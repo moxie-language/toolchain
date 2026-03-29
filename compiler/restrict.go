@@ -1,0 +1,289 @@
+package compiler
+
+// This file implements Moxie language restrictions.
+// Moxie removes features that are incompatible with domain-isolated
+// cooperative concurrency or that obstract the programming model.
+//
+// Restrictions apply ONLY to user code — runtime, internal, and stdlib
+// packages are exempt (they need the full language to implement primitives).
+
+import (
+	"go/ast"
+	"go/token"
+	"go/types"
+	"strings"
+
+	"golang.org/x/tools/go/ssa"
+)
+
+// restrictedBuiltins maps Go builtins to the Moxie alternative.
+var restrictedBuiltins = map[string]string{
+	"new":     "use composite literal with & or var declaration",
+	"complex": "complex numbers not supported in moxie",
+	"real":    "complex numbers not supported in moxie",
+	"imag":    "complex numbers not supported in moxie",
+}
+
+// restrictedTypes maps type names to rejection reasons.
+var restrictedTypes = map[string]string{
+	"complex64":  "complex numbers not supported in moxie",
+	"complex128": "complex numbers not supported in moxie",
+	"uintptr":    "use explicit pointer types",
+}
+
+// isUserPackage returns true if the package is user code (not runtime/stdlib).
+func isUserPackage(pkg *ssa.Package) bool {
+	if pkg == nil {
+		return false
+	}
+	path := pkg.Pkg.Path()
+	// Exempt: runtime, internal packages, standard library, moxie internals
+	if path == "runtime" || path == "moxie" ||
+		strings.HasPrefix(path, "runtime/") ||
+		strings.HasPrefix(path, "internal/") ||
+		strings.HasPrefix(path, "sync") ||
+		strings.HasPrefix(path, "reflect") ||
+		strings.HasPrefix(path, "syscall") ||
+		strings.HasPrefix(path, "os") ||
+		strings.HasPrefix(path, "io") ||
+		strings.HasPrefix(path, "fmt") ||
+		strings.HasPrefix(path, "math") ||
+		strings.HasPrefix(path, "crypto") ||
+		strings.HasPrefix(path, "encoding") ||
+		strings.HasPrefix(path, "strings") ||
+		strings.HasPrefix(path, "bytes") ||
+		strings.HasPrefix(path, "errors") ||
+		strings.HasPrefix(path, "unicode") ||
+		strings.HasPrefix(path, "sort") ||
+		strings.HasPrefix(path, "strconv") ||
+		strings.HasPrefix(path, "testing") {
+		return false
+	}
+	return true
+}
+
+// checkMoxieRestrictions scans a function for uses of restricted features.
+// Only applies to user code — runtime packages are exempt.
+func (b *builder) checkMoxieRestrictions() {
+	if !isUserPackage(b.fn.Pkg) {
+		return
+	}
+	for _, block := range b.fn.Blocks {
+		for _, instr := range block.Instrs {
+			b.checkInstrRestrictions(instr)
+		}
+	}
+	// Check function signature for restricted types.
+	b.checkSignatureRestrictions(b.fn)
+	// Check for fallthrough (lowered away by SSA, must check AST).
+	b.checkFallthroughRestriction()
+	// Check for restricted types and builtins in AST (SSA may optimize them away).
+	b.checkASTRestrictions()
+	// Check that non-constant spawn args aren't used after the spawn call.
+	b.checkSpawnMoveRestriction()
+}
+
+func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
+	switch v := instr.(type) {
+	case *ssa.Call:
+		if builtin, ok := v.Call.Value.(*ssa.Builtin); ok {
+			if reason, restricted := restrictedBuiltins[builtin.Name()]; restricted {
+				b.addError(v.Pos(), "moxie: '"+builtin.Name()+"' is not allowed: "+reason)
+			}
+		}
+
+	case *ssa.MakeChan:
+		// Channels are allowed — they're fundamental to CSP.
+
+	case *ssa.MakeMap:
+		// Maps via make are allowed — no alternative yet.
+
+	case *ssa.MakeSlice:
+		// make([]T, ...) is allowed — no alternative yet.
+
+	case *ssa.Alloc:
+		// new(T) shows up as Alloc with Heap=true and Comment="new".
+		if v.Heap && v.Comment == "new" {
+			b.addError(v.Pos(), "moxie: 'new' is not allowed: use composite literal with & or var declaration")
+		}
+
+	case ssa.Value:
+		// Check types of values for restricted types.
+		b.checkTypeAtPos(v.Type(), v.Pos())
+	}
+}
+
+func (b *builder) checkTypeAtPos(t types.Type, pos token.Pos) {
+	if t == nil {
+		return
+	}
+	// Unwrap pointer types — SSA wraps local var types in pointers.
+	if ptr, ok := t.(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+	basic, ok := t.(*types.Basic)
+	if !ok {
+		return
+	}
+	if reason, restricted := restrictedTypes[basic.Name()]; restricted {
+		b.addError(pos, "moxie: type '"+basic.Name()+"' is not allowed: "+reason)
+	}
+}
+
+func (b *builder) checkSignatureRestrictions(fn *ssa.Function) {
+	sig := fn.Signature
+	// Check parameters.
+	for i := 0; i < sig.Params().Len(); i++ {
+		b.checkTypeAtPos(sig.Params().At(i).Type(), fn.Pos())
+	}
+	// Check return types.
+	if sig.Results() != nil {
+		for i := 0; i < sig.Results().Len(); i++ {
+			b.checkTypeAtPos(sig.Results().At(i).Type(), fn.Pos())
+		}
+	}
+}
+
+// checkFallthroughRestriction walks the function's AST looking for
+// fallthrough statements. SSA eliminates these, so we must check the
+// raw syntax tree.
+func (b *builder) checkFallthroughRestriction() {
+	syntax := b.fn.Syntax()
+	if syntax == nil {
+		return
+	}
+	ast.Inspect(syntax, func(n ast.Node) bool {
+		if br, ok := n.(*ast.BranchStmt); ok && br.Tok == token.FALLTHROUGH {
+			b.addError(br.Pos(), "moxie: 'fallthrough' is not allowed: each case must be self-contained")
+			return false
+		}
+		return true
+	})
+}
+
+// checkASTRestrictions walks the function's AST to catch restricted types
+// and builtins that SSA may optimize away (dead code elimination removes
+// unused complex64 vars, unused complex() calls, etc).
+func (b *builder) checkASTRestrictions() {
+	syntax := b.fn.Syntax()
+	if syntax == nil {
+		return
+	}
+	ast.Inspect(syntax, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.Ident:
+			if reason, restricted := restrictedTypes[node.Name]; restricted {
+				b.addError(node.Pos(), "moxie: type '"+node.Name+"' is not allowed: "+reason)
+			}
+		case *ast.CallExpr:
+			if ident, ok := node.Fun.(*ast.Ident); ok {
+				if reason, restricted := restrictedBuiltins[ident.Name]; restricted {
+					b.addError(ident.Pos(), "moxie: '"+ident.Name+"' is not allowed: "+reason)
+				}
+			}
+		}
+		return true
+	})
+}
+
+// checkSpawnMoveRestriction enforces move semantics for spawn arguments.
+// Non-constant values passed to spawn must not be used after the call —
+// ownership moves to the child domain. No shared memory.
+func (b *builder) checkSpawnMoveRestriction() {
+	for _, block := range b.fn.Blocks {
+		for spawnIdx, instr := range block.Instrs {
+			call, ok := instr.(*ssa.Call)
+			if !ok {
+				continue
+			}
+			callee := call.Call.StaticCallee()
+			if callee == nil || callee.Name() != "spawn" {
+				continue
+			}
+
+			args := extractSpawnSSAArgs(&call.Call)
+			exempt := spawnVarargsInstrs(&call.Call)
+
+			for _, arg := range args {
+				if _, isConst := arg.(*ssa.Const); isConst {
+					continue
+				}
+				// Channels are exempt — both parent and child hold
+				// endpoints for IPC communication.
+				if _, isChan := arg.Type().Underlying().(*types.Chan); isChan {
+					continue
+				}
+				refs := arg.Referrers()
+				if refs == nil {
+					continue
+				}
+				for _, ref := range *refs {
+					ri, ok := ref.(ssa.Instruction)
+					if !ok {
+						continue
+					}
+					if exempt[ri] {
+						continue
+					}
+					// Same block: check if the referrer comes after spawn.
+					if ri.Block() == block {
+						for j := spawnIdx + 1; j < len(block.Instrs); j++ {
+							if block.Instrs[j] == ri {
+								b.addError(ri.Pos(), "moxie: variable used after spawn — ownership moved to child domain")
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// spawnVarargsInstrs collects all SSA instructions that are part of the
+// spawn call's variadic argument construction. These are exempt from the
+// move restriction since they happen before the spawn.
+func spawnVarargsInstrs(instr *ssa.CallCommon) map[ssa.Instruction]bool {
+	set := make(map[ssa.Instruction]bool)
+	if len(instr.Args) < 2 {
+		return set
+	}
+	slice, ok := instr.Args[1].(*ssa.Slice)
+	if !ok {
+		return set
+	}
+	set[slice] = true
+	alloc, ok := slice.X.(*ssa.Alloc)
+	if !ok {
+		return set
+	}
+	set[alloc] = true
+	refs := alloc.Referrers()
+	if refs == nil {
+		return set
+	}
+	for _, ref := range *refs {
+		ia, ok := ref.(*ssa.IndexAddr)
+		if !ok {
+			continue
+		}
+		set[ia] = true
+		iaRefs := ia.Referrers()
+		if iaRefs == nil {
+			continue
+		}
+		for _, iaRef := range *iaRefs {
+			if store, ok := iaRef.(*ssa.Store); ok && store.Addr == ia {
+				set[store] = true
+				if mi, ok := store.Val.(*ssa.MakeInterface); ok {
+					set[mi] = true
+				}
+			}
+		}
+	}
+	// Also exempt the fn arg's MakeInterface.
+	if mi, ok := instr.Args[0].(*ssa.MakeInterface); ok {
+		set[mi] = true
+	}
+	return set
+}

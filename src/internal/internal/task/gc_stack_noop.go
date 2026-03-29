@@ -1,0 +1,8 @@
+//go:build !(gc.conservative || gc.custom || gc.precise) || !moxie.wasm
+
+package task
+
+type gcData struct{}
+
+func (gcd *gcData) swap() {
+}
