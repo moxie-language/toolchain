@@ -32,31 +32,19 @@ var restrictedTypes = map[string]string{
 }
 
 // isUserPackage returns true if the package is user code (not runtime/stdlib).
+// Standard library packages use dotless import paths (fmt, time, crypto/rand).
+// Go also vendors golang.org/x/* packages inside GOROOT — these are stdlib too.
+// User/third-party packages always have a non-vendored domain (smesh.lol, github.com/...).
 func isUserPackage(pkg *ssa.Package) bool {
 	if pkg == nil {
 		return false
 	}
 	path := pkg.Pkg.Path()
-	// Exempt: runtime, internal packages, standard library, moxie internals
-	if path == "runtime" || path == "moxie" ||
-		strings.HasPrefix(path, "runtime/") ||
-		strings.HasPrefix(path, "internal/") ||
-		strings.HasPrefix(path, "sync") ||
-		strings.HasPrefix(path, "reflect") ||
-		strings.HasPrefix(path, "syscall") ||
-		strings.HasPrefix(path, "os") ||
-		strings.HasPrefix(path, "io") ||
-		strings.HasPrefix(path, "fmt") ||
-		strings.HasPrefix(path, "math") ||
-		strings.HasPrefix(path, "crypto") ||
-		strings.HasPrefix(path, "encoding") ||
-		strings.HasPrefix(path, "strings") ||
-		strings.HasPrefix(path, "bytes") ||
-		strings.HasPrefix(path, "errors") ||
-		strings.HasPrefix(path, "unicode") ||
-		strings.HasPrefix(path, "sort") ||
-		strings.HasPrefix(path, "strconv") ||
-		strings.HasPrefix(path, "testing") {
+	if !strings.Contains(path, ".") {
+		return false
+	}
+	// Go vendors golang.org/x/* inside GOROOT (e.g. vendor/golang.org/x/crypto).
+	if strings.HasPrefix(path, "vendor/") {
 		return false
 	}
 	return true
@@ -107,9 +95,10 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 			b.addError(v.Pos(), "moxie: 'new' is not allowed: use composite literal with & or var declaration")
 		}
 
-	case ssa.Value:
-		// Check types of values for restricted types.
-		b.checkTypeAtPos(v.Type(), v.Pos())
+		// Note: restricted types (uintptr, complex) are caught by AST checks
+		// in checkASTRestrictions, not here. SSA-level type checking causes
+		// false positives when stdlib functions return restricted types
+		// (e.g. runtime.Caller returns uintptr).
 	}
 }
 

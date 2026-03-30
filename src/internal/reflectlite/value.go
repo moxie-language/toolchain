@@ -721,7 +721,7 @@ func (v Value) Slice3(i, j, k int) Value {
 		}
 	}
 
-	panic("unimplemented: (reflect.Value).Slice3()")
+	panic(&ValueError{Method: "Slice3", Kind: v.Kind()})
 }
 
 //go:linkname maplen runtime.hashmapLen
@@ -1595,19 +1595,23 @@ func makeFloat32(flags valueFlags, f float32, t *RawType) Value {
 }
 
 func cvtIntString(src Value, t *RawType) Value {
-	panic("cvtUintString: unimplemented")
+	s := string(rune(src.Int()))
+	return Value{typecode: t, value: unsafe.Pointer(&s), flags: src.flags}
 }
 
 func cvtUintString(src Value, t *RawType) Value {
-	panic("cvtUintString: unimplemented")
+	s := string(rune(src.Uint()))
+	return Value{typecode: t, value: unsafe.Pointer(&s), flags: src.flags}
 }
 
 func cvtStringRunes(src Value, t *RawType) Value {
-	panic("cvsStringRunes: unimplemented")
+	runes := []rune(*(*string)(src.value))
+	return Value{typecode: t, value: unsafe.Pointer(&runes), flags: src.flags}
 }
 
 func cvtRunesString(src Value, t *RawType) Value {
-	panic("cvsRunesString: unimplemented")
+	s := string(*(*[]rune)(src.value))
+	return Value{typecode: t, value: unsafe.Pointer(&s), flags: src.flags}
 }
 
 //go:linkname slicePanic runtime.slicePanic

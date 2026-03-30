@@ -751,6 +751,56 @@ func (t *RawType) AssignableTo(u Type) bool {
 	return false
 }
 
+// ConvertibleTo reports whether a value of type t is convertible to type u.
+func (t *RawType) ConvertibleTo(u Type) bool {
+	ru := u.(*RawType)
+	if t.underlying() == ru.underlying() {
+		return true
+	}
+	if ru.Kind() == Interface && ru.NumMethod() == 0 {
+		return true
+	}
+	tk, uk := t.Kind(), ru.Kind()
+	switch tk {
+	case Int, Int8, Int16, Int32, Int64:
+		switch uk {
+		case Int, Int8, Int16, Int32, Int64, Uint, Uint8, Uint16, Uint32, Uint64, Uintptr, Float32, Float64, String:
+			return true
+		}
+	case Uint, Uint8, Uint16, Uint32, Uint64, Uintptr:
+		switch uk {
+		case Int, Int8, Int16, Int32, Int64, Uint, Uint8, Uint16, Uint32, Uint64, Uintptr, Float32, Float64, String:
+			return true
+		}
+	case Float32, Float64:
+		switch uk {
+		case Int, Int8, Int16, Int32, Int64, Uint, Uint8, Uint16, Uint32, Uint64, Uintptr, Float32, Float64:
+			return true
+		}
+	case Slice:
+		if uk == Array && t.elem() == ru.elem() {
+			return true
+		}
+		if uk == Pointer && ru.Elem().Kind() == Array && t.elem() == ru.Elem().(*RawType).elem() {
+			return true
+		}
+		if uk == String && !t.elem().isNamed() {
+			ek := t.Elem().Kind()
+			if ek == Uint8 || ek == Int32 {
+				return true
+			}
+		}
+	case String:
+		if uk == Slice && !ru.elem().isNamed() {
+			ek := ru.Elem().Kind()
+			if ek == Uint8 || ek == Int32 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (t *RawType) Implements(u Type) bool {
 	if u.Kind() != Interface {
 		panic("reflect: non-interface type passed to Type.Implements")

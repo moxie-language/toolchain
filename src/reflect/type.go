@@ -110,28 +110,6 @@ const (
 	BothDir = reflectlite.BothDir
 )
 
-// Method represents a single method.
-type Method struct {
-	// Name is the method name.
-	Name string
-
-	// PkgPath is the package path that qualifies a lower case (unexported)
-	// method name. It is empty for upper case (exported) method names.
-	// The combination of PkgPath and Name uniquely identifies a method
-	// in a method set.
-	// See https://golang.org/ref/spec#Uniqueness_of_identifiers
-	PkgPath string
-
-	Type  Type  // method type
-	Func  Value // func with receiver as first argument
-	Index int   // index for Type.Method
-}
-
-// IsExported reports whether the method is exported.
-func (m Method) IsExported() bool {
-	return m.PkgPath == ""
-}
-
 // The following Type type has been copied almost entirely from
 // https://github.com/golang/go/blob/go1.15/src/reflect/type.go#L27-L212.
 // Some methods have been commented out as they haven't yet been implemented.
@@ -157,29 +135,6 @@ type Type interface {
 	// FieldAlign returns the alignment in bytes of a value of
 	// this type when used as a field in a struct.
 	FieldAlign() int
-
-	// Method returns the i'th method in the type's method set.
-	// It panics if i is not in the range [0, NumMethod()).
-	//
-	// For a non-interface type T or *T, the returned Method's Type and Func
-	// fields describe a function whose first argument is the receiver.
-	//
-	// For an interface type, the returned Method's Type field gives the
-	// method signature, without a receiver, and the Func field is nil.
-	//
-	// Only exported methods are accessible and they are sorted in
-	// lexicographic order.
-	Method(int) Method
-
-	// MethodByName returns the method with that name in the type's
-	// method set and a boolean indicating if the method was found.
-	//
-	// For a non-interface type T or *T, the returned Method's Type and Func
-	// fields describe a function whose first argument is the receiver.
-	//
-	// For an interface type, the returned Method's Type field gives the
-	// method signature, without a receiver, and the Func field is nil.
-	MethodByName(string) (Method, bool)
 
 	// NumMethod returns the number of exported methods in the type's method set.
 	NumMethod() int
@@ -242,20 +197,6 @@ type Type interface {
 	// It panics if the type's Kind is not Chan.
 	ChanDir() ChanDir
 
-	// IsVariadic reports whether a function type's final input parameter
-	// is a "..." parameter. If so, t.In(t.NumIn() - 1) returns the parameter's
-	// implicit actual type []T.
-	//
-	// For concreteness, if t represents func(x int, y ... float64), then
-	//
-	//	t.NumIn() == 2
-	//	t.In(0) is the reflect.Type for "int"
-	//	t.In(1) is the reflect.Type for "[]float64"
-	//	t.IsVariadic() == true
-	//
-	// IsVariadic panics if the type's Kind is not Func.
-	IsVariadic() bool
-
 	// Elem returns a type's element type.
 	// It panics if the type's Kind is not Array, Chan, Map, Pointer, or Slice.
 	Elem() Type
@@ -289,11 +230,6 @@ type Type interface {
 	// structs containing embedded fields.
 	FieldByNameFunc(match func(string) bool) (StructField, bool)
 
-	// In returns the type of a function type's i'th input parameter.
-	// It panics if the type's Kind is not Func.
-	// It panics if i is not in the range [0, NumIn()).
-	In(i int) Type
-
 	// Key returns a map type's key type.
 	// It panics if the type's Kind is not Map.
 	Key() Type
@@ -305,19 +241,6 @@ type Type interface {
 	// NumField returns a struct type's field count.
 	// It panics if the type's Kind is not Struct.
 	NumField() int
-
-	// NumIn returns a function type's input parameter count.
-	// It panics if the type's Kind is not Func.
-	NumIn() int
-
-	// NumOut returns a function type's output parameter count.
-	// It panics if the type's Kind is not Func.
-	NumOut() int
-
-	// Out returns the type of a function type's i'th output parameter.
-	// It panics if the type's Kind is not Func.
-	// It panics if i is not in the range [0, NumOut()).
-	Out(i int) Type
 
 	// OverflowComplex reports whether the complex128 x cannot be represented by type t.
 	// It panics if t's Kind is not Complex64 or Complex128.
@@ -377,10 +300,6 @@ func (t *rawType) CanSeq() bool {
 	switch t.Kind() {
 	case Int8, Int16, Int32, Int64, Int, Uint8, Uint16, Uint32, Uint64, Uint, Uintptr, Array, Slice, Chan, String, Map:
 		return true
-	case Func:
-		// TODO: implement canRangeFunc
-		// return canRangeFunc(t)
-		panic("unimplemented: (reflect.Type).CanSeq() for functions")
 	case Pointer:
 		return t.Elem().Kind() == Array
 	}
@@ -391,10 +310,6 @@ func (t *rawType) CanSeq2() bool {
 	switch t.Kind() {
 	case Array, Slice, String, Map:
 		return true
-	case Func:
-		// TODO: implement canRangeFunc2
-		// return canRangeFunc2(t)
-		panic("unimplemented: (reflect.Type).CanSeq2() for functions")
 	case Pointer:
 		return t.Elem().Kind() == Array
 	}
@@ -402,7 +317,7 @@ func (t *rawType) CanSeq2() bool {
 }
 
 func (t *rawType) ConvertibleTo(u Type) bool {
-	panic("unimplemented: (reflect.Type).ConvertibleTo()")
+	return t.RawType.ConvertibleTo(toRawType(u))
 }
 
 func (t *rawType) Elem() Type {
@@ -433,37 +348,10 @@ func (t *rawType) Implements(u Type) bool {
 	return t.RawType.Implements(&(u.(*rawType).RawType))
 }
 
-func (t *rawType) In(i int) Type {
-	panic("unimplemented: (reflect.Type).In()")
-}
-
-func (t *rawType) IsVariadic() bool {
-	panic("unimplemented: (reflect.Type).IsVariadic()")
-}
-
 func (t *rawType) Key() Type {
 	return toType(t.RawType.Key())
 }
 
-func (t *rawType) Method(i int) Method {
-	panic("unimplemented: (reflect.Type).Method()")
-}
-
-func (t *rawType) MethodByName(name string) (Method, bool) {
-	panic("unimplemented: (reflect.Type).MethodByName()")
-}
-
-func (t *rawType) NumIn() int {
-	panic("unimplemented: (reflect.Type).NumIn()")
-}
-
-func (t *rawType) NumOut() int {
-	panic("unimplemented: (reflect.Type).NumOut()")
-}
-
-func (t *rawType) Out(i int) Type {
-	panic("unimplemented: (reflect.Type).Out()")
-}
 
 // A StructField describes a single field in a struct.
 // This must be kept in sync with [reflectlite.StructField].
@@ -513,28 +401,3 @@ func ArrayOf(n int, t Type) Type {
 	return toType(reflectlite.ArrayOf(n, toRawType(t)))
 }
 
-func StructOf([]StructField) Type {
-	return toType(reflectlite.StructOf([]reflectlite.StructField{}))
-}
-
-func MapOf(key, value Type) Type {
-	return toType(reflectlite.MapOf(toRawType(key), toRawType(value)))
-}
-
-func FuncOf(in, out []Type, variadic bool) Type {
-	rawIn := make([]reflectlite.Type, len(in))
-	for i, t := range in {
-		rawIn[i] = toRawType(t)
-	}
-
-	rawOut := make([]reflectlite.Type, len(out))
-	for i, t := range out {
-		rawOut[i] = toRawType(t)
-	}
-
-	return toType(reflectlite.FuncOf(rawIn, rawOut, variadic))
-}
-
-func ChanOf(dir ChanDir, t Type) Type {
-	panic("unimplemented: reflect.ChanOf")
-}

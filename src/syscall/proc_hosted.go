@@ -1,4 +1,4 @@
-//go:build !baremetal && !moxie.wasm && !nintendoswitch
+//go:build ignore
 
 // This file assumes there is a libc available that runs on a real operating
 // system.

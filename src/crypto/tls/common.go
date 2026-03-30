@@ -28,6 +28,43 @@ const (
 	VersionSSL30 = 0x0300
 )
 
+// Cipher suite constants.
+const (
+	// TLS 1.0 - 1.2 cipher suites.
+	TLS_RSA_WITH_RC4_128_SHA                      uint16 = 0x0005
+	TLS_RSA_WITH_3DES_EDE_CBC_SHA                 uint16 = 0x000a
+	TLS_RSA_WITH_AES_128_CBC_SHA                  uint16 = 0x002f
+	TLS_RSA_WITH_AES_256_CBC_SHA                  uint16 = 0x0035
+	TLS_RSA_WITH_AES_128_CBC_SHA256               uint16 = 0x003c
+	TLS_RSA_WITH_AES_128_GCM_SHA256               uint16 = 0x009c
+	TLS_RSA_WITH_AES_256_GCM_SHA384               uint16 = 0x009d
+	TLS_ECDHE_ECDSA_WITH_RC4_128_SHA              uint16 = 0xc007
+	TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA          uint16 = 0xc009
+	TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA          uint16 = 0xc00a
+	TLS_ECDHE_RSA_WITH_RC4_128_SHA                uint16 = 0xc011
+	TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA           uint16 = 0xc012
+	TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA            uint16 = 0xc013
+	TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA            uint16 = 0xc014
+	TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256       uint16 = 0xc023
+	TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256         uint16 = 0xc027
+	TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256         uint16 = 0xc02f
+	TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256       uint16 = 0xc02b
+	TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384         uint16 = 0xc030
+	TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384       uint16 = 0xc02c
+	TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256   uint16 = 0xcca8
+	TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 uint16 = 0xcca9
+
+	// TLS 1.3 cipher suites.
+	TLS_AES_128_GCM_SHA256       uint16 = 0x1301
+	TLS_AES_256_GCM_SHA384       uint16 = 0x1302
+	TLS_CHACHA20_POLY1305_SHA256 uint16 = 0x1303
+
+	// Legacy names for the corresponding cipher suites with the correct _SHA256
+	// suffix, retained for backward compatibility.
+	TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305   = TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+	TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305 = TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+)
+
 // VersionName returns the name for the provided TLS version number
 // (e.g. "TLS 1.3"), or a fallback representation of the value if the
 // version is not implemented by this package.
@@ -64,12 +101,23 @@ func CipherSuiteName(id uint16) string {
 
 // ConnectionState records basic TLS details about the connection.
 type ConnectionState struct {
-	// TINYGO: empty; TLS connection offloaded to device
-	//
-	// Minimum (empty) fields for fortio.org/log http logging and others
-	// to compile and run.
-	PeerCertificates []*x509.Certificate
-	CipherSuite      uint16
+	Version                     uint16
+	HandshakeComplete           bool
+	DidResume                   bool
+	CipherSuite                 uint16
+	NegotiatedProtocol          string
+	NegotiatedProtocolIsMutual  bool
+	ServerName                  string
+	PeerCertificates            []*x509.Certificate
+	VerifiedChains              [][]*x509.Certificate
+	SignedCertificateTimestamps [][]byte
+	OCSPResponse                []byte
+	TLSUnique                   []byte
+}
+
+// ExportKeyingMaterial is not implemented in the moxie stub.
+func (cs *ConnectionState) ExportKeyingMaterial(label string, context []byte, length int) ([]byte, error) {
+	return nil, fmt.Errorf("tls: ExportKeyingMaterial not implemented")
 }
 
 // ClientAuthType declares the policy the server will follow for
@@ -457,6 +505,47 @@ type Config struct {
 	// autoSessionTicketKeys is like sessionTicketKeys but is owned by the
 	// auto-rotation logic. See Config.ticketKeys.
 	autoSessionTicketKeys []ticketKey
+}
+
+// Clone returns a shallow clone of c or a new zero Config if c is nil.
+func (c *Config) Clone() *Config {
+	if c == nil {
+		return &Config{}
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return &Config{
+		Rand:                        c.Rand,
+		Time:                        c.Time,
+		Certificates:                c.Certificates,
+		NameToCertificate:           c.NameToCertificate,
+		GetCertificate:              c.GetCertificate,
+		GetClientCertificate:        c.GetClientCertificate,
+		GetConfigForClient:          c.GetConfigForClient,
+		VerifyPeerCertificate:       c.VerifyPeerCertificate,
+		VerifyConnection:            c.VerifyConnection,
+		RootCAs:                     c.RootCAs,
+		NextProtos:                  c.NextProtos,
+		ServerName:                  c.ServerName,
+		ClientAuth:                  c.ClientAuth,
+		ClientCAs:                   c.ClientCAs,
+		InsecureSkipVerify:          c.InsecureSkipVerify,
+		CipherSuites:               c.CipherSuites,
+		PreferServerCipherSuites:    c.PreferServerCipherSuites,
+		SessionTicketsDisabled:      c.SessionTicketsDisabled,
+		SessionTicketKey:            c.SessionTicketKey,
+		ClientSessionCache:          c.ClientSessionCache,
+		UnwrapSession:               c.UnwrapSession,
+		WrapSession:                 c.WrapSession,
+		MinVersion:                  c.MinVersion,
+		MaxVersion:                  c.MaxVersion,
+		CurvePreferences:            c.CurvePreferences,
+		DynamicRecordSizingDisabled: c.DynamicRecordSizingDisabled,
+		Renegotiation:               c.Renegotiation,
+		KeyLogWriter:                c.KeyLogWriter,
+		sessionTicketKeys:           c.sessionTicketKeys,
+		autoSessionTicketKeys:       c.autoSessionTicketKeys,
+	}
 }
 
 // ticketKey is the internal representation of a session ticket key.

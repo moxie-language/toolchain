@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build !unix
+
 package syscall
 
 // clen returns the index of the first NULL byte in n or len(n) if n contains no NULL byte.

@@ -1,10 +1,24 @@
+// Copyright 2024 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+//go:build unix
+
 package unix
 
-import "syscall"
+import (
+	"runtime"
+	"syscall"
+)
 
 func Eaccess(path string, mode uint32) error {
-	// We don't support this syscall on baremetal or wasm.
-	// Callers are generally able to deal with this since unix.Eaccess also
-	// isn't available on Android.
-	return syscall.ENOSYS
+	if runtime.GOOS == "android" {
+		// syscall.Faccessat for Android implements AT_EACCESS check in
+		// userspace. Since Android doesn't have setuid programs and
+		// never runs code with euid!=uid, AT_EACCESS check is not
+		// really required. Return ENOSYS so the callers can fall back
+		// to permission bits check.
+		return syscall.ENOSYS
+	}
+	return faccessat(AT_FDCWD, path, mode, AT_EACCESS)
 }

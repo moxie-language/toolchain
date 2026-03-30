@@ -1,3 +1,5 @@
+//go:build baremetal || moxie.wasm || wasm_unknown || nintendoswitch
+
 package syscall
 
 import "internal/itoa"

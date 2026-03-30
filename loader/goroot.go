@@ -226,53 +226,17 @@ func needsSyscallPackage(buildTags []string) bool {
 }
 
 // The boolean indicates whether to merge the subdirs. True means merge, false
-// means use the TinyGo version.
+// means use the moxie version entirely.
+//
+// Moxie's src/ tree is self-contained — all stdlib source is in-tree.
+// The root entry (false) means use moxie's src/ for everything.
+// syscall/ is the one exception: moxie has compiler-intrinsic stubs that
+// conflict with Go's full implementation. The merge system provides Go's
+// syscall files for hosted targets while moxie's stubs serve baremetal.
 func pathsToOverride(goMinor int, needsSyscallPackage bool) map[string]bool {
-	paths := map[string]bool{
-		"":                            true,
-		"crypto/":                     true,
-		"crypto/rand/":                false,
-		"crypto/tls/":                 false,
-		"crypto/x509/":                true,
-		"crypto/x509/internal/":       true,
-		"crypto/x509/internal/macos/": false,
-		"device/":                     false,
-		"examples/":                   false,
-		"internal/":                   true,
-		"internal/abi/":               false,
-		"internal/binary/":            false,
-		"internal/bytealg/":           false,
-		"internal/cm/":                false,
-		"internal/futex/":             false,
-		"internal/fuzz/":              false,
-		"internal/reflectlite/":       false,
-		"internal/gclayout":           false,
-		"internal/task/":              false,
-		"internal/wasi/":              false,
-		"machine/":                    false,
-		"net/":                        true,
-		"net/http/":                   false,
-		"os/":                         true,
-		"reflect/":                    false,
-		"runtime/":                    false,
-		"sync/":                       true,
-		"testing/":                    true,
-		"moxie/":                      false,
-		"unique/":                     false,
+	return map[string]bool{
+		"": false,
 	}
-
-	if goMinor >= 19 {
-		paths["crypto/internal/"] = true
-		paths["crypto/internal/boring/"] = true
-		paths["crypto/internal/boring/sig/"] = false
-	}
-
-	if needsSyscallPackage {
-		paths["syscall/"] = true // include syscall/js
-		paths["internal/syscall/"] = true
-		paths["internal/syscall/unix/"] = false
-	}
-	return paths
 }
 
 // symlink creates a symlink or something similar. On Unix-like systems, it
