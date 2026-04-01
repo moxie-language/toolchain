@@ -2,25 +2,30 @@
 
 package runtime
 
+import "unsafe"
+
 // Domain registry — tracks child domains spawned by this process.
 // Single-threaded cooperative scheduler, so no lock needed.
 
 type domainEntry struct {
 	pid      int32
 	parentFd int32 // parent's end of socketpair
+	alive    bool
 	next     *domainEntry
 }
 
 var domainList *domainEntry
 
 func domainRegister(pid, fd int32) {
-	domainList = &domainEntry{pid: pid, parentFd: fd, next: domainList}
+	domainList = &domainEntry{pid: pid, parentFd: fd, alive: true, next: domainList}
 }
 
 func domainCount() int {
 	n := 0
 	for e := domainList; e != nil; e = e.next {
-		n++
+		if e.alive {
+			n++
+		}
 	}
 	return n
 }
@@ -42,3 +47,71 @@ func domainLookupByFd(fd int32) *domainEntry {
 	}
 	return nil
 }
+
+// domainReapChildren checks for exited children and marks them dead.
+// Non-blocking (WNOHANG). Call periodically from the scheduler.
+func domainReapChildren() {
+	for e := domainList; e != nil; e = e.next {
+		if !e.alive {
+			continue
+		}
+		var status int32
+		r := moxie_waitpid(e.pid, unsafe.Pointer(&status), 1) // WNOHANG=1
+		if r > 0 {
+			e.alive = false
+			moxie_close(e.parentFd)
+		}
+	}
+}
+
+// domainShutdownAll sends SIGTERM to all live children, then waits
+// with a timeout. Stragglers get SIGKILL.
+func domainShutdownAll() {
+	// Signal all children.
+	for e := domainList; e != nil; e = e.next {
+		if e.alive {
+			moxie_kill(e.pid, 15) // SIGTERM
+		}
+	}
+
+	// Wait briefly for exits.
+	for i := 0; i < 100; i++ {
+		allDead := true
+		for e := domainList; e != nil; e = e.next {
+			if !e.alive {
+				continue
+			}
+			var status int32
+			r := moxie_waitpid(e.pid, unsafe.Pointer(&status), 1)
+			if r > 0 {
+				e.alive = false
+				moxie_close(e.parentFd)
+			} else {
+				allDead = false
+			}
+		}
+		if allDead {
+			return
+		}
+		sleepTicks(timeUnit(10_000_000)) // 10ms
+	}
+
+	// SIGKILL stragglers.
+	for e := domainList; e != nil; e = e.next {
+		if e.alive {
+			moxie_kill(e.pid, 9) // SIGKILL
+			var status int32
+			moxie_waitpid(e.pid, unsafe.Pointer(&status), 0)
+			e.alive = false
+			moxie_close(e.parentFd)
+		}
+	}
+}
+
+// C functions defined in spawn_unix.c.
+
+//export moxie_waitpid
+func moxie_waitpid(pid int32, status unsafe.Pointer, options int32) int32
+
+//export moxie_kill
+func moxie_kill(pid int32, sig int32) int32

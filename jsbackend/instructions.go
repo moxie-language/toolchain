@@ -832,8 +832,47 @@ func (fc *FunctionCompiler) emitSpawn(callee *ssa.Function, args []ssa.Value) st
 		return "/* spawn: no function argument */ undefined"
 	}
 
-	// Unwrap the function from MakeInterface.
-	fnArg := args[0]
+	// Check if the first positional argument (fn) is a transport string.
+	// SSA: spawn("pipe", worker, ch) → args[0]=MakeInterface("pipe"), args[1]=variadic
+	transport := "local"
+	hasTransport := false
+	if ts, ok := extractTransportStringJS(args[0]); ok {
+		transport = ts
+		hasTransport = true
+	}
+
+	// Validate transport.
+	switch transport {
+	case "local", "pipe":
+		// OK.
+	default:
+		if len(transport) > 6 && (transport[:6] == "tcp://" || transport[:5] == "ws://" || transport[:6] == "wss://") {
+			return fmt.Sprintf("/* spawn: network transport %q not yet implemented */ undefined", transport)
+		}
+		return fmt.Sprintf("/* spawn: unknown transport %q */ undefined", transport)
+	}
+
+	// Extract all concrete values from the variadic slice.
+	allConcrete := extractSpawnSSAArgsJS(args)
+
+	// When transport is present, the function is allConcrete[0], args are [1:].
+	var fnArg ssa.Value
+	var concreteArgs []ssa.Value
+	if hasTransport {
+		if len(allConcrete) < 1 {
+			return "/* spawn: no function argument after transport string */ undefined"
+		}
+		fnArg = allConcrete[0]
+		concreteArgs = allConcrete[1:]
+	} else {
+		fnArg = args[0]
+		if mi, ok := fnArg.(*ssa.MakeInterface); ok {
+			fnArg = mi.X
+		}
+		concreteArgs = allConcrete
+	}
+
+	// Unwrap MakeInterface on fnArg.
 	if mi, ok := fnArg.(*ssa.MakeInterface); ok {
 		fnArg = mi.X
 	}
@@ -849,10 +888,6 @@ func (fc *FunctionCompiler) emitSpawn(callee *ssa.Function, args []ssa.Value) st
 			targetFn = fn
 		}
 	}
-
-	// Extract concrete args from the variadic []interface{} slice.
-	// Uses the same SSA-graph walk as the native backend.
-	concreteArgs := extractSpawnSSAArgsJS(args)
 
 	// Verify argument count and types match the target function.
 	if targetFn != nil {
@@ -911,6 +946,22 @@ func (fc *FunctionCompiler) emitSpawnArgSerialize(arg ssa.Value, goType types.Ty
 // extractSpawnSSAArgsJS recovers concrete values from spawn's variadic slice.
 // Same logic as extractSpawnSSAArgs in compiler/spawn.go but accessible from
 // the jsbackend package.
+// extractTransportStringJS checks if an SSA value is a string constant
+// (possibly wrapped in MakeInterface) and returns it.
+func extractTransportStringJS(v ssa.Value) (string, bool) {
+	if mi, ok := v.(*ssa.MakeInterface); ok {
+		v = mi.X
+	}
+	c, ok := v.(*ssa.Const)
+	if !ok {
+		return "", false
+	}
+	if c.Value == nil || c.Value.Kind() != constant.String {
+		return "", false
+	}
+	return constant.StringVal(c.Value), true
+}
+
 func extractSpawnSSAArgsJS(args []ssa.Value) []ssa.Value {
 	if len(args) < 2 {
 		return nil

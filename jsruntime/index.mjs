@@ -17,3 +17,4 @@ export * as domain from './domain.mjs';
 export * as signer from './signer.mjs';
 export * as ext from './ext.mjs';
 export * as schnorr from './schnorr.mjs';
+export * as idb from './idb.mjs';

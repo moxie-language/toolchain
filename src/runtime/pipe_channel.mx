@@ -1,0 +1,110 @@
+//go:build linux
+
+package runtime
+
+// Pipe channel IPC — bridges Go channels across spawn domain boundaries
+// using the socketpair created by spawnDomain.
+//
+// Protocol: length-prefixed messages over the Unix socketpair.
+//   Header: chanID(2) | len(4) | payload(len)
+// Each channel passed to spawn gets a chanID assigned at spawn time.
+// The parent and child each run a bridge goroutine that multiplexes
+// all IPC channels over the single socketpair fd.
+
+import "unsafe"
+
+const (
+	pipeMsgHdrLen = 6 // 2 (chanID) + 4 (length)
+	pipeMaxMsg    = 1 << 20
+)
+
+// pipeChanEntry maps a channel ID to a runtime channel pointer.
+type pipeChanEntry struct {
+	id   uint16
+	ch   *channel
+	dir  uint8 // 0=send (parent writes, child reads), 1=recv (child writes, parent reads)
+	next *pipeChanEntry
+}
+
+// pipeBridge is the multiplexer state for one socketpair fd.
+type pipeBridge struct {
+	fd       int32
+	channels *pipeChanEntry
+	nextID   uint16
+}
+
+// pipeBridgeRegister adds a channel to the bridge and returns its ID.
+func pipeBridgeRegister(br *pipeBridge, ch *channel, dir uint8) uint16 {
+	id := br.nextID
+	br.nextID++
+	br.channels = &pipeChanEntry{
+		id:   id,
+		ch:   ch,
+		dir:  dir,
+		next: br.channels,
+	}
+	return id
+}
+
+// pipeBridgeLookup finds a channel by ID.
+func pipeBridgeLookup(br *pipeBridge, id uint16) *pipeChanEntry {
+	for e := br.channels; e != nil; e = e.next {
+		if e.id == id {
+			return e
+		}
+	}
+	return nil
+}
+
+// pipeWrite writes a length-prefixed message to fd.
+// Format: chanID(2) | len(4) | data(len)
+func pipeWrite(fd int32, chanID uint16, data []byte) bool {
+	var hdr [pipeMsgHdrLen]byte
+	hdr[0] = byte(chanID >> 8)
+	hdr[1] = byte(chanID)
+	l := uint32(len(data))
+	hdr[2] = byte(l >> 24)
+	hdr[3] = byte(l >> 16)
+	hdr[4] = byte(l >> 8)
+	hdr[5] = byte(l)
+
+	if moxie_write(fd, unsafe.Pointer(&hdr[0]), pipeMsgHdrLen) < 0 {
+		return false
+	}
+	if len(data) > 0 {
+		if moxie_write(fd, unsafe.Pointer(&data[0]), int32(len(data))) < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// pipeRead reads one length-prefixed message from fd.
+// Returns chanID, data, ok.
+func pipeRead(fd int32) (uint16, []byte, bool) {
+	var hdr [pipeMsgHdrLen]byte
+	if moxie_read(fd, unsafe.Pointer(&hdr[0]), pipeMsgHdrLen) < pipeMsgHdrLen {
+		return 0, nil, false
+	}
+	chanID := uint16(hdr[0])<<8 | uint16(hdr[1])
+	l := uint32(hdr[2])<<24 | uint32(hdr[3])<<16 | uint32(hdr[4])<<8 | uint32(hdr[5])
+	if l > pipeMaxMsg {
+		return 0, nil, false
+	}
+	if l == 0 {
+		return chanID, nil, true
+	}
+	data := make([]byte, l)
+	if moxie_read(fd, unsafe.Pointer(&data[0]), int32(l)) < int32(l) {
+		return 0, nil, false
+	}
+	return chanID, data, true
+}
+
+// C functions for pipe I/O (defined in spawn_unix.c).
+
+//export moxie_write
+func moxie_write(fd int32, buf unsafe.Pointer, count int32) int32
+
+//export moxie_read
+func moxie_read(fd int32, buf unsafe.Pointer, count int32) int32

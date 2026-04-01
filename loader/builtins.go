@@ -15,6 +15,12 @@ const spawnBuiltinSource = `package main
 // spawn creates a new isolated domain (OS process on native, Service Worker
 // on JS) that runs fn with the given arguments. Returns a lifecycle channel
 // that closes when the child domain exits. Close it to signal the child to stop.
+//
+// The first argument may be a transport string:
+//   spawn(fn, args...)             — local fork+socketpair (default)
+//   spawn("local", fn, args...)    — explicit local
+//   spawn("pipe", fn, args...)     — alias for local
+//   spawn("tcp://...", fn, args...)— network transport (not yet implemented)
 func spawn(fn interface{}, args ...interface{}) chan struct{} {
 	panic("spawn: compiler failed to intercept")
 }

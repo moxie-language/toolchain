@@ -66,10 +66,23 @@ export function OnFetch(fn) {
   });
 }
 
+let _goMessageHandler = null;
+
+// Early message queue — buffers messages arriving before main() registers OnMessage.
+const _earlyQueue = [];
+self.addEventListener('message', (event) => {
+  if (_goMessageHandler) {
+    _goMessageHandler(_storeEvent(event));
+  } else {
+    _earlyQueue.push(event);
+  }
+});
+
 export function OnMessage(fn) {
-  self.addEventListener('message', (event) => {
-    fn(_storeEvent(event));
-  });
+  _goMessageHandler = fn;
+  while (_earlyQueue.length > 0) {
+    fn(_storeEvent(_earlyQueue.shift()));
+  }
 }
 
 // --- Event methods ---
@@ -121,6 +134,12 @@ export function GetMessageData(eventId) {
   return typeof d === 'string' ? d : JSON.stringify(d);
 }
 
+export function GetMessageClientID(eventId) {
+  const ev = _events.get(eventId);
+  if (!ev || !ev.source) return '';
+  return ev.source.id || '';
+}
+
 // --- SW globals ---
 
 export function SkipWaiting() {
@@ -144,6 +163,21 @@ export function PostMessage(clientId, msg) {
   if (c) c.postMessage({ type: msg });
 }
 
+export function PostMessageJSON(clientId, json) {
+  const c = _clients.get(clientId);
+  if (c) c.postMessage(json);
+}
+
+export function GetClientByID(id, fn) {
+  self.clients.get(id).then((client) => {
+    if (client) {
+      fn(_storeClient(client), true);
+    } else {
+      fn(0, false);
+    }
+  });
+}
+
 export function Navigate(clientId, url) {
   const c = _clients.get(clientId);
   if (c) c.navigate(url || c.url);
@@ -156,13 +190,43 @@ export function CacheOpen(name, fn) {
     const id = _nextCacheId++;
     _caches.set(id, cache);
     fn(id);
-  });
+  }).catch(() => { fn(0); });
 }
 
 export function CacheAddAll(cacheId, urls, done) {
   const cache = _caches.get(cacheId);
   if (!cache) { if (done) done(); return; }
-  cache.addAll(urls).then(() => { if (done) done(); });
+  // Add each URL individually, skipping failures.
+  Promise.allSettled(urls.map(u =>
+    fetch(u).then(r => r.ok ? cache.put(u, r) : null).catch(() => {})
+  )).then(() => { if (done) done(); });
+}
+
+export function CacheFromManifests(cacheId, staticFiles, done) {
+  const cache = _caches.get(cacheId);
+  if (!cache) { if (done) done(); return; }
+  // Fetch both app and SW manifests, combine with static files, cache all.
+  Promise.all([
+    fetch('/$manifest.json').then(r => r.ok ? r.json() : []).catch(() => []),
+    fetch('/$sw/$manifest.json').then(r => r.ok ? r.json() : []).catch(() => []),
+  ]).then(([app, sw]) => {
+    const urls = new Set();
+    // Static files from Moxie source.
+    if (staticFiles && staticFiles.forEach) {
+      staticFiles.forEach(f => urls.add(f));
+    } else if (staticFiles && staticFiles.$get) {
+      const s = staticFiles.$get();
+      for (let i = 0; i < s.length; i++) urls.add(s.addr ? s.addr(i).$get() : s[i]);
+    }
+    // App build outputs.
+    for (const f of app) urls.add('/' + f);
+    // SW build outputs.
+    for (const f of sw) urls.add('/$sw/' + f);
+    // Cache all, skipping failures.
+    Promise.allSettled([...urls].map(u =>
+      fetch(u).then(r => r.ok ? cache.put(u, r) : null).catch(() => {})
+    )).then(() => { if (done) done(); });
+  });
 }
 
 export function CachePut(cacheId, url, respId, done) {
@@ -191,6 +255,20 @@ export function Fetch(url, fn) {
   );
 }
 
+export function FetchAll(urls, onEach, onDone) {
+  let remaining = urls.length;
+  if (remaining === 0) { if (onDone) onDone(); return; }
+  urls.forEach((url, i) => {
+    fetch(url).then(
+      (resp) => { onEach(i, _storeResponse(resp), true); },
+      () => { onEach(i, 0, false); }
+    ).finally(() => {
+      remaining--;
+      if (remaining === 0 && onDone) onDone();
+    });
+  });
+}
+
 export function ResponseOK(respId) {
   const resp = _responses.get(respId);
   return resp ? resp.ok : false;
@@ -216,8 +294,35 @@ export function SSEClose(sseId) {
   }
 }
 
+// --- Timers ---
+
+export function SetTimeout(ms, fn) {
+  return setTimeout(fn, ms);
+}
+
+export function ClearTimeout(timerId) {
+  clearTimeout(timerId);
+}
+
+// --- Time ---
+
+export function NowSeconds() {
+  return Math.floor(Date.now() / 1000);
+}
+
+export function NowMillis() {
+  return Date.now();
+}
+
+// --- SW globals ---
+
+export function Origin() {
+  return self.location.origin;
+}
+
 // --- Logging ---
 
 export function Log(msg) {
   console.log('sw:', msg);
 }
+

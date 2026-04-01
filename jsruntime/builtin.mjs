@@ -61,7 +61,7 @@ export function sliceSlice(s, low, high, max) {
 
 // Append to slice.
 export function append(s, ...elems) {
-  if (s === null) {
+  if (s == null) {
     s = new Slice([], 0, 0, 0);
   }
 

@@ -4,6 +4,8 @@
 // These avoid duplicate //export declarations in Go.
 
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <unistd.h>
 
 int moxie_fork(void) {
@@ -68,3 +70,22 @@ int moxie_socketpair(int domain, int type, int protocol, int fds[2]) {
 }
 
 #endif // __APPLE__
+
+// Pipe I/O — wraps read/write for the IPC channel bridge.
+// Uses libc on all platforms since these are standard POSIX.
+
+int moxie_write(int fd, const void *buf, int count) {
+    return (int)write(fd, buf, (size_t)count);
+}
+
+int moxie_read(int fd, void *buf, int count) {
+    return (int)read(fd, buf, (size_t)count);
+}
+
+int moxie_waitpid(int pid, int *status, int options) {
+    return (int)waitpid((pid_t)pid, status, options);
+}
+
+int moxie_kill(int pid, int sig) {
+    return kill((pid_t)pid, sig);
+}

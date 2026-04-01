@@ -18,6 +18,12 @@ import (
 // these and emits a call to runtime.spawnDomain with the function pointer and
 // serialized arguments.
 //
+// If the first argument is a string constant, it specifies the transport:
+//   spawn("local", fn, args...)  — fork+socketpair (default)
+//   spawn("pipe", fn, args...)   — alias for local
+//   spawn("tcp://...", fn, args...) — network transport (not yet implemented)
+//   spawn(fn, args...)           — implicit local
+//
 // Because Spawn takes interface{} params, the SSA wraps arguments in
 // MakeInterface. We look through this wrapping to find the actual function.
 func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
@@ -26,9 +32,53 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		return llvm.Value{}, nil
 	}
 
-	// Unwrap the first argument to find the actual function.
-	// In SSA: moxie.Spawn(worker) becomes moxie.Spawn(MakeInterface(worker))
-	fnArg := instr.Args[0]
+	// Check if the first positional argument (fn) is a transport string.
+	// spawn signature: func spawn(fn interface{}, args ...interface{})
+	// With transport: spawn("pipe", worker, ch) → fn="pipe", args=[worker, ch]
+	// Without:        spawn(worker, ch) → fn=worker, args=[ch]
+	transport := "local"
+	hasTransport := false
+	if transportStr, ok := extractTransportString(instr.Args[0]); ok {
+		transport = transportStr
+		hasTransport = true
+	}
+
+	// Validate transport.
+	switch transport {
+	case "local", "pipe":
+		// OK — use fork+socketpair.
+	default:
+		if len(transport) > 0 && (hasScheme(transport, "tcp") || hasScheme(transport, "ws") || hasScheme(transport, "wss")) {
+			b.addError(instr.Pos(), fmt.Sprintf("spawn: network transport %q not yet implemented", transport))
+			return llvm.Value{}, nil
+		}
+		b.addError(instr.Pos(), fmt.Sprintf("spawn: unknown transport %q (expected \"local\", \"pipe\", or a network URL)", transport))
+		return llvm.Value{}, nil
+	}
+
+	// Extract concrete values from the variadic slice.
+	allConcrete := extractSpawnSSAArgs(instr)
+
+	// When transport is present, the function is the first element of the
+	// variadic (allConcrete[0]), and the actual args are allConcrete[1:].
+	// When not present, the function is instr.Args[0] and args are allConcrete.
+	var fnArg ssa.Value
+	var concreteArgs []ssa.Value
+	if hasTransport {
+		if len(allConcrete) < 1 {
+			b.addError(instr.Pos(), "moxie.Spawn requires a function argument after transport string")
+			return llvm.Value{}, nil
+		}
+		fnArg = allConcrete[0]
+		concreteArgs = allConcrete[1:]
+	} else {
+		fnArg = instr.Args[0]
+		if mi, ok := fnArg.(*ssa.MakeInterface); ok {
+			fnArg = mi.X
+		}
+		concreteArgs = allConcrete
+	}
+
 	var targetFn *ssa.Function
 
 	// Look through MakeInterface to find the function value.
@@ -58,10 +108,6 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		}
 	}
 
-	// Extract concrete argument values from the variadic []interface{} slice.
-	// SSA packs each arg into MakeInterface, stores them in a local array,
-	// then slices it. We walk the SSA graph to recover the actual typed values.
-	concreteArgs := extractSpawnSSAArgs(instr)
 	if len(concreteArgs) != sig.Params().Len() {
 		b.addError(instr.Pos(), fmt.Sprintf("spawn: %s expects %d arguments, got %d",
 			targetFn.Name(), sig.Params().Len(), len(concreteArgs)))
@@ -226,4 +272,33 @@ func validateSpawnElem(t types.Type, argIndex int) error {
 		return validateSpawnElem(ut.Elem(), argIndex)
 	}
 	return nil
+}
+
+// extractTransportString checks if an SSA value is a string constant
+// (possibly wrapped in MakeInterface) and returns it.
+func extractTransportString(v ssa.Value) (string, bool) {
+	if mi, ok := v.(*ssa.MakeInterface); ok {
+		v = mi.X
+	}
+	c, ok := v.(*ssa.Const)
+	if !ok {
+		return "", false
+	}
+	if c.Value == nil || c.Value.Kind() != constant.String {
+		return "", false
+	}
+	return constant.StringVal(c.Value), true
+}
+
+// hasScheme checks if s starts with scheme://.
+func hasScheme(s, scheme string) bool {
+	if len(s) < len(scheme)+3 {
+		return false
+	}
+	for i := 0; i < len(scheme); i++ {
+		if s[i] != scheme[i] {
+			return false
+		}
+	}
+	return s[len(scheme)] == ':' && s[len(scheme)+1] == '/' && s[len(scheme)+2] == '/'
 }
