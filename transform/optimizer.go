@@ -17,14 +17,14 @@ import (
 func OptimizePackage(mod llvm.Module, config *compileopts.Config) {
 	_, speedLevel, _ := config.OptLevel()
 
-	// Run TinyGo-specific optimization passes.
+	// Run Moxie-specific optimization passes.
 	if speedLevel > 0 {
 		OptimizeMaps(mod)
 	}
 }
 
 // Optimize runs a number of optimization and transformation passes over the
-// given module. Some passes are specific to TinyGo, others are generic LLVM
+// given module. Some passes are specific to Moxie, others are generic LLVM
 // passes.
 //
 // Please note that some optimizations are not optional, thus Optimize must
@@ -32,7 +32,7 @@ func OptimizePackage(mod llvm.Module, config *compileopts.Config) {
 func Optimize(mod llvm.Module, config *compileopts.Config) []error {
 	optLevel, speedLevel, _ := config.OptLevel()
 
-	// Make sure these functions are kept in tact during TinyGo transformation passes.
+	// Make sure these functions are kept in tact during Moxie transformation passes.
 	for _, name := range functionsUsedInTransforms {
 		fn := mod.NamedFunction(name)
 		if fn.IsNil() {
@@ -63,7 +63,7 @@ func Optimize(mod llvm.Module, config *compileopts.Config) []error {
 			return []error{fmt.Errorf("could not build pass pipeline: %w", err)}
 		}
 
-		// Run TinyGo-specific optimization passes.
+		// Run Moxie-specific optimization passes.
 		OptimizeStringToBytes(mod)
 		OptimizeReflectImplements(mod)
 		maxStackSize := config.MaxStackAlloc()
@@ -86,7 +86,7 @@ func Optimize(mod llvm.Module, config *compileopts.Config) []error {
 			return []error{fmt.Errorf("could not build pass pipeline: %w", err)}
 		}
 
-		// Run TinyGo-specific interprocedural optimizations.
+		// Run Moxie-specific interprocedural optimizations.
 		OptimizeAllocs(mod, config.Options.PrintAllocs, maxStackSize, func(pos token.Position, msg string) {
 			fmt.Fprintln(os.Stderr, pos.String()+": "+msg)
 		})
@@ -133,7 +133,7 @@ func Optimize(mod llvm.Module, config *compileopts.Config) []error {
 		return []error{errors.New("optimizations caused a verification failure")}
 	}
 
-	// After TinyGo-specific transforms have finished, undo exporting these functions.
+	// After Moxie-specific transforms have finished, undo exporting these functions.
 	for _, name := range functionsUsedInTransforms {
 		fn := mod.NamedFunction(name)
 		if fn.IsNil() || fn.IsDeclaration() {
@@ -165,8 +165,8 @@ func Optimize(mod llvm.Module, config *compileopts.Config) []error {
 }
 
 // functionsUsedInTransform is a list of function symbols that may be used
-// during TinyGo optimization passes so they have to be marked as external
-// linkage until all TinyGo passes have finished.
+// during Moxie optimization passes so they have to be marked as external
+// linkage until all Moxie passes have finished.
 var functionsUsedInTransforms = []string{
 	"runtime.alloc",
 	"runtime.free",

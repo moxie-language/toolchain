@@ -1,10 +1,10 @@
 #ifdef __ELF__
-.section .text.tinygo_scanCurrentStack
-.global tinygo_scanCurrentStack
-tinygo_scanCurrentStack:
+.section .text.moxie_scanCurrentStack
+.global moxie_scanCurrentStack
+moxie_scanCurrentStack:
 #else // Darwin
-.global _tinygo_scanCurrentStack
-_tinygo_scanCurrentStack:
+.global _moxie_scanCurrentStack
+_moxie_scanCurrentStack:
 #endif
     // Save callee-saved registers.
     pushq %rbx
@@ -18,9 +18,9 @@ _tinygo_scanCurrentStack:
     subq $8, %rsp // adjust the stack before the call to maintain 16-byte alignment
     movq %rsp, %rdi
 #ifdef __ELF__
-    callq tinygo_scanstack
+    callq moxie_scanstack
 #else
-    callq _tinygo_scanstack // Darwin
+    callq _moxie_scanstack // Darwin
 #endif
 
     // Restore the stack pointer. Registers do not need to be restored as they
@@ -30,12 +30,12 @@ _tinygo_scanCurrentStack:
 
 
 #ifdef __ELF__
-.section .text.tinygo_longjmp
-.global tinygo_longjmp
-tinygo_longjmp:
+.section .text.moxie_longjmp
+.global moxie_longjmp
+moxie_longjmp:
 #else // Darwin
-.global _tinygo_longjmp
-_tinygo_longjmp:
+.global _moxie_longjmp
+_moxie_longjmp:
 #endif
     // Note: the code we jump to assumes rax is set to a non-zero value if we
     // jump from here, so we use rax as the temporary value for jumpPC.

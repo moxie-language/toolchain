@@ -4,10 +4,10 @@ package compiler
 // Go assembly.
 //
 // The Go toolchain defines many performance critical functions in assembly
-// instead of plain Go. This is a problem for TinyGo as it currently (as of
+// instead of plain Go. This is a problem for Moxie as it currently (as of
 // august 2021) is not able to compile these assembly files and even if it
 // could, it would not be able to make use of them for many targets that are
-// supported by TinyGo (baremetal RISC-V, AVR, etc). Therefore, many of these
+// supported by Moxie (baremetal RISC-V, AVR, etc). Therefore, many of these
 // functions are aliased to their generic Go implementation.
 // This results in slower than possible implementations, but at least they are
 // usable.

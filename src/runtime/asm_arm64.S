@@ -1,9 +1,9 @@
 #ifdef __MACH__
-.global _tinygo_scanCurrentStack
-_tinygo_scanCurrentStack:
+.global _moxie_scanCurrentStack
+_moxie_scanCurrentStack:
 #else
-.global tinygo_scanCurrentStack
-tinygo_scanCurrentStack:
+.global moxie_scanCurrentStack
+moxie_scanCurrentStack:
 #endif
     // Sources:
     //   * https://developer.arm.com/architectures/learn-the-architecture/armv8-a-instruction-set-architecture/procedure-call-standard
@@ -24,9 +24,9 @@ tinygo_scanCurrentStack:
     // Scan the stack.
     mov     x0, sp
 #ifdef __MACH__
-    bl      _tinygo_scanstack
+    bl      _moxie_scanstack
 #else
-    bl      tinygo_scanstack
+    bl      moxie_scanstack
 #endif
 
     // Restore stack state and return.
@@ -35,11 +35,11 @@ tinygo_scanCurrentStack:
 
 
 #ifdef __MACH__
-.global _tinygo_longjmp
-_tinygo_longjmp:
+.global _moxie_longjmp
+_moxie_longjmp:
 #else
-.global tinygo_longjmp
-tinygo_longjmp:
+.global moxie_longjmp
+moxie_longjmp:
 #endif
     // Note: the code we jump to assumes x0 is set to a non-zero value if we
     // jump from here (which is conveniently already the case).

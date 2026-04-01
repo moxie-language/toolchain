@@ -129,7 +129,7 @@ func OptimizeReflectImplements(mod llvm.Module) {
 	// Look up the (reflect.Value).Implements() method.
 	var implementsFunc llvm.Value
 	for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
-		attr := fn.GetStringAttributeAtIndex(-1, "tinygo-invoke")
+		attr := fn.GetStringAttributeAtIndex(-1, "moxie-invoke")
 		if attr.IsNil() {
 			continue
 		}

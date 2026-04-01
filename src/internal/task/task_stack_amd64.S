@@ -1,10 +1,10 @@
 #ifdef __MACH__ // Darwin
-.global  _tinygo_startTask
-_tinygo_startTask:
+.global  _moxie_startTask
+_moxie_startTask:
 #else // Linux etc
-.section .text.tinygo_startTask
-.global  tinygo_startTask
-tinygo_startTask:
+.section .text.moxie_startTask
+.global  moxie_startTask
+moxie_startTask:
 #endif
     .cfi_startproc
     // Small assembly stub for starting a goroutine. This is already run on the
@@ -16,7 +16,7 @@ tinygo_startTask:
     // Indicate to the unwinder that there is nothing to unwind, this is the
     // root frame. It avoids bogus extra frames in GDB like here:
     //     #10 0x00000000004277b6 in <goroutine wrapper> () at [...]
-    //     #11 0x00000000004278f3 in tinygo_startTask () at [...]
+    //     #11 0x00000000004278f3 in moxie_startTask () at [...]
     //     #12 0x0000000000002030 in ?? ()
     //     #13 0x0000000000000071 in ?? ()
     .cfi_undefined rip
@@ -30,19 +30,19 @@ tinygo_startTask:
 
     // After return, exit this goroutine. This is a tail call.
     #ifdef __MACH__
-    jmp _tinygo_task_exit
+    jmp _moxie_task_exit
     #else
-    jmp tinygo_task_exit
+    jmp moxie_task_exit
     #endif
     .cfi_endproc
 
 #ifdef __MACH__ // Darwin
-.global _tinygo_swapTask
-_tinygo_swapTask:
+.global _moxie_swapTask
+_moxie_swapTask:
 #else // Linux etc
-.global tinygo_swapTask
-.section .text.tinygo_swapTask
-tinygo_swapTask:
+.global moxie_swapTask
+.section .text.moxie_swapTask
+moxie_swapTask:
 #endif
     // This function gets the following parameters:
     // %rdi = newStack uintptr
@@ -70,7 +70,7 @@ tinygo_swapTask:
     popq %r14
     popq %r15
 
-    // Return into the new task, as if tinygo_swapTask was a regular call.
+    // Return into the new task, as if moxie_swapTask was a regular call.
     ret
 
 #ifdef __MACH__ // Darwin

@@ -8,11 +8,11 @@ import (
 	"strings"
 )
 
-// Version of TinyGo.
+// Version of Moxie.
 // Update this value before release of new version of software.
 const version = "0.2.0-dev"
 
-// Return TinyGo version, either in the form 0.30.0 or as a development version
+// Return Moxie version, either in the form 0.30.0 or as a development version
 // (like 0.30.0-dev-abcd012).
 func Version() string {
 	v := version
@@ -35,8 +35,8 @@ func readGitHash() string {
 	return ""
 }
 
-// GetGorootVersion returns the major and minor version for a given GOROOT path.
-// If the goroot cannot be determined, (0, 0) is returned.
+// GetGorootVersion returns the major and minor version for a given MOXIEROOT path.
+// If the root cannot be determined, (0, 0) is returned.
 func GetGorootVersion() (major, minor int, err error) {
 	s, err := GorootVersionString()
 	if err != nil {
@@ -46,27 +46,36 @@ func GetGorootVersion() (major, minor int, err error) {
 	return major, minor, err
 }
 
-// Parse parses the Go version (like "go1.3.2") in the parameter and return the
+// Parse parses the Moxie version (like "mx1.3.2") in the parameter and return the
 // major, minor, and patch version: 1, 3, and 2 in this example.
+// Also accepts the "go" prefix for compatibility with the Go toolchain.
 // If there is an error, (0, 0, 0) and an error will be returned.
 func Parse(version string) (major, minor, patch int, err error) {
 	if strings.HasPrefix(version, "devel ") {
 		version = strings.Split(strings.TrimPrefix(version, "devel "), version)[0]
 	}
-	if version == "" || version[:2] != "go" {
-		return 0, 0, 0, errors.New("could not parse Go version: version does not start with 'go' prefix")
+	// Accept both "mx" and "go" prefixes
+	prefix := ""
+	if len(version) >= 2 {
+		switch version[:2] {
+		case "mx", "go":
+			prefix = version[:2]
+		}
+	}
+	if prefix == "" {
+		return 0, 0, 0, errors.New("could not parse version: version does not start with 'mx' or 'go' prefix")
 	}
 
 	parts := strings.Split(version[2:], ".")
 	if len(parts) < 2 {
-		return 0, 0, 0, errors.New("could not parse Go version: version has less than two parts")
+		return 0, 0, 0, errors.New("could not parse version: version has less than two parts")
 	}
 
 	// Ignore the errors, we don't really handle errors here anyway.
 	var trailing string
-	n, err := fmt.Sscanf(version, "go%d.%d.%d%s", &major, &minor, &patch, &trailing)
+	n, err := fmt.Sscanf(version, prefix+"%d.%d.%d%s", &major, &minor, &patch, &trailing)
 	if n == 2 {
-		n, err = fmt.Sscanf(version, "go%d.%d%s", &major, &minor, &trailing)
+		n, err = fmt.Sscanf(version, prefix+"%d.%d%s", &major, &minor, &trailing)
 	}
 	if n >= 2 && err == io.EOF {
 		// Means there were no trailing characters (i.e., not an alpha/beta)
@@ -79,7 +88,7 @@ func Parse(version string) (major, minor, patch int, err error) {
 	return major, minor, patch, nil
 }
 
-// Compare compares two Go version strings.
+// Compare compares two Moxie version strings.
 // The result will be 0 if a == b, -1 if a < b, and +1 if a > b.
 // If either a or b is not a valid Go version, it is treated as "go0.0"
 // and compared lexicographically.
@@ -105,9 +114,9 @@ func Compare(a, b string) int {
 	}
 }
 
-// GorootVersionString returns the version string as reported by the Go
-// toolchain. It is usually of the form `go1.x.y` but can have some variations
-// (for beta releases, for example).
+// GorootVersionString returns the version string as reported by the
+// toolchain. It is usually of the form `go1.x.y` or `mx1.x.y` but can
+// have some variations (for beta releases, for example).
 func GorootVersionString() (string, error) {
 	err := readGoEnvVars()
 	return goEnvVars.GOVERSION, err

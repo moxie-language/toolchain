@@ -190,7 +190,7 @@ func _Cgo___get_errno() error {
 
 // Windows uses fake errno values in the syscall package.
 // See for example: https://github.com/golang/go/issues/23468
-// TinyGo uses mingw-w64 though, which does have defined errno values. Since the
+// Moxie uses mingw-w64 though, which does have defined errno values. Since the
 // syscall package is the standard library one we can't change it, but we can
 // map the errno values to match the values in the syscall package.
 // Source of the errno values: lib/mingw-w64/mingw-w64-headers/crt/errno.h

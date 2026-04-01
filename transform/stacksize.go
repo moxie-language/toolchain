@@ -47,7 +47,7 @@ func CreateStackSizeLoads(mod llvm.Module, config *compileopts.Config) []string 
 	// just for itself.
 	stackSizesGlobalType := llvm.ArrayType(functions[0].Type(), len(functions))
 	stackSizesGlobal := llvm.AddGlobal(mod, stackSizesGlobalType, "internal/task.stackSizes")
-	stackSizesGlobal.SetSection(".tinygo_stacksizes")
+	stackSizesGlobal.SetSection(".moxie_stacksizes")
 	defaultStackSizes := make([]llvm.Value, len(functions))
 	defaultStackSize := llvm.ConstInt(functions[0].Type(), config.StackSize(), false)
 	alignment := targetData.ABITypeAlignment(functions[0].Type())
@@ -63,7 +63,7 @@ func CreateStackSizeLoads(mod llvm.Module, config *compileopts.Config) []string 
 			Language:  0xb, // DW_LANG_C99 (0xc, off-by-one?)
 			File:      "<unknown>",
 			Dir:       "",
-			Producer:  "TinyGo",
+			Producer:  "Moxie",
 			Optimized: true,
 		})
 		ditype := dibuilder.CreateArrayType(llvm.DIArrayType{

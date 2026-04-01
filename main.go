@@ -94,7 +94,7 @@ func Build(pkgName, outpath string, config *compileopts.Config) error {
 
 	if result.Binary != "" {
 		if outpath == "" {
-			if strings.HasSuffix(pkgName, ".go") {
+			if strings.HasSuffix(pkgName, ".mx") {
 				outpath = filepath.Base(pkgName[:len(pkgName)-3]) + config.DefaultBinaryExtension()
 			} else {
 				outpath = filepath.Base(result.MainDir) + config.DefaultBinaryExtension()
@@ -339,7 +339,7 @@ func getListOfPackages(pkgs []string, options *compileopts.Options) ([]string, e
 	}
 	cmd, err := loader.List(config, nil, pkgs)
 	if err != nil {
-		return nil, fmt.Errorf("failed to run `go list`: %w", err)
+		return nil, fmt.Errorf("failed to run `moxie list`: %w", err)
 	}
 	outputBuf := bytes.NewBuffer(nil)
 	cmd.Stdout = outputBuf
@@ -478,14 +478,14 @@ func main() {
 
 	// Internal flags.
 	printIR := flag.Bool("internal-printir", false, "print LLVM IR")
-	dumpSSA := flag.Bool("internal-dumpssa", false, "dump internal Go SSA")
+	dumpSSA := flag.Bool("internal-dumpssa", false, "dump internal Moxie SSA")
 	verifyIR := flag.Bool("internal-verifyir", false, "run extra verification steps on LLVM IR")
 	skipDwarf := flag.Bool("internal-nodwarf", false, "internal flag, use -no-debug instead")
 
 	var flagDeps, flagTest bool
 	if command == "help" || command == "list" {
-		flag.BoolVar(&flagDeps, "deps", false, "supply -deps flag to go list")
-		flag.BoolVar(&flagTest, "test", false, "supply -test flag to go list")
+		flag.BoolVar(&flagDeps, "deps", false, "supply -deps flag to moxie list")
+		flag.BoolVar(&flagTest, "test", false, "supply -test flag to moxie list")
 	}
 	var outpath string
 	if command == "help" || command == "build" || command == "test" {
@@ -739,7 +739,7 @@ func main() {
 		}
 		cmd, err := loader.List(config, extraArgs, flag.Args())
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "failed to run `go list`:", err)
+			fmt.Fprintln(os.Stderr, "failed to run `moxie list`:", err)
 			os.Exit(1)
 		}
 		cmd.Stdout = os.Stdout
@@ -749,7 +749,7 @@ func main() {
 			if exitErr, ok := err.(*exec.ExitError); ok {
 				os.Exit(exitErr.ExitCode())
 			}
-			fmt.Fprintln(os.Stderr, "failed to run `go list`:", err)
+			fmt.Fprintln(os.Stderr, "failed to run `moxie list`:", err)
 			os.Exit(1)
 		}
 	case "clean":
@@ -765,7 +765,7 @@ func main() {
 		if s, err := goenv.GorootVersionString(); err == nil {
 			goversion = s
 		}
-		fmt.Printf("moxie version %s %s/%s (using go version %s)\n", goenv.Version(), runtime.GOOS, runtime.GOARCH, goversion)
+		fmt.Printf("moxie version %s %s/%s (using moxie version %s)\n", goenv.Version(), runtime.GOOS, runtime.GOARCH, goversion)
 	case "env":
 		if flag.NArg() == 0 {
 			for _, key := range goenv.Keys {

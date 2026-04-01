@@ -10,7 +10,7 @@
 #include <ucontext.h>
 #include <string.h>
 
-void tinygo_handle_fatal_signal(int sig, uintptr_t addr);
+void moxie_handle_fatal_signal(int sig, uintptr_t addr);
 
 static void signal_handler(int sig, siginfo_t *info, void *context) {
 	ucontext_t* uctx = context;
@@ -38,10 +38,14 @@ static void signal_handler(int sig, siginfo_t *info, void *context) {
 	#else
 		#error unknown platform
 	#endif
-	tinygo_handle_fatal_signal(sig, addr);
+	moxie_handle_fatal_signal(sig, addr);
 }
 
-void tinygo_register_fatal_signals(void) {
+void moxie_register_fatal_signals(void) {
+	// Ignore SIGPIPE — network servers must not die on write-to-closed-socket.
+	// Go's runtime does this; moxie must too.
+	signal(SIGPIPE, SIG_IGN);
+
 	struct sigaction act = { 0 };
 	// SA_SIGINFO:   we want the 2 extra parameters
 	// SA_RESETHAND: only catch the signal once (the handler will re-raise the signal)

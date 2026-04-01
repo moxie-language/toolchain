@@ -49,7 +49,7 @@ type Config struct {
 	CodeModel       string
 	RelocationModel string
 	SizeLevel       int
-	TinyGoVersion   string // for llvm.ident
+	MoxieVersion    string // for llvm.ident
 
 	// Various compiler options that determine how code is generated.
 	Scheduler          string
@@ -130,7 +130,7 @@ func newCompilerContext(moduleName string, machine llvm.TargetMachine, config *C
 	c.dataPtrType = llvm.PointerType(c.ctx.Int8Type(), 0)
 
 	dummyFuncType := llvm.FunctionType(c.ctx.VoidType(), nil, false)
-	dummyFunc := llvm.AddFunction(c.mod, "tinygo.dummy", dummyFuncType)
+	dummyFunc := llvm.AddFunction(c.mod, "moxie.dummy", dummyFuncType)
 	c.funcPtrAddrSpace = dummyFunc.Type().PointerAddressSpace()
 	c.funcPtrType = dummyFunc.Type()
 	dummyFunc.EraseFromParentAsFunction()
@@ -306,7 +306,7 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 			Language:  0xb, // DW_LANG_C99 (0xc, off-by-one?)
 			File:      "<unknown>",
 			Dir:       "",
-			Producer:  "TinyGo",
+			Producer:  "Moxie",
 			Optimized: true,
 		})
 	}
@@ -343,12 +343,12 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 				llvm.ConstInt(c.ctx.Int32Type(), 4, false).ConstantAsMetadata(),
 			}),
 		)
-		if c.TinyGoVersion != "" {
+		if c.MoxieVersion != "" {
 			// It is necessary to set llvm.ident, otherwise debugging on MacOS
 			// won't work.
 			c.mod.AddNamedMetadataOperand("llvm.ident",
 				c.ctx.MDNode(([]llvm.Metadata{
-					c.ctx.MDString("TinyGo version " + c.TinyGoVersion),
+					c.ctx.MDString("Moxie version " + c.MoxieVersion),
 				})))
 		}
 		c.dibuilder.Finalize()

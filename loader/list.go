@@ -11,7 +11,7 @@ import (
 )
 
 // List returns a ready-to-run *exec.Cmd for running the `go list` command with
-// the configuration used for TinyGo.
+// the configuration used for Moxie.
 func List(config *compileopts.Config, extraArgs, pkgs []string) (*exec.Cmd, error) {
 	goroot, err := GetCachedGoroot(config)
 	if err != nil {

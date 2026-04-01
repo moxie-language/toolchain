@@ -609,11 +609,11 @@ func (c *compilerContext) addStandardDeclaredAttributes(llvmFn llvm.Value) {
 }
 
 // addStandardDefinedAttributes adds the set of attributes that are added to
-// every function defined by TinyGo (even thunks/wrappers), possibly depending
+// every function defined by Moxie (even thunks/wrappers), possibly depending
 // on the architecture. It does not set attributes only set for declared
 // functions, use addStandardDeclaredAttributes for this.
 func (c *compilerContext) addStandardDefinedAttributes(llvmFn llvm.Value) {
-	// TinyGo does not currently raise exceptions, so set the 'nounwind' flag.
+	// Moxie does not currently raise exceptions, so set the 'nounwind' flag.
 	// This behavior matches Clang when compiling C source files.
 	// It reduces binary size on Linux a little bit on non-x86_64 targets by
 	// eliminating exception tables for these functions.

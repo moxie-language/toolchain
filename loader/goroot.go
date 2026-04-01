@@ -1,9 +1,9 @@
 package loader
 
 // This file constructs a new temporary GOROOT directory by merging both the
-// standard Go GOROOT and the GOROOT from TinyGo using symlinks.
+// standard Go GOROOT and the GOROOT from Moxie using symlinks.
 //
-// The goal is to replace specific packages from Go with a TinyGo version. It's
+// The goal is to replace specific packages from Go with a Moxie version. It's
 // never a partial replacement, either a package is fully replaced or it is not.
 // This is important because if we did allow to merge packages (e.g. by adding
 // files to a package), it would lead to a dependency on implementation details
@@ -33,14 +33,14 @@ import (
 var gorootCreateMutex sync.Mutex
 
 // GetCachedGoroot creates a new GOROOT by merging both the standard GOROOT and
-// the GOROOT from TinyGo using lots of symbolic links.
+// the GOROOT from Moxie using lots of symbolic links.
 func GetCachedGoroot(config *compileopts.Config) (string, error) {
 	goroot := goenv.Get("GOROOT")
 	if goroot == "" {
 		return "", errors.New("could not determine GOROOT")
 	}
-	tinygoroot := goenv.Get("MOXIEROOT")
-	if tinygoroot == "" {
+	moxieroot := goenv.Get("MOXIEROOT")
+	if moxieroot == "" {
 		return "", errors.New("could not determine MOXIEROOT")
 	}
 
@@ -48,7 +48,7 @@ func GetCachedGoroot(config *compileopts.Config) (string, error) {
 	overrides := pathsToOverride(config.GoMinorVersion, needsSyscallPackage(config.BuildTags()))
 
 	// Resolve the merge links within the goroot.
-	merge, err := listGorootMergeLinks(goroot, tinygoroot, overrides)
+	merge, err := listGorootMergeLinks(goroot, moxieroot, overrides)
 	if err != nil {
 		return "", err
 	}
@@ -63,7 +63,7 @@ func GetCachedGoroot(config *compileopts.Config) (string, error) {
 	// Do not try to create the cached GOROOT in parallel, that's only a waste
 	// of I/O bandwidth and thus speed. Instead, use a mutex to make sure only
 	// one goroutine does it at a time.
-	// This is not a way to ensure atomicity (a different TinyGo invocation
+	// This is not a way to ensure atomicity (a different Moxie invocation
 	// could be creating the same directory), but instead a way to avoid
 	// creating it many times in parallel when running tests in parallel.
 	gorootCreateMutex.Lock()
@@ -123,7 +123,7 @@ func GetCachedGoroot(config *compileopts.Config) (string, error) {
 	err = os.Rename(tmpgoroot, cachedgoroot)
 	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
-			// Another invocation of TinyGo also seems to have created a GOROOT.
+			// Another invocation of Moxie also seems to have created a GOROOT.
 			// Use that one instead. Our new GOROOT will be automatically
 			// deleted by the defer above.
 			return cachedgoroot, nil
@@ -142,38 +142,38 @@ func GetCachedGoroot(config *compileopts.Config) (string, error) {
 	return cachedgoroot, nil
 }
 
-// listGorootMergeLinks searches goroot and tinygoroot for all symlinks that must be created within the merged goroot.
-func listGorootMergeLinks(goroot, tinygoroot string, overrides map[string]bool) (map[string]string, error) {
+// listGorootMergeLinks searches goroot and moxieroot for all symlinks that must be created within the merged goroot.
+func listGorootMergeLinks(goroot, moxieroot string, overrides map[string]bool) (map[string]string, error) {
 	goSrc := filepath.Join(goroot, "src")
-	tinygoSrc := filepath.Join(tinygoroot, "src")
+	moxieSrc := filepath.Join(moxieroot, "src")
 	merges := make(map[string]string)
 	for dir, merge := range overrides {
 		if !merge {
-			// Use the TinyGo version.
-			merges[filepath.Join("src", dir)] = filepath.Join(tinygoSrc, dir)
+			// Use the Moxie version.
+			merges[filepath.Join("src", dir)] = filepath.Join(moxieSrc, dir)
 			continue
 		}
 
-		// Add files from TinyGo.
-		tinygoDir := filepath.Join(tinygoSrc, dir)
-		tinygoEntries, err := os.ReadDir(tinygoDir)
+		// Add files from Moxie.
+		moxieDir := filepath.Join(moxieSrc, dir)
+		moxieEntries, err := os.ReadDir(moxieDir)
 		if err != nil {
 			return nil, err
 		}
-		var hasTinyGoFiles bool
-		for _, e := range tinygoEntries {
+		var hasMoxieFiles bool
+		for _, e := range moxieEntries {
 			if e.IsDir() {
 				continue
 			}
 
 			// Link this file.
 			name := e.Name()
-			merges[filepath.Join("src", dir, name)] = filepath.Join(tinygoDir, name)
+			merges[filepath.Join("src", dir, name)] = filepath.Join(moxieDir, name)
 
-			hasTinyGoFiles = true
+			hasMoxieFiles = true
 		}
 
-		// Add all directories from $GOROOT that are not part of the TinyGo
+		// Add all directories from $GOROOT that are not part of the Moxie
 		// overrides.
 		goDir := filepath.Join(goSrc, dir)
 		goEntries, err := os.ReadDir(goDir)
@@ -182,8 +182,8 @@ func listGorootMergeLinks(goroot, tinygoroot string, overrides map[string]bool) 
 		}
 		for _, e := range goEntries {
 			isDir := e.IsDir()
-			if hasTinyGoFiles && !isDir {
-				// Only merge files from Go if TinyGo does not have any files.
+			if hasMoxieFiles && !isDir {
+				// Only merge files from Go if Moxie does not have any files.
 				// Otherwise we'd end up with a weird mix from both Go
 				// implementations.
 				continue
@@ -191,7 +191,7 @@ func listGorootMergeLinks(goroot, tinygoroot string, overrides map[string]bool) 
 
 			name := e.Name()
 			if _, ok := overrides[path.Join(dir, name)+"/"]; ok {
-				// This entry is overridden by TinyGo.
+				// This entry is overridden by Moxie.
 				// It has/will be merged elsewhere.
 				continue
 			}
@@ -215,10 +215,10 @@ func listGorootMergeLinks(goroot, tinygoroot string, overrides map[string]bool) 
 }
 
 // needsSyscallPackage returns whether the syscall package should be overridden
-// with the TinyGo version. This is the case on some targets.
+// with the Moxie version. This is the case on some targets.
 func needsSyscallPackage(buildTags []string) bool {
 	for _, tag := range buildTags {
-		if tag == "baremetal" || tag == "nintendoswitch" || tag == "tinygo.wasm" {
+		if tag == "baremetal" || tag == "nintendoswitch" || tag == "moxie.wasm" {
 			return true
 		}
 	}
@@ -246,8 +246,8 @@ func pathsToOverride(goMinor int, needsSyscallPackage bool) map[string]bool {
 // Note that while Windows 10 does support symlinks and allows them to be
 // created using os.Symlink, it requires developer mode to be enabled.
 // Therefore provide a fallback for when symlinking is not possible.
-// Unfortunately this fallback only works when TinyGo is installed on the same
-// filesystem as the TinyGo cache and the Go installation (which is usually the
+// Unfortunately this fallback only works when Moxie is installed on the same
+// filesystem as the Moxie cache and the Go installation (which is usually the
 // C drive).
 func symlink(oldname, newname string) error {
 	symlinkErr := os.Symlink(oldname, newname)

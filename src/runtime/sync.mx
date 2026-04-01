@@ -1,0 +1,116 @@
+package runtime
+
+// Semaphore implementation for moxie's cooperative scheduler.
+// Used by internal/poll and internal/sync (which backs sync.Mutex).
+
+import (
+	"internal/task"
+	"sync/atomic"
+)
+
+// Waiter queue for semaphores. Maps sema address → linked list of waiting tasks.
+type semaWaiter struct {
+	t    *task.Task
+	addr *uint32
+	next *semaWaiter
+}
+
+var (
+	semaWaiters   *semaWaiter
+	semaPool      [256]semaWaiter
+	semaPoolCount int
+)
+
+func semaAlloc() *semaWaiter {
+	if semaPoolCount >= len(semaPool) {
+		runtimePanic("semaphore: too many waiters")
+	}
+	w := &semaPool[semaPoolCount]
+	semaPoolCount++
+	return w
+}
+
+// semacquire1 blocks until *addr > 0, then decrements it.
+func semacquire1(addr *uint32, lifo bool) {
+	for {
+		v := atomic.LoadUint32(addr)
+		if v > 0 {
+			if atomic.CompareAndSwapUint32(addr, v, v-1) {
+				return
+			}
+			continue
+		}
+		// Park: add to wait queue and pause.
+		w := semaAlloc()
+		w.t = task.Current()
+		w.addr = addr
+		if lifo {
+			// Insert at front.
+			w.next = semaWaiters
+			semaWaiters = w
+		} else {
+			// Insert at back.
+			w.next = nil
+			if semaWaiters == nil {
+				semaWaiters = w
+			} else {
+				tail := semaWaiters
+				for tail.next != nil {
+					tail = tail.next
+				}
+				tail.next = w
+			}
+		}
+		task.Pause()
+		// Woken up — retry the acquire.
+	}
+}
+
+// semrelease1 increments *addr and wakes one waiting goroutine if any.
+func semrelease1(addr *uint32) {
+	atomic.AddUint32(addr, 1)
+
+	// Find and wake a waiter for this address.
+	var prev *semaWaiter
+	for w := semaWaiters; w != nil; w = w.next {
+		if w.addr == addr {
+			// Remove from list.
+			if prev == nil {
+				semaWaiters = w.next
+			} else {
+				prev.next = w.next
+			}
+			t := w.t
+			w.t = nil
+			w.addr = nil
+			w.next = nil
+			scheduleTask(t)
+			return
+		}
+		prev = w
+	}
+}
+
+// internal/poll semaphores (simple interface).
+
+//go:linkname poll_semacquire internal/poll.runtime_Semacquire
+func poll_semacquire(sema *uint32) {
+	semacquire1(sema, false)
+}
+
+//go:linkname poll_semrelease internal/poll.runtime_Semrelease
+func poll_semrelease(sema *uint32) {
+	semrelease1(sema)
+}
+
+// internal/sync semaphores (mutex interface with lifo/handoff).
+
+//go:linkname sync_runtime_SemacquireMutex internal/sync.runtime_SemacquireMutex
+func sync_runtime_SemacquireMutex(s *uint32, lifo bool, skipframes int) {
+	semacquire1(s, lifo)
+}
+
+//go:linkname sync_runtime_Semrelease internal/sync.runtime_Semrelease
+func sync_runtime_Semrelease(s *uint32, handoff bool, skipframes int) {
+	semrelease1(s)
+}

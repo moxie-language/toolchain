@@ -46,7 +46,7 @@ func (s *stdSizes) Alignof(T types.Type) int64 {
 			return s.PtrSize
 		}
 	case *types.Signature:
-		// Even though functions in tinygo are 2 pointers, they are not 2 pointer aligned
+		// Even though functions in moxie are 2 pointers, they are not 2 pointer aligned
 		return s.PtrSize
 	}
 
@@ -155,7 +155,7 @@ func (s *stdSizes) Sizeof(T types.Type) int64 {
 	case *types.Pointer, *types.Chan, *types.Map:
 		return s.PtrSize
 	case *types.Signature:
-		// Func values in TinyGo are two words in size.
+		// Func values in Moxie are two words in size.
 		return s.PtrSize * 2
 	default:
 		panic("unknown type: " + t.String())

@@ -251,7 +251,7 @@ func (fi *frameInfo) exec(bytecode []byte) ([]frameInfoLine, error) {
 				}
 			case 0x07: // DW_CFA_undefined
 				// Marks a single register as undefined. This is used to stop
-				// unwinding in tinygo_startTask using:
+				// unwinding in moxie_startTask using:
 				//     .cfi_undefined lr
 				// Ignore this directive.
 				_, err := readULEB128(r)

@@ -1,7 +1,7 @@
 package builder
 
 // The well-known conservative Boehm-Demers-Weiser GC.
-// This file provides a way to compile this GC for use with TinyGo.
+// This file provides a way to compile this GC for use with Moxie.
 
 import (
 	"path/filepath"
@@ -21,7 +21,7 @@ var BoehmGC = Library{
 			"-DGC_BUILTIN_ATOMIC",     // use compiler intrinsics for atomic operations
 			"-DNO_EXECUTE_PERMISSION", // don't make the heap executable
 
-			// specific flags for TinyGo
+			// specific flags for Moxie
 			"-DALL_INTERIOR_POINTERS",  // scan interior pointers (needed for Go)
 			"-DIGNORE_DYNAMIC_LOADING", // we don't support dynamic loading at the moment
 			"-DNO_GETCONTEXT",          // musl doesn't support getcontext()

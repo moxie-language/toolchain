@@ -773,7 +773,7 @@ func (b *builder) createTypeAssert(expr *ssa.TypeAssert) llvm.Value {
 	}
 }
 
-// getMethodsString returns a string to be used in the "tinygo-methods" string
+// getMethodsString returns a string to be used in the "moxie-methods" string
 // attribute for interface functions.
 func (c *compilerContext) getMethodsString(itf *types.Interface) string {
 	methods := make([]string, itf.NumMethods())
@@ -794,7 +794,7 @@ func (c *compilerContext) getInterfaceImplementsFunc(assertedType types.Type) ll
 		llvmFn = llvm.AddFunction(c.mod, fnName, llvmFnType)
 		c.addStandardDeclaredAttributes(llvmFn)
 		methods := c.getMethodsString(assertedType.Underlying().(*types.Interface))
-		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("tinygo-methods", methods))
+		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("moxie-methods", methods))
 	}
 	return llvmFn
 }
@@ -816,9 +816,9 @@ func (c *compilerContext) getInvokeFunction(instr *ssa.CallCommon) llvm.Value {
 		llvmFnType := c.getLLVMFunctionType(types.NewSignature(sig.Recv(), types.NewTuple(paramTuple...), sig.Results(), false))
 		llvmFn = llvm.AddFunction(c.mod, fnName, llvmFnType)
 		c.addStandardDeclaredAttributes(llvmFn)
-		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("tinygo-invoke", c.getMethodSignatureName(instr.Method)))
+		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("moxie-invoke", c.getMethodSignatureName(instr.Method)))
 		methods := c.getMethodsString(instr.Value.Type().Underlying().(*types.Interface))
-		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("tinygo-methods", methods))
+		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("moxie-methods", methods))
 	}
 	return llvmFn
 }

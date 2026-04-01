@@ -13,38 +13,38 @@
 .import_module stop_rewind, asyncify
 .import_name stop_rewind, stop_rewind
 
-.global  tinygo_unwind
-.hidden  tinygo_unwind
-.type    tinygo_unwind,@function
-tinygo_unwind: // func (state *stackState) unwind()
-    .functype tinygo_unwind (i32) -> ()
+.global  moxie_unwind
+.hidden  moxie_unwind
+.type    moxie_unwind,@function
+moxie_unwind: // func (state *stackState) unwind()
+    .functype moxie_unwind (i32) -> ()
     // Check if we are rewinding.
     i32.const 0
-    i32.load8_u tinygo_rewinding
-    if // if tinygo_rewinding {
+    i32.load8_u moxie_rewinding
+    if // if moxie_rewinding {
     // Stop rewinding.
     call stop_rewind
     i32.const 0
     i32.const 0
-    i32.store8 tinygo_rewinding // tinygo_rewinding = false;
+    i32.store8 moxie_rewinding // moxie_rewinding = false;
     else
     // Save the C stack pointer (destination structure pointer is in local 0).
     local.get 0
     global.get __stack_pointer
     i32.store 4 // state.csp = getCurrentStackPointer()
     // Ask asyncify to unwind.
-    // When resuming, asyncify will return this function with tinygo_rewinding set to true.
+    // When resuming, asyncify will return this function with moxie_rewinding set to true.
     local.get 0
     call start_unwind // asyncify.start_unwind(state)
     end_if
     return
     end_function
 
-.global tinygo_launch
-.hidden tinygo_launch
-.type tinygo_launch,@function
-tinygo_launch: // func (state *state) launch()
-    .functype tinygo_launch (i32) -> ()
+.global moxie_launch
+.hidden moxie_launch
+.type moxie_launch,@function
+moxie_launch: // func (state *state) launch()
+    .functype moxie_launch (i32) -> ()
     // Switch to the goroutine's C stack.
     global.get __stack_pointer // prev := getCurrentStackPointer()
     local.get 0
@@ -64,11 +64,11 @@ tinygo_launch: // func (state *state) launch()
     return
     end_function
 
-.global  tinygo_rewind
-.hidden  tinygo_rewind
-.type    tinygo_rewind,@function
-tinygo_rewind: // func (state *state) rewind()
-    .functype tinygo_rewind (i32) -> ()
+.global  moxie_rewind
+.hidden  moxie_rewind
+.type    moxie_rewind,@function
+moxie_rewind: // func (state *state) rewind()
+    .functype moxie_rewind (i32) -> ()
     // Switch to the goroutine's C stack.
     global.get __stack_pointer // prev := getCurrentStackPointer()
     local.get 0
@@ -82,7 +82,7 @@ tinygo_rewind: // func (state *state) rewind()
     // Prepare to rewind.
     i32.const 0
     i32.const 1
-    i32.store8 tinygo_rewinding // tinygo_rewinding = true;
+    i32.store8 moxie_rewinding // moxie_rewinding = true;
     local.get 0
     i32.const 8
     i32.add
@@ -97,10 +97,10 @@ tinygo_rewind: // func (state *state) rewind()
     return
     end_function
 
-        .hidden tinygo_rewinding                # @tinygo_rewinding
-        .type   tinygo_rewinding,@object
-        .section        .bss.tinygo_rewinding,"",@
-        .globl  tinygo_rewinding
-tinygo_rewinding:
+        .hidden moxie_rewinding                # @moxie_rewinding
+        .type   moxie_rewinding,@object
+        .section        .bss.moxie_rewinding,"",@
+        .globl  moxie_rewinding
+moxie_rewinding:
         .int8   0                               # 0x0
-        .size   tinygo_rewinding, 1
+        .size   moxie_rewinding, 1

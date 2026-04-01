@@ -319,7 +319,7 @@ func (c *compilerContext) createGoroutineStartWrapper(fnType llvm.Type, fn llvm.
 		c.addStandardAttributes(wrapper)
 		wrapper.SetLinkage(llvm.LinkOnceODRLinkage)
 		wrapper.SetUnnamedAddr(true)
-		wrapper.AddAttributeAtIndex(-1, c.ctx.CreateStringAttribute("tinygo-gowrapper", name))
+		wrapper.AddAttributeAtIndex(-1, c.ctx.CreateStringAttribute("moxie-gowrapper", name))
 		entry := c.ctx.AddBasicBlock(wrapper, "entry")
 		b.SetInsertPointAtEnd(entry)
 
@@ -475,7 +475,7 @@ func (c *compilerContext) createGoroutineStartWrapper(fnType llvm.Type, fn llvm.
 		c.addStandardAttributes(wrapper)
 		wrapper.SetLinkage(llvm.LinkOnceODRLinkage)
 		wrapper.SetUnnamedAddr(true)
-		wrapper.AddAttributeAtIndex(-1, c.ctx.CreateStringAttribute("tinygo-gowrapper", ""))
+		wrapper.AddAttributeAtIndex(-1, c.ctx.CreateStringAttribute("moxie-gowrapper", ""))
 		entry := c.ctx.AddBasicBlock(wrapper, "entry")
 		b.SetInsertPointAtEnd(entry)
 

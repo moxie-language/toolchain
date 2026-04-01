@@ -168,7 +168,7 @@ func parseLLDErrors(text string) error {
 
 	if flashOverflow > 0 {
 		linkErrors = append(linkErrors, LinkerError{
-			Msg: fmt.Sprintf("program too large for this chip (flash overflowed by %d bytes)\n\toptimization guide: https://tinygo.org/docs/guides/optimizing-binaries/", flashOverflow),
+			Msg: fmt.Sprintf("program too large for this chip (flash overflowed by %d bytes)\n\toptimization guide: https://moxie.dev/docs/guides/optimizing-binaries/", flashOverflow),
 		})
 	}
 	if ramOverflow > 0 {

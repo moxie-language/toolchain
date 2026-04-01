@@ -1,12 +1,12 @@
 # Moxie
 
-A compiler for domain-isolated cooperative concurrency. Fork of TinyGo with a restricted Go subset, single-threaded cooperative scheduling per domain, and `spawn` for creating isolated OS-process domains with IPC channels.
+A compiler for domain-isolated cooperative concurrency. Fork of TinyGo, now its own language with .mx source files, moxie.mod modules, a restricted subset of Go syntax, single-threaded cooperative scheduling per domain, and `spawn` for creating isolated OS-process domains with IPC channels.
 
 ## What Moxie Is
 
 Each Moxie program is a tree of **domains**. Each domain is an OS process with its own cooperative scheduler running goroutines on a single thread. Domains communicate through channels that become IPC over Unix socketpairs. No shared memory. No data races. No mutexes.
 
-```go
+```moxie
 package main
 
 import "moxie"
@@ -67,13 +67,13 @@ GOWORK=off go build -tags llvm19 -o moxie ./main.go
 ```sh
 export MOXIEROOT=/path/to/moxie
 export PATH="/usr/lib/llvm19/bin:$PATH"
-./moxie build -o hello hello.go
+./moxie build -o hello hello.mx
 ./hello
 ```
 
 ## Language Restrictions
 
-Moxie is a restricted subset of Go. The following are compile-time errors in user code (runtime internals are exempt):
+Moxie is a restricted subset of Go syntax. Source files use the `.mx` extension. The following are compile-time errors in user code (runtime internals are exempt):
 
 | Rejected | Reason |
 |----------|--------|
@@ -128,8 +128,8 @@ The jsruntime provides:
 
 ```
 moxie/
-├── main.go                  # CLI entry point
-├── compiler/                # Go SSA → LLVM IR (+ spawn detection, restrictions)
+├── main.mx                  # CLI entry point
+├── compiler/                # Moxie SSA → LLVM IR (+ spawn detection, restrictions)
 ├── builder/                 # Build orchestration, library compilation
 ├── loader/                  # Go package loading with MOXIEROOT overlays
 ├── compileopts/             # Target configuration (scheduler=tasks, GC=boehm)
@@ -151,4 +151,4 @@ moxie/
 
 ## Lineage
 
-Moxie is a fork of [TinyGo](https://tinygo.org/). All embedded/MCU targets, flash tools, and threading infrastructure have been stripped. What remains is the compilation pipeline for linux, darwin, and JS, rewired for cooperative single-threaded domains with process-level isolation via `spawn`.
+Moxie is a fork of [TinyGo](https://tinygo.org/). All embedded/MCU targets, flash tools, and threading infrastructure have been stripped. What remains is the compilation pipeline for linux, darwin, and JS, rewired for cooperative single-threaded domains with process-level isolation via `spawn`. Moxie source files use `.mx` extension and `moxie.mod` for modules.

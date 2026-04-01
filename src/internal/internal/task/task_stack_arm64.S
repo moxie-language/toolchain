@@ -1,9 +1,9 @@
 #ifdef __MACH__
-.global  _tinygo_startTask
-_tinygo_startTask:
+.global  _moxie_startTask
+_moxie_startTask:
 #else
-.global  tinygo_startTask
-tinygo_startTask:
+.global  moxie_startTask
+moxie_startTask:
 #endif
     .cfi_startproc
     // Small assembly stub for starting a goroutine. This is already run on the
@@ -27,9 +27,9 @@ tinygo_startTask:
 
     // After return, exit this goroutine. This is a tail call.
 #ifdef __MACH__
-    b     _tinygo_task_exit
+    b     _moxie_task_exit
 #else
-    b     tinygo_task_exit
+    b     moxie_task_exit
 #endif
     .cfi_endproc
 #ifndef __MACH__
@@ -37,11 +37,11 @@ tinygo_startTask:
 
 
 #ifdef __MACH__
-.global _tinygo_swapTask
-_tinygo_swapTask:
+.global _moxie_swapTask
+_moxie_swapTask:
 #else
-.global tinygo_swapTask
-tinygo_swapTask:
+.global moxie_swapTask
+moxie_swapTask:
 #endif
     // This function gets the following parameters:
     // x0 = newStack uintptr

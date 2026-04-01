@@ -272,7 +272,7 @@ func (b *builder) createSyscall(call *ssa.CallCommon) (llvm.Value, error) {
 	case "windows":
 		// On Windows, syscall.Syscall* is basically just a function pointer
 		// call. This is complicated in gc because of stack switching and the
-		// different ABI, but easy in TinyGo: just call the function pointer.
+		// different ABI, but easy in Moxie: just call the function pointer.
 		// The signature looks like this:
 		//   func Syscall(trap, nargs, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno)
 

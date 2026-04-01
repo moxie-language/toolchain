@@ -1,9 +1,7 @@
 package loader
 
 import (
-	"bytes"
 	"crypto/sha512"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -12,13 +10,10 @@ import (
 	"go/scanner"
 	"go/token"
 	"go/types"
-	"io"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"unicode"
 
@@ -44,7 +39,7 @@ type Program struct {
 	LDFlags []string
 }
 
-// PackageJSON is a subset of the JSON struct returned from `go list`.
+// PackageJSON is a subset of the JSON struct returned from `moxie list`.
 type PackageJSON struct {
 	Dir        string
 	ImportPath string
@@ -60,7 +55,7 @@ type PackageJSON struct {
 	}
 
 	// Source files
-	GoFiles  []string
+	GoFiles  []string // TODO: rename to MxFiles when moxie list is implemented
 	CgoFiles []string
 	CFiles   []string
 
@@ -127,33 +122,19 @@ func Load(config *compileopts.Config, inputPkg string, typeChecker types.Config)
 		fset:        token.NewFileSet(),
 	}
 
-	// List the dependencies of this package, in raw JSON format.
-	extraArgs := []string{"-json", "-deps", "-e"}
-	if config.TestConfig.CompileTestBinary {
-		extraArgs = append(extraArgs, "-test")
-	}
-	cmd, err := List(config, extraArgs, []string{inputPkg})
+	// Discover packages and dependencies using the internal mxlist
+	// package scanner. This replaces the external `go list` command and
+	// natively understands .mx source files.
+	pkgJSONs, err := mxListPackages(config, goroot, inputPkg)
 	if err != nil {
-		return nil, err
-	}
-	buf := &bytes.Buffer{}
-	cmd.Stdout = buf
-	cmd.Stderr = os.Stderr
-	err = cmd.Run()
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
-		}
-		return nil, fmt.Errorf("failed to run `go list`: %s", err)
+		return nil, fmt.Errorf("mxlist: %w", err)
 	}
 
-	// Parse the returned json from `go list`.
-	decoder := json.NewDecoder(buf)
-	var pkgErrors []error
-	for {
+	for _, pj := range pkgJSONs {
 		pkg := &Package{
-			program:      p,
-			FileHashes:   make(map[string][]byte),
+			PackageJSON: *pj,
+			program:     p,
+			FileHashes:  make(map[string][]byte),
 			EmbedGlobals: make(map[string][]*EmbedFile),
 			info: types.Info{
 				Types:      make(map[ast.Expr]types.TypeAndValue),
@@ -165,101 +146,8 @@ func Load(config *compileopts.Config, inputPkg string, typeChecker types.Config)
 				Selections: make(map[*ast.SelectorExpr]*types.Selection),
 			},
 		}
-		err := decoder.Decode(&pkg.PackageJSON)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, err
-		}
-		if pkg.Error != nil {
-			// There was an error while importing (for example, a circular
-			// dependency).
-			pos := token.Position{}
-			fields := strings.Split(pkg.Error.Pos, ":")
-			if len(fields) >= 2 {
-				// There is some file/line/column information.
-				if n, err := strconv.Atoi(fields[len(fields)-2]); err == nil {
-					// Format: filename.go:line:column
-					pos.Filename = strings.Join(fields[:len(fields)-2], ":")
-					pos.Line = n
-					pos.Column, _ = strconv.Atoi(fields[len(fields)-1])
-				} else {
-					// Format: filename.go:line
-					pos.Filename = strings.Join(fields[:len(fields)-1], ":")
-					pos.Line, _ = strconv.Atoi(fields[len(fields)-1])
-				}
-				if abs, err := filepath.Abs(pos.Filename); err == nil {
-					// Make the path absolute, so that error messages will be
-					// prettier (it will be turned back into a relative path
-					// when printing the error).
-					pos.Filename = abs
-				}
-				pos.Filename = p.getOriginalPath(pos.Filename)
-			}
-			err := scanner.Error{
-				Pos: pos,
-				Msg: pkg.Error.Err,
-			}
-			if len(pkg.Error.ImportStack) != 0 {
-				pkgErrors = append(pkgErrors, Error{
-					ImportStack: pkg.Error.ImportStack,
-					Err:         err,
-				})
-				continue
-			}
-			return nil, err
-		}
-		if config.TestConfig.CompileTestBinary {
-			// When creating a test binary, `go list` will list two or three
-			// packages used for testing the package. The first is the original
-			// package as if it were built normally, the second is the same
-			// package but with the *_test.go files included. A possible third
-			// may be included for _test packages (such as math_test), used to
-			// test the external API with no access to internal functions.
-			// All packages that are necessary for testing (including the to be
-			// tested package with *_test.go files, but excluding the original
-			// unmodified package) have a suffix added to the import path, for
-			// example the math package has import path "math [math.test]" and
-			// test dependencies such as fmt will have an import path of the
-			// form "fmt [math.test]".
-			// The code below removes this suffix, and if this results in a
-			// duplicate (which happens with the to-be-tested package without
-			// *.test.go files) the previous package is removed from the list of
-			// packages included in this build.
-			// This is necessary because the change in import paths results in
-			// breakage to //go:linkname. Additionally, the duplicated package
-			// slows down the build and so is best removed.
-			if pkg.ForTest != "" && strings.HasSuffix(pkg.ImportPath, " ["+pkg.ForTest+".test]") {
-				newImportPath := pkg.ImportPath[:len(pkg.ImportPath)-len(" ["+pkg.ForTest+".test]")]
-				if _, ok := p.Packages[newImportPath]; ok {
-					// Delete the previous package (that this package overrides).
-					delete(p.Packages, newImportPath)
-					for i, pkg := range p.sorted {
-						if pkg.ImportPath == newImportPath {
-							p.sorted = append(p.sorted[:i], p.sorted[i+1:]...) // remove element from slice
-							break
-						}
-					}
-				}
-				pkg.ImportPath = newImportPath
-			}
-		}
 		p.sorted = append(p.sorted, pkg)
 		p.Packages[pkg.ImportPath] = pkg
-	}
-
-	if len(pkgErrors) != 0 {
-		// TODO: use errors.Join in Go 1.20.
-		return nil, Errors{
-			Errs: pkgErrors,
-		}
-	}
-
-	if config.TestConfig.CompileTestBinary && !strings.HasSuffix(p.sorted[len(p.sorted)-1].ImportPath, ".test") {
-		// Trying to compile a test binary but there are no test files in this
-		// package.
-		return p, NoTestFilesError{p.sorted[len(p.sorted)-1].ImportPath}
 	}
 
 	return p, nil
@@ -278,7 +166,7 @@ func (p *Program) getOriginalPath(path string) string {
 		if _, err := os.Stat(realgorootPath); err == nil {
 			originalPath = realgorootPath
 		}
-		maybeInTinyGoRoot := false
+		maybeInMoxieRoot := false
 		for prefix := range pathsToOverride(p.config.GoMinorVersion, needsSyscallPackage(p.config.BuildTags())) {
 			if runtime.GOOS == "windows" {
 				prefix = strings.ReplaceAll(prefix, "/", "\\")
@@ -286,12 +174,12 @@ func (p *Program) getOriginalPath(path string) string {
 			if !strings.HasPrefix(relpath, prefix) {
 				continue
 			}
-			maybeInTinyGoRoot = true
+			maybeInMoxieRoot = true
 		}
-		if maybeInTinyGoRoot {
-			tinygoPath := filepath.Join(goenv.Get("MOXIEROOT"), "src", relpath)
-			if _, err := os.Stat(tinygoPath); err == nil {
-				originalPath = tinygoPath
+		if maybeInMoxieRoot {
+			moxiePath := filepath.Join(goenv.Get("MOXIEROOT"), "src", relpath)
+			if _, err := os.Stat(moxiePath); err == nil {
+				originalPath = moxiePath
 			}
 		}
 	}
@@ -406,7 +294,7 @@ func (p *Package) Check() error {
 		checker.GoVersion = "go" + p.Module.GoVersion
 	} else {
 		// Version is not known, so use the currently installed Go version.
-		// This is needed for `tinygo run` for example.
+		// This is needed for `moxie run` for example.
 		// Normally we'd use goenv.GorootVersionString(), but for compatibility
 		// with Go 1.20 and below we need a version in the form of "go1.12" (no
 		// patch version).
@@ -442,7 +330,7 @@ func (p *Package) Check() error {
 		}
 		// This can happen in some weird cases.
 		// The only case I know is when compiling a Go 1.23 program, with a
-		// TinyGo version that supports Go 1.23 but is compiled using Go 1.22.
+		// Moxie version that supports Go 1.23 but is compiled using Go 1.22.
 		// So this should be pretty rare.
 		return Errors{p, []error{err}}
 	}
@@ -482,7 +370,7 @@ func (p *Package) parseFiles() ([]*ast.File, error) {
 
 	// Do CGo processing.
 	// This is done when there are any CgoFiles at all. In that case, len(files)
-	// should be non-zero. However, if len(GoFiles) == 0 and len(CgoFiles) == 1
+	// should be non-zero. However, if len(MxFiles) == 0 and len(CgoFiles) == 1
 	// and there is a syntax error in a CGo file, len(files) may be 0. Don't try
 	// to call cgo.Process in that case as it will only cause issues.
 	if len(p.CgoFiles) != 0 && len(files) != 0 {
@@ -512,7 +400,7 @@ func (p *Package) parseFiles() ([]*ast.File, error) {
 }
 
 // extractEmbedLines finds all //go:embed lines in the package and matches them
-// against EmbedFiles from `go list`.
+// against EmbedFiles from `moxie list`.
 func (p *Package) extractEmbedLines(addError func(error)) {
 	for _, file := range p.Files {
 		// Check for an `import "embed"` line at the start of the file.

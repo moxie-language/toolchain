@@ -11,16 +11,16 @@ void GC_set_push_other_roots(GC_push_other_roots_proc);
 typedef void(* GC_warn_proc)(const char *msg, uintptr_t arg);
 void GC_set_warn_proc(GC_warn_proc p);
 
-void tinygo_runtime_bdwgc_callback(void);
+void moxie_runtime_bdwgc_callback(void);
 
 static void callback(void) {
-    tinygo_runtime_bdwgc_callback();
+    moxie_runtime_bdwgc_callback();
 }
 
 static void warn_proc(const char *msg, uintptr_t arg) {
 }
 
-void tinygo_runtime_bdwgc_init(void) {
+void moxie_runtime_bdwgc_init(void) {
     GC_set_push_other_roots(callback);
 #if defined(__wasm__)
     // There are a lot of warnings on WebAssembly in the form:

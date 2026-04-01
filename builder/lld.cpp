@@ -22,7 +22,7 @@ static void configure() {
 
 extern "C" {
 
-bool tinygo_link(int argc, char **argv) {
+bool moxie_link(int argc, char **argv) {
 	configure();
 	std::vector<const char*> args(argv, argv + argc);
 	lld::Result r = lld::lldMain(args, llvm::outs(), llvm::errs(), LLD_ALL_DRIVERS);

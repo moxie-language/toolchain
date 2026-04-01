@@ -18,7 +18,7 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 		return nil, err
 	}
 
-	// Version range supported by TinyGo.
+	// Version range supported by Moxie.
 	const minorMin = 19
 	const minorMax = 25
 
@@ -37,7 +37,7 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 		return nil, err
 	}
 	if buildMajor != 1 || buildMinor < gorootMinor {
-		return nil, fmt.Errorf("cannot compile with Go toolchain version go%d.%d (TinyGo was built using toolchain version %s)", gorootMajor, gorootMinor, runtime.Version())
+		return nil, fmt.Errorf("cannot compile with Go toolchain version go%d.%d (Moxie was built using toolchain version %s)", gorootMajor, gorootMinor, runtime.Version())
 	}
 
 	return &compileopts.Config{

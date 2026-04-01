@@ -1,4 +1,4 @@
-// Package moxie contains constants used between the TinyGo compiler and
+// Package moxie contains constants used between the Moxie compiler and
 // runtime.
 package moxie
 

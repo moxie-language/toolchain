@@ -75,7 +75,7 @@ func (t *typeInfo) getMethod(signature *signatureInfo) *methodInfo {
 // interfaceInfo keeps information about a Go interface type, including all
 // methods it has.
 type interfaceInfo struct {
-	name       string                    // "tinygo-methods" attribute
+	name       string                    // "moxie-methods" attribute
 	signatures map[string]*signatureInfo // method set
 	types      []*typeInfo               // types this interface implements
 }
@@ -137,7 +137,7 @@ func (p *lowerInterfacesPass) run() error {
 			Language:  0xb, // DW_LANG_C99 (0xc, off-by-one?)
 			File:      "<unknown>",
 			Dir:       "",
-			Producer:  "TinyGo",
+			Producer:  "Moxie",
 			Optimized: true,
 		})
 	}
@@ -184,7 +184,7 @@ func (p *lowerInterfacesPass) run() error {
 	var interfaceAssertFunctions []llvm.Value
 	var interfaceInvokeFunctions []llvm.Value
 	for fn := p.mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
-		methodsAttr := fn.GetStringAttributeAtIndex(-1, "tinygo-methods")
+		methodsAttr := fn.GetStringAttributeAtIndex(-1, "moxie-methods")
 		if methodsAttr.IsNil() {
 			continue
 		}
@@ -193,7 +193,7 @@ func (p *lowerInterfacesPass) run() error {
 			continue
 		}
 		p.addInterface(methodsAttr.GetStringValue())
-		invokeAttr := fn.GetStringAttributeAtIndex(-1, "tinygo-invoke")
+		invokeAttr := fn.GetStringAttributeAtIndex(-1, "moxie-invoke")
 		if invokeAttr.IsNil() {
 			// Type assert.
 			interfaceAssertFunctions = append(interfaceAssertFunctions, fn)
@@ -265,8 +265,8 @@ func (p *lowerInterfacesPass) run() error {
 
 	// Define all interface invoke thunks.
 	for _, fn := range interfaceInvokeFunctions {
-		methodsAttr := fn.GetStringAttributeAtIndex(-1, "tinygo-methods")
-		invokeAttr := fn.GetStringAttributeAtIndex(-1, "tinygo-invoke")
+		methodsAttr := fn.GetStringAttributeAtIndex(-1, "moxie-methods")
+		invokeAttr := fn.GetStringAttributeAtIndex(-1, "moxie-invoke")
 		itf := p.interfaces[methodsAttr.GetStringValue()]
 		signature := itf.signatures[invokeAttr.GetStringValue()]
 		p.defineInterfaceMethodFunc(fn, itf, signature)
@@ -274,7 +274,7 @@ func (p *lowerInterfacesPass) run() error {
 
 	// Define all interface type assert functions.
 	for _, fn := range interfaceAssertFunctions {
-		methodsAttr := fn.GetStringAttributeAtIndex(-1, "tinygo-methods")
+		methodsAttr := fn.GetStringAttributeAtIndex(-1, "moxie-methods")
 		itf := p.interfaces[methodsAttr.GetStringValue()]
 		p.defineInterfaceImplementsFunc(fn, itf)
 	}

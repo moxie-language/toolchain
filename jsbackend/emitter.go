@@ -169,6 +169,7 @@ func JsString(s string) string {
 // Go allows unicode identifiers that JS also allows, but we need to handle
 // cases like package paths becoming module names.
 func JsIdentifier(name string) string {
+	name = strings.ReplaceAll(name, "#", "$")
 	name = strings.ReplaceAll(name, "/", "$")
 	name = strings.ReplaceAll(name, ".", "$")
 	name = strings.ReplaceAll(name, "-", "_")

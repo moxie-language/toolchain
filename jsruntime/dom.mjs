@@ -114,6 +114,11 @@ export function SetStyle(elId, prop, value) {
   if (el) el.style[prop] = value;
 }
 
+export function Focus(elId) {
+  const el = _elements.get(elId);
+  if (el && el.focus) el.focus();
+}
+
 export function SetProperty(elId, prop, value) {
   const el = _elements.get(elId);
   if (el) el[prop] = value;
@@ -140,6 +145,25 @@ export function AddEventListener(elId, event, callbackId) {
   const el = _elements.get(elId);
   const cb = _callbacks.get(callbackId);
   if (el && cb) el.addEventListener(event, cb);
+}
+
+// AddEnterKeyListener fires callback when Enter is pressed on the element.
+export function AddEnterKeyListener(elId, callbackId) {
+  const el = _elements.get(elId);
+  const cb = _callbacks.get(callbackId);
+  if (el && cb) el.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { e.preventDefault(); cb(); }
+  });
+}
+
+// Like AddEventListener but only fires when e.target === e.currentTarget.
+// Useful for backdrop click-to-close without catching child clicks.
+export function AddSelfEventListener(elId, event, callbackId) {
+  const el = _elements.get(elId);
+  const cb = _callbacks.get(callbackId);
+  if (el && cb) el.addEventListener(event, function(e) {
+    if (e.target === e.currentTarget) cb();
+  });
 }
 
 export function RemoveEventListener(elId, event, callbackId) {
@@ -192,6 +216,182 @@ export function ReleaseElement(id) {
 // Fetch a URL as text, call fn with result.
 export function FetchText(url, fn) {
   fetch(url).then(r => r.text()).then(t => { if (fn) fn(t); });
+}
+
+// Navigation.
+export function NextSibling(elId) {
+  const el = _elements.get(elId);
+  if (el && el.nextSibling) {
+    const id = _nextId++;
+    _elements.set(id, el.nextSibling);
+    return id;
+  }
+  return 0;
+}
+
+// Console / browser.
+export function ConsoleLog(msg) {
+  console.log(msg);
+}
+
+export function PrefersDark() {
+  if (typeof window !== 'undefined' && window.matchMedia) {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  }
+  return false;
+}
+
+export function Confirm(msg) {
+  if (typeof window !== 'undefined') return window.confirm(msg);
+  return false;
+}
+
+// Service Worker communication.
+let _swMessageHandler = null;
+
+export function PostToSW(msg) {
+  if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage(msg);
+  }
+}
+
+export function OnSWMessage(fn) {
+  _swMessageHandler = fn;
+  if (navigator.serviceWorker) {
+    navigator.serviceWorker.addEventListener('message', function(e) {
+      if (_swMessageHandler && typeof e.data === 'string') {
+        _swMessageHandler(e.data);
+      }
+    });
+  }
+}
+
+// IndexedDB (simple key-value).
+let _idb = null;
+const _idbName = 'smesh';
+const _idbStores = ['profiles', 'events', 'cache'];
+
+function _openIDB() {
+  return new Promise(function(resolve, reject) {
+    if (_idb) { resolve(_idb); return; }
+    const req = indexedDB.open(_idbName, 1);
+    req.onupgradeneeded = function(e) {
+      const db = e.target.result;
+      for (const s of _idbStores) {
+        if (!db.objectStoreNames.contains(s)) db.createObjectStore(s);
+      }
+    };
+    req.onsuccess = function(e) { _idb = e.target.result; resolve(_idb); };
+    req.onerror = function() { reject(req.error); };
+  });
+}
+
+export function IDBGet(store, key, fn) {
+  _openIDB().then(function(db) {
+    const tx = db.transaction(store, 'readonly');
+    const req = tx.objectStore(store).get(key);
+    req.onsuccess = function() { fn(req.result ?? ''); };
+    req.onerror = function() { fn(''); };
+  }).catch(function() { fn(''); });
+}
+
+export function IDBPut(store, key, value) {
+  _openIDB().then(function(db) {
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).put(value, key);
+  });
+}
+
+export function IDBGetAll(store, fn, done) {
+  _openIDB().then(function(db) {
+    const tx = db.transaction(store, 'readonly');
+    const req = tx.objectStore(store).openCursor();
+    req.onsuccess = function(e) {
+      const cursor = e.target.result;
+      if (cursor) {
+        fn(String(cursor.key), String(cursor.value));
+        cursor.continue();
+      } else {
+        if (done) done();
+      }
+    };
+    req.onerror = function() { if (done) done(); };
+  }).catch(function() { if (done) done(); });
+}
+
+// Fetch relay NIP-11 info.
+export function FetchRelayInfo(url, fn) {
+  fetch(url, { headers: { 'Accept': 'application/nostr+json' } })
+    .then(function(r) { return r.text(); })
+    .then(function(t) { if (fn) fn(t); })
+    .catch(function() { if (fn) fn(''); });
+}
+
+// History / location.
+export function PushState(path) {
+  if (typeof history !== 'undefined') history.pushState(null, '', path);
+}
+
+export function ReplaceState(path) {
+  if (typeof history !== 'undefined') history.replaceState(null, '', path);
+}
+
+export function LocationReload() {
+  if (typeof location !== 'undefined') location.reload();
+}
+
+export function GetPath() {
+  if (typeof location !== 'undefined') return location.pathname;
+  return '/';
+}
+
+export function Hostname() {
+  if (typeof location !== 'undefined') return location.hostname;
+  return '';
+}
+
+export function Port() {
+  if (typeof location !== 'undefined') return location.port;
+  return '';
+}
+
+export function OnPopState(fn) {
+  if (typeof window !== 'undefined') {
+    window.addEventListener('popstate', function() {
+      if (fn) fn(location.pathname);
+    });
+  }
+}
+
+// DownloadText triggers a file download with the given text content.
+export function DownloadText(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType || 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function() { a.remove(); URL.revokeObjectURL(url); }, 1000);
+}
+
+// PickFileText opens a file picker and reads the selected file as text.
+export function PickFileText(accept, fn) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  if (accept) input.accept = accept;
+  input.style.display = 'none';
+  input.addEventListener('change', function() {
+    if (!input.files || !input.files[0]) { fn(''); return; }
+    const reader = new FileReader();
+    reader.onload = function() { fn(reader.result || ''); };
+    reader.onerror = function() { fn(''); };
+    reader.readAsText(input.files[0]);
+  });
+  document.body.appendChild(input);
+  input.click();
+  // Clean up after a delay (even if user cancels).
+  setTimeout(function() { input.remove(); }, 60000);
 }
 
 // Get raw element (for advanced use within JS runtime only).

@@ -11,8 +11,8 @@ import (
 #cgo CXXFLAGS: -fno-rtti
 #include <stdbool.h>
 #include <stdlib.h>
-bool tinygo_clang_driver(int argc, char **argv);
-bool tinygo_link(int argc, char **argv);
+bool moxie_clang_driver(int argc, char **argv);
+bool moxie_link(int argc, char **argv);
 */
 import "C"
 
@@ -20,7 +20,7 @@ const hasBuiltinTools = true
 
 // RunTool runs the given tool (such as clang).
 //
-// This version actually runs the tools because TinyGo was compiled while
+// This version actually runs the tools because Moxie was compiled while
 // linking statically with LLVM (with the byollvm build tag).
 func RunTool(tool string, args ...string) error {
 	args = append([]string{tool}, args...)
@@ -38,9 +38,9 @@ func RunTool(tool string, args ...string) error {
 	var ok C.bool
 	switch tool {
 	case "clang":
-		ok = C.tinygo_clang_driver(C.int(len(args)), (**C.char)(buf))
+		ok = C.moxie_clang_driver(C.int(len(args)), (**C.char)(buf))
 	case "ld.lld", "wasm-ld":
-		ok = C.tinygo_link(C.int(len(args)), (**C.char)(buf))
+		ok = C.moxie_link(C.int(len(args)), (**C.char)(buf))
 	default:
 		return errors.New("unknown tool: " + tool)
 	}

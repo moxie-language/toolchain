@@ -23,7 +23,7 @@ using namespace clang;
 
 extern "C" {
 
-bool tinygo_clang_driver(int argc, char **argv) {
+bool moxie_clang_driver(int argc, char **argv) {
 	std::vector<const char*> args(argv, argv + argc);
 
 	// The compiler invocation needs a DiagnosticsEngine so it can report problems

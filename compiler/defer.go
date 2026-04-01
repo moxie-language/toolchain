@@ -67,7 +67,7 @@ func (b *builder) deferInitFunc() {
 	if b.hasDeferFrame() {
 		// Set up the defer frame with the current stack pointer.
 		// This assumes that the stack pointer doesn't move outside of the
-		// function prologue/epilogue (an invariant maintained by TinyGo but
+		// function prologue/epilogue (an invariant maintained by Moxie but
 		// possibly broken by the C alloca function).
 		// The frame pointer is _not_ saved, because it is marked as clobbered
 		// in the setjmp-like inline assembly.
@@ -126,7 +126,7 @@ xorl %eax, %eax
 movl $$1f, 4(%ebx)
 1:`
 		constraints = "={eax},{ebx},~{ebx},~{ecx},~{edx},~{esi},~{edi},~{ebp},~{xmm0},~{xmm1},~{xmm2},~{xmm3},~{xmm4},~{xmm5},~{xmm6},~{xmm7},~{fpsr},~{fpcr},~{flags},~{dirflag},~{memory}"
-		// This doesn't include the floating point stack because TinyGo uses
+		// This doesn't include the floating point stack because Moxie uses
 		// newer floating point instructions.
 	case "x86_64":
 		asmString = `
@@ -135,13 +135,13 @@ movq %rax, 8(%rbx)
 xorq %rax, %rax
 1:`
 		constraints = "={rax},{rbx},~{rbx},~{rcx},~{rdx},~{rsi},~{rdi},~{rbp},~{r8},~{r9},~{r10},~{r11},~{r12},~{r13},~{r14},~{r15},~{xmm0},~{xmm1},~{xmm2},~{xmm3},~{xmm4},~{xmm5},~{xmm6},~{xmm7},~{xmm8},~{xmm9},~{xmm10},~{xmm11},~{xmm12},~{xmm13},~{xmm14},~{xmm15},~{xmm16},~{xmm17},~{xmm18},~{xmm19},~{xmm20},~{xmm21},~{xmm22},~{xmm23},~{xmm24},~{xmm25},~{xmm26},~{xmm27},~{xmm28},~{xmm29},~{xmm30},~{xmm31},~{fpsr},~{fpcr},~{flags},~{dirflag},~{memory}"
-		// This list doesn't include AVX/AVX512 registers because TinyGo
+		// This list doesn't include AVX/AVX512 registers because Moxie
 		// doesn't currently enable support for AVX instructions.
 	case "arm":
 		// Note: the following assembly takes into account that the PC is
 		// always 4 bytes ahead on ARM. The PC that is stored always points
 		// to the instruction just after the assembly fragment so that
-		// tinygo_longjmp lands at the correct instruction.
+		// moxie_longjmp lands at the correct instruction.
 		if b.isThumb() {
 			// Instructions are 2 bytes in size.
 			asmString = `
@@ -173,7 +173,7 @@ mov x0, #0
 			//     undefined behaviour.
 			constraints += ",~{x18},~{fp}"
 		}
-		// TODO: SVE registers, which we don't use in TinyGo at the moment.
+		// TODO: SVE registers, which we don't use in Moxie at the moment.
 	case "avr":
 		// Note: the Y register (R28:R29) is a fixed register and therefore
 		// needs to be saved manually. TODO: do this only once per function with
@@ -635,7 +635,7 @@ func (b *builder) createRunDefers() {
 				forwardParams = append(forwardParams, forwardParam)
 			}
 
-			// Plain TinyGo functions add some extra parameters to implement async functionality and function receivers.
+			// Plain Moxie functions add some extra parameters to implement async functionality and function receivers.
 			// These parameters should not be supplied when calling into an external C/ASM function.
 			if !b.getFunctionInfo(callback).exported {
 				// Add the context parameter. We know it is ignored by the receiving

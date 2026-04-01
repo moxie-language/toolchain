@@ -9,7 +9,7 @@ import (
 )
 
 // For a description of the calling convention in prose, see:
-// https://tinygo.org/compiler-internals/calling-convention/
+// https://moxie.dev/compiler-internals/calling-convention/
 
 // The maximum number of arguments that can be expanded from a single struct. If
 // a struct contains more fields, it is passed as a struct without expanding.

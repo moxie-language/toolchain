@@ -29,18 +29,18 @@ var Keys = []string{
 // Set to true if we're linking statically against LLVM.
 var hasBuiltinTools = false
 
-// MOXIEROOT is the path to the final location for checking tinygo files. If
+// MOXIEROOT is the path to the final location for checking moxie files. If
 // unset (by a -X ldflag), then sourceDir() will fallback to the original build
 // directory.
 var MOXIEROOT string
 
-// If a particular Clang resource dir must always be used and TinyGo can't
+// If a particular Clang resource dir must always be used and Moxie can't
 // figure out the directory using heuristics, this global can be set using a
 // linker flag.
 // This is needed for Nix.
 var clangResourceDir string
 
-// Variables read from a `go env` command invocation.
+// Variables read from a `moxie env` command invocation.
 var goEnvVars struct {
 	GOPATH    string
 	GOROOT    string
@@ -166,7 +166,10 @@ func sourceDir() string {
 
 // isSourceDir returns true if the directory looks like a moxie source directory.
 func isSourceDir(root string) bool {
-	_, err := os.Stat(filepath.Join(root, "src/runtime/internal/sys/zversion.go"))
+	_, err := os.Stat(filepath.Join(root, "src/runtime/internal/sys/zversion.mx"))
+	if err != nil {
+		_, err = os.Stat(filepath.Join(root, "src/runtime/internal/sys/zversion.go"))
+	}
 	return err == nil
 }
 

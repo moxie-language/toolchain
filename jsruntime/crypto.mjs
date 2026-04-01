@@ -7,10 +7,15 @@ let _secp = null;
 
 // init loads and initializes the secp256k1 WASM module.
 // Called from $entry.mjs before main().
+// Gracefully skips if WASM module is not available (e.g. app delegates crypto to extension).
 export async function init() {
-  const base = new URL('./', import.meta.url);
-  const mod = await import(new URL('../$wasm/secp256k1.mjs', base).href);
-  _secp = await mod.initSecp256k1();
+  try {
+    const base = new URL('./', import.meta.url);
+    const mod = await import(new URL('../$wasm/secp256k1.mjs', base).href);
+    _secp = await mod.initSecp256k1();
+  } catch (e) {
+    console.log('crypto: secp256k1 WASM not available, crypto operations will use extension');
+  }
 }
 
 function sliceToU8(s) {

@@ -103,7 +103,7 @@ func (l *Library) load(config *compileopts.Config, tmpdir string) (job *compileJ
 			if err != nil {
 				switch {
 				case errors.Is(err, fs.ErrExist):
-					// Another invocation of TinyGo also seems to have already created the headers.
+					// Another invocation of Moxie also seems to have already created the headers.
 
 				case runtime.GOOS == "windows" && errors.Is(err, fs.ErrPermission):
 					// On Windows, a rename with a destination directory that already
@@ -122,7 +122,7 @@ func (l *Library) load(config *compileopts.Config, tmpdir string) (job *compileJ
 		}
 	}
 
-	remapDir := filepath.Join(os.TempDir(), "tinygo-"+l.name)
+	remapDir := filepath.Join(os.TempDir(), "moxie-"+l.name)
 	dir := filepath.Join(tmpdir, "build-lib-"+l.name)
 	err = os.Mkdir(dir, 0777)
 	if err != nil {

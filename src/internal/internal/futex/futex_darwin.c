@@ -20,11 +20,11 @@ int __ulock_wake(uint32_t operation, void *addr, uint64_t wake_value);
 #define ULF_WAKE_ALL 0x00000100
 #define ULF_NO_ERRNO 0x01000000
 
-void tinygo_futex_wait(uint32_t *addr, uint32_t cmp) {
+void moxie_futex_wait(uint32_t *addr, uint32_t cmp) {
     __ulock_wait(UL_COMPARE_AND_WAIT|ULF_NO_ERRNO, addr, (uint64_t)cmp, 0);
 }
 
-void tinygo_futex_wait_timeout(uint32_t *addr, uint32_t cmp, uint64_t timeout) {
+void moxie_futex_wait_timeout(uint32_t *addr, uint32_t cmp, uint64_t timeout) {
     // Make sure that an accidental use of a zero timeout is not treated as an
     // infinite timeout. Return if it's zero since it wouldn't be waiting for
     // any significant time anyway.
@@ -40,10 +40,10 @@ void tinygo_futex_wait_timeout(uint32_t *addr, uint32_t cmp, uint64_t timeout) {
     __ulock_wait2(UL_COMPARE_AND_WAIT|ULF_NO_ERRNO, addr, (uint64_t)cmp, timeout, 0);
 }
 
-void tinygo_futex_wake(uint32_t *addr) {
+void moxie_futex_wake(uint32_t *addr) {
     __ulock_wake(UL_COMPARE_AND_WAIT|ULF_NO_ERRNO, addr, 0);
 }
 
-void tinygo_futex_wake_all(uint32_t *addr) {
+void moxie_futex_wake_all(uint32_t *addr) {
     __ulock_wake(UL_COMPARE_AND_WAIT|ULF_NO_ERRNO|ULF_WAKE_ALL, addr, 0);
 }

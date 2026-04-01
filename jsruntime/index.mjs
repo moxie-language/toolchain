@@ -14,3 +14,6 @@ export * as crypto from './crypto.mjs';
 export * as subtle from './subtle.mjs';
 export * as sw from './sw.mjs';
 export * as domain from './domain.mjs';
+export * as signer from './signer.mjs';
+export * as ext from './ext.mjs';
+export * as schnorr from './schnorr.mjs';

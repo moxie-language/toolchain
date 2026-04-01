@@ -101,7 +101,7 @@ func (b *builder) createInlineAsmFull(instr *ssa.CallCommon) (llvm.Value, error)
 			case llvm.PointerTypeKind:
 				// Memory references require a type starting with LLVM 14,
 				// probably as a preparation for opaque pointers.
-				err = b.makeError(instr.Pos(), "support for pointer operands was dropped in TinyGo 0.23")
+				err = b.makeError(instr.Pos(), "support for pointer operands was dropped in Moxie 0.23")
 				return s
 			default:
 				err = b.makeError(instr.Pos(), "unknown type in inline assembly for value: "+name)

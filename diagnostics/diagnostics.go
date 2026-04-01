@@ -209,7 +209,7 @@ func (diag Diagnostic) WriteTo(w io.Writer, wd string) {
 }
 
 // Convert the position in pos (assumed to have an absolute path) into a
-// relative path if possible. Paths inside GOROOT/TINYGOROOT will remain
+// relative path if possible. Paths inside GOROOT/MOXIEROOT will remain
 // absolute.
 func RelativePosition(pos token.Position, wd string) token.Position {
 	// Check whether we even have a working directory.
@@ -218,7 +218,7 @@ func RelativePosition(pos token.Position, wd string) token.Position {
 	}
 
 	// Paths inside GOROOT should be printed in full.
-	if strings.HasPrefix(pos.Filename, filepath.Join(goenv.Get("GOROOT"), "src")) || strings.HasPrefix(pos.Filename, filepath.Join(goenv.Get("TINYGOROOT"), "src")) {
+	if strings.HasPrefix(pos.Filename, filepath.Join(goenv.Get("GOROOT"), "src")) || strings.HasPrefix(pos.Filename, filepath.Join(goenv.Get("MOXIEROOT"), "src")) {
 		return pos
 	}
 

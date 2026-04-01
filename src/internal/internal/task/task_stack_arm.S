@@ -1,12 +1,12 @@
-//go:build tinygo
+//go:build moxie
 
 // Only generate .debug_frame, don't generate .eh_frame.
 .cfi_sections .debug_frame
 
-.section .text.tinygo_startTask
-.global  tinygo_startTask
-.type    tinygo_startTask, %function
-tinygo_startTask:
+.section .text.moxie_startTask
+.global  moxie_startTask
+.type    moxie_startTask, %function
+moxie_startTask:
     .cfi_startproc
     // Small assembly stub for starting a goroutine. This is already run on the
     // new stack, with the callee-saved registers already loaded.
@@ -28,13 +28,13 @@ tinygo_startTask:
     blx   r4
 
     // After return, exit this goroutine. This is a tail call.
-    bl    tinygo_task_exit
+    bl    moxie_task_exit
     .cfi_endproc
-.size tinygo_startTask, .-tinygo_startTask
+.size moxie_startTask, .-moxie_startTask
 
-.global tinygo_swapTask
-.type tinygo_swapTask, %function
-tinygo_swapTask:
+.global moxie_swapTask
+.type moxie_swapTask, %function
+moxie_swapTask:
     // This function gets the following parameters:
     // r0 = newStack uintptr
     // r1 = oldStack *uintptr

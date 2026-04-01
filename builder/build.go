@@ -1,4 +1,4 @@
-// Package builder is the compiler driver of TinyGo. It takes in a package name
+// Package builder is the compiler driver of Moxie. It takes in a package name
 // and an output path, and outputs an executable. It manages the entire
 // compilation pipeline in between.
 package builder
@@ -77,7 +77,7 @@ type BuildResult struct {
 type packageAction struct {
 	ImportPath       string
 	CompilerBuildID  string
-	TinyGoVersion    string
+	MoxieVersion    string
 	LLVMVersion      string
 	Config           *compiler.Config
 	CFlags           []string
@@ -95,7 +95,7 @@ type packageAction struct {
 // The error value may be of type *MultiError. Callers will likely want to check
 // for this case and print such errors individually.
 func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildResult, error) {
-	// Read the build ID of the tinygo binary.
+	// Read the build ID of the moxie binary.
 	// Used as a cache key for package builds.
 	compilerBuildID, err := ReadBuildID()
 	if err != nil {
@@ -175,7 +175,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		CodeModel:       config.CodeModel(),
 		RelocationModel: config.RelocationModel(),
 		SizeLevel:       sizeLevel,
-		TinyGoVersion:   goenv.Version(),
+		MoxieVersion:   goenv.Version(),
 
 		Scheduler:          config.Scheduler(),
 		AutomaticStackSize: false,
@@ -453,7 +453,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 
 				// Serialize the LLVM module as a bitcode file.
 				// Write to a temporary path that is renamed to the destination
-				// file to avoid race conditions with other TinyGo invocatiosn
+				// file to avoid race conditions with other Moxie invocatiosn
 				// that might also be compiling this package at the same time.
 				f, err := os.CreateTemp(filepath.Dir(job.result), filepath.Base(job.result))
 				if err != nil {
@@ -461,7 +461,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				}
 				if runtime.GOOS == "windows" {
 					// Work around a problem on Windows.
-					// For some reason, WriteBitcodeToFile causes TinyGo to
+					// For some reason, WriteBitcodeToFile causes Moxie to
 					// exit with the following message:
 					//   LLVM ERROR: IO failure on output stream: Bad file descriptor
 					buf := llvm.WriteBitcodeToMemoryBuffer(mod)
@@ -962,7 +962,7 @@ func createEmbedObjectFile(data, hexSum, sourceFile, sourceDir, tmpdir string, c
 		Language:  0xb, // DW_LANG_C99 (0xc, off-by-one?)
 		File:      sourceFile,
 		Dir:       sourceDir,
-		Producer:  "TinyGo",
+		Producer:  "Moxie",
 		Optimized: false,
 	})
 	ditype := dibuilder.CreateArrayType(llvm.DIArrayType{
@@ -1149,7 +1149,7 @@ func determineStackSizes(mod llvm.Module, executable string) ([]string, map[stri
 
 		// Get a list of "go wrappers", small wrapper functions that decode
 		// parameters when starting a new goroutine.
-		attr := fn.GetStringAttributeAtIndex(-1, "tinygo-gowrapper")
+		attr := fn.GetStringAttributeAtIndex(-1, "moxie-gowrapper")
 		if !attr.IsNil() {
 			gowrappers = append(gowrappers, fn.Name())
 			gowrapperNames[fn.Name()] = attr.GetStringValue()
@@ -1172,11 +1172,11 @@ func determineStackSizes(mod llvm.Module, executable string) ([]string, map[stri
 
 	// Goroutines need to be started and finished and take up some stack space
 	// that way. This can be measured by measuring the stack size of
-	// tinygo_startTask.
-	if numFuncs := len(functions["tinygo_startTask"]); numFuncs != 1 {
-		return nil, nil, fmt.Errorf("expected exactly one definition of tinygo_startTask, got %d", numFuncs)
+	// moxie_startTask.
+	if numFuncs := len(functions["moxie_startTask"]); numFuncs != 1 {
+		return nil, nil, fmt.Errorf("expected exactly one definition of moxie_startTask, got %d", numFuncs)
 	}
-	baseStackSize, baseStackSizeType, baseStackSizeFailedAt := functions["tinygo_startTask"][0].StackSize()
+	baseStackSize, baseStackSizeType, baseStackSizeFailedAt := functions["moxie_startTask"][0].StackSize()
 
 	sizes := make(map[string]functionStackSize)
 
@@ -1216,7 +1216,7 @@ func determineStackSizes(mod llvm.Module, executable string) ([]string, map[stri
 		stackSize, stackSizeType, missingStackSize := funcs[0].StackSize()
 		if baseStackSizeType != stacksize.Bounded {
 			// It was not possible to determine the stack size at compile time
-			// because tinygo_startTask does not have a fixed stack size. This
+			// because moxie_startTask does not have a fixed stack size. This
 			// can happen when using -opt=1.
 			stackSizeType = baseStackSizeType
 			missingStackSize = baseStackSizeFailedAt
@@ -1240,11 +1240,11 @@ func determineStackSizes(mod llvm.Module, executable string) ([]string, map[stri
 	return gowrappers, sizes, nil
 }
 
-// modifyStackSizes modifies the .tinygo_stacksizes section with the updated
+// modifyStackSizes modifies the .moxie_stacksizes section with the updated
 // stack size information. Before this modification, all stack sizes in the
 // section assume the default stack size (which is relatively big).
 func modifyStackSizes(executable string, stackSizeLoads []string, stackSizes map[string]functionStackSize) error {
-	data, fileHeader, err := getElfSectionData(executable, ".tinygo_stacksizes")
+	data, fileHeader, err := getElfSectionData(executable, ".moxie_stacksizes")
 	if err != nil {
 		return err
 	}
@@ -1301,7 +1301,7 @@ func modifyStackSizes(executable string, stackSizeLoads []string, stackSizes map
 		}
 	}
 
-	return replaceElfSection(executable, ".tinygo_stacksizes", data)
+	return replaceElfSection(executable, ".moxie_stacksizes", data)
 }
 
 // printStacks prints the maximum stack depth for functions that are started as

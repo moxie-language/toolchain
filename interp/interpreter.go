@@ -438,7 +438,7 @@ func (r *runner) run(fn *function, params []value, parentMem *memoryView, indent
 				} else {
 					locals[inst.localIndex] = literalValue{uint8(0)}
 				}
-			case callFn.name == "__tinygo_interp_raise_test_error":
+			case callFn.name == "__moxie_interp_raise_test_error":
 				// Special function that will trigger an error.
 				// This is used to test error reporting.
 				return nil, mem, r.errorAt(inst, errors.New("test error"))
@@ -474,7 +474,7 @@ func (r *runner) run(fn *function, params []value, parentMem *memoryView, indent
 				methodSet := mem.get(methodSetPtr.index()).llvmGlobal.Initializer()
 				numMethods := int(r.builder.CreateExtractValue(methodSet, 0, "").ZExtValue())
 				llvmFn := inst.llvmInst.CalledValue()
-				methodSetAttr := llvmFn.GetStringAttributeAtIndex(-1, "tinygo-methods")
+				methodSetAttr := llvmFn.GetStringAttributeAtIndex(-1, "moxie-methods")
 				methodSetString := methodSetAttr.GetStringValue()
 
 				// Make a set of all the methods on the concrete type, for
@@ -527,7 +527,7 @@ func (r *runner) run(fn *function, params []value, parentMem *memoryView, indent
 
 				// Load the signature of the to-be-called function.
 				llvmFn := inst.llvmInst.CalledValue()
-				invokeAttr := llvmFn.GetStringAttributeAtIndex(-1, "tinygo-invoke")
+				invokeAttr := llvmFn.GetStringAttributeAtIndex(-1, "moxie-invoke")
 				invokeName := invokeAttr.GetStringValue()
 				signature := r.mod.NamedGlobal(invokeName)
 

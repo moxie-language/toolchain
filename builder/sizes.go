@@ -491,7 +491,7 @@ func loadProgramSize(path string, packagePathMap map[string]string) (*programSiz
 			}
 			if section.Type == elf.SHT_NOBITS {
 				if strings.HasPrefix(section.Name, ".stack") {
-					// TinyGo emits stack sections on microcontroller using the
+					// Moxie emits stack sections on microcontroller using the
 					// ".stack" name.
 					// This is a bit ugly, but I don't think there is a way to
 					// mark the stack section in a linker script.
@@ -948,7 +948,7 @@ func findPackagePath(path string, packagePathMap map[string]string) (packagePath
 		filename = filepath.Base(path)
 	} else {
 		if strings.HasPrefix(path, filepath.Join(goenv.Get("MOXIEROOT"), "lib")) {
-			// Emit C libraries (in the lib subdirectory of TinyGo) as a single
+			// Emit C libraries (in the lib subdirectory of Moxie) as a single
 			// package, with a "C" prefix. For example: "C picolibc" for the
 			// baremetal libc.
 			libPath := strings.TrimPrefix(path, filepath.Join(goenv.Get("MOXIEROOT"), "lib")+string(os.PathSeparator))
