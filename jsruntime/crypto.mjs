@@ -9,6 +9,9 @@ let _secp = null;
 // Called from $entry.mjs before main().
 // Gracefully skips if WASM module is not available (e.g. app delegates crypto to extension).
 export async function init() {
+  // In Service Worker context, no WASM is available — skip to avoid
+  // a dynamic import that can hang and block event listener registration.
+  if (typeof ServiceWorkerGlobalScope !== 'undefined') return;
   try {
     const base = new URL('./', import.meta.url);
     const mod = await import(new URL('../$wasm/secp256k1.mjs', base).href);

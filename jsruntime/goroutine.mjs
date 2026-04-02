@@ -34,8 +34,7 @@ function scheduleRun() {
 }
 
 async function tick() {
-  scheduled = false;
-  if (running) return;
+  if (running) { scheduled = false; return; }
   running = true;
 
   while (runQueue.length > 0) {
@@ -62,6 +61,7 @@ async function tick() {
   }
 
   running = false;
+  scheduled = false;
 }
 
 // Yield current goroutine to let others run.

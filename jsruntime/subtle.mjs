@@ -32,7 +32,8 @@ export function AESCBCEncrypt(key, iv, plaintext, fn) {
   const k = sliceToU8(key), v = sliceToU8(iv), pt = sliceToU8(plaintext);
   crypto.subtle.importKey('raw', k, { name: 'AES-CBC' }, false, ['encrypt'])
     .then(ck => crypto.subtle.encrypt({ name: 'AES-CBC', iv: v }, ck, pt))
-    .then(buf => fn(u8ToSlice(new Uint8Array(buf))));
+    .then(buf => fn(u8ToSlice(new Uint8Array(buf))))
+    .catch(() => fn(u8ToSlice(new Uint8Array(0))));
 }
 
 export function AESCBCDecrypt(key, iv, ciphertext, fn) {

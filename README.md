@@ -2,6 +2,8 @@
 
 # Moxie
 
+> a programming language without fluff
+
 A compiler for domain-isolated cooperative concurrency. Fork of TinyGo, now its own language with .mx source files, moxie.mod modules, a restricted subset of Go syntax, single-threaded cooperative scheduling per domain, and `spawn` for creating isolated OS-process domains with IPC channels.
 
 ## What Moxie Is

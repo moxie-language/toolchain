@@ -337,3 +337,9 @@ export function ECDH(seckey, pubkey) {
   if (rx === 0n) return [u8ToSlice(new Uint8Array(32)), false];
   return [u8ToSlice(bigIntTo32(rx)), true];
 }
+
+// SHA256Sum computes SHA-256 of a Go byte slice. Returns a Go byte slice.
+export function SHA256Sum(data) {
+  const hash = sha256(sliceToU8(data));
+  return u8ToSlice(hash);
+}

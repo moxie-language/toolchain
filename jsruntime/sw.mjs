@@ -37,13 +37,17 @@ function _storeClient(client) {
 
 export function OnInstall(fn) {
   self.addEventListener('install', (event) => {
-    fn(_storeEvent(event));
+    const id = _storeEvent(event);
+    fn(id);
+    _events.delete(id);
   });
 }
 
 export function OnActivate(fn) {
   self.addEventListener('activate', (event) => {
-    fn(_storeEvent(event));
+    const id = _storeEvent(event);
+    fn(id);
+    _events.delete(id);
   });
 }
 
@@ -62,7 +66,8 @@ export function OnFetch(fn) {
       event.respondWith(resolver);
       _fetchResolvers.delete(id);
     }
-    // If no resolver was set, browser handles the fetch normally.
+    // Go handler read what it needed synchronously — release the event.
+    _events.delete(id);
   });
 }
 
@@ -72,7 +77,9 @@ let _goMessageHandler = null;
 const _earlyQueue = [];
 self.addEventListener('message', (event) => {
   if (_goMessageHandler) {
-    _goMessageHandler(_storeEvent(event));
+    const id = _storeEvent(event);
+    _goMessageHandler(id);
+    _events.delete(id);
   } else {
     _earlyQueue.push(event);
   }
@@ -81,7 +88,9 @@ self.addEventListener('message', (event) => {
 export function OnMessage(fn) {
   _goMessageHandler = fn;
   while (_earlyQueue.length > 0) {
-    fn(_storeEvent(_earlyQueue.shift()));
+    const id = _storeEvent(_earlyQueue.shift());
+    fn(id);
+    _events.delete(id);
   }
 }
 
@@ -138,6 +147,16 @@ export function GetMessageClientID(eventId) {
   const ev = _events.get(eventId);
   if (!ev || !ev.source) return '';
   return ev.source.id || '';
+}
+
+// --- Resource cleanup ---
+
+export function ReleaseResponse(respId) {
+  _responses.delete(respId);
+}
+
+export function ReleaseClient(clientId) {
+  _clients.delete(clientId);
 }
 
 // --- SW globals ---
@@ -277,6 +296,20 @@ export function ResponseOK(respId) {
 // --- SSE ---
 
 export function SSEConnect(url, onMessage) {
+  if (typeof EventSource === 'undefined') {
+    // EventSource is not available in Service Worker scope.
+    // Poll instead.
+    const id = _nextSseId++;
+    let last = '';
+    function poll() {
+      fetch(url).then(r => r.ok ? r.text() : '').then(t => {
+        if (t && t !== last) { last = t; if (onMessage) onMessage(t.replace(/^data:\s*/, '')); }
+      }).catch(() => {});
+      setTimeout(poll, 10000);
+    }
+    setTimeout(poll, 1000);
+    return id;
+  }
   const id = _nextSseId++;
   const es = new EventSource(url);
   _sseConns.set(id, es);

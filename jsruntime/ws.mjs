@@ -23,6 +23,7 @@ export function Dial(url, onMessage, onOpen, onClose, onError) {
 
   ws.onclose = (ev) => {
     conn.closed = true;
+    _conns.delete(id);
     if (onClose) onClose(id, ev.code, ev.reason);
   };
 

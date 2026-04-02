@@ -4,7 +4,7 @@
 // Function names match Go signatures (PascalCase).
 
 const _elements = new Map();
-let _nextId = 1;
+let _nextId = 1; // Safe up to 2^53 in JS. No wrap needed.
 const _callbacks = new Map();
 let _nextCb = 1;
 
@@ -268,7 +268,7 @@ export function OnSWMessage(fn) {
 
 // IndexedDB (simple key-value).
 let _idb = null;
-const _idbName = 'smesh';
+const _idbName = 'smesh-kv';
 const _idbStores = ['profiles', 'events', 'cache'];
 
 function _openIDB() {
@@ -352,6 +352,11 @@ export function Hostname() {
 
 export function Port() {
   if (typeof location !== 'undefined') return location.port;
+  return '';
+}
+
+export function UserAgent() {
+  if (typeof navigator !== 'undefined') return navigator.userAgent;
   return '';
 }
 

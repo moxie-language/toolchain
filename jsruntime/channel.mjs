@@ -10,6 +10,23 @@ export class Channel {
     this.recvWaiters = []; // [{resolve, reject}]
   }
 
+  // Skip cancelled waiters (from resolved selects).
+  _shiftRecv() {
+    while (this.recvWaiters.length > 0) {
+      const w = this.recvWaiters.shift();
+      if (!w.cancelled) return w;
+    }
+    return null;
+  }
+
+  _shiftSend() {
+    while (this.sendWaiters.length > 0) {
+      const w = this.sendWaiters.shift();
+      if (!w.cancelled) return w;
+    }
+    return null;
+  }
+
   // Send a value. Blocks (awaits) if buffer full and no receiver waiting.
   async send(value) {
     if (this.closed) {
@@ -17,8 +34,8 @@ export class Channel {
     }
 
     // If a receiver is waiting, hand off directly.
-    if (this.recvWaiters.length > 0) {
-      const waiter = this.recvWaiters.shift();
+    const waiter = this._shiftRecv();
+    if (waiter) {
       waiter.resolve({ value, ok: true });
       return;
     }
@@ -40,8 +57,8 @@ export class Channel {
     // If buffer has data, return it. Then unblock a sender if waiting.
     if (this.buffer.length > 0) {
       const value = this.buffer.shift();
-      if (this.sendWaiters.length > 0) {
-        const sender = this.sendWaiters.shift();
+      const sender = this._shiftSend();
+      if (sender) {
         this.buffer.push(sender.value);
         sender.resolve();
       }
@@ -49,8 +66,8 @@ export class Channel {
     }
 
     // If a sender is waiting (unbuffered or buffer was empty), take directly.
-    if (this.sendWaiters.length > 0) {
-      const sender = this.sendWaiters.shift();
+    const sender = this._shiftSend();
+    if (sender) {
       sender.resolve();
       return { value: sender.value, ok: true };
     }
@@ -74,15 +91,14 @@ export class Channel {
     this.closed = true;
 
     // Wake all waiting receivers with zero value.
-    while (this.recvWaiters.length > 0) {
-      const waiter = this.recvWaiters.shift();
-      waiter.resolve({ value: undefined, ok: false });
+    let w;
+    while ((w = this._shiftRecv())) {
+      w.resolve({ value: undefined, ok: false });
     }
 
     // Panic on waiting senders.
-    while (this.sendWaiters.length > 0) {
-      const sender = this.sendWaiters.shift();
-      sender.reject(new Error('send on closed channel'));
+    while ((w = this._shiftSend())) {
+      w.reject(new Error('send on closed channel'));
     }
   }
 
@@ -90,8 +106,8 @@ export class Channel {
   trySend(value) {
     if (this.closed) throw new Error('send on closed channel');
 
-    if (this.recvWaiters.length > 0) {
-      const waiter = this.recvWaiters.shift();
+    const waiter = this._shiftRecv();
+    if (waiter) {
       waiter.resolve({ value, ok: true });
       return true;
     }
@@ -108,16 +124,16 @@ export class Channel {
   tryRecv() {
     if (this.buffer.length > 0) {
       const value = this.buffer.shift();
-      if (this.sendWaiters.length > 0) {
-        const sender = this.sendWaiters.shift();
+      const sender = this._shiftSend();
+      if (sender) {
         this.buffer.push(sender.value);
         sender.resolve();
       }
       return { value, ok: true, received: true };
     }
 
-    if (this.sendWaiters.length > 0) {
-      const sender = this.sendWaiters.shift();
+    const sender = this._shiftSend();
+    if (sender) {
       sender.resolve();
       return { value: sender.value, ok: true, received: true };
     }
@@ -161,49 +177,47 @@ export async function select(cases, hasDefault) {
     return { id: -1, value: undefined, ok: false };
   }
 
-  // Block: race all cases.
-  return new Promise((resolve) => {
-    const cleanup = [];
+  // Block: race all cases. Use cancel flags instead of splice for O(1) cleanup.
+  return new Promise((resolve, reject) => {
+    const waiters = [];
     let resolved = false;
+
+    function cancelOthers() {
+      for (const w of waiters) w.cancelled = true;
+    }
 
     for (const c of shuffled) {
       if (c.dir === 'recv') {
         const waiter = {
+          cancelled: false,
           resolve: (result) => {
             if (resolved) return;
             resolved = true;
-            // Remove other waiters.
-            for (const fn of cleanup) fn();
+            cancelOthers();
             resolve({ id: c.id, value: result.value, ok: result.ok });
           }
         };
+        waiters.push(waiter);
         c.ch.recvWaiters.push(waiter);
-        cleanup.push(() => {
-          const idx = c.ch.recvWaiters.indexOf(waiter);
-          if (idx >= 0) c.ch.recvWaiters.splice(idx, 1);
-        });
       } else {
         const waiter = {
+          cancelled: false,
           value: c.value,
           resolve: () => {
             if (resolved) return;
             resolved = true;
-            for (const fn of cleanup) fn();
+            cancelOthers();
             resolve({ id: c.id, value: undefined, ok: true });
           },
           reject: (err) => {
             if (resolved) return;
             resolved = true;
-            for (const fn of cleanup) fn();
-            // Propagate error (send on closed channel).
-            throw err;
+            cancelOthers();
+            reject(err);
           }
         };
+        waiters.push(waiter);
         c.ch.sendWaiters.push(waiter);
-        cleanup.push(() => {
-          const idx = c.ch.sendWaiters.indexOf(waiter);
-          if (idx >= 0) c.ch.sendWaiters.splice(idx, 1);
-        });
       }
     }
   });
