@@ -37,17 +37,23 @@ var MoxiePurePackages = map[string]bool{
 	// Restriction enforcement (no string, uintptr, complex, new, fallthrough)
 	// applies to these packages. String literal wrapping + pipe concat enabled.
 	"arena":                                       true,
+	"compress/bzip2":                               true,
+	"compress/flate":                               true,
+	"compress/gzip":                                true,
 	"compress/lzw":                                true,
 	"compress/zlib":                                true,
 	"container/heap":                               true,
 	"container/list":                               true,
 	"container/ring":                               true,
+	"crypto/aes":                                   true,
 	"crypto/boring":                                true,
+	"crypto/internal/boring":                       true,
 	"crypto/cipher":                                true,
 	"crypto/dsa":                                   true,
 	"crypto/ecdsa":                                 true,
 	"crypto/fips140":                               true,
 	"crypto/hmac":                                  true,
+	"crypto/md5":                                   true,
 	"crypto/internal/boring/bbig":                  true,
 	"crypto/internal/boring/sig":                   true,
 	"crypto/internal/boring/syso":                  true,
@@ -67,15 +73,22 @@ var MoxiePurePackages = map[string]bool{
 	"crypto/internal/sysrand/internal/seccomp":     true,
 	"crypto/mlkem":                                 true,
 	"crypto/rand":                                  true,
+	"crypto/sha1":                                  true,
 	"crypto/sha256":                                true,
 	"crypto/sha512":                                true,
 	"crypto/subtle":                                true,
 	"encoding":                                     true,
 	"encoding/gob":                                 true,
 	"hash":                                         true,
+	"hash/adler32":                                 true,
+	"hash/crc32":                                   true,
+	"hash/crc64":                                   true,
+	"hash/fnv":                                     true,
+	"image":                                        true,
 	"image/color":                                  true,
 	"image/color/palette":                          true,
 	"image/internal/imageutil":                     true,
+	"image/png":                                    true,
 	"internal/binary":                              true,
 	"internal/byteorder":                           true,
 	"internal/cfg":                                 true,
@@ -97,6 +110,7 @@ var MoxiePurePackages = map[string]bool{
 	"math/bits":                                    true,
 	"math/rand":                                    true,
 	"mime/quotedprintable":                         true,
+	"sort":                                         true,
 	"structs":                                      true,
 	"unicode/utf16":                                true,
 	"unique":                                       true,
@@ -143,7 +157,6 @@ func isMoxieStringTarget(importPath string) bool {
 		importPath == "time" ||
 		importPath == "fmt" ||
 		importPath == "strings" ||
-		importPath == "sort" ||
 		importPath == "bytes" ||
 		importPath == "errors" ||
 		importPath == "strconv" ||

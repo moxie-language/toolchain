@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/bzip2"
 	"compress/gzip"
 	"compress/lzw"
 	"compress/zlib"
@@ -8,13 +9,16 @@ import (
 	"container/ring"
 	"crypto/aes"
 	"crypto/hmac"
+	"crypto/md5"
 	"crypto/rand"
+	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
 	"hash/crc32"
 	"hash/crc64"
 	"math"
 	mrand "math/rand/v2"
+	"sort"
 )
 
 func main() {
@@ -172,6 +176,73 @@ func main() {
 		block, _ := aes.NewCipher(key[:])
 		print("aes:     block_size=")
 		println(block.BlockSize())
+	}
+
+	// MD5
+	{
+		h := md5.Sum(msg)
+		print("md5:     ")
+		printHexN(h[:], 8)
+		println()
+	}
+
+	// SHA1
+	{
+		h := sha1.Sum(msg)
+		print("sha1:    ")
+		printHexN(h[:], 8)
+		println()
+	}
+
+	// Bzip2 (decompress only — bzip2 package is decompression only)
+	{
+		// A minimal bzip2 compressed stream for "hello"
+		// Use pre-computed bzip2 data
+		// bzip2 of "hello"
+		compressed := []byte{
+			0x42, 0x5a, 0x68, 0x39, 0x31, 0x41, 0x59, 0x26,
+			0x53, 0x59, 0x19, 0x31, 0x65, 0x3d, 0x00, 0x00,
+			0x00, 0x81, 0x00, 0x02, 0x44, 0xa0, 0x00, 0x21,
+			0x9a, 0x68, 0x33, 0x4d, 0x07, 0x33, 0x8b, 0xb9,
+			0x22, 0x9c, 0x28, 0x48, 0x0c, 0x98, 0xb2, 0x9e,
+			0x80,
+		}
+		r := bzip2.NewReader(&byteReader{data: compressed})
+		var result []byte
+		var tmp [256]byte
+		for {
+			n, err := r.Read(tmp[:])
+			if n > 0 {
+				result = append(result, tmp[:n]...)
+			}
+			if err != nil {
+				break
+			}
+		}
+		print("bzip2:   ")
+		if len(result) > 0 {
+			println("PASS")
+		} else {
+			println("FAIL")
+		}
+	}
+
+	// Sort
+	{
+		data := []int{5, 3, 1, 4, 2}
+		sort.Ints(data)
+		sorted := true
+		for i := 0; i < len(data)-1; i++ {
+			if data[i] > data[i+1] {
+				sorted = false
+			}
+		}
+		print("sort:    ")
+		if sorted && data[0] == 1 && data[4] == 5 {
+			println("PASS")
+		} else {
+			println("FAIL")
+		}
 	}
 }
 

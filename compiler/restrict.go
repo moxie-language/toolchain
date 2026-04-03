@@ -61,7 +61,6 @@ func isUserPackage(pkg *ssa.Package) bool {
 		path == "time" ||
 		path == "fmt" ||
 		path == "strings" ||
-		path == "sort" ||
 		path == "bytes" ||
 		path == "strconv" ||
 		path == "errors" ||
@@ -69,12 +68,22 @@ func isUserPackage(pkg *ssa.Package) bool {
 		strings.HasPrefix(path, "math/big") ||
 		strings.HasPrefix(path, "reflect") ||
 		strings.HasPrefix(path, "encoding") ||
-		strings.HasPrefix(path, "hash") ||
 		path == "bufio" ||
 		path == "context" {
 		return false
 	}
 	return true
+}
+
+// packageImportsUnsafe returns true if the package imports "unsafe".
+// Packages using unsafe.Pointer legitimately need uintptr for pointer arithmetic.
+func packageImportsUnsafe(pkg *ssa.Package) bool {
+	for _, imp := range pkg.Pkg.Imports() {
+		if imp.Path() == "unsafe" {
+			return true
+		}
+	}
+	return false
 }
 
 // checkMoxieRestrictions scans a function for uses of restricted features.
@@ -155,6 +164,11 @@ func (b *builder) checkTypeAtPos(t types.Type, pos token.Pos) {
 		return
 	}
 	if reason, restricted := restrictedTypes[basic.Name()]; restricted {
+		// uintptr is allowed in packages that import unsafe — needed for
+		// pointer arithmetic with unsafe.Pointer.
+		if basic.Name() == "uintptr" && packageImportsUnsafe(b.fn.Pkg) {
+			return
+		}
 		b.addError(pos, "moxie: type '"+basic.Name()+"' is not allowed: "+reason)
 	}
 }
@@ -248,6 +262,10 @@ func (b *builder) checkASTRestrictions() {
 				return true
 			}
 			if reason, restricted := restrictedTypes[node.Name]; restricted {
+				// uintptr is allowed in packages that import unsafe.
+				if node.Name == "uintptr" && packageImportsUnsafe(b.fn.Pkg) {
+					return true
+				}
 				b.addError(node.Pos(), "moxie: type '"+node.Name+"' is not allowed: "+reason)
 			}
 		case *ast.CallExpr:
