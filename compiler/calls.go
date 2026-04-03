@@ -186,7 +186,7 @@ func (c *compilerContext) flattenAggregateType(t llvm.Type, name string, goType 
 					case types.Complex64, types.Complex128:
 						suffix = []string{"r", "i"}[i]
 					case types.String:
-						suffix = []string{"data", "len"}[i]
+						suffix = []string{"data", "len", "cap"}[i]
 						isString = true
 					}
 				case *types.Signature:

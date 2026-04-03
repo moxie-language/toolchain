@@ -35,39 +35,39 @@ import (
 
 var trailingPort = regexp.MustCompile(`:([0-9]+)$`)
 
-var osDefaultInheritEnv = func() []string {
+var osDefaultInheritEnv = func() [][]byte {
 	switch runtime.GOOS {
 	case "darwin", "ios":
-		return []string{"DYLD_LIBRARY_PATH"}
+		return [][]byte{"DYLD_LIBRARY_PATH"}
 	case "android", "linux", "freebsd", "netbsd", "openbsd":
-		return []string{"LD_LIBRARY_PATH"}
+		return [][]byte{"LD_LIBRARY_PATH"}
 	case "hpux":
-		return []string{"LD_LIBRARY_PATH", "SHLIB_PATH"}
+		return [][]byte{"LD_LIBRARY_PATH", "SHLIB_PATH"}
 	case "irix":
-		return []string{"LD_LIBRARY_PATH", "LD_LIBRARYN32_PATH", "LD_LIBRARY64_PATH"}
+		return [][]byte{"LD_LIBRARY_PATH", "LD_LIBRARYN32_PATH", "LD_LIBRARY64_PATH"}
 	case "illumos", "solaris":
-		return []string{"LD_LIBRARY_PATH", "LD_LIBRARY_PATH_32", "LD_LIBRARY_PATH_64"}
+		return [][]byte{"LD_LIBRARY_PATH", "LD_LIBRARY_PATH_32", "LD_LIBRARY_PATH_64"}
 	case "windows":
-		return []string{"SystemRoot", "COMSPEC", "PATHEXT", "WINDIR"}
+		return [][]byte{"SystemRoot", "COMSPEC", "PATHEXT", "WINDIR"}
 	}
 	return nil
 }()
 
 // Handler runs an executable in a subprocess with a CGI environment.
 type Handler struct {
-	Path string // path to the CGI executable
-	Root string // root URI prefix of handler or empty for "/"
+	Path []byte // path to the CGI executable
+	Root []byte // root URI prefix of handler or empty for "/"
 
 	// Dir specifies the CGI executable's working directory.
 	// If Dir is empty, the base directory of Path is used.
 	// If Path has no base directory, the current working
 	// directory is used.
-	Dir string
+	Dir []byte
 
-	Env        []string    // extra environment variables to set, if any, as "key=value"
-	InheritEnv []string    // environment variables to inherit from host, as "key"
+	Env        [][]byte    // extra environment variables to set, if any, as "key=value"
+	InheritEnv [][]byte    // environment variables to inherit from host, as "key"
 	Logger     *log.Logger // optional log for errors or nil to use log.Print
-	Args       []string    // optional arguments to pass to child process
+	Args       [][]byte    // optional arguments to pass to child process
 	Stderr     io.Writer   // optional stderr for the child process; nil means os.Stderr
 
 	// PathLocationHandler specifies the root http Handler that
@@ -95,7 +95,7 @@ func (h *Handler) stderr() io.Writer {
 //	  ...
 //	  Env: []string{"SCRIPT_FILENAME=foo.php"},
 //	}
-func removeLeadingDuplicates(env []string) (ret []string) {
+func removeLeadingDuplicates(env [][]byte) (ret [][]byte) {
 	for i, e := range env {
 		found := false
 		if eq := strings.IndexByte(e, '='); eq != -1 {
@@ -132,7 +132,7 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		port = matches[1]
 	}
 
-	env := []string{
+	env := [][]byte{
 		"SERVER_SOFTWARE=go",
 		"SERVER_PROTOCOL=HTTP/1.1",
 		"HTTP_HOST=" + req.Host,
@@ -207,7 +207,7 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	env = removeLeadingDuplicates(env)
 
-	var cwd, path string
+	var cwd, path []byte
 	if h.Dir != "" {
 		path = h.Path
 		cwd = h.Dir
@@ -225,7 +225,7 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	cmd := &exec.Cmd{
 		Path:   path,
-		Args:   append([]string{h.Path}, h.Args...),
+		Args:   append([][]byte{h.Path}, h.Args...),
 		Dir:    cwd,
 		Env:    env,
 		Stderr: h.stderr(),
@@ -275,7 +275,7 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			break
 		}
 		headerLines++
-		header, val, ok := strings.Cut(string(line), ":")
+		header, val, ok := strings.Cut([]byte(line), ":")
 		if !ok {
 			h.printf("cgi: bogus header line: %s", line)
 			continue
@@ -352,7 +352,7 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func (h *Handler) printf(format string, v ...any) {
+func (h *Handler) printf(format []byte, v ...any) {
 	if h.Logger != nil {
 		h.Logger.Printf(format, v...)
 	} else {
@@ -360,7 +360,7 @@ func (h *Handler) printf(format string, v ...any) {
 	}
 }
 
-func (h *Handler) handleInternalRedirect(rw http.ResponseWriter, req *http.Request, path string) {
+func (h *Handler) handleInternalRedirect(rw http.ResponseWriter, req *http.Request, path []byte) {
 	url, err := req.URL.Parse(path)
 	if err != nil {
 		rw.WriteHeader(http.StatusInternalServerError)

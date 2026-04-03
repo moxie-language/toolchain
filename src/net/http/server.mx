@@ -831,7 +831,7 @@ var (
 
 const copyBufPoolSize = 32 * 1024
 
-var copyBufPool = sync.Pool{New: func() any { return new([copyBufPoolSize]byte) }}
+var copyBufPool = sync.Pool{New: func() any { return &[copyBufPoolSize]byte{} }}
 
 func getCopyBuf() []byte {
 	return copyBufPool.Get().(*[copyBufPoolSize]byte)[:]
@@ -1166,7 +1166,7 @@ func checkWriteHeaderCode(code int) {
 // relevantCaller searches the call stack for the first function outside of net/http.
 // The purpose of this function is to provide more helpful error messages.
 func relevantCaller() runtime.Frame {
-	pc := make([]uintptr, 16)
+	pc := []uintptr{:16}
 	n := runtime.Callers(1, pc)
 	frames := runtime.CallersFrames(pc[:n])
 	var frame runtime.Frame
@@ -1321,7 +1321,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 			return
 		}
 		if excludeHeader == nil {
-			excludeHeader = make(map[string]bool)
+			excludeHeader = map[string]bool{}
 		}
 		excludeHeader[key] = true
 	}
@@ -1332,7 +1332,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	for k := range cw.header {
 		if strings.HasPrefix(k, TrailerPrefix) {
 			if excludeHeader == nil {
-				excludeHeader = make(map[string]bool)
+				excludeHeader = map[string]bool{}
 			}
 			excludeHeader[k] = true
 			trailers = true
@@ -1939,7 +1939,7 @@ func (c *conn) serve(ctx context.Context) {
 	defer func() {
 		if err := recover(); err != nil && err != ErrAbortHandler {
 			const size = 64 << 10
-			buf := make([]byte, size)
+			buf := []byte{:size}
 			buf = buf[:runtime.Stack(buf, false)]
 			c.server.logf("http: panic serving %v: %v\n%s", c.remoteAddr, err, buf)
 		}
@@ -1984,7 +1984,7 @@ func (c *conn) serve(ctx context.Context) {
 			c.rwc.SetReadDeadline(time.Time{})
 			c.rwc.SetWriteDeadline(time.Time{})
 		}
-		c.tlsState = new(tls.ConnectionState)
+		c.tlsState = &tls.ConnectionState{}
 		*c.tlsState = tlsConn.ConnectionState()
 		if proto := c.tlsState.NegotiatedProtocol; validNextProto(proto) {
 			if fn := c.server.TLSNextProto[proto]; fn != nil {
@@ -2004,7 +2004,7 @@ func (c *conn) serve(ctx context.Context) {
 	// Set Request.TLS if the conn is not a *tls.Conn, but implements ConnectionState.
 	if c.tlsState == nil {
 		if tc, ok := c.rwc.(connectionStater); ok {
-			c.tlsState = new(tls.ConnectionState)
+			c.tlsState = &tls.ConnectionState{}
 			*c.tlsState = tc.ConnectionState()
 		}
 	}
@@ -2264,7 +2264,7 @@ func (w *response) CloseNotify() <-chan bool {
 		panic("net/http: CloseNotify called after ServeHTTP finished")
 	}
 	if w.closeNotifyCh == nil {
-		w.closeNotifyCh = make(chan bool, 1)
+		w.closeNotifyCh = chan bool{1}
 		if w.closeNotifyTriggered {
 			w.closeNotifyCh <- true // action prior closeNotify call
 		}
@@ -2375,9 +2375,9 @@ func StripPrefix(prefix string, h Handler) Handler {
 		p := strings.TrimPrefix(r.URL.Path, prefix)
 		rp := strings.TrimPrefix(r.URL.RawPath, prefix)
 		if len(p) < len(r.URL.Path) && (r.URL.RawPath == "" || len(rp) < len(r.URL.RawPath)) {
-			r2 := new(Request)
+			r2 := &Request{}
 			*r2 = *r
-			r2.URL = new(url.URL)
+			r2.URL = &url.URL{}
 			*r2.URL = *r.URL
 			r2.URL.Path = p
 			r2.URL.RawPath = rp
@@ -3354,9 +3354,9 @@ func badServeHTTP(serverHandler, ResponseWriter, *Request)
 func AllowQuerySemicolons(h Handler) Handler {
 	return HandlerFunc(func(w ResponseWriter, r *Request) {
 		if strings.Contains(r.URL.RawQuery, ";") {
-			r2 := new(Request)
+			r2 := &Request{}
 			*r2 = *r
-			r2.URL = new(url.URL)
+			r2.URL = &url.URL{}
 			*r2.URL = *r.URL
 			r2.URL.RawQuery = strings.ReplaceAll(r.URL.RawQuery, ";", "&")
 			h.ServeHTTP(w, r2)
@@ -3521,7 +3521,7 @@ func (s *Server) ServeTLS(l net.Listener, certFile, keyFile string) error {
 	configHasCert := len(config.Certificates) > 0 || config.GetCertificate != nil || config.GetConfigForClient != nil
 	if !configHasCert || certFile != "" || keyFile != "" {
 		var err error
-		config.Certificates = make([]tls.Certificate, 1)
+		config.Certificates = []tls.Certificate{:1}
 		config.Certificates[0], err = tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
 			return err
@@ -3605,7 +3605,7 @@ func (s *Server) trackListener(ln *net.Listener, add bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.listeners == nil {
-		s.listeners = make(map[*net.Listener]struct{})
+		s.listeners = map[*net.Listener]struct{}{}
 	}
 	if add {
 		if s.shuttingDown() {
@@ -3624,7 +3624,7 @@ func (s *Server) trackConn(c *conn, add bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.activeConn == nil {
-		s.activeConn = make(map[*conn]struct{})
+		s.activeConn = map[*conn]struct{}{}
 	}
 	if add {
 		s.activeConn[c] = struct{}{}
@@ -3850,13 +3850,13 @@ func (h *timeoutHandler) ServeHTTP(w ResponseWriter, r *Request) {
 		defer cancelCtx()
 	}
 	r = r.WithContext(ctx)
-	done := make(chan struct{})
+	done := chan struct{}{}
 	tw := &timeoutWriter{
 		w:   w,
 		h:   make(Header),
 		req: r,
 	}
-	panicChan := make(chan any, 1)
+	panicChan := chan any{1}
 	go func() {
 		defer func() {
 			if p := recover(); p != nil {
@@ -4021,7 +4021,7 @@ type loggingConn struct {
 
 var (
 	uniqNameMu   sync.Mutex
-	uniqNameNext = make(map[string]int)
+	uniqNameNext = map[string]int{}
 )
 
 func newLoggingConn(baseName string, c net.Conn) net.Conn {

@@ -99,7 +99,7 @@ func (c *compilerContext) getFunction(fn *ssa.Function) (llvm.Type, llvm.Value) 
 
 	// Add an extra parameter as the function context. This context is used in
 	// closures and bound methods, but should be optimized away when not used.
-	if !info.exported {
+	if !info.exported && !strings.HasPrefix(info.linkName, "llvm.") {
 		paramInfos = append(paramInfos, paramInfo{llvmType: c.dataPtrType, name: "context", elemSize: 0})
 	}
 
@@ -524,7 +524,7 @@ func (c *compilerContext) isValidWasmType(typ types.Type, site wasmSite) bool {
 		case types.Uintptr, types.UnsafePointer:
 			return true
 		case types.String:
-			// string flattens to two values, so disallowed as a result
+			// string flattens to three values (ptr, len, cap), so disallowed as a result
 			return site == siteParam || site == siteIndirect
 		}
 	case *types.Array:

@@ -1,0 +1,40 @@
+//go:build (gc.conservative || gc.custom || gc.precise || gc.boehm) && moxie.wasm
+
+package task
+
+import "unsafe"
+
+// gcData holds GC-relevant state for WASM tasks.
+type gcData struct {
+	stackTop uintptr
+}
+
+func (gcd *gcData) swap() {
+	// On WASM, the stack is managed by the engine. Swap the stack top
+	// pointer so the GC can scan the correct stack.
+	gcd.stackTop, stackTop = stackTop, gcd.stackTop
+}
+
+// stackTop is the current stack top for GC scanning.
+var stackTop uintptr
+
+//go:export tinygo_scanCurrentStack
+func scanCurrentStack() {
+	// Mark from the current stack pointer to the stack top.
+	scanstack(stackTop)
+}
+
+//go:linkname scanstack runtime.scanstack
+func scanstack(uintptr)
+
+//go:export tinygo_getStackTop
+func getStackTop() uintptr {
+	return stackTop
+}
+
+// SetStackTop is called by the runtime to set the top of the stack for GC.
+//
+//go:linkname SetStackTop runtime.setStackTop
+func SetStackTop(top unsafe.Pointer) {
+	stackTop = uintptr(top)
+}

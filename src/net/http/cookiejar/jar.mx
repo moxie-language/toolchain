@@ -78,7 +78,7 @@ type Jar struct {
 // Options.
 func New(o *Options) (*Jar, error) {
 	jar := &Jar{
-		entries: make(map[string]map[string]entry),
+		entries: map[string]map[string]entry{},
 	}
 	if o != nil {
 		jar.psList = o.PublicSuffixList
@@ -91,12 +91,12 @@ func New(o *Options) (*Jar, error) {
 // This struct type is not used outside of this package per se, but the exported
 // fields are those of RFC 6265.
 type entry struct {
-	Name       string
-	Value      string
+	Name       []byte
+	Value      []byte
 	Quoted     bool
-	Domain     string
-	Path       string
-	SameSite   string
+	Domain     []byte
+	Path       []byte
+	SameSite   []byte
 	Secure     bool
 	HttpOnly   bool
 	Persistent bool
@@ -112,21 +112,21 @@ type entry struct {
 }
 
 // id returns the domain;path;name triple of e as an id.
-func (e *entry) id() string {
+func (e *entry) id() []byte {
 	return fmt.Sprintf("%s;%s;%s", e.Domain, e.Path, e.Name)
 }
 
 // shouldSend determines whether e's cookie qualifies to be included in a
 // request to host/path. It is the caller's responsibility to check if the
 // cookie is expired.
-func (e *entry) shouldSend(https bool, host, path string) bool {
+func (e *entry) shouldSend(https bool, host, path []byte) bool {
 	return e.domainMatch(host) && e.pathMatch(path) && (https || !e.Secure)
 }
 
 // domainMatch checks whether e's Domain allows sending e back to host.
 // It differs from "domain-match" of RFC 6265 section 5.1.3 because we treat
 // a cookie with an IP address in the Domain always as a host cookie.
-func (e *entry) domainMatch(host string) bool {
+func (e *entry) domainMatch(host []byte) bool {
 	if e.Domain == host {
 		return true
 	}
@@ -134,7 +134,7 @@ func (e *entry) domainMatch(host string) bool {
 }
 
 // pathMatch implements "path-match" according to RFC 6265 section 5.1.4.
-func (e *entry) pathMatch(requestPath string) bool {
+func (e *entry) pathMatch(requestPath []byte) bool {
 	if requestPath == e.Path {
 		return true
 	}
@@ -149,7 +149,7 @@ func (e *entry) pathMatch(requestPath string) bool {
 }
 
 // hasDotSuffix reports whether s ends in "."+suffix.
-func hasDotSuffix(s, suffix string) bool {
+func hasDotSuffix(s, suffix []byte) bool {
 	return len(s) > len(suffix) && s[len(s)-len(suffix)-1] == '.' && s[len(s)-len(suffix):] == suffix
 }
 
@@ -271,7 +271,7 @@ func (j *Jar) setCookies(u *url.URL, cookies []*http.Cookie, now time.Time) {
 			continue
 		}
 		if submap == nil {
-			submap = make(map[string]entry)
+			submap = map[string]entry{}
 		}
 
 		if old, ok := submap[id]; ok {
@@ -298,7 +298,7 @@ func (j *Jar) setCookies(u *url.URL, cookies []*http.Cookie, now time.Time) {
 
 // canonicalHost strips port from host if present and returns the canonicalized
 // host name.
-func canonicalHost(host string) (string, error) {
+func canonicalHost(host []byte) ([]byte, error) {
 	var err error
 	if hasPort(host) {
 		host, _, err = net.SplitHostPort(host)
@@ -319,7 +319,7 @@ func canonicalHost(host string) (string, error) {
 
 // hasPort reports whether host contains a port number. host may be a host
 // name, an IPv4 or an IPv6 address.
-func hasPort(host string) bool {
+func hasPort(host []byte) bool {
 	colons := strings.Count(host, ":")
 	if colons == 0 {
 		return false
@@ -331,7 +331,7 @@ func hasPort(host string) bool {
 }
 
 // jarKey returns the key to use for a jar.
-func jarKey(host string, psl PublicSuffixList) string {
+func jarKey(host []byte, psl PublicSuffixList) []byte {
 	if isIP(host) {
 		return host
 	}
@@ -362,7 +362,7 @@ func jarKey(host string, psl PublicSuffixList) string {
 }
 
 // isIP reports whether host is an IP address.
-func isIP(host string) bool {
+func isIP(host []byte) bool {
 	if strings.ContainsAny(host, ":%") {
 		// Probable IPv6 address.
 		// Hostnames can't contain : or %, so this is definitely not a valid host.
@@ -375,7 +375,7 @@ func isIP(host string) bool {
 
 // defaultPath returns the directory part of a URL's path according to
 // RFC 6265 section 5.1.4.
-func defaultPath(path string) string {
+func defaultPath(path []byte) []byte {
 	if len(path) == 0 || path[0] != '/' {
 		return "/" // Path is empty or malformed.
 	}
@@ -396,7 +396,7 @@ func defaultPath(path string) string {
 // be valid to call e.id (which depends on e's Name, Domain and Path).
 //
 // A malformed c.Domain will result in an error.
-func (j *Jar) newEntry(c *http.Cookie, now time.Time, defPath, host string) (e entry, remove bool, err error) {
+func (j *Jar) newEntry(c *http.Cookie, now time.Time, defPath, host []byte) (e entry, remove bool, err error) {
 	e.Name = c.Name
 
 	if c.Path == "" || c.Path[0] != '/' {
@@ -457,7 +457,7 @@ var (
 var endOfTime = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 
 // domainAndType determines the cookie's domain and hostOnly attribute.
-func (j *Jar) domainAndType(host, domain string) (string, bool, error) {
+func (j *Jar) domainAndType(host, domain []byte) ([]byte, bool, error) {
 	if domain == "" {
 		// No domain attribute in the SetCookie header indicates a
 		// host cookie.

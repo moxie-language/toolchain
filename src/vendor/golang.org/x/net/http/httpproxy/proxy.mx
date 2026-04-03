@@ -29,12 +29,12 @@ type Config struct {
 	// HTTPProxy represents the value of the HTTP_PROXY or
 	// http_proxy environment variable. It will be used as the proxy
 	// URL for HTTP requests unless overridden by NoProxy.
-	HTTPProxy string
+	HTTPProxy []byte
 
 	// HTTPSProxy represents the HTTPS_PROXY or https_proxy
 	// environment variable. It will be used as the proxy URL for
 	// HTTPS requests unless overridden by NoProxy.
-	HTTPSProxy string
+	HTTPSProxy []byte
 
 	// NoProxy represents the NO_PROXY or no_proxy environment
 	// variable. It specifies a string that contains comma-separated values
@@ -49,7 +49,7 @@ type Config struct {
 	// A single asterisk (*) indicates that no proxying should be done.
 	// A best effort is made to parse the string and errors are
 	// ignored.
-	NoProxy string
+	NoProxy []byte
 
 	// CGI holds whether the current process is running
 	// as a CGI handler (FromEnvironment infers this from the
@@ -96,7 +96,7 @@ func FromEnvironment() *Config {
 	}
 }
 
-func getEnvAny(names ...string) string {
+func getEnvAny(names ...[]byte) []byte {
 	for _, n := range names {
 		if val := os.Getenv(n); val != "" {
 			return val
@@ -144,7 +144,7 @@ func (cfg *config) proxyForURL(reqURL *url.URL) (*url.URL, error) {
 	return proxy, nil
 }
 
-func parseProxy(proxy string) (*url.URL, error) {
+func parseProxy(proxy []byte) (*url.URL, error) {
 	if proxy == "" {
 		return nil, nil
 	}
@@ -167,7 +167,7 @@ func parseProxy(proxy string) (*url.URL, error) {
 // useProxy reports whether requests to addr should use a proxy,
 // according to the NO_PROXY or no_proxy environment variable.
 // addr is always a canonicalAddr with a host and port.
-func (cfg *config) useProxy(addr string) bool {
+func (cfg *config) useProxy(addr []byte) bool {
 	if len(addr) == 0 {
 		return true
 	}
@@ -273,14 +273,14 @@ func (c *config) init() {
 	}
 }
 
-var portMap = map[string]string{
+var portMap = map[string][]byte{
 	"http":   "80",
 	"https":  "443",
 	"socks5": "1080",
 }
 
 // canonicalAddr returns url.Host but always with a ":port" suffix
-func canonicalAddr(url *url.URL) string {
+func canonicalAddr(url *url.URL) []byte {
 	addr := url.Hostname()
 	if v, err := idnaASCII(addr); err == nil {
 		addr = v
@@ -294,9 +294,9 @@ func canonicalAddr(url *url.URL) string {
 
 // Given a string of the form "host", "host:port", or "[ipv6::address]:port",
 // return true if the string includes a port.
-func hasPort(s string) bool { return strings.LastIndex(s, ":") > strings.LastIndex(s, "]") }
+func hasPort(s []byte) bool { return strings.LastIndex(s, ":") > strings.LastIndex(s, "]") }
 
-func idnaASCII(v string) (string, error) {
+func idnaASCII(v []byte) ([]byte, error) {
 	// TODO: Consider removing this check after verifying performance is okay.
 	// Right now punycode verification, length checks, context checks, and the
 	// permissible character tests are all omitted. It also prevents the ToASCII
@@ -312,7 +312,7 @@ func idnaASCII(v string) (string, error) {
 	return idna.Lookup.ToASCII(v)
 }
 
-func isASCII(s string) bool {
+func isASCII(s []byte) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] >= utf8.RuneSelf {
 			return false
@@ -331,7 +331,7 @@ type matcher interface {
 // allMatch matches on all possible inputs
 type allMatch struct{}
 
-func (a allMatch) match(host, port string, ip net.IP) bool {
+func (a allMatch) match(host, port []byte, ip net.IP) bool {
 	return true
 }
 
@@ -339,16 +339,16 @@ type cidrMatch struct {
 	cidr *net.IPNet
 }
 
-func (m cidrMatch) match(host, port string, ip net.IP) bool {
+func (m cidrMatch) match(host, port []byte, ip net.IP) bool {
 	return m.cidr.Contains(ip)
 }
 
 type ipMatch struct {
 	ip   net.IP
-	port string
+	port []byte
 }
 
-func (m ipMatch) match(host, port string, ip net.IP) bool {
+func (m ipMatch) match(host, port []byte, ip net.IP) bool {
 	if m.ip.Equal(ip) {
 		return m.port == "" || m.port == port
 	}
@@ -356,13 +356,13 @@ func (m ipMatch) match(host, port string, ip net.IP) bool {
 }
 
 type domainMatch struct {
-	host string
-	port string
+	host []byte
+	port []byte
 
 	matchHost bool
 }
 
-func (m domainMatch) match(host, port string, ip net.IP) bool {
+func (m domainMatch) match(host, port []byte, ip net.IP) bool {
 	if ip != nil {
 		return false
 	}

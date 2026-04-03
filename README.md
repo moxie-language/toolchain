@@ -82,19 +82,20 @@ Moxie is a restricted subset of Go syntax. Source files use the `.mx` extension.
 | Rejected | Reason |
 |----------|--------|
 | `new(T)` | Use `var x T` or `&T{...}` |
+| `make` | Use literal syntax: `chan T{}`, `map[K]V{}`, `[]T{}` |
+| `string` type | Use `[]byte`; string literals auto-wrap to `[]byte` |
+| `+` on text | Use `\|` for byte slice concatenation |
 | `complex()`, `real()`, `imag()` | Complex numbers not supported |
 | `complex64`, `complex128` types | Complex numbers not supported |
+| `uintptr` | Use explicit pointer types |
+| `int`, `uint` | Use explicitly sized types (`int32`, `int64`, etc.) |
+| `fallthrough` | Each case must be self-contained |
 
 Future restrictions (not yet enforced — alternatives pending):
 
 | Will reject | Alternative |
 |-------------|------------|
-| `make` | Typed constructors / literal syntax |
-| `append` | `\|` concatenation operator |
-| `string` type | `[]byte` |
-| `any` type | Explicit interface types |
-| `int`, `uint` | Explicit sizing (`int32`, `int64`, etc.) |
-| `fallthrough` | — |
+| `append` | `\|` concatenation operator (already works for `[]byte`) |
 
 ## Spawn Boundary Rules
 

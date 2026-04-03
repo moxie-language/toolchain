@@ -85,7 +85,7 @@ func OpenReader(name string) (*ReadCloser, error) {
 		f.Close()
 		return nil, err
 	}
-	r := new(ReadCloser)
+	r := &ReadCloser{}
 	if err = r.init(f, fi.Size()); err != nil && err != ErrInsecurePath {
 		f.Close()
 		return nil, err
@@ -108,7 +108,7 @@ func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
 	if size < 0 {
 		return nil, errors.New("zip: size cannot be negative")
 	}
-	zr := new(Reader)
+	zr := &Reader{}
 	var err error
 	if err = zr.init(r, size); err != nil && err != ErrInsecurePath {
 		return nil, err
@@ -130,7 +130,7 @@ func (r *Reader) init(rdr io.ReaderAt, size int64) error {
 	// header which will be _at least_ 30 bytes we can safely preallocate
 	// if (data size / 30) >= end.directoryRecords.
 	if end.directorySize < uint64(size) && (uint64(size)-end.directorySize)/30 >= end.directoryRecords {
-		r.File = make([]*File, 0, end.directoryRecords)
+		r.File = []*File{:0:end.directoryRecords}
 	}
 	r.Comment = end.comment
 	rs := io.NewSectionReader(rdr, 0, size)
@@ -182,7 +182,7 @@ func (r *Reader) init(rdr io.ReaderAt, size int64) error {
 // [Reader] will default to looking up the decompressor at the package level.
 func (r *Reader) RegisterDecompressor(method uint16, dcomp Decompressor) {
 	if r.decompressors == nil {
-		r.decompressors = make(map[uint16]Decompressor)
+		r.decompressors = map[uint16]Decompressor{}
 	}
 	r.decompressors[method] = dcomp
 }
@@ -380,7 +380,7 @@ func readDirectoryHeader(f *File, r io.Reader) error {
 	b = b[4:] // skipped start disk number and internal attributes (2x uint16)
 	f.ExternalAttrs = b.uint32()
 	f.headerOffset = int64(b.uint32())
-	d := make([]byte, filenameLen+extraLen+commentLen)
+	d := []byte{:filenameLen+extraLen+commentLen}
 	if _, err := io.ReadFull(r, d); err != nil {
 		return err
 	}
@@ -573,7 +573,7 @@ func readDirectoryEnd(r io.ReaderAt, size int64) (dir *directoryEnd, baseOffset 
 		if bLen > size {
 			bLen = size
 		}
-		buf = make([]byte, int(bLen))
+		buf = []byte{:int(bLen)}
 		if _, err := r.ReadAt(buf, size-bLen); err != nil && err != io.EOF {
 			return nil, 0, err
 		}
@@ -652,7 +652,7 @@ func findDirectory64End(r io.ReaderAt, directoryEndOffset int64) (int64, error) 
 	if locOffset < 0 {
 		return -1, nil // no need to look for a header outside the file
 	}
-	buf := make([]byte, directory64LocLen)
+	buf := []byte{:directory64LocLen}
 	if _, err := r.ReadAt(buf, locOffset); err != nil {
 		return -1, err
 	}
@@ -673,7 +673,7 @@ func findDirectory64End(r io.ReaderAt, directoryEndOffset int64) (int64, error) 
 // readDirectory64End reads the zip64 directory end and updates the
 // directory end with the zip64 directory end values.
 func readDirectory64End(r io.ReaderAt, offset int64, d *directoryEnd) (err error) {
-	buf := make([]byte, directory64EndLen)
+	buf := []byte{:directory64EndLen}
 	if _, err := r.ReadAt(buf, offset); err != nil {
 		return err
 	}
@@ -807,16 +807,16 @@ func (r *Reader) initFileList() {
 	r.fileListOnce.Do(func() {
 		// Preallocate the minimum size of the index.
 		// We may also synthesize additional directory entries.
-		r.fileList = make([]fileListEntry, 0, len(r.File))
+		r.fileList = []fileListEntry{:0:len(r.File)}
 		// files and knownDirs map from a file/directory name
 		// to an index into the r.fileList entry that we are
 		// building. They are used to mark duplicate entries.
-		files := make(map[string]int)
-		knownDirs := make(map[string]int)
+		files := map[string]int{}
+		knownDirs := map[string]int{}
 
 		// dirs[name] is true if name is known to be a directory,
 		// because it appears as a prefix in a path.
-		dirs := make(map[string]bool)
+		dirs := map[string]bool{}
 
 		for _, file := range r.File {
 			isDir := len(file.Name) > 0 && file.Name[len(file.Name)-1] == '/'
@@ -984,7 +984,7 @@ func (d *openDir) ReadDir(count int) ([]fs.DirEntry, error) {
 		}
 		return nil, io.EOF
 	}
-	list := make([]fs.DirEntry, n)
+	list := []fs.DirEntry{:n}
 	for i := range list {
 		s, err := d.files[d.offset+i].stat()
 		if err != nil {

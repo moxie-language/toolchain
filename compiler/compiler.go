@@ -576,6 +576,13 @@ func (c *compilerContext) createDIType(typ types.Type) llvm.Metadata {
 						OffsetInBits: c.targetData.ElementOffset(llvmType, 1) * 8,
 						Type:         c.getDIType(types.Typ[types.Uintptr]),
 					}),
+					c.dibuilder.CreateMemberType(llvm.Metadata{}, llvm.DIMemberType{
+						Name:         "cap",
+						SizeInBits:   c.targetData.TypeAllocSize(c.uintptrType) * 8,
+						AlignInBits:  uint32(c.targetData.ABITypeAlignment(c.uintptrType)) * 8,
+						OffsetInBits: c.targetData.ElementOffset(llvmType, 2) * 8,
+						Type:         c.getDIType(types.Typ[types.Uintptr]),
+					}),
 				},
 			})
 		} else {
@@ -1142,7 +1149,7 @@ func (c *compilerContext) getEmbedFileString(file *loader.EmbedFile) llvm.Value 
 		llvm.ConstInt(c.uintptrType, 0, false),
 	})
 	strLen := llvm.ConstInt(c.uintptrType, file.Size, false)
-	return llvm.ConstNamedStruct(c.getLLVMRuntimeType("_string"), []llvm.Value{strPtr, strLen})
+	return llvm.ConstNamedStruct(c.getLLVMRuntimeType("_string"), []llvm.Value{strPtr, strLen, strLen})
 }
 
 // Start defining a function so that it can be filled with instructions: load
@@ -1788,11 +1795,16 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 				ptrValue := b.CreatePtrToInt(value, b.uintptrType, "")
 				b.createRuntimeCall("printptr", []llvm.Value{ptrValue}, "")
 			case *types.Slice:
-				bufptr := b.CreateExtractValue(value, 0, "")
-				buflen := b.CreateExtractValue(value, 1, "")
-				bufcap := b.CreateExtractValue(value, 2, "")
-				ptrValue := b.CreatePtrToInt(bufptr, b.uintptrType, "")
-				b.createRuntimeCall("printslice", []llvm.Value{ptrValue, buflen, bufcap}, "")
+				// []byte prints as text; other slices print the header.
+				if basic, ok := typ.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {
+					b.createRuntimeCall("printbytes", []llvm.Value{value}, "")
+				} else {
+					bufptr := b.CreateExtractValue(value, 0, "")
+					buflen := b.CreateExtractValue(value, 1, "")
+					bufcap := b.CreateExtractValue(value, 2, "")
+					ptrValue := b.CreatePtrToInt(bufptr, b.uintptrType, "")
+					b.createRuntimeCall("printslice", []llvm.Value{ptrValue, buflen, bufcap}, "")
+				}
 			default:
 				return llvm.Value{}, b.makeError(pos, "unknown arg type: "+typ.String())
 			}
@@ -1873,6 +1885,7 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 			str := llvm.Undef(b.getLLVMRuntimeType("_string"))
 			str = b.CreateInsertValue(str, argValues[0], 0, "")
 			str = b.CreateInsertValue(str, len, 1, "")
+			str = b.CreateInsertValue(str, len, 2, "") // cap = len for strings
 			return str, nil
 		}
 	case "SliceData", "StringData": // unsafe.SliceData, unsafe.StringData
@@ -1936,6 +1949,12 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 			}
 		case name == "moxie.Spawn" || fn.Name() == "spawn":
 			return b.createSpawn(instr)
+		case strings.HasPrefix(fn.Name(), "__moxie_concat"):
+			return b.createMoxieConcat(instr), nil
+		case strings.HasPrefix(fn.Name(), "__moxie_eq"):
+			return b.createMoxieEq(instr), nil
+		case strings.HasPrefix(fn.Name(), "__moxie_lt"):
+			return b.createMoxieLt(instr), nil
 		}
 	}
 
@@ -1973,7 +1992,7 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 		default:
 			panic("StaticCallee returned an unexpected value")
 		}
-		exported = info.exported
+		exported = info.exported || strings.HasPrefix(info.linkName, "llvm.")
 	} else if call, ok := instr.Value.(*ssa.Builtin); ok {
 		// Builtin function (append, close, delete, etc.).)
 		var argTypes []types.Type
@@ -2531,6 +2550,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			str := llvm.Undef(b.getLLVMRuntimeType("_string"))
 			str = b.CreateInsertValue(str, newPtr, 0, "")
 			str = b.CreateInsertValue(str, newLen, 1, "")
+			str = b.CreateInsertValue(str, newLen, 2, "") // cap = len for string slices
 			return str, nil
 
 		default:
@@ -2903,8 +2923,31 @@ func (b *builder) createBinOp(op token.Token, typ, ytyp types.Type, x, y llvm.Va
 			return llvm.Value{}, b.makeError(pos, "todo: binop on pointer: "+op.String())
 		}
 	case *types.Slice:
-		// Slices are in general not comparable, but can be compared against
-		// nil. Assume at least one of them is nil to make the code easier.
+		// Moxie: []byte is the text type (replaces string) and supports
+		// full comparison (==, !=, <, <=, >, >=) via runtime string functions.
+		// Other slice types only support nil comparison.
+		if basic, ok := typ.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {
+			switch op {
+			case token.EQL:
+				return b.createRuntimeCall("stringEqual", []llvm.Value{x, y}, ""), nil
+			case token.NEQ:
+				result := b.createRuntimeCall("stringEqual", []llvm.Value{x, y}, "")
+				return b.CreateNot(result, ""), nil
+			case token.LSS:
+				return b.createRuntimeCall("stringLess", []llvm.Value{x, y}, ""), nil
+			case token.LEQ:
+				result := b.createRuntimeCall("stringLess", []llvm.Value{y, x}, "")
+				return b.CreateNot(result, ""), nil
+			case token.GTR:
+				return b.createRuntimeCall("stringLess", []llvm.Value{y, x}, ""), nil
+			case token.GEQ:
+				result := b.createRuntimeCall("stringLess", []llvm.Value{x, y}, "")
+				return b.CreateNot(result, ""), nil
+			default:
+				return llvm.Value{}, b.makeError(pos, "todo: binop on []byte: "+op.String())
+			}
+		}
+		// Non-byte slices: nil comparison only.
 		xPtr := b.CreateExtractValue(x, 0, "")
 		yPtr := b.CreateExtractValue(y, 0, "")
 		switch op {
@@ -3012,7 +3055,7 @@ func (c *compilerContext) createConst(expr *ssa.Const, pos token.Pos) llvm.Value
 			} else {
 				strPtr = llvm.ConstNull(c.dataPtrType)
 			}
-			strObj := llvm.ConstNamedStruct(c.getLLVMRuntimeType("_string"), []llvm.Value{strPtr, strLen})
+			strObj := llvm.ConstNamedStruct(c.getLLVMRuntimeType("_string"), []llvm.Value{strPtr, strLen, strLen})
 			return strObj
 		} else if typ.Kind() == types.UnsafePointer {
 			if !expr.IsNil() {
@@ -3146,7 +3189,16 @@ func (b *builder) createConvert(typeFrom, typeTo types.Type, value llvm.Value, p
 			case *types.Slice:
 				switch typeFrom.Elem().(*types.Basic).Kind() {
 				case types.Byte:
-					return b.createRuntimeCall("stringFromBytes", []llvm.Value{value}, ""), nil
+					// Moxie: string and []byte have identical 3-word layout.
+					// No allocation or copy — just repack fields for LLVM type compatibility.
+					ptr := b.CreateExtractValue(value, 0, "")
+					ln := b.CreateExtractValue(value, 1, "")
+					cp := b.CreateExtractValue(value, 2, "")
+					str := llvm.Undef(b.getLLVMRuntimeType("_string"))
+					str = b.CreateInsertValue(str, ptr, 0, "")
+					str = b.CreateInsertValue(str, ln, 1, "")
+					str = b.CreateInsertValue(str, cp, 2, "")
+					return str, nil
 				case types.Rune:
 					return b.createRuntimeCall("stringFromRunes", []llvm.Value{value}, ""), nil
 				default:
@@ -3301,7 +3353,16 @@ func (b *builder) createConvert(typeFrom, typeTo types.Type, value llvm.Value, p
 		elemType := typeTo.Elem().Underlying().(*types.Basic) // must be byte or rune
 		switch elemType.Kind() {
 		case types.Byte:
-			return b.createRuntimeCall("stringToBytes", []llvm.Value{value}, ""), nil
+			// Moxie: string and []byte have identical 3-word layout.
+			// No allocation or copy — just repack fields for LLVM type compatibility.
+			ptr := b.CreateExtractValue(value, 0, "")
+			ln := b.CreateExtractValue(value, 1, "")
+			cp := b.CreateExtractValue(value, 2, "")
+			slice := llvm.Undef(b.getLLVMType(typeTo))
+			slice = b.CreateInsertValue(slice, ptr, 0, "")
+			slice = b.CreateInsertValue(slice, ln, 1, "")
+			slice = b.CreateInsertValue(slice, cp, 2, "")
+			return slice, nil
 		case types.Rune:
 			return b.createRuntimeCall("stringToRunes", []llvm.Value{value}, ""), nil
 		default:

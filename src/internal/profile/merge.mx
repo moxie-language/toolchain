@@ -29,17 +29,17 @@ func Merge(srcs []*Profile) (*Profile, error) {
 
 	pm := &profileMerger{
 		p:         p,
-		samples:   make(map[sampleKey]*Sample, len(srcs[0].Sample)),
-		locations: make(map[locationKey]*Location, len(srcs[0].Location)),
-		functions: make(map[functionKey]*Function, len(srcs[0].Function)),
-		mappings:  make(map[mappingKey]*Mapping, len(srcs[0].Mapping)),
+		samples:   map[sampleKey]*Sample{},
+		locations: map[locationKey]*Location{},
+		functions: map[functionKey]*Function{},
+		mappings:  map[mappingKey]*Mapping{},
 	}
 
 	for _, src := range srcs {
 		// Clear the profile-specific hash tables
-		pm.locationsByID = make(map[uint64]*Location, len(src.Location))
-		pm.functionsByID = make(map[uint64]*Function, len(src.Function))
-		pm.mappingsByID = make(map[uint64]mapInfo, len(src.Mapping))
+		pm.locationsByID = map[uint64]*Location{}
+		pm.functionsByID = map[uint64]*Function{}
+		pm.mappingsByID = map[uint64]mapInfo{}
 
 		if len(pm.mappings) == 0 && len(src.Mapping) > 0 {
 			// The Mapping list has the property that the first mapping
@@ -76,21 +76,21 @@ func (p *Profile) Normalize(pb *Profile) error {
 		return err
 	}
 
-	baseVals := make([]int64, len(p.SampleType))
+	baseVals := []int64{:len(p.SampleType)}
 	for _, s := range pb.Sample {
 		for i, v := range s.Value {
 			baseVals[i] += v
 		}
 	}
 
-	srcVals := make([]int64, len(p.SampleType))
+	srcVals := []int64{:len(p.SampleType)}
 	for _, s := range p.Sample {
 		for i, v := range s.Value {
 			srcVals[i] += v
 		}
 	}
 
-	normScale := make([]float64, len(baseVals))
+	normScale := []float64{:len(baseVals)}
 	for i := range baseVals {
 		if srcVals[i] == 0 {
 			normScale[i] = 0.0
@@ -133,24 +133,24 @@ type mapInfo struct {
 
 func (pm *profileMerger) mapSample(src *Sample) *Sample {
 	s := &Sample{
-		Location: make([]*Location, len(src.Location)),
-		Value:    make([]int64, len(src.Value)),
-		Label:    make(map[string][]string, len(src.Label)),
-		NumLabel: make(map[string][]int64, len(src.NumLabel)),
-		NumUnit:  make(map[string][]string, len(src.NumLabel)),
+		Location: []*Location{:len(src.Location)},
+		Value:    []int64{:len(src.Value)},
+		Label:    map[string][][]byte{},
+		NumLabel: map[string][]int64{},
+		NumUnit:  map[string][][]byte{},
 	}
 	for i, l := range src.Location {
 		s.Location[i] = pm.mapLocation(l)
 	}
 	for k, v := range src.Label {
-		vv := make([]string, len(v))
+		vv := [][]byte{:len(v)}
 		copy(vv, v)
 		s.Label[k] = vv
 	}
 	for k, v := range src.NumLabel {
 		u := src.NumUnit[k]
-		vv := make([]int64, len(v))
-		uu := make([]string, len(u))
+		vv := []int64{:len(v)}
+		uu := [][]byte{:len(u)}
 		copy(vv, v)
 		copy(uu, u)
 		s.NumLabel[k] = vv
@@ -174,18 +174,18 @@ func (pm *profileMerger) mapSample(src *Sample) *Sample {
 
 // key generates sampleKey to be used as a key for maps.
 func (sample *Sample) key() sampleKey {
-	ids := make([]string, len(sample.Location))
+	ids := [][]byte{:len(sample.Location)}
 	for i, l := range sample.Location {
 		ids[i] = strconv.FormatUint(l.ID, 16)
 	}
 
-	labels := make([]string, 0, len(sample.Label))
+	labels := [][]byte{:0:len(sample.Label)}
 	for k, v := range sample.Label {
 		labels = append(labels, fmt.Sprintf("%q%q", k, v))
 	}
 	sort.Strings(labels)
 
-	numlabels := make([]string, 0, len(sample.NumLabel))
+	numlabels := [][]byte{:0:len(sample.NumLabel)}
 	for k, v := range sample.NumLabel {
 		numlabels = append(numlabels, fmt.Sprintf("%q%x%x", k, v, sample.NumUnit[k]))
 	}
@@ -199,9 +199,9 @@ func (sample *Sample) key() sampleKey {
 }
 
 type sampleKey struct {
-	locations string
-	labels    string
-	numlabels string
+	locations []byte
+	labels    []byte
+	numlabels []byte
 }
 
 func (pm *profileMerger) mapLocation(src *Location) *Location {
@@ -219,7 +219,7 @@ func (pm *profileMerger) mapLocation(src *Location) *Location {
 		ID:       uint64(len(pm.p.Location) + 1),
 		Mapping:  mi.m,
 		Address:  uint64(int64(src.Address) + mi.offset),
-		Line:     make([]Line, len(src.Line)),
+		Line:     []Line{:len(src.Line)},
 		IsFolded: src.IsFolded,
 	}
 	for i, ln := range src.Line {
@@ -249,7 +249,7 @@ func (l *Location) key() locationKey {
 		key.addr -= l.Mapping.Start
 		key.mappingID = l.Mapping.ID
 	}
-	lines := make([]string, len(l.Line)*2)
+	lines := [][]byte{:len(l.Line)*2}
 	for i, line := range l.Line {
 		if line.Function != nil {
 			lines[i*2] = strconv.FormatUint(line.Function.ID, 16)
@@ -262,7 +262,7 @@ func (l *Location) key() locationKey {
 
 type locationKey struct {
 	addr, mappingID uint64
-	lines           string
+	lines           []byte
 	isFolded        bool
 }
 
@@ -333,7 +333,7 @@ func (m *Mapping) key() mappingKey {
 
 type mappingKey struct {
 	size, offset  uint64
-	buildIDOrFile string
+	buildIDOrFile []byte
 }
 
 func (pm *profileMerger) mapLine(src Line) Line {
@@ -381,7 +381,7 @@ func (f *Function) key() functionKey {
 
 type functionKey struct {
 	startLine                  int64
-	name, systemName, fileName string
+	name, systemName, fileName []byte
 }
 
 // combineHeaders checks that all profiles can be merged and returns
@@ -394,9 +394,9 @@ func combineHeaders(srcs []*Profile) (*Profile, error) {
 	}
 
 	var timeNanos, durationNanos, period int64
-	var comments []string
+	var comments [][]byte
 	seenComments := map[string]bool{}
-	var defaultSampleType string
+	var defaultSampleType []byte
 	for _, s := range srcs {
 		if timeNanos == 0 || s.TimeNanos < timeNanos {
 			timeNanos = s.TimeNanos
@@ -417,7 +417,7 @@ func combineHeaders(srcs []*Profile) (*Profile, error) {
 	}
 
 	p := &Profile{
-		SampleType: make([]*ValueType, len(srcs[0].SampleType)),
+		SampleType: []*ValueType{:len(srcs[0].SampleType)},
 
 		DropFrames: srcs[0].DropFrames,
 		KeepFrames: srcs[0].KeepFrames,

@@ -8,9 +8,11 @@ import (
 )
 
 // The underlying struct for the Go string type.
+// Moxie: 3-word struct matching []byte layout (ptr, len, cap).
 type _string struct {
 	ptr    *byte
 	length uintptr
+	cap    uintptr
 }
 
 // The iterator state for a range over a string.
@@ -63,8 +65,23 @@ func stringConcat(x, y _string) _string {
 		buf := alloc(length, gclayout.NoPtrs.AsPtr())
 		memcpy(buf, unsafe.Pointer(x.ptr), x.length)
 		memcpy(unsafe.Add(buf, x.length), unsafe.Pointer(y.ptr), y.length)
-		return _string{ptr: (*byte)(buf), length: length}
+		return _string{ptr: (*byte)(buf), length: length, cap: length}
 	}
+}
+
+// Concatenate two byte slices. Used by Moxie's | pipe concat operator.
+func bytesConcat(x, y []byte) []byte {
+	if len(x) == 0 {
+		return y
+	} else if len(y) == 0 {
+		return x
+	}
+	length := len(x) + len(y)
+	buf := alloc(uintptr(length), gclayout.NoPtrs.AsPtr())
+	memcpy(buf, unsafe.Pointer(&x[0]), uintptr(len(x)))
+	memcpy(unsafe.Add(buf, uintptr(len(x))), unsafe.Pointer(&y[0]), uintptr(len(y)))
+	result := (*[1 << 30]byte)(buf)[:length:length]
+	return result
 }
 
 // Create a string from a []byte slice.
@@ -75,7 +92,7 @@ func stringFromBytes(x struct {
 }) _string {
 	buf := alloc(x.len, gclayout.NoPtrs.AsPtr())
 	memcpy(buf, unsafe.Pointer(x.ptr), x.len)
-	return _string{ptr: (*byte)(buf), length: x.len}
+	return _string{ptr: (*byte)(buf), length: x.len, cap: x.len}
 }
 
 // Convert a string to a []byte slice.
@@ -99,6 +116,7 @@ func stringFromRunes(runeSlice []rune) (s _string) {
 		_, numBytes := encodeUTF8(r)
 		s.length += numBytes
 	}
+	s.cap = s.length
 
 	// Allocate memory for the string.
 	s.ptr = (*byte)(alloc(s.length, gclayout.NoPtrs.AsPtr()))
@@ -137,7 +155,7 @@ func stringFromUnicode(x rune) _string {
 	// Array will be heap allocated.
 	// The heap most likely doesn't work with blocks below 4 bytes, so there's
 	// no point in allocating a smaller buffer for the string here.
-	return _string{ptr: (*byte)(unsafe.Pointer(&array)), length: length}
+	return _string{ptr: (*byte)(unsafe.Pointer(&array)), length: length, cap: length}
 }
 
 // Iterate over a string.
@@ -265,6 +283,7 @@ func cgo_GoStringN(cstr unsafe.Pointer, length uintptr) _string {
 func makeGoString(cstr unsafe.Pointer, length uintptr) _string {
 	s := _string{
 		length: length,
+		cap:    length,
 	}
 	if s.length != 0 {
 		buf := make([]byte, s.length)

@@ -15,7 +15,7 @@ import (
 type item struct {
 	typ  itemType // The type of this item.
 	pos  Pos      // The starting position, in bytes, of this item in the input string.
-	val  string   // The value of this item.
+	val  []byte   // The value of this item.
 	line int      // The line number at the start of this item.
 }
 
@@ -111,10 +111,10 @@ type stateFn func(*lexer) stateFn
 
 // lexer holds the state of the scanner.
 type lexer struct {
-	name         string // the name of the input; used only for error reports
-	input        string // the string being scanned
-	leftDelim    string // start of action marker
-	rightDelim   string // end of action marker
+	name         []byte // the name of the input; used only for error reports
+	input        []byte // the string being scanned
+	leftDelim    []byte // start of action marker
+	rightDelim   []byte // end of action marker
 	pos          Pos    // current position in the input
 	start        Pos    // start position of this item
 	atEOF        bool   // we have hit the end of input and returned eof
@@ -196,7 +196,7 @@ func (l *lexer) ignore() {
 }
 
 // accept consumes the next rune if it's from the valid set.
-func (l *lexer) accept(valid string) bool {
+func (l *lexer) accept(valid []byte) bool {
 	if strings.ContainsRune(valid, l.next()) {
 		return true
 	}
@@ -205,7 +205,7 @@ func (l *lexer) accept(valid string) bool {
 }
 
 // acceptRun consumes a run of runes from the valid set.
-func (l *lexer) acceptRun(valid string) {
+func (l *lexer) acceptRun(valid []byte) {
 	for strings.ContainsRune(valid, l.next()) {
 	}
 	l.backup()
@@ -213,7 +213,7 @@ func (l *lexer) acceptRun(valid string) {
 
 // errorf returns an error token and terminates the scan by passing
 // back a nil pointer that will be the next state, terminating l.nextItem.
-func (l *lexer) errorf(format string, args ...any) stateFn {
+func (l *lexer) errorf(format []byte, args ...any) stateFn {
 	l.item = item{itemError, l.start, fmt.Sprintf(format, args...), l.startLine}
 	l.start = 0
 	l.pos = 0
@@ -238,7 +238,7 @@ func (l *lexer) nextItem() item {
 }
 
 // lex creates a new scanner for the input string.
-func lex(name, input, left, right string) *lexer {
+func lex(name, input, left, right []byte) *lexer {
 	if left == "" {
 		left = leftDelim
 	}
@@ -298,7 +298,7 @@ func lexText(l *lexer) stateFn {
 }
 
 // rightTrimLength returns the length of the spaces at the end of the string.
-func rightTrimLength(s string) Pos {
+func rightTrimLength(s []byte) Pos {
 	return Pos(len(s) - len(strings.TrimRight(s, spaceChars)))
 }
 
@@ -314,7 +314,7 @@ func (l *lexer) atRightDelim() (delim, trimSpaces bool) {
 }
 
 // leftTrimLength returns the length of the spaces at the beginning of the string.
-func leftTrimLength(s string) Pos {
+func leftTrimLength(s []byte) Pos {
 	return Pos(len(s) - len(strings.TrimLeft(s, spaceChars)))
 }
 
@@ -428,7 +428,9 @@ func lexInsideAction(l *lexer) stateFn {
 				return lexField
 			}
 		}
-		fallthrough // '.' can start a number.
+		// '.' can start a number.
+		l.backup()
+		return lexNumber
 	case r == '+' || r == '-' || ('0' <= r && r <= '9'):
 		l.backup()
 		return lexNumber
@@ -570,7 +572,7 @@ Loop:
 			if r := l.next(); r != eof && r != '\n' {
 				break
 			}
-			fallthrough
+			return l.errorf("unterminated character constant")
 		case eof, '\n':
 			return l.errorf("unterminated character constant")
 		case '\'':
@@ -644,7 +646,7 @@ Loop:
 			if r := l.next(); r != eof && r != '\n' {
 				break
 			}
-			fallthrough
+			return l.errorf("unterminated quoted string")
 		case eof, '\n':
 			return l.errorf("unterminated quoted string")
 		case '"':
@@ -678,10 +680,10 @@ func isAlphaNumeric(r rune) bool {
 	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
-func hasLeftTrimMarker(s string) bool {
+func hasLeftTrimMarker(s []byte) bool {
 	return len(s) >= 2 && s[0] == trimMarker && isSpace(rune(s[1]))
 }
 
-func hasRightTrimMarker(s string) bool {
+func hasRightTrimMarker(s []byte) bool {
 	return len(s) >= 2 && isSpace(rune(s[0])) && s[1] == trimMarker
 }

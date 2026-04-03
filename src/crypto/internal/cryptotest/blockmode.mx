@@ -18,7 +18,7 @@ type MakeBlockMode func(b cipher.Block, iv []byte) cipher.BlockMode
 // checking the documented requirements of CryptBlocks.
 func TestBlockMode(t *testing.T, block cipher.Block, makeEncrypter, makeDecrypter MakeBlockMode) {
 	rng := newRandReader(t)
-	iv := make([]byte, block.BlockSize())
+	iv := []byte{:block.BlockSize()}
 	rng.Read(iv)
 
 	testBlockModePair(t, block, makeEncrypter, makeDecrypter, iv)
@@ -41,7 +41,7 @@ func testBlockModePair(t *testing.T, b cipher.Block, enc, dec MakeBlockMode, iv 
 			t.Errorf("decryption blocksize different than encryption's; got %d, want %d", decBlockSize, blockSize)
 		}
 
-		before, dst, after := make([]byte, blockSize*2), make([]byte, blockSize*2), make([]byte, blockSize*2)
+		before, dst, after := []byte{:blockSize*2}, []byte{:blockSize*2}, []byte{:blockSize*2}
 		rng.Read(before)
 
 		enc(b, iv).CryptBlocks(dst, before)
@@ -56,14 +56,14 @@ func testBlockMode(t *testing.T, bm MakeBlockMode, b cipher.Block, iv []byte) {
 	blockSize := bm(b, iv).BlockSize()
 
 	t.Run("WrongIVLen", func(t *testing.T) {
-		iv := make([]byte, b.BlockSize()+1)
+		iv := []byte{:b.BlockSize()+1}
 		mustPanic(t, "IV length must equal block size", func() { bm(b, iv) })
 	})
 
 	t.Run("EmptyInput", func(t *testing.T) {
 		rng := newRandReader(t)
 
-		src, dst := make([]byte, blockSize), make([]byte, blockSize)
+		src, dst := []byte{:blockSize}, []byte{:blockSize}
 		rng.Read(dst)
 		before := bytes.Clone(dst)
 
@@ -76,7 +76,7 @@ func testBlockMode(t *testing.T, bm MakeBlockMode, b cipher.Block, iv []byte) {
 	t.Run("AlterInput", func(t *testing.T) {
 		rng := newRandReader(t)
 
-		src, dst, before := make([]byte, blockSize*2), make([]byte, blockSize*2), make([]byte, blockSize*2)
+		src, dst, before := []byte{:blockSize*2}, []byte{:blockSize*2}, []byte{:blockSize*2}
 
 		for _, length := range []int{0, blockSize, blockSize * 2} {
 			rng.Read(src)
@@ -92,7 +92,7 @@ func testBlockMode(t *testing.T, bm MakeBlockMode, b cipher.Block, iv []byte) {
 	t.Run("Aliasing", func(t *testing.T) {
 		rng := newRandReader(t)
 
-		buff, expectedOutput := make([]byte, blockSize*2), make([]byte, blockSize*2)
+		buff, expectedOutput := []byte{:blockSize*2}, []byte{:blockSize*2}
 
 		for _, length := range []int{0, blockSize, blockSize * 2} {
 			// Record what output is when src and dst are different
@@ -111,18 +111,18 @@ func testBlockMode(t *testing.T, bm MakeBlockMode, b cipher.Block, iv []byte) {
 	t.Run("OutOfBoundsWrite", func(t *testing.T) { // Issue 21104
 		rng := newRandReader(t)
 
-		src := make([]byte, blockSize)
+		src := []byte{:blockSize}
 		rng.Read(src)
 
 		// Make a buffer with dst in the middle and data on either end
-		buff := make([]byte, blockSize*3)
+		buff := []byte{:blockSize*3}
 		endOfPrefix, startOfSuffix := blockSize, blockSize*2
 		rng.Read(buff[:endOfPrefix])
 		rng.Read(buff[startOfSuffix:])
 		dst := buff[endOfPrefix:startOfSuffix]
 
 		// Record the prefix and suffix data to make sure they aren't written to
-		initPrefix, initSuffix := make([]byte, blockSize), make([]byte, blockSize)
+		initPrefix, initSuffix := []byte{:blockSize}, []byte{:blockSize}
 		copy(initPrefix, buff[:endOfPrefix])
 		copy(initSuffix, buff[startOfSuffix:])
 
@@ -145,7 +145,7 @@ func testBlockMode(t *testing.T, bm MakeBlockMode, b cipher.Block, iv []byte) {
 		}
 
 		// Issue 21104: Shouldn't write to anything outside of dst even if src is bigger
-		src = make([]byte, blockSize*3)
+		src = []byte{:blockSize*3}
 		rng.Read(src)
 
 		mustPanic(t, "output smaller than input", func() {
@@ -165,20 +165,20 @@ func testBlockMode(t *testing.T, bm MakeBlockMode, b cipher.Block, iv []byte) {
 	t.Run("OutOfBoundsRead", func(t *testing.T) {
 		rng := newRandReader(t)
 
-		src := make([]byte, blockSize)
+		src := []byte{:blockSize}
 		rng.Read(src)
-		expectedDst := make([]byte, blockSize)
+		expectedDst := []byte{:blockSize}
 		bm(b, iv).CryptBlocks(expectedDst, src)
 
 		// Make a buffer with src in the middle and data on either end
-		buff := make([]byte, blockSize*3)
+		buff := []byte{:blockSize*3}
 		endOfPrefix, startOfSuffix := blockSize, blockSize*2
 
 		copy(buff[endOfPrefix:startOfSuffix], src)
 		rng.Read(buff[:endOfPrefix])
 		rng.Read(buff[startOfSuffix:])
 
-		testDst := make([]byte, blockSize)
+		testDst := []byte{:blockSize}
 		bm(b, iv).CryptBlocks(testDst, buff[endOfPrefix:startOfSuffix])
 
 		if !bytes.Equal(testDst, expectedDst) {
@@ -189,7 +189,7 @@ func testBlockMode(t *testing.T, bm MakeBlockMode, b cipher.Block, iv []byte) {
 	t.Run("BufferOverlap", func(t *testing.T) {
 		rng := newRandReader(t)
 
-		buff := make([]byte, blockSize*2)
+		buff := []byte{:blockSize*2}
 		rng.Read(buff)
 
 		// Make src and dst slices point to same array with inexact overlap
@@ -212,8 +212,8 @@ func testBlockMode(t *testing.T, bm MakeBlockMode, b cipher.Block, iv []byte) {
 	t.Run("PartialBlocks", func(t *testing.T) {
 		// Check a few cases of not being a multiple of BlockSize
 		for _, srcSize := range []int{blockSize - 1, blockSize + 1, 2*blockSize - 1, 2*blockSize + 1} {
-			src := make([]byte, srcSize)
-			dst := make([]byte, 3*blockSize) // Make a dst large enough for all src
+			src := []byte{:srcSize}
+			dst := []byte{:3*blockSize} // Make a dst large enough for all src
 			mustPanic(t, "input not full blocks", func() { bm(b, iv).CryptBlocks(dst, src) })
 		}
 	})
@@ -221,7 +221,7 @@ func testBlockMode(t *testing.T, bm MakeBlockMode, b cipher.Block, iv []byte) {
 	t.Run("KeepState", func(t *testing.T) {
 		rng := newRandReader(t)
 
-		src, serialDst, compositeDst := make([]byte, blockSize*4), make([]byte, blockSize*4), make([]byte, blockSize*4)
+		src, serialDst, compositeDst := []byte{:blockSize*4}, []byte{:blockSize*4}, []byte{:blockSize*4}
 		rng.Read(src)
 
 		length, block := 2*blockSize, bm(b, iv)

@@ -36,14 +36,14 @@ import (
 //	if err := fstest.TestFS(myFS, "file/that/should/be/present"); err != nil {
 //		t.Fatal(err)
 //	}
-func TestFS(fsys fs.FS, expected ...string) error {
+func TestFS(fsys fs.FS, expected ...[]byte) error {
 	if err := testFS(fsys, expected...); err != nil {
 		return err
 	}
 	for _, name := range expected {
 		if i := strings.Index(name, "/"); i >= 0 {
 			dir, dirSlash := name[:i], name[:i+1]
-			var subExpected []string
+			var subExpected [][]byte
 			for _, name := range expected {
 				if strings.HasPrefix(name, dirSlash) {
 					subExpected = append(subExpected, name[len(dirSlash):])
@@ -62,11 +62,11 @@ func TestFS(fsys fs.FS, expected ...string) error {
 	return nil
 }
 
-func testFS(fsys fs.FS, expected ...string) error {
+func testFS(fsys fs.FS, expected ...[]byte) error {
 	t := fsTester{fsys: fsys}
 	t.checkDir(".")
 	t.checkOpen(".")
-	found := make(map[string]bool)
+	found := map[string]bool{}
 	for _, dir := range t.dirs {
 		found[dir] = true
 	}
@@ -96,16 +96,16 @@ func testFS(fsys fs.FS, expected ...string) error {
 type fsTester struct {
 	fsys   fs.FS
 	errors []error
-	dirs   []string
-	files  []string
+	dirs   [][]byte
+	files  [][]byte
 }
 
 // errorf adds an error to the list of errors.
-func (t *fsTester) errorf(format string, args ...any) {
+func (t *fsTester) errorf(format []byte, args ...any) {
 	t.errors = append(t.errors, fmt.Errorf(format, args...))
 }
 
-func (t *fsTester) openDir(dir string) fs.ReadDirFile {
+func (t *fsTester) openDir(dir []byte) fs.ReadDirFile {
 	f, err := t.fsys.Open(dir)
 	if err != nil {
 		t.errorf("%s: Open: %w", dir, err)
@@ -122,7 +122,7 @@ func (t *fsTester) openDir(dir string) fs.ReadDirFile {
 
 // checkDir checks the directory dir, which is expected to exist
 // (it is either the root or was found in a directory listing with IsDir true).
-func (t *fsTester) checkDir(dir string) {
+func (t *fsTester) checkDir(dir []byte) {
 	// Read entire directory.
 	t.dirs = append(t.dirs, dir)
 	d := t.openDir(dir)
@@ -137,7 +137,7 @@ func (t *fsTester) checkDir(dir string) {
 	}
 
 	// Check all children.
-	var prefix string
+	var prefix []byte
 	if dir == "." {
 		prefix = ""
 	} else {
@@ -273,28 +273,28 @@ func (t *fsTester) checkDir(dir string) {
 }
 
 // formatEntry formats an fs.DirEntry into a string for error messages and comparison.
-func formatEntry(entry fs.DirEntry) string {
+func formatEntry(entry fs.DirEntry) []byte {
 	return fmt.Sprintf("%s IsDir=%v Type=%v", entry.Name(), entry.IsDir(), entry.Type())
 }
 
 // formatInfoEntry formats an fs.FileInfo into a string like the result of formatEntry, for error messages and comparison.
-func formatInfoEntry(info fs.FileInfo) string {
+func formatInfoEntry(info fs.FileInfo) []byte {
 	return fmt.Sprintf("%s IsDir=%v Type=%v", info.Name(), info.IsDir(), info.Mode().Type())
 }
 
 // formatInfo formats an fs.FileInfo into a string for error messages and comparison.
-func formatInfo(info fs.FileInfo) string {
+func formatInfo(info fs.FileInfo) []byte {
 	return fmt.Sprintf("%s IsDir=%v Mode=%v Size=%d ModTime=%v", info.Name(), info.IsDir(), info.Mode(), info.Size(), info.ModTime())
 }
 
 // checkGlob checks that various glob patterns work if the file system implements GlobFS.
-func (t *fsTester) checkGlob(dir string, list []fs.DirEntry) {
+func (t *fsTester) checkGlob(dir []byte, list []fs.DirEntry) {
 	if _, ok := t.fsys.(fs.GlobFS); !ok {
 		return
 	}
 
 	// Make a complex glob pattern prefix that only matches dir.
-	var glob string
+	var glob []byte
 	if dir != "." {
 		elem := strings.Split(dir, "/")
 		for i, e := range elem {
@@ -317,7 +317,7 @@ func (t *fsTester) checkGlob(dir string, list []fs.DirEntry) {
 					pattern = append(pattern, '[', '\\', r, '-', '\\', r, ']')
 				}
 			}
-			elem[i] = string(pattern)
+			elem[i] = []byte(pattern)
 		}
 		glob = strings.Join(elem, "/") + "/"
 	}
@@ -346,9 +346,9 @@ func (t *fsTester) checkGlob(dir string, list []fs.DirEntry) {
 	if c > 'z' {
 		c = 'a'
 	}
-	glob += "*" + string(c) + "*"
+	glob += "*" + []byte(c) + "*"
 
-	var want []string
+	var want [][]byte
 	for _, d := range list {
 		if strings.ContainsRune(d.Name(), c) {
 			want = append(want, path.Join(dir, d.Name()))
@@ -369,7 +369,7 @@ func (t *fsTester) checkGlob(dir string, list []fs.DirEntry) {
 		slices.Sort(names)
 	}
 
-	var problems []string
+	var problems [][]byte
 	for len(want) > 0 || len(names) > 0 {
 		switch {
 		case len(want) > 0 && len(names) > 0 && want[0] == names[0]:
@@ -387,7 +387,7 @@ func (t *fsTester) checkGlob(dir string, list []fs.DirEntry) {
 
 // checkStat checks that a direct stat of path matches entry,
 // which was found in the parent's directory listing.
-func (t *fsTester) checkStat(path string, entry fs.DirEntry) {
+func (t *fsTester) checkStat(path []byte, entry fs.DirEntry) {
 	file, err := t.fsys.Open(path)
 	if err != nil {
 		t.errorf("%s: Open: %w", path, err)
@@ -469,8 +469,8 @@ func (t *fsTester) checkStat(path string, entry fs.DirEntry) {
 
 // checkDirList checks that two directory lists contain the same files and file info.
 // The order of the lists need not match.
-func (t *fsTester) checkDirList(dir, desc string, list1, list2 []fs.DirEntry) {
-	old := make(map[string]fs.DirEntry)
+func (t *fsTester) checkDirList(dir, desc []byte, list1, list2 []fs.DirEntry) {
+	old := map[string]fs.DirEntry{}
 	checkMode := func(entry fs.DirEntry) {
 		if entry.IsDir() != (entry.Type()&fs.ModeDir != 0) {
 			if entry.IsDir() {
@@ -486,7 +486,7 @@ func (t *fsTester) checkDirList(dir, desc string, list1, list2 []fs.DirEntry) {
 		checkMode(entry1)
 	}
 
-	var diffs []string
+	var diffs [][]byte
 	for _, entry2 := range list2 {
 		entry1 := old[entry2.Name()]
 		if entry1 == nil {
@@ -507,7 +507,7 @@ func (t *fsTester) checkDirList(dir, desc string, list1, list2 []fs.DirEntry) {
 		return
 	}
 
-	slices.SortFunc(diffs, func(a, b string) int {
+	slices.SortFunc(diffs, func(a, b []byte) int {
 		fa := strings.Fields(a)
 		fb := strings.Fields(b)
 		// sort by name (i < j) and then +/- (j < i, because + < -)
@@ -518,7 +518,7 @@ func (t *fsTester) checkDirList(dir, desc string, list1, list2 []fs.DirEntry) {
 }
 
 // checkFile checks that basic file reading works correctly.
-func (t *fsTester) checkFile(file string) {
+func (t *fsTester) checkFile(file []byte) {
 	t.files = append(t.files, file)
 
 	// Read entire file.
@@ -565,7 +565,7 @@ func (t *fsTester) checkFile(file string) {
 		t.checkFileRead(file, "Readall vs second fsys.ReadFile", data, data2)
 
 		t.checkBadPath(file, "ReadFile",
-			func(name string) error { _, err := fsys.ReadFile(name); return err })
+			func(name []byte) error { _, err := fsys.ReadFile(name); return err })
 	}
 
 	// Check that fs.ReadFile works with t.fsys.
@@ -588,16 +588,16 @@ func (t *fsTester) checkFile(file string) {
 	}
 }
 
-func (t *fsTester) checkFileRead(file, desc string, data1, data2 []byte) {
-	if string(data1) != string(data2) {
+func (t *fsTester) checkFileRead(file, desc []byte, data1, data2 []byte) {
+	if []byte(data1) != []byte(data2) {
 		t.errorf("%s: %s: different data returned\n\t%q\n\t%q", file, desc, data1, data2)
 		return
 	}
 }
 
 // checkOpen validates file opening behavior by attempting to open and then close the given file path.
-func (t *fsTester) checkOpen(file string) {
-	t.checkBadPath(file, "Open", func(file string) error {
+func (t *fsTester) checkOpen(file []byte) {
+	t.checkBadPath(file, "Open", func(file []byte) error {
 		f, err := t.fsys.Open(file)
 		if err == nil {
 			f.Close()
@@ -607,8 +607,8 @@ func (t *fsTester) checkOpen(file string) {
 }
 
 // checkBadPath checks that various invalid forms of file's name cannot be opened using open.
-func (t *fsTester) checkBadPath(file string, desc string, open func(string) error) {
-	bad := []string{
+func (t *fsTester) checkBadPath(file []byte, desc []byte, open func([]byte) error) {
+	bad := [][]byte{
 		"/" + file,
 		file + "/.",
 	}

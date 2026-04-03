@@ -491,7 +491,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 			}
 		default:
 			// It appears that no Type means "void".
-			return new(VoidType)
+			return &VoidType{}
 		}
 		return t
 	}
@@ -506,7 +506,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		// Children:
 		//	TagSubrangeType or TagEnumerationType giving one dimension.
 		//	dimensions are in left to right order.
-		t := new(ArrayType)
+		t := &ArrayType{}
 		typ = t
 		typeCache[off] = t
 		if t.Type = typeOf(e); err != nil {
@@ -571,11 +571,11 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 			goto Error
 
 		case encAddress:
-			typ = new(AddrType)
+			typ = &AddrType{}
 		case encBoolean:
-			typ = new(BoolType)
+			typ = &BoolType{}
 		case encComplexFloat:
-			typ = new(ComplexType)
+			typ = &ComplexType{}
 			if name == "complex" {
 				// clang writes out 'complex' instead of 'complex float' or 'complex double'.
 				// clang also writes out a byte size that we can use to distinguish.
@@ -588,15 +588,15 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 				}
 			}
 		case encFloat:
-			typ = new(FloatType)
+			typ = &FloatType{}
 		case encSigned:
-			typ = new(IntType)
+			typ = &IntType{}
 		case encUnsigned:
-			typ = new(UintType)
+			typ = &UintType{}
 		case encSignedChar:
-			typ = new(CharType)
+			typ = &CharType{}
 		case encUnsignedChar:
-			typ = new(UcharType)
+			typ = &UcharType{}
 		}
 		typeCache[off] = typ
 		t := typ.(interface {
@@ -629,7 +629,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		//		AttrBitSize: bit size for bit fields
 		//		AttrDataMemberLoc: location within struct [required for struct, class]
 		// There is much more to handle C++, all ignored for now.
-		t := new(StructType)
+		t := &StructType{}
 		typ = t
 		typeCache[off] = t
 		switch e.Tag {
@@ -642,7 +642,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		}
 		t.StructName, _ = e.Val(AttrName).(string)
 		t.Incomplete = e.Val(AttrDeclaration) != nil
-		t.Field = make([]*StructField, 0, 8)
+		t.Field = []*StructField{:0:8}
 		var lastFieldType *Type
 		var lastFieldBitSize int64
 		var lastFieldByteOffset int64
@@ -650,7 +650,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 			if kid.Tag != TagMember {
 				continue
 			}
-			f := new(StructField)
+			f := &StructField{}
 			if f.Type = typeOf(kid); err != nil {
 				goto Error
 			}
@@ -706,7 +706,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		// Type modifier (DWARF v2 §5.2)
 		// Attributes:
 		//	AttrType: subtype
-		t := new(QualType)
+		t := &QualType{}
 		typ = t
 		typeCache[off] = t
 		if t.Type = typeOf(e); err != nil {
@@ -730,19 +730,19 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		//	TagEnumerator:
 		//		AttrName: name of constant
 		//		AttrConstValue: value of constant
-		t := new(EnumType)
+		t := &EnumType{}
 		typ = t
 		typeCache[off] = t
 		t.EnumName, _ = e.Val(AttrName).(string)
-		t.Val = make([]*EnumValue, 0, 8)
+		t.Val = []*EnumValue{:0:8}
 		for kid := next(); kid != nil; kid = next() {
 			if kid.Tag == TagEnumerator {
-				f := new(EnumValue)
+				f := &EnumValue{}
 				f.Name, _ = kid.Val(AttrName).(string)
 				f.Val, _ = kid.Val(AttrConstValue).(int64)
 				n := len(t.Val)
 				if n >= cap(t.Val) {
-					val := make([]*EnumValue, n, n*2)
+					val := []*EnumValue{:n:n*2}
 					copy(val, t.Val)
 					t.Val = val
 				}
@@ -756,7 +756,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		// Attributes:
 		//	AttrType: subtype [not required!  void* has no AttrType]
 		//	AttrAddrClass: address class [ignored]
-		t := new(PtrType)
+		t := &PtrType{}
 		typ = t
 		typeCache[off] = t
 		if e.Val(AttrType) == nil {
@@ -775,13 +775,13 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		//	TagFormalParameter: typed parameter
 		//		AttrType: type of parameter
 		//	TagUnspecifiedParameter: final ...
-		t := new(FuncType)
+		t := &FuncType{}
 		typ = t
 		typeCache[off] = t
 		if t.ReturnType = typeOf(e); err != nil {
 			goto Error
 		}
-		t.ParamType = make([]Type, 0, 8)
+		t.ParamType = []Type{:0:8}
 		for kid := next(); kid != nil; kid = next() {
 			var tkid Type
 			switch kid.Tag {
@@ -802,7 +802,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		// Attributes:
 		//	AttrName: name [required]
 		//	AttrType: type definition [required]
-		t := new(TypedefType)
+		t := &TypedefType{}
 		typ = t
 		typeCache[off] = t
 		t.Name, _ = e.Val(AttrName).(string)
@@ -812,7 +812,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		// Unspecified type (DWARF v3 §5.2)
 		// Attributes:
 		//	AttrName: name
-		t := new(UnspecifiedType)
+		t := &UnspecifiedType{}
 		typ = t
 		typeCache[off] = t
 		t.Name, _ = e.Val(AttrName).(string)
@@ -821,7 +821,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		// This is some other type DIE that we're currently not
 		// equipped to handle. Return an abstract "unsupported type"
 		// object in such cases.
-		t := new(UnsupportedType)
+		t := &UnsupportedType{}
 		typ = t
 		typeCache[off] = t
 		t.Tag = e.Tag

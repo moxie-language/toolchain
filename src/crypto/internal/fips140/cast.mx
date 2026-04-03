@@ -5,16 +5,16 @@
 package fips140
 
 import (
+	"bytes"
 	"crypto/internal/fips140deps/godebug"
 	"errors"
-	"strings"
 	_ "unsafe" // for go:linkname
 )
 
 // fatal is [runtime.fatal], pushed via linkname.
 //
 //go:linkname fatal crypto/internal/fips140.fatal
-func fatal(string)
+func fatal([]byte)
 
 // failfipscast is a GODEBUG key allowing simulation of a CAST or PCT failure,
 // as required during FIPS 140-3 functional testing. The value is the whole name
@@ -34,24 +34,32 @@ var failfipscast = godebug.Value("#failfipscast")
 // be added to crypto/internal/fips140test. If a package p calls CAST on the first
 // use of the algorithm, an invocation of that algorithm should be added to
 // fipstest.TestConditionals.
-func CAST(name string, f func() error) {
-	if strings.ContainsAny(name, ",#=:") {
-		panic("fips: invalid self-test name: " + name)
+func CAST(name []byte, f func() error) {
+	if bytes.ContainsAny(name, ",#=:") {
+		var msg []byte
+		msg = append(msg, "fips: invalid self-test name: "...)
+		msg = append(msg, name...)
+		panic(string(msg))
 	}
 	if !Enabled {
 		return
 	}
 
 	err := f()
-	if name == failfipscast {
+	if bytes.Equal(name, failfipscast) {
 		err = errors.New("simulated CAST failure")
 	}
 	if err != nil {
-		fatal("FIPS 140-3 self-test failed: " + name + ": " + err.Error())
+		var msg []byte
+		msg = append(msg, "FIPS 140-3 self-test failed: "...)
+		msg = append(msg, name...)
+		msg = append(msg, ": "...)
+		msg = append(msg, err.Error()...)
+		fatal(msg)
 		panic("unreachable")
 	}
 	if debug {
-		println("FIPS 140-3 self-test passed:", name)
+		println("FIPS 140-3 self-test passed:", string(name))
 	}
 }
 
@@ -67,23 +75,31 @@ func CAST(name string, f func() error) {
 //
 // If a package p calls PCT during key generation, an invocation of that
 // function should be added to fipstest.TestConditionals.
-func PCT(name string, f func() error) {
-	if strings.ContainsAny(name, ",#=:") {
-		panic("fips: invalid self-test name: " + name)
+func PCT(name []byte, f func() error) {
+	if bytes.ContainsAny(name, ",#=:") {
+		var msg []byte
+		msg = append(msg, "fips: invalid self-test name: "...)
+		msg = append(msg, name...)
+		panic(string(msg))
 	}
 	if !Enabled {
 		return
 	}
 
 	err := f()
-	if name == failfipscast {
+	if bytes.Equal(name, failfipscast) {
 		err = errors.New("simulated PCT failure")
 	}
 	if err != nil {
-		fatal("FIPS 140-3 self-test failed: " + name + ": " + err.Error())
+		var msg []byte
+		msg = append(msg, "FIPS 140-3 self-test failed: "...)
+		msg = append(msg, name...)
+		msg = append(msg, ": "...)
+		msg = append(msg, err.Error()...)
+		fatal(msg)
 		panic("unreachable")
 	}
 	if debug {
-		println("FIPS 140-3 PCT passed:", name)
+		println("FIPS 140-3 PCT passed:", string(name))
 	}
 }

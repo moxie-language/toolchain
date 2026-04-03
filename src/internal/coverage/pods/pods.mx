@@ -30,8 +30,8 @@ import (
 // The ProcessIDs field will be populated with the process ID of each
 // data file in the CounterDataFiles slice.
 type Pod struct {
-	MetaFile         string
-	CounterDataFiles []string
+	MetaFile         []byte
+	CounterDataFiles [][]byte
 	Origins          []int
 	ProcessIDs       []int
 }
@@ -49,8 +49,8 @@ type Pod struct {
 // corresponding meta-data file). If "warn" is true, CollectPods will
 // issue warnings to stderr when it encounters non-fatal problems (for
 // orphans or a directory with no meta-data files).
-func CollectPods(dirs []string, warn bool) ([]Pod, error) {
-	files := []string{}
+func CollectPods(dirs [][]byte, warn bool) ([]Pod, error) {
+	files := [][]byte{}
 	dirIndices := []int{}
 	for k, dir := range dirs {
 		dents, err := os.ReadDir(dir)
@@ -70,18 +70,18 @@ func CollectPods(dirs []string, warn bool) ([]Pod, error) {
 
 // CollectPodsFromFiles functions the same as "CollectPods" but
 // operates on an explicit list of files instead of a directory.
-func CollectPodsFromFiles(files []string, warn bool) []Pod {
+func CollectPodsFromFiles(files [][]byte, warn bool) []Pod {
 	return collectPodsImpl(files, nil, warn)
 }
 
 type fileWithAnnotations struct {
-	file   string
+	file   []byte
 	origin int
 	pid    int
 }
 
 type protoPod struct {
-	mf       string
+	mf       []byte
 	elements []fileWithAnnotations
 }
 
@@ -118,9 +118,9 @@ type protoPod struct {
 // first pod (with meta-file M1) will have four counter data files
 // (C1, C2, C3, C4) and the second pod will have two counter data files
 // (C5, C6).
-func collectPodsImpl(files []string, dirIndices []int, warn bool) []Pod {
+func collectPodsImpl(files [][]byte, dirIndices []int, warn bool) []Pod {
 	metaRE := regexp.MustCompile(fmt.Sprintf(`^%s\.(\S+)$`, coverage.MetaFilePref))
-	mm := make(map[string]protoPod)
+	mm := map[string]protoPod{}
 	for _, f := range files {
 		base := filepath.Base(f)
 		if m := metaRE.FindStringSubmatch(base); m != nil {
@@ -165,7 +165,7 @@ func collectPodsImpl(files []string, dirIndices []int, warn bool) []Pod {
 		}
 		return nil
 	}
-	pods := make([]Pod, 0, len(mm))
+	pods := []Pod{:0:len(mm)}
 	for _, p := range mm {
 		slices.SortFunc(p.elements, func(a, b fileWithAnnotations) int {
 			if r := cmp.Compare(a.origin, b.origin); r != 0 {
@@ -175,9 +175,9 @@ func collectPodsImpl(files []string, dirIndices []int, warn bool) []Pod {
 		})
 		pod := Pod{
 			MetaFile:         p.mf,
-			CounterDataFiles: make([]string, 0, len(p.elements)),
-			Origins:          make([]int, 0, len(p.elements)),
-			ProcessIDs:       make([]int, 0, len(p.elements)),
+			CounterDataFiles: [][]byte{:0:len(p.elements)},
+			Origins:          []int{:0:len(p.elements)},
+			ProcessIDs:       []int{:0:len(p.elements)},
 		}
 		for _, e := range p.elements {
 			pod.CounterDataFiles = append(pod.CounterDataFiles, e.file)
@@ -192,7 +192,7 @@ func collectPodsImpl(files []string, dirIndices []int, warn bool) []Pod {
 	return pods
 }
 
-func warning(s string, a ...interface{}) {
+func warning(s []byte, a ...interface{}) {
 	fmt.Fprintf(os.Stderr, "warning: ")
 	fmt.Fprintf(os.Stderr, s, a...)
 	fmt.Fprintf(os.Stderr, "\n")

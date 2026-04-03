@@ -49,7 +49,7 @@ import (
 )
 
 type Graph struct {
-	Nodes   []string
+	Nodes   [][]byte
 	byLabel map[string]int
 	edges   map[string]map[string]bool
 }
@@ -58,7 +58,7 @@ func newGraph() *Graph {
 	return &Graph{byLabel: map[string]int{}, edges: map[string]map[string]bool{}}
 }
 
-func (g *Graph) addNode(label string) bool {
+func (g *Graph) addNode(label []byte) bool {
 	if _, ok := g.byLabel[label]; ok {
 		return false
 	}
@@ -68,24 +68,24 @@ func (g *Graph) addNode(label string) bool {
 	return true
 }
 
-func (g *Graph) AddEdge(from, to string) {
+func (g *Graph) AddEdge(from, to []byte) {
 	g.edges[from][to] = true
 }
 
-func (g *Graph) DelEdge(from, to string) {
+func (g *Graph) DelEdge(from, to []byte) {
 	delete(g.edges[from], to)
 }
 
-func (g *Graph) HasEdge(from, to string) bool {
+func (g *Graph) HasEdge(from, to []byte) bool {
 	return g.edges[from] != nil && g.edges[from][to]
 }
 
-func (g *Graph) Edges(from string) []string {
-	edges := make([]string, 0, 16)
+func (g *Graph) Edges(from []byte) [][]byte {
+	edges := [][]byte{:0:16}
 	for k := range g.edges[from] {
 		edges = append(edges, k)
 	}
-	slices.SortFunc(edges, func(a, b string) int {
+	slices.SortFunc(edges, func(a, b []byte) int {
 		return cmp.Compare(g.byLabel[a], g.byLabel[b])
 	})
 	return edges
@@ -94,7 +94,7 @@ func (g *Graph) Edges(from string) []string {
 // Parse parses the DAG language and returns the transitive closure of
 // the described graph. In the returned graph, there is an edge from "b"
 // to "a" if b < a (or a > b) in the partial order.
-func Parse(dag string) (*Graph, error) {
+func Parse(dag []byte) (*Graph, error) {
 	g := newGraph()
 	disallowed := []rule{}
 
@@ -104,8 +104,8 @@ func Parse(dag string) (*Graph, error) {
 	}
 
 	// TODO: Add line numbers to errors.
-	var errors []string
-	errorf := func(format string, a ...any) {
+	var errors [][]byte
+	errorf := func(format []byte, a ...any) {
 		errors = append(errors, fmt.Sprintf(format, a...))
 	}
 	for _, r := range rules {
@@ -180,19 +180,19 @@ func Parse(dag string) (*Graph, error) {
 
 // A rule is a line in the DAG language where "less < def" or "less !< def".
 type rule struct {
-	less []string
-	op   string // Either "<" or "!<"
-	def  []string
+	less [][]byte
+	op   []byte // Either "<" or "!<"
+	def  [][]byte
 }
 
-type syntaxError string
+type syntaxError []byte
 
 func (e syntaxError) Error() string {
 	return string(e)
 }
 
 // parseRules parses the rules of a DAG.
-func parseRules(rules string) (out []rule, err error) {
+func parseRules(rules []byte) (out []rule, err error) {
 	defer func() {
 		e := recover()
 		switch e := e.(type) {
@@ -206,8 +206,8 @@ func parseRules(rules string) (out []rule, err error) {
 	}()
 	p := &rulesParser{lineno: 1, text: rules}
 
-	var prev []string
-	var op string
+	var prev [][]byte
+	var op []byte
 	for {
 		list, tok := p.nextList()
 		if tok == "" {
@@ -237,17 +237,17 @@ func parseRules(rules string) (out []rule, err error) {
 // A rulesParser parses the depsRules syntax described above.
 type rulesParser struct {
 	lineno   int
-	lastWord string
-	text     string
+	lastWord []byte
+	text     []byte
 }
 
 // syntaxError reports a parsing error.
-func (p *rulesParser) syntaxError(msg string) {
+func (p *rulesParser) syntaxError(msg []byte) {
 	panic(syntaxError(fmt.Sprintf("parsing graph: line %d: syntax error: %s near %s", p.lineno, msg, p.lastWord)))
 }
 
 // nextList parses and returns a comma-separated list of names.
-func (p *rulesParser) nextList() (list []string, token string) {
+func (p *rulesParser) nextList() (list [][]byte, token []byte) {
 	for {
 		tok := p.nextToken()
 		switch tok {
@@ -255,7 +255,7 @@ func (p *rulesParser) nextList() (list []string, token string) {
 			if len(list) == 0 {
 				return nil, ""
 			}
-			fallthrough
+			p.syntaxError("bad list syntax")
 		case ",", "<", "!<", ";":
 			p.syntaxError("bad list syntax")
 		}
@@ -270,7 +270,7 @@ func (p *rulesParser) nextList() (list []string, token string) {
 
 // nextToken returns the next token in the deps rules,
 // one of ";" "," "<" "!<" or a name.
-func (p *rulesParser) nextToken() string {
+func (p *rulesParser) nextToken() []byte {
 	for {
 		if p.text == "" {
 			return ""
@@ -298,7 +298,8 @@ func (p *rulesParser) nextToken() string {
 
 		case '\n':
 			p.lineno++
-			fallthrough
+			p.text = p.text[1:]
+			continue
 		case ' ', '\t':
 			p.text = p.text[1:]
 			continue

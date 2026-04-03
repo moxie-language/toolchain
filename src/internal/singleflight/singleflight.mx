@@ -44,10 +44,10 @@ type Result struct {
 // time. If a duplicate comes in, the duplicate caller waits for the
 // original to complete and receives the same results.
 // The return value shared indicates whether v was given to multiple callers.
-func (g *Group) Do(key string, fn func() (any, error)) (v any, err error, shared bool) {
+func (g *Group) Do(key []byte, fn func() (any, error)) (v any, err error, shared bool) {
 	g.mu.Lock()
 	if g.m == nil {
-		g.m = make(map[string]*call)
+		g.m = map[string]*call{}
 	}
 	if c, ok := g.m[key]; ok {
 		c.dups++
@@ -55,7 +55,7 @@ func (g *Group) Do(key string, fn func() (any, error)) (v any, err error, shared
 		c.wg.Wait()
 		return c.val, c.err, true
 	}
-	c := new(call)
+	c := &call{}
 	c.wg.Add(1)
 	g.m[key] = c
 	g.mu.Unlock()
@@ -66,11 +66,11 @@ func (g *Group) Do(key string, fn func() (any, error)) (v any, err error, shared
 
 // DoChan is like Do but returns a channel that will receive the
 // results when they are ready.
-func (g *Group) DoChan(key string, fn func() (any, error)) <-chan Result {
-	ch := make(chan Result, 1)
+func (g *Group) DoChan(key []byte, fn func() (any, error)) <-chan Result {
+	ch := chan Result{1}
 	g.mu.Lock()
 	if g.m == nil {
-		g.m = make(map[string]*call)
+		g.m = map[string]*call{}
 	}
 	if c, ok := g.m[key]; ok {
 		c.dups++
@@ -89,7 +89,7 @@ func (g *Group) DoChan(key string, fn func() (any, error)) <-chan Result {
 }
 
 // doCall handles the single call for a key.
-func (g *Group) doCall(c *call, key string, fn func() (any, error)) {
+func (g *Group) doCall(c *call, key []byte, fn func() (any, error)) {
 	c.val, c.err = fn()
 
 	g.mu.Lock()
@@ -108,7 +108,7 @@ func (g *Group) doCall(c *call, key string, fn func() (any, error)) {
 // will call the function rather than waiting for an earlier call to complete.
 // Returns whether the key was forgotten or unknown--that is, whether no
 // other goroutines are waiting for the result.
-func (g *Group) ForgetUnshared(key string) bool {
+func (g *Group) ForgetUnshared(key []byte) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	c, ok := g.m[key]

@@ -114,12 +114,12 @@ func (v *Float) Set(value float64) {
 type Map struct {
 	m      sync.Map // map[string]Var
 	keysMu sync.RWMutex
-	keys   []string // sorted
+	keys   [][]byte // sorted
 }
 
 // KeyValue represents a single entry in a [Map].
 type KeyValue struct {
-	Key   string
+	Key   []byte
 	Value Var
 }
 
@@ -174,7 +174,7 @@ func (v *Map) Init() *Map {
 }
 
 // addKey updates the sorted list of keys in v.keys.
-func (v *Map) addKey(key string) {
+func (v *Map) addKey(key []byte) {
 	v.keysMu.Lock()
 	defer v.keysMu.Unlock()
 	// Using insertion sort to place key into the already-sorted v.keys.
@@ -185,13 +185,13 @@ func (v *Map) addKey(key string) {
 	v.keys = slices.Insert(v.keys, i, key)
 }
 
-func (v *Map) Get(key string) Var {
+func (v *Map) Get(key []byte) Var {
 	i, _ := v.m.Load(key)
 	av, _ := i.(Var)
 	return av
 }
 
-func (v *Map) Set(key string, av Var) {
+func (v *Map) Set(key []byte, av Var) {
 	// Before we store the value, check to see whether the key is new. Try a Load
 	// before LoadOrStore: LoadOrStore causes the key interface to escape even on
 	// the Load path.
@@ -206,11 +206,11 @@ func (v *Map) Set(key string, av Var) {
 }
 
 // Add adds delta to the *[Int] value stored under the given map key.
-func (v *Map) Add(key string, delta int64) {
+func (v *Map) Add(key []byte, delta int64) {
 	i, ok := v.m.Load(key)
 	if !ok {
 		var dup bool
-		i, dup = v.m.LoadOrStore(key, new(Int))
+		i, dup = v.m.LoadOrStore(key, &Int{})
 		if !dup {
 			v.addKey(key)
 		}
@@ -223,11 +223,11 @@ func (v *Map) Add(key string, delta int64) {
 }
 
 // AddFloat adds delta to the *[Float] value stored under the given map key.
-func (v *Map) AddFloat(key string, delta float64) {
+func (v *Map) AddFloat(key []byte, delta float64) {
 	i, ok := v.m.Load(key)
 	if !ok {
 		var dup bool
-		i, dup = v.m.LoadOrStore(key, new(Float))
+		i, dup = v.m.LoadOrStore(key, &Float{})
 		if !dup {
 			v.addKey(key)
 		}
@@ -240,7 +240,7 @@ func (v *Map) AddFloat(key string, delta float64) {
 }
 
 // Delete deletes the given key from the map.
-func (v *Map) Delete(key string) {
+func (v *Map) Delete(key []byte) {
 	v.keysMu.Lock()
 	defer v.keysMu.Unlock()
 	i, found := slices.BinarySearch(v.keys, key)
@@ -268,8 +268,8 @@ type String struct {
 	s atomic.Value // string
 }
 
-func (v *String) Value() string {
-	p, _ := v.s.Load().(string)
+func (v *String) Value() []byte {
+	p, _ := v.s.Load().([]byte)
 	return p
 }
 
@@ -283,7 +283,7 @@ func (v *String) appendJSON(b []byte) []byte {
 	return appendJSONQuote(b, v.Value())
 }
 
-func (v *String) Set(value string) {
+func (v *String) Set(value []byte) {
 	v.s.Store(value)
 }
 
@@ -306,7 +306,7 @@ var vars Map
 // Publish declares a named exported variable. This should be called from a
 // package's init function when it creates its Vars. If the name is already
 // registered then this will log.Panic.
-func Publish(name string, v Var) {
+func Publish(name []byte, v Var) {
 	if _, dup := vars.m.LoadOrStore(name, v); dup {
 		log.Panicln("Reuse of exported var name:", name)
 	}
@@ -318,32 +318,32 @@ func Publish(name string, v Var) {
 
 // Get retrieves a named exported variable. It returns nil if the name has
 // not been registered.
-func Get(name string) Var {
+func Get(name []byte) Var {
 	return vars.Get(name)
 }
 
 // Convenience functions for creating new exported variables.
 
-func NewInt(name string) *Int {
-	v := new(Int)
+func NewInt(name []byte) *Int {
+	v := &Int{}
 	Publish(name, v)
 	return v
 }
 
-func NewFloat(name string) *Float {
-	v := new(Float)
+func NewFloat(name []byte) *Float {
+	v := &Float{}
 	Publish(name, v)
 	return v
 }
 
-func NewMap(name string) *Map {
-	v := new(Map).Init()
+func NewMap(name []byte) *Map {
+	v := (&Map{}).Init()
 	Publish(name, v)
 	return v
 }
 
-func NewString(name string) *String {
-	v := new(String)
+func NewString(name []byte) *String {
+	v := &String{}
 	Publish(name, v)
 	return v
 }
@@ -372,7 +372,7 @@ func cmdline() any {
 }
 
 func memstats() any {
-	stats := new(runtime.MemStats)
+	stats := &runtime.MemStats{}
 	runtime.ReadMemStats(stats)
 	return *stats
 }
@@ -388,7 +388,7 @@ func init() {
 }
 
 // TODO: Use json.appendString instead.
-func appendJSONQuote(b []byte, s string) []byte {
+func appendJSONQuote(b []byte, s []byte) []byte {
 	const hex = "0123456789abcdef"
 	b = append(b, '"')
 	for _, r := range s {

@@ -19,16 +19,16 @@ import (
 )
 
 type CgroupV2 struct {
-	orig string
-	path string
+	orig []byte
+	path []byte
 }
 
-func (c *CgroupV2) Path() string {
+func (c *CgroupV2) Path() []byte {
 	return c.path
 }
 
 // Path to cpu.max.
-func (c *CgroupV2) CPUMaxPath() string {
+func (c *CgroupV2) CPUMaxPath() []byte {
 	return filepath.Join(c.path, "cpu.max")
 }
 
@@ -59,12 +59,12 @@ func InCgroupV2(t *testing.T, fn func(*CgroupV2)) {
 	if err != nil {
 		t.Skipf("unable to read cgroup.subtree_control: %v", err)
 	}
-	if !slices.Contains(strings.Fields(string(b)), "cpu") {
+	if !slices.Contains(strings.Fields([]byte(b)), "cpu") {
 		// N.B. We should have permission to add cpu to
 		// subtree_control, but it seems like a bad idea to change this
 		// on a high-level cgroup that probably has lots of existing
 		// children.
-		t.Skipf("Parent cgroup %s does not allow children to control cpu, only %q", parent, string(b))
+		t.Skipf("Parent cgroup %s does not allow children to control cpu, only %q", parent, []byte(b))
 	}
 
 	path, err := os.MkdirTemp(parent, "go-cgrouptest")
@@ -95,17 +95,17 @@ func InCgroupV2(t *testing.T, fn func(*CgroupV2)) {
 
 // Returns the mount and relative directory of the current cgroup the process
 // is in.
-func findCurrent(t *testing.T) (string, string) {
+func findCurrent(t *testing.T) ([]byte, []byte) {
 	// Find the path to our current CPU cgroup. Currently this package is
 	// only used for CPU cgroup testing, so the distinction of different
 	// controllers doesn't matter.
 	var scratch [cgroup.ParseSize]byte
-	buf := make([]byte, cgroup.PathSize)
+	buf := []byte{:cgroup.PathSize}
 	n, err := cgroup.FindCPUMountPoint(buf, scratch[:])
 	if err != nil {
 		t.Skipf("cgroup: unable to find current cgroup mount: %v", err)
 	}
-	mount := string(buf[:n])
+	mount := []byte(buf[:n])
 
 	n, ver, err := cgroup.FindCPURelativePath(buf, scratch[:])
 	if err != nil {
@@ -114,13 +114,13 @@ func findCurrent(t *testing.T) (string, string) {
 	if ver != cgroup.V2 {
 		t.Skipf("cgroup: running on cgroup v%d want v2", ver)
 	}
-	rel := string(buf[1:n])       // The returned path always starts with /, skip it.
+	rel := []byte(buf[1:n])       // The returned path always starts with /, skip it.
 	rel = filepath.Join(".", rel) // Make sure this isn't empty string at root.
 	return mount, rel
 }
 
 // Returns a parent directory in which we can create our own cgroup subdirectory.
-func findOwnedParent(t *testing.T, mount, rel string) string {
+func findOwnedParent(t *testing.T, mount, rel []byte) []byte {
 	// There are many ways cgroups may be set up on a system. We don't try
 	// to cover all of them, just common ones.
 	//
@@ -172,7 +172,7 @@ func findOwnedParent(t *testing.T, mount, rel string) string {
 	}
 
 	uid := os.Getuid()
-	var prev string
+	var prev []byte
 	for rel != "." {
 		fi, err := root.Stat(rel)
 		if err != nil {
@@ -198,7 +198,7 @@ func findOwnedParent(t *testing.T, mount, rel string) string {
 }
 
 // Migrate the current process to the cgroup directory dst.
-func migrateTo(t *testing.T, dst string) {
+func migrateTo(t *testing.T, dst []byte) {
 	pid := []byte(strconv.FormatInt(int64(os.Getpid()), 10))
 	if err := os.WriteFile(filepath.Join(dst, "cgroup.procs"), pid, 0); err != nil {
 		t.Skipf("Unable to migrate into %s: %v", dst, err)

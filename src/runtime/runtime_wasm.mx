@@ -1,0 +1,141 @@
+//go:build js && wasm
+
+package runtime
+
+import "unsafe"
+
+// putchar writes a single byte to stdout via the JS console.
+//
+//go:wasm-module wasi_snapshot_preview1
+//export fd_write
+func fd_write(fd int32, iovs unsafe.Pointer, iovs_len int32, nwritten unsafe.Pointer) int32
+
+func putchar(c byte) {
+	buf := [1]byte{c}
+	iov := [2]uintptr{uintptr(unsafe.Pointer(&buf[0])), 1}
+	var nw int32
+	fd_write(1, unsafe.Pointer(&iov[0]), 1, unsafe.Pointer(&nw))
+}
+
+// abort terminates the program.
+//
+//export abort
+func abort() {
+	trap()
+}
+
+// hardwareRand returns a random uint64. On WASM/JS, we use a simple
+// xorshift fallback since there's no hardware RNG instruction.
+var randState uint64 = 0x853c49e6748fea9b
+
+func hardwareRand() (n uint64, ok bool) {
+	// xorshift64*
+	randState ^= randState >> 12
+	randState ^= randState << 25
+	randState ^= randState >> 27
+	return randState * 0x2545F4914F6CDD1D, true
+}
+
+// Heap management for WASM linear memory.
+var heapStart, heapEnd uintptr
+
+// wasm_memory_size returns the current memory size in pages (64KB each).
+//
+//go:linkname wasm_memory_size llvm.wasm.memory.size.i32
+func wasm_memory_size(index int32) int32
+
+// wasm_memory_grow grows memory by delta pages. Returns previous size or -1.
+//
+//go:linkname wasm_memory_grow llvm.wasm.memory.grow.i32
+func wasm_memory_grow(index int32, delta int32) int32
+
+const wasmPageSize = 64 * 1024
+
+// allocateHeap initializes the WASM heap from linear memory.
+func allocateHeap() {
+	pages := wasm_memory_size(0)
+	heapStart = uintptr(pages) * wasmPageSize
+	// Start with 8 pages (512KB)
+	if wasm_memory_grow(0, 8) == -1 {
+		runtimePanic("cannot allocate heap memory")
+	}
+	heapEnd = heapStart + 8*wasmPageSize
+}
+
+func growHeap() bool {
+	oldPages := wasm_memory_grow(0, 8)
+	if oldPages == -1 {
+		return false
+	}
+	heapEnd = uintptr(oldPages+8) * wasmPageSize
+	return true
+}
+
+// globalsStart/globalsEnd are linker-provided symbols for GC scanning.
+//
+//go:extern __data_start
+var globalsStart [0]byte
+
+//go:extern __data_end
+var globalsEnd [0]byte
+
+// Timing functions for WASM.
+var wasmTickOffset int64
+
+func ticks() timeUnit {
+	return timeUnit(monotime())
+}
+
+//go:wasm-module wasi_snapshot_preview1
+//export clock_time_get
+func clock_time_get(clockID int32, precision int64, time unsafe.Pointer) int32
+
+func monotime() int64 {
+	var t int64
+	clock_time_get(1, 0, unsafe.Pointer(&t)) // CLOCK_MONOTONIC = 1
+	return t
+}
+
+func nanosecondsToTicks(ns int64) timeUnit {
+	return timeUnit(ns)
+}
+
+func ticksToNanoseconds(t timeUnit) int64 {
+	return int64(t)
+}
+
+func sleepTicks(d timeUnit) {
+	// No-op on WASM — cooperative scheduling handles yields.
+}
+
+func now() (int64, int32, int64) {
+	var t int64
+	clock_time_get(0, 0, unsafe.Pointer(&t)) // CLOCK_REALTIME = 0
+	sec := t / 1000000000
+	nsec := int32(t % 1000000000)
+	mono := monotime()
+	return sec, nsec, mono
+}
+
+// libc_errno_location is not available on WASM.
+func libc_errno_location() *int32 {
+	return &wasmErrno
+}
+
+var wasmErrno int32
+
+// savedStackPointer is used by the GC to save the stack pointer.
+var savedStackPointer uintptr
+
+// _start is the WASI entry point for WASM executables.
+// WASM is single-threaded, so we bypass the scheduler and call main directly.
+//
+//export _start
+func _start() {
+	// Initialize heap from linear memory.
+	allocateHeap()
+	initRand()
+	initHeap()
+	initAll()
+	callMain()
+}

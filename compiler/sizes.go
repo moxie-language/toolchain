@@ -103,7 +103,7 @@ func (s *stdSizes) Sizeof(T types.Type) int64 {
 			}
 		}
 		if k == types.String {
-			return s.PtrSize * 2
+			return s.PtrSize * 3 // Moxie: string is {ptr, len, cap} like []byte
 		}
 		if k == types.Int || k == types.Uint {
 			return s.IntSize

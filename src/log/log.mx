@@ -68,8 +68,8 @@ type Logger struct {
 // The prefix appears at the beginning of each generated log line, or
 // after the log header if the [Lmsgprefix] flag is provided.
 // The flag argument defines the logging properties.
-func New(out io.Writer, prefix string, flag int) *Logger {
-	l := new(Logger)
+func New(out io.Writer, prefix []byte, flag int) *Logger {
+	l := &Logger{}
 	l.SetOutput(out)
 	l.SetPrefix(prefix)
 	l.SetFlags(flag)
@@ -111,7 +111,7 @@ func itoa(buf *[]byte, i int, wid int) {
 //   - date and/or time (if corresponding flags are provided),
 //   - file and line number (if corresponding flags are provided),
 //   - l.prefix (if it's not blank and Lmsgprefix is set).
-func formatHeader(buf *[]byte, t time.Time, prefix string, flag int, file string, line int) {
+func formatHeader(buf *[]byte, t time.Time, prefix []byte, flag int, file []byte, line int) {
 	if flag&Lmsgprefix == 0 {
 		*buf = append(*buf, prefix...)
 	}
@@ -163,7 +163,7 @@ func formatHeader(buf *[]byte, t time.Time, prefix string, flag int, file string
 	}
 }
 
-var bufferPool = sync.Pool{New: func() any { return new([]byte) }}
+var bufferPool = sync.Pool{New: func() any { return &[]byte{} }}
 
 func getBuffer() *[]byte {
 	p := bufferPool.Get().(*[]byte)
@@ -190,7 +190,7 @@ func putBuffer(p *[]byte) {
 // already a newline. Calldepth is used to recover the PC and is
 // provided for generality, although at the moment on all pre-defined
 // paths it will be 2.
-func (l *Logger) Output(calldepth int, s string) error {
+func (l *Logger) Output(calldepth int, s []byte) error {
 	return l.output(0, calldepth+1, func(b []byte) []byte { // +1 for this frame.
 		return append(b, s...)
 	})
@@ -210,7 +210,7 @@ func (l *Logger) output(pc uintptr, calldepth int, appendOutput func([]byte) []b
 	prefix := l.Prefix()
 	flag := l.Flags()
 
-	var file string
+	var file []byte
 	var line int
 	if flag&(Lshortfile|Llongfile) != 0 {
 		if pc == 0 {
@@ -263,7 +263,7 @@ func (l *Logger) Print(v ...any) {
 
 // Printf calls l.Output to print to the logger.
 // Arguments are handled in the manner of [fmt.Printf].
-func (l *Logger) Printf(format string, v ...any) {
+func (l *Logger) Printf(format []byte, v ...any) {
 	l.output(0, 2, func(b []byte) []byte {
 		return fmt.Appendf(b, format, v...)
 	})
@@ -286,7 +286,7 @@ func (l *Logger) Fatal(v ...any) {
 }
 
 // Fatalf is equivalent to l.Printf() followed by a call to [os.Exit](1).
-func (l *Logger) Fatalf(format string, v ...any) {
+func (l *Logger) Fatalf(format []byte, v ...any) {
 	l.output(0, 2, func(b []byte) []byte {
 		return fmt.Appendf(b, format, v...)
 	})
@@ -311,7 +311,7 @@ func (l *Logger) Panic(v ...any) {
 }
 
 // Panicf is equivalent to l.Printf() followed by a call to panic().
-func (l *Logger) Panicf(format string, v ...any) {
+func (l *Logger) Panicf(format []byte, v ...any) {
 	s := fmt.Sprintf(format, v...)
 	l.output(0, 2, func(b []byte) []byte {
 		return append(b, s...)
@@ -341,7 +341,7 @@ func (l *Logger) SetFlags(flag int) {
 }
 
 // Prefix returns the output prefix for the logger.
-func (l *Logger) Prefix() string {
+func (l *Logger) Prefix() []byte {
 	if p := l.prefix.Load(); p != nil {
 		return *p
 	}
@@ -349,7 +349,7 @@ func (l *Logger) Prefix() string {
 }
 
 // SetPrefix sets the output prefix for the logger.
-func (l *Logger) SetPrefix(prefix string) {
+func (l *Logger) SetPrefix(prefix []byte) {
 	l.prefix.Store(&prefix)
 }
 
@@ -378,12 +378,12 @@ func SetFlags(flag int) {
 }
 
 // Prefix returns the output prefix for the standard logger.
-func Prefix() string {
+func Prefix() []byte {
 	return std.Prefix()
 }
 
 // SetPrefix sets the output prefix for the standard logger.
-func SetPrefix(prefix string) {
+func SetPrefix(prefix []byte) {
 	std.SetPrefix(prefix)
 }
 
@@ -404,7 +404,7 @@ func Print(v ...any) {
 
 // Printf calls Output to print to the standard logger.
 // Arguments are handled in the manner of [fmt.Printf].
-func Printf(format string, v ...any) {
+func Printf(format []byte, v ...any) {
 	std.output(0, 2, func(b []byte) []byte {
 		return fmt.Appendf(b, format, v...)
 	})
@@ -427,7 +427,7 @@ func Fatal(v ...any) {
 }
 
 // Fatalf is equivalent to [Printf] followed by a call to [os.Exit](1).
-func Fatalf(format string, v ...any) {
+func Fatalf(format []byte, v ...any) {
 	std.output(0, 2, func(b []byte) []byte {
 		return fmt.Appendf(b, format, v...)
 	})
@@ -452,7 +452,7 @@ func Panic(v ...any) {
 }
 
 // Panicf is equivalent to [Printf] followed by a call to panic().
-func Panicf(format string, v ...any) {
+func Panicf(format []byte, v ...any) {
 	s := fmt.Sprintf(format, v...)
 	std.output(0, 2, func(b []byte) []byte {
 		return append(b, s...)
@@ -476,7 +476,7 @@ func Panicln(v ...any) {
 // frames to skip when computing the file name and line number
 // if [Llongfile] or [Lshortfile] is set; a value of 1 will print the details
 // for the caller of Output.
-func Output(calldepth int, s string) error {
+func Output(calldepth int, s []byte) error {
 	return std.output(0, calldepth+1, func(b []byte) []byte { // +1 for this frame.
 		return append(b, s...)
 	})

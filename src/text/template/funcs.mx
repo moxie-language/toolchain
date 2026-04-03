@@ -78,7 +78,7 @@ func builtinFuncs() map[string]reflect.Value {
 
 // createValueFuncs turns a FuncMap into a map[string]reflect.Value
 func createValueFuncs(funcMap FuncMap) map[string]reflect.Value {
-	m := make(map[string]reflect.Value)
+	m := map[string]reflect.Value{}
 	addValueFuncs(m, funcMap)
 	return m
 }
@@ -105,9 +105,8 @@ func addFuncs(out, in FuncMap) {
 	}
 }
 
-
 // goodName reports whether the function name is a valid identifier.
-func goodName(name string) bool {
+func goodName(name []byte) bool {
 	if name == "" {
 		return false
 	}
@@ -124,7 +123,7 @@ func goodName(name string) bool {
 }
 
 // findFunction looks for a function in the template, and global map.
-func findFunction(name string, tmpl *Template) (v reflect.Value, isBuiltin, ok bool) {
+func findFunction(name []byte, tmpl *Template) (v reflect.Value, isBuiltin, ok bool) {
 	if tmpl != nil && tmpl.common != nil {
 		tmpl.muFuncs.RLock()
 		defer tmpl.muFuncs.RUnlock()
@@ -302,7 +301,7 @@ func emptyCall(fn reflect.Value, args ...reflect.Value) reflect.Value {
 // callUserFunc calls a user-registered template function via type assertion.
 // Since moxie's reflect cannot Call functions dynamically, we dispatch to known
 // function signatures. Unsupported signatures produce an error at call time.
-func callUserFunc(name string, fun reflect.Value, args []interface{}) (result reflect.Value, err error) {
+func callUserFunc(name []byte, fun reflect.Value, args []interface{}) (result reflect.Value, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if e, ok := r.(error); ok {
@@ -322,26 +321,26 @@ func callUserFunc(name string, fun reflect.Value, args []interface{}) (result re
 		ret, err = f(args...)
 	case func(...interface{}) interface{}:
 		ret = f(args...)
-	case func(...interface{}) string:
+	case func(...interface{}) []byte:
 		ret = f(args...)
-	case func(...interface{}) (string, error):
-		var s string
+	case func(...interface{}) ([]byte, error):
+		var s []byte
 		s, err = f(args...)
 		ret = s
 
 	// Format-style variadic
-	case func(string, ...interface{}) string:
-		ret = f(args[0].(string), args[1:]...)
-	case func(string, ...interface{}) (string, error):
-		var s string
-		s, err = f(args[0].(string), args[1:]...)
+	case func([]byte, ...interface{}) []byte:
+		ret = f(args[0].([]byte), args[1:]...)
+	case func([]byte, ...interface{}) ([]byte, error):
+		var s []byte
+		s, err = f(args[0].([]byte), args[1:]...)
 		ret = s
 
 	// Zero-arg
-	case func() string:
+	case func() []byte:
 		ret = f()
-	case func() (string, error):
-		var s string
+	case func() ([]byte, error):
+		var s []byte
 		s, err = f()
 		ret = s
 	case func() bool:
@@ -362,34 +361,34 @@ func callUserFunc(name string, fun reflect.Value, args []interface{}) (result re
 		ret, err = f()
 
 	// One-arg string
-	case func(string) string:
-		ret = f(args[0].(string))
-	case func(string) (string, error):
-		var s string
-		s, err = f(args[0].(string))
+	case func([]byte) []byte:
+		ret = f(args[0].([]byte))
+	case func([]byte) ([]byte, error):
+		var s []byte
+		s, err = f(args[0].([]byte))
 		ret = s
-	case func(string) bool:
-		ret = f(args[0].(string))
-	case func(string) (bool, error):
+	case func([]byte) bool:
+		ret = f(args[0].([]byte))
+	case func([]byte) (bool, error):
 		var b bool
-		b, err = f(args[0].(string))
+		b, err = f(args[0].([]byte))
 		ret = b
-	case func(string) int:
-		ret = f(args[0].(string))
-	case func(string) (int, error):
+	case func([]byte) int:
+		ret = f(args[0].([]byte))
+	case func([]byte) (int, error):
 		var n int
-		n, err = f(args[0].(string))
+		n, err = f(args[0].([]byte))
 		ret = n
-	case func(string) interface{}:
-		ret = f(args[0].(string))
-	case func(string) (interface{}, error):
-		ret, err = f(args[0].(string))
+	case func([]byte) interface{}:
+		ret = f(args[0].([]byte))
+	case func([]byte) (interface{}, error):
+		ret, err = f(args[0].([]byte))
 
 	// One-arg int
-	case func(int) string:
+	case func(int) []byte:
 		ret = f(args[0].(int))
-	case func(int) (string, error):
-		var s string
+	case func(int) ([]byte, error):
+		var s []byte
 		s, err = f(args[0].(int))
 		ret = s
 	case func(int) int:
@@ -400,10 +399,10 @@ func callUserFunc(name string, fun reflect.Value, args []interface{}) (result re
 		ret = n
 
 	// One-arg interface{}
-	case func(interface{}) string:
+	case func(interface{}) []byte:
 		ret = f(args[0])
-	case func(interface{}) (string, error):
-		var s string
+	case func(interface{}) ([]byte, error):
+		var s []byte
 		s, err = f(args[0])
 		ret = s
 	case func(interface{}) bool:
@@ -418,11 +417,11 @@ func callUserFunc(name string, fun reflect.Value, args []interface{}) (result re
 		ret, err = f(args[0])
 
 	// Two-arg
-	case func(string, string) string:
-		ret = f(args[0].(string), args[1].(string))
-	case func(string, string) (string, error):
-		var s string
-		s, err = f(args[0].(string), args[1].(string))
+	case func([]byte, []byte) []byte:
+		ret = f(args[0].([]byte), args[1].([]byte))
+	case func([]byte, []byte) ([]byte, error):
+		var s []byte
+		s, err = f(args[0].([]byte), args[1].([]byte))
 		ret = s
 	case func(interface{}, interface{}) (interface{}, error):
 		ret, err = f(args[0], args[1])
@@ -719,7 +718,7 @@ func HTMLEscape(w io.Writer, b []byte) {
 }
 
 // HTMLEscapeString returns the escaped HTML equivalent of the plain text data s.
-func HTMLEscapeString(s string) string {
+func HTMLEscapeString(s []byte) []byte {
 	// Avoid allocation if we can.
 	if !strings.ContainsAny(s, "'\"&<>\000") {
 		return s
@@ -731,7 +730,7 @@ func HTMLEscapeString(s string) string {
 
 // HTMLEscaper returns the escaped HTML equivalent of the textual
 // representation of its arguments.
-func HTMLEscaper(args ...any) string {
+func HTMLEscaper(args ...any) []byte {
 	return HTMLEscapeString(evalArgs(args))
 }
 
@@ -802,7 +801,7 @@ func JSEscape(w io.Writer, b []byte) {
 }
 
 // JSEscapeString returns the escaped JavaScript equivalent of the plain text data s.
-func JSEscapeString(s string) string {
+func JSEscapeString(s []byte) []byte {
 	// Avoid allocation if we can.
 	if strings.IndexFunc(s, jsIsSpecial) < 0 {
 		return s
@@ -822,13 +821,13 @@ func jsIsSpecial(r rune) bool {
 
 // JSEscaper returns the escaped JavaScript equivalent of the textual
 // representation of its arguments.
-func JSEscaper(args ...any) string {
+func JSEscaper(args ...any) []byte {
 	return JSEscapeString(evalArgs(args))
 }
 
 // URLQueryEscaper returns the escaped value of the textual representation of
 // its arguments in a form suitable for embedding in a URL query.
-func URLQueryEscaper(args ...any) string {
+func URLQueryEscaper(args ...any) []byte {
 	return url.QueryEscape(evalArgs(args))
 }
 
@@ -839,12 +838,12 @@ func URLQueryEscaper(args ...any) string {
 // except that each argument is indirected (if a pointer), as required,
 // using the same rules as the default string evaluation during template
 // execution.
-func evalArgs(args []any) string {
+func evalArgs(args []any) []byte {
 	ok := false
-	var s string
+	var s []byte
 	// Fast path for simple common case.
 	if len(args) == 1 {
-		s, ok = args[0].(string)
+		s, ok = args[0].([]byte)
 	}
 	if !ok {
 		for i, arg := range args {

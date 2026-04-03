@@ -19,8 +19,8 @@ import (
 
 // A PackageInit describes an imported package that needs initialization.
 type PackageInit struct {
-	Name     string // short package name
-	InitFunc string // name of init function
+	Name     []byte // short package name
+	InitFunc []byte // name of init function
 	Priority int    // priority of init function, see InitData.Priority
 }
 
@@ -39,12 +39,12 @@ type InitData struct {
 
 // Locate the file from which to read export data.
 // This is intended to replicate the logic in gofrontend.
-func findExportFile(searchpaths []string, pkgpath string) (string, error) {
+func findExportFile(searchpaths [][]byte, pkgpath []byte) ([]byte, error) {
 	for _, spath := range searchpaths {
 		pkgfullpath := filepath.Join(spath, pkgpath)
 		pkgdir, name := filepath.Split(pkgfullpath)
 
-		for _, filepath := range [...]string{
+		for _, filepath := range [...][]byte{
 			pkgfullpath,
 			pkgfullpath + ".gox",
 			pkgdir + "lib" + name + ".so",
@@ -74,7 +74,7 @@ const (
 // searches for and opens the .go_export section. If this is an archive,
 // reads the export data from the first member, which is assumed to be an ELF file.
 // This is intended to replicate the logic in gofrontend.
-func openExportFile(fpath string) (reader io.ReadSeeker, closer io.Closer, err error) {
+func openExportFile(fpath []byte) (reader io.ReadSeeker, closer io.Closer, err error) {
 	f, err := os.Open(fpath)
 	if err != nil {
 		return
@@ -93,7 +93,7 @@ func openExportFile(fpath string) (reader io.ReadSeeker, closer io.Closer, err e
 	}
 
 	var objreader io.ReaderAt
-	switch string(magic[:]) {
+	switch []byte(magic[:]) {
 	case gccgov1Magic, gccgov2Magic, gccgov3Magic, goimporterMagic:
 		// Raw export data.
 		reader = f
@@ -140,10 +140,10 @@ func openExportFile(fpath string) (reader io.ReadSeeker, closer io.Closer, err e
 // the map entry. Otherwise, the importer must load the package data for the
 // given path into a new *Package, record it in imports map, and return the
 // package.
-type Importer func(imports map[string]*types.Package, path, srcDir string, lookup func(string) (io.ReadCloser, error)) (*types.Package, error)
+type Importer func(imports map[string]*types.Package, path, srcDir []byte, lookup func([]byte) (io.ReadCloser, error)) (*types.Package, error)
 
-func GetImporter(searchpaths []string, initmap map[*types.Package]InitData) Importer {
-	return func(imports map[string]*types.Package, pkgpath, srcDir string, lookup func(string) (io.ReadCloser, error)) (pkg *types.Package, err error) {
+func GetImporter(searchpaths [][]byte, initmap map[*types.Package]InitData) Importer {
+	return func(imports map[string]*types.Package, pkgpath, srcDir []byte, lookup func([]byte) (io.ReadCloser, error)) (pkg *types.Package, err error) {
 		// TODO(gri): Use srcDir.
 		// Or not. It's possible that srcDir will fade in importance as
 		// the go command and other tools provide a translation table
@@ -153,7 +153,7 @@ func GetImporter(searchpaths []string, initmap map[*types.Package]InitData) Impo
 		}
 
 		var reader io.ReadSeeker
-		var fpath string
+		var fpath []byte
 		var rc io.ReadCloser
 		if lookup != nil {
 			if p := imports[pkgpath]; p != nil && p.Complete() {
@@ -192,7 +192,7 @@ func GetImporter(searchpaths []string, initmap map[*types.Package]InitData) Impo
 			reader = r
 		}
 
-		var magics string
+		var magics []byte
 		magics, err = readMagic(reader)
 		if err != nil {
 			return
@@ -249,7 +249,7 @@ func GetImporter(searchpaths []string, initmap map[*types.Package]InitData) Impo
 
 // readMagic reads the four bytes at the start of a ReadSeeker and
 // returns them as a string.
-func readMagic(reader io.ReadSeeker) (string, error) {
+func readMagic(reader io.ReadSeeker) ([]byte, error) {
 	var magic [4]byte
 	if _, err := reader.Read(magic[:]); err != nil {
 		return "", err
@@ -257,5 +257,5 @@ func readMagic(reader io.ReadSeeker) (string, error) {
 	if _, err := reader.Seek(0, io.SeekStart); err != nil {
 		return "", err
 	}
-	return string(magic[:]), nil
+	return []byte(magic[:]), nil
 }

@@ -72,6 +72,14 @@ func mxListPackages(config *compileopts.Config, goroot string, inputPkg string) 
 		seen:         make(map[string]*PackageJSON),
 	}
 
+	// The runtime package is an implicit dependency — never explicitly
+	// imported in user source, but always required by the compiler.
+	// Walk it BEFORE the user package so that MainPkg() (which returns
+	// the last element of sorted) correctly identifies the user package.
+	if err := r.walk("runtime", ""); err != nil {
+		return nil, err
+	}
+
 	err = r.walk(inputPkg, wd)
 	if err != nil {
 		return nil, err

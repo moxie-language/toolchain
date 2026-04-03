@@ -351,7 +351,16 @@ func (p *parser) expectSemi() (comment *ast.CommentGroup) {
 		case token.COMMA:
 			// permit a ',' instead of a ';' but complain
 			p.errorExpected(p.pos, "';'")
-			fallthrough
+			if p.lit == ";" {
+				// explicit semicolon
+				p.next()
+				comment = p.lineComment // use following comments
+			} else {
+				// artificial semicolon
+				comment = p.lineComment // use preceding comments
+				p.next()
+			}
+			return comment
 		case token.SEMICOLON:
 			if p.lit == ";" {
 				// explicit semicolon
@@ -1112,7 +1121,7 @@ func (p *parser) parseParameters(result bool) *ast.FieldList {
 	}
 
 	if typ := p.tryIdentOrType(); typ != nil {
-		list := make([]*ast.Field, 1)
+		list := []*ast.Field{:1}
 		list[0] = &ast.Field{Type: typ}
 		return &ast.FieldList{List: list}
 	}
@@ -1229,7 +1238,7 @@ func (p *parser) embeddedElem(x ast.Expr) ast.Expr {
 		x = p.embeddedTerm()
 	}
 	for p.tok == token.OR {
-		t := new(ast.BinaryExpr)
+		t := &ast.BinaryExpr{}
 		t.OpPos = p.pos
 		t.Op = token.OR
 		p.next()
@@ -1245,7 +1254,7 @@ func (p *parser) embeddedTerm() ast.Expr {
 		defer un(trace(p, "EmbeddedTerm"))
 	}
 	if p.tok == token.TILDE {
-		t := new(ast.UnaryExpr)
+		t := &ast.UnaryExpr{}
 		t.OpPos = p.pos
 		t.Op = token.TILDE
 		p.next()
@@ -2235,7 +2244,7 @@ func (p *parser) isTypeSwitchGuard(s ast.Stmt) bool {
 			case token.ASSIGN:
 				// permit v = x.(type) but complain
 				p.error(t.TokPos, "expected ':=', found '='")
-				fallthrough
+				return true
 			case token.DEFINE:
 				return true
 			}

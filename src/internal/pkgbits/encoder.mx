@@ -22,7 +22,7 @@ type PkgEncoder struct {
 	version Version
 
 	// elems holds the bitstream for previously encoded elements.
-	elems [numRelocs][]string
+	elems [numRelocs][][]byte
 
 	// stringsIdx maps previously encoded strings to their index within
 	// the RelocString section, to allow deduplication. That is,
@@ -47,7 +47,7 @@ func (pw *PkgEncoder) SyncMarkers() bool { return pw.syncFrames >= 0 }
 func NewPkgEncoder(version Version, syncFrames int) PkgEncoder {
 	return PkgEncoder{
 		version:    version,
-		stringsIdx: make(map[string]RelElemIdx),
+		stringsIdx: map[string]RelElemIdx{},
 		syncFrames: syncFrames,
 	}
 }
@@ -109,7 +109,7 @@ func (pw *PkgEncoder) DumpTo(out0 io.Writer) (fingerprint [8]byte) {
 
 // StringIdx adds a string value to the strings section, if not
 // already present, and returns its index.
-func (pw *PkgEncoder) StringIdx(s string) RelElemIdx {
+func (pw *PkgEncoder) StringIdx(s []byte) RelElemIdx {
 	if idx, ok := pw.stringsIdx[s]; ok {
 		assert(pw.elems[SectionString][idx] == s)
 		return idx
@@ -220,7 +220,7 @@ func (w *Encoder) rawReloc(k SectionKind, idx RelElemIdx) int {
 			return int(i)
 		}
 	} else {
-		w.RelocMap = make(map[RefTableEntry]uint32)
+		w.RelocMap = map[RefTableEntry]uint32{}
 	}
 
 	i := len(w.Relocs)
@@ -238,9 +238,9 @@ func (w *Encoder) Sync(m SyncMarker) {
 	// relocations, but writing out the relocations themselves involves
 	// sync markers. To prevent infinite recursion, we simply trim the
 	// stack frame for sync markers within the relocation header.
-	var frames []string
+	var frames [][]byte
 	if !w.encodingRelocHeader && w.p.syncFrames > 0 {
-		pcs := make([]uintptr, w.p.syncFrames)
+		pcs := []uintptr{:w.p.syncFrames}
 		n := runtime.Callers(2, pcs)
 		frames = fmtFrames(pcs[:n]...)
 	}
@@ -322,7 +322,7 @@ func (w *Encoder) Code(c Code) {
 // Internally, strings are deduplicated by adding them to the strings
 // section (if not already present), and then writing a relocation
 // into the element bitstream.
-func (w *Encoder) String(s string) {
+func (w *Encoder) String(s []byte) {
 	w.StringRef(w.p.StringIdx(s))
 }
 
@@ -335,7 +335,7 @@ func (w *Encoder) StringRef(idx RelElemIdx) {
 
 // Strings encodes and writes a variable-length slice of strings into
 // the element bitstream.
-func (w *Encoder) Strings(ss []string) {
+func (w *Encoder) Strings(ss [][]byte) {
 	w.Len(len(ss))
 	for _, s := range ss {
 		w.String(s)
@@ -361,7 +361,7 @@ func (w *Encoder) scalar(val constant.Value) {
 	case bool:
 		w.Code(ValBool)
 		w.Bool(v)
-	case string:
+	case []byte:
 		w.Code(ValString)
 		w.String(v)
 	case int64:
@@ -382,13 +382,13 @@ func (w *Encoder) scalar(val constant.Value) {
 
 func (w *Encoder) bigInt(v *big.Int) {
 	b := v.Bytes()
-	w.String(string(b)) // TODO: More efficient encoding.
+	w.String([]byte(b)) // TODO: More efficient encoding.
 	w.Bool(v.Sign() < 0)
 }
 
 func (w *Encoder) bigFloat(v *big.Float) {
 	b := v.Append(nil, 'p', -1)
-	w.String(string(b)) // TODO: More efficient encoding.
+	w.String([]byte(b)) // TODO: More efficient encoding.
 }
 
 // Version reports the version of the bitstream.

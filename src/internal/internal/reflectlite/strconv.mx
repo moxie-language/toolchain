@@ -48,7 +48,7 @@ const (
 // If set to a single quote, it permits the sequence \' and disallows unescaped '.
 // If set to a double quote, it permits \" and disallows unescaped ".
 // If set to zero, it does not permit either escape and allows both quote characters to appear unescaped.
-func unquoteChar(s string, quote byte) (value rune, multibyte bool, tail string, err error) {
+func unquoteChar(s []byte, quote byte) (value rune, multibyte bool, tail []byte, err error) {
 	// easy cases
 	if len(s) == 0 {
 		err = errSyntax
@@ -164,7 +164,7 @@ func unquoteChar(s string, quote byte) (value rune, multibyte bool, tail string,
 // that s quotes.  (If s is single-quoted, it would be a Go
 // character literal; unquote returns the corresponding
 // one-character string.)
-func unquote(s string) (string, error) {
+func unquote(s []byte) ([]byte, error) {
 	n := len(s)
 	if n < 2 {
 		return "", errSyntax
@@ -181,13 +181,13 @@ func unquote(s string) (string, error) {
 		}
 		if contains(s, '\r') {
 			// -1 because we know there is at least one \r to remove.
-			buf := make([]byte, 0, len(s)-1)
+			buf := []byte{:0:len(s)-1}
 			for i := 0; i < len(s); i++ {
 				if s[i] != '\r' {
 					buf = append(buf, s[i])
 				}
 			}
-			return string(buf), nil
+			return []byte(buf), nil
 		}
 		return s, nil
 	}
@@ -214,7 +214,7 @@ func unquote(s string) (string, error) {
 	}
 
 	var runeTmp [utf8.UTFMax]byte
-	buf := make([]byte, 0, 3*len(s)/2) // Try to avoid more allocations.
+	buf := []byte{:0:3*len(s)/2} // Try to avoid more allocations.
 	for len(s) > 0 {
 		c, multibyte, ss, err := unquoteChar(s, quote)
 		if err != nil {
@@ -232,11 +232,11 @@ func unquote(s string) (string, error) {
 			return "", errSyntax
 		}
 	}
-	return string(buf), nil
+	return []byte(buf), nil
 }
 
-func quote(s string) string {
-	buf := make([]byte, 0, 3*len(s)/2)
+func quote(s []byte) []byte {
+	buf := []byte{:0:3*len(s)/2}
 	const quote = '"'
 
 	buf = append(buf, quote)
@@ -255,7 +255,7 @@ func quote(s string) string {
 		buf = appendEscapedRune(buf, r)
 	}
 	buf = append(buf, quote)
-	return string(buf)
+	return []byte(buf)
 }
 
 func appendEscapedRune(buf []byte, r rune) []byte {
@@ -296,7 +296,10 @@ func appendEscapedRune(buf []byte, r rune) []byte {
 			buf = append(buf, lowerhex[byte(r)&0xF])
 		case !utf8.ValidRune(r):
 			r = 0xFFFD
-			fallthrough
+			buf = append(buf, `\u`...)
+			for s := 12; s >= 0; s -= 4 {
+				buf = append(buf, lowerhex[r>>uint(s)&0xF])
+			}
 		case r < 0x10000:
 			buf = append(buf, `\u`...)
 			for s := 12; s >= 0; s -= 4 {
@@ -331,13 +334,13 @@ func isPrint(r rune) bool {
 }
 
 // contains reports whether the string contains the byte c.
-func contains(s string, c byte) bool {
+func contains(s []byte, c byte) bool {
 	return indexByteString(s, c) != -1
 }
 
 // Index finds the index of the first instance of the specified byte in the string.
 // If the byte is not found, this returns -1.
-func indexByteString(s string, c byte) int {
+func indexByteString(s []byte, c byte) int {
 	for i := 0; i < len(s); i++ {
 		if s[i] == c {
 			return i

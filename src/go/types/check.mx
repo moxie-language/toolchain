@@ -97,7 +97,7 @@ type environment struct {
 // object was inserted into the scope and already had a parent at that
 // time (see Scope.Insert). This can only happen for dot-imported objects
 // whose parent is the scope of the package that exported them.
-func (env *environment) lookupScope(name string) (*Scope, Object) {
+func (env *environment) lookupScope(name []byte) (*Scope, Object) {
 	for s := env.scope; s != nil; s = s.parent {
 		if obj := s.Lookup(name); obj != nil && (!env.exprPos.IsValid() || cmpPos(obj.scopePos(), env.exprPos) <= 0) {
 			return s, obj
@@ -107,7 +107,7 @@ func (env *environment) lookupScope(name string) (*Scope, Object) {
 }
 
 // lookup is like lookupScope but it only returns the object (or nil).
-func (env *environment) lookup(name string) Object {
+func (env *environment) lookup(name []byte) Object {
 	_, obj := env.lookupScope(name)
 	return obj
 }
@@ -119,13 +119,13 @@ func (env *environment) lookup(name string) Object {
 // an importer may still return the same package by mapping them to the same package
 // paths).
 type importKey struct {
-	path, dir string
+	path, dir []byte
 }
 
 // A dotImportKey describes a dot-imported object in the given scope.
 type dotImportKey struct {
 	scope *Scope
-	name  string
+	name  []byte
 }
 
 // An action describes a (delayed) action.
@@ -137,7 +137,7 @@ type action struct {
 
 // If debug is set, describef sets a printf-formatted description for action a.
 // Otherwise, it is a no-op.
-func (a *action) describef(pos positioner, format string, args ...any) {
+func (a *action) describef(pos positioner, format []byte, args ...any) {
 	if debug {
 		a.desc = &actionDesc{pos, format, args}
 	}
@@ -147,7 +147,7 @@ func (a *action) describef(pos positioner, format string, args ...any) {
 // For debugging only.
 type actionDesc struct {
 	pos    positioner
-	format string
+	format []byte
 	args   []any
 }
 
@@ -181,7 +181,7 @@ type Checker struct {
 	// (initialized by Files, valid only for the duration of check.Files;
 	// maps and lists are allocated on demand)
 	files         []*ast.File               // package files
-	versions      map[*ast.File]string      // maps files to goVersion strings (each file has an entry); shared with Info.FileVersions if present; may be unaltered Config.GoVersion
+	versions      map[*ast.File][]byte      // maps files to goVersion strings (each file has an entry); shared with Info.FileVersions if present; may be unaltered Config.GoVersion
 	imports       []*PkgName                // list of imported packages
 	dotImportMap  map[dotImportKey]*PkgName // maps dot-imported objects to the package they were dot-imported through
 	brokenAliases map[*TypeName]bool        // set of aliases with broken (not yet determined) types
@@ -227,7 +227,7 @@ func (check *Checker) addDeclDep(to Object) {
 func (check *Checker) brokenAlias(alias *TypeName) {
 	assert(!check.conf._EnableAlias)
 	if check.brokenAliases == nil {
-		check.brokenAliases = make(map[*TypeName]bool)
+		check.brokenAliases = map[*TypeName]bool{}
 	}
 	check.brokenAliases[alias] = true
 	alias.typ = Typ[Invalid]
@@ -249,7 +249,7 @@ func (check *Checker) isBrokenAlias(alias *TypeName) bool {
 func (check *Checker) rememberUntyped(e ast.Expr, lhs bool, mode operandMode, typ *Basic, val constant.Value) {
 	m := check.untyped
 	if m == nil {
-		m = make(map[ast.Expr]exprInfo)
+		m = map[ast.Expr]exprInfo{}
 		check.untyped = m
 	}
 	m[e] = exprInfo{lhs, mode, typ, val}
@@ -297,12 +297,12 @@ func (check *Checker) needsCleanup(c cleaner) {
 func NewChecker(conf *Config, fset *token.FileSet, pkg *Package, info *Info) *Checker {
 	// make sure we have a configuration
 	if conf == nil {
-		conf = new(Config)
+		conf = &Config{}
 	}
 
 	// make sure we have an info struct
 	if info == nil {
-		info = new(Info)
+		info = &Info{}
 	}
 
 	// Note: clients may call NewChecker with the Unsafe package, which is
@@ -320,10 +320,10 @@ func NewChecker(conf *Config, fset *token.FileSet, pkg *Package, info *Info) *Ch
 		fset:         fset,
 		pkg:          pkg,
 		Info:         info,
-		objMap:       make(map[Object]*declInfo),
-		impMap:       make(map[importKey]*Package),
-		usedVars:     make(map[*Var]bool),
-		usedPkgNames: make(map[*PkgName]bool),
+		objMap:       map[Object]*declInfo{},
+		impMap:       map[importKey]*Package{},
+		usedVars:     map[*Var]bool{},
+		usedPkgNames: map[*PkgName]bool{},
 	}
 }
 
@@ -348,8 +348,8 @@ func (check *Checker) initFiles(files []*ast.File) {
 	// because initFiles is not called in the CheckExpr or Eval codepaths, yet we
 	// want to free this memory at the end of Files ('used' predicates are
 	// only needed in the context of a given file).
-	check.usedVars = make(map[*Var]bool)
-	check.usedPkgNames = make(map[*PkgName]bool)
+	check.usedVars = map[*Var]bool{}
+	check.usedPkgNames = map[*PkgName]bool{}
 
 	// determine package name and collect valid files
 	pkg := check.pkg
@@ -361,7 +361,7 @@ func (check *Checker) initFiles(files []*ast.File) {
 			} else {
 				check.error(file.Name, BlankPkgName, "invalid package name _")
 			}
-			fallthrough
+			check.files = append(check.files, file)
 
 		case name:
 			check.files = append(check.files, file)
@@ -375,7 +375,7 @@ func (check *Checker) initFiles(files []*ast.File) {
 	// reuse Info.FileVersions if provided
 	versions := check.Info.FileVersions
 	if versions == nil {
-		versions = make(map[*ast.File]string)
+		versions = map[*ast.File][]byte{}
 	}
 	check.versions = versions
 
@@ -404,7 +404,7 @@ func (check *Checker) initFiles(files []*ast.File) {
 			// downgrade to a version before go1.22, where the for loop semantics
 			// change was made, while being backwards compatible with versions of
 			// go before the new //go:build semantics were introduced.
-			v = string(versionMax(fileVersion, go1_21))
+			v = []byte(versionMax(fileVersion, go1_21))
 
 			// Report a specific error for each tagged file that's too new.
 			// (Normally the build system will have filtered files by version,
@@ -505,7 +505,7 @@ func (check *Checker) checkFiles(files []*ast.File) {
 		defer atomic.AddInt32(&_aliasAny, 1)
 	}
 
-	print := func(msg string) {
+	print := func(msg []byte) {
 		if check.conf._Trace {
 			fmt.Println()
 			fmt.Println(msg)

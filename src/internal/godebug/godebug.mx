@@ -59,7 +59,7 @@ import (
 
 // A Setting is a single setting in the $GODEBUG environment variable.
 type Setting struct {
-	name string
+	name []byte
 	once sync.Once
 	*setting
 }
@@ -72,7 +72,7 @@ type setting struct {
 }
 
 type value struct {
-	text   string
+	text   []byte
 	bisect *bisect.Matcher
 }
 
@@ -90,12 +90,12 @@ type value struct {
 // when program behavior is changing from the default due to the setting
 // (not just when the setting is different, but when program behavior changes).
 // See the [internal/godebug] package comment for more.
-func New(name string) *Setting {
+func New(name []byte) *Setting {
 	return &Setting{name: name}
 }
 
 // Name returns the name of the setting.
-func (s *Setting) Name() string {
+func (s *Setting) Name() []byte {
 	if s.name != "" && s.name[0] == '#' {
 		return s.name[1:]
 	}
@@ -109,7 +109,11 @@ func (s *Setting) Undocumented() bool {
 
 // String returns a printable form for the setting: name=value.
 func (s *Setting) String() string {
-	return s.Name() + "=" + s.Value()
+	var buf []byte
+	buf = append(buf, s.Name()...)
+	buf = append(buf, '=')
+	buf = append(buf, s.Value()...)
+	return string(buf)
 }
 
 // IncNonDefault increments the non-default behavior counter
@@ -125,9 +129,16 @@ func (s *Setting) IncNonDefault() {
 
 func (s *Setting) register() {
 	if s.info == nil || s.info.Opaque {
-		panic("godebug: unexpected IncNonDefault of " + s.name)
+		var msg []byte
+		msg = append(msg, "godebug: unexpected IncNonDefault of "...)
+		msg = append(msg, s.name...)
+		panic(string(msg))
 	}
-	registerMetric("/godebug/non-default-behavior/"+s.Name()+":events", s.nonDefault.Load)
+	var key []byte
+	key = append(key, "/godebug/non-default-behavior/"...)
+	key = append(key, s.Name()...)
+	key = append(key, ":events"...)
+	registerMetric(key, s.nonDefault.Load)
 }
 
 // cache is a cache of all the GODEBUG settings,
@@ -154,11 +165,14 @@ var empty value
 // making Value efficient to call as frequently as needed.
 // Clients should therefore typically not attempt their own
 // caching of Value's result.
-func (s *Setting) Value() string {
+func (s *Setting) Value() []byte {
 	s.once.Do(func() {
 		s.setting = lookup(s.Name())
 		if s.info == nil && !s.Undocumented() {
-			panic("godebug: Value of name not listed in godebugs.All: " + s.name)
+			var msg []byte
+			msg = append(msg, "godebug: Value of name not listed in godebugs.All: "...)
+			msg = append(msg, s.name...)
+			panic(string(msg))
 		}
 	})
 	v := *s.value.Load()
@@ -169,14 +183,16 @@ func (s *Setting) Value() string {
 }
 
 // lookup returns the unique *setting value for the given name.
-func lookup(name string) *setting {
-	if v, ok := cache.Load(name); ok {
+func lookup(name []byte) *setting {
+	// Use string(name) as map key since []byte is not comparable.
+	key := string(name)
+	if v, ok := cache.Load(key); ok {
 		return v.(*setting)
 	}
-	s := new(setting)
+	s := &setting{}
 	s.info = godebugs.Lookup(name)
 	s.value.Store(&empty)
-	if v, loaded := cache.LoadOrStore(name, s); loaded {
+	if v, loaded := cache.LoadOrStore(key, s); loaded {
 		// Lost race: someone else created it. Use theirs.
 		return v.(*setting)
 	}
@@ -192,13 +208,13 @@ func lookup(name string) *setting {
 // (due to use of os.Setenv, for example).
 //
 //go:linkname setUpdate
-func setUpdate(update func(string, string))
+func setUpdate(update func([]byte, []byte))
 
 // registerMetric is provided by package runtime.
 // It forwards registrations to runtime/metrics.
 //
 //go:linkname registerMetric
-func registerMetric(name string, read func() uint64)
+func registerMetric(name []byte, read func() uint64)
 
 // setNewIncNonDefault is provided by package runtime.
 // The runtime can do
@@ -212,14 +228,14 @@ func registerMetric(name string, read func() uint64)
 // since it cannot import godebug.
 //
 //go:linkname setNewIncNonDefault
-func setNewIncNonDefault(newIncNonDefault func(string) func())
+func setNewIncNonDefault(newIncNonDefault func([]byte) func())
 
 func init() {
 	setUpdate(update)
 	setNewIncNonDefault(newIncNonDefault)
 }
 
-func newIncNonDefault(name string) func() {
+func newIncNonDefault(name []byte) func() {
 	s := New(name)
 	s.Value()
 	return s.IncNonDefault
@@ -230,7 +246,7 @@ var updateMu sync.Mutex
 // update records an updated GODEBUG setting.
 // def is the default GODEBUG setting for the running binary,
 // and env is the current value of the $GODEBUG environment variable.
-func update(def, env string) {
+func update(def, env []byte) {
 	updateMu.Lock()
 	defer updateMu.Unlock()
 
@@ -238,10 +254,10 @@ func update(def, env string) {
 	// We parse the environment variable first, so that any settings it has
 	// are already locked in place (did[name] = true) before we consider
 	// the defaults. Existing immutable settings are always locked.
-	did := make(map[string]bool)
+	did := map[string]bool{}
 	cache.Range(func(name, s any) bool {
 		if info := s.(*setting).info; info != nil && info.Immutable {
-			did[name.(string)] = true
+			did[string(name.([]byte))] = true
 		}
 		return true
 	})
@@ -250,7 +266,7 @@ func update(def, env string) {
 
 	// Clear any cached values that are no longer present.
 	cache.Range(func(name, s any) bool {
-		if !did[name.(string)] {
+		if !did[string(name.([]byte))] {
 			s.(*setting).value.Store(&empty)
 		}
 		return true
@@ -265,7 +281,7 @@ func update(def, env string) {
 // Each value v can also have the form v#pattern,
 // in which case the GODEBUG is only enabled for call stacks
 // matching pattern, for use with golang.org/x/tools/cmd/bisect.
-func parse(did map[string]bool, s string) {
+func parse(did map[string]bool, s []byte) {
 	// Scan the string backward so that later settings are used
 	// and earlier settings are ignored.
 	// Note that a forward scan would cause cached values
@@ -277,8 +293,8 @@ func parse(did map[string]bool, s string) {
 		if i == -1 || s[i] == ',' {
 			if eq >= 0 {
 				name, arg := s[i+1:eq], s[eq+1:end]
-				if !did[name] {
-					did[name] = true
+				if !did[string(name)] {
+					did[string(name)] = true
 					v := &value{text: arg}
 					for j := 0; j < len(arg); j++ {
 						if arg[j] == '#' {

@@ -18,17 +18,17 @@ import (
 
 // Tree is the representation of a single parsed template.
 type Tree struct {
-	Name      string    // name of the template represented by the tree.
-	ParseName string    // name of the top-level template during parsing, for error messages.
+	Name      []byte    // name of the template represented by the tree.
+	ParseName []byte    // name of the top-level template during parsing, for error messages.
 	Root      *ListNode // top-level root of the tree.
 	Mode      Mode      // parsing mode.
-	text      string    // text parsed to create the template (or its parent)
+	text      []byte    // text parsed to create the template (or its parent)
 	// Parsing only; cleared after parse.
 	funcs      []map[string]any
 	lex        *lexer
 	token      [3]item // three-token lookahead for parser.
 	peekCount  int
-	vars       []string // variables defined at the moment.
+	vars       [][]byte // variables defined at the moment.
 	treeSet    map[string]*Tree
 	actionLine int // line of left delim starting action
 	rangeDepth int
@@ -71,8 +71,8 @@ func (t *Tree) Copy() *Tree {
 // templates described in the argument string. The top-level template will be
 // given the specified name. If an error is encountered, parsing stops and an
 // empty map is returned with the error.
-func Parse(name, text, leftDelim, rightDelim string, funcs ...map[string]any) (map[string]*Tree, error) {
-	treeSet := make(map[string]*Tree)
+func Parse(name, text, leftDelim, rightDelim []byte, funcs ...map[string]any) (map[string]*Tree, error) {
+	treeSet := map[string]*Tree{}
 	t := New(name)
 	t.text = text
 	_, err := t.Parse(text, leftDelim, rightDelim, treeSet, funcs...)
@@ -140,7 +140,7 @@ func (t *Tree) peekNonSpace() item {
 // Parsing.
 
 // New allocates a new parse tree with the given name.
-func New(name string, funcs ...map[string]any) *Tree {
+func New(name []byte, funcs ...map[string]any) *Tree {
 	return &Tree{
 		Name:  name,
 		funcs: funcs,
@@ -150,7 +150,7 @@ func New(name string, funcs ...map[string]any) *Tree {
 // ErrorContext returns a textual representation of the location of the node in the input text.
 // The receiver is only used when the node does not have a pointer to the tree inside,
 // which can occur in old code.
-func (t *Tree) ErrorContext(n Node) (location, context string) {
+func (t *Tree) ErrorContext(n Node) (location, context []byte) {
 	pos := int(n.Position())
 	tree := n.tree()
 	if tree == nil {
@@ -170,7 +170,7 @@ func (t *Tree) ErrorContext(n Node) (location, context string) {
 }
 
 // errorf formats the error and terminates processing.
-func (t *Tree) errorf(format string, args ...any) {
+func (t *Tree) errorf(format []byte, args ...any) {
 	t.Root = nil
 	format = fmt.Sprintf("template: %s:%d: %s", t.ParseName, t.token[0].line, format)
 	panic(fmt.Errorf(format, args...))
@@ -182,7 +182,7 @@ func (t *Tree) error(err error) {
 }
 
 // expect consumes the next token and guarantees it has the required type.
-func (t *Tree) expect(expected itemType, context string) item {
+func (t *Tree) expect(expected itemType, context []byte) item {
 	token := t.nextNonSpace()
 	if token.typ != expected {
 		t.unexpected(token, context)
@@ -191,7 +191,7 @@ func (t *Tree) expect(expected itemType, context string) item {
 }
 
 // expectOneOf consumes the next token and guarantees it has one of the required types.
-func (t *Tree) expectOneOf(expected1, expected2 itemType, context string) item {
+func (t *Tree) expectOneOf(expected1, expected2 itemType, context []byte) item {
 	token := t.nextNonSpace()
 	if token.typ != expected1 && token.typ != expected2 {
 		t.unexpected(token, context)
@@ -200,7 +200,7 @@ func (t *Tree) expectOneOf(expected1, expected2 itemType, context string) item {
 }
 
 // unexpected complains about the token and terminates processing.
-func (t *Tree) unexpected(token item, context string) {
+func (t *Tree) unexpected(token item, context []byte) {
 	if token.typ == itemError {
 		extra := ""
 		if t.actionLine != 0 && t.actionLine != token.line {
@@ -232,7 +232,7 @@ func (t *Tree) recover(errp *error) {
 func (t *Tree) startParse(funcs []map[string]any, lex *lexer, treeSet map[string]*Tree) {
 	t.Root = nil
 	t.lex = lex
-	t.vars = []string{"$"}
+	t.vars = [][]byte{"$"}
 	t.funcs = funcs
 	t.treeSet = treeSet
 	t.stackDepth = 0
@@ -255,7 +255,7 @@ func (t *Tree) stopParse() {
 // the template for execution. If either action delimiter string is empty, the
 // default ("{{" or "}}") is used. Embedded template definitions are added to
 // the treeSet map.
-func (t *Tree) Parse(text, leftDelim, rightDelim string, treeSet map[string]*Tree, funcs ...map[string]any) (tree *Tree, err error) {
+func (t *Tree) Parse(text, leftDelim, rightDelim []byte, treeSet map[string]*Tree, funcs ...map[string]any) (tree *Tree, err error) {
 	defer t.recover(&err)
 	t.ParseName = t.Name
 	lexer := lex(t.Name, text, leftDelim, rightDelim)
@@ -464,7 +464,7 @@ func (t *Tree) continueControl(pos Pos, line int) Node {
 // Pipeline:
 //
 //	declarations? command ('|' command)*
-func (t *Tree) pipeline(context string, end itemType) (pipe *PipeNode) {
+func (t *Tree) pipeline(context []byte, end itemType) (pipe *PipeNode) {
 	token := t.peekNonSpace()
 	pipe = t.newPipeline(token.pos, token.line, nil)
 	// Are there declarations or assignments?
@@ -519,7 +519,7 @@ decls:
 	}
 }
 
-func (t *Tree) checkPipeline(pipe *PipeNode, context string) {
+func (t *Tree) checkPipeline(pipe *PipeNode, context []byte) {
 	// Reject empty pipelines
 	if len(pipe.Cmds) == 0 {
 		t.errorf("missing value for %s", context)
@@ -534,7 +534,7 @@ func (t *Tree) checkPipeline(pipe *PipeNode, context string) {
 	}
 }
 
-func (t *Tree) parseControl(context string) (pos Pos, line int, pipe *PipeNode, list, elseList *ListNode) {
+func (t *Tree) parseControl(context []byte) (pos Pos, line int, pipe *PipeNode, list, elseList *ListNode) {
 	defer t.popVars(len(t.vars))
 	pipe = t.pipeline(context, itemRightDelim)
 	if context == "range" {
@@ -682,7 +682,7 @@ func (t *Tree) templateControl() Node {
 	return t.newTemplate(token.pos, token.line, name, pipe)
 }
 
-func (t *Tree) parseTemplateName(token item, context string) (name string) {
+func (t *Tree) parseTemplateName(token item, context []byte) (name []byte) {
 	switch token.typ {
 	case itemString, itemRawString:
 		s, err := strconv.Unquote(token.val)
@@ -818,7 +818,7 @@ func (t *Tree) term() Node {
 }
 
 // hasFunction reports if a function name exists in the Tree's maps.
-func (t *Tree) hasFunction(name string) bool {
+func (t *Tree) hasFunction(name []byte) bool {
 	for _, funcMap := range t.funcs {
 		if funcMap == nil {
 			continue
@@ -837,7 +837,7 @@ func (t *Tree) popVars(n int) {
 
 // useVar returns a node for a variable reference. It errors if the
 // variable is not defined.
-func (t *Tree) useVar(pos Pos, name string) Node {
+func (t *Tree) useVar(pos Pos, name []byte) Node {
 	v := t.newVariable(pos, name)
 	for _, varName := range t.vars {
 		if varName == v.Ident[0] {

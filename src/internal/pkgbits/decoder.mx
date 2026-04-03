@@ -29,13 +29,13 @@ type PkgDecoder struct {
 	// pkgPath is the package path for the package to be decoded.
 	//
 	// TODO(mdempsky): Remove; unneeded since CL 391014.
-	pkgPath string
+	pkgPath []byte
 
 	// elemData is the full data payload of the encoded package.
 	// Elements are densely and contiguously packed together.
 	//
 	// The last 8 bytes of elemData are the package fingerprint.
-	elemData string
+	elemData []byte
 
 	// elemEnds stores the byte-offset end positions of element
 	// bitstreams within elemData.
@@ -60,7 +60,7 @@ type PkgDecoder struct {
 // PkgPath returns the package path for the package
 //
 // TODO(mdempsky): Remove; unneeded since CL 391014.
-func (pr *PkgDecoder) PkgPath() string { return pr.pkgPath }
+func (pr *PkgDecoder) PkgPath() []byte { return pr.pkgPath }
 
 // SyncMarkers reports whether pr uses sync markers.
 func (pr *PkgDecoder) SyncMarkers() bool { return pr.sync }
@@ -68,7 +68,7 @@ func (pr *PkgDecoder) SyncMarkers() bool { return pr.sync }
 // NewPkgDecoder returns a PkgDecoder initialized to read the Unified
 // IR export data from input. pkgPath is the package path for the
 // compilation unit that produced the export data.
-func NewPkgDecoder(pkgPath, input string) PkgDecoder {
+func NewPkgDecoder(pkgPath, input []byte) PkgDecoder {
 	pr := PkgDecoder{
 		pkgPath: pkgPath,
 	}
@@ -94,7 +94,7 @@ func NewPkgDecoder(pkgPath, input string) PkgDecoder {
 
 	assert(binary.Read(r, binary.LittleEndian, pr.elemEndsEnds[:]) == nil)
 
-	pr.elemEnds = make([]uint32, pr.elemEndsEnds[len(pr.elemEndsEnds)-1])
+	pr.elemEnds = []uint32{:pr.elemEndsEnds[len(pr.elemEndsEnds)-1]}
 	assert(binary.Read(r, binary.LittleEndian, pr.elemEnds[:]) == nil)
 
 	pos, err := r.Seek(0, io.SeekCurrent)
@@ -144,7 +144,7 @@ func (pr *PkgDecoder) AbsIdx(k SectionKind, idx RelElemIdx) int {
 
 // DataIdx returns the raw element bitstream for the given (section,
 // index) pair.
-func (pr *PkgDecoder) DataIdx(k SectionKind, idx RelElemIdx) string {
+func (pr *PkgDecoder) DataIdx(k SectionKind, idx RelElemIdx) []byte {
 	absIdx := pr.AbsIdx(k, idx)
 
 	var start uint32
@@ -157,7 +157,7 @@ func (pr *PkgDecoder) DataIdx(k SectionKind, idx RelElemIdx) string {
 }
 
 // StringIdx returns the string value for the given string index.
-func (pr *PkgDecoder) StringIdx(idx RelElemIdx) string {
+func (pr *PkgDecoder) StringIdx(idx RelElemIdx) []byte {
 	return pr.DataIdx(SectionString, idx)
 }
 
@@ -196,7 +196,7 @@ func (pr *PkgDecoder) NewDecoderRaw(k SectionKind, idx RelElemIdx) Decoder {
 
 	r.Data.Reset(pr.DataIdx(k, idx))
 	r.Sync(SyncRelocs)
-	r.Relocs = make([]RefTableEntry, r.Len())
+	r.Relocs = []RefTableEntry{:r.Len()}
 	for i := range r.Relocs {
 		r.Sync(SyncReloc)
 		r.Relocs[i] = RefTableEntry{SectionKind(r.Len()), RelElemIdx(r.Len())}
@@ -219,7 +219,7 @@ func (pr *PkgDecoder) TempDecoderRaw(k SectionKind, idx RelElemIdx) Decoder {
 		r.Relocs = pr.scratchRelocEnt[:l]
 		pr.scratchRelocEnt = nil
 	} else {
-		r.Relocs = make([]RefTableEntry, l)
+		r.Relocs = []RefTableEntry{:l}
 	}
 	for i := range r.Relocs {
 		r.Sync(SyncReloc)
@@ -309,7 +309,7 @@ func (r *Decoder) Sync(mWant SyncMarker) {
 
 	pos, _ := r.Data.Seek(0, io.SeekCurrent)
 	mHave := SyncMarker(r.rawUvarint())
-	writerPCs := make([]int, r.rawUvarint())
+	writerPCs := []int{:r.rawUvarint()}
 	for i := range writerPCs {
 		writerPCs[i] = int(r.rawUvarint())
 	}
@@ -415,8 +415,8 @@ func (r *Decoder) String() string {
 
 // Strings decodes and returns a variable-length slice of strings from
 // the element bitstream.
-func (r *Decoder) Strings() []string {
-	res := make([]string, r.Len())
+func (r *Decoder) Strings() [][]byte {
+	res := [][]byte{:r.Len()}
 	for i := range res {
 		res[i] = r.String()
 	}
@@ -451,14 +451,14 @@ func (r *Decoder) scalar() constant.Value {
 	case ValBigRat:
 		num := r.bigInt()
 		denom := r.bigInt()
-		return constant.Make(new(big.Rat).SetFrac(num, denom))
+		return constant.Make((&big.Rat{}).SetFrac(num, denom))
 	case ValBigFloat:
 		return constant.Make(r.bigFloat())
 	}
 }
 
 func (r *Decoder) bigInt() *big.Int {
-	v := new(big.Int).SetBytes([]byte(r.String()))
+	v := (&big.Int{}).SetBytes([]byte(r.String()))
 	if r.Bool() {
 		v.Neg(v)
 	}
@@ -466,7 +466,7 @@ func (r *Decoder) bigInt() *big.Int {
 }
 
 func (r *Decoder) bigFloat() *big.Float {
-	v := new(big.Float).SetPrec(512)
+	v := (&big.Float{}).SetPrec(512)
 	assert(v.UnmarshalText([]byte(r.String())) == nil)
 	return v
 }
@@ -478,8 +478,8 @@ func (r *Decoder) bigFloat() *big.Float {
 
 // PeekPkgPath returns the package path for the specified package
 // index.
-func (pr *PkgDecoder) PeekPkgPath(idx RelElemIdx) string {
-	var path string
+func (pr *PkgDecoder) PeekPkgPath(idx RelElemIdx) []byte {
+	var path []byte
 	{
 		r := pr.TempDecoder(SectionPkg, idx, SyncPkgDef)
 		path = r.String()
@@ -493,9 +493,9 @@ func (pr *PkgDecoder) PeekPkgPath(idx RelElemIdx) string {
 
 // PeekObj returns the package path, object name, and CodeObj for the
 // specified object index.
-func (pr *PkgDecoder) PeekObj(idx RelElemIdx) (string, string, CodeObj) {
+func (pr *PkgDecoder) PeekObj(idx RelElemIdx) ([]byte, []byte, CodeObj) {
 	var ridx RelElemIdx
-	var name string
+	var name []byte
 	var rcode int
 	{
 		r := pr.TempDecoder(SectionName, idx, SyncObject1)

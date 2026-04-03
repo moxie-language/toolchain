@@ -73,8 +73,8 @@ type Trace struct {
 	// from the trace.
 	Stacks        map[uint32][]uint64
 	PCs           map[uint64]Frame
-	Strings       map[uint64]string
-	InlineStrings []string
+	Strings       map[uint64][]byte
+	InlineStrings [][]byte
 }
 
 // batchOffset records the byte offset of, and number of events in, a batch. A
@@ -90,8 +90,8 @@ type parser struct {
 	data []byte
 	off  int
 
-	strings              map[uint64]string
-	inlineStrings        []string
+	strings              map[uint64][]byte
+	inlineStrings        [][]byte
 	inlineStringsMapping map[string]int
 	// map from Ps to their batch offsets
 	batchOffsets map[int32][]batchOffset
@@ -143,7 +143,7 @@ func newParser(r io.Reader, ver version.Version) (*parser, error) {
 			return nil, err
 		}
 
-		buf = make([]byte, end-cur)
+		buf = []byte{:end-cur}
 		_, err = io.ReadFull(r, buf)
 		if err != nil {
 			return nil, err
@@ -155,7 +155,7 @@ func newParser(r io.Reader, ver version.Version) (*parser, error) {
 			return nil, err
 		}
 	}
-	return &parser{data: buf, ver: ver, timerGoids: make(map[uint64]bool)}, nil
+	return &parser{data: buf, ver: ver, timerGoids: map[uint64]bool{}}, nil
 }
 
 // Parse parses Go execution traces from versions 1.11–1.21. The provided reader
@@ -197,12 +197,12 @@ func (p *parser) parse() (Trace, error) {
 	//
 	// 4. Finally, we validate the trace.
 
-	p.strings = make(map[uint64]string)
-	p.batchOffsets = make(map[int32][]batchOffset)
-	p.lastGs = make(map[int32]uint64)
-	p.stacks = make(map[uint32][]uint64)
-	p.pcs = make(map[uint64]Frame)
-	p.inlineStringsMapping = make(map[string]int)
+	p.strings = map[uint64][]byte{}
+	p.batchOffsets = map[int32][]batchOffset{}
+	p.lastGs = map[int32]uint64{}
+	p.stacks = map[uint32][]uint64{}
+	p.pcs = map[uint64]Frame{}
+	p.inlineStringsMapping = map[string]int{}
 
 	if err := p.collectBatchesAndCPUSamples(); err != nil {
 		return Trace{}, err
@@ -254,7 +254,7 @@ func (p *parser) parse() (Trace, error) {
 type rawEvent struct {
 	typ   EventType
 	args  []uint64
-	sargs []string
+	sargs [][]byte
 
 	// if typ == EvBatch, these fields describe the batch.
 	batchPid    int32
@@ -289,7 +289,7 @@ type Events struct {
 func (l *Events) grow() *Event {
 	a, b := l.index(l.n)
 	if a >= len(l.buckets) {
-		l.buckets = append(l.buckets, new([eventsBucketSize]Event))
+		l.buckets = append(l.buckets, &[eventsBucketSize]Event{})
 	}
 	ptr := &l.buckets[a][b]
 	l.n++
@@ -381,7 +381,7 @@ func (p *parser) parseEventBatches() (Events, error) {
 		return cmp.Compare(a.Ts, b.Ts)
 	})
 
-	allProcs := make([]proc, 0, len(p.batchOffsets))
+	allProcs := []proc{:0:len(p.batchOffsets)}
 	for pid := range p.batchOffsets {
 		allProcs = append(allProcs, proc{pid: pid})
 	}
@@ -390,7 +390,7 @@ func (p *parser) parseEventBatches() (Events, error) {
 	events := Events{}
 
 	// Merge events as long as at least one P has more events
-	gs := make(map[uint64]gState)
+	gs := map[uint64]gState{}
 	// Note: technically we don't need a priority queue here. We're only ever
 	// interested in the earliest eligible event, which means we just have to
 	// track the smallest element. However, in practice, the priority queue
@@ -400,7 +400,7 @@ func (p *parser) parseEventBatches() (Events, error) {
 	// look at in each iteration, because all other Ps are already in the queue.
 	var frontier orderEventList
 
-	availableProcs := make([]*proc, len(allProcs))
+	availableProcs := []*proc{:len(allProcs)}
 	for i := range allProcs {
 		availableProcs[i] = &allProcs[i]
 	}
@@ -504,7 +504,7 @@ func (p *parser) parseEventBatches() (Events, error) {
 	// events, because if timestamps are broken we will misplace the event and
 	// later report logically broken trace (instead of reporting broken
 	// timestamps).
-	lastSysBlock := make(map[uint64]Timestamp)
+	lastSysBlock := map[uint64]Timestamp{}
 	for i := 0; i < events.Len(); i++ {
 		ev := events.Ptr(i)
 		switch ev.Type {
@@ -701,7 +701,7 @@ func (p *parser) readRawEvent(flags uint, ev *rawEvent) error {
 			if err != nil {
 				return fmt.Errorf("failed to read trace: %w", err)
 			}
-			p.strings[id] = string(buf)
+			p.strings[id] = []byte(buf)
 		}
 
 		ev.typ = EvNone
@@ -834,7 +834,7 @@ func (p *parser) loadBatch(pid int32, events []Event) ([]Event, error) {
 	p.off = offset
 
 	if cap(events) < n {
-		events = make([]Event, 0, n)
+		events = []Event{:0:n}
 	}
 
 	gotHeader := false
@@ -871,7 +871,7 @@ func (p *parser) loadBatch(pid int32, events []Event) ([]Event, error) {
 	return events, nil
 }
 
-func (p *parser) readStr() (s string, err error) {
+func (p *parser) readStr() (s []byte, err error) {
 	sz, err := p.readVal()
 	if err != nil {
 		return "", err
@@ -886,7 +886,7 @@ func (p *parser) readStr() (s string, err error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to read trace: %w", err)
 	}
-	return string(buf), nil
+	return []byte(buf), nil
 }
 
 // parseEvent transforms raw events into events.
@@ -1031,10 +1031,10 @@ func (p *parser) postProcessTrace(events Events) error {
 		evSweep *Event
 	}
 
-	gs := make(map[uint64]gdesc)
-	ps := make(map[int32]pdesc)
-	tasks := make(map[uint64]*Event)           // task id to task creation events
-	activeRegions := make(map[uint64][]*Event) // goroutine id to stack of regions
+	gs := map[uint64]gdesc{}
+	ps := map[int32]pdesc{}
+	tasks := map[uint64]*Event{}           // task id to task creation events
+	activeRegions := map[uint64][]*Event{} // goroutine id to stack of regions
 	gs[0] = gdesc{state: gRunning}
 	var evGC, evSTW *Event
 
@@ -1348,7 +1348,7 @@ func readValFrom(buf []byte) (v uint64, rem []byte, err error) {
 
 func (ev *Event) String() string {
 	desc := &EventDescriptions[ev.Type]
-	w := new(bytes.Buffer)
+	w := &bytes.Buffer{}
 	fmt.Fprintf(w, "%d %s p=%d g=%d stk=%d", ev.Ts, desc.Name, ev.P, ev.G, ev.StkID)
 	for i, a := range desc.Args {
 		fmt.Fprintf(w, " %s=%d", a, ev.Args[i])
@@ -1434,62 +1434,62 @@ const (
 )
 
 var EventDescriptions = [256]struct {
-	Name       string
+	Name       []byte
 	minVersion version.Version
 	Stack      bool
-	Args       []string
-	SArgs      []string // string arguments
+	Args       [][]byte
+	SArgs      [][]byte // string arguments
 }{
-	EvNone:              {"None", 5, false, []string{}, nil},
-	EvBatch:             {"Batch", 5, false, []string{"p", "ticks"}, nil}, // in 1.5 format it was {"p", "seq", "ticks"}
-	EvFrequency:         {"Frequency", 5, false, []string{"freq"}, nil},   // in 1.5 format it was {"freq", "unused"}
-	EvStack:             {"Stack", 5, false, []string{"id", "siz"}, nil},
-	EvGomaxprocs:        {"Gomaxprocs", 5, true, []string{"procs"}, nil},
-	EvProcStart:         {"ProcStart", 5, false, []string{"thread"}, nil},
-	EvProcStop:          {"ProcStop", 5, false, []string{}, nil},
-	EvGCStart:           {"GCStart", 5, true, []string{"seq"}, nil}, // in 1.5 format it was {}
-	EvGCDone:            {"GCDone", 5, false, []string{}, nil},
-	EvSTWStart:          {"GCSTWStart", 5, false, []string{"kindid"}, []string{"kind"}}, // <= 1.9, args was {} (implicitly {0})
-	EvSTWDone:           {"GCSTWDone", 5, false, []string{}, nil},
-	EvGCSweepStart:      {"GCSweepStart", 5, true, []string{}, nil},
-	EvGCSweepDone:       {"GCSweepDone", 5, false, []string{"swept", "reclaimed"}, nil}, // before 1.9, format was {}
-	EvGoCreate:          {"GoCreate", 5, true, []string{"g", "stack"}, nil},
-	EvGoStart:           {"GoStart", 5, false, []string{"g", "seq"}, nil}, // in 1.5 format it was {"g"}
-	EvGoEnd:             {"GoEnd", 5, false, []string{}, nil},
-	EvGoStop:            {"GoStop", 5, true, []string{}, nil},
-	EvGoSched:           {"GoSched", 5, true, []string{}, nil},
-	EvGoPreempt:         {"GoPreempt", 5, true, []string{}, nil},
-	EvGoSleep:           {"GoSleep", 5, true, []string{}, nil},
-	EvGoBlock:           {"GoBlock", 5, true, []string{}, nil},
-	EvGoUnblock:         {"GoUnblock", 5, true, []string{"g", "seq"}, nil}, // in 1.5 format it was {"g"}
-	EvGoBlockSend:       {"GoBlockSend", 5, true, []string{}, nil},
-	EvGoBlockRecv:       {"GoBlockRecv", 5, true, []string{}, nil},
-	EvGoBlockSelect:     {"GoBlockSelect", 5, true, []string{}, nil},
-	EvGoBlockSync:       {"GoBlockSync", 5, true, []string{}, nil},
-	EvGoBlockCond:       {"GoBlockCond", 5, true, []string{}, nil},
-	EvGoBlockNet:        {"GoBlockNet", 5, true, []string{}, nil},
-	EvGoSysCall:         {"GoSysCall", 5, true, []string{}, nil},
-	EvGoSysExit:         {"GoSysExit", 5, false, []string{"g", "seq", "ts"}, nil},
-	EvGoSysBlock:        {"GoSysBlock", 5, false, []string{}, nil},
-	EvGoWaiting:         {"GoWaiting", 5, false, []string{"g"}, nil},
-	EvGoInSyscall:       {"GoInSyscall", 5, false, []string{"g"}, nil},
-	EvHeapAlloc:         {"HeapAlloc", 5, false, []string{"mem"}, nil},
-	EvHeapGoal:          {"HeapGoal", 5, false, []string{"mem"}, nil},
-	EvTimerGoroutine:    {"TimerGoroutine", 5, false, []string{"g"}, nil}, // in 1.5 format it was {"g", "unused"}
-	EvFutileWakeup:      {"FutileWakeup", 5, false, []string{}, nil},
-	EvString:            {"String", 7, false, []string{}, nil},
-	EvGoStartLocal:      {"GoStartLocal", 7, false, []string{"g"}, nil},
-	EvGoUnblockLocal:    {"GoUnblockLocal", 7, true, []string{"g"}, nil},
-	EvGoSysExitLocal:    {"GoSysExitLocal", 7, false, []string{"g", "ts"}, nil},
-	EvGoStartLabel:      {"GoStartLabel", 8, false, []string{"g", "seq", "labelid"}, []string{"label"}},
-	EvGoBlockGC:         {"GoBlockGC", 8, true, []string{}, nil},
-	EvGCMarkAssistStart: {"GCMarkAssistStart", 9, true, []string{}, nil},
-	EvGCMarkAssistDone:  {"GCMarkAssistDone", 9, false, []string{}, nil},
-	EvUserTaskCreate:    {"UserTaskCreate", 11, true, []string{"taskid", "pid", "typeid"}, []string{"name"}},
-	EvUserTaskEnd:       {"UserTaskEnd", 11, true, []string{"taskid"}, nil},
-	EvUserRegion:        {"UserRegion", 11, true, []string{"taskid", "mode", "typeid"}, []string{"name"}},
-	EvUserLog:           {"UserLog", 11, true, []string{"id", "keyid"}, []string{"category", "message"}},
-	EvCPUSample:         {"CPUSample", 19, true, []string{"ts", "p", "g"}, nil},
+	EvNone:              {"None", 5, false, [][]byte{}, nil},
+	EvBatch:             {"Batch", 5, false, [][]byte{"p", "ticks"}, nil}, // in 1.5 format it was {"p", "seq", "ticks"}
+	EvFrequency:         {"Frequency", 5, false, [][]byte{"freq"}, nil},   // in 1.5 format it was {"freq", "unused"}
+	EvStack:             {"Stack", 5, false, [][]byte{"id", "siz"}, nil},
+	EvGomaxprocs:        {"Gomaxprocs", 5, true, [][]byte{"procs"}, nil},
+	EvProcStart:         {"ProcStart", 5, false, [][]byte{"thread"}, nil},
+	EvProcStop:          {"ProcStop", 5, false, [][]byte{}, nil},
+	EvGCStart:           {"GCStart", 5, true, [][]byte{"seq"}, nil}, // in 1.5 format it was {}
+	EvGCDone:            {"GCDone", 5, false, [][]byte{}, nil},
+	EvSTWStart:          {"GCSTWStart", 5, false, [][]byte{"kindid"}, [][]byte{"kind"}}, // <= 1.9, args was {} (implicitly {0})
+	EvSTWDone:           {"GCSTWDone", 5, false, [][]byte{}, nil},
+	EvGCSweepStart:      {"GCSweepStart", 5, true, [][]byte{}, nil},
+	EvGCSweepDone:       {"GCSweepDone", 5, false, [][]byte{"swept", "reclaimed"}, nil}, // before 1.9, format was {}
+	EvGoCreate:          {"GoCreate", 5, true, [][]byte{"g", "stack"}, nil},
+	EvGoStart:           {"GoStart", 5, false, [][]byte{"g", "seq"}, nil}, // in 1.5 format it was {"g"}
+	EvGoEnd:             {"GoEnd", 5, false, [][]byte{}, nil},
+	EvGoStop:            {"GoStop", 5, true, [][]byte{}, nil},
+	EvGoSched:           {"GoSched", 5, true, [][]byte{}, nil},
+	EvGoPreempt:         {"GoPreempt", 5, true, [][]byte{}, nil},
+	EvGoSleep:           {"GoSleep", 5, true, [][]byte{}, nil},
+	EvGoBlock:           {"GoBlock", 5, true, [][]byte{}, nil},
+	EvGoUnblock:         {"GoUnblock", 5, true, [][]byte{"g", "seq"}, nil}, // in 1.5 format it was {"g"}
+	EvGoBlockSend:       {"GoBlockSend", 5, true, [][]byte{}, nil},
+	EvGoBlockRecv:       {"GoBlockRecv", 5, true, [][]byte{}, nil},
+	EvGoBlockSelect:     {"GoBlockSelect", 5, true, [][]byte{}, nil},
+	EvGoBlockSync:       {"GoBlockSync", 5, true, [][]byte{}, nil},
+	EvGoBlockCond:       {"GoBlockCond", 5, true, [][]byte{}, nil},
+	EvGoBlockNet:        {"GoBlockNet", 5, true, [][]byte{}, nil},
+	EvGoSysCall:         {"GoSysCall", 5, true, [][]byte{}, nil},
+	EvGoSysExit:         {"GoSysExit", 5, false, [][]byte{"g", "seq", "ts"}, nil},
+	EvGoSysBlock:        {"GoSysBlock", 5, false, [][]byte{}, nil},
+	EvGoWaiting:         {"GoWaiting", 5, false, [][]byte{"g"}, nil},
+	EvGoInSyscall:       {"GoInSyscall", 5, false, [][]byte{"g"}, nil},
+	EvHeapAlloc:         {"HeapAlloc", 5, false, [][]byte{"mem"}, nil},
+	EvHeapGoal:          {"HeapGoal", 5, false, [][]byte{"mem"}, nil},
+	EvTimerGoroutine:    {"TimerGoroutine", 5, false, [][]byte{"g"}, nil}, // in 1.5 format it was {"g", "unused"}
+	EvFutileWakeup:      {"FutileWakeup", 5, false, [][]byte{}, nil},
+	EvString:            {"String", 7, false, [][]byte{}, nil},
+	EvGoStartLocal:      {"GoStartLocal", 7, false, [][]byte{"g"}, nil},
+	EvGoUnblockLocal:    {"GoUnblockLocal", 7, true, [][]byte{"g"}, nil},
+	EvGoSysExitLocal:    {"GoSysExitLocal", 7, false, [][]byte{"g", "ts"}, nil},
+	EvGoStartLabel:      {"GoStartLabel", 8, false, [][]byte{"g", "seq", "labelid"}, [][]byte{"label"}},
+	EvGoBlockGC:         {"GoBlockGC", 8, true, [][]byte{}, nil},
+	EvGCMarkAssistStart: {"GCMarkAssistStart", 9, true, [][]byte{}, nil},
+	EvGCMarkAssistDone:  {"GCMarkAssistDone", 9, false, [][]byte{}, nil},
+	EvUserTaskCreate:    {"UserTaskCreate", 11, true, [][]byte{"taskid", "pid", "typeid"}, [][]byte{"name"}},
+	EvUserTaskEnd:       {"UserTaskEnd", 11, true, [][]byte{"taskid"}, nil},
+	EvUserRegion:        {"UserRegion", 11, true, [][]byte{"taskid", "mode", "typeid"}, [][]byte{"name"}},
+	EvUserLog:           {"UserLog", 11, true, [][]byte{"id", "keyid"}, [][]byte{"category", "message"}},
+	EvCPUSample:         {"CPUSample", 19, true, [][]byte{"ts", "p", "g"}, nil},
 }
 
 //gcassert:inline
@@ -1504,7 +1504,7 @@ func (p *parser) allocateStack(size uint64) []uint64 {
 	// at a time.
 	out := p.stacksData
 	if uint64(len(out)) < size {
-		out = make([]uint64, 1024*128)
+		out = []uint64{:1024*128}
 	}
 	p.stacksData = out[size:]
 	return out[:size:size]

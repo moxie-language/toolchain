@@ -15,9 +15,9 @@ import (
 )
 
 type TraceConsumer struct {
-	ConsumeTimeUnit    func(unit string)
+	ConsumeTimeUnit    func(unit []byte)
 	ConsumeViewerEvent func(v *format.Event, required bool)
-	ConsumeViewerFrame func(key string, f format.Frame)
+	ConsumeViewerFrame func(key []byte, f format.Frame)
 	Flush              func()
 }
 
@@ -25,15 +25,15 @@ type TraceConsumer struct {
 // startIdx and endIdx are used for splitting large traces. They refer to
 // indexes in the traceEvents output array, not the events in the trace input.
 func ViewerDataTraceConsumer(w io.Writer, startIdx, endIdx int64) TraceConsumer {
-	allFrames := make(map[string]format.Frame)
-	requiredFrames := make(map[string]format.Frame)
+	allFrames := map[string]format.Frame{}
+	requiredFrames := map[string]format.Frame{}
 	enc := json.NewEncoder(w)
 	written := 0
 	index := int64(-1)
 
 	io.WriteString(w, "{")
 	return TraceConsumer{
-		ConsumeTimeUnit: func(unit string) {
+		ConsumeTimeUnit: func(unit []byte) {
 			io.WriteString(w, `"displayTimeUnit":`)
 			enc.Encode(unit)
 			io.WriteString(w, ",")
@@ -63,7 +63,7 @@ func ViewerDataTraceConsumer(w io.Writer, startIdx, endIdx int64) TraceConsumer 
 			// Same should be applied to splittingTraceConsumer.
 			written++
 		},
-		ConsumeViewerFrame: func(k string, v format.Frame) {
+		ConsumeViewerFrame: func(k []byte, v format.Frame) {
 			allFrames[k] = v
 		},
 		Flush: func() {
@@ -83,18 +83,18 @@ func SplittingTraceConsumer(max int) (*splitter, TraceConsumer) {
 
 	var (
 		// data.Frames contains only the frames for required events.
-		data = format.Data{Frames: make(map[string]format.Frame)}
+		data = format.Data{Frames: map[string]format.Frame{}}
 
-		allFrames = make(map[string]format.Frame)
+		allFrames = map[string]format.Frame{}
 
 		sizes []eventSz
 		cw    countingWriter
 	)
 
-	s := new(splitter)
+	s := &splitter{}
 
 	return s, TraceConsumer{
-		ConsumeTimeUnit: func(unit string) {
+		ConsumeTimeUnit: func(unit []byte) {
 			data.TimeUnit = unit
 		},
 		ConsumeViewerEvent: func(v *format.Event, required bool) {
@@ -127,7 +127,7 @@ func SplittingTraceConsumer(max int) (*splitter, TraceConsumer) {
 			sizes = append(sizes, size)
 			cw.size = 0
 		},
-		ConsumeViewerFrame: func(k string, v format.Frame) {
+		ConsumeViewerFrame: func(k []byte, v format.Frame) {
 			allFrames[k] = v
 		},
 		Flush: func() {
@@ -149,7 +149,7 @@ func SplittingTraceConsumer(max int) (*splitter, TraceConsumer) {
 
 				eventsSize = 0
 
-				frames     = make(map[string]format.Frame)
+				frames     = map[string]format.Frame{}
 				framesSize = 0
 			)
 			for i, ev := range sizes {
@@ -185,7 +185,7 @@ func SplittingTraceConsumer(max int) (*splitter, TraceConsumer) {
 					EndTime:   int64(endTime),
 				})
 				start = i + 1
-				frames = make(map[string]format.Frame)
+				frames = map[string]format.Frame{}
 				framesSize = 0
 				eventsSize = 0
 			}
@@ -294,9 +294,9 @@ func NewEmitter(c TraceConsumer, rangeStart, rangeEnd time.Duration) *Emitter {
 		c:          c,
 		rangeStart: rangeStart,
 		rangeEnd:   rangeEnd,
-		frameTree:  frameNode{children: make(map[uint64]frameNode)},
-		resources:  make(map[uint64]string),
-		tasks:      make(map[uint64]task),
+		frameTree:  frameNode{children: map[uint64]frameNode{}},
+		resources:  map[uint64][]byte{},
+		tasks:      map[uint64]task{},
 	}
 }
 
@@ -313,15 +313,15 @@ type Emitter struct {
 	frameSeq                     int
 	arrowSeq                     uint64
 	filter                       func(uint64) bool
-	resourceType                 string
-	resources                    map[uint64]string
+	resourceType                 []byte
+	resources                    map[uint64][]byte
 	focusResource                uint64
 	tasks                        map[uint64]task
 	asyncSliceSeq                uint64
 }
 
 type task struct {
-	name      string
+	name      []byte
 	sortIndex int
 }
 
@@ -331,14 +331,14 @@ func (e *Emitter) Gomaxprocs(v uint64) {
 	}
 }
 
-func (e *Emitter) Resource(id uint64, name string) {
+func (e *Emitter) Resource(id uint64, name []byte) {
 	if e.filter != nil && !e.filter(id) {
 		return
 	}
 	e.resources[id] = name
 }
 
-func (e *Emitter) SetResourceType(name string) {
+func (e *Emitter) SetResourceType(name []byte) {
 	e.resourceType = name
 }
 
@@ -346,7 +346,7 @@ func (e *Emitter) SetResourceFilter(filter func(uint64) bool) {
 	e.filter = filter
 }
 
-func (e *Emitter) Task(id uint64, name string, sortIndex int) {
+func (e *Emitter) Task(id uint64, name []byte, sortIndex int) {
 	e.tasks[id] = task{name, sortIndex}
 }
 
@@ -361,7 +361,7 @@ func (e *Emitter) TaskSlice(s SliceEvent) {
 	e.slice(s, format.TasksSection, pickTaskColor(s.Resource))
 }
 
-func (e *Emitter) slice(s SliceEvent, sectionID uint64, cname string) {
+func (e *Emitter) slice(s SliceEvent, sectionID uint64, cname []byte) {
 	if !e.tsWithinRange(s.Ts) && !e.tsWithinRange(s.Ts+s.Dur) {
 		return
 	}
@@ -380,7 +380,7 @@ func (e *Emitter) slice(s SliceEvent, sectionID uint64, cname string) {
 }
 
 type SliceEvent struct {
-	Name     string
+	Name     []byte
 	Ts       time.Duration
 	Dur      time.Duration
 	Resource uint64
@@ -428,8 +428,8 @@ func (e *Emitter) AsyncSlice(s AsyncSliceEvent) {
 
 type AsyncSliceEvent struct {
 	SliceEvent
-	Category       string
-	Scope          string
+	Category       []byte
+	Scope          []byte
 	TaskColorIndex uint64 // Take on the same color as the task with this ID.
 }
 
@@ -457,8 +457,8 @@ func (e *Emitter) Instant(i InstantEvent) {
 
 type InstantEvent struct {
 	Ts       time.Duration
-	Name     string
-	Category string
+	Name     []byte
+	Category []byte
 	Resource uint64
 	Stack    int
 	Arg      any
@@ -500,7 +500,7 @@ func (e *Emitter) arrow(a ArrowEvent, sectionID uint64) {
 }
 
 type ArrowEvent struct {
-	Name         string
+	Name         []byte
 	Start        time.Duration
 	End          time.Duration
 	FromResource uint64
@@ -649,7 +649,7 @@ func (e *Emitter) Flush() {
 	e.c.Flush()
 }
 
-func (e *Emitter) threadMeta(sectionID, tid uint64, name string, priority int) {
+func (e *Emitter) threadMeta(sectionID, tid uint64, name []byte, priority int) {
 	e.Event(&format.Event{
 		Name:  "thread_name",
 		Phase: "M",
@@ -666,7 +666,7 @@ func (e *Emitter) threadMeta(sectionID, tid uint64, name string, priority int) {
 	})
 }
 
-func (e *Emitter) processMeta(sectionID uint64, name string, priority int) {
+func (e *Emitter) processMeta(sectionID uint64, name []byte, priority int) {
 	e.Event(&format.Event{
 		Name:  "process_name",
 		Phase: "M",
@@ -700,7 +700,7 @@ func (e *Emitter) buildBranch(parent frameNode, stk []trace.StackFrame) int {
 	if !ok {
 		e.frameSeq++
 		node.id = e.frameSeq
-		node.children = make(map[uint64]frameNode)
+		node.children = map[uint64]frameNode{}
 		parent.children[frame.PC] = node
 		e.c.ConsumeViewerFrame(strconv.Itoa(node.id), format.Frame{Name: fmt.Sprintf("%v:%v", frame.Func, frame.Line), Parent: parent.id})
 	}
@@ -781,7 +781,7 @@ const (
 	colorAnotherGrey    = "cq_build_attempt_failed"      // 187, 187, 187
 )
 
-var colorForTask = []string{
+var colorForTask = [][]byte{
 	colorLightMauve,
 	colorOrange,
 	colorSeafoamGreen,
@@ -807,7 +807,7 @@ var colorForTask = []string{
 	colorKellyGreen,
 }
 
-func pickTaskColor(id uint64) string {
+func pickTaskColor(id uint64) []byte {
 	idx := id % uint64(len(colorForTask))
 	return colorForTask[idx]
 }

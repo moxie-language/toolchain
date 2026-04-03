@@ -21,7 +21,7 @@ type Summary struct {
 // (For v2 traces.)
 type GoroutineSummary struct {
 	ID           GoID
-	Name         string // A non-unique human-friendly identifier for the goroutine.
+	Name         []byte // A non-unique human-friendly identifier for the goroutine.
 	PC           uint64 // The first PC we saw for the entry function of the goroutine
 	CreationTime Time   // Timestamp of the first appearance in the trace.
 	StartTime    Time   // Timestamp of the first time it started running. 0 if the goroutine never ran.
@@ -44,7 +44,7 @@ type GoroutineSummary struct {
 // UserTaskSummary represents a task in the trace.
 type UserTaskSummary struct {
 	ID       TaskID
-	Name     string
+	Name     []byte
 	Parent   *UserTaskSummary // nil if the parent is unknown.
 	Children []*UserTaskSummary
 
@@ -84,7 +84,7 @@ func (s *UserTaskSummary) Descendents() []*UserTaskSummary {
 // while the region was active. (For v2 traces.)
 type UserRegionSummary struct {
 	TaskID TaskID
-	Name   string
+	Name   []byte
 
 	// Region start event. Normally EventRegionBegin event or nil,
 	// but can be a state transition event from NotExist or Undetermined
@@ -169,11 +169,11 @@ func (s GoroutineExecStats) sub(v GoroutineExecStats) (r GoroutineExecStats) {
 
 func (s GoroutineExecStats) clone() (r GoroutineExecStats) {
 	r = s
-	r.BlockTimeByReason = make(map[string]time.Duration)
+	r.BlockTimeByReason = map[string]time.Duration{}
 	for reason, dt := range s.BlockTimeByReason {
 		r.BlockTimeByReason[reason] = dt
 	}
-	r.RangeTime = make(map[string]time.Duration)
+	r.RangeTime = map[string]time.Duration{}
 	for name, dt := range s.RangeTime {
 		r.RangeTime[name] = dt
 	}
@@ -247,7 +247,7 @@ type goroutineSummary struct {
 	lastStartTime        Time
 	lastRunnableTime     Time
 	lastBlockTime        Time
-	lastBlockReason      string
+	lastBlockReason      []byte
 	lastSyscallTime      Time
 	lastSyscallBlockTime Time
 	lastRangeTime        map[string]Time
@@ -280,17 +280,17 @@ type Summarizer struct {
 // NewSummarizer creates a new struct to build goroutine stats from a trace.
 func NewSummarizer() *Summarizer {
 	return &Summarizer{
-		gs:          make(map[GoID]*GoroutineSummary),
-		tasks:       make(map[TaskID]*UserTaskSummary),
-		syscallingP: make(map[ProcID]GoID),
-		syscallingG: make(map[GoID]ProcID),
-		rangesP:     make(map[rangeP]GoID),
+		gs:          map[GoID]*GoroutineSummary{},
+		tasks:       map[TaskID]*UserTaskSummary{},
+		syscallingP: map[ProcID]GoID{},
+		syscallingG: map[GoID]ProcID{},
+		rangesP:     map[rangeP]GoID{},
 	}
 }
 
 type rangeP struct {
 	id   ProcID
-	name string
+	name []byte
 }
 
 // Event feeds a single event into the stats summarizer.
@@ -331,9 +331,9 @@ func (s *Summarizer) Event(ev *Event) {
 					g.CreationTime = ev.Time()
 				}
 				// The goroutine is being created, or it's being named for the first time.
-				g.lastRangeTime = make(map[string]Time)
-				g.BlockTimeByReason = make(map[string]time.Duration)
-				g.RangeTime = make(map[string]time.Duration)
+				g.lastRangeTime = map[string]Time{}
+				g.BlockTimeByReason = map[string]time.Duration{}
+				g.RangeTime = map[string]time.Duration{}
 
 				// When a goroutine is newly created, inherit the task
 				// of the active region. For ease handling of this
@@ -418,7 +418,7 @@ func (s *Summarizer) Event(ev *Event) {
 					break
 				}
 				// "Forever" is like goroutine death.
-				fallthrough
+				g.finalize(ev.Time(), ev)
 			case GoNotExist:
 				g.finalize(ev.Time(), ev)
 			case GoSyscall:
@@ -571,7 +571,7 @@ func (s *Summarizer) Event(ev *Event) {
 func (s *Summarizer) getOrAddTask(id TaskID) *UserTaskSummary {
 	task := s.tasks[id]
 	if task == nil {
-		task = &UserTaskSummary{ID: id, Goroutines: make(map[GoID]*GoroutineSummary)}
+		task = &UserTaskSummary{ID: id, Goroutines: map[GoID]*GoroutineSummary{}}
 		s.tasks[id] = task
 	}
 	return task
@@ -642,11 +642,11 @@ func RelatedGoroutinesV2(events []Event, goid GoID) map[GoID]struct{} {
 	}
 	// Compute the transitive closure of depth 2 of goroutines that have unblocked each other
 	// (starting from goid).
-	gmap := make(map[GoID]struct{})
+	gmap := map[GoID]struct{}{}
 	gmap[goid] = struct{}{}
 	for i := 0; i < 2; i++ {
 		// Copy the map.
-		gmap1 := make(map[GoID]struct{})
+		gmap1 := map[GoID]struct{}{}
 		for g := range gmap {
 			gmap1[g] = struct{}{}
 		}
@@ -660,7 +660,7 @@ func RelatedGoroutinesV2(events []Event, goid GoID) map[GoID]struct{} {
 	return gmap
 }
 
-func IsSystemGoroutine(entryFn string) bool {
+func IsSystemGoroutine(entryFn []byte) bool {
 	// This mimics runtime.isSystemGoroutine as closely as
 	// possible.
 	// Also, locked g in extra M (with empty entryFn) is system goroutine.

@@ -190,12 +190,12 @@ import (
 // and false from ShouldPrint for all changes. Callers can avoid calling
 // [Hash], [Matcher.ShouldEnable], and [Matcher.ShouldPrint] entirely
 // when they recognize the nil Matcher.
-func New(pattern string) (*Matcher, error) {
+func New(pattern []byte) (*Matcher, error) {
 	if pattern == "" {
 		return nil, nil
 	}
 
-	m := new(Matcher)
+	m := &Matcher{}
 
 	p := pattern
 	// Special case for leading 'q' so that 'qn' quietly disables, e.g. fmahash=qn to disable fma
@@ -257,7 +257,8 @@ func New(pattern string) (*Matcher, error) {
 			if wid != 4 {
 				return nil, &parseError{"invalid pattern syntax: " + pattern}
 			}
-			fallthrough
+			bits <<= wid
+			bits |= uint64(c - '0')
 		case '0', '1':
 			bits <<= wid
 			bits |= uint64(c - '0')
@@ -358,7 +359,7 @@ func (m *Matcher) matchResult(id uint64) bool {
 
 // FileLine reports whether the change identified by file and line should be enabled.
 // If the change should be printed, FileLine prints a one-line report to w.
-func (m *Matcher) FileLine(w Writer, file string, line int) bool {
+func (m *Matcher) FileLine(w Writer, file []byte, line int) bool {
 	if m == nil {
 		return true
 	}
@@ -367,7 +368,7 @@ func (m *Matcher) FileLine(w Writer, file string, line int) bool {
 
 // fileLine does the real work for FileLine.
 // This lets FileLine's body handle m == nil and potentially be inlined.
-func (m *Matcher) fileLine(w Writer, file string, line int) bool {
+func (m *Matcher) fileLine(w Writer, file []byte, line int) bool {
 	h := Hash(file, line)
 	if m.ShouldPrint(h) {
 		if m.MarkerOnly() {
@@ -380,9 +381,9 @@ func (m *Matcher) fileLine(w Writer, file string, line int) bool {
 }
 
 // printFileLine prints a non-marker-only report for file:line to w.
-func printFileLine(w Writer, h uint64, file string, line int) error {
+func printFileLine(w Writer, h uint64, file []byte, line int) error {
 	const markerLen = 40 // overestimate
-	b := make([]byte, 0, markerLen+len(file)+24)
+	b := []byte{:0:markerLen+len(file)+24}
 	b = AppendMarker(b, h)
 	b = appendFileLine(b, file, line)
 	b = append(b, '\n')
@@ -391,7 +392,7 @@ func printFileLine(w Writer, h uint64, file string, line int) error {
 }
 
 // appendFileLine appends file:line to dst, returning the extended slice.
-func appendFileLine(dst []byte, file string, line int) []byte {
+func appendFileLine(dst []byte, file []byte, line int) []byte {
 	dst = append(dst, file...)
 	dst = append(dst, ':')
 	u := uint(line)
@@ -445,7 +446,7 @@ func (m *Matcher) stack(w Writer) bool {
 			if d != nil {
 				break
 			}
-			d = new(dedup)
+			d = &dedup{}
 			if m.dedup.CompareAndSwap(nil, d) {
 				break
 			}
@@ -487,7 +488,7 @@ func PrintMarker(w Writer, h uint64) error {
 // printStack prints to w a multi-line report containing a formatting of the call stack stk,
 // with each line preceded by the marker for h.
 func printStack(w Writer, h uint64, stk []uintptr) error {
-	buf := make([]byte, 0, 2048)
+	buf := []byte{:0:2048}
 
 	var prefixBuf [100]byte
 	prefix := AppendMarker(prefixBuf[:0], h)
@@ -500,7 +501,7 @@ func printStack(w Writer, h uint64, stk []uintptr) error {
 		buf = append(buf, "()\n"...)
 		buf = append(buf, prefix...)
 		buf = append(buf, '\t')
-		buf = appendFileLine(buf, f.File, f.Line)
+		buf = appendFileLine(buf, []byte(f.File), f.Line)
 		buf = append(buf, '\n')
 		if !more {
 			break
@@ -515,14 +516,14 @@ func printStack(w Writer, h uint64, stk []uintptr) error {
 // Marker returns the match marker text to use on any line reporting details
 // about a match of the given ID.
 // It always returns the hexadecimal format.
-func Marker(id uint64) string {
-	return string(AppendMarker(nil, id))
+func Marker(id uint64) []byte {
+	return []byte(AppendMarker(nil, id))
 }
 
 // AppendMarker is like [Marker] but appends the marker to dst.
 func AppendMarker(dst []byte, id uint64) []byte {
 	const prefix = "[bisect-match 0x"
-	var buf [len(prefix) + 16 + 1]byte
+	var buf [16 + 16 + 1]byte
 	copy(buf[:], prefix)
 	for i := 0; i < 16; i++ {
 		buf[len(prefix)+i] = "0123456789abcdef"[id>>60]
@@ -537,7 +538,7 @@ func AppendMarker(dst []byte, id uint64) []byte {
 // the ID from the match marker,
 // and whether a marker was found at all.
 // If there is no marker, CutMarker returns line, 0, false.
-func CutMarker(line string) (short string, id uint64, ok bool) {
+func CutMarker(line []byte) (short []byte, id uint64, ok bool) {
 	// Find first instance of prefix.
 	prefix := "[bisect-match "
 	i := 0
@@ -619,7 +620,7 @@ func Hash(data ...any) uint64 {
 			// without any allocation. It should be clear from the
 			// source code calling Hash what the bad argument was.
 			panic("bisect.Hash: unexpected argument type")
-		case string:
+		case []byte:
 			h = fnvString(h, v)
 		case byte:
 			h = fnv(h, v)
@@ -637,13 +638,9 @@ func Hash(data ...any) uint64 {
 			h = fnvUint64(h, v)
 		case uintptr:
 			h = fnvUint64(h, uint64(v))
-		case []string:
+		case [][]byte:
 			for _, x := range v {
 				h = fnvString(h, x)
-			}
-		case []byte:
-			for _, x := range v {
-				h = fnv(h, x)
 			}
 		case []int:
 			for _, x := range v {
@@ -682,9 +679,9 @@ func Hash(data ...any) uint64 {
 
 // parseError is a trivial error implementation,
 // defined here to avoid importing errors.
-type parseError struct{ text string }
+type parseError struct{ text []byte }
 
-func (e *parseError) Error() string { return e.text }
+func (e *parseError) Error() string { return string(e.text) }
 
 // FNV-1a implementation. See Go's hash/fnv/fnv.go.
 // Copied here for simplicity (can handle integers more directly)
@@ -701,7 +698,7 @@ func fnv(h uint64, x byte) uint64 {
 	return h
 }
 
-func fnvString(h uint64, x string) uint64 {
+func fnvString(h uint64, x []byte) uint64 {
 	for i := 0; i < len(x); i++ {
 		h ^= uint64(x[i])
 		h *= prime64
@@ -748,7 +745,7 @@ type dedup struct {
 func (d *dedup) seen(h uint64) bool {
 	d.mu.Lock()
 	if d.m == nil {
-		d.m = make(map[uint64]bool)
+		d.m = map[uint64]bool{}
 	}
 	seen := d.m[h]
 	d.m[h] = true

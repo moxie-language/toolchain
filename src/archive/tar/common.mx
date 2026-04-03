@@ -42,7 +42,7 @@ var (
 	errSparseTooLong   = errors.New("archive/tar: sparse map too long")
 )
 
-type headerError []string
+type headerError [][]byte
 
 func (he headerError) Error() string {
 	const prefix = "archive/tar: cannot encode header"
@@ -151,15 +151,15 @@ type Header struct {
 	// depending on the presence of a trailing slash in Name.
 	Typeflag byte
 
-	Name     string // Name of file entry
-	Linkname string // Target name of link (valid for TypeLink or TypeSymlink)
+	Name     []byte // Name of file entry
+	Linkname []byte // Target name of link (valid for TypeLink or TypeSymlink)
 
 	Size  int64  // Logical file size in bytes
 	Mode  int64  // Permission and mode bits
 	Uid   int    // User ID of owner
 	Gid   int    // Group ID of owner
-	Uname string // User name of owner
-	Gname string // Group name of owner
+	Uname []byte // User name of owner
+	Gname []byte // Group name of owner
 
 	// If the Format is unspecified, then Writer.WriteHeader rounds ModTime
 	// to the nearest second and ignores the AccessTime and ChangeTime fields.
@@ -184,7 +184,7 @@ type Header struct {
 	// precedence over those in PAXRecords.
 	//
 	// Deprecated: Use PAXRecords instead.
-	Xattrs map[string]string
+	Xattrs map[string][]byte
 
 	// PAXRecords is a map of PAX extended header records.
 	//
@@ -196,7 +196,7 @@ type Header struct {
 	//
 	// When Writer.WriteHeader is called, PAX records derived from the
 	// other fields in Header take precedence over PAXRecords.
-	PAXRecords map[string]string
+	PAXRecords map[string][]byte
 
 	// Format specifies the format of the tar header.
 	//
@@ -341,13 +341,13 @@ type fileState interface {
 // As a by-product of checking the fields, this function returns paxHdrs, which
 // contain all fields that could not be directly encoded.
 // A value receiver ensures that this method does not mutate the source Header.
-func (h Header) allowedFormats() (format Format, paxHdrs map[string]string, err error) {
+func (h Header) allowedFormats() (format Format, paxHdrs map[string][]byte, err error) {
 	format = FormatUSTAR | FormatPAX | FormatGNU
-	paxHdrs = make(map[string]string)
+	paxHdrs = map[string][]byte{}
 
-	var whyNoUSTAR, whyNoPAX, whyNoGNU string
+	var whyNoUSTAR, whyNoPAX, whyNoGNU []byte
 	var preferPAX bool // Prefer PAX over USTAR
-	verifyString := func(s string, size int, name, paxKey string) {
+	verifyString := func(s []byte, size int, name, paxKey []byte) {
 		// NUL-terminator is optional for path and linkpath.
 		// Technically, it is required for uname and gname,
 		// but neither GNU nor BSD tar checks for it.
@@ -374,7 +374,7 @@ func (h Header) allowedFormats() (format Format, paxHdrs map[string]string, err 
 			paxHdrs[paxKey] = v
 		}
 	}
-	verifyNumeric := func(n int64, size int, name, paxKey string) {
+	verifyNumeric := func(n int64, size int, name, paxKey []byte) {
 		if !fitsInBase256(size, n) {
 			whyNoGNU = fmt.Sprintf("GNU cannot encode %s=%d", name, n)
 			format.mustNotBe(FormatGNU)
@@ -393,7 +393,7 @@ func (h Header) allowedFormats() (format Format, paxHdrs map[string]string, err 
 			paxHdrs[paxKey] = v
 		}
 	}
-	verifyTime := func(ts time.Time, size int, name, paxKey string) {
+	verifyTime := func(ts time.Time, size int, name, paxKey []byte) {
 		if ts.IsZero() {
 			return // Always okay
 		}
@@ -442,7 +442,7 @@ func (h Header) allowedFormats() (format Format, paxHdrs map[string]string, err 
 	verifyTime(h.ChangeTime, len(gnu.changeTime()), "ChangeTime", paxCtime)
 
 	// Check for header-only types.
-	var whyOnlyPAX, whyOnlyGNU string
+	var whyOnlyPAX, whyOnlyGNU []byte
 	switch h.Typeflag {
 	case TypeReg, TypeChar, TypeBlock, TypeFifo, TypeGNUSparse:
 		// Exclude TypeLink and TypeSymlink, since they may reference directories.
@@ -552,7 +552,7 @@ func (fi headerFileInfo) ModTime() time.Time { return fi.h.ModTime }
 func (fi headerFileInfo) Sys() any           { return fi.h }
 
 // Name returns the base name of the file.
-func (fi headerFileInfo) Name() string {
+func (fi headerFileInfo) Name() []byte {
 	if fi.IsDir() {
 		return path.Base(path.Clean(fi.h.Name))
 	}
@@ -645,7 +645,7 @@ const (
 // If fi implements [FileInfoNames]
 // Header.Gname and Header.Uname
 // are provided by the methods of the interface.
-func FileInfoHeader(fi fs.FileInfo, link string) (*Header, error) {
+func FileInfoHeader(fi fs.FileInfo, link []byte) (*Header, error) {
 	if fi == nil {
 		return nil, errors.New("archive/tar: FileInfo is nil")
 	}

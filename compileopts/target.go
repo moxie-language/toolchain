@@ -34,11 +34,17 @@ type TargetSpec struct {
 
 // LoadTarget loads a target specification from options.
 func LoadTarget(options *Options) (*TargetSpec, error) {
-	if options.Target == "" && options.GOARCH == "wasm" {
-		if options.GOOS != "js" {
-			return nil, fmt.Errorf("GOARCH=wasm requires GOOS=js")
-		}
-		options.Target = "wasm"
+	// Parse compound target like "js/wasm" into GOOS/GOARCH.
+	if strings.Contains(options.Target, "/") {
+		parts := strings.SplitN(options.Target, "/", 2)
+		options.GOOS = parts[0]
+		options.GOARCH = parts[1]
+		options.Target = ""
+	}
+	if options.Target == "wasm" {
+		options.GOOS = "js"
+		options.GOARCH = "wasm"
+		options.Target = ""
 	}
 	return defaultTarget(options)
 }
@@ -72,9 +78,9 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 		if options.GOOS != "js" {
 			return nil, fmt.Errorf("GOARCH=wasm requires GOOS=js")
 		}
-		// JS/wasm target is handled by jsbackend, not LLVM.
-		spec.Scheduler = "tasks"
-		return &spec, nil
+		llvmarch = "wasm32"
+		spec.CPU = "generic"
+		spec.Features = "+mutable-globals,+sign-ext"
 	default:
 		return nil, fmt.Errorf("unsupported GOARCH=%s (moxie supports amd64, arm64, wasm)", options.GOARCH)
 	}
@@ -121,8 +127,18 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"src/runtime/signal.c",
 			"src/runtime/spawn_unix.c",
 			"src/internal/futex/futex_linux.c")
+	case "js":
+		spec.GC = "leaking"
+		spec.Scheduler = "tasks"
+		spec.Linker = "wasm-ld"
+		spec.BuildTags = append(spec.BuildTags, "moxie.wasm", "moxie.unicore")
+		spec.LDFlags = append(spec.LDFlags,
+			"--export-dynamic",
+			"--allow-undefined",
+			"--gc-sections",
+		)
 	default:
-		return nil, fmt.Errorf("unsupported GOOS=%s (moxie supports linux, darwin)", options.GOOS)
+		return nil, fmt.Errorf("unsupported GOOS=%s (moxie supports linux, darwin, js)", options.GOOS)
 	}
 
 	if spec.GC == "boehm" {
@@ -135,10 +151,12 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 		spec.Triple += "-musleabihf"
 	}
 
-	// Assembly files for scheduler and task switching.
-	spec.ExtraFiles = append(spec.ExtraFiles,
-		"src/runtime/asm_"+options.GOARCH+".S",
-		"src/internal/task/task_stack_"+options.GOARCH+".S")
+	// Assembly files for scheduler and task switching (not for WASM).
+	if options.GOARCH != "wasm" {
+		spec.ExtraFiles = append(spec.ExtraFiles,
+			"src/runtime/asm_"+options.GOARCH+".S",
+			"src/internal/task/task_stack_"+options.GOARCH+".S")
+	}
 
 	// Cross-compilation emulator.
 	if options.GOARCH != runtime.GOARCH && options.GOOS == "linux" {

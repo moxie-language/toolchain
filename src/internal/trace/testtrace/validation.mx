@@ -19,8 +19,8 @@ type Validator struct {
 	gs        map[trace.GoID]*goState
 	ps        map[trace.ProcID]*procState
 	ms        map[trace.ThreadID]*schedContext
-	ranges    map[trace.ResourceID][]string
-	tasks     map[trace.TaskID]string
+	ranges    map[trace.ResourceID][][]byte
+	tasks     map[trace.TaskID][]byte
 	lastSync  trace.Sync
 	GoVersion version.Version
 
@@ -47,11 +47,11 @@ type procState struct {
 // NewValidator creates a new Validator.
 func NewValidator() *Validator {
 	return &Validator{
-		gs:        make(map[trace.GoID]*goState),
-		ps:        make(map[trace.ProcID]*procState),
-		ms:        make(map[trace.ThreadID]*schedContext),
-		ranges:    make(map[trace.ResourceID][]string),
-		tasks:     make(map[trace.TaskID]string),
+		gs:        map[trace.GoID]*goState{},
+		ps:        map[trace.ProcID]*procState{},
+		ms:        map[trace.ThreadID]*schedContext{},
+		ranges:    map[trace.ResourceID][][]byte{},
+		tasks:     map[trace.TaskID][]byte{},
 		GoVersion: version.Current,
 	}
 }
@@ -68,7 +68,7 @@ func (v *Validator) SkipClockSnapshotChecks() {
 //
 // Returns an error if validation fails.
 func (v *Validator) Event(ev trace.Event) error {
-	e := new(errAccumulator)
+	e := &errAccumulator{}
 
 	// Validate timestamp order.
 	if v.lastTs != 0 {
@@ -336,12 +336,12 @@ func (v *Validator) Event(ev trace.Event) error {
 	return e.Errors()
 }
 
-func (v *Validator) hasRange(r trace.ResourceID, name string) bool {
+func (v *Validator) hasRange(r trace.ResourceID, name []byte) bool {
 	ranges, ok := v.ranges[r]
 	return ok && slices.Contains(ranges, name)
 }
 
-func (v *Validator) addRange(r trace.ResourceID, name string) {
+func (v *Validator) addRange(r trace.ResourceID, name []byte) {
 	ranges, _ := v.ranges[r]
 	ranges = append(ranges, name)
 	v.ranges[r] = ranges
@@ -352,7 +352,7 @@ func (v *Validator) hasAnyRange(r trace.ResourceID) bool {
 	return ok && len(ranges) != 0
 }
 
-func (v *Validator) deleteRange(r trace.ResourceID, name string) {
+func (v *Validator) deleteRange(r trace.ResourceID, name []byte) {
 	ranges, ok := v.ranges[r]
 	if !ok {
 		return
@@ -414,7 +414,7 @@ type errAccumulator struct {
 	errs []error
 }
 
-func (e *errAccumulator) Errorf(f string, args ...any) {
+func (e *errAccumulator) Errorf(f []byte, args ...any) {
 	e.errs = append(e.errs, fmt.Errorf(f, args...))
 }
 

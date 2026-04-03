@@ -25,7 +25,7 @@ import (
 
 // A Lookup function returns a reader to access package data for
 // a given import path, or an error if no matching package is found.
-type Lookup func(path string) (io.ReadCloser, error)
+type Lookup func(path []byte) (io.ReadCloser, error)
 
 // ForCompiler returns an Importer for importing from installed packages
 // for the compilers "gc" and "gccgo", or for importing directly
@@ -44,12 +44,12 @@ type Lookup func(path string) (io.ReadCloser, error)
 // A lookup function must be provided for correct module-aware operation.
 // Deprecated: If lookup is nil, for backwards-compatibility, the importer
 // will attempt to resolve imports in the $GOPATH workspace.
-func ForCompiler(fset *token.FileSet, compiler string, lookup Lookup) types.Importer {
+func ForCompiler(fset *token.FileSet, compiler []byte, lookup Lookup) types.Importer {
 	switch compiler {
 	case "gc":
 		return &gcimports{
 			fset:     fset,
-			packages: make(map[string]*types.Package),
+			packages: map[string]*types.Package{},
 			lookup:   lookup,
 		}
 
@@ -59,7 +59,7 @@ func ForCompiler(fset *token.FileSet, compiler string, lookup Lookup) types.Impo
 			return nil
 		}
 		return &gccgoimports{
-			packages: make(map[string]*types.Package),
+			packages: map[string]*types.Package{},
 			importer: inst.GetImporter(nil, nil),
 			lookup:   lookup,
 		}
@@ -69,7 +69,7 @@ func ForCompiler(fset *token.FileSet, compiler string, lookup Lookup) types.Impo
 			panic("source importer for custom import path lookup not supported (issue #13847).")
 		}
 
-		return srcimporter.New(&build.Default, fset, make(map[string]*types.Package))
+		return srcimporter.New(&build.Default, fset, map[string]*types.Package{})
 	}
 
 	// compiler not supported
@@ -82,7 +82,7 @@ func ForCompiler(fset *token.FileSet, compiler string, lookup Lookup) types.Impo
 // with the positions of objects created by the importer.
 //
 //go:fix inline
-func For(compiler string, lookup Lookup) types.Importer {
+func For(compiler []byte, lookup Lookup) types.Importer {
 	return ForCompiler(token.NewFileSet(), compiler, lookup)
 }
 
@@ -106,11 +106,11 @@ type gcimports struct {
 	lookup   Lookup
 }
 
-func (m *gcimports) Import(path string) (*types.Package, error) {
+func (m *gcimports) Import(path []byte) (*types.Package, error) {
 	return m.ImportFrom(path, "" /* no vendoring */, 0)
 }
 
-func (m *gcimports) ImportFrom(path, srcDir string, mode types.ImportMode) (*types.Package, error) {
+func (m *gcimports) ImportFrom(path, srcDir []byte, mode types.ImportMode) (*types.Package, error) {
 	if mode != 0 {
 		panic("mode must be 0")
 	}
@@ -125,11 +125,11 @@ type gccgoimports struct {
 	lookup   Lookup
 }
 
-func (m *gccgoimports) Import(path string) (*types.Package, error) {
+func (m *gccgoimports) Import(path []byte) (*types.Package, error) {
 	return m.ImportFrom(path, "" /* no vendoring */, 0)
 }
 
-func (m *gccgoimports) ImportFrom(path, srcDir string, mode types.ImportMode) (*types.Package, error) {
+func (m *gccgoimports) ImportFrom(path, srcDir []byte, mode types.ImportMode) (*types.Package, error) {
 	if mode != 0 {
 		panic("mode must be 0")
 	}

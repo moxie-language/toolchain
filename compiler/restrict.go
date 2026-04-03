@@ -4,8 +4,9 @@ package compiler
 // Moxie removes features that are incompatible with domain-isolated
 // cooperative concurrency or that obstract the programming model.
 //
-// Restrictions apply ONLY to user code — runtime, internal, and stdlib
-// packages are exempt (they need the full language to implement primitives).
+// Restrictions apply to user code and stdlib packages that have been
+// converted to Moxie syntax (listed in loader.MoxiePurePackages).
+// Runtime/internal packages are permanently exempt.
 
 import (
 	"go/ast"
@@ -17,6 +18,9 @@ import (
 )
 
 // restrictedBuiltins maps Go builtins to the Moxie alternative.
+// Note: make is NOT listed here because the compiler generates make() calls
+// from Moxie syntax ([]T{:n} → make([]T, n)). Channel and map makes are
+// caught at SSA level (MakeChan, MakeMap) instead.
 var restrictedBuiltins = map[string]string{
 	"new":     "use composite literal with & or var declaration",
 	"complex": "complex numbers not supported in moxie",
@@ -25,26 +29,46 @@ var restrictedBuiltins = map[string]string{
 }
 
 // restrictedTypes maps type names to rejection reasons.
+// Note: int/uint are NOT restricted yet — len()/cap()/copy() return int,
+// and Go's type checker treats int and int32 as distinct types. Restricting
+// int requires the compiler to alias int=int32 in the type checker universe.
 var restrictedTypes = map[string]string{
 	"complex64":  "complex numbers not supported in moxie",
 	"complex128": "complex numbers not supported in moxie",
 	"uintptr":    "use explicit pointer types",
+	"string":     "use []byte",
 }
 
-// isUserPackage returns true if the package is user code (not runtime/stdlib).
-// Standard library packages use dotless import paths (fmt, time, crypto/rand).
-// Go also vendors golang.org/x/* packages inside GOROOT — these are stdlib too.
-// User/third-party packages always have a non-vendored domain (smesh.lol, github.com/...).
+// isUserPackage returns true if a package should be subject to Moxie
+// language restrictions. All packages except runtime internals qualify.
 func isUserPackage(pkg *ssa.Package) bool {
 	if pkg == nil {
 		return false
 	}
 	path := pkg.Pkg.Path()
-	if !strings.Contains(path, ".") {
-		return false
-	}
-	// Go vendors golang.org/x/* inside GOROOT (e.g. vendor/golang.org/x/crypto).
-	if strings.HasPrefix(path, "vendor/") {
+	// Runtime internals and low-level packages are permanently exempt.
+	// All internal/* packages are exempt — they use low-level primitives
+	// (uintptr, string, new) that Moxie restricts in user code.
+	if strings.HasPrefix(path, "internal/") ||
+		strings.Contains(path, "/internal/") ||
+		strings.HasPrefix(path, "runtime") ||
+		strings.HasPrefix(path, "sync") ||
+		strings.HasPrefix(path, "syscall") ||
+		strings.HasPrefix(path, "io") ||
+		strings.HasPrefix(path, "os") ||
+		strings.HasPrefix(path, "path") ||
+		strings.HasPrefix(path, "unsafe") ||
+		path == "time" ||
+		path == "fmt" ||
+		path == "strings" ||
+		path == "sort" ||
+		path == "bytes" ||
+		path == "strconv" ||
+		path == "errors" ||
+		strings.HasPrefix(path, "unicode") ||
+		strings.HasPrefix(path, "math/big") ||
+		strings.HasPrefix(path, "reflect") ||
+		strings.HasPrefix(path, "encoding") {
 		return false
 	}
 	return true
@@ -56,9 +80,12 @@ func (b *builder) checkMoxieRestrictions() {
 	if !isUserPackage(b.fn.Pkg) {
 		return
 	}
-	for _, block := range b.fn.Blocks {
-		for _, instr := range block.Instrs {
-			b.checkInstrRestrictions(instr)
+	exempt := isStringExemptMethod(b.fn)
+	if !exempt {
+		for _, block := range b.fn.Blocks {
+			for _, instr := range block.Instrs {
+				b.checkInstrRestrictions(instr)
+			}
 		}
 	}
 	// Check function signature for restricted types.
@@ -81,13 +108,23 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 		}
 
 	case *ssa.MakeChan:
-		// Channels are allowed — they're fundamental to CSP.
+		b.addError(v.Pos(), "moxie: 'make' is not allowed: use chan T{} literal syntax")
 
 	case *ssa.MakeMap:
-		// Maps via make are allowed — no alternative yet.
+		b.addError(v.Pos(), "moxie: 'make' is not allowed for maps: use map literal syntax")
 
-	case *ssa.MakeSlice:
-		// make([]T, ...) is allowed — no alternative yet.
+	// MakeSlice is NOT restricted — the compiler generates make() calls from
+	// Moxie slice literal syntax ([]T{:n} → make([]T, n)).
+
+	case *ssa.BinOp:
+		// Reject + on non-numeric types (strings use | for concatenation).
+		if v.Op == token.ADD {
+			if basic, ok := v.X.Type().Underlying().(*types.Basic); ok {
+				if basic.Info()&types.IsString != 0 {
+					b.addError(v.Pos(), "moxie: '+' is not allowed for text concatenation: use | operator")
+				}
+			}
+		}
 
 	case *ssa.Alloc:
 		// new(T) shows up as Alloc with Heap=true and Comment="new".
@@ -121,16 +158,39 @@ func (b *builder) checkTypeAtPos(t types.Type, pos token.Pos) {
 
 func (b *builder) checkSignatureRestrictions(fn *ssa.Function) {
 	sig := fn.Signature
+	exempt := isStringExemptMethod(fn)
 	// Check parameters.
 	for i := 0; i < sig.Params().Len(); i++ {
 		b.checkTypeAtPos(sig.Params().At(i).Type(), fn.Pos())
 	}
-	// Check return types.
+	// Check return types (exempt string for Error()/String() methods).
 	if sig.Results() != nil {
 		for i := 0; i < sig.Results().Len(); i++ {
-			b.checkTypeAtPos(sig.Results().At(i).Type(), fn.Pos())
+			t := sig.Results().At(i).Type()
+			if exempt {
+				if basic, ok := t.(*types.Basic); ok && basic.Name() == "string" {
+					continue
+				}
+			}
+			b.checkTypeAtPos(t, fn.Pos())
 		}
 	}
+}
+
+// isStringExemptMethod returns true for methods that must return string
+// to satisfy Go built-in interfaces (error, fmt.Stringer). These methods
+// cannot be converted to []byte because the interface is hardcoded in
+// Go's types.Universe.
+func isStringExemptMethod(fn *ssa.Function) bool {
+	sig := fn.Signature
+	if sig.Recv() == nil {
+		return false
+	}
+	switch fn.Name() {
+	case "Error", "String":
+		return sig.Params().Len() == 0 && sig.Results().Len() == 1
+	}
+	return false
 }
 
 // checkFallthroughRestriction walks the function's AST looking for
@@ -158,9 +218,15 @@ func (b *builder) checkASTRestrictions() {
 	if syntax == nil {
 		return
 	}
+	exempt := isStringExemptMethod(b.fn)
 	ast.Inspect(syntax, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.Ident:
+			// Exempt string in Error()/String() methods — these must use
+			// string to satisfy Go's built-in error/Stringer interfaces.
+			if node.Name == "string" && exempt {
+				return true
+			}
 			if reason, restricted := restrictedTypes[node.Name]; restricted {
 				b.addError(node.Pos(), "moxie: type '"+node.Name+"' is not allowed: "+reason)
 			}

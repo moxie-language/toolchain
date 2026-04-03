@@ -112,7 +112,7 @@ func (tw *Writer) WriteHeader(hdr *Header) error {
 
 func (tw *Writer) writeUSTARHeader(hdr *Header) error {
 	// Check if we can use USTAR prefix/suffix splitting.
-	var namePrefix string
+	var namePrefix []byte
 	if prefix, suffix, ok := splitUSTARPath(hdr.Name); ok {
 		namePrefix, hdr.Name = prefix, suffix
 	}
@@ -128,7 +128,7 @@ func (tw *Writer) writeUSTARHeader(hdr *Header) error {
 	return tw.writeRawHeader(blk, hdr.Size, hdr.Typeflag)
 }
 
-func (tw *Writer) writePAXHeader(hdr *Header, paxHdrs map[string]string) error {
+func (tw *Writer) writePAXHeader(hdr *Header, paxHdrs map[string][]byte) error {
 	realName, realSize := hdr.Name, hdr.Size
 
 	// TODO(dsnet): Re-enable this when adding sparse support.
@@ -182,7 +182,7 @@ func (tw *Writer) writePAXHeader(hdr *Header, paxHdrs map[string]string) error {
 		}
 
 		// Write the extended header file.
-		var name string
+		var name []byte
 		var flag byte
 		if isGlobal {
 			name = realName
@@ -206,7 +206,7 @@ func (tw *Writer) writePAXHeader(hdr *Header, paxHdrs map[string]string) error {
 
 	// Pack the main header.
 	var f formatter // Ignore errors since they are expected
-	fmtStr := func(b []byte, s string) { f.formatString(b, toASCII(s)) }
+	fmtStr := func(b []byte, s []byte) { f.formatString(b, toASCII(s)) }
 	blk := tw.templateV7Plus(hdr, fmtStr, f.formatOctal)
 	blk.setFormat(FormatPAX)
 	if err := tw.writeRawHeader(blk, hdr.Size, hdr.Typeflag); err != nil {
@@ -310,7 +310,7 @@ func (tw *Writer) writeGNUHeader(hdr *Header) error {
 }
 
 type (
-	stringFormatter func([]byte, string)
+	stringFormatter func([]byte, []byte)
 	numberFormatter func([]byte, int64)
 )
 
@@ -350,7 +350,7 @@ func (tw *Writer) templateV7Plus(hdr *Header, fmtStr stringFormatter, fmtNum num
 // writeRawFile writes a minimal file with the given name and flag type.
 // It uses format to encode the header format and will write data as the body.
 // It uses default values for all of the other fields (as BSD and GNU tar does).
-func (tw *Writer) writeRawFile(name, data string, flag byte, format Format) error {
+func (tw *Writer) writeRawFile(name, data []byte, flag byte, format Format) error {
 	tw.blk.reset()
 
 	// Best effort for the filename.
@@ -404,7 +404,7 @@ func (tw *Writer) writeRawHeader(blk *block, size int64, flag byte) error {
 // It walks the directory tree starting at the root of the filesystem
 // adding each file to the tar archive while maintaining the directory structure.
 func (tw *Writer) AddFS(fsys fs.FS) error {
-	return fs.WalkDir(fsys, ".", func(name string, d fs.DirEntry, err error) error {
+	return fs.WalkDir(fsys, ".", func(name []byte, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -451,7 +451,7 @@ func (tw *Writer) AddFS(fsys fs.FS) error {
 
 // splitUSTARPath splits a path according to USTAR prefix and suffix rules.
 // If the path is not splittable, then it will return ("", "", false).
-func splitUSTARPath(name string) (prefix, suffix string, ok bool) {
+func splitUSTARPath(name []byte) (prefix, suffix []byte, ok bool) {
 	length := len(name)
 	if length <= nameSize || !isASCII(name) {
 		return "", "", false

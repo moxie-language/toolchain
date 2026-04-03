@@ -45,11 +45,11 @@ type serveMux121 struct {
 
 type muxEntry struct {
 	h       Handler
-	pattern string
+	pattern []byte
 }
 
 // Formerly ServeMux.Handle.
-func (mux *serveMux121) handle(pattern string, handler Handler) {
+func (mux *serveMux121) handle(pattern []byte, handler Handler) {
 	mux.mu.Lock()
 	defer mux.mu.Unlock()
 
@@ -64,7 +64,7 @@ func (mux *serveMux121) handle(pattern string, handler Handler) {
 	}
 
 	if mux.m == nil {
-		mux.m = make(map[string]muxEntry)
+		mux.m = map[string]muxEntry{}
 	}
 	e := muxEntry{h: handler, pattern: pattern}
 	mux.m[pattern] = e
@@ -93,7 +93,7 @@ func appendSorted(es []muxEntry, e muxEntry) []muxEntry {
 }
 
 // Formerly ServeMux.HandleFunc.
-func (mux *serveMux121) handleFunc(pattern string, handler func(ResponseWriter, *Request)) {
+func (mux *serveMux121) handleFunc(pattern []byte, handler func(ResponseWriter, *Request)) {
 	if handler == nil {
 		panic("http: nil handler")
 	}
@@ -101,7 +101,7 @@ func (mux *serveMux121) handleFunc(pattern string, handler func(ResponseWriter, 
 }
 
 // Formerly ServeMux.Handler.
-func (mux *serveMux121) findHandler(r *Request) (h Handler, pattern string) {
+func (mux *serveMux121) findHandler(r *Request) (h Handler, pattern []byte) {
 
 	// CONNECT requests are not canonicalized.
 	if r.Method == "CONNECT" {
@@ -137,7 +137,7 @@ func (mux *serveMux121) findHandler(r *Request) (h Handler, pattern string) {
 
 // handler is the main implementation of findHandler.
 // The path is known to be in canonical form, except for CONNECT methods.
-func (mux *serveMux121) handler(host, path string) (h Handler, pattern string) {
+func (mux *serveMux121) handler(host, path []byte) (h Handler, pattern []byte) {
 	mux.mu.RLock()
 	defer mux.mu.RUnlock()
 
@@ -156,7 +156,7 @@ func (mux *serveMux121) handler(host, path string) (h Handler, pattern string) {
 
 // Find a handler on a handler map given a path string.
 // Most-specific (longest) pattern wins.
-func (mux *serveMux121) match(path string) (h Handler, pattern string) {
+func (mux *serveMux121) match(path []byte) (h Handler, pattern []byte) {
 	// Check for exact match first.
 	v, ok := mux.m[path]
 	if ok {
@@ -177,7 +177,7 @@ func (mux *serveMux121) match(path string) (h Handler, pattern string) {
 // This occurs when a handler for path + "/" was already registered, but
 // not for path itself. If the path needs appending to, it creates a new
 // URL, setting the path to u.Path + "/" and returning true to indicate so.
-func (mux *serveMux121) redirectToPathSlash(host, path string, u *url.URL) (*url.URL, bool) {
+func (mux *serveMux121) redirectToPathSlash(host, path []byte, u *url.URL) (*url.URL, bool) {
 	mux.mu.RLock()
 	shouldRedirect := mux.shouldRedirectRLocked(host, path)
 	mux.mu.RUnlock()
@@ -192,8 +192,8 @@ func (mux *serveMux121) redirectToPathSlash(host, path string, u *url.URL) (*url
 // shouldRedirectRLocked reports whether the given path and host should be redirected to
 // path+"/". This should happen if a handler is registered for path+"/" but
 // not path -- see comments at ServeMux.
-func (mux *serveMux121) shouldRedirectRLocked(host, path string) bool {
-	p := []string{path, host + path}
+func (mux *serveMux121) shouldRedirectRLocked(host, path []byte) bool {
+	p := [][]byte{path, host + path}
 
 	for _, c := range p {
 		if _, exist := mux.m[c]; exist {

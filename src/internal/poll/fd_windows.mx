@@ -126,7 +126,7 @@ func (o *operation) InitBuf(buf []byte) {
 
 func (o *operation) InitBufs(buf *[][]byte) {
 	if o.bufs == nil {
-		o.bufs = make([]syscall.WSABuf, 0, len(*buf))
+		o.bufs = []syscall.WSABuf{:0:len(*buf)}
 	} else {
 		o.bufs = o.bufs[:0]
 	}
@@ -377,7 +377,7 @@ const (
 // or "file" or "console" or "dir".
 // Set pollable to true if fd should be managed by runtime netpoll.
 // Pollable must be set to true for overlapped fds.
-func (fd *FD) Init(net string, pollable bool) error {
+func (fd *FD) Init(net []byte, pollable bool) error {
 	if initErr != nil {
 		return initErr
 	}
@@ -557,8 +557,8 @@ func (fd *FD) readConsole(b []byte) (int, error) {
 		// Note: syscall.ReadConsole fails for very large buffers.
 		// The limit is somewhere around (but not exactly) 16384.
 		// Stay well below.
-		fd.readuint16 = make([]uint16, 0, 10000)
-		fd.readbyte = make([]byte, 0, 4*cap(fd.readuint16))
+		fd.readuint16 = []uint16{:0:10000}
+		fd.readbyte = []byte{:0:4*cap(fd.readuint16)}
 	}
 
 	for fd.readbyteOffset >= len(fd.readbyte) {
@@ -683,7 +683,7 @@ func (fd *FD) ReadFrom(buf []byte) (int, syscall.Sockaddr, error) {
 	o.InitBuf(buf)
 	n, err := execIO(o, func(o *operation) error {
 		if o.rsa == nil {
-			o.rsa = new(syscall.RawSockaddrAny)
+			o.rsa = &syscall.RawSockaddrAny{}
 		}
 		o.rsan = int32(unsafe.Sizeof(*o.rsa))
 		return syscall.WSARecvFrom(o.fd.Sysfd, &o.buf, 1, &o.qty, &o.flags, o.rsa, &o.rsan, &o.o, nil)
@@ -712,7 +712,7 @@ func (fd *FD) ReadFromInet4(buf []byte, sa4 *syscall.SockaddrInet4) (int, error)
 	o.InitBuf(buf)
 	n, err := execIO(o, func(o *operation) error {
 		if o.rsa == nil {
-			o.rsa = new(syscall.RawSockaddrAny)
+			o.rsa = &syscall.RawSockaddrAny{}
 		}
 		o.rsan = int32(unsafe.Sizeof(*o.rsa))
 		return syscall.WSARecvFrom(o.fd.Sysfd, &o.buf, 1, &o.qty, &o.flags, o.rsa, &o.rsan, &o.o, nil)
@@ -741,7 +741,7 @@ func (fd *FD) ReadFromInet6(buf []byte, sa6 *syscall.SockaddrInet6) (int, error)
 	o.InitBuf(buf)
 	n, err := execIO(o, func(o *operation) error {
 		if o.rsa == nil {
-			o.rsa = new(syscall.RawSockaddrAny)
+			o.rsa = &syscall.RawSockaddrAny{}
 		}
 		o.rsan = int32(unsafe.Sizeof(*o.rsa))
 		return syscall.WSARecvFrom(o.fd.Sysfd, &o.buf, 1, &o.qty, &o.flags, o.rsa, &o.rsan, &o.o, nil)
@@ -808,7 +808,7 @@ func (fd *FD) Write(buf []byte) (int, error) {
 // It returns the number of bytes written and an error, if any.
 func (fd *FD) writeConsole(b []byte) (int, error) {
 	n := len(b)
-	runes := make([]rune, 0, 256)
+	runes := []rune{:0:256}
 	if len(fd.lastbits) > 0 {
 		b = append(fd.lastbits, b...)
 		fd.lastbits = nil
@@ -820,7 +820,7 @@ func (fd *FD) writeConsole(b []byte) (int, error) {
 		b = b[l:]
 	}
 	if len(b) > 0 {
-		fd.lastbits = make([]byte, len(b))
+		fd.lastbits = []byte{:len(b)}
 		copy(fd.lastbits, b)
 	}
 	// syscall.WriteConsole seems to fail, if given large buffer.
@@ -1052,7 +1052,7 @@ func (fd *FD) ConnectEx(ra syscall.Sockaddr) error {
 	return err
 }
 
-func (fd *FD) acceptOne(s syscall.Handle, rawsa []syscall.RawSockaddrAny, o *operation) (string, error) {
+func (fd *FD) acceptOne(s syscall.Handle, rawsa []syscall.RawSockaddrAny, o *operation) ([]byte, error) {
 	// Submit accept request.
 	o.handle = s
 	o.rsan = int32(unsafe.Sizeof(rawsa[0]))
@@ -1076,7 +1076,7 @@ func (fd *FD) acceptOne(s syscall.Handle, rawsa []syscall.RawSockaddrAny, o *ope
 
 // Accept handles accepting a socket. The sysSocket parameter is used
 // to allocate the net socket.
-func (fd *FD) Accept(sysSocket func() (syscall.Handle, error)) (syscall.Handle, []syscall.RawSockaddrAny, uint32, string, error) {
+func (fd *FD) Accept(sysSocket func() (syscall.Handle, error)) (syscall.Handle, []syscall.RawSockaddrAny, uint32, []byte, error) {
 	if err := fd.readLock(); err != nil {
 		return syscall.InvalidHandle, nil, 0, "", err
 	}
@@ -1299,7 +1299,7 @@ func (fd *FD) ReadMsg(p []byte, oob []byte, flags int) (int, int, int, syscall.S
 	o := &fd.rop
 	o.InitMsg(p, oob)
 	if o.rsa == nil {
-		o.rsa = new(syscall.RawSockaddrAny)
+		o.rsa = &syscall.RawSockaddrAny{}
 	}
 	o.msg.Name = (syscall.Pointer)(unsafe.Pointer(o.rsa))
 	o.msg.Namelen = int32(unsafe.Sizeof(*o.rsa))
@@ -1329,7 +1329,7 @@ func (fd *FD) ReadMsgInet4(p []byte, oob []byte, flags int, sa4 *syscall.Sockadd
 	o := &fd.rop
 	o.InitMsg(p, oob)
 	if o.rsa == nil {
-		o.rsa = new(syscall.RawSockaddrAny)
+		o.rsa = &syscall.RawSockaddrAny{}
 	}
 	o.msg.Name = (syscall.Pointer)(unsafe.Pointer(o.rsa))
 	o.msg.Namelen = int32(unsafe.Sizeof(*o.rsa))
@@ -1358,7 +1358,7 @@ func (fd *FD) ReadMsgInet6(p []byte, oob []byte, flags int, sa6 *syscall.Sockadd
 	o := &fd.rop
 	o.InitMsg(p, oob)
 	if o.rsa == nil {
-		o.rsa = new(syscall.RawSockaddrAny)
+		o.rsa = &syscall.RawSockaddrAny{}
 	}
 	o.msg.Name = (syscall.Pointer)(unsafe.Pointer(o.rsa))
 	o.msg.Namelen = int32(unsafe.Sizeof(*o.rsa))
@@ -1388,7 +1388,7 @@ func (fd *FD) WriteMsg(p []byte, oob []byte, sa syscall.Sockaddr) (int, int, err
 	o.InitMsg(p, oob)
 	if sa != nil {
 		if o.rsa == nil {
-			o.rsa = new(syscall.RawSockaddrAny)
+			o.rsa = &syscall.RawSockaddrAny{}
 		}
 		len, err := sockaddrToRaw(o.rsa, sa)
 		if err != nil {
@@ -1417,7 +1417,7 @@ func (fd *FD) WriteMsgInet4(p []byte, oob []byte, sa *syscall.SockaddrInet4) (in
 	o := &fd.wop
 	o.InitMsg(p, oob)
 	if o.rsa == nil {
-		o.rsa = new(syscall.RawSockaddrAny)
+		o.rsa = &syscall.RawSockaddrAny{}
 	}
 	len := sockaddrInet4ToRaw(o.rsa, sa)
 	o.msg.Name = (syscall.Pointer)(unsafe.Pointer(o.rsa))
@@ -1442,7 +1442,7 @@ func (fd *FD) WriteMsgInet6(p []byte, oob []byte, sa *syscall.SockaddrInet6) (in
 	o := &fd.wop
 	o.InitMsg(p, oob)
 	if o.rsa == nil {
-		o.rsa = new(syscall.RawSockaddrAny)
+		o.rsa = &syscall.RawSockaddrAny{}
 	}
 	len := sockaddrInet6ToRaw(o.rsa, sa)
 	o.msg.Name = (syscall.Pointer)(unsafe.Pointer(o.rsa))
@@ -1453,7 +1453,7 @@ func (fd *FD) WriteMsgInet6(p []byte, oob []byte, sa *syscall.SockaddrInet6) (in
 	return n, int(o.msg.Control.Len), err
 }
 
-func DupCloseOnExec(fd int) (int, string, error) {
+func DupCloseOnExec(fd int) (int, []byte, error) {
 	proc, err := syscall.GetCurrentProcess()
 	if err != nil {
 		return 0, "GetCurrentProcess", err

@@ -605,8 +605,14 @@ Error:
 // incomparableCause returns a more specific cause why typ is not comparable.
 // If there is no more specific cause, the result is "".
 func (check *Checker) incomparableCause(typ Type) string {
-	switch under(typ).(type) {
-	case *Slice, *Signature, *Map:
+	switch t := under(typ).(type) {
+	case *Slice:
+		// Moxie: []byte is fully comparable (replaces string).
+		if basic, ok := t.elem.(*Basic); ok && basic.kind == Byte {
+			return ""
+		}
+		return compositeKind(typ) + " can only be compared to nil"
+	case *Signature, *Map:
 		return compositeKind(typ) + " can only be compared to nil"
 	}
 	// see if we can extract a more specific error
@@ -1204,7 +1210,19 @@ func keyVal(x constant.Value) interface{} {
 			return complex(r, i)
 		}
 		x = f
-		fallthrough
+		// try to reduce float to int
+		i := constant.ToInt(x)
+		if i.Kind() != constant.Int {
+			v, _ := constant.Float64Val(x)
+			return v
+		}
+		x = i
+		if v, ok := constant.Int64Val(x); ok {
+			return v
+		}
+		if v, ok := constant.Uint64Val(x); ok {
+			return v
+		}
 	case constant.Float:
 		i := constant.ToInt(x)
 		if i.Kind() != constant.Int {
@@ -1212,7 +1230,12 @@ func keyVal(x constant.Value) interface{} {
 			return v
 		}
 		x = i
-		fallthrough
+		if v, ok := constant.Int64Val(x); ok {
+			return v
+		}
+		if v, ok := constant.Uint64Val(x); ok {
+			return v
+		}
 	case constant.Int:
 		if v, ok := constant.Int64Val(x); ok {
 			return v
@@ -1273,7 +1296,7 @@ func (check *Checker) multiExpr(e ast.Expr, allowCommaOk bool) (list []*operand,
 
 	if t, ok := x.typ.(*Tuple); ok && x.mode != invalid {
 		// multiple values
-		list = make([]*operand, t.Len())
+		list = []*operand{:t.Len()}
 		for i, v := range t.vars {
 			list[i] = &operand{mode: value, expr: e, typ: v.typ}
 		}

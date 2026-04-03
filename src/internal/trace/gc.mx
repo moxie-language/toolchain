@@ -71,9 +71,9 @@ func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
 	out := [][]MutatorUtil{}
 	stw := 0
 	ps := []perP{}
-	inGC := make(map[GoID]bool)
-	states := make(map[GoID]GoState)
-	bgMark := make(map[GoID]bool)
+	inGC := map[GoID]bool{}
+	states := map[GoID]GoState{}
+	bgMark := map[GoID]bool{}
 	procs := []procsCount{}
 	nSync := 0
 
@@ -148,16 +148,28 @@ func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
 			r := ev.Range()
 			switch {
 			case handleMarkAssist(r):
-				if !states[ev.Goroutine()].Executing() {
-					// If the goroutine isn't executing, then the fact that it was in mark
-					// assist doesn't actually count.
-					break
+				if states[ev.Goroutine()].Executing() {
+					// This G has been in a mark assist *and running on its P* since the start
+					// of the trace. Handle same as sweep below.
+					if flags&UtilPerProc == 0 {
+						// Subtract out 1/gomaxprocs mutator utilization for all time periods
+						// from the beginning of the trace until now.
+						mi, pi := 0, 0
+						for mi < len(out[0]) {
+							if pi < len(procs)-1 && procs[pi+1].time < out[0][mi].Time {
+								pi++
+								continue
+							}
+							out[0][mi].Util -= float64(1) / float64(procs[pi].n)
+							if out[0][mi].Util < 0 {
+								out[0][mi].Util = 0
+							}
+							mi++
+						}
+					}
 				}
-				// This G has been in a mark assist *and running on its P* since the start
-				// of the trace.
-				fallthrough
 			case handleSweep(r):
-				// This P has been in sweep (or mark assist, from above) in the start of the trace.
+				// This P has been in sweep in the start of the trace.
 				//
 				// We don't need to do anything if UtilPerProc is set. If we get an event like
 				// this for a running P, it must show up the first time a P is mentioned. Therefore,
@@ -185,7 +197,16 @@ func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
 			}
 			// After accounting for the portion we missed, this just acts like the
 			// beginning of a new range.
-			fallthrough
+			if handleSTW(r) {
+				stw++
+			} else if handleSweep(r) {
+				ps[ev.Proc()].gc++
+			} else if handleMarkAssist(r) {
+				ps[ev.Proc()].gc++
+				if g := r.Scope.Goroutine(); g != NoGoroutine {
+					inGC[g] = true
+				}
+			}
 		case EventRangeBegin:
 			r := ev.Range()
 			if handleSTW(r) {
@@ -357,7 +378,7 @@ type mmuBand struct {
 // NewMMUCurve returns an MMU curve for the given mutator utilization
 // function.
 func NewMMUCurve(utils [][]MutatorUtil) *MMUCurve {
-	series := make([]mmuSeries, len(utils))
+	series := []mmuSeries{:len(utils)}
 	for i, util := range utils {
 		series[i] = newMMUSeries(util)
 	}
@@ -370,7 +391,7 @@ var bandsPerSeries = 1000
 
 func newMMUSeries(util []MutatorUtil) mmuSeries {
 	// Compute cumulative sum.
-	sums := make([]totalUtil, len(util))
+	sums := []totalUtil{:len(util)}
 	var prev MutatorUtil
 	var sum totalUtil
 	for j, u := range util {
@@ -397,7 +418,7 @@ func newMMUSeries(util []MutatorUtil) mmuSeries {
 	}
 	// Compute the bands. There are numBands+1 bands in order to
 	// record the final cumulative sum.
-	bands := make([]mmuBand, numBands+1)
+	bands := []mmuBand{:numBands+1}
 	s := mmuSeries{util, sums, bands, bandDur}
 	leftSum := integrator{&s, 0}
 	for i := range bands {
@@ -669,12 +690,12 @@ func (c *MMUCurve) MUD(window time.Duration, quantiles []float64) []float64 {
 
 	// Accumulate the MUD until we have precise information for
 	// everything to the left of qMass.
-	acc := accumulator{mmu: 1.0, bound: 1.0, preciseMass: qMass, mud: new(mud)}
+	acc := accumulator{mmu: 1.0, bound: 1.0, preciseMass: qMass, mud: &mud{}}
 	acc.mud.setTrackMass(qMass)
 	c.mmu(window, &acc)
 
 	// Evaluate the quantiles on the accumulated MUD.
-	out := make([]float64, len(quantiles))
+	out := []float64{:len(quantiles)}
 	for i := range out {
 		mu, _ := acc.mud.invCumulativeSum(float64(duration) * quantiles[i])
 		if math.IsNaN(mu) {
@@ -705,7 +726,7 @@ func (c *MMUCurve) mmu(window time.Duration, acc *accumulator) {
 	}
 
 	var bandU bandUtilHeap
-	windows := make([]time.Duration, len(c.series))
+	windows := []time.Duration{:len(c.series)}
 	for i, s := range c.series {
 		windows[i] = window
 		if max := time.Duration(s.util[len(s.util)-1].Time - s.util[0].Time); window > max {
@@ -750,7 +771,7 @@ func (c *mmuSeries) mkBandUtil(series int, window time.Duration) []bandUtil {
 	if nUtil < 0 {
 		nUtil = 0
 	}
-	bandU := make([]bandUtil, nUtil)
+	bandU := []bandUtil{:nUtil}
 	for i := range bandU {
 		// To compute the worst-case MU, we assume the minimum
 		// for any bands that are only partially overlapped by

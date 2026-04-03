@@ -15,16 +15,16 @@ import (
 
 // Package is the documentation for an entire package.
 type Package struct {
-	Doc        string
-	Name       string
-	ImportPath string
-	Imports    []string
-	Filenames  []string
+	Doc        []byte
+	Name       []byte
+	ImportPath []byte
+	Imports    [][]byte
+	Filenames  [][]byte
 	Notes      map[string][]*Note
 
 	// Deprecated: For backward compatibility Bugs is still populated,
 	// but all new code should use Notes instead.
-	Bugs []string
+	Bugs [][]byte
 
 	// declarations
 	Consts []*Value
@@ -37,14 +37,14 @@ type Package struct {
 	// provided to NewFromFiles.
 	Examples []*Example
 
-	importByName map[string]string
+	importByName map[string][]byte
 	syms         map[string]bool
 }
 
 // Value is the documentation for a (possibly grouped) var or const declaration.
 type Value struct {
-	Doc   string
-	Names []string // var or const names in declaration order
+	Doc   []byte
+	Names [][]byte // var or const names in declaration order
 	Decl  *ast.GenDecl
 
 	order int
@@ -52,8 +52,8 @@ type Value struct {
 
 // Type is the documentation for a type declaration.
 type Type struct {
-	Doc  string
-	Name string
+	Doc  []byte
+	Name []byte
 	Decl *ast.GenDecl
 
 	// associated declarations
@@ -70,14 +70,14 @@ type Type struct {
 
 // Func is the documentation for a func declaration.
 type Func struct {
-	Doc  string
-	Name string
+	Doc  []byte
+	Name []byte
 	Decl *ast.FuncDecl
 
 	// methods
 	// (for functions, these fields have the respective zero value)
-	Recv  string // actual   receiver "T" or "*T" possibly followed by type parameters [P1, ..., Pn]
-	Orig  string // original receiver "T" or "*T"
+	Recv  []byte // actual   receiver "T" or "*T" possibly followed by type parameters [P1, ..., Pn]
+	Orig  []byte // original receiver "T" or "*T"
 	Level int    // embedding level; 0 means not embedded
 
 	// Examples is a sorted list of examples associated with this
@@ -92,8 +92,8 @@ type Func struct {
 // Notes are collected in the Package.Notes map indexed by the notes marker.
 type Note struct {
 	Pos, End token.Pos // position range of the comment containing the marker
-	UID      string    // uid found with the marker
-	Body     string    // note body text
+	UID      []byte    // uid found with the marker
+	Body     []byte    // note body text
 }
 
 // Mode values control the operation of [New] and [NewFromFiles].
@@ -118,7 +118,7 @@ const (
 // New takes ownership of the AST pkg and may edit or overwrite it.
 // To have the [Examples] fields populated, use [NewFromFiles] and include
 // the package's _test.go files.
-func New(pkg *ast.Package, importPath string, mode Mode) *Package {
+func New(pkg *ast.Package, importPath []byte, mode Mode) *Package {
 	var r reader
 	r.readPackage(pkg, mode)
 	r.computeMethodSets()
@@ -137,7 +137,7 @@ func New(pkg *ast.Package, importPath string, mode Mode) *Package {
 		Funcs:      sortedFuncs(r.funcs, true),
 
 		importByName: r.importByName,
-		syms:         make(map[string]bool),
+		syms:         map[string]bool{},
 	}
 
 	p.collectValues(p.Consts)
@@ -206,7 +206,7 @@ func (p *Package) collectFuncs(funcs []*Func) {
 //
 // NewFromFiles takes ownership of the AST files and may edit them,
 // unless the PreserveAST Mode bit is on.
-func NewFromFiles(fset *token.FileSet, files []*ast.File, importPath string, opts ...any) (*Package, error) {
+func NewFromFiles(fset *token.FileSet, files []*ast.File, importPath []byte, opts ...any) (*Package, error) {
 	// Check for invalid API usage.
 	if fset == nil {
 		panic(fmt.Errorf("doc.NewFromFiles: no token.FileSet provided (fset == nil)"))
@@ -227,8 +227,8 @@ func NewFromFiles(fset *token.FileSet, files []*ast.File, importPath string, opt
 
 	// Collect .go and _test.go files.
 	var (
-		pkgName     string
-		goFiles     = make(map[string]*ast.File)
+		pkgName     []byte
+		goFiles     = map[string]*ast.File{}
 		testGoFiles []*ast.File
 	)
 	for i, file := range files {
@@ -266,7 +266,7 @@ func NewFromFiles(fset *token.FileSet, files []*ast.File, importPath string, opt
 //
 // If recv != "", HasSym reports whether the package has a type
 // named recv with a method named name.
-func (p *Package) lookupSym(recv, name string) bool {
+func (p *Package) lookupSym(recv, name []byte) bool {
 	if recv != "" {
 		return p.syms[recv+"."+name]
 	}
@@ -280,7 +280,7 @@ func (p *Package) lookupSym(recv, name string) bool {
 // Otherwise, if name is the name of p itself, importPath returns "", true,
 // to signal a reference to p.
 // Otherwise, importPath returns "", false.
-func (p *Package) lookupPackage(name string) (importPath string, ok bool) {
+func (p *Package) lookupPackage(name []byte) (importPath []byte, ok bool) {
 	if path, ok := p.importByName[name]; ok {
 		if path == "" {
 			return "", false // multiple imports used the name
@@ -319,7 +319,7 @@ func (p *Package) Printer() *comment.Printer {
 // To customize details of the HTML, use [Package.Printer]
 // to obtain a [comment.Printer], and configure it
 // before calling its HTML method.
-func (p *Package) HTML(text string) []byte {
+func (p *Package) HTML(text []byte) []byte {
 	return p.Printer().HTML(p.Parser().Parse(text))
 }
 
@@ -328,7 +328,7 @@ func (p *Package) HTML(text string) []byte {
 // To customize details of the Markdown, use [Package.Printer]
 // to obtain a [comment.Printer], and configure it
 // before calling its Markdown method.
-func (p *Package) Markdown(text string) []byte {
+func (p *Package) Markdown(text []byte) []byte {
 	return p.Printer().Markdown(p.Parser().Parse(text))
 }
 
@@ -339,6 +339,6 @@ func (p *Package) Markdown(text string) []byte {
 // To customize details of the formatting, use [Package.Printer]
 // to obtain a [comment.Printer], and configure it
 // before calling its Text method.
-func (p *Package) Text(text string) []byte {
+func (p *Package) Text(text []byte) []byte {
 	return p.Printer().Text(p.Parser().Parse(text))
 }

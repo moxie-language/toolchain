@@ -27,9 +27,9 @@ type P521Point struct {
 // NewP521Point returns a new P521Point representing the point at infinity point.
 func NewP521Point() *P521Point {
 	return &P521Point{
-		x: new(fiat.P521Element),
-		y: new(fiat.P521Element).One(),
-		z: new(fiat.P521Element),
+		x: &fiat.P521Element{},
+		y: (&fiat.P521Element{}).One(),
+		z: &fiat.P521Element{},
 	}
 }
 
@@ -61,11 +61,11 @@ func (p *P521Point) SetBytes(b []byte) (*P521Point, error) {
 
 	// Uncompressed form.
 	case len(b) == 1+2*p521ElementLength && b[0] == 4:
-		x, err := new(fiat.P521Element).SetBytes(b[1 : 1+p521ElementLength])
+		x, err := (&fiat.P521Element{}).SetBytes(b[1 : 1+p521ElementLength])
 		if err != nil {
 			return nil, err
 		}
-		y, err := new(fiat.P521Element).SetBytes(b[1+p521ElementLength:])
+		y, err := (&fiat.P521Element{}).SetBytes(b[1+p521ElementLength:])
 		if err != nil {
 			return nil, err
 		}
@@ -79,20 +79,20 @@ func (p *P521Point) SetBytes(b []byte) (*P521Point, error) {
 
 	// Compressed form.
 	case len(b) == 1+p521ElementLength && (b[0] == 2 || b[0] == 3):
-		x, err := new(fiat.P521Element).SetBytes(b[1:])
+		x, err := (&fiat.P521Element{}).SetBytes(b[1:])
 		if err != nil {
 			return nil, err
 		}
 
 		// y² = x³ - 3x + b
-		y := p521Polynomial(new(fiat.P521Element), x)
+		y := p521Polynomial(&fiat.P521Element{}, x)
 		if !p521Sqrt(y, y) {
 			return nil, errors.New("invalid P521 compressed point encoding")
 		}
 
 		// Select the positive or negative root, as indicated by the least
 		// significant bit, based on the encoding type byte.
-		otherRoot := new(fiat.P521Element)
+		otherRoot := &fiat.P521Element{}
 		otherRoot.Sub(otherRoot, y)
 		cond := y.Bytes()[p521ElementLength-1]&1 ^ b[0]&1
 		y.Select(otherRoot, y, int(cond))
@@ -112,7 +112,7 @@ var _p521BOnce sync.Once
 
 func p521B() *fiat.P521Element {
 	_p521BOnce.Do(func() {
-		_p521B, _ = new(fiat.P521Element).SetBytes([]byte{0x0, 0x51, 0x95, 0x3e, 0xb9, 0x61, 0x8e, 0x1c, 0x9a, 0x1f, 0x92, 0x9a, 0x21, 0xa0, 0xb6, 0x85, 0x40, 0xee, 0xa2, 0xda, 0x72, 0x5b, 0x99, 0xb3, 0x15, 0xf3, 0xb8, 0xb4, 0x89, 0x91, 0x8e, 0xf1, 0x9, 0xe1, 0x56, 0x19, 0x39, 0x51, 0xec, 0x7e, 0x93, 0x7b, 0x16, 0x52, 0xc0, 0xbd, 0x3b, 0xb1, 0xbf, 0x7, 0x35, 0x73, 0xdf, 0x88, 0x3d, 0x2c, 0x34, 0xf1, 0xef, 0x45, 0x1f, 0xd4, 0x6b, 0x50, 0x3f, 0x0})
+		_p521B, _ = (&fiat.P521Element{}).SetBytes([]byte{0x0, 0x51, 0x95, 0x3e, 0xb9, 0x61, 0x8e, 0x1c, 0x9a, 0x1f, 0x92, 0x9a, 0x21, 0xa0, 0xb6, 0x85, 0x40, 0xee, 0xa2, 0xda, 0x72, 0x5b, 0x99, 0xb3, 0x15, 0xf3, 0xb8, 0xb4, 0x89, 0x91, 0x8e, 0xf1, 0x9, 0xe1, 0x56, 0x19, 0x39, 0x51, 0xec, 0x7e, 0x93, 0x7b, 0x16, 0x52, 0xc0, 0xbd, 0x3b, 0xb1, 0xbf, 0x7, 0x35, 0x73, 0xdf, 0x88, 0x3d, 0x2c, 0x34, 0xf1, 0xef, 0x45, 0x1f, 0xd4, 0x6b, 0x50, 0x3f, 0x0})
 	})
 	return _p521B
 }
@@ -122,7 +122,7 @@ func p521Polynomial(y2, x *fiat.P521Element) *fiat.P521Element {
 	y2.Square(x)
 	y2.Mul(y2, x)
 
-	threeX := new(fiat.P521Element).Add(x, x)
+	threeX := (&fiat.P521Element{}).Add(x, x)
 	threeX.Add(threeX, x)
 	y2.Sub(y2, threeX)
 
@@ -131,8 +131,8 @@ func p521Polynomial(y2, x *fiat.P521Element) *fiat.P521Element {
 
 func p521CheckOnCurve(x, y *fiat.P521Element) error {
 	// y² = x³ - 3x + b
-	rhs := p521Polynomial(new(fiat.P521Element), x)
-	lhs := new(fiat.P521Element).Square(y)
+	rhs := p521Polynomial(&fiat.P521Element{}, x)
+	lhs := (&fiat.P521Element{}).Square(y)
 	if rhs.Equal(lhs) != 1 {
 		return errors.New("P521 point not on curve")
 	}
@@ -154,9 +154,9 @@ func (p *P521Point) bytes(out *[1 + 2*p521ElementLength]byte) []byte {
 		return append(out[:0], 0)
 	}
 
-	zinv := new(fiat.P521Element).Invert(p.z)
-	x := new(fiat.P521Element).Mul(p.x, zinv)
-	y := new(fiat.P521Element).Mul(p.y, zinv)
+	zinv := (&fiat.P521Element{}).Invert(p.z)
+	x := (&fiat.P521Element{}).Mul(p.x, zinv)
+	y := (&fiat.P521Element{}).Mul(p.y, zinv)
 
 	buf := append(out[:0], 4)
 	buf = append(buf, x.Bytes()...)
@@ -178,8 +178,8 @@ func (p *P521Point) bytesX(out *[p521ElementLength]byte) ([]byte, error) {
 		return nil, errors.New("P521 point is the point at infinity")
 	}
 
-	zinv := new(fiat.P521Element).Invert(p.z)
-	x := new(fiat.P521Element).Mul(p.x, zinv)
+	zinv := (&fiat.P521Element{}).Invert(p.z)
+	x := (&fiat.P521Element{}).Mul(p.x, zinv)
 
 	return append(out[:0], x.Bytes()...), nil
 }
@@ -199,9 +199,9 @@ func (p *P521Point) bytesCompressed(out *[1 + p521ElementLength]byte) []byte {
 		return append(out[:0], 0)
 	}
 
-	zinv := new(fiat.P521Element).Invert(p.z)
-	x := new(fiat.P521Element).Mul(p.x, zinv)
-	y := new(fiat.P521Element).Mul(p.y, zinv)
+	zinv := (&fiat.P521Element{}).Invert(p.z)
+	x := (&fiat.P521Element{}).Mul(p.x, zinv)
+	y := (&fiat.P521Element{}).Mul(p.y, zinv)
 
 	// Encode the sign of the y coordinate (indicated by the least significant
 	// bit) as the encoding type (2 or 3).
@@ -216,25 +216,25 @@ func (q *P521Point) Add(p1, p2 *P521Point) *P521Point {
 	// Complete addition formula for a = -3 from "Complete addition formulas for
 	// prime order elliptic curves" (https://eprint.iacr.org/2015/1060), §A.2.
 
-	t0 := new(fiat.P521Element).Mul(p1.x, p2.x)  // t0 := X1 * X2
-	t1 := new(fiat.P521Element).Mul(p1.y, p2.y)  // t1 := Y1 * Y2
-	t2 := new(fiat.P521Element).Mul(p1.z, p2.z)  // t2 := Z1 * Z2
-	t3 := new(fiat.P521Element).Add(p1.x, p1.y)  // t3 := X1 + Y1
-	t4 := new(fiat.P521Element).Add(p2.x, p2.y)  // t4 := X2 + Y2
+	t0 := (&fiat.P521Element{}).Mul(p1.x, p2.x)  // t0 := X1 * X2
+	t1 := (&fiat.P521Element{}).Mul(p1.y, p2.y)  // t1 := Y1 * Y2
+	t2 := (&fiat.P521Element{}).Mul(p1.z, p2.z)  // t2 := Z1 * Z2
+	t3 := (&fiat.P521Element{}).Add(p1.x, p1.y)  // t3 := X1 + Y1
+	t4 := (&fiat.P521Element{}).Add(p2.x, p2.y)  // t4 := X2 + Y2
 	t3.Mul(t3, t4)                               // t3 := t3 * t4
 	t4.Add(t0, t1)                               // t4 := t0 + t1
 	t3.Sub(t3, t4)                               // t3 := t3 - t4
 	t4.Add(p1.y, p1.z)                           // t4 := Y1 + Z1
-	x3 := new(fiat.P521Element).Add(p2.y, p2.z)  // X3 := Y2 + Z2
+	x3 := (&fiat.P521Element{}).Add(p2.y, p2.z)  // X3 := Y2 + Z2
 	t4.Mul(t4, x3)                               // t4 := t4 * X3
 	x3.Add(t1, t2)                               // X3 := t1 + t2
 	t4.Sub(t4, x3)                               // t4 := t4 - X3
 	x3.Add(p1.x, p1.z)                           // X3 := X1 + Z1
-	y3 := new(fiat.P521Element).Add(p2.x, p2.z)  // Y3 := X2 + Z2
+	y3 := (&fiat.P521Element{}).Add(p2.x, p2.z)  // Y3 := X2 + Z2
 	x3.Mul(x3, y3)                               // X3 := X3 * Y3
 	y3.Add(t0, t2)                               // Y3 := t0 + t2
 	y3.Sub(x3, y3)                               // Y3 := X3 - Y3
-	z3 := new(fiat.P521Element).Mul(p521B(), t2) // Z3 := b * t2
+	z3 := (&fiat.P521Element{}).Mul(p521B(), t2) // Z3 := b * t2
 	x3.Sub(y3, z3)                               // X3 := Y3 - Z3
 	z3.Add(x3, x3)                               // Z3 := X3 + X3
 	x3.Add(x3, z3)                               // X3 := X3 + Z3
@@ -271,16 +271,16 @@ func (q *P521Point) Double(p *P521Point) *P521Point {
 	// Complete addition formula for a = -3 from "Complete addition formulas for
 	// prime order elliptic curves" (https://eprint.iacr.org/2015/1060), §A.2.
 
-	t0 := new(fiat.P521Element).Square(p.x)      // t0 := X ^ 2
-	t1 := new(fiat.P521Element).Square(p.y)      // t1 := Y ^ 2
-	t2 := new(fiat.P521Element).Square(p.z)      // t2 := Z ^ 2
-	t3 := new(fiat.P521Element).Mul(p.x, p.y)    // t3 := X * Y
+	t0 := (&fiat.P521Element{}).Square(p.x)      // t0 := X ^ 2
+	t1 := (&fiat.P521Element{}).Square(p.y)      // t1 := Y ^ 2
+	t2 := (&fiat.P521Element{}).Square(p.z)      // t2 := Z ^ 2
+	t3 := (&fiat.P521Element{}).Mul(p.x, p.y)    // t3 := X * Y
 	t3.Add(t3, t3)                               // t3 := t3 + t3
-	z3 := new(fiat.P521Element).Mul(p.x, p.z)    // Z3 := X * Z
+	z3 := (&fiat.P521Element{}).Mul(p.x, p.z)    // Z3 := X * Z
 	z3.Add(z3, z3)                               // Z3 := Z3 + Z3
-	y3 := new(fiat.P521Element).Mul(p521B(), t2) // Y3 := b * t2
+	y3 := (&fiat.P521Element{}).Mul(p521B(), t2) // Y3 := b * t2
 	y3.Sub(y3, z3)                               // Y3 := Y3 - Z3
-	x3 := new(fiat.P521Element).Add(y3, y3)      // X3 := Y3 + Y3
+	x3 := (&fiat.P521Element{}).Add(y3, y3)      // X3 := Y3 + Y3
 	y3.Add(x3, y3)                               // Y3 := X3 + Y3
 	x3.Sub(t1, y3)                               // X3 := t1 - Y3
 	y3.Add(t1, y3)                               // Y3 := t1 + Y3
@@ -391,7 +391,7 @@ var p521GeneratorTableOnce sync.Once
 // times.
 func (p *P521Point) generatorTable() *[p521ElementLength * 2]p521Table {
 	p521GeneratorTableOnce.Do(func() {
-		p521GeneratorTable = new([p521ElementLength * 2]p521Table)
+		p521GeneratorTable = &[p521ElementLength * 2]p521Table{}
 		base := NewP521Point().SetGenerator()
 		for i := 0; i < p521ElementLength*2; i++ {
 			p521GeneratorTable[i][0] = NewP521Point().Set(base)
@@ -442,9 +442,9 @@ func (p *P521Point) ScalarBaseMult(scalar []byte) (*P521Point, error) {
 // p521Sqrt sets e to a square root of x. If x is not a square, p521Sqrt returns
 // false and e is unchanged. e and x can overlap.
 func p521Sqrt(e, x *fiat.P521Element) (isSquare bool) {
-	candidate := new(fiat.P521Element)
+	candidate := &fiat.P521Element{}
 	p521SqrtCandidate(candidate, x)
-	square := new(fiat.P521Element).Square(candidate)
+	square := (&fiat.P521Element{}).Square(candidate)
 	if square.Equal(x) != 1 {
 		return false
 	}

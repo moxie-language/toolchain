@@ -365,7 +365,7 @@ func (t *Transport) Clone() *Transport {
 	if !t.tlsNextProtoWasNil {
 		npm := maps.Clone(t.TLSNextProto)
 		if npm == nil {
-			npm = make(map[string]func(authority string, c *tls.Conn) RoundTripper)
+			npm = map[string]func(authority string, c *tls.Conn) RoundTripper{}
 		}
 		t2.TLSNextProto = npm
 	}
@@ -874,7 +874,7 @@ func (t *Transport) RegisterProtocol(scheme string, rt RoundTripper) {
 	}
 	newMap := maps.Clone(oldMap)
 	if newMap == nil {
-		newMap = make(map[string]RoundTripper)
+		newMap = map[string]RoundTripper{}
 	}
 	newMap[scheme] = rt
 	t.altProto.Store(newMap)
@@ -925,7 +925,7 @@ func (t *Transport) prepareTransportCancel(req *Request, origCancel context.Canc
 	}
 	t.reqMu.Lock()
 	if t.reqCanceler == nil {
-		t.reqCanceler = make(map[*Request]context.CancelCauseFunc)
+		t.reqCanceler = map[*Request]context.CancelCauseFunc{}
 	}
 	t.reqCanceler[req] = cancel
 	t.reqMu.Unlock()
@@ -1109,7 +1109,7 @@ func (t *Transport) tryPutIdleConn(pconn *persistConn) error {
 		return errCloseIdle
 	}
 	if t.idleConn == nil {
-		t.idleConn = make(map[connectMethodKey][]*persistConn)
+		t.idleConn = map[connectMethodKey][]*persistConn{}
 	}
 	idles := t.idleConn[key]
 	if len(idles) >= t.maxIdleConnsPerHost() {
@@ -1222,7 +1222,7 @@ func (t *Transport) queueForIdleConn(w *wantConn) (delivered bool) {
 
 	// Register to receive next connection that becomes idle.
 	if t.idleConnWait == nil {
-		t.idleConnWait = make(map[connectMethodKey]wantConnQueue)
+		t.idleConnWait = map[connectMethodKey]wantConnQueue{}
 	}
 	q := t.idleConnWait[w.key]
 	q.cleanFrontNotWaiting()
@@ -1504,7 +1504,7 @@ func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (_ *persis
 		key:        cm.key(),
 		ctx:        dialCtx,
 		cancelCtx:  dialCancel,
-		result:     make(chan connOrError, 1),
+		result:     chan connOrError{1},
 		beforeDial: testHookPrePendingDial,
 		afterDial:  testHookPostPendingDial,
 	}
@@ -1575,7 +1575,7 @@ func (t *Transport) queueForDial(w *wantConn) {
 
 	if n := t.connsPerHost[w.key]; n < t.MaxConnsPerHost {
 		if t.connsPerHost == nil {
-			t.connsPerHost = make(map[connectMethodKey]int)
+			t.connsPerHost = map[connectMethodKey]int{}
 		}
 		t.connsPerHost[w.key] = n + 1
 		t.startDialConnForLocked(w)
@@ -1583,7 +1583,7 @@ func (t *Transport) queueForDial(w *wantConn) {
 	}
 
 	if t.connsPerHostWait == nil {
-		t.connsPerHostWait = make(map[connectMethodKey]wantConnQueue)
+		t.connsPerHostWait = map[connectMethodKey]wantConnQueue{}
 	}
 	q := t.connsPerHostWait[w.key]
 	q.cleanFrontNotWaiting()
@@ -1692,7 +1692,7 @@ func (pconn *persistConn) addTLS(ctx context.Context, name string, trace *httptr
 	}
 	plainConn := pconn.conn
 	tlsConn := tls.Client(plainConn, cfg)
-	errc := make(chan error, 2)
+	errc := chan error{2}
 	var timer *time.Timer // for canceling TLS handshake
 	if d := pconn.t.TLSHandshakeTimeout; d != 0 {
 		timer = time.AfterFunc(d, func() {
@@ -1740,11 +1740,11 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 	pconn = &persistConn{
 		t:             t,
 		cacheKey:      cm.key(),
-		reqch:         make(chan requestAndChan, 1),
-		writech:       make(chan writeRequest, 1),
-		closech:       make(chan struct{}),
-		writeErrCh:    make(chan error, 1),
-		writeLoopDone: make(chan struct{}),
+		reqch:         chan requestAndChan{1},
+		writech:       chan writeRequest{1},
+		closech:       chan struct{}{},
+		writeErrCh:    chan error{1},
+		writeLoopDone: chan struct{}{},
 	}
 	trace := httptrace.ContextClientTrace(ctx)
 	wrapErr := func(err error) error {
@@ -1858,7 +1858,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 		connectCtx, cancel := testHookProxyConnectTimeout(ctx, 1*time.Minute)
 		defer cancel()
 
-		didReadResponse := make(chan struct{}) // closed after CONNECT write+read is done or fails
+		didReadResponse := chan struct{}{} // closed after CONNECT write+read is done or fails
 		var (
 			resp *Response
 			err  error // write or read error
@@ -2264,7 +2264,7 @@ func (pc *persistConn) readLoop() {
 	// eofc is used to block caller goroutines reading from Response.Body
 	// at EOF until this goroutines has (potentially) added the connection
 	// back to the idle pool.
-	eofc := make(chan struct{})
+	eofc := chan struct{}{}
 	defer close(eofc) // unblock reader on errors
 
 	// Read this once, before loop starts. (to avoid races in tests)
@@ -2354,7 +2354,7 @@ func (pc *persistConn) readLoop() {
 			continue
 		}
 
-		waitForBodyRead := make(chan bool, 2)
+		waitForBodyRead := chan bool{2}
 		body := &bodyEOFSignal{
 			body: resp.Body,
 			earlyCloseFn: func() error {
@@ -2785,7 +2785,7 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 
 	var continueCh chan struct{}
 	if req.ProtoAtLeast(1, 1) && req.Body != nil && req.expectsContinue() {
-		continueCh = make(chan struct{}, 1)
+		continueCh = chan struct{}{1}
 	}
 
 	if pc.t.DisableKeepAlives &&
@@ -2794,7 +2794,7 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 		req.extraHeaders().Set("Connection", "close")
 	}
 
-	gone := make(chan struct{})
+	gone := chan struct{}{}
 	defer close(gone)
 
 	const debugRoundTrip = false
@@ -2803,10 +2803,10 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 	// in case the server decides to reply before reading our full
 	// request body.
 	startBytesWritten := pc.nwrite
-	writeErrCh := make(chan error, 1)
+	writeErrCh := chan error{1}
 	pc.writech <- writeRequest{req, writeErrCh, continueCh}
 
-	resc := make(chan responseAndError)
+	resc := chan responseAndError{}
 	pc.reqch <- requestAndChan{
 		treq:       req,
 		ch:         resc,
@@ -3111,7 +3111,7 @@ type connLRU struct {
 func (cl *connLRU) add(pc *persistConn) {
 	if cl.ll == nil {
 		cl.ll = list.New()
-		cl.m = make(map[*persistConn]*list.Element)
+		cl.m = map[*persistConn]*list.Element{}
 	}
 	ele := cl.ll.PushFront(pc)
 	if _, ok := cl.m[pc]; ok {

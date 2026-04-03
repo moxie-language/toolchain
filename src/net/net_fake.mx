@@ -399,7 +399,7 @@ func (p *packet) clear() {
 }
 
 var packetPool = sync.Pool{
-	New: func() any { return new(packet) },
+	New: func() any { return &packet{} },
 }
 
 type packetQueueState struct {
@@ -421,9 +421,9 @@ type packetQueue struct {
 
 func newPacketQueue(readBufferBytes int) *packetQueue {
 	pq := &packetQueue{
-		empty: make(chan packetQueueState, 1),
-		ready: make(chan packetQueueState, 1),
-		full:  make(chan packetQueueState, 1),
+		empty: chan packetQueueState{1},
+		ready: chan packetQueueState{1},
+		full:  chan packetQueueState{1},
 	}
 	pq.put(packetQueueState{
 		readBufferBytes: readBufferBytes,
@@ -644,8 +644,8 @@ type deadlineTimer struct {
 
 func newDeadlineTimer(deadline time.Time) *deadlineTimer {
 	dt := &deadlineTimer{
-		timer:   make(chan *time.Timer, 1),
-		expired: make(chan struct{}),
+		timer:   chan *time.Timer{1},
+		expired: chan struct{}{},
 	}
 	dt.timer <- nil
 	dt.Reset(deadline)
@@ -720,9 +720,9 @@ func fakeListen(fd *netFD, laddr sockaddr) (err error) {
 	ffd.fakeAddr = fakeAddr(fd.laddr.(sockaddr))
 	switch fd.sotype {
 	case syscall.SOCK_STREAM, syscall.SOCK_SEQPACKET:
-		ffd.incoming = make(chan []*netFD, 1)
-		ffd.incomingFull = make(chan []*netFD, 1)
-		ffd.incomingEmpty = make(chan bool, 1)
+		ffd.incoming = chan []*netFD{1}
+		ffd.incomingFull = chan []*netFD{1}
+		ffd.incomingEmpty = chan bool{1}
 		ffd.incomingEmpty <- true
 	case syscall.SOCK_DGRAM:
 		ffd.queue = newPacketQueue(defaultBuffer)
@@ -970,13 +970,13 @@ func (ffd *fakeNetFD) assignFakeAddr(addr sockaddr) error {
 	switch ffd.fd.net {
 	case "tcp", "tcp4", "tcp6":
 		if addr == nil {
-			return assignIP(new(TCPAddr))
+			return assignIP(&TCPAddr{})
 		}
 		return assignIP(addr)
 
 	case "udp", "udp4", "udp6":
 		if addr == nil {
-			return assignIP(new(UDPAddr))
+			return assignIP(&UDPAddr{})
 		}
 		return assignIP(addr)
 

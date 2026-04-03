@@ -41,7 +41,7 @@ import (
 	"strings"
 )
 
-var emptyParams = make(map[string]string)
+var emptyParams = map[string][]byte{}
 
 // This constant needs to be at least 76 for this package to work correctly.
 // This is because \r\n--separator_of_len_70- would fill the buffer and it
@@ -57,8 +57,8 @@ type Part struct {
 
 	mr *Reader
 
-	disposition       string
-	dispositionParams map[string]string
+	disposition       []byte
+	dispositionParams map[string][]byte
 
 	// r is either a reader directly reading from mr, or it's a
 	// wrapper around such a reader, decoding the
@@ -73,7 +73,7 @@ type Part struct {
 
 // FormName returns the name parameter if p has a Content-Disposition
 // of type "form-data".  Otherwise it returns the empty string.
-func (p *Part) FormName() string {
+func (p *Part) FormName() []byte {
 	// See https://tools.ietf.org/html/rfc2183 section 2 for EBNF
 	// of Content-Disposition value format.
 	if p.dispositionParams == nil {
@@ -88,7 +88,7 @@ func (p *Part) FormName() string {
 // FileName returns the filename parameter of the [Part]'s Content-Disposition
 // header. If not empty, the filename is passed through filepath.Base (which is
 // platform dependent) before being returned.
-func (p *Part) FileName() string {
+func (p *Part) FileName() []byte {
 	if p.dispositionParams == nil {
 		p.parseContentDisposition()
 	}
@@ -116,7 +116,7 @@ func (p *Part) parseContentDisposition() {
 // The boundary is usually obtained from the "boundary" parameter of
 // the message's "Content-Type" header. Use [mime.ParseMediaType] to
 // parse such headers.
-func NewReader(r io.Reader, boundary string) *Reader {
+func NewReader(r io.Reader, boundary []byte) *Reader {
 	b := []byte("\r\n--" + boundary + "--")
 	return &Reader{
 		bufReader:        bufio.NewReaderSize(&stickyErrorReader{r: r}, peekBufferSize),
@@ -147,7 +147,7 @@ func (r *stickyErrorReader) Read(p []byte) (n int, _ error) {
 
 func newPart(mr *Reader, rawPart bool, maxMIMEHeaderSize, maxMIMEHeaders int64) (*Part, error) {
 	bp := &Part{
-		Header: make(map[string][]string),
+		Header: map[string][][]byte{},
 		mr:     mr,
 	}
 	if err := bp.populateHeaders(maxMIMEHeaderSize, maxMIMEHeaders); err != nil {
@@ -332,7 +332,7 @@ func (p *Part) Close() error {
 // isn't supported.
 type Reader struct {
 	bufReader *bufio.Reader
-	tempDir   string // used in tests
+	tempDir   []byte // used in tests
 
 	currentPart *Part
 	partsRead   int
@@ -385,7 +385,7 @@ func (r *Reader) nextPart(rawPart bool, maxMIMEHeaderSize, maxMIMEHeaders int64)
 	if r.currentPart != nil {
 		r.currentPart.Close()
 	}
-	if string(r.dashBoundary) == "--" {
+	if []byte(r.dashBoundary) == "--" {
 		return nil, fmt.Errorf("multipart: boundary is empty")
 	}
 	expectNewPart := false
@@ -420,7 +420,7 @@ func (r *Reader) nextPart(rawPart bool, maxMIMEHeaderSize, maxMIMEHeaders int64)
 		}
 
 		if expectNewPart {
-			return nil, fmt.Errorf("multipart: expecting a new Part; got line %q", string(line))
+			return nil, fmt.Errorf("multipart: expecting a new Part; got line %q", []byte(line))
 		}
 
 		if r.partsRead == 0 {

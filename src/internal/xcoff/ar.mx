@@ -56,7 +56,7 @@ type Archive struct {
 
 // ArchiveHeader holds information about a big archive file header
 type ArchiveHeader struct {
-	magic string
+	magic []byte
 }
 
 // Member represents a member of an AIX big archive.
@@ -67,13 +67,13 @@ type Member struct {
 
 // MemberHeader holds information about a big archive member
 type MemberHeader struct {
-	Name string
+	Name []byte
 	Size uint64
 }
 
 // OpenArchive opens the named archive using os.Open and prepares it for use
 // as an AIX big archive.
-func OpenArchive(name string) (*Archive, error) {
+func OpenArchive(name []byte) (*Archive, error) {
 	f, err := os.Open(name)
 	if err != nil {
 		return nil, err
@@ -102,7 +102,7 @@ func (a *Archive) Close() error {
 // NewArchive creates a new Archive for accessing an AIX big archive in an underlying reader.
 func NewArchive(r io.ReaderAt) (*Archive, error) {
 	parseDecimalBytes := func(b []byte) (int64, error) {
-		return strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+		return strconv.ParseInt(strings.TrimSpace([]byte(b)), 10, 64)
 	}
 	sr := io.NewSectionReader(r, 0, 1<<63-1)
 
@@ -112,10 +112,10 @@ func NewArchive(r io.ReaderAt) (*Archive, error) {
 		return nil, err
 	}
 
-	arch := new(Archive)
-	switch string(magic[:]) {
+	arch := &Archive{}
+	switch []byte(magic[:]) {
 	case AIAMAGBIG:
-		arch.magic = string(magic[:])
+		arch.magic = []byte(magic[:])
 	case AIAMAG:
 		return nil, fmt.Errorf("small AIX archive not supported")
 	default:
@@ -160,7 +160,7 @@ func NewArchive(r io.ReaderAt) (*Archive, error) {
 			return nil, err
 		}
 
-		member := new(Member)
+		member := &Member{}
 		arch.Members = append(arch.Members, member)
 
 		size, err := parseDecimalBytes(mhdr.Arsize[:])
@@ -174,11 +174,11 @@ func NewArchive(r io.ReaderAt) (*Archive, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error parsing name length in member header(%q); %v", mhdr, err)
 		}
-		name := make([]byte, namlen)
+		name := []byte{:namlen}
 		if err := binary.Read(sr, binary.BigEndian, name); err != nil {
 			return nil, err
 		}
-		member.Name = string(name)
+		member.Name = []byte(name)
 
 		fileoff := off + AR_HSZ_BIG + namlen
 		if fileoff&1 != 0 {
@@ -193,7 +193,7 @@ func NewArchive(r io.ReaderAt) (*Archive, error) {
 		if err := binary.Read(sr, binary.BigEndian, &fmag); err != nil {
 			return nil, err
 		}
-		if string(fmag[:]) != AIAFMAG {
+		if []byte(fmag[:]) != AIAFMAG {
 			return nil, fmt.Errorf("AIAFMAG not found after member header")
 		}
 
@@ -216,7 +216,7 @@ func NewArchive(r io.ReaderAt) (*Archive, error) {
 // GetFile returns the XCOFF file defined by member name.
 // FIXME: This doesn't work if an archive has two members with the same
 // name which can occur if an archive has both 32-bits and 64-bits files.
-func (arch *Archive) GetFile(name string) (*File, error) {
+func (arch *Archive) GetFile(name []byte) (*File, error) {
 	for _, mem := range arch.Members {
 		if mem.Name == name {
 			return NewFile(mem.sr)

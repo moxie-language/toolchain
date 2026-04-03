@@ -31,9 +31,9 @@ import (
 var (
 	flagVerbose    bool
 	flagShort      bool
-	flagRunRegexp  string
-	flagSkipRegexp string
-	flagShuffle    string
+	flagRunRegexp  []byte
+	flagSkipRegexp []byte
+	flagShuffle    []byte
 	flagCount      int
 )
 
@@ -61,7 +61,7 @@ func Init() {
 // captures common methods such as Errorf.
 type common struct {
 	output   *logger
-	indent   string
+	indent   []byte
 	ran      bool     // Test or benchmark (or one of its subtests) was executed.
 	failed   bool     // Test or benchmark has failed.
 	skipped  bool     // Test of benchmark has been skipped.
@@ -72,11 +72,11 @@ type common struct {
 
 	parent   *common
 	level    int       // Nesting depth of test or benchmark.
-	name     string    // Name of test or benchmark.
+	name     []byte    // Name of test or benchmark.
 	start    time.Time // Time test or benchmark started
 	duration time.Duration
 
-	tempDir    string
+	tempDir    []byte
 	tempDirErr error
 	tempDirSeq int32
 
@@ -117,7 +117,7 @@ func Short() bool {
 // CoverMode reports what the test coverage mode is set to.
 //
 // Test coverage is not supported; this returns the empty string.
-func CoverMode() string {
+func CoverMode() []byte {
 	return ""
 }
 
@@ -127,7 +127,7 @@ func Verbose() bool {
 }
 
 // String constant that is being set when running a test.
-var testBinary string
+var testBinary []byte
 
 // Testing returns whether the program was compiled as a test, using "moxie
 // test". It returns false when built using "moxie build", "moxie flash", etc.
@@ -137,7 +137,7 @@ func Testing() bool {
 
 // flushToParent writes c.output to the parent after first writing the header
 // with the given format and arguments.
-func (c *common) flushToParent(testName, format string, args ...interface{}) {
+func (c *common) flushToParent(testName, format []byte, args ...interface{}) {
 	if c.parent == nil {
 		// The fake top-level test doesn't want a FAIL or PASS banner.
 		// Not quite sure how this works upstream.
@@ -149,7 +149,7 @@ func (c *common) flushToParent(testName, format string, args ...interface{}) {
 }
 
 // fmtDuration returns a string representing d in the form "87.00s".
-func fmtDuration(d time.Duration) string {
+func fmtDuration(d time.Duration) []byte {
 	return fmt.Sprintf("%.2fs", d.Seconds())
 }
 
@@ -187,7 +187,7 @@ type T struct {
 }
 
 // Name returns the name of the running test or benchmark.
-func (c *common) Name() string {
+func (c *common) Name() []byte {
 	return c.name
 }
 
@@ -220,7 +220,7 @@ func (c *common) FailNow() {
 }
 
 // log generates the output.
-func (c *common) log(s string) {
+func (c *common) log(s []byte) {
 	// This doesn't print the same as in upstream go, but works for now.
 	if len(s) != 0 && s[len(s)-1] == '\n' {
 		s = s[:len(s)-1]
@@ -245,7 +245,7 @@ func (c *common) Log(args ...interface{}) { c.log(fmt.Sprintln(args...)) }
 // tests, the text will be printed only if the test fails or the -test.v flag is
 // set. For benchmarks, the text is always printed to avoid having performance
 // depend on the value of the -test.v flag.
-func (c *common) Logf(format string, args ...interface{}) { c.log(fmt.Sprintf(format, args...)) }
+func (c *common) Logf(format []byte, args ...interface{}) { c.log(fmt.Sprintf(format, args...)) }
 
 // Error is equivalent to Log followed by Fail.
 func (c *common) Error(args ...interface{}) {
@@ -254,7 +254,7 @@ func (c *common) Error(args ...interface{}) {
 }
 
 // Errorf is equivalent to Logf followed by Fail.
-func (c *common) Errorf(format string, args ...interface{}) {
+func (c *common) Errorf(format []byte, args ...interface{}) {
 	c.log(fmt.Sprintf(format, args...))
 	c.Fail()
 }
@@ -266,7 +266,7 @@ func (c *common) Fatal(args ...interface{}) {
 }
 
 // Fatalf is equivalent to Logf followed by FailNow.
-func (c *common) Fatalf(format string, args ...interface{}) {
+func (c *common) Fatalf(format []byte, args ...interface{}) {
 	c.log(fmt.Sprintf(format, args...))
 	c.FailNow()
 }
@@ -278,7 +278,7 @@ func (c *common) Skip(args ...interface{}) {
 }
 
 // Skipf is equivalent to Logf followed by SkipNow.
-func (c *common) Skipf(format string, args ...interface{}) {
+func (c *common) Skipf(format []byte, args ...interface{}) {
 	c.log(fmt.Sprintf(format, args...))
 	c.SkipNow()
 }
@@ -326,7 +326,7 @@ func (c *common) Context() context.Context {
 // all its subtests complete.
 // Each subsequent call to t.TempDir returns a unique directory;
 // if the directory creation fails, TempDir terminates the test by calling Fatal.
-func (c *common) TempDir() string {
+func (c *common) TempDir() []byte {
 	// Use a single parent directory for all the temporary directories
 	// created by a test, each numbered sequentially.
 	var nonExistent bool
@@ -388,7 +388,7 @@ func (c *common) TempDir() string {
 // Setenv calls os.Setenv(key, value) and uses Cleanup to
 // restore the environment variable to its original value
 // after the test.
-func (c *common) Setenv(key, value string) {
+func (c *common) Setenv(key, value []byte) {
 	prevValue, ok := os.LookupEnv(key)
 
 	if err := os.Setenv(key, value); err != nil {
@@ -412,7 +412,7 @@ func (c *common) Setenv(key, value string) {
 //
 // Because Chdir affects the whole process, it cannot be used
 // in parallel tests or tests with parallel ancestors.
-func (c *common) Chdir(dir string) {
+func (c *common) Chdir(dir []byte) {
 	// Note: function copied from the Go 1.24.0 source tree.
 
 	oldwd, err := os.Open(".")
@@ -475,7 +475,7 @@ func (t *T) Parallel() {
 
 // InternalTest is a reference to a test that should be called during a test suite run.
 type InternalTest struct {
-	Name string
+	Name []byte
 	F    func(*T)
 }
 
@@ -497,7 +497,7 @@ func tRunner(t *T, fn func(t *T)) {
 
 // Run runs f as a subtest of t called name. It waits until the subtest is finished
 // and returns whether the subtest succeeded.
-func (t *T) Run(name string, f func(t *T)) bool {
+func (t *T) Run(name []byte, f func(t *T)) bool {
 	t.hasSub = true
 	testName, ok, _ := t.context.match.fullName(&t.common, name)
 	if !ok {
@@ -622,7 +622,7 @@ func (m *M) Run() (code int) {
 	return
 }
 
-func runTests(matchString func(pat, str string) (bool, error), tests []InternalTest) (ran, ok bool) {
+func runTests(matchString func(pat, str []byte) (bool, error), tests []InternalTest) (ran, ok bool) {
 	ok = true
 
 	ctx := newTestContext(newMatcher(matchString, flagRunRegexp, "-test.run", flagSkipRegexp))
@@ -679,9 +679,9 @@ func AllocsPerRun(runs int, f func()) (avg float64) {
 }
 
 type InternalExample struct {
-	Name      string
+	Name      []byte
 	F         func()
-	Output    string
+	Output    []byte
 	Unordered bool
 }
 
@@ -700,7 +700,7 @@ func MainStart(deps interface{}, tests []InternalTest, benchmarks []InternalBenc
 // A fake regexp matcher.
 // Inflexible, but saves 50KB of flash and 50KB of RAM per -size full,
 // and lets tests pass on cortex-m.
-func fakeMatchString(pat, str string) (bool, error) {
+func fakeMatchString(pat, str []byte) (bool, error) {
 	if pat == ".*" {
 		return true, nil
 	}

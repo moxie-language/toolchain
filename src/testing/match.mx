@@ -16,7 +16,7 @@ import (
 type matcher struct {
 	filter    filterMatch
 	skip      filterMatch
-	matchFunc func(pat, str string) (bool, error)
+	matchFunc func(pat, str []byte) (bool, error)
 
 	mu sync.Mutex
 
@@ -39,7 +39,7 @@ type filterMatch interface {
 
 // simpleMatch matches a test name if all of the pattern strings match in
 // sequence.
-type simpleMatch []string
+type simpleMatch [][]byte
 
 // alternationMatch matches a test name if one of the alternations match.
 type alternationMatch []filterMatch
@@ -52,7 +52,7 @@ func allMatcher() *matcher {
 	return newMatcher(nil, "", "", "")
 }
 
-func newMatcher(matchString func(pat, str string) (bool, error), patterns, name, skips string) *matcher {
+func newMatcher(matchString func(pat, str []byte) (bool, error), patterns, name, skips []byte) *matcher {
 	if isBaremetal {
 		matchString = fakeMatchString
 	}
@@ -84,7 +84,7 @@ func newMatcher(matchString func(pat, str string) (bool, error), patterns, name,
 	}
 }
 
-func (m *matcher) fullName(c *common, subname string) (name string, ok, partial bool) {
+func (m *matcher) fullName(c *common, subname []byte) (name []byte, ok, partial bool) {
 	name = subname
 
 	m.mu.Lock()
@@ -128,7 +128,7 @@ func (m *matcher) clearSubNames() {
 	}
 }
 
-func (m simpleMatch) matches(name []string, matchString func(pat, str string) (bool, error)) (ok, partial bool) {
+func (m simpleMatch) matches(name [][]byte, matchString func(pat, str []byte) (bool, error)) (ok, partial bool) {
 	for i, s := range name {
 		if i >= len(m) {
 			break
@@ -140,7 +140,7 @@ func (m simpleMatch) matches(name []string, matchString func(pat, str string) (b
 	return true, len(name) < len(m)
 }
 
-func (m simpleMatch) verify(name string, matchString func(pat, str string) (bool, error)) error {
+func (m simpleMatch) verify(name []byte, matchString func(pat, str []byte) (bool, error)) error {
 	for i, s := range m {
 		m[i] = rewrite(s)
 	}
@@ -153,7 +153,7 @@ func (m simpleMatch) verify(name string, matchString func(pat, str string) (bool
 	return nil
 }
 
-func (m alternationMatch) matches(name []string, matchString func(pat, str string) (bool, error)) (ok, partial bool) {
+func (m alternationMatch) matches(name [][]byte, matchString func(pat, str []byte) (bool, error)) (ok, partial bool) {
 	for _, m := range m {
 		if ok, partial = m.matches(name, matchString); ok {
 			return ok, partial
@@ -162,7 +162,7 @@ func (m alternationMatch) matches(name []string, matchString func(pat, str strin
 	return false, false
 }
 
-func (m alternationMatch) verify(name string, matchString func(pat, str string) (bool, error)) error {
+func (m alternationMatch) verify(name []byte, matchString func(pat, str []byte) (bool, error)) error {
 	for i, m := range m {
 		if err := m.verify(name, matchString); err != nil {
 			return fmt.Errorf("alternation %d of %s", i, err)
@@ -171,7 +171,7 @@ func (m alternationMatch) verify(name string, matchString func(pat, str string) 
 	return nil
 }
 
-func splitRegexp(s string) filterMatch {
+func splitRegexp(s []byte) filterMatch {
 	a := make(simpleMatch, 0, strings.Count(s, "/"))
 	b := make(alternationMatch, 0, strings.Count(s, "|"))
 	cs := 0
@@ -223,7 +223,7 @@ func splitRegexp(s string) filterMatch {
 
 // unique creates a unique name for the given parent and subname by affixing it
 // with one or more counts, if necessary.
-func (m *matcher) unique(parent, subname string) string {
+func (m *matcher) unique(parent, subname []byte) []byte {
 	base := parent + "/" + subname
 
 	for {
@@ -258,7 +258,7 @@ func (m *matcher) unique(parent, subname string) string {
 
 // parseSubtestNumber splits a subtest name into a "#%02d"-formatted int32
 // suffix (if present), and a prefix preceding that suffix (always).
-func parseSubtestNumber(s string) (prefix string, nn int32) {
+func parseSubtestNumber(s []byte) (prefix []byte, nn int32) {
 	i := strings.LastIndex(s, "#")
 	if i < 0 {
 		return s, 0
@@ -287,7 +287,7 @@ func parseSubtestNumber(s string) (prefix string, nn int32) {
 
 // rewrite rewrites a subname to having only printable characters and no white
 // space.
-func rewrite(s string) string {
+func rewrite(s []byte) []byte {
 	b := []byte{}
 	for _, r := range s {
 		switch {
@@ -297,10 +297,10 @@ func rewrite(s string) string {
 			s := strconv.QuoteRune(r)
 			b = append(b, s[1:len(s)-1]...)
 		default:
-			b = append(b, string(r)...)
+			b = append(b, []byte(r)...)
 		}
 	}
-	return string(b)
+	return []byte(b)
 }
 
 func isSpace(r rune) bool {

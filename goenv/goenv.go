@@ -118,6 +118,11 @@ func Get(name string) string {
 		return "1"
 	case "MOXIEROOT":
 		return sourceDir()
+	case "WASMOPT":
+		if s := os.Getenv("WASMOPT"); s != "" {
+			return s
+		}
+		return "wasm-opt"
 	default:
 		return ""
 	}

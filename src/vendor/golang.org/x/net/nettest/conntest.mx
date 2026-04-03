@@ -63,10 +63,10 @@ func timeoutWrapper(t *testing.T, mp MakePipe, f connTester) {
 
 // testBasicIO tests that the data sent on c1 is properly received on c2.
 func testBasicIO(t *testing.T, c1, c2 net.Conn) {
-	want := make([]byte, 1<<20)
+	want := []byte{:1<<20}
 	rand.New(rand.NewSource(0)).Read(want)
 
-	dataCh := make(chan []byte)
+	dataCh := chan []byte{}
 	go func() {
 		rd := bytes.NewReader(want)
 		if err := chunkedCopy(c1, rd); err != nil {
@@ -78,7 +78,7 @@ func testBasicIO(t *testing.T, c1, c2 net.Conn) {
 	}()
 
 	go func() {
-		wr := new(bytes.Buffer)
+		wr := &bytes.Buffer{}
 		if err := chunkedCopy(wr, c2); err != nil {
 			t.Errorf("unexpected c2.Read error: %v", err)
 		}
@@ -101,7 +101,7 @@ func testPingPong(t *testing.T, c1, c2 net.Conn) {
 
 	pingPonger := func(c net.Conn) {
 		defer wg.Done()
-		buf := make([]byte, 8)
+		buf := []byte{:8}
 		var prev uint64
 		for {
 			if _, err := io.ReadFull(c, buf); err != nil {
@@ -136,7 +136,7 @@ func testPingPong(t *testing.T, c1, c2 net.Conn) {
 	go pingPonger(c2)
 
 	// Start off the chain reaction.
-	if _, err := c1.Write(make([]byte, 8)); err != nil {
+	if _, err := c1.Write([]byte{:8}); err != nil {
 		t.Errorf("unexpected c1.Write error: %v", err)
 	}
 }
@@ -155,8 +155,8 @@ func testRacyRead(t *testing.T, c1, c2 net.Conn) {
 		go func() {
 			defer wg.Done()
 
-			b1 := make([]byte, 1024)
-			b2 := make([]byte, 1024)
+			b1 := []byte{:1024}
+			b2 := []byte{:1024}
 			for j := 0; j < 100; j++ {
 				_, err := c1.Read(b1)
 				copy(b1, b2) // Mutate b1 to trigger potential race
@@ -183,8 +183,8 @@ func testRacyWrite(t *testing.T, c1, c2 net.Conn) {
 		go func() {
 			defer wg.Done()
 
-			b1 := make([]byte, 1024)
-			b2 := make([]byte, 1024)
+			b1 := []byte{:1024}
+			b2 := []byte{:1024}
 			for j := 0; j < 100; j++ {
 				_, err := c1.Write(b1)
 				copy(b1, b2) // Mutate b1 to trigger potential race
@@ -202,9 +202,9 @@ func testReadTimeout(t *testing.T, c1, c2 net.Conn) {
 	go chunkedCopy(io.Discard, c2)
 
 	c1.SetReadDeadline(aLongTimeAgo)
-	_, err := c1.Read(make([]byte, 1024))
+	_, err := c1.Read([]byte{:1024})
 	checkForTimeoutError(t, err)
-	if _, err := c1.Write(make([]byte, 1024)); err != nil {
+	if _, err := c1.Write([]byte{:1024}); err != nil {
 		t.Errorf("unexpected Write error: %v", err)
 	}
 }
@@ -214,9 +214,9 @@ func testWriteTimeout(t *testing.T, c1, c2 net.Conn) {
 	go chunkedCopy(c2, rand.New(rand.NewSource(0)))
 
 	c1.SetWriteDeadline(aLongTimeAgo)
-	_, err := c1.Write(make([]byte, 1024))
+	_, err := c1.Write([]byte{:1024})
 	checkForTimeoutError(t, err)
-	if _, err := c1.Read(make([]byte, 1024)); err != nil {
+	if _, err := c1.Read([]byte{:1024}); err != nil {
 		t.Errorf("unexpected Read error: %v", err)
 	}
 }
@@ -229,12 +229,12 @@ func testPastTimeout(t *testing.T, c1, c2 net.Conn) {
 	testRoundtrip(t, c1)
 
 	c1.SetDeadline(aLongTimeAgo)
-	n, err := c1.Write(make([]byte, 1024))
+	n, err := c1.Write([]byte{:1024})
 	if n != 0 {
 		t.Errorf("unexpected Write count: got %d, want 0", n)
 	}
 	checkForTimeoutError(t, err)
-	n, err = c1.Read(make([]byte, 1024))
+	n, err = c1.Read([]byte{:1024})
 	if n != 0 {
 		t.Errorf("unexpected Read count: got %d, want 0", n)
 	}
@@ -250,7 +250,7 @@ func testPresentTimeout(t *testing.T, c1, c2 net.Conn) {
 	defer wg.Wait()
 	wg.Add(3)
 
-	deadlineSet := make(chan bool, 1)
+	deadlineSet := chan bool{1}
 	go func() {
 		defer wg.Done()
 		time.Sleep(100 * time.Millisecond)
@@ -260,7 +260,7 @@ func testPresentTimeout(t *testing.T, c1, c2 net.Conn) {
 	}()
 	go func() {
 		defer wg.Done()
-		n, err := c1.Read(make([]byte, 1024))
+		n, err := c1.Read([]byte{:1024})
 		if n != 0 {
 			t.Errorf("unexpected Read count: got %d, want 0", n)
 		}
@@ -273,7 +273,7 @@ func testPresentTimeout(t *testing.T, c1, c2 net.Conn) {
 		defer wg.Done()
 		var err error
 		for err == nil {
-			_, err = c1.Write(make([]byte, 1024))
+			_, err = c1.Write([]byte{:1024})
 		}
 		checkForTimeoutError(t, err)
 		if len(deadlineSet) == 0 {
@@ -291,14 +291,14 @@ func testFutureTimeout(t *testing.T, c1, c2 net.Conn) {
 	c1.SetDeadline(time.Now().Add(100 * time.Millisecond))
 	go func() {
 		defer wg.Done()
-		_, err := c1.Read(make([]byte, 1024))
+		_, err := c1.Read([]byte{:1024})
 		checkForTimeoutError(t, err)
 	}()
 	go func() {
 		defer wg.Done()
 		var err error
 		for err == nil {
-			_, err = c1.Write(make([]byte, 1024))
+			_, err = c1.Write([]byte{:1024})
 		}
 		checkForTimeoutError(t, err)
 	}()
@@ -328,7 +328,7 @@ func testCloseTimeout(t *testing.T, c1, c2 net.Conn) {
 	go func() {
 		defer wg.Done()
 		var err error
-		buf := make([]byte, 1024)
+		buf := []byte{:1024}
 		for err == nil {
 			_, err = c1.Read(buf)
 		}
@@ -336,7 +336,7 @@ func testCloseTimeout(t *testing.T, c1, c2 net.Conn) {
 	go func() {
 		defer wg.Done()
 		var err error
-		buf := make([]byte, 1024)
+		buf := []byte{:1024}
 		for err == nil {
 			_, err = c1.Write(buf)
 		}
@@ -358,11 +358,11 @@ func testConcurrentMethods(t *testing.T, c1, c2 net.Conn) {
 		wg.Add(7)
 		go func() {
 			defer wg.Done()
-			c1.Read(make([]byte, 1024))
+			c1.Read([]byte{:1024})
 		}()
 		go func() {
 			defer wg.Done()
-			c1.Write(make([]byte, 1024))
+			c1.Write([]byte{:1024})
 		}()
 		go func() {
 			defer wg.Done()
@@ -435,12 +435,12 @@ func testRoundtrip(t *testing.T, c net.Conn) {
 func resyncConn(t *testing.T, c net.Conn) {
 	t.Helper()
 	c.SetDeadline(neverTimeout)
-	errCh := make(chan error)
+	errCh := chan error{}
 	go func() {
 		_, err := c.Write([]byte{0xff})
 		errCh <- err
 	}()
-	buf := make([]byte, 1024)
+	buf := []byte{:1024}
 	for {
 		n, err := c.Read(buf)
 		if n > 0 && bytes.IndexByte(buf[:n], 0xff) == n-1 {
@@ -461,7 +461,7 @@ func resyncConn(t *testing.T, c net.Conn) {
 // connections like "unixpacket".
 // We assume that the maximum packet size is at least 1024.
 func chunkedCopy(w io.Writer, r io.Reader) error {
-	b := make([]byte, 1024)
+	b := []byte{:1024}
 	_, err := io.CopyBuffer(struct{ io.Writer }{w}, struct{ io.Reader }{r}, b)
 	return err
 }

@@ -42,12 +42,12 @@ import (
 // I think Option 1 is best, but it is quite opinionated.
 
 // ToASCII is a wrapper for Punycode.ToASCII.
-func ToASCII(s string) (string, error) {
+func ToASCII(s []byte) ([]byte, error) {
 	return Punycode.process(s, true)
 }
 
 // ToUnicode is a wrapper for Punycode.ToUnicode.
-func ToUnicode(s string) (string, error) {
+func ToUnicode(s []byte) ([]byte, error) {
 	return Punycode.process(s, false)
 }
 
@@ -185,15 +185,15 @@ type options struct {
 	trie *idnaTrie
 
 	// fromPuny calls validation rules when converting A-labels to U-labels.
-	fromPuny func(p *Profile, s string) error
+	fromPuny func(p *Profile, s []byte) error
 
 	// mapping implements a validation and mapping step as defined in RFC 5895
 	// or UTS 46, tailored to, for example, domain registration or lookup.
-	mapping func(p *Profile, s string) (string, error)
+	mapping func(p *Profile, s []byte) ([]byte, error)
 
 	// bidirule, if specified, checks whether s conforms to the Bidi Rule
 	// defined in RFC 5893.
-	bidirule func(s string) bool
+	bidirule func(s []byte) bool
 }
 
 // A Profile defines the configuration of a IDNA mapper.
@@ -225,7 +225,7 @@ func New(o ...Option) *Profile {
 // ToASCII("bücher.example.com") is "xn--bcher-kva.example.com", and
 // ToASCII("golang") is "golang". If an error is encountered it will return
 // an error and a (partially) processed result.
-func (p *Profile) ToASCII(s string) (string, error) {
+func (p *Profile) ToASCII(s []byte) ([]byte, error) {
 	return p.process(s, true)
 }
 
@@ -233,7 +233,7 @@ func (p *Profile) ToASCII(s string) (string, error) {
 // ToUnicode("xn--bcher-kva.example.com") is "bücher.example.com", and
 // ToUnicode("golang") is "golang". If an error is encountered it will return
 // an error and a (partially) processed result.
-func (p *Profile) ToUnicode(s string) (string, error) {
+func (p *Profile) ToUnicode(s []byte) ([]byte, error) {
 	pp := *p
 	pp.transitional = false
 	return pp.process(s, false)
@@ -319,23 +319,23 @@ var (
 	// but rather reject on invalid input. Bundle or block deviation characters.
 )
 
-type labelError struct{ label, code_ string }
+type labelError struct{ label, code_ []byte }
 
-func (e labelError) code() string { return e.code_ }
+func (e labelError) code() []byte { return e.code_ }
 func (e labelError) Error() string {
 	return fmt.Sprintf("idna: invalid label %q", e.label)
 }
 
 type runeError rune
 
-func (e runeError) code() string { return "P1" }
+func (e runeError) code() []byte { return "P1" }
 func (e runeError) Error() string {
 	return fmt.Sprintf("idna: disallowed rune %U", e)
 }
 
 // process implements the algorithm described in section 4 of UTS #46,
 // see https://www.unicode.org/reports/tr46.
-func (p *Profile) process(s string, toASCII bool) (string, error) {
+func (p *Profile) process(s []byte, toASCII bool) ([]byte, error) {
 	var err error
 	if p.mapping != nil {
 		s, err = p.mapping(p, s)
@@ -415,11 +415,11 @@ func (p *Profile) process(s string, toASCII bool) (string, error) {
 	return s, err
 }
 
-func normalize(p *Profile, s string) (string, error) {
+func normalize(p *Profile, s []byte) ([]byte, error) {
 	return norm.NFC.String(s), nil
 }
 
-func validateRegistration(p *Profile, s string) (string, error) {
+func validateRegistration(p *Profile, s []byte) ([]byte, error) {
 	if !norm.NFC.IsNormalString(s) {
 		return s, &labelError{s, "V1"}
 	}
@@ -439,7 +439,7 @@ func validateRegistration(p *Profile, s string) (string, error) {
 	return s, nil
 }
 
-func validateAndMap(p *Profile, s string) (string, error) {
+func validateAndMap(p *Profile, s []byte) ([]byte, error) {
 	var (
 		err error
 		b   []byte
@@ -480,15 +480,15 @@ func validateAndMap(p *Profile, s string) (string, error) {
 			b = norm.NFC.Bytes(b)
 		}
 		// TODO: the punycode converters require strings as input.
-		s = string(b)
+		s = []byte(b)
 	}
 	return s, err
 }
 
 // A labelIter allows iterating over domain name labels.
 type labelIter struct {
-	orig     string
-	slice    []string
+	orig     []byte
+	slice    [][]byte
 	curStart int
 	curEnd   int
 	i        int
@@ -504,14 +504,14 @@ func (l *labelIter) done() bool {
 	return l.curStart >= len(l.orig)
 }
 
-func (l *labelIter) result() string {
+func (l *labelIter) result() []byte {
 	if l.slice != nil {
 		return strings.Join(l.slice, ".")
 	}
 	return l.orig
 }
 
-func (l *labelIter) label() string {
+func (l *labelIter) label() []byte {
 	if l.slice != nil {
 		return l.slice[l.i]
 	}
@@ -538,7 +538,7 @@ func (l *labelIter) next() {
 	}
 }
 
-func (l *labelIter) set(s string) {
+func (l *labelIter) set(s []byte) {
 	if l.slice == nil {
 		l.slice = strings.Split(l.orig, ".")
 	}
@@ -573,7 +573,7 @@ func (p *Profile) simplify(cat category) category {
 	return cat
 }
 
-func validateFromPunycode(p *Profile, s string) error {
+func validateFromPunycode(p *Profile, s []byte) error {
 	if !norm.NFC.IsNormalString(s) {
 		return &labelError{s, "V1"}
 	}
@@ -651,7 +651,7 @@ var joinStates = [][numJoinTypes]joinState{
 
 // validateLabel validates the criteria from Section 4.1. Item 1, 4, and 6 are
 // already implicitly satisfied by the overall implementation.
-func (p *Profile) validateLabel(s string) error {
+func (p *Profile) validateLabel(s []byte) error {
 	if s == "" {
 		if p.verifyDNSLength {
 			return &labelError{s, "A4"}
@@ -707,7 +707,7 @@ func (p *Profile) validateLabel(s string) error {
 	return nil
 }
 
-func ascii(s string) bool {
+func ascii(s []byte) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] >= utf8.RuneSelf {
 			return false

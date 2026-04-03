@@ -45,7 +45,7 @@ var driversMu sync.RWMutex
 // See go.dev/issue/67401.
 //
 //go:linkname drivers
-var drivers = make(map[string]driver.Driver)
+var drivers = map[string]driver.Driver{}
 
 // nowFunc returns the current time; it's overridden in tests.
 var nowFunc = time.Now
@@ -69,7 +69,7 @@ func unregisterAllDrivers() {
 	driversMu.Lock()
 	defer driversMu.Unlock()
 	// For tests.
-	drivers = make(map[string]driver.Driver)
+	drivers = map[string]driver.Driver{}
 }
 
 // Drivers returns a sorted list of the names of the registered drivers.
@@ -419,7 +419,8 @@ type Null[T any] struct {
 
 func (n *Null[T]) Scan(value any) error {
 	if value == nil {
-		n.V, n.Valid = *new(T), false
+		var zero T
+		n.V, n.Valid = zero, false
 		return nil
 	}
 	n.Valid = true
@@ -640,7 +641,7 @@ func (dc *driverConn) prepareLocked(ctx context.Context, cg stmtConnGrabber, que
 	//
 	// Wrap all driver.Stmt is *driverStmt to ensure they are only closed once.
 	if dc.openStmt == nil {
-		dc.openStmt = make(map[*driverStmt]bool)
+		dc.openStmt = map[*driverStmt]bool{}
 	}
 	dc.openStmt[ds] = true
 	return ds, nil
@@ -681,7 +682,7 @@ func (dc *driverConn) finalClose() error {
 	// before calling close on each stmt.
 	var openStmt []*driverStmt
 	withLock(dc, func() {
-		openStmt = make([]*driverStmt, 0, len(dc.openStmt))
+		openStmt = []*driverStmt{:0:len(dc.openStmt)}
 		for ds := range dc.openStmt {
 			openStmt = append(openStmt, ds)
 		}
@@ -749,7 +750,7 @@ func (db *DB) addDep(x finalCloser, dep any) {
 
 func (db *DB) addDepLocked(x finalCloser, dep any) {
 	if db.dep == nil {
-		db.dep = make(map[finalCloser]depSet)
+		db.dep = map[finalCloser]depSet{}
 	}
 	xdep := db.dep[x]
 	if xdep == nil {
@@ -833,8 +834,8 @@ func OpenDB(c driver.Connector) *DB {
 	ctx, cancel := context.WithCancel(context.Background())
 	db := &DB{
 		connector: c,
-		openerCh:  make(chan struct{}, connectionRequestQueueSize),
-		lastPut:   make(map[*driverConn]string),
+		openerCh:  chan struct{}{connectionRequestQueueSize},
+		lastPut:   map[*driverConn]string{},
 		stop:      cancel,
 	}
 
@@ -933,7 +934,7 @@ func (db *DB) Close() error {
 		close(db.cleanerCh)
 	}
 	var err error
-	fns := make([]func() error, 0, len(db.freeConn))
+	fns := []func() error{:0:len(db.freeConn)}
 	for _, dc := range db.freeConn {
 		fns = append(fns, dc.closeDBLocked())
 	}
@@ -1087,7 +1088,7 @@ func (db *DB) SetConnMaxIdleTime(d time.Duration) {
 // startCleanerLocked starts connectionCleaner if needed.
 func (db *DB) startCleanerLocked() {
 	if (db.maxLifetime > 0 || db.maxIdleTime > 0) && db.numOpen > 0 && db.cleanerCh == nil {
-		db.cleanerCh = make(chan struct{}, 1)
+		db.cleanerCh = chan struct{}{1}
 		go db.connectionCleaner(db.shortestIdleTimeLocked())
 	}
 }
@@ -1358,7 +1359,7 @@ func (db *DB) conn(ctx context.Context, strategy connReuseStrategy) (*driverConn
 	if db.maxOpen > 0 && db.numOpen >= db.maxOpen {
 		// Make the connRequest channel. It's buffered so that the
 		// connectionOpener doesn't block while waiting for the req to be read.
-		req := make(chan connRequest, 1)
+		req := chan connRequest{1}
 		delHandle := db.connRequests.Add(req)
 		db.waitCount++
 		db.mu.Unlock()
@@ -3060,7 +3061,7 @@ func (rs *Rows) nextLocked() (doClose, ok bool) {
 	defer rs.dc.Unlock()
 
 	if rs.lastcols == nil {
-		rs.lastcols = make([]driver.Value, len(rs.rowsi.Columns()))
+		rs.lastcols = []driver.Value{:len(rs.rowsi.Columns())}
 	}
 
 	rs.lasterr = rs.rowsi.Next(rs.lastcols)
@@ -3274,7 +3275,7 @@ func (ci *ColumnType) DatabaseTypeName() string {
 func rowsColumnInfoSetupConnLocked(rowsi driver.Rows) []*ColumnType {
 	names := rowsi.Columns()
 
-	list := make([]*ColumnType, len(names))
+	list := []*ColumnType{:len(names)}
 	for i := range list {
 		ci := &ColumnType{
 			name: names[i],

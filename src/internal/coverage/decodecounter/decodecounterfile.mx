@@ -21,10 +21,10 @@ import (
 
 type CounterDataReader struct {
 	stab     *stringtab.Reader
-	args     map[string]string
-	osargs   []string
-	goarch   string // GOARCH setting from run that produced counter data
-	goos     string // GOOS setting from run that produced counter data
+	args     map[string][]byte
+	osargs   [][]byte
+	goarch   []byte // GOARCH setting from run that produced counter data
+	goos     []byte // GOOS setting from run that produced counter data
 	mr       io.ReadSeeker
 	hdr      coverage.CounterFileHeader
 	ftr      coverage.CounterFileFooter
@@ -36,11 +36,11 @@ type CounterDataReader struct {
 	debug    bool
 }
 
-func NewCounterDataReader(fn string, rs io.ReadSeeker) (*CounterDataReader, error) {
+func NewCounterDataReader(fn []byte, rs io.ReadSeeker) (*CounterDataReader, error) {
 	cdr := &CounterDataReader{
 		mr:   rs,
-		u32b: make([]byte, 4),
-		u8b:  make([]byte, 1),
+		u32b: []byte{:4},
+		u8b:  []byte{:1},
 	}
 	// Read header
 	if err := binary.Read(rs, binary.LittleEndian, &cdr.hdr); err != nil {
@@ -130,7 +130,7 @@ func (cdr *CounterDataReader) readSegmentPreamble() error {
 }
 
 func (cdr *CounterDataReader) readStringTable() error {
-	b := make([]byte, cdr.shdr.StrTabLen)
+	b := []byte{:cdr.shdr.StrTabLen}
 	nr, err := cdr.mr.Read(b)
 	if err != nil {
 		return err
@@ -145,7 +145,7 @@ func (cdr *CounterDataReader) readStringTable() error {
 }
 
 func (cdr *CounterDataReader) readArgs() error {
-	b := make([]byte, cdr.shdr.ArgsLen)
+	b := []byte{:cdr.shdr.ArgsLen}
 	nr, err := cdr.mr.Read(b)
 	if err != nil {
 		return err
@@ -154,7 +154,7 @@ func (cdr *CounterDataReader) readArgs() error {
 		return fmt.Errorf("error: short read on args table")
 	}
 	slr := slicereader.NewReader(b, false /* not readonly */)
-	sget := func() (string, error) {
+	sget := func() ([]byte, error) {
 		kidx := slr.ReadULEB128()
 		if int(kidx) >= cdr.stab.Entries() {
 			return "", fmt.Errorf("malformed string table ref")
@@ -162,7 +162,7 @@ func (cdr *CounterDataReader) readArgs() error {
 		return cdr.stab.Get(uint32(kidx)), nil
 	}
 	nents := slr.ReadULEB128()
-	cdr.args = make(map[string]string, int(nents))
+	cdr.args = map[string][]byte{}
 	for i := uint64(0); i < nents; i++ {
 		k, errk := sget()
 		if errk != nil {
@@ -182,7 +182,7 @@ func (cdr *CounterDataReader) readArgs() error {
 		if err != nil {
 			return fmt.Errorf("malformed argc in counter data file args section")
 		}
-		cdr.osargs = make([]string, 0, argc)
+		cdr.osargs = [][]byte{:0:argc}
 		for i := 0; i < argc; i++ {
 			arg := cdr.args[fmt.Sprintf("argv%d", i)]
 			cdr.osargs = append(cdr.osargs, arg)
@@ -203,7 +203,7 @@ func (cdr *CounterDataReader) readArgs() error {
 // for example, if a data file is produced by merging coverage
 // data from two distinct runs, no os args will be available (an
 // empty list is returned).
-func (cdr *CounterDataReader) OsArgs() []string {
+func (cdr *CounterDataReader) OsArgs() [][]byte {
 	return cdr.osargs
 }
 
@@ -211,7 +211,7 @@ func (cdr *CounterDataReader) OsArgs() []string {
 // that produced this counter data file. The GOOS value may be
 // empty in the case where the counter data file was produced
 // from a merge in which more than one GOOS value was present.
-func (cdr *CounterDataReader) Goos() string {
+func (cdr *CounterDataReader) Goos() []byte {
 	return cdr.goos
 }
 
@@ -219,7 +219,7 @@ func (cdr *CounterDataReader) Goos() string {
 // that produced this counter data file. The GOARCH value may be
 // empty in the case where the counter data file was produced
 // from a merge in which more than one GOARCH value was present.
-func (cdr *CounterDataReader) Goarch() string {
+func (cdr *CounterDataReader) Goarch() []byte {
 	return cdr.goarch
 }
 
@@ -359,7 +359,7 @@ func (cdr *CounterDataReader) NextFunc(p *FuncPayload) (bool, error) {
 		return false, err
 	}
 	if cap(p.Counters) < 1024 {
-		p.Counters = make([]uint32, 0, 1024)
+		p.Counters = []uint32{:0:1024}
 	}
 	p.Counters = p.Counters[:0]
 	for i := uint32(0); i < nc; i++ {

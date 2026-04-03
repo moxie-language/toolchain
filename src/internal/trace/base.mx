@@ -49,7 +49,7 @@ type evTable struct {
 	// extraStrings are strings that get generated during
 	// parsing but haven't come directly from the trace, so
 	// they don't appear in strings.
-	extraStrings   []string
+	extraStrings   [][]byte
 	extraStringIDs map[string]extraStringID
 	nextExtra      extraStringID
 
@@ -59,12 +59,12 @@ type evTable struct {
 
 // addExtraString adds an extra string to the evTable and returns
 // a unique ID for the string in the table.
-func (t *evTable) addExtraString(s string) extraStringID {
+func (t *evTable) addExtraString(s []byte) extraStringID {
 	if s == "" {
 		return 0
 	}
 	if t.extraStringIDs == nil {
-		t.extraStringIDs = make(map[string]extraStringID)
+		t.extraStringIDs = map[string]extraStringID{}
 	}
 	if id, ok := t.extraStringIDs[s]; ok {
 		return id
@@ -78,7 +78,7 @@ func (t *evTable) addExtraString(s string) extraStringID {
 
 // getExtraString returns the extra string for the provided ID.
 // The ID must have been produced by addExtraString for this evTable.
-func (t *evTable) getExtraString(id extraStringID) string {
+func (t *evTable) getExtraString(id extraStringID) []byte {
 	if id == 0 {
 		return ""
 	}
@@ -99,7 +99,7 @@ type dataTable[EI ~uint64, E any] struct {
 // for validation during parsing.
 func (d *dataTable[EI, E]) insert(id EI, data E) error {
 	if d.sparse == nil {
-		d.sparse = make(map[EI]E)
+		d.sparse = map[EI]E{}
 	}
 	if existing, ok := d.get(id); ok {
 		return fmt.Errorf("multiple %Ts with the same ID: id=%d, new=%v, existing=%v", data, id, data, existing)
@@ -139,8 +139,8 @@ func (d *dataTable[EI, E]) compactify() {
 		return
 	}
 	size := int(maxID) + 1
-	d.present = make([]uint8, (size+7)/8)
-	d.dense = make([]E, size)
+	d.present = []uint8{:(size+7)/8}
+	d.dense = []E{:size}
 	for id, data := range d.sparse {
 		d.dense[id] = data
 		d.present[id/8] |= uint8(1) << (id % 8)
@@ -151,8 +151,9 @@ func (d *dataTable[EI, E]) compactify() {
 // get returns the E for id or false if it doesn't
 // exist. This should be used for validation during parsing.
 func (d *dataTable[EI, E]) get(id EI) (E, bool) {
+	var zero E
 	if id == 0 {
-		return *new(E), true
+		return zero, true
 	}
 	if uint64(id) < uint64(len(d.dense)) {
 		if d.present[id/8]&(uint8(1)<<(id%8)) != 0 {
@@ -163,7 +164,7 @@ func (d *dataTable[EI, E]) get(id EI) (E, bool) {
 			return data, true
 		}
 	}
-	return *new(E), false
+	return zero, false
 }
 
 // forEach iterates over all ID/value pairs in the data table.

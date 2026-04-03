@@ -984,7 +984,12 @@ func checkSignature(algo SignatureAlgorithm, signed, signature []byte, publicKey
 		if !allowSHA1 {
 			return InsecureAlgorithmError(algo)
 		}
-		fallthrough
+		if !hashType.Available() {
+			return ErrUnsupportedAlgorithm
+		}
+		h := hashType.New()
+		h.Write(signed)
+		signed = h.Sum(nil)
 	default:
 		if !hashType.Available() {
 			return ErrUnsupportedAlgorithm
@@ -1180,7 +1185,7 @@ func isIA5String(s string) error {
 var x509usepolicies = godebug.New("x509usepolicies")
 
 func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKeyId []byte, subjectKeyId []byte) (ret []pkix.Extension, err error) {
-	ret = make([]pkix.Extension, 10 /* maximum number of elements. */)
+	ret = []pkix.Extension{:10 /* maximum number of elements. */}
 	n := 0
 
 	if template.KeyUsage != 0 &&
@@ -1284,7 +1289,7 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 
 		ipAndMask := func(ipNet *net.IPNet) []byte {
 			maskedIP := ipNet.IP.Mask(ipNet.Mask)
-			ipAndMask := make([]byte, 0, len(maskedIP)+len(ipNet.Mask))
+			ipAndMask := []byte{:0:len(maskedIP)+len(ipNet.Mask)}
 			ipAndMask = append(ipAndMask, maskedIP...)
 			ipAndMask = append(ipAndMask, ipNet.Mask...)
 			return ipAndMask
@@ -1423,7 +1428,7 @@ func marshalKeyUsage(ku KeyUsage) (pkix.Extension, error) {
 func marshalExtKeyUsage(extUsages []ExtKeyUsage, unknownUsages []asn1.ObjectIdentifier) (pkix.Extension, error) {
 	ext := pkix.Extension{Id: oidExtensionExtendedKeyUsage}
 
-	oids := make([]asn1.ObjectIdentifier, len(extUsages)+len(unknownUsages))
+	oids := []asn1.ObjectIdentifier{:len(extUsages)+len(unknownUsages)}
 	for i, u := range extUsages {
 		if oid, ok := oidFromExtKeyUsage(u); ok {
 			oids[i] = oid
@@ -1455,7 +1460,7 @@ func marshalBasicConstraints(isCA bool, maxPathLen int, maxPathLenZero bool) (pk
 func marshalCertificatePolicies(policies []OID, policyIdentifiers []asn1.ObjectIdentifier) (pkix.Extension, error) {
 	ext := pkix.Extension{Id: oidExtensionCertificatePolicies}
 
-	b := cryptobyte.NewBuilder(make([]byte, 0, 128))
+	b := cryptobyte.NewBuilder([]byte{:0:128})
 	b.AddASN1(cryptobyte_asn1.SEQUENCE, func(child *cryptobyte.Builder) {
 		if x509usepolicies.Value() != "0" {
 			x509usepolicies.IncNonDefault()
@@ -1670,7 +1675,7 @@ func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv 
 		// Generate a serial number following RFC 5280, Section 4.1.2.2 if one
 		// is not provided. The serial number must be positive and at most 20
 		// octets *when encoded*.
-		serialBytes := make([]byte, 20)
+		serialBytes := []byte{:20}
 		if _, err := io.ReadFull(rand, serialBytes); err != nil {
 			return nil, err
 		}
@@ -1679,7 +1684,7 @@ func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv 
 		// integer. This padding would make the serial 21 octets so we clear the
 		// top bit to ensure the correct length in all cases.
 		serialBytes[0] &= 0b0111_1111
-		serialNumber = new(big.Int).SetBytes(serialBytes)
+		serialNumber = (&big.Int{}).SetBytes(serialBytes)
 	}
 
 	// RFC 5280 Section 4.1.2.2: serial number must be positive
@@ -1821,7 +1826,7 @@ func ParseCRL(crlBytes []byte) (*pkix.CertificateList, error) {
 //
 // Deprecated: Use [ParseRevocationList] instead.
 func ParseDERCRL(derBytes []byte) (*pkix.CertificateList, error) {
-	certList := new(pkix.CertificateList)
+	certList := &pkix.CertificateList{}
 	if rest, err := asn1.Unmarshal(derBytes, certList); err != nil {
 		return nil, err
 	} else if len(rest) != 0 {
@@ -1847,7 +1852,7 @@ func (c *Certificate) CreateCRL(rand io.Reader, priv any, revokedCerts []pkix.Re
 	}
 
 	// Force revocation times to UTC per RFC 5280.
-	revokedCertsUTC := make([]pkix.RevokedCertificate, len(revokedCerts))
+	revokedCertsUTC := []pkix.RevokedCertificate{:len(revokedCerts)}
 	for i, rc := range revokedCerts {
 		rc.RevocationTime = rc.RevocationTime.UTC()
 		revokedCertsUTC[i] = rc
@@ -2000,7 +2005,7 @@ func parseCSRExtensions(rawAttributes []asn1.RawValue) ([]pkix.Extension, error)
 	}
 
 	var ret []pkix.Extension
-	requestedExts := make(map[string]bool)
+	requestedExts := map[string]bool{}
 	for _, rawAttr := range rawAttributes {
 		var attr pkcs10Attribute
 		if rest, err := asn1.Unmarshal(rawAttr.FullBytes, &attr); err != nil || len(rest) != 0 || len(attr.Values) == 0 {
@@ -2072,9 +2077,9 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 	}
 
 	// Make a copy of template.Attributes because we may alter it below.
-	attributes := make([]pkix.AttributeTypeAndValueSET, 0, len(template.Attributes))
+	attributes := []pkix.AttributeTypeAndValueSET{:0:len(template.Attributes)}
 	for _, attr := range template.Attributes {
-		values := make([][]pkix.AttributeTypeAndValue, len(attr.Value))
+		values := [][]pkix.AttributeTypeAndValue{:len(attr.Value)}
 		copy(values, attr.Value)
 		attributes = append(attributes, pkix.AttributeTypeAndValueSET{
 			Type:  attr.Type,
@@ -2092,7 +2097,7 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 
 			// specifiedExtensions contains all the extensions that we
 			// found specified via template.Attributes.
-			specifiedExtensions := make(map[string]bool)
+			specifiedExtensions := map[string]bool{}
 
 			for _, atvs := range atvSet.Value {
 				for _, atv := range atvs {
@@ -2100,7 +2105,7 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 				}
 			}
 
-			newValue := make([]pkix.AttributeTypeAndValue, 0, len(atvSet.Value[0])+len(extensions))
+			newValue := []pkix.AttributeTypeAndValue{:0:len(atvSet.Value[0])+len(extensions)}
 			newValue = append(newValue, atvSet.Value[0]...)
 
 			for _, e := range extensions {
@@ -2427,7 +2432,7 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 	// and the new RevokedCertificateEntries field is not populated.
 	if len(template.RevokedCertificates) > 0 && len(template.RevokedCertificateEntries) == 0 {
 		// Force revocation times to UTC per RFC 5280.
-		revokedCerts = make([]pkix.RevokedCertificate, len(template.RevokedCertificates))
+		revokedCerts = []pkix.RevokedCertificate{:len(template.RevokedCertificates)}
 		for i, rc := range template.RevokedCertificates {
 			rc.RevocationTime = rc.RevocationTime.UTC()
 			revokedCerts[i] = rc
@@ -2435,7 +2440,7 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 	} else {
 		// Convert the ReasonCode field to a proper extension, and force revocation
 		// times to UTC per RFC 5280.
-		revokedCerts = make([]pkix.RevokedCertificate, len(template.RevokedCertificateEntries))
+		revokedCerts = []pkix.RevokedCertificate{:len(template.RevokedCertificateEntries)}
 		for i, rce := range template.RevokedCertificateEntries {
 			if rce.SerialNumber == nil {
 				return nil, errors.New("x509: template contains entry with nil SerialNumber field")
@@ -2451,7 +2456,7 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 
 			// Copy over any extra extensions, except for a Reason Code extension,
 			// because we'll synthesize that ourselves to ensure it is correct.
-			exts := make([]pkix.Extension, 0, len(rce.ExtraExtensions))
+			exts := []pkix.Extension{:0:len(rce.ExtraExtensions)}
 			for _, ext := range rce.ExtraExtensions {
 				if ext.Id.Equal(oidExtensionReasonCode) {
 					return nil, errors.New("x509: template contains entry with ReasonCode ExtraExtension; use ReasonCode field instead")
