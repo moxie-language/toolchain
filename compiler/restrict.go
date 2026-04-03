@@ -29,9 +29,6 @@ var restrictedBuiltins = map[string]string{
 }
 
 // restrictedTypes maps type names to rejection reasons.
-// Note: int/uint are NOT restricted yet — len()/cap()/copy() return int,
-// and Go's type checker treats int and int32 as distinct types. Restricting
-// int requires the compiler to alias int=int32 in the type checker universe.
 var restrictedTypes = map[string]string{
 	"complex64":  "complex numbers not supported in moxie",
 	"complex128": "complex numbers not supported in moxie",
@@ -40,29 +37,36 @@ var restrictedTypes = map[string]string{
 }
 
 // isUserPackage returns true if a package should be subject to Moxie
-// language restrictions. All packages except runtime internals qualify.
+// language restrictions. Exempt packages fall into two categories:
+//   - Permanent: runtime/*, internal/*, unsafe, reflect — implement primitives
+//   - Unconverted: still use string type, new(), or complex in signatures.
+//     These need mxpurify conversion before they can be enforced.
 func isUserPackage(pkg *ssa.Package) bool {
 	if pkg == nil {
 		return false
 	}
 	path := pkg.Pkg.Path()
-	// Runtime internals and low-level packages are permanently exempt.
-	// All internal/* packages are exempt — they use low-level primitives
-	// (uintptr, string, new) that Moxie restricts in user code.
+	// Permanent exemptions — low-level primitives.
 	if strings.HasPrefix(path, "internal/") ||
 		strings.Contains(path, "/internal/") ||
 		strings.HasPrefix(path, "runtime") ||
-		strings.HasPrefix(path, "syscall") ||
-		strings.HasPrefix(path, "io/") ||
-		strings.HasPrefix(path, "os") ||
 		strings.HasPrefix(path, "unsafe") ||
-		path == "time" ||
-		path == "fmt" ||
-		path == "strings" ||
-		path == "strconv" ||
-		path == "math/big" ||
-		path == "reflect" ||
-		path == "encoding/binary" {
+		path == "reflect" {
+		return false
+	}
+	// Unconverted packages — string/complex/new violations remain.
+	switch path {
+	case "encoding/binary", // complex number support
+		"strconv",  // complex number support, string+ concat
+		"strings",  // string type throughout
+		"fmt",      // complex, uintptr, string type, string+ concat
+		"math/big", // fallthrough, string+ concat
+		"time",     // string type, string+ concat
+		"io/fs":    // string type in function signatures
+		return false
+	}
+	if strings.HasPrefix(path, "os") || // string, new(), string+
+		strings.HasPrefix(path, "syscall") { // string, new(), string+
 		return false
 	}
 	return true
