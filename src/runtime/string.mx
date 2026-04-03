@@ -54,22 +54,15 @@ func stringLess(x, y string) bool {
 	return len(x) < len(y)
 }
 
-// Add two strings together.
+// String concatenation — delegates to bytesConcat (string=[]byte).
 func stringConcat(x, y _string) _string {
-	if x.length == 0 {
-		return y
-	} else if y.length == 0 {
-		return x
-	} else {
-		length := x.length + y.length
-		buf := alloc(length, gclayout.NoPtrs.AsPtr())
-		memcpy(buf, unsafe.Pointer(x.ptr), x.length)
-		memcpy(unsafe.Add(buf, x.length), unsafe.Pointer(y.ptr), y.length)
-		return _string{ptr: (*byte)(buf), length: length, cap: length}
-	}
+	bx := unsafe.Slice(x.ptr, x.length)
+	by := unsafe.Slice(y.ptr, y.length)
+	result := bytesConcat(bx, by)
+	return _string{ptr: unsafe.SliceData(result), length: uintptr(len(result)), cap: uintptr(cap(result))}
 }
 
-// Concatenate two byte slices. Used by Moxie's | pipe concat operator.
+// Concatenate two byte slices. Used for | pipe concat and string +.
 func bytesConcat(x, y []byte) []byte {
 	if len(x) == 0 {
 		return y
@@ -85,27 +78,27 @@ func bytesConcat(x, y []byte) []byte {
 }
 
 // Create a string from a []byte slice.
+// Moxie: string=[]byte with identical layout — no copy needed.
+// Kept for reflectlite //go:linkname compatibility.
 func stringFromBytes(x struct {
 	ptr *byte
 	len uintptr
 	cap uintptr
 }) _string {
-	buf := alloc(x.len, gclayout.NoPtrs.AsPtr())
-	memcpy(buf, unsafe.Pointer(x.ptr), x.len)
-	return _string{ptr: (*byte)(buf), length: x.len, cap: x.len}
+	return _string{ptr: x.ptr, length: x.len, cap: x.cap}
 }
 
 // Convert a string to a []byte slice.
+// Moxie: string=[]byte with identical layout — no copy needed.
+// Kept for reflectlite //go:linkname compatibility.
 func stringToBytes(x _string) (slice struct {
 	ptr *byte
 	len uintptr
 	cap uintptr
 }) {
-	buf := alloc(x.length, gclayout.NoPtrs.AsPtr())
-	memcpy(buf, unsafe.Pointer(x.ptr), x.length)
-	slice.ptr = (*byte)(buf)
+	slice.ptr = x.ptr
 	slice.len = x.length
-	slice.cap = x.length
+	slice.cap = x.cap
 	return
 }
 
