@@ -20,6 +20,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"image/gif"
 	"math"
 	mrand "math/rand/v2"
 	"slices"
@@ -283,6 +284,27 @@ func main() {
 		r, _, _, _ := dst.At(2, 2).RGBA()
 		print("draw:    ")
 		if r>>8 == 255 {
+			println("PASS")
+		} else {
+			println("FAIL")
+		}
+	}
+
+	// Image/gif (encode a minimal animated GIF)
+	{
+		var buf byteBuffer
+		frame1 := image.NewPaletted(image.Rect(0, 0, 2, 2), color.Palette{
+			color.RGBA{R: 255, A: 255},
+			color.RGBA{G: 255, A: 255},
+		})
+		frame1.SetColorIndex(0, 0, 1)
+		g := &gif.GIF{
+			Image: []*image.Paletted{frame1},
+			Delay: []int{10},
+		}
+		err := gif.EncodeAll(&buf, g)
+		print("gif:     ")
+		if err == nil && len(buf.data) > 0 {
 			println("PASS")
 		} else {
 			println("FAIL")
