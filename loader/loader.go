@@ -100,8 +100,8 @@ type EmbedFile struct {
 // package). Call .Parse() afterwards to parse all Go files (including CGo
 // processing, if necessary).
 func Load(config *compileopts.Config, inputPkg string, typeChecker types.Config) (*Program, error) {
-	// Make int≡int32 and uint≡uint32 on 32-bit targets (WASM).
-	patchIntTypes(typeChecker.Sizes)
+	// Make int≡int32 and uint≡uint32 on all targets.
+	patchIntTypes()
 
 	goroot, err := GetCachedGoroot(config)
 	if err != nil {

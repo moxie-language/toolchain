@@ -118,15 +118,9 @@ func newCompilerContext(moduleName string, machine llvm.TargetMachine, config *C
 	}
 
 	c.uintptrType = c.ctx.IntType(c.targetData.PointerSize() * 8)
-	if c.targetData.PointerSize() <= 4 {
-		// 8, 16, 32 bits targets
-		c.intType = c.ctx.Int32Type()
-	} else if c.targetData.PointerSize() == 8 {
-		// 64 bits target
-		c.intType = c.ctx.Int64Type()
-	} else {
-		panic("unknown pointer size")
-	}
+	// Moxie: int is always 32 bits on all targets. Slice headers still use
+	// uintptr-sized len/cap; trunc/ext happens at the int boundary.
+	c.intType = c.ctx.Int32Type()
 	c.dataPtrType = llvm.PointerType(c.ctx.Int8Type(), 0)
 
 	dummyFuncType := llvm.FunctionType(c.ctx.VoidType(), nil, false)
@@ -264,16 +258,8 @@ func Sizes(machine llvm.TargetMachine) types.Sizes {
 	targetData := machine.CreateTargetData()
 	defer targetData.Dispose()
 
-	var intWidth int
-	if targetData.PointerSize() <= 4 {
-		// 8, 16, 32 bits targets
-		intWidth = 32
-	} else if targetData.PointerSize() == 8 {
-		// 64 bits target
-		intWidth = 64
-	} else {
-		panic("unknown pointer size")
-	}
+	// Moxie: int is always 32 bits on all targets.
+	intWidth := 32
 
 	// Construct a complex128 type because that's likely the type with the
 	// biggest alignment on most/all ABIs.
@@ -1629,8 +1615,12 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		default:
 			return llvm.Value{}, b.makeError(pos, "todo: cap: unknown type")
 		}
-		if b.targetData.TypeAllocSize(llvmCap.Type()) < b.targetData.TypeAllocSize(b.intType) {
-			llvmCap = b.CreateZExt(llvmCap, b.intType, "len.int")
+		capSize := b.targetData.TypeAllocSize(llvmCap.Type())
+		intSize := b.targetData.TypeAllocSize(b.intType)
+		if capSize < intSize {
+			llvmCap = b.CreateZExt(llvmCap, b.intType, "cap.int")
+		} else if capSize > intSize {
+			llvmCap = b.CreateTrunc(llvmCap, b.intType, "cap.int")
 		}
 		return llvmCap, nil
 	case "close":
@@ -1719,8 +1709,12 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		default:
 			return llvm.Value{}, b.makeError(pos, "todo: len: unknown type")
 		}
-		if b.targetData.TypeAllocSize(llvmLen.Type()) < b.targetData.TypeAllocSize(b.intType) {
+		lenSize := b.targetData.TypeAllocSize(llvmLen.Type())
+		intSize := b.targetData.TypeAllocSize(b.intType)
+		if lenSize < intSize {
 			llvmLen = b.CreateZExt(llvmLen, b.intType, "len.int")
+		} else if lenSize > intSize {
+			llvmLen = b.CreateTrunc(llvmLen, b.intType, "len.int")
 		}
 		return llvmLen, nil
 	case "min", "max":
