@@ -341,15 +341,16 @@ func (p *Package) Check() error {
 	}
 	typesPkg, err := checker.Check(packageName, p.program.fset, p.Files, &p.info)
 
-	// Two-pass Moxie rewrite: pipe concat (|), []byte comparisons, []byte switches.
-	// If the first typecheck found errors from Moxie's []byte text type, rewrite
-	// the offending expressions to builtin calls and re-typecheck.
-	if isMoxieStringTarget(p.ImportPath) && len(typeErrors) > 0 {
+	// Two-pass Moxie rewrite: pipe concat (|), string/[]byte + concat, comparisons, switches.
+	// Always run for Moxie target packages — the patched type checker accepts string+
+	// without errors, but the restriction checker still forbids it, so we must rewrite.
+	if isMoxieStringTarget(p.ImportPath) {
 		pipeRewrites := findPipeConcat(p.Files, &p.info)
 		cmpExprs := findByteComparisons(p.Files, &p.info)
 		byteSwitches := findByteSwitches(p.Files, &p.info)
+		addAssignCount := rewriteAddAssign(p.Files, &p.info)
 
-		if len(pipeRewrites) > 0 || len(cmpExprs) > 0 || len(byteSwitches) > 0 {
+		if len(pipeRewrites) > 0 || len(cmpExprs) > 0 || len(byteSwitches) > 0 || addAssignCount > 0 {
 			applyPipeRewrites(p.Files, pipeRewrites)
 			applyByteComparisonRewrites(p.Files, cmpExprs)
 			applyByteSwitchRewrites(byteSwitches)

@@ -29,11 +29,13 @@ var restrictedBuiltins = map[string]string{
 }
 
 // restrictedTypes maps type names to rejection reasons.
+// Note: string is NOT restricted — with string=[]byte type unification,
+// the types are interchangeable. The + operator restriction on strings
+// still enforces Moxie's | concatenation syntax.
 var restrictedTypes = map[string]string{
 	"complex64":  "complex numbers not supported in moxie",
 	"complex128": "complex numbers not supported in moxie",
 	"uintptr":    "use explicit pointer types",
-	"string":     "use []byte",
 }
 
 // isUserPackage returns true if a package should be subject to Moxie
@@ -58,11 +60,8 @@ func isUserPackage(pkg *ssa.Package) bool {
 	switch path {
 	case "encoding/binary", // complex number support
 		"strconv",  // complex number support, string+ concat
-		"strings",  // string type throughout
-		"fmt",      // complex, uintptr, string type, string+ concat
-		"math/big", // fallthrough, string+ concat
-		"time",     // string type, string+ concat
-		"io/fs":    // string type in function signatures
+		"fmt",      // complex, uintptr, string+ concat
+		"math/big": // fallthrough, string+ concat
 		return false
 	}
 	if strings.HasPrefix(path, "os") || // string, new(), string+
@@ -89,12 +88,9 @@ func (b *builder) checkMoxieRestrictions() {
 	if !isUserPackage(b.fn.Pkg) {
 		return
 	}
-	exempt := isStringExemptMethod(b.fn)
-	if !exempt {
-		for _, block := range b.fn.Blocks {
-			for _, instr := range block.Instrs {
-				b.checkInstrRestrictions(instr)
-			}
+	for _, block := range b.fn.Blocks {
+		for _, instr := range block.Instrs {
+			b.checkInstrRestrictions(instr)
 		}
 	}
 	// Check function signature for restricted types.
@@ -163,42 +159,14 @@ func (b *builder) checkTypeAtPos(t types.Type, pos token.Pos) {
 
 func (b *builder) checkSignatureRestrictions(fn *ssa.Function) {
 	sig := fn.Signature
-	// String is allowed in function signatures (params and returns) for
-	// cross-package boundary compatibility — the system go/types does not
-	// support string↔[]byte assignability. Restriction enforcement focuses
-	// on internal types (struct fields, local variables).
 	for i := 0; i < sig.Params().Len(); i++ {
-		t := sig.Params().At(i).Type()
-		if basic, ok := t.(*types.Basic); ok && basic.Name() == "string" {
-			continue
-		}
-		b.checkTypeAtPos(t, fn.Pos())
+		b.checkTypeAtPos(sig.Params().At(i).Type(), fn.Pos())
 	}
 	if sig.Results() != nil {
 		for i := 0; i < sig.Results().Len(); i++ {
-			t := sig.Results().At(i).Type()
-			if basic, ok := t.(*types.Basic); ok && basic.Name() == "string" {
-				continue
-			}
-			b.checkTypeAtPos(t, fn.Pos())
+			b.checkTypeAtPos(sig.Results().At(i).Type(), fn.Pos())
 		}
 	}
-}
-
-// isStringExemptMethod returns true for methods that must return string
-// to satisfy Go built-in interfaces (error, fmt.Stringer). These methods
-// cannot be converted to []byte because the interface is hardcoded in
-// Go's types.Universe.
-func isStringExemptMethod(fn *ssa.Function) bool {
-	sig := fn.Signature
-	if sig.Recv() == nil {
-		return false
-	}
-	switch fn.Name() {
-	case "Error", "String":
-		return sig.Params().Len() == 0 && sig.Results().Len() == 1
-	}
-	return false
 }
 
 // checkFallthroughRestriction walks the function's AST looking for
@@ -226,59 +194,9 @@ func (b *builder) checkASTRestrictions() {
 	if syntax == nil {
 		return
 	}
-	exempt := isStringExemptMethod(b.fn)
-	// Collect positions of string identifiers used as type conversions
-	// (e.g. string(b) for UTF-8 rune iteration). These are exempt from
-	// the string type restriction.
-	stringExemptPositions := map[token.Pos]bool{}
-	ast.Inspect(syntax, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "string" {
-				stringExemptPositions[ident.Pos()] = true
-			}
-		}
-		// Exempt string in function signatures (params + returns) and
-		// variable declarations for cross-package boundary compatibility.
-		// Local vars must match function return types from system go/types.
-		if ft, ok := n.(*ast.FuncType); ok {
-			for _, fields := range []*ast.FieldList{ft.Params, ft.Results} {
-				if fields == nil {
-					continue
-				}
-				for _, f := range fields.List {
-					if id, ok := f.Type.(*ast.Ident); ok && id.Name == "string" {
-						stringExemptPositions[id.Pos()] = true
-					}
-					// Variadic ...string: unwrap ellipsis.
-					if ell, ok := f.Type.(*ast.Ellipsis); ok {
-						if id, ok := ell.Elt.(*ast.Ident); ok && id.Name == "string" {
-							stringExemptPositions[id.Pos()] = true
-						}
-					}
-				}
-			}
-		}
-		// Exempt string in var/const type annotations (var x string).
-		if vs, ok := n.(*ast.ValueSpec); ok {
-			if id, ok := vs.Type.(*ast.Ident); ok && id.Name == "string" {
-				stringExemptPositions[id.Pos()] = true
-			}
-		}
-		return true
-	})
-
 	ast.Inspect(syntax, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.Ident:
-			// Exempt string in Error()/String() methods — these must use
-			// string to satisfy Go's built-in error/Stringer interfaces.
-			if node.Name == "string" && exempt {
-				return true
-			}
-			// Exempt string() type conversions and function signature positions.
-			if node.Name == "string" && stringExemptPositions[node.Pos()] {
-				return true
-			}
 			if reason, restricted := restrictedTypes[node.Name]; restricted {
 				// uintptr is allowed in packages that import unsafe.
 				if node.Name == "uintptr" && packageImportsUnsafe(b.fn.Pkg) {
@@ -288,10 +206,6 @@ func (b *builder) checkASTRestrictions() {
 			}
 		case *ast.CallExpr:
 			if ident, ok := node.Fun.(*ast.Ident); ok {
-				// Note: make(chan T) and make(map[K]V) are NOT restricted at AST
-				// level because rewriteChanLiterals converts chan T{} → make(chan T)
-				// before parsing. Both user-written and rewriter-generated make()
-				// calls look identical at this point.
 				if reason, restricted := restrictedBuiltins[ident.Name]; restricted {
 					b.addError(ident.Pos(), "moxie: '"+ident.Name+"' is not allowed: "+reason)
 				}

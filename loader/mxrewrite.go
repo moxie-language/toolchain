@@ -189,13 +189,12 @@ func isMoxieStringTarget(importPath string) bool {
 		strings.HasPrefix(importPath, "internal/sync") ||
 		strings.HasPrefix(importPath, "syscall") ||
 		strings.HasPrefix(importPath, "internal/syscall") ||
-		strings.HasPrefix(importPath, "io") ||
+		importPath == "io" ||
+		importPath == "io/ioutil" ||
 		strings.HasPrefix(importPath, "os") ||
 		strings.HasPrefix(importPath, "path") ||
 		strings.HasPrefix(importPath, "unsafe") ||
-		importPath == "time" ||
 		importPath == "fmt" ||
-		importPath == "strings" ||
 		importPath == "bytes" ||
 		importPath == "strconv" ||
 		importPath == "errors" ||
@@ -1002,13 +1001,14 @@ func findPipeConcat(files []*ast.File, info *types.Info) []pipeRewrite {
 			if !ok || (bin.Op != token.OR && bin.Op != token.ADD) {
 				return true
 			}
-			// Check if operands are []byte. Use both type info and syntactic
-			// detection (the []byte(...) wrapper pattern from string literal
-			// rewrite), since type info may be incomplete after errors.
+			// Check if operands are []byte or string (string=[]byte unification).
+			// Use both type info and syntactic detection (the []byte(...) wrapper
+			// pattern from string literal rewrite), since type info may be
+			// incomplete after errors.
 			xType := info.TypeOf(bin.X)
 			yType := info.TypeOf(bin.Y)
-			xOk := (xType != nil && isByteSlice(xType)) || isSliceByteConversion(bin.X)
-			yOk := (yType != nil && isByteSlice(yType)) || isSliceByteConversion(bin.Y)
+			xOk := (xType != nil && isTextType(xType)) || isSliceByteConversion(bin.X)
+			yOk := (yType != nil && isTextType(yType)) || isSliceByteConversion(bin.Y)
 			// For | (pipe), also detect nested | as likely byte concat —
 			// but only if the OTHER side is confirmed []byte. Otherwise
 			// we'd false-positive on integer bitwise OR chains.
@@ -1041,6 +1041,47 @@ func isByteSlice(t types.Type) bool {
 	}
 	basic, ok := sl.Elem().(*types.Basic)
 	return ok && basic.Kind() == types.Byte
+}
+
+// isTextType returns true if t is []byte or string (equivalent under Moxie's
+// string=[]byte unification).
+func isTextType(t types.Type) bool {
+	if isByteSlice(t) {
+		return true
+	}
+	basic, ok := t.Underlying().(*types.Basic)
+	return ok && basic.Info()&types.IsString != 0
+}
+
+// rewriteAddAssign converts `s += expr` to `s = __moxie_concat(s, expr)` for
+// text types (string and []byte). The += operator doesn't produce a BinaryExpr
+// in the AST, so findPipeConcat can't catch it. Returns number of rewrites.
+func rewriteAddAssign(files []*ast.File, info *types.Info) int {
+	count := 0
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			assign, ok := n.(*ast.AssignStmt)
+			if !ok || assign.Tok != token.ADD_ASSIGN || len(assign.Lhs) != 1 {
+				return true
+			}
+			lhsType := info.TypeOf(assign.Lhs[0])
+			if lhsType == nil || !isTextType(lhsType) {
+				return true
+			}
+			// Rewrite: s += expr → s = __moxie_concat(s, expr)
+			assign.Tok = token.ASSIGN
+			assign.Rhs[0] = &ast.CallExpr{
+				Fun: &ast.Ident{Name: "__moxie_concat"},
+				Args: []ast.Expr{
+					assign.Lhs[0],
+					assign.Rhs[0],
+				},
+			}
+			count++
+			return true
+		})
+	}
+	return count
 }
 
 // applyPipeRewrites replaces | binary expressions with __moxie_concat calls.
