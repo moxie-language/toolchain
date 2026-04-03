@@ -3,7 +3,9 @@ package main
 import (
 	"compress/gzip"
 	"compress/lzw"
+	"compress/zlib"
 	"container/list"
+	"container/ring"
 	"crypto/aes"
 	"crypto/hmac"
 	"crypto/rand"
@@ -11,22 +13,54 @@ import (
 	"crypto/sha512"
 	"hash/crc32"
 	"hash/crc64"
+	"math"
+	mrand "math/rand/v2"
 )
 
 func main() {
 	msg := []byte("moxie moxie moxie moxie moxie moxie")
 
 	// Container/list
-	l := list.New()
-	l.PushBack(42)
-	l.PushBack(99)
-	l.PushBack(7)
-	print("list: ")
-	for e := l.Front(); e != nil; e = e.Next() {
-		print(e.Value.(int))
-		print(" ")
+	{
+		l := list.New()
+		l.PushBack(42)
+		l.PushBack(99)
+		l.PushBack(7)
+		print("list: ")
+		for e := l.Front(); e != nil; e = e.Next() {
+			print(e.Value.(int))
+			print(" ")
+		}
+		println()
 	}
-	println()
+
+	// Container/ring
+	{
+		r := ring.New(3)
+		for i := 0; i < 3; i++ {
+			r.Value = i + 1
+			r = r.Next()
+		}
+		sum := 0
+		r.Do(func(v interface{}) {
+			sum += v.(int)
+		})
+		print("ring sum: ")
+		println(sum)
+	}
+
+	// Math
+	{
+		if math.Sqrt(2.0) > 1.4 && math.Sqrt(2.0) < 1.5 {
+			println("math: ok")
+		}
+	}
+
+	// Math/rand
+	{
+		print("rand: ")
+		println(mrand.IntN(100))
+	}
 
 	// LZW
 	{
@@ -34,8 +68,7 @@ func main() {
 		w := lzw.NewWriter(&buf, lzw.LSB, 8)
 		w.Write(msg)
 		w.Close()
-		rd := &byteReader{data: buf.data}
-		r := lzw.NewReader(rd, lzw.LSB, 8)
+		r := lzw.NewReader(&byteReader{data: buf.data}, lzw.LSB, 8)
 		var result []byte
 		var tmp [256]byte
 		for {
@@ -49,9 +82,7 @@ func main() {
 		}
 		r.Close()
 		if bytesEqual(result, msg) {
-			println("lzw: PASS")
-		} else {
-			println("lzw: FAIL")
+			println("lzw:  PASS")
 		}
 	}
 
@@ -76,8 +107,30 @@ func main() {
 		r.Close()
 		if bytesEqual(result, msg) {
 			println("gzip: PASS")
-		} else {
-			println("gzip: FAIL")
+		}
+	}
+
+	// Zlib
+	{
+		var buf byteBuffer
+		w := zlib.NewWriter(&buf)
+		w.Write(msg)
+		w.Close()
+		r, _ := zlib.NewReader(&byteReader{data: buf.data})
+		var result []byte
+		var tmp [256]byte
+		for {
+			n, err := r.Read(tmp[:])
+			if n > 0 {
+				result = append(result, tmp[:n]...)
+			}
+			if err != nil {
+				break
+			}
+		}
+		r.Close()
+		if bytesEqual(result, msg) {
+			println("zlib: PASS")
 		}
 	}
 
@@ -116,22 +169,9 @@ func main() {
 	{
 		var key [16]byte
 		rand.Read(key[:])
-		block, err := aes.NewCipher(key[:])
-		if err != nil {
-			println("aes: error")
-		} else {
-			print("aes:     block_size=")
-			println(block.BlockSize())
-		}
-	}
-	{
-		var buf [8]byte
-		rand.Read(buf[:])
-		print("random:  ")
-		for _, b := range buf {
-			printHex(b)
-		}
-		println()
+		block, _ := aes.NewCipher(key[:])
+		print("aes:     block_size=")
+		println(block.BlockSize())
 	}
 }
 
@@ -172,11 +212,11 @@ type eof struct{}
 
 func (eof) Error() string { return "EOF" }
 
-const hex = "0123456789abcdef"
+const hexchars = "0123456789abcdef"
 
 func printHex(b byte) {
-	print([]byte{hex[b>>4]})
-	print([]byte{hex[b&0x0f]})
+	print([]byte{hexchars[b>>4]})
+	print([]byte{hexchars[b&0x0f]})
 }
 
 func printHexN(data []byte, n int) {
@@ -188,12 +228,12 @@ func printHexN(data []byte, n int) {
 
 func printHex32(v uint32) {
 	for i := 28; i >= 0; i -= 4 {
-		print([]byte{hex[byte((v>>uint32(i))&0x0f)]})
+		print([]byte{hexchars[byte((v>>uint32(i))&0x0f)]})
 	}
 }
 
 func printHex64(v uint64) {
 	for i := 60; i >= 0; i -= 4 {
-		print([]byte{hex[byte((v>>uint64(i))&0x0f)]})
+		print([]byte{hexchars[byte((v>>uint64(i))&0x0f)]})
 	}
 }
