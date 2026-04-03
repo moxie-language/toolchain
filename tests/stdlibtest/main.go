@@ -8,6 +8,7 @@ import (
 	"container/list"
 	"container/ring"
 	"crypto/aes"
+	"crypto/des"
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/rand"
@@ -16,8 +17,12 @@ import (
 	"crypto/sha512"
 	"hash/crc32"
 	"hash/crc64"
+	"image"
+	"image/color"
+	"image/draw"
 	"math"
 	mrand "math/rand/v2"
+	"slices"
 	"sort"
 )
 
@@ -239,6 +244,45 @@ func main() {
 		}
 		print("sort:    ")
 		if sorted && data[0] == 1 && data[4] == 5 {
+			println("PASS")
+		} else {
+			println("FAIL")
+		}
+	}
+
+	// DES
+	{
+		var key [8]byte
+		rand.Read(key[:])
+		block, err := des.NewCipher(key[:])
+		print("des:     ")
+		if err == nil && block.BlockSize() == 8 {
+			println("block_size=8")
+		} else {
+			println("FAIL")
+		}
+	}
+
+	// Slices
+	{
+		data := []int{9, 1, 5, 3, 7}
+		slices.Sort(data)
+		print("slices:  ")
+		if slices.IsSorted(data) && data[0] == 1 && data[4] == 9 {
+			println("PASS")
+		} else {
+			println("FAIL")
+		}
+	}
+
+	// Image/draw
+	{
+		dst := image.NewRGBA(image.Rect(0, 0, 4, 4))
+		red := image.NewUniform(color.RGBA{R: 255, A: 255})
+		draw.Draw(dst, dst.Bounds(), red, image.Point{}, draw.Src)
+		r, _, _, _ := dst.At(2, 2).RGBA()
+		print("draw:    ")
+		if r>>8 == 255 {
 			println("PASS")
 		} else {
 			println("FAIL")
