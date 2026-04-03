@@ -2,10 +2,9 @@ package compiler
 
 // This file implements Moxie language restrictions.
 // Moxie removes features that are incompatible with domain-isolated
-// cooperative concurrency or that obstract the programming model.
+// cooperative concurrency or that obstruct the programming model.
 //
-// Restrictions apply to user code and stdlib packages that have been
-// converted to Moxie syntax (listed in loader.MoxiePurePackages).
+// Restrictions apply to user code and converted stdlib packages.
 // Runtime/internal packages are permanently exempt.
 
 import (
@@ -39,28 +38,20 @@ var restrictedTypes = map[string]string{
 }
 
 // isUserPackage returns true if a package should be subject to Moxie
-// language restrictions. Exempt packages fall into two categories:
-//   - Permanent: runtime/*, internal/*, unsafe, reflect — implement primitives
-//   - Unconverted: still use string type, new(), or complex in signatures.
-//     These need mxpurify conversion before they can be enforced.
+// language restrictions. All permanently exempt packages implement
+// low-level primitives or syscall interfaces.
 func isUserPackage(pkg *ssa.Package) bool {
 	if pkg == nil {
 		return false
 	}
 	path := pkg.Pkg.Path()
-	// Permanent exemptions — low-level primitives.
-	if strings.HasPrefix(path, "internal/") ||
-		strings.Contains(path, "/internal/") ||
-		strings.HasPrefix(path, "runtime") ||
-		strings.HasPrefix(path, "unsafe") ||
-		path == "reflect" {
-		return false
-	}
-	// Unconverted packages — string/complex/new violations remain.
-	switch path {
-	}
-	if strings.HasPrefix(path, "os") || // string, new(), string+
-		strings.HasPrefix(path, "syscall") { // string, new(), string+
+	if strings.HasPrefix(path, "internal/") || // internal packages
+		strings.Contains(path, "/internal/") || // nested internals
+		strings.HasPrefix(path, "runtime") || // language primitives
+		strings.HasPrefix(path, "unsafe") || // language primitive
+		path == "reflect" || // must handle all Go types
+		strings.HasPrefix(path, "os") || // FDs, syscall wrappers
+		strings.HasPrefix(path, "syscall") { // syscall interfaces
 		return false
 	}
 	return true

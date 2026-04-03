@@ -29,177 +29,21 @@ import (
 	"strings"
 )
 
-// MoxiePurePackages tracks stdlib packages that have been fully rewritten
-// to Moxie syntax (including string→[]byte). These get ALL rewrites
-// (string literals, | concat) and restriction enforcement.
-var MoxiePurePackages = map[string]bool{
-	// Packages with zero restricted type usage in compiled code.
-	// Restriction enforcement (no string, uintptr, complex, new, fallthrough)
-	// applies to these packages. String literal wrapping + pipe concat enabled.
-	"arena":                                       true,
-	"compress/bzip2":                               true,
-	"compress/flate":                               true,
-	"compress/gzip":                                true,
-	"compress/lzw":                                true,
-	"compress/zlib":                                true,
-	"container/heap":                               true,
-	"container/list":                               true,
-	"container/ring":                               true,
-	"crypto/aes":                                   true,
-	"crypto/boring":                                true,
-	"crypto/internal/boring":                       true,
-	"crypto/cipher":                                true,
-	"crypto/des":                                   true,
-	"crypto/ecdh":                                  true,
-	"crypto/elliptic":                              true,
-	"crypto/dsa":                                   true,
-	"crypto/ecdsa":                                 true,
-	"crypto/fips140":                               true,
-	"crypto/hkdf":                                  true,
-	"crypto/hmac":                                  true,
-	"crypto/md5":                                   true,
-	"crypto/internal/boring/bbig":                  true,
-	"crypto/internal/boring/bcache":                true,
-	"crypto/internal/boring/sig":                   true,
-	"crypto/internal/boring/syso":                  true,
-	"crypto/internal/entropy":                      true,
-	"crypto/internal/fips140/aes":                  true,
-	"crypto/internal/fips140/aes/gcm":              true,
-	"crypto/internal/fips140/alias":                true,
-	"crypto/internal/fips140/bigmod":               true,
-	"crypto/internal/fips140/drbg":                 true,
-	"crypto/internal/fips140/ecdh":                 true,
-	"crypto/internal/fips140/ecdsa":                true,
-	"crypto/internal/fips140/edwards25519":         true,
-	"crypto/internal/fips140/edwards25519/field":   true,
-	"crypto/internal/fips140/hmac":                 true,
-	"crypto/internal/fips140/mlkem":                true,
-	"crypto/internal/fips140/nistec":               true,
-	"crypto/internal/fips140/nistec/fiat":          true,
-	"crypto/internal/fips140/sha256":               true,
-	"crypto/internal/fips140/sha3":                 true,
-	"crypto/internal/fips140/sha512":               true,
-	"crypto/internal/fips140/ssh":                  true,
-	"crypto/internal/fips140/subtle":               true,
-	"crypto/internal/fips140cache":                  true,
-	"crypto/internal/fips140deps":                  true,
-	"crypto/internal/fips140deps/byteorder":        true,
-	"crypto/internal/fips140deps/cpu":              true,
-	"crypto/internal/fips140deps/godebug":          true,
-	"crypto/internal/fips140hash":                  true,
-	"crypto/internal/fips140only":                  true,
-	"crypto/internal/randutil":                     true,
-	"crypto/internal/sysrand":                      true,
-	"crypto/internal/sysrand/internal/seccomp":     true,
-	"crypto/mlkem":                                 true,
-	"crypto/pbkdf2":                                true,
-	"crypto/rand":                                  true,
-	"crypto/rc4":                                   true,
-	"crypto/rsa":                                   true,
-	"crypto/sha1":                                  true,
-	"crypto/sha3":                                  true,
-	"crypto/sha256":                                true,
-	"crypto/sha512":                                true,
-	"crypto/subtle":                                true,
-	"encoding":                                     true,
-	"encoding/ascii85":                             true,
-	"errors":                                       true,
-	"encoding/gob":                                 true,
-	"hash":                                         true,
-	"hash/adler32":                                 true,
-	"hash/crc32":                                   true,
-	"hash/crc64":                                   true,
-	"hash/fnv":                                     true,
-	"image":                                        true,
-	"image/color":                                  true,
-	"image/color/palette":                          true,
-	"image/draw":                                   true,
-	"image/gif":                                    true,
-	"image/internal/imageutil":                     true,
-	"image/jpeg":                                   true,
-	"image/png":                                    true,
-	"internal/binary":                              true,
-	"internal/byteorder":                           true,
-	"internal/cfg":                                 true,
-	"internal/coverage/calloc":                     true,
-	"internal/coverage/cmerge":                     true,
-	"internal/coverage/rtcov":                      true,
-	"internal/coverage/slicewriter":                true,
-	"internal/coverage/uleb128":                    true,
-	"internal/fmtsort":                             true,
-	"internal/fuzz":                                true,
-	"internal/futex":                               true,
-	"internal/gclayout":                            true,
-	"internal/godebugs":                            true,
-	"internal/goexperiment":                        true,
-	"internal/goos":                                true,
-	"internal/goroot":                              true,
-	"internal/goversion":                           true,
-	"internal/oserror":                             true,
-	"internal/saferio":                             true,
-	"internal/synctest":                            true,
-	"iter":                                         true,
-	"log/internal":                                 true,
-	"log/slog/internal":                            true,
-	"maps":                                         true,
-	"math":                                         true,
-	"math/bits":                                    true,
-	"math/rand":                                    true,
-	"math/rand/v2":                                 true,
-	"mime/quotedprintable":                         true,
-	"slices":                                       true,
-	"sort":                                         true,
-	"structs":                                      true,
-	"testing/iotest":                               true,
-	"unicode/utf16":                                true,
-	"unique":                                       true,
-	"weak":                                         true,
-}
-
-// MoxieSyntaxPackages is no longer needed — text-level rewrites (chan/slice
-// literals) now fire on ALL packages. Only files with the new syntax
-// ([]T{:n}, chan T{}) are affected; unconverted files pass through unchanged.
-
-// isUserImportPath returns true for user/third-party packages.
-// Same logic as compiler/restrict.go isUserPackage but for import paths.
-func isUserImportPath(path string) bool {
-	if !strings.Contains(path, ".") {
-		return false
-	}
-	if strings.HasPrefix(path, "vendor/") {
-		return false
-	}
-	return true
-}
-
 // isMoxieStringTarget returns true if a package should get string→[]byte
 // rewrites (string literal wrapping, | concat, comparison rewrites).
-// Runtime internals that implement Go interfaces with string methods are exempt.
+//
+// Permanently exempt packages implement low-level primitives or
+// syscall interfaces that require native Go string/uintptr types.
 func isMoxieStringTarget(importPath string) bool {
-	// Exempt packages that have NOT been converted to []byte text.
-	// Their source still uses native Go string type, so string literal
-	// wrapping and comparison rewriting would break them.
-	if strings.HasPrefix(importPath, "runtime") ||
-		strings.HasPrefix(importPath, "internal/task") ||
-		strings.HasPrefix(importPath, "internal/abi") ||
-		strings.HasPrefix(importPath, "internal/reflectlite") ||
-		importPath == "internal/itoa" ||
-		strings.HasPrefix(importPath, "internal/fmtsort") ||
-		strings.HasPrefix(importPath, "sync") ||
-		strings.HasPrefix(importPath, "internal/sync") ||
-		strings.HasPrefix(importPath, "syscall") ||
-		strings.HasPrefix(importPath, "internal/syscall") ||
-		importPath == "io" ||
-		importPath == "io/ioutil" ||
-		strings.HasPrefix(importPath, "os") ||
-		strings.HasPrefix(importPath, "path") ||
-		strings.HasPrefix(importPath, "unsafe") ||
-		importPath == "bytes" ||
-		importPath == "errors" ||
-		strings.HasPrefix(importPath, "unicode") ||
-		strings.HasPrefix(importPath, "reflect") ||
-		importPath == "bufio" ||
-		importPath == "context" {
+	if strings.HasPrefix(importPath, "runtime") || // language primitives
+		strings.HasPrefix(importPath, "internal/task") || // cooperative scheduler
+		strings.HasPrefix(importPath, "internal/abi") || // ABI type descriptors
+		strings.HasPrefix(importPath, "internal/reflectlite") || // type reflection
+		strings.HasPrefix(importPath, "syscall") || // syscall interfaces
+		strings.HasPrefix(importPath, "internal/syscall") || // syscall internals
+		strings.HasPrefix(importPath, "os") || // FDs, syscall wrappers
+		strings.HasPrefix(importPath, "unsafe") || // language primitive
+		strings.HasPrefix(importPath, "reflect") { // must handle all Go types
 		return false
 	}
 	return true
