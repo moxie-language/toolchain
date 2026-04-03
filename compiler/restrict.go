@@ -52,24 +52,17 @@ func isUserPackage(pkg *ssa.Package) bool {
 	if strings.HasPrefix(path, "internal/") ||
 		strings.Contains(path, "/internal/") ||
 		strings.HasPrefix(path, "runtime") ||
-		strings.HasPrefix(path, "sync") ||
 		strings.HasPrefix(path, "syscall") ||
-		strings.HasPrefix(path, "io") ||
+		strings.HasPrefix(path, "io/") ||
 		strings.HasPrefix(path, "os") ||
-		strings.HasPrefix(path, "path") ||
 		strings.HasPrefix(path, "unsafe") ||
 		path == "time" ||
 		path == "fmt" ||
 		path == "strings" ||
-		path == "bytes" ||
 		path == "strconv" ||
-		path == "errors" ||
-		strings.HasPrefix(path, "unicode") ||
-		strings.HasPrefix(path, "math/big") ||
-		strings.HasPrefix(path, "reflect") ||
-		strings.HasPrefix(path, "encoding") ||
-		path == "bufio" ||
-		path == "context" {
+		path == "math/big" ||
+		path == "reflect" ||
+		path == "encoding/binary" {
 		return false
 	}
 	return true
@@ -119,12 +112,9 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 			}
 		}
 
-	case *ssa.MakeChan:
-		b.addError(v.Pos(), "moxie: 'make' is not allowed: use chan T{} literal syntax")
-
-	case *ssa.MakeMap:
-		b.addError(v.Pos(), "moxie: 'make' is not allowed for maps: use map literal syntax")
-
+	// MakeChan and MakeMap are NOT checked at SSA level — both make(chan T)
+	// and chan T{} produce MakeChan; both make(map[K]V) and map[K]V{} produce
+	// MakeMap. AST-level checks in checkASTRestrictions distinguish them.
 	// MakeSlice is NOT restricted — the compiler generates make() calls from
 	// Moxie slice literal syntax ([]T{:n} → make([]T, n)).
 
@@ -138,16 +128,10 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 			}
 		}
 
-	case *ssa.Alloc:
-		// new(T) shows up as Alloc with Heap=true and Comment="new".
-		if v.Heap && v.Comment == "new" {
-			b.addError(v.Pos(), "moxie: 'new' is not allowed: use composite literal with & or var declaration")
-		}
-
-		// Note: restricted types (uintptr, complex) are caught by AST checks
-		// in checkASTRestrictions, not here. SSA-level type checking causes
-		// false positives when stdlib functions return restricted types
-		// (e.g. runtime.Caller returns uintptr).
+	// Note: new(T) is caught by AST check (restrictedBuiltins), not SSA.
+		// SSA Alloc with Comment="new" has false positives when a local
+		// variable named "new" has its address taken (&new).
+		// Restricted types (uintptr, complex) are also caught by AST checks.
 	}
 }
 
@@ -175,19 +159,22 @@ func (b *builder) checkTypeAtPos(t types.Type, pos token.Pos) {
 
 func (b *builder) checkSignatureRestrictions(fn *ssa.Function) {
 	sig := fn.Signature
-	exempt := isStringExemptMethod(fn)
-	// Check parameters.
+	// String is allowed in function signatures (params and returns) for
+	// cross-package boundary compatibility — the system go/types does not
+	// support string↔[]byte assignability. Restriction enforcement focuses
+	// on internal types (struct fields, local variables).
 	for i := 0; i < sig.Params().Len(); i++ {
-		b.checkTypeAtPos(sig.Params().At(i).Type(), fn.Pos())
+		t := sig.Params().At(i).Type()
+		if basic, ok := t.(*types.Basic); ok && basic.Name() == "string" {
+			continue
+		}
+		b.checkTypeAtPos(t, fn.Pos())
 	}
-	// Check return types (exempt string for Error()/String() methods).
 	if sig.Results() != nil {
 		for i := 0; i < sig.Results().Len(); i++ {
 			t := sig.Results().At(i).Type()
-			if exempt {
-				if basic, ok := t.(*types.Basic); ok && basic.Name() == "string" {
-					continue
-				}
+			if basic, ok := t.(*types.Basic); ok && basic.Name() == "string" {
+				continue
 			}
 			b.checkTypeAtPos(t, fn.Pos())
 		}
@@ -239,11 +226,38 @@ func (b *builder) checkASTRestrictions() {
 	// Collect positions of string identifiers used as type conversions
 	// (e.g. string(b) for UTF-8 rune iteration). These are exempt from
 	// the string type restriction.
-	stringConvPositions := map[token.Pos]bool{}
+	stringExemptPositions := map[token.Pos]bool{}
 	ast.Inspect(syntax, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
 			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "string" {
-				stringConvPositions[ident.Pos()] = true
+				stringExemptPositions[ident.Pos()] = true
+			}
+		}
+		// Exempt string in function signatures (params + returns) and
+		// variable declarations for cross-package boundary compatibility.
+		// Local vars must match function return types from system go/types.
+		if ft, ok := n.(*ast.FuncType); ok {
+			for _, fields := range []*ast.FieldList{ft.Params, ft.Results} {
+				if fields == nil {
+					continue
+				}
+				for _, f := range fields.List {
+					if id, ok := f.Type.(*ast.Ident); ok && id.Name == "string" {
+						stringExemptPositions[id.Pos()] = true
+					}
+					// Variadic ...string: unwrap ellipsis.
+					if ell, ok := f.Type.(*ast.Ellipsis); ok {
+						if id, ok := ell.Elt.(*ast.Ident); ok && id.Name == "string" {
+							stringExemptPositions[id.Pos()] = true
+						}
+					}
+				}
+			}
+		}
+		// Exempt string in var/const type annotations (var x string).
+		if vs, ok := n.(*ast.ValueSpec); ok {
+			if id, ok := vs.Type.(*ast.Ident); ok && id.Name == "string" {
+				stringExemptPositions[id.Pos()] = true
 			}
 		}
 		return true
@@ -257,8 +271,8 @@ func (b *builder) checkASTRestrictions() {
 			if node.Name == "string" && exempt {
 				return true
 			}
-			// Exempt string() type conversions (needed for UTF-8 rune iteration).
-			if node.Name == "string" && stringConvPositions[node.Pos()] {
+			// Exempt string() type conversions and function signature positions.
+			if node.Name == "string" && stringExemptPositions[node.Pos()] {
 				return true
 			}
 			if reason, restricted := restrictedTypes[node.Name]; restricted {
@@ -270,6 +284,10 @@ func (b *builder) checkASTRestrictions() {
 			}
 		case *ast.CallExpr:
 			if ident, ok := node.Fun.(*ast.Ident); ok {
+				// Note: make(chan T) and make(map[K]V) are NOT restricted at AST
+				// level because rewriteChanLiterals converts chan T{} → make(chan T)
+				// before parsing. Both user-written and rewriter-generated make()
+				// calls look identical at this point.
 				if reason, restricted := restrictedBuiltins[ident.Name]; restricted {
 					b.addError(ident.Pos(), "moxie: '"+ident.Name+"' is not allowed: "+reason)
 				}

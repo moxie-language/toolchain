@@ -103,6 +103,7 @@ var MoxiePurePackages = map[string]bool{
 	"crypto/subtle":                                true,
 	"encoding":                                     true,
 	"encoding/ascii85":                             true,
+	"errors":                                       true,
 	"encoding/gob":                                 true,
 	"hash":                                         true,
 	"hash/adler32":                                 true,
@@ -196,8 +197,8 @@ func isMoxieStringTarget(importPath string) bool {
 		importPath == "fmt" ||
 		importPath == "strings" ||
 		importPath == "bytes" ||
-		importPath == "errors" ||
 		importPath == "strconv" ||
+		importPath == "errors" ||
 		strings.HasPrefix(importPath, "math/big") ||
 		strings.HasPrefix(importPath, "unicode") ||
 		strings.HasPrefix(importPath, "reflect") ||
