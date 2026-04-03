@@ -58,11 +58,6 @@ func isUserPackage(pkg *ssa.Package) bool {
 	}
 	// Unconverted packages — string/complex/new violations remain.
 	switch path {
-	case "encoding/binary", // complex number support
-		"strconv",  // complex number support, string+ concat
-		"fmt",      // complex, uintptr, string+ concat
-		"math/big": // fallthrough, string+ concat
-		return false
 	}
 	if strings.HasPrefix(path, "os") || // string, new(), string+
 		strings.HasPrefix(path, "syscall") { // string, new(), string+

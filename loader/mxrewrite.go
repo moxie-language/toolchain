@@ -194,14 +194,10 @@ func isMoxieStringTarget(importPath string) bool {
 		strings.HasPrefix(importPath, "os") ||
 		strings.HasPrefix(importPath, "path") ||
 		strings.HasPrefix(importPath, "unsafe") ||
-		importPath == "fmt" ||
 		importPath == "bytes" ||
-		importPath == "strconv" ||
 		importPath == "errors" ||
-		strings.HasPrefix(importPath, "math/big") ||
 		strings.HasPrefix(importPath, "unicode") ||
 		strings.HasPrefix(importPath, "reflect") ||
-		strings.HasPrefix(importPath, "encoding") ||
 		importPath == "bufio" ||
 		importPath == "context" {
 		return false
@@ -1007,19 +1003,19 @@ func findPipeConcat(files []*ast.File, info *types.Info) []pipeRewrite {
 			// incomplete after errors.
 			xType := info.TypeOf(bin.X)
 			yType := info.TypeOf(bin.Y)
-			xOk := (xType != nil && isTextType(xType)) || isSliceByteConversion(bin.X)
-			yOk := (yType != nil && isTextType(yType)) || isSliceByteConversion(bin.Y)
-			// For | (pipe), also detect nested | as likely byte concat —
-			// but only if the OTHER side is confirmed []byte. Otherwise
-			// we'd false-positive on integer bitwise OR chains.
-			if bin.Op == token.OR {
+			xOk := (xType != nil && isTextType(xType)) || isSliceByteConversion(bin.X) || isMoxieConcatCall(bin.X)
+			yOk := (yType != nil && isTextType(yType)) || isSliceByteConversion(bin.Y) || isMoxieConcatCall(bin.Y)
+			// For | (pipe) and + (string concat), detect nested chains —
+			// if one side is confirmed text and the other is a nested
+			// binary of the same operator, propagate the text detection.
+			if bin.Op == token.OR || bin.Op == token.ADD {
 				if !xOk && yOk {
-					if inner, ok := bin.X.(*ast.BinaryExpr); ok && inner.Op == token.OR {
+					if inner, ok := bin.X.(*ast.BinaryExpr); ok && (inner.Op == token.OR || inner.Op == token.ADD) {
 						xOk = true
 					}
 				}
 				if !yOk && xOk {
-					if inner, ok := bin.Y.(*ast.BinaryExpr); ok && inner.Op == token.OR {
+					if inner, ok := bin.Y.(*ast.BinaryExpr); ok && (inner.Op == token.OR || inner.Op == token.ADD) {
 						yOk = true
 					}
 				}
@@ -1041,6 +1037,17 @@ func isByteSlice(t types.Type) bool {
 	}
 	basic, ok := sl.Elem().(*types.Basic)
 	return ok && basic.Kind() == types.Byte
+}
+
+// isMoxieConcatCall returns true if the expression is a __moxie_concat call.
+// Needed for chained + detection after earlier rewrites replaced inner + nodes.
+func isMoxieConcatCall(e ast.Expr) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	ident, ok := call.Fun.(*ast.Ident)
+	return ok && ident.Name == "__moxie_concat"
 }
 
 // isTextType returns true if t is []byte or string (equivalent under Moxie's
