@@ -68,7 +68,10 @@ func isUserPackage(pkg *ssa.Package) bool {
 		strings.HasPrefix(path, "unicode") ||
 		strings.HasPrefix(path, "math/big") ||
 		strings.HasPrefix(path, "reflect") ||
-		strings.HasPrefix(path, "encoding") {
+		strings.HasPrefix(path, "encoding") ||
+		strings.HasPrefix(path, "hash") ||
+		path == "bufio" ||
+		path == "context" {
 		return false
 	}
 	return true
@@ -219,12 +222,29 @@ func (b *builder) checkASTRestrictions() {
 		return
 	}
 	exempt := isStringExemptMethod(b.fn)
+	// Collect positions of string identifiers used as type conversions
+	// (e.g. string(b) for UTF-8 rune iteration). These are exempt from
+	// the string type restriction.
+	stringConvPositions := map[token.Pos]bool{}
+	ast.Inspect(syntax, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "string" {
+				stringConvPositions[ident.Pos()] = true
+			}
+		}
+		return true
+	})
+
 	ast.Inspect(syntax, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.Ident:
 			// Exempt string in Error()/String() methods — these must use
 			// string to satisfy Go's built-in error/Stringer interfaces.
 			if node.Name == "string" && exempt {
+				return true
+			}
+			// Exempt string() type conversions (needed for UTF-8 rune iteration).
+			if node.Name == "string" && stringConvPositions[node.Pos()] {
 				return true
 			}
 			if reason, restricted := restrictedTypes[node.Name]; restricted {

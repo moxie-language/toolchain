@@ -150,7 +150,9 @@ func isMoxieStringTarget(importPath string) bool {
 		strings.HasPrefix(importPath, "math/big") ||
 		strings.HasPrefix(importPath, "unicode") ||
 		strings.HasPrefix(importPath, "reflect") ||
-		strings.HasPrefix(importPath, "encoding") {
+		strings.HasPrefix(importPath, "encoding") ||
+		importPath == "bufio" ||
+		importPath == "context" {
 		return false
 	}
 	return true
@@ -462,9 +464,13 @@ func rewriteSliceLiterals(src []byte, fset *token.FileSet) []byte {
 		}
 
 		// Find the closing brace, collecting colon positions for len:cap.
+		// Track all bracket types so colons inside subscripts (e.g. buf[:2])
+		// aren't mistaken for the len:cap separator.
 		closeIdx := -1
 		colonPositions := []int{braceIdx + 1} // first colon already found
 		depth = 1
+		bracketDepth := 0
+		parenDepth := 0
 		for j := braceIdx + 2; j < len(toks); j++ {
 			switch toks[j].tok {
 			case token.LBRACE:
@@ -474,8 +480,16 @@ func rewriteSliceLiterals(src []byte, fset *token.FileSet) []byte {
 				if depth == 0 {
 					closeIdx = j
 				}
+			case token.LBRACK:
+				bracketDepth++
+			case token.RBRACK:
+				bracketDepth--
+			case token.LPAREN:
+				parenDepth++
+			case token.RPAREN:
+				parenDepth--
 			case token.COLON:
-				if depth == 1 {
+				if depth == 1 && bracketDepth == 0 && parenDepth == 0 {
 					colonPositions = append(colonPositions, j)
 				}
 			}
