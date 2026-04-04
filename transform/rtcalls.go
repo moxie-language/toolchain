@@ -74,12 +74,11 @@ func OptimizeStringToBytes(mod llvm.Module) {
 }
 
 // OptimizeStringEqual transforms runtime.stringEqual(...) calls into simple
-// integer comparisons if at least one of the sides of the comparison is zero.
-// Ths converts str == "" into len(str) == 0 and "" == "" into false.
+// length comparisons when one operand is the empty string.
+// Converts str == "" into len(str) == 0.
 func OptimizeStringEqual(mod llvm.Module) {
 	stringEqual := mod.NamedFunction("runtime.stringEqual")
 	if stringEqual.IsNil() {
-		// nothing to optimize
 		return
 	}
 
@@ -87,18 +86,20 @@ func OptimizeStringEqual(mod llvm.Module) {
 	defer builder.Dispose()
 
 	for _, call := range getUses(stringEqual) {
-		// string is {ptr, len, cap} so operands are:
-		// [0]=callee, [1]=x.ptr, [2]=x.len, [3]=x.cap, [4]=y.ptr, [5]=y.len, [6]=y.cap
-		str1len := call.Operand(2)
-		str2len := call.Operand(5)
+		// Moxie string is {ptr, len, cap}. Call args are flattened:
+		//   Operand(0)=x.ptr, (1)=x.len, (2)=x.cap,
+		//   (3)=y.ptr, (4)=y.len, (5)=y.cap,
+		//   (6)=context, (7)=callee
+		str1len := call.Operand(1)
+		str2len := call.Operand(4)
 
-		zero := llvm.ConstInt(str1len.Type(), 0, false)
-		if str1len == zero || str2len == zero {
+		str1zero := !str1len.IsAConstantInt().IsNil() && str1len.ZExtValue() == 0
+		str2zero := !str2len.IsAConstantInt().IsNil() && str2len.ZExtValue() == 0
+		if str1zero || str2zero {
 			builder.SetInsertPointBefore(call)
 			icmp := builder.CreateICmp(llvm.IntEQ, str1len, str2len, "")
 			call.ReplaceAllUsesWith(icmp)
 			call.EraseFromParentAsInstruction()
-			continue
 		}
 	}
 }

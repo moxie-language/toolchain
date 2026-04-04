@@ -1,0 +1,164 @@
+// Raw DNS resolver — bypasses dnsmessage which produces malformed
+// packets under moxie's string=[]byte runtime.
+// Uses raw syscalls to avoid re-entering the net package.
+
+//go:build !windows
+
+package net
+
+import (
+	"fmt"
+	"os"
+	"syscall"
+)
+
+var rawDNSAddr [4]byte
+
+func init() {
+	rawDNSAddr = [4]byte{127, 0, 0, 1}
+	data, err := os.ReadFile("/etc/resolv.conf")
+	if err != nil {
+		return
+	}
+	i := 0
+	for i < len(data) {
+		start := i
+		for i < len(data) && data[i] != '\n' {
+			i++
+		}
+		line := data[start:i]
+		if i < len(data) {
+			i++
+		}
+		if len(line) > 11 && string(line[:11]) == "nameserver " {
+			ns := line[11:]
+			for len(ns) > 0 && (ns[len(ns)-1] == ' ' || ns[len(ns)-1] == '\t' || ns[len(ns)-1] == '\r') {
+				ns = ns[:len(ns)-1]
+			}
+			if ip := rawParseIPv4(ns); ip != nil {
+				rawDNSAddr = [4]byte{ip[0], ip[1], ip[2], ip[3]}
+				return
+			}
+		}
+	}
+}
+
+func rawParseIPv4(s []byte) []byte {
+	var parts [4]byte
+	p := 0
+	v := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == '.' {
+			if v > 255 || p > 3 {
+				return nil
+			}
+			parts[p] = byte(v)
+			p++
+			v = 0
+		} else if s[i] >= '0' && s[i] <= '9' {
+			v = v*10 + int(s[i]-'0')
+		} else {
+			return nil
+		}
+	}
+	if p != 4 {
+		return nil
+	}
+	return parts[:]
+}
+
+// rawLookupHost resolves a hostname via raw UDP syscalls.
+func rawLookupHost(host string) [][]byte {
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
+	if err != nil {
+		return nil
+	}
+	defer syscall.Close(fd)
+
+	tv := syscall.Timeval{Sec: 5}
+	syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+
+	sa := &syscall.SockaddrInet4{Port: 53, Addr: rawDNSAddr}
+	if err := syscall.Connect(fd, sa); err != nil {
+		return nil
+	}
+
+	// Build DNS A-record query.
+	var pkt []byte
+	pkt = append(pkt, 0xAB, 0xCD) // ID
+	pkt = append(pkt, 0x01, 0x00) // flags: recursion desired
+	pkt = append(pkt, 0x00, 0x01) // 1 question
+	pkt = append(pkt, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00) // 0 answer/auth/additional
+
+	// Encode QNAME.
+	j := 0
+	for j < len(host) {
+		dot := j
+		for dot < len(host) && host[dot] != '.' {
+			dot++
+		}
+		pkt = append(pkt, byte(dot-j))
+		pkt = append(pkt, host[j:dot]...)
+		j = dot + 1
+	}
+	pkt = append(pkt, 0x00)       // root
+	pkt = append(pkt, 0x00, 0x01) // QTYPE A
+	pkt = append(pkt, 0x00, 0x01) // QCLASS IN
+
+	if err := syscall.Sendto(fd, pkt, 0, sa); err != nil {
+		return nil
+	}
+
+	buf := make([]byte, 512)
+	n, _, err := syscall.Recvfrom(fd, buf, 0)
+	if err != nil || n < 12 {
+		return nil
+	}
+
+	anCount := int(buf[6])<<8 | int(buf[7])
+	if anCount == 0 {
+		return nil
+	}
+
+	// Skip question section.
+	pos := 12
+	for pos < n {
+		if buf[pos] == 0 {
+			pos++
+			break
+		}
+		if buf[pos]&0xC0 == 0xC0 {
+			pos += 2
+			break
+		}
+		pos += int(buf[pos]) + 1
+	}
+	pos += 4 // QTYPE + QCLASS
+
+	// Parse answer records.
+	var addrs [][]byte
+	for a := 0; a < anCount && pos+10 < n; a++ {
+		if buf[pos]&0xC0 == 0xC0 {
+			pos += 2
+		} else {
+			for pos < n && buf[pos] != 0 {
+				pos += int(buf[pos]) + 1
+			}
+			pos++
+		}
+		if pos+10 > n {
+			break
+		}
+		rtype := int(buf[pos])<<8 | int(buf[pos+1])
+		rdlen := int(buf[pos+8])<<8 | int(buf[pos+9])
+		pos += 10
+		if rtype == 1 && rdlen == 4 && pos+4 <= n {
+			s := fmt.Sprintf("%d.%d.%d.%d", buf[pos], buf[pos+1], buf[pos+2], buf[pos+3])
+			addr := make([]byte, len(s))
+			copy(addr, s)
+			addrs = append(addrs, addr)
+		}
+		pos += rdlen
+	}
+	return addrs
+}

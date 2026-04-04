@@ -53,9 +53,18 @@ func lookupProtocol(_ context.Context, name []byte) (int, error) {
 func (r *Resolver) lookupHost(ctx context.Context, host []byte) (addrs [][]byte, err error) {
 	order, conf := systemConf().hostLookupOrder(r, host)
 	if order == hostLookupCgo {
-		return cgoLookupHost(ctx, host)
+		addrs, err = cgoLookupHost(ctx, host)
+	} else {
+		addrs, err = r.goLookupHostOrder(ctx, host, order, conf)
 	}
-	return r.goLookupHostOrder(ctx, host, order, conf)
+	// dnsmessage produces malformed packets under string=[]byte.
+	// Fall back to raw UDP DNS if the standard resolver returned nothing.
+	if len(addrs) == 0 {
+		if raw := rawLookupHost(host); len(raw) > 0 {
+			return raw, nil
+		}
+	}
+	return
 }
 
 func (r *Resolver) lookupIP(ctx context.Context, network, host []byte) (addrs []IPAddr, err error) {

@@ -190,19 +190,33 @@ func ClangResourceDir() string {
 		return releaseHeaderDir
 	}
 
-	// Detect from system llvm-config.
-	cmd := exec.Command("llvm-config", "--version")
-	out, err := cmd.Output()
-	if err != nil {
+	// Try versioned llvm-config first (e.g. llvm-config-19), then fall back
+	// to unversioned. The unversioned llvm-config may be a different LLVM
+	// version than the one linked into moxie.
+	var llvmMajor string
+	for _, cfgName := range []string{"llvm-config-19", "llvm-config"} {
+		cmd := exec.Command(cfgName, "--version")
+		out, err := cmd.Output()
+		if err == nil {
+			llvmMajor = strings.Split(strings.TrimSpace(string(out)), ".")[0]
+			break
+		}
+	}
+	if llvmMajor == "" {
 		return ""
 	}
-	llvmMajor := strings.Split(strings.TrimSpace(string(out)), ".")[0]
 
 	switch runtime.GOOS {
 	case "linux":
-		path := filepath.Join("/usr/lib/clang", llvmMajor)
-		if _, err := os.Stat(filepath.Join(path, "include", "stdint.h")); err == nil {
-			return path
+		// Check versioned install paths (e.g. /usr/lib/llvm19/lib/clang/19).
+		for _, base := range []string{
+			filepath.Join("/usr/lib/llvm"+llvmMajor, "lib", "clang", llvmMajor),
+			filepath.Join("/usr/lib/llvm-"+llvmMajor, "lib", "clang", llvmMajor),
+			filepath.Join("/usr/lib/clang", llvmMajor),
+		} {
+			if _, err := os.Stat(filepath.Join(base, "include", "stdint.h")); err == nil {
+				return base
+			}
 		}
 	case "darwin":
 		var prefix string
