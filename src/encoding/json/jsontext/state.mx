@@ -11,7 +11,7 @@ import (
 	"iter"
 	"math"
 	"strconv"
-	"strings"
+	"bytes"
 	"unicode/utf8"
 
 	"encoding/json/internal/jsonwire"
@@ -101,7 +101,7 @@ func (p Pointer) IsValid() bool {
 		switch {
 		case r == '~' && (i+1 == len(p) || (p[i+1] != '0' && p[i+1] != '1')):
 			return false // invalid escape
-		case r == '\ufffd' && !strings.HasPrefix(string(p[i:]), "\ufffd"):
+		case r == '\ufffd' && !bytes.HasPrefix(string(p[i:]), "\ufffd"):
 			return false // invalid UTF-8
 		}
 	}
@@ -112,21 +112,21 @@ func (p Pointer) IsValid() bool {
 // is equal to or contains the JSON value that pc points to.
 func (p Pointer) Contains(pc Pointer) bool {
 	// Invariant: len(p) <= len(pc) if p.Contains(pc)
-	suffix, ok := strings.CutPrefix(string(pc), string(p))
+	suffix, ok := bytes.CutPrefix(string(pc), string(p))
 	return ok && (suffix == "" || suffix[0] == '/')
 }
 
 // Parent strips off the last token and returns the remaining pointer.
 // The parent of an empty p is an empty string.
 func (p Pointer) Parent() Pointer {
-	return p[:max(strings.LastIndexByte(string(p), '/'), 0)]
+	return p[:max(bytes.LastIndexByte(string(p), '/'), 0)]
 }
 
 // LastToken returns the last token in the pointer.
 // The last token of an empty p is an empty string.
 func (p Pointer) LastToken() string {
-	last := p[max(strings.LastIndexByte(string(p), '/'), 0):]
-	return unescapePointerToken(strings.TrimPrefix(string(last), "/"))
+	last := p[max(bytes.LastIndexByte(string(p), '/'), 0):]
+	return unescapePointerToken(bytes.TrimPrefix(string(last), "/"))
 }
 
 // AppendToken appends a token to the end of p and returns the full pointer.
@@ -142,8 +142,8 @@ func (p Pointer) AppendToken(tok string) Pointer {
 func (p Pointer) Tokens() iter.Seq[string] {
 	return func(yield func(string) bool) {
 		for len(p) > 0 {
-			p = Pointer(strings.TrimPrefix(string(p), "/"))
-			i := min(uint(strings.IndexByte(string(p), '/')), uint(len(p)))
+			p = Pointer(bytes.TrimPrefix(string(p), "/"))
+			i := min(uint(bytes.IndexByte(string(p), '/')), uint(len(p)))
 			if !yield(unescapePointerToken(string(p)[:i])) {
 				return
 			}
@@ -153,10 +153,10 @@ func (p Pointer) Tokens() iter.Seq[string] {
 }
 
 func unescapePointerToken(token string) string {
-	if strings.Contains(token, "~") {
+	if bytes.Contains(token, "~") {
 		// Per RFC 6901, section 3, unescape '~' and '/' characters.
-		token = strings.ReplaceAll(token, "~1", "/")
-		token = strings.ReplaceAll(token, "~0", "~")
+		token = bytes.ReplaceAll(token, "~1", "/")
+		token = bytes.ReplaceAll(token, "~0", "~")
 	}
 	return token
 }

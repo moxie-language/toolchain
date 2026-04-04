@@ -10,7 +10,7 @@ import (
 	"net/http/internal/ascii"
 	"net/textproto"
 	"slices"
-	"strings"
+	"bytes"
 	"sync"
 	"time"
 
@@ -21,7 +21,7 @@ import (
 //
 // The keys should be in canonical form, as returned by
 // [CanonicalHeaderKey].
-type Header map[string][]string
+type Header map[string][][]byte
 
 // Add adds the key, value pair to the header.
 // It appends to any existing values associated with key.
@@ -55,7 +55,7 @@ func (h Header) Get(key string) string {
 // used to canonicalize the provided key. To use non-canonical
 // keys, access the map directly.
 // The returned slice is not a copy.
-func (h Header) Values(key string) []string {
+func (h Header) Values(key string) [][]byte {
 	return textproto.MIMEHeader(h).Values(key)
 }
 
@@ -101,7 +101,7 @@ func (h Header) Clone() Header {
 	for _, vv := range h {
 		nv += len(vv)
 	}
-	sv := []string{:nv} // shared backing array for headers' values
+	sv := [][]byte{:nv} // shared backing array for headers' values
 	h2 := make(Header, len(h))
 	for k, vv := range h {
 		if vv == nil {
@@ -136,7 +136,7 @@ func ParseTime(text string) (t time.Time, err error) {
 	return
 }
 
-var headerNewlineToSpace = strings.NewReplacer("\n", " ", "\r", " ")
+var headerNewlineToSpace = bytes.NewReplacer("\n", " ", "\r", " ")
 
 // stringWriter implements WriteString on a Writer.
 type stringWriter struct {
@@ -149,7 +149,7 @@ func (w stringWriter) WriteString(s string) (n int, err error) {
 
 type keyValues struct {
 	key    string
-	values []string
+	values [][]byte
 }
 
 // headerSorter contains a slice of keyValues sorted by keyValues.key.
@@ -176,7 +176,7 @@ func (h Header) sortedKeyValues(exclude map[string]bool) (kvs []keyValues, hs *h
 		}
 	}
 	hs.kvs = kvs
-	slices.SortFunc(hs.kvs, func(a, b keyValues) int { return strings.Compare(a.key, b.key) })
+	slices.SortFunc(hs.kvs, func(a, b keyValues) int { return bytes.Compare(a.key, b.key) })
 	return kvs, hs
 }
 
@@ -193,7 +193,7 @@ func (h Header) writeSubset(w io.Writer, exclude map[string]bool, trace *httptra
 		ws = stringWriter{w}
 	}
 	kvs, sorter := h.sortedKeyValues(exclude)
-	var formattedVals []string
+	var formattedVals [][]byte
 	for _, kv := range kvs {
 		if !httpguts.ValidHeaderFieldName(kv.key) {
 			// This could be an error. In the common case of

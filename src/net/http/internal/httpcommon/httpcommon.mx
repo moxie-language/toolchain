@@ -12,7 +12,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
-	"strings"
+	"bytes"
 	"sync"
 
 	"golang.org/x/net/http/httpguts"
@@ -23,7 +23,7 @@ import (
 // contains helper functions which may use Unicode-aware functions which would
 // otherwise be unsafe and could introduce vulnerabilities if used improperly.
 
-// asciiEqualFold is strings.EqualFold, ASCII only. It reports whether s and t
+// asciiEqualFold is bytes.EqualFold, ASCII only. It reports whether s and t
 // are equal, ASCII-case-insensitively.
 func asciiEqualFold(s, t string) bool {
 	if len(s) != len(t) {
@@ -62,7 +62,7 @@ func asciiToLower(s string) (lower string, ok bool) {
 	if !isASCIIPrint(s) {
 		return "", false
 	}
-	return strings.ToLower(s), true
+	return bytes.ToLower(s), true
 }
 
 var (
@@ -181,8 +181,8 @@ type Request struct {
 	URL                 *url.URL
 	Method              string
 	Host                string
-	Header              map[string][]string
-	Trailer             map[string][]string
+	Header              map[string][][]byte
+	Trailer             map[string][][]byte
 	ActualContentLength int64 // 0 means 0, -1 means unknown
 }
 
@@ -254,7 +254,7 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
 		path = req.URL.RequestURI()
 		if !validPseudoPath(path) {
 			orig := path
-			path = strings.TrimPrefix(path, req.URL.Scheme+"://"+host)
+			path = bytes.TrimPrefix(path, req.URL.Scheme+"://"+host)
 			if !validPseudoPath(path) {
 				if req.URL.Opaque != "" {
 					return res, fmt.Errorf("invalid request :path %q from URL.Opaque = %q", orig, req.URL.Opaque)
@@ -338,7 +338,7 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
 				// each with one or more cookie-pairs.
 				for _, v := range vv {
 					for {
-						p := strings.IndexByte(v, ';')
+						p := bytes.IndexByte(v, ';')
 						if p < 0 {
 							break
 						}
@@ -405,7 +405,7 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
 		headerf(name, value)
 
 		if trace != nil && trace.WroteHeaderField != nil {
-			trace.WroteHeaderField(name, []string{value})
+			trace.WroteHeaderField(name, [][]byte{value})
 		}
 	})
 
@@ -416,7 +416,7 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
 
 // IsRequestGzip reports whether we should add an Accept-Encoding: gzip header
 // for a request.
-func IsRequestGzip(method string, header map[string][]string, disableCompression bool) bool {
+func IsRequestGzip(method string, header map[string][][]byte, disableCompression bool) bool {
 	// TODO(bradfitz): this is a copy of the logic in net/http. Unify somewhere?
 	if !disableCompression &&
 		len(header["Accept-Encoding"]) == 0 &&
@@ -446,7 +446,7 @@ func IsRequestGzip(method string, header map[string][]string, disableCompression
 //
 // Certain headers are special-cased as okay but not transmitted later.
 // For example, we allow "Transfer-Encoding: chunked", but drop the header when encoding.
-func checkConnHeaders(h map[string][]string) error {
+func checkConnHeaders(h map[string][][]byte) error {
 	if vv := h["Upgrade"]; len(vv) > 0 && (vv[0] != "" && vv[0] != "chunked") {
 		return fmt.Errorf("invalid Upgrade request header: %q", vv)
 	}
@@ -459,8 +459,8 @@ func checkConnHeaders(h map[string][]string) error {
 	return nil
 }
 
-func commaSeparatedTrailers(trailer map[string][]string) (string, error) {
-	keys := []string{:0:len(trailer)}
+func commaSeparatedTrailers(trailer map[string][][]byte) (string, error) {
+	keys := [][]byte{:0:len(trailer)}
 	for k := range trailer {
 		k = CanonicalHeader(k)
 		switch k {
@@ -471,7 +471,7 @@ func commaSeparatedTrailers(trailer map[string][]string) (string, error) {
 	}
 	if len(keys) > 0 {
 		sort.Strings(keys)
-		return strings.Join(keys, ","), nil
+		return string(bytes.Join(keys, ",")), nil
 	}
 	return "", nil
 }
@@ -493,7 +493,7 @@ func validPseudoPath(v string) bool {
 	return (len(v) > 0 && v[0] == '/') || v == "*"
 }
 
-func validateHeaders(hdrs map[string][]string) string {
+func validateHeaders(hdrs map[string][][]byte) string {
 	for k, vv := range hdrs {
 		if !httpguts.ValidHeaderFieldName(k) && k != ":protocol" {
 			return fmt.Sprintf("name %q", k)
@@ -536,7 +536,7 @@ type ServerRequestParam struct {
 	Method                  string
 	Scheme, Authority, Path string
 	Protocol                string
-	Header                  map[string][]string
+	Header                  map[string][][]byte
 }
 
 // ServerRequestResult is the result of NewServerRequest.
@@ -544,7 +544,7 @@ type ServerRequestResult struct {
 	// Various http.Request fields.
 	URL        *url.URL
 	RequestURI string
-	Trailer    map[string][]string
+	Trailer    map[string][][]byte
 
 	NeedsContinue bool // client provided an "Expect: 100-continue" header
 
@@ -562,13 +562,13 @@ func NewServerRequest(rp ServerRequestParam) ServerRequestResult {
 	}
 	// Merge Cookie headers into one "; "-delimited value.
 	if cookies := rp.Header["Cookie"]; len(cookies) > 1 {
-		rp.Header["Cookie"] = []string{strings.Join(cookies, "; ")}
+		rp.Header["Cookie"] = [][]byte{bytes.Join(cookies, "; ")}
 	}
 
 	// Setup Trailers
-	var trailer map[string][]string
+	var trailer map[string][][]byte
 	for _, v := range rp.Header["Trailer"] {
-		for _, key := range strings.Split(v, ",") {
+		for _, key := range bytes.Split(v, ",") {
 			key = textproto.CanonicalMIMEHeaderKey(textproto.TrimString(key))
 			switch key {
 			case "Transfer-Encoding", "Trailer", "Content-Length":
@@ -576,7 +576,7 @@ func NewServerRequest(rp ServerRequestParam) ServerRequestResult {
 				// Ignore.
 			default:
 				if trailer == nil {
-					trailer = map[string][]string{}
+					trailer = map[string][][]byte{}
 				}
 				trailer[key] = nil
 			}
@@ -587,7 +587,7 @@ func NewServerRequest(rp ServerRequestParam) ServerRequestResult {
 	// "':authority' MUST NOT include the deprecated userinfo subcomponent
 	// for "http" or "https" schemed URIs."
 	// https://www.rfc-editor.org/rfc/rfc9113.html#section-8.3.1-2.3.8
-	if strings.IndexByte(rp.Authority, '@') != -1 && (rp.Scheme == "http" || rp.Scheme == "https") {
+	if bytes.IndexByte(rp.Authority, '@') != -1 && (rp.Scheme == "http" || rp.Scheme == "https") {
 		return ServerRequestResult{
 			InvalidReason: "userinfo_in_authority",
 		}

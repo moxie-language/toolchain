@@ -255,10 +255,19 @@ func chanSend(ch *channel, value unsafe.Pointer, op *channelOp) {
 	ch.lock.Unlock()
 	interrupt.Restore(mask)
 
-	// Wait until this goroutine is resumed.
-	// It might be resumed after Unlock() and before Pause(). In that case,
-	// because we use semaphores, the Pause() will continue immediately.
-	task.Pause()
+	// Wait until a receiver picks up the value.
+	if !hasScheduler {
+		for t.DataUint32() == chanOperationWaiting {
+			if hasPoll {
+				netpollBlock(100)
+			} else {
+				sleepTicks(nanosecondsToTicks(100_000_000))
+			}
+			fireTimers()
+		}
+	} else {
+		task.Pause()
+	}
 
 	// Check whether the sent happened normally (not because the channel was
 	// closed while sending).
@@ -333,8 +342,19 @@ func chanRecv(ch *channel, value unsafe.Pointer, op *channelOp) bool {
 	ch.lock.Unlock()
 	interrupt.Restore(mask)
 
-	// Wait until the goroutine is resumed.
-	task.Pause()
+	// Wait until a sender provides a value.
+	if !hasScheduler {
+		for t.DataUint32() == chanOperationWaiting {
+			if hasPoll {
+				netpollBlock(100)
+			} else {
+				sleepTicks(nanosecondsToTicks(100_000_000))
+			}
+			fireTimers()
+		}
+	} else {
+		task.Pause()
+	}
 
 	// Return whether the receive happened from a closed channel.
 	return t.DataUint32() != chanOperationClosed
@@ -501,7 +521,21 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 	unlockAllStates(states)
 	chanSelectLock.Unlock()
 	interrupt.Restore(mask)
-	task.Pause()
+
+	// Single-threaded event loop: poll for I/O and timers until a
+	// channel operation completes (changes t.Data from waiting).
+	if !hasScheduler {
+		for t.DataUint32() == chanOperationWaiting {
+			if hasPoll {
+				netpollBlock(100)
+			} else {
+				sleepTicks(nanosecondsToTicks(100_000_000))
+			}
+			fireTimers()
+		}
+	} else {
+		task.Pause()
+	}
 
 	// Resumed, so one channel operation must have progressed.
 

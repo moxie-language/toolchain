@@ -35,6 +35,18 @@ func stringEqual(x, y string) bool {
 	return true
 }
 
+// sliceEqual compares two slices of any comparable element type.
+// Checks lengths first, then compares raw memory (elemSize * length bytes).
+func sliceEqual(xPtr, yPtr unsafe.Pointer, xLen, yLen, elemSize uintptr) bool {
+	if xLen != yLen {
+		return false
+	}
+	if xLen == 0 {
+		return true
+	}
+	return memequal(xPtr, yPtr, xLen*elemSize)
+}
+
 // Return true iff x < y.
 //
 //go:nobounds
@@ -54,15 +66,22 @@ func stringLess(x, y string) bool {
 	return len(x) < len(y)
 }
 
-// String concatenation — delegates to bytesConcat (string=[]byte).
+// Concatenate two strings.
 func stringConcat(x, y _string) _string {
-	bx := unsafe.Slice(x.ptr, x.length)
-	by := unsafe.Slice(y.ptr, y.length)
-	result := bytesConcat(bx, by)
-	return _string{ptr: unsafe.SliceData(result), length: uintptr(len(result)), cap: uintptr(cap(result))}
+	if x.length == 0 {
+		return y
+	} else if y.length == 0 {
+		return x
+	}
+	length := x.length + y.length
+	buf := alloc(length, gclayout.NoPtrs.AsPtr())
+	memcpy(buf, unsafe.Pointer(x.ptr), x.length)
+	memcpy(unsafe.Add(buf, x.length), unsafe.Pointer(y.ptr), y.length)
+	result := _string{ptr: (*byte)(buf), length: length, cap: length}
+	return result
 }
 
-// Concatenate two byte slices. Used for | pipe concat and string +.
+// Concatenate two byte slices. Used for | pipe concat.
 func bytesConcat(x, y []byte) []byte {
 	if len(x) == 0 {
 		return y

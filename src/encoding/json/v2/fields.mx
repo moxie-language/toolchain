@@ -14,7 +14,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
-	"strings"
+	"bytes"
 	"unicode"
 	"unicode/utf8"
 
@@ -288,7 +288,7 @@ func makeStructFields(root reflect.Type) (fs structFields, serr *SemanticError) 
 	flattened := allFields[:0]
 	slices.SortStableFunc(allFields, func(x, y structField) int {
 		return cmp.Or(
-			strings.Compare(x.name, y.name),
+			bytes.Compare(x.name, y.name),
 			cmp.Compare(len(x.index), len(y.index)),
 			boolsCompare(!x.hasName, !y.hasName))
 	})
@@ -366,14 +366,14 @@ func indirectType(t reflect.Type) reflect.Type {
 // (and the `case:strict` tag option is not specified).
 // Functionally, the `case:ignore` and `case:strict` tag options take precedence.
 //
-// The v1 definition of case-insensitivity operated under strings.EqualFold
+// The v1 definition of case-insensitivity operated under bytes.EqualFold
 // and would strictly compare dashes and underscores,
 // while the v2 definition would ignore the presence of dashes and underscores.
 // Thus, if the MatchCaseSensitiveDelimiter call option is specified,
-// the match is further restricted to using strings.EqualFold.
+// the match is further restricted to using bytes.EqualFold.
 func (f *structField) matchFoldedName(name []byte, flags *jsonflags.Flags) bool {
 	if f.casing == caseIgnore || (flags.Get(jsonflags.MatchCaseInsensitiveNames) && f.casing != caseStrict) {
-		if !flags.Get(jsonflags.MatchCaseSensitiveDelimiter) || strings.EqualFold(string(name), f.name) {
+		if !flags.Get(jsonflags.MatchCaseSensitiveDelimiter) || bytes.EqualFold(string(name), f.name) {
 			return true
 		}
 	}
@@ -433,10 +433,10 @@ func parseFieldOptions(sf reflect.StructField) (out fieldOptions, ignored bool, 
 	// The single-quoted string allows arbitrary characters in the name.
 	// See https://go.dev/issue/2718 and https://go.dev/issue/3546.
 	out.name = sf.Name // always starts with an uppercase character
-	if len(tag) > 0 && !strings.HasPrefix(tag, ",") {
+	if len(tag) > 0 && !bytes.HasPrefix(tag, ",") {
 		// For better compatibility with v1, accept almost any unescaped name.
-		n := len(tag) - len(strings.TrimLeftFunc(tag, func(r rune) bool {
-			return !strings.ContainsRune(",\\'\"`", r) // reserve comma, backslash, and quotes
+		n := len(tag) - len(bytes.TrimLeftFunc(tag, func(r rune) bool {
+			return !bytes.ContainsRune(",\\'\"`", r) // reserve comma, backslash, and quotes
 		}))
 		name := tag[:n]
 
@@ -444,7 +444,7 @@ func parseFieldOptions(sf reflect.StructField) (out fieldOptions, ignored bool, 
 		// malformed (if n > 0) or a single-quoted name.
 		// In either case, call consumeTagOption to handle it further.
 		var err2 error
-		if !strings.HasPrefix(tag[n:], ",") && len(name) != len(tag) {
+		if !bytes.HasPrefix(tag[n:], ",") && len(name) != len(tag) {
 			name, n, err2 = consumeTagOption(tag)
 			if err2 != nil {
 				err = cmp.Or(err, fmt.Errorf("Go struct field %s has malformed `json` tag: %v", sf.Name, err2))
@@ -458,7 +458,7 @@ func parseFieldOptions(sf reflect.StructField) (out fieldOptions, ignored bool, 
 			defer func() { // defer to let other errors take precedence
 				err = cmp.Or(err, fmt.Errorf("Go struct field %s has JSON object name %q; either "+
 					"use `json:\"-\"` to ignore the field or "+
-					"use `json:\"'-'%s` to specify %q as the name", sf.Name, out.name, strings.TrimPrefix(strconv.Quote(tagOrig), `"-`), name))
+					"use `json:\"'-'%s` to specify %q as the name", sf.Name, out.name, bytes.TrimPrefix(strconv.Quote(tagOrig), `"-`), name))
 			}()
 		}
 		if err2 == nil {
@@ -496,12 +496,12 @@ func parseFieldOptions(sf reflect.StructField) (out fieldOptions, ignored bool, 
 		switch {
 		case wasFormat:
 			err = cmp.Or(err, fmt.Errorf("Go struct field %s has `format` tag option that was not specified last", sf.Name))
-		case strings.HasPrefix(rawOpt, "'") && strings.TrimFunc(opt, isLetterOrDigit) == "":
+		case bytes.HasPrefix(rawOpt, "'") && bytes.TrimFunc(opt, isLetterOrDigit) == "":
 			err = cmp.Or(err, fmt.Errorf("Go struct field %s has unnecessarily quoted appearance of `%s` tag option; specify `%s` instead", sf.Name, rawOpt, opt))
 		}
 		switch opt {
 		case "case":
-			if !strings.HasPrefix(tag, ":") {
+			if !bytes.HasPrefix(tag, ":") {
 				err = cmp.Or(err, fmt.Errorf("Go struct field %s is missing value for `case` tag option; specify `case:ignore` or `case:strict` instead", sf.Name))
 				break
 			}
@@ -513,7 +513,7 @@ func parseFieldOptions(sf reflect.StructField) (out fieldOptions, ignored bool, 
 			}
 			rawOpt := tag[:n]
 			tag = tag[n:]
-			if strings.HasPrefix(rawOpt, "'") {
+			if bytes.HasPrefix(rawOpt, "'") {
 				err = cmp.Or(err, fmt.Errorf("Go struct field %s has unnecessarily quoted appearance of `case:%s` tag option; specify `case:%s` instead", sf.Name, rawOpt, opt))
 			}
 			switch opt {
@@ -535,7 +535,7 @@ func parseFieldOptions(sf reflect.StructField) (out fieldOptions, ignored bool, 
 		case "string":
 			out.string = true
 		case "format":
-			if !strings.HasPrefix(tag, ":") {
+			if !bytes.HasPrefix(tag, ":") {
 				err = cmp.Or(err, fmt.Errorf("Go struct field %s is missing value for `format` tag option", sf.Name))
 				break
 			}
@@ -551,7 +551,7 @@ func parseFieldOptions(sf reflect.StructField) (out fieldOptions, ignored bool, 
 		default:
 			// Reject keys that resemble one of the supported options.
 			// This catches invalid mutants such as "omitEmpty" or "omit_empty".
-			normOpt := strings.ReplaceAll(strings.ToLower(opt), "_", "")
+			normOpt := bytes.ReplaceAll(bytes.ToLower(opt), "_", "")
 			switch normOpt {
 			case "case", "inline", "unknown", "omitzero", "omitempty", "string", "format":
 				err = cmp.Or(err, fmt.Errorf("Go struct field %s has invalid appearance of `%s` tag option; specify `%s` instead", sf.Name, opt, normOpt))
@@ -580,7 +580,7 @@ func parseFieldOptions(sf reflect.StructField) (out fieldOptions, ignored bool, 
 // and reports an error.
 func consumeTagOption(in string) (string, int, error) {
 	// For legacy compatibility with v1, assume options are comma-separated.
-	i := strings.IndexByte(in, ',')
+	i := bytes.IndexByte(in, ',')
 	if i < 0 {
 		i = len(in)
 	}
@@ -588,7 +588,7 @@ func consumeTagOption(in string) (string, int, error) {
 	switch r, _ := utf8.DecodeRuneInString(in); {
 	// Option as a Go identifier.
 	case r == '_' || unicode.IsLetter(r):
-		n := len(in) - len(strings.TrimLeftFunc(in, isLetterOrDigit))
+		n := len(in) - len(bytes.TrimLeftFunc(in, isLetterOrDigit))
 		return in[:n], n, nil
 	// Option as a single-quoted string.
 	case r == '\'':

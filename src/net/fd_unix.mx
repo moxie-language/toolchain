@@ -79,43 +79,9 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa sysc
 		defer fd.pfd.SetWriteDeadline(noDeadline)
 	}
 
-	// Start the "interrupter" goroutine, if this context might be canceled.
-	//
-	// The interrupter goroutine waits for the context to be done and
-	// interrupts the dial (by altering the fd's write deadline, which
-	// wakes up waitWrite).
-	ctxDone := ctx.Done()
-	if ctxDone != nil {
-		// Wait for the interrupter goroutine to exit before returning
-		// from connect.
-		done := chan struct{}{}
-		interruptRes := chan error{}
-		defer func() {
-			close(done)
-			if ctxErr := <-interruptRes; ctxErr != nil && ret == nil {
-				// The interrupter goroutine called SetWriteDeadline,
-				// but the connect code below had returned from
-				// waitWrite already and did a successful connect (ret
-				// == nil). Because we've now poisoned the connection
-				// by making it unwritable, don't return a successful
-				// dial. This was issue 16523.
-				ret = mapErr(ctxErr)
-				fd.Close() // prevent a leak
-			}
-		}()
-		go func() {
-			select {
-			case <-ctxDone:
-				// Force the runtime's poller to immediately give up
-				// waiting for writability, unblocking waitWrite
-				// below.
-				fd.pfd.SetWriteDeadline(aLongTimeAgo)
-				testHookCanceledDial()
-				interruptRes <- ctx.Err()
-			case <-done:
-				interruptRes <- nil
-			}
-		}()
+	// Moxie: no goroutines. Check context before connecting.
+	if ctx.Err() != nil {
+		return nil, mapErr(ctx.Err())
 	}
 
 	for {
@@ -129,7 +95,7 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa sysc
 		// details.
 		if err := fd.pfd.WaitWrite(); err != nil {
 			select {
-			case <-ctxDone:
+			case <-ctx.Done():
 				return nil, mapErr(ctx.Err())
 			default:
 			}

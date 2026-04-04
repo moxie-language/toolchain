@@ -4,11 +4,17 @@
 
 > a programming language without fluff
 
-A compiler for domain-isolated cooperative concurrency. Fork of TinyGo, now its own language with .mx source files, moxie.mod modules, a restricted subset of Go syntax, single-threaded cooperative scheduling per domain, and `spawn` for creating isolated OS-process domains with IPC channels.
+A compiler for domain-isolated event-driven programs. Fork of TinyGo, now its own language with .mx source files, moxie.mod modules, a restricted subset of Go syntax, single-threaded execution per domain, and `spawn` for creating isolated OS-process domains with IPC channels.
 
 ## What Moxie Is
 
-Each Moxie program is a tree of **domains**. Each domain is an OS process with its own cooperative scheduler running goroutines on a single thread. Domains communicate through channels that become IPC over Unix socketpairs. No shared memory. No data races. No mutexes.
+Each Moxie program is a tree of **domains**. Each domain is an OS process running a single thread. There are no goroutines. Execution flow is controlled by three constructs:
+
+1. **Unbuffered channels** are dispatchers — sending on an unbuffered channel transfers execution to the `select` statement listening for that channel, like a goto without the baggage.
+2. **Buffered channels** are message queues — sending enqueues a value for the next time the receiving `select` runs.
+3. **`select`** is the event handler — it waits for channel messages, I/O events, and timer expirations. All concurrency reduces to sitting in a `select` loop.
+
+Domains communicate through channels that become IPC over Unix socketpairs via `moxie.Spawn`. Messages pass between processes transparently — the receiving domain picks them up when its event loop reaches the relevant `select`.
 
 ```moxie
 package main
@@ -25,30 +31,45 @@ func main() {
 }
 ```
 
-`Spawn` forks the process. The child gets a fresh scheduler, runs `worker`, exits. The parent continues immediately.
+`Spawn` forks the process. The child runs `worker` to completion, exits. The parent continues immediately.
 
-## Architecture
+## Execution Model
 
 ```
 ┌─────────────────────────────────────┐
 │              Program                │
-│  ┌─────────┐     ┌─────────┐       │
-│  │ Domain 0 │────│ Domain 1 │       │
-│  │ (parent) │ IPC│ (child)  │       │
-│  │          │sock│          │       │
-│  │ goroutine│pair│ goroutine│       │
-│  │ goroutine│    │ goroutine│       │
-│  │ goroutine│    │          │       │
-│  └──────────┘    └──────────┘       │
-│  cooperative      cooperative       │
-│  scheduler        scheduler         │
+│  ┌──────────┐     ┌──────────┐     │
+│  │ Domain 0  │────│ Domain 1  │     │
+│  │ (parent)  │ IPC│ (child)   │     │
+│  │           │sock│           │     │
+│  │  select   │pair│  select   │     │
+│  │  ├ ch1    │    │  ├ ch3    │     │
+│  │  ├ ch2    │    │  └ timer  │     │
+│  │  └ I/O    │    │           │     │
+│  └───────────┘    └───────────┘     │
+│  single thread    single thread     │
 └─────────────────────────────────────┘
 ```
 
-- **Within a domain**: goroutines, channels, cooperative scheduling (no preemption, no threads)
-- **Between domains**: `spawn` + IPC channels over socketpairs (deep copy, no shared state)
+- **Within a domain**: channels + `select` as event dispatch. No goroutines, no scheduler, no task switching.
+- **Between domains**: `spawn` + IPC channels over socketpairs (deep copy, no shared state).
+- **The `go` keyword is a compile error.** There is no way to create concurrent execution within a domain.
 - **Native targets**: linux/amd64, linux/arm64, darwin/amd64, darwin/arm64
-- **JS target**: each domain is a Service Worker with its own runtime copy
+- **JS target**: each domain is a Service Worker
+
+### Why No Goroutines
+
+The `go` keyword hides execution paths. When you write `go f()`, you create an invisible thread of control that runs at unpredictable times relative to the rest of your code. Reasoning about program behavior requires tracking every goroutine's state simultaneously.
+
+Moxie reduces the execution model to three incontrovertible rules:
+
+| Construct | Behavior |
+|-----------|----------|
+| Unbuffered channel send | Execution jumps to the waiting `select` case |
+| Buffered channel send | Message queued, processed on next `select` iteration |
+| `select` | Event handler — blocks until a channel, I/O event, or timer fires |
+
+With these three rules, you can trace any Moxie program's execution by following the channel sends to their corresponding `select` cases. The cost of reasoning about control flow drops to near zero.
 
 ## Type Unification
 
@@ -60,6 +81,21 @@ Moxie unifies types that Go keeps separate:
 | `int` (platform-sized) / `int32` | `int32` only | 32-bit on all targets. `len()`/`cap()` return `int32`. |
 
 The `string` and `int` keywords still compile — the type checker treats them as their unified equivalents. Moxie convention uses `[]byte` and `int32` explicitly.
+
+### Slice Equality
+
+Any slice of a comparable element type supports `==` and `!=`. Two slices are equal if they have the same length and all corresponding elements are equal.
+
+```moxie
+a := []int32{1, 2, 3}
+b := []int32{1, 2, 3}
+println(a == b) // true
+
+m := map[[]byte]int32{}  // slices can be map keys
+m[[]byte("key")] = 42
+```
+
+Go restricts `==` to strings and refuses it for `[]byte` — an artificial distinction. Moxie treats all slices the same: if the element type is comparable, the slice is comparable.
 
 ## Building Moxie
 
@@ -92,6 +128,7 @@ Moxie is a restricted subset of Go syntax. Source files use the `.mx` extension.
 
 | Rejected | Alternative |
 |----------|------------|
+| `go f()` | Channels + `select` for event dispatch |
 | `new(T)` | `&T{}` or `var x T; p := &x` |
 | `+` on text | `\|` pipe operator for `[]byte` concatenation |
 | `complex()`, `real()`, `imag()` | Not supported |
@@ -128,15 +165,15 @@ Arguments to `moxie.Spawn` must be safe to serialize across process boundaries:
 
 Non-constant variables passed to `spawn` cannot be used after the call — ownership moves to the child domain.
 
-## Scheduler
+## Runtime
 
-Moxie uses cooperative scheduling on all platforms. There are no threads, no preemption, no OS-level synchronization primitives within a domain. Goroutines yield at channel operations and explicit yield points.
+Each domain runs on a single thread with no scheduler. I/O is handled via epoll (Linux) or kqueue (macOS), blocking the thread until events arrive. Timers fire as interrupts during I/O waits and sleep. Channels are synchronous within a domain — unbuffered sends dispatch directly to the waiting receiver.
 
-This is intentional: each domain is single-threaded, so there are no data races within a domain. The OS provides isolation between domains.
+There are no goroutines, no task switching, no run queue. The only concurrency primitive is `select`, which multiplexes channel messages, I/O readiness, and timer expirations into a single event loop.
 
 ## JS Target
 
-On the JS target, each domain maps to a Service Worker with its own copy of the cooperative runtime. IPC uses `BroadcastChannel` (SW-SW) or `MessagePort` (Worker-Worker).
+On the JS target, each domain maps to a Service Worker. IPC uses `BroadcastChannel` (SW-SW) or `MessagePort` (Worker-Worker).
 
 ## Project Structure
 

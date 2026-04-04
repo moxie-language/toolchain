@@ -35,6 +35,7 @@ The `string` keyword still compiles — the type checker treats `string` and `[]
 
 | Statement | Alternative |
 |-----------|------------|
+| `go f()` | **Compile error.** There are no goroutines. Use channels + `select` for event dispatch, `spawn` for process-level parallelism. |
 | `fallthrough` | Comma-separated case expressions, or call a shared function. |
 
 ### Text Concatenation
@@ -56,6 +57,16 @@ The `+` operator on text types is a compile error. The pipe operator `|` is rewr
 | Nested `chan` | Channels must be top-level spawn parameters, not inside structs/arrays/slices/maps. |
 
 Non-constant variables passed to `spawn` cannot be used after the call (move semantics).
+
+### Slice Equality (Extension)
+
+Moxie extends Go's comparison rules: any `[]T` where `T` is comparable supports `==` and `!=`. Slices can be used as map keys. Go restricts this to `string` only — Moxie treats all comparable-element slices uniformly.
+
+### Import Restrictions
+
+| Import | Error |
+|--------|-------|
+| `"strings"` | `use "bytes" instead of "strings" (string=[]byte)` |
 
 ## Exemptions
 

@@ -6,7 +6,7 @@ package parse
 
 import (
 	"fmt"
-	"strings"
+	"bytes"
 	"unicode"
 	"unicode/utf8"
 )
@@ -190,14 +190,14 @@ func (l *lexer) emitItem(i item) stateFn {
 // It tracks newlines in the ignored text, so use it only
 // for text that is skipped without calling l.next.
 func (l *lexer) ignore() {
-	l.line += strings.Count(l.input[l.start:l.pos], "\n")
+	l.line += bytes.Count(l.input[l.start:l.pos], "\n")
 	l.start = l.pos
 	l.startLine = l.line
 }
 
 // accept consumes the next rune if it's from the valid set.
 func (l *lexer) accept(valid []byte) bool {
-	if strings.ContainsRune(valid, l.next()) {
+	if bytes.ContainsRune(valid, l.next()) {
 		return true
 	}
 	l.backup()
@@ -206,7 +206,7 @@ func (l *lexer) accept(valid []byte) bool {
 
 // acceptRun consumes a run of runes from the valid set.
 func (l *lexer) acceptRun(valid []byte) {
-	for strings.ContainsRune(valid, l.next()) {
+	for bytes.ContainsRune(valid, l.next()) {
 	}
 	l.backup()
 }
@@ -268,7 +268,7 @@ const (
 
 // lexText scans until an opening action delimiter, "{{".
 func lexText(l *lexer) stateFn {
-	if x := strings.Index(l.input[l.pos:], l.leftDelim); x >= 0 {
+	if x := bytes.Index(l.input[l.pos:], l.leftDelim); x >= 0 {
 		if x > 0 {
 			l.pos += Pos(x)
 			// Do we trim any trailing space?
@@ -278,7 +278,7 @@ func lexText(l *lexer) stateFn {
 				trimLength = rightTrimLength(l.input[l.start:l.pos])
 			}
 			l.pos -= trimLength
-			l.line += strings.Count(l.input[l.start:l.pos], "\n")
+			l.line += bytes.Count(l.input[l.start:l.pos], "\n")
 			i := l.thisItem(itemText)
 			l.pos += trimLength
 			l.ignore()
@@ -291,7 +291,7 @@ func lexText(l *lexer) stateFn {
 	l.pos = Pos(len(l.input))
 	// Correctly reached EOF.
 	if l.pos > l.start {
-		l.line += strings.Count(l.input[l.start:l.pos], "\n")
+		l.line += bytes.Count(l.input[l.start:l.pos], "\n")
 		return l.emit(itemText)
 	}
 	return l.emit(itemEOF)
@@ -299,15 +299,15 @@ func lexText(l *lexer) stateFn {
 
 // rightTrimLength returns the length of the spaces at the end of the string.
 func rightTrimLength(s []byte) Pos {
-	return Pos(len(s) - len(strings.TrimRight(s, spaceChars)))
+	return Pos(len(s) - len(bytes.TrimRight(s, spaceChars)))
 }
 
 // atRightDelim reports whether the lexer is at a right delimiter, possibly preceded by a trim marker.
 func (l *lexer) atRightDelim() (delim, trimSpaces bool) {
-	if hasRightTrimMarker(l.input[l.pos:]) && strings.HasPrefix(l.input[l.pos+trimMarkerLen:], l.rightDelim) { // With trim marker.
+	if hasRightTrimMarker(l.input[l.pos:]) && bytes.HasPrefix(l.input[l.pos+trimMarkerLen:], l.rightDelim) { // With trim marker.
 		return true, true
 	}
-	if strings.HasPrefix(l.input[l.pos:], l.rightDelim) { // Without trim marker.
+	if bytes.HasPrefix(l.input[l.pos:], l.rightDelim) { // Without trim marker.
 		return true, false
 	}
 	return false, false
@@ -315,7 +315,7 @@ func (l *lexer) atRightDelim() (delim, trimSpaces bool) {
 
 // leftTrimLength returns the length of the spaces at the beginning of the string.
 func leftTrimLength(s []byte) Pos {
-	return Pos(len(s) - len(strings.TrimLeft(s, spaceChars)))
+	return Pos(len(s) - len(bytes.TrimLeft(s, spaceChars)))
 }
 
 // lexLeftDelim scans the left delimiter, which is known to be present, possibly with a trim marker.
@@ -327,7 +327,7 @@ func lexLeftDelim(l *lexer) stateFn {
 	if trimSpace {
 		afterMarker = trimMarkerLen
 	}
-	if strings.HasPrefix(l.input[l.pos+afterMarker:], leftComment) {
+	if bytes.HasPrefix(l.input[l.pos+afterMarker:], leftComment) {
 		l.pos += afterMarker
 		l.ignore()
 		return lexComment
@@ -343,7 +343,7 @@ func lexLeftDelim(l *lexer) stateFn {
 // lexComment scans a comment. The left comment marker is known to be present.
 func lexComment(l *lexer) stateFn {
 	l.pos += Pos(len(leftComment))
-	x := strings.Index(l.input[l.pos:], rightComment)
+	x := bytes.Index(l.input[l.pos:], rightComment)
 	if x < 0 {
 		return l.errorf("unclosed comment")
 	}
@@ -352,7 +352,7 @@ func lexComment(l *lexer) stateFn {
 	if !delim {
 		return l.errorf("comment ends before closing delimiter")
 	}
-	l.line += strings.Count(l.input[l.start:l.pos], "\n")
+	l.line += bytes.Count(l.input[l.start:l.pos], "\n")
 	i := l.thisItem(itemComment)
 	if trimSpace {
 		l.pos += trimMarkerLen
@@ -469,7 +469,7 @@ func lexSpace(l *lexer) stateFn {
 	}
 	// Be careful about a trim-marked closing delimiter, which has a minus
 	// after a space. We know there is a space, so check for the '-' that might follow.
-	if hasRightTrimMarker(l.input[l.pos-1:]) && strings.HasPrefix(l.input[l.pos-1+trimMarkerLen:], l.rightDelim) {
+	if hasRightTrimMarker(l.input[l.pos-1:]) && bytes.HasPrefix(l.input[l.pos-1+trimMarkerLen:], l.rightDelim) {
 		l.backup() // Before the space.
 		if numSpaces == 1 {
 			return lexRightDelim // On the delim, so go right to that.
@@ -559,7 +559,7 @@ func (l *lexer) atTerminator() bool {
 	case eof, '.', ',', '|', ':', ')', '(':
 		return true
 	}
-	return strings.HasPrefix(l.input[l.pos:], l.rightDelim)
+	return bytes.HasPrefix(l.input[l.pos:], l.rightDelim)
 }
 
 // lexChar scans a character constant. The initial quote is already

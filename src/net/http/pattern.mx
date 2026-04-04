@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"strings"
+	"bytes"
 	"unicode"
 )
 
@@ -93,8 +93,8 @@ func parsePattern(s []byte) (_ *pattern, err error) {
 	}()
 
 	method, rest, found := s, "", false
-	if i := strings.IndexAny(s, " \t"); i >= 0 {
-		method, rest, found = s[:i], strings.TrimLeft(s[i+1:], " \t"), true
+	if i := bytes.IndexAny(s, " \t"); i >= 0 {
+		method, rest, found = s[:i], bytes.TrimLeft(s[i+1:], " \t"), true
 	}
 	if !found {
 		rest = method
@@ -108,13 +108,13 @@ func parsePattern(s []byte) (_ *pattern, err error) {
 	if found {
 		off = len(method) + 1
 	}
-	i := strings.IndexByte(rest, '/')
+	i := bytes.IndexByte(rest, '/')
 	if i < 0 {
 		return nil, errors.New("host/path missing /")
 	}
 	p.host = rest[:i]
 	rest = rest[i:]
-	if j := strings.IndexByte(p.host, '{'); j >= 0 {
+	if j := bytes.IndexByte(p.host, '{'); j >= 0 {
 		off += j
 		return nil, errors.New("host contains '{' (missing initial '/'?)")
 	}
@@ -137,13 +137,13 @@ func parsePattern(s []byte) (_ *pattern, err error) {
 			p.segments = append(p.segments, segment{wild: true, multi: true})
 			break
 		}
-		i := strings.IndexByte(rest, '/')
+		i := bytes.IndexByte(rest, '/')
 		if i < 0 {
 			i = len(rest)
 		}
 		var seg []byte
 		seg, rest = rest[:i], rest[i:]
-		if i := strings.IndexByte(seg, '{'); i < 0 {
+		if i := bytes.IndexByte(seg, '{'); i < 0 {
 			// Literal.
 			seg = pathUnescape(seg)
 			p.segments = append(p.segments, segment{s: seg})
@@ -163,7 +163,7 @@ func parsePattern(s []byte) (_ *pattern, err error) {
 				p.segments = append(p.segments, segment{s: "/"})
 				break
 			}
-			name, multi := strings.CutSuffix(name, "...")
+			name, multi := bytes.CutSuffix(name, "...")
 			if multi && len(rest) != 0 {
 				return nil, errors.New("{...} wildcard not at end")
 			}
@@ -189,7 +189,7 @@ func isValidWildcardName(s []byte) bool {
 	}
 	// Valid Go identifier.
 	for i, c := range s {
-		if !unicode.IsLetter(c) && c != '_' && (i == 0 || !unicode.IsDigit(c)) {
+		if !unicode.IsLetter(rune(c)) && c != '_' && (i == 0 || !unicode.IsDigit(rune(c))) {
 			return false
 		}
 	}
@@ -206,7 +206,7 @@ func pathUnescape(path []byte) []byte {
 }
 
 // relationship is a relationship between two patterns, p1 and p2.
-type relationship []byte
+type relationship string
 
 const (
 	equivalent   relationship = "equivalent"   // both match the same requests
@@ -430,13 +430,13 @@ But neither is more specific than the other.
 }
 
 // writeMatchingPath writes to b a path that matches the segments.
-func writeMatchingPath(b *strings.Builder, segs []segment) {
+func writeMatchingPath(b *bytes.Buffer, segs []segment) {
 	for _, s := range segs {
 		writeSegment(b, s)
 	}
 }
 
-func writeSegment(b *strings.Builder, s segment) {
+func writeSegment(b *bytes.Buffer, s segment) {
 	b.WriteByte('/')
 	if !s.multi && s.s != "/" {
 		b.WriteString(s.s)
@@ -446,7 +446,7 @@ func writeSegment(b *strings.Builder, s segment) {
 // commonPath returns a path that both p1 and p2 match.
 // It assumes there is such a path.
 func commonPath(p1, p2 *pattern) []byte {
-	var b strings.Builder
+	var b bytes.Buffer
 	var segs1, segs2 []segment
 	for segs1, segs2 = p1.segments, p2.segments; len(segs1) > 0 && len(segs2) > 0; segs1, segs2 = segs1[1:], segs2[1:] {
 		if s1 := segs1[0]; s1.wild {
@@ -466,7 +466,7 @@ func commonPath(p1, p2 *pattern) []byte {
 // differencePath returns a path that p1 matches and p2 doesn't.
 // It assumes there is such a path.
 func differencePath(p1, p2 *pattern) []byte {
-	var b strings.Builder
+	var b bytes.Buffer
 
 	var segs1, segs2 []segment
 	for segs1, segs2 = p1.segments, p2.segments; len(segs1) > 0 && len(segs2) > 0; segs1, segs2 = segs1[1:], segs2[1:] {

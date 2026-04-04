@@ -17,7 +17,6 @@ import (
 	"net/url"
 	"reflect"
 	"runtime"
-	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -128,7 +127,7 @@ func (h HostnameError) Error() string {
 			valid += san.String()
 		}
 	} else {
-		valid = strings.Join(c.DNSNames, ", ")
+		valid = bytes.Join(c.DNSNames, ", ")
 	}
 
 	if len(valid) == 0 {
@@ -392,9 +391,9 @@ func parseRFC2821Mailbox(in string) (mailbox rfc2821Mailbox, ok bool) {
 // domainToReverseLabels converts a textual domain name like foo.example.com to
 // the list of labels in reverse order, e.g. ["com", "example", "foo"].
 func domainToReverseLabels(domain string) (reverseLabels []string, ok bool) {
-	reverseLabels = []string{:0:strings.Count(domain, ".")+1}
+	reverseLabels = []string{:0:bytes.Count(domain, ".")+1}
 	for len(domain) > 0 {
-		if i := strings.LastIndexByte(domain, '.'); i == -1 {
+		if i := bytes.LastIndexByte(domain, '.'); i == -1 {
 			reverseLabels = append(reverseLabels, domain)
 			domain = ""
 		} else {
@@ -433,12 +432,12 @@ func domainToReverseLabels(domain string) (reverseLabels []string, ok bool) {
 func matchEmailConstraint(mailbox rfc2821Mailbox, constraint string, reversedDomainsCache map[string][]string, reversedConstraintsCache map[string][]string) (bool, error) {
 	// If the constraint contains an @, then it specifies an exact mailbox
 	// name.
-	if strings.Contains(constraint, "@") {
+	if bytes.Contains(constraint, "@") {
 		constraintMailbox, ok := parseRFC2821Mailbox(constraint)
 		if !ok {
 			return false, fmt.Errorf("x509: internal error: cannot parse constraint %q", constraint)
 		}
-		return mailbox.local == constraintMailbox.local && strings.EqualFold(mailbox.domain, constraintMailbox.domain), nil
+		return mailbox.local == constraintMailbox.local && bytes.EqualFold(mailbox.domain, constraintMailbox.domain), nil
 	}
 
 	// Otherwise the constraint is like a DNS constraint of the domain part
@@ -460,7 +459,7 @@ func matchURIConstraint(uri *url.URL, constraint string, reversedDomainsCache ma
 		return false, fmt.Errorf("URI with empty host (%q) cannot be matched against constraints", uri.String())
 	}
 
-	if strings.Contains(host, ":") && !strings.HasSuffix(host, "]") {
+	if bytes.Contains(host, ":") && !bytes.HasSuffix(host, "]") {
 		var err error
 		host, _, err = net.SplitHostPort(uri.Host)
 		if err != nil {
@@ -471,7 +470,7 @@ func matchURIConstraint(uri *url.URL, constraint string, reversedDomainsCache ma
 	// netip.ParseAddr will reject the URI IPv6 literal form "[...]", so we
 	// check if _either_ the string parses as an IP, or if it is enclosed in
 	// square brackets.
-	if _, err := netip.ParseAddr(host); err == nil || (strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]")) {
+	if _, err := netip.ParseAddr(host); err == nil || (bytes.HasPrefix(host, "[") && bytes.HasSuffix(host, "]")) {
 		return false, fmt.Errorf("URI with IP (%q) cannot be matched against constraints", uri.String())
 	}
 
@@ -536,7 +535,7 @@ func matchDomainConstraint(domain, constraint string, reversedDomainsCache map[s
 	}
 
 	for i, constraintLabel := range constraintLabels {
-		if !strings.EqualFold(constraintLabel, domainLabels[i]) {
+		if !bytes.EqualFold(constraintLabel, domainLabels[i]) {
 			return false, nil
 		}
 	}
@@ -916,7 +915,7 @@ func (c *Certificate) Verify(opts VerifyOptions) (chains [][]*Certificate, err e
 		if invalidPoliciesChains > 0 {
 			details = append(details, fmt.Sprintf("%d chains with invalid policies", invalidPoliciesChains))
 		}
-		err = CertificateInvalidError{c, NoValidChains, strings.Join(details, ", ")}
+		err = CertificateInvalidError{c, NoValidChains, bytes.Join(details, ", ")}
 		return nil, err
 	}
 
@@ -1066,7 +1065,7 @@ func validHostnameInput(host string) bool   { return validHostname(host, false) 
 // legacy values.
 func validHostname(host string, isPattern bool) bool {
 	if !isPattern {
-		host = strings.TrimSuffix(host, ".")
+		host = bytes.TrimSuffix(host, ".")
 	}
 	if len(host) == 0 {
 		return false
@@ -1077,7 +1076,7 @@ func validHostname(host string, isPattern bool) bool {
 		return false
 	}
 
-	for i, part := range strings.Split(host, ".") {
+	for i, part := range bytes.Split(host, ".") {
 		if part == "" {
 			// Empty label.
 			return false
@@ -1122,14 +1121,14 @@ func matchExactly(hostA, hostB string) bool {
 
 func matchHostnames(pattern, host string) bool {
 	pattern = toLowerCaseASCII(pattern)
-	host = toLowerCaseASCII(strings.TrimSuffix(host, "."))
+	host = toLowerCaseASCII(bytes.TrimSuffix(host, "."))
 
 	if len(pattern) == 0 || len(host) == 0 {
 		return false
 	}
 
-	patternParts := strings.Split(pattern, ".")
-	hostParts := strings.Split(host, ".")
+	patternParts := bytes.Split(pattern, ".")
+	hostParts := bytes.Split(host, ".")
 
 	if len(patternParts) != len(hostParts) {
 		return false

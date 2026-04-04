@@ -1518,8 +1518,12 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 	case *ssa.Defer:
 		b.createDefer(instr)
 	case *ssa.Go:
-		// Start a new goroutine.
-		b.createGo(instr)
+		// Moxie: go keyword banned in user code. Runtime/internal exempt.
+		if isUserPackage(b.fn.Pkg) {
+			b.addError(instr.Pos(), "moxie: the go keyword is not supported (there are no goroutines)")
+		} else {
+			b.createGo(instr)
+		}
 	case *ssa.If:
 		cond := b.getValue(instr.Cond, getPos(instr))
 		block := instr.Block()
@@ -2941,16 +2945,25 @@ func (b *builder) createBinOp(op token.Token, typ, ytyp types.Type, x, y llvm.Va
 				return llvm.Value{}, b.makeError(pos, "todo: binop on []byte: "+op.String())
 			}
 		}
-		// Non-byte slices: nil comparison only.
-		xPtr := b.CreateExtractValue(x, 0, "")
-		yPtr := b.CreateExtractValue(y, 0, "")
-		switch op {
-		case token.EQL: // ==
-			return b.CreateICmp(llvm.IntEQ, xPtr, yPtr, ""), nil
-		case token.NEQ: // !=
-			return b.CreateICmp(llvm.IntNE, xPtr, yPtr, ""), nil
-		default:
+		// Moxie: slices of comparable types support == and !=.
+		// Compare lengths first, then data byte-by-byte via runtime.
+		if op != token.EQL && op != token.NEQ {
 			return llvm.Value{}, b.makeError(pos, "todo: binop on slice: "+op.String())
+		}
+		xPtr := b.CreateExtractValue(x, 0, "")
+		xLen := b.CreateExtractValue(x, 1, "")
+		yPtr := b.CreateExtractValue(y, 0, "")
+		yLen := b.CreateExtractValue(y, 1, "")
+		elemSize := b.targetData.TypeAllocSize(b.getLLVMType(typ.Elem()))
+		elemSizeVal := llvm.ConstInt(b.uintptrType, elemSize, false)
+		result := b.createRuntimeCall("sliceEqual", []llvm.Value{xPtr, yPtr, xLen, yLen, elemSizeVal}, "")
+		switch op {
+		case token.EQL:
+			return result, nil
+		case token.NEQ:
+			return b.CreateNot(result, ""), nil
+		default:
+			panic("unreachable")
 		}
 	case *types.Array:
 		// Compare each array element and combine the result. From the spec:

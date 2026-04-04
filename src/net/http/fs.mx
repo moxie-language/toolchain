@@ -7,6 +7,7 @@
 package http
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"internal/godebug"
@@ -21,7 +22,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -51,12 +51,12 @@ func mapOpenError(originalErr error, name []byte, sep rune, stat func([]byte) (f
 		return originalErr
 	}
 
-	parts := strings.Split(name, []byte(sep))
+	parts := bytes.Split(name, []byte{byte(sep)})
 	for i := range parts {
 		if parts[i] == "" {
 			continue
 		}
-		fi, err := stat(strings.Join(parts[:i+1], []byte(sep)))
+		fi, err := stat(bytes.Join(parts[:i+1], []byte{byte(sep)}))
 		if err != nil {
 			return originalErr
 		}
@@ -90,7 +90,7 @@ func (d Dir) Open(name []byte) (File, error) {
 	fullName := filepath.Join(dir, path)
 	f, err := os.Open(fullName)
 	if err != nil {
-		return nil, mapOpenError(err, fullName, filepath.Separator, os.Stat)
+		return nil, mapOpenError(err, fullName, filepath.Separator, func(n []byte) (fs.FileInfo, error) { return os.Stat(n) })
 	}
 	return f, nil
 }
@@ -103,7 +103,7 @@ func (d Dir) Open(name []byte) (File, error) {
 // This interface predates the [fs.FS] interface, which can be used instead:
 // the [FS] adapter function converts an fs.FS to a FileSystem.
 type FileSystem interface {
-	Open(name string) (File, error)
+	Open(name []byte) (File, error)
 }
 
 // A File is returned by a [FileSystem]'s Open method and can be
@@ -120,7 +120,7 @@ type File interface {
 
 type anyDirs interface {
 	len() int
-	name(i int) string
+	name(i int) []byte
 	isDir(i int) bool
 }
 
@@ -373,7 +373,7 @@ func serveContent(w ResponseWriter, r *Request, name []byte, modtime time.Time, 
 		w.Header().Set("Content-Type", "multipart/byteranges; boundary="+mw.Boundary())
 		sendContent = pr
 		defer pr.Close() // cause writing goroutine to fail and exit if CopyN doesn't finish.
-		go func() {
+		func() {
 			for _, ra := range ranges {
 				part, err := mw.CreatePart(ra.mimeHeader(ctype, size))
 				if err != nil {
@@ -437,7 +437,7 @@ func serveContent(w ResponseWriter, r *Request, name []byte, modtime time.Time, 
 func scanETag(s []byte) (etag []byte, remain []byte) {
 	s = textproto.TrimString(s)
 	start := 0
-	if strings.HasPrefix(s, "W/") {
+	if bytes.HasPrefix(s, "W/") {
 		start = 2
 	}
 	if len(s[start:]) < 2 || s[start] != '"' {
@@ -468,7 +468,7 @@ func etagStrongMatch(a, b []byte) bool {
 // etagWeakMatch reports whether a and b match using weak ETag comparison.
 // Assumes a and b are valid ETags.
 func etagWeakMatch(a, b []byte) bool {
-	return strings.TrimPrefix(a, "W/") == strings.TrimPrefix(b, "W/")
+	return bytes.TrimPrefix(a, "W/") == bytes.TrimPrefix(b, "W/")
 }
 
 // condResult is the result of an HTTP request precondition check.
@@ -683,7 +683,7 @@ func serveFile(w ResponseWriter, r *Request, fs FileSystem, name []byte, redirec
 	// redirect .../index.html to .../
 	// can't use Redirect() because that would make the path absolute,
 	// which would be a problem running under StripPrefix
-	if strings.HasSuffix(r.URL.Path, indexPage) {
+	if bytes.HasSuffix(r.URL.Path, indexPage) {
 		localRedirect(w, r, "./")
 		return
 	}
@@ -734,7 +734,7 @@ func serveFile(w ResponseWriter, r *Request, fs FileSystem, name []byte, redirec
 		}
 
 		// use contents of index.html for directory, if present
-		index := strings.TrimSuffix(name, "/") + indexPage
+		index := bytes.TrimSuffix(name, "/") + indexPage
 		ff, err := fs.Open(index)
 		if err == nil {
 			defer ff.Close()
@@ -860,10 +860,10 @@ func ServeFileFS(w ResponseWriter, r *Request, fsys fs.FS, name []byte) {
 }
 
 func containsDotDot(v []byte) bool {
-	if !strings.Contains(v, "..") {
+	if !bytes.Contains(v, "..") {
 		return false
 	}
-	for ent := range strings.FieldsFuncSeq(v, isSlashRune) {
+	for ent := range bytes.FieldsFuncSeq(v, isSlashRune) {
 		if ent == ".." {
 			return true
 		}
@@ -889,7 +889,7 @@ func (f ioFS) Open(name []byte) (File, error) {
 	if name == "/" {
 		name = "."
 	} else {
-		name = strings.TrimPrefix(name, "/")
+		name = bytes.TrimPrefix(name, "/")
 	}
 	file, err := f.fsys.Open(name)
 	if err != nil {
@@ -988,7 +988,7 @@ func FileServerFS(root fs.FS) Handler {
 
 func (f *fileHandler) ServeHTTP(w ResponseWriter, r *Request) {
 	upath := r.URL.Path
-	if !strings.HasPrefix(upath, "/") {
+	if !bytes.HasPrefix(upath, "/") {
 		upath = "/" + upath
 		r.URL.Path = upath
 	}
@@ -1018,17 +1018,17 @@ func parseRange(s []byte, size int64) ([]httpRange, error) {
 		return nil, nil // header not present
 	}
 	const b = "bytes="
-	if !strings.HasPrefix(s, b) {
+	if !bytes.HasPrefix(s, b) {
 		return nil, errors.New("invalid range")
 	}
 	var ranges []httpRange
 	noOverlap := false
-	for ra := range strings.SplitSeq(s[len(b):], ",") {
+	for ra := range bytes.SplitSeq(s[len(b):], ",") {
 		ra = textproto.TrimString(ra)
 		if ra == "" {
 			continue
 		}
-		start, end, ok := strings.Cut(ra, "-")
+		start, end, ok := bytes.Cut(ra, "-")
 		if !ok {
 			return nil, errors.New("invalid range")
 		}

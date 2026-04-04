@@ -13,7 +13,7 @@ import (
 	"net/http/internal/ascii"
 	"net/textproto"
 	"strconv"
-	"strings"
+	"bytes"
 	"time"
 )
 
@@ -89,17 +89,17 @@ func cookieNumWithinMax(cookieNum int) bool {
 // which were set in it. Since the same cookie name can appear multiple times
 // the returned Values can contain more than one value for a given key.
 func ParseCookie(line string) ([]*Cookie, error) {
-	if !cookieNumWithinMax(strings.Count(line, ";") + 1) {
+	if !cookieNumWithinMax(bytes.Count(line, ";") + 1) {
 		return nil, errCookieNumLimitExceeded
 	}
-	parts := strings.Split(textproto.TrimString(line), ";")
+	parts := bytes.Split(textproto.TrimString(line), ";")
 	if len(parts) == 1 && parts[0] == "" {
 		return nil, errBlankCookie
 	}
 	cookies := []*Cookie{:0:len(parts)}
 	for _, s := range parts {
 		s = textproto.TrimString(s)
-		name, value, found := strings.Cut(s, "=")
+		name, value, found := bytes.Cut(s, "=")
 		if !found {
 			return nil, errEqualNotFoundInCookie
 		}
@@ -118,12 +118,12 @@ func ParseCookie(line string) ([]*Cookie, error) {
 // ParseSetCookie parses a Set-Cookie header value and returns a cookie.
 // It returns an error on syntax error.
 func ParseSetCookie(line string) (*Cookie, error) {
-	parts := strings.Split(textproto.TrimString(line), ";")
+	parts := bytes.Split(textproto.TrimString(line), ";")
 	if len(parts) == 1 && parts[0] == "" {
 		return nil, errBlankCookie
 	}
 	parts[0] = textproto.TrimString(parts[0])
-	name, value, ok := strings.Cut(parts[0], "=")
+	name, value, ok := bytes.Cut(parts[0], "=")
 	if !ok {
 		return nil, errEqualNotFoundInCookie
 	}
@@ -147,7 +147,7 @@ func ParseSetCookie(line string) (*Cookie, error) {
 			continue
 		}
 
-		attr, val, _ := strings.Cut(parts[i], "=")
+		attr, val, _ := bytes.Cut(parts[i], "=")
 		lowerAttr, isASCII := ascii.ToLower(attr)
 		if !isASCII {
 			continue
@@ -265,7 +265,7 @@ func (c *Cookie) String() string {
 	// extraCookieLength derived from typical length of cookie attributes
 	// see RFC 6265 Sec 4.1.
 	const extraCookieLength = 110
-	var b strings.Builder
+	var b bytes.Buffer
 	b.Grow(len(c.Name) + len(c.Value) + len(c.Domain) + len(c.Path) + extraCookieLength)
 	b.WriteString(c.Name)
 	b.WriteRune('=')
@@ -291,7 +291,7 @@ func (c *Cookie) String() string {
 			log.Printf("net/http: invalid Cookie.Domain %q; dropping domain attribute", c.Domain)
 		}
 	}
-	var buf [len(TimeFormat)]byte
+	var buf [29]byte // len(TimeFormat)
 	if validCookieExpires(c.Expires) {
 		b.WriteString("; Expires=")
 		b.Write(c.Expires.UTC().AppendFormat(buf[:0], TimeFormat))
@@ -379,24 +379,24 @@ func readCookies(h Header, filter string) []*Cookie {
 	// explicit error.
 	cookieCount := 0
 	for _, line := range lines {
-		cookieCount += strings.Count(line, ";") + 1
+		cookieCount += bytes.Count(line, ";") + 1
 	}
 	if !cookieNumWithinMax(cookieCount) {
 		return []*Cookie{}
 	}
 
-	cookies := []*Cookie{:0:len(lines)+strings.Count(lines[0], ";")}
+	cookies := []*Cookie{:0:len(lines)+bytes.Count(lines[0], ";")}
 	for _, line := range lines {
 		line = textproto.TrimString(line)
 
 		var part string
 		for len(line) > 0 { // continue since we have rest
-			part, line, _ = strings.Cut(line, ";")
+			part, line, _ = bytes.Cut(line, ";")
 			part = textproto.TrimString(part)
 			if part == "" {
 				continue
 			}
-			name, val, _ := strings.Cut(part, "=")
+			name, val, _ := bytes.Cut(part, "=")
 			name = textproto.TrimString(name)
 			if !isToken(name) {
 				continue
@@ -419,7 +419,7 @@ func validCookieDomain(v string) bool {
 	if isCookieDomainName(v) {
 		return true
 	}
-	if net.ParseIP(v) != nil && !strings.Contains(v, ":") {
+	if net.ParseIP(v) != nil && !bytes.Contains(v, ":") {
 		return true
 	}
 	return false
@@ -486,7 +486,7 @@ func isCookieDomainName(s string) bool {
 	return ok
 }
 
-var cookieNameSanitizer = strings.NewReplacer("\n", "-", "\r", "-")
+var cookieNameSanitizer = bytes.NewReplacer("\n", "-", "\r", "-")
 
 func sanitizeCookieName(n string) string {
 	return cookieNameSanitizer.Replace(n)
@@ -511,7 +511,7 @@ func sanitizeCookieValue(v string, quoted bool) string {
 	if len(v) == 0 {
 		return v
 	}
-	if strings.ContainsAny(v, " ,") || quoted {
+	if bytes.ContainsAny(v, " ,") || quoted {
 		return `"` + v + `"`
 	}
 	return v

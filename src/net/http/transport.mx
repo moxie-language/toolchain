@@ -27,7 +27,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"reflect"
-	"strings"
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -140,7 +140,7 @@ type Transport struct {
 	// A RoundTrip call that initiates a dial may end up using
 	// a connection dialed previously when the earlier connection
 	// becomes idle before the later DialContext completes.
-	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	DialContext func(ctx context.Context, network, addr []byte) (net.Conn, error)
 
 	// Dial specifies the dial function for creating unencrypted TCP connections.
 	//
@@ -647,7 +647,7 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 
 	// Convert Request.Cancel into context cancelation.
 	if origReq.Cancel != nil {
-		go awaitLegacyCancel(ctx, cancel, origReq)
+		awaitLegacyCancel(ctx, cancel, origReq)
 	}
 
 	// Convert Transport.CancelRequest into context cancelation.
@@ -1185,7 +1185,7 @@ func (t *Transport) queueForIdleConn(w *wantConn) (delivered bool) {
 				// Async cleanup. Launch in its own goroutine (as if a
 				// time.AfterFunc called it); it acquires idleMu, which we're
 				// holding, and does a synchronous net.Conn.Close.
-				go pconn.closeConnIfStillIdle()
+				pconn.closeConnIfStillIdle()
 			}
 			if pconn.isBroken() || tooOld {
 				// If either persistConn.readLoop has marked the connection
@@ -1596,7 +1596,7 @@ func (t *Transport) queueForDial(w *wantConn) {
 func (t *Transport) startDialConnForLocked(w *wantConn) {
 	t.dialsInProgress.cleanFrontCanceled()
 	t.dialsInProgress.pushBack(w)
-	go func() {
+	func() {
 		t.dialConnFor(w)
 		t.connsPerHostMu.Lock()
 		defer t.connsPerHostMu.Unlock()
@@ -1699,7 +1699,7 @@ func (pconn *persistConn) addTLS(ctx context.Context, name string, trace *httptr
 			errc <- tlsHandshakeTimeoutError{}
 		})
 	}
-	go func() {
+	func() {
 		if trace != nil && trace.TLSHandshakeStart != nil {
 			trace.TLSHandshakeStart()
 		}
@@ -1767,7 +1767,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 				trace.TLSHandshakeStart()
 			}
 			if err := tc.HandshakeContext(ctx); err != nil {
-				go pconn.conn.Close()
+				pconn.conn.Close()
 				if trace != nil && trace.TLSHandshakeDone != nil {
 					trace.TLSHandshakeDone(tls.ConnectionState{}, err)
 				}
@@ -1864,7 +1864,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 			err  error // write or read error
 		)
 		// Write the CONNECT request & read the response.
-		go func() {
+		func() {
 			defer close(didReadResponse)
 			err = connectReq.Write(conn)
 			if err != nil {
@@ -1897,7 +1897,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 		}
 
 		if resp.StatusCode != 200 {
-			_, text, ok := strings.Cut(resp.Status, " ")
+			_, text, ok := bytes.Cut(resp.Status, " ")
 			conn.Close()
 			if !ok {
 				return nil, errors.New("unknown status code")
@@ -1944,8 +1944,8 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 	pconn.br = bufio.NewReaderSize(pconn, t.readBufferSize())
 	pconn.bw = bufio.NewWriterSize(persistConnWriter{pconn}, t.writeBufferSize())
 
-	go pconn.readLoop()
-	go pconn.writeLoop()
+	pconn.readLoop()
+	pconn.writeLoop()
 	return pconn, nil
 }
 
@@ -2041,7 +2041,7 @@ func (cm *connectMethod) addr() string {
 func (cm *connectMethod) tlsHost() string {
 	h := cm.targetAddr
 	if hasPort(h) {
-		h = h[:strings.LastIndex(h, ":")]
+		h = h[:bytes.LastIndex(h, ":")]
 	}
 	return h
 }

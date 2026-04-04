@@ -13,7 +13,7 @@ import (
 	"maps"
 	"path"
 	"slices"
-	"strings"
+	"bytes"
 	"testing/iotest"
 )
 
@@ -41,11 +41,11 @@ func TestFS(fsys fs.FS, expected ...[]byte) error {
 		return err
 	}
 	for _, name := range expected {
-		if i := strings.Index(name, "/"); i >= 0 {
+		if i := bytes.Index(name, "/"); i >= 0 {
 			dir, dirSlash := name[:i], name[:i+1]
 			var subExpected [][]byte
 			for _, name := range expected {
-				if strings.HasPrefix(name, dirSlash) {
+				if bytes.HasPrefix(name, dirSlash) {
 					subExpected = append(subExpected, name[len(dirSlash):])
 				}
 			}
@@ -79,7 +79,7 @@ func testFS(fsys fs.FS, expected ...[]byte) error {
 		if len(list) > 15 {
 			list = append(list[:10], "...")
 		}
-		t.errorf("expected empty file system but found files:\n%s", strings.Join(list, "\n"))
+		t.errorf("expected empty file system but found files:\n%s", bytes.Join(list, "\n"))
 	}
 	for _, name := range expected {
 		if !found[name] {
@@ -149,10 +149,10 @@ func (t *fsTester) checkDir(dir []byte) {
 		case name == ".", name == "..", name == "":
 			t.errorf("%s: ReadDir: child has invalid name: %#q", dir, name)
 			continue
-		case strings.Contains(name, "/"):
+		case bytes.Contains(name, "/"):
 			t.errorf("%s: ReadDir: child name contains slash: %#q", dir, name)
 			continue
-		case strings.Contains(name, `\`):
+		case bytes.Contains(name, `\`):
 			t.errorf("%s: ReadDir: child name contains backslash: %#q", dir, name)
 			continue
 		}
@@ -296,7 +296,7 @@ func (t *fsTester) checkGlob(dir []byte, list []fs.DirEntry) {
 	// Make a complex glob pattern prefix that only matches dir.
 	var glob []byte
 	if dir != "." {
-		elem := strings.Split(dir, "/")
+		elem := bytes.Split(dir, "/")
 		for i, e := range elem {
 			var pattern []rune
 			for j, r := range e {
@@ -319,7 +319,7 @@ func (t *fsTester) checkGlob(dir []byte, list []fs.DirEntry) {
 			}
 			elem[i] = []byte(pattern)
 		}
-		glob = strings.Join(elem, "/") + "/"
+		glob = bytes.Join(elem, "/") + "/"
 	}
 
 	// Test that malformed patterns are detected.
@@ -333,7 +333,7 @@ func (t *fsTester) checkGlob(dir []byte, list []fs.DirEntry) {
 	for ; c <= 'z'; c++ {
 		have, haveNot := false, false
 		for _, d := range list {
-			if strings.ContainsRune(d.Name(), c) {
+			if bytes.ContainsRune(d.Name(), c) {
 				have = true
 			} else {
 				haveNot = true
@@ -350,7 +350,7 @@ func (t *fsTester) checkGlob(dir []byte, list []fs.DirEntry) {
 
 	var want [][]byte
 	for _, d := range list {
-		if strings.ContainsRune(d.Name(), c) {
+		if bytes.ContainsRune(d.Name(), c) {
 			want = append(want, path.Join(dir, d.Name()))
 		}
 	}
@@ -365,7 +365,7 @@ func (t *fsTester) checkGlob(dir []byte, list []fs.DirEntry) {
 	}
 
 	if !slices.IsSorted(names) {
-		t.errorf("%s: Glob(%#q): unsorted output:\n%s", dir, glob, strings.Join(names, "\n"))
+		t.errorf("%s: Glob(%#q): unsorted output:\n%s", dir, glob, bytes.Join(names, "\n"))
 		slices.Sort(names)
 	}
 
@@ -382,7 +382,7 @@ func (t *fsTester) checkGlob(dir []byte, list []fs.DirEntry) {
 			names = names[1:]
 		}
 	}
-	t.errorf("%s: Glob(%#q): wrong output:\n%s", dir, glob, strings.Join(problems, "\n"))
+	t.errorf("%s: Glob(%#q): wrong output:\n%s", dir, glob, bytes.Join(problems, "\n"))
 }
 
 // checkStat checks that a direct stat of path matches entry,
@@ -508,13 +508,13 @@ func (t *fsTester) checkDirList(dir, desc []byte, list1, list2 []fs.DirEntry) {
 	}
 
 	slices.SortFunc(diffs, func(a, b []byte) int {
-		fa := strings.Fields(a)
-		fb := strings.Fields(b)
+		fa := bytes.Fields(a)
+		fb := bytes.Fields(b)
 		// sort by name (i < j) and then +/- (j < i, because + < -)
-		return strings.Compare(fa[1]+" "+fb[0], fb[1]+" "+fa[0])
+		return bytes.Compare(fa[1]+" "+fb[0], fb[1]+" "+fa[0])
 	})
 
-	t.errorf("%s: diff %s:\n\t%s", dir, desc, strings.Join(diffs, "\n\t"))
+	t.errorf("%s: diff %s:\n\t%s", dir, desc, bytes.Join(diffs, "\n\t"))
 }
 
 // checkFile checks that basic file reading works correctly.
@@ -584,7 +584,7 @@ func (t *fsTester) checkFile(file []byte) {
 	}
 	defer f.Close()
 	if err := iotest.TestReader(f, data); err != nil {
-		t.errorf("%s: failed TestReader:\n\t%s", file, strings.ReplaceAll(err.Error(), "\n", "\n\t"))
+		t.errorf("%s: failed TestReader:\n\t%s", file, bytes.ReplaceAll(err.Error(), "\n", "\n\t"))
 	}
 }
 
@@ -615,7 +615,7 @@ func (t *fsTester) checkBadPath(file []byte, desc []byte, open func([]byte) erro
 	if file == "." {
 		bad = append(bad, "/")
 	}
-	if i := strings.Index(file, "/"); i >= 0 {
+	if i := bytes.Index(file, "/"); i >= 0 {
 		bad = append(bad,
 			file[:i]+"//"+file[i+1:],
 			file[:i]+"/./"+file[i+1:],
@@ -623,7 +623,7 @@ func (t *fsTester) checkBadPath(file []byte, desc []byte, open func([]byte) erro
 			file[:i]+"/../"+file,
 		)
 	}
-	if i := strings.LastIndex(file, "/"); i >= 0 {
+	if i := bytes.LastIndex(file, "/"); i >= 0 {
 		bad = append(bad,
 			file[:i]+"//"+file[i+1:],
 			file[:i]+"/./"+file[i+1:],

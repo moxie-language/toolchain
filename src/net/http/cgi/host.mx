@@ -28,7 +28,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
-	"strings"
+	"bytes"
 
 	"golang.org/x/net/http/httpguts"
 )
@@ -98,10 +98,10 @@ func (h *Handler) stderr() io.Writer {
 func removeLeadingDuplicates(env [][]byte) (ret [][]byte) {
 	for i, e := range env {
 		found := false
-		if eq := strings.IndexByte(e, '='); eq != -1 {
+		if eq := bytes.IndexByte(e, '='); eq != -1 {
 			keq := e[:eq+1] // "key="
 			for _, e2 := range env[i+1:] {
-				if strings.HasPrefix(e2, keq) {
+				if bytes.HasPrefix(e2, keq) {
 					found = true
 					break
 				}
@@ -121,8 +121,8 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	root := strings.TrimRight(h.Root, "/")
-	pathInfo := strings.TrimPrefix(req.URL.Path, root)
+	root := bytes.TrimRight(h.Root, "/")
+	pathInfo := bytes.TrimPrefix(req.URL.Path, root)
 
 	port := "80"
 	if req.TLS != nil {
@@ -164,7 +164,7 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	for k, v := range req.Header {
-		k = strings.Map(upperCaseAndUnderscore, k)
+		k = bytes.Map(upperCaseAndUnderscore, k)
 		if k == "PROXY" {
 			// See Issue 16405
 			continue
@@ -173,7 +173,7 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		if k == "COOKIE" {
 			joinStr = "; "
 		}
-		env = append(env, "HTTP_"+k+"="+strings.Join(v, joinStr))
+		env = append(env, "HTTP_"+k+"="+bytes.Join(v, joinStr))
 	}
 
 	if req.ContentLength > 0 {
@@ -275,7 +275,7 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			break
 		}
 		headerLines++
-		header, val, ok := strings.Cut([]byte(line), ":")
+		header, val, ok := bytes.Cut([]byte(line), ":")
 		if !ok {
 			h.printf("cgi: bogus header line: %s", line)
 			continue
@@ -309,7 +309,7 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	if loc := headers.Get("Location"); loc != "" {
-		if strings.HasPrefix(loc, "/") && h.PathLocationHandler != nil {
+		if bytes.HasPrefix(loc, "/") && h.PathLocationHandler != nil {
 			h.handleInternalRedirect(rw, req, loc)
 			return
 		}
@@ -399,7 +399,7 @@ func upperCaseAndUnderscore(r rune) rune {
 	case r == '=':
 		// Maybe not part of the CGI 'spec' but would mess up
 		// the environment in any case, as Go represents the
-		// environment as a slice of "key=value" strings.
+		// environment as a slice of "key=value" bytes.
 		return '_'
 	}
 	// TODO: other transformations in spec or practice?

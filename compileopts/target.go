@@ -96,7 +96,7 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			platformVersion = "11.0.0"
 		}
 		llvmvendor = "apple"
-		spec.Scheduler = "tasks" // moxie: cooperative, not threads
+		spec.Scheduler = "none" // moxie: no goroutines
 		spec.Linker = "ld.lld"
 		spec.Libc = "darwin-libSystem"
 		llvmos = "macosx" + platformVersion
@@ -114,7 +114,7 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"src/internal/futex/futex_darwin.c")
 	case "linux":
 		spec.GC = "boehm"
-		spec.Scheduler = "tasks" // moxie: cooperative, not threads
+		spec.Scheduler = "none" // moxie: no goroutines
 		spec.Linker = "ld.lld"
 		spec.RTLib = "compiler-rt"
 		spec.Libc = "musl"
@@ -129,7 +129,7 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"src/internal/futex/futex_linux.c")
 	case "js":
 		spec.GC = "leaking"
-		spec.Scheduler = "tasks"
+		spec.Scheduler = "none" // moxie: no goroutines
 		spec.Linker = "wasm-ld"
 		spec.BuildTags = append(spec.BuildTags, "moxie.wasm", "moxie.unicore")
 		spec.LDFlags = append(spec.LDFlags,

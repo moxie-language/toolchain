@@ -26,7 +26,6 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -484,7 +483,7 @@ type response struct {
 	handlerDone atomic.Bool // set true when the handler exits
 
 	// Buffers for Date, Content-Length, and status code
-	dateBuf   [len(TimeFormat)]byte
+	dateBuf   [29]byte // len(TimeFormat)
 	clenBuf   [10]byte
 	statusBuf [3]byte
 
@@ -529,7 +528,7 @@ const TrailerPrefix = "Trailer:"
 func (w *response) finalTrailers() Header {
 	var t Header
 	for k, vv := range w.handlerHeader {
-		if kk, found := strings.CutPrefix(k, TrailerPrefix); found {
+		if kk, found := bytes.CutPrefix(k, TrailerPrefix); found {
 			if t == nil {
 				t = make(Header)
 			}
@@ -695,7 +694,7 @@ func (cr *connReader) startBackgroundRead() {
 	}
 	cr.inRead = true
 	cr.rwc.SetReadDeadline(time.Time{})
-	go cr.backgroundRead()
+	cr.backgroundRead()
 }
 
 func (cr *connReader) backgroundRead() {
@@ -1172,7 +1171,7 @@ func relevantCaller() runtime.Frame {
 	var frame runtime.Frame
 	for {
 		frame, more := frames.Next()
-		if !strings.HasPrefix(frame.Function, "net/http.") {
+		if !bytes.HasPrefix(frame.Function, "net/http.") {
 			return frame
 		}
 		if !more {
@@ -1330,7 +1329,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	// Don't write out the fake "Trailer:foo" keys. See TrailerPrefix.
 	trailers := false
 	for k := range cw.header {
-		if strings.HasPrefix(k, TrailerPrefix) {
+		if bytes.HasPrefix(k, TrailerPrefix) {
 			if excludeHeader == nil {
 				excludeHeader = map[string]bool{}
 			}
@@ -1578,11 +1577,11 @@ func foreachHeaderElement(v string, fn func(string)) {
 	if v == "" {
 		return
 	}
-	if !strings.Contains(v, ",") {
+	if !bytes.Contains(v, ",") {
 		fn(v)
 		return
 	}
-	for f := range strings.SplitSeq(v, ",") {
+	for f := range bytes.SplitSeq(v, ",") {
 		if f = textproto.TrimString(f); f != "" {
 			fn(f)
 		}
@@ -2372,8 +2371,8 @@ func StripPrefix(prefix string, h Handler) Handler {
 		return h
 	}
 	return HandlerFunc(func(w ResponseWriter, r *Request) {
-		p := strings.TrimPrefix(r.URL.Path, prefix)
-		rp := strings.TrimPrefix(r.URL.RawPath, prefix)
+		p := bytes.TrimPrefix(r.URL.Path, prefix)
+		rp := bytes.TrimPrefix(r.URL.RawPath, prefix)
 		if len(p) < len(r.URL.Path) && (r.URL.RawPath == "" || len(rp) < len(r.URL.RawPath)) {
 			r2 := &Request{}
 			*r2 = *r
@@ -2421,14 +2420,14 @@ func Redirect(w ResponseWriter, r *Request, url string, code int) {
 			}
 
 			var query string
-			if i := strings.Index(url, "?"); i != -1 {
+			if i := bytes.Index(url, "?"); i != -1 {
 				url, query = url[:i], url[i:]
 			}
 
 			// clean up but preserve trailing slash
-			trailing := strings.HasSuffix(url, "/")
+			trailing := bytes.HasSuffix(url, "/")
 			url = path.Clean(url)
-			if trailing && !strings.HasSuffix(url, "/") {
+			if trailing && !bytes.HasSuffix(url, "/") {
 				url += "/"
 			}
 			url += query
@@ -2455,7 +2454,7 @@ func Redirect(w ResponseWriter, r *Request, url string, code int) {
 	}
 }
 
-var htmlReplacer = strings.NewReplacer(
+var htmlReplacer = bytes.NewReplacer(
 	"&", "&amp;",
 	"<", "&lt;",
 	">", "&gt;",
@@ -2638,7 +2637,7 @@ func cleanPath(p string) string {
 	// put the trailing slash back if necessary.
 	if p[len(p)-1] == '/' && np != "/" {
 		// Fast path for common case of p being the string we want:
-		if len(p) == len(np)+1 && strings.HasPrefix(p, np) {
+		if len(p) == len(np)+1 && bytes.HasPrefix(p, np) {
 			np = p
 		} else {
 			np += "/"
@@ -2650,7 +2649,7 @@ func cleanPath(p string) string {
 // stripHostPort returns h without any trailing ":<port>".
 func stripHostPort(h string) string {
 	// If no port on host, return unchanged
-	if !strings.Contains(h, ":") {
+	if !bytes.Contains(h, ":") {
 		return h
 	}
 	host, _, err := net.SplitHostPort(h)
@@ -2692,7 +2691,7 @@ func (mux *ServeMux) Handler(r *Request) (h Handler, pattern string) {
 // If there is a matching handler, it returns it and the pattern that matched.
 // Otherwise it returns a Redirect or NotFound handler with the path that would match
 // after the redirect.
-func (mux *ServeMux) findHandler(r *Request) (h Handler, patStr string, _ *pattern, matches []string) {
+func (mux *ServeMux) findHandler(r *Request) (h Handler, patStr string, _ *pattern, matches [][]byte) {
 	var n *routingNode
 	host := r.URL.Host
 	escapedPath := r.URL.EscapedPath()
@@ -2739,7 +2738,7 @@ func (mux *ServeMux) findHandler(r *Request) (h Handler, patStr string, _ *patte
 		allowedMethods := mux.matchingMethods(host, path)
 		if len(allowedMethods) > 0 {
 			return HandlerFunc(func(w ResponseWriter, r *Request) {
-				w.Header().Set("Allow", strings.Join(allowedMethods, ", "))
+				w.Header().Set("Allow", bytes.Join(allowedMethods, ", "))
 				Error(w, StatusText(StatusMethodNotAllowed), StatusMethodNotAllowed)
 			}), "", nil, nil
 		}
@@ -2754,14 +2753,14 @@ func (mux *ServeMux) findHandler(r *Request) (h Handler, patStr string, _ *patte
 // redirection: when a path doesn't match exactly, the match is tried again
 // after appending "/" to the path. If that second match succeeds, the last
 // return value is the URL to redirect to.
-func (mux *ServeMux) matchOrRedirect(host, method, path string, u *url.URL) (_ *routingNode, matches []string, redirectTo *url.URL) {
+func (mux *ServeMux) matchOrRedirect(host, method, path string, u *url.URL) (_ *routingNode, matches [][]byte, redirectTo *url.URL) {
 	mux.mu.RLock()
 	defer mux.mu.RUnlock()
 
 	n, matches := mux.tree.match(host, method, path)
 	// If we have an exact match, or we were asked not to try trailing-slash redirection,
 	// or the URL already has a trailing slash, then we're done.
-	if !exactMatch(n, path) && u != nil && !strings.HasSuffix(path, "/") {
+	if !exactMatch(n, path) && u != nil && !bytes.HasSuffix(path, "/") {
 		// If there is an exact match with a trailing slash, then redirect.
 		path += "/"
 		n2, _ := mux.tree.match(host, method, path)
@@ -2824,7 +2823,7 @@ func exactMatch(n *routingNode, path string) bool {
 	// For the match to be exact, the number of pattern
 	// segments should be the same as the number of slashes in the path.
 	// E.g. "/a/b/{$}" and "/a/b/{...}" exactly match "/a/b/", but "/a/" does not.
-	return len(n.pattern.segments) == strings.Count(path, "/")
+	return len(n.pattern.segments) == bytes.Count(path, "/")
 }
 
 // matchingMethods return a sorted list of all methods that would match with the given host and path.
@@ -2836,7 +2835,7 @@ func (mux *ServeMux) matchingMethods(host, path string) []string {
 	ms := map[string]bool{}
 	mux.tree.matchingMethods(host, path, ms)
 	// matchOrRedirect will try appending a trailing slash if there is no match.
-	if !strings.HasSuffix(path, "/") {
+	if !bytes.HasSuffix(path, "/") {
 		mux.tree.matchingMethods(host, path+"/", ms)
 	}
 	return slices.Sorted(maps.Keys(ms))
@@ -3182,7 +3181,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	lnerr := s.closeListenersLocked()
 	for _, f := range s.onShutdown {
-		go f()
+		f()
 	}
 	s.mu.Unlock()
 	s.listenerGroup.Wait()
@@ -3353,12 +3352,12 @@ func badServeHTTP(serverHandler, ResponseWriter, *Request)
 // AllowQuerySemicolons should be invoked before [Request.ParseForm] is called.
 func AllowQuerySemicolons(h Handler) Handler {
 	return HandlerFunc(func(w ResponseWriter, r *Request) {
-		if strings.Contains(r.URL.RawQuery, ";") {
+		if bytes.Contains(r.URL.RawQuery, ";") {
 			r2 := &Request{}
 			*r2 = *r
 			r2.URL = &url.URL{}
 			*r2.URL = *r.URL
-			r2.URL.RawQuery = strings.ReplaceAll(r.URL.RawQuery, ";", "&")
+			r2.URL.RawQuery = bytes.ReplaceAll(r.URL.RawQuery, ";", "&")
 			h.ServeHTTP(w, r2)
 		} else {
 			h.ServeHTTP(w, r)
@@ -3490,7 +3489,7 @@ func (s *Server) Serve(l net.Listener) error {
 		tempDelay = 0
 		c := s.newConn(rw)
 		c.setState(c.rwc, StateNew, runHooks) // before Serve can return
-		go c.serve(connCtx)
+		c.serve(connCtx)
 	}
 }
 
@@ -3559,7 +3558,7 @@ func (s *Server) protocols() Protocols {
 
 // adjustNextProtos adds or removes "http/1.1" and "h2" entries from
 // a tls.Config.NextProtos list, according to the set of protocols in protos.
-func adjustNextProtos(nextProtos []string, protos Protocols) []string {
+func adjustNextProtos(nextProtos [][]byte, protos Protocols) [][]byte {
 	// Make a copy of NextProtos since it might be shared with some other tls.Config.
 	// (tls.Config.Clone doesn't do a deep copy.)
 	//
@@ -3567,7 +3566,7 @@ func adjustNextProtos(nextProtos []string, protos Protocols) []string {
 	// is already in order, but this is just one small allocation per connection.
 	nextProtos = slices.Clone(nextProtos)
 	var have Protocols
-	nextProtos = slices.DeleteFunc(nextProtos, func(s string) bool {
+	nextProtos = slices.DeleteFunc(nextProtos, func(s []byte) bool {
 		switch s {
 		case "http/1.1":
 			if !protos.HTTP1() {
@@ -3857,7 +3856,7 @@ func (h *timeoutHandler) ServeHTTP(w ResponseWriter, r *Request) {
 		req: r,
 	}
 	panicChan := chan any{1}
-	go func() {
+	func() {
 		defer func() {
 			if p := recover(); p != nil {
 				panicChan <- p

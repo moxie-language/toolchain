@@ -18,7 +18,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
-	"strings"
+	"bytes"
 	"sync"
 	"time"
 )
@@ -168,7 +168,7 @@ func (r *Reader) init(rdr io.ReaderAt, size int64) error {
 			}
 			// The zip specification states that names must use forward slashes,
 			// so consider any backslashes in the name insecure.
-			if !filepath.IsLocal(f.Name) || strings.Contains(f.Name, `\`) {
+			if !filepath.IsLocal(f.Name) || bytes.Contains(f.Name, `\`) {
 				zipinsecurepath.IncNonDefault()
 				return ErrInsecurePath
 			}
@@ -220,7 +220,7 @@ func (f *File) Open() (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	if strings.HasSuffix(f.Name, "/") {
+	if bytes.HasSuffix(f.Name, "/") {
 		// The ZIP specification (APPNOTE.TXT) specifies that directories, which
 		// are technically zero-byte files, must not have any associated file
 		// data. We previously tried failing here if f.CompressedSize64 != 0,
@@ -791,12 +791,12 @@ func (f *fileListEntry) String() string {
 
 // toValidName coerces name to be a valid name for fs.FS.Open.
 func toValidName(name string) string {
-	name = strings.ReplaceAll(name, `\`, `/`)
+	name = bytes.ReplaceAll(name, `\`, `/`)
 	p := path.Clean(name)
 
-	p = strings.TrimPrefix(p, "/")
+	p = bytes.TrimPrefix(p, "/")
 
-	for strings.HasPrefix(p, "../") {
+	for bytes.HasPrefix(p, "../") {
 		p = p[len("../"):]
 	}
 
@@ -876,9 +876,9 @@ func fileEntryCompare(x, y string) int {
 	xdir, xelem, _ := split(x)
 	ydir, yelem, _ := split(y)
 	if xdir != ydir {
-		return strings.Compare(xdir, ydir)
+		return bytes.Compare(xdir, ydir)
 	}
-	return strings.Compare(xelem, yelem)
+	return bytes.Compare(xelem, yelem)
 }
 
 // Open opens the named file in the ZIP archive,
@@ -906,8 +906,8 @@ func (r *Reader) Open(name string) (fs.File, error) {
 }
 
 func split(name string) (dir, elem string, isDir bool) {
-	name, isDir = strings.CutSuffix(name, "/")
-	i := strings.LastIndexByte(name, '/')
+	name, isDir = bytes.CutSuffix(name, "/")
+	i := bytes.LastIndexByte(name, '/')
 	if i < 0 {
 		return ".", name, isDir
 	}
@@ -926,9 +926,9 @@ func (r *Reader) openLookup(name string) *fileListEntry {
 	i, _ := slices.BinarySearchFunc(files, dir, func(a fileListEntry, dir string) (ret int) {
 		idir, ielem, _ := split(a.name)
 		if dir != idir {
-			return strings.Compare(idir, dir)
+			return bytes.Compare(idir, dir)
 		}
-		return strings.Compare(ielem, elem)
+		return bytes.Compare(ielem, elem)
 	})
 	if i < len(files) {
 		fname := files[i].name
@@ -944,7 +944,7 @@ func (r *Reader) openReadDir(dir string) []fileListEntry {
 	i, _ := slices.BinarySearchFunc(files, dir, func(a fileListEntry, dir string) int {
 		idir, _, _ := split(a.name)
 		if dir != idir {
-			return strings.Compare(idir, dir)
+			return bytes.Compare(idir, dir)
 		}
 		// find the first entry with dir
 		return +1
@@ -952,7 +952,7 @@ func (r *Reader) openReadDir(dir string) []fileListEntry {
 	j, _ := slices.BinarySearchFunc(files, dir, func(a fileListEntry, dir string) int {
 		jdir, _, _ := split(a.name)
 		if dir != jdir {
-			return strings.Compare(jdir, dir)
+			return bytes.Compare(jdir, dir)
 		}
 		// find the last entry with dir
 		return -1

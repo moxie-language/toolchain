@@ -6,7 +6,7 @@ package comment
 
 import (
 	"slices"
-	"strings"
+	"bytes"
 	"unicode"
 	"unicode/utf8"
 )
@@ -244,7 +244,7 @@ type parseDoc struct {
 // the first chance to resolve it, in case there's a different package imported as math,
 // and otherwise we refer to a built-in list of single-element standard library package names.
 func (d *parseDoc) lookupPkg(pkg string) (importPath string, ok bool) {
-	if strings.Contains(pkg, "/") { // assume a full import path
+	if bytes.Contains(pkg, "/") { // assume a full import path
 		if validImportPath(pkg) {
 			return pkg, true
 		}
@@ -282,7 +282,7 @@ func DefaultLookupPackage(name string) (importPath string, ok bool) {
 // Parse parses the doc comment text and returns the *[Doc] form.
 // Comment markers (/* // and */) in the text must have already been removed.
 func (p *Parser) Parse(text string) *Doc {
-	lines := unindent(strings.Split(text, "\n"))
+	lines := unindent(bytes.Split(text, "\n"))
 	d := &parseDoc{
 		Parser:    p,
 		Doc:       &Doc{},
@@ -422,7 +422,7 @@ Spans:
 			// The heuristic will never trigger on a gofmt'ed comment,
 			// because any gofmt'ed code block or list would be
 			// followed by a blank line or end of comment.
-			if end < len(lines) && strings.HasPrefix(lines[end], "}") {
+			if end < len(lines) && bytes.HasPrefix(lines[end], "}") {
 				end++
 			}
 
@@ -461,7 +461,7 @@ Spans:
 						end--
 					}
 
-				case strings.HasSuffix(lines[i-1], "{") || strings.HasSuffix(lines[i-1], `\`):
+				case bytes.HasSuffix(lines[i-1], "{") || bytes.HasSuffix(lines[i-1], `\`):
 					// If the final unindented line ended in { or \
 					// it is probably the start of a misindented code block.
 					// Give the user a single line fix.
@@ -525,8 +525,8 @@ func unindent(lines []string) []string {
 
 	out := []string{:len(lines)}
 	for i, line := range lines {
-		line = strings.TrimPrefix(line, prefix)
-		if strings.TrimSpace(line) == "" {
+		line = bytes.TrimPrefix(line, prefix)
+		if bytes.TrimSpace(line) == "" {
 			line = ""
 		}
 		out[i] = line
@@ -570,7 +570,7 @@ func isOldHeading(line string, all []string, off int) bool {
 		return false
 	}
 
-	line = strings.TrimSpace(line)
+	line = bytes.TrimSpace(line)
 
 	// a heading must start with an uppercase letter
 	r, _ := utf8.DecodeRuneInString(line)
@@ -585,17 +585,17 @@ func isOldHeading(line string, all []string, off int) bool {
 	}
 
 	// exclude lines with illegal characters. we allow "(),"
-	if strings.ContainsAny(line, ";:!?+*/=[]{}_^°&§~%#@<\">\\") {
+	if bytes.ContainsAny(line, ";:!?+*/=[]{}_^°&§~%#@<\">\\") {
 		return false
 	}
 
 	// allow "'" for possessive "'s" only
 	for b := line; ; {
 		var ok bool
-		if _, b, ok = strings.Cut(b, "'"); !ok {
+		if _, b, ok = bytes.Cut(b, "'"); !ok {
 			break
 		}
-		if b != "s" && !strings.HasPrefix(b, "s ") {
+		if b != "s" && !bytes.HasPrefix(b, "s ") {
 			return false // ' not followed by s and then end-of-word
 		}
 	}
@@ -603,10 +603,10 @@ func isOldHeading(line string, all []string, off int) bool {
 	// allow "." when followed by non-space
 	for b := line; ; {
 		var ok bool
-		if _, b, ok = strings.Cut(b, "."); !ok {
+		if _, b, ok = bytes.Cut(b, "."); !ok {
 			break
 		}
-		if b == "" || strings.HasPrefix(b, " ") {
+		if b == "" || bytes.HasPrefix(b, " ") {
 			return false // not followed by non-space
 		}
 	}
@@ -616,7 +616,7 @@ func isOldHeading(line string, all []string, off int) bool {
 
 // oldHeading returns the *Heading for the given old-style section heading line.
 func (d *parseDoc) oldHeading(line string) Block {
-	return &Heading{Text: []Text{Plain(strings.TrimSpace(line))}}
+	return &Heading{Text: []Text{Plain(bytes.TrimSpace(line))}}
 }
 
 // isHeading reports whether line is a new-style section heading.
@@ -624,19 +624,19 @@ func isHeading(line string) bool {
 	return len(line) >= 2 &&
 		line[0] == '#' &&
 		(line[1] == ' ' || line[1] == '\t') &&
-		strings.TrimSpace(line) != "#"
+		bytes.TrimSpace(line) != "#"
 }
 
 // heading returns the *Heading for the given new-style section heading line.
 func (d *parseDoc) heading(line string) Block {
-	return &Heading{Text: []Text{Plain(strings.TrimSpace(line[1:]))}}
+	return &Heading{Text: []Text{Plain(bytes.TrimSpace(line[1:]))}}
 }
 
 // code returns a code block built from the lines.
 func (d *parseDoc) code(lines []string) *Code {
 	body := unindent(lines)
 	body = append(body, "") // to get final \n from Join
-	return &Code{Text: strings.Join(body, "\n")}
+	return &Code{Text: bytes.Join(body, "\n")}
 }
 
 // paragraph returns a paragraph block built from the lines.
@@ -660,7 +660,7 @@ func (d *parseDoc) paragraph(lines []string) Block {
 	return nil
 NoDefs:
 
-	return &Paragraph{Text: []Text{Plain(strings.Join(lines, "\n"))}}
+	return &Paragraph{Text: []Text{Plain(bytes.Join(lines, "\n"))}}
 }
 
 // parseLink parses a single link definition line:
@@ -672,14 +672,14 @@ func parseLink(line string) (*LinkDef, bool) {
 	if line == "" || line[0] != '[' {
 		return nil, false
 	}
-	i := strings.Index(line, "]:")
+	i := bytes.Index(line, "]:")
 	if i < 0 || i+3 >= len(line) || (line[i+2] != ' ' && line[i+2] != '\t') {
 		return nil, false
 	}
 
 	text := line[1:i]
-	url := strings.TrimSpace(line[i+3:])
-	j := strings.Index(url, "://")
+	url := bytes.TrimSpace(line[i+3:])
+	j := bytes.Index(url, "://")
 	if j < 0 || !isScheme(url[:j]) {
 		return nil, false
 	}
@@ -718,13 +718,13 @@ func (d *parseDoc) list(lines []string, forceBlankBefore bool) *List {
 			list.Items = append(list.Items, item)
 			line = after
 		}
-		line = strings.TrimSpace(line)
+		line = bytes.TrimSpace(line)
 		if line == "" {
 			list.ForceBlankBetween = true
 			flush()
 			continue
 		}
-		text = append(text, strings.TrimSpace(line))
+		text = append(text, bytes.TrimSpace(line))
 	}
 	flush()
 	return list
@@ -735,7 +735,7 @@ func (d *parseDoc) list(lines []string, forceBlankBefore bool) *List {
 // the rest of the line, and ok == true.
 // Otherwise, it returns "", "", false.
 func listMarker(line string) (num, rest string, ok bool) {
-	line = strings.TrimSpace(line)
+	line = bytes.TrimSpace(line)
 	if line == "" {
 		return "", "", false
 	}
@@ -756,7 +756,7 @@ func listMarker(line string) (num, rest string, ok bool) {
 		return "", "", false
 	}
 
-	if !indented(rest) || strings.TrimSpace(rest) == "" {
+	if !indented(rest) || bytes.TrimSpace(rest) == "" {
 		return "", "", false
 	}
 
@@ -849,7 +849,7 @@ func (d *parseDoc) docLink(text, before, after string) (link *DocLink, ok bool) 
 			return nil, false
 		}
 	}
-	text = strings.TrimPrefix(text, "*")
+	text = bytes.TrimPrefix(text, "*")
 	pkg, name, ok := splitDocName(text)
 	var recv string
 	if ok {
@@ -876,7 +876,7 @@ func (d *parseDoc) docLink(text, before, after string) (link *DocLink, ok bool) 
 // then splitDocName returns before, name, true.
 // Otherwise it returns text, "", false.
 func splitDocName(text string) (before, name string, foundDot bool) {
-	i := strings.LastIndex(text, ".")
+	i := bytes.LastIndex(text, ".")
 	name = text[i+1:]
 	if !isName(name) {
 		return text, "", false
@@ -894,7 +894,7 @@ func splitDocName(text string) (before, name string, foundDot bool) {
 // If autoLink is true, then parseText recognizes URLs and words from d.Words
 // and converts those to links as appropriate.
 func (d *parseDoc) parseText(out []Text, s string, autoLink bool) []Text {
-	var w strings.Builder
+	var w bytes.Buffer
 	wrote := 0
 	writeUntil := func(i int) {
 		w.WriteString(s[wrote:i])
@@ -940,7 +940,7 @@ func (d *parseDoc) parseText(out []Text, s string, autoLink bool) []Text {
 			}
 		}
 		switch {
-		case strings.HasPrefix(t, "``"):
+		case bytes.HasPrefix(t, "``"):
 			if len(t) >= 3 && t[2] == '`' {
 				// Do not convert `` inside ```, in case people are mistakenly writing Markdown.
 				i += 3
@@ -953,7 +953,7 @@ func (d *parseDoc) parseText(out []Text, s string, autoLink bool) []Text {
 			w.WriteRune('“')
 			i += 2
 			wrote = i
-		case strings.HasPrefix(t, "''"):
+		case bytes.HasPrefix(t, "''"):
 			writeUntil(i)
 			w.WriteRune('”')
 			i += 2
@@ -1210,7 +1210,7 @@ func validImportPath(path string) bool {
 	if path[0] == '-' {
 		return false
 	}
-	if strings.Contains(path, "//") {
+	if bytes.Contains(path, "//") {
 		return false
 	}
 	if path[len(path)-1] == '/' {

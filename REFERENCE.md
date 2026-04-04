@@ -27,7 +27,7 @@ Moxie recognizes all Go keywords. The following have restricted or altered seman
 | Keyword | Status |
 |---------|--------|
 | `fallthrough` | **Compile error.** Each case must be self-contained. |
-| `go` | Starts a goroutine within the current domain. |
+| `go` | **Compile error.** There are no goroutines. Use channels + `select` for event dispatch, `spawn` for process-level parallelism. |
 
 All other keywords (`break`, `case`, `chan`, `const`, `continue`, `default`, `defer`, `else`, `for`, `func`, `goto`, `if`, `import`, `interface`, `map`, `package`, `range`, `return`, `select`, `struct`, `switch`, `type`, `var`) behave identically to Go.
 
@@ -108,7 +108,22 @@ Identical to Go. Fixed-size, value-type.
 SliceType = "[" "]" ElementType .
 ```
 
-Identical to Go. Dynamic-length view over a backing array.
+Dynamic-length view over a backing array.
+
+#### Slice Equality
+
+Any slice of a comparable element type supports `==` and `!=`. Two slices are equal if they have the same length and identical elements:
+
+```go
+a := []int32{1, 2, 3}
+b := []int32{1, 2, 3}
+println(a == b) // true
+
+m := map[[]byte]int32{}  // slices can be map keys
+m[[]byte("key")] = 42
+```
+
+Go restricts `==` to arrays and excludes slices. Moxie lifts this restriction: if the element type is comparable, the slice is comparable. This follows from string=[]byte — if `"hello" == "hello"` works, then `[]byte{1,2} == []byte{1,2}` should too.
 
 ### Struct Types
 
@@ -299,7 +314,7 @@ All other statements (`go`, `defer`, `select`, `for`, `if`, `return`, `break`, `
 func spawn(fn FuncType, args ...T) chan struct{}
 ```
 
-`spawn` creates a new **domain** — an isolated execution context with its own cooperative scheduler, heap, and goroutine run queue. On native targets, the domain is an OS process created via `fork()`. On JavaScript targets, the domain is a Web Worker or Service Worker.
+`spawn` creates a new **domain** — an isolated execution context with its own single-threaded event loop and heap. On native targets, the domain is an OS process created via `fork()`. On JavaScript targets, the domain is a Web Worker or Service Worker.
 
 `spawn` is a language builtin. No import is required.
 
@@ -407,10 +422,9 @@ On Linux and Darwin:
 4. **Parent:** closes child's socket end, registers the domain (pid + fd), continues execution.
 
 Each domain has its own:
-- Cooperative scheduler and run queue
-- Goroutines and channel instances
+- Single-threaded event loop
+- Channel instances
 - Boehm GC heap
-- Stack space (8 KB default per goroutine)
 
 ### Browser Implementation
 
@@ -419,7 +433,7 @@ In the browser:
 1. The spawn call emits `$rt.domain.spawn(async () => fn(args))`.
 2. The runtime creates an isolated microtask context backed by a BroadcastChannel.
 3. Slices are spread-copied (`[...arr]`), maps are `Object.assign`'d — the child gets independent data.
-4. Each domain gets its own cooperative goroutine scheduler via `queueMicrotask`.
+4. Each domain gets its own single-threaded event loop via `queueMicrotask`.
 
 ---
 
@@ -433,23 +447,17 @@ The `moxie` package path is reserved for compiler internals and should not be im
 
 ## Concurrency
 
-### Goroutines
+### No Goroutines
 
-The `go` statement works identically to Go:
+The `go` keyword is a **compile error**. There are no goroutines in Moxie.
 
-```go
-go func() {
-    // runs concurrently within this domain
-}()
-```
+Each domain runs a single thread with no scheduler. Concurrency within a domain is expressed entirely through channels and `select`:
 
-Goroutines within a domain are cooperatively scheduled on a single thread. There is no preemption. Goroutines yield at:
+- **Unbuffered channels** dispatch execution to the waiting `select` case (synchronous handoff).
+- **Buffered channels** enqueue messages for the next `select` iteration.
+- **`select`** is the event loop — it blocks until a channel message, I/O event, or timer fires.
 
-- Channel send and receive operations
-- `runtime.Gosched()` calls
-- Blocking system calls (via the runtime's poll mechanism)
-
-Because there is exactly one thread per domain, **there are no data races within a domain**. Mutexes are no-ops. Atomics are plain loads and stores. The Go race detector is inapplicable.
+Because there is exactly one thread per domain, **there are no data races**. Mutexes are no-ops. Atomics are plain loads and stores. The Go race detector is inapplicable.
 
 ### Channels
 
@@ -474,7 +482,7 @@ default:
 
 #### IPC Channels
 
-Channels passed to `spawn` become IPC channels. Sends serialize the value over a socketpair (native) or MessagePort (JS). Receives block the goroutine until data arrives from the other domain.
+Channels passed to `spawn` become IPC channels. Sends serialize the value over a socketpair (native) or MessagePort (JS). Receives block until data arrives from the other domain.
 
 ```go
 func worker(results chan int32) {
@@ -497,7 +505,7 @@ The channel element type must be a serializable value type (no pointers, no inte
 
 ### Within a Domain
 
-Single-threaded cooperative scheduling. All goroutines see the same consistent memory. No memory barriers, no fences, no happens-before complexity. A goroutine's writes are visible to all other goroutines in the same domain at the next yield point.
+Single-threaded execution. No memory barriers, no fences, no happens-before complexity. Sequential consistency is guaranteed by construction — there is only one thread.
 
 ### Between Domains
 
@@ -526,10 +534,10 @@ The JavaScript target runs in a browser environment only (Web Workers, Broadcast
 ## Runtime Guarantees
 
 1. **Single-threaded per domain.** `runtime.NumCPU()` always returns 1.
-2. **No preemption.** A goroutine runs until it yields. Infinite loops without channel ops or `Gosched()` will starve other goroutines.
-3. **No data races.** The cooperative scheduler makes races structurally impossible within a domain.
+2. **No goroutines.** The `go` keyword is a compile error. Concurrency is expressed through channels, `select`, and `spawn`.
+3. **No data races.** Single-threaded execution makes races structurally impossible within a domain.
 4. **Complete domain isolation.** `fork()` provides OS-level memory isolation. A bug in one domain cannot corrupt another domain's heap.
-5. **Deterministic scheduling.** Given the same inputs and yield points, goroutines execute in the same order. The scheduler is FIFO.
+5. **Deterministic execution.** Given the same inputs, execution within a domain follows one path. No scheduler, no task switching, no nondeterminism.
 
 ---
 
@@ -560,8 +568,8 @@ Standard Go build tags (`linux`, `darwin`, `amd64`, `arm64`, `js`) work as expec
 | `complex()`, `real()`, `imag()` | Complex builtins | **Compile error.** |
 | `uintptr` | Integer type for pointers | **Does not exist.** |
 | `fallthrough` | Falls through to next case | **Compile error.** |
-| `go` | OS thread or M:N scheduled | Cooperative, single-threaded. |
-| Goroutine scheduling | Preemptive (Go 1.14+) | Cooperative. Yields at channel ops. |
+| `go` | Starts goroutine | **Compile error.** No goroutines. |
+| `[]T == []T` | Compile error (except `string`) | **Works** for any comparable element type. |
 | `sync.Mutex` | Blocks thread | No-op. Single-threaded. |
 | Memory model | Happens-before, memory fences | Single-threaded. Sequential consistency. |
 | `spawn` | Does not exist | **Moxie builtin.** Creates isolated domain. |

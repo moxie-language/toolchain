@@ -1,7 +1,8 @@
 package compiler
 
-// This file implements the 'go' keyword to start a new goroutine. See
-// goroutine-lowering.go for more details.
+// This file implements goroutine start wrappers used by spawn, //go:wasmexport,
+// and runtime-internal 'go' calls. User code cannot use 'go' (enforced in
+// compiler.go); runtime/internal packages are exempt.
 
 import (
 	"go/token"
@@ -12,29 +13,10 @@ import (
 	"tinygo.org/x/go-llvm"
 )
 
-// createGo emits code to start a new goroutine.
+// createGo emits code to start a new goroutine (runtime/internal only).
 func (b *builder) createGo(instr *ssa.Go) {
 	if builtin, ok := instr.Call.Value.(*ssa.Builtin); ok {
-		// We cheat. None of the builtins do any long or blocking operation, so
-		// we might as well run these builtins right away without the program
-		// noticing the difference.
-		// Possible exceptions:
-		//   - copy: this is a possibly long operation, but not a blocking
-		//     operation. Semantically it makes no difference to run it right
-		//     away (not in a goroutine). However, in practice it makes no sense
-		//     to run copy in a goroutine as there is no way to (safely) know
-		//     when it is finished.
-		//   - panic: the error message would appear in the parent goroutine.
-		//     But because `go panic("err")` would halt the program anyway
-		//     (there is no recover), panicking right away would give the same
-		//     behavior as creating a goroutine, switching the scheduler to that
-		//     goroutine, and panicking there. So this optimization seems
-		//     correct.
-		//   - recover: because it runs in a new goroutine, it is never a
-		//     deferred function. Thus this is a no-op.
 		if builtin.Name() == "recover" {
-			// This is a no-op, even in a deferred function:
-			//   go recover()
 			return
 		}
 		var argTypes []types.Type
@@ -47,7 +29,6 @@ func (b *builder) createGo(instr *ssa.Go) {
 		return
 	}
 
-	// Get all function parameters to pass to the goroutine.
 	var params []llvm.Value
 	for _, param := range instr.Call.Args {
 		params = append(params, b.expandFormalParam(b.getValue(param, getPos(instr)))...)
@@ -58,40 +39,30 @@ func (b *builder) createGo(instr *ssa.Go) {
 	var funcType llvm.Type
 	hasContext := false
 	if callee := instr.Call.StaticCallee(); callee != nil {
-		// Static callee is known. This makes it easier to start a new
-		// goroutine.
 		var context llvm.Value
 		switch value := instr.Call.Value.(type) {
 		case *ssa.Function:
-			// Goroutine call is regular function call. No context is necessary.
+			// Regular function call. No context.
 		case *ssa.MakeClosure:
-			// A goroutine call on a func value, but the callee is trivial to find. For
-			// example: immediately applied functions.
 			funcValue := b.getValue(value, getPos(instr))
 			context = b.extractFuncContext(funcValue)
 		default:
 			panic("StaticCallee returned an unexpected value")
 		}
 		if !context.IsNil() {
-			params = append(params, context) // context parameter
+			params = append(params, context)
 			hasContext = true
 		}
 		funcType, funcPtr = b.getFunction(callee)
 	} else if instr.Call.IsInvoke() {
-		// This is a method call on an interface value.
 		itf := b.getValue(instr.Call.Value, getPos(instr))
 		itfTypeCode := b.CreateExtractValue(itf, 0, "")
 		itfValue := b.CreateExtractValue(itf, 1, "")
 		funcPtr = b.getInvokeFunction(&instr.Call)
 		funcType = funcPtr.GlobalValueType()
-		params = append([]llvm.Value{itfValue}, params...) // start with receiver
-		params = append(params, itfTypeCode)               // end with typecode
+		params = append([]llvm.Value{itfValue}, params...)
+		params = append(params, itfTypeCode)
 	} else {
-		// This is a function pointer.
-		// At the moment, two extra params are passed to the newly started
-		// goroutine:
-		//   * The function context, for closures.
-		//   * The function pointer (for tasks).
 		var context llvm.Value
 		funcPtr, context = b.decodeFuncValue(b.getValue(instr.Call.Value, getPos(instr)))
 		funcType = b.getLLVMFunctionType(instr.Call.Value.Type().Underlying().(*types.Signature))
@@ -104,15 +75,9 @@ func (b *builder) createGo(instr *ssa.Go) {
 	var stackSize llvm.Value
 	callee := b.createGoroutineStartWrapper(funcType, funcPtr, prefix, hasContext, false, instr.Pos())
 	if b.AutomaticStackSize {
-		// The stack size is not known until after linking. Call a dummy
-		// function that will be replaced with a load from a special ELF
-		// section that contains the stack size (and is modified after
-		// linking).
 		stackSizeFnType, stackSizeFn := b.getFunction(b.program.ImportedPackage("internal/task").Members["getGoroutineStackSize"].(*ssa.Function))
 		stackSize = b.createCall(stackSizeFnType, stackSizeFn, []llvm.Value{callee, llvm.Undef(b.dataPtrType)}, "stacksize")
 	} else {
-		// The stack size is fixed at compile time. By emitting it here as a
-		// constant, it can be optimized.
 		if (b.Scheduler == "tasks" || b.Scheduler == "asyncify") && b.DefaultStackSize == 0 {
 			b.addError(instr.Pos(), "default stack size for goroutines is not set")
 		}

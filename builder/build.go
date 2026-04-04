@@ -422,9 +422,6 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 					}
 					globalType := global.GlobalValueType()
 					if globalType.TypeKind() != llvm.StructTypeKind || globalType.StructName() != "runtime._string" {
-						// Verify this is indeed a string. This is needed so
-						// that makeGlobalsModule can just create the right
-						// globals of string type without checking.
 						return fmt.Errorf("%s: not a string", globalName)
 					}
 					name := global.Name()
@@ -1075,6 +1072,7 @@ func makeGlobalsModule(ctx llvm.Context, globals map[string]map[string]string, m
 	stringType.StructSetBody([]llvm.Type{
 		llvm.PointerType(ctx.Int8Type(), 0),
 		uintptrType,
+		uintptrType,
 	}, false)
 
 	var pkgPaths []string
@@ -1101,10 +1099,11 @@ func makeGlobalsModule(ctx llvm.Context, globals map[string]map[string]string, m
 			buf.SetUnnamedAddr(true)
 			buf.SetLinkage(llvm.PrivateLinkage)
 
-			// Create the string value, which is a {ptr, len} pair.
+			// Create the string value: {ptr, len, cap}.
 			length := llvm.ConstInt(uintptrType, uint64(len(value)), false)
 			initializer := llvm.ConstNamedStruct(stringType, []llvm.Value{
 				buf,
+				length,
 				length,
 			})
 

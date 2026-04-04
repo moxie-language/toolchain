@@ -476,6 +476,10 @@ func getTypeKind(t types.Type) uint8 {
 	case *types.Pointer:
 		return typeKindPointer
 	case *types.Slice:
+		// Moxie: []byte reports as String kind (string=[]byte unification).
+		if b, ok := t.Elem().(*types.Basic); ok && b.Kind() == types.Byte {
+			return basicTypes[types.String]
+		}
 		return typeKindSlice
 	case *types.Array:
 		return typeKindArray

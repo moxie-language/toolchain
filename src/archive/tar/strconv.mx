@@ -8,13 +8,12 @@ import (
 	"bytes"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 )
 
 // hasNUL reports whether the NUL character exists within s.
 func hasNUL(s string) bool {
-	return strings.Contains(s, "\x00")
+	return bytes.Contains(s, "\x00")
 }
 
 // isASCII reports whether the input is an ASCII C-style string.
@@ -73,7 +72,7 @@ func (f *formatter) formatString(b []byte, s string) {
 	// in the V7 path field as a directory even though the full path
 	// recorded elsewhere (e.g., via PAX record) contains no trailing slash.
 	if len(s) > len(b) && b[len(b)-1] == '/' {
-		n := len(strings.TrimRight(s[:len(b)-1], "/"))
+		n := len(bytes.TrimRight(s[:len(b)-1], "/"))
 		b[n] = 0 // Replace trailing slash with NUL terminator
 	}
 }
@@ -182,7 +181,7 @@ func (f *formatter) formatOctal(b []byte, x int64) {
 	s := strconv.FormatInt(x, 8)
 	// Add leading zeros, but leave room for a NUL.
 	if n := len(b) - len(s) - 1; n > 0 {
-		s = strings.Repeat("0", n) + s
+		s = bytes.Repeat("0", n) + s
 	}
 	f.formatString(b, s)
 }
@@ -201,7 +200,7 @@ func parsePAXTime(s string) (time.Time, error) {
 	const maxNanoSecondDigits = 9
 
 	// Split string into seconds and sub-seconds parts.
-	ss, sn, _ := strings.Cut(s, ".")
+	ss, sn, _ := bytes.Cut(s, ".")
 
 	// Parse the seconds.
 	secs, err := strconv.ParseInt(ss, 10, 64)
@@ -213,11 +212,11 @@ func parsePAXTime(s string) (time.Time, error) {
 	}
 
 	// Parse the nanoseconds.
-	if strings.Trim(sn, "0123456789") != "" {
+	if bytes.Trim(sn, "0123456789") != "" {
 		return time.Time{}, ErrHeader
 	}
 	if len(sn) < maxNanoSecondDigits {
-		sn += strings.Repeat("0", maxNanoSecondDigits-len(sn)) // Right pad
+		sn += bytes.Repeat("0", maxNanoSecondDigits-len(sn)) // Right pad
 	} else {
 		sn = sn[:maxNanoSecondDigits] // Right truncate
 	}
@@ -243,7 +242,7 @@ func formatPAXTime(ts time.Time) (s string) {
 		secs = -(secs + 1)     // Add a second to secs
 		nsecs = -(nsecs - 1e9) // Take that second away from nsecs
 	}
-	return strings.TrimRight(fmt.Sprintf("%s%d.%09d", sign, secs, nsecs), "0")
+	return bytes.TrimRight(fmt.Sprintf("%s%d.%09d", sign, secs, nsecs), "0")
 }
 
 // parsePAXRecord parses the input PAX record string into a key-value pair.
@@ -251,7 +250,7 @@ func formatPAXTime(ts time.Time) (s string) {
 // return the remainder as r.
 func parsePAXRecord(s string) (k, v, r string, err error) {
 	// The size field ends at the first space.
-	nStr, rest, ok := strings.Cut(s, " ")
+	nStr, rest, ok := bytes.Cut(s, " ")
 	if !ok {
 		return "", "", s, ErrHeader
 	}
@@ -273,7 +272,7 @@ func parsePAXRecord(s string) (k, v, r string, err error) {
 	}
 
 	// The first equals separates the key from the value.
-	k, v, ok = strings.Cut(rec, "=")
+	k, v, ok = bytes.Cut(rec, "=")
 	if !ok {
 		return "", "", s, ErrHeader
 	}
@@ -315,7 +314,7 @@ func formatPAXRecord(k, v string) (string, error) {
 // for the PAX version of the USTAR string fields.
 // The key must not contain an '=' character.
 func validPAXRecord(k, v string) bool {
-	if k == "" || strings.Contains(k, "=") {
+	if k == "" || bytes.Contains(k, "=") {
 		return false
 	}
 	switch k {

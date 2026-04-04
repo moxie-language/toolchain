@@ -157,25 +157,76 @@ func poll_runtime_pollWait(ctx uintptr, mode int) int {
 		return pollErrTimeout
 	}
 
-	// Park the current goroutine.
-	t := task.Current()
+	// Single-threaded: block on epoll_wait until this fd is ready.
+	// Narrow the epoll interest set to only the event we need,
+	// otherwise write-readiness causes busy-spinning when waiting for reads.
+	var wantEvents uint32 = _EPOLLHUP | _EPOLLERR
 	if mode == 'r' {
-		pd.rg = t
+		wantEvents |= _EPOLLIN
 	} else {
-		pd.wg = t
+		wantEvents |= _EPOLLOUT
 	}
-	task.Pause()
+	modEv := epollEvent{events: wantEvents, fd: pd.fd}
+	libc_epoll_ctl(epfd, int32(_EPOLL_CTL_MOD), pd.fd, &modEv)
 
+	for {
+		// Compute timeout from deadline.
+		timeoutMs := int32(-1) // infinite
+		if mode == 'r' && pd.rd > 0 {
+			ms := (pd.rd - nanotime()) / 1000000
+			if ms <= 0 {
+				break
+			}
+			timeoutMs = int32(ms)
+		} else if mode == 'w' && pd.wd > 0 {
+			ms := (pd.wd - nanotime()) / 1000000
+			if ms <= 0 {
+				break
+			}
+			timeoutMs = int32(ms)
+		}
+
+		// Clamp to 100ms so timers fire regularly.
+		if timeoutMs < 0 || timeoutMs > 100 {
+			timeoutMs = 100
+		}
+
+		var events [64]epollEvent
+		n := libc_epoll_wait(epfd, &events[0], 64, timeoutMs)
+		netpollProcess(events[:], int(n))
+		fireTimers()
+
+		if pd.closing {
+			break
+		}
+		if mode == 'r' && pd.rready {
+			pd.rready = false
+			// Restore full interest set.
+			restoreEv := epollEvent{events: _EPOLLIN | _EPOLLOUT | _EPOLLHUP | _EPOLLERR, fd: pd.fd}
+			libc_epoll_ctl(epfd, int32(_EPOLL_CTL_MOD), pd.fd, &restoreEv)
+			return pollNoError
+		}
+		if mode == 'w' && pd.wready {
+			pd.wready = false
+			restoreEv := epollEvent{events: _EPOLLIN | _EPOLLOUT | _EPOLLHUP | _EPOLLERR, fd: pd.fd}
+			libc_epoll_ctl(epfd, int32(_EPOLL_CTL_MOD), pd.fd, &restoreEv)
+			return pollNoError
+		}
+		if mode == 'r' && pd.rd < 0 {
+			break
+		}
+		if mode == 'w' && pd.wd < 0 {
+			break
+		}
+	}
+
+	// Restore full interest set on exit.
+	restoreEv := epollEvent{events: _EPOLLIN | _EPOLLOUT | _EPOLLHUP | _EPOLLERR, fd: pd.fd}
+	libc_epoll_ctl(epfd, int32(_EPOLL_CTL_MOD), pd.fd, &restoreEv)
 	if pd.closing {
 		return pollErrClosing
 	}
-	if mode == 'r' && pd.rd < 0 {
-		return pollErrTimeout
-	}
-	if mode == 'w' && pd.wd < 0 {
-		return pollErrTimeout
-	}
-	return pollNoError
+	return pollErrTimeout
 }
 
 //go:linkname poll_runtime_pollWaitCanceled internal/poll.runtime_pollWaitCanceled

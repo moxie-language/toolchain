@@ -125,6 +125,30 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		}
 	}
 
+	// Reject buffered channels across spawn boundaries.
+	// Only unbuffered channels are allowed — they become synchronous IPC endpoints.
+	for i, arg := range concreteArgs {
+		if _, isChan := arg.Type().Underlying().(*types.Chan); !isChan {
+			continue
+		}
+		if mc := traceToMakeChan(arg); mc != nil {
+			if c, ok := mc.Size.(*ssa.Const); ok {
+				if c.Value != nil && constant.Sign(c.Value) > 0 {
+					b.addError(instr.Pos(), fmt.Sprintf(
+						"spawn: argument %d is a buffered channel — only unbuffered channels allowed across spawn boundaries",
+						i+1))
+					return llvm.Value{}, nil
+				}
+			} else {
+				// Dynamic buffer size — can't verify it's unbuffered at compile time.
+				b.addError(instr.Pos(), fmt.Sprintf(
+					"spawn: argument %d has dynamic channel buffer size — only unbuffered channels (make(chan T)) allowed across spawn boundaries",
+					i+1))
+				return llvm.Value{}, nil
+			}
+		}
+	}
+
 	var params []llvm.Value
 	for _, arg := range concreteArgs {
 		params = append(params, b.expandFormalParam(b.getValue(arg, instr.Pos()))...)
@@ -288,6 +312,24 @@ func extractTransportString(v ssa.Value) (string, bool) {
 		return "", false
 	}
 	return constant.StringVal(c.Value), true
+}
+
+// traceToMakeChan walks an SSA value back to its MakeChan definition.
+// Returns nil if the channel origin can't be determined (parameter, load, etc).
+func traceToMakeChan(v ssa.Value) *ssa.MakeChan {
+	switch v := v.(type) {
+	case *ssa.MakeChan:
+		return v
+	case *ssa.MakeInterface:
+		return traceToMakeChan(v.X)
+	case *ssa.Phi:
+		for _, edge := range v.Edges {
+			if mc := traceToMakeChan(edge); mc != nil {
+				return mc
+			}
+		}
+	}
+	return nil
 }
 
 // hasScheme checks if s starts with scheme://.

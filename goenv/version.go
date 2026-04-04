@@ -10,7 +10,7 @@ import (
 
 // Version of Moxie.
 // Update this value before release of new version of software.
-const version = "0.3.1-dev"
+const version = "0.3.2-dev"
 
 // Return Moxie version, either in the form 0.30.0 or as a development version
 // (like 0.30.0-dev-abcd012).

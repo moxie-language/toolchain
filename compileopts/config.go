@@ -86,7 +86,7 @@ func (c *Config) NeedsStackObjects() bool {
 	return false
 }
 
-// Scheduler returns the scheduler implementation. Moxie always uses "tasks" (cooperative).
+// Scheduler returns the scheduler implementation. Moxie uses "none" (no goroutines).
 func (c *Config) Scheduler() string {
 	if c.Options.Scheduler != "" {
 		return c.Options.Scheduler
@@ -94,7 +94,7 @@ func (c *Config) Scheduler() string {
 	if c.Target.Scheduler != "" {
 		return c.Target.Scheduler
 	}
-	return "tasks"
+	return "none"
 }
 
 func (c *Config) OptLevel() (level string, speedLevel, sizeLevel int) {

@@ -21,7 +21,7 @@ import (
 	"net/url"
 	"reflect"
 	"slices"
-	"strings"
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -165,7 +165,7 @@ func refererForURL(lastReq, newReq *url.URL, explicitRef string) string {
 		// - copying the URL struct manually, which would cause
 		//   maintenance problems down the line
 		auth := lastReq.User.String() + "@"
-		referer = strings.Replace(referer, auth, "", 1)
+		referer = bytes.Replace(referer, auth, "", 1)
 	}
 	return referer
 }
@@ -289,7 +289,7 @@ func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, d
 		if resp.ContentLength > 0 && req.Method != "HEAD" {
 			return nil, didTimeout, fmt.Errorf("http: RoundTripper implementation (%T) returned a *Response with content length %d but a nil Body", rt, resp.ContentLength)
 		}
-		resp.Body = io.NopCloser(strings.NewReader(""))
+		resp.Body = io.NopCloser(bytes.NewReader(""))
 	}
 	if !deadline.IsZero() {
 		resp.Body = &cancelTimerBody{
@@ -398,7 +398,7 @@ func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTi
 	timer := time.NewTimer(time.Until(deadline))
 	var timedOut atomic.Bool
 
-	go func() {
+	func() {
 		select {
 		case <-initialReqCancel:
 			doCancel()
@@ -797,7 +797,7 @@ func (c *Client) makeHeadersCopier(ireq *Request) func(req *Request, stripSensit
 					}
 				}
 				slices.Sort(ss) // Ensure deterministic headers
-				ireqhdr.Set("Cookie", strings.Join(ss, "; "))
+				ireqhdr.Set("Cookie", bytes.Join(ss, "; "))
 			}
 		}
 
@@ -902,7 +902,7 @@ func PostForm(url string, data url.Values) (resp *Response, err error) {
 // To make a request with a specified context.Context, use [NewRequestWithContext]
 // and Client.Do.
 func (c *Client) PostForm(url string, data url.Values) (resp *Response, err error) {
-	return c.Post(url, "application/x-www-form-urlencoded", strings.NewReader(data.Encode()))
+	return c.Post(url, "application/x-www-form-urlencoded", bytes.NewReader(data.Encode()))
 }
 
 // Head issues a HEAD to the specified URL. If the response is one of
@@ -1019,13 +1019,13 @@ func isDomainOrSubdomain(sub, parent string) bool {
 	// If sub contains a :, it's probably an IPv6 address (and is definitely not a hostname).
 	// Don't check the suffix in this case, to avoid matching the contents of a IPv6 zone.
 	// For example, "::1%.www.example.com" is not a subdomain of "www.example.com".
-	if strings.ContainsAny(sub, ":%") {
+	if bytes.ContainsAny(sub, ":%") {
 		return false
 	}
 	// If sub is "foo.example.com" and parent is "example.com",
 	// that means sub must end in "."+parent.
 	// Do it without allocating.
-	if !strings.HasSuffix(sub, parent) {
+	if !bytes.HasSuffix(sub, parent) {
 		return false
 	}
 	return sub[len(sub)-len(parent)-1] == '.'
@@ -1034,7 +1034,7 @@ func isDomainOrSubdomain(sub, parent string) bool {
 func stripPassword(u *url.URL) string {
 	_, passSet := u.User.Password()
 	if passSet {
-		return strings.Replace(u.String(), u.User.String()+"@", u.User.Username()+":***@", 1)
+		return bytes.Replace(u.String(), u.User.String()+"@", u.User.Username()+":***@", 1)
 	}
 	return u.String()
 }

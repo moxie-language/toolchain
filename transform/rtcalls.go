@@ -87,8 +87,10 @@ func OptimizeStringEqual(mod llvm.Module) {
 	defer builder.Dispose()
 
 	for _, call := range getUses(stringEqual) {
-		str1len := call.Operand(1)
-		str2len := call.Operand(3)
+		// string is {ptr, len, cap} so operands are:
+		// [0]=callee, [1]=x.ptr, [2]=x.len, [3]=x.cap, [4]=y.ptr, [5]=y.len, [6]=y.cap
+		str1len := call.Operand(2)
+		str2len := call.Operand(5)
 
 		zero := llvm.ConstInt(str1len.Type(), 0, false)
 		if str1len == zero || str2len == zero {

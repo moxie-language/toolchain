@@ -2,19 +2,18 @@
 
 package task
 
+//go:linkname eventLoopTick runtime.eventLoopTick
+func eventLoopTick()
+
 type Mutex struct {
 	locked  bool
+	depth   int
 	blocked Stack
 }
 
 func (m *Mutex) Lock() {
-	if m.locked {
-		// Push self onto stack of blocked tasks, and wait to be resumed.
-		m.blocked.Push(Current())
-		Pause()
-		return
-	}
-
+	// Single-threaded: allow reentrant locking (no contention possible).
+	m.depth++
 	m.locked = true
 }
 
@@ -22,11 +21,8 @@ func (m *Mutex) Unlock() {
 	if !m.locked {
 		panic("sync: unlock of unlocked Mutex")
 	}
-
-	// Wake up a blocked task, if applicable.
-	if t := m.blocked.Pop(); t != nil {
-		scheduleTask(t)
-	} else {
+	m.depth--
+	if m.depth == 0 {
 		m.locked = false
 	}
 }

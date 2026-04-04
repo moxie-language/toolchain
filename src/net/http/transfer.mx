@@ -17,9 +17,8 @@ import (
 	"net/http/internal/ascii"
 	"net/textproto"
 	"reflect"
-	"slices"
+	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -65,7 +64,7 @@ type transferWriter struct {
 	ResponseToHEAD   bool
 	ContentLength    int64 // -1 means unknown, 0 means exactly none
 	Close            bool
-	TransferEncoding []string
+	TransferEncoding [][]byte
 	Header           Header
 	Trailer          Header
 	IsResponse       bool
@@ -94,7 +93,7 @@ func newTransferWriter(r any) (t *transferWriter, err error) {
 		t.BodyCloser = rr.Body
 		t.ContentLength = rr.outgoingLength()
 		if t.ContentLength < 0 && len(t.TransferEncoding) == 0 && t.shouldSendChunkedRequestBody() {
-			t.TransferEncoding = []string{"chunked"}
+			t.TransferEncoding = [][]byte{"chunked"}
 		}
 		// If there's a body, conservatively flush the headers
 		// to any bufio.Writer we're writing to, just in case
@@ -207,7 +206,7 @@ func (t *transferWriter) shouldSendChunkedRequestBody() bool {
 // are workarounds if it does.
 func (t *transferWriter) probeRequestBody() {
 	t.ByteReadCh = chan readResult{1}
-	go func(body io.Reader) {
+	func(body io.Reader) {
 		var buf [1]byte
 		var rres readResult
 		rres.n, rres.err = body.Read(buf[:])
@@ -281,7 +280,7 @@ func (t *transferWriter) writeHeader(w io.Writer, trace *httptrace.ClientTrace) 
 			return err
 		}
 		if trace != nil && trace.WroteHeaderField != nil {
-			trace.WroteHeaderField("Connection", []string{"close"})
+			trace.WroteHeaderField("Connection", [][]byte{"close"})
 		}
 	}
 
@@ -296,20 +295,20 @@ func (t *transferWriter) writeHeader(w io.Writer, trace *httptrace.ClientTrace) 
 			return err
 		}
 		if trace != nil && trace.WroteHeaderField != nil {
-			trace.WroteHeaderField("Content-Length", []string{strconv.FormatInt(t.ContentLength, 10)})
+			trace.WroteHeaderField("Content-Length", [][]byte{strconv.FormatInt(t.ContentLength, 10)})
 		}
 	} else if chunked(t.TransferEncoding) {
 		if _, err := io.WriteString(w, "Transfer-Encoding: chunked\r\n"); err != nil {
 			return err
 		}
 		if trace != nil && trace.WroteHeaderField != nil {
-			trace.WroteHeaderField("Transfer-Encoding", []string{"chunked"})
+			trace.WroteHeaderField("Transfer-Encoding", [][]byte{"chunked"})
 		}
 	}
 
 	// Write Trailer header
 	if t.Trailer != nil {
-		keys := []string{:0:len(t.Trailer)}
+		keys := [][]byte{:0:len(t.Trailer)}
 		for k := range t.Trailer {
 			k = CanonicalHeaderKey(k)
 			switch k {
@@ -319,10 +318,10 @@ func (t *transferWriter) writeHeader(w io.Writer, trace *httptrace.ClientTrace) 
 			keys = append(keys, k)
 		}
 		if len(keys) > 0 {
-			slices.Sort(keys)
+			sort.Slice(keys, func(i, j int) bool { return string(keys[i]) < string(keys[j]) })
 			// TODO: could do better allocation-wise here, but trailers are rare,
 			// so being lazy for now.
-			if _, err := io.WriteString(w, "Trailer: "+strings.Join(keys, ",")+"\r\n"); err != nil {
+			if _, err := io.WriteString(w, "Trailer: "+string(bytes.Join(keys, ","))+"\r\n"); err != nil {
 				return err
 			}
 			if trace != nil && trace.WroteHeaderField != nil {
@@ -588,7 +587,7 @@ func readTransfer(msg any, r *bufio.Reader) (err error) {
 		rr.Body = t.Body
 		rr.ContentLength = t.ContentLength
 		if t.Chunked {
-			rr.TransferEncoding = []string{"chunked"}
+			rr.TransferEncoding = [][]byte{"chunked"}
 		}
 		rr.Close = t.Close
 		rr.Trailer = t.Trailer
@@ -596,7 +595,7 @@ func readTransfer(msg any, r *bufio.Reader) (err error) {
 		rr.Body = t.Body
 		rr.ContentLength = t.ContentLength
 		if t.Chunked {
-			rr.TransferEncoding = []string{"chunked"}
+			rr.TransferEncoding = [][]byte{"chunked"}
 		}
 		rr.Close = t.Close
 		rr.Trailer = t.Trailer
@@ -606,10 +605,10 @@ func readTransfer(msg any, r *bufio.Reader) (err error) {
 }
 
 // Checks whether chunked is part of the encodings stack.
-func chunked(te []string) bool { return len(te) > 0 && te[0] == "chunked" }
+func chunked(te [][]byte) bool { return len(te) > 0 && te[0] == "chunked" }
 
 // Checks whether the encoding is explicitly "identity".
-func isIdentity(te []string) bool { return len(te) == 1 && te[0] == "identity" }
+func isIdentity(te [][]byte) bool { return len(te) == 1 && te[0] == "identity" }
 
 // unsupportedTEError reports unsupported transfer-encodings.
 type unsupportedTEError struct {
@@ -1047,7 +1046,7 @@ var httplaxcontentlength = godebug.New("httplaxcontentlength")
 // parseContentLength checks that the header is valid and then trims
 // whitespace. It returns -1 if no value is set otherwise the value
 // if it's >= 0.
-func parseContentLength(clHeaders []string) (int64, error) {
+func parseContentLength(clHeaders [][]byte) (int64, error) {
 	if len(clHeaders) == 0 {
 		return -1, nil
 	}
@@ -1112,7 +1111,7 @@ func unwrapNopCloser(r io.Reader) (underlyingReader io.Reader, isNopCloser bool)
 // send fewer TCP packets.
 func isKnownInMemoryReader(r io.Reader) bool {
 	switch r.(type) {
-	case *bytes.Reader, *bytes.Buffer, *strings.Reader:
+	case *bytes.Reader, *bytes.Buffer, *bytes.Reader:
 		return true
 	}
 	if r, ok := unwrapNopCloser(r); ok {

@@ -64,6 +64,7 @@ func main() {
 	patchOperand(dstDir)
 	patchExpr(dstDir)
 	patchSizes(dstDir)
+	patchDecl(dstDir)
 
 	fmt.Fprintf(os.Stderr, "patched go/types in %s\n", dstDir)
 }
@@ -86,10 +87,10 @@ func isByteSlice(t Type) bool {
 }
 `)
 
-	// Patch 2: Add []byte comparability in comparableType.
+	// Patch 2: Add slice comparability — any slice of comparable elements is comparable.
 	src = mustReplace(f, src,
 		"\tdefault:\n\t\treturn typeErrorf(\"\")\n\t}\n\n\treturn nil\n}",
-		"\tcase *Slice:\n\t\t// Moxie: []byte is comparable (string=[]byte unification).\n\t\tif basic, ok := t.elem.(*Basic); ok && basic.kind == Byte {\n\t\t\treturn nil\n\t\t}\n\t\treturn typeErrorf(\"\")\n\n\tdefault:\n\t\treturn typeErrorf(\"\")\n\t}\n\n\treturn nil\n}")
+		"\tcase *Slice:\n\t\t// Moxie: slices of comparable types are comparable.\n\t\t// Length check + element-wise comparison at runtime.\n\t\treturn comparableType(t.elem, dynamic, seen)\n\n\tdefault:\n\t\treturn typeErrorf(\"\")\n\t}\n\n\treturn nil\n}")
 
 	mustWrite(f, src)
 }
@@ -128,6 +129,19 @@ func patchSizes(dir string) {
 	src = mustReplace(f, src,
 		"\t\tif k == String {\n\t\t\treturn s.WordSize * 2\n\t\t}",
 		"\t\tif k == String {\n\t\t\t// Moxie: string=[]byte — 3-word struct (ptr, len, cap).\n\t\t\treturn s.WordSize * 3\n\t\t}")
+
+	mustWrite(f, src)
+}
+
+func patchDecl(dir string) {
+	f := filepath.Join(dir, "decl.go")
+	src := mustRead(f)
+
+	// Patch 6: Allow []byte as a valid constant type (string=[]byte unification).
+	// With string=[]byte, named types like `type X []byte` should accept string constants.
+	src = mustReplace(f, src,
+		"\t\tif !isConstType(t) {",
+		"\t\tif !isConstType(t) && !isByteSlice(t) {")
 
 	mustWrite(f, src)
 }

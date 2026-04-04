@@ -172,11 +172,11 @@ func (r *Resolver) exchange(ctx context.Context, server string, q dnsmessage.Que
 	if err != nil {
 		return dnsmessage.Parser{}, dnsmessage.Header{}, errCannotMarshalDNSMessage
 	}
-	var networks []string
+	var networks [][]byte
 	if useTCP {
-		networks = []string{"tcp"}
+		networks = [][]byte{"tcp"}
 	} else {
-		networks = []string{"udp", "tcp"}
+		networks = [][]byte{"udp", "tcp"}
 	}
 	for _, network := range networks {
 		ctx, cancel := context.WithDeadline(ctx, time.Now().Add(timeout))
@@ -493,7 +493,7 @@ func avoidDNS(name string) bool {
 }
 
 // nameList returns a list of names for sequential DNS queries.
-func (conf *dnsConfig) nameList(name string) []string {
+func (conf *dnsConfig) nameList(name string) [][]byte {
 	// Check name length (see isDomainName).
 	l := len(name)
 	rooted := l > 0 && name[l-1] == '.'
@@ -506,7 +506,7 @@ func (conf *dnsConfig) nameList(name string) []string {
 		if avoidDNS(name) {
 			return nil
 		}
-		return []string{name}
+		return [][]byte{name}
 	}
 
 	hasNdots := bytealg.CountString(name, '.') >= conf.ndots
@@ -514,7 +514,7 @@ func (conf *dnsConfig) nameList(name string) []string {
 	l++
 
 	// Build list of search choices.
-	names := []string{:0:1+len(conf.search)}
+	names := [][]byte{:0:1+len(conf.search)}
 	// If name has enough dots, try unsuffixed first.
 	if hasNdots && !avoidDNS(name) {
 		names = append(names, name)
@@ -562,7 +562,7 @@ func (o hostLookupOrder) String() string {
 	return "hostLookupOrder=" + itoa.Itoa(int(o)) + "??"
 }
 
-func (r *Resolver) goLookupHostOrder(ctx context.Context, name string, order hostLookupOrder, conf *dnsConfig) (addrs []string, err error) {
+func (r *Resolver) goLookupHostOrder(ctx context.Context, name string, order hostLookupOrder, conf *dnsConfig) (addrs [][]byte, err error) {
 	if order == hostLookupFilesDNS || order == hostLookupFiles {
 		// Use entries from /etc/hosts if they match.
 		addrs, _ = lookupStaticHost(name)
@@ -578,7 +578,7 @@ func (r *Resolver) goLookupHostOrder(ctx context.Context, name string, order hos
 	if err != nil {
 		return
 	}
-	addrs = []string{:0:len(ips)}
+	addrs = [][]byte{:0:len(ips)}
 	for _, ip := range ips {
 		addrs = append(addrs, ip.String())
 	}
@@ -639,7 +639,6 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
 		conf = getSystemDNSConfig()
 	}
 
-	lane := chan result{1}
 	qtypes := []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA}
 	if network == "CNAME" {
 		qtypes = append(qtypes, dnsmessage.TypeCNAME)
@@ -661,16 +660,13 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
 			return result{p, server, err}
 		}
 	} else {
-		queryFn = func(fqdn string, qtype dnsmessage.Type) {
-			dnsWaitGroup.Add(1)
-			go func(qtype dnsmessage.Type) {
-				p, server, err := r.tryOneName(ctx, conf, fqdn, qtype)
-				lane <- result{p, server, err}
-				dnsWaitGroup.Done()
-			}(qtype)
-		}
+		// Moxie: no goroutines. Sequential queries like singleRequest.
+		queryFn = func(fqdn string, qtype dnsmessage.Type) {}
 		responseFn = func(fqdn string, qtype dnsmessage.Type) result {
-			return <-lane
+			dnsWaitGroup.Add(1)
+			defer dnsWaitGroup.Done()
+			p, server, err := r.tryOneName(ctx, conf, fqdn, qtype)
+			return result{p, server, err}
 		}
 	}
 	var lastErr error
@@ -824,7 +820,7 @@ func (r *Resolver) goLookupCNAME(ctx context.Context, host string, order hostLoo
 }
 
 // goLookupPTR is the native Go implementation of LookupAddr.
-func (r *Resolver) goLookupPTR(ctx context.Context, addr string, order hostLookupOrder, conf *dnsConfig) ([]string, error) {
+func (r *Resolver) goLookupPTR(ctx context.Context, addr string, order hostLookupOrder, conf *dnsConfig) ([][]byte, error) {
 	if order == hostLookupFiles || order == hostLookupFilesDNS {
 		names := lookupStaticAddr(addr)
 		if len(names) > 0 {
@@ -853,7 +849,7 @@ func (r *Resolver) goLookupPTR(ctx context.Context, addr string, order hostLooku
 		}
 		return nil, err
 	}
-	var ptrs []string
+	var ptrs [][]byte
 	for {
 		h, err := p.AnswerHeader()
 		if err == dnsmessage.ErrSectionDone {

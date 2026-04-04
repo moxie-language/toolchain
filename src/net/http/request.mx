@@ -24,7 +24,6 @@ import (
 	"net/url"
 	urlpkg "net/url"
 	"strconv"
-	"strings"
 	"sync"
 	_ "unsafe" // for linkname
 
@@ -209,7 +208,7 @@ type Request struct {
 	// TransferEncoding can usually be ignored; chunked encoding is
 	// automatically added and removed as necessary when sending and
 	// receiving requests.
-	TransferEncoding []string
+	TransferEncoding [][]byte
 
 	// Close indicates whether to close the connection after
 	// replying to this request (for servers) or after sending this
@@ -334,7 +333,7 @@ type Request struct {
 
 	// The following fields are for requests matched by ServeMux.
 	pat         *pattern          // the pattern that matched
-	matches     []string          // values for the matching wildcards in pat
+	matches     [][]byte          // values for the matching wildcards in pat
 	otherValues map[string]string // for calls to SetPathValue that don't match a wildcard
 }
 
@@ -394,7 +393,7 @@ func (r *Request) Clone(ctx context.Context) *Request {
 	r2.Header = r.Header.Clone()
 	r2.Trailer = r.Trailer.Clone()
 	if s := r.TransferEncoding; s != nil {
-		s2 := []string{:len(s)}
+		s2 := [][]byte{:len(s)}
 		copy(s2, s)
 		r2.TransferEncoding = s2
 	}
@@ -404,7 +403,7 @@ func (r *Request) Clone(ctx context.Context) *Request {
 
 	// Copy matches and otherValues. See issue 61410.
 	if s := r.matches; s != nil {
-		s2 := []string{:len(s)}
+		s2 := [][]byte{:len(s)}
 		copy(s2, s)
 		r2.matches = s2
 	}
@@ -486,7 +485,7 @@ func (r *Request) Referer() string {
 // Its presence in Request.MultipartForm indicates that parsing of the request
 // body has been handed off to a MultipartReader instead of ParseMultipartForm.
 var multipartByReader = &multipart.Form{
-	Value: map[string][]string{},
+	Value: map[string][][]byte{},
 	File:  map[string][]*multipart.FileHeader{},
 }
 
@@ -681,7 +680,7 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 		return err
 	}
 	if trace != nil && trace.WroteHeaderField != nil {
-		trace.WroteHeaderField("Host", []string{host})
+		trace.WroteHeaderField("Host", [][]byte{host})
 	}
 
 	// Use the defaultUserAgent unless the Header contains one, which
@@ -698,7 +697,7 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 			return err
 		}
 		if trace != nil && trace.WroteHeaderField != nil {
-			trace.WroteHeaderField("User-Agent", []string{userAgent})
+			trace.WroteHeaderField("User-Agent", [][]byte{userAgent})
 		}
 	}
 
@@ -797,14 +796,14 @@ func idnaASCII(v string) (string, error) {
 // removeZone removes IPv6 zone identifier from host.
 // E.g., "[fe80::1%en0]:8080" to "[fe80::1]:8080"
 func removeZone(host string) string {
-	if !strings.HasPrefix(host, "[") {
+	if !bytes.HasPrefix(host, "[") {
 		return host
 	}
-	i := strings.LastIndex(host, "]")
+	i := bytes.LastIndex(host, "]")
 	if i < 0 {
 		return host
 	}
-	j := strings.LastIndex(host[:i], "%")
+	j := bytes.LastIndex(host[:i], "%")
 	if j < 0 {
 		return host
 	}
@@ -821,7 +820,7 @@ func ParseHTTPVersion(vers string) (major, minor int, ok bool) {
 	case "HTTP/1.0":
 		return 1, 0, true
 	}
-	if !strings.HasPrefix(vers, "HTTP/") {
+	if !bytes.HasPrefix(vers, "HTTP/") {
 		return 0, 0, false
 	}
 	if len(vers) != len("HTTP/X.Y") {
@@ -882,7 +881,7 @@ func NewRequest(method, url string, body io.Reader) (*Request, error) {
 // the difference between inbound and outbound request fields.
 //
 // If body is of type [*bytes.Buffer], [*bytes.Reader], or
-// [*strings.Reader], the returned request's ContentLength is set to its
+// [*bytes.Reader], the returned request's ContentLength is set to its
 // exact value (instead of -1), GetBody is populated (so 307 and 308
 // redirects can replay the body), and Body is set to [NoBody] if the
 // ContentLength is 0.
@@ -936,7 +935,7 @@ func NewRequestWithContext(ctx context.Context, method, url string, body io.Read
 				r := snapshot
 				return io.NopCloser(&r), nil
 			}
-		case *strings.Reader:
+		case *bytes.Reader:
 			req.ContentLength = int64(v.Len())
 			snapshot := *v
 			req.GetBody = func() (io.ReadCloser, error) {
@@ -1001,7 +1000,7 @@ func parseBasicAuth(auth string) (username, password string, ok bool) {
 		return "", "", false
 	}
 	cs := string(c)
-	username, password, ok = strings.Cut(cs, ":")
+	username, password, ok = bytes.Cut(cs, ":")
 	if !ok {
 		return "", "", false
 	}
@@ -1025,8 +1024,8 @@ func (r *Request) SetBasicAuth(username, password string) {
 
 // parseRequestLine parses "GET /foo HTTP/1.1" into its three parts.
 func parseRequestLine(line string) (method, requestURI, proto string, ok bool) {
-	method, rest, ok1 := strings.Cut(line, " ")
-	requestURI, proto, ok2 := strings.Cut(rest, " ")
+	method, rest, ok1 := bytes.Cut(line, " ")
+	requestURI, proto, ok2 := bytes.Cut(rest, " ")
 	if !ok1 || !ok2 {
 		return "", "", "", false
 	}
@@ -1115,7 +1114,7 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
 	// that starts with a slash. It can be parsed with the regular URL parser,
 	// and the path will end up in req.URL.Path, where it needs to be in order for
 	// RPC to work.
-	justAuthority := req.Method == "CONNECT" && !strings.HasPrefix(rawurl, "/")
+	justAuthority := req.Method == "CONNECT" && !bytes.HasPrefix(rawurl, "/")
 	if justAuthority {
 		rawurl = "http://" + rawurl
 	}

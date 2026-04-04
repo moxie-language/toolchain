@@ -9,7 +9,7 @@ import (
 	"iter"
 	"math"
 	"strconv"
-	"strings"
+	"bytes"
 	"time"
 
 	"internal/trace/tracev2"
@@ -276,8 +276,8 @@ func (s Stack) Frames() iter.Seq[StackFrame] {
 			f := s.table.pcs[pc]
 			sf := StackFrame{
 				PC:   f.pc,
-				Func: s.table.strings.mustGet(f.funcID),
-				File: s.table.strings.mustGet(f.fileID),
+				Func: s.table.bytes.mustGet(f.funcID),
+				File: s.table.bytes.mustGet(f.fileID),
 				Line: f.line,
 			}
 			if !yield(sf) {
@@ -330,8 +330,8 @@ func (e ExperimentalEvent) ArgValue(i int) Value {
 	if i < 0 || i >= len(e.Args) {
 		panic(fmt.Sprintf("experimental event argument index %d out of bounds [0, %d)", i, len(e.Args)))
 	}
-	if strings.HasSuffix(e.Args[i], "string") {
-		s := e.table.strings.mustGet(stringID(e.argValues[i]))
+	if bytes.HasSuffix(e.Args[i], "string") {
+		s := e.table.bytes.mustGet(stringID(e.argValues[i]))
 		return stringValue(s)
 	}
 	return uint64Value(e.argValues[i])
@@ -459,7 +459,7 @@ func (e Event) Label() Label {
 		panic(fmt.Sprintf("internal error: unexpected wire-format event type for Label kind: %d", e.base.typ))
 	}
 	return Label{
-		Label:    e.table.strings.mustGet(stringID(e.base.args[0])),
+		Label:    e.table.bytes.mustGet(stringID(e.base.args[0])),
 		Resource: ResourceID{Kind: ResourceGoroutine, id: int64(e.ctx.G)},
 	}
 }
@@ -476,7 +476,7 @@ func (e Event) Range() Range {
 	case tracev2.EvSTWBegin, tracev2.EvSTWEnd:
 		// N.B. ordering.advance smuggles in the STW reason as e.base.args[0]
 		// for tracev2.EvSTWEnd (it's already there for Begin).
-		r.Name = "stop-the-world (" + e.table.strings.mustGet(stringID(e.base.args[0])) + ")"
+		r.Name = "stop-the-world (" + e.table.bytes.mustGet(stringID(e.base.args[0])) + ")"
 		r.Scope = ResourceID{Kind: ResourceGoroutine, id: int64(e.Goroutine())}
 	case tracev2.EvGCBegin, tracev2.EvGCActive, tracev2.EvGCEnd:
 		r.Name = "GC concurrent mark phase"
@@ -538,7 +538,7 @@ func (e Event) Task() Task {
 	switch e.base.typ {
 	case tracev2.EvUserTaskBegin:
 		parentID = TaskID(e.base.args[1])
-		typ = e.table.strings.mustGet(stringID(e.base.args[2]))
+		typ = e.table.bytes.mustGet(stringID(e.base.args[2]))
 	case tracev2.EvUserTaskEnd:
 		parentID = TaskID(e.base.extra(version.Go122)[0])
 		typ = e.table.getExtraString(extraStringID(e.base.extra(version.Go122)[1]))
@@ -564,7 +564,7 @@ func (e Event) Region() Region {
 	}
 	return Region{
 		Task: TaskID(e.base.args[0]),
-		Type: e.table.strings.mustGet(stringID(e.base.args[1])),
+		Type: e.table.bytes.mustGet(stringID(e.base.args[1])),
 	}
 }
 
@@ -580,8 +580,8 @@ func (e Event) Log() Log {
 	}
 	return Log{
 		Task:     TaskID(e.base.args[0]),
-		Category: e.table.strings.mustGet(stringID(e.base.args[1])),
-		Message:  e.table.strings.mustGet(stringID(e.base.args[2])),
+		Category: e.table.bytes.mustGet(stringID(e.base.args[1])),
+		Message:  e.table.bytes.mustGet(stringID(e.base.args[2])),
 	}
 }
 
@@ -630,11 +630,11 @@ func (e Event) StateTransition() StateTransition {
 		s = goStateTransition(e.ctx.G, GoSyscall, GoNotExist)
 	case tracev2.EvGoStop:
 		s = goStateTransition(e.ctx.G, GoRunning, GoRunnable)
-		s.Reason = e.table.strings.mustGet(stringID(e.base.args[0]))
+		s.Reason = e.table.bytes.mustGet(stringID(e.base.args[0]))
 		s.Stack = e.Stack() // This event references the resource the event happened on.
 	case tracev2.EvGoBlock:
 		s = goStateTransition(e.ctx.G, GoRunning, GoWaiting)
-		s.Reason = e.table.strings.mustGet(stringID(e.base.args[0]))
+		s.Reason = e.table.bytes.mustGet(stringID(e.base.args[0]))
 		s.Stack = e.Stack() // This event references the resource the event happened on.
 	case tracev2.EvGoUnblock, tracev2.EvGoSwitch, tracev2.EvGoSwitchDestroy:
 		// N.B. GoSwitch and GoSwitchDestroy both emit additional events, but
@@ -806,7 +806,7 @@ var tracev2ProcStatus2ProcState = [...]ProcState{
 //
 // The format of the string is intended for debugging and is subject to change.
 func (e Event) String() string {
-	var sb strings.Builder
+	var sb bytes.Buffer
 	fmt.Fprintf(&sb, "M=%d P=%d G=%d", e.Thread(), e.Proc(), e.Goroutine())
 	fmt.Fprintf(&sb, " %s Time=%d", e.Kind(), e.Time())
 	// Kind-specific fields.
@@ -915,10 +915,10 @@ func (e Event) validateTableIDs() error {
 	// N.B. Strings referenced by stack frames are validated
 	// early on, when reading the stacks in to begin with.
 
-	// Check strings.
+	// Check bytes.
 	for _, i := range spec.StringIDs {
 		id := stringID(e.base.args[i-1])
-		_, ok := e.table.strings.get(id)
+		_, ok := e.table.bytes.get(id)
 		if !ok {
 			return fmt.Errorf("found invalid string ID %d for event %s", id, spec.Name)
 		}

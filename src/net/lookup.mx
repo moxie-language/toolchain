@@ -184,19 +184,19 @@ func (r *Resolver) getLookupGroup() *singleflight.Group {
 //
 // LookupHost uses [context.Background] internally; to specify the context, use
 // [Resolver.LookupHost].
-func LookupHost(host string) (addrs []string, err error) {
+func LookupHost(host string) (addrs [][]byte, err error) {
 	return DefaultResolver.LookupHost(context.Background(), host)
 }
 
 // LookupHost looks up the given host using the local resolver.
 // It returns a slice of that host's addresses.
-func (r *Resolver) LookupHost(ctx context.Context, host string) (addrs []string, err error) {
+func (r *Resolver) LookupHost(ctx context.Context, host string) (addrs [][]byte, err error) {
 	// Make sure that no matter what we do later, host=="" is rejected.
 	if host == "" {
 		return nil, newDNSError(errNoSuchHost, host, "")
 	}
 	if _, err := netip.ParseAddr(host); err == nil {
-		return []string{host}, nil
+		return [][]byte{host}, nil
 	}
 	return r.lookupHost(ctx, host)
 }
@@ -318,7 +318,7 @@ func (r *Resolver) lookupIPAddr(ctx context.Context, network, host string) ([]IP
 	// can be overridden by tests. This is needed by net/http, so it
 	// uses a context key instead of unexported variables.
 	resolverFunc := r.lookupIP
-	if alt, _ := ctx.Value(nettrace.LookupIPAltResolverKey{}).(func(context.Context, string, string) ([]IPAddr, error)); alt != nil {
+	if alt, _ := ctx.Value(nettrace.LookupIPAltResolverKey{}).(func(context.Context, []byte, []byte) ([]IPAddr, error)); alt != nil {
 		resolverFunc = alt
 	}
 
@@ -351,9 +351,9 @@ func (r *Resolver) lookupIPAddr(ctx context.Context, network, host string) ([]IP
 		// See issues 8602, 20703, 22724.
 		if r.getLookupGroup().ForgetUnshared(lookupKey) {
 			lookupGroupCancel()
-			go dnsWaitGroupDone(ch, func() {})
+			dnsWaitGroupDone(ch, func() {})
 		} else {
-			go dnsWaitGroupDone(ch, lookupGroupCancel)
+			dnsWaitGroupDone(ch, lookupGroupCancel)
 		}
 		err := newDNSError(mapErr(ctx.Err()), host, "")
 		if trace != nil && trace.DNSDone != nil {
@@ -625,7 +625,7 @@ func (r *Resolver) LookupNS(ctx context.Context, name string) ([]*NS, error) {
 //
 // LookupTXT uses [context.Background] internally; to specify the context, use
 // [Resolver.LookupTXT].
-func LookupTXT(name string) ([]string, error) {
+func LookupTXT(name string) ([][]byte, error) {
 	return DefaultResolver.lookupTXT(context.Background(), name)
 }
 
@@ -633,7 +633,7 @@ func LookupTXT(name string) ([]string, error) {
 //
 // If a DNS TXT record holds multiple strings, they are concatenated as a
 // single string.
-func (r *Resolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
+func (r *Resolver) LookupTXT(ctx context.Context, name string) ([][]byte, error) {
 	return r.lookupTXT(ctx, name)
 }
 
@@ -649,7 +649,7 @@ func (r *Resolver) LookupTXT(ctx context.Context, name string) ([]string, error)
 //
 // LookupAddr uses [context.Background] internally; to specify the context, use
 // [Resolver.LookupAddr].
-func LookupAddr(addr string) (names []string, err error) {
+func LookupAddr(addr string) (names [][]byte, err error) {
 	return DefaultResolver.LookupAddr(context.Background(), addr)
 }
 
@@ -659,12 +659,12 @@ func LookupAddr(addr string) (names []string, err error) {
 // The returned names are validated to be properly formatted presentation-format
 // domain names. If the response contains invalid names, those records are filtered
 // out and an error will be returned alongside the remaining results, if any.
-func (r *Resolver) LookupAddr(ctx context.Context, addr string) ([]string, error) {
+func (r *Resolver) LookupAddr(ctx context.Context, addr string) ([][]byte, error) {
 	names, err := r.lookupAddr(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
-	filteredNames := []string{:0:len(names)}
+	filteredNames := [][]byte{:0:len(names)}
 	for _, name := range names {
 		if isDomainName(name) {
 			filteredNames = append(filteredNames, name)
@@ -850,12 +850,12 @@ func (r *Resolver) goLookupNS(ctx context.Context, name string) ([]*NS, error) {
 }
 
 // goLookupTXT returns the TXT records from name.
-func (r *Resolver) goLookupTXT(ctx context.Context, name string) ([]string, error) {
+func (r *Resolver) goLookupTXT(ctx context.Context, name string) ([][]byte, error) {
 	p, server, err := r.lookup(ctx, name, dnsmessage.TypeTXT, nil)
 	if err != nil {
 		return nil, err
 	}
-	var txts []string
+	var txts [][]byte
 	for {
 		h, err := p.AnswerHeader()
 		if err == dnsmessage.ErrSectionDone {
@@ -898,7 +898,7 @@ func (r *Resolver) goLookupTXT(ctx context.Context, name string) ([]string, erro
 			txtJoin = append(txtJoin, s...)
 		}
 		if len(txts) == 0 {
-			txts = []string{:0:1}
+			txts = [][]byte{:0:1}
 		}
 		txts = append(txts, string(txtJoin))
 	}

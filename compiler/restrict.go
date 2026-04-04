@@ -16,6 +16,11 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+// restrictedImports maps package paths that should not be used in Moxie code.
+var restrictedImports = map[string]string{
+	"strings": `use "bytes" instead of "strings" (string=[]byte)`,
+}
+
 // restrictedBuiltins maps Go builtins to the Moxie alternative.
 // Note: make is NOT listed here because the compiler generates make() calls
 // from Moxie syntax ([]T{:n} → make([]T, n)). Channel and map makes are
@@ -74,6 +79,14 @@ func (b *builder) checkMoxieRestrictions() {
 	if !isUserPackage(b.fn.Pkg) {
 		return
 	}
+	// Check for restricted imports (only on the init function to avoid per-function spam).
+	if b.fn.Name() == "init" || (b.fn.Name() == "main" && b.fn.Pkg.Pkg.Name() == "main") {
+		for _, imp := range b.fn.Pkg.Pkg.Imports() {
+			if reason, restricted := restrictedImports[imp.Path()]; restricted {
+				b.addError(b.fn.Pos(), "moxie: import \""+imp.Path()+"\" is not allowed: "+reason)
+			}
+		}
+	}
 	for _, block := range b.fn.Blocks {
 		for _, instr := range block.Instrs {
 			b.checkInstrRestrictions(instr)
@@ -87,6 +100,8 @@ func (b *builder) checkMoxieRestrictions() {
 	b.checkASTRestrictions()
 	// Check that non-constant spawn args aren't used after the spawn call.
 	b.checkSpawnMoveRestriction()
+	// Check that every channel has both a sender and a listener.
+	b.checkChannelCompleteness()
 }
 
 func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
@@ -250,6 +265,80 @@ func (b *builder) checkSpawnMoveRestriction() {
 						}
 					}
 				}
+			}
+		}
+	}
+}
+
+// checkChannelCompleteness ensures every channel created in a function has
+// both a sender and a listener (select case or receive). Channels that escape
+// the function (passed to calls, stored, returned) are exempt — the other end
+// is elsewhere.
+func (b *builder) checkChannelCompleteness() {
+	for _, block := range b.fn.Blocks {
+		for _, instr := range block.Instrs {
+			mc, ok := instr.(*ssa.MakeChan)
+			if !ok {
+				continue
+			}
+			refs := mc.Referrers()
+			if refs == nil || len(*refs) == 0 {
+				b.addError(mc.Pos(), "moxie: channel created but never used")
+				continue
+			}
+
+			hasSend := false
+			hasRecv := false
+			escapes := false
+
+			for _, ref := range *refs {
+				switch r := ref.(type) {
+				case *ssa.Send:
+					if r.Chan == mc {
+						hasSend = true
+					} else {
+						escapes = true // channel sent as a value
+					}
+				case *ssa.Select:
+					found := false
+					for _, state := range r.States {
+						if state.Chan == mc {
+							found = true
+							if state.Dir == types.SendOnly {
+								hasSend = true
+							} else {
+								hasRecv = true
+							}
+						}
+					}
+					if !found {
+						escapes = true // mc used as send value in select
+					}
+				case *ssa.UnOp:
+					if r.Op == token.ARROW {
+						hasRecv = true
+					}
+				case *ssa.Call:
+					if _, ok := r.Call.Value.(*ssa.Builtin); !ok {
+						escapes = true
+					}
+					// close, len, cap are fine — not an escape
+				case *ssa.DebugRef:
+					// Debug info, not real usage.
+				default:
+					escapes = true
+				}
+			}
+
+			if escapes {
+				continue
+			}
+			if !hasSend && !hasRecv {
+				b.addError(mc.Pos(), "moxie: channel created but has no send or select/receive")
+			} else if !hasSend {
+				b.addError(mc.Pos(), "moxie: channel has no sender — every channel needs both a sender and a listener")
+			} else if !hasRecv {
+				b.addError(mc.Pos(), "moxie: channel has no listener — every channel needs both a sender and a select/receive")
 			}
 		}
 	}

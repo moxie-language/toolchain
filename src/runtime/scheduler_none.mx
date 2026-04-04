@@ -9,7 +9,7 @@ import (
 
 const hasScheduler = false
 
-// No goroutines are allowed, so there's no parallelism anywhere.
+// No goroutines — single-threaded event dispatch.
 const hasParallelism = false
 
 // Set to true after main.main returns.
@@ -19,7 +19,6 @@ var mainExited bool
 var schedulerExit bool
 
 // run is called by the program entry point to execute the go program.
-// With the "none" scheduler, init and the main function are invoked directly.
 func run() {
 	initRand()
 	initHeap()
@@ -34,47 +33,88 @@ func sleep(duration int64) {
 		return
 	}
 
-	sleepTicks(nanosecondsToTicks(duration))
+	// Sleep in chunks, firing expired timers between chunks.
+	target := ticks() + nanosecondsToTicks(duration)
+	for {
+		now := ticks()
+		remaining := target - now
+		if remaining <= 0 {
+			break
+		}
+
+		// If a timer fires before our target, only sleep until that timer.
+		if timerQueue != nil {
+			nextTimer := timerQueue.whenTicks() - now
+			if nextTimer < remaining {
+				remaining = nextTimer
+			}
+		}
+
+		if remaining > 0 {
+			sleepTicks(remaining)
+		}
+
+		// Fire all expired timers.
+		fireTimers()
+	}
+
+	// Final timer check after sleep completes.
+	fireTimers()
+}
+
+// fireTimers runs callbacks for all expired timers.
+func fireTimers() {
+	now := ticks()
+	for timerQueue != nil && timerQueue.whenTicks() <= now {
+		tn := timerQueue
+		timerQueue = tn.next
+		tn.next = nil
+		tn.callback(tn, int64(ticksToNanoseconds(now-tn.whenTicks())))
+	}
+}
+
+// addTimer adds a timer to the queue. Timers fire during sleep or
+// at explicit yield points.
+func addTimer(tim *timerNode) {
+	mask := interrupt.Disable()
+	timerQueueAdd(tim)
+	interrupt.Restore(mask)
+}
+
+// removeTimer removes a timer from the queue.
+func removeTimer(tim *timer) *timerNode {
+	mask := interrupt.Disable()
+	n := timerQueueRemove(tim)
+	interrupt.Restore(mask)
+	return n
 }
 
 func deadlock() {
-	// The only goroutine available is deadlocked.
 	runtimePanic("all goroutines are asleep - deadlock!")
 }
 
 func scheduleTask(t *task.Task) {
-	// Pause() will panic, so this should not be reachable.
+	// Single-threaded: no task scheduling. Channel operations
+	// that would block will deadlock (by design).
 }
 
 func Gosched() {
-	// There are no other goroutines, so there's nothing to schedule.
+	// Single-threaded: fire pending timers as a yield point.
+	fireTimers()
+}
+
+func scheduler(returnAtDeadlock bool) {
+	runtimePanic("unreachable: scheduler must not be called without goroutines")
+}
+
+func schedulerRunQueue() *task.Queue {
+	runtimePanic("unreachable: no runqueue without goroutines")
+	return nil
 }
 
 // NumCPU returns the number of logical CPUs usable by the current process.
 func NumCPU() int {
 	return 1
-}
-
-func addTimer(tim *timerNode) {
-	runtimePanic("timers not supported without a scheduler")
-}
-
-func removeTimer(tim *timer) *timerNode {
-	runtimePanic("timers not supported without a scheduler")
-	return nil
-}
-
-func schedulerRunQueue() *task.Queue {
-	// This function is not actually used, it is only called when hasScheduler
-	// is true.
-	runtimePanic("unreachable: no runqueue without a scheduler")
-	return nil
-}
-
-func scheduler(returnAtDeadlock bool) {
-	// The scheduler should never be run when using -scheduler=none. Meaning,
-	// this code should be unreachable.
-	runtimePanic("unreachable: scheduler must not be called with the 'none' scheduler")
 }
 
 func lockAtomics() interrupt.State {
@@ -91,4 +131,14 @@ func printlock() {
 
 func printunlock() {
 	// nothing to do
+}
+
+// eventLoopTick runs one iteration of the single-threaded event loop.
+// Called from internal/task when blocking operations need to poll for
+// I/O events and timers without a scheduler.
+func eventLoopTick() {
+	if hasPoll {
+		netpollBlock(1) // 1ms poll
+	}
+	fireTimers()
 }
