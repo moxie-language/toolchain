@@ -33,7 +33,13 @@ All other keywords (`break`, `case`, `chan`, `const`, `continue`, `default`, `de
 
 ### Operators and Punctuation
 
-Identical to Go.
+Identical to Go, with one addition:
+
+| Operator | Context | Meaning |
+|----------|---------|---------|
+| `\|` | `[]T \| []T` | Slice concatenation. Returns a new slice. |
+
+The `+` operator on text types (`[]byte`) is a **compile error**. Use `\|` instead. See [Slice Concatenation](#slice-concatenation).
 
 ### Literals
 
@@ -41,6 +47,8 @@ Identical to Go, with these exceptions:
 
 - Complex literals (`1+2i`) are not supported since the complex types do not exist.
 - String literals (`"hello"`, `` `raw` ``) produce `[]byte` values, not `string`. See [Text Type](#text-type).
+- Slice size literals: `[]T{:n}` is `make([]T, n)`, `[]T{:n:c}` is `make([]T, n, c)`. See [Slice Size Literals](#slice-size-literals).
+- Channel literals: `chan T{}` is `make(chan T)`, `chan T{n}` is `make(chan T, n)`. See [Channel Literals](#channel-literals).
 
 ---
 
@@ -125,6 +133,40 @@ m[[]byte("key")] = 42
 
 Go restricts `==` to arrays and excludes slices. Moxie lifts this restriction: if the element type is comparable, the slice is comparable. This follows from string=[]byte — if `"hello" == "hello"` works, then `[]byte{1,2} == []byte{1,2}` should too.
 
+#### Slice Concatenation
+
+The `|` (pipe) operator concatenates any two slices of the same type, returning a fresh slice:
+
+```go
+a := []int32{1, 2, 3}
+b := []int32{4, 5}
+c := a | b           // c is []int32{1, 2, 3, 4, 5}
+// a and b are unchanged — | always allocates a new backing array.
+
+s := "hello" | " world"  // works on []byte (text) too
+s |= "!"                 // append-assign
+```
+
+The `+` operator on text types is a **compile error**. Use `|` instead. This applies to all `[]byte` expressions, including string literals.
+
+For non-`[]byte` slices, `|` is native — it passes through the type checker and compiler directly. For `[]byte`, the loader rewrites `|` to an internal concat call before type checking.
+
+#### Slice Size Literals
+
+Moxie provides shorthand for `make()` on slices. The leading `:` after `{` distinguishes size literals from composite literals:
+
+```go
+buf := []byte{:1024}         // make([]byte, 1024)
+table := []int32{:0:100}     // make([]int32, 0, 100)
+```
+
+| Syntax | Equivalent |
+|--------|-----------|
+| `[]T{:n}` | `make([]T, n)` |
+| `[]T{:n:c}` | `make([]T, n, c)` |
+
+The `make()` function still works. Size literals are syntactic sugar rewritten before parsing.
+
 ### Struct Types
 
 ```
@@ -188,6 +230,22 @@ ChannelType = ( "chan" | "chan" "<-" | "<-" "chan" ) ElementType .
 
 Identical to Go. Channels are the primary synchronization mechanism within a domain. Channels passed to `spawn` become IPC channels backed by a socketpair (native) or MessagePort (JS).
 
+#### Channel Literals
+
+Moxie provides shorthand for `make()` on channels:
+
+```go
+ch := chan int32{}       // make(chan int32)       — unbuffered
+ch := chan int32{10}     // make(chan int32, 10)   — buffered
+```
+
+| Syntax | Equivalent |
+|--------|-----------|
+| `chan T{}` | `make(chan T)` |
+| `chan T{n}` | `make(chan T, n)` |
+
+The `make()` function still works. Channel literals are syntactic sugar rewritten before parsing.
+
 ---
 
 ## Declarations and Scope
@@ -227,6 +285,8 @@ Identical to Go, with these exceptions:
 
 - Complex arithmetic expressions are not available (no `complex`, `real`, `imag`).
 - The `new(T)` expression is a compile error. Use `&T{}` or `var` instead.
+- The `+` operator on `[]byte` (text) is a compile error. Use `|` for concatenation.
+- The `|` operator on matching slice types performs concatenation (see [Slice Concatenation](#slice-concatenation)).
 
 All other expressions (arithmetic, comparison, logical, address, receive, type assertion, function calls, conversions) work identically to Go.
 
@@ -274,7 +334,7 @@ case 2:
 }
 ```
 
-All other statements (`go`, `defer`, `select`, `for`, `if`, `return`, `break`, `continue`, `goto`, `send`, `assign`, `block`) work identically to Go.
+All other statements (`defer`, `select`, `for`, `if`, `return`, `break`, `continue`, `goto`, `send`, `assign`, `block`) work identically to Go.
 
 ---
 
@@ -443,6 +503,14 @@ Identical to Go. The `import` declaration, package paths, and init functions wor
 
 The `moxie` package path is reserved for compiler internals and should not be imported by user code. The `spawn` builtin is available without import.
 
+### Import Restrictions
+
+| Import | Error |
+|--------|-------|
+| `"strings"` | Compile error: `use "bytes" instead of "strings" (string=[]byte)` |
+
+With string=[]byte, the `strings` and `bytes` packages are functionally identical. Moxie removes `strings` and requires `bytes` for all text operations.
+
 ---
 
 ## Concurrency
@@ -569,7 +637,12 @@ Standard Go build tags (`linux`, `darwin`, `amd64`, `arm64`, `js`) work as expec
 | `uintptr` | Integer type for pointers | **Does not exist.** |
 | `fallthrough` | Falls through to next case | **Compile error.** |
 | `go` | Starts goroutine | **Compile error.** No goroutines. |
+| `+` on text | String concatenation | **Compile error.** Use `\|` (pipe). |
+| `\|` on slices | Bitwise OR (integers only) | **Slice concatenation** for matching slice types. |
 | `[]T == []T` | Compile error (except `string`) | **Works** for any comparable element type. |
+| `[]T{:n}` | Invalid syntax | `make([]T, n)` — slice size literal. |
+| `chan T{}` | Invalid syntax | `make(chan T)` — channel literal. |
+| `import "strings"` | Standard library | **Compile error.** Use `"bytes"`. |
 | `sync.Mutex` | Blocks thread | No-op. Single-threaded. |
 | Memory model | Happens-before, memory fences | Single-threaded. Sequential consistency. |
 | `spawn` | Does not exist | **Moxie builtin.** Creates isolated domain. |

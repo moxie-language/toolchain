@@ -77,7 +77,7 @@ Moxie unifies types that Go keeps separate:
 
 | Go | Moxie | Effect |
 |----|-------|--------|
-| `string` (immutable) / `[]byte` (mutable) | `[]byte` only | Text is `[]byte`. String literals auto-wrap. `\|` for concatenation. |
+| `string` (immutable) / `[]byte` (mutable) | `[]byte` only | Text is `[]byte`. String literals auto-wrap. `\|` for concatenation (works on all slice types). |
 | `int` (platform-sized) / `int32` | `int32` only | 32-bit on all targets. `len()`/`cap()` return `int32`. |
 
 The `string` and `int` keywords still compile — the type checker treats them as their unified equivalents. Moxie convention uses `[]byte` and `int32` explicitly.
@@ -130,7 +130,7 @@ Moxie is a restricted subset of Go syntax. Source files use the `.mx` extension.
 |----------|------------|
 | `go f()` | Channels + `select` for event dispatch |
 | `new(T)` | `&T{}` or `var x T; p := &x` |
-| `+` on text | `\|` pipe operator for `[]byte` concatenation |
+| `+` on text | `\|` pipe operator (concatenates any matching slice types) |
 | `complex()`, `real()`, `imag()` | Not supported |
 | `complex64`, `complex128` | Not supported |
 | `uintptr` | Explicit pointer types (allowed with `import "unsafe"`) |

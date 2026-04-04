@@ -38,14 +38,36 @@ The `string` keyword still compiles — the type checker treats `string` and `[]
 | `go f()` | **Compile error.** There are no goroutines. Use channels + `select` for event dispatch, `spawn` for process-level parallelism. |
 | `fallthrough` | Comma-separated case expressions, or call a shared function. |
 
-### Text Concatenation
+### Slice Concatenation (`|` operator)
 
 | Go | Moxie |
 |----|-------|
 | `a + b` (strings) | `a \| b` (pipe operator) |
-| `s += "suffix"` | `s = s \| "suffix"` |
+| `s += "suffix"` | `s \|= "suffix"` |
+| `append(a, b...)` | `a \| b` (for same-type slices) |
 
-The `+` operator on text types is a compile error. The pipe operator `|` is rewritten by the compiler to `__moxie_concat()`.
+The `+` operator on text types is a compile error. Use `|` instead.
+
+The `|` operator works on **all matching slice types**, not just `[]byte`:
+
+```go
+a := []int32{1, 2}
+b := []int32{3, 4}
+c := a | b   // []int32{1, 2, 3, 4} — always a fresh allocation
+```
+
+For `[]byte`, the loader rewrites `|` to an internal concat call before type checking. For all other slice types, the type checker and compiler handle `|` natively.
+
+### Literal Syntax Extensions
+
+| Syntax | Equivalent | Notes |
+|--------|-----------|-------|
+| `[]T{:n}` | `make([]T, n)` | Slice with length `n` |
+| `[]T{:n:c}` | `make([]T, n, c)` | Slice with length `n`, capacity `c` |
+| `chan T{}` | `make(chan T)` | Unbuffered channel |
+| `chan T{n}` | `make(chan T, n)` | Buffered channel with capacity `n` |
+
+The leading `:` in slice literals distinguishes size allocation from composite literals. `make()` still works — these are syntactic sugar rewritten before parsing.
 
 ### Spawn Boundary Restrictions
 
