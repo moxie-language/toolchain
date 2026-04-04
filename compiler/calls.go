@@ -187,7 +187,7 @@ func (c *compilerContext) flattenAggregateType(t llvm.Type, name string, goType 
 						suffix = []string{"r", "i"}[i]
 					case types.String:
 						suffix = []string{"data", "len", "cap"}[i]
-						isString = true
+						// Moxie: don't mark string data as readonly (string=[]byte, mutable).
 					}
 				case *types.Signature:
 					suffix = []string{"context", "funcptr"}[i]

@@ -19,8 +19,8 @@ func (b *builder) createMakeMap(expr *ssa.MakeMap) (llvm.Value, error) {
 	llvmValueType := b.getLLVMType(mapType.Elem().Underlying())
 	var llvmKeyType llvm.Type
 	var alg uint64
-	if t, ok := keyType.(*types.Basic); ok && t.Info()&types.IsString != 0 {
-		// String keys.
+	if isStringLike(keyType) {
+		// String/[]byte keys (Moxie: string=[]byte).
 		llvmKeyType = b.getLLVMType(keyType)
 		alg = uint64(moxie.HashmapAlgorithmString)
 	} else if hashmapIsBinaryKey(keyType) {
@@ -74,8 +74,8 @@ func (b *builder) createMapLookup(keyType, valueType types.Type, m, key llvm.Val
 	var commaOkValue llvm.Value
 	origKeyType := keyType
 	keyType = keyType.Underlying()
-	if t, ok := keyType.(*types.Basic); ok && t.Info()&types.IsString != 0 {
-		// key is a string
+	if isStringLike(keyType) {
+		// key is string/[]byte (Moxie: string=[]byte)
 		params := []llvm.Value{m, key, mapValueAlloca, mapValueSize}
 		commaOkValue = b.createRuntimeCall("hashmapStringGet", params, "")
 	} else if hashmapIsBinaryKey(keyType) {
@@ -122,8 +122,8 @@ func (b *builder) createMapUpdate(keyType types.Type, m, key, value llvm.Value, 
 	b.CreateStore(value, valueAlloca)
 	origKeyType := keyType
 	keyType = keyType.Underlying()
-	if t, ok := keyType.(*types.Basic); ok && t.Info()&types.IsString != 0 {
-		// key is a string
+	if isStringLike(keyType) {
+		// key is string/[]byte (Moxie: string=[]byte)
 		params := []llvm.Value{m, key, valueAlloca}
 		b.createRuntimeCall("hashmapStringSet", params, "")
 	} else if hashmapIsBinaryKey(keyType) {
@@ -152,8 +152,8 @@ func (b *builder) createMapUpdate(keyType types.Type, m, key, value llvm.Value, 
 func (b *builder) createMapDelete(keyType types.Type, m, key llvm.Value, pos token.Pos) error {
 	origKeyType := keyType
 	keyType = keyType.Underlying()
-	if t, ok := keyType.(*types.Basic); ok && t.Info()&types.IsString != 0 {
-		// key is a string
+	if isStringLike(keyType) {
+		// key is string/[]byte (Moxie: string=[]byte)
 		params := []llvm.Value{m, key}
 		b.createRuntimeCall("hashmapStringDelete", params, "")
 		return nil
@@ -199,8 +199,8 @@ func (b *builder) createMapIteratorNext(rangeVal ssa.Value, llvmRangeVal, it llv
 	// instead of the value they normally are. This happens for non-trivially
 	// comparable types such as float32 or some structs.
 	isKeyStoredAsInterface := false
-	if t, ok := keyType.Underlying().(*types.Basic); ok && t.Info()&types.IsString != 0 {
-		// key is a string
+	if isStringLike(keyType.Underlying()) {
+		// key is string/[]byte (Moxie: string=[]byte)
 	} else if hashmapIsBinaryKey(keyType) {
 		// key can be compared with runtime.memequal
 	} else {
@@ -247,6 +247,19 @@ func (b *builder) createMapIteratorNext(rangeVal ssa.Value, llvmRangeVal, it llv
 // Returns true if this key type does not contain strings, interfaces etc., so
 // can be compared with runtime.memequal.  Note that padding bytes are undef
 // and can alter two "equal" structs being equal when compared with memequal.
+// isStringLike reports whether t is string or []byte (Moxie: string=[]byte).
+func isStringLike(t types.Type) bool {
+	switch t := t.(type) {
+	case *types.Basic:
+		return t.Info()&types.IsString != 0
+	case *types.Slice:
+		if b, ok := t.Elem().(*types.Basic); ok && b.Kind() == types.Byte {
+			return true
+		}
+	}
+	return false
+}
+
 func hashmapIsBinaryKey(keyType types.Type) bool {
 	switch keyType := keyType.Underlying().(type) {
 	case *types.Basic:

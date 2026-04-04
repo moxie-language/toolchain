@@ -65,6 +65,10 @@ func main() {
 	patchExpr(dstDir)
 	patchSizes(dstDir)
 	patchDecl(dstDir)
+	patchRecording(dstDir)
+	patchIdentical(dstDir)
+	patchUnify(dstDir)
+	patchTypeTerm(dstDir)
 
 	fmt.Fprintf(os.Stderr, "patched go/types in %s\n", dstDir)
 }
@@ -147,6 +151,60 @@ func patchDecl(dir string) {
 	src = mustReplace(f, src,
 		"\t\tif !isConstType(t) {",
 		"\t\tif !isConstType(t) && !isByteSlice(t) {")
+
+	mustWrite(f, src)
+}
+
+func patchRecording(dir string) {
+	f := filepath.Join(dir, "recording.go")
+	src := mustRead(f)
+
+	// Patch 11: Allow []byte as a valid constant type in type recording.
+	// With string=[]byte, string constants may have []byte type.
+	src = mustReplace(f, src,
+		"assert(!isValid(typ) || allBasic(typ, IsConstType))",
+		"assert(!isValid(typ) || allBasic(typ, IsConstType) || isByteSlice(typ))")
+
+	mustWrite(f, src)
+}
+
+func patchIdentical(dir string) {
+	f := filepath.Join(dir, "predicates.go")
+	src := mustRead(f)
+
+	// Patch 9: string ↔ []byte identity in comparer.identical.
+	// Makes Identical(string, []byte) true, propagating through all composite
+	// types: []string = [][]byte, map[string]V = map[[]byte]V, etc.
+	src = mustReplace(f, src,
+		"\tswitch x := x.(type) {\n\tcase *Basic:\n\t\t// Basic types are singletons except for the rune and byte\n\t\t// aliases, thus we cannot solely rely on the x == y check\n\t\t// above. See also comment in TypeName.IsAlias.\n\t\tif y, ok := y.(*Basic); ok {\n\t\t\treturn x.kind == y.kind\n\t\t}",
+		"\t// Moxie: string and []byte are identical types.\n\tif (isString(x) && isByteSlice(y)) || (isByteSlice(x) && isString(y)) {\n\t\treturn true\n\t}\n\n\tswitch x := x.(type) {\n\tcase *Basic:\n\t\t// Basic types are singletons except for the rune and byte\n\t\t// aliases, thus we cannot solely rely on the x == y check\n\t\t// above. See also comment in TypeName.IsAlias.\n\t\tif y, ok := y.(*Basic); ok {\n\t\t\treturn x.kind == y.kind\n\t\t}")
+
+	mustWrite(f, src)
+}
+
+func patchUnify(dir string) {
+	f := filepath.Join(dir, "unify.go")
+	src := mustRead(f)
+
+	// Patch 10: string ↔ []byte unification in the type unifier.
+	// Generic constraint satisfaction uses unify(), not Identical().
+	src = mustReplace(f, src,
+		"\t// nothing to do if x == y\n\tif x == y || Unalias(x) == Unalias(y) {\n\t\treturn true\n\t}",
+		"\t// nothing to do if x == y\n\tif x == y || Unalias(x) == Unalias(y) {\n\t\treturn true\n\t}\n\n\t// Moxie: string and []byte unify (string=[]byte).\n\tif (isString(x) && isByteSlice(y)) || (isByteSlice(x) && isString(y)) {\n\t\treturn true\n\t}")
+
+	mustWrite(f, src)
+}
+
+func patchTypeTerm(dir string) {
+	f := filepath.Join(dir, "typeterm.go")
+	src := mustRead(f)
+
+	// Patch 8: Generic constraint satisfaction — []byte satisfies ~string.
+	// term.includes checks Identical(x.typ, under(t)). With string=[]byte,
+	// []byte must satisfy ~string in constraint unions like cmp.Ordered.
+	src = mustReplace(f, src,
+		"\treturn Identical(x.typ, u)\n}",
+		"\tif Identical(x.typ, u) {\n\t\treturn true\n\t}\n\t// Moxie: []byte satisfies ~string (string=[]byte unification).\n\tif isString(x.typ) && isByteSlice(t) {\n\t\treturn true\n\t}\n\tif isByteSlice(x.typ) && isString(t) {\n\t\treturn true\n\t}\n\treturn false\n}")
 
 	mustWrite(f, src)
 }

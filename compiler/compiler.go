@@ -444,6 +444,10 @@ func (c *compilerContext) makeLLVMType(goType types.Type) llvm.Type {
 	case *types.Signature: // function value
 		return c.getFuncType(typ)
 	case *types.Slice:
+		// Moxie: []byte uses the named _string type (string=[]byte unification).
+		if basic, ok := typ.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {
+			return c.getLLVMRuntimeType("_string")
+		}
 		members := []llvm.Type{
 			c.dataPtrType,
 			c.uintptrType, // len
@@ -994,7 +998,7 @@ func (c *compilerContext) createEmbedGlobal(member *ssa.Global, global llvm.Valu
 			llvm.ConstInt(c.uintptrType, 0, false),
 		})
 		sliceLen := llvm.ConstInt(c.uintptrType, file.Size, false)
-		sliceObj := c.ctx.ConstStruct([]llvm.Value{slicePtr, sliceLen, sliceLen}, false)
+		sliceObj := llvm.ConstNamedStruct(c.getLLVMRuntimeType("_string"), []llvm.Value{slicePtr, sliceLen, sliceLen})
 		global.SetInitializer(sliceObj)
 		global.SetVisibility(llvm.HiddenVisibility)
 
@@ -1597,7 +1601,16 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		srcCap := b.CreateExtractValue(src, 2, "append.srcCap")
 		elemsBuf := b.CreateExtractValue(elems, 0, "append.elemsBuf")
 		elemsLen := b.CreateExtractValue(elems, 1, "append.elemsLen")
-		elemType := b.getLLVMType(argTypes[0].Underlying().(*types.Slice).Elem())
+		// Moxie: argTypes[0] may be *types.Basic (string) due to string=[]byte.
+		var elemType llvm.Type
+		switch ut := argTypes[0].Underlying().(type) {
+		case *types.Slice:
+			elemType = b.getLLVMType(ut.Elem())
+		case *types.Basic: // string=[]byte: element is byte
+			elemType = b.ctx.Int8Type()
+		default:
+			panic("append on non-slice type: " + argTypes[0].String())
+		}
 		elemSize := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(elemType), false)
 		result := b.createRuntimeCall("sliceAppend", []llvm.Value{srcBuf, elemsBuf, srcLen, srcCap, elemsLen, elemSize}, "append.new")
 		newPtr := b.CreateExtractValue(result, 0, "append.newPtr")
@@ -1870,11 +1883,18 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 			len = b.CreateTrunc(len, b.uintptrType, "")
 		}
 		if callName == "Slice" {
-			slice := llvm.Undef(b.ctx.StructType([]llvm.Type{
-				ptr.Type(),
-				b.uintptrType,
-				b.uintptrType,
-			}, false))
+			// Moxie: detect []byte to use named _string type.
+			var sliceType llvm.Type
+			if elementType == b.ctx.Int8Type() {
+				sliceType = b.getLLVMRuntimeType("_string")
+			} else {
+				sliceType = b.ctx.StructType([]llvm.Type{
+					ptr.Type(),
+					b.uintptrType,
+					b.uintptrType,
+				}, false)
+			}
+			slice := llvm.Undef(sliceType)
 			slice = b.CreateInsertValue(slice, ptr, 0, "")
 			slice = b.CreateInsertValue(slice, len, 1, "")
 			slice = b.CreateInsertValue(slice, len, 2, "")
@@ -2227,6 +2247,17 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			bufElemType := b.ctx.Int8Type()
 			bufPtr := b.CreateInBoundsGEP(bufElemType, buf, []llvm.Value{index}, "")
 			return b.CreateLoad(bufElemType, bufPtr, ""), nil
+		case *types.Slice: // Moxie: []byte index (string=[]byte unification)
+			if basic, ok := xType.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {
+				index = b.extendInteger(index, expr.Index.Type(), b.uintptrType)
+				length := b.CreateExtractValue(collection, 1, "len")
+				b.createLookupBoundsCheck(length, index)
+				buf := b.CreateExtractValue(collection, 0, "")
+				bufElemType := b.ctx.Int8Type()
+				bufPtr := b.CreateInBoundsGEP(bufElemType, buf, []llvm.Value{index}, "")
+				return b.CreateLoad(bufElemType, bufPtr, ""), nil
+			}
+			panic("unexpected slice type in *ssa.Index")
 		case *types.Array: // extract element from array
 			// Extend index to at least uintptr size, because getelementptr
 			// assumes index is a signed integer.
@@ -2278,6 +2309,10 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			bufptr = b.CreateExtractValue(val, 0, "indexaddr.ptr")
 			buflen = b.CreateExtractValue(val, 1, "indexaddr.len")
 			bufType = b.getLLVMType(ptrTyp.Elem())
+		case *types.Basic: // Moxie: string=[]byte, addressable indexing
+			bufptr = b.CreateExtractValue(val, 0, "indexaddr.ptr")
+			buflen = b.CreateExtractValue(val, 1, "indexaddr.len")
+			bufType = b.ctx.Int8Type()
 		default:
 			return llvm.Value{}, b.makeError(expr.Pos(), "todo: indexaddr: "+ptrTyp.String())
 		}
@@ -2297,6 +2332,8 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			}
 			return b.CreateInBoundsGEP(bufType, bufptr, indices, ""), nil
 		case *types.Slice:
+			return b.CreateInBoundsGEP(bufType, bufptr, []llvm.Value{index}, ""), nil
+		case *types.Basic: // Moxie: string=[]byte, addressable
 			return b.CreateInBoundsGEP(bufType, bufptr, []llvm.Value{index}, ""), nil
 		default:
 			panic("unreachable")
@@ -2362,11 +2399,8 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		}
 
 		// Create the slice.
-		slice := b.ctx.ConstStruct([]llvm.Value{
-			llvm.Undef(slicePtr.Type()),
-			llvm.Undef(b.uintptrType),
-			llvm.Undef(b.uintptrType),
-		}, false)
+		// Moxie: use getLLVMType to get named type for []byte.
+		slice := llvm.Undef(b.getLLVMType(sliceType))
 		slice = b.CreateInsertValue(slice, slicePtr, 0, "")
 		slice = b.CreateInsertValue(slice, sliceLen, 1, "")
 		slice = b.CreateInsertValue(slice, sliceCap, 2, "")
@@ -2387,7 +2421,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 	case *ssa.Range:
 		var iteratorType llvm.Type
 		switch typ := expr.X.Type().Underlying().(type) {
-		case *types.Basic: // string
+		case *types.Basic: // string range (yields runes via UTF-8 decode)
 			iteratorType = b.getLLVMRuntimeType("stringIterator")
 		case *types.Map:
 			iteratorType = b.getLLVMRuntimeType("hashmapIterator")
@@ -2466,11 +2500,8 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			slicePtr := b.CreateInBoundsGEP(b.getLLVMType(arrayType), value, indices, "slice.ptr")
 			sliceCap := b.CreateSub(max, low, "slice.cap")
 
-			slice := b.ctx.ConstStruct([]llvm.Value{
-				llvm.Undef(slicePtr.Type()),
-				llvm.Undef(b.uintptrType),
-				llvm.Undef(b.uintptrType),
-			}, false)
+			// Moxie: use getLLVMType for correct named type on []byte.
+			slice := llvm.Undef(b.getLLVMType(expr.Type()))
 			slice = b.CreateInsertValue(slice, slicePtr, 0, "")
 			slice = b.CreateInsertValue(slice, sliceLen, 1, "")
 			slice = b.CreateInsertValue(slice, sliceCap, 2, "")
@@ -2506,11 +2537,8 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			newPtr := b.CreateInBoundsGEP(ptrElemType, oldPtr, []llvm.Value{low}, "")
 			newLen := b.CreateSub(high, low, "")
 			newCap := b.CreateSub(max, low, "")
-			slice := b.ctx.ConstStruct([]llvm.Value{
-				llvm.Undef(newPtr.Type()),
-				llvm.Undef(b.uintptrType),
-				llvm.Undef(b.uintptrType),
-			}, false)
+			// Moxie: use getLLVMType to get the correct type (named for []byte).
+			slice := llvm.Undef(b.getLLVMType(typ))
 			slice = b.CreateInsertValue(slice, newPtr, 0, "")
 			slice = b.CreateInsertValue(slice, newLen, 1, "")
 			slice = b.CreateInsertValue(slice, newCap, 2, "")
@@ -2926,6 +2954,8 @@ func (b *builder) createBinOp(op token.Token, typ, ytyp types.Type, x, y llvm.Va
 		// Other slice types only support nil comparison.
 		if basic, ok := typ.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {
 			switch op {
+			case token.ADD: // Moxie: []byte + []byte (exempt packages use + on text)
+				return b.createRuntimeCall("stringConcat", []llvm.Value{x, y}, ""), nil
 			case token.EQL:
 				return b.createRuntimeCall("stringEqual", []llvm.Value{x, y}, ""), nil
 			case token.NEQ:
@@ -3149,14 +3179,8 @@ func (c *compilerContext) createConst(expr *ssa.Const, pos token.Pos) llvm.Value
 		if expr.Value != nil {
 			panic("expected nil slice constant")
 		}
-		llvmPtr := llvm.ConstPointerNull(c.dataPtrType)
-		llvmLen := llvm.ConstInt(c.uintptrType, 0, false)
-		slice := c.ctx.ConstStruct([]llvm.Value{
-			llvmPtr, // backing array
-			llvmLen, // len
-			llvmLen, // cap
-		}, false)
-		return slice
+		// Moxie: use ConstNull with correct type (named for []byte).
+		return llvm.ConstNull(c.getLLVMType(expr.Type()))
 	case *types.Struct:
 		if expr.Value != nil {
 			panic("expected nil struct constant")
@@ -3372,8 +3396,9 @@ func (b *builder) createConvert(typeFrom, typeTo types.Type, value llvm.Value, p
 		return llvm.Value{}, b.makeError(pos, "todo: convert: basic non-integer type: "+typeFrom.String()+" -> "+typeTo.String())
 
 	case *types.Slice:
-		if basic, ok := typeFrom.Underlying().(*types.Basic); !ok || basic.Info()&types.IsString == 0 {
-			panic("can only convert from a string to a slice")
+		// Moxie: allow conversion from string or []byte (string=[]byte).
+		if !isStringLike(typeFrom.Underlying()) {
+			panic("can only convert from a string/[]byte to a slice")
 		}
 
 		elemType := typeTo.Elem().Underlying().(*types.Basic) // must be byte or rune

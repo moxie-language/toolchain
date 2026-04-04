@@ -60,4 +60,4 @@ export CGO_CPPFLAGS="-I${LLVM_PREFIX}/include -D__STDC_CONSTANT_MACROS -D__STDC_
 export CGO_CFLAGS="-I${LLVM_PREFIX}/include"
 export CGO_LDFLAGS="-L${LLVM_PREFIX}/lib -lLLVM-19 -lclang"
 
-exec go build -tags llvm19 -o moxie "$@" .
+exec go build -mod=vendor -tags llvm19 -o moxie "$@" .
