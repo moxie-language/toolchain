@@ -171,3 +171,77 @@ export function RemoveIdentity(pubkey, fn) {
     fn(false);
   }
 }
+
+// --- HD keychain ---
+
+export function GenerateMnemonic(fn) {
+  var s = _smesh();
+  if (s && s.generateMnemonic) {
+    s.generateMnemonic().then(function(m) { fn(m || ''); }).catch(function() { fn(''); });
+  } else {
+    fn('');
+  }
+}
+
+export function ValidateMnemonic(mnemonic, fn) {
+  var s = _smesh();
+  if (s && s.validateMnemonic) {
+    s.validateMnemonic(mnemonic).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+  } else {
+    fn(false);
+  }
+}
+
+export function CreateHDVault(password, name, fn) {
+  var s = _smesh();
+  if (s && s.createHDVault) {
+    s.createHDVault(password, name).then(function(m) { fn(m || ''); }).catch(function() { fn(''); });
+  } else {
+    fn('');
+  }
+}
+
+export function RestoreHDVault(password, mnemonic, name, fn) {
+  var s = _smesh();
+  if (s && s.restoreHDVault) {
+    s.restoreHDVault(password, mnemonic, name).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+  } else {
+    fn(false);
+  }
+}
+
+export function DeriveIdentity(name, fn) {
+  var s = _smesh();
+  if (s && s.deriveIdentity) {
+    s.deriveIdentity(name).then(function(pk) { fn(pk || ''); }).catch(function() { fn(''); });
+  } else {
+    fn('');
+  }
+}
+
+export function GetMnemonic(fn) {
+  var s = _smesh();
+  if (s && s.getMnemonic) {
+    s.getMnemonic().then(function(m) { fn(m || ''); }).catch(function() { fn(''); });
+  } else {
+    fn('');
+  }
+}
+
+export function ProbeAccount(index, fn) {
+  var s = _smesh();
+  if (s && s.probeAccount) {
+    s.probeAccount(index).then(function(pk) { fn(pk || ''); }).catch(function() { fn(''); });
+  } else {
+    fn('');
+  }
+}
+
+export function IsHD(fn) {
+  var s = _smesh();
+  if (s && s.isHD) {
+    s.isHD().then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+  } else {
+    fn(false);
+  }
+}

@@ -343,3 +343,25 @@ export function SHA256Sum(data) {
   const hash = sha256(sliceToU8(data));
   return u8ToSlice(hash);
 }
+
+// ScalarAddModN adds two 32-byte big-endian scalars modulo the curve order N.
+// Returns [resultSlice, ok]. ok is false if result is zero.
+export function ScalarAddModN(a, b) {
+  const ai = bytesToBigInt(sliceToU8(a));
+  const bi = bytesToBigInt(sliceToU8(b));
+  const sum = modN(ai + bi);
+  if (sum === 0n) return [u8ToSlice(new Uint8Array(32)), false];
+  return [u8ToSlice(bigIntTo32(sum)), true];
+}
+
+// CompressedPubKey derives the 33-byte SEC1 compressed public key from a secret key.
+// Returns [compressedSlice (33 bytes), ok].
+export function CompressedPubKey(seckey) {
+  const sk = bytesToBigInt(sliceToU8(seckey));
+  if (sk === 0n || sk >= N) return [u8ToSlice(new Uint8Array(33)), false];
+  const [px, py] = scalarMult(sk, Gx, Gy);
+  const out = new Uint8Array(33);
+  out[0] = (py % 2n === 0n) ? 0x02 : 0x03;
+  out.set(bigIntTo32(px), 1);
+  return [u8ToSlice(out), true];
+}

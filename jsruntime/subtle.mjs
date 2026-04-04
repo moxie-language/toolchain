@@ -130,3 +130,28 @@ export function Argon2idDeriveKey(password, salt, t, m, p, dkLen, fn) {
     });
   }
 }
+
+// HMACSHA512 computes HMAC-SHA-512 via WebCrypto.
+// key and data are Go slices. Calls fn with a 64-byte Go slice.
+export function HMACSHA512(key, data, fn) {
+  const k = sliceToU8(key);
+  const d = sliceToU8(data);
+  crypto.subtle.importKey('raw', k, {name: 'HMAC', hash: 'SHA-512'}, false, ['sign'])
+    .then(ck => crypto.subtle.sign('HMAC', ck, d))
+    .then(buf => fn(u8ToSlice(new Uint8Array(buf))))
+    .catch(() => fn(u8ToSlice(new Uint8Array(0))));
+}
+
+// PBKDF2SHA512 derives a key using PBKDF2 with SHA-512 via WebCrypto.
+// password is a Go string, salt is a Go slice.
+export function PBKDF2SHA512(password, salt, iterations, dkLen, fn) {
+  const pw = goStringToJS(password);
+  const s = sliceToU8(salt);
+  const enc = new TextEncoder();
+  crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveBits'])
+    .then(baseKey => crypto.subtle.deriveBits(
+      {name: 'PBKDF2', salt: s, iterations: iterations, hash: 'SHA-512'},
+      baseKey, dkLen * 8))
+    .then(bits => fn(u8ToSlice(new Uint8Array(bits))))
+    .catch(() => fn(u8ToSlice(new Uint8Array(0))));
+}

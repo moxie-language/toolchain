@@ -399,6 +399,11 @@ export function PickFileText(accept, fn) {
   setTimeout(function() { input.remove(); }, 60000);
 }
 
+// NowSeconds returns current Unix time in seconds.
+export function NowSeconds() {
+  return Math.floor(Date.now() / 1000);
+}
+
 // Get raw element (for advanced use within JS runtime only).
 export function getRawElement(id) {
   return _elements.get(id);
