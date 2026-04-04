@@ -2945,6 +2945,25 @@ func (b *builder) createBinOp(op token.Token, typ, ytyp types.Type, x, y llvm.Va
 				return llvm.Value{}, b.makeError(pos, "todo: binop on []byte: "+op.String())
 			}
 		}
+		// Moxie: | on any slice type is concatenation.
+		// Uses sliceAppend with cap=len to force fresh allocation.
+		if op == token.OR {
+			xPtr := b.CreateExtractValue(x, 0, "concat.xPtr")
+			xLen := b.CreateExtractValue(x, 1, "concat.xLen")
+			yPtr := b.CreateExtractValue(y, 0, "concat.yPtr")
+			yLen := b.CreateExtractValue(y, 1, "concat.yLen")
+			elemType := b.getLLVMType(typ.Elem())
+			elemSize := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(elemType), false)
+			result := b.createRuntimeCall("sliceAppend", []llvm.Value{xPtr, yPtr, xLen, xLen, yLen, elemSize}, "concat.new")
+			newPtr := b.CreateExtractValue(result, 0, "concat.ptr")
+			newLen := b.CreateExtractValue(result, 1, "concat.len")
+			newCap := b.CreateExtractValue(result, 2, "concat.cap")
+			newSlice := llvm.Undef(x.Type())
+			newSlice = b.CreateInsertValue(newSlice, newPtr, 0, "")
+			newSlice = b.CreateInsertValue(newSlice, newLen, 1, "")
+			newSlice = b.CreateInsertValue(newSlice, newCap, 2, "")
+			return newSlice, nil
+		}
 		// Moxie: slices of comparable types support == and !=.
 		// Compare lengths first, then data byte-by-byte via runtime.
 		if op != token.EQL && op != token.NEQ {

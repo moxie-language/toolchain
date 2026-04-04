@@ -276,6 +276,33 @@ func main() {
 		}
 	}
 
+	// Slice concat (| operator)
+	{
+		a := []int{1, 2, 3}
+		b := []int{4, 5}
+		c := a | b
+		print("concat:  ")
+		if len(c) == 5 && c[0] == 1 && c[3] == 4 && c[4] == 5 {
+			// Verify a is unchanged (| must not modify the original).
+			if len(a) == 3 && a[0] == 1 {
+				println("PASS")
+			} else {
+				println("FAIL (src mutated)")
+			}
+		} else {
+			println("FAIL")
+		}
+
+		// String ([]byte) concat with |
+		s := "hello" | " world"
+		print("strcat:  ")
+		if len(s) == 11 {
+			println("PASS")
+		} else {
+			println("FAIL")
+		}
+	}
+
 	// Image/draw
 	{
 		dst := image.NewRGBA(image.Rect(0, 0, 4, 4))

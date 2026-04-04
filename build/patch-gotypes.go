@@ -118,6 +118,11 @@ func patchExpr(dir string) {
 		"\tswitch u := under(target).(type) {\n\tcase *Basic:\n\t\tif x.mode == constant_ {",
 		"\t// Moxie: untyped string → []byte implicit conversion (string=[]byte unification).\n\t// For constants, return Typ[String] because slices aren't valid constant types.\n\tif x.typ.(*Basic).kind == UntypedString && isByteSlice(target) {\n\t\tif x.mode == constant_ {\n\t\t\treturn Typ[String], x.val, 0\n\t\t}\n\t\treturn target, nil, 0\n\t}\n\n\tswitch u := under(target).(type) {\n\tcase *Basic:\n\t\tif x.mode == constant_ {")
 
+	// Patch 7: Allow | on matching slice types (slice concatenation).
+	src = mustReplace(f, src,
+		"\tif !check.op(binaryOpPredicates, x, op) {\n\t\tx.mode = invalid\n\t\treturn\n\t}",
+		"\t// Moxie: | on matching slice types is concatenation.\n\t_, mxSliceConcat := under(x.typ).(*Slice)\n\tif !(op == token.OR && mxSliceConcat) && !check.op(binaryOpPredicates, x, op) {\n\t\tx.mode = invalid\n\t\treturn\n\t}")
+
 	mustWrite(f, src)
 }
 
