@@ -77,10 +77,10 @@ Moxie unifies types that Go keeps separate:
 
 | Go | Moxie | Effect |
 |----|-------|--------|
-| `string` (immutable) / `[]byte` (mutable) | `[]byte` only | Text is `[]byte`. String literals auto-wrap. `\|` for concatenation (works on all slice types). |
+| `string` (immutable) / `[]byte` (mutable) | `string = []byte` | Same runtime layout, mutually assignable. No immutable strings. `string` is preferred for readability. `\|` for concatenation (works on all slice types). |
 | `int` (platform-sized) / `int32` | `int32` only | 32-bit on all targets. `len()`/`cap()` return `int32`. |
 
-The `string` and `int` keywords still compile — the type checker treats them as their unified equivalents. Moxie convention uses `[]byte` and `int32` explicitly.
+The `string` keyword is retained and preferred — it reads better than `[]byte` in function signatures and type declarations. They are the same type: same layout, same operations, same runtime representation. Use whichever reads better in context.
 
 ### Slice Equality
 

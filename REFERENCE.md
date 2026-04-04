@@ -84,23 +84,28 @@ Note: `rune` is not a language-level type. Unicode code point encoding and decod
 
 ### Text Type
 
-There is no `string` type. Text is `[]byte`.
-
-String literals produce `[]byte` values:
+`string` and `[]byte` are the same type. They have identical runtime layout (pointer, length, capacity), are mutually assignable, and can be used interchangeably everywhere. `string` is the preferred spelling for readability:
 
 ```go
-name := "hello"          // name has type []byte
-raw := `raw\nstring`     // raw has type []byte
+name := "hello"           // type is string (= []byte)
+var s string = []byte{72} // string and []byte are interchangeable
+b := []byte("world")      // no-op conversion — same layout
+s = b                     // direct assignment, no copy
 ```
 
-To get a pointer: `&[]byte` works like any other address-of expression:
+There is no immutable string type. All text is a mutable byte slice. The keyword `string` is retained because it reads better than `[]byte` in signatures and declarations:
 
 ```go
-var greeting []byte = "hello"
-p := &greeting            // p has type *[]byte
+func greet(name string) string {  // preferred
+    return "hello " | name
+}
+
+func greet(name []byte) []byte {  // equivalent, less readable
+    return "hello " | name
+}
 ```
 
-UTF-8 encoding and rune iteration are library operations, not language primitives. There is no implicit `range` over runes — ranging over `[]byte` yields bytes.
+UTF-8 encoding and rune iteration are library operations, not language primitives. There is no implicit `range` over runes — ranging over text yields bytes.
 
 ### Array Types
 
@@ -629,7 +634,7 @@ Standard Go build tags (`linux`, `darwin`, `amd64`, `arm64`, `js`) work as expec
 | Feature | Go | Moxie |
 |---------|-----|-------|
 | `new(T)` | Allocates and returns `*T` | **Compile error.** Use `&T{}`. |
-| `string` | Immutable UTF-8 type | **Does not exist.** Text is `[]byte`. |
+| `string` | Immutable UTF-8 type | **`string = []byte`.** Mutable, same layout, mutually assignable. `string` is preferred for readability. |
 | `rune` | Alias for `int32` | Not a language type. Use `int32` + encoding library. |
 | `any` | Alias for `interface{}` | **Same.** Retained as generic shorthand. |
 | `complex64/128` | Complex number types | **Do not exist.** |

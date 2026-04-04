@@ -8,11 +8,11 @@ See [REFERENCE.md](../REFERENCE.md) for the complete language reference.
 
 | Go Type | Moxie Equivalent | Notes |
 |---------|-----------------|-------|
-| `string` | `[]byte` | Identical 3-word layout. String literals produce `[]byte`. |
+| `string` | `string = []byte` | Same type. Identical 3-word layout, mutually assignable. `string` is preferred for readability. |
 | `int` | `int32` | 32-bit on all targets. `len()`/`cap()` return `int32`. |
 | `uint` | `uint32` | 32-bit on all targets. |
 
-The `string` keyword still compiles — the type checker treats `string` and `[]byte` as mutually assignable. But Moxie convention is `[]byte` for text.
+`string` and `[]byte` are the same type in Moxie — same runtime representation, same operations, fully interchangeable. Use `string` in signatures and declarations for readability; use `[]byte` when the byte-level nature matters (e.g., binary protocols).
 
 ### Removed Builtins
 

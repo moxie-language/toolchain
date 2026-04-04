@@ -44,7 +44,7 @@ The compiler rewrites `|` on `[]byte` operands to `__moxie_concat()` calls. The 
 
 **String literals are auto-wrapped.** The compiler rewrites `"hello"` to `[]byte("hello")` automatically. You don't need to change string literals.
 
-**`string` type still works.** With type unification, `string` and `[]byte` are interchangeable. You can use either in declarations — but `[]byte` is the Moxie convention.
+**`string` is preferred.** With type unification, `string` and `[]byte` are the same type — same layout, mutually assignable. Use `string` in signatures and declarations for readability; use `[]byte` when the byte-level nature matters.
 
 ## Step 3: Remove `new()`
 
@@ -175,7 +175,7 @@ import "bytes"
 bytes.Contains(s, "foo")
 ```
 
-The `strings` package still exists and works, but `bytes` is canonical.
+`import "strings"` is a compile error — use `bytes` for all text operations.
 
 ## What the Compiler Does Automatically
 
@@ -183,7 +183,7 @@ You do NOT need to manually:
 
 - Wrap string literals in `[]byte()` — the compiler does this
 - Convert `len()`/`cap()` return types — the compiler handles int32 truncation
-- Change `string` to `[]byte` in type declarations — they're interchangeable
+- Change `string` to `[]byte` in type declarations — they're the same type
 - Rewrite `+=` on text — the compiler detects and rewrites this
 - Handle `string` in function signatures — assignability works both ways
 
