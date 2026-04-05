@@ -32,9 +32,20 @@ func (s *String) read(n int) []byte {
 	return v
 }
 
+// readOK is like read but returns a bool to handle moxie's nil-empty-slice identity.
+func (s *String) readOK(n int) ([]byte, bool) {
+	if len(*s) < n || n < 0 {
+		return nil, false
+	}
+	v := (*s)[:n]
+	*s = (*s)[n:]
+	return v, true
+}
+
 // Skip advances the String by n byte and reports whether it was successful.
 func (s *String) Skip(n int) bool {
-	return s.read(n) != nil
+	_, ok := s.readOK(n)
+	return ok
 }
 
 // ReadUint8 decodes an 8-bit value into out and advances over it.
@@ -118,8 +129,8 @@ func (s *String) readUnsigned(out *uint32, length int) bool {
 }
 
 func (s *String) readLengthPrefixed(lenLen int, outChild *String) bool {
-	lenBytes := s.read(lenLen)
-	if lenBytes == nil {
+	lenBytes, ok := s.readOK(lenLen)
+	if !ok {
 		return false
 	}
 	var length uint32
@@ -127,8 +138,8 @@ func (s *String) readLengthPrefixed(lenLen int, outChild *String) bool {
 		length = length << 8
 		length = length | uint32(b)
 	}
-	v := s.read(int(length))
-	if v == nil {
+	v, ok := s.readOK(int(length))
+	if !ok {
 		return false
 	}
 	*outChild = v
@@ -158,8 +169,8 @@ func (s *String) ReadUint24LengthPrefixed(out *String) bool {
 // ReadBytes reads n bytes into out and advances over them. It reports
 // whether the read was successful.
 func (s *String) ReadBytes(out *[]byte, n int) bool {
-	v := s.read(n)
-	if v == nil {
+	v, ok := s.readOK(n)
+	if !ok {
 		return false
 	}
 	*out = v
@@ -170,8 +181,8 @@ func (s *String) ReadBytes(out *[]byte, n int) bool {
 // whether the copy operation was successful
 func (s *String) CopyBytes(out []byte) bool {
 	n := len(out)
-	v := s.read(n)
-	if v == nil {
+	v, ok := s.readOK(n)
+	if !ok {
 		return false
 	}
 	return copy(out, v) == n
