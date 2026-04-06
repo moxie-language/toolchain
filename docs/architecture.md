@@ -22,7 +22,7 @@ SSA construction (via golang.org/x/tools/go/ssa)
     │
     ▼
 compiler (Moxie SSA → LLVM IR)
-    ├── spawn detection: moxie.Spawn → runtime.spawnDomain
+    ├── spawn builtin → runtime.spawnDomain (Codec validation)
     ├── restriction checking: reject new, complex, etc.
     ├── goroutine lowering: go → task.start
     └── syscall intrinsics: inline assembly
@@ -74,13 +74,17 @@ Each domain runs `scheduler = "tasks"` — a cooperative FIFO scheduler.
 
 ## Spawn: Domain Creation
 
+`spawn` is a language builtin (like `make`, `append`). The type checker validates
+argument count and types. The SSA validator enforces `moxie.Codec` on all data
+arguments and channel element types.
+
 ```
-moxie.Spawn(fn, args...)
+spawn(fn, args...)
     │
     ▼ (compile time)
 compiler/spawn.go
-    │ validate boundary types
-    │ create goroutine-style wrapper
+    │ validate all args implement moxie.Codec
+    │ reject pointers, interfaces, functions
     │ emit: runtime.spawnDomain(wrapper, packedArgs)
     │
     ▼ (runtime)

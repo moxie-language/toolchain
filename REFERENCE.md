@@ -397,25 +397,28 @@ The compiler verifies at compile time that:
 - Every argument type is serializable across the spawn boundary.
 
 ```go
-func worker(x int32, y float64) { ... }
+import "moxie"
 
-spawn(worker, int32(1), float64(2.5))  // OK
-spawn(worker, int32(1))                // compile error: expects 2 arguments, got 1
-spawn(worker, 1, 2.5)                  // compile error: int != int32
-spawn(worker, float64(1), int32(2))    // compile error: argument 1 has type float64, expects int32
+func worker(x moxie.Int32, y moxie.Float64) { ... }
+
+spawn(worker, moxie.Int32(1), moxie.Float64(2.5))  // OK
+spawn(worker, moxie.Int32(1))                        // compile error: expects 2 arguments, got 1
+spawn(worker, int32(1), float64(2.5))                // compile error: int32 does not implement moxie.Codec
 ```
 
 ### Example
 
 ```go
-func producer(id int32, scale float64) {
+import "moxie"
+
+func producer(id moxie.Int32, scale moxie.Float64) {
     for i := int32(0); i < 10; i++ {
-        println(id, float64(i)*scale)
+        println(id, float64(i)*float64(scale))
     }
 }
 
 func main() {
-    done := spawn(producer, int32(1), float64(2.5))
+    done := spawn(producer, moxie.Int32(1), moxie.Float64(2.5))
     _ = done
     println("parent continues immediately")
 }
@@ -425,32 +428,51 @@ The parent does not block. The child runs concurrently as a separate process.
 
 ### Spawn Boundary Rules
 
-The spawn boundary is a serialization boundary. Every argument is deep-copied into the child's address space. There is no shared memory between domains.
+The spawn boundary is a serialization boundary. Every argument is serialized via `moxie.Codec` into the child's address space. There is no shared memory between domains.
+
+All data arguments and channel element types must implement `moxie.Codec`:
+
+```go
+import "moxie"
+
+type Codec interface {
+    EncodeTo(w io.Writer) error
+    DecodeFrom(r io.Reader) error
+}
+```
+
+#### Codec Types
+
+The `moxie` package provides built-in codec types. All encode little-endian by default (matching target hardware). Big-endian aliases exist for protocols like Bitcoin:
+
+| Default (LE) | Big-endian (BE) | Size |
+|-------------|-----------------|------|
+| `moxie.Bool`, `moxie.Int8`, `moxie.Uint8` | — | 1 byte |
+| `moxie.Int16`, `moxie.Uint16` | `moxie.BigInt16`, `moxie.BigUint16` | 2 bytes |
+| `moxie.Int32`, `moxie.Uint32` | `moxie.BigInt32`, `moxie.BigUint32` | 4 bytes |
+| `moxie.Int64`, `moxie.Uint64` | `moxie.BigInt64`, `moxie.BigUint64` | 8 bytes |
+| `moxie.Float32` | `moxie.BigFloat32` | 4 bytes |
+| `moxie.Float64` | `moxie.BigFloat64` | 8 bytes |
+| `moxie.Bytes` | — | 4-byte LE length prefix + data |
+
+User-defined structs implement Codec by defining `EncodeTo`/`DecodeFrom` methods.
 
 #### Allowed Types
 
-| Type | Behavior |
-|------|----------|
-| `int8` .. `int64`, `uint8` .. `uint64` | Copied by value. |
-| `float32`, `float64` | Copied by value. |
-| `bool`, `byte` | Copied by value. |
-| `[N]T` (array) | Copied by value. Element type must be allowed. |
-| `struct{...}` | Copied by value. All fields must be allowed types. |
-| `[]T` (slice) | Deep copied. Element type must be allowed. |
-| `map[K]V` | Deep copied. Key and value types must be allowed. |
-| `chan T` | **Top-level only.** Becomes an IPC channel. Element type must be allowed. |
+| Type | Treatment |
+|------|-----------|
+| Types implementing `moxie.Codec` | Serialized via EncodeTo/DecodeFrom. |
+| Channels (element type must implement Codec) | Become IPC channels. |
+| Structs with Codec methods | User-defined serialization. |
 
 #### Rejected Types (compile error)
 
 | Type | Reason |
 |------|--------|
+| Raw built-in types (`int32`, `bool`, etc.) | Use `moxie.Int32`, `moxie.Bool`, etc. |
 | `*T` (pointer) | Cannot share memory across process boundary. |
 | `func(...)` | Cannot serialize code pointers. |
-| `interface{}` | Type erasure makes serialization ambiguous. |
-| Any interface type | Same reason. All interface types are rejected. |
-| Nested channel | Channels inside structs, arrays, slices, or maps are rejected. Channels must be top-level parameters. |
-
-The validation is recursive: a struct containing a pointer field, or a slice of interfaces, or a map with function values, will all be rejected at compile time.
+| `interface{}` / any interface type | Type erasure makes serialization ambiguous. No interface crosses the spawn boundary. |
 
 ### Move Semantics
 
@@ -506,7 +528,7 @@ In the browser:
 
 Identical to Go. The `import` declaration, package paths, and init functions work as in Go.
 
-The `moxie` package path is reserved for compiler internals and should not be imported by user code. The `spawn` builtin is available without import.
+The `moxie` package is force-imported by the compiler (like `runtime`). User code imports `moxie` explicitly when using Codec types at spawn boundaries. The `spawn` builtin itself requires no import.
 
 ### Import Restrictions
 
@@ -558,19 +580,21 @@ default:
 Channels passed to `spawn` become IPC channels. Sends serialize the value over a socketpair (native) or MessagePort (JS). Receives block until data arrives from the other domain.
 
 ```go
-func worker(results chan int32) {
-    results <- compute()
+import "moxie"
+
+func worker(results chan moxie.Int32) {
+    results <- moxie.Int32(compute())
 }
 
 func main() {
-    results := make(chan int32)
+    results := make(chan moxie.Int32)
     spawn(worker, results)
     v := <-results
     println(v)
 }
 ```
 
-The channel element type must be a serializable value type (no pointers, no interfaces, no functions, no nested channels).
+The channel element type must implement `moxie.Codec`.
 
 ---
 
@@ -650,7 +674,8 @@ Standard Go build tags (`linux`, `darwin`, `amd64`, `arm64`, `js`) work as expec
 | `import "strings"` | Standard library | **Compile error.** Use `"bytes"`. |
 | `sync.Mutex` | Blocks thread | No-op. Single-threaded. |
 | Memory model | Happens-before, memory fences | Single-threaded. Sequential consistency. |
-| `spawn` | Does not exist | **Moxie builtin.** Creates isolated domain. |
+| `spawn` | Does not exist | **Moxie builtin.** Creates isolated domain. Args must implement `moxie.Codec`. |
+| `interface{}` at spawn | N/A | **Compile error.** No interface crosses the spawn boundary. |
 | Concurrency model | Shared memory + locks | Domain isolation. No shared memory. |
 | Binary output | Dynamically linked | Fully static. |
 | Targets | All platforms | Linux, Darwin, browser JS. |

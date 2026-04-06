@@ -2,33 +2,68 @@
 
 See [REFERENCE.md](../REFERENCE.md) for the complete language reference.
 
-`spawn` is a language builtin. No import required.
+`spawn` is a language builtin (like `make`, `append`). No import required. Patched into Go's type universe via `build/patch-gotypes.go`.
 
 ```go
 done := spawn(funcName, arg1, arg2, ...)
+done := spawn("local", funcName, arg1, arg2, ...)  // explicit transport
 ```
 
 Creates a new domain — an isolated OS process (native) or Worker (JS) — running `funcName(arg1, arg2, ...)` with its own cooperative scheduler and heap. Returns `chan struct{}` (lifecycle channel).
 
-## Example
+## Codec Requirement
+
+All data arguments and channel element types must implement `moxie.Codec`:
 
 ```go
-func worker(n int32, scale float64) {
-    println(float64(n) * scale)
-}
+import "moxie"
 
-func main() {
-    spawn(worker, int32(42), float64(2.5))
+type Codec interface {
+    EncodeTo(w io.Writer) error
+    DecodeFrom(r io.Reader) error
 }
 ```
 
-## Allowed Parameter Types
+Built-in codec types encode little-endian by default. Big-endian aliases exist for protocols like Bitcoin:
 
-Integers, floats, bools, strings, arrays, structs, slices, maps, and bare channels. All checked recursively — every leaf type must be serializable.
+| Default (LE) | Big-endian (BE) | Size |
+|-------------|-----------------|------|
+| `moxie.Bool`, `moxie.Int8`, `moxie.Uint8` | — | 1 byte |
+| `moxie.Int16`, `moxie.Uint16` | `moxie.BigInt16`, `moxie.BigUint16` | 2 bytes |
+| `moxie.Int32`, `moxie.Uint32` | `moxie.BigInt32`, `moxie.BigUint32` | 4 bytes |
+| `moxie.Int64`, `moxie.Uint64` | `moxie.BigInt64`, `moxie.BigUint64` | 8 bytes |
+| `moxie.Float32` | `moxie.BigFloat32` | 4 bytes |
+| `moxie.Float64` | `moxie.BigFloat64` | 8 bytes |
+| `moxie.Bytes` | — | 4-byte LE length prefix + data |
 
-## Rejected Parameter Types (compile error)
+User-defined structs implement Codec by defining EncodeTo/DecodeFrom methods that encode each field.
 
-Pointers, functions, all interface types, and channels nested inside compound types.
+## Example
+
+```go
+import "moxie"
+
+func worker(n moxie.Int32, scale moxie.Float64) {
+    println(float64(n) * float64(scale))
+}
+
+func main() {
+    spawn(worker, moxie.Int32(42), moxie.Float64(2.5))
+}
+```
+
+## Type Checking
+
+The type checker (patched go/types) validates:
+- First argument must be a function (or transport string + function)
+- Result type is `chan struct{}`
+
+The compiler's SSA validator additionally enforces:
+- All data argument types implement `moxie.Codec`
+- All channel element types implement `moxie.Codec`
+- No `interface{}` values cross the boundary
+- No pointers, functions, or nested channels
+- Only unbuffered channels allowed
 
 ## Move Semantics
 

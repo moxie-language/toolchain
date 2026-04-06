@@ -14,24 +14,22 @@ Each Moxie program is a tree of **domains**. Each domain is an OS process runnin
 2. **Buffered channels** are message queues — sending enqueues a value for the next time the receiving `select` runs.
 3. **`select`** is the event handler — it waits for channel messages, I/O events, and timer expirations. All concurrency reduces to sitting in a `select` loop.
 
-Domains communicate through channels that become IPC over Unix socketpairs via `moxie.Spawn`. Messages pass between processes transparently — the receiving domain picks them up when its event loop reaches the relevant `select`.
+Domains communicate through channels that become IPC over Unix socketpairs via `spawn`. Messages pass between processes transparently — the receiving domain picks them up when its event loop reaches the relevant `select`.
 
 ```moxie
 package main
-
-import "moxie"
 
 func worker() {
     println("hello from child domain")
 }
 
 func main() {
-    moxie.Spawn(worker)
+    spawn(worker)
     println("parent continues")
 }
 ```
 
-`Spawn` forks the process. The child runs `worker` to completion, exits. The parent continues immediately.
+`spawn` is a language builtin — no import needed. It forks the process. The child runs `worker` to completion, exits. The parent continues immediately.
 
 ## Execution Model
 
@@ -149,19 +147,31 @@ See [REFERENCE.md](REFERENCE.md) for the full language specification and [docs/P
 
 ## Spawn Boundary Rules
 
-Arguments to `moxie.Spawn` must be safe to serialize across process boundaries:
+`spawn` is a true language builtin (like `make`, `append`) — patched into Go's type universe, no import or function stub. The type checker validates args directly; the SSA validator enforces `moxie.Codec` on data types and channel element types.
+
+All data arguments and channel element types must implement `moxie.Codec`:
+
+```go
+type Codec interface {
+    EncodeTo(w io.Writer) error
+    DecodeFrom(r io.Reader) error
+}
+```
+
+Built-in codec types (in the `moxie` package): `Bool`, `Int8`, `Uint8`, `Int16`, `Uint16`, `Int32`, `Uint32`, `Int64`, `Uint64`, `Float32`, `Float64`, `Bytes`. All encode little-endian by default (matching target hardware). Big-endian aliases for protocols like Bitcoin: `BigInt16`, `BigUint16`, `BigInt32`, `BigUint32`, `BigInt64`, `BigUint64`, `BigFloat32`, `BigFloat64`.
 
 | Allowed | Treatment |
 |---------|-----------|
-| Value types (int, float, bool, struct, array) | Deep copy |
-| Channels | Become IPC channels |
-| Slices, maps | Deep copy |
+| Types implementing `moxie.Codec` | Serialized via EncodeTo/DecodeFrom |
+| Channels (element type must implement Codec) | Become IPC channels |
+| Structs with Codec methods | User-defined serialization |
 
 | Rejected (compile error) | Reason |
 |--------------------------|--------|
+| Raw built-in types (`int32`, `bool`, etc.) | Use `moxie.Int32`, `moxie.Bool`, etc. |
 | Pointers (`*T`) | Can't share memory across processes |
 | Functions | Can't serialize code |
-| Non-empty interfaces | Can't serialize vtables |
+| All interface types | No `interface{}` crosses the spawn boundary |
 
 Non-constant variables passed to `spawn` cannot be used after the call — ownership moves to the child domain.
 
@@ -197,7 +207,7 @@ moxie/
 ├── src/                     # Target-side sources (compiled INTO programs)
 │   ├── runtime/             # Runtime: scheduler, channels, GC, spawn
 │   ├── internal/task/       # Cooperative task system, context switching
-│   ├── moxie/               # Shared constants + Spawn declaration
+│   ├── moxie/               # Codec interface, built-in codec types, constants
 │   └── ...                  # Stdlib overlays (.mx files)
 ├── lib/                     # C libraries (musl, bdwgc, compiler-rt)
 └── docs/                    # Language reference, porting guide, architecture

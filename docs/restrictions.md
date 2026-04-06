@@ -71,12 +71,20 @@ The leading `:` in slice literals distinguishes size allocation from composite l
 
 ### Spawn Boundary Restrictions
 
-| Type | Rule |
-|------|------|
-| `*T` (pointer) | Cannot cross spawn boundary. |
-| `func(...)` | Cannot cross spawn boundary. |
-| Any `interface` type | Cannot cross spawn boundary (including `interface{}`). |
-| Nested `chan` | Channels must be top-level spawn parameters, not inside structs/arrays/slices/maps. |
+All data arguments and channel element types must implement `moxie.Codec` (see `src/moxie/codec.go`). The `moxie` package provides built-in codec types: `Bool`, `Int8`, `Uint8`, `Int16`, `Uint16`, `Int32`, `Uint32`, `Int64`, `Uint64`, `Float32`, `Float64`, `Bytes`. Big-endian aliases: `BigInt16`, `BigUint16`, `BigInt32`, `BigUint32`, `BigInt64`, `BigUint64`, `BigFloat32`, `BigFloat64`.
+
+| Allowed | Treatment |
+|---------|-----------|
+| Types implementing `moxie.Codec` | Serialized via EncodeTo/DecodeFrom |
+| Channels (element type must implement Codec) | Become IPC channels |
+| Structs with Codec methods | User-defined serialization |
+
+| Rejected (compile error) | Reason |
+|--------------------------|--------|
+| Raw built-in types (`int32`, `bool`, etc.) | Use `moxie.Int32`, `moxie.Bool`, etc. |
+| `*T` (pointer) | Cannot share memory across processes |
+| `func(...)` | Cannot serialize code |
+| Any `interface` type (including `interface{}`) | No interface crosses the spawn boundary |
 
 Non-constant variables passed to `spawn` cannot be used after the call (move semantics).
 

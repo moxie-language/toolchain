@@ -197,6 +197,7 @@ You do NOT need to manually:
 | `moxie: type 'uintptr' is not allowed` | uintptr without unsafe | Add `import _ "unsafe"` or use pointer types |
 | `moxie: 'fallthrough' is not allowed` | fallthrough statement | Merge cases with commas |
 | `moxie: variable used after spawn` | Using moved variable | Don't reference args after spawn call |
+| `does not implement moxie.Codec` | Raw type at spawn boundary | Use `moxie.Int32`, `moxie.Float64`, etc. |
 
 ## Exempt Packages
 
