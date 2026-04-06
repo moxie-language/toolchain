@@ -1,6 +1,6 @@
-// schnorr.mjs — BIP-340 Schnorr signatures using native JS BigInt.
-// Bypasses moxie's uint64 emulation (which uses float64 and loses precision
-// above 2^53). All 256-bit field/scalar arithmetic is exact via BigInt.
+// schnorr.mjs — BIP-340 Schnorr signatures using JS BigInt.
+// Field/scalar arithmetic over secp256k1 with wNAF precomputed tables
+// and Shamir's trick for fast verification.
 
 import { Slice } from './builtin.mjs';
 
@@ -11,95 +11,214 @@ const Gy = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8n;
 
 // --- Modular arithmetic ---
 
-function modP(x) { return ((x % P) + P) % P; }
-function modN(x) { return ((x % N) + N) % N; }
+function mod(x, m) { return ((x % m) + m) % m; }
 
 function modInv(a, m) {
-  let [old_r, r] = [((a % m) + m) % m, m];
+  let [old_r, r] = [mod(a, m), m];
   let [old_s, s] = [1n, 0n];
   while (r !== 0n) {
     const q = old_r / r;
     [old_r, r] = [r, old_r - q * r];
     [old_s, s] = [s, old_s - q * s];
   }
-  return ((old_s % m) + m) % m;
+  return mod(old_s, m);
 }
 
-// --- Jacobian point operations (X, Y, Z) → affine (X/Z², Y/Z³) ---
+function modPow(base, exp, m) {
+  let result = 1n;
+  base = mod(base, m);
+  while (exp > 0n) {
+    if (exp & 1n) result = result * base % m;
+    exp >>= 1n;
+    base = base * base % m;
+  }
+  return result;
+}
 
-function jDouble(X1, Y1, Z1) {
+// --- Jacobian point: [X, Y, Z] where affine x=X/Z², y=Y/Z³ ---
+// Point at infinity: Z === 0n.
+
+function jDbl(X1, Y1, Z1) {
   if (Y1 === 0n) return [0n, 1n, 0n];
-  const A = modP(Y1 * Y1);
-  const B = modP(4n * X1 * A);
-  const C = modP(8n * A * A);
-  const D = modP(3n * X1 * X1); // a=0 for secp256k1
-  const X3 = modP(D * D - 2n * B);
-  const Y3 = modP(D * (B - X3) - C);
-  const Z3 = modP(2n * Y1 * Z1);
+  const A = mod(Y1 * Y1, P);
+  const B = mod(4n * X1 * A, P);
+  const C = mod(8n * A * A, P);
+  const D = mod(3n * X1 * X1, P); // a=0 for secp256k1
+  const X3 = mod(D * D - 2n * B, P);
+  const Y3 = mod(D * (B - X3) - C, P);
+  const Z3 = mod(2n * Y1 * Z1, P);
   return [X3, Y3, Z3];
 }
 
 function jAdd(X1, Y1, Z1, X2, Y2, Z2) {
   if (Z1 === 0n) return [X2, Y2, Z2];
   if (Z2 === 0n) return [X1, Y1, Z1];
-  const Z1sq = modP(Z1 * Z1);
-  const Z2sq = modP(Z2 * Z2);
-  const U1 = modP(X1 * Z2sq);
-  const U2 = modP(X2 * Z1sq);
-  const S1 = modP(Y1 * Z2sq % P * Z2 % P);
-  const S2 = modP(Y2 * Z1sq % P * Z1 % P);
+  const Z1sq = mod(Z1 * Z1, P);
+  const Z2sq = mod(Z2 * Z2, P);
+  const U1 = mod(X1 * Z2sq, P);
+  const U2 = mod(X2 * Z1sq, P);
+  const S1 = mod(Y1 * mod(Z2sq * Z2, P), P);
+  const S2 = mod(Y2 * mod(Z1sq * Z1, P), P);
   if (U1 === U2) {
-    if (S1 === S2) return jDouble(X1, Y1, Z1);
+    if (S1 === S2) return jDbl(X1, Y1, Z1);
     return [0n, 1n, 0n];
   }
-  const H = modP(U2 - U1);
-  const R = modP(S2 - S1);
-  const H2 = modP(H * H);
-  const H3 = modP(H2 * H);
-  const X3 = modP(R * R - H3 - 2n * U1 * H2);
-  const Y3 = modP(R * (U1 * H2 - X3) - S1 * H3);
-  const Z3 = modP(H * Z1 * Z2);
+  const H = mod(U2 - U1, P);
+  const R = mod(S2 - S1, P);
+  const H2 = mod(H * H, P);
+  const H3 = mod(H2 * H, P);
+  const X3 = mod(R * R - H3 - 2n * U1 * H2, P);
+  const Y3 = mod(R * (U1 * H2 - X3) - S1 * H3, P);
+  const Z3 = mod(H * Z1 * Z2, P);
   return [X3, Y3, Z3];
+}
+
+function jNeg(X, Y, Z) {
+  return [X, mod(P - Y, P), Z];
 }
 
 function jToAffine(X, Y, Z) {
   if (Z === 0n) return [0n, 0n];
   const Zi = modInv(Z, P);
-  const Z2 = modP(Zi * Zi);
-  const Z3 = modP(Z2 * Zi);
-  return [modP(X * Z2), modP(Y * Z3)];
+  const Z2 = mod(Zi * Zi, P);
+  const Z3 = mod(Z2 * Zi, P);
+  return [mod(X * Z2, P), mod(Y * Z3, P)];
 }
 
+// --- wNAF precomputed table for generator G ---
+// Window size W=8: precompute odd multiples 1G, 3G, 5G, ..., 255G.
+// Then scalarMultG processes 8 bits at a time using table lookup.
+
+const W = 8;
+const HALF = 1 << (W - 1); // 128
+const MASK = (1 << W) - 1; // 255
+
+// Precomputed table: _gTable[i] = (2i+1)*G in Jacobian [X, Y, Z].
+// Negation (for negative wNAF digits) is free: just negate Y.
+let _gTable = null;
+
+function ensureGTable() {
+  if (_gTable) return;
+  _gTable = new Array(HALF);
+  // 1*G
+  _gTable[0] = [Gx, Gy, 1n];
+  // 2*G
+  const g2 = jDbl(Gx, Gy, 1n);
+  for (let i = 1; i < HALF; i++) {
+    _gTable[i] = jAdd(_gTable[i - 1][0], _gTable[i - 1][1], _gTable[i - 1][2],
+                       g2[0], g2[1], g2[2]);
+  }
+}
+
+// Encode scalar k into wNAF form with window W.
+// Returns array of digits in {-(2^(W-1)-1) .. 2^(W-1)-1}, odd or zero.
+function wnaf(k, w) {
+  const digits = [];
+  const halfW = 1n << BigInt(w - 1);
+  const fullW = halfW << 1n;
+  const mask = fullW - 1n;
+  while (k > 0n) {
+    if (k & 1n) {
+      let d = k & mask;
+      if (d >= halfW) d -= fullW;
+      k -= d;
+      digits.push(d);
+    } else {
+      digits.push(0n);
+    }
+    k >>= 1n;
+  }
+  return digits;
+}
+
+// scalarMultG: fast k*G using wNAF precomputed table.
+function scalarMultG(k) {
+  ensureGTable();
+  k = ((k % N) + N) % N;
+  if (k === 0n) return [0n, 0n];
+
+  const digits = wnaf(k, W);
+  let RX = 0n, RY = 1n, RZ = 0n; // infinity
+
+  for (let i = digits.length - 1; i >= 0; i--) {
+    [RX, RY, RZ] = jDbl(RX, RY, RZ);
+    const d = digits[i];
+    if (d !== 0n) {
+      const idx = Number(d < 0n ? (-d - 1n) >> 1n : (d - 1n) >> 1n);
+      const pt = _gTable[idx];
+      if (d < 0n) {
+        [RX, RY, RZ] = jAdd(RX, RY, RZ, pt[0], mod(P - pt[1], P), pt[2]);
+      } else {
+        [RX, RY, RZ] = jAdd(RX, RY, RZ, pt[0], pt[1], pt[2]);
+      }
+    }
+  }
+  return jToAffine(RX, RY, RZ);
+}
+
+// Plain scalar multiply for arbitrary points (no precomputation).
 function scalarMult(k, px, py) {
-  let [RX, RY, RZ] = [0n, 1n, 0n]; // infinity
+  let [RX, RY, RZ] = [0n, 1n, 0n];
   let [CX, CY, CZ] = [px, py, 1n];
+  k = ((k % N) + N) % N;
   while (k > 0n) {
     if (k & 1n) [RX, RY, RZ] = jAdd(RX, RY, RZ, CX, CY, CZ);
-    [CX, CY, CZ] = jDouble(CX, CY, CZ);
+    [CX, CY, CZ] = jDbl(CX, CY, CZ);
     k >>= 1n;
   }
   return jToAffine(RX, RY, RZ);
 }
 
-function liftX(x) {
-  const c = modP(x * x * x + 7n);
-  // y = c^((p+1)/4) mod p
-  const exp = (P + 1n) / 4n;
-  let y = modPow(c, exp, P);
-  if (modP(y * y) !== modP(c)) return null;
-  if (y % 2n !== 0n) y = modP(P - y);
-  return y;
+// Shamir's trick: compute k1*G + k2*P in one pass.
+// Shares doublings between the two scalar multiplications.
+function shamirMultGP(k1, k2, px, py) {
+  ensureGTable();
+  k1 = ((k1 % N) + N) % N;
+  k2 = ((k2 % N) + N) % N;
+
+  // wNAF encode k1 (for G table lookup)
+  const d1 = wnaf(k1, W);
+  // Simple binary for k2 (no precomputed table for P)
+  const d2 = wnaf(k2, 2);
+
+  const len = Math.max(d1.length, d2.length);
+
+  let RX = 0n, RY = 1n, RZ = 0n; // infinity
+
+  for (let i = len - 1; i >= 0; i--) {
+    [RX, RY, RZ] = jDbl(RX, RY, RZ);
+
+    // k1*G part: use precomputed table
+    const a = i < d1.length ? d1[i] : 0n;
+    if (a !== 0n) {
+      const idx = Number(a < 0n ? (-a - 1n) >> 1n : (a - 1n) >> 1n);
+      const pt = _gTable[idx];
+      if (a < 0n) {
+        [RX, RY, RZ] = jAdd(RX, RY, RZ, pt[0], mod(P - pt[1], P), pt[2]);
+      } else {
+        [RX, RY, RZ] = jAdd(RX, RY, RZ, pt[0], pt[1], pt[2]);
+      }
+    }
+
+    // k2*P part: simple binary (odd digit = ±1 only)
+    const b = i < d2.length ? d2[i] : 0n;
+    if (b > 0n) {
+      [RX, RY, RZ] = jAdd(RX, RY, RZ, px, py, 1n);
+    } else if (b < 0n) {
+      [RX, RY, RZ] = jAdd(RX, RY, RZ, px, mod(P - py, P), 1n);
+    }
+  }
+
+  return jToAffine(RX, RY, RZ);
 }
 
-function modPow(base, exp, mod) {
-  let result = 1n;
-  base = ((base % mod) + mod) % mod;
-  while (exp > 0n) {
-    if (exp & 1n) result = result * base % mod;
-    exp >>= 1n;
-    base = base * base % mod;
-  }
-  return result;
+function liftX(x) {
+  const c = mod(x * x * x + 7n, P);
+  const exp = (P + 1n) / 4n;
+  let y = modPow(c, exp, P);
+  if (mod(y * y, P) !== mod(c, P)) return null;
+  if (y % 2n !== 0n) y = mod(P - y, P);
+  return y;
 }
 
 // --- SHA-256 (synchronous, pure JS) ---
@@ -116,14 +235,12 @@ const K256 = [
 ];
 
 function sha256(data) {
-  // Padding.
   const len = data.length;
   const bitLen = len * 8;
   const padLen = ((56 - (len + 1) % 64) + 64) % 64;
   const padded = new Uint8Array(len + 1 + padLen + 8);
   padded.set(data);
   padded[len] = 0x80;
-  // Big-endian 64-bit length (only lower 32 bits for messages < 2^32 bytes).
   const dv = new DataView(padded.buffer);
   dv.setUint32(padded.length - 4, bitLen, false);
 
@@ -172,7 +289,7 @@ function taggedHash(tag, msg) {
   return sha256(buf);
 }
 
-// --- Conversions between Go slices and BigInt/Uint8Array ---
+// --- Slice conversions ---
 
 function sliceToU8(s) {
   if (s instanceof Uint8Array) return s;
@@ -199,20 +316,15 @@ function bigIntTo32(n) {
   return out;
 }
 
-// --- Exported BIP-340 functions (called from Go via jsbridge) ---
+// --- Exported BIP-340 functions ---
 
-// PubKeyFromSecKey computes the x-only public key.
-// Returns the pubkey as a Go slice, and a bool.
 export function PubKeyFromSecKey(seckey) {
   const sk = bytesToBigInt(sliceToU8(seckey));
   if (sk === 0n || sk >= N) return [u8ToSlice(new Uint8Array(32)), false];
-  const [px, _] = scalarMult(sk, Gx, Gy);
+  const [px, _] = scalarMultG(sk);
   return [u8ToSlice(bigIntTo32(px)), true];
 }
 
-// SignSchnorr signs a message using BIP-340.
-// seckey, msg, auxRand are Go slices of 32 bytes each.
-// Returns [sigSlice (64 bytes), bool].
 export function SignSchnorr(seckey, msg, auxRand) {
   const sk = bytesToBigInt(sliceToU8(seckey));
   const m = sliceToU8(msg);
@@ -220,22 +332,17 @@ export function SignSchnorr(seckey, msg, auxRand) {
 
   if (sk === 0n || sk >= N) return [u8ToSlice(new Uint8Array(64)), false];
 
-  // P = sk * G
-  const [px, py] = scalarMult(sk, Gx, Gy);
-
-  // If P.y is odd, negate sk.
+  const [px, py] = scalarMultG(sk);
   let d = sk;
   if (py % 2n !== 0n) d = N - d;
 
   const pkBytes = bigIntTo32(px);
 
-  // t = d XOR tagged_hash("BIP0340/aux", auxRand)
   const auxHash = taggedHash("BIP0340/aux", aux);
   const dBytes = bigIntTo32(d);
   const t = new Uint8Array(32);
   for (let i = 0; i < 32; i++) t[i] = dBytes[i] ^ auxHash[i];
 
-  // k' = tagged_hash("BIP0340/nonce", t || pk || msg) mod n
   const nonceInput = new Uint8Array(96);
   nonceInput.set(t, 0);
   nonceInput.set(pkBytes, 32);
@@ -244,15 +351,11 @@ export function SignSchnorr(seckey, msg, auxRand) {
   let k = bytesToBigInt(kHash) % N;
   if (k === 0n) return [u8ToSlice(new Uint8Array(64)), false];
 
-  // R = k * G
-  const [rx, ry] = scalarMult(k, Gx, Gy);
-
-  // If R.y is odd, negate k.
+  const [rx, ry] = scalarMultG(k);
   if (ry % 2n !== 0n) k = N - k;
 
   const rxBytes = bigIntTo32(rx);
 
-  // e = tagged_hash("BIP0340/challenge", R.x || P.x || msg) mod n
   const eInput = new Uint8Array(96);
   eInput.set(rxBytes, 0);
   eInput.set(pkBytes, 32);
@@ -260,8 +363,7 @@ export function SignSchnorr(seckey, msg, auxRand) {
   const eHash = taggedHash("BIP0340/challenge", eInput);
   const e = bytesToBigInt(eHash) % N;
 
-  // sig = R.x || (k + e*d) mod n
-  const s = modN(k + e * d);
+  const s = ((k + e * d) % N + N) % N;
 
   const sig = new Uint8Array(64);
   sig.set(rxBytes, 0);
@@ -270,7 +372,7 @@ export function SignSchnorr(seckey, msg, auxRand) {
   return [u8ToSlice(sig), true];
 }
 
-// VerifySchnorr verifies a BIP-340 signature.
+// VerifySchnorr — uses Shamir's trick for s*G + (-e)*P.
 export function VerifySchnorr(pubkey, msg, sig) {
   const pkU8 = sliceToU8(pubkey);
   const mU8 = sliceToU8(msg);
@@ -284,7 +386,6 @@ export function VerifySchnorr(pubkey, msg, sig) {
   const s = bytesToBigInt(sigU8.slice(32, 64));
   if (rx >= P || s >= N) return false;
 
-  // e = tagged_hash("BIP0340/challenge", R.x || P.x || msg) mod n
   const eInput = new Uint8Array(96);
   eInput.set(sigU8.slice(0, 32), 0);
   eInput.set(pkU8, 32);
@@ -292,12 +393,9 @@ export function VerifySchnorr(pubkey, msg, sig) {
   const eHash = taggedHash("BIP0340/challenge", eInput);
   const e = bytesToBigInt(eHash) % N;
 
-  // R = s*G - e*P
-  const [sGx, sGy] = scalarMult(s, Gx, Gy);
-  const [ePx, ePy] = scalarMult(e, px, py);
-  // s*G + (-e)*P
-  const negEPy = modP(P - ePy);
-  const [Rx, Ry] = affineAdd(sGx, sGy, ePx, negEPy);
+  // R = s*G + (-e)*P via Shamir's trick.
+  const negE = ((N - e) % N + N) % N;
+  const [Rx, Ry] = shamirMultGP(s, negE, px, py);
 
   if (Rx === 0n && Ry === 0n) return false;
   if (Ry % 2n !== 0n) return false;
@@ -305,28 +403,6 @@ export function VerifySchnorr(pubkey, msg, sig) {
   return true;
 }
 
-function affineAdd(x1, y1, x2, y2) {
-  if (x1 === 0n && y1 === 0n) return [x2, y2];
-  if (x2 === 0n && y2 === 0n) return [x1, y1];
-  if (x1 === x2) {
-    if (y1 === y2) return affineDbl(x1, y1);
-    return [0n, 0n];
-  }
-  const lam = modP((y2 - y1) * modInv(x2 - x1, P));
-  const x3 = modP(lam * lam - x1 - x2);
-  const y3 = modP(lam * (x1 - x3) - y1);
-  return [x3, y3];
-}
-
-function affineDbl(x1, y1) {
-  if (y1 === 0n) return [0n, 0n];
-  const lam = modP(3n * x1 * x1 * modInv(2n * y1, P));
-  const x3 = modP(lam * lam - 2n * x1);
-  const y3 = modP(lam * (x1 - x3) - y1);
-  return [x3, y3];
-}
-
-// ECDH computes the shared secret x-coordinate.
 export function ECDH(seckey, pubkey) {
   const sk = bytesToBigInt(sliceToU8(seckey));
   const px = bytesToBigInt(sliceToU8(pubkey));
@@ -338,28 +414,22 @@ export function ECDH(seckey, pubkey) {
   return [u8ToSlice(bigIntTo32(rx)), true];
 }
 
-// SHA256Sum computes SHA-256 of a Go byte slice. Returns a Go byte slice.
 export function SHA256Sum(data) {
-  const hash = sha256(sliceToU8(data));
-  return u8ToSlice(hash);
+  return u8ToSlice(sha256(sliceToU8(data)));
 }
 
-// ScalarAddModN adds two 32-byte big-endian scalars modulo the curve order N.
-// Returns [resultSlice, ok]. ok is false if result is zero.
 export function ScalarAddModN(a, b) {
   const ai = bytesToBigInt(sliceToU8(a));
   const bi = bytesToBigInt(sliceToU8(b));
-  const sum = modN(ai + bi);
+  const sum = ((ai + bi) % N + N) % N;
   if (sum === 0n) return [u8ToSlice(new Uint8Array(32)), false];
   return [u8ToSlice(bigIntTo32(sum)), true];
 }
 
-// CompressedPubKey derives the 33-byte SEC1 compressed public key from a secret key.
-// Returns [compressedSlice (33 bytes), ok].
 export function CompressedPubKey(seckey) {
   const sk = bytesToBigInt(sliceToU8(seckey));
   if (sk === 0n || sk >= N) return [u8ToSlice(new Uint8Array(33)), false];
-  const [px, py] = scalarMult(sk, Gx, Gy);
+  const [px, py] = scalarMultG(sk);
   const out = new Uint8Array(33);
   out[0] = (py % 2n === 0n) ? 0x02 : 0x03;
   out.set(bigIntTo32(px), 1);

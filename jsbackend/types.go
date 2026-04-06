@@ -80,6 +80,9 @@ func (tm *TypeMapper) ZeroExpr(t types.Type) string {
 			if info&types.IsComplex != 0 {
 				return "{ re: 0, im: 0 }"
 			}
+			if t.Kind() == types.Int64 || t.Kind() == types.Uint64 {
+				return "0n"
+			}
 			return "0"
 		}
 		if info&types.IsString != 0 {

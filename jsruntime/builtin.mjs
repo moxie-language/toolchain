@@ -263,6 +263,7 @@ let _cacheStr = '';
 let _cacheBytes = new Uint8Array(0);
 
 export function utf8Bytes(s) {
+  if (typeof s !== 'string') s = '' + s; // unbox String objects for cache hits
   if (s !== _cacheStr) {
     _cacheStr = s;
     _cacheBytes = _enc.encode(s);
@@ -362,6 +363,68 @@ export function stringSlice(s, low, high) {
   return _dec.decode(bytes.subarray(low, high));
 }
 
+// --- String↔Slice compatibility shims ---
+// moxiejs compiles s[i] to s.addr(i).$get() assuming Slice objects.
+// DOM bridge and other JS APIs return raw strings — shim them to behave
+// like read-only byte Slices so compiled code works on either type.
+//
+// addr() has its own byte cache, separate from utf8Bytes, so that
+// stringSlice→utf8Bytes calls can't thrash the cache during byte loops.
+
+let _addrStr = '';
+let _addrBytes = new Uint8Array(0);
+
+Object.defineProperty(String.prototype, 'addr', {
+  value: function(i) {
+    const s = '' + this;
+    if (s !== _addrStr) { _addrStr = s; _addrBytes = _enc.encode(s); }
+    const b = _addrBytes;
+    return { $get: () => b[i], $set: () => {} };
+  },
+  writable: false, configurable: true, enumerable: false
+});
+
+Object.defineProperty(String.prototype, 'get', {
+  value: function(i) {
+    const s = '' + this;
+    if (s !== _addrStr) { _addrStr = s; _addrBytes = _enc.encode(s); }
+    return _addrBytes[i];
+  },
+  writable: false, configurable: true, enumerable: false
+});
+
+Object.defineProperty(String.prototype, '$length', {
+  get: function() {
+    const s = '' + this;
+    if (s !== _addrStr) { _addrStr = s; _addrBytes = _enc.encode(s); }
+    return _addrBytes.length;
+  },
+  configurable: true, enumerable: false
+});
+
+Object.defineProperty(String.prototype, '$capacity', {
+  get: function() {
+    const s = '' + this;
+    if (s !== _addrStr) { _addrStr = s; _addrBytes = _enc.encode(s); }
+    return _addrBytes.length;
+  },
+  configurable: true, enumerable: false
+});
+
+Object.defineProperty(String.prototype, '$offset', {
+  get: function() { return 0; },
+  configurable: true, enumerable: false
+});
+
+Object.defineProperty(String.prototype, '$array', {
+  get: function() {
+    const s = '' + this;
+    if (s !== _addrStr) { _addrStr = s; _addrBytes = _enc.encode(s); }
+    return _addrBytes;
+  },
+  configurable: true, enumerable: false
+});
+
 // --- Deep equality for map keys ---
 
 function deepEqual(a, b) {
@@ -401,29 +464,8 @@ export function cloneValue(v) {
   return obj;
 }
 
-// 64-bit bitwise operations using Number arithmetic (safe up to 2^53).
-// JS bitwise operators truncate to 32-bit signed int; these preserve precision.
-export function int64or(x, y) {
-  // Split into high (above bit 32) and low (below bit 32) parts.
-  const xhi = Math.trunc(x / 0x100000000);
-  const xlo = x - xhi * 0x100000000;
-  const yhi = Math.trunc(y / 0x100000000);
-  const ylo = y - yhi * 0x100000000;
-  return ((xhi | yhi) >>> 0) * 0x100000000 + ((xlo | ylo) >>> 0);
-}
-
-export function int64and(x, y) {
-  const xhi = Math.trunc(x / 0x100000000);
-  const xlo = x - xhi * 0x100000000;
-  const yhi = Math.trunc(y / 0x100000000);
-  const ylo = y - yhi * 0x100000000;
-  return ((xhi & yhi) >>> 0) * 0x100000000 + ((xlo & ylo) >>> 0);
-}
-
-export function int64xor(x, y) {
-  const xhi = Math.trunc(x / 0x100000000);
-  const xlo = x - xhi * 0x100000000;
-  const yhi = Math.trunc(y / 0x100000000);
-  const ylo = y - yhi * 0x100000000;
-  return ((xhi ^ yhi) >>> 0) * 0x100000000 + ((xlo ^ ylo) >>> 0);
-}
+// Legacy 64-bit bitwise stubs — kept for compatibility with pre-BigInt compiled code.
+// New code uses native BigInt operators directly.
+export function int64or(x, y) { return x | y; }
+export function int64and(x, y) { return x & y; }
+export function int64xor(x, y) { return x ^ y; }

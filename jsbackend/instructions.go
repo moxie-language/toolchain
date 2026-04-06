@@ -1076,10 +1076,36 @@ func (fc *FunctionCompiler) emitConvert(instr *ssa.Convert) string {
 
 	// Numeric conversions.
 	if fromIsBasic && toIsBasic {
+		from64 := fromBasic.Kind() == types.Int64 || fromBasic.Kind() == types.Uint64
+		to64 := toBasic.Kind() == types.Int64 || toBasic.Kind() == types.Uint64
+
+		// BigInt (64-bit) → Number (float/smaller int).
+		if from64 && toBasic.Info()&types.IsFloat != 0 {
+			return fmt.Sprintf("Number(%s)", x)
+		}
+		if from64 && toBasic.Info()&types.IsInteger != 0 && !to64 {
+			return fc.intTruncate(fmt.Sprintf("Number(%s)", x), toBasic)
+		}
+
+		// Number → BigInt (64-bit).
+		if !from64 && to64 {
+			if toBasic.Kind() == types.Uint64 {
+				return fmt.Sprintf("BigInt.asUintN(64, BigInt(%s))", x)
+			}
+			return fmt.Sprintf("BigInt(%s)", x)
+		}
+
+		// float → int (both Number).
 		if toBasic.Info()&types.IsFloat != 0 && fromBasic.Info()&types.IsInteger != 0 {
+			if from64 {
+				return fmt.Sprintf("Number(%s)", x)
+			}
 			return x // JS numbers are already float64
 		}
 		if toBasic.Info()&types.IsInteger != 0 && fromBasic.Info()&types.IsFloat != 0 {
+			if to64 {
+				return fmt.Sprintf("BigInt(Math.trunc(%s))", x)
+			}
 			return fmt.Sprintf("Math.trunc(%s)", x)
 		}
 		if toBasic.Info()&types.IsInteger != 0 && fromBasic.Info()&types.IsInteger != 0 {
@@ -1105,6 +1131,10 @@ func (fc *FunctionCompiler) intTruncate(x string, t *types.Basic) string {
 		return fmt.Sprintf("(%s & 0xFFFF)", x)
 	case types.Uint32:
 		return fmt.Sprintf("(%s >>> 0)", x)
+	case types.Int64:
+		return fmt.Sprintf("BigInt.asIntN(64, BigInt(%s))", x)
+	case types.Uint64:
+		return fmt.Sprintf("BigInt.asUintN(64, BigInt(%s))", x)
 	default:
 		return x
 	}
@@ -1158,10 +1188,22 @@ func (fc *FunctionCompiler) local(v ssa.Value) string {
 	return name
 }
 
+// is64bit returns true if the type is int64 or uint64.
+func is64bit(t types.Type) bool {
+	basic, ok := t.Underlying().(*types.Basic)
+	if !ok {
+		return false
+	}
+	return basic.Kind() == types.Int64 || basic.Kind() == types.Uint64
+}
+
 // constValue returns the JS literal for an SSA constant.
 func (fc *FunctionCompiler) constValue(c *ssa.Const) string {
 	if c.Value == nil {
 		// Typed nil or zero value.
+		if is64bit(c.Type()) {
+			return "0n"
+		}
 		return fc.pc.typeMapper.ZeroExpr(c.Type())
 	}
 
@@ -1172,6 +1214,16 @@ func (fc *FunctionCompiler) constValue(c *ssa.Const) string {
 		}
 		return "false"
 	case constant.Int:
+		// 64-bit integers use BigInt (suffix n) for full precision.
+		if is64bit(c.Type()) {
+			if v, exact := constant.Int64Val(c.Value); exact {
+				return fmt.Sprintf("%dn", v)
+			}
+			if v, exact := constant.Uint64Val(c.Value); exact {
+				return fmt.Sprintf("%dn", v)
+			}
+			return c.Value.ExactString() + "n"
+		}
 		if v, exact := constant.Int64Val(c.Value); exact {
 			return fmt.Sprintf("%d", v)
 		}
@@ -1233,8 +1285,10 @@ func wrapUint(expr string, bits int) string {
 		return fmt.Sprintf("((%s) & 0xFFFF)", expr)
 	case 32:
 		return fmt.Sprintf("((%s) >>> 0)", expr)
+	case 64:
+		return fmt.Sprintf("BigInt.asUintN(64, %s)", expr)
 	default:
-		return expr // 64-bit: no wrapping in JS number (TODO: BigInt)
+		return expr
 	}
 }
 
@@ -1246,6 +1300,56 @@ func (fc *FunctionCompiler) binOp(op token.Token, t types.Type) func(x, y string
 	}
 
 	bits, unsigned := intTypeInfo(t)
+
+	// 64-bit integer operations use BigInt for full precision.
+	if bits == 64 {
+		wrap := "BigInt.asUintN"
+		if !unsigned {
+			wrap = "BigInt.asIntN"
+		}
+		switch op {
+		case token.ADD:
+			return func(x, y string) string { return fmt.Sprintf("%s(64, %s + %s)", wrap, x, y) }
+		case token.SUB:
+			return func(x, y string) string { return fmt.Sprintf("%s(64, %s - %s)", wrap, x, y) }
+		case token.MUL:
+			return func(x, y string) string { return fmt.Sprintf("%s(64, %s * %s)", wrap, x, y) }
+		case token.QUO:
+			return func(x, y string) string { return fmt.Sprintf("%s(64, %s / %s)", wrap, x, y) }
+		case token.REM:
+			return func(x, y string) string { return fmt.Sprintf("(%s %% %s)", x, y) }
+		case token.AND:
+			return func(x, y string) string { return fmt.Sprintf("(%s & %s)", x, y) }
+		case token.OR:
+			return func(x, y string) string { return fmt.Sprintf("(%s | %s)", x, y) }
+		case token.XOR:
+			return func(x, y string) string { return fmt.Sprintf("(%s ^ %s)", x, y) }
+		case token.SHL:
+			// Shift amount may be a Number (e.g. uint); coerce to BigInt.
+			return func(x, y string) string { return fmt.Sprintf("%s(64, %s << BigInt(%s))", wrap, x, y) }
+		case token.SHR:
+			if unsigned {
+				return func(x, y string) string { return fmt.Sprintf("(%s >> BigInt(%s))", x, y) }
+			}
+			return func(x, y string) string {
+				return fmt.Sprintf("BigInt.asIntN(64, %s >> BigInt(%s))", x, y)
+			}
+		case token.AND_NOT:
+			return func(x, y string) string { return fmt.Sprintf("(%s & ~%s)", x, y) }
+		case token.EQL:
+			return func(x, y string) string { return fmt.Sprintf("(%s === %s)", x, y) }
+		case token.NEQ:
+			return func(x, y string) string { return fmt.Sprintf("(%s !== %s)", x, y) }
+		case token.LSS:
+			return func(x, y string) string { return fmt.Sprintf("(%s < %s)", x, y) }
+		case token.LEQ:
+			return func(x, y string) string { return fmt.Sprintf("(%s <= %s)", x, y) }
+		case token.GTR:
+			return func(x, y string) string { return fmt.Sprintf("(%s > %s)", x, y) }
+		case token.GEQ:
+			return func(x, y string) string { return fmt.Sprintf("(%s >= %s)", x, y) }
+		}
+	}
 
 	switch op {
 	case token.ADD:
@@ -1288,33 +1392,20 @@ func (fc *FunctionCompiler) binOp(op token.Token, t types.Type) func(x, y string
 		if unsigned && bits == 32 {
 			return func(x, y string) string { return fmt.Sprintf("((%s & %s) >>> 0)", x, y) }
 		}
-		if bits == 64 {
-			return func(x, y string) string { return fmt.Sprintf("$rt.builtin.int64and(%s, %s)", x, y) }
-		}
 		return func(x, y string) string { return fmt.Sprintf("(%s & %s)", x, y) }
 	case token.OR:
 		if unsigned && bits == 32 {
 			return func(x, y string) string { return fmt.Sprintf("((%s | %s) >>> 0)", x, y) }
-		}
-		if bits == 64 {
-			return func(x, y string) string { return fmt.Sprintf("$rt.builtin.int64or(%s, %s)", x, y) }
 		}
 		return func(x, y string) string { return fmt.Sprintf("(%s | %s)", x, y) }
 	case token.XOR:
 		if unsigned && bits == 32 {
 			return func(x, y string) string { return fmt.Sprintf("((%s ^ %s) >>> 0)", x, y) }
 		}
-		if bits == 64 {
-			return func(x, y string) string { return fmt.Sprintf("$rt.builtin.int64xor(%s, %s)", x, y) }
-		}
 		return func(x, y string) string { return fmt.Sprintf("(%s ^ %s)", x, y) }
 	case token.SHL:
 		if unsigned && bits <= 32 {
 			return func(x, y string) string { return wrapUint(fmt.Sprintf("%s << %s", x, y), bits) }
-		}
-		if bits == 64 {
-			// JS << only works on 32-bit; use multiplication for 64-bit.
-			return func(x, y string) string { return fmt.Sprintf("(%s * (2 ** %s))", x, y) }
 		}
 		return func(x, y string) string { return fmt.Sprintf("(%s << %s)", x, y) }
 	case token.SHR:
@@ -1325,12 +1416,7 @@ func (fc *FunctionCompiler) binOp(op token.Token, t types.Type) func(x, y string
 			if bits < 32 {
 				return func(x, y string) string { return fmt.Sprintf("((%s & %s) >> %s)", x, wrapMask(bits), y) }
 			}
-			// 64-bit unsigned: JS >> only uses 5 bits of shift; use Math.trunc division.
-			return func(x, y string) string { return fmt.Sprintf("Math.trunc(%s / (2 ** %s))", x, y) }
-		}
-		if bits == 64 {
-			// 64-bit signed: JS >> only uses 5 bits of shift; use Math.trunc division.
-			return func(x, y string) string { return fmt.Sprintf("Math.trunc(%s / (2 ** %s))", x, y) }
+			return func(x, y string) string { return fmt.Sprintf("(%s >>> %s)", x, y) }
 		}
 		return func(x, y string) string { return fmt.Sprintf("(%s >> %s)", x, y) }
 	case token.AND_NOT:

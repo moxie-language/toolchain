@@ -223,6 +223,8 @@ func (r *pkgResolver) resolveDir(importPath, srcDir string) (string, error) {
 func mxBuildContext(goroot string) build.Context {
 	ctx := build.Default
 	ctx.GOROOT = goroot
+	ctx.GOOS = "js"
+	ctx.GOARCH = "wasm"
 	ctx.CgoEnabled = false
 	ctx.ReadDir = mxReadDir
 	ctx.OpenFile = mxOpenFile
