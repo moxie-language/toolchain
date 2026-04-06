@@ -1,0 +1,354 @@
+// rewrite.go — Moxie literal syntax preprocessing for moxiejs.
+//
+// Rewrites moxie-specific syntax to valid Go before parser.ParseFile:
+//   []T{:len}      → make([]T, len)
+//   []T{:len:cap}  → make([]T, len, cap)
+//   chan T{}        → make(chan T)
+//   chan T{expr}    → make(chan T, expr)
+//
+// Ported from moxie/loader/mxrewrite.go for the JS backend.
+
+package main
+
+import (
+	"bytes"
+	"go/scanner"
+	"go/token"
+	"strings"
+)
+
+// rewriteMoxieLiterals applies all text-level rewrites to moxie source.
+func rewriteMoxieLiterals(src []byte) []byte {
+	fset := token.NewFileSet()
+	src = rewriteChanLiterals(src, fset)
+	src = rewriteSliceLiterals(src, fset)
+	return src
+}
+
+// tok is a scanned token with byte offsets.
+type tok struct {
+	pos int
+	end int
+	tok token.Token
+	lit string
+}
+
+// scanTokens tokenizes src into a slice of tok.
+func scanTokens(src []byte, fset *token.FileSet) []tok {
+	file := fset.AddFile("", fset.Base(), len(src))
+	var s scanner.Scanner
+	s.Init(file, src, nil, scanner.ScanComments)
+
+	var toks []tok
+	for {
+		pos, t, lit := s.Scan()
+		if t == token.EOF {
+			break
+		}
+		offset := file.Offset(pos)
+		end := offset + len(lit)
+		if lit == "" {
+			end = offset + len(t.String())
+		}
+		toks = append(toks, tok{pos: offset, end: end, tok: t, lit: lit})
+	}
+	return toks
+}
+
+// rewriteChanLiterals rewrites chan T{} → make(chan T) and chan T{N} → make(chan T, N).
+func rewriteChanLiterals(src []byte, fset *token.FileSet) []byte {
+	toks := scanTokens(src, fset)
+
+	var result bytes.Buffer
+	lastEnd := 0
+
+	for i := 0; i < len(toks); i++ {
+		if toks[i].tok != token.CHAN {
+			continue
+		}
+
+		chanIdx := i
+		braceIdx := -1
+
+		depth := 0
+		for j := i + 1; j < len(toks); j++ {
+			switch toks[j].tok {
+			case token.LBRACE:
+				if depth == 0 {
+					braceIdx = j
+				}
+				depth++
+			case token.RBRACE:
+				depth--
+			case token.LPAREN:
+				depth++
+			case token.RPAREN:
+				depth--
+			}
+			if braceIdx >= 0 {
+				break
+			}
+			if toks[j].tok == token.SEMICOLON || toks[j].tok == token.ASSIGN ||
+				toks[j].tok == token.DEFINE || toks[j].tok == token.COMMA ||
+				toks[j].tok == token.RPAREN {
+				break
+			}
+		}
+
+		if braceIdx < 0 || braceIdx <= chanIdx+1 {
+			continue
+		}
+
+		// Check expression context.
+		inExprContext := false
+		if chanIdx > 0 {
+			prev := toks[chanIdx-1].tok
+			switch prev {
+			case token.ASSIGN, token.DEFINE,
+				token.COLON, token.COMMA,
+				token.LPAREN, token.LBRACK,
+				token.LBRACE, token.RETURN,
+				token.SEMICOLON:
+				inExprContext = true
+			}
+		} else {
+			inExprContext = true
+		}
+
+		if !inExprContext {
+			continue
+		}
+
+		// Find closing brace.
+		closeIdx := -1
+		depth = 1
+		for j := braceIdx + 1; j < len(toks); j++ {
+			switch toks[j].tok {
+			case token.LBRACE:
+				depth++
+			case token.RBRACE:
+				depth--
+				if depth == 0 {
+					closeIdx = j
+				}
+			}
+			if closeIdx >= 0 {
+				break
+			}
+		}
+
+		if closeIdx < 0 {
+			continue
+		}
+
+		// Extract type text.
+		typeStart := toks[chanIdx+1].pos
+		typeEnd := toks[braceIdx].pos
+		typeText := strings.TrimSpace(string(src[typeStart:typeEnd]))
+
+		if typeText == "" {
+			continue
+		}
+
+		// Handle chan struct{}{} and chan interface{}{}.
+		if typeText == "struct" || typeText == "interface" {
+			if closeIdx+1 >= len(toks) || toks[closeIdx+1].tok != token.LBRACE {
+				continue
+			}
+			typeText = typeText + "{}"
+			braceIdx = closeIdx + 1
+			closeIdx = -1
+			depth = 1
+			for j := braceIdx + 1; j < len(toks); j++ {
+				switch toks[j].tok {
+				case token.LBRACE:
+					depth++
+				case token.RBRACE:
+					depth--
+					if depth == 0 {
+						closeIdx = j
+					}
+				}
+				if closeIdx >= 0 {
+					break
+				}
+			}
+			if closeIdx < 0 {
+				continue
+			}
+		}
+
+		// Extract buffer size expression.
+		var bufExpr string
+		if closeIdx > braceIdx+1 {
+			bufStart := toks[braceIdx+1].pos
+			bufEnd := toks[closeIdx].pos
+			bufExpr = strings.TrimSpace(string(src[bufStart:bufEnd]))
+		}
+
+		result.Write(src[lastEnd:toks[chanIdx].pos])
+		result.WriteString("make(chan ")
+		result.WriteString(typeText)
+		if bufExpr != "" {
+			result.WriteString(", ")
+			result.WriteString(bufExpr)
+		}
+		result.WriteString(")")
+
+		lastEnd = toks[closeIdx].end
+		i = closeIdx
+	}
+
+	if lastEnd == 0 {
+		return src
+	}
+	result.Write(src[lastEnd:])
+	return result.Bytes()
+}
+
+// rewriteSliceLiterals rewrites []T{:len} → make([]T, len) and []T{:len:cap} → make([]T, len, cap).
+func rewriteSliceLiterals(src []byte, fset *token.FileSet) []byte {
+	toks := scanTokens(src, fset)
+
+	var result bytes.Buffer
+	lastEnd := 0
+
+	for i := 0; i < len(toks); i++ {
+		if toks[i].tok != token.LBRACK {
+			continue
+		}
+		if i+1 >= len(toks) || toks[i+1].tok != token.RBRACK {
+			continue
+		}
+
+		lbrackIdx := i
+
+		// Scan forward past element type to find LBRACE.
+		braceIdx := -1
+		depth := 0
+		for j := i + 2; j < len(toks); j++ {
+			switch toks[j].tok {
+			case token.LBRACK:
+				depth++
+			case token.RBRACK:
+				depth--
+			case token.LPAREN:
+				depth++
+			case token.RPAREN:
+				depth--
+			case token.LBRACE:
+				if depth == 0 {
+					braceIdx = j
+				}
+			}
+			if braceIdx >= 0 {
+				break
+			}
+			if depth == 0 && (toks[j].tok == token.SEMICOLON ||
+				toks[j].tok == token.ASSIGN ||
+				toks[j].tok == token.DEFINE ||
+				toks[j].tok == token.COMMA) {
+				break
+			}
+		}
+
+		if braceIdx < 0 || braceIdx <= lbrackIdx+2 {
+			continue
+		}
+
+		// Discriminator: token after { must be COLON.
+		if braceIdx+1 >= len(toks) || toks[braceIdx+1].tok != token.COLON {
+			continue
+		}
+
+		// Find closing brace, collecting colon positions.
+		closeIdx := -1
+		colonPositions := []int{braceIdx + 1}
+		depth = 1
+		bracketDepth := 0
+		parenDepth := 0
+		for j := braceIdx + 2; j < len(toks); j++ {
+			switch toks[j].tok {
+			case token.LBRACE:
+				depth++
+			case token.RBRACE:
+				depth--
+				if depth == 0 {
+					closeIdx = j
+				}
+			case token.LBRACK:
+				bracketDepth++
+			case token.RBRACK:
+				bracketDepth--
+			case token.LPAREN:
+				parenDepth++
+			case token.RPAREN:
+				parenDepth--
+			case token.COLON:
+				if depth == 1 && bracketDepth == 0 && parenDepth == 0 {
+					colonPositions = append(colonPositions, j)
+				}
+			}
+			if closeIdx >= 0 {
+				break
+			}
+		}
+
+		if closeIdx < 0 {
+			continue
+		}
+
+		// Extract type text (from [ through to {, not including {).
+		typeText := strings.TrimSpace(string(src[toks[lbrackIdx].pos:toks[braceIdx].pos]))
+
+		if len(colonPositions) == 1 {
+			// []T{:len} → make([]T, len)
+			lenStart := toks[colonPositions[0]+1].pos
+			lenEnd := toks[closeIdx].pos
+			lenExpr := strings.TrimSpace(string(src[lenStart:lenEnd]))
+			if lenExpr == "" {
+				continue
+			}
+
+			result.Write(src[lastEnd:toks[lbrackIdx].pos])
+			result.WriteString("make(")
+			result.WriteString(typeText)
+			result.WriteString(", ")
+			result.WriteString(lenExpr)
+			result.WriteString(")")
+		} else if len(colonPositions) == 2 {
+			// []T{:len:cap} → make([]T, len, cap)
+			lenStart := toks[colonPositions[0]+1].pos
+			lenEnd := toks[colonPositions[1]].pos
+			lenExpr := strings.TrimSpace(string(src[lenStart:lenEnd]))
+
+			capStart := toks[colonPositions[1]+1].pos
+			capEnd := toks[closeIdx].pos
+			capExpr := strings.TrimSpace(string(src[capStart:capEnd]))
+
+			if lenExpr == "" || capExpr == "" {
+				continue
+			}
+
+			result.Write(src[lastEnd:toks[lbrackIdx].pos])
+			result.WriteString("make(")
+			result.WriteString(typeText)
+			result.WriteString(", ")
+			result.WriteString(lenExpr)
+			result.WriteString(", ")
+			result.WriteString(capExpr)
+			result.WriteString(")")
+		} else {
+			continue
+		}
+
+		lastEnd = toks[closeIdx].end
+		i = closeIdx
+	}
+
+	if lastEnd == 0 {
+		return src
+	}
+	result.Write(src[lastEnd:])
+	return result.Bytes()
+}

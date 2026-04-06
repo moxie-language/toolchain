@@ -21,6 +21,28 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+// readAndRewrite reads a source file and applies moxie literal rewrites.
+// For .mx files, it rewrites moxie-specific syntax (slice/chan literals)
+// to standard Go before parsing. For .go files, returns content as-is.
+func readAndRewrite(path string) ([]byte, error) {
+	// discover.go maps .go filenames to .mx on disk
+	actual := path
+	if filepath.Ext(path) == ".go" {
+		mxPath := path[:len(path)-3] + ".mx"
+		if _, err := os.Stat(mxPath); err == nil {
+			actual = mxPath
+		}
+	}
+	src, err := os.ReadFile(actual)
+	if err != nil {
+		return nil, err
+	}
+	if filepath.Ext(actual) == ".mx" {
+		src = rewriteMoxieLiterals(src)
+	}
+	return src, nil
+}
+
 func main() {
 	outputDir := flag.String("o", "jsout", "output directory for .mjs files")
 	runtimeDir := flag.String("runtime", "", "path to jsruntime/ directory (if empty, must be copied manually)")
@@ -52,7 +74,13 @@ func main() {
 func compileFile(filename string, outputDir, runtimeDir string, dumpSSA bool) error {
 	fset := token.NewFileSet()
 
-	file, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
+	src, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", filename, err)
+	}
+	src = rewriteMoxieLiterals(src)
+
+	file, err := parser.ParseFile(fset, filename, src, parser.ParseComments)
 	if err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
@@ -128,7 +156,11 @@ func compilePackage(pattern string, outputDir, runtimeDir string, dumpSSA bool) 
 		var files []*ast.File
 		for _, f := range pj.GoFiles {
 			path := filepath.Join(pj.Dir, f)
-			file, parseErr := parser.ParseFile(fset, path, nil, parser.ParseComments)
+			src, readErr := readAndRewrite(path)
+			if readErr != nil {
+				return fmt.Errorf("read %s: %w", path, readErr)
+			}
+			file, parseErr := parser.ParseFile(fset, path, src, parser.ParseComments)
 			if parseErr != nil {
 				return fmt.Errorf("parse %s: %w", path, parseErr)
 			}

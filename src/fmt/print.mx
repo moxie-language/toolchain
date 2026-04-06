@@ -163,6 +163,14 @@ func (p *pp) free() {
 	if cap(p.buf) > 64*1024 {
 		p.buf = nil
 	} else {
+		// Zero the backing array before reuse. With string=[]byte,
+		// callers may still hold slices pointing at this memory.
+		// Zeroing makes stale reads return empty bytes rather than
+		// silently aliasing new content.
+		b := p.buf[:cap(p.buf)]
+		for i := range b {
+			b[i] = 0
+		}
 		p.buf = p.buf[:0]
 	}
 	if cap(p.wrappedErrs) > 8 {
@@ -230,7 +238,7 @@ func Printf(format []byte, a ...any) (n int, err error) {
 func Sprintf(format []byte, a ...any) []byte {
 	p := newPrinter()
 	p.doPrintf(format, a)
-	s := []byte(p.buf)
+	s := copyBuf(p.buf)
 	p.free()
 	return s
 }
@@ -270,7 +278,7 @@ func Print(a ...any) (n int, err error) {
 func Sprint(a ...any) []byte {
 	p := newPrinter()
 	p.doPrint(a)
-	s := []byte(p.buf)
+	s := copyBuf(p.buf)
 	p.free()
 	return s
 }
@@ -312,9 +320,21 @@ func Println(a ...any) (n int, err error) {
 func Sprintln(a ...any) []byte {
 	p := newPrinter()
 	p.doPrintln(a)
-	s := []byte(p.buf)
+	s := copyBuf(p.buf)
 	p.free()
 	return s
+}
+
+// copyBuf returns an owned copy of b. With string=[]byte, returning a
+// slice that shares backing storage with a pooled buffer causes silent
+// corruption when the pool recycles the buffer.
+func copyBuf(b []byte) []byte {
+	if len(b) == 0 {
+		return nil
+	}
+	c := make([]byte, len(b))
+	copy(c, b)
+	return c
 }
 
 // Appendln formats using the default formats for its operands, appends the result
