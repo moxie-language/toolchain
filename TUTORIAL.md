@@ -43,7 +43,7 @@ Moxie has the same declaration syntax you'd expect: `var`, `:=`, `const`, `type`
 
 Numeric types: `int8`, `int16`, `int32`, `int64`, `uint8`-`uint64`, `float32`, `float64`, `byte`, `bool`.
 
-`int` and `uint` are always 32-bit. There is no `complex64/128` or `uintptr`.
+`int` and `uint` are always 32-bit. There is no `complex64/128`. `uintptr` is only available in packages that `import "unsafe"`.
 
 ---
 

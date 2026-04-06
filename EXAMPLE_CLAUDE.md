@@ -4,7 +4,7 @@ Drop this into your project's `CLAUDE.md` (or `.claude/CLAUDE.md`) so that Claud
 
 ---
 
-```markdown
+````markdown
 # CLAUDE.md
 
 ## Language: Moxie
@@ -183,4 +183,4 @@ Do not assume project structure from convention. Read the actual code.
 - Never use `+` for text concatenation (use `|`)
 - Never pass raw types across spawn boundaries (use moxie.Codec types)
 - Never use `new(T)` (use `&T{}`)
-```
+````
