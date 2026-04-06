@@ -245,3 +245,12 @@ export function IsHD(fn) {
     fn(false);
   }
 }
+
+export function ResetExtension(fn) {
+  var s = _smesh();
+  if (s && s.resetExtension) {
+    s.resetExtension().then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+  } else {
+    fn(false);
+  }
+}
