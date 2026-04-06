@@ -25,26 +25,26 @@ import (
 	"internal/saferio"
 	"math"
 	"math/big"
-	"reflect"
 	"slices"
 	"strconv"
 	"bytes"
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // A StructuralError suggests that the ASN.1 data is valid, but the Go type
 // which is receiving it doesn't match.
 type StructuralError struct {
-	Msg string
+	Msg []byte
 }
 
 func (e StructuralError) Error() string { return "asn1: structure error: " + e.Msg }
 
 // A SyntaxError suggests that the ASN.1 data is invalid.
 type SyntaxError struct {
-	Msg string
+	Msg []byte
 }
 
 func (e SyntaxError) Error() string { return "asn1: syntax error: " + e.Msg }
@@ -141,7 +141,7 @@ func parseBigInt(bytes []byte) (*big.Int, error) {
 	ret := &big.Int{}
 	if len(bytes) > 0 && bytes[0]&0x80 == 0x80 {
 		// This is a negative number.
-		notBytes := make([]byte, len(bytes))
+		notBytes := []byte{:len(bytes)}
 		for i := range notBytes {
 			notBytes[i] = ^bytes[i]
 		}
@@ -183,7 +183,7 @@ func (b BitString) RightAlign() []byte {
 		return b.Bytes
 	}
 
-	a := make([]byte, len(b.Bytes))
+	a := []byte{:len(b.Bytes)}
 	a[0] = b.Bytes[0] >> shift
 	for i := 1; i < len(b.Bytes); i++ {
 		a[i] = b.Bytes[i-1] << (8 - shift)
@@ -233,7 +233,7 @@ func (oi ObjectIdentifier) String() string {
 	var s bytes.Buffer
 	s.Grow(32)
 
-	buf := make([]byte, 0, 19)
+	buf := []byte{:0:19}
 	for i, v := range oi {
 		if i > 0 {
 			s.WriteByte('.')
@@ -255,7 +255,7 @@ func parseObjectIdentifier(bytes []byte) (s ObjectIdentifier, err error) {
 
 	// In the worst case, we get two elements from the first byte (which is
 	// encoded differently) and then every varint is a single byte long.
-	s = make([]int, len(bytes)+1)
+	s = []int{:len(bytes)+1}
 
 	// The first varint is 40*value1 + value2:
 	// According to this packing, value1 can take the values 0, 1 and 2 only.
@@ -333,7 +333,7 @@ func parseBase128Int(bytes []byte, initOffset int) (ret, offset int, err error) 
 // UTCTime
 
 func parseUTCTime(bytes []byte) (ret time.Time, err error) {
-	s := string(bytes)
+	s := []byte(bytes)
 
 	formatStr := "0601021504Z0700"
 	ret, err = time.Parse(formatStr, s)
@@ -362,7 +362,7 @@ func parseUTCTime(bytes []byte) (ret time.Time, err error) {
 // and returns the resulting time.
 func parseGeneralizedTime(bytes []byte) (ret time.Time, err error) {
 	const formatStr = "20060102150405.999999999Z0700"
-	s := string(bytes)
+	s := []byte(bytes)
 
 	if ret, err = time.Parse(formatStr, s); err != nil {
 		return
@@ -379,13 +379,13 @@ func parseGeneralizedTime(bytes []byte) (ret time.Time, err error) {
 
 // parseNumericString parses an ASN.1 NumericString from the given byte array
 // and returns it.
-func parseNumericString(bytes []byte) (ret string, err error) {
+func parseNumericString(bytes []byte) (ret []byte, err error) {
 	for _, b := range bytes {
 		if !isNumeric(b) {
 			return "", SyntaxError{"NumericString contains invalid character"}
 		}
 	}
-	return string(bytes), nil
+	return []byte(bytes), nil
 }
 
 // isNumeric reports whether the given b is in the ASN.1 NumericString set.
@@ -398,14 +398,14 @@ func isNumeric(b byte) bool {
 
 // parsePrintableString parses an ASN.1 PrintableString from the given byte
 // array and returns it.
-func parsePrintableString(bytes []byte) (ret string, err error) {
+func parsePrintableString(bytes []byte) (ret []byte, err error) {
 	for _, b := range bytes {
 		if !isPrintable(b, allowAsterisk, allowAmpersand) {
 			err = SyntaxError{"PrintableString contains invalid character"}
 			return
 		}
 	}
-	ret = string(bytes)
+	ret = []byte(bytes)
 	return
 }
 
@@ -448,14 +448,14 @@ func isPrintable(b byte, asterisk asteriskFlag, ampersand ampersandFlag) bool {
 
 // parseIA5String parses an ASN.1 IA5String (ASCII string) from the given
 // byte slice and returns it.
-func parseIA5String(bytes []byte) (ret string, err error) {
+func parseIA5String(bytes []byte) (ret []byte, err error) {
 	for _, b := range bytes {
 		if b >= utf8.RuneSelf {
 			err = SyntaxError{"IA5String contains invalid character"}
 			return
 		}
 	}
-	ret = string(bytes)
+	ret = []byte(bytes)
 	return
 }
 
@@ -463,7 +463,7 @@ func parseIA5String(bytes []byte) (ret string, err error) {
 
 // parseT61String parses an ASN.1 T61String (8-bit clean string) from the given
 // byte slice and returns it.
-func parseT61String(bytes []byte) (ret string, err error) {
+func parseT61String(bytes []byte) (ret []byte, err error) {
 	// T.61 is a defunct ITU 8-bit character encoding which preceded Unicode.
 	// T.61 uses a code page layout that _almost_ exactly maps to the code
 	// page layout of the ISO 8859-1 (Latin-1) character encoding, with the
@@ -473,30 +473,30 @@ func parseT61String(bytes []byte) (ret string, err error) {
 	// Instead of mapping which characters are present in Latin-1 but not T.61,
 	// we just treat these strings as being encoded using Latin-1. This matches
 	// what most of the world does, including BoringSSL.
-	buf := make([]byte, 0, len(bytes))
+	buf := []byte{:0:len(bytes)}
 	for _, v := range bytes {
 		// All the 1-byte UTF-8 runes map 1-1 with Latin-1.
 		buf = utf8.AppendRune(buf, rune(v))
 	}
-	return string(buf), nil
+	return []byte(buf), nil
 }
 
 // UTF8String
 
 // parseUTF8String parses an ASN.1 UTF8String (raw UTF-8) from the given byte
 // array and returns it.
-func parseUTF8String(bytes []byte) (ret string, err error) {
+func parseUTF8String(bytes []byte) (ret []byte, err error) {
 	if !utf8.Valid(bytes) {
 		return "", errors.New("asn1: invalid UTF-8 string")
 	}
-	return string(bytes), nil
+	return []byte(bytes), nil
 }
 
 // BMPString
 
 // parseBMPString parses an ASN.1 BMPString (Basic Multilingual Plane of
 // ISO/IEC/ITU 10646-1) from the given byte slice and returns it.
-func parseBMPString(bmpString []byte) (string, error) {
+func parseBMPString(bmpString []byte) ([]byte, error) {
 	// BMPString uses the defunct UCS-2 16-bit character encoding, which
 	// covers the Basic Multilingual Plane (BMP). UTF-16 was an extension of
 	// UCS-2, containing all of the same code points, but also including
@@ -514,7 +514,7 @@ func parseBMPString(bmpString []byte) (string, error) {
 		bmpString = bmpString[:l-2]
 	}
 
-	s := make([]uint16, 0, len(bmpString)/2)
+	s := []uint16{:0:len(bmpString)/2}
 	for len(bmpString) > 0 {
 		point := uint16(bmpString[0])<<8 + uint16(bmpString[1])
 		// Reject UTF-16 code points that are permanently reserved
@@ -529,7 +529,14 @@ func parseBMPString(bmpString []byte) (string, error) {
 		bmpString = bmpString[2:]
 	}
 
-	return string(utf16.Decode(s)), nil
+	runes := utf16.Decode(s)
+	buf := []byte{:0:len(runes)*3}
+	var tmp [utf8.UTFMax]byte
+	for _, r := range runes {
+		n := utf8.EncodeRune(tmp[:], r)
+		buf = append(buf, tmp[:n]...)
+	}
+	return buf, nil
 }
 
 // A RawValue represents an undecoded ASN.1 object.
@@ -629,56 +636,53 @@ func parseTagAndLength(bytes []byte, initOffset int) (ret tagAndLength, offset i
 // parseSequenceOf is used for SEQUENCE OF and SET OF values. It tries to parse
 // a number of ASN.1 values from the given byte slice and returns them as a
 // slice of Go values of the given type.
-func parseSequenceOf(bytes []byte, sliceType reflect.Type, elemType reflect.Type) (ret reflect.Value, err error) {
+// parseSequenceOfUnsafe parses a SEQUENCE OF / SET OF into a raw slice buffer.
+// elemType is the element type code. Returns a pointer to a _sliceHeader.
+func parseSequenceOfUnsafe(data []byte, elemType *_rawType) (slicePtr unsafe.Pointer, err error) {
 	matchAny, expectedTag, compoundType, ok := getUniversalType(elemType)
 	if !ok {
 		err = StructuralError{"unknown Go type for slice"}
 		return
 	}
 
-	// First we iterate over the input and count the number of elements,
-	// checking that the types are correct in each case.
 	numElements := 0
-	for offset := 0; offset < len(bytes); {
+	for offset := 0; offset < len(data); {
 		var t tagAndLength
-		t, offset, err = parseTagAndLength(bytes, offset)
+		t, offset, err = parseTagAndLength(data, offset)
 		if err != nil {
 			return
 		}
 		switch t.tag {
 		case TagIA5String, TagGeneralString, TagT61String, TagUTF8String, TagNumericString, TagBMPString:
-			// We pretend that various other string types are
-			// PRINTABLE STRINGs so that a sequence of them can be
-			// parsed into a [][]byte.
 			t.tag = TagPrintableString
 		case TagGeneralizedTime, TagUTCTime:
-			// Likewise, both time types are treated the same.
 			t.tag = TagUTCTime
 		}
-
 		if !matchAny && (t.class != ClassUniversal || t.isCompound != compoundType || t.tag != expectedTag) {
 			err = StructuralError{"sequence tag mismatch"}
 			return
 		}
-		if invalidLength(offset, t.length, len(bytes)) {
+		if invalidLength(offset, t.length, len(data)) {
 			err = SyntaxError{"truncated sequence"}
 			return
 		}
 		offset += t.length
 		numElements++
 	}
-	elemSize := uint64(elemType.Size())
+
+	elemSize := uint64(elemType.size())
 	safeCap := saferio.SliceCapWithSize(elemSize, uint64(numElements))
 	if safeCap < 0 {
-		err = SyntaxError{fmt.Sprintf("%s slice too big: %d elements of %d bytes", elemType.Kind(), numElements, elemSize)}
+		err = SyntaxError{fmt.Sprintf("slice too big: %d elements of %d bytes", numElements, elemSize)}
 		return
 	}
-	ret = reflect.MakeSlice(sliceType, 0, safeCap)
+
+	slicePtr = makeSliceOf(elemType, numElements, safeCap)
 	params := fieldParameters{}
 	offset := 0
 	for i := 0; i < numElements; i++ {
-		ret = reflect.Append(ret, reflect.Zero(elemType))
-		offset, err = parseField(ret.Index(i), bytes, offset, params)
+		elemPtr := sliceIndex(slicePtr, elemType, i)
+		offset, err = parseFieldUnsafe(elemType, elemPtr, data, offset, params)
 		if err != nil {
 			return
 		}
@@ -686,15 +690,17 @@ func parseSequenceOf(bytes []byte, sliceType reflect.Type, elemType reflect.Type
 	return
 }
 
+// Type code pointers for known ASN.1 types. Obtained by decomposing
+// a nil pointer interface to extract the compiler's type descriptor.
 var (
-	bitStringType        = reflect.TypeFor[BitString]()
-	objectIdentifierType = reflect.TypeFor[ObjectIdentifier]()
-	enumeratedType       = reflect.TypeFor[Enumerated]()
-	flagType             = reflect.TypeFor[Flag]()
-	timeType             = reflect.TypeFor[time.Time]()
-	rawValueType         = reflect.TypeFor[RawValue]()
-	rawContentsType      = reflect.TypeFor[RawContent]()
-	bigIntType           = reflect.TypeFor[*big.Int]()
+	_bitStringTC        = typeCodeOf((*BitString)(nil)).elem()
+	_objectIdentifierTC = typeCodeOf((*ObjectIdentifier)(nil)).elem()
+	_enumeratedTC       = typeCodeOf((*Enumerated)(nil)).elem()
+	_flagTC             = typeCodeOf((*Flag)(nil)).elem()
+	_timeTC             = typeCodeOf((*time.Time)(nil)).elem()
+	_rawValueTC         = typeCodeOf((*RawValue)(nil)).elem()
+	_rawContentsTC      = typeCodeOf((*RawContent)(nil)).elem()
+	_bigIntPtrTC        = typeCodeOf((**big.Int)(nil)).elem() // *big.Int, not big.Int
 )
 
 // invalidLength reports whether offset + length > sliceLength, or if the
@@ -703,35 +709,48 @@ func invalidLength(offset, length, sliceLength int) bool {
 	return offset+length < offset || offset+length > sliceLength
 }
 
-// parseField is the main parsing function. Given a byte slice and an offset
-// into the array, it will try to parse a suitable ASN.1 value out and store it
-// in the given Value.
-func parseField(v reflect.Value, bytes []byte, initOffset int, params fieldParameters) (offset int, err error) {
-	offset = initOffset
-	fieldType := v.Type()
+// getASN1Tag extracts the "asn1" value from a raw struct tag string.
+func getASN1Tag(tag []byte) []byte {
+	key := []byte(`asn1:"`)
+	i := bytes.Index(tag, key)
+	if i < 0 {
+		return nil
+	}
+	tag = tag[i+len(key):]
+	j := bytes.IndexByte(tag, '"')
+	if j < 0 {
+		return tag
+	}
+	return tag[:j]
+}
 
-	// If we have run out of data, it may be that there are optional elements at the end.
-	if offset == len(bytes) {
-		if !setDefaultValue(v, params) {
+// parseFieldUnsafe is the main parsing function. Given a type code, a pointer
+// to the destination, and a byte slice with offset, it parses an ASN.1 value
+// and writes it directly through the unsafe pointer.
+func parseFieldUnsafe(typ *_rawType, ptr unsafe.Pointer, data []byte, initOffset int, params fieldParameters) (offset int, err error) {
+	offset = initOffset
+
+	if offset == len(data) {
+		if !setDefaultValueUnsafe(typ, ptr, params) {
 			err = SyntaxError{"sequence truncated"}
 		}
 		return
 	}
 
-	// Deal with the ANY type.
-	if ifaceType := fieldType; ifaceType.Kind() == reflect.Interface && ifaceType.NumMethod() == 0 {
+	// Deal with the ANY type (interface{}).
+	if typ.kind() == akInterface {
 		var t tagAndLength
-		t, offset, err = parseTagAndLength(bytes, offset)
+		t, offset, err = parseTagAndLength(data, offset)
 		if err != nil {
 			return
 		}
-		if invalidLength(offset, t.length, len(bytes)) {
+		if invalidLength(offset, t.length, len(data)) {
 			err = SyntaxError{"data truncated"}
 			return
 		}
 		var result any
 		if !t.isCompound && t.class == ClassUniversal {
-			innerBytes := bytes[offset : offset+t.length]
+			innerBytes := data[offset : offset+t.length]
 			switch t.tag {
 			case TagBoolean:
 				result, err = parseBool(innerBytes)
@@ -759,8 +778,6 @@ func parseField(v reflect.Value, bytes []byte, initOffset int, params fieldParam
 				result = innerBytes
 			case TagBMPString:
 				result, err = parseBMPString(innerBytes)
-			default:
-				// If we don't know how to handle the type, we just leave Value as nil.
 			}
 		}
 		offset += t.length
@@ -768,12 +785,12 @@ func parseField(v reflect.Value, bytes []byte, initOffset int, params fieldParam
 			return
 		}
 		if result != nil {
-			v.Set(reflect.ValueOf(result))
+			*(*any)(ptr) = result
 		}
 		return
 	}
 
-	t, offset, err := parseTagAndLength(bytes, offset)
+	t, offset, err := parseTagAndLength(data, offset)
 	if err != nil {
 		return
 	}
@@ -782,29 +799,28 @@ func parseField(v reflect.Value, bytes []byte, initOffset int, params fieldParam
 		if params.application {
 			expectedClass = ClassApplication
 		}
-		if offset == len(bytes) {
+		if offset == len(data) {
 			err = StructuralError{"explicit tag has no child"}
 			return
 		}
 		if t.class == expectedClass && t.tag == *params.tag && (t.length == 0 || t.isCompound) {
-			if fieldType == rawValueType {
+			if typ == _rawValueTC {
 				// The inner element should not be parsed for RawValues.
 			} else if t.length > 0 {
-				t, offset, err = parseTagAndLength(bytes, offset)
+				t, offset, err = parseTagAndLength(data, offset)
 				if err != nil {
 					return
 				}
 			} else {
-				if fieldType != flagType {
+				if typ != _flagTC {
 					err = StructuralError{"zero length explicit tag was not an asn1.Flag"}
 					return
 				}
-				v.SetBool(true)
+				*(*Flag)(ptr) = true
 				return
 			}
 		} else {
-			// The tags didn't match, it might be an optional element.
-			ok := setDefaultValue(v, params)
+			ok := setDefaultValueUnsafe(typ, ptr, params)
 			if ok {
 				offset = initOffset
 			} else {
@@ -814,9 +830,9 @@ func parseField(v reflect.Value, bytes []byte, initOffset int, params fieldParam
 		}
 	}
 
-	matchAny, universalTag, compoundType, ok1 := getUniversalType(fieldType)
+	matchAny, universalTag, compoundType, ok1 := getUniversalType(typ)
 	if !ok1 {
-		err = StructuralError{fmt.Sprintf("unknown Go type: %v", fieldType)}
+		err = StructuralError{fmt.Sprintf("unknown Go type (kind %d)", typ.kind())}
 		return
 	}
 
@@ -836,10 +852,7 @@ func parseField(v reflect.Value, bytes []byte, initOffset int, params fieldParam
 	}
 
 	// Special case for time: UTCTime and GeneralizedTime both map to the
-	// Go type time.Time. getUniversalType returns the tag for UTCTime when
-	// it sees a time.Time, so if we see a different time type on the wire,
-	// or the field is tagged with a different type, we change the universal
-	// type to match.
+	// Go type time.Time.
 	if universalTag == TagUTCTime {
 		if t.class == ClassUniversal {
 			if t.tag == TagGeneralizedTime {
@@ -879,293 +892,246 @@ func parseField(v reflect.Value, bytes []byte, initOffset int, params fieldParam
 	// We have unwrapped any explicit tagging at this point.
 	if !matchAnyClassAndTag && (t.class != expectedClass || t.tag != expectedTag) ||
 		(!matchAny && t.isCompound != compoundType) {
-		// Tags don't match. Again, it could be an optional element.
-		ok := setDefaultValue(v, params)
+		ok := setDefaultValueUnsafe(typ, ptr, params)
 		if ok {
 			offset = initOffset
 		} else {
-			err = StructuralError{fmt.Sprintf("tags don't match (%d vs %+v) %+v %s @%d", expectedTag, t, params, fieldType.Name(), offset)}
+			err = StructuralError{fmt.Sprintf("tags don't match (%d vs %+v) %+v %s @%d", expectedTag, t, params, typ.typeName(), offset)}
 		}
 		return
 	}
-	if invalidLength(offset, t.length, len(bytes)) {
+	if invalidLength(offset, t.length, len(data)) {
 		err = SyntaxError{"data truncated"}
 		return
 	}
-	innerBytes := bytes[offset : offset+t.length]
+	innerBytes := data[offset : offset+t.length]
 	offset += t.length
 
-	// We deal with the structures defined in this package first.
-	switch v := v.Addr().Interface().(type) {
-	case *RawValue:
-		*v = RawValue{t.class, t.tag, t.isCompound, innerBytes, bytes[initOffset:offset]}
-		return
-	case *ObjectIdentifier:
-		*v, err = parseObjectIdentifier(innerBytes)
-		return
-	case *BitString:
-		*v, err = parseBitString(innerBytes)
-		return
-	case *time.Time:
-		if universalTag == TagUTCTime {
-			*v, err = parseUTCTime(innerBytes)
-			return
-		}
-		*v, err = parseGeneralizedTime(innerBytes)
-		return
-	case *Enumerated:
-		parsedInt, err1 := parseInt32(innerBytes)
-		if err1 == nil {
-			*v = Enumerated(parsedInt)
-		}
-		err = err1
-		return
-	case *Flag:
-		*v = true
-		return
-	case **big.Int:
-		parsedInt, err1 := parseBigInt(innerBytes)
-		if err1 == nil {
-			*v = parsedInt
-		}
-		err = err1
+	// Known concrete types by type code pointer comparison.
+	if typ == _rawValueTC {
+		*(*RawValue)(ptr) = RawValue{t.class, t.tag, t.isCompound, innerBytes, data[initOffset:offset]}
 		return
 	}
-	switch val := v; val.Kind() {
-	case reflect.Bool:
-		parsedBool, err1 := parseBool(innerBytes)
-		if err1 == nil {
-			val.SetBool(parsedBool)
+	if typ == _objectIdentifierTC {
+		oid, e := parseObjectIdentifier(innerBytes)
+		if e != nil {
+			err = e
+			return
 		}
-		err = err1
+		*(*ObjectIdentifier)(ptr) = oid
 		return
-	case reflect.Int, reflect.Int32, reflect.Int64:
-		if val.Type().Size() == 4 {
-			parsedInt, err1 := parseInt32(innerBytes)
-			if err1 == nil {
-				val.SetInt(int64(parsedInt))
-			}
-			err = err1
+	}
+	if typ == _bitStringTC {
+		bs, e := parseBitString(innerBytes)
+		if e != nil {
+			err = e
+			return
+		}
+		*(*BitString)(ptr) = bs
+		return
+	}
+	if typ == _timeTC {
+		var tv time.Time
+		var e error
+		if universalTag == TagUTCTime {
+			tv, e = parseUTCTime(innerBytes)
 		} else {
-			parsedInt, err1 := parseInt64(innerBytes)
-			if err1 == nil {
-				val.SetInt(parsedInt)
+			tv, e = parseGeneralizedTime(innerBytes)
+		}
+		if e != nil {
+			err = e
+			return
+		}
+		*(*time.Time)(ptr) = tv
+		return
+	}
+	if typ == _enumeratedTC {
+		iv, e := parseInt32(innerBytes)
+		if e != nil {
+			err = e
+			return
+		}
+		*(*Enumerated)(ptr) = Enumerated(iv)
+		return
+	}
+	if typ == _flagTC {
+		*(*Flag)(ptr) = true
+		return
+	}
+	if typ == _bigIntPtrTC {
+		bi, e := parseBigInt(innerBytes)
+		if e != nil {
+			err = e
+			return
+		}
+		*(**big.Int)(ptr) = bi
+		return
+	}
+
+	// Kind-based dispatch for primitive types.
+	switch typ.kind() {
+	case akBool:
+		bv, e := parseBool(innerBytes)
+		if e == nil {
+			*(*bool)(ptr) = bv
+		}
+		err = e
+		return
+	case akInt, akInt32, akInt64:
+		if typ.size() == 4 {
+			iv, e := parseInt32(innerBytes)
+			if e == nil {
+				*(*int32)(ptr) = iv
 			}
-			err = err1
+			err = e
+		} else {
+			iv, e := parseInt64(innerBytes)
+			if e == nil {
+				*(*int64)(ptr) = iv
+			}
+			err = e
 		}
 		return
-	// TODO(dfc) Add support for the remaining integer types
-	case reflect.Struct:
-		structType := fieldType
-
-		for i := 0; i < structType.NumField(); i++ {
-			if !structType.Field(i).IsExported() {
+	case akStruct:
+		for i := 0; i < typ.numField(); i++ {
+			if !typ.fieldExported(i) {
 				err = StructuralError{"struct contains unexported fields"}
 				return
 			}
 		}
 
-		if structType.NumField() > 0 &&
-			structType.Field(0).Type == rawContentsType {
-			bytes := bytes[initOffset:offset]
-			val.Field(0).Set(reflect.ValueOf(RawContent(bytes)))
+		if typ.numField() > 0 && typ.fieldType(0) == _rawContentsTC {
+			rc := RawContent(data[initOffset:offset])
+			*(*RawContent)(unsafe.Add(ptr, typ.fieldOffset(0))) = rc
 		}
 
 		innerOffset := 0
-		for i := 0; i < structType.NumField(); i++ {
-			field := structType.Field(i)
-			if i == 0 && field.Type == rawContentsType {
+		for i := 0; i < typ.numField(); i++ {
+			if i == 0 && typ.fieldType(0) == _rawContentsTC {
 				continue
 			}
-			innerOffset, err = parseField(val.Field(i), innerBytes, innerOffset, parseFieldParameters(field.Tag.Get("asn1")))
+			ft := typ.fieldType(i)
+			fp := unsafe.Add(ptr, typ.fieldOffset(i))
+			tag := getASN1Tag(typ.fieldTag(i))
+			innerOffset, err = parseFieldUnsafe(ft, fp, innerBytes, innerOffset, parseFieldParameters(tag))
 			if err != nil {
 				return
 			}
 		}
-		// We allow extra bytes at the end of the SEQUENCE because
-		// adding elements to the end has been used in X.509 as the
-		// version numbers have increased.
 		return
-	case reflect.Slice:
-		sliceType := fieldType
-		if sliceType.Elem().Kind() == reflect.Uint8 {
-			val.Set(reflect.MakeSlice(sliceType, len(innerBytes), len(innerBytes)))
-			reflect.Copy(val, reflect.ValueOf(innerBytes))
+	case akSlice:
+		if typ.elem().kind() == akUint8 {
+			dst := make([]byte, len(innerBytes))
+			copy(dst, innerBytes)
+			*(*[]byte)(ptr) = dst
 			return
 		}
-		newSlice, err1 := parseSequenceOf(innerBytes, sliceType, sliceType.Elem())
-		if err1 == nil {
-			val.Set(newSlice)
+		slicePtr, e := parseSequenceOfUnsafe(innerBytes, typ.elem())
+		if e == nil {
+			*(*_sliceHeader)(ptr) = *(*_sliceHeader)(slicePtr)
 		}
-		err = err1
+		err = e
 		return
-	case reflect.String:
-		var v string
+	case akBytes:
+		var sv []byte
 		switch universalTag {
 		case TagPrintableString:
-			v, err = parsePrintableString(innerBytes)
+			sv, err = parsePrintableString(innerBytes)
 		case TagNumericString:
-			v, err = parseNumericString(innerBytes)
+			sv, err = parseNumericString(innerBytes)
 		case TagIA5String:
-			v, err = parseIA5String(innerBytes)
+			sv, err = parseIA5String(innerBytes)
 		case TagT61String:
-			v, err = parseT61String(innerBytes)
+			sv, err = parseT61String(innerBytes)
 		case TagUTF8String:
-			v, err = parseUTF8String(innerBytes)
+			sv, err = parseUTF8String(innerBytes)
 		case TagGeneralString:
-			// GeneralString is specified in ISO-2022/ECMA-35,
-			// A brief review suggests that it includes structures
-			// that allow the encoding to change midstring and
-			// such. We give up and pass it as an 8-bit string.
-			v, err = parseT61String(innerBytes)
+			sv, err = parseT61String(innerBytes)
 		case TagBMPString:
-			v, err = parseBMPString(innerBytes)
-
+			sv, err = parseBMPString(innerBytes)
 		default:
 			err = SyntaxError{fmt.Sprintf("internal error: unknown string type %d", universalTag)}
 		}
 		if err == nil {
-			val.SetString(v)
+			*(*[]byte)(ptr) = sv
 		}
 		return
 	}
-	err = StructuralError{"unsupported: " + v.Type().String()}
+	err = StructuralError{"unsupported: " + typ.typeName()}
 	return
 }
 
-// canHaveDefaultValue reports whether k is a Kind that we will set a default
-// value for. (A signed integer, essentially.)
-func canHaveDefaultValue(k reflect.Kind) bool {
-	switch k {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+// setDefaultValueUnsafe installs a default value from tag parameters.
+// Returns true if the field was optional (even if no default was set).
+func setDefaultValueUnsafe(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) bool {
+	if !params.optional {
+		return false
+	}
+	if params.defaultValue == nil {
 		return true
 	}
-
-	return false
-}
-
-// setDefaultValue is used to install a default value, from a tag string, into
-// a Value. It is successful if the field was optional, even if a default value
-// wasn't provided or it failed to install it into the Value.
-func setDefaultValue(v reflect.Value, params fieldParameters) (ok bool) {
-	if !params.optional {
-		return
+	switch typ.kind() {
+	case akInt, akInt8, akInt16, akInt32, akInt64:
+		switch typ.size() {
+		case 1:
+			*(*int8)(ptr) = int8(*params.defaultValue)
+		case 2:
+			*(*int16)(ptr) = int16(*params.defaultValue)
+		case 4:
+			*(*int32)(ptr) = int32(*params.defaultValue)
+		default:
+			*(*int64)(ptr) = *params.defaultValue
+		}
 	}
-	ok = true
-	if params.defaultValue == nil {
-		return
-	}
-	if canHaveDefaultValue(v.Kind()) {
-		v.SetInt(*params.defaultValue)
-	}
-	return
+	return true
 }
 
 // Unmarshal parses the DER-encoded ASN.1 data structure b
-// and uses the reflect package to fill in an arbitrary value pointed at by val.
-// Because Unmarshal uses the reflect package, the structs
-// being written to must use upper case field names. If val
-// is nil or not a pointer, Unmarshal returns an error.
-//
-// After parsing b, any bytes that were leftover and not used to fill
-// val will be returned in rest. When parsing a SEQUENCE into a struct,
-// any trailing elements of the SEQUENCE that do not have matching
-// fields in val will not be included in rest, as these are considered
-// valid elements of the SEQUENCE and not trailing data.
-//
-//   - An ASN.1 INTEGER can be written to an int, int32, int64,
-//     or *[big.Int].
-//     If the encoded value does not fit in the Go type,
-//     Unmarshal returns a parse error.
-//
-//   - An ASN.1 BIT STRING can be written to a [BitString].
-//
-//   - An ASN.1 OCTET STRING can be written to a []byte.
-//
-//   - An ASN.1 OBJECT IDENTIFIER can be written to an [ObjectIdentifier].
-//
-//   - An ASN.1 ENUMERATED can be written to an [Enumerated].
-//
-//   - An ASN.1 UTCTIME or GENERALIZEDTIME can be written to a [time.Time].
-//
-//   - An ASN.1 PrintableString, IA5String, or NumericString can be written to a string.
-//
-//   - Any of the above ASN.1 values can be written to an interface{}.
-//     The value stored in the interface has the corresponding Go type.
-//     For integers, that type is int64.
-//
-//   - An ASN.1 SEQUENCE OF x or SET OF x can be written
-//     to a slice if an x can be written to the slice's element type.
-//
-//   - An ASN.1 SEQUENCE or SET can be written to a struct
-//     if each of the elements in the sequence can be
-//     written to the corresponding element in the struct.
-//
-// The following tags on struct fields have special meaning to Unmarshal:
-//
-//	application specifies that an APPLICATION tag is used
-//	private     specifies that a PRIVATE tag is used
-//	default:x   sets the default value for optional integer fields (only used if optional is also present)
-//	explicit    specifies that an additional, explicit tag wraps the implicit one
-//	optional    marks the field as ASN.1 OPTIONAL
-//	set         causes a SET, rather than a SEQUENCE type to be expected
-//	tag:x       specifies the ASN.1 tag number; implies ASN.1 CONTEXT SPECIFIC
-//
-// When decoding an ASN.1 value with an IMPLICIT tag into a string field,
-// Unmarshal will default to a PrintableString, which doesn't support
-// characters such as '@' and '&'. To force other encodings, use the following
-// tags:
-//
-//	ia5     causes strings to be unmarshaled as ASN.1 IA5String values
-//	numeric causes strings to be unmarshaled as ASN.1 NumericString values
-//	utf8    causes strings to be unmarshaled as ASN.1 UTF8String values
-//
-// When decoding an ASN.1 value with an IMPLICIT tag into a time.Time field,
-// Unmarshal will default to a UTCTime, which doesn't support time zones or
-// fractional seconds. To force usage of GeneralizedTime, use the following
-// tag:
-//
-//	generalized causes time.Times to be unmarshaled as ASN.1 GeneralizedTime values
-//
-// If the type of the first field of a structure is RawContent then the raw
-// ASN1 contents of the struct will be stored in it.
-//
-// If the name of a slice type ends with "SET" then it's treated as if
-// the "set" tag was set on it. This results in interpreting the type as a
-// SET OF x rather than a SEQUENCE OF x. This can be used with nested slices
-// where a struct tag cannot be given.
-//
-// Other ASN.1 types are not supported; if it encounters them,
-// Unmarshal returns a parse error.
+// and fills in an arbitrary value pointed at by val.
+// val must be a non-nil pointer.
 func Unmarshal(b []byte, val any) (rest []byte, err error) {
 	return UnmarshalWithParams(b, val, "")
 }
 
-// An invalidUnmarshalError describes an invalid argument passed to Unmarshal.
-// (The argument to Unmarshal must be a non-nil pointer.)
+// invalidUnmarshalError describes an invalid argument passed to Unmarshal.
 type invalidUnmarshalError struct {
-	Type reflect.Type
+	typeName []byte
+	isNil    bool
+	isNonPtr bool
 }
 
 func (e *invalidUnmarshalError) Error() string {
-	if e.Type == nil {
+	if e.isNil && len(e.typeName) == 0 {
 		return "asn1: Unmarshal recipient value is nil"
 	}
-
-	if e.Type.Kind() != reflect.Pointer {
-		return "asn1: Unmarshal recipient value is non-pointer " + e.Type.String()
+	if e.isNonPtr {
+		return "asn1: Unmarshal recipient value is non-pointer " + e.typeName
 	}
-	return "asn1: Unmarshal recipient value is nil " + e.Type.String()
+	return "asn1: Unmarshal recipient value is nil " + e.typeName
 }
 
 // UnmarshalWithParams allows field parameters to be specified for the
 // top-level element. The form of the params is the same as the field tags.
-func UnmarshalWithParams(b []byte, val any, params string) (rest []byte, err error) {
-	v := reflect.ValueOf(val)
-	if v.Kind() != reflect.Pointer || v.IsNil() {
-		return nil, &invalidUnmarshalError{reflect.TypeOf(val)}
+func UnmarshalWithParams(b []byte, val any, params []byte) (rest []byte, err error) {
+	elemType, dataPtr := derefPtr(val)
+	if elemType == nil {
+		tc := typeCodeOf(val)
+		name := []byte("unknown")
+		if tc != nil {
+			if n := tc.typeName(); len(n) > 0 {
+				name = n
+			}
+		}
+		return nil, &invalidUnmarshalError{typeName: name, isNonPtr: true}
 	}
-	offset, err := parseField(v.Elem(), b, 0, parseFieldParameters(params))
+	if dataPtr == nil {
+		name := elemType.typeName()
+		if len(name) == 0 {
+			name = []byte("unknown")
+		}
+		return nil, &invalidUnmarshalError{typeName: name, isNil: true}
+	}
+	offset, err := parseFieldUnsafe(elemType, dataPtr, b, 0, parseFieldParameters(params))
 	if err != nil {
 		return nil, err
 	}

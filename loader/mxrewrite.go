@@ -39,6 +39,7 @@ func isMoxieStringTarget(importPath string) bool {
 		strings.HasPrefix(importPath, "internal/task") || // cooperative scheduler
 		strings.HasPrefix(importPath, "internal/abi") || // ABI type descriptors
 		strings.HasPrefix(importPath, "internal/reflectlite") || // type reflection
+			strings.HasPrefix(importPath, "internal/itoa") || // used by reflectlite, returns string
 		strings.HasPrefix(importPath, "syscall") || // syscall interfaces
 		strings.HasPrefix(importPath, "internal/syscall") || // syscall internals
 		strings.HasPrefix(importPath, "os") || // FDs, syscall wrappers
@@ -1248,6 +1249,22 @@ func filterByteCompareErrors(errs []error) []error {
 		}
 		// "invalid case" errors from switch on []byte
 		if strings.Contains(msg, "invalid case") && strings.Contains(msg, "[]byte") {
+			continue
+		}
+		filtered = append(filtered, err)
+	}
+	return filtered
+}
+
+// filterStringByteMismatch removes type errors about string/[]byte mismatches.
+// In moxie, string and []byte are the same type, so these errors are spurious.
+func filterStringByteMismatch(errs []error) []error {
+	var filtered []error
+	for _, err := range errs {
+		msg := err.Error()
+		if strings.Contains(msg, "[]byte") && strings.Contains(msg, "string") &&
+			(strings.Contains(msg, "cannot use") || strings.Contains(msg, "cannot convert") ||
+				strings.Contains(msg, "mismatched types") || strings.Contains(msg, "does not satisfy")) {
 			continue
 		}
 		filtered = append(filtered, err)

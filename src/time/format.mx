@@ -7,6 +7,7 @@ package time
 import (
 	"errors"
 	"internal/stringslite"
+	"unicode/utf8"
 	_ "unsafe" // for linkname
 )
 
@@ -180,7 +181,7 @@ var std0x = [...]int{stdZeroMonth, stdZeroDay, stdZeroHour12, stdZeroMinute, std
 
 // startsWithLowerCase reports whether the string has a lower-case letter at the beginning.
 // Its purpose is to prevent matching strings like "Month" when looking for "Mon".
-func startsWithLowerCase(str string) bool {
+func startsWithLowerCase(str []byte) bool {
 	if len(str) == 0 {
 		return false
 	}
@@ -200,7 +201,7 @@ func startsWithLowerCase(str string) bool {
 // See go.dev/issue/67401.
 //
 //go:linkname nextStdChunk
-func nextStdChunk(layout string) (prefix string, std int, suffix string) {
+func nextStdChunk(layout []byte) (prefix []byte, std int, suffix []byte) {
 	for i := 0; i < len(layout); i++ {
 		switch c := int(layout[i]); c {
 		case 'J': // January, Jan
@@ -387,7 +388,7 @@ var longMonthNames = [][]byte{
 
 // match reports whether s1 and s2 match ignoring case.
 // It is assumed s1 and s2 are the same length.
-func match(s1, s2 string) bool {
+func match(s1, s2 []byte) bool {
 	for i := 0; i < len(s1); i++ {
 		c1 := s1[i]
 		c2 := s2[i]
@@ -403,7 +404,7 @@ func match(s1, s2 string) bool {
 	return true
 }
 
-func lookup(tab [][]byte, val string) (int, string, error) {
+func lookup(tab [][]byte, val []byte) (int, []byte, error) {
 	for i, v := range tab {
 		if len(val) >= len(v) && match(val[:len(v)], v) {
 			return i, val[len(v):], nil
@@ -449,7 +450,7 @@ func appendInt(b []byte, x int, width int) []byte {
 	if len(b)+n <= cap(b) {
 		b = b[:len(b)+n]
 	} else {
-		b = append(b, make([]byte, n)...)
+		b = append(b, []byte{:n}...)
 	}
 
 	// Assemble decimal in reverse order.
@@ -556,7 +557,7 @@ func (t Time) String() string {
 		}
 		m1, m2 := m2/1e9, m2%1e9
 		m0, m1 := m1/1e9, m1%1e9
-		buf := make([]byte, 0, 24)
+		buf := []byte{:0:24}
 		buf = append(buf, " m="...)
 		buf = append(buf, sign)
 		wid := 0
@@ -574,12 +575,12 @@ func (t Time) String() string {
 
 // GoString implements [fmt.GoStringer] and formats t to be printed in Go source
 // code.
-func (t Time) GoString() string {
+func (t Time) GoString() []byte {
 	abs := t.absSec()
 	year, month, day := abs.days().date()
 	hour, minute, second := abs.clock()
 
-	buf := make([]byte, 0, len("time.Date(9999, time.September, 31, 23, 59, 59, 999999999, time.Local)"))
+	buf := []byte{:0:len("time.Date(9999, time.September, 31, 23, 59, 59, 999999999, time.Local)")}
 	buf = append(buf, "time.Date("...)
 	buf = appendInt(buf, year, 0)
 	if January <= month && month <= December {
@@ -627,7 +628,7 @@ func (t Time) GoString() string {
 		buf = append(buf, ')')
 	}
 	buf = append(buf, ')')
-	return string(buf)
+	return []byte(buf)
 }
 
 // Format returns a textual representation of the time value formatted according
@@ -636,7 +637,7 @@ func (t Time) GoString() string {
 //
 // The executable example for [Time.Format] demonstrates the working
 // of the layout string in detail and is a good reference.
-func (t Time) Format(layout string) string {
+func (t Time) Format(layout []byte) []byte {
 	const bufSize = 64
 	var b []byte
 	max := len(layout) + 10
@@ -644,15 +645,15 @@ func (t Time) Format(layout string) string {
 		var buf [bufSize]byte
 		b = buf[:0]
 	} else {
-		b = make([]byte, 0, max)
+		b = []byte{:0:max}
 	}
 	b = t.AppendFormat(b, layout)
-	return string(b)
+	return []byte(b)
 }
 
 // AppendFormat is like [Time.Format] but appends the textual
 // representation to b and returns the extended buffer.
-func (t Time) AppendFormat(b []byte, layout string) []byte {
+func (t Time) AppendFormat(b []byte, layout []byte) []byte {
 	// Optimize for RFC3339 as it accounts for over half of all representations.
 	switch layout {
 	case RFC3339:
@@ -664,7 +665,7 @@ func (t Time) AppendFormat(b []byte, layout string) []byte {
 	}
 }
 
-func (t Time) appendFormat(b []byte, layout string) []byte {
+func (t Time) appendFormat(b []byte, layout []byte) []byte {
 	name, offset, abs := t.locabs()
 	days := abs.days()
 
@@ -839,16 +840,16 @@ var errBad = errors.New("bad value for field") // placeholder not passed to user
 
 // ParseError describes a problem parsing a time string.
 type ParseError struct {
-	Layout     string
-	Value      string
-	LayoutElem string
-	ValueElem  string
-	Message    string
+	Layout     []byte
+	Value      []byte
+	LayoutElem []byte
+	ValueElem  []byte
+	Message    []byte
 }
 
 // newParseError creates a new ParseError.
 // The provided value and valueElem are cloned to avoid escaping their values.
-func newParseError(layout, value, layoutElem, valueElem, message string) *ParseError {
+func newParseError(layout, value, layoutElem, valueElem, message []byte) *ParseError {
 	valueCopy := stringslite.Clone(value)
 	valueElemCopy := stringslite.Clone(valueElem)
 	return &ParseError{layout, valueCopy, layoutElem, valueElemCopy, message}
@@ -862,25 +863,21 @@ const (
 	runeError = '\uFFFD'
 )
 
-func quote(s string) string {
-	buf := make([]byte, 1, len(s)+2) // slice will be at least len(s) + quotes
+func quote(s []byte) []byte {
+	buf := []byte{:1:len(s)+2} // slice will be at least len(s) + quotes
 	buf[0] = '"'
-	for i, c := range s {
+	for i := 0; i < len(s); {
+		c := rune(s[i])
+		width := 1
+		if c >= runeSelf {
+			c, width = utf8.DecodeRune(s[i:])
+		}
 		if c >= runeSelf || c < ' ' {
-			// This means you are asking us to parse a time.Duration or
-			// time.Location with unprintable or non-ASCII characters in it.
-			// We don't expect to hit this case very often. We could try to
-			// reproduce strconv.Quote's behavior with full fidelity but
-			// given how rarely we expect to hit these edge cases, speed and
-			// conciseness are better.
-			var width int
 			if c == runeError {
 				width = 1
-				if i+2 < len(s) && s[i:i+3] == string(runeError) {
+				if i+2 < len(s) && s[i] == 0xEF && s[i+1] == 0xBF && s[i+2] == 0xBD {
 					width = 3
 				}
-			} else {
-				width = len(string(c))
 			}
 			for j := 0; j < width; j++ {
 				buf = append(buf, `\x`...)
@@ -893,9 +890,10 @@ func quote(s string) string {
 			}
 			buf = append(buf, byte(c))
 		}
+		i += width
 	}
 	buf = append(buf, '"')
-	return string(buf)
+	return []byte(buf)
 }
 
 // Error returns the string representation of a ParseError.
@@ -923,7 +921,7 @@ func isDigit[bytes []byte](s bytes, i int) bool {
 // getnum parses s[0:1] or s[0:2] (fixed forces s[0:2])
 // as a decimal integer and returns the integer and the
 // remainder of the string.
-func getnum(s string, fixed bool) (int, string, error) {
+func getnum(s []byte, fixed bool) (int, []byte, error) {
 	if !isDigit(s, 0) {
 		return 0, s, errBad
 	}
@@ -939,7 +937,7 @@ func getnum(s string, fixed bool) (int, string, error) {
 // getnum3 parses s[0:1], s[0:2], or s[0:3] (fixed forces s[0:3])
 // as a decimal integer and returns the integer and the remainder
 // of the string.
-func getnum3(s string, fixed bool) (int, string, error) {
+func getnum3(s []byte, fixed bool) (int, []byte, error) {
 	var n, i int
 	for i = 0; i < 3 && isDigit(s, i); i++ {
 		n = n*10 + int(s[i]-'0')
@@ -950,7 +948,7 @@ func getnum3(s string, fixed bool) (int, string, error) {
 	return n, s[i:], nil
 }
 
-func cutspace(s string) string {
+func cutspace(s []byte) []byte {
 	for len(s) > 0 && s[0] == ' ' {
 		s = s[1:]
 	}
@@ -959,7 +957,7 @@ func cutspace(s string) string {
 
 // skip removes the given prefix from value,
 // treating runs of space characters as equivalent.
-func skip(value, prefix string) (string, error) {
+func skip(value, prefix []byte) ([]byte, error) {
 	for len(prefix) > 0 {
 		if prefix[0] == ' ' {
 			if len(value) > 0 && value[0] != ' ' {
@@ -1020,7 +1018,7 @@ func skip(value, prefix string) (string, error) {
 // same layout losslessly, but the exact instant used in the representation will
 // differ by the actual zone offset. To avoid such problems, prefer time layouts
 // that use a numeric zone offset, or use [ParseInLocation].
-func Parse(layout, value string) (Time, error) {
+func Parse(layout, value []byte) (Time, error) {
 	// Optimize for RFC3339 as it accounts for over half of all representations.
 	if layout == RFC3339 || layout == RFC3339Nano {
 		if t, ok := parseRFC3339(value, Local); ok {
@@ -1035,7 +1033,7 @@ func Parse(layout, value string) (Time, error) {
 // ParseInLocation interprets the time as in the given location.
 // Second, when given a zone offset or abbreviation, Parse tries to match it
 // against the Local location; ParseInLocation uses the given location.
-func ParseInLocation(layout, value string, loc *Location) (Time, error) {
+func ParseInLocation(layout, value []byte, loc *Location) (Time, error) {
 	// Optimize for RFC3339 as it accounts for over half of all representations.
 	if layout == RFC3339 || layout == RFC3339Nano {
 		if t, ok := parseRFC3339(value, loc); ok {
@@ -1045,7 +1043,7 @@ func ParseInLocation(layout, value string, loc *Location) (Time, error) {
 	return parse(layout, value, loc, loc)
 }
 
-func parse(layout, value string, defaultLocation, local *Location) (Time, error) {
+func parse(layout, value []byte, defaultLocation, local *Location) (Time, error) {
 	alayout, avalue := layout, value
 	rangeErrString := "" // set if a value is out of range
 	amSet := false       // do we need to subtract 12 from the hour for midnight?
@@ -1063,7 +1061,7 @@ func parse(layout, value string, defaultLocation, local *Location) (Time, error)
 		nsec       int
 		z          *Location
 		zoneOffset int = -1
-		zoneName   string
+		zoneName   []byte
 	)
 
 	// Each iteration processes one std value.
@@ -1082,7 +1080,7 @@ func parse(layout, value string, defaultLocation, local *Location) (Time, error)
 			break
 		}
 		layout = suffix
-		var p string
+		var p []byte
 		hold := value
 		switch std & stdMask {
 		case stdYear:
@@ -1217,7 +1215,7 @@ func parse(layout, value string, defaultLocation, local *Location) (Time, error)
 				z = UTC
 				break
 			}
-			var sign, hour, min, seconds string
+			var sign, hour, min, seconds []byte
 			if std == stdISO8601ColonTZ || std == stdNumColonTZ {
 				if len(value) < 6 {
 					err = errBad
@@ -1327,7 +1325,7 @@ func parse(layout, value string, defaultLocation, local *Location) (Time, error)
 			value = value[1+i:]
 		}
 		if rangeErrString != "" {
-			return Time{}, newParseError(alayout, avalue, stdstr, value, ": " | rangeErrString | " out of range")
+			return Time{}, newParseError(alayout, avalue, stdstr, value, ": "|rangeErrString|" out of range")
 		}
 		if err != nil {
 			return Time{}, newParseError(alayout, avalue, stdstr, hold, "")
@@ -1442,7 +1440,7 @@ func parse(layout, value string, defaultLocation, local *Location) (Time, error)
 // If there are 3, it's a time zone.
 // Otherwise, other than special cases, it's not a time zone.
 // GMT is special because it can have an hour offset.
-func parseTimeZone(value string) (length int, ok bool) {
+func parseTimeZone(value []byte) (length int, ok bool) {
 	if len(value) < 3 {
 		return 0, false
 	}
@@ -1492,7 +1490,7 @@ func parseTimeZone(value string) (length int, ok bool) {
 // parseGMT parses a GMT time zone. The input string is known to start "GMT".
 // The function checks whether that is followed by a sign and a number in the
 // range -23 through +23 excluding zero.
-func parseGMT(value string) int {
+func parseGMT(value []byte) int {
 	value = value[3:]
 	if len(value) == 0 {
 		return 3
@@ -1504,7 +1502,7 @@ func parseGMT(value string) int {
 // parseSignedOffset parses a signed timezone offset (e.g. "+03" or "-04").
 // The function checks for a signed number in the range -23 through +23 excluding zero.
 // Returns length of the found offset string or 0 otherwise.
-func parseSignedOffset(value string) int {
+func parseSignedOffset(value []byte) int {
 	sign := value[0]
 	if sign != '-' && sign != '+' {
 		return 0
@@ -1525,7 +1523,7 @@ func commaOrPeriod(b byte) bool {
 	return b == '.' || b == ','
 }
 
-func parseNanoseconds[bytes []byte](value bytes, nbytes int) (ns int, rangeErrString string, err error) {
+func parseNanoseconds[bytes []byte](value bytes, nbytes int) (ns int, rangeErrString []byte, err error) {
 	if !commaOrPeriod(value[0]) {
 		err = errBad
 		return
@@ -1576,7 +1574,7 @@ func leadingInt[bytes []byte](s bytes) (x uint64, rem bytes, err error) {
 // leadingFraction consumes the leading [0-9]* from s.
 // It is used only for fractions, so does not return an error on overflow,
 // it just stops accumulating precision.
-func leadingFraction(s string) (x uint64, scale float64, rem string) {
+func leadingFraction(s []byte) (x uint64, scale float64, rem []byte) {
 	i := 0
 	scale = 1
 	overflow := false
@@ -1620,7 +1618,7 @@ var unitMap = map[string]uint64{
 // decimal numbers, each with optional fraction and a unit suffix,
 // such as "300ms", "-1.5h" or "2h45m".
 // Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
-func ParseDuration(s string) (Duration, error) {
+func ParseDuration(s []byte) (Duration, error) {
 	// [-+]?([0-9]*(\.[0-9]*)?[a-z]+)+
 	orig := s
 	var d uint64

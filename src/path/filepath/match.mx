@@ -41,15 +41,15 @@ var ErrBadPattern = errors.New("syntax error in pattern")
 //
 // On Windows, escaping is disabled. Instead, '\\' is treated as
 // path separator.
-func Match(pattern, name string) (matched bool, err error) {
+func Match(pattern, name []byte) (matched bool, err error) {
 Pattern:
 	for len(pattern) > 0 {
 		var star bool
-		var chunk string
+		var chunk []byte
 		star, chunk, pattern = scanChunk(pattern)
 		if star && chunk == "" {
 			// Trailing * matches rest of string unless it has a /.
-			return !bytes.Contains(name, string(Separator)), nil
+			return !bytes.Contains(name, []byte{byte(Separator)}), nil
 		}
 		// Look for match at current position.
 		t, ok, err := matchChunk(chunk, name)
@@ -88,7 +88,7 @@ Pattern:
 
 // scanChunk gets the next segment of pattern, which is a non-star string
 // possibly preceded by a star.
-func scanChunk(pattern string) (star bool, chunk, rest string) {
+func scanChunk(pattern []byte) (star bool, chunk, rest []byte) {
 	for len(pattern) > 0 && pattern[0] == '*' {
 		pattern = pattern[1:]
 		star = true
@@ -121,7 +121,7 @@ Scan:
 // matchChunk checks whether chunk matches the beginning of s.
 // If so, it returns the remainder of s (after the match).
 // Chunk is all single-character operators: literals, char classes, and ?.
-func matchChunk(chunk, s string) (rest string, ok bool, err error) {
+func matchChunk(chunk, s []byte) (rest []byte, ok bool, err error) {
 	// failed records whether the match has failed.
 	// After the match fails, the loop continues on processing chunk,
 	// checking that the pattern is well-formed but no longer reading s.
@@ -215,7 +215,7 @@ func matchChunk(chunk, s string) (rest string, ok bool, err error) {
 }
 
 // getEsc gets a possibly-escaped character from chunk, for a character class.
-func getEsc(chunk string) (r rune, nchunk string, err error) {
+func getEsc(chunk []byte) (r rune, nchunk []byte, err error) {
 	if len(chunk) == 0 || chunk[0] == '-' || chunk[0] == ']' {
 		err = ErrBadPattern
 		return
@@ -246,11 +246,11 @@ func getEsc(chunk string) (r rune, nchunk string, err error) {
 // Glob ignores file system errors such as I/O errors reading directories.
 // The only possible returned error is [ErrBadPattern], when pattern
 // is malformed.
-func Glob(pattern string) (matches [][]byte, err error) {
+func Glob(pattern []byte) (matches [][]byte, err error) {
 	return globWithLimit(pattern, 0)
 }
 
-func globWithLimit(pattern string, depth int) (matches [][]byte, err error) {
+func globWithLimit(pattern []byte, depth int) (matches [][]byte, err error) {
 	// This limit is used prevent stack exhaustion issues. See CVE-2022-30632.
 	const pathSeparatorsLimit = 10000
 	if depth == pathSeparatorsLimit {
@@ -300,11 +300,11 @@ func globWithLimit(pattern string, depth int) (matches [][]byte, err error) {
 }
 
 // cleanGlobPath prepares path for glob matching.
-func cleanGlobPath(path string) string {
+func cleanGlobPath(path []byte) []byte {
 	switch path {
 	case "":
 		return "."
-	case string(Separator):
+	case []byte{byte(Separator)}:
 		// do nothing to the path
 		return path
 	default:
@@ -313,7 +313,7 @@ func cleanGlobPath(path string) string {
 }
 
 // cleanGlobPathWindows is windows version of cleanGlobPath.
-func cleanGlobPathWindows(path string) (prefixLen int, cleaned string) {
+func cleanGlobPathWindows(path []byte) (prefixLen int, cleaned []byte) {
 	vollen := filepathlite.VolumeNameLen(path)
 	switch {
 	case path == "":
@@ -335,7 +335,7 @@ func cleanGlobPathWindows(path string) (prefixLen int, cleaned string) {
 // and appends them to matches. If the directory cannot be
 // opened, it returns the existing matches. New matches are
 // added in lexicographical order.
-func glob(dir, pattern string, matches [][]byte) (m [][]byte, e error) {
+func glob(dir, pattern []byte, matches [][]byte) (m [][]byte, e error) {
 	m = matches
 	fi, err := os.Stat(dir)
 	if err != nil {
@@ -367,7 +367,7 @@ func glob(dir, pattern string, matches [][]byte) (m [][]byte, e error) {
 
 // hasMeta reports whether path contains any of the magic characters
 // recognized by Match.
-func hasMeta(path string) bool {
+func hasMeta(path []byte) bool {
 	magicChars := `*?[`
 	if runtime.GOOS != "windows" {
 		magicChars = `*?[\`

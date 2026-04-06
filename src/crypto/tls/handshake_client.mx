@@ -69,7 +69,7 @@ func (c *Conn) makeClientHello() (*clientHelloMsg, *keySharePrivateKeys, *echCli
 	hello := &clientHelloMsg{
 		vers:                         maxVersion,
 		compressionMethods:           []uint8{compressionNone},
-		random:                       make([]byte, 32),
+		random:                       []byte{:32},
 		extendedMasterSecret:         true,
 		ocspStapling:                 true,
 		scts:                         true,
@@ -111,7 +111,7 @@ func (c *Conn) makeClientHello() (*clientHelloMsg, *keySharePrivateKeys, *echCli
 	//
 	// The session ID is not set for QUIC connections (see RFC 9001, Section 8.4).
 	if c.quic == nil {
-		hello.sessionId = make([]byte, 32)
+		hello.sessionId = []byte{:32}
 		if _, err := io.ReadFull(config.rand(), hello.sessionId); err != nil {
 			return nil, nil, nil, errors.New("tls: short read from Rand: " + err.Error())
 		}
@@ -258,9 +258,9 @@ func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 
 		// Overwrite the server name in the outer hello with the public facing
 		// name.
-		hello.serverName = string(ech.config.PublicName)
+		hello.serverName = []byte(ech.config.PublicName)
 		// Generate a new random for the outer hello.
-		hello.random = make([]byte, 32)
+		hello.random = []byte{:32}
 		_, err = io.ReadFull(c.config.rand(), hello.random)
 		if err != nil {
 			return errors.New("tls: short read from Rand: " + err.Error())
@@ -315,8 +315,8 @@ func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 	// support, check for the server downgrade canaries.
 	// See RFC 8446, Section 4.1.3.
 	maxVers := c.config.maxSupportedVersion(roleClient)
-	tls12Downgrade := string(serverHello.random[24:]) == downgradeCanaryTLS12
-	tls11Downgrade := string(serverHello.random[24:]) == downgradeCanaryTLS11
+	tls12Downgrade := []byte(serverHello.random[24:]) == downgradeCanaryTLS12
+	tls11Downgrade := []byte(serverHello.random[24:]) == downgradeCanaryTLS11
 	if maxVers == VersionTLS13 && c.vers <= VersionTLS12 && (tls12Downgrade || tls11Downgrade) ||
 		maxVers == VersionTLS12 && c.vers <= VersionTLS11 && tls11Downgrade {
 		c.sendAlert(alertIllegalParameter)
@@ -487,7 +487,7 @@ func (c *Conn) loadSession(hello *clientHelloMsg) (
 		obfuscatedTicketAge: uint32(ticketAge/time.Millisecond) + session.ageAdd,
 	}
 	hello.pskIdentities = []pskIdentity{identity}
-	hello.pskBinders = [][]byte{make([]byte, cipherSuite.hash.Size())}
+	hello.pskBinders = [][]byte{[]byte{:cipherSuite.hash.Size()}}
 
 	// Compute the PSK binders. See RFC 8446, Section 4.2.11.2.
 	earlySecret = tls13.NewEarlySecret(cipherSuite.hash.New, session.secret)
@@ -960,7 +960,7 @@ func (hs *clientHandshakeState) processServerHello() (bool, error) {
 
 // checkALPN ensure that the server's choice of ALPN protocol is compatible with
 // the protocols that we advertised in the ClientHello.
-func checkALPN(clientProtos []string, serverProto string, quic bool) error {
+func checkALPN(clientProtos [][]byte, serverProto []byte, quic bool) error {
 	if serverProto == "" {
 		if quic && len(clientProtos) > 0 {
 			// RFC 9001, Section 8.1
@@ -1096,7 +1096,7 @@ func checkKeySize(n int) (max int, ok bool) {
 // verifyServerCertificate parses and verifies the provided chain, setting
 // c.verifiedChains and c.peerCertificates or sending the appropriate alert.
 func (c *Conn) verifyServerCertificate(certificates [][]byte) error {
-	certs := make([]*x509.Certificate, len(certificates))
+	certs := []*x509.Certificate{:len(certificates)}
 	for i, asn1Data := range certificates {
 		cert, err := globalCertCache.newCert(asn1Data)
 		if err != nil {
@@ -1239,7 +1239,7 @@ func certificateRequestInfoFromMsg(ctx context.Context, vers uint16, certReq *ce
 
 	// Filter the signature schemes based on the certificate types.
 	// See RFC 5246, Section 7.4.4 (where it calls this "somewhat complicated").
-	cri.SignatureSchemes = make([]SignatureScheme, 0, len(certReq.supportedSignatureAlgorithms))
+	cri.SignatureSchemes = []SignatureScheme{:0:len(certReq.supportedSignatureAlgorithms)}
 	for _, sigScheme := range certReq.supportedSignatureAlgorithms {
 		sigType, _, err := typeAndHashFromSignatureScheme(sigScheme)
 		if err != nil {
@@ -1278,7 +1278,7 @@ func (c *Conn) getClientCertificate(cri *CertificateRequestInfo) (*Certificate, 
 
 // clientSessionCacheKey returns a key used to cache sessionTickets that could
 // be used to resume previously negotiated TLS sessions with a server.
-func (c *Conn) clientSessionCacheKey() string {
+func (c *Conn) clientSessionCacheKey() []byte {
 	if len(c.config.ServerName) > 0 {
 		return c.config.ServerName
 	}
@@ -1291,7 +1291,7 @@ func (c *Conn) clientSessionCacheKey() string {
 // hostnameInSNI converts name into an appropriate hostname for SNI.
 // Literal IP addresses and absolute FQDNs are not permitted as SNI values.
 // See RFC 6066, Section 3.
-func hostnameInSNI(name string) string {
+func hostnameInSNI(name []byte) []byte {
 	host := name
 	if len(host) > 0 && host[0] == '[' && host[len(host)-1] == ']' {
 		host = host[1 : len(host)-1]

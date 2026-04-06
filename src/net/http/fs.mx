@@ -20,7 +20,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"time"
 )
@@ -122,19 +121,22 @@ type anyDirs interface {
 	len() int
 	name(i int) []byte
 	isDir(i int) bool
+	swap(i, j int)
 }
 
 type fileInfoDirs []fs.FileInfo
 
-func (d fileInfoDirs) len() int          { return len(d) }
-func (d fileInfoDirs) isDir(i int) bool  { return d[i].IsDir() }
-func (d fileInfoDirs) name(i int) []byte { return d[i].Name() }
+func (d fileInfoDirs) len() int            { return len(d) }
+func (d fileInfoDirs) isDir(i int) bool    { return d[i].IsDir() }
+func (d fileInfoDirs) name(i int) []byte   { return d[i].Name() }
+func (d fileInfoDirs) swap(i, j int)       { d[i], d[j] = d[j], d[i] }
 
 type dirEntryDirs []fs.DirEntry
 
-func (d dirEntryDirs) len() int          { return len(d) }
-func (d dirEntryDirs) isDir(i int) bool  { return d[i].IsDir() }
-func (d dirEntryDirs) name(i int) []byte { return d[i].Name() }
+func (d dirEntryDirs) len() int            { return len(d) }
+func (d dirEntryDirs) isDir(i int) bool    { return d[i].IsDir() }
+func (d dirEntryDirs) name(i int) []byte   { return d[i].Name() }
+func (d dirEntryDirs) swap(i, j int)       { d[i], d[j] = d[j], d[i] }
 
 func dirList(w ResponseWriter, r *Request, f File) {
 	// Prefer to use ReadDir instead of Readdir,
@@ -157,7 +159,12 @@ func dirList(w ResponseWriter, r *Request, f File) {
 		Error(w, "Error reading directory", StatusInternalServerError)
 		return
 	}
-	sort.Slice(dirs, func(i, j int) bool { return dirs.name(i) < dirs.name(j) })
+	// Insertion sort by name
+	for si := 1; si < dirs.len(); si++ {
+		for sj := si; sj > 0 && string(dirs.name(sj)) < string(dirs.name(sj-1)); sj-- {
+			dirs.swap(sj, sj-1)
+		}
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, "<!doctype html>\n")

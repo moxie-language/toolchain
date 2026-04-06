@@ -236,7 +236,7 @@ func (hs *serverHandshakeState) processClientHello() error {
 		return errors.New("tls: client does not support uncompressed connections")
 	}
 
-	hs.hello.random = make([]byte, 32)
+	hs.hello.random = []byte{:32}
 	serverRandom := hs.hello.random
 	// Downgrade protection canaries. See RFC 8446, Section 4.1.3.
 	maxVers := c.config.maxSupportedVersion(roleServer)
@@ -331,7 +331,7 @@ func (hs *serverHandshakeState) processClientHello() error {
 // negotiateALPN picks a shared ALPN protocol that both sides support in server
 // preference order. If ALPN is not configured or the peer doesn't support it,
 // it returns "" and no error.
-func negotiateALPN(serverProtos, clientProtos []string, quic bool) (string, error) {
+func negotiateALPN(serverProtos, clientProtos [][]byte, quic bool) ([]byte, error) {
 	if len(serverProtos) == 0 || len(clientProtos) == 0 {
 		if quic && len(serverProtos) != 0 {
 			// RFC 9001, Section 8.1
@@ -939,7 +939,7 @@ func (hs *serverHandshakeState) sendFinished(out []byte) error {
 // certificateMsg message or a certificateMsgTLS13 message and verifies them.
 func (c *Conn) processCertsFromClient(certificate Certificate) error {
 	certificates := certificate.Certificate
-	certs := make([]*x509.Certificate, len(certificates))
+	certs := []*x509.Certificate{:len(certificates)}
 	var err error
 	for i, asn1Data := range certificates {
 		if certs[i], err = x509.ParseCertificate(asn1Data); err != nil {
@@ -978,11 +978,9 @@ func (c *Conn) processCertsFromClient(certificate Certificate) error {
 
 		chains, err := certs[0].Verify(opts)
 		if err != nil {
-			var uaErr x509.UnknownAuthorityError
-			var ciErr x509.CertificateInvalidError
-			if errors.As(err, &uaErr) {
+			if _, ok := err.(x509.UnknownAuthorityError); ok {
 				c.sendAlert(alertUnknownCA)
-			} else if errors.As(err, &ciErr) && ciErr.Reason == x509.Expired {
+			} else if ciErr, ok := err.(x509.CertificateInvalidError); ok && ciErr.Reason == x509.Expired {
 				c.sendAlert(alertCertificateExpired)
 			} else {
 				c.sendAlert(alertBadCertificate)

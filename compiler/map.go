@@ -22,7 +22,7 @@ func (b *builder) createMakeMap(expr *ssa.MakeMap) (llvm.Value, error) {
 	if isStringLike(keyType) {
 		// String/[]byte keys (Moxie: string=[]byte).
 		llvmKeyType = b.getLLVMType(keyType)
-		alg = uint64(moxie.HashmapAlgorithmString)
+		alg = uint64(moxie.HashmapAlgorithmContent)
 	} else if hashmapIsBinaryKey(keyType) {
 		// Trivially comparable keys.
 		llvmKeyType = b.getLLVMType(keyType)
@@ -77,7 +77,7 @@ func (b *builder) createMapLookup(keyType, valueType types.Type, m, key llvm.Val
 	if isStringLike(keyType) {
 		// key is string/[]byte (Moxie: string=[]byte)
 		params := []llvm.Value{m, key, mapValueAlloca, mapValueSize}
-		commaOkValue = b.createRuntimeCall("hashmapStringGet", params, "")
+		commaOkValue = b.createRuntimeCall("hashmapContentGet", params, "")
 	} else if hashmapIsBinaryKey(keyType) {
 		// key can be compared with runtime.memequal
 		// Store the key in an alloca, in the entry block to avoid dynamic stack
@@ -125,7 +125,7 @@ func (b *builder) createMapUpdate(keyType types.Type, m, key, value llvm.Value, 
 	if isStringLike(keyType) {
 		// key is string/[]byte (Moxie: string=[]byte)
 		params := []llvm.Value{m, key, valueAlloca}
-		b.createRuntimeCall("hashmapStringSet", params, "")
+		b.createRuntimeCall("hashmapContentSet", params, "")
 	} else if hashmapIsBinaryKey(keyType) {
 		// key can be compared with runtime.memequal
 		keyAlloca, keySize := b.createTemporaryAlloca(key.Type(), "hashmap.key")
@@ -155,7 +155,7 @@ func (b *builder) createMapDelete(keyType types.Type, m, key llvm.Value, pos tok
 	if isStringLike(keyType) {
 		// key is string/[]byte (Moxie: string=[]byte)
 		params := []llvm.Value{m, key}
-		b.createRuntimeCall("hashmapStringDelete", params, "")
+		b.createRuntimeCall("hashmapContentDelete", params, "")
 		return nil
 	} else if hashmapIsBinaryKey(keyType) {
 		keyAlloca, keySize := b.createTemporaryAlloca(key.Type(), "hashmap.key")

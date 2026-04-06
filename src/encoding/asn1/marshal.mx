@@ -9,10 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"reflect"
 	"slices"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 )
 
 var (
@@ -50,7 +50,7 @@ func (b bytesEncoder) Encode(dst []byte) {
 	}
 }
 
-type stringEncoder string
+type stringEncoder []byte
 
 func (s stringEncoder) Len() int {
 	return len(s)
@@ -99,9 +99,9 @@ func (s setEncoder) Encode(dst []byte) {
 	// First we encode each element to its TLV encoding and then use
 	// octetSort to get the ordering expected by X690 DER rules before
 	// writing the sorted encodings out to dst.
-	l := make([][]byte, len(s))
+	l := [][]byte{:len(s)}
 	for i, e := range s {
-		l[i] = make([]byte, e.Len())
+		l[i] = []byte{:e.Len()}
 		e.Encode(l[i])
 	}
 
@@ -308,7 +308,7 @@ func makeObjectIdentifier(oid []int) (e encoder, err error) {
 	return oidEncoder(oid), nil
 }
 
-func makePrintableString(s string) (e encoder, err error) {
+func makePrintableString(s []byte) (e encoder, err error) {
 	for i := 0; i < len(s); i++ {
 		// The asterisk is often used in PrintableString, even though
 		// it is invalid. If a PrintableString was specifically
@@ -324,7 +324,7 @@ func makePrintableString(s string) (e encoder, err error) {
 	return stringEncoder(s), nil
 }
 
-func makeIA5String(s string) (e encoder, err error) {
+func makeIA5String(s []byte) (e encoder, err error) {
 	for i := 0; i < len(s); i++ {
 		if s[i] > 127 {
 			return nil, StructuralError{"IA5String contains invalid character"}
@@ -334,7 +334,7 @@ func makeIA5String(s string) (e encoder, err error) {
 	return stringEncoder(s), nil
 }
 
-func makeNumericString(s string) (e encoder, err error) {
+func makeNumericString(s []byte) (e encoder, err error) {
 	for i := 0; i < len(s); i++ {
 		if !isNumeric(s[i]) {
 			return nil, StructuralError{"NumericString contains invalid character"}
@@ -344,7 +344,7 @@ func makeNumericString(s string) (e encoder, err error) {
 	return stringEncoder(s), nil
 }
 
-func makeUTF8String(s string) encoder {
+func makeUTF8String(s []byte) encoder {
 	return stringEncoder(s)
 }
 
@@ -366,7 +366,7 @@ func outsideUTCRange(t time.Time) bool {
 }
 
 func makeUTCTime(t time.Time) (e encoder, err error) {
-	dst := make([]byte, 0, 18)
+	dst := []byte{:0:18}
 
 	dst, err = appendUTCTime(dst, t)
 	if err != nil {
@@ -377,7 +377,7 @@ func makeUTCTime(t time.Time) (e encoder, err error) {
 }
 
 func makeGeneralizedTime(t time.Time) (e encoder, err error) {
-	dst := make([]byte, 0, 20)
+	dst := []byte{:0:20}
 
 	dst, err = appendGeneralizedTime(dst, t)
 	if err != nil {
@@ -455,61 +455,67 @@ func stripTagAndLength(in []byte) []byte {
 	return in[offset:]
 }
 
-func makeBody(value reflect.Value, params fieldParameters) (e encoder, err error) {
-	switch value.Type() {
-	case flagType:
+
+func makeBody(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e encoder, err error) {
+	// Known concrete types by type code pointer comparison.
+	if typ == _flagTC {
 		return bytesEncoder(nil), nil
-	case timeType:
-		t := value.Interface().(time.Time)
+	}
+	if typ == _timeTC {
+		t := *(*time.Time)(ptr)
 		if params.timeType == TagGeneralizedTime || outsideUTCRange(t) {
 			return makeGeneralizedTime(t)
 		}
 		return makeUTCTime(t)
-	case bitStringType:
-		return bitStringEncoder(value.Interface().(BitString)), nil
-	case objectIdentifierType:
-		return makeObjectIdentifier(value.Interface().(ObjectIdentifier))
-	case bigIntType:
-		return makeBigInt(value.Interface().(*big.Int))
+	}
+	if typ == _bitStringTC {
+		return bitStringEncoder(*(*BitString)(ptr)), nil
+	}
+	if typ == _objectIdentifierTC {
+		return makeObjectIdentifier(*(*ObjectIdentifier)(ptr))
+	}
+	if typ == _bigIntPtrTC {
+		return makeBigInt(*(**big.Int)(ptr))
 	}
 
-	switch v := value; v.Kind() {
-	case reflect.Bool:
-		if v.Bool() {
+	// Kind-based dispatch.
+	switch typ.kind() {
+	case akBool:
+		if *(*bool)(ptr) {
 			return byteFFEncoder, nil
 		}
 		return byte00Encoder, nil
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return int64Encoder(v.Int()), nil
-	case reflect.Struct:
-		t := v.Type()
-
-		for i := 0; i < t.NumField(); i++ {
-			if !t.Field(i).IsExported() {
+	case akInt, akInt8, akInt16, akInt32, akInt64:
+		var intVal int64
+		switch typ.size() {
+		case 1:
+			intVal = int64(*(*int8)(ptr))
+		case 2:
+			intVal = int64(*(*int16)(ptr))
+		case 4:
+			intVal = int64(*(*int32)(ptr))
+		default:
+			intVal = *(*int64)(ptr)
+		}
+		return int64Encoder(intVal), nil
+	case akStruct:
+		for i := 0; i < typ.numField(); i++ {
+			if !typ.fieldExported(i) {
 				return nil, StructuralError{"struct contains unexported fields"}
 			}
 		}
 
 		startingField := 0
-
-		n := t.NumField()
+		n := typ.numField()
 		if n == 0 {
 			return bytesEncoder(nil), nil
 		}
 
-		// If the first element of the structure is a non-empty
-		// RawContents, then we don't bother serializing the rest.
-		if t.Field(0).Type == rawContentsType {
-			s := v.Field(0)
-			if s.Len() > 0 {
-				bytes := s.Bytes()
-				/* The RawContents will contain the tag and
-				 * length fields but we'll also be writing
-				 * those ourselves, so we strip them out of
-				 * bytes */
-				return bytesEncoder(stripTagAndLength(bytes)), nil
+		if typ.fieldType(0) == _rawContentsTC {
+			rc := *(*RawContent)(unsafe.Add(ptr, typ.fieldOffset(0)))
+			if len(rc) > 0 {
+				return bytesEncoder(stripTagAndLength([]byte(rc))), nil
 			}
-
 			startingField = 1
 		}
 
@@ -517,110 +523,142 @@ func makeBody(value reflect.Value, params fieldParameters) (e encoder, err error
 		case 0:
 			return bytesEncoder(nil), nil
 		case 1:
-			return makeField(v.Field(startingField), parseFieldParameters(t.Field(startingField).Tag.Get("asn1")))
+			ft := typ.fieldType(startingField)
+			fp := unsafe.Add(ptr, typ.fieldOffset(startingField))
+			tag := getASN1Tag(typ.fieldTag(startingField))
+			return makeField(ft, fp, parseFieldParameters(tag))
 		default:
-			m := make([]encoder, n1)
+			m := []encoder{:n1}
 			for i := 0; i < n1; i++ {
-				m[i], err = makeField(v.Field(i+startingField), parseFieldParameters(t.Field(i+startingField).Tag.Get("asn1")))
+				fi := i + startingField
+				ft := typ.fieldType(fi)
+				fp := unsafe.Add(ptr, typ.fieldOffset(fi))
+				tag := getASN1Tag(typ.fieldTag(fi))
+				m[i], err = makeField(ft, fp, parseFieldParameters(tag))
 				if err != nil {
 					return nil, err
 				}
 			}
-
 			return multiEncoder(m), nil
 		}
-	case reflect.Slice:
-		sliceType := v.Type()
-		if sliceType.Elem().Kind() == reflect.Uint8 {
-			return bytesEncoder(v.Bytes()), nil
+	case akSlice:
+		if typ.elem().kind() == akUint8 {
+			return bytesEncoder(*(*[]byte)(ptr)), nil
 		}
-
+		hdr := (*_sliceHeader)(ptr)
+		l := hdr.len
+		elemType := typ.elem()
 		var fp fieldParameters
-
-		switch l := v.Len(); l {
+		switch l {
 		case 0:
 			return bytesEncoder(nil), nil
 		case 1:
-			return makeField(v.Index(0), fp)
+			return makeField(elemType, sliceIndex(ptr, elemType, 0), fp)
 		default:
-			m := make([]encoder, l)
-
+			m := []encoder{:l}
 			for i := 0; i < l; i++ {
-				m[i], err = makeField(v.Index(i), fp)
+				m[i], err = makeField(elemType, sliceIndex(ptr, elemType, i), fp)
 				if err != nil {
 					return nil, err
 				}
 			}
-
 			if params.set {
 				return setEncoder(m), nil
 			}
 			return multiEncoder(m), nil
 		}
-	case reflect.String:
+	case akBytes:
+		s := *(*[]byte)(ptr)
 		switch params.stringType {
 		case TagIA5String:
-			return makeIA5String(v.String())
+			return makeIA5String(s)
 		case TagPrintableString:
-			return makePrintableString(v.String())
+			return makePrintableString(s)
 		case TagNumericString:
-			return makeNumericString(v.String())
+			return makeNumericString(s)
 		default:
-			return makeUTF8String(v.String()), nil
+			return makeUTF8String(s), nil
 		}
 	}
 
 	return nil, StructuralError{"unknown Go type"}
 }
 
-func makeField(v reflect.Value, params fieldParameters) (e encoder, err error) {
-	if !v.IsValid() {
+// isZeroValue reports whether the value at ptr is all zero bytes.
+func isZeroValue(typ *_rawType, ptr unsafe.Pointer) bool {
+	sz := typ.size()
+	for i := uintptr(0); i < sz; i++ {
+		if *(*byte)(unsafe.Add(ptr, i)) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func makeField(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e encoder, err error) {
+	if typ == nil || ptr == nil {
 		return nil, fmt.Errorf("asn1: cannot marshal nil value")
 	}
-	// If the field is an interface{} then recurse into it.
-	if v.Kind() == reflect.Interface && v.Type().NumMethod() == 0 {
-		return makeField(v.Elem(), params)
+	// If the field is an interface{} then recurse into the concrete value.
+	if typ.kind() == akInterface {
+		iface := (*_ifacePair)(ptr)
+		if iface.typecode == nil {
+			return nil, fmt.Errorf("asn1: cannot marshal nil value")
+		}
+		concreteType := (*_rawType)(iface.typecode)
+		var concretePtr unsafe.Pointer
+		if concreteType.size() <= unsafe.Sizeof(uintptr(0)) {
+			concretePtr = unsafe.Pointer(&iface.value)
+		} else {
+			concretePtr = iface.value
+		}
+		return makeField(concreteType, concretePtr, params)
 	}
 
-	if v.Kind() == reflect.Slice && v.Len() == 0 && params.omitEmpty {
+	if typ.kind() == akSlice && (*_sliceHeader)(ptr).len == 0 && params.omitEmpty {
 		return bytesEncoder(nil), nil
 	}
 
-	if params.optional && params.defaultValue != nil && canHaveDefaultValue(v.Kind()) {
-		defaultValue := reflect.New(v.Type()).Elem()
-		defaultValue.SetInt(*params.defaultValue)
-
-		if reflect.DeepEqual(v.Interface(), defaultValue.Interface()) {
-			return bytesEncoder(nil), nil
+	if params.optional && params.defaultValue != nil {
+		k := typ.kind()
+		if k == akInt || k == akInt8 || k == akInt16 || k == akInt32 || k == akInt64 {
+			var current int64
+			switch typ.size() {
+			case 1:
+				current = int64(*(*int8)(ptr))
+			case 2:
+				current = int64(*(*int16)(ptr))
+			case 4:
+				current = int64(*(*int32)(ptr))
+			default:
+				current = *(*int64)(ptr)
+			}
+			if current == *params.defaultValue {
+				return bytesEncoder(nil), nil
+			}
 		}
 	}
 
-	// If no default value is given then the zero value for the type is
-	// assumed to be the default value. This isn't obviously the correct
-	// behavior, but it's what Go has traditionally done.
 	if params.optional && params.defaultValue == nil {
-		if reflect.DeepEqual(v.Interface(), reflect.Zero(v.Type()).Interface()) {
+		if isZeroValue(typ, ptr) {
 			return bytesEncoder(nil), nil
 		}
 	}
 
-	if v.Type() == rawValueType {
-		rv := v.Interface().(RawValue)
+	if typ == _rawValueTC {
+		rv := *(*RawValue)(ptr)
 		if len(rv.FullBytes) != 0 {
 			return bytesEncoder(rv.FullBytes), nil
 		}
-
 		t := &taggedEncoder{}
-
 		t.tag = bytesEncoder(appendTagAndLength(t.scratch[:0], tagAndLength{rv.Class, rv.Tag, len(rv.Bytes), rv.IsCompound}))
 		t.body = bytesEncoder(rv.Bytes)
-
 		return t, nil
 	}
 
-	matchAny, tag, isCompound, ok := getUniversalType(v.Type())
+	matchAny, tag, isCompound, ok := getUniversalType(typ)
 	if !ok || matchAny {
-		return nil, StructuralError{fmt.Sprintf("unknown Go type: %v", v.Type())}
+		return nil, StructuralError{fmt.Sprintf("unknown Go type (kind %d)", typ.kind())}
 	}
 
 	if params.timeType != 0 && tag != TagUTCTime {
@@ -634,12 +672,10 @@ func makeField(v reflect.Value, params fieldParameters) (e encoder, err error) {
 	switch tag {
 	case TagPrintableString:
 		if params.stringType == 0 {
-			// This is a string without an explicit string type. We'll use
-			// a PrintableString if the character set in the string is
-			// sufficiently limited, otherwise we'll use a UTF8String.
-			for _, r := range v.String() {
-				if r >= utf8.RuneSelf || !isPrintable(byte(r), rejectAsterisk, rejectAmpersand) {
-					if !utf8.ValidString(v.String()) {
+			s := *(*[]byte)(ptr)
+			for _, r := range s {
+				if r >= utf8.RuneSelf || !isPrintable(r, rejectAsterisk, rejectAmpersand) {
+					if !utf8.Valid(s) {
 						return nil, errors.New("asn1: string not valid UTF-8")
 					}
 					tag = TagUTF8String
@@ -650,7 +686,7 @@ func makeField(v reflect.Value, params fieldParameters) (e encoder, err error) {
 			tag = params.stringType
 		}
 	case TagUTCTime:
-		if params.timeType == TagGeneralizedTime || outsideUTCRange(v.Interface().(time.Time)) {
+		if params.timeType == TagGeneralizedTime || outsideUTCRange(*(*time.Time)(ptr)) {
 			tag = TagGeneralizedTime
 		}
 	}
@@ -662,18 +698,13 @@ func makeField(v reflect.Value, params fieldParameters) (e encoder, err error) {
 		tag = TagSet
 	}
 
-	// makeField can be called for a slice that should be treated as a SET
-	// but doesn't have params.set set, for instance when using a slice
-	// with the SET type name suffix. In this case getUniversalType returns
-	// TagSet, but makeBody doesn't know about that so will treat the slice
-	// as a sequence. To work around this we set params.set.
 	if tag == TagSet && !params.set {
 		params.set = true
 	}
 
 	t := &taggedEncoder{}
 
-	t.body, err = makeBody(v, params)
+	t.body, err = makeBody(typ, ptr, params)
 	if err != nil {
 		return nil, err
 	}
@@ -694,9 +725,7 @@ func makeField(v reflect.Value, params fieldParameters) (e encoder, err error) {
 			t.tag = bytesEncoder(appendTagAndLength(t.scratch[:0], tagAndLength{ClassUniversal, tag, bodyLen, isCompound}))
 
 			tt := &taggedEncoder{}
-
 			tt.body = t
-
 			tt.tag = bytesEncoder(appendTagAndLength(tt.scratch[:0], tagAndLength{
 				class:      class,
 				tag:        *params.tag,
@@ -717,29 +746,29 @@ func makeField(v reflect.Value, params fieldParameters) (e encoder, err error) {
 }
 
 // Marshal returns the ASN.1 encoding of val.
-//
-// In addition to the struct tags recognized by Unmarshal, the following can be
-// used:
-//
-//	ia5:         causes strings to be marshaled as ASN.1, IA5String values
-//	omitempty:   causes empty slices to be skipped
-//	printable:   causes strings to be marshaled as ASN.1, PrintableString values
-//	utf8:        causes strings to be marshaled as ASN.1, UTF8String values
-//	numeric:     causes strings to be marshaled as ASN.1, NumericString values
-//	utc:         causes time.Time to be marshaled as ASN.1, UTCTime values
-//	generalized: causes time.Time to be marshaled as ASN.1, GeneralizedTime values
 func Marshal(val any) ([]byte, error) {
 	return MarshalWithParams(val, "")
 }
 
 // MarshalWithParams allows field parameters to be specified for the
 // top-level element. The form of the params is the same as the field tags.
-func MarshalWithParams(val any, params string) ([]byte, error) {
-	e, err := makeField(reflect.ValueOf(val), parseFieldParameters(params))
+func MarshalWithParams(val any, params []byte) ([]byte, error) {
+	iface := (*_ifacePair)(unsafe.Pointer(&val))
+	tc := (*_rawType)(iface.typecode)
+	if tc == nil {
+		return nil, fmt.Errorf("asn1: cannot marshal nil value")
+	}
+	var dp unsafe.Pointer
+	if tc.size() <= unsafe.Sizeof(uintptr(0)) {
+		dp = unsafe.Pointer(&iface.value)
+	} else {
+		dp = iface.value
+	}
+	e, err := makeField(tc, dp, parseFieldParameters(params))
 	if err != nil {
 		return nil, err
 	}
-	b := make([]byte, e.Len())
+	b := []byte{:e.Len()}
 	e.Encode(b)
 	return b, nil
 }

@@ -4,9 +4,7 @@
 
 package errors
 
-import (
-	"internal/reflectlite"
-)
+// No imports needed — reflectlite removed.
 
 // Unwrap returns the result of calling the Unwrap method on err, if err's
 // type contains an Unwrap method returning error.
@@ -46,8 +44,7 @@ func Is(err, target error) bool {
 		return err == target
 	}
 
-	isComparable := reflectlite.TypeOf(target).Comparable()
-	return is(err, target, isComparable)
+	return is(err, target, true)
 }
 
 func is(err, target error, targetComparable bool) bool {
@@ -77,71 +74,5 @@ func is(err, target error, targetComparable bool) bool {
 	}
 }
 
-// As finds the first error in err's tree that matches target, and if one is found, sets
-// target to that error value and returns true. Otherwise, it returns false.
-//
-// The tree consists of err itself, followed by the errors obtained by repeatedly
-// calling its Unwrap() error or Unwrap() []error method. When err wraps multiple
-// errors, As examines err followed by a depth-first traversal of its children.
-//
-// An error matches target if the error's concrete value is assignable to the value
-// pointed to by target, or if the error has a method As(any) bool such that
-// As(target) returns true. In the latter case, the As method is responsible for
-// setting target.
-//
-// An error type might provide an As method so it can be treated as if it were a
-// different error type.
-//
-// As panics if target is not a non-nil pointer to either a type that implements
-// error, or to any interface type.
-func As(err error, target any) bool {
-	if err == nil {
-		return false
-	}
-	if target == nil {
-		panic("errors: target cannot be nil")
-	}
-	val := reflectlite.ValueOf(target)
-	typ := val.Type()
-	if typ.Kind() != reflectlite.Ptr || val.IsNil() {
-		panic("errors: target must be a non-nil pointer")
-	}
-	targetType := typ.Elem()
-	if targetType.Kind() != reflectlite.Interface && !targetType.Implements(errorType) {
-		panic("errors: *target must be interface or implement error")
-	}
-	return as(err, target, val, targetType)
-}
-
-func as(err error, target any, targetVal reflectlite.Value, targetType reflectlite.Type) bool {
-	for {
-		if reflectlite.TypeOf(err).AssignableTo(targetType) {
-			targetVal.Elem().Set(reflectlite.ValueOf(err))
-			return true
-		}
-		if x, ok := err.(interface{ As(any) bool }); ok && x.As(target) {
-			return true
-		}
-		switch x := err.(type) {
-		case interface{ Unwrap() error }:
-			err = x.Unwrap()
-			if err == nil {
-				return false
-			}
-		case interface{ Unwrap() []error }:
-			for _, err := range x.Unwrap() {
-				if err == nil {
-					continue
-				}
-				if as(err, target, targetVal, targetType) {
-					return true
-				}
-			}
-			return false
-		default:
-			return false
-		}
-	}
-}
-
-var errorType = reflectlite.TypeOf((*error)(nil)).Elem()
+// As was removed — it requires reflect for runtime type matching.
+// Use type assertions or errors.Is instead.

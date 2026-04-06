@@ -54,7 +54,6 @@ func isUserPackage(pkg *ssa.Package) bool {
 		strings.Contains(path, "/internal/") || // nested internals
 		strings.HasPrefix(path, "runtime") || // language primitives
 		strings.HasPrefix(path, "unsafe") || // language primitive
-		path == "reflect" || // must handle all Go types
 		strings.HasPrefix(path, "os") || // FDs, syscall wrappers
 		strings.HasPrefix(path, "syscall") { // syscall interfaces
 		return false

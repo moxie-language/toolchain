@@ -29,14 +29,14 @@ func init() {
 
 var allowGorootSource = true
 
-func gorootZoneSource(goroot string) (string, bool) {
+func gorootZoneSource(goroot []byte) ([]byte, bool) {
 	if goroot == "" || !allowGorootSource {
 		return "", false
 	}
 	return goroot | "/lib/time/zoneinfo.zip", true
 }
 
-func androidLoadTzinfoFromTzdata(file, name string) ([]byte, error) {
+func androidLoadTzinfoFromTzdata(file, name []byte) ([]byte, error) {
 	const (
 		headersize = 12 + 3*4
 		namesize   = 40
@@ -51,12 +51,12 @@ func androidLoadTzinfoFromTzdata(file, name string) ([]byte, error) {
 	}
 	defer closefd(fd)
 
-	buf := make([]byte, headersize)
+	buf := []byte{:headersize}
 	if err := preadn(fd, buf, 0); err != nil {
 		return nil, errors.New("corrupt tzdata file " | file)
 	}
 	d := dataIO{buf, false}
-	if magic := d.read(6); string(magic) != "tzdata" {
+	if magic := d.read(6); []byte(magic) != "tzdata" {
 		return nil, errors.New("corrupt tzdata file " | file)
 	}
 	d = dataIO{buf[12:], false}
@@ -64,20 +64,20 @@ func androidLoadTzinfoFromTzdata(file, name string) ([]byte, error) {
 	dataOff, _ := d.big4()
 	indexSize := dataOff - indexOff
 	entrycount := indexSize / entrysize
-	buf = make([]byte, indexSize)
+	buf = []byte{:indexSize}
 	if err := preadn(fd, buf, int(indexOff)); err != nil {
 		return nil, errors.New("corrupt tzdata file " | file)
 	}
 	for i := 0; i < int(entrycount); i++ {
 		entry := buf[i*entrysize : (i+1)*entrysize]
 		// len(name) <= namesize is checked at function entry
-		if string(entry[:len(name)]) != name {
+		if []byte(entry[:len(name)]) != name {
 			continue
 		}
 		d := dataIO{entry[namesize:], false}
 		off, _ := d.big4()
 		size, _ := d.big4()
-		buf := make([]byte, size)
+		buf := []byte{:size}
 		if err := preadn(fd, buf, int(off+dataOff)); err != nil {
 			return nil, errors.New("corrupt tzdata file " | file)
 		}

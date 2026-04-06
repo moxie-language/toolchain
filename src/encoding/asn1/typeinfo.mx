@@ -1,0 +1,390 @@
+package asn1
+
+// Unsafe type introspection for encoding/asn1, replacing reflect.
+// Reads the compiler's type descriptors directly (same layout as
+// internal/reflectlite/type.mx and runtime/typekind.mx).
+
+import "unsafe"
+
+// Kind constants matching the compiler's type descriptor format.
+type aKind uint8
+
+const (
+	akInvalid aKind = iota
+	akBool
+	akInt
+	akInt8
+	akInt16
+	akInt32
+	akInt64
+	akUint
+	akUint8
+	akUint16
+	akUint32
+	akUint64
+	akUintptr
+	akFloat32
+	akFloat64
+	akComplex64
+	akComplex128
+	akBytes // 17: unified string=[]byte
+	akUnsafePointer
+	akChan
+	akInterface
+	akPointer
+	akSlice
+	akArray
+	akFunc
+	akMap
+	akStruct
+)
+
+const (
+	_kindMask  = 31
+	_flagNamed = 32
+)
+
+// Struct field flags from the field descriptor data blob.
+const (
+	_sfAnonymous = 1 << iota
+	_sfHasTag
+	_sfExported
+)
+
+// _ifacePair is the interface{} memory layout.
+type _ifacePair struct {
+	typecode unsafe.Pointer
+	value    unsafe.Pointer
+}
+
+// _rawType is the base type descriptor.
+type _rawType struct {
+	meta uint8
+}
+
+// _elemType: named, chan, slice, array, map.
+type _elemType struct {
+	_rawType
+	numMethod uint16
+	ptrTo     *_rawType
+	elem      *_rawType
+}
+
+// _ptrType: pointer types (no ptrTo field).
+type _ptrType struct {
+	_rawType
+	numMethod uint16
+	elem      *_rawType
+}
+
+// _structType: struct types.
+type _structType struct {
+	_rawType
+	numMethod uint16
+	ptrTo     *_rawType
+	pkgpath   *byte
+	size      uint32
+	numField  uint16
+	fields    [1]_structFieldDesc
+}
+
+type _structFieldDesc struct {
+	fieldType *_rawType
+	data      unsafe.Pointer
+}
+
+// _sliceHeader is the memory layout of a slice.
+type _sliceHeader struct {
+	data unsafe.Pointer
+	len  int
+	cap  int
+}
+
+func (t *_rawType) kind() aKind {
+	if t == nil {
+		return akInvalid
+	}
+	if uintptr(unsafe.Pointer(t))&0b11 != 0 {
+		return akPointer
+	}
+	return aKind(t.meta & _kindMask)
+}
+
+func (t *_rawType) isNamed() bool {
+	if uintptr(unsafe.Pointer(t))&0b11 != 0 {
+		return false
+	}
+	return t.meta&_flagNamed != 0
+}
+
+func (t *_rawType) underlying() *_rawType {
+	if t.isNamed() {
+		return (*_elemType)(unsafe.Pointer(t)).elem
+	}
+	return t
+}
+
+func (t *_rawType) size() uintptr {
+	switch t.kind() {
+	case akBool, akInt8, akUint8:
+		return 1
+	case akInt16, akUint16:
+		return 2
+	case akInt32, akUint32, akFloat32:
+		return 4
+	case akInt64, akUint64, akFloat64:
+		return 8
+	case akInt, akUint:
+		return unsafe.Sizeof(int(0))
+	case akUintptr:
+		return unsafe.Sizeof(uintptr(0))
+	case akBytes:
+		return unsafe.Sizeof("")
+	case akUnsafePointer, akChan, akMap, akPointer:
+		return unsafe.Sizeof(uintptr(0))
+	case akSlice:
+		return unsafe.Sizeof([]int{})
+	case akInterface:
+		return unsafe.Sizeof(interface{}(nil))
+	case akStruct:
+		return uintptr((*_structType)(unsafe.Pointer(t.underlying())).size)
+	default:
+		return 0
+	}
+}
+
+func (t *_rawType) elem() *_rawType {
+	if tag := uintptr(unsafe.Pointer(t)) & 0b11; tag != 0 {
+		// Tagged pointer: peel one pointer level.
+		return (*_rawType)(unsafe.Pointer(uintptr(unsafe.Pointer(t)) - 1))
+	}
+	u := t.underlying()
+	if u.kind() == akPointer {
+		return (*_ptrType)(unsafe.Pointer(u)).elem
+	}
+	return (*_elemType)(unsafe.Pointer(u)).elem
+}
+
+func (t *_rawType) numField() int {
+	return int((*_structType)(unsafe.Pointer(t.underlying())).numField)
+}
+
+func (t *_rawType) fieldDesc(i int) *_structFieldDesc {
+	st := (*_structType)(unsafe.Pointer(t.underlying()))
+	return (*_structFieldDesc)(unsafe.Add(
+		unsafe.Pointer(&st.fields[0]),
+		uintptr(i)*unsafe.Sizeof(_structFieldDesc{}),
+	))
+}
+
+func (t *_rawType) fieldType(i int) *_rawType {
+	return t.fieldDesc(i).fieldType
+}
+
+// fieldData reads the field descriptor data blob for the i-th field.
+// Returns: flags, field offset, name, and tag.
+func (t *_rawType) fieldData(i int) (flags uint8, offset uintptr, name []byte, tag []byte) {
+	fd := t.fieldDesc(i)
+	p := (*byte)(fd.data)
+
+	// flags byte
+	flags = *p
+	p = (*byte)(unsafe.Add(unsafe.Pointer(p), 1))
+
+	// varint-encoded offset
+	var shift uint
+	for {
+		b := *p
+		offset |= uintptr(b&0x7f) << shift
+		if b&0x80 == 0 {
+			p = (*byte)(unsafe.Add(unsafe.Pointer(p), 1))
+			break
+		}
+		shift += 7
+		p = (*byte)(unsafe.Add(unsafe.Pointer(p), 1))
+	}
+
+	// null-terminated name
+	nameStart := unsafe.Pointer(p)
+	nameLen := 0
+	for *p != 0 {
+		nameLen++
+		p = (*byte)(unsafe.Add(unsafe.Pointer(p), 1))
+	}
+	name = unsafe.Slice((*byte)(nameStart), nameLen)
+	p = (*byte)(unsafe.Add(unsafe.Pointer(p), 1)) // skip null
+
+	// tag (if present)
+	if flags&_sfHasTag != 0 {
+		tagLen := int(*p)
+		p = (*byte)(unsafe.Add(unsafe.Pointer(p), 1))
+		tag = unsafe.Slice((*byte)(unsafe.Pointer(p)), tagLen)
+	}
+	return
+}
+
+func (t *_rawType) fieldOffset(i int) uintptr {
+	_, off, _, _ := t.fieldData(i)
+	return off
+}
+
+func (t *_rawType) fieldTag(i int) []byte {
+	_, _, _, tag := t.fieldData(i)
+	return tag
+}
+
+func (t *_rawType) fieldExported(i int) bool {
+	flags, _, _, _ := t.fieldData(i)
+	return flags&_sfExported != 0
+}
+
+func (t *_rawType) fieldName(i int) []byte {
+	_, _, name, _ := t.fieldData(i)
+	return name
+}
+
+// typeName returns the type's name (empty for unnamed types).
+func (t *_rawType) typeName() []byte {
+	if !t.isNamed() {
+		return nil
+	}
+	// namedType has: rawType, numMethod, ptrTo, elem, pkg, name[1]
+	// name starts after pkg (*byte) field.
+	type _namedType struct {
+		_rawType
+		numMethod uint16
+		ptrTo     *_rawType
+		elem      *_rawType
+		pkg       *byte
+		name      [1]byte
+	}
+	nt := (*_namedType)(unsafe.Pointer(t))
+	p := &nt.name[0]
+	n := 0
+	for *(*byte)(unsafe.Add(unsafe.Pointer(p), uintptr(n))) != 0 {
+		n++
+	}
+	return unsafe.Slice(p, n)
+}
+
+// typeCodeOf extracts the raw type code pointer from an interface value.
+func typeCodeOf(val any) *_rawType {
+	return (*_rawType)((*_ifacePair)(unsafe.Pointer(&val)).typecode)
+}
+
+// dataOf extracts the data pointer from an interface value, dereferencing
+// the interface packing (small values are stored directly in the pointer slot).
+func dataOf(val any) unsafe.Pointer {
+	iface := (*_ifacePair)(unsafe.Pointer(&val))
+	t := (*_rawType)(iface.typecode)
+	if t.size() <= unsafe.Sizeof(uintptr(0)) {
+		return unsafe.Pointer(&iface.value)
+	}
+	return iface.value
+}
+
+// derefPtr extracts the element type and data pointer from an interface
+// holding a pointer type. Returns the pointed-to type and data pointer.
+func derefPtr(val any) (*_rawType, unsafe.Pointer) {
+	iface := (*_ifacePair)(unsafe.Pointer(&val))
+	t := (*_rawType)(iface.typecode)
+	if t.kind() != akPointer {
+		return nil, nil
+	}
+	elemType := t.elem()
+	// Pointer is a small type (size == pointer size), so iface.value IS the pointer.
+	dataPtr := iface.value
+	return elemType, dataPtr
+}
+
+// ptrToIface constructs an interface{} from a pointer to data.
+// The resulting interface holds a *T where T has type code t.
+func ptrToIface(t *_rawType, ptr unsafe.Pointer) any {
+	// Need the *T type code. For named types, ptrTo is in the elemType layout.
+	var ptrType *_rawType
+	if t.isNamed() {
+		ptrType = (*_elemType)(unsafe.Pointer(t)).ptrTo
+	} else {
+		switch t.kind() {
+		case akStruct:
+			ptrType = (*_structType)(unsafe.Pointer(t)).ptrTo
+		default:
+			// For other types, the ptrTo field is at the same offset as elemType.ptrTo
+			ptrType = (*_elemType)(unsafe.Pointer(t)).ptrTo
+		}
+	}
+	if ptrType == nil {
+		// Fallback: can't construct typed pointer interface.
+		return nil
+	}
+	// Construct _ifacePair with pointer type code and the pointer as value.
+	// Pointer is small (fits in pointer slot), so value IS the pointer.
+	iface := _ifacePair{typecode: unsafe.Pointer(ptrType), value: ptr}
+	return *(*any)(unsafe.Pointer(&iface))
+}
+
+// valToIface constructs an interface{} from a type and data pointer.
+func valToIface(t *_rawType, ptr unsafe.Pointer) any {
+	iface := _ifacePair{typecode: unsafe.Pointer(t), value: ptr}
+	if t.size() <= unsafe.Sizeof(uintptr(0)) {
+		// Small value: copy the value into the pointer slot.
+		iface.value = *(*unsafe.Pointer)(ptr)
+	}
+	return *(*any)(unsafe.Pointer(&iface))
+}
+
+// makeZero allocates a zeroed value of the given type and returns a pointer to it.
+func makeZero(t *_rawType) unsafe.Pointer {
+	sz := t.size()
+	buf := make([]byte, sz)
+	return unsafe.Pointer(&buf[0])
+}
+
+// makeSliceOf creates a new slice with the given element type, length, and capacity.
+// Returns a pointer to the slice header.
+func makeSliceOf(elemType *_rawType, length, capacity int) unsafe.Pointer {
+	elemSize := elemType.size()
+	buf := make([]byte, elemSize*uintptr(capacity))
+	var dataPtr unsafe.Pointer
+	if len(buf) > 0 {
+		dataPtr = unsafe.Pointer(&buf[0])
+	}
+	p := &_sliceHeader{data: dataPtr, len: length, cap: capacity}
+	return unsafe.Pointer(p)
+}
+
+// sliceAppend grows a slice by one element (zeroed) and returns the
+// updated slice header pointer. elemType is the element type.
+func sliceAppend(slicePtr unsafe.Pointer, elemType *_rawType) unsafe.Pointer {
+	hdr := (*_sliceHeader)(slicePtr)
+	elemSize := elemType.size()
+	if hdr.len >= hdr.cap {
+		// Grow: double capacity or set to 4 minimum.
+		newCap := hdr.cap * 2
+		if newCap < 4 {
+			newCap = 4
+		}
+		newBuf := make([]byte, elemSize*uintptr(newCap))
+		var newData unsafe.Pointer
+		if len(newBuf) > 0 {
+			newData = unsafe.Pointer(&newBuf[0])
+		}
+		// Copy old data.
+		if hdr.data != nil && hdr.len > 0 {
+			memcpy(newData, hdr.data, elemSize*uintptr(hdr.len))
+		}
+		hdr.data = newData
+		hdr.cap = newCap
+	}
+	hdr.len++
+	return slicePtr
+}
+
+// sliceIndex returns a pointer to the i-th element of a slice.
+func sliceIndex(slicePtr unsafe.Pointer, elemType *_rawType, i int) unsafe.Pointer {
+	hdr := (*_sliceHeader)(slicePtr)
+	return unsafe.Add(hdr.data, elemType.size()*uintptr(i))
+}
+
+//go:linkname memcpy runtime.memcpy
+func memcpy(dst, src unsafe.Pointer, n uintptr)

@@ -12,6 +12,6 @@ type HashmapAlgorithm uint8
 // Constants for hashmap algorithms.
 const (
 	HashmapAlgorithmBinary HashmapAlgorithm = iota
-	HashmapAlgorithmString
+	HashmapAlgorithmContent
 	HashmapAlgorithmInterface
 )

@@ -21,7 +21,6 @@ import (
 	"internal/byteorder"
 	"io"
 	"slices"
-	"sort"
 	"time"
 )
 
@@ -146,7 +145,7 @@ func (hs *serverHandshakeStateTLS13) processClientHello() error {
 		return errors.New("tls: TLS 1.3 client supports illegal compression methods")
 	}
 
-	hs.hello.random = make([]byte, 32)
+	hs.hello.random = []byte{:32}
 	if _, err := io.ReadFull(c.config.rand(), hs.hello.random); err != nil {
 		c.sendAlert(alertInternalError)
 		return err
@@ -222,12 +221,18 @@ func (hs *serverHandshakeStateTLS13) processClientHello() error {
 		}
 		return false
 	}
-	sort.SliceStable(preferredGroups, func(i, j int) bool {
-		return hasKeyShare(preferredGroups[i]) && !hasKeyShare(preferredGroups[j])
-	})
-	sort.SliceStable(preferredGroups, func(i, j int) bool {
-		return isPQKeyExchange(preferredGroups[i]) && !isPQKeyExchange(preferredGroups[j])
-	})
+	// Stable sort: prefer groups with key shares
+	for i := 1; i < len(preferredGroups); i++ {
+		for j := i; j > 0 && hasKeyShare(preferredGroups[j]) && !hasKeyShare(preferredGroups[j-1]); j-- {
+			preferredGroups[j], preferredGroups[j-1] = preferredGroups[j-1], preferredGroups[j]
+		}
+	}
+	// Stable sort: prefer PQ key exchanges
+	for i := 1; i < len(preferredGroups); i++ {
+		for j := i; j > 0 && isPQKeyExchange(preferredGroups[j]) && !isPQKeyExchange(preferredGroups[j-1]); j-- {
+			preferredGroups[j], preferredGroups[j-1] = preferredGroups[j-1], preferredGroups[j]
+		}
+	}
 	selectedGroup := preferredGroups[0]
 
 	var clientKeyShare *keyShare
@@ -552,7 +557,7 @@ func (hs *serverHandshakeStateTLS13) doHelloRetryRequest(selectedGroup CurveID) 
 
 	if hs.echContext != nil {
 		// Compute the acceptance message.
-		helloRetryRequest.encryptedClientHello = make([]byte, 8)
+		helloRetryRequest.encryptedClientHello = []byte{:8}
 		confTranscript := cloneHash(hs.transcript, hs.suite.hash)
 		if err := transcriptMsg(helloRetryRequest, confTranscript); err != nil {
 			return nil, err
@@ -714,7 +719,7 @@ func (hs *serverHandshakeStateTLS13) sendServerParameters() error {
 	c := hs.c
 
 	if hs.echContext != nil {
-		copy(hs.hello.random[32-8:], make([]byte, 8))
+		copy(hs.hello.random[32-8:], []byte{:8})
 		echTranscript := cloneHash(hs.transcript, hs.suite.hash)
 		echTranscript.Write(hs.clientHello.original)
 		if err := transcriptMsg(hs.hello, echTranscript); err != nil {
@@ -1006,7 +1011,7 @@ func (c *Conn) sendSessionTicket(earlyData bool, extra [][]byte) error {
 	// ticket_age_add is a random 32-bit value. See RFC 8446, section 4.6.1
 	// The value is not stored anywhere; we never need to check the ticket age
 	// because 0-RTT is not supported.
-	ageAdd := make([]byte, 4)
+	ageAdd := []byte{:4}
 	if _, err := c.config.rand().Read(ageAdd); err != nil {
 		return err
 	}

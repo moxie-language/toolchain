@@ -6,7 +6,6 @@ package runtime
 //     https://golang.org/src/runtime/map.go
 
 import (
-	"internal/reflectlite"
 	"moxie"
 	"unsafe"
 )
@@ -116,8 +115,8 @@ func hashmapKeyEqualAlg(alg moxie.HashmapAlgorithm) func(x, y unsafe.Pointer, n 
 	switch alg {
 	case moxie.HashmapAlgorithmBinary:
 		return memequal
-	case moxie.HashmapAlgorithmString:
-		return hashmapStringEqual
+	case moxie.HashmapAlgorithmContent:
+		return hashmapContentEqual
 	case moxie.HashmapAlgorithmInterface:
 		return hashmapInterfaceEqual
 	default:
@@ -130,8 +129,8 @@ func hashmapKeyHashAlg(alg moxie.HashmapAlgorithm) func(key unsafe.Pointer, n, s
 	switch alg {
 	case moxie.HashmapAlgorithmBinary:
 		return hash32
-	case moxie.HashmapAlgorithmString:
-		return hashmapStringPtrHash
+	case moxie.HashmapAlgorithmContent:
+		return hashmapContentPtrHash
 	case moxie.HashmapAlgorithmInterface:
 		return hashmapInterfacePtrHash
 	default:
@@ -493,42 +492,42 @@ func hashmapBinaryDelete(m *hashmap, key unsafe.Pointer) {
 
 // Hashmap with string keys (a common case).
 
-func hashmapStringEqual(x, y unsafe.Pointer, n uintptr) bool {
+func hashmapContentEqual(x, y unsafe.Pointer, n uintptr) bool {
 	return *(*string)(x) == *(*string)(y)
 }
 
-func hashmapStringHash(s string, seed uintptr) uint32 {
+func hashmapContentHash(s string, seed uintptr) uint32 {
 	_s := (*_string)(unsafe.Pointer(&s))
 	return hash32(unsafe.Pointer(_s.ptr), uintptr(_s.length), seed)
 }
 
-func hashmapStringPtrHash(sptr unsafe.Pointer, size uintptr, seed uintptr) uint32 {
+func hashmapContentPtrHash(sptr unsafe.Pointer, size uintptr, seed uintptr) uint32 {
 	_s := *(*_string)(sptr)
 	return hash32(unsafe.Pointer(_s.ptr), uintptr(_s.length), seed)
 }
 
-func hashmapStringSet(m *hashmap, key string, value unsafe.Pointer) {
+func hashmapContentSet(m *hashmap, key string, value unsafe.Pointer) {
 	if m == nil {
 		nilMapPanic()
 	}
-	hash := hashmapStringHash(key, m.seed)
+	hash := hashmapContentHash(key, m.seed)
 	hashmapSet(m, unsafe.Pointer(&key), value, hash)
 }
 
-func hashmapStringGet(m *hashmap, key string, value unsafe.Pointer, valueSize uintptr) bool {
+func hashmapContentGet(m *hashmap, key string, value unsafe.Pointer, valueSize uintptr) bool {
 	if m == nil {
 		memzero(value, uintptr(valueSize))
 		return false
 	}
-	hash := hashmapStringHash(key, m.seed)
+	hash := hashmapContentHash(key, m.seed)
 	return hashmapGet(m, unsafe.Pointer(&key), value, valueSize, hash)
 }
 
-func hashmapStringDelete(m *hashmap, key string) {
+func hashmapContentDelete(m *hashmap, key string) {
 	if m == nil {
 		return
 	}
-	hash := hashmapStringHash(key, m.seed)
+	hash := hashmapContentHash(key, m.seed)
 	hashmapDelete(m, unsafe.Pointer(&key), hash)
 }
 
@@ -539,9 +538,6 @@ func hashmapStringDelete(m *hashmap, key string) {
 // a field is exported and thus allows circumventing the type system.
 // The hash function needs it as it also needs to hash unexported struct fields.
 //
-//go:linkname valueInterfaceUnsafe internal/reflectlite.valueInterfaceUnsafe
-func valueInterfaceUnsafe(v reflectlite.Value) interface{}
-
 func hashmapFloat32Hash(ptr unsafe.Pointer, seed uintptr) uint32 {
 	f := *(*uint32)(ptr)
 	if f == 0x80000000 {
@@ -561,60 +557,73 @@ func hashmapFloat64Hash(ptr unsafe.Pointer, seed uintptr) uint32 {
 }
 
 func hashmapInterfaceHash(itf interface{}, seed uintptr) uint32 {
-	x := reflectlite.ValueOf(itf)
-	if x.RawType() == nil {
+	iface := (*_interface)(unsafe.Pointer(&itf))
+	if iface.typecode == nil {
 		return 0 // nil interface
 	}
 
-	value := (*_interface)(unsafe.Pointer(&itf)).value
+	t := (*rawType)(iface.typecode)
+	value := iface.value
+
+	// Convert interface value to direct data pointer.
 	ptr := value
-	if x.RawType().Size() <= unsafe.Sizeof(uintptr(0)) {
-		// Value fits in pointer, so it's directly stored in the pointer.
+	if t.size() <= unsafe.Sizeof(uintptr(0)) {
 		ptr = unsafe.Pointer(&value)
 	}
 
-	switch x.RawType().Kind() {
-	case reflectlite.Int, reflectlite.Int8, reflectlite.Int16, reflectlite.Int32, reflectlite.Int64:
-		return hash32(ptr, x.RawType().Size(), seed)
-	case reflectlite.Bool, reflectlite.Uint, reflectlite.Uint8, reflectlite.Uint16, reflectlite.Uint32, reflectlite.Uint64, reflectlite.Uintptr:
-		return hash32(ptr, x.RawType().Size(), seed)
-	case reflectlite.Float32:
-		// It should be possible to just has the contents. However, NaN != NaN
-		// so if you're using lots of NaNs as map keys (you shouldn't) then hash
-		// time may become exponential. To fix that, it would be better to
-		// return a random number instead:
-		// https://research.swtch.com/randhash
+	return hashmapPtrHash(t, ptr, seed)
+}
+
+// hashmapPtrHash hashes the value at ptr. ptr always points directly to the
+// value data — no interface packing. Used for recursive struct/array hashing.
+func hashmapPtrHash(t *rawType, ptr unsafe.Pointer, seed uintptr) uint32 {
+	k := t.kind()
+
+	switch k {
+	case Int, Int8, Int16, Int32, Int64:
+		return hash32(ptr, t.size(), seed)
+	case Bool, Uint, Uint8, Uint16, Uint32, Uint64, Uintptr:
+		return hash32(ptr, t.size(), seed)
+	case Float32:
 		return hashmapFloat32Hash(ptr, seed)
-	case reflectlite.Float64:
+	case Float64:
 		return hashmapFloat64Hash(ptr, seed)
-	case reflectlite.Complex64:
+	case Complex64:
 		rptr, iptr := ptr, unsafe.Add(ptr, 4)
 		return hashmapFloat32Hash(rptr, seed) ^ hashmapFloat32Hash(iptr, seed)
-	case reflectlite.Complex128:
+	case Complex128:
 		rptr, iptr := ptr, unsafe.Add(ptr, 8)
 		return hashmapFloat64Hash(rptr, seed) ^ hashmapFloat64Hash(iptr, seed)
-	case reflectlite.String:
-		return hashmapStringHash(x.String(), seed)
-	case reflectlite.Chan, reflectlite.Ptr, reflectlite.UnsafePointer:
-		// It might seem better to just return the pointer, but that won't
-		// result in an evenly distributed hashmap. Instead, hash the pointer
-		// like most other types.
-		return hash32(ptr, x.RawType().Size(), seed)
-	case reflectlite.Array:
+	case kindBytes:
+		s := *(*_string)(ptr)
+		return hashmapContentHash(*(*string)(unsafe.Pointer(&s)), seed)
+	case kindChan, kindPointer, kindUnsafePointer:
+		return hash32(ptr, t.size(), seed)
+	case kindArray:
+		elemType := t.elem()
+		elemSize := elemType.size()
+		length := t.arrayLen()
 		var hash uint32
-		for i := 0; i < x.Len(); i++ {
-			hash ^= hashmapInterfaceHash(valueInterfaceUnsafe(x.Index(i)), seed)
+		for i := 0; i < length; i++ {
+			ep := unsafe.Add(ptr, uintptr(i)*elemSize)
+			hash ^= hashmapPtrHash(elemType, ep, seed)
 		}
 		return hash
-	case reflectlite.Struct:
+	case kindStruct:
+		nf := t.numField()
 		var hash uint32
-		for i := 0; i < x.NumField(); i++ {
-			hash ^= hashmapInterfaceHash(valueInterfaceUnsafe(x.Field(i)), seed)
+		for i := 0; i < nf; i++ {
+			ft := t.structFieldType(i)
+			off := t.structFieldOffset(i)
+			fp := unsafe.Add(ptr, off)
+			hash ^= hashmapPtrHash(ft, fp, seed)
 		}
 		return hash
+	case kindInterface:
+		return hashmapInterfaceHash(*(*interface{})(ptr), seed)
 	default:
 		runtimePanic("comparing un-comparable type")
-		return 0 // unreachable
+		return 0
 	}
 }
 

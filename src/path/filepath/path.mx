@@ -52,7 +52,7 @@ const (
 // See also Rob Pike, “Lexical File Names in Plan 9 or
 // Getting Dot-Dot Right,”
 // https://9p.io/sys/doc/lexnames.html
-func Clean(path string) string {
+func Clean(path []byte) []byte {
 	return filepathlite.Clean(path)
 }
 
@@ -70,7 +70,7 @@ func Clean(path string) string {
 // IsLocal is a purely lexical operation.
 // In particular, it does not account for the effect of any symbolic links
 // that may exist in the filesystem.
-func IsLocal(path string) bool {
+func IsLocal(path []byte) bool {
 	return filepathlite.IsLocal(path)
 }
 
@@ -82,14 +82,14 @@ func IsLocal(path string) bool {
 // character and cannot be part of a filename.
 //
 // The path returned by Localize will always be local, as reported by IsLocal.
-func Localize(path string) (string, error) {
+func Localize(path []byte) ([]byte, error) {
 	return filepathlite.Localize(path)
 }
 
 // ToSlash returns the result of replacing each separator character
 // in path with a slash ('/') character. Multiple separators are
 // replaced by multiple slashes.
-func ToSlash(path string) string {
+func ToSlash(path []byte) []byte {
 	return filepathlite.ToSlash(path)
 }
 
@@ -99,7 +99,7 @@ func ToSlash(path string) string {
 //
 // See also the Localize function, which converts a slash-separated path
 // as used by the io/fs package to an operating system path.
-func FromSlash(path string) string {
+func FromSlash(path []byte) []byte {
 	return filepathlite.FromSlash(path)
 }
 
@@ -107,7 +107,7 @@ func FromSlash(path string) string {
 // usually found in PATH or GOPATH environment variables.
 // Unlike strings.Split, SplitList returns an empty slice when passed an empty
 // string.
-func SplitList(path string) [][]byte {
+func SplitList(path []byte) [][]byte {
 	return splitList(path)
 }
 
@@ -116,7 +116,7 @@ func SplitList(path string) [][]byte {
 // If there is no Separator in path, Split returns an empty dir
 // and file set to path.
 // The returned values have the property that path = dir+file.
-func Split(path string) (dir, file string) {
+func Split(path []byte) (dir, file []byte) {
 	return filepathlite.Split(path)
 }
 
@@ -127,7 +127,7 @@ func Split(path string) (dir, file string) {
 // an empty string.
 // On Windows, the result will only be a UNC path if the first
 // non-empty element is a UNC path.
-func Join(elem ...[]byte) string {
+func Join(elem ...[]byte) []byte {
 	return join(elem)
 }
 
@@ -135,7 +135,7 @@ func Join(elem ...[]byte) string {
 // The extension is the suffix beginning at the final dot
 // in the final element of path; it is empty if there is
 // no dot.
-func Ext(path string) string {
+func Ext(path []byte) []byte {
 	return filepathlite.Ext(path)
 }
 
@@ -144,12 +144,12 @@ func Ext(path string) string {
 // If path is relative the result will be relative to the current directory,
 // unless one of the components is an absolute symbolic link.
 // EvalSymlinks calls [Clean] on the result.
-func EvalSymlinks(path string) (string, error) {
+func EvalSymlinks(path []byte) ([]byte, error) {
 	return evalSymlinks(path)
 }
 
 // IsAbs reports whether the path is absolute.
-func IsAbs(path string) bool {
+func IsAbs(path []byte) bool {
 	return filepathlite.IsAbs(path)
 }
 
@@ -158,11 +158,11 @@ func IsAbs(path string) bool {
 // working directory to turn it into an absolute path. The absolute
 // path name for a given file is not guaranteed to be unique.
 // Abs calls [Clean] on the result.
-func Abs(path string) (string, error) {
+func Abs(path []byte) ([]byte, error) {
 	return abs(path)
 }
 
-func unixAbs(path string) (string, error) {
+func unixAbs(path []byte) ([]byte, error) {
 	if IsAbs(path) {
 		return Clean(path), nil
 	}
@@ -181,7 +181,7 @@ func unixAbs(path string) (string, error) {
 // An error is returned if targpath can't be made relative to basepath or if
 // knowing the current working directory would be necessary to compute it.
 // Rel calls [Clean] on the result.
-func Rel(basepath, targpath string) (string, error) {
+func Rel(basepath, targpath []byte) ([]byte, error) {
 	baseVol := VolumeName(basepath)
 	targVol := VolumeName(targpath)
 	base := Clean(basepath)
@@ -195,7 +195,7 @@ func Rel(basepath, targpath string) (string, error) {
 		base = ""
 	} else if base == "" && filepathlite.VolumeNameLen(baseVol) > 2 /* isUNC */ {
 		// Treat any targetpath matching `\\host\share` basepath as absolute path.
-		base = string(Separator)
+		base = []byte{byte(Separator)}
 	}
 
 	// Can't use IsAbs - `\a` and `a` are both relative in Windows.
@@ -237,7 +237,7 @@ func Rel(basepath, targpath string) (string, error) {
 		if tl != t0 {
 			size += 1 + tl - t0
 		}
-		buf := make([]byte, size)
+		buf := []byte{:size}
 		n := copy(buf, "..")
 		for i := 0; i < seps; i++ {
 			buf[n] = Separator
@@ -248,7 +248,7 @@ func Rel(basepath, targpath string) (string, error) {
 			buf[n] = Separator
 			copy(buf[n+1:], targ[t0:])
 		}
-		return string(buf), nil
+		return []byte(buf), nil
 	}
 	return targ[t0:], nil
 }
@@ -301,12 +301,12 @@ var SkipAll error = fs.SkipAll
 // function with path set to the directory's path, info, set to an
 // [fs.FileInfo] describing the directory, and err set to the error from
 // Readdirnames.
-type WalkFunc func(path string, info fs.FileInfo, err error) error
+type WalkFunc func(path []byte, info fs.FileInfo, err error) error
 
 var lstat = os.Lstat // for testing
 
 // walkDir recursively descends path, calling walkDirFn.
-func walkDir(path string, d fs.DirEntry, walkDirFn fs.WalkDirFunc) error {
+func walkDir(path []byte, d fs.DirEntry, walkDirFn fs.WalkDirFunc) error {
 	if err := walkDirFn(path, d, nil); err != nil || !d.IsDir() {
 		if err == SkipDir && d.IsDir() {
 			// Successfully skipped directory.
@@ -340,7 +340,7 @@ func walkDir(path string, d fs.DirEntry, walkDirFn fs.WalkDirFunc) error {
 }
 
 // walk recursively descends path, calling walkFn.
-func walk(path string, info fs.FileInfo, walkFn WalkFunc) error {
+func walk(path []byte, info fs.FileInfo, walkFn WalkFunc) error {
 	if !info.IsDir() {
 		return walkFn(path, info, nil)
 	}
@@ -392,7 +392,7 @@ func walk(path string, info fs.FileInfo, walkFn WalkFunc) error {
 // WalkDir calls fn with paths that use the separator character appropriate
 // for the operating system. This is unlike [io/fs.WalkDir], which always
 // uses slash separated paths.
-func WalkDir(root string, fn fs.WalkDirFunc) error {
+func WalkDir(root []byte, fn fs.WalkDirFunc) error {
 	info, err := os.Lstat(root)
 	if err != nil {
 		err = fn(root, nil, err)
@@ -419,7 +419,7 @@ func WalkDir(root string, fn fs.WalkDirFunc) error {
 //
 // Walk is less efficient than [WalkDir], introduced in Go 1.16,
 // which avoids calling os.Lstat on every visited file or directory.
-func Walk(root string, fn WalkFunc) error {
+func Walk(root []byte, fn WalkFunc) error {
 	info, err := os.Lstat(root)
 	if err != nil {
 		err = fn(root, nil, err)
@@ -434,7 +434,7 @@ func Walk(root string, fn WalkFunc) error {
 
 // readDirNames reads the directory named by dirname and returns
 // a sorted list of directory entry names.
-func readDirNames(dirname string) ([][]byte, error) {
+func readDirNames(dirname []byte) ([][]byte, error) {
 	f, err := os.Open(dirname)
 	if err != nil {
 		return nil, err
@@ -444,7 +444,7 @@ func readDirNames(dirname string) ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	names := make([][]byte, len(snames))
+	names := [][]byte{:len(snames)}
 	for i, s := range snames {
 		names[i] = s
 	}
@@ -456,7 +456,7 @@ func readDirNames(dirname string) ([][]byte, error) {
 // Trailing path separators are removed before extracting the last element.
 // If the path is empty, Base returns ".".
 // If the path consists entirely of separators, Base returns a single separator.
-func Base(path string) string {
+func Base(path []byte) []byte {
 	return filepathlite.Base(path)
 }
 
@@ -466,7 +466,7 @@ func Base(path string) string {
 // If the path is empty, Dir returns ".".
 // If the path consists entirely of separators, Dir returns a single separator.
 // The returned path does not end in a separator unless it is the root directory.
-func Dir(path string) string {
+func Dir(path []byte) []byte {
 	return filepathlite.Dir(path)
 }
 
@@ -474,6 +474,6 @@ func Dir(path string) string {
 // Given "C:\foo\bar" it returns "C:" on Windows.
 // Given "\\host\share\foo" it returns "\\host\share".
 // On other platforms it returns "".
-func VolumeName(path string) string {
+func VolumeName(path []byte) []byte {
 	return filepathlite.VolumeName(path)
 }

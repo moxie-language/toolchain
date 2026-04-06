@@ -1,0 +1,233 @@
+package runtime
+
+// Minimal type introspection for interface equality and hashmap hashing.
+// Replaces the reflectlite dependency in runtime.
+// These constants and types mirror internal/reflectlite but are defined
+// locally to break the runtime→reflectlite→runtime cycle.
+//
+// CRITICAL: struct layouts must exactly match those in
+// internal/reflectlite/type.mx — the compiler generates type descriptors
+// in that format.
+
+import "unsafe"
+
+type Kind uint8
+
+const (
+	Invalid Kind = iota
+	Bool
+	Int
+	Int8
+	Int16
+	Int32
+	Int64
+	Uint
+	Uint8
+	Uint16
+	Uint32
+	Uint64
+	Uintptr
+	Float32
+	Float64
+	Complex64
+	Complex128
+	kindBytes // kind 17: unified string=[]byte
+	kindUnsafePointer
+	kindChan
+	kindInterface
+	kindPointer
+	kindSlice
+	kindArray
+	kindFunc
+	kindMap
+	kindStruct
+)
+
+const (
+	kindMask       = 31
+	flagNamed      = 32
+	flagComparable = 64
+	flagIsBinary   = 128
+)
+
+// rawType is the base type descriptor. All type descriptors start with this.
+type rawType struct {
+	meta uint8
+}
+
+// rtElemType: named, chan, slice, array, map — types with elem pointer.
+// Layout: meta(1) pad(1) numMethod(2) pad(4) ptrTo(8) elem(8) = 24 bytes
+type rtElemType struct {
+	rawType
+	numMethod uint16
+	ptrTo     *rawType
+	elem      *rawType
+}
+
+// rtPtrType: pointer types — no ptrTo field.
+// Layout: meta(1) pad(1) numMethod(2) pad(4) elem(8) = 16 bytes
+type rtPtrType struct {
+	rawType
+	numMethod uint16
+	elem      *rawType
+}
+
+// rtArrayType: array types.
+// Layout: meta(1) pad(1) numMethod(2) pad(4) ptrTo(8) elem(8) arrayLen(8) slicePtr(8) = 40 bytes
+type rtArrayType struct {
+	rtElemType
+	arrayLen uintptr
+	slicePtr *rawType
+}
+
+// rtStructType: struct types. Does NOT have elem field — has pkgpath instead.
+// Layout: meta(1) pad(1) numMethod(2) pad(4) ptrTo(8) pkgpath(8) size(4) numField(2) pad(2) fields(...)
+type rtStructType struct {
+	rawType
+	numMethod uint16
+	ptrTo     *rawType
+	pkgpath   *byte
+	size      uint32
+	numField  uint16
+	fields    [1]rtStructFieldDesc // flexible array member
+}
+
+// rtStructFieldDesc is a struct field descriptor.
+type rtStructFieldDesc struct {
+	fieldType *rawType
+	data      unsafe.Pointer
+}
+
+func (t *rawType) isNamed() bool {
+	if uintptr(unsafe.Pointer(t))&0b11 != 0 {
+		return false
+	}
+	return t.meta&flagNamed != 0
+}
+
+func (t *rawType) kind() Kind {
+	if t == nil {
+		return Invalid
+	}
+	if tag := uintptr(unsafe.Pointer(t)) & 0b11; tag != 0 {
+		return kindPointer
+	}
+	return Kind(t.meta & kindMask)
+}
+
+func (t *rawType) size() uintptr {
+	switch t.kind() {
+	case Bool, Int8, Uint8:
+		return 1
+	case Int16, Uint16:
+		return 2
+	case Int32, Uint32, Float32:
+		return 4
+	case Int64, Uint64, Float64:
+		return 8
+	case Int, Uint:
+		return unsafe.Sizeof(int(0))
+	case Uintptr:
+		return unsafe.Sizeof(uintptr(0))
+	case Complex64:
+		return 8
+	case Complex128:
+		return 16
+	case kindBytes:
+		return unsafe.Sizeof("")
+	case kindUnsafePointer, kindChan, kindMap, kindPointer:
+		return unsafe.Sizeof(uintptr(0))
+	case kindSlice:
+		return unsafe.Sizeof([]int{})
+	case kindInterface:
+		return unsafe.Sizeof(interface{}(nil))
+	case kindFunc:
+		var f func()
+		return unsafe.Sizeof(f)
+	case kindArray:
+		return t.elem().size() * uintptr(t.arrayLen())
+	case kindStruct:
+		return uintptr(t.structSize())
+	default:
+		return 0
+	}
+}
+
+// underlying returns the underlying type. For named types, follows the
+// elem pointer in the namedType/elemType layout to the underlying type.
+func (t *rawType) underlying() *rawType {
+	if t.isNamed() {
+		// namedType has same layout as elemType: elem is at the same offset.
+		return (*rtElemType)(unsafe.Pointer(t)).elem
+	}
+	return t
+}
+
+// elem returns the element type for pointer, chan, slice, array, map types.
+func (t *rawType) elem() *rawType {
+	if tag := uintptr(unsafe.Pointer(t)) & 0b11; tag != 0 {
+		// Tagged pointer: peel one pointer level.
+		return (*rawType)(unsafe.Pointer(uintptr(unsafe.Pointer(t)) - 1))
+	}
+	u := t.underlying()
+	switch u.kind() {
+	case kindPointer:
+		return (*rtPtrType)(unsafe.Pointer(u)).elem
+	default:
+		return (*rtElemType)(unsafe.Pointer(u)).elem
+	}
+}
+
+func (t *rawType) arrayLen() int {
+	u := t.underlying()
+	return int((*rtArrayType)(unsafe.Pointer(u)).arrayLen)
+}
+
+func (t *rawType) structSize() uint32 {
+	u := t.underlying()
+	return (*rtStructType)(unsafe.Pointer(u)).size
+}
+
+func (t *rawType) numField() int {
+	u := t.underlying()
+	return int((*rtStructType)(unsafe.Pointer(u)).numField)
+}
+
+// structFieldType returns the type of the i-th field of a struct.
+func (t *rawType) structFieldType(i int) *rawType {
+	u := t.underlying()
+	st := (*rtStructType)(unsafe.Pointer(u))
+	fd := (*rtStructFieldDesc)(unsafe.Add(
+		unsafe.Pointer(&st.fields[0]),
+		uintptr(i)*unsafe.Sizeof(rtStructFieldDesc{}),
+	))
+	return fd.fieldType
+}
+
+// structFieldOffset returns the offset of the i-th field by reading the
+// varint-encoded offset from the field descriptor's data pointer.
+// Data format: flags(1 byte) + varint(offset) + name(null-term) + ...
+func (t *rawType) structFieldOffset(i int) uintptr {
+	u := t.underlying()
+	st := (*rtStructType)(unsafe.Pointer(u))
+	fd := (*rtStructFieldDesc)(unsafe.Add(
+		unsafe.Pointer(&st.fields[0]),
+		uintptr(i)*unsafe.Sizeof(rtStructFieldDesc{}),
+	))
+	p := (*uint8)(fd.data)
+	// skip flags byte
+	p = (*uint8)(unsafe.Add(unsafe.Pointer(p), 1))
+	// read varint-encoded offset
+	var offset uintptr
+	var shift uint
+	for {
+		b := *p
+		offset |= uintptr(b&0x7f) << shift
+		if b&0x80 == 0 {
+			break
+		}
+		shift += 7
+		p = (*uint8)(unsafe.Add(unsafe.Pointer(p), 1))
+	}
+	return offset
+}

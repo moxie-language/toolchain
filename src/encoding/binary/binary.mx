@@ -25,9 +25,7 @@ import (
 	"errors"
 	"io"
 	"math"
-	"reflect"
 	"slices"
-	"sync"
 )
 
 var errBufferTooSmall = errors.New("buffer too small")
@@ -147,7 +145,7 @@ func (littleEndian) AppendUint64(b []byte, v uint64) []byte {
 
 func (littleEndian) String() string { return "LittleEndian" }
 
-func (littleEndian) GoString() string { return "binary.LittleEndian" }
+func (littleEndian) GoString() []byte { return "binary.LittleEndian" }
 
 type bigEndian struct{}
 
@@ -233,11 +231,11 @@ func (bigEndian) AppendUint64(b []byte, v uint64) []byte {
 
 func (bigEndian) String() string { return "BigEndian" }
 
-func (bigEndian) GoString() string { return "binary.BigEndian" }
+func (bigEndian) GoString() []byte { return "binary.BigEndian" }
 
 func (nativeEndian) String() string { return "NativeEndian" }
 
-func (nativeEndian) GoString() string { return "binary.NativeEndian" }
+func (nativeEndian) GoString() []byte { return "binary.NativeEndian" }
 
 // Read reads structured binary data from r into data.
 // Data must be a pointer to a fixed-size value or a slice
@@ -256,37 +254,15 @@ func (nativeEndian) GoString() string { return "binary.NativeEndian" }
 // If an [io.EOF] happens after reading some but not all the bytes,
 // Read returns [io.ErrUnexpectedEOF].
 func Read(r io.Reader, order ByteOrder, data any) error {
-	// Fast path for basic types and slices.
-	if n, _ := intDataSize(data); n != 0 {
-		bs := make([]byte, n)
-		if _, err := io.ReadFull(r, bs); err != nil {
-			return err
-		}
-
-		if decodeFast(bs, order, data) {
-			return nil
-		}
+	n, _ := intDataSize(data)
+	if n == 0 {
+		return errors.New("binary.Read: unsupported type (struct/array encoding removed)")
 	}
-
-	// Fallback to reflect-based decoding.
-	v := reflect.ValueOf(data)
-	size := -1
-	switch v.Kind() {
-	case reflect.Pointer:
-		v = v.Elem()
-		size = dataSize(v)
-	case reflect.Slice:
-		size = dataSize(v)
-	}
-	if size < 0 {
-		return errors.New("binary.Read: invalid type " | reflect.TypeOf(data).String())
-	}
-
-	d := &decoder{order: order, buf: make([]byte, size)}
-	if _, err := io.ReadFull(r, d.buf); err != nil {
+	bs := []byte{:n}
+	if _, err := io.ReadFull(r, bs); err != nil {
 		return err
 	}
-	d.value(v)
+	decodeFast(bs, order, data)
 	return nil
 }
 
@@ -295,36 +271,15 @@ func Read(r io.Reader, order ByteOrder, data any) error {
 // It returns an error if buf is too small, otherwise the number of
 // bytes consumed from buf.
 func Decode(buf []byte, order ByteOrder, data any) (int, error) {
-	if n, _ := intDataSize(data); n != 0 {
-		if len(buf) < n {
-			return 0, errBufferTooSmall
-		}
-
-		if decodeFast(buf, order, data) {
-			return n, nil
-		}
+	n, _ := intDataSize(data)
+	if n == 0 {
+		return 0, errors.New("binary.Decode: unsupported type (struct/array encoding removed)")
 	}
-
-	// Fallback to reflect-based decoding.
-	v := reflect.ValueOf(data)
-	size := -1
-	switch v.Kind() {
-	case reflect.Pointer:
-		v = v.Elem()
-		size = dataSize(v)
-	case reflect.Slice:
-		size = dataSize(v)
-	}
-	if size < 0 {
-		return 0, errors.New("binary.Decode: invalid type " | reflect.TypeOf(data).String())
-	}
-
-	if len(buf) < size {
+	if len(buf) < n {
 		return 0, errBufferTooSmall
 	}
-	d := &decoder{order: order, buf: buf[:size]}
-	d.value(v)
-	return size, nil
+	decodeFast(buf, order, data)
+	return n, nil
 }
 
 func decodeFast(bs []byte, order ByteOrder, data any) bool {
@@ -408,28 +363,15 @@ func decodeFast(bs []byte, order ByteOrder, data any) bool {
 // When writing structs, zero values are written for fields
 // with blank (_) field names.
 func Write(w io.Writer, order ByteOrder, data any) error {
-	// Fast path for basic types and slices.
-	if n, bs := intDataSize(data); n != 0 {
-		if bs == nil {
-			bs = make([]byte, n)
-			encodeFast(bs, order, data)
-		}
-
-		_, err := w.Write(bs)
-		return err
+	n, bs := intDataSize(data)
+	if n == 0 {
+		return errors.New("binary.Write: unsupported type (struct/array encoding removed)")
 	}
-
-	// Fallback to reflect-based encoding.
-	v := reflect.Indirect(reflect.ValueOf(data))
-	size := dataSize(v)
-	if size < 0 {
-		return errors.New("binary.Write: some values are not fixed-sized in type " | reflect.TypeOf(data).String())
+	if bs == nil {
+		bs = []byte{:n}
+		encodeFast(bs, order, data)
 	}
-
-	buf := make([]byte, size)
-	e := &encoder{order: order, buf: buf}
-	e.value(v)
-	_, err := w.Write(buf)
+	_, err := w.Write(bs)
 	return err
 }
 
@@ -438,29 +380,15 @@ func Write(w io.Writer, order ByteOrder, data any) error {
 // It returns an error if buf is too small, otherwise the number of
 // bytes written into buf.
 func Encode(buf []byte, order ByteOrder, data any) (int, error) {
-	// Fast path for basic types and slices.
-	if n, _ := intDataSize(data); n != 0 {
-		if len(buf) < n {
-			return 0, errBufferTooSmall
-		}
-
-		encodeFast(buf, order, data)
-		return n, nil
+	n, _ := intDataSize(data)
+	if n == 0 {
+		return 0, errors.New("binary.Encode: unsupported type (struct/array encoding removed)")
 	}
-
-	// Fallback to reflect-based encoding.
-	v := reflect.Indirect(reflect.ValueOf(data))
-	size := dataSize(v)
-	if size < 0 {
-		return 0, errors.New("binary.Encode: some values are not fixed-sized in type " | reflect.TypeOf(data).String())
-	}
-
-	if len(buf) < size {
+	if len(buf) < n {
 		return 0, errBufferTooSmall
 	}
-	e := &encoder{order: order, buf: buf}
-	e.value(v)
-	return size, nil
+	encodeFast(buf, order, data)
+	return n, nil
 }
 
 // Append appends the binary representation of data to buf.
@@ -468,23 +396,12 @@ func Encode(buf []byte, order ByteOrder, data any) (int, error) {
 // See [Write] on which data are acceptable.
 // It returns the (possibly extended) buffer containing data or an error.
 func Append(buf []byte, order ByteOrder, data any) ([]byte, error) {
-	// Fast path for basic types and slices.
-	if n, _ := intDataSize(data); n != 0 {
-		buf, pos := ensure(buf, n)
-		encodeFast(pos, order, data)
-		return buf, nil
+	n, _ := intDataSize(data)
+	if n == 0 {
+		return nil, errors.New("binary.Append: unsupported type (struct/array encoding removed)")
 	}
-
-	// Fallback to reflect-based encoding.
-	v := reflect.Indirect(reflect.ValueOf(data))
-	size := dataSize(v)
-	if size < 0 {
-		return nil, errors.New("binary.Append: some values are not fixed-sized in type " | reflect.TypeOf(data).String())
-	}
-
-	buf, pos := ensure(buf, size)
-	e := &encoder{order: order, buf: pos}
-	e.value(v)
+	buf, pos := ensure(buf, n)
+	encodeFast(pos, order, data)
 	return buf, nil
 }
 
@@ -686,75 +603,6 @@ func Size(v any) int {
 	case []float64:
 		return 8 * len(data)
 	}
-	return dataSize(reflect.Indirect(reflect.ValueOf(v)))
-}
-
-var structSize sync.Map // map[reflect.Type]int
-
-// dataSize returns the number of bytes the actual data represented by v occupies in memory.
-// For compound structures, it sums the sizes of the elements. Thus, for instance, for a slice
-// it returns the length of the slice times the element size and does not count the memory
-// occupied by the header. If the type of v is not acceptable, dataSize returns -1.
-func dataSize(v reflect.Value) int {
-	switch v.Kind() {
-	case reflect.Slice, reflect.Array:
-		t := v.Type().Elem()
-		if size, ok := structSize.Load(t); ok {
-			return size.(int) * v.Len()
-		}
-
-		size := sizeof(t)
-		if size >= 0 {
-			if t.Kind() == reflect.Struct {
-				structSize.Store(t, size)
-			}
-			return size * v.Len()
-		}
-
-	case reflect.Struct:
-		t := v.Type()
-		if size, ok := structSize.Load(t); ok {
-			return size.(int)
-		}
-		size := sizeof(t)
-		structSize.Store(t, size)
-		return size
-
-	default:
-		if v.IsValid() {
-			return sizeof(v.Type())
-		}
-	}
-
-	return -1
-}
-
-// sizeof returns the size >= 0 of variables for the given type or -1 if the type is not acceptable.
-func sizeof(t reflect.Type) int {
-	switch t.Kind() {
-	case reflect.Array:
-		if s := sizeof(t.Elem()); s >= 0 {
-			return s * t.Len()
-		}
-
-	case reflect.Struct:
-		sum := 0
-		for i, n := 0, t.NumField(); i < n; i++ {
-			s := sizeof(t.Field(i).Type)
-			if s < 0 {
-				return -1
-			}
-			sum += s
-		}
-		return sum
-
-	case reflect.Bool,
-		reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-		reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128:
-		return int(t.Size())
-	}
-
 	return -1
 }
 
@@ -841,138 +689,6 @@ func (e *encoder) int32(x int32) { e.uint32(uint32(x)) }
 func (d *decoder) int64() int64 { return int64(d.uint64()) }
 
 func (e *encoder) int64(x int64) { e.uint64(uint64(x)) }
-
-func (d *decoder) value(v reflect.Value) {
-	switch v.Kind() {
-	case reflect.Array:
-		l := v.Len()
-		for i := 0; i < l; i++ {
-			d.value(v.Index(i))
-		}
-
-	case reflect.Struct:
-		t := v.Type()
-		l := v.NumField()
-		for i := 0; i < l; i++ {
-			// Note: Calling v.CanSet() below is an optimization.
-			// It would be sufficient to check the field name,
-			// but creating the StructField info for each field is
-			// costly (run "go test -bench=ReadStruct" and compare
-			// results when making changes to this code).
-			if v := v.Field(i); v.CanSet() || t.Field(i).Name != "_" {
-				d.value(v)
-			} else {
-				d.skip(v)
-			}
-		}
-
-	case reflect.Slice:
-		l := v.Len()
-		for i := 0; i < l; i++ {
-			d.value(v.Index(i))
-		}
-
-	case reflect.Bool:
-		v.SetBool(d.bool())
-
-	case reflect.Int8:
-		v.SetInt(int64(d.int8()))
-	case reflect.Int16:
-		v.SetInt(int64(d.int16()))
-	case reflect.Int32:
-		v.SetInt(int64(d.int32()))
-	case reflect.Int64:
-		v.SetInt(d.int64())
-
-	case reflect.Uint8:
-		v.SetUint(uint64(d.uint8()))
-	case reflect.Uint16:
-		v.SetUint(uint64(d.uint16()))
-	case reflect.Uint32:
-		v.SetUint(uint64(d.uint32()))
-	case reflect.Uint64:
-		v.SetUint(d.uint64())
-
-	case reflect.Float32:
-		v.SetFloat(float64(math.Float32frombits(d.uint32())))
-	case reflect.Float64:
-		v.SetFloat(math.Float64frombits(d.uint64()))
-
-	case reflect.Complex64:
-		panic("moxie: complex numbers not supported")
-	case reflect.Complex128:
-		panic("moxie: complex numbers not supported")
-	}
-}
-
-func (e *encoder) value(v reflect.Value) {
-	switch v.Kind() {
-	case reflect.Array:
-		l := v.Len()
-		for i := 0; i < l; i++ {
-			e.value(v.Index(i))
-		}
-
-	case reflect.Struct:
-		t := v.Type()
-		l := v.NumField()
-		for i := 0; i < l; i++ {
-			// see comment for corresponding code in decoder.value()
-			if v := v.Field(i); v.CanSet() || t.Field(i).Name != "_" {
-				e.value(v)
-			} else {
-				e.skip(v)
-			}
-		}
-
-	case reflect.Slice:
-		l := v.Len()
-		for i := 0; i < l; i++ {
-			e.value(v.Index(i))
-		}
-
-	case reflect.Bool:
-		e.bool(v.Bool())
-
-	case reflect.Int8:
-		e.int8(int8(v.Int()))
-	case reflect.Int16:
-		e.int16(int16(v.Int()))
-	case reflect.Int32:
-		e.int32(int32(v.Int()))
-	case reflect.Int64:
-		e.int64(v.Int())
-
-	case reflect.Uint8:
-		e.uint8(uint8(v.Uint()))
-	case reflect.Uint16:
-		e.uint16(uint16(v.Uint()))
-	case reflect.Uint32:
-		e.uint32(uint32(v.Uint()))
-	case reflect.Uint64:
-		e.uint64(v.Uint())
-
-	case reflect.Float32:
-		e.uint32(math.Float32bits(float32(v.Float())))
-	case reflect.Float64:
-		e.uint64(math.Float64bits(v.Float()))
-
-	case reflect.Complex64:
-		panic("moxie: complex numbers not supported")
-	case reflect.Complex128:
-		panic("moxie: complex numbers not supported")
-	}
-}
-
-func (d *decoder) skip(v reflect.Value) {
-	d.offset += dataSize(v)
-}
-
-func (e *encoder) skip(v reflect.Value) {
-	n := dataSize(v)
-	clear(e.buf[e.offset : e.offset+n])
-	e.offset += n
-}
 
 // intDataSize returns the size of the data required to represent the data when encoded,
 // and optionally a byte slice containing the encoded data if no conversion is necessary.

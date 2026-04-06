@@ -16,8 +16,7 @@ import (
 	"net/http/internal"
 	"net/http/internal/ascii"
 	"net/textproto"
-	"reflect"
-	"sort"
+
 	"strconv"
 	"sync"
 	"time"
@@ -318,7 +317,12 @@ func (t *transferWriter) writeHeader(w io.Writer, trace *httptrace.ClientTrace) 
 			keys = append(keys, k)
 		}
 		if len(keys) > 0 {
-			sort.Slice(keys, func(i, j int) bool { return string(keys[i]) < string(keys[j]) })
+			// Insertion sort keys
+			for si := 1; si < len(keys); si++ {
+				for sj := si; sj > 0 && keys[sj] < keys[sj-1]; sj-- {
+					keys[sj], keys[sj-1] = keys[sj-1], keys[sj]
+				}
+			}
 			// TODO: could do better allocation-wise here, but trailers are rare,
 			// so being lazy for now.
 			if _, err := io.WriteString(w, "Trailer: "+string(bytes.Join(keys, ","))+"\r\n"); err != nil {
@@ -1089,21 +1093,10 @@ func (fr finishAsyncByteRead) Read(p []byte) (n int, err error) {
 	return
 }
 
-var nopCloserType = reflect.TypeOf(io.NopCloser(nil))
-var nopCloserWriterToType = reflect.TypeOf(io.NopCloser(struct {
-	io.Reader
-	io.WriterTo
-}{}))
-
-// unwrapNopCloser return the underlying reader and true if r is a NopCloser
-// else it return false.
+// unwrapNopCloser: reflect-free stub. Cannot unwrap unexported io.nopCloser
+// without reflect. This is an optional optimization — callers handle false.
 func unwrapNopCloser(r io.Reader) (underlyingReader io.Reader, isNopCloser bool) {
-	switch reflect.TypeOf(r) {
-	case nopCloserType, nopCloserWriterToType:
-		return reflect.ValueOf(r).Field(0).Interface().(io.Reader), true
-	default:
-		return nil, false
-	}
+	return nil, false
 }
 
 // isKnownInMemoryReader reports whether r is a type known to not

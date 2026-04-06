@@ -42,7 +42,7 @@ type echConfig struct {
 var errMalformedECHConfigList = errors.New("tls: malformed ECHConfigList")
 
 type echConfigErr struct {
-	field string
+	field []byte
 }
 
 func (e *echConfigErr) Error() string {
@@ -150,7 +150,7 @@ func parseECHConfigList(data []byte) ([]echConfig, error) {
 
 func pickECHConfig(list []echConfig) (*echConfig, hpke.PublicKey, hpke.KDF, hpke.AEAD) {
 	for _, ec := range list {
-		if !validDNSName(string(ec.PublicName)) {
+		if !validDNSName([]byte(ec.PublicName)) {
 			continue
 		}
 		var unsupportedExt bool
@@ -208,7 +208,7 @@ func encodeInnerClientHello(inner *clientHelloMsg, maxNameLength int) ([]byte, e
 	}
 	paddingLen = 31 - ((len(h) + paddingLen - 1) % 32)
 
-	return append(h, make([]byte, paddingLen)...), nil
+	return append(h, []byte{:paddingLen}...), nil
 }
 
 func skipUint8LengthPrefixed(s *cryptobyte.String) bool {
@@ -396,7 +396,7 @@ func decodeInnerClientHello(outer *clientHelloMsg, encoded []byte) (*clientHello
 }
 
 func decryptECHPayload(context *hpke.Recipient, hello, payload []byte) ([]byte, error) {
-	outerAAD := bytes.Replace(hello[4:], payload, make([]byte, len(payload)), 1)
+	outerAAD := bytes.Replace(hello[4:], payload, []byte{:len(payload)}, 1)
 	return context.Open(outerAAD, payload)
 }
 
@@ -424,7 +424,7 @@ func computeAndUpdateOuterECHExtension(outer, inner *clientHelloMsg, ech *echCli
 	// bytes), so we have hardcoded it here. If we add support for another AEAD
 	// with a different tag length, we will need to change this.
 	encryptedLen := len(encodedInner) + 16 // AEAD tag length
-	outer.encryptedClientHello, err = generateOuterECHExt(ech.config.ConfigID, ech.kdfID, ech.aeadID, encapKey, make([]byte, encryptedLen))
+	outer.encryptedClientHello, err = generateOuterECHExt(ech.config.ConfigID, ech.kdfID, ech.aeadID, encapKey, []byte{:encryptedLen})
 	if err != nil {
 		return err
 	}
@@ -448,7 +448,7 @@ func computeAndUpdateOuterECHExtension(outer, inner *clientHelloMsg, ech *echCli
 // This is used to check if the public_name in a ECHConfig is valid when we are
 // picking a config. This can be somewhat lax because even if we pick a
 // valid-looking name, the DNS layer will later reject it anyway.
-func validDNSName(name string) bool {
+func validDNSName(name []byte) bool {
 	if len(name) > 253 {
 		return false
 	}
@@ -498,7 +498,7 @@ const (
 )
 
 func parseECHExt(ext []byte) (echType echExtType, cs echCipher, configID uint8, encap []byte, payload []byte, err error) {
-	data := make([]byte, len(ext))
+	data := []byte{:len(ext)}
 	copy(data, ext)
 	s := cryptobyte.String(data)
 	var echInt uint8

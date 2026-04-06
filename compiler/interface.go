@@ -36,7 +36,7 @@ var basicTypes = [...]uint8{
 	types.Float64:       14,
 	types.Complex64:     15,
 	types.Complex128:    16,
-	types.String:        17,
+	types.String:        17, // Moxie: kind 17 is Bytes (string=[]byte unified)
 	types.UnsafePointer: 18,
 }
 
@@ -511,7 +511,7 @@ var basicTypeNames = [...]string{
 	types.Float64:       "float64",
 	types.Complex64:     "complex64",
 	types.Complex128:    "complex128",
-	types.String:        "string",
+	types.String:        "bytes", // Moxie: unified string=[]byte type
 	types.UnsafePointer: "unsafe.Pointer",
 }
 
@@ -585,6 +585,10 @@ func getTypeCodeName(t types.Type) (string, bool) {
 		}
 		return "func:" + "{" + strings.Join(params, ",") + "}{" + strings.Join(results, ",") + "}", isLocal
 	case *types.Slice:
+		// Moxie: []byte uses the unified bytes type code name.
+		if b, ok := t.Elem().(*types.Basic); ok && b.Kind() == types.Byte {
+			return "basic:bytes", false
+		}
 		s, isLocal := getTypeCodeName(t.Elem())
 		return "slice:" + s, isLocal
 	case *types.Struct:

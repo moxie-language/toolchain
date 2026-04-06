@@ -5,7 +5,6 @@
 package asn1
 
 import (
-	"reflect"
 	"strconv"
 	"bytes"
 )
@@ -91,8 +90,8 @@ type fieldParameters struct {
 // Given a tag string with the format specified in the package comment,
 // parseFieldParameters will parse it into a fieldParameters structure,
 // ignoring unknown parts of the string.
-func parseFieldParameters(str string) (ret fieldParameters) {
-	var part string
+func parseFieldParameters(str []byte) (ret fieldParameters) {
+	var part []byte
 	for len(str) > 0 {
 		part, str, _ = bytes.Cut(str, ",")
 		switch {
@@ -149,39 +148,39 @@ func parseFieldParameters(str string) (ret fieldParameters) {
 	return
 }
 
-// Given a reflected Go type, getUniversalType returns the default tag number
-// and expected compound flag.
-func getUniversalType(t reflect.Type) (matchAny bool, tagNumber int, isCompound, ok bool) {
+// getUniversalType returns the default ASN.1 tag number and expected compound
+// flag for a type identified by its raw type code pointer.
+func getUniversalType(t *_rawType) (matchAny bool, tagNumber int, isCompound, ok bool) {
 	switch t {
-	case rawValueType:
+	case _rawValueTC:
 		return true, -1, false, true
-	case objectIdentifierType:
+	case _objectIdentifierTC:
 		return false, TagOID, false, true
-	case bitStringType:
+	case _bitStringTC:
 		return false, TagBitString, false, true
-	case timeType:
+	case _timeTC:
 		return false, TagUTCTime, false, true
-	case enumeratedType:
+	case _enumeratedTC:
 		return false, TagEnum, false, true
-	case bigIntType:
+	case _bigIntPtrTC:
 		return false, TagInteger, false, true
 	}
-	switch t.Kind() {
-	case reflect.Bool:
+	switch t.kind() {
+	case akBool:
 		return false, TagBoolean, false, true
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+	case akInt, akInt8, akInt16, akInt32, akInt64:
 		return false, TagInteger, false, true
-	case reflect.Struct:
+	case akStruct:
 		return false, TagSequence, true, true
-	case reflect.Slice:
-		if t.Elem().Kind() == reflect.Uint8 {
+	case akSlice:
+		if t.elem().kind() == akUint8 {
 			return false, TagOctetString, false, true
 		}
-		if bytes.HasSuffix(t.Name(), "SET") {
+		if bytes.HasSuffix(t.typeName(), "SET") {
 			return false, TagSet, true, true
 		}
 		return false, TagSequence, true, true
-	case reflect.String:
+	case akBytes:
 		return false, TagPrintableString, false, true
 	}
 	return false, 0, false, false

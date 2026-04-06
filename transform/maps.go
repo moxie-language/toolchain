@@ -16,7 +16,7 @@ func OptimizeMaps(mod llvm.Module) {
 	}
 
 	hashmapBinarySet := mod.NamedFunction("runtime.hashmapBinarySet")
-	hashmapStringSet := mod.NamedFunction("runtime.hashmapStringSet")
+	hashmapContentSet := mod.NamedFunction("runtime.hashmapContentSet")
 
 	for _, makeInst := range getUses(hashmapMake) {
 		updateInsts := []llvm.Value{}
@@ -25,7 +25,7 @@ func OptimizeMaps(mod llvm.Module) {
 		for _, use := range getUses(makeInst) {
 			if use := use.IsACallInst(); !use.IsNil() {
 				switch use.CalledValue() {
-				case hashmapBinarySet, hashmapStringSet:
+				case hashmapBinarySet, hashmapContentSet:
 					updateInsts = append(updateInsts, use)
 				default:
 					unknownUses = true

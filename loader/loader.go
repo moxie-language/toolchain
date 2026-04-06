@@ -341,6 +341,7 @@ func (p *Package) Check() error {
 	}
 	typesPkg, err := checker.Check(packageName, p.program.fset, p.Files, &p.info)
 
+
 	// Two-pass Moxie rewrite: pipe concat (|), string/[]byte + concat, comparisons, switches.
 	// Always run for Moxie target packages — the patched type checker accepts string+
 	// without errors, but the restriction checker still forbids it, so we must rewrite.

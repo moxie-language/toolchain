@@ -75,7 +75,7 @@ type clientHelloMsg struct {
 	sessionId                        []byte
 	cipherSuites                     []uint16
 	compressionMethods               []uint8
-	serverName                       string
+	serverName                       []byte
 	ocspStapling                     bool
 	supportedCurves                  []CurveID
 	supportedPoints                  []uint8
@@ -86,7 +86,7 @@ type clientHelloMsg struct {
 	secureRenegotiationSupported     bool
 	secureRenegotiation              []byte
 	extendedMasterSecret             bool
-	alpnProtocols                    []string
+	alpnProtocols                    [][]byte
 	scts                             bool
 	supportedVersions                []uint16
 	cookie                           []byte
@@ -456,7 +456,7 @@ func (m *clientHelloMsg) unmarshal(data []byte) bool {
 		return false
 	}
 
-	seenExts := make(map[uint16]bool)
+	seenExts := map[uint16]bool{}
 	for !extensions.Empty() {
 		var extension uint16
 		var extData cryptobyte.String
@@ -493,7 +493,7 @@ func (m *clientHelloMsg) unmarshal(data []byte) bool {
 					// Multiple names of the same name_type are prohibited.
 					return false
 				}
-				m.serverName = string(serverName)
+				m.serverName = []byte(serverName)
 				// An SNI value may not include a trailing dot.
 				if bytes.HasSuffix(m.serverName, ".") {
 					return false
@@ -580,7 +580,7 @@ func (m *clientHelloMsg) unmarshal(data []byte) bool {
 				if !protoList.ReadUint8LengthPrefixed(&proto) || proto.Empty() {
 					return false
 				}
-				m.alpnProtocols = append(m.alpnProtocols, string(proto))
+				m.alpnProtocols = append(m.alpnProtocols, []byte(proto))
 			}
 		case extensionSCT:
 			// RFC 6962, Section 3.3.1
@@ -628,7 +628,7 @@ func (m *clientHelloMsg) unmarshal(data []byte) bool {
 				return false
 			}
 		case extensionQUICTransportParameters:
-			m.quicTransportParameters = make([]byte, len(extData))
+			m.quicTransportParameters = []byte{:len(extData)}
 			if !extData.CopyBytes(m.quicTransportParameters) {
 				return false
 			}
@@ -728,7 +728,7 @@ type serverHelloMsg struct {
 	secureRenegotiationSupported bool
 	secureRenegotiation          []byte
 	extendedMasterSecret         bool
-	alpnProtocol                 string
+	alpnProtocol                 []byte
 	scts                         [][]byte
 	supportedVersion             uint16
 	serverShare                  keyShare
@@ -890,7 +890,7 @@ func (m *serverHelloMsg) unmarshal(data []byte) bool {
 		return false
 	}
 
-	seenExts := make(map[uint16]bool)
+	seenExts := map[uint16]bool{}
 	for !extensions.Empty() {
 		var extension uint16
 		var extData cryptobyte.String
@@ -926,7 +926,7 @@ func (m *serverHelloMsg) unmarshal(data []byte) bool {
 				proto.Empty() || !protoList.Empty() {
 				return false
 			}
-			m.alpnProtocol = string(proto)
+			m.alpnProtocol = []byte(proto)
 		case extensionSCT:
 			var sctList cryptobyte.String
 			if !extData.ReadUint16LengthPrefixed(&sctList) || sctList.Empty() {
@@ -974,7 +974,7 @@ func (m *serverHelloMsg) unmarshal(data []byte) bool {
 				return false
 			}
 		case extensionEncryptedClientHello: // encrypted_client_hello
-			m.encryptedClientHello = make([]byte, len(extData))
+			m.encryptedClientHello = []byte{:len(extData)}
 			if !extData.CopyBytes(m.encryptedClientHello) {
 				return false
 			}
@@ -1001,7 +1001,7 @@ func (m *serverHelloMsg) originalBytes() []byte {
 }
 
 type encryptedExtensionsMsg struct {
-	alpnProtocol            string
+	alpnProtocol            []byte
 	quicTransportParameters []byte
 	earlyData               bool
 	echRetryConfigs         []byte
@@ -1061,7 +1061,7 @@ func (m *encryptedExtensionsMsg) unmarshal(data []byte) bool {
 		return false
 	}
 
-	seenExts := make(map[uint16]bool)
+	seenExts := map[uint16]bool{}
 	for !extensions.Empty() {
 		var extension uint16
 		var extData cryptobyte.String
@@ -1086,9 +1086,9 @@ func (m *encryptedExtensionsMsg) unmarshal(data []byte) bool {
 				proto.Empty() || !protoList.Empty() {
 				return false
 			}
-			m.alpnProtocol = string(proto)
+			m.alpnProtocol = []byte(proto)
 		case extensionQUICTransportParameters:
-			m.quicTransportParameters = make([]byte, len(extData))
+			m.quicTransportParameters = []byte{:len(extData)}
 			if !extData.CopyBytes(m.quicTransportParameters) {
 				return false
 			}
@@ -1096,7 +1096,7 @@ func (m *encryptedExtensionsMsg) unmarshal(data []byte) bool {
 			// RFC 8446, Section 4.2.10
 			m.earlyData = true
 		case extensionEncryptedClientHello:
-			m.echRetryConfigs = make([]byte, len(extData))
+			m.echRetryConfigs = []byte{:len(extData)}
 			if !extData.CopyBytes(m.echRetryConfigs) {
 				return false
 			}
@@ -1121,7 +1121,7 @@ func (m *encryptedExtensionsMsg) unmarshal(data []byte) bool {
 type endOfEarlyDataMsg struct{}
 
 func (m *endOfEarlyDataMsg) marshal() ([]byte, error) {
-	x := make([]byte, 4)
+	x := []byte{:4}
 	x[0] = typeEndOfEarlyData
 	return x, nil
 }
@@ -1397,7 +1397,7 @@ func (m *certificateMsg) marshal() ([]byte, error) {
 	}
 
 	length := 3 + 3*len(m.certificates) + i
-	x := make([]byte, 4+length)
+	x := []byte{:4+length}
 	x[0] = typeCertificate
 	x[1] = uint8(length >> 16)
 	x[2] = uint8(length >> 8)
@@ -1445,7 +1445,7 @@ func (m *certificateMsg) unmarshal(data []byte) bool {
 		numCerts++
 	}
 
-	m.certificates = make([][]byte, numCerts)
+	m.certificates = [][]byte{:numCerts}
 	d = data[7:]
 	for i := 0; i < numCerts; i++ {
 		certLen := uint32(d[0])<<16 | uint32(d[1])<<8 | uint32(d[2])
@@ -1602,7 +1602,7 @@ type serverKeyExchangeMsg struct {
 
 func (m *serverKeyExchangeMsg) marshal() ([]byte, error) {
 	length := len(m.key)
-	x := make([]byte, length+4)
+	x := []byte{:length+4}
 	x[0] = typeServerKeyExchange
 	x[1] = uint8(length >> 16)
 	x[2] = uint8(length >> 8)
@@ -1653,7 +1653,7 @@ func (m *certificateStatusMsg) unmarshal(data []byte) bool {
 type serverHelloDoneMsg struct{}
 
 func (m *serverHelloDoneMsg) marshal() ([]byte, error) {
-	x := make([]byte, 4)
+	x := []byte{:4}
 	x[0] = typeServerHelloDone
 	return x, nil
 }
@@ -1668,7 +1668,7 @@ type clientKeyExchangeMsg struct {
 
 func (m *clientKeyExchangeMsg) marshal() ([]byte, error) {
 	length := len(m.ciphertext)
-	x := make([]byte, length+4)
+	x := []byte{:length+4}
 	x[0] = typeClientKeyExchange
 	x[1] = uint8(length >> 16)
 	x[2] = uint8(length >> 8)
@@ -1734,7 +1734,7 @@ func (m *certificateRequestMsg) marshal() ([]byte, error) {
 		length += 2 + 2*len(m.supportedSignatureAlgorithms)
 	}
 
-	x := make([]byte, 4+length)
+	x := []byte{:4+length}
 	x[0] = typeCertificateRequest
 	x[1] = uint8(length >> 16)
 	x[2] = uint8(length >> 8)
@@ -1787,7 +1787,7 @@ func (m *certificateRequestMsg) unmarshal(data []byte) bool {
 		return false
 	}
 
-	m.certificateTypes = make([]byte, numCertTypes)
+	m.certificateTypes = []byte{:numCertTypes}
 	if copy(m.certificateTypes, data) != numCertTypes {
 		return false
 	}
@@ -1807,7 +1807,7 @@ func (m *certificateRequestMsg) unmarshal(data []byte) bool {
 			return false
 		}
 		numSigAlgos := sigAndHashLen / 2
-		m.supportedSignatureAlgorithms = make([]SignatureScheme, numSigAlgos)
+		m.supportedSignatureAlgorithms = []SignatureScheme{:numSigAlgos}
 		for i := range m.supportedSignatureAlgorithms {
 			m.supportedSignatureAlgorithms[i] = SignatureScheme(data[0])<<8 | SignatureScheme(data[1])
 			data = data[2:]
@@ -1822,7 +1822,7 @@ func (m *certificateRequestMsg) unmarshal(data []byte) bool {
 	if len(data) < int(casLength) {
 		return false
 	}
-	cas := make([]byte, casLength)
+	cas := []byte{:casLength}
 	copy(cas, data)
 	data = data[casLength:]
 
@@ -1888,7 +1888,7 @@ func (m *newSessionTicketMsg) marshal() ([]byte, error) {
 	// See RFC 5077, Section 3.3.
 	ticketLen := len(m.ticket)
 	length := 2 + 4 + ticketLen
-	x := make([]byte, 4+length)
+	x := []byte{:4+length}
 	x[0] = typeNewSessionTicket
 	x[1] = uint8(length >> 16)
 	x[2] = uint8(length >> 8)

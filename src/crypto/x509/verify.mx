@@ -15,7 +15,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
-	"reflect"
+
 	"runtime"
 	"time"
 	"unicode/utf8"
@@ -548,6 +548,28 @@ func matchDomainConstraint(domain, constraint string, reversedDomainsCache map[s
 // form of name, suitable for passing to the match function. The total number
 // of comparisons is tracked in the given count and should not exceed the given
 // limit.
+// constraintSliceLen returns the length of a constraint slice ([]string or []*net.IPNet).
+func constraintSliceLen(v any) int {
+	switch s := v.(type) {
+	case []string:
+		return len(s)
+	case []*net.IPNet:
+		return len(s)
+	}
+	return 0
+}
+
+// constraintSliceAt returns the i-th element of a constraint slice.
+func constraintSliceAt(v any, i int) any {
+	switch s := v.(type) {
+	case []string:
+		return s[i]
+	case []*net.IPNet:
+		return s[i]
+	}
+	return nil
+}
+
 func (c *Certificate) checkNameConstraints(count *int,
 	maxConstraintComparisons int,
 	nameType string,
@@ -556,15 +578,15 @@ func (c *Certificate) checkNameConstraints(count *int,
 	match func(parsedName, constraint any) (match bool, err error),
 	permitted, excluded any) error {
 
-	excludedValue := reflect.ValueOf(excluded)
+	excludedLen := constraintSliceLen(excluded)
 
-	*count += excludedValue.Len()
+	*count += excludedLen
 	if *count > maxConstraintComparisons {
 		return CertificateInvalidError{c, TooManyConstraints, ""}
 	}
 
-	for i := 0; i < excludedValue.Len(); i++ {
-		constraint := excludedValue.Index(i).Interface()
+	for i := 0; i < excludedLen; i++ {
+		constraint := constraintSliceAt(excluded, i)
 		match, err := match(parsedName, constraint)
 		if err != nil {
 			return CertificateInvalidError{c, CANotAuthorizedForThisName, err.Error()}
@@ -575,16 +597,16 @@ func (c *Certificate) checkNameConstraints(count *int,
 		}
 	}
 
-	permittedValue := reflect.ValueOf(permitted)
+	permittedLen := constraintSliceLen(permitted)
 
-	*count += permittedValue.Len()
+	*count += permittedLen
 	if *count > maxConstraintComparisons {
 		return CertificateInvalidError{c, TooManyConstraints, ""}
 	}
 
 	ok := true
-	for i := 0; i < permittedValue.Len(); i++ {
-		constraint := permittedValue.Index(i).Interface()
+	for i := 0; i < permittedLen; i++ {
+		constraint := constraintSliceAt(permitted, i)
 
 		var err error
 		if ok, err = match(parsedName, constraint); err != nil {

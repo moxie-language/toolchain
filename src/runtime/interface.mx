@@ -5,10 +5,7 @@ package runtime
 // Interfaces are represented as a pair of {typecode, value}, where value can be
 // anything (including non-pointers).
 
-import (
-	"internal/reflectlite"
-	"unsafe"
-)
+import "unsafe"
 
 type _interface struct {
 	typecode unsafe.Pointer
@@ -27,58 +24,115 @@ func decomposeInterface(i _interface) (unsafe.Pointer, unsafe.Pointer) {
 
 // Return true iff both interfaces are equal.
 func interfaceEqual(x, y interface{}) bool {
-	return reflectValueEqual(reflectlite.ValueOf(x), reflectlite.ValueOf(y))
+	xi := (*_interface)(unsafe.Pointer(&x))
+	yi := (*_interface)(unsafe.Pointer(&y))
+	return rawValueEqual(xi.typecode, xi.value, yi.typecode, yi.value)
 }
 
-func reflectValueEqual(x, y reflectlite.Value) bool {
-	// Note: doing a x.Type() == y.Type() comparison would not work here as that
-	// would introduce an infinite recursion: comparing two reflectlite.Type values
-	// is done with this reflectValueEqual runtime call.
-	if x.RawType() == nil || y.RawType() == nil {
-		// One of them is nil.
-		return x.RawType() == y.RawType()
+// rawValueEqual compares two values by their raw type codes and value pointers.
+// xt/yt are type code pointers; xv/yv are interface value slots (small values
+// packed directly, large values as pointers to data).
+func rawValueEqual(xt, xv, yt, yv unsafe.Pointer) bool {
+	if xt == nil || yt == nil {
+		return xt == yt
 	}
-
-	if x.RawType() != y.RawType() {
-		// The type is not the same, which means the interfaces are definitely
-		// not the same.
+	if xt != yt {
 		return false
 	}
 
-	switch x.RawType().Kind() {
-	case reflectlite.Bool:
-		return x.Bool() == y.Bool()
-	case reflectlite.Int, reflectlite.Int8, reflectlite.Int16, reflectlite.Int32, reflectlite.Int64:
-		return x.Int() == y.Int()
-	case reflectlite.Uint, reflectlite.Uint8, reflectlite.Uint16, reflectlite.Uint32, reflectlite.Uint64, reflectlite.Uintptr:
-		return x.Uint() == y.Uint()
-	case reflectlite.Float32, reflectlite.Float64:
-		return x.Float() == y.Float()
-	case reflectlite.Complex64, reflectlite.Complex128:
-		return x.Complex() == y.Complex()
-	case reflectlite.String:
-		return x.String() == y.String()
-	case reflectlite.Chan, reflectlite.Ptr, reflectlite.UnsafePointer:
-		return x.UnsafePointer() == y.UnsafePointer()
-	case reflectlite.Array:
-		for i := 0; i < x.Len(); i++ {
-			if !reflectValueEqual(x.Index(i), y.Index(i)) {
+	t := (*rawType)(xt)
+
+	// Convert interface value representation to direct data pointer.
+	// Small values (fit in a pointer) are stored directly in the value slot.
+	// Large values are stored as a pointer to the data.
+	xp, yp := xv, yv
+	if t.size() <= unsafe.Sizeof(uintptr(0)) {
+		xp = unsafe.Pointer(&xv)
+		yp = unsafe.Pointer(&yv)
+	}
+
+	return rawPtrEqual(t, xp, yp)
+}
+
+// rawPtrEqual compares two values where xp and yp always point directly to the
+// value data. Used for recursive comparison of struct fields and array elements
+// where we already have direct pointers (no interface packing).
+func rawPtrEqual(t *rawType, xp, yp unsafe.Pointer) bool {
+	k := t.kind()
+
+	switch k {
+	case Bool:
+		return *(*bool)(xp) == *(*bool)(yp)
+	case Int:
+		return *(*int)(xp) == *(*int)(yp)
+	case Int8:
+		return *(*int8)(xp) == *(*int8)(yp)
+	case Int16:
+		return *(*int16)(xp) == *(*int16)(yp)
+	case Int32:
+		return *(*int32)(xp) == *(*int32)(yp)
+	case Int64:
+		return *(*int64)(xp) == *(*int64)(yp)
+	case Uint:
+		return *(*uint)(xp) == *(*uint)(yp)
+	case Uint8:
+		return *(*uint8)(xp) == *(*uint8)(yp)
+	case Uint16:
+		return *(*uint16)(xp) == *(*uint16)(yp)
+	case Uint32:
+		return *(*uint32)(xp) == *(*uint32)(yp)
+	case Uint64:
+		return *(*uint64)(xp) == *(*uint64)(yp)
+	case Uintptr:
+		return *(*uintptr)(xp) == *(*uintptr)(yp)
+	case Float32:
+		return *(*float32)(xp) == *(*float32)(yp)
+	case Float64:
+		return *(*float64)(xp) == *(*float64)(yp)
+	case Complex64:
+		return *(*complex64)(xp) == *(*complex64)(yp)
+	case Complex128:
+		return *(*complex128)(xp) == *(*complex128)(yp)
+	case kindBytes:
+		xs := *(*_string)(xp)
+		ys := *(*_string)(yp)
+		if xs.length != ys.length {
+			return false
+		}
+		return memequal(unsafe.Pointer(xs.ptr), unsafe.Pointer(ys.ptr), xs.length)
+	case kindChan, kindPointer, kindUnsafePointer:
+		return *(*uintptr)(xp) == *(*uintptr)(yp)
+	case kindArray:
+		elemType := t.elem()
+		elemSize := elemType.size()
+		length := t.arrayLen()
+		for i := 0; i < length; i++ {
+			ex := unsafe.Add(xp, uintptr(i)*elemSize)
+			ey := unsafe.Add(yp, uintptr(i)*elemSize)
+			if !rawPtrEqual(elemType, ex, ey) {
 				return false
 			}
 		}
 		return true
-	case reflectlite.Struct:
-		for i := 0; i < x.NumField(); i++ {
-			if !reflectValueEqual(x.Field(i), y.Field(i)) {
+	case kindStruct:
+		nf := t.numField()
+		for i := 0; i < nf; i++ {
+			ft := t.structFieldType(i)
+			off := t.structFieldOffset(i)
+			fx := unsafe.Add(xp, off)
+			fy := unsafe.Add(yp, off)
+			if !rawPtrEqual(ft, fx, fy) {
 				return false
 			}
 		}
 		return true
-	case reflectlite.Interface:
-		return reflectValueEqual(x.Elem(), y.Elem())
+	case kindInterface:
+		xi := (*_interface)(xp)
+		yi := (*_interface)(yp)
+		return rawValueEqual(xi.typecode, xi.value, yi.typecode, yi.value)
 	default:
 		runtimePanic("comparing un-comparable type")
-		return false // unreachable
+		return false
 	}
 }
 

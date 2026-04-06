@@ -59,13 +59,13 @@ type Conn struct {
 	// opposed to the ones presented by the server.
 	verifiedChains [][]*x509.Certificate
 	// serverName contains the server name indicated by the client, if any.
-	serverName string
+	serverName []byte
 	// secureRenegotiation is true if the server echoed the secure
 	// renegotiation extension. (This is meaningless as a server because
 	// renegotiation is not supported in that case.)
 	secureRenegotiation bool
 	// ekm is a closure for exporting keying material.
-	ekm func(label string, context []byte, length int) ([]byte, error)
+	ekm func(label []byte, context []byte, length int) ([]byte, error)
 	// resumptionSecret is the resumption_master_secret for handling
 	// or sending NewSessionTicket messages.
 	resumptionSecret []byte
@@ -96,7 +96,7 @@ type Conn struct {
 	serverFinished [12]byte
 
 	// clientProtocol is the negotiated ALPN protocol.
-	clientProtocol string
+	clientProtocol []byte
 
 	// input/output
 	in, out   halfConn
@@ -467,7 +467,7 @@ func sliceForAppend(in []byte, n int) (head, tail []byte) {
 	if total := len(in) + n; cap(in) >= total {
 		head = in[:total]
 	} else {
-		head = make([]byte, total)
+		head = []byte{:total}
 		copy(head, in)
 	}
 	tail = head[len(in):]
@@ -564,7 +564,7 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 // RecordHeaderError is returned when a TLS record header is invalid.
 type RecordHeaderError struct {
 	// Msg contains a human readable string that describes the error.
-	Msg string
+	Msg []byte
 	// RecordHeader contains the five bytes of TLS record header that
 	// triggered the error.
 	RecordHeader [5]byte
@@ -577,7 +577,7 @@ type RecordHeaderError struct {
 
 func (e RecordHeaderError) Error() string { return "tls: " + e.Msg }
 
-func (c *Conn) newRecordHeaderError(conn net.Conn, msg string) (err RecordHeaderError) {
+func (c *Conn) newRecordHeaderError(conn net.Conn, msg []byte) (err RecordHeaderError) {
 	err.Msg = msg
 	err.Conn = conn
 	copy(err.RecordHeader[:], c.rawInput.Bytes())
@@ -971,7 +971,7 @@ func (c *Conn) flush() (int, error) {
 // outBufPool pools the record-sized scratch buffers used by writeRecordLocked.
 var outBufPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, 0)
+		b := []byte{:0}
 		return &b
 	},
 }
@@ -1587,8 +1587,7 @@ func (c *Conn) handshakeContext(ctx context.Context) (ret error) {
 			}
 		} else {
 			c.out.Lock()
-			var a alert
-			ok := errors.As(c.out.err, &a)
+			a, ok := c.out.err.(alert)
 			if !ok {
 				a = alertInternalError
 			}
@@ -1641,7 +1640,7 @@ func (c *Conn) connectionStateLocked() ConnectionState {
 	if c.config.Renegotiation != RenegotiateNever {
 		state.ekm = noEKMBecauseRenegotiation
 	} else if c.vers != VersionTLS13 && !c.extMasterSecret {
-		state.ekm = func(label string, context []byte, length int) ([]byte, error) {
+		state.ekm = func(label []byte, context []byte, length int) ([]byte, error) {
 			if tlsunsafeekm.Value() == "1" {
 				tlsunsafeekm.IncNonDefault()
 				return c.ekm(label, context, length)
@@ -1667,7 +1666,7 @@ func (c *Conn) OCSPResponse() []byte {
 // VerifyHostname checks that the peer certificate chain is valid for
 // connecting to host. If so, it returns nil; if not, it returns an error
 // describing the problem.
-func (c *Conn) VerifyHostname(host string) error {
+func (c *Conn) VerifyHostname(host []byte) error {
 	c.handshakeMutex.Lock()
 	defer c.handshakeMutex.Unlock()
 	if !c.isClient {

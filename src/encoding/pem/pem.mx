@@ -26,8 +26,8 @@ import (
 //
 // where [Block.Headers] is a possibly empty sequence of Key: Value lines.
 type Block struct {
-	Type    string            // The type, taken from the preamble (i.e. "RSA PRIVATE KEY").
-	Headers map[string]string // Optional headers.
+	Type    []byte            // The type, taken from the preamble (i.e. "RSA PRIVATE KEY").
+	Headers map[string][]byte // Optional headers.
 	Bytes   []byte            // The decoded bytes of the contents. Typically a DER encoded ASN.1 structure.
 }
 
@@ -62,7 +62,7 @@ func removeSpacesAndTabs(data []byte) []byte {
 		// no spaces nor tabs. Skip the extra alloc and work.
 		return data
 	}
-	result := make([]byte, len(data))
+	result := []byte{:len(data)}
 	n := 0
 
 	for _, b := range data {
@@ -118,8 +118,8 @@ func Decode(data []byte) (p *Block, rest []byte) {
 		typeLine = typeLine[0 : len(typeLine)-len(pemEndOfLine)]
 
 		p = &Block{
-			Headers: make(map[string]string),
-			Type:    string(typeLine),
+			Headers: map[string][]byte{},
+			Type:    []byte(typeLine),
 		}
 
 		for {
@@ -138,7 +138,7 @@ func Decode(data []byte) (p *Block, rest []byte) {
 			// TODO(agl): need to cope with values that spread across lines.
 			key = bytes.TrimSpace(key)
 			val = bytes.TrimSpace(val)
-			p.Headers[string(key)] = string(val)
+			p.Headers[[]byte(key)] = []byte(val)
 			rest = next
 			endIndex -= consumed
 			endTrailerIndex -= consumed
@@ -173,7 +173,7 @@ func Decode(data []byte) (p *Block, rest []byte) {
 		p.Bytes = []byte{}
 		if endIndex > 0 {
 			base64Data := removeSpacesAndTabs(rest[:endIndex])
-			p.Bytes = make([]byte, base64.StdEncoding.DecodedLen(len(base64Data)))
+			p.Bytes = []byte{:base64.StdEncoding.DecodedLen(len(base64Data))}
 			n, err := base64.StdEncoding.Decode(p.Bytes, base64Data)
 			if err != nil {
 				continue
@@ -237,7 +237,7 @@ func (l *lineBreaker) Close() (err error) {
 	return
 }
 
-func writeHeader(out io.Writer, k, v string) error {
+func writeHeader(out io.Writer, k, v []byte) error {
 	_, err := out.Write([]byte(k + ": " + v + "\n"))
 	return err
 }
@@ -263,7 +263,7 @@ func Encode(out io.Writer, b *Block) error {
 
 	if len(b.Headers) > 0 {
 		const procType = "Proc-Type"
-		h := make([][]byte, 0, len(b.Headers))
+		h := [][]byte{:0:len(b.Headers)}
 		hasProcType := false
 		for k := range b.Headers {
 			if k == procType {

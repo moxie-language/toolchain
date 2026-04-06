@@ -19,7 +19,7 @@ import (
 // A nil argument is equivalent to an empty slice.
 func Equal(a, b []byte) bool {
 	// Neither cmd/compile nor gccgo allocates for these string conversions.
-	return string(a) == string(b)
+	return []byte(a) == []byte(b)
 }
 
 // Compare returns an integer comparing two byte slices lexicographically.
@@ -35,7 +35,7 @@ func explode(s []byte, n int) [][]byte {
 	if n <= 0 || n > len(s) {
 		n = len(s)
 	}
-	a := make([][]byte, n)
+	a := [][]byte{:n}
 	var size int
 	na := 0
 	for len(s) > 0 {
@@ -79,7 +79,7 @@ func Contains(b, subslice []byte) bool {
 }
 
 // ContainsAny reports whether any of the UTF-8-encoded code points in chars are within b.
-func ContainsAny(b []byte, chars string) bool {
+func ContainsAny(b []byte, chars []byte) bool {
 	return IndexAny(b, chars) >= 0
 }
 
@@ -218,7 +218,7 @@ func IndexRune(s []byte, r rune) int {
 // It returns the byte index of the first occurrence in s of any of the Unicode
 // code points in chars. It returns -1 if chars is empty or if there is no code
 // point in common.
-func IndexAny(s []byte, chars string) int {
+func IndexAny(s []byte, chars []byte) int {
 	if chars == "" {
 		// Avoid scanning all of s.
 		return -1
@@ -227,10 +227,12 @@ func IndexAny(s []byte, chars string) int {
 		r := rune(s[0])
 		if r >= utf8.RuneSelf {
 			// search utf8.RuneError.
-			for _, r = range chars {
-				if r == utf8.RuneError {
+			for ci := 0; ci < len(chars); {
+				cr, cw := utf8.DecodeRune(chars[ci:])
+				if cr == utf8.RuneError {
 					return 0
 				}
+				ci += cw
 			}
 			return -1
 		}
@@ -270,23 +272,25 @@ func IndexAny(s []byte, chars string) int {
 		if r != utf8.RuneError {
 			// r is 2 to 4 bytes
 			if len(chars) == width {
-				if chars == string(r) {
+				if Equal(chars, s[i:i+width]) {
 					return i
 				}
 				continue
 			}
 			// Use bytealg.IndexString for performance if available.
 			if bytealg.MaxLen >= width {
-				if bytealg.IndexString(chars, string(r)) >= 0 {
+				if bytealg.IndexString(chars, s[i:i+width]) >= 0 {
 					return i
 				}
 				continue
 			}
 		}
-		for _, ch := range chars {
+		for ci := 0; ci < len(chars); {
+			ch, cw := utf8.DecodeRune(chars[ci:])
 			if r == ch {
 				return i
 			}
+			ci += cw
 		}
 	}
 	return -1
@@ -296,7 +300,7 @@ func IndexAny(s []byte, chars string) int {
 // points. It returns the byte index of the last occurrence in s of any of
 // the Unicode code points in chars. It returns -1 if chars is empty or if
 // there is no code point in common.
-func LastIndexAny(s []byte, chars string) int {
+func LastIndexAny(s []byte, chars []byte) int {
 	if chars == "" {
 		// Avoid scanning all of s.
 		return -1
@@ -314,10 +318,12 @@ func LastIndexAny(s []byte, chars string) int {
 	if len(s) == 1 {
 		r := rune(s[0])
 		if r >= utf8.RuneSelf {
-			for _, r = range chars {
-				if r == utf8.RuneError {
+			for ci := 0; ci < len(chars); {
+				cr, cw := utf8.DecodeRune(chars[ci:])
+				if cr == utf8.RuneError {
 					return 0
 				}
+				ci += cw
 			}
 			return -1
 		}
@@ -354,23 +360,25 @@ func LastIndexAny(s []byte, chars string) int {
 		if r != utf8.RuneError {
 			// r is 2 to 4 bytes
 			if len(chars) == size {
-				if chars == string(r) {
+				if Equal(chars, s[i:i+size]) {
 					return i
 				}
 				continue
 			}
 			// Use bytealg.IndexString for performance if available.
 			if bytealg.MaxLen >= size {
-				if bytealg.IndexString(chars, string(r)) >= 0 {
+				if bytealg.IndexString(chars, s[i:i+size]) >= 0 {
 					return i
 				}
 				continue
 			}
 		}
-		for _, ch := range chars {
+		for ci := 0; ci < len(chars); {
+			ch, cw := utf8.DecodeRune(chars[ci:])
 			if r == ch {
 				return i
 			}
+			ci += cw
 		}
 	}
 	return -1
@@ -392,7 +400,7 @@ func genSplit(s, sep []byte, sepSave, n int) [][]byte {
 		n = len(s) + 1
 	}
 
-	a := make([][]byte, n)
+	a := [][]byte{:n}
 	n--
 	i := 0
 	for i < n {
@@ -475,7 +483,7 @@ func Fields(s []byte) [][]byte {
 	}
 
 	// ASCII fast path
-	a := make([][]byte, n)
+	a := [][]byte{:n}
 	na := 0
 	fieldStart := 0
 	i := 0
@@ -520,7 +528,7 @@ func FieldsFunc(s []byte, f func(rune) bool) [][]byte {
 		start int
 		end   int
 	}
-	spans := make([]span, 0, 32)
+	spans := []span{:0:32}
 
 	// Find the field start and end indices.
 	// Doing this in a separate pass (rather than slicing the string s
@@ -552,7 +560,7 @@ func FieldsFunc(s []byte, f func(rune) bool) [][]byte {
 	}
 
 	// Create subslices from recorded field indices.
-	a := make([][]byte, len(spans))
+	a := [][]byte{:len(spans)}
 	for i, span := range spans {
 		a[i] = s[span.start:span.end:span.end]
 	}
@@ -612,7 +620,7 @@ func Map(mapping func(r rune) rune, s []byte) []byte {
 	// In the worst case, the slice can grow when mapped, making
 	// things unpleasant. But it's so rare we barge in assuming it's
 	// fine. It could also shrink but that falls out naturally.
-	b := make([]byte, 0, len(s))
+	b := []byte{:0:len(s)}
 	for i := 0; i < len(s); {
 		wid := 1
 		r := rune(s[i])
@@ -777,7 +785,7 @@ func ToTitleSpecial(c unicode.SpecialCase, s []byte) []byte {
 // ToValidUTF8 treats s as UTF-8-encoded bytes and returns a copy with each run of bytes
 // representing invalid UTF-8 replaced with the bytes in replacement, which may be empty.
 func ToValidUTF8(s, replacement []byte) []byte {
-	b := make([]byte, 0, len(s)+len(replacement))
+	b := []byte{:0:len(s)+len(replacement)}
 	invalid := false // previous byte was from an invalid UTF-8 sequence
 	for i := 0; i < len(s); {
 		c := s[i]
@@ -959,7 +967,7 @@ type asciiSet [8]uint32
 
 // makeASCIISet creates a set of ASCII characters and reports whether all
 // characters in chars are ASCII.
-func makeASCIISet(chars string) (as asciiSet, ok bool) {
+func makeASCIISet(chars []byte) (as asciiSet, ok bool) {
 	for i := 0; i < len(chars); i++ {
 		c := chars[i]
 		if c >= utf8.RuneSelf {
@@ -978,18 +986,20 @@ func (as *asciiSet) contains(c byte) bool {
 // containsRune is a simplified version of strings.ContainsRune
 // to avoid importing the strings package.
 // We avoid bytes.ContainsRune to avoid allocating a temporary copy of s.
-func containsRune(s string, r rune) bool {
-	for _, c := range s {
+func containsRune(s []byte, r rune) bool {
+	for i := 0; i < len(s); {
+		c, w := utf8.DecodeRune(s[i:])
 		if c == r {
 			return true
 		}
+		i += w
 	}
 	return false
 }
 
 // Trim returns a subslice of s by slicing off all leading and
 // trailing UTF-8-encoded code points contained in cutset.
-func Trim(s []byte, cutset string) []byte {
+func Trim(s []byte, cutset []byte) []byte {
 	if len(s) == 0 {
 		// This is what we've historically done.
 		return nil
@@ -1008,7 +1018,7 @@ func Trim(s []byte, cutset string) []byte {
 
 // TrimLeft returns a subslice of s by slicing off all leading
 // UTF-8-encoded code points contained in cutset.
-func TrimLeft(s []byte, cutset string) []byte {
+func TrimLeft(s []byte, cutset []byte) []byte {
 	if len(s) == 0 {
 		// This is what we've historically done.
 		return nil
@@ -1050,7 +1060,7 @@ func trimLeftASCII(s []byte, as *asciiSet) []byte {
 	return s
 }
 
-func trimLeftUnicode(s []byte, cutset string) []byte {
+func trimLeftUnicode(s []byte, cutset []byte) []byte {
 	for len(s) > 0 {
 		r, n := rune(s[0]), 1
 		if r >= utf8.RuneSelf {
@@ -1070,7 +1080,7 @@ func trimLeftUnicode(s []byte, cutset string) []byte {
 
 // TrimRight returns a subslice of s by slicing off all trailing
 // UTF-8-encoded code points that are contained in cutset.
-func TrimRight(s []byte, cutset string) []byte {
+func TrimRight(s []byte, cutset []byte) []byte {
 	if len(s) == 0 || cutset == "" {
 		return s
 	}
@@ -1100,7 +1110,7 @@ func trimRightASCII(s []byte, as *asciiSet) []byte {
 	return s
 }
 
-func trimRightUnicode(s []byte, cutset string) []byte {
+func trimRightUnicode(s []byte, cutset []byte) []byte {
 	for len(s) > 0 {
 		r, n := rune(s[len(s)-1]), 1
 		if r >= utf8.RuneSelf {
@@ -1157,7 +1167,7 @@ func TrimSpace(s []byte) []byte {
 // Runes interprets s as a sequence of UTF-8-encoded code points.
 // It returns a slice of runes (Unicode code points) equivalent to s.
 func Runes(s []byte) []rune {
-	t := make([]rune, utf8.RuneCount(s))
+	t := []rune{:utf8.RuneCount(s)}
 	i := 0
 	for len(s) > 0 {
 		r, l := utf8.DecodeRune(s)
@@ -1189,7 +1199,7 @@ func Replace(s, old, new []byte, n int) []byte {
 	}
 
 	// Apply replacements to buffer.
-	t := make([]byte, len(s)+n*(len(new)-len(old)))
+	t := []byte{:len(s)+n*(len(new)-len(old))}
 	w := 0
 	start := 0
 	if len(old) > 0 {

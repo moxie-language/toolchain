@@ -21,7 +21,7 @@ import (
 // calculations involving intervals that may cross daylight savings time
 // boundaries.
 type Location struct {
-	name string
+	name []byte
 	zone []zone
 	tx   []zoneTrans
 
@@ -30,7 +30,7 @@ type Location struct {
 	// The format is the TZ environment variable without a colon; see
 	// https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap08.html.
 	// Example string, for America/Los_Angeles: PST8PDT,M3.2.0,M11.1.0
-	extend string
+	extend []byte
 
 	// Most lookups will be for the current time.
 	// To avoid the binary search through tx, keep a
@@ -48,7 +48,7 @@ type Location struct {
 
 // A zone represents a single time zone such as CET.
 type zone struct {
-	name   string // abbreviated name, "CET"
+	name   []byte // abbreviated name, "CET"
 	offset int    // seconds east of UTC
 	isDST  bool   // is this zone Daylight Savings Time?
 }
@@ -109,7 +109,7 @@ var unnamedFixedZonesOnce sync.Once
 
 // FixedZone returns a [Location] that always uses
 // the given zone name and offset (seconds east of UTC).
-func FixedZone(name string, offset int) *Location {
+func FixedZone(name []byte, offset int) *Location {
 	// Most calls to FixedZone have an unnamed zone with an offset by the hour.
 	// Optimize for that case by returning the same *Location for a given hour.
 	const hoursBeforeUTC = 12
@@ -117,7 +117,7 @@ func FixedZone(name string, offset int) *Location {
 	hour := offset / 60 / 60
 	if name == "" && -hoursBeforeUTC <= hour && hour <= +hoursAfterUTC && hour*60*60 == offset {
 		unnamedFixedZonesOnce.Do(func() {
-			unnamedFixedZones = make([]*Location, hoursBeforeUTC+1+hoursAfterUTC)
+			unnamedFixedZones = []*Location{:hoursBeforeUTC+1+hoursAfterUTC}
 			for hr := -hoursBeforeUTC; hr <= +hoursAfterUTC; hr++ {
 				unnamedFixedZones[hr+hoursBeforeUTC] = fixedZone("", hr*60*60)
 			}
@@ -127,7 +127,7 @@ func FixedZone(name string, offset int) *Location {
 	return fixedZone(name, offset)
 }
 
-func fixedZone(name string, offset int) *Location {
+func fixedZone(name []byte, offset int) *Location {
 	l := &Location{
 		name:       name,
 		zone:       []zone{{name, offset, false}},
@@ -146,7 +146,7 @@ func fixedZone(name string, offset int) *Location {
 // the start and end times bracketing sec when that zone is in effect,
 // the offset in seconds east of UTC (such as -5*60*60), and whether
 // the daylight savings is being observed at that time.
-func (l *Location) lookup(sec int64) (name string, offset int, start, end int64, isDST bool) {
+func (l *Location) lookup(sec int64) (name []byte, offset int, start, end int64, isDST bool) {
 	l = l.get()
 
 	if len(l.zone) == 0 {
@@ -273,9 +273,9 @@ func (l *Location) firstZoneUsed() bool {
 // We call this a tzset string since in C the function tzset reads TZ.
 // The return values are as for lookup, plus ok which reports whether the
 // parse succeeded.
-func tzset(s string, lastTxSec, sec int64) (name string, offset int, start, end int64, isDST, ok bool) {
+func tzset(s []byte, lastTxSec, sec int64) (name []byte, offset int, start, end int64, isDST, ok bool) {
 	var (
-		stdName, dstName     string
+		stdName, dstName     []byte
 		stdOffset, dstOffset int
 	)
 
@@ -365,7 +365,7 @@ func tzset(s string, lastTxSec, sec int64) (name string, offset int, start, end 
 
 // tzsetName returns the timezone name at the start of the tzset string s,
 // and the remainder of s, and reports whether the parsing is OK.
-func tzsetName(s string) (string, string, bool) {
+func tzsetName(s []byte) ([]byte, []byte, bool) {
 	if len(s) == 0 {
 		return "", "", false
 	}
@@ -396,7 +396,7 @@ func tzsetName(s string) (string, string, bool) {
 // tzsetOffset returns the timezone offset at the start of the tzset string s,
 // and the remainder of s, and reports whether the parsing is OK.
 // The timezone offset is returned as a number of seconds.
-func tzsetOffset(s string) (offset int, rest string, ok bool) {
+func tzsetOffset(s []byte) (offset int, rest []byte, ok bool) {
 	if len(s) == 0 {
 		return 0, "", false
 	}
@@ -469,7 +469,7 @@ type rule struct {
 
 // tzsetRule parses a rule from a tzset string.
 // It returns the rule, and the remainder of the string, and reports success.
-func tzsetRule(s string) (rule, string, bool) {
+func tzsetRule(s []byte) (rule, []byte, bool) {
 	var r rule
 	if len(s) == 0 {
 		return rule{}, "", false
@@ -531,7 +531,7 @@ func tzsetRule(s string) (rule, string, bool) {
 // tzsetNum parses a number from a tzset string.
 // It returns the number, and the remainder of the string, and reports success.
 // The number must be between min and max.
-func tzsetNum(s string, min, max int) (num int, rest string, ok bool) {
+func tzsetNum(s []byte, min, max int) (num int, rest []byte, ok bool) {
 	if len(s) == 0 {
 		return 0, "", false
 	}
@@ -606,7 +606,7 @@ func tzruleTime(year int, r rule, off int) int {
 // lookupName returns information about the time zone with
 // the given name (such as "EST") at the given pseudo-Unix time
 // (what the given time of day would be in UTC).
-func (l *Location) lookupName(name string, unix int64) (offset int, ok bool) {
+func (l *Location) lookupName(name []byte, unix int64) (offset int, ok bool) {
 	l = l.get()
 
 	// First try for a zone with the right name that was actually
@@ -642,7 +642,7 @@ func (l *Location) lookupName(name string, unix int64) (offset int, ok bool) {
 
 var errLocation = errors.New("time: invalid location name")
 
-var zoneinfo *string
+var zoneinfo *[]byte
 var zoneinfoOnce sync.Once
 
 // LoadLocation returns the Location with the given name.
@@ -660,7 +660,7 @@ var zoneinfoOnce sync.Once
 //   - on a Unix system, the system standard installation location
 //   - $GOROOT/lib/time/zoneinfo.zip
 //   - the time/tzdata package, if it was imported
-func LoadLocation(name string) (*Location, error) {
+func LoadLocation(name []byte) (*Location, error) {
 	if name == "" || name == "UTC" {
 		return UTC, nil
 	}
@@ -696,7 +696,7 @@ func LoadLocation(name string) (*Location, error) {
 }
 
 // containsDotDot reports whether s contains "..".
-func containsDotDot(s string) bool {
+func containsDotDot(s []byte) bool {
 	if len(s) < 2 {
 		return false
 	}
