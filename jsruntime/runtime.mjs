@@ -116,8 +116,10 @@ export function runDeferStack(defers, panicValue) {
 export function zeroValue(typeId) {
   switch (typeId) {
     case 'bool': return false;
-    case 'int': case 'int8': case 'int16': case 'int32': case 'int64':
-    case 'uint': case 'uint8': case 'uint16': case 'uint32': case 'uint64':
+    case 'int64': case 'uint64':
+      return 0n;
+    case 'int': case 'int8': case 'int16': case 'int32':
+    case 'uint': case 'uint8': case 'uint16': case 'uint32':
     case 'float32': case 'float64':
       return 0;
     default:

@@ -113,6 +113,7 @@ function zeroForType(typeId) {
   // Fallback for basic types.
   if (typeId === 'bool') return false;
   if (typeId === 'string') return '';
+  if (typeId === 'int64' || typeId === 'uint64') return 0n;
   if (typeId.startsWith('int') || typeId.startsWith('uint') ||
       typeId.startsWith('float') || typeId === 'uintptr' || typeId === 'byte' || typeId === 'rune') {
     return 0;

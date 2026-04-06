@@ -127,8 +127,8 @@ export function QueryEvents(filterJSON, fn) {
   if (filter.kinds && filter.kinds.length === 1) {
     const kind = filter.kinds[0];
     const idx = store.index('kind_created');
-    const lower = [kind, filter.since || 0];
-    const upper = [kind, filter.until || Date.now() / 1000 + 86400];
+    const lower = [kind, Number(filter.since) || 0];
+    const upper = [kind, Number(filter.until) || Date.now() / 1000 + 86400];
     source = idx.openCursor(IDBKeyRange.bound(lower, upper), 'prev');
   } else {
     const idx = store.index('created_at');
@@ -203,7 +203,7 @@ export function QueryDMs(peer, limit, until, fn) {
   const idx = store.index('peer_created');
   const results = [];
   const max = limit || 50;
-  const upper = until > 0 ? until : Date.now() / 1000 + 86400;
+  const upper = Number(until) > 0 ? Number(until) : Date.now() / 1000 + 86400;
   const range = IDBKeyRange.bound([peer, 0], [peer, upper]);
   const req = idx.openCursor(range, 'prev');
   req.onsuccess = (e) => {

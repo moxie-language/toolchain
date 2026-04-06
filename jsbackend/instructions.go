@@ -1261,7 +1261,7 @@ func intTypeInfo(t types.Type) (int, bool) {
 	case types.Uint64:
 		return 64, true
 	case types.Uint, types.Uintptr:
-		return 64, true // Go int is 64-bit; in JS we treat uint as 64-bit
+		return 32, true // Moxie: int/uint are always 32-bit
 	case types.Int8:
 		return 8, false
 	case types.Int16:
@@ -1271,7 +1271,7 @@ func intTypeInfo(t types.Type) (int, bool) {
 	case types.Int64:
 		return 64, false
 	case types.Int:
-		return 64, false
+		return 32, false // Moxie: int/uint are always 32-bit
 	}
 	return 0, false
 }

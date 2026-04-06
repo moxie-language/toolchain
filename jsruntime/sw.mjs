@@ -340,11 +340,11 @@ export function ClearTimeout(timerId) {
 // --- Time ---
 
 export function NowSeconds() {
-  return Math.floor(Date.now() / 1000);
+  return BigInt(Math.floor(Date.now() / 1000));
 }
 
 export function NowMillis() {
-  return Date.now();
+  return BigInt(Date.now());
 }
 
 // --- SW globals ---

@@ -72,8 +72,9 @@ export function gosched() {
 }
 
 // Sleep for a duration (nanoseconds, but we convert to ms).
+// ns may be BigInt (int64) or Number.
 export function sleep(ns) {
-  const ms = Math.max(0, ns / 1_000_000);
+  const ms = Math.max(0, Number(ns) / 1_000_000);
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 

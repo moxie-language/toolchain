@@ -32,7 +32,7 @@ export function CreateTextNode(text) {
 
 export function GetElementById(id) {
   const el = document.getElementById(id);
-  if (!el) return -1;
+  if (!el) return 0;
   const handle = _nextId++;
   _elements.set(handle, el);
   return handle;
@@ -40,7 +40,7 @@ export function GetElementById(id) {
 
 export function QuerySelector(sel) {
   const el = document.querySelector(sel);
-  if (!el) return -1;
+  if (!el) return 0;
   const handle = _nextId++;
   _elements.set(handle, el);
   return handle;
@@ -401,7 +401,7 @@ export function PickFileText(accept, fn) {
 
 // NowSeconds returns current Unix time in seconds.
 export function NowSeconds() {
-  return Math.floor(Date.now() / 1000);
+  return BigInt(Math.floor(Date.now() / 1000));
 }
 
 // Get raw element (for advanced use within JS runtime only).
