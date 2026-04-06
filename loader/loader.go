@@ -216,9 +216,8 @@ func (p *Program) Parse() error {
 		}
 	}
 
-	// Inject builtins into the main package so user code
-	// can call spawn without an import.
-	p.injectSpawnBuiltin()
+	// spawn is a true builtin (patched into go/types universe scope),
+	// no injection needed — available in all packages like make/append.
 
 	// Moxie AST rewrite: string literals → []byte() in user and moxie-pure packages.
 	for _, pkg := range p.sorted {

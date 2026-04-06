@@ -80,6 +80,13 @@ func mxListPackages(config *compileopts.Config, goroot string, inputPkg string) 
 		return nil, err
 	}
 
+	// The moxie package is an implicit dependency — the compiler needs it
+	// to look up the Codec interface for spawn-boundary type checking.
+	// Like runtime, it lives in the synthetic GOROOT at src/moxie/.
+	if err := r.walk("moxie", ""); err != nil {
+		return nil, err
+	}
+
 	err = r.walk(inputPkg, wd)
 	if err != nil {
 		return nil, err

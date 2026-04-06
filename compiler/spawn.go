@@ -14,33 +14,29 @@ import (
 	"tinygo.org/x/go-llvm"
 )
 
-// createSpawn handles moxie.Spawn(fn, args...) calls. The compiler intercepts
-// these and emits a call to runtime.spawnDomain with the function pointer and
-// serialized arguments.
+// createSpawn handles spawn(fn, args...) builtin calls. The compiler emits
+// a call to runtime.spawnDomain with the function pointer and serialized
+// arguments.
+//
+// As a builtin, the SSA passes args directly — no MakeInterface wrapping,
+// no variadic slice packing.
 //
 // If the first argument is a string constant, it specifies the transport:
 //   spawn("local", fn, args...)  — fork+socketpair (default)
 //   spawn("pipe", fn, args...)   — alias for local
-//   spawn("tcp://...", fn, args...) — network transport (not yet implemented)
 //   spawn(fn, args...)           — implicit local
-//
-// Because Spawn takes interface{} params, the SSA wraps arguments in
-// MakeInterface. We look through this wrapping to find the actual function.
 func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	if len(instr.Args) < 1 {
-		b.addError(instr.Pos(), "moxie.Spawn requires at least a function argument")
+		b.addError(instr.Pos(), "spawn requires at least a function argument")
 		return llvm.Value{}, nil
 	}
 
-	// Check if the first positional argument (fn) is a transport string.
-	// spawn signature: func spawn(fn interface{}, args ...interface{})
-	// With transport: spawn("pipe", worker, ch) → fn="pipe", args=[worker, ch]
-	// Without:        spawn(worker, ch) → fn=worker, args=[ch]
+	// Check if the first argument is a transport string constant.
 	transport := "local"
-	hasTransport := false
+	argStart := 0 // index of the function argument
 	if transportStr, ok := extractTransportString(instr.Args[0]); ok {
 		transport = transportStr
-		hasTransport = true
+		argStart = 1
 	}
 
 	// Validate transport.
@@ -56,35 +52,14 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		return llvm.Value{}, nil
 	}
 
-	// Extract concrete values from the variadic slice.
-	allConcrete := extractSpawnSSAArgs(instr)
-
-	// When transport is present, the function is the first element of the
-	// variadic (allConcrete[0]), and the actual args are allConcrete[1:].
-	// When not present, the function is instr.Args[0] and args are allConcrete.
-	var fnArg ssa.Value
-	var concreteArgs []ssa.Value
-	if hasTransport {
-		if len(allConcrete) < 1 {
-			b.addError(instr.Pos(), "moxie.Spawn requires a function argument after transport string")
-			return llvm.Value{}, nil
-		}
-		fnArg = allConcrete[0]
-		concreteArgs = allConcrete[1:]
-	} else {
-		fnArg = instr.Args[0]
-		if mi, ok := fnArg.(*ssa.MakeInterface); ok {
-			fnArg = mi.X
-		}
-		concreteArgs = allConcrete
+	if argStart >= len(instr.Args) {
+		b.addError(instr.Pos(), "spawn requires a function argument after transport string")
+		return llvm.Value{}, nil
 	}
 
+	// Extract the function argument.
+	fnArg := instr.Args[argStart]
 	var targetFn *ssa.Function
-
-	// Look through MakeInterface to find the function value.
-	if mi, ok := fnArg.(*ssa.MakeInterface); ok {
-		fnArg = mi.X
-	}
 	switch v := fnArg.(type) {
 	case *ssa.Function:
 		targetFn = v
@@ -95,14 +70,28 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	}
 
 	if targetFn == nil {
-		b.addError(instr.Pos(), "moxie.Spawn: first argument must be a static function (dynamic function values not yet supported)")
+		b.addError(instr.Pos(), "spawn: first argument must be a static function (dynamic function values not yet supported)")
 		return llvm.Value{}, nil
 	}
 
-	// Validate that the function signature's parameters are spawn-safe.
+	// Data args are everything after the function.
+	concreteArgs := instr.Args[argStart+1:]
+
+	// Look up the moxie.Codec interface for spawn-boundary type checking.
+	var codecIface *types.Interface
+	if moxiePkg := b.program.ImportedPackage("moxie"); moxiePkg != nil {
+		if obj := moxiePkg.Pkg.Scope().Lookup("Codec"); obj != nil {
+			if iface, ok := obj.Type().Underlying().(*types.Interface); ok {
+				codecIface = iface
+			}
+		}
+	}
+
+	// Validate that the function signature's parameters are spawn-safe
+	// and implement moxie.Codec.
 	sig := targetFn.Signature
 	for i := 0; i < sig.Params().Len(); i++ {
-		if err := validateSpawnArg(sig.Params().At(i).Type(), i); err != nil {
+		if err := validateSpawnArg(sig.Params().At(i).Type(), i, codecIface); err != nil {
 			b.addError(instr.Pos(), err.Error())
 			return llvm.Value{}, nil
 		}
@@ -126,7 +115,6 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	}
 
 	// Reject buffered channels across spawn boundaries.
-	// Only unbuffered channels are allowed — they become synchronous IPC endpoints.
 	for i, arg := range concreteArgs {
 		if _, isChan := arg.Type().Underlying().(*types.Chan); !isChan {
 			continue
@@ -140,7 +128,6 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 					return llvm.Value{}, nil
 				}
 			} else {
-				// Dynamic buffer size — can't verify it's unbuffered at compile time.
 				b.addError(instr.Pos(), fmt.Sprintf(
 					"spawn: argument %d has dynamic channel buffer size — only unbuffered channels (make(chan T)) allowed across spawn boundaries",
 					i+1))
@@ -168,134 +155,69 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 
 	// Return a lifecycle channel (chan struct{}).
 	// TODO: wire this to the socketpair so close propagates.
-	// For now, return a nil channel.
 	chanType := b.getLLVMRuntimeType("channel")
 	return llvm.ConstPointerNull(llvm.PointerType(chanType, 0)), nil
 }
 
-// extractSpawnArgs recovers the concrete typed values from the variadic
-// []interface{} argument of a spawn call.
-//
-// The SSA builder transforms spawn(worker, int32(42)) into:
-//
-//	t0 = local [1]interface{} (varargs)
-//	t1 = &t0[0:int]
-//	*t1 = MakeInterface(int32(42))
-//	t2 = slice t0[:]
-//	spawn(MakeInterface(worker), t2)
-//
-// We walk: Slice → Alloc → referrers(IndexAddr) → referrers(Store) → unwrap MakeInterface
-func extractSpawnSSAArgs(instr *ssa.CallCommon) []ssa.Value {
-	if len(instr.Args) < 2 {
-		return nil
-	}
-
-	variadicArg := instr.Args[1]
-
-	slice, ok := variadicArg.(*ssa.Slice)
-	if !ok {
-		return nil
-	}
-	alloc, ok := slice.X.(*ssa.Alloc)
-	if !ok {
-		return nil
-	}
-
-	refs := alloc.Referrers()
-	if refs == nil {
-		return nil
-	}
-
-	type indexedValue struct {
-		index int64
-		value ssa.Value
-	}
-	var indexed []indexedValue
-
-	for _, ref := range *refs {
-		ia, ok := ref.(*ssa.IndexAddr)
-		if !ok {
-			continue
-		}
-		iaRefs := ia.Referrers()
-		if iaRefs == nil {
-			continue
-		}
-		for _, iaRef := range *iaRefs {
-			store, ok := iaRef.(*ssa.Store)
-			if !ok || store.Addr != ia {
-				continue
-			}
-			idx := int64(0)
-			if constIdx, ok := ia.Index.(*ssa.Const); ok {
-				if v, ok := constant.Int64Val(constIdx.Value); ok {
-					idx = v
-				}
-			}
-			val := store.Val
-			if mi, ok := val.(*ssa.MakeInterface); ok {
-				val = mi.X
-			}
-			indexed = append(indexed, indexedValue{idx, val})
-		}
-	}
-
-	// Sort by index (insertion sort — N is always small).
-	for i := 1; i < len(indexed); i++ {
-		for j := i; j > 0 && indexed[j].index < indexed[j-1].index; j-- {
-			indexed[j], indexed[j-1] = indexed[j-1], indexed[j]
-		}
-	}
-
-	result := make([]ssa.Value, len(indexed))
-	for i, iv := range indexed {
-		result[i] = iv.value
-	}
-	return result
-}
-
 // validateSpawnArg checks that a type is safe to pass across a spawn boundary.
-// Channels are allowed as bare top-level parameters (they become IPC channels).
-// No interface types anywhere — they erase concrete types and make serialization
-// ambiguous. Slices/maps are allowed if their element types are spawn-safe.
-func validateSpawnArg(t types.Type, argIndex int) error {
+// Channels are allowed as bare top-level parameters (they become IPC channels);
+// their element types must implement moxie.Codec. Non-channel arguments must
+// implement moxie.Codec directly. No interface types anywhere.
+func validateSpawnArg(t types.Type, argIndex int, codec *types.Interface) error {
 	if ch, ok := t.Underlying().(*types.Chan); ok {
-		// Top-level channel: validate element type has no pointers/channels.
-		return validateSpawnElem(ch.Elem(), argIndex)
+		// Top-level channel: element type must be spawn-safe and implement Codec.
+		return validateSpawnElem(ch.Elem(), argIndex, codec)
 	}
-	return validateSpawnElem(t, argIndex)
+	return validateSpawnElem(t, argIndex, codec)
 }
 
 // validateSpawnElem rejects types that can't be serialized across a spawn
-// boundary. Channels are rejected here — they're only allowed at the top level
-// (checked by validateSpawnArg).
-func validateSpawnElem(t types.Type, argIndex int) error {
+// boundary. Named types that implement moxie.Codec are accepted immediately.
+// Channels are rejected here — they're only allowed at the top level.
+func validateSpawnElem(t types.Type, argIndex int, codec *types.Interface) error {
+	// Named type that implements Codec — accept directly.
+	// This handles moxie.Int32, moxie.Bytes, user structs with Codec methods, etc.
+	if codec != nil && implementsCodec(t, codec) {
+		return nil
+	}
+
 	switch ut := t.Underlying().(type) {
 	case *types.Pointer:
 		return fmt.Errorf("spawn: argument %d is a pointer type %s (not allowed across spawn boundary)", argIndex+1, ut)
 	case *types.Chan:
 		return fmt.Errorf("spawn: argument %d contains a nested channel (channels must be top-level parameters)", argIndex+1)
 	case *types.Slice:
-		return validateSpawnElem(ut.Elem(), argIndex)
+		return validateSpawnElem(ut.Elem(), argIndex, codec)
 	case *types.Map:
-		if err := validateSpawnElem(ut.Key(), argIndex); err != nil {
+		if err := validateSpawnElem(ut.Key(), argIndex, codec); err != nil {
 			return err
 		}
-		return validateSpawnElem(ut.Elem(), argIndex)
+		return validateSpawnElem(ut.Elem(), argIndex, codec)
 	case *types.Signature:
 		return fmt.Errorf("spawn: argument %d is a function type (not allowed across spawn boundary)", argIndex+1)
 	case *types.Interface:
 		return fmt.Errorf("spawn: argument %d is an interface type (not allowed across spawn boundary)", argIndex+1)
 	case *types.Struct:
 		for i := 0; i < ut.NumFields(); i++ {
-			if err := validateSpawnElem(ut.Field(i).Type(), argIndex); err != nil {
+			if err := validateSpawnElem(ut.Field(i).Type(), argIndex, codec); err != nil {
 				return err
 			}
 		}
+		return nil
 	case *types.Array:
-		return validateSpawnElem(ut.Elem(), argIndex)
+		return validateSpawnElem(ut.Elem(), argIndex, codec)
+	}
+
+	// Leaf type that doesn't implement Codec.
+	if codec != nil {
+		return fmt.Errorf("spawn: argument %d type %s does not implement moxie.Codec (use moxie.Int32, moxie.Uint64, etc.)", argIndex+1, t)
 	}
 	return nil
+}
+
+// implementsCodec checks whether t or *t satisfies the Codec interface.
+func implementsCodec(t types.Type, codec *types.Interface) bool {
+	return types.Implements(t, codec) || types.Implements(types.NewPointer(t), codec)
 }
 
 // extractTransportString checks if an SSA value is a string constant

@@ -225,15 +225,33 @@ func (b *builder) checkSpawnMoveRestriction() {
 			if !ok {
 				continue
 			}
-			callee := call.Call.StaticCallee()
-			if callee == nil || callee.Name() != "spawn" {
+			// Detect spawn builtin calls.
+			isSpawn := false
+			var spawnArgs []ssa.Value
+			if builtin, ok := call.Call.Value.(*ssa.Builtin); ok && builtin.Name() == "spawn" {
+				// Builtin spawn: args are direct in call.Call.Args.
+				// Skip the function arg (index 0, or 1 if transport string).
+				args := call.Call.Args
+				start := 0
+				if len(args) > 0 {
+					if _, ok := args[0].(*ssa.Const); ok {
+						// Could be transport string — skip it + fn.
+						start = 2
+					} else {
+						// fn is args[0], data starts at 1.
+						start = 1
+					}
+				}
+				if start < len(args) {
+					spawnArgs = args[start:]
+				}
+				isSpawn = true
+			}
+			if !isSpawn {
 				continue
 			}
 
-			args := extractSpawnSSAArgs(&call.Call)
-			exempt := spawnVarargsInstrs(&call.Call)
-
-			for _, arg := range args {
+			for _, arg := range spawnArgs {
 				if _, isConst := arg.(*ssa.Const); isConst {
 					continue
 				}
@@ -249,9 +267,6 @@ func (b *builder) checkSpawnMoveRestriction() {
 				for _, ref := range *refs {
 					ri, ok := ref.(ssa.Instruction)
 					if !ok {
-						continue
-					}
-					if exempt[ri] {
 						continue
 					}
 					// Same block: check if the referrer comes after spawn.
@@ -343,50 +358,3 @@ func (b *builder) checkChannelCompleteness() {
 	}
 }
 
-// spawnVarargsInstrs collects all SSA instructions that are part of the
-// spawn call's variadic argument construction. These are exempt from the
-// move restriction since they happen before the spawn.
-func spawnVarargsInstrs(instr *ssa.CallCommon) map[ssa.Instruction]bool {
-	set := make(map[ssa.Instruction]bool)
-	if len(instr.Args) < 2 {
-		return set
-	}
-	slice, ok := instr.Args[1].(*ssa.Slice)
-	if !ok {
-		return set
-	}
-	set[slice] = true
-	alloc, ok := slice.X.(*ssa.Alloc)
-	if !ok {
-		return set
-	}
-	set[alloc] = true
-	refs := alloc.Referrers()
-	if refs == nil {
-		return set
-	}
-	for _, ref := range *refs {
-		ia, ok := ref.(*ssa.IndexAddr)
-		if !ok {
-			continue
-		}
-		set[ia] = true
-		iaRefs := ia.Referrers()
-		if iaRefs == nil {
-			continue
-		}
-		for _, iaRef := range *iaRefs {
-			if store, ok := iaRef.(*ssa.Store); ok && store.Addr == ia {
-				set[store] = true
-				if mi, ok := store.Val.(*ssa.MakeInterface); ok {
-					set[mi] = true
-				}
-			}
-		}
-	}
-	// Also exempt the fn arg's MakeInterface.
-	if mi, ok := instr.Args[0].(*ssa.MakeInterface); ok {
-		set[mi] = true
-	}
-	return set
-}

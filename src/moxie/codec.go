@@ -1,0 +1,373 @@
+package moxie
+
+import (
+	"io"
+	"unsafe"
+)
+
+// Codec is the interface that types must satisfy to cross a spawn boundary.
+// Channel element types and direct arguments to spawn must implement both
+// methods. The compiler enforces this statically.
+type Codec interface {
+	EncodeTo(w io.Writer) error
+	DecodeFrom(r io.Reader) error
+}
+
+// ── single-byte types (no endianness) ──────────────────────────
+
+type Bool bool
+
+func (v Bool) EncodeTo(w io.Writer) error {
+	var b [1]byte
+	if v {
+		b[0] = 1
+	}
+	_, err := w.Write(b[:])
+	return err
+}
+
+func (v *Bool) DecodeFrom(r io.Reader) error {
+	var b [1]byte
+	_, err := io.ReadFull(r, b[:])
+	*v = b[0] != 0
+	return err
+}
+
+type Int8 int8
+
+func (v Int8) EncodeTo(w io.Writer) error {
+	_, err := w.Write([]byte{byte(v)})
+	return err
+}
+
+func (v *Int8) DecodeFrom(r io.Reader) error {
+	var b [1]byte
+	_, err := io.ReadFull(r, b[:])
+	*v = Int8(b[0])
+	return err
+}
+
+type Uint8 uint8
+
+func (v Uint8) EncodeTo(w io.Writer) error {
+	_, err := w.Write([]byte{byte(v)})
+	return err
+}
+
+func (v *Uint8) DecodeFrom(r io.Reader) error {
+	var b [1]byte
+	_, err := io.ReadFull(r, b[:])
+	*v = Uint8(b[0])
+	return err
+}
+
+// ── 16-bit ─────────────────────────────────────────────────────
+
+type Int16 int16
+
+func (v Int16) EncodeTo(w io.Writer) error {
+	var b [2]byte
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
+	_, err := w.Write(b[:])
+	return err
+}
+
+func (v *Int16) DecodeFrom(r io.Reader) error {
+	var b [2]byte
+	_, err := io.ReadFull(r, b[:])
+	*v = Int16(b[0]) | Int16(b[1])<<8
+	return err
+}
+
+type Uint16 uint16
+
+func (v Uint16) EncodeTo(w io.Writer) error {
+	var b [2]byte
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
+	_, err := w.Write(b[:])
+	return err
+}
+
+func (v *Uint16) DecodeFrom(r io.Reader) error {
+	var b [2]byte
+	_, err := io.ReadFull(r, b[:])
+	*v = Uint16(b[0]) | Uint16(b[1])<<8
+	return err
+}
+
+type BigInt16 int16
+
+func (v BigInt16) EncodeTo(w io.Writer) error {
+	var b [2]byte
+	b[0] = byte(v >> 8)
+	b[1] = byte(v)
+	_, err := w.Write(b[:])
+	return err
+}
+
+func (v *BigInt16) DecodeFrom(r io.Reader) error {
+	var b [2]byte
+	_, err := io.ReadFull(r, b[:])
+	*v = BigInt16(b[0])<<8 | BigInt16(b[1])
+	return err
+}
+
+type BigUint16 uint16
+
+func (v BigUint16) EncodeTo(w io.Writer) error {
+	var b [2]byte
+	b[0] = byte(v >> 8)
+	b[1] = byte(v)
+	_, err := w.Write(b[:])
+	return err
+}
+
+func (v *BigUint16) DecodeFrom(r io.Reader) error {
+	var b [2]byte
+	_, err := io.ReadFull(r, b[:])
+	*v = BigUint16(b[0])<<8 | BigUint16(b[1])
+	return err
+}
+
+// ── 32-bit ─────────────────────────────────────────────────────
+
+type Int32 int32
+
+func (v Int32) EncodeTo(w io.Writer) error {
+	var b [4]byte
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
+	b[2] = byte(v >> 16)
+	b[3] = byte(v >> 24)
+	_, err := w.Write(b[:])
+	return err
+}
+
+func (v *Int32) DecodeFrom(r io.Reader) error {
+	var b [4]byte
+	_, err := io.ReadFull(r, b[:])
+	*v = Int32(b[0]) | Int32(b[1])<<8 | Int32(b[2])<<16 | Int32(b[3])<<24
+	return err
+}
+
+type Uint32 uint32
+
+func (v Uint32) EncodeTo(w io.Writer) error {
+	var b [4]byte
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
+	b[2] = byte(v >> 16)
+	b[3] = byte(v >> 24)
+	_, err := w.Write(b[:])
+	return err
+}
+
+func (v *Uint32) DecodeFrom(r io.Reader) error {
+	var b [4]byte
+	_, err := io.ReadFull(r, b[:])
+	*v = Uint32(b[0]) | Uint32(b[1])<<8 | Uint32(b[2])<<16 | Uint32(b[3])<<24
+	return err
+}
+
+type BigInt32 int32
+
+func (v BigInt32) EncodeTo(w io.Writer) error {
+	var b [4]byte
+	b[0] = byte(v >> 24)
+	b[1] = byte(v >> 16)
+	b[2] = byte(v >> 8)
+	b[3] = byte(v)
+	_, err := w.Write(b[:])
+	return err
+}
+
+func (v *BigInt32) DecodeFrom(r io.Reader) error {
+	var b [4]byte
+	_, err := io.ReadFull(r, b[:])
+	*v = BigInt32(b[0])<<24 | BigInt32(b[1])<<16 | BigInt32(b[2])<<8 | BigInt32(b[3])
+	return err
+}
+
+type BigUint32 uint32
+
+func (v BigUint32) EncodeTo(w io.Writer) error {
+	var b [4]byte
+	b[0] = byte(v >> 24)
+	b[1] = byte(v >> 16)
+	b[2] = byte(v >> 8)
+	b[3] = byte(v)
+	_, err := w.Write(b[:])
+	return err
+}
+
+func (v *BigUint32) DecodeFrom(r io.Reader) error {
+	var b [4]byte
+	_, err := io.ReadFull(r, b[:])
+	*v = BigUint32(b[0])<<24 | BigUint32(b[1])<<16 | BigUint32(b[2])<<8 | BigUint32(b[3])
+	return err
+}
+
+// ── 64-bit ─────────────────────────────────────────────────────
+
+type Int64 int64
+
+func (v Int64) EncodeTo(w io.Writer) error {
+	var b [8]byte
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
+	b[2] = byte(v >> 16)
+	b[3] = byte(v >> 24)
+	b[4] = byte(v >> 32)
+	b[5] = byte(v >> 40)
+	b[6] = byte(v >> 48)
+	b[7] = byte(v >> 56)
+	_, err := w.Write(b[:])
+	return err
+}
+
+func (v *Int64) DecodeFrom(r io.Reader) error {
+	var b [8]byte
+	_, err := io.ReadFull(r, b[:])
+	*v = Int64(b[0]) | Int64(b[1])<<8 | Int64(b[2])<<16 | Int64(b[3])<<24 |
+		Int64(b[4])<<32 | Int64(b[5])<<40 | Int64(b[6])<<48 | Int64(b[7])<<56
+	return err
+}
+
+type Uint64 uint64
+
+func (v Uint64) EncodeTo(w io.Writer) error {
+	var b [8]byte
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
+	b[2] = byte(v >> 16)
+	b[3] = byte(v >> 24)
+	b[4] = byte(v >> 32)
+	b[5] = byte(v >> 40)
+	b[6] = byte(v >> 48)
+	b[7] = byte(v >> 56)
+	_, err := w.Write(b[:])
+	return err
+}
+
+func (v *Uint64) DecodeFrom(r io.Reader) error {
+	var b [8]byte
+	_, err := io.ReadFull(r, b[:])
+	*v = Uint64(b[0]) | Uint64(b[1])<<8 | Uint64(b[2])<<16 | Uint64(b[3])<<24 |
+		Uint64(b[4])<<32 | Uint64(b[5])<<40 | Uint64(b[6])<<48 | Uint64(b[7])<<56
+	return err
+}
+
+type BigInt64 int64
+
+func (v BigInt64) EncodeTo(w io.Writer) error {
+	var b [8]byte
+	b[0] = byte(v >> 56)
+	b[1] = byte(v >> 48)
+	b[2] = byte(v >> 40)
+	b[3] = byte(v >> 32)
+	b[4] = byte(v >> 24)
+	b[5] = byte(v >> 16)
+	b[6] = byte(v >> 8)
+	b[7] = byte(v)
+	_, err := w.Write(b[:])
+	return err
+}
+
+func (v *BigInt64) DecodeFrom(r io.Reader) error {
+	var b [8]byte
+	_, err := io.ReadFull(r, b[:])
+	*v = BigInt64(b[0])<<56 | BigInt64(b[1])<<48 | BigInt64(b[2])<<40 | BigInt64(b[3])<<32 |
+		BigInt64(b[4])<<24 | BigInt64(b[5])<<16 | BigInt64(b[6])<<8 | BigInt64(b[7])
+	return err
+}
+
+type BigUint64 uint64
+
+func (v BigUint64) EncodeTo(w io.Writer) error {
+	var b [8]byte
+	b[0] = byte(v >> 56)
+	b[1] = byte(v >> 48)
+	b[2] = byte(v >> 40)
+	b[3] = byte(v >> 32)
+	b[4] = byte(v >> 24)
+	b[5] = byte(v >> 16)
+	b[6] = byte(v >> 8)
+	b[7] = byte(v)
+	_, err := w.Write(b[:])
+	return err
+}
+
+func (v *BigUint64) DecodeFrom(r io.Reader) error {
+	var b [8]byte
+	_, err := io.ReadFull(r, b[:])
+	*v = BigUint64(b[0])<<56 | BigUint64(b[1])<<48 | BigUint64(b[2])<<40 | BigUint64(b[3])<<32 |
+		BigUint64(b[4])<<24 | BigUint64(b[5])<<16 | BigUint64(b[6])<<8 | BigUint64(b[7])
+	return err
+}
+
+// ── float ──────────────────────────────────────────────────────
+
+type Float32 float32
+
+func (v Float32) EncodeTo(w io.Writer) error {
+	return Uint32(*(*uint32)(unsafe.Pointer(&v))).EncodeTo(w)
+}
+
+func (v *Float32) DecodeFrom(r io.Reader) error {
+	return (*Uint32)(unsafe.Pointer(v)).DecodeFrom(r)
+}
+
+type Float64 float64
+
+func (v Float64) EncodeTo(w io.Writer) error {
+	return Uint64(*(*uint64)(unsafe.Pointer(&v))).EncodeTo(w)
+}
+
+func (v *Float64) DecodeFrom(r io.Reader) error {
+	return (*Uint64)(unsafe.Pointer(v)).DecodeFrom(r)
+}
+
+type BigFloat32 float32
+
+func (v BigFloat32) EncodeTo(w io.Writer) error {
+	return BigUint32(*(*uint32)(unsafe.Pointer(&v))).EncodeTo(w)
+}
+
+func (v *BigFloat32) DecodeFrom(r io.Reader) error {
+	return (*BigUint32)(unsafe.Pointer(v)).DecodeFrom(r)
+}
+
+type BigFloat64 float64
+
+func (v BigFloat64) EncodeTo(w io.Writer) error {
+	return BigUint64(*(*uint64)(unsafe.Pointer(&v))).EncodeTo(w)
+}
+
+func (v *BigFloat64) DecodeFrom(r io.Reader) error {
+	return (*BigUint64)(unsafe.Pointer(v)).DecodeFrom(r)
+}
+
+// ── bytes (string = []byte in moxie) ───────────────────────────
+
+// Bytes is a length-prefixed byte slice. Length is encoded as Uint32 (LE).
+type Bytes []byte
+
+func (v Bytes) EncodeTo(w io.Writer) error {
+	if err := Uint32(len(v)).EncodeTo(w); err != nil {
+		return err
+	}
+	_, err := w.Write(v)
+	return err
+}
+
+func (v *Bytes) DecodeFrom(r io.Reader) error {
+	var n Uint32
+	if err := n.DecodeFrom(r); err != nil {
+		return err
+	}
+	*v = make([]byte, n)
+	_, err := io.ReadFull(r, *v)
+	return err
+}

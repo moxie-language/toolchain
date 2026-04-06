@@ -605,10 +605,7 @@ func (fc *FunctionCompiler) emitStaticCall(callee *ssa.Function, args []ssa.Valu
 		return fmt.Sprintf("$rt.runtime.panic(%s)", argStr)
 	case "recover":
 		return "$rt.runtime.recover()"
-	}
-
-	// Intercept spawn — emit domain spawn for Service Worker isolation.
-	if fullName == "moxie.Spawn" || fullName == "(moxie).Spawn" || callee.Name() == "spawn" {
+	case "spawn":
 		return fc.emitSpawn(callee, args)
 	}
 

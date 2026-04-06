@@ -1,13 +1,14 @@
 package moxie
 
-// Spawn starts fn in a new isolated domain (OS process on native, Service
-// Worker on JS). Arguments are deep-copied across the domain boundary.
-// Channels passed as arguments become IPC channels.
+// spawn is a true builtin (like make, append) — declared in go/types universe
+// scope via patch-gotypes.go. No function stub needed here.
 //
-// The compiler intercepts calls to this function and emits spawn-specific
-// code instead of a regular function call.
-func Spawn(fn interface{}, args ...interface{}) {
-	// This function body is never executed — the compiler replaces the
-	// call with spawn machinery. If somehow reached, panic.
-	panic("moxie.Spawn: compiler failed to intercept spawn call")
-}
+// Usage:
+//   spawn(fn, args...)                 — local fork+socketpair
+//   spawn("local", fn, args...)        — explicit local transport
+//
+// The compiler enforces at compile time:
+//   - fn must be a static function
+//   - data arguments must implement Codec
+//   - channel element types must implement Codec
+//   - no interface{} values cross the boundary

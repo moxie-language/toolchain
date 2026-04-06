@@ -1965,8 +1965,6 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 			if !retval.IsNil() {
 				return retval, nil
 			}
-		case name == "moxie.Spawn" || fn.Name() == "spawn":
-			return b.createSpawn(instr)
 		case strings.HasPrefix(fn.Name(), "__moxie_concat"):
 			return b.createMoxieConcat(instr), nil
 		case strings.HasPrefix(fn.Name(), "__moxie_eq"):
@@ -2012,6 +2010,9 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 		}
 		exported = info.exported || strings.HasPrefix(info.linkName, "llvm.")
 	} else if call, ok := instr.Value.(*ssa.Builtin); ok {
+		if call.Name() == "spawn" {
+			return b.createSpawn(instr)
+		}
 		// Builtin function (append, close, delete, etc.).)
 		var argTypes []types.Type
 		for _, arg := range instr.Args {

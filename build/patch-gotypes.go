@@ -69,6 +69,7 @@ func main() {
 	patchIdentical(dstDir)
 	patchUnify(dstDir)
 	patchTypeTerm(dstDir)
+	patchSpawnBuiltin(dstDir)
 
 	fmt.Fprintf(os.Stderr, "patched go/types in %s\n", dstDir)
 }
@@ -205,6 +206,71 @@ func patchTypeTerm(dir string) {
 	src = mustReplace(f, src,
 		"\treturn Identical(x.typ, u)\n}",
 		"\tif Identical(x.typ, u) {\n\t\treturn true\n\t}\n\t// Moxie: []byte satisfies ~string (string=[]byte unification).\n\tif isString(x.typ) && isByteSlice(t) {\n\t\treturn true\n\t}\n\tif isByteSlice(x.typ) && isString(t) {\n\t\treturn true\n\t}\n\treturn false\n}")
+
+	mustWrite(f, src)
+}
+
+func patchSpawnBuiltin(dir string) {
+	// Patch universe.go: add _Spawn builtin ID and predeclaredFuncs entry.
+	f := filepath.Join(dir, "universe.go")
+	src := mustRead(f)
+
+	// Add _Spawn after _Recover in the builtinId enum.
+	src = mustReplace(f, src,
+		"\t_Recover\n\n\t// package unsafe",
+		"\t_Recover\n\t_Spawn\n\n\t// package unsafe")
+
+	// Add spawn entry in predeclaredFuncs after _Recover.
+	// nargs=1 (minimum: the function), variadic=true, expression (returns chan struct{}).
+	src = mustReplace(f, src,
+		"\t_Recover: {\"recover\", 0, false, statement},",
+		"\t_Recover: {\"recover\", 0, false, statement},\n\t_Spawn:   {\"spawn\", 1, true, expression},")
+
+	mustWrite(f, src)
+
+	// Patch builtins.go: add type-checking handler for spawn.
+	f = filepath.Join(dir, "builtins.go")
+	src = mustRead(f)
+
+	// Insert spawn handler after the _Recover case, before _Add.
+	src = mustReplace(f, src,
+		"\tcase _Recover:\n\t\t// recover() interface{}\n\t\tx.mode = value\n\t\tx.typ = &emptyInterface\n\t\tif check.recordTypes() {\n\t\t\tcheck.recordBuiltinType(call.Fun, makeSig(x.typ))\n\t\t}\n\n\tcase _Add:",
+		`	case _Recover:
+		// recover() interface{}
+		x.mode = value
+		x.typ = &emptyInterface
+		if check.recordTypes() {
+			check.recordBuiltinType(call.Fun, makeSig(x.typ))
+		}
+
+	case _Spawn:
+		// spawn(fn, args...) chan struct{}
+		// spawn("transport", fn, args...) chan struct{}
+		// First argument must be a function or a transport string constant.
+		// Remaining arguments are validated by the compiler at SSA level
+		// (must implement moxie.Codec, channels must have Codec element types).
+		if nargs < 1 {
+			return
+		}
+		if _, ok := under(x.typ).(*Signature); !ok {
+			if !isString(x.typ) {
+				check.errorf(x, InvalidArg, invalidOp+"first argument to spawn must be a function or transport string, got %s", x)
+				return
+			}
+			// Transport string — second arg must be a function.
+			if nargs < 2 {
+				check.errorf(x, WrongArgCount, invalidOp+"spawn with transport string requires a function argument")
+				return
+			}
+			if _, ok := under(args[1].typ).(*Signature); !ok {
+				check.errorf(args[1], InvalidArg, invalidOp+"second argument to spawn must be a function when first is a transport string, got %s", args[1])
+				return
+			}
+		}
+		x.mode = value
+		x.typ = NewChan(SendRecv, NewStruct(nil, nil))
+
+	case _Add:`)
 
 	mustWrite(f, src)
 }
