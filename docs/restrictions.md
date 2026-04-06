@@ -18,6 +18,7 @@ See [REFERENCE.md](../REFERENCE.md) for the complete language reference.
 
 | Builtin | Alternative |
 |---------|------------|
+| `make(T, ...)` | Literal syntax: `[]T{:n}`, `chan T{}`, `map[K]V{}` |
 | `new(T)` | `&T{}` or `var x T; p := &x` |
 | `complex(r, i)` | Not supported. Use separate float fields. |
 | `real(z)` | Not supported. |
@@ -67,7 +68,7 @@ For `[]byte`, the loader rewrites `|` to an internal concat call before type che
 | `chan T{}` | `make(chan T)` | Unbuffered channel |
 | `chan T{n}` | `make(chan T, n)` | Buffered channel with capacity `n` |
 
-The leading `:` in slice literals distinguishes size allocation from composite literals. `make()` still works — these are syntactic sugar rewritten before parsing.
+The leading `:` in slice literals distinguishes size allocation from composite literals. `make()` is a compile error in user code — use literal syntax only.
 
 ### Spawn Boundary Restrictions
 

@@ -58,7 +58,7 @@ buf := []byte{:1024}        // make([]byte, 1024)
 table := []int32{:0:100}    // make([]int32, 0, 100)
 ```
 
-The leading `:` after `{` distinguishes size literals from composite literals. `make()` still works.
+The leading `:` after `{` distinguishes size literals from composite literals.
 
 #### Channel Literals
 
@@ -67,7 +67,7 @@ ch := chan int32{}           // make(chan int32)       — unbuffered
 ch := chan int32{10}         // make(chan int32, 10)   — buffered
 ```
 
-`make()` still works. These are syntactic sugar.
+These replace `make()` which is not available in user code.
 
 ---
 
@@ -401,7 +401,7 @@ func worker(results chan moxie.Int32) {
 }
 
 func main() {
-    results := make(chan moxie.Int32)
+    results := chan moxie.Int32{}
     spawn(worker, results)
     v := <-results
     println(v)
@@ -621,8 +621,9 @@ Key flags: `-o output`, `-opt [0\|1\|2\|s\|z]`, `-gc [none\|leaking\|conservativ
 | Memory model | No shared memory between domains. |
 | GC | Boehm conservative, per-domain heap. |
 | Slice equality | `==` works for any comparable element type. |
-| Slice literals | `[]T{:n}` = `make([]T, n)`. `[]T{:n:c}` = `make([]T, n, c)`. |
-| Channel literals | `chan T{}` = `make(chan T)`. `chan T{n}` = `make(chan T, n)`. |
+| Slice literals | `[]T{:n}` (length n). `[]T{:n:c}` (length n, capacity c). |
+| Channel literals | `chan T{}` (unbuffered). `chan T{n}` (buffered, capacity n). |
+| `make()` | Compile error. Use literal syntax. |
 | `new(T)` | Compile error. Use `&T{}`. |
 | `fallthrough` | Compile error. Use `case A, B:`. |
 | `import "strings"` | Compile error. Use `"bytes"`. |

@@ -242,8 +242,9 @@ func rewriteChanLiterals(src []byte, fset *token.FileSet) []byte {
 		// Write everything before this channel literal.
 		result.Write(src[lastEnd:toks[chanIdx].pos])
 
-		// Write the replacement: make(chan T) or make(chan T, N).
-		result.WriteString("make(chan ")
+		// Write the replacement: (make)(chan T) or (make)(chan T, N).
+		// Parenthesized (make) so AST restriction check skips generated calls.
+		result.WriteString("(make)(chan ")
 		result.WriteString(typeText)
 		if bufExpr != "" {
 			result.WriteString(", ")
@@ -408,7 +409,7 @@ func rewriteSliceLiterals(src []byte, fset *token.FileSet) []byte {
 			}
 
 			result.Write(src[lastEnd:toks[lbrackIdx].pos])
-			result.WriteString("make(")
+			result.WriteString("(make)(")
 			result.WriteString(typeText)
 			result.WriteString(", ")
 			result.WriteString(lenExpr)
@@ -430,7 +431,7 @@ func rewriteSliceLiterals(src []byte, fset *token.FileSet) []byte {
 			}
 
 			result.Write(src[lastEnd:toks[lbrackIdx].pos])
-			result.WriteString("make(")
+			result.WriteString("(make)(")
 			result.WriteString(typeText)
 			result.WriteString(", ")
 			result.WriteString(lenExpr)

@@ -22,10 +22,11 @@ var restrictedImports = map[string]string{
 }
 
 // restrictedBuiltins maps Go builtins to the Moxie alternative.
-// Note: make is NOT listed here because the compiler generates make() calls
-// from Moxie syntax ([]T{:n} → make([]T, n)). Channel and map makes are
-// caught at SSA level (MakeChan, MakeMap) instead.
+// The loader rewrites Moxie literal syntax to (make)(...) — parenthesized
+// form that the AST check skips. User-written make(...) has a bare Ident
+// which this check catches.
 var restrictedBuiltins = map[string]string{
+	"make":    "use literal syntax: []T{:n}, chan T{}, chan T{n}",
 	"new":     "use composite literal with & or var declaration",
 	"complex": "complex numbers not supported in moxie",
 	"real":    "complex numbers not supported in moxie",
@@ -112,11 +113,9 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 			}
 		}
 
-	// MakeChan and MakeMap are NOT checked at SSA level — both make(chan T)
-	// and chan T{} produce MakeChan; both make(map[K]V) and map[K]V{} produce
-	// MakeMap. AST-level checks in checkASTRestrictions distinguish them.
-	// MakeSlice is NOT restricted — the compiler generates make() calls from
-	// Moxie slice literal syntax ([]T{:n} → make([]T, n)).
+	// MakeChan, MakeMap, MakeSlice are NOT checked at SSA level — the loader
+	// rewrites Moxie literal syntax to (make)() calls. User-written make() is
+	// caught at AST level (restrictedBuiltins) where the bare Ident is visible.
 
 	case *ssa.BinOp:
 		// Reject + on non-numeric types (strings use | for concatenation).
@@ -128,10 +127,8 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 			}
 		}
 
-	// Note: new(T) is caught by AST check (restrictedBuiltins), not SSA.
-		// SSA Alloc with Comment="new" has false positives when a local
-		// variable named "new" has its address taken (&new).
-		// Restricted types (uintptr, complex) are also caught by AST checks.
+	// Note: new(T) and make() are caught by AST check (restrictedBuiltins),
+		// not SSA. Restricted types (uintptr, complex) are also AST-checked.
 	}
 }
 
@@ -207,12 +204,43 @@ func (b *builder) checkASTRestrictions() {
 		case *ast.CallExpr:
 			if ident, ok := node.Fun.(*ast.Ident); ok {
 				if reason, restricted := restrictedBuiltins[ident.Name]; restricted {
+					// Bare make() — exempt .go files and stdlib .mx overlays.
+					// Loader-generated (make)() has ParenExpr as Fun, not bare Ident.
+					if ident.Name == "make" {
+						if isMakeExempt(b.fn.Pkg, b.program.Fset, ident.Pos()) {
+							return true
+						}
+					}
 					b.addError(ident.Pos(), "moxie: '"+ident.Name+"' is not allowed: "+reason)
 				}
 			}
 		}
 		return true
 	})
+}
+
+// isMakeExempt returns true if a make() call at the given position should
+// be allowed. Exempt: .go files (stdlib), stdlib .mx overlays (package
+// import path has no dots), and vendored stdlib dependencies (golang.org/x/).
+func isMakeExempt(pkg *ssa.Package, fset *token.FileSet, pos token.Pos) bool {
+	position := fset.Position(pos)
+	if !strings.HasSuffix(position.Filename, ".mx") {
+		return true // .go files always allowed
+	}
+	// Stdlib packages have simple paths (no dots): bytes, fmt, net/http.
+	// The main package also has a simple path ("main") but IS user code.
+	path := pkg.Pkg.Path()
+	if path == "main" || path == "command-line-arguments" {
+		return false // user code
+	}
+	if !strings.Contains(path, ".") {
+		return true // stdlib
+	}
+	// Vendored stdlib dependencies.
+	if strings.HasPrefix(path, "golang.org/x/") {
+		return true
+	}
+	return false
 }
 
 // checkSpawnMoveRestriction enforces move semantics for spawn arguments.

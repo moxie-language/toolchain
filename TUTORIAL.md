@@ -460,7 +460,7 @@ func producer(out chan moxie.Int32) {
 }
 
 func main() {
-    ch := make(chan moxie.Int32)
+    ch := chan moxie.Int32{}
     spawn(producer, ch)
 
     // Receive results from child domain
@@ -555,7 +555,7 @@ func worker(id moxie.Int32, results chan moxie.Int32) {
 
 func main() {
     n := 4
-    results := make(chan moxie.Int32)
+    results := chan moxie.Int32{}
 
     for i := int32(0); i < int32(n); i++ {
         spawn(worker, moxie.Int32(i), results)
@@ -596,8 +596,8 @@ func stage2(in chan moxie.Int32, out chan moxie.Int32) {
 }
 
 func main() {
-    ch1 := make(chan moxie.Int32)
-    ch2 := make(chan moxie.Int32)
+    ch1 := chan moxie.Int32{}
+    ch2 := chan moxie.Int32{}
 
     spawn(stage1, ch1)
     spawn(stage2, ch1, ch2)
@@ -679,10 +679,10 @@ The compiler automatically marks functions as `async` when they contain channel 
 |-------|-----------|-------|
 | `"hello"` | `[]byte("hello")` | String literals produce `[]byte` |
 | `a \| b` | `concat(a, b)` | Slice concatenation (any matching slice type) |
-| `[]T{:n}` | `make([]T, n)` | Slice with length n |
-| `[]T{:n:c}` | `make([]T, n, c)` | Slice with length n, capacity c |
-| `chan T{}` | `make(chan T)` | Unbuffered channel |
-| `chan T{n}` | `make(chan T, n)` | Buffered channel with capacity n |
+| `[]T{:n}` | Slice with length n | `make()` is not available |
+| `[]T{:n:c}` | Slice with length n, capacity c | |
+| `chan T{}` | Unbuffered channel | |
+| `chan T{n}` | Buffered channel with capacity n | |
 | `&T{...}` | (heap allocation) | Replaces `new(T)` |
 
 ---

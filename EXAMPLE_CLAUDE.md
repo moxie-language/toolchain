@@ -26,6 +26,7 @@ These are compile errors. Violating them wastes a build cycle.
 | Construct | Compile Error | Use Instead |
 |-----------|---------------|-------------|
 | `go f()` | No goroutines | Channels + `select` for dispatch, `spawn` for isolation |
+| `make(T, ...)` | Removed | Literal syntax: `[]T{:n}`, `chan T{}`, `map[K]V{}` |
 | `new(T)` | Removed | `&T{}` or `var x T; p := &x` |
 | `"a" + "b"` | No `+` on text | `"a" \| "b"` (pipe operator) |
 | `fallthrough` | Removed | `case A, B:` comma-separated |
@@ -49,7 +50,7 @@ These are compile errors. Violating them wastes a build cycle.
 | `chan T{}` | `make(chan T)` |
 | `chan T{n}` | `make(chan T, n)` |
 
-Both forms compile. `make()` is not restricted.
+`make()` is a compile error in user code. Use literal syntax only.
 
 ## Execution Model
 
@@ -83,7 +84,7 @@ func worker(id moxie.Int32, results chan moxie.Int32) {
 }
 
 func main() {
-    results := make(chan moxie.Int32)
+    results := chan moxie.Int32{}
     for i := int32(0); i < 4; i++ {
         spawn(worker, moxie.Int32(i), results)
     }
@@ -181,6 +182,7 @@ Do not assume project structure from convention. Read the actual code.
 - Never optimize before it works
 - Never use `go` keyword (it's a compile error)
 - Never use `+` for text concatenation (use `|`)
-- Never pass raw types across spawn boundaries (use moxie.Codec types)
+- Never use `make()` (use literal syntax)
 - Never use `new(T)` (use `&T{}`)
+- Never pass raw types across spawn boundaries (use moxie.Codec types)
 ````

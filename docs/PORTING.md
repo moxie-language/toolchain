@@ -141,9 +141,9 @@ Replace `uintptr` with explicit pointer types. Exception: packages that `import 
 
 If the package legitimately does pointer arithmetic, add `import _ "unsafe"` to get the exemption.
 
-## Step 7: Slice and Channel Literals (Optional)
+## Step 7: Slice and Channel Literals
 
-These syntactic shortcuts are available but not required:
+Replace all `make()` calls with literal syntax:
 
 ```go
 // Go
@@ -152,14 +152,14 @@ ch := make(chan int, 10)
 s := make([]byte, 256)
 s := make([]byte, 0, 1024)
 
-// Moxie (optional syntax)
+// Moxie
 ch := chan int{}
 ch := chan int{10}
 s := []byte{:256}
 s := []byte{:0:1024}
 ```
 
-Both forms compile. The Moxie syntax is rewritten to `make()` calls before parsing.
+`make()` is a compile error in user code.
 
 ## Step 8: Prefer `bytes` over `strings`
 

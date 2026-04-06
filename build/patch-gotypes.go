@@ -254,7 +254,7 @@ func patchSpawnBuiltin(dir string) {
 		}
 		if _, ok := under(x.typ).(*Signature); !ok {
 			if !isString(x.typ) {
-				check.errorf(x, InvalidArg, invalidOp+"first argument to spawn must be a function or transport string, got %s", x)
+				check.errorf(x, InvalidCall, invalidOp+"first argument to spawn must be a function or transport string, got %s", x)
 				return
 			}
 			// Transport string — second arg must be a function.
@@ -263,7 +263,7 @@ func patchSpawnBuiltin(dir string) {
 				return
 			}
 			if _, ok := under(args[1].typ).(*Signature); !ok {
-				check.errorf(args[1], InvalidArg, invalidOp+"second argument to spawn must be a function when first is a transport string, got %s", args[1])
+				check.errorf(args[1], InvalidCall, invalidOp+"second argument to spawn must be a function when first is a transport string, got %s", args[1])
 				return
 			}
 		}
