@@ -1,20 +1,16 @@
 # The Moxie Language Reference
 
-Moxie is a restricted subset of Go designed for domain-isolated cooperative concurrency. Programs compile to static native binaries (Linux, Darwin) or JavaScript (browser, Node.js).
+Moxie is a compiled systems language for domain-isolated event-driven programs. Programs compile to static native binaries (Linux, Darwin) or JavaScript (browser). Moxie descends from TinyGo; its syntax is a restricted subset of Go's, diverging where domain isolation, type unification, or the single-threaded execution model require it.
 
-This document specifies where Moxie diverges from the [Go specification](https://go.dev/ref/spec). Anything not mentioned here follows Go's rules exactly.
-
----
-
-## Notation
-
-Productions use Go spec EBNF. Moxie uses Go's parser and type checker unmodified — restrictions are enforced after SSA construction.
+This document specifies the Moxie language. Familiarity with C-family syntax is assumed.
 
 ---
 
-## Source Code Representation
+## Source Files
 
-Identical to Go. UTF-8 encoded. `.go` file extension. Standard `package` declarations.
+Source files use the `.mx` extension and are UTF-8 encoded. Each file begins with a `package` declaration. If both `file.mx` and `file.go` exist in the same directory, the `.mx` file takes precedence.
+
+Module manifests use `moxie.mod` (preferred) or `go.mod`.
 
 ---
 
@@ -22,45 +18,68 @@ Identical to Go. UTF-8 encoded. `.go` file extension. Standard `package` declara
 
 ### Keywords
 
-Moxie recognizes all Go keywords. The following have restricted or altered semantics:
+```
+break    case     chan     const    continue
+default  defer    else    for      func
+goto     if       import  interface map
+package  range    return  select   struct
+switch   type     var
+```
 
-| Keyword | Status |
-|---------|--------|
-| `fallthrough` | **Compile error.** Each case must be self-contained. |
-| `go` | **Compile error.** There are no goroutines. Use channels + `select` for event dispatch, `spawn` for process-level parallelism. |
+The following keywords from Go are **compile errors** in Moxie:
 
-All other keywords (`break`, `case`, `chan`, `const`, `continue`, `default`, `defer`, `else`, `for`, `func`, `goto`, `if`, `import`, `interface`, `map`, `package`, `range`, `return`, `select`, `struct`, `switch`, `type`, `var`) behave identically to Go.
+| Keyword | Error |
+|---------|-------|
+| `fallthrough` | Each case must be self-contained. Use comma-separated case expressions. |
+| `go` | There are no goroutines. Use channels + `select` for event dispatch, `spawn` for process-level parallelism. |
 
 ### Operators and Punctuation
 
-Identical to Go, with one addition:
+All standard operators apply, with one addition:
 
 | Operator | Context | Meaning |
 |----------|---------|---------|
-| `\|` | `[]T \| []T` | Slice concatenation. Returns a new slice. |
+| `\|` | `[]T \| []T` | Slice concatenation. Returns a new slice containing elements from both operands. |
 
-The `+` operator on text types (`[]byte`) is a **compile error**. Use `\|` instead. See [Slice Concatenation](#slice-concatenation).
+The `+` operator on `string` or `[]byte` values is a **compile error**. Use `|` for text concatenation:
+
+```moxie
+msg := "hello " | name | "!"
+```
 
 ### Literals
 
-Identical to Go, with these exceptions:
+String literals (`"hello"`, `` `raw` ``) produce `[]byte` values. Complex literals (`1+2i`) do not exist.
 
-- Complex literals (`1+2i`) are not supported since the complex types do not exist.
-- String literals (`"hello"`, `` `raw` ``) produce `[]byte` values, not `string`. See [Text Type](#text-type).
-- Slice size literals: `[]T{:n}` is `make([]T, n)`, `[]T{:n:c}` is `make([]T, n, c)`. See [Slice Size Literals](#slice-size-literals).
-- Channel literals: `chan T{}` is `make(chan T)`, `chan T{n}` is `make(chan T, n)`. See [Channel Literals](#channel-literals).
+#### Slice Size Literals
+
+```moxie
+buf := []byte{:1024}        // make([]byte, 1024)
+table := []int32{:0:100}    // make([]int32, 0, 100)
+```
+
+The leading `:` after `{` distinguishes size literals from composite literals. `make()` still works.
+
+#### Channel Literals
+
+```moxie
+ch := chan int32{}           // make(chan int32)       — unbuffered
+ch := chan int32{10}         // make(chan int32, 10)   — buffered
+```
+
+`make()` still works. These are syntactic sugar.
 
 ---
 
 ## Types
 
-### Boolean Type
+### Boolean
 
 ```
 bool
 ```
 
-Identical to Go.
+Two values: `true` and `false`.
 
 ### Numeric Types
 
@@ -68,58 +87,49 @@ Identical to Go.
 int8    int16    int32    int64
 uint8   uint16   uint32   uint64
 float32 float64
-byte    // alias for uint8
-int     uint     // platform-sized, as in Go
+byte                              // alias for uint8
+int     uint                      // 32-bit on all targets
 ```
 
-The following numeric types do **not exist** in Moxie:
+`int` and `uint` are always 32-bit. `len()` and `cap()` return `int32`.
+
+The following types do **not exist**:
 
 | Removed | Reason |
 |---------|--------|
-| `complex64` | Complex numbers not supported. Use separate float fields. |
-| `complex128` | Complex numbers not supported. |
-| `uintptr` | Use explicit pointer types. Raw integer-pointer conversion is unsafe. |
-
-Note: `rune` is not a language-level type. Unicode code point encoding and decoding is a library concern. Use `int32` for numeric code point values and an encoding library for UTF-8 operations.
+| `complex64`, `complex128` | Complex numbers not supported. |
+| `uintptr` | Use explicit pointer types. Allowed in packages that `import "unsafe"`. |
 
 ### Text Type
 
-`string` and `[]byte` are the same type. They have identical runtime layout (pointer, length, capacity), are mutually assignable, and can be used interchangeably everywhere. `string` is the preferred spelling for readability:
+`string` and `[]byte` are the **same type**. They have identical runtime layout (pointer, length, capacity), are mutually assignable, and are interchangeable everywhere.
 
-```go
+```moxie
 name := "hello"           // type is string (= []byte)
-var s string = []byte{72} // string and []byte are interchangeable
-b := []byte("world")      // no-op conversion — same layout
-s = b                     // direct assignment, no copy
+var s string = []byte{72} // direct assignment, no conversion
+b := []byte("world")      // no-op — same layout
+s = b                     // no copy
 ```
 
-There is no immutable string type. All text is a mutable byte slice. The keyword `string` is retained because it reads better than `[]byte` in signatures and declarations:
+There is no immutable string type. All text is a mutable byte slice. The keyword `string` is retained because it reads better in signatures:
 
-```go
-func greet(name string) string {  // preferred
-    return "hello " | name
-}
-
-func greet(name []byte) []byte {  // equivalent, less readable
+```moxie
+func greet(name string) string {   // preferred
     return "hello " | name
 }
 ```
 
-UTF-8 encoding and rune iteration are library operations, not language primitives. There is no implicit `range` over runes — ranging over text yields bytes.
+UTF-8 encoding is a library concern. `range` over text yields **bytes**, not runes. Use an encoding library for rune-level iteration.
 
 ### Array Types
 
-```
-ArrayType = "[" ArrayLength "]" ElementType .
-```
+Fixed-size, value-type. Identical to standard array semantics.
 
-Identical to Go. Fixed-size, value-type.
+```moxie
+var a [4]int32
+```
 
 ### Slice Types
-
-```
-SliceType = "[" "]" ElementType .
-```
 
 Dynamic-length view over a backing array.
 
@@ -127,197 +137,98 @@ Dynamic-length view over a backing array.
 
 Any slice of a comparable element type supports `==` and `!=`. Two slices are equal if they have the same length and identical elements:
 
-```go
+```moxie
 a := []int32{1, 2, 3}
 b := []int32{1, 2, 3}
-println(a == b) // true
+println(a == b)            // true
 
-m := map[[]byte]int32{}  // slices can be map keys
+m := map[[]byte]int32{}    // slices can be map keys
 m[[]byte("key")] = 42
 ```
 
-Go restricts `==` to arrays and excludes slices. Moxie lifts this restriction: if the element type is comparable, the slice is comparable. This follows from string=[]byte — if `"hello" == "hello"` works, then `[]byte{1,2} == []byte{1,2}` should too.
-
 #### Slice Concatenation
 
-The `|` (pipe) operator concatenates any two slices of the same type, returning a fresh slice:
+The `|` operator concatenates any two slices of the same type, returning a fresh slice:
 
-```go
+```moxie
 a := []int32{1, 2, 3}
 b := []int32{4, 5}
-c := a | b           // c is []int32{1, 2, 3, 4, 5}
-// a and b are unchanged — | always allocates a new backing array.
+c := a | b                 // []int32{1, 2, 3, 4, 5}
 
-s := "hello" | " world"  // works on []byte (text) too
-s |= "!"                 // append-assign
+s := "hello" | " world"   // works on text too
+s |= "!"                  // append-assign
 ```
 
-The `+` operator on text types is a **compile error**. Use `|` instead. This applies to all `[]byte` expressions, including string literals.
-
-For non-`[]byte` slices, `|` is native — it passes through the type checker and compiler directly. For `[]byte`, the loader rewrites `|` to an internal concat call before type checking.
-
-#### Slice Size Literals
-
-Moxie provides shorthand for `make()` on slices. The leading `:` after `{` distinguishes size literals from composite literals:
-
-```go
-buf := []byte{:1024}         // make([]byte, 1024)
-table := []int32{:0:100}     // make([]int32, 0, 100)
-```
-
-| Syntax | Equivalent |
-|--------|-----------|
-| `[]T{:n}` | `make([]T, n)` |
-| `[]T{:n:c}` | `make([]T, n, c)` |
-
-The `make()` function still works. Size literals are syntactic sugar rewritten before parsing.
+`|` always allocates a new backing array. The operands are not modified.
 
 ### Struct Types
 
-```
-StructType = "struct" "{" { FieldDecl ";" } "}" .
-```
-
-Identical to Go. Embedding, tags, and anonymous fields work as in Go.
+Identical to standard struct semantics. Embedding, tags, and anonymous fields work as expected.
 
 ### Pointer Types
 
+Pointers work as expected. The `&` operator takes the address of any addressable value. `new(T)` does not exist — use `&T{}` or `var` instead.
+
+```moxie
+p := &MyStruct{X: 1}      // allocates and returns *MyStruct
 ```
-PointerType = "*" BaseType .
-```
-
-Pointers work identically to Go. The `&` operator takes the address of any addressable value. `new(T)` does not exist — use `&` instead.
-
-```go
-var x int32 = 42
-p := &x                  // p has type *int32
-
-s := &MyStruct{X: 1}     // allocates and returns *MyStruct
-
-arr := &[3]int32{1,2,3}  // *[3]int32
-```
-
-Dereferencing (`*p`), nil checks, and pointer comparison work as in Go.
 
 ### Function Types
 
-```
-FunctionType = "func" Signature .
-```
-
-Identical to Go.
+First-class values. Closures, variadic parameters, and multiple return values work as expected.
 
 ### Interface Types
 
-```
-InterfaceType = "interface" "{" { MethodSpec ";" } "}" .
-```
+Method sets, type assertions, type switches, and dynamic dispatch work as expected. `any` is retained as an alias for `interface{}`.
 
-Identical to Go. Type assertions, type switches, and method dispatch work as in Go.
-
-`any` is retained as an alias for `interface{}`.
-
-Note: all interface types (including `any`) are restricted at the spawn boundary. See [Spawn Boundary Rules](#spawn-boundary-rules).
+All interface types are restricted at the `spawn` boundary. See [Spawn Boundary Rules](#spawn-boundary-rules).
 
 ### Map Types
 
-```
-MapType = "map" "[" KeyType "]" ElementType .
-```
-
-Identical to Go.
+Hash maps with arbitrary key and value types. Keys must be comparable.
 
 ### Channel Types
 
 ```
-ChannelType = ( "chan" | "chan" "<-" | "<-" "chan" ) ElementType .
+chan T          // bidirectional
+chan<- T        // send-only
+<-chan T        // receive-only
 ```
 
-Identical to Go. Channels are the primary synchronization mechanism within a domain. Channels passed to `spawn` become IPC channels backed by a socketpair (native) or MessagePort (JS).
-
-#### Channel Literals
-
-Moxie provides shorthand for `make()` on channels:
-
-```go
-ch := chan int32{}       // make(chan int32)       — unbuffered
-ch := chan int32{10}     // make(chan int32, 10)   — buffered
-```
-
-| Syntax | Equivalent |
-|--------|-----------|
-| `chan T{}` | `make(chan T)` |
-| `chan T{n}` | `make(chan T, n)` |
-
-The `make()` function still works. Channel literals are syntactic sugar rewritten before parsing.
+Channels are the primary synchronization mechanism within a domain. Channels passed to `spawn` become IPC channels over Unix socketpairs (native) or MessagePorts (JS).
 
 ---
 
 ## Declarations and Scope
 
-Identical to Go, with the exception that `new(T)` is not available. Use `var` declarations or composite literals with `&`:
+Variable, constant, type, and function declarations follow standard syntax. Short variable declarations (`:=`) work as expected.
 
-```go
-// Instead of: p := new(int)
-var x int
-p := &x
+`new(T)` is a **compile error**. Use composite literals with `&` or `var` declarations:
 
-// Instead of: p := new(MyStruct)
-p := &MyStruct{Field: value}
+```moxie
+p := &MyStruct{Field: value}   // instead of new(MyStruct)
 ```
-
-### Constant Declarations
-
-Identical to Go. The predeclared `iota` works as in Go. Complex constants are not available.
-
-### Type Declarations
-
-Identical to Go.
-
-### Variable Declarations
-
-Identical to Go. Short variable declarations (`:=`) work as in Go.
-
-### Function Declarations
-
-Identical to Go. Methods, closures, and variadic functions work as in Go.
 
 ---
 
 ## Expressions
 
-Identical to Go, with these exceptions:
+All standard expressions work, with these exceptions:
 
-- Complex arithmetic expressions are not available (no `complex`, `real`, `imag`).
-- The `new(T)` expression is a compile error. Use `&T{}` or `var` instead.
-- The `+` operator on `[]byte` (text) is a compile error. Use `|` for concatenation.
-- The `|` operator on matching slice types performs concatenation (see [Slice Concatenation](#slice-concatenation)).
-
-All other expressions (arithmetic, comparison, logical, address, receive, type assertion, function calls, conversions) work identically to Go.
+- `new(T)` is a compile error.
+- `complex()`, `real()`, `imag()` are compile errors.
+- `+` on `string`/`[]byte` is a compile error. Use `|`.
+- `|` on matching slice types performs concatenation.
 
 ---
 
 ## Statements
 
-Identical to Go, with one exception:
+### Switch
 
-### Switch Statements
+The `fallthrough` statement is a **compile error**. Each case must be self-contained. Use comma-separated expressions to share logic:
 
-The `fallthrough` statement is a **compile error**. Each case clause must be self-contained.
-
-```go
-switch x {
-case 1:
-    doOne()
-    // fallthrough ← compile error
-case 2:
-    doTwo()
-}
-```
-
-To share logic between cases, use comma-separated expressions:
-
-```go
+```moxie
 switch x {
 case 1, 2:
     doOneOrTwo()
@@ -326,113 +237,94 @@ case 3:
 }
 ```
 
-Or call a shared function:
+### Select
 
-```go
-switch x {
-case 1:
-    shared()
-    doOne()
-case 2:
-    shared()
-    doTwo()
+`select` is the event handler. It waits for channel messages, I/O events, and timer expirations. All concurrency within a domain reduces to `select`:
+
+```moxie
+select {
+case v := <-ch1:
+    handle(v)
+case ch2 <- x:
+    // sent
+default:
+    // no channel ready
 }
 ```
 
-All other statements (`defer`, `select`, `for`, `if`, `return`, `break`, `continue`, `goto`, `send`, `assign`, `block`) work identically to Go.
+All other statements (`defer`, `for`, `if`, `return`, `break`, `continue`, `goto`, `send`, `assign`) work as expected.
 
 ---
 
 ## Built-in Functions
 
-### Available Builtins
+### Available
 
 | Function | Behavior |
 |----------|----------|
-| `append` | Identical to Go. |
-| `cap` | Identical to Go. |
-| `close` | Identical to Go. |
-| `copy` | Identical to Go. |
-| `delete` | Identical to Go. |
-| `len` | Identical to Go. |
-| `make` | Identical to Go. |
-| `panic` | Identical to Go. |
-| `print` | Identical to Go. |
-| `println` | Identical to Go. |
-| `recover` | Identical to Go. |
-| `spawn` | **Moxie builtin.** See [spawn](#spawn). |
+| `append` | Appends elements to a slice. |
+| `cap` | Returns capacity of a slice or channel. |
+| `close` | Closes a channel. |
+| `copy` | Copies elements between slices. Returns count copied. |
+| `delete` | Deletes a key from a map. |
+| `len` | Returns length of a string, slice, array, map, or channel. |
+| `make` | Allocates and initializes slices, maps, and channels. |
+| `panic` | Stops execution with an error value. |
+| `print` | Prints to stderr (no newline). |
+| `println` | Prints to stderr (with newline). |
+| `recover` | Catches a panic in a deferred function. |
+| `spawn` | Creates a new isolated domain. See [spawn](#spawn). |
 
-### Removed Builtins
+### Removed (compile errors)
 
-| Function | Compile Error |
-|----------|---------------|
-| `new` | Use `&T{}` or `var` declaration. |
-| `complex` | Complex numbers not supported. |
-| `real` | Complex numbers not supported. |
-| `imag` | Complex numbers not supported. |
+| Function | Alternative |
+|----------|-------------|
+| `new` | `&T{}` or `var x T; p := &x` |
+| `complex` | Not supported. |
+| `real` | Not supported. |
+| `imag` | Not supported. |
 
 ---
 
 ## spawn
 
-```go
-func spawn(fn FuncType, args ...T) chan struct{}
+```moxie
+done := spawn(fn, arg1, arg2, ...)
 ```
 
-`spawn` creates a new **domain** — an isolated execution context with its own single-threaded event loop and heap. On native targets, the domain is an OS process created via `fork()`. On JavaScript targets, the domain is a Web Worker or Service Worker.
+`spawn` creates a new **domain** — an isolated execution context with its own single-threaded event loop, heap, and garbage collector. On native targets, the domain is an OS process created via `fork()`. On the JS target, the domain is a Web Worker.
 
 `spawn` is a language builtin. No import is required.
 
-### Syntax
+### Arguments
 
-```go
-done := spawn(worker, arg1, arg2, ...)
-```
+The first argument must be a **static function name** (not a variable). Remaining arguments are passed to that function in the child domain. The return value is `chan struct{}` — a lifecycle channel that closes when the child exits.
 
-The first argument must be a **static function name** (not a variable holding a function value). The remaining arguments are passed to that function in the child domain. The return value is a lifecycle channel (`chan struct{}`) that will close when the child domain exits.
-
-The compiler verifies at compile time that:
-- The number of arguments matches the function's parameter count exactly.
-- The type of each argument matches the corresponding parameter type exactly.
-- Every argument type is serializable across the spawn boundary.
-
-```go
+```moxie
 import "moxie"
 
-func worker(x moxie.Int32, y moxie.Float64) { ... }
-
-spawn(worker, moxie.Int32(1), moxie.Float64(2.5))  // OK
-spawn(worker, moxie.Int32(1))                        // compile error: expects 2 arguments, got 1
-spawn(worker, int32(1), float64(2.5))                // compile error: int32 does not implement moxie.Codec
-```
-
-### Example
-
-```go
-import "moxie"
-
-func producer(id moxie.Int32, scale moxie.Float64) {
-    for i := int32(0); i < 10; i++ {
-        println(id, float64(i)*float64(scale))
-    }
+func worker(id moxie.Int32, scale moxie.Float64) {
+    println(float64(id) * float64(scale))
 }
 
 func main() {
-    done := spawn(producer, moxie.Int32(1), moxie.Float64(2.5))
+    done := spawn(worker, moxie.Int32(1), moxie.Float64(2.5))
     _ = done
-    println("parent continues immediately")
 }
 ```
 
-The parent does not block. The child runs concurrently as a separate process.
+The compiler verifies at compile time:
+- Argument count matches the function's parameter count exactly.
+- Each argument type matches the corresponding parameter type exactly.
+- Every argument type is serializable across the spawn boundary.
 
 ### Spawn Boundary Rules
 
-The spawn boundary is a serialization boundary. Every argument is serialized via `moxie.Codec` into the child's address space. There is no shared memory between domains.
+The spawn boundary is a serialization boundary. Every argument is serialized into the child's address space via `moxie.Codec`. There is no shared memory between domains.
 
 All data arguments and channel element types must implement `moxie.Codec`:
 
-```go
+```moxie
 import "moxie"
 
 type Codec interface {
@@ -441,9 +333,9 @@ type Codec interface {
 }
 ```
 
-#### Codec Types
+#### Built-in Codec Types
 
-The `moxie` package provides built-in codec types. All encode little-endian by default (matching target hardware). Big-endian aliases exist for protocols like Bitcoin:
+The `moxie` package provides codec wrappers for all primitive types. All encode **little-endian** by default (matching x86-64 and ARM64 hardware). Big-endian aliases exist for network protocols:
 
 | Default (LE) | Big-endian (BE) | Size |
 |-------------|-----------------|------|
@@ -455,14 +347,14 @@ The `moxie` package provides built-in codec types. All encode little-endian by d
 | `moxie.Float64` | `moxie.BigFloat64` | 8 bytes |
 | `moxie.Bytes` | — | 4-byte LE length prefix + data |
 
-User-defined structs implement Codec by defining `EncodeTo`/`DecodeFrom` methods.
+User-defined structs implement `Codec` by defining `EncodeTo`/`DecodeFrom` methods that serialize each field.
 
 #### Allowed Types
 
 | Type | Treatment |
 |------|-----------|
 | Types implementing `moxie.Codec` | Serialized via EncodeTo/DecodeFrom. |
-| Channels (element type must implement Codec) | Become IPC channels. |
+| Channels (element type must implement Codec) | Become IPC channels over socketpair. |
 | Structs with Codec methods | User-defined serialization. |
 
 #### Rejected Types (compile error)
@@ -471,115 +363,37 @@ User-defined structs implement Codec by defining `EncodeTo`/`DecodeFrom` methods
 |------|--------|
 | Raw built-in types (`int32`, `bool`, etc.) | Use `moxie.Int32`, `moxie.Bool`, etc. |
 | `*T` (pointer) | Cannot share memory across process boundary. |
-| `func(...)` | Cannot serialize code pointers. |
-| `interface{}` / any interface type | Type erasure makes serialization ambiguous. No interface crosses the spawn boundary. |
+| `func(...)` | Cannot serialize code. |
+| `interface{}` / any interface type | Type erasure prevents serialization. |
 
 ### Move Semantics
 
-Non-constant values passed to `spawn` are **moved** to the child domain. Using the variable after the `spawn` call is a compile error:
+Non-constant values passed to `spawn` are **moved** to the child domain. Using the variable after `spawn` is a compile error:
 
-```go
+```moxie
 x := compute()
 spawn(worker, x)
-println(x)    // compile error: variable used after spawn
+println(x)        // compile error: variable used after spawn
 ```
-
-This prevents the programmer from assuming that modifications to `x` after spawn will be visible in the child. There is no shared memory.
 
 **Exceptions:**
-- Constants and constant-foldable expressions are exempt (they're immutable).
-- Channels are exempt (both parent and child hold endpoints for communication).
+- Constants and constant-foldable expressions are exempt (immutable).
+- Channels are exempt (both parent and child hold IPC endpoints).
 
-```go
-spawn(worker, int32(42))    // OK: constant
-println(42)                  // OK: constant, no move
+### Channel Completeness
 
-ch := make(chan int32)
-spawn(reader, ch)
-ch <- 99                     // OK: channel, exempt from move
+Every channel created in a function must have both a sender and a listener (receive or select case). Channels that escape the function (passed to calls, returned, stored) are exempt.
+
+```moxie
+ch := chan int32{}
+ch <- 42           // compile error: channel has no listener
 ```
 
-### Native Implementation
+### IPC Channels
 
-On Linux and Darwin:
+Channels passed to `spawn` become IPC channels. The runtime multiplexes them over a single socketpair with length-prefixed messages:
 
-1. `socketpair(AF_UNIX, SOCK_STREAM)` creates a bidirectional IPC pipe.
-2. `fork()` creates the child process (copy-on-write memory).
-3. **Child:** closes parent's socket end, drains inherited run queue, starts the wrapper function as a cooperative task, runs the scheduler, exits when the task completes.
-4. **Parent:** closes child's socket end, registers the domain (pid + fd), continues execution.
-
-Each domain has its own:
-- Single-threaded event loop
-- Channel instances
-- Boehm GC heap
-
-### Browser Implementation
-
-In the browser:
-
-1. The spawn call emits `$rt.domain.spawn(async () => fn(args))`.
-2. The runtime creates an isolated microtask context backed by a BroadcastChannel.
-3. Slices are spread-copied (`[...arr]`), maps are `Object.assign`'d — the child gets independent data.
-4. Each domain gets its own single-threaded event loop via `queueMicrotask`.
-
----
-
-## Packages
-
-Identical to Go. The `import` declaration, package paths, and init functions work as in Go.
-
-The `moxie` package is force-imported by the compiler (like `runtime`). User code imports `moxie` explicitly when using Codec types at spawn boundaries. The `spawn` builtin itself requires no import.
-
-### Import Restrictions
-
-| Import | Error |
-|--------|-------|
-| `"strings"` | Compile error: `use "bytes" instead of "strings" (string=[]byte)` |
-
-With string=[]byte, the `strings` and `bytes` packages are functionally identical. Moxie removes `strings` and requires `bytes` for all text operations.
-
----
-
-## Concurrency
-
-### No Goroutines
-
-The `go` keyword is a **compile error**. There are no goroutines in Moxie.
-
-Each domain runs a single thread with no scheduler. Concurrency within a domain is expressed entirely through channels and `select`:
-
-- **Unbuffered channels** dispatch execution to the waiting `select` case (synchronous handoff).
-- **Buffered channels** enqueue messages for the next `select` iteration.
-- **`select`** is the event loop — it blocks until a channel message, I/O event, or timer fires.
-
-Because there is exactly one thread per domain, **there are no data races**. Mutexes are no-ops. Atomics are plain loads and stores. The Go race detector is inapplicable.
-
-### Channels
-
-Channel types and operations are identical to Go:
-
-```go
-ch := make(chan int32)      // unbuffered
-ch := make(chan int32, 10)  // buffered
-
-ch <- value                  // send
-value := <-ch                // receive
-value, ok := <-ch            // receive with closed check
-
-close(ch)                    // close
-
-select {                     // select
-case v := <-ch1:
-case ch2 <- x:
-default:
-}
-```
-
-#### IPC Channels
-
-Channels passed to `spawn` become IPC channels. Sends serialize the value over a socketpair (native) or MessagePort (JS). Receives block until data arrives from the other domain.
-
-```go
+```moxie
 import "moxie"
 
 func worker(results chan moxie.Int32) {
@@ -594,7 +408,83 @@ func main() {
 }
 ```
 
-The channel element type must implement `moxie.Codec`.
+### Native Implementation
+
+On Linux and Darwin:
+1. `socketpair(AF_UNIX, SOCK_STREAM)` creates a bidirectional IPC pipe.
+2. `fork()` creates the child process (copy-on-write memory).
+3. **Child:** closes parent's socket end, runs the function, exits on completion.
+4. **Parent:** closes child's socket end, registers domain (pid + fd), continues.
+
+Each domain has its own single-threaded event loop, channel instances, and Boehm GC heap.
+
+### JS Implementation
+
+On the JS target:
+1. `$rt.domain.spawn(async () => fn(args))` creates an isolated microtask context.
+2. Slices are spread-copied (`[...arr]`), maps are `Object.assign`'d.
+3. Each domain gets its own event loop via `queueMicrotask`.
+4. IPC uses `BroadcastChannel` for inter-domain messaging.
+
+---
+
+## Packages
+
+The `import` declaration, package paths, and `init` functions work as expected.
+
+The `moxie` package is force-imported by the compiler (like `runtime`). User code imports `moxie` explicitly when using Codec types at spawn boundaries. The `spawn` builtin requires no import.
+
+### Import Restrictions
+
+| Import | Error |
+|--------|-------|
+| `"strings"` | Use `"bytes"` instead. With `string = []byte`, they are functionally identical. |
+
+---
+
+## Execution Model
+
+### Domains
+
+A Moxie program is a tree of **domains**. Each domain is an OS process (native) or Worker (JS) running a single thread. There are no goroutines.
+
+```
+┌─────────────────────────────────────┐
+│              Program                │
+│  ┌──────────┐     ┌──────────┐     │
+│  │ Domain 0  │────│ Domain 1  │     │
+│  │ (parent)  │ IPC│ (child)   │     │
+│  │           │sock│           │     │
+│  │  select   │pair│  select   │     │
+│  │  ├ ch1    │    │  ├ ch3    │     │
+│  │  ├ ch2    │    │  └ timer  │     │
+│  │  └ I/O    │    │           │     │
+│  └───────────┘    └───────────┘     │
+│  single thread    single thread     │
+└─────────────────────────────────────┘
+```
+
+### Concurrency Within a Domain
+
+There are no goroutines. Execution flow within a domain is controlled by three constructs:
+
+| Construct | Behavior |
+|-----------|----------|
+| Unbuffered channel send | Execution transfers to the waiting `select` case. Like a function call via the channel. |
+| Buffered channel send | Message queued for the next `select` iteration. |
+| `select` | Event handler — blocks until a channel message, I/O event, or timer fires. |
+
+Because there is exactly one thread per domain, **there are no data races**. Mutexes are no-ops. Atomics are plain loads and stores.
+
+### Concurrency Between Domains
+
+`spawn` creates child domains. Communication happens exclusively through IPC channels. Values are deep-copied across the boundary via Codec serialization. The parent and child cannot observe each other's heap.
+
+This is not a relaxed memory model — it is **no shared memory**. The answer to "when does domain A see domain B's write?" is: when B sends it on a channel and A receives it.
+
+### I/O Model
+
+Each domain blocks on `epoll` (Linux) or `kqueue` (Darwin) until I/O events arrive. The `select` statement multiplexes channel messages, I/O readiness, and timer expirations into a single event loop.
 
 ---
 
@@ -602,80 +492,139 @@ The channel element type must implement `moxie.Codec`.
 
 ### Within a Domain
 
-Single-threaded execution. No memory barriers, no fences, no happens-before complexity. Sequential consistency is guaranteed by construction — there is only one thread.
+Single-threaded. Sequential consistency by construction. No memory barriers, no fences, no happens-before complexity.
 
 ### Between Domains
 
-Complete isolation. No shared memory. Communication happens exclusively through IPC channels. Values are deep-copied across the boundary. The parent and child cannot observe each other's heap.
+Complete isolation. No shared memory. Communication through IPC channels only. Each domain has its own Boehm conservative GC heap.
 
-This is not a relaxed memory model — it is no shared memory model. The question "when does domain A see domain B's write?" has one answer: when domain B sends it on a channel and domain A receives it.
+---
+
+## Runtime
+
+The runtime provides:
+
+- **Cooperative task scheduling**: FIFO round-robin for internal runtime tasks (e.g., deferred I/O callbacks). No user-visible goroutines.
+- **Boehm GC**: Conservative mark-and-sweep garbage collection per domain.
+- **Channel dispatch**: Lock-free select with atomic CAS for fairness. Unbuffered channels transfer execution directly. Buffered channels use a circular ring buffer.
+- **I/O polling**: `epoll`/`kqueue` integration. I/O waits yield to the event loop, not blocking the domain.
+- **Context switching**: Cooperative stack switching via saved register sets (AMD64: rbx, rbp, r12-r15; ARM64: x19-x28, d8-d15). Stack overflow detected via canary values.
 
 ---
 
 ## Targets
 
-| GOOS/GOARCH | Output | Scheduler | GC | Libc |
-|-------------|--------|-----------|-----|------|
-| linux/amd64 | Static ELF | Cooperative | Boehm | musl |
-| linux/arm64 | Static ELF | Cooperative | Boehm | musl |
-| darwin/amd64 | Mach-O | Cooperative | Boehm | libSystem |
-| darwin/arm64 | Mach-O | Cooperative | Boehm | libSystem |
-| js/browser | JavaScript + runtime | Cooperative | Browser GC | — |
+| GOOS/GOARCH | Output | GC | Libc |
+|-------------|--------|-----|------|
+| linux/amd64 | Static ELF | Boehm | musl |
+| linux/arm64 | Static ELF | Boehm | musl |
+| darwin/amd64 | Mach-O | Boehm | libSystem |
+| darwin/arm64 | Mach-O | Boehm | libSystem |
+| js/wasm | JavaScript + runtime | Browser GC | — |
 
-All native binaries are fully statically linked. No dynamic library dependencies. No libc dependency at runtime (musl is compiled in).
+All native binaries are fully statically linked. No dynamic library dependencies at runtime.
 
-The JavaScript target runs in a browser environment only (Web Workers, BroadcastChannel). Node.js and Deno are not supported — if you can run a native binary, use one.
+The JavaScript target outputs ES modules with a runtime library. Each domain maps to a `BroadcastChannel`-isolated context. Browser APIs (DOM, WebSocket, IndexedDB, Service Workers) are accessible via bridge packages.
 
----
+### JS Bridge Packages
 
-## Runtime Guarantees
+The JS target provides typed bridges to browser APIs:
 
-1. **Single-threaded per domain.** `runtime.NumCPU()` always returns 1.
-2. **No goroutines.** The `go` keyword is a compile error. Concurrency is expressed through channels, `select`, and `spawn`.
-3. **No data races.** Single-threaded execution makes races structurally impossible within a domain.
-4. **Complete domain isolation.** `fork()` provides OS-level memory isolation. A bug in one domain cannot corrupt another domain's heap.
-5. **Deterministic execution.** Given the same inputs, execution within a domain follows one path. No scheduler, no task switching, no nondeterminism.
+| Bridge | Purpose |
+|--------|---------|
+| `dom` | Element creation, tree manipulation, events |
+| `ws` | WebSocket dial/send/close |
+| `sw` | Service Worker lifecycle, fetch/cache, SSE |
+| `localstorage` | localStorage operations |
+| `idb` | IndexedDB transactions |
+| `crypto` | secp256k1 via WASM |
+| `subtle` | SubtleCrypto bridge |
 
 ---
 
 ## Build Tags
 
-Moxie programs can use build tags. The following are always set:
+The following build tags are always set:
 
 ```
-moxie              // Moxie compiler (always true)
-moxie.unicore      // Single-core cooperative (always true)
+moxie              // Moxie compiler
+moxie.unicore      // Single-core cooperative
 gc.boehm           // Boehm GC (native targets)
-scheduler.tasks    // Cooperative scheduler (always true)
+scheduler.none     // No goroutine scheduler
 ```
 
-Standard Go build tags (`linux`, `darwin`, `amd64`, `arm64`, `js`) work as expected.
+Standard platform tags (`linux`, `darwin`, `amd64`, `arm64`, `js`) work as expected.
 
 ---
 
-## Differences from Go: Summary
+## Building
 
-| Feature | Go | Moxie |
-|---------|-----|-------|
-| `new(T)` | Allocates and returns `*T` | **Compile error.** Use `&T{}`. |
-| `string` | Immutable UTF-8 type | **`string = []byte`.** Mutable, same layout, mutually assignable. `string` is preferred for readability. |
-| `rune` | Alias for `int32` | Not a language type. Use `int32` + encoding library. |
-| `any` | Alias for `interface{}` | **Same.** Retained as generic shorthand. |
-| `complex64/128` | Complex number types | **Do not exist.** |
-| `complex()`, `real()`, `imag()` | Complex builtins | **Compile error.** |
-| `uintptr` | Integer type for pointers | **Does not exist.** |
-| `fallthrough` | Falls through to next case | **Compile error.** |
-| `go` | Starts goroutine | **Compile error.** No goroutines. |
-| `+` on text | String concatenation | **Compile error.** Use `\|` (pipe). |
-| `\|` on slices | Bitwise OR (integers only) | **Slice concatenation** for matching slice types. |
-| `[]T == []T` | Compile error (except `string`) | **Works** for any comparable element type. |
-| `[]T{:n}` | Invalid syntax | `make([]T, n)` — slice size literal. |
-| `chan T{}` | Invalid syntax | `make(chan T)` — channel literal. |
-| `import "strings"` | Standard library | **Compile error.** Use `"bytes"`. |
-| `sync.Mutex` | Blocks thread | No-op. Single-threaded. |
-| Memory model | Happens-before, memory fences | Single-threaded. Sequential consistency. |
-| `spawn` | Does not exist | **Moxie builtin.** Creates isolated domain. Args must implement `moxie.Codec`. |
-| `interface{}` at spawn | N/A | **Compile error.** No interface crosses the spawn boundary. |
-| Concurrency model | Shared memory + locks | Domain isolation. No shared memory. |
-| Binary output | Dynamically linked | Fully static. |
-| Targets | All platforms | Linux, Darwin, browser JS. |
+### Prerequisites
+
+- Go 1.25+
+- LLVM 19 (clang-19, lld-19)
+
+### Build the Compiler
+
+```sh
+./build.sh
+```
+
+Creates a patched GOROOT (for type unification), then builds the compiler with LLVM 19 linking. Produces a `./moxie` binary.
+
+### Build a Program
+
+```sh
+export MOXIEROOT=/path/to/moxie
+moxie build -o hello .
+./hello
+```
+
+### CLI Reference
+
+| Command | Purpose |
+|---------|---------|
+| `moxie build` | Compile to binary |
+| `moxie run` | Compile and execute |
+| `moxie test` | Run tests |
+| `moxie clean` | Clear build cache |
+| `moxie targets` | List supported targets |
+| `moxie info` | Display target configuration |
+
+Key flags: `-o output`, `-opt [0\|1\|2\|s\|z]`, `-gc [none\|leaking\|conservative\|boehm]`, `-target [linux/amd64\|js/wasm]`, `-stack-size N`.
+
+---
+
+## Runtime Guarantees
+
+1. **Single-threaded per domain.** No goroutines, no preemption, no task switching.
+2. **No data races.** Single-threaded execution makes races structurally impossible.
+3. **Complete domain isolation.** `fork()` provides OS-level memory isolation.
+4. **Deterministic execution.** Given the same inputs, execution follows one path.
+5. **Static binaries.** No dynamic dependencies. Ship one file.
+
+---
+
+## Quick Reference
+
+| Feature | Moxie |
+|---------|-------|
+| File extension | `.mx` |
+| Module file | `moxie.mod` (or `go.mod`) |
+| Text type | `string = []byte`. Mutable. `string` preferred for readability. |
+| Text concatenation | `\|` operator. `+` is a compile error. |
+| Integer sizes | `int` = `uint` = 32-bit on all targets. |
+| Goroutines | Do not exist. `go` is a compile error. |
+| Concurrency | Channels + `select` within a domain. `spawn` for new domains. |
+| Process isolation | `spawn(fn, args...)` via `fork()` + socketpair. |
+| Serialization | `moxie.Codec` interface required at spawn boundary. |
+| Memory model | No shared memory between domains. |
+| GC | Boehm conservative, per-domain heap. |
+| Slice equality | `==` works for any comparable element type. |
+| Slice literals | `[]T{:n}` = `make([]T, n)`. `[]T{:n:c}` = `make([]T, n, c)`. |
+| Channel literals | `chan T{}` = `make(chan T)`. `chan T{n}` = `make(chan T, n)`. |
+| `new(T)` | Compile error. Use `&T{}`. |
+| `fallthrough` | Compile error. Use `case A, B:`. |
+| `import "strings"` | Compile error. Use `"bytes"`. |
+| Interface at spawn | Compile error. No interface crosses the spawn boundary. |
+| Targets | linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, js/wasm |
