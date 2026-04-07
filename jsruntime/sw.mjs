@@ -224,10 +224,12 @@ export function CacheAddAll(cacheId, urls, done) {
 export function CacheFromManifests(cacheId, staticFiles, done) {
   const cache = _caches.get(cacheId);
   if (!cache) { if (done) done(); return; }
-  // Fetch both app and SW manifests, combine with static files, cache all.
+  // Bypass HTTP cache when fetching manifests and assets — otherwise the
+  // browser may serve stale files, defeating the whole point of refresh.
+  const noCache = { cache: 'reload' };
   Promise.all([
-    fetch('/$manifest.json').then(r => r.ok ? r.json() : []).catch(() => []),
-    fetch('/$sw/$manifest.json').then(r => r.ok ? r.json() : []).catch(() => []),
+    fetch('/$manifest.json', noCache).then(r => r.ok ? r.json() : []).catch(() => []),
+    fetch('/$sw/$manifest.json', noCache).then(r => r.ok ? r.json() : []).catch(() => []),
   ]).then(([app, sw]) => {
     const urls = new Set();
     // Static files from Moxie source.
@@ -241,9 +243,9 @@ export function CacheFromManifests(cacheId, staticFiles, done) {
     for (const f of app) urls.add('/' + f);
     // SW build outputs.
     for (const f of sw) urls.add('/$sw/' + f);
-    // Cache all, skipping failures.
+    // Cache all, skipping failures. Use cache: 'reload' to bypass HTTP cache.
     Promise.allSettled([...urls].map(u =>
-      fetch(u).then(r => r.ok ? cache.put(u, r) : null).catch(() => {})
+      fetch(u, noCache).then(r => r.ok ? cache.put(u, r) : null).catch(() => {})
     )).then(() => { if (done) done(); });
   });
 }
@@ -298,16 +300,16 @@ export function ResponseOK(respId) {
 export function SSEConnect(url, onMessage) {
   if (typeof EventSource === 'undefined') {
     // EventSource is not available in Service Worker scope.
-    // Poll instead.
+    // Poll instead. Bypass HTTP cache so a stale 304 doesn't mask updates.
     const id = _nextSseId++;
     let last = '';
     function poll() {
-      fetch(url).then(r => r.ok ? r.text() : '').then(t => {
+      fetch(url, { cache: 'reload' }).then(r => r.ok ? r.text() : '').then(t => {
         if (t && t !== last) { last = t; if (onMessage) onMessage(t.replace(/^data:\s*/, '')); }
       }).catch(() => {});
-      setTimeout(poll, 10000);
+      setTimeout(poll, 3000);
     }
-    setTimeout(poll, 1000);
+    setTimeout(poll, 500);
     return id;
   }
   const id = _nextSseId++;

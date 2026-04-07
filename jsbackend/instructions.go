@@ -550,9 +550,12 @@ func (fc *FunctionCompiler) emitCall(call *ssa.CallCommon) string {
 	}
 
 	callee := call.StaticCallee()
-	if callee != nil {
+	if callee != nil && len(callee.FreeVars) == 0 {
 		return fc.emitStaticCall(callee, call.Args)
 	}
+	// Closure call: callee has FreeVars that were pre-bound via MakeClosure.
+	// Fall through to the dynamic call path so we invoke the bound value
+	// instead of the bare function name (which would skip the bindings).
 
 	// Builtin call (println, len, cap, append, etc.).
 	if builtin, ok := call.Value.(*ssa.Builtin); ok {
