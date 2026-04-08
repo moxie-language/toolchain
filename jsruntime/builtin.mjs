@@ -38,11 +38,15 @@ export class Slice {
   }
 }
 
-// Make a new slice.
+// Make a new slice. Object zero values must be deep-cloned per slot — otherwise
+// every slot shares one reference and mutating any element mutates all of them.
 export function makeSlice(len, cap, zero) {
   if (cap === undefined || cap < len) cap = len;
   const arr = new Array(cap);
-  for (let i = 0; i < cap; i++) arr[i] = zero !== undefined ? zero : 0;
+  const needsClone = zero !== undefined && zero !== null && typeof zero === 'object';
+  for (let i = 0; i < cap; i++) {
+    arr[i] = needsClone ? cloneValue(zero) : (zero !== undefined ? zero : 0);
+  }
   return new Slice(arr, 0, len, cap);
 }
 
