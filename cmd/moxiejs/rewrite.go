@@ -20,9 +20,106 @@ import (
 // rewriteMoxieLiterals applies all text-level rewrites to moxie source.
 func rewriteMoxieLiterals(src []byte) []byte {
 	fset := token.NewFileSet()
+	src = rewritePipeConcat(src, fset)
 	src = rewriteChanLiterals(src, fset)
 	src = rewriteSliceLiterals(src, fset)
 	return src
+}
+
+// rewritePipeConcat converts `|` used as string concatenation to `+`.
+// In Moxie, `|` is the text concat operator, but Go's type checker only
+// accepts `+` for string concatenation. This rewrites `|` to `+` when
+// the operands are string-typed (not bitwise integer OR).
+//
+// Heuristic: a `|` token is pipe-concat when it is NOT between two
+// expressions that are clearly integer-typed. We detect integer context by
+// checking if both adjacent tokens are integer literals, or if the `|` is
+// inside a clearly bitwise context (e.g. `flags |= mask`).
+//
+// Conservative rule: rewrite `|` to `+` unless:
+//   - it's `|=` (compound assign — always bitwise)
+//   - both sides are integer literals
+//   - it's inside a const block (const expressions are numeric)
+func rewritePipeConcat(src []byte, fset *token.FileSet) []byte {
+	toks := scanTokens(src, fset)
+	if len(toks) == 0 {
+		return src
+	}
+
+	// Identify const blocks to skip (| in const is always bitwise).
+	constRanges := findConstRanges(toks)
+
+	var result bytes.Buffer
+	lastEnd := 0
+
+	for i, t := range toks {
+		if t.tok != token.OR {
+			continue
+		}
+		// Skip |= (compound assign).
+		if i+1 < len(toks) && toks[i+1].tok == token.ASSIGN && toks[i+1].pos == t.end {
+			continue
+		}
+		// Skip if inside a const block.
+		if inConstRange(t.pos, constRanges) {
+			continue
+		}
+		// Skip if both neighbors are integer literals.
+		if i > 0 && i+1 < len(toks) &&
+			toks[i-1].tok == token.INT && toks[i+1].tok == token.INT {
+			continue
+		}
+		// Rewrite | → +
+		result.Write(src[lastEnd:t.pos])
+		result.WriteByte('+')
+		lastEnd = t.end
+	}
+
+	if lastEnd == 0 {
+		return src
+	}
+	result.Write(src[lastEnd:])
+	return result.Bytes()
+}
+
+// constRange marks byte offsets of const(...) blocks.
+type constRange struct{ start, end int }
+
+func findConstRanges(toks []tok) []constRange {
+	var ranges []constRange
+	for i := 0; i < len(toks); i++ {
+		if toks[i].tok != token.CONST {
+			continue
+		}
+		// const ( ... ) or const name = expr
+		if i+1 < len(toks) && toks[i+1].tok == token.LPAREN {
+			depth := 1
+			start := toks[i].pos
+			for j := i + 2; j < len(toks); j++ {
+				if toks[j].tok == token.LPAREN {
+					depth++
+				}
+				if toks[j].tok == token.RPAREN {
+					depth--
+					if depth == 0 {
+						ranges = append(ranges, constRange{start, toks[j].end})
+						i = j
+						break
+					}
+				}
+			}
+		}
+	}
+	return ranges
+}
+
+func inConstRange(pos int, ranges []constRange) bool {
+	for _, r := range ranges {
+		if pos >= r.start && pos < r.end {
+			return true
+		}
+	}
+	return false
 }
 
 // tok is a scanned token with byte offsets.
