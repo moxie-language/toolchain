@@ -74,6 +74,16 @@ export function FirstChild(parentId) {
   return 0;
 }
 
+export function FirstElementChild(parentId) {
+  const parent = _elements.get(parentId);
+  if (parent && parent.firstElementChild) {
+    const id = _nextId++;
+    _elements.set(id, parent.firstElementChild);
+    return id;
+  }
+  return 0;
+}
+
 export function InsertBefore(parentId, newId, refId) {
   const parent = _elements.get(parentId);
   const newEl = _elements.get(newId);
@@ -91,12 +101,12 @@ export function ReplaceChild(parentId, newId, oldId) {
 // Properties and attributes.
 export function SetAttribute(elId, name, value) {
   const el = _elements.get(elId);
-  if (el) el.setAttribute(name, value);
+  if (el && el.setAttribute) el.setAttribute(name, value);
 }
 
 export function RemoveAttribute(elId, name) {
   const el = _elements.get(elId);
-  if (el) el.removeAttribute(name);
+  if (el && el.removeAttribute) el.removeAttribute(name);
 }
 
 export function SetTextContent(elId, text) {
@@ -106,12 +116,12 @@ export function SetTextContent(elId, text) {
 
 export function SetInnerHTML(elId, html) {
   const el = _elements.get(elId);
-  if (el) el.innerHTML = html;
+  if (el && 'innerHTML' in el) el.innerHTML = html;
 }
 
 export function SetStyle(elId, prop, value) {
   const el = _elements.get(elId);
-  if (el) el.style[prop] = value;
+  if (el && el.style) el.style[prop] = value;
 }
 
 export function Focus(elId) {
