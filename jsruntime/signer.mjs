@@ -29,7 +29,7 @@ export function SignEvent(eventJSON, fn) {
   var ev = JSON.parse(_str(eventJSON));
   window.nostr.signEvent(ev)
     .then(function(signed) { fn(JSON.stringify(signed)); })
-    .catch(function() { fn(''); });
+    .catch(function(e) { console.error('[signer] signEvent failed:', e); fn(''); });
 }
 
 export function Nip04Decrypt(peerPubkey, ciphertext, fn) {

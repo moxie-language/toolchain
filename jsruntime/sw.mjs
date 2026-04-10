@@ -125,6 +125,22 @@ export function RespondWithCacheFirst(eventId) {
   );
 }
 
+// RespondWithNetworkFirst tries network, falls back to cache.
+// Updates cache on successful fetch so offline still works.
+export function RespondWithNetworkFirst(eventId) {
+  const ev = _events.get(eventId);
+  if (!ev) return;
+  _fetchResolvers.set(eventId,
+    fetch(ev.request).then(resp => {
+      if (resp.ok) {
+        const clone = resp.clone();
+        caches.open('smesh').then(c => c.put(ev.request, clone));
+      }
+      return resp;
+    }).catch(() => caches.match(ev.request).then(c => c || new Response('offline', {status: 503})))
+  );
+}
+
 export function GetRequestURL(eventId) {
   const ev = _events.get(eventId);
   return ev ? ev.request.url : '';
