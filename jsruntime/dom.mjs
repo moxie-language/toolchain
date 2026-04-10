@@ -648,6 +648,58 @@ export function NowSeconds() {
   return BigInt(Math.floor(Date.now() / 1000));
 }
 
+// OnPullRefresh registers a handler that fires when the user pulls to refresh.
+// Handles both mouse wheel (accumulated up-scroll at top) and touch gestures.
+export function OnPullRefresh(elId, indicatorId, fn) {
+  const el = _elements.get(elId);
+  const ind = _elements.get(indicatorId);
+  if (!el) return;
+
+  var pullAccum = 0;
+  var pullTimer = 0;
+  var threshold = 200;
+  var resetMs = 400;
+
+  el.addEventListener('wheel', function(e) {
+    if (el.scrollTop > 0 || e.deltaY >= 0) {
+      pullAccum = 0;
+      if (ind) ind.style.display = 'none';
+      return;
+    }
+    pullAccum += Math.abs(e.deltaY);
+    clearTimeout(pullTimer);
+    pullTimer = setTimeout(function() {
+      pullAccum = 0;
+      if (ind) ind.style.display = 'none';
+    }, resetMs);
+    if (ind && pullAccum > 40) ind.style.display = 'flex';
+    if (pullAccum >= threshold) {
+      pullAccum = 0;
+      fn();
+    }
+  }, { passive: true });
+
+  var touchStartY = 0;
+  el.addEventListener('touchstart', function(e) {
+    if (el.scrollTop === 0 && e.touches.length === 1) {
+      touchStartY = e.touches[0].clientY;
+    }
+  }, { passive: true });
+  el.addEventListener('touchmove', function(e) {
+    if (el.scrollTop > 0 || touchStartY === 0) return;
+    var dy = e.touches[0].clientY - touchStartY;
+    if (dy > 20 && ind) ind.style.display = 'flex';
+    if (dy > 80) {
+      touchStartY = 0;
+      fn();
+    }
+  }, { passive: true });
+  el.addEventListener('touchend', function() {
+    touchStartY = 0;
+    if (pullAccum < threshold && ind) ind.style.display = 'none';
+  }, { passive: true });
+}
+
 // Get raw element (for advanced use within JS runtime only).
 export function getRawElement(id) {
   return _elements.get(id);
