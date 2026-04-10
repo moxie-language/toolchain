@@ -1301,6 +1301,14 @@ func (fc *FunctionCompiler) binOp(op token.Token, t types.Type) func(x, y string
 	if basic, ok := t.Underlying().(*types.Basic); ok {
 		isString = basic.Info()&types.IsString != 0
 	}
+	// Moxie: string=[]byte — a []byte slice is also a string.
+	if !isString {
+		if sl, ok := t.Underlying().(*types.Slice); ok {
+			if basic, ok := sl.Elem().Underlying().(*types.Basic); ok {
+				isString = basic.Kind() == types.Byte
+			}
+		}
+	}
 
 	bits, unsigned := intTypeInfo(t)
 
@@ -1428,8 +1436,14 @@ func (fc *FunctionCompiler) binOp(op token.Token, t types.Type) func(x, y string
 		}
 		return func(x, y string) string { return fmt.Sprintf("(%s & ~%s)", x, y) }
 	case token.EQL:
+		if isString {
+			return func(x, y string) string { return fmt.Sprintf("$rt.builtin.stringEqual(%s, %s)", x, y) }
+		}
 		return func(x, y string) string { return fmt.Sprintf("(%s === %s)", x, y) }
 	case token.NEQ:
+		if isString {
+			return func(x, y string) string { return fmt.Sprintf("!$rt.builtin.stringEqual(%s, %s)", x, y) }
+		}
 		return func(x, y string) string { return fmt.Sprintf("(%s !== %s)", x, y) }
 	case token.LSS:
 		return func(x, y string) string { return fmt.Sprintf("(%s < %s)", x, y) }

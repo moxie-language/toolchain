@@ -1,6 +1,13 @@
 // TinyJS Runtime — Signer Bridge
 // Wraps window.nostr (NIP-07) and window.nostr.smesh (management API).
 // Called by generated Go→JS signer jsbridge code.
+//
+// All string parameters are coerced with '' + x because Moxie strings are
+// Slice objects. The extension bridge JSON-serialises arguments, and
+// JSON.stringify(Slice) produces garbage. Coercion triggers Slice.toString()
+// which decodes the bytes to a JS string.
+
+function _str(v) { return '' + v; }
 
 export function HasSigner() {
   return typeof window !== 'undefined' && typeof window.nostr !== 'undefined';
@@ -19,7 +26,7 @@ export function GetPublicKey(fn) {
 
 export function SignEvent(eventJSON, fn) {
   if (!HasSigner()) { fn(''); return; }
-  var ev = JSON.parse(eventJSON);
+  var ev = JSON.parse(_str(eventJSON));
   window.nostr.signEvent(ev)
     .then(function(signed) { fn(JSON.stringify(signed)); })
     .catch(function() { fn(''); });
@@ -27,28 +34,28 @@ export function SignEvent(eventJSON, fn) {
 
 export function Nip04Decrypt(peerPubkey, ciphertext, fn) {
   if (!HasSigner() || !window.nostr.nip04) { fn(''); return; }
-  window.nostr.nip04.decrypt(peerPubkey, ciphertext)
+  window.nostr.nip04.decrypt(_str(peerPubkey), _str(ciphertext))
     .then(function(pt) { fn(pt); })
     .catch(function() { fn(''); });
 }
 
 export function Nip04Encrypt(peerPubkey, plaintext, fn) {
   if (!HasSigner() || !window.nostr.nip04) { fn(''); return; }
-  window.nostr.nip04.encrypt(peerPubkey, plaintext)
+  window.nostr.nip04.encrypt(_str(peerPubkey), _str(plaintext))
     .then(function(ct) { fn(ct); })
     .catch(function() { fn(''); });
 }
 
 export function Nip44Decrypt(peerPubkey, ciphertext, fn) {
   if (!HasSigner() || !window.nostr.nip44) { fn(''); return; }
-  window.nostr.nip44.decrypt(peerPubkey, ciphertext)
+  window.nostr.nip44.decrypt(_str(peerPubkey), _str(ciphertext))
     .then(function(pt) { fn(pt); })
     .catch(function() { fn(''); });
 }
 
 export function Nip44Encrypt(peerPubkey, plaintext, fn) {
   if (!HasSigner() || !window.nostr.nip44) { fn(''); return; }
-  window.nostr.nip44.encrypt(peerPubkey, plaintext)
+  window.nostr.nip44.encrypt(_str(peerPubkey), _str(plaintext))
     .then(function(ct) { fn(ct); })
     .catch(function() { fn(''); });
 }
@@ -85,7 +92,7 @@ export function GetVaultStatus(fn) {
 export function CreateVault(password, fn) {
   var s = _smesh();
   if (s && s.createVault) {
-    s.createVault(password).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.createVault(_str(password)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -94,7 +101,7 @@ export function CreateVault(password, fn) {
 export function UnlockVault(password, fn) {
   var s = _smesh();
   if (s && s.unlockVault) {
-    s.unlockVault(password).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.unlockVault(_str(password)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -123,7 +130,16 @@ export function ListIdentities(fn) {
 export function AddIdentity(nsec, fn) {
   var s = _smesh();
   if (s && s.addIdentity) {
-    s.addIdentity(nsec).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.addIdentity(_str(nsec)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+  } else {
+    fn(false);
+  }
+}
+
+export function NsecLogin(nsec, fn) {
+  var s = _smesh();
+  if (s && s.nsecLogin) {
+    s.nsecLogin(_str(nsec)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -132,16 +148,16 @@ export function AddIdentity(nsec, fn) {
 export function SwitchIdentity(pubkey, fn) {
   var s = _smesh();
   if (s && s.switchIdentity) {
-    s.switchIdentity(pubkey).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.switchIdentity(_str(pubkey)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
 }
 
-export function ExportVault(fn) {
+export function ExportVault(password, fn) {
   var s = _smesh();
   if (s && s.exportVault) {
-    s.exportVault().then(function(data) {
+    s.exportVault(_str(password)).then(function(data) {
       // data may be an object (parsed by ext.mjs) or a string
       if (typeof data === 'object' && data !== null) {
         fn(JSON.stringify(data));
@@ -157,7 +173,7 @@ export function ExportVault(fn) {
 export function ImportVault(data, fn) {
   var s = _smesh();
   if (s && s.importVault) {
-    s.importVault(data).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.importVault(_str(data)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -166,7 +182,7 @@ export function ImportVault(data, fn) {
 export function RemoveIdentity(pubkey, fn) {
   var s = _smesh();
   if (s && s.removeIdentity) {
-    s.removeIdentity(pubkey).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.removeIdentity(_str(pubkey)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -186,7 +202,7 @@ export function GenerateMnemonic(fn) {
 export function ValidateMnemonic(mnemonic, fn) {
   var s = _smesh();
   if (s && s.validateMnemonic) {
-    s.validateMnemonic(mnemonic).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.validateMnemonic(_str(mnemonic)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -195,7 +211,7 @@ export function ValidateMnemonic(mnemonic, fn) {
 export function CreateHDVault(password, name, fn) {
   var s = _smesh();
   if (s && s.createHDVault) {
-    s.createHDVault(password, name).then(function(m) { fn(m || ''); }).catch(function() { fn(''); });
+    s.createHDVault(_str(password), _str(name)).then(function(m) { fn(m || ''); }).catch(function() { fn(''); });
   } else {
     fn('');
   }
@@ -204,7 +220,7 @@ export function CreateHDVault(password, name, fn) {
 export function RestoreHDVault(password, mnemonic, name, fn) {
   var s = _smesh();
   if (s && s.restoreHDVault) {
-    s.restoreHDVault(password, mnemonic, name).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.restoreHDVault(_str(password), _str(mnemonic), _str(name)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -213,7 +229,7 @@ export function RestoreHDVault(password, mnemonic, name, fn) {
 export function DeriveIdentity(name, fn) {
   var s = _smesh();
   if (s && s.deriveIdentity) {
-    s.deriveIdentity(name).then(function(pk) { fn(pk || ''); }).catch(function() { fn(''); });
+    s.deriveIdentity(_str(name)).then(function(pk) { fn(pk || ''); }).catch(function() { fn(''); });
   } else {
     fn('');
   }

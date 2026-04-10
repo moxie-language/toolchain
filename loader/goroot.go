@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -42,6 +43,14 @@ func GetCachedGoroot(config *compileopts.Config) (string, error) {
 	moxieroot := goenv.Get("MOXIEROOT")
 	if moxieroot == "" {
 		return "", errors.New("could not determine MOXIEROOT")
+	}
+	// Resolve to absolute path — relative paths break cached goroot symlinks.
+	if !filepath.IsAbs(moxieroot) {
+		abs, err := filepath.Abs(moxieroot)
+		if err != nil {
+			return "", fmt.Errorf("could not resolve MOXIEROOT: %w", err)
+		}
+		moxieroot = abs
 	}
 
 	// Find the overrides needed for the goroot.

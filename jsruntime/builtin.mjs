@@ -36,6 +36,17 @@ export class Slice {
       $set: (v) => { arr[idx] = v; }
     };
   }
+
+  // Decode bytes to a JS string so that `+` concatenation works.
+  // In Moxie string and []byte are the same type — Slice objects must
+  // coerce to JS strings when used with the + operator.
+  toString() {
+    const buf = new Uint8Array(this.$length);
+    for (let i = 0; i < this.$length; i++) {
+      buf[i] = this.$array[this.$offset + i];
+    }
+    return new TextDecoder().decode(buf);
+  }
 }
 
 // Make a new slice. Object zero values must be deep-cloned per slot — otherwise
@@ -226,13 +237,13 @@ export function makeMap(keyKind) {
 
 // Map lookup with comma-ok.
 export function mapLookup(m, key) {
-  if (m === null || m === undefined) return { value: undefined, ok: false };
+  if (m === null || m === undefined) return { value: null, ok: false };
   if (m instanceof Map) {
     if (m.has(key)) return { value: m.get(key), ok: true };
-    return { value: undefined, ok: false };
+    return { value: null, ok: false };
   }
   if (m instanceof GoMap) return m.get(key);
-  return { value: undefined, ok: false };
+  return { value: null, ok: false };
 }
 
 // Map update.
@@ -350,6 +361,14 @@ export function runesToString(sl) {
 // String concatenation (Go's + operator for strings).
 export function stringConcat(a, b) {
   return a + b;
+}
+
+// String equality — handles both Slice objects and native JS strings.
+// The JS backend emits this instead of === for string-typed operands,
+// because Slice objects with identical content are !== each other.
+export function stringEqual(a, b) {
+  if (a === b) return true;
+  return ('' + a) === ('' + b);
 }
 
 // String comparison.

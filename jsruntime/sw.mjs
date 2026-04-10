@@ -179,12 +179,12 @@ export function MatchClients(fn) {
 
 export function PostMessage(clientId, msg) {
   const c = _clients.get(clientId);
-  if (c) c.postMessage({ type: msg });
+  if (c) c.postMessage({ type: '' + msg });
 }
 
 export function PostMessageJSON(clientId, json) {
   const c = _clients.get(clientId);
-  if (c) c.postMessage(json);
+  if (c) c.postMessage('' + json);
 }
 
 export function GetClientByID(id, fn) {
