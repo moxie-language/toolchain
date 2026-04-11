@@ -723,6 +723,17 @@ func (fc *FunctionCompiler) emitBuiltinCall(name string, args []ssa.Value) strin
 		return fmt.Sprintf("/* make(%s) */", argStr)
 	case "new":
 		return fmt.Sprintf("/* new(%s) */", argStr)
+	case "clear":
+		if len(args) > 0 {
+			argType := args[0].Type().Underlying()
+			if _, isSlice := argType.(*types.Slice); isSlice {
+				return fmt.Sprintf("$rt.builtin.clearSlice(%s)", jsArgs[0])
+			}
+			if _, isMap := argType.(*types.Map); isMap {
+				return fmt.Sprintf("$rt.builtin.clearMap(%s)", jsArgs[0])
+			}
+		}
+		return fmt.Sprintf("/* clear(%s) */", argStr)
 	default:
 		return fmt.Sprintf("/* builtin %s(%s) */", name, argStr)
 	}

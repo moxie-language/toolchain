@@ -398,7 +398,42 @@ func rewriteSliceLiterals(src []byte, fset *token.FileSet) []byte {
 		// Extract type text (from [ through to {, not including {).
 		typeText := strings.TrimSpace(string(src[toks[lbrackIdx].pos:toks[braceIdx].pos]))
 
-		if len(colonPositions) == 1 {
+		// Detect the secure-allocator marker: a trailing `, secure` IDENT
+		// before the closing brace. On the JS target the allocator is
+		// best-effort — there is no mmap, no guard pages, no kernel
+		// residency control — so the marker silently degrades to a plain
+		// allocation. The active defence on JS is runtime.SecureClear,
+		// which overwrites the buffer when the caller is done with it.
+		secureMarker := false
+		secureExprEnd := closeIdx
+		if len(colonPositions) == 1 && closeIdx-2 > colonPositions[0] {
+			lastTok := toks[closeIdx-1]
+			prevTok := toks[closeIdx-2]
+			if lastTok.tok == token.IDENT && lastTok.lit == "secure" &&
+				prevTok.tok == token.COMMA {
+				secureMarker = true
+				secureExprEnd = closeIdx - 2
+			}
+		}
+
+		if secureMarker {
+			// []byte{:len, secure} → (make)([]byte, len)
+			// Only []byte is supported, matching native. Parenthesised
+			// make bypasses the restriction checker on named slice types.
+			if typeText != "[]byte" {
+				continue
+			}
+			lenStart := toks[colonPositions[0]+1].pos
+			lenEnd := toks[secureExprEnd].pos
+			lenExpr := strings.TrimSpace(string(src[lenStart:lenEnd]))
+			if lenExpr == "" {
+				continue
+			}
+			result.Write(src[lastEnd:toks[lbrackIdx].pos])
+			result.WriteString("(make)([]byte, ")
+			result.WriteString(lenExpr)
+			result.WriteString(")")
+		} else if len(colonPositions) == 1 {
 			// []T{:len} → make([]T, len)
 			lenStart := toks[colonPositions[0]+1].pos
 			lenEnd := toks[closeIdx].pos

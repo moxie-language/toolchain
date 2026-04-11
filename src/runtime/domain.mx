@@ -8,16 +8,38 @@ import "unsafe"
 // Single-threaded cooperative scheduler, so no lock needed.
 
 type domainEntry struct {
-	pid      int32
-	parentFd int32 // parent's end of socketpair
-	alive    bool
-	next     *domainEntry
+	pid        int32
+	parentFd   int32 // parent's end of socketpair (IPC channel)
+	lockdownFd int32 // parent's read end of the secalloc lockdown pipe; -1 if none
+	alive      bool
+	next       *domainEntry
 }
 
 var domainList *domainEntry
 
-func domainRegister(pid, fd int32) {
-	domainList = &domainEntry{pid: pid, parentFd: fd, alive: true, next: domainList}
+func domainRegister(pid, fd, lockdownFd int32) {
+	domainList = &domainEntry{
+		pid:        pid,
+		parentFd:   fd,
+		lockdownFd: lockdownFd,
+		alive:      true,
+		next:       domainList,
+	}
+}
+
+// LastSpawnedLockdownFd returns the parent's read end of the secalloc
+// lockdown pipe for the most recently spawned child. The parent's event
+// loop watches this fd; one byte arriving (the marker
+// "MOXIE_SECALLOC_LOCKDOWN\n") means the child tripped a guard page and
+// its arenas have been wiped synchronously.
+//
+// Returns -1 if no child has been spawned, or if pipe creation failed at
+// spawn time.
+func LastSpawnedLockdownFd() int32 {
+	if domainList == nil {
+		return -1
+	}
+	return domainList.lockdownFd
 }
 
 func domainCount() int {
@@ -60,6 +82,9 @@ func domainReapChildren() {
 		if r > 0 {
 			e.alive = false
 			moxie_close(e.parentFd)
+			if e.lockdownFd >= 0 {
+				moxie_close(e.lockdownFd)
+			}
 		}
 	}
 }
@@ -86,6 +111,9 @@ func domainShutdownAll() {
 			if r > 0 {
 				e.alive = false
 				moxie_close(e.parentFd)
+				if e.lockdownFd >= 0 {
+					moxie_close(e.lockdownFd)
+				}
 			} else {
 				allDead = false
 			}
@@ -104,6 +132,9 @@ func domainShutdownAll() {
 			moxie_waitpid(e.pid, unsafe.Pointer(&status), 0)
 			e.alive = false
 			moxie_close(e.parentFd)
+			if e.lockdownFd >= 0 {
+				moxie_close(e.lockdownFd)
+			}
 		}
 	}
 }

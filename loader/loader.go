@@ -349,8 +349,13 @@ func (p *Package) Check() error {
 		cmpExprs := findByteComparisons(p.Files, &p.info)
 		byteSwitches := findByteSwitches(p.Files, &p.info)
 		addAssignCount := rewriteAddAssign(p.Files, &p.info)
+		// __moxie_secalloc refs come from the text-level slice literal
+		// rewriter (`[]byte{:n, secure}`), which has already run before
+		// parse. They need the same builtin injection as the AST-level
+		// rewrites below.
+		secallocRefs := hasMoxieSecallocRefs(p.Files)
 
-		if len(pipeRewrites) > 0 || len(cmpExprs) > 0 || len(byteSwitches) > 0 || addAssignCount > 0 {
+		if len(pipeRewrites) > 0 || len(cmpExprs) > 0 || len(byteSwitches) > 0 || addAssignCount > 0 || secallocRefs {
 			applyPipeRewrites(p.Files, pipeRewrites)
 			applyByteComparisonRewrites(p.Files, cmpExprs)
 			applyByteSwitchRewrites(byteSwitches)

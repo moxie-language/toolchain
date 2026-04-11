@@ -52,6 +52,12 @@ cross_compile_check() {
 
 run_suite "Restriction tests" "$TESTDIR/restrict/run.sh"
 run_suite "Spawn tests" "$TESTDIR/spawn/run.sh"
+run_suite "Secure allocator (M1)" "$TESTDIR/secalloc/run.sh"
+run_suite "Secure allocator spawn channel (M2)" "$TESTDIR/secalloc-spawn/run.sh"
+run_suite "Secure allocator spawn builtin (M3.1)" "$TESTDIR/secalloc-spawn-builtin/run.sh"
+run_suite "Secure allocator rotation (M3.2)" "$TESTDIR/secalloc-rotate/run.sh"
+run_suite "Secure allocator clear + lockdown (M3.2b)" "$TESTDIR/secalloc-clear/run.sh"
+run_suite "Secure allocator memfd_secret (M4)" "$TESTDIR/secalloc-memfd/run.sh"
 
 if cross_compile_check; then
     total_pass=$((total_pass + 1))

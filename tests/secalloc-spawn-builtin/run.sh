@@ -1,0 +1,76 @@
+#!/bin/bash
+# Milestone-3 verification: first-class spawn lockdown channel.
+#
+# Builds tests/secalloc-spawn-builtin/main.go and runs the binary.
+# The parent uses the actual `spawn` keyword (not bare fork) to launch
+# a child. spawnDomain auto-creates a lockdown pipe and routes the
+# child's secalloc handler to the write end. The parent retrieves the
+# read end via runtime.LastSpawnedLockdownFd() and reads the byte the
+# signal handler writes when the child trips a guard page.
+#
+# Verifies:
+#   - parent exit status is 0
+#   - parent stdout contains LOCKDOWN_VIA_SPAWN_RECEIVED
+#   - the raw secret pattern does NOT appear anywhere
+#   - parent stderr does NOT contain MOXIE_SECALLOC_LOCKDOWN
+#     (the byte must travel via the inherited pipe, not stderr)
+set -euo pipefail
+
+MOXIEROOT="${MOXIEROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+MOXIE="${MOXIE:-$MOXIEROOT/moxie}"
+TMPDIR=$(mktemp -d)
+trap "rm -rf $TMPDIR" EXIT
+
+export PATH="/usr/lib/llvm19/bin:$PATH"
+export MOXIEROOT
+
+BIN="$TMPDIR/secalloc_spawn_builtin_test"
+
+cd "$MOXIEROOT"
+
+if ! "$MOXIE" build -o "$BIN" ./tests/secalloc-spawn-builtin 2>"$TMPDIR/build.err"; then
+    echo "FAIL secalloc-spawn-builtin: compilation failed"
+    cat "$TMPDIR/build.err"
+    exit 1
+fi
+
+set +e
+bash -c "\"$BIN\" >\"$TMPDIR/stdout\" 2>\"$TMPDIR/stderr\"" 2>/dev/null
+rc=$?
+set -e
+
+stdout=$(cat "$TMPDIR/stdout")
+stderr=$(cat "$TMPDIR/stderr")
+
+fail=0
+
+if [ "$rc" -ne 0 ]; then
+    echo "FAIL secalloc-spawn-builtin: parent exited non-zero (got $rc)"
+    fail=1
+fi
+
+if ! echo "$stdout" | grep -q "LOCKDOWN_VIA_SPAWN_RECEIVED"; then
+    echo "FAIL secalloc-spawn-builtin: lockdown marker did not arrive via spawn pipe"
+    fail=1
+fi
+
+if echo "$stdout$stderr" | grep -q "MOXIE_SECRET_PAYLOAD"; then
+    echo "FAIL secalloc-spawn-builtin: raw secret pattern leaked"
+    fail=1
+fi
+
+if echo "$stderr" | grep -q "MOXIE_SECALLOC_LOCKDOWN"; then
+    echo "FAIL secalloc-spawn-builtin: marker leaked to stderr instead of pipe"
+    fail=1
+fi
+
+if [ "$fail" -eq 0 ]; then
+    echo "OK   secalloc-spawn-builtin (lockdown auto-routed via spawn keyword)"
+    exit 0
+fi
+
+echo "--- stdout ---"
+echo "$stdout"
+echo "--- stderr ---"
+echo "$stderr"
+exit 1

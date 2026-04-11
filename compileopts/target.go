@@ -109,6 +109,7 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 		spec.ExtraFiles = append(spec.ExtraFiles,
 			"src/runtime/os_darwin.c",
 			"src/runtime/runtime_unix.c",
+			"src/runtime/secalloc.c",
 			"src/runtime/signal.c",
 			"src/runtime/spawn_unix.c",
 			"src/internal/futex/futex_darwin.c")
@@ -124,6 +125,7 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 		}
 		spec.ExtraFiles = append(spec.ExtraFiles,
 			"src/runtime/runtime_unix.c",
+			"src/runtime/secalloc.c",
 			"src/runtime/signal.c",
 			"src/runtime/spawn_unix.c",
 			"src/internal/futex/futex_linux.c")

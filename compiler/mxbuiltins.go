@@ -37,3 +37,12 @@ func (b *builder) createMoxieLt(instr *ssa.CallCommon) llvm.Value {
 	bv := b.getValue(instr.Args[1], instr.Pos())
 	return b.createRuntimeCall("stringLess", []llvm.Value{a, bv}, "")
 }
+
+// createMoxieSecalloc handles __moxie_secalloc(n int32) []byte. The text
+// rewriter emits this for the `[]byte{:n, secure}` literal form. Emits a
+// call to runtime.SecureAlloc which mmap's a guarded arena and returns a
+// slice into it.
+func (b *builder) createMoxieSecalloc(instr *ssa.CallCommon) llvm.Value {
+	n := b.getValue(instr.Args[0], instr.Pos())
+	return b.createRuntimeCall("SecureAlloc", []llvm.Value{n}, "")
+}

@@ -25,15 +25,18 @@ export function GetPublicKey(fn) {
 }
 
 export function SignEvent(eventJSON, fn) {
-  if (!HasSigner()) { fn(''); return; }
+  if (!HasSigner()) { console.warn('[signer] SignEvent: no signer'); fn(''); return; }
   var ev = JSON.parse(_str(eventJSON));
+  console.log('[signer] SignEvent: kind=' + ev.kind + ' hasSigner=true');
   window.nostr.signEvent(ev)
     .then(function(signed) {
       if (!signed || signed.error || !signed.sig) {
-        console.error('[signer] signEvent returned error:', signed && signed.error || 'no sig');
+        var reason = (signed && signed.error) || 'no sig field';
+        console.error('[signer] signEvent error:', reason, signed);
         fn('');
         return;
       }
+      console.log('[signer] signEvent OK kind=' + ev.kind + ' sig=' + signed.sig.substring(0,16));
       fn(JSON.stringify(signed));
     })
     .catch(function(e) { console.error('[signer] signEvent failed:', e); fn(''); });

@@ -11,8 +11,16 @@
 #include <string.h>
 
 void moxie_handle_fatal_signal(int sig, uintptr_t addr);
+void moxie_secalloc_on_fatal_signal(void);
 
 static void signal_handler(int sig, siginfo_t *info, void *context) {
+	// Secure allocator defence: synchronously wipe every registered guarded
+	// arena and notify the lockdown pipe BEFORE doing anything else. Must
+	// happen before the handler returns so no attacker code can run between
+	// fault detection and secret erasure. If no arenas are registered this
+	// is a no-op and the existing fatal path is unchanged.
+	moxie_secalloc_on_fatal_signal();
+
 	ucontext_t* uctx = context;
 	uintptr_t addr = 0;
 	#if __APPLE__

@@ -1,0 +1,393 @@
+//go:build darwin || (linux && !baremetal && !wasip1 && !wasm_unknown && !wasip2 && !nintendoswitch)
+
+package runtime
+
+// Secure allocator — page-guarded arenas with signal-handler wipe.
+//
+// Each secure allocation returns a []byte slice backed by its own mmap'd
+// arena. The arena layout is:
+//
+//   [guard page][data page(s)][guard page]
+//     PROT_NONE    PROT_RW        PROT_NONE
+//                 mlock'd,
+//                 DONTFORK|DONTDUMP
+//
+// Any out-of-bounds access via pointer arithmetic hits a guard page and
+// raises SIGSEGV. runtime_unix.c's signal_handler calls into secalloc.c's
+// moxie_secalloc_on_fatal_signal() BEFORE the rest of the fatal path, which
+// synchronously memcpy's a noise pattern over every registered arena and
+// writes one byte to the lockdown fd. The process then dies; any secret
+// that lived in the arena has been overwritten before the handler returned,
+// so no subsequent code (attacker ROP, debugger, kernel core dumper) can
+// observe it.
+//
+// The noise buffer is generated once at first secureAlloc call, seeded from
+// the kernel via hardwareRand() and expanded with ChaCha12 (see
+// secalloc_chacha.mx). It lives in a package-level byte array and is shared
+// across all arenas.
+//
+// This is Milestone 1: the lockdown fd defaults to stderr (fd 2) so the
+// test program can observe the notification byte. Milestone 2 will route
+// the notification through a spawn-level lockdown channel inherited from
+// the parent domain.
+
+import "unsafe"
+
+const (
+	secPageSize  = 4096
+	secNoiseSize = 4096
+)
+
+// secNoise holds the noise pattern used to overwrite arena contents on
+// fault. Filled once by secureInit() via ChaCha12 keystream. Lives in
+// .bss until then, which would produce a zero-wipe — still secure, just
+// less entropy. The noise buffer is shared by every arena.
+var secNoise [secNoiseSize]byte
+
+// secInited is set once secureInit() has generated the noise buffer and
+// configured the C signal handler side.
+var secInited bool
+
+// secLockdownFd is the write end of the notification pipe. Default 2 is
+// stderr; spawned children that want a private lockdown channel call
+// SetSecureLockdownFd with a pipe fd inherited from the parent domain.
+var secLockdownFd int32 = 2
+
+// SetSecureLockdownFd routes fault notifications to fd instead of stderr.
+// Typical use: a parent domain creates a pipe, spawns a child with the
+// write end inherited via fork, and the child calls SetSecureLockdownFd
+// with that fd before any SecureAlloc. The parent's event loop watches
+// the read end and reacts to lockdown bytes (e.g. clearing the UI of any
+// memory derived from the secret, redrawing a tamper warning).
+//
+// Safe to call before or after the first SecureAlloc. Updates both the
+// Moxie-side var (so a future secureInit picks it up if it hasn't run)
+// AND the C-side notification fd (so an already-initialized handler
+// switches over immediately).
+func SetSecureLockdownFd(fd int32) {
+	secLockdownFd = fd
+	moxie_secalloc_set_lockdown_fd(fd)
+}
+
+// secureGenerateNoise fills secNoise with a fresh ChaCha12 keystream
+// seeded from kernel entropy. Called at first SecureAlloc (via
+// secureInit) and from SecureRekey / SecureRotate / SecureLockdown
+// when refreshing the wipe pattern.
+//
+// Zeroes the buffer before XORing the keystream: ChaCha XOR against
+// zero produces the keystream directly, but XOR against a previous
+// keystream produces two overlapping streams, which is not a clean
+// fresh keystream. The zero step is the difference between "first
+// call" semantics (buffer starts clean) and "rekey" semantics
+// (buffer holds stale noise).
+func secureGenerateNoise() {
+	var seed [32]byte
+	for i := 0; i < 4; i++ {
+		n, ok := hardwareRand()
+		if !ok {
+			runtimePanic("secalloc: kernel entropy unavailable")
+		}
+		seed[i*8+0] = byte(n)
+		seed[i*8+1] = byte(n >> 8)
+		seed[i*8+2] = byte(n >> 16)
+		seed[i*8+3] = byte(n >> 24)
+		seed[i*8+4] = byte(n >> 32)
+		seed[i*8+5] = byte(n >> 40)
+		seed[i*8+6] = byte(n >> 48)
+		seed[i*8+7] = byte(n >> 56)
+	}
+	for i := range secNoise {
+		secNoise[i] = 0
+	}
+	var nonce [secChachaNonceSize]byte
+	secChachaXORKeyStream(secNoise[:], secNoise[:], nonce[:], seed[:], 12)
+}
+
+// secureInit generates the noise buffer and hands it to the C signal
+// handler. Idempotent.
+func secureInit() {
+	if secInited {
+		return
+	}
+	secureGenerateNoise()
+	moxie_secalloc_configure(
+		unsafe.Pointer(&secNoise[0]),
+		uintptr(secNoiseSize),
+		secLockdownFd,
+	)
+	secInited = true
+}
+
+// SecureRekey regenerates the noise buffer from fresh kernel entropy.
+// Subsequent wipes (signal-handler, SecureClear, SecureLockdown, or
+// SecureRotate) will use the new bytes. Existing wiped contents are
+// NOT re-wiped — rekey only affects the pattern used from now on.
+//
+// Callers can invoke this periodically (on a timer, on session
+// boundaries, on every rotation) to defeat attackers who captured
+// noise bytes from a prior memory snapshot and would otherwise
+// correlate them against future wipes. The noise buffer's virtual
+// address does not change across rekey, so the C-side configuration
+// pointer remains valid.
+func SecureRekey() {
+	if !secInited {
+		return
+	}
+	secureGenerateNoise()
+}
+
+// SecureClear overwrites buf with the current noise pattern. Targeted
+// wipe for point-in-time residency minimization: the caller invokes
+// this at application context-change boundaries — logout, tenant
+// switch, navigation away from a decrypted conversation, tab
+// backgrounding — any moment where specific decrypted material is no
+// longer needed and should not keep occupying memory.
+//
+// buf need not be SecureAlloc'd. SecureClear works on any []byte the
+// caller holds; the guarantee is that on return, the bytes contain
+// noise rather than the caller's prior contents. For SecureAlloc'd
+// slices the underlying mapping stays valid (no unmap), so the slice
+// can be reused immediately for fresh data.
+//
+// Policy note: SecureClear does NOT rekey. Frequent small clears
+// should not pay the entropy cost of refreshing the shared noise
+// buffer. Callers that want fresh bytes per clear can call SecureRekey
+// explicitly.
+func SecureClear(buf []byte) {
+	secureInit()
+	if len(buf) == 0 {
+		return
+	}
+	moxie_secalloc_clear(unsafe.Pointer(&buf[0]), uintptr(len(buf)))
+}
+
+// SecureLockdown synchronously wipes every registered arena with the
+// current noise pattern and writes the lockdown marker to the notify
+// fd. Unlike the fatal-signal path (which runs this sequence and then
+// dies) SecureLockdown returns, so the caller stays alive.
+//
+// After the wipe, secureGenerateNoise regenerates the noise buffer
+// from fresh kernel entropy. This bounds the lifetime of any given
+// noise pattern to at most one lockdown — so if an attacker captured
+// the noise from a memory snapshot taken before the lockdown, that
+// snapshot does not help them interpret subsequent wipes.
+//
+// Semantics: "something broad happened and every secure arena should
+// be treated as compromised." Typical triggers:
+//   - Emergency revocation from user or policy engine
+//   - Pre-suspend preparation before kernel puts RAM to sleep
+//   - Detected anomaly that doesn't warrant a full crash
+//
+// For routine context changes (wiping one specific buffer when it
+// goes out of app-level scope) use SecureClear instead — it's
+// targeted and cheaper.
+func SecureLockdown() {
+	secureInit()
+	moxie_secalloc_lockdown()
+	secureGenerateNoise()
+}
+
+// SecureAlloc returns a byte slice of exactly n bytes backed by a freshly
+// mmap'd guarded arena. The underlying data pages are locked into RAM,
+// excluded from core dumps, and excluded from fork inheritance. Any
+// pointer-arithmetic access outside [0, n) hits a guard page and triggers
+// the wipe-and-die handler.
+//
+// No free. Arenas persist for the process lifetime; regeneration must come
+// from an authoritative source (re-derive, re-decrypt, re-prompt). For
+// long-lived secrets, see SecureRotate which moves contents to a fresh
+// mapping and wipes the old one.
+func SecureAlloc(n int32) []byte {
+	secureInit()
+	if n <= 0 {
+		runtimePanic("secalloc: size must be positive")
+	}
+	dataStart, dataSize := secureMap(n)
+	if moxie_secalloc_register_arena(dataStart, dataSize) != 0 {
+		runtimePanic("secalloc: arena registry full")
+	}
+	return unsafe.Slice((*byte)(dataStart), n)
+}
+
+// secureMap mmaps a fresh guarded arena sized for n user bytes. Returns
+// (dataStart, dataSize) — the first address the caller may write to and
+// the number of usable bytes before the tail guard. The leading and
+// trailing guard pages sit immediately before dataStart and immediately
+// after dataStart+dataSize. Shared by SecureAlloc and SecureRotate.
+func secureMap(n int32) (unsafe.Pointer, uintptr) {
+	dataSize := (uintptr(n) + secPageSize - 1) &^ (secPageSize - 1)
+	totalSize := dataSize + 2*secPageSize
+
+	addr := mmap(
+		nil,
+		totalSize,
+		flag_PROT_READ|flag_PROT_WRITE,
+		flag_MAP_PRIVATE|flag_MAP_ANONYMOUS,
+		-1,
+		0,
+	)
+	if addr == unsafe.Pointer(^uintptr(0)) {
+		runtimePanic("secalloc: mmap failed")
+	}
+
+	dataStart := unsafe.Add(addr, secPageSize)
+	tailGuard := unsafe.Add(dataStart, dataSize)
+
+	// Gold-standard upgrade: on Linux ≥5.14 replace the anonymous data pages
+	// with memfd_secret(2)-backed secretmem — pages the kernel itself cannot
+	// read through /proc/<pid>/mem or ptrace. Failure is silent and non-fatal;
+	// on Darwin or older Linux the anonymous mapping (with mlock + guards)
+	// remains in place and the arena stays secure via the portable path.
+	_ = moxie_secalloc_try_secretmem(dataStart, dataSize)
+
+	if mprotect(addr, secPageSize, flag_PROT_NONE) != 0 {
+		runtimePanic("secalloc: mprotect head guard failed")
+	}
+	if mprotect(tailGuard, secPageSize, flag_PROT_NONE) != 0 {
+		runtimePanic("secalloc: mprotect tail guard failed")
+	}
+
+	// Pin data pages in RAM (prevent swap leaks), exclude from core dumps
+	// and fork inheritance. Failures on these are advisory, not fatal:
+	// mlock may hit RLIMIT_MEMLOCK, madvise flags may be unsupported on
+	// older kernels. The guard pages and signal wipe still work without
+	// them.
+	_ = mlock(dataStart, dataSize)
+	_ = madvise(dataStart, dataSize, flag_MADV_DONTDUMP)
+	_ = madvise(dataStart, dataSize, flag_MADV_DONTFORK)
+
+	return dataStart, dataSize
+}
+
+// SecureRotate moves the contents of an existing SecureAlloc'd slice to a
+// fresh guarded mapping, wipes the old arena with noise, unmaps it, and
+// returns the new slice. The input slice must have been returned by
+// SecureAlloc (directly or via a prior SecureRotate). After the call, the
+// old backing memory is unmapped — any Moxie code still holding a pointer
+// into it will SIGSEGV on access, triggering the normal wipe-and-die path.
+//
+// Use cases:
+//   - Rotating a long-lived session key so its virtual address changes over
+//     time, defeating adversaries who observed the VA at any prior moment
+//     (e.g. /proc/self/mem leak, core-dump escape, ROP read gadget).
+//   - Forcing eviction from page-cache entries that may have been scanned.
+//
+// The caller MUST drop any aliases to the old slice before calling, since
+// those aliases become dangling pointers into unmapped memory.
+func SecureRotate(old []byte) []byte {
+	if len(old) == 0 {
+		runtimePanic("secalloc: rotate empty slice")
+	}
+	oldBase := unsafe.Pointer(&old[0])
+	oldDataSize := (uintptr(len(old)) + secPageSize - 1) &^ (secPageSize - 1)
+
+	// Allocate the replacement arena first. If this fails we panic before
+	// touching the old one, leaving the caller's slice valid.
+	newBase, newDataSize := secureMap(int32(len(old)))
+
+	// Copy bytes into the new arena.
+	dst := unsafe.Slice((*byte)(newBase), len(old))
+	copy(dst, old)
+
+	// Register the replacement. If the registry is full the old arena is
+	// still live; unmap the replacement and panic.
+	if moxie_secalloc_register_arena(newBase, newDataSize) != 0 {
+		_ = munmap(unsafe.Add(newBase, -int(secPageSize)), newDataSize+2*secPageSize)
+		runtimePanic("secalloc: arena registry full")
+	}
+
+	// Regenerate the noise buffer BEFORE wiping the old arena. Rotation
+	// is the natural re-key point: both the virtual address (new mmap)
+	// and the wipe signature (new noise) change in one step, so an
+	// attacker who observed either side of the old arena gets no useful
+	// bridge to the new one.
+	secureGenerateNoise()
+
+	// Wipe the old arena with the (now-fresh) noise pattern BEFORE
+	// unmapping. If any page aliases survive in TLB or another thread's
+	// view, they see noise instead of the secret.
+	secureWipe(oldBase, oldDataSize)
+
+	// Drop the old arena from the registry so the signal handler stops
+	// touching it. Must happen before munmap: otherwise a concurrent fault
+	// could hit unmapped memory mid-wipe.
+	moxie_secalloc_unregister_arena(oldBase)
+
+	// Unmap the full three-page mapping (head guard, data, tail guard).
+	_ = munmap(unsafe.Add(oldBase, -int(secPageSize)), oldDataSize+2*secPageSize)
+
+	return dst
+}
+
+// secureWipe overwrites length bytes at base with the repeating noise
+// pattern generated by secureInit. Inlined memcpy loop — no C call,
+// keeps this usable from contexts where the C side might be re-entered
+// (not currently the case, but cheap insurance).
+func secureWipe(base unsafe.Pointer, length uintptr) {
+	if !secInited {
+		return
+	}
+	noise := unsafe.Pointer(&secNoise[0])
+	off := uintptr(0)
+	for off < length {
+		n := length - off
+		if n > secNoiseSize {
+			n = secNoiseSize
+		}
+		dst := unsafe.Slice((*byte)(unsafe.Add(base, off)), n)
+		src := unsafe.Slice((*byte)(noise), n)
+		copy(dst, src)
+		off += n
+	}
+}
+
+// moxie_secalloc_register_arena hands a new guarded region to the C-side
+// signal handler for wipe tracking. Returns 0 on success, -1 if the
+// registry is full. The C side reuses NULL'd-out slots left by previous
+// unregister calls so long-running domains that rotate arenas don't
+// exhaust the fixed-size registry.
+//
+//export moxie_secalloc_register_arena
+func moxie_secalloc_register_arena(base unsafe.Pointer, length uintptr) int32
+
+// moxie_secalloc_unregister_arena marks the slot for an arena as free.
+// The next register call may reuse it. The signal-handler wipe loop
+// skips NULL entries, so after unregister the arena is no longer wiped.
+//
+//export moxie_secalloc_unregister_arena
+func moxie_secalloc_unregister_arena(base unsafe.Pointer)
+
+// moxie_secalloc_configure hands the noise buffer and lockdown fd to the
+// C-side signal handler. Called once by secureInit().
+//
+//export moxie_secalloc_configure
+func moxie_secalloc_configure(noise unsafe.Pointer, noiseLen uintptr, fd int32)
+
+// moxie_secalloc_set_lockdown_fd updates only the lockdown fd on the C side.
+// Used by SetSecureLockdownFd to retarget notifications without rewriting
+// the noise buffer pointer.
+//
+//export moxie_secalloc_set_lockdown_fd
+func moxie_secalloc_set_lockdown_fd(fd int32)
+
+// moxie_secalloc_clear overwrites a single buffer with the current noise
+// pattern. No registry mutation, no fd write — targeted per-buffer wipe
+// for SecureClear's context-change use case.
+//
+//export moxie_secalloc_clear
+func moxie_secalloc_clear(base unsafe.Pointer, length uintptr)
+
+// moxie_secalloc_lockdown wipes every registered arena with noise and
+// writes the lockdown marker to the notify fd. Shared entry point for
+// both the fatal-signal path and the explicit SecureLockdown primitive.
+//
+//export moxie_secalloc_lockdown
+func moxie_secalloc_lockdown()
+
+// moxie_secalloc_try_secretmem attempts to replace the anonymous data pages
+// at base with memfd_secret(2)-backed secretmem (Linux ≥5.14). Returns 0 on
+// success, -1 on failure. Failure is silent — the existing mmap+mlock
+// mapping stays in place. Darwin always returns -1.
+//
+//export moxie_secalloc_try_secretmem
+func moxie_secalloc_try_secretmem(base unsafe.Pointer, length uintptr) int32

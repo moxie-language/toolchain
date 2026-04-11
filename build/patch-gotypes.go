@@ -221,10 +221,12 @@ func patchSpawnBuiltin(dir string) {
 		"\t_Recover\n\t_Spawn\n\n\t// package unsafe")
 
 	// Add spawn entry in predeclaredFuncs after _Recover.
-	// nargs=1 (minimum: the function), variadic=true, expression (returns chan struct{}).
+	// nargs=1 (minimum: the function), variadic=true, statement-kind so the
+	// call can be used as an expression statement (its primary use) while
+	// still allowing `ch := spawn(...)` to consume the lifecycle handle.
 	src = mustReplace(f, src,
 		"\t_Recover: {\"recover\", 0, false, statement},",
-		"\t_Recover: {\"recover\", 0, false, statement},\n\t_Spawn:   {\"spawn\", 1, true, expression},")
+		"\t_Recover: {\"recover\", 0, false, statement},\n\t_Spawn:   {\"spawn\", 1, true, statement},")
 
 	mustWrite(f, src)
 
@@ -269,6 +271,17 @@ func patchSpawnBuiltin(dir string) {
 		}
 		x.mode = value
 		x.typ = NewChan(SendRecv, NewStruct(nil, nil))
+		// Synthesize a signature for the spawn ident so the SSA builder
+		// can construct a *Builtin with a *types.Signature when it visits
+		// the call. Without this, fn.instanceType(e).(*types.Signature)
+		// at builder.go:814 panics: the universe entry has no signature.
+		if check.recordTypes() {
+			params := make([]Type, nargs)
+			for i, a := range args {
+				params[i] = a.typ
+			}
+			check.recordBuiltinType(call.Fun, makeSig(x.typ, params...))
+		}
 
 	case _Add:`)
 

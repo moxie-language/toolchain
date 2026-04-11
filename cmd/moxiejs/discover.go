@@ -228,6 +228,21 @@ func mxBuildContext(goroot string) build.Context {
 	ctx.CgoEnabled = false
 	ctx.ReadDir = mxReadDir
 	ctx.OpenFile = mxOpenFile
+	// Strip host goexperiment.* tags. The host Go toolchain injects tags
+	// reflecting how *it* was built (regabiargs, regabiwrappers, swissmap,
+	// dwarf5, etc.), but those are host-specific and wrong for js/wasm:
+	// register-based ABI doesn't apply, and the moxie stdlib rewrite ships
+	// matched _on/_off pairs per experiment — with regabi tags set, the _on
+	// versions get selected and conflict with js/wasm reality. Keep only
+	// non-goexperiment entries (e.g. arch-level "amd64.v1" isn't relevant to
+	// js/wasm either but costs nothing to leave in).
+	filtered := make([]string, 0, len(ctx.ToolTags))
+	for _, t := range ctx.ToolTags {
+		if !strings.HasPrefix(t, "goexperiment.") {
+			filtered = append(filtered, t)
+		}
+	}
+	ctx.ToolTags = filtered
 	return ctx
 }
 

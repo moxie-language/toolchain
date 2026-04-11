@@ -130,7 +130,10 @@ export function appendSlice(dst, src) {
 }
 
 // Copy from src to dst. Returns number of elements copied.
+// nil src / dst match Go semantics: zero-length, no-op copy.
 export function copy(dst, src) {
+  if (dst === null || dst === undefined) return 0;
+  if (src === null || src === undefined) return 0;
   // Handle string source — copy UTF-8 bytes.
   if (typeof src === 'string') {
     const bytes = utf8Bytes(src);
@@ -265,6 +268,31 @@ export function mapDelete(m, key) {
     m.delete(key);
   } else if (m instanceof GoMap) {
     m.delete(key);
+  }
+}
+
+// Builtin clear(slice) — zeros every element in [0, length).
+// This is the JS-side wipe primitive for the secure-allocation contract:
+// `[]byte{:n, secure}` gives you a best-effort allocation on JS, and
+// `clear(b)` is the caller's way of overwriting the backing before it
+// falls out of scope. On []byte the fill value is 0, matching Go semantics.
+export function clearSlice(s) {
+  if (s === null || s === undefined) return;
+  const arr = s.$array;
+  const off = s.$offset;
+  const n = s.$length;
+  for (let i = 0; i < n; i++) {
+    arr[off + i] = 0;
+  }
+}
+
+// Builtin clear(map) — deletes every entry.
+export function clearMap(m) {
+  if (m === null || m === undefined) return;
+  if (m instanceof Map) {
+    m.clear();
+  } else if (m instanceof GoMap) {
+    m.entries.length = 0;
   }
 }
 

@@ -140,3 +140,21 @@ export function GetActiveTab(fn) {
     fn(0, '');
   }
 }
+
+export function SessionGet(key, fn) {
+  try {
+    fn(sessionStorage.getItem(_prefix + key) || '');
+  } catch(e) {
+    fn('');
+  }
+}
+
+export function SessionSet(key, value) {
+  try {
+    sessionStorage.setItem(_prefix + key, '' + value);
+  } catch(e) {}
+}
+
+export function IsInPage() {
+  return !_isExt;
+}

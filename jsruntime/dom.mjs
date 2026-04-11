@@ -273,6 +273,22 @@ let _wsSeen = {};        // subID -> { eventID: true }
 let _wsEoseCount = {};   // subID -> count of relays that sent EOSE
 let _wsWriteRelays = []; // relay URLs for EVENT publishing
 
+// Visible diagnostic overlay for mobile debugging (no console access).
+var _diagEl = null;
+function _diag(msg) {
+  console.log(msg);
+  if (!_diagEl) {
+    _diagEl = document.createElement('div');
+    _diagEl.style.cssText = 'position:fixed;bottom:0;left:0;right:0;max-height:40vh;overflow-y:auto;background:#111;color:#0f0;font:11px/1.4 monospace;padding:6px;z-index:99999;pointer-events:auto;';
+    document.body.appendChild(_diagEl);
+  }
+  var line = document.createElement('div');
+  line.textContent = msg;
+  _diagEl.appendChild(line);
+  _diagEl.scrollTop = _diagEl.scrollHeight;
+}
+let _wsPendingPub = {};  // url -> [json strings] queued while CONNECTING
+
 function _wsSend(handler, msg) {
   if (handler) handler(msg);
 }
@@ -283,12 +299,20 @@ function _wsEnsure(url) {
   try { ws = new WebSocket(url); } catch(e) { return null; }
   _wsConns[url] = ws;
   ws.onopen = function() {
+    _diag('WS OPEN ' + url);
     // Replay active subs for this relay.
     for (var sid in _wsSubs) {
       var sub = _wsSubs[sid];
       if (sub.relays.has(url)) {
         ws.send(JSON.stringify(["REQ", sid, JSON.parse(sub.filter)]));
       }
+    }
+    // Flush queued publishes.
+    var pending = _wsPendingPub[url];
+    if (pending) {
+      _diag('FLUSH ' + pending.length + ' queued to ' + url);
+      delete _wsPendingPub[url];
+      for (var p = 0; p < pending.length; p++) ws.send(pending[p]);
     }
   };
   ws.onmessage = function(e) {
@@ -310,9 +334,16 @@ function _wsEnsure(url) {
       if (sub2 && _wsEoseCount[sid2] >= sub2.relays.size) {
         _wsSend(_swMessageHandler, '["EOSE",' + JSON.stringify(sid2) + ']');
       }
+    } else if (msg[0] === "OK" && msg.length >= 3) {
+      var okId = msg[1], okSuccess = msg[2], okMsg = msg[3] || '';
+      if (okSuccess) { _diag('OK ' + url + ' id=' + (okId && okId.substring(0,8))); }
+      else { _diag('REJECTED ' + url + ' ' + (okId && okId.substring(0,8)) + ': ' + okMsg); }
+    } else if (msg[0] === "NOTICE") {
+      _diag('NOTICE ' + url + ': ' + msg[1]);
     }
   };
   ws.onclose = function() {
+    _diag('WS CLOSE ' + url);
     delete _wsConns[url];
     // Trigger EOSE for subs that included this relay (connection died before EOSE).
     for (var sid in _wsSubs) {
@@ -383,22 +414,29 @@ function _wsHandleMsg(raw) {
     _wsCloseSub(arr[1]);
   } else if (cmd === "PUBLISH_TO") {
     var ev2 = arr[1], relays2 = arr[2] || [];
+    _diag('PUBLISH_TO kind=' + (ev2 && ev2.kind) + ' id=' + (ev2 && ev2.id && ev2.id.substring(0,8)) + ' relays=' + relays2.length);
     var data2 = JSON.stringify(["EVENT", ev2]);
     for (var m = 0; m < relays2.length; m++) {
       var ws4 = _wsEnsure(relays2[m]);
-      if (ws4 && ws4.readyState === WebSocket.OPEN) ws4.send(data2);
+      if (ws4 && ws4.readyState === WebSocket.OPEN) { _diag('SEND ' + relays2[m]); ws4.send(data2); }
+      else if (ws4) { _diag('QUEUE ' + relays2[m] + ' state=' + ws4.readyState); if (!_wsPendingPub[relays2[m]]) _wsPendingPub[relays2[m]] = []; _wsPendingPub[relays2[m]].push(data2); }
+      else { _diag('FAIL no WS ' + relays2[m]); }
     }
   } else if (cmd === "EVENT") {
+    _diag('EVENT kind=' + (arr[1] && arr[1].kind) + ' writeRelays=' + _wsWriteRelays.length);
     var ev = arr[1], data = JSON.stringify(["EVENT", ev]);
     for (var k = 0; k < _wsWriteRelays.length; k++) {
       var ws3 = _wsEnsure(_wsWriteRelays[k]);
-      if (ws3 && ws3.readyState === WebSocket.OPEN) ws3.send(data);
+      if (ws3 && ws3.readyState === WebSocket.OPEN) { _diag('SEND ' + _wsWriteRelays[k]); ws3.send(data); }
+      else if (ws3) { var u3 = _wsWriteRelays[k]; _diag('QUEUE ' + u3 + ' state=' + ws3.readyState); if (!_wsPendingPub[u3]) _wsPendingPub[u3] = []; _wsPendingPub[u3].push(data); }
+      else { _diag('FAIL no WS ' + _wsWriteRelays[k]); }
     }
   } else if (cmd === "CLEAR_KEY") {
     for (var sid3 in _wsSubs) _wsCloseSub(sid3);
     for (var u in _wsConns) { try { _wsConns[u].close(); } catch(e) {} }
     _wsConns = {};
     _wsWriteRelays = [];
+    _wsPendingPub = {};
   }
 }
 
@@ -409,7 +447,7 @@ var _swSent = [];
 
 export function PostToSW(msg) {
   if (!_hasSW) {
-    _wsHandleMsg(msg);
+    _wsHandleMsg('' + msg);
     return;
   }
   var s = '' + msg;

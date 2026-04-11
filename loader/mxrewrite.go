@@ -63,6 +63,10 @@ func injectMoxieByteBuiltins(fset *token.FileSet, pkgName string) *ast.File {
 	return mxtext.InjectMoxieByteBuiltins(fset, pkgName)
 }
 
+func hasMoxieSecallocRefs(files []*ast.File) bool {
+	return mxtext.HasMoxieSecallocRefs(files)
+}
+
 func rewriteChanLiterals(src []byte, fset *token.FileSet) []byte {
 	return mxtext.RewriteChanLiterals(src, fset)
 }

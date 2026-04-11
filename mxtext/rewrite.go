@@ -399,7 +399,42 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet) []byte {
 		typeText := string(src[toks[lbrackIdx].pos:toks[braceIdx].pos])
 		typeText = strings.TrimSpace(typeText)
 
-		if len(colonPositions) == 1 {
+		// Detect the secure-allocator marker: a trailing `, secure` IDENT
+		// just before the closing brace. This only applies to the
+		// `[]T{:len}` form (no len:cap variant — secure allocations are
+		// page-aligned and have an implicit cap).
+		secureMarker := false
+		secureExprEnd := closeIdx
+		if len(colonPositions) == 1 && closeIdx-2 > colonPositions[0] {
+			lastTok := toks[closeIdx-1]
+			prevTok := toks[closeIdx-2]
+			if lastTok.tok == token.IDENT && lastTok.lit == "secure" &&
+				prevTok.tok == token.COMMA {
+				secureMarker = true
+				secureExprEnd = closeIdx - 2 // index of the COMMA
+			}
+		}
+
+		if secureMarker {
+			// []byte{:len, secure} → __moxie_secalloc(len)
+			// Only []byte is supported in M2; other element types fall
+			// through to the regular make path and trip a typecheck error
+			// downstream because the resulting __moxie_secalloc returns
+			// []byte.
+			if typeText != "[]byte" {
+				continue
+			}
+			lenStart := toks[colonPositions[0]+1].pos
+			lenEnd := toks[secureExprEnd].pos
+			lenExpr := strings.TrimSpace(string(src[lenStart:lenEnd]))
+			if lenExpr == "" {
+				continue
+			}
+			result.Write(src[lastEnd:toks[lbrackIdx].pos])
+			result.WriteString("__moxie_secalloc(")
+			result.WriteString(lenExpr)
+			result.WriteString(")")
+		} else if len(colonPositions) == 1 {
 			// []T{:len} → make([]T, len)
 			lenStart := toks[colonPositions[0]+1].pos
 			lenEnd := toks[closeIdx].pos

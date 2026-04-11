@@ -4,9 +4,13 @@
 set -euo pipefail
 
 MOXIE="${MOXIE:-./moxie}"
+MOXIEROOT="${MOXIEROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+export MOXIEROOT
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 TMPDIR=$(mktemp -d)
-trap "rm -rf $TMPDIR" EXIT
+STAGEROOT="$MOXIEROOT/tests/_spawn_stage_$$"
+mkdir -p "$STAGEROOT"
+trap "rm -rf $TMPDIR $STAGEROOT" EXIT
 
 export PATH="/usr/lib/llvm19/bin:$PATH"
 
@@ -14,12 +18,25 @@ pass=0
 fail=0
 skip=0
 
+# stage_src copies $1 to a fresh per-test package directory under the moxie
+# tree so the package resolver can find it, and prints the package path.
+stage_src() {
+    local src="$1"
+    local name=$(basename "$src" .go)
+    local stage="$STAGEROOT/$name"
+    mkdir -p "$stage"
+    cp "$src" "$stage/main.go"
+    echo "./tests/_spawn_stage_$$/$name"
+}
+
 run_pass_test() {
     local src="$1"
     local name=$(basename "$src" .go)
     local bin="$TMPDIR/$name"
+    local pkg
+    pkg=$(stage_src "$src")
 
-    if ! "$MOXIE" build -o "$bin" "$src" 2>"$TMPDIR/$name.err"; then
+    if ! (cd "$MOXIEROOT" && "$MOXIE" build -o "$bin" "$pkg") 2>"$TMPDIR/$name.err"; then
         echo "FAIL $name: compilation failed"
         cat "$TMPDIR/$name.err"
         fail=$((fail + 1))
@@ -52,9 +69,11 @@ run_fail_test() {
     local pattern="$2"
     local name=$(basename "$src" .go)
     local bin="$TMPDIR/$name"
+    local pkg
+    pkg=$(stage_src "$src")
 
     local errout
-    if errout=$("$MOXIE" build -o "$bin" "$src" 2>&1); then
+    if errout=$(cd "$MOXIEROOT" && "$MOXIE" build -o "$bin" "$pkg" 2>&1); then
         echo "FAIL $name: compilation should have failed"
         fail=$((fail + 1))
         return

@@ -93,6 +93,7 @@ func compileFile(filename string, outputDir, runtimeDir string, dumpSSA bool) er
 		Defs:       make(map[*ast.Ident]types.Object),
 		Uses:       make(map[*ast.Ident]types.Object),
 		Instances:  make(map[*ast.Ident]types.Instance),
+		Implicits:  make(map[ast.Node]types.Object),
 		Scopes:     make(map[ast.Node]*types.Scope),
 		Selections: make(map[*ast.SelectorExpr]*types.Selection),
 	}
@@ -175,6 +176,7 @@ func compilePackage(pattern string, outputDir, runtimeDir string, dumpSSA bool) 
 			Defs:       make(map[*ast.Ident]types.Object),
 			Uses:       make(map[*ast.Ident]types.Object),
 			Instances:  make(map[*ast.Ident]types.Instance),
+			Implicits:  make(map[ast.Node]types.Object),
 			Scopes:     make(map[ast.Node]*types.Scope),
 			Selections: make(map[*ast.SelectorExpr]*types.Selection),
 		}

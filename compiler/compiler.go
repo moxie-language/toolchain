@@ -1971,6 +1971,8 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 			return b.createMoxieEq(instr), nil
 		case strings.HasPrefix(fn.Name(), "__moxie_lt"):
 			return b.createMoxieLt(instr), nil
+		case strings.HasPrefix(fn.Name(), "__moxie_secalloc"):
+			return b.createMoxieSecalloc(instr), nil
 		}
 	}
 
