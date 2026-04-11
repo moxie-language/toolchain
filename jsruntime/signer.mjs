@@ -28,7 +28,14 @@ export function SignEvent(eventJSON, fn) {
   if (!HasSigner()) { fn(''); return; }
   var ev = JSON.parse(_str(eventJSON));
   window.nostr.signEvent(ev)
-    .then(function(signed) { fn(JSON.stringify(signed)); })
+    .then(function(signed) {
+      if (!signed || signed.error || !signed.sig) {
+        console.error('[signer] signEvent returned error:', signed && signed.error || 'no sig');
+        fn('');
+        return;
+      }
+      fn(JSON.stringify(signed));
+    })
     .catch(function(e) { console.error('[signer] signEvent failed:', e); fn(''); });
 }
 
