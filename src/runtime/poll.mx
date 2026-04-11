@@ -102,8 +102,12 @@ func poll_runtime_pollOpen(fd uintptr) (uintptr, int) {
 	pd.rd = 0
 	pd.wd = 0
 
+	// Do NOT register EPOLLOUT by default: a writable socket's send buffer
+	// is almost always below the low-water mark, so level-triggered EPOLLOUT
+	// fires on every epoll_wait and burns CPU when no task is writing.
+	// EPOLLOUT is added lazily in pollWait(mode='w').
 	ev := epollEvent{
-		events: _EPOLLIN | _EPOLLOUT | _EPOLLHUP | _EPOLLERR,
+		events: _EPOLLIN | _EPOLLHUP | _EPOLLERR,
 		fd:     int32(fd),
 	}
 	if libc_epoll_ctl(epfd, int32(_EPOLL_CTL_ADD), int32(fd), &ev) < 0 {
@@ -158,16 +162,14 @@ func poll_runtime_pollWait(ctx uintptr, mode int) int {
 	}
 
 	// Single-threaded: block on epoll_wait until this fd is ready.
-	// Narrow the epoll interest set to only the event we need,
-	// otherwise write-readiness causes busy-spinning when waiting for reads.
-	var wantEvents uint32 = _EPOLLHUP | _EPOLLERR
-	if mode == 'r' {
-		wantEvents |= _EPOLLIN
-	} else {
-		wantEvents |= _EPOLLOUT
+	// For mode='w', temporarily add EPOLLOUT to the interest set; it is
+	// removed again on exit so an idle writable socket never re-fires.
+	// For mode='r', the default set already includes EPOLLIN so no MOD
+	// is needed.
+	if mode == 'w' {
+		modEv := epollEvent{events: _EPOLLOUT | _EPOLLIN | _EPOLLHUP | _EPOLLERR, fd: pd.fd}
+		libc_epoll_ctl(epfd, int32(_EPOLL_CTL_MOD), pd.fd, &modEv)
 	}
-	modEv := epollEvent{events: wantEvents, fd: pd.fd}
-	libc_epoll_ctl(epfd, int32(_EPOLL_CTL_MOD), pd.fd, &modEv)
 
 	for {
 		// Compute timeout from deadline.
@@ -202,13 +204,13 @@ func poll_runtime_pollWait(ctx uintptr, mode int) int {
 		if mode == 'r' && pd.rready {
 			pd.rready = false
 			// Restore full interest set.
-			restoreEv := epollEvent{events: _EPOLLIN | _EPOLLOUT | _EPOLLHUP | _EPOLLERR, fd: pd.fd}
+			restoreEv := epollEvent{events: _EPOLLIN | _EPOLLHUP | _EPOLLERR, fd: pd.fd}
 			libc_epoll_ctl(epfd, int32(_EPOLL_CTL_MOD), pd.fd, &restoreEv)
 			return pollNoError
 		}
 		if mode == 'w' && pd.wready {
 			pd.wready = false
-			restoreEv := epollEvent{events: _EPOLLIN | _EPOLLOUT | _EPOLLHUP | _EPOLLERR, fd: pd.fd}
+			restoreEv := epollEvent{events: _EPOLLIN | _EPOLLHUP | _EPOLLERR, fd: pd.fd}
 			libc_epoll_ctl(epfd, int32(_EPOLL_CTL_MOD), pd.fd, &restoreEv)
 			return pollNoError
 		}
@@ -220,8 +222,8 @@ func poll_runtime_pollWait(ctx uintptr, mode int) int {
 		}
 	}
 
-	// Restore full interest set on exit.
-	restoreEv := epollEvent{events: _EPOLLIN | _EPOLLOUT | _EPOLLHUP | _EPOLLERR, fd: pd.fd}
+	// Restore default interest set on exit (no EPOLLOUT — added lazily).
+	restoreEv := epollEvent{events: _EPOLLIN | _EPOLLHUP | _EPOLLERR, fd: pd.fd}
 	libc_epoll_ctl(epfd, int32(_EPOLL_CTL_MOD), pd.fd, &restoreEv)
 	if pd.closing {
 		return pollErrClosing

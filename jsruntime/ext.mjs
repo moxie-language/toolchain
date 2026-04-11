@@ -1,87 +1,142 @@
-// ext.mjs — Browser extension API (MV2 persistent background page).
-// Implements the jsbridge/ext package for the signer background script.
+// ext.mjs — Platform-adaptive extension/signer bridge.
+// Detects whether it is running in a browser extension background page
+// or in a regular page context and uses the appropriate APIs.
+//
+// Extension:  browser.storage.local, browser.runtime.onMessage
+// In-page:    localStorage (prefixed), direct handler dispatch
 
-// StorageGet retrieves a value from browser.storage.local.
+var _isExt = typeof browser !== 'undefined'
+  && !!browser.runtime && !!browser.runtime.onMessage;
+
+var _prefix = 'smesh-signer:';
+var _handler = null;
+var _readyResolve = null;
+var _ready = new Promise(function(r) { _readyResolve = r; });
+
+function _signalReady() {
+  if (_readyResolve) { _readyResolve(); _readyResolve = null; }
+}
+
+// --- Storage ---
+
 export function StorageGet(key, fn) {
-  browser.storage.local.get(key).then((result) => {
-    fn(result[key] || "");
-  }).catch(() => {
-    fn("");
-  });
+  if (_isExt) {
+    browser.storage.local.get(key).then(function(result) {
+      fn(result[key] || '');
+    }).catch(function() { fn(''); });
+  } else {
+    fn(localStorage.getItem(_prefix + key) || '');
+  }
 }
 
-// StorageSet stores a key-value pair in browser.storage.local.
 export function StorageSet(key, value) {
-  browser.storage.local.set({ [key]: value });
+  if (_isExt) {
+    browser.storage.local.set({ [key]: value });
+  } else {
+    localStorage.setItem(_prefix + key, value);
+  }
 }
 
-// StorageRemove removes a key from browser.storage.local.
 export function StorageRemove(key) {
-  browser.storage.local.remove(key);
+  if (_isExt) {
+    browser.storage.local.remove(key);
+  } else {
+    localStorage.removeItem(_prefix + key);
+  }
 }
 
-// OnMessage registers a handler for browser.runtime.onMessage.
+// --- Message handling ---
+
+// OnMessage registers a handler for incoming requests.
 // fn receives (method, paramsJSON, senderTabID, respond).
-// respond is called with the response JSON string when ready.
 export function OnMessage(fn) {
-  browser.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    const method = msg.method || "";
-    const params = msg.params ? JSON.stringify(msg.params) : "{}";
-    const tabID = (sender.tab && sender.tab.id) || 0;
-    function respond(result) {
-      try {
-        const parsed = JSON.parse(result);
-        if (parsed.error) {
-          sendResponse({ error: parsed.error });
-        } else {
-          sendResponse(parsed.result !== undefined ? parsed.result : parsed);
+  if (_isExt) {
+    browser.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
+      var method = msg.method || '';
+      var params = msg.params ? JSON.stringify(msg.params) : '{}';
+      var tabID = (sender.tab && sender.tab.id) || 0;
+      function respond(result) {
+        try {
+          var parsed = JSON.parse(result);
+          if (parsed.error) {
+            sendResponse({ error: parsed.error });
+          } else {
+            sendResponse(parsed.result !== undefined ? parsed.result : parsed);
+          }
+        } catch (e) {
+          sendResponse(result);
         }
-      } catch (e) {
-        sendResponse(result);
       }
-    }
-    try {
-      fn(method, params, tabID, respond);
-    } catch (e) {
-      console.error("smesh handler error:", e);
-      sendResponse({ error: e.message || "handler error" });
-    }
-    return true; // keep sendResponse channel open for async
+      try {
+        fn(method, params, tabID, respond);
+      } catch (e) {
+        console.error('smesh handler error:', e);
+        sendResponse({ error: e.message || 'handler error' });
+      }
+      return true;
+    });
+  } else {
+    _handler = fn;
+    _signalReady();
+  }
+}
+
+// dispatch calls the registered handler directly (in-page path).
+// In extension context this is unused — messages arrive via browser.runtime.
+export function dispatch(method, params) {
+  return _ready.then(function() {
+    return new Promise(function(resolve) {
+      if (!_handler) { resolve(null); return; }
+      var paramsJSON = JSON.stringify(params || {});
+      _handler(method, paramsJSON, 0, function(result) {
+        try {
+          var parsed = JSON.parse('' + result);
+          if (parsed.error) {
+            resolve({ error: parsed.error });
+          } else {
+            resolve(parsed.result !== undefined ? parsed.result : parsed);
+          }
+        } catch (e) {
+          resolve('' + result);
+        }
+      });
+    });
   });
 }
 
-// SendMessageToTab sends a message to a specific tab's content script.
+// --- Tab messaging (extension only, no-op in-page) ---
+
 export function SendMessageToTab(tabID, msg) {
+  if (!_isExt) return;
   try {
-    const parsed = JSON.parse(msg);
-    browser.tabs.sendMessage(tabID, parsed);
+    browser.tabs.sendMessage(tabID, JSON.parse(msg));
   } catch (e) {
     browser.tabs.sendMessage(tabID, { data: msg });
   }
 }
 
-// ConsoleLog logs to the browser console and forwards to active tab.
 export function ConsoleLog(msg) {
-  console.log('[smesh-bg]', msg);
-  // Also forward to active tab's content script for page console visibility.
+  console.log('[smesh]', '' + msg);
+  if (!_isExt) return;
   try {
-    browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
+    browser.tabs.query({ active: true, currentWindow: true }).then(function(tabs) {
       if (tabs.length > 0) {
-        browser.tabs.sendMessage(tabs[0].id, { type: "LOG", text: msg }).catch(() => {});
+        browser.tabs.sendMessage(tabs[0].id, { type: 'LOG', text: msg }).catch(function() {});
       }
-    }).catch(() => {});
+    }).catch(function() {});
   } catch(e) {}
 }
 
-// GetActiveTab gets the active tab's ID and URL.
 export function GetActiveTab(fn) {
-  browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
-    if (tabs.length > 0) {
-      fn(tabs[0].id, tabs[0].url || "");
-    } else {
-      fn(0, "");
-    }
-  }).catch(() => {
-    fn(0, "");
-  });
+  if (_isExt) {
+    browser.tabs.query({ active: true, currentWindow: true }).then(function(tabs) {
+      if (tabs.length > 0) {
+        fn(tabs[0].id, tabs[0].url || '');
+      } else {
+        fn(0, '');
+      }
+    }).catch(function() { fn(0, ''); });
+  } else {
+    fn(0, '');
+  }
 }

@@ -381,6 +381,13 @@ function _wsHandleMsg(raw) {
     }
   } else if (cmd === "CLOSE") {
     _wsCloseSub(arr[1]);
+  } else if (cmd === "PUBLISH_TO") {
+    var ev2 = arr[1], relays2 = arr[2] || [];
+    var data2 = JSON.stringify(["EVENT", ev2]);
+    for (var m = 0; m < relays2.length; m++) {
+      var ws4 = _wsEnsure(relays2[m]);
+      if (ws4 && ws4.readyState === WebSocket.OPEN) ws4.send(data2);
+    }
   } else if (cmd === "EVENT") {
     var ev = arr[1], data = JSON.stringify(["EVENT", ev]);
     for (var k = 0; k < _wsWriteRelays.length; k++) {
