@@ -944,6 +944,48 @@ func wrapIntBuiltin(expr ast.Expr, builtins map[string]bool) ast.Expr {
 // 3. Pipe concatenation rewrite (AST-level, after first typecheck pass)
 // ---------------------------------------------------------------------------
 
+// RewriteConstPipes changes | to + inside const declarations where operands
+// are string literals. Go's compiler folds "a" + "b" at compile time, but
+// __moxie_concat is a runtime call and cannot appear in a const.
+func RewriteConstPipes(files []*ast.File) {
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, val := range vs.Values {
+					constPipeToAdd(val)
+				}
+			}
+		}
+	}
+}
+
+// constPipeToAdd recursively rewrites | to + in binary expressions
+// where all leaves are string literals.
+func constPipeToAdd(e ast.Expr) bool {
+	switch n := e.(type) {
+	case *ast.BasicLit:
+		return n.Kind == token.STRING
+	case *ast.BinaryExpr:
+		xLit := constPipeToAdd(n.X)
+		yLit := constPipeToAdd(n.Y)
+		if xLit && yLit && n.Op == token.OR {
+			n.Op = token.ADD
+		}
+		return xLit && yLit
+	case *ast.ParenExpr:
+		return constPipeToAdd(n.X)
+	}
+	return false
+}
+
 // PipeRewrite records a | expression that should become __moxie_concat.
 type PipeRewrite struct {
 	parent ast.Node

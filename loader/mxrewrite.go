@@ -23,6 +23,10 @@ func rewriteStringLiterals(file *ast.File) {
 	mxtext.RewriteStringLiterals(file)
 }
 
+func rewriteConstPipes(files []*ast.File) {
+	mxtext.RewriteConstPipes(files)
+}
+
 func findPipeConcat(files []*ast.File, info *types.Info) []pipeRewrite {
 	return mxtext.FindPipeConcat(files, info)
 }

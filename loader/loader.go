@@ -351,6 +351,7 @@ func (p *Package) Check() error {
 				return Errors{p, plusErrs}
 			}
 		}
+		rewriteConstPipes(p.Files)
 		pipeRewrites := findPipeConcat(p.Files, &p.info)
 		cmpExprs := findByteComparisons(p.Files, &p.info)
 		byteSwitches := findByteSwitches(p.Files, &p.info)
