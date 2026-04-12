@@ -1,23 +1,56 @@
-// TinyJS Runtime — Goroutine Scheduler
+// MoxieJS Runtime — Goroutine Scheduler
 // Cooperative async/await scheduler with microtask queue.
 
 const runQueue = [];
 let running = false;
 let goroutineId = 0;
 
+// Error tracking — last N goroutine crashes, accessible via onError callback.
+const _errorLog = [];
+const _maxErrors = 32;
+let _onError = null;
+
 class Goroutine {
-  constructor(id, fn) {
+  constructor(id, fn, caller) {
     this.id = id;
     this.fn = fn;
+    this.caller = caller || '';
     this.done = false;
     this.error = null;
   }
 }
 
-// Spawn a new goroutine.
-export function spawn(fn) {
+// Register a callback for goroutine errors: fn(goroutineId, callerInfo, error).
+export function onError(fn) {
+  _onError = fn;
+}
+
+// Return recent errors as [{id, caller, error, time}].
+export function errors() {
+  return _errorLog.slice();
+}
+
+function recordError(g, e) {
+  const entry = { id: g.id, caller: g.caller, error: e, time: Date.now() };
+  _errorLog.push(entry);
+  if (_errorLog.length > _maxErrors) _errorLog.shift();
+
+  if (typeof e === 'object' && e !== null && e.name === 'GoPanic') {
+    console.error(`goroutine ${g.id} [${g.caller}]: panic: ${e.message}`);
+    if (e.stack) console.error(e.stack);
+  } else {
+    console.error(`goroutine ${g.id} [${g.caller}]: unhandled error:`, e);
+  }
+
+  if (_onError) {
+    try { _onError(g.id, g.caller, e); } catch (_) {}
+  }
+}
+
+// Spawn a new goroutine. caller is an optional string identifying the spawn site.
+export function spawn(fn, caller) {
   const id = ++goroutineId;
-  const g = new Goroutine(id, fn);
+  const g = new Goroutine(id, fn, caller || '');
   runQueue.push(g);
   scheduleRun();
   return g;
@@ -50,13 +83,9 @@ async function tick() {
     } catch (e) {
       g.done = true;
       g.error = e;
-      // Unhandled panic in goroutine — print and exit like Go does.
-      if (typeof e === 'object' && e !== null && e.name === 'GoPanic') {
-        console.error(`goroutine ${g.id}: panic: ${e.message}`);
-      } else {
-        console.error(`goroutine ${g.id}: unhandled error:`, e);
-      }
-      throw e;
+      // Record the error but keep the scheduler alive.
+      recordError(g, e);
+      // Continue processing remaining goroutines.
     }
   }
 
@@ -84,11 +113,18 @@ export async function runMain(mainFn) {
     const result = mainFn();
     if (result instanceof Promise) await result;
   } catch (e) {
+    const entry = { id: 0, caller: 'main', error: e, time: Date.now() };
+    _errorLog.push(entry);
     if (e && e.name === 'GoPanic') {
-      console.error(`panic: ${e.message}`);
-      console.error(e.stack);
+      console.error(`main: panic: ${e.message}`);
+      if (e.stack) console.error(e.stack);
+    } else {
+      console.error('main: unhandled error:', e);
     }
-    throw e;
+    if (_onError) {
+      try { _onError(0, 'main', e); } catch (_) {}
+    }
+    // Don't re-throw — let the scheduler drain remaining goroutines.
   }
 
   // Drain remaining goroutines.

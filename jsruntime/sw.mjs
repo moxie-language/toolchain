@@ -59,7 +59,13 @@ const _fetchResolvers = new Map();
 export function OnFetch(fn) {
   self.addEventListener('fetch', (event) => {
     const id = _storeEvent(event);
-    fn(id);
+    try {
+      fn(id);
+    } catch (e) {
+      // Runtime already logged it — just ensure fetch falls through to browser.
+      _events.delete(id);
+      return;
+    }
     // Check if Go code set up a response strategy.
     const resolver = _fetchResolvers.get(id);
     if (resolver) {
@@ -78,7 +84,9 @@ const _earlyQueue = [];
 self.addEventListener('message', (event) => {
   if (_goMessageHandler) {
     const id = _storeEvent(event);
-    _goMessageHandler(id);
+    try {
+      _goMessageHandler(id);
+    } catch (e) { /* runtime handles logging */ }
     _events.delete(id);
   } else {
     _earlyQueue.push(event);
@@ -89,7 +97,9 @@ export function OnMessage(fn) {
   _goMessageHandler = fn;
   while (_earlyQueue.length > 0) {
     const id = _storeEvent(_earlyQueue.shift());
-    fn(id);
+    try {
+      fn(id);
+    } catch (e) { /* runtime handles logging */ }
     _events.delete(id);
   }
 }

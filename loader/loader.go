@@ -345,6 +345,12 @@ func (p *Package) Check() error {
 	// Always run for Moxie target packages — the patched type checker accepts string+
 	// without errors, but the restriction checker still forbids it, so we must rewrite.
 	if isMoxieStringTarget(p.ImportPath) {
+		// Reject + on text in user packages before rewriting.
+		if p.Module.Main {
+			if plusErrs := checkPlusOnText(p.Files, &p.info, p.program.fset); len(plusErrs) > 0 {
+				return Errors{p, plusErrs}
+			}
+		}
 		pipeRewrites := findPipeConcat(p.Files, &p.info)
 		cmpExprs := findByteComparisons(p.Files, &p.info)
 		byteSwitches := findByteSwitches(p.Files, &p.info)

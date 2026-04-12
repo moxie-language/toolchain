@@ -22,6 +22,7 @@ package mxtext
 
 import (
 	"bytes"
+	"fmt"
 	"go/ast"
 	"go/scanner"
 	"go/token"
@@ -709,13 +710,13 @@ func wrapStringExpr(expr ast.Expr) ast.Expr {
 }
 
 // isStringExpr returns true if the expression is syntactically a string literal
-// or a binary + of string expressions (constant string concatenation).
+// or a binary +/| chain of string expressions (constant string concatenation).
 func isStringExpr(expr ast.Expr) bool {
 	switch e := expr.(type) {
 	case *ast.BasicLit:
 		return e.Kind == token.STRING
 	case *ast.BinaryExpr:
-		if e.Op == token.ADD {
+		if e.Op == token.ADD || e.Op == token.OR {
 			return isStringExpr(e.X) && isStringExpr(e.Y)
 		}
 	case *ast.ParenExpr:
@@ -961,17 +962,10 @@ func FindPipeConcat(files []*ast.File, info *types.Info) []PipeRewrite {
 			if !ok || (bin.Op != token.OR && bin.Op != token.ADD) {
 				return true
 			}
-			// Check if operands are []byte or string (string=[]byte unification).
-			// Use both type info and syntactic detection (the []byte(...) wrapper
-			// pattern from string literal rewrite), since type info may be
-			// incomplete after errors.
 			xType := info.TypeOf(bin.X)
 			yType := info.TypeOf(bin.Y)
-			xOk := (xType != nil && isTextType(xType)) || isSliceByteConversion(bin.X) || isMoxieConcatCall(bin.X)
-			yOk := (yType != nil && isTextType(yType)) || isSliceByteConversion(bin.Y) || isMoxieConcatCall(bin.Y)
-			// For | (pipe) and + (string concat), detect nested chains —
-			// if one side is confirmed text and the other is a nested
-			// binary of the same operator, propagate the text detection.
+			xOk := (xType != nil && isTextType(xType)) || isSliceByteConversion(bin.X) || isMoxieConcatCall(bin.X) || isStringLit(bin.X)
+			yOk := (yType != nil && isTextType(yType)) || isSliceByteConversion(bin.Y) || isMoxieConcatCall(bin.Y) || isStringLit(bin.Y)
 			if bin.Op == token.OR || bin.Op == token.ADD {
 				if !xOk && yOk {
 					if inner, ok := bin.X.(*ast.BinaryExpr); ok && (inner.Op == token.OR || inner.Op == token.ADD) {
@@ -991,6 +985,47 @@ func FindPipeConcat(files []*ast.File, info *types.Info) []PipeRewrite {
 		})
 	}
 	return rewrites
+}
+
+// isStringLit returns true if e is a string literal (token.STRING).
+func isStringLit(e ast.Expr) bool {
+	lit, ok := e.(*ast.BasicLit)
+	return ok && lit.Kind == token.STRING
+}
+
+// CheckPlusOnText walks the AST and returns errors for any + or += used on
+// text types. Call this for user packages only — stdlib/vendor may still use +.
+func CheckPlusOnText(files []*ast.File, info *types.Info, fset *token.FileSet) []error {
+	var errs []error
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.BinaryExpr:
+				if node.Op != token.ADD {
+					return true
+				}
+				xType := info.TypeOf(node.X)
+				yType := info.TypeOf(node.Y)
+				xText := (xType != nil && isTextType(xType)) || isSliceByteConversion(node.X) || isStringLit(node.X)
+				yText := (yType != nil && isTextType(yType)) || isSliceByteConversion(node.Y) || isStringLit(node.Y)
+				if xText || yText {
+					pos := fset.Position(node.Pos())
+					errs = append(errs, fmt.Errorf("%s: moxie: '+' is not allowed for text concatenation, use | operator", pos))
+				}
+			case *ast.AssignStmt:
+				if node.Tok != token.ADD_ASSIGN || len(node.Lhs) != 1 {
+					return true
+				}
+				lhsType := info.TypeOf(node.Lhs[0])
+				if lhsType != nil && isTextType(lhsType) {
+					pos := fset.Position(node.Pos())
+					errs = append(errs, fmt.Errorf("%s: moxie: '+=' is not allowed for text concatenation, use |= operator", pos))
+				}
+			}
+			return true
+		})
+	}
+	return errs
 }
 
 // isByteSlice returns true if t is []byte (or []uint8).
@@ -1024,22 +1059,24 @@ func isTextType(t types.Type) bool {
 	return ok && basic.Info()&types.IsString != 0
 }
 
-// rewriteAddAssign converts `s += expr` to `s = __moxie_concat(s, expr)` for
-// text types (string and []byte). The += operator doesn't produce a BinaryExpr
-// in the AST, so findPipeConcat can't catch it. Returns number of rewrites.
+// RewriteAddAssign converts `s += expr` and `s |= expr` to
+// `s = __moxie_concat(s, expr)` for text types. Both forms compile, but
+// CheckPlusOnText rejects += for user packages.
 func RewriteAddAssign(files []*ast.File, info *types.Info) int {
 	count := 0
 	for _, file := range files {
 		ast.Inspect(file, func(n ast.Node) bool {
 			assign, ok := n.(*ast.AssignStmt)
-			if !ok || assign.Tok != token.ADD_ASSIGN || len(assign.Lhs) != 1 {
+			if !ok || len(assign.Lhs) != 1 {
+				return true
+			}
+			if assign.Tok != token.ADD_ASSIGN && assign.Tok != token.OR_ASSIGN {
 				return true
 			}
 			lhsType := info.TypeOf(assign.Lhs[0])
 			if lhsType == nil || !isTextType(lhsType) {
 				return true
 			}
-			// Rewrite: s += expr → s = __moxie_concat(s, expr)
 			assign.Tok = token.ASSIGN
 			assign.Rhs[0] = &ast.CallExpr{
 				Fun: &ast.Ident{Name: "__moxie_concat"},
@@ -1126,28 +1163,29 @@ func maybeReplacePipe(expr ast.Expr, set map[*ast.BinaryExpr]bool) ast.Expr {
 	}
 }
 
-// filterPipeErrors removes type errors about | on []byte from the error list.
+// FilterPipeErrors removes type errors about | and + on text types from the
+// error list. Both are rewritten to __moxie_concat — the user-facing rejection
+// of + happens separately via CheckPlusOnText.
 func FilterPipeErrors(errs []error) []error {
 	var filtered []error
 	for _, err := range errs {
 		msg := err.Error()
-		// Go type checker error for | on slices looks like:
-		// "invalid operation: ... (operator | not defined on ...)"
 		if strings.Contains(msg, "operator |") && strings.Contains(msg, "[]") {
 			continue
 		}
-		// Also filter "operator | not defined on untyped string" which can
-		// happen when | is used between string literals before the string
-		// rewrite converts them to []byte.
 		if strings.Contains(msg, "operator |") && strings.Contains(msg, "string") {
 			continue
 		}
-		// Filter "operator + not defined on []byte" — unconverted string concat.
 		if strings.Contains(msg, "operator +") && strings.Contains(msg, "[]byte") {
 			continue
 		}
-		// Filter mismatched types from + between []byte and string.
 		if strings.Contains(msg, "mismatched types") && strings.Contains(msg, "operator +") {
+			continue
+		}
+		if strings.Contains(msg, "operator |=") {
+			continue
+		}
+		if strings.Contains(msg, "operator +=") && strings.Contains(msg, "[]byte") {
 			continue
 		}
 		filtered = append(filtered, err)

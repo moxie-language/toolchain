@@ -71,6 +71,10 @@ func rewriteChanLiterals(src []byte, fset *token.FileSet) []byte {
 	return mxtext.RewriteChanLiterals(src, fset)
 }
 
+func checkPlusOnText(files []*ast.File, info *types.Info, fset *token.FileSet) []error {
+	return mxtext.CheckPlusOnText(files, info, fset)
+}
+
 func rewriteSliceLiterals(src []byte, fset *token.FileSet) []byte {
 	return mxtext.RewriteSliceLiterals(src, fset)
 }
