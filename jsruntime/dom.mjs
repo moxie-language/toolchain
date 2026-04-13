@@ -64,6 +64,11 @@ export function RemoveChild(parentId, childId) {
   if (parent && child) parent.removeChild(child);
 }
 
+export function Remove(elId) {
+  const el = _elements.get(elId);
+  if (el && el.parentNode) el.parentNode.removeChild(el);
+}
+
 export function FirstChild(parentId) {
   const parent = _elements.get(parentId);
   if (parent && parent.firstChild) {
@@ -273,19 +278,8 @@ let _wsSeen = {};        // subID -> { eventID: true }
 let _wsEoseCount = {};   // subID -> count of relays that sent EOSE
 let _wsWriteRelays = []; // relay URLs for EVENT publishing
 
-// Visible diagnostic overlay for mobile debugging (no console access).
-var _diagEl = null;
 function _diag(msg) {
   console.log(msg);
-  if (!_diagEl) {
-    _diagEl = document.createElement('div');
-    _diagEl.style.cssText = 'position:fixed;bottom:0;left:0;right:0;max-height:40vh;overflow-y:auto;background:#111;color:#0f0;font:11px/1.4 monospace;padding:6px;z-index:99999;pointer-events:auto;';
-    document.body.appendChild(_diagEl);
-  }
-  var line = document.createElement('div');
-  line.textContent = msg;
-  _diagEl.appendChild(line);
-  _diagEl.scrollTop = _diagEl.scrollHeight;
 }
 let _wsPendingPub = {};  // url -> [json strings] queued while CONNECTING
 
@@ -468,7 +462,8 @@ function _sendToSW() {
     msgs = _swQueue;
     _swQueue = [];
   } else if (_swSent.length > 0) {
-    msgs = _swSent;
+    msgs = _swSent.slice();
+    _swSent = [];
   } else {
     return;
   }
