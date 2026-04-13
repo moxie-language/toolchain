@@ -18,3 +18,4 @@ export * as signer from './signer.mjs';
 export * as ext from './ext.mjs';
 export * as schnorr from './schnorr.mjs';
 export * as idb from './idb.mjs';
+export * as poly1305 from './poly1305.mjs';

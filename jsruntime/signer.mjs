@@ -42,6 +42,13 @@ export function SignEvent(eventJSON, fn) {
     .catch(function(e) { console.error('[signer] signEvent failed:', e); fn(''); });
 }
 
+export function GetSharedSecret(peerPubkey, fn) {
+  if (!HasSigner()) { fn(''); return; }
+  window.nostr.getSharedSecret(_str(peerPubkey))
+    .then(function(s) { fn(s || ''); })
+    .catch(function() { fn(''); });
+}
+
 export function Nip04Decrypt(peerPubkey, ciphertext, fn) {
   if (!HasSigner() || !window.nostr.nip04) { fn(''); return; }
   window.nostr.nip04.decrypt(_str(peerPubkey), _str(ciphertext))

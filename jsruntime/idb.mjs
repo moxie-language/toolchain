@@ -1,10 +1,19 @@
 // TinyJS Runtime — IndexedDB Bridge
 // Provides Go-callable IndexedDB operations for event and DM storage.
 
+import { setKey as _setEncKey, sealStr, openStr, hasKey as _encHasKey } from './aead.mjs';
+
 const DB_NAME = 'smesh';
 const DB_VERSION = 2;
 let _db = null;
 let _appVersion = '';
+
+export function SetEncKey(hexKey) {
+  const hex = '' + hexKey;
+  const key = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) key[i] = parseInt(hex.substr(i * 2, 2), 16);
+  _setEncKey(key);
+}
 
 function _openDB(onReady) {
   const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -174,12 +183,13 @@ export function SaveDM(dmJSON, fn) {
   let dm;
   try { dm = JSON.parse(dmJSON); } catch(e) { if (fn) fn('error'); return; }
   if (!dm.id) { if (fn) fn('error'); return; }
+  // Encrypt content at rest
+  if (_encHasKey() && dm.content) dm.content = sealStr(dm.content);
   const tx = _db.transaction('dms', 'readwrite');
   const store = tx.objectStore('dms');
   const check = store.get(dm.id);
   check.onsuccess = () => {
     if (check.result) {
-      // Check if this is an upgrade (e.g. decrypted version replacing encrypted).
       if (dm.content && (!check.result.content || check.result.content !== dm.content)) {
         store.put(dm);
         tx.oncomplete = () => { if (fn) fn('upgraded'); };
@@ -194,6 +204,11 @@ export function SaveDM(dmJSON, fn) {
     }
   };
   check.onerror = () => { if (fn) fn('error'); };
+}
+
+function _decryptDM(dm) {
+  if (_encHasKey() && dm.content) dm.content = openStr(dm.content);
+  return dm;
 }
 
 export function QueryDMs(peer, limit, until, fn) {
@@ -212,7 +227,7 @@ export function QueryDMs(peer, limit, until, fn) {
       if (fn) fn(JSON.stringify(results));
       return;
     }
-    results.push(cursor.value);
+    results.push(_decryptDM(cursor.value));
     cursor.continue();
   };
   req.onerror = () => { if (fn) fn('[]'); };
@@ -232,7 +247,7 @@ export function GetConversationList(fn) {
       if (fn) fn(JSON.stringify(list));
       return;
     }
-    const dm = cursor.value;
+    const dm = _decryptDM(cursor.value);
     const peer = dm.peer || '';
     if (peer) {
       const existing = convos.get(peer);

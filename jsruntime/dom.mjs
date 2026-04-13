@@ -3,6 +3,8 @@
 // Elements are tracked by integer handles.
 // Function names match Go signatures (PascalCase).
 
+import { setKey as _setEncKey, sealStr, openStr, hasKey as _encHasKey } from './aead.mjs';
+
 const _elements = new Map();
 let _nextId = 1; // Safe up to 2^53 in JS. No wrap needed.
 const _callbacks = new Map();
@@ -515,6 +517,14 @@ export function ReadClipboard(fn) {
   }
 }
 
+// IDB encryption key (set once per session).
+export function IDBSetEncKey(hexKey) {
+  const hex = '' + hexKey;
+  const key = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) key[i] = parseInt(hex.substr(i * 2, 2), 16);
+  _setEncKey(key);
+}
+
 // IndexedDB (simple key-value).
 let _idb = null;
 const _idbName = 'smesh-kv';
@@ -539,7 +549,10 @@ export function IDBGet(store, key, fn) {
   _openIDB().then(function(db) {
     const tx = db.transaction(store, 'readonly');
     const req = tx.objectStore(store).get(key);
-    req.onsuccess = function() { fn(req.result ?? ''); };
+    req.onsuccess = function() {
+      const raw = req.result ?? '';
+      fn(_encHasKey() ? openStr(raw) : raw);
+    };
     req.onerror = function() { fn(''); };
   }).catch(function() { fn(''); });
 }
@@ -547,7 +560,8 @@ export function IDBGet(store, key, fn) {
 export function IDBPut(store, key, value) {
   _openIDB().then(function(db) {
     const tx = db.transaction(store, 'readwrite');
-    tx.objectStore(store).put(value, key);
+    const v = _encHasKey() ? sealStr('' + value) : value;
+    tx.objectStore(store).put(v, key);
   });
 }
 
@@ -558,7 +572,8 @@ export function IDBGetAll(store, fn, done) {
     req.onsuccess = function(e) {
       const cursor = e.target.result;
       if (cursor) {
-        fn(String(cursor.key), String(cursor.value));
+        const val = _encHasKey() ? openStr(String(cursor.value)) : String(cursor.value);
+        fn(String(cursor.key), val);
         cursor.continue();
       } else {
         if (done) done();
