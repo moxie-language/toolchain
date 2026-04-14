@@ -129,7 +129,27 @@ func compilePackage(pattern string, outputDir, runtimeDir string, dumpSSA bool) 
 
 	goroot := runtime.GOROOT()
 
-	pkgJSONs, err := discoverPackages(goroot, wd, pattern)
+	// Derive moxie stdlib src dir from the -runtime flag.
+	// -runtime points to e.g. ../moxie/jsruntime/, so ../src/ is the stdlib.
+	var moxieSrcDir string
+	if runtimeDir != "" {
+		candidate := filepath.Join(runtimeDir, "..", "src")
+		if abs, err := filepath.Abs(candidate); err == nil {
+			if info, err := os.Stat(abs); err == nil && info.IsDir() {
+				moxieSrcDir = abs
+			}
+		}
+	}
+	if moxieSrcDir == "" {
+		if root := os.Getenv("MOXIEROOT"); root != "" {
+			candidate := filepath.Join(root, "src")
+			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+				moxieSrcDir = candidate
+			}
+		}
+	}
+
+	pkgJSONs, err := discoverPackages(goroot, wd, pattern, moxieSrcDir)
 	if err != nil {
 		return fmt.Errorf("discover: %w", err)
 	}

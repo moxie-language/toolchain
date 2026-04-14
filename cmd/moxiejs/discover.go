@@ -34,7 +34,7 @@ type packageJSON struct {
 
 // discoverPackages finds all packages transitively imported by inputPkg,
 // returning them in dependency order (deps before dependents).
-func discoverPackages(goroot, workDir, inputPkg string) ([]*packageJSON, error) {
+func discoverPackages(goroot, workDir, inputPkg, moxieSrcDir string) ([]*packageJSON, error) {
 	ctx := mxBuildContext(goroot)
 
 	modPath, modDir, modGoVersion, err := readModInfo(workDir)
@@ -68,6 +68,7 @@ func discoverPackages(goroot, workDir, inputPkg string) ([]*packageJSON, error) 
 		modDir:       modDir,
 		modGoVersion: modGoVersion,
 		modCache:     modCache,
+		moxieSrcDir:  moxieSrcDir,
 		requires:     requires,
 		replaces:     replaces,
 		goroot:       goroot,
@@ -87,6 +88,7 @@ type pkgResolver struct {
 	modDir       string
 	modGoVersion string
 	modCache     string
+	moxieSrcDir  string // moxie stdlib overlay (checked before goroot)
 	requires     map[string]string
 	replaces     map[string]string // module path → absolute local dir
 	goroot       string
@@ -154,6 +156,14 @@ func (r *pkgResolver) walk(importPath, srcDir string) error {
 func (r *pkgResolver) resolveDir(importPath, srcDir string) (string, error) {
 	if importPath == "." || strings.HasPrefix(importPath, "./") || strings.HasPrefix(importPath, "../") {
 		return filepath.Join(srcDir, importPath), nil
+	}
+
+	// Check moxie stdlib overlay first (has correct string==[]byte semantics).
+	if r.moxieSrcDir != "" {
+		mxDir := filepath.Join(r.moxieSrcDir, importPath)
+		if isDir(mxDir) {
+			return mxDir, nil
+		}
 	}
 
 	stdDir := filepath.Join(r.goroot, "src", importPath)
