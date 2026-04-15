@@ -225,6 +225,16 @@ func (p *Program) Parse() error {
 			for _, file := range pkg.Files {
 				rewriteStringLiterals(file)
 			}
+			// Stdlib/vendor packages may still use `+` for text concat
+			// (predating the v1.1.1 enforcement). Syntactically rewrite
+			// `+` to `|` so the patched go/types accepts them on the
+			// first pass. User code still gets CheckPlusOnText to flag
+			// `+` on text as an error.
+			if !pkg.Module.Main {
+				for _, file := range pkg.Files {
+					rewriteAddToPipe(file)
+				}
+			}
 		}
 	}
 

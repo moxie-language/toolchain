@@ -10,7 +10,7 @@ import (
 
 // Version of Moxie.
 // Update this value before release of new version of software.
-const version = "1.2.0"
+const version = "1.2.1"
 
 // Return Moxie version, either in the form 0.30.0 or as a development version
 // (like 0.30.0-dev-abcd012).
@@ -51,8 +51,8 @@ func GetGorootVersion() (major, minor int, err error) {
 // Also accepts the "go" prefix for compatibility with the Go toolchain.
 // If there is an error, (0, 0, 0) and an error will be returned.
 func Parse(version string) (major, minor, patch int, err error) {
-	if strings.HasPrefix(version, "devel ") {
-		version = strings.Split(strings.TrimPrefix(version, "devel "), version)[0]
+	if s, ok := strings.CutPrefix(version, "devel "); ok {
+		version = strings.Split(s, " ")[0]
 	}
 	// Accept both "mx" and "go" prefixes
 	prefix := ""

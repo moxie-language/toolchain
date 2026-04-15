@@ -1,5 +1,9 @@
 # CLAUDE.md
 
+## Reporting Completion
+
+Any "feature X is complete" claim must be backed by a test that exercises X end-to-end on a fresh build, not by the agent's recollection of having implemented it. Trust the test artifact, not the narrative. This is the most important rule and why it's first. Tattoo it backwards. Never ever skip this. Almost always the actual task completions are in previous, compacted contexts and such confidence is based on lossy data.
+
 ## Thinking outputs
 
 Don't waste time generating printed thinking outputs with long chains of reasoning. Just summarize the points in one sentence after a long chain.
@@ -101,7 +105,7 @@ Five laws. Five elements. One generative cycle. One destructive cycle. Every arc
 - Prefer one file over many files when the logic is related
 - When writing utility scripts, tooling, or standalone programs, always use Moxieunless there is a specific technical reason requiring another language. This means: no reflection, no cgo, no full runtime features. If a task seems like it needs Python, reconsider whether it can be done in Moxie. It can always be done in Moxie.
 - Remember that Moxie has no parallelism (no goroutines), no reflection, no arbitrary string/bytes distinction (remember to treat these as encodings and preserve UTF-8 byte sequences instead of breaking them up), spawn() boundary channels are always unbuffered (the network connection is a buffer) and use buffered channels as a convenient notation for FIFO queues. There is no concurrency primitives because there is only one thread of execution.
-- Last but most important, always use the WASM target for moxie code. If shims or interfacing are required, those live in the moxiejs code in Moxie compiler.
+- For browser/frontend moxie code, use the moxiejs target (Moxie compiled to ES modules). If JS shims or host-bridging are required, those live in moxie/jsruntime and moxie/cmd/moxiejs. Native targets (linux/amd64, darwin/arm64, etc.) remain first-class — relays, servers, and CLI tools compile natively via `moxie build`.
 
 ## Architecture Reading
 

@@ -915,7 +915,72 @@ func wrapStringExpr(expr ast.Expr) ast.Expr {
 	if isSliceByteConversion(expr) {
 		return nil
 	}
+	// Normalize | to + so the wrapped []byte(...) expression type-checks
+	// (the patched type checker accepts | only on slice types, not untyped
+	// string constants).
+	normalizePipeToAdd(expr)
 	return makeSliceByteCall(expr)
+}
+
+// normalizePipeToAdd rewrites | to + in a string-literal subtree, in place.
+func normalizePipeToAdd(e ast.Expr) {
+	switch n := e.(type) {
+	case *ast.BinaryExpr:
+		if n.Op == token.OR {
+			n.Op = token.ADD
+		}
+		normalizePipeToAdd(n.X)
+		normalizePipeToAdd(n.Y)
+	case *ast.ParenExpr:
+		normalizePipeToAdd(n.X)
+	}
+}
+
+// isSyntacticText returns true if expr is syntactically recognizable as text:
+// a string literal, a []byte(...) conversion, or a BinaryExpr whose operands
+// are themselves syntactically text. Used to rewrite + to | pre-typecheck
+// when info.TypeOf is not yet available.
+func isSyntacticText(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		return e.Kind == token.STRING
+	case *ast.CallExpr:
+		return isSliceByteConversion(e)
+	case *ast.BinaryExpr:
+		if e.Op == token.ADD || e.Op == token.OR {
+			return isSyntacticText(e.X) || isSyntacticText(e.Y)
+		}
+	case *ast.ParenExpr:
+		return isSyntacticText(e.X)
+	}
+	return false
+}
+
+// RewriteAddToPipe walks the file's AST (after RewriteStringLiterals has
+// wrapped string literals in []byte) and changes BinaryExpr + to | whenever
+// the expression is syntactically text. This permits the patched go/types —
+// which accepts | but not + on []byte — to succeed on the first typecheck
+// pass for vendored/stdlib packages that still use + for text concatenation.
+// Does not touch +=; that is rewritten by RewriteAddAssign after typecheck.
+// Intentionally NOT called on main-module packages — user code with + on
+// text is a compile error (CheckPlusOnText).
+func RewriteAddToPipe(file *ast.File) {
+	ast.Inspect(file, func(n ast.Node) bool {
+		// Don't descend into const decls or []byte wraps — their + is
+		// needed for compile-time constant folding.
+		if gd, ok := n.(*ast.GenDecl); ok && gd.Tok == token.CONST {
+			return false
+		}
+		if expr, ok := n.(ast.Expr); ok && isSliceByteConversion(expr) {
+			return false
+		}
+		if bin, ok := n.(*ast.BinaryExpr); ok && bin.Op == token.ADD {
+			if isSyntacticText(bin.X) || isSyntacticText(bin.Y) {
+				bin.Op = token.OR
+			}
+		}
+		return true
+	})
 }
 
 // isStringExpr returns true if the expression is syntactically a string literal
@@ -1026,6 +1091,7 @@ func splitConstBlocks(file *ast.File) {
 			newDecls = append(newDecls, decl)
 			continue
 		}
+		varSpecs, constSpecs = cascadeDemotion(varSpecs, constSpecs)
 		if len(constSpecs) == 0 {
 			gd.Tok = token.VAR
 			gd.Specs = varSpecs
@@ -1042,6 +1108,78 @@ func splitConstBlocks(file *ast.File) {
 		})
 	}
 	file.Decls = newDecls
+}
+
+// cascadeDemotion moves any remaining const spec whose value references a
+// name already demoted to var into the var specs. Because demoting a string
+// const to a []byte var makes len() on it non-constant, any const spec that
+// depends on such a name can no longer typecheck as const and must also
+// become var. Iterates to transitive closure.
+func cascadeDemotion(varSpecs, constSpecs []ast.Spec) ([]ast.Spec, []ast.Spec) {
+	demoted := map[string]bool{}
+	for _, spec := range varSpecs {
+		vs, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		for _, name := range vs.Names {
+			demoted[name.Name] = true
+		}
+	}
+	for {
+		var keep []ast.Spec
+		changed := false
+		for _, spec := range constSpecs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				keep = append(keep, spec)
+				continue
+			}
+			dep := false
+			for _, val := range vs.Values {
+				if referencesIdent(val, demoted) {
+					dep = true
+					break
+				}
+			}
+			if !dep {
+				keep = append(keep, spec)
+				continue
+			}
+			for _, name := range vs.Names {
+				if name.Obj != nil {
+					name.Obj.Kind = ast.Var
+				}
+				demoted[name.Name] = true
+			}
+			varSpecs = append(varSpecs, vs)
+			changed = true
+		}
+		constSpecs = keep
+		if !changed {
+			break
+		}
+	}
+	return varSpecs, constSpecs
+}
+
+// referencesIdent returns true if expr references any identifier in names.
+func referencesIdent(expr ast.Expr, names map[string]bool) bool {
+	if len(names) == 0 {
+		return false
+	}
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if id, ok := n.(*ast.Ident); ok && names[id.Name] {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // splitBlockStmtConsts walks function bodies and splits function-scoped
@@ -1125,6 +1263,7 @@ func splitBlockStmtConsts(file *ast.File) {
 				newStmts = append(newStmts, stmt)
 				continue
 			}
+			varSpecs, constSpecs = cascadeDemotion(varSpecs, constSpecs)
 			if len(constSpecs) == 0 {
 				gd.Tok = token.VAR
 				gd.Specs = varSpecs
@@ -2530,11 +2669,16 @@ func FindPipeConcat(files []*ast.File, info *types.Info) []PipeRewrite {
 			if gd, ok := n.(*ast.GenDecl); ok && gd.Tok == token.CONST {
 				return false
 			}
-			// Don't descend into `[]byte(...)` casts — their inner
-			// expression must stay Go-native so the type checker can
-			// constant-fold stringlit + stringlit.
+			// Skip `[]byte(...)` casts ONLY when the inner expression
+			// is fully literal — Go's constant folder will merge
+			// `"a" + "b"` at compile time. When the cast wraps a
+			// mixed chain (containing vars, calls, etc. — e.g.
+			// `[]byte(k | ": " | v)`), descend so we can convert
+			// `|`/`+` to `__moxie_concat` at runtime.
 			if call, ok := n.(*ast.CallExpr); ok && isSliceByteConversion(call) {
-				return false
+				if len(call.Args) == 1 && isFullyLiteralChain(call.Args[0]) {
+					return false
+				}
 			}
 			bin, ok := n.(*ast.BinaryExpr)
 			if !ok || (bin.Op != token.OR && bin.Op != token.ADD) {
@@ -2571,12 +2715,38 @@ func isStringLit(e ast.Expr) bool {
 	return ok && lit.Kind == token.STRING
 }
 
+// isFullyLiteralChain returns true if e is entirely string literals joined
+// by + or | — i.e. a chain Go's constant folder can collapse. Used to decide
+// whether to preserve `[]byte(...)` wraps untouched (fold) or descend into
+// them for `__moxie_concat` rewriting (runtime-only ops like var operands).
+func isFullyLiteralChain(e ast.Expr) bool {
+	switch n := e.(type) {
+	case *ast.BasicLit:
+		return n.Kind == token.STRING
+	case *ast.BinaryExpr:
+		if n.Op != token.ADD && n.Op != token.OR {
+			return false
+		}
+		return isFullyLiteralChain(n.X) && isFullyLiteralChain(n.Y)
+	case *ast.ParenExpr:
+		return isFullyLiteralChain(n.X)
+	}
+	return false
+}
+
 // CheckPlusOnText walks the AST and returns errors for any + or += used on
 // text types. Call this for user packages only — stdlib/vendor may still use +.
 func CheckPlusOnText(files []*ast.File, info *types.Info, fset *token.FileSet) []error {
 	var errs []error
 	for _, file := range files {
 		ast.Inspect(file, func(n ast.Node) bool {
+			// Skip the inside of []byte(...) wraps — the literal-only
+			// subchains rewriter-synthesized by rewriteStringExprs use
+			// `+` internally (normalizePipeToAdd) so Go's constant folder
+			// can merge them. These are not user-written + operators.
+			if expr, ok := n.(ast.Expr); ok && isSliceByteConversion(expr) {
+				return false
+			}
 			switch node := n.(type) {
 			case *ast.BinaryExpr:
 				if node.Op != token.ADD {

@@ -23,3 +23,4 @@ export * as x25519 from './x25519.mjs';
 export * as ed25519 from './ed25519.mjs';
 export * as p256 from './p256.mjs';
 export * as node from './node.mjs';
+export * as aead from './aead.mjs';

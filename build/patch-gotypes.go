@@ -124,9 +124,21 @@ func patchExpr(dir string) {
 		"\t// Moxie: untyped string → []byte implicit conversion (string=[]byte unification).\n\t// For constants, return Typ[String] because slices aren't valid constant types.\n\tif x.typ.(*Basic).kind == UntypedString && isByteSlice(target) {\n\t\tif x.mode == constant_ {\n\t\t\treturn Typ[String], x.val, 0\n\t\t}\n\t\treturn target, nil, 0\n\t}\n\n\tswitch u := under(target).(type) {\n\tcase *Basic:\n\t\tif x.mode == constant_ {")
 
 	// Patch 7: Allow | on matching slice types (slice concatenation).
+	// Also allow | when either operand is a string (string=[]byte unification).
+	// After matchTypes + patch 4, an untyped string constant paired with []byte
+	// becomes typed String (not []byte, since constants cannot be slice-typed),
+	// so we must detect slice-ness on either side.
 	src = mustReplace(f, src,
 		"\tif !check.op(binaryOpPredicates, x, op) {\n\t\tx.mode = invalid\n\t\treturn\n\t}",
-		"\t// Moxie: | on matching slice types is concatenation.\n\t_, mxSliceConcat := under(x.typ).(*Slice)\n\tif !(op == token.OR && mxSliceConcat) && !check.op(binaryOpPredicates, x, op) {\n\t\tx.mode = invalid\n\t\treturn\n\t}")
+		"\t// Moxie: | on matching slice types is concatenation.\n\t_, mxSliceX := under(x.typ).(*Slice)\n\t_, mxSliceY := under(y.typ).(*Slice)\n\tmxSliceConcat := mxSliceX || mxSliceY || isString(x.typ) || isString(y.typ)\n\tif !(op == token.OR && mxSliceConcat) && !check.op(binaryOpPredicates, x, op) {\n\t\tx.mode = invalid\n\t\treturn\n\t}")
+
+	// Patch 12: allow untyped string ↔ []byte conversion in matchTypes.mayConvert.
+	// Without this, `"lit" | boundary` (where boundary is []byte) fails because
+	// mayConvert short-circuits on allString mismatch, leaving the mixed-kind
+	// operands for the binary-op predicate check which then rejects them.
+	src = mustReplace(f, src,
+		"\t\t// A string type can only convert to another string type.\n\t\tif allString(x.typ) != allString(y.typ) {\n\t\t\treturn false\n\t\t}",
+		"\t\t// A string type can only convert to another string type.\n\t\tif allString(x.typ) != allString(y.typ) {\n\t\t\t// Moxie: string and []byte unify — allow conversion in either direction.\n\t\t\tif allString(x.typ) && isByteSlice(y.typ) {\n\t\t\t\treturn true\n\t\t\t}\n\t\t\tif isByteSlice(x.typ) && allString(y.typ) {\n\t\t\t\treturn true\n\t\t\t}\n\t\t\treturn false\n\t\t}")
 
 	mustWrite(f, src)
 }

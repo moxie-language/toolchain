@@ -23,6 +23,10 @@ func rewriteStringLiterals(file *ast.File) {
 	mxtext.RewriteStringLiterals(file)
 }
 
+func rewriteAddToPipe(file *ast.File) {
+	mxtext.RewriteAddToPipe(file)
+}
+
 func rewriteConstPipes(files []*ast.File) {
 	mxtext.RewriteConstPipes(files)
 }

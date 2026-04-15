@@ -537,8 +537,41 @@ The JS target provides typed bridges to browser APIs:
 | `sw` | Service Worker lifecycle, fetch/cache, SSE |
 | `localstorage` | localStorage operations |
 | `idb` | IndexedDB transactions |
-| `crypto` | secp256k1 via WASM |
+| `crypto` | secp256k1 (schnorr / BIP340) via WASM |
 | `subtle` | SubtleCrypto bridge |
+
+### JS Runtime Shims (added v1.2.0 / v1.1.4)
+
+Helper modules that ship alongside `moxiejs`-emitted output in
+`moxie/jsruntime/`. They are not `import`-able from Moxie source;
+moxiejs wires them into generated bridge code:
+
+| Shim | Purpose |
+|------|---------|
+| `aead.mjs` | XChaCha20-Poly1305 for IndexedDB-at-rest encryption |
+| `p256.mjs` | NIST P-256 ECDH / ECDSA (pure-JS BigInt implementation) |
+| `node.mjs` | Node.js stdio bridge for CLI-shaped Moxie programs |
+| `ed25519.mjs` | Ed25519 signatures |
+| `x25519.mjs` | X25519 ECDH |
+| `poly1305.mjs` | Poly1305 MAC |
+
+### Moxie Stdlib Crypto (v1.2.0)
+
+Pure-Moxie implementations under `moxie/src/` — compile on both native
+and JS targets:
+
+| Package | Purpose |
+|---------|---------|
+| `crypto/ec/secp256k1` | Bitcoin curve — scalar mult, point ops, signing primitives |
+| `crypto/ec/schnorr` | BIP340 Schnorr signatures over SHA-256 |
+| `crypto/ec/bech32` | Bech32 / Bech32m address encoding |
+| `crypto/ec/ecdsa` | secp256k1 ECDSA |
+| `crypto/ec/chainhash` | Double-SHA-256 helpers |
+| `encoding/base58` | base58 / base58check encoding |
+
+These packages are the authoritative location for Bitcoin / Nostr
+cryptography; downstream projects (e.g. smesh v0.5.0) stopped carrying
+private forks when this landed.
 
 ---
 
