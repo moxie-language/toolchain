@@ -22,10 +22,26 @@ type stringIterator struct {
 
 // Return true iff the strings match.
 //
+// If either operand's backing pointer lives inside a registered secure
+// allocation, the comparison is promoted to a constant-time walk of the
+// full length. Otherwise the fast first-mismatch-escape path is used.
+// Pointer-based detection: a subslice of a secure slice is secure because
+// its pointer is still inside the arena. A heap copy of a secure slice is
+// NOT secure — callers who need to preserve constant-time semantics across
+// a copy must allocate the destination with SecureAlloc.
+//
 //go:nobounds
 func stringEqual(x, y string) bool {
 	if len(x) != len(y) {
 		return false
+	}
+	if len(x) == 0 {
+		return true
+	}
+	xPtr := unsafe.Pointer((*_string)(unsafe.Pointer(&x)).ptr)
+	yPtr := unsafe.Pointer((*_string)(unsafe.Pointer(&y)).ptr)
+	if isSecurePtr(xPtr) || isSecurePtr(yPtr) {
+		return memequalCT(xPtr, yPtr, uintptr(len(x)))
 	}
 	for i := 0; i < len(x); i++ {
 		if x[i] != y[i] {
@@ -49,8 +65,19 @@ func sliceEqual(xPtr, yPtr unsafe.Pointer, xLen, yLen, elemSize uintptr) bool {
 
 // Return true iff x < y.
 //
+// Secure-aware: if either operand is in a registered secure arena, the
+// comparison is promoted to a constant-time lex compare that walks the full
+// min-length without early exit.
+//
 //go:nobounds
 func stringLess(x, y string) bool {
+	if len(x) > 0 && len(y) > 0 {
+		xPtr := unsafe.Pointer((*_string)(unsafe.Pointer(&x)).ptr)
+		yPtr := unsafe.Pointer((*_string)(unsafe.Pointer(&y)).ptr)
+		if isSecurePtr(xPtr) || isSecurePtr(yPtr) {
+			return memcompareCT(xPtr, uintptr(len(x)), yPtr, uintptr(len(y))) < 0
+		}
+	}
 	l := len(x)
 	if m := len(y); m < l {
 		l = m
@@ -82,6 +109,11 @@ func stringConcat(x, y _string) _string {
 }
 
 // Concatenate two byte slices. Used for | pipe concat.
+//
+// Secure-aware: if either operand is in a registered secure arena, the
+// destination is allocated via SecureAlloc so the concatenated result
+// inherits guard-page + wipe protection and its pointer lives inside a
+// registered arena (so subsequent comparisons promote to constant-time).
 func bytesConcat(x, y []byte) []byte {
 	if len(x) == 0 {
 		return y
@@ -89,10 +121,11 @@ func bytesConcat(x, y []byte) []byte {
 		return x
 	}
 	length := len(x) + len(y)
-	buf := alloc(uintptr(length), gclayout.NoPtrs.AsPtr())
+	secure := isSecurePtr(unsafe.Pointer(&x[0])) || isSecurePtr(unsafe.Pointer(&y[0]))
+	result := secureAwareByteAlloc(uintptr(length), secure)
+	buf := unsafe.Pointer(&result[0])
 	memcpy(buf, unsafe.Pointer(&x[0]), uintptr(len(x)))
 	memcpy(unsafe.Add(buf, uintptr(len(x))), unsafe.Pointer(&y[0]), uintptr(len(y)))
-	result := (*[1 << 30]byte)(buf)[:length:length]
 	return result
 }
 

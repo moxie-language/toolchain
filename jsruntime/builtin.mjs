@@ -4,11 +4,16 @@
 // --- Slices ---
 
 export class Slice {
-  constructor(array, offset, length, capacity) {
+  constructor(array, offset, length, capacity, secure) {
     this.$array = array;     // backing array (JS Array)
     this.$offset = offset;   // start offset into backing array
     this.$length = length;   // number of accessible elements
     this.$capacity = capacity; // max elements before realloc
+    // $secure is the taint bit for the `secure` slice allocation marker.
+    // When truthy, comparisons involving this slice use constant-time
+    // byte equality/ordering and any new slice derived from this one
+    // (sub-slice, append, copy destination, concat) inherits the bit.
+    this.$secure = !!secure;
   }
 
   get(i) {
@@ -61,6 +66,19 @@ export function makeSlice(len, cap, zero) {
   return new Slice(arr, 0, len, cap);
 }
 
+// secureAlloc is the JS-target implementation of the Moxie `[]byte{:n, secure}`
+// literal. On native targets this maps onto mmap+mlock guarded arenas with
+// signal-handler wipe; the browser has no such primitives so the allocator
+// degrades to a zeroed []byte slice carrying the $secure taint bit. The
+// taint flips subsequent __moxie_eq / __moxie_lt onto the constant-time
+// path and propagates through sliceSlice/append/copy/stringConcat so that
+// any derived buffer retains the comparison guarantee.
+export function secureAlloc(n) {
+  const arr = new Array(n);
+  for (let i = 0; i < n; i++) arr[i] = 0;
+  return new Slice(arr, 0, n, n, true);
+}
+
 // Slice a slice: s[low:high:max]
 export function sliceSlice(s, low, high, max) {
   if (low === undefined) low = 0;
@@ -71,7 +89,9 @@ export function sliceSlice(s, low, high, max) {
     throw new Error(`runtime error: slice bounds out of range [${low}:${high}:${max}] with capacity ${s.$capacity}`);
   }
 
-  return new Slice(s.$array, s.$offset + low, high - low, max - low);
+  // Slicing a secure slice produces a secure sub-slice — the taint bit
+  // follows the backing bytes, not the slice header.
+  return new Slice(s.$array, s.$offset + low, high - low, max - low, s.$secure);
 }
 
 // Append to slice.
@@ -81,13 +101,14 @@ export function append(s, ...elems) {
   }
 
   const needed = s.$length + elems.length;
+  const secure = !!s.$secure;
 
   if (needed <= s.$capacity) {
     // Fits in existing backing array.
     for (let i = 0; i < elems.length; i++) {
       s.$array[s.$offset + s.$length + i] = elems[i];
     }
-    return new Slice(s.$array, s.$offset, needed, s.$capacity);
+    return new Slice(s.$array, s.$offset, needed, s.$capacity, secure);
   }
 
   // Need to grow. Go growth strategy: double until 256, then grow by 25%.
@@ -109,7 +130,7 @@ export function append(s, ...elems) {
     newArr[s.$length + i] = elems[i];
   }
 
-  return new Slice(newArr, 0, needed, newCap);
+  return new Slice(newArr, 0, needed, newCap, secure);
 }
 
 // Append a string's UTF-8 bytes to a byte slice: append([]byte, string...)
@@ -122,11 +143,19 @@ export function appendString(dst, s) {
 
 // Append slice to slice: append(a, b...)
 export function appendSlice(dst, src) {
+  if (src === null || src === undefined || src.$length === 0) return dst;
   const elems = [];
   for (let i = 0; i < src.$length; i++) {
     elems.push(src.$array[src.$offset + i]);
   }
-  return append(dst, ...elems);
+  const result = append(dst, ...elems);
+  // Taint propagation: if src was secure, the appended bytes carry secret
+  // material into dst. Mark the result secure so downstream comparisons
+  // still run constant-time.
+  if (result && (src.$secure || (dst && dst.$secure))) {
+    result.$secure = true;
+  }
+  return result;
 }
 
 // Copy from src to dst. Returns number of elements copied.
@@ -154,6 +183,13 @@ export function copy(dst, src) {
     for (let i = 0; i < n; i++) {
       dst.$array[dst.$offset + i] = src.$array[src.$offset + i];
     }
+  }
+  // Taint propagation: copying secret bytes into dst makes dst secret.
+  // The $secure flag flips on dst's header, so any subsequent comparison
+  // where dst is an operand takes the constant-time path — closing the
+  // `copy(temp, secret); if temp == received { ... }` side-channel.
+  if (src.$secure) {
+    dst.$secure = true;
   }
   return n;
 }
@@ -386,21 +422,124 @@ export function runesToString(sl) {
   return s;
 }
 
+// sliceBytes extracts the underlying bytes from a Slice, string, or other
+// text-like value without allocating a new string. Returns an Array of
+// byte values or null if the input has no bytes. Used by the constant-time
+// comparison paths so the comparison scans raw bytes rather than forcing
+// UTF-8 decode/encode round-trips.
+function sliceBytes(v) {
+  if (v === null || v === undefined) return null;
+  if (v instanceof Slice) {
+    const out = new Array(v.$length);
+    for (let i = 0; i < v.$length; i++) out[i] = v.$array[v.$offset + i];
+    return out;
+  }
+  if (typeof v === 'string') {
+    return Array.from(_enc.encode(v));
+  }
+  return null;
+}
+
+// isSecureOperand reports whether the value should force the
+// constant-time comparison path. A Slice carrying $secure taints its
+// own comparisons. A native JS string is never marked secure because
+// strings have no stable header to carry the bit — callers must copy
+// sensitive material into a `[]byte{:n, secure}` buffer before
+// comparison for the guarantee to apply.
+function isSecureOperand(v) {
+  return v instanceof Slice && !!v.$secure;
+}
+
 // String concatenation (Go's + operator for strings).
+// Propagates the $secure taint: if either operand is a secure Slice,
+// the concatenated result is a secure Slice holding the combined bytes.
 export function stringConcat(a, b) {
+  if (isSecureOperand(a) || isSecureOperand(b)) {
+    const ab = sliceBytes(a) || [];
+    const bb = sliceBytes(b) || [];
+    const arr = new Array(ab.length + bb.length);
+    for (let i = 0; i < ab.length; i++) arr[i] = ab[i];
+    for (let j = 0; j < bb.length; j++) arr[ab.length + j] = bb[j];
+    return new Slice(arr, 0, arr.length, arr.length, true);
+  }
   return a + b;
+}
+
+// constantTimeBytesEqual walks the full length of both inputs and
+// accumulates differences into a running OR. Return value depends only
+// on the final accumulator, so execution time is a function of (length +
+// padding), never of where the first mismatch occurs. Mirrors the
+// semantics of Go's subtle.ConstantTimeCompare / OpenSSL CRYPTO_memcmp.
+function constantTimeBytesEqual(a, b) {
+  const ab = sliceBytes(a);
+  const bb = sliceBytes(b);
+  if (ab === null || bb === null) return a === b;
+  // Walk the max length so a shorter operand still contributes to the
+  // accumulator via its virtual tail of zero-XOR-nonzero bytes.
+  const n = ab.length >= bb.length ? ab.length : bb.length;
+  let acc = (ab.length ^ bb.length) | 0;
+  for (let i = 0; i < n; i++) {
+    const x = i < ab.length ? ab[i] : 0;
+    const y = i < bb.length ? bb[i] : 0;
+    acc |= (x ^ y);
+  }
+  return acc === 0;
 }
 
 // String equality — handles both Slice objects and native JS strings.
 // The JS backend emits this instead of === for string-typed operands,
 // because Slice objects with identical content are !== each other.
+//
+// If either operand is a secure slice (carries $secure), the comparison
+// runs in constant time over the maximum of the two lengths. Otherwise
+// the fast path compares via string coercion.
 export function stringEqual(a, b) {
   if (a === b) return true;
+  if (isSecureOperand(a) || isSecureOperand(b)) {
+    return constantTimeBytesEqual(a, b);
+  }
   return ('' + a) === ('' + b);
 }
 
 // String comparison.
 export function stringCompare(a, b) {
+  if (isSecureOperand(a) || isSecureOperand(b)) {
+    // Constant-time lexicographic compare. The loop body is data-
+    // oblivious: all per-iteration branches fold into bitwise ops on
+    // 32-bit integers, so per-byte cost is fixed regardless of content.
+    //
+    // The loop maintains:
+    //   diff   — running OR of (x ^ y); once non-zero, a mismatch has
+    //            been seen and subsequent iterations must not overwrite
+    //            the result.
+    //   result — -1 / 0 / 1, snapshotted at the first mismatch.
+    //   seen   — 0 while diff == 0; -1 once diff != 0. Used as a mask
+    //            to suppress updates to `result` after the first diff.
+    const ab = sliceBytes(a) || [];
+    const bb = sliceBytes(b) || [];
+    const la = ab.length, lb = bb.length;
+    const n = la >= lb ? la : lb;
+    let diff = 0;
+    let result = 0;
+    for (let i = 0; i < n; i++) {
+      const x = i < la ? ab[i] : 0;
+      const y = i < lb ? bb[i] : 0;
+      const d = (x - y) | 0;
+      // seen: 0 while diff == 0, -1 once diff != 0
+      const seen = -(((diff | -diff) >>> 31) | 0);
+      // sign: -1 if d<0, 1 if d>0, 0 if d==0 — no branches
+      const sign = (d >> 31) + (((-d) >>> 31) & 1);
+      result = (result & seen) | (sign & ~seen);
+      diff |= (x ^ y);
+    }
+    // Length tiebreaker when all compared bytes matched. Lengths are
+    // non-secret in the Moxie model so this branch does not leak
+    // byte content.
+    if (diff === 0) {
+      return la < lb ? -1 : (la > lb ? 1 : 0);
+    }
+    return result;
+  }
   if (a < b) return -1;
   if (a > b) return 1;
   return 0;
@@ -492,6 +631,11 @@ function deepEqual(a, b) {
 
 // Clone a Go value type (array or struct). Slices get a new backing array copy.
 // Structs get shallow field copies (nested value types need recursive clone).
+// Pointer wrappers ({$get,$set}) are copied by reference — Go pointer-value
+// semantics: struct-copy propagates the pointer bits, both structs then point
+// to the same underlying allocation. Recursive-cloning a pointer wrapper as
+// if it were a struct would strip all $-prefixed keys and return {}, silently
+// erasing the pointer (caught in MLS framedContent struct copy).
 export function cloneValue(v) {
   if (v === null || v === undefined || typeof v !== 'object') return v;
   if (v instanceof Slice) {
@@ -504,6 +648,10 @@ export function cloneValue(v) {
   }
   if (Array.isArray(v)) {
     return v.map(e => (typeof e === 'object' && e !== null) ? cloneValue(e) : e);
+  }
+  // Pointer wrapper: share by reference (Go pointer semantics).
+  if (typeof v.$get === 'function' && typeof v.$set === 'function') {
+    return v;
   }
   // Struct: shallow clone with recursive value cloning.
   const obj = {};

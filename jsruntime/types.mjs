@@ -88,7 +88,13 @@ export function methodCall(iface, methodName, args) {
     throw new Error('runtime error: invalid memory address or nil pointer dereference');
   }
 
-  const concreteType = typeRegistry.get(iface.$type);
+  let typeName = iface.$type;
+  let concreteType = typeRegistry.get(typeName);
+  // Pointer types share methods with their base type.
+  if ((!concreteType || !concreteType.methods || !concreteType.methods.has(methodName)) && typeName.startsWith('*')) {
+    typeName = typeName.slice(1);
+    concreteType = typeRegistry.get(typeName);
+  }
   if (!concreteType || !concreteType.methods || !concreteType.methods.has(methodName)) {
     throw new Error(`method not found: ${iface.$type}.${methodName}`);
   }

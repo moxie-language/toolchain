@@ -317,8 +317,18 @@ func (fc *FunctionCompiler) emitInstruction(instr ssa.Instruction, inSwitch bool
 		e.Line("%s = new $rt.channel.Channel(%s);", dst, size)
 
 	case *ssa.MakeClosure:
+		// SSA contract: instr.Bindings[i] corresponds to instr.Fn.FreeVars[i].
+		// The generated function (see functionParams in compiler.go) emits
+		// FreeVars as the first N parameters, so .bind() with bindings in
+		// instr.Bindings order aligns them correctly. If SSA ever reorders
+		// one side but not the other, the length mismatch fires first.
 		dst := fc.local(instr)
-		fnRef := fc.value(instr.Fn.(*ssa.Function))
+		targetFn := instr.Fn.(*ssa.Function)
+		if len(instr.Bindings) != len(targetFn.FreeVars) {
+			panic(fmt.Sprintf("MakeClosure: bindings/FreeVars count mismatch for %s (%d vs %d)",
+				targetFn.Name(), len(instr.Bindings), len(targetFn.FreeVars)))
+		}
+		fnRef := fc.value(targetFn)
 		var bindings []string
 		for _, b := range instr.Bindings {
 			bindings = append(bindings, fc.value(b))
@@ -583,6 +593,23 @@ func (fc *FunctionCompiler) emitStaticCall(callee *ssa.Function, args []ssa.Valu
 	argStr := strings.Join(jsArgs, ", ")
 
 	fullName := callee.String()
+
+	// Moxie builtin interception: __moxie_concat is injected into every
+	// Moxie-target package by the rewriter. Its body panics, but we never
+	// call the body — we intercept here and emit the JS runtime equivalent.
+	// This mirrors native moxie's createMoxieConcat at the SSA level.
+	if callee.Name() == "__moxie_concat" {
+		return fmt.Sprintf("$rt.builtin.stringConcat(%s)", argStr)
+	}
+	if callee.Name() == "__moxie_eq" {
+		return fmt.Sprintf("$rt.builtin.stringEqual(%s)", argStr)
+	}
+	if callee.Name() == "__moxie_lt" {
+		return fmt.Sprintf("$rt.builtin.stringCompare(%s) < 0", argStr)
+	}
+	if callee.Name() == "__moxie_secalloc" {
+		return fmt.Sprintf("$rt.builtin.secureAlloc(%s)", argStr)
+	}
 
 	// Map well-known functions to JS equivalents.
 	switch fullName {

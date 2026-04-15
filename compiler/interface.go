@@ -811,6 +811,16 @@ func (c *compilerContext) getInterfaceImplementsFunc(assertedType types.Type) ll
 // thunk is declared, not defined: it will be defined by the interface lowering
 // pass.
 func (c *compilerContext) getInvokeFunction(instr *ssa.CallCommon) llvm.Value {
+	// Go's type system forbids calling a method through an empty interface
+	// without a type assertion, so this should be unreachable. Fail loudly
+	// rather than emit a function with an empty "moxie-methods" attribute,
+	// which would cause the interface-lowering pass to NPE on a nil
+	// signature lookup far downstream.
+	itf := instr.Value.Type().Underlying().(*types.Interface)
+	if itf.NumMethods() == 0 {
+		panic("getInvokeFunction: invoke on empty interface for method " +
+			instr.Method.Name() + " (compiler invariant broken)")
+	}
 	s, _ := getTypeCodeName(instr.Value.Type().Underlying())
 	fnName := s + "." + instr.Method.Name() + "$invoke"
 	llvmFn := c.mod.NamedFunction(fnName)
@@ -821,11 +831,11 @@ func (c *compilerContext) getInvokeFunction(instr *ssa.CallCommon) llvm.Value {
 			paramTuple = append(paramTuple, sig.Params().At(i))
 		}
 		paramTuple = append(paramTuple, types.NewVar(token.NoPos, nil, "$typecode", types.Typ[types.UnsafePointer]))
-		llvmFnType := c.getLLVMFunctionType(types.NewSignature(sig.Recv(), types.NewTuple(paramTuple...), sig.Results(), false))
+		llvmFnType := c.getLLVMFunctionType(types.NewSignatureType(sig.Recv(), nil, nil, types.NewTuple(paramTuple...), sig.Results(), false))
 		llvmFn = llvm.AddFunction(c.mod, fnName, llvmFnType)
 		c.addStandardDeclaredAttributes(llvmFn)
 		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("moxie-invoke", c.getMethodSignatureName(instr.Method)))
-		methods := c.getMethodsString(instr.Value.Type().Underlying().(*types.Interface))
+		methods := c.getMethodsString(itf)
 		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("moxie-methods", methods))
 	}
 	return llvmFn

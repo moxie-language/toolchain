@@ -14,6 +14,7 @@ export async function init() {
 
 function sliceToU8(s) {
   if (s instanceof Uint8Array) return s;
+  if (typeof s === 'string') return new TextEncoder().encode(s);
   const u = new Uint8Array(s.$length);
   for (let i = 0; i < s.$length; i++) {
     u[i] = s.$array[s.$offset + i];

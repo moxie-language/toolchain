@@ -289,6 +289,19 @@ function _wsSend(handler, msg) {
   if (handler) handler(msg);
 }
 
+// Count an EOSE (or CLOSED) for a sub. Fire EOSE to the app on the FIRST
+// relay response — matches the SW behaviour and prevents auth-requiring
+// relays from blocking the threshold.
+let _wsEoseFired = {};
+function _wsCountEose(sid) {
+  if (!_wsEoseCount[sid]) _wsEoseCount[sid] = 0;
+  _wsEoseCount[sid]++;
+  if (!_wsEoseFired[sid]) {
+    _wsEoseFired[sid] = true;
+    _wsSend(_swMessageHandler, '["EOSE",' + JSON.stringify(sid) + ']');
+  }
+}
+
 function _wsEnsure(url) {
   if (_wsConns[url]) return _wsConns[url];
   var ws;
@@ -323,13 +336,10 @@ function _wsEnsure(url) {
       _wsSend(_swMessageHandler, '["EVENT",' + JSON.stringify(sid) + ',' + JSON.stringify(ev) + ']');
       if (ev.id) _wsSend(_swMessageHandler, '["SEEN_ON",' + JSON.stringify(ev.id) + ',' + JSON.stringify(url) + ']');
     } else if (msg[0] === "EOSE" && msg.length >= 2) {
-      var sid2 = msg[1];
-      if (!_wsEoseCount[sid2]) _wsEoseCount[sid2] = 0;
-      _wsEoseCount[sid2]++;
-      var sub2 = _wsSubs[sid2];
-      if (sub2 && _wsEoseCount[sid2] >= sub2.relays.size) {
-        _wsSend(_swMessageHandler, '["EOSE",' + JSON.stringify(sid2) + ']');
-      }
+      _wsCountEose(msg[1]);
+    } else if (msg[0] === "CLOSED" && msg.length >= 2) {
+      _diag('CLOSED ' + url + ' sub=' + msg[1] + ' reason=' + (msg[2] || ''));
+      _wsCountEose(msg[1]);
     } else if (msg[0] === "OK" && msg.length >= 3) {
       var okId = msg[1], okSuccess = msg[2], okMsg = msg[3] || '';
       if (okSuccess) { _diag('OK ' + url + ' id=' + (okId && okId.substring(0,8))); }
@@ -343,14 +353,7 @@ function _wsEnsure(url) {
     delete _wsConns[url];
     // Trigger EOSE for subs that included this relay (connection died before EOSE).
     for (var sid in _wsSubs) {
-      var sub = _wsSubs[sid];
-      if (sub.relays.has(url)) {
-        if (!_wsEoseCount[sid]) _wsEoseCount[sid] = 0;
-        _wsEoseCount[sid]++;
-        if (_wsEoseCount[sid] >= sub.relays.size) {
-          _wsSend(_swMessageHandler, '["EOSE",' + JSON.stringify(sid) + ']');
-        }
-      }
+      if (_wsSubs[sid].relays.has(url)) _wsCountEose(sid);
     }
   };
   ws.onerror = function() { ws.close(); };
@@ -369,6 +372,7 @@ function _wsCloseSub(sid) {
   delete _wsSubs[sid];
   delete _wsSeen[sid];
   delete _wsEoseCount[sid];
+  delete _wsEoseFired[sid];
 }
 
 function _wsHandleMsg(raw) {
@@ -383,14 +387,26 @@ function _wsHandleMsg(raw) {
     for (var i = 0; i < _wsWriteRelays.length; i++) _wsEnsure(_wsWriteRelays[i]);
   } else if (cmd === "PROXY") {
     var sid = arr[1], filter = arr[2], relays = arr[3] || [];
+    _diag('PROXY ' + sid + ' relays=' + relays.length);
     _wsCloseSub(sid);
     _wsSubs[sid] = { filter: JSON.stringify(filter), relays: new Set(relays) };
     _wsSeen[sid] = {};
     _wsEoseCount[sid] = 0;
     for (var j = 0; j < relays.length; j++) {
-      var ws = _wsEnsure(relays[j]);
+      var url = relays[j];
+      var ws = _wsConns[url];
+      // Drop dead connections (CLOSING/CLOSED) so _wsEnsure creates a fresh one.
+      if (ws && ws.readyState > 1) {
+        _diag('PROXY ' + sid + ' drop dead ws ' + url + ' state=' + ws.readyState);
+        delete _wsConns[url];
+        ws = null;
+      }
+      ws = _wsEnsure(url);
       if (ws && ws.readyState === WebSocket.OPEN) {
+        _diag('PROXY ' + sid + ' REQ ' + url);
         ws.send(JSON.stringify(["REQ", sid, filter]));
+      } else {
+        _diag('PROXY ' + sid + ' DEFER ' + url + ' state=' + (ws ? ws.readyState : 'null'));
       }
     }
   } else if (cmd === "REQ") {

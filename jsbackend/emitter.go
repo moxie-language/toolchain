@@ -173,6 +173,12 @@ func JsIdentifier(name string) string {
 	name = strings.ReplaceAll(name, "/", "$")
 	name = strings.ReplaceAll(name, ".", "$")
 	name = strings.ReplaceAll(name, "-", "_")
+	// Generic function instantiations produce names like
+	// "LastIndexRabinKarp[[]byte]" — strip/mangle non-identifier chars.
+	name = strings.ReplaceAll(name, "[", "$")
+	name = strings.ReplaceAll(name, "]", "")
+	name = strings.ReplaceAll(name, " ", "_")
+	name = strings.ReplaceAll(name, ",", "_")
 	if isJsReserved(name) {
 		return "$" + name
 	}

@@ -253,6 +253,19 @@ func mxBuildContext(goroot string) build.Context {
 		}
 	}
 	ctx.ToolTags = filtered
+	// Mirror the build-tag set that native moxie injects via compileopts.Config.BuildTags.
+	// Without these, stdlib files gated on e.g. scheduler.none are excluded from
+	// typechecking and downstream packages fail with "undefined: state".
+	ctx.BuildTags = append(ctx.BuildTags,
+		"moxie",
+		"purego",
+		"osusergo",
+		"math_big_pure_go",
+		"gc.conservative",
+		"scheduler.none",
+		"moxie.unicore",
+		"moxie.wasm", // mirrors compileopts/target.go for GOOS=js
+	)
 	return ctx
 }
 

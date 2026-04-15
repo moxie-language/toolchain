@@ -279,6 +279,30 @@ func (b *builder) checkSpawnMoveRestriction() {
 				continue
 			}
 
+			// Collect every block reachable from spawn's block via successor
+			// edges. A referrer in any such block is "after" spawn in the
+			// control-flow sense, even if it's in a different basic block
+			// (branch, loop body, later sequential block). Same-block refs
+			// are handled separately by instruction-index comparison.
+			reachableAfter := make(map[*ssa.BasicBlock]bool)
+			var work []*ssa.BasicBlock
+			for _, succ := range block.Succs {
+				if !reachableAfter[succ] {
+					reachableAfter[succ] = true
+					work = append(work, succ)
+				}
+			}
+			for len(work) > 0 {
+				bb := work[0]
+				work = work[1:]
+				for _, succ := range bb.Succs {
+					if !reachableAfter[succ] {
+						reachableAfter[succ] = true
+						work = append(work, succ)
+					}
+				}
+			}
+
 			for _, arg := range spawnArgs {
 				if _, isConst := arg.(*ssa.Const); isConst {
 					continue
@@ -297,14 +321,27 @@ func (b *builder) checkSpawnMoveRestriction() {
 					if !ok {
 						continue
 					}
-					// Same block: check if the referrer comes after spawn.
-					if ri.Block() == block {
+					refBlock := ri.Block()
+					if refBlock == block {
+						// Same block: referrer must come after spawn.
+						// If the block has a back-edge to itself
+						// (reachableAfter[block] == true), any referrer
+						// in this block is reachable-after on the next
+						// iteration — flag it regardless of instruction
+						// position.
+						if reachableAfter[block] {
+							b.addError(ri.Pos(), "moxie: variable used after spawn — ownership moved to child domain")
+							break
+						}
 						for j := spawnIdx + 1; j < len(block.Instrs); j++ {
 							if block.Instrs[j] == ri {
 								b.addError(ri.Pos(), "moxie: variable used after spawn — ownership moved to child domain")
 								break
 							}
 						}
+					} else if reachableAfter[refBlock] {
+						b.addError(ri.Pos(), "moxie: variable used after spawn — ownership moved to child domain")
+						break
 					}
 				}
 			}

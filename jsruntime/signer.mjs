@@ -18,14 +18,14 @@ export function HasMLS() {
 }
 
 export function GetPublicKey(fn) {
-  if (!HasSigner()) { fn(''); return; }
+  if (!HasSigner() || typeof window.nostr.getPublicKey !== 'function') { fn(''); return; }
   window.nostr.getPublicKey()
     .then(function(k) { fn(k); })
     .catch(function() { fn(''); });
 }
 
 export function SignEvent(eventJSON, fn) {
-  if (!HasSigner()) { console.warn('[signer] SignEvent: no signer'); fn(''); return; }
+  if (!HasSigner() || typeof window.nostr.signEvent !== 'function') { console.warn('[signer] SignEvent: no signer'); fn(''); return; }
   var ev = JSON.parse(_str(eventJSON));
   console.log('[signer] SignEvent: kind=' + ev.kind + ' hasSigner=true');
   window.nostr.signEvent(ev)
@@ -43,7 +43,7 @@ export function SignEvent(eventJSON, fn) {
 }
 
 export function GetSharedSecret(peerPubkey, fn) {
-  if (!HasSigner()) { fn(''); return; }
+  if (!HasSigner() || typeof window.nostr.getSharedSecret !== 'function') { fn(''); return; }
   window.nostr.getSharedSecret(_str(peerPubkey))
     .then(function(s) { fn(s || ''); })
     .catch(function() { fn(''); });

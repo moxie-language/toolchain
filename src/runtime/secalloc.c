@@ -88,6 +88,37 @@ int moxie_secalloc_arena_count(void) {
 	return moxie_secalloc_narenas;
 }
 
+// Moxie-facing: return 1 if ptr is inside any currently registered arena's
+// data region, 0 otherwise. Used by the runtime's stringEqual / stringLess /
+// bytesConcat dispatch to decide whether to route through the constant-time
+// comparison path. Linear scan over the registry; bounded at
+// MOXIE_SECALLOC_MAX_ARENAS. Fast-out when no arenas have ever been
+// registered: programs that never call SecureAlloc pay one load+branch
+// per comparison and nothing else.
+//
+// Pointer-based detection is the native analogue of JS's Slice.$secure flag.
+// Taint propagates implicitly through slicing (a subslice points into the
+// same arena) but does NOT propagate through copy() into a heap slice —
+// the destination's pointer is outside every registered arena and returns
+// 0 here. Callers that need to preserve secrecy across a copy must allocate
+// the destination with SecureAlloc.
+int moxie_secalloc_contains(const void *ptr) {
+	if (moxie_secalloc_narenas == 0) {
+		return 0;
+	}
+	const uint8_t *p = (const uint8_t *)ptr;
+	for (int i = 0; i < moxie_secalloc_narenas; i++) {
+		const uint8_t *base = (const uint8_t *)moxie_secalloc_arenas[i].base;
+		if (base == NULL) {
+			continue;
+		}
+		if (p >= base && p < base + moxie_secalloc_arenas[i].len) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 // Moxie-facing: one-shot configuration. noise must be a buffer of noise_len
 // bytes that will live for the rest of the process. lockdown_fd is the write
 // end of a pipe inherited from the parent domain; the read end is watched by

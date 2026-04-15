@@ -503,6 +503,15 @@ func RewriteStringTypes(file *ast.File) {
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.FuncDecl:
+			// Interface-mandated methods (Error() string, String() string) must
+			// keep their `string` return type — they're bound to language-level
+			// interfaces (error, fmt.Stringer) we can't rewrite. Their return
+			// wrapping is deferred to WrapInterfaceMandatedReturns so it runs
+			// AFTER RewriteStringConversions (which would otherwise undo the
+			// string(...) wrap by converting it to []byte(...)).
+			if isInterfaceMandatedMethod(node) {
+				return false
+			}
 			rewriteFieldListTypes(node.Type.Params)
 			rewriteFieldListTypes(node.Type.Results)
 		case *ast.FuncLit:
@@ -518,6 +527,12 @@ func RewriteStringTypes(file *ast.File) {
 				node.Type = rewriteStringTypeExpr(node.Type)
 			}
 		case *ast.TypeSpec:
+			// `type X string` must stay as defined string type so
+			// `const c X = "..."` remains legal. Rewriting to []byte
+			// makes the const invalid (slice types can't be const).
+			if id, ok := node.Type.(*ast.Ident); ok && id.Name == "string" {
+				return false
+			}
 			node.Type = rewriteStringTypeExpr(node.Type)
 		case *ast.ArrayType:
 			node.Elt = rewriteStringTypeExpr(node.Elt)
@@ -552,11 +567,94 @@ func rewriteStringTypeExpr(expr ast.Expr) ast.Expr {
 	}
 }
 
+// WrapInterfaceMandatedReturns wraps return statements inside interface-
+// mandated methods (Error, String) with string(...) conversions. Must run
+// AFTER RewriteStringConversions (which rewrites string→[]byte everywhere)
+// so the wraps this function introduces are preserved.
+func WrapInterfaceMandatedReturns(file *ast.File) {
+	ast.Inspect(file, func(n ast.Node) bool {
+		fd, ok := n.(*ast.FuncDecl)
+		if !ok {
+			return true
+		}
+		if !isInterfaceMandatedMethod(fd) {
+			return true
+		}
+		wrapReturnsInStringConv(fd.Body)
+		return false
+	})
+}
+
+// wrapReturnsInStringConv wraps every return-statement value in an explicit
+// string(...) conversion. Used for interface-mandated methods that keep their
+// string return type while the receiver fields have been rewritten to []byte.
+func wrapReturnsInStringConv(body *ast.BlockStmt) {
+	if body == nil {
+		return
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		ret, ok := n.(*ast.ReturnStmt)
+		if !ok {
+			return true
+		}
+		for i, r := range ret.Results {
+			// Skip already-wrapped string(...) calls.
+			if call, ok := r.(*ast.CallExpr); ok {
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "string" {
+					continue
+				}
+			}
+			ret.Results[i] = &ast.CallExpr{
+				Fun:  ast.NewIdent("string"),
+				Args: []ast.Expr{r},
+			}
+		}
+		return true
+	})
+}
+
+// isInterfaceMandatedMethod returns true if the function is a method whose
+// signature is mandated by a language built-in interface we can't rewrite:
+//   - Error() string (error interface)
+//   - String() string (fmt.Stringer, used by print formatting)
+//
+// These methods must keep their `string` return type; their bodies are also
+// skipped by RewriteStringLiterals via funcReturnsString.
+func isInterfaceMandatedMethod(fd *ast.FuncDecl) bool {
+	if fd.Recv == nil || len(fd.Recv.List) != 1 {
+		return false
+	}
+	if fd.Name == nil {
+		return false
+	}
+	name := fd.Name.Name
+	if name != "Error" && name != "String" {
+		return false
+	}
+	// Must take no params and return exactly one string value.
+	if fd.Type.Params != nil && len(fd.Type.Params.List) != 0 {
+		return false
+	}
+	if fd.Type.Results == nil || len(fd.Type.Results.List) != 1 {
+		return false
+	}
+	field := fd.Type.Results.List[0]
+	if len(field.Names) != 0 {
+		// Named return — still check the type.
+	}
+	ident, ok := field.Type.(*ast.Ident)
+	return ok && ident.Name == "string"
+}
+
 // RewriteStringConversions rewrites `string(expr)` → `[]byte(expr)` in the
 // AST. Since Moxie unifies string and []byte, these conversions are identity
 // but the Go type checker rejects returning a string where []byte is expected.
 // Must run after RewriteStringTypes so return types are already []byte.
 func RewriteStringConversions(file *ast.File) {
+	// Interface-mandated methods (Error/String) have return values wrapped
+	// in `string(...)` by wrapReturnsInStringConv before this runs. We can
+	// safely rewrite inner string(x) → []byte(x) throughout: the outer
+	// wrap handles the string return-type requirement.
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok || len(call.Args) != 1 {
@@ -568,6 +666,35 @@ func RewriteStringConversions(file *ast.File) {
 		}
 		// string(x) → []byte(x)
 		call.Fun = &ast.ArrayType{Elt: ast.NewIdent("byte")}
+		return true
+	})
+}
+
+// RewriteUnsafeString rewrites `unsafe.String(ptr, len)` → `unsafe.Slice(ptr,
+// len)` in the AST. In stock Go the two functions differ in return type
+// (`string` vs `[]T`), but in Moxie string and []byte are the same type so the
+// swap is identity for byte-pointer callers. Every unsafe.String use in the
+// stdlib passes a *byte (either `&b[0]` or `(*byte)(...)` cast), so the
+// rewrite is universally safe for Moxie-target packages. Must run before
+// typecheck so the return-type mismatch errors never get produced.
+func RewriteUnsafeString(file *ast.File) {
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok || pkg.Name != "unsafe" {
+			return true
+		}
+		if sel.Sel.Name != "String" {
+			return true
+		}
+		sel.Sel = ast.NewIdent("Slice")
 		return true
 	})
 }
@@ -585,9 +712,93 @@ func RewriteStringConversions(file *ast.File) {
 // This makes Go's type checker see []byte instead of string for all text
 // values in user code.
 func RewriteStringLiterals(file *ast.File) {
+	// Rewrite "X == \"\"" and "X != \"\"" to "len(X) == 0" and "len(X) != 0"
+	// BEFORE wrapping literals. After RewriteStringTypes turns the LHS into
+	// []byte, a slice == []byte("") would be rejected (slices only compare to
+	// nil). len-based check is the correct semantic replacement.
+	rewriteEmptyStringComparisons(file)
+	// Split mixed-type const blocks so non-string specs stay untyped.
+	splitConstBlocks(file)
 	// Walk the AST and replace string expressions with []byte() wrapped versions.
 	// We need to walk parent nodes to replace children in-place.
 	rewriteStringExprs(file)
+}
+
+// rewriteEmptyStringComparisons converts `X == ""` → `len(X) == 0` and
+// `X != ""` → `len(X) != 0` in the AST. Must run before RewriteStringLiterals'
+// literal wrapping, since wrapping turns "" into []byte("") which then makes
+// the comparison illegal (slice vs slice).
+func rewriteEmptyStringComparisons(file *ast.File) {
+	replace := func(expr *ast.Expr) {
+		be, ok := (*expr).(*ast.BinaryExpr)
+		if !ok {
+			return
+		}
+		if be.Op != token.EQL && be.Op != token.NEQ {
+			return
+		}
+		// Detect `X == ""` or `"" == X`.
+		var other ast.Expr
+		if isEmptyStringLit(be.Y) {
+			other = be.X
+		} else if isEmptyStringLit(be.X) {
+			other = be.Y
+		} else {
+			return
+		}
+		// Replace with len(other) OP 0
+		lenCall := &ast.CallExpr{
+			Fun:  ast.NewIdent("len"),
+			Args: []ast.Expr{other},
+		}
+		*expr = &ast.BinaryExpr{
+			X:  lenCall,
+			Op: be.Op,
+			Y:  &ast.BasicLit{Kind: token.INT, Value: "0"},
+		}
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.IfStmt:
+			replace(&node.Cond)
+		case *ast.ForStmt:
+			if node.Cond != nil {
+				replace(&node.Cond)
+			}
+		case *ast.BinaryExpr:
+			replace(&node.X)
+			replace(&node.Y)
+		case *ast.AssignStmt:
+			for i := range node.Rhs {
+				replace(&node.Rhs[i])
+			}
+		case *ast.ReturnStmt:
+			for i := range node.Results {
+				replace(&node.Results[i])
+			}
+		case *ast.CallExpr:
+			for i := range node.Args {
+				replace(&node.Args[i])
+			}
+		case *ast.UnaryExpr:
+			replace(&node.X)
+		case *ast.ParenExpr:
+			replace(&node.X)
+		case *ast.SwitchStmt:
+			if node.Tag != nil {
+				replace(&node.Tag)
+			}
+		}
+		return true
+	})
+}
+
+func isEmptyStringLit(expr ast.Expr) bool {
+	bl, ok := expr.(*ast.BasicLit)
+	if !ok {
+		return false
+	}
+	return bl.Kind == token.STRING && (bl.Value == `""` || bl.Value == "``")
 }
 
 // rewriteStringExprs walks the AST and wraps string-typed expressions in []byte().
@@ -599,21 +810,19 @@ func rewriteStringExprs(node ast.Node) {
 		if expr, ok := n.(ast.Expr); ok && isSliceByteConversion(expr) {
 			return false
 		}
-		// Convert string const declarations to var with []byte values.
-		// Go const can only hold string; after mxpurify converts
-		// fields/params to []byte, const strings can't be assigned.
+		// Const blocks are handled at file-scope by splitConstBlocks so
+		// mixed string/non-string blocks can be split into a preserved
+		// const (for untyped integer constants) and a companion var.
 		if gd, ok := n.(*ast.GenDecl); ok && gd.Tok == token.CONST {
-			convertStringConstsToVars(gd)
 			return false
 		}
-		// Skip function bodies that return string — these are interface-
-		// mandated methods (Error(), String()) that cannot return []byte.
-		if fd, ok := n.(*ast.FuncDecl); ok && funcReturnsString(fd) {
-			return false
-		}
-		if fl, ok := n.(*ast.FuncLit); ok && funcTypeReturnsString(fl.Type) {
-			return false
-		}
+		// Interface-mandated methods (Error/String) keep their string
+		// return type, but RewriteStringTypes has already wrapped every
+		// return value in `string(...)`. So we CAN wrap inner string
+		// literals here — e.g. `return "strconv." | e.Func` becomes
+		// `return string([]byte("strconv.") + e.Func + ...)`, which
+		// RewriteTextConcat then lowers to __moxie_concat. The outer
+		// string() conversion takes the []byte result back to string.
 		switch parent := n.(type) {
 		case *ast.AssignStmt:
 			for i, rhs := range parent.Rhs {
@@ -742,63 +951,198 @@ func isSliceByteConversion(expr ast.Expr) bool {
 // convertStringConstsToVars converts pure string constants to var declarations
 // with []byte values. Only converts specs where ALL values are string literals
 // and there's no explicit type or iota. Leaves numeric/mixed consts untouched.
-func convertStringConstsToVars(gd *ast.GenDecl) {
-	// Check if this is a pure string const block.
-	// If any spec uses iota or has non-string values, skip entirely.
-	hasString := false
-	for _, spec := range gd.Specs {
-		vs, ok := spec.(*ast.ValueSpec)
-		if !ok {
-			return
-		}
-		// Has explicit type — leave as-is (could be int, byte, etc.)
-		if vs.Type != nil {
+// splitConstBlocks walks the file's top-level declarations AND function
+// bodies, splitting each const block that mixes string and non-string
+// specs into a const block (non-string) and a var block (string, with
+// literals wrapped in []byte). Keeping the non-string specs as const
+// preserves their untyped-ness so comparisons like `rune >= runeSelf`
+// still typecheck.
+func splitConstBlocks(file *ast.File) {
+	splitBlockStmtConsts(file)
+	var newDecls []ast.Decl
+	for _, decl := range file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
+			newDecls = append(newDecls, decl)
 			continue
 		}
-		for _, val := range vs.Values {
-			if isStringExpr(val) {
-				hasString = true
+		hasString := false
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
 			}
-		}
-	}
-	if !hasString {
-		return
-	}
-	// Convert string-only specs to var with []byte wrapping.
-	// Keep non-string specs as const.
-	gd.Tok = token.VAR
-	for _, spec := range gd.Specs {
-		vs, ok := spec.(*ast.ValueSpec)
-		if !ok {
-			continue
-		}
-		allString := true
-		for _, val := range vs.Values {
-			if !isStringExpr(val) {
-				allString = false
+			if vs.Type != nil {
+				continue
+			}
+			for _, val := range vs.Values {
+				if isStringExpr(val) {
+					hasString = true
+					break
+				}
+			}
+			if hasString {
 				break
 			}
 		}
-		if !allString || vs.Type != nil {
-			// Non-string spec in a now-var block. This is OK —
-			// Go allows mixed const/var blocks, and var init from
-			// literal is valid.
+		if !hasString {
+			newDecls = append(newDecls, decl)
 			continue
 		}
-		for i, val := range vs.Values {
-			if wrapped := wrapStringExpr(val); wrapped != nil {
-				vs.Values[i] = wrapped
+		var varSpecs []ast.Spec
+		var constSpecs []ast.Spec
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				constSpecs = append(constSpecs, spec)
+				continue
 			}
-		}
-		// Update the Object.Kind so the type checker sees these as
-		// variables, not constants. The parser sets Kind=Con for const
-		// declarations and the type checker uses this.
-		for _, name := range vs.Names {
-			if name.Obj != nil {
-				name.Obj.Kind = ast.Var
+			allString := vs.Type == nil && len(vs.Values) > 0
+			if allString {
+				for _, val := range vs.Values {
+					if !isStringExpr(val) {
+						allString = false
+						break
+					}
+				}
 			}
+			if !allString {
+				constSpecs = append(constSpecs, vs)
+				continue
+			}
+			for i, val := range vs.Values {
+				if wrapped := wrapStringExpr(val); wrapped != nil {
+					vs.Values[i] = wrapped
+				}
+			}
+			for _, name := range vs.Names {
+				if name.Obj != nil {
+					name.Obj.Kind = ast.Var
+				}
+			}
+			varSpecs = append(varSpecs, vs)
 		}
+		if len(varSpecs) == 0 {
+			newDecls = append(newDecls, decl)
+			continue
+		}
+		if len(constSpecs) == 0 {
+			gd.Tok = token.VAR
+			gd.Specs = varSpecs
+			newDecls = append(newDecls, gd)
+			continue
+		}
+		// Mixed: emit a const block with non-string specs, then a var
+		// block with string specs.
+		gd.Specs = constSpecs
+		newDecls = append(newDecls, gd)
+		newDecls = append(newDecls, &ast.GenDecl{
+			Tok:   token.VAR,
+			Specs: varSpecs,
+		})
 	}
+	file.Decls = newDecls
+}
+
+// splitBlockStmtConsts walks function bodies and splits function-scoped
+// const blocks the same way splitConstBlocks splits top-level const blocks.
+// Function-scoped consts appear as DeclStmt{Decl:&GenDecl{Tok:CONST}}.
+func splitBlockStmtConsts(file *ast.File) {
+	ast.Inspect(file, func(n ast.Node) bool {
+		block, ok := n.(*ast.BlockStmt)
+		if !ok {
+			return true
+		}
+		var newStmts []ast.Stmt
+		for _, stmt := range block.List {
+			ds, ok := stmt.(*ast.DeclStmt)
+			if !ok {
+				newStmts = append(newStmts, stmt)
+				continue
+			}
+			gd, ok := ds.Decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				newStmts = append(newStmts, stmt)
+				continue
+			}
+			hasString := false
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				if vs.Type != nil {
+					continue
+				}
+				for _, val := range vs.Values {
+					if isStringExpr(val) {
+						hasString = true
+						break
+					}
+				}
+				if hasString {
+					break
+				}
+			}
+			if !hasString {
+				newStmts = append(newStmts, stmt)
+				continue
+			}
+			var varSpecs []ast.Spec
+			var constSpecs []ast.Spec
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					constSpecs = append(constSpecs, spec)
+					continue
+				}
+				allString := vs.Type == nil && len(vs.Values) > 0
+				if allString {
+					for _, val := range vs.Values {
+						if !isStringExpr(val) {
+							allString = false
+							break
+						}
+					}
+				}
+				if !allString {
+					constSpecs = append(constSpecs, vs)
+					continue
+				}
+				for i, val := range vs.Values {
+					if wrapped := wrapStringExpr(val); wrapped != nil {
+						vs.Values[i] = wrapped
+					}
+				}
+				for _, name := range vs.Names {
+					if name.Obj != nil {
+						name.Obj.Kind = ast.Var
+					}
+				}
+				varSpecs = append(varSpecs, vs)
+			}
+			if len(varSpecs) == 0 {
+				newStmts = append(newStmts, stmt)
+				continue
+			}
+			if len(constSpecs) == 0 {
+				gd.Tok = token.VAR
+				gd.Specs = varSpecs
+				newStmts = append(newStmts, stmt)
+				continue
+			}
+			gd.Specs = constSpecs
+			newStmts = append(newStmts, stmt)
+			newStmts = append(newStmts, &ast.DeclStmt{
+				Decl: &ast.GenDecl{
+					Tok:   token.VAR,
+					Specs: varSpecs,
+				},
+			})
+		}
+		block.List = newStmts
+		return true
+	})
 }
 
 // funcReturnsString returns true if a FuncDecl has string in its return types.
@@ -842,6 +1186,1187 @@ func makeSliceByteCall(expr ast.Expr) *ast.CallExpr {
 		},
 		Args: []ast.Expr{expr},
 	}
+}
+
+// FindExemptCrossBoundaryMismatches walks the AST of an exempt package and
+// returns a list of argument expressions that need to be wrapped in
+// []byte(...) to match the callee's rewritten []byte signature. Requires
+// type info from a prior typecheck pass to inspect callee param types and
+// caller arg types.
+//
+// Pattern: pkg.Func(x) where pkg is non-exempt, the Func's param is []byte,
+// and x is of type string.
+func FindExemptCrossBoundaryMismatches(files []*ast.File, info *types.Info) []ast.Expr {
+	var result []ast.Expr
+	for _, file := range files {
+		imports := map[string]bool{}
+		for _, imp := range file.Imports {
+			path := strings.Trim(imp.Path.Value, "\"")
+			if imp.Name != nil {
+				imports[imp.Name.Name] = true
+				continue
+			}
+			name := path
+			if i := strings.LastIndex(path, "/"); i >= 0 {
+				name = path[i+1:]
+			}
+			imports[name] = true
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			pkgIdent, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if !imports[pkgIdent.Name] {
+				return true
+			}
+			if !IsMoxieStringTarget(pkgIdent.Name) {
+				return true
+			}
+			// Get callee signature.
+			tv, ok := info.Types[sel]
+			if !ok {
+				return true
+			}
+			sig, ok := tv.Type.(*types.Signature)
+			if !ok {
+				return true
+			}
+			params := sig.Params()
+			for i, arg := range call.Args {
+				if i >= params.Len() {
+					break // variadic overflow
+				}
+				paramType := params.At(i).Type()
+				// Only interested when param is []byte.
+				slice, ok := paramType.(*types.Slice)
+				if !ok {
+					continue
+				}
+				basic, ok := slice.Elem().(*types.Basic)
+				if !ok || basic.Kind() != types.Byte {
+					continue
+				}
+				// Check arg's type: string means mismatch.
+				argTV, ok := info.Types[arg]
+				if !ok {
+					continue
+				}
+				argBasic, ok := argTV.Type.(*types.Basic)
+				if !ok {
+					continue
+				}
+				if argBasic.Kind() == types.String || argBasic.Kind() == types.UntypedString {
+					// Already wrapped in []byte(...)?
+					if isSliceByteConversion(arg) {
+						continue
+					}
+					result = append(result, arg)
+				}
+			}
+			return true
+		})
+	}
+	return result
+}
+
+// ApplyExemptCrossBoundaryMismatches wraps each identified arg expression
+// in []byte(...). Identifies args by pointer equality — must be called
+// with the exact nodes returned by FindExemptCrossBoundaryMismatches.
+func ApplyExemptCrossBoundaryMismatches(files []*ast.File, exprs []ast.Expr) {
+	if len(exprs) == 0 {
+		return
+	}
+	targets := map[ast.Expr]bool{}
+	for _, e := range exprs {
+		targets[e] = true
+	}
+	// Remove from targets once wrapped to prevent infinite revisits.
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			for i, arg := range call.Args {
+				if targets[arg] {
+					call.Args[i] = makeSliceByteCall(arg)
+					delete(targets, arg)
+				}
+			}
+			return true
+		})
+	}
+}
+
+// makeStringCall wraps an expression in `string(...)`.
+func makeStringCall(expr ast.Expr) *ast.CallExpr {
+	return &ast.CallExpr{
+		Fun:  &ast.Ident{Name: "string"},
+		Args: []ast.Expr{expr},
+	}
+}
+
+// FindExemptStructLiteralMismatches walks the AST of an exempt package and
+// returns value expressions in struct literals whose field type is []byte
+// but the supplied value is string-typed (typically a literal). These need
+// wrapping in []byte(...) so stock go/types accepts them.
+//
+// Pattern: &PathError{Op: "readdir unimplemented"} inside os where PathError
+// comes from io/fs (non-exempt) and its Op field was rewritten to []byte.
+func FindExemptStructLiteralMismatches(files []*ast.File, info *types.Info) []ast.Expr {
+	var result []ast.Expr
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			cl, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			tv, ok := info.Types[cl]
+			if !ok {
+				return true
+			}
+			t := tv.Type
+			for {
+				p, ok := t.(*types.Pointer)
+				if !ok {
+					break
+				}
+				t = p.Elem()
+			}
+			if t == nil {
+				return true
+			}
+			st, ok := t.Underlying().(*types.Struct)
+			if !ok {
+				return true
+			}
+			for i, elt := range cl.Elts {
+				var fieldType types.Type
+				var value ast.Expr
+				if kv, ok := elt.(*ast.KeyValueExpr); ok {
+					keyIdent, ok := kv.Key.(*ast.Ident)
+					if !ok {
+						continue
+					}
+					for j := 0; j < st.NumFields(); j++ {
+						if st.Field(j).Name() == keyIdent.Name {
+							fieldType = st.Field(j).Type()
+							break
+						}
+					}
+					value = kv.Value
+				} else {
+					if i >= st.NumFields() {
+						continue
+					}
+					fieldType = st.Field(i).Type()
+					value = elt
+				}
+				if fieldType == nil {
+					continue
+				}
+				slice, ok := fieldType.(*types.Slice)
+				if !ok {
+					continue
+				}
+				basic, ok := slice.Elem().(*types.Basic)
+				if !ok || basic.Kind() != types.Byte {
+					continue
+				}
+				vTV, ok := info.Types[value]
+				if !ok {
+					continue
+				}
+				vBasic, ok := vTV.Type.(*types.Basic)
+				if !ok {
+					continue
+				}
+				if vBasic.Kind() == types.String || vBasic.Kind() == types.UntypedString {
+					if isSliceByteConversion(value) {
+						continue
+					}
+					result = append(result, value)
+				}
+			}
+			return true
+		})
+	}
+	return result
+}
+
+// FindNonExemptReturnMismatches scans non-exempt package files for return
+// statements where the enclosing function's result type is []byte but the
+// returned expression is string-typed (typically from an interface-mandated
+// String() method that kept its string return). These need wrapping in
+// []byte(...).
+func FindNonExemptReturnMismatches(files []*ast.File, info *types.Info) []ast.Expr {
+	var result []ast.Expr
+	walk := func(sig *types.Signature, body *ast.BlockStmt) {
+		if sig == nil || body == nil {
+			return
+		}
+		results := sig.Results()
+		if results.Len() == 0 {
+			return
+		}
+		ast.Inspect(body, func(n ast.Node) bool {
+			// Don't descend into nested FuncLit — their returns bind to
+			// their own signature, handled separately.
+			if _, ok := n.(*ast.FuncLit); ok {
+				return false
+			}
+			ret, ok := n.(*ast.ReturnStmt)
+			if !ok {
+				return true
+			}
+			for i, expr := range ret.Results {
+				if i >= results.Len() {
+					break
+				}
+				rt := results.At(i).Type()
+				slice, ok := rt.(*types.Slice)
+				if !ok {
+					continue
+				}
+				basic, ok := slice.Elem().(*types.Basic)
+				if !ok || basic.Kind() != types.Byte {
+					continue
+				}
+				eTV, ok := info.Types[expr]
+				if !ok {
+					continue
+				}
+				eBasic, ok := eTV.Type.(*types.Basic)
+				if !ok {
+					continue
+				}
+				if eBasic.Kind() == types.String || eBasic.Kind() == types.UntypedString {
+					if isSliceByteConversion(expr) {
+						continue
+					}
+					result = append(result, expr)
+				}
+			}
+			return true
+		})
+	}
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch fn := n.(type) {
+			case *ast.FuncDecl:
+				if fn.Body == nil {
+					return true
+				}
+				obj := info.Defs[fn.Name]
+				if obj == nil {
+					return true
+				}
+				sig, _ := obj.Type().(*types.Signature)
+				walk(sig, fn.Body)
+			case *ast.FuncLit:
+				tv, ok := info.Types[fn]
+				if !ok {
+					return true
+				}
+				sig, _ := tv.Type.(*types.Signature)
+				walk(sig, fn.Body)
+			}
+			return true
+		})
+	}
+	return result
+}
+
+// ApplyNonExemptReturnMismatches wraps each identified return-expr in []byte(...).
+func ApplyNonExemptReturnMismatches(files []*ast.File, exprs []ast.Expr) {
+	if len(exprs) == 0 {
+		return
+	}
+	targets := map[ast.Expr]bool{}
+	for _, e := range exprs {
+		targets[e] = true
+	}
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			ret, ok := n.(*ast.ReturnStmt)
+			if !ok {
+				return true
+			}
+			for i, expr := range ret.Results {
+				if targets[expr] {
+					ret.Results[i] = makeSliceByteCall(expr)
+					delete(targets, expr)
+				}
+			}
+			return true
+		})
+	}
+}
+
+// AssignMismatch carries an assignment-RHS expression plus the direction of
+// the wrap needed: "toBytes" wraps in []byte(...), "toString" wraps in string(...).
+type AssignMismatch struct {
+	Expr ast.Expr
+	Kind string
+}
+
+// FindNonExemptAssignMismatches scans for `a = b` or `a, b = c, d` assigns
+// where the LHS and RHS straddle the string/[]byte boundary. Returns a list
+// of fixes keyed by RHS expression pointer.
+func FindNonExemptAssignMismatches(files []*ast.File, info *types.Info) []AssignMismatch {
+	var result []AssignMismatch
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			assign, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			if assign.Tok != token.ASSIGN {
+				return true
+			}
+			if len(assign.Lhs) != len(assign.Rhs) {
+				return true
+			}
+			for i, lhs := range assign.Lhs {
+				lTV, ok := info.Types[lhs]
+				if !ok {
+					continue
+				}
+				rhs := assign.Rhs[i]
+				rTV, ok := info.Types[rhs]
+				if !ok {
+					continue
+				}
+				// LHS []byte, RHS string → wrap in []byte(...).
+				if lSlice, ok := lTV.Type.(*types.Slice); ok {
+					if lb, ok := lSlice.Elem().(*types.Basic); ok && lb.Kind() == types.Byte {
+						if rBasic, ok := rTV.Type.(*types.Basic); ok && (rBasic.Kind() == types.String || rBasic.Kind() == types.UntypedString) {
+							if !isSliceByteConversion(rhs) {
+								result = append(result, AssignMismatch{Expr: rhs, Kind: "toBytes"})
+							}
+							continue
+						}
+					}
+				}
+				// LHS string, RHS []byte → wrap in string(...).
+				if lBasic, ok := lTV.Type.(*types.Basic); ok && lBasic.Kind() == types.String {
+					if rSlice, ok := rTV.Type.(*types.Slice); ok {
+						if rb, ok := rSlice.Elem().(*types.Basic); ok && rb.Kind() == types.Byte {
+							if !isStringConversion(rhs) {
+								result = append(result, AssignMismatch{Expr: rhs, Kind: "toString"})
+							}
+						}
+					}
+				}
+			}
+			return true
+		})
+	}
+	return result
+}
+
+// ApplyNonExemptAssignMismatches wraps each identified RHS per its Kind.
+func ApplyNonExemptAssignMismatches(files []*ast.File, fixes []AssignMismatch) {
+	if len(fixes) == 0 {
+		return
+	}
+	targets := map[ast.Expr]string{}
+	for _, f := range fixes {
+		targets[f.Expr] = f.Kind
+	}
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			assign, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for i, rhs := range assign.Rhs {
+				if kind, ok := targets[rhs]; ok {
+					switch kind {
+					case "toBytes":
+						assign.Rhs[i] = makeSliceByteCall(rhs)
+					case "toString":
+						assign.Rhs[i] = makeStringCall(rhs)
+					}
+					delete(targets, rhs)
+				}
+			}
+			return true
+		})
+	}
+}
+
+// isStringConversion reports whether expr is already a `string(x)` call.
+func isStringConversion(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 {
+		return false
+	}
+	id, ok := call.Fun.(*ast.Ident)
+	return ok && id.Name == "string"
+}
+
+// ByteConvFix describes a rewrite to apply to a `[]byte(x)` CallExpr that
+// was produced by RewriteStringConversions from a non-slice arg.
+//
+//	Kind "compLit": []byte(x) → []byte{x} (for byte/untypedInt args).
+//	Kind "revert":  []byte(x) → string(x) (for rune/int32/int args; phase 2
+//	                wrapping will re-wrap when flowing into []byte contexts).
+type ByteConvFix struct {
+	Call *ast.CallExpr
+	Kind string
+}
+
+// FindByteToSliceConversions scans for `[]byte(x)` calls where `x` is not a
+// slice or string. These arise from the aggressive `string(x)` → `[]byte(x)`
+// rewrite in RewriteStringConversions, which is correct for slice args but
+// breaks for single-byte/rune args.
+func FindByteToSliceConversions(files []*ast.File, info *types.Info) []ByteConvFix {
+	var result []ByteConvFix
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || len(call.Args) != 1 {
+				return true
+			}
+			at, ok := call.Fun.(*ast.ArrayType)
+			if !ok || at.Len != nil {
+				return true
+			}
+			elt, ok := at.Elt.(*ast.Ident)
+			if !ok || elt.Name != "byte" {
+				return true
+			}
+			argTV, ok := info.Types[call.Args[0]]
+			if !ok {
+				return true
+			}
+			basic, ok := argTV.Type.(*types.Basic)
+			if !ok {
+				return true
+			}
+			switch basic.Kind() {
+			case types.Byte, types.UntypedInt:
+				// byte (uint8): []byte{x} is exact single-byte slice.
+				result = append(result, ByteConvFix{Call: call, Kind: "compLit"})
+			case types.Int32, types.Int, types.UntypedRune:
+				// rune: revert to string(x) so UTF-8 semantics kick in.
+				// Phase 2 wrapping handles the []byte context.
+				result = append(result, ByteConvFix{Call: call, Kind: "revert"})
+			}
+			return true
+		})
+	}
+	return result
+}
+
+// ApplyByteToSliceConversions walks files and applies each ByteConvFix.
+func ApplyByteToSliceConversions(files []*ast.File, fixes []ByteConvFix) {
+	if len(fixes) == 0 {
+		return
+	}
+	targets := map[*ast.CallExpr]string{}
+	for _, f := range fixes {
+		targets[f.Call] = f.Kind
+	}
+	replace := func(e ast.Expr) ast.Expr {
+		ce, ok := e.(*ast.CallExpr)
+		if !ok {
+			return e
+		}
+		kind, ok := targets[ce]
+		if !ok {
+			return e
+		}
+		switch kind {
+		case "compLit":
+			return &ast.CompositeLit{
+				Type: &ast.ArrayType{Elt: ast.NewIdent("byte")},
+				Elts: []ast.Expr{ce.Args[0]},
+			}
+		case "revert":
+			// rune → UTF-8 bytes: []byte(string(rune)).
+			// Stock go/types accepts: string(rune) → string (UTF-8),
+			// []byte(string) → []byte.
+			return &ast.CallExpr{
+				Fun: &ast.ArrayType{Elt: ast.NewIdent("byte")},
+				Args: []ast.Expr{
+					&ast.CallExpr{
+						Fun:  ast.NewIdent("string"),
+						Args: []ast.Expr{ce.Args[0]},
+					},
+				},
+			}
+		}
+		return e
+	}
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch v := n.(type) {
+			case *ast.AssignStmt:
+				for i, r := range v.Rhs {
+					v.Rhs[i] = replace(r)
+				}
+			case *ast.ValueSpec:
+				for i, r := range v.Values {
+					v.Values[i] = replace(r)
+				}
+			case *ast.ReturnStmt:
+				for i, r := range v.Results {
+					v.Results[i] = replace(r)
+				}
+			case *ast.CallExpr:
+				for i, a := range v.Args {
+					v.Args[i] = replace(a)
+				}
+			case *ast.KeyValueExpr:
+				v.Value = replace(v.Value)
+			case *ast.BinaryExpr:
+				v.X = replace(v.X)
+				v.Y = replace(v.Y)
+			case *ast.UnaryExpr:
+				v.X = replace(v.X)
+			case *ast.ParenExpr:
+				v.X = replace(v.X)
+			case *ast.IndexExpr:
+				v.X = replace(v.X)
+				v.Index = replace(v.Index)
+			case *ast.SliceExpr:
+				v.X = replace(v.X)
+				if v.Low != nil {
+					v.Low = replace(v.Low)
+				}
+				if v.High != nil {
+					v.High = replace(v.High)
+				}
+				if v.Max != nil {
+					v.Max = replace(v.Max)
+				}
+			case *ast.CompositeLit:
+				for i, e := range v.Elts {
+					v.Elts[i] = replace(e)
+				}
+			case *ast.SelectorExpr:
+				v.X = replace(v.X)
+			case *ast.StarExpr:
+				v.X = replace(v.X)
+			case *ast.TypeAssertExpr:
+				v.X = replace(v.X)
+			case *ast.IncDecStmt:
+				v.X = replace(v.X)
+			case *ast.SendStmt:
+				v.Chan = replace(v.Chan)
+				v.Value = replace(v.Value)
+			case *ast.ExprStmt:
+				v.X = replace(v.X)
+			case *ast.ForStmt:
+				if v.Cond != nil {
+					v.Cond = replace(v.Cond)
+				}
+			case *ast.IfStmt:
+				if v.Cond != nil {
+					v.Cond = replace(v.Cond)
+				}
+			case *ast.SwitchStmt:
+				if v.Tag != nil {
+					v.Tag = replace(v.Tag)
+				}
+			case *ast.CaseClause:
+				for i, e := range v.List {
+					v.List[i] = replace(e)
+				}
+			case *ast.RangeStmt:
+				v.X = replace(v.X)
+			}
+			return true
+		})
+	}
+}
+
+// ApplyExemptStructLiteralMismatches wraps each identified struct-literal
+// value in []byte(...). Identifies by pointer equality — must be called
+// with the exact nodes returned by FindExemptStructLiteralMismatches.
+func ApplyExemptStructLiteralMismatches(files []*ast.File, exprs []ast.Expr) {
+	if len(exprs) == 0 {
+		return
+	}
+	targets := map[ast.Expr]bool{}
+	for _, e := range exprs {
+		targets[e] = true
+	}
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			cl, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			for i, elt := range cl.Elts {
+				if kv, ok := elt.(*ast.KeyValueExpr); ok {
+					if targets[kv.Value] {
+						orig := kv.Value
+						kv.Value = makeSliceByteCall(kv.Value)
+						delete(targets, orig)
+					}
+				} else {
+					if targets[elt] {
+						cl.Elts[i] = makeSliceByteCall(elt)
+						delete(targets, elt)
+					}
+				}
+			}
+			return true
+		})
+	}
+}
+
+// NonExemptBoundaryFix describes an arg that needs wrapping; the Kind
+// field picks the wrap form.
+type NonExemptBoundaryFix struct {
+	Arg  ast.Expr
+	Kind string // "toString" or "toBytes"
+}
+
+// FindNonExemptCrossBoundaryMismatches walks the AST of a Moxie-target
+// (non-exempt) package and returns a list of call arguments that need a
+// type-bridge wrap to reconcile stock go/types with the Moxie string==[]byte
+// identity.
+//
+// Two directions are handled:
+//  1. []byte arg → string param: happens when calling into an exempt package
+//     whose signature still uses native Go string (e.g. syscall.Open). Wrap
+//     in `string(...)`.
+//  2. string arg → []byte param: happens when the arg came from an exempt
+//     package's return (e.g. runtime.GOROOT()) but is being passed to a
+//     non-exempt callee whose signature was rewritten to []byte. Wrap in
+//     `[]byte(...)`.
+func FindNonExemptCrossBoundaryMismatches(files []*ast.File, info *types.Info) []NonExemptBoundaryFix {
+	var result []NonExemptBoundaryFix
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			// Special-case builtin append: additional args after the slice
+			// must match the element type. If the slice is [][]byte and a
+			// subsequent arg is a string, wrap in []byte(...).
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "append" && len(call.Args) >= 2 {
+				if tv, ok := info.Types[call.Args[0]]; ok {
+					if slice, ok := tv.Type.(*types.Slice); ok {
+						if eb, ok := slice.Elem().(*types.Slice); ok {
+							if bb, ok := eb.Elem().(*types.Basic); ok && bb.Kind() == types.Byte {
+								// Element type is []byte; wrap string args.
+								for i := 1; i < len(call.Args); i++ {
+									arg := call.Args[i]
+									argTV, ok := info.Types[arg]
+									if !ok {
+										continue
+									}
+									if ab, ok := argTV.Type.(*types.Basic); ok && (ab.Kind() == types.String || ab.Kind() == types.UntypedString) {
+										if isSliceByteConversion(arg) {
+											continue
+										}
+										result = append(result, NonExemptBoundaryFix{Arg: arg, Kind: "toBytes"})
+									}
+								}
+							}
+						}
+					}
+				}
+				return true
+			}
+			// Special-case builtin delete(m, k): map keys stay as string
+			// after the []byte rewrite, so if k is []byte, wrap in string().
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "delete" && len(call.Args) == 2 {
+				if tv, ok := info.Types[call.Args[0]]; ok {
+					if m, ok := tv.Type.Underlying().(*types.Map); ok {
+						if kb, ok := m.Key().(*types.Basic); ok && kb.Kind() == types.String {
+							arg := call.Args[1]
+							if argTV, ok := info.Types[arg]; ok {
+								if slice, ok := argTV.Type.(*types.Slice); ok {
+									if bb, ok := slice.Elem().(*types.Basic); ok && bb.Kind() == types.Byte {
+										result = append(result, NonExemptBoundaryFix{Arg: arg, Kind: "toString"})
+									}
+								}
+							}
+						}
+					}
+				}
+				return true
+			}
+			var sig *types.Signature
+			switch fn := call.Fun.(type) {
+			case *ast.SelectorExpr:
+				if tv, ok := info.Types[fn]; ok {
+					sig, _ = tv.Type.(*types.Signature)
+				}
+			case *ast.Ident:
+				if tv, ok := info.Types[fn]; ok {
+					sig, _ = tv.Type.(*types.Signature)
+				}
+			}
+			if sig == nil {
+				return true
+			}
+			params := sig.Params()
+			for i, arg := range call.Args {
+				if i >= params.Len() {
+					break
+				}
+				paramType := params.At(i).Type()
+				argTV, ok := info.Types[arg]
+				if !ok {
+					continue
+				}
+				// paramString := paramType is *types.Basic with Kind string
+				if pb, ok := paramType.(*types.Basic); ok && pb.Kind() == types.String {
+					// Arg should be []byte; if so, wrap in string.
+					if slice, ok := argTV.Type.(*types.Slice); ok {
+						if bb, ok := slice.Elem().(*types.Basic); ok && bb.Kind() == types.Byte {
+							// Already string(...)?
+							if c, ok := arg.(*ast.CallExpr); ok {
+								if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "string" && len(c.Args) == 1 {
+									continue
+								}
+							}
+							result = append(result, NonExemptBoundaryFix{Arg: arg, Kind: "toString"})
+						}
+					}
+					continue
+				}
+				// paramType is []byte?
+				if slice, ok := paramType.(*types.Slice); ok {
+					if bb, ok := slice.Elem().(*types.Basic); ok && bb.Kind() == types.Byte {
+						// Arg should be string; if so, wrap in []byte.
+						if ab, ok := argTV.Type.(*types.Basic); ok && (ab.Kind() == types.String || ab.Kind() == types.UntypedString) {
+							if isSliceByteConversion(arg) {
+								continue
+							}
+							result = append(result, NonExemptBoundaryFix{Arg: arg, Kind: "toBytes"})
+						}
+					}
+				}
+			}
+			return true
+		})
+	}
+	return result
+}
+
+// ApplyNonExemptCrossBoundaryMismatches wraps each identified arg expression
+// per its Kind: `string(...)` for toString, `[]byte(...)` for toBytes.
+// Identifies args by pointer equality — must be called with the exact nodes
+// returned by FindNonExemptCrossBoundaryMismatches.
+func ApplyNonExemptCrossBoundaryMismatches(files []*ast.File, fixes []NonExemptBoundaryFix) {
+	if len(fixes) == 0 {
+		return
+	}
+	targets := map[ast.Expr]string{}
+	for _, f := range fixes {
+		targets[f.Arg] = f.Kind
+	}
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			for i, arg := range call.Args {
+				if kind, ok := targets[arg]; ok {
+					switch kind {
+					case "toString":
+						call.Args[i] = makeStringCall(arg)
+					case "toBytes":
+						call.Args[i] = makeSliceByteCall(arg)
+					}
+					delete(targets, arg)
+				}
+			}
+			return true
+		})
+	}
+}
+
+// RewriteExemptCrossBoundaryCalls wraps string literals passed as arguments
+// to calls that cross from an exempt package (e.g. syscall, os, runtime)
+// into a non-exempt package whose signatures have already been rewritten to
+// []byte. The exempt package keeps native Go string types internally, but
+// its calls into errors.New/fmt.Errorf/etc must match the rewritten []byte
+// signatures seen by stock go/types.
+func RewriteExemptCrossBoundaryCalls(file *ast.File) {
+	// Collect import names that are in scope (both explicit names and the
+	// trailing path component of each import). Local identifiers that don't
+	// match an import must not be treated as package references.
+	imports := map[string]bool{}
+	for _, imp := range file.Imports {
+		path := strings.Trim(imp.Path.Value, "\"")
+		if imp.Name != nil {
+			imports[imp.Name.Name] = true
+			continue
+		}
+		// Default package ident is the last path segment.
+		name := path
+		if i := strings.LastIndex(path, "/"); i >= 0 {
+			name = path[i+1:]
+		}
+		imports[name] = true
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkgIdent, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		// Only wrap when pkgIdent is actually an imported package name.
+		if !imports[pkgIdent.Name] {
+			return true
+		}
+		// Only wrap when calling into a NON-exempt package.
+		if !IsMoxieStringTarget(pkgIdent.Name) {
+			return true
+		}
+		// Wrap only string literals. Wrapping arbitrary identifiers would
+		// mis-type args like uintptr or int. Variable-typed string args
+		// are handled in a type-info-driven second pass.
+		for i, arg := range call.Args {
+			if lit, ok := arg.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				call.Args[i] = makeSliceByteCall(lit)
+			}
+		}
+		return true
+	})
+}
+
+// RewriteTextConcat converts syntactically-detectable text concatenations
+// (ADD or OR between text operands) to __moxie_concat(X, Y) calls and
+// syntactic text comparisons (EQL/NEQ/LSS/LEQ/GTR/GEQ) to __moxie_eq /
+// __moxie_lt calls, BEFORE typecheck. Used by moxiejs, which lacks native
+// moxie's patched go/types that accepts []byte ops.
+//
+// Runs after RewriteStringLiterals so stringlit operands are already wrapped
+// in []byte(...). An operand is considered text when it is:
+//   - []byte(...) CallExpr (including the wraps from RewriteStringLiterals)
+//   - a ParenExpr whose inner expr is text
+//   - an existing __moxie_concat(...) call
+func RewriteTextConcat(file *ast.File) {
+	replace := func(expr ast.Expr) ast.Expr {
+		return rewriteTextConcatExpr(expr)
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		// Skip const declarations — __moxie_concat/__moxie_eq/__moxie_lt
+		// are runtime calls and cannot appear in const expressions.
+		// `const X = GOARCH == "amd64" || ...` must stay Go-native.
+		if gd, ok := n.(*ast.GenDecl); ok && gd.Tok == token.CONST {
+			return false
+		}
+		// Skip `[]byte(...)` casts whose body is purely string literals
+		// so stock Go can still constant-fold `[]byte("a"+"b")`. If the
+		// body references a variable (as in `[]byte("prefix" | x)` where
+		// x was rewritten to []byte), rewrite the inner concat so stock
+		// go/types accepts it.
+		if call, ok := n.(*ast.CallExpr); ok && isSliceByteConversion(call) {
+			if allStringLitBinaryArg(call) {
+				return false
+			}
+			// Unwrap: `[]byte(X + Y)` → replace with the rewritten X ⊕ Y
+			// (which will be a __moxie_concat(...) call returning []byte,
+			// so the outer []byte(...) wrap is redundant). We transform in
+			// place via the parent-node replacements below.
+		}
+		switch parent := n.(type) {
+		case *ast.AssignStmt:
+			for i := range parent.Rhs {
+				parent.Rhs[i] = replace(parent.Rhs[i])
+			}
+		case *ast.ValueSpec:
+			for i := range parent.Values {
+				parent.Values[i] = replace(parent.Values[i])
+			}
+		case *ast.ReturnStmt:
+			for i := range parent.Results {
+				parent.Results[i] = replace(parent.Results[i])
+			}
+		case *ast.CallExpr:
+			for i := range parent.Args {
+				parent.Args[i] = replace(parent.Args[i])
+			}
+		case *ast.SendStmt:
+			parent.Value = replace(parent.Value)
+		case *ast.BinaryExpr:
+			parent.X = replace(parent.X)
+			parent.Y = replace(parent.Y)
+		case *ast.ParenExpr:
+			parent.X = replace(parent.X)
+		case *ast.IndexExpr:
+			parent.Index = replace(parent.Index)
+		case *ast.KeyValueExpr:
+			parent.Value = replace(parent.Value)
+		case *ast.CompositeLit:
+			for i := range parent.Elts {
+				parent.Elts[i] = replace(parent.Elts[i])
+			}
+		case *ast.IfStmt:
+			if parent.Cond != nil {
+				parent.Cond = replace(parent.Cond)
+			}
+		case *ast.ForStmt:
+			if parent.Cond != nil {
+				parent.Cond = replace(parent.Cond)
+			}
+		case *ast.SwitchStmt:
+			if parent.Tag != nil {
+				parent.Tag = replace(parent.Tag)
+			}
+		case *ast.CaseClause:
+			for i := range parent.List {
+				parent.List[i] = replace(parent.List[i])
+			}
+		case *ast.ExprStmt:
+			parent.X = replace(parent.X)
+		case *ast.IncDecStmt:
+			parent.X = replace(parent.X)
+		case *ast.UnaryExpr:
+			parent.X = replace(parent.X)
+		case *ast.StarExpr:
+			parent.X = replace(parent.X)
+		case *ast.SliceExpr:
+			if parent.Low != nil {
+				parent.Low = replace(parent.Low)
+			}
+			if parent.High != nil {
+				parent.High = replace(parent.High)
+			}
+			if parent.Max != nil {
+				parent.Max = replace(parent.Max)
+			}
+		case *ast.TypeAssertExpr:
+			parent.X = replace(parent.X)
+		}
+		return true
+	})
+}
+
+// rewriteTextConcatExpr recursively transforms BinaryExpr ADD/OR nodes whose
+// operands are syntactically text into __moxie_concat calls, and comparison
+// BinaryExprs (EQL/NEQ/LSS/LEQ/GTR/GEQ) whose operands are syntactically
+// text into __moxie_eq / __moxie_lt calls. Returns the rewritten expression
+// (or the original when no rewrite applies).
+func rewriteTextConcatExpr(expr ast.Expr) ast.Expr {
+	if expr == nil {
+		return expr
+	}
+	switch e := expr.(type) {
+	case *ast.BinaryExpr:
+		e.X = rewriteTextConcatExpr(e.X)
+		e.Y = rewriteTextConcatExpr(e.Y)
+		switch e.Op {
+		case token.ADD, token.OR:
+			xText := isSyntacticTextExpr(e.X)
+			yText := isSyntacticTextExpr(e.Y)
+			// Only rewrite when at least one side is syntactically
+			// text. This keeps bitwise `|` on user-defined int
+			// types intact (e.g. `Int16(b[0]) | Int16(b[1])<<8`)
+			// while correctly catching text concat (since
+			// RewriteStringLiterals has already wrapped every
+			// stringlit in `[]byte(...)`).
+			if !xText && !yText {
+				return e
+			}
+			// Once we commit to rewriting (because at least one side
+			// is text), any nested `+`/`|` on the other side must also
+			// be part of a text concat chain. Force-rewrite them so
+			// `out + short + []byte(":")` doesn't leave an inner
+			// `out + short` BinaryExpr under a `[]byte(...)` wrap,
+			// which fails stock go/types as `[]byte + string`.
+			e.X = forceTextConcat(e.X)
+			e.Y = forceTextConcat(e.Y)
+			// Wrap non-text operands in `[]byte(...)` so the
+			// __moxie_concat([]byte, []byte) signature is satisfied
+			// regardless of whether the operand is string-typed (method
+			// calls like e.Err.Error()) or []byte-typed (field accesses
+			// post-RewriteStringTypes). Identity conversion for []byte,
+			// explicit conversion for string — both accepted by
+			// stock go/types.
+			return &ast.CallExpr{
+				Fun:  &ast.Ident{Name: "__moxie_concat"},
+				Args: []ast.Expr{wrapForMoxieConcat(e.X), wrapForMoxieConcat(e.Y)},
+			}
+		case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ:
+			// Slice comparison rewrite: same syntactic rule. If
+			// either operand is syntactically text, rewrite so the
+			// standard typechecker doesn't reject slice-to-slice
+			// comparison.
+			if !isSyntacticTextExpr(e.X) && !isSyntacticTextExpr(e.Y) {
+				return e
+			}
+			return rewriteTextCompare(e)
+		}
+		return e
+	case *ast.ParenExpr:
+		e.X = rewriteTextConcatExpr(e.X)
+		return e
+	case *ast.CallExpr:
+		// Don't descend into `[]byte(...)` casts — see the walker comment.
+		if isSliceByteConversion(e) {
+			return e
+		}
+		for i := range e.Args {
+			e.Args[i] = rewriteTextConcatExpr(e.Args[i])
+		}
+		return e
+	case *ast.UnaryExpr:
+		e.X = rewriteTextConcatExpr(e.X)
+		return e
+	}
+	return expr
+}
+
+// wrapForMoxieConcat wraps an expression in `[]byte(...)` unless it's
+// already a syntactic text expression. Used when constructing arguments
+// to __moxie_concat so that operands like `e.Err.Error()` (string-returning
+// method calls) or `e.Func` (named []byte field accesses) end up as []byte
+// per stock go/types — Moxie's identity-conversion rule lets []byte→[]byte
+// pass too.
+func wrapForMoxieConcat(e ast.Expr) ast.Expr {
+	if isSyntacticTextExpr(e) {
+		return e
+	}
+	return &ast.CallExpr{
+		Fun:  &ast.ArrayType{Elt: ast.NewIdent("byte")},
+		Args: []ast.Expr{e},
+	}
+}
+
+// allStringLitBinaryArg reports whether `call` is a `[]byte(X)` cast whose
+// body X is a tree of ADD/OR binary expressions over string literals only.
+// In that case stock Go can constant-fold (`[]byte("a"+"b")`), so the
+// walker must NOT descend and rewrite the inner `+` to __moxie_concat.
+// Anything else — an Ident, SelectorExpr, CallExpr, etc. — means the body
+// references a variable and must be lowered.
+func allStringLitBinaryArg(call *ast.CallExpr) bool {
+	if len(call.Args) != 1 {
+		return false
+	}
+	var check func(e ast.Expr) bool
+	check = func(e ast.Expr) bool {
+		switch x := e.(type) {
+		case *ast.BasicLit:
+			return x.Kind == token.STRING
+		case *ast.BinaryExpr:
+			if x.Op != token.ADD && x.Op != token.OR {
+				return false
+			}
+			return check(x.X) && check(x.Y)
+		case *ast.ParenExpr:
+			return check(x.X)
+		}
+		return false
+	}
+	return check(call.Args[0])
+}
+
+// forceTextConcat rewrites any ADD/OR BinaryExpr inside expr as a
+// __moxie_concat call, even when neither operand is syntactically text.
+// Used by rewriteTextConcatExpr when the enclosing expression has already
+// committed to a text-concat rewrite, so nested `+`/`|` chains between
+// variables (whose types we don't know yet) must be lowered too.
+func forceTextConcat(expr ast.Expr) ast.Expr {
+	if expr == nil {
+		return expr
+	}
+	switch e := expr.(type) {
+	case *ast.BinaryExpr:
+		if e.Op == token.ADD || e.Op == token.OR {
+			e.X = forceTextConcat(e.X)
+			e.Y = forceTextConcat(e.Y)
+			return &ast.CallExpr{
+				Fun:  &ast.Ident{Name: "__moxie_concat"},
+				Args: []ast.Expr{wrapForMoxieConcat(e.X), wrapForMoxieConcat(e.Y)},
+			}
+		}
+		return e
+	case *ast.ParenExpr:
+		e.X = forceTextConcat(e.X)
+		return e
+	}
+	return expr
+}
+
+// rewriteTextCompare lowers a BinaryExpr comparison between syntactically
+// text operands to the appropriate __moxie_eq / __moxie_lt form.
+func rewriteTextCompare(e *ast.BinaryExpr) ast.Expr {
+	// Wrap non-text operands in []byte(...) so __moxie_eq / __moxie_lt's
+	// []byte parameters see consistent types. Mirrors wrapForMoxieConcat.
+	// Handles the common case of cross-package selectors like runtime.GOOS
+	// (untyped string constant from exempt runtime) being compared to a
+	// string literal that's already been wrapped as []byte(...).
+	x := wrapForMoxieConcat(e.X)
+	y := wrapForMoxieConcat(e.Y)
+	eq := func(x, y ast.Expr) *ast.CallExpr {
+		return &ast.CallExpr{Fun: &ast.Ident{Name: "__moxie_eq"}, Args: []ast.Expr{x, y}}
+	}
+	lt := func(x, y ast.Expr) *ast.CallExpr {
+		return &ast.CallExpr{Fun: &ast.Ident{Name: "__moxie_lt"}, Args: []ast.Expr{x, y}}
+	}
+	not := func(x ast.Expr) *ast.UnaryExpr { return &ast.UnaryExpr{Op: token.NOT, X: x} }
+	switch e.Op {
+	case token.EQL:
+		return eq(x, y)
+	case token.NEQ:
+		return not(eq(x, y))
+	case token.LSS:
+		return lt(x, y)
+	case token.LEQ:
+		return not(lt(y, x))
+	case token.GTR:
+		return lt(y, x)
+	case token.GEQ:
+		return not(lt(x, y))
+	}
+	return e
+}
+
+// isSyntacticTextExpr returns true when the expression is recognisable as a
+// text value before typecheck: a []byte(...) conversion, a string literal,
+// a __moxie_concat call, a slice expression (which in Moxie-target packages
+// almost always yields a []byte sub-slice), or a parenthesised text expression.
+func isSyntacticTextExpr(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		return e.Kind == token.STRING
+	case *ast.CallExpr:
+		if isSliceByteConversion(e) {
+			return true
+		}
+		if isMoxieConcatCall(e) {
+			return true
+		}
+	case *ast.ParenExpr:
+		return isSyntacticTextExpr(e.X)
+	case *ast.SliceExpr:
+		// foo[i:j] — in Moxie-target packages, slicing produces a
+		// []byte sub-slice for string/[]byte variables. Treating it
+		// as text lets comparisons like `line[i:i+n] == prefix`
+		// rewrite to __moxie_eq without post-typecheck type info.
+		return true
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,6 +2525,17 @@ func FindPipeConcat(files []*ast.File, info *types.Info) []PipeRewrite {
 	var rewrites []PipeRewrite
 	for _, file := range files {
 		ast.Inspect(file, func(n ast.Node) bool {
+			// Don't descend into const declarations — __moxie_concat is a
+			// runtime call and cannot appear in const expressions.
+			if gd, ok := n.(*ast.GenDecl); ok && gd.Tok == token.CONST {
+				return false
+			}
+			// Don't descend into `[]byte(...)` casts — their inner
+			// expression must stay Go-native so the type checker can
+			// constant-fold stringlit + stringlit.
+			if call, ok := n.(*ast.CallExpr); ok && isSliceByteConversion(call) {
+				return false
+			}
 			bin, ok := n.(*ast.BinaryExpr)
 			if !ok || (bin.Op != token.OR && bin.Op != token.ADD) {
 				return true
@@ -1101,6 +2637,17 @@ func isTextType(t types.Type) bool {
 	return ok && basic.Info()&types.IsString != 0
 }
 
+func isTextLike(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	if isByteSlice(t) {
+		return true
+	}
+	basic, ok := t.Underlying().(*types.Basic)
+	return ok && basic.Info()&types.IsString != 0
+}
+
 // RewriteAddAssign converts `s += expr` and `s |= expr` to
 // `s = __moxie_concat(s, expr)` for text types. Both forms compile, but
 // CheckPlusOnText rejects += for user packages.
@@ -1120,11 +2667,14 @@ func RewriteAddAssign(files []*ast.File, info *types.Info) int {
 				return true
 			}
 			assign.Tok = token.ASSIGN
+			// Wrap non-text operands in []byte(...) so callable-returning
+			// strings (like itoa.Itoa(...)) match __moxie_concat's []byte
+			// signature under stock go/types.
 			assign.Rhs[0] = &ast.CallExpr{
 				Fun: &ast.Ident{Name: "__moxie_concat"},
 				Args: []ast.Expr{
-					assign.Lhs[0],
-					assign.Rhs[0],
+					wrapForMoxieConcat(assign.Lhs[0]),
+					wrapForMoxieConcat(assign.Rhs[0]),
 				},
 			}
 			count++
@@ -1198,10 +2748,12 @@ func maybeReplacePipe(expr ast.Expr, set map[*ast.BinaryExpr]bool) ast.Expr {
 	if !ok || !set[bin] {
 		return expr
 	}
-	// Replace: a | b → __moxie_concat(a, b)
+	// Replace: a | b → __moxie_concat([]byte(a), []byte(b))
+	// Wrap non-text operands so string-returning method calls (err.Error())
+	// and string-typed vars match __moxie_concat's []byte param type.
 	return &ast.CallExpr{
 		Fun:  &ast.Ident{Name: "__moxie_concat"},
-		Args: []ast.Expr{bin.X, bin.Y},
+		Args: []ast.Expr{wrapForMoxieConcat(bin.X), wrapForMoxieConcat(bin.Y)},
 	}
 }
 
@@ -1245,6 +2797,9 @@ func FilterPipeErrors(errs []error) []error {
 // to tag-less switches with __moxie_eq calls.
 
 // findByteComparisons finds binary expressions comparing two []byte values.
+// If one side is []byte and the other is string (e.g. map-key string compared
+// against a []byte var), wraps the string side in []byte(...) so the emitted
+// __moxie_eq/__moxie_lt receives matching types.
 func FindByteComparisons(files []*ast.File, info *types.Info) []*ast.BinaryExpr {
 	var result []*ast.BinaryExpr
 	for _, file := range files {
@@ -1263,13 +2818,31 @@ func FindByteComparisons(files []*ast.File, info *types.Info) []*ast.BinaryExpr 
 			if xType == nil || yType == nil {
 				return true
 			}
-			if isByteSlice(xType) || isByteSlice(yType) {
-				result = append(result, bin)
+			xBytes := isByteSlice(xType)
+			yBytes := isByteSlice(yType)
+			if !xBytes && !yBytes {
+				return true
 			}
+			// Bridge string↔[]byte mismatches by wrapping string side.
+			if xBytes && !yBytes && isStringKind(yType) {
+				bin.Y = wrapInByteSlice(bin.Y)
+			}
+			if yBytes && !xBytes && isStringKind(xType) {
+				bin.X = wrapInByteSlice(bin.X)
+			}
+			result = append(result, bin)
 			return true
 		})
 	}
 	return result
+}
+
+// wrapInByteSlice wraps expr in []byte(expr).
+func wrapInByteSlice(expr ast.Expr) ast.Expr {
+	return &ast.CallExpr{
+		Fun:  &ast.ArrayType{Elt: ast.NewIdent("byte")},
+		Args: []ast.Expr{expr},
+	}
 }
 
 // applyByteComparisonRewrites replaces []byte comparison expressions with
@@ -1430,6 +3003,66 @@ func ApplyByteSwitchRewrites(switches []*ast.SwitchStmt) {
 			}
 		}
 	}
+}
+
+// FindByteMapKeys returns IndexExpr nodes where the container is a
+// map[string]V and the index expression has type []byte. moxiejs leaves
+// map keys as `string` (because []byte is not comparable under stock
+// go/types) but Moxie source often indexes such maps with []byte values.
+// Each matched IndexExpr has its Index wrapped in a string(...) conversion
+// by ApplyByteMapKeyRewrites so the second typecheck accepts it.
+//
+// Same pattern for assignments `m[k] = v`: if the map value type is string
+// and v is []byte, the RHS is wrapped in string(v). Collected via
+// FindByteMapValues.
+func FindByteMapKeys(files []*ast.File, info *types.Info) []*ast.IndexExpr {
+	var result []*ast.IndexExpr
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			idx, ok := n.(*ast.IndexExpr)
+			if !ok {
+				return true
+			}
+			containerType := info.TypeOf(idx.X)
+			if containerType == nil {
+				return true
+			}
+			mapType, ok := containerType.Underlying().(*types.Map)
+			if !ok {
+				return true
+			}
+			if !isStringKind(mapType.Key()) {
+				return true
+			}
+			indexType := info.TypeOf(idx.Index)
+			if indexType == nil {
+				return true
+			}
+			if isByteSlice(indexType) {
+				result = append(result, idx)
+			}
+			return true
+		})
+	}
+	return result
+}
+
+// ApplyByteMapKeyRewrites wraps each matched IndexExpr's Index in a
+// string(...) conversion call.
+func ApplyByteMapKeyRewrites(exprs []*ast.IndexExpr) {
+	for _, idx := range exprs {
+		idx.Index = &ast.CallExpr{
+			Fun:  ast.NewIdent("string"),
+			Args: []ast.Expr{idx.Index},
+		}
+	}
+}
+
+// isStringKind reports whether t is the built-in `string` (not a named
+// alias or composite). Named types whose underlying is string also count.
+func isStringKind(t types.Type) bool {
+	basic, ok := t.Underlying().(*types.Basic)
+	return ok && basic.Kind() == types.String
 }
 
 // filterByteCompareErrors removes type errors about []byte comparison.

@@ -7,6 +7,7 @@ const P = (1n << 130n) - 5n; // 2^130 - 5
 
 function sliceToU8(s) {
   if (s instanceof Uint8Array) return s;
+  if (typeof s === 'string') return new TextEncoder().encode(s);
   const u = new Uint8Array(s.$length);
   for (let i = 0; i < s.$length; i++) u[i] = s.$array[s.$offset + i];
   return u;

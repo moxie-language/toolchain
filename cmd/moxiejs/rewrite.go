@@ -48,6 +48,12 @@ func rewritePipeConcat(src []byte, fset *token.FileSet) []byte {
 
 	// Identify const blocks to skip (| in const is always bitwise).
 	constRanges := findConstRanges(toks)
+	// Identify interface{...} bodies to skip — `|` there is a type-constraint
+	// union (generics), not string concat. e.g. `interface { int32 | int64 }`.
+	interfaceRanges := findInterfaceRanges(toks)
+	// Identify generic type-parameter lists to skip — `|` there is also a
+	// type-union constraint, e.g. `func F[T byte | uintptr](...)`.
+	typeParamRanges := findTypeParamRanges(toks)
 
 	var result bytes.Buffer
 	lastEnd := 0
@@ -62,6 +68,14 @@ func rewritePipeConcat(src []byte, fset *token.FileSet) []byte {
 		}
 		// Skip if inside a const block.
 		if inConstRange(t.pos, constRanges) {
+			continue
+		}
+		// Skip if inside an interface{...} body (type-union constraint).
+		if inConstRange(t.pos, interfaceRanges) {
+			continue
+		}
+		// Skip if inside a generic type-parameter list.
+		if inConstRange(t.pos, typeParamRanges) {
 			continue
 		}
 		// Skip if both neighbors are integer literals.
@@ -120,6 +134,78 @@ func inConstRange(pos int, ranges []constRange) bool {
 		}
 	}
 	return false
+}
+
+// findInterfaceRanges returns byte ranges for every `interface{ ... }` body.
+// Inside those bodies, `|` is a type-union constraint (Go generics) and must
+// not be rewritten to `+`.
+func findInterfaceRanges(toks []tok) []constRange {
+	var ranges []constRange
+	for i := 0; i < len(toks); i++ {
+		if toks[i].tok != token.INTERFACE {
+			continue
+		}
+		// Must be followed by `{`.
+		if i+1 >= len(toks) || toks[i+1].tok != token.LBRACE {
+			continue
+		}
+		lbrace := i + 1
+		depth := 1
+		for j := lbrace + 1; j < len(toks); j++ {
+			switch toks[j].tok {
+			case token.LBRACE:
+				depth++
+			case token.RBRACE:
+				depth--
+				if depth == 0 {
+					ranges = append(ranges, constRange{toks[lbrace].pos, toks[j].end})
+					i = j
+					goto next
+				}
+			}
+		}
+	next:
+	}
+	return ranges
+}
+
+// findTypeParamRanges returns byte ranges for every generic type-parameter
+// list in top-level declarations: `func NAME[...]` and `type NAME[...]`.
+// Inside these brackets, `|` is a type-union constraint (e.g.
+// `func F[T byte | uintptr](...)`) and must not be rewritten to `+`.
+// Generic type arguments at the call site (e.g. `f[int32](x)`) are not
+// matched because they are preceded by an expression context, not by
+// `func`/`type`.
+func findTypeParamRanges(toks []tok) []constRange {
+	var ranges []constRange
+	for i := 2; i < len(toks); i++ {
+		if toks[i].tok != token.LBRACK {
+			continue
+		}
+		if toks[i-1].tok != token.IDENT {
+			continue
+		}
+		prev := toks[i-2].tok
+		if prev != token.FUNC && prev != token.TYPE {
+			continue
+		}
+		depth := 1
+		for j := i + 1; j < len(toks); j++ {
+			switch toks[j].tok {
+			case token.LBRACK:
+				depth++
+			case token.RBRACK:
+				depth--
+				if depth == 0 {
+					ranges = append(ranges, constRange{toks[i].pos, toks[j].end})
+					i = j
+					goto next
+				}
+			}
+		}
+	next:
+	}
+	return ranges
 }
 
 // tok is a scanned token with byte offsets.

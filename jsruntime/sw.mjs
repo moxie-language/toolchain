@@ -34,21 +34,50 @@ function _storeClient(client) {
 }
 
 // --- Lifecycle ---
+// Firefox requires all SW event listeners to be registered during the
+// script's initial synchronous evaluation. Register them eagerly and
+// queue events until Go's main() calls On*(fn).
+
+let _goInstallHandler = null;
+const _installQueue = [];
+self.addEventListener('install', (event) => {
+  if (_goInstallHandler) {
+    const id = _storeEvent(event);
+    _goInstallHandler(id);
+    _events.delete(id);
+  } else {
+    _installQueue.push(event);
+  }
+});
 
 export function OnInstall(fn) {
-  self.addEventListener('install', (event) => {
-    const id = _storeEvent(event);
+  _goInstallHandler = fn;
+  while (_installQueue.length > 0) {
+    const id = _storeEvent(_installQueue.shift());
     fn(id);
     _events.delete(id);
-  });
+  }
 }
 
-export function OnActivate(fn) {
-  self.addEventListener('activate', (event) => {
+let _goActivateHandler = null;
+const _activateQueue = [];
+self.addEventListener('activate', (event) => {
+  if (_goActivateHandler) {
     const id = _storeEvent(event);
+    _goActivateHandler(id);
+    _events.delete(id);
+  } else {
+    _activateQueue.push(event);
+  }
+});
+
+export function OnActivate(fn) {
+  _goActivateHandler = fn;
+  while (_activateQueue.length > 0) {
+    const id = _storeEvent(_activateQueue.shift());
     fn(id);
     _events.delete(id);
-  });
+  }
 }
 
 // Fetch events use a deferred promise pattern:
@@ -56,25 +85,26 @@ export function OnActivate(fn) {
 // The runtime creates the promise and calls event.respondWith() synchronously.
 const _fetchResolvers = new Map();
 
-export function OnFetch(fn) {
-  self.addEventListener('fetch', (event) => {
-    const id = _storeEvent(event);
-    try {
-      fn(id);
-    } catch (e) {
-      // Runtime already logged it — just ensure fetch falls through to browser.
-      _events.delete(id);
-      return;
-    }
-    // Check if Go code set up a response strategy.
-    const resolver = _fetchResolvers.get(id);
-    if (resolver) {
-      event.respondWith(resolver);
-      _fetchResolvers.delete(id);
-    }
-    // Go handler read what it needed synchronously — release the event.
+let _goFetchHandler = null;
+self.addEventListener('fetch', (event) => {
+  if (!_goFetchHandler) return; // no handler yet — let browser handle
+  const id = _storeEvent(event);
+  try {
+    _goFetchHandler(id);
+  } catch (e) {
     _events.delete(id);
-  });
+    return;
+  }
+  const resolver = _fetchResolvers.get(id);
+  if (resolver) {
+    event.respondWith(resolver);
+    _fetchResolvers.delete(id);
+  }
+  _events.delete(id);
+});
+
+export function OnFetch(fn) {
+  _goFetchHandler = fn;
 }
 
 let _goMessageHandler = null;

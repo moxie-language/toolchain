@@ -1,0 +1,78 @@
+package schnorr
+
+import (
+	"crypto/sha256"
+	"testing"
+
+	"crypto/ec/secp256k1"
+)
+
+func TestSignVerify(t *testing.T) {
+	// Generate a key pair.
+	sk, err := secp256k1.GenerateSecretKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk := sk.PubKey()
+
+	// Create a message hash (events use SHA256 of serialized JSON).
+	msg := sha256.Sum256([]byte("test message for schnorr signing"))
+
+	// Sign the hash.
+	sig, err := Sign(sk, msg[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the signature.
+	if !sig.Verify(msg[:], pk) {
+		t.Fatal("signature verification failed")
+	}
+
+	// Serialize and parse round-trip.
+	sigBytes := sig.Serialize()
+	if len(sigBytes) != SignatureSize {
+		t.Fatalf("expected %d signature bytes, got %d", SignatureSize, len(sigBytes))
+	}
+	sig2, err := ParseSignature(sigBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sig2.Verify(msg[:], pk) {
+		t.Fatal("parsed signature verification failed")
+	}
+
+	// Wrong message should fail.
+	bad := sha256.Sum256([]byte("wrong message"))
+	if sig.Verify(bad[:], pk) {
+		t.Fatal("verification should have failed for wrong message")
+	}
+}
+
+func TestPubKeyRoundTrip(t *testing.T) {
+	sk, err := secp256k1.GenerateSecretKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk := sk.PubKey()
+
+	// Serialize as 32-byte x-only.
+	pkBytes := SerializePubKey(pk)
+	if len(pkBytes) != PubKeyBytesLen {
+		t.Fatalf("expected %d pubkey bytes, got %d", PubKeyBytesLen, len(pkBytes))
+	}
+
+	// Parse back.
+	pk2, err := ParsePubKey(pkBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-serialize should match.
+	pkBytes2 := SerializePubKey(pk2)
+	for i := range pkBytes {
+		if pkBytes[i] != pkBytes2[i] {
+			t.Fatal("pubkey round-trip mismatch")
+		}
+	}
+}

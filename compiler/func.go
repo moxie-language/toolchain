@@ -1,7 +1,6 @@
 package compiler
 
-// This file implements function values and closures. It may need some lowering
-// in a later step, see func-lowering.go.
+// This file implements function values and closures.
 
 import (
 	"go/types"

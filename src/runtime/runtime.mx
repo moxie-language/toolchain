@@ -86,6 +86,54 @@ func memequal(x, y unsafe.Pointer, n uintptr) bool {
 	return true
 }
 
+// memequalCT is the constant-time variant of memequal. Walks the full length
+// unconditionally, accumulating any bit difference into a running OR, and
+// returns whether the accumulator is zero. The timing reveals only the
+// length n, not the content. Used by stringEqual/bytesConcat when either
+// operand points into a registered secure arena.
+func memequalCT(x, y unsafe.Pointer, n uintptr) bool {
+	var acc uint8 = 0
+	for i := uintptr(0); i < n; i++ {
+		cx := *(*uint8)(unsafe.Add(x, i))
+		cy := *(*uint8)(unsafe.Add(y, i))
+		acc |= cx ^ cy
+	}
+	return acc == 0
+}
+
+// memcompareCT is the constant-time lex comparator. Returns -1 if x<y, 0 if
+// x==y, +1 if x>y, derived in a branchless fashion: the first differing byte
+// captures its sign into result, subsequent bytes are masked off; if all
+// min-length bytes match, length is the tiebreaker. Walks min(xn, yn) bytes
+// unconditionally — timing reveals only the common-prefix length, not the
+// differing byte's position.
+func memcompareCT(x unsafe.Pointer, xn uintptr, y unsafe.Pointer, yn uintptr) int32 {
+	n := xn
+	if yn < n {
+		n = yn
+	}
+	var result int32 = 0
+	var done int32 = 0
+	for i := uintptr(0); i < n; i++ {
+		cx := int32(*(*uint8)(unsafe.Add(x, i)))
+		cy := int32(*(*uint8)(unsafe.Add(y, i)))
+		d := cx - cy
+		// dIsNonZero: -1 if d != 0, else 0.
+		dIsNonZero := (d | -d) >> 31
+		// sign: -1, 0, or +1 for d.
+		sign := (d >> 31) | int32(uint32(-d)>>31)
+		// take: -1 iff result not yet set AND d is nonzero.
+		take := ^done & dIsNonZero
+		result |= sign & take
+		done |= dIsNonZero
+	}
+	// If all compared bytes equal, length is tiebreaker.
+	lenDiff := int32(xn) - int32(yn)
+	lSign := (lenDiff >> 31) | int32(uint32(-lenDiff)>>31)
+	result |= lSign & ^done
+	return result
+}
+
 func nanotime() int64 {
 	return ticksToNanoseconds(ticks())
 }

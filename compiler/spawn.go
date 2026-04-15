@@ -78,13 +78,23 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	concreteArgs := instr.Args[argStart+1:]
 
 	// Look up the moxie.Codec interface for spawn-boundary type checking.
-	var codecIface *types.Interface
-	if moxiePkg := b.program.ImportedPackage("moxie"); moxiePkg != nil {
-		if obj := moxiePkg.Pkg.Scope().Lookup("Codec"); obj != nil {
-			if iface, ok := obj.Type().Underlying().(*types.Interface); ok {
-				codecIface = iface
-			}
-		}
+	// runtime transitively imports moxie, so this should always succeed;
+	// the explicit errors turn a formerly-silent permissive path into a
+	// clear compiler failure if the stdlib wiring is ever broken.
+	moxiePkg := b.program.ImportedPackage("moxie")
+	if moxiePkg == nil {
+		b.addError(instr.Pos(), "spawn: internal error — \"moxie\" package not in program (runtime wiring broken)")
+		return llvm.Value{}, nil
+	}
+	codecObj := moxiePkg.Pkg.Scope().Lookup("Codec")
+	if codecObj == nil {
+		b.addError(instr.Pos(), "spawn: internal error — moxie.Codec symbol missing from moxie package")
+		return llvm.Value{}, nil
+	}
+	codecIface, ok := codecObj.Type().Underlying().(*types.Interface)
+	if !ok {
+		b.addError(instr.Pos(), "spawn: internal error — moxie.Codec is not an interface type")
+		return llvm.Value{}, nil
 	}
 
 	// Validate that the function signature's parameters are spawn-safe
@@ -174,10 +184,11 @@ func validateSpawnArg(t types.Type, argIndex int, codec *types.Interface) error 
 // validateSpawnElem rejects types that can't be serialized across a spawn
 // boundary. Named types that implement moxie.Codec are accepted immediately.
 // Channels are rejected here — they're only allowed at the top level.
+// codec is non-nil (createSpawn enforces moxie.Codec availability before call).
 func validateSpawnElem(t types.Type, argIndex int, codec *types.Interface) error {
 	// Named type that implements Codec — accept directly.
 	// This handles moxie.Int32, moxie.Bytes, user structs with Codec methods, etc.
-	if codec != nil && implementsCodec(t, codec) {
+	if implementsCodec(t, codec) {
 		return nil
 	}
 
@@ -209,10 +220,7 @@ func validateSpawnElem(t types.Type, argIndex int, codec *types.Interface) error
 	}
 
 	// Leaf type that doesn't implement Codec.
-	if codec != nil {
-		return fmt.Errorf("spawn: argument %d type %s does not implement moxie.Codec (use moxie.Int32, moxie.Uint64, etc.)", argIndex+1, t)
-	}
-	return nil
+	return fmt.Errorf("spawn: argument %d type %s does not implement moxie.Codec (use moxie.Int32, moxie.Uint64, etc.)", argIndex+1, t)
 }
 
 // implementsCodec checks whether t or *t satisfies the Codec interface.

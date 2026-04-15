@@ -19,3 +19,7 @@ export * as ext from './ext.mjs';
 export * as schnorr from './schnorr.mjs';
 export * as idb from './idb.mjs';
 export * as poly1305 from './poly1305.mjs';
+export * as x25519 from './x25519.mjs';
+export * as ed25519 from './ed25519.mjs';
+export * as p256 from './p256.mjs';
+export * as node from './node.mjs';

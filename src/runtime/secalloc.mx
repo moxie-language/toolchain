@@ -31,7 +31,10 @@ package runtime
 // the notification through a spawn-level lockdown channel inherited from
 // the parent domain.
 
-import "unsafe"
+import (
+	"internal/gclayout"
+	"unsafe"
+)
 
 const (
 	secPageSize  = 4096
@@ -185,6 +188,19 @@ func SecureLockdown() {
 	secureInit()
 	moxie_secalloc_lockdown()
 	secureGenerateNoise()
+}
+
+// secureAwareByteAlloc allocates n bytes. If secure is true, the allocation
+// comes from a fresh SecureAlloc arena (guard-paged, mlocked, wipe-on-fault).
+// If secure is false, a regular heap allocation is used. Used by bytesConcat
+// to propagate the secure flag across concatenation: if either operand is
+// secure, the concatenation result lives in a secure arena too.
+func secureAwareByteAlloc(n uintptr, secure bool) []byte {
+	if secure {
+		return SecureAlloc(int32(n))
+	}
+	buf := alloc(n, gclayout.NoPtrs.AsPtr())
+	return unsafe.Slice((*byte)(buf), n)
 }
 
 // SecureAlloc returns a byte slice of exactly n bytes backed by a freshly
@@ -391,3 +407,25 @@ func moxie_secalloc_lockdown()
 //
 //export moxie_secalloc_try_secretmem
 func moxie_secalloc_try_secretmem(base unsafe.Pointer, length uintptr) int32
+
+// moxie_secalloc_contains returns 1 if ptr is inside any currently registered
+// arena's data region, 0 otherwise. The runtime comparison/concat dispatch
+// (stringEqual / stringLess / bytesConcat) calls this once per operand and
+// routes through the constant-time path if either returns 1. Fast-out when
+// no arenas are registered so non-crypto programs pay one load per compare.
+//
+//export moxie_secalloc_contains
+func moxie_secalloc_contains(ptr unsafe.Pointer) int32
+
+// isSecurePtr is the runtime-internal wrapper around moxie_secalloc_contains.
+// Returns true when ptr is the backing address of a secure allocation (or
+// any subslice derived from one, since subslicing preserves the pointer's
+// arena membership). The runtime comparison path calls this on each operand
+// of stringEqual / stringLess / bytesConcat and promotes the operation to
+// constant-time when either side is secure.
+//
+// On platforms without the secalloc machinery (WASM, baremetal) this symbol
+// is provided by a stub that always returns false.
+func isSecurePtr(ptr unsafe.Pointer) bool {
+	return moxie_secalloc_contains(ptr) != 0
+}

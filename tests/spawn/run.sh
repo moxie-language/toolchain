@@ -104,6 +104,7 @@ run_fail_test "$TESTDIR/fail_slice_iface.go"   "interface"
 run_fail_test "$TESTDIR/fail_struct_chan.go"    "channel"
 run_fail_test "$TESTDIR/fail_array_chan.go"     "channel"
 run_fail_test "$TESTDIR/fail_alias.go"         "after spawn"
+run_fail_test "$TESTDIR/fail_cross_block.go"   "after spawn"
 run_fail_test "$TESTDIR/fail_type_mismatch.go" "expects"
 run_fail_test "$TESTDIR/fail_wrong_count.go"   "expects"
 
