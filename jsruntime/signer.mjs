@@ -287,3 +287,58 @@ export function ResetExtension(fn) {
     fn(false);
   }
 }
+
+// --- NWC wallet connections ---
+
+export function NwcList(fn) {
+  var s = _smesh();
+  if (s && s.nwcList) {
+    s.nwcList()
+      .then(function(list) { fn(typeof list === 'string' ? list : JSON.stringify(list)); })
+      .catch(function() { fn('[]'); });
+  } else {
+    fn('[]');
+  }
+}
+
+export function NwcAdd(uri, alias, createdAt, fn) {
+  var s = _smesh();
+  if (s && s.nwcAdd) {
+    s.nwcAdd(_str(uri), _str(alias), Number(createdAt))
+      .then(function(id) { fn(id || ''); })
+      .catch(function() { fn(''); });
+  } else {
+    fn('');
+  }
+}
+
+export function NwcRemove(id, fn) {
+  var s = _smesh();
+  if (s && s.nwcRemove) {
+    s.nwcRemove(_str(id)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+  } else {
+    fn(false);
+  }
+}
+
+export function NwcBuildRequest(id, method, paramsJSON, encryption, createdAt, fn) {
+  var s = _smesh();
+  if (s && s.nwcBuildRequest) {
+    s.nwcBuildRequest(_str(id), _str(method), _str(paramsJSON), _str(encryption), Number(createdAt))
+      .then(function(ev) { fn(typeof ev === 'string' ? ev : JSON.stringify(ev)); })
+      .catch(function() { fn(''); });
+  } else {
+    fn('');
+  }
+}
+
+export function NwcParseResponse(id, ciphertext, encryption, fn) {
+  var s = _smesh();
+  if (s && s.nwcParseResponse) {
+    s.nwcParseResponse(_str(id), _str(ciphertext), _str(encryption))
+      .then(function(pt) { fn(pt || ''); })
+      .catch(function() { fn(''); });
+  } else {
+    fn('');
+  }
+}

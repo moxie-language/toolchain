@@ -147,6 +147,12 @@ export function GetProperty(elId, prop) {
   return '';
 }
 
+export function BoundingClientLeft(elId) {
+  const el = _elements.get(elId);
+  if (!el || !el.getBoundingClientRect) return 0;
+  return el.getBoundingClientRect().left | 0;
+}
+
 export function AddClass(elId, cls) {
   const el = _elements.get(elId);
   if (el && el.classList) el.classList.add(cls);
