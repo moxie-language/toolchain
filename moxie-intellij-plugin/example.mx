@@ -1,0 +1,85 @@
+package main
+
+import "moxie"
+
+// Example Moxie file exercising syntax highlighting.
+//
+// Moxie is a TinyGo-derived systems language. Key differences from Go:
+//   - string and []byte are the same type
+//   - int and uint are always 32-bit
+//   - no goroutines; spawn() creates isolated domains over IPC
+//   - no new(), complex, uintptr; use &T{}, literal syntax, explicit pointers
+//   - text concat uses |, not +
+//   - fallthrough and go are compile errors
+
+const MaxWorkers = 4
+
+type Job struct {
+	id   int32
+	name string
+}
+
+func worker(j moxie.Int32, out chan moxie.Int32) {
+	out <- moxie.Int32(int32(j) * int32(j))
+}
+
+func main() {
+	// Slice size literals: []T{:len} and []T{:len:cap}.
+	buf := []byte{:1024}
+	queue := []int32{:0:100}
+
+	// Channel and map literals replace make().
+	results := chan moxie.Int32{}
+	config := map[string]int32{
+		"timeout":    30,
+		"maxRetries": 3,
+	}
+
+	// Text concatenation with |, not +.
+	greeting := "hello " | "moxie" | "!"
+
+	// Fan out: each spawn creates an isolated domain.
+	for i := int32(0); i < MaxWorkers; i++ {
+		spawn(worker, moxie.Int32(i), results)
+	}
+
+	// Event loop.
+	for n := 0; n < MaxWorkers; n++ {
+		select {
+		case r := <-results:
+			println(int32(r))
+		}
+	}
+
+	/*
+	   Range over text yields bytes, not runes.
+	   Use an encoding library for rune-level iteration.
+	*/
+	for i, b := range greeting {
+		if b == ' ' {
+			clear(buf[i:])
+			break
+		}
+	}
+
+	queue = append(queue, 1, 2, 3)
+	_ = config
+}
+
+// Multiple return values, generics.
+func divide(a, b float64) (float64, error) {
+	if b == 0 {
+		return 0, nil
+	}
+	return a / b, nil
+}
+
+func filter[T any](items []T, pred func(T) bool) []T {
+	result := []T{:0:len(items)}
+	for _, item := range items {
+		if pred(item) {
+			result = append(result, item)
+		}
+	}
+	return result
+}
