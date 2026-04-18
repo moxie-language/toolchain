@@ -6,6 +6,12 @@ import { Slice } from './builtin.mjs';
 // Pure-JS crypto only — no platform dependency on crypto.subtle.
 const _subtle = null;
 
+// AES-CBC has no pure-JS fallback in this runtime (AES-GCM uses _streamEncrypt
+// which is NOT real GCM, so we keep it off there for vault compatibility).
+// AES-CBC is used only for NIP-04 wire encryption; no stored ciphertext depends
+// on it, so we can safely use native crypto.subtle when available.
+const _subtleCBC = (typeof crypto !== 'undefined' && crypto.subtle) ? crypto.subtle : null;
+
 const _empty = new Uint8Array(0);
 
 function sliceToU8(s) {
@@ -278,21 +284,29 @@ export function RandomBytes(dst) {
 }
 
 export function AESCBCEncrypt(key, iv, plaintext, fn) {
-  if (!_subtle) { fn(u8ToSlice(_empty)); return; }
+  if (!_subtleCBC) {
+    console.error('[subtle] AESCBCEncrypt: crypto.subtle unavailable');
+    fn(u8ToSlice(_empty));
+    return;
+  }
   const k = sliceToU8(key), v = sliceToU8(iv), pt = sliceToU8(plaintext);
-  _subtle.importKey('raw', k, { name: 'AES-CBC' }, false, ['encrypt'])
-    .then(ck => _subtle.encrypt({ name: 'AES-CBC', iv: v }, ck, pt))
+  _subtleCBC.importKey('raw', k, { name: 'AES-CBC' }, false, ['encrypt'])
+    .then(ck => _subtleCBC.encrypt({ name: 'AES-CBC', iv: v }, ck, pt))
     .then(buf => fn(u8ToSlice(new Uint8Array(buf))))
-    .catch(() => fn(u8ToSlice(_empty)));
+    .catch(err => { console.error('[subtle] AESCBCEncrypt failed:', err); fn(u8ToSlice(_empty)); });
 }
 
 export function AESCBCDecrypt(key, iv, ciphertext, fn) {
-  if (!_subtle) { fn(u8ToSlice(_empty)); return; }
+  if (!_subtleCBC) {
+    console.error('[subtle] AESCBCDecrypt: crypto.subtle unavailable');
+    fn(u8ToSlice(_empty));
+    return;
+  }
   const k = sliceToU8(key), v = sliceToU8(iv), ct = sliceToU8(ciphertext);
-  _subtle.importKey('raw', k, { name: 'AES-CBC' }, false, ['decrypt'])
-    .then(ck => _subtle.decrypt({ name: 'AES-CBC', iv: v }, ck, ct))
+  _subtleCBC.importKey('raw', k, { name: 'AES-CBC' }, false, ['decrypt'])
+    .then(ck => _subtleCBC.decrypt({ name: 'AES-CBC', iv: v }, ck, ct))
     .then(buf => fn(u8ToSlice(new Uint8Array(buf))))
-    .catch(() => fn(u8ToSlice(_empty)));
+    .catch(err => { console.error('[subtle] AESCBCDecrypt failed:', err); fn(u8ToSlice(_empty)); });
 }
 
 export function AESGCMEncrypt(key, iv, plaintext, fn) {

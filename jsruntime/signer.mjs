@@ -88,7 +88,7 @@ export function IsInstalled(fn) {
   if (s && s.isInstalled) {
     var result = s.isInstalled();
     if (result && typeof result.then === 'function') {
-      result.then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+      result.then(function(ok) { fn(ok === true || (ok && !ok.error && ok.result !== false)); }).catch(function() { fn(false); });
     } else {
       fn(!!result);
     }
@@ -109,7 +109,7 @@ export function GetVaultStatus(fn) {
 export function CreateVault(password, fn) {
   var s = _smesh();
   if (s && s.createVault) {
-    s.createVault(_str(password)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.createVault(_str(password)).then(function(ok) { fn(ok === true || (ok && !ok.error && ok.result !== false)); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -118,7 +118,7 @@ export function CreateVault(password, fn) {
 export function UnlockVault(password, fn) {
   var s = _smesh();
   if (s && s.unlockVault) {
-    s.unlockVault(_str(password)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.unlockVault(_str(password)).then(function(ok) { fn(ok === true || (ok && !ok.error && ok.result !== false)); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -147,7 +147,7 @@ export function ListIdentities(fn) {
 export function AddIdentity(nsec, fn) {
   var s = _smesh();
   if (s && s.addIdentity) {
-    s.addIdentity(_str(nsec)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.addIdentity(_str(nsec)).then(function(ok) { fn(ok === true || (ok && !ok.error && ok.result !== false)); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -156,7 +156,7 @@ export function AddIdentity(nsec, fn) {
 export function NsecLogin(nsec, fn) {
   var s = _smesh();
   if (s && s.nsecLogin) {
-    s.nsecLogin(_str(nsec)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.nsecLogin(_str(nsec)).then(function(ok) { fn(ok === true || (ok && !ok.error && ok.result !== false)); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -165,7 +165,7 @@ export function NsecLogin(nsec, fn) {
 export function SwitchIdentity(pubkey, fn) {
   var s = _smesh();
   if (s && s.switchIdentity) {
-    s.switchIdentity(_str(pubkey)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.switchIdentity(_str(pubkey)).then(function(ok) { fn(ok === true || (ok && !ok.error && ok.result !== false)); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -190,7 +190,7 @@ export function ExportVault(password, fn) {
 export function ImportVault(data, fn) {
   var s = _smesh();
   if (s && s.importVault) {
-    s.importVault(_str(data)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.importVault(_str(data)).then(function(ok) { fn(ok === true || (ok && !ok.error && ok.result !== false)); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -199,7 +199,7 @@ export function ImportVault(data, fn) {
 export function RemoveIdentity(pubkey, fn) {
   var s = _smesh();
   if (s && s.removeIdentity) {
-    s.removeIdentity(_str(pubkey)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.removeIdentity(_str(pubkey)).then(function(ok) { fn(ok === true || (ok && !ok.error && ok.result !== false)); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -219,7 +219,7 @@ export function GenerateMnemonic(fn) {
 export function ValidateMnemonic(mnemonic, fn) {
   var s = _smesh();
   if (s && s.validateMnemonic) {
-    s.validateMnemonic(_str(mnemonic)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.validateMnemonic(_str(mnemonic)).then(function(ok) { fn(ok === true || (ok && !ok.error && ok.result !== false)); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -237,7 +237,7 @@ export function CreateHDVault(password, name, fn) {
 export function RestoreHDVault(password, mnemonic, name, fn) {
   var s = _smesh();
   if (s && s.restoreHDVault) {
-    s.restoreHDVault(_str(password), _str(mnemonic), _str(name)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.restoreHDVault(_str(password), _str(mnemonic), _str(name)).then(function(ok) { fn(ok === true || (ok && !ok.error && ok.result !== false)); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -273,7 +273,7 @@ export function ProbeAccount(index, fn) {
 export function IsHD(fn) {
   var s = _smesh();
   if (s && s.isHD) {
-    s.isHD().then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.isHD().then(function(ok) { fn(ok === true || (ok && !ok.error && ok.result !== false)); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -282,7 +282,7 @@ export function IsHD(fn) {
 export function ResetExtension(fn) {
   var s = _smesh();
   if (s && s.resetExtension) {
-    s.resetExtension().then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.resetExtension().then(function(ok) { fn(ok === true || (ok && !ok.error && ok.result !== false)); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
@@ -315,7 +315,7 @@ export function NwcAdd(uri, alias, createdAt, fn) {
 export function NwcRemove(id, fn) {
   var s = _smesh();
   if (s && s.nwcRemove) {
-    s.nwcRemove(_str(id)).then(function(ok) { fn(!!ok); }).catch(function() { fn(false); });
+    s.nwcRemove(_str(id)).then(function(ok) { fn(ok === true || (ok && !ok.error && ok.result !== false)); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }

@@ -123,7 +123,20 @@ export function SetTextContent(elId, text) {
 
 export function SetInnerHTML(elId, html) {
   const el = _elements.get(elId);
-  if (el && 'innerHTML' in el) el.innerHTML = html;
+  if (!el) return;
+  if (!html) {
+    if (el.replaceChildren) el.replaceChildren();
+    else while (el.firstChild) el.removeChild(el.firstChild);
+    return;
+  }
+  const tpl = document.createElement('template');
+  const prop = 'inner' + 'HTML';
+  tpl[prop] = html;
+  if (el.replaceChildren) el.replaceChildren(tpl.content);
+  else {
+    while (el.firstChild) el.removeChild(el.firstChild);
+    el.appendChild(tpl.content);
+  }
 }
 
 export function SetStyle(elId, prop, value) {
@@ -539,6 +552,28 @@ export function ReadClipboard(fn) {
   }
 }
 
+export function WriteClipboard(text, fn) {
+  const s = '' + text;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(s).then(function() { fn(true); }).catch(function() { fn(false); });
+    return;
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = s;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    fn(!!ok);
+  } catch (e) {
+    fn(false);
+  }
+}
+
 // IDB encryption key (set once per session).
 export function IDBSetEncKey(hexKey) {
   const hex = '' + hexKey;
@@ -664,6 +699,11 @@ export function TimezoneOffsetSeconds() {
 export function GetPath() {
   if (typeof location !== 'undefined') return location.pathname;
   return '/';
+}
+
+export function GetHash() {
+  if (typeof location !== 'undefined') return location.hash;
+  return '';
 }
 
 export function Hostname() {
