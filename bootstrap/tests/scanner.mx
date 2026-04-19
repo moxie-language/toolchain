@@ -1,6 +1,7 @@
 package main
 
 import (
+    "os"
 	"fmt"
     "bytes"
     . "moxie/bootstrap/syntax"
@@ -8,6 +9,8 @@ import (
 
 func main() {
     TestSmoke()
+    TestTokens()
+    TestEmbeddedTokens()
 }
 
 // errh is a default error handler for basic tests.
@@ -28,5 +31,101 @@ func TestSmoke() {
 			fmt.Printf("%d:%d: got %s; want %s\n", got.Line, got.Col, got.Tok, want)
 			continue
 		}
+	}
+}
+
+// Once TestSmoke passes, run TestTokens next.
+func TestTokens() {
+	var got Scanner
+	for _, want := range sampleTokens {
+		got.Init(bytes.NewReader(want.src), func(line, col uint, msg string) {
+			fmt.Printf("%s:%d:%d: %s", want.src, line, col, msg)
+		}, 0)
+		got.Next()
+		if got.Tok != want.tok {
+			fmt.Printf("%s: got %s; want %s", want.src, got.Tok, want.tok)
+			continue
+		}
+		if (got.Tok == Name || got.Tok == Literal) && got.Lit != want.src {
+			fmt.Printf("%s: got %q; want %q", want.src, got.Lit, want.src)
+		}
+	}
+}
+
+func TestEmbeddedTokens() {
+	// make source
+	var buf bytes.Buffer
+	for i, s := range sampleTokens {
+		buf.WriteString("\t\t\t\t"[:i&3])                 // leading indentation
+		buf.WriteString(s.src)                            // token
+		buf.WriteString("        "[:i&7])                 // trailing spaces
+		fmt.Fprintf(&buf, "/*line foo:%d */ // bar\n", i) // comments + newline (don't crash w/o directive handler)
+	}
+
+	// scan source
+	var got Scanner
+	var src string
+	got.Init(&buf, func(line, col uint, msg string) {
+		fmt.Printf("%s:%d:%d: %s", src, line, col, msg)
+		os.Exit(1)
+	}, 0)
+	got.Next()
+	for i, want := range sampleTokens {
+		src = want.src
+		nlsemi := false
+
+		if got.Line-Linebase != uint(i) {
+			fmt.Printf("%s: got line %d; want %d", src, got.Line-Linebase, i)
+		}
+
+		if got.Tok != want.tok {
+			fmt.Printf("%s: got tok %s; want %s", src, got.Tok, want.tok)
+			continue
+		}
+
+		switch want.tok {
+		case Semi:
+			if got.Lit != "semicolon" {
+				fmt.Printf("%s: got %s; want semicolon", src, got.Lit)
+			}
+
+		case Name, Literal:
+			if got.Lit != want.src {
+				fmt.Printf("%s: got lit %q; want %q", src, got.Lit, want.src)
+				continue
+			}
+			nlsemi = true
+
+		case Operator, AssignOp, IncOp:
+			if got.Op != want.op {
+				fmt.Printf("%s: got op %s; want %s", src, got.Op, want.op)
+				continue
+			}
+			if got.Prec != want.prec {
+				fmt.Printf("%s: got prec %d; want %d", src, got.Prec, want.prec)
+				continue
+			}
+			nlsemi = want.tok == IncOp
+
+		case Rparen, Rbrack, Rbrace, Break, Continue, Fallthrough, Return:
+			nlsemi = true
+		}
+
+		if nlsemi {
+			got.Next()
+			if got.Tok != Semi {
+				fmt.Printf("%s: got tok %s; want ;", src, got.Tok)
+				continue
+			}
+			if got.Lit != "newline" {
+				fmt.Printf("%s: got %s; want newline", src, got.Lit)
+			}
+		}
+
+		got.Next()
+	}
+
+	if got.Tok != EOF {
+		fmt.Printf("got %q; want EOF", got.Tok)
 	}
 }
