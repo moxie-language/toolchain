@@ -86,6 +86,7 @@ type Package struct {
 	EmbedGlobals map[string][]*EmbedFile
 	Pkg          *types.Package
 	info         types.Info
+	hasBuiltins  bool
 }
 
 type EmbedFile struct {
@@ -189,6 +190,11 @@ func (p *Program) getOriginalPath(path string) string {
 	return originalPath
 }
 
+// FileSet returns the token.FileSet used across all packages.
+func (p *Program) FileSet() *token.FileSet {
+	return p.fset
+}
+
 // Sorted returns a list of all packages, sorted in a way that no packages come
 // before the packages they depend upon.
 func (p *Program) Sorted() []*Package {
@@ -231,8 +237,17 @@ func (p *Program) Parse() error {
 			// first pass. User code still gets CheckPlusOnText to flag
 			// `+` on text as an error.
 			if !pkg.Module.Main {
+				needsBuiltin := false
 				for _, file := range pkg.Files {
-					rewriteAddToPipe(file)
+					if rewriteAddToPipe(file) {
+						needsBuiltin = true
+					}
+				}
+				if needsBuiltin {
+					if f := injectMoxieByteBuiltins(p.fset, pkg.Name); f != nil {
+						pkg.Files = append(pkg.Files, f)
+						pkg.hasBuiltins = true
+					}
 				}
 			}
 		}
@@ -351,11 +366,11 @@ func (p *Package) Check() error {
 	typesPkg, err := checker.Check(packageName, p.program.fset, p.Files, &p.info)
 
 
-	// Two-pass Moxie rewrite: pipe concat (|), string/[]byte + concat, comparisons, switches.
-	// Always run for Moxie target packages — the patched type checker accepts string+
-	// without errors, but the restriction checker still forbids it, so we must rewrite.
+	// Two-pass Moxie rewrite: pipe concat (|), byte comparisons, switches.
+	// The patched GOROOT's type checker accepts string/[]byte as identical,
+	// but the restriction checker still forbids + on text, so we must rewrite.
+	needsRecheck := false
 	if isMoxieStringTarget(p.ImportPath) {
-		// Reject + on text in user packages before rewriting.
 		if p.Module.Main {
 			if plusErrs := checkPlusOnText(p.Files, &p.info, p.program.fset); len(plusErrs) > 0 {
 				return Errors{p, plusErrs}
@@ -366,10 +381,6 @@ func (p *Package) Check() error {
 		cmpExprs := findByteComparisons(p.Files, &p.info)
 		byteSwitches := findByteSwitches(p.Files, &p.info)
 		addAssignCount := rewriteAddAssign(p.Files, &p.info)
-		// __moxie_secalloc refs come from the text-level slice literal
-		// rewriter (`[]byte{:n, secure}`), which has already run before
-		// parse. They need the same builtin injection as the AST-level
-		// rewrites below.
 		secallocRefs := hasMoxieSecallocRefs(p.Files)
 
 		if len(pipeRewrites) > 0 || len(cmpExprs) > 0 || len(byteSwitches) > 0 || addAssignCount > 0 || secallocRefs {
@@ -379,38 +390,49 @@ func (p *Package) Check() error {
 			typeErrors = filterPipeErrors(typeErrors)
 			typeErrors = filterByteCompareErrors(typeErrors)
 
-			// Inject __moxie_concat/eq/lt declarations into this package.
-			if f := injectMoxieByteBuiltins(p.program.fset, p.Name); f != nil {
-				p.Files = append(p.Files, f)
-			}
-
-			// Reset type info and re-check.
-			p.info = types.Info{
-				Types:      make(map[ast.Expr]types.TypeAndValue),
-				Instances:  make(map[*ast.Ident]types.Instance),
-				Defs:       make(map[*ast.Ident]types.Object),
-				Uses:       make(map[*ast.Ident]types.Object),
-				Implicits:  make(map[ast.Node]types.Object),
-				Scopes:     make(map[ast.Node]*types.Scope),
-				Selections: make(map[*ast.SelectorExpr]*types.Selection),
-			}
-			initFileVersions(&p.info)
-			typeErrors = nil
-			checker2 := p.program.typeChecker
-			checker2.Error = func(e error) {
-				typeErrors = append(typeErrors, e)
-			}
-			checker2.Importer = p
-			if p.Module.GoVersion != "" {
-				checker2.GoVersion = "go" + p.Module.GoVersion
-			} else {
-				major, minor, verr := goenv.GetGorootVersion()
-				if verr != nil {
-					return verr
+			if !p.hasBuiltins {
+				if f := injectMoxieByteBuiltins(p.program.fset, p.Name); f != nil {
+					p.Files = append(p.Files, f)
 				}
-				checker2.GoVersion = fmt.Sprintf("go%d.%d", major, minor)
 			}
-			typesPkg, err = checker2.Check(packageName, p.program.fset, p.Files, &p.info)
+			needsRecheck = true
+		}
+	}
+
+	// Re-typecheck after AST rewrites (pipe concat, byte comparisons,
+	// switches, builtins injection). The rewrites modify the AST, so
+	// the first pass type info is stale. Only needed when rewrites occurred.
+	if needsRecheck {
+		p.info = types.Info{
+			Types:      make(map[ast.Expr]types.TypeAndValue),
+			Instances:  make(map[*ast.Ident]types.Instance),
+			Defs:       make(map[*ast.Ident]types.Object),
+			Uses:       make(map[*ast.Ident]types.Object),
+			Implicits:  make(map[ast.Node]types.Object),
+			Scopes:     make(map[ast.Node]*types.Scope),
+			Selections: make(map[*ast.SelectorExpr]*types.Selection),
+		}
+		initFileVersions(&p.info)
+		typeErrors = nil
+		checker2 := p.program.typeChecker
+		checker2.Error = func(e error) {
+			typeErrors = append(typeErrors, e)
+		}
+		checker2.Importer = p
+		if p.Module.GoVersion != "" {
+			checker2.GoVersion = "go" + p.Module.GoVersion
+		} else {
+			major, minor, verr := goenv.GetGorootVersion()
+			if verr != nil {
+				return verr
+			}
+			checker2.GoVersion = fmt.Sprintf("go%d.%d", major, minor)
+		}
+		typesPkg, err = checker2.Check(packageName, p.program.fset, p.Files, &p.info)
+		typeErrors = filterPipeErrors(typeErrors)
+		typeErrors = filterByteCompareErrors(typeErrors)
+		if err != nil && len(typeErrors) == 0 {
+			err = nil
 		}
 	}
 

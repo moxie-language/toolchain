@@ -788,6 +788,12 @@ func rewriteEmptyStringComparisons(file *ast.File) {
 			if node.Tag != nil {
 				replace(&node.Tag)
 			}
+		case *ast.KeyValueExpr:
+			replace(&node.Value)
+		case *ast.ValueSpec:
+			for i := range node.Values {
+				replace(&node.Values[i])
+			}
 		}
 		return true
 	})
@@ -937,6 +943,23 @@ func normalizePipeToAdd(e ast.Expr) {
 }
 
 // isSyntacticText returns true if expr is syntactically recognizable as text:
+// containsSyntacticText returns true if the expression tree contains any
+// syntactic text node (string literal or []byte conversion) at the top
+// level — in binary expressions and parens, but NOT inside function call
+// arguments (len("x"), strconv.Itoa(...), etc. return integers, not text).
+func containsSyntacticText(expr ast.Expr) bool {
+	if isSyntacticText(expr) {
+		return true
+	}
+	switch e := expr.(type) {
+	case *ast.BinaryExpr:
+		return containsSyntacticText(e.X) || containsSyntacticText(e.Y)
+	case *ast.ParenExpr:
+		return containsSyntacticText(e.X)
+	}
+	return false
+}
+
 // a string literal, a []byte(...) conversion, or a BinaryExpr whose operands
 // are themselves syntactically text. Used to rewrite + to | pre-typecheck
 // when info.TypeOf is not yet available.
@@ -961,10 +984,11 @@ func isSyntacticText(expr ast.Expr) bool {
 // the expression is syntactically text. This permits the patched go/types —
 // which accepts | but not + on []byte — to succeed on the first typecheck
 // pass for vendored/stdlib packages that still use + for text concatenation.
-// Does not touch +=; that is rewritten by RewriteAddAssign after typecheck.
-// Intentionally NOT called on main-module packages — user code with + on
-// text is a compile error (CheckPlusOnText).
-func RewriteAddToPipe(file *ast.File) {
+// Also converts += to |= for compound assignments whose RHS contains
+// syntactic text. Intentionally NOT called on main-module packages —
+// user code with + on text is a compile error (CheckPlusOnText).
+func RewriteAddToPipe(file *ast.File) bool {
+	modified := false
 	ast.Inspect(file, func(n ast.Node) bool {
 		// Don't descend into const decls or []byte wraps — their + is
 		// needed for compile-time constant folding.
@@ -979,8 +1003,21 @@ func RewriteAddToPipe(file *ast.File) {
 				bin.Op = token.OR
 			}
 		}
+		if assign, ok := n.(*ast.AssignStmt); ok && assign.Tok == token.ADD_ASSIGN && len(assign.Rhs) == 1 {
+			if containsSyntacticText(assign.Rhs[0]) {
+				lhs := assign.Lhs[0]
+				rhs := assign.Rhs[0]
+				assign.Tok = token.ASSIGN
+				assign.Rhs[0] = &ast.CallExpr{
+					Fun:  &ast.Ident{Name: "__moxie_concat"},
+					Args: []ast.Expr{lhs, wrapForMoxieConcat(rhs)},
+				}
+				modified = true
+			}
+		}
 		return true
 	})
+	return modified
 }
 
 // isStringExpr returns true if the expression is syntactically a string literal
@@ -2693,9 +2730,15 @@ func FindPipeConcat(files []*ast.File, info *types.Info) []PipeRewrite {
 					if inner, ok := bin.X.(*ast.BinaryExpr); ok && (inner.Op == token.OR || inner.Op == token.ADD) {
 						xOk = true
 					}
+					if _, ok := bin.X.(*ast.Ident); ok {
+						xOk = true
+					}
 				}
 				if !yOk && xOk {
 					if inner, ok := bin.Y.(*ast.BinaryExpr); ok && (inner.Op == token.OR || inner.Op == token.ADD) {
+						yOk = true
+					}
+					if _, ok := bin.Y.(*ast.Ident); ok {
 						yOk = true
 					}
 				}
@@ -2985,19 +3028,16 @@ func FindByteComparisons(files []*ast.File, info *types.Info) []*ast.BinaryExpr 
 			}
 			xType := info.TypeOf(bin.X)
 			yType := info.TypeOf(bin.Y)
-			if xType == nil || yType == nil {
-				return true
-			}
-			xBytes := isByteSlice(xType)
-			yBytes := isByteSlice(yType)
+			xBytes := (xType != nil && isByteSlice(xType)) || isMoxieConcatCall(bin.X) || isSliceByteConversion(bin.X)
+			yBytes := (yType != nil && isByteSlice(yType)) || isMoxieConcatCall(bin.Y) || isSliceByteConversion(bin.Y)
 			if !xBytes && !yBytes {
 				return true
 			}
 			// Bridge string↔[]byte mismatches by wrapping string side.
-			if xBytes && !yBytes && isStringKind(yType) {
+			if xBytes && !yBytes && yType != nil && isStringKind(yType) {
 				bin.Y = wrapInByteSlice(bin.Y)
 			}
-			if yBytes && !xBytes && isStringKind(xType) {
+			if yBytes && !xBytes && xType != nil && isStringKind(xType) {
 				bin.X = wrapInByteSlice(bin.X)
 			}
 			result = append(result, bin)
