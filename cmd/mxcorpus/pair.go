@@ -38,6 +38,51 @@ func enrichManifest(importPath, outdir string) error {
 		}
 	}
 	fmt.Printf("  PAIRED: %d segments\n", paired)
+
+	if err := writeCSVManifest(&manifest, outdir); err != nil {
+		return fmt.Errorf("csv manifest: %w", err)
+	}
+
+	return nil
+}
+
+// writeCSVManifest writes manifest.csv: tab-separated, one row per segment.
+// Columns: id, kind, name, ast_file, ir_O0, asm_O0, bin_O0, lineinfo
+func writeCSVManifest(manifest *PackageManifest, outdir string) error {
+	csvPath := filepath.Join(outdir, "manifest.csv")
+	f, err := os.Create(csvPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	f.WriteString("id\tkind\tname\tast_file\tast_dump\tir_O0\tasm_O0\tbin_O0\tlineinfo\n")
+
+	for _, fm := range manifest.Files {
+		for _, seg := range fm.Segments {
+			irFile := ""
+			if sf, ok := seg.IRFiles["O0"]; ok && sf != nil {
+				irFile = sf.File
+			}
+			asmFile := ""
+			if sf, ok := seg.ASMFiles["O0"]; ok && sf != nil {
+				asmFile = sf.File
+			}
+			binFile := ""
+			if sf, ok := seg.BinFiles["O0"]; ok && sf != nil {
+				binFile = sf.File
+			}
+			liFile := ""
+			if seg.Lineinfo != nil {
+				liFile = seg.Lineinfo.File
+			}
+			fmt.Fprintf(f, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				seg.ID, seg.Kind, seg.Name, seg.ASTFile, seg.ASTDump,
+				irFile, asmFile, binFile, liFile)
+		}
+	}
+
+	fmt.Printf("  wrote %s\n", csvPath)
 	return nil
 }
 

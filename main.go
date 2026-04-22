@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -337,23 +336,7 @@ func getListOfPackages(pkgs []string, options *compileopts.Options) ([]string, e
 	if err != nil {
 		return nil, err
 	}
-	cmd, err := loader.List(config, nil, pkgs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to run `moxie list`: %w", err)
-	}
-	outputBuf := bytes.NewBuffer(nil)
-	cmd.Stdout = outputBuf
-	cmd.Stderr = os.Stderr
-	err = cmd.Run()
-	if err != nil {
-		return nil, err
-	}
-	var pkgNames []string
-	sc := bufio.NewScanner(outputBuf)
-	for sc.Scan() {
-		pkgNames = append(pkgNames, sc.Text())
-	}
-	return pkgNames, nil
+	return loader.MxListImportPaths(config, pkgs)
 }
 
 func handleCompilerError(err error) {

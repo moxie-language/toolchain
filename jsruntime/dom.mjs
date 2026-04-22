@@ -817,6 +817,71 @@ export function OnPullRefresh(elId, indicatorId, fn) {
   }, { passive: true });
 }
 
+// OnPasteImage: listen for paste events with image data on an element.
+export function OnPasteImage(elId, fn) {
+  const el = _elements.get(elId);
+  if (!el) return;
+  el.addEventListener('paste', function(e) {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf('image/') === 0) {
+        e.preventDefault();
+        const mime = items[i].type;
+        const blob = items[i].getAsFile();
+        if (!blob) continue;
+        const reader = new FileReader();
+        reader.onload = function() {
+          const b64 = reader.result.split(',')[1] || '';
+          fn(b64, mime);
+        };
+        reader.readAsDataURL(blob);
+        return;
+      }
+    }
+  });
+}
+
+// OnDropImage: listen for drop events with image files on an element.
+export function OnDropImage(elId, fn) {
+  const el = _elements.get(elId);
+  if (!el) return;
+  el.addEventListener('dragover', function(e) { e.preventDefault(); });
+  el.addEventListener('drop', function(e) {
+    e.preventDefault();
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (!files) return;
+    for (let i = 0; i < files.length; i++) {
+      if (files[i].type.indexOf('image/') === 0) {
+        const mime = files[i].type;
+        const reader = new FileReader();
+        reader.onload = function() {
+          const b64 = reader.result.split(',')[1] || '';
+          fn(b64, mime);
+        };
+        reader.readAsDataURL(files[i]);
+      }
+    }
+  });
+}
+
+// FetchPutBlobBase64: PUT binary data (from base64) to a URL with auth header.
+export function FetchPutBlobBase64(url, base64data, contentType, authHeader, fn) {
+  try {
+    const raw = atob(base64data);
+    const arr = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+    const headers = { 'Content-Type': contentType || 'application/octet-stream' };
+    if (authHeader) headers['Authorization'] = authHeader;
+    fetch(url, { method: 'PUT', headers: headers, body: arr })
+      .then(function(r) { return r.text(); })
+      .then(function(t) { if (fn) fn(t); })
+      .catch(function() { if (fn) fn(''); });
+  } catch(e) {
+    if (fn) fn('');
+  }
+}
+
 // Get raw element (for advanced use within JS runtime only).
 export function getRawElement(id) {
   return _elements.get(id);

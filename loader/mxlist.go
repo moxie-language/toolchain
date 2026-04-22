@@ -22,6 +22,14 @@ import (
 // returning them in dependency order (dependencies before dependents).
 // This replaces `go list -json -deps -e`.
 func mxListPackages(config *compileopts.Config, goroot string, inputPkg string) ([]*PackageJSON, error) {
+	return mxListPackagesImpl(config, goroot, inputPkg, false)
+}
+
+func mxListPackagesTest(config *compileopts.Config, goroot string, inputPkg string) ([]*PackageJSON, error) {
+	return mxListPackagesImpl(config, goroot, inputPkg, true)
+}
+
+func mxListPackagesImpl(config *compileopts.Config, goroot string, inputPkg string, testMode bool) ([]*PackageJSON, error) {
 	ctx := mxContext(goroot, config.GOOS(), config.GOARCH(), config.BuildTags())
 
 	// Determine the working directory and module info.
@@ -92,6 +100,161 @@ func mxListPackages(config *compileopts.Config, goroot string, inputPkg string) 
 		return nil, err
 	}
 
+	if testMode {
+		sorted, err := r.addTestMain(inputPkg, wd)
+		if err != nil {
+			return nil, err
+		}
+		return sorted, nil
+	}
+
+	return r.sorted, nil
+}
+
+// MxListImportPaths returns just the import paths of the given packages,
+// using the native .mx-aware resolver instead of `go list`.
+func MxListImportPaths(config *compileopts.Config, pkgs []string) ([]string, error) {
+	goroot, err := GetCachedGoroot(config)
+	if err != nil {
+		return nil, err
+	}
+	var result []string
+	for _, pkg := range pkgs {
+		pkgJSONs, err := mxListPackages(config, goroot, pkg)
+		if err != nil {
+			return nil, err
+		}
+		if len(pkgJSONs) > 0 {
+			last := pkgJSONs[len(pkgJSONs)-1]
+			result = append(result, last.ImportPath)
+		}
+	}
+	return result, nil
+}
+
+// addTestMain finds _test.mx files in the target package, merges them,
+// scans for Test* functions, generates a synthetic test main, and appends
+// a .test main package to the resolver's sorted list.
+func (r *resolver) addTestMain(inputPkg string, wd string) ([]*PackageJSON, error) {
+	// Find the target package.
+	var targetPkg *PackageJSON
+	for _, pj := range r.sorted {
+		if pj.ImportPath == inputPkg || (inputPkg == "." && pj.Dir == wd) {
+			targetPkg = pj
+			break
+		}
+	}
+	if targetPkg == nil {
+		return r.sorted, nil
+	}
+
+	// Find _test.mx files in the package directory.
+	entries, err := os.ReadDir(targetPkg.Dir)
+	if err != nil {
+		return nil, err
+	}
+	var testFiles []string
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasSuffix(name, "_test.mx") && !e.IsDir() {
+			testFiles = append(testFiles, name)
+		}
+	}
+	if len(testFiles) == 0 {
+		return nil, NoTestFilesError{ImportPath: targetPkg.ImportPath}
+	}
+
+	// Merge test files into the target package.
+	targetPkg.GoFiles = append(targetPkg.GoFiles, testFiles...)
+	// Mark this package as the test package.
+	targetPkg.ForTest = targetPkg.ImportPath
+
+	// Remove target package from sorted — we need to re-add it after
+	// walking test dependencies so the dependency order is correct.
+	var targetIdx int
+	for i, pj := range r.sorted {
+		if pj == targetPkg {
+			targetIdx = i
+			break
+		}
+	}
+	r.sorted = append(r.sorted[:targetIdx], r.sorted[targetIdx+1:]...)
+	delete(r.seen, targetPkg.ImportPath)
+
+	// Walk testing dependency (test files import "testing").
+	if err := r.walk("testing", targetPkg.Dir); err != nil {
+		return nil, fmt.Errorf("walking testing dependency: %w", err)
+	}
+	// Add "testing" to the package's imports.
+	hasTestingImport := false
+	for _, imp := range targetPkg.Imports {
+		if imp == "testing" {
+			hasTestingImport = true
+			break
+		}
+	}
+	if !hasTestingImport {
+		targetPkg.Imports = append(targetPkg.Imports, "testing")
+	}
+
+	// Re-add target package after its test dependencies.
+	r.seen[targetPkg.ImportPath] = targetPkg
+	r.sorted = append(r.sorted, targetPkg)
+
+	// Scan test files for Test* function names.
+	var testFuncs []string
+	for _, tf := range testFiles {
+		data, err := os.ReadFile(filepath.Join(targetPkg.Dir, tf))
+		if err != nil {
+			return nil, err
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "func Test") {
+				// Extract function name: "func TestFoo(t *testing.T) {"
+				name := line[len("func "):]
+				if idx := strings.IndexByte(name, '('); idx > 0 {
+					name = name[:idx]
+					testFuncs = append(testFuncs, name)
+				}
+			}
+		}
+	}
+
+	// Generate synthetic _testmain.mx in a temp directory.
+	tmpDir, err := os.MkdirTemp("", "moxie-testmain-*")
+	if err != nil {
+		return nil, err
+	}
+
+	var buf strings.Builder
+	buf.WriteString("package main\n\nimport (\n")
+	buf.WriteString("\t\"testing\"\n")
+	buf.WriteString("\tpkg \"" + targetPkg.ImportPath + "\"\n")
+	buf.WriteString(")\n\nfunc main() {\n")
+	buf.WriteString("\ttests := []testing.InternalTest{\n")
+	for _, fn := range testFuncs {
+		buf.WriteString("\t\t{\"" + fn + "\", pkg." + fn + "},\n")
+	}
+	buf.WriteString("\t}\n")
+	buf.WriteString("\ttesting.Main(tests)\n")
+	buf.WriteString("}\n")
+
+	mainFile := filepath.Join(tmpDir, "_testmain.mx")
+	if err := os.WriteFile(mainFile, []byte(buf.String()), 0644); err != nil {
+		return nil, err
+	}
+
+	// Add the .test main package.
+	testMainPkg := &PackageJSON{
+		Dir:        tmpDir,
+		ImportPath: targetPkg.ImportPath + ".test",
+		Name:       "main",
+		GoFiles:    []string{"_testmain.mx"},
+		Imports:    []string{"testing", targetPkg.ImportPath},
+	}
+
+	r.sorted = append(r.sorted, testMainPkg)
 	return r.sorted, nil
 }
 

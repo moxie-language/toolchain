@@ -129,7 +129,12 @@ func Load(config *compileopts.Config, inputPkg string, typeChecker types.Config)
 	// Discover packages and dependencies using the internal mxlist
 	// package scanner. This replaces the external `go list` command and
 	// natively understands .mx source files.
-	pkgJSONs, err := mxListPackages(config, goroot, inputPkg)
+	var pkgJSONs []*PackageJSON
+	if config.TestConfig.CompileTestBinary {
+		pkgJSONs, err = mxListPackagesTest(config, goroot, inputPkg)
+	} else {
+		pkgJSONs, err = mxListPackages(config, goroot, inputPkg)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("mxlist: %w", err)
 	}

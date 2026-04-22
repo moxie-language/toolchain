@@ -24,6 +24,7 @@ type SegmentManifest struct {
 	Comments  []string     `json:"comments,omitempty"`
 	Generated bool         `json:"generated"`
 	HasSpawn  bool         `json:"has_spawn"`
+	ASTDump   string       `json:"ast_dump,omitempty"`
 	IRFiles   OptFileMap   `json:"ir_files,omitempty"`
 	ASMFiles  OptFileMap   `json:"asm_files,omitempty"`
 	BinFiles  OptFileMap   `json:"bin_files,omitempty"`

@@ -31,6 +31,11 @@ func extractAST(fset *token.FileSet, pf parsedFile, fileIndex int, outdir string
 		return FileManifest{}, err
 	}
 
+	astDir := filepath.Join(outdir, "ast")
+	if err := os.MkdirAll(astDir, 0755); err != nil {
+		return FileManifest{}, err
+	}
+
 	fm := FileManifest{
 		Path:      pf.name,
 		FileIndex: fileIndex,
@@ -38,11 +43,25 @@ func extractAST(fset *token.FileSet, pf parsedFile, fileIndex int, outdir string
 
 	// Use the rewritten source for segment extraction (AST positions match rewritten bytes).
 	segments := segmentFile(fset, pf.file, pf.src, fileIndex)
-	for _, seg := range segments {
+	for si, seg := range segments {
 		segFilename := seg.Filename()
 		segPath := filepath.Join(segDir, segFilename)
 		if err := os.WriteFile(segPath, seg.Data, 0644); err != nil {
 			return FileManifest{}, fmt.Errorf("write segment %s: %w", segPath, err)
+		}
+
+		// Generate AST dump for declarations (si=0 is pkg clause, decls start at si=1).
+		astDumpFile := ""
+		declIdx := si - 1
+		if declIdx >= 0 && declIdx < len(pf.file.Decls) {
+			dump := dumpAST(fset, pf.file.Decls[declIdx])
+			if len(dump) > 0 {
+				astDumpFile = strings.TrimSuffix(segFilename, ".mx") + ".ast"
+				astPath := filepath.Join(astDir, astDumpFile)
+				if err := os.WriteFile(astPath, []byte(dump), 0644); err != nil {
+					return FileManifest{}, fmt.Errorf("write ast dump %s: %w", astPath, err)
+				}
+			}
 		}
 
 		sm := SegmentManifest{
@@ -50,6 +69,7 @@ func extractAST(fset *token.FileSet, pf parsedFile, fileIndex int, outdir string
 			Kind:      seg.Kind,
 			Name:      seg.Name,
 			ASTFile:   segFilename,
+			ASTDump:   astDumpFile,
 			SizeBytes: len(seg.Data),
 			SourcePos: SourcePos{Line: seg.StartLine, EndLine: seg.EndLine},
 			Comments:  seg.Comments,
