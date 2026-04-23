@@ -18,6 +18,7 @@ import (
 	"unicode"
 
 	"moxie/cgo"
+	"moxie/syntax"
 	"moxie/compileopts"
 	"moxie/goenv"
 )
@@ -275,7 +276,8 @@ func (p *Package) OriginalDir() string {
 	return strings.TrimSuffix(p.program.getOriginalPath(p.Dir+string(os.PathSeparator)), string(os.PathSeparator))
 }
 
-// parseFile is a wrapper around parser.ParseFile.
+// parseFile parses a source file using the bootstrap parser (syntax package)
+// and converts the result to go/ast.File for downstream compatibility.
 func (p *Package) parseFile(path string, mode parser.Mode) (*ast.File, error) {
 	originalPath := p.program.getOriginalPath(path)
 	data, err := os.ReadFile(path)
@@ -285,14 +287,10 @@ func (p *Package) parseFile(path string, mode parser.Mode) (*ast.File, error) {
 	sum := sha512.Sum512_224(data)
 	p.FileHashes[originalPath] = sum[:]
 
-	// Moxie text-level rewrites before parsing. Fire on ALL packages —
-	// the new syntax (chan T{}, []T{:n}) only exists in converted files,
-	// unconverted files pass through unchanged. The chan struct{} guard
-	// prevents false positives.
 	data = rewriteChanLiterals(data, p.program.fset)
 	data = rewriteSliceLiterals(data, p.program.fset)
 
-	return parser.ParseFile(p.program.fset, originalPath, data, mode)
+	return syntax.Convert(p.program.fset, originalPath, data)
 }
 
 // Parse parses and typechecks this package.

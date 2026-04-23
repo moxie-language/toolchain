@@ -511,7 +511,6 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 					return fmt.Errorf("failed to link module: %w", err)
 				}
 			}
-
 			// Insert values from -ldflags="-X ..." into the IR.
 			// This is a separate module, so that the "runtime._string" type
 			// doesn't need to match precisely. LLVM tends to rename that type
