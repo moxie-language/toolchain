@@ -180,9 +180,84 @@ Replace go/types, go/ssa, go/ast, then rewrite everything above. The phases:
 |-------|--------|--------|
 | Phase 0 (vendor) | ✅ Complete | Prior session |
 | Phase 1 (parser) | ✅ Complete | 8d6969e |
-| Phase 2 (eliminate re-typecheck) | ✅ Complete | Current session |
-| B1 (type checker) | ✅ Complete | `typecheck/` package — 37/37 stdlib + smesh + iskra PASS |
-| B2 (SSA builder) | ✅ Complete | `mxssa/` package — mxssadump tested on bytes/strconv/fmt/sort/strings/net/http |
+| Phase 2 (eliminate re-typecheck) | ✅ Complete | f58c068 |
+| B1 (type checker) | ✅ Complete | f58c068 — `typecheck/` package, 37/37 stdlib + smesh + iskra PASS |
+| B2 (SSA builder) | ✅ Complete | f58c068 — `mxssa/` package, mxssadump tested on bytes/strconv/fmt/sort/strings/net/http |
+| B3 (backend migration) | 🔄 In Progress | see below |
+
+## B3: Backend Migration — Detailed Plan
+
+### Strategy: Dual-Representation Bridge
+
+The compiler currently consumes `go/types` + `go/ssa`. The native replacements (`typecheck` + `mxssa`)
+mirror the same structure. The bridge strategy:
+
+1. `ssabridge` package translates `ssa.Program` → `mxssa.Program` at `CompilePackage` entry
+   - Uses existing `typecheck/bridge` for `go/types.Type` → `typecheck.Type` translation
+   - Walks functions, blocks, instructions; creates mxssa equivalents
+2. `compilerContext` holds **both** `*ssa.Program` and `*mxssa.Program` temporarily
+3. Each compiler file migrates independently (atomic commit per file):
+   - Change imports: `go/types` → `typecheck`, `go/ssa` → `mxssa`
+   - Change type assertions: `*ssa.Call` → `*mxssa.Call`, `*types.Basic` → `*typecheck.Basic`
+   - Adjust any API differences
+4. When all files use `mxssa`/`typecheck`, drop `*ssa.Program` from compilerContext
+5. Delete `ssabridge` and `typecheck/bridge`
+
+### API Surface (measured)
+
+- 166 `go/types` type assertions across 35 files
+- 81 `go/ssa` type assertions across 35 files
+- 1284 `types.*` method/function calls
+- 477 `ssa.*` method/field accesses
+
+### Migration Order (by dependency — leaf files first)
+
+**Tier 0: Bridge infrastructure**
+- [ ] `ssabridge/` — ssa.Program → mxssa.Program translator
+- [ ] `CompilePackage` entry point — produce mxssa.Program, store in compilerContext
+
+**Tier 1: Leaf files (no intra-compiler type flow)**
+- [ ] compiler/sizes.go
+- [ ] compiler/errors.go
+- [ ] compiler/volatile.go
+- [ ] compiler/atomic.go
+- [ ] compiler/inlineasm.go
+- [ ] compiler/interrupt.go
+- [ ] compiler/syscall.go
+
+**Tier 2: Mid-complexity files**
+- [ ] compiler/symbol.go
+- [ ] compiler/gc.go
+- [ ] compiler/llvm.go
+- [ ] compiler/channel.go
+- [ ] compiler/map.go
+- [ ] compiler/defer.go
+- [ ] compiler/asserts.go
+- [ ] compiler/spawn.go
+- [ ] compiler/mxbuiltins.go
+- [ ] compiler/restrict.go
+
+**Tier 3: Core files (highest assertion count)**
+- [ ] compiler/calls.go
+- [ ] compiler/func.go
+- [ ] compiler/goroutine.go
+- [ ] compiler/alias.go
+- [ ] compiler/interface.go — 14 type assertions, 249 types method calls
+- [ ] compiler/compiler.go — 42 type assertions, 289 types method calls, 117 ssa accesses
+
+**Tier 4: JS backend**
+- [ ] jsbackend/*.go (3 files, 27+33 assertions)
+
+**Tier 5: Other consumers**
+- [ ] mxtext/rewrite.go (43 type assertions)
+- [ ] loader/loader.go
+- [ ] builder/build.go
+
+**Tier 6: Cleanup**
+- [ ] Drop ssa.Program from compilerContext
+- [ ] Delete ssabridge/
+- [ ] Delete typecheck/bridge/
+- [ ] Remove go/ssa from go.mod
 
 ## What Stays Go/C Permanently
 

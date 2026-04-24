@@ -1,0 +1,546 @@
+// Package ssabridge translates go/ssa IR into mxssa IR.
+// It is a temporary shim for B3: the compiler receives ssa.Package from the
+// loader (which still uses go/types), and the bridge converts it to
+// mxssa.Package so that migrated compiler files can consume native types.
+// Deleted when all compiler files have migrated and the loader produces
+// mxssa directly.
+package ssabridge
+
+import (
+	"go/token"
+	"go/types"
+
+	"moxie/mxssa"
+	"moxie/typecheck"
+	tcbridge "moxie/typecheck/bridge"
+
+	"golang.org/x/tools/go/ssa"
+)
+
+// Translator converts an ssa.Program into an mxssa.Program.
+type Translator struct {
+	prog    *mxssa.Program
+	imp     *tcbridge.Importer
+	fset    *token.FileSet
+	funcs   map[*ssa.Function]*mxssa.Function
+	globals map[*ssa.Global]*mxssa.Global
+	pkgs    map[*ssa.Package]*mxssa.Package
+}
+
+// Translate converts an entire ssa.Program to mxssa.Program.
+// The typePkgs map provides go/types packages for type translation.
+func Translate(fset *token.FileSet, ssaProg *ssa.Program, typePkgs map[string]*types.Package) (*mxssa.Program, *Translator) {
+	prog := mxssa.NewProgram(fset)
+	imp := tcbridge.New(typePkgs)
+	t := &Translator{
+		prog:    prog,
+		imp:     imp,
+		fset:    fset,
+		funcs:   map[*ssa.Function]*mxssa.Function{},
+		globals: map[*ssa.Global]*mxssa.Global{},
+		pkgs:    map[*ssa.Package]*mxssa.Package{},
+	}
+	return prog, t
+}
+
+// TranslatePackage converts one ssa.Package to mxssa.Package.
+// Must be called after the ssa package is built (ssaPkg.Build()).
+func (t *Translator) TranslatePackage(ssaPkg *ssa.Package) *mxssa.Package {
+	if p, ok := t.pkgs[ssaPkg]; ok {
+		return p
+	}
+	tcPkg, _ := t.imp.Import(ssaPkg.Pkg.Path())
+	if tcPkg == nil {
+		tcPkg = typecheck.NewPackage(ssaPkg.Pkg.Path(), ssaPkg.Pkg.Name())
+	}
+	p := &mxssa.Package{
+		Prog:    t.prog,
+		Pkg:     tcPkg,
+		Members: map[string]mxssa.Member{},
+	}
+	t.pkgs[ssaPkg] = p
+	t.prog.RegisterPackage(p)
+
+	for name, m := range ssaPkg.Members {
+		switch m := m.(type) {
+		case *ssa.Function:
+			fn := t.translateFunctionShell(m, p)
+			p.Members[name] = fn
+		case *ssa.Global:
+			g := t.translateGlobal(m, p)
+			p.Members[name] = g
+		case *ssa.Type:
+			tn := t.translateTypeMember(m, p)
+			p.Members[name] = tn
+		case *ssa.NamedConst:
+			nc := t.translateNamedConst(m, p)
+			p.Members[name] = nc
+		}
+	}
+
+	// Build function bodies after all members registered (cross-references).
+	for name, m := range ssaPkg.Members {
+		if f, ok := m.(*ssa.Function); ok {
+			if fn, ok := p.Members[name].(*mxssa.Function); ok {
+				t.translateFunctionBody(f, fn)
+			}
+		}
+	}
+
+	return p
+}
+
+func (t *Translator) typ(gt types.Type) typecheck.Type {
+	return tcbridge.TranslateType(t.imp, gt)
+}
+
+func (t *Translator) translateFunctionShell(f *ssa.Function, pkg *mxssa.Package) *mxssa.Function {
+	if fn, ok := t.funcs[f]; ok {
+		return fn
+	}
+	var sig *typecheck.Signature
+	if f.Signature != nil {
+		if s, ok := t.typ(f.Signature).(*typecheck.Signature); ok {
+			sig = s
+		}
+	}
+	fn := mxssa.NewFunction(f.Name(), sig, f.Synthetic, pkg, t.prog)
+	fn.SetPos(f.Pos())
+	t.funcs[f] = fn
+	return fn
+}
+
+func (t *Translator) translateGlobal(g *ssa.Global, pkg *mxssa.Package) *mxssa.Global {
+	if mg, ok := t.globals[g]; ok {
+		return mg
+	}
+	mg := mxssa.NewGlobal(g.Name(), t.typ(g.Type()), pkg)
+	mg.SetPos(g.Pos())
+	t.globals[g] = mg
+	return mg
+}
+
+func (t *Translator) translateTypeMember(m *ssa.Type, pkg *mxssa.Package) *mxssa.Type_ {
+	return mxssa.NewType_(m.Name(), t.typ(m.Type()), pkg)
+}
+
+func (t *Translator) translateNamedConst(m *ssa.NamedConst, pkg *mxssa.Package) *mxssa.NamedConst {
+	return mxssa.NewNamedConst(m.Name(), t.typ(m.Type()), m.Value.Value, pkg)
+}
+
+// translateFunctionBody fills in blocks, params, locals, and instructions.
+func (t *Translator) translateFunctionBody(sf *ssa.Function, mf *mxssa.Function) {
+	if len(sf.Blocks) == 0 {
+		return // external function, no body
+	}
+
+	// Parameters.
+	for _, p := range sf.Params {
+		mp := mxssa.NewParameter(p.Name(), t.typ(p.Type()), mf)
+		mp.SetPos(p.Pos())
+		mf.Params = append(mf.Params, mp)
+	}
+
+	// Free variables.
+	for _, fv := range sf.FreeVars {
+		mfv := mxssa.NewFreeVar(fv.Name(), t.typ(fv.Type()), mf)
+		mfv.SetPos(fv.Pos())
+		mf.FreeVars = append(mf.FreeVars, mfv)
+	}
+
+	// Create blocks first (instructions reference blocks by index).
+	blockMap := map[*ssa.BasicBlock]*mxssa.BasicBlock{}
+	for _, b := range sf.Blocks {
+		mb := mxssa.NewBasicBlock(mf, b.Comment)
+		blockMap[b] = mb
+	}
+
+	// Wire preds/succs.
+	for _, b := range sf.Blocks {
+		mb := blockMap[b]
+		for _, pred := range b.Preds {
+			mb.Preds = append(mb.Preds, blockMap[pred])
+		}
+		for _, succ := range b.Succs {
+			mb.Succs = append(mb.Succs, blockMap[succ])
+		}
+	}
+
+	if sf.Recover != nil {
+		mf.Recover = blockMap[sf.Recover]
+	}
+
+	// Value map: ssa.Value → mxssa.Value.
+	// Pre-populate with params and freevars.
+	valMap := map[ssa.Value]mxssa.Value{}
+	for i, p := range sf.Params {
+		valMap[p] = mf.Params[i]
+	}
+	for i, fv := range sf.FreeVars {
+		valMap[fv] = mf.FreeVars[i]
+	}
+	// Pre-populate globals.
+	for _, g := range t.globals {
+		// Globals are already in the map by pointer identity, but we may
+		// encounter globals from other packages via cross-references.
+		// Those get translated on demand in t.value().
+		_ = g
+	}
+
+	// Translate instructions.
+	for _, b := range sf.Blocks {
+		mb := blockMap[b]
+		for _, instr := range b.Instrs {
+			mi := t.translateInstruction(instr, mb, blockMap, valMap)
+			if mi != nil {
+				mb.Instrs = append(mb.Instrs, mi)
+				// If the instruction defines a value, register it.
+				if v, ok := instr.(ssa.Value); ok {
+					if mv, ok := mi.(mxssa.Value); ok {
+						valMap[v] = mv
+					}
+				}
+			}
+		}
+	}
+
+	// Anonymous functions.
+	for _, af := range sf.AnonFuncs {
+		maf := t.translateFunctionShell(af, mf.Pkg)
+		t.translateFunctionBody(af, maf)
+		mf.AnonFuncs = append(mf.AnonFuncs, maf)
+	}
+}
+
+// value translates an ssa.Value to mxssa.Value.
+// Returns the cached translation or creates one on demand.
+func (t *Translator) value(v ssa.Value, valMap map[ssa.Value]mxssa.Value) mxssa.Value {
+	if v == nil {
+		return nil
+	}
+	if mv, ok := valMap[v]; ok {
+		return mv
+	}
+	switch v := v.(type) {
+	case *ssa.Const:
+		mc := mxssa.NewConst(v.Value, t.typ(v.Type()))
+		valMap[v] = mc
+		return mc
+	case *ssa.Global:
+		pkg := t.pkgs[v.Package()]
+		mg := t.translateGlobal(v, pkg)
+		valMap[v] = mg
+		return mg
+	case *ssa.Function:
+		var pkg *mxssa.Package
+		if v.Package() != nil {
+			pkg = t.pkgs[v.Package()]
+		}
+		mf := t.translateFunctionShell(v, pkg)
+		valMap[v] = mf
+		return mf
+	case *ssa.Builtin:
+		mb := mxssa.NewBuiltin(v.Name())
+		valMap[v] = mb
+		return mb
+	}
+	// If we get here the value was defined by an instruction that hasn't
+	// been translated yet, which shouldn't happen in a well-ordered walk.
+	// Return a placeholder const.
+	mc := mxssa.NewConst(nil, t.typ(v.Type()))
+	valMap[v] = mc
+	return mc
+}
+
+func (t *Translator) translateInstruction(
+	instr ssa.Instruction,
+	mb *mxssa.BasicBlock,
+	blockMap map[*ssa.BasicBlock]*mxssa.BasicBlock,
+	valMap map[ssa.Value]mxssa.Value,
+) mxssa.Instruction {
+	v := func(sv ssa.Value) mxssa.Value { return t.value(sv, valMap) }
+
+	switch i := instr.(type) {
+	case *ssa.Alloc:
+		a := mxssa.NewAlloc(t.typ(i.Type()), i.Heap, i.Comment, mb)
+		a.SetPos(i.Pos())
+		a.SetName(i.Name())
+		return a
+
+	case *ssa.Phi:
+		edges := make([]mxssa.Value, len(i.Edges))
+		for j, e := range i.Edges {
+			edges[j] = v(e)
+		}
+		p := mxssa.NewPhi(t.typ(i.Type()), i.Comment, edges, mb)
+		p.SetPos(i.Pos())
+		p.SetName(i.Name())
+		return p
+
+	case *ssa.Call:
+		cc := t.translateCallCommon(&i.Call, valMap)
+		c := mxssa.NewCall(t.typ(i.Type()), cc, mb)
+		c.SetPos(i.Pos())
+		c.SetName(i.Name())
+		return c
+
+	case *ssa.BinOp:
+		b := mxssa.NewBinOp(t.typ(i.Type()), i.Op, v(i.X), v(i.Y), mb)
+		b.SetPos(i.Pos())
+		b.SetName(i.Name())
+		return b
+
+	case *ssa.UnOp:
+		u := mxssa.NewUnOp(t.typ(i.Type()), i.Op, v(i.X), i.CommaOk, mb)
+		u.SetPos(i.Pos())
+		u.SetName(i.Name())
+		return u
+
+	case *ssa.ChangeType:
+		ct := mxssa.NewChangeType(t.typ(i.Type()), v(i.X), mb)
+		ct.SetPos(i.Pos())
+		ct.SetName(i.Name())
+		return ct
+
+	case *ssa.Convert:
+		cv := mxssa.NewConvert(t.typ(i.Type()), v(i.X), mb)
+		cv.SetPos(i.Pos())
+		cv.SetName(i.Name())
+		return cv
+
+	case *ssa.ChangeInterface:
+		ci := mxssa.NewChangeInterface(t.typ(i.Type()), v(i.X), mb)
+		ci.SetPos(i.Pos())
+		ci.SetName(i.Name())
+		return ci
+
+	case *ssa.SliceToArrayPointer:
+		s := mxssa.NewSliceToArrayPointer(t.typ(i.Type()), v(i.X), mb)
+		s.SetPos(i.Pos())
+		s.SetName(i.Name())
+		return s
+
+	case *ssa.MakeInterface:
+		mi := mxssa.NewMakeInterface(t.typ(i.Type()), v(i.X), mb)
+		mi.SetPos(i.Pos())
+		mi.SetName(i.Name())
+		return mi
+
+	case *ssa.MakeClosure:
+		bindings := make([]mxssa.Value, len(i.Bindings))
+		for j, b := range i.Bindings {
+			bindings[j] = v(b)
+		}
+		mc := mxssa.NewMakeClosure(t.typ(i.Type()), v(i.Fn), bindings, mb)
+		mc.SetPos(i.Pos())
+		mc.SetName(i.Name())
+		return mc
+
+	case *ssa.MakeMap:
+		var reserve mxssa.Value
+		if i.Reserve != nil {
+			reserve = v(i.Reserve)
+		}
+		mm := mxssa.NewMakeMap(t.typ(i.Type()), reserve, mb)
+		mm.SetPos(i.Pos())
+		mm.SetName(i.Name())
+		return mm
+
+	case *ssa.MakeChan:
+		var sz mxssa.Value
+		if i.Size != nil {
+			sz = v(i.Size)
+		}
+		mc := mxssa.NewMakeChan(t.typ(i.Type()), sz, mb)
+		mc.SetPos(i.Pos())
+		mc.SetName(i.Name())
+		return mc
+
+	case *ssa.MakeSlice:
+		var cap mxssa.Value
+		if i.Cap != nil {
+			cap = v(i.Cap)
+		}
+		ms := mxssa.NewMakeSlice(t.typ(i.Type()), v(i.Len), cap, mb)
+		ms.SetPos(i.Pos())
+		ms.SetName(i.Name())
+		return ms
+
+	case *ssa.Slice:
+		var low, high, max mxssa.Value
+		if i.Low != nil {
+			low = v(i.Low)
+		}
+		if i.High != nil {
+			high = v(i.High)
+		}
+		if i.Max != nil {
+			max = v(i.Max)
+		}
+		s := mxssa.NewSlice(t.typ(i.Type()), v(i.X), low, high, max, mb)
+		s.SetPos(i.Pos())
+		s.SetName(i.Name())
+		return s
+
+	case *ssa.FieldAddr:
+		fa := mxssa.NewFieldAddr(t.typ(i.Type()), v(i.X), i.Field, mb)
+		fa.SetPos(i.Pos())
+		fa.SetName(i.Name())
+		return fa
+
+	case *ssa.Field:
+		f := mxssa.NewField(t.typ(i.Type()), v(i.X), i.Field, mb)
+		f.SetPos(i.Pos())
+		f.SetName(i.Name())
+		return f
+
+	case *ssa.IndexAddr:
+		ia := mxssa.NewIndexAddr(t.typ(i.Type()), v(i.X), v(i.Index), mb)
+		ia.SetPos(i.Pos())
+		ia.SetName(i.Name())
+		return ia
+
+	case *ssa.Index:
+		idx := mxssa.NewIndex(t.typ(i.Type()), v(i.X), v(i.Index), mb)
+		idx.SetPos(i.Pos())
+		idx.SetName(i.Name())
+		return idx
+
+	case *ssa.Lookup:
+		l := mxssa.NewLookup(t.typ(i.Type()), v(i.X), v(i.Index), i.CommaOk, mb)
+		l.SetPos(i.Pos())
+		l.SetName(i.Name())
+		return l
+
+	case *ssa.Select:
+		states := make([]*mxssa.SelectState, len(i.States))
+		for j, s := range i.States {
+			dir := token.ARROW // recv
+			if s.Dir == types.SendOnly {
+				dir = token.CHAN // send — mxssa uses token.Token, not types.ChanDir
+			}
+			var send mxssa.Value
+			if s.Send != nil {
+				send = v(s.Send)
+			}
+			states[j] = &mxssa.SelectState{
+				Dir:  dir,
+				Chan: v(s.Chan),
+				Send: send,
+				Pos:  s.Pos,
+			}
+		}
+		sel := mxssa.NewSelect(t.typ(i.Type()), states, i.Blocking, mb)
+		sel.SetPos(i.Pos())
+		sel.SetName(i.Name())
+		return sel
+
+	case *ssa.Range:
+		r := mxssa.NewRange(t.typ(i.Type()), v(i.X), mb)
+		r.SetPos(i.Pos())
+		r.SetName(i.Name())
+		return r
+
+	case *ssa.Next:
+		n := mxssa.NewNext(t.typ(i.Type()), v(i.Iter), i.IsString, mb)
+		n.SetPos(i.Pos())
+		n.SetName(i.Name())
+		return n
+
+	case *ssa.TypeAssert:
+		ta := mxssa.NewTypeAssert(t.typ(i.Type()), v(i.X), t.typ(i.AssertedType), i.CommaOk, mb)
+		ta.SetPos(i.Pos())
+		ta.SetName(i.Name())
+		return ta
+
+	case *ssa.Extract:
+		e := mxssa.NewExtract(t.typ(i.Type()), v(i.Tuple), i.Index, mb)
+		e.SetPos(i.Pos())
+		e.SetName(i.Name())
+		return e
+
+	// Terminators.
+	case *ssa.Jump:
+		return mxssa.NewJump("", mb)
+
+	case *ssa.If:
+		return mxssa.NewIf(v(i.Cond), mb)
+
+	case *ssa.Return:
+		results := make([]mxssa.Value, len(i.Results))
+		for j, r := range i.Results {
+			results[j] = v(r)
+		}
+		ret := mxssa.NewReturn(results, mb)
+		ret.SetPos(i.Pos())
+		return ret
+
+	case *ssa.RunDefers:
+		return mxssa.NewRunDefers(mb)
+
+	case *ssa.Panic:
+		p := mxssa.NewPanic(v(i.X), mb)
+		p.SetPos(i.Pos())
+		return p
+
+	// Side-effecting.
+	case *ssa.Go:
+		cc := t.translateCallCommon(&i.Call, valMap)
+		g := mxssa.NewGo(cc, mb)
+		g.SetPos(i.Pos())
+		return g
+
+	case *ssa.Defer:
+		cc := t.translateCallCommon(&i.Call, valMap)
+		d := mxssa.NewDefer(cc, mb)
+		d.SetPos(i.Pos())
+		return d
+
+	case *ssa.Send:
+		s := mxssa.NewSend(v(i.Chan), v(i.X), mb)
+		s.SetPos(i.Pos())
+		return s
+
+	case *ssa.Store:
+		s := mxssa.NewStore(v(i.Addr), v(i.Val), mb)
+		s.SetPos(i.Pos())
+		return s
+
+	case *ssa.MapUpdate:
+		m := mxssa.NewMapUpdate(v(i.Map), v(i.Key), v(i.Value), mb)
+		m.SetPos(i.Pos())
+		return m
+
+	case *ssa.DebugRef:
+		var obj typecheck.Object
+		if i.Object() != nil {
+			// Translate the debug object if possible.
+			if o := i.Object(); o != nil {
+				obj = tcbridge.TranslateObject(t.imp, o)
+			}
+		}
+		d := mxssa.NewDebugRef(v(i.X), obj, i.IsAddr, mb)
+		return d
+	}
+
+	return nil
+}
+
+func (t *Translator) translateCallCommon(cc *ssa.CallCommon, valMap map[ssa.Value]mxssa.Value) mxssa.CallCommon {
+	args := make([]mxssa.Value, len(cc.Args))
+	for j, a := range cc.Args {
+		args[j] = t.value(a, valMap)
+	}
+	mcc := mxssa.CallCommon{
+		Value:    t.value(cc.Value, valMap),
+		Args:     args,
+		IsInvoke: cc.IsInvoke(),
+	}
+	if cc.Method != nil {
+		if fn, ok := t.typ(cc.Method.Type()).(*typecheck.Signature); ok {
+			mcc.Method = typecheck.NewFunc(nil, cc.Method.Name(), fn)
+		}
+	}
+	mcc.SetPos(cc.Pos())
+	return mcc
+}

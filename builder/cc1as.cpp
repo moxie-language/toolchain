@@ -20,6 +20,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/Config/llvm-config.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/DiagnosticOptions.h"
 #include "clang/Driver/DriverDiagnostic.h"
@@ -234,7 +235,9 @@ bool AssemblerInvocation::CreateFromArgs(AssemblerInvocation &Opts,
   Opts.EmitCompactUnwindNonCanonical =
       Args.hasArg(OPT_femit_compact_unwind_non_canonical);
   Opts.Crel = Args.hasArg(OPT_crel);
+#if LLVM_VERSION_MAJOR >= 20
   Opts.ImplicitMapsyms = Args.hasArg(OPT_mmapsyms_implicit);
+#endif
   Opts.X86RelaxRelocations = !Args.hasArg(OPT_mrelax_relocations_no);
   Opts.X86Sse2Avx = Args.hasArg(OPT_msse2avx);
 
@@ -295,7 +298,9 @@ static bool ExecuteAssemblerImpl(AssemblerInvocation &Opts,
   MCOptions.EmitCompactUnwindNonCanonical = Opts.EmitCompactUnwindNonCanonical;
   MCOptions.MCSaveTempLabels = Opts.SaveTemporaryLabels;
   MCOptions.Crel = Opts.Crel;
+#if LLVM_VERSION_MAJOR >= 20
   MCOptions.ImplicitMapSyms = Opts.ImplicitMapsyms;
+#endif
   MCOptions.X86RelaxRelocations = Opts.X86RelaxRelocations;
   MCOptions.X86Sse2Avx = Opts.X86Sse2Avx;
   MCOptions.CompressDebugSections = Opts.CompressDebugSections;

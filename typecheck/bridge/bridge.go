@@ -85,6 +85,16 @@ func translatePackage(gp *types.Package, imp *Importer) *typecheck.Package {
 	return p
 }
 
+// TranslateType converts a go/types.Type to a typecheck.Type using imp's cache.
+func TranslateType(imp *Importer, t types.Type) typecheck.Type {
+	return translateType(t, newTypeCache(), imp)
+}
+
+// TranslateObject converts a go/types.Object to a typecheck.Object.
+func TranslateObject(imp *Importer, obj types.Object) typecheck.Object {
+	return translateObject(obj, nil, newTypeCache(), imp)
+}
+
 func translateObject(obj types.Object, pkg *typecheck.Package, cache *typeCache, imp *Importer) typecheck.Object {
 	typ := translateType(obj.Type(), cache, imp)
 	switch obj := obj.(type) {

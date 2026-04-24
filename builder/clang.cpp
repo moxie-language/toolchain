@@ -1,5 +1,6 @@
 //go:build byollvm
 
+#include <llvm/Config/llvm-config.h>
 #include <clang/Basic/DiagnosticOptions.h>
 #include <clang/CodeGen/CodeGenAction.h>
 #include <clang/Driver/Compilation.h>
@@ -60,7 +61,11 @@ bool moxie_clang_driver(int argc, char **argv) {
 			}
 
 			// Create the actual diagnostics engine.
+#if LLVM_VERSION_MAJOR >= 20
 			Clang->createDiagnostics(*llvm::vfs::getRealFileSystem());
+#else
+			Clang->createDiagnostics();
+#endif
 			if (!Clang->hasDiagnostics()) {
 				return false;
 			}
