@@ -26,6 +26,7 @@ type Translator struct {
 	globals  map[*ssa.Global]*mxssa.Global
 	pkgs     map[*ssa.Package]*mxssa.Package
 	revTypes map[typecheck.Type]types.Type
+	revFuncs map[*mxssa.Function]*ssa.Function
 }
 
 // Importer returns the bridge type importer for cross-validation.
@@ -47,6 +48,7 @@ func Translate(fset *token.FileSet, ssaProg *ssa.Program, typePkgs map[string]*t
 		globals:  map[*ssa.Global]*mxssa.Global{},
 		pkgs:     map[*ssa.Package]*mxssa.Package{},
 		revTypes: map[typecheck.Type]types.Type{},
+		revFuncs: map[*mxssa.Function]*ssa.Function{},
 	}
 	return prog, t
 }
@@ -108,6 +110,8 @@ func (t *Translator) typ(gt types.Type) typecheck.Type {
 
 func (t *Translator) ReverseType(tc typecheck.Type) types.Type { return t.revTypes[tc] }
 
+func (t *Translator) ReverseFunction(fn *mxssa.Function) *ssa.Function { return t.revFuncs[fn] }
+
 func (t *Translator) translateFunctionShell(f *ssa.Function, pkg *mxssa.Package) *mxssa.Function {
 	if fn, ok := t.funcs[f]; ok {
 		return fn
@@ -121,6 +125,7 @@ func (t *Translator) translateFunctionShell(f *ssa.Function, pkg *mxssa.Package)
 	fn := mxssa.NewFunction(f.Name(), sig, f.Synthetic, pkg, t.prog)
 	fn.SetPos(f.Pos())
 	t.funcs[f] = fn
+	t.revFuncs[fn] = f
 	return fn
 }
 

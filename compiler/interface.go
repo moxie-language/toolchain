@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"moxie/mxssa"
 	"moxie/typecheck"
 
 	"golang.org/x/tools/go/ssa"
@@ -854,6 +855,54 @@ func (c *compilerContext) getInvokeFunction(instr *ssa.CallCommon) llvm.Value {
 		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("moxie-methods", methods))
 	}
 	return llvmFn
+}
+
+func (c *compilerContext) getInvokeFunctionTC(instr *mxssa.CallCommon) llvm.Value {
+	itfType := instr.Value.Type().Underlying().(*typecheck.Interface)
+	if itfType.NumMethods() == 0 {
+		panic("getInvokeFunctionTC: invoke on empty interface for method " +
+			instr.Method.Name() + " (compiler invariant broken)")
+	}
+	goItfType := c.mxTranslator.ReverseType(instr.Value.Type().Underlying())
+	if goItfType == nil {
+		panic("getInvokeFunctionTC: no reverse type for " + instr.Value.Type().String())
+	}
+	goItf := goItfType.(*types.Interface)
+	s, _ := getTypeCodeName(goItfType)
+	fnName := s + "." + instr.Method.Name() + "$invoke"
+	llvmFn := c.mod.NamedFunction(fnName)
+	if llvmFn.IsNil() {
+		goMethodType := c.mxTranslator.ReverseType(instr.Method.Type())
+		if goMethodType == nil {
+			panic("getInvokeFunctionTC: no reverse type for method " + instr.Method.Name())
+		}
+		sig := goMethodType.(*types.Signature)
+		var paramTuple []*types.Var
+		for i := 0; i < sig.Params().Len(); i++ {
+			paramTuple = append(paramTuple, sig.Params().At(i))
+		}
+		paramTuple = append(paramTuple, types.NewVar(token.NoPos, nil, "$typecode", types.Typ[types.UnsafePointer]))
+		llvmFnType := c.getLLVMFunctionType(types.NewSignatureType(sig.Recv(), nil, nil, types.NewTuple(paramTuple...), sig.Results(), false))
+		llvmFn = llvm.AddFunction(c.mod, fnName, llvmFnType)
+		c.addStandardDeclaredAttributes(llvmFn)
+		goMethod := findGoMethod(goItf, instr.Method.Name())
+		if goMethod == nil {
+			panic("getInvokeFunctionTC: cannot find go/types method " + instr.Method.Name())
+		}
+		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("moxie-invoke", c.getMethodSignatureName(goMethod)))
+		methods := c.getMethodsString(goItf)
+		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("moxie-methods", methods))
+	}
+	return llvmFn
+}
+
+func findGoMethod(itf *types.Interface, name string) *types.Func {
+	for i := 0; i < itf.NumMethods(); i++ {
+		if itf.Method(i).Name() == name {
+			return itf.Method(i)
+		}
+	}
+	return nil
 }
 
 // getInterfaceInvokeWrapper returns a wrapper for the given method so it can be

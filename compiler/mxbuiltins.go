@@ -11,6 +11,7 @@ package compiler
 
 import (
 	"golang.org/x/tools/go/ssa"
+	"moxie/mxssa"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -44,5 +45,28 @@ func (b *builder) createMoxieLt(instr *ssa.CallCommon) llvm.Value {
 // slice into it.
 func (b *builder) createMoxieSecalloc(instr *ssa.CallCommon) llvm.Value {
 	n := b.getValue(instr.Args[0], instr.Pos())
+	return b.createRuntimeCall("SecureAlloc", []llvm.Value{n}, "")
+}
+
+func (b *builder) createMoxieConcatTC(instr *mxssa.CallCommon) llvm.Value {
+	a := b.getValueTC(instr.Args[0], instr.Pos())
+	bv := b.getValueTC(instr.Args[1], instr.Pos())
+	return b.createRuntimeCall("bytesConcat", []llvm.Value{a, bv}, "")
+}
+
+func (b *builder) createMoxieEqTC(instr *mxssa.CallCommon) llvm.Value {
+	a := b.getValueTC(instr.Args[0], instr.Pos())
+	bv := b.getValueTC(instr.Args[1], instr.Pos())
+	return b.createRuntimeCall("stringEqual", []llvm.Value{a, bv}, "")
+}
+
+func (b *builder) createMoxieLtTC(instr *mxssa.CallCommon) llvm.Value {
+	a := b.getValueTC(instr.Args[0], instr.Pos())
+	bv := b.getValueTC(instr.Args[1], instr.Pos())
+	return b.createRuntimeCall("stringLess", []llvm.Value{a, bv}, "")
+}
+
+func (b *builder) createMoxieSecallocTC(instr *mxssa.CallCommon) llvm.Value {
+	n := b.getValueTC(instr.Args[0], instr.Pos())
 	return b.createRuntimeCall("SecureAlloc", []llvm.Value{n}, "")
 }

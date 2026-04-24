@@ -11,6 +11,8 @@ import (
 	"go/types"
 
 	"golang.org/x/tools/go/ssa"
+	"moxie/mxssa"
+	"moxie/typecheck"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -273,4 +275,170 @@ func hasScheme(s, scheme string) bool {
 		}
 	}
 	return s[len(scheme)] == ':' && s[len(scheme)+1] == '/' && s[len(scheme)+2] == '/'
+}
+
+func (b *builder) createSpawnTC(instr *mxssa.CallCommon) (llvm.Value, error) {
+	if len(instr.Args) < 1 {
+		b.addError(instr.Pos(), "spawn requires at least a function argument")
+		return llvm.Value{}, nil
+	}
+
+	transport := "local"
+	argStart := 0
+	if transportStr, ok := extractTransportStringTC(instr.Args[0]); ok {
+		transport = transportStr
+		argStart = 1
+	}
+
+	switch transport {
+	case "local", "pipe":
+	default:
+		if len(transport) > 0 && (hasScheme(transport, "tcp") || hasScheme(transport, "ws") || hasScheme(transport, "wss")) {
+			b.addError(instr.Pos(), fmt.Sprintf("spawn: network transport %q not yet implemented", transport))
+			return llvm.Value{}, nil
+		}
+		b.addError(instr.Pos(), fmt.Sprintf("spawn: unknown transport %q (expected \"local\", \"pipe\", or a network URL)", transport))
+		return llvm.Value{}, nil
+	}
+
+	if argStart >= len(instr.Args) {
+		b.addError(instr.Pos(), "spawn requires a function argument after transport string")
+		return llvm.Value{}, nil
+	}
+
+	fnArg := instr.Args[argStart]
+	var targetFn *mxssa.Function
+	switch v := fnArg.(type) {
+	case *mxssa.Function:
+		targetFn = v
+	case *mxssa.MakeClosure:
+		if fn, ok := v.Fn.(*mxssa.Function); ok {
+			targetFn = fn
+		}
+	}
+
+	if targetFn == nil {
+		b.addError(instr.Pos(), "spawn: first argument must be a static function (dynamic function values not yet supported)")
+		return llvm.Value{}, nil
+	}
+
+	concreteArgs := instr.Args[argStart+1:]
+
+	moxiePkg := b.program.ImportedPackage("moxie")
+	if moxiePkg == nil {
+		b.addError(instr.Pos(), "spawn: internal error — \"moxie\" package not in program (runtime wiring broken)")
+		return llvm.Value{}, nil
+	}
+	codecObj := moxiePkg.Pkg.Scope().Lookup("Codec")
+	if codecObj == nil {
+		b.addError(instr.Pos(), "spawn: internal error — moxie.Codec symbol missing from moxie package")
+		return llvm.Value{}, nil
+	}
+	codecIface, ok := codecObj.Type().Underlying().(*types.Interface)
+	if !ok {
+		b.addError(instr.Pos(), "spawn: internal error — moxie.Codec is not an interface type")
+		return llvm.Value{}, nil
+	}
+
+	sig := targetFn.Signature
+	for i := 0; i < sig.Params().Len(); i++ {
+		pt := sig.Params().At(i).Type()
+		goType := b.mxTranslator.ReverseType(pt)
+		if goType == nil {
+			b.addError(instr.Pos(), fmt.Sprintf("spawn: cannot reverse-bridge parameter %d type %s", i+1, pt))
+			return llvm.Value{}, nil
+		}
+		if err := validateSpawnArg(goType, i, codecIface); err != nil {
+			b.addError(instr.Pos(), err.Error())
+			return llvm.Value{}, nil
+		}
+	}
+
+	if len(concreteArgs) != sig.Params().Len() {
+		b.addError(instr.Pos(), fmt.Sprintf("spawn: %s expects %d arguments, got %d",
+			targetFn.Name(), sig.Params().Len(), len(concreteArgs)))
+		return llvm.Value{}, nil
+	}
+
+	for i, arg := range concreteArgs {
+		paramType := sig.Params().At(i).Type()
+		argType := arg.Type()
+		if !typecheck.Identical(argType.Underlying(), paramType.Underlying()) {
+			b.addError(instr.Pos(), fmt.Sprintf("spawn: argument %d has type %s, %s expects %s",
+				i+1, argType, targetFn.Name(), paramType))
+			return llvm.Value{}, nil
+		}
+	}
+
+	for i, arg := range concreteArgs {
+		if _, isChan := arg.Type().Underlying().(*typecheck.Chan); !isChan {
+			continue
+		}
+		if mc := traceToMakeChanTC(arg); mc != nil {
+			if c, ok := mc.Size.(*mxssa.Const); ok {
+				if c.Value() != nil && constant.Sign(c.Value()) > 0 {
+					b.addError(instr.Pos(), fmt.Sprintf(
+						"spawn: argument %d is a buffered channel — only unbuffered channels allowed across spawn boundaries",
+						i+1))
+					return llvm.Value{}, nil
+				}
+			} else {
+				b.addError(instr.Pos(), fmt.Sprintf(
+					"spawn: argument %d has dynamic channel buffer size — only unbuffered channels (make(chan T)) allowed across spawn boundaries",
+					i+1))
+				return llvm.Value{}, nil
+			}
+		}
+	}
+
+	var params []llvm.Value
+	for _, arg := range concreteArgs {
+		params = append(params, b.expandFormalParam(b.getValueTC(arg, instr.Pos()))...)
+	}
+
+	paramBundle := b.emitPointerPack(params)
+
+	goFn := b.mxTranslator.ReverseFunction(targetFn)
+	if goFn == nil {
+		return llvm.Value{}, b.makeError(instr.Pos(), "cannot reverse-bridge function: "+targetFn.Name())
+	}
+	funcType, funcPtr := b.getFunction(goFn)
+
+	wrapper := b.createGoroutineStartWrapper(funcType, funcPtr, "spawn", false, false, instr.Pos())
+
+	spawnFnType, spawnFn := b.getFunction(b.program.ImportedPackage("runtime").Members["spawnDomain"].(*ssa.Function))
+	b.createCall(spawnFnType, spawnFn, []llvm.Value{wrapper, paramBundle, llvm.Undef(b.dataPtrType)}, "")
+
+	chanType := b.getLLVMRuntimeType("channel")
+	return llvm.ConstPointerNull(llvm.PointerType(chanType, 0)), nil
+}
+
+func extractTransportStringTC(v mxssa.Value) (string, bool) {
+	if mi, ok := v.(*mxssa.MakeInterface); ok {
+		v = mi.X
+	}
+	c, ok := v.(*mxssa.Const)
+	if !ok {
+		return "", false
+	}
+	if c.Value() == nil || c.Value().Kind() != constant.String {
+		return "", false
+	}
+	return constant.StringVal(c.Value()), true
+}
+
+func traceToMakeChanTC(v mxssa.Value) *mxssa.MakeChan {
+	switch v := v.(type) {
+	case *mxssa.MakeChan:
+		return v
+	case *mxssa.MakeInterface:
+		return traceToMakeChanTC(v.X)
+	case *mxssa.Phi:
+		for _, edge := range v.Edges {
+			if mc := traceToMakeChanTC(edge); mc != nil {
+				return mc
+			}
+		}
+	}
+	return nil
 }
