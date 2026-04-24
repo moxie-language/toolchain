@@ -1,29 +1,25 @@
 package compiler
 
-import "go/types"
+import "moxie/typecheck"
 
-// This file implements volatile loads/stores in runtime/volatile.LoadT and
-// runtime/volatile.StoreT as compiler builtins.
-
-// createVolatileLoad is the implementation of the intrinsic function
-// runtime/volatile.LoadT().
 func (b *builder) createVolatileLoad() {
 	b.createFunctionStart(true)
-	addr := b.getValue(b.fn.Params[0], getPos(b.fn))
-	b.createNilCheck(b.fn.Params[0], addr, "deref")
-	valType := b.getLLVMType(b.fn.Params[0].Type().(*types.Pointer).Elem())
+	p0 := b.mxFn.Params[0]
+	addr := b.getValueTC(p0, getPosTC(p0))
+	b.createNilCheckTC(p0, addr, "deref")
+	valType := b.getLLVMTypeTC(p0.Type().(*typecheck.Pointer).Elem())
 	val := b.CreateLoad(valType, addr, "")
 	val.SetVolatile(true)
 	b.CreateRet(val)
 }
 
-// createVolatileStore is the implementation of the intrinsic function
-// runtime/volatile.StoreT().
 func (b *builder) createVolatileStore() {
 	b.createFunctionStart(true)
-	addr := b.getValue(b.fn.Params[0], getPos(b.fn))
-	val := b.getValue(b.fn.Params[1], getPos(b.fn))
-	b.createNilCheck(b.fn.Params[0], addr, "deref")
+	p0 := b.mxFn.Params[0]
+	p1 := b.mxFn.Params[1]
+	addr := b.getValueTC(p0, getPosTC(p0))
+	val := b.getValueTC(p1, getPosTC(p1))
+	b.createNilCheckTC(p0, addr, "deref")
 	store := b.CreateStore(val, addr)
 	store.SetVolatile(true)
 	b.CreateRetVoid()

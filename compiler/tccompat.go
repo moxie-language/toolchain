@@ -405,12 +405,34 @@ func (c *compilerContext) createConstTC(expr *mxssa.Const, pos token.Pos) llvm.V
 	}
 }
 
-// getPos extracts token.Pos from an ssa instruction/value.
-// This is used by existing code; the TC version works on mxssa.
+// getPosTC extracts token.Pos from an mxssa value.
 func getPosTC(v mxssa.Value) token.Pos {
 	if v == nil {
 		return token.NoPos
 	}
 	return v.Pos()
+}
+
+// createNilCheckTC is the TC-parallel of createNilCheck.
+// Skips the check for values known to be non-nil.
+func (b *builder) createNilCheckTC(inst mxssa.Value, ptr llvm.Value, blockPrefix string) {
+	if !ptr.IsAGlobalValue().IsNil() {
+		return
+	}
+	switch inst := inst.(type) {
+	case *mxssa.Alloc:
+		return
+	case *mxssa.FreeVar:
+		return
+	case *mxssa.IndexAddr:
+		return
+	case *mxssa.Convert:
+		if basic, ok := inst.X.Type().Underlying().(*typecheck.Basic); ok && basic.Kind() == typecheck.UnsafePointer {
+			return
+		}
+	}
+	nilptr := llvm.ConstPointerNull(ptr.Type())
+	isnil := b.CreateICmp(llvm.IntEQ, ptr, nilptr, "")
+	b.createRuntimeAssert(isnil, blockPrefix, "nilPanic")
 }
 
