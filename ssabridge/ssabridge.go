@@ -19,12 +19,13 @@ import (
 
 // Translator converts an ssa.Program into an mxssa.Program.
 type Translator struct {
-	prog    *mxssa.Program
-	imp     *tcbridge.Importer
-	fset    *token.FileSet
-	funcs   map[*ssa.Function]*mxssa.Function
-	globals map[*ssa.Global]*mxssa.Global
-	pkgs    map[*ssa.Package]*mxssa.Package
+	prog     *mxssa.Program
+	imp      *tcbridge.Importer
+	fset     *token.FileSet
+	funcs    map[*ssa.Function]*mxssa.Function
+	globals  map[*ssa.Global]*mxssa.Global
+	pkgs     map[*ssa.Package]*mxssa.Package
+	revTypes map[typecheck.Type]types.Type
 }
 
 // Importer returns the bridge type importer for cross-validation.
@@ -39,12 +40,13 @@ func Translate(fset *token.FileSet, ssaProg *ssa.Program, typePkgs map[string]*t
 	prog := mxssa.NewProgram(fset)
 	imp := tcbridge.New(typePkgs)
 	t := &Translator{
-		prog:    prog,
-		imp:     imp,
-		fset:    fset,
-		funcs:   map[*ssa.Function]*mxssa.Function{},
-		globals: map[*ssa.Global]*mxssa.Global{},
-		pkgs:    map[*ssa.Package]*mxssa.Package{},
+		prog:     prog,
+		imp:      imp,
+		fset:     fset,
+		funcs:    map[*ssa.Function]*mxssa.Function{},
+		globals:  map[*ssa.Global]*mxssa.Global{},
+		pkgs:     map[*ssa.Package]*mxssa.Package{},
+		revTypes: map[typecheck.Type]types.Type{},
 	}
 	return prog, t
 }
@@ -97,8 +99,14 @@ func (t *Translator) TranslatePackage(ssaPkg *ssa.Package) *mxssa.Package {
 }
 
 func (t *Translator) typ(gt types.Type) typecheck.Type {
-	return tcbridge.TranslateType(t.imp, gt)
+	tc := tcbridge.TranslateType(t.imp, gt)
+	if tc != nil && gt != nil {
+		t.revTypes[tc] = gt
+	}
+	return tc
 }
+
+func (t *Translator) ReverseType(tc typecheck.Type) types.Type { return t.revTypes[tc] }
 
 func (t *Translator) translateFunctionShell(f *ssa.Function, pkg *mxssa.Package) *mxssa.Function {
 	if fn, ok := t.funcs[f]; ok {

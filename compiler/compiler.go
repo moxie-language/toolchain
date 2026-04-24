@@ -177,6 +177,7 @@ type builder struct {
 	deferClosureFuncs map[*ssa.Function]int
 	deferExprFuncs    map[ssa.Value]int
 	selectRecvBuf     map[*ssa.Select]llvm.Value
+	selectRecvBufTC   map[*mxssa.Select]llvm.Value
 	deferBuiltinFuncs map[ssa.Value]deferBuiltin
 	runDefersBlock    []llvm.BasicBlock
 	afterDefersBlock  []llvm.BasicBlock

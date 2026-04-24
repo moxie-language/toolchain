@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 
+	"moxie/typecheck"
+
 	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
@@ -78,6 +80,19 @@ const (
 func (b *builder) createMakeInterface(val llvm.Value, typ types.Type, pos token.Pos) llvm.Value {
 	itfValue := b.emitPointerPack([]llvm.Value{val})
 	itfType := b.getTypeCode(typ)
+	itf := llvm.Undef(b.getLLVMRuntimeType("_interface"))
+	itf = b.CreateInsertValue(itf, itfType, 0, "")
+	itf = b.CreateInsertValue(itf, itfValue, 1, "")
+	return itf
+}
+
+func (b *builder) createMakeInterfaceTC(val llvm.Value, typ typecheck.Type, pos token.Pos) llvm.Value {
+	goType := b.mxTranslator.ReverseType(typ)
+	if goType == nil {
+		panic("createMakeInterfaceTC: no reverse type for " + typ.String())
+	}
+	itfValue := b.emitPointerPack([]llvm.Value{val})
+	itfType := b.getTypeCode(goType)
 	itf := llvm.Undef(b.getLLVMRuntimeType("_interface"))
 	itf = b.CreateInsertValue(itf, itfType, 0, "")
 	itf = b.CreateInsertValue(itf, itfValue, 1, "")
