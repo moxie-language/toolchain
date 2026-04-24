@@ -817,6 +817,30 @@ export function OnPullRefresh(elId, indicatorId, fn) {
   }, { passive: true });
 }
 
+// PickFileBase64: open file picker, read as base64, call fn(base64, mime).
+export function PickFileBase64(accept, fn) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  if (accept) input.accept = accept;
+  input.style.display = 'none';
+  input.addEventListener('change', function() {
+    if (!input.files || !input.files[0]) { fn('', ''); return; }
+    const file = input.files[0];
+    const mime = file.type || 'application/octet-stream';
+    const reader = new FileReader();
+    reader.onload = function() {
+      const b64 = reader.result.split(',')[1] || '';
+      fn(b64, mime);
+    };
+    reader.onerror = function() { fn('', ''); };
+    reader.readAsDataURL(file);
+    input.remove();
+  });
+  document.body.appendChild(input);
+  input.click();
+  setTimeout(function() { input.remove(); }, 120000);
+}
+
 // OnPasteImage: listen for paste events with image data on an element.
 export function OnPasteImage(elId, fn) {
   const el = _elements.get(elId);
