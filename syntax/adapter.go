@@ -48,16 +48,23 @@ type Adapter struct {
 // Convert parses src using the bootstrap parser and returns a go/ast.File
 // registered in fset. filename is used for position info.
 func Convert(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+	af, _, err := ConvertAndKeep(fset, filename, src)
+	return af, err
+}
+
+// ConvertAndKeep is like Convert but also returns the parsed *syntax.File.
+// The syntax.File is used by the native type checker (B1) to annotate
+// expressions with type info without going through go/ast.
+func ConvertAndKeep(fset *token.FileSet, filename string, src []byte) (*ast.File, *File, error) {
 	base := NewFileBase(filename)
 	sf, err := Parse(base, bytes.NewReader(src), nil, pragmaHandler, 0)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	a := &Adapter{fset: fset}
 	a.file = fset.AddFile(filename, -1, len(src))
 
-	// Register real line offsets from the source
 	var lines []int
 	lines = append(lines, 0)
 	for i, b := range src {
@@ -68,7 +75,7 @@ func Convert(fset *token.FileSet, filename string, src []byte) (*ast.File, error
 	a.file.SetLines(lines)
 
 	af := a.convertFile(sf)
-	return af, nil
+	return af, sf, nil
 }
 
 func (a *Adapter) pos(p Pos) token.Pos {

@@ -1,0 +1,111 @@
+package testing
+
+import (
+	"fmt"
+	"os"
+)
+
+var testBinary string
+
+type T struct {
+	name   string
+	failed bool
+}
+
+func (t *T) Fatal(args ...any) {
+	fmt.Print("    ")
+	fmt.Println(args...)
+	t.failed = true
+	panic(testFailedPanic{})
+}
+
+func (t *T) Fatalf(format string, args ...any) {
+	fmt.Print("    ")
+	fmt.Printf(format, args...)
+	fmt.Println()
+	t.failed = true
+	panic(testFailedPanic{})
+}
+
+func (t *T) Error(args ...any) {
+	fmt.Print("    ")
+	fmt.Println(args...)
+	t.failed = true
+}
+
+func (t *T) Errorf(format string, args ...any) {
+	fmt.Print("    ")
+	fmt.Printf(format, args...)
+	fmt.Println()
+	t.failed = true
+}
+
+func (t *T) Log(args ...any) {
+	fmt.Print("    ")
+	fmt.Println(args...)
+}
+
+func (t *T) Logf(format string, args ...any) {
+	fmt.Print("    ")
+	fmt.Printf(format, args...)
+	fmt.Println()
+}
+
+func (t *T) Name() string {
+	return t.name
+}
+
+func (t *T) Skip(args ...any) {
+	fmt.Print("    SKIP: ")
+	fmt.Println(args...)
+	panic(testSkippedPanic{})
+}
+
+func (t *T) Helper() {}
+
+type testFailedPanic struct{}
+type testSkippedPanic struct{}
+
+type InternalTest struct {
+	Name string
+	F    func(*T)
+}
+
+func Main(tests []InternalTest) {
+	passed := 0
+	failed := 0
+	skipped := 0
+	for _, test := range tests {
+		t := &T{name: test.Name}
+		fmt.Println("=== RUN  ", test.Name)
+		func() {
+			defer func() {
+				r := recover()
+				if r != nil {
+					if _, ok := r.(testFailedPanic); ok {
+						return
+					}
+					if _, ok := r.(testSkippedPanic); ok {
+						return
+					}
+					fmt.Println("    panic:", r)
+					t.failed = true
+				}
+			}()
+			test.F(t)
+		}()
+		if t.failed {
+			fmt.Println("--- FAIL:", test.Name)
+			failed++
+		} else {
+			fmt.Println("--- PASS:", test.Name)
+			passed++
+		}
+	}
+	fmt.Println()
+	if failed > 0 {
+		fmt.Printf("FAIL: %d passed, %d failed, %d skipped\n", passed, failed, skipped)
+		os.Exit(1)
+	}
+	fmt.Printf("PASS: %d passed, %d skipped\n", passed, skipped)
+}

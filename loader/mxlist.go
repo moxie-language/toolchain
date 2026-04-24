@@ -47,15 +47,7 @@ func mxListPackagesImpl(config *compileopts.Config, goroot string, inputPkg stri
 		return nil, fmt.Errorf("mxlist: %w", err)
 	}
 
-	// Read module cache path for external dependencies.
-	modCache := goenv.Get("GOMODCACHE")
-	if modCache == "" {
-		gopath := goenv.Get("GOPATH")
-		if gopath == "" {
-			gopath = filepath.Join(os.Getenv("HOME"), "go")
-		}
-		modCache = filepath.Join(gopath, "pkg", "mod")
-	}
+	modCache := gomodcache()
 
 	// Parse module require and replace directives.
 	modFile := findModFile(modDir)
@@ -385,8 +377,15 @@ func (r *resolver) resolveDir(importPath string, srcDir string) (string, error) 
 		}
 	}
 
-	// 4b. External dependencies (module cache).
-	// Find the longest matching module path from go.mod requires.
+	// 4b. Vendored packages (checked before module cache).
+	if r.modDir != "" {
+		vendorDir := filepath.Join(r.modDir, "vendor", importPath)
+		if isDir(vendorDir) {
+			return vendorDir, nil
+		}
+	}
+
+	// 4c. External dependencies (module cache — fallback when no vendor).
 	bestMod := ""
 	bestVer := ""
 	for mod, ver := range r.requires {
@@ -396,7 +395,6 @@ func (r *resolver) resolveDir(importPath string, srcDir string) (string, error) 
 		}
 	}
 	if bestMod != "" {
-		// Module cache path: $GOMODCACHE/module@version/subpath
 		modCacheDir := filepath.Join(r.modCache, bestMod+"@"+bestVer)
 		rel := strings.TrimPrefix(importPath, bestMod)
 		rel = strings.TrimPrefix(rel, "/")
@@ -405,14 +403,6 @@ func (r *resolver) resolveDir(importPath string, srcDir string) (string, error) 
 			return dir, nil
 		}
 		return "", fmt.Errorf("package %q not found in module cache at %s", importPath, dir)
-	}
-
-	// 5. Vendored packages.
-	if r.modDir != "" {
-		vendorDir := filepath.Join(r.modDir, "vendor", importPath)
-		if isDir(vendorDir) {
-			return vendorDir, nil
-		}
 	}
 
 	return "", fmt.Errorf("package %q not found (not in stdlib, module, or cache)", importPath)
@@ -549,6 +539,18 @@ func readModReplaces(gomodPath, modDir string) (map[string]string, error) {
 		}
 	}
 	return replaces, nil
+}
+
+func gomodcache() string {
+	c := goenv.Get("GOMODCACHE")
+	if c == "" {
+		gopath := goenv.Get("GOPATH")
+		if gopath == "" {
+			gopath = filepath.Join(os.Getenv("HOME"), "go")
+		}
+		c = filepath.Join(gopath, "pkg", "mod")
+	}
+	return c
 }
 
 func isDir(path string) bool {

@@ -392,6 +392,7 @@ commands:
   targets: list all supported targets
   version: print version information
   env:     print environment information
+  vendor:  copy dependencies into vendor/
   help:    print this help text
 `
 
@@ -733,6 +734,16 @@ func main() {
 				os.Exit(exitErr.ExitCode())
 			}
 			fmt.Fprintln(os.Stderr, "failed to run `moxie list`:", err)
+			os.Exit(1)
+		}
+	case "vendor":
+		wd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := loader.Vendor(wd); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 	case "clean":

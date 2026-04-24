@@ -32,13 +32,19 @@ type Program struct {
 	goroot      string // synthetic GOROOT
 	workingDir  string
 
-	Packages map[string]*Package
-	sorted   []*Package
-	fset     *token.FileSet
+	Packages        map[string]*Package
+	sorted          []*Package
+	fset            *token.FileSet
+	keepSyntaxFiles bool // set by EnableSyntaxFiles; only mxcheck needs this
 
 	// Information obtained during parsing.
 	LDFlags []string
 }
+
+// EnableSyntaxFiles instructs the loader to retain *syntax.File ASTs in
+// Package.SyntaxFiles. Off by default to avoid doubling AST memory during
+// normal builds (the compiler does not use syntax files today).
+func (p *Program) EnableSyntaxFiles() { p.keepSyntaxFiles = true }
 
 // PackageJSON is a subset of the JSON struct returned from `moxie list`.
 type PackageJSON struct {
@@ -81,6 +87,7 @@ type Package struct {
 
 	program      *Program
 	Files        []*ast.File
+	SyntaxFiles  []*syntax.File // bootstrap-parser AST, used by the native type checker (B1)
 	FileHashes   map[string][]byte
 	CFlags       []string // CFlags used during CGo preprocessing (only set if CGo is used)
 	CGoHeaders   []string // text above 'import "C"' lines
@@ -259,6 +266,22 @@ func (p *Program) Parse() error {
 		}
 	}
 
+	// Pre-typecheck: constant-pipe and secalloc rewrites need no type info.
+	// Injecting builtins here lets the first checker.Check() resolve
+	// __moxie_secalloc without a re-typecheck pass for packages that use
+	// secure allocation but no pipe/byte-compare rewrites.
+	for _, pkg := range p.sorted {
+		if isMoxieStringTarget(pkg.ImportPath) {
+			rewriteConstPipes(pkg.Files)
+			if !pkg.hasBuiltins && hasMoxieSecallocRefs(pkg.Files) {
+				if f := injectMoxieByteBuiltins(p.fset, pkg.Name); f != nil {
+					pkg.Files = append(pkg.Files, f)
+					pkg.hasBuiltins = true
+				}
+			}
+		}
+	}
+
 	// Typecheck all packages.
 	for _, pkg := range p.sorted {
 		err := pkg.Check()
@@ -278,6 +301,7 @@ func (p *Package) OriginalDir() string {
 
 // parseFile parses a source file using the bootstrap parser (syntax package)
 // and converts the result to go/ast.File for downstream compatibility.
+// The *syntax.File is stored in p.SyntaxFiles for the native type checker (B1).
 func (p *Package) parseFile(path string, mode parser.Mode) (*ast.File, error) {
 	originalPath := p.program.getOriginalPath(path)
 	data, err := os.ReadFile(path)
@@ -290,7 +314,21 @@ func (p *Package) parseFile(path string, mode parser.Mode) (*ast.File, error) {
 	data = rewriteChanLiterals(data, p.program.fset)
 	data = rewriteSliceLiterals(data, p.program.fset)
 
-	return syntax.Convert(p.program.fset, originalPath, data)
+	if p.program.keepSyntaxFiles {
+		af, sf, err := syntax.ConvertAndKeep(p.program.fset, originalPath, data)
+		if err != nil {
+			return nil, err
+		}
+		if sf != nil {
+			p.SyntaxFiles = append(p.SyntaxFiles, sf)
+		}
+		return af, nil
+	}
+	af, err := syntax.Convert(p.program.fset, originalPath, data)
+	if err != nil {
+		return nil, err
+	}
+	return af, nil
 }
 
 // Parse parses and typechecks this package.
@@ -379,14 +417,12 @@ func (p *Package) Check() error {
 				return Errors{p, plusErrs}
 			}
 		}
-		rewriteConstPipes(p.Files)
 		pipeRewrites := findPipeConcat(p.Files, &p.info)
 		cmpExprs := findByteComparisons(p.Files, &p.info)
 		byteSwitches := findByteSwitches(p.Files, &p.info)
 		addAssignCount := rewriteAddAssign(p.Files, &p.info)
-		secallocRefs := hasMoxieSecallocRefs(p.Files)
 
-		if len(pipeRewrites) > 0 || len(cmpExprs) > 0 || len(byteSwitches) > 0 || addAssignCount > 0 || secallocRefs {
+		if len(pipeRewrites) > 0 || len(cmpExprs) > 0 || len(byteSwitches) > 0 || addAssignCount > 0 {
 			applyPipeRewrites(p.Files, pipeRewrites)
 			applyByteComparisonRewrites(p.Files, cmpExprs)
 			applyByteSwitchRewrites(byteSwitches)

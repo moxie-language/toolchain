@@ -10,7 +10,6 @@ import (
 	"go/types"
 	"io"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
 
@@ -120,22 +119,13 @@ func createPackageDiagnostic(err error) PackageDiagnostic {
 func createDiagnostics(err error) []Diagnostic {
 	switch err := err.(type) {
 	case types.Error:
-		diag := Diagnostic{
+		// StartPos/EndPos come from go/types.Error.go116start/go116end,
+		// which are unexported. They will be populated natively from
+		// typecheck.TypeError.EndPos once B3 replaces go/types.
+		return []Diagnostic{{
 			Pos: err.Fset.Position(err.Pos),
 			Msg: err.Msg,
-		}
-		// There is a special unexported API since Go 1.16 that provides the
-		// range (start and end position) where the type error exists.
-		// There is no promise of backwards compatibility in future Go versions
-		// so we have to be extra careful here to be resilient.
-		v := reflect.ValueOf(err)
-		start := v.FieldByName("go116start")
-		end := v.FieldByName("go116end")
-		if start.IsValid() && end.IsValid() && start.Int() != end.Int() {
-			diag.StartPos = err.Fset.Position(token.Pos(start.Int()))
-			diag.EndPos = err.Fset.Position(token.Pos(end.Int()))
-		}
-		return []Diagnostic{diag}
+		}}
 	case scanner.Error:
 		return []Diagnostic{
 			{
