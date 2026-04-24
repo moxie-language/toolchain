@@ -7,6 +7,7 @@ import (
 	"go/token"
 
 	"golang.org/x/tools/go/ssa"
+	"moxie/mxssa"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -45,6 +46,35 @@ func (b *builder) trackExpr(expr ssa.Value, value llvm.Value) {
 		switch expr.Op {
 		case token.ADD:
 			// String concatenation.
+			b.trackValue(value)
+		}
+	}
+}
+
+func (b *builder) trackExprTC(expr mxssa.Value, value llvm.Value) {
+	switch expr := expr.(type) {
+	case *mxssa.Alloc, *mxssa.MakeChan, *mxssa.MakeMap:
+		b.trackPointer(value)
+	case *mxssa.Call, *mxssa.Convert, *mxssa.MakeClosure, *mxssa.MakeInterface, *mxssa.MakeSlice, *mxssa.Next:
+		if !value.IsNil() {
+			b.trackValue(value)
+		}
+	case *mxssa.Select:
+		if alloca, ok := b.selectRecvBufTC[expr]; ok {
+			if alloca.IsAUndefValue().IsNil() {
+				b.trackPointer(alloca)
+			}
+		}
+	case *mxssa.UnOp:
+		switch expr.Op {
+		case token.MUL:
+			b.trackValue(value)
+		case token.ARROW:
+			b.trackValue(value)
+		}
+	case *mxssa.BinOp:
+		switch expr.Op {
+		case token.ADD:
 			b.trackValue(value)
 		}
 	}

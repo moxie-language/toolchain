@@ -6,6 +6,7 @@ import (
 	"go/types"
 
 	"golang.org/x/tools/go/ssa"
+	"moxie/mxssa"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -116,4 +117,26 @@ func (b *builder) parseMakeClosure(expr *ssa.MakeClosure) (llvm.Value, error) {
 	// Create the closure.
 	_, fn := b.getFunction(f)
 	return b.createFuncValue(fn, context, f.Signature), nil
+}
+
+func (b *builder) parseMakeClosureTC(expr *mxssa.MakeClosure) (llvm.Value, error) {
+	if len(expr.Bindings) == 0 {
+		panic("unexpected: MakeClosure without bound variables")
+	}
+	f := expr.Fn.(*mxssa.Function)
+
+	boundVars := make([]llvm.Value, len(expr.Bindings))
+	for i, binding := range expr.Bindings {
+		llvmBoundVar := b.getValueTC(binding, expr.Pos())
+		boundVars[i] = llvmBoundVar
+	}
+
+	context := b.emitPointerPack(boundVars)
+
+	goFn := b.mxTranslator.ReverseFunction(f)
+	if goFn == nil {
+		panic("parseMakeClosureTC: cannot reverse-bridge function: " + f.Name())
+	}
+	_, fn := b.getFunction(goFn)
+	return b.createFuncValue(fn, context, goFn.Signature), nil
 }

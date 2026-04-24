@@ -797,6 +797,67 @@ func (b *builder) createTypeAssert(expr *ssa.TypeAssert) llvm.Value {
 	}
 }
 
+func (b *builder) createTypeAssertTC(expr *mxssa.TypeAssert) llvm.Value {
+	itf := b.getValueTC(expr.X, expr.Pos())
+	assertedType := b.getLLVMTypeTC(expr.AssertedType)
+
+	actualTypeNum := b.CreateExtractValue(itf, 0, "interface.type")
+	commaOk := llvm.Value{}
+
+	goAssertedType := b.mxTranslator.ReverseType(expr.AssertedType)
+	if goAssertedType == nil {
+		panic("createTypeAssertTC: no reverse type for " + expr.AssertedType.String())
+	}
+
+	if _, ok := expr.AssertedType.Underlying().(*typecheck.Interface); ok {
+		tcItf := expr.AssertedType.Underlying().(*typecheck.Interface)
+		if tcItf.NumMethods() == 0 {
+			commaOk = llvm.ConstInt(b.ctx.Int1Type(), 1, true)
+		} else {
+			fn := b.getInterfaceImplementsFunc(goAssertedType)
+			commaOk = b.CreateCall(fn.GlobalValueType(), fn, []llvm.Value{actualTypeNum}, "")
+		}
+	} else {
+		name, _ := getTypeCodeName(goAssertedType)
+		globalName := "reflect/types.typeid:" + name
+		assertedTypeCodeGlobal := b.mod.NamedGlobal(globalName)
+		if assertedTypeCodeGlobal.IsNil() {
+			assertedTypeCodeGlobal = llvm.AddGlobal(b.mod, b.ctx.Int8Type(), globalName)
+			assertedTypeCodeGlobal.SetGlobalConstant(true)
+		}
+		commaOk = b.createRuntimeCall("typeAssert", []llvm.Value{actualTypeNum, assertedTypeCodeGlobal}, "typecode")
+	}
+
+	prevBlock := b.GetInsertBlock()
+	okBlock := b.insertBasicBlock("typeassert.ok")
+	nextBlock := b.insertBasicBlock("typeassert.next")
+	b.currentBlockInfo.exit = nextBlock
+	b.CreateCondBr(commaOk, okBlock, nextBlock)
+
+	b.SetInsertPointAtEnd(okBlock)
+	var valueOk llvm.Value
+	if _, ok := expr.AssertedType.Underlying().(*typecheck.Interface); ok {
+		valueOk = itf
+	} else {
+		valueOk = b.extractValueFromInterface(itf, assertedType)
+	}
+	b.CreateBr(nextBlock)
+
+	b.SetInsertPointAtEnd(nextBlock)
+	phi := b.CreatePHI(assertedType, "typeassert.value")
+	phi.AddIncoming([]llvm.Value{llvm.ConstNull(assertedType), valueOk}, []llvm.BasicBlock{prevBlock, okBlock})
+
+	if expr.CommaOk {
+		tuple := b.ctx.ConstStruct([]llvm.Value{llvm.Undef(assertedType), llvm.Undef(b.ctx.Int1Type())}, false)
+		tuple = b.CreateInsertValue(tuple, phi, 0, "")
+		tuple = b.CreateInsertValue(tuple, commaOk, 1, "")
+		return tuple
+	} else {
+		b.createRuntimeCall("interfaceTypeAssert", []llvm.Value{commaOk}, "")
+		return phi
+	}
+}
+
 // getMethodsString returns a string to be used in the "moxie-methods" string
 // attribute for interface functions.
 func (c *compilerContext) getMethodsString(itf *types.Interface) string {

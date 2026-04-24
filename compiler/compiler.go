@@ -163,6 +163,7 @@ type builder struct {
 	tarjanStack       []uint
 	tarjanIndex       uint
 	phis              []phiNode
+	mxPhis            []phiNodeTC
 	deferPtr          llvm.Value
 	deferFrame        llvm.Value
 	stackChainAlloca  llvm.Value
@@ -224,6 +225,11 @@ type deferBuiltin struct {
 
 type phiNode struct {
 	ssa  *ssa.Phi
+	llvm llvm.Value
+}
+
+type phiNodeTC struct {
+	phi  *mxssa.Phi
 	llvm llvm.Value
 }
 
@@ -1619,6 +1625,92 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 	}
 }
 
+func (b *builder) createInstructionTC(instr mxssa.Instruction) {
+	if b.Debug {
+		b.setDebugLocation(instr.Pos())
+	}
+
+	switch instr := instr.(type) {
+	case mxssa.Value:
+		if value, err := b.createExprTC(instr); err != nil {
+			b.diagnostics = append(b.diagnostics, err)
+			b.mxLocals[instr] = llvm.Undef(b.getLLVMTypeTC(instr.Type()))
+		} else {
+			b.mxLocals[instr] = value
+			if len(*instr.Referrers()) != 0 && b.NeedsStackObjects {
+				b.trackExprTC(instr, value)
+			}
+		}
+	case *mxssa.DebugRef:
+		// ignore
+	case *mxssa.Defer:
+		b.addError(instr.Pos(), "todo: defer TC path not yet implemented")
+	case *mxssa.Go:
+		if b.mxFn != nil && b.mxFn.Pkg != nil {
+			pkgPath := b.mxFn.Pkg.Pkg.Path()
+			if !strings.HasPrefix(pkgPath, "runtime") && !strings.HasPrefix(pkgPath, "internal/") {
+				b.addError(instr.Pos(), "moxie: the go keyword is not supported (there are no goroutines)")
+				return
+			}
+		}
+		b.addError(instr.Pos(), "todo: go TC path not yet implemented")
+	case *mxssa.If:
+		cond := b.getValueTC(instr.Cond, instr.Pos())
+		block := instr.Block()
+		blockThen := b.blockInfo[block.Succs[0].Index].entry
+		blockElse := b.blockInfo[block.Succs[1].Index].entry
+		b.CreateCondBr(cond, blockThen, blockElse)
+	case *mxssa.Jump:
+		blockJump := b.blockInfo[instr.Block().Succs[0].Index].entry
+		b.CreateBr(blockJump)
+	case *mxssa.MapUpdate:
+		m := b.getValueTC(instr.Map, instr.Pos())
+		key := b.getValueTC(instr.Key, instr.Pos())
+		value := b.getValueTC(instr.Value, instr.Pos())
+		mapType := instr.Map.Type().Underlying().(*typecheck.Map)
+		b.createMapUpdateTC(mapType.Key(), m, key, value, instr.Pos())
+	case *mxssa.Panic:
+		value := b.getValueTC(instr.X, instr.Pos())
+		b.createRuntimeInvoke("_panic", []llvm.Value{value}, "")
+		b.CreateUnreachable()
+	case *mxssa.Return:
+		if b.hasDeferFrame() {
+			b.createRuntimeCall("destroyDeferFrame", []llvm.Value{b.deferFrame}, "")
+		}
+		if len(instr.Results) == 0 {
+			b.CreateRetVoid()
+		} else if len(instr.Results) == 1 {
+			b.CreateRet(b.getValueTC(instr.Results[0], instr.Pos()))
+		} else {
+			retVal := llvm.ConstNull(b.llvmFn.GlobalValueType().ReturnType())
+			for i, result := range instr.Results {
+				val := b.getValueTC(result, instr.Pos())
+				retVal = b.CreateInsertValue(retVal, val, i, "")
+			}
+			b.CreateRet(retVal)
+		}
+	case *mxssa.RunDefers:
+		run := b.insertBasicBlock("rundefers.block")
+		b.CreateBr(run)
+		b.runDefersBlock = append(b.runDefersBlock, run)
+		after := b.insertBasicBlock("rundefers.after")
+		b.SetInsertPointAtEnd(after)
+		b.afterDefersBlock = append(b.afterDefersBlock, after)
+	case *mxssa.Send:
+		b.createChanSendTC(instr)
+	case *mxssa.Store:
+		llvmAddr := b.getValueTC(instr.Addr, instr.Pos())
+		llvmVal := b.getValueTC(instr.Val, instr.Pos())
+		b.createNilCheckTC(instr.Addr, llvmAddr, "store")
+		if b.targetData.TypeAllocSize(llvmVal.Type()) == 0 {
+			return
+		}
+		b.CreateStore(llvmVal, llvmAddr)
+	default:
+		b.addError(instr.Pos(), "unknown instruction: "+instr.String())
+	}
+}
+
 // createBuiltin lowers a builtin Go function (append, close, delete, etc.) to
 // LLVM IR. It uses runtime calls for some builtins.
 func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, callName string, pos token.Pos) (llvm.Value, error) {
@@ -2988,6 +3080,379 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		return b.createTypeAssert(expr), nil
 	case *ssa.UnOp:
 		return b.createUnOp(expr)
+	default:
+		return llvm.Value{}, b.makeError(expr.Pos(), "todo: unknown expression: "+expr.String())
+	}
+}
+
+func (b *builder) createExprTC(expr mxssa.Value) (llvm.Value, error) {
+	if _, ok := b.mxLocals[expr]; ok {
+		panic("instruction has already been created: " + expr.String())
+	}
+
+	switch expr := expr.(type) {
+	case *mxssa.Alloc:
+		typ := b.getLLVMTypeTC(expr.Type().Underlying().(*typecheck.Pointer).Elem())
+		size := b.targetData.TypeAllocSize(typ)
+		if expr.Heap || size > b.MaxStackAlloc {
+			maxSize := llvm.ConstNot(llvm.ConstInt(b.uintptrType, 0, false)).ZExtValue()
+			if size > maxSize {
+				return llvm.Value{}, b.makeError(expr.Pos(), fmt.Sprintf("value is too big (%v bytes)", size))
+			}
+			sizeValue := llvm.ConstInt(b.uintptrType, size, false)
+			layoutValue := b.createObjectLayout(typ, expr.Pos())
+			buf := b.createRuntimeCall("alloc", []llvm.Value{sizeValue, layoutValue}, expr.Comment)
+			align := b.targetData.ABITypeAlignment(typ)
+			buf.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(align)))
+			return buf, nil
+		} else {
+			buf := llvmutil.CreateEntryBlockAlloca(b.Builder, typ, expr.Comment)
+			if b.targetData.TypeAllocSize(typ) != 0 {
+				b.CreateStore(llvm.ConstNull(typ), buf)
+			}
+			return buf, nil
+		}
+	case *mxssa.BinOp:
+		x := b.getValueTC(expr.X, expr.Pos())
+		y := b.getValueTC(expr.Y, expr.Pos())
+		return b.createBinOpTC(expr.Op, expr.X.Type(), expr.Y.Type(), x, y, expr.Pos())
+	case *mxssa.Call:
+		return b.createFunctionCallTC(expr.Common())
+	case *mxssa.ChangeInterface:
+		return b.getValueTC(expr.X, expr.Pos()), nil
+	case *mxssa.ChangeType:
+		x := b.getValueTC(expr.X, expr.Pos())
+		llvmType := b.getLLVMTypeTC(expr.Type())
+		if x.Type() == llvmType {
+			return x, nil
+		}
+		switch llvmType.TypeKind() {
+		case llvm.StructTypeKind:
+			value := llvm.Undef(llvmType)
+			for i := 0; i < llvmType.StructElementTypesCount(); i++ {
+				field := b.CreateExtractValue(x, i, "changetype.field")
+				value = b.CreateInsertValue(value, field, i, "changetype.struct")
+			}
+			return value, nil
+		default:
+			return llvm.Value{}, errors.New("todo: unknown ChangeType type: " + expr.X.Type().String())
+		}
+	case *mxssa.Const:
+		panic("const is not an expression")
+	case *mxssa.Convert:
+		x := b.getValueTC(expr.X, expr.Pos())
+		return b.createConvertTC(expr.X.Type(), expr.Type(), x, expr.Pos())
+	case *mxssa.Extract:
+		if _, ok := expr.Tuple.(*mxssa.Select); ok {
+			return b.getChanSelectResultTC(expr), nil
+		}
+		value := b.getValueTC(expr.Tuple, expr.Pos())
+		return b.CreateExtractValue(value, expr.Index, ""), nil
+	case *mxssa.Field:
+		value := b.getValueTC(expr.X, expr.Pos())
+		return b.CreateExtractValue(value, expr.Field, ""), nil
+	case *mxssa.FieldAddr:
+		val := b.getValueTC(expr.X, expr.Pos())
+		b.createNilCheckTC(expr.X, val, "gep")
+		indices := []llvm.Value{
+			llvm.ConstInt(b.ctx.Int32Type(), 0, false),
+			llvm.ConstInt(b.ctx.Int32Type(), uint64(expr.Field), false),
+		}
+		elementType := b.getLLVMTypeTC(expr.X.Type().Underlying().(*typecheck.Pointer).Elem())
+		return b.CreateInBoundsGEP(elementType, val, indices, ""), nil
+	case *mxssa.Function:
+		panic("function is not an expression")
+	case *mxssa.Global:
+		panic("global is not an expression")
+	case *mxssa.Index:
+		collection := b.getValueTC(expr.X, expr.Pos())
+		index := b.getValueTC(expr.Index, expr.Pos())
+		switch xType := expr.X.Type().Underlying().(type) {
+		case *typecheck.Basic:
+			if xType.Info()&typecheck.IsString == 0 {
+				panic("lookup on non-string?")
+			}
+			index = b.extendIntegerTC(index, expr.Index.Type(), b.uintptrType)
+			length := b.CreateExtractValue(collection, 1, "len")
+			b.createLookupBoundsCheck(length, index)
+			buf := b.CreateExtractValue(collection, 0, "")
+			bufElemType := b.ctx.Int8Type()
+			bufPtr := b.CreateInBoundsGEP(bufElemType, buf, []llvm.Value{index}, "")
+			return b.CreateLoad(bufElemType, bufPtr, ""), nil
+		case *typecheck.Slice:
+			if basic, ok := xType.Elem().(*typecheck.Basic); ok && basic.Kind() == typecheck.Uint8 {
+				index = b.extendIntegerTC(index, expr.Index.Type(), b.uintptrType)
+				length := b.CreateExtractValue(collection, 1, "len")
+				b.createLookupBoundsCheck(length, index)
+				buf := b.CreateExtractValue(collection, 0, "")
+				bufElemType := b.ctx.Int8Type()
+				bufPtr := b.CreateInBoundsGEP(bufElemType, buf, []llvm.Value{index}, "")
+				return b.CreateLoad(bufElemType, bufPtr, ""), nil
+			}
+			panic("unexpected slice type in *mxssa.Index")
+		case *typecheck.Array:
+			index = b.extendIntegerTC(index, expr.Index.Type(), b.uintptrType)
+			arrayLen := llvm.ConstInt(b.uintptrType, uint64(xType.Len()), false)
+			b.createLookupBoundsCheck(arrayLen, index)
+			arrayType := collection.Type()
+			alloca, allocaSize := b.createTemporaryAlloca(arrayType, "index.alloca")
+			b.CreateStore(collection, alloca)
+			zero := llvm.ConstInt(b.ctx.Int32Type(), 0, false)
+			ptr := b.CreateInBoundsGEP(arrayType, alloca, []llvm.Value{zero, index}, "index.gep")
+			result := b.CreateLoad(arrayType.ElementType(), ptr, "index.load")
+			b.emitLifetimeEnd(alloca, allocaSize)
+			return result, nil
+		default:
+			panic("unknown *mxssa.Index type")
+		}
+	case *mxssa.IndexAddr:
+		val := b.getValueTC(expr.X, expr.Pos())
+		index := b.getValueTC(expr.Index, expr.Pos())
+		var bufptr, buflen llvm.Value
+		var bufType llvm.Type
+		switch ptrTyp := expr.X.Type().Underlying().(type) {
+		case *typecheck.Pointer:
+			typ := ptrTyp.Elem().Underlying()
+			switch typ := typ.(type) {
+			case *typecheck.Array:
+				bufptr = val
+				buflen = llvm.ConstInt(b.uintptrType, uint64(typ.Len()), false)
+				bufType = b.getLLVMTypeTC(typ)
+				b.createNilCheckTC(expr.X, bufptr, "gep")
+			default:
+				return llvm.Value{}, b.makeError(expr.Pos(), "todo: indexaddr: "+typ.String())
+			}
+		case *typecheck.Slice:
+			bufptr = b.CreateExtractValue(val, 0, "indexaddr.ptr")
+			buflen = b.CreateExtractValue(val, 1, "indexaddr.len")
+			bufType = b.getLLVMTypeTC(ptrTyp.Elem())
+		case *typecheck.Basic:
+			bufptr = b.CreateExtractValue(val, 0, "indexaddr.ptr")
+			buflen = b.CreateExtractValue(val, 1, "indexaddr.len")
+			bufType = b.ctx.Int8Type()
+		default:
+			return llvm.Value{}, b.makeError(expr.Pos(), "todo: indexaddr: "+ptrTyp.String())
+		}
+		index = b.extendIntegerTC(index, expr.Index.Type(), b.uintptrType)
+		b.createLookupBoundsCheck(buflen, index)
+		switch expr.X.Type().Underlying().(type) {
+		case *typecheck.Pointer:
+			indices := []llvm.Value{llvm.ConstInt(b.ctx.Int32Type(), 0, false), index}
+			return b.CreateInBoundsGEP(bufType, bufptr, indices, ""), nil
+		case *typecheck.Slice:
+			return b.CreateInBoundsGEP(bufType, bufptr, []llvm.Value{index}, ""), nil
+		case *typecheck.Basic:
+			return b.CreateInBoundsGEP(bufType, bufptr, []llvm.Value{index}, ""), nil
+		default:
+			panic("unreachable")
+		}
+	case *mxssa.Lookup:
+		value := b.getValueTC(expr.X, expr.Pos())
+		index := b.getValueTC(expr.Index, expr.Pos())
+		valueType := expr.Type()
+		if expr.CommaOk {
+			valueType = valueType.(*typecheck.Tuple).At(0).Type()
+		}
+		return b.createMapLookupTC(expr.X.Type().Underlying().(*typecheck.Map).Key(), valueType, value, index, expr.CommaOk, expr.Pos())
+	case *mxssa.MakeChan:
+		return b.createMakeChanTC(expr), nil
+	case *mxssa.MakeClosure:
+		return b.parseMakeClosureTC(expr)
+	case *mxssa.MakeInterface:
+		val := b.getValueTC(expr.X, expr.Pos())
+		return b.createMakeInterfaceTC(val, expr.X.Type(), expr.Pos()), nil
+	case *mxssa.MakeMap:
+		return b.createMakeMapTC(expr)
+	case *mxssa.MakeSlice:
+		sliceLen := b.getValueTC(expr.Len, expr.Pos())
+		sliceCap := b.getValueTC(expr.Cap, expr.Pos())
+		sliceType := expr.Type().Underlying().(*typecheck.Slice)
+		llvmElemType := b.getLLVMTypeTC(sliceType.Elem())
+		elemSize := b.targetData.TypeAllocSize(llvmElemType)
+		elemAlign := b.targetData.ABITypeAlignment(llvmElemType)
+		elemSizeValue := llvm.ConstInt(b.uintptrType, elemSize, false)
+		maxSize := b.maxSliceSize(llvmElemType)
+		if elemSize > maxSize {
+			return llvm.Value{}, b.makeError(expr.Pos(), fmt.Sprintf("slice element type is too big (%v bytes)", elemSize))
+		}
+		lenType := expr.Len.Type().Underlying().(*typecheck.Basic)
+		capType := expr.Cap.Type().Underlying().(*typecheck.Basic)
+		maxSizeValue := llvm.ConstInt(b.uintptrType, maxSize, false)
+		b.createSliceBoundsCheckTC(maxSizeValue, sliceLen, sliceCap, sliceCap, lenType, capType, capType)
+		sliceCapCast, err := b.createConvertTC(expr.Cap.Type(), typecheck.Typ[typecheck.Uint64], sliceCap, expr.Pos())
+		if err != nil {
+			return llvm.Value{}, err
+		}
+		sliceSize := b.CreateBinOp(llvm.Mul, elemSizeValue, sliceCapCast, "makeslice.cap")
+		layoutValue := b.createObjectLayout(llvmElemType, expr.Pos())
+		slicePtr := b.createRuntimeCall("alloc", []llvm.Value{sliceSize, layoutValue}, "makeslice.buf")
+		slicePtr.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(elemAlign)))
+		sliceLen, err = b.createConvertTC(expr.Len.Type(), typecheck.Typ[typecheck.Uint64], sliceLen, expr.Pos())
+		if err != nil {
+			return llvm.Value{}, err
+		}
+		sliceCap, err = b.createConvertTC(expr.Cap.Type(), typecheck.Typ[typecheck.Uint64], sliceCap, expr.Pos())
+		if err != nil {
+			return llvm.Value{}, err
+		}
+		slice := llvm.Undef(b.getLLVMTypeTC(sliceType))
+		slice = b.CreateInsertValue(slice, slicePtr, 0, "")
+		slice = b.CreateInsertValue(slice, sliceLen, 1, "")
+		slice = b.CreateInsertValue(slice, sliceCap, 2, "")
+		return slice, nil
+	case *mxssa.Next:
+		rangeVal := expr.Iter.(*mxssa.Range).X
+		llvmRangeVal := b.getValueTC(rangeVal, expr.Pos())
+		it := b.getValueTC(expr.Iter, expr.Pos())
+		if expr.IsString {
+			return b.createRuntimeCall("stringNext", []llvm.Value{llvmRangeVal, it}, "range.next"), nil
+		} else {
+			return b.createMapIteratorNextTC(rangeVal, llvmRangeVal, it), nil
+		}
+	case *mxssa.Phi:
+		phi := b.CreatePHI(b.getLLVMTypeTC(expr.Type()), "")
+		b.mxPhis = append(b.mxPhis, phiNodeTC{expr, phi})
+		return phi, nil
+	case *mxssa.Range:
+		var iteratorType llvm.Type
+		switch typ := expr.X.Type().Underlying().(type) {
+		case *typecheck.Basic:
+			iteratorType = b.getLLVMRuntimeType("stringIterator")
+		case *typecheck.Map:
+			iteratorType = b.getLLVMRuntimeType("hashmapIterator")
+		default:
+			panic("unknown type in range: " + typ.String())
+		}
+		it, _ := b.createTemporaryAlloca(iteratorType, "range.it")
+		b.CreateStore(llvm.ConstNull(iteratorType), it)
+		return it, nil
+	case *mxssa.Select:
+		return b.createSelectTC(expr), nil
+	case *mxssa.Slice:
+		value := b.getValueTC(expr.X, expr.Pos())
+		var lowType, highType, maxType *typecheck.Basic
+		var low, high, max llvm.Value
+		if expr.Low != nil {
+			lowType = expr.Low.Type().Underlying().(*typecheck.Basic)
+			low = b.getValueTC(expr.Low, expr.Pos())
+			low = b.extendIntegerTC(low, lowType, b.uintptrType)
+		} else {
+			lowType = typecheck.Typ[typecheck.Uint64]
+			low = llvm.ConstInt(b.uintptrType, 0, false)
+		}
+		if expr.High != nil {
+			highType = expr.High.Type().Underlying().(*typecheck.Basic)
+			high = b.getValueTC(expr.High, expr.Pos())
+			high = b.extendIntegerTC(high, highType, b.uintptrType)
+		} else {
+			highType = typecheck.Typ[typecheck.Uint64]
+		}
+		if expr.Max != nil {
+			maxType = expr.Max.Type().Underlying().(*typecheck.Basic)
+			max = b.getValueTC(expr.Max, expr.Pos())
+			max = b.extendIntegerTC(max, maxType, b.uintptrType)
+		} else {
+			maxType = typecheck.Typ[typecheck.Uint64]
+		}
+		switch typ := expr.X.Type().Underlying().(type) {
+		case *typecheck.Pointer:
+			arrayType := typ.Elem().Underlying().(*typecheck.Array)
+			length := arrayType.Len()
+			llvmLen := llvm.ConstInt(b.uintptrType, uint64(length), false)
+			if high.IsNil() {
+				high = llvmLen
+			}
+			if max.IsNil() {
+				max = llvmLen
+			}
+			indices := []llvm.Value{llvm.ConstInt(b.ctx.Int32Type(), 0, false), low}
+			b.createNilCheckTC(expr.X, value, "slice")
+			b.createSliceBoundsCheckTC(llvmLen, low, high, max, lowType, highType, maxType)
+			if b.targetData.TypeAllocSize(low.Type()) > b.targetData.TypeAllocSize(b.uintptrType) {
+				low = b.CreateTrunc(low, b.uintptrType, "")
+			}
+			if b.targetData.TypeAllocSize(high.Type()) > b.targetData.TypeAllocSize(b.uintptrType) {
+				high = b.CreateTrunc(high, b.uintptrType, "")
+			}
+			if b.targetData.TypeAllocSize(max.Type()) > b.targetData.TypeAllocSize(b.uintptrType) {
+				max = b.CreateTrunc(max, b.uintptrType, "")
+			}
+			sliceLen := b.CreateSub(high, low, "slice.len")
+			slicePtr := b.CreateInBoundsGEP(b.getLLVMTypeTC(arrayType), value, indices, "slice.ptr")
+			sliceCap := b.CreateSub(max, low, "slice.cap")
+			slice := llvm.Undef(b.getLLVMTypeTC(expr.Type()))
+			slice = b.CreateInsertValue(slice, slicePtr, 0, "")
+			slice = b.CreateInsertValue(slice, sliceLen, 1, "")
+			slice = b.CreateInsertValue(slice, sliceCap, 2, "")
+			return slice, nil
+		case *typecheck.Slice:
+			oldPtr := b.CreateExtractValue(value, 0, "")
+			oldLen := b.CreateExtractValue(value, 1, "")
+			oldCap := b.CreateExtractValue(value, 2, "")
+			if high.IsNil() {
+				high = oldLen
+			}
+			if max.IsNil() {
+				max = oldCap
+			}
+			b.createSliceBoundsCheckTC(oldCap, low, high, max, lowType, highType, maxType)
+			if b.targetData.TypeAllocSize(low.Type()) > b.targetData.TypeAllocSize(b.uintptrType) {
+				low = b.CreateTrunc(low, b.uintptrType, "")
+			}
+			if b.targetData.TypeAllocSize(high.Type()) > b.targetData.TypeAllocSize(b.uintptrType) {
+				high = b.CreateTrunc(high, b.uintptrType, "")
+			}
+			if b.targetData.TypeAllocSize(max.Type()) > b.targetData.TypeAllocSize(b.uintptrType) {
+				max = b.CreateTrunc(max, b.uintptrType, "")
+			}
+			ptrElemType := b.getLLVMTypeTC(typ.Elem())
+			newPtr := b.CreateInBoundsGEP(ptrElemType, oldPtr, []llvm.Value{low}, "")
+			newLen := b.CreateSub(high, low, "")
+			newCap := b.CreateSub(max, low, "")
+			slice := llvm.Undef(b.getLLVMTypeTC(typ))
+			slice = b.CreateInsertValue(slice, newPtr, 0, "")
+			slice = b.CreateInsertValue(slice, newLen, 1, "")
+			slice = b.CreateInsertValue(slice, newCap, 2, "")
+			return slice, nil
+		case *typecheck.Basic:
+			if typ.Info()&typecheck.IsString == 0 {
+				return llvm.Value{}, b.makeError(expr.Pos(), "unknown slice type: "+typ.String())
+			}
+			if expr.Max != nil {
+				return llvm.Value{}, b.makeError(expr.Pos(), "slicing a string with a max parameter is not allowed by the spec")
+			}
+			oldPtr := b.CreateExtractValue(value, 0, "")
+			oldLen := b.CreateExtractValue(value, 1, "")
+			if high.IsNil() {
+				high = oldLen
+			}
+			b.createSliceBoundsCheckTC(oldLen, low, high, high, lowType, highType, maxType)
+			if b.targetData.TypeAllocSize(low.Type()) > b.targetData.TypeAllocSize(b.uintptrType) {
+				low = b.CreateTrunc(low, b.uintptrType, "")
+			}
+			if b.targetData.TypeAllocSize(high.Type()) > b.targetData.TypeAllocSize(b.uintptrType) {
+				high = b.CreateTrunc(high, b.uintptrType, "")
+			}
+			newPtr := b.CreateInBoundsGEP(b.ctx.Int8Type(), oldPtr, []llvm.Value{low}, "")
+			newLen := b.CreateSub(high, low, "")
+			str := llvm.Undef(b.getLLVMRuntimeType("_string"))
+			str = b.CreateInsertValue(str, newPtr, 0, "")
+			str = b.CreateInsertValue(str, newLen, 1, "")
+			str = b.CreateInsertValue(str, newLen, 2, "")
+			return str, nil
+		default:
+			return llvm.Value{}, b.makeError(expr.Pos(), "unknown slice type: "+typ.String())
+		}
+	case *mxssa.SliceToArrayPointer:
+		slice := b.getValueTC(expr.X, expr.Pos())
+		sliceLen := b.CreateExtractValue(slice, 1, "")
+		arrayLen := expr.Type().Underlying().(*typecheck.Pointer).Elem().Underlying().(*typecheck.Array).Len()
+		b.createSliceToArrayPointerCheck(sliceLen, int64(arrayLen))
+		return b.CreateExtractValue(slice, 0, ""), nil
+	case *mxssa.TypeAssert:
+		return b.createTypeAssertTC(expr), nil
+	case *mxssa.UnOp:
+		return b.createUnOpTC(expr)
 	default:
 		return llvm.Value{}, b.makeError(expr.Pos(), "todo: unknown expression: "+expr.String())
 	}
