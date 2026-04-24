@@ -17,7 +17,10 @@ import (
 
 	"moxie/compiler/llvmutil"
 	"moxie/loader"
+	"moxie/mxssa"
+	"moxie/ssabridge"
 	"moxie/src/moxie"
+	"moxie/typecheck"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/types/typeutil"
 	"tinygo.org/x/go-llvm"
@@ -85,11 +88,14 @@ type compilerContext struct {
 	funcPtrAddrSpace int
 	uintptrType      llvm.Type
 	program          *ssa.Program
+	mxProgram        *mxssa.Program   // B3 bridge: native SSA, populated by ssabridge
+	mxTranslator     *ssabridge.Translator
 	diagnostics      []error
 	functionInfos    map[*ssa.Function]functionInfo
 	astComments      map[string]*ast.CommentGroup
 	embedGlobals     map[string][]*loader.EmbedFile
 	pkg              *types.Package
+	mxPkg            *typecheck.Package // B3 bridge: native types for current package
 	packageDir       string // directory for this package
 	runtimePkg       *types.Package
 }
@@ -285,6 +291,19 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 
 	// Convert AST to SSA.
 	ssaPkg.Build()
+
+	// B3 bridge: build mxssa.Program from ssa.Program for migrated files.
+	typePkgs := map[string]*types.Package{}
+	for _, p := range ssaPkg.Prog.AllPackages() {
+		typePkgs[p.Pkg.Path()] = p.Pkg
+	}
+	mxProg, mxTrans := ssabridge.Translate(ssaPkg.Prog.Fset, ssaPkg.Prog, typePkgs)
+	c.mxProgram = mxProg
+	c.mxTranslator = mxTrans
+	c.mxTranslator.TranslatePackage(ssaPkg)
+	if mxP := mxProg.ImportedPackage(pkg.Pkg.Path()); mxP != nil {
+		c.mxPkg = mxP.Pkg
+	}
 
 	// Initialize debug information.
 	if c.Debug {
