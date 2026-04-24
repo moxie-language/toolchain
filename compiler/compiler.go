@@ -914,7 +914,11 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 				// that case.
 				continue
 			}
-			b.createFunction()
+			if b.mxFn != nil {
+				b.createFunctionTC()
+			} else {
+				b.createFunction()
+			}
 		case *ssa.Type:
 			if types.IsInterface(member.Type()) {
 				// Interfaces don't have concrete methods.
@@ -955,7 +959,11 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 				}
 				// Create the function definition.
 				b := newBuilder(c, irbuilder, fn)
-				b.createFunction()
+				if b.mxFn != nil {
+					b.createFunctionTC()
+				} else {
+					b.createFunction()
+				}
 			}
 		case *ssa.Global:
 			// Global variable.
@@ -1470,10 +1478,106 @@ func (b *builder) createFunction() {
 	for _, sub := range b.fn.AnonFuncs {
 		b := newBuilder(b.compilerContext, b.Builder, sub)
 		b.llvmFn.SetLinkage(llvm.InternalLinkage)
-		b.createFunction()
+		if b.mxFn != nil {
+			b.createFunctionTC()
+		} else {
+			b.createFunction()
+		}
 	}
 
 	// Create wrapper function that can be called externally.
+	if b.info.wasmExport != "" {
+		b.createWasmExport()
+	}
+}
+
+func (b *builder) createFunctionTC() {
+	b.createFunctionStart(false)
+	b.checkMoxieRestrictions()
+
+	// Bridge parameters: ssa locals → mxssa locals.
+	if b.mxFn != nil {
+		for i, ssaParam := range b.fn.Params {
+			if i < len(b.mxFn.Params) {
+				if val, ok := b.locals[ssaParam]; ok {
+					b.mxLocals[b.mxFn.Params[i]] = val
+				}
+			}
+		}
+		for i, ssaFV := range b.fn.FreeVars {
+			if i < len(b.mxFn.FreeVars) {
+				if val, ok := b.locals[ssaFV]; ok {
+					b.mxLocals[b.mxFn.FreeVars[i]] = val
+				}
+			}
+		}
+	}
+
+	for _, block := range b.fn.DomPreorder() {
+		if b.DumpSSA {
+			fmt.Printf("%d: %s:\n", block.Index, block.Comment)
+		}
+		b.currentBlock = block
+		b.currentBlockInfo = &b.blockInfo[block.Index]
+		b.SetInsertPointAtEnd(b.currentBlockInfo.entry)
+
+		mxBlock := b.mxFn.Blocks[block.Index]
+		for _, instr := range mxBlock.Instrs {
+			if b.DumpSSA {
+				if val, ok := instr.(mxssa.Value); ok && val.Name() != "" {
+					fmt.Printf("\t%s = %s\n", val.Name(), val.String())
+				} else {
+					fmt.Printf("\t%s\n", instr.String())
+				}
+			}
+			b.createInstructionTC(instr)
+		}
+		if b.fn.Name() == "init" && len(mxBlock.Instrs) == 0 {
+			b.CreateRetVoid()
+		}
+	}
+
+	for i, bb := range b.runDefersBlock {
+		b.SetInsertPointAtEnd(bb)
+		b.createRunDefers()
+		b.CreateBr(b.afterDefersBlock[i])
+	}
+
+	if b.hasDeferFrame() {
+		b.createLandingPad()
+	}
+
+	// Resolve mxssa phi nodes.
+	for _, phi := range b.mxPhis {
+		block := phi.phi.Block()
+		for i, edge := range phi.phi.Edges {
+			llvmVal := b.getValueTC(edge, phi.phi.Pos())
+			llvmBlock := b.blockInfo[block.Preds[i].Index].exit
+			phi.llvm.AddIncoming([]llvm.Value{llvmVal}, []llvm.BasicBlock{llvmBlock})
+		}
+	}
+
+	if b.NeedsStackObjects {
+		for _, phi := range b.mxPhis {
+			insertPoint := llvm.NextInstruction(phi.llvm)
+			for !insertPoint.IsAPHINode().IsNil() {
+				insertPoint = llvm.NextInstruction(insertPoint)
+			}
+			b.SetInsertPointBefore(insertPoint)
+			b.trackValue(phi.llvm)
+		}
+	}
+
+	for _, sub := range b.fn.AnonFuncs {
+		b := newBuilder(b.compilerContext, b.Builder, sub)
+		b.llvmFn.SetLinkage(llvm.InternalLinkage)
+		if b.mxFn != nil {
+			b.createFunctionTC()
+		} else {
+			b.createFunction()
+		}
+	}
+
 	if b.info.wasmExport != "" {
 		b.createWasmExport()
 	}
