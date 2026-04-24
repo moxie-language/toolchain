@@ -413,6 +413,18 @@ func getPosTC(v mxssa.Value) token.Pos {
 	return v.Pos()
 }
 
+func isStringLikeTC(t typecheck.Type) bool {
+	switch t := t.(type) {
+	case *typecheck.Basic:
+		return t.Info()&typecheck.IsString != 0
+	case *typecheck.Slice:
+		if b, ok := t.Elem().(*typecheck.Basic); ok && b.Kind() == typecheck.Uint8 {
+			return true
+		}
+	}
+	return false
+}
+
 // createNilCheckTC is the TC-parallel of createNilCheck.
 // Skips the check for values known to be non-nil.
 func (b *builder) createNilCheckTC(inst mxssa.Value, ptr llvm.Value, blockPrefix string) {

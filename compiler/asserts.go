@@ -8,6 +8,8 @@ import (
 	"go/token"
 	"go/types"
 
+	"moxie/typecheck"
+
 	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
@@ -259,18 +261,86 @@ func (b *builder) createRuntimeAssert(assert llvm.Value, blockPrefix, assertFunc
 	b.SetInsertPointAtEnd(nextBlock)
 }
 
-// extendInteger extends the value to at least targetType using a zero or sign
-// extend. The resulting value is not truncated: it may still be bigger than
-// targetType.
 func (b *builder) extendInteger(value llvm.Value, valueType types.Type, targetType llvm.Type) llvm.Value {
 	if value.Type().IntTypeWidth() < targetType.IntTypeWidth() {
 		if valueType.Underlying().(*types.Basic).Info()&types.IsUnsigned != 0 {
-			// Unsigned, so zero-extend to the target type.
 			value = b.CreateZExt(value, targetType, "")
 		} else {
-			// Signed, so sign-extend to the target type.
 			value = b.CreateSExt(value, targetType, "")
 		}
 	}
 	return value
+}
+
+func (b *builder) extendIntegerTC(value llvm.Value, valueType typecheck.Type, targetType llvm.Type) llvm.Value {
+	if value.Type().IntTypeWidth() < targetType.IntTypeWidth() {
+		if valueType.Underlying().(*typecheck.Basic).Info()&typecheck.IsUnsigned != 0 {
+			value = b.CreateZExt(value, targetType, "")
+		} else {
+			value = b.CreateSExt(value, targetType, "")
+		}
+	}
+	return value
+}
+
+func (b *builder) createSliceBoundsCheckTC(capacity, low, high, max llvm.Value, lowType, highType, maxType *typecheck.Basic) {
+	if b.info.nobounds {
+		return
+	}
+	capacityType := capacity.Type()
+	if low.Type().IntTypeWidth() > capacityType.IntTypeWidth() {
+		capacityType = low.Type()
+	}
+	if high.Type().IntTypeWidth() > capacityType.IntTypeWidth() {
+		capacityType = high.Type()
+	}
+	if max.Type().IntTypeWidth() > capacityType.IntTypeWidth() {
+		capacityType = max.Type()
+	}
+	if capacityType != capacity.Type() {
+		capacity = b.CreateZExt(capacity, capacityType, "")
+	}
+	low = b.extendIntegerTC(low, lowType, capacityType)
+	high = b.extendIntegerTC(high, highType, capacityType)
+	max = b.extendIntegerTC(max, maxType, capacityType)
+	outOfBounds1 := b.CreateICmp(llvm.IntUGT, low, high, "slice.lowhigh")
+	outOfBounds2 := b.CreateICmp(llvm.IntUGT, high, max, "slice.highmax")
+	outOfBounds3 := b.CreateICmp(llvm.IntUGT, max, capacity, "slice.maxcap")
+	outOfBounds := b.CreateOr(outOfBounds1, outOfBounds2, "slice.lowmax")
+	outOfBounds = b.CreateOr(outOfBounds, outOfBounds3, "slice.lowcap")
+	b.createRuntimeAssert(outOfBounds, "slice", "slicePanic")
+}
+
+func (b *builder) createUnsafeSliceStringCheckTC(name string, ptr, length llvm.Value, elementType llvm.Type, lenType *typecheck.Basic) {
+	length = b.extendIntegerTC(length, lenType, b.uintptrType)
+	maxSize := b.maxSliceSize(elementType)
+	maxSizeValue := llvm.ConstInt(length.Type(), maxSize, false)
+	zero := llvm.ConstInt(length.Type(), 0, false)
+	lenOutOfBounds := b.CreateICmp(llvm.IntUGT, length, maxSizeValue, "")
+	ptrIsNil := b.CreateICmp(llvm.IntEQ, ptr, llvm.ConstNull(ptr.Type()), "")
+	lenIsNotZero := b.CreateICmp(llvm.IntNE, length, zero, "")
+	assert := b.CreateAnd(ptrIsNil, lenIsNotZero, "")
+	assert = b.CreateOr(assert, lenOutOfBounds, "")
+	b.createRuntimeAssert(assert, name, "unsafeSlicePanic")
+}
+
+func (b *builder) createChanBoundsCheckTC(elementSize uint64, bufSize llvm.Value, bufSizeType *typecheck.Basic, pos token.Pos) {
+	if b.info.nobounds {
+		return
+	}
+	bufSize = b.extendIntegerTC(bufSize, bufSizeType, b.uintptrType)
+	maxBufSize := b.CreateLShr(llvm.ConstNot(llvm.ConstInt(b.uintptrType, 0, false)), llvm.ConstInt(b.uintptrType, 1, false), "")
+	if elementSize > maxBufSize.ZExtValue() {
+		b.addError(pos, fmt.Sprintf("channel element type is too big (%v bytes)", elementSize))
+		return
+	}
+	if elementSize == 0 {
+		elementSize = 1
+	}
+	maxBufSize = b.CreateUDiv(maxBufSize, llvm.ConstInt(b.uintptrType, elementSize, false), "")
+	if maxBufSize.Type() != bufSize.Type() {
+		maxBufSize = b.CreateZExt(maxBufSize, bufSize.Type(), "")
+	}
+	bufSizeTooBig := b.CreateICmp(llvm.IntUGE, bufSize, maxBufSize, "")
+	b.createRuntimeAssert(bufSizeTooBig, "chan", "chanMakePanic")
 }

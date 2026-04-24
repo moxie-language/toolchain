@@ -3102,6 +3102,313 @@ func (b *builder) createBinOp(op token.Token, typ, ytyp types.Type, x, y llvm.Va
 	}
 }
 
+func (b *builder) createBinOpTC(op token.Token, typ, ytyp typecheck.Type, x, y llvm.Value, pos token.Pos) (llvm.Value, error) {
+	switch typ := typ.Underlying().(type) {
+	case *typecheck.Basic:
+		if typ.Info()&typecheck.IsInteger != 0 {
+			signed := typ.Info()&typecheck.IsUnsigned == 0
+			switch op {
+			case token.ADD:
+				return b.CreateAdd(x, y, ""), nil
+			case token.SUB:
+				return b.CreateSub(x, y, ""), nil
+			case token.MUL:
+				return b.CreateMul(x, y, ""), nil
+			case token.QUO, token.REM:
+				b.createDivideByZeroCheck(y)
+				if signed {
+					llvmType := x.Type()
+					minusOne := llvm.ConstSub(llvm.ConstInt(llvmType, 0, false), llvm.ConstInt(llvmType, 1, false))
+					lowestInteger := llvm.ConstInt(x.Type(), 1<<(llvmType.IntTypeWidth()-1), false)
+					yIsMinusOne := b.CreateICmp(llvm.IntEQ, y, minusOne, "")
+					xIsLowestInteger := b.CreateICmp(llvm.IntEQ, x, lowestInteger, "")
+					hasOverflow := b.CreateAnd(yIsMinusOne, xIsLowestInteger, "")
+					y = b.CreateSelect(hasOverflow, llvm.ConstInt(llvmType, 1, true), y, "")
+					if op == token.QUO {
+						return b.CreateSDiv(x, y, ""), nil
+					}
+					return b.CreateSRem(x, y, ""), nil
+				}
+				if op == token.QUO {
+					return b.CreateUDiv(x, y, ""), nil
+				}
+				return b.CreateURem(x, y, ""), nil
+			case token.AND:
+				return b.CreateAnd(x, y, ""), nil
+			case token.OR:
+				return b.CreateOr(x, y, ""), nil
+			case token.XOR:
+				return b.CreateXor(x, y, ""), nil
+			case token.SHL, token.SHR:
+				if ytyp.Underlying().(*typecheck.Basic).Info()&typecheck.IsUnsigned == 0 {
+					b.createNegativeShiftCheck(y)
+				}
+				sizeX := b.targetData.TypeAllocSize(x.Type())
+				sizeY := b.targetData.TypeAllocSize(y.Type())
+				overshifted := b.CreateICmp(llvm.IntUGE, y, llvm.ConstInt(y.Type(), 8*sizeX, false), "shift.overflow")
+				switch {
+				case sizeX > sizeY:
+					y = b.CreateZExt(y, x.Type(), "")
+				case sizeX < sizeY:
+					y = b.CreateTrunc(y, x.Type(), "")
+				}
+				var val llvm.Value
+				switch op {
+				case token.SHL:
+					val = b.CreateShl(x, y, "")
+				case token.SHR:
+					if signed {
+						y = b.CreateSelect(overshifted, llvm.ConstInt(y.Type(), 8*sizeX-1, false), y, "shift.offset")
+						return b.CreateAShr(x, y, ""), nil
+					}
+					val = b.CreateLShr(x, y, "")
+				default:
+					panic("unreachable")
+				}
+				return b.CreateSelect(overshifted, llvm.ConstInt(val.Type(), 0, false), val, "shift.result"), nil
+			case token.EQL:
+				return b.CreateICmp(llvm.IntEQ, x, y, ""), nil
+			case token.NEQ:
+				return b.CreateICmp(llvm.IntNE, x, y, ""), nil
+			case token.AND_NOT:
+				inv := b.CreateNot(y, "")
+				return b.CreateAnd(x, inv, ""), nil
+			case token.LSS:
+				if signed {
+					return b.CreateICmp(llvm.IntSLT, x, y, ""), nil
+				}
+				return b.CreateICmp(llvm.IntULT, x, y, ""), nil
+			case token.LEQ:
+				if signed {
+					return b.CreateICmp(llvm.IntSLE, x, y, ""), nil
+				}
+				return b.CreateICmp(llvm.IntULE, x, y, ""), nil
+			case token.GTR:
+				if signed {
+					return b.CreateICmp(llvm.IntSGT, x, y, ""), nil
+				}
+				return b.CreateICmp(llvm.IntUGT, x, y, ""), nil
+			case token.GEQ:
+				if signed {
+					return b.CreateICmp(llvm.IntSGE, x, y, ""), nil
+				}
+				return b.CreateICmp(llvm.IntUGE, x, y, ""), nil
+			default:
+				panic("binop on integer: " + op.String())
+			}
+		} else if typ.Info()&typecheck.IsFloat != 0 {
+			switch op {
+			case token.ADD:
+				return b.CreateFAdd(x, y, ""), nil
+			case token.SUB:
+				return b.CreateFSub(x, y, ""), nil
+			case token.MUL:
+				return b.CreateFMul(x, y, ""), nil
+			case token.QUO:
+				return b.CreateFDiv(x, y, ""), nil
+			case token.EQL:
+				return b.CreateFCmp(llvm.FloatOEQ, x, y, ""), nil
+			case token.NEQ:
+				return b.CreateFCmp(llvm.FloatUNE, x, y, ""), nil
+			case token.LSS:
+				return b.CreateFCmp(llvm.FloatOLT, x, y, ""), nil
+			case token.LEQ:
+				return b.CreateFCmp(llvm.FloatOLE, x, y, ""), nil
+			case token.GTR:
+				return b.CreateFCmp(llvm.FloatOGT, x, y, ""), nil
+			case token.GEQ:
+				return b.CreateFCmp(llvm.FloatOGE, x, y, ""), nil
+			default:
+				panic("binop on float: " + op.String())
+			}
+		} else if typ.Info()&typecheck.IsBoolean != 0 {
+			switch op {
+			case token.EQL:
+				return b.CreateICmp(llvm.IntEQ, x, y, ""), nil
+			case token.NEQ:
+				return b.CreateICmp(llvm.IntNE, x, y, ""), nil
+			default:
+				panic("binop on bool: " + op.String())
+			}
+		} else if typ.Kind() == typecheck.UnsafePointer {
+			switch op {
+			case token.EQL:
+				return b.CreateICmp(llvm.IntEQ, x, y, ""), nil
+			case token.NEQ:
+				return b.CreateICmp(llvm.IntNE, x, y, ""), nil
+			default:
+				panic("binop on pointer: " + op.String())
+			}
+		} else if typ.Info()&typecheck.IsString != 0 {
+			switch op {
+			case token.ADD:
+				return b.createRuntimeCall("stringConcat", []llvm.Value{x, y}, ""), nil
+			case token.EQL:
+				return b.createRuntimeCall("stringEqual", []llvm.Value{x, y}, ""), nil
+			case token.NEQ:
+				result := b.createRuntimeCall("stringEqual", []llvm.Value{x, y}, "")
+				return b.CreateNot(result, ""), nil
+			case token.LSS:
+				return b.createRuntimeCall("stringLess", []llvm.Value{x, y}, ""), nil
+			case token.LEQ:
+				result := b.createRuntimeCall("stringLess", []llvm.Value{y, x}, "")
+				return b.CreateNot(result, ""), nil
+			case token.GTR:
+				return b.createRuntimeCall("stringLess", []llvm.Value{y, x}, ""), nil
+			case token.GEQ:
+				result := b.createRuntimeCall("stringLess", []llvm.Value{x, y}, "")
+				return b.CreateNot(result, ""), nil
+			default:
+				panic("binop on string: " + op.String())
+			}
+		} else {
+			return llvm.Value{}, b.makeError(pos, "todo: unknown basic type in binop: "+typ.String())
+		}
+	case *typecheck.Signature:
+		x = b.extractFuncScalar(x)
+		y = b.extractFuncScalar(y)
+		switch op {
+		case token.EQL:
+			return b.CreateICmp(llvm.IntEQ, x, y, ""), nil
+		case token.NEQ:
+			return b.CreateICmp(llvm.IntNE, x, y, ""), nil
+		default:
+			return llvm.Value{}, b.makeError(pos, "binop on signature: "+op.String())
+		}
+	case *typecheck.Interface:
+		switch op {
+		case token.EQL, token.NEQ:
+			nilInterface := llvm.ConstNull(x.Type())
+			var result llvm.Value
+			if x == nilInterface || y == nilInterface {
+				typecodeX := b.CreateExtractValue(x, 0, "")
+				typecodeY := b.CreateExtractValue(y, 0, "")
+				result = b.CreateICmp(llvm.IntEQ, typecodeX, typecodeY, "")
+			} else {
+				result = b.createRuntimeCall("interfaceEqual", []llvm.Value{x, y}, "")
+			}
+			if op == token.NEQ {
+				result = b.CreateNot(result, "")
+			}
+			return result, nil
+		default:
+			return llvm.Value{}, b.makeError(pos, "binop on interface: "+op.String())
+		}
+	case *typecheck.Chan, *typecheck.Map, *typecheck.Pointer:
+		switch op {
+		case token.EQL:
+			return b.CreateICmp(llvm.IntEQ, x, y, ""), nil
+		case token.NEQ:
+			return b.CreateICmp(llvm.IntNE, x, y, ""), nil
+		default:
+			return llvm.Value{}, b.makeError(pos, "todo: binop on pointer: "+op.String())
+		}
+	case *typecheck.Slice:
+		if basic, ok := typ.Elem().(*typecheck.Basic); ok && basic.Kind() == typecheck.Uint8 {
+			switch op {
+			case token.ADD:
+				return b.createRuntimeCall("stringConcat", []llvm.Value{x, y}, ""), nil
+			case token.EQL:
+				return b.createRuntimeCall("stringEqual", []llvm.Value{x, y}, ""), nil
+			case token.NEQ:
+				result := b.createRuntimeCall("stringEqual", []llvm.Value{x, y}, "")
+				return b.CreateNot(result, ""), nil
+			case token.LSS:
+				return b.createRuntimeCall("stringLess", []llvm.Value{x, y}, ""), nil
+			case token.LEQ:
+				result := b.createRuntimeCall("stringLess", []llvm.Value{y, x}, "")
+				return b.CreateNot(result, ""), nil
+			case token.GTR:
+				return b.createRuntimeCall("stringLess", []llvm.Value{y, x}, ""), nil
+			case token.GEQ:
+				result := b.createRuntimeCall("stringLess", []llvm.Value{x, y}, "")
+				return b.CreateNot(result, ""), nil
+			default:
+				return llvm.Value{}, b.makeError(pos, "todo: binop on []byte: "+op.String())
+			}
+		}
+		if op == token.OR {
+			xPtr := b.CreateExtractValue(x, 0, "concat.xPtr")
+			xLen := b.CreateExtractValue(x, 1, "concat.xLen")
+			yPtr := b.CreateExtractValue(y, 0, "concat.yPtr")
+			yLen := b.CreateExtractValue(y, 1, "concat.yLen")
+			elemType := b.getLLVMTypeTC(typ.Elem())
+			elemSize := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(elemType), false)
+			result := b.createRuntimeCall("sliceAppend", []llvm.Value{xPtr, yPtr, xLen, xLen, yLen, elemSize}, "concat.new")
+			newPtr := b.CreateExtractValue(result, 0, "concat.ptr")
+			newLen := b.CreateExtractValue(result, 1, "concat.len")
+			newCap := b.CreateExtractValue(result, 2, "concat.cap")
+			newSlice := llvm.Undef(x.Type())
+			newSlice = b.CreateInsertValue(newSlice, newPtr, 0, "")
+			newSlice = b.CreateInsertValue(newSlice, newLen, 1, "")
+			newSlice = b.CreateInsertValue(newSlice, newCap, 2, "")
+			return newSlice, nil
+		}
+		if op != token.EQL && op != token.NEQ {
+			return llvm.Value{}, b.makeError(pos, "todo: binop on slice: "+op.String())
+		}
+		xPtr := b.CreateExtractValue(x, 0, "")
+		xLen := b.CreateExtractValue(x, 1, "")
+		yPtr := b.CreateExtractValue(y, 0, "")
+		yLen := b.CreateExtractValue(y, 1, "")
+		elemSize := b.targetData.TypeAllocSize(b.getLLVMTypeTC(typ.Elem()))
+		elemSizeVal := llvm.ConstInt(b.uintptrType, elemSize, false)
+		result := b.createRuntimeCall("sliceEqual", []llvm.Value{xPtr, yPtr, xLen, yLen, elemSizeVal}, "")
+		switch op {
+		case token.EQL:
+			return result, nil
+		case token.NEQ:
+			return b.CreateNot(result, ""), nil
+		default:
+			panic("unreachable")
+		}
+	case *typecheck.Array:
+		result := llvm.ConstInt(b.ctx.Int1Type(), 1, true)
+		for i := 0; i < int(typ.Len()); i++ {
+			xField := b.CreateExtractValue(x, i, "")
+			yField := b.CreateExtractValue(y, i, "")
+			fieldEqual, err := b.createBinOpTC(token.EQL, typ.Elem(), typ.Elem(), xField, yField, pos)
+			if err != nil {
+				return llvm.Value{}, err
+			}
+			result = b.CreateAnd(result, fieldEqual, "")
+		}
+		switch op {
+		case token.EQL:
+			return result, nil
+		case token.NEQ:
+			return b.CreateNot(result, ""), nil
+		default:
+			return llvm.Value{}, b.makeError(pos, "unknown: binop on array: "+op.String())
+		}
+	case *typecheck.Struct:
+		result := llvm.ConstInt(b.ctx.Int1Type(), 1, true)
+		for i := 0; i < typ.NumFields(); i++ {
+			if typ.Field(i).Name() == "_" {
+				continue
+			}
+			fieldType := typ.Field(i).Type()
+			xField := b.CreateExtractValue(x, i, "")
+			yField := b.CreateExtractValue(y, i, "")
+			fieldEqual, err := b.createBinOpTC(token.EQL, fieldType, fieldType, xField, yField, pos)
+			if err != nil {
+				return llvm.Value{}, err
+			}
+			result = b.CreateAnd(result, fieldEqual, "")
+		}
+		switch op {
+		case token.EQL:
+			return result, nil
+		case token.NEQ:
+			return b.CreateNot(result, ""), nil
+		default:
+			return llvm.Value{}, b.makeError(pos, "unknown: binop on struct: "+op.String())
+		}
+	default:
+		return llvm.Value{}, b.makeError(pos, "todo: binop type: "+typ.String())
+	}
+}
+
 // createConst creates a LLVM constant value from a Go constant.
 func (c *compilerContext) createConst(expr *ssa.Const, pos token.Pos) llvm.Value {
 	switch typ := expr.Type().Underlying().(type) {
@@ -3457,9 +3764,167 @@ func (b *builder) createConvert(typeFrom, typeTo types.Type, value llvm.Value, p
 	}
 }
 
+func (b *builder) createConvertTC(typeFrom, typeTo typecheck.Type, value llvm.Value, pos token.Pos) (llvm.Value, error) {
+	llvmTypeFrom := value.Type()
+	llvmTypeTo := b.getLLVMTypeTC(typeTo)
+
+	isPtrFrom := isPointerTC(typeFrom.Underlying())
+	isPtrTo := isPointerTC(typeTo.Underlying())
+	if isPtrFrom && !isPtrTo {
+		return b.CreatePtrToInt(value, llvmTypeTo, ""), nil
+	} else if !isPtrFrom && isPtrTo {
+		return b.CreateIntToPtr(value, llvmTypeTo, ""), nil
+	}
+
+	if isPtrFrom && isPtrTo {
+		return value, nil
+	}
+
+	switch typeTo := typeTo.Underlying().(type) {
+	case *typecheck.Basic:
+		sizeFrom := b.targetData.TypeAllocSize(llvmTypeFrom)
+
+		if typeTo.Info()&typecheck.IsString != 0 {
+			switch typeFrom := typeFrom.Underlying().(type) {
+			case *typecheck.Basic:
+				if sizeFrom > 4 {
+					value = b.CreateTrunc(value, b.ctx.Int32Type(), "")
+				} else if sizeFrom < 4 && typeTo.Info()&typecheck.IsUnsigned != 0 {
+					value = b.CreateZExt(value, b.ctx.Int32Type(), "")
+				} else if sizeFrom < 4 {
+					value = b.CreateSExt(value, b.ctx.Int32Type(), "")
+				}
+				return b.createRuntimeCall("stringFromUnicode", []llvm.Value{value}, ""), nil
+			case *typecheck.Slice:
+				switch typeFrom.Elem().(*typecheck.Basic).Kind() {
+				case typecheck.Uint8:
+					ptr := b.CreateExtractValue(value, 0, "")
+					ln := b.CreateExtractValue(value, 1, "")
+					cp := b.CreateExtractValue(value, 2, "")
+					str := llvm.Undef(b.getLLVMRuntimeType("_string"))
+					str = b.CreateInsertValue(str, ptr, 0, "")
+					str = b.CreateInsertValue(str, ln, 1, "")
+					str = b.CreateInsertValue(str, cp, 2, "")
+					return str, nil
+				case typecheck.Int32:
+					return b.createRuntimeCall("stringFromRunes", []llvm.Value{value}, ""), nil
+				default:
+					return llvm.Value{}, b.makeError(pos, "todo: convert to string: "+typeFrom.String())
+				}
+			default:
+				return llvm.Value{}, b.makeError(pos, "todo: convert to string: "+typeFrom.String())
+			}
+		}
+
+		typeFrom := typeFrom.Underlying().(*typecheck.Basic)
+		sizeTo := b.targetData.TypeAllocSize(llvmTypeTo)
+
+		if typeFrom.Info()&typecheck.IsInteger != 0 && typeTo.Info()&typecheck.IsInteger != 0 {
+			if sizeFrom > sizeTo {
+				return b.CreateTrunc(value, llvmTypeTo, ""), nil
+			} else if typeFrom.Info()&typecheck.IsUnsigned != 0 {
+				return b.CreateZExt(value, llvmTypeTo, ""), nil
+			} else {
+				return b.CreateSExt(value, llvmTypeTo, ""), nil
+			}
+		}
+
+		if typeFrom.Info()&typecheck.IsFloat != 0 && typeTo.Info()&typecheck.IsFloat != 0 {
+			if sizeFrom > sizeTo {
+				return b.CreateFPTrunc(value, llvmTypeTo, ""), nil
+			} else if sizeFrom < sizeTo {
+				return b.CreateFPExt(value, llvmTypeTo, ""), nil
+			} else {
+				return value, nil
+			}
+		}
+
+		if typeFrom.Info()&typecheck.IsFloat != 0 && typeTo.Info()&typecheck.IsInteger != 0 {
+			var significandBits int
+			switch typeFrom.Kind() {
+			case typecheck.Float32:
+				significandBits = 23
+			case typecheck.Float64:
+				significandBits = 52
+			}
+			if typeTo.Info()&typecheck.IsUnsigned != 0 {
+				max := ^(^uint64(0) << uint(llvmTypeTo.IntTypeWidth()))
+				maxFloat := float64(max)
+				if bits.Len64(max) > significandBits {
+					maxFloat = float64(max & (^uint64(0) << uint(bits.Len64(max)-significandBits)))
+				}
+				positive := b.CreateFCmp(llvm.FloatOLE, llvm.ConstNull(llvmTypeFrom), value, "positive")
+				withinMax := b.CreateFCmp(llvm.FloatOLE, value, llvm.ConstFloat(llvmTypeFrom, maxFloat), "withinmax")
+				inBounds := b.CreateAnd(positive, withinMax, "inbounds")
+				saturated := b.CreateSelect(positive,
+					llvm.ConstInt(llvmTypeTo, max, false),
+					llvm.ConstNull(llvmTypeTo),
+					"saturated",
+				)
+				normal := b.CreateFPToUI(value, llvmTypeTo, "normal")
+				return b.CreateSelect(inBounds, normal, saturated, ""), nil
+			} else {
+				min := uint64(1) << uint(llvmTypeTo.IntTypeWidth()-1)
+				minFloat := -float64(min)
+				max := ^(^uint64(0) << uint(llvmTypeTo.IntTypeWidth()-1))
+				maxFloat := float64(max)
+				if bits.Len64(max) > significandBits {
+					maxFloat = float64(max & (^uint64(0) << uint(bits.Len64(max)-significandBits)))
+				}
+				aboveMin := b.CreateFCmp(llvm.FloatOLE, llvm.ConstFloat(llvmTypeFrom, minFloat), value, "abovemin")
+				belowMax := b.CreateFCmp(llvm.FloatOLE, value, llvm.ConstFloat(llvmTypeFrom, maxFloat), "belowmax")
+				inBounds := b.CreateAnd(aboveMin, belowMax, "inbounds")
+				saturated := b.CreateSelect(aboveMin,
+					llvm.ConstInt(llvmTypeTo, max, false),
+					llvm.ConstInt(llvmTypeTo, min, false),
+					"saturated",
+				)
+				saturated = b.CreateSelect(b.CreateFCmp(llvm.FloatUNO, value, value, "isnan"),
+					llvm.ConstNull(llvmTypeTo),
+					saturated,
+					"remapped",
+				)
+				normal := b.CreateFPToSI(value, llvmTypeTo, "normal")
+				return b.CreateSelect(inBounds, normal, saturated, ""), nil
+			}
+		}
+
+		if typeFrom.Info()&typecheck.IsInteger != 0 && typeTo.Info()&typecheck.IsFloat != 0 {
+			if typeFrom.Info()&typecheck.IsUnsigned != 0 {
+				return b.CreateUIToFP(value, llvmTypeTo, ""), nil
+			}
+			return b.CreateSIToFP(value, llvmTypeTo, ""), nil
+		}
+
+		return llvm.Value{}, b.makeError(pos, "todo: convert: basic non-integer type: "+typeFrom.String()+" -> "+typeTo.String())
+
+	case *typecheck.Slice:
+		if !isStringLikeTC(typeFrom.Underlying()) {
+			panic("can only convert from a string/[]byte to a slice")
+		}
+		elemType := typeTo.Elem().Underlying().(*typecheck.Basic)
+		switch elemType.Kind() {
+		case typecheck.Uint8:
+			ptr := b.CreateExtractValue(value, 0, "")
+			ln := b.CreateExtractValue(value, 1, "")
+			cp := b.CreateExtractValue(value, 2, "")
+			slice := llvm.Undef(b.getLLVMTypeTC(typeTo))
+			slice = b.CreateInsertValue(slice, ptr, 0, "")
+			slice = b.CreateInsertValue(slice, ln, 1, "")
+			slice = b.CreateInsertValue(slice, cp, 2, "")
+			return slice, nil
+		case typecheck.Int32:
+			return b.createRuntimeCall("stringToRunes", []llvm.Value{value}, ""), nil
+		default:
+			panic("unexpected type in string to slice conversion")
+		}
+
+	default:
+		return llvm.Value{}, b.makeError(pos, "todo: convert "+typeTo.String()+" <- "+typeFrom.String())
+	}
+}
+
 // createUnOp creates LLVM IR for a given Go unary operation.
-// Most unary operators are pretty simple, such as the not and minus operator
-// which can all be directly lowered to IR. However, there is also the channel
 // receive operator which is handled in the runtime directly.
 func (b *builder) createUnOp(unop *ssa.UnOp) (llvm.Value, error) {
 	x := b.getValue(unop.X, getPos(unop))
