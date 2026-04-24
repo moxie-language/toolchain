@@ -27,6 +27,12 @@ type Translator struct {
 	pkgs    map[*ssa.Package]*mxssa.Package
 }
 
+// Importer returns the bridge type importer for cross-validation.
+func (t *Translator) Importer() *tcbridge.Importer { return t.imp }
+
+// LookupFunction returns the mxssa.Function for an ssa.Function, or nil.
+func (t *Translator) LookupFunction(f *ssa.Function) *mxssa.Function { return t.funcs[f] }
+
 // Translate converts an entire ssa.Program to mxssa.Program.
 // The typePkgs map provides go/types packages for type translation.
 func Translate(fset *token.FileSet, ssaProg *ssa.Program, typePkgs map[string]*types.Package) (*mxssa.Program, *Translator) {

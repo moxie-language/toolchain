@@ -96,6 +96,7 @@ type compilerContext struct {
 	embedGlobals     map[string][]*loader.EmbedFile
 	pkg              *types.Package
 	mxPkg            *typecheck.Package // B3 bridge: native types for current package
+	tcLLVMTypes      map[typecheck.Type]llvm.Type // B3 bridge: typecheck.Type → LLVM cache
 	packageDir       string // directory for this package
 	runtimePkg       *types.Package
 }
@@ -112,6 +113,7 @@ func newCompilerContext(moduleName string, machine llvm.TargetMachine, config *C
 		targetData:    machine.CreateTargetData(),
 		functionInfos: map[*ssa.Function]functionInfo{},
 		astComments:   map[string]*ast.CommentGroup{},
+		tcLLVMTypes:   map[typecheck.Type]llvm.Type{},
 	}
 
 	c.ctx = llvm.NewContext()
@@ -149,10 +151,12 @@ type builder struct {
 	*compilerContext
 	llvm.Builder
 	fn                *ssa.Function
+	mxFn              *mxssa.Function          // B3 bridge: native SSA function
 	llvmFnType        llvm.Type
 	llvmFn            llvm.Value
 	info              functionInfo
 	locals            map[ssa.Value]llvm.Value // local variables
+	mxLocals          map[mxssa.Value]llvm.Value // B3 bridge: native SSA locals
 	blockInfo         []blockInfo
 	currentBlock      *ssa.BasicBlock
 	currentBlockInfo  *blockInfo
@@ -180,7 +184,7 @@ type builder struct {
 
 func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *builder {
 	fnType, fn := c.getFunction(f)
-	return &builder{
+	b := &builder{
 		compilerContext: c,
 		Builder:         irbuilder,
 		fn:              f,
@@ -188,8 +192,13 @@ func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *bu
 		llvmFn:          fn,
 		info:            c.getFunctionInfo(f),
 		locals:          make(map[ssa.Value]llvm.Value),
+		mxLocals:        make(map[mxssa.Value]llvm.Value),
 		dilocals:        make(map[*types.Var]llvm.Metadata),
 	}
+	if c.mxTranslator != nil {
+		b.mxFn = c.mxTranslator.LookupFunction(f)
+	}
+	return b
 }
 
 type blockInfo struct {
@@ -304,6 +313,7 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 	if mxP := mxProg.ImportedPackage(pkg.Pkg.Path()); mxP != nil {
 		c.mxPkg = mxP.Pkg
 	}
+	c.validateBridgeTypes()
 
 	// Initialize debug information.
 	if c.Debug {

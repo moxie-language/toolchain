@@ -354,6 +354,7 @@ func (c *Const) Pos() token.Pos                  { return 0 }
 func (c *Const) Parent() *Function               { return nil }
 func (c *Const) Referrers() *[]Instruction       { return &c.referrers }
 func (c *Const) Value() constant.Value           { return c.val }
+func (c *Const) IsNil() bool                     { return c.val == nil && nillable(c.typ) }
 func (c *Const) setName(n string)                {}
 func (c *Const) setType(t typecheck.Type)        { c.typ = t }
 func (c *Const) addReferrer(i Instruction)       { c.referrers = append(c.referrers, i) }
@@ -885,3 +886,17 @@ func (d *DebugRef) Operands(rands []*Value) []*Value { return append(rands, &d.X
 func (d *DebugRef) Pos() token.Pos                   { return 0 }
 func (d *DebugRef) Object() typecheck.Object         { return d.object }
 func (d *DebugRef) String() string                   { return "debugref" }
+
+func nillable(t typecheck.Type) bool {
+	if t == nil {
+		return false
+	}
+	switch t.Underlying().(type) {
+	case *typecheck.Pointer, *typecheck.Slice, *typecheck.Chan, *typecheck.Map, *typecheck.Signature:
+		return true
+	case *typecheck.Interface:
+		return true
+	default:
+		return false
+	}
+}

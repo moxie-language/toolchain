@@ -213,10 +213,21 @@ mirror the same structure. The bridge strategy:
 ### Migration Order (by dependency — leaf files first)
 
 **Tier 0: Bridge infrastructure**
-- [ ] `ssabridge/` — ssa.Program → mxssa.Program translator
-- [ ] `CompilePackage` entry point — produce mxssa.Program, store in compilerContext
+- [x] `ssabridge/` — ssa.Program → mxssa.Program translator
+- [x] `CompilePackage` entry point — produce mxssa.Program, store in compilerContext
+- [x] `compiler/tccompat.go` — parallel type/value/size layer:
+  - `getLLVMTypeTC(typecheck.Type) llvm.Type` — type→LLVM with own cache
+  - `getLLVMFunctionTypeTC`, `getFuncTypeTC` — function type variants
+  - `AlignofTC`, `SizeofTC`, `OffsetsofTC` — size computation on stdSizes
+  - `getValueTC(mxssa.Value, token.Pos) llvm.Value` — value resolution
+  - `createConstTC(*mxssa.Const, token.Pos) llvm.Value` — constant creation
+  - `isPointerTC`, `getPosTC` — utility helpers
+  - `validateBridgeTypes` — cross-check (MOXIE_VALIDATE_BRIDGE=1)
+- [x] `builder` gains `mxFn *mxssa.Function` and `mxLocals map[mxssa.Value]llvm.Value`
+- [x] `mxssa.Const.IsNil()` + `nillable()` added
+- [x] `ssabridge.Translator.LookupFunction()` / `Importer()` accessors
 
-**Tier 1: Leaf files (no intra-compiler type flow)**
+**Tier 1: Per-method migration (files share builder infra, migrate method-by-method)**
 - [ ] compiler/sizes.go
 - [ ] compiler/errors.go
 - [ ] compiler/volatile.go
