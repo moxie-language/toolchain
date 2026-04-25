@@ -228,25 +228,25 @@ mirror the same structure. The bridge strategy:
 - [x] `ssabridge.Translator.LookupFunction()` / `Importer()` accessors
 
 **Tier 1: Per-method migration (files share builder infra, migrate method-by-method)**
-- [ ] compiler/sizes.go
-- [ ] compiler/errors.go
-- [ ] compiler/volatile.go
-- [ ] compiler/atomic.go
-- [ ] compiler/inlineasm.go
-- [ ] compiler/interrupt.go
-- [ ] compiler/syscall.go
+- [ ] compiler/sizes.go — implements types.Sizes interface; needed until B3 Tier 6
+- [ ] compiler/errors.go — types.Error for diagnostics; needs diagnostics.go update
+- [x] compiler/volatile.go — pure TC (done prior session)
+- [x] compiler/atomic.go — pure TC (done prior session)
+- [x] compiler/inlineasm.go — deleted (embedded targets only, unsupported by Moxie)
+- [x] compiler/interrupt.go — deleted (embedded targets only, unsupported by Moxie)
+- [x] compiler/syscall.go — SSA versions deleted; TC path handles all syscalls
 
 **Tier 2: Mid-complexity files**
-- [ ] compiler/symbol.go
-- [ ] compiler/gc.go
-- [ ] compiler/llvm.go
-- [ ] compiler/channel.go
-- [ ] compiler/map.go
-- [ ] compiler/defer.go
-- [ ] compiler/asserts.go
-- [ ] compiler/spawn.go
-- [ ] compiler/mxbuiltins.go
-- [ ] compiler/restrict.go
+- [ ] compiler/symbol.go — core infra (getFunction, getFunctionInfo); SSA-typed throughout
+- [ ] compiler/gc.go — trackExpr needed by SSA fallback (newcoro uses channels)
+- [ ] compiler/llvm.go — one types.* use in debug info; near-complete
+- [ ] compiler/channel.go — SSA channel methods needed by newcoro SSA fallback
+- [x] compiler/map.go — SSA versions deleted; TC path handles all map ops; EnsureFunction + global type cache fixes land here
+- [ ] compiler/defer.go — SSA defer needed for SSA fallback
+- [ ] compiler/asserts.go — SSA nil/bounds checks needed by SSA fallback
+- [x] compiler/spawn.go — SSA createSpawn deleted; validation utilities kept (shared)
+- [x] compiler/mxbuiltins.go — SSA versions deleted; TC path handles all moxie builtins
+- [ ] compiler/restrict.go — SSA-typed restriction checker; called from both paths
 
 **Tier 3: Core files (highest assertion count)**
 - [ ] compiler/calls.go
