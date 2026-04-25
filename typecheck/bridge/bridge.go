@@ -17,16 +17,18 @@ import (
 // Importer wraps a go/types package map and satisfies typecheck.Importer.
 // Each package is translated lazily and cached.
 type Importer struct {
-	mu    sync.Mutex
-	pkgs  map[string]*types.Package // import path → go/types Package
-	cache map[string]*typecheck.Package
+	mu        sync.Mutex
+	pkgs      map[string]*types.Package // import path → go/types Package
+	cache     map[string]*typecheck.Package
+	typeCache *typeCache // global type cache for pointer identity across calls
 }
 
 // New returns an Importer pre-loaded with the given package map.
 func New(pkgs map[string]*types.Package) *Importer {
 	return &Importer{
-		pkgs:  pkgs,
-		cache: map[string]*typecheck.Package{},
+		pkgs:      pkgs,
+		cache:     map[string]*typecheck.Package{},
+		typeCache: newTypeCache(),
 	}
 }
 
@@ -85,9 +87,11 @@ func translatePackage(gp *types.Package, imp *Importer) *typecheck.Package {
 	return p
 }
 
-// TranslateType converts a go/types.Type to a typecheck.Type using imp's cache.
+// TranslateType converts a go/types.Type to a typecheck.Type using imp's global cache.
+// Using the importer's global typeCache ensures the same go/types.Type always
+// maps to the same typecheck.Type pointer, keeping revTypes consistent.
 func TranslateType(imp *Importer, t types.Type) typecheck.Type {
-	return translateType(t, newTypeCache(), imp)
+	return translateType(t, imp.typeCache, imp)
 }
 
 // TranslateObject converts a go/types.Object to a typecheck.Object.

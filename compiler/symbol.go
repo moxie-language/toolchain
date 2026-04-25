@@ -280,7 +280,11 @@ func (c *compilerContext) maybeCreateSyntheticFunction(fn *ssa.Function, llvmFn 
 		}
 		irbuilder := c.ctx.NewBuilder()
 		b := newBuilder(c, irbuilder, fn)
-		b.createFunction()
+		if b.mxFn != nil {
+			b.createFunctionTC()
+		} else {
+			b.createFunction()
+		}
 		irbuilder.Dispose()
 		llvmFn.SetLinkage(llvm.LinkOnceODRLinkage)
 		llvmFn.SetUnnamedAddr(true)

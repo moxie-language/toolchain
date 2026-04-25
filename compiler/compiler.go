@@ -198,7 +198,7 @@ func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *bu
 		dilocals:        make(map[*types.Var]llvm.Metadata),
 	}
 	if c.mxTranslator != nil {
-		b.mxFn = c.mxTranslator.LookupFunction(f)
+		b.mxFn = c.mxTranslator.EnsureFunction(f)
 	}
 	return b
 }

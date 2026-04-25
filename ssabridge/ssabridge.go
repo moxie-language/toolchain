@@ -9,6 +9,7 @@ package ssabridge
 import (
 	"go/token"
 	"go/types"
+	"unsafe"
 
 	"moxie/mxssa"
 	"moxie/typecheck"
@@ -27,6 +28,10 @@ type Translator struct {
 	pkgs     map[*ssa.Package]*mxssa.Package
 	revTypes map[typecheck.Type]types.Type
 	revFuncs map[*mxssa.Function]*ssa.Function
+	// typeCache maps go/types.Type (by pointer) to its canonical typecheck.Type.
+	// Ensures the same TC type pointer is returned for the same go/types type
+	// so that revTypes lookups remain consistent.
+	typeCache map[uintptr]typecheck.Type
 }
 
 // Importer returns the bridge type importer for cross-validation.
@@ -35,20 +40,49 @@ func (t *Translator) Importer() *tcbridge.Importer { return t.imp }
 // LookupFunction returns the mxssa.Function for an ssa.Function, or nil.
 func (t *Translator) LookupFunction(f *ssa.Function) *mxssa.Function { return t.funcs[f] }
 
+// EnsureFunction ensures f has a full mxssa translation (shell + body).
+// The value() helper may register only a shell for cross-package function
+// references; this fills in the body if it is missing.
+// Returns nil for external functions (no SSA blocks), letting them use the SSA path.
+func (t *Translator) EnsureFunction(f *ssa.Function) *mxssa.Function {
+	if len(f.Blocks) == 0 {
+		// External/stub — no body to translate; SSA path handles it.
+		if mf, ok := t.funcs[f]; ok {
+			return mf // shell-only is fine for external functions
+		}
+		return nil
+	}
+	mf, ok := t.funcs[f]
+	if ok && len(mf.Blocks) > 0 {
+		return mf // already fully translated
+	}
+	if !ok {
+		var pkg *mxssa.Package
+		if f.Package() != nil {
+			pkg = t.ensurePackage(f.Package())
+		}
+		mf = t.translateFunctionShell(f, pkg)
+	}
+	// mf exists (either just created or a shell from value()) but has no blocks.
+	t.translateFunctionBody(f, mf)
+	return mf
+}
+
 // Translate converts an entire ssa.Program to mxssa.Program.
 // The typePkgs map provides go/types packages for type translation.
 func Translate(fset *token.FileSet, ssaProg *ssa.Program, typePkgs map[string]*types.Package) (*mxssa.Program, *Translator) {
 	prog := mxssa.NewProgram(fset)
 	imp := tcbridge.New(typePkgs)
 	t := &Translator{
-		prog:     prog,
-		imp:      imp,
-		fset:     fset,
-		funcs:    map[*ssa.Function]*mxssa.Function{},
-		globals:  map[*ssa.Global]*mxssa.Global{},
-		pkgs:     map[*ssa.Package]*mxssa.Package{},
-		revTypes: map[typecheck.Type]types.Type{},
-		revFuncs: map[*mxssa.Function]*ssa.Function{},
+		prog:      prog,
+		imp:       imp,
+		fset:      fset,
+		funcs:     map[*ssa.Function]*mxssa.Function{},
+		globals:   map[*ssa.Global]*mxssa.Global{},
+		pkgs:      map[*ssa.Package]*mxssa.Package{},
+		revTypes:  map[typecheck.Type]types.Type{},
+		revFuncs:  map[*mxssa.Function]*ssa.Function{},
+		typeCache: map[uintptr]typecheck.Type{},
 	}
 	return prog, t
 }
@@ -100,9 +134,26 @@ func (t *Translator) TranslatePackage(ssaPkg *ssa.Package) *mxssa.Package {
 	return p
 }
 
+func typePtr(t types.Type) uintptr {
+	type iface struct{ typ, ptr uintptr }
+	return (*iface)(unsafe.Pointer(&t)).ptr
+}
+
 func (t *Translator) typ(gt types.Type) typecheck.Type {
+	if gt == nil {
+		return nil
+	}
+	// Use a global cache keyed by pointer identity to ensure the same go/types
+	// type always maps to the same typecheck.Type pointer. This keeps revTypes
+	// consistent: multiple TranslateType calls for the same type return
+	// different pointers, but we always use the first one.
+	key := typePtr(gt)
+	if cached, ok := t.typeCache[key]; ok {
+		return cached
+	}
 	tc := tcbridge.TranslateType(t.imp, gt)
-	if tc != nil && gt != nil {
+	if tc != nil {
+		t.typeCache[key] = tc
 		t.revTypes[tc] = gt
 		if u := tc.Underlying(); u != nil && u != tc {
 			if _, exists := t.revTypes[u]; !exists {
