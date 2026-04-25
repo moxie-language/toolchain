@@ -2468,9 +2468,6 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 		}
 		exported = info.exported || strings.HasPrefix(info.linkName, "llvm.")
 	} else if call, ok := instr.Value.(*ssa.Builtin); ok {
-		if call.Name() == "spawn" {
-			return b.createSpawn(instr)
-		}
 		// Builtin function (append, close, delete, etc.).)
 		var argTypes []types.Type
 		for _, arg := range instr.Args {
