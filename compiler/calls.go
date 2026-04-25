@@ -79,6 +79,17 @@ func (b *builder) createCall(fnType llvm.Type, fn llvm.Value, args []llvm.Value,
 		fragments := b.expandFormalParam(arg)
 		expanded = append(expanded, fragments...)
 	}
+	// Coerce named↔anonymous struct mismatches (TC path may produce
+	// anonymous struct types where the callee expects named ones).
+	if paramTypes := fnType.ParamTypes(); len(paramTypes) == len(expanded) {
+		for i, pt := range paramTypes {
+			if expanded[i].Type() != pt &&
+				pt.TypeKind() == llvm.StructTypeKind &&
+				expanded[i].Type().TypeKind() == llvm.StructTypeKind {
+				expanded[i] = b.coerceStructType(expanded[i], pt)
+			}
+		}
+	}
 	call := b.CreateCall(fnType, fn, expanded, name)
 	if !fn.IsAFunction().IsNil() {
 		if cc := fn.FunctionCallConv(); cc != llvm.CCallConv {

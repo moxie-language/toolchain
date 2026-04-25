@@ -86,9 +86,16 @@ func (c *compilerContext) getMemsetFunc() llvm.Value {
 	return llvmFn
 }
 
+func (b *builder) intrinsicParam0() llvm.Value {
+	if b.mxFn != nil {
+		return b.getValueTC(b.mxFn.Params[0], getPosTC(b.mxFn.Params[0]))
+	}
+	return b.getValue(b.fn.Params[0], b.fn.Pos())
+}
+
 func (b *builder) createKeepAliveImpl() {
 	b.createFunctionStart(true)
-	interfaceValue := b.getValueTC(b.mxFn.Params[0], getPosTC(b.mxFn.Params[0]))
+	interfaceValue := b.intrinsicParam0()
 	pointerValue := b.CreateExtractValue(interfaceValue, 1, "")
 	asmType := llvm.FunctionType(b.ctx.VoidType(), []llvm.Type{b.dataPtrType}, false)
 	asmFn := llvm.InlineAsm(asmType, "", "r", true, false, 0, false)
@@ -98,7 +105,7 @@ func (b *builder) createKeepAliveImpl() {
 
 func (b *builder) createAbiEscapeImpl() {
 	b.createFunctionStart(true)
-	pointerValue := b.getValueTC(b.mxFn.Params[0], getPosTC(b.mxFn.Params[0]))
+	pointerValue := b.intrinsicParam0()
 	asmType := llvm.FunctionType(b.dataPtrType, []llvm.Type{b.dataPtrType}, false)
 	asmFn := llvm.InlineAsm(asmType, "", "=r,0", true, false, 0, false)
 	result := b.createCall(asmType, asmFn, []llvm.Value{pointerValue}, "")
@@ -107,7 +114,7 @@ func (b *builder) createAbiEscapeImpl() {
 
 func (b *builder) createMachineKeepAliveImpl() {
 	b.createFunctionStart(true)
-	pointerValue := b.getValueTC(b.mxFn.Params[0], getPosTC(b.mxFn.Params[0]))
+	pointerValue := b.intrinsicParam0()
 	asmType := llvm.FunctionType(b.ctx.VoidType(), []llvm.Type{b.dataPtrType}, false)
 	asmFn := llvm.InlineAsm(asmType, "", "r", true, false, 0, false)
 	b.createCall(asmType, asmFn, []llvm.Value{pointerValue}, "")

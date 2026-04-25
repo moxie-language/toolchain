@@ -1379,6 +1379,25 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		// because runtime.trackPointer is replaced by an alloca store.
 		b.stackChainAlloca = b.CreateAlloca(b.ctx.Int8Type(), "stackalloc")
 	}
+
+	// Bridge ssa locals → mxssa locals for params and freevars so that
+	// both TC-path and intrinsic functions can use getValueTC.
+	if b.mxFn != nil {
+		for i, ssaParam := range b.fn.Params {
+			if i < len(b.mxFn.Params) {
+				if val, ok := b.locals[ssaParam]; ok {
+					b.mxLocals[b.mxFn.Params[i]] = val
+				}
+			}
+		}
+		for i, ssaFV := range b.fn.FreeVars {
+			if i < len(b.mxFn.FreeVars) {
+				if val, ok := b.locals[ssaFV]; ok {
+					b.mxLocals[b.mxFn.FreeVars[i]] = val
+				}
+			}
+		}
+	}
 }
 
 // createFunction builds the LLVM IR implementation for this function. The
@@ -1492,26 +1511,16 @@ func (b *builder) createFunction() {
 }
 
 func (b *builder) createFunctionTC() {
+	if len(b.mxFn.Blocks) == 0 {
+		b.createFunction()
+		return
+	}
+	if mxFnHasInvalidTypes(b.mxFn) {
+		b.createFunction()
+		return
+	}
 	b.createFunctionStart(false)
 	b.checkMoxieRestrictions()
-
-	// Bridge parameters: ssa locals → mxssa locals.
-	if b.mxFn != nil {
-		for i, ssaParam := range b.fn.Params {
-			if i < len(b.mxFn.Params) {
-				if val, ok := b.locals[ssaParam]; ok {
-					b.mxLocals[b.mxFn.Params[i]] = val
-				}
-			}
-		}
-		for i, ssaFV := range b.fn.FreeVars {
-			if i < len(b.mxFn.FreeVars) {
-				if val, ok := b.locals[ssaFV]; ok {
-					b.mxLocals[b.mxFn.FreeVars[i]] = val
-				}
-			}
-		}
-	}
 
 	for _, block := range b.fn.DomPreorder() {
 		if b.DumpSSA {
@@ -1550,9 +1559,17 @@ func (b *builder) createFunctionTC() {
 	// Resolve mxssa phi nodes.
 	for _, phi := range b.mxPhis {
 		block := phi.phi.Block()
+		phiType := phi.llvm.Type()
 		for i, edge := range phi.phi.Edges {
 			llvmVal := b.getValueTC(edge, phi.phi.Pos())
 			llvmBlock := b.blockInfo[block.Preds[i].Index].exit
+			if llvmVal.Type() != phiType {
+				// Coercion emits instructions — place them before the
+				// predecessor block's terminator.
+				term := llvmBlock.LastInstruction()
+				b.SetInsertPointBefore(term)
+				llvmVal = b.coerceStructType(llvmVal, phiType)
+			}
 			phi.llvm.AddIncoming([]llvm.Value{llvmVal}, []llvm.BasicBlock{llvmBlock})
 		}
 	}
@@ -1748,7 +1765,7 @@ func (b *builder) createInstructionTC(instr mxssa.Instruction) {
 	case *mxssa.DebugRef:
 		// ignore
 	case *mxssa.Defer:
-		b.addError(instr.Pos(), "todo: defer TC path not yet implemented")
+		b.createDeferTC(instr)
 	case *mxssa.Go:
 		if b.mxFn != nil && b.mxFn.Pkg != nil {
 			pkgPath := b.mxFn.Pkg.Pkg.Path()
@@ -1784,11 +1801,18 @@ func (b *builder) createInstructionTC(instr mxssa.Instruction) {
 		if len(instr.Results) == 0 {
 			b.CreateRetVoid()
 		} else if len(instr.Results) == 1 {
-			b.CreateRet(b.getValueTC(instr.Results[0], instr.Pos()))
+			val := b.getValueTC(instr.Results[0], instr.Pos())
+			val = b.fixReturnType(val)
+			b.CreateRet(val)
 		} else {
-			retVal := llvm.ConstNull(b.llvmFn.GlobalValueType().ReturnType())
+			retType := b.llvmFn.GlobalValueType().ReturnType()
+			retVal := llvm.ConstNull(retType)
+			retFields := retType.StructElementTypes()
 			for i, result := range instr.Results {
 				val := b.getValueTC(result, instr.Pos())
+				if i < len(retFields) {
+					val = b.coerceStructType(val, retFields[i])
+				}
 				retVal = b.CreateInsertValue(retVal, val, i, "")
 			}
 			b.CreateRet(retVal)
@@ -2564,6 +2588,12 @@ func (b *builder) createFunctionCallTC(instr *mxssa.CallCommon) (llvm.Value, err
 			return b.createMoxieLtTC(instr), nil
 		case strings.HasPrefix(fn.Name(), "__moxie_secalloc"):
 			return b.createMoxieSecallocTC(instr), nil
+		case strings.HasPrefix(name, "syscall.Syscall") || strings.HasPrefix(name, "syscall.RawSyscall") || strings.HasPrefix(name, "golang.org/x/sys/unix.Syscall") || strings.HasPrefix(name, "golang.org/x/sys/unix.RawSyscall"):
+			if b.GOOS != "darwin" {
+				return b.createSyscallTC(instr)
+			}
+		case strings.HasPrefix(name, "syscall.rawSyscallNoError") || strings.HasPrefix(name, "golang.org/x/sys/unix.RawSyscallNoError"):
+			return b.createRawSyscallNoErrorTC(instr)
 		}
 	}
 
@@ -2625,7 +2655,7 @@ func (b *builder) createFunctionCallTC(instr *mxssa.CallCommon) (llvm.Value, err
 	} else {
 		value := b.getValueTC(instr.Value, instr.Pos())
 		callee, context = b.decodeFuncValue(value)
-		calleeType = b.getLLVMFunctionTypeTC(instr.Value.Type().(*typecheck.Signature))
+		calleeType = b.getLLVMFunctionTypeTC(instr.Value.Type().Underlying().(*typecheck.Signature))
 		b.createNilCheckTC(instr.Value, callee, "fpcall")
 	}
 
@@ -4938,9 +4968,8 @@ func (b *builder) createUnOpTC(unop *mxssa.UnOp) (llvm.Value, error) {
 		valueType := b.getLLVMTypeTC(unop.X.Type().Underlying().(*typecheck.Pointer).Elem())
 		if b.targetData.TypeAllocSize(valueType) == 0 {
 			return llvm.ConstNull(valueType), nil
-		} else if strings.HasSuffix(unop.X.String(), "$funcaddr") {
-			// CGo function pointer — Moxie has no CGo, so this is dead code.
-			name := strings.TrimSuffix(unop.X.(*mxssa.Global).Name(), "$funcaddr")
+		} else if g, ok := unop.X.(*mxssa.Global); ok && strings.HasSuffix(g.Name(), "$funcaddr") {
+			name := strings.TrimSuffix(g.Name(), "$funcaddr")
 			pkg := b.mxFn.Pkg
 			fn := pkg.Members[name].(*mxssa.Function)
 			goFn := b.mxTranslator.ReverseFunction(fn)

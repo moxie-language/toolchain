@@ -84,11 +84,18 @@ func (c *compilerContext) makeLLVMTypeTC(t typecheck.Type) llvm.Type {
 	case *typecheck.TypeParam:
 		return c.getLLVMTypeTC(typ.Underlying())
 	case *typecheck.Named:
-		if st, ok := typ.Underlying().(*typecheck.Struct); ok {
+		if _, ok := typ.Underlying().(*typecheck.Struct); ok {
 			llvmName := typ.String()
+			// Reuse existing named type from the module to avoid identity mismatches
+			// between the SSA path's getLLVMType and this TC path.
+			existing := c.mod.GetTypeByName(llvmName)
+			if !existing.IsNil() {
+				c.tcLLVMTypes[t] = existing
+				return existing
+			}
 			llvmType := c.ctx.StructCreateNamed(llvmName)
 			c.tcLLVMTypes[t] = llvmType
-			underlying := c.getLLVMTypeTC(st)
+			underlying := c.getLLVMTypeTC(typ.Underlying())
 			llvmType.StructSetBody(underlying.StructElementTypes(), false)
 			return llvmType
 		}
@@ -122,15 +129,24 @@ func (c *compilerContext) getLLVMFunctionTypeTC(typ *typecheck.Signature) llvm.T
 
 	var paramTypes []llvm.Type
 	if recv := typ.Recv(); recv != nil {
-		paramTypes = append(paramTypes, c.getLLVMTypeTC(recv.Type()))
+		rt := c.getLLVMTypeTC(recv.Type())
+		if rt.StructName() == "runtime._interface" {
+			rt = c.dataPtrType
+		}
+		for _, info := range c.expandFormalParamType(rt, "", nil) {
+			paramTypes = append(paramTypes, info.llvmType)
+		}
 	}
 	params := typ.Params()
 	if params != nil {
 		for i := 0; i < params.Len(); i++ {
-			paramTypes = append(paramTypes, c.getLLVMTypeTC(params.At(i).Type()))
+			subType := c.getLLVMTypeTC(params.At(i).Type())
+			for _, info := range c.expandFormalParamType(subType, "", nil) {
+				paramTypes = append(paramTypes, info.llvmType)
+			}
 		}
 	}
-
+	paramTypes = append(paramTypes, c.dataPtrType) // context
 	return llvm.FunctionType(returnType, paramTypes, typ.Variadic())
 }
 
@@ -316,15 +332,31 @@ func (b *builder) getValueTC(expr mxssa.Value, pos token.Pos) llvm.Value {
 			}
 		}
 		return b.createConstTC(expr, pos)
+	case *mxssa.Function:
+		goFn := b.mxTranslator.ReverseFunction(expr)
+		if goFn == nil {
+			b.addError(expr.Pos(), "cannot reverse-bridge function: "+expr.Name())
+			return llvm.Undef(b.getLLVMTypeTC(expr.Type()))
+		}
+		if b.getFunctionInfo(goFn).exported {
+			b.addError(expr.Pos(), "cannot use an exported function as value: "+expr.String())
+			return llvm.Undef(b.getLLVMTypeTC(expr.Type()))
+		}
+		_, fn := b.getFunction(goFn)
+		return b.createFuncValue(fn, llvm.Undef(b.dataPtrType), goFn.Signature)
 	case *mxssa.Global:
-		// Look up via the old path: find the corresponding ssa.Global and delegate.
-		if b.fn != nil {
-			for _, m := range b.fn.Package().Members {
-				if g, ok := m.(*ssa.Global); ok && g.Name() == expr.Name() {
-					value := b.getGlobal(g)
-					if !value.IsNil() {
-						return value
-					}
+		pkgPath := ""
+		if expr.Package() != nil {
+			pkgPath = expr.Package().Pkg.Path()
+		}
+		for _, p := range b.fn.Prog.AllPackages() {
+			if pkgPath != "" && p.Pkg.Path() != pkgPath {
+				continue
+			}
+			if g, ok := p.Members[expr.Name()].(*ssa.Global); ok {
+				value := b.getGlobal(g)
+				if !value.IsNil() {
+					return value
 				}
 			}
 		}
@@ -343,6 +375,9 @@ func (c *compilerContext) createConstTC(expr *mxssa.Const, pos token.Pos) llvm.V
 	switch typ := expr.Type().Underlying().(type) {
 	case *typecheck.Basic:
 		llvmType := c.getLLVMTypeTC(typ)
+		if expr.Value() == nil {
+			return llvm.ConstNull(llvmType)
+		}
 		if typ.Info()&typecheck.IsBoolean != 0 {
 			n := uint64(0)
 			if constant.BoolVal(expr.Value()) {
@@ -390,6 +425,10 @@ func (c *compilerContext) createConstTC(expr *mxssa.Const, pos token.Pos) llvm.V
 		*typecheck.Pointer, *typecheck.Array, *typecheck.Slice,
 		*typecheck.Struct, *typecheck.Map:
 		if !expr.IsNil() {
+			switch typ.(type) {
+			case *typecheck.Struct, *typecheck.Array:
+				return llvm.ConstNull(c.getLLVMTypeTC(expr.Type()))
+			}
 			panic("tccompat: expected nil constant for " + typ.String())
 		}
 		if _, ok := typ.(*typecheck.Interface); ok {
@@ -446,5 +485,77 @@ func (b *builder) createNilCheckTC(inst mxssa.Value, ptr llvm.Value, blockPrefix
 	nilptr := llvm.ConstPointerNull(ptr.Type())
 	isnil := b.CreateICmp(llvm.IntEQ, ptr, nilptr, "")
 	b.createRuntimeAssert(isnil, blockPrefix, "nilPanic")
+}
+
+func (b *builder) fixReturnType(val llvm.Value) llvm.Value {
+	expected := b.llvmFn.GlobalValueType().ReturnType()
+	return b.coerceStructType(val, expected)
+}
+
+func (b *builder) coerceStructType(val llvm.Value, expected llvm.Type) llvm.Value {
+	got := val.Type()
+	if expected == got {
+		return val
+	}
+	if expected.TypeKind() == llvm.StructTypeKind && got.TypeKind() == llvm.StructTypeKind {
+		n := expected.StructElementTypesCount()
+		if n == got.StructElementTypesCount() {
+			expectedFields := expected.StructElementTypes()
+			result := llvm.ConstNull(expected)
+			for i := 0; i < n; i++ {
+				field := b.CreateExtractValue(val, i, "")
+				field = b.coerceStructType(field, expectedFields[i])
+				result = b.CreateInsertValue(result, field, i, "")
+			}
+			return result
+		}
+	}
+	return val
+}
+
+func isInvalidTC(t typecheck.Type) bool {
+	if t == nil {
+		return false
+	}
+	switch typ := t.Underlying().(type) {
+	case *typecheck.Basic:
+		return typ.Kind() == typecheck.Invalid
+	}
+	return false
+}
+
+func mxFnHasInvalidTypes(fn *mxssa.Function) bool {
+	if fn.Signature != nil {
+		params := fn.Signature.Params()
+		if params != nil {
+			for i := 0; i < params.Len(); i++ {
+				if isInvalidTC(params.At(i).Type()) {
+					return true
+				}
+			}
+		}
+		results := fn.Signature.Results()
+		if results != nil {
+			for i := 0; i < results.Len(); i++ {
+				if isInvalidTC(results.At(i).Type()) {
+					return true
+				}
+			}
+		}
+	}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			switch instr.(type) {
+			case *mxssa.Go:
+				return true
+			}
+			if v, ok := instr.(mxssa.Value); ok {
+				if isInvalidTC(v.Type()) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 

@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"moxie/compiler/llvmutil"
+	"moxie/mxssa"
 	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
@@ -496,6 +497,176 @@ func (b *builder) createDefer(instr *ssa.Defer) {
 	b.CreateStore(deferredCall, alloca)
 
 	// Push it on top of the linked list by replacing deferPtr.
+	b.CreateStore(alloca, b.deferPtr)
+}
+
+// findSSADefer finds the *ssa.Defer in b.fn that corresponds to the given
+// mxssa.Defer by counting defer instructions in the current block.
+func (b *builder) findSSADefer(mxDefer *mxssa.Defer) *ssa.Defer {
+	mxBlock := mxDefer.Block()
+	deferIdx := 0
+	for _, instr := range mxBlock.Instrs {
+		if instr == mxDefer {
+			break
+		}
+		if _, ok := instr.(*mxssa.Defer); ok {
+			deferIdx++
+		}
+	}
+	ssaBlock := b.fn.Blocks[mxBlock.Index]
+	count := 0
+	for _, instr := range ssaBlock.Instrs {
+		if d, ok := instr.(*ssa.Defer); ok {
+			if count == deferIdx {
+				return d
+			}
+			count++
+		}
+	}
+	return nil
+}
+
+// createDeferTC emits a defer instruction from the TC path.
+// It uses mxssa types for LLVM value extraction (getValueTC) but stores
+// SSA types in the defer maps so that createRunDefers works unchanged.
+func (b *builder) createDeferTC(instr *mxssa.Defer) {
+	ssaDefer := b.findSSADefer(instr)
+	if ssaDefer == nil {
+		b.addError(instr.Pos(), "createDeferTC: cannot find matching SSA defer")
+		return
+	}
+
+	next := b.CreateLoad(b.dataPtrType, b.deferPtr, "defer.next")
+
+	var values []llvm.Value
+	valueTypes := []llvm.Type{b.uintptrType, next.Type()}
+
+	if instr.Call.IsInvoke {
+		methodName := ssaDefer.Call.Method.FullName()
+		if _, ok := b.deferInvokeFuncs[methodName]; !ok {
+			b.deferInvokeFuncs[methodName] = len(b.allDeferFuncs)
+			b.allDeferFuncs = append(b.allDeferFuncs, &ssaDefer.Call)
+		}
+		callback := llvm.ConstInt(b.uintptrType, uint64(b.deferInvokeFuncs[methodName]), false)
+
+		itf := b.getValueTC(instr.Call.Value, instr.Pos())
+		typecode := b.CreateExtractValue(itf, 0, "invoke.func.typecode")
+		receiverValue := b.CreateExtractValue(itf, 1, "invoke.func.receiver")
+		values = []llvm.Value{callback, next, typecode, receiverValue}
+		valueTypes = append(valueTypes, b.dataPtrType, b.dataPtrType)
+		for _, arg := range instr.Call.Args {
+			val := b.getValueTC(arg, instr.Pos())
+			values = append(values, val)
+			valueTypes = append(valueTypes, val.Type())
+		}
+
+	} else if _, ok := instr.Call.Value.(*mxssa.Function); ok {
+		callee := ssaDefer.Call.Value.(*ssa.Function)
+		if _, ok := b.deferFuncs[callee]; !ok {
+			b.deferFuncs[callee] = len(b.allDeferFuncs)
+			b.allDeferFuncs = append(b.allDeferFuncs, callee)
+		}
+		callback := llvm.ConstInt(b.uintptrType, uint64(b.deferFuncs[callee]), false)
+
+		values = []llvm.Value{callback, next}
+		for _, param := range instr.Call.Args {
+			llvmParam := b.getValueTC(param, instr.Pos())
+			values = append(values, llvmParam)
+			valueTypes = append(valueTypes, llvmParam.Type())
+		}
+
+	} else if _, ok := instr.Call.Value.(*mxssa.MakeClosure); ok {
+		ssaMC, ok := ssaDefer.Call.Value.(*ssa.MakeClosure)
+		if !ok {
+			b.addError(instr.Pos(), "createDeferTC: MakeClosure type mismatch with SSA")
+			return
+		}
+
+		closure := b.getValueTC(instr.Call.Value, instr.Pos())
+		context := b.CreateExtractValue(closure, 0, "")
+
+		fn := ssaMC.Fn.(*ssa.Function)
+		if _, ok := b.deferClosureFuncs[fn]; !ok {
+			b.deferClosureFuncs[fn] = len(b.allDeferFuncs)
+			b.allDeferFuncs = append(b.allDeferFuncs, ssaMC)
+		}
+		callback := llvm.ConstInt(b.uintptrType, uint64(b.deferClosureFuncs[fn]), false)
+
+		values = []llvm.Value{callback, next}
+		for _, param := range instr.Call.Args {
+			llvmParam := b.getValueTC(param, instr.Pos())
+			values = append(values, llvmParam)
+			valueTypes = append(valueTypes, llvmParam.Type())
+		}
+		values = append(values, context)
+		valueTypes = append(valueTypes, context.Type())
+
+	} else if _, ok := instr.Call.Value.(*mxssa.Builtin); ok {
+		ssaBuiltin := ssaDefer.Call.Value.(*ssa.Builtin)
+		var argTypes []types.Type
+		var argValues []llvm.Value
+		for _, arg := range ssaDefer.Call.Args {
+			argTypes = append(argTypes, arg.Type())
+		}
+		for _, arg := range instr.Call.Args {
+			argValues = append(argValues, b.getValueTC(arg, instr.Pos()))
+		}
+
+		if _, ok := b.deferBuiltinFuncs[ssaDefer.Call.Value]; !ok {
+			b.deferBuiltinFuncs[ssaDefer.Call.Value] = deferBuiltin{
+				callName: ssaBuiltin.Name(),
+				pos:      ssaBuiltin.Pos(),
+				argTypes: argTypes,
+				callback: len(b.allDeferFuncs),
+			}
+			b.allDeferFuncs = append(b.allDeferFuncs, ssaDefer.Call.Value)
+		}
+		callback := llvm.ConstInt(b.uintptrType, uint64(b.deferBuiltinFuncs[ssaDefer.Call.Value].callback), false)
+
+		values = []llvm.Value{callback, next}
+		for _, param := range argValues {
+			values = append(values, param)
+			valueTypes = append(valueTypes, param.Type())
+		}
+
+	} else {
+		funcValue := b.getValueTC(instr.Call.Value, instr.Pos())
+
+		if _, ok := b.deferExprFuncs[ssaDefer.Call.Value]; !ok {
+			b.deferExprFuncs[ssaDefer.Call.Value] = len(b.allDeferFuncs)
+			b.allDeferFuncs = append(b.allDeferFuncs, &ssaDefer.Call)
+		}
+		callback := llvm.ConstInt(b.uintptrType, uint64(b.deferExprFuncs[ssaDefer.Call.Value]), false)
+
+		values = []llvm.Value{callback, next, funcValue}
+		valueTypes = append(valueTypes, funcValue.Type())
+		for _, param := range instr.Call.Args {
+			llvmParam := b.getValueTC(param, instr.Pos())
+			values = append(values, llvmParam)
+			valueTypes = append(valueTypes, llvmParam.Type())
+		}
+	}
+
+	deferredCallType := b.ctx.StructType(valueTypes, false)
+	deferredCall := llvm.ConstNull(deferredCallType)
+	for i, value := range values {
+		deferredCall = b.CreateInsertValue(deferredCall, value, i, "")
+	}
+
+	var alloca llvm.Value
+	if !b.isInLoop() {
+		alloca = llvmutil.CreateEntryBlockAlloca(b.Builder, deferredCallType, "defer.alloca")
+	} else {
+		size := b.targetData.TypeAllocSize(deferredCallType)
+		sizeValue := llvm.ConstInt(b.uintptrType, size, false)
+		nilPtr := llvm.ConstNull(b.dataPtrType)
+		alloca = b.createRuntimeCall("alloc", []llvm.Value{sizeValue, nilPtr}, "defer.alloc.call")
+	}
+	if b.NeedsStackObjects {
+		b.trackPointer(alloca)
+	}
+	b.CreateStore(deferredCall, alloca)
+
 	b.CreateStore(alloca, b.deferPtr)
 }
 
