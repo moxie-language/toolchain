@@ -1694,12 +1694,6 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 	case *ssa.Jump:
 		blockJump := b.blockInfo[instr.Block().Succs[0].Index].entry
 		b.CreateBr(blockJump)
-	case *ssa.MapUpdate:
-		m := b.getValue(instr.Map, getPos(instr))
-		key := b.getValue(instr.Key, getPos(instr))
-		value := b.getValue(instr.Value, getPos(instr))
-		mapType := instr.Map.Type().Underlying().(*types.Map)
-		b.createMapUpdate(mapType.Key(), m, key, value, instr.Pos())
 	case *ssa.Panic:
 		value := b.getValue(instr.X, getPos(instr))
 		b.createRuntimeInvoke("_panic", []llvm.Value{value}, "")
@@ -1938,10 +1932,6 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 			call.AddCallSiteAttribute(1, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(elementAlign)))
 
 			return llvm.Value{}, nil
-		case *types.Map:
-			m := argValues[0]
-			b.createMapClear(m)
-			return llvm.Value{}, nil
 		default:
 			return llvm.Value{}, b.makeError(pos, "unsupported type in clear builtin: "+typ.String())
 		}
@@ -1955,10 +1945,6 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		elemType := b.getLLVMType(argTypes[0].Underlying().(*types.Slice).Elem())
 		elemSize := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(elemType), false)
 		return b.createRuntimeCall("sliceCopy", []llvm.Value{dstBuf, srcBuf, dstLen, srcLen, elemSize}, "copy.n"), nil
-	case "delete":
-		m := argValues[0]
-		key := argValues[1]
-		return llvm.Value{}, b.createMapDelete(argTypes[1], m, key, pos)
 	case "imag":
 		cplx := argValues[0]
 		return b.CreateExtractValue(cplx, 1, "imag"), nil
@@ -2428,22 +2414,6 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 		// applied) function call. If it is anonymous, it may be a closure.
 		name := fn.RelString(nil)
 		switch {
-		case name == "device.Asm" || name == "device/arm.Asm" || name == "device/arm64.Asm" || name == "device/avr.Asm" || name == "device/riscv.Asm":
-			return b.createInlineAsm(instr.Args)
-		case name == "device.AsmFull" || name == "device/arm.AsmFull" || name == "device/arm64.AsmFull" || name == "device/avr.AsmFull" || name == "device/riscv.AsmFull":
-			return b.createInlineAsmFull(instr)
-		case strings.HasPrefix(name, "device/arm.SVCall"):
-			return b.emitSVCall(instr.Args, getPos(instr))
-		case strings.HasPrefix(name, "device/arm64.SVCall"):
-			return b.emitSV64Call(instr.Args, getPos(instr))
-		case strings.HasPrefix(name, "(device/riscv.CSR)."):
-			return b.emitCSROperation(instr)
-		case strings.HasPrefix(name, "syscall.Syscall") || strings.HasPrefix(name, "syscall.RawSyscall") || strings.HasPrefix(name, "golang.org/x/sys/unix.Syscall") || strings.HasPrefix(name, "golang.org/x/sys/unix.RawSyscall"):
-			if b.GOOS != "darwin" {
-				return b.createSyscall(instr)
-			}
-		case strings.HasPrefix(name, "syscall.rawSyscallNoError") || strings.HasPrefix(name, "golang.org/x/sys/unix.RawSyscallNoError"):
-			return b.createRawSyscallNoError(instr)
 		case name == "runtime.supportsRecover":
 			supportsRecover := uint64(0)
 			if b.supportsRecover() {
@@ -2456,26 +2426,9 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 				"trap":  moxie.PanicStrategyTrap,
 			}[b.Config.PanicStrategy]
 			return llvm.ConstInt(b.ctx.Int8Type(), panicStrategy, false), nil
-		case name == "runtime/interrupt.New":
-			return b.createInterruptGlobal(instr)
 		case name == "runtime.exportedFuncPtr":
 			_, ptr := b.getFunction(instr.Args[0].(*ssa.Function))
 			return b.CreatePtrToInt(ptr, b.uintptrType, ""), nil
-		case name == "(*runtime/interrupt.Checkpoint).Save":
-			return b.createInterruptCheckpoint(instr.Args[0]), nil
-		case name == "internal/abi.FuncPCABI0":
-			retval := b.createDarwinFuncPCABI0Call(instr)
-			if !retval.IsNil() {
-				return retval, nil
-			}
-		case strings.HasPrefix(fn.Name(), "__moxie_concat"):
-			return b.createMoxieConcat(instr), nil
-		case strings.HasPrefix(fn.Name(), "__moxie_eq"):
-			return b.createMoxieEq(instr), nil
-		case strings.HasPrefix(fn.Name(), "__moxie_lt"):
-			return b.createMoxieLt(instr), nil
-		case strings.HasPrefix(fn.Name(), "__moxie_secalloc"):
-			return b.createMoxieSecalloc(instr), nil
 		}
 	}
 
@@ -2594,6 +2547,11 @@ func (b *builder) createFunctionCallTC(instr *mxssa.CallCommon) (llvm.Value, err
 			}
 		case strings.HasPrefix(name, "syscall.rawSyscallNoError") || strings.HasPrefix(name, "golang.org/x/sys/unix.RawSyscallNoError"):
 			return b.createRawSyscallNoErrorTC(instr)
+		case name == "internal/abi.FuncPCABI0":
+			retval := b.createDarwinFuncPCABI0CallTC(instr)
+			if !retval.IsNil() {
+				return retval, nil
+			}
 		}
 	}
 
@@ -2956,14 +2914,6 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		default:
 			panic("unreachable")
 		}
-	case *ssa.Lookup: // map lookup
-		value := b.getValue(expr.X, getPos(expr))
-		index := b.getValue(expr.Index, getPos(expr))
-		valueType := expr.Type()
-		if expr.CommaOk {
-			valueType = valueType.(*types.Tuple).At(0).Type()
-		}
-		return b.createMapLookup(expr.X.Type().Underlying().(*types.Map).Key(), valueType, value, index, expr.CommaOk, expr.Pos())
 	case *ssa.MakeChan:
 		return b.createMakeChan(expr), nil
 	case *ssa.MakeClosure:
@@ -2971,8 +2921,6 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 	case *ssa.MakeInterface:
 		val := b.getValue(expr.X, getPos(expr))
 		return b.createMakeInterface(val, expr.X.Type(), expr.Pos()), nil
-	case *ssa.MakeMap:
-		return b.createMakeMap(expr)
 	case *ssa.MakeSlice:
 		sliceLen := b.getValue(expr.Len, getPos(expr))
 		sliceCap := b.getValue(expr.Cap, getPos(expr))
@@ -3029,9 +2977,8 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		it := b.getValue(expr.Iter, getPos(expr))
 		if expr.IsString {
 			return b.createRuntimeCall("stringNext", []llvm.Value{llvmRangeVal, it}, "range.next"), nil
-		} else { // map
-			return b.createMapIteratorNext(rangeVal, llvmRangeVal, it), nil
 		}
+		return llvm.Value{}, b.makeError(expr.Pos(), "map range not available in SSA path")
 	case *ssa.Phi:
 		phi := b.CreatePHI(b.getLLVMType(expr.Type()), "")
 		b.phis = append(b.phis, phiNode{expr, phi})
@@ -4992,5 +4939,38 @@ func (b *builder) createUnOpTC(unop *mxssa.UnOp) (llvm.Value, error) {
 		return b.createChanRecvTC(unop), nil
 	default:
 		return llvm.Value{}, b.makeError(unop.Pos(), "todo: unknown unop")
+	}
+}
+
+// isStringLike reports whether t is string or []byte (Moxie: string=[]byte).
+func isStringLike(t types.Type) bool {
+	switch t := t.(type) {
+	case *types.Basic:
+		return t.Info()&types.IsString != 0
+	case *types.Slice:
+		if b, ok := t.Elem().(*types.Basic); ok && b.Kind() == types.Byte {
+			return true
+		}
+	}
+	return false
+}
+
+func hashmapIsBinaryKey(keyType types.Type) bool {
+	switch keyType := keyType.Underlying().(type) {
+	case *types.Basic:
+		return keyType.Info()&(types.IsBoolean|types.IsInteger) != 0
+	case *types.Pointer:
+		return true
+	case *types.Struct:
+		for i := 0; i < keyType.NumFields(); i++ {
+			if !hashmapIsBinaryKey(keyType.Field(i).Type().Underlying()) {
+				return false
+			}
+		}
+		return true
+	case *types.Array:
+		return hashmapIsBinaryKey(keyType.Elem())
+	default:
+		return false
 	}
 }
