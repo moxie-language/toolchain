@@ -312,8 +312,8 @@ func (mv *memoryView) load(p pointerValue, size uint32) value {
 	if p.offset() == 0 && size == obj.size {
 		return obj.buffer.clone()
 	}
-	if checks && p.offset()+size > obj.size {
-		panic("interp: load out of bounds")
+	if p.offset()+size > obj.size {
+		return nil
 	}
 	v := obj.buffer.asRawValue(mv.r)
 	loadedValue := rawValue{

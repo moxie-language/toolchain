@@ -104,6 +104,13 @@ func (t *Translator) typ(gt types.Type) typecheck.Type {
 	tc := tcbridge.TranslateType(t.imp, gt)
 	if tc != nil && gt != nil {
 		t.revTypes[tc] = gt
+		if u := tc.Underlying(); u != nil && u != tc {
+			if _, exists := t.revTypes[u]; !exists {
+				if gu := gt.Underlying(); gu != nil {
+					t.revTypes[u] = gu
+				}
+			}
+		}
 	}
 	return tc
 }
@@ -124,9 +131,37 @@ func (t *Translator) translateFunctionShell(f *ssa.Function, pkg *mxssa.Package)
 	}
 	fn := mxssa.NewFunction(f.Name(), sig, f.Synthetic, pkg, t.prog)
 	fn.SetPos(f.Pos())
+	for _, p := range f.Params {
+		mp := mxssa.NewParameter(p.Name(), t.typ(p.Type()), fn)
+		mp.SetPos(p.Pos())
+		fn.Params = append(fn.Params, mp)
+	}
+	for _, fv := range f.FreeVars {
+		mfv := mxssa.NewFreeVar(fv.Name(), t.typ(fv.Type()), fn)
+		mfv.SetPos(fv.Pos())
+		fn.FreeVars = append(fn.FreeVars, mfv)
+	}
 	t.funcs[f] = fn
 	t.revFuncs[fn] = f
 	return fn
+}
+
+func (t *Translator) ensurePackage(ssaPkg *ssa.Package) *mxssa.Package {
+	if p, ok := t.pkgs[ssaPkg]; ok {
+		return p
+	}
+	tcPkg, _ := t.imp.Import(ssaPkg.Pkg.Path())
+	if tcPkg == nil {
+		tcPkg = typecheck.NewPackage(ssaPkg.Pkg.Path(), ssaPkg.Pkg.Name())
+	}
+	p := &mxssa.Package{
+		Prog:    t.prog,
+		Pkg:     tcPkg,
+		Members: map[string]mxssa.Member{},
+	}
+	t.pkgs[ssaPkg] = p
+	t.prog.RegisterPackage(p)
+	return p
 }
 
 func (t *Translator) translateGlobal(g *ssa.Global, pkg *mxssa.Package) *mxssa.Global {
@@ -147,24 +182,11 @@ func (t *Translator) translateNamedConst(m *ssa.NamedConst, pkg *mxssa.Package) 
 	return mxssa.NewNamedConst(m.Name(), t.typ(m.Type()), m.Value.Value, pkg)
 }
 
-// translateFunctionBody fills in blocks, params, locals, and instructions.
+// translateFunctionBody fills in blocks and instructions.
+// Params and freevars are created in translateFunctionShell.
 func (t *Translator) translateFunctionBody(sf *ssa.Function, mf *mxssa.Function) {
 	if len(sf.Blocks) == 0 {
 		return // external function, no body
-	}
-
-	// Parameters.
-	for _, p := range sf.Params {
-		mp := mxssa.NewParameter(p.Name(), t.typ(p.Type()), mf)
-		mp.SetPos(p.Pos())
-		mf.Params = append(mf.Params, mp)
-	}
-
-	// Free variables.
-	for _, fv := range sf.FreeVars {
-		mfv := mxssa.NewFreeVar(fv.Name(), t.typ(fv.Type()), mf)
-		mfv.SetPos(fv.Pos())
-		mf.FreeVars = append(mf.FreeVars, mfv)
 	}
 
 	// Create blocks first (instructions reference blocks by index).
@@ -198,28 +220,43 @@ func (t *Translator) translateFunctionBody(sf *ssa.Function, mf *mxssa.Function)
 	for i, fv := range sf.FreeVars {
 		valMap[fv] = mf.FreeVars[i]
 	}
-	// Pre-populate globals.
-	for _, g := range t.globals {
-		// Globals are already in the map by pointer identity, but we may
-		// encounter globals from other packages via cross-references.
-		// Those get translated on demand in t.value().
-		_ = g
-	}
 
-	// Translate instructions.
-	for _, b := range sf.Blocks {
+	// Translate instructions in dominator-tree preorder so that definitions
+	// are visited before their uses (SSA dominance property).
+	// Phi edges are deferred because they can reference values from predecessor
+	// blocks that aren't dominators (e.g. loop back-edges).
+	type deferredPhi struct {
+		phi   *mxssa.Phi
+		edges []ssa.Value
+	}
+	var deferred []deferredPhi
+	for _, b := range sf.DomPreorder() {
 		mb := blockMap[b]
 		for _, instr := range b.Instrs {
+			if phiInstr, ok := instr.(*ssa.Phi); ok {
+				edges := make([]mxssa.Value, len(phiInstr.Edges))
+				p := mxssa.NewPhi(t.typ(phiInstr.Type()), phiInstr.Comment, edges, mb)
+				p.SetPos(phiInstr.Pos())
+				p.SetName(phiInstr.Name())
+				mb.Instrs = append(mb.Instrs, p)
+				valMap[phiInstr] = p
+				deferred = append(deferred, deferredPhi{p, phiInstr.Edges})
+				continue
+			}
 			mi := t.translateInstruction(instr, mb, blockMap, valMap)
 			if mi != nil {
 				mb.Instrs = append(mb.Instrs, mi)
-				// If the instruction defines a value, register it.
 				if v, ok := instr.(ssa.Value); ok {
 					if mv, ok := mi.(mxssa.Value); ok {
 						valMap[v] = mv
 					}
 				}
 			}
+		}
+	}
+	for _, dp := range deferred {
+		for j, e := range dp.edges {
+			dp.phi.Edges[j] = t.value(e, valMap)
 		}
 	}
 
@@ -247,6 +284,9 @@ func (t *Translator) value(v ssa.Value, valMap map[ssa.Value]mxssa.Value) mxssa.
 		return mc
 	case *ssa.Global:
 		pkg := t.pkgs[v.Package()]
+		if pkg == nil && v.Package() != nil {
+			pkg = t.ensurePackage(v.Package())
+		}
 		mg := t.translateGlobal(v, pkg)
 		valMap[v] = mg
 		return mg
@@ -254,6 +294,9 @@ func (t *Translator) value(v ssa.Value, valMap map[ssa.Value]mxssa.Value) mxssa.
 		var pkg *mxssa.Package
 		if v.Package() != nil {
 			pkg = t.pkgs[v.Package()]
+			if pkg == nil {
+				pkg = t.ensurePackage(v.Package())
+			}
 		}
 		mf := t.translateFunctionShell(v, pkg)
 		valMap[v] = mf
@@ -287,14 +330,7 @@ func (t *Translator) translateInstruction(
 		return a
 
 	case *ssa.Phi:
-		edges := make([]mxssa.Value, len(i.Edges))
-		for j, e := range i.Edges {
-			edges[j] = v(e)
-		}
-		p := mxssa.NewPhi(t.typ(i.Type()), i.Comment, edges, mb)
-		p.SetPos(i.Pos())
-		p.SetName(i.Name())
-		return p
+		return nil // handled in deferred pass
 
 	case *ssa.Call:
 		cc := t.translateCallCommon(&i.Call, valMap)

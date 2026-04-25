@@ -226,6 +226,9 @@ func translateType(t types.Type, cache *typeCache, imp *Importer) typecheck.Type
 		obj := typecheck.NewTypeName(nil, t.Obj().Name(), nil)
 		return typecheck.NewTypeParam(obj, nil)
 
+	case *types.Tuple:
+		return translateTuple(t, cache, imp)
+
 	case *types.Alias:
 		return translateType(types.Unalias(t), cache, imp)
 	}
