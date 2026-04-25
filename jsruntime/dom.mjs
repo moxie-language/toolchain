@@ -105,10 +105,206 @@ export function ReplaceChild(parentId, newId, oldId) {
   if (parent && newEl && oldEl) parent.replaceChild(newEl, oldEl);
 }
 
+// Contenteditable support — makes contenteditable divs behave like textareas
+// for Moxie code that reads/writes "value", "selectionStart", "selectionEnd".
+
+let _cePlaceholderCSS = false;
+
+function _ceSetup(el) {
+  if (!_cePlaceholderCSS) {
+    const s = document.createElement('style');
+    s.textContent = '[data-placeholder]:empty::before{content:attr(data-placeholder);color:var(--muted);pointer-events:none;}[data-placeholder] br:only-child{display:none;}';
+    document.head.appendChild(s);
+    _cePlaceholderCSS = true;
+  }
+  el.style.outline = 'none';
+  const ph = el.getAttribute('placeholder');
+  if (ph) { el.setAttribute('data-placeholder', ph); el.removeAttribute('placeholder'); }
+  // Firefox bug 685799: Backspace/Delete can't remove contenteditable=false
+  // inline elements. Detect deletion adjacent to a chip and remove it manually.
+  el.addEventListener('beforeinput', function(e) {
+    if (e.inputType !== 'deleteContentBackward' && e.inputType !== 'deleteContentForward') return;
+    const sel = window.getSelection();
+    if (!sel.rangeCount || !sel.isCollapsed) return;
+    const r = sel.getRangeAt(0);
+    let target = null;
+    if (e.inputType === 'deleteContentBackward') {
+      if (r.startContainer === el) {
+        const prev = el.childNodes[r.startOffset - 1];
+        if (prev && prev.dataset && prev.dataset.npub) target = prev;
+      } else if (r.startContainer.nodeType === 3 && r.startOffset === 0) {
+        const prev = r.startContainer.previousSibling;
+        if (prev && prev.dataset && prev.dataset.npub) target = prev;
+      }
+    } else {
+      if (r.startContainer === el) {
+        const next = el.childNodes[r.startOffset];
+        if (next && next.dataset && next.dataset.npub) target = next;
+      } else if (r.startContainer.nodeType === 3 && r.startOffset === r.startContainer.textContent.length) {
+        const next = r.startContainer.nextSibling;
+        if (next && next.dataset && next.dataset.npub) target = next;
+      }
+    }
+    if (target) {
+      e.preventDefault();
+      target.remove();
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  });
+}
+
+function _isCE(el) { return el && (el.contentEditable === 'true' || el.contentEditable === 'plaintext-only'); }
+
+function _ceExtract(el, stopNode, stopOff) {
+  let text = '';
+  let stopped = false;
+  let resultOff = 0;
+  function walk(node) {
+    if (stopped) return;
+    if (stopNode && node === stopNode) {
+      if (node.nodeType === 3) {
+        text += node.textContent.substring(0, stopOff);
+      } else {
+        let c = 0;
+        for (const ch of node.childNodes) { if (c >= stopOff) break; walk(ch); c++; }
+      }
+      resultOff = text.length;
+      stopped = true;
+      return;
+    }
+    if (node.nodeType === 3) { text += node.textContent; }
+    else if (node.nodeName === 'BR') { text += '\n'; }
+    else if (node.dataset && node.dataset.npub) { text += 'nostr:' + node.dataset.npub; }
+    else {
+      if ((node.nodeName === 'DIV' || node.nodeName === 'P') && text.length > 0 && text[text.length - 1] !== '\n') text += '\n';
+      for (const ch of node.childNodes) { if (stopped) return; walk(ch); }
+    }
+  }
+  for (const ch of el.childNodes) { if (stopped) break; walk(ch); }
+  if (!stopped) resultOff = text.length;
+  return { text, offset: resultOff };
+}
+
+function _ceGetValue(el) { return _ceExtract(el).text; }
+
+function _ceGetSelOff(el) {
+  const sel = window.getSelection();
+  if (!sel.rangeCount || !el.contains(sel.focusNode)) return 0;
+  return _ceExtract(el, sel.focusNode, sel.focusOffset).offset;
+}
+
+function _ceSetSelOff(el, target) {
+  let rem = target;
+  let rNode = el, rOff = 0;
+  let done = false;
+  function walk(node) {
+    if (done) return;
+    if (node.nodeType === 3) {
+      if (rem <= node.textContent.length) { rNode = node; rOff = rem; done = true; return; }
+      rem -= node.textContent.length;
+    } else if (node.nodeName === 'BR') {
+      if (rem <= 1) { rNode = node.parentNode; rOff = Array.from(node.parentNode.childNodes).indexOf(node) + 1; done = true; return; }
+      rem -= 1;
+    } else if (node.dataset && node.dataset.npub) {
+      const len = ('nostr:' + node.dataset.npub).length;
+      if (rem <= len) { rNode = node.parentNode; rOff = Array.from(node.parentNode.childNodes).indexOf(node) + 1; done = true; return; }
+      rem -= len;
+    } else {
+      if ((node.nodeName === 'DIV' || node.nodeName === 'P') && rem > 0) rem--;
+      for (const ch of node.childNodes) { if (done) return; walk(ch); }
+    }
+  }
+  for (const ch of el.childNodes) { if (done) break; walk(ch); }
+  if (!done) { rNode = el; rOff = el.childNodes.length; }
+  try {
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.setStart(rNode, rOff);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  } catch(e) {}
+}
+
+function _ceSetValue(el, text) {
+  while (el.firstChild) el.removeChild(el.firstChild);
+  if (!text) return;
+  const re = /(nostr:npub1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58})/;
+  const parts = text.split(re);
+  for (const part of parts) {
+    if (part.match(re)) {
+      el.appendChild(_ceChip(part.slice(6), '', ''));
+    } else {
+      const lines = part.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0) el.appendChild(document.createElement('br'));
+        if (lines[i]) el.appendChild(document.createTextNode(lines[i]));
+      }
+    }
+  }
+}
+
+function _ceChip(npub, name, pic) {
+  const s = document.createElement('span');
+  s.contentEditable = 'false';
+  s.dataset.npub = npub;
+  s.style.cssText = 'display:inline-flex;align-items:center;gap:3px;background:rgba(100,100,255,0.15);border-radius:4px;padding:1px 5px;font-size:13px;vertical-align:baseline;cursor:default;user-select:all;line-height:1.4;';
+  if (pic) {
+    const img = document.createElement('img');
+    img.src = pic;
+    img.style.cssText = 'width:16px;height:16px;border-radius:50%;object-fit:cover;';
+    s.appendChild(img);
+  }
+  s.appendChild(document.createTextNode(name || ('@' + npub.slice(0, 12) + '…')));
+  return s;
+}
+
+export function InsertMentionChip(elId, charCount, npub, name, pic) {
+  const el = _elements.get(elId);
+  if (!el) return;
+  if (_isCE(el)) {
+    el.focus();
+    const sel = window.getSelection();
+    if (!sel.rangeCount) return;
+    for (let i = 0; i < charCount; i++) sel.modify('extend', 'backward', 'character');
+    const range = sel.getRangeAt(0);
+    range.deleteContents();
+    const chip = _ceChip(npub, name, pic);
+    range.insertNode(chip);
+    const space = document.createTextNode(' ');
+    if (chip.nextSibling) chip.parentNode.insertBefore(space, chip.nextSibling);
+    else chip.parentNode.appendChild(space);
+    range.setStartAfter(space);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  } else {
+    const val = el.value || '';
+    const cur = el.selectionStart || 0;
+    const mention = 'nostr:' + npub + ' ';
+    const start = cur - charCount;
+    el.value = val.substring(0, start) + mention + val.substring(cur);
+    const nc = start + mention.length;
+    el.selectionStart = nc;
+    el.selectionEnd = nc;
+  }
+}
+
 // Properties and attributes.
 export function SetAttribute(elId, name, value) {
   const el = _elements.get(elId);
-  if (el && el.setAttribute) el.setAttribute(name, value);
+  if (!el || !el.setAttribute) return;
+  if (name === 'contenteditable' && (value === 'true' || value === 'plaintext-only')) {
+    el.setAttribute(name, value);
+    _ceSetup(el);
+    return;
+  }
+  if (name === 'placeholder' && _isCE(el)) {
+    el.setAttribute('data-placeholder', value);
+    return;
+  }
+  el.setAttribute(name, value);
 }
 
 export function RemoveAttribute(elId, name) {
@@ -151,19 +347,39 @@ export function Focus(elId) {
 
 export function SetProperty(elId, prop, value) {
   const el = _elements.get(elId);
-  if (el) el[prop] = value;
+  if (!el) return;
+  if (_isCE(el)) {
+    if (prop === 'value') { _ceSetValue(el, value); return; }
+    if (prop === 'selectionStart' || prop === 'selectionEnd') { _ceSetSelOff(el, parseInt(value) || 0); return; }
+  }
+  el[prop] = value;
 }
 
 export function GetProperty(elId, prop) {
   const el = _elements.get(elId);
-  if (el) return String(el[prop] ?? '');
-  return '';
+  if (!el) return '';
+  if (_isCE(el)) {
+    if (prop === 'value') return _ceGetValue(el);
+    if (prop === 'selectionStart' || prop === 'selectionEnd') return String(_ceGetSelOff(el));
+  }
+  return String(el[prop] ?? '');
 }
 
 export function BoundingClientLeft(elId) {
   const el = _elements.get(elId);
   if (!el || !el.getBoundingClientRect) return 0;
   return el.getBoundingClientRect().left | 0;
+}
+
+export function GetBoundingRect(elId, fn) {
+  const el = _elements.get(elId);
+  if (!el || !el.getBoundingClientRect) { fn(0, 0, 0, 0, 0, 0); return; }
+  const r = el.getBoundingClientRect();
+  fn(Math.round(r.left), Math.round(r.top), Math.round(r.right), Math.round(r.bottom), Math.round(r.width), Math.round(r.height));
+}
+
+export function GetViewportHeight() {
+  return window.innerHeight | 0;
 }
 
 export function AddClass(elId, cls) {
@@ -189,6 +405,19 @@ export function AddEnterKeyListener(elId, callbackId) {
   const cb = _callbacks.get(callbackId);
   if (el && cb) el.addEventListener('keydown', function(e) {
     if (e.key === 'Enter') { e.preventDefault(); cb(); }
+  });
+}
+
+// OnKeydown registers a keydown handler that calls fn(key, prevent).
+// fn receives the key name as a string. To preventDefault, fn should call
+// the prevent callback.
+export function OnKeydown(elId, fn) {
+  const el = _elements.get(elId);
+  if (!el) return;
+  el.addEventListener('keydown', function(e) {
+    let stopped = false;
+    fn(e.key, function() { stopped = true; });
+    if (stopped) { e.preventDefault(); e.stopPropagation(); }
   });
 }
 
@@ -870,21 +1099,23 @@ export function OnPasteImage(elId, fn) {
 export function OnDropImage(elId, fn) {
   const el = _elements.get(elId);
   if (!el) return;
-  el.addEventListener('dragover', function(e) { e.preventDefault(); });
+  el.addEventListener('dragenter', function(e) { e.preventDefault(); e.stopPropagation(); });
+  el.addEventListener('dragover', function(e) { e.preventDefault(); e.stopPropagation(); });
   el.addEventListener('drop', function(e) {
     e.preventDefault();
+    e.stopPropagation();
     const files = e.dataTransfer && e.dataTransfer.files;
-    if (!files) return;
+    if (!files || files.length === 0) return;
     for (let i = 0; i < files.length; i++) {
-      if (files[i].type.indexOf('image/') === 0) {
-        const mime = files[i].type;
-        const reader = new FileReader();
-        reader.onload = function() {
-          const b64 = reader.result.split(',')[1] || '';
-          fn(b64, mime);
-        };
-        reader.readAsDataURL(files[i]);
-      }
+      const f = files[i];
+      const mime = f.type || 'application/octet-stream';
+      if (mime.indexOf('image/') !== 0) continue;
+      const reader = new FileReader();
+      reader.onload = function() {
+        const b64 = reader.result.split(',')[1] || '';
+        fn(b64, mime);
+      };
+      reader.readAsDataURL(f);
     }
   });
 }
