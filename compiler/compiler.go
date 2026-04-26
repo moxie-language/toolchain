@@ -219,7 +219,7 @@ type blockInfo struct {
 type deferBuiltin struct {
 	callName string
 	pos      token.Pos
-	argTypes []types.Type
+	argTypes []typecheck.Type
 	callback int
 }
 
