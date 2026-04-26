@@ -276,6 +276,13 @@ These were added incrementally so future Tier 2/3 migrations have building
 blocks ready. None change existing behavior — pure additions.
 
 - `typecheck.Comparable(T)` — go/types.Comparable equivalent (assign.go)
+- `typecheck.IsInterface(T)` — true if T's underlying is *Interface
+- `typecheck.HasInfo(T, bits)` — wraps `T.Underlying().(*Basic).Info()&bits != 0`;
+  one helper for all BasicInfo bits (IsString, IsInteger, etc.) so the
+  bit constants stay un-shadowed
+- `typecheck.MethodSet(T) map[string]*Func` — full method set including
+  promoted/pointer-receiver methods; exported form of internal methodSet
+- `typecheck.LookupMethod(T, name) *Func` — single-method lookup
 - `ssabridge.Translator.ForwardType(types.Type) typecheck.Type` — public
   cached forward translation, mirror of ReverseType
 - `mxssa.Function.WireReferrers()` — populates Value.Referrers across all
