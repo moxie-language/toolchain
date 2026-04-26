@@ -777,7 +777,7 @@ func (b *builder) setDebugLocation(pos token.Pos) {
 				File: b.getDIFile(position.Filename),
 			})
 			difunc = b.dibuilder.CreateFunction(b.getDIFile(position.Filename), llvm.DIFunction{
-				Name:         b.fn.RelString(nil) + "#" + name,
+				Name:         b.mxFn.RelString(nil) + "#" + name,
 				File:         b.getDIFile(position.Filename),
 				Line:         0,
 				Type:         diFuncType,
