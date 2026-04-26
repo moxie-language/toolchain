@@ -1529,8 +1529,13 @@ func (b *builder) createFunctionTC() {
 		}
 	}
 
-	for _, sub := range b.fn.AnonFuncs {
-		b := newBuilder(b.compilerContext, b.Builder, sub)
+	for _, sub := range b.mxFn.AnonFuncs {
+		// newBuilder still takes *ssa.Function; bridge via ReverseFunction.
+		goSub := b.mxTranslator.ReverseFunction(sub)
+		if goSub == nil {
+			continue
+		}
+		b := newBuilder(b.compilerContext, b.Builder, goSub)
 		b.llvmFn.SetLinkage(llvm.InternalLinkage)
 		b.createFunctionDispatch()
 	}
