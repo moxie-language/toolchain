@@ -1339,10 +1339,9 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		b.blockInfo = blockInfo
 		b.currentBlockInfo = &blockInfo[0]
 	} else {
-		blocks := b.fn.Blocks
-		blockInfo := make([]blockInfo, len(blocks))
-		for _, block := range b.fn.DomPreorder() {
-			info := &blockInfo[block.Index]
+		blockInfo := make([]blockInfo, len(b.mxFn.Blocks))
+		for i, block := range b.mxFn.Blocks {
+			info := &blockInfo[i]
 			llvmBlock := b.ctx.AddBasicBlock(b.llvmFn, block.Comment)
 			info.entry = llvmBlock
 			info.exit = llvmBlock
