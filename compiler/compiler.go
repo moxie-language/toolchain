@@ -181,13 +181,24 @@ type builder struct {
 	afterDefersBlock  []llvm.BasicBlock
 }
 
-func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *builder {
-	mxFn := c.mxTranslator.EnsureFunction(f)
+func newBuilder(c *compilerContext, irbuilder llvm.Builder, mxFn *mxssa.Function) *builder {
+	// b.fn (*ssa.Function) is still needed for debug-info paths keyed on
+	// go/types until §3; derive via ReverseFunction. Always re-EnsureFunction
+	// to guarantee body translation has run (a shell-only mxFn from
+	// cross-package value translation would make createFunctionTC skip
+	// body generation and produce undefined symbols at link time).
+	var goFn *ssa.Function
+	if mxFn != nil {
+		goFn = c.mxTranslator.ReverseFunction(mxFn)
+		if goFn != nil {
+			c.mxTranslator.EnsureFunction(goFn)
+		}
+	}
 	fnType, fn := c.getFunction(mxFn)
 	b := &builder{
 		compilerContext: c,
 		Builder:         irbuilder,
-		fn:              f,
+		fn:              goFn,
 		mxFn:            mxFn,
 		llvmFnType:      fnType,
 		llvmFn:          fn,
@@ -943,8 +954,10 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 				// Do not try to build generic (non-instantiated) functions.
 				continue
 			}
-			// Create the function definition.
-			b := newBuilder(c, irbuilder, member)
+			// Create the function definition. Always EnsureFunction (not just
+			// LookupFunction) so the body is translated, otherwise
+			// createFunctionTC sees empty Blocks and skips body generation.
+			b := newBuilder(c, irbuilder, c.mxTranslator.EnsureFunction(member))
 			if _, ok := mathToLLVMMapping[member.RelString(nil)]; ok {
 				// The body of this function (if there is one) is ignored and
 				// replaced with a LLVM intrinsic call.
@@ -1004,7 +1017,7 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 					continue
 				}
 				// Create the function definition.
-				b := newBuilder(c, irbuilder, fn)
+				b := newBuilder(c, irbuilder, c.mxTranslator.EnsureFunction(fn))
 				b.createFunctionDispatch()
 			}
 		case *ssa.Global:
@@ -1042,7 +1055,7 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 					// The error will be a link error, if there is an error.
 					continue
 				}
-				b := newBuilder(c, irbuilder, member)
+				b := newBuilder(c, irbuilder, mxMember)
 				b.createAlias(alias)
 			}
 		}
@@ -1519,12 +1532,7 @@ func (b *builder) createFunctionTC() {
 	}
 
 	for _, sub := range b.mxFn.AnonFuncs {
-		// newBuilder still takes *ssa.Function; bridge via ReverseFunction.
-		goSub := b.mxTranslator.ReverseFunction(sub)
-		if goSub == nil {
-			continue
-		}
-		b := newBuilder(b.compilerContext, b.Builder, goSub)
+		b := newBuilder(b.compilerContext, b.Builder, sub)
 		b.llvmFn.SetLinkage(llvm.InternalLinkage)
 		b.createFunctionDispatch()
 	}

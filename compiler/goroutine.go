@@ -34,7 +34,7 @@ func (b *builder) createWasmExport() {
 	exportedFn.AddFunctionAttr(b.ctx.CreateStringAttribute("wasm-export-name", b.info.wasmExport))
 
 	// Create a builder for this wrapper function.
-	builder := newBuilder(b.compilerContext, b.ctx.NewBuilder(), b.fn)
+	builder := newBuilder(b.compilerContext, b.ctx.NewBuilder(), b.mxFn)
 	defer builder.Dispose()
 
 	// Define this function as a separate function in DWARF

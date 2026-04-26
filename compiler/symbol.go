@@ -273,7 +273,7 @@ func (c *compilerContext) maybeCreateSyntheticFunction(fn *mxssa.Function, llvmF
 				if _, ok := fn.Params[0].Type().Underlying().(*typecheck.Pointer); ok {
 					irbuilder := c.ctx.NewBuilder()
 					defer irbuilder.Dispose()
-					b := newBuilder(c, irbuilder, goFn)
+					b := newBuilder(c, irbuilder, fn)
 					b.createAbiEscapeImpl()
 					llvmFn.SetLinkage(llvm.LinkOnceODRLinkage)
 					llvmFn.SetUnnamedAddr(true)
@@ -293,7 +293,7 @@ func (c *compilerContext) maybeCreateSyntheticFunction(fn *mxssa.Function, llvmF
 		return
 	}
 	irbuilder := c.ctx.NewBuilder()
-	b := newBuilder(c, irbuilder, goFn)
+	b := newBuilder(c, irbuilder, fn)
 	b.createFunctionDispatch()
 	irbuilder.Dispose()
 	llvmFn.SetLinkage(llvm.LinkOnceODRLinkage)
