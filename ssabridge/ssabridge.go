@@ -21,6 +21,7 @@ import (
 // Translator converts an ssa.Program into an mxssa.Program.
 type Translator struct {
 	prog     *mxssa.Program
+	ssaProg  *ssa.Program // kept so the bridge can hide method-set queries
 	imp      *tcbridge.Importer
 	fset     *token.FileSet
 	funcs    map[*ssa.Function]*mxssa.Function
@@ -110,6 +111,7 @@ func Translate(fset *token.FileSet, ssaProg *ssa.Program, typePkgs map[string]*t
 	imp := tcbridge.New(typePkgs)
 	t := &Translator{
 		prog:      prog,
+		ssaProg:   ssaProg,
 		imp:       imp,
 		fset:      fset,
 		funcs:     map[*ssa.Function]*mxssa.Function{},
@@ -121,6 +123,38 @@ func Translate(fset *token.FileSet, ssaProg *ssa.Program, typePkgs map[string]*t
 		typeCache: map[uintptr]typecheck.Type{},
 	}
 	return prog, t
+}
+
+// MethodsForType returns the methods on a named type, including both
+// value-receiver and pointer-receiver methods. Hides the go/ssa.Program
+// method-set queries from the compiler so it can stop importing go/ssa.
+//
+// MethodSet(*T) includes value-receiver methods of T (since *T can call
+// them via auto-deref), so iterating both T and *T method sets produces
+// duplicates; deduplicate by underlying *ssa.Function so the same method
+// isn't compiled twice (which would trigger LLVM "redeclared" errors).
+func (t *Translator) MethodsForType(typ typecheck.Type) []*mxssa.Function {
+	goType := t.revTypes[typ]
+	if goType == nil {
+		return nil
+	}
+	seen := map[*ssa.Function]bool{}
+	var fns []*mxssa.Function
+	add := func(t2 types.Type) {
+		ms := t.ssaProg.MethodSets.MethodSet(t2)
+		for i := 0; i < ms.Len(); i++ {
+			method := ms.At(i)
+			ssaFn := t.ssaProg.MethodValue(method)
+			if ssaFn == nil || seen[ssaFn] {
+				continue
+			}
+			seen[ssaFn] = true
+			fns = append(fns, t.EnsureFunction(ssaFn))
+		}
+	}
+	add(goType)
+	add(types.NewPointer(goType))
+	return fns
 }
 
 // TranslatePackage converts one ssa.Package to mxssa.Package.
@@ -339,6 +373,9 @@ func (t *Translator) translateNamedConst(m *ssa.NamedConst, pkg *mxssa.Package) 
 func (t *Translator) translateFunctionBody(sf *ssa.Function, mf *mxssa.Function) {
 	if len(sf.Blocks) == 0 {
 		return // external function, no body
+	}
+	if len(mf.Blocks) > 0 {
+		return // already translated; calling again would duplicate blocks
 	}
 	// Backfill any params/freevars that were lazily populated on sf after
 	// the shell was created (cross-package references made the shell early

@@ -355,7 +355,11 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 	// Compile all functions, methods, and global variables in this package.
 	irbuilder := c.ctx.NewBuilder()
 	defer irbuilder.Dispose()
-	c.createPackage(irbuilder, ssaPkg)
+	mxCurrPkg := c.mxTranslator.LookupPackage(ssaPkg)
+	if mxCurrPkg == nil {
+		mxCurrPkg = c.mxTranslator.TranslatePackage(ssaPkg)
+	}
+	c.createPackage(irbuilder, mxCurrPkg)
 
 	// see: https://reviews.llvm.org/D18355
 	if c.Debug {
@@ -536,16 +540,6 @@ func (c *compilerContext) getDITypeForGlobal(g *mxssa.Global) llvm.Metadata {
 		}
 	}
 	return llvm.Metadata{}
-}
-
-// Get all methods of a type.
-func getAllMethods(prog *ssa.Program, typ types.Type) []*types.Selection {
-	ms := prog.MethodSets.MethodSet(typ)
-	methods := make([]*types.Selection, ms.Len())
-	for i := 0; i < ms.Len(); i++ {
-		methods[i] = ms.At(i)
-	}
-	return methods
 }
 
 // Get the DWARF type for this Go type.
@@ -927,7 +921,7 @@ func (c *compilerContext) getDIFile(filename string) llvm.Metadata {
 
 // createPackage builds the LLVM IR for all types, methods, and global variables
 // in the given package.
-func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package) {
+func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *mxssa.Package) {
 	// Sort by position, so that the order of the functions in the IR matches
 	// the order of functions in the source file. This is useful for testing,
 	// for example.
@@ -945,86 +939,73 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 		return iPos < jPos
 	})
 
-	// Define all functions.
+	// Define all functions. Track seen mxssa.Function to dedupe methods that
+	// appear in multiple type's method sets (e.g., embedded types).
+	seenFn := map[*mxssa.Function]bool{}
 	for _, name := range members {
-		member := pkg.Members[name]
-		switch member := member.(type) {
-		case *ssa.Function:
-			if member.TypeParams() != nil {
-				// Do not try to build generic (non-instantiated) functions.
+		switch member := pkg.Members[name].(type) {
+		case *mxssa.Function:
+			// Skip generic (non-instantiated) functions. mxssa.Function.TypeParams
+			// isn't populated by the bridge yet, so fall back to the SSA-side
+			// check via ReverseFunction.
+			if goFn := c.mxTranslator.ReverseFunction(member); goFn != nil && goFn.TypeParams() != nil {
 				continue
 			}
-			// Create the function definition. Always EnsureFunction (not just
-			// LookupFunction) so the body is translated, otherwise
-			// createFunctionTC sees empty Blocks and skips body generation.
-			b := newBuilder(c, irbuilder, c.mxTranslator.EnsureFunction(member))
+			b := newBuilder(c, irbuilder, member)
 			if _, ok := mathToLLVMMapping[member.RelString(nil)]; ok {
-				// The body of this function (if there is one) is ignored and
-				// replaced with a LLVM intrinsic call.
 				b.defineMathOp()
 				continue
 			}
 			if ok := b.defineMathBitsIntrinsic(); ok {
-				// Like a math intrinsic, the body of this function was replaced
-				// with a LLVM intrinsic.
 				continue
 			}
-			if member.Blocks == nil {
+			if len(member.Blocks) == 0 {
 				// Try to define this as an intrinsic function.
 				b.defineIntrinsicFunction()
-				// It might not be an intrinsic function but simply an external
-				// function (defined via //go:linkname). Leave it undefined in
-				// that case.
+				// May simply be an external function (defined via //go:linkname);
+				// leave it undefined in that case.
 				continue
 			}
 			b.createFunctionDispatch()
-		case *ssa.Type:
-			if types.IsInterface(member.Type()) {
-				// Interfaces don't have concrete methods.
+		case *mxssa.Type_:
+			memberType := member.Type()
+			if _, isInterface := memberType.Underlying().(*typecheck.Interface); isInterface {
 				continue
 			}
-			if _, isalias := member.Type().(*types.Alias); isalias {
-				// Aliases don't need to be redefined, since they just refer to
-				// an already existing type whose methods will be defined.
+			// Skip type aliases: their methods belong to the underlying type and
+			// are compiled there. For an alias `type Foo = Bar`, mxssa.Type_.Name()
+			// returns "Foo" but the resolved typecheck.Type is Bar, so the
+			// qualified-name suffix won't match.
+			memberQual := pkg.Pkg.Path() + "." + member.Name()
+			if memberType.String() != memberQual && memberType.String() != member.Name() {
 				continue
 			}
-
-			// Named type. We should make sure all methods are created.
-			// This includes both functions with pointer receivers and those
-			// without.
-			methods := getAllMethods(pkg.Prog, member.Type())
-			methods = append(methods, getAllMethods(pkg.Prog, types.NewPointer(member.Type()))...)
-			for _, method := range methods {
-				// Parse this method.
-				fn := pkg.Prog.MethodValue(method)
+			// Named type — make sure all methods (value and pointer receivers)
+			// are created. Methods aren't in pkg.Members; the translator's
+			// MethodsForType helper hides the go/ssa MethodSet enumeration.
+			methods := c.mxTranslator.MethodsForType(memberType)
+			for _, fn := range methods {
 				if fn == nil {
-					continue // probably a generic method
-				}
-				if member.Type().String() != member.String() {
-					// This is a member on a type alias. Do not build such a
-					// function.
 					continue
 				}
-				if fn.Blocks == nil {
+				if seenFn[fn] {
+					continue // already compiled (e.g., promoted via embedded type)
+				}
+				seenFn[fn] = true
+				if len(fn.Blocks) == 0 {
 					continue // external function
 				}
 				if fn.Synthetic != "" && fn.Synthetic != "package initializer" {
-					// This function is a kind of wrapper function (created by
-					// the ssa package, not appearing in the source code) that
-					// is created by the getFunction method as needed.
-					// Therefore, don't build it here to avoid "function
-					// redeclared" errors.
+					// Wrapper functions are created on demand by getFunction;
+					// skip them here to avoid redeclaration errors.
 					continue
 				}
-				// Create the function definition.
-				b := newBuilder(c, irbuilder, c.mxTranslator.EnsureFunction(fn))
+				b := newBuilder(c, irbuilder, fn)
 				b.createFunctionDispatch()
 			}
-		case *ssa.Global:
-			// Global variable.
-			mxMember := c.mxTranslator.LookupGlobal(member)
-			info := c.getGlobalInfo(mxMember)
-			global := c.getGlobal(mxMember)
+		case *mxssa.Global:
+			info := c.getGlobalInfo(member)
+			global := c.getGlobal(member)
 			if files, ok := c.embedGlobals[member.Name()]; ok {
 				c.createEmbedGlobal(member, global, files)
 			} else if !info.extern {
@@ -1040,30 +1021,35 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 	// Add forwarding functions for functions that would otherwise be
 	// implemented in assembly.
 	for _, name := range members {
-		member := pkg.Members[name]
-		switch member := member.(type) {
-		case *ssa.Function:
-			if member.Blocks != nil {
-				continue // external function
+		member, ok := pkg.Members[name].(*mxssa.Function)
+		if !ok {
+			continue
+		}
+		if len(member.Blocks) != 0 {
+			continue // not an external function
+		}
+		info := c.getFunctionInfo(member)
+		if aliasName, ok := stdlibAliases[info.linkName]; ok {
+			alias := c.mod.NamedFunction(aliasName)
+			if alias.IsNil() {
+				continue
 			}
-			mxMember := c.mxTranslator.EnsureFunction(member)
-			info := c.getFunctionInfo(mxMember)
-			if aliasName, ok := stdlibAliases[info.linkName]; ok {
-				alias := c.mod.NamedFunction(aliasName)
-				if alias.IsNil() {
-					// Shouldn't happen, but perhaps best to just ignore.
-					// The error will be a link error, if there is an error.
-					continue
-				}
-				b := newBuilder(c, irbuilder, mxMember)
-				b.createAlias(alias)
-			}
+			b := newBuilder(c, irbuilder, member)
+			b.createAlias(alias)
 		}
 	}
 }
 
 // createEmbedGlobal creates an initializer for a //go:embed global variable.
-func (c *compilerContext) createEmbedGlobal(member *ssa.Global, global llvm.Value, files []*loader.EmbedFile) {
+// The body still uses go/types extensively; bridge the *mxssa.Global at the
+// signature via ReverseGlobal until §3 migrates the type-discrimination
+// internals.
+func (c *compilerContext) createEmbedGlobal(mxMember *mxssa.Global, global llvm.Value, files []*loader.EmbedFile) {
+	member := c.mxTranslator.ReverseGlobal(mxMember)
+	if member == nil {
+		c.addError(mxMember.Pos(), "createEmbedGlobal: cannot reverse-bridge global "+mxMember.Name())
+		return
+	}
 	switch typ := member.Type().(*types.Pointer).Elem().Underlying().(type) {
 	case *types.Basic:
 		// String type.

@@ -95,7 +95,10 @@ func (c *compilerContext) makeLLVMTypeTC(t typecheck.Type) llvm.Type {
 		}
 		return c.ctx.StructType(members, false)
 	case *typecheck.TypeParam:
-		return c.getLLVMTypeTC(typ.Underlying())
+		// TypeParam.Underlying() returns self, so don't recurse on it.
+		// Generic templates are dead code post-instantiation; emit a
+		// placeholder pointer so codegen can complete.
+		return c.dataPtrType
 	case *typecheck.Named:
 		if _, ok := typ.Underlying().(*typecheck.Struct); ok {
 			llvmName := typ.String()
@@ -431,6 +434,11 @@ func (c *compilerContext) createConstTC(expr *mxssa.Const, pos token.Pos) llvm.V
 			return llvm.ConstNamedStruct(c.getLLVMRuntimeType("_interface"), fields)
 		}
 		return llvm.ConstNull(c.getLLVMTypeTC(expr.Type()))
+	case *typecheck.TypeParam:
+		// Generic template body — never actually called at runtime, so
+		// emit a placeholder. This case is only reached when createPackage
+		// iterates a generic type's method templates instead of skipping them.
+		return llvm.ConstNull(c.intType)
 	default:
 		panic("tccompat: unhandled constant type: " + expr.Type().String())
 	}
