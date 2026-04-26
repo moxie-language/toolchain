@@ -381,7 +381,7 @@ func (c *compilerContext) createConstTC(expr *mxssa.Const, pos token.Pos) llvm.V
 			strLen := llvm.ConstInt(c.uintptrType, uint64(len(str)), false)
 			var strPtr llvm.Value
 			if str != "" {
-				objname := c.pkg.Path() + "$string"
+				objname := c.mxPkg.Path() + "$string"
 				globalType := llvm.ArrayType(c.ctx.Int8Type(), len(str))
 				global := llvm.AddGlobal(c.mod, globalType, objname)
 				global.SetInitializer(c.ctx.ConstString(str, false))

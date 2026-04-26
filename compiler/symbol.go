@@ -493,7 +493,7 @@ const (
 // the function's position as a fallback. Parameter errors use the parameter's
 // own position via mxssa.Parameter.Pos().
 func (c *compilerContext) checkWasmImportExportTC(fn *mxssa.Function, pragma string) {
-	if c.pkg.Path() == "runtime" || c.pkg.Path() == "syscall/js" || c.pkg.Path() == "syscall" || c.pkg.Path() == "crypto/internal/sysrand" {
+	if c.mxPkg.Path() == "runtime" || c.mxPkg.Path() == "syscall/js" || c.mxPkg.Path() == "syscall" || c.mxPkg.Path() == "crypto/internal/sysrand" {
 		return
 	}
 	sig := fn.Signature
