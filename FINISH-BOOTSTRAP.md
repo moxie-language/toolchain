@@ -70,14 +70,18 @@ Bug fixes uncovered along the way (all documented in commit messages):
 6. `ssabridge.translateFunctionBody` needed to backfill lazily-populated
    sf.Params/FreeVars before iterating them.
 
-### Status after §1 progress
+### Status after §1+early-§2 progress
 
 Files still importing go/types or go/ssa:
-- compiler/compiler.go (~125 type/ssa refs, mostly in createDIType + createPackage + getLLVMType)
-- compiler/interface.go (~178 type/ssa refs, all in getTypeCode/getTypeMethodSet machinery)
+- compiler/compiler.go (~125 type+ssa refs in createDIType + createPackage + getLLVMType)
+- compiler/interface.go (~178 type refs in getTypeCode/getTypeMethodSet — go/ssa now removed)
 - compiler/sizes.go (36 type refs, blocked on §7 loader)
 
 Files cleanly using go/ast only (legitimate, syntax-level): symbol.go, restrict.go, compiler.go.
+
+Files with NO go/types or go/ssa imports: alias, asserts, atomic, calls, channel,
+defer, errors, func, gc, goroutine, interface (after §2 start), intrinsics, llvm,
+map, mxbuiltins, restrict, spawn, symbol, syscall, tccompat, volatile.
 
 Smesh builds at 7,032 KB (baseline was 7,051 KB — slightly smaller from removed dead code) and runs `version` at every commit.
 
