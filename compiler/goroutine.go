@@ -6,86 +6,11 @@ package compiler
 
 import (
 	"go/token"
-	"go/types"
 
 	"moxie/compiler/llvmutil"
 	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
-
-// createGo emits code to start a new goroutine (runtime/internal only).
-func (b *builder) createGo(instr *ssa.Go) {
-	if builtin, ok := instr.Call.Value.(*ssa.Builtin); ok {
-		if builtin.Name() == "recover" {
-			return
-		}
-		var argTypes []types.Type
-		var argValues []llvm.Value
-		for _, arg := range instr.Call.Args {
-			argTypes = append(argTypes, arg.Type())
-			argValues = append(argValues, b.getValue(arg, getPos(instr)))
-		}
-		b.createBuiltin(argTypes, argValues, builtin.Name(), instr.Pos())
-		return
-	}
-
-	var params []llvm.Value
-	for _, param := range instr.Call.Args {
-		params = append(params, b.expandFormalParam(b.getValue(param, getPos(instr)))...)
-	}
-
-	var prefix string
-	var funcPtr llvm.Value
-	var funcType llvm.Type
-	hasContext := false
-	if callee := instr.Call.StaticCallee(); callee != nil {
-		var context llvm.Value
-		switch value := instr.Call.Value.(type) {
-		case *ssa.Function:
-			// Regular function call. No context.
-		case *ssa.MakeClosure:
-			funcValue := b.getValue(value, getPos(instr))
-			context = b.extractFuncContext(funcValue)
-		default:
-			panic("StaticCallee returned an unexpected value")
-		}
-		if !context.IsNil() {
-			params = append(params, context)
-			hasContext = true
-		}
-		funcType, funcPtr = b.getFunction(callee)
-	} else if instr.Call.IsInvoke() {
-		itf := b.getValue(instr.Call.Value, getPos(instr))
-		itfTypeCode := b.CreateExtractValue(itf, 0, "")
-		itfValue := b.CreateExtractValue(itf, 1, "")
-		funcPtr = b.getInvokeFunction(&instr.Call)
-		funcType = funcPtr.GlobalValueType()
-		params = append([]llvm.Value{itfValue}, params...)
-		params = append(params, itfTypeCode)
-	} else {
-		var context llvm.Value
-		funcPtr, context = b.decodeFuncValue(b.getValue(instr.Call.Value, getPos(instr)))
-		funcType = b.getLLVMFunctionType(instr.Call.Value.Type().Underlying().(*types.Signature))
-		params = append(params, context, funcPtr)
-		hasContext = true
-		prefix = b.fn.RelString(nil)
-	}
-
-	paramBundle := b.emitPointerPack(params)
-	var stackSize llvm.Value
-	callee := b.createGoroutineStartWrapper(funcType, funcPtr, prefix, hasContext, false, instr.Pos())
-	if b.AutomaticStackSize {
-		stackSizeFnType, stackSizeFn := b.getFunction(b.program.ImportedPackage("internal/task").Members["getGoroutineStackSize"].(*ssa.Function))
-		stackSize = b.createCall(stackSizeFnType, stackSizeFn, []llvm.Value{callee, llvm.Undef(b.dataPtrType)}, "stacksize")
-	} else {
-		if (b.Scheduler == "tasks" || b.Scheduler == "asyncify") && b.DefaultStackSize == 0 {
-			b.addError(instr.Pos(), "default stack size for goroutines is not set")
-		}
-		stackSize = llvm.ConstInt(b.uintptrType, b.DefaultStackSize, false)
-	}
-	fnType, start := b.getFunction(b.program.ImportedPackage("internal/task").Members["start"].(*ssa.Function))
-	b.createCall(fnType, start, []llvm.Value{callee, paramBundle, stackSize, llvm.Undef(b.dataPtrType)}, "")
-}
 
 // Create an exported wrapper function for functions with the //go:wasmexport
 // pragma. This wrapper function is quite complex when the scheduler is enabled:

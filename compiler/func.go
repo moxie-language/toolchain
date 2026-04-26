@@ -5,7 +5,6 @@ package compiler
 import (
 	"go/types"
 
-	"golang.org/x/tools/go/ssa"
 	"moxie/mxssa"
 	"tinygo.org/x/go-llvm"
 )
@@ -96,28 +95,6 @@ func (c *compilerContext) getLLVMFunctionType(typ *types.Signature) llvm.Type {
 
 // parseMakeClosure makes a function value (with context) from the given
 // closure expression.
-func (b *builder) parseMakeClosure(expr *ssa.MakeClosure) (llvm.Value, error) {
-	if len(expr.Bindings) == 0 {
-		panic("unexpected: MakeClosure without bound variables")
-	}
-	f := expr.Fn.(*ssa.Function)
-
-	// Collect all bound variables.
-	boundVars := make([]llvm.Value, len(expr.Bindings))
-	for i, binding := range expr.Bindings {
-		// The context stores the bound variables.
-		llvmBoundVar := b.getValue(binding, getPos(expr))
-		boundVars[i] = llvmBoundVar
-	}
-
-	// Store the bound variables in a single object, allocating it on the heap
-	// if necessary.
-	context := b.emitPointerPack(boundVars)
-
-	// Create the closure.
-	_, fn := b.getFunction(f)
-	return b.createFuncValue(fn, context), nil
-}
 
 func (b *builder) parseMakeClosureTC(expr *mxssa.MakeClosure) (llvm.Value, error) {
 	if len(expr.Bindings) == 0 {
