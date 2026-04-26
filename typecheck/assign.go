@@ -210,6 +210,17 @@ func isTextType(T Type) bool {
 	return false
 }
 
+// IsInterface reports whether T's underlying type is an interface type.
+// Equivalent to go/types.IsInterface. Useful in type switches and dispatch
+// logic where the *Interface itself isn't needed, only the boolean.
+func IsInterface(T Type) bool {
+	if T == nil {
+		return false
+	}
+	_, ok := T.Underlying().(*Interface)
+	return ok
+}
+
 // Comparable reports whether values of type T can be compared with == or !=.
 // Equivalent to go/types.Comparable. Determines whether T may be used as a map key.
 //
