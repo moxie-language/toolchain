@@ -3,16 +3,32 @@ package compiler
 // This file contains some utility functions related to error handling.
 
 import (
+	"fmt"
 	"go/token"
-	"go/types"
 	"path/filepath"
 
 	"tinygo.org/x/go-llvm"
 )
 
+// Error is a compiler diagnostic with file/position info.
+// Mirror of go/types.Error fields, kept local so compiler/ does not need to
+// import go/types just for the error type. Diagnostics package handles both.
+type Error struct {
+	Fset *token.FileSet
+	Pos  token.Pos
+	Msg  string
+}
+
+func (e Error) Error() string {
+	if e.Fset != nil {
+		return fmt.Sprintf("%s: %s", e.Fset.Position(e.Pos), e.Msg)
+	}
+	return e.Msg
+}
+
 // makeError makes it easy to create an error from a token.Pos with a message.
-func (c *compilerContext) makeError(pos token.Pos, msg string) types.Error {
-	return types.Error{
+func (c *compilerContext) makeError(pos token.Pos, msg string) Error {
+	return Error{
 		Fset: c.program.Fset,
 		Pos:  pos,
 		Msg:  msg,

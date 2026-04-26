@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"moxie/builder"
+	"moxie/compiler"
 	"moxie/goenv"
 	"moxie/interp"
 	"moxie/loader"
@@ -122,6 +123,13 @@ func createDiagnostics(err error) []Diagnostic {
 		// StartPos/EndPos come from go/types.Error.go116start/go116end,
 		// which are unexported. They will be populated natively from
 		// typecheck.TypeError.EndPos once B3 replaces go/types.
+		return []Diagnostic{{
+			Pos: err.Fset.Position(err.Pos),
+			Msg: err.Msg,
+		}}
+	case compiler.Error:
+		// Mirror of types.Error for diagnostics emitted by compiler/ which
+		// no longer imports go/types directly.
 		return []Diagnostic{{
 			Pos: err.Fset.Position(err.Pos),
 			Msg: err.Msg,
