@@ -168,6 +168,11 @@ func (t *Translator) typ(gt types.Type) typecheck.Type {
 
 func (t *Translator) ReverseType(tc typecheck.Type) types.Type { return t.revTypes[tc] }
 
+// ForwardType converts a go/types.Type to its typecheck equivalent, using the
+// translator's cache so the same go/types pointer always maps to the same
+// typecheck.Type pointer. Mirror of ReverseType for the forward direction.
+func (t *Translator) ForwardType(gt types.Type) typecheck.Type { return t.typ(gt) }
+
 func (t *Translator) ReverseFunction(fn *mxssa.Function) *ssa.Function { return t.revFuncs[fn] }
 
 func (t *Translator) translateFunctionShell(f *ssa.Function, pkg *mxssa.Package) *mxssa.Function {
