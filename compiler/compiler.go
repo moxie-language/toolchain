@@ -400,22 +400,24 @@ func (c *compilerContext) getLLVMRuntimeType(name string) llvm.Type {
 	return c.getLLVMType(c.getRuntimeType(name))
 }
 
-// getLLVMType returns a LLVM type for a Go type. It doesn't recreate already
-// created types. This is somewhat important for performance, but especially
-// important for named struct types (which should only be created once).
+// getLLVMType returns a LLVM type for a Go type. It bridges to
+// getLLVMTypeTC via the translator's ForwardType so the SSA-side and
+// TC-side LLVM type caches share identity (single source of truth for
+// named structs).
 func (c *compilerContext) getLLVMType(goType types.Type) llvm.Type {
-	// Try to load the LLVM type from the cache.
-	// Note: *types.Named isn't unique when working with generics.
-	// See https://github.com/golang/go/issues/53914
-	// This is the reason for using typeutil.Map to lookup LLVM types for Go types.
-	ival := c.llvmTypes.At(goType)
-	if ival != nil {
-		return ival.(llvm.Type)
+	tcType := c.mxTranslator.ForwardType(goType)
+	if tcType == nil {
+		// Fallback for cases where the translator can't bridge (e.g. some
+		// generic instantiations); fall through to the legacy SSA path.
+		ival := c.llvmTypes.At(goType)
+		if ival != nil {
+			return ival.(llvm.Type)
+		}
+		llvmType := c.makeLLVMType(goType)
+		c.llvmTypes.Set(goType, llvmType)
+		return llvmType
 	}
-	// Not already created, so adding this type to the cache.
-	llvmType := c.makeLLVMType(goType)
-	c.llvmTypes.Set(goType, llvmType)
-	return llvmType
+	return c.getLLVMTypeTC(tcType)
 }
 
 // makeLLVMType creates a LLVM type for a Go type. Don't call this, use
