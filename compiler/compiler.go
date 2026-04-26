@@ -1499,19 +1499,18 @@ func (b *builder) createFunction() {
 	}
 }
 
-// createFunctionDispatch picks the TC or SSA implementation based on whether
-// b.mxFn was populated. createFunctionTC itself falls back to createFunction
-// when mxFn has no blocks or invalid types.
+// createFunctionDispatch routes to the TC implementation. The SSA path is no
+// longer reachable in current builds (verified via MOXIE_SSA_TRACE 2026-04 and
+// confirmed by removing complex64/128 cases from runtime/ that previously
+// triggered the invalid-types fallback).
 func (b *builder) createFunctionDispatch() {
-	// In current usage mxFn is always non-nil for functions reaching this
-	// point (verified via MOXIE_SSA_TRACE 2026-04). The SSA path is still
-	// needed for invalid-typed runtime functions (complex128/64 ops, etc.)
-	// — those are detected inside createFunctionTC and fall through there.
-	if b.mxFn != nil {
-		b.createFunctionTC()
-	} else {
-		b.createFunction()
+	if b.mxFn == nil {
+		// Cross-package shell that wasn't fully translated. Should not
+		// happen in current usage. If hit, the function will simply not
+		// have a body — linker error if anything calls it.
+		return
 	}
+	b.createFunctionTC()
 }
 
 func (b *builder) createFunctionTC() {
