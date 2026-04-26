@@ -43,6 +43,9 @@ func (t *Translator) LookupFunction(f *ssa.Function) *mxssa.Function { return t.
 // LookupGlobal returns the mxssa.Global for an ssa.Global, or nil.
 func (t *Translator) LookupGlobal(g *ssa.Global) *mxssa.Global { return t.globals[g] }
 
+// LookupPackage returns the mxssa.Package for an ssa.Package, or nil.
+func (t *Translator) LookupPackage(p *ssa.Package) *mxssa.Package { return t.pkgs[p] }
+
 // EnsureFunction ensures f has a full mxssa translation (shell + body).
 // The value() helper may register only a shell for cross-package function
 // references; this fills in the body if it is missing.
