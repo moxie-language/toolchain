@@ -161,7 +161,6 @@ type builder struct {
 	currentBlockInfo  *blockInfo
 	tarjanStack       []uint
 	tarjanIndex       uint
-	phis              []phiNode
 	mxPhis            []phiNodeTC
 	deferPtr          llvm.Value
 	deferFrame        llvm.Value
@@ -218,11 +217,6 @@ type deferBuiltin struct {
 	pos      token.Pos
 	argTypes []typecheck.Type
 	callback int
-}
-
-type phiNode struct {
-	ssa  *ssa.Phi
-	llvm llvm.Value
 }
 
 type phiNodeTC struct {
