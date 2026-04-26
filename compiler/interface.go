@@ -790,36 +790,6 @@ func (c *compilerContext) getInterfaceImplementsFunc(assertedType types.Type) ll
 // getInvokeFunction returns the thunk to call the given interface method. The
 // thunk is declared, not defined: it will be defined by the interface lowering
 // pass.
-func (c *compilerContext) getInvokeFunction(instr *ssa.CallCommon) llvm.Value {
-	// Go's type system forbids calling a method through an empty interface
-	// without a type assertion, so this should be unreachable. Fail loudly
-	// rather than emit a function with an empty "moxie-methods" attribute,
-	// which would cause the interface-lowering pass to NPE on a nil
-	// signature lookup far downstream.
-	itf := instr.Value.Type().Underlying().(*types.Interface)
-	if itf.NumMethods() == 0 {
-		panic("getInvokeFunction: invoke on empty interface for method " +
-			instr.Method.Name() + " (compiler invariant broken)")
-	}
-	s, _ := getTypeCodeName(instr.Value.Type().Underlying())
-	fnName := s + "." + instr.Method.Name() + "$invoke"
-	llvmFn := c.mod.NamedFunction(fnName)
-	if llvmFn.IsNil() {
-		sig := instr.Method.Type().(*types.Signature)
-		var paramTuple []*types.Var
-		for i := 0; i < sig.Params().Len(); i++ {
-			paramTuple = append(paramTuple, sig.Params().At(i))
-		}
-		paramTuple = append(paramTuple, types.NewVar(token.NoPos, nil, "$typecode", types.Typ[types.UnsafePointer]))
-		llvmFnType := c.getLLVMFunctionType(types.NewSignatureType(sig.Recv(), nil, nil, types.NewTuple(paramTuple...), sig.Results(), false))
-		llvmFn = llvm.AddFunction(c.mod, fnName, llvmFnType)
-		c.addStandardDeclaredAttributes(llvmFn)
-		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("moxie-invoke", c.getMethodSignatureName(instr.Method)))
-		methods := c.getMethodsString(itf)
-		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("moxie-methods", methods))
-	}
-	return llvmFn
-}
 
 func (c *compilerContext) getInvokeFunctionTC(instr *mxssa.CallCommon) llvm.Value {
 	itfType := instr.Value.Type().Underlying().(*typecheck.Interface)
@@ -840,13 +810,31 @@ func (c *compilerContext) getInvokeFunctionTC(instr *mxssa.CallCommon) llvm.Valu
 		if goMethodType == nil {
 			panic("getInvokeFunctionTC: no reverse type for method " + instr.Method.Name())
 		}
+		// Convert via tcbridge: instr.Method.Signature() can have nil
+		// params (the typecheck.Func may not have full signature info),
+		// so go through the go/types side which is reliable.
 		sig := goMethodType.(*types.Signature)
-		var paramTuple []*types.Var
+		var paramTuple []*typecheck.Var
 		for i := 0; i < sig.Params().Len(); i++ {
-			paramTuple = append(paramTuple, sig.Params().At(i))
+			tcParamType := c.mxTranslator.ForwardType(sig.Params().At(i).Type())
+			paramTuple = append(paramTuple, typecheck.NewVar(nil, sig.Params().At(i).Name(), tcParamType))
 		}
-		paramTuple = append(paramTuple, types.NewVar(token.NoPos, nil, "$typecode", types.Typ[types.UnsafePointer]))
-		llvmFnType := c.getLLVMFunctionType(types.NewSignatureType(sig.Recv(), nil, nil, types.NewTuple(paramTuple...), sig.Results(), false))
+		paramTuple = append(paramTuple, typecheck.NewVar(nil, "$typecode", typecheck.Typ[typecheck.UnsafePointer]))
+		var tcRecv *typecheck.Var
+		if sig.Recv() != nil {
+			tcRecvType := c.mxTranslator.ForwardType(sig.Recv().Type())
+			tcRecv = typecheck.NewVar(nil, sig.Recv().Name(), tcRecvType)
+		}
+		var tcResults *typecheck.Tuple
+		if sig.Results() != nil {
+			var resultVars []*typecheck.Var
+			for i := 0; i < sig.Results().Len(); i++ {
+				tcResType := c.mxTranslator.ForwardType(sig.Results().At(i).Type())
+				resultVars = append(resultVars, typecheck.NewVar(nil, sig.Results().At(i).Name(), tcResType))
+			}
+			tcResults = typecheck.NewTuple(resultVars...)
+		}
+		llvmFnType := c.getLLVMFunctionTypeTC(typecheck.NewSignature(tcRecv, typecheck.NewTuple(paramTuple...), tcResults, false))
 		llvmFn = llvm.AddFunction(c.mod, fnName, llvmFnType)
 		c.addStandardDeclaredAttributes(llvmFn)
 		goMethod := findGoMethod(goItf, instr.Method.Name())

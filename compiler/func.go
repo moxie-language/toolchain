@@ -3,8 +3,6 @@ package compiler
 // This file implements function values and closures.
 
 import (
-	"go/types"
-
 	"moxie/mxssa"
 	"tinygo.org/x/go-llvm"
 )
@@ -46,52 +44,6 @@ func (b *builder) decodeFuncValue(funcValue llvm.Value) (funcPtr, context llvm.V
 }
 
 // getLLVMFunctionType returns a LLVM function type for a given signature.
-func (c *compilerContext) getLLVMFunctionType(typ *types.Signature) llvm.Type {
-	// Get the return type.
-	var returnType llvm.Type
-	switch typ.Results().Len() {
-	case 0:
-		// No return values.
-		returnType = c.ctx.VoidType()
-	case 1:
-		// Just one return value.
-		returnType = c.getLLVMType(typ.Results().At(0).Type())
-	default:
-		// Multiple return values. Put them together in a struct.
-		// This appears to be the common way to handle multiple return values in
-		// LLVM.
-		members := make([]llvm.Type, typ.Results().Len())
-		for i := 0; i < typ.Results().Len(); i++ {
-			members[i] = c.getLLVMType(typ.Results().At(i).Type())
-		}
-		returnType = c.ctx.StructType(members, false)
-	}
-
-	// Get the parameter types.
-	var paramTypes []llvm.Type
-	if typ.Recv() != nil {
-		recv := c.getLLVMType(typ.Recv().Type())
-		if recv.StructName() == "runtime._interface" {
-			// This is a call on an interface, not a concrete type.
-			// The receiver is not an interface, but a i8* type.
-			recv = c.dataPtrType
-		}
-		for _, info := range c.expandFormalParamTypeTC(recv, "", nil) {
-			paramTypes = append(paramTypes, info.llvmType)
-		}
-	}
-	for i := 0; i < typ.Params().Len(); i++ {
-		subType := c.getLLVMType(typ.Params().At(i).Type())
-		for _, info := range c.expandFormalParamTypeTC(subType, "", nil) {
-			paramTypes = append(paramTypes, info.llvmType)
-		}
-	}
-	// All functions take these parameters at the end.
-	paramTypes = append(paramTypes, c.dataPtrType) // context
-
-	// Make a func type out of the signature.
-	return llvm.FunctionType(returnType, paramTypes, false)
-}
 
 // parseMakeClosure makes a function value (with context) from the given
 // closure expression.
