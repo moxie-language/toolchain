@@ -513,6 +513,16 @@ func (c *compilerContext) makeLLVMType(goType types.Type) llvm.Type {
 	}
 }
 
+// Get all methods of a type.
+func getAllMethods(prog *ssa.Program, typ types.Type) []*types.Selection {
+	ms := prog.MethodSets.MethodSet(typ)
+	methods := make([]*types.Selection, ms.Len())
+	for i := 0; i < ms.Len(); i++ {
+		methods[i] = ms.At(i)
+	}
+	return methods
+}
+
 // Is this a pointer type of some sort? Can be unsafe.Pointer or any *T pointer.
 func isPointer(typ types.Type) bool {
 	if _, ok := typ.(*types.Pointer); ok {

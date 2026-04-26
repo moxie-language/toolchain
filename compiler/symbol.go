@@ -15,7 +15,6 @@ import (
 	"moxie/loader"
 	"moxie/mxssa"
 	"moxie/typecheck"
-	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -271,13 +270,15 @@ func (c *compilerContext) maybeCreateSyntheticFunction(fn *mxssa.Function, llvmF
 			// This is a special implementation or internal/abi.Escape, which
 			// can only really be implemented in the compiler.
 			// For simplicity we'll only implement pointer parameters for now.
-			if _, ok := goFn.Params[0].Type().Underlying().(*types.Pointer); ok {
-				irbuilder := c.ctx.NewBuilder()
-				defer irbuilder.Dispose()
-				b := newBuilder(c, irbuilder, goFn)
-				b.createAbiEscapeImpl()
-				llvmFn.SetLinkage(llvm.LinkOnceODRLinkage)
-				llvmFn.SetUnnamedAddr(true)
+			if len(fn.Params) > 0 {
+				if _, ok := fn.Params[0].Type().Underlying().(*typecheck.Pointer); ok {
+					irbuilder := c.ctx.NewBuilder()
+					defer irbuilder.Dispose()
+					b := newBuilder(c, irbuilder, goFn)
+					b.createAbiEscapeImpl()
+					llvmFn.SetLinkage(llvm.LinkOnceODRLinkage)
+					llvmFn.SetUnnamedAddr(true)
+				}
 			}
 			// If the parameter is not of a pointer type, it will be left
 			// unimplemented. This will result in a linker error if the function
@@ -784,26 +785,6 @@ func (info *globalInfo) parsePragmasTC(doc *ast.CommentGroup, c *compilerContext
 			}
 		}
 	}
-}
-
-// Get all methods of a type.
-func getAllMethods(prog *ssa.Program, typ types.Type) []*types.Selection {
-	ms := prog.MethodSets.MethodSet(typ)
-	methods := make([]*types.Selection, ms.Len())
-	for i := 0; i < ms.Len(); i++ {
-		methods[i] = ms.At(i)
-	}
-	return methods
-}
-
-// Return true if this package imports "unsafe", false otherwise.
-func hasUnsafeImport(pkg *types.Package) bool {
-	for _, imp := range pkg.Imports() {
-		if imp == types.Unsafe {
-			return true
-		}
-	}
-	return false
 }
 
 // hasUnsafeImportTC is the typecheck-side mirror of hasUnsafeImport.
