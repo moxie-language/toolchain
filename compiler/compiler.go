@@ -173,13 +173,12 @@ type builder struct {
 	initInlinedAt     llvm.Metadata            // fake inlinedAt position
 	initPseudoFuncs   map[string]llvm.Metadata // fake "inlined" functions for proper init debug locations
 	allDeferFuncs     []interface{}
-	deferFuncs        map[*ssa.Function]int
+	deferFuncs        map[*mxssa.Function]int
 	deferInvokeFuncs  map[string]int
-	deferClosureFuncs map[*ssa.Function]int
-	deferExprFuncs    map[ssa.Value]int
-	selectRecvBuf     map[*ssa.Select]llvm.Value
+	deferClosureFuncs map[*mxssa.Function]int
+	deferExprFuncs    map[mxssa.Value]int
 	selectRecvBufTC   map[*mxssa.Select]llvm.Value
-	deferBuiltinFuncs map[ssa.Value]deferBuiltin
+	deferBuiltinFuncs map[mxssa.Value]deferBuiltin
 	runDefersBlock    []llvm.BasicBlock
 	afterDefersBlock  []llvm.BasicBlock
 }
