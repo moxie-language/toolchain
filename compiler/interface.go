@@ -717,7 +717,7 @@ func (b *builder) createTypeAssertTC(expr *mxssa.TypeAssert) llvm.Value {
 		if tcItf.NumMethods() == 0 {
 			commaOk = llvm.ConstInt(b.ctx.Int1Type(), 1, true)
 		} else {
-			fn := b.getInterfaceImplementsFunc(goAssertedType)
+			fn := b.getInterfaceImplementsFunc(expr.AssertedType)
 			commaOk = b.CreateCall(fn.GlobalValueType(), fn, []llvm.Value{actualTypeNum}, "")
 		}
 	} else {
@@ -773,15 +773,21 @@ func (c *compilerContext) getMethodsString(itf *types.Interface) string {
 
 // getInterfaceImplementsFunc returns a declared function that works as a type
 // switch. The interface lowering pass will define this function.
-func (c *compilerContext) getInterfaceImplementsFunc(assertedType types.Type) llvm.Value {
-	s, _ := getTypeCodeName(assertedType.Underlying())
+func (c *compilerContext) getInterfaceImplementsFunc(assertedType typecheck.Type) llvm.Value {
+	// Internally still uses the SSA-side type via ReverseType for
+	// getTypeCodeName/getMethodsString — those helpers haven't migrated yet.
+	goAssertedType := c.mxTranslator.ReverseType(assertedType)
+	if goAssertedType == nil {
+		panic("getInterfaceImplementsFunc: no reverse type for " + assertedType.String())
+	}
+	s, _ := getTypeCodeName(goAssertedType.Underlying())
 	fnName := s + ".$typeassert"
 	llvmFn := c.mod.NamedFunction(fnName)
 	if llvmFn.IsNil() {
 		llvmFnType := llvm.FunctionType(c.ctx.Int1Type(), []llvm.Type{c.dataPtrType}, false)
 		llvmFn = llvm.AddFunction(c.mod, fnName, llvmFnType)
 		c.addStandardDeclaredAttributes(llvmFn)
-		methods := c.getMethodsString(assertedType.Underlying().(*types.Interface))
+		methods := c.getMethodsString(goAssertedType.Underlying().(*types.Interface))
 		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("moxie-methods", methods))
 	}
 	return llvmFn
