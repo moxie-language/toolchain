@@ -1086,7 +1086,7 @@ func (c *compilerContext) createEmbedGlobal(member *ssa.Global, global llvm.Valu
 		}
 		file := files[0]
 		bufferValue := c.ctx.ConstString(string(file.Data), false)
-		bufferGlobal := llvm.AddGlobal(c.mod, bufferValue.Type(), c.pkg.Path()+"$embedslice")
+		bufferGlobal := llvm.AddGlobal(c.mod, bufferValue.Type(), c.mxPkg.Path()+"$embedslice")
 		bufferGlobal.SetInitializer(bufferValue)
 		bufferGlobal.SetLinkage(llvm.InternalLinkage)
 		bufferGlobal.SetAlignment(1)
@@ -1166,7 +1166,7 @@ func (c *compilerContext) createEmbedGlobal(member *ssa.Global, global llvm.Valu
 			fileStructs = append(fileStructs, fileStruct)
 		}
 		sliceDataInitializer := llvm.ConstArray(llvmEmbedFileStructType, fileStructs)
-		sliceDataGlobal := llvm.AddGlobal(c.mod, sliceDataInitializer.Type(), c.pkg.Path()+"$embedfsfiles")
+		sliceDataGlobal := llvm.AddGlobal(c.mod, sliceDataInitializer.Type(), c.mxPkg.Path()+"$embedfsfiles")
 		sliceDataGlobal.SetInitializer(sliceDataInitializer)
 		sliceDataGlobal.SetLinkage(llvm.InternalLinkage)
 		sliceDataGlobal.SetGlobalConstant(true)
@@ -1194,7 +1194,7 @@ func (c *compilerContext) createEmbedGlobal(member *ssa.Global, global llvm.Valu
 		})
 		sliceLen := llvm.ConstInt(c.uintptrType, uint64(len(fileStructs)), false)
 		sliceInitializer := c.ctx.ConstStruct([]llvm.Value{slicePtr, sliceLen, sliceLen}, false)
-		sliceGlobal := llvm.AddGlobal(c.mod, sliceInitializer.Type(), c.pkg.Path()+"$embedfsslice")
+		sliceGlobal := llvm.AddGlobal(c.mod, sliceInitializer.Type(), c.mxPkg.Path()+"$embedfsslice")
 		sliceGlobal.SetInitializer(sliceInitializer)
 		sliceGlobal.SetLinkage(llvm.InternalLinkage)
 		sliceGlobal.SetGlobalConstant(true)
@@ -2736,7 +2736,7 @@ func (c *compilerContext) createConst(expr *ssa.Const, pos token.Pos) llvm.Value
 			strLen := llvm.ConstInt(c.uintptrType, uint64(len(str)), false)
 			var strPtr llvm.Value
 			if str != "" {
-				objname := c.pkg.Path() + "$string"
+				objname := c.mxPkg.Path() + "$string"
 				globalType := llvm.ArrayType(c.ctx.Int8Type(), len(str))
 				global := llvm.AddGlobal(c.mod, globalType, objname)
 				global.SetInitializer(c.ctx.ConstString(str, false))
