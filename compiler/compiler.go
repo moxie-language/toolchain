@@ -535,17 +535,6 @@ func getAllMethods(prog *ssa.Program, typ types.Type) []*types.Selection {
 	return methods
 }
 
-// Is this a pointer type of some sort? Can be unsafe.Pointer or any *T pointer.
-func isPointer(typ types.Type) bool {
-	if _, ok := typ.(*types.Pointer); ok {
-		return true
-	} else if typ, ok := typ.(*types.Basic); ok && typ.Kind() == types.UnsafePointer {
-		return true
-	} else {
-		return false
-	}
-}
-
 // Get the DWARF type for this Go type.
 func (c *compilerContext) getDIType(typ types.Type) llvm.Metadata {
 	if md, ok := c.ditypes[typ]; ok {
