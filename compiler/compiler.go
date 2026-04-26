@@ -1761,12 +1761,9 @@ func (b *builder) createInstructionTC(instr mxssa.Instruction) {
 	case *mxssa.Defer:
 		b.createDeferTC(instr)
 	case *mxssa.Go:
-		if b.mxFn != nil && b.mxFn.Pkg != nil {
-			pkgPath := b.mxFn.Pkg.Pkg.Path()
-			if !strings.HasPrefix(pkgPath, "runtime") && !strings.HasPrefix(pkgPath, "internal/") {
-				b.addError(instr.Pos(), "moxie: the go keyword is not supported (there are no goroutines)")
-				return
-			}
+		if b.mxFn != nil && isUserPackageTC(b.mxFn.Pkg) {
+			b.addError(instr.Pos(), "moxie: the go keyword is not supported (there are no goroutines)")
+			return
 		}
 		b.addError(instr.Pos(), "todo: go TC path not yet implemented")
 	case *mxssa.If:
