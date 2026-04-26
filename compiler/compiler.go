@@ -1516,8 +1516,10 @@ func (b *builder) createFunctionDispatch() {
 
 func (b *builder) createFunctionTC() {
 	if len(b.mxFn.Blocks) == 0 || mxFnHasInvalidTypes(b.mxFn) {
-		// Empty body (external decl) or types Moxie can't represent in TC
-		// (complex64/128 in runtime helpers). The SSA path emits these.
+		// SSA path needed for: external decls (no body) + a small set of
+		// runtime helpers with complex types Moxie's TC cannot represent
+		// (rawPtrEqual, printitf use these and are reachable; others are
+		// linker-DCE'd).
 		b.createFunction()
 		return
 	}
