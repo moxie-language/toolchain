@@ -341,33 +341,6 @@ type tarjanNode struct {
 
 // createDefer emits a single defer instruction, to be run when this function
 // returns.
-
-// findSSADefer finds the *ssa.Defer in b.fn that corresponds to the given
-// mxssa.Defer by counting defer instructions in the current block.
-func (b *builder) findSSADefer(mxDefer *mxssa.Defer) *ssa.Defer {
-	mxBlock := mxDefer.Block()
-	deferIdx := 0
-	for _, instr := range mxBlock.Instrs {
-		if instr == mxDefer {
-			break
-		}
-		if _, ok := instr.(*mxssa.Defer); ok {
-			deferIdx++
-		}
-	}
-	ssaBlock := b.fn.Blocks[mxBlock.Index]
-	count := 0
-	for _, instr := range ssaBlock.Instrs {
-		if d, ok := instr.(*ssa.Defer); ok {
-			if count == deferIdx {
-				return d
-			}
-			count++
-		}
-	}
-	return nil
-}
-
 // createDeferTC emits a defer instruction from the TC path.
 func (b *builder) createDeferTC(instr *mxssa.Defer) {
 	next := b.CreateLoad(b.dataPtrType, b.deferPtr, "defer.next")
