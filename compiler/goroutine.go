@@ -62,7 +62,7 @@ func (b *builder) createWasmExport() {
 		params := exportedFn.Params()
 		params = append(params, llvm.ConstNull(b.dataPtrType)) // context parameter
 		retval := builder.CreateCall(b.llvmFnType, b.llvmFn, params, "")
-		if b.fn.Signature.Results() == nil {
+		if b.mxFn.Signature.Results() == nil {
 			builder.CreateRetVoid()
 		} else {
 			builder.CreateRet(retval)
@@ -96,7 +96,7 @@ func (b *builder) createWasmExport() {
 		//       return state.result
 		//   }
 
-		hasReturn := b.fn.Signature.Results() != nil
+		hasReturn := b.mxFn.Signature.Results() != nil
 
 		// Build the state struct type.
 		// It stores the function parameters, the 'done' flag, and reserves
