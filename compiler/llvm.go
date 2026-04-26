@@ -3,7 +3,6 @@ package compiler
 import (
 	"fmt"
 	"go/token"
-	"go/types"
 	"math/big"
 	"strings"
 
@@ -344,13 +343,10 @@ func (c *compilerContext) createObjectLayout(t llvm.Type, pos token.Pos) llvm.Va
 		// GDB which may be useful for debugging.
 		position := c.program.Fset.Position(pos)
 		diglobal := c.dibuilder.CreateGlobalVariableExpression(c.difiles[position.Filename], llvm.DIGlobalVariableExpression{
-			Name: globalName,
-			File: c.getDIFile(position.Filename),
-			Line: position.Line,
-			Type: c.getDIType(types.NewStruct([]*types.Var{
-				types.NewVar(pos, nil, "numBits", types.Typ[types.Uintptr]),
-				types.NewVar(pos, nil, "data", types.NewArray(types.Typ[types.Byte], int64(len(bitmapByteValues)))),
-			}, nil)),
+			Name:        globalName,
+			File:        c.getDIFile(position.Filename),
+			Line:        position.Line,
+			Type:        c.getPointerBitmapDIType(len(bitmapByteValues)),
 			LocalToUnit: false,
 			Expr:        c.dibuilder.CreateExpression(nil),
 		})
@@ -358,6 +354,53 @@ func (c *compilerContext) createObjectLayout(t llvm.Type, pos token.Pos) llvm.Va
 	}
 
 	return global
+}
+
+// getPointerBitmapDIType synthesizes the DIStructType for a pointer-bitmap
+// global: { uintptr numBits; uint8 data[N] }. Built directly on the dibuilder
+// API to avoid synthesizing a go/types.Struct for getDIType.
+func (c *compilerContext) getPointerBitmapDIType(dataLen int) llvm.Metadata {
+	uintptrSize := c.targetData.TypeAllocSize(c.uintptrType)
+	uintptrAlign := uint32(c.targetData.ABITypeAlignment(c.uintptrType)) * 8
+
+	uintptrDI := c.dibuilder.CreateBasicType(llvm.DIBasicType{
+		Name:       "uintptr",
+		SizeInBits: uintptrSize * 8,
+		Encoding:   llvm.DW_ATE_unsigned,
+	})
+	byteDI := c.dibuilder.CreateBasicType(llvm.DIBasicType{
+		Name:       "uint8",
+		SizeInBits: 8,
+		Encoding:   llvm.DW_ATE_unsigned,
+	})
+	dataArrayDI := c.dibuilder.CreateArrayType(llvm.DIArrayType{
+		SizeInBits:  uint64(dataLen) * 8,
+		AlignInBits: 8,
+		ElementType: byteDI,
+		Subscripts:  []llvm.DISubrange{{Lo: 0, Count: int64(dataLen)}},
+	})
+
+	totalBits := (uintptrSize + uint64(dataLen)) * 8
+	return c.dibuilder.CreateStructType(llvm.Metadata{}, llvm.DIStructType{
+		SizeInBits:  totalBits,
+		AlignInBits: uintptrAlign,
+		Elements: []llvm.Metadata{
+			c.dibuilder.CreateMemberType(llvm.Metadata{}, llvm.DIMemberType{
+				Name:         "numBits",
+				SizeInBits:   uintptrSize * 8,
+				AlignInBits:  uintptrAlign,
+				OffsetInBits: 0,
+				Type:         uintptrDI,
+			}),
+			c.dibuilder.CreateMemberType(llvm.Metadata{}, llvm.DIMemberType{
+				Name:         "data",
+				SizeInBits:   uint64(dataLen) * 8,
+				AlignInBits:  8,
+				OffsetInBits: uintptrSize * 8,
+				Type:         dataArrayDI,
+			}),
+		},
+	})
 }
 
 // getPointerBitmap scans the given LLVM type for pointers and sets bits in a
