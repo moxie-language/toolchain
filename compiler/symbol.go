@@ -14,6 +14,7 @@ import (
 	"moxie/compiler/llvmutil"
 	"moxie/goenv"
 	"moxie/loader"
+	"moxie/mxssa"
 	"moxie/typecheck"
 	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
@@ -566,6 +567,35 @@ const (
 	siteResult
 	siteIndirect // pointer or field
 )
+
+// checkWasmImportExportTC is the mxssa variant of checkWasmImportExport. Note
+// that typecheck.Var doesn't expose a typed Pos(), so result-type errors use
+// the function's position as a fallback. Parameter errors use the parameter's
+// own position via mxssa.Parameter.Pos().
+func (c *compilerContext) checkWasmImportExportTC(fn *mxssa.Function, pragma string) {
+	if c.pkg.Path() == "runtime" || c.pkg.Path() == "syscall/js" || c.pkg.Path() == "syscall" || c.pkg.Path() == "crypto/internal/sysrand" {
+		return
+	}
+	sig := fn.Signature
+	if sig == nil {
+		return
+	}
+	if results := sig.Results(); results != nil {
+		if results.Len() > 1 {
+			c.addError(fn.Pos(), fmt.Sprintf("%s: too many return values", pragma))
+		} else if results.Len() == 1 {
+			result := results.At(0)
+			if !c.isValidWasmTypeTC(result.Type(), siteResult) {
+				c.addError(fn.Pos(), fmt.Sprintf("%s: unsupported result type %s", pragma, result.Type().String()))
+			}
+		}
+	}
+	for _, param := range fn.Params {
+		if !c.isValidWasmTypeTC(param.Type(), siteParam) {
+			c.addError(param.Pos(), fmt.Sprintf("%s: unsupported parameter type %s", pragma, param.Type().String()))
+		}
+	}
+}
 
 // isValidWasmTypeTC is the typecheck variant of isValidWasmType. Mirrors the
 // SSA logic with typecheck.Type. Note: Uintptr collapses to Uint64 in tcbridge,
