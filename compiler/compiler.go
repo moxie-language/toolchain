@@ -478,7 +478,7 @@ func (c *compilerContext) makeLLVMType(goType types.Type) llvm.Type {
 		}
 		return c.getLLVMType(typ.Underlying())
 	case *types.Signature: // function value
-		return c.getFuncType(typ)
+		return c.funcValueType()
 	case *types.Slice:
 		// Moxie: []byte uses the named _string type (string=[]byte unification).
 		if basic, ok := typ.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {
@@ -2659,7 +2659,7 @@ func (b *builder) getValue(expr ssa.Value, pos token.Pos) llvm.Value {
 			return llvm.Undef(b.getLLVMType(expr.Type()))
 		}
 		_, fn := b.getFunction(expr)
-		return b.createFuncValue(fn, llvm.Undef(b.dataPtrType), expr.Signature)
+		return b.createFuncValue(fn, llvm.Undef(b.dataPtrType))
 	case *ssa.Global:
 		value := b.getGlobal(expr)
 		if value.IsNil() {

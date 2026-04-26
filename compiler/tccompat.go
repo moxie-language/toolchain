@@ -67,7 +67,7 @@ func (c *compilerContext) makeLLVMTypeTC(t typecheck.Type) llvm.Type {
 	case *typecheck.Interface:
 		return c.getLLVMRuntimeType("_interface")
 	case *typecheck.Signature:
-		return c.getFuncTypeTC(typ)
+		return c.funcValueType()
 	case *typecheck.Struct:
 		members := make([]llvm.Type, typ.NumFields())
 		for i := range members {
@@ -102,11 +102,6 @@ func (c *compilerContext) makeLLVMTypeTC(t typecheck.Type) llvm.Type {
 	default:
 		panic("tccompat: unknown type: " + t.String())
 	}
-}
-
-// getFuncTypeTC returns the LLVM representation of a function value (closure pair).
-func (c *compilerContext) getFuncTypeTC(typ *typecheck.Signature) llvm.Type {
-	return c.ctx.StructType([]llvm.Type{c.dataPtrType, c.funcPtrType}, false)
 }
 
 // getLLVMFunctionTypeTC returns an LLVM function type for a typecheck.Signature.
@@ -342,7 +337,7 @@ func (b *builder) getValueTC(expr mxssa.Value, pos token.Pos) llvm.Value {
 			return llvm.Undef(b.getLLVMTypeTC(expr.Type()))
 		}
 		_, fn := b.getFunction(goFn)
-		return b.createFuncValue(fn, llvm.Undef(b.dataPtrType), goFn.Signature)
+		return b.createFuncValue(fn, llvm.Undef(b.dataPtrType))
 	case *mxssa.Global:
 		if g := b.mxTranslator.ReverseGlobal(expr); g != nil {
 			value := b.getGlobal(g)

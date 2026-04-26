@@ -7,30 +7,23 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 	"moxie/mxssa"
-	"moxie/typecheck"
 	"tinygo.org/x/go-llvm"
 )
 
 // createFuncValue creates a function value from a raw function pointer with no
-// context.
-func (b *builder) createFuncValue(funcPtr, context llvm.Value, sig *types.Signature) llvm.Value {
-	// Closure is: {context, function pointer}
-	funcValueType := b.getFuncType(sig)
+// context. The closure layout is {context, function pointer}.
+func (b *builder) createFuncValue(funcPtr, context llvm.Value) llvm.Value {
+	funcValueType := b.funcValueType()
 	funcValue := llvm.Undef(funcValueType)
 	funcValue = b.CreateInsertValue(funcValue, context, 0, "")
 	funcValue = b.CreateInsertValue(funcValue, funcPtr, 1, "")
 	return funcValue
 }
 
-// createFuncValueTC is the typecheck variant of createFuncValue. The signature
-// is ignored at runtime (getFuncType returns the same {context, funcPtr} struct
-// regardless), kept for parallelism with the SSA helper signature.
-func (b *builder) createFuncValueTC(funcPtr, context llvm.Value, sig *typecheck.Signature) llvm.Value {
-	funcValueType := b.getFuncTypeTC(sig)
-	funcValue := llvm.Undef(funcValueType)
-	funcValue = b.CreateInsertValue(funcValue, context, 0, "")
-	funcValue = b.CreateInsertValue(funcValue, funcPtr, 1, "")
-	return funcValue
+// funcValueType returns the LLVM struct type used for all func values:
+// {context, function pointer}. The Go signature has no impact on this layout.
+func (c *compilerContext) funcValueType() llvm.Type {
+	return c.ctx.StructType([]llvm.Type{c.dataPtrType, c.funcPtrType}, false)
 }
 
 // extractFuncScalar returns some scalar that can be used in comparisons. It is
@@ -51,11 +44,6 @@ func (b *builder) decodeFuncValue(funcValue llvm.Value) (funcPtr, context llvm.V
 	context = b.CreateExtractValue(funcValue, 0, "")
 	funcPtr = b.CreateExtractValue(funcValue, 1, "")
 	return
-}
-
-// getFuncType returns the type of a func value given a signature.
-func (c *compilerContext) getFuncType(typ *types.Signature) llvm.Type {
-	return c.ctx.StructType([]llvm.Type{c.dataPtrType, c.funcPtrType}, false)
 }
 
 // getLLVMFunctionType returns a LLVM function type for a given signature.
@@ -128,7 +116,7 @@ func (b *builder) parseMakeClosure(expr *ssa.MakeClosure) (llvm.Value, error) {
 
 	// Create the closure.
 	_, fn := b.getFunction(f)
-	return b.createFuncValue(fn, context, f.Signature), nil
+	return b.createFuncValue(fn, context), nil
 }
 
 func (b *builder) parseMakeClosureTC(expr *mxssa.MakeClosure) (llvm.Value, error) {
@@ -150,5 +138,5 @@ func (b *builder) parseMakeClosureTC(expr *mxssa.MakeClosure) (llvm.Value, error
 		panic("parseMakeClosureTC: cannot reverse-bridge function: " + f.Name())
 	}
 	_, fn := b.getFunction(goFn)
-	return b.createFuncValue(fn, context, goFn.Signature), nil
+	return b.createFuncValue(fn, context), nil
 }

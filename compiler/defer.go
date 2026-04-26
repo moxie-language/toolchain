@@ -737,7 +737,7 @@ func (b *builder) createRunDefers() {
 
 			if !callback.IsInvoke() {
 				//Expect funcValue to be passed through the deferred call.
-				valueTypes = append(valueTypes, b.getFuncType(callback.Signature()))
+				valueTypes = append(valueTypes, b.funcValueType())
 			} else {
 				//Expect typecode
 				valueTypes = append(valueTypes, b.dataPtrType, b.dataPtrType)
