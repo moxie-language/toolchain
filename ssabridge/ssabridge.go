@@ -124,6 +124,19 @@ func (t *Translator) TranslatePackage(ssaPkg *ssa.Package) *mxssa.Package {
 	if tcPkg == nil {
 		tcPkg = typecheck.NewPackage(ssaPkg.Pkg.Path(), ssaPkg.Pkg.Name())
 	}
+	// Populate imports so checks like packageImportsUnsafeTC can find them.
+	// imp.Import is cached and idempotent.
+	if len(tcPkg.Imports()) == 0 {
+		var tcImps []*typecheck.Package
+		for _, gimp := range ssaPkg.Pkg.Imports() {
+			if tcImp, _ := t.imp.Import(gimp.Path()); tcImp != nil {
+				tcImps = append(tcImps, tcImp)
+			}
+		}
+		if len(tcImps) > 0 {
+			tcPkg.SetImports(tcImps)
+		}
+	}
 	p := &mxssa.Package{
 		Prog:    t.prog,
 		Pkg:     tcPkg,
@@ -239,6 +252,17 @@ func (t *Translator) ensurePackage(ssaPkg *ssa.Package) *mxssa.Package {
 	tcPkg, _ := t.imp.Import(ssaPkg.Pkg.Path())
 	if tcPkg == nil {
 		tcPkg = typecheck.NewPackage(ssaPkg.Pkg.Path(), ssaPkg.Pkg.Name())
+	}
+	if len(tcPkg.Imports()) == 0 {
+		var tcImps []*typecheck.Package
+		for _, gimp := range ssaPkg.Pkg.Imports() {
+			if tcImp, _ := t.imp.Import(gimp.Path()); tcImp != nil {
+				tcImps = append(tcImps, tcImp)
+			}
+		}
+		if len(tcImps) > 0 {
+			tcPkg.SetImports(tcImps)
+		}
 	}
 	p := &mxssa.Package{
 		Prog:    t.prog,

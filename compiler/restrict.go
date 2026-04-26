@@ -76,13 +76,35 @@ func packageImportsUnsafe(pkg *ssa.Package) bool {
 	return false
 }
 
+// isUserPackageTC is the mxssa variant of isUserPackage.
+func isUserPackageTC(pkg *mxssa.Package) bool {
+	if pkg == nil || pkg.Pkg == nil {
+		return false
+	}
+	path := pkg.Pkg.Path()
+	if strings.HasPrefix(path, "internal/") ||
+		strings.Contains(path, "/internal/") ||
+		strings.HasPrefix(path, "runtime") ||
+		strings.HasPrefix(path, "unsafe") ||
+		strings.HasPrefix(path, "os") ||
+		strings.HasPrefix(path, "syscall") {
+		return false
+	}
+	return true
+}
+
 // checkMoxieRestrictions scans a function for uses of restricted features.
 // Only applies to user code — runtime packages are exempt.
+//
+// Top-level dispatch: TC path when mxFn is fully populated, SSA otherwise.
 func (b *builder) checkMoxieRestrictions() {
+	if b.mxFn != nil && len(b.mxFn.Blocks) > 0 {
+		b.checkMoxieRestrictionsTC()
+		return
+	}
 	if !isUserPackage(b.fn.Pkg) {
 		return
 	}
-	// Check for restricted imports (only on the init function to avoid per-function spam).
 	if b.fn.Name() == "init" || (b.fn.Name() == "main" && b.fn.Pkg.Pkg.Name() == "main") {
 		for _, imp := range b.fn.Pkg.Pkg.Imports() {
 			if reason, restricted := restrictedImports[imp.Path()]; restricted {
@@ -90,37 +112,41 @@ func (b *builder) checkMoxieRestrictions() {
 			}
 		}
 	}
-	if b.mxFn != nil && len(b.mxFn.Blocks) > 0 {
-		for _, block := range b.mxFn.Blocks {
-			for _, instr := range block.Instrs {
-				b.checkInstrRestrictionsTC(instr)
-			}
-		}
-	} else {
-		for _, block := range b.fn.Blocks {
-			for _, instr := range block.Instrs {
-				b.checkInstrRestrictions(instr)
-			}
+	for _, block := range b.fn.Blocks {
+		for _, instr := range block.Instrs {
+			b.checkInstrRestrictions(instr)
 		}
 	}
-	// Check function signature for restricted types.
-	if b.mxFn != nil && b.mxFn.Signature != nil {
-		b.checkSignatureRestrictionsTC()
-	} else {
-		b.checkSignatureRestrictions(b.fn)
-	}
-	// Check for fallthrough (lowered away by SSA, must check AST).
+	b.checkSignatureRestrictions(b.fn)
 	b.checkFallthroughRestriction()
-	// Check for restricted types and builtins in AST (SSA may optimize them away).
 	b.checkASTRestrictions()
-	// Check that non-constant spawn args aren't used after the spawn call.
-	if b.mxFn != nil && len(b.mxFn.Blocks) > 0 {
-		b.checkSpawnMoveRestrictionTC()
-	} else {
-		b.checkSpawnMoveRestriction()
-	}
-	// Check that every channel has both a sender and a listener.
+	b.checkSpawnMoveRestriction()
 	b.checkChannelCompleteness()
+}
+
+// checkMoxieRestrictionsTC is the unified mxssa-only dispatcher. Mirror
+// of checkMoxieRestrictions with no SSA references.
+func (b *builder) checkMoxieRestrictionsTC() {
+	if !isUserPackageTC(b.mxFn.Pkg) {
+		return
+	}
+	if b.mxFn.Name() == "init" || (b.mxFn.Name() == "main" && b.mxFn.Pkg.Pkg.Name() == "main") {
+		for _, imp := range b.mxFn.Pkg.Pkg.Imports() {
+			if reason, restricted := restrictedImports[imp.Path()]; restricted {
+				b.addError(b.mxFn.Pos(), "moxie: import \""+imp.Path()+"\" is not allowed: "+reason)
+			}
+		}
+	}
+	for _, block := range b.mxFn.Blocks {
+		for _, instr := range block.Instrs {
+			b.checkInstrRestrictionsTC(instr)
+		}
+	}
+	b.checkSignatureRestrictionsTC()
+	b.checkFallthroughRestrictionTC()
+	b.checkASTRestrictionsTC()
+	b.checkSpawnMoveRestrictionTC()
+	b.checkChannelCompletenessTC()
 }
 
 func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
@@ -330,6 +356,74 @@ func isMakeExempt(pkg *ssa.Package, fset *token.FileSet, pos token.Pos) bool {
 	return false
 }
 
+// isMakeExemptTC is the mxssa variant of isMakeExempt.
+func isMakeExemptTC(pkg *mxssa.Package, fset *token.FileSet, pos token.Pos) bool {
+	position := fset.Position(pos)
+	if !strings.HasSuffix(position.Filename, ".mx") {
+		return true
+	}
+	if pkg == nil || pkg.Pkg == nil {
+		return false
+	}
+	path := pkg.Pkg.Path()
+	if path == "main" || path == "command-line-arguments" {
+		return false
+	}
+	if !strings.Contains(path, ".") {
+		return true
+	}
+	if strings.HasPrefix(path, "golang.org/x/") {
+		return true
+	}
+	return false
+}
+
+// checkFallthroughRestrictionTC is the mxssa variant of checkFallthroughRestriction.
+func (b *builder) checkFallthroughRestrictionTC() {
+	syntax := b.mxFn.Syntax()
+	if syntax == nil {
+		return
+	}
+	ast.Inspect(syntax, func(n ast.Node) bool {
+		if br, ok := n.(*ast.BranchStmt); ok && br.Tok == token.FALLTHROUGH {
+			b.addError(br.Pos(), "moxie: 'fallthrough' is not allowed: each case must be self-contained")
+			return false
+		}
+		return true
+	})
+}
+
+// checkASTRestrictionsTC is the mxssa variant of checkASTRestrictions.
+func (b *builder) checkASTRestrictionsTC() {
+	syntax := b.mxFn.Syntax()
+	if syntax == nil {
+		return
+	}
+	ast.Inspect(syntax, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.Ident:
+			if reason, restricted := restrictedTypes[node.Name]; restricted {
+				if node.Name == "uintptr" && packageImportsUnsafeTC(b.mxFn.Pkg) {
+					return true
+				}
+				b.addError(node.Pos(), "moxie: type '"+node.Name+"' is not allowed: "+reason)
+			}
+		case *ast.CallExpr:
+			if ident, ok := node.Fun.(*ast.Ident); ok {
+				if reason, restricted := restrictedBuiltins[ident.Name]; restricted {
+					if ident.Name == "make" {
+						if isMakeExemptTC(b.mxFn.Pkg, b.program.Fset, ident.Pos()) {
+							return true
+						}
+					}
+					b.addError(ident.Pos(), "moxie: '"+ident.Name+"' is not allowed: "+reason)
+				}
+			}
+		}
+		return true
+	})
+}
+
 // checkSpawnMoveRestriction enforces move semantics for spawn arguments.
 // Non-constant values passed to spawn must not be used after the call —
 // ownership moves to the child domain. No shared memory.
@@ -524,10 +618,6 @@ func (b *builder) checkSpawnMoveRestrictionTC() {
 // the function (passed to calls, stored, returned) are exempt — the other end
 // is elsewhere.
 func (b *builder) checkChannelCompleteness() {
-	if b.mxFn != nil && len(b.mxFn.Blocks) > 0 {
-		b.checkChannelCompletenessTC()
-		return
-	}
 	for _, block := range b.fn.Blocks {
 		for _, instr := range block.Instrs {
 			mc, ok := instr.(*ssa.MakeChan)
