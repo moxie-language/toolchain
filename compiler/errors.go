@@ -29,7 +29,7 @@ func (e Error) Error() string {
 // makeError makes it easy to create an error from a token.Pos with a message.
 func (c *compilerContext) makeError(pos token.Pos, msg string) Error {
 	return Error{
-		Fset: c.program.Fset,
+		Fset: c.mxProgram.Fset,
 		Pos:  pos,
 		Msg:  msg,
 	}

@@ -222,7 +222,7 @@ func (b *builder) checkASTRestrictionsTC() {
 			if ident, ok := node.Fun.(*ast.Ident); ok {
 				if reason, restricted := restrictedBuiltins[ident.Name]; restricted {
 					if ident.Name == "make" {
-						if isMakeExemptTC(b.mxFn.Pkg, b.program.Fset, ident.Pos()) {
+						if isMakeExemptTC(b.mxFn.Pkg, b.mxProgram.Fset, ident.Pos()) {
 							return true
 						}
 					}

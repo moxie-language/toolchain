@@ -41,7 +41,7 @@ func (b *builder) createWasmExport() {
 	if b.Debug {
 		if b.fn.Syntax() != nil {
 			// Create debug info file if needed.
-			pos := b.program.Fset.Position(pos)
+			pos := b.mxProgram.Fset.Position(pos)
 			builder.difunc = builder.attachDebugInfoRaw(b.mxFn, exportedFn, suffix, pos.Filename, pos.Line)
 		}
 		builder.setDebugLocation(pos)
@@ -213,7 +213,7 @@ func (c *compilerContext) createGoroutineStartWrapper(fnType llvm.Type, fn llvm.
 		b.SetInsertPointAtEnd(entry)
 
 		if c.Debug {
-			pos := c.program.Fset.Position(pos)
+			pos := c.mxProgram.Fset.Position(pos)
 			diFuncType := c.dibuilder.CreateSubroutineType(llvm.DISubroutineType{
 				File:       c.getDIFile(pos.Filename),
 				Parameters: nil, // do not show parameters in debugger
@@ -369,7 +369,7 @@ func (c *compilerContext) createGoroutineStartWrapper(fnType llvm.Type, fn llvm.
 		b.SetInsertPointAtEnd(entry)
 
 		if c.Debug {
-			pos := c.program.Fset.Position(pos)
+			pos := c.mxProgram.Fset.Position(pos)
 			diFuncType := c.dibuilder.CreateSubroutineType(llvm.DISubroutineType{
 				File:       c.getDIFile(pos.Filename),
 				Parameters: nil, // do not show parameters in debugger

@@ -47,7 +47,7 @@ func (b *builder) createAlias(alias llvm.Value) {
 			// Create debug info file if present.
 			b.difunc = b.attachDebugInfo(b.mxFn)
 		}
-		pos := b.program.Fset.Position(b.fn.Pos())
+		pos := b.mxProgram.Fset.Position(b.fn.Pos())
 		b.SetCurrentDebugLocation(uint(pos.Line), uint(pos.Column), b.difunc, llvm.Metadata{})
 	}
 	entryBlock := b.ctx.AddBasicBlock(b.llvmFn, "entry")

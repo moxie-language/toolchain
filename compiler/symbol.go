@@ -705,7 +705,7 @@ func (c *compilerContext) getGlobal(g *mxssa.Global) llvm.Value {
 			// createDIType chain remains keyed on go/types.Type. Migrating
 			// that is its own commit (§3). Pull from getDITypeForGlobal
 			// (helper in compiler.go) so symbol.go stays types-import-free.
-			pos := c.program.Fset.Position(g.Pos())
+			pos := c.mxProgram.Fset.Position(g.Pos())
 			diType := c.getDITypeForGlobal(g)
 			diglobal := c.dibuilder.CreateGlobalVariableExpression(c.difiles[pos.Filename], llvm.DIGlobalVariableExpression{
 				Name:        g.String(),

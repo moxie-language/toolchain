@@ -760,7 +760,7 @@ func (b *builder) setDebugLocation(pos token.Pos) {
 		return
 	}
 
-	position := b.program.Fset.Position(pos)
+	position := b.mxProgram.Fset.Position(pos)
 	if b.fn.Synthetic == "package initializer" {
 		// Package initializers are treated specially, because while individual
 		// Go SSA instructions have file/line/col information, the parent
@@ -769,7 +769,7 @@ func (b *builder) setDebugLocation(pos token.Pos) {
 		// creating a fake DIFunction for each Go file and say that the
 		// instruction really came from that (fake) function but was inlined in
 		// the package initializer function.
-		position := b.program.Fset.Position(pos)
+		position := b.mxProgram.Fset.Position(pos)
 		name := filepath.Base(position.Filename)
 		difunc, ok := b.initPseudoFuncs[name]
 		if !ok {
@@ -806,7 +806,7 @@ func (b *builder) getLocalVariable(variable *types.Var) llvm.Metadata {
 		return dilocal
 	}
 
-	pos := b.program.Fset.Position(variable.Pos())
+	pos := b.mxProgram.Fset.Position(variable.Pos())
 
 	// Check whether this is a function parameter.
 	for i, param := range b.fn.Params {
@@ -1101,7 +1101,7 @@ func (c *compilerContext) createEmbedGlobal(member *ssa.Global, global llvm.Valu
 
 		if c.Debug {
 			// Add debug info to the slice backing array.
-			position := c.program.Fset.Position(member.Pos())
+			position := c.mxProgram.Fset.Position(member.Pos())
 			diglobal := c.dibuilder.CreateGlobalVariableExpression(llvm.Metadata{}, llvm.DIGlobalVariableExpression{
 				File:        c.getDIFile(position.Filename),
 				Line:        position.Line,
@@ -1174,7 +1174,7 @@ func (c *compilerContext) createEmbedGlobal(member *ssa.Global, global llvm.Valu
 		sliceDataGlobal.SetAlignment(c.targetData.ABITypeAlignment(sliceDataInitializer.Type()))
 		if c.Debug {
 			// Add debug information for code size attribution (among others).
-			position := c.program.Fset.Position(member.Pos())
+			position := c.mxProgram.Fset.Position(member.Pos())
 			diglobal := c.dibuilder.CreateGlobalVariableExpression(llvm.Metadata{}, llvm.DIGlobalVariableExpression{
 				File:        c.getDIFile(position.Filename),
 				Line:        position.Line,
@@ -1201,7 +1201,7 @@ func (c *compilerContext) createEmbedGlobal(member *ssa.Global, global llvm.Valu
 		sliceGlobal.SetUnnamedAddr(true)
 		sliceGlobal.SetAlignment(c.targetData.ABITypeAlignment(sliceInitializer.Type()))
 		if c.Debug {
-			position := c.program.Fset.Position(member.Pos())
+			position := c.mxProgram.Fset.Position(member.Pos())
 			diglobal := c.dibuilder.CreateGlobalVariableExpression(llvm.Metadata{}, llvm.DIGlobalVariableExpression{
 				File:        c.getDIFile(position.Filename),
 				Line:        position.Line,
@@ -2746,7 +2746,7 @@ func (c *compilerContext) createConst(expr *ssa.Const, pos token.Pos) llvm.Value
 				global.SetAlignment(1)
 				if c.Debug {
 					// Unfortunately, expr.Pos() is always token.NoPos.
-					position := c.program.Fset.Position(pos)
+					position := c.mxProgram.Fset.Position(pos)
 					diglobal := c.dibuilder.CreateGlobalVariableExpression(llvm.Metadata{}, llvm.DIGlobalVariableExpression{
 						File:        c.getDIFile(position.Filename),
 						Line:        position.Line,

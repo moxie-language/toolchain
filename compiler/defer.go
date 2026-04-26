@@ -92,7 +92,7 @@ func (b *builder) createLandingPad() {
 	// Add debug info, if needed.
 	// The location used is the closing bracket of the function.
 	if b.Debug {
-		pos := b.program.Fset.Position(b.fn.Syntax().End())
+		pos := b.mxProgram.Fset.Position(b.fn.Syntax().End())
 		b.SetCurrentDebugLocation(uint(pos.Line), uint(pos.Column), b.difunc, llvm.Metadata{})
 	}
 

@@ -341,7 +341,7 @@ func (c *compilerContext) createObjectLayout(t llvm.Type, pos token.Pos) llvm.Va
 		// ...that's sort of a mixed C/Go type, but it is readable. More
 		// importantly, these object layout globals can be read and printed by
 		// GDB which may be useful for debugging.
-		position := c.program.Fset.Position(pos)
+		position := c.mxProgram.Fset.Position(pos)
 		diglobal := c.dibuilder.CreateGlobalVariableExpression(c.difiles[position.Filename], llvm.DIGlobalVariableExpression{
 			Name:        globalName,
 			File:        c.getDIFile(position.Filename),
