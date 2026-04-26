@@ -132,8 +132,8 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 	// Resolve alias types: alias types are resolved at compile time.
 	typ = types.Unalias(typ)
 
-	ms := c.program.MethodSets.MethodSet(typ)
-	hasMethodSet := ms.Len() != 0
+	msItems := c.mxTranslator.MethodSet(typ)
+	hasMethodSet := len(msItems) != 0
 	_, isInterface := typ.Underlying().(*types.Interface)
 	if isInterface {
 		hasMethodSet = false
@@ -144,8 +144,8 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 	// For a non-interface type, it returns the number of exported methods.
 	// For an interface type, it returns the number of exported and unexported methods.
 	var numMethods int
-	for i := 0; i < ms.Len(); i++ {
-		if isInterface || ms.At(i).Obj().Exported() {
+	for _, item := range msItems {
+		if isInterface || (item.Obj != nil && item.Obj.Exported()) {
 			numMethods++
 		}
 	}
@@ -627,28 +627,24 @@ func (c *compilerContext) getTypeMethodSet(typ types.Type) llvm.Value {
 	globalName := typ.String() + "$methodset"
 	global := c.mod.NamedGlobal(globalName)
 	if global.IsNil() {
-		ms := c.program.MethodSets.MethodSet(typ)
+		items := c.mxTranslator.MethodSet(typ)
 
 		// Create method set.
 		var signatures, wrappers []llvm.Value
-		for i := 0; i < ms.Len(); i++ {
-			method := ms.At(i)
-			signatureGlobal := c.getMethodSignature(method.Obj().(*types.Func))
+		for _, item := range items {
+			signatureGlobal := c.getMethodSignature(item.Obj)
 			signatures = append(signatures, signatureGlobal)
-			fn := c.program.MethodValue(method)
-			mxFn := c.mxTranslator.EnsureFunction(fn)
-			llvmFnType, llvmFn := c.getFunction(mxFn)
+			llvmFnType, llvmFn := c.getFunction(item.Func)
 			if llvmFn.IsNil() {
-				// compiler error, so panic
-				panic("cannot find function: " + c.getFunctionInfo(mxFn).linkName)
+				panic("cannot find function: " + c.getFunctionInfo(item.Func).linkName)
 			}
-			wrapper := c.getInterfaceInvokeWrapper(mxFn, llvmFnType, llvmFn)
+			wrapper := c.getInterfaceInvokeWrapper(item.Func, llvmFnType, llvmFn)
 			wrappers = append(wrappers, wrapper)
 		}
 
 		// Construct global value.
 		globalValue := c.ctx.ConstStruct([]llvm.Value{
-			llvm.ConstInt(c.uintptrType, uint64(ms.Len()), false),
+			llvm.ConstInt(c.uintptrType, uint64(len(items)), false),
 			llvm.ConstArray(c.dataPtrType, signatures),
 			c.ctx.ConstStruct(wrappers, false),
 		}, false)

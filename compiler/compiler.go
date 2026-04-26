@@ -87,7 +87,6 @@ type compilerContext struct {
 	funcPtrType      llvm.Type // pointer in function address space (1 for AVR, 0 elsewhere)
 	funcPtrAddrSpace int
 	uintptrType      llvm.Type
-	program          *ssa.Program
 	mxProgram        *mxssa.Program   // B3 bridge: native SSA, populated by ssabridge
 	mxTranslator     *ssabridge.Translator
 	diagnostics      []error
@@ -304,7 +303,6 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 	c.embedGlobals = pkg.EmbedGlobals
 	c.pkg = pkg.Pkg
 	c.runtimePkg = ssaPkg.Prog.ImportedPackage("runtime").Pkg
-	c.program = ssaPkg.Prog
 
 	// Convert AST to SSA.
 	ssaPkg.Build()

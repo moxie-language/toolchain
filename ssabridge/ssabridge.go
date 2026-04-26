@@ -125,6 +125,37 @@ func Translate(fset *token.FileSet, ssaProg *ssa.Program, typePkgs map[string]*t
 	return prog, t
 }
 
+// MethodSetItem is one entry of a type's method set.
+type MethodSetItem struct {
+	// Obj is the go/types method object — kept for compatibility with
+	// callers that need the qualified method name (interface.go's
+	// getMethodSignature / getMethodsString).
+	Obj *types.Func
+	// Func is the mxssa.Function that implements this method.
+	Func *mxssa.Function
+}
+
+// MethodSet returns the method set of typ as a list of (Obj, Func) pairs.
+// Hides go/ssa.Program.MethodSets behind the bridge so the compiler doesn't
+// need to import go/ssa just for these queries. Takes go/types.Type to
+// avoid forcing every caller through a typecheck conversion (interface.go's
+// getTypeCode chain still operates on go/types).
+func (t *Translator) MethodSet(typ types.Type) []MethodSetItem {
+	ms := t.ssaProg.MethodSets.MethodSet(typ)
+	var items []MethodSetItem
+	for i := 0; i < ms.Len(); i++ {
+		method := ms.At(i)
+		obj, _ := method.Obj().(*types.Func)
+		ssaFn := t.ssaProg.MethodValue(method)
+		var mxFn *mxssa.Function
+		if ssaFn != nil {
+			mxFn = t.EnsureFunction(ssaFn)
+		}
+		items = append(items, MethodSetItem{Obj: obj, Func: mxFn})
+	}
+	return items
+}
+
 // MethodsForType returns the methods on a named type, including both
 // value-receiver and pointer-receiver methods. Hides the go/ssa.Program
 // method-set queries from the compiler so it can stop importing go/ssa.
