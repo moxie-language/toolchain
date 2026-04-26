@@ -16,7 +16,6 @@ import (
 	"moxie/mxssa"
 	"moxie/typecheck"
 
-	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -643,7 +642,7 @@ func (c *compilerContext) getTypeMethodSet(typ types.Type) llvm.Value {
 				// compiler error, so panic
 				panic("cannot find function: " + c.getFunctionInfo(mxFn).linkName)
 			}
-			wrapper := c.getInterfaceInvokeWrapper(fn, llvmFnType, llvmFn)
+			wrapper := c.getInterfaceInvokeWrapper(mxFn, llvmFnType, llvmFn)
 			wrappers = append(wrappers, wrapper)
 		}
 
@@ -863,7 +862,7 @@ func findGoMethod(itf *types.Interface, name string) *types.Func {
 // value, dereferences or unpacks it if necessary, and calls the real method.
 // If the method to wrap has a pointer receiver, no wrapping is necessary and
 // the function is returned directly.
-func (c *compilerContext) getInterfaceInvokeWrapper(fn *ssa.Function, llvmFnType llvm.Type, llvmFn llvm.Value) llvm.Value {
+func (c *compilerContext) getInterfaceInvokeWrapper(fn *mxssa.Function, llvmFnType llvm.Type, llvmFn llvm.Value) llvm.Value {
 	wrapperName := llvmFn.Name() + "$invoke"
 	wrapper := c.mod.NamedFunction(wrapperName)
 	if !wrapper.IsNil() {
@@ -872,18 +871,16 @@ func (c *compilerContext) getInterfaceInvokeWrapper(fn *ssa.Function, llvmFnType
 	}
 
 	// Get the expanded receiver type.
-	receiverType := c.getLLVMType(fn.Signature.Recv().Type())
+	recvType := fn.Signature.Recv().Type()
+	receiverType := c.getLLVMTypeTC(recvType)
 	var expandedReceiverType []llvm.Type
-	for _, info := range c.expandFormalParamTypeTC(receiverType, "", nil) {
+	for _, info := range c.expandFormalParamTypeTC(receiverType, "", recvType) {
 		expandedReceiverType = append(expandedReceiverType, info.llvmType)
 	}
 
 	// Does this method even need any wrapping?
 	if len(expandedReceiverType) == 1 && receiverType.TypeKind() == llvm.PointerTypeKind {
 		// Nothing to wrap.
-		// Casting a function signature to a different signature and calling it
-		// with a receiver pointer bitcasted to *i8 (as done in calls on an
-		// interface) is hopefully a safe (defined) operation.
 		return llvmFn
 	}
 
@@ -906,8 +903,7 @@ func (c *compilerContext) getInterfaceInvokeWrapper(fn *ssa.Function, llvmFnType
 	// add debug info if needed
 	if c.Debug {
 		pos := c.mxProgram.Fset.Position(fn.Pos())
-		mxFn := c.mxTranslator.EnsureFunction(fn)
-		difunc := c.attachDebugInfoRaw(mxFn, wrapper, "$invoke", pos.Filename, pos.Line)
+		difunc := c.attachDebugInfoRaw(fn, wrapper, "$invoke", pos.Filename, pos.Line)
 		b.SetCurrentDebugLocation(uint(pos.Line), uint(pos.Column), difunc, llvm.Metadata{})
 	}
 
