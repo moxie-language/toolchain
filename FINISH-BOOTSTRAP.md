@@ -18,7 +18,7 @@ Two milestones: **M1 = no Go stdlib type/SSA imports anywhere except `typecheck/
 
 errors.go, defer.go, llvm.go, tccompat.go contain only comment references — already clean.
 
-### §1 progress (this session) — 19 commits
+### §1 progress (this session) — 22+ commits
 
 Keystone migrations:
 - `B3 §1: migrate getFunction onto *mxssa.Function` (59261a1)
@@ -46,6 +46,11 @@ Dead code purges:
 - `createConst` (SSA, ~125 lines, only complex64/128 self-recursion remained) (03dedef)
 - `isPointer` (SSA-side helper, replaced by `isPointerTC`) (0d97ff6)
 - `symbol.go.getParams` inlined into single caller (3f3612b)
+
+Late additions:
+- `getLLVMType` now bridges through `getLLVMTypeTC` via translator's
+  ForwardType, sharing identity with the TC cache (single source of
+  truth for named structs) (a3a8045)
 
 Bug fixes uncovered along the way (all documented in commit messages):
 1. `tccompat.go.makeLLVMTypeTC` switched on `t.Underlying()` which collapsed
