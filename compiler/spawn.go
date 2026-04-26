@@ -8,7 +8,6 @@ package compiler
 import (
 	"fmt"
 	"go/constant"
-	"go/types"
 
 	"golang.org/x/tools/go/ssa"
 	"moxie/mxssa"
@@ -27,63 +26,56 @@ import (
 //   spawn("local", fn, args...)  — fork+socketpair (default)
 //   spawn("pipe", fn, args...)   — alias for local
 //   spawn(fn, args...)           — implicit local
-// validateSpawnArg checks that a type is safe to pass across a spawn boundary.
+// validateSpawnArgTC checks that a type is safe to pass across a spawn boundary.
 // Channels are allowed as bare top-level parameters (they become IPC channels);
 // their element types must implement moxie.Codec. Non-channel arguments must
 // implement moxie.Codec directly. No interface types anywhere.
-func validateSpawnArg(t types.Type, argIndex int, codec *types.Interface) error {
-	if ch, ok := t.Underlying().(*types.Chan); ok {
-		// Top-level channel: element type must be spawn-safe and implement Codec.
-		return validateSpawnElem(ch.Elem(), argIndex, codec)
+func validateSpawnArgTC(t typecheck.Type, argIndex int, codec *typecheck.Interface) error {
+	if ch, ok := t.Underlying().(*typecheck.Chan); ok {
+		return validateSpawnElemTC(ch.Elem(), argIndex, codec)
 	}
-	return validateSpawnElem(t, argIndex, codec)
+	return validateSpawnElemTC(t, argIndex, codec)
 }
 
-// validateSpawnElem rejects types that can't be serialized across a spawn
+// validateSpawnElemTC rejects types that can't be serialized across a spawn
 // boundary. Named types that implement moxie.Codec are accepted immediately.
 // Channels are rejected here — they're only allowed at the top level.
-// codec is non-nil (createSpawn enforces moxie.Codec availability before call).
-func validateSpawnElem(t types.Type, argIndex int, codec *types.Interface) error {
-	// Named type that implements Codec — accept directly.
-	// This handles moxie.Int32, moxie.Bytes, user structs with Codec methods, etc.
-	if implementsCodec(t, codec) {
+func validateSpawnElemTC(t typecheck.Type, argIndex int, codec *typecheck.Interface) error {
+	if implementsCodecTC(t, codec) {
 		return nil
 	}
-
 	switch ut := t.Underlying().(type) {
-	case *types.Pointer:
+	case *typecheck.Pointer:
 		return fmt.Errorf("spawn: argument %d is a pointer type %s (not allowed across spawn boundary)", argIndex+1, ut)
-	case *types.Chan:
+	case *typecheck.Chan:
 		return fmt.Errorf("spawn: argument %d contains a nested channel (channels must be top-level parameters)", argIndex+1)
-	case *types.Slice:
-		return validateSpawnElem(ut.Elem(), argIndex, codec)
-	case *types.Map:
-		if err := validateSpawnElem(ut.Key(), argIndex, codec); err != nil {
+	case *typecheck.Slice:
+		return validateSpawnElemTC(ut.Elem(), argIndex, codec)
+	case *typecheck.Map:
+		if err := validateSpawnElemTC(ut.Key(), argIndex, codec); err != nil {
 			return err
 		}
-		return validateSpawnElem(ut.Elem(), argIndex, codec)
-	case *types.Signature:
+		return validateSpawnElemTC(ut.Elem(), argIndex, codec)
+	case *typecheck.Signature:
 		return fmt.Errorf("spawn: argument %d is a function type (not allowed across spawn boundary)", argIndex+1)
-	case *types.Interface:
+	case *typecheck.Interface:
 		return fmt.Errorf("spawn: argument %d is an interface type (not allowed across spawn boundary)", argIndex+1)
-	case *types.Struct:
+	case *typecheck.Struct:
 		for i := 0; i < ut.NumFields(); i++ {
-			if err := validateSpawnElem(ut.Field(i).Type(), argIndex, codec); err != nil {
+			if err := validateSpawnElemTC(ut.Field(i).Type(), argIndex, codec); err != nil {
 				return err
 			}
 		}
 		return nil
-	case *types.Array:
-		return validateSpawnElem(ut.Elem(), argIndex, codec)
+	case *typecheck.Array:
+		return validateSpawnElemTC(ut.Elem(), argIndex, codec)
 	}
-
-	// Leaf type that doesn't implement Codec.
 	return fmt.Errorf("spawn: argument %d type %s does not implement moxie.Codec (use moxie.Int32, moxie.Uint64, etc.)", argIndex+1, t)
 }
 
-// implementsCodec checks whether t or *t satisfies the Codec interface.
-func implementsCodec(t types.Type, codec *types.Interface) bool {
-	return types.Implements(t, codec) || types.Implements(types.NewPointer(t), codec)
+// implementsCodecTC checks whether t or *t satisfies the Codec interface.
+func implementsCodecTC(t typecheck.Type, codec *typecheck.Interface) bool {
+	return typecheck.Implements(t, codec) || typecheck.Implements(typecheck.NewPointer(t), codec)
 }
 
 // hasScheme checks if s starts with scheme://.
@@ -146,17 +138,20 @@ func (b *builder) createSpawnTC(instr *mxssa.CallCommon) (llvm.Value, error) {
 
 	concreteArgs := instr.Args[argStart+1:]
 
-	moxiePkg := b.program.ImportedPackage("moxie")
-	if moxiePkg == nil {
+	// Look up moxie.Codec via the typecheck importer (cached, populates on
+	// demand). Going through ssa.Program would also work but mxssa.Program
+	// only registers packages eagerly translated by ssabridge.
+	moxieTC, _ := b.mxTranslator.Importer().Import("moxie")
+	if moxieTC == nil {
 		b.addError(instr.Pos(), "spawn: internal error — \"moxie\" package not in program (runtime wiring broken)")
 		return llvm.Value{}, nil
 	}
-	codecObj := moxiePkg.Pkg.Scope().Lookup("Codec")
+	codecObj := moxieTC.Scope().Lookup("Codec")
 	if codecObj == nil {
 		b.addError(instr.Pos(), "spawn: internal error — moxie.Codec symbol missing from moxie package")
 		return llvm.Value{}, nil
 	}
-	codecIface, ok := codecObj.Type().Underlying().(*types.Interface)
+	codecTC, ok := codecObj.Type().Underlying().(*typecheck.Interface)
 	if !ok {
 		b.addError(instr.Pos(), "spawn: internal error — moxie.Codec is not an interface type")
 		return llvm.Value{}, nil
@@ -165,12 +160,7 @@ func (b *builder) createSpawnTC(instr *mxssa.CallCommon) (llvm.Value, error) {
 	sig := targetFn.Signature
 	for i := 0; i < sig.Params().Len(); i++ {
 		pt := sig.Params().At(i).Type()
-		goType := b.mxTranslator.ReverseType(pt)
-		if goType == nil {
-			b.addError(instr.Pos(), fmt.Sprintf("spawn: cannot reverse-bridge parameter %d type %s", i+1, pt))
-			return llvm.Value{}, nil
-		}
-		if err := validateSpawnArg(goType, i, codecIface); err != nil {
+		if err := validateSpawnArgTC(pt, i, codecTC); err != nil {
 			b.addError(instr.Pos(), err.Error())
 			return llvm.Value{}, nil
 		}
