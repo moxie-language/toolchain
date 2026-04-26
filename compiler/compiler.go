@@ -646,11 +646,11 @@ func (c *compilerContext) createDIType(typ types.Type) llvm.Metadata {
 			Encoding:   encoding,
 		})
 	case *types.Chan:
-		return c.getDIType(types.NewPointer(c.program.ImportedPackage("runtime").Members["channel"].(*ssa.Type).Type()))
+		return c.getDIType(types.NewPointer(c.getRuntimeType("channel")))
 	case *types.Interface:
-		return c.getDIType(c.program.ImportedPackage("runtime").Members["_interface"].(*ssa.Type).Type())
+		return c.getDIType(c.getRuntimeType("_interface"))
 	case *types.Map:
-		return c.getDIType(types.NewPointer(c.program.ImportedPackage("runtime").Members["hashmap"].(*ssa.Type).Type()))
+		return c.getDIType(types.NewPointer(c.getRuntimeType("hashmap")))
 	case *types.Named:
 		// Placeholder metadata node, to be replaced afterwards.
 		temporaryMDNode := c.dibuilder.CreateReplaceableCompositeType(llvm.Metadata{}, llvm.DIReplaceableCompositeType{
