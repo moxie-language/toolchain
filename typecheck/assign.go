@@ -236,6 +236,21 @@ func IsInterface(T Type) bool {
 	return ok
 }
 
+// IsPointer reports whether T's underlying type is a pointer kind: either a
+// *Pointer (typed Go pointer) or *Basic with UnsafePointer kind.
+func IsPointer(T Type) bool {
+	if T == nil {
+		return false
+	}
+	switch t := T.Underlying().(type) {
+	case *Pointer:
+		return true
+	case *Basic:
+		return t.kind == UnsafePointer
+	}
+	return false
+}
+
 // Comparable reports whether values of type T can be compared with == or !=.
 // Equivalent to go/types.Comparable. Determines whether T may be used as a map key.
 //
