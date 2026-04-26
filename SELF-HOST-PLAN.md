@@ -236,25 +236,25 @@ mirror the same structure. The bridge strategy:
 - [x] compiler/syscall.go — SSA versions deleted; TC path handles all syscalls
 
 **Tier 2: Mid-complexity files**
-- [~] compiler/symbol.go — parsePragmas migrated to TC via parsePragmasTC (uses hasUnsafeImportTC, isValidWasmTypeTC, checkWasmImportExportTC). getFunction still SSA-typed (paramInfos/elemSize migration too risky for now).
-- [~] compiler/gc.go — TC variant trackExprTC exists; SSA stays for SSA-path callers
-- [x] compiler/llvm.go — go/types purged via direct DI synthesis (getPointerBitmapDIType bypasses getDIType for the synthesized struct)
-- [~] compiler/channel.go — TC variants for createMakeChan/Send/Recv/Select/Extract exist; SSA stays for SSA-path callers
-- [x] compiler/map.go — SSA versions deleted; TC path handles all map ops; EnsureFunction + global type cache fixes land here
-- [~] compiler/defer.go — TC variant createDeferTC exists but uses findSSADefer hack (delegates back to SSA for some ops)
-- [~] compiler/asserts.go — TC variants exist for createSliceBoundsCheck, createUnsafeSliceStringCheck, createChanBoundsCheck, createNilCheck (in tccompat.go), extendInteger
-- [x] compiler/spawn.go — SSA createSpawn deleted; validation utilities kept (shared)
-- [x] compiler/mxbuiltins.go — SSA versions deleted; TC path handles all moxie builtins
-- [x] compiler/restrict.go — go/ssa and go/types purged. SSA fallback deleted (verified dead via MOXIE_RESTRICT_SSA_TRACE). All check methods are now mxssa-only. *ssa.Go handler in compiler.go now uses isUserPackageTC.
-- [x] compiler/errors.go — go/types purged via local compiler.Error type (mirror of types.Error fields, handled in diagnostics package alongside types.Error).
+- [~] compiler/symbol.go — parsePragmas (functions+globals) migrated to TC. getFunction still SSA-typed (paramInfos/elemSize migration too risky).
+- [x] compiler/gc.go — go/ssa purged. SSA trackExpr inlined at one caller; trackExprTC handles TC path.
+- [x] compiler/llvm.go — go/types purged via direct DI synthesis.
+- [x] compiler/channel.go — go/ssa and go/types purged. All SSA channel functions deleted (zero callers after createInstruction/createExpr removal).
+- [x] compiler/map.go — already done; TC handles all map ops.
+- [~] compiler/defer.go — TC variant createDeferTC exists but uses findSSADefer hack. createDefer (SSA) deleted but createRunDefers/createLandingPad still SSA-typed (alive via createFunctionTC).
+- [~] compiler/asserts.go — TC variants exist; SSA versions still alive for createBuiltin's bounds checks.
+- [x] compiler/spawn.go — SSA createSpawn deleted; TC validation handles spawn (8 tests now pass vs baseline 4).
+- [x] compiler/mxbuiltins.go — already done.
+- [x] compiler/restrict.go — go/ssa and go/types purged. SSA fallback deleted.
+- [x] compiler/errors.go — go/types purged via local compiler.Error type.
 
-**Tier 3: Core files (highest assertion count)**
-- [ ] compiler/calls.go
-- [ ] compiler/func.go
-- [ ] compiler/goroutine.go
-- [ ] compiler/alias.go
-- [ ] compiler/interface.go — 14 type assertions, 249 types method calls
-- [ ] compiler/compiler.go — 42 type assertions, 289 types method calls, 117 ssa accesses
+**Tier 3: Core files (mostly purged this session)**
+- [~] compiler/calls.go — go/types purged. 1 ssa.Function cast left in getRuntimeFunction (the load-bearing runtime lookup).
+- [~] compiler/func.go — go/ssa purged. Only types.Signature in getLLVMFunctionType remains (blocking on interface.go's NewSignatureType synthesis).
+- [x] compiler/goroutine.go — go/ssa and go/types purged via getPackageFunction helper.
+- [x] compiler/alias.go — already had no SSA/types refs (static map).
+- [~] compiler/interface.go — many types refs remain (~182, mostly heavy type-handling code). go/ssa down to 5 refs (getInvokeFunction, getInterfaceInvokeWrapper).
+- [~] compiler/compiler.go — major deletions this session (createInstruction, createExpr, createFunction body, createUnOp, createConvert, createFunctionCall — total ~1500 lines deleted). Still has 179+54 refs in core infra (getLLVMType/createDIType, builder fields, helpers like createBinOp/createBuiltin still alive via createRunDefers).
 
 **Tier 4: JS backend**
 - [ ] jsbackend/*.go (3 files, 27+33 assertions)
