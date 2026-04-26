@@ -16,6 +16,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"moxie/mxssa"
+	"moxie/typecheck"
 )
 
 // restrictedImports maps package paths that should not be used in Moxie code.
@@ -89,9 +90,17 @@ func (b *builder) checkMoxieRestrictions() {
 			}
 		}
 	}
-	for _, block := range b.fn.Blocks {
-		for _, instr := range block.Instrs {
-			b.checkInstrRestrictions(instr)
+	if b.mxFn != nil && len(b.mxFn.Blocks) > 0 {
+		for _, block := range b.mxFn.Blocks {
+			for _, instr := range block.Instrs {
+				b.checkInstrRestrictionsTC(instr)
+			}
+		}
+	} else {
+		for _, block := range b.fn.Blocks {
+			for _, instr := range block.Instrs {
+				b.checkInstrRestrictions(instr)
+			}
 		}
 	}
 	// Check function signature for restricted types.
@@ -131,6 +140,25 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 
 	// Note: new(T) and make() are caught by AST check (restrictedBuiltins),
 		// not SSA. Restricted types (uintptr, complex) are also AST-checked.
+	}
+}
+
+// checkInstrRestrictionsTC is the mxssa version of checkInstrRestrictions.
+// Catches restricted builtins (make/new/complex/etc.) and '+' on text types.
+func (b *builder) checkInstrRestrictionsTC(instr mxssa.Instruction) {
+	switch v := instr.(type) {
+	case *mxssa.Call:
+		if builtin, ok := v.Call.Value.(*mxssa.Builtin); ok {
+			if reason, restricted := restrictedBuiltins[builtin.Name()]; restricted {
+				b.addError(v.Pos(), "moxie: '"+builtin.Name()+"' is not allowed: "+reason)
+			}
+		}
+	case *mxssa.BinOp:
+		if v.Op == token.ADD {
+			if typecheck.HasInfo(v.X.Type(), typecheck.IsString) {
+				b.addError(v.Pos(), "moxie: '+' is not allowed for text concatenation: use | operator")
+			}
+		}
 	}
 }
 
