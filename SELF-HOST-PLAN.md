@@ -246,7 +246,7 @@ mirror the same structure. The bridge strategy:
 - [~] compiler/asserts.go — TC variants exist for createSliceBoundsCheck, createUnsafeSliceStringCheck, createChanBoundsCheck, createNilCheck (in tccompat.go), extendInteger
 - [x] compiler/spawn.go — SSA createSpawn deleted; validation utilities kept (shared)
 - [x] compiler/mxbuiltins.go — SSA versions deleted; TC path handles all moxie builtins
-- [~] compiler/restrict.go — TC variants exist for every check; unified dispatcher checkMoxieRestrictionsTC runs purely on mxssa. SSA path retained for shells/external decls (no Blocks). SSA can be deleted once compiler.go createFunction is gone.
+- [~] compiler/restrict.go — TC variants exist for every check; unified dispatcher checkMoxieRestrictionsTC runs purely on mxssa. SSA path retained as defense-in-depth but verified unreachable in current usage (zero hits during smesh build, restrict tests, spawn tests via MOXIE_RESTRICT_SSA_TRACE). SSA can be deleted once cross-package shell handling guarantees mxFn is non-nil.
 
 **Tier 3: Core files (highest assertion count)**
 - [ ] compiler/calls.go
