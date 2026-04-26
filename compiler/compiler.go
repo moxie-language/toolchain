@@ -1157,7 +1157,8 @@ func (c *compilerContext) createEmbedGlobal(member *ssa.Global, global llvm.Valu
 		var fileStructs []llvm.Value
 		for _, file := range allFiles {
 			fileStruct := llvm.ConstNull(llvmEmbedFileStructType)
-			name := c.createConst(ssa.NewConst(constant.MakeString(file.Name), types.Typ[types.String]), member.Pos())
+			mxStrConst := mxssa.NewConst(constant.MakeString(file.Name), typecheck.Typ[typecheck.String])
+			name := c.createConstTC(mxStrConst, member.Pos())
 			fileStruct = c.builder.CreateInsertValue(fileStruct, name, 0, "") // "name" field
 			if file.Hash != "" {
 				data := c.getEmbedFileString(file)
