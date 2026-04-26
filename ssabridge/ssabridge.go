@@ -321,6 +321,10 @@ func (t *Translator) translateFunctionBody(sf *ssa.Function, mf *mxssa.Function)
 	if len(sf.Blocks) == 0 {
 		return // external function, no body
 	}
+	// Backfill any params/freevars that were lazily populated on sf after
+	// the shell was created (cross-package references made the shell early
+	// when sf.Params was still empty).
+	t.backfillShellMembers(sf, mf)
 
 	// Create blocks first (instructions reference blocks by index).
 	blockMap := map[*ssa.BasicBlock]*mxssa.BasicBlock{}

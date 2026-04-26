@@ -348,11 +348,9 @@ func (b *builder) getValueTC(expr mxssa.Value, pos token.Pos) llvm.Value {
 		_, fn := b.getFunction(expr)
 		return b.createFuncValue(fn, llvm.Undef(b.dataPtrType))
 	case *mxssa.Global:
-		if g := b.mxTranslator.ReverseGlobal(expr); g != nil {
-			value := b.getGlobal(g)
-			if !value.IsNil() {
-				return value
-			}
+		value := b.getGlobal(expr)
+		if !value.IsNil() {
+			return value
 		}
 		b.addError(expr.Pos(), "global not found: "+expr.Name())
 		return llvm.Undef(b.getLLVMTypeTC(expr.Type()))

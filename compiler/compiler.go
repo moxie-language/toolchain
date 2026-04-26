@@ -965,8 +965,9 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 			}
 		case *ssa.Global:
 			// Global variable.
-			info := c.getGlobalInfo(member)
-			global := c.getGlobal(member)
+			mxMember := c.mxTranslator.LookupGlobal(member)
+			info := c.getGlobalInfo(mxMember)
+			global := c.getGlobal(mxMember)
 			if files, ok := c.embedGlobals[member.Name()]; ok {
 				c.createEmbedGlobal(member, global, files)
 			} else if !info.extern {

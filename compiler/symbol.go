@@ -686,14 +686,20 @@ func (c *compilerContext) loadASTComments(pkg *loader.Package) {
 	}
 }
 
-// getGlobal returns a LLVM IR global value for a Go SSA global. It is added to
-// the LLVM IR if it has not been added already.
-func (c *compilerContext) getGlobal(g *ssa.Global) llvm.Value {
+// getGlobal returns a LLVM IR global value for a native SSA global. It is
+// added to the LLVM IR if it has not been added already.
+func (c *compilerContext) getGlobal(g *mxssa.Global) llvm.Value {
 	info := c.getGlobalInfo(g)
 	llvmGlobal := c.mod.NamedGlobal(info.linkName)
 	if llvmGlobal.IsNil() {
-		typ := g.Type().(*types.Pointer).Elem()
-		llvmType := c.getLLVMType(typ)
+		// mxssa.Global.Type() returns the pointer type (matches go/ssa).
+		var elemType typecheck.Type
+		if ptrTyp, ok := g.Type().(*typecheck.Pointer); ok {
+			elemType = ptrTyp.Elem()
+		} else {
+			elemType = g.Type()
+		}
+		llvmType := c.getLLVMTypeTC(elemType)
 		llvmGlobal = llvm.AddGlobal(c.mod, llvmType, info.linkName)
 
 		// Set alignment from the //go:align comment.
@@ -702,23 +708,26 @@ func (c *compilerContext) getGlobal(g *ssa.Global) llvm.Value {
 			alignment = info.align
 		}
 		if alignment <= 0 || alignment&(alignment-1) != 0 {
-			// Check for power-of-two (or 0).
-			// See: https://stackoverflow.com/a/108360
 			c.addError(g.Pos(), "global variable alignment must be a positive power of two")
 		} else {
-			// Set the alignment only when it is a power of two.
 			llvmGlobal.SetAlignment(alignment)
 		}
 
 		if c.Debug && !info.extern {
-			// Add debug info.
+			// Debug info still uses the SSA-side type via ReverseType to
+			// drive getDIType, since the createDIType chain remains keyed
+			// on go/types.Type. Migrating that is its own commit (§3).
 			pos := c.program.Fset.Position(g.Pos())
+			var diType llvm.Metadata
+			if goG := c.mxTranslator.ReverseGlobal(g); goG != nil {
+				diType = c.getDIType(goG.Type().(*types.Pointer).Elem())
+			}
 			diglobal := c.dibuilder.CreateGlobalVariableExpression(c.difiles[pos.Filename], llvm.DIGlobalVariableExpression{
-				Name:        g.RelString(nil),
+				Name:        g.String(),
 				LinkageName: info.linkName,
 				File:        c.getDIFile(pos.Filename),
 				Line:        pos.Line,
-				Type:        c.getDIType(typ),
+				Type:        diType,
 				LocalToUnit: false,
 				Expr:        c.dibuilder.CreateExpression(nil),
 				AlignInBits: uint32(alignment) * 8,
@@ -730,17 +739,13 @@ func (c *compilerContext) getGlobal(g *ssa.Global) llvm.Value {
 }
 
 // getGlobalInfo returns some information about a specific global.
-func (c *compilerContext) getGlobalInfo(g *ssa.Global) globalInfo {
+func (c *compilerContext) getGlobalInfo(g *mxssa.Global) globalInfo {
 	info := globalInfo{
-		// Pick the default linkName.
-		linkName: g.RelString(nil),
+		linkName: g.String(),
 	}
-	// Check for //go: pragmas, which may change the link name (among others).
 	doc := c.astComments[info.linkName]
 	if doc != nil {
-		if mxG := c.mxTranslator.LookupGlobal(g); mxG != nil {
-			info.parsePragmasTC(doc, c, mxG)
-		}
+		info.parsePragmasTC(doc, c, g)
 	}
 	return info
 }
