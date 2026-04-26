@@ -1365,24 +1365,23 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 
 	// Load function parameters
 	llvmParamIndex := 0
-	for i, param := range b.fn.Params {
-		llvmType := b.getLLVMType(param.Type())
-		mxType := b.mxTranslator.ForwardType(param.Type())
+	for i, mxParam := range b.mxFn.Params {
+		llvmType := b.getLLVMTypeTC(mxParam.Type())
 		fields := make([]llvm.Value, 0, 1)
-		for _, info := range b.expandFormalParamTypeTC(llvmType, param.Name(), mxType) {
+		for _, info := range b.expandFormalParamTypeTC(llvmType, mxParam.Name(), mxParam.Type()) {
 			param := b.llvmFn.Param(llvmParamIndex)
 			param.SetName(info.name)
 			fields = append(fields, param)
 			llvmParamIndex++
 		}
 		paramValue := b.collapseFormalParam(llvmType, fields)
-		if b.mxFn != nil && i < len(b.mxFn.Params) {
-			b.mxLocals[b.mxFn.Params[i]] = paramValue
-		}
+		b.mxLocals[mxParam] = paramValue
 
-		// Add debug information to this parameter (if available)
-		if b.Debug && b.mxFn.Syntax() != nil {
-			dbgParam := b.getLocalVariable(param.Object().(*types.Var))
+		// Add debug information to this parameter (if available). Falls back
+		// to the SSA-side *types.Var via b.fn.Params[i] since getLocalVariable
+		// is keyed on go/types until §3.
+		if b.Debug && b.mxFn.Syntax() != nil && i < len(b.fn.Params) {
+			dbgParam := b.getLocalVariable(b.fn.Params[i].Object().(*types.Var))
 			loc := b.GetCurrentDebugLocation()
 			if len(fields) == 1 {
 				expr := b.dibuilder.CreateExpression(nil)
