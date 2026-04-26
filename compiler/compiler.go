@@ -914,11 +914,7 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 				// that case.
 				continue
 			}
-			if b.mxFn != nil {
-				b.createFunctionTC()
-			} else {
-				b.createFunction()
-			}
+			b.createFunctionDispatch()
 		case *ssa.Type:
 			if types.IsInterface(member.Type()) {
 				// Interfaces don't have concrete methods.
@@ -959,11 +955,7 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 				}
 				// Create the function definition.
 				b := newBuilder(c, irbuilder, fn)
-				if b.mxFn != nil {
-					b.createFunctionTC()
-				} else {
-					b.createFunction()
-				}
+				b.createFunctionDispatch()
 			}
 		case *ssa.Global:
 			// Global variable.
@@ -1497,16 +1489,23 @@ func (b *builder) createFunction() {
 	for _, sub := range b.fn.AnonFuncs {
 		b := newBuilder(b.compilerContext, b.Builder, sub)
 		b.llvmFn.SetLinkage(llvm.InternalLinkage)
-		if b.mxFn != nil {
-			b.createFunctionTC()
-		} else {
-			b.createFunction()
-		}
+		b.createFunctionDispatch()
 	}
 
 	// Create wrapper function that can be called externally.
 	if b.info.wasmExport != "" {
 		b.createWasmExport()
+	}
+}
+
+// createFunctionDispatch picks the TC or SSA implementation based on whether
+// b.mxFn was populated. createFunctionTC itself falls back to createFunction
+// when mxFn has no blocks or invalid types.
+func (b *builder) createFunctionDispatch() {
+	if b.mxFn != nil {
+		b.createFunctionTC()
+	} else {
+		b.createFunction()
 	}
 }
 
