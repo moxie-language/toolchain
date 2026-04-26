@@ -26,8 +26,9 @@ type Translator struct {
 	funcs    map[*ssa.Function]*mxssa.Function
 	globals  map[*ssa.Global]*mxssa.Global
 	pkgs     map[*ssa.Package]*mxssa.Package
-	revTypes map[typecheck.Type]types.Type
-	revFuncs map[*mxssa.Function]*ssa.Function
+	revTypes   map[typecheck.Type]types.Type
+	revFuncs   map[*mxssa.Function]*ssa.Function
+	revGlobals map[*mxssa.Global]*ssa.Global
 	// typeCache maps go/types.Type (by pointer) to its canonical typecheck.Type.
 	// Ensures the same TC type pointer is returned for the same go/types type
 	// so that revTypes lookups remain consistent.
@@ -113,8 +114,9 @@ func Translate(fset *token.FileSet, ssaProg *ssa.Program, typePkgs map[string]*t
 		funcs:     map[*ssa.Function]*mxssa.Function{},
 		globals:   map[*ssa.Global]*mxssa.Global{},
 		pkgs:      map[*ssa.Package]*mxssa.Package{},
-		revTypes:  map[typecheck.Type]types.Type{},
-		revFuncs:  map[*mxssa.Function]*ssa.Function{},
+		revTypes:   map[typecheck.Type]types.Type{},
+		revFuncs:   map[*mxssa.Function]*ssa.Function{},
+		revGlobals: map[*mxssa.Global]*ssa.Global{},
 		typeCache: map[uintptr]typecheck.Type{},
 	}
 	return prog, t
@@ -214,6 +216,9 @@ func (t *Translator) typ(gt types.Type) typecheck.Type {
 
 func (t *Translator) ReverseType(tc typecheck.Type) types.Type { return t.revTypes[tc] }
 
+// ReverseGlobal returns the ssa.Global for an mxssa.Global, or nil.
+func (t *Translator) ReverseGlobal(mg *mxssa.Global) *ssa.Global { return t.revGlobals[mg] }
+
 // ForwardType converts a go/types.Type to its typecheck equivalent, using the
 // translator's cache so the same go/types pointer always maps to the same
 // typecheck.Type pointer. Mirror of ReverseType for the forward direction.
@@ -287,6 +292,7 @@ func (t *Translator) translateGlobal(g *ssa.Global, pkg *mxssa.Package) *mxssa.G
 	mg := mxssa.NewGlobal(g.Name(), t.typ(g.Type()), pkg)
 	mg.SetPos(g.Pos())
 	t.globals[g] = mg
+	t.revGlobals[mg] = g
 	return mg
 }
 

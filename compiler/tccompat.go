@@ -10,7 +10,6 @@ import (
 	"moxie/typecheck"
 	tcbridge "moxie/typecheck/bridge"
 
-	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -345,19 +344,10 @@ func (b *builder) getValueTC(expr mxssa.Value, pos token.Pos) llvm.Value {
 		_, fn := b.getFunction(goFn)
 		return b.createFuncValue(fn, llvm.Undef(b.dataPtrType), goFn.Signature)
 	case *mxssa.Global:
-		pkgPath := ""
-		if expr.Package() != nil {
-			pkgPath = expr.Package().Pkg.Path()
-		}
-		for _, p := range b.fn.Prog.AllPackages() {
-			if pkgPath != "" && p.Pkg.Path() != pkgPath {
-				continue
-			}
-			if g, ok := p.Members[expr.Name()].(*ssa.Global); ok {
-				value := b.getGlobal(g)
-				if !value.IsNil() {
-					return value
-				}
+		if g := b.mxTranslator.ReverseGlobal(expr); g != nil {
+			value := b.getGlobal(g)
+			if !value.IsNil() {
+				return value
 			}
 		}
 		b.addError(expr.Pos(), "global not found: "+expr.Name())
