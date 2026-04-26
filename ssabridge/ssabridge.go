@@ -237,6 +237,25 @@ func (t *Translator) ForwardType(gt types.Type) typecheck.Type { return t.typ(gt
 
 func (t *Translator) ReverseFunction(fn *mxssa.Function) *ssa.Function { return t.revFuncs[fn] }
 
+// DomPreorder returns the function's basic blocks in dominator-tree preorder
+// (definitions before uses). Computed via the underlying ssa.Function's
+// existing dominator analysis, then translated to mxssa blocks by index.
+// Returns nil if no SSA-side function exists for this mxssa.Function.
+func (t *Translator) DomPreorder(fn *mxssa.Function) []*mxssa.BasicBlock {
+	goFn := t.revFuncs[fn]
+	if goFn == nil {
+		return nil
+	}
+	preorder := goFn.DomPreorder()
+	out := make([]*mxssa.BasicBlock, 0, len(preorder))
+	for _, b := range preorder {
+		if b.Index < len(fn.Blocks) {
+			out = append(out, fn.Blocks[b.Index])
+		}
+	}
+	return out
+}
+
 func (t *Translator) translateFunctionShell(f *ssa.Function, pkg *mxssa.Package) *mxssa.Function {
 	if fn, ok := t.funcs[f]; ok {
 		return fn

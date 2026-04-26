@@ -1464,13 +1464,12 @@ func (b *builder) createFunctionTC() {
 	b.createFunctionStart(false)
 	b.checkMoxieRestrictions()
 
-	for _, block := range b.fn.DomPreorder() {
+	for _, mxBlock := range b.mxTranslator.DomPreorder(b.mxFn) {
 		if b.DumpSSA {
-			fmt.Printf("%d: %s:\n", block.Index, block.Comment)
+			fmt.Printf("%d: %s:\n", mxBlock.Index, mxBlock.Comment)
 		}
-		mxBlock := b.mxFn.Blocks[block.Index]
 		b.currentBlock = mxBlock
-		b.currentBlockInfo = &b.blockInfo[block.Index]
+		b.currentBlockInfo = &b.blockInfo[mxBlock.Index]
 		b.SetInsertPointAtEnd(b.currentBlockInfo.entry)
 
 		for _, instr := range mxBlock.Instrs {
