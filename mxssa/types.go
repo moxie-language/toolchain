@@ -8,6 +8,7 @@
 package mxssa
 
 import (
+	"go/ast"
 	"go/constant"
 	"go/token"
 
@@ -112,6 +113,11 @@ type Function struct {
 
 	Synthetic string // "" for real source functions
 
+	// SyntaxNode is the AST node for this function (nil for synthetic
+	// functions or external declarations). Used by AST-based checks like
+	// fallthrough detection. Populated by ssabridge from f.Syntax().
+	SyntaxNode ast.Node
+
 	Pkg  *Package
 	Prog *Program
 
@@ -159,7 +165,7 @@ func (f *Function) RelString(from *typecheck.Package) string {
 	return f.name
 }
 func (f *Function) TypeParams() []typecheck.Type { return f.typeparams }
-func (f *Function) Syntax() any                  { return nil }
+func (f *Function) Syntax() ast.Node              { return f.SyntaxNode }
 
 func (f *Function) setName(n string)                   { f.name = n }
 func (f *Function) setType(t typecheck.Type)           {}

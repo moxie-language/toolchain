@@ -187,6 +187,9 @@ func (t *Translator) translateFunctionShell(f *ssa.Function, pkg *mxssa.Package)
 	}
 	fn := mxssa.NewFunction(f.Name(), sig, f.Synthetic, pkg, t.prog)
 	fn.SetPos(f.Pos())
+	if syn := f.Syntax(); syn != nil {
+		fn.SyntaxNode = syn
+	}
 	for _, p := range f.Params {
 		mp := mxssa.NewParameter(p.Name(), t.typ(p.Type()), fn)
 		mp.SetPos(p.Pos())
