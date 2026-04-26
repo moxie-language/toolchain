@@ -382,6 +382,10 @@ export function GetViewportHeight() {
   return window.innerHeight | 0;
 }
 
+export function GetViewportWidth() {
+  return window.innerWidth | 0;
+}
+
 export function AddClass(elId, cls) {
   const el = _elements.get(elId);
   if (el && el.classList) el.classList.add(cls);
