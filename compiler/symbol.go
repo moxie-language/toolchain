@@ -95,7 +95,8 @@ func (c *compilerContext) getFunction(fn *ssa.Function) (llvm.Type, llvm.Value) 
 	var paramInfos []paramInfo
 	for _, param := range getParams(fn.Signature) {
 		paramType := c.getLLVMType(param.Type())
-		paramFragmentInfos := c.expandFormalParamType(paramType, param.Name(), param.Type())
+		mxType := c.mxTranslator.ForwardType(param.Type())
+		paramFragmentInfos := c.expandFormalParamTypeTC(paramType, param.Name(), mxType)
 		paramInfos = append(paramInfos, paramFragmentInfos...)
 	}
 

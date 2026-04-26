@@ -1,7 +1,6 @@
 package compiler
 
 import (
-	"go/types"
 	"strconv"
 
 	"moxie/typecheck"
@@ -117,22 +116,6 @@ func (b *builder) createInvoke(fnType llvm.Type, fn llvm.Value, args []llvm.Valu
 	return b.createCall(fnType, fn, args, name)
 }
 
-// Expand an argument type to a list that can be used in a function call
-// parameter list.
-func (c *compilerContext) expandFormalParamType(t llvm.Type, name string, goType types.Type) []paramInfo {
-	switch t.TypeKind() {
-	case llvm.StructTypeKind:
-		fieldInfos := c.flattenAggregateType(t, name, goType)
-		if len(fieldInfos) <= maxFieldsPerParam {
-			// managed to expand this parameter
-			return fieldInfos
-		}
-		// failed to expand this parameter: too many fields
-	}
-	// TODO: split small arrays
-	return []paramInfo{c.getParamInfo(t, name, goType)}
-}
-
 // expandFormalParamOffsets returns a list of offsets from the start of an
 // object of type t after it would have been split up by expandFormalParam. This
 // is useful for debug information, where it is necessary to know the offset
@@ -160,7 +143,7 @@ func (b *builder) expandFormalParamOffsets(t llvm.Type) []uint64 {
 func (b *builder) expandFormalParam(v llvm.Value) []llvm.Value {
 	switch v.Type().TypeKind() {
 	case llvm.StructTypeKind:
-		fieldInfos := b.flattenAggregateType(v.Type(), "", nil)
+		fieldInfos := b.flattenAggregateTypeTC(v.Type(), "", nil)
 		if len(fieldInfos) <= maxFieldsPerParam {
 			fields := b.flattenAggregate(v)
 			if len(fields) != len(fieldInfos) {
@@ -174,98 +157,6 @@ func (b *builder) expandFormalParam(v llvm.Value) []llvm.Value {
 	default:
 		// TODO: split small arrays
 		return []llvm.Value{v}
-	}
-}
-
-// Try to flatten a struct type to a list of types. Returns a 1-element slice
-// with the passed in type if this is not possible.
-func (c *compilerContext) flattenAggregateType(t llvm.Type, name string, goType types.Type) []paramInfo {
-	switch t.TypeKind() {
-	case llvm.StructTypeKind:
-		var paramInfos []paramInfo
-		for i, subfield := range t.StructElementTypes() {
-			if c.targetData.TypeAllocSize(subfield) == 0 {
-				continue
-			}
-			suffix := strconv.Itoa(i)
-			isString := false
-			if goType != nil {
-				// Try to come up with a good suffix for this struct field,
-				// depending on which Go type it's based on.
-				switch goType := goType.Underlying().(type) {
-				case *types.Interface:
-					suffix = []string{"typecode", "value"}[i]
-				case *types.Slice:
-					suffix = []string{"data", "len", "cap"}[i]
-				case *types.Struct:
-					suffix = goType.Field(i).Name()
-				case *types.Basic:
-					switch goType.Kind() {
-					case types.Complex64, types.Complex128:
-						suffix = []string{"r", "i"}[i]
-					case types.String:
-						suffix = []string{"data", "len", "cap"}[i]
-						// Moxie: don't mark string data as readonly (string=[]byte, mutable).
-					}
-				case *types.Signature:
-					suffix = []string{"context", "funcptr"}[i]
-				}
-			}
-			subInfos := c.flattenAggregateType(subfield, name+"."+suffix, extractSubfield(goType, i))
-			if isString {
-				subInfos[0].flags |= paramIsReadonly
-			}
-			paramInfos = append(paramInfos, subInfos...)
-		}
-		return paramInfos
-	default:
-		return []paramInfo{c.getParamInfo(t, name, goType)}
-	}
-}
-
-// getParamInfo collects information about a parameter. For example, if this
-// parameter is pointer-like, it will also store the element type for the
-// dereferenceable_or_null attribute.
-func (c *compilerContext) getParamInfo(t llvm.Type, name string, goType types.Type) paramInfo {
-	info := paramInfo{
-		llvmType: t,
-		name:     name,
-		flags:    paramIsGoParam,
-	}
-	if goType != nil {
-		switch underlying := goType.Underlying().(type) {
-		case *types.Pointer:
-			// Pointers in Go must either point to an object or be nil.
-			info.elemSize = c.targetData.TypeAllocSize(c.getLLVMType(underlying.Elem()))
-		case *types.Chan:
-			// Channels are implemented simply as a *runtime.channel.
-			info.elemSize = c.targetData.TypeAllocSize(c.getLLVMRuntimeType("channel"))
-		case *types.Map:
-			// Maps are similar to channels: they are implemented as a
-			// *runtime.hashmap.
-			info.elemSize = c.targetData.TypeAllocSize(c.getLLVMRuntimeType("hashmap"))
-		}
-	}
-	return info
-}
-
-// extractSubfield extracts a field from a struct, or returns null if this is
-// not a struct and thus no subfield can be obtained.
-func extractSubfield(t types.Type, field int) types.Type {
-	if t == nil {
-		return nil
-	}
-	switch t := t.Underlying().(type) {
-	case *types.Struct:
-		return t.Field(field).Type()
-	case *types.Interface, *types.Slice, *types.Basic, *types.Signature:
-		// These Go types are (sometimes) implemented as LLVM structs but can't
-		// really be split further up in Go (with the possible exception of
-		// complex numbers).
-		return nil
-	default:
-		// This should be unreachable.
-		panic("cannot split subfield: " + t.String())
 	}
 }
 
@@ -332,7 +223,7 @@ func (b *builder) collapseFormalParam(t llvm.Type, fields []llvm.Value) llvm.Val
 func (b *builder) collapseFormalParamInternal(t llvm.Type, fields []llvm.Value) (llvm.Value, []llvm.Value) {
 	switch t.TypeKind() {
 	case llvm.StructTypeKind:
-		flattened := b.flattenAggregateType(t, "", nil)
+		flattened := b.flattenAggregateTypeTC(t, "", nil)
 		if len(flattened) <= maxFieldsPerParam {
 			value := llvm.ConstNull(t)
 			for i, subtyp := range t.StructElementTypes() {

@@ -89,13 +89,13 @@ func (c *compilerContext) getLLVMFunctionType(typ *types.Signature) llvm.Type {
 			// The receiver is not an interface, but a i8* type.
 			recv = c.dataPtrType
 		}
-		for _, info := range c.expandFormalParamType(recv, "", nil) {
+		for _, info := range c.expandFormalParamTypeTC(recv, "", nil) {
 			paramTypes = append(paramTypes, info.llvmType)
 		}
 	}
 	for i := 0; i < typ.Params().Len(); i++ {
 		subType := c.getLLVMType(typ.Params().At(i).Type())
-		for _, info := range c.expandFormalParamType(subType, "", nil) {
+		for _, info := range c.expandFormalParamTypeTC(subType, "", nil) {
 			paramTypes = append(paramTypes, info.llvmType)
 		}
 	}

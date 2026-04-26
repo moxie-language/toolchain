@@ -132,7 +132,7 @@ func (c *compilerContext) getLLVMFunctionTypeTC(typ *typecheck.Signature) llvm.T
 		if rt.StructName() == "runtime._interface" {
 			rt = c.dataPtrType
 		}
-		for _, info := range c.expandFormalParamType(rt, "", nil) {
+		for _, info := range c.expandFormalParamTypeTC(rt, "", nil) {
 			paramTypes = append(paramTypes, info.llvmType)
 		}
 	}
@@ -140,7 +140,7 @@ func (c *compilerContext) getLLVMFunctionTypeTC(typ *typecheck.Signature) llvm.T
 	if params != nil {
 		for i := 0; i < params.Len(); i++ {
 			subType := c.getLLVMTypeTC(params.At(i).Type())
-			for _, info := range c.expandFormalParamType(subType, "", nil) {
+			for _, info := range c.expandFormalParamTypeTC(subType, "", nil) {
 				paramTypes = append(paramTypes, info.llvmType)
 			}
 		}

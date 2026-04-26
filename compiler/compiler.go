@@ -1306,8 +1306,9 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 	llvmParamIndex := 0
 	for _, param := range b.fn.Params {
 		llvmType := b.getLLVMType(param.Type())
+		mxType := b.mxTranslator.ForwardType(param.Type())
 		fields := make([]llvm.Value, 0, 1)
-		for _, info := range b.expandFormalParamType(llvmType, param.Name(), param.Type()) {
+		for _, info := range b.expandFormalParamTypeTC(llvmType, param.Name(), mxType) {
 			param := b.llvmFn.Param(llvmParamIndex)
 			param.SetName(info.name)
 			fields = append(fields, param)
