@@ -7,6 +7,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 	"moxie/mxssa"
+	"moxie/typecheck"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -15,6 +16,17 @@ import (
 func (b *builder) createFuncValue(funcPtr, context llvm.Value, sig *types.Signature) llvm.Value {
 	// Closure is: {context, function pointer}
 	funcValueType := b.getFuncType(sig)
+	funcValue := llvm.Undef(funcValueType)
+	funcValue = b.CreateInsertValue(funcValue, context, 0, "")
+	funcValue = b.CreateInsertValue(funcValue, funcPtr, 1, "")
+	return funcValue
+}
+
+// createFuncValueTC is the typecheck variant of createFuncValue. The signature
+// is ignored at runtime (getFuncType returns the same {context, funcPtr} struct
+// regardless), kept for parallelism with the SSA helper signature.
+func (b *builder) createFuncValueTC(funcPtr, context llvm.Value, sig *typecheck.Signature) llvm.Value {
+	funcValueType := b.getFuncTypeTC(sig)
 	funcValue := llvm.Undef(funcValueType)
 	funcValue = b.CreateInsertValue(funcValue, context, 0, "")
 	funcValue = b.CreateInsertValue(funcValue, funcPtr, 1, "")
