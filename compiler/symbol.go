@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"moxie/compiler/llvmutil"
-	"moxie/goenv"
 	"moxie/loader"
 	"moxie/mxssa"
 	"moxie/typecheck"
@@ -320,14 +319,8 @@ func (c *compilerContext) getFunctionInfo(f *ssa.Function) functionInfo {
 	}
 
 	// Check for //go: pragmas, which may change the link name (among others).
-	if c.mxTranslator != nil {
-		if mxFn := c.mxTranslator.LookupFunction(f); mxFn != nil {
-			c.parsePragmasTC(&info, mxFn)
-		} else {
-			c.parsePragmas(&info, f)
-		}
-	} else {
-		c.parsePragmas(&info, f)
+	if mxFn := c.mxTranslator.LookupFunction(f); mxFn != nil {
+		c.parsePragmasTC(&info, mxFn)
 	}
 
 	c.functionInfos[f] = info
@@ -336,151 +329,6 @@ func (c *compilerContext) getFunctionInfo(f *ssa.Function) functionInfo {
 
 // parsePragmas is used by getFunctionInfo to parse function pragmas such as
 // //export or //go:noinline.
-func (c *compilerContext) parsePragmas(info *functionInfo, f *ssa.Function) {
-	syntax := f.Syntax()
-	if f.Origin() != nil {
-		syntax = f.Origin().Syntax()
-	}
-	if syntax == nil {
-		return
-	}
-
-	// Read all pragmas of this function.
-	var pragmas []*ast.Comment
-	hasWasmExport := false
-	if decl, ok := syntax.(*ast.FuncDecl); ok && decl.Doc != nil {
-		for _, comment := range decl.Doc.List {
-			text := comment.Text
-			if strings.HasPrefix(text, "//go:") || strings.HasPrefix(text, "//export ") {
-				pragmas = append(pragmas, comment)
-				if strings.HasPrefix(comment.Text, "//go:wasmexport ") {
-					hasWasmExport = true
-				}
-			}
-		}
-	}
-
-	// Parse each pragma.
-	for _, comment := range pragmas {
-		parts := strings.Fields(comment.Text)
-		switch parts[0] {
-		case "//export", "//go:export":
-			if len(parts) != 2 {
-				continue
-			}
-			if hasWasmExport {
-				// //go:wasmexport overrides //export.
-				continue
-			}
-
-			info.linkName = parts[1]
-			info.wasmName = info.linkName
-			info.exported = true
-		case "//go:interrupt":
-			if hasUnsafeImport(f.Pkg.Pkg) {
-				info.interrupt = true
-			}
-		case "//go:wasm-module":
-			// Alternative comment for setting the import module.
-			// This is deprecated, use //go:wasmimport instead.
-			if len(parts) != 2 {
-				continue
-			}
-			info.wasmModule = parts[1]
-		case "//go:wasmimport":
-			// Import a WebAssembly function, for example a WASI function.
-			// Original proposal: https://github.com/golang/go/issues/38248
-			// Allow globally: https://github.com/golang/go/issues/59149
-			if len(parts) != 3 {
-				continue
-			}
-			if f.Blocks != nil {
-				// Defined functions cannot be exported.
-				c.addError(f.Pos(), "can only use //go:wasmimport on declarations")
-				continue
-			}
-			c.checkWasmImportExport(f, comment.Text)
-			info.exported = true
-			info.wasmModule = parts[1]
-			info.wasmName = parts[2]
-		case "//go:wasmexport":
-			if f.Blocks == nil {
-				c.addError(f.Pos(), "can only use //go:wasmexport on definitions")
-				continue
-			}
-			if len(parts) != 2 {
-				c.addError(f.Pos(), fmt.Sprintf("expected one parameter to //go:wasmexport, not %d", len(parts)-1))
-				continue
-			}
-			name := parts[1]
-			if name == "_start" || name == "_initialize" {
-				c.addError(f.Pos(), fmt.Sprintf("//go:wasmexport does not allow %#v", name))
-				continue
-			}
-			if c.BuildMode != "c-shared" && f.RelString(nil) == "main.main" {
-				c.addError(f.Pos(), fmt.Sprintf("//go:wasmexport does not allow main.main to be exported with -buildmode=%s", c.BuildMode))
-				continue
-			}
-			if c.archFamily() != "wasm32" {
-				c.addError(f.Pos(), "//go:wasmexport is only supported on wasm")
-			}
-			c.checkWasmImportExport(f, comment.Text)
-			info.wasmExport = name
-			info.wasmExportPos = comment.Slash
-		case "//go:inline":
-			info.inline = inlineHint
-		case "//go:noinline":
-			info.inline = inlineNone
-		case "//go:linkname":
-			if len(parts) != 3 || parts[1] != f.Name() {
-				continue
-			}
-			// Only enable go:linkname when the package imports "unsafe".
-			// This is a slightly looser requirement than what gc uses: gc
-			// requires the file to import "unsafe", not the package as a
-			// whole.
-			if hasUnsafeImport(f.Pkg.Pkg) {
-				info.linkName = parts[2]
-			}
-		case "//go:section":
-			// Only enable go:section when the package imports "unsafe".
-			// go:section also implies go:noinline since inlining could
-			// move the code to a different section than that requested.
-			if len(parts) == 2 && hasUnsafeImport(f.Pkg.Pkg) {
-				info.section = parts[1]
-				info.inline = inlineNone
-			}
-		case "//go:nobounds":
-			// Skip bounds checking in this function. Useful for some
-			// runtime functions.
-			// This is somewhat dangerous and thus only imported in packages
-			// that import unsafe.
-			if hasUnsafeImport(f.Pkg.Pkg) {
-				info.nobounds = true
-			}
-		case "//go:noescape":
-			// Don't let pointer parameters escape.
-			// Following the upstream Go implementation, we only do this for
-			// declarations, not definitions.
-			if len(f.Blocks) == 0 {
-				info.noescape = true
-			}
-		case "//go:variadic":
-			// The //go:variadic pragma is emitted by the CGo preprocessing
-			// pass for C variadic functions. This includes both explicit
-			// (with ...) and implicit (no parameters in signature)
-			// functions.
-			if strings.HasPrefix(f.Name(), "_Cgo_") {
-				// This prefix was created as a result of CGo preprocessing.
-				info.variadic = true
-			}
-		}
-	}
-
-	if c.Nobounds {
-		info.nobounds = true
-	}
-}
 
 // parsePragmasTC is the mxssa variant of parsePragmas. Walks the AST via
 // fn.Syntax() and uses TC helpers for unsafe-import and wasm checks.
@@ -607,28 +455,6 @@ func (c *compilerContext) parsePragmasTC(info *functionInfo, fn *mxssa.Function)
 //
 // The list of allowed types is based on this proposal:
 // https://github.com/golang/go/issues/59149
-func (c *compilerContext) checkWasmImportExport(f *ssa.Function, pragma string) {
-	if c.pkg.Path() == "runtime" || c.pkg.Path() == "syscall/js" || c.pkg.Path() == "syscall" || c.pkg.Path() == "crypto/internal/sysrand" {
-		// The runtime is a special case. Allow all kinds of parameters
-		// (importantly, including pointers).
-		return
-	}
-	if f.Signature.Results().Len() > 1 {
-		c.addError(f.Signature.Results().At(1).Pos(), fmt.Sprintf("%s: too many return values", pragma))
-	} else if f.Signature.Results().Len() == 1 {
-		result := f.Signature.Results().At(0)
-		if !c.isValidWasmType(result.Type(), siteResult) {
-			c.addError(result.Pos(), fmt.Sprintf("%s: unsupported result type %s", pragma, result.Type().String()))
-		}
-	}
-	for _, param := range f.Params {
-		// Check whether the type is allowed.
-		// Only a very limited number of types can be mapped to WebAssembly.
-		if !c.isValidWasmType(param.Type(), siteParam) {
-			c.addError(param.Pos(), fmt.Sprintf("%s: unsupported parameter type %s", pragma, param.Type().String()))
-		}
-	}
-}
 
 // Check whether the type maps directly to a WebAssembly type.
 //
@@ -637,57 +463,6 @@ func (c *compilerContext) checkWasmImportExport(f *ssa.Function, pragma string) 
 //
 // This previously reflected the additional restrictions documented here:
 // https://github.com/golang/go/issues/59149
-func (c *compilerContext) isValidWasmType(typ types.Type, site wasmSite) bool {
-	switch typ := typ.Underlying().(type) {
-	case *types.Basic:
-		switch typ.Kind() {
-		case types.Bool:
-			return true
-		case types.Int8, types.Uint8, types.Int16, types.Uint16:
-			return site == siteIndirect
-		case types.Int32, types.Uint32, types.Int64, types.Uint64:
-			return true
-		case types.Float32, types.Float64:
-			return true
-		case types.Uintptr, types.UnsafePointer:
-			return true
-		case types.String:
-			// string flattens to three values (ptr, len, cap), so disallowed as a result
-			return site == siteParam || site == siteIndirect
-		}
-	case *types.Array:
-		return site == siteIndirect && c.isValidWasmType(typ.Elem(), siteIndirect)
-	case *types.Struct:
-		if site != siteIndirect {
-			return false
-		}
-		// Structs with no fields do not need structs.HostLayout
-		if typ.NumFields() == 0 {
-			return true
-		}
-		hasHostLayout := true // default to true before detecting Go version
-		// (*types.Package).GoVersion added in go1.21
-		if gv, ok := any(c.pkg).(interface{ GoVersion() string }); ok {
-			if goenv.Compare(gv.GoVersion(), "go1.23") >= 0 {
-				hasHostLayout = false // package structs added in go1.23
-			}
-		}
-		for i := 0; i < typ.NumFields(); i++ {
-			ftyp := typ.Field(i).Type()
-			if ftyp.String() == "structs.HostLayout" {
-				hasHostLayout = true
-				continue
-			}
-			if !c.isValidWasmType(ftyp, siteIndirect) {
-				return false
-			}
-		}
-		return hasHostLayout
-	case *types.Pointer:
-		return c.isValidWasmType(typ.Elem(), siteIndirect)
-	}
-	return false
-}
 
 type wasmSite int
 
@@ -929,54 +704,15 @@ func (c *compilerContext) getGlobalInfo(g *ssa.Global) globalInfo {
 	// Check for //go: pragmas, which may change the link name (among others).
 	doc := c.astComments[info.linkName]
 	if doc != nil {
-		if c.mxTranslator != nil {
-			if mxG := c.mxTranslator.LookupGlobal(g); mxG != nil {
-				info.parsePragmasTC(doc, c, mxG)
-				return info
-			}
+		if mxG := c.mxTranslator.LookupGlobal(g); mxG != nil {
+			info.parsePragmasTC(doc, c, mxG)
 		}
-		info.parsePragmas(doc, c, g)
 	}
 	return info
 }
 
 // Parse //go: pragma comments from the source. In particular, it parses the
 // //go:extern and //go:linkname pragmas on globals.
-func (info *globalInfo) parsePragmas(doc *ast.CommentGroup, c *compilerContext, g *ssa.Global) {
-	for _, comment := range doc.List {
-		if !strings.HasPrefix(comment.Text, "//go:") {
-			continue
-		}
-		parts := strings.Fields(comment.Text)
-		switch parts[0] {
-		case "//go:extern":
-			info.extern = true
-			if len(parts) == 2 {
-				info.linkName = parts[1]
-			}
-		case "//go:align":
-			align, err := strconv.Atoi(parts[1])
-			if err == nil {
-				info.align = align
-			}
-		case "//go:section":
-			if len(parts) == 2 {
-				info.section = parts[1]
-			}
-		case "//go:linkname":
-			if len(parts) != 3 || parts[1] != g.Name() {
-				continue
-			}
-			// Only enable go:linkname when the package imports "unsafe".
-			// This is a slightly looser requirement than what gc uses: gc
-			// requires the file to import "unsafe", not the package as a
-			// whole.
-			if hasUnsafeImport(g.Pkg.Pkg) {
-				info.linkName = parts[2]
-			}
-		}
-	}
-}
 
 // parsePragmasTC is the mxssa variant of (*globalInfo).parsePragmas.
 func (info *globalInfo) parsePragmasTC(doc *ast.CommentGroup, c *compilerContext, g *mxssa.Global) {
