@@ -319,7 +319,15 @@ func (c *compilerContext) getFunctionInfo(f *ssa.Function) functionInfo {
 	}
 
 	// Check for //go: pragmas, which may change the link name (among others).
-	c.parsePragmas(&info, f)
+	if c.mxTranslator != nil {
+		if mxFn := c.mxTranslator.LookupFunction(f); mxFn != nil {
+			c.parsePragmasTC(&info, mxFn)
+		} else {
+			c.parsePragmas(&info, f)
+		}
+	} else {
+		c.parsePragmas(&info, f)
+	}
 
 	c.functionInfos[f] = info
 	return info
@@ -463,6 +471,126 @@ func (c *compilerContext) parsePragmas(info *functionInfo, f *ssa.Function) {
 			// functions.
 			if strings.HasPrefix(f.Name(), "_Cgo_") {
 				// This prefix was created as a result of CGo preprocessing.
+				info.variadic = true
+			}
+		}
+	}
+
+	if c.Nobounds {
+		info.nobounds = true
+	}
+}
+
+// parsePragmasTC is the mxssa variant of parsePragmas. Walks the AST via
+// fn.Syntax() and uses TC helpers for unsafe-import and wasm checks.
+//
+// Note: Origin (generic instantiation) handling is not supported by mxssa;
+// the syntax falls back to fn.Syntax() unconditionally. In practice Moxie
+// makes minimal use of generics and pragmas don't apply to instantiations.
+func (c *compilerContext) parsePragmasTC(info *functionInfo, fn *mxssa.Function) {
+	syntax := fn.Syntax()
+	if syntax == nil {
+		return
+	}
+
+	var pragmas []*ast.Comment
+	hasWasmExport := false
+	if decl, ok := syntax.(*ast.FuncDecl); ok && decl.Doc != nil {
+		for _, comment := range decl.Doc.List {
+			text := comment.Text
+			if strings.HasPrefix(text, "//go:") || strings.HasPrefix(text, "//export ") {
+				pragmas = append(pragmas, comment)
+				if strings.HasPrefix(comment.Text, "//go:wasmexport ") {
+					hasWasmExport = true
+				}
+			}
+		}
+	}
+
+	for _, comment := range pragmas {
+		parts := strings.Fields(comment.Text)
+		switch parts[0] {
+		case "//export", "//go:export":
+			if len(parts) != 2 {
+				continue
+			}
+			if hasWasmExport {
+				continue
+			}
+			info.linkName = parts[1]
+			info.wasmName = info.linkName
+			info.exported = true
+		case "//go:interrupt":
+			if hasUnsafeImportTC(fn.Pkg.Pkg) {
+				info.interrupt = true
+			}
+		case "//go:wasm-module":
+			if len(parts) != 2 {
+				continue
+			}
+			info.wasmModule = parts[1]
+		case "//go:wasmimport":
+			if len(parts) != 3 {
+				continue
+			}
+			if len(fn.Blocks) > 0 {
+				c.addError(fn.Pos(), "can only use //go:wasmimport on declarations")
+				continue
+			}
+			c.checkWasmImportExportTC(fn, comment.Text)
+			info.exported = true
+			info.wasmModule = parts[1]
+			info.wasmName = parts[2]
+		case "//go:wasmexport":
+			if len(fn.Blocks) == 0 {
+				c.addError(fn.Pos(), "can only use //go:wasmexport on definitions")
+				continue
+			}
+			if len(parts) != 2 {
+				c.addError(fn.Pos(), fmt.Sprintf("expected one parameter to //go:wasmexport, not %d", len(parts)-1))
+				continue
+			}
+			name := parts[1]
+			if name == "_start" || name == "_initialize" {
+				c.addError(fn.Pos(), fmt.Sprintf("//go:wasmexport does not allow %#v", name))
+				continue
+			}
+			if c.BuildMode != "c-shared" && fn.RelString(nil) == "main.main" {
+				c.addError(fn.Pos(), fmt.Sprintf("//go:wasmexport does not allow main.main to be exported with -buildmode=%s", c.BuildMode))
+				continue
+			}
+			if c.archFamily() != "wasm32" {
+				c.addError(fn.Pos(), "//go:wasmexport is only supported on wasm")
+			}
+			c.checkWasmImportExportTC(fn, comment.Text)
+			info.wasmExport = name
+			info.wasmExportPos = comment.Slash
+		case "//go:inline":
+			info.inline = inlineHint
+		case "//go:noinline":
+			info.inline = inlineNone
+		case "//go:linkname":
+			if len(parts) != 3 || parts[1] != fn.Name() {
+				continue
+			}
+			if hasUnsafeImportTC(fn.Pkg.Pkg) {
+				info.linkName = parts[2]
+			}
+		case "//go:section":
+			if len(parts) == 2 && hasUnsafeImportTC(fn.Pkg.Pkg) {
+				info.section = parts[1]
+				info.inline = inlineNone
+			}
+		case "//go:nobounds":
+			if hasUnsafeImportTC(fn.Pkg.Pkg) {
+				info.nobounds = true
+			}
+		case "//go:noescape":
+			if len(fn.Blocks) == 0 {
+				info.noescape = true
+			}
+		case "//go:variadic":
+			if strings.HasPrefix(fn.Name(), "_Cgo_") {
 				info.variadic = true
 			}
 		}
