@@ -237,7 +237,7 @@ mirror the same structure. The bridge strategy:
 - [x] compiler/syscall.go — SSA versions deleted; TC path handles all syscalls
 
 **Tier 2: Mid-complexity files**
-- [ ] compiler/symbol.go — core infra (getFunction, getFunctionInfo); SSA-typed throughout
+- [~] compiler/symbol.go — parsePragmas migrated to TC via parsePragmasTC (uses hasUnsafeImportTC, isValidWasmTypeTC, checkWasmImportExportTC). getFunction still SSA-typed (paramInfos/elemSize migration too risky for now).
 - [~] compiler/gc.go — TC variant trackExprTC exists; SSA stays for SSA-path callers
 - [ ] compiler/llvm.go — one types.* use in debug info; blocked on getDITypeTC (would require porting createDIType)
 - [~] compiler/channel.go — TC variants for createMakeChan/Send/Recv/Select/Extract exist; SSA stays for SSA-path callers
