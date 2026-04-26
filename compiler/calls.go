@@ -39,17 +39,22 @@ const (
 	paramIsReadonly
 )
 
+// getRuntimeFunction looks up runtime.<fnName> and returns its LLVM type and
+// value. Hides the go/ssa lookup so callers in TC files don't need ssa.Function.
+func (b *builder) getRuntimeFunction(fnName string) (llvm.Type, llvm.Value) {
+	member := b.program.ImportedPackage("runtime").Members[fnName]
+	if member == nil {
+		panic("unknown runtime function: " + fnName)
+	}
+	return b.getFunction(member.(*ssa.Function))
+}
+
 // createRuntimeCallCommon creates a runtime call. Use createRuntimeCall or
 // createRuntimeInvoke instead.
 func (b *builder) createRuntimeCallCommon(fnName string, args []llvm.Value, name string, isInvoke bool) llvm.Value {
-	member := b.program.ImportedPackage("runtime").Members[fnName]
-	if member == nil {
-		panic("unknown runtime call: " + fnName)
-	}
-	fn := member.(*ssa.Function)
-	fnType, llvmFn := b.getFunction(fn)
+	fnType, llvmFn := b.getRuntimeFunction(fnName)
 	if llvmFn.IsNil() {
-		panic("trying to call non-existent function: " + fn.RelString(nil))
+		panic("trying to call non-existent function: runtime." + fnName)
 	}
 	args = append(args, llvm.Undef(b.dataPtrType)) // unused context parameter
 	if isInvoke {

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"go/constant"
 
-	"golang.org/x/tools/go/ssa"
 	"moxie/mxssa"
 	"moxie/typecheck"
 	"tinygo.org/x/go-llvm"
@@ -218,7 +217,7 @@ func (b *builder) createSpawnTC(instr *mxssa.CallCommon) (llvm.Value, error) {
 
 	wrapper := b.createGoroutineStartWrapper(funcType, funcPtr, "spawn", false, false, instr.Pos())
 
-	spawnFnType, spawnFn := b.getFunction(b.program.ImportedPackage("runtime").Members["spawnDomain"].(*ssa.Function))
+	spawnFnType, spawnFn := b.getRuntimeFunction("spawnDomain")
 	b.createCall(spawnFnType, spawnFn, []llvm.Value{wrapper, paramBundle, llvm.Undef(b.dataPtrType)}, "")
 
 	chanType := b.getLLVMRuntimeType("channel")
