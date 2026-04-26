@@ -158,7 +158,7 @@ type builder struct {
 	locals            map[ssa.Value]llvm.Value // local variables
 	mxLocals          map[mxssa.Value]llvm.Value // B3 bridge: native SSA locals
 	blockInfo         []blockInfo
-	currentBlock      *ssa.BasicBlock
+	currentBlock      *mxssa.BasicBlock
 	currentBlockInfo  *blockInfo
 	tarjanStack       []uint
 	tarjanIndex       uint
@@ -1424,11 +1424,11 @@ func (b *builder) createFunctionTC() {
 		if b.DumpSSA {
 			fmt.Printf("%d: %s:\n", block.Index, block.Comment)
 		}
-		b.currentBlock = block
+		mxBlock := b.mxFn.Blocks[block.Index]
+		b.currentBlock = mxBlock
 		b.currentBlockInfo = &b.blockInfo[block.Index]
 		b.SetInsertPointAtEnd(b.currentBlockInfo.entry)
 
-		mxBlock := b.mxFn.Blocks[block.Index]
 		for _, instr := range mxBlock.Instrs {
 			if b.DumpSSA {
 				if val, ok := instr.(mxssa.Value); ok && val.Name() != "" {

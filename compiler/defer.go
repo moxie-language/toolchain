@@ -20,7 +20,6 @@ import (
 	"moxie/compiler/llvmutil"
 	"moxie/mxssa"
 	"moxie/typecheck"
-	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -250,7 +249,7 @@ func (b *builder) isInLoop() bool {
 	return b.currentBlockInfo.tarjan.cyclic
 }
 
-func (b *builder) strongConnect(block *ssa.BasicBlock) {
+func (b *builder) strongConnect(block *mxssa.BasicBlock) {
 	// Assign a new index.
 	// Indices start from 1 so that 0 can be used as a sentinel.
 	assignedIndex := b.tarjanIndex + 1
