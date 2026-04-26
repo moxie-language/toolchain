@@ -87,10 +87,8 @@ func (c *compilerContext) getMemsetFunc() llvm.Value {
 }
 
 func (b *builder) intrinsicParam0() llvm.Value {
-	if b.mxFn != nil {
-		return b.getValueTC(b.mxFn.Params[0], getPosTC(b.mxFn.Params[0]))
-	}
-	return b.getValue(b.fn.Params[0], b.fn.Pos())
+	// mxFn is always non-nil for live builds (verified via MOXIE_SSA_TRACE).
+	return b.getValueTC(b.mxFn.Params[0], getPosTC(b.mxFn.Params[0]))
 }
 
 func (b *builder) createKeepAliveImpl() {
