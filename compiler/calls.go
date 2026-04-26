@@ -41,12 +41,12 @@ const (
 
 // getRuntimeFunction looks up runtime.<fnName> and returns its LLVM type and
 // value. Hides the go/ssa lookup so callers in TC files don't need ssa.Function.
-func (b *builder) getRuntimeFunction(fnName string) (llvm.Type, llvm.Value) {
-	member := b.program.ImportedPackage("runtime").Members[fnName]
+func (c *compilerContext) getRuntimeFunction(fnName string) (llvm.Type, llvm.Value) {
+	member := c.program.ImportedPackage("runtime").Members[fnName]
 	if member == nil {
 		panic("unknown runtime function: " + fnName)
 	}
-	return b.getFunction(member.(*ssa.Function))
+	return c.getFunction(member.(*ssa.Function))
 }
 
 // createRuntimeCallCommon creates a runtime call. Use createRuntimeCall or

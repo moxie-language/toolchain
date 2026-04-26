@@ -263,7 +263,7 @@ func (c *compilerContext) createGoroutineStartWrapper(fnType llvm.Type, fn llvm.
 	var deadlock llvm.Value
 	var deadlockType llvm.Type
 	if c.Scheduler == "asyncify" {
-		deadlockType, deadlock = c.getFunction(c.program.ImportedPackage("runtime").Members["deadlock"].(*ssa.Function))
+		deadlockType, deadlock = c.getRuntimeFunction("deadlock")
 	}
 
 	if !fn.IsAFunction().IsNil() {
