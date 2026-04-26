@@ -8,7 +8,6 @@ import (
 	"go/token"
 
 	"moxie/compiler/llvmutil"
-	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -132,7 +131,7 @@ func (b *builder) createWasmExport() {
 		// Create a new goroutine and add it to the runqueue.
 		wrapper := b.createGoroutineStartWrapper(b.llvmFnType, b.llvmFn, "", false, true, pos)
 		stackSize := llvm.ConstInt(b.uintptrType, b.DefaultStackSize, false)
-		taskStartFnType, taskStartFn := builder.getFunction(b.program.ImportedPackage("internal/task").Members["start"].(*ssa.Function))
+		taskStartFnType, taskStartFn := builder.getPackageFunction("internal/task", "start")
 		builder.createCall(taskStartFnType, taskStartFn, []llvm.Value{wrapper, statePtr, stackSize, llvm.Undef(b.dataPtrType)}, "")
 
 		// Run the scheduler.

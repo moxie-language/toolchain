@@ -41,9 +41,19 @@ const (
 // getRuntimeFunction looks up runtime.<fnName> and returns its LLVM type and
 // value. Hides the go/ssa lookup so callers in TC files don't need ssa.Function.
 func (c *compilerContext) getRuntimeFunction(fnName string) (llvm.Type, llvm.Value) {
-	member := c.program.ImportedPackage("runtime").Members[fnName]
+	return c.getPackageFunction("runtime", fnName)
+}
+
+// getPackageFunction looks up <pkgPath>.<fnName> and returns its LLVM type and
+// value. Hides the go/ssa lookup.
+func (c *compilerContext) getPackageFunction(pkgPath, fnName string) (llvm.Type, llvm.Value) {
+	pkg := c.program.ImportedPackage(pkgPath)
+	if pkg == nil {
+		panic("package not in program: " + pkgPath)
+	}
+	member := pkg.Members[fnName]
 	if member == nil {
-		panic("unknown runtime function: " + fnName)
+		panic("unknown function: " + pkgPath + "." + fnName)
 	}
 	return c.getFunction(member.(*ssa.Function))
 }
