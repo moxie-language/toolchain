@@ -14,6 +14,7 @@ import (
 	"moxie/compiler/llvmutil"
 	"moxie/goenv"
 	"moxie/loader"
+	"moxie/typecheck"
 	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
@@ -780,6 +781,21 @@ func getAllMethods(prog *ssa.Program, typ types.Type) []*types.Selection {
 func hasUnsafeImport(pkg *types.Package) bool {
 	for _, imp := range pkg.Imports() {
 		if imp == types.Unsafe {
+			return true
+		}
+	}
+	return false
+}
+
+// hasUnsafeImportTC is the typecheck-side mirror of hasUnsafeImport.
+// Requires ssabridge.TranslatePackage / ensurePackage to have populated
+// pkg.Imports() — done unconditionally in current ssabridge.
+func hasUnsafeImportTC(pkg *typecheck.Package) bool {
+	if pkg == nil {
+		return false
+	}
+	for _, imp := range pkg.Imports() {
+		if imp != nil && imp.Path() == "unsafe" {
 			return true
 		}
 	}
