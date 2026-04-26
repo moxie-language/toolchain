@@ -190,6 +190,27 @@ func NewBasicBlock(parent *Function, comment string) *BasicBlock {
 	return b
 }
 
+// WireReferrers walks every instruction in f and registers it as a referrer of
+// each operand Value it uses. Required after translation so Value.Referrers()
+// returns the correct usage list — checks like "channel created but never
+// used" depend on this.
+//
+// ssabridge.translateFunctionBody does not populate referrers automatically;
+// callers must invoke WireReferrers after the body is fully translated (when
+// all operand instructions have been created).
+func (f *Function) WireReferrers() {
+	for _, bb := range f.Blocks {
+		for _, instr := range bb.Instrs {
+			for _, op := range instr.Operands(nil) {
+				if op == nil || *op == nil {
+					continue
+				}
+				(*op).addReferrer(instr)
+			}
+		}
+	}
+}
+
 // ─── register (shared embed for instructions that define a value) ─────────────
 
 type register struct {
