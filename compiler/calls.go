@@ -4,6 +4,8 @@ import (
 	"go/types"
 	"strconv"
 
+	"moxie/typecheck"
+
 	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
@@ -343,5 +345,96 @@ func (b *builder) collapseFormalParamInternal(t llvm.Type, fields []llvm.Value) 
 		}
 	default:
 		return fields[0], fields[1:]
+	}
+}
+
+// ─── TC variants (use typecheck.Type instead of go/types.Type) ───────────────
+
+// expandFormalParamTypeTC is the typecheck variant of expandFormalParamType.
+// Mirrors the SSA structure: try to flatten small structs, fall back to a
+// single paramInfo for everything else.
+func (c *compilerContext) expandFormalParamTypeTC(t llvm.Type, name string, mxType typecheck.Type) []paramInfo {
+	switch t.TypeKind() {
+	case llvm.StructTypeKind:
+		fieldInfos := c.flattenAggregateTypeTC(t, name, mxType)
+		if len(fieldInfos) <= maxFieldsPerParam {
+			return fieldInfos
+		}
+	}
+	return []paramInfo{c.getParamInfoTC(t, name, mxType)}
+}
+
+// flattenAggregateTypeTC is the typecheck variant of flattenAggregateType.
+// Names struct subfields based on the typecheck type when available
+// (matching SSA's behavior for interface/slice/struct/string/signature).
+func (c *compilerContext) flattenAggregateTypeTC(t llvm.Type, name string, mxType typecheck.Type) []paramInfo {
+	switch t.TypeKind() {
+	case llvm.StructTypeKind:
+		var paramInfos []paramInfo
+		for i, subfield := range t.StructElementTypes() {
+			if c.targetData.TypeAllocSize(subfield) == 0 {
+				continue
+			}
+			suffix := strconv.Itoa(i)
+			if mxType != nil {
+				switch mxt := mxType.Underlying().(type) {
+				case *typecheck.Interface:
+					suffix = []string{"typecode", "value"}[i]
+				case *typecheck.Slice:
+					suffix = []string{"data", "len", "cap"}[i]
+				case *typecheck.Struct:
+					suffix = mxt.Field(i).Name()
+				case *typecheck.Basic:
+					if mxt.Info()&typecheck.IsString != 0 {
+						suffix = []string{"data", "len", "cap"}[i]
+					}
+				case *typecheck.Signature:
+					suffix = []string{"context", "funcptr"}[i]
+				}
+			}
+			subInfos := c.flattenAggregateTypeTC(subfield, name+"."+suffix, extractSubfieldTC(mxType, i))
+			paramInfos = append(paramInfos, subInfos...)
+		}
+		return paramInfos
+	default:
+		return []paramInfo{c.getParamInfoTC(t, name, mxType)}
+	}
+}
+
+// getParamInfoTC is the typecheck variant of getParamInfo. Sets elemSize for
+// pointer-like types (pointer/chan/map) so LLVM can apply the
+// dereferenceable_or_null attribute.
+func (c *compilerContext) getParamInfoTC(t llvm.Type, name string, mxType typecheck.Type) paramInfo {
+	info := paramInfo{
+		llvmType: t,
+		name:     name,
+		flags:    paramIsGoParam,
+	}
+	if mxType != nil {
+		switch underlying := mxType.Underlying().(type) {
+		case *typecheck.Pointer:
+			info.elemSize = c.targetData.TypeAllocSize(c.getLLVMTypeTC(underlying.Elem()))
+		case *typecheck.Chan:
+			info.elemSize = c.targetData.TypeAllocSize(c.getLLVMRuntimeType("channel"))
+		case *typecheck.Map:
+			info.elemSize = c.targetData.TypeAllocSize(c.getLLVMRuntimeType("hashmap"))
+		}
+	}
+	return info
+}
+
+// extractSubfieldTC is the typecheck variant of extractSubfield. Returns the
+// element type of a struct field, or nil for types that can't be split.
+func extractSubfieldTC(t typecheck.Type, field int) typecheck.Type {
+	if t == nil {
+		return nil
+	}
+	switch t := t.Underlying().(type) {
+	case *typecheck.Struct:
+		return t.Field(field).Type()
+	case *typecheck.Interface, *typecheck.Slice, *typecheck.Basic, *typecheck.Signature:
+		return nil
+	default:
+		return nil
 	}
 }
