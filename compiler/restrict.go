@@ -104,7 +104,11 @@ func (b *builder) checkMoxieRestrictions() {
 		}
 	}
 	// Check function signature for restricted types.
-	b.checkSignatureRestrictions(b.fn)
+	if b.mxFn != nil && b.mxFn.Signature != nil {
+		b.checkSignatureRestrictionsTC()
+	} else {
+		b.checkSignatureRestrictions(b.fn)
+	}
 	// Check for fallthrough (lowered away by SSA, must check AST).
 	b.checkFallthroughRestriction()
 	// Check for restricted types and builtins in AST (SSA may optimize them away).
@@ -194,6 +198,55 @@ func (b *builder) checkSignatureRestrictions(fn *ssa.Function) {
 			b.checkTypeAtPos(sig.Results().At(i).Type(), fn.Pos())
 		}
 	}
+}
+
+// checkTypeAtPosTC is the typecheck variant of checkTypeAtPos.
+func (b *builder) checkTypeAtPosTC(t typecheck.Type, pos token.Pos) {
+	if t == nil {
+		return
+	}
+	if ptr, ok := t.(*typecheck.Pointer); ok {
+		t = ptr.Elem()
+	}
+	basic, ok := t.(*typecheck.Basic)
+	if !ok {
+		return
+	}
+	if reason, restricted := restrictedTypes[basic.Name()]; restricted {
+		if basic.Name() == "uintptr" && packageImportsUnsafeTC(b.mxFn.Pkg) {
+			return
+		}
+		b.addError(pos, "moxie: type '"+basic.Name()+"' is not allowed: "+reason)
+	}
+}
+
+// checkSignatureRestrictionsTC is the mxssa variant of checkSignatureRestrictions.
+func (b *builder) checkSignatureRestrictionsTC() {
+	sig := b.mxFn.Signature
+	pos := b.mxFn.Pos()
+	if params := sig.Params(); params != nil {
+		for i := 0; i < params.Len(); i++ {
+			b.checkTypeAtPosTC(params.At(i).Type(), pos)
+		}
+	}
+	if results := sig.Results(); results != nil {
+		for i := 0; i < results.Len(); i++ {
+			b.checkTypeAtPosTC(results.At(i).Type(), pos)
+		}
+	}
+}
+
+// packageImportsUnsafeTC is the mxssa variant of packageImportsUnsafe.
+func packageImportsUnsafeTC(pkg *mxssa.Package) bool {
+	if pkg == nil || pkg.Pkg == nil {
+		return false
+	}
+	for _, imp := range pkg.Pkg.Imports() {
+		if imp.Path() == "unsafe" {
+			return true
+		}
+	}
+	return false
 }
 
 // checkFallthroughRestriction walks the function's AST looking for
