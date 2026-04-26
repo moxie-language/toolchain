@@ -906,7 +906,8 @@ func (c *compilerContext) getInterfaceInvokeWrapper(fn *ssa.Function, llvmFnType
 	// add debug info if needed
 	if c.Debug {
 		pos := c.program.Fset.Position(fn.Pos())
-		difunc := c.attachDebugInfoRaw(fn, wrapper, "$invoke", pos.Filename, pos.Line)
+		mxFn := c.mxTranslator.EnsureFunction(fn)
+		difunc := c.attachDebugInfoRaw(mxFn, wrapper, "$invoke", pos.Filename, pos.Line)
 		b.SetCurrentDebugLocation(uint(pos.Line), uint(pos.Column), difunc, llvm.Metadata{})
 	}
 

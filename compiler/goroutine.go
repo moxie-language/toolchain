@@ -42,7 +42,7 @@ func (b *builder) createWasmExport() {
 		if b.fn.Syntax() != nil {
 			// Create debug info file if needed.
 			pos := b.program.Fset.Position(pos)
-			builder.difunc = builder.attachDebugInfoRaw(b.fn, exportedFn, suffix, pos.Filename, pos.Line)
+			builder.difunc = builder.attachDebugInfoRaw(b.mxFn, exportedFn, suffix, pos.Filename, pos.Line)
 		}
 		builder.setDebugLocation(pos)
 	}

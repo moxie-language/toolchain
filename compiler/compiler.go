@@ -839,41 +839,63 @@ func (b *builder) getLocalVariable(variable *types.Var) llvm.Metadata {
 
 // attachDebugInfo adds debug info to a function declaration. It returns the
 // DISubprogram metadata node.
-func (c *compilerContext) attachDebugInfo(f *ssa.Function) llvm.Metadata {
-	pos := c.program.Fset.Position(f.Syntax().Pos())
-	mxFn := c.mxTranslator.EnsureFunction(f)
-	_, fn := c.getFunction(mxFn)
+func (c *compilerContext) attachDebugInfo(f *mxssa.Function) llvm.Metadata {
+	syn := f.Syntax()
+	if syn == nil {
+		return llvm.Metadata{}
+	}
+	pos := c.mxProgram.Fset.Position(syn.Pos())
+	_, fn := c.getFunction(f)
 	return c.attachDebugInfoRaw(f, fn, "", pos.Filename, pos.Line)
 }
 
 // attachDebugInfo adds debug info to a function declaration. It returns the
 // DISubprogram metadata node. This method allows some more control over how
 // debug info is added to the function.
-func (c *compilerContext) attachDebugInfoRaw(f *ssa.Function, llvmFn llvm.Value, suffix, filename string, line int) llvm.Metadata {
-	// Debug info for this function. Inline param iteration: f.Signature.Recv()
-	// (if present) followed by f.Signature.Params() — same shape as the old
-	// getParams helper.
+func (c *compilerContext) attachDebugInfoRaw(f *mxssa.Function, llvmFn llvm.Value, suffix, filename string, line int) llvm.Metadata {
+	// Debug info for this function. Iterate receiver + params via mxssa.Function
+	// signature; convert to go/types via ReverseType for getDIType (debug info
+	// chain still keyed on go/types until §3).
 	sig := f.Signature
-	paramCount := sig.Params().Len()
-	if sig.Recv() != nil {
-		paramCount++
-	}
-	diparams := make([]llvm.Metadata, 0, paramCount)
-	if recv := sig.Recv(); recv != nil {
-		diparams = append(diparams, c.getDIType(recv.Type()))
-	}
-	for i := 0; i < sig.Params().Len(); i++ {
-		diparams = append(diparams, c.getDIType(sig.Params().At(i).Type()))
+	var diparams []llvm.Metadata
+	if sig != nil {
+		recv := sig.Recv()
+		params := sig.Params()
+		paramCount := 0
+		if params != nil {
+			paramCount = params.Len()
+		}
+		if recv != nil {
+			paramCount++
+		}
+		diparams = make([]llvm.Metadata, 0, paramCount)
+		if recv != nil {
+			if goT := c.mxTranslator.ReverseType(recv.Type()); goT != nil {
+				diparams = append(diparams, c.getDIType(goT))
+			}
+		}
+		if params != nil {
+			for i := 0; i < params.Len(); i++ {
+				if goT := c.mxTranslator.ReverseType(params.At(i).Type()); goT != nil {
+					diparams = append(diparams, c.getDIType(goT))
+				}
+			}
+		}
 	}
 	diFuncType := c.dibuilder.CreateSubroutineType(llvm.DISubroutineType{
 		File:       c.getDIFile(filename),
 		Parameters: diparams,
 		Flags:      0, // ?
 	})
-	mxFn := c.mxTranslator.EnsureFunction(f)
+	// Use ssa.Function.RelString(nil) for the canonical name (mxssa's RelString
+	// loses the receiver type for methods).
+	canonicalName := f.RelString(nil)
+	if goFn := c.mxTranslator.ReverseFunction(f); goFn != nil {
+		canonicalName = goFn.RelString(nil)
+	}
 	difunc := c.dibuilder.CreateFunction(c.getDIFile(filename), llvm.DIFunction{
-		Name:         f.RelString(nil) + suffix,
-		LinkageName:  c.getFunctionInfo(mxFn).linkName + suffix,
+		Name:         canonicalName + suffix,
+		LinkageName:  c.getFunctionInfo(f).linkName + suffix,
 		File:         c.getDIFile(filename),
 		Line:         line,
 		Type:         diFuncType,
@@ -1290,10 +1312,10 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		if b.fn.Synthetic == "package initializer" {
 			// Package initializer functions have no debug info. Create some
 			// fake debug info to at least have *something*.
-			b.difunc = b.attachDebugInfoRaw(b.fn, b.llvmFn, "", b.packageDir, 0)
+			b.difunc = b.attachDebugInfoRaw(b.mxFn, b.llvmFn, "", b.packageDir, 0)
 		} else if b.fn.Syntax() != nil {
 			// Create debug info file if needed.
-			b.difunc = b.attachDebugInfo(b.fn)
+			b.difunc = b.attachDebugInfo(b.mxFn)
 		}
 		b.setDebugLocation(b.fn.Pos())
 	}
