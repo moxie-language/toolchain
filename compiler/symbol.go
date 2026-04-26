@@ -567,6 +567,56 @@ const (
 	siteIndirect // pointer or field
 )
 
+// isValidWasmTypeTC is the typecheck variant of isValidWasmType. Mirrors the
+// SSA logic with typecheck.Type. Note: Uintptr collapses to Uint64 in tcbridge,
+// so the Uintptr case is handled by the Uint64 branch.
+func (c *compilerContext) isValidWasmTypeTC(typ typecheck.Type, site wasmSite) bool {
+	switch typ := typ.Underlying().(type) {
+	case *typecheck.Basic:
+		switch typ.Kind() {
+		case typecheck.Bool:
+			return true
+		case typecheck.Int8, typecheck.Uint8, typecheck.Int16, typecheck.Uint16:
+			return site == siteIndirect
+		case typecheck.Int32, typecheck.Uint32, typecheck.Int64, typecheck.Uint64:
+			return true
+		case typecheck.Float32, typecheck.Float64:
+			return true
+		case typecheck.UnsafePointer:
+			return true
+		case typecheck.String:
+			return site == siteParam || site == siteIndirect
+		}
+	case *typecheck.Array:
+		return site == siteIndirect && c.isValidWasmTypeTC(typ.Elem(), siteIndirect)
+	case *typecheck.Struct:
+		if site != siteIndirect {
+			return false
+		}
+		if typ.NumFields() == 0 {
+			return true
+		}
+		// HostLayout detection requires field name matching by string;
+		// typecheck.Struct doesn't expose go-version metadata, so default
+		// to true (accept) for fields that aren't HostLayout.
+		hasHostLayout := true
+		for i := 0; i < typ.NumFields(); i++ {
+			ftyp := typ.Field(i).Type()
+			if ftyp.String() == "structs.HostLayout" {
+				hasHostLayout = true
+				continue
+			}
+			if !c.isValidWasmTypeTC(ftyp, siteIndirect) {
+				return false
+			}
+		}
+		return hasHostLayout
+	case *typecheck.Pointer:
+		return c.isValidWasmTypeTC(typ.Elem(), siteIndirect)
+	}
+	return false
+}
+
 // getParams returns the function parameters, including the receiver at the
 // start. This is an alternative to the Params member of *ssa.Function, which is
 // not yet populated when the package has not yet been built.
