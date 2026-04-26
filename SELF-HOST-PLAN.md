@@ -235,26 +235,17 @@ mirror the same structure. The bridge strategy:
 - [x] compiler/interrupt.go — deleted (embedded targets only, unsupported by Moxie)
 - [x] compiler/syscall.go — SSA versions deleted; TC path handles all syscalls
 
-**Tier 2: Mid-complexity files**
-- [~] compiler/symbol.go — parsePragmas (functions+globals) migrated to TC. getFunction still SSA-typed (paramInfos/elemSize migration too risky).
-- [x] compiler/gc.go — go/ssa purged. SSA trackExpr inlined at one caller; trackExprTC handles TC path.
-- [x] compiler/llvm.go — go/types purged via direct DI synthesis.
-- [x] compiler/channel.go — go/ssa and go/types purged. All SSA channel functions deleted (zero callers after createInstruction/createExpr removal).
-- [x] compiler/map.go — already done; TC handles all map ops.
-- [~] compiler/defer.go — TC variant createDeferTC exists but uses findSSADefer hack. createDefer (SSA) deleted but createRunDefers/createLandingPad still SSA-typed (alive via createFunctionTC).
-- [~] compiler/asserts.go — TC variants exist; SSA versions still alive for createBuiltin's bounds checks.
-- [x] compiler/spawn.go — SSA createSpawn deleted; TC validation handles spawn (8 tests now pass vs baseline 4).
-- [x] compiler/mxbuiltins.go — already done.
-- [x] compiler/restrict.go — go/ssa and go/types purged. SSA fallback deleted.
-- [x] compiler/errors.go — go/types purged via local compiler.Error type.
+**18 of 23 compiler/*.go files now fully purged of go/ssa AND go/types**:
+alias, asserts, atomic, channel, defer, errors, func, gc, goroutine,
+intrinsics, llvm, map, mxbuiltins, restrict, spawn, syscall, tccompat,
+volatile.
 
-**Tier 3: Core files (mostly purged this session)**
-- [~] compiler/calls.go — go/types purged. 1 ssa.Function cast left in getRuntimeFunction (the load-bearing runtime lookup).
-- [~] compiler/func.go — go/ssa purged. Only types.Signature in getLLVMFunctionType remains (blocking on interface.go's NewSignatureType synthesis).
-- [x] compiler/goroutine.go — go/ssa and go/types purged via getPackageFunction helper.
-- [x] compiler/alias.go — already had no SSA/types refs (static map).
-- [~] compiler/interface.go — many types refs remain (~182, mostly heavy type-handling code). go/ssa down to 5 refs (getInvokeFunction, getInterfaceInvokeWrapper).
-- [~] compiler/compiler.go — major deletions this session (createInstruction, createExpr, createFunction body, createUnOp, createConvert, createFunctionCall — total ~1500 lines deleted). Still has 179+54 refs in core infra (getLLVMType/createDIType, builder fields, helpers like createBinOp/createBuiltin still alive via createRunDefers).
+**5 files still importing**:
+- calls.go (1 types-comment, 2 ssa) — 1 ssa.Function cast in getRuntimeFunction (load-bearing runtime lookup, blocked on getFunction migration)
+- compiler.go (129 types, 43 ssa) — core infra (getLLVMType/createDIType, builder fields, createConst, createPackage, createFunctionStart). Major deletions this session: createInstruction, createExpr, createFunction body, createBuiltin, createBinOp, createUnOp, createConvert, createFunctionCall, getValue (~1900 lines)
+- interface.go (174 types, 4 ssa) — heavy type-handling. getInvokeFunctionTC migrated; remaining: createMakeInterface, createTypeAssert helpers, getInterfaceInvokeWrapper
+- sizes.go (36 types) — implements types.Sizes interface for go/types loader (cannot migrate without loader migration)
+- symbol.go (8 types, 10 ssa) — getFunction (the big blocker), getGlobal, getFunctionInfo, getGlobalInfo, getAllMethods, maybeCreateSyntheticFunction, getParams
 
 **Tier 4: JS backend**
 - [ ] jsbackend/*.go (3 files, 27+33 assertions)
