@@ -92,7 +92,7 @@ func (b *builder) createLandingPad() {
 	// Add debug info, if needed.
 	// The location used is the closing bracket of the function.
 	if b.Debug {
-		pos := b.mxProgram.Fset.Position(b.fn.Syntax().End())
+		pos := b.mxProgram.Fset.Position(b.mxFn.Syntax().End())
 		b.SetCurrentDebugLocation(uint(pos.Line), uint(pos.Column), b.difunc, llvm.Metadata{})
 	}
 
@@ -216,7 +216,7 @@ li a0, 0
 		constraints = "={a0},{a1},~{a1},~{a2},~{a3},~{a4},~{a5},~{a6},~{a7},~{s0},~{s1},~{s2},~{s3},~{s4},~{s5},~{s6},~{s7},~{s8},~{s9},~{s10},~{s11},~{t0},~{t1},~{t2},~{t3},~{t4},~{t5},~{t6},~{ra},~{f0},~{f1},~{f2},~{f3},~{f4},~{f5},~{f6},~{f7},~{f8},~{f9},~{f10},~{f11},~{f12},~{f13},~{f14},~{f15},~{f16},~{f17},~{f18},~{f19},~{f20},~{f21},~{f22},~{f23},~{f24},~{f25},~{f26},~{f27},~{f28},~{f29},~{f30},~{f31},~{memory}"
 	default:
 		// This case should have been handled by b.supportsRecover().
-		b.addError(b.fn.Pos(), "unknown architecture for defer: "+b.archFamily())
+		b.addError(b.mxFn.Pos(), "unknown architecture for defer: "+b.archFamily())
 	}
 	asmType := llvm.FunctionType(resultType, []llvm.Type{b.dataPtrType}, false)
 	asm := llvm.InlineAsm(asmType, asmString, constraints, false, false, 0, false)

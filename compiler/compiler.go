@@ -761,7 +761,7 @@ func (b *builder) setDebugLocation(pos token.Pos) {
 	}
 
 	position := b.mxProgram.Fset.Position(pos)
-	if b.fn.Synthetic == "package initializer" {
+	if b.mxFn.Synthetic == "package initializer" {
 		// Package initializers are treated specially, because while individual
 		// Go SSA instructions have file/line/col information, the parent
 		// function does not. LLVM doesn't store filename information per
@@ -1253,7 +1253,7 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		if fnPos.IsValid() {
 			errValue += "\n\tprevious declaration at " + fnPos.String()
 		}
-		b.addError(b.fn.Pos(), errValue)
+		b.addError(b.mxFn.Pos(), errValue)
 		return
 	}
 
@@ -1303,21 +1303,21 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		if strings.HasPrefix(b.Triple, "avr") {
 			b.llvmFn.AddFunctionAttr(b.ctx.CreateStringAttribute("signal", ""))
 		} else {
-			b.addError(b.fn.Pos(), "//go:interrupt not supported on this architecture")
+			b.addError(b.mxFn.Pos(), "//go:interrupt not supported on this architecture")
 		}
 	}
 
 	// Add debug info, if needed.
 	if b.Debug {
-		if b.fn.Synthetic == "package initializer" {
+		if b.mxFn.Synthetic == "package initializer" {
 			// Package initializer functions have no debug info. Create some
 			// fake debug info to at least have *something*.
 			b.difunc = b.attachDebugInfoRaw(b.mxFn, b.llvmFn, "", b.packageDir, 0)
-		} else if b.fn.Syntax() != nil {
+		} else if b.mxFn.Syntax() != nil {
 			// Create debug info file if needed.
 			b.difunc = b.attachDebugInfo(b.mxFn)
 		}
-		b.setDebugLocation(b.fn.Pos())
+		b.setDebugLocation(b.mxFn.Pos())
 	}
 
 	// Pre-create all basic blocks in the function.
@@ -1353,7 +1353,7 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 	}
 	b.SetInsertPointAtEnd(entryBlock)
 
-	if b.fn.Synthetic == "package initializer" {
+	if b.mxFn.Synthetic == "package initializer" {
 		b.initPseudoFuncs = make(map[string]llvm.Metadata)
 
 		// Create a fake 'inlined at' metadata node.
@@ -1381,7 +1381,7 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		}
 
 		// Add debug information to this parameter (if available)
-		if b.Debug && b.fn.Syntax() != nil {
+		if b.Debug && b.mxFn.Syntax() != nil {
 			dbgParam := b.getLocalVariable(param.Object().(*types.Var))
 			loc := b.GetCurrentDebugLocation()
 			if len(fields) == 1 {
@@ -1487,7 +1487,7 @@ func (b *builder) createFunctionTC() {
 			}
 			b.createInstructionTC(instr)
 		}
-		if b.fn.Name() == "init" && len(mxBlock.Instrs) == 0 {
+		if b.mxFn.Name() == "init" && len(mxBlock.Instrs) == 0 {
 			b.CreateRetVoid()
 		}
 	}

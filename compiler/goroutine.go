@@ -39,7 +39,7 @@ func (b *builder) createWasmExport() {
 
 	// Define this function as a separate function in DWARF
 	if b.Debug {
-		if b.fn.Syntax() != nil {
+		if b.mxFn.Syntax() != nil {
 			// Create debug info file if needed.
 			pos := b.mxProgram.Fset.Position(pos)
 			builder.difunc = builder.attachDebugInfoRaw(b.mxFn, exportedFn, suffix, pos.Filename, pos.Line)

@@ -334,7 +334,7 @@ func (b *builder) getValueTC(expr mxssa.Value, pos token.Pos) llvm.Value {
 	switch expr := expr.(type) {
 	case *mxssa.Const:
 		if pos == token.NoPos && b.fn != nil {
-			file := b.mxProgram.Fset.File(b.fn.Pos())
+			file := b.mxProgram.Fset.File(b.mxFn.Pos())
 			if file != nil {
 				pos = file.Pos(0)
 			}
