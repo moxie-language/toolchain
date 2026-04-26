@@ -85,11 +85,10 @@ export function StorageGet(key, fn) {
   } else {
     _idbGet(_prefix + key, function(val) {
       if (val) { fn(val); return; }
-      // Migrate from localStorage if present.
-      var ls = localStorage.getItem(_prefix + key);
+      var ls = null;
+      try { ls = localStorage.getItem(_prefix + key); } catch(e) {}
       if (ls) {
         _idbSet(_prefix + key, ls);
-        localStorage.removeItem(_prefix + key);
         fn(ls);
       } else {
         fn('');
@@ -103,6 +102,7 @@ export function StorageSet(key, value) {
     browser.storage.local.set({ [key]: value });
   } else {
     _idbSet(_prefix + key, value);
+    try { localStorage.setItem(_prefix + key, value); } catch(e) {}
   }
 }
 
