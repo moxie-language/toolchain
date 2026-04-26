@@ -4,19 +4,38 @@ Goal: eliminate all `go/types`, `go/ssa`, `go/ast` (and `golang.org/x/tools/go/.
 
 Two milestones: **M1 = no Go stdlib type/SSA imports anywhere except `typecheck/bridge` and `ssabridge`, both of which then get deleted.** **M2 = the moxie binary is built by Moxie, no Go toolchain required.**
 
-## Inventory (current, verified 2026-04-26)
+## Inventory (verified 2026-04-26 mid-§1)
 
-### compiler/ — 5 of 23 files still importing go/types or go/ssa
+### compiler/ — 4 of 23 files still importing go/ssa, 4 importing go/types
 
-| File | types | ssa | Blocker |
-|------|-------|-----|---------|
-| symbol.go | 8 | 14 | `getFunction` central cache key, see §1 |
-| interface.go | 174 | 6 | type-code/methodset machinery, see §2 |
-| compiler.go | 129 | 110 | `getLLVMType`/`createDIType`/builder fields, see §3 |
-| calls.go | 1 | 2 | one ssa cast in `getRuntimeFunction`, unblocks once §1 lands |
-| sizes.go | 36 | 0 | implements `types.Sizes` for the loader, blocked on §6 |
+| File | types | ssa | Status |
+|------|-------|-----|--------|
+| symbol.go | 8 | 0 | §1 done — go/ssa import removed; go/types remains for getParams (debug) |
+| interface.go | 174 | 4 | §2 next |
+| compiler.go | 129 | 38 | §3 createDIType chain |
+| calls.go | 0 | 0 | ✓ fully purged |
+| sizes.go | 36 | 0 | blocked on §7 (loader) |
 
 errors.go, defer.go, llvm.go, tccompat.go contain only comment references — already clean.
+
+### §1 progress (this session)
+
+3 commits landed:
+- `B3 §1: migrate getFunction onto *mxssa.Function` (59261a1)
+- `B3 §1 (cont): migrate getGlobal/getGlobalInfo onto *mxssa.Global` (35a614a)
+- `B3 §1 (cont): symbol.go fully purged of go/ssa import` (d4ee793)
+
+Bug fixes uncovered along the way (all documented in commit messages):
+1. tccompat.go.makeLLVMTypeTC was switching on `t.Underlying()` which collapsed
+   Named types to anonymous structs.
+2. tcbridge.translateType for *types.Named was creating typecheck.NewTypeName
+   with nil package, so Named.String() returned unqualified names.
+3. ssabridge.EnsureFunction returned nil for external functions; now creates shells.
+4. ssabridge.TranslatePackage skipped Member population if the package was
+   previously registered as a shell.
+5. tccompat.go.makeLLVMTypeTC didn't handle Invalid/Untyped basic kinds.
+6. ssabridge.translateFunctionBody needed to backfill lazily-populated params
+   before iterating them.
 
 ### jsbackend/ — 3 files, 149 type refs total
 - compiler.go (677 LOC, 14)
