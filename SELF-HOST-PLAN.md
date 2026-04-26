@@ -270,6 +270,25 @@ mirror the same structure. The bridge strategy:
 - [ ] Delete typecheck/bridge/
 - [ ] Remove go/ssa from go.mod
 
+## Safe TC-Side Helpers (Available for Future Migrations)
+
+These were added incrementally so future Tier 2/3 migrations have building
+blocks ready. None change existing behavior — pure additions.
+
+- `typecheck.Comparable(T)` — go/types.Comparable equivalent (assign.go)
+- `ssabridge.Translator.ForwardType(types.Type) typecheck.Type` — public
+  cached forward translation, mirror of ReverseType
+- `mxssa.Function.WireReferrers()` — populates Value.Referrers across all
+  blocks; required for usage-based checks like channel completeness.
+  Already wired into ssabridge.translateFunctionBody.
+- `mxssa.Function.SyntaxNode ast.Node` + `Syntax() ast.Node` — populated
+  by ssabridge from f.Syntax(); enables AST-based checks via mxssa
+- `compiler.expandFormalParamTypeTC` / `flattenAggregateTypeTC` /
+  `getParamInfoTC` / `extractSubfieldTC` — TC variants of param helpers
+  (calls.go); use when migrating getFunction etc.
+- `ssabridge.EnsureFunction` backfills Params/FreeVars when go/ssa
+  populates them lazily after a cross-package shell was created
+
 ## Breadcrumbs from Failed Attempts
 
 ### LinkOnceODRLinkage struct layout must be deterministic across modules
