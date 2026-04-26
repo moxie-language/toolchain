@@ -18,24 +18,63 @@ Two milestones: **M1 = no Go stdlib type/SSA imports anywhere except `typecheck/
 
 errors.go, defer.go, llvm.go, tccompat.go contain only comment references — already clean.
 
-### §1 progress (this session)
+### §1 progress (this session) — 19 commits
 
-3 commits landed:
+Keystone migrations:
 - `B3 §1: migrate getFunction onto *mxssa.Function` (59261a1)
-- `B3 §1 (cont): migrate getGlobal/getGlobalInfo onto *mxssa.Global` (35a614a)
-- `B3 §1 (cont): symbol.go fully purged of go/ssa import` (d4ee793)
+- `B3 §1: migrate getGlobal/getGlobalInfo onto *mxssa.Global` (35a614a)
+- `attachDebugInfo / attachDebugInfoRaw take *mxssa.Function` (321e0e0)
+
+Bulk migrations cleaning b.fn surface:
+- `b.fn.{Synthetic,Syntax,Pos,Name}` → `b.mxFn.*` (ea7cd2e)
+- `b.fn.Signature.Results()` → `b.mxFn.Signature.Results()` (fbf621a)
+- `b.fn.Recover` → `b.mxFn.Recover` (e54fc66)
+- `b.fn.RelString(nil)` → `b.mxFn.RelString(nil)` (03a9193)
+- `b.fn.FreeVars` → `b.mxFn.FreeVars` (63bf97b)
+- `b.fn.AnonFuncs` → `b.mxFn.AnonFuncs` (1593cf9)
+- `b.fn.Params` → `b.mxFn.Params` (a9bcfe3)
+- `b.fn.Blocks` → `b.mxFn.Blocks` (a0e48d7)
+- `b.fn.DomPreorder()` → `b.mxTranslator.DomPreorder(b.mxFn)` (aecb77e)
+
+Field cleanups:
+- `c.pkg.Path()` → `c.mxPkg.Path()` (f8d8593, e3fcbf4)
+- `c.program.Fset` → `c.mxProgram.Fset` (ec061d4)
+- `c.program.ImportedPackage("runtime").Members[X].(*ssa.Type).Type()` → `c.getRuntimeType(X)` (d4b474e)
+
+Dead code purges:
+- `posser` interface and `getPos` helper (44bdbb2)
+- `createConst` (SSA, ~125 lines, only complex64/128 self-recursion remained) (03dedef)
+- `isPointer` (SSA-side helper, replaced by `isPointerTC`) (0d97ff6)
+- `symbol.go.getParams` inlined into single caller (3f3612b)
 
 Bug fixes uncovered along the way (all documented in commit messages):
-1. tccompat.go.makeLLVMTypeTC was switching on `t.Underlying()` which collapsed
-   Named types to anonymous structs.
-2. tcbridge.translateType for *types.Named was creating typecheck.NewTypeName
-   with nil package, so Named.String() returned unqualified names.
-3. ssabridge.EnsureFunction returned nil for external functions; now creates shells.
-4. ssabridge.TranslatePackage skipped Member population if the package was
-   previously registered as a shell.
-5. tccompat.go.makeLLVMTypeTC didn't handle Invalid/Untyped basic kinds.
-6. ssabridge.translateFunctionBody needed to backfill lazily-populated params
-   before iterating them.
+1. `tccompat.go.makeLLVMTypeTC` switched on `t.Underlying()` which collapsed
+   Named types to anonymous structs (the verifier flagged this via
+   encoding/base64.Encoding mismatching at call sites).
+2. `tcbridge.translateType` for `*types.Named` was creating
+   `typecheck.NewTypeName(nil, ...)` with nil package, so Named.String()
+   returned the unqualified name. Now passes the package via NewPackage
+   (not Import — that holds the importer mutex while we recurse).
+3. `ssabridge.EnsureFunction` returned nil for external functions when
+   not previously registered; now creates a shell unconditionally.
+4. `ssabridge.TranslatePackage` skipped Member population if a package
+   was previously registered as a shell via ensurePackage; now re-fills
+   missing entries.
+5. `tccompat.go.makeLLVMTypeTC` didn't handle Invalid/Untyped basic
+   kinds; added placeholder mappings.
+6. `ssabridge.translateFunctionBody` needed to backfill lazily-populated
+   sf.Params/FreeVars before iterating them.
+
+### Status after §1 progress
+
+Files still importing go/types or go/ssa:
+- compiler/compiler.go (~125 type/ssa refs, mostly in createDIType + createPackage + getLLVMType)
+- compiler/interface.go (~178 type/ssa refs, all in getTypeCode/getTypeMethodSet machinery)
+- compiler/sizes.go (36 type refs, blocked on §7 loader)
+
+Files cleanly using go/ast only (legitimate, syntax-level): symbol.go, restrict.go, compiler.go.
+
+Smesh builds at 7,032 KB (baseline was 7,051 KB — slightly smaller from removed dead code) and runs `version` at every commit.
 
 ### jsbackend/ — 3 files, 149 type refs total
 - compiler.go (677 LOC, 14)
