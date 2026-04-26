@@ -40,6 +40,9 @@ func (t *Translator) Importer() *tcbridge.Importer { return t.imp }
 // LookupFunction returns the mxssa.Function for an ssa.Function, or nil.
 func (t *Translator) LookupFunction(f *ssa.Function) *mxssa.Function { return t.funcs[f] }
 
+// LookupGlobal returns the mxssa.Global for an ssa.Global, or nil.
+func (t *Translator) LookupGlobal(g *ssa.Global) *mxssa.Global { return t.globals[g] }
+
 // EnsureFunction ensures f has a full mxssa translation (shell + body).
 // The value() helper may register only a shell for cross-package function
 // references; this fills in the body if it is missing.

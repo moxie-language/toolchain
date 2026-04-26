@@ -928,6 +928,12 @@ func (c *compilerContext) getGlobalInfo(g *ssa.Global) globalInfo {
 	// Check for //go: pragmas, which may change the link name (among others).
 	doc := c.astComments[info.linkName]
 	if doc != nil {
+		if c.mxTranslator != nil {
+			if mxG := c.mxTranslator.LookupGlobal(g); mxG != nil {
+				info.parsePragmasTC(doc, c, mxG)
+				return info
+			}
+		}
 		info.parsePragmas(doc, c, g)
 	}
 	return info
@@ -965,6 +971,39 @@ func (info *globalInfo) parsePragmas(doc *ast.CommentGroup, c *compilerContext, 
 			// requires the file to import "unsafe", not the package as a
 			// whole.
 			if hasUnsafeImport(g.Pkg.Pkg) {
+				info.linkName = parts[2]
+			}
+		}
+	}
+}
+
+// parsePragmasTC is the mxssa variant of (*globalInfo).parsePragmas.
+func (info *globalInfo) parsePragmasTC(doc *ast.CommentGroup, c *compilerContext, g *mxssa.Global) {
+	for _, comment := range doc.List {
+		if !strings.HasPrefix(comment.Text, "//go:") {
+			continue
+		}
+		parts := strings.Fields(comment.Text)
+		switch parts[0] {
+		case "//go:extern":
+			info.extern = true
+			if len(parts) == 2 {
+				info.linkName = parts[1]
+			}
+		case "//go:align":
+			align, err := strconv.Atoi(parts[1])
+			if err == nil {
+				info.align = align
+			}
+		case "//go:section":
+			if len(parts) == 2 {
+				info.section = parts[1]
+			}
+		case "//go:linkname":
+			if len(parts) != 3 || parts[1] != g.Name() {
+				continue
+			}
+			if hasUnsafeImportTC(g.Package().Pkg) {
 				info.linkName = parts[2]
 			}
 		}
