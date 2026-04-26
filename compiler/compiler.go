@@ -1587,11 +1587,7 @@ func (b *builder) createFunctionTC() {
 	for _, sub := range b.fn.AnonFuncs {
 		b := newBuilder(b.compilerContext, b.Builder, sub)
 		b.llvmFn.SetLinkage(llvm.InternalLinkage)
-		if b.mxFn != nil {
-			b.createFunctionTC()
-		} else {
-			b.createFunction()
-		}
+		b.createFunctionDispatch()
 	}
 
 	if b.info.wasmExport != "" {
