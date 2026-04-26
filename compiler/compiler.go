@@ -1666,7 +1666,18 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		} else {
 			b.locals[instr] = value
 			if len(*instr.Referrers()) != 0 && b.NeedsStackObjects {
-				b.trackExpr(instr, value)
+				// trackValue handles pointer/struct/array recursively;
+				// Select needs special handling for its recv-buffer alloca.
+				if sel, ok := instr.(*ssa.Select); ok {
+					if alloca, ok := b.selectRecvBuf[sel]; ok {
+						if alloca.IsAUndefValue().IsNil() {
+							b.trackPointer(alloca)
+						}
+					}
+				}
+				if !value.IsNil() {
+					b.trackValue(value)
+				}
 			}
 		}
 	case *ssa.DebugRef:

@@ -6,50 +6,9 @@ package compiler
 import (
 	"go/token"
 
-	"golang.org/x/tools/go/ssa"
 	"moxie/mxssa"
 	"tinygo.org/x/go-llvm"
 )
-
-// trackExpr inserts pointer tracking intrinsics for the GC if the expression is
-// one of the expressions that need this.
-func (b *builder) trackExpr(expr ssa.Value, value llvm.Value) {
-	// There are uses of this expression, Make sure the pointers
-	// are tracked during GC.
-	switch expr := expr.(type) {
-	case *ssa.Alloc, *ssa.MakeChan, *ssa.MakeMap:
-		// These values are always of pointer type in IR.
-		b.trackPointer(value)
-	case *ssa.Call, *ssa.Convert, *ssa.MakeClosure, *ssa.MakeInterface, *ssa.MakeSlice, *ssa.Next:
-		if !value.IsNil() {
-			b.trackValue(value)
-		}
-	case *ssa.Select:
-		if alloca, ok := b.selectRecvBuf[expr]; ok {
-			if alloca.IsAUndefValue().IsNil() {
-				b.trackPointer(alloca)
-			}
-		}
-	case *ssa.UnOp:
-		switch expr.Op {
-		case token.MUL:
-			// Pointer dereference.
-			b.trackValue(value)
-		case token.ARROW:
-			// Channel receive operator.
-			// It's not necessary to look at commaOk here, because in that
-			// case it's just an aggregate and trackValue will extract the
-			// pointer in there (if there is one).
-			b.trackValue(value)
-		}
-	case *ssa.BinOp:
-		switch expr.Op {
-		case token.ADD:
-			// String concatenation.
-			b.trackValue(value)
-		}
-	}
-}
 
 func (b *builder) trackExprTC(expr mxssa.Value, value llvm.Value) {
 	switch expr := expr.(type) {
