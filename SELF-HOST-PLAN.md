@@ -270,6 +270,111 @@ mirror the same structure. The bridge strategy:
 - [ ] Delete typecheck/bridge/
 - [ ] Remove go/ssa from go.mod
 
+## Breadcrumbs from Failed Attempts
+
+### LinkOnceODRLinkage struct layout must be deterministic across modules
+
+The `reflect/types.type:named:X$methodset` globals use `LinkOnceODRLinkage`. ODR
+requires every module that defines the global to use **the same struct layout**.
+The layout depends on `hasMethodSet`, which `getTypeCodeTC` computes via:
+
+```go
+if goType := c.mxTranslator.ReverseType(typ); goType != nil {
+    ms := c.program.MethodSets.MethodSet(goType)
+    hasMethodSet = ms.Len() != 0
+    ...
+}
+```
+
+`ReverseType(typ)` returns nil when `typ` (a `*typecheck.Named`) was not
+translated by the **current package's** translator. Each `CompilePackage` call
+creates a fresh `ssabridge.Translator`, so non-owning packages don't have the
+type registered, and silently produce a struct **without** the methodSet ptr.
+The linker keeps one copy. If the wrong one wins (no methodSet), all the type's
+methods get DCE'd. For event.S (`Less`, `Swap`), schnorr.schnorrVerify, etc.,
+this means missing functions that smesh needs at runtime → nil pointer crash.
+
+Symptom: smesh-test binary 3MB instead of 7MB, missing ~26 packages including
+crypto/ec/schnorr, smesh.lol/pkg/nostr/signer/p8k, smesh.lol/pkg/lol/chk.
+
+Fix when removing SSA fallback: make `hasMethodSet` use `typecheck.Named`'s own
+`NumMethods()` (populated consistently by `tcbridge.translateType`). But also
+need to provide the methodSet symbol — when ReverseType fails, declare it as
+extern so the owning module's definition resolves at link time.
+
+### Named type LLVM identity: short-name vs qualified-name collision
+
+`tcbridge.translateType` for `*types.Named` previously created
+`typecheck.NewTypeName(nil, t.Obj().Name(), nil)` — nil package. Then
+`Named.String()` returns just `"Encoding"` (short name).
+
+Meanwhile `getLLVMType` (SSA path) uses `typ.String()` from `*types.Named`
+which returns `"encoding/base64.Encoding"` (qualified).
+
+Two named LLVM types created (`%Encoding` and `%"encoding/base64.Encoding"`)
+with the same body. Function signatures use one, value loads use the other,
+verifier rejects calls.
+
+Fix: pass `tcPkg` to `NewTypeName` in tcbridge:
+
+```go
+var tcPkg *typecheck.Package
+if t.Obj().Pkg() != nil {
+    tcPkg = typecheck.NewPackage(t.Obj().Pkg().Path(), t.Obj().Pkg().Name())
+}
+obj := typecheck.NewTypeName(tcPkg, t.Obj().Name(), nil)
+```
+
+**Important:** Don't use `imp.Import(...)` here — it holds `imp.mu` while
+`translatePackage` recurses into `translateType`, which would re-enter
+`imp.Import` for the same package and deadlock.
+
+### Method receiver missing from defer struct
+
+`createDeferTC` for `*mxssa.Function` stores `instr.Call.Args` (which includes
+receiver for methods) as the deferred frame. `createRunDefers` then loaded
+based on `callback.Params`. But `mxssa.Function.Params` is empty when the
+function shell was created during cross-package translation **before** the
+function's home package was built (`f.Params` is populated lazily by go/ssa).
+
+Fix when migrating defer.go: use `getParams(goFn.Signature)` (includes
+receiver) for the `*mxssa.Function` case, with `b.getLLVMType(p.Type())` for
+each param's LLVM type. Mirrors what `createDeferTC` actually stored.
+
+### Method name collision in mxssa.RelString
+
+`mxssa.Function.RelString(nil)` returns `pkg.Path() + "." + f.name`. For
+methods, `f.name` is just the method name (no receiver type). So
+`(*Rand).Int` and package-level `Int` both resolve to `"math/rand/v2.Int"`.
+
+The compile-side fast path:
+```go
+linkName := staticFn.RelString(nil)
+callee = b.mod.NamedFunction(linkName)
+```
+
+finds the wrong function and calls it with wrong arity → LLVM verifier error.
+
+Fix when migrating createFunctionCallTC: try `mxTranslator.ReverseFunction`
+first to get the canonical go/ssa link name; only fall back to name lookup
+when no go/ssa equivalent exists.
+
+### isUserPackageTC needs vendored exemption
+
+The original `isUserPackage` whitelists `internal/`, `runtime`, `unsafe`, etc.
+A natural TC equivalent is "dot in path = user code, no dot = stdlib", but
+this misclassifies vendored stdlib (`golang.org/x/crypto/internal/alias`) as
+user code, triggering `uintptr` restriction errors on legitimate vendored
+files.
+
+Fix: mirror `isMakeExempt`'s logic:
+```go
+if path == "main" || path == "command-line-arguments" { return true }
+if !strings.Contains(path, ".") { return false }  // stdlib
+if strings.HasPrefix(path, "golang.org/x/") { return false }  // vendored
+return true
+```
+
 ## What Stays Go/C Permanently
 
 - LLVM library (C/C++) — codegen backend, never rewriting
