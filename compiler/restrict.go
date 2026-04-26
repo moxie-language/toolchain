@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
+
+	"moxie/mxssa"
 )
 
 // restrictedImports maps package paths that should not be used in Moxie code.
@@ -354,6 +356,10 @@ func (b *builder) checkSpawnMoveRestriction() {
 // the function (passed to calls, stored, returned) are exempt — the other end
 // is elsewhere.
 func (b *builder) checkChannelCompleteness() {
+	if b.mxFn != nil && len(b.mxFn.Blocks) > 0 {
+		b.checkChannelCompletenessTC()
+		return
+	}
 	for _, block := range b.fn.Blocks {
 		for _, instr := range block.Instrs {
 			mc, ok := instr.(*ssa.MakeChan)
@@ -403,6 +409,81 @@ func (b *builder) checkChannelCompleteness() {
 					}
 					// close, len, cap are fine — not an escape
 				case *ssa.DebugRef:
+					// Debug info, not real usage.
+				default:
+					escapes = true
+				}
+			}
+
+			if escapes {
+				continue
+			}
+			if !hasSend && !hasRecv {
+				b.addError(mc.Pos(), "moxie: channel created but has no send or select/receive")
+			} else if !hasSend {
+				b.addError(mc.Pos(), "moxie: channel has no sender — every channel needs both a sender and a listener")
+			} else if !hasRecv {
+				b.addError(mc.Pos(), "moxie: channel has no listener — every channel needs both a sender and a select/receive")
+			}
+		}
+	}
+}
+
+// checkChannelCompletenessTC is the mxssa version of checkChannelCompleteness.
+// Same rules: every MakeChan must have a sender and a listener, unless it
+// escapes (passed to a non-builtin call, etc.). Active when b.mxFn has blocks.
+func (b *builder) checkChannelCompletenessTC() {
+	for _, block := range b.mxFn.Blocks {
+		for _, instr := range block.Instrs {
+			mc, ok := instr.(*mxssa.MakeChan)
+			if !ok {
+				continue
+			}
+			refs := mc.Referrers()
+			if refs == nil || len(*refs) == 0 {
+				b.addError(mc.Pos(), "moxie: channel created but never used")
+				continue
+			}
+
+			hasSend := false
+			hasRecv := false
+			escapes := false
+			var mcVal mxssa.Value = mc
+
+			for _, ref := range *refs {
+				switch r := ref.(type) {
+				case *mxssa.Send:
+					if r.Chan == mcVal {
+						hasSend = true
+					} else {
+						escapes = true
+					}
+				case *mxssa.Select:
+					found := false
+					for _, state := range r.States {
+						if state.Chan == mcVal {
+							found = true
+							// ssabridge encodes send as token.CHAN, recv as token.ARROW.
+							if state.Dir == token.CHAN {
+								hasSend = true
+							} else {
+								hasRecv = true
+							}
+						}
+					}
+					if !found {
+						escapes = true
+					}
+				case *mxssa.UnOp:
+					if r.Op == token.ARROW {
+						hasRecv = true
+					}
+				case *mxssa.Call:
+					if _, ok := r.Call.Value.(*mxssa.Builtin); !ok {
+						escapes = true
+					}
+					// close, len, cap are builtins — not an escape.
+				case *mxssa.DebugRef:
 					// Debug info, not real usage.
 				default:
 					escapes = true
