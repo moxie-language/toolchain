@@ -213,7 +213,16 @@ func translateType(t types.Type, cache *typeCache, imp *Importer) typecheck.Type
 
 	case *types.Named:
 		// Reserve a slot in the cache before recursing to handle cycles.
-		obj := typecheck.NewTypeName(nil, t.Obj().Name(), nil)
+		// Pass the package so Named.String() returns the qualified name
+		// (e.g. "encoding/base64.Encoding") matching go/types convention.
+		// Don't call imp.Import here — that holds imp.mu while
+		// translatePackage recurses, leading to deadlock; use NewPackage
+		// directly. The Importer's cache will dedupe on later lookups.
+		var tcPkg *typecheck.Package
+		if t.Obj().Pkg() != nil {
+			tcPkg = typecheck.NewPackage(t.Obj().Pkg().Path(), t.Obj().Pkg().Name())
+		}
+		obj := typecheck.NewTypeName(tcPkg, t.Obj().Name(), nil)
 		named := typecheck.NewNamed(obj, nil)
 		cache.m[typePtr(t)] = named
 		underlying := translateType(t.Underlying(), cache, imp)

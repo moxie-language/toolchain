@@ -637,10 +637,11 @@ func (c *compilerContext) getTypeMethodSet(typ types.Type) llvm.Value {
 			signatureGlobal := c.getMethodSignature(method.Obj().(*types.Func))
 			signatures = append(signatures, signatureGlobal)
 			fn := c.program.MethodValue(method)
-			llvmFnType, llvmFn := c.getFunction(fn)
+			mxFn := c.mxTranslator.EnsureFunction(fn)
+			llvmFnType, llvmFn := c.getFunction(mxFn)
 			if llvmFn.IsNil() {
 				// compiler error, so panic
-				panic("cannot find function: " + c.getFunctionInfo(fn).linkName)
+				panic("cannot find function: " + c.getFunctionInfo(mxFn).linkName)
 			}
 			wrapper := c.getInterfaceInvokeWrapper(fn, llvmFnType, llvmFn)
 			wrappers = append(wrappers, wrapper)

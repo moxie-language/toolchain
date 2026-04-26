@@ -569,14 +569,10 @@ func (b *builder) createRunDefers() {
 
 		case *mxssa.Function:
 			// Direct call.
-			goFn := b.mxTranslator.ReverseFunction(callback)
-			if goFn == nil {
-				panic("createRunDefers: cannot reverse-bridge function: " + callback.Name())
-			}
 			valueTypes := []llvm.Type{b.uintptrType, b.dataPtrType}
-			goParams := getParams(goFn.Signature)
+			goParams := getParamsTC(callback.Signature)
 			for _, param := range goParams {
-				valueTypes = append(valueTypes, b.getLLVMType(param.Type()))
+				valueTypes = append(valueTypes, b.getLLVMTypeTC(param.Type()))
 			}
 			deferredCallType := b.ctx.StructType(valueTypes, false)
 
@@ -588,23 +584,22 @@ func (b *builder) createRunDefers() {
 				forwardParams = append(forwardParams, forwardParam)
 			}
 
-			if !b.getFunctionInfo(goFn).exported {
+			if !b.getFunctionInfo(callback).exported {
 				forwardParams = append(forwardParams, llvm.Undef(b.dataPtrType))
 			}
 
-			fnType, fn := b.getFunction(goFn)
+			fnType, fn := b.getFunction(callback)
 			b.createInvoke(fnType, fn, forwardParams, "")
 
 		case *mxssa.MakeClosure:
 			fn := callback.Fn.(*mxssa.Function)
-			goFn := b.mxTranslator.ReverseFunction(fn)
-			if goFn == nil {
-				panic("createRunDefers: cannot reverse-bridge closure: " + fn.Name())
-			}
 			valueTypes := []llvm.Type{b.uintptrType, b.dataPtrType}
-			params := goFn.Signature.Params()
-			for i := 0; i < params.Len(); i++ {
-				valueTypes = append(valueTypes, b.getLLVMType(params.At(i).Type()))
+			if fn.Signature != nil {
+				if params := fn.Signature.Params(); params != nil {
+					for i := 0; i < params.Len(); i++ {
+						valueTypes = append(valueTypes, b.getLLVMTypeTC(params.At(i).Type()))
+					}
+				}
 			}
 			valueTypes = append(valueTypes, b.dataPtrType) // closure
 			deferredCallType := b.ctx.StructType(valueTypes, false)
@@ -617,7 +612,7 @@ func (b *builder) createRunDefers() {
 				forwardParams = append(forwardParams, forwardParam)
 			}
 
-			fnType, llvmFn := b.getFunction(goFn)
+			fnType, llvmFn := b.getFunction(fn)
 			b.createCall(fnType, llvmFn, forwardParams, "")
 		case *mxssa.Builtin:
 			db := b.deferBuiltinFuncs[callback]

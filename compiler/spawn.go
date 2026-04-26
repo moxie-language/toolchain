@@ -209,11 +209,7 @@ func (b *builder) createSpawnTC(instr *mxssa.CallCommon) (llvm.Value, error) {
 
 	paramBundle := b.emitPointerPack(params)
 
-	goFn := b.mxTranslator.ReverseFunction(targetFn)
-	if goFn == nil {
-		return llvm.Value{}, b.makeError(instr.Pos(), "cannot reverse-bridge function: "+targetFn.Name())
-	}
-	funcType, funcPtr := b.getFunction(goFn)
+	funcType, funcPtr := b.getFunction(targetFn)
 
 	wrapper := b.createGoroutineStartWrapper(funcType, funcPtr, "spawn", false, false, instr.Pos())
 

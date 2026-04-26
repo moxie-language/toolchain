@@ -26,7 +26,11 @@ func (c *compilerContext) getLLVMTypeTC(t typecheck.Type) llvm.Type {
 }
 
 func (c *compilerContext) makeLLVMTypeTC(t typecheck.Type) llvm.Type {
-	switch typ := t.Underlying().(type) {
+	// Switch on the type itself, not its underlying — otherwise named types
+	// (e.g. encoding/base64.Encoding) collapse to their anonymous underlying
+	// struct, producing fnType params with anonymous structs instead of named
+	// ones, which then mismatch call-site values that use the named form.
+	switch typ := t.(type) {
 	case *typecheck.Basic:
 		switch typ.Kind() {
 		case typecheck.Bool, typecheck.UntypedBool:
@@ -47,6 +51,16 @@ func (c *compilerContext) makeLLVMTypeTC(t typecheck.Type) llvm.Type {
 			return c.getLLVMRuntimeType("_string")
 		case typecheck.UnsafePointer:
 			return c.dataPtrType
+		case typecheck.Invalid, typecheck.UntypedNil:
+			// Placeholder — typically only seen for unreachable code or
+			// failed-to-resolve types. Use dataPtrType so the compile
+			// continues; if the function is actually called, LLVM will
+			// fail at link/verify time.
+			return c.dataPtrType
+		case typecheck.UntypedInt, typecheck.UntypedRune:
+			return c.intType
+		case typecheck.UntypedFloat:
+			return c.ctx.DoubleType()
 		default:
 			panic("tccompat: unknown basic kind: " + typ.String())
 		}
@@ -327,16 +341,11 @@ func (b *builder) getValueTC(expr mxssa.Value, pos token.Pos) llvm.Value {
 		}
 		return b.createConstTC(expr, pos)
 	case *mxssa.Function:
-		goFn := b.mxTranslator.ReverseFunction(expr)
-		if goFn == nil {
-			b.addError(expr.Pos(), "cannot reverse-bridge function: "+expr.Name())
-			return llvm.Undef(b.getLLVMTypeTC(expr.Type()))
-		}
-		if b.getFunctionInfo(goFn).exported {
+		if b.getFunctionInfo(expr).exported {
 			b.addError(expr.Pos(), "cannot use an exported function as value: "+expr.String())
 			return llvm.Undef(b.getLLVMTypeTC(expr.Type()))
 		}
-		_, fn := b.getFunction(goFn)
+		_, fn := b.getFunction(expr)
 		return b.createFuncValue(fn, llvm.Undef(b.dataPtrType))
 	case *mxssa.Global:
 		if g := b.mxTranslator.ReverseGlobal(expr); g != nil {

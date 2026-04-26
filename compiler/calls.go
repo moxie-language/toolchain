@@ -3,9 +3,9 @@ package compiler
 import (
 	"strconv"
 
+	"moxie/mxssa"
 	"moxie/typecheck"
 
-	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -39,15 +39,15 @@ const (
 )
 
 // getRuntimeFunction looks up runtime.<fnName> and returns its LLVM type and
-// value. Hides the go/ssa lookup so callers in TC files don't need ssa.Function.
+// value.
 func (c *compilerContext) getRuntimeFunction(fnName string) (llvm.Type, llvm.Value) {
 	return c.getPackageFunction("runtime", fnName)
 }
 
 // getPackageFunction looks up <pkgPath>.<fnName> and returns its LLVM type and
-// value. Hides the go/ssa lookup.
+// value.
 func (c *compilerContext) getPackageFunction(pkgPath, fnName string) (llvm.Type, llvm.Value) {
-	pkg := c.program.ImportedPackage(pkgPath)
+	pkg := c.mxProgram.ImportedPackage(pkgPath)
 	if pkg == nil {
 		panic("package not in program: " + pkgPath)
 	}
@@ -55,7 +55,7 @@ func (c *compilerContext) getPackageFunction(pkgPath, fnName string) (llvm.Type,
 	if member == nil {
 		panic("unknown function: " + pkgPath + "." + fnName)
 	}
-	return c.getFunction(member.(*ssa.Function))
+	return c.getFunction(member.(*mxssa.Function))
 }
 
 // createRuntimeCallCommon creates a runtime call. Use createRuntimeCall or

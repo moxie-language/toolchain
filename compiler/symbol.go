@@ -69,9 +69,9 @@ const (
 	allocKindAligned
 )
 
-// getFunction returns the LLVM function for the given *ssa.Function, creating
+// getFunction returns the LLVM function for the given *mxssa.Function, creating
 // it if needed. It can later be filled with compilerContext.createFunction().
-func (c *compilerContext) getFunction(fn *ssa.Function) (llvm.Type, llvm.Value) {
+func (c *compilerContext) getFunction(fn *mxssa.Function) (llvm.Type, llvm.Value) {
 	info := c.getFunctionInfo(fn)
 	llvmFn := c.mod.NamedFunction(info.linkName)
 	if !llvmFn.IsNil() {
@@ -79,23 +79,26 @@ func (c *compilerContext) getFunction(fn *ssa.Function) (llvm.Type, llvm.Value) 
 	}
 
 	var retType llvm.Type
-	if fn.Signature.Results() == nil {
+	var results *typecheck.Tuple
+	if fn.Signature != nil {
+		results = fn.Signature.Results()
+	}
+	if results == nil || results.Len() == 0 {
 		retType = c.ctx.VoidType()
-	} else if fn.Signature.Results().Len() == 1 {
-		retType = c.getLLVMType(fn.Signature.Results().At(0).Type())
+	} else if results.Len() == 1 {
+		retType = c.getLLVMTypeTC(results.At(0).Type())
 	} else {
-		results := make([]llvm.Type, 0, fn.Signature.Results().Len())
-		for i := 0; i < fn.Signature.Results().Len(); i++ {
-			results = append(results, c.getLLVMType(fn.Signature.Results().At(i).Type()))
+		rs := make([]llvm.Type, 0, results.Len())
+		for i := 0; i < results.Len(); i++ {
+			rs = append(rs, c.getLLVMTypeTC(results.At(i).Type()))
 		}
-		retType = c.ctx.StructType(results, false)
+		retType = c.ctx.StructType(rs, false)
 	}
 
 	var paramInfos []paramInfo
-	for _, param := range getParams(fn.Signature) {
-		paramType := c.getLLVMType(param.Type())
-		mxType := c.mxTranslator.ForwardType(param.Type())
-		paramFragmentInfos := c.expandFormalParamTypeTC(paramType, param.Name(), mxType)
+	for _, param := range getParamsTC(fn.Signature) {
+		paramType := c.getLLVMTypeTC(param.Type())
+		paramFragmentInfos := c.expandFormalParamTypeTC(paramType, param.Name(), param.Type())
 		paramInfos = append(paramInfos, paramFragmentInfos...)
 	}
 
@@ -251,22 +254,27 @@ func (c *compilerContext) getFunction(fn *ssa.Function) (llvm.Type, llvm.Value) 
 
 // If this is a synthetic function (such as a generic function or a wrapper),
 // create it now.
-func (c *compilerContext) maybeCreateSyntheticFunction(fn *ssa.Function, llvmFn llvm.Value) {
+func (c *compilerContext) maybeCreateSyntheticFunction(fn *mxssa.Function, llvmFn llvm.Value) {
 	// Synthetic functions are functions that do not appear in the source code,
 	// they are artificially constructed. Usually they are wrapper functions
 	// that are not referenced anywhere except in a SSA call instruction so
 	// should be created right away.
 	// The exception is the package initializer, which does appear in the
 	// *ssa.Package members and so shouldn't be created here.
-	if fn.Synthetic != "" && fn.Synthetic != "package initializer" && fn.Synthetic != "generic function" && fn.Synthetic != "range-over-func yield" {
-		if origin := fn.Origin(); origin != nil && origin.RelString(nil) == "internal/abi.Escape" {
+	if fn.Synthetic == "" || fn.Synthetic == "package initializer" || fn.Synthetic == "generic function" || fn.Synthetic == "range-over-func yield" {
+		return
+	}
+	// newBuilder still requires *ssa.Function; obtain via translator.
+	goFn := c.mxTranslator.ReverseFunction(fn)
+	if goFn != nil {
+		if origin := goFn.Origin(); origin != nil && origin.RelString(nil) == "internal/abi.Escape" {
 			// This is a special implementation or internal/abi.Escape, which
 			// can only really be implemented in the compiler.
 			// For simplicity we'll only implement pointer parameters for now.
-			if _, ok := fn.Params[0].Type().Underlying().(*types.Pointer); ok {
+			if _, ok := goFn.Params[0].Type().Underlying().(*types.Pointer); ok {
 				irbuilder := c.ctx.NewBuilder()
 				defer irbuilder.Dispose()
-				b := newBuilder(c, irbuilder, fn)
+				b := newBuilder(c, irbuilder, goFn)
 				b.createAbiEscapeImpl()
 				llvmFn.SetLinkage(llvm.LinkOnceODRLinkage)
 				llvmFn.SetUnnamedAddr(true)
@@ -276,29 +284,39 @@ func (c *compilerContext) maybeCreateSyntheticFunction(fn *ssa.Function, llvmFn 
 			// is really called, making it clear it needs to be implemented.
 			return
 		}
-		if len(fn.Blocks) == 0 {
-			c.addError(fn.Pos(), "missing function body")
-			return
-		}
-		irbuilder := c.ctx.NewBuilder()
-		b := newBuilder(c, irbuilder, fn)
-		b.createFunctionDispatch()
-		irbuilder.Dispose()
-		llvmFn.SetLinkage(llvm.LinkOnceODRLinkage)
-		llvmFn.SetUnnamedAddr(true)
+		// Ensure the mxssa body is filled — synthetic instances/wrappers may
+		// have been registered as shells via cross-package translation.
+		c.mxTranslator.EnsureFunction(goFn)
 	}
+	if goFn == nil || len(goFn.Blocks) == 0 {
+		c.addError(fn.Pos(), "missing function body")
+		return
+	}
+	irbuilder := c.ctx.NewBuilder()
+	b := newBuilder(c, irbuilder, goFn)
+	b.createFunctionDispatch()
+	irbuilder.Dispose()
+	llvmFn.SetLinkage(llvm.LinkOnceODRLinkage)
+	llvmFn.SetUnnamedAddr(true)
 }
 
 // getFunctionInfo returns information about a function that is not directly
-// present in *ssa.Function, such as the link name and whether it should be
+// present in *mxssa.Function, such as the link name and whether it should be
 // exported.
-func (c *compilerContext) getFunctionInfo(f *ssa.Function) functionInfo {
+func (c *compilerContext) getFunctionInfo(f *mxssa.Function) functionInfo {
 	if info, ok := c.functionInfos[f]; ok {
 		return info
 	}
+	// Use ssa.Function.RelString(nil) for canonical linkName since
+	// mxssa.Function.RelString doesn't include the receiver type for methods.
+	var linkName string
+	if goFn := c.mxTranslator.ReverseFunction(f); goFn != nil {
+		linkName = goFn.RelString(nil)
+	} else {
+		linkName = f.RelString(nil)
+	}
 	info := functionInfo{
-		// Pick the default linkName.
-		linkName: f.RelString(nil),
+		linkName: linkName,
 	}
 
 	// Check for a few runtime functions that are treated specially.
@@ -319,9 +337,7 @@ func (c *compilerContext) getFunctionInfo(f *ssa.Function) functionInfo {
 	}
 
 	// Check for //go: pragmas, which may change the link name (among others).
-	if mxFn := c.mxTranslator.LookupFunction(f); mxFn != nil {
-		c.parsePragmasTC(&info, mxFn)
-	}
+	c.parsePragmasTC(&info, f)
 
 	c.functionInfos[f] = info
 	return info
@@ -561,6 +577,24 @@ func getParams(sig *types.Signature) []*types.Var {
 	}
 	for i := 0; i < sig.Params().Len(); i++ {
 		params = append(params, sig.Params().At(i))
+	}
+	return params
+}
+
+// getParamsTC is the typecheck variant of getParams. Tolerates nil Signature
+// fields since the bridge may produce signatures with nil params/results.
+func getParamsTC(sig *typecheck.Signature) []*typecheck.Var {
+	params := []*typecheck.Var{}
+	if sig == nil {
+		return params
+	}
+	if sig.Recv() != nil {
+		params = append(params, sig.Recv())
+	}
+	if p := sig.Params(); p != nil {
+		for i := 0; i < p.Len(); i++ {
+			params = append(params, p.At(i))
+		}
 	}
 	return params
 }

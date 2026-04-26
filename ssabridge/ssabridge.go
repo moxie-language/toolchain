@@ -50,30 +50,31 @@ func (t *Translator) LookupPackage(p *ssa.Package) *mxssa.Package { return t.pkg
 // EnsureFunction ensures f has a full mxssa translation (shell + body).
 // The value() helper may register only a shell for cross-package function
 // references; this fills in the body if it is missing.
-// Returns nil for external functions (no SSA blocks), letting them use the SSA path.
+// Returns a shell for any function, including external ones (no SSA blocks).
+// Creates a shell if not yet registered.
 func (t *Translator) EnsureFunction(f *ssa.Function) *mxssa.Function {
-	if len(f.Blocks) == 0 {
-		// External/stub — no body to translate; SSA path handles it.
-		if mf, ok := t.funcs[f]; ok {
-			return mf // shell-only is fine for external functions
-		}
+	if f == nil {
 		return nil
 	}
 	mf, ok := t.funcs[f]
-	if ok && len(mf.Blocks) > 0 {
-		// Already fully translated. Backfill any params/freevars added since
-		// the shell was created — go/ssa populates f.Params lazily during
-		// pkg.Build(), so cross-package shells made earlier may have empty
-		// Params even though f.Params is now set. Same for FreeVars.
-		t.backfillShellMembers(f, mf)
-		return mf
-	}
 	if !ok {
 		var pkg *mxssa.Package
 		if f.Package() != nil {
 			pkg = t.ensurePackage(f.Package())
 		}
 		mf = t.translateFunctionShell(f, pkg)
+	}
+	if len(f.Blocks) == 0 {
+		// External/stub — shell-only is sufficient.
+		return mf
+	}
+	if len(mf.Blocks) > 0 {
+		// Already fully translated. Backfill any params/freevars added since
+		// the shell was created — go/ssa populates f.Params lazily during
+		// pkg.Build(), so cross-package shells made earlier may have empty
+		// Params even though f.Params is now set. Same for FreeVars.
+		t.backfillShellMembers(f, mf)
+		return mf
 	}
 	// Same backfill before translating the body — body translation indexes
 	// into mf.Params for parameter-value lookups.
@@ -124,36 +125,46 @@ func Translate(fset *token.FileSet, ssaProg *ssa.Program, typePkgs map[string]*t
 
 // TranslatePackage converts one ssa.Package to mxssa.Package.
 // Must be called after the ssa package is built (ssaPkg.Build()).
+// Idempotent: re-populates Members if the package was previously registered
+// only as a shell (via ensurePackage).
 func (t *Translator) TranslatePackage(ssaPkg *ssa.Package) *mxssa.Package {
-	if p, ok := t.pkgs[ssaPkg]; ok {
-		return p
-	}
-	tcPkg, _ := t.imp.Import(ssaPkg.Pkg.Path())
-	if tcPkg == nil {
-		tcPkg = typecheck.NewPackage(ssaPkg.Pkg.Path(), ssaPkg.Pkg.Name())
-	}
-	// Populate imports so checks like packageImportsUnsafeTC can find them.
-	// imp.Import is cached and idempotent.
-	if len(tcPkg.Imports()) == 0 {
-		var tcImps []*typecheck.Package
-		for _, gimp := range ssaPkg.Pkg.Imports() {
-			if tcImp, _ := t.imp.Import(gimp.Path()); tcImp != nil {
-				tcImps = append(tcImps, tcImp)
+	p, existed := t.pkgs[ssaPkg]
+	if !existed {
+		tcPkg, _ := t.imp.Import(ssaPkg.Pkg.Path())
+		if tcPkg == nil {
+			tcPkg = typecheck.NewPackage(ssaPkg.Pkg.Path(), ssaPkg.Pkg.Name())
+		}
+		// Populate imports so checks like packageImportsUnsafeTC can find them.
+		if len(tcPkg.Imports()) == 0 {
+			var tcImps []*typecheck.Package
+			for _, gimp := range ssaPkg.Pkg.Imports() {
+				if tcImp, _ := t.imp.Import(gimp.Path()); tcImp != nil {
+					tcImps = append(tcImps, tcImp)
+				}
+			}
+			if len(tcImps) > 0 {
+				tcPkg.SetImports(tcImps)
 			}
 		}
-		if len(tcImps) > 0 {
-			tcPkg.SetImports(tcImps)
+		p = &mxssa.Package{
+			Prog:    t.prog,
+			Pkg:     tcPkg,
+			Members: map[string]mxssa.Member{},
 		}
+		t.pkgs[ssaPkg] = p
+		t.prog.RegisterPackage(p)
 	}
-	p := &mxssa.Package{
-		Prog:    t.prog,
-		Pkg:     tcPkg,
-		Members: map[string]mxssa.Member{},
+	// Members may already be partially populated (shells from cross-package
+	// references). Skip if the package is fully populated; otherwise add any
+	// missing entries from ssaPkg.Members.
+	if existed && len(p.Members) >= len(ssaPkg.Members) {
+		return p
 	}
-	t.pkgs[ssaPkg] = p
-	t.prog.RegisterPackage(p)
 
 	for name, m := range ssaPkg.Members {
+		if _, ok := p.Members[name]; ok {
+			continue // shell already exists
+		}
 		switch m := m.(type) {
 		case *ssa.Function:
 			fn := t.translateFunctionShell(m, p)

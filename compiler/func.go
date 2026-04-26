@@ -62,10 +62,6 @@ func (b *builder) parseMakeClosureTC(expr *mxssa.MakeClosure) (llvm.Value, error
 
 	context := b.emitPointerPack(boundVars)
 
-	goFn := b.mxTranslator.ReverseFunction(f)
-	if goFn == nil {
-		panic("parseMakeClosureTC: cannot reverse-bridge function: " + f.Name())
-	}
-	_, fn := b.getFunction(goFn)
+	_, fn := b.getFunction(f)
 	return b.createFuncValue(fn, context), nil
 }

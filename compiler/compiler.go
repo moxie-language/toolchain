@@ -91,7 +91,7 @@ type compilerContext struct {
 	mxProgram        *mxssa.Program   // B3 bridge: native SSA, populated by ssabridge
 	mxTranslator     *ssabridge.Translator
 	diagnostics      []error
-	functionInfos    map[*ssa.Function]functionInfo
+	functionInfos    map[*mxssa.Function]functionInfo
 	astComments      map[string]*ast.CommentGroup
 	embedGlobals     map[string][]*loader.EmbedFile
 	pkg              *types.Package
@@ -111,7 +111,7 @@ func newCompilerContext(moduleName string, machine llvm.TargetMachine, config *C
 		ditypes:       make(map[types.Type]llvm.Metadata),
 		machine:       machine,
 		targetData:    machine.CreateTargetData(),
-		functionInfos: map[*ssa.Function]functionInfo{},
+		functionInfos: map[*mxssa.Function]functionInfo{},
 		astComments:   map[string]*ast.CommentGroup{},
 		tcLLVMTypes:   map[typecheck.Type]llvm.Type{},
 	}
@@ -182,19 +182,18 @@ type builder struct {
 }
 
 func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *builder {
-	fnType, fn := c.getFunction(f)
+	mxFn := c.mxTranslator.EnsureFunction(f)
+	fnType, fn := c.getFunction(mxFn)
 	b := &builder{
 		compilerContext: c,
 		Builder:         irbuilder,
 		fn:              f,
+		mxFn:            mxFn,
 		llvmFnType:      fnType,
 		llvmFn:          fn,
-		info:            c.getFunctionInfo(f),
+		info:            c.getFunctionInfo(mxFn),
 		mxLocals:        make(map[mxssa.Value]llvm.Value),
 		dilocals:        make(map[*types.Var]llvm.Metadata),
-	}
-	if c.mxTranslator != nil {
-		b.mxFn = c.mxTranslator.EnsureFunction(f)
 	}
 	return b
 }
@@ -308,6 +307,13 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 	c.mxProgram = mxProg
 	c.mxTranslator = mxTrans
 	c.mxTranslator.TranslatePackage(ssaPkg)
+	// Pre-translate runtime and internal/task so getPackageFunction can resolve
+	// them via mxProgram.ImportedPackage. TranslatePackage is idempotent.
+	for _, importPath := range []string{"runtime", "internal/task"} {
+		if rt := ssaPkg.Prog.ImportedPackage(importPath); rt != nil {
+			c.mxTranslator.TranslatePackage(rt)
+		}
+	}
 	if mxP := mxProg.ImportedPackage(pkg.Pkg.Path()); mxP != nil {
 		c.mxPkg = mxP.Pkg
 	}
@@ -461,6 +467,13 @@ func (c *compilerContext) makeLLVMType(goType types.Type) llvm.Type {
 			// LLVM. This is because it is otherwise impossible to create
 			// self-referencing types such as linked lists.
 			llvmName := typ.String()
+			// Reuse existing named type from the module to keep identity
+			// consistent with getLLVMTypeTC.
+			existing := c.mod.GetTypeByName(llvmName)
+			if !existing.IsNil() {
+				c.llvmTypes.Set(goType, existing)
+				return existing
+			}
 			llvmType := c.ctx.StructCreateNamed(llvmName)
 			c.llvmTypes.Set(goType, llvmType) // avoid infinite recursion
 			underlying := c.getLLVMType(st)
@@ -806,7 +819,8 @@ func (b *builder) getLocalVariable(variable *types.Var) llvm.Metadata {
 // DISubprogram metadata node.
 func (c *compilerContext) attachDebugInfo(f *ssa.Function) llvm.Metadata {
 	pos := c.program.Fset.Position(f.Syntax().Pos())
-	_, fn := c.getFunction(f)
+	mxFn := c.mxTranslator.EnsureFunction(f)
+	_, fn := c.getFunction(mxFn)
 	return c.attachDebugInfoRaw(f, fn, "", pos.Filename, pos.Line)
 }
 
@@ -825,9 +839,10 @@ func (c *compilerContext) attachDebugInfoRaw(f *ssa.Function, llvmFn llvm.Value,
 		Parameters: diparams,
 		Flags:      0, // ?
 	})
+	mxFn := c.mxTranslator.EnsureFunction(f)
 	difunc := c.dibuilder.CreateFunction(c.getDIFile(filename), llvm.DIFunction{
 		Name:         f.RelString(nil) + suffix,
-		LinkageName:  c.getFunctionInfo(f).linkName + suffix,
+		LinkageName:  c.getFunctionInfo(mxFn).linkName + suffix,
 		File:         c.getDIFile(filename),
 		Line:         line,
 		Type:         diFuncType,
@@ -973,7 +988,8 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 			if member.Blocks != nil {
 				continue // external function
 			}
-			info := c.getFunctionInfo(member)
+			mxMember := c.mxTranslator.EnsureFunction(member)
+			info := c.getFunctionInfo(mxMember)
 			if aliasName, ok := stdlibAliases[info.linkName]; ok {
 				alias := c.mod.NamedFunction(aliasName)
 				if alias.IsNil() {
@@ -1894,11 +1910,7 @@ func (b *builder) createFunctionCallTC(instr *mxssa.CallCommon) (llvm.Value, err
 			return llvm.ConstInt(b.ctx.Int8Type(), panicStrategy, false), nil
 		case name == "runtime.exportedFuncPtr":
 			fnArg := instr.Args[0].(*mxssa.Function)
-			goFnArg := b.mxTranslator.ReverseFunction(fnArg)
-			if goFnArg == nil {
-				return llvm.Value{}, b.makeError(instr.Pos(), "cannot reverse-bridge function: "+fnArg.Name())
-			}
-			_, ptr := b.getFunction(goFnArg)
+			_, ptr := b.getFunction(fnArg)
 			return b.CreatePtrToInt(ptr, b.uintptrType, ""), nil
 		case strings.HasPrefix(fn.Name(), "__moxie_concat"):
 			return b.createMoxieConcatTC(instr), nil
@@ -1940,12 +1952,8 @@ func (b *builder) createFunctionCallTC(instr *mxssa.CallCommon) (llvm.Value, err
 		}
 	}
 	if staticFn != nil {
-		goFn := b.mxTranslator.ReverseFunction(staticFn)
-		if goFn == nil {
-			return llvm.Value{}, b.makeError(instr.Pos(), "cannot reverse-bridge function: "+staticFn.Name())
-		}
-		calleeType, callee = b.getFunction(goFn)
-		info := b.getFunctionInfo(goFn)
+		calleeType, callee = b.getFunction(staticFn)
+		info := b.getFunctionInfo(staticFn)
 		if callee.IsNil() {
 			return llvm.Value{}, b.makeError(instr.Pos(), "undefined function: "+info.linkName)
 		}
@@ -3026,11 +3034,7 @@ func (b *builder) createUnOpTC(unop *mxssa.UnOp) (llvm.Value, error) {
 			name := strings.TrimSuffix(g.Name(), "$funcaddr")
 			pkg := b.mxFn.Pkg
 			fn := pkg.Members[name].(*mxssa.Function)
-			goFn := b.mxTranslator.ReverseFunction(fn)
-			if goFn == nil {
-				return llvm.Value{}, b.makeError(unop.Pos(), "cgo function not found: "+name)
-			}
-			_, fnVal := b.getFunction(goFn)
+			_, fnVal := b.getFunction(fn)
 			if fnVal.IsNil() {
 				return llvm.Value{}, b.makeError(unop.Pos(), "cgo function not found: "+name)
 			}
