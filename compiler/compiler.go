@@ -513,6 +513,18 @@ func (c *compilerContext) makeLLVMType(goType types.Type) llvm.Type {
 	}
 }
 
+// getDITypeForGlobal returns the DWARF type for a global variable's element
+// type. Wraps the SSA-side resolution so symbol.go can stay
+// go/types-import-free until the createDIType chain (§3) migrates.
+func (c *compilerContext) getDITypeForGlobal(g *mxssa.Global) llvm.Metadata {
+	if goG := c.mxTranslator.ReverseGlobal(g); goG != nil {
+		if ptr, ok := goG.Type().(*types.Pointer); ok {
+			return c.getDIType(ptr.Elem())
+		}
+	}
+	return llvm.Metadata{}
+}
+
 // Get all methods of a type.
 func getAllMethods(prog *ssa.Program, typ types.Type) []*types.Selection {
 	ms := prog.MethodSets.MethodSet(typ)
@@ -838,11 +850,20 @@ func (c *compilerContext) attachDebugInfo(f *ssa.Function) llvm.Metadata {
 // DISubprogram metadata node. This method allows some more control over how
 // debug info is added to the function.
 func (c *compilerContext) attachDebugInfoRaw(f *ssa.Function, llvmFn llvm.Value, suffix, filename string, line int) llvm.Metadata {
-	// Debug info for this function.
-	params := getParams(f.Signature)
-	diparams := make([]llvm.Metadata, 0, len(params))
-	for _, param := range params {
-		diparams = append(diparams, c.getDIType(param.Type()))
+	// Debug info for this function. Inline param iteration: f.Signature.Recv()
+	// (if present) followed by f.Signature.Params() — same shape as the old
+	// getParams helper.
+	sig := f.Signature
+	paramCount := sig.Params().Len()
+	if sig.Recv() != nil {
+		paramCount++
+	}
+	diparams := make([]llvm.Metadata, 0, paramCount)
+	if recv := sig.Recv(); recv != nil {
+		diparams = append(diparams, c.getDIType(recv.Type()))
+	}
+	for i := 0; i < sig.Params().Len(); i++ {
+		diparams = append(diparams, c.getDIType(sig.Params().At(i).Type()))
 	}
 	diFuncType := c.dibuilder.CreateSubroutineType(llvm.DISubroutineType{
 		File:       c.getDIFile(filename),

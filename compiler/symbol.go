@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
-	"go/types"
 	"strconv"
 	"strings"
 
@@ -568,21 +567,8 @@ func (c *compilerContext) isValidWasmTypeTC(typ typecheck.Type, site wasmSite) b
 	return false
 }
 
-// getParams returns the function parameters, including the receiver at the
-// start. This is an alternative to the Params member of *ssa.Function, which is
-// not yet populated when the package has not yet been built.
-func getParams(sig *types.Signature) []*types.Var {
-	params := []*types.Var{}
-	if sig.Recv() != nil {
-		params = append(params, sig.Recv())
-	}
-	for i := 0; i < sig.Params().Len(); i++ {
-		params = append(params, sig.Params().At(i))
-	}
-	return params
-}
-
-// getParamsTC is the typecheck variant of getParams. Tolerates nil Signature
+// getParamsTC returns the function parameters, including the receiver at
+// the start. Tolerates nil Signature
 // fields since the bridge may produce signatures with nil params/results.
 func getParamsTC(sig *typecheck.Signature) []*typecheck.Var {
 	params := []*typecheck.Var{}
@@ -715,14 +701,12 @@ func (c *compilerContext) getGlobal(g *mxssa.Global) llvm.Value {
 		}
 
 		if c.Debug && !info.extern {
-			// Debug info still uses the SSA-side type via ReverseType to
-			// drive getDIType, since the createDIType chain remains keyed
-			// on go/types.Type. Migrating that is its own commit (§3).
+			// Debug info still uses go/types to drive getDIType, since the
+			// createDIType chain remains keyed on go/types.Type. Migrating
+			// that is its own commit (§3). Pull from getDITypeForGlobal
+			// (helper in compiler.go) so symbol.go stays types-import-free.
 			pos := c.program.Fset.Position(g.Pos())
-			var diType llvm.Metadata
-			if goG := c.mxTranslator.ReverseGlobal(g); goG != nil {
-				diType = c.getDIType(goG.Type().(*types.Pointer).Elem())
-			}
+			diType := c.getDITypeForGlobal(g)
 			diglobal := c.dibuilder.CreateGlobalVariableExpression(c.difiles[pos.Filename], llvm.DIGlobalVariableExpression{
 				Name:        g.String(),
 				LinkageName: info.linkName,
