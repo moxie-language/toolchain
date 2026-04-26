@@ -295,6 +295,21 @@ func methodSet(T Type) map[string]*Func {
 	return ms
 }
 
+// MethodSet is the exported form of methodSet — returns T's method set as a
+// name→Func map. Includes pointer-receiver methods when T is addressable.
+// Use LookupMethod for single-name lookups.
+func MethodSet(T Type) map[string]*Func { return methodSet(T) }
+
+// LookupMethod returns the method with the given name on T, or nil. Searches
+// T's method set including promoted/pointer-receiver methods (same rules as
+// MethodSet).
+func LookupMethod(T Type, name string) *Func {
+	if T == nil || name == "" {
+		return nil
+	}
+	return methodSet(T)[name]
+}
+
 func collectMethods(T Type, ms map[string]*Func, ptrOk bool) {
 	switch t := T.(type) {
 	case *Named:
