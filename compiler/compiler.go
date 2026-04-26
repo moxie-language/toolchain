@@ -1426,7 +1426,7 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		}
 	}
 
-	if b.fn.Recover != nil {
+	if b.mxFn.Recover != nil {
 		// This function has deferred function calls. Set some things up for
 		// them.
 		b.deferInitFunc()

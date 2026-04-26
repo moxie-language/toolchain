@@ -43,7 +43,7 @@ func (b *builder) supportsRecover() bool {
 // hasDeferFrame returns whether the current function needs to catch panics and
 // run defers.
 func (b *builder) hasDeferFrame() bool {
-	if b.fn.Recover == nil {
+	if b.mxFn.Recover == nil {
 		return false
 	}
 	return b.supportsRecover()
@@ -100,7 +100,7 @@ func (b *builder) createLandingPad() {
 
 	// Continue at the 'recover' block, which returns to the parent in an
 	// appropriate way.
-	b.CreateBr(b.blockInfo[b.fn.Recover.Index].entry)
+	b.CreateBr(b.blockInfo[b.mxFn.Recover.Index].entry)
 }
 
 // Create a checkpoint (similar to setjmp). This emits inline assembly that
