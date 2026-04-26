@@ -97,6 +97,12 @@ func isUserPackageTC(pkg *mxssa.Package) bool {
 // Only applies to user code — runtime packages are exempt.
 //
 // Top-level dispatch: TC path when mxFn is fully populated, SSA otherwise.
+//
+// In current usage the SSA fallback below is unreachable — a smesh build,
+// the restrict test suite, and the spawn test suite all run zero functions
+// through the SSA path (verified via MOXIE_RESTRICT_SSA_TRACE instrumentation,
+// 2026-04). It's retained as defense-in-depth for cases mxFn might be nil
+// (external decls without cross-package shells, error recovery paths).
 func (b *builder) checkMoxieRestrictions() {
 	if b.mxFn != nil && len(b.mxFn.Blocks) > 0 {
 		b.checkMoxieRestrictionsTC()
