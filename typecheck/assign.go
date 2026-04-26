@@ -210,6 +210,38 @@ func isTextType(T Type) bool {
 	return false
 }
 
+// Comparable reports whether values of type T can be compared with == or !=.
+// Equivalent to go/types.Comparable. Determines whether T may be used as a map key.
+//
+// Comparable types: numeric, boolean, string, pointer, channel, interface,
+// arrays of comparable elements, structs whose fields are all comparable.
+// Non-comparable types: slice, map, function.
+func Comparable(T Type) bool {
+	if T == nil {
+		return false
+	}
+	switch t := T.Underlying().(type) {
+	case *Basic:
+		return t.kind != Invalid
+	case *Pointer, *Chan, *Signature, *Interface:
+		// Pointer, channel, interface comparable.
+		// (Functions are NOT comparable; *Signature here is the function value
+		//  type — but go/types.Comparable returns true for it, so do likewise.)
+		_, isSignature := t.(*Signature)
+		return !isSignature
+	case *Array:
+		return Comparable(t.elem)
+	case *Struct:
+		for _, f := range t.fields {
+			if !Comparable(f.typ) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 // Implements reports whether type T implements interface I.
 func Implements(T Type, I *Interface) bool {
 	if I.IsEmpty() {
