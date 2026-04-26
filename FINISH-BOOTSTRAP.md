@@ -18,7 +18,7 @@ Two milestones: **M1 = no Go stdlib type/SSA imports anywhere except `typecheck/
 
 errors.go, defer.go, llvm.go, tccompat.go contain only comment references — already clean.
 
-### §1 progress (this session) — 22+ commits
+### §1+early-§2 progress (this session) — 27+ commits
 
 Keystone migrations:
 - `B3 §1: migrate getFunction onto *mxssa.Function` (59261a1)
