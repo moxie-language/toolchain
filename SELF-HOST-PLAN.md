@@ -238,15 +238,15 @@ mirror the same structure. The bridge strategy:
 
 **Tier 2: Mid-complexity files**
 - [ ] compiler/symbol.go — core infra (getFunction, getFunctionInfo); SSA-typed throughout
-- [ ] compiler/gc.go — trackExpr needed by SSA fallback (newcoro uses channels)
-- [ ] compiler/llvm.go — one types.* use in debug info; near-complete
-- [ ] compiler/channel.go — SSA channel methods needed by newcoro SSA fallback
+- [~] compiler/gc.go — TC variant trackExprTC exists; SSA stays for SSA-path callers
+- [ ] compiler/llvm.go — one types.* use in debug info; blocked on getDITypeTC (would require porting createDIType)
+- [~] compiler/channel.go — TC variants for createMakeChan/Send/Recv/Select/Extract exist; SSA stays for SSA-path callers
 - [x] compiler/map.go — SSA versions deleted; TC path handles all map ops; EnsureFunction + global type cache fixes land here
-- [ ] compiler/defer.go — SSA defer needed for SSA fallback
-- [ ] compiler/asserts.go — SSA nil/bounds checks needed by SSA fallback
+- [~] compiler/defer.go — TC variant createDeferTC exists but uses findSSADefer hack (delegates back to SSA for some ops)
+- [~] compiler/asserts.go — TC variants exist for createSliceBoundsCheck, createUnsafeSliceStringCheck, createChanBoundsCheck, createNilCheck (in tccompat.go), extendInteger
 - [x] compiler/spawn.go — SSA createSpawn deleted; validation utilities kept (shared)
 - [x] compiler/mxbuiltins.go — SSA versions deleted; TC path handles all moxie builtins
-- [ ] compiler/restrict.go — SSA-typed restriction checker; called from both paths
+- [~] compiler/restrict.go — TC variants exist for every check; unified dispatcher checkMoxieRestrictionsTC runs purely on mxssa. SSA path retained for shells/external decls (no Blocks). SSA can be deleted once compiler.go createFunction is gone.
 
 **Tier 3: Core files (highest assertion count)**
 - [ ] compiler/calls.go
@@ -295,6 +295,15 @@ blocks ready. None change existing behavior — pure additions.
   (calls.go); use when migrating getFunction etc.
 - `ssabridge.EnsureFunction` backfills Params/FreeVars when go/ssa
   populates them lazily after a cross-package shell was created
+- `ssabridge.TranslatePackage` / `ensurePackage` populate
+  `typecheck.Package.imports` from ssaPkg.Pkg.Imports() so checks like
+  `packageImportsUnsafeTC` work. Without this, TC AST checks falsely
+  flag uintptr in unsafe-importing packages (sync/atomic).
+- restrict.go TC helpers: `isUserPackageTC`, `isMakeExemptTC`,
+  `packageImportsUnsafeTC`, `checkInstrRestrictionsTC`,
+  `checkSignatureRestrictionsTC`, `checkSpawnMoveRestrictionTC`,
+  `checkChannelCompletenessTC`, `checkFallthroughRestrictionTC`,
+  `checkASTRestrictionsTC`, `checkTypeAtPosTC`
 
 ## Breadcrumbs from Failed Attempts
 
