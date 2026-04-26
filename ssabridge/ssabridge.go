@@ -54,7 +54,12 @@ func (t *Translator) EnsureFunction(f *ssa.Function) *mxssa.Function {
 	}
 	mf, ok := t.funcs[f]
 	if ok && len(mf.Blocks) > 0 {
-		return mf // already fully translated
+		// Already fully translated. Backfill any params/freevars added since
+		// the shell was created — go/ssa populates f.Params lazily during
+		// pkg.Build(), so cross-package shells made earlier may have empty
+		// Params even though f.Params is now set. Same for FreeVars.
+		t.backfillShellMembers(f, mf)
+		return mf
 	}
 	if !ok {
 		var pkg *mxssa.Package
@@ -63,9 +68,31 @@ func (t *Translator) EnsureFunction(f *ssa.Function) *mxssa.Function {
 		}
 		mf = t.translateFunctionShell(f, pkg)
 	}
+	// Same backfill before translating the body — body translation indexes
+	// into mf.Params for parameter-value lookups.
+	t.backfillShellMembers(f, mf)
 	// mf exists (either just created or a shell from value()) but has no blocks.
 	t.translateFunctionBody(f, mf)
 	return mf
+}
+
+// backfillShellMembers appends any parameters/freevars present on f but
+// missing from mf. Handles the lazy-population race: a shell created during
+// cross-package translation captured f.Params at a time when go/ssa hadn't
+// built f's package yet, so f.Params was empty.
+func (t *Translator) backfillShellMembers(f *ssa.Function, mf *mxssa.Function) {
+	for i := len(mf.Params); i < len(f.Params); i++ {
+		p := f.Params[i]
+		mp := mxssa.NewParameter(p.Name(), t.typ(p.Type()), mf)
+		mp.SetPos(p.Pos())
+		mf.Params = append(mf.Params, mp)
+	}
+	for i := len(mf.FreeVars); i < len(f.FreeVars); i++ {
+		fv := f.FreeVars[i]
+		mfv := mxssa.NewFreeVar(fv.Name(), t.typ(fv.Type()), mf)
+		mfv.SetPos(fv.Pos())
+		mf.FreeVars = append(mf.FreeVars, mfv)
+	}
 }
 
 // Translate converts an entire ssa.Program to mxssa.Program.
