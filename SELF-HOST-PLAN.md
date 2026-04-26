@@ -229,7 +229,6 @@ mirror the same structure. The bridge strategy:
 
 **Tier 1: Per-method migration (files share builder infra, migrate method-by-method)**
 - [ ] compiler/sizes.go — implements types.Sizes interface; needed until B3 Tier 6
-- [ ] compiler/errors.go — types.Error for diagnostics; needs diagnostics.go update
 - [x] compiler/volatile.go — pure TC (done prior session)
 - [x] compiler/atomic.go — pure TC (done prior session)
 - [x] compiler/inlineasm.go — deleted (embedded targets only, unsupported by Moxie)
@@ -239,14 +238,15 @@ mirror the same structure. The bridge strategy:
 **Tier 2: Mid-complexity files**
 - [~] compiler/symbol.go — parsePragmas migrated to TC via parsePragmasTC (uses hasUnsafeImportTC, isValidWasmTypeTC, checkWasmImportExportTC). getFunction still SSA-typed (paramInfos/elemSize migration too risky for now).
 - [~] compiler/gc.go — TC variant trackExprTC exists; SSA stays for SSA-path callers
-- [ ] compiler/llvm.go — one types.* use in debug info; blocked on getDITypeTC (would require porting createDIType)
+- [x] compiler/llvm.go — go/types purged via direct DI synthesis (getPointerBitmapDIType bypasses getDIType for the synthesized struct)
 - [~] compiler/channel.go — TC variants for createMakeChan/Send/Recv/Select/Extract exist; SSA stays for SSA-path callers
 - [x] compiler/map.go — SSA versions deleted; TC path handles all map ops; EnsureFunction + global type cache fixes land here
 - [~] compiler/defer.go — TC variant createDeferTC exists but uses findSSADefer hack (delegates back to SSA for some ops)
 - [~] compiler/asserts.go — TC variants exist for createSliceBoundsCheck, createUnsafeSliceStringCheck, createChanBoundsCheck, createNilCheck (in tccompat.go), extendInteger
 - [x] compiler/spawn.go — SSA createSpawn deleted; validation utilities kept (shared)
 - [x] compiler/mxbuiltins.go — SSA versions deleted; TC path handles all moxie builtins
-- [~] compiler/restrict.go — TC variants exist for every check; unified dispatcher checkMoxieRestrictionsTC runs purely on mxssa. SSA path retained as defense-in-depth but verified unreachable in current usage (zero hits during smesh build, restrict tests, spawn tests via MOXIE_RESTRICT_SSA_TRACE). SSA can be deleted once cross-package shell handling guarantees mxFn is non-nil.
+- [x] compiler/restrict.go — go/ssa and go/types purged. SSA fallback deleted (verified dead via MOXIE_RESTRICT_SSA_TRACE). All check methods are now mxssa-only. *ssa.Go handler in compiler.go now uses isUserPackageTC.
+- [x] compiler/errors.go — go/types purged via local compiler.Error type (mirror of types.Error fields, handled in diagnostics package alongside types.Error).
 
 **Tier 3: Core files (highest assertion count)**
 - [ ] compiler/calls.go
