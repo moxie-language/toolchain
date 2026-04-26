@@ -1503,6 +1503,10 @@ func (b *builder) createFunction() {
 // b.mxFn was populated. createFunctionTC itself falls back to createFunction
 // when mxFn has no blocks or invalid types.
 func (b *builder) createFunctionDispatch() {
+	// In current usage mxFn is always non-nil for functions reaching this
+	// point (verified via MOXIE_SSA_TRACE 2026-04). The SSA path is still
+	// needed for invalid-typed runtime functions (complex128/64 ops, etc.)
+	// — those are detected inside createFunctionTC and fall through there.
 	if b.mxFn != nil {
 		b.createFunctionTC()
 	} else {
@@ -1511,11 +1515,9 @@ func (b *builder) createFunctionDispatch() {
 }
 
 func (b *builder) createFunctionTC() {
-	if len(b.mxFn.Blocks) == 0 {
-		b.createFunction()
-		return
-	}
-	if mxFnHasInvalidTypes(b.mxFn) {
+	if len(b.mxFn.Blocks) == 0 || mxFnHasInvalidTypes(b.mxFn) {
+		// Empty body (external decl) or types Moxie can't represent in TC
+		// (complex64/128 in runtime helpers). The SSA path emits these.
 		b.createFunction()
 		return
 	}
