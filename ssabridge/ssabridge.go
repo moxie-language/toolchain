@@ -322,6 +322,9 @@ func (t *Translator) translateFunctionBody(sf *ssa.Function, mf *mxssa.Function)
 		t.translateFunctionBody(af, maf)
 		mf.AnonFuncs = append(mf.AnonFuncs, maf)
 	}
+
+	// Wire referrers so Value.Referrers() returns the correct usage list.
+	mf.WireReferrers()
 }
 
 // value translates an ssa.Value to mxssa.Value.
