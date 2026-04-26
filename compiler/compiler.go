@@ -1675,8 +1675,22 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		b.createDefer(instr)
 	case *ssa.Go:
 		// Moxie: go keyword banned in user code. Runtime/internal exempt.
-		if isUserPackage(b.fn.Pkg) {
+		// SSA path runs only when mxFn isn't populated; check via mxssa
+		// equivalent if available, otherwise inline package-path test.
+		if b.mxFn != nil && isUserPackageTC(b.mxFn.Pkg) {
 			b.addError(instr.Pos(), "moxie: the go keyword is not supported (there are no goroutines)")
+		} else if b.mxFn == nil {
+			path := b.fn.Pkg.Pkg.Path()
+			if !strings.HasPrefix(path, "internal/") &&
+				!strings.Contains(path, "/internal/") &&
+				!strings.HasPrefix(path, "runtime") &&
+				!strings.HasPrefix(path, "unsafe") &&
+				!strings.HasPrefix(path, "os") &&
+				!strings.HasPrefix(path, "syscall") {
+				b.addError(instr.Pos(), "moxie: the go keyword is not supported (there are no goroutines)")
+			} else {
+				b.createGo(instr)
+			}
 		} else {
 			b.createGo(instr)
 		}
