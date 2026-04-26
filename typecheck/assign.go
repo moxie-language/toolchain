@@ -210,6 +210,21 @@ func isTextType(T Type) bool {
 	return false
 }
 
+// HasInfo reports whether T's underlying type is a *Basic with the given
+// BasicInfo bits set. The bits (IsString, IsBoolean, IsInteger, IsFloat,
+// IsUnsigned, IsNumeric, IsOrdered, IsUntyped) are constants in this package.
+//
+// Mirror of go/types per-info functions: typecheck.HasInfo(T, IsString) is
+// equivalent to types.IsString(T). One helper instead of eight saves boilerplate
+// while leaving the bit constants un-shadowed.
+func HasInfo(T Type, bits BasicInfo) bool {
+	if T == nil {
+		return false
+	}
+	b, ok := T.Underlying().(*Basic)
+	return ok && b.Info()&bits != 0
+}
+
 // IsInterface reports whether T's underlying type is an interface type.
 // Equivalent to go/types.IsInterface. Useful in type switches and dispatch
 // logic where the *Interface itself isn't needed, only the boolean.
