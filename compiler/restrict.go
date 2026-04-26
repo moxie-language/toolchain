@@ -114,7 +114,11 @@ func (b *builder) checkMoxieRestrictions() {
 	// Check for restricted types and builtins in AST (SSA may optimize them away).
 	b.checkASTRestrictions()
 	// Check that non-constant spawn args aren't used after the spawn call.
-	b.checkSpawnMoveRestriction()
+	if b.mxFn != nil && len(b.mxFn.Blocks) > 0 {
+		b.checkSpawnMoveRestrictionTC()
+	} else {
+		b.checkSpawnMoveRestriction()
+	}
 	// Check that every channel has both a sender and a listener.
 	b.checkChannelCompleteness()
 }
@@ -424,6 +428,89 @@ func (b *builder) checkSpawnMoveRestriction() {
 						}
 					} else if reachableAfter[refBlock] {
 						b.addError(ri.Pos(), "moxie: variable used after spawn — ownership moved to child domain")
+						break
+					}
+				}
+			}
+		}
+	}
+}
+
+// checkSpawnMoveRestrictionTC is the mxssa variant of checkSpawnMoveRestriction.
+// Same control-flow reachability analysis using mxssa.BasicBlock.Succs.
+func (b *builder) checkSpawnMoveRestrictionTC() {
+	for _, block := range b.mxFn.Blocks {
+		for spawnIdx, instr := range block.Instrs {
+			call, ok := instr.(*mxssa.Call)
+			if !ok {
+				continue
+			}
+			isSpawn := false
+			var spawnArgs []mxssa.Value
+			if builtin, ok := call.Call.Value.(*mxssa.Builtin); ok && builtin.Name() == "spawn" {
+				args := call.Call.Args
+				start := 0
+				if len(args) > 0 {
+					if _, ok := args[0].(*mxssa.Const); ok {
+						start = 2
+					} else {
+						start = 1
+					}
+				}
+				if start < len(args) {
+					spawnArgs = args[start:]
+				}
+				isSpawn = true
+			}
+			if !isSpawn {
+				continue
+			}
+
+			reachableAfter := make(map[*mxssa.BasicBlock]bool)
+			var work []*mxssa.BasicBlock
+			for _, succ := range block.Succs {
+				if !reachableAfter[succ] {
+					reachableAfter[succ] = true
+					work = append(work, succ)
+				}
+			}
+			for len(work) > 0 {
+				bb := work[0]
+				work = work[1:]
+				for _, succ := range bb.Succs {
+					if !reachableAfter[succ] {
+						reachableAfter[succ] = true
+						work = append(work, succ)
+					}
+				}
+			}
+
+			for _, arg := range spawnArgs {
+				if _, isConst := arg.(*mxssa.Const); isConst {
+					continue
+				}
+				if _, isChan := arg.Type().Underlying().(*typecheck.Chan); isChan {
+					continue
+				}
+				refs := arg.Referrers()
+				if refs == nil {
+					continue
+				}
+				for _, ref := range *refs {
+					refBlock := ref.Block()
+					if refBlock == block {
+						if reachableAfter[block] {
+							b.addError(ref.Pos(), "moxie: variable used after spawn — ownership moved to child domain")
+							break
+						}
+						for j := spawnIdx + 1; j < len(block.Instrs); j++ {
+							if block.Instrs[j] == ref {
+								b.addError(ref.Pos(), "moxie: variable used after spawn — ownership moved to child domain")
+								break
+							}
+						}
+					} else if reachableAfter[refBlock] {
+						b.addError(ref.Pos(), "moxie: variable used after spawn — ownership moved to child domain")
 						break
 					}
 				}
