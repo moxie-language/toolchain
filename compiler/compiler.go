@@ -149,7 +149,6 @@ func (c *compilerContext) dispose() {
 type builder struct {
 	*compilerContext
 	llvm.Builder
-	fn                *ssa.Function
 	mxFn              *mxssa.Function          // B3 bridge: native SSA function
 	llvmFnType        llvm.Type
 	llvmFn            llvm.Value
@@ -166,7 +165,7 @@ type builder struct {
 	stackChainAlloca  llvm.Value
 	landingpad        llvm.BasicBlock
 	difunc            llvm.Metadata
-	dilocals          map[*types.Var]llvm.Metadata
+	dilocalsParam     map[*mxssa.Parameter]llvm.Metadata
 	initInlinedAt     llvm.Metadata            // fake inlinedAt position
 	initPseudoFuncs   map[string]llvm.Metadata // fake "inlined" functions for proper init debug locations
 	allDeferFuncs     []interface{}
@@ -181,15 +180,12 @@ type builder struct {
 }
 
 func newBuilder(c *compilerContext, irbuilder llvm.Builder, mxFn *mxssa.Function) *builder {
-	// b.fn (*ssa.Function) is still needed for debug-info paths keyed on
-	// go/types until §3; derive via ReverseFunction. Always re-EnsureFunction
-	// to guarantee body translation has run (a shell-only mxFn from
-	// cross-package value translation would make createFunctionTC skip
-	// body generation and produce undefined symbols at link time).
-	var goFn *ssa.Function
+	// Always EnsureFunction so the body is translated. Without this, a
+	// shell-only mxFn (from cross-package value translation) would make
+	// createFunctionTC skip body generation and produce undefined symbols
+	// at link time.
 	if mxFn != nil {
-		goFn = c.mxTranslator.ReverseFunction(mxFn)
-		if goFn != nil {
+		if goFn := c.mxTranslator.ReverseFunction(mxFn); goFn != nil {
 			c.mxTranslator.EnsureFunction(goFn)
 		}
 	}
@@ -197,13 +193,12 @@ func newBuilder(c *compilerContext, irbuilder llvm.Builder, mxFn *mxssa.Function
 	b := &builder{
 		compilerContext: c,
 		Builder:         irbuilder,
-		fn:              goFn,
 		mxFn:            mxFn,
 		llvmFnType:      fnType,
 		llvmFn:          fn,
 		info:            c.getFunctionInfo(mxFn),
 		mxLocals:        make(map[mxssa.Value]llvm.Value),
-		dilocals:        make(map[*types.Var]llvm.Metadata),
+		dilocalsParam:   make(map[*mxssa.Parameter]llvm.Metadata),
 	}
 	return b
 }
@@ -791,43 +786,28 @@ func (b *builder) setDebugLocation(pos token.Pos) {
 	b.SetCurrentDebugLocation(uint(position.Line), uint(position.Column), b.difunc, llvm.Metadata{})
 }
 
-// getLocalVariable returns a debug info entry for a local variable, which may
-// either be a parameter or a regular variable. It will create a new metadata
-// entry if there isn't one for the variable yet.
-func (b *builder) getLocalVariable(variable *types.Var) llvm.Metadata {
-	if dilocal, ok := b.dilocals[variable]; ok {
-		// DILocalVariable was already created, return it directly.
+// getLocalParameter returns the debug info entry for a function parameter.
+// Cached on b.dilocalsParam (keyed by *mxssa.Parameter).
+func (b *builder) getLocalParameter(param *mxssa.Parameter, argNo int) llvm.Metadata {
+	if dilocal, ok := b.dilocalsParam[param]; ok {
 		return dilocal
 	}
-
-	pos := b.mxProgram.Fset.Position(variable.Pos())
-
-	// Check whether this is a function parameter.
-	for i, param := range b.fn.Params {
-		if param.Object().(*types.Var) == variable {
-			// Yes it is, create it as a function parameter.
-			dilocal := b.dibuilder.CreateParameterVariable(b.difunc, llvm.DIParameterVariable{
-				Name:           param.Name(),
-				File:           b.getDIFile(pos.Filename),
-				Line:           pos.Line,
-				Type:           b.getDIType(param.Type()),
-				AlwaysPreserve: true,
-				ArgNo:          i + 1,
-			})
-			b.dilocals[variable] = dilocal
-			return dilocal
-		}
+	pos := b.mxProgram.Fset.Position(param.Pos())
+	// Bridge typecheck.Type → go/types.Type for the still-SSA-typed
+	// getDIType chain (§3 will migrate that to TC).
+	var diType llvm.Metadata
+	if goType := b.mxTranslator.ReverseType(param.Type()); goType != nil {
+		diType = b.getDIType(goType)
 	}
-
-	// No, it's not a parameter. Create a regular (auto) variable.
-	dilocal := b.dibuilder.CreateAutoVariable(b.difunc, llvm.DIAutoVariable{
-		Name:           variable.Name(),
+	dilocal := b.dibuilder.CreateParameterVariable(b.difunc, llvm.DIParameterVariable{
+		Name:           param.Name(),
 		File:           b.getDIFile(pos.Filename),
 		Line:           pos.Line,
-		Type:           b.getDIType(variable.Type()),
+		Type:           diType,
 		AlwaysPreserve: true,
+		ArgNo:          argNo,
 	})
-	b.dilocals[variable] = dilocal
+	b.dilocalsParam[param] = dilocal
 	return dilocal
 }
 
@@ -1234,7 +1214,7 @@ func (c *compilerContext) getEmbedFileString(file *loader.EmbedFile) llvm.Value 
 // define compiler intrinsics like the atomic operations in sync/atomic.
 func (b *builder) createFunctionStart(intrinsic bool) {
 	if b.DumpSSA {
-		fmt.Printf("\nfunc %s:\n", b.fn)
+		fmt.Printf("\nfunc %s:\n", b.mxFn)
 	}
 	if !b.llvmFn.IsDeclaration() {
 		errValue := b.llvmFn.Name() + " redeclared in this program"
@@ -1365,11 +1345,11 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		paramValue := b.collapseFormalParam(llvmType, fields)
 		b.mxLocals[mxParam] = paramValue
 
-		// Add debug information to this parameter (if available). Falls back
-		// to the SSA-side *types.Var via b.fn.Params[i] since getLocalVariable
-		// is keyed on go/types until §3.
-		if b.Debug && b.mxFn.Syntax() != nil && i < len(b.fn.Params) {
-			dbgParam := b.getLocalVariable(b.fn.Params[i].Object().(*types.Var))
+		// Add debug information to this parameter (if available). Now mxssa-
+		// native: getLocalParameter takes *mxssa.Parameter directly, no
+		// b.fn.Params bridge needed.
+		if b.Debug && b.mxFn.Syntax() != nil {
+			dbgParam := b.getLocalParameter(mxParam, i+1)
 			loc := b.GetCurrentDebugLocation()
 			if len(fields) == 1 {
 				expr := b.dibuilder.CreateExpression(nil)

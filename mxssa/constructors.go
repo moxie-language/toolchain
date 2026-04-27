@@ -52,7 +52,8 @@ func NewParameter(name string, typ typecheck.Type, parent *Function) *Parameter 
 	return &Parameter{name: name, typ: typ, parent: parent}
 }
 
-func (p *Parameter) SetPos(pos token.Pos) { p.pos = pos }
+func (p *Parameter) SetPos(pos token.Pos)               { p.pos = pos }
+func (p *Parameter) SetObject(obj *typecheck.Var)       { p.object = obj }
 
 // NewFreeVar creates a free variable for a closure.
 func NewFreeVar(name string, typ typecheck.Type, parent *Function) *FreeVar {

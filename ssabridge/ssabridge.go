@@ -94,6 +94,13 @@ func (t *Translator) backfillShellMembers(f *ssa.Function, mf *mxssa.Function) {
 		p := f.Params[i]
 		mp := mxssa.NewParameter(p.Name(), t.typ(p.Type()), mf)
 		mp.SetPos(p.Pos())
+		if pObj := p.Object(); pObj != nil {
+			if tcObj := tcbridge.TranslateObject(t.imp, pObj); tcObj != nil {
+				if tcVar, ok := tcObj.(*typecheck.Var); ok {
+					mp.SetObject(tcVar)
+				}
+			}
+		}
 		mf.Params = append(mf.Params, mp)
 	}
 	for i := len(mf.FreeVars); i < len(f.FreeVars); i++ {
@@ -339,6 +346,15 @@ func (t *Translator) translateFunctionShell(f *ssa.Function, pkg *mxssa.Package)
 	for _, p := range f.Params {
 		mp := mxssa.NewParameter(p.Name(), t.typ(p.Type()), fn)
 		mp.SetPos(p.Pos())
+		// Populate Object so getLocalVariable can dispatch on *typecheck.Var
+		// without having to bridge through *types.Var.
+		if pObj := p.Object(); pObj != nil {
+			if tcObj := tcbridge.TranslateObject(t.imp, pObj); tcObj != nil {
+				if tcVar, ok := tcObj.(*typecheck.Var); ok {
+					mp.SetObject(tcVar)
+				}
+			}
+		}
 		fn.Params = append(fn.Params, mp)
 	}
 	for _, fv := range f.FreeVars {

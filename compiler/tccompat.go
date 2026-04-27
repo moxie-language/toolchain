@@ -336,7 +336,7 @@ func (c *compilerContext) validateBridgeTypes() {
 func (b *builder) getValueTC(expr mxssa.Value, pos token.Pos) llvm.Value {
 	switch expr := expr.(type) {
 	case *mxssa.Const:
-		if pos == token.NoPos && b.fn != nil {
+		if pos == token.NoPos && b.mxFn != nil {
 			file := b.mxProgram.Fset.File(b.mxFn.Pos())
 			if file != nil {
 				pos = file.Pos(0)
