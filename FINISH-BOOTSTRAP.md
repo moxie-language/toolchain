@@ -18,7 +18,7 @@ Two milestones: **M1 = no Go stdlib type/SSA imports anywhere except `typecheck/
 
 errors.go, defer.go, llvm.go, tccompat.go contain only comment references — already clean.
 
-### §1+early-§2 progress (this session) — 30+ commits
+### §1+§2+§3-prep progress (this session+next) — 33+ commits
 
 Keystone migrations:
 - `B3 §1: migrate getFunction onto *mxssa.Function` (59261a1)
@@ -70,34 +70,44 @@ Bug fixes uncovered along the way (all documented in commit messages):
 6. `ssabridge.translateFunctionBody` needed to backfill lazily-populated
    sf.Params/FreeVars before iterating them.
 
-### Status after §1+§2 progress
+### Status: compiler/ FULLY purged of go/ssa (2026-04-27)
 
-Files still importing go/types or go/ssa:
-- compiler/compiler.go (~120 type refs in createDIType + getLLVMType + createEmbedGlobal;
-  3 ssa references: builder.fn, var goFn in newBuilder, CompilePackage's parameter)
-- compiler/interface.go (~178 type refs in getTypeCode chain — go/ssa removed entirely)
-- compiler/sizes.go (36 type refs, blocked on §7 loader)
+The compiler/ package no longer imports `golang.org/x/tools/go/ssa` from
+any file. Achieved by:
 
-Files cleanly using go/ast only (legitimate, syntax-level): symbol.go, restrict.go, compiler.go.
+1. Migrating newBuilder to *mxssa.Function (with EnsureFunction body-safety)
+2. createPackage iterating mxssa.Members + Translator.MethodsForType helper
+3. Translator.MethodSet helper hiding go/ssa.MethodSets queries
+4. c.program field removed (interface.go uses Translator.MethodSet)
+5. createEmbedGlobal taking *mxssa.Global (bridges via ReverseGlobal internally)
+6. b.fn field removed (debug-info path migrated to getLocalParameter taking
+   *mxssa.Parameter; ssabridge.translateFunctionShell now sets Object())
+7. **PrepareCompile** factored out of CompilePackage so the entry point takes
+   `*ssabridge.Prepared` instead of `*ssa.Package` — the last go/ssa reference.
 
-Files with NO go/types or go/ssa imports: alias, asserts, atomic, calls, channel,
-defer, errors, func, gc, goroutine, interface (go/ssa-only), intrinsics, llvm,
-map, mxbuiltins, restrict, spawn, symbol, syscall, tccompat, volatile.
+compiler/ remaining imports:
+- compiler.go: go/ast, go/types, golang.org/x/tools/go/types/typeutil
+- interface.go: go/types (~178 refs in getTypeCode chain — §2)
+- sizes.go: go/types (implements types.Sizes for loader — §7-blocked)
+- restrict.go, symbol.go: go/ast (legitimate AST scanning)
 
-Major milestones reached this session:
-- newBuilder migrated to *mxssa.Function with EnsureFunction safety
-- createPackage iteration migrated to mxssa.Members + Translator.MethodsForType
-- Translator.MethodSet helper hides go/ssa.MethodSets behind the bridge
-- c.program field removed (interface.go now uses Translator.MethodSet)
-- createEmbedGlobal signature now takes *mxssa.Global (body bridges via ReverseGlobal)
+### Files still importing golang.org/x/tools/go/ssa (4 files, 1 of which is the bridge)
 
-Remaining go/ssa surface in compiler.go:
-- builder.fn / newBuilder var goFn — for debug-info path (getLocalVariable's
-  *types.Var lookup; §3 territory)
-- CompilePackage's `ssaPkg *ssa.Package` parameter — caller boundary; loader
-  passes ssa.Package today, must migrate to mxssa for full removal (§7)
+- ssabridge/ssabridge.go (the bridge itself; deletes when loader+jsbackend migrate)
+- jsbackend/compiler.go, jsbackend/instructions.go (§5 — independent backend, ~2400 LOC)
+- loader/ssa.go (§7 — 28 lines, but the migration is the loader's go/types Checker swap)
+- cmd/moxiejs/main.go (tooling — ~400 LOC, follows jsbackend)
 
-Smesh builds at 7,031,936 bytes (vs 7,051,048 baseline) and runs `version` at every commit.
+### Next major migrations
+
+- §2: interface.go's getTypeCode/getTypeCodeName/getTypeMethodSet chain (~500 LOC)
+- §3: createDIType chain in compiler.go (~200 LOC, unblocks dropping more go/types)
+- §5: jsbackend (~2400 LOC, mechanical mxssa.Function/Type/Global migration)
+- §7: loader migration (go/types.Checker → typecheck.Checker; ~50 LOC change but
+  high risk because of edge cases; biggest blocker for full bridge deletion)
+- §10: bridge deletion once §7 lands
+
+Smesh builds at 7,032,968 bytes (vs 7,051,048 baseline) and runs `version` at every commit.
 
 ### jsbackend/ — 3 files, 149 type refs total
 - compiler.go (677 LOC, 14)
