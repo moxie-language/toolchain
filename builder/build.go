@@ -27,6 +27,7 @@ import (
 	"moxie/goenv"
 	"moxie/interp"
 	"moxie/loader"
+	"moxie/ssabridge"
 	"moxie/stacksize"
 	"moxie/transform"
 	"tinygo.org/x/go-llvm"
@@ -352,9 +353,10 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 					return nil
 				}
 
-				// Compile AST to IR. The compiler.CompilePackage function will
-				// build the SSA as needed.
-				mod, errs := compiler.CompilePackage(pkg.ImportPath, pkg, program.Package(pkg.Pkg), machine, compilerConfig, config.DumpSSA())
+				// Prepare the bridge state (runs ssa.Build, sets up mxssa).
+				prep := ssabridge.PrepareCompile(program.Package(pkg.Pkg))
+				// Compile AST to IR.
+				mod, errs := compiler.CompilePackage(pkg.ImportPath, pkg, prep, machine, compilerConfig, config.DumpSSA())
 				defer mod.Context().Dispose()
 				defer mod.Dispose()
 				if errs != nil {

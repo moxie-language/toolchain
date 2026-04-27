@@ -15,6 +15,7 @@ import (
 	"moxie/compileopts"
 	"moxie/goenv"
 	"moxie/loader"
+	"moxie/ssabridge"
 
 	llvm "tinygo.org/x/go-llvm"
 )
@@ -131,10 +132,11 @@ func compilePackageIR(wrapDir, targetPkg string) ([]byte, error) {
 		return nil, fmt.Errorf("package %q not found in program", targetPkg)
 	}
 
+	prep := ssabridge.PrepareCompile(program.Package(targetLoaderPkg.Pkg))
 	mod, errs := compiler.CompilePackage(
 		targetLoaderPkg.ImportPath,
 		targetLoaderPkg,
-		program.Package(targetLoaderPkg.Pkg),
+		prep,
 		machine,
 		compilerConfig,
 		false,

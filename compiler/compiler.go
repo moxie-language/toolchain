@@ -21,7 +21,6 @@ import (
 	"moxie/ssabridge"
 	"moxie/src/moxie"
 	"moxie/typecheck"
-	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/types/typeutil"
 	"tinygo.org/x/go-llvm"
 )
@@ -291,35 +290,19 @@ func Sizes(machine llvm.TargetMachine) types.Sizes {
 }
 
 // CompilePackage compiles a single package to a LLVM module.
-func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package, machine llvm.TargetMachine, config *Config, dumpSSA bool) (llvm.Module, []error) {
+// The Prepared bridge state is built by ssabridge.PrepareCompile, which
+// hides go/ssa.Package from the compiler.
+func CompilePackage(moduleName string, pkg *loader.Package, prep *ssabridge.Prepared, machine llvm.TargetMachine, config *Config, dumpSSA bool) (llvm.Module, []error) {
 	c := newCompilerContext(moduleName, machine, config, dumpSSA)
 	defer c.dispose()
 	c.packageDir = pkg.OriginalDir()
 	c.embedGlobals = pkg.EmbedGlobals
 	c.pkg = pkg.Pkg
-	c.runtimePkg = ssaPkg.Prog.ImportedPackage("runtime").Pkg
-
-	// Convert AST to SSA.
-	ssaPkg.Build()
-
-	// B3 bridge: build mxssa.Program from ssa.Program for migrated files.
-	typePkgs := map[string]*types.Package{}
-	for _, p := range ssaPkg.Prog.AllPackages() {
-		typePkgs[p.Pkg.Path()] = p.Pkg
-	}
-	mxProg, mxTrans := ssabridge.Translate(ssaPkg.Prog.Fset, ssaPkg.Prog, typePkgs)
-	c.mxProgram = mxProg
-	c.mxTranslator = mxTrans
-	c.mxTranslator.TranslatePackage(ssaPkg)
-	// Pre-translate runtime and internal/task so getPackageFunction can resolve
-	// them via mxProgram.ImportedPackage. TranslatePackage is idempotent.
-	for _, importPath := range []string{"runtime", "internal/task"} {
-		if rt := ssaPkg.Prog.ImportedPackage(importPath); rt != nil {
-			c.mxTranslator.TranslatePackage(rt)
-		}
-	}
-	if mxP := mxProg.ImportedPackage(pkg.Pkg.Path()); mxP != nil {
-		c.mxPkg = mxP.Pkg
+	c.runtimePkg = prep.GoRuntimePkg
+	c.mxProgram = prep.MxProg
+	c.mxTranslator = prep.Translator
+	if prep.MxPkg != nil {
+		c.mxPkg = prep.MxPkg.Pkg
 	}
 	c.validateBridgeTypes()
 
@@ -348,11 +331,7 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 	// Compile all functions, methods, and global variables in this package.
 	irbuilder := c.ctx.NewBuilder()
 	defer irbuilder.Dispose()
-	mxCurrPkg := c.mxTranslator.LookupPackage(ssaPkg)
-	if mxCurrPkg == nil {
-		mxCurrPkg = c.mxTranslator.TranslatePackage(ssaPkg)
-	}
-	c.createPackage(irbuilder, mxCurrPkg)
+	c.createPackage(irbuilder, prep.MxPkg)
 
 	// see: https://reviews.llvm.org/D18355
 	if c.Debug {

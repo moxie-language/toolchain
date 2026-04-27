@@ -111,6 +111,48 @@ func (t *Translator) backfillShellMembers(f *ssa.Function, mf *mxssa.Function) {
 	}
 }
 
+// Prepared holds the bridge state for one CompilePackage invocation.
+// PrepareCompile builds it; CompilePackage consumes it. Hides go/ssa from
+// the compiler so it can drop the import.
+type Prepared struct {
+	MxProg       *mxssa.Program
+	Translator   *Translator
+	MxPkg        *mxssa.Package    // current package
+	GoRuntimePkg *types.Package    // runtime's go/types package (still needed for createDIType chain)
+}
+
+// PrepareCompile is the new entry point for the compiler. It runs ssa.Build,
+// constructs the bridge, and pre-translates runtime+internal/task. The
+// returned Prepared lets CompilePackage operate without importing go/ssa.
+func PrepareCompile(ssaPkg *ssa.Package) *Prepared {
+	ssaPkg.Build()
+	typePkgs := map[string]*types.Package{}
+	for _, p := range ssaPkg.Prog.AllPackages() {
+		typePkgs[p.Pkg.Path()] = p.Pkg
+	}
+	mxProg, mxTrans := Translate(ssaPkg.Prog.Fset, ssaPkg.Prog, typePkgs)
+	mxTrans.TranslatePackage(ssaPkg)
+	for _, importPath := range []string{"runtime", "internal/task"} {
+		if rt := ssaPkg.Prog.ImportedPackage(importPath); rt != nil {
+			mxTrans.TranslatePackage(rt)
+		}
+	}
+	var mxPkg *mxssa.Package
+	if mxP := mxProg.ImportedPackage(ssaPkg.Pkg.Path()); mxP != nil {
+		mxPkg = mxP
+	}
+	var runtimePkg *types.Package
+	if rt := ssaPkg.Prog.ImportedPackage("runtime"); rt != nil {
+		runtimePkg = rt.Pkg
+	}
+	return &Prepared{
+		MxProg:       mxProg,
+		Translator:   mxTrans,
+		MxPkg:        mxPkg,
+		GoRuntimePkg: runtimePkg,
+	}
+}
+
 // Translate converts an entire ssa.Program to mxssa.Program.
 // The typePkgs map provides go/types packages for type translation.
 func Translate(fset *token.FileSet, ssaProg *ssa.Program, typePkgs map[string]*types.Package) (*mxssa.Program, *Translator) {
