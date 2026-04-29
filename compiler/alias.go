@@ -43,17 +43,17 @@ func (b *builder) createAlias(alias llvm.Value) {
 	b.llvmFn.SetUnnamedAddr(true)
 
 	if b.Debug {
-		if b.mxFn.Syntax() != nil {
+		if b.fn.Syntax() != nil {
 			// Create debug info file if present.
-			b.difunc = b.attachDebugInfo(b.mxFn)
+			b.difunc = b.attachDebugInfo(b.fn)
 		}
-		pos := b.mxProgram.Fset.Position(b.mxFn.Pos())
+		pos := b.program.Fset.Position(b.fn.Pos())
 		b.SetCurrentDebugLocation(uint(pos.Line), uint(pos.Column), b.difunc, llvm.Metadata{})
 	}
 	entryBlock := b.ctx.AddBasicBlock(b.llvmFn, "entry")
 	b.SetInsertPointAtEnd(entryBlock)
 	if b.llvmFn.Type() != alias.Type() {
-		b.addError(b.mxFn.Pos(), "alias function should have the same type as aliasee "+alias.Name())
+		b.addError(b.fn.Pos(), "alias function should have the same type as aliasee "+alias.Name())
 		b.CreateUnreachable()
 		return
 	}

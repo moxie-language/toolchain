@@ -14,8 +14,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Config/llvm-config.h"
-
 /// Helper class for representing a single invocation of the assembler.
 struct AssemblerInvocation {
   /// @name Target Options
@@ -115,10 +113,8 @@ struct AssemblerInvocation {
 
   LLVM_PREFERRED_TYPE(bool)
   unsigned Crel : 1;
-#if LLVM_VERSION_MAJOR >= 20
   LLVM_PREFERRED_TYPE(bool)
   unsigned ImplicitMapsyms : 1;
-#endif
 
   LLVM_PREFERRED_TYPE(bool)
   unsigned X86RelaxRelocations : 1;
@@ -166,9 +162,7 @@ public:
     EmitDwarfUnwind = EmitDwarfUnwindType::Default;
     EmitCompactUnwindNonCanonical = false;
     Crel = false;
-#if LLVM_VERSION_MAJOR >= 20
     ImplicitMapsyms = 0;
-#endif
     X86RelaxRelocations = 0;
     X86Sse2Avx = 0;
   }

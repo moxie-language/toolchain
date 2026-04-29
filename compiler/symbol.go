@@ -7,13 +7,14 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"go/types"
 	"strconv"
 	"strings"
 
 	"moxie/compiler/llvmutil"
+	"moxie/goenv"
 	"moxie/loader"
-	"moxie/mxssa"
-	"moxie/typecheck"
+	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -67,9 +68,9 @@ const (
 	allocKindAligned
 )
 
-// getFunction returns the LLVM function for the given *mxssa.Function, creating
+// getFunction returns the LLVM function for the given *ssa.Function, creating
 // it if needed. It can later be filled with compilerContext.createFunction().
-func (c *compilerContext) getFunction(fn *mxssa.Function) (llvm.Type, llvm.Value) {
+func (c *compilerContext) getFunction(fn *ssa.Function) (llvm.Type, llvm.Value) {
 	info := c.getFunctionInfo(fn)
 	llvmFn := c.mod.NamedFunction(info.linkName)
 	if !llvmFn.IsNil() {
@@ -77,26 +78,22 @@ func (c *compilerContext) getFunction(fn *mxssa.Function) (llvm.Type, llvm.Value
 	}
 
 	var retType llvm.Type
-	var results *typecheck.Tuple
-	if fn.Signature != nil {
-		results = fn.Signature.Results()
-	}
-	if results == nil || results.Len() == 0 {
+	if fn.Signature.Results() == nil {
 		retType = c.ctx.VoidType()
-	} else if results.Len() == 1 {
-		retType = c.getLLVMTypeTC(results.At(0).Type())
+	} else if fn.Signature.Results().Len() == 1 {
+		retType = c.getLLVMType(fn.Signature.Results().At(0).Type())
 	} else {
-		rs := make([]llvm.Type, 0, results.Len())
-		for i := 0; i < results.Len(); i++ {
-			rs = append(rs, c.getLLVMTypeTC(results.At(i).Type()))
+		results := make([]llvm.Type, 0, fn.Signature.Results().Len())
+		for i := 0; i < fn.Signature.Results().Len(); i++ {
+			results = append(results, c.getLLVMType(fn.Signature.Results().At(i).Type()))
 		}
-		retType = c.ctx.StructType(rs, false)
+		retType = c.ctx.StructType(results, false)
 	}
 
 	var paramInfos []paramInfo
-	for _, param := range getParamsTC(fn.Signature) {
-		paramType := c.getLLVMTypeTC(param.Type())
-		paramFragmentInfos := c.expandFormalParamTypeTC(paramType, param.Name(), param.Type())
+	for _, param := range getParams(fn.Signature) {
+		paramType := c.getLLVMType(param.Type())
+		paramFragmentInfos := c.expandFormalParamType(paramType, param.Name(), param.Type())
 		paramInfos = append(paramInfos, paramFragmentInfos...)
 	}
 
@@ -252,71 +249,54 @@ func (c *compilerContext) getFunction(fn *mxssa.Function) (llvm.Type, llvm.Value
 
 // If this is a synthetic function (such as a generic function or a wrapper),
 // create it now.
-func (c *compilerContext) maybeCreateSyntheticFunction(fn *mxssa.Function, llvmFn llvm.Value) {
+func (c *compilerContext) maybeCreateSyntheticFunction(fn *ssa.Function, llvmFn llvm.Value) {
 	// Synthetic functions are functions that do not appear in the source code,
 	// they are artificially constructed. Usually they are wrapper functions
 	// that are not referenced anywhere except in a SSA call instruction so
 	// should be created right away.
 	// The exception is the package initializer, which does appear in the
 	// *ssa.Package members and so shouldn't be created here.
-	if fn.Synthetic == "" || fn.Synthetic == "package initializer" || fn.Synthetic == "generic function" || fn.Synthetic == "range-over-func yield" {
-		return
-	}
-	// newBuilder still requires *ssa.Function; obtain via translator.
-	goFn := c.mxTranslator.ReverseFunction(fn)
-	if goFn != nil {
-		if origin := goFn.Origin(); origin != nil && origin.RelString(nil) == "internal/abi.Escape" {
+	if fn.Synthetic != "" && fn.Synthetic != "package initializer" && fn.Synthetic != "generic function" && fn.Synthetic != "range-over-func yield" {
+		if origin := fn.Origin(); origin != nil && origin.RelString(nil) == "internal/abi.Escape" {
 			// This is a special implementation or internal/abi.Escape, which
 			// can only really be implemented in the compiler.
 			// For simplicity we'll only implement pointer parameters for now.
-			if len(fn.Params) > 0 {
-				if _, ok := fn.Params[0].Type().Underlying().(*typecheck.Pointer); ok {
-					irbuilder := c.ctx.NewBuilder()
-					defer irbuilder.Dispose()
-					b := newBuilder(c, irbuilder, fn)
-					b.createAbiEscapeImpl()
-					llvmFn.SetLinkage(llvm.LinkOnceODRLinkage)
-					llvmFn.SetUnnamedAddr(true)
-				}
+			if _, ok := fn.Params[0].Type().Underlying().(*types.Pointer); ok {
+				irbuilder := c.ctx.NewBuilder()
+				defer irbuilder.Dispose()
+				b := newBuilder(c, irbuilder, fn)
+				b.createAbiEscapeImpl()
+				llvmFn.SetLinkage(llvm.LinkOnceODRLinkage)
+				llvmFn.SetUnnamedAddr(true)
 			}
 			// If the parameter is not of a pointer type, it will be left
 			// unimplemented. This will result in a linker error if the function
 			// is really called, making it clear it needs to be implemented.
 			return
 		}
-		// Ensure the mxssa body is filled — synthetic instances/wrappers may
-		// have been registered as shells via cross-package translation.
-		c.mxTranslator.EnsureFunction(goFn)
+		if len(fn.Blocks) == 0 {
+			c.addError(fn.Pos(), "missing function body")
+			return
+		}
+		irbuilder := c.ctx.NewBuilder()
+		b := newBuilder(c, irbuilder, fn)
+		b.createFunction()
+		irbuilder.Dispose()
+		llvmFn.SetLinkage(llvm.LinkOnceODRLinkage)
+		llvmFn.SetUnnamedAddr(true)
 	}
-	if goFn == nil || len(goFn.Blocks) == 0 {
-		c.addError(fn.Pos(), "missing function body")
-		return
-	}
-	irbuilder := c.ctx.NewBuilder()
-	b := newBuilder(c, irbuilder, fn)
-	b.createFunctionDispatch()
-	irbuilder.Dispose()
-	llvmFn.SetLinkage(llvm.LinkOnceODRLinkage)
-	llvmFn.SetUnnamedAddr(true)
 }
 
 // getFunctionInfo returns information about a function that is not directly
-// present in *mxssa.Function, such as the link name and whether it should be
+// present in *ssa.Function, such as the link name and whether it should be
 // exported.
-func (c *compilerContext) getFunctionInfo(f *mxssa.Function) functionInfo {
+func (c *compilerContext) getFunctionInfo(f *ssa.Function) functionInfo {
 	if info, ok := c.functionInfos[f]; ok {
 		return info
 	}
-	// Use ssa.Function.RelString(nil) for canonical linkName since
-	// mxssa.Function.RelString doesn't include the receiver type for methods.
-	var linkName string
-	if goFn := c.mxTranslator.ReverseFunction(f); goFn != nil {
-		linkName = goFn.RelString(nil)
-	} else {
-		linkName = f.RelString(nil)
-	}
 	info := functionInfo{
-		linkName: linkName,
+		// Pick the default linkName.
+		linkName: f.RelString(nil),
 	}
 
 	// Check for a few runtime functions that are treated specially.
@@ -337,7 +317,7 @@ func (c *compilerContext) getFunctionInfo(f *mxssa.Function) functionInfo {
 	}
 
 	// Check for //go: pragmas, which may change the link name (among others).
-	c.parsePragmasTC(&info, f)
+	c.parsePragmas(&info, f)
 
 	c.functionInfos[f] = info
 	return info
@@ -345,19 +325,16 @@ func (c *compilerContext) getFunctionInfo(f *mxssa.Function) functionInfo {
 
 // parsePragmas is used by getFunctionInfo to parse function pragmas such as
 // //export or //go:noinline.
-
-// parsePragmasTC is the mxssa variant of parsePragmas. Walks the AST via
-// fn.Syntax() and uses TC helpers for unsafe-import and wasm checks.
-//
-// Note: Origin (generic instantiation) handling is not supported by mxssa;
-// the syntax falls back to fn.Syntax() unconditionally. In practice Moxie
-// makes minimal use of generics and pragmas don't apply to instantiations.
-func (c *compilerContext) parsePragmasTC(info *functionInfo, fn *mxssa.Function) {
-	syntax := fn.Syntax()
+func (c *compilerContext) parsePragmas(info *functionInfo, f *ssa.Function) {
+	syntax := f.Syntax()
+	if f.Origin() != nil {
+		syntax = f.Origin().Syntax()
+	}
 	if syntax == nil {
 		return
 	}
 
+	// Read all pragmas of this function.
 	var pragmas []*ast.Comment
 	hasWasmExport := false
 	if decl, ok := syntax.(*ast.FuncDecl); ok && decl.Doc != nil {
@@ -372,6 +349,7 @@ func (c *compilerContext) parsePragmasTC(info *functionInfo, fn *mxssa.Function)
 		}
 	}
 
+	// Parse each pragma.
 	for _, comment := range pragmas {
 		parts := strings.Fields(comment.Text)
 		switch parts[0] {
@@ -380,54 +358,62 @@ func (c *compilerContext) parsePragmasTC(info *functionInfo, fn *mxssa.Function)
 				continue
 			}
 			if hasWasmExport {
+				// //go:wasmexport overrides //export.
 				continue
 			}
+
 			info.linkName = parts[1]
 			info.wasmName = info.linkName
 			info.exported = true
 		case "//go:interrupt":
-			if hasUnsafeImportTC(fn.Pkg.Pkg) {
+			if hasUnsafeImport(f.Pkg.Pkg) {
 				info.interrupt = true
 			}
 		case "//go:wasm-module":
+			// Alternative comment for setting the import module.
+			// This is deprecated, use //go:wasmimport instead.
 			if len(parts) != 2 {
 				continue
 			}
 			info.wasmModule = parts[1]
 		case "//go:wasmimport":
+			// Import a WebAssembly function, for example a WASI function.
+			// Original proposal: https://github.com/golang/go/issues/38248
+			// Allow globally: https://github.com/golang/go/issues/59149
 			if len(parts) != 3 {
 				continue
 			}
-			if len(fn.Blocks) > 0 {
-				c.addError(fn.Pos(), "can only use //go:wasmimport on declarations")
+			if f.Blocks != nil {
+				// Defined functions cannot be exported.
+				c.addError(f.Pos(), "can only use //go:wasmimport on declarations")
 				continue
 			}
-			c.checkWasmImportExportTC(fn, comment.Text)
+			c.checkWasmImportExport(f, comment.Text)
 			info.exported = true
 			info.wasmModule = parts[1]
 			info.wasmName = parts[2]
 		case "//go:wasmexport":
-			if len(fn.Blocks) == 0 {
-				c.addError(fn.Pos(), "can only use //go:wasmexport on definitions")
+			if f.Blocks == nil {
+				c.addError(f.Pos(), "can only use //go:wasmexport on definitions")
 				continue
 			}
 			if len(parts) != 2 {
-				c.addError(fn.Pos(), fmt.Sprintf("expected one parameter to //go:wasmexport, not %d", len(parts)-1))
+				c.addError(f.Pos(), fmt.Sprintf("expected one parameter to //go:wasmexport, not %d", len(parts)-1))
 				continue
 			}
 			name := parts[1]
 			if name == "_start" || name == "_initialize" {
-				c.addError(fn.Pos(), fmt.Sprintf("//go:wasmexport does not allow %#v", name))
+				c.addError(f.Pos(), fmt.Sprintf("//go:wasmexport does not allow %#v", name))
 				continue
 			}
-			if c.BuildMode != "c-shared" && fn.RelString(nil) == "main.main" {
-				c.addError(fn.Pos(), fmt.Sprintf("//go:wasmexport does not allow main.main to be exported with -buildmode=%s", c.BuildMode))
+			if c.BuildMode != "c-shared" && f.RelString(nil) == "main.main" {
+				c.addError(f.Pos(), fmt.Sprintf("//go:wasmexport does not allow main.main to be exported with -buildmode=%s", c.BuildMode))
 				continue
 			}
 			if c.archFamily() != "wasm32" {
-				c.addError(fn.Pos(), "//go:wasmexport is only supported on wasm")
+				c.addError(f.Pos(), "//go:wasmexport is only supported on wasm")
 			}
-			c.checkWasmImportExportTC(fn, comment.Text)
+			c.checkWasmImportExport(f, comment.Text)
 			info.wasmExport = name
 			info.wasmExportPos = comment.Slash
 		case "//go:inline":
@@ -435,27 +421,46 @@ func (c *compilerContext) parsePragmasTC(info *functionInfo, fn *mxssa.Function)
 		case "//go:noinline":
 			info.inline = inlineNone
 		case "//go:linkname":
-			if len(parts) != 3 || parts[1] != fn.Name() {
+			if len(parts) != 3 || parts[1] != f.Name() {
 				continue
 			}
-			if hasUnsafeImportTC(fn.Pkg.Pkg) {
+			// Only enable go:linkname when the package imports "unsafe".
+			// This is a slightly looser requirement than what gc uses: gc
+			// requires the file to import "unsafe", not the package as a
+			// whole.
+			if hasUnsafeImport(f.Pkg.Pkg) {
 				info.linkName = parts[2]
 			}
 		case "//go:section":
-			if len(parts) == 2 && hasUnsafeImportTC(fn.Pkg.Pkg) {
+			// Only enable go:section when the package imports "unsafe".
+			// go:section also implies go:noinline since inlining could
+			// move the code to a different section than that requested.
+			if len(parts) == 2 && hasUnsafeImport(f.Pkg.Pkg) {
 				info.section = parts[1]
 				info.inline = inlineNone
 			}
 		case "//go:nobounds":
-			if hasUnsafeImportTC(fn.Pkg.Pkg) {
+			// Skip bounds checking in this function. Useful for some
+			// runtime functions.
+			// This is somewhat dangerous and thus only imported in packages
+			// that import unsafe.
+			if hasUnsafeImport(f.Pkg.Pkg) {
 				info.nobounds = true
 			}
 		case "//go:noescape":
-			if len(fn.Blocks) == 0 {
+			// Don't let pointer parameters escape.
+			// Following the upstream Go implementation, we only do this for
+			// declarations, not definitions.
+			if len(f.Blocks) == 0 {
 				info.noescape = true
 			}
 		case "//go:variadic":
-			if strings.HasPrefix(fn.Name(), "_Cgo_") {
+			// The //go:variadic pragma is emitted by the CGo preprocessing
+			// pass for C variadic functions. This includes both explicit
+			// (with ...) and implicit (no parameters in signature)
+			// functions.
+			if strings.HasPrefix(f.Name(), "_Cgo_") {
+				// This prefix was created as a result of CGo preprocessing.
 				info.variadic = true
 			}
 		}
@@ -471,6 +476,28 @@ func (c *compilerContext) parsePragmasTC(info *functionInfo, fn *mxssa.Function)
 //
 // The list of allowed types is based on this proposal:
 // https://github.com/golang/go/issues/59149
+func (c *compilerContext) checkWasmImportExport(f *ssa.Function, pragma string) {
+	if c.pkg.Path() == "runtime" || c.pkg.Path() == "syscall/js" || c.pkg.Path() == "syscall" || c.pkg.Path() == "crypto/internal/sysrand" {
+		// The runtime is a special case. Allow all kinds of parameters
+		// (importantly, including pointers).
+		return
+	}
+	if f.Signature.Results().Len() > 1 {
+		c.addError(f.Signature.Results().At(1).Pos(), fmt.Sprintf("%s: too many return values", pragma))
+	} else if f.Signature.Results().Len() == 1 {
+		result := f.Signature.Results().At(0)
+		if !c.isValidWasmType(result.Type(), siteResult) {
+			c.addError(result.Pos(), fmt.Sprintf("%s: unsupported result type %s", pragma, result.Type().String()))
+		}
+	}
+	for _, param := range f.Params {
+		// Check whether the type is allowed.
+		// Only a very limited number of types can be mapped to WebAssembly.
+		if !c.isValidWasmType(param.Type(), siteParam) {
+			c.addError(param.Pos(), fmt.Sprintf("%s: unsupported parameter type %s", pragma, param.Type().String()))
+		}
+	}
+}
 
 // Check whether the type maps directly to a WebAssembly type.
 //
@@ -479,6 +506,57 @@ func (c *compilerContext) parsePragmasTC(info *functionInfo, fn *mxssa.Function)
 //
 // This previously reflected the additional restrictions documented here:
 // https://github.com/golang/go/issues/59149
+func (c *compilerContext) isValidWasmType(typ types.Type, site wasmSite) bool {
+	switch typ := typ.Underlying().(type) {
+	case *types.Basic:
+		switch typ.Kind() {
+		case types.Bool:
+			return true
+		case types.Int8, types.Uint8, types.Int16, types.Uint16:
+			return site == siteIndirect
+		case types.Int32, types.Uint32, types.Int64, types.Uint64:
+			return true
+		case types.Float32, types.Float64:
+			return true
+		case types.Uintptr, types.UnsafePointer:
+			return true
+		case types.String:
+			// string flattens to three values (ptr, len, cap), so disallowed as a result
+			return site == siteParam || site == siteIndirect
+		}
+	case *types.Array:
+		return site == siteIndirect && c.isValidWasmType(typ.Elem(), siteIndirect)
+	case *types.Struct:
+		if site != siteIndirect {
+			return false
+		}
+		// Structs with no fields do not need structs.HostLayout
+		if typ.NumFields() == 0 {
+			return true
+		}
+		hasHostLayout := true // default to true before detecting Go version
+		// (*types.Package).GoVersion added in go1.21
+		if gv, ok := any(c.pkg).(interface{ GoVersion() string }); ok {
+			if goenv.Compare(gv.GoVersion(), "go1.23") >= 0 {
+				hasHostLayout = false // package structs added in go1.23
+			}
+		}
+		for i := 0; i < typ.NumFields(); i++ {
+			ftyp := typ.Field(i).Type()
+			if ftyp.String() == "structs.HostLayout" {
+				hasHostLayout = true
+				continue
+			}
+			if !c.isValidWasmType(ftyp, siteIndirect) {
+				return false
+			}
+		}
+		return hasHostLayout
+	case *types.Pointer:
+		return c.isValidWasmType(typ.Elem(), siteIndirect)
+	}
+	return false
+}
 
 type wasmSite int
 
@@ -488,100 +566,16 @@ const (
 	siteIndirect // pointer or field
 )
 
-// checkWasmImportExportTC is the mxssa variant of checkWasmImportExport. Note
-// that typecheck.Var doesn't expose a typed Pos(), so result-type errors use
-// the function's position as a fallback. Parameter errors use the parameter's
-// own position via mxssa.Parameter.Pos().
-func (c *compilerContext) checkWasmImportExportTC(fn *mxssa.Function, pragma string) {
-	if c.mxPkg.Path() == "runtime" || c.mxPkg.Path() == "syscall/js" || c.mxPkg.Path() == "syscall" || c.mxPkg.Path() == "crypto/internal/sysrand" {
-		return
-	}
-	sig := fn.Signature
-	if sig == nil {
-		return
-	}
-	if results := sig.Results(); results != nil {
-		if results.Len() > 1 {
-			c.addError(fn.Pos(), fmt.Sprintf("%s: too many return values", pragma))
-		} else if results.Len() == 1 {
-			result := results.At(0)
-			if !c.isValidWasmTypeTC(result.Type(), siteResult) {
-				c.addError(fn.Pos(), fmt.Sprintf("%s: unsupported result type %s", pragma, result.Type().String()))
-			}
-		}
-	}
-	for _, param := range fn.Params {
-		if !c.isValidWasmTypeTC(param.Type(), siteParam) {
-			c.addError(param.Pos(), fmt.Sprintf("%s: unsupported parameter type %s", pragma, param.Type().String()))
-		}
-	}
-}
-
-// isValidWasmTypeTC is the typecheck variant of isValidWasmType. Mirrors the
-// SSA logic with typecheck.Type. Note: Uintptr collapses to Uint64 in tcbridge,
-// so the Uintptr case is handled by the Uint64 branch.
-func (c *compilerContext) isValidWasmTypeTC(typ typecheck.Type, site wasmSite) bool {
-	switch typ := typ.Underlying().(type) {
-	case *typecheck.Basic:
-		switch typ.Kind() {
-		case typecheck.Bool:
-			return true
-		case typecheck.Int8, typecheck.Uint8, typecheck.Int16, typecheck.Uint16:
-			return site == siteIndirect
-		case typecheck.Int32, typecheck.Uint32, typecheck.Int64, typecheck.Uint64:
-			return true
-		case typecheck.Float32, typecheck.Float64:
-			return true
-		case typecheck.UnsafePointer:
-			return true
-		case typecheck.String:
-			return site == siteParam || site == siteIndirect
-		}
-	case *typecheck.Array:
-		return site == siteIndirect && c.isValidWasmTypeTC(typ.Elem(), siteIndirect)
-	case *typecheck.Struct:
-		if site != siteIndirect {
-			return false
-		}
-		if typ.NumFields() == 0 {
-			return true
-		}
-		// HostLayout detection requires field name matching by string;
-		// typecheck.Struct doesn't expose go-version metadata, so default
-		// to true (accept) for fields that aren't HostLayout.
-		hasHostLayout := true
-		for i := 0; i < typ.NumFields(); i++ {
-			ftyp := typ.Field(i).Type()
-			if ftyp.String() == "structs.HostLayout" {
-				hasHostLayout = true
-				continue
-			}
-			if !c.isValidWasmTypeTC(ftyp, siteIndirect) {
-				return false
-			}
-		}
-		return hasHostLayout
-	case *typecheck.Pointer:
-		return c.isValidWasmTypeTC(typ.Elem(), siteIndirect)
-	}
-	return false
-}
-
-// getParamsTC returns the function parameters, including the receiver at
-// the start. Tolerates nil Signature
-// fields since the bridge may produce signatures with nil params/results.
-func getParamsTC(sig *typecheck.Signature) []*typecheck.Var {
-	params := []*typecheck.Var{}
-	if sig == nil {
-		return params
-	}
+// getParams returns the function parameters, including the receiver at the
+// start. This is an alternative to the Params member of *ssa.Function, which is
+// not yet populated when the package has not yet been built.
+func getParams(sig *types.Signature) []*types.Var {
+	params := []*types.Var{}
 	if sig.Recv() != nil {
 		params = append(params, sig.Recv())
 	}
-	if p := sig.Params(); p != nil {
-		for i := 0; i < p.Len(); i++ {
-			params = append(params, p.At(i))
-		}
+	for i := 0; i < sig.Params().Len(); i++ {
+		params = append(params, sig.Params().At(i))
 	}
 	return params
 }
@@ -673,20 +667,14 @@ func (c *compilerContext) loadASTComments(pkg *loader.Package) {
 	}
 }
 
-// getGlobal returns a LLVM IR global value for a native SSA global. It is
-// added to the LLVM IR if it has not been added already.
-func (c *compilerContext) getGlobal(g *mxssa.Global) llvm.Value {
+// getGlobal returns a LLVM IR global value for a Go SSA global. It is added to
+// the LLVM IR if it has not been added already.
+func (c *compilerContext) getGlobal(g *ssa.Global) llvm.Value {
 	info := c.getGlobalInfo(g)
 	llvmGlobal := c.mod.NamedGlobal(info.linkName)
 	if llvmGlobal.IsNil() {
-		// mxssa.Global.Type() returns the pointer type (matches go/ssa).
-		var elemType typecheck.Type
-		if ptrTyp, ok := g.Type().(*typecheck.Pointer); ok {
-			elemType = ptrTyp.Elem()
-		} else {
-			elemType = g.Type()
-		}
-		llvmType := c.getLLVMTypeTC(elemType)
+		typ := g.Type().(*types.Pointer).Elem()
+		llvmType := c.getLLVMType(typ)
 		llvmGlobal = llvm.AddGlobal(c.mod, llvmType, info.linkName)
 
 		// Set alignment from the //go:align comment.
@@ -695,24 +683,23 @@ func (c *compilerContext) getGlobal(g *mxssa.Global) llvm.Value {
 			alignment = info.align
 		}
 		if alignment <= 0 || alignment&(alignment-1) != 0 {
+			// Check for power-of-two (or 0).
+			// See: https://stackoverflow.com/a/108360
 			c.addError(g.Pos(), "global variable alignment must be a positive power of two")
 		} else {
+			// Set the alignment only when it is a power of two.
 			llvmGlobal.SetAlignment(alignment)
 		}
 
 		if c.Debug && !info.extern {
-			// Debug info still uses go/types to drive getDIType, since the
-			// createDIType chain remains keyed on go/types.Type. Migrating
-			// that is its own commit (§3). Pull from getDITypeForGlobal
-			// (helper in compiler.go) so symbol.go stays types-import-free.
-			pos := c.mxProgram.Fset.Position(g.Pos())
-			diType := c.getDITypeForGlobal(g)
+			// Add debug info.
+			pos := c.program.Fset.Position(g.Pos())
 			diglobal := c.dibuilder.CreateGlobalVariableExpression(c.difiles[pos.Filename], llvm.DIGlobalVariableExpression{
-				Name:        g.String(),
+				Name:        g.RelString(nil),
 				LinkageName: info.linkName,
 				File:        c.getDIFile(pos.Filename),
 				Line:        pos.Line,
-				Type:        diType,
+				Type:        c.getDIType(typ),
 				LocalToUnit: false,
 				Expr:        c.dibuilder.CreateExpression(nil),
 				AlignInBits: uint32(alignment) * 8,
@@ -724,22 +711,22 @@ func (c *compilerContext) getGlobal(g *mxssa.Global) llvm.Value {
 }
 
 // getGlobalInfo returns some information about a specific global.
-func (c *compilerContext) getGlobalInfo(g *mxssa.Global) globalInfo {
+func (c *compilerContext) getGlobalInfo(g *ssa.Global) globalInfo {
 	info := globalInfo{
-		linkName: g.String(),
+		// Pick the default linkName.
+		linkName: g.RelString(nil),
 	}
+	// Check for //go: pragmas, which may change the link name (among others).
 	doc := c.astComments[info.linkName]
 	if doc != nil {
-		info.parsePragmasTC(doc, c, g)
+		info.parsePragmas(doc, c, g)
 	}
 	return info
 }
 
 // Parse //go: pragma comments from the source. In particular, it parses the
 // //go:extern and //go:linkname pragmas on globals.
-
-// parsePragmasTC is the mxssa variant of (*globalInfo).parsePragmas.
-func (info *globalInfo) parsePragmasTC(doc *ast.CommentGroup, c *compilerContext, g *mxssa.Global) {
+func (info *globalInfo) parsePragmas(doc *ast.CommentGroup, c *compilerContext, g *ssa.Global) {
 	for _, comment := range doc.List {
 		if !strings.HasPrefix(comment.Text, "//go:") {
 			continue
@@ -764,22 +751,31 @@ func (info *globalInfo) parsePragmasTC(doc *ast.CommentGroup, c *compilerContext
 			if len(parts) != 3 || parts[1] != g.Name() {
 				continue
 			}
-			if hasUnsafeImportTC(g.Package().Pkg) {
+			// Only enable go:linkname when the package imports "unsafe".
+			// This is a slightly looser requirement than what gc uses: gc
+			// requires the file to import "unsafe", not the package as a
+			// whole.
+			if hasUnsafeImport(g.Pkg.Pkg) {
 				info.linkName = parts[2]
 			}
 		}
 	}
 }
 
-// hasUnsafeImportTC is the typecheck-side mirror of hasUnsafeImport.
-// Requires ssabridge.TranslatePackage / ensurePackage to have populated
-// pkg.Imports() — done unconditionally in current ssabridge.
-func hasUnsafeImportTC(pkg *typecheck.Package) bool {
-	if pkg == nil {
-		return false
+// Get all methods of a type.
+func getAllMethods(prog *ssa.Program, typ types.Type) []*types.Selection {
+	ms := prog.MethodSets.MethodSet(typ)
+	methods := make([]*types.Selection, ms.Len())
+	for i := 0; i < ms.Len(); i++ {
+		methods[i] = ms.At(i)
 	}
+	return methods
+}
+
+// Return true if this package imports "unsafe", false otherwise.
+func hasUnsafeImport(pkg *types.Package) bool {
 	for _, imp := range pkg.Imports() {
-		if imp != nil && imp.Path() == "unsafe" {
+		if imp == types.Unsafe {
 			return true
 		}
 	}

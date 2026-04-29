@@ -4,52 +4,32 @@ package compiler
 
 import (
 	"go/token"
+	"go/types"
 
-	"moxie/mxssa"
 	"moxie/src/moxie"
-	"moxie/typecheck"
+	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
 
 // createMakeMap creates a new map object (runtime.hashmap) by allocating and
-// Clear the given map.
-func (b *builder) createMapClear(m llvm.Value) {
-	b.createRuntimeCall("hashmapClear", []llvm.Value{m}, "")
-}
-
-func hashmapIsBinaryKeyTC(keyType typecheck.Type) bool {
-	switch keyType := keyType.Underlying().(type) {
-	case *typecheck.Basic:
-		return keyType.Info()&(typecheck.IsBoolean|typecheck.IsInteger) != 0
-	case *typecheck.Pointer:
-		return true
-	case *typecheck.Struct:
-		for i := 0; i < keyType.NumFields(); i++ {
-			if !hashmapIsBinaryKeyTC(keyType.Field(i).Type().Underlying()) {
-				return false
-			}
-		}
-		return true
-	case *typecheck.Array:
-		return hashmapIsBinaryKeyTC(keyType.Elem())
-	default:
-		return false
-	}
-}
-
-func (b *builder) createMakeMapTC(expr *mxssa.MakeMap) (llvm.Value, error) {
-	mapType := expr.Type().Underlying().(*typecheck.Map)
+// initializing an appropriately sized object.
+func (b *builder) createMakeMap(expr *ssa.MakeMap) (llvm.Value, error) {
+	mapType := expr.Type().Underlying().(*types.Map)
 	keyType := mapType.Key().Underlying()
-	llvmValueType := b.getLLVMTypeTC(mapType.Elem().Underlying())
+	llvmValueType := b.getLLVMType(mapType.Elem().Underlying())
 	var llvmKeyType llvm.Type
 	var alg uint64
-	if isStringLikeTC(keyType) {
-		llvmKeyType = b.getLLVMTypeTC(keyType)
+	if isStringLike(keyType) {
+		// String/[]byte keys (Moxie: string=[]byte).
+		llvmKeyType = b.getLLVMType(keyType)
 		alg = uint64(moxie.HashmapAlgorithmContent)
-	} else if hashmapIsBinaryKeyTC(keyType) {
-		llvmKeyType = b.getLLVMTypeTC(keyType)
+	} else if hashmapIsBinaryKey(keyType) {
+		// Trivially comparable keys.
+		llvmKeyType = b.getLLVMType(keyType)
 		alg = uint64(moxie.HashmapAlgorithmBinary)
 	} else {
+		// All other keys. Implemented as map[interface{}]valueType for ease of
+		// implementation.
 		llvmKeyType = b.getLLVMRuntimeType("_interface")
 		alg = uint64(moxie.HashmapAlgorithmInterface)
 	}
@@ -60,9 +40,9 @@ func (b *builder) createMakeMapTC(expr *mxssa.MakeMap) (llvm.Value, error) {
 	sizeHint := llvm.ConstInt(b.uintptrType, 8, false)
 	algEnum := llvm.ConstInt(b.ctx.Int8Type(), alg, false)
 	if expr.Reserve != nil {
-		sizeHint = b.getValueTC(expr.Reserve, getPosTC(expr))
+		sizeHint = b.getValue(expr.Reserve, getPos(expr))
 		var err error
-		sizeHint, err = b.createConvertTC(expr.Reserve.Type(), typecheck.Typ[typecheck.Uint64], sizeHint, expr.Pos())
+		sizeHint, err = b.createConvert(expr.Reserve.Type(), types.Typ[types.Uintptr], sizeHint, expr.Pos())
 		if err != nil {
 			return llvm.Value{}, err
 		}
@@ -71,36 +51,57 @@ func (b *builder) createMakeMapTC(expr *mxssa.MakeMap) (llvm.Value, error) {
 	return hashmap, nil
 }
 
-func (b *builder) createMapLookupTC(keyType, valueType typecheck.Type, m, key llvm.Value, commaOk bool, pos token.Pos) (llvm.Value, error) {
-	llvmValueType := b.getLLVMTypeTC(valueType)
+// createMapLookup returns the value in a map. It calls a runtime function
+// depending on the map key type to load the map value and its comma-ok value.
+func (b *builder) createMapLookup(keyType, valueType types.Type, m, key llvm.Value, commaOk bool, pos token.Pos) (llvm.Value, error) {
+	llvmValueType := b.getLLVMType(valueType)
+
+	// Allocate the memory for the resulting type. Do not zero this memory: it
+	// will be zeroed by the hashmap get implementation if the key is not
+	// present in the map.
 	mapValueAlloca, mapValueAllocaSize := b.createTemporaryAlloca(llvmValueType, "hashmap.value")
+
+	// We need the map size (with type uintptr) to pass to the hashmap*Get
+	// functions. This is necessary because those *Get functions are valid on
+	// nil maps, and they'll need to zero the value pointer by that number of
+	// bytes.
 	mapValueSize := mapValueAllocaSize
 	if mapValueSize.Type().IntTypeWidth() > b.uintptrType.IntTypeWidth() {
 		mapValueSize = llvm.ConstTrunc(mapValueSize, b.uintptrType)
 	}
 
+	// Do the lookup. How it is done depends on the key type.
 	var commaOkValue llvm.Value
 	origKeyType := keyType
 	keyType = keyType.Underlying()
-	if isStringLikeTC(keyType) {
+	if isStringLike(keyType) {
+		// key is string/[]byte (Moxie: string=[]byte)
 		params := []llvm.Value{m, key, mapValueAlloca, mapValueSize}
 		commaOkValue = b.createRuntimeCall("hashmapContentGet", params, "")
-	} else if hashmapIsBinaryKeyTC(keyType) {
+	} else if hashmapIsBinaryKey(keyType) {
+		// key can be compared with runtime.memequal
+		// Store the key in an alloca, in the entry block to avoid dynamic stack
+		// growth.
 		mapKeyAlloca, mapKeySize := b.createTemporaryAlloca(key.Type(), "hashmap.key")
 		b.CreateStore(key, mapKeyAlloca)
-		b.zeroUndefBytes(b.getLLVMTypeTC(keyType), mapKeyAlloca)
+		b.zeroUndefBytes(b.getLLVMType(keyType), mapKeyAlloca)
+		// Fetch the value from the hashmap.
 		params := []llvm.Value{m, mapKeyAlloca, mapValueAlloca, mapValueSize}
 		commaOkValue = b.createRuntimeCall("hashmapBinaryGet", params, "")
 		b.emitLifetimeEnd(mapKeyAlloca, mapKeySize)
 	} else {
+		// Not trivially comparable using memcmp. Make it an interface instead.
 		itfKey := key
-		if _, ok := keyType.(*typecheck.Interface); !ok {
-			itfKey = b.createMakeInterfaceTC(key, origKeyType, pos)
+		if _, ok := keyType.(*types.Interface); !ok {
+			// Not already an interface, so convert it to an interface now.
+			itfKey = b.createMakeInterface(key, origKeyType, pos)
 		}
 		params := []llvm.Value{m, itfKey, mapValueAlloca, mapValueSize}
 		commaOkValue = b.createRuntimeCall("hashmapInterfaceGet", params, "")
 	}
 
+	// Load the resulting value from the hashmap. The value is set to the zero
+	// value if the key doesn't exist in the hashmap.
 	mapValue := b.CreateLoad(llvmValueType, mapValueAlloca, "")
 	b.emitLifetimeEnd(mapValueAlloca, mapValueAllocaSize)
 
@@ -109,29 +110,36 @@ func (b *builder) createMapLookupTC(keyType, valueType typecheck.Type, m, key ll
 		tuple = b.CreateInsertValue(tuple, mapValue, 0, "")
 		tuple = b.CreateInsertValue(tuple, commaOkValue, 1, "")
 		return tuple, nil
+	} else {
+		return mapValue, nil
 	}
-	return mapValue, nil
 }
 
-func (b *builder) createMapUpdateTC(keyType typecheck.Type, m, key, value llvm.Value, pos token.Pos) {
+// createMapUpdate updates a map key to a given value, by creating an
+// appropriate runtime call.
+func (b *builder) createMapUpdate(keyType types.Type, m, key, value llvm.Value, pos token.Pos) {
 	valueAlloca, valueSize := b.createTemporaryAlloca(value.Type(), "hashmap.value")
 	b.CreateStore(value, valueAlloca)
 	origKeyType := keyType
 	keyType = keyType.Underlying()
-	if isStringLikeTC(keyType) {
+	if isStringLike(keyType) {
+		// key is string/[]byte (Moxie: string=[]byte)
 		params := []llvm.Value{m, key, valueAlloca}
 		b.createRuntimeCall("hashmapContentSet", params, "")
-	} else if hashmapIsBinaryKeyTC(keyType) {
+	} else if hashmapIsBinaryKey(keyType) {
+		// key can be compared with runtime.memequal
 		keyAlloca, keySize := b.createTemporaryAlloca(key.Type(), "hashmap.key")
 		b.CreateStore(key, keyAlloca)
-		b.zeroUndefBytes(b.getLLVMTypeTC(keyType), keyAlloca)
+		b.zeroUndefBytes(b.getLLVMType(keyType), keyAlloca)
 		params := []llvm.Value{m, keyAlloca, valueAlloca}
 		b.createRuntimeCall("hashmapBinarySet", params, "")
 		b.emitLifetimeEnd(keyAlloca, keySize)
 	} else {
+		// Key is not trivially comparable, so compare it as an interface instead.
 		itfKey := key
-		if _, ok := keyType.(*typecheck.Interface); !ok {
-			itfKey = b.createMakeInterfaceTC(key, origKeyType, pos)
+		if _, ok := keyType.(*types.Interface); !ok {
+			// Not already an interface, so convert it to an interface first.
+			itfKey = b.createMakeInterface(key, origKeyType, pos)
 		}
 		params := []llvm.Value{m, itfKey, valueAlloca}
 		b.createRuntimeCall("hashmapInterfaceSet", params, "")
@@ -139,25 +147,31 @@ func (b *builder) createMapUpdateTC(keyType typecheck.Type, m, key, value llvm.V
 	b.emitLifetimeEnd(valueAlloca, valueSize)
 }
 
-func (b *builder) createMapDeleteTC(keyType typecheck.Type, m, key llvm.Value, pos token.Pos) error {
+// createMapDelete deletes a key from a map by calling the appropriate runtime
+// function. It is the implementation of the Go delete() builtin.
+func (b *builder) createMapDelete(keyType types.Type, m, key llvm.Value, pos token.Pos) error {
 	origKeyType := keyType
 	keyType = keyType.Underlying()
-	if isStringLikeTC(keyType) {
+	if isStringLike(keyType) {
+		// key is string/[]byte (Moxie: string=[]byte)
 		params := []llvm.Value{m, key}
 		b.createRuntimeCall("hashmapContentDelete", params, "")
 		return nil
-	} else if hashmapIsBinaryKeyTC(keyType) {
+	} else if hashmapIsBinaryKey(keyType) {
 		keyAlloca, keySize := b.createTemporaryAlloca(key.Type(), "hashmap.key")
 		b.CreateStore(key, keyAlloca)
-		b.zeroUndefBytes(b.getLLVMTypeTC(keyType), keyAlloca)
+		b.zeroUndefBytes(b.getLLVMType(keyType), keyAlloca)
 		params := []llvm.Value{m, keyAlloca}
 		b.createRuntimeCall("hashmapBinaryDelete", params, "")
 		b.emitLifetimeEnd(keyAlloca, keySize)
 		return nil
 	} else {
+		// Key is not trivially comparable, so compare it as an interface
+		// instead.
 		itfKey := key
-		if _, ok := keyType.(*typecheck.Interface); !ok {
-			itfKey = b.createMakeInterfaceTC(key, origKeyType, pos)
+		if _, ok := keyType.(*types.Interface); !ok {
+			// Not already an interface, so convert it to an interface first.
+			itfKey = b.createMakeInterface(key, origKeyType, pos)
 		}
 		params := []llvm.Value{m, itfKey}
 		b.createRuntimeCall("hashmapInterfaceDelete", params, "")
@@ -165,26 +179,46 @@ func (b *builder) createMapDeleteTC(keyType typecheck.Type, m, key llvm.Value, p
 	}
 }
 
-func (b *builder) createMapIteratorNextTC(rangeVal mxssa.Value, llvmRangeVal, it llvm.Value) llvm.Value {
-	keyType := rangeVal.Type().Underlying().(*typecheck.Map).Key()
-	valueType := rangeVal.Type().Underlying().(*typecheck.Map).Elem()
-	llvmKeyType := b.getLLVMTypeTC(keyType)
-	llvmValueType := b.getLLVMTypeTC(valueType)
+// Clear the given map.
+func (b *builder) createMapClear(m llvm.Value) {
+	b.createRuntimeCall("hashmapClear", []llvm.Value{m}, "")
+}
 
+// createMapIteratorNext lowers the *ssa.Next instruction for iterating over a
+// map. It returns a tuple of {bool, key, value} with the result of the
+// iteration.
+func (b *builder) createMapIteratorNext(rangeVal ssa.Value, llvmRangeVal, it llvm.Value) llvm.Value {
+	// Determine the type of the values to return from the *ssa.Next
+	// instruction. It is returned as {bool, keyType, valueType}.
+	keyType := rangeVal.Type().Underlying().(*types.Map).Key()
+	valueType := rangeVal.Type().Underlying().(*types.Map).Elem()
+	llvmKeyType := b.getLLVMType(keyType)
+	llvmValueType := b.getLLVMType(valueType)
+
+	// There is a special case in which keys are stored as an interface value
+	// instead of the value they normally are. This happens for non-trivially
+	// comparable types such as float32 or some structs.
 	isKeyStoredAsInterface := false
-	if isStringLikeTC(keyType.Underlying()) {
-	} else if hashmapIsBinaryKeyTC(keyType) {
+	if isStringLike(keyType.Underlying()) {
+		// key is string/[]byte (Moxie: string=[]byte)
+	} else if hashmapIsBinaryKey(keyType) {
+		// key can be compared with runtime.memequal
 	} else {
-		if _, ok := keyType.Underlying().(*typecheck.Interface); !ok {
+		// The key is stored as an interface value, and may or may not be an
+		// interface type (for example, float32 keys are stored as an interface
+		// value).
+		if _, ok := keyType.Underlying().(*types.Interface); !ok {
 			isKeyStoredAsInterface = true
 		}
 	}
 
+	// Determine the type of the key as stored in the map.
 	llvmStoredKeyType := llvmKeyType
 	if isKeyStoredAsInterface {
 		llvmStoredKeyType = b.getLLVMRuntimeType("_interface")
 	}
 
+	// Extract the key and value from the map.
 	mapKeyAlloca, mapKeySize := b.createTemporaryAlloca(llvmStoredKeyType, "range.key")
 	mapValueAlloca, mapValueSize := b.createTemporaryAlloca(llvmValueType, "range.value")
 	ok := b.createRuntimeCall("hashmapNext", []llvm.Value{llvmRangeVal, it, mapKeyAlloca, mapValueAlloca}, "range.next")
@@ -192,17 +226,62 @@ func (b *builder) createMapIteratorNextTC(rangeVal mxssa.Value, llvmRangeVal, it
 	mapValue := b.CreateLoad(llvmValueType, mapValueAlloca, "")
 
 	if isKeyStoredAsInterface {
+		// The key is stored as an interface but it isn't of interface type.
+		// Extract the underlying value.
 		mapKey = b.extractValueFromInterface(mapKey, llvmKeyType)
 	}
 
+	// End the lifetimes of the allocas, because we're done with them.
 	b.emitLifetimeEnd(mapKeyAlloca, mapKeySize)
 	b.emitLifetimeEnd(mapValueAlloca, mapValueSize)
 
+	// Construct the *ssa.Next return value: {ok, mapKey, mapValue}
 	tuple := llvm.Undef(b.ctx.StructType([]llvm.Type{b.ctx.Int1Type(), llvmKeyType, llvmValueType}, false))
 	tuple = b.CreateInsertValue(tuple, ok, 0, "")
 	tuple = b.CreateInsertValue(tuple, mapKey, 1, "")
 	tuple = b.CreateInsertValue(tuple, mapValue, 2, "")
+
 	return tuple
+}
+
+// Returns true if this key type does not contain strings, interfaces etc., so
+// can be compared with runtime.memequal.  Note that padding bytes are undef
+// and can alter two "equal" structs being equal when compared with memequal.
+// isStringLike reports whether t is string or []byte (Moxie: string=[]byte).
+func isStringLike(t types.Type) bool {
+	switch t := t.(type) {
+	case *types.Basic:
+		return t.Info()&types.IsString != 0
+	case *types.Slice:
+		if b, ok := t.Elem().(*types.Basic); ok && b.Kind() == types.Byte {
+			return true
+		}
+	}
+	return false
+}
+
+func hashmapIsBinaryKey(keyType types.Type) bool {
+	switch keyType := keyType.Underlying().(type) {
+	case *types.Basic:
+		// TODO: unsafe.Pointer is also a binary key, but to support that we
+		// need to fix an issue with interp first (see
+		// https://moxie/pull/4898).
+		return keyType.Info()&(types.IsBoolean|types.IsInteger) != 0
+	case *types.Pointer:
+		return true
+	case *types.Struct:
+		for i := 0; i < keyType.NumFields(); i++ {
+			fieldType := keyType.Field(i).Type().Underlying()
+			if !hashmapIsBinaryKey(fieldType) {
+				return false
+			}
+		}
+		return true
+	case *types.Array:
+		return hashmapIsBinaryKey(keyType.Elem())
+	default:
+		return false
+	}
 }
 
 func (b *builder) zeroUndefBytes(llvmType llvm.Type, ptr llvm.Value) error {

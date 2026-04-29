@@ -13,9 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"moxie/mxssa"
-	"moxie/typecheck"
-
+	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -77,14 +75,9 @@ const (
 // value field.
 //
 // An interface value is a {typecode, value} tuple named runtime._interface.
-
-func (b *builder) createMakeInterfaceTC(val llvm.Value, typ typecheck.Type, pos token.Pos) llvm.Value {
-	goType := b.mxTranslator.ReverseType(typ)
-	if goType == nil {
-		panic("createMakeInterfaceTC: no reverse type for " + typ.String())
-	}
+func (b *builder) createMakeInterface(val llvm.Value, typ types.Type, pos token.Pos) llvm.Value {
 	itfValue := b.emitPointerPack([]llvm.Value{val})
-	itfType := b.getTypeCode(goType)
+	itfType := b.getTypeCode(typ)
 	itf := llvm.Undef(b.getLLVMRuntimeType("_interface"))
 	itf = b.CreateInsertValue(itf, itfType, 0, "")
 	itf = b.CreateInsertValue(itf, itfValue, 1, "")
@@ -132,8 +125,8 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 	// Resolve alias types: alias types are resolved at compile time.
 	typ = types.Unalias(typ)
 
-	msItems := c.mxTranslator.MethodSet(typ)
-	hasMethodSet := len(msItems) != 0
+	ms := c.program.MethodSets.MethodSet(typ)
+	hasMethodSet := ms.Len() != 0
 	_, isInterface := typ.Underlying().(*types.Interface)
 	if isInterface {
 		hasMethodSet = false
@@ -144,8 +137,8 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 	// For a non-interface type, it returns the number of exported methods.
 	// For an interface type, it returns the number of exported and unexported methods.
 	var numMethods int
-	for _, item := range msItems {
-		if isInterface || (item.Obj != nil && item.Obj.Exported()) {
+	for i := 0; i < ms.Len(); i++ {
+		if isInterface || ms.At(i).Obj().Exported() {
 			numMethods++
 		}
 	}
@@ -627,24 +620,27 @@ func (c *compilerContext) getTypeMethodSet(typ types.Type) llvm.Value {
 	globalName := typ.String() + "$methodset"
 	global := c.mod.NamedGlobal(globalName)
 	if global.IsNil() {
-		items := c.mxTranslator.MethodSet(typ)
+		ms := c.program.MethodSets.MethodSet(typ)
 
 		// Create method set.
 		var signatures, wrappers []llvm.Value
-		for _, item := range items {
-			signatureGlobal := c.getMethodSignature(item.Obj)
+		for i := 0; i < ms.Len(); i++ {
+			method := ms.At(i)
+			signatureGlobal := c.getMethodSignature(method.Obj().(*types.Func))
 			signatures = append(signatures, signatureGlobal)
-			llvmFnType, llvmFn := c.getFunction(item.Func)
+			fn := c.program.MethodValue(method)
+			llvmFnType, llvmFn := c.getFunction(fn)
 			if llvmFn.IsNil() {
-				panic("cannot find function: " + c.getFunctionInfo(item.Func).linkName)
+				// compiler error, so panic
+				panic("cannot find function: " + c.getFunctionInfo(fn).linkName)
 			}
-			wrapper := c.getInterfaceInvokeWrapper(item.Func, llvmFnType, llvmFn)
+			wrapper := c.getInterfaceInvokeWrapper(fn, llvmFnType, llvmFn)
 			wrappers = append(wrappers, wrapper)
 		}
 
 		// Construct global value.
 		globalValue := c.ctx.ConstStruct([]llvm.Value{
-			llvm.ConstInt(c.uintptrType, uint64(len(items)), false),
+			llvm.ConstInt(c.uintptrType, uint64(ms.Len()), false),
 			llvm.ConstArray(c.dataPtrType, signatures),
 			c.ctx.ConstStruct(wrappers, false),
 		}, false)
@@ -695,63 +691,91 @@ func (c *compilerContext) getMethodSignature(method *types.Func) llvm.Value {
 //
 // Type asserts on concrete types are trivial: just compare type numbers. Type
 // asserts on interfaces are more difficult, see the comments in the function.
-
-func (b *builder) createTypeAssertTC(expr *mxssa.TypeAssert) llvm.Value {
-	itf := b.getValueTC(expr.X, expr.Pos())
-	assertedType := b.getLLVMTypeTC(expr.AssertedType)
+func (b *builder) createTypeAssert(expr *ssa.TypeAssert) llvm.Value {
+	itf := b.getValue(expr.X, getPos(expr))
+	assertedType := b.getLLVMType(expr.AssertedType)
 
 	actualTypeNum := b.CreateExtractValue(itf, 0, "interface.type")
 	commaOk := llvm.Value{}
 
-	goAssertedType := b.mxTranslator.ReverseType(expr.AssertedType)
-	if goAssertedType == nil {
-		panic("createTypeAssertTC: no reverse type for " + expr.AssertedType.String())
-	}
-
-	if _, ok := expr.AssertedType.Underlying().(*typecheck.Interface); ok {
-		tcItf := expr.AssertedType.Underlying().(*typecheck.Interface)
-		if tcItf.NumMethods() == 0 {
+	if intf, ok := expr.AssertedType.Underlying().(*types.Interface); ok {
+		if intf.Empty() {
+			// intf is the empty interface => no methods
+			// This type assertion always succeeds, so we can just set commaOk to true.
 			commaOk = llvm.ConstInt(b.ctx.Int1Type(), 1, true)
 		} else {
+			// Type assert on interface type with methods.
+			// This is a call to an interface type assert function.
+			// The interface lowering pass will define this function by filling it
+			// with a type switch over all concrete types that implement this
+			// interface, and returning whether it's one of the matched types.
+			// This is very different from how interface asserts are implemented in
+			// the main Go compiler, where the runtime checks whether the type
+			// implements each method of the interface. See:
+			// https://research.swtch.com/interfaces
 			fn := b.getInterfaceImplementsFunc(expr.AssertedType)
 			commaOk = b.CreateCall(fn.GlobalValueType(), fn, []llvm.Value{actualTypeNum}, "")
 		}
 	} else {
-		name, _ := getTypeCodeName(goAssertedType)
+		name, _ := getTypeCodeName(expr.AssertedType)
 		globalName := "reflect/types.typeid:" + name
 		assertedTypeCodeGlobal := b.mod.NamedGlobal(globalName)
 		if assertedTypeCodeGlobal.IsNil() {
+			// Create a new typecode global.
 			assertedTypeCodeGlobal = llvm.AddGlobal(b.mod, b.ctx.Int8Type(), globalName)
 			assertedTypeCodeGlobal.SetGlobalConstant(true)
 		}
+		// Type assert on concrete type.
+		// Call runtime.typeAssert, which will be lowered to a simple icmp or
+		// const false in the interface lowering pass.
 		commaOk = b.createRuntimeCall("typeAssert", []llvm.Value{actualTypeNum, assertedTypeCodeGlobal}, "typecode")
 	}
+
+	// Add 2 new basic blocks (that should get optimized away): one for the
+	// 'ok' case and one for all instructions following this type assert.
+	// This is necessary because we need to insert the casted value or the
+	// nil value based on whether the assert was successful. Casting before
+	// this check tells LLVM that it can use this value and may
+	// speculatively dereference pointers before the check. This can lead to
+	// a miscompilation resulting in a segfault at runtime.
+	// Additionally, this is even required by the Go spec: a failed
+	// typeassert should return a zero value, not an incorrectly casted
+	// value.
 
 	prevBlock := b.GetInsertBlock()
 	okBlock := b.insertBasicBlock("typeassert.ok")
 	nextBlock := b.insertBasicBlock("typeassert.next")
-	b.currentBlockInfo.exit = nextBlock
+	b.currentBlockInfo.exit = nextBlock // adjust outgoing block for phi nodes
 	b.CreateCondBr(commaOk, okBlock, nextBlock)
 
+	// Retrieve the value from the interface if the type assert was
+	// successful.
 	b.SetInsertPointAtEnd(okBlock)
 	var valueOk llvm.Value
-	if _, ok := expr.AssertedType.Underlying().(*typecheck.Interface); ok {
+	if _, ok := expr.AssertedType.Underlying().(*types.Interface); ok {
+		// Type assert on interface type. Easy: just return the same
+		// interface value.
 		valueOk = itf
 	} else {
+		// Type assert on concrete type. Extract the underlying type from
+		// the interface (but only after checking it matches).
 		valueOk = b.extractValueFromInterface(itf, assertedType)
 	}
 	b.CreateBr(nextBlock)
 
+	// Continue after the if statement.
 	b.SetInsertPointAtEnd(nextBlock)
 	phi := b.CreatePHI(assertedType, "typeassert.value")
 	phi.AddIncoming([]llvm.Value{llvm.ConstNull(assertedType), valueOk}, []llvm.BasicBlock{prevBlock, okBlock})
 
 	if expr.CommaOk {
-		tuple := b.ctx.ConstStruct([]llvm.Value{llvm.Undef(assertedType), llvm.Undef(b.ctx.Int1Type())}, false)
-		tuple = b.CreateInsertValue(tuple, phi, 0, "")
-		tuple = b.CreateInsertValue(tuple, commaOk, 1, "")
+		tuple := b.ctx.ConstStruct([]llvm.Value{llvm.Undef(assertedType), llvm.Undef(b.ctx.Int1Type())}, false) // create empty tuple
+		tuple = b.CreateInsertValue(tuple, phi, 0, "")                                                          // insert value
+		tuple = b.CreateInsertValue(tuple, commaOk, 1, "")                                                      // insert 'comma ok' boolean
 		return tuple
 	} else {
+		// This is kind of dirty as the branch above becomes mostly useless,
+		// but hopefully this gets optimized away.
 		b.createRuntimeCall("interfaceTypeAssert", []llvm.Value{commaOk}, "")
 		return phi
 	}
@@ -769,21 +793,15 @@ func (c *compilerContext) getMethodsString(itf *types.Interface) string {
 
 // getInterfaceImplementsFunc returns a declared function that works as a type
 // switch. The interface lowering pass will define this function.
-func (c *compilerContext) getInterfaceImplementsFunc(assertedType typecheck.Type) llvm.Value {
-	// Internally still uses the SSA-side type via ReverseType for
-	// getTypeCodeName/getMethodsString — those helpers haven't migrated yet.
-	goAssertedType := c.mxTranslator.ReverseType(assertedType)
-	if goAssertedType == nil {
-		panic("getInterfaceImplementsFunc: no reverse type for " + assertedType.String())
-	}
-	s, _ := getTypeCodeName(goAssertedType.Underlying())
+func (c *compilerContext) getInterfaceImplementsFunc(assertedType types.Type) llvm.Value {
+	s, _ := getTypeCodeName(assertedType.Underlying())
 	fnName := s + ".$typeassert"
 	llvmFn := c.mod.NamedFunction(fnName)
 	if llvmFn.IsNil() {
 		llvmFnType := llvm.FunctionType(c.ctx.Int1Type(), []llvm.Type{c.dataPtrType}, false)
 		llvmFn = llvm.AddFunction(c.mod, fnName, llvmFnType)
 		c.addStandardDeclaredAttributes(llvmFn)
-		methods := c.getMethodsString(goAssertedType.Underlying().(*types.Interface))
+		methods := c.getMethodsString(assertedType.Underlying().(*types.Interface))
 		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("moxie-methods", methods))
 	}
 	return llvmFn
@@ -792,71 +810,35 @@ func (c *compilerContext) getInterfaceImplementsFunc(assertedType typecheck.Type
 // getInvokeFunction returns the thunk to call the given interface method. The
 // thunk is declared, not defined: it will be defined by the interface lowering
 // pass.
-
-func (c *compilerContext) getInvokeFunctionTC(instr *mxssa.CallCommon) llvm.Value {
-	itfType := instr.Value.Type().Underlying().(*typecheck.Interface)
-	if itfType.NumMethods() == 0 {
-		panic("getInvokeFunctionTC: invoke on empty interface for method " +
+func (c *compilerContext) getInvokeFunction(instr *ssa.CallCommon) llvm.Value {
+	// Go's type system forbids calling a method through an empty interface
+	// without a type assertion, so this should be unreachable. Fail loudly
+	// rather than emit a function with an empty "moxie-methods" attribute,
+	// which would cause the interface-lowering pass to NPE on a nil
+	// signature lookup far downstream.
+	itf := instr.Value.Type().Underlying().(*types.Interface)
+	if itf.NumMethods() == 0 {
+		panic("getInvokeFunction: invoke on empty interface for method " +
 			instr.Method.Name() + " (compiler invariant broken)")
 	}
-	goItfType := c.mxTranslator.ReverseType(instr.Value.Type().Underlying())
-	if goItfType == nil {
-		panic("getInvokeFunctionTC: no reverse type for " + instr.Value.Type().String())
-	}
-	goItf := goItfType.(*types.Interface)
-	s, _ := getTypeCodeName(goItfType)
+	s, _ := getTypeCodeName(instr.Value.Type().Underlying())
 	fnName := s + "." + instr.Method.Name() + "$invoke"
 	llvmFn := c.mod.NamedFunction(fnName)
 	if llvmFn.IsNil() {
-		goMethodType := c.mxTranslator.ReverseType(instr.Method.Type())
-		if goMethodType == nil {
-			panic("getInvokeFunctionTC: no reverse type for method " + instr.Method.Name())
-		}
-		// Convert via tcbridge: instr.Method.Signature() can have nil
-		// params (the typecheck.Func may not have full signature info),
-		// so go through the go/types side which is reliable.
-		sig := goMethodType.(*types.Signature)
-		var paramTuple []*typecheck.Var
+		sig := instr.Method.Type().(*types.Signature)
+		var paramTuple []*types.Var
 		for i := 0; i < sig.Params().Len(); i++ {
-			tcParamType := c.mxTranslator.ForwardType(sig.Params().At(i).Type())
-			paramTuple = append(paramTuple, typecheck.NewVar(nil, sig.Params().At(i).Name(), tcParamType))
+			paramTuple = append(paramTuple, sig.Params().At(i))
 		}
-		paramTuple = append(paramTuple, typecheck.NewVar(nil, "$typecode", typecheck.Typ[typecheck.UnsafePointer]))
-		var tcRecv *typecheck.Var
-		if sig.Recv() != nil {
-			tcRecvType := c.mxTranslator.ForwardType(sig.Recv().Type())
-			tcRecv = typecheck.NewVar(nil, sig.Recv().Name(), tcRecvType)
-		}
-		var tcResults *typecheck.Tuple
-		if sig.Results() != nil {
-			var resultVars []*typecheck.Var
-			for i := 0; i < sig.Results().Len(); i++ {
-				tcResType := c.mxTranslator.ForwardType(sig.Results().At(i).Type())
-				resultVars = append(resultVars, typecheck.NewVar(nil, sig.Results().At(i).Name(), tcResType))
-			}
-			tcResults = typecheck.NewTuple(resultVars...)
-		}
-		llvmFnType := c.getLLVMFunctionTypeTC(typecheck.NewSignature(tcRecv, typecheck.NewTuple(paramTuple...), tcResults, false))
+		paramTuple = append(paramTuple, types.NewVar(token.NoPos, nil, "$typecode", types.Typ[types.UnsafePointer]))
+		llvmFnType := c.getLLVMFunctionType(types.NewSignatureType(sig.Recv(), nil, nil, types.NewTuple(paramTuple...), sig.Results(), false))
 		llvmFn = llvm.AddFunction(c.mod, fnName, llvmFnType)
 		c.addStandardDeclaredAttributes(llvmFn)
-		goMethod := findGoMethod(goItf, instr.Method.Name())
-		if goMethod == nil {
-			panic("getInvokeFunctionTC: cannot find go/types method " + instr.Method.Name())
-		}
-		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("moxie-invoke", c.getMethodSignatureName(goMethod)))
-		methods := c.getMethodsString(goItf)
+		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("moxie-invoke", c.getMethodSignatureName(instr.Method)))
+		methods := c.getMethodsString(itf)
 		llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("moxie-methods", methods))
 	}
 	return llvmFn
-}
-
-func findGoMethod(itf *types.Interface, name string) *types.Func {
-	for i := 0; i < itf.NumMethods(); i++ {
-		if itf.Method(i).Name() == name {
-			return itf.Method(i)
-		}
-	}
-	return nil
 }
 
 // getInterfaceInvokeWrapper returns a wrapper for the given method so it can be
@@ -864,7 +846,7 @@ func findGoMethod(itf *types.Interface, name string) *types.Func {
 // value, dereferences or unpacks it if necessary, and calls the real method.
 // If the method to wrap has a pointer receiver, no wrapping is necessary and
 // the function is returned directly.
-func (c *compilerContext) getInterfaceInvokeWrapper(fn *mxssa.Function, llvmFnType llvm.Type, llvmFn llvm.Value) llvm.Value {
+func (c *compilerContext) getInterfaceInvokeWrapper(fn *ssa.Function, llvmFnType llvm.Type, llvmFn llvm.Value) llvm.Value {
 	wrapperName := llvmFn.Name() + "$invoke"
 	wrapper := c.mod.NamedFunction(wrapperName)
 	if !wrapper.IsNil() {
@@ -873,16 +855,18 @@ func (c *compilerContext) getInterfaceInvokeWrapper(fn *mxssa.Function, llvmFnTy
 	}
 
 	// Get the expanded receiver type.
-	recvType := fn.Signature.Recv().Type()
-	receiverType := c.getLLVMTypeTC(recvType)
+	receiverType := c.getLLVMType(fn.Signature.Recv().Type())
 	var expandedReceiverType []llvm.Type
-	for _, info := range c.expandFormalParamTypeTC(receiverType, "", recvType) {
+	for _, info := range c.expandFormalParamType(receiverType, "", nil) {
 		expandedReceiverType = append(expandedReceiverType, info.llvmType)
 	}
 
 	// Does this method even need any wrapping?
 	if len(expandedReceiverType) == 1 && receiverType.TypeKind() == llvm.PointerTypeKind {
 		// Nothing to wrap.
+		// Casting a function signature to a different signature and calling it
+		// with a receiver pointer bitcasted to *i8 (as done in calls on an
+		// interface) is hopefully a safe (defined) operation.
 		return llvmFn
 	}
 
@@ -904,7 +888,7 @@ func (c *compilerContext) getInterfaceInvokeWrapper(fn *mxssa.Function, llvmFnTy
 
 	// add debug info if needed
 	if c.Debug {
-		pos := c.mxProgram.Fset.Position(fn.Pos())
+		pos := c.program.Fset.Position(fn.Pos())
 		difunc := c.attachDebugInfoRaw(fn, wrapper, "$invoke", pos.Filename, pos.Line)
 		b.SetCurrentDebugLocation(uint(pos.Line), uint(pos.Column), difunc, llvm.Metadata{})
 	}

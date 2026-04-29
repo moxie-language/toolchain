@@ -8,7 +8,6 @@
 package mxssa
 
 import (
-	"go/ast"
 	"go/constant"
 	"go/token"
 
@@ -113,11 +112,6 @@ type Function struct {
 
 	Synthetic string // "" for real source functions
 
-	// SyntaxNode is the AST node for this function (nil for synthetic
-	// functions or external declarations). Used by AST-based checks like
-	// fallthrough detection. Populated by ssabridge from f.Syntax().
-	SyntaxNode ast.Node
-
 	Pkg  *Package
 	Prog *Program
 
@@ -165,7 +159,7 @@ func (f *Function) RelString(from *typecheck.Package) string {
 	return f.name
 }
 func (f *Function) TypeParams() []typecheck.Type { return f.typeparams }
-func (f *Function) Syntax() ast.Node              { return f.SyntaxNode }
+func (f *Function) Syntax() any                  { return nil }
 
 func (f *Function) setName(n string)                   { f.name = n }
 func (f *Function) setType(t typecheck.Type)           {}
@@ -194,27 +188,6 @@ func NewBasicBlock(parent *Function, comment string) *BasicBlock {
 	}
 	parent.Blocks = append(parent.Blocks, b)
 	return b
-}
-
-// WireReferrers walks every instruction in f and registers it as a referrer of
-// each operand Value it uses. Required after translation so Value.Referrers()
-// returns the correct usage list — checks like "channel created but never
-// used" depend on this.
-//
-// ssabridge.translateFunctionBody does not populate referrers automatically;
-// callers must invoke WireReferrers after the body is fully translated (when
-// all operand instructions have been created).
-func (f *Function) WireReferrers() {
-	for _, bb := range f.Blocks {
-		for _, instr := range bb.Instrs {
-			for _, op := range instr.Operands(nil) {
-				if op == nil || *op == nil {
-					continue
-				}
-				(*op).addReferrer(instr)
-			}
-		}
-	}
 }
 
 // ─── register (shared embed for instructions that define a value) ─────────────
@@ -381,7 +354,6 @@ func (c *Const) Pos() token.Pos                  { return 0 }
 func (c *Const) Parent() *Function               { return nil }
 func (c *Const) Referrers() *[]Instruction       { return &c.referrers }
 func (c *Const) Value() constant.Value           { return c.val }
-func (c *Const) IsNil() bool                     { return c.val == nil && nillable(c.typ) }
 func (c *Const) setName(n string)                {}
 func (c *Const) setType(t typecheck.Type)        { c.typ = t }
 func (c *Const) addReferrer(i Instruction)       { c.referrers = append(c.referrers, i) }
@@ -913,17 +885,3 @@ func (d *DebugRef) Operands(rands []*Value) []*Value { return append(rands, &d.X
 func (d *DebugRef) Pos() token.Pos                   { return 0 }
 func (d *DebugRef) Object() typecheck.Object         { return d.object }
 func (d *DebugRef) String() string                   { return "debugref" }
-
-func nillable(t typecheck.Type) bool {
-	if t == nil {
-		return false
-	}
-	switch t.Underlying().(type) {
-	case *typecheck.Pointer, *typecheck.Slice, *typecheck.Chan, *typecheck.Map, *typecheck.Signature:
-		return true
-	case *typecheck.Interface:
-		return true
-	default:
-		return false
-	}
-}

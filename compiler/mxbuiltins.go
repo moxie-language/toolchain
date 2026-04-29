@@ -10,29 +10,39 @@ package compiler
 // and go through the standard MakeChan SSA path.
 
 import (
-	"moxie/mxssa"
+	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
 
-func (b *builder) createMoxieConcatTC(instr *mxssa.CallCommon) llvm.Value {
-	a := b.getValueTC(instr.Args[0], instr.Pos())
-	bv := b.getValueTC(instr.Args[1], instr.Pos())
+// createMoxieConcat handles __moxie_concat(a, b []byte) []byte.
+// Emits a call to runtime.bytesConcat.
+func (b *builder) createMoxieConcat(instr *ssa.CallCommon) llvm.Value {
+	a := b.getValue(instr.Args[0], instr.Pos())
+	bv := b.getValue(instr.Args[1], instr.Pos())
 	return b.createRuntimeCall("bytesConcat", []llvm.Value{a, bv}, "")
 }
 
-func (b *builder) createMoxieEqTC(instr *mxssa.CallCommon) llvm.Value {
-	a := b.getValueTC(instr.Args[0], instr.Pos())
-	bv := b.getValueTC(instr.Args[1], instr.Pos())
+// createMoxieEq handles __moxie_eq(a, b []byte) bool.
+// Emits a call to runtime.stringEqual (same layout as []byte).
+func (b *builder) createMoxieEq(instr *ssa.CallCommon) llvm.Value {
+	a := b.getValue(instr.Args[0], instr.Pos())
+	bv := b.getValue(instr.Args[1], instr.Pos())
 	return b.createRuntimeCall("stringEqual", []llvm.Value{a, bv}, "")
 }
 
-func (b *builder) createMoxieLtTC(instr *mxssa.CallCommon) llvm.Value {
-	a := b.getValueTC(instr.Args[0], instr.Pos())
-	bv := b.getValueTC(instr.Args[1], instr.Pos())
+// createMoxieLt handles __moxie_lt(a, b []byte) bool.
+// Emits a call to runtime.stringLess (same layout as []byte).
+func (b *builder) createMoxieLt(instr *ssa.CallCommon) llvm.Value {
+	a := b.getValue(instr.Args[0], instr.Pos())
+	bv := b.getValue(instr.Args[1], instr.Pos())
 	return b.createRuntimeCall("stringLess", []llvm.Value{a, bv}, "")
 }
 
-func (b *builder) createMoxieSecallocTC(instr *mxssa.CallCommon) llvm.Value {
-	n := b.getValueTC(instr.Args[0], instr.Pos())
+// createMoxieSecalloc handles __moxie_secalloc(n int32) []byte. The text
+// rewriter emits this for the `[]byte{:n, secure}` literal form. Emits a
+// call to runtime.SecureAlloc which mmap's a guarded arena and returns a
+// slice into it.
+func (b *builder) createMoxieSecalloc(instr *ssa.CallCommon) llvm.Value {
+	n := b.getValue(instr.Args[0], instr.Pos())
 	return b.createRuntimeCall("SecureAlloc", []llvm.Value{n}, "")
 }

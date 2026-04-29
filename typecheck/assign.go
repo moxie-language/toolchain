@@ -210,79 +210,6 @@ func isTextType(T Type) bool {
 	return false
 }
 
-// HasInfo reports whether T's underlying type is a *Basic with the given
-// BasicInfo bits set. The bits (IsString, IsBoolean, IsInteger, IsFloat,
-// IsUnsigned, IsNumeric, IsOrdered, IsUntyped) are constants in this package.
-//
-// Mirror of go/types per-info functions: typecheck.HasInfo(T, IsString) is
-// equivalent to types.IsString(T). One helper instead of eight saves boilerplate
-// while leaving the bit constants un-shadowed.
-func HasInfo(T Type, bits BasicInfo) bool {
-	if T == nil {
-		return false
-	}
-	b, ok := T.Underlying().(*Basic)
-	return ok && b.Info()&bits != 0
-}
-
-// IsInterface reports whether T's underlying type is an interface type.
-// Equivalent to go/types.IsInterface. Useful in type switches and dispatch
-// logic where the *Interface itself isn't needed, only the boolean.
-func IsInterface(T Type) bool {
-	if T == nil {
-		return false
-	}
-	_, ok := T.Underlying().(*Interface)
-	return ok
-}
-
-// IsPointer reports whether T's underlying type is a pointer kind: either a
-// *Pointer (typed Go pointer) or *Basic with UnsafePointer kind.
-func IsPointer(T Type) bool {
-	if T == nil {
-		return false
-	}
-	switch t := T.Underlying().(type) {
-	case *Pointer:
-		return true
-	case *Basic:
-		return t.kind == UnsafePointer
-	}
-	return false
-}
-
-// Comparable reports whether values of type T can be compared with == or !=.
-// Equivalent to go/types.Comparable. Determines whether T may be used as a map key.
-//
-// Comparable types: numeric, boolean, string, pointer, channel, interface,
-// arrays of comparable elements, structs whose fields are all comparable.
-// Non-comparable types: slice, map, function.
-func Comparable(T Type) bool {
-	if T == nil {
-		return false
-	}
-	switch t := T.Underlying().(type) {
-	case *Basic:
-		return t.kind != Invalid
-	case *Pointer, *Chan, *Signature, *Interface:
-		// Pointer, channel, interface comparable.
-		// (Functions are NOT comparable; *Signature here is the function value
-		//  type — but go/types.Comparable returns true for it, so do likewise.)
-		_, isSignature := t.(*Signature)
-		return !isSignature
-	case *Array:
-		return Comparable(t.elem)
-	case *Struct:
-		for _, f := range t.fields {
-			if !Comparable(f.typ) {
-				return false
-			}
-		}
-		return true
-	}
-	return false
-}
-
 // Implements reports whether type T implements interface I.
 func Implements(T Type, I *Interface) bool {
 	if I.IsEmpty() {
@@ -308,21 +235,6 @@ func methodSet(T Type) map[string]*Func {
 	ms := map[string]*Func{}
 	collectMethods(T, ms, false)
 	return ms
-}
-
-// MethodSet is the exported form of methodSet — returns T's method set as a
-// name→Func map. Includes pointer-receiver methods when T is addressable.
-// Use LookupMethod for single-name lookups.
-func MethodSet(T Type) map[string]*Func { return methodSet(T) }
-
-// LookupMethod returns the method with the given name on T, or nil. Searches
-// T's method set including promoted/pointer-receiver methods (same rules as
-// MethodSet).
-func LookupMethod(T Type, name string) *Func {
-	if T == nil || name == "" {
-		return nil
-	}
-	return methodSet(T)[name]
 }
 
 func collectMethods(T Type, ms map[string]*Func, ptrOk bool) {

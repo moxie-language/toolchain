@@ -1,11 +1,10 @@
 package compiler
 
 import (
+	"go/types"
 	"strconv"
 
-	"moxie/mxssa"
-	"moxie/typecheck"
-
+	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -38,32 +37,17 @@ const (
 	paramIsReadonly
 )
 
-// getRuntimeFunction looks up runtime.<fnName> and returns its LLVM type and
-// value.
-func (c *compilerContext) getRuntimeFunction(fnName string) (llvm.Type, llvm.Value) {
-	return c.getPackageFunction("runtime", fnName)
-}
-
-// getPackageFunction looks up <pkgPath>.<fnName> and returns its LLVM type and
-// value.
-func (c *compilerContext) getPackageFunction(pkgPath, fnName string) (llvm.Type, llvm.Value) {
-	pkg := c.mxProgram.ImportedPackage(pkgPath)
-	if pkg == nil {
-		panic("package not in program: " + pkgPath)
-	}
-	member := pkg.Members[fnName]
-	if member == nil {
-		panic("unknown function: " + pkgPath + "." + fnName)
-	}
-	return c.getFunction(member.(*mxssa.Function))
-}
-
 // createRuntimeCallCommon creates a runtime call. Use createRuntimeCall or
 // createRuntimeInvoke instead.
 func (b *builder) createRuntimeCallCommon(fnName string, args []llvm.Value, name string, isInvoke bool) llvm.Value {
-	fnType, llvmFn := b.getRuntimeFunction(fnName)
+	member := b.program.ImportedPackage("runtime").Members[fnName]
+	if member == nil {
+		panic("unknown runtime call: " + fnName)
+	}
+	fn := member.(*ssa.Function)
+	fnType, llvmFn := b.getFunction(fn)
 	if llvmFn.IsNil() {
-		panic("trying to call non-existent function: runtime." + fnName)
+		panic("trying to call non-existent function: " + fn.RelString(nil))
 	}
 	args = append(args, llvm.Undef(b.dataPtrType)) // unused context parameter
 	if isInvoke {
@@ -95,17 +79,6 @@ func (b *builder) createCall(fnType llvm.Type, fn llvm.Value, args []llvm.Value,
 		fragments := b.expandFormalParam(arg)
 		expanded = append(expanded, fragments...)
 	}
-	// Coerce named↔anonymous struct mismatches (TC path may produce
-	// anonymous struct types where the callee expects named ones).
-	if paramTypes := fnType.ParamTypes(); len(paramTypes) == len(expanded) {
-		for i, pt := range paramTypes {
-			if expanded[i].Type() != pt &&
-				pt.TypeKind() == llvm.StructTypeKind &&
-				expanded[i].Type().TypeKind() == llvm.StructTypeKind {
-				expanded[i] = b.coerceStructType(expanded[i], pt)
-			}
-		}
-	}
 	call := b.CreateCall(fnType, fn, expanded, name)
 	if !fn.IsAFunction().IsNil() {
 		if cc := fn.FunctionCallConv(); cc != llvm.CCallConv {
@@ -124,6 +97,22 @@ func (b *builder) createInvoke(fnType llvm.Type, fn llvm.Value, args []llvm.Valu
 		b.createInvokeCheckpoint()
 	}
 	return b.createCall(fnType, fn, args, name)
+}
+
+// Expand an argument type to a list that can be used in a function call
+// parameter list.
+func (c *compilerContext) expandFormalParamType(t llvm.Type, name string, goType types.Type) []paramInfo {
+	switch t.TypeKind() {
+	case llvm.StructTypeKind:
+		fieldInfos := c.flattenAggregateType(t, name, goType)
+		if len(fieldInfos) <= maxFieldsPerParam {
+			// managed to expand this parameter
+			return fieldInfos
+		}
+		// failed to expand this parameter: too many fields
+	}
+	// TODO: split small arrays
+	return []paramInfo{c.getParamInfo(t, name, goType)}
 }
 
 // expandFormalParamOffsets returns a list of offsets from the start of an
@@ -153,7 +142,7 @@ func (b *builder) expandFormalParamOffsets(t llvm.Type) []uint64 {
 func (b *builder) expandFormalParam(v llvm.Value) []llvm.Value {
 	switch v.Type().TypeKind() {
 	case llvm.StructTypeKind:
-		fieldInfos := b.flattenAggregateTypeTC(v.Type(), "", nil)
+		fieldInfos := b.flattenAggregateType(v.Type(), "", nil)
 		if len(fieldInfos) <= maxFieldsPerParam {
 			fields := b.flattenAggregate(v)
 			if len(fields) != len(fieldInfos) {
@@ -167,6 +156,98 @@ func (b *builder) expandFormalParam(v llvm.Value) []llvm.Value {
 	default:
 		// TODO: split small arrays
 		return []llvm.Value{v}
+	}
+}
+
+// Try to flatten a struct type to a list of types. Returns a 1-element slice
+// with the passed in type if this is not possible.
+func (c *compilerContext) flattenAggregateType(t llvm.Type, name string, goType types.Type) []paramInfo {
+	switch t.TypeKind() {
+	case llvm.StructTypeKind:
+		var paramInfos []paramInfo
+		for i, subfield := range t.StructElementTypes() {
+			if c.targetData.TypeAllocSize(subfield) == 0 {
+				continue
+			}
+			suffix := strconv.Itoa(i)
+			isString := false
+			if goType != nil {
+				// Try to come up with a good suffix for this struct field,
+				// depending on which Go type it's based on.
+				switch goType := goType.Underlying().(type) {
+				case *types.Interface:
+					suffix = []string{"typecode", "value"}[i]
+				case *types.Slice:
+					suffix = []string{"data", "len", "cap"}[i]
+				case *types.Struct:
+					suffix = goType.Field(i).Name()
+				case *types.Basic:
+					switch goType.Kind() {
+					case types.Complex64, types.Complex128:
+						suffix = []string{"r", "i"}[i]
+					case types.String:
+						suffix = []string{"data", "len", "cap"}[i]
+						// Moxie: don't mark string data as readonly (string=[]byte, mutable).
+					}
+				case *types.Signature:
+					suffix = []string{"context", "funcptr"}[i]
+				}
+			}
+			subInfos := c.flattenAggregateType(subfield, name+"."+suffix, extractSubfield(goType, i))
+			if isString {
+				subInfos[0].flags |= paramIsReadonly
+			}
+			paramInfos = append(paramInfos, subInfos...)
+		}
+		return paramInfos
+	default:
+		return []paramInfo{c.getParamInfo(t, name, goType)}
+	}
+}
+
+// getParamInfo collects information about a parameter. For example, if this
+// parameter is pointer-like, it will also store the element type for the
+// dereferenceable_or_null attribute.
+func (c *compilerContext) getParamInfo(t llvm.Type, name string, goType types.Type) paramInfo {
+	info := paramInfo{
+		llvmType: t,
+		name:     name,
+		flags:    paramIsGoParam,
+	}
+	if goType != nil {
+		switch underlying := goType.Underlying().(type) {
+		case *types.Pointer:
+			// Pointers in Go must either point to an object or be nil.
+			info.elemSize = c.targetData.TypeAllocSize(c.getLLVMType(underlying.Elem()))
+		case *types.Chan:
+			// Channels are implemented simply as a *runtime.channel.
+			info.elemSize = c.targetData.TypeAllocSize(c.getLLVMRuntimeType("channel"))
+		case *types.Map:
+			// Maps are similar to channels: they are implemented as a
+			// *runtime.hashmap.
+			info.elemSize = c.targetData.TypeAllocSize(c.getLLVMRuntimeType("hashmap"))
+		}
+	}
+	return info
+}
+
+// extractSubfield extracts a field from a struct, or returns null if this is
+// not a struct and thus no subfield can be obtained.
+func extractSubfield(t types.Type, field int) types.Type {
+	if t == nil {
+		return nil
+	}
+	switch t := t.Underlying().(type) {
+	case *types.Struct:
+		return t.Field(field).Type()
+	case *types.Interface, *types.Slice, *types.Basic, *types.Signature:
+		// These Go types are (sometimes) implemented as LLVM structs but can't
+		// really be split further up in Go (with the possible exception of
+		// complex numbers).
+		return nil
+	default:
+		// This should be unreachable.
+		panic("cannot split subfield: " + t.String())
 	}
 }
 
@@ -233,7 +314,7 @@ func (b *builder) collapseFormalParam(t llvm.Type, fields []llvm.Value) llvm.Val
 func (b *builder) collapseFormalParamInternal(t llvm.Type, fields []llvm.Value) (llvm.Value, []llvm.Value) {
 	switch t.TypeKind() {
 	case llvm.StructTypeKind:
-		flattened := b.flattenAggregateTypeTC(t, "", nil)
+		flattened := b.flattenAggregateType(t, "", nil)
 		if len(flattened) <= maxFieldsPerParam {
 			value := llvm.ConstNull(t)
 			for i, subtyp := range t.StructElementTypes() {
@@ -251,96 +332,5 @@ func (b *builder) collapseFormalParamInternal(t llvm.Type, fields []llvm.Value) 
 		}
 	default:
 		return fields[0], fields[1:]
-	}
-}
-
-// ─── TC variants (use typecheck.Type instead of go/types.Type) ───────────────
-
-// expandFormalParamTypeTC is the typecheck variant of expandFormalParamType.
-// Mirrors the SSA structure: try to flatten small structs, fall back to a
-// single paramInfo for everything else.
-func (c *compilerContext) expandFormalParamTypeTC(t llvm.Type, name string, mxType typecheck.Type) []paramInfo {
-	switch t.TypeKind() {
-	case llvm.StructTypeKind:
-		fieldInfos := c.flattenAggregateTypeTC(t, name, mxType)
-		if len(fieldInfos) <= maxFieldsPerParam {
-			return fieldInfos
-		}
-	}
-	return []paramInfo{c.getParamInfoTC(t, name, mxType)}
-}
-
-// flattenAggregateTypeTC is the typecheck variant of flattenAggregateType.
-// Names struct subfields based on the typecheck type when available
-// (matching SSA's behavior for interface/slice/struct/string/signature).
-func (c *compilerContext) flattenAggregateTypeTC(t llvm.Type, name string, mxType typecheck.Type) []paramInfo {
-	switch t.TypeKind() {
-	case llvm.StructTypeKind:
-		var paramInfos []paramInfo
-		for i, subfield := range t.StructElementTypes() {
-			if c.targetData.TypeAllocSize(subfield) == 0 {
-				continue
-			}
-			suffix := strconv.Itoa(i)
-			if mxType != nil {
-				switch mxt := mxType.Underlying().(type) {
-				case *typecheck.Interface:
-					suffix = []string{"typecode", "value"}[i]
-				case *typecheck.Slice:
-					suffix = []string{"data", "len", "cap"}[i]
-				case *typecheck.Struct:
-					suffix = mxt.Field(i).Name()
-				case *typecheck.Basic:
-					if mxt.Info()&typecheck.IsString != 0 {
-						suffix = []string{"data", "len", "cap"}[i]
-					}
-				case *typecheck.Signature:
-					suffix = []string{"context", "funcptr"}[i]
-				}
-			}
-			subInfos := c.flattenAggregateTypeTC(subfield, name+"."+suffix, extractSubfieldTC(mxType, i))
-			paramInfos = append(paramInfos, subInfos...)
-		}
-		return paramInfos
-	default:
-		return []paramInfo{c.getParamInfoTC(t, name, mxType)}
-	}
-}
-
-// getParamInfoTC is the typecheck variant of getParamInfo. Sets elemSize for
-// pointer-like types (pointer/chan/map) so LLVM can apply the
-// dereferenceable_or_null attribute.
-func (c *compilerContext) getParamInfoTC(t llvm.Type, name string, mxType typecheck.Type) paramInfo {
-	info := paramInfo{
-		llvmType: t,
-		name:     name,
-		flags:    paramIsGoParam,
-	}
-	if mxType != nil {
-		switch underlying := mxType.Underlying().(type) {
-		case *typecheck.Pointer:
-			info.elemSize = c.targetData.TypeAllocSize(c.getLLVMTypeTC(underlying.Elem()))
-		case *typecheck.Chan:
-			info.elemSize = c.targetData.TypeAllocSize(c.getLLVMRuntimeType("channel"))
-		case *typecheck.Map:
-			info.elemSize = c.targetData.TypeAllocSize(c.getLLVMRuntimeType("hashmap"))
-		}
-	}
-	return info
-}
-
-// extractSubfieldTC is the typecheck variant of extractSubfield. Returns the
-// element type of a struct field, or nil for types that can't be split.
-func extractSubfieldTC(t typecheck.Type, field int) typecheck.Type {
-	if t == nil {
-		return nil
-	}
-	switch t := t.Underlying().(type) {
-	case *typecheck.Struct:
-		return t.Field(field).Type()
-	case *typecheck.Interface, *typecheck.Slice, *typecheck.Basic, *typecheck.Signature:
-		return nil
-	default:
-		return nil
 	}
 }

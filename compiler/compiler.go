@@ -17,10 +17,8 @@ import (
 
 	"moxie/compiler/llvmutil"
 	"moxie/loader"
-	"moxie/mxssa"
-	"moxie/ssabridge"
 	"moxie/src/moxie"
-	"moxie/typecheck"
+	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/types/typeutil"
 	"tinygo.org/x/go-llvm"
 )
@@ -86,15 +84,12 @@ type compilerContext struct {
 	funcPtrType      llvm.Type // pointer in function address space (1 for AVR, 0 elsewhere)
 	funcPtrAddrSpace int
 	uintptrType      llvm.Type
-	mxProgram        *mxssa.Program   // B3 bridge: native SSA, populated by ssabridge
-	mxTranslator     *ssabridge.Translator
+	program          *ssa.Program
 	diagnostics      []error
-	functionInfos    map[*mxssa.Function]functionInfo
+	functionInfos    map[*ssa.Function]functionInfo
 	astComments      map[string]*ast.CommentGroup
 	embedGlobals     map[string][]*loader.EmbedFile
 	pkg              *types.Package
-	mxPkg            *typecheck.Package // B3 bridge: native types for current package
-	tcLLVMTypes      map[typecheck.Type]llvm.Type // B3 bridge: typecheck.Type → LLVM cache
 	packageDir       string // directory for this package
 	runtimePkg       *types.Package
 }
@@ -109,9 +104,8 @@ func newCompilerContext(moduleName string, machine llvm.TargetMachine, config *C
 		ditypes:       make(map[types.Type]llvm.Metadata),
 		machine:       machine,
 		targetData:    machine.CreateTargetData(),
-		functionInfos: map[*mxssa.Function]functionInfo{},
+		functionInfos: map[*ssa.Function]functionInfo{},
 		astComments:   map[string]*ast.CommentGroup{},
-		tcLLVMTypes:   map[typecheck.Type]llvm.Type{},
 	}
 
 	c.ctx = llvm.NewContext()
@@ -148,58 +142,48 @@ func (c *compilerContext) dispose() {
 type builder struct {
 	*compilerContext
 	llvm.Builder
-	mxFn              *mxssa.Function          // B3 bridge: native SSA function
+	fn                *ssa.Function
 	llvmFnType        llvm.Type
 	llvmFn            llvm.Value
 	info              functionInfo
-	mxLocals          map[mxssa.Value]llvm.Value // local variables (TC)
+	locals            map[ssa.Value]llvm.Value // local variables
 	blockInfo         []blockInfo
-	currentBlock      *mxssa.BasicBlock
+	currentBlock      *ssa.BasicBlock
 	currentBlockInfo  *blockInfo
 	tarjanStack       []uint
 	tarjanIndex       uint
-	mxPhis            []phiNodeTC
+	phis              []phiNode
 	deferPtr          llvm.Value
 	deferFrame        llvm.Value
 	stackChainAlloca  llvm.Value
 	landingpad        llvm.BasicBlock
 	difunc            llvm.Metadata
-	dilocalsParam     map[*mxssa.Parameter]llvm.Metadata
+	dilocals          map[*types.Var]llvm.Metadata
 	initInlinedAt     llvm.Metadata            // fake inlinedAt position
 	initPseudoFuncs   map[string]llvm.Metadata // fake "inlined" functions for proper init debug locations
 	allDeferFuncs     []interface{}
-	deferFuncs        map[*mxssa.Function]int
+	deferFuncs        map[*ssa.Function]int
 	deferInvokeFuncs  map[string]int
-	deferClosureFuncs map[*mxssa.Function]int
-	deferExprFuncs    map[mxssa.Value]int
-	selectRecvBufTC   map[*mxssa.Select]llvm.Value
-	deferBuiltinFuncs map[mxssa.Value]deferBuiltin
+	deferClosureFuncs map[*ssa.Function]int
+	deferExprFuncs    map[ssa.Value]int
+	selectRecvBuf     map[*ssa.Select]llvm.Value
+	deferBuiltinFuncs map[ssa.Value]deferBuiltin
 	runDefersBlock    []llvm.BasicBlock
 	afterDefersBlock  []llvm.BasicBlock
 }
 
-func newBuilder(c *compilerContext, irbuilder llvm.Builder, mxFn *mxssa.Function) *builder {
-	// Always EnsureFunction so the body is translated. Without this, a
-	// shell-only mxFn (from cross-package value translation) would make
-	// createFunctionTC skip body generation and produce undefined symbols
-	// at link time.
-	if mxFn != nil {
-		if goFn := c.mxTranslator.ReverseFunction(mxFn); goFn != nil {
-			c.mxTranslator.EnsureFunction(goFn)
-		}
-	}
-	fnType, fn := c.getFunction(mxFn)
-	b := &builder{
+func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *builder {
+	fnType, fn := c.getFunction(f)
+	return &builder{
 		compilerContext: c,
 		Builder:         irbuilder,
-		mxFn:            mxFn,
+		fn:              f,
 		llvmFnType:      fnType,
 		llvmFn:          fn,
-		info:            c.getFunctionInfo(mxFn),
-		mxLocals:        make(map[mxssa.Value]llvm.Value),
-		dilocalsParam:   make(map[*mxssa.Parameter]llvm.Metadata),
+		info:            c.getFunctionInfo(f),
+		locals:          make(map[ssa.Value]llvm.Value),
+		dilocals:        make(map[*types.Var]llvm.Metadata),
 	}
-	return b
 }
 
 type blockInfo struct {
@@ -218,12 +202,12 @@ type blockInfo struct {
 type deferBuiltin struct {
 	callName string
 	pos      token.Pos
-	argTypes []typecheck.Type
+	argTypes []types.Type
 	callback int
 }
 
-type phiNodeTC struct {
-	phi  *mxssa.Phi
+type phiNode struct {
+	ssa  *ssa.Phi
 	llvm llvm.Value
 }
 
@@ -290,21 +274,17 @@ func Sizes(machine llvm.TargetMachine) types.Sizes {
 }
 
 // CompilePackage compiles a single package to a LLVM module.
-// The Prepared bridge state is built by ssabridge.PrepareCompile, which
-// hides go/ssa.Package from the compiler.
-func CompilePackage(moduleName string, pkg *loader.Package, prep *ssabridge.Prepared, machine llvm.TargetMachine, config *Config, dumpSSA bool) (llvm.Module, []error) {
+func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package, machine llvm.TargetMachine, config *Config, dumpSSA bool) (llvm.Module, []error) {
 	c := newCompilerContext(moduleName, machine, config, dumpSSA)
 	defer c.dispose()
 	c.packageDir = pkg.OriginalDir()
 	c.embedGlobals = pkg.EmbedGlobals
 	c.pkg = pkg.Pkg
-	c.runtimePkg = prep.GoRuntimePkg
-	c.mxProgram = prep.MxProg
-	c.mxTranslator = prep.Translator
-	if prep.MxPkg != nil {
-		c.mxPkg = prep.MxPkg.Pkg
-	}
-	c.validateBridgeTypes()
+	c.runtimePkg = ssaPkg.Prog.ImportedPackage("runtime").Pkg
+	c.program = ssaPkg.Prog
+
+	// Convert AST to SSA.
+	ssaPkg.Build()
 
 	// Initialize debug information.
 	if c.Debug {
@@ -322,16 +302,16 @@ func CompilePackage(moduleName string, pkg *loader.Package, prep *ssabridge.Prep
 
 	// Predeclare the runtime.alloc function, which is used by the wordpack
 	// functionality.
-	c.getRuntimeFunction("alloc")
+	c.getFunction(c.program.ImportedPackage("runtime").Members["alloc"].(*ssa.Function))
 	if c.NeedsStackObjects {
 		// Predeclare trackPointer, which is used everywhere we use runtime.alloc.
-		c.getRuntimeFunction("trackPointer")
+		c.getFunction(c.program.ImportedPackage("runtime").Members["trackPointer"].(*ssa.Function))
 	}
 
 	// Compile all functions, methods, and global variables in this package.
 	irbuilder := c.ctx.NewBuilder()
 	defer irbuilder.Dispose()
-	c.createPackage(irbuilder, prep.MxPkg)
+	c.createPackage(irbuilder, ssaPkg)
 
 	// see: https://reviews.llvm.org/D18355
 	if c.Debug {
@@ -387,24 +367,22 @@ func (c *compilerContext) getLLVMRuntimeType(name string) llvm.Type {
 	return c.getLLVMType(c.getRuntimeType(name))
 }
 
-// getLLVMType returns a LLVM type for a Go type. It bridges to
-// getLLVMTypeTC via the translator's ForwardType so the SSA-side and
-// TC-side LLVM type caches share identity (single source of truth for
-// named structs).
+// getLLVMType returns a LLVM type for a Go type. It doesn't recreate already
+// created types. This is somewhat important for performance, but especially
+// important for named struct types (which should only be created once).
 func (c *compilerContext) getLLVMType(goType types.Type) llvm.Type {
-	tcType := c.mxTranslator.ForwardType(goType)
-	if tcType == nil {
-		// Fallback for cases where the translator can't bridge (e.g. some
-		// generic instantiations); fall through to the legacy SSA path.
-		ival := c.llvmTypes.At(goType)
-		if ival != nil {
-			return ival.(llvm.Type)
-		}
-		llvmType := c.makeLLVMType(goType)
-		c.llvmTypes.Set(goType, llvmType)
-		return llvmType
+	// Try to load the LLVM type from the cache.
+	// Note: *types.Named isn't unique when working with generics.
+	// See https://github.com/golang/go/issues/53914
+	// This is the reason for using typeutil.Map to lookup LLVM types for Go types.
+	ival := c.llvmTypes.At(goType)
+	if ival != nil {
+		return ival.(llvm.Type)
 	}
-	return c.getLLVMTypeTC(tcType)
+	// Not already created, so adding this type to the cache.
+	llvmType := c.makeLLVMType(goType)
+	c.llvmTypes.Set(goType, llvmType)
+	return llvmType
 }
 
 // makeLLVMType creates a LLVM type for a Go type. Don't call this, use
@@ -456,13 +434,6 @@ func (c *compilerContext) makeLLVMType(goType types.Type) llvm.Type {
 			// LLVM. This is because it is otherwise impossible to create
 			// self-referencing types such as linked lists.
 			llvmName := typ.String()
-			// Reuse existing named type from the module to keep identity
-			// consistent with getLLVMTypeTC.
-			existing := c.mod.GetTypeByName(llvmName)
-			if !existing.IsNil() {
-				c.llvmTypes.Set(goType, existing)
-				return existing
-			}
 			llvmType := c.ctx.StructCreateNamed(llvmName)
 			c.llvmTypes.Set(goType, llvmType) // avoid infinite recursion
 			underlying := c.getLLVMType(st)
@@ -471,7 +442,7 @@ func (c *compilerContext) makeLLVMType(goType types.Type) llvm.Type {
 		}
 		return c.getLLVMType(typ.Underlying())
 	case *types.Signature: // function value
-		return c.funcValueType()
+		return c.getFuncType(typ)
 	case *types.Slice:
 		// Moxie: []byte uses the named _string type (string=[]byte unification).
 		if basic, ok := typ.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {
@@ -502,16 +473,15 @@ func (c *compilerContext) makeLLVMType(goType types.Type) llvm.Type {
 	}
 }
 
-// getDITypeForGlobal returns the DWARF type for a global variable's element
-// type. Wraps the SSA-side resolution so symbol.go can stay
-// go/types-import-free until the createDIType chain (§3) migrates.
-func (c *compilerContext) getDITypeForGlobal(g *mxssa.Global) llvm.Metadata {
-	if goG := c.mxTranslator.ReverseGlobal(g); goG != nil {
-		if ptr, ok := goG.Type().(*types.Pointer); ok {
-			return c.getDIType(ptr.Elem())
-		}
+// Is this a pointer type of some sort? Can be unsafe.Pointer or any *T pointer.
+func isPointer(typ types.Type) bool {
+	if _, ok := typ.(*types.Pointer); ok {
+		return true
+	} else if typ, ok := typ.(*types.Basic); ok && typ.Kind() == types.UnsafePointer {
+		return true
+	} else {
+		return false
 	}
-	return llvm.Metadata{}
 }
 
 // Get the DWARF type for this Go type.
@@ -614,11 +584,11 @@ func (c *compilerContext) createDIType(typ types.Type) llvm.Metadata {
 			Encoding:   encoding,
 		})
 	case *types.Chan:
-		return c.getDIType(types.NewPointer(c.getRuntimeType("channel")))
+		return c.getDIType(types.NewPointer(c.program.ImportedPackage("runtime").Members["channel"].(*ssa.Type).Type()))
 	case *types.Interface:
-		return c.getDIType(c.getRuntimeType("_interface"))
+		return c.getDIType(c.program.ImportedPackage("runtime").Members["_interface"].(*ssa.Type).Type())
 	case *types.Map:
-		return c.getDIType(types.NewPointer(c.getRuntimeType("hashmap")))
+		return c.getDIType(types.NewPointer(c.program.ImportedPackage("runtime").Members["hashmap"].(*ssa.Type).Type()))
 	case *types.Named:
 		// Placeholder metadata node, to be replaced afterwards.
 		temporaryMDNode := c.dibuilder.CreateReplaceableCompositeType(llvm.Metadata{}, llvm.DIReplaceableCompositeType{
@@ -728,8 +698,8 @@ func (b *builder) setDebugLocation(pos token.Pos) {
 		return
 	}
 
-	position := b.mxProgram.Fset.Position(pos)
-	if b.mxFn.Synthetic == "package initializer" {
+	position := b.program.Fset.Position(pos)
+	if b.fn.Synthetic == "package initializer" {
 		// Package initializers are treated specially, because while individual
 		// Go SSA instructions have file/line/col information, the parent
 		// function does not. LLVM doesn't store filename information per
@@ -737,7 +707,7 @@ func (b *builder) setDebugLocation(pos token.Pos) {
 		// creating a fake DIFunction for each Go file and say that the
 		// instruction really came from that (fake) function but was inlined in
 		// the package initializer function.
-		position := b.mxProgram.Fset.Position(pos)
+		position := b.program.Fset.Position(pos)
 		name := filepath.Base(position.Filename)
 		difunc, ok := b.initPseudoFuncs[name]
 		if !ok {
@@ -745,7 +715,7 @@ func (b *builder) setDebugLocation(pos token.Pos) {
 				File: b.getDIFile(position.Filename),
 			})
 			difunc = b.dibuilder.CreateFunction(b.getDIFile(position.Filename), llvm.DIFunction{
-				Name:         b.mxFn.RelString(nil) + "#" + name,
+				Name:         b.fn.RelString(nil) + "#" + name,
 				File:         b.getDIFile(position.Filename),
 				Line:         0,
 				Type:         diFuncType,
@@ -765,39 +735,50 @@ func (b *builder) setDebugLocation(pos token.Pos) {
 	b.SetCurrentDebugLocation(uint(position.Line), uint(position.Column), b.difunc, llvm.Metadata{})
 }
 
-// getLocalParameter returns the debug info entry for a function parameter.
-// Cached on b.dilocalsParam (keyed by *mxssa.Parameter).
-func (b *builder) getLocalParameter(param *mxssa.Parameter, argNo int) llvm.Metadata {
-	if dilocal, ok := b.dilocalsParam[param]; ok {
+// getLocalVariable returns a debug info entry for a local variable, which may
+// either be a parameter or a regular variable. It will create a new metadata
+// entry if there isn't one for the variable yet.
+func (b *builder) getLocalVariable(variable *types.Var) llvm.Metadata {
+	if dilocal, ok := b.dilocals[variable]; ok {
+		// DILocalVariable was already created, return it directly.
 		return dilocal
 	}
-	pos := b.mxProgram.Fset.Position(param.Pos())
-	// Bridge typecheck.Type → go/types.Type for the still-SSA-typed
-	// getDIType chain (§3 will migrate that to TC).
-	var diType llvm.Metadata
-	if goType := b.mxTranslator.ReverseType(param.Type()); goType != nil {
-		diType = b.getDIType(goType)
+
+	pos := b.program.Fset.Position(variable.Pos())
+
+	// Check whether this is a function parameter.
+	for i, param := range b.fn.Params {
+		if param.Object().(*types.Var) == variable {
+			// Yes it is, create it as a function parameter.
+			dilocal := b.dibuilder.CreateParameterVariable(b.difunc, llvm.DIParameterVariable{
+				Name:           param.Name(),
+				File:           b.getDIFile(pos.Filename),
+				Line:           pos.Line,
+				Type:           b.getDIType(param.Type()),
+				AlwaysPreserve: true,
+				ArgNo:          i + 1,
+			})
+			b.dilocals[variable] = dilocal
+			return dilocal
+		}
 	}
-	dilocal := b.dibuilder.CreateParameterVariable(b.difunc, llvm.DIParameterVariable{
-		Name:           param.Name(),
+
+	// No, it's not a parameter. Create a regular (auto) variable.
+	dilocal := b.dibuilder.CreateAutoVariable(b.difunc, llvm.DIAutoVariable{
+		Name:           variable.Name(),
 		File:           b.getDIFile(pos.Filename),
 		Line:           pos.Line,
-		Type:           diType,
+		Type:           b.getDIType(variable.Type()),
 		AlwaysPreserve: true,
-		ArgNo:          argNo,
 	})
-	b.dilocalsParam[param] = dilocal
+	b.dilocals[variable] = dilocal
 	return dilocal
 }
 
 // attachDebugInfo adds debug info to a function declaration. It returns the
 // DISubprogram metadata node.
-func (c *compilerContext) attachDebugInfo(f *mxssa.Function) llvm.Metadata {
-	syn := f.Syntax()
-	if syn == nil {
-		return llvm.Metadata{}
-	}
-	pos := c.mxProgram.Fset.Position(syn.Pos())
+func (c *compilerContext) attachDebugInfo(f *ssa.Function) llvm.Metadata {
+	pos := c.program.Fset.Position(f.Syntax().Pos())
 	_, fn := c.getFunction(f)
 	return c.attachDebugInfoRaw(f, fn, "", pos.Filename, pos.Line)
 }
@@ -805,49 +786,20 @@ func (c *compilerContext) attachDebugInfo(f *mxssa.Function) llvm.Metadata {
 // attachDebugInfo adds debug info to a function declaration. It returns the
 // DISubprogram metadata node. This method allows some more control over how
 // debug info is added to the function.
-func (c *compilerContext) attachDebugInfoRaw(f *mxssa.Function, llvmFn llvm.Value, suffix, filename string, line int) llvm.Metadata {
-	// Debug info for this function. Iterate receiver + params via mxssa.Function
-	// signature; convert to go/types via ReverseType for getDIType (debug info
-	// chain still keyed on go/types until §3).
-	sig := f.Signature
-	var diparams []llvm.Metadata
-	if sig != nil {
-		recv := sig.Recv()
-		params := sig.Params()
-		paramCount := 0
-		if params != nil {
-			paramCount = params.Len()
-		}
-		if recv != nil {
-			paramCount++
-		}
-		diparams = make([]llvm.Metadata, 0, paramCount)
-		if recv != nil {
-			if goT := c.mxTranslator.ReverseType(recv.Type()); goT != nil {
-				diparams = append(diparams, c.getDIType(goT))
-			}
-		}
-		if params != nil {
-			for i := 0; i < params.Len(); i++ {
-				if goT := c.mxTranslator.ReverseType(params.At(i).Type()); goT != nil {
-					diparams = append(diparams, c.getDIType(goT))
-				}
-			}
-		}
+func (c *compilerContext) attachDebugInfoRaw(f *ssa.Function, llvmFn llvm.Value, suffix, filename string, line int) llvm.Metadata {
+	// Debug info for this function.
+	params := getParams(f.Signature)
+	diparams := make([]llvm.Metadata, 0, len(params))
+	for _, param := range params {
+		diparams = append(diparams, c.getDIType(param.Type()))
 	}
 	diFuncType := c.dibuilder.CreateSubroutineType(llvm.DISubroutineType{
 		File:       c.getDIFile(filename),
 		Parameters: diparams,
 		Flags:      0, // ?
 	})
-	// Use ssa.Function.RelString(nil) for the canonical name (mxssa's RelString
-	// loses the receiver type for methods).
-	canonicalName := f.RelString(nil)
-	if goFn := c.mxTranslator.ReverseFunction(f); goFn != nil {
-		canonicalName = goFn.RelString(nil)
-	}
 	difunc := c.dibuilder.CreateFunction(c.getDIFile(filename), llvm.DIFunction{
-		Name:         canonicalName + suffix,
+		Name:         f.RelString(nil) + suffix,
 		LinkageName:  c.getFunctionInfo(f).linkName + suffix,
 		File:         c.getDIFile(filename),
 		Line:         line,
@@ -878,7 +830,7 @@ func (c *compilerContext) getDIFile(filename string) llvm.Metadata {
 
 // createPackage builds the LLVM IR for all types, methods, and global variables
 // in the given package.
-func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *mxssa.Package) {
+func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package) {
 	// Sort by position, so that the order of the functions in the IR matches
 	// the order of functions in the source file. This is useful for testing,
 	// for example.
@@ -896,71 +848,81 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *mxssa.Packa
 		return iPos < jPos
 	})
 
-	// Define all functions. Track seen mxssa.Function to dedupe methods that
-	// appear in multiple type's method sets (e.g., embedded types).
-	seenFn := map[*mxssa.Function]bool{}
+	// Define all functions.
 	for _, name := range members {
-		switch member := pkg.Members[name].(type) {
-		case *mxssa.Function:
-			// Skip generic (non-instantiated) functions. mxssa.Function.TypeParams
-			// isn't populated by the bridge yet, so fall back to the SSA-side
-			// check via ReverseFunction.
-			if goFn := c.mxTranslator.ReverseFunction(member); goFn != nil && goFn.TypeParams() != nil {
+		member := pkg.Members[name]
+		switch member := member.(type) {
+		case *ssa.Function:
+			if member.TypeParams() != nil {
+				// Do not try to build generic (non-instantiated) functions.
 				continue
 			}
+			// Create the function definition.
 			b := newBuilder(c, irbuilder, member)
 			if _, ok := mathToLLVMMapping[member.RelString(nil)]; ok {
+				// The body of this function (if there is one) is ignored and
+				// replaced with a LLVM intrinsic call.
 				b.defineMathOp()
 				continue
 			}
 			if ok := b.defineMathBitsIntrinsic(); ok {
+				// Like a math intrinsic, the body of this function was replaced
+				// with a LLVM intrinsic.
 				continue
 			}
-			if len(member.Blocks) == 0 {
+			if member.Blocks == nil {
 				// Try to define this as an intrinsic function.
 				b.defineIntrinsicFunction()
-				// May simply be an external function (defined via //go:linkname);
-				// leave it undefined in that case.
+				// It might not be an intrinsic function but simply an external
+				// function (defined via //go:linkname). Leave it undefined in
+				// that case.
 				continue
 			}
-			b.createFunctionDispatch()
-		case *mxssa.Type_:
-			memberType := member.Type()
-			if _, isInterface := memberType.Underlying().(*typecheck.Interface); isInterface {
+			b.createFunction()
+		case *ssa.Type:
+			if types.IsInterface(member.Type()) {
+				// Interfaces don't have concrete methods.
 				continue
 			}
-			// Skip type aliases: their methods belong to the underlying type and
-			// are compiled there. For an alias `type Foo = Bar`, mxssa.Type_.Name()
-			// returns "Foo" but the resolved typecheck.Type is Bar, so the
-			// qualified-name suffix won't match.
-			memberQual := pkg.Pkg.Path() + "." + member.Name()
-			if memberType.String() != memberQual && memberType.String() != member.Name() {
+			if _, isalias := member.Type().(*types.Alias); isalias {
+				// Aliases don't need to be redefined, since they just refer to
+				// an already existing type whose methods will be defined.
 				continue
 			}
-			// Named type — make sure all methods (value and pointer receivers)
-			// are created. Methods aren't in pkg.Members; the translator's
-			// MethodsForType helper hides the go/ssa MethodSet enumeration.
-			methods := c.mxTranslator.MethodsForType(memberType)
-			for _, fn := range methods {
+
+			// Named type. We should make sure all methods are created.
+			// This includes both functions with pointer receivers and those
+			// without.
+			methods := getAllMethods(pkg.Prog, member.Type())
+			methods = append(methods, getAllMethods(pkg.Prog, types.NewPointer(member.Type()))...)
+			for _, method := range methods {
+				// Parse this method.
+				fn := pkg.Prog.MethodValue(method)
 				if fn == nil {
+					continue // probably a generic method
+				}
+				if member.Type().String() != member.String() {
+					// This is a member on a type alias. Do not build such a
+					// function.
 					continue
 				}
-				if seenFn[fn] {
-					continue // already compiled (e.g., promoted via embedded type)
-				}
-				seenFn[fn] = true
-				if len(fn.Blocks) == 0 {
+				if fn.Blocks == nil {
 					continue // external function
 				}
 				if fn.Synthetic != "" && fn.Synthetic != "package initializer" {
-					// Wrapper functions are created on demand by getFunction;
-					// skip them here to avoid redeclaration errors.
+					// This function is a kind of wrapper function (created by
+					// the ssa package, not appearing in the source code) that
+					// is created by the getFunction method as needed.
+					// Therefore, don't build it here to avoid "function
+					// redeclared" errors.
 					continue
 				}
+				// Create the function definition.
 				b := newBuilder(c, irbuilder, fn)
-				b.createFunctionDispatch()
+				b.createFunction()
 			}
-		case *mxssa.Global:
+		case *ssa.Global:
+			// Global variable.
 			info := c.getGlobalInfo(member)
 			global := c.getGlobal(member)
 			if files, ok := c.embedGlobals[member.Name()]; ok {
@@ -978,35 +940,29 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *mxssa.Packa
 	// Add forwarding functions for functions that would otherwise be
 	// implemented in assembly.
 	for _, name := range members {
-		member, ok := pkg.Members[name].(*mxssa.Function)
-		if !ok {
-			continue
-		}
-		if len(member.Blocks) != 0 {
-			continue // not an external function
-		}
-		info := c.getFunctionInfo(member)
-		if aliasName, ok := stdlibAliases[info.linkName]; ok {
-			alias := c.mod.NamedFunction(aliasName)
-			if alias.IsNil() {
-				continue
+		member := pkg.Members[name]
+		switch member := member.(type) {
+		case *ssa.Function:
+			if member.Blocks != nil {
+				continue // external function
 			}
-			b := newBuilder(c, irbuilder, member)
-			b.createAlias(alias)
+			info := c.getFunctionInfo(member)
+			if aliasName, ok := stdlibAliases[info.linkName]; ok {
+				alias := c.mod.NamedFunction(aliasName)
+				if alias.IsNil() {
+					// Shouldn't happen, but perhaps best to just ignore.
+					// The error will be a link error, if there is an error.
+					continue
+				}
+				b := newBuilder(c, irbuilder, member)
+				b.createAlias(alias)
+			}
 		}
 	}
 }
 
 // createEmbedGlobal creates an initializer for a //go:embed global variable.
-// The body still uses go/types extensively; bridge the *mxssa.Global at the
-// signature via ReverseGlobal until §3 migrates the type-discrimination
-// internals.
-func (c *compilerContext) createEmbedGlobal(mxMember *mxssa.Global, global llvm.Value, files []*loader.EmbedFile) {
-	member := c.mxTranslator.ReverseGlobal(mxMember)
-	if member == nil {
-		c.addError(mxMember.Pos(), "createEmbedGlobal: cannot reverse-bridge global "+mxMember.Name())
-		return
-	}
+func (c *compilerContext) createEmbedGlobal(member *ssa.Global, global llvm.Value, files []*loader.EmbedFile) {
 	switch typ := member.Type().(*types.Pointer).Elem().Underlying().(type) {
 	case *types.Basic:
 		// String type.
@@ -1033,7 +989,7 @@ func (c *compilerContext) createEmbedGlobal(mxMember *mxssa.Global, global llvm.
 		}
 		file := files[0]
 		bufferValue := c.ctx.ConstString(string(file.Data), false)
-		bufferGlobal := llvm.AddGlobal(c.mod, bufferValue.Type(), c.mxPkg.Path()+"$embedslice")
+		bufferGlobal := llvm.AddGlobal(c.mod, bufferValue.Type(), c.pkg.Path()+"$embedslice")
 		bufferGlobal.SetInitializer(bufferValue)
 		bufferGlobal.SetLinkage(llvm.InternalLinkage)
 		bufferGlobal.SetAlignment(1)
@@ -1048,7 +1004,7 @@ func (c *compilerContext) createEmbedGlobal(mxMember *mxssa.Global, global llvm.
 
 		if c.Debug {
 			// Add debug info to the slice backing array.
-			position := c.mxProgram.Fset.Position(member.Pos())
+			position := c.program.Fset.Position(member.Pos())
 			diglobal := c.dibuilder.CreateGlobalVariableExpression(llvm.Metadata{}, llvm.DIGlobalVariableExpression{
 				File:        c.getDIFile(position.Filename),
 				Line:        position.Line,
@@ -1104,8 +1060,7 @@ func (c *compilerContext) createEmbedGlobal(mxMember *mxssa.Global, global llvm.
 		var fileStructs []llvm.Value
 		for _, file := range allFiles {
 			fileStruct := llvm.ConstNull(llvmEmbedFileStructType)
-			mxStrConst := mxssa.NewConst(constant.MakeString(file.Name), typecheck.Typ[typecheck.String])
-			name := c.createConstTC(mxStrConst, member.Pos())
+			name := c.createConst(ssa.NewConst(constant.MakeString(file.Name), types.Typ[types.String]), getPos(member))
 			fileStruct = c.builder.CreateInsertValue(fileStruct, name, 0, "") // "name" field
 			if file.Hash != "" {
 				data := c.getEmbedFileString(file)
@@ -1114,7 +1069,7 @@ func (c *compilerContext) createEmbedGlobal(mxMember *mxssa.Global, global llvm.
 			fileStructs = append(fileStructs, fileStruct)
 		}
 		sliceDataInitializer := llvm.ConstArray(llvmEmbedFileStructType, fileStructs)
-		sliceDataGlobal := llvm.AddGlobal(c.mod, sliceDataInitializer.Type(), c.mxPkg.Path()+"$embedfsfiles")
+		sliceDataGlobal := llvm.AddGlobal(c.mod, sliceDataInitializer.Type(), c.pkg.Path()+"$embedfsfiles")
 		sliceDataGlobal.SetInitializer(sliceDataInitializer)
 		sliceDataGlobal.SetLinkage(llvm.InternalLinkage)
 		sliceDataGlobal.SetGlobalConstant(true)
@@ -1122,7 +1077,7 @@ func (c *compilerContext) createEmbedGlobal(mxMember *mxssa.Global, global llvm.
 		sliceDataGlobal.SetAlignment(c.targetData.ABITypeAlignment(sliceDataInitializer.Type()))
 		if c.Debug {
 			// Add debug information for code size attribution (among others).
-			position := c.mxProgram.Fset.Position(member.Pos())
+			position := c.program.Fset.Position(member.Pos())
 			diglobal := c.dibuilder.CreateGlobalVariableExpression(llvm.Metadata{}, llvm.DIGlobalVariableExpression{
 				File:        c.getDIFile(position.Filename),
 				Line:        position.Line,
@@ -1142,14 +1097,14 @@ func (c *compilerContext) createEmbedGlobal(mxMember *mxssa.Global, global llvm.
 		})
 		sliceLen := llvm.ConstInt(c.uintptrType, uint64(len(fileStructs)), false)
 		sliceInitializer := c.ctx.ConstStruct([]llvm.Value{slicePtr, sliceLen, sliceLen}, false)
-		sliceGlobal := llvm.AddGlobal(c.mod, sliceInitializer.Type(), c.mxPkg.Path()+"$embedfsslice")
+		sliceGlobal := llvm.AddGlobal(c.mod, sliceInitializer.Type(), c.pkg.Path()+"$embedfsslice")
 		sliceGlobal.SetInitializer(sliceInitializer)
 		sliceGlobal.SetLinkage(llvm.InternalLinkage)
 		sliceGlobal.SetGlobalConstant(true)
 		sliceGlobal.SetUnnamedAddr(true)
 		sliceGlobal.SetAlignment(c.targetData.ABITypeAlignment(sliceInitializer.Type()))
 		if c.Debug {
-			position := c.mxProgram.Fset.Position(member.Pos())
+			position := c.program.Fset.Position(member.Pos())
 			diglobal := c.dibuilder.CreateGlobalVariableExpression(llvm.Metadata{}, llvm.DIGlobalVariableExpression{
 				File:        c.getDIFile(position.Filename),
 				Line:        position.Line,
@@ -1193,7 +1148,7 @@ func (c *compilerContext) getEmbedFileString(file *loader.EmbedFile) llvm.Value 
 // define compiler intrinsics like the atomic operations in sync/atomic.
 func (b *builder) createFunctionStart(intrinsic bool) {
 	if b.DumpSSA {
-		fmt.Printf("\nfunc %s:\n", b.mxFn)
+		fmt.Printf("\nfunc %s:\n", b.fn)
 	}
 	if !b.llvmFn.IsDeclaration() {
 		errValue := b.llvmFn.Name() + " redeclared in this program"
@@ -1201,7 +1156,7 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		if fnPos.IsValid() {
 			errValue += "\n\tprevious declaration at " + fnPos.String()
 		}
-		b.addError(b.mxFn.Pos(), errValue)
+		b.addError(b.fn.Pos(), errValue)
 		return
 	}
 
@@ -1251,21 +1206,21 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		if strings.HasPrefix(b.Triple, "avr") {
 			b.llvmFn.AddFunctionAttr(b.ctx.CreateStringAttribute("signal", ""))
 		} else {
-			b.addError(b.mxFn.Pos(), "//go:interrupt not supported on this architecture")
+			b.addError(b.fn.Pos(), "//go:interrupt not supported on this architecture")
 		}
 	}
 
 	// Add debug info, if needed.
 	if b.Debug {
-		if b.mxFn.Synthetic == "package initializer" {
+		if b.fn.Synthetic == "package initializer" {
 			// Package initializer functions have no debug info. Create some
 			// fake debug info to at least have *something*.
-			b.difunc = b.attachDebugInfoRaw(b.mxFn, b.llvmFn, "", b.packageDir, 0)
-		} else if b.mxFn.Syntax() != nil {
+			b.difunc = b.attachDebugInfoRaw(b.fn, b.llvmFn, "", b.packageDir, 0)
+		} else if b.fn.Syntax() != nil {
 			// Create debug info file if needed.
-			b.difunc = b.attachDebugInfo(b.mxFn)
+			b.difunc = b.attachDebugInfo(b.fn)
 		}
-		b.setDebugLocation(b.mxFn.Pos())
+		b.setDebugLocation(b.fn.Pos())
 	}
 
 	// Pre-create all basic blocks in the function.
@@ -1287,9 +1242,10 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		b.blockInfo = blockInfo
 		b.currentBlockInfo = &blockInfo[0]
 	} else {
-		blockInfo := make([]blockInfo, len(b.mxFn.Blocks))
-		for i, block := range b.mxFn.Blocks {
-			info := &blockInfo[i]
+		blocks := b.fn.Blocks
+		blockInfo := make([]blockInfo, len(blocks))
+		for _, block := range b.fn.DomPreorder() {
+			info := &blockInfo[block.Index]
 			llvmBlock := b.ctx.AddBasicBlock(b.llvmFn, block.Comment)
 			info.entry = llvmBlock
 			info.exit = llvmBlock
@@ -1300,7 +1256,7 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 	}
 	b.SetInsertPointAtEnd(entryBlock)
 
-	if b.mxFn.Synthetic == "package initializer" {
+	if b.fn.Synthetic == "package initializer" {
 		b.initPseudoFuncs = make(map[string]llvm.Metadata)
 
 		// Create a fake 'inlined at' metadata node.
@@ -1312,23 +1268,20 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 
 	// Load function parameters
 	llvmParamIndex := 0
-	for i, mxParam := range b.mxFn.Params {
-		llvmType := b.getLLVMTypeTC(mxParam.Type())
+	for _, param := range b.fn.Params {
+		llvmType := b.getLLVMType(param.Type())
 		fields := make([]llvm.Value, 0, 1)
-		for _, info := range b.expandFormalParamTypeTC(llvmType, mxParam.Name(), mxParam.Type()) {
+		for _, info := range b.expandFormalParamType(llvmType, param.Name(), param.Type()) {
 			param := b.llvmFn.Param(llvmParamIndex)
 			param.SetName(info.name)
 			fields = append(fields, param)
 			llvmParamIndex++
 		}
-		paramValue := b.collapseFormalParam(llvmType, fields)
-		b.mxLocals[mxParam] = paramValue
+		b.locals[param] = b.collapseFormalParam(llvmType, fields)
 
-		// Add debug information to this parameter (if available). Now mxssa-
-		// native: getLocalParameter takes *mxssa.Parameter directly, no
-		// b.fn.Params bridge needed.
-		if b.Debug && b.mxFn.Syntax() != nil {
-			dbgParam := b.getLocalParameter(mxParam, i+1)
+		// Add debug information to this parameter (if available)
+		if b.Debug && b.fn.Syntax() != nil {
+			dbgParam := b.getLocalVariable(param.Object().(*types.Var))
 			loc := b.GetCurrentDebugLocation()
 			if len(fields) == 1 {
 				expr := b.dibuilder.CreateExpression(nil)
@@ -1354,11 +1307,11 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		context = b.llvmFn.LastParam()
 		context.SetName("context")
 	}
-	if len(b.mxFn.FreeVars) != 0 {
+	if len(b.fn.FreeVars) != 0 {
 		// Get a list of all variable types in the context.
-		freeVarTypes := make([]llvm.Type, len(b.mxFn.FreeVars))
-		for i, freeVar := range b.mxFn.FreeVars {
-			freeVarTypes[i] = b.getLLVMTypeTC(freeVar.Type())
+		freeVarTypes := make([]llvm.Type, len(b.fn.FreeVars))
+		for i, freeVar := range b.fn.FreeVars {
+			freeVarTypes[i] = b.getLLVMType(freeVar.Type())
 		}
 
 		// Load each free variable from the context pointer.
@@ -1366,11 +1319,11 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		// can be another type when it is a wrapper for a bound method (these
 		// wrappers are generated by the ssa package).
 		for i, val := range b.emitPointerUnpack(context, freeVarTypes) {
-			b.mxLocals[b.mxFn.FreeVars[i]] = val
+			b.locals[b.fn.FreeVars[i]] = val
 		}
 	}
 
-	if b.mxFn.Recover != nil {
+	if b.fn.Recover != nil {
 		// This function has deferred function calls. Set some things up for
 		// them.
 		b.deferInitFunc()
@@ -1384,57 +1337,65 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 	}
 }
 
-// createFunctionDispatch routes to the TC implementation. The SSA path is no
-// longer reachable in current builds (verified via MOXIE_SSA_TRACE 2026-04 and
-// confirmed by removing complex64/128 cases from runtime/ that previously
-// triggered the invalid-types fallback).
-func (b *builder) createFunctionDispatch() {
-	if b.mxFn == nil {
-		// Cross-package shell that wasn't fully translated. Should not
-		// happen in current usage. If hit, the function will simply not
-		// have a body — linker error if anything calls it.
-		return
-	}
-	b.createFunctionTC()
-}
-
-func (b *builder) createFunctionTC() {
-	if len(b.mxFn.Blocks) == 0 {
-		// External decl with no body — nothing to emit.
-		return
-	}
-	if mxFnHasInvalidTypes(b.mxFn) {
-		// Runtime helpers with complex64/128 cases (now removed from
-		// runtime sources). If anything still hits this, it's dead code
-		// the linker will DCE.
-		return
-	}
+// createFunction builds the LLVM IR implementation for this function. The
+// function must not yet be defined, otherwise this function will create a
+// diagnostic.
+func (b *builder) createFunction() {
 	b.createFunctionStart(false)
+
+	// Check Moxie language restrictions on user code.
 	b.checkMoxieRestrictions()
 
-	for _, mxBlock := range b.mxTranslator.DomPreorder(b.mxFn) {
+	// Fill blocks with instructions.
+	for _, block := range b.fn.DomPreorder() {
 		if b.DumpSSA {
-			fmt.Printf("%d: %s:\n", mxBlock.Index, mxBlock.Comment)
+			fmt.Printf("%d: %s:\n", block.Index, block.Comment)
 		}
-		b.currentBlock = mxBlock
-		b.currentBlockInfo = &b.blockInfo[mxBlock.Index]
+		b.currentBlock = block
+		b.currentBlockInfo = &b.blockInfo[block.Index]
 		b.SetInsertPointAtEnd(b.currentBlockInfo.entry)
-
-		for _, instr := range mxBlock.Instrs {
+		for _, instr := range block.Instrs {
+			if instr, ok := instr.(*ssa.DebugRef); ok {
+				if !b.Debug {
+					continue
+				}
+				object := instr.Object()
+				variable, ok := object.(*types.Var)
+				if !ok {
+					// Not a local variable.
+					continue
+				}
+				if instr.IsAddr {
+					// TODO, this may happen for *ssa.Alloc and *ssa.FieldAddr
+					// for example.
+					continue
+				}
+				dbgVar := b.getLocalVariable(variable)
+				pos := b.program.Fset.Position(instr.Pos())
+				b.dibuilder.InsertValueAtEnd(b.getValue(instr.X, getPos(instr)), dbgVar, b.dibuilder.CreateExpression(nil), llvm.DebugLoc{
+					Line:  uint(pos.Line),
+					Col:   uint(pos.Column),
+					Scope: b.difunc,
+				}, b.GetInsertBlock())
+				continue
+			}
 			if b.DumpSSA {
-				if val, ok := instr.(mxssa.Value); ok && val.Name() != "" {
+				if val, ok := instr.(ssa.Value); ok && val.Name() != "" {
 					fmt.Printf("\t%s = %s\n", val.Name(), val.String())
 				} else {
 					fmt.Printf("\t%s\n", instr.String())
 				}
 			}
-			b.createInstructionTC(instr)
+			b.createInstruction(instr)
 		}
-		if b.mxFn.Name() == "init" && len(mxBlock.Instrs) == 0 {
+		if b.fn.Name() == "init" && len(block.Instrs) == 0 {
 			b.CreateRetVoid()
 		}
 	}
 
+	// The rundefers instruction needs to be created after all defer
+	// instructions have been created. Otherwise it won't handle all defer
+	// cases.
 	for i, bb := range b.runDefersBlock {
 		b.SetInsertPointAtEnd(bb)
 		b.createRunDefers()
@@ -1442,29 +1403,24 @@ func (b *builder) createFunctionTC() {
 	}
 
 	if b.hasDeferFrame() {
+		// Create the landing pad block, where execution continues after a
+		// panic.
 		b.createLandingPad()
 	}
 
-	// Resolve mxssa phi nodes.
-	for _, phi := range b.mxPhis {
-		block := phi.phi.Block()
-		phiType := phi.llvm.Type()
-		for i, edge := range phi.phi.Edges {
-			llvmVal := b.getValueTC(edge, phi.phi.Pos())
+	// Resolve phi nodes
+	for _, phi := range b.phis {
+		block := phi.ssa.Block()
+		for i, edge := range phi.ssa.Edges {
+			llvmVal := b.getValue(edge, getPos(phi.ssa))
 			llvmBlock := b.blockInfo[block.Preds[i].Index].exit
-			if llvmVal.Type() != phiType {
-				// Coercion emits instructions — place them before the
-				// predecessor block's terminator.
-				term := llvmBlock.LastInstruction()
-				b.SetInsertPointBefore(term)
-				llvmVal = b.coerceStructType(llvmVal, phiType)
-			}
 			phi.llvm.AddIncoming([]llvm.Value{llvmVal}, []llvm.BasicBlock{llvmBlock})
 		}
 	}
 
 	if b.NeedsStackObjects {
-		for _, phi := range b.mxPhis {
+		// Track phi nodes.
+		for _, phi := range b.phis {
 			insertPoint := llvm.NextInstruction(phi.llvm)
 			for !insertPoint.IsAPHINode().IsNil() {
 				insertPoint = llvm.NextInstruction(insertPoint)
@@ -1474,99 +1430,157 @@ func (b *builder) createFunctionTC() {
 		}
 	}
 
-	for _, sub := range b.mxFn.AnonFuncs {
+	// Create anonymous functions (closures etc.).
+	for _, sub := range b.fn.AnonFuncs {
 		b := newBuilder(b.compilerContext, b.Builder, sub)
 		b.llvmFn.SetLinkage(llvm.InternalLinkage)
-		b.createFunctionDispatch()
+		b.createFunction()
 	}
 
+	// Create wrapper function that can be called externally.
 	if b.info.wasmExport != "" {
 		b.createWasmExport()
 	}
 }
 
-func (b *builder) createInstructionTC(instr mxssa.Instruction) {
+// posser is an interface that's implemented by both ssa.Value and
+// ssa.Instruction. It is implemented by everything that has a Pos() method,
+// which is all that getPos() needs.
+type posser interface {
+	Pos() token.Pos
+}
+
+// getPos returns position information for a ssa.Value or ssa.Instruction.
+//
+// Not all instructions have position information, especially when they're
+// implicit (such as implicit casts or implicit returns at the end of a
+// function). In these cases, it makes sense to try a bit harder to guess what
+// the position really should be.
+func getPos(val posser) token.Pos {
+	pos := val.Pos()
+	if pos != token.NoPos {
+		// Easy: position is known.
+		return pos
+	}
+
+	// No position information is known.
+	switch val := val.(type) {
+	case *ssa.MakeInterface:
+		return getPos(val.X)
+	case *ssa.MakeClosure:
+		return val.Fn.(*ssa.Function).Pos()
+	case *ssa.Return:
+		syntax := val.Parent().Syntax()
+		if syntax != nil {
+			// non-synthetic
+			return syntax.End()
+		}
+		return token.NoPos
+	case *ssa.FieldAddr:
+		return getPos(val.X)
+	case *ssa.IndexAddr:
+		return getPos(val.X)
+	case *ssa.Slice:
+		return getPos(val.X)
+	case *ssa.Store:
+		return getPos(val.Addr)
+	case *ssa.Extract:
+		return getPos(val.Tuple)
+	default:
+		// This is reachable, for example with *ssa.Const, *ssa.If, and
+		// *ssa.Jump. They might be implemented in some way in the future.
+		return token.NoPos
+	}
+}
+
+// createInstruction builds the LLVM IR equivalent instructions for the
+// particular Go SSA instruction.
+func (b *builder) createInstruction(instr ssa.Instruction) {
 	if b.Debug {
-		b.setDebugLocation(instr.Pos())
+		b.setDebugLocation(getPos(instr))
 	}
 
 	switch instr := instr.(type) {
-	case mxssa.Value:
-		if value, err := b.createExprTC(instr); err != nil {
+	case ssa.Value:
+		if value, err := b.createExpr(instr); err != nil {
+			// This expression could not be parsed. Add the error to the list
+			// of diagnostics and continue with an undef value.
+			// The resulting IR will be incorrect (but valid). However,
+			// compilation can proceed which is useful because there may be
+			// more compilation errors which can then all be shown together to
+			// the user.
 			b.diagnostics = append(b.diagnostics, err)
-			b.mxLocals[instr] = llvm.Undef(b.getLLVMTypeTC(instr.Type()))
+			b.locals[instr] = llvm.Undef(b.getLLVMType(instr.Type()))
 		} else {
-			b.mxLocals[instr] = value
+			b.locals[instr] = value
 			if len(*instr.Referrers()) != 0 && b.NeedsStackObjects {
-				b.trackExprTC(instr, value)
+				b.trackExpr(instr, value)
 			}
 		}
-	case *mxssa.DebugRef:
+	case *ssa.DebugRef:
 		// ignore
-	case *mxssa.Defer:
-		b.createDeferTC(instr)
-	case *mxssa.Go:
-		if b.mxFn != nil && isUserPackageTC(b.mxFn.Pkg) {
+	case *ssa.Defer:
+		b.createDefer(instr)
+	case *ssa.Go:
+		// Moxie: go keyword banned in user code. Runtime/internal exempt.
+		if isUserPackage(b.fn.Pkg) {
 			b.addError(instr.Pos(), "moxie: the go keyword is not supported (there are no goroutines)")
-			return
+		} else {
+			b.createGo(instr)
 		}
-		b.addError(instr.Pos(), "todo: go TC path not yet implemented")
-	case *mxssa.If:
-		cond := b.getValueTC(instr.Cond, instr.Pos())
+	case *ssa.If:
+		cond := b.getValue(instr.Cond, getPos(instr))
 		block := instr.Block()
 		blockThen := b.blockInfo[block.Succs[0].Index].entry
 		blockElse := b.blockInfo[block.Succs[1].Index].entry
 		b.CreateCondBr(cond, blockThen, blockElse)
-	case *mxssa.Jump:
+	case *ssa.Jump:
 		blockJump := b.blockInfo[instr.Block().Succs[0].Index].entry
 		b.CreateBr(blockJump)
-	case *mxssa.MapUpdate:
-		m := b.getValueTC(instr.Map, instr.Pos())
-		key := b.getValueTC(instr.Key, instr.Pos())
-		value := b.getValueTC(instr.Value, instr.Pos())
-		mapType := instr.Map.Type().Underlying().(*typecheck.Map)
-		b.createMapUpdateTC(mapType.Key(), m, key, value, instr.Pos())
-	case *mxssa.Panic:
-		value := b.getValueTC(instr.X, instr.Pos())
+	case *ssa.MapUpdate:
+		m := b.getValue(instr.Map, getPos(instr))
+		key := b.getValue(instr.Key, getPos(instr))
+		value := b.getValue(instr.Value, getPos(instr))
+		mapType := instr.Map.Type().Underlying().(*types.Map)
+		b.createMapUpdate(mapType.Key(), m, key, value, instr.Pos())
+	case *ssa.Panic:
+		value := b.getValue(instr.X, getPos(instr))
 		b.createRuntimeInvoke("_panic", []llvm.Value{value}, "")
 		b.CreateUnreachable()
-	case *mxssa.Return:
+	case *ssa.Return:
 		if b.hasDeferFrame() {
 			b.createRuntimeCall("destroyDeferFrame", []llvm.Value{b.deferFrame}, "")
 		}
 		if len(instr.Results) == 0 {
 			b.CreateRetVoid()
 		} else if len(instr.Results) == 1 {
-			val := b.getValueTC(instr.Results[0], instr.Pos())
-			val = b.fixReturnType(val)
-			b.CreateRet(val)
+			b.CreateRet(b.getValue(instr.Results[0], getPos(instr)))
 		} else {
-			retType := b.llvmFn.GlobalValueType().ReturnType()
-			retVal := llvm.ConstNull(retType)
-			retFields := retType.StructElementTypes()
+			// Multiple return values. Put them all in a struct.
+			retVal := llvm.ConstNull(b.llvmFn.GlobalValueType().ReturnType())
 			for i, result := range instr.Results {
-				val := b.getValueTC(result, instr.Pos())
-				if i < len(retFields) {
-					val = b.coerceStructType(val, retFields[i])
-				}
+				val := b.getValue(result, getPos(instr))
 				retVal = b.CreateInsertValue(retVal, val, i, "")
 			}
 			b.CreateRet(retVal)
 		}
-	case *mxssa.RunDefers:
+	case *ssa.RunDefers:
+		// Note where we're going to put the rundefers block
 		run := b.insertBasicBlock("rundefers.block")
 		b.CreateBr(run)
 		b.runDefersBlock = append(b.runDefersBlock, run)
+
 		after := b.insertBasicBlock("rundefers.after")
 		b.SetInsertPointAtEnd(after)
 		b.afterDefersBlock = append(b.afterDefersBlock, after)
-	case *mxssa.Send:
-		b.createChanSendTC(instr)
-	case *mxssa.Store:
-		llvmAddr := b.getValueTC(instr.Addr, instr.Pos())
-		llvmVal := b.getValueTC(instr.Val, instr.Pos())
-		b.createNilCheckTC(instr.Addr, llvmAddr, "store")
+	case *ssa.Send:
+		b.createChanSend(instr)
+	case *ssa.Store:
+		llvmAddr := b.getValue(instr.Addr, getPos(instr))
+		llvmVal := b.getValue(instr.Val, getPos(instr))
+		b.createNilCheck(instr.Addr, llvmAddr, "store")
 		if b.targetData.TypeAllocSize(llvmVal.Type()) == 0 {
+			// nothing to store
 			return
 		}
 		b.CreateStore(llvmVal, llvmAddr)
@@ -1577,8 +1591,7 @@ func (b *builder) createInstructionTC(instr mxssa.Instruction) {
 
 // createBuiltin lowers a builtin Go function (append, close, delete, etc.) to
 // LLVM IR. It uses runtime calls for some builtins.
-
-func (b *builder) createBuiltinTC(argTypes []typecheck.Type, argValues []llvm.Value, callName string, pos token.Pos) (llvm.Value, error) {
+func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, callName string, pos token.Pos) (llvm.Value, error) {
 	switch callName {
 	case "append":
 		src := argValues[0]
@@ -1588,11 +1601,12 @@ func (b *builder) createBuiltinTC(argTypes []typecheck.Type, argValues []llvm.Va
 		srcCap := b.CreateExtractValue(src, 2, "append.srcCap")
 		elemsBuf := b.CreateExtractValue(elems, 0, "append.elemsBuf")
 		elemsLen := b.CreateExtractValue(elems, 1, "append.elemsLen")
+		// Moxie: argTypes[0] may be *types.Basic (string) due to string=[]byte.
 		var elemType llvm.Type
 		switch ut := argTypes[0].Underlying().(type) {
-		case *typecheck.Slice:
-			elemType = b.getLLVMTypeTC(ut.Elem())
-		case *typecheck.Basic:
+		case *types.Slice:
+			elemType = b.getLLVMType(ut.Elem())
+		case *types.Basic: // string=[]byte: element is byte
 			elemType = b.ctx.Int8Type()
 		default:
 			panic("append on non-slice type: " + argTypes[0].String())
@@ -1611,9 +1625,9 @@ func (b *builder) createBuiltinTC(argTypes []typecheck.Type, argValues []llvm.Va
 		value := argValues[0]
 		var llvmCap llvm.Value
 		switch argTypes[0].Underlying().(type) {
-		case *typecheck.Chan:
+		case *types.Chan:
 			llvmCap = b.createRuntimeCall("chanCap", []llvm.Value{value}, "cap")
-		case *typecheck.Slice:
+		case *types.Slice:
 			llvmCap = b.CreateExtractValue(value, 2, "cap")
 		default:
 			return llvm.Value{}, b.makeError(pos, "todo: cap: unknown type")
@@ -1629,27 +1643,54 @@ func (b *builder) createBuiltinTC(argTypes []typecheck.Type, argValues []llvm.Va
 	case "close":
 		b.createChanClose(argValues[0])
 		return llvm.Value{}, nil
+	case "complex":
+		r := argValues[0]
+		i := argValues[1]
+		t := argTypes[0].Underlying().(*types.Basic)
+		var cplx llvm.Value
+		switch t.Kind() {
+		case types.Float32:
+			cplx = llvm.Undef(b.ctx.StructType([]llvm.Type{b.ctx.FloatType(), b.ctx.FloatType()}, false))
+		case types.Float64:
+			cplx = llvm.Undef(b.ctx.StructType([]llvm.Type{b.ctx.DoubleType(), b.ctx.DoubleType()}, false))
+		default:
+			return llvm.Value{}, b.makeError(pos, "unsupported type in complex builtin: "+t.String())
+		}
+		cplx = b.CreateInsertValue(cplx, r, 0, "")
+		cplx = b.CreateInsertValue(cplx, i, 1, "")
+		return cplx, nil
 	case "clear":
 		value := argValues[0]
 		switch typ := argTypes[0].Underlying().(type) {
-		case *typecheck.Slice:
-			elementType := b.getLLVMTypeTC(typ.Elem())
+		case *types.Slice:
+			elementType := b.getLLVMType(typ.Elem())
 			elementSize := b.targetData.TypeAllocSize(elementType)
 			elementAlign := b.targetData.ABITypeAlignment(elementType)
+
+			// The pointer to the data to be cleared.
 			llvmBuf := b.CreateExtractValue(value, 0, "buf")
+
+			// The length (in bytes) to be cleared.
 			llvmLen := b.CreateExtractValue(value, 1, "len")
 			llvmLen = b.CreateMul(llvmLen, llvm.ConstInt(llvmLen.Type(), elementSize, false), "")
+
+			// Do the clear operation using the LLVM memset builtin.
+			// This is also correct for nil slices: in those cases, len will be
+			// 0 which means the memset call is a no-op (according to the LLVM
+			// LangRef).
 			memset := b.getMemsetFunc()
 			call := b.createCall(memset.GlobalValueType(), memset, []llvm.Value{
-				llvmBuf,
-				llvm.ConstInt(b.ctx.Int8Type(), 0, false),
-				llvmLen,
-				llvm.ConstInt(b.ctx.Int1Type(), 0, false),
+				llvmBuf, // dest
+				llvm.ConstInt(b.ctx.Int8Type(), 0, false), // val
+				llvmLen, // len
+				llvm.ConstInt(b.ctx.Int1Type(), 0, false), // isVolatile
 			}, "")
 			call.AddCallSiteAttribute(1, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(elementAlign)))
+
 			return llvm.Value{}, nil
-		case *typecheck.Map:
-			b.createMapClear(argValues[0])
+		case *types.Map:
+			m := argValues[0]
+			b.createMapClear(m)
 			return llvm.Value{}, nil
 		default:
 			return llvm.Value{}, b.makeError(pos, "unsupported type in clear builtin: "+typ.String())
@@ -1661,22 +1702,26 @@ func (b *builder) createBuiltinTC(argTypes []typecheck.Type, argValues []llvm.Va
 		srcLen := b.CreateExtractValue(src, 1, "copy.srcLen")
 		dstBuf := b.CreateExtractValue(dst, 0, "copy.dstArray")
 		srcBuf := b.CreateExtractValue(src, 0, "copy.srcArray")
-		elemType := b.getLLVMTypeTC(argTypes[0].Underlying().(*typecheck.Slice).Elem())
+		elemType := b.getLLVMType(argTypes[0].Underlying().(*types.Slice).Elem())
 		elemSize := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(elemType), false)
 		return b.createRuntimeCall("sliceCopy", []llvm.Value{dstBuf, srcBuf, dstLen, srcLen, elemSize}, "copy.n"), nil
 	case "delete":
 		m := argValues[0]
 		key := argValues[1]
-		return llvm.Value{}, b.createMapDeleteTC(argTypes[1], m, key, pos)
+		return llvm.Value{}, b.createMapDelete(argTypes[1], m, key, pos)
+	case "imag":
+		cplx := argValues[0]
+		return b.CreateExtractValue(cplx, 1, "imag"), nil
 	case "len":
 		value := argValues[0]
 		var llvmLen llvm.Value
 		switch argTypes[0].Underlying().(type) {
-		case *typecheck.Basic, *typecheck.Slice:
+		case *types.Basic, *types.Slice:
+			// string or slice
 			llvmLen = b.CreateExtractValue(value, 1, "len")
-		case *typecheck.Chan:
+		case *types.Chan:
 			llvmLen = b.createRuntimeCall("chanLen", []llvm.Value{value}, "len")
-		case *typecheck.Map:
+		case *types.Map:
 			llvmLen = b.createRuntimeCall("hashmapLen", []llvm.Value{value}, "len")
 		default:
 			return llvm.Value{}, b.makeError(pos, "todo: len: unknown type")
@@ -1690,6 +1735,9 @@ func (b *builder) createBuiltinTC(argTypes []typecheck.Type, argValues []llvm.Va
 		}
 		return llvmLen, nil
 	case "min", "max":
+		// min and max builtins, added in Go 1.21.
+		// We can simply reuse the existing binop comparison code, which has all
+		// the edge cases figured out already.
 		tok := token.LSS
 		if callName == "max" {
 			tok = token.GTR
@@ -1697,7 +1745,7 @@ func (b *builder) createBuiltinTC(argTypes []typecheck.Type, argValues []llvm.Va
 		result := argValues[0]
 		typ := argTypes[0]
 		for _, arg := range argValues[1:] {
-			cmp, err := b.createBinOpTC(tok, typ, typ, result, arg, pos)
+			cmp, err := b.createBinOp(tok, typ, typ, result, arg, pos)
 			if err != nil {
 				return result, err
 			}
@@ -1705,6 +1753,7 @@ func (b *builder) createBuiltinTC(argTypes []typecheck.Type, argValues []llvm.Va
 		}
 		return result, nil
 	case "panic":
+		// This is rare, but happens in "defer panic()".
 		b.createRuntimeInvoke("_panic", argValues, "")
 		return llvm.Value{}, nil
 	case "print", "println":
@@ -1715,40 +1764,50 @@ func (b *builder) createBuiltinTC(argTypes []typecheck.Type, argValues []llvm.Va
 			}
 			typ := argTypes[i].Underlying()
 			switch typ := typ.(type) {
-			case *typecheck.Basic:
-				switch {
-				case typ.Kind() == typecheck.String:
+			case *types.Basic:
+				switch typ.Kind() {
+				case types.String, types.UntypedString:
 					b.createRuntimeCall("printstring", []llvm.Value{value}, "")
-				case typ.Kind() == typecheck.UnsafePointer:
+				case types.Uintptr:
+					b.createRuntimeCall("printptr", []llvm.Value{value}, "")
+				case types.UnsafePointer:
 					ptrValue := b.CreatePtrToInt(value, b.uintptrType, "")
 					b.createRuntimeCall("printptr", []llvm.Value{ptrValue}, "")
-				case typ.Info()&typecheck.IsInteger != 0:
-					name := "print"
-					if typ.Info()&typecheck.IsUnsigned != 0 {
-						name += "uint"
-					} else {
-						name += "int"
-					}
-					name += strconv.FormatUint(b.targetData.TypeAllocSize(value.Type())*8, 10)
-					b.createRuntimeCall(name, []llvm.Value{value}, "")
-				case typ.Kind() == typecheck.Bool:
-					b.createRuntimeCall("printbool", []llvm.Value{value}, "")
-				case typ.Kind() == typecheck.Float32:
-					b.createRuntimeCall("printfloat32", []llvm.Value{value}, "")
-				case typ.Kind() == typecheck.Float64:
-					b.createRuntimeCall("printfloat64", []llvm.Value{value}, "")
 				default:
-					return llvm.Value{}, b.makeError(pos, "unknown basic arg type: "+typ.String())
+					// runtime.print{int,uint}{8,16,32,64}
+					if typ.Info()&types.IsInteger != 0 {
+						name := "print"
+						if typ.Info()&types.IsUnsigned != 0 {
+							name += "uint"
+						} else {
+							name += "int"
+						}
+						name += strconv.FormatUint(b.targetData.TypeAllocSize(value.Type())*8, 10)
+						b.createRuntimeCall(name, []llvm.Value{value}, "")
+					} else if typ.Kind() == types.Bool {
+						b.createRuntimeCall("printbool", []llvm.Value{value}, "")
+					} else if typ.Kind() == types.Float32 {
+						b.createRuntimeCall("printfloat32", []llvm.Value{value}, "")
+					} else if typ.Kind() == types.Float64 {
+						b.createRuntimeCall("printfloat64", []llvm.Value{value}, "")
+					} else if typ.Kind() == types.Complex64 {
+						b.createRuntimeCall("printcomplex64", []llvm.Value{value}, "")
+					} else if typ.Kind() == types.Complex128 {
+						b.createRuntimeCall("printcomplex128", []llvm.Value{value}, "")
+					} else {
+						return llvm.Value{}, b.makeError(pos, "unknown basic arg type: "+typ.String())
+					}
 				}
-			case *typecheck.Interface:
+			case *types.Interface:
 				b.createRuntimeCall("printitf", []llvm.Value{value}, "")
-			case *typecheck.Map:
+			case *types.Map:
 				b.createRuntimeCall("printmap", []llvm.Value{value}, "")
-			case *typecheck.Pointer:
+			case *types.Pointer:
 				ptrValue := b.CreatePtrToInt(value, b.uintptrType, "")
 				b.createRuntimeCall("printptr", []llvm.Value{ptrValue}, "")
-			case *typecheck.Slice:
-				if basic, ok := typ.Elem().(*typecheck.Basic); ok && basic.Kind() == typecheck.Uint8 {
+			case *types.Slice:
+				// []byte prints as text; other slices print the header.
+				if basic, ok := typ.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {
 					b.createRuntimeCall("printbytes", []llvm.Value{value}, "")
 				} else {
 					bufptr := b.CreateExtractValue(value, 0, "")
@@ -1765,43 +1824,66 @@ func (b *builder) createBuiltinTC(argTypes []typecheck.Type, argValues []llvm.Va
 			b.createRuntimeCall("printnl", nil, "")
 		}
 		b.createRuntimeCall("printunlock", nil, "")
-		return llvm.Value{}, nil
+		return llvm.Value{}, nil // print() or println() returns void
+	case "real":
+		cplx := argValues[0]
+		return b.CreateExtractValue(cplx, 0, "real"), nil
 	case "recover":
 		useParentFrame := uint64(0)
 		if b.hasDeferFrame() {
+			// recover() should return the panic value of the parent function,
+			// not of the current function.
 			useParentFrame = 1
 		}
 		return b.createRuntimeCall("_recover", []llvm.Value{llvm.ConstInt(b.ctx.Int1Type(), useParentFrame, false)}, ""), nil
 	case "ssa:wrapnilchk":
+		// TODO: do an actual nil check?
 		return argValues[0], nil
-	case "Add":
+
+	// Builtins from the unsafe package.
+	case "Add": // unsafe.Add
+		// This is basically just a GEP operation.
+		// Note: the pointer is always of type *i8.
 		ptr := argValues[0]
 		len := argValues[1]
 		return b.CreateGEP(b.ctx.Int8Type(), ptr, []llvm.Value{len}, ""), nil
-	case "Alignof":
+	case "Alignof": // unsafe.Alignof
 		align := b.targetData.ABITypeAlignment(argValues[0].Type())
 		return llvm.ConstInt(b.uintptrType, uint64(align), false), nil
-	case "Offsetof":
+	case "Offsetof": // unsafe.Offsetof
+		// This builtin is a bit harder to implement and may need a bit of
+		// refactoring to work (it may be easier to implement if we have access
+		// to the underlying Go SSA instruction). It is also rarely used: it
+		// only applies in generic code and unsafe.Offsetof isn't very commonly
+		// used anyway.
+		// In other words, postpone it to some other day.
 		return llvm.Value{}, b.makeError(pos, "todo: unsafe.Offsetof")
-	case "Sizeof":
+	case "Sizeof": // unsafe.Sizeof
 		size := b.targetData.TypeAllocSize(argValues[0].Type())
 		return llvm.ConstInt(b.uintptrType, size, false), nil
-	case "Slice", "String":
+	case "Slice", "String": // unsafe.Slice, unsafe.String
+		// This creates a slice or string from a pointer and a length.
+		// Note that the exception mentioned in the documentation (if the
+		// pointer and length are nil, the slice is also nil) is trivially
+		// already the case.
 		ptr := argValues[0]
 		len := argValues[1]
 		var elementType llvm.Type
 		if callName == "Slice" {
-			elementType = b.getLLVMTypeTC(argTypes[0].Underlying().(*typecheck.Pointer).Elem())
+			elementType = b.getLLVMType(argTypes[0].Underlying().(*types.Pointer).Elem())
 		} else {
 			elementType = b.ctx.Int8Type()
 		}
-		b.createUnsafeSliceStringCheckTC("unsafe."+callName, ptr, len, elementType, argTypes[1].Underlying().(*typecheck.Basic))
+		b.createUnsafeSliceStringCheck("unsafe."+callName, ptr, len, elementType, argTypes[1].Underlying().(*types.Basic))
 		if len.Type().IntTypeWidth() < b.uintptrType.IntTypeWidth() {
+			// Too small, zero-extend len.
 			len = b.CreateZExt(len, b.uintptrType, "")
 		} else if len.Type().IntTypeWidth() > b.uintptrType.IntTypeWidth() {
+			// Too big, truncate len.
 			len = b.CreateTrunc(len, b.uintptrType, "")
 		}
 		if callName == "Slice" {
+			// Moxie: detect []byte to use named _string type.
 			var sliceType llvm.Type
 			if elementType == b.ctx.Int8Type() {
 				sliceType = b.getLLVMRuntimeType("_string")
@@ -1821,10 +1903,10 @@ func (b *builder) createBuiltinTC(argTypes []typecheck.Type, argValues []llvm.Va
 			str := llvm.Undef(b.getLLVMRuntimeType("_string"))
 			str = b.CreateInsertValue(str, argValues[0], 0, "")
 			str = b.CreateInsertValue(str, len, 1, "")
-			str = b.CreateInsertValue(str, len, 2, "")
+			str = b.CreateInsertValue(str, len, 2, "") // cap = len for strings
 			return str, nil
 		}
-	case "SliceData", "StringData":
+	case "SliceData", "StringData": // unsafe.SliceData, unsafe.StringData
 		return b.CreateExtractValue(argValues[0], 0, "slice.data"), nil
 	default:
 		return llvm.Value{}, b.makeError(pos, "todo: builtin: "+callName)
@@ -1836,13 +1918,29 @@ func (b *builder) createBuiltinTC(argTypes []typecheck.Type, argValues []llvm.Va
 // instruction.
 //
 // This is also where compiler intrinsics are implemented.
-
-func (b *builder) createFunctionCallTC(instr *mxssa.CallCommon) (llvm.Value, error) {
-	if fn, ok := instr.Value.(*mxssa.Function); ok {
+func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) {
+	// See if this is an intrinsic function that is handled specially.
+	if fn := instr.StaticCallee(); fn != nil {
+		// Direct function call, either to a named or anonymous (directly
+		// applied) function call. If it is anonymous, it may be a closure.
 		name := fn.RelString(nil)
 		switch {
-		case strings.HasPrefix(name, "device.") || strings.HasPrefix(name, "device/") || strings.HasPrefix(name, "(device/"):
-			return llvm.Value{}, b.makeError(instr.Pos(), "device intrinsic not available in TC path: "+name)
+		case name == "device.Asm" || name == "device/arm.Asm" || name == "device/arm64.Asm" || name == "device/avr.Asm" || name == "device/riscv.Asm":
+			return b.createInlineAsm(instr.Args)
+		case name == "device.AsmFull" || name == "device/arm.AsmFull" || name == "device/arm64.AsmFull" || name == "device/avr.AsmFull" || name == "device/riscv.AsmFull":
+			return b.createInlineAsmFull(instr)
+		case strings.HasPrefix(name, "device/arm.SVCall"):
+			return b.emitSVCall(instr.Args, getPos(instr))
+		case strings.HasPrefix(name, "device/arm64.SVCall"):
+			return b.emitSV64Call(instr.Args, getPos(instr))
+		case strings.HasPrefix(name, "(device/riscv.CSR)."):
+			return b.emitCSROperation(instr)
+		case strings.HasPrefix(name, "syscall.Syscall") || strings.HasPrefix(name, "syscall.RawSyscall") || strings.HasPrefix(name, "golang.org/x/sys/unix.Syscall") || strings.HasPrefix(name, "golang.org/x/sys/unix.RawSyscall"):
+			if b.GOOS != "darwin" {
+				return b.createSyscall(instr)
+			}
+		case strings.HasPrefix(name, "syscall.rawSyscallNoError") || strings.HasPrefix(name, "golang.org/x/sys/unix.RawSyscallNoError"):
+			return b.createRawSyscallNoError(instr)
 		case name == "runtime.supportsRecover":
 			supportsRecover := uint64(0)
 			if b.supportsRecover() {
@@ -1855,91 +1953,98 @@ func (b *builder) createFunctionCallTC(instr *mxssa.CallCommon) (llvm.Value, err
 				"trap":  moxie.PanicStrategyTrap,
 			}[b.Config.PanicStrategy]
 			return llvm.ConstInt(b.ctx.Int8Type(), panicStrategy, false), nil
+		case name == "runtime/interrupt.New":
+			return b.createInterruptGlobal(instr)
 		case name == "runtime.exportedFuncPtr":
-			fnArg := instr.Args[0].(*mxssa.Function)
-			_, ptr := b.getFunction(fnArg)
+			_, ptr := b.getFunction(instr.Args[0].(*ssa.Function))
 			return b.CreatePtrToInt(ptr, b.uintptrType, ""), nil
-		case strings.HasPrefix(fn.Name(), "__moxie_concat"):
-			return b.createMoxieConcatTC(instr), nil
-		case strings.HasPrefix(fn.Name(), "__moxie_eq"):
-			return b.createMoxieEqTC(instr), nil
-		case strings.HasPrefix(fn.Name(), "__moxie_lt"):
-			return b.createMoxieLtTC(instr), nil
-		case strings.HasPrefix(fn.Name(), "__moxie_secalloc"):
-			return b.createMoxieSecallocTC(instr), nil
-		case strings.HasPrefix(name, "syscall.Syscall") || strings.HasPrefix(name, "syscall.RawSyscall") || strings.HasPrefix(name, "golang.org/x/sys/unix.Syscall") || strings.HasPrefix(name, "golang.org/x/sys/unix.RawSyscall"):
-			if b.GOOS != "darwin" {
-				return b.createSyscallTC(instr)
-			}
-		case strings.HasPrefix(name, "syscall.rawSyscallNoError") || strings.HasPrefix(name, "golang.org/x/sys/unix.RawSyscallNoError"):
-			return b.createRawSyscallNoErrorTC(instr)
+		case name == "(*runtime/interrupt.Checkpoint).Save":
+			return b.createInterruptCheckpoint(instr.Args[0]), nil
 		case name == "internal/abi.FuncPCABI0":
-			retval := b.createDarwinFuncPCABI0CallTC(instr)
+			retval := b.createDarwinFuncPCABI0Call(instr)
 			if !retval.IsNil() {
 				return retval, nil
 			}
+		case strings.HasPrefix(fn.Name(), "__moxie_concat"):
+			return b.createMoxieConcat(instr), nil
+		case strings.HasPrefix(fn.Name(), "__moxie_eq"):
+			return b.createMoxieEq(instr), nil
+		case strings.HasPrefix(fn.Name(), "__moxie_lt"):
+			return b.createMoxieLt(instr), nil
+		case strings.HasPrefix(fn.Name(), "__moxie_secalloc"):
+			return b.createMoxieSecalloc(instr), nil
 		}
 	}
 
 	var params []llvm.Value
 	for _, param := range instr.Args {
-		params = append(params, b.getValueTC(param, instr.Pos()))
+		params = append(params, b.getValue(param, getPos(instr)))
 	}
 
+	// Try to call the function directly for trivially static calls.
 	var callee, context llvm.Value
 	var calleeType llvm.Type
 	exported := false
-	var staticFn *mxssa.Function
-	switch v := instr.Value.(type) {
-	case *mxssa.Function:
-		staticFn = v
-	case *mxssa.MakeClosure:
-		if f, ok := v.Fn.(*mxssa.Function); ok {
-			staticFn = f
-		}
-	}
-	if staticFn != nil {
-		calleeType, callee = b.getFunction(staticFn)
-		info := b.getFunctionInfo(staticFn)
+	if fn := instr.StaticCallee(); fn != nil {
+		calleeType, callee = b.getFunction(fn)
+		info := b.getFunctionInfo(fn)
 		if callee.IsNil() {
 			return llvm.Value{}, b.makeError(instr.Pos(), "undefined function: "+info.linkName)
 		}
-		if _, ok := instr.Value.(*mxssa.MakeClosure); ok {
-			funcValue := b.getValueTC(instr.Value, instr.Pos())
-			context = b.extractFuncContext(funcValue)
-		} else {
+		switch value := instr.Value.(type) {
+		case *ssa.Function:
+			// Regular function call. No context is necessary.
 			context = llvm.Undef(b.dataPtrType)
-			if info.variadic && len(staticFn.Params) == 0 {
+			if info.variadic && len(fn.Params) == 0 {
+				// This matches Clang, see: https://godbolt.org/z/Gqv49xKMq
+				// Eventually we might be able to eliminate this special case
+				// entirely. For details, see:
+				// https://discourse.llvm.org/t/rfc-enabling-wstrict-prototypes-by-default-in-c/60521
 				calleeType = llvm.FunctionType(callee.GlobalValueType().ReturnType(), nil, false)
 			}
+		case *ssa.MakeClosure:
+			// A call on a func value, but the callee is trivial to find. For
+			// example: immediately applied functions.
+			funcValue := b.getValue(value, getPos(value))
+			context = b.extractFuncContext(funcValue)
+		default:
+			panic("StaticCallee returned an unexpected value")
 		}
 		exported = info.exported || strings.HasPrefix(info.linkName, "llvm.")
-	} else if call, ok := instr.Value.(*mxssa.Builtin); ok {
+	} else if call, ok := instr.Value.(*ssa.Builtin); ok {
 		if call.Name() == "spawn" {
-			return b.createSpawnTC(instr)
+			return b.createSpawn(instr)
 		}
-		var argTypes []typecheck.Type
+		// Builtin function (append, close, delete, etc.).)
+		var argTypes []types.Type
 		for _, arg := range instr.Args {
 			argTypes = append(argTypes, arg.Type())
 		}
-		return b.createBuiltinTC(argTypes, params, call.Name(), instr.Pos())
-	} else if instr.IsInvoke {
-		itf := b.getValueTC(instr.Value, instr.Pos())
+		return b.createBuiltin(argTypes, params, call.Name(), instr.Pos())
+	} else if instr.IsInvoke() {
+		// Interface method call (aka invoke call).
+		itf := b.getValue(instr.Value, getPos(instr)) // interface value (runtime._interface)
 		typecode := b.CreateExtractValue(itf, 0, "invoke.func.typecode")
-		value := b.CreateExtractValue(itf, 1, "invoke.func.value")
+		value := b.CreateExtractValue(itf, 1, "invoke.func.value") // receiver
+		// Prefix the params with receiver value and suffix with typecode.
 		params = append([]llvm.Value{value}, params...)
 		params = append(params, typecode)
-		callee = b.getInvokeFunctionTC(instr)
+		callee = b.getInvokeFunction(instr)
 		calleeType = callee.GlobalValueType()
 		context = llvm.Undef(b.dataPtrType)
 	} else {
-		value := b.getValueTC(instr.Value, instr.Pos())
+		// Function pointer.
+		value := b.getValue(instr.Value, getPos(instr))
+		// This is a func value, which cannot be called directly. We have to
+		// extract the function pointer and context first from the func value.
 		callee, context = b.decodeFuncValue(value)
-		calleeType = b.getLLVMFunctionTypeTC(instr.Value.Type().Underlying().(*typecheck.Signature))
-		b.createNilCheckTC(instr.Value, callee, "fpcall")
+		calleeType = b.getLLVMFunctionType(instr.Value.Type().Underlying().(*types.Signature))
+		b.createNilCheck(instr.Value, callee, "fpcall")
 	}
 
 	if !exported {
+		// This function takes a context parameter.
+		// Add it to the end of the parameter list.
 		params = append(params, context)
 	}
 
@@ -1948,6 +2053,42 @@ func (b *builder) createFunctionCallTC(instr *mxssa.CallCommon) (llvm.Value, err
 
 // getValue returns the LLVM value of a constant, function value, global, or
 // already processed SSA expression.
+func (b *builder) getValue(expr ssa.Value, pos token.Pos) llvm.Value {
+	switch expr := expr.(type) {
+	case *ssa.Const:
+		if pos == token.NoPos {
+			// If the position isn't known, at least try to find in which file
+			// it is defined.
+			file := b.program.Fset.File(b.fn.Pos())
+			if file != nil {
+				pos = file.Pos(0)
+			}
+		}
+		return b.createConst(expr, pos)
+	case *ssa.Function:
+		if b.getFunctionInfo(expr).exported {
+			b.addError(expr.Pos(), "cannot use an exported function as value: "+expr.String())
+			return llvm.Undef(b.getLLVMType(expr.Type()))
+		}
+		_, fn := b.getFunction(expr)
+		return b.createFuncValue(fn, llvm.Undef(b.dataPtrType), expr.Signature)
+	case *ssa.Global:
+		value := b.getGlobal(expr)
+		if value.IsNil() {
+			b.addError(expr.Pos(), "global not found: "+expr.RelString(nil))
+			return llvm.Undef(b.getLLVMType(expr.Type()))
+		}
+		return value
+	default:
+		// other (local) SSA value
+		if value, ok := b.locals[expr]; ok {
+			return value
+		} else {
+			// indicates a compiler bug
+			panic("SSA value not previously found in function: " + expr.String())
+		}
+	}
+}
 
 // maxSliceSize determines the maximum size a slice of the given element type
 // can be.
@@ -1975,19 +2116,24 @@ func (c *compilerContext) maxSliceSize(elementType llvm.Type) uint64 {
 	return maxSize
 }
 
-
-func (b *builder) createExprTC(expr mxssa.Value) (llvm.Value, error) {
-	if _, ok := b.mxLocals[expr]; ok {
+// createExpr translates a Go SSA expression to LLVM IR. This can be zero, one,
+// or multiple LLVM IR instructions and/or runtime calls.
+func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
+	if _, ok := b.locals[expr]; ok {
+		// sanity check
 		panic("instruction has already been created: " + expr.String())
 	}
 
 	switch expr := expr.(type) {
-	case *mxssa.Alloc:
-		typ := b.getLLVMTypeTC(expr.Type().Underlying().(*typecheck.Pointer).Elem())
+	case *ssa.Alloc:
+		typ := b.getLLVMType(expr.Type().Underlying().(*types.Pointer).Elem())
 		size := b.targetData.TypeAllocSize(typ)
+		// Move all "large" allocations to the heap.
 		if expr.Heap || size > b.MaxStackAlloc {
+			// Calculate ^uintptr(0)
 			maxSize := llvm.ConstNot(llvm.ConstInt(b.uintptrType, 0, false)).ZExtValue()
 			if size > maxSize {
+				// Size would be truncated if truncated to uintptr.
 				return llvm.Value{}, b.makeError(expr.Pos(), fmt.Sprintf("value is too big (%v bytes)", size))
 			}
 			sizeValue := llvm.ConstInt(b.uintptrType, size, false)
@@ -1999,26 +2145,41 @@ func (b *builder) createExprTC(expr mxssa.Value) (llvm.Value, error) {
 		} else {
 			buf := llvmutil.CreateEntryBlockAlloca(b.Builder, typ, expr.Comment)
 			if b.targetData.TypeAllocSize(typ) != 0 {
-				b.CreateStore(llvm.ConstNull(typ), buf)
+				b.CreateStore(llvm.ConstNull(typ), buf) // zero-initialize var
 			}
 			return buf, nil
 		}
-	case *mxssa.BinOp:
-		x := b.getValueTC(expr.X, expr.Pos())
-		y := b.getValueTC(expr.Y, expr.Pos())
-		return b.createBinOpTC(expr.Op, expr.X.Type(), expr.Y.Type(), x, y, expr.Pos())
-	case *mxssa.Call:
-		return b.createFunctionCallTC(expr.Common())
-	case *mxssa.ChangeInterface:
-		return b.getValueTC(expr.X, expr.Pos()), nil
-	case *mxssa.ChangeType:
-		x := b.getValueTC(expr.X, expr.Pos())
-		llvmType := b.getLLVMTypeTC(expr.Type())
+	case *ssa.BinOp:
+		x := b.getValue(expr.X, getPos(expr))
+		y := b.getValue(expr.Y, getPos(expr))
+		return b.createBinOp(expr.Op, expr.X.Type(), expr.Y.Type(), x, y, expr.Pos())
+	case *ssa.Call:
+		return b.createFunctionCall(expr.Common())
+	case *ssa.ChangeInterface:
+		// Do not change between interface types: always use the underlying
+		// (concrete) type in the type number of the interface. Every method
+		// call on an interface will do a lookup which method to call.
+		// This is different from how the official Go compiler works, because of
+		// heap allocation and because it's easier to implement, see:
+		// https://research.swtch.com/interfaces
+		return b.getValue(expr.X, getPos(expr)), nil
+	case *ssa.ChangeType:
+		// This instruction changes the type, but the underlying value remains
+		// the same. This is often a no-op, but sometimes we have to change the
+		// LLVM type as well.
+		x := b.getValue(expr.X, getPos(expr))
+		llvmType := b.getLLVMType(expr.Type())
 		if x.Type() == llvmType {
+			// Different Go type but same LLVM type (for example, named int).
+			// This is the common case.
 			return x, nil
 		}
+		// Figure out what kind of type we need to cast.
 		switch llvmType.TypeKind() {
 		case llvm.StructTypeKind:
+			// Unfortunately, we can't just bitcast structs. We have to
+			// actually create a new struct of the correct type and insert the
+			// values from the previous struct in there.
 			value := llvm.Undef(llvmType)
 			for i := 0; i < llvmType.StructElementTypesCount(); i++ {
 				field := b.CreateExtractValue(x, i, "changetype.field")
@@ -2028,51 +2189,70 @@ func (b *builder) createExprTC(expr mxssa.Value) (llvm.Value, error) {
 		default:
 			return llvm.Value{}, errors.New("todo: unknown ChangeType type: " + expr.X.Type().String())
 		}
-	case *mxssa.Const:
+	case *ssa.Const:
 		panic("const is not an expression")
-	case *mxssa.Convert:
-		x := b.getValueTC(expr.X, expr.Pos())
-		return b.createConvertTC(expr.X.Type(), expr.Type(), x, expr.Pos())
-	case *mxssa.Extract:
-		if _, ok := expr.Tuple.(*mxssa.Select); ok {
-			return b.getChanSelectResultTC(expr), nil
+	case *ssa.Convert:
+		x := b.getValue(expr.X, getPos(expr))
+		return b.createConvert(expr.X.Type(), expr.Type(), x, expr.Pos())
+	case *ssa.Extract:
+		if _, ok := expr.Tuple.(*ssa.Select); ok {
+			return b.getChanSelectResult(expr), nil
 		}
-		value := b.getValueTC(expr.Tuple, expr.Pos())
+		value := b.getValue(expr.Tuple, getPos(expr))
 		return b.CreateExtractValue(value, expr.Index, ""), nil
-	case *mxssa.Field:
-		value := b.getValueTC(expr.X, expr.Pos())
-		return b.CreateExtractValue(value, expr.Field, ""), nil
-	case *mxssa.FieldAddr:
-		val := b.getValueTC(expr.X, expr.Pos())
-		b.createNilCheckTC(expr.X, val, "gep")
+	case *ssa.Field:
+		value := b.getValue(expr.X, getPos(expr))
+		result := b.CreateExtractValue(value, expr.Field, "")
+		return result, nil
+	case *ssa.FieldAddr:
+		val := b.getValue(expr.X, getPos(expr))
+		// Check for nil pointer before calculating the address, from the spec:
+		// > For an operand x of type T, the address operation &x generates a
+		// > pointer of type *T to x. [...] If the evaluation of x would cause a
+		// > run-time panic, then the evaluation of &x does too.
+		b.createNilCheck(expr.X, val, "gep")
+		// Do a GEP on the pointer to get the field address.
 		indices := []llvm.Value{
 			llvm.ConstInt(b.ctx.Int32Type(), 0, false),
 			llvm.ConstInt(b.ctx.Int32Type(), uint64(expr.Field), false),
 		}
-		elementType := b.getLLVMTypeTC(expr.X.Type().Underlying().(*typecheck.Pointer).Elem())
+		elementType := b.getLLVMType(expr.X.Type().Underlying().(*types.Pointer).Elem())
 		return b.CreateInBoundsGEP(elementType, val, indices, ""), nil
-	case *mxssa.Function:
+	case *ssa.Function:
 		panic("function is not an expression")
-	case *mxssa.Global:
+	case *ssa.Global:
 		panic("global is not an expression")
-	case *mxssa.Index:
-		collection := b.getValueTC(expr.X, expr.Pos())
-		index := b.getValueTC(expr.Index, expr.Pos())
+	case *ssa.Index:
+		collection := b.getValue(expr.X, getPos(expr))
+		index := b.getValue(expr.Index, getPos(expr))
+
 		switch xType := expr.X.Type().Underlying().(type) {
-		case *typecheck.Basic:
-			if xType.Info()&typecheck.IsString == 0 {
+		case *types.Basic: // extract byte from string
+			// Value type must be a string, which is a basic type.
+			if xType.Info()&types.IsString == 0 {
 				panic("lookup on non-string?")
 			}
-			index = b.extendIntegerTC(index, expr.Index.Type(), b.uintptrType)
+
+			// Sometimes, the index can be e.g. an uint8 or int8, and we have to
+			// correctly extend that type for two reasons:
+			//  1. The lookup bounds check expects an index of at least uintptr
+			//     size.
+			//  2. getelementptr has signed operands, and therefore s[uint8(x)]
+			//     can be lowered as s[int8(x)]. That would be a bug.
+			index = b.extendInteger(index, expr.Index.Type(), b.uintptrType)
+
+			// Bounds check.
 			length := b.CreateExtractValue(collection, 1, "len")
 			b.createLookupBoundsCheck(length, index)
+
+			// Lookup byte
 			buf := b.CreateExtractValue(collection, 0, "")
 			bufElemType := b.ctx.Int8Type()
 			bufPtr := b.CreateInBoundsGEP(bufElemType, buf, []llvm.Value{index}, "")
 			return b.CreateLoad(bufElemType, bufPtr, ""), nil
-		case *typecheck.Slice:
-			if basic, ok := xType.Elem().(*typecheck.Basic); ok && basic.Kind() == typecheck.Uint8 {
-				index = b.extendIntegerTC(index, expr.Index.Type(), b.uintptrType)
+		case *types.Slice: // Moxie: []byte index (string=[]byte unification)
+			if basic, ok := xType.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {
+				index = b.extendInteger(index, expr.Index.Type(), b.uintptrType)
 				length := b.CreateExtractValue(collection, 1, "len")
 				b.createLookupBoundsCheck(length, index)
 				buf := b.CreateExtractValue(collection, 0, "")
@@ -2080,11 +2260,18 @@ func (b *builder) createExprTC(expr mxssa.Value) (llvm.Value, error) {
 				bufPtr := b.CreateInBoundsGEP(bufElemType, buf, []llvm.Value{index}, "")
 				return b.CreateLoad(bufElemType, bufPtr, ""), nil
 			}
-			panic("unexpected slice type in *mxssa.Index")
-		case *typecheck.Array:
-			index = b.extendIntegerTC(index, expr.Index.Type(), b.uintptrType)
+			panic("unexpected slice type in *ssa.Index")
+		case *types.Array: // extract element from array
+			// Extend index to at least uintptr size, because getelementptr
+			// assumes index is a signed integer.
+			index = b.extendInteger(index, expr.Index.Type(), b.uintptrType)
+
+			// Check bounds.
 			arrayLen := llvm.ConstInt(b.uintptrType, uint64(xType.Len()), false)
 			b.createLookupBoundsCheck(arrayLen, index)
+
+			// Can't load directly from array (as index is non-constant), so
+			// have to do it using an alloca+gep+load.
 			arrayType := collection.Type()
 			alloca, allocaSize := b.createTemporaryAlloca(arrayType, "index.alloca")
 			b.CreateStore(collection, alloca)
@@ -2094,83 +2281,107 @@ func (b *builder) createExprTC(expr mxssa.Value) (llvm.Value, error) {
 			b.emitLifetimeEnd(alloca, allocaSize)
 			return result, nil
 		default:
-			panic("unknown *mxssa.Index type")
+			panic("unknown *ssa.Index type")
 		}
-	case *mxssa.IndexAddr:
-		val := b.getValueTC(expr.X, expr.Pos())
-		index := b.getValueTC(expr.Index, expr.Pos())
+	case *ssa.IndexAddr:
+		val := b.getValue(expr.X, getPos(expr))
+		index := b.getValue(expr.Index, getPos(expr))
+
+		// Get buffer pointer and length
 		var bufptr, buflen llvm.Value
 		var bufType llvm.Type
 		switch ptrTyp := expr.X.Type().Underlying().(type) {
-		case *typecheck.Pointer:
+		case *types.Pointer:
 			typ := ptrTyp.Elem().Underlying()
 			switch typ := typ.(type) {
-			case *typecheck.Array:
+			case *types.Array:
 				bufptr = val
 				buflen = llvm.ConstInt(b.uintptrType, uint64(typ.Len()), false)
-				bufType = b.getLLVMTypeTC(typ)
-				b.createNilCheckTC(expr.X, bufptr, "gep")
+				bufType = b.getLLVMType(typ)
+				// Check for nil pointer before calculating the address, from
+				// the spec:
+				// > For an operand x of type T, the address operation &x
+				// > generates a pointer of type *T to x. [...] If the
+				// > evaluation of x would cause a run-time panic, then the
+				// > evaluation of &x does too.
+				b.createNilCheck(expr.X, bufptr, "gep")
 			default:
 				return llvm.Value{}, b.makeError(expr.Pos(), "todo: indexaddr: "+typ.String())
 			}
-		case *typecheck.Slice:
+		case *types.Slice:
 			bufptr = b.CreateExtractValue(val, 0, "indexaddr.ptr")
 			buflen = b.CreateExtractValue(val, 1, "indexaddr.len")
-			bufType = b.getLLVMTypeTC(ptrTyp.Elem())
-		case *typecheck.Basic:
+			bufType = b.getLLVMType(ptrTyp.Elem())
+		case *types.Basic: // Moxie: string=[]byte, addressable indexing
 			bufptr = b.CreateExtractValue(val, 0, "indexaddr.ptr")
 			buflen = b.CreateExtractValue(val, 1, "indexaddr.len")
 			bufType = b.ctx.Int8Type()
 		default:
 			return llvm.Value{}, b.makeError(expr.Pos(), "todo: indexaddr: "+ptrTyp.String())
 		}
-		index = b.extendIntegerTC(index, expr.Index.Type(), b.uintptrType)
+
+		// Make sure index is at least the size of uintptr because getelementptr
+		// assumes index is a signed integer.
+		index = b.extendInteger(index, expr.Index.Type(), b.uintptrType)
+
+		// Bounds check.
 		b.createLookupBoundsCheck(buflen, index)
+
 		switch expr.X.Type().Underlying().(type) {
-		case *typecheck.Pointer:
-			indices := []llvm.Value{llvm.ConstInt(b.ctx.Int32Type(), 0, false), index}
+		case *types.Pointer:
+			indices := []llvm.Value{
+				llvm.ConstInt(b.ctx.Int32Type(), 0, false),
+				index,
+			}
 			return b.CreateInBoundsGEP(bufType, bufptr, indices, ""), nil
-		case *typecheck.Slice:
+		case *types.Slice:
 			return b.CreateInBoundsGEP(bufType, bufptr, []llvm.Value{index}, ""), nil
-		case *typecheck.Basic:
+		case *types.Basic: // Moxie: string=[]byte, addressable
 			return b.CreateInBoundsGEP(bufType, bufptr, []llvm.Value{index}, ""), nil
 		default:
 			panic("unreachable")
 		}
-	case *mxssa.Lookup:
-		value := b.getValueTC(expr.X, expr.Pos())
-		index := b.getValueTC(expr.Index, expr.Pos())
+	case *ssa.Lookup: // map lookup
+		value := b.getValue(expr.X, getPos(expr))
+		index := b.getValue(expr.Index, getPos(expr))
 		valueType := expr.Type()
 		if expr.CommaOk {
-			valueType = valueType.(*typecheck.Tuple).At(0).Type()
+			valueType = valueType.(*types.Tuple).At(0).Type()
 		}
-		return b.createMapLookupTC(expr.X.Type().Underlying().(*typecheck.Map).Key(), valueType, value, index, expr.CommaOk, expr.Pos())
-	case *mxssa.MakeChan:
-		return b.createMakeChanTC(expr), nil
-	case *mxssa.MakeClosure:
-		return b.parseMakeClosureTC(expr)
-	case *mxssa.MakeInterface:
-		val := b.getValueTC(expr.X, expr.Pos())
-		return b.createMakeInterfaceTC(val, expr.X.Type(), expr.Pos()), nil
-	case *mxssa.MakeMap:
-		return b.createMakeMapTC(expr)
-	case *mxssa.MakeSlice:
-		sliceLen := b.getValueTC(expr.Len, expr.Pos())
-		sliceCap := b.getValueTC(expr.Cap, expr.Pos())
-		sliceType := expr.Type().Underlying().(*typecheck.Slice)
-		llvmElemType := b.getLLVMTypeTC(sliceType.Elem())
+		return b.createMapLookup(expr.X.Type().Underlying().(*types.Map).Key(), valueType, value, index, expr.CommaOk, expr.Pos())
+	case *ssa.MakeChan:
+		return b.createMakeChan(expr), nil
+	case *ssa.MakeClosure:
+		return b.parseMakeClosure(expr)
+	case *ssa.MakeInterface:
+		val := b.getValue(expr.X, getPos(expr))
+		return b.createMakeInterface(val, expr.X.Type(), expr.Pos()), nil
+	case *ssa.MakeMap:
+		return b.createMakeMap(expr)
+	case *ssa.MakeSlice:
+		sliceLen := b.getValue(expr.Len, getPos(expr))
+		sliceCap := b.getValue(expr.Cap, getPos(expr))
+		sliceType := expr.Type().Underlying().(*types.Slice)
+		llvmElemType := b.getLLVMType(sliceType.Elem())
 		elemSize := b.targetData.TypeAllocSize(llvmElemType)
 		elemAlign := b.targetData.ABITypeAlignment(llvmElemType)
 		elemSizeValue := llvm.ConstInt(b.uintptrType, elemSize, false)
+
 		maxSize := b.maxSliceSize(llvmElemType)
 		if elemSize > maxSize {
+			// This seems to be checked by the typechecker already, but let's
+			// check it again just to be sure.
 			return llvm.Value{}, b.makeError(expr.Pos(), fmt.Sprintf("slice element type is too big (%v bytes)", elemSize))
 		}
-		lenType := expr.Len.Type().Underlying().(*typecheck.Basic)
-		capType := expr.Cap.Type().Underlying().(*typecheck.Basic)
+
+		// Bounds checking.
+		lenType := expr.Len.Type().Underlying().(*types.Basic)
+		capType := expr.Cap.Type().Underlying().(*types.Basic)
 		maxSizeValue := llvm.ConstInt(b.uintptrType, maxSize, false)
-		b.createSliceBoundsCheckTC(maxSizeValue, sliceLen, sliceCap, sliceCap, lenType, capType, capType)
-		sliceCapCast, err := b.createConvertTC(expr.Cap.Type(), typecheck.Typ[typecheck.Uint64], sliceCap, expr.Pos())
+		b.createSliceBoundsCheck(maxSizeValue, sliceLen, sliceCap, sliceCap, lenType, capType, capType)
+
+		// Allocate the backing array.
+		sliceCapCast, err := b.createConvert(expr.Cap.Type(), types.Typ[types.Uintptr], sliceCap, expr.Pos())
 		if err != nil {
 			return llvm.Value{}, err
 		}
@@ -2178,38 +2389,44 @@ func (b *builder) createExprTC(expr mxssa.Value) (llvm.Value, error) {
 		layoutValue := b.createObjectLayout(llvmElemType, expr.Pos())
 		slicePtr := b.createRuntimeCall("alloc", []llvm.Value{sliceSize, layoutValue}, "makeslice.buf")
 		slicePtr.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(elemAlign)))
-		sliceLen, err = b.createConvertTC(expr.Len.Type(), typecheck.Typ[typecheck.Uint64], sliceLen, expr.Pos())
+
+		// Extend or truncate if necessary. This is safe as we've already done
+		// the bounds check.
+		sliceLen, err = b.createConvert(expr.Len.Type(), types.Typ[types.Uintptr], sliceLen, expr.Pos())
 		if err != nil {
 			return llvm.Value{}, err
 		}
-		sliceCap, err = b.createConvertTC(expr.Cap.Type(), typecheck.Typ[typecheck.Uint64], sliceCap, expr.Pos())
+		sliceCap, err = b.createConvert(expr.Cap.Type(), types.Typ[types.Uintptr], sliceCap, expr.Pos())
 		if err != nil {
 			return llvm.Value{}, err
 		}
-		slice := llvm.Undef(b.getLLVMTypeTC(sliceType))
+
+		// Create the slice.
+		// Moxie: use getLLVMType to get named type for []byte.
+		slice := llvm.Undef(b.getLLVMType(sliceType))
 		slice = b.CreateInsertValue(slice, slicePtr, 0, "")
 		slice = b.CreateInsertValue(slice, sliceLen, 1, "")
 		slice = b.CreateInsertValue(slice, sliceCap, 2, "")
 		return slice, nil
-	case *mxssa.Next:
-		rangeVal := expr.Iter.(*mxssa.Range).X
-		llvmRangeVal := b.getValueTC(rangeVal, expr.Pos())
-		it := b.getValueTC(expr.Iter, expr.Pos())
+	case *ssa.Next:
+		rangeVal := expr.Iter.(*ssa.Range).X
+		llvmRangeVal := b.getValue(rangeVal, getPos(expr))
+		it := b.getValue(expr.Iter, getPos(expr))
 		if expr.IsString {
 			return b.createRuntimeCall("stringNext", []llvm.Value{llvmRangeVal, it}, "range.next"), nil
-		} else {
-			return b.createMapIteratorNextTC(rangeVal, llvmRangeVal, it), nil
+		} else { // map
+			return b.createMapIteratorNext(rangeVal, llvmRangeVal, it), nil
 		}
-	case *mxssa.Phi:
-		phi := b.CreatePHI(b.getLLVMTypeTC(expr.Type()), "")
-		b.mxPhis = append(b.mxPhis, phiNodeTC{expr, phi})
+	case *ssa.Phi:
+		phi := b.CreatePHI(b.getLLVMType(expr.Type()), "")
+		b.phis = append(b.phis, phiNode{expr, phi})
 		return phi, nil
-	case *mxssa.Range:
+	case *ssa.Range:
 		var iteratorType llvm.Type
 		switch typ := expr.X.Type().Underlying().(type) {
-		case *typecheck.Basic:
+		case *types.Basic: // string range (yields runes via UTF-8 decode)
 			iteratorType = b.getLLVMRuntimeType("stringIterator")
-		case *typecheck.Map:
+		case *types.Map:
 			iteratorType = b.getLLVMRuntimeType("hashmapIterator")
 		default:
 			panic("unknown type in range: " + typ.String())
@@ -2217,37 +2434,43 @@ func (b *builder) createExprTC(expr mxssa.Value) (llvm.Value, error) {
 		it, _ := b.createTemporaryAlloca(iteratorType, "range.it")
 		b.CreateStore(llvm.ConstNull(iteratorType), it)
 		return it, nil
-	case *mxssa.Select:
-		return b.createSelectTC(expr), nil
-	case *mxssa.Slice:
-		value := b.getValueTC(expr.X, expr.Pos())
-		var lowType, highType, maxType *typecheck.Basic
+	case *ssa.Select:
+		return b.createSelect(expr), nil
+	case *ssa.Slice:
+		value := b.getValue(expr.X, getPos(expr))
+
+		var lowType, highType, maxType *types.Basic
 		var low, high, max llvm.Value
+
 		if expr.Low != nil {
-			lowType = expr.Low.Type().Underlying().(*typecheck.Basic)
-			low = b.getValueTC(expr.Low, expr.Pos())
-			low = b.extendIntegerTC(low, lowType, b.uintptrType)
+			lowType = expr.Low.Type().Underlying().(*types.Basic)
+			low = b.getValue(expr.Low, getPos(expr))
+			low = b.extendInteger(low, lowType, b.uintptrType)
 		} else {
-			lowType = typecheck.Typ[typecheck.Uint64]
+			lowType = types.Typ[types.Uintptr]
 			low = llvm.ConstInt(b.uintptrType, 0, false)
 		}
+
 		if expr.High != nil {
-			highType = expr.High.Type().Underlying().(*typecheck.Basic)
-			high = b.getValueTC(expr.High, expr.Pos())
-			high = b.extendIntegerTC(high, highType, b.uintptrType)
+			highType = expr.High.Type().Underlying().(*types.Basic)
+			high = b.getValue(expr.High, getPos(expr))
+			high = b.extendInteger(high, highType, b.uintptrType)
 		} else {
-			highType = typecheck.Typ[typecheck.Uint64]
+			highType = types.Typ[types.Uintptr]
 		}
+
 		if expr.Max != nil {
-			maxType = expr.Max.Type().Underlying().(*typecheck.Basic)
-			max = b.getValueTC(expr.Max, expr.Pos())
-			max = b.extendIntegerTC(max, maxType, b.uintptrType)
+			maxType = expr.Max.Type().Underlying().(*types.Basic)
+			max = b.getValue(expr.Max, getPos(expr))
+			max = b.extendInteger(max, maxType, b.uintptrType)
 		} else {
-			maxType = typecheck.Typ[typecheck.Uint64]
+			maxType = types.Typ[types.Uintptr]
 		}
+
 		switch typ := expr.X.Type().Underlying().(type) {
-		case *typecheck.Pointer:
-			arrayType := typ.Elem().Underlying().(*typecheck.Array)
+		case *types.Pointer: // pointer to array
+			// slice an array
+			arrayType := typ.Elem().Underlying().(*types.Array)
 			length := arrayType.Len()
 			llvmLen := llvm.ConstInt(b.uintptrType, uint64(length), false)
 			if high.IsNil() {
@@ -2256,9 +2479,16 @@ func (b *builder) createExprTC(expr mxssa.Value) (llvm.Value, error) {
 			if max.IsNil() {
 				max = llvmLen
 			}
-			indices := []llvm.Value{llvm.ConstInt(b.ctx.Int32Type(), 0, false), low}
-			b.createNilCheckTC(expr.X, value, "slice")
-			b.createSliceBoundsCheckTC(llvmLen, low, high, max, lowType, highType, maxType)
+			indices := []llvm.Value{
+				llvm.ConstInt(b.ctx.Int32Type(), 0, false),
+				low,
+			}
+
+			b.createNilCheck(expr.X, value, "slice")
+			b.createSliceBoundsCheck(llvmLen, low, high, max, lowType, highType, maxType)
+
+			// Truncate ints bigger than uintptr. This is after the bounds
+			// check so it's safe.
 			if b.targetData.TypeAllocSize(low.Type()) > b.targetData.TypeAllocSize(b.uintptrType) {
 				low = b.CreateTrunc(low, b.uintptrType, "")
 			}
@@ -2268,15 +2498,20 @@ func (b *builder) createExprTC(expr mxssa.Value) (llvm.Value, error) {
 			if b.targetData.TypeAllocSize(max.Type()) > b.targetData.TypeAllocSize(b.uintptrType) {
 				max = b.CreateTrunc(max, b.uintptrType, "")
 			}
+
 			sliceLen := b.CreateSub(high, low, "slice.len")
-			slicePtr := b.CreateInBoundsGEP(b.getLLVMTypeTC(arrayType), value, indices, "slice.ptr")
+			slicePtr := b.CreateInBoundsGEP(b.getLLVMType(arrayType), value, indices, "slice.ptr")
 			sliceCap := b.CreateSub(max, low, "slice.cap")
-			slice := llvm.Undef(b.getLLVMTypeTC(expr.Type()))
+
+			// Moxie: use getLLVMType for correct named type on []byte.
+			slice := llvm.Undef(b.getLLVMType(expr.Type()))
 			slice = b.CreateInsertValue(slice, slicePtr, 0, "")
 			slice = b.CreateInsertValue(slice, sliceLen, 1, "")
 			slice = b.CreateInsertValue(slice, sliceCap, 2, "")
 			return slice, nil
-		case *typecheck.Slice:
+
+		case *types.Slice:
+			// slice a slice
 			oldPtr := b.CreateExtractValue(value, 0, "")
 			oldLen := b.CreateExtractValue(value, 1, "")
 			oldCap := b.CreateExtractValue(value, 2, "")
@@ -2286,7 +2521,11 @@ func (b *builder) createExprTC(expr mxssa.Value) (llvm.Value, error) {
 			if max.IsNil() {
 				max = oldCap
 			}
-			b.createSliceBoundsCheckTC(oldCap, low, high, max, lowType, highType, maxType)
+
+			b.createSliceBoundsCheck(oldCap, low, high, max, lowType, highType, maxType)
+
+			// Truncate ints bigger than uintptr. This is after the bounds
+			// check so it's safe.
 			if b.targetData.TypeAllocSize(low.Type()) > b.targetData.TypeAllocSize(b.uintptrType) {
 				low = b.CreateTrunc(low, b.uintptrType, "")
 			}
@@ -2296,20 +2535,26 @@ func (b *builder) createExprTC(expr mxssa.Value) (llvm.Value, error) {
 			if b.targetData.TypeAllocSize(max.Type()) > b.targetData.TypeAllocSize(b.uintptrType) {
 				max = b.CreateTrunc(max, b.uintptrType, "")
 			}
-			ptrElemType := b.getLLVMTypeTC(typ.Elem())
+
+			ptrElemType := b.getLLVMType(typ.Elem())
 			newPtr := b.CreateInBoundsGEP(ptrElemType, oldPtr, []llvm.Value{low}, "")
 			newLen := b.CreateSub(high, low, "")
 			newCap := b.CreateSub(max, low, "")
-			slice := llvm.Undef(b.getLLVMTypeTC(typ))
+			// Moxie: use getLLVMType to get the correct type (named for []byte).
+			slice := llvm.Undef(b.getLLVMType(typ))
 			slice = b.CreateInsertValue(slice, newPtr, 0, "")
 			slice = b.CreateInsertValue(slice, newLen, 1, "")
 			slice = b.CreateInsertValue(slice, newCap, 2, "")
 			return slice, nil
-		case *typecheck.Basic:
-			if typ.Info()&typecheck.IsString == 0 {
+
+		case *types.Basic:
+			if typ.Info()&types.IsString == 0 {
 				return llvm.Value{}, b.makeError(expr.Pos(), "unknown slice type: "+typ.String())
 			}
+			// slice a string
 			if expr.Max != nil {
+				// This might as well be a panic, as the frontend should have
+				// handled this already.
 				return llvm.Value{}, b.makeError(expr.Pos(), "slicing a string with a max parameter is not allowed by the spec")
 			}
 			oldPtr := b.CreateExtractValue(value, 0, "")
@@ -2317,33 +2562,43 @@ func (b *builder) createExprTC(expr mxssa.Value) (llvm.Value, error) {
 			if high.IsNil() {
 				high = oldLen
 			}
-			b.createSliceBoundsCheckTC(oldLen, low, high, high, lowType, highType, maxType)
+
+			b.createSliceBoundsCheck(oldLen, low, high, high, lowType, highType, maxType)
+
+			// Truncate ints bigger than uintptr. This is after the bounds
+			// check so it's safe.
 			if b.targetData.TypeAllocSize(low.Type()) > b.targetData.TypeAllocSize(b.uintptrType) {
 				low = b.CreateTrunc(low, b.uintptrType, "")
 			}
 			if b.targetData.TypeAllocSize(high.Type()) > b.targetData.TypeAllocSize(b.uintptrType) {
 				high = b.CreateTrunc(high, b.uintptrType, "")
 			}
+
 			newPtr := b.CreateInBoundsGEP(b.ctx.Int8Type(), oldPtr, []llvm.Value{low}, "")
 			newLen := b.CreateSub(high, low, "")
 			str := llvm.Undef(b.getLLVMRuntimeType("_string"))
 			str = b.CreateInsertValue(str, newPtr, 0, "")
 			str = b.CreateInsertValue(str, newLen, 1, "")
-			str = b.CreateInsertValue(str, newLen, 2, "")
+			str = b.CreateInsertValue(str, newLen, 2, "") // cap = len for string slices
 			return str, nil
+
 		default:
 			return llvm.Value{}, b.makeError(expr.Pos(), "unknown slice type: "+typ.String())
 		}
-	case *mxssa.SliceToArrayPointer:
-		slice := b.getValueTC(expr.X, expr.Pos())
+	case *ssa.SliceToArrayPointer:
+		// Conversion from a slice to an array pointer, as the name clearly
+		// says. This requires a runtime check to make sure the slice is at
+		// least as big as the array.
+		slice := b.getValue(expr.X, getPos(expr))
 		sliceLen := b.CreateExtractValue(slice, 1, "")
-		arrayLen := expr.Type().Underlying().(*typecheck.Pointer).Elem().Underlying().(*typecheck.Array).Len()
-		b.createSliceToArrayPointerCheck(sliceLen, int64(arrayLen))
-		return b.CreateExtractValue(slice, 0, ""), nil
-	case *mxssa.TypeAssert:
-		return b.createTypeAssertTC(expr), nil
-	case *mxssa.UnOp:
-		return b.createUnOpTC(expr)
+		arrayLen := expr.Type().Underlying().(*types.Pointer).Elem().Underlying().(*types.Array).Len()
+		b.createSliceToArrayPointerCheck(sliceLen, arrayLen)
+		ptr := b.CreateExtractValue(slice, 0, "")
+		return ptr, nil
+	case *ssa.TypeAssert:
+		return b.createTypeAssert(expr), nil
+	case *ssa.UnOp:
+		return b.createUnOp(expr)
 	default:
 		return llvm.Value{}, b.makeError(expr.Pos(), "todo: unknown expression: "+expr.String())
 	}
@@ -2355,22 +2610,52 @@ func (b *builder) createExprTC(expr mxssa.Value) (llvm.Value, error) {
 // same type, even for bitshifts. Also, signedness in Go is encoded in the type
 // and is encoded in the operation in LLVM IR: this is important for some
 // operations such as divide.
-
-func (b *builder) createBinOpTC(op token.Token, typ, ytyp typecheck.Type, x, y llvm.Value, pos token.Pos) (llvm.Value, error) {
+func (b *builder) createBinOp(op token.Token, typ, ytyp types.Type, x, y llvm.Value, pos token.Pos) (llvm.Value, error) {
 	switch typ := typ.Underlying().(type) {
-	case *typecheck.Basic:
-		if typ.Info()&typecheck.IsInteger != 0 {
-			signed := typ.Info()&typecheck.IsUnsigned == 0
+	case *types.Basic:
+		if typ.Info()&types.IsInteger != 0 {
+			// Operations on integers
+			signed := typ.Info()&types.IsUnsigned == 0
 			switch op {
-			case token.ADD:
+			case token.ADD: // +
 				return b.CreateAdd(x, y, ""), nil
-			case token.SUB:
+			case token.SUB: // -
 				return b.CreateSub(x, y, ""), nil
-			case token.MUL:
+			case token.MUL: // *
 				return b.CreateMul(x, y, ""), nil
-			case token.QUO, token.REM:
+			case token.QUO, token.REM: // /, %
+				// Check for a divide by zero. If y is zero, the Go
+				// specification says that a runtime error must be triggered.
 				b.createDivideByZeroCheck(y)
+
 				if signed {
+					// Deal with signed division overflow.
+					// The LLVM LangRef says:
+					//
+					//   Overflow also leads to undefined behavior; this is a
+					//   rare case, but can occur, for example, by doing a
+					//   32-bit division of -2147483648 by -1.
+					//
+					// The Go specification however says this about division:
+					//
+					//   The one exception to this rule is that if the dividend
+					//   x is the most negative value for the int type of x, the
+					//   quotient q = x / -1 is equal to x (and r = 0) due to
+					//   two's-complement integer overflow.
+					//
+					// In other words, in the special case that the lowest
+					// possible signed integer is divided by -1, the result of
+					// the division is the same as x (the dividend).
+					// This is implemented by checking for this condition and
+					// changing y to 1 if it occurs, for example for 32-bit
+					// ints:
+					//
+					//   if x == -2147483648 && y == -1 {
+					//       y = 1
+					//   }
+					//
+					// Dividing x by 1 obviously returns x, therefore satisfying
+					// the Go specification without a branch.
 					llvmType := x.Type()
 					minusOne := llvm.ConstSub(llvm.ConstInt(llvmType, 0, false), llvm.ConstInt(llvmType, 1, false))
 					lowestInteger := llvm.ConstInt(x.Type(), 1<<(llvmType.IntTypeWidth()-1), false)
@@ -2378,138 +2663,233 @@ func (b *builder) createBinOpTC(op token.Token, typ, ytyp typecheck.Type, x, y l
 					xIsLowestInteger := b.CreateICmp(llvm.IntEQ, x, lowestInteger, "")
 					hasOverflow := b.CreateAnd(yIsMinusOne, xIsLowestInteger, "")
 					y = b.CreateSelect(hasOverflow, llvm.ConstInt(llvmType, 1, true), y, "")
+
 					if op == token.QUO {
 						return b.CreateSDiv(x, y, ""), nil
+					} else {
+						return b.CreateSRem(x, y, ""), nil
 					}
-					return b.CreateSRem(x, y, ""), nil
+				} else {
+					if op == token.QUO {
+						return b.CreateUDiv(x, y, ""), nil
+					} else {
+						return b.CreateURem(x, y, ""), nil
+					}
 				}
-				if op == token.QUO {
-					return b.CreateUDiv(x, y, ""), nil
-				}
-				return b.CreateURem(x, y, ""), nil
-			case token.AND:
+			case token.AND: // &
 				return b.CreateAnd(x, y, ""), nil
-			case token.OR:
+			case token.OR: // |
 				return b.CreateOr(x, y, ""), nil
-			case token.XOR:
+			case token.XOR: // ^
 				return b.CreateXor(x, y, ""), nil
 			case token.SHL, token.SHR:
-				if ytyp.Underlying().(*typecheck.Basic).Info()&typecheck.IsUnsigned == 0 {
+				if ytyp.Underlying().(*types.Basic).Info()&types.IsUnsigned == 0 {
+					// Ensure that y is not negative.
 					b.createNegativeShiftCheck(y)
 				}
+
 				sizeX := b.targetData.TypeAllocSize(x.Type())
 				sizeY := b.targetData.TypeAllocSize(y.Type())
+
+				// Check if the shift is bigger than the bit-width of the shifted value.
+				// This is UB in LLVM, so it needs to be handled separately.
+				// The Go spec indirectly defines the result as 0.
+				// Negative shifts are handled earlier, so we can treat y as unsigned.
 				overshifted := b.CreateICmp(llvm.IntUGE, y, llvm.ConstInt(y.Type(), 8*sizeX, false), "shift.overflow")
+
+				// Adjust the size of y to match x.
 				switch {
 				case sizeX > sizeY:
 					y = b.CreateZExt(y, x.Type(), "")
 				case sizeX < sizeY:
+					// If it gets truncated, overshifted will be true and it will not matter.
 					y = b.CreateTrunc(y, x.Type(), "")
 				}
+
+				// Create a shift operation.
 				var val llvm.Value
 				switch op {
-				case token.SHL:
+				case token.SHL: // <<
 					val = b.CreateShl(x, y, "")
-				case token.SHR:
+				case token.SHR: // >>
 					if signed {
+						// Arithmetic right shifts work differently, since shifting a negative number right yields -1.
+						// Cap the shift input rather than selecting the output.
 						y = b.CreateSelect(overshifted, llvm.ConstInt(y.Type(), 8*sizeX-1, false), y, "shift.offset")
 						return b.CreateAShr(x, y, ""), nil
+					} else {
+						val = b.CreateLShr(x, y, "")
 					}
-					val = b.CreateLShr(x, y, "")
 				default:
 					panic("unreachable")
 				}
+
+				// Select between the shift result and zero depending on whether there was an overshift.
 				return b.CreateSelect(overshifted, llvm.ConstInt(val.Type(), 0, false), val, "shift.result"), nil
-			case token.EQL:
+			case token.EQL: // ==
 				return b.CreateICmp(llvm.IntEQ, x, y, ""), nil
-			case token.NEQ:
+			case token.NEQ: // !=
 				return b.CreateICmp(llvm.IntNE, x, y, ""), nil
-			case token.AND_NOT:
-				inv := b.CreateNot(y, "")
+			case token.AND_NOT: // &^
+				// Go specific. Calculate "and not" with x & (~y)
+				inv := b.CreateNot(y, "") // ~y
 				return b.CreateAnd(x, inv, ""), nil
-			case token.LSS:
+			case token.LSS: // <
 				if signed {
 					return b.CreateICmp(llvm.IntSLT, x, y, ""), nil
+				} else {
+					return b.CreateICmp(llvm.IntULT, x, y, ""), nil
 				}
-				return b.CreateICmp(llvm.IntULT, x, y, ""), nil
-			case token.LEQ:
+			case token.LEQ: // <=
 				if signed {
 					return b.CreateICmp(llvm.IntSLE, x, y, ""), nil
+				} else {
+					return b.CreateICmp(llvm.IntULE, x, y, ""), nil
 				}
-				return b.CreateICmp(llvm.IntULE, x, y, ""), nil
-			case token.GTR:
+			case token.GTR: // >
 				if signed {
 					return b.CreateICmp(llvm.IntSGT, x, y, ""), nil
+				} else {
+					return b.CreateICmp(llvm.IntUGT, x, y, ""), nil
 				}
-				return b.CreateICmp(llvm.IntUGT, x, y, ""), nil
-			case token.GEQ:
+			case token.GEQ: // >=
 				if signed {
 					return b.CreateICmp(llvm.IntSGE, x, y, ""), nil
+				} else {
+					return b.CreateICmp(llvm.IntUGE, x, y, ""), nil
 				}
-				return b.CreateICmp(llvm.IntUGE, x, y, ""), nil
 			default:
 				panic("binop on integer: " + op.String())
 			}
-		} else if typ.Info()&typecheck.IsFloat != 0 {
+		} else if typ.Info()&types.IsFloat != 0 {
+			// Operations on floats
 			switch op {
-			case token.ADD:
+			case token.ADD: // +
 				return b.CreateFAdd(x, y, ""), nil
-			case token.SUB:
+			case token.SUB: // -
 				return b.CreateFSub(x, y, ""), nil
-			case token.MUL:
+			case token.MUL: // *
 				return b.CreateFMul(x, y, ""), nil
-			case token.QUO:
+			case token.QUO: // /
 				return b.CreateFDiv(x, y, ""), nil
-			case token.EQL:
+			case token.EQL: // ==
 				return b.CreateFCmp(llvm.FloatOEQ, x, y, ""), nil
-			case token.NEQ:
+			case token.NEQ: // !=
 				return b.CreateFCmp(llvm.FloatUNE, x, y, ""), nil
-			case token.LSS:
+			case token.LSS: // <
 				return b.CreateFCmp(llvm.FloatOLT, x, y, ""), nil
-			case token.LEQ:
+			case token.LEQ: // <=
 				return b.CreateFCmp(llvm.FloatOLE, x, y, ""), nil
-			case token.GTR:
+			case token.GTR: // >
 				return b.CreateFCmp(llvm.FloatOGT, x, y, ""), nil
-			case token.GEQ:
+			case token.GEQ: // >=
 				return b.CreateFCmp(llvm.FloatOGE, x, y, ""), nil
 			default:
 				panic("binop on float: " + op.String())
 			}
-		} else if typ.Info()&typecheck.IsBoolean != 0 {
+		} else if typ.Info()&types.IsComplex != 0 {
+			r1 := b.CreateExtractValue(x, 0, "r1")
+			r2 := b.CreateExtractValue(y, 0, "r2")
+			i1 := b.CreateExtractValue(x, 1, "i1")
+			i2 := b.CreateExtractValue(y, 1, "i2")
 			switch op {
-			case token.EQL:
+			case token.EQL: // ==
+				req := b.CreateFCmp(llvm.FloatOEQ, r1, r2, "")
+				ieq := b.CreateFCmp(llvm.FloatOEQ, i1, i2, "")
+				return b.CreateAnd(req, ieq, ""), nil
+			case token.NEQ: // !=
+				req := b.CreateFCmp(llvm.FloatOEQ, r1, r2, "")
+				ieq := b.CreateFCmp(llvm.FloatOEQ, i1, i2, "")
+				neq := b.CreateAnd(req, ieq, "")
+				return b.CreateNot(neq, ""), nil
+			case token.ADD, token.SUB:
+				var r, i llvm.Value
+				switch op {
+				case token.ADD:
+					r = b.CreateFAdd(r1, r2, "")
+					i = b.CreateFAdd(i1, i2, "")
+				case token.SUB:
+					r = b.CreateFSub(r1, r2, "")
+					i = b.CreateFSub(i1, i2, "")
+				default:
+					panic("unreachable")
+				}
+				cplx := llvm.Undef(b.ctx.StructType([]llvm.Type{r.Type(), i.Type()}, false))
+				cplx = b.CreateInsertValue(cplx, r, 0, "")
+				cplx = b.CreateInsertValue(cplx, i, 1, "")
+				return cplx, nil
+			case token.MUL:
+				// Complex multiplication follows the current implementation in
+				// the Go compiler, with the difference that complex64
+				// components are not first scaled up to float64 for increased
+				// precision.
+				// https://github.com/golang/go/blob/170b8b4b12be50eeccbcdadb8523fb4fc670ca72/src/cmd/compile/internal/gc/ssa.go#L2089-L2127
+				// The implementation is as follows:
+				//   r := real(a) * real(b) - imag(a) * imag(b)
+				//   i := real(a) * imag(b) + imag(a) * real(b)
+				// Note: this does NOT follow the C11 specification (annex G):
+				// http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1548.pdf#page=549
+				// See https://github.com/golang/go/issues/29846 for a related
+				// discussion.
+				r := b.CreateFSub(b.CreateFMul(r1, r2, ""), b.CreateFMul(i1, i2, ""), "")
+				i := b.CreateFAdd(b.CreateFMul(r1, i2, ""), b.CreateFMul(i1, r2, ""), "")
+				cplx := llvm.Undef(b.ctx.StructType([]llvm.Type{r.Type(), i.Type()}, false))
+				cplx = b.CreateInsertValue(cplx, r, 0, "")
+				cplx = b.CreateInsertValue(cplx, i, 1, "")
+				return cplx, nil
+			case token.QUO:
+				// Complex division.
+				// Do this in a library call because it's too difficult to do
+				// inline.
+				switch r1.Type().TypeKind() {
+				case llvm.FloatTypeKind:
+					return b.createRuntimeCall("complex64div", []llvm.Value{x, y}, ""), nil
+				case llvm.DoubleTypeKind:
+					return b.createRuntimeCall("complex128div", []llvm.Value{x, y}, ""), nil
+				default:
+					panic("unexpected complex type")
+				}
+			default:
+				panic("binop on complex: " + op.String())
+			}
+		} else if typ.Info()&types.IsBoolean != 0 {
+			// Operations on booleans
+			switch op {
+			case token.EQL: // ==
 				return b.CreateICmp(llvm.IntEQ, x, y, ""), nil
-			case token.NEQ:
+			case token.NEQ: // !=
 				return b.CreateICmp(llvm.IntNE, x, y, ""), nil
 			default:
 				panic("binop on bool: " + op.String())
 			}
-		} else if typ.Kind() == typecheck.UnsafePointer {
+		} else if typ.Kind() == types.UnsafePointer {
+			// Operations on pointers
 			switch op {
-			case token.EQL:
+			case token.EQL: // ==
 				return b.CreateICmp(llvm.IntEQ, x, y, ""), nil
-			case token.NEQ:
+			case token.NEQ: // !=
 				return b.CreateICmp(llvm.IntNE, x, y, ""), nil
 			default:
 				panic("binop on pointer: " + op.String())
 			}
-		} else if typ.Info()&typecheck.IsString != 0 {
+		} else if typ.Info()&types.IsString != 0 {
+			// Operations on strings
 			switch op {
-			case token.ADD:
+			case token.ADD: // +
 				return b.createRuntimeCall("stringConcat", []llvm.Value{x, y}, ""), nil
-			case token.EQL:
+			case token.EQL: // ==
 				return b.createRuntimeCall("stringEqual", []llvm.Value{x, y}, ""), nil
-			case token.NEQ:
+			case token.NEQ: // !=
 				result := b.createRuntimeCall("stringEqual", []llvm.Value{x, y}, "")
 				return b.CreateNot(result, ""), nil
-			case token.LSS:
+			case token.LSS: // x < y
 				return b.createRuntimeCall("stringLess", []llvm.Value{x, y}, ""), nil
-			case token.LEQ:
+			case token.LEQ: // x <= y becomes NOT (y < x)
 				result := b.createRuntimeCall("stringLess", []llvm.Value{y, x}, "")
 				return b.CreateNot(result, ""), nil
-			case token.GTR:
+			case token.GTR: // x > y becomes y < x
 				return b.createRuntimeCall("stringLess", []llvm.Value{y, x}, ""), nil
-			case token.GEQ:
+			case token.GEQ: // x >= y becomes NOT (x < y)
 				result := b.createRuntimeCall("stringLess", []llvm.Value{x, y}, "")
 				return b.CreateNot(result, ""), nil
 			default:
@@ -2518,27 +2898,36 @@ func (b *builder) createBinOpTC(op token.Token, typ, ytyp typecheck.Type, x, y l
 		} else {
 			return llvm.Value{}, b.makeError(pos, "todo: unknown basic type in binop: "+typ.String())
 		}
-	case *typecheck.Signature:
+	case *types.Signature:
+		// Get raw scalars from the function value and compare those.
+		// Function values may be implemented in multiple ways, but they all
+		// have some way of getting a scalar value identifying the function.
+		// This is safe: function pointers are generally not comparable
+		// against each other, only against nil. So one of these has to be nil.
 		x = b.extractFuncScalar(x)
 		y = b.extractFuncScalar(y)
 		switch op {
-		case token.EQL:
+		case token.EQL: // ==
 			return b.CreateICmp(llvm.IntEQ, x, y, ""), nil
-		case token.NEQ:
+		case token.NEQ: // !=
 			return b.CreateICmp(llvm.IntNE, x, y, ""), nil
 		default:
 			return llvm.Value{}, b.makeError(pos, "binop on signature: "+op.String())
 		}
-	case *typecheck.Interface:
+	case *types.Interface:
 		switch op {
-		case token.EQL, token.NEQ:
+		case token.EQL, token.NEQ: // ==, !=
 			nilInterface := llvm.ConstNull(x.Type())
 			var result llvm.Value
 			if x == nilInterface || y == nilInterface {
+				// An interface value is compared against nil.
+				// This is a very common case and is easy to optimize: simply
+				// compare the typecodes (of which one is nil).
 				typecodeX := b.CreateExtractValue(x, 0, "")
 				typecodeY := b.CreateExtractValue(y, 0, "")
 				result = b.CreateICmp(llvm.IntEQ, typecodeX, typecodeY, "")
 			} else {
+				// Fall back to a full interface comparison.
 				result = b.createRuntimeCall("interfaceEqual", []llvm.Value{x, y}, "")
 			}
 			if op == token.NEQ {
@@ -2548,19 +2937,27 @@ func (b *builder) createBinOpTC(op token.Token, typ, ytyp typecheck.Type, x, y l
 		default:
 			return llvm.Value{}, b.makeError(pos, "binop on interface: "+op.String())
 		}
-	case *typecheck.Chan, *typecheck.Map, *typecheck.Pointer:
+	case *types.Chan, *types.Map, *types.Pointer:
+		// Maps are in general not comparable, but can be compared against nil
+		// (which is a nil pointer). This means they can be trivially compared
+		// by treating them as a pointer.
+		// Channels behave as pointers in that they are equal as long as they
+		// are created with the same call to make or if both are nil.
 		switch op {
-		case token.EQL:
+		case token.EQL: // ==
 			return b.CreateICmp(llvm.IntEQ, x, y, ""), nil
-		case token.NEQ:
+		case token.NEQ: // !=
 			return b.CreateICmp(llvm.IntNE, x, y, ""), nil
 		default:
 			return llvm.Value{}, b.makeError(pos, "todo: binop on pointer: "+op.String())
 		}
-	case *typecheck.Slice:
-		if basic, ok := typ.Elem().(*typecheck.Basic); ok && basic.Kind() == typecheck.Uint8 {
+	case *types.Slice:
+		// Moxie: []byte is the text type (replaces string) and supports
+		// full comparison (==, !=, <, <=, >, >=) via runtime string functions.
+		// Other slice types only support nil comparison.
+		if basic, ok := typ.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {
 			switch op {
-			case token.ADD:
+			case token.ADD: // Moxie: []byte + []byte (exempt packages use + on text)
 				return b.createRuntimeCall("stringConcat", []llvm.Value{x, y}, ""), nil
 			case token.EQL:
 				return b.createRuntimeCall("stringEqual", []llvm.Value{x, y}, ""), nil
@@ -2581,12 +2978,14 @@ func (b *builder) createBinOpTC(op token.Token, typ, ytyp typecheck.Type, x, y l
 				return llvm.Value{}, b.makeError(pos, "todo: binop on []byte: "+op.String())
 			}
 		}
+		// Moxie: | on any slice type is concatenation.
+		// Uses sliceAppend with cap=len to force fresh allocation.
 		if op == token.OR {
 			xPtr := b.CreateExtractValue(x, 0, "concat.xPtr")
 			xLen := b.CreateExtractValue(x, 1, "concat.xLen")
 			yPtr := b.CreateExtractValue(y, 0, "concat.yPtr")
 			yLen := b.CreateExtractValue(y, 1, "concat.yLen")
-			elemType := b.getLLVMTypeTC(typ.Elem())
+			elemType := b.getLLVMType(typ.Elem())
 			elemSize := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(elemType), false)
 			result := b.createRuntimeCall("sliceAppend", []llvm.Value{xPtr, yPtr, xLen, xLen, yLen, elemSize}, "concat.new")
 			newPtr := b.CreateExtractValue(result, 0, "concat.ptr")
@@ -2598,6 +2997,8 @@ func (b *builder) createBinOpTC(op token.Token, typ, ytyp typecheck.Type, x, y l
 			newSlice = b.CreateInsertValue(newSlice, newCap, 2, "")
 			return newSlice, nil
 		}
+		// Moxie: slices of comparable types support == and !=.
+		// Compare lengths first, then data byte-by-byte via runtime.
 		if op != token.EQL && op != token.NEQ {
 			return llvm.Value{}, b.makeError(pos, "todo: binop on slice: "+op.String())
 		}
@@ -2605,7 +3006,7 @@ func (b *builder) createBinOpTC(op token.Token, typ, ytyp typecheck.Type, x, y l
 		xLen := b.CreateExtractValue(x, 1, "")
 		yPtr := b.CreateExtractValue(y, 0, "")
 		yLen := b.CreateExtractValue(y, 1, "")
-		elemSize := b.targetData.TypeAllocSize(b.getLLVMTypeTC(typ.Elem()))
+		elemSize := b.targetData.TypeAllocSize(b.getLLVMType(typ.Elem()))
 		elemSizeVal := llvm.ConstInt(b.uintptrType, elemSize, false)
 		result := b.createRuntimeCall("sliceEqual", []llvm.Value{xPtr, yPtr, xLen, yLen, elemSizeVal}, "")
 		switch op {
@@ -2616,44 +3017,53 @@ func (b *builder) createBinOpTC(op token.Token, typ, ytyp typecheck.Type, x, y l
 		default:
 			panic("unreachable")
 		}
-	case *typecheck.Array:
+	case *types.Array:
+		// Compare each array element and combine the result. From the spec:
+		//     Array values are comparable if values of the array element type
+		//     are comparable. Two array values are equal if their corresponding
+		//     elements are equal.
 		result := llvm.ConstInt(b.ctx.Int1Type(), 1, true)
 		for i := 0; i < int(typ.Len()); i++ {
 			xField := b.CreateExtractValue(x, i, "")
 			yField := b.CreateExtractValue(y, i, "")
-			fieldEqual, err := b.createBinOpTC(token.EQL, typ.Elem(), typ.Elem(), xField, yField, pos)
+			fieldEqual, err := b.createBinOp(token.EQL, typ.Elem(), typ.Elem(), xField, yField, pos)
 			if err != nil {
 				return llvm.Value{}, err
 			}
 			result = b.CreateAnd(result, fieldEqual, "")
 		}
 		switch op {
-		case token.EQL:
+		case token.EQL: // ==
 			return result, nil
-		case token.NEQ:
+		case token.NEQ: // !=
 			return b.CreateNot(result, ""), nil
 		default:
-			return llvm.Value{}, b.makeError(pos, "unknown: binop on array: "+op.String())
+			return llvm.Value{}, b.makeError(pos, "unknown: binop on struct: "+op.String())
 		}
-	case *typecheck.Struct:
+	case *types.Struct:
+		// Compare each struct field and combine the result. From the spec:
+		//     Struct values are comparable if all their fields are comparable.
+		//     Two struct values are equal if their corresponding non-blank
+		//     fields are equal.
 		result := llvm.ConstInt(b.ctx.Int1Type(), 1, true)
 		for i := 0; i < typ.NumFields(); i++ {
 			if typ.Field(i).Name() == "_" {
+				// skip blank fields
 				continue
 			}
 			fieldType := typ.Field(i).Type()
 			xField := b.CreateExtractValue(x, i, "")
 			yField := b.CreateExtractValue(y, i, "")
-			fieldEqual, err := b.createBinOpTC(token.EQL, fieldType, fieldType, xField, yField, pos)
+			fieldEqual, err := b.createBinOp(token.EQL, fieldType, fieldType, xField, yField, pos)
 			if err != nil {
 				return llvm.Value{}, err
 			}
 			result = b.CreateAnd(result, fieldEqual, "")
 		}
 		switch op {
-		case token.EQL:
+		case token.EQL: // ==
 			return result, nil
-		case token.NEQ:
+		case token.NEQ: // !=
 			return b.CreateNot(result, ""), nil
 		default:
 			return llvm.Value{}, b.makeError(pos, "unknown: binop on struct: "+op.String())
@@ -2663,42 +3073,177 @@ func (b *builder) createBinOpTC(op token.Token, typ, ytyp typecheck.Type, x, y l
 	}
 }
 
+// createConst creates a LLVM constant value from a Go constant.
+func (c *compilerContext) createConst(expr *ssa.Const, pos token.Pos) llvm.Value {
+	switch typ := expr.Type().Underlying().(type) {
+	case *types.Basic:
+		llvmType := c.getLLVMType(typ)
+		if typ.Info()&types.IsBoolean != 0 {
+			n := uint64(0)
+			if constant.BoolVal(expr.Value) {
+				n = 1
+			}
+			return llvm.ConstInt(llvmType, n, false)
+		} else if typ.Info()&types.IsString != 0 {
+			str := constant.StringVal(expr.Value)
+			strLen := llvm.ConstInt(c.uintptrType, uint64(len(str)), false)
+			var strPtr llvm.Value
+			if str != "" {
+				objname := c.pkg.Path() + "$string"
+				globalType := llvm.ArrayType(c.ctx.Int8Type(), len(str))
+				global := llvm.AddGlobal(c.mod, globalType, objname)
+				global.SetInitializer(c.ctx.ConstString(str, false))
+				global.SetLinkage(llvm.InternalLinkage)
+				global.SetGlobalConstant(true)
+				global.SetUnnamedAddr(true)
+				global.SetAlignment(1)
+				if c.Debug {
+					// Unfortunately, expr.Pos() is always token.NoPos.
+					position := c.program.Fset.Position(pos)
+					diglobal := c.dibuilder.CreateGlobalVariableExpression(llvm.Metadata{}, llvm.DIGlobalVariableExpression{
+						File:        c.getDIFile(position.Filename),
+						Line:        position.Line,
+						Type:        c.getDIType(types.NewArray(types.Typ[types.Byte], int64(len(str)))),
+						LocalToUnit: true,
+						Expr:        c.dibuilder.CreateExpression(nil),
+					})
+					global.AddMetadata(0, diglobal)
+				}
+				zero := llvm.ConstInt(c.ctx.Int32Type(), 0, false)
+				strPtr = llvm.ConstInBoundsGEP(globalType, global, []llvm.Value{zero, zero})
+			} else {
+				strPtr = llvm.ConstNull(c.dataPtrType)
+			}
+			strObj := llvm.ConstNamedStruct(c.getLLVMRuntimeType("_string"), []llvm.Value{strPtr, strLen, strLen})
+			return strObj
+		} else if typ.Kind() == types.UnsafePointer {
+			if !expr.IsNil() {
+				value, _ := constant.Uint64Val(constant.ToInt(expr.Value))
+				return llvm.ConstIntToPtr(llvm.ConstInt(c.uintptrType, value, false), c.dataPtrType)
+			}
+			return llvm.ConstNull(c.dataPtrType)
+		} else if typ.Info()&types.IsUnsigned != 0 {
+			n, _ := constant.Uint64Val(constant.ToInt(expr.Value))
+			return llvm.ConstInt(llvmType, n, false)
+		} else if typ.Info()&types.IsInteger != 0 { // signed
+			n, _ := constant.Int64Val(constant.ToInt(expr.Value))
+			return llvm.ConstInt(llvmType, uint64(n), true)
+		} else if typ.Info()&types.IsFloat != 0 {
+			n, _ := constant.Float64Val(expr.Value)
+			return llvm.ConstFloat(llvmType, n)
+		} else if typ.Kind() == types.Complex64 {
+			r := c.createConst(ssa.NewConst(constant.Real(expr.Value), types.Typ[types.Float32]), pos)
+			i := c.createConst(ssa.NewConst(constant.Imag(expr.Value), types.Typ[types.Float32]), pos)
+			cplx := llvm.Undef(c.ctx.StructType([]llvm.Type{c.ctx.FloatType(), c.ctx.FloatType()}, false))
+			cplx = c.builder.CreateInsertValue(cplx, r, 0, "")
+			cplx = c.builder.CreateInsertValue(cplx, i, 1, "")
+			return cplx
+		} else if typ.Kind() == types.Complex128 {
+			r := c.createConst(ssa.NewConst(constant.Real(expr.Value), types.Typ[types.Float64]), pos)
+			i := c.createConst(ssa.NewConst(constant.Imag(expr.Value), types.Typ[types.Float64]), pos)
+			cplx := llvm.Undef(c.ctx.StructType([]llvm.Type{c.ctx.DoubleType(), c.ctx.DoubleType()}, false))
+			cplx = c.builder.CreateInsertValue(cplx, r, 0, "")
+			cplx = c.builder.CreateInsertValue(cplx, i, 1, "")
+			return cplx
+		} else {
+			panic("unknown constant of basic type: " + expr.String())
+		}
+	case *types.Chan:
+		if expr.Value != nil {
+			panic("expected nil chan constant")
+		}
+		return llvm.ConstNull(c.getLLVMType(expr.Type()))
+	case *types.Signature:
+		if expr.Value != nil {
+			panic("expected nil signature constant")
+		}
+		return llvm.ConstNull(c.getLLVMType(expr.Type()))
+	case *types.Interface:
+		if expr.Value != nil {
+			panic("expected nil interface constant")
+		}
+		// Create a generic nil interface with no dynamic type (typecode=0).
+		fields := []llvm.Value{
+			llvm.ConstInt(c.uintptrType, 0, false),
+			llvm.ConstPointerNull(c.dataPtrType),
+		}
+		return llvm.ConstNamedStruct(c.getLLVMRuntimeType("_interface"), fields)
+	case *types.Pointer:
+		if expr.Value != nil {
+			panic("expected nil pointer constant")
+		}
+		return llvm.ConstPointerNull(c.getLLVMType(typ))
+	case *types.Array:
+		if expr.Value != nil {
+			panic("expected nil array constant")
+		}
+		return llvm.ConstNull(c.getLLVMType(expr.Type()))
+	case *types.Slice:
+		if expr.Value != nil {
+			panic("expected nil slice constant")
+		}
+		// Moxie: use ConstNull with correct type (named for []byte).
+		return llvm.ConstNull(c.getLLVMType(expr.Type()))
+	case *types.Struct:
+		if expr.Value != nil {
+			panic("expected nil struct constant")
+		}
+		return llvm.ConstNull(c.getLLVMType(expr.Type()))
+	case *types.Map:
+		if !expr.IsNil() {
+			// I believe this is not allowed by the Go spec.
+			panic("non-nil map constant")
+		}
+		llvmType := c.getLLVMType(typ)
+		return llvm.ConstNull(llvmType)
+	default:
+		panic("unknown constant: " + expr.String())
+	}
+}
+
 // createConvert creates a Go type conversion instruction.
-
-func (b *builder) createConvertTC(typeFrom, typeTo typecheck.Type, value llvm.Value, pos token.Pos) (llvm.Value, error) {
+func (b *builder) createConvert(typeFrom, typeTo types.Type, value llvm.Value, pos token.Pos) (llvm.Value, error) {
 	llvmTypeFrom := value.Type()
-	llvmTypeTo := b.getLLVMTypeTC(typeTo)
+	llvmTypeTo := b.getLLVMType(typeTo)
 
-	isPtrFrom := isPointerTC(typeFrom.Underlying())
-	isPtrTo := isPointerTC(typeTo.Underlying())
+	// Conversion between unsafe.Pointer and uintptr.
+	isPtrFrom := isPointer(typeFrom.Underlying())
+	isPtrTo := isPointer(typeTo.Underlying())
 	if isPtrFrom && !isPtrTo {
 		return b.CreatePtrToInt(value, llvmTypeTo, ""), nil
 	} else if !isPtrFrom && isPtrTo {
 		return b.CreateIntToPtr(value, llvmTypeTo, ""), nil
 	}
 
+	// Conversion between pointers and unsafe.Pointer.
 	if isPtrFrom && isPtrTo {
 		return value, nil
 	}
 
 	switch typeTo := typeTo.Underlying().(type) {
-	case *typecheck.Basic:
+	case *types.Basic:
 		sizeFrom := b.targetData.TypeAllocSize(llvmTypeFrom)
 
-		if typeTo.Info()&typecheck.IsString != 0 {
+		if typeTo.Info()&types.IsString != 0 {
 			switch typeFrom := typeFrom.Underlying().(type) {
-			case *typecheck.Basic:
+			case *types.Basic:
+				// Assume a Unicode code point, as that is the only possible
+				// value here.
+				// Cast to an i32 value as expected by
+				// runtime.stringFromUnicode.
 				if sizeFrom > 4 {
 					value = b.CreateTrunc(value, b.ctx.Int32Type(), "")
-				} else if sizeFrom < 4 && typeTo.Info()&typecheck.IsUnsigned != 0 {
+				} else if sizeFrom < 4 && typeTo.Info()&types.IsUnsigned != 0 {
 					value = b.CreateZExt(value, b.ctx.Int32Type(), "")
 				} else if sizeFrom < 4 {
 					value = b.CreateSExt(value, b.ctx.Int32Type(), "")
 				}
 				return b.createRuntimeCall("stringFromUnicode", []llvm.Value{value}, ""), nil
-			case *typecheck.Slice:
-				switch typeFrom.Elem().(*typecheck.Basic).Kind() {
-				case typecheck.Uint8:
+			case *types.Slice:
+				switch typeFrom.Elem().(*types.Basic).Kind() {
+				case types.Byte:
+					// Moxie: string and []byte have identical 3-word layout.
+					// No allocation or copy — just repack fields for LLVM type compatibility.
 					ptr := b.CreateExtractValue(value, 0, "")
 					ln := b.CreateExtractValue(value, 1, "")
 					cp := b.CreateExtractValue(value, 2, "")
@@ -2707,7 +3252,7 @@ func (b *builder) createConvertTC(typeFrom, typeTo typecheck.Type, value llvm.Va
 					str = b.CreateInsertValue(str, ln, 1, "")
 					str = b.CreateInsertValue(str, cp, 2, "")
 					return str, nil
-				case typecheck.Int32:
+				case types.Rune:
 					return b.createRuntimeCall("stringFromRunes", []llvm.Value{value}, ""), nil
 				default:
 					return llvm.Value{}, b.makeError(pos, "todo: convert to string: "+typeFrom.String())
@@ -2717,20 +3262,22 @@ func (b *builder) createConvertTC(typeFrom, typeTo typecheck.Type, value llvm.Va
 			}
 		}
 
-		typeFrom := typeFrom.Underlying().(*typecheck.Basic)
+		typeFrom := typeFrom.Underlying().(*types.Basic)
 		sizeTo := b.targetData.TypeAllocSize(llvmTypeTo)
 
-		if typeFrom.Info()&typecheck.IsInteger != 0 && typeTo.Info()&typecheck.IsInteger != 0 {
+		if typeFrom.Info()&types.IsInteger != 0 && typeTo.Info()&types.IsInteger != 0 {
+			// Conversion between two integers.
 			if sizeFrom > sizeTo {
 				return b.CreateTrunc(value, llvmTypeTo, ""), nil
-			} else if typeFrom.Info()&typecheck.IsUnsigned != 0 {
+			} else if typeFrom.Info()&types.IsUnsigned != 0 { // if unsigned
 				return b.CreateZExt(value, llvmTypeTo, ""), nil
-			} else {
+			} else { // if signed
 				return b.CreateSExt(value, llvmTypeTo, ""), nil
 			}
 		}
 
-		if typeFrom.Info()&typecheck.IsFloat != 0 && typeTo.Info()&typecheck.IsFloat != 0 {
+		if typeFrom.Info()&types.IsFloat != 0 && typeTo.Info()&types.IsFloat != 0 {
+			// Conversion between two floats.
 			if sizeFrom > sizeTo {
 				return b.CreateFPTrunc(value, llvmTypeTo, ""), nil
 			} else if sizeFrom < sizeTo {
@@ -2740,81 +3287,137 @@ func (b *builder) createConvertTC(typeFrom, typeTo typecheck.Type, value llvm.Va
 			}
 		}
 
-		if typeFrom.Info()&typecheck.IsFloat != 0 && typeTo.Info()&typecheck.IsInteger != 0 {
+		if typeFrom.Info()&types.IsFloat != 0 && typeTo.Info()&types.IsInteger != 0 {
+			// Conversion from float to int.
+			// Passing an out-of-bounds float to LLVM would cause UB, so that UB is trapped by select instructions.
+			// The Go specification says that this should be implementation-defined behavior.
+			// This implements saturating behavior, except that NaN is mapped to the minimum value.
 			var significandBits int
 			switch typeFrom.Kind() {
-			case typecheck.Float32:
+			case types.Float32:
 				significandBits = 23
-			case typecheck.Float64:
+			case types.Float64:
 				significandBits = 52
 			}
-			if typeTo.Info()&typecheck.IsUnsigned != 0 {
+			if typeTo.Info()&types.IsUnsigned != 0 { // if unsigned
+				// Select the maximum value for this unsigned integer type.
 				max := ^(^uint64(0) << uint(llvmTypeTo.IntTypeWidth()))
 				maxFloat := float64(max)
 				if bits.Len64(max) > significandBits {
+					// Round the max down to fit within the significand.
 					maxFloat = float64(max & (^uint64(0) << uint(bits.Len64(max)-significandBits)))
 				}
+
+				// Check if the value is in-bounds (0 <= value <= max).
 				positive := b.CreateFCmp(llvm.FloatOLE, llvm.ConstNull(llvmTypeFrom), value, "positive")
 				withinMax := b.CreateFCmp(llvm.FloatOLE, value, llvm.ConstFloat(llvmTypeFrom, maxFloat), "withinmax")
 				inBounds := b.CreateAnd(positive, withinMax, "inbounds")
+
+				// Assuming that the value is out-of-bounds, select a saturated value.
 				saturated := b.CreateSelect(positive,
-					llvm.ConstInt(llvmTypeTo, max, false),
-					llvm.ConstNull(llvmTypeTo),
+					llvm.ConstInt(llvmTypeTo, max, false), // value > max
+					llvm.ConstNull(llvmTypeTo),            // value < 0 (or NaN)
 					"saturated",
 				)
+
+				// Do a normal conversion.
 				normal := b.CreateFPToUI(value, llvmTypeTo, "normal")
+
 				return b.CreateSelect(inBounds, normal, saturated, ""), nil
-			} else {
+			} else { // if signed
+				// Select the minimum value for this signed integer type.
 				min := uint64(1) << uint(llvmTypeTo.IntTypeWidth()-1)
 				minFloat := -float64(min)
+
+				// Select the maximum value for this signed integer type.
 				max := ^(^uint64(0) << uint(llvmTypeTo.IntTypeWidth()-1))
 				maxFloat := float64(max)
 				if bits.Len64(max) > significandBits {
+					// Round the max down to fit within the significand.
 					maxFloat = float64(max & (^uint64(0) << uint(bits.Len64(max)-significandBits)))
 				}
+
+				// Check if the value is in-bounds (min <= value <= max).
 				aboveMin := b.CreateFCmp(llvm.FloatOLE, llvm.ConstFloat(llvmTypeFrom, minFloat), value, "abovemin")
 				belowMax := b.CreateFCmp(llvm.FloatOLE, value, llvm.ConstFloat(llvmTypeFrom, maxFloat), "belowmax")
 				inBounds := b.CreateAnd(aboveMin, belowMax, "inbounds")
+
+				// Assuming that the value is out-of-bounds, select a saturated value.
 				saturated := b.CreateSelect(aboveMin,
-					llvm.ConstInt(llvmTypeTo, max, false),
-					llvm.ConstInt(llvmTypeTo, min, false),
+					llvm.ConstInt(llvmTypeTo, max, false), // value > max
+					llvm.ConstInt(llvmTypeTo, min, false), // value < min
 					"saturated",
 				)
+
+				// Map NaN to 0.
 				saturated = b.CreateSelect(b.CreateFCmp(llvm.FloatUNO, value, value, "isnan"),
 					llvm.ConstNull(llvmTypeTo),
 					saturated,
 					"remapped",
 				)
+
+				// Do a normal conversion.
 				normal := b.CreateFPToSI(value, llvmTypeTo, "normal")
+
 				return b.CreateSelect(inBounds, normal, saturated, ""), nil
 			}
 		}
 
-		if typeFrom.Info()&typecheck.IsInteger != 0 && typeTo.Info()&typecheck.IsFloat != 0 {
-			if typeFrom.Info()&typecheck.IsUnsigned != 0 {
+		if typeFrom.Info()&types.IsInteger != 0 && typeTo.Info()&types.IsFloat != 0 {
+			// Conversion from int to float.
+			if typeFrom.Info()&types.IsUnsigned != 0 { // if unsigned
 				return b.CreateUIToFP(value, llvmTypeTo, ""), nil
+			} else { // if signed
+				return b.CreateSIToFP(value, llvmTypeTo, ""), nil
 			}
-			return b.CreateSIToFP(value, llvmTypeTo, ""), nil
+		}
+
+		if typeFrom.Kind() == types.Complex128 && typeTo.Kind() == types.Complex64 {
+			// Conversion from complex128 to complex64.
+			r := b.CreateExtractValue(value, 0, "real.f64")
+			i := b.CreateExtractValue(value, 1, "imag.f64")
+			r = b.CreateFPTrunc(r, b.ctx.FloatType(), "real.f32")
+			i = b.CreateFPTrunc(i, b.ctx.FloatType(), "imag.f32")
+			cplx := llvm.Undef(b.ctx.StructType([]llvm.Type{b.ctx.FloatType(), b.ctx.FloatType()}, false))
+			cplx = b.CreateInsertValue(cplx, r, 0, "")
+			cplx = b.CreateInsertValue(cplx, i, 1, "")
+			return cplx, nil
+		}
+
+		if typeFrom.Kind() == types.Complex64 && typeTo.Kind() == types.Complex128 {
+			// Conversion from complex64 to complex128.
+			r := b.CreateExtractValue(value, 0, "real.f32")
+			i := b.CreateExtractValue(value, 1, "imag.f32")
+			r = b.CreateFPExt(r, b.ctx.DoubleType(), "real.f64")
+			i = b.CreateFPExt(i, b.ctx.DoubleType(), "imag.f64")
+			cplx := llvm.Undef(b.ctx.StructType([]llvm.Type{b.ctx.DoubleType(), b.ctx.DoubleType()}, false))
+			cplx = b.CreateInsertValue(cplx, r, 0, "")
+			cplx = b.CreateInsertValue(cplx, i, 1, "")
+			return cplx, nil
 		}
 
 		return llvm.Value{}, b.makeError(pos, "todo: convert: basic non-integer type: "+typeFrom.String()+" -> "+typeTo.String())
 
-	case *typecheck.Slice:
-		if !isStringLikeTC(typeFrom.Underlying()) {
+	case *types.Slice:
+		// Moxie: allow conversion from string or []byte (string=[]byte).
+		if !isStringLike(typeFrom.Underlying()) {
 			panic("can only convert from a string/[]byte to a slice")
 		}
-		elemType := typeTo.Elem().Underlying().(*typecheck.Basic)
+
+		elemType := typeTo.Elem().Underlying().(*types.Basic) // must be byte or rune
 		switch elemType.Kind() {
-		case typecheck.Uint8:
+		case types.Byte:
+			// Moxie: string and []byte have identical 3-word layout.
+			// No allocation or copy — just repack fields for LLVM type compatibility.
 			ptr := b.CreateExtractValue(value, 0, "")
 			ln := b.CreateExtractValue(value, 1, "")
 			cp := b.CreateExtractValue(value, 2, "")
-			slice := llvm.Undef(b.getLLVMTypeTC(typeTo))
+			slice := llvm.Undef(b.getLLVMType(typeTo))
 			slice = b.CreateInsertValue(slice, ptr, 0, "")
 			slice = b.CreateInsertValue(slice, ln, 1, "")
 			slice = b.CreateInsertValue(slice, cp, 2, "")
 			return slice, nil
-		case typecheck.Int32:
+		case types.Rune:
 			return b.createRuntimeCall("stringToRunes", []llvm.Value{value}, ""), nil
 		default:
 			panic("unexpected type in string to slice conversion")
@@ -2826,81 +3429,67 @@ func (b *builder) createConvertTC(typeFrom, typeTo typecheck.Type, value llvm.Va
 }
 
 // createUnOp creates LLVM IR for a given Go unary operation.
+// Most unary operators are pretty simple, such as the not and minus operator
+// which can all be directly lowered to IR. However, there is also the channel
 // receive operator which is handled in the runtime directly.
-
-func (b *builder) createUnOpTC(unop *mxssa.UnOp) (llvm.Value, error) {
-	x := b.getValueTC(unop.X, unop.Pos())
+func (b *builder) createUnOp(unop *ssa.UnOp) (llvm.Value, error) {
+	x := b.getValue(unop.X, getPos(unop))
 	switch unop.Op {
-	case token.NOT:
+	case token.NOT: // !x
 		return b.CreateNot(x, ""), nil
-	case token.SUB:
-		if typ, ok := unop.X.Type().Underlying().(*typecheck.Basic); ok {
-			if typ.Info()&typecheck.IsInteger != 0 {
+	case token.SUB: // -x
+		if typ, ok := unop.X.Type().Underlying().(*types.Basic); ok {
+			if typ.Info()&types.IsInteger != 0 {
 				return b.CreateSub(llvm.ConstInt(x.Type(), 0, false), x, ""), nil
-			} else if typ.Info()&typecheck.IsFloat != 0 {
+			} else if typ.Info()&types.IsFloat != 0 {
 				return b.CreateFNeg(x, ""), nil
+			} else if typ.Info()&types.IsComplex != 0 {
+				// Negate both components of the complex number.
+				r := b.CreateExtractValue(x, 0, "r")
+				i := b.CreateExtractValue(x, 1, "i")
+				r = b.CreateFNeg(r, "")
+				i = b.CreateFNeg(i, "")
+				cplx := llvm.Undef(x.Type())
+				cplx = b.CreateInsertValue(cplx, r, 0, "")
+				cplx = b.CreateInsertValue(cplx, i, 1, "")
+				return cplx, nil
 			} else {
 				return llvm.Value{}, b.makeError(unop.Pos(), "todo: unknown basic type for negate: "+typ.String())
 			}
 		} else {
 			return llvm.Value{}, b.makeError(unop.Pos(), "todo: unknown type for negate: "+unop.X.Type().Underlying().String())
 		}
-	case token.MUL:
-		valueType := b.getLLVMTypeTC(unop.X.Type().Underlying().(*typecheck.Pointer).Elem())
+	case token.MUL: // *x, dereference pointer
+		valueType := b.getLLVMType(unop.X.Type().Underlying().(*types.Pointer).Elem())
 		if b.targetData.TypeAllocSize(valueType) == 0 {
+			// zero-length data
 			return llvm.ConstNull(valueType), nil
-		} else if g, ok := unop.X.(*mxssa.Global); ok && strings.HasSuffix(g.Name(), "$funcaddr") {
-			name := strings.TrimSuffix(g.Name(), "$funcaddr")
-			pkg := b.mxFn.Pkg
-			fn := pkg.Members[name].(*mxssa.Function)
-			_, fnVal := b.getFunction(fn)
-			if fnVal.IsNil() {
+		} else if strings.HasSuffix(unop.X.String(), "$funcaddr") {
+			// CGo function pointer. The cgo part has rewritten CGo function
+			// pointers as stub global variables of the form:
+			//     var C.add unsafe.Pointer
+			// Instead of a load from the global, create a bitcast of the
+			// function pointer itself.
+			name := strings.TrimSuffix(unop.X.(*ssa.Global).Name(), "$funcaddr")
+			pkg := b.fn.Pkg
+			if pkg == nil {
+				pkg = b.fn.Origin().Pkg
+			}
+			_, fn := b.getFunction(pkg.Members[name].(*ssa.Function))
+			if fn.IsNil() {
 				return llvm.Value{}, b.makeError(unop.Pos(), "cgo function not found: "+name)
 			}
-			return fnVal, nil
+			return fn, nil
 		} else {
-			b.createNilCheckTC(unop.X, x, "deref")
+			b.createNilCheck(unop.X, x, "deref")
 			load := b.CreateLoad(valueType, x, "")
 			return load, nil
 		}
-	case token.XOR:
+	case token.XOR: // ^x, toggle all bits in integer
 		return b.CreateXor(x, llvm.ConstInt(x.Type(), ^uint64(0), false), ""), nil
-	case token.ARROW:
-		return b.createChanRecvTC(unop), nil
+	case token.ARROW: // <-x, receive from channel
+		return b.createChanRecv(unop), nil
 	default:
 		return llvm.Value{}, b.makeError(unop.Pos(), "todo: unknown unop")
-	}
-}
-
-// isStringLike reports whether t is string or []byte (Moxie: string=[]byte).
-func isStringLike(t types.Type) bool {
-	switch t := t.(type) {
-	case *types.Basic:
-		return t.Info()&types.IsString != 0
-	case *types.Slice:
-		if b, ok := t.Elem().(*types.Basic); ok && b.Kind() == types.Byte {
-			return true
-		}
-	}
-	return false
-}
-
-func hashmapIsBinaryKey(keyType types.Type) bool {
-	switch keyType := keyType.Underlying().(type) {
-	case *types.Basic:
-		return keyType.Info()&(types.IsBoolean|types.IsInteger) != 0
-	case *types.Pointer:
-		return true
-	case *types.Struct:
-		for i := 0; i < keyType.NumFields(); i++ {
-			if !hashmapIsBinaryKey(keyType.Field(i).Type().Underlying()) {
-				return false
-			}
-		}
-		return true
-	case *types.Array:
-		return hashmapIsBinaryKey(keyType.Elem())
-	default:
-		return false
 	}
 }

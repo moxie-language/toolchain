@@ -3,7 +3,7 @@
 // or in a regular page context and uses the appropriate APIs.
 //
 // Extension:  browser.storage.local, browser.runtime.onMessage
-// In-page:    IndexedDB (persistent), direct handler dispatch
+// In-page:    localStorage (prefixed), direct handler dispatch
 
 var _isExt = typeof browser !== 'undefined'
   && !!browser.runtime && !!browser.runtime.onMessage;
@@ -17,64 +17,6 @@ function _signalReady() {
   if (_readyResolve) { _readyResolve(); _readyResolve = null; }
 }
 
-// --- IDB helpers (in-page storage) ---
-
-var _idb = null;
-var _idbReady = null;
-
-function _openIDB() {
-  if (_idbReady) return _idbReady;
-  _idbReady = new Promise(function(resolve) {
-    try {
-      var req = indexedDB.open('smesh-signer', 1);
-      req.onupgradeneeded = function(e) {
-        var db = e.target.result;
-        if (!db.objectStoreNames.contains('kv')) {
-          db.createObjectStore('kv');
-        }
-      };
-      req.onsuccess = function(e) {
-        _idb = e.target.result;
-        resolve(_idb);
-      };
-      req.onerror = function() { resolve(null); };
-    } catch(e) { resolve(null); }
-  });
-  return _idbReady;
-}
-
-function _idbGet(key, fn) {
-  _openIDB().then(function(db) {
-    if (!db) { fn(''); return; }
-    try {
-      var tx = db.transaction('kv', 'readonly');
-      var req = tx.objectStore('kv').get(key);
-      req.onsuccess = function() { fn(req.result || ''); };
-      req.onerror = function() { fn(''); };
-    } catch(e) { fn(''); }
-  });
-}
-
-function _idbSet(key, value) {
-  _openIDB().then(function(db) {
-    if (!db) return;
-    try {
-      var tx = db.transaction('kv', 'readwrite');
-      tx.objectStore('kv').put(value, key);
-    } catch(e) {}
-  });
-}
-
-function _idbRemove(key) {
-  _openIDB().then(function(db) {
-    if (!db) return;
-    try {
-      var tx = db.transaction('kv', 'readwrite');
-      tx.objectStore('kv').delete(key);
-    } catch(e) {}
-  });
-}
-
 // --- Storage ---
 
 export function StorageGet(key, fn) {
@@ -83,17 +25,7 @@ export function StorageGet(key, fn) {
       fn(result[key] || '');
     }).catch(function() { fn(''); });
   } else {
-    _idbGet(_prefix + key, function(val) {
-      if (val) { fn(val); return; }
-      var ls = null;
-      try { ls = localStorage.getItem(_prefix + key); } catch(e) {}
-      if (ls) {
-        _idbSet(_prefix + key, ls);
-        fn(ls);
-      } else {
-        fn('');
-      }
-    });
+    fn(localStorage.getItem(_prefix + key) || '');
   }
 }
 
@@ -101,8 +33,7 @@ export function StorageSet(key, value) {
   if (_isExt) {
     browser.storage.local.set({ [key]: value });
   } else {
-    _idbSet(_prefix + key, value);
-    try { localStorage.setItem(_prefix + key, value); } catch(e) {}
+    localStorage.setItem(_prefix + key, value);
   }
 }
 
@@ -110,7 +41,6 @@ export function StorageRemove(key) {
   if (_isExt) {
     browser.storage.local.remove(key);
   } else {
-    _idbRemove(_prefix + key);
     localStorage.removeItem(_prefix + key);
   }
 }

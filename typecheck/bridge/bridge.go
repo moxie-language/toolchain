@@ -17,18 +17,16 @@ import (
 // Importer wraps a go/types package map and satisfies typecheck.Importer.
 // Each package is translated lazily and cached.
 type Importer struct {
-	mu        sync.Mutex
-	pkgs      map[string]*types.Package // import path → go/types Package
-	cache     map[string]*typecheck.Package
-	typeCache *typeCache // global type cache for pointer identity across calls
+	mu    sync.Mutex
+	pkgs  map[string]*types.Package // import path → go/types Package
+	cache map[string]*typecheck.Package
 }
 
 // New returns an Importer pre-loaded with the given package map.
 func New(pkgs map[string]*types.Package) *Importer {
 	return &Importer{
-		pkgs:      pkgs,
-		cache:     map[string]*typecheck.Package{},
-		typeCache: newTypeCache(),
+		pkgs:  pkgs,
+		cache: map[string]*typecheck.Package{},
 	}
 }
 
@@ -85,18 +83,6 @@ func translatePackage(gp *types.Package, imp *Importer) *typecheck.Package {
 	}
 	p.MarkComplete()
 	return p
-}
-
-// TranslateType converts a go/types.Type to a typecheck.Type using imp's global cache.
-// Using the importer's global typeCache ensures the same go/types.Type always
-// maps to the same typecheck.Type pointer, keeping revTypes consistent.
-func TranslateType(imp *Importer, t types.Type) typecheck.Type {
-	return translateType(t, imp.typeCache, imp)
-}
-
-// TranslateObject converts a go/types.Object to a typecheck.Object.
-func TranslateObject(imp *Importer, obj types.Object) typecheck.Object {
-	return translateObject(obj, nil, newTypeCache(), imp)
 }
 
 func translateObject(obj types.Object, pkg *typecheck.Package, cache *typeCache, imp *Importer) typecheck.Object {
@@ -213,16 +199,7 @@ func translateType(t types.Type, cache *typeCache, imp *Importer) typecheck.Type
 
 	case *types.Named:
 		// Reserve a slot in the cache before recursing to handle cycles.
-		// Pass the package so Named.String() returns the qualified name
-		// (e.g. "encoding/base64.Encoding") matching go/types convention.
-		// Don't call imp.Import here — that holds imp.mu while
-		// translatePackage recurses, leading to deadlock; use NewPackage
-		// directly. The Importer's cache will dedupe on later lookups.
-		var tcPkg *typecheck.Package
-		if t.Obj().Pkg() != nil {
-			tcPkg = typecheck.NewPackage(t.Obj().Pkg().Path(), t.Obj().Pkg().Name())
-		}
-		obj := typecheck.NewTypeName(tcPkg, t.Obj().Name(), nil)
+		obj := typecheck.NewTypeName(nil, t.Obj().Name(), nil)
 		named := typecheck.NewNamed(obj, nil)
 		cache.m[typePtr(t)] = named
 		underlying := translateType(t.Underlying(), cache, imp)
@@ -238,9 +215,6 @@ func translateType(t types.Type, cache *typeCache, imp *Importer) typecheck.Type
 	case *types.TypeParam:
 		obj := typecheck.NewTypeName(nil, t.Obj().Name(), nil)
 		return typecheck.NewTypeParam(obj, nil)
-
-	case *types.Tuple:
-		return translateTuple(t, cache, imp)
 
 	case *types.Alias:
 		return translateType(types.Unalias(t), cache, imp)
