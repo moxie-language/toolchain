@@ -818,12 +818,24 @@ export function IDBSetEncKey(hexKey) {
 // IndexedDB (simple key-value).
 let _idb = null;
 const _idbName = 'smesh-kv';
-const _idbStores = ['profiles', 'events', 'cache'];
+const _idbStores = ['profiles', 'events', 'cache', 'settings'];
+
+// Coerce a value (JS string or moxiejs []byte Slice) to a native JS string.
+// IDB requires native strings for store names and keys; Slice objects fail.
+function _idbStr(v) {
+  if (typeof v === 'string') return v;
+  if (v && typeof v.$length === 'number' && v.$array) {
+    const bytes = new Uint8Array(v.$length);
+    for (let i = 0; i < v.$length; i++) bytes[i] = v.$array[v.$offset + i];
+    return new TextDecoder().decode(bytes);
+  }
+  return String(v);
+}
 
 function _openIDB() {
   return new Promise(function(resolve, reject) {
     if (_idb) { resolve(_idb); return; }
-    const req = indexedDB.open(_idbName, 1);
+    const req = indexedDB.open(_idbName, 2);
     req.onupgradeneeded = function(e) {
       const db = e.target.result;
       for (const s of _idbStores) {
@@ -836,9 +848,10 @@ function _openIDB() {
 }
 
 export function IDBGet(store, key, fn) {
+  const s = _idbStr(store), k = _idbStr(key);
   _openIDB().then(function(db) {
-    const tx = db.transaction(store, 'readonly');
-    const req = tx.objectStore(store).get(key);
+    const tx = db.transaction(s, 'readonly');
+    const req = tx.objectStore(s).get(k);
     req.onsuccess = function() {
       const raw = req.result ?? '';
       fn(_encHasKey() ? openStr(raw) : raw);
@@ -848,17 +861,19 @@ export function IDBGet(store, key, fn) {
 }
 
 export function IDBPut(store, key, value) {
+  const s = _idbStr(store), k = _idbStr(key);
   _openIDB().then(function(db) {
-    const tx = db.transaction(store, 'readwrite');
+    const tx = db.transaction(s, 'readwrite');
     const v = _encHasKey() ? sealStr('' + value) : value;
-    tx.objectStore(store).put(v, key);
+    tx.objectStore(s).put(v, k);
   });
 }
 
 export function IDBGetAll(store, fn, done) {
+  const s = _idbStr(store);
   _openIDB().then(function(db) {
-    const tx = db.transaction(store, 'readonly');
-    const req = tx.objectStore(store).openCursor();
+    const tx = db.transaction(s, 'readonly');
+    const req = tx.objectStore(s).openCursor();
     req.onsuccess = function(e) {
       const cursor = e.target.result;
       if (cursor) {
