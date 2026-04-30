@@ -566,6 +566,17 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			}
 
 			if config.Options.PrintIR {
+				// Run interface lowering before printing so the IR
+				// includes dispatch stubs and resolved type IDs.
+				// Skip globaldce to preserve all symbols for archive linking.
+				err := transform.LowerInterfaces(mod, config)
+				if err != nil {
+					return err
+				}
+				errs := transform.LowerInterrupts(mod)
+				if len(errs) > 0 {
+					return errs[0]
+				}
 				fmt.Println("; Generated LLVM IR:")
 				fmt.Println(mod.String())
 			}
