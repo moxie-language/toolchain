@@ -38,8 +38,28 @@ func extractIR(pkgName, outdir string) error {
 		return err
 	}
 
-	moxieRoot := goenv.Get("MOXIEROOT")
-	modSrc := fmt.Sprintf("module mxcorpus_wrap\n\ngo 1.25.0\n\nreplace %s => %s/src/%s\n", pkgName, moxieRoot, pkgName)
+	var modSrc string
+	if flagModDir != "" {
+		modFile := filepath.Join(flagModDir, "moxie.mod")
+		modData, err := os.ReadFile(modFile)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", modFile, err)
+		}
+		var modName string
+		for _, line := range strings.Split(string(modData), "\n") {
+			if strings.HasPrefix(line, "module ") {
+				modName = strings.TrimSpace(line[7:])
+				break
+			}
+		}
+		if modName == "" {
+			return fmt.Errorf("no module name in %s", modFile)
+		}
+		modSrc = fmt.Sprintf("module mxcorpus_wrap\n\ngo 1.25.0\n\nreplace %s => %s\n", modName, flagModDir)
+	} else {
+		moxieRoot := goenv.Get("MOXIEROOT")
+		modSrc = fmt.Sprintf("module mxcorpus_wrap\n\ngo 1.25.0\n\nreplace %s => %s/src/%s\n", pkgName, moxieRoot, pkgName)
+	}
 	if err := os.WriteFile(wrapMod, []byte(modSrc), 0644); err != nil {
 		return err
 	}

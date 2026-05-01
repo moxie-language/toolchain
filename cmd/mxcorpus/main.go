@@ -31,12 +31,14 @@ import (
 var (
 	flagVerify bool
 	flagIR     string
+	flagModDir string
 )
 
 func main() {
 	outdir := flag.String("o", "corpus", "output directory")
 	flag.BoolVar(&flagVerify, "verify", false, "verify segment concatenation")
 	flag.StringVar(&flagIR, "ir", "", "generate IR for this import path (e.g. unicode/utf8)")
+	flag.StringVar(&flagModDir, "moddir", "", "module root directory for non-stdlib packages")
 	flag.Parse()
 
 	// AST extraction from directories.
@@ -77,12 +79,10 @@ func main() {
 			os.Exit(1)
 		}
 		if err := extractBIN(pkgDir); err != nil {
-			fmt.Fprintf(os.Stderr, "bin: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "bin: %v (non-fatal)\n", err)
 		}
 		if err := extractLineInfo(pkgDir); err != nil {
-			fmt.Fprintf(os.Stderr, "lineinfo: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "lineinfo: %v (non-fatal)\n", err)
 		}
 		if err := enrichManifest(flagIR, pkgDir); err != nil {
 			fmt.Fprintf(os.Stderr, "pair: %v\n", err)

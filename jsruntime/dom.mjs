@@ -441,6 +441,8 @@ export function RemoveEventListener(elId, event, callbackId) {
   if (el && cb) el.removeEventListener(event, cb);
 }
 
+export function getElement(id) { return _elements.get(id); }
+
 // Register a Go function as a JS callback. Returns callback ID.
 export function RegisterCallback(fn) {
   const id = _nextCb++;
