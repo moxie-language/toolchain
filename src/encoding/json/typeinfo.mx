@@ -1,0 +1,349 @@
+package json
+
+import "unsafe"
+
+type jKind uint8
+
+const (
+	jkInvalid jKind = iota
+	jkBool
+	jkInt
+	jkInt8
+	jkInt16
+	jkInt32
+	jkInt64
+	jkUint
+	jkUint8
+	jkUint16
+	jkUint32
+	jkUint64
+	jkUintptr
+	jkFloat32
+	jkFloat64
+	jkComplex64
+	jkComplex128
+	jkBytes // 17: unified string=[]byte
+	jkUnsafePointer
+	jkChan
+	jkInterface
+	jkPointer
+	jkSlice
+	jkArray
+	jkFunc
+	jkMap
+	jkStruct
+)
+
+const (
+	_kindMask  = 31
+	_flagNamed = 32
+)
+
+const (
+	_sfAnonymous = 1 << iota
+	_sfHasTag
+	_sfExported
+)
+
+type _ifacePair struct {
+	typecode unsafe.Pointer
+	value    unsafe.Pointer
+}
+
+type _rawType struct {
+	meta uint8
+}
+
+type _elemType struct {
+	_rawType
+	numMethod uint16
+	ptrTo     *_rawType
+	elem      *_rawType
+}
+
+type _ptrType struct {
+	_rawType
+	numMethod uint16
+	elem      *_rawType
+}
+
+type _structType struct {
+	_rawType
+	numMethod uint16
+	ptrTo     *_rawType
+	pkgpath   *byte
+	size      uint32
+	numField  uint16
+	fields    [1]_structFieldDesc
+}
+
+type _structFieldDesc struct {
+	fieldType *_rawType
+	data      unsafe.Pointer
+}
+
+type _sliceHeader struct {
+	data unsafe.Pointer
+	len  int
+	cap  int
+}
+
+func (t *_rawType) kind() jKind {
+	if t == nil {
+		return jkInvalid
+	}
+	if uintptr(unsafe.Pointer(t))&0b11 != 0 {
+		return jkPointer
+	}
+	return jKind(t.meta & _kindMask)
+}
+
+func (t *_rawType) isNamed() bool {
+	if uintptr(unsafe.Pointer(t))&0b11 != 0 {
+		return false
+	}
+	return t.meta&_flagNamed != 0
+}
+
+func (t *_rawType) underlying() *_rawType {
+	if t.isNamed() {
+		return (*_elemType)(unsafe.Pointer(t)).elem
+	}
+	return t
+}
+
+func (t *_rawType) size() uintptr {
+	switch t.kind() {
+	case jkBool, jkInt8, jkUint8:
+		return 1
+	case jkInt16, jkUint16:
+		return 2
+	case jkInt32, jkUint32, jkFloat32:
+		return 4
+	case jkInt64, jkUint64, jkFloat64:
+		return 8
+	case jkInt, jkUint:
+		return unsafe.Sizeof(int(0))
+	case jkUintptr:
+		return unsafe.Sizeof(uintptr(0))
+	case jkBytes:
+		return unsafe.Sizeof("")
+	case jkUnsafePointer, jkChan, jkMap, jkPointer:
+		return unsafe.Sizeof(uintptr(0))
+	case jkSlice:
+		return unsafe.Sizeof([]int{})
+	case jkInterface:
+		return unsafe.Sizeof(interface{}(nil))
+	case jkStruct:
+		return uintptr((*_structType)(unsafe.Pointer(t.underlying())).size)
+	default:
+		return 0
+	}
+}
+
+func (t *_rawType) elem() *_rawType {
+	if tag := uintptr(unsafe.Pointer(t)) & 0b11; tag != 0 {
+		return (*_rawType)(unsafe.Pointer(uintptr(unsafe.Pointer(t)) - 1))
+	}
+	u := t.underlying()
+	if u.kind() == jkPointer {
+		return (*_ptrType)(unsafe.Pointer(u)).elem
+	}
+	return (*_elemType)(unsafe.Pointer(u)).elem
+}
+
+func (t *_rawType) numField() int {
+	return int((*_structType)(unsafe.Pointer(t.underlying())).numField)
+}
+
+func (t *_rawType) fieldDesc(i int) *_structFieldDesc {
+	st := (*_structType)(unsafe.Pointer(t.underlying()))
+	return (*_structFieldDesc)(unsafe.Add(
+		unsafe.Pointer(&st.fields[0]),
+		uintptr(i)*unsafe.Sizeof(_structFieldDesc{}),
+	))
+}
+
+func (t *_rawType) fieldType(i int) *_rawType {
+	return t.fieldDesc(i).fieldType
+}
+
+func (t *_rawType) fieldData(i int) (flags uint8, offset uintptr, name []byte, tag []byte) {
+	fd := t.fieldDesc(i)
+	p := (*byte)(fd.data)
+
+	flags = *p
+	p = (*byte)(unsafe.Add(unsafe.Pointer(p), 1))
+
+	var shift uint
+	for {
+		b := *p
+		offset |= uintptr(b&0x7f) << shift
+		if b&0x80 == 0 {
+			p = (*byte)(unsafe.Add(unsafe.Pointer(p), 1))
+			break
+		}
+		shift += 7
+		p = (*byte)(unsafe.Add(unsafe.Pointer(p), 1))
+	}
+
+	nameStart := unsafe.Pointer(p)
+	nameLen := 0
+	for *p != 0 {
+		nameLen++
+		p = (*byte)(unsafe.Add(unsafe.Pointer(p), 1))
+	}
+	name = unsafe.Slice((*byte)(nameStart), nameLen)
+	p = (*byte)(unsafe.Add(unsafe.Pointer(p), 1))
+
+	if flags&_sfHasTag != 0 {
+		tagLen := int(*p)
+		p = (*byte)(unsafe.Add(unsafe.Pointer(p), 1))
+		tag = unsafe.Slice((*byte)(unsafe.Pointer(p)), tagLen)
+	}
+	return
+}
+
+func (t *_rawType) fieldOffset(i int) uintptr {
+	_, off, _, _ := t.fieldData(i)
+	return off
+}
+
+func (t *_rawType) fieldTag(i int) []byte {
+	_, _, _, tag := t.fieldData(i)
+	return tag
+}
+
+func (t *_rawType) fieldExported(i int) bool {
+	flags, _, _, _ := t.fieldData(i)
+	return flags&_sfExported != 0
+}
+
+func (t *_rawType) fieldName(i int) []byte {
+	_, _, name, _ := t.fieldData(i)
+	return name
+}
+
+func (t *_rawType) typeName() []byte {
+	if !t.isNamed() {
+		return nil
+	}
+	type _namedType struct {
+		_rawType
+		numMethod uint16
+		ptrTo     *_rawType
+		elem      *_rawType
+		pkg       *byte
+		name      [1]byte
+	}
+	nt := (*_namedType)(unsafe.Pointer(t))
+	p := &nt.name[0]
+	n := 0
+	for *(*byte)(unsafe.Add(unsafe.Pointer(p), uintptr(n))) != 0 {
+		n++
+	}
+	return unsafe.Slice(p, n)
+}
+
+func typeCodeOf(val any) *_rawType {
+	return (*_rawType)((*_ifacePair)(unsafe.Pointer(&val)).typecode)
+}
+
+func dataOf(val any) unsafe.Pointer {
+	iface := (*_ifacePair)(unsafe.Pointer(&val))
+	t := (*_rawType)(iface.typecode)
+	if t.size() <= unsafe.Sizeof(uintptr(0)) {
+		return unsafe.Pointer(&iface.value)
+	}
+	return iface.value
+}
+
+func derefPtr(val any) (*_rawType, unsafe.Pointer) {
+	iface := (*_ifacePair)(unsafe.Pointer(&val))
+	t := (*_rawType)(iface.typecode)
+	if t.kind() != jkPointer {
+		return nil, nil
+	}
+	elemType := t.elem()
+	dataPtr := iface.value
+	return elemType, dataPtr
+}
+
+func ptrToIface(t *_rawType, ptr unsafe.Pointer) any {
+	var ptrType *_rawType
+	if t.isNamed() {
+		ptrType = (*_elemType)(unsafe.Pointer(t)).ptrTo
+	} else {
+		switch t.kind() {
+		case jkStruct:
+			ptrType = (*_structType)(unsafe.Pointer(t)).ptrTo
+		default:
+			ptrType = (*_elemType)(unsafe.Pointer(t)).ptrTo
+		}
+	}
+	if ptrType == nil {
+		return nil
+	}
+	iface := _ifacePair{typecode: unsafe.Pointer(ptrType), value: ptr}
+	return *(*any)(unsafe.Pointer(&iface))
+}
+
+func valToIface(t *_rawType, ptr unsafe.Pointer) any {
+	iface := _ifacePair{typecode: unsafe.Pointer(t), value: ptr}
+	if t.size() <= unsafe.Sizeof(uintptr(0)) {
+		iface.value = *(*unsafe.Pointer)(ptr)
+	}
+	return *(*any)(unsafe.Pointer(&iface))
+}
+
+func isZeroValue(typ *_rawType, ptr unsafe.Pointer) bool {
+	sz := typ.size()
+	for i := uintptr(0); i < sz; i++ {
+		if *(*byte)(unsafe.Add(ptr, i)) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func makeSliceOf(elemType *_rawType, length, capacity int) unsafe.Pointer {
+	elemSize := elemType.size()
+	buf := []byte{:int(elemSize)*capacity}
+	var dataPtr unsafe.Pointer
+	if len(buf) > 0 {
+		dataPtr = unsafe.Pointer(&buf[0])
+	}
+	p := &_sliceHeader{data: dataPtr, len: length, cap: capacity}
+	return unsafe.Pointer(p)
+}
+
+func sliceAppend(slicePtr unsafe.Pointer, elemType *_rawType) unsafe.Pointer {
+	hdr := (*_sliceHeader)(slicePtr)
+	elemSize := elemType.size()
+	if hdr.len >= hdr.cap {
+		newCap := hdr.cap * 2
+		if newCap < 4 {
+			newCap = 4
+		}
+		newBuf := []byte{:int(elemSize)*newCap}
+		var newData unsafe.Pointer
+		if len(newBuf) > 0 {
+			newData = unsafe.Pointer(&newBuf[0])
+		}
+		if hdr.data != nil && hdr.len > 0 {
+			memcpy(newData, hdr.data, elemSize*uintptr(hdr.len))
+		}
+		hdr.data = newData
+		hdr.cap = newCap
+	}
+	hdr.len++
+	return slicePtr
+}
+
+func sliceIndex(slicePtr unsafe.Pointer, elemType *_rawType, i int) unsafe.Pointer {
+	hdr := (*_sliceHeader)(slicePtr)
+	return unsafe.Add(hdr.data, elemType.size()*uintptr(i))
+}
+
+//go:linkname memcpy runtime.memcpy
+func memcpy(dst, src unsafe.Pointer, n uintptr)
