@@ -671,12 +671,11 @@ func RewriteStringConversions(file *ast.File) {
 }
 
 // RewriteUnsafeString rewrites `unsafe.String(ptr, len)` → `unsafe.Slice(ptr,
-// len)` in the AST. In stock Go the two functions differ in return type
-// (`string` vs `[]T`), but in Moxie string and []byte are the same type so the
-// swap is identity for byte-pointer callers. Every unsafe.String use in the
-// stdlib passes a *byte (either `&b[0]` or `(*byte)(...)` cast), so the
-// rewrite is universally safe for Moxie-target packages. Must run before
-// typecheck so the return-type mismatch errors never get produced.
+// len)` and `unsafe.StringData(s)` → `unsafe.SliceData(s)` in the AST. In
+// stock Go the two function pairs differ in argument/return type (`string` vs
+// `[]T`), but in Moxie string and []byte are the same type so the swaps are
+// identity. Must run before typecheck so the type mismatch errors never get
+// produced.
 func RewriteUnsafeString(file *ast.File) {
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -691,10 +690,12 @@ func RewriteUnsafeString(file *ast.File) {
 		if !ok || pkg.Name != "unsafe" {
 			return true
 		}
-		if sel.Sel.Name != "String" {
-			return true
+		switch sel.Sel.Name {
+		case "String":
+			sel.Sel = ast.NewIdent("Slice")
+		case "StringData":
+			sel.Sel = ast.NewIdent("SliceData")
 		}
-		sel.Sel = ast.NewIdent("Slice")
 		return true
 	})
 }
