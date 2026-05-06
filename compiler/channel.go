@@ -367,81 +367,93 @@ func (b *builder) getChanSelectResult(expr *ssa.Extract) llvm.Value {
 }
 
 // createNativePipeChanSend emits the native spawn-boundary chan send
-// path. Routes raw memory layout through PipeChanSendRaw on the
-// channel's pipeBoundFd. Both endpoints share the same architecture,
-// so raw layout is portable across the fork.
+// path. Wraps the value as a moxie.Codec interface (with *T as the
+// underlying value so both value- and pointer-receiver methods are
+// dispatchable) and calls runtime.PipeChanSendCodec, which invokes
+// the user-defined EncodeTo to serialize correctly across the fork.
+//
+// Codec replaces raw-memcpy: types containing slices, maps, or other
+// indirect data now serialize their byte payload, not just their
+// pointer headers. The compiler's stack allocas stay T-sized (no
+// quadratic codegen blowup from huge inline allocas) because EncodeTo
+// emits bytes incrementally.
 func (b *builder) createNativePipeChanSend(instr *ssa.Send) {
 	ch := b.getValue(instr.Chan, getPos(instr))
 	chanValue := b.getValue(instr.X, getPos(instr))
-	valueType := b.getLLVMType(instr.X.Type())
-	sz := b.targetData.TypeAllocSize(valueType)
-	i32 := b.ctx.Int32Type()
+	elemType := instr.X.Type()
+	elemLLVM := b.getLLVMType(elemType)
 
-	var ptr llvm.Value
-	var allocaSize llvm.Value
-	if sz == 0 {
-		ptr = llvm.ConstNull(b.dataPtrType)
-	} else {
-		var alloca llvm.Value
-		alloca, allocaSize = b.createTemporaryAlloca(valueType, "pipe.send.val")
-		b.CreateStore(chanValue, alloca)
-		ptr = alloca
-	}
+	// Alloca space for the value, store it. The interface holds a pointer
+	// to this alloca, so MakeInterface doesn't heap-allocate the value.
+	valAlloca, valAllocaSize := b.createTemporaryAlloca(elemLLVM, "pipe.send.val")
+	b.CreateStore(chanValue, valAlloca)
 
-	sendFn := b.program.ImportedPackage("runtime").Members["PipeChanSendRaw"].(*ssa.Function)
+	// Build a Codec interface value with typecode(*T) and valuePtr=alloca.
+	// Using *T as the underlying type makes both value- and pointer-
+	// receiver methods on T accessible via interface dispatch.
+	codecIface := b.createPipeChanCodecIface(elemType, valAlloca)
+
+	// runtime.PipeChanSendCodec(ch, codec)
+	runtimePkg := b.program.ImportedPackage("runtime")
+	sendFn := runtimePkg.Members["PipeChanSendCodec"].(*ssa.Function)
 	sendType, sendLLVM := b.getFunction(sendFn)
-	b.createCall(sendType, sendLLVM, []llvm.Value{
-		ch,
-		ptr,
-		llvm.ConstInt(i32, sz, false),
-		llvm.Undef(b.dataPtrType),
-	}, "")
 
-	if sz != 0 {
-		b.emitLifetimeEnd(ptr, allocaSize)
-	}
+	args := []llvm.Value{ch}
+	args = append(args, b.expandFormalParam(codecIface)...)
+	args = append(args, llvm.Undef(b.dataPtrType))
+	b.createCall(sendType, sendLLVM, args, "")
+
+	b.emitLifetimeEnd(valAlloca, valAllocaSize)
 }
 
 // createNativePipeChanRecv emits the native spawn-boundary chan recv
-// path. Drives PipeChanRecvRaw which copies the next message bytes
-// directly into the receive alloca; on EOF it returns ok=false.
+// path. Allocas T, wraps &alloca as a moxie.Codec, calls
+// runtime.PipeChanRecvCodec which decodes pipe bytes via DecodeFrom
+// into the alloca; the result is then loaded as the recv'd value.
 func (b *builder) createNativePipeChanRecv(unop *ssa.UnOp) llvm.Value {
-	valueType := b.getLLVMType(unop.X.Type().Underlying().(*types.Chan).Elem())
+	elemType := unop.X.Type().Underlying().(*types.Chan).Elem()
+	elemLLVM := b.getLLVMType(elemType)
 	ch := b.getValue(unop.X, getPos(unop))
-	sz := b.targetData.TypeAllocSize(valueType)
-	i32 := b.ctx.Int32Type()
 
-	var ptr llvm.Value
-	var allocaSize llvm.Value
-	isZeroSize := sz == 0
-	if isZeroSize {
-		ptr = llvm.ConstNull(b.dataPtrType)
-	} else {
-		ptr, allocaSize = b.createTemporaryAlloca(valueType, "pipe.recv.val")
-	}
+	valAlloca, valAllocaSize := b.createTemporaryAlloca(elemLLVM, "pipe.recv.val")
+	b.CreateStore(llvm.ConstNull(elemLLVM), valAlloca) // zero-init
 
-	recvFn := b.program.ImportedPackage("runtime").Members["PipeChanRecvRaw"].(*ssa.Function)
+	codecIface := b.createPipeChanCodecIface(elemType, valAlloca)
+
+	runtimePkg := b.program.ImportedPackage("runtime")
+	recvFn := runtimePkg.Members["PipeChanRecvCodec"].(*ssa.Function)
 	recvType, recvLLVM := b.getFunction(recvFn)
-	okBool := b.createCall(recvType, recvLLVM, []llvm.Value{
-		ch,
-		ptr,
-		llvm.ConstInt(i32, sz, false),
-		llvm.Undef(b.dataPtrType),
-	}, "pipe.recv.ok")
 
-	var received llvm.Value
-	if isZeroSize {
-		received = llvm.ConstNull(valueType)
-	} else {
-		received = b.CreateLoad(valueType, ptr, "pipe.received")
-		b.emitLifetimeEnd(ptr, allocaSize)
-	}
+	args := []llvm.Value{ch}
+	args = append(args, b.expandFormalParam(codecIface)...)
+	args = append(args, llvm.Undef(b.dataPtrType))
+	okBool := b.createCall(recvType, recvLLVM, args, "pipe.recv.ok")
+
+	received := b.CreateLoad(elemLLVM, valAlloca, "pipe.received")
+	b.emitLifetimeEnd(valAlloca, valAllocaSize)
 
 	if unop.CommaOk {
-		tuple := llvm.Undef(b.ctx.StructType([]llvm.Type{valueType, b.ctx.Int1Type()}, false))
+		tuple := llvm.Undef(b.ctx.StructType([]llvm.Type{elemLLVM, b.ctx.Int1Type()}, false))
 		tuple = b.CreateInsertValue(tuple, received, 0, "")
 		tuple = b.CreateInsertValue(tuple, okBool, 1, "")
 		return tuple
 	}
 	return received
+}
+
+// createPipeChanCodecIface builds a moxie.Codec interface value whose
+// typecode is *T (so value-receiver and pointer-receiver methods on T
+// both dispatch correctly) and whose valuePtr points at the supplied
+// alloca holding (or to be filled with) a T value.
+//
+// Avoids createMakeInterface — that would heap-allocate the value via
+// emitPointerPack for non-pointer-typed inputs. Here valPtr is already
+// a pointer; we splice it directly into the _interface struct.
+func (b *builder) createPipeChanCodecIface(elemType types.Type, valPtr llvm.Value) llvm.Value {
+	ptrType := types.NewPointer(elemType)
+	typecode := b.getTypeCode(ptrType)
+	itf := llvm.Undef(b.getLLVMRuntimeType("_interface"))
+	itf = b.CreateInsertValue(itf, typecode, 0, "")
+	itf = b.CreateInsertValue(itf, valPtr, 1, "")
+	return itf
 }

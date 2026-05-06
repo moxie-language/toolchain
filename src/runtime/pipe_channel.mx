@@ -13,6 +13,7 @@ package runtime
 
 import (
 	"internal/task"
+	"moxie"
 	"unsafe"
 )
 
@@ -546,6 +547,48 @@ func pipeSelectRecheck(t *task.Task, states []chanSelectState, recvbuf unsafe.Po
 		}
 	}
 	return false
+}
+
+// PipeChanSendCodec is the runtime entry the compiler emits for chan
+// sends on pipe-bound channels. Encodes c via Codec.EncodeTo into a
+// PipeWriter, then writes the bytes to the pipe. Returns false on
+// EncodeTo error or pipe write failure (EPIPE).
+//
+// Codec-based send replaces the earlier raw-memcpy path, which only
+// worked for value-flat types. With Codec, types containing slices,
+// maps, or other indirect data serialize correctly across the spawn
+// boundary because the user-defined EncodeTo emits the byte payload.
+func PipeChanSendCodec(ch *channel, c moxie.Codec) bool {
+	if ch == nil || ch.pipeBoundFd == 0 {
+		return false
+	}
+	var w moxie.PipeWriter
+	if err := c.EncodeTo(&w); err != nil {
+		return false
+	}
+	return PipeChanSend(ch, w.Buf)
+}
+
+// PipeChanRecvCodec drains a frame from the pipe and decodes into c
+// (which must be a Codec interface wrapping a *T pointer so DecodeFrom
+// can mutate the underlying value).
+//
+// Returns ok (true on successful receive+decode, false on EOF/decode
+// error).
+func PipeChanRecvCodec(ch *channel, c moxie.Codec) bool {
+	if ch == nil || ch.pipeBoundFd == 0 {
+		return false
+	}
+	data, ok := PipeChanRecv(ch)
+	if !ok {
+		return false
+	}
+	var r moxie.PipeReader
+	r.Buf = data
+	if err := c.DecodeFrom(&r); err != nil {
+		return false
+	}
+	return true
 }
 
 // LastSpawnedParentFd returns the parent's end of the socketpair for

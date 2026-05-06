@@ -13,8 +13,9 @@ package compiler
 //      calling the function NOT through spawn leaves its parameters as
 //      ordinary local channels.
 //   3. createChanSend / createChanRecv check b.pipeChannels and emit a
-//      pipe-routed call (PipeChanSendRaw / PipeChanRecvRaw + raw memcpy)
-//      instead of the in-runtime queue path.
+//      pipe-routed call (PipeChanSendCodec / PipeChanRecvCodec) that
+//      invokes the user-defined Codec methods to serialize the chan
+//      element, instead of the in-runtime queue path.
 //
 // Channels are multiplexed over a single socketpair fd by chanID. A
 // stable layout is fixed by parameter order: the i-th channel parameter

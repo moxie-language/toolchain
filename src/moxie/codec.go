@@ -13,6 +13,42 @@ type Codec interface {
 	DecodeFrom(r io.Reader) error
 }
 
+// PipeWriter is an io.Writer that appends to an internal byte buffer. The
+// compiler emits a stack alloca of this struct on the send side of every
+// spawn-boundary chan op, then invokes T.EncodeTo with &PipeWriter wrapped
+// as io.Writer. The buffered bytes are then handed off to the runtime
+// PipeChanSend helper.
+//
+// Lives in moxie (next to Codec) so the compiler can Lookup it and emit
+// IR that references it without circularity. Both runtime and user code
+// can import moxie freely.
+type PipeWriter struct {
+	Buf []byte
+}
+
+func (w *PipeWriter) Write(p []byte) (n int, err error) {
+	w.Buf = append(w.Buf, p...)
+	return len(p), nil
+}
+
+// PipeReader is an io.Reader over a fixed byte buffer. The compiler emits
+// a stack alloca on the recv side, fills its Buf with the bytes drained
+// from the pipe, and invokes (*T).DecodeFrom with &PipeReader wrapped as
+// io.Reader.
+type PipeReader struct {
+	Buf []byte
+	Pos int
+}
+
+func (r *PipeReader) Read(p []byte) (n int, err error) {
+	if r.Pos >= len(r.Buf) {
+		return 0, io.EOF
+	}
+	n = copy(p, r.Buf[r.Pos:])
+	r.Pos += n
+	return n, nil
+}
+
 // ── single-byte types (no endianness) ──────────────────────────
 
 type Bool bool

@@ -190,9 +190,10 @@ type builder struct {
 
 	// pipeChannels tracks SSA channel values that route through a fork+
 	// socketpair pipe (native spawn boundary). Presence in the map means
-	// chan send/recv on this value should emit PipeChanSendRaw/PipeChanRecvRaw
-	// instead of the in-runtime queue path. Populated by createSpawn (parent)
-	// and setupNativeSpawnTargetChannels (child).
+	// chan send/recv on this value should emit PipeChanSendCodec /
+	// PipeChanRecvCodec (Codec-based serialization) instead of the
+	// in-runtime queue path. Populated by createSpawn (parent) and
+	// setupNativeSpawnTargetChannels (child).
 	pipeChannels map[ssa.Value]bool
 }
 
