@@ -29,6 +29,19 @@ func (b *builder) createMakeChan(expr *ssa.MakeChan) llvm.Value {
 // createChanSend emits a pseudo chan send operation. It is lowered to the
 // actual channel send operation during goroutine lowering.
 func (b *builder) createChanSend(instr *ssa.Send) {
+	// Wasm spawn-boundary SAB channel: bypass runtime, call bridge directly.
+	if b.isWasmTarget() {
+		if handle, ok := b.sabChannels[instr.Chan]; ok {
+			b.createWasmSABChanSend(instr, handle)
+			return
+		}
+	}
+	// Native spawn-boundary pipe channel: route raw bytes through the socketpair.
+	if b.pipeChannels != nil && b.pipeChannels[instr.Chan] {
+		b.createNativePipeChanSend(instr)
+		return
+	}
+
 	ch := b.getValue(instr.Chan, getPos(instr))
 	chanValue := b.getValue(instr.X, getPos(instr))
 
@@ -62,6 +75,17 @@ func (b *builder) createChanSend(instr *ssa.Send) {
 // createChanRecv emits a pseudo chan receive operation. It is lowered to the
 // actual channel receive operation during goroutine lowering.
 func (b *builder) createChanRecv(unop *ssa.UnOp) llvm.Value {
+	// Wasm spawn-boundary SAB channel.
+	if b.isWasmTarget() {
+		if handle, ok := b.sabChannels[unop.X]; ok {
+			return b.createWasmSABChanRecv(unop, handle)
+		}
+	}
+	// Native spawn-boundary pipe channel.
+	if b.pipeChannels != nil && b.pipeChannels[unop.X] {
+		return b.createNativePipeChanRecv(unop)
+	}
+
 	valueType := b.getLLVMType(unop.X.Type().Underlying().(*types.Chan).Elem())
 	ch := b.getValue(unop.X, getPos(unop))
 
@@ -102,6 +126,63 @@ func (b *builder) createChanRecv(unop *ssa.UnOp) llvm.Value {
 // createChanClose closes the given channel.
 func (b *builder) createChanClose(ch llvm.Value) {
 	b.createRuntimeCall("chanClose", []llvm.Value{ch}, "")
+}
+
+// createWasmSABChanSend emits a bridge.channel_send call for spawn-boundary channels.
+func (b *builder) createWasmSABChanSend(instr *ssa.Send, handle llvm.Value) {
+	chanValue := b.getValue(instr.X, getPos(instr))
+	valueType := b.getLLVMType(instr.X.Type())
+	sz := b.targetData.TypeAllocSize(valueType)
+	i32 := b.ctx.Int32Type()
+
+	if sz == 0 {
+		b.emitBridgeCall("channel_send", []llvm.Value{
+			handle,
+			llvm.ConstNull(b.dataPtrType),
+			llvm.ConstInt(i32, 0, false),
+		}, b.ctx.VoidType())
+		return
+	}
+	alloca, allocaSize := b.createTemporaryAlloca(valueType, "sab.send.val")
+	b.CreateStore(chanValue, alloca)
+	b.emitBridgeCall("channel_send", []llvm.Value{
+		handle,
+		alloca,
+		llvm.ConstInt(i32, sz, false),
+	}, b.ctx.VoidType())
+	b.emitLifetimeEnd(alloca, allocaSize)
+}
+
+// createWasmSABChanRecv emits a bridge.channel_recv call for spawn-boundary channels.
+func (b *builder) createWasmSABChanRecv(unop *ssa.UnOp, handle llvm.Value) llvm.Value {
+	valueType := b.getLLVMType(unop.X.Type().Underlying().(*types.Chan).Elem())
+	sz := b.targetData.TypeAllocSize(valueType)
+	i32 := b.ctx.Int32Type()
+
+	alloca, allocaSize := b.createTemporaryAlloca(valueType, "sab.recv.val")
+	result := b.emitBridgeCall("channel_recv", []llvm.Value{
+		handle,
+		alloca,
+		llvm.ConstInt(i32, sz, false),
+	}, i32)
+
+	var received llvm.Value
+	if sz == 0 {
+		received = llvm.ConstNull(valueType)
+	} else {
+		received = b.CreateLoad(valueType, alloca, "sab.received")
+		b.emitLifetimeEnd(alloca, allocaSize)
+	}
+
+	if unop.CommaOk {
+		// result == -1 (all bits set as int32) means closed.
+		isOpen := b.CreateICmp(llvm.IntNE, result, llvm.ConstInt(i32, ^uint64(0), true), "sab.ok")
+		tuple := llvm.Undef(b.ctx.StructType([]llvm.Type{valueType, b.ctx.Int1Type()}, false))
+		tuple = b.CreateInsertValue(tuple, received, 0, "")
+		tuple = b.CreateInsertValue(tuple, isOpen, 1, "")
+		return tuple
+	}
+	return received
 }
 
 // createSelect emits all IR necessary for a select statements. That's a
@@ -283,4 +364,84 @@ func (b *builder) getChanSelectResult(expr *ssa.Extract) llvm.Value {
 		typ := b.getLLVMType(expr.Type())
 		return b.CreateLoad(typ, recvbuf, "")
 	}
+}
+
+// createNativePipeChanSend emits the native spawn-boundary chan send
+// path. Routes raw memory layout through PipeChanSendRaw on the
+// channel's pipeBoundFd. Both endpoints share the same architecture,
+// so raw layout is portable across the fork.
+func (b *builder) createNativePipeChanSend(instr *ssa.Send) {
+	ch := b.getValue(instr.Chan, getPos(instr))
+	chanValue := b.getValue(instr.X, getPos(instr))
+	valueType := b.getLLVMType(instr.X.Type())
+	sz := b.targetData.TypeAllocSize(valueType)
+	i32 := b.ctx.Int32Type()
+
+	var ptr llvm.Value
+	var allocaSize llvm.Value
+	if sz == 0 {
+		ptr = llvm.ConstNull(b.dataPtrType)
+	} else {
+		var alloca llvm.Value
+		alloca, allocaSize = b.createTemporaryAlloca(valueType, "pipe.send.val")
+		b.CreateStore(chanValue, alloca)
+		ptr = alloca
+	}
+
+	sendFn := b.program.ImportedPackage("runtime").Members["PipeChanSendRaw"].(*ssa.Function)
+	sendType, sendLLVM := b.getFunction(sendFn)
+	b.createCall(sendType, sendLLVM, []llvm.Value{
+		ch,
+		ptr,
+		llvm.ConstInt(i32, sz, false),
+		llvm.Undef(b.dataPtrType),
+	}, "")
+
+	if sz != 0 {
+		b.emitLifetimeEnd(ptr, allocaSize)
+	}
+}
+
+// createNativePipeChanRecv emits the native spawn-boundary chan recv
+// path. Drives PipeChanRecvRaw which copies the next message bytes
+// directly into the receive alloca; on EOF it returns ok=false.
+func (b *builder) createNativePipeChanRecv(unop *ssa.UnOp) llvm.Value {
+	valueType := b.getLLVMType(unop.X.Type().Underlying().(*types.Chan).Elem())
+	ch := b.getValue(unop.X, getPos(unop))
+	sz := b.targetData.TypeAllocSize(valueType)
+	i32 := b.ctx.Int32Type()
+
+	var ptr llvm.Value
+	var allocaSize llvm.Value
+	isZeroSize := sz == 0
+	if isZeroSize {
+		ptr = llvm.ConstNull(b.dataPtrType)
+	} else {
+		ptr, allocaSize = b.createTemporaryAlloca(valueType, "pipe.recv.val")
+	}
+
+	recvFn := b.program.ImportedPackage("runtime").Members["PipeChanRecvRaw"].(*ssa.Function)
+	recvType, recvLLVM := b.getFunction(recvFn)
+	okBool := b.createCall(recvType, recvLLVM, []llvm.Value{
+		ch,
+		ptr,
+		llvm.ConstInt(i32, sz, false),
+		llvm.Undef(b.dataPtrType),
+	}, "pipe.recv.ok")
+
+	var received llvm.Value
+	if isZeroSize {
+		received = llvm.ConstNull(valueType)
+	} else {
+		received = b.CreateLoad(valueType, ptr, "pipe.received")
+		b.emitLifetimeEnd(ptr, allocaSize)
+	}
+
+	if unop.CommaOk {
+		tuple := llvm.Undef(b.ctx.StructType([]llvm.Type{valueType, b.ctx.Int1Type()}, false))
+		tuple = b.CreateInsertValue(tuple, received, 0, "")
+		tuple = b.CreateInsertValue(tuple, okBool, 1, "")
+		return tuple
+	}
+	return received
 }

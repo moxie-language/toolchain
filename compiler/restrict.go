@@ -398,10 +398,21 @@ func (b *builder) checkChannelCompleteness() {
 						hasRecv = true
 					}
 				case *ssa.Call:
-					if _, ok := r.Call.Value.(*ssa.Builtin); !ok {
+					if bi, ok := r.Call.Value.(*ssa.Builtin); ok {
+						if bi.Name() == "spawn" {
+							// A channel passed to spawn escapes to the spawned
+							// domain, which provides the other end.
+							for _, arg := range r.Call.Args {
+								if arg == mc {
+									escapes = true
+									break
+								}
+							}
+						}
+						// close, len, cap are fine — not an escape
+					} else {
 						escapes = true
 					}
-					// close, len, cap are fine — not an escape
 				case *ssa.DebugRef:
 					// Debug info, not real usage.
 				default:

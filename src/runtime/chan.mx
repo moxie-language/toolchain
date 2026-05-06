@@ -61,6 +61,15 @@ type channel struct {
 	receivers    chanQueue
 	lock         task.PMutex
 	buf          unsafe.Pointer
+
+	// Spawn-boundary metadata (native targets only). When pipeBoundFd != 0
+	// the channel is on a fork+socketpair pipe, not a local in-runtime
+	// queue. send/recv route through pipeWrite/pipeRead with the
+	// codec-encoded bytes. Zero values = local channel, existing behavior
+	// unchanged. Set by the compiler-emitted spawn-site code (parent) and
+	// spawnCall setup (child); see compiler/spawn.go.
+	pipeBoundFd int32
+	pipeChanID  uint16
 }
 
 const (
@@ -199,6 +208,10 @@ func (ch *channel) bufferPop(value unsafe.Pointer) {
 // the send succeeded. Interrupts must be disabled and the lock must be held
 // when calling this function.
 func (ch *channel) trySend(value unsafe.Pointer) bool {
+	// Spawn-boundary pipe channel: route through pipe instead of in-runtime queue.
+	if ch.pipeBoundFd != 0 {
+		return ch.tryPipeSend(value)
+	}
 	// To make sure we send values in the correct order, we can only send
 	// directly to a receiver when there are no values in the buffer.
 
@@ -281,6 +294,10 @@ func chanSend(ch *channel, value unsafe.Pointer, op *channelOp) {
 // whether the receive operation succeeded. Interrupts must be disabled and the
 // lock must be held when calling this function.
 func (ch *channel) tryRecv(value unsafe.Pointer) (received, ok bool) {
+	// Spawn-boundary pipe channel: route through pipe instead of in-runtime queue.
+	if ch.pipeBoundFd != 0 {
+		return ch.tryPipeRecv(value)
+	}
 	// To make sure we keep the values in the channel in the correct order, we
 	// first have to read values from the buffer before we can look at the
 	// senders.
@@ -408,6 +425,12 @@ func chanClose(ch *channel) {
 
 	ch.lock.Unlock()
 	interrupt.Restore(mask)
+
+	// Spawn-boundary: if this is a pipe-bound channel, signal the remote
+	// end so its receiver-side bridge / chan recv observes the close.
+	if ch.pipeBoundFd != 0 {
+		PipeChanCloseSignal(ch)
+	}
 }
 
 // We currently use a global select lock to avoid deadlocks while locking each
@@ -524,17 +547,47 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 
 	// Single-threaded event loop: poll for I/O and timers until a
 	// channel operation completes (changes t.Data from waiting).
+	// Pipe-bound channels have no in-runtime waker; we re-check them
+	// each poll iteration via pipeSelectRecheck.
+	hasPipeBound := false
+	for _, state := range states {
+		if state.ch != nil && state.ch.pipeBoundFd != 0 {
+			hasPipeBound = true
+			break
+		}
+	}
 	if !hasScheduler {
 		for t.DataUint32() == chanOperationWaiting {
+			if hasPipeBound {
+				if pipeSelectRecheck(t, states, recvbuf) {
+					break
+				}
+			}
 			if hasPoll {
 				netpollBlock(100)
+			} else if hasPipeBound {
+				// Pipe-bound channels need short polling cadence; full 100ms
+				// sleep would add unacceptable latency to every receive.
+				sleepTicks(nanosecondsToTicks(1_000_000)) // 1ms
 			} else {
 				sleepTicks(nanosecondsToTicks(100_000_000))
 			}
 			fireTimers()
 		}
 	} else {
-		task.Pause()
+		if hasPipeBound {
+			// Same recheck loop for the scheduler.tasks variant. Yields
+			// between checks via Gosched to share the CPU.
+			for t.DataUint32() == chanOperationWaiting {
+				if pipeSelectRecheck(t, states, recvbuf) {
+					break
+				}
+				Gosched()
+				sleepTicks(nanosecondsToTicks(1_000_000))
+			}
+		} else {
+			task.Pause()
+		}
 	}
 
 	// Resumed, so one channel operation must have progressed.

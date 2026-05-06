@@ -31,6 +31,10 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		return llvm.Value{}, nil
 	}
 
+	// Wasm target uses a completely different spawn mechanism (Workers + SAB channels).
+	if b.isWasmTarget() {
+		return b.createWasmSpawn(instr)
+	}
 	// Check if the first argument is a transport string constant.
 	transport := "local"
 	argStart := 0 // index of the function argument
@@ -146,6 +150,17 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		}
 	}
 
+	// Collect channel args (in declaration order) for post-spawn marking.
+	var chanArgs []spawnChanArg
+	for _, arg := range concreteArgs {
+		if _, isChan := arg.Type().Underlying().(*types.Chan); isChan {
+			chanArgs = append(chanArgs, spawnChanArg{
+				ssa:  arg,
+				llvm: b.getValue(arg, instr.Pos()),
+			})
+		}
+	}
+
 	var params []llvm.Value
 	for _, arg := range concreteArgs {
 		params = append(params, b.expandFormalParam(b.getValue(arg, instr.Pos()))...)
@@ -162,6 +177,12 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	// Call runtime.spawnDomain(wrapper, paramBundle).
 	spawnFnType, spawnFn := b.getFunction(b.program.ImportedPackage("runtime").Members["spawnDomain"].(*ssa.Function))
 	b.createCall(spawnFnType, spawnFn, []llvm.Value{wrapper, paramBundle, llvm.Undef(b.dataPtrType)}, "")
+
+	// Mark every channel arg pipe-bound on the parent side. The child's
+	// setupNativeSpawnTargetChannels does the symmetric mark with ChildPipeFd.
+	if target := b.nativeSpawnTargetFor(targetFn); target != nil {
+		b.emitNativeSpawnChannelMark(target, chanArgs)
+	}
 
 	// Return a lifecycle channel (chan struct{}).
 	// TODO: wire this to the socketpair so close propagates.
@@ -194,7 +215,15 @@ func validateSpawnElem(t types.Type, argIndex int, codec *types.Interface) error
 
 	switch ut := t.Underlying().(type) {
 	case *types.Pointer:
-		return fmt.Errorf("spawn: argument %d is a pointer type %s (not allowed across spawn boundary)", argIndex+1, ut)
+		// A pointer that itself implements Codec is acceptable: the codec
+		// handles the contents, the receiver gets a fresh allocation. This
+		// is copy-not-alias semantics — distinct from sharing memory across
+		// the boundary, which is impossible by construction (no shared address
+		// space across fork or workers).
+		if implementsCodec(t, codec) {
+			return nil
+		}
+		return fmt.Errorf("spawn: argument %d is a pointer type %s without Codec; raw pointers cannot cross spawn boundaries", argIndex+1, ut)
 	case *types.Chan:
 		return fmt.Errorf("spawn: argument %d contains a nested channel (channels must be top-level parameters)", argIndex+1)
 	case *types.Slice:
