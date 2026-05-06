@@ -18,7 +18,11 @@ import (
 
 const (
 	pipeMsgHdrLen = 6 // 2 (chanID) + 4 (length)
-	pipeMaxMsg    = 1 << 20
+	// pipeMaxMsg caps the size of a single chan-IPC frame. Set high
+	// enough to accommodate the largest valid event (smesh: 20 MiB).
+	// Frames over this limit are rejected fail-loud at the sender so
+	// the protocol never silently truncates.
+	pipeMaxMsg = 32 << 20
 )
 
 // pipeChanEntry maps a channel ID to a runtime channel pointer.
@@ -61,7 +65,16 @@ func pipeBridgeLookup(br *pipeBridge, id uint16) *pipeChanEntry {
 
 // pipeWrite writes a length-prefixed message to fd.
 // Format: chanID(2) | len(4) | data(len)
+//
+// Fail-loud on oversize: panics if data exceeds pipeMaxMsg. Silent
+// truncation would corrupt the wire protocol on the receiving side.
+//
+// Loops on short writes — write(2) may return fewer bytes than requested
+// for large frames or when the socketpair buffer is partially full.
 func pipeWrite(fd int32, chanID uint16, data []byte) bool {
+	if uint32(len(data)) > pipeMaxMsg {
+		runtimePanic("pipeWrite: frame exceeds pipeMaxMsg")
+	}
 	var hdr [pipeMsgHdrLen]byte
 	hdr[0] = byte(chanID >> 8)
 	hdr[1] = byte(chanID)
@@ -70,23 +83,52 @@ func pipeWrite(fd int32, chanID uint16, data []byte) bool {
 	hdr[3] = byte(l >> 16)
 	hdr[4] = byte(l >> 8)
 	hdr[5] = byte(l)
-
-	if moxie_write(fd, unsafe.Pointer(&hdr[0]), pipeMsgHdrLen) < 0 {
+	if !writeAll(fd, unsafe.Pointer(&hdr[0]), pipeMsgHdrLen) {
 		return false
 	}
 	if len(data) > 0 {
-		if moxie_write(fd, unsafe.Pointer(&data[0]), int32(len(data))) < 0 {
+		if !writeAll(fd, unsafe.Pointer(&data[0]), int32(len(data))) {
 			return false
 		}
 	}
 	return true
 }
 
+// writeAll loops moxie_write until count bytes are written or an error
+// occurs. Returns false on any write returning <= 0 (partial-progress
+// is folded into the loop).
+func writeAll(fd int32, buf unsafe.Pointer, count int32) bool {
+	written := int32(0)
+	for written < count {
+		n := moxie_write(fd, unsafe.Pointer(uintptr(buf)+uintptr(written)), count-written)
+		if n <= 0 {
+			return false
+		}
+		written += n
+	}
+	return true
+}
+
+// readAll loops moxie_read until count bytes are read or EOF/error.
+// Returns false on EOF or read error before count is reached.
+func readAll(fd int32, buf unsafe.Pointer, count int32) bool {
+	got := int32(0)
+	for got < count {
+		n := moxie_read(fd, unsafe.Pointer(uintptr(buf)+uintptr(got)), count-got)
+		if n <= 0 {
+			return false
+		}
+		got += n
+	}
+	return true
+}
+
 // pipeRead reads one length-prefixed message from fd.
-// Returns chanID, data, ok.
+// Returns chanID, data, ok. Loops on short reads — read(2) may split
+// frames across multiple syscalls for large payloads.
 func pipeRead(fd int32) (uint16, []byte, bool) {
 	var hdr [pipeMsgHdrLen]byte
-	if moxie_read(fd, unsafe.Pointer(&hdr[0]), pipeMsgHdrLen) < pipeMsgHdrLen {
+	if !readAll(fd, unsafe.Pointer(&hdr[0]), pipeMsgHdrLen) {
 		return 0, nil, false
 	}
 	chanID := uint16(hdr[0])<<8 | uint16(hdr[1])
@@ -98,7 +140,7 @@ func pipeRead(fd int32) (uint16, []byte, bool) {
 		return chanID, nil, true
 	}
 	data := make([]byte, l)
-	if moxie_read(fd, unsafe.Pointer(&data[0]), int32(l)) < int32(l) {
+	if !readAll(fd, unsafe.Pointer(&data[0]), int32(l)) {
 		return 0, nil, false
 	}
 	return chanID, data, true
