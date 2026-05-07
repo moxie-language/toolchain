@@ -1,0 +1,62 @@
+//go:build js && wasm
+
+package runtime
+
+import "unsafe"
+
+// Bridge imports for spawn-boundary SAB channels and domain creation.
+// These are provided by wasm-worker-host.mjs in the JS host.
+
+//go:wasmimport bridge channel_create
+func bridgeChannelCreate(slotSize, slotCount int32) int32
+
+//go:wasmimport bridge channel_send
+func bridgeChannelSend(handle int32, srcPtr *byte, srcLen int32)
+
+//go:wasmimport bridge channel_recv
+func bridgeChannelRecv(handle int32, dstPtr *byte, dstCap int32) int32
+
+//go:wasmimport bridge channel_close
+func bridgeChannelClose(handle int32)
+
+//go:wasmimport bridge spawn_domain
+func bridgeSpawnDomain(fnIdx int32, argPtr *byte, argLen int32, chanHandlesPtr *byte, nChans int32)
+
+//go:wasmimport bridge is_worker_context
+func bridgeIsWorkerContext() int32
+
+// SpawnChannelCreate creates a SAB-backed channel for use across a spawn
+// boundary. slotSize and slotCount must both be powers of two; slotSize
+// >= 64. Returns an opaque int32 handle stored as a uintptr.
+func SpawnChannelCreate(slotSize, slotCount int32) uintptr {
+	return uintptr(bridgeChannelCreate(slotSize, slotCount))
+}
+
+// SpawnChannelSend sends bytes to a SAB channel identified by handle.
+func SpawnChannelSend(handle uintptr, data unsafe.Pointer, n int32) {
+	bridgeChannelSend(int32(handle), (*byte)(data), n)
+}
+
+// SpawnChannelRecv receives into dst from a SAB channel. Returns byte count
+// or -1 if the channel is closed.
+func SpawnChannelRecv(handle uintptr, dst unsafe.Pointer, cap int32) int32 {
+	return bridgeChannelRecv(int32(handle), (*byte)(dst), cap)
+}
+
+// SpawnChannelClose marks a SAB channel as closed.
+func SpawnChannelClose(handle uintptr) {
+	bridgeChannelClose(int32(handle))
+}
+
+// SpawnDomain creates a new Worker running the spawned function at fnIdx.
+// argPtr/argLen carry serialized scalar args; chanHandlesPtr/nChans carry
+// int32 SAB handles. Called by compiler-emitted spawn site code.
+//
+// Panics if not running inside a Web Worker: channel_recv uses Atomics.wait
+// which is forbidden on the main browser thread. See moxie/wasm deployment docs.
+func SpawnDomain(fnIdx int32, argPtr unsafe.Pointer, argLen int32, chanHandlesPtr unsafe.Pointer, nChans int32) {
+	if bridgeIsWorkerContext() == 0 {
+		runtimePanic("moxie/spawn: wasm binary must be loaded inside a Web Worker — channel_recv uses Atomics.wait which is blocked on the main thread")
+	}
+	bridgeSpawnDomain(fnIdx, (*byte)(argPtr), argLen, (*byte)(chanHandlesPtr), nChans)
+}
