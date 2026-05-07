@@ -605,6 +605,33 @@ func pipeSelectRecheck(t *task.Task, states []chanSelectState, recvbuf unsafe.Po
 	return false
 }
 
+// ChanSendDual is the runtime dispatch the compiler emits for any
+// chan-send whose element type implements moxie.Codec. It branches
+// on ch.pipeBoundFd to pick the path:
+//   pipeBoundFd != 0 → PipeChanSendCodec (codec encode + pipe write)
+//   pipeBoundFd == 0 → chanSend (in-runtime queue, the existing path)
+//
+// Runtime dispatch instead of compile-time SSA tracking so chans
+// stored in arrays / slices / struct fields still route correctly:
+// the compiler can't always tell from the SSA value whether a given
+// chan-op site refers to a pipe-bound chan, but the channel struct
+// itself always knows.
+func ChanSendDual(ch *channel, c moxie.Codec, value unsafe.Pointer, op *channelOp) {
+	if ch != nil && ch.pipeBoundFd != 0 {
+		PipeChanSendCodec(ch, c)
+		return
+	}
+	chanSend(ch, value, op)
+}
+
+// ChanRecvDual is the recv counterpart of ChanSendDual.
+func ChanRecvDual(ch *channel, c moxie.Codec, value unsafe.Pointer, op *channelOp) bool {
+	if ch != nil && ch.pipeBoundFd != 0 {
+		return PipeChanRecvCodec(ch, c)
+	}
+	return chanRecv(ch, value, op)
+}
+
 // PipeChanSendCodec is the runtime entry the compiler emits for chan
 // sends on pipe-bound channels. Encodes c via Codec.EncodeTo into a
 // PipeWriter, then writes the bytes to the pipe. Returns false on

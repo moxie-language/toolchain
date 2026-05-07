@@ -36,9 +36,13 @@ func (b *builder) createChanSend(instr *ssa.Send) {
 			return
 		}
 	}
-	// Native spawn-boundary pipe channel: route raw bytes through the socketpair.
-	if b.pipeChannels != nil && b.pipeChannels[instr.Chan] {
-		b.createNativePipeChanSend(instr)
+	// Native: any chan whose element type implements moxie.Codec routes
+	// through ChanSendDual at runtime, which dispatches on ch.pipeBoundFd.
+	// This preserves correctness through array / slice / struct-field
+	// indirection where the compiler's per-SSA-value tracking can't see
+	// that the chan was originally passed to spawn().
+	if b.elemTypeImplementsCodec(instr.X.Type()) {
+		b.createCodecChanSend(instr)
 		return
 	}
 
@@ -81,12 +85,13 @@ func (b *builder) createChanRecv(unop *ssa.UnOp) llvm.Value {
 			return b.createWasmSABChanRecv(unop, handle)
 		}
 	}
-	// Native spawn-boundary pipe channel.
-	if b.pipeChannels != nil && b.pipeChannels[unop.X] {
-		return b.createNativePipeChanRecv(unop)
+	// Native: dual-path runtime dispatch for Codec-implementing types.
+	chanType := unop.X.Type().Underlying().(*types.Chan)
+	if b.elemTypeImplementsCodec(chanType.Elem()) {
+		return b.createCodecChanRecv(unop)
 	}
 
-	valueType := b.getLLVMType(unop.X.Type().Underlying().(*types.Chan).Elem())
+	valueType := b.getLLVMType(chanType.Elem())
 	ch := b.getValue(unop.X, getPos(unop))
 
 	// Allocate memory to receive into.
@@ -377,59 +382,69 @@ func (b *builder) getChanSelectResult(expr *ssa.Extract) llvm.Value {
 // pointer headers. The compiler's stack allocas stay T-sized (no
 // quadratic codegen blowup from huge inline allocas) because EncodeTo
 // emits bytes incrementally.
-func (b *builder) createNativePipeChanSend(instr *ssa.Send) {
+// createCodecChanSend emits the dual-path chan send for any chan whose
+// element type implements moxie.Codec. The runtime helper ChanSendDual
+// branches on ch.pipeBoundFd: if pipe-bound, EncodeTo then PipeSend; if
+// local, the existing chanSend in-runtime queue path.
+//
+// Compile-time emission shape:
+//   alloca v: T            // store the value-to-send
+//   alloca op: channelOp   // for local-queue path
+//   codec := iface{*T, &v}
+//   ChanSendDual(ch, codec, &v, &op)
+func (b *builder) createCodecChanSend(instr *ssa.Send) {
 	ch := b.getValue(instr.Chan, getPos(instr))
 	chanValue := b.getValue(instr.X, getPos(instr))
 	elemType := instr.X.Type()
 	elemLLVM := b.getLLVMType(elemType)
 
-	// Alloca space for the value, store it. The interface holds a pointer
-	// to this alloca, so MakeInterface doesn't heap-allocate the value.
-	valAlloca, valAllocaSize := b.createTemporaryAlloca(elemLLVM, "pipe.send.val")
+	valAlloca, valAllocaSize := b.createTemporaryAlloca(elemLLVM, "chan.value")
 	b.CreateStore(chanValue, valAlloca)
-
-	// Build a Codec interface value with typecode(*T) and valuePtr=alloca.
-	// Using *T as the underlying type makes both value- and pointer-
-	// receiver methods on T accessible via interface dispatch.
 	codecIface := b.createPipeChanCodecIface(elemType, valAlloca)
 
-	// runtime.PipeChanSendCodec(ch, codec)
+	channelOpType := b.getLLVMRuntimeType("channelOp")
+	opAlloca, opAllocaSize := b.createTemporaryAlloca(channelOpType, "chan.op")
+
 	runtimePkg := b.program.ImportedPackage("runtime")
-	sendFn := runtimePkg.Members["PipeChanSendCodec"].(*ssa.Function)
+	sendFn := runtimePkg.Members["ChanSendDual"].(*ssa.Function)
 	sendType, sendLLVM := b.getFunction(sendFn)
 
 	args := []llvm.Value{ch}
 	args = append(args, b.expandFormalParam(codecIface)...)
+	args = append(args, valAlloca, opAlloca)
 	args = append(args, llvm.Undef(b.dataPtrType))
 	b.createCall(sendType, sendLLVM, args, "")
 
+	b.emitLifetimeEnd(opAlloca, opAllocaSize)
 	b.emitLifetimeEnd(valAlloca, valAllocaSize)
 }
 
-// createNativePipeChanRecv emits the native spawn-boundary chan recv
-// path. Allocas T, wraps &alloca as a moxie.Codec, calls
-// runtime.PipeChanRecvCodec which decodes pipe bytes via DecodeFrom
-// into the alloca; the result is then loaded as the recv'd value.
-func (b *builder) createNativePipeChanRecv(unop *ssa.UnOp) llvm.Value {
+// createCodecChanRecv emits the dual-path chan recv counterpart of
+// createCodecChanSend.
+func (b *builder) createCodecChanRecv(unop *ssa.UnOp) llvm.Value {
 	elemType := unop.X.Type().Underlying().(*types.Chan).Elem()
 	elemLLVM := b.getLLVMType(elemType)
 	ch := b.getValue(unop.X, getPos(unop))
 
-	valAlloca, valAllocaSize := b.createTemporaryAlloca(elemLLVM, "pipe.recv.val")
-	b.CreateStore(llvm.ConstNull(elemLLVM), valAlloca) // zero-init
-
+	valAlloca, valAllocaSize := b.createTemporaryAlloca(elemLLVM, "chan.value")
+	b.CreateStore(llvm.ConstNull(elemLLVM), valAlloca)
 	codecIface := b.createPipeChanCodecIface(elemType, valAlloca)
 
+	channelOpType := b.getLLVMRuntimeType("channelOp")
+	opAlloca, opAllocaSize := b.createTemporaryAlloca(channelOpType, "chan.op")
+
 	runtimePkg := b.program.ImportedPackage("runtime")
-	recvFn := runtimePkg.Members["PipeChanRecvCodec"].(*ssa.Function)
+	recvFn := runtimePkg.Members["ChanRecvDual"].(*ssa.Function)
 	recvType, recvLLVM := b.getFunction(recvFn)
 
 	args := []llvm.Value{ch}
 	args = append(args, b.expandFormalParam(codecIface)...)
+	args = append(args, valAlloca, opAlloca)
 	args = append(args, llvm.Undef(b.dataPtrType))
-	okBool := b.createCall(recvType, recvLLVM, args, "pipe.recv.ok")
+	okBool := b.createCall(recvType, recvLLVM, args, "chan.recv.ok")
 
-	received := b.CreateLoad(elemLLVM, valAlloca, "pipe.received")
+	received := b.CreateLoad(elemLLVM, valAlloca, "chan.received")
+	b.emitLifetimeEnd(opAlloca, opAllocaSize)
 	b.emitLifetimeEnd(valAlloca, valAllocaSize)
 
 	if unop.CommaOk {
@@ -439,6 +454,29 @@ func (b *builder) createNativePipeChanRecv(unop *ssa.UnOp) llvm.Value {
 		return tuple
 	}
 	return received
+}
+
+// elemTypeImplementsCodec reports whether the given chan element type
+// satisfies the moxie.Codec interface (or *T does — covers value- and
+// pointer-receiver methods). Used to decide whether to emit the dual-
+// path chan op or the local-only path.
+func (b *builder) elemTypeImplementsCodec(t types.Type) bool {
+	if ch, ok := t.Underlying().(*types.Chan); ok {
+		t = ch.Elem()
+	}
+	moxiePkg := b.program.ImportedPackage("moxie")
+	if moxiePkg == nil {
+		return false
+	}
+	codecObj := moxiePkg.Pkg.Scope().Lookup("Codec")
+	if codecObj == nil {
+		return false
+	}
+	codecIface, ok := codecObj.Type().Underlying().(*types.Interface)
+	if !ok {
+		return false
+	}
+	return implementsCodec(t, codecIface)
 }
 
 // createPipeChanCodecIface builds a moxie.Codec interface value whose
