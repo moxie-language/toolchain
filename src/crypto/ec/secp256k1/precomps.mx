@@ -10,20 +10,38 @@ var bytePointTable [32][256]JacobianPoint
 var bytePointsLoaded bool
 
 // getBytePointTable returns the precomputed byte point table, initializing
-// it on first call.
+// it on first call. Trivial getter — just a flag check and an out-of-line
+// init call. The init logic is in initBytePointTable to keep this function's
+// SelectionDAG small (LLVM 19 SDAG-combine has a known crash on the original
+// inline form at -opt 0).
 func getBytePointTable() *[32][256]JacobianPoint {
 	if !bytePointsLoaded {
-		var cursor int
-		for i := range bytePointTable {
-			for j := range bytePointTable[i] {
-				bytePointTable[i][j].X.SetByteSlice(bytepoints[cursor:])
-				cursor += 32
-				bytePointTable[i][j].Y.SetByteSlice(bytepoints[cursor:])
-				cursor += 32
-				bytePointTable[i][j].Z.SetInt(1)
-			}
-		}
-		bytePointsLoaded = true
+		initBytePointTable()
 	}
 	return &bytePointTable
+}
+
+// initBytePointTable fills the precomputed table from the embedded
+// rawbytepoints.bin. Trivial loop dispatching to per-row helper.
+//
+//go:noinline
+func initBytePointTable() {
+	for i := 0; i < 32; i++ {
+		loadBytePointRow(i)
+	}
+	bytePointsLoaded = true
+}
+
+// loadBytePointRow fills bytePointTable[row] from the embedded bytepoints
+// blob. Indexes 256 entries at offsets row*256*64 + j*64.
+//
+//go:noinline
+func loadBytePointRow(row int) {
+	base := row * 256 * 64
+	for j := 0; j < 256; j++ {
+		off := base + j*64
+		bytePointTable[row][j].X.SetByteSlice(bytepoints[off : off+32])
+		bytePointTable[row][j].Y.SetByteSlice(bytepoints[off+32 : off+64])
+		bytePointTable[row][j].Z.SetInt(1)
+	}
 }

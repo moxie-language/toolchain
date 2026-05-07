@@ -437,7 +437,7 @@ func main() {
 	}
 	command := os.Args[1]
 
-	opt := flag.String("opt", "z", "optimization level: 0, 1, 2, s, z")
+	opt := flag.String("opt", "0", "optimization level: 0, 1, 2, s, z (Moxie default: 0 — LLVM optimization is forbidden; Moxie's source-to-codegen mapping is 1:1, the optimizer assumes semantics Moxie does not have)")
 	gc := flag.String("gc", "", "garbage collector to use (none, leaking, conservative, boehm)")
 	panicStrategy := flag.String("panic", "print", "panic strategy (print, trap)")
 	scheduler := flag.String("scheduler", "", "which scheduler to use (none, tasks)")
