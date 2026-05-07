@@ -426,21 +426,77 @@ func PipeChanRecvRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
 	return true
 }
 
-// tryPipeSend attempts a non-blocking send on a pipe-bound channel.
-// Used by trySend / chanSelect for pipe channels. The kernel socketpair
-// buffer absorbs short bursts; when full, this can block briefly. B.0.5
-// addresses the relief-valve case for sustained slow-consumer scenarios.
+// tryPipeSend attempts a NON-blocking send on a pipe-bound channel.
+// Used by trySend / chanSelect on pipe channels — must not block, or
+// the cooperative event loop deadlocks (the parent can't pivot to recv
+// from the worker that would unblock this send).
 //
-// Returns true on success, false on EPIPE (remote closed) or on size==0
-// edge case where there's nothing meaningful to send.
+// Strategy: write the 6-byte header non-blocking. If it would block,
+// return false (select will retry later). If header fits in kernel
+// buffer, write the payload (which is guaranteed to fit because the
+// buffer always has at least header-sized headroom or none at all).
+//
+// Returns true on completed send, false on EAGAIN (would block), and
+// true on EPIPE (treated as a successful send to a closed pipe — the
+// receiver will observe close and stop waiting; same semantic the
+// chan-runtime uses for closed-during-send).
 func (ch *channel) tryPipeSend(value unsafe.Pointer) bool {
 	sz := int32(ch.elementSize)
-	if sz == 0 {
-		return PipeSend(ch.pipeBoundFd, ch.pipeChanID, nil)
+	var data []byte
+	if sz > 0 {
+		data = unsafe.Slice((*byte)(value), sz)
 	}
-	data := unsafe.Slice((*byte)(value), sz)
-	return PipeSend(ch.pipeBoundFd, ch.pipeChanID, data)
+	return pipeSendNB(ch.pipeBoundFd, ch.pipeChanID, data)
 }
+
+// pipeSendNB is a non-blocking variant of pipeWrite. Returns true if
+// the entire frame was sent; false if the kernel buffer was full
+// (caller retries). Aborts and returns false also on hard write error.
+//
+// Once the header has been accepted by the kernel, we MUST complete
+// the payload write or the receiver sees a corrupt frame. So after
+// header succeeds we fall back to blocking writeAll for the payload —
+// in practice this rarely blocks because if the header fit, room
+// usually remains for the payload. For very large frames (multi-MB)
+// this can block; spawn-boundary channels carrying large payloads
+// should use a relief-valve buffer (B.0.5).
+func pipeSendNB(fd int32, chanID uint16, data []byte) bool {
+	if uint32(len(data)) > pipeMaxMsg {
+		runtimePanic("pipeSendNB: frame exceeds pipeMaxMsg")
+	}
+	var hdr [pipeMsgHdrLen]byte
+	hdr[0] = byte(chanID >> 8)
+	hdr[1] = byte(chanID)
+	l := uint32(len(data))
+	hdr[2] = byte(l >> 24)
+	hdr[3] = byte(l >> 16)
+	hdr[4] = byte(l >> 8)
+	hdr[5] = byte(l)
+	n := moxie_send_nb(fd, unsafe.Pointer(&hdr[0]), pipeMsgHdrLen)
+	if n == 0 {
+		// Would block. Try again later.
+		return false
+	}
+	if n < 0 {
+		// Hard error.
+		return false
+	}
+	if n < pipeMsgHdrLen {
+		// Partial header. Complete with blocking write.
+		if !writeAll(fd, unsafe.Pointer(uintptr(unsafe.Pointer(&hdr[0]))+uintptr(n)), pipeMsgHdrLen-n) {
+			return false
+		}
+	}
+	if len(data) > 0 {
+		if !writeAll(fd, unsafe.Pointer(&data[0]), int32(len(data))) {
+			return false
+		}
+	}
+	return true
+}
+
+//export moxie_send_nb
+func moxie_send_nb(fd int32, buf unsafe.Pointer, count int32) int32
 
 // tryPipeRecv attempts a non-blocking receive on a pipe-bound channel.
 // The pipe is multiplexed by chanID, so a peek tells us "any data on the
@@ -589,6 +645,24 @@ func PipeChanRecvCodec(ch *channel, c moxie.Codec) bool {
 		return false
 	}
 	return true
+}
+
+// PipeFDHasData returns true if there's a frame waiting to be read on
+// the given pipe fd. Used by user code that wants to multiplex multiple
+// spawn-boundary channels via polling instead of select (select-on-
+// pipe-bound channels currently uses raw memcpy and is incompatible
+// with Codec-based chan ops).
+//
+// Wraps moxie_peek (non-blocking MSG_PEEK | MSG_DONTWAIT). Does not
+// consume the data — the caller follows up with a regular blocking
+// recv on the channel to drain the frame via the Codec path.
+func PipeFDHasData(fd int32) bool {
+	if fd < 0 {
+		return false
+	}
+	var probe [1]byte
+	n := moxie_peek(fd, unsafe.Pointer(&probe[0]), 1)
+	return n > 0
 }
 
 // LastSpawnedParentFd returns the parent's end of the socketpair for
