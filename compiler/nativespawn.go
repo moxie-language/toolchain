@@ -42,17 +42,74 @@ func (c *compilerContext) scanNativeSpawnTargets(pkg *ssa.Package) {
 	if c.nativeSpawnIndex == nil {
 		c.nativeSpawnIndex = make(map[*ssa.Function]*nativeSpawnTarget)
 	}
+	// Build the entire program's SSA so we can scan EVERY package for
+	// spawn() call sites. A spawn target function defined in package A
+	// but invoked from package B needs the child-side prologue
+	// (MarkChildPipeChannel) emitted when A is compiled — but the
+	// spawn site that marks the function as a target lives in B's SSA
+	// (which is lazy-built by default and may not yet exist when A is
+	// being compiled).
+	//
+	// program.Build() is idempotent and fast on already-built packages,
+	// so the cost is paid once per compilation context.
+	c.program.Build()
 	seen := map[*ssa.Function]bool{}
-	for _, mem := range pkg.Members {
-		fn, ok := mem.(*ssa.Function)
-		if !ok {
-			continue
+	scanned := map[*ssa.Function]bool{}
+	// Walk every package, then for each pkg member walk the SSA
+	// reachable from it. Methods aren't in pkg.Members directly — they
+	// belong to type definitions — so for *ssa.Type members we have to
+	// pull the method set via prog.MethodValue. Function values
+	// referenced from anonymous functions / closures get picked up via
+	// fn.AnonFuncs.
+	for _, p := range c.program.AllPackages() {
+		for _, mem := range p.Members {
+			switch m := mem.(type) {
+			case *ssa.Function:
+				c.scanFnDeep(m, seen, scanned)
+			case *ssa.Type:
+				c.scanTypeMethods(m.Type(), seen, scanned)
+			}
 		}
-		c.scanFnForNativeSpawn(fn, seen)
+	}
+	_ = pkg
+}
+
+// scanFnDeep scans fn and recursively scans its anonymous funcs.
+func (c *compilerContext) scanFnDeep(fn *ssa.Function, seen, scanned map[*ssa.Function]bool) {
+	if scanned[fn] {
+		return
+	}
+	scanned[fn] = true
+	c.scanFnForNativeSpawn(fn, seen)
+	for _, anon := range fn.AnonFuncs {
+		c.scanFnDeep(anon, seen, scanned)
+	}
+}
+
+// scanTypeMethods walks every method on a named type (and on *T) and
+// scans its body. The Go SSA program knows methods via MethodValue
+// once the program has been Built.
+func (c *compilerContext) scanTypeMethods(t types.Type, seen, scanned map[*ssa.Function]bool) {
+	mset := c.program.MethodSets.MethodSet(t)
+	for i := 0; i < mset.Len(); i++ {
+		fn := c.program.MethodValue(mset.At(i))
+		if fn != nil {
+			c.scanFnDeep(fn, seen, scanned)
+		}
+	}
+	mset = c.program.MethodSets.MethodSet(types.NewPointer(t))
+	for i := 0; i < mset.Len(); i++ {
+		fn := c.program.MethodValue(mset.At(i))
+		if fn != nil {
+			c.scanFnDeep(fn, seen, scanned)
+		}
 	}
 }
 
 func (c *compilerContext) scanFnForNativeSpawn(fn *ssa.Function, seen map[*ssa.Function]bool) {
+	if len(fn.Blocks) == 0 {
+		return
+	}
 	for _, blk := range fn.Blocks {
 		for _, instr := range blk.Instrs {
 			call, ok := instr.(*ssa.Call)
