@@ -1,0 +1,113 @@
+// Package bip39 implements BIP-39 mnemonic encoding, validation, and seed derivation.
+// https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
+//
+// Currently supports 12-word mnemonics (128-bit entropy + 4-bit checksum).
+// Wordlist: English only (Wordlist.English).
+package bip39
+
+import (
+	"crypto/pbkdf2"
+	"crypto/sha256"
+	"crypto/sha512"
+)
+
+// EntropyToMnemonic converts 16 bytes (128 bits) of entropy into a 12-word
+// English BIP-39 mnemonic. Returns "" on bad input length.
+func EntropyToMnemonic(entropy []byte) string {
+	if len(entropy) != 16 {
+		return ""
+	}
+	hash := sha256.Sum(entropy)
+	all := []byte{:17}
+	copy(all, entropy)
+	all[16] = hash[0]
+	buf := []byte{:0}
+	for i := 0; i < 12; i++ {
+		bitPos := i * 11
+		byteIdx := bitPos / 8
+		bitOff := uint(bitPos % 8)
+		var val uint32
+		val = uint32(all[byteIdx]) << 16
+		if byteIdx+1 < 17 {
+			val |= uint32(all[byteIdx+1]) << 8
+		}
+		if byteIdx+2 < 17 {
+			val |= uint32(all[byteIdx+2])
+		}
+		idx := (val << bitOff >> 13) & 0x7FF
+		if i > 0 {
+			buf = append(buf, ' ')
+		}
+		buf = append(buf, English[idx]...)
+	}
+	return string(buf)
+}
+
+// ValidateMnemonic returns true if phrase is a valid 12-word BIP-39 English
+// mnemonic with a correct checksum.
+func ValidateMnemonic(phrase string) bool {
+	if phrase == "" {
+		return false
+	}
+	var words [13]string
+	n := 0
+	start := 0
+	for i := 0; i <= len(phrase); i++ {
+		if i == len(phrase) || phrase[i] == ' ' {
+			if i > start {
+				if n >= 13 {
+					return false
+				}
+				words[n] = phrase[start:i]
+				n++
+			}
+			start = i + 1
+		}
+	}
+	if n != 12 {
+		return false
+	}
+	var indices [12]uint32
+	for w := 0; w < 12; w++ {
+		found := false
+		for i := 0; i < 2048; i++ {
+			if English[i] == words[w] {
+				indices[w] = uint32(i)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	// Reconstruct 132-bit stream into all[17]: 128 entropy + 4 checksum.
+	var all [17]byte
+	for w := 0; w < 12; w++ {
+		idx := indices[w]
+		for bit := 0; bit < 11; bit++ {
+			if (idx>>uint(10-bit))&1 != 0 {
+				streamPos := w*11 + bit
+				all[streamPos/8] |= 1 << uint(7-(streamPos%8))
+			}
+		}
+	}
+	entropy := all[:16]
+	cs := all[16] >> 4
+	hash := sha256.Sum(entropy)
+	return (hash[0] >> 4) == cs
+}
+
+// MnemonicToSeed derives a 64-byte seed from a mnemonic + optional passphrase
+// per BIP-39 ("mnemonic" || passphrase as salt, 2048 PBKDF2-HMAC-SHA512 rounds).
+// Returns nil on PBKDF2 failure (should never happen with valid params).
+func MnemonicToSeed(phrase, passphrase string) []byte {
+	salt := []byte{:0:8+len(passphrase)}
+	salt = append(salt, 'm', 'n', 'e', 'm', 'o', 'n', 'i', 'c')
+	salt = append(salt, passphrase...)
+	dk, err := pbkdf2.Key(sha512.New, []byte(phrase), salt, 2048, 64)
+	if err != nil {
+		return nil
+	}
+	return dk
+}

@@ -1,37 +1,84 @@
 package secp256k1
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"io"
 )
 
-// VerifySchnorr verifies a BIP-340 Schnorr signature.
-// pubkey: 32-byte x-only public key
-// msg: 32-byte message hash
-// sig: 64-byte signature (R.x || s)
+// BIP-340 protocol sizes.
+const (
+	PubKeyBytesLen = 32
+	SignatureSize  = 64
+)
+
+// GenerateSecretKey returns a 32-byte secret key in [1, n-1] read from
+// crypto/rand. The probability of looping is negligible (~1 in 2^128).
+func GenerateSecretKey() (sk [32]byte, err error) {
+	return generateSecretKey(rand.Reader)
+}
+
+func generateSecretKey(r io.Reader) (sk [32]byte, err error) {
+	for {
+		if _, err = io.ReadFull(r, sk[:]); err != nil {
+			return
+		}
+		k := scalarFromBytes(sk[:])
+		if !scalarIsZero(k) && feCmp(k, curveN) < 0 {
+			return
+		}
+	}
+}
+
+// ValidatePubKey returns true if pubkey is a valid 32-byte BIP-340 x-only
+// public key: correct length, x < p, and the x-coordinate lifts to a point on
+// the curve.
+func ValidatePubKey(pubkey []byte) bool {
+	if len(pubkey) != PubKeyBytesLen {
+		return false
+	}
+	x := feFromBytes(pubkey)
+	if feCmp(x, feP) >= 0 {
+		return false
+	}
+	_, ok := LiftX(x)
+	return ok
+}
+
+// VerifySchnorr verifies a BIP-340 Schnorr signature over a 32-byte message hash.
 func VerifySchnorr(pubkey, msg [32]byte, sig [64]byte) bool {
-	// Parse public key.
+	return VerifySchnorrBytes(pubkey, msg[:], sig)
+}
+
+// VerifySchnorrBytes verifies a BIP-340 Schnorr signature over a variable-length
+// message. BIP-340 (post-2022) defines signing/verification over arbitrary-length
+// input; Nostr always passes a 32-byte sha256 hash but the spec is general.
+func VerifySchnorrBytes(pubkey [32]byte, msg []byte, sig [64]byte) bool {
 	px := feFromBytes(pubkey[:])
 	P, ok := LiftX(px)
 	if !ok {
 		return false
 	}
 
-	// Parse signature.
 	rx := feFromBytes(sig[:32])
 	s := scalarFromBytes(sig[32:])
 
-	// e = tagged_hash("BIP0340/challenge", R.x || P.x || msg) mod n
-	e := computeChallenge(sig[:32], pubkey[:], msg[:])
+	// BIP-340 explicit reject: sig[0:32] >= p or sig[32:64] >= n.
+	if feCmp(rx, feP) >= 0 {
+		return false
+	}
+	if feCmp(s, curveN) >= 0 {
+		return false
+	}
 
-	// R = s*G - e*P
+	e := computeChallenge(sig[:32], pubkey[:], msg)
+
 	sG := ScalarBaseMult(s)
 	eP := ScalarMult(pointFromAffine(P), e).toAffine()
 
-	// s*G - e*P = s*G + (-e)*P
 	negEP := AffinePoint{eP.X, feNeg(eP.Y)}
 	R := pointAdd(pointFromAffine(sG), pointFromAffine(negEP)).toAffine()
 
-	// Check R.x == rx and R.y is even.
 	if feIsZero(R.X) && feIsZero(R.Y) {
 		return false
 	}
@@ -41,25 +88,23 @@ func VerifySchnorr(pubkey, msg [32]byte, sig [64]byte) bool {
 	if !feIsEven(R.Y) {
 		return false
 	}
-
 	return true
 }
 
-// SignSchnorr creates a BIP-340 Schnorr signature.
-// seckey: 32-byte secret key
-// msg: 32-byte message hash
-// auxRand: 32-byte auxiliary randomness
-// Returns zero [64]byte and false on failure.
+// SignSchnorr creates a BIP-340 Schnorr signature over a 32-byte message hash.
 func SignSchnorr(seckey, msg, auxRand [32]byte) (sig [64]byte, ok bool) {
+	return SignSchnorrBytes(seckey, msg[:], auxRand)
+}
+
+// SignSchnorrBytes signs a variable-length message per BIP-340.
+func SignSchnorrBytes(seckey [32]byte, msg []byte, auxRand [32]byte) (sig [64]byte, ok bool) {
 	sk := scalarFromBytes(seckey[:])
-	if scalarIsZero(sk) {
+	if scalarIsZero(sk) || feCmp(sk, curveN) >= 0 {
 		return sig, false
 	}
 
-	// P = sk * G
 	P := ScalarBaseMult(sk)
 
-	// If P.y is odd, negate the secret key.
 	d := sk
 	if !feIsEven(P.Y) {
 		d = scalarNeg(d)
@@ -67,7 +112,6 @@ func SignSchnorr(seckey, msg, auxRand [32]byte) (sig [64]byte, ok bool) {
 
 	pkBytes := feToBytes(P.X)
 
-	// t = d XOR tagged_hash("BIP0340/aux", auxRand)
 	var t [32]byte
 	aux := taggedHash("BIP0340/aux", auxRand[:])
 	dBytes := feToBytes(d)
@@ -76,14 +120,13 @@ func SignSchnorr(seckey, msg, auxRand [32]byte) (sig [64]byte, ok bool) {
 	}
 
 	// k' = tagged_hash("BIP0340/nonce", t || pkBytes || msg) mod n
-	var nonceInput [96]byte
-	copy(nonceInput[:32], t[:])
-	copy(nonceInput[32:64], pkBytes[:])
-	copy(nonceInput[64:96], msg[:])
-	kHash := taggedHash("BIP0340/nonce", nonceInput[:])
+	nonceInput := []byte{:0:64+len(msg)}
+	nonceInput = append(nonceInput, t[:]...)
+	nonceInput = append(nonceInput, pkBytes[:]...)
+	nonceInput = append(nonceInput, msg...)
+	kHash := taggedHash("BIP0340/nonce", nonceInput)
 	k := scalarFromBytes(kHash[:])
 
-	// Reduce k mod n.
 	if feCmp(k, curveN) >= 0 {
 		k = scalarSub(k, curveN)
 	}
@@ -91,20 +134,16 @@ func SignSchnorr(seckey, msg, auxRand [32]byte) (sig [64]byte, ok bool) {
 		return sig, false
 	}
 
-	// R = k * G
 	R := ScalarBaseMult(k)
 
-	// If R.y is odd, negate k.
 	if !feIsEven(R.Y) {
 		k = scalarNeg(k)
 	}
 
 	rxBytes := feToBytes(R.X)
 
-	// e = tagged_hash("BIP0340/challenge", R.x || P.x || msg) mod n
-	e := computeChallenge(rxBytes[:], pkBytes[:], msg[:])
+	e := computeChallenge(rxBytes[:], pkBytes[:], msg)
 
-	// sig = R.x || (k + e*d) mod n
 	s := scalarAdd(k, scalarMul(e, d))
 	sBytes := feToBytes(s)
 

@@ -1,0 +1,95 @@
+package secp256k1
+
+// BIP-32 hierarchical deterministic key derivation for secp256k1.
+// https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki
+//
+// Only the secret-key derivation path is exposed (DerivePath, DeriveChild).
+// Public-key-only derivation (xpub) is not implemented since the smesh
+// signer always derives from the master seed with the secret key in hand.
+
+import (
+	"crypto/hmac"
+	"crypto/sha512"
+)
+
+// HardenedBit is the BIP-32 hardened-derivation marker (index high bit).
+const HardenedBit = uint32(0x80000000)
+
+// MasterSeed is the BIP-32 master key separator ("Bitcoin seed").
+var masterKey = []byte("Bitcoin seed")
+
+// DeriveChild derives a child key + chain code from a parent key + chain code
+// at the given index. Returns (nil, nil) on failure (parent key invalid for
+// non-hardened derivation, child scalar at zero, etc.).
+func DeriveChild(parentKey, chainCode []byte, index uint32) (childKey, childChain []byte) {
+	if len(parentKey) != 32 || len(chainCode) != 32 {
+		return nil, nil
+	}
+	data := []byte{:37}
+	if index&HardenedBit != 0 {
+		data[0] = 0x00
+		copy(data[1:], parentKey)
+	} else {
+		var sk [32]byte
+		copy(sk[:], parentKey)
+		cpk, ok := CompressedPubKey(sk)
+		if !ok {
+			return nil, nil
+		}
+		copy(data, cpk[:])
+	}
+	data[33] = byte(index >> 24)
+	data[34] = byte(index >> 16)
+	data[35] = byte(index >> 8)
+	data[36] = byte(index)
+	mac := hmac.New(sha512.New, chainCode)
+	mac.Write(data)
+	result := mac.Sum(nil)
+	if len(result) != 64 {
+		return nil, nil
+	}
+	il := result[:32]
+	childChain = result[32:]
+	var ilArr, parentArr [32]byte
+	copy(ilArr[:], il)
+	copy(parentArr[:], parentKey)
+	r, ok := ScalarAddModN(parentArr, ilArr)
+	if !ok {
+		return nil, nil
+	}
+	childKey = r[:]
+	return childKey, childChain
+}
+
+// DerivePath derives a key + chain code from a 64-byte master seed along the
+// given BIP-32 path. Empty path returns the master key + chain code as-is.
+// Returns (nil, nil) on any derivation failure.
+func DerivePath(seed []byte, path []uint32) (key, chain []byte) {
+	mac := hmac.New(sha512.New, masterKey)
+	mac.Write(seed)
+	master := mac.Sum(nil)
+	if len(master) != 64 {
+		return nil, nil
+	}
+	key = master[:32]
+	chain = master[32:]
+	for _, idx := range path {
+		key, chain = DeriveChild(key, chain, idx)
+		if key == nil {
+			return nil, nil
+		}
+	}
+	return key, chain
+}
+
+// NostrPath returns the BIP-32 path for a Nostr key at the given account index.
+// NIP-06: m/44'/1237'/account'/0/0
+func NostrPath(account int) []uint32 {
+	return []uint32{
+		44 | HardenedBit,
+		1237 | HardenedBit,
+		uint32(account) | HardenedBit,
+		0,
+		0,
+	}
+}

@@ -225,19 +225,21 @@ export function ValidateMnemonic(mnemonic, fn) {
   }
 }
 
-export function CreateHDVault(password, name, fn) {
+export function CreateHDVault(password, mnemonic, fn) {
   var s = _smesh();
   if (s && s.createHDVault) {
-    s.createHDVault(_str(password), _str(name)).then(function(m) { fn(m || ''); }).catch(function() { fn(''); });
+    s.createHDVault(_str(password), _str(mnemonic)).then(function(m) { fn(m || ''); }).catch(function() { fn(''); });
   } else {
     fn('');
   }
 }
 
-export function RestoreHDVault(password, mnemonic, name, fn) {
+export function RestoreHDVault(password, mnemonic, _label, fn) {
+  // _label is currently ignored by the host extension (vault has no per-vault
+  // label field). Kept in signature for back-compat with existing callers.
   var s = _smesh();
   if (s && s.restoreHDVault) {
-    s.restoreHDVault(_str(password), _str(mnemonic), _str(name)).then(function(ok) { fn(ok === true || (ok && !ok.error && ok.result !== false)); }).catch(function() { fn(false); });
+    s.restoreHDVault(_str(password), _str(mnemonic)).then(function(ok) { fn(ok === true || (ok && !ok.error && ok.result !== false)); }).catch(function() { fn(false); });
   } else {
     fn(false);
   }
