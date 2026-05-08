@@ -1,10 +1,6 @@
 package secp256k1
 
-import (
-	"crypto/rand"
-	"crypto/sha256"
-	"io"
-)
+import "crypto/sha256"
 
 // BIP-340 protocol sizes.
 const (
@@ -12,22 +8,17 @@ const (
 	SignatureSize  = 64
 )
 
-// GenerateSecretKey returns a 32-byte secret key in [1, n-1] read from
-// crypto/rand. The probability of looping is negligible (~1 in 2^128).
-func GenerateSecretKey() (sk [32]byte, err error) {
-	return generateSecretKey(rand.Reader)
-}
-
-func generateSecretKey(r io.Reader) (sk [32]byte, err error) {
-	for {
-		if _, err = io.ReadFull(r, sk[:]); err != nil {
-			return
-		}
-		k := scalarFromBytes(sk[:])
-		if !scalarIsZero(k) && feCmp(k, curveN) < 0 {
-			return
-		}
+// ValidateSecretKey returns true if sk is a valid secp256k1 scalar (32 bytes,
+// in [1, n-1]). Callers wanting a fresh random key should loop reading bytes
+// from their preferred source until ValidateSecretKey returns true; this
+// package intentionally does not import crypto/rand so WASM consumers that
+// only need verification do not link unused entropy machinery.
+func ValidateSecretKey(sk []byte) bool {
+	if len(sk) != 32 {
+		return false
 	}
+	k := scalarFromBytes(sk)
+	return !scalarIsZero(k) && feCmp(k, curveN) < 0
 }
 
 // ValidatePubKey returns true if pubkey is a valid 32-byte BIP-340 x-only
