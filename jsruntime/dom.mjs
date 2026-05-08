@@ -6,9 +6,40 @@
 import { setKey as _setEncKey, sealStr, openStr, hasKey as _encHasKey } from './aead.mjs';
 
 const _elements = new Map();
+const _nodeToId = new WeakMap();
 let _nextId = 1; // Safe up to 2^53 in JS. No wrap needed.
 const _callbacks = new Map();
 let _nextCb = 1;
+
+// Instrumentation: log _elements.size at thresholds when __moxie_instrument is set.
+const _elemThresholds = [100, 500, 1000, 2000, 5000];
+let _elemThresholdIdx = 0;
+function _checkElemThreshold() {
+  if (!globalThis.__moxie_instrument) return;
+  const sz = _elements.size;
+  while (_elemThresholdIdx < _elemThresholds.length && sz >= _elemThresholds[_elemThresholdIdx]) {
+    const log = globalThis.__moxie_alloc_log;
+    if (Array.isArray(log)) {
+      if (log.length >= 10000) log.shift();
+      log.push({ ts: Date.now(), source: 'dom', metric: 'elements_size', value: sz });
+    }
+    _elemThresholdIdx++;
+  }
+}
+
+// Initialize the ring buffer on first use if instrumentation is active.
+if (typeof globalThis.__moxie_alloc_log === 'undefined') {
+  globalThis.__moxie_alloc_log = [];
+}
+
+// Register a new element handle and return its ID.
+function _trackEl(el) {
+  const id = _nextId++;
+  _elements.set(id, el);
+  _nodeToId.set(el, id);
+  _checkElemThreshold();
+  return id;
+}
 
 // Bootstrap: map handle 0 to document.body (available after DOMContentLoaded).
 function ensureBody() {
@@ -19,33 +50,21 @@ function ensureBody() {
 
 // Element creation and lookup.
 export function CreateElement(tag) {
-  const el = document.createElement(tag);
-  const id = _nextId++;
-  _elements.set(id, el);
-  return id;
+  return _trackEl(document.createElement(tag));
 }
 
 export function CreateTextNode(text) {
-  const node = document.createTextNode(text);
-  const id = _nextId++;
-  _elements.set(id, node);
-  return id;
+  return _trackEl(document.createTextNode(text));
 }
 
 export function GetElementById(id) {
   const el = document.getElementById(id);
-  if (!el) return 0;
-  const handle = _nextId++;
-  _elements.set(handle, el);
-  return handle;
+  return el ? _trackEl(el) : 0;
 }
 
 export function QuerySelector(sel) {
   const el = document.querySelector(sel);
-  if (!el) return 0;
-  const handle = _nextId++;
-  _elements.set(handle, el);
-  return handle;
+  return el ? _trackEl(el) : 0;
 }
 
 export function Body() {
@@ -73,22 +92,12 @@ export function Remove(elId) {
 
 export function FirstChild(parentId) {
   const parent = _elements.get(parentId);
-  if (parent && parent.firstChild) {
-    const id = _nextId++;
-    _elements.set(id, parent.firstChild);
-    return id;
-  }
-  return 0;
+  return (parent && parent.firstChild) ? _trackEl(parent.firstChild) : 0;
 }
 
 export function FirstElementChild(parentId) {
   const parent = _elements.get(parentId);
-  if (parent && parent.firstElementChild) {
-    const id = _nextId++;
-    _elements.set(id, parent.firstElementChild);
-    return id;
-  }
-  return 0;
+  return (parent && parent.firstElementChild) ? _trackEl(parent.firstElementChild) : 0;
 }
 
 export function InsertBefore(parentId, newId, refId) {
@@ -481,7 +490,37 @@ export function ClearTimeout(id) {
 
 // Cleanup: release element handle.
 export function ReleaseElement(id) {
+  const el = _elements.get(id);
+  if (el) _nodeToId.delete(el);
   _elements.delete(id);
+}
+
+// Bulk release: drop all handles in the ids array.
+export function ReleaseAll(ids) {
+  for (let i = 0; i < ids.length; i++) {
+    const el = _elements.get(ids[i]);
+    if (el) _nodeToId.delete(el);
+    _elements.delete(ids[i]);
+  }
+}
+
+// ReleaseChildren releases handles for all DOM descendants of el (but not el itself).
+export function ReleaseChildren(elId) {
+  const root = _elements.get(elId);
+  if (!root) return;
+  const stack = [];
+  const ch = root.children;
+  for (let i = 0; i < ch.length; i++) stack.push(ch[i]);
+  while (stack.length > 0) {
+    const node = stack.pop();
+    const sub = node.children;
+    for (let i = 0; i < sub.length; i++) stack.push(sub[i]);
+    const id = _nodeToId.get(node);
+    if (id !== undefined) {
+      _elements.delete(id);
+      _nodeToId.delete(node);
+    }
+  }
 }
 
 // Fetch a URL as text, call fn with result.
@@ -492,12 +531,7 @@ export function FetchText(url, fn) {
 // Navigation.
 export function NextSibling(elId) {
   const el = _elements.get(elId);
-  if (el && el.nextSibling) {
-    const id = _nextId++;
-    _elements.set(id, el.nextSibling);
-    return id;
-  }
-  return 0;
+  return (el && el.nextSibling) ? _trackEl(el.nextSibling) : 0;
 }
 
 // Console / browser.
