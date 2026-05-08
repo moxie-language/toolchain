@@ -23,7 +23,11 @@ func (b *builder) createMakeChan(expr *ssa.MakeChan) llvm.Value {
 	} else if bufSize.Type().IntTypeWidth() > b.uintptrType.IntTypeWidth() {
 		bufSize = b.CreateTrunc(bufSize, b.uintptrType, "")
 	}
-	return b.createRuntimeCall("chanMake", []llvm.Value{elementSizeValue, bufSize}, "")
+	ch := b.createRuntimeCall("chanMake", []llvm.Value{elementSizeValue, bufSize}, "")
+	if b.PrintAllocs != nil {
+		b.emitLogAlloc(elementSizeValue, expr.Pos())
+	}
+	return ch
 }
 
 // createChanSend emits a pseudo chan send operation. It is lowered to the

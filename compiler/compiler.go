@@ -11,6 +11,7 @@ import (
 	"math/bits"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,6 +61,7 @@ type Config struct {
 	Debug              bool // Whether to emit debug information in the LLVM module.
 	Nobounds           bool // Whether to skip bounds checks
 	PanicStrategy      string
+	PrintAllocs        *regexp.Regexp // if non-nil, emit runtime.logAlloc at matching heap sites
 }
 
 // compilerContext contains function-independent data that should still be
@@ -391,6 +393,36 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 
 func (c *compilerContext) getRuntimeType(name string) types.Type {
 	return c.runtimePkg.Scope().Lookup(name).(*types.TypeName).Type()
+}
+
+// emitLogAlloc emits a call to runtime.logAlloc(siteID, size) after a heap
+// allocation, when the current function's package matches PrintAllocs.
+// Returns true if the call was emitted.
+func (b *builder) emitLogAlloc(size llvm.Value, pos token.Pos) bool {
+	if b.PrintAllocs == nil {
+		return false
+	}
+	// Match against the fully-qualified function name (e.g. "web/wasm/app.switchPage").
+	// Consistent with transform/allocs.go which matches LLVM function names.
+	fnName := b.fn.RelString(nil)
+	if !b.PrintAllocs.MatchString(fnName) {
+		return false
+	}
+	logAllocMember := b.program.ImportedPackage("runtime").Members["logAlloc"]
+	if logAllocMember == nil {
+		return false
+	}
+	position := b.program.Fset.Position(pos)
+	siteName := b.fn.RelString(nil) + "@" + position.Filename + ":" + strconv.Itoa(position.Line)
+	siteID := nextAllocSite(siteName)
+	siteIDVal := llvm.ConstInt(b.ctx.Int32Type(), uint64(siteID), false)
+	// Ensure size is uintptr width for the logAlloc signature.
+	sizeVal := size
+	if sizeVal.Type().IntTypeWidth() != b.uintptrType.IntTypeWidth() {
+		sizeVal = b.createZExtOrTrunc(sizeVal, b.uintptrType)
+	}
+	b.createRuntimeCall("logAlloc", []llvm.Value{siteIDVal, sizeVal}, "")
+	return true
 }
 
 // getLLVMRuntimeType obtains a named type from the runtime package and returns
@@ -2181,6 +2213,9 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			buf := b.createRuntimeCall("alloc", []llvm.Value{sizeValue, layoutValue}, expr.Comment)
 			align := b.targetData.ABITypeAlignment(typ)
 			buf.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(align)))
+			if b.PrintAllocs != nil {
+				b.emitLogAlloc(sizeValue, expr.Pos())
+			}
 			return buf, nil
 		} else {
 			buf := llvmutil.CreateEntryBlockAlloca(b.Builder, typ, expr.Comment)
@@ -2429,6 +2464,9 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		layoutValue := b.createObjectLayout(llvmElemType, expr.Pos())
 		slicePtr := b.createRuntimeCall("alloc", []llvm.Value{sliceSize, layoutValue}, "makeslice.buf")
 		slicePtr.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(elemAlign)))
+		if b.PrintAllocs != nil {
+			b.emitLogAlloc(sliceSize, expr.Pos())
+		}
 
 		// Extend or truncate if necessary. This is safe as we've already done
 		// the bounds check.
