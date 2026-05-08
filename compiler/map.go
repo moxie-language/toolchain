@@ -49,7 +49,7 @@ func (b *builder) createMakeMap(expr *ssa.MakeMap) (llvm.Value, error) {
 	}
 	hashmap := b.createRuntimeCall("hashmapMake", []llvm.Value{llvmKeySize, llvmValueSize, sizeHint, algEnum}, "")
 	if b.PrintAllocs != nil {
-		b.emitLogAlloc(llvm.ConstInt(b.uintptrType, 0, false), expr.Pos())
+		b.emitLogAlloc(expr.Pos())
 	}
 	return hashmap, nil
 }

@@ -25,7 +25,7 @@ func (b *builder) createMakeChan(expr *ssa.MakeChan) llvm.Value {
 	}
 	ch := b.createRuntimeCall("chanMake", []llvm.Value{elementSizeValue, bufSize}, "")
 	if b.PrintAllocs != nil {
-		b.emitLogAlloc(elementSizeValue, expr.Pos())
+		b.emitLogAlloc(expr.Pos())
 	}
 	return ch
 }

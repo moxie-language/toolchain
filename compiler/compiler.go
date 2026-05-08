@@ -61,7 +61,6 @@ type Config struct {
 	Debug              bool // Whether to emit debug information in the LLVM module.
 	Nobounds           bool // Whether to skip bounds checks
 	PanicStrategy      string
-	PrintAllocs        *regexp.Regexp // if non-nil, emit runtime.logAlloc at matching heap sites
 }
 
 // compilerContext contains function-independent data that should still be
@@ -69,7 +68,8 @@ type Config struct {
 // must not contain function-dependent data such as an IR builder.
 type compilerContext struct {
 	*Config
-	DumpSSA          bool
+	DumpSSA     bool
+	PrintAllocs *regexp.Regexp // set when -print-allocs active; kept off Config to avoid cache key churn
 	mod              llvm.Module
 	ctx              llvm.Context
 	builder          llvm.Builder // only used for constant operations
@@ -109,10 +109,11 @@ type compilerContext struct {
 
 // newCompilerContext returns a new compiler context ready for use, most
 // importantly with a newly created LLVM context and module.
-func newCompilerContext(moduleName string, machine llvm.TargetMachine, config *Config, dumpSSA bool) *compilerContext {
+func newCompilerContext(moduleName string, machine llvm.TargetMachine, config *Config, dumpSSA bool, printAllocs *regexp.Regexp) *compilerContext {
 	c := &compilerContext{
 		Config:        config,
 		DumpSSA:       dumpSSA,
+		PrintAllocs:   printAllocs,
 		difiles:       make(map[string]llvm.Metadata),
 		ditypes:       make(map[types.Type]llvm.Metadata),
 		machine:       machine,
@@ -301,8 +302,8 @@ func Sizes(machine llvm.TargetMachine) types.Sizes {
 }
 
 // CompilePackage compiles a single package to a LLVM module.
-func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package, machine llvm.TargetMachine, config *Config, dumpSSA bool) (llvm.Module, []error) {
-	c := newCompilerContext(moduleName, machine, config, dumpSSA)
+func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package, machine llvm.TargetMachine, config *Config, dumpSSA bool, printAllocs *regexp.Regexp) (llvm.Module, []error) {
+	c := newCompilerContext(moduleName, machine, config, dumpSSA, printAllocs)
 	defer c.dispose()
 	c.packageDir = pkg.OriginalDir()
 	c.embedGlobals = pkg.EmbedGlobals
@@ -395,34 +396,19 @@ func (c *compilerContext) getRuntimeType(name string) types.Type {
 	return c.runtimePkg.Scope().Lookup(name).(*types.TypeName).Type()
 }
 
-// emitLogAlloc emits a call to runtime.logAlloc(siteID, size) after a heap
-// allocation, when the current function's package matches PrintAllocs.
-// Returns true if the call was emitted.
-func (b *builder) emitLogAlloc(size llvm.Value, pos token.Pos) bool {
-	if b.PrintAllocs == nil {
-		return false
+// emitLogAlloc emits runtime.logAlloc(siteID) at a heap allocation site
+// when the function name matches the -print-allocs pattern.
+func (b *builder) emitLogAlloc(pos token.Pos) {
+	if !b.PrintAllocs.MatchString(b.fn.RelString(nil)) {
+		return
 	}
-	// Match against the fully-qualified function name (e.g. "web/wasm/app.switchPage").
-	// Consistent with transform/allocs.go which matches LLVM function names.
-	fnName := b.fn.RelString(nil)
-	if !b.PrintAllocs.MatchString(fnName) {
-		return false
-	}
-	logAllocMember := b.program.ImportedPackage("runtime").Members["logAlloc"]
-	if logAllocMember == nil {
-		return false
+	if b.program.ImportedPackage("runtime").Members["logAlloc"] == nil {
+		return
 	}
 	position := b.program.Fset.Position(pos)
 	siteName := b.fn.RelString(nil) + "@" + position.Filename + ":" + strconv.Itoa(position.Line)
-	siteID := nextAllocSite(siteName)
-	siteIDVal := llvm.ConstInt(b.ctx.Int32Type(), uint64(siteID), false)
-	// Ensure size is uintptr width for the logAlloc signature.
-	sizeVal := size
-	if sizeVal.Type().IntTypeWidth() != b.uintptrType.IntTypeWidth() {
-		sizeVal = b.createZExtOrTrunc(sizeVal, b.uintptrType)
-	}
-	b.createRuntimeCall("logAlloc", []llvm.Value{siteIDVal, sizeVal}, "")
-	return true
+	siteIDVal := llvm.ConstInt(b.ctx.Int32Type(), uint64(nextAllocSite(siteName)), false)
+	b.createRuntimeCall("logAlloc", []llvm.Value{siteIDVal}, "")
 }
 
 // getLLVMRuntimeType obtains a named type from the runtime package and returns
@@ -2214,7 +2200,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			align := b.targetData.ABITypeAlignment(typ)
 			buf.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(align)))
 			if b.PrintAllocs != nil {
-				b.emitLogAlloc(sizeValue, expr.Pos())
+				b.emitLogAlloc(expr.Pos())
 			}
 			return buf, nil
 		} else {
@@ -2465,7 +2451,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		slicePtr := b.createRuntimeCall("alloc", []llvm.Value{sliceSize, layoutValue}, "makeslice.buf")
 		slicePtr.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(elemAlign)))
 		if b.PrintAllocs != nil {
-			b.emitLogAlloc(sliceSize, expr.Pos())
+			b.emitLogAlloc(expr.Pos())
 		}
 
 		// Extend or truncate if necessary. This is safe as we've already done

@@ -95,6 +95,10 @@ type packageAction struct {
 // The error value may be of type *MultiError. Callers will likely want to check
 // for this case and print such errors individually.
 func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildResult, error) {
+	if config.Options.PrintAllocs != nil {
+		compiler.ResetAllocSites()
+	}
+
 	// Read the build ID of the moxie binary.
 	// Used as a cache key for package builds.
 	compilerBuildID, err := ReadBuildID()
@@ -354,7 +358,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 
 				// Compile AST to IR. The compiler.CompilePackage function will
 				// build the SSA as needed.
-				mod, errs := compiler.CompilePackage(pkg.ImportPath, pkg, program.Package(pkg.Pkg), machine, compilerConfig, config.DumpSSA())
+				mod, errs := compiler.CompilePackage(pkg.ImportPath, pkg, program.Package(pkg.Pkg), machine, compilerConfig, config.DumpSSA(), config.Options.PrintAllocs)
 				defer mod.Context().Dispose()
 				defer mod.Dispose()
 				if errs != nil {
@@ -926,6 +930,12 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		}
 	default:
 		return result, fmt.Errorf("unknown output format: %s", outext)
+	}
+
+	if config.Options.PrintAllocs != nil && len(compiler.AllocSites) > 0 {
+		if data, err2 := json.Marshal(compiler.AllocSites); err2 == nil {
+			_ = os.WriteFile(outpath+".alloc_sites.json", data, 0666)
+		}
 	}
 
 	return result, nil

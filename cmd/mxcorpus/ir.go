@@ -158,6 +158,7 @@ func compilePackageIR(wrapDir, targetPkg string) ([]byte, error) {
 		machine,
 		compilerConfig,
 		false,
+		nil,
 	)
 	if errs != nil {
 		return nil, fmt.Errorf("compile: %v", errs)
