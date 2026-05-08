@@ -1,28 +1,23 @@
 // domain.mjs — Domain manager for spawn in the Moxie JS runtime.
 //
-// Each spawned domain is an isolated execution context with its own
-// cooperative scheduler. Maps to a Web Worker in the browser.
+// moxiejs path (JS compiled output): spawn() is a cooperative microtask domain.
+// wasm path: spawn() emits bridge.spawn_domain() which creates a real Worker
+//   via wasm-worker-host.mjs using SAB channels (see sab-channel.mjs).
+//   The compiler assigns fnIdx at compile time; __spawn_entry in the Worker
+//   dispatches via __spawn_dispatch[fnIdx].
 //
-// IPC between domains uses BroadcastChannel.
+// This file serves the moxiejs path only. True OS-process isolation
+// (matching the native spawn() semantics) requires the wasm target.
 
 let domainCounter = 0;
 
-// spawn creates a new isolated domain that runs the given async function.
-// Each domain gets its own microtask queue via queueMicrotask.
-// True Worker isolation requires registering a new Worker scope, which
-// needs a separate .js file. For now, simulate with a BroadcastChannel-
-// isolated microtask domain.
 export function spawn(asyncFn) {
-    const domainId = ++domainCounter;
-    const channel = new BroadcastChannel(`moxie-domain-${domainId}`);
-    queueMicrotask(async () => {
-        try {
-            await asyncFn();
-        } catch (e) {
-            console.error(`[domain ${domainId}] panic:`, e);
-        } finally {
-            channel.close();
-        }
-    });
-    return { id: domainId, channel };
+  const id = ++domainCounter;
+  queueMicrotask(async () => {
+    try {
+      await asyncFn();
+    } catch (e) {
+      console.error('[domain ' + id + '] panic:', e);
+    }
+  });
 }

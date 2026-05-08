@@ -16,18 +16,14 @@ might have taken only one path. Moxie added more forks.
       iterates packages in dep order and calls `pkg.init()` for each.
 - [ ] Regression test: a package-level `var x = f()` where `f` is in another
       package. Confirm `x` is set before main runs.
-- [ ] Check: `jsbackend/compiler.go:writeEntryPoint`, `builder/build.go`
-      `runtime.initAll` construction (~line 524).
+- [ ] Check: `builder/build.go` `runtime.initAll` construction (~line 524).
 
 ### 2. Anonymous functions / closures
 - [ ] SSA flags `BuildSerially` or `NaiveForm` set? If yes, SSA skips
       automatic closure lifting — backends must handle `FreeVars` manually.
-- [ ] Backend parameter emission order must match the binding order of
-      `MakeClosure.Bindings`. JS binds via `.bind()` — silent misalignment
-      if order drifts.
 - [ ] Test: a closure capturing two distinct types; call through a
       `func()` value after the constructor returns.
-- [ ] Check: `compiler/func.go:parseMakeClosure`, `jsbackend/compiler.go:functionParams`.
+- [ ] Check: `compiler/func.go:parseMakeClosure`.
 
 ### 3. Interface method tables
 - [ ] Empty interface (`any`, `interface{}`) method invoke path — does it
@@ -77,32 +73,25 @@ might have taken only one path. Moxie added more forks.
 
 ### 8. Defer chains
 - [ ] Loop-detected defers use heap allocation? Tarjan SCC still runs?
-- [ ] JS backend: `$rt.runtime.recover()` exists in `jsruntime/`? Native
-      `_recover` supported on target arch?
 - [ ] Closure-in-defer: captured vars reach deferred call correctly?
-- [ ] Panic path: try/catch/finally in JS, landing-pad in LLVM.
-- [ ] Check: `compiler/defer.go`, `jsbackend/instructions.go` finally block.
+- [ ] Panic path: landing-pad in LLVM.
+- [ ] Check: `compiler/defer.go`.
 
 ### 9. SSA pass ordering
-- [ ] Native builds SSA per-package inside parallel jobs; JS builds
-      once globally. Any new cross-package analysis added since the last
-      audit? If yes, it must live in the global-build (JS) pipeline or be
-      moved out of per-package parallel jobs (native).
 - [ ] Any pass assuming "entire program's SSA is built"? Verify it runs
-      after `Build()` — not inside `CompilePackage`.
+      after `Build()` - not inside `CompilePackage`.
 
 ### 10. Generated-output smoke
-- [ ] Regenerate one small test program for each target (JS, native).
-      Diff the entry point / init-chain structure against a known-good
-      baseline.
-- [ ] Run `tests/` end-to-end on both targets.
+- [ ] Regenerate one small test program for native target.
+      Diff the entry point / init-chain structure against a known-good baseline.
+- [ ] Run `tests/` end-to-end.
 
 ## When to run
 
-- After any change to `compiler/`, `jsbackend/`, `transform/`, `builder/`.
+- After any change to `compiler/`, `transform/`, `builder/`.
 - After bumping `vendor/golang.org/x/tools/`.
 - Before release tags.
-- When a user reports behavior that only reproduces in one backend.
+- When a user reports behavior that only reproduces on one target.
 
 ## When a check fires
 

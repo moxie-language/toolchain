@@ -497,8 +497,8 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet) []byte {
 // type positions: function params, returns, struct fields, var declarations,
 // type specs, map keys/values, slice elements, and interface method signatures.
 // This is the AST-level equivalent of what mxpurify does to source files,
-// needed by moxiejs since it uses the standard Go type checker (which treats
-// string and []byte as distinct types).
+// needed because the standard Go type checker treats string and []byte as
+// distinct types.
 func RewriteStringTypes(file *ast.File) {
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch node := n.(type) {
@@ -2233,8 +2233,8 @@ func RewriteExemptCrossBoundaryCalls(file *ast.File) {
 // RewriteTextConcat converts syntactically-detectable text concatenations
 // (ADD or OR between text operands) to __moxie_concat(X, Y) calls and
 // syntactic text comparisons (EQL/NEQ/LSS/LEQ/GTR/GEQ) to __moxie_eq /
-// __moxie_lt calls, BEFORE typecheck. Used by moxiejs, which lacks native
-// moxie's patched go/types that accepts []byte ops.
+// __moxie_lt calls, BEFORE typecheck. Runs before the patched go/types
+// that accepts []byte ops.
 //
 // Runs after RewriteStringLiterals so stringlit operands are already wrapped
 // in []byte(...). An operand is considered text when it is:
@@ -3217,9 +3217,9 @@ func ApplyByteSwitchRewrites(switches []*ast.SwitchStmt) {
 }
 
 // FindByteMapKeys returns IndexExpr nodes where the container is a
-// map[string]V and the index expression has type []byte. moxiejs leaves
-// map keys as `string` (because []byte is not comparable under stock
-// go/types) but Moxie source often indexes such maps with []byte values.
+// map[string]V and the index expression has type []byte. Map keys stay
+// as `string` ([]byte is not comparable under stock go/types) but Moxie
+// source often indexes such maps with []byte values.
 // Each matched IndexExpr has its Index wrapped in a string(...) conversion
 // by ApplyByteMapKeyRewrites so the second typecheck accepts it.
 //

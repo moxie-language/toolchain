@@ -1,0 +1,155 @@
+package blake2b
+
+import (
+	"testing"
+)
+
+func hexDecode(s string) []byte {
+	out := []byte{:0:len(s) / 2}
+	for i := 0; i < len(s); i += 2 {
+		hi := hexVal(s[i])
+		lo := hexVal(s[i+1])
+		out = append(out, hi<<4|lo)
+	}
+	return out
+}
+
+func hexVal(c byte) byte {
+	if c >= '0' && c <= '9' {
+		return c - '0'
+	}
+	if c >= 'a' && c <= 'f' {
+		return c - 'a' + 10
+	}
+	if c >= 'A' && c <= 'F' {
+		return c - 'A' + 10
+	}
+	return 0
+}
+
+func hexEncode(b []byte) string {
+	const hextable = "0123456789abcdef"
+	out := []byte{:0:len(b) * 2}
+	for i := 0; i < len(b); i++ {
+		out = append(out, hextable[b[i]>>4])
+		out = append(out, hextable[b[i]&0x0f])
+	}
+	return string(out)
+}
+
+func TestSum512Empty(t *testing.T) {
+	got := Sum512(nil)
+	want := "786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce"
+	gotHex := hexEncode(got[:])
+	if gotHex != want {
+		t.Fatal("Sum512(nil): got " | gotHex | ", want " | want)
+	}
+}
+
+func TestSum512Abc(t *testing.T) {
+	got := Sum512([]byte("abc"))
+	want := "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923"
+	gotHex := hexEncode(got[:])
+	if gotHex != want {
+		t.Fatal("Sum512(abc): got " | gotHex | ", want " | want)
+	}
+}
+
+func TestSum256Abc(t *testing.T) {
+	got := Sum256([]byte("abc"))
+	want := "bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319"
+	gotHex := hexEncode(got[:])
+	if gotHex != want {
+		t.Fatal("Sum256(abc): got " | gotHex | ", want " | want)
+	}
+}
+
+func TestKeyedHash(t *testing.T) {
+	key := hexDecode("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f")
+	input := []byte{:255}
+	for i := range input {
+		input[i] = byte(i)
+	}
+
+	// RFC 7693 Appendix E: keyed BLAKE2b-512, input length 0
+	h, err := New512(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Write(input[:0])
+	sum := h.Sum(nil)
+	got := hexEncode(sum)
+	want := "10ebb67700b1868efb4417987acf4690ae9d972fb7a590c2f02871799aaa4786b5e996e8f0f4eb981fc214b005f42d2ff4233499391653df7aefcbc13fc51568"
+	if got != want {
+		t.Fatal("keyed len=0: got " | got | ", want " | want)
+	}
+
+	// Input length 3
+	h, err = New512(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Write(input[:3])
+	sum = h.Sum(nil)
+	got = hexEncode(sum)
+	want = "33d0825dddf7ada99b0e7e307104ad07ca9cfd9692214f1561356315e784f3e5a17e364ae9dbb14cb2036df932b77f4b292761365fb328de7afdc6d8998f5fc1"
+	if got != want {
+		t.Fatal("keyed len=3: got " | got | ", want " | want)
+	}
+
+	// Input length 128 (full block)
+	h, err = New512(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Write(input[:128])
+	sum = h.Sum(nil)
+	got = hexEncode(sum)
+	want = "72065ee4dd91c2d8509fa1fc28a37c7fc9fa7d5b3f8ad3d0d7a25626b57b1b44788d4caf806290425f9890a3a2a35a905ab4b37acfd0da6e4517b2525c9651e4"
+	if got != want {
+		t.Fatal("keyed len=128: got " | got | ", want " | want)
+	}
+
+	// Input length 255 (max)
+	h, err = New512(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Write(input[:255])
+	sum = h.Sum(nil)
+	got = hexEncode(sum)
+	want = "142709d62e28fcccd0af97fad0f8465b971e82201dc51070faa0372aa43e92484be1c1e73ba10906d5d1853db6a4106e0a7bf9800d373d6dee2d46d62ef2a461"
+	if got != want {
+		t.Fatal("keyed len=255: got " | got | ", want " | want)
+	}
+}
+
+func TestWriteIncremental(t *testing.T) {
+	data := []byte("The quick brown fox jumps over the lazy dog")
+	full := Sum512(data)
+
+	h, _ := New512(nil)
+	for i := 0; i < len(data); i++ {
+		h.Write(data[i : i+1])
+	}
+	inc := h.Sum(nil)
+	for i := range full {
+		if full[i] != inc[i] {
+			t.Fatal("incremental write mismatch")
+		}
+	}
+}
+
+func TestReset(t *testing.T) {
+	h, _ := New512(nil)
+	h.Write([]byte("first"))
+	h.Reset()
+	h.Write([]byte("abc"))
+	sum := h.Sum(nil)
+	direct := Sum512([]byte("abc"))
+	for i := range sum {
+		if sum[i] != direct[i] {
+			t.Fatal("reset mismatch")
+		}
+	}
+}

@@ -542,15 +542,13 @@ The JS target provides typed bridges to browser APIs:
 
 ### JS Runtime Shims (added v1.2.0 / v1.1.4)
 
-Helper modules that ship alongside `moxiejs`-emitted output in
-`moxie/jsruntime/`. They are not `import`-able from Moxie source;
-moxiejs wires them into generated bridge code:
+Helper modules in `moxie/jsruntime/` used as WASM host shims.
+Not `import`-able from Moxie source; wired into WASM bridge code:
 
 | Shim | Purpose |
 |------|---------|
 | `aead.mjs` | XChaCha20-Poly1305 for IndexedDB-at-rest encryption |
 | `p256.mjs` | NIST P-256 ECDH / ECDSA (pure-JS BigInt implementation) |
-| `node.mjs` | Node.js stdio bridge for CLI-shaped Moxie programs |
 | `ed25519.mjs` | Ed25519 signatures |
 | `x25519.mjs` | X25519 ECDH |
 | `poly1305.mjs` | Poly1305 MAC |

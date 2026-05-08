@@ -43,11 +43,6 @@ builder (orchestration)
 Static ELF/Mach-O binary
 ```
 
-For the JS target, `jsbackend` replaces the LLVM path:
-
-```
-Moxie SSA → jsbackend → JavaScript + jsruntime
-```
 
 ## Cooperative Scheduler
 

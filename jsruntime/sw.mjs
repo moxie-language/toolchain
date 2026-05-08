@@ -165,6 +165,75 @@ export function RespondWithCacheFirst(eventId) {
   );
 }
 
+// RespondWithProxyCache handles /proxy/<base64url> requests with a
+// normalized cache key (the decoded upstream URL) so two different
+// base64url encodings of the same upstream share one cache entry. Stamps
+// each cached Response with X-Smesh-Cached-At for age-based prune. Cache
+// hits younger than 30 days are returned; older or missing entries fall
+// through to network and are re-cached on success.
+const PROXY_CACHE_NAME = 'smesh-proxy';
+const PROXY_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+function _decodeProxyB64Url(s) {
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  try { return atob(s); } catch (e) { return ''; }
+}
+function _proxyCacheKey(requestUrl) {
+  const idx = requestUrl.indexOf('/proxy/');
+  if (idx < 0) return requestUrl;
+  const enc = requestUrl.substr(idx + '/proxy/'.length);
+  const decoded = _decodeProxyB64Url(enc);
+  if (!decoded) return requestUrl;
+  return new URL('/__proxy/' + encodeURIComponent(decoded), requestUrl).toString();
+}
+async function _wrapWithCachedAt(resp) {
+  const blob = await resp.clone().blob();
+  const headers = new Headers(resp.headers);
+  headers.set('X-Smesh-Cached-At', String(Date.now()));
+  return new Response(blob, { status: resp.status, statusText: resp.statusText, headers });
+}
+export function RespondWithProxyCache(eventId) {
+  const ev = _events.get(eventId);
+  if (!ev) return;
+  const key = _proxyCacheKey(ev.request.url);
+  _fetchResolvers.set(eventId, (async () => {
+    const cache = await caches.open(PROXY_CACHE_NAME);
+    const cached = await cache.match(key);
+    if (cached) {
+      const stamp = Number(cached.headers.get('X-Smesh-Cached-At') || '0');
+      if (stamp && Date.now() - stamp < PROXY_CACHE_TTL_MS) {
+        return cached;
+      }
+    }
+    const resp = await fetch(ev.request);
+    if (resp.ok) {
+      const wrapped = await _wrapWithCachedAt(resp.clone());
+      cache.put(key, wrapped).catch(() => {});
+    }
+    return resp;
+  })());
+}
+export function PruneProxyCache(maxAgeMs, fn) {
+  (async () => {
+    try {
+      const cache = await caches.open(PROXY_CACHE_NAME);
+      const keys = await cache.keys();
+      const now = Date.now();
+      for (const req of keys) {
+        const resp = await cache.match(req);
+        if (!resp) continue;
+        const stamp = Number(resp.headers.get('X-Smesh-Cached-At') || '0');
+        if (!stamp || now - stamp > maxAgeMs) {
+          await cache.delete(req);
+        }
+      }
+    } catch (e) {
+      // best-effort
+    }
+    if (fn) fn();
+  })();
+}
+
 // RespondWithNetworkFirst tries network, falls back to cache.
 // Updates cache on successful fetch so offline still works.
 export function RespondWithNetworkFirst(eventId) {

@@ -125,8 +125,7 @@ moxie/
 ├── transform/               # LLVM IR optimization passes
 ├── interp/                  # Compile-time partial evaluation
 ├── diagnostics/             # Error reporting
-├── jsbackend/               # SSA → JavaScript compiler
-├── jsruntime/               # JS runtime (channels, domains, browser bridges)
+├── jsruntime/               # JS host shims for WASM target (channels, domains, browser bridges)
 ├── src/                     # Target-side sources (compiled INTO programs)
 │   ├── runtime/             # Runtime: scheduler, channels, GC, spawn
 │   ├── internal/task/       # Cooperative task system, context switching

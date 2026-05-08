@@ -92,6 +92,14 @@ Five laws. Five elements. One generative cycle. One destructive cycle. Every arc
 - Do not introduce abstractions "for future flexibility"
 - Do not modify build configuration without approval
 
+## Browser Target: WASM Only
+
+Moxie's browser target is WebAssembly exclusively. New web-app surface area lives in `jsruntime/`.
+
+Cross-domain communication primitives (page <-> service worker, page <-> dedicated workers, worker <-> worker via MessagePort, SharedArrayBuffer-backed channels for moxie spawn) are exposed to Moxie code via thin JavaScript shims in `jsruntime/`. The shims pass bytes/strings/integers across the WASM boundary and call the corresponding browser API; no business logic, no framework abstraction layers. A generic Web API exposed once in `jsruntime/<name>/` is reusable by any downstream Moxie web app.
+
+Generic Web APIs that belong upstream in `jsruntime/`: DOM, IndexedDB, WebSocket, MessagePort, Fetch, Cache API, ServiceWorker lifecycle, BroadcastChannel, WebRTC, etc. App-specific protocol shims belong downstream in the consuming repo.
+
 ## Code Style
 
 - Direct, minimal, no abstraction for abstraction's sake
@@ -105,8 +113,7 @@ Five laws. Five elements. One generative cycle. One destructive cycle. Every arc
 - Prefer one file over many files when the logic is related
 - When writing utility scripts, tooling, or standalone programs, always use Moxieunless there is a specific technical reason requiring another language. This means: no reflection, no cgo, no full runtime features. If a task seems like it needs Python, reconsider whether it can be done in Moxie. It can always be done in Moxie.
 - Remember that Moxie has no parallelism (no goroutines), no reflection, no arbitrary string/bytes distinction (remember to treat these as encodings and preserve UTF-8 byte sequences instead of breaking them up), spawn() boundary channels are always unbuffered (the network connection is a buffer) and use buffered channels as a convenient notation for FIFO queues. There is no concurrency primitives because there is only one thread of execution.
-- For browser/frontend moxie code, use the moxiejs target (Moxie compiled to ES modules). If JS shims or host-bridging are required, those live in moxie/jsruntime and moxie/cmd/moxiejs. Native targets (linux/amd64, darwin/arm64, etc.) remain first-class — relays, servers, and CLI tools compile natively via `moxie build`.
-- **JS target: `string` and `[]byte` produce different runtime objects.** In the Moxie type system they are identical — same layout, mutually assignable, no distinction. But the moxiejs backend preserves the source spelling in emitted struct descriptors and the jsruntime uses it as a representation hint: `string` → native JS string, `[]byte` → `Slice` object. These are not interchangeable at the JS boundary. A field declared `[]byte` arriving from the relay as a native JS string will be mishandled — UTF-8 multi-byte sequences (em-dash, CJK, emoji) corrupt silently. **Always declare struct fields that hold text as `string`, not `[]byte`, when targeting JS.** The javascript target boundary with moxie is adversarial.
+- For browser/frontend moxie code, compile to WASM (`GOOS=js GOARCH=wasm`). JS shims and host-bridging live in `jsruntime/`. Native targets (linux/amd64, darwin/arm64, etc.) remain first-class - relays, servers, and CLI tools compile via `moxie build`.
 
 ## Architecture Reading
 
@@ -120,7 +127,7 @@ Do not assume project structure from convention. Read the actual code.
 
 ## Complexity of Tasks Estimation
 
-Complexity estimates from general web-stack priors do not apply; measure against the Moxie/moxiejs baseline, not the npm baseline. moxiejs is orders of magnitude less complex and features flow easily.
+Complexity estimates from general web-stack priors do not apply; measure against the Moxie/moxiejs baseline, not the npm baseline. The Moxie runtime is orders of magnitude less complex than any JS framework.
 
 ## Scope of Task
 

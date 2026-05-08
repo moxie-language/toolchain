@@ -1,0 +1,61 @@
+package secp256k1
+
+import "errors"
+
+// TestSignedRadix16 verifies the constant-time ScalarMult handles the
+// digits[64]==1 edge case. The scalar n-1 (group order minus one) has top
+// two nibbles 0xF/0xF, so carry propagates all the way through digit 63
+// into digit 64 during scalarToSignedRadix16 decomposition.
+//
+// (n-1)*G == -G, which has the same x-coordinate as G itself.
+// PubKeyFromSecKey(n-1) must therefore equal PubKeyFromSecKey(1) == Gx.
+func TestSignedRadix16() error {
+	// n-1 in big-endian (32 bytes): FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364140
+	nMinus1 := [32]byte{
+		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
+		0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B,
+		0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x40,
+	}
+
+	// Verify digits[64] == 1 for n-1.
+	k := scalarFromBytes(nMinus1[:])
+	digits := scalarToSignedRadix16(k)
+	if digits[64] != 1 {
+		return errors.New("scalarToSignedRadix16: expected digits[64]==1 for scalar n-1")
+	}
+
+	// Verify all digits[0..63] are in [-8, 7].
+	for i := 0; i < 64; i++ {
+		if digits[i] < -8 || digits[i] > 7 {
+			return errors.New("scalarToSignedRadix16: digit out of range")
+		}
+	}
+
+	// (n-1)*G == -G, x-coordinate equals Gx.
+	// PubKeyFromSecKey returns the x-coordinate of seckey*G.
+	pubNM1, ok := PubKeyFromSecKey(nMinus1)
+	if !ok {
+		return errors.New("PubKeyFromSecKey(n-1) failed")
+	}
+
+	// seckey 1: 1*G = G.
+	var one [32]byte
+	one[31] = 1
+	pub1, ok := PubKeyFromSecKey(one)
+	if !ok {
+		return errors.New("PubKeyFromSecKey(1) failed")
+	}
+
+	if pubNM1 != pub1 {
+		return errors.New("PubKeyFromSecKey(n-1) != PubKeyFromSecKey(1): x-coordinate mismatch")
+	}
+
+	// Also verify against the known Gx constant.
+	gx := feToBytes(G.X)
+	if pubNM1 != gx {
+		return errors.New("PubKeyFromSecKey(n-1) != Gx: wrong x-coordinate")
+	}
+
+	return nil
+}

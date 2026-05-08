@@ -915,6 +915,10 @@ export function LocationReload() {
   if (typeof location !== 'undefined') location.reload();
 }
 
+export function LocationAssign(url) {
+  if (typeof location !== 'undefined') location.assign(url);
+}
+
 export function HardRefresh() {
   var p = [];
   if (typeof caches !== 'undefined') {

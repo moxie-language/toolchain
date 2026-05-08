@@ -1,9 +1,6 @@
 package loader
 
 // Moxie source rewrites — thin wrappers around moxie/mxtext.
-//
-// The actual rewrite logic lives in moxie/mxtext so it can be shared
-// with cmd/moxiejs (which cannot import moxie/loader due to cgo deps).
 
 import (
 	"go/ast"
