@@ -7,6 +7,7 @@ import { setKey as _setEncKey, sealStr, openStr, hasKey as _encHasKey } from './
 
 const _elements = new Map();
 const _nodeToId = new WeakMap();
+const _elemCallbacks = new Map();
 let _nextId = 1; // Safe up to 2^53 in JS. No wrap needed.
 const _callbacks = new Map();
 let _nextCb = 1;
@@ -409,7 +410,12 @@ export function RemoveClass(elId, cls) {
 export function AddEventListener(elId, event, callbackId) {
   const el = _elements.get(elId);
   const cb = _callbacks.get(callbackId);
-  if (el && cb) el.addEventListener(event, cb);
+  if (el && cb) {
+    el.addEventListener(event, cb);
+    let set = _elemCallbacks.get(elId);
+    if (!set) { set = new Set(); _elemCallbacks.set(elId, set); }
+    set.add(callbackId);
+  }
 }
 
 // AddEnterKeyListener fires callback when Enter is pressed on the element.
@@ -488,23 +494,33 @@ export function ClearTimeout(id) {
   clearTimeout(id);
 }
 
+function _releaseHandle(id, el) {
+  if (el) {
+    _nodeToId.delete(el);
+    if (el.tagName === 'IMG' || el.tagName === 'VIDEO') {
+      const src = el.src;
+      if (src && src.startsWith('blob:')) URL.revokeObjectURL(src);
+    }
+  }
+  _elements.delete(id);
+  const cbs = _elemCallbacks.get(id);
+  if (cbs) {
+    cbs.forEach(cbId => _callbacks.delete(cbId));
+    _elemCallbacks.delete(id);
+  }
+}
+
 // Cleanup: release element handle.
 export function ReleaseElement(id) {
-  const el = _elements.get(id);
-  if (el) _nodeToId.delete(el);
-  _elements.delete(id);
+  _releaseHandle(id, _elements.get(id));
 }
 
 // Bulk release: drop all handles in the ids array.
 export function ReleaseAll(ids) {
-  for (let i = 0; i < ids.length; i++) {
-    const el = _elements.get(ids[i]);
-    if (el) _nodeToId.delete(el);
-    _elements.delete(ids[i]);
-  }
+  for (let i = 0; i < ids.length; i++) _releaseHandle(ids[i], _elements.get(ids[i]));
 }
 
-// ReleaseChildren releases handles for all DOM descendants of el (but not el itself).
+// ReleaseChildren releases handles, blob URLs, and callbacks for all DOM descendants.
 export function ReleaseChildren(elId) {
   const root = _elements.get(elId);
   if (!root) return;
@@ -516,10 +532,7 @@ export function ReleaseChildren(elId) {
     const sub = node.children;
     for (let i = 0; i < sub.length; i++) stack.push(sub[i]);
     const id = _nodeToId.get(node);
-    if (id !== undefined) {
-      _elements.delete(id);
-      _nodeToId.delete(node);
-    }
+    if (id !== undefined) _releaseHandle(id, node);
   }
 }
 
