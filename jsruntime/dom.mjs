@@ -8,6 +8,7 @@ import { setKey as _setEncKey, sealStr, openStr, hasKey as _encHasKey } from './
 const _elements = new Map();
 const _nodeToId = new WeakMap();
 const _elemCallbacks = new Map();
+const _cbEventInfo = new Map(); // cbId → {el, event, fn}
 let _nextId = 1; // Safe up to 2^53 in JS. No wrap needed.
 const _callbacks = new Map();
 let _nextCb = 1;
@@ -415,6 +416,7 @@ export function AddEventListener(elId, event, callbackId) {
     let set = _elemCallbacks.get(elId);
     if (!set) { set = new Set(); _elemCallbacks.set(elId, set); }
     set.add(callbackId);
+    _cbEventInfo.set(callbackId, { el, event, fn: cb });
   }
 }
 
@@ -505,7 +507,14 @@ function _releaseHandle(id, el) {
   _elements.delete(id);
   const cbs = _elemCallbacks.get(id);
   if (cbs) {
-    cbs.forEach(cbId => _callbacks.delete(cbId));
+    cbs.forEach(cbId => {
+      const info = _cbEventInfo.get(cbId);
+      if (info) {
+        try { info.el.removeEventListener(info.event, info.fn); } catch(_) {}
+        _cbEventInfo.delete(cbId);
+      }
+      _callbacks.delete(cbId);
+    });
     _elemCallbacks.delete(id);
   }
 }
