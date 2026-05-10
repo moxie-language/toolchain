@@ -4,7 +4,7 @@
 import { setKey as _setEncKey, sealStr, openStr, hasKey as _encHasKey } from './aead.mjs';
 
 const DB_NAME = 'smesh';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 let _db = null;
 let _appVersion = '';
 
@@ -41,7 +41,15 @@ function _openDB(onReady) {
     onReady();
   };
   req.onerror = (e) => {
-    console.error('idb: open error:', e.target.error);
+    const err = e.target.error;
+    if (err && err.name === 'VersionError') {
+      console.warn('idb: version downgrade, deleting stale DB');
+      const del = indexedDB.deleteDatabase(DB_NAME);
+      del.onsuccess = () => _openDB(onReady);
+      del.onerror = () => onReady();
+      return;
+    }
+    console.error('idb: open error:', err);
     onReady();
   };
 }

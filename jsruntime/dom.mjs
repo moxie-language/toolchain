@@ -902,10 +902,12 @@ function _idbStr(v) {
   return String(v);
 }
 
+let _openIDBPromise = null;
 function _openIDB() {
-  return new Promise(function(resolve, reject) {
-    if (_idb) { resolve(_idb); return; }
-    const req = indexedDB.open(_idbName, 2);
+  if (_idb) return Promise.resolve(_idb);
+  if (_openIDBPromise) return _openIDBPromise;
+  _openIDBPromise = new Promise(function(resolve, reject) {
+    const req = indexedDB.open(_idbName, 3);
     req.onupgradeneeded = function(e) {
       const db = e.target.result;
       for (const s of _idbStores) {
@@ -913,8 +915,19 @@ function _openIDB() {
       }
     };
     req.onsuccess = function(e) { _idb = e.target.result; resolve(_idb); };
-    req.onerror = function() { reject(req.error); };
-  });
+    req.onerror = function() {
+      var err = req.error;
+      if (err && err.name === 'VersionError') {
+        _openIDBPromise = null;
+        var del = indexedDB.deleteDatabase(_idbName);
+        del.onsuccess = function() { _idb = null; _openIDB().then(resolve, reject); };
+        del.onerror = function() { reject(err); };
+        return;
+      }
+      reject(err);
+    };
+  }).finally(function() { _openIDBPromise = null; });
+  return _openIDBPromise;
 }
 
 export function IDBGet(store, key, fn) {
@@ -936,7 +949,7 @@ export function IDBPut(store, key, value) {
     const tx = db.transaction(s, 'readwrite');
     const v = _encHasKey() ? sealStr('' + value) : value;
     tx.objectStore(s).put(v, k);
-  });
+  }).catch(function() {});
 }
 
 export function IDBGetAll(store, fn, done) {
