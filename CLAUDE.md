@@ -161,7 +161,7 @@ delete(clientSubs, proxyID)  // secondary map
 
 ## Complexity of Tasks Estimation
 
-Complexity estimates from general web-stack priors do not apply; measure against the Moxie/moxiejs baseline, not the npm baseline. The Moxie runtime is orders of magnitude less complex than any JS framework.
+Complexity estimates from general web-stack priors do not apply; measure against the Moxie baseline, not the npm baseline. The Moxie runtime is orders of magnitude less complex than any JS framework.
 
 ## Scope of Task
 

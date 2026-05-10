@@ -29,18 +29,11 @@ echo "building release $NAME ..." >&2
 # build moxie compiler
 ./build.sh
 
-# verify moxiejs binary exists (tracked in git, not built from source)
-if [ ! -f moxiejs ]; then
-    echo "error: moxiejs binary not found" >&2
-    exit 1
-fi
-
 # stage the release tree
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin"
 
 cp moxie "$STAGE/bin/"
-cp moxiejs "$STAGE/bin/"
 
 # stdlib sources
 cp -a src "$STAGE/src"
@@ -53,7 +46,6 @@ cp -a jsruntime "$STAGE/jsruntime"
 
 # strip
 strip "$STAGE/bin/moxie" 2>/dev/null || true
-strip "$STAGE/bin/moxiejs" 2>/dev/null || true
 
 echo "creating tarball ..." >&2
 tar czf "$TARBALL" -C /tmp "$NAME"

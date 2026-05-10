@@ -64,4 +64,3 @@ echo "  export PATH=\"$INSTALL_DIR/bin:\$PATH\"" >&2
 echo "  export MOXIEROOT=\"$INSTALL_DIR\"" >&2
 echo "" >&2
 echo "moxie requires LLVM 19 (libLLVM-19, libclang)." >&2
-echo "moxiejs has no external dependencies." >&2
