@@ -559,7 +559,7 @@ export function ReleaseChildren(elId) {
 
 // Fetch a URL as text, call fn with result.
 export function FetchText(url, fn) {
-  fetch(url).then(r => r.text()).then(t => { if (fn) fn(t); });
+  fetch(url).then(r => r.text()).then(t => { if (fn) fn(t); }).catch(() => { if (fn) fn(''); });
 }
 
 // Navigation.
