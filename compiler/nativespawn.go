@@ -74,7 +74,16 @@ func (c *compilerContext) scanNativeSpawnTargets(pkg *ssa.Package) {
 	_ = pkg
 }
 
-// scanFnDeep scans fn and recursively scans its anonymous funcs.
+// scanFnDeep scans fn, its anonymous funcs, and its direct callees.
+// Following direct callees is required to find spawn() sites inside
+// package init() bodies: source-level `func init()` declarations compile
+// to SSA functions named init$1, init$2, etc., which are NOT package
+// Members — they are only reachable as callees of the synthetic init
+// wrapper. Without callee traversal, any spawn() call inside an init()
+// is invisible to the scanner, so the target's channels are never
+// registered and MarkChildPipeChannel is never emitted in the child
+// process, leaving the child's channel.pipeBoundFd == 0 and breaking
+// all channel I/O across that spawn boundary.
 func (c *compilerContext) scanFnDeep(fn *ssa.Function, seen, scanned map[*ssa.Function]bool) {
 	if scanned[fn] {
 		return
@@ -83,6 +92,16 @@ func (c *compilerContext) scanFnDeep(fn *ssa.Function, seen, scanned map[*ssa.Fu
 	c.scanFnForNativeSpawn(fn, seen)
 	for _, anon := range fn.AnonFuncs {
 		c.scanFnDeep(anon, seen, scanned)
+	}
+	// Follow direct static callees so init$N bodies are reachable.
+	for _, blk := range fn.Blocks {
+		for _, instr := range blk.Instrs {
+			if call, ok := instr.(*ssa.Call); ok {
+				if callee, ok := call.Call.Value.(*ssa.Function); ok {
+					c.scanFnDeep(callee, seen, scanned)
+				}
+			}
+		}
 	}
 }
 

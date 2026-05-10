@@ -877,6 +877,52 @@ export function WriteClipboard(text, fn) {
   }
 }
 
+// WritePrimarySelection writes text to the X11 primary selection (middle-click
+// paste buffer). Creates an off-screen textarea, selects it, and relies on the
+// browser propagating the selection to the X server. No-op on non-X11 platforms.
+export function WritePrimarySelection(text) {
+  const s = '' + text;
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = s;
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    ta.style.left = '-9999px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  } catch (_) {}
+}
+
+// CopyImageToClipboard copies an image element's pixel data to the clipboard
+// as image/png via ClipboardItem. Requires a secure context (HTTPS or localhost).
+// fn is called with true on success, false on failure or if API unavailable.
+export function CopyImageToClipboard(elId, fn) {
+  const img = _elements.get(elId);
+  if (!img || !navigator.clipboard || !window.ClipboardItem) {
+    fn(false);
+    return;
+  }
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth || img.width || 1;
+    canvas.height = img.naturalHeight || img.height || 1;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    canvas.toBlob(function(blob) {
+      if (!blob) { fn(false); return; }
+      navigator.clipboard.write([new ClipboardItem({'image/png': blob})])
+        .then(function() { fn(true); })
+        .catch(function() { fn(false); });
+    }, 'image/png');
+  } catch (_) {
+    fn(false);
+  }
+}
+
 // IDB encryption key (set once per session).
 export function IDBSetEncKey(hexKey) {
   const hex = '' + hexKey;
