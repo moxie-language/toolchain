@@ -2,7 +2,12 @@
 
 # Moxie
 
-> a programming language without fluff
+*a programming language without fluff*
+
+> "Perfection is achieved, not when there is nothing more to add, but when there is nothing left to take away."
+> - Antoine de Saint-Exupery
+
+*Saint-Exupery was an aircraft engineer. Software is like aircraft - what fails in the air is usually needless complexity.*
 
 A compiled systems language for domain-isolated event-driven programs. Each program is a tree of **domains** — isolated OS processes communicating through serialized IPC channels. No goroutines, no shared memory, no data races.
 
