@@ -69,6 +69,13 @@ export function QuerySelector(sel) {
   return el ? _trackEl(el) : 0;
 }
 
+export function QuerySelectorFrom(rootId, sel) {
+  const root = _elements.get(rootId);
+  if (!root) return 0;
+  const el = root.querySelector(sel);
+  return el ? _trackEl(el) : 0;
+}
+
 export function Body() {
   ensureBody();
   return 0;
@@ -321,6 +328,11 @@ export function SetAttribute(elId, name, value) {
 export function RemoveAttribute(elId, name) {
   const el = _elements.get(elId);
   if (el && el.removeAttribute) el.removeAttribute(name);
+}
+
+export function GetAttribute(elId, name) {
+  const el = _elements.get(elId);
+  return (el && el.getAttribute) ? (el.getAttribute(name) || '') : '';
 }
 
 export function SetTextContent(elId, text) {

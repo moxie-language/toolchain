@@ -44,22 +44,21 @@ var restrictedTypes = map[string]string{
 }
 
 // isUserPackage returns true if a package should be subject to Moxie
-// language restrictions. All permanently exempt packages implement
-// low-level primitives or syscall interfaces.
+// language restrictions. Stdlib and stdlib-vendored packages are exempt.
+// User packages (identified by dots in the import path from the module
+// path) get full restrictions. "internal/" has no special semantics.
 func isUserPackage(pkg *ssa.Package) bool {
 	if pkg == nil {
 		return false
 	}
 	path := pkg.Pkg.Path()
-	if strings.HasPrefix(path, "internal/") || // internal packages
-		strings.Contains(path, "/internal/") || // nested internals
-		strings.HasPrefix(path, "runtime") || // language primitives
-		strings.HasPrefix(path, "unsafe") || // language primitive
-		strings.HasPrefix(path, "os") || // FDs, syscall wrappers
-		strings.HasPrefix(path, "syscall") { // syscall interfaces
+	if path == "main" || path == "command-line-arguments" {
+		return true
+	}
+	if strings.HasPrefix(path, "golang.org/x/") {
 		return false
 	}
-	return true
+	return strings.Contains(path, ".")
 }
 
 // packageImportsUnsafe returns true if the package imports "unsafe".

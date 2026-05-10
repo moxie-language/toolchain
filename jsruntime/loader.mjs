@@ -2,6 +2,9 @@
 // Reuses existing jsruntime modules for browser API surface.
 
 import * as dom from './dom.mjs';
+import * as webgl from './webgl.mjs';
+import * as app from './app.mjs';
+import * as text from './text.mjs';
 import * as localstorage from './localstorage.mjs';
 import * as ws from './ws.mjs';
 import * as schnorr from './schnorr.mjs';
@@ -241,6 +244,7 @@ function buildBridge() {
     dom_create_text_node(p, l, _c) { return dom.CreateTextNode(readStr(p, l)); },
     dom_get_element_by_id(p, l, _c) { return dom.GetElementById(readStr(p, l)); },
     dom_query_selector(p, l, _c) { return dom.QuerySelector(readStr(p, l)); },
+    dom_query_selector_from(root, p, l, _c) { return dom.QuerySelectorFrom(root, readStr(p, l)); },
     dom_append_child(parent, child) { dom.AppendChild(parent, child); },
     dom_remove_child(parent, child) { dom.RemoveChild(parent, child); },
     dom_remove(el) { dom.Remove(el); },
@@ -252,6 +256,8 @@ function buildBridge() {
     dom_set_attribute(el, np, nl, _nc, vp, vl, _vc) {
       dom.SetAttribute(el, readStr(np, nl), readStr(vp, vl));
     },
+    dom_remove_attribute(el, np, nl, _nc) { dom.RemoveAttribute(el, readStr(np, nl)); },
+    dom_get_attribute(el, np, nl, _nc, op, ol) { setOutStr(op, ol, dom.GetAttribute(el, readStr(np, nl))); },
     dom_set_text_content(el, p, l, _c) { dom.SetTextContent(el, readStr(p, l)); },
     dom_set_inner_html(el, p, l, _c) { dom.SetInnerHTML(el, readStr(p, l)); },
     dom_set_style(el, pp, pl, _pc, vp, vl, _vc) {
@@ -683,6 +689,99 @@ function buildBridge() {
     sw_now_seconds() { return BigInt(Math.floor(Date.now() / 1000)); },
     sw_now_millis() { return BigInt(Date.now()); },
     sw_log(p, l, _c) { console.log(readStr(p, l)); },
+
+    // --- webgl ---
+    webgl_CreateContext(canvasId) { return webgl.CreateContext(canvasId); },
+    webgl_CreateContextFromHandle(el) { return webgl.CreateContextFromHandle(el); },
+    webgl_DeleteContext(ctx) { webgl.DeleteContext(ctx); },
+    webgl_Enable(ctx, cap) { webgl.Enable(ctx, cap); },
+    webgl_Disable(ctx, cap) { webgl.Disable(ctx, cap); },
+    webgl_Viewport(ctx, x, y, w, h) { webgl.Viewport(ctx, x, y, w, h); },
+    webgl_Scissor(ctx, x, y, w, h) { webgl.Scissor(ctx, x, y, w, h); },
+    webgl_BlendFunc(ctx, src, dst) { webgl.BlendFunc(ctx, src, dst); },
+    webgl_BlendFuncSeparate(ctx, sr, dr, sa, da) { webgl.BlendFuncSeparate(ctx, sr, dr, sa, da); },
+    webgl_BlendEquation(ctx, mode) { webgl.BlendEquation(ctx, mode); },
+    webgl_DepthFunc(ctx, fn) { webgl.DepthFunc(ctx, fn); },
+    webgl_DepthMask(ctx, flag) { webgl.DepthMask(ctx, flag); },
+    webgl_ClearColor(ctx, r, g, b, a) { webgl.ClearColor(ctx, r, g, b, a); },
+    webgl_ClearDepth(ctx, d) { webgl.ClearDepth(ctx, d); },
+    webgl_Clear(ctx, mask) { webgl.Clear(ctx, mask); },
+    webgl_Flush(ctx) { webgl.Flush(ctx); },
+    webgl_Finish(ctx) { webgl.Finish(ctx); },
+    webgl_GetError(ctx) { return webgl.GetError(ctx); },
+    webgl_GetInteger(ctx, pname) { return webgl.GetInteger(ctx, pname); },
+    webgl_IsEnabled(ctx, cap) { return webgl.IsEnabled(ctx, cap); },
+    webgl_PixelStorei(ctx, pname, param) { webgl.PixelStorei(ctx, pname, param); },
+    webgl_ReadPixels(ctx, x, y, w, h, fmt, typ, bufPtr, bufLen) { webgl.ReadPixels(ctx, x, y, w, h, fmt, typ, bufPtr, bufLen); },
+    webgl_CreateBuffer(ctx) { return webgl.CreateBuffer(ctx); },
+    webgl_DeleteBuffer(ctx, buf) { webgl.DeleteBuffer(ctx, buf); },
+    webgl_BindBuffer(ctx, target, buf) { webgl.BindBuffer(ctx, target, buf); },
+    webgl_BufferData(ctx, target, ptr, len, usage) { webgl.BufferData(ctx, target, ptr, len, usage); },
+    webgl_BufferSubData(ctx, target, off, ptr, len) { webgl.BufferSubData(ctx, target, off, ptr, len); },
+    webgl_CreateTexture(ctx) { return webgl.CreateTexture(ctx); },
+    webgl_DeleteTexture(ctx, tex) { webgl.DeleteTexture(ctx, tex); },
+    webgl_BindTexture(ctx, target, tex) { webgl.BindTexture(ctx, target, tex); },
+    webgl_ActiveTexture(ctx, unit) { webgl.ActiveTexture(ctx, unit); },
+    webgl_TexParameteri(ctx, target, pname, param) { webgl.TexParameteri(ctx, target, pname, param); },
+    webgl_TexImage2D(ctx, target, lvl, ifmt, w, h, border, fmt, typ, ptr, len) { webgl.TexImage2D(ctx, target, lvl, ifmt, w, h, border, fmt, typ, ptr, len); },
+    webgl_TexStorage2D(ctx, target, lvls, ifmt, w, h) { webgl.TexStorage2D(ctx, target, lvls, ifmt, w, h); },
+    webgl_TexSubImage2D(ctx, target, lvl, xo, yo, w, h, fmt, typ, ptr, len) { webgl.TexSubImage2D(ctx, target, lvl, xo, yo, w, h, fmt, typ, ptr, len); },
+    webgl_CopyTexSubImage2D(ctx, target, lvl, xo, yo, x, y, w, h) { webgl.CopyTexSubImage2D(ctx, target, lvl, xo, yo, x, y, w, h); },
+    webgl_GenerateMipmap(ctx, target) { webgl.GenerateMipmap(ctx, target); },
+    webgl_CreateFramebuffer(ctx) { return webgl.CreateFramebuffer(ctx); },
+    webgl_DeleteFramebuffer(ctx, fbo) { webgl.DeleteFramebuffer(ctx, fbo); },
+    webgl_BindFramebuffer(ctx, target, fbo) { webgl.BindFramebuffer(ctx, target, fbo); },
+    webgl_FramebufferTexture2D(ctx, target, att, texTarget, tex, lvl) { webgl.FramebufferTexture2D(ctx, target, att, texTarget, tex, lvl); },
+    webgl_CheckFramebufferStatus(ctx, target) { return webgl.CheckFramebufferStatus(ctx, target); },
+    webgl_InvalidateFramebuffer(ctx, target, att) { webgl.InvalidateFramebuffer(ctx, target, att); },
+    webgl_CreateRenderbuffer(ctx) { return webgl.CreateRenderbuffer(ctx); },
+    webgl_DeleteRenderbuffer(ctx, rbo) { webgl.DeleteRenderbuffer(ctx, rbo); },
+    webgl_BindRenderbuffer(ctx, target, rbo) { webgl.BindRenderbuffer(ctx, target, rbo); },
+    webgl_RenderbufferStorage(ctx, target, ifmt, w, h) { webgl.RenderbufferStorage(ctx, target, ifmt, w, h); },
+    webgl_FramebufferRenderbuffer(ctx, target, att, rbtarget, rbo) { webgl.FramebufferRenderbuffer(ctx, target, att, rbtarget, rbo); },
+    webgl_CreateShader(ctx, typ) { return webgl.CreateShader(ctx, typ); },
+    webgl_DeleteShader(ctx, sh) { webgl.DeleteShader(ctx, sh); },
+    webgl_ShaderSource(ctx, sh, ptr, len) { webgl.ShaderSource(ctx, sh, ptr, len); },
+    webgl_CompileShader(ctx, sh) { webgl.CompileShader(ctx, sh); },
+    webgl_GetShaderParameter(ctx, sh, pname) { return webgl.GetShaderParameter(ctx, sh, pname); },
+    webgl_GetShaderInfoLog(ctx, sh, ptr, len) { return webgl.GetShaderInfoLog(ctx, sh, ptr, len); },
+    webgl_CreateProgram(ctx) { return webgl.CreateProgram(ctx); },
+    webgl_DeleteProgram(ctx, prog) { webgl.DeleteProgram(ctx, prog); },
+    webgl_AttachShader(ctx, prog, sh) { webgl.AttachShader(ctx, prog, sh); },
+    webgl_LinkProgram(ctx, prog) { webgl.LinkProgram(ctx, prog); },
+    webgl_UseProgram(ctx, prog) { webgl.UseProgram(ctx, prog); },
+    webgl_GetProgramParameter(ctx, prog, pname) { return webgl.GetProgramParameter(ctx, prog, pname); },
+    webgl_GetProgramInfoLog(ctx, prog, ptr, len) { return webgl.GetProgramInfoLog(ctx, prog, ptr, len); },
+    webgl_BindAttribLocation(ctx, prog, idx, ptr, len) { webgl.BindAttribLocation(ctx, prog, idx, ptr, len); },
+    webgl_GetUniformLocation(ctx, prog, ptr, len) { return webgl.GetUniformLocation(ctx, prog, ptr, len); },
+    webgl_Uniform1f(ctx, loc, v) { webgl.Uniform1f(ctx, loc, v); },
+    webgl_Uniform2f(ctx, loc, v0, v1) { webgl.Uniform2f(ctx, loc, v0, v1); },
+    webgl_Uniform3f(ctx, loc, v0, v1, v2) { webgl.Uniform3f(ctx, loc, v0, v1, v2); },
+    webgl_Uniform4f(ctx, loc, v0, v1, v2, v3) { webgl.Uniform4f(ctx, loc, v0, v1, v2, v3); },
+    webgl_Uniform1i(ctx, loc, v) { webgl.Uniform1i(ctx, loc, v); },
+    webgl_EnableVertexAttribArray(ctx, idx) { webgl.EnableVertexAttribArray(ctx, idx); },
+    webgl_DisableVertexAttribArray(ctx, idx) { webgl.DisableVertexAttribArray(ctx, idx); },
+    webgl_VertexAttribPointer(ctx, idx, size, typ, norm, stride, off) { webgl.VertexAttribPointer(ctx, idx, size, typ, norm, stride, off); },
+    webgl_DrawArrays(ctx, mode, first, count) { webgl.DrawArrays(ctx, mode, first, count); },
+    webgl_DrawElements(ctx, mode, count, typ, off) { webgl.DrawElements(ctx, mode, count, typ, off); },
+
+    // --- text ---
+    text_Measure(fp, fl, sz, tp, tl, wp, hp) { text.Measure(fp, fl, sz, tp, tl, wp, hp); },
+    text_Render(fp, fl, sz, tp, tl, mw, dp, dc) { return text.Render(fp, fl, sz, tp, tl, mw, dp, dc); },
+
+    // --- app ---
+    app_CreateFullscreenCanvas() { app.CreateFullscreenCanvas(); },
+    app_CreateWebGLContext() { return app.CreateWebGLContext(); },
+    app_GetDevicePixelRatio() { return app.GetDevicePixelRatio(); },
+    app_GetCanvasCSSSize(wPtr, hPtr) { app.GetCanvasCSSSize(wPtr, hPtr); },
+    app_SetCanvasBacking(w, h) { app.SetCanvasBacking(w, h); },
+    app_RequestRAF() { app.RequestRAF(); },
+    app_SetCursor(ptr, len) { app.SetCursor(ptr, len); },
+    app_SetTitle(ptr, len) { app.SetTitle(ptr, len); },
+    app_SetFullscreen(full) { app.SetFullscreen(full); },
+    app_RegisterPointerEvents() { app.RegisterPointerEvents(); },
+    app_RegisterKeyEvents() { app.RegisterKeyEvents(); },
+    app_RegisterResizeEvents() { app.RegisterResizeEvents(); },
   };
 }
 
@@ -722,6 +821,12 @@ export async function load(wasmPath) {
 
   instance = result.instance;
   memory = instance.exports.memory;
+  // Wire up reverse callbacks for app and text bridges.
+  app.SetWASM(instance);
+  text.SetWASM(instance);
+  globalThis.__moxie_wasm_memory = instance.exports.memory;
   instance.exports._start();
+  // Mark WASM as ready for event dispatch now that initialization is complete.
+  app.SetWASMReady();
   return instance;
 }

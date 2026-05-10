@@ -3,6 +3,9 @@
 
 export * as runtime from './runtime.mjs';
 export * as goroutine from './goroutine.mjs';
+export * as webgl from './webgl.mjs';
+export * as app from './app.mjs';
+export * as text from './text.mjs';
 export * as channel from './channel.mjs';
 export * as types from './types.mjs';
 export * as builtin from './builtin.mjs';
