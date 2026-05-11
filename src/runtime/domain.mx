@@ -9,8 +9,9 @@ import "unsafe"
 
 type domainEntry struct {
 	pid        int32
-	parentFd   int32 // parent's end of socketpair (IPC channel)
-	lockdownFd int32 // parent's read end of the secalloc lockdown pipe; -1 if none
+	parentFd   int32    // parent's end of socketpair (IPC channel)
+	lockdownFd int32    // parent's read end of the secalloc lockdown pipe; -1 if none
+	doneCh     *channel // lifecycle channel - closed when child exits
 	alive      bool
 	next       *domainEntry
 }
@@ -40,6 +41,18 @@ func LastSpawnedLockdownFd() int32 {
 		return -1
 	}
 	return domainList.lockdownFd
+}
+
+// SpawnLifecycleChannel creates an unbuffered chan struct{} and stores
+// it in the most recently registered domain entry. The compiler emits
+// a call to this after spawnDomain returns. The channel is closed by
+// domainReapChildren when the child exits, making <-done observable.
+func SpawnLifecycleChannel() *channel {
+	ch := chanMake(0, 0)
+	if domainList != nil {
+		domainList.doneCh = ch
+	}
+	return ch
 }
 
 func domainCount() int {
@@ -84,6 +97,9 @@ func domainReapChildren() {
 			moxie_close(e.parentFd)
 			if e.lockdownFd >= 0 {
 				moxie_close(e.lockdownFd)
+			}
+			if e.doneCh != nil && !e.doneCh.closed {
+				chanClose(e.doneCh)
 			}
 		}
 	}

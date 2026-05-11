@@ -87,6 +87,25 @@ Built-in codec types: `Bool`, `Int8`, `Uint8`, `Int16`, `Uint16`, `Int32`, `Uint
 | `uintptr` | Explicit pointer types |
 | `import "strings"` | `import "bytes"` |
 
+## Spawn Channel Model: Non-blocking Duplex
+
+Spawn channels are non-blocking on both sides. The runtime uses `moxie_peek` (non-blocking) to check for data before reading, and `pipeSendNB` (non-blocking) for sends. When the pipe buffer is full or empty, the runtime yields for 1ms and retries (up to 100ms total), then returns false. No domain ever blocks in a syscall waiting for the other side.
+
+The spawn socketpair is full-duplex - both sides can send simultaneously. Both sides are symmetric concurrent peers. Backpressure is expressed by pipe buffer fullness, not by sender blocking.
+
+### ChanID convention
+
+chanID 0 = control (close signals), chanID 1 = first spawn channel arg, chanID 2 = second, etc.
+
+### Channel operations on spawn channels
+
+| Operation | Behavior |
+|-----------|----------|
+| `ch <- v` | Non-blocking send with retry-and-yield. Returns after 100ms if buffer stays full. |
+| `v := <-ch` | Non-blocking recv with retry-and-yield. Returns zero value after 100ms if no data. |
+| `select { case v := <-ch: }` | Non-blocking poll via `tryPipeRecv`/`tryPipeSend`. |
+| `close(ch)` | Sends close marker (chanID 0) to remote, then closes locally. |
+
 ## Targets
 
 | Target | Output | GC |

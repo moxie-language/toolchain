@@ -125,6 +125,14 @@ Before writing any code in a new session:
 
 Do not assume project structure from convention. Read the actual code.
 
+## Spawn Channel Model
+
+Spawn channels are non-blocking on both sides. The runtime uses `moxie_peek` + retry-with-yield (1ms sleep, 100 retries) for receives and `pipeSendNB` + retry-with-yield for sends. No domain ever blocks in a syscall waiting for the other side. Both sides of the socketpair are symmetric concurrent peers.
+
+**ChanID convention**: chanID 0 = control (close signals), chanID 1 = first spawn channel arg, chanID 2 = second, etc.
+
+**Timeout behavior**: after 100ms of retries with no progress, send/recv returns false. Callers should handle this as "peer busy or dead" - check `PipeClosed(fd)` to distinguish.
+
 ## Memory Management in WASM (Critical)
 
 The Moxie WASM target uses the Boehm conservative GC inherited from TinyGo. Its mark phase is a **recursive depth-first scan** of the live heap graph. The WASM call stack is fixed (typically ~1MB = ~10k-20k frames). When the live heap graph grows large, the mark-phase recursion overflows the stack and the WASM module dies with `InternalError: too much recursion`. This is a GC stack overflow, not an infinite loop.

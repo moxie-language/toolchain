@@ -391,7 +391,7 @@ ch <- 42           // compile error: channel has no listener
 
 ### IPC Channels
 
-Channels passed to `spawn` become IPC channels. The runtime multiplexes them over a single socketpair with length-prefixed messages:
+Channels passed to `spawn` become IPC channels. The runtime multiplexes them over a single socketpair with length-prefixed messages. All spawn channel operations are non-blocking with retry-and-yield (1ms sleep, up to 100ms total). Both sides of the socketpair are symmetric concurrent peers - backpressure is expressed by pipe buffer fullness, not by blocking:
 
 ```moxie
 import "moxie"

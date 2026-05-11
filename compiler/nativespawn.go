@@ -217,6 +217,11 @@ func (b *builder) setupNativeSpawnTargetChannels() {
 		}, "")
 		b.pipeChannels[param] = true
 	}
+
+	// Signal the parent that the child is ready.
+	readyFn := runtimePkg.Members["PipeChildReady"].(*ssa.Function)
+	readyType, readyVal := b.getFunction(readyFn)
+	b.CreateCall(readyType, readyVal, []llvm.Value{llvm.Undef(b.dataPtrType)}, "")
 }
 
 // emitNativeSpawnChannelMark emits the parent-side MarkParentPipeChannel

@@ -75,6 +75,10 @@ spawn(worker, x)
 println(x)        // compile error: ownership moved to child
 ```
 
+## Channel Behavior
+
+All spawn channel operations are non-blocking with cooperative yield. The runtime peeks for data (recv) or attempts a non-blocking write (send). If the pipe buffer is empty/full, the runtime yields for 1ms and retries up to 100 times (100ms total). Both sides of the socketpair are symmetric - no parent/child behavioral distinction. Backpressure is expressed by pipe buffer fullness, not by blocking.
+
 ## Native Implementation
 
 `socketpair()` + `fork()`. Child gets COW copy of parent memory. Each domain has its own Boehm GC heap, run queue, and goroutine stacks.

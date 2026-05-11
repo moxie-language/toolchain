@@ -184,10 +184,14 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		b.emitNativeSpawnChannelMark(target, chanArgs)
 	}
 
-	// Return a lifecycle channel (chan struct{}).
-	// TODO: wire this to the socketpair so close propagates.
-	chanType := b.getLLVMRuntimeType("channel")
-	return llvm.ConstPointerNull(llvm.PointerType(chanType, 0)), nil
+	// Block until the child signals ready.
+	waitFnType, waitFn := b.getFunction(b.program.ImportedPackage("runtime").Members["PipeWaitChildReady"].(*ssa.Function))
+	b.createCall(waitFnType, waitFn, []llvm.Value{llvm.Undef(b.dataPtrType)}, "child.ready")
+
+	// Return a lifecycle channel (chan struct{}) that closes when the child exits.
+	lcFnType, lcFn := b.getFunction(b.program.ImportedPackage("runtime").Members["SpawnLifecycleChannel"].(*ssa.Function))
+	doneCh := b.createCall(lcFnType, lcFn, []llvm.Value{llvm.Undef(b.dataPtrType)}, "done.ch")
+	return doneCh, nil
 }
 
 // validateSpawnArg checks that a type is safe to pass across a spawn boundary.
