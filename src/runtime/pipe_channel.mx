@@ -309,6 +309,7 @@ func PipeChanSend(ch *channel, encoded []byte) bool {
 	if ch == nil || ch.pipeBoundFd == 0 {
 		return false
 	}
+	ticks := int32(0)
 	for {
 		if pipeSendNB(ch.pipeBoundFd, ch.pipeChanID, encoded) {
 			return true
@@ -316,6 +317,10 @@ func PipeChanSend(ch *channel, encoded []byte) bool {
 		if PipeClosed(ch.pipeBoundFd) {
 			pipeBridgeOnClose(ch.pipeBoundFd)
 			return false
+		}
+		ticks++
+		if ticks == 3000 {
+			println("pipe: send stalled 3s fd=", ch.pipeBoundFd, "chan=", ch.pipeChanID)
 		}
 		sleepTicks(nanosecondsToTicks(1_000_000))
 	}
@@ -337,6 +342,7 @@ func PipeChanRecv(ch *channel) ([]byte, bool) {
 	if pipeChanClosed[pipeBoundKey(ch.pipeBoundFd, ch.pipeChanID)] {
 		return nil, false
 	}
+	ticks := int32(0)
 	for {
 		var probe [1]byte
 		n := moxie_peek(ch.pipeBoundFd, unsafe.Pointer(&probe[0]), 1)
@@ -348,6 +354,10 @@ func PipeChanRecv(ch *channel) ([]byte, bool) {
 			return nil, false
 		}
 		if n < 0 {
+			ticks++
+			if ticks == 3000 {
+				println("pipe: recv stalled 3s fd=", ch.pipeBoundFd, "chan=", ch.pipeChanID)
+			}
 			sleepTicks(nanosecondsToTicks(1_000_000))
 			continue
 		}
