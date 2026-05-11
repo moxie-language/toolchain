@@ -303,14 +303,13 @@ func pipeIncomingPop(fd int32, chanID uint16) ([]byte, bool) {
 }
 
 // PipeChanSend is the runtime entry the compiler emits in place of the
-// in-runtime queue send for pipe-bound channels. Non-blocking with
-// retry-and-yield: tries pipeSendNB, yields 1ms on buffer-full, retries
-// up to 100 times (100ms). Returns false on pipe closed or timeout.
+// in-runtime queue send for pipe-bound channels. Retries indefinitely
+// with 1ms yield on buffer-full. Returns false only on pipe closed.
 func PipeChanSend(ch *channel, encoded []byte) bool {
 	if ch == nil || ch.pipeBoundFd == 0 {
 		return false
 	}
-	for i := 0; i < 100; i++ {
+	for {
 		if pipeSendNB(ch.pipeBoundFd, ch.pipeChanID, encoded) {
 			return true
 		}
@@ -320,14 +319,14 @@ func PipeChanSend(ch *channel, encoded []byte) bool {
 		}
 		sleepTicks(nanosecondsToTicks(1_000_000))
 	}
-	return false
 }
 
 // PipeChanRecv is the runtime entry the compiler emits in place of the
 // in-runtime queue recv for pipe-bound channels. Non-blocking with
-// retry-and-yield: peeks for data, yields 1ms if none, retries up to
-// 100 times (100ms). Drains sibling frames into pipeIncomingByChan.
-// Returns (encoded_bytes, ok). ok=false means pipe closed or timeout.
+// Blocking receive on a pipe channel. Peeks for data, yields 1ms if
+// none, retries indefinitely until data arrives or the pipe closes.
+// Drains sibling frames into pipeIncomingByChan.
+// Returns (encoded_bytes, ok). ok=false means pipe closed.
 func PipeChanRecv(ch *channel) ([]byte, bool) {
 	if ch == nil || ch.pipeBoundFd == 0 {
 		return nil, false
@@ -338,7 +337,7 @@ func PipeChanRecv(ch *channel) ([]byte, bool) {
 	if pipeChanClosed[pipeBoundKey(ch.pipeBoundFd, ch.pipeChanID)] {
 		return nil, false
 	}
-	for i := 0; i < 100; i++ {
+	for {
 		var probe [1]byte
 		n := moxie_peek(ch.pipeBoundFd, unsafe.Pointer(&probe[0]), 1)
 		if n == 0 {
