@@ -2943,7 +2943,7 @@ func (b *builder) createBinOp(op token.Token, typ, ytyp types.Type, x, y llvm.Va
 		} else if typ.Info()&types.IsString != 0 {
 			// Operations on strings
 			switch op {
-			case token.ADD: // +
+			case token.ADD, token.OR: // + or | (Moxie pipe concat)
 				return b.createRuntimeCall("stringConcat", []llvm.Value{x, y}, ""), nil
 			case token.EQL: // ==
 				return b.createRuntimeCall("stringEqual", []llvm.Value{x, y}, ""), nil
