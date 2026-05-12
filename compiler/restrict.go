@@ -205,8 +205,11 @@ func (b *builder) checkASTRestrictions() {
 			}
 		case *ast.CallExpr:
 			// Ban parenthesized call targets: (f)(args) is not valid Moxie.
+			// Exempt: type conversions like (*byte)(expr) where the paren wraps a type.
 			if paren, ok := node.Fun.(*ast.ParenExpr); ok {
-				b.addError(paren.Pos(), "moxie: parenthesized call target is not allowed: write f(x), not (f)(x)")
+				if !isTypeExpr(paren.X) {
+					b.addError(paren.Pos(), "moxie: parenthesized call target is not allowed: write f(x), not (f)(x)")
+				}
 			}
 			if ident, ok := node.Fun.(*ast.Ident); ok {
 				if reason, restricted := restrictedBuiltins[ident.Name]; restricted {
@@ -221,6 +224,28 @@ func (b *builder) checkASTRestrictions() {
 		}
 		return true
 	})
+}
+
+// isTypeExpr returns true if the AST expression is syntactically a type
+// (pointer type, selector, array type, etc.) rather than a value expression.
+func isTypeExpr(expr ast.Expr) bool {
+	switch expr.(type) {
+	case *ast.StarExpr:
+		return true
+	case *ast.ArrayType:
+		return true
+	case *ast.MapType:
+		return true
+	case *ast.ChanType:
+		return true
+	case *ast.FuncType:
+		return true
+	case *ast.StructType:
+		return true
+	case *ast.InterfaceType:
+		return true
+	}
+	return false
 }
 
 // isMakeExempt returns true if a make() call at the given position was
