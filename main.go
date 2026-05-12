@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/shlex"
 	"moxie/builder"
+	"moxie/cache"
 	"moxie/compileopts"
 	"moxie/diagnostics"
 	"moxie/goenv"
@@ -393,6 +394,10 @@ commands:
   version: print version information
   env:     print environment information
   vendor:  copy dependencies into vendor/
+  header:  extract codec types from a package into a .mxh protocol header
+  install: fetch, compile, and cache an external package binary + .mxh
+  fetch:   fetch and cache all dependencies declared in moxie.mod
+  cache:   manage the install cache (subcommands: list, clean)
   help:    print this help text
 `
 
@@ -472,7 +477,7 @@ func main() {
 		flag.BoolVar(&flagTest, "test", false, "supply -test flag to moxie list")
 	}
 	var outpath string
-	if command == "help" || command == "build" || command == "test" {
+	if command == "help" || command == "build" || command == "test" || command == "header" {
 		flag.StringVar(&outpath, "o", "", "output filename")
 	}
 
@@ -750,6 +755,69 @@ func main() {
 		err := os.RemoveAll(goenv.Get("GOCACHE"))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "cannot clean cache:", err)
+			os.Exit(1)
+		}
+	case "header":
+		pkgName := "."
+		if flag.NArg() >= 1 {
+			pkgName = filepath.ToSlash(flag.Arg(0))
+		}
+		if outpath == "" {
+			outpath = "."
+		}
+		// Scan remaining args for --prev <old.mxh>.
+		prevPath := ""
+		args := flag.Args()
+		for i := 1; i < len(args)-1; i++ {
+			if args[i] == "--prev" || args[i] == "-prev" {
+				prevPath = args[i+1]
+			}
+		}
+		err := Header(pkgName, outpath, prevPath, options)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	case "install":
+		if flag.NArg() < 1 {
+			fmt.Fprintln(os.Stderr, "install requires a package path")
+			usage(command)
+			os.Exit(1)
+		}
+		pkgName := filepath.ToSlash(flag.Arg(0))
+		err := Install(pkgName, options)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	case "fetch":
+		err := Fetch(options)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	case "cache":
+		subcmd := ""
+		if flag.NArg() >= 1 {
+			subcmd = flag.Arg(0)
+		}
+		switch subcmd {
+		case "clean":
+			if err := cache.Clean(); err != nil {
+				fmt.Fprintln(os.Stderr, "cannot clean install cache:", err)
+				os.Exit(1)
+			}
+		case "list":
+			paths, err := cache.List()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			for _, p := range paths {
+				fmt.Println(p)
+			}
+		default:
+			fmt.Fprintln(os.Stderr, "cache subcommand must be 'list' or 'clean'")
 			os.Exit(1)
 		}
 	case "help":

@@ -10,6 +10,7 @@ import (
 	"go/constant"
 	"go/types"
 
+	"moxie/loader"
 	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
@@ -76,6 +77,11 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	if targetFn == nil {
 		b.addError(instr.Pos(), "spawn: first argument must be a static function (dynamic function values not yet supported)")
 		return llvm.Value{}, nil
+	}
+
+	// Cross-binary spawn: target is in a .mxh package (loaded from cache).
+	if b.isExternalMXHSpawn(targetFn) {
+		return b.createCrossBinarySpawn(targetFn, instr)
 	}
 
 	// Data args are everything after the function.
@@ -213,7 +219,7 @@ func validateSpawnArg(t types.Type, argIndex int, codec *types.Interface) error 
 func validateSpawnElem(t types.Type, argIndex int, codec *types.Interface) error {
 	// Named type that implements Codec — accept directly.
 	// This handles moxie.Int32, moxie.Bytes, user structs with Codec methods, etc.
-	if implementsCodec(t, codec) {
+	if loader.ImplementsCodecIface(t, codec) {
 		return nil
 	}
 
@@ -224,7 +230,7 @@ func validateSpawnElem(t types.Type, argIndex int, codec *types.Interface) error
 		// is copy-not-alias semantics — distinct from sharing memory across
 		// the boundary, which is impossible by construction (no shared address
 		// space across fork or workers).
-		if implementsCodec(t, codec) {
+		if loader.ImplementsCodecIface(t, codec) {
 			return nil
 		}
 		return fmt.Errorf("spawn: argument %d is a pointer type %s without Codec; raw pointers cannot cross spawn boundaries", argIndex+1, ut)
@@ -254,11 +260,6 @@ func validateSpawnElem(t types.Type, argIndex int, codec *types.Interface) error
 
 	// Leaf type that doesn't implement Codec.
 	return fmt.Errorf("spawn: argument %d type %s does not implement moxie.Codec (use moxie.Int32, moxie.Uint64, etc.)", argIndex+1, t)
-}
-
-// implementsCodec checks whether t or *t satisfies the Codec interface.
-func implementsCodec(t types.Type, codec *types.Interface) bool {
-	return types.Implements(t, codec) || types.Implements(types.NewPointer(t), codec)
 }
 
 // extractTransportString checks if an SSA value is a string constant

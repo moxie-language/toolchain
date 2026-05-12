@@ -220,6 +220,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	if err != nil {
 		return result, err
 	}
+	compilerConfig.MXHPackages = lprogram.MXHPackages
 
 	// Store which filesystem paths map to which package name.
 	result.PackagePathMap = make(map[string]string, len(lprogram.Packages))

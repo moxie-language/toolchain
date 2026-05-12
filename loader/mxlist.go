@@ -69,6 +69,7 @@ func mxListPackagesImpl(config *compileopts.Config, goroot string, inputPkg stri
 		requires:     requires,
 		replaces:     replaces,
 		goroot:       goroot,
+		mxhDir:       MXHProtocolsDir(),
 		seen:         make(map[string]*PackageJSON),
 	}
 
@@ -260,6 +261,7 @@ type resolver struct {
 	requires     map[string]string // module path → version
 	replaces     map[string]string // module path → absolute local dir
 	goroot       string
+	mxhDir       string // path to $GOCACHE/mxinstall/protocols/ for .mxh fallback
 	seen         map[string]*PackageJSON
 	sorted       []*PackageJSON
 }
@@ -289,7 +291,21 @@ func (r *resolver) walk(importPath string, srcDir string) error {
 
 	dir, err := r.resolveDir(importPath, srcDir)
 	if err != nil {
-		return fmt.Errorf("resolving %q: %w", importPath, err)
+		// Check for a cached .mxh before failing.
+		if r.mxhDir != "" {
+			mxhPath := filepath.Join(r.mxhDir, importPath+".mxh")
+			if _, statErr := os.Stat(mxhPath); statErr == nil {
+				pj := &PackageJSON{
+					ImportPath: importPath,
+					Name:       importPath[strings.LastIndex(importPath, "/")+1:],
+					IsMXH:      true,
+				}
+				r.seen[importPath] = pj
+				r.sorted = append(r.sorted, pj)
+				return nil
+			}
+		}
+		return fmt.Errorf("resolving %q: %w\n\thint: run `moxie install %s` to cache this package", importPath, err, importPath)
 	}
 
 	pkg, err := r.ctx.ImportDir(dir, 0)

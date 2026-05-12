@@ -1,0 +1,60 @@
+//go:build linux || darwin
+
+package runtime
+
+import "unsafe"
+
+// SpawnBinary forks and execs an installed binary as a new domain.
+// binPath is the absolute path to the binary in the mxinstall cache.
+// hash is the .mxh content hash embedded at compile time for this spawn site,
+// verified by SpawnHandshake on both sides.
+// Returns the parent's IPC fd on success, -1 on error.
+//
+// Child stderr/stdout are inherited from the parent. Child panic traces and
+// debug output will appear on the parent's terminal. This is intentional.
+func SpawnBinary(binPath string, hash string) int32 {
+	var fds [2]int32
+	r := moxie_socketpair(1, 1, 0, unsafe.Pointer(&fds[0])) // AF_UNIX=1, SOCK_STREAM=1
+	if r < 0 {
+		println("spawn: socketpair failed for", binPath)
+		return -1
+	}
+	moxie_set_spawn_bufs(fds[0], fds[1])
+
+	pid := moxie_fork()
+	if pid < 0 {
+		moxie_close(fds[0])
+		moxie_close(fds[1])
+		println("spawn: fork failed for", binPath)
+		return -1
+	}
+
+	if pid == 0 {
+		// Child: moxie_exec_binary closes all fds except fds[1] (IPC fd),
+		// sets MOXIE_IPC_FD, then execs the binary. Does not return on success.
+		moxie_close(fds[0]) // close parent's end before exec
+		moxie_exec_binary(binPath, fds[1])
+		println("spawn: exec failed for", binPath)
+		exit(1)
+	}
+
+	// Parent: close child's fd.
+	moxie_close(fds[1])
+
+	// Perform handshake over the parent's fd.
+	if errMsg := SpawnHandshake(fds[0], []string{hash}); errMsg != "" {
+		println("spawn:", errMsg)
+		moxie_close(fds[0])
+		moxie_kill(pid, 9)
+		var status int32
+		moxie_waitpid(pid, unsafe.Pointer(&status), 0)
+		return -1
+	}
+
+	// Register with domain list so domainReapChildren handles cleanup.
+	domainRegister(pid, fds[0], -1)
+	return fds[0]
+}
+
+//export moxie_exec_binary
+func moxie_exec_binary(path string, ipcFd int32) int32

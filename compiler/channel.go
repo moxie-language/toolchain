@@ -9,6 +9,7 @@ import (
 	"math"
 
 	"moxie/compiler/llvmutil"
+	"moxie/loader"
 	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
@@ -480,7 +481,7 @@ func (b *builder) elemTypeImplementsCodec(t types.Type) bool {
 	if !ok {
 		return false
 	}
-	return implementsCodec(t, codecIface)
+	return loader.ImplementsCodecIface(t, codecIface)
 }
 
 // createPipeChanCodecIface builds a moxie.Codec interface value whose

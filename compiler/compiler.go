@@ -52,6 +52,10 @@ type Config struct {
 	SizeLevel       int
 	MoxieVersion    string // for llvm.ident
 
+	// MXHPackages is the set of import paths loaded from .mxh cache files.
+	// Used to detect cross-binary spawn targets.
+	MXHPackages map[string]bool
+
 	// Various compiler options that determine how code is generated.
 	Scheduler          string
 	AutomaticStackSize bool

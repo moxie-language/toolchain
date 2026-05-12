@@ -410,13 +410,22 @@ func main() {
 
 ### Native Implementation
 
-On Linux and Darwin:
+On Linux and Darwin, two spawn paths exist:
+
+**Same-binary spawn** (default — target function is local source):
 1. `socketpair(AF_UNIX, SOCK_STREAM)` creates a bidirectional IPC pipe.
 2. `fork()` creates the child process (copy-on-write memory).
-3. **Child:** closes parent's socket end, runs the function, exits on completion.
+3. **Child:** closes parent's socket end, runs the function directly, exits on completion.
 4. **Parent:** closes child's socket end, registers domain (pid + fd), continues.
 
-Each domain has its own single-threaded event loop, channel instances, and Boehm GC heap.
+**Cross-binary spawn** (target package is from the `.mxh` cache — see [Package Cache and External Dependencies](#package-cache-and-external-dependencies)):
+1. `socketpair` creates the IPC pipe.
+2. `fork()` creates the child process.
+3. **Child:** closes all file descriptors except the IPC socket, then `execve`s the installed binary. The IPC fd number is passed via `MOXIE_IPC_FD` environment variable.
+4. **Parent:** performs `SpawnHandshake` — exchanges `.mxh` content hashes over the IPC socket (100 retries × 50ms = 5s timeout). Hash mismatch aborts and kills the child.
+5. On success, the child is registered in the domain list for automatic reaping (`WNOHANG` polling from the scheduler).
+
+In both cases, each domain has its own single-threaded event loop, channel instances, and Boehm GC heap. The domain registry handles crash cleanup - a child that exits unexpectedly is reaped on the next scheduler tick with no zombie leakage.
 
 ### JS Implementation
 
@@ -621,8 +630,142 @@ moxie build -o hello .
 | `moxie clean` | Clear build cache |
 | `moxie targets` | List supported targets |
 | `moxie info` | Display target configuration |
+| `moxie header` | Extract codec types into a `.mxh` protocol header |
+| `moxie install <pkg>` | Fetch, compile, and cache an external package |
+| `moxie fetch` | Fetch and cache all deps declared in `moxie.mod` |
+| `moxie cache list` | List installed packages |
+| `moxie cache clean` | Remove the install cache |
 
 Key flags: `-o output`, `-opt [0\|1\|2\|s\|z]`, `-gc [none\|leaking\|conservative\|boehm]`, `-target [linux/amd64\|js/wasm]`, `-stack-size N`.
+
+---
+
+## Package Cache and External Dependencies
+
+### Separation of Concerns
+
+`moxie build` is **network-free**. It never fetches source or compiles dependencies. It only reads `.mxh` protocol headers from the cache to type-check your code against external packages.
+
+The install/fetch commands are the trust establishment step:
+
+```sh
+# After cloning a project, install all deps once:
+moxie fetch
+
+# Add a new dependency:
+moxie install git.smesh.lol/iskradb
+
+# Build as usual (never touches the network):
+MOXIEROOT=/path/to/moxie moxie build -o myapp .
+```
+
+If `.mxh` is missing at build time, the compiler emits:
+
+```
+run `moxie install git.smesh.lol/iskradb` before building against it
+```
+
+### Cache Layout
+
+The install cache lives under `$GOCACHE/mxinstall/` (where `$GOCACHE` defaults to `~/.cache/moxie`):
+
+```
+$GOCACHE/mxinstall/
+  <triple>/                         # e.g. x86_64-unknown-linux-musleabihf
+    <import-path>/
+      <binary>                      # compiled binary for spawn
+      .meta                         # source hash, compiler version, triple, timestamp
+  protocols/
+    <import-path>.mxh               # target-independent protocol header
+  src/
+    <import-path>/                  # cloned source (remote packages only)
+```
+
+The binary cache is keyed by target triple. A binary installed for `linux/amd64` will not be found when building for `linux/arm64` — the cache forces recompilation for each target.
+
+### Protocol Headers (`.mxh`)
+
+A `.mxh` file is a machine-readable description of a package's codec types. It contains only exported types that implement `moxie.Codec`, their wire layout, and method signatures. No implementation, no unexported types.
+
+Example — extracting the moxie stdlib's codec types:
+
+```sh
+MOXIEROOT=/path/to/moxie moxie header -o . moxie
+# produces: ./moxie.mxh
+```
+
+`.mxh` format:
+
+```
+// mxh v1 <fnv1a-hex-hash>
+// wire: uint32-length-prefixed EncodeTo/DecodeFrom at cross-binary spawn boundaries
+type Int32 int32
+func (Int32) EncodeTo(w io.Writer) error
+func (*Int32) DecodeFrom(r io.Reader) error
+type Record struct {
+    DataFile uint32
+    DataOff  uint32
+    DataLen  uint32
+    Inline   [20]byte
+}
+func (Record) EncodeTo(w io.Writer) error
+func (*Record) DecodeFrom(r io.Reader) error
+```
+
+The hash on the first line is FNV-1a of the body. It changes when any type layout changes. The compiler embeds this hash at cross-binary spawn sites and the runtime verifies it at spawn time.
+
+#### Variable-Length Fields
+
+Slice and map fields cannot appear in `.mxh` struct layouts. If a type has a `[]byte` field, that field must be encoded in `EncodeTo`/`DecodeFrom` — the wire format is defined by the methods, not the struct layout. `moxie header` errors if it encounters a slice or map field:
+
+```
+header: variable-length field Record.Data cannot appear in .mxh struct layout;
+        encode it in EncodeTo/DecodeFrom instead
+```
+
+#### Backward Compatibility
+
+`moxie header` with `-prev` enforces a strict append-only contract:
+
+```sh
+moxie header -o new.mxh . --prev old.mxh
+# Errors on: field removal, reorder, type change
+# Allows: appending new fields at the end
+```
+
+To intentionally break compatibility, omit `-prev` and accept the new hash as a new protocol version.
+
+### Cross-Binary spawn
+
+When a package is imported from the `.mxh` cache, `spawn` forks and execs the cached binary instead of forking the current process:
+
+```moxie
+import iskradb "git.smesh.lol/iskradb"
+
+// Same syntax whether iskradb is local source or cached .mxh.
+// The compiler determines the transport at import resolution time.
+done := spawn(iskradb.InsertTriple, key, val, results)
+```
+
+At compile time the compiler:
+1. Reads the `.mxh` hash for `git.smesh.lol/iskradb`
+2. Embeds the binary path and hash as string constants
+3. Emits `runtime.SpawnBinary(binPath, hash)` instead of `spawnDomain`
+
+At runtime:
+1. `SpawnBinary` forks, closes all file descriptors except the IPC socket
+2. Execs the installed binary with `MOXIE_IPC_FD=<n>` in the environment
+3. Parent and child exchange hashes via `SpawnHandshake` (100 retries × 50ms = 5s timeout)
+4. Hash mismatch → spawn fails with `run moxie install <pkg> to update`
+5. On success, the child is registered in the domain list; `domainReapChildren` handles crash cleanup automatically
+
+Same-binary `spawn` (local source, same compilation) is unchanged and does not go through the hash exchange — it is implicitly version-locked.
+
+The wire protocol for cross-binary spawn codec values adds a `uint32` length prefix before each `EncodeTo` call. This is declared in the `.mxh` header line:
+
+```
+// wire: uint32-length-prefixed EncodeTo/DecodeFrom at cross-binary spawn boundaries
+```
 
 ---
 
@@ -647,8 +790,10 @@ Key flags: `-o output`, `-opt [0\|1\|2\|s\|z]`, `-gc [none\|leaking\|conservativ
 | Integer sizes | `int` = `uint` = 32-bit on all targets. |
 | Goroutines | Do not exist. `go` is a compile error. |
 | Concurrency | Channels + `select` within a domain. `spawn` for new domains. |
-| Process isolation | `spawn(fn, args...)` via `fork()` + socketpair. |
+| Process isolation | `spawn(fn, args...)` via `fork()` + socketpair (same binary) or exec (cross-binary). |
 | Serialization | `moxie.Codec` interface required at spawn boundary. |
+| Cross-binary deps | `moxie fetch` installs deps; `moxie build` is network-free. |
+| Protocol headers | `.mxh` files — codec type layout + hash for version verification. |
 | Memory model | No shared memory between domains. |
 | GC | Boehm conservative, per-domain heap. |
 | Slice equality | `==` works for any comparable element type. |

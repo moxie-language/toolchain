@@ -37,6 +37,14 @@ type Program struct {
 	fset            *token.FileSet
 	keepSyntaxFiles bool // set by EnableSyntaxFiles; only mxcheck needs this
 
+	// MXHPackages is the set of import paths loaded from .mxh cache files.
+	// The compiler uses this to identify cross-binary spawn targets.
+	MXHPackages map[string]bool
+
+	// SkipMainNameCheck disables the "main package must be named main" check.
+	// Used by moxie header which extracts types from non-main packages.
+	SkipMainNameCheck bool
+
 	// Information obtained during parsing.
 	LDFlags []string
 }
@@ -79,6 +87,10 @@ type PackageJSON struct {
 		Pos         string
 		Err         string
 	}
+
+	// IsMXH marks this as a synthetic package loaded from a .mxh file.
+	// Packages with this flag skip Parse/Check and have Pkg set directly.
+	IsMXH bool
 }
 
 // Package holds a loaded package, its imports, and its parsed files.
@@ -131,6 +143,7 @@ func Load(config *compileopts.Config, inputPkg string, typeChecker types.Config)
 		goroot:      goroot,
 		workingDir:  wd,
 		Packages:    make(map[string]*Package),
+		MXHPackages: make(map[string]bool),
 		fset:        token.NewFileSet(),
 	}
 
@@ -162,6 +175,16 @@ func Load(config *compileopts.Config, inputPkg string, typeChecker types.Config)
 				Scopes:     make(map[ast.Node]*types.Scope),
 				Selections: make(map[*ast.SelectorExpr]*types.Selection),
 			},
+		}
+		if pj.IsMXH {
+			// Synthetic package from .mxh cache: build types.Package directly.
+			mxhPath := filepath.Join(MXHProtocolsDir(), pj.ImportPath+".mxh")
+			synth, err := synthMXHPackage(pj.ImportPath, mxhPath)
+			if err != nil {
+				return nil, fmt.Errorf("loading .mxh for %s: %w", pj.ImportPath, err)
+			}
+			pkg.Pkg = synth
+			p.MXHPackages[pj.ImportPath] = true
 		}
 		p.sorted = append(p.sorted, pkg)
 		p.Packages[pkg.ImportPath] = pkg
@@ -229,6 +252,9 @@ func (p *Program) Parse() error {
 	// Parse all packages.
 	// TODO: do this in parallel.
 	for _, pkg := range p.sorted {
+		if pkg.IsMXH {
+			continue // synthetic package; types already set by Load
+		}
 		err := pkg.Parse()
 		if err != nil {
 			return err
@@ -284,6 +310,9 @@ func (p *Program) Parse() error {
 
 	// Typecheck all packages.
 	for _, pkg := range p.sorted {
+		if pkg.IsMXH {
+			continue // synthetic package; types already set by Load
+		}
 		err := pkg.Check()
 		if err != nil {
 			return err
@@ -394,7 +423,7 @@ func (p *Package) Check() error {
 	// Do typechecking of the package.
 	packageName := p.ImportPath
 	if p == p.program.MainPkg() {
-		if p.Name != "main" {
+		if p.Name != "main" && !p.program.SkipMainNameCheck {
 			return Errors{p, []error{
 				scanner.Error{
 					Pos: p.program.fset.Position(p.Files[0].Name.Pos()),

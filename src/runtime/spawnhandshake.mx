@@ -1,0 +1,119 @@
+//go:build linux || darwin
+
+package runtime
+
+import "unsafe"
+
+// Handshake timeout parameters. 100 retries × 50ms = 5 second total.
+const (
+	handshakeRetries = 100
+	handshakeSleepMs = 50
+)
+
+// SpawnHandshake performs a protocol hash exchange over fd immediately after
+// a cross-binary spawn. Each side sends its hashes then reads the peer's.
+//
+// Protocol: each hash is sent as a length-prefixed line: uint8(len) + bytes.
+// The peer sends the same number of hashes in the same type order.
+//
+// On hash mismatch or timeout, returns an error string. Returns "" on success.
+func SpawnHandshake(fd int32, localHashes []string) string {
+	// Send all local hashes first.
+	for _, h := range localHashes {
+		if !spawnHandshakeWrite(fd, h) {
+			return "spawn handshake: write failed (child may have crashed)"
+		}
+	}
+
+	// Read back one hash per type from the peer.
+	for i, local := range localHashes {
+		remote, ok := spawnHandshakeRead(fd)
+		if !ok {
+			return "spawn handshake: timeout after 5s (child may have crashed)"
+		}
+		if remote != local {
+			return "spawn handshake: protocol version mismatch on type " |
+				itoa(i) | ": expected " | local | ", got " | remote |
+				"; run `moxie install` to update"
+		}
+	}
+	return ""
+}
+
+// spawnHandshakeWrite sends a single hash string as uint8(len) + bytes.
+func spawnHandshakeWrite(fd int32, s string) bool {
+	n := len(s)
+	if n > 255 {
+		n = 255
+	}
+	var hdr [1]byte
+	hdr[0] = byte(n)
+	if moxie_write(fd, unsafe.Pointer(&hdr[0]), 1) != 1 {
+		return false
+	}
+	if n == 0 {
+		return true
+	}
+	written := int32(0)
+	for written < int32(n) {
+		r := moxie_write(fd, unsafe.Pointer(uintptr(unsafe.Pointer(&([]byte(s))[0]))+uintptr(written)), int32(n)-written)
+		if r <= 0 {
+			return false
+		}
+		written += r
+	}
+	return true
+}
+
+// spawnHandshakeRead reads a single hash string with retry-and-yield timeout.
+// Returns ("", false) on timeout.
+func spawnHandshakeRead(fd int32) (string, bool) {
+	// Read the length byte with retries.
+	var hdr [1]byte
+	retries := int32(0)
+	for {
+		n := moxie_read(fd, unsafe.Pointer(&hdr[0]), 1)
+		if n == 1 {
+			break
+		}
+		if n == 0 {
+			return "", false // EOF
+		}
+		retries++
+		if retries >= handshakeRetries {
+			return "", false
+		}
+		sleepTicks(nanosecondsToTicks(int64(handshakeSleepMs) * 1_000_000))
+	}
+
+	length := int32(hdr[0])
+	if length == 0 {
+		return "", true
+	}
+
+	buf := []byte{:length}
+	got := int32(0)
+	for got < length {
+		n := moxie_read(fd, unsafe.Pointer(uintptr(unsafe.Pointer(&buf[0]))+uintptr(got)), length-got)
+		if n <= 0 {
+			return "", false
+		}
+		got += n
+	}
+	return string(buf), true
+}
+
+// itoa converts a small integer to its decimal string representation.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [10]byte
+	i := 10
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
