@@ -1,0 +1,130 @@
+// Package siphash implements SipHash-2-4, a fast short-input PRF designed
+// by Jean-Philippe Aumasson and Daniel J. Bernstein.
+//
+// Reference: https://131002.net/siphash/siphash.pdf
+//
+// Sum64 produces a 64-bit MAC. Sum128 produces a 128-bit MAC suitable for
+// use as a collision-resistant hash key where truncation would reduce safety
+// margins. For hash table use where DoS resistance is not required, a fixed
+// or zero key is acceptable.
+package siphash
+
+import "math/bits"
+
+// Key is a 128-bit SipHash key.
+type Key [2]uint64
+
+// DefaultKey is a non-secret fixed key for deterministic hash-table use.
+// It uses the SipHash initialization constants so it is well-tested.
+var DefaultKey = Key{0x736f6d6570736575, 0x646f72616e646f6d}
+
+// Sum64 computes SipHash-2-4 with 64-bit output.
+func Sum64(key Key, p []byte) uint64 {
+	v0 := key[0] ^ 0x736f6d6570736575
+	v1 := key[1] ^ 0x646f72616e646f6d
+	v2 := key[0] ^ 0x6c7967656e657261
+	v3 := key[1] ^ 0x7465646279746573
+
+	length := len(p)
+	blocks := length / 8
+	for i := 0; i < blocks; i++ {
+		m := leUint64(p[i*8:])
+		v3 ^= m
+		v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
+		v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
+		v0 ^= m
+	}
+
+	// Last block: remaining bytes + length in top byte.
+	last := uint64(length) << 56
+	tail := p[blocks*8:]
+	for i := len(tail) - 1; i >= 0; i-- {
+		last |= uint64(tail[i]) << (uint(i) * 8)
+	}
+	v3 ^= last
+	v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
+	v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
+	v0 ^= last
+
+	v2 ^= 0xff
+	for i := 0; i < 4; i++ {
+		v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
+	}
+	return v0 ^ v1 ^ v2 ^ v3
+}
+
+// Sum128 computes SipHash-2-4 with 128-bit output.
+// The 128-bit variant is identical to Sum64 except:
+//   - v1 is XORed with 0xee at initialization
+//   - Finalization runs twice: once for the low 64 bits, then with
+//     v1 XORed by 0xdd for the high 64 bits
+func Sum128(key Key, p []byte) [2]uint64 {
+	v0 := key[0] ^ 0x736f6d6570736575
+	v1 := key[1] ^ 0x646f72616e646f6d
+	v2 := key[0] ^ 0x6c7967656e657261
+	v3 := key[1] ^ 0x7465646279746573
+
+	// 128-bit output mode marker.
+	v1 ^= 0xee
+
+	length := len(p)
+	blocks := length / 8
+	for i := 0; i < blocks; i++ {
+		m := leUint64(p[i*8:])
+		v3 ^= m
+		v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
+		v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
+		v0 ^= m
+	}
+
+	// Last block.
+	last := uint64(length) << 56
+	tail := p[blocks*8:]
+	for i := len(tail) - 1; i >= 0; i-- {
+		last |= uint64(tail[i]) << (uint(i) * 8)
+	}
+	v3 ^= last
+	v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
+	v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
+	v0 ^= last
+
+	// First finalization: low 64 bits.
+	v2 ^= 0xee
+	for i := 0; i < 4; i++ {
+		v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
+	}
+	lo := v0 ^ v1 ^ v2 ^ v3
+
+	// Second finalization: high 64 bits.
+	v1 ^= 0xdd
+	for i := 0; i < 4; i++ {
+		v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
+	}
+	hi := v0 ^ v1 ^ v2 ^ v3
+
+	return [2]uint64{lo, hi}
+}
+
+func sipRound(v0, v1, v2, v3 uint64) (uint64, uint64, uint64, uint64) {
+	v0 += v1
+	v1 = bits.RotateLeft64(v1, 13)
+	v1 ^= v0
+	v0 = bits.RotateLeft64(v0, 32)
+	v2 += v3
+	v3 = bits.RotateLeft64(v3, 16)
+	v3 ^= v2
+	v0 += v3
+	v3 = bits.RotateLeft64(v3, 21)
+	v3 ^= v0
+	v2 += v1
+	v1 = bits.RotateLeft64(v1, 17)
+	v1 ^= v2
+	v2 = bits.RotateLeft64(v2, 32)
+	return v0, v1, v2, v3
+}
+
+// leUint64 reads a little-endian uint64 from b (must be at least 8 bytes).
+func leUint64(b []byte) uint64 {
+	return uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
+		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
+}
