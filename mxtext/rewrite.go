@@ -30,6 +30,16 @@ import (
 	"strings"
 )
 
+// RewriteResult holds rewritten source and metadata about generated tokens.
+type RewriteResult struct {
+	Src            []byte
+	MakeOffsets    []int // byte offsets of loader-generated 'make' tokens
+	// PriorOffsets are make offsets from an earlier rewrite pass, adjusted
+	// to account for byte shifts introduced by this rewrite. Only populated
+	// when the rewriter receives prior offsets to remap.
+	PriorOffsets   []int
+}
+
 // isMoxieStringTarget returns true if a package should get string→[]byte
 // rewrites (string literal wrapping, | concat, comparison rewrites).
 //
@@ -65,8 +75,7 @@ func IsMoxieStringTarget(importPath string) bool {
 // The rewrite is token-aware: it uses go/scanner to avoid matching inside
 // strings or comments. It only rewrites when 'chan' is followed by a type
 // expression and then '{' in expression context.
-func RewriteChanLiterals(src []byte, fset *token.FileSet) []byte {
-	// Tokenize the source.
+func RewriteChanLiterals(src []byte, fset *token.FileSet) RewriteResult {
 	type tok struct {
 		pos    int
 		end    int
@@ -75,7 +84,8 @@ func RewriteChanLiterals(src []byte, fset *token.FileSet) []byte {
 		offset int // byte offset in src
 	}
 
-	file := fset.AddFile("", fset.Base(), len(src))
+	localFset := token.NewFileSet()
+	file := localFset.AddFile("", localFset.Base(), len(src))
 	var s scanner.Scanner
 	s.Init(file, src, nil, scanner.ScanComments)
 
@@ -96,6 +106,7 @@ func RewriteChanLiterals(src []byte, fset *token.FileSet) []byte {
 	// Scan for pattern: CHAN typeTokens... LBRACE [expr] RBRACE
 	// where typeTokens form a valid channel element type.
 	var result bytes.Buffer
+	var offsets []int
 	lastEnd := 0
 
 	for i := 0; i < len(toks); i++ {
@@ -243,25 +254,25 @@ func RewriteChanLiterals(src []byte, fset *token.FileSet) []byte {
 		// Write everything before this channel literal.
 		result.Write(src[lastEnd:toks[chanIdx].pos])
 
-		// Write the replacement: (make)(chan T) or (make)(chan T, N).
-		// Parenthesized (make) so AST restriction check skips generated calls.
-		result.WriteString("(make)(chan ")
+		makeOffset := result.Len()
+		result.WriteString("make(chan ")
 		result.WriteString(typeText)
 		if bufExpr != "" {
 			result.WriteString(", ")
 			result.WriteString(bufExpr)
 		}
 		result.WriteString(")")
+		offsets = append(offsets, makeOffset)
 
 		lastEnd = toks[closeIdx].end
 		i = closeIdx // skip past the closing brace
 	}
 
 	if lastEnd == 0 {
-		return src // no rewrites
+		return RewriteResult{Src: src}
 	}
 	result.Write(src[lastEnd:])
-	return result.Bytes()
+	return RewriteResult{Src: result.Bytes(), MakeOffsets: offsets}
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +289,7 @@ func RewriteChanLiterals(src []byte, fset *token.FileSet) []byte {
 // The leading colon after { distinguishes this from regular composite literals
 // ([]int{1, 2, 3} has no colon). The syntax mirrors Go's three-index slice
 // expression a[low:high:max].
-func RewriteSliceLiterals(src []byte, fset *token.FileSet) []byte {
+func RewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int) RewriteResult {
 	type tok struct {
 		pos    int
 		end    int
@@ -286,7 +297,8 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet) []byte {
 		lit    string
 	}
 
-	file := fset.AddFile("", fset.Base(), len(src))
+	localFset := token.NewFileSet()
+	file := localFset.AddFile("", localFset.Base(), len(src))
 	var s scanner.Scanner
 	s.Init(file, src, nil, scanner.ScanComments)
 
@@ -305,7 +317,19 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet) []byte {
 	}
 
 	var result bytes.Buffer
+	var offsets []int
 	lastEnd := 0
+
+	// Track input-to-output byte delta for remapping prior offsets.
+	// Each entry: replacement consumed src[replStart:replEnd] and wrote
+	// outputLen bytes. Prior offsets after replStart shift by the
+	// cumulative (outputLen - inputLen) of all preceding replacements.
+	type deltaEntry struct {
+		inputEnd int // end of replaced input region
+		cumDelta int // cumulative delta after this replacement
+	}
+	var deltas []deltaEntry
+	cumDelta := 0
 
 	for i := 0; i < len(toks); i++ {
 		// Look for LBRACK RBRACK ... LBRACE COLON pattern.
@@ -416,12 +440,9 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet) []byte {
 			}
 		}
 
+		replInputStart := toks[lbrackIdx].pos
+
 		if secureMarker {
-			// []byte{:len, secure} → __moxie_secalloc(len)
-			// Only []byte is supported in M2; other element types fall
-			// through to the regular make path and trip a typecheck error
-			// downstream because the resulting __moxie_secalloc returns
-			// []byte.
 			if typeText != "[]byte" {
 				continue
 			}
@@ -431,62 +452,84 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet) []byte {
 			if lenExpr == "" {
 				continue
 			}
-			result.Write(src[lastEnd:toks[lbrackIdx].pos])
+			result.Write(src[lastEnd:replInputStart])
 			result.WriteString("__moxie_secalloc(")
 			result.WriteString(lenExpr)
 			result.WriteString(")")
 		} else if len(colonPositions) == 1 {
-			// []T{:len} → make([]T, len)
 			lenStart := toks[colonPositions[0]+1].pos
 			lenEnd := toks[closeIdx].pos
 			lenExpr := strings.TrimSpace(string(src[lenStart:lenEnd]))
 			if lenExpr == "" {
 				continue
 			}
-
-			result.Write(src[lastEnd:toks[lbrackIdx].pos])
-			result.WriteString("(make)(")
+			result.Write(src[lastEnd:replInputStart])
+			makeOffset := result.Len()
+			result.WriteString("make(")
 			result.WriteString(typeText)
 			result.WriteString(", ")
 			result.WriteString(lenExpr)
 			result.WriteString(")")
+			offsets = append(offsets, makeOffset)
 		} else if len(colonPositions) == 2 {
-			// []T{:len:cap} → make([]T, len, cap)
-			// len is between first colon and second colon
 			lenStart := toks[colonPositions[0]+1].pos
 			lenEnd := toks[colonPositions[1]].pos
 			lenExpr := strings.TrimSpace(string(src[lenStart:lenEnd]))
-
-			// cap is between second colon and closing brace
 			capStart := toks[colonPositions[1]+1].pos
 			capEnd := toks[closeIdx].pos
 			capExpr := strings.TrimSpace(string(src[capStart:capEnd]))
-
 			if lenExpr == "" || capExpr == "" {
 				continue
 			}
-
-			result.Write(src[lastEnd:toks[lbrackIdx].pos])
-			result.WriteString("(make)(")
+			result.Write(src[lastEnd:replInputStart])
+			makeOffset := result.Len()
+			result.WriteString("make(")
 			result.WriteString(typeText)
 			result.WriteString(", ")
 			result.WriteString(lenExpr)
 			result.WriteString(", ")
 			result.WriteString(capExpr)
 			result.WriteString(")")
+			offsets = append(offsets, makeOffset)
 		} else {
-			continue // malformed — more than 2 colons
+			continue
 		}
+
+		replInputEnd := toks[closeIdx].end
+		cumDelta = result.Len() - replInputEnd
+		deltas = append(deltas, deltaEntry{inputEnd: replInputEnd, cumDelta: cumDelta})
 
 		lastEnd = toks[closeIdx].end
 		i = closeIdx
 	}
 
 	if lastEnd == 0 {
-		return src // no rewrites
+		r := RewriteResult{Src: src}
+		if len(priorOffsets) > 0 {
+			r.PriorOffsets = priorOffsets[0]
+		}
+		return r
 	}
 	result.Write(src[lastEnd:])
-	return result.Bytes()
+
+	// Remap prior offsets from the earlier rewrite pass.
+	var remapped []int
+	if len(priorOffsets) > 0 && len(priorOffsets[0]) > 0 {
+		remapped = make([]int, len(priorOffsets[0]))
+		for i, off := range priorOffsets[0] {
+			delta := 0
+			for _, d := range deltas {
+				if off >= d.inputEnd {
+					delta = d.cumDelta
+				} else {
+					break
+				}
+			}
+			remapped[i] = off + delta
+		}
+	}
+
+	return RewriteResult{Src: result.Bytes(), MakeOffsets: offsets, PriorOffsets: remapped}
 }
 
 // ---------------------------------------------------------------------------

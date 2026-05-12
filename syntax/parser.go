@@ -312,7 +312,7 @@ func tokstring(tok Token) string {
 }
 
 // Convenience methods using the current token position.
-func (p *Parser) pos() Pos               { return p.posAt(p.line, p.col) }
+func (p *Parser) pos() Pos               { return p.posAt(p.Line-Linebase, p.Col-Colbase) }
 func (p *Parser) error(msg string)       { p.errorAt(p.pos(), msg) }
 func (p *Parser) syntaxError(msg string) { p.syntaxErrorAt(p.pos(), msg) }
 

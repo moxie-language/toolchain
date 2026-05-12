@@ -99,6 +99,10 @@ type compilerContext struct {
 	packageDir       string // directory for this package
 	runtimePkg       *types.Package
 
+	// Loader-generated make() byte offsets per file. Used by the restriction
+	// check to distinguish literal-syntax lowerings from user-written make().
+	makeExemptOffsets map[string][]int
+
 	// Wasm spawn dispatch table. Populated by scanWasmSpawnTargets before
 	// package compilation; consumed by emitWasmSpawnEntry after.
 	wasmSpawnTargets []*wasmSpawnTarget
@@ -311,6 +315,7 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 	defer c.dispose()
 	c.packageDir = pkg.OriginalDir()
 	c.embedGlobals = pkg.EmbedGlobals
+	c.makeExemptOffsets = pkg.MakeExemptOffsets
 	c.pkg = pkg.Pkg
 	c.runtimePkg = ssaPkg.Prog.ImportedPackage("runtime").Pkg
 	c.program = ssaPkg.Prog

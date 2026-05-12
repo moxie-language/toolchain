@@ -72,7 +72,7 @@ func hasMoxieSecallocRefs(files []*ast.File) bool {
 	return mxtext.HasMoxieSecallocRefs(files)
 }
 
-func rewriteChanLiterals(src []byte, fset *token.FileSet) []byte {
+func rewriteChanLiterals(src []byte, fset *token.FileSet) mxtext.RewriteResult {
 	return mxtext.RewriteChanLiterals(src, fset)
 }
 
@@ -80,6 +80,6 @@ func checkPlusOnText(files []*ast.File, info *types.Info, fset *token.FileSet) [
 	return mxtext.CheckPlusOnText(files, info, fset)
 }
 
-func rewriteSliceLiterals(src []byte, fset *token.FileSet) []byte {
-	return mxtext.RewriteSliceLiterals(src, fset)
+func rewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int) mxtext.RewriteResult {
+	return mxtext.RewriteSliceLiterals(src, fset, priorOffsets...)
 }

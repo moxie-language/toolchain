@@ -68,7 +68,7 @@ func ConvertAndKeep(fset *token.FileSet, filename string, src []byte) (*ast.File
 	var lines []int
 	lines = append(lines, 0)
 	for i, b := range src {
-		if b == '\n' {
+		if b == '\n' && i+1 < len(src) {
 			lines = append(lines, i+1)
 		}
 	}
@@ -79,7 +79,7 @@ func ConvertAndKeep(fset *token.FileSet, filename string, src []byte) (*ast.File
 }
 
 func (a *Adapter) pos(p Pos) token.Pos {
-	// syntax Pos stores 0-based line/col from Source.line/col
+	// syntax Pos stores 0-based line/col from scanner snapshot
 	line := int(p.Line()) + 1
 	col := int(p.Col()) + 1
 	if line < 1 {
@@ -91,7 +91,8 @@ func (a *Adapter) pos(p Pos) token.Pos {
 	if line > a.file.LineCount() {
 		line = a.file.LineCount()
 	}
-	return a.file.LineStart(line) + token.Pos(col-1)
+	result := a.file.LineStart(line) + token.Pos(col-1)
+	return result
 }
 
 func (a *Adapter) ident(n *Name) *ast.Ident {

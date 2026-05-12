@@ -5,6 +5,7 @@
 set -euo pipefail
 
 MOXIE="${MOXIE:-./moxie}"
+MOXIE="$(cd "$(dirname "$MOXIE")" && pwd)/$(basename "$MOXIE")"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
@@ -14,14 +15,28 @@ export PATH="/usr/lib/llvm19/bin:$PATH"
 pass=0
 fail=0
 
+# Create a temp module directory, copy a single .mx file into it as main.mx,
+# and return the module directory path. Each test gets an isolated module.
+setup_module() {
+    local src="$1"
+    local name=$(basename "$src" .mx)
+    local moddir="$TMPDIR/mod_$name"
+    mkdir -p "$moddir"
+    cp "$src" "$moddir/main.mx"
+    printf 'module %s\n\nmoxie 0.1.0\n' "$name" > "$moddir/moxie.mod"
+    echo "$moddir"
+}
+
 run_pass_test() {
     local src="$1"
-    local name=$(basename "$src" .go)
-    local bin="$TMPDIR/$name"
+    local name=$(basename "$src" .mx)
+    local moddir
+    moddir=$(setup_module "$src")
+    local bin="$moddir/$name"
 
-    if ! "$MOXIE" build -o "$bin" "$src" 2>"$TMPDIR/$name.err"; then
+    if ! (cd "$moddir" && "$MOXIE" build -o "$bin" . 2>"$moddir/err.log"); then
         echo "FAIL $name: compilation failed"
-        cat "$TMPDIR/$name.err"
+        cat "$moddir/err.log"
         fail=$((fail + 1))
         return
     fi
@@ -49,11 +64,13 @@ run_pass_test() {
 run_fail_test() {
     local src="$1"
     local pattern="$2"
-    local name=$(basename "$src" .go)
-    local bin="$TMPDIR/$name"
+    local name=$(basename "$src" .mx)
+    local moddir
+    moddir=$(setup_module "$src")
+    local bin="$moddir/$name"
 
     local errout
-    if errout=$("$MOXIE" build -o "$bin" "$src" 2>&1); then
+    if errout=$(cd "$moddir" && "$MOXIE" build -o "$bin" . 2>&1); then
         echo "FAIL $name: compilation should have failed"
         fail=$((fail + 1))
         return
@@ -70,20 +87,20 @@ run_fail_test() {
 }
 
 echo "=== Restriction positive tests ==="
-for src in "$TESTDIR"/pass_*.go; do
+for src in "$TESTDIR"/pass_*.mx; do
     run_pass_test "$src"
 done
 
 echo ""
 echo "=== Restriction negative tests ==="
-run_fail_test "$TESTDIR/fail_new.go"              "new.*not allowed"
-run_fail_test "$TESTDIR/fail_complex_builtin.go"   "complex.*not"
-run_fail_test "$TESTDIR/fail_real.go"              "real.*not\|complex.*not"
-run_fail_test "$TESTDIR/fail_imag.go"              "imag.*not\|complex.*not"
-run_fail_test "$TESTDIR/fail_complex64.go"         "complex64"
-run_fail_test "$TESTDIR/fail_complex128.go"        "complex128"
-run_fail_test "$TESTDIR/fail_uintptr.go"           "uintptr"
-run_fail_test "$TESTDIR/fail_fallthrough.go"       "fallthrough"
+run_fail_test "$TESTDIR/fail_new.mx"              "new.*not allowed"
+run_fail_test "$TESTDIR/fail_complex_builtin.mx"   "complex.*not"
+run_fail_test "$TESTDIR/fail_real.mx"              "real.*not\|complex.*not"
+run_fail_test "$TESTDIR/fail_imag.mx"              "imag.*not\|complex.*not"
+run_fail_test "$TESTDIR/fail_complex64.mx"         "complex64"
+run_fail_test "$TESTDIR/fail_complex128.mx"        "complex128"
+run_fail_test "$TESTDIR/fail_uintptr.mx"           "uintptr"
+run_fail_test "$TESTDIR/fail_fallthrough.mx"       "fallthrough"
 
 echo ""
 echo "=== Results: $pass passed, $fail failed ==="

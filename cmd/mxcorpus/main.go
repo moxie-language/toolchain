@@ -116,8 +116,9 @@ func processDir(dir, outdir string) ([]string, error) {
 
 		origSrc := append([]byte(nil), src...)
 
-		rewritten := mxtext.RewriteChanLiterals(src, fset)
-		rewritten = mxtext.RewriteSliceLiterals(rewritten, fset)
+		chanRes := mxtext.RewriteChanLiterals(src, fset)
+		sliceRes := mxtext.RewriteSliceLiterals(chanRes.Src, fset)
+		rewritten := sliceRes.Src
 
 		f, err := parser.ParseFile(fset, e.Name(), rewritten, parser.ParseComments)
 		if err != nil {

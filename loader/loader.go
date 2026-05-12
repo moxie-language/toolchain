@@ -107,6 +107,11 @@ type Package struct {
 	Pkg          *types.Package
 	info         types.Info
 	hasBuiltins  bool
+
+	// MakeExemptOffsets maps filenames to byte offsets of loader-generated
+	// make() calls. The restriction check uses this to distinguish
+	// user-written make() (illegal) from literal-syntax lowerings.
+	MakeExemptOffsets map[string][]int
 }
 
 type EmbedFile struct {
@@ -340,8 +345,17 @@ func (p *Package) parseFile(path string, mode parser.Mode) (*ast.File, error) {
 	sum := sha512.Sum512_224(data)
 	p.FileHashes[originalPath] = sum[:]
 
-	data = rewriteChanLiterals(data, p.program.fset)
-	data = rewriteSliceLiterals(data, p.program.fset)
+	chanResult := rewriteChanLiterals(data, p.program.fset)
+	sliceResult := rewriteSliceLiterals(chanResult.Src, p.program.fset, chanResult.MakeOffsets)
+	data = sliceResult.Src
+
+	allOffsets := append(sliceResult.PriorOffsets, sliceResult.MakeOffsets...)
+	if len(allOffsets) > 0 {
+		if p.MakeExemptOffsets == nil {
+			p.MakeExemptOffsets = make(map[string][]int)
+		}
+		p.MakeExemptOffsets[originalPath] = allOffsets
+	}
 
 	if p.program.keepSyntaxFiles {
 		af, sf, err := syntax.ConvertAndKeep(p.program.fset, originalPath, data)
@@ -424,9 +438,15 @@ func (p *Package) Check() error {
 	packageName := p.ImportPath
 	if p == p.program.MainPkg() {
 		if p.Name != "main" && !p.program.SkipMainNameCheck {
+			var errPos token.Position
+			if len(p.Files) > 0 {
+				errPos = p.program.fset.Position(p.Files[0].Name.Pos())
+			} else {
+				errPos = token.Position{Filename: p.ImportPath}
+			}
 			return Errors{p, []error{
 				scanner.Error{
-					Pos: p.program.fset.Position(p.Files[0].Name.Pos()),
+					Pos: errPos,
 					Msg: fmt.Sprintf("expected main package to have name \"main\", not %#v", p.Name),
 				},
 			}}
