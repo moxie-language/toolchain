@@ -8,7 +8,8 @@ import { setKey as _setEncKey, sealStr, openStr, hasKey as _encHasKey } from './
 const _elements = new Map();
 const _nodeToId = new WeakMap();
 const _elemCallbacks = new Map();
-const _cbEventInfo = new Map(); // cbId → {el, event, fn}
+const _cbEventInfo = new Map(); // cbId -> {el, event, fn}
+const _resizeObservers = new Map(); // elId -> ResizeObserver
 let _nextId = 1; // Safe up to 2^53 in JS. No wrap needed.
 const _callbacks = new Map();
 let _nextCb = 1;
@@ -470,6 +471,22 @@ export function RemoveEventListener(elId, event, callbackId) {
   if (el && cb) el.removeEventListener(event, cb);
 }
 
+export function ObserveResize(elId, callbackId) {
+  const el = _elements.get(elId);
+  const cb = _callbacks.get(callbackId);
+  if (!el || !cb) return;
+  const old = _resizeObservers.get(elId);
+  if (old) old.disconnect();
+  const ro = new ResizeObserver(() => cb());
+  ro.observe(el);
+  _resizeObservers.set(elId, ro);
+}
+
+export function UnobserveResize(elId) {
+  const ro = _resizeObservers.get(elId);
+  if (ro) { ro.disconnect(); _resizeObservers.delete(elId); }
+}
+
 export function getElement(id) { return _elements.get(id); }
 
 // Register a Go function as a JS callback. Returns callback ID.
@@ -516,6 +533,8 @@ function _releaseHandle(id, el) {
       if (src && src.startsWith('blob:')) URL.revokeObjectURL(src);
     }
   }
+  const ro = _resizeObservers.get(id);
+  if (ro) { ro.disconnect(); _resizeObservers.delete(id); }
   _elements.delete(id);
   const cbs = _elemCallbacks.get(id);
   if (cbs) {

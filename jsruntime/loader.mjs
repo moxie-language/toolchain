@@ -312,6 +312,8 @@ function buildBridge() {
       if (fn) { el.removeEventListener(event, fn); jsListeners.delete(key); }
     },
     dom_request_animation_frame(cbID) { requestAnimationFrame(() => cb0(cbID)); },
+    dom_observe_resize(elId, cbID) { dom.ObserveResize(elId, cbID); },
+    dom_unobserve_resize(elId) { dom.UnobserveResize(elId); },
     dom_on_keydown(el, handlerID) {
       const element = dom.getElement(el);
       if (!element) return;
