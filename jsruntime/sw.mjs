@@ -40,20 +40,25 @@ function _storeClient(client) {
 
 let _goInstallHandler = null;
 const _installQueue = [];
+const _lifecycleResolvers = new Map();
 self.addEventListener('install', (event) => {
   if (_goInstallHandler) {
     const id = _storeEvent(event);
     _goInstallHandler(id);
     _events.delete(id);
   } else {
-    _installQueue.push(event);
+    let resolve;
+    event.waitUntil(new Promise((r) => { resolve = r; }));
+    _installQueue.push({ event, resolve });
   }
 });
 
 export function OnInstall(fn) {
   _goInstallHandler = fn;
   while (_installQueue.length > 0) {
-    const id = _storeEvent(_installQueue.shift());
+    const { event, resolve } = _installQueue.shift();
+    const id = _storeEvent(event);
+    _lifecycleResolvers.set(id, resolve);
     fn(id);
     _events.delete(id);
   }
@@ -67,14 +72,18 @@ self.addEventListener('activate', (event) => {
     _goActivateHandler(id);
     _events.delete(id);
   } else {
-    _activateQueue.push(event);
+    let resolve;
+    event.waitUntil(new Promise((r) => { resolve = r; }));
+    _activateQueue.push({ event, resolve });
   }
 });
 
 export function OnActivate(fn) {
   _goActivateHandler = fn;
   while (_activateQueue.length > 0) {
-    const id = _storeEvent(_activateQueue.shift());
+    const { event, resolve } = _activateQueue.shift();
+    const id = _storeEvent(event);
+    _lifecycleResolvers.set(id, resolve);
     fn(id);
     _events.delete(id);
   }
@@ -137,6 +146,12 @@ export function OnMessage(fn) {
 // --- Event methods ---
 
 export function WaitUntil(eventId, fn) {
+  const resolver = _lifecycleResolvers.get(eventId);
+  if (resolver) {
+    _lifecycleResolvers.delete(eventId);
+    fn(resolver);
+    return;
+  }
   const ev = _events.get(eventId);
   if (!ev) return;
   ev.waitUntil(new Promise((resolve) => {

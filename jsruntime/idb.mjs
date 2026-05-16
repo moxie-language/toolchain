@@ -4,7 +4,7 @@
 import { setKey as _setEncKey, sealStr, openStr, hasKey as _encHasKey } from './aead.mjs';
 
 const DB_NAME = 'smesh';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 let _db = null;
 let _appVersion = '';
 
@@ -35,6 +35,12 @@ function _openDB(onReady) {
     if (!db.objectStoreNames.contains('meta')) {
       db.createObjectStore('meta', { keyPath: 'key' });
     }
+    if (!db.objectStoreNames.contains('mls_groups')) {
+      db.createObjectStore('mls_groups', { keyPath: 'id' });
+    }
+    if (!db.objectStoreNames.contains('mls_kpp')) {
+      db.createObjectStore('mls_kpp', { keyPath: 'key' });
+    }
   };
   req.onsuccess = (e) => {
     _db = e.target.result;
@@ -63,9 +69,11 @@ function _checkVersion(fn) {
     const stored = req.result ? req.result.value : '';
     if (stored && stored !== _appVersion) {
       // Version mismatch — flush all data stores.
-      const clearTx = _db.transaction(['events', 'dms', 'meta'], 'readwrite');
+      const clearTx = _db.transaction(['events', 'dms', 'meta', 'mls_groups', 'mls_kpp'], 'readwrite');
       clearTx.objectStore('events').clear();
       clearTx.objectStore('dms').clear();
+      clearTx.objectStore('mls_groups').clear();
+      clearTx.objectStore('mls_kpp').clear();
       clearTx.objectStore('meta').put({ key: 'version', value: _appVersion });
       clearTx.oncomplete = fn;
       clearTx.onerror = fn;
@@ -282,4 +290,46 @@ export function ClearDMsByPeer(peer, fn) {
   };
   tx.oncomplete = () => { if (fn) fn(); };
   tx.onerror = () => { if (fn) fn(); };
+}
+
+// --- MLS storage ---
+
+export function MlsSaveGroup(groupIDHex, stateBase64, fn) {
+  if (!_db) { if (fn) fn(); return; }
+  const tx = _db.transaction('mls_groups', 'readwrite');
+  tx.objectStore('mls_groups').put({ id: groupIDHex, state: stateBase64 });
+  tx.oncomplete = () => { if (fn) fn(); };
+  tx.onerror = () => { if (fn) fn(); };
+}
+
+export function MlsLoadGroup(groupIDHex, fn) {
+  if (!_db) { if (fn) fn(''); return; }
+  const tx = _db.transaction('mls_groups', 'readonly');
+  const req = tx.objectStore('mls_groups').get(groupIDHex);
+  req.onsuccess = () => { if (fn) fn(req.result ? req.result.state : ''); };
+  req.onerror = () => { if (fn) fn(''); };
+}
+
+export function MlsListGroups(fn) {
+  if (!_db) { if (fn) fn('[]'); return; }
+  const tx = _db.transaction('mls_groups', 'readonly');
+  const req = tx.objectStore('mls_groups').getAllKeys();
+  req.onsuccess = () => { if (fn) fn(JSON.stringify(req.result || [])); };
+  req.onerror = () => { if (fn) fn('[]'); };
+}
+
+export function MlsSaveKPP(kppBase64, fn) {
+  if (!_db) { if (fn) fn(); return; }
+  const tx = _db.transaction('mls_kpp', 'readwrite');
+  tx.objectStore('mls_kpp').put({ key: 'kpp', data: kppBase64 });
+  tx.oncomplete = () => { if (fn) fn(); };
+  tx.onerror = () => { if (fn) fn(); };
+}
+
+export function MlsLoadKPP(fn) {
+  if (!_db) { if (fn) fn(''); return; }
+  const tx = _db.transaction('mls_kpp', 'readonly');
+  const req = tx.objectStore('mls_kpp').get('kpp');
+  req.onsuccess = () => { if (fn) fn(req.result ? req.result.data : ''); };
+  req.onerror = () => { if (fn) fn(''); };
 }

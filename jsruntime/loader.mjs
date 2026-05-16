@@ -519,6 +519,15 @@ function buildBridge() {
     idb_get_conversation_list(cbID) { idb.GetConversationList((s) => cbs(cbID, s)); },
     idb_clear_dms_by_peer(p, l, _c, cbID) { idb.ClearDMsByPeer(readStr(p, l), () => cb0(cbID)); },
     idb_set_version(p, l, _c) { idb.SetVersion(readStr(p, l)); },
+    idb_mls_save_group(gp, gl, _gc, sp, sl, _sc, cbID) {
+      idb.MlsSaveGroup(readStr(gp, gl), readStr(sp, sl), () => cb0(cbID));
+    },
+    idb_mls_load_group(gp, gl, _gc, cbID) {
+      idb.MlsLoadGroup(readStr(gp, gl), (s) => cbs(cbID, s));
+    },
+    idb_mls_list_groups(cbID) { idb.MlsListGroups((s) => cbs(cbID, s)); },
+    idb_mls_save_kpp(p, l, _c, cbID) { idb.MlsSaveKPP(readStr(p, l), () => cb0(cbID)); },
+    idb_mls_load_kpp(cbID) { idb.MlsLoadKPP((s) => cbs(cbID, s)); },
 
     // --- ext ---
     ext_storage_get(kp, kl, _kc, cbID) { ext.StorageGet(readStr(kp, kl), (s) => cbs(cbID, s)); },

@@ -98,6 +98,16 @@ int moxie_pipe(int fds[2]) {
     return pipe(fds);
 }
 
+// moxie_setnonblock sets O_NONBLOCK on fd via fcntl. Returns 0 on success, -1 on error.
+// Used by evloop to set fds non-blocking without going through the syscall package's
+// F_GETFL/F_SETFL two-step when we know the fd is freshly created.
+#include <fcntl.h>
+int moxie_setnonblock(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return flags;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
 // moxie_peek does a non-blocking peek read on fd to detect data /
 // remote close. Returns: 0 if remote closed (EOF), -1 if no data
 // available right now (EAGAIN/EWOULDBLOCK or transient error), >0 if
