@@ -231,6 +231,10 @@ func (c *compilerContext) getFunction(fn *ssa.Function) (llvm.Type, llvm.Value) 
 			}
 
 			llvmFn.AddFunctionAttr(c.ctx.CreateStringAttribute("wasm-import-name", info.wasmName))
+
+			// WASM imports must survive LTO - the host provides them
+			// but LLVM can't see the external call graph.
+			llvmutil.AppendToGlobal(c.mod, "llvm.used", llvmFn)
 		}
 		nocaptureKind := llvm.AttributeKindID("nocapture")
 		nocapture := c.ctx.CreateEnumAttribute(nocaptureKind, 0)
