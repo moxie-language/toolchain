@@ -2,16 +2,35 @@
 
 package runtime
 
-import "unsafe"
+import (
+	"runtime/volatile"
+	"unsafe"
+)
+
+// stackChainStart anchors the compiler-generated stack chain that tracks
+// heap pointers in WASM function locals. MakeGCStackSlots inserts stores
+// to this global at every function entry/exit. The volatile load in
+// markStack prevents LLVM from DCE'ing those stores.
+//
+// Declared as a regular var (not //go:extern) so the linker places it at
+// a non-zero BSS address. With //go:extern, wasm-ld resolves it to
+// address 0, which triggers a nil panic on the volatile load.
+var stackChainStart *stackChainObject
+
+type stackChainObject struct {
+	parent   *stackChainObject
+	numSlots uintptr
+}
 
 func gcMarkReachable() {
 	markStack()
 	findGlobals(markRoots)
 }
 
-// markStack scans the system stack for GC roots.
-// Moxie has no goroutines - always on the system stack.
 func markStack() {
+	// Force LLVM to keep stackChainStart (and the MakeGCStackSlots
+	// bookkeeping that writes to it) alive.
+	volatile.LoadUint32((*uint32)(unsafe.Pointer(&stackChainStart)))
 	markRoots(getCurrentStackPointer(), stackTop)
 }
 
@@ -19,14 +38,6 @@ func markStack() {
 // construction. Calls to it are later replaced with regular stack bookkeeping
 // code.
 func trackPointer(ptr, alloca unsafe.Pointer)
-
-//go:extern runtime.stackChainStart
-var stackChainStart *stackChainObject
-
-type stackChainObject struct {
-	parent   *stackChainObject
-	numSlots uintptr
-}
 
 // swapStackChain is referenced by internal/task for goroutine switching.
 // No-op in moxie (no goroutines).
