@@ -138,6 +138,8 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"--export-dynamic",
 			"--allow-undefined",
 			"--gc-sections",
+			"--export=__heap_base",
+			"--export=__data_end",
 		)
 	default:
 		return nil, fmt.Errorf("unsupported GOOS=%s (moxie supports linux, darwin, js)", options.GOOS)
