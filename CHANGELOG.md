@@ -5,6 +5,28 @@ features, language rules, runtime additions, and fixes that change observable
 behaviour. Point-releases under the same minor typically group related
 work; the headline of each entry matches the tag's commit subject.
 
+## v1.2.19
+
+- **WASM GC reverted to leaking** - conservative GC (v1.2.18 commits
+  a182665..96e2ab4) caused stack overflows in the recursive mark phase on
+  large heap graphs. Leaking GC is correct for short-lived WASM modules
+  with explicit cleanup paths. `NeedsStackObjects` disabled, `__heap_base`
+  / `__data_end` exports removed, stack size override removed.
+- **`trap()` / `moxie_longjmp()` use direct LLVM exports** instead of
+  arch-specific wrapper functions (`trap_arch`, `moxie_longjmp_arch`).
+- **`llvm_sponentry` intrinsic** added (`llvm.sponentry.p0`) for stack
+  pointer on function entry.
+- **`gc_stack_portable.mx`** reverted to goroutine-aware stack scanning
+  with `swapStackChain` support.
+- **Fork error handling** fixed in `os/osexec.mx` - errno checked
+  correctly for non-zero pid returns.
+- **Pipe stall diagnostic** reduced from 60s to 3s for faster detection
+  of stuck spawn channels.
+- **Removed `llvm.used` for WASM imports** - not needed without
+  conservative GC's LTO preservation requirements.
+- **README** corrected: spawn channel retry is indefinite (not 100ms
+  timeout), WASM GC column updated.
+
 ## v1.2.1
 
 - **Latent v1.1.2 regression fixed** — native stdlib builds now succeed

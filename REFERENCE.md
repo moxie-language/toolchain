@@ -391,7 +391,7 @@ ch <- 42           // compile error: channel has no listener
 
 ### IPC Channels
 
-Channels passed to `spawn` become IPC channels. The runtime multiplexes them over a single socketpair with length-prefixed messages. All spawn channel operations are non-blocking with retry-and-yield (1ms sleep, up to 100ms total). Both sides of the socketpair are symmetric concurrent peers - backpressure is expressed by pipe buffer fullness, not by blocking:
+Channels passed to `spawn` become IPC channels. The runtime multiplexes them over a single socketpair with length-prefixed messages. All spawn channel operations are non-blocking with retry-and-yield (1ms sleep, indefinite retry until success or pipe close). Both sides of the socketpair are symmetric concurrent peers - backpressure is expressed by pipe buffer fullness, not by blocking:
 
 ```moxie
 import "moxie"
@@ -529,7 +529,7 @@ The runtime provides:
 | linux/arm64 | Static ELF | Boehm | musl |
 | darwin/amd64 | Mach-O | Boehm | libSystem |
 | darwin/arm64 | Mach-O | Boehm | libSystem |
-| js/wasm | JavaScript + runtime | Browser GC | — |
+| js/wasm | JavaScript + runtime | Leaking (no GC) | — |
 
 All native binaries are fully statically linked. No dynamic library dependencies at runtime.
 
@@ -795,7 +795,7 @@ The wire protocol for cross-binary spawn codec values adds a `uint32` length pre
 | Cross-binary deps | `moxie fetch` installs deps; `moxie build` is network-free. |
 | Protocol headers | `.mxh` files — codec type layout + hash for version verification. |
 | Memory model | No shared memory between domains. |
-| GC | Boehm conservative, per-domain heap. |
+| GC | Boehm conservative (native), leaking (WASM). Per-domain heap. |
 | Slice equality | `==` works for any comparable element type. |
 | Slice literals | `[]T{:n}` (length n). `[]T{:n:c}` (length n, capacity c). |
 | Channel literals | `chan T{}` (unbuffered). `chan T{n}` (buffered, capacity n). |

@@ -130,7 +130,7 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"src/runtime/spawn_unix.c",
 			"src/internal/futex/futex_linux.c")
 	case "js":
-		spec.GC = "conservative"
+		spec.GC = "leaking"
 		spec.Scheduler = "none" // moxie: no goroutines
 		spec.Linker = "wasm-ld"
 		spec.BuildTags = append(spec.BuildTags, "moxie.wasm", "moxie.unicore")
@@ -138,9 +138,6 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"--export-dynamic",
 			"--allow-undefined",
 			"--gc-sections",
-			"--export=__heap_base",
-			"--export=__data_end",
-			"-z", "stack-size=131072",
 		)
 	default:
 		return nil, fmt.Errorf("unsupported GOOS=%s (moxie supports linux, darwin, js)", options.GOOS)

@@ -83,9 +83,7 @@ func (c *Config) GC() string {
 }
 
 func (c *Config) NeedsStackObjects() bool {
-	// WASM locals live outside linear memory - the GC can't see them.
-	// MakeGCStackSlots mirrors them into the linear stack via a chain.
-	return c.GOARCH() == "wasm" && c.GC() != "leaking"
+	return false
 }
 
 // Scheduler returns the scheduler implementation. Moxie uses "none" (no goroutines).

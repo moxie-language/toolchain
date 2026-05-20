@@ -3,18 +3,17 @@
 package runtime
 
 import (
+	"internal/task"
 	"runtime/volatile"
 	"unsafe"
 )
 
-// stackChainStart anchors the compiler-generated stack chain that tracks
-// heap pointers in WASM function locals. MakeGCStackSlots inserts stores
-// to this global at every function entry/exit. The volatile load in
-// markStack prevents LLVM from DCE'ing those stores.
-//
-// Declared as a regular var (not //go:extern) so the linker places it at
-// a non-zero BSS address. With //go:extern, wasm-ld resolves it to
-// address 0, which triggers a nil panic on the volatile load.
+func gcMarkReachable() {
+	markStack()
+	findGlobals(markRoots)
+}
+
+//go:extern runtime.stackChainStart
 var stackChainStart *stackChainObject
 
 type stackChainObject struct {
@@ -22,16 +21,37 @@ type stackChainObject struct {
 	numSlots uintptr
 }
 
-func gcMarkReachable() {
-	markStack()
-	findGlobals(markRoots)
-}
-
+// markStack marks all root pointers found on the stack.
+//
+//   - Goroutine stacks are heap allocated and always reachable in some way
+//     (for example through internal/task.currentTask) so they will always be
+//     scanned.
+//   - The system stack (aka startup stack) is not heap allocated, so even
+//     though it may be referenced it will not be scanned by default.
+//
+// The compiler also inserts code to store all globals in a chain via
+// stackChainStart. Luckily we don't need to scan these, as these globals are
+// stored on the goroutine stack and are therefore already getting scanned.
 func markStack() {
-	// Force LLVM to keep stackChainStart (and the MakeGCStackSlots
-	// bookkeeping that writes to it) alive.
+	// Hack to force LLVM to consider stackChainStart to be live.
+	// Without this hack, loads and stores may be considered dead and objects on
+	// the stack might not be correctly tracked. With this volatile load, LLVM
+	// is forced to consider stackChainStart (and everything it points to) as
+	// live.
 	volatile.LoadUint32((*uint32)(unsafe.Pointer(&stackChainStart)))
-	markRoots(getCurrentStackPointer(), stackTop)
+
+	// Scan the system stack.
+	var sysSP uintptr
+	if task.OnSystemStack() {
+		// We are on the system stack.
+		// Use the current stack pointer.
+		sysSP = getCurrentStackPointer()
+	} else {
+		// We are in a goroutine.
+		// Use the saved stack pointer.
+		sysSP = savedStackPointer
+	}
+	markRoots(sysSP, stackTop)
 }
 
 // trackPointer is a stub function call inserted by the compiler during IR
@@ -39,13 +59,12 @@ func markStack() {
 // code.
 func trackPointer(ptr, alloca unsafe.Pointer)
 
-// swapStackChain is referenced by internal/task for goroutine switching.
-// No-op in moxie (no goroutines).
-func swapStackChain(dst **stackChainObject) {}
-
-// scanstack is called from internal/task via go:linkname.
-func scanstack(sp uintptr) {
-	markRoots(sp, stackTop)
+// swapStackChain swaps the stack chain.
+// This is called from internal/task when switching goroutines.
+func swapStackChain(dst **stackChainObject) {
+	*dst, stackChainStart = stackChainStart, *dst
 }
 
-func gcResumeWorld() {}
+func gcResumeWorld() {
+	// Nothing to do here (single threaded).
+}
