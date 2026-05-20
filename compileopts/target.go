@@ -140,6 +140,7 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"--gc-sections",
 			"--export=__heap_base",
 			"--export=__data_end",
+			"-z", "stack-size=131072",
 		)
 	default:
 		return nil, fmt.Errorf("unsupported GOOS=%s (moxie supports linux, darwin, js)", options.GOOS)
