@@ -1,3 +1,5 @@
+//go:build !purego
+
 //===- analysis.go - Bindings for analysis --------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.

@@ -1,3 +1,5 @@
+//go:build !purego
+
 //===- target.go - Bindings for target ------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.

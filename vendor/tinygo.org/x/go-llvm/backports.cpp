@@ -1,3 +1,4 @@
+//go:build !purego
 
 #include "backports.h"
 #include "llvm/IR/Instructions.h"

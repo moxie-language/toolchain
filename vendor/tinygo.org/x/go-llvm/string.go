@@ -1,3 +1,5 @@
+//go:build !purego
+
 //===- string.go - Stringer implementation for Type -----------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.

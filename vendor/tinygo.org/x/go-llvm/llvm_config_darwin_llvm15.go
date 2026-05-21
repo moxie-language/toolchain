@@ -1,4 +1,4 @@
-//go:build !byollvm && darwin && llvm15
+//go:build !purego && !byollvm && darwin && llvm15
 
 package llvm
 

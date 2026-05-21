@@ -1,3 +1,5 @@
+//go:build !purego
+
 //===- ir.go - Bindings for ir --------------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -16,7 +18,6 @@ package llvm
 #include "llvm-c/Core.h"
 #include "llvm-c/Comdat.h"
 #include "IRBindings.h"
-#include "compat_removed.h"
 #include <stdlib.h>
 */
 import "C"

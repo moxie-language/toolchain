@@ -353,6 +353,36 @@ var (
 	symGetOrInsertComdat     uintptr
 	symComdatSetSelectionKind uintptr
 	symSetComdat             uintptr
+
+	// Value type checks (IsA*)
+	symIsAAllocaInst  uintptr
+	symIsAConstant    uintptr
+	symIsAConstantInt uintptr
+	symIsAFunction    uintptr
+	symIsAGlobalValue uintptr
+	symIsAInstruction uintptr
+	symIsAPHINode     uintptr
+	symIsAUndefValue  uintptr
+
+	// Value misc
+	symIsDeclaration    uintptr
+	symGlobalGetValType uintptr
+	symGetLastParam     uintptr
+	symGetOperand       uintptr
+	symGetNumOperands   uintptr
+	symSetVolatile      uintptr
+	symInstructionRemoveFromParent uintptr
+	symInstructionGetDebugLoc     uintptr
+	symCountIncoming    uintptr
+	symGetIncomingValue uintptr
+	symGetIncomingBlock uintptr
+
+	// Builder misc
+	symInsertIntoBuilder uintptr
+	symBuildBinOp        uintptr
+
+	// Const misc
+	symConstPointerCast uintptr
 )
 
 func registerAll() {
@@ -687,6 +717,36 @@ func registerAll() {
 	symGetOrInsertComdat = mustSym(libLLVM, "LLVMGetOrInsertComdat")
 	symComdatSetSelectionKind = mustSym(libLLVM, "LLVMSetComdatSelectionKind")
 	symSetComdat = mustSym(libLLVM, "LLVMSetComdat")
+
+	// Value type checks
+	symIsAAllocaInst = mustSym(libLLVM, "LLVMIsAAllocaInst")
+	symIsAConstant = mustSym(libLLVM, "LLVMIsAConstant")
+	symIsAConstantInt = mustSym(libLLVM, "LLVMIsAConstantInt")
+	symIsAFunction = mustSym(libLLVM, "LLVMIsAFunction")
+	symIsAGlobalValue = mustSym(libLLVM, "LLVMIsAGlobalValue")
+	symIsAInstruction = mustSym(libLLVM, "LLVMIsAInstruction")
+	symIsAPHINode = mustSym(libLLVM, "LLVMIsAPHINode")
+	symIsAUndefValue = mustSym(libLLVM, "LLVMIsAUndefValue")
+
+	// Value misc
+	symIsDeclaration = mustSym(libLLVM, "LLVMIsDeclaration")
+	symGlobalGetValType = mustSym(libLLVM, "LLVMGlobalGetValueType")
+	symGetLastParam = mustSym(libLLVM, "LLVMGetLastParam")
+	symGetOperand = mustSym(libLLVM, "LLVMGetOperand")
+	symGetNumOperands = mustSym(libLLVM, "LLVMGetNumOperands")
+	symSetVolatile = mustSym(libLLVM, "LLVMSetVolatile")
+	symInstructionRemoveFromParent = mustSym(libLLVM, "LLVMInstructionRemoveFromParent")
+	symInstructionGetDebugLoc = mustSym(libLLVM, "LLVMInstructionGetDebugLoc")
+	symCountIncoming = mustSym(libLLVM, "LLVMCountIncoming")
+	symGetIncomingValue = mustSym(libLLVM, "LLVMGetIncomingValue")
+	symGetIncomingBlock = mustSym(libLLVM, "LLVMGetIncomingBlock")
+
+	// Builder misc
+	symInsertIntoBuilder = mustSym(libLLVM, "LLVMInsertIntoBuilder")
+	symBuildBinOp = mustSym(libLLVM, "LLVMBuildBinOp")
+
+	// Const misc
+	symConstPointerCast = trySym(libLLVM, "LLVMConstPointerCast")
 
 	// Glue functions (from libmoxie-llvm-glue.so)
 	if libGlue != 0 {
@@ -1108,9 +1168,9 @@ func (v Value) HasMetadata() bool {
 	return r != 0
 }
 
-func (v Value) InstructionDebugLoc() Value {
-	r, _, _ := purego.SyscallN(symGetMetadata, v.ref, 0)
-	return Value{r}
+func (v Value) InstructionDebugLoc() Metadata {
+	r, _, _ := purego.SyscallN(symInstructionGetDebugLoc, v.ref)
+	return Metadata{r}
 }
 
 func (v Value) SetMetadata(kind int, node Metadata) {
@@ -1202,7 +1262,7 @@ func (v Value) ConstNSWNeg() Value {
 	return Value{r}
 }
 
-func (v Value) ConstNot() Value {
+func ConstNot(v Value) Value {
 	r, _, _ := purego.SyscallN(symConstNot, v.ref)
 	return Value{r}
 }
@@ -1309,6 +1369,14 @@ func ConstIntToPtr(val Value, t Type) Value {
 
 func ConstBitCast(val Value, t Type) Value {
 	r, _, _ := purego.SyscallN(symConstBitCast, val.ref, t.ref)
+	return Value{r}
+}
+
+func ConstPointerCast(val Value, t Type) Value {
+	if symConstPointerCast == 0 {
+		return ConstBitCast(val, t)
+	}
+	r, _, _ := purego.SyscallN(symConstPointerCast, val.ref, t.ref)
 	return Value{r}
 }
 
@@ -1484,6 +1552,14 @@ func (m Module) AddFunction(name string, t Type) Value {
 	return Value{r}
 }
 
+func AddFunction(m Module, name string, ft Type) Value {
+	return m.AddFunction(name, ft)
+}
+
+func AddGlobal(m Module, t Type, name string) Value {
+	return m.AddGlobal(t, name)
+}
+
 func (m Module) NamedFunction(name string) Value {
 	cname := cString(name)
 	r, _, _ := purego.SyscallN(symGetNamedFunction, m.ref, cname)
@@ -1534,8 +1610,9 @@ func (v Value) FunctionCallConv() CallConv {
 	return CallConv(r)
 }
 
-func (v Value) AddFunctionAttr(index int, attr Attribute) {
-	purego.SyscallN(symAddFuncAttr, v.ref, uintptr(index), attr.ref)
+func (v Value) AddFunctionAttr(attr Attribute) {
+	// LLVMAttributeFunctionIndex = -1, but passed as unsigned = 0xFFFFFFFF
+	purego.SyscallN(symAddFuncAttr, v.ref, ^uintptr(0), attr.ref)
 }
 
 func (v Value) GetEnumFunctionAttribute(index int, kindID uint) Attribute {
@@ -1562,6 +1639,10 @@ func (c Context) AddBasicBlock(f Value, name string) BasicBlock {
 	r, _, _ := purego.SyscallN(symAppendBasicBlockInCtx, c.ref, f.ref, cname)
 	runtime.KeepAlive(name)
 	return BasicBlock{r}
+}
+
+func AddBasicBlock(f Value, name string) BasicBlock {
+	return GlobalContext().AddBasicBlock(f, name)
 }
 
 func (c Context) InsertBasicBlock(ref BasicBlock, name string) BasicBlock {
@@ -1659,6 +1740,112 @@ func (v Value) IsATerminatorInst() Value {
 	return Value{r}
 }
 
+func (v Value) IsAAllocaInst() Value {
+	r, _, _ := purego.SyscallN(symIsAAllocaInst, v.ref)
+	return Value{r}
+}
+
+func (v Value) IsAConstant() Value {
+	r, _, _ := purego.SyscallN(symIsAConstant, v.ref)
+	return Value{r}
+}
+
+func (v Value) IsAConstantInt() Value {
+	r, _, _ := purego.SyscallN(symIsAConstantInt, v.ref)
+	return Value{r}
+}
+
+func (v Value) IsAFunction() Value {
+	r, _, _ := purego.SyscallN(symIsAFunction, v.ref)
+	return Value{r}
+}
+
+func (v Value) IsAGlobalValue() Value {
+	r, _, _ := purego.SyscallN(symIsAGlobalValue, v.ref)
+	return Value{r}
+}
+
+func (v Value) IsAInstruction() Value {
+	r, _, _ := purego.SyscallN(symIsAInstruction, v.ref)
+	return Value{r}
+}
+
+func (v Value) IsAPHINode() Value {
+	r, _, _ := purego.SyscallN(symIsAPHINode, v.ref)
+	return Value{r}
+}
+
+func (v Value) IsAUndefValue() Value {
+	r, _, _ := purego.SyscallN(symIsAUndefValue, v.ref)
+	return Value{r}
+}
+
+func (v Value) IsDeclaration() bool {
+	r, _, _ := purego.SyscallN(symIsDeclaration, v.ref)
+	return r != 0
+}
+
+func (v Value) GlobalValueType() Type {
+	r, _, _ := purego.SyscallN(symGlobalGetValType, v.ref)
+	return Type{r}
+}
+
+func (v Value) LastParam() Value {
+	r, _, _ := purego.SyscallN(symGetLastParam, v.ref)
+	return Value{r}
+}
+
+func (v Value) Operand(i int) Value {
+	r, _, _ := purego.SyscallN(symGetOperand, v.ref, uintptr(i))
+	return Value{r}
+}
+
+func (v Value) OperandsCount() int {
+	r, _, _ := purego.SyscallN(symGetNumOperands, v.ref)
+	return int(r)
+}
+
+func (v Value) SetVolatile(volatile bool) {
+	purego.SyscallN(symSetVolatile, v.ref, boolToInt(volatile))
+}
+
+func (v Value) RemoveFromParentAsInstruction() {
+	purego.SyscallN(symInstructionRemoveFromParent, v.ref)
+}
+
+func (v Value) IncomingCount() int {
+	r, _, _ := purego.SyscallN(symCountIncoming, v.ref)
+	return int(r)
+}
+
+func (v Value) IncomingValue(i int) Value {
+	r, _, _ := purego.SyscallN(symGetIncomingValue, v.ref, uintptr(i))
+	return Value{r}
+}
+
+func (v Value) IncomingBlock(i int) BasicBlock {
+	r, _, _ := purego.SyscallN(symGetIncomingBlock, v.ref, uintptr(i))
+	return BasicBlock{r}
+}
+
+func (v Value) AddAttributeAtIndex(i int, a Attribute) {
+	purego.SyscallN(symAddFuncAttr, v.ref, uintptr(i), a.ref)
+}
+
+func (v Value) AddMetadata(kind int, md Metadata) {
+	if symGlobalObjectAddMetadata == 0 {
+		return
+	}
+	purego.SyscallN(symGlobalObjectAddMetadata, v.ref, uintptr(kind), md.ref)
+}
+
+// Free-function wrappers for iteration (compiler uses these)
+
+func NextInstruction(v Value) Value         { return v.NextInstruction() }
+func NextBasicBlock(bb BasicBlock) BasicBlock { return bb.NextBasicBlock() }
+func NextFunction(v Value) Value            { return v.NextFunction() }
+func NextGlobal(v Value) Value              { return v.NextGlobal() }
+
 // ---- Builder ----
 
 func (c Context) NewBuilder() Builder {
@@ -1682,6 +1869,17 @@ func (b Builder) GetInsertBlock() BasicBlock {
 
 func (b Builder) Dispose() {
 	purego.SyscallN(symDisposeBuilder, b.ref)
+}
+
+func (b Builder) Insert(instr Value) {
+	purego.SyscallN(symInsertIntoBuilder, b.ref, instr.ref)
+}
+
+func (b Builder) CreateBinOp(op Opcode, lhs, rhs Value, name string) Value {
+	cname := cString(name)
+	r, _, _ := purego.SyscallN(symBuildBinOp, b.ref, uintptr(op), lhs.ref, rhs.ref, cname)
+	runtime.KeepAlive(name)
+	return Value{r}
 }
 
 // Builder - terminators
@@ -2265,9 +2463,9 @@ func (b Builder) SetCurrentDebugLocation(line, col uint, scope, inlinedAt Metada
 	purego.SyscallN(symGoSetCurrentDebugLocation, b.ref, uintptr(line), uintptr(col), scope.ref, inlinedAt.ref)
 }
 
-func (b Builder) GetCurrentDebugLocation() (line, col uint, scope, inlinedAt Metadata) {
+func (b Builder) GetCurrentDebugLocation() DebugLoc {
 	if symGoGetCurrentDebugLocation == 0 {
-		return
+		return DebugLoc{}
 	}
 	var dl [4]uintptr
 	purego.SyscallN(symGoGetCurrentDebugLocation, b.ref,
@@ -2275,7 +2473,7 @@ func (b Builder) GetCurrentDebugLocation() (line, col uint, scope, inlinedAt Met
 		uintptr(unsafe.Pointer(&dl[1])),
 		uintptr(unsafe.Pointer(&dl[2])),
 		uintptr(unsafe.Pointer(&dl[3])))
-	return uint(dl[0]), uint(dl[1]), Metadata{dl[2]}, Metadata{dl[3]}
+	return DebugLoc{Line: uint(dl[0]), Col: uint(dl[1]), Scope: Metadata{dl[2]}, InlinedAt: Metadata{dl[3]}}
 }
 
 // ---- Module verify ----

@@ -510,11 +510,13 @@ func (d *DIBuilder) CreateDebugLocation(ctx Context, line, col uint, scope, inli
 	return Metadata{r}
 }
 
-func (d *DIBuilder) InsertValueAtEnd(v Value, diVarInfo, expr, loc Metadata, bb BasicBlock) {
+func (d *DIBuilder) InsertValueAtEnd(v Value, diVarInfo, expr Metadata, l DebugLoc, bb BasicBlock) {
 	if symGoInsertDbgValueRecord == 0 {
 		return
 	}
-	purego.SyscallN(symGoInsertDbgValueRecord, d.ref, v.ref, diVarInfo.ref, expr.ref, loc.ref, bb.ref)
+	loc, _, _ := purego.SyscallN(symDIBCreateDebugLocation, d.m.Context().ref,
+		uintptr(l.Line), uintptr(l.Col), l.Scope.ref, l.InlinedAt.ref)
+	purego.SyscallN(symGoInsertDbgValueRecord, d.ref, v.ref, diVarInfo.ref, expr.ref, loc, bb.ref)
 }
 
 // Metadata operations

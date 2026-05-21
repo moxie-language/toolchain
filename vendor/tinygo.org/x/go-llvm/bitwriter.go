@@ -1,3 +1,5 @@
+//go:build !purego
+
 //===- bitwriter.go - Bindings for bitwriter ------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.

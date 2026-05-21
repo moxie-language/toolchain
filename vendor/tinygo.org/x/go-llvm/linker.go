@@ -1,3 +1,5 @@
+//go:build !purego
+
 //===- linker.go - Bindings for linker ------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.

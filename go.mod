@@ -7,6 +7,7 @@ require golang.org/x/tools v0.43.0
 require (
 	github.com/aykevl/go-wasm v0.0.2-0.20250317121156-42b86c494139 // indirect
 	github.com/blakesmith/ar v0.0.0-20190502131153-809d4375e1fb // indirect
+	github.com/ebitengine/purego v0.10.0 // indirect
 	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
 	github.com/marcinbor85/gohex v0.1.0 // indirect

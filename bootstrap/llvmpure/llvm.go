@@ -24,6 +24,14 @@ type (
 	Use          struct{ ref uintptr }
 )
 
+const Version = "19.1.0"
+
+type DebugLoc struct {
+	Line, Col uint
+	Scope     Metadata
+	InlinedAt Metadata
+}
+
 func (c Context) IsNil() bool      { return c.ref == 0 }
 func (m Module) IsNil() bool       { return m.ref == 0 }
 func (t Type) IsNil() bool         { return t.ref == 0 }

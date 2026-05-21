@@ -1,3 +1,4 @@
+//go:build !purego
 
 #include "llvm-c/DebugInfo.h"
 #include "llvm-c/Types.h"
