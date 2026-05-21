@@ -153,6 +153,9 @@ func (c *Config) LibraryPath(name string) string {
 	if name == "bdwgc" {
 		archname += "-" + c.Target.Libc
 	}
+	if c.BuildMode() == "c-shared" {
+		archname += "-pic"
+	}
 	if v, ok := libVersions[name]; ok {
 		archname += "-v" + strconv.Itoa(v)
 	}
@@ -190,6 +193,9 @@ func (c *Config) CFlags() []string {
 	}
 	if c.ABI() != "" {
 		cflags = append(cflags, "-mabi="+c.ABI())
+	}
+	if c.BuildMode() == "c-shared" {
+		cflags = append(cflags, "-fPIC")
 	}
 	return cflags
 }
@@ -242,6 +248,9 @@ func (c *Config) CodeModel() string {
 }
 
 func (c *Config) RelocationModel() string {
+	if c.BuildMode() == "c-shared" {
+		return "pic"
+	}
 	if c.Target.RelocationModel != "" {
 		return c.Target.RelocationModel
 	}

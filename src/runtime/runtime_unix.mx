@@ -92,7 +92,33 @@ type timespec struct {
 }
 
 // Highest address of the stack of the main thread.
+// In c-shared mode, updated on each exported function entry via
+// RefreshStackTop to prevent GC from scanning host runtime frames.
 var stackTop uintptr
+
+// RefreshStackTop captures the current stack pointer as the stack top.
+// Call at the entry of each exported function in c-shared builds to prevent
+// the conservative GC from scanning host runtime stack frames above.
+func RefreshStackTop() {
+	stackTop = getCurrentStackPointer()
+}
+
+var csharedInitDone bool
+
+// InitCShared initializes the runtime for c-shared mode where main() never runs.
+// Call once at the start of the first exported function.
+func InitCShared() {
+	if csharedInitDone {
+		return
+	}
+	csharedInitDone = true
+	if needsStaticHeap {
+		allocateHeap()
+	}
+	initHeap()
+	initRand()
+	initAll()
+}
 
 // Entry point for Go. Initialize all packages and call main.main().
 //

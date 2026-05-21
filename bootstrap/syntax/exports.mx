@@ -1,0 +1,269 @@
+package main
+
+import (
+	"bytes"
+	"unsafe"
+)
+
+var fileHandles []*File
+
+func allocFileHandle(f *File) int32 {
+	for i, h := range fileHandles {
+		if h == nil {
+			fileHandles[i] = f
+			return int32(i)
+		}
+	}
+	fileHandles = append(fileHandles, f)
+	return int32(len(fileHandles) - 1)
+}
+
+func getFile(h int32) *File {
+	if h < 0 || int(h) >= len(fileHandles) {
+		return nil
+	}
+	return fileHandles[h]
+}
+
+func copyOut(dst unsafe.Pointer, cap int32, src string) int32 {
+	n := int32(len(src))
+	if n > cap {
+		n = cap
+	}
+	if n > 0 {
+		buf := unsafe.Slice((*byte)(dst), n)
+		copy(buf, src[:n])
+	}
+	return n
+}
+
+//export moxie_parse_file
+func moxie_parse_file(pathPtr unsafe.Pointer, pathLen int32) int32 {
+	path := string(unsafe.Slice((*byte)(pathPtr), pathLen))
+	f, err := ParseFile(path, nil, nil, 0)
+	if err != nil || f == nil {
+		return -1
+	}
+	return allocFileHandle(f)
+}
+
+//export moxie_parse_bytes
+func moxie_parse_bytes(srcPtr unsafe.Pointer, srcLen int32, namePtr unsafe.Pointer, nameLen int32) int32 {
+	src := unsafe.Slice((*byte)(srcPtr), srcLen)
+	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
+	r := bytes.NewReader(src)
+	f, err := Parse(NewFileBase(name), r, nil, nil, 0)
+	if err != nil || f == nil {
+		return -1
+	}
+	return allocFileHandle(f)
+}
+
+//export moxie_file_pkg_name
+func moxie_file_pkg_name(h int32, out unsafe.Pointer, cap int32) int32 {
+	f := getFile(h)
+	if f == nil || f.PkgName == nil {
+		return 0
+	}
+	return copyOut(out, cap, f.PkgName.Value)
+}
+
+//export moxie_file_decl_count
+func moxie_file_decl_count(h int32) int32 {
+	f := getFile(h)
+	if f == nil {
+		return 0
+	}
+	return int32(len(f.DeclList))
+}
+
+//export moxie_file_decl_kind
+func moxie_file_decl_kind(h int32, idx int32) int32 {
+	f := getFile(h)
+	if f == nil || idx < 0 || int(idx) >= len(f.DeclList) {
+		return 0
+	}
+	switch f.DeclList[idx].(type) {
+	case *ImportDecl:
+		return 1
+	case *ConstDecl:
+		return 2
+	case *TypeDecl:
+		return 3
+	case *VarDecl:
+		return 4
+	case *FuncDecl:
+		return 5
+	}
+	return 0
+}
+
+//export moxie_file_import_path
+func moxie_file_import_path(h int32, idx int32, out unsafe.Pointer, cap int32) int32 {
+	f := getFile(h)
+	if f == nil || idx < 0 || int(idx) >= len(f.DeclList) {
+		return 0
+	}
+	d, ok := f.DeclList[idx].(*ImportDecl)
+	if !ok || d.Path == nil {
+		return 0
+	}
+	return copyOut(out, cap, d.Path.Value)
+}
+
+//export moxie_file_func_name
+func moxie_file_func_name(h int32, idx int32, out unsafe.Pointer, cap int32) int32 {
+	f := getFile(h)
+	if f == nil || idx < 0 || int(idx) >= len(f.DeclList) {
+		return 0
+	}
+	d, ok := f.DeclList[idx].(*FuncDecl)
+	if !ok || d.Name == nil {
+		return 0
+	}
+	return copyOut(out, cap, d.Name.Value)
+}
+
+//export moxie_file_func_has_body
+func moxie_file_func_has_body(h int32, idx int32) int32 {
+	f := getFile(h)
+	if f == nil || idx < 0 || int(idx) >= len(f.DeclList) {
+		return 0
+	}
+	d, ok := f.DeclList[idx].(*FuncDecl)
+	if !ok {
+		return 0
+	}
+	if d.Body != nil {
+		return 1
+	}
+	return 0
+}
+
+//export moxie_file_func_param_count
+func moxie_file_func_param_count(h int32, idx int32) int32 {
+	f := getFile(h)
+	if f == nil || idx < 0 || int(idx) >= len(f.DeclList) {
+		return 0
+	}
+	d, ok := f.DeclList[idx].(*FuncDecl)
+	if !ok || d.Type == nil {
+		return 0
+	}
+	return int32(len(d.Type.ParamList))
+}
+
+//export moxie_file_func_result_count
+func moxie_file_func_result_count(h int32, idx int32) int32 {
+	f := getFile(h)
+	if f == nil || idx < 0 || int(idx) >= len(f.DeclList) {
+		return 0
+	}
+	d, ok := f.DeclList[idx].(*FuncDecl)
+	if !ok || d.Type == nil {
+		return 0
+	}
+	return int32(len(d.Type.ResultList))
+}
+
+//export moxie_file_func_body_stmt_count
+func moxie_file_func_body_stmt_count(h int32, idx int32) int32 {
+	f := getFile(h)
+	if f == nil || idx < 0 || int(idx) >= len(f.DeclList) {
+		return 0
+	}
+	d, ok := f.DeclList[idx].(*FuncDecl)
+	if !ok || d.Body == nil {
+		return 0
+	}
+	return int32(len(d.Body.List))
+}
+
+//export moxie_file_func_has_recv
+func moxie_file_func_has_recv(h int32, idx int32) int32 {
+	f := getFile(h)
+	if f == nil || idx < 0 || int(idx) >= len(f.DeclList) {
+		return 0
+	}
+	d, ok := f.DeclList[idx].(*FuncDecl)
+	if !ok {
+		return 0
+	}
+	if d.Recv != nil {
+		return 1
+	}
+	return 0
+}
+
+//export moxie_file_type_name
+func moxie_file_type_name(h int32, idx int32, out unsafe.Pointer, cap int32) int32 {
+	f := getFile(h)
+	if f == nil || idx < 0 || int(idx) >= len(f.DeclList) {
+		return 0
+	}
+	d, ok := f.DeclList[idx].(*TypeDecl)
+	if !ok || d.Name == nil {
+		return 0
+	}
+	return copyOut(out, cap, d.Name.Value)
+}
+
+//export moxie_file_type_is_alias
+func moxie_file_type_is_alias(h int32, idx int32) int32 {
+	f := getFile(h)
+	if f == nil || idx < 0 || int(idx) >= len(f.DeclList) {
+		return 0
+	}
+	d, ok := f.DeclList[idx].(*TypeDecl)
+	if !ok {
+		return 0
+	}
+	if d.Alias {
+		return 1
+	}
+	return 0
+}
+
+//export moxie_file_var_name_count
+func moxie_file_var_name_count(h int32, idx int32) int32 {
+	f := getFile(h)
+	if f == nil || idx < 0 || int(idx) >= len(f.DeclList) {
+		return 0
+	}
+	d, ok := f.DeclList[idx].(*VarDecl)
+	if !ok {
+		return 0
+	}
+	return int32(len(d.NameList))
+}
+
+//export moxie_file_const_name_count
+func moxie_file_const_name_count(h int32, idx int32) int32 {
+	f := getFile(h)
+	if f == nil || idx < 0 || int(idx) >= len(f.DeclList) {
+		return 0
+	}
+	d, ok := f.DeclList[idx].(*ConstDecl)
+	if !ok {
+		return 0
+	}
+	return int32(len(d.NameList))
+}
+
+//export moxie_file_go_version
+func moxie_file_go_version(h int32, out unsafe.Pointer, cap int32) int32 {
+	f := getFile(h)
+	if f == nil {
+		return 0
+	}
+	return copyOut(out, cap, f.GoVersion)
+}
+
+//export moxie_file_free
+func moxie_file_free(h int32) {
+	if h >= 0 && int(h) < len(fileHandles) {
+		fileHandles[h] = nil
+	}
+}
+
+func main() {}

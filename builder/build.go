@@ -639,6 +639,11 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	// First add all jobs necessary to build this object file, then afterwards
 	// run all jobs in parallel as far as possible.
 
+	// Native c-shared builds use regular object emission instead of ThinLTO
+	// bitcode. ThinLTO partitioning duplicates type descriptors, which breaks
+	// type switches (interface dispatch) in the loaded .so.
+	nativeCShared := config.Options.BuildMode == "c-shared" && !strings.HasPrefix(config.Triple(), "wasm32-")
+
 	// Add job to write the output object file.
 	objfile := filepath.Join(tmpdir, "main.o")
 	outputObjectFileJob := &compileJob{
@@ -646,6 +651,14 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		dependencies: []*compileJob{programJob},
 		result:       objfile,
 		run: func(*compileJob) error {
+			if nativeCShared {
+				llvmBuf, err := machine.EmitToMemoryBuffer(mod, llvm.ObjectFile)
+				if err != nil {
+					return err
+				}
+				defer llvmBuf.Dispose()
+				return os.WriteFile(objfile, llvmBuf.Bytes(), 0666)
+			}
 			llvmBuf := llvm.WriteThinLTOBitcodeToMemoryBuffer(mod)
 			defer llvmBuf.Dispose()
 			return os.WriteFile(objfile, llvmBuf.Bytes(), 0666)
@@ -662,10 +675,11 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	ldflags := append(config.LDFlags(), "-o", result.Executable)
 
 	if config.Options.BuildMode == "c-shared" {
-		if !strings.HasPrefix(config.Triple(), "wasm32-") {
-			return result, fmt.Errorf("buildmode c-shared is only supported on wasm at the moment")
+		if strings.HasPrefix(config.Triple(), "wasm32-") {
+			ldflags = append(ldflags, "--no-entry")
+		} else {
+			ldflags = append(ldflags, "--shared")
 		}
-		ldflags = append(ldflags, "--no-entry")
 	}
 
 	if config.Options.BuildMode == "wasi-legacy" {
@@ -796,6 +810,9 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				ldflags = append(ldflags,
 					"--lto-O"+strconv.Itoa(speedLevel),
 					"-cache_path_lto", filepath.Join(cacheDir, "thinlto"))
+			} else if nativeCShared {
+				// Native c-shared: object file is native, not bitcode.
+				// No ThinLTO flags needed.
 			} else {
 				// Options for the ELF linker.
 				ldflags = append(ldflags,
@@ -921,7 +938,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 
 	// Convert output format if needed.
 	switch outext {
-	case "", ".elf", ".wasm":
+	case "", ".elf", ".wasm", ".so":
 		// do nothing, file is already in the right format
 	case ".hex", ".bin":
 		result.Binary = filepath.Join(tmpdir, "main"+outext)

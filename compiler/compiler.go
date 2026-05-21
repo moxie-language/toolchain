@@ -1235,16 +1235,18 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 	if b.info.section != "" {
 		b.llvmFn.SetSection(b.info.section)
 	}
-	if b.info.exported && strings.HasPrefix(b.Triple, "wasm") {
-		// Set the exported name. This is necessary for WebAssembly because
-		// otherwise the function is not exported.
-		functionAttr := b.ctx.CreateStringAttribute("wasm-export-name", b.info.linkName)
-		b.llvmFn.AddFunctionAttr(functionAttr)
-		// Unlike most targets, exported functions are actually visible in
-		// WebAssembly (even if it's not called from within the WebAssembly
-		// module). But LTO generally optimizes such functions away. Therefore,
-		// exported functions must be explicitly marked as used.
-		llvmutil.AppendToGlobal(b.mod, "llvm.used", b.llvmFn)
+	if b.info.exported {
+		if strings.HasPrefix(b.Triple, "wasm") {
+			// Set the exported name. This is necessary for WebAssembly because
+			// otherwise the function is not exported.
+			functionAttr := b.ctx.CreateStringAttribute("wasm-export-name", b.info.linkName)
+			b.llvmFn.AddFunctionAttr(functionAttr)
+		}
+		if strings.HasPrefix(b.Triple, "wasm") || b.BuildMode == "c-shared" {
+			// LTO generally optimizes away functions not called from within
+			// the module. Exported functions must be explicitly marked as used.
+			llvmutil.AppendToGlobal(b.mod, "llvm.used", b.llvmFn)
+		}
 	}
 
 	// Some functions have a pragma controlling the inlining level.

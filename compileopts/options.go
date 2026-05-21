@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	validBuildModeOptions     = []string{"default"}
+	validBuildModeOptions     = []string{"default", "c-shared"}
 	validGCOptions            = []string{"none", "leaking", "conservative", "boehm"}
 	validSchedulerOptions     = []string{"none", "tasks"}
 	validPanicStrategyOptions = []string{"print", "trap"}

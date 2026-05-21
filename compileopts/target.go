@@ -143,6 +143,10 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 		return nil, fmt.Errorf("unsupported GOOS=%s (moxie supports linux, darwin, js)", options.GOOS)
 	}
 
+	// CLI -gc flag overrides target default before we add GC-specific files.
+	if options.GC != "" {
+		spec.GC = options.GC
+	}
 	if spec.GC == "boehm" {
 		spec.ExtraFiles = append(spec.ExtraFiles, "src/runtime/gc_boehm.c")
 	}
@@ -153,11 +157,14 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 		spec.Triple += "-musleabihf"
 	}
 
-	// Assembly files for scheduler and task switching (not for WASM).
+	// Assembly files (not for WASM).
 	if options.GOARCH != "wasm" {
 		spec.ExtraFiles = append(spec.ExtraFiles,
-			"src/runtime/asm_"+options.GOARCH+".S",
-			"src/internal/task/task_stack_"+options.GOARCH+".S")
+			"src/runtime/asm_"+options.GOARCH+".S")
+		if spec.Scheduler == "tasks" {
+			spec.ExtraFiles = append(spec.ExtraFiles,
+				"src/internal/task/task_stack_"+options.GOARCH+".S")
+		}
 	}
 
 	// Cross-compilation emulator.

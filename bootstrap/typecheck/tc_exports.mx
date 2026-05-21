@@ -1,0 +1,378 @@
+package main
+
+import (
+	"bytes"
+	"runtime"
+	"unsafe"
+)
+
+var pkgHandles []*TCPackage
+var infoHandles []*Info
+
+func allocPkgHandle(p *TCPackage) int32 {
+	for i, h := range pkgHandles {
+		if h == nil {
+			pkgHandles[i] = p
+			return int32(i)
+		}
+	}
+	pkgHandles = append(pkgHandles, p)
+	return int32(len(pkgHandles) - 1)
+}
+
+func getPkg(h int32) *TCPackage {
+	if h < 0 || int(h) >= len(pkgHandles) {
+		return nil
+	}
+	return pkgHandles[h]
+}
+
+func allocInfoHandle(info *Info) int32 {
+	for i, h := range infoHandles {
+		if h == nil {
+			infoHandles[i] = info
+			return int32(i)
+		}
+	}
+	infoHandles = append(infoHandles, info)
+	return int32(len(infoHandles) - 1)
+}
+
+func getInfo(h int32) *Info {
+	if h < 0 || int(h) >= len(infoHandles) {
+		return nil
+	}
+	return infoHandles[h]
+}
+
+func tcCopyOut(dst unsafe.Pointer, cap int32, src string) int32 {
+	n := int32(len(src))
+	if n > cap {
+		n = cap
+	}
+	if n > 0 {
+		buf := unsafe.Slice((*byte)(dst), n)
+		copy(buf, src[:n])
+	}
+	return n
+}
+
+//export moxie_tc_parse_only
+func moxie_tc_parse_only(srcPtr unsafe.Pointer, srcLen int32, namePtr unsafe.Pointer, nameLen int32) int32 {
+	runtime.InitCShared()
+	src := unsafe.Slice((*byte)(srcPtr), srcLen)
+	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
+	r := bytes.NewReader(src)
+	f, err := Parse(NewFileBase(name), r, nil, nil, 0)
+	if err != nil || f == nil {
+		return -1
+	}
+	return int32(len(f.DeclList))
+}
+
+//export moxie_tc_pass1_insert
+func moxie_tc_pass1_insert(srcPtr unsafe.Pointer, srcLen int32, namePtr unsafe.Pointer, nameLen int32) int32 {
+	runtime.InitCShared()
+	initUniverse()
+	src := unsafe.Slice((*byte)(srcPtr), srcLen)
+	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
+	r := bytes.NewReader(src)
+	f, err := Parse(NewFileBase(name), r, nil, nil, 0)
+	if err != nil || f == nil {
+		return -1
+	}
+	pkg := NewTCPackage(name, packageName([]*File{f}))
+	scope := pkg.Scope()
+	for _, d := range f.DeclList {
+		switch d := d.(type) {
+		case *VarDecl:
+			for _, n := range d.NameList {
+				scope.Insert(NewTCVar(pkg, n.Value, nil))
+			}
+		case *FuncDecl:
+			if d.Recv == nil && d.Name.Value != "init" {
+				scope.Insert(NewTCFunc(pkg, d.Name.Value, nil))
+			}
+		case *TypeDecl:
+			scope.Insert(NewTypeName(pkg, d.Name.Value, nil))
+		case *ConstDecl:
+			for _, n := range d.NameList {
+				scope.Insert(NewTCConst(pkg, n.Value, nil, nil))
+			}
+		}
+	}
+	return int32(len(scope.Names()))
+}
+
+//export moxie_tc_check_bytes
+func moxie_tc_check_bytes(srcPtr unsafe.Pointer, srcLen int32, namePtr unsafe.Pointer, nameLen int32) int32 {
+	runtime.InitCShared()
+	initUniverse()
+	src := unsafe.Slice((*byte)(srcPtr), srcLen)
+	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
+	r := bytes.NewReader(src)
+	f, err := Parse(NewFileBase(name), r, nil, nil, 0)
+	if err != nil || f == nil {
+		return -1
+	}
+	pkg := NewTCPackage(name, packageName([]*File{f}))
+	scope := pkg.Scope()
+	// Pass 1: register all names
+	for _, d := range f.DeclList {
+		switch d := d.(type) {
+		case *VarDecl:
+			for _, n := range d.NameList {
+				scope.Insert(NewTCVar(pkg, n.Value, nil))
+			}
+		case *FuncDecl:
+			if d.Recv == nil && d.Name.Value != "init" {
+				scope.Insert(NewTCFunc(pkg, d.Name.Value, nil))
+			}
+		case *TypeDecl:
+			scope.Insert(NewTypeName(pkg, d.Name.Value, nil))
+		case *ConstDecl:
+			for _, n := range d.NameList {
+				scope.Insert(NewTCConst(pkg, n.Value, nil, nil))
+			}
+		}
+	}
+	// Pass 2: resolve types
+	for _, d := range f.DeclList {
+		switch d := d.(type) {
+		case *VarDecl:
+			typ := tcResolveNameInline(d.Type)
+			for _, n := range d.NameList {
+				obj := scope.Lookup(n.Value)
+				if obj != nil {
+					if v, ok := obj.(*TCVar); ok {
+						v.typ = typ
+					}
+				}
+			}
+		case *FuncDecl:
+			if d.Recv == nil && d.Name.Value != "init" {
+				sig := tcResolveFuncInline(d.Type)
+				obj := scope.Lookup(d.Name.Value)
+				if obj != nil {
+					if fn, ok := obj.(*TCFunc); ok && sig != nil {
+						fn.typ = sig
+					}
+				}
+			}
+		case *TypeDecl:
+			typ := tcResolveNameInline(d.Type)
+			obj := scope.Lookup(d.Name.Value)
+			if obj != nil {
+				if tn, ok := obj.(*TypeName); ok {
+					tn.typ = typ
+				}
+			}
+		}
+	}
+	ph := allocPkgHandle(pkg)
+	return ph
+}
+
+func tcResolveNameInline(e Expr) Type {
+	if e == nil {
+		return nil
+	}
+	switch e := e.(type) {
+	case *Name:
+		_, obj := Universe.LookupParent(e.Value)
+		if obj != nil {
+			if tn, ok := obj.(*TypeName); ok {
+				return tn.typ
+			}
+		}
+	case *Operation:
+		if e.Y == nil && e.Op == Mul {
+			base := tcResolveNameInline(e.X)
+			if base != nil {
+				return NewPointer(base)
+			}
+		}
+	case *SliceType:
+		elem := tcResolveNameInline(e.Elem)
+		if elem != nil {
+			return NewSlice(elem)
+		}
+	case *ArrayType:
+		elem := tcResolveNameInline(e.Elem)
+		if elem != nil {
+			return NewArray(elem, -1)
+		}
+	case *MapType:
+		key := tcResolveNameInline(e.Key)
+		val := tcResolveNameInline(e.Value)
+		if key != nil && val != nil {
+			return NewTCMap(key, val)
+		}
+	case *StructType:
+		var fields []*TCVar
+		var tags []string
+		for i, field := range e.FieldList {
+			typ := tcResolveNameInline(field.Type)
+			fname := ""
+			if field.Name != nil {
+				fname = field.Name.Value
+			}
+			fields = append(fields, NewTCField(nil, fname, typ, field.Name == nil))
+			tag := ""
+			if i < len(e.TagList) && e.TagList[i] != nil {
+				tag = e.TagList[i].Value
+			}
+			tags = append(tags, tag)
+		}
+		return NewTCStruct(fields, tags)
+	case *FuncType:
+		return tcResolveFuncInline(e)
+	}
+	return nil
+}
+
+func tcResolveFuncInline(ft *FuncType) *Signature {
+	if ft == nil {
+		return nil
+	}
+	var params []*TCVar
+	for _, p := range ft.ParamList {
+		typ := tcResolveNameInline(p.Type)
+		pname := ""
+		if p.Name != nil {
+			pname = p.Name.Value
+		}
+		params = append(params, NewTCVar(nil, pname, typ))
+	}
+	var results []*TCVar
+	for _, r := range ft.ResultList {
+		typ := tcResolveNameInline(r.Type)
+		rname := ""
+		if r.Name != nil {
+			rname = r.Name.Value
+		}
+		results = append(results, NewTCVar(nil, rname, typ))
+	}
+	variadic := false
+	if len(ft.ParamList) > 0 {
+		if _, ok := ft.ParamList[len(ft.ParamList)-1].Type.(*DotsType); ok {
+			variadic = true
+		}
+	}
+	var pTuple *Tuple
+	if len(params) > 0 {
+		pTuple = NewTuple(params...)
+	}
+	var rTuple *Tuple
+	if len(results) > 0 {
+		rTuple = NewTuple(results...)
+	}
+	return NewSignature(nil, pTuple, rTuple, variadic)
+}
+
+//export moxie_tc_scope_name_count
+func moxie_tc_scope_name_count(h int32) int32 {
+	runtime.InitCShared()
+	names := getCachedNames(h)
+	return int32(len(names))
+}
+
+// cachedNames stores a snapshot of Names() per handle so repeated
+// index calls return a consistent ordering.
+var cachedNames [][]string
+
+func getCachedNames(h int32) []string {
+	for int(h) >= len(cachedNames) {
+		cachedNames = append(cachedNames, nil)
+	}
+	if cachedNames[h] == nil {
+		p := getPkg(h)
+		if p == nil || p.Scope() == nil {
+			return nil
+		}
+		cachedNames[h] = p.Scope().Names()
+	}
+	return cachedNames[h]
+}
+
+//export moxie_tc_scope_name
+func moxie_tc_scope_name(h int32, idx int32, out unsafe.Pointer, cap int32) int32 {
+	runtime.InitCShared()
+	names := getCachedNames(h)
+	if idx < 0 || int(idx) >= len(names) {
+		return 0
+	}
+	return tcCopyOut(out, cap, names[idx])
+}
+
+func isNilType(t Type) bool {
+	if t == nil {
+		return true
+	}
+	// Check for typed nil interface (e.g. (*Signature)(nil) stored as Type).
+	// An interface is {type_ptr, data_ptr}; data_ptr==0 means nil concrete value.
+	iface := (*[2]uintptr)(unsafe.Pointer(&t))
+	return iface[1] == 0
+}
+
+//export moxie_tc_scope_type_of
+func moxie_tc_scope_type_of(h int32, namePtr unsafe.Pointer, nameLen int32, out unsafe.Pointer, cap int32) int32 {
+	runtime.InitCShared()
+	p := getPkg(h)
+	if p == nil || p.Scope() == nil {
+		return 0
+	}
+	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
+	obj := p.Scope().Lookup(name)
+	if obj == nil {
+		return 0
+	}
+	t := obj.Type()
+	if isNilType(t) {
+		return 0
+	}
+	return tcCopyOut(out, cap, t.String())
+}
+
+//export moxie_tc_pkg_name
+func moxie_tc_pkg_name(h int32, out unsafe.Pointer, cap int32) int32 {
+	runtime.InitCShared()
+	p := getPkg(h)
+	if p == nil {
+		return 0
+	}
+	return tcCopyOut(out, cap, p.Name())
+}
+
+//export moxie_tc_pkg_path
+func moxie_tc_pkg_path(h int32, out unsafe.Pointer, cap int32) int32 {
+	runtime.InitCShared()
+	p := getPkg(h)
+	if p == nil {
+		return 0
+	}
+	return tcCopyOut(out, cap, p.Path())
+}
+
+//export moxie_tc_free
+func moxie_tc_free(h int32) {
+	runtime.InitCShared()
+	if h >= 0 && int(h) < len(pkgHandles) {
+		pkgHandles[h] = nil
+	}
+	if h >= 0 && int(h) < len(cachedNames) {
+		cachedNames[h] = nil
+	}
+}
+
+//export moxie_tc_universe_ok
+func moxie_tc_universe_ok() int32 {
+	runtime.InitCShared()
+	initUniverse()
+	if Universe == nil {
+		return 0
+	}
+	return int32(Universe.Len())
+}
+
+func main() {}

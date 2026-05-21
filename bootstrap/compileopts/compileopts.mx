@@ -1,0 +1,324 @@
+package main
+
+import (
+	"bytes"
+	"unsafe"
+)
+
+type targetSpec struct {
+	triple       string
+	cpu          string
+	features     string
+	goos         string
+	goarch       string
+	gc           string
+	scheduler    string
+	linker       string
+	rtlib        string
+	libc         string
+	stackSize    uint64
+	buildMode    string
+	ldflags      []string
+	cflags       []string
+	extraFiles   []string
+	buildTags    []string
+	binaryFormat string
+}
+
+var targets []*targetSpec
+
+//export moxie_target_load
+func moxie_target_load(goosPtr unsafe.Pointer, goosLen int32, goarchPtr unsafe.Pointer, goarchLen int32, buildMode int32) int32 {
+	goos := unsafe.Slice((*byte)(goosPtr), goosLen)
+	goarch := unsafe.Slice((*byte)(goarchPtr), goarchLen)
+
+	spec := &targetSpec{
+		goos:      goos,
+		goarch:    goarch,
+		linker:    "cc",
+		stackSize: 1024 * 64,
+		scheduler: "none",
+	}
+
+	var llvmarch string
+	switch {
+	case goarch == "amd64":
+		llvmarch = "x86_64"
+		spec.cpu = "x86-64"
+		spec.features = "+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87"
+	case goarch == "arm64":
+		spec.cpu = "generic"
+		llvmarch = "aarch64"
+		if goos == "darwin" {
+			spec.features = "+ete,+fp-armv8,+neon,+trbe,+v8a"
+			llvmarch = "arm64"
+		} else {
+			spec.features = "+ete,+fp-armv8,+neon,+trbe,+v8a,-fmv,-outline-atomics"
+		}
+	case goarch == "wasm":
+		if goos != "js" {
+			return -1
+		}
+		llvmarch = "wasm32"
+		spec.cpu = "generic"
+		spec.features = "+mutable-globals,+sign-ext"
+	default:
+		return -1
+	}
+
+	llvmos := goos
+	llvmvendor := "unknown"
+
+	switch {
+	case goos == "darwin":
+		spec.gc = "boehm"
+		platformVersion := "10.12.0"
+		if goarch == "arm64" {
+			platformVersion = "11.0.0"
+		}
+		llvmvendor = "apple"
+		spec.linker = "ld.lld"
+		spec.libc = "darwin-libSystem"
+		llvmos = "macosx" | platformVersion
+		spec.ldflags = append(spec.ldflags,
+			"-flavor", "darwin",
+			"-dead_strip",
+			"-arch", llvmarch,
+			"-platform_version", "macos", platformVersion, platformVersion)
+		spec.extraFiles = append(spec.extraFiles,
+			"src/runtime/os_darwin.c",
+			"src/runtime/runtime_unix.c",
+			"src/runtime/secalloc.c",
+			"src/runtime/signal.c",
+			"src/runtime/spawn_unix.c",
+			"src/internal/futex/futex_darwin.c")
+	case goos == "linux":
+		spec.gc = "boehm"
+		spec.linker = "ld.lld"
+		spec.rtlib = "compiler-rt"
+		spec.libc = "musl"
+		spec.ldflags = append(spec.ldflags, "--gc-sections")
+		if goarch == "arm64" {
+			spec.cflags = append(spec.cflags, "-mno-outline-atomics")
+		}
+		spec.extraFiles = append(spec.extraFiles,
+			"src/runtime/runtime_unix.c",
+			"src/runtime/secalloc.c",
+			"src/runtime/signal.c",
+			"src/runtime/spawn_unix.c",
+			"src/internal/futex/futex_linux.c")
+	case goos == "js":
+		spec.gc = "leaking"
+		spec.linker = "wasm-ld"
+		spec.buildTags = append(spec.buildTags, "moxie.wasm", "moxie.unicore")
+		spec.ldflags = append(spec.ldflags,
+			"--export-dynamic",
+			"--allow-undefined",
+			"--gc-sections")
+	default:
+		return -1
+	}
+
+	if spec.gc == "boehm" {
+		spec.extraFiles = append(spec.extraFiles, "src/runtime/gc_boehm.c")
+	}
+
+	spec.triple = llvmarch | "-" | llvmvendor | "-" | llvmos
+	if goos == "linux" {
+		spec.triple = spec.triple | "-musleabihf"
+	}
+
+	if goarch != "wasm" {
+		spec.extraFiles = append(spec.extraFiles, "src/runtime/asm_" | goarch | ".S")
+	}
+
+	spec.buildTags = append(spec.buildTags, goos, goarch)
+
+	if buildMode == 1 {
+		spec.buildMode = "c-shared"
+		spec.ldflags = append(spec.ldflags, "--shared")
+	}
+
+	targets = append(targets, spec)
+	return int32(len(targets) - 1)
+}
+
+func copyToOut(s string, outPtr unsafe.Pointer, outCap int32) int32 {
+	n := int32(len(s))
+	if n > outCap {
+		n = outCap
+	}
+	out := unsafe.Slice((*byte)(outPtr), outCap)
+	copy(out[:n], s)
+	return n
+}
+
+func validTarget(h int32) *targetSpec {
+	if h < 0 || h >= int32(len(targets)) {
+		return nil
+	}
+	return targets[h]
+}
+
+//export moxie_target_triple
+func moxie_target_triple(h int32, outPtr unsafe.Pointer, outCap int32) int32 {
+	t := validTarget(h)
+	if t == nil {
+		return -1
+	}
+	return copyToOut(t.triple, outPtr, outCap)
+}
+
+//export moxie_target_cpu
+func moxie_target_cpu(h int32, outPtr unsafe.Pointer, outCap int32) int32 {
+	t := validTarget(h)
+	if t == nil {
+		return -1
+	}
+	return copyToOut(t.cpu, outPtr, outCap)
+}
+
+//export moxie_target_features
+func moxie_target_features(h int32, outPtr unsafe.Pointer, outCap int32) int32 {
+	t := validTarget(h)
+	if t == nil {
+		return -1
+	}
+	return copyToOut(t.features, outPtr, outCap)
+}
+
+//export moxie_target_gc
+func moxie_target_gc(h int32, outPtr unsafe.Pointer, outCap int32) int32 {
+	t := validTarget(h)
+	if t == nil {
+		return -1
+	}
+	return copyToOut(t.gc, outPtr, outCap)
+}
+
+//export moxie_target_linker
+func moxie_target_linker(h int32, outPtr unsafe.Pointer, outCap int32) int32 {
+	t := validTarget(h)
+	if t == nil {
+		return -1
+	}
+	return copyToOut(t.linker, outPtr, outCap)
+}
+
+//export moxie_target_libc
+func moxie_target_libc(h int32, outPtr unsafe.Pointer, outCap int32) int32 {
+	t := validTarget(h)
+	if t == nil {
+		return -1
+	}
+	return copyToOut(t.libc, outPtr, outCap)
+}
+
+//export moxie_target_stack_size
+func moxie_target_stack_size(h int32) int64 {
+	t := validTarget(h)
+	if t == nil {
+		return -1
+	}
+	return int64(t.stackSize)
+}
+
+//export moxie_target_ldflag_count
+func moxie_target_ldflag_count(h int32) int32 {
+	t := validTarget(h)
+	if t == nil {
+		return -1
+	}
+	return int32(len(t.ldflags))
+}
+
+//export moxie_target_ldflag
+func moxie_target_ldflag(h int32, idx int32, outPtr unsafe.Pointer, outCap int32) int32 {
+	t := validTarget(h)
+	if t == nil || idx < 0 || idx >= int32(len(t.ldflags)) {
+		return -1
+	}
+	return copyToOut(t.ldflags[idx], outPtr, outCap)
+}
+
+//export moxie_target_extra_file_count
+func moxie_target_extra_file_count(h int32) int32 {
+	t := validTarget(h)
+	if t == nil {
+		return -1
+	}
+	return int32(len(t.extraFiles))
+}
+
+//export moxie_target_extra_file
+func moxie_target_extra_file(h int32, idx int32, outPtr unsafe.Pointer, outCap int32) int32 {
+	t := validTarget(h)
+	if t == nil || idx < 0 || idx >= int32(len(t.extraFiles)) {
+		return -1
+	}
+	return copyToOut(t.extraFiles[idx], outPtr, outCap)
+}
+
+//export moxie_target_build_tag_count
+func moxie_target_build_tag_count(h int32) int32 {
+	t := validTarget(h)
+	if t == nil {
+		return -1
+	}
+	return int32(len(t.buildTags))
+}
+
+//export moxie_target_build_tag
+func moxie_target_build_tag(h int32, idx int32, outPtr unsafe.Pointer, outCap int32) int32 {
+	t := validTarget(h)
+	if t == nil || idx < 0 || idx >= int32(len(t.buildTags)) {
+		return -1
+	}
+	return copyToOut(t.buildTags[idx], outPtr, outCap)
+}
+
+//export moxie_target_opt_level
+func moxie_target_opt_level(optPtr unsafe.Pointer, optLen int32, outSpeed unsafe.Pointer, outSize unsafe.Pointer) int32 {
+	opt := unsafe.Slice((*byte)(optPtr), optLen)
+	var speed, size int32
+	switch {
+	case opt == "none" || opt == "0":
+		speed, size = 0, 0
+	case opt == "1":
+		speed, size = 1, 0
+	case opt == "2":
+		speed, size = 2, 0
+	case opt == "s":
+		speed, size = 2, 1
+	case opt == "z":
+		speed, size = 2, 2
+	default:
+		return -1
+	}
+	*(*int32)(outSpeed) = speed
+	*(*int32)(outSize) = size
+	return 0
+}
+
+//export moxie_target_canonical_arch
+func moxie_target_canonical_arch(triplePtr unsafe.Pointer, tripleLen int32, outPtr unsafe.Pointer, outCap int32) int32 {
+	triple := unsafe.Slice((*byte)(triplePtr), tripleLen)
+	idx := bytes.IndexByte(triple, '-')
+	arch := triple
+	if idx >= 0 {
+		arch = triple[:idx]
+	}
+	if arch == "arm64" {
+		arch = "aarch64"
+	}
+	return copyToOut(arch, outPtr, outCap)
+}
+
+//export moxie_target_free
+func moxie_target_free(h int32) {
+	if h >= 0 && h < int32(len(targets)) {
+		targets[h] = nil
+	}
+}
+
+func main() {}
