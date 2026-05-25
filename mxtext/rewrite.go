@@ -3353,7 +3353,9 @@ func FilterStringByteMismatch(errs []error) []error {
 		msg := err.Error()
 		if strings.Contains(msg, "[]byte") && strings.Contains(msg, "string") &&
 			(strings.Contains(msg, "cannot use") || strings.Contains(msg, "cannot convert") ||
-				strings.Contains(msg, "mismatched types") || strings.Contains(msg, "does not satisfy")) {
+				strings.Contains(msg, "mismatched types") || strings.Contains(msg, "does not satisfy") ||
+				strings.Contains(msg, "impossible type") || strings.Contains(msg, "wrong type for method") ||
+				strings.Contains(msg, "does not implement")) {
 			continue
 		}
 		filtered = append(filtered, err)

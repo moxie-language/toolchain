@@ -1,9 +1,9 @@
 MOXIEROOT ?= ..
 MOXIE ?= $(MOXIEROOT)/moxie
 
-.PHONY: all clean test test-hello test-parsemxh test-goenv test-compileopts test-syntax test-typecheck test-mxssa test-loader test-llvm test-glue
+.PHONY: all clean test test-hello test-parsemxh test-goenv test-compileopts test-syntax test-typecheck test-mxssa test-loader test-llvm test-glue test-compile
 
-all: hello.so parsemxh.so goenv_version.so compileopts.so syntax.so typecheck.so mxssa.so loader.so llvm-glue/libmoxie-llvm-glue.so
+all: hello.so parsemxh.so goenv_version.so compileopts.so syntax.so typecheck.so mxssa.so loader.so compile.so llvm-glue/libmoxie-llvm-glue.so
 
 hello.so: hello/hello.mx hello/moxie.mod
 	cd $(MOXIEROOT) && MOXIEROOT=. ./moxie build -buildmode=c-shared -o bootstrap/hello.so ./bootstrap/hello/
@@ -32,7 +32,10 @@ mxssa.so: mxssa/*.mx mxssa/moxie.mod
 loader.so: loader/*.mx loader/moxie.mod
 	cd $(MOXIEROOT) && MOXIEROOT=. ./moxie build -gc=leaking -buildmode=c-shared -o bootstrap/loader.so ./bootstrap/loader/
 
-test: test-hello test-parsemxh test-goenv test-compileopts test-syntax test-typecheck test-mxssa test-loader test-llvm
+compile.so: compile/*.mx compile/moxie.mod
+	cd $(MOXIEROOT) && MOXIEROOT=. ./moxie build -gc=leaking -buildmode=c-shared -o bootstrap/compile.so ./bootstrap/compile/
+
+test: test-hello test-parsemxh test-goenv test-compileopts test-syntax test-typecheck test-mxssa test-loader test-llvm test-compile
 
 test-hello: hello.so
 	cd probe && go run . $(CURDIR)/hello.so
@@ -61,5 +64,8 @@ test-loader: loader.so
 test-llvm: llvm-glue/libmoxie-llvm-glue.so
 	cd probe_llvm && go run . $(CURDIR)/llvm-glue/libmoxie-llvm-glue.so
 
+test-compile: compile.so
+	cd probe_compile && go run . $(CURDIR)/compile.so
+
 clean:
-	rm -f hello.so parsemxh.so goenv_version.so compileopts.so syntax.so typecheck.so mxssa.so loader.so llvm-glue/libmoxie-llvm-glue.so
+	rm -f hello.so parsemxh.so goenv_version.so compileopts.so syntax.so typecheck.so mxssa.so loader.so compile.so llvm-glue/libmoxie-llvm-glue.so

@@ -99,15 +99,19 @@ var (
 	symDisposeTargetData         uintptr
 
 	// MemoryBuffer
-	symGetBufferStart      uintptr
-	symGetBufferSize       uintptr
-	symDisposeMemoryBuffer uintptr
+	symGetBufferStart        uintptr
+	symGetBufferSize         uintptr
+	symDisposeMemoryBuffer   uintptr
+	symCreateMemBufWithRange uintptr
 
 	// Bitcode
 	symWriteBitcodeToFD         uintptr
 	symWriteBitcodeToMemBuf     uintptr
 	symCreateMemBufWithFile     uintptr
 	symParseBitcodeInCtx2       uintptr
+
+	// IR Reader
+	symParseIRInContext uintptr
 
 	// Linker
 	symLinkModules2 uintptr
@@ -168,11 +172,14 @@ func registerTarget() {
 	symGetBufferStart = mustSym(libLLVM, "LLVMGetBufferStart")
 	symGetBufferSize = mustSym(libLLVM, "LLVMGetBufferSize")
 	symDisposeMemoryBuffer = mustSym(libLLVM, "LLVMDisposeMemoryBuffer")
+	symCreateMemBufWithRange = mustSym(libLLVM, "LLVMCreateMemoryBufferWithMemoryRangeCopy")
 
 	symWriteBitcodeToFD = mustSym(libLLVM, "LLVMWriteBitcodeToFD")
 	symWriteBitcodeToMemBuf = mustSym(libLLVM, "LLVMWriteBitcodeToMemoryBuffer")
 	symCreateMemBufWithFile = mustSym(libLLVM, "LLVMCreateMemoryBufferWithContentsOfFile")
 	symParseBitcodeInCtx2 = mustSym(libLLVM, "LLVMParseBitcodeInContext2")
+
+	symParseIRInContext = mustSym(libLLVM, "LLVMParseIRInContext")
 
 	symLinkModules2 = mustSym(libLLVM, "LLVMLinkModules2")
 
@@ -385,6 +392,28 @@ func (mb MemoryBuffer) Bytes() []byte {
 
 func (mb MemoryBuffer) Dispose() {
 	purego.SyscallN(symDisposeMemoryBuffer, mb.C)
+}
+
+func NewMemoryBufferFromBytes(data []byte, name string) MemoryBuffer {
+	cname := cString(name)
+	r, _, _ := purego.SyscallN(symCreateMemBufWithRange,
+		uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)), cname, 1)
+	runtime.KeepAlive(data)
+	runtime.KeepAlive(name)
+	return MemoryBuffer{C: r}
+}
+
+func (c Context) ParseIR(buf MemoryBuffer) (Module, error) {
+	var mod uintptr
+	var errMsg uintptr
+	r, _, _ := purego.SyscallN(symParseIRInContext, c.C, buf.C,
+		uintptr(unsafe.Pointer(&mod)), uintptr(unsafe.Pointer(&errMsg)))
+	if r != 0 {
+		s := goString(errMsg)
+		purego.SyscallN(symDisposeMessage, errMsg)
+		return Module{}, fmt.Errorf("ParseIR: %s", s)
+	}
+	return Module{mod}, nil
 }
 
 // ---- Bitcode ----

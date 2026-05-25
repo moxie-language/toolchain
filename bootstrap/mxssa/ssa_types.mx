@@ -16,6 +16,7 @@ const (
 	OpXor
 	OpShl
 	OpShr
+	OpOr
 	OpAndNot
 	OpLand
 	OpLor
@@ -45,6 +46,8 @@ func (op SSAOp) String() string {
 		return "&"
 	case OpXor:
 		return "^"
+	case OpOr:
+		return "|"
 	case OpShl:
 		return "<<"
 	case OpShr:
@@ -408,11 +411,24 @@ func (c *SSAConvert) InstrString() string { return "convert" }
 // MakeInterface.
 type SSAMakeInterface struct {
 	ssaRegister
-	X SSAValue
+	X     SSAValue
+	IType Type
 }
 
 func (m *SSAMakeInterface) InstrPos() int32    { return m.pos }
 func (m *SSAMakeInterface) InstrString() string { return "makeinterface" }
+
+// Invoke - interface method call.
+type SSAInvoke struct {
+	ssaRegister
+	X          SSAValue
+	MethodName string
+	IfaceType  *TCInterface
+	Args       []SSAValue
+}
+
+func (inv *SSAInvoke) InstrPos() int32    { return inv.pos }
+func (inv *SSAInvoke) InstrString() string { return "invoke " | inv.MethodName }
 
 // MakeClosure.
 type SSAMakeClosure struct {
@@ -675,8 +691,10 @@ func syntaxOpToSSAOp(op Operator, unary bool) SSAOp {
 		}
 	}
 	switch op {
-	case Add, Or:
+	case Add:
 		return OpAdd
+	case Or:
+		return OpOr
 	case Sub:
 		return OpSub
 	case Mul:
@@ -717,8 +735,10 @@ func syntaxOpToSSAOp(op Operator, unary bool) SSAOp {
 
 func compoundOp(op Operator) SSAOp {
 	switch op {
-	case Add, Or:
+	case Add:
 		return OpAdd
+	case Or:
+		return OpOr
 	case Sub:
 		return OpSub
 	case Mul:
@@ -813,6 +833,10 @@ func ssaElemType(t Type) Type {
 		return t.Elem()
 	case *Pointer:
 		return t.Elem()
+	case *Basic:
+		if t.Info()&IsString != 0 {
+			return Typ[Uint8]
+		}
 	}
 	return nil
 }
@@ -841,13 +865,19 @@ func ssaSliceOf(t Type) Type {
 	if t == nil {
 		return nil
 	}
+	if b, ok := t.Underlying().(*Basic); ok && b.Info()&IsString != 0 {
+		return t
+	}
 	switch t := t.Underlying().(type) {
 	case *Slice:
 		return t
 	case *Array:
+		if b, ok := t.Elem().(*Basic); ok && b.kind == Uint8 {
+			return Typ[TCString]
+		}
 		return NewSlice(t.Elem())
 	}
-	return NewSlice(Typ[Uint8])
+	return Typ[TCString]
 }
 
 func ssaTupleElemType(t Type, i int) Type {
@@ -858,4 +888,16 @@ func ssaTupleElemType(t Type, i int) Type {
 		return tup.At(i).Type()
 	}
 	return nil
+}
+
+func ssaParseInt64(s string) int64 {
+	var n int64
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			break
+		}
+		n = n*10 + int64(c-'0')
+	}
+	return n
 }

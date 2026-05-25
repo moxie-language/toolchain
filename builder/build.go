@@ -99,6 +99,8 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		compiler.ResetAllocSites()
 	}
 
+	useBootstrap := os.Getenv("MOXIE_BOOTSTRAP_COMPILE") == "1" && bootstrapAvailable()
+
 	// Read the build ID of the moxie binary.
 	// Used as a cache key for package builds.
 	compilerBuildID, err := ReadBuildID()
@@ -357,14 +359,23 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 					return nil
 				}
 
-				// Compile AST to IR. The compiler.CompilePackage function will
-				// build the SSA as needed.
-				mod, errs := compiler.CompilePackage(pkg.ImportPath, pkg, program.Package(pkg.Pkg), machine, compilerConfig, config.DumpSSA(), config.Options.PrintAllocs)
+				// Compile AST to IR.
+				var mod llvm.Module
+				if useBootstrap && len(pkg.CgoFiles) == 0 && pkg.ImportPath == lprogram.MainPkg().ImportPath {
+					var err error
+					mod, err = bootstrapCompilePackage(pkg, config.Triple())
+					if err != nil {
+						return fmt.Errorf("bootstrap compile %s: %w", pkg.ImportPath, err)
+					}
+				} else {
+					var errs []error
+					mod, errs = compiler.CompilePackage(pkg.ImportPath, pkg, program.Package(pkg.Pkg), machine, compilerConfig, config.DumpSSA(), config.Options.PrintAllocs)
+					if errs != nil {
+						return newMultiError(errs, pkg.ImportPath)
+					}
+				}
 				defer mod.Context().Dispose()
 				defer mod.Dispose()
-				if errs != nil {
-					return newMultiError(errs, pkg.ImportPath)
-				}
 				if err := llvm.VerifyModule(mod, llvm.PrintMessageAction); err != nil {
 					return errors.New("verification error after compiling package " + pkg.ImportPath)
 				}

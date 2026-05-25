@@ -455,10 +455,7 @@ func (p *Package) Check() error {
 	}
 	typesPkg, err := checker.Check(packageName, p.program.fset, p.Files, &p.info)
 
-
 	// Two-pass Moxie rewrite: pipe concat (|), byte comparisons, switches.
-	// The patched GOROOT's type checker accepts string/[]byte as identical,
-	// but the restriction checker still forbids + on text, so we must rewrite.
 	needsRecheck := false
 	if isMoxieStringTarget(p.ImportPath) {
 		if p.Module.Main {

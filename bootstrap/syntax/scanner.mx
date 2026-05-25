@@ -25,12 +25,16 @@ type Scanner struct {
 	Kind      LitKind
 	Op        Operator
 	Prec      int32
+
+	keywordMap   [1 << 6]Token
+	keywordsReady bool
 }
 
 func (s *Scanner) Init(src io.Reader, errh func(line, col uint32, msg string), mode uint) {
 	s.Source.init(src, errh)
 	s.mode = mode
 	s.nlsemi = false
+	s.initKeywords()
 }
 
 func (s *Scanner) Errorf(format string, args ...interface{}) {
@@ -44,7 +48,7 @@ func (s *Scanner) ErrorAtf(offset int32, format string, args ...interface{}) {
 func (s *Scanner) SetLit(kind LitKind, ok bool) {
 	s.nlsemi = true
 	s.Tok = Literal
-	s.Lit = string(s.segment())
+	s.Lit = string(s.segmentCopy())
 	s.Bad = !ok
 	s.Kind = kind
 }
@@ -337,7 +341,8 @@ func (s *Scanner) Ident() {
 
 	lit := s.segment()
 	if len(lit) >= 2 {
-		if tok := keywordMap[Hash(lit)]; tok != 0 && TokStrFast(tok) == string(lit) {
+		h := (uint(lit[0])<<4 ^ uint(lit[1]) + uint(len(lit))) & 63
+		if tok := s.keywordMap[h]; tok != 0 && tokStrFast(tok) == string(lit) {
 			s.nlsemi = contains(1<<Break|1<<Continue|1<<Fallthrough|1<<Return, tok)
 			s.Tok = tok
 			return
@@ -345,12 +350,15 @@ func (s *Scanner) Ident() {
 	}
 
 	s.nlsemi = true
-	s.Lit = string(lit)
+	c := []byte{:len(lit)}
+	copy(c, lit)
+	s.Lit = string(c)
 	s.Tok = NameType
 }
 
-func TokStrFast(tok Token) string {
-	return token_name[token_index[tok-1]:token_index[tok]]
+func tokStrFast(tok Token) string {
+	idx := [48]uint8{0, 3, 7, 14, 16, 19, 23, 24, 26, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 42, 47, 51, 55, 60, 68, 75, 80, 84, 95, 98, 102, 104, 108, 110, 116, 125, 128, 135, 140, 146, 152, 158, 164, 168, 171, 171}
+	return token_name[idx[tok-1]:idx[tok]]
 }
 
 func (s *Scanner) AtIdentChar(first bool) bool {
@@ -368,21 +376,18 @@ func (s *Scanner) AtIdentChar(first bool) bool {
 	return true
 }
 
-func Hash(s []byte) uint {
-	return (uint(s[0])<<4 ^ uint(s[1]) + uint(len(s))) & uint(len(keywordMap)-1)
-}
-
-var keywordMap [1 << 6]Token
-
-func init() { InitKeywords() }
-
-func InitKeywords() {
+func (s *Scanner) initKeywords() {
+	if s.keywordsReady {
+		return
+	}
+	s.keywordsReady = true
 	for tok := Break; tok <= Var; tok++ {
-		h := Hash([]byte(tok.String()))
-		if keywordMap[h] != 0 {
+		b := []byte(tok.String())
+		h := (uint(b[0])<<4 ^ uint(b[1]) + uint(len(b))) & 63
+		if s.keywordMap[h] != 0 {
 			panic("imperfect hash")
 		}
-		keywordMap[h] = tok
+		s.keywordMap[h] = tok
 	}
 }
 

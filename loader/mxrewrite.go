@@ -60,6 +60,10 @@ func filterByteCompareErrors(errs []error) []error {
 	return mxtext.FilterByteCompareErrors(errs)
 }
 
+func filterStringByteMismatch(errs []error) []error {
+	return mxtext.FilterStringByteMismatch(errs)
+}
+
 func rewriteAddAssign(files []*ast.File, info *types.Info) int {
 	return mxtext.RewriteAddAssign(files, info)
 }

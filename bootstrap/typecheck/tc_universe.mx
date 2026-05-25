@@ -7,13 +7,7 @@ var Universe *Scope
 // Predeclared types. Indices match BasicKind values.
 var Typ [UntypedNil + 1]*Basic
 
-// Predeclared named types (accessible as objects in Universe).
-var (
-	universeBool          *TypeName
-	universeError         *TypeName
-	universeByteAlias     *TypeName // byte = uint8
-	universeRuneAlias     *TypeName // rune = int32
-)
+var universeError *TypeName
 
 func initUniverse() {
 	if Universe != nil {
@@ -86,13 +80,11 @@ func initUniverse() {
 	byteType := NewNamed(NewTypeName(nil, "byte", nil), Typ[Uint8])
 	defObj(byteType.obj)
 	byteType.obj.typ = byteType
-	universeByteAlias = byteType.obj
 
 	// rune = int32
 	runeType := NewNamed(NewTypeName(nil, "rune", nil), Typ[Int32])
 	defObj(runeType.obj)
 	runeType.obj.typ = runeType
-	universeRuneAlias = runeType.obj
 
 	// uintptr (allowed only with import "unsafe")
 	uintptrType := NewNamed(NewTypeName(nil, "uintptr", nil), Typ[Uint64])
@@ -132,6 +124,25 @@ func initUniverse() {
 	defNil()
 
 	// predeclared builtins
+	builtinNames := [17]string{
+		BuiltinAppend:  "append",
+		BuiltinCap:     "cap",
+		BuiltinClear:   "clear",
+		BuiltinClose:   "close",
+		BuiltinComplex: "complex",
+		BuiltinCopy:    "copy",
+		BuiltinDelete:  "delete",
+		BuiltinImag:    "imag",
+		BuiltinLen:     "len",
+		BuiltinMake:    "make",
+		BuiltinNew:     "new",
+		BuiltinPanic:   "panic",
+		BuiltinPrint:   "print",
+		BuiltinPrintln: "println",
+		BuiltinReal:    "real",
+		BuiltinRecover: "recover",
+		BuiltinSpawn:   "spawn",
+	}
 	for id, name := range builtinNames {
 		Universe.Insert(newBuiltin(name, BuiltinID(id)))
 	}
@@ -139,26 +150,6 @@ func initUniverse() {
 	// Go 1.21 builtins.
 	Universe.Insert(newBuiltin("min", BuiltinMin))
 	Universe.Insert(newBuiltin("max", BuiltinMax))
-}
-
-var builtinNames = [...]string{
-	BuiltinAppend:  "append",
-	BuiltinCap:     "cap",
-	BuiltinClear:   "clear",
-	BuiltinClose:   "close",
-	BuiltinComplex: "complex",
-	BuiltinCopy:    "copy",
-	BuiltinDelete:  "delete",
-	BuiltinImag:    "imag",
-	BuiltinLen:     "len",
-	BuiltinMake:    "make",
-	BuiltinNew:     "new",
-	BuiltinPanic:   "panic",
-	BuiltinPrint:   "print",
-	BuiltinPrintln: "println",
-	BuiltinReal:    "real",
-	BuiltinRecover: "recover",
-	BuiltinSpawn:   "spawn",
 }
 
 func defTypeName(name string, typ Type) {
@@ -189,7 +180,28 @@ func untypedInt(v int64) ConstVal  { return constInt{v} }
 func untypedNil() ConstVal         { return constNil{} }
 
 func (c constBool) String() string { if c.v { return "true" }; return "false" }
-func (c constInt) String() string  { return "0" }
+func (c constInt) String() string {
+	n := c.v
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	buf := []byte{:0:20}
+	for n > 0 {
+		buf = append(buf, byte('0'+n%10))
+		n /= 10
+	}
+	if neg {
+		buf = append(buf, '-')
+	}
+	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
 func (c constNil) String() string  { return "nil" }
 
 // Predeclared returns the universe-scope object with the given name, or nil.
