@@ -5,7 +5,6 @@
 package windows
 
 import (
-	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -237,22 +236,26 @@ const (
 	socket_error = uintptr(^uint32(0))
 )
 
-var WSAID_WSASENDMSG = syscall.GUID{
-	Data1: 0xa441e712,
-	Data2: 0x754f,
-	Data3: 0x43ca,
-	Data4: [8]byte{0x84, 0xa7, 0x0d, 0xee, 0x44, 0xcf, 0x60, 0x6d},
+func WSAID_WSASENDMSG() syscall.GUID {
+	return syscall.GUID{
+		Data1: 0xa441e712,
+		Data2: 0x754f,
+		Data3: 0x43ca,
+		Data4: [8]byte{0x84, 0xa7, 0x0d, 0xee, 0x44, 0xcf, 0x60, 0x6d},
+	}
 }
 
-var WSAID_WSARECVMSG = syscall.GUID{
-	Data1: 0xf689d7c8,
-	Data2: 0x6f1f,
-	Data3: 0x436b,
-	Data4: [8]byte{0x8a, 0x53, 0xe5, 0x4f, 0xe3, 0x51, 0xc3, 0x22},
+func WSAID_WSARECVMSG() syscall.GUID {
+	return syscall.GUID{
+		Data1: 0xf689d7c8,
+		Data2: 0x6f1f,
+		Data3: 0x436b,
+		Data4: [8]byte{0x8a, 0x53, 0xe5, 0x4f, 0xe3, 0x51, 0xc3, 0x22},
+	}
 }
 
 var sendRecvMsgFunc struct {
-	once     sync.Once
+	done     bool
 	sendAddr uintptr
 	recvAddr uintptr
 	err      error
@@ -272,32 +275,33 @@ type WSAMsg struct {
 //sys	WSAGetOverlappedResult(h syscall.Handle, o *syscall.Overlapped, bytes *uint32, wait bool, flags *uint32) (err error) = ws2_32.WSAGetOverlappedResult
 
 func loadWSASendRecvMsg() error {
-	sendRecvMsgFunc.once.Do(func() {
+	if !sendRecvMsgFunc.done {
+		sendRecvMsgFunc.done = true
 		var s syscall.Handle
 		s, sendRecvMsgFunc.err = syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, syscall.IPPROTO_UDP)
-		if sendRecvMsgFunc.err != nil {
-			return
+		if sendRecvMsgFunc.err == nil {
+			defer syscall.CloseHandle(s)
+			var n uint32
+			recvGUID := WSAID_WSARECVMSG()
+			sendRecvMsgFunc.err = syscall.WSAIoctl(s,
+				syscall.SIO_GET_EXTENSION_FUNCTION_POINTER,
+				(*byte)(unsafe.Pointer(&recvGUID)),
+				uint32(unsafe.Sizeof(recvGUID)),
+				(*byte)(unsafe.Pointer(&sendRecvMsgFunc.recvAddr)),
+				uint32(unsafe.Sizeof(sendRecvMsgFunc.recvAddr)),
+				&n, nil, 0)
+			if sendRecvMsgFunc.err == nil {
+				sendGUID := WSAID_WSASENDMSG()
+				sendRecvMsgFunc.err = syscall.WSAIoctl(s,
+					syscall.SIO_GET_EXTENSION_FUNCTION_POINTER,
+					(*byte)(unsafe.Pointer(&sendGUID)),
+					uint32(unsafe.Sizeof(sendGUID)),
+					(*byte)(unsafe.Pointer(&sendRecvMsgFunc.sendAddr)),
+					uint32(unsafe.Sizeof(sendRecvMsgFunc.sendAddr)),
+					&n, nil, 0)
+			}
 		}
-		defer syscall.CloseHandle(s)
-		var n uint32
-		sendRecvMsgFunc.err = syscall.WSAIoctl(s,
-			syscall.SIO_GET_EXTENSION_FUNCTION_POINTER,
-			(*byte)(unsafe.Pointer(&WSAID_WSARECVMSG)),
-			uint32(unsafe.Sizeof(WSAID_WSARECVMSG)),
-			(*byte)(unsafe.Pointer(&sendRecvMsgFunc.recvAddr)),
-			uint32(unsafe.Sizeof(sendRecvMsgFunc.recvAddr)),
-			&n, nil, 0)
-		if sendRecvMsgFunc.err != nil {
-			return
-		}
-		sendRecvMsgFunc.err = syscall.WSAIoctl(s,
-			syscall.SIO_GET_EXTENSION_FUNCTION_POINTER,
-			(*byte)(unsafe.Pointer(&WSAID_WSASENDMSG)),
-			uint32(unsafe.Sizeof(WSAID_WSASENDMSG)),
-			(*byte)(unsafe.Pointer(&sendRecvMsgFunc.sendAddr)),
-			uint32(unsafe.Sizeof(sendRecvMsgFunc.sendAddr)),
-			&n, nil, 0)
-	})
+	}
 	return sendRecvMsgFunc.err
 }
 

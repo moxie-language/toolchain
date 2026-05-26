@@ -8,8 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"sync"
-	"sync/atomic"
 )
 
 // CrossOriginProtection implements protections against [Cross-Site Request
@@ -34,10 +32,9 @@ import (
 // [Cross-Site Request Forgery (CSRF)]: https://developer.mozilla.org/en-US/docs/Web/Security/Attacks/CSRF
 // [safe methods]: https://developer.mozilla.org/en-US/docs/Glossary/Safe/HTTP
 type CrossOriginProtection struct {
-	bypass    atomic.Pointer[ServeMux]
-	trustedMu sync.RWMutex
+	bypass    *ServeMux
 	trusted   map[string]bool
-	deny      atomic.Pointer[Handler]
+	deny      *Handler
 }
 
 // NewCrossOriginProtection returns a new [CrossOriginProtection] value.
@@ -68,8 +65,6 @@ func (c *CrossOriginProtection) AddTrustedOrigin(origin []byte) error {
 	if u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("invalid origin %q: path, query, and fragment are not allowed", origin)
 	}
-	c.trustedMu.Lock()
-	defer c.trustedMu.Unlock()
 	if c.trusted == nil {
 		c.trusted = map[string]bool{}
 	}
@@ -93,21 +88,11 @@ var sentinelHandler Handler = &noopHandler{}
 // AddInsecureBypassPattern can be called concurrently with other methods or
 // request handling, and applies to future requests.
 func (c *CrossOriginProtection) AddInsecureBypassPattern(pattern []byte) {
-	var bypass *ServeMux
-
-	// Lazily initialize c.bypass
-	for {
-		bypass = c.bypass.Load()
-		if bypass != nil {
-			break
-		}
-		bypass = NewServeMux()
-		if c.bypass.CompareAndSwap(nil, bypass) {
-			break
-		}
+	if c.bypass == nil {
+		c.bypass = NewServeMux()
 	}
 
-	bypass.Handle(pattern, sentinelHandler)
+	c.bypass.Handle(pattern, sentinelHandler)
 }
 
 // SetDenyHandler sets a handler to invoke when a request is rejected.
@@ -119,10 +104,10 @@ func (c *CrossOriginProtection) AddInsecureBypassPattern(pattern []byte) {
 // Check does not call the error handler.
 func (c *CrossOriginProtection) SetDenyHandler(h Handler) {
 	if h == nil {
-		c.deny.Store(nil)
+		c.deny = nil
 		return
 	}
-	c.deny.Store(&h)
+	c.deny = &h
 }
 
 // Check applies cross-origin checks to a request.
@@ -170,24 +155,22 @@ func (c *CrossOriginProtection) Check(req *Request) error {
 	return errCrossOriginRequestFromOldBrowser
 }
 
-var (
-	errCrossOriginRequest               = errors.New("cross-origin request detected from Sec-Fetch-Site header")
-	errCrossOriginRequestFromOldBrowser = errors.New("cross-origin request detected, and/or browser is out of date: " +
+const (
+	errCrossOriginRequest               = errors.Const("cross-origin request detected from Sec-Fetch-Site header")
+	errCrossOriginRequestFromOldBrowser = errors.Const("cross-origin request detected, and/or browser is out of date: " +
 		"Sec-Fetch-Site is missing, and Origin does not match Host")
 )
 
 // isRequestExempt checks the bypasses which require taking a lock, and should
 // be deferred until the last moment.
 func (c *CrossOriginProtection) isRequestExempt(req *Request) bool {
-	if bypass := c.bypass.Load(); bypass != nil {
+	if bypass := c.bypass; bypass != nil {
 		if h, _ := bypass.Handler(req); h == sentinelHandler {
 			// The request matches a bypass pattern.
 			return true
 		}
 	}
 
-	c.trustedMu.RLock()
-	defer c.trustedMu.RUnlock()
 	origin := req.Header.Get("Origin")
 	// The request matches a trusted origin.
 	return origin != "" && c.trusted[origin]
@@ -202,7 +185,7 @@ func (c *CrossOriginProtection) isRequestExempt(req *Request) bool {
 func (c *CrossOriginProtection) Handler(h Handler) Handler {
 	return HandlerFunc(func(w ResponseWriter, r *Request) {
 		if err := c.Check(r); err != nil {
-			if deny := c.deny.Load(); deny != nil {
+			if deny := c.deny; deny != nil {
 				(*deny).ServeHTTP(w, r)
 				return
 			}

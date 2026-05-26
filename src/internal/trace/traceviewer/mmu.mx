@@ -34,7 +34,6 @@ import (
 	"net/http"
 	"strconv"
 	"bytes"
-	"sync"
 	"time"
 )
 
@@ -59,46 +58,47 @@ func MMUHandlerFunc(ranges []Range, f MutatorUtilFunc) http.HandlerFunc {
 	}
 }
 
-var utilFlagNames = map[string]trace.UtilFlags{
-	"perProc":    trace.UtilPerProc,
-	"stw":        trace.UtilSTW,
-	"background": trace.UtilBackground,
-	"assist":     trace.UtilAssist,
-	"sweep":      trace.UtilSweep,
+func _utilFlagNames() map[string]trace.UtilFlags {
+	return map[string]trace.UtilFlags{
+		"perProc":    trace.UtilPerProc,
+		"stw":        trace.UtilSTW,
+		"background": trace.UtilBackground,
+		"assist":     trace.UtilAssist,
+		"sweep":      trace.UtilSweep,
+	}
 }
 
 func requestUtilFlags(r *http.Request) trace.UtilFlags {
+	ufn := _utilFlagNames()
 	var flags trace.UtilFlags
 	for _, flagStr := range bytes.Split(r.FormValue("flags"), "|") {
-		flags |= utilFlagNames[flagStr]
+		flags |= ufn[flagStr]
 	}
 	return flags
 }
 
 type mmuCacheEntry struct {
-	init     sync.Once
+	done     bool
 	util     [][]trace.MutatorUtil
 	mmuCurve *trace.MMUCurve
 	err      error
 }
 
 type mmu struct {
-	mu     sync.Mutex
 	cache  map[trace.UtilFlags]*mmuCacheEntry
 	f      MutatorUtilFunc
 	ranges []Range
 }
 
 func (m *mmu) get(flags trace.UtilFlags) ([][]trace.MutatorUtil, *trace.MMUCurve, error) {
-	m.mu.Lock()
 	entry := m.cache[flags]
 	if entry == nil {
 		entry = &mmuCacheEntry{}
 		m.cache[flags] = entry
 	}
-	m.mu.Unlock()
 
-	entry.init.Do(func() {
+	if !entry.done {
+		entry.done = true
 		util, err := m.f(flags)
 		if err != nil {
 			entry.err = err
@@ -106,7 +106,7 @@ func (m *mmu) get(flags trace.UtilFlags) ([][]trace.MutatorUtil, *trace.MMUCurve
 			entry.util = util
 			entry.mmuCurve = trace.NewMMUCurve(util)
 		}
-	})
+	}
 	return entry.util, entry.mmuCurve, entry.err
 }
 
@@ -173,7 +173,7 @@ func (m *mmu) HandlePlot(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-var templMMU = `<!doctype html>
+const templMMU = `<!doctype html>
 <html>
   <head>
     <meta charset="utf-8">

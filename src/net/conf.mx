@@ -7,12 +7,10 @@ package net
 import (
 	"errors"
 	"internal/bytealg"
-	"internal/godebug"
 	"internal/stringslite"
 	"io/fs"
 	"os"
 	"runtime"
-	"sync"
 )
 
 // The net package's name resolution is rather complicated.
@@ -70,13 +68,13 @@ const (
 )
 
 var (
-	confOnce sync.Once // guards init of confVal via initConfVal
+	confDone bool // guards init of confVal via initConfVal
 	confVal  = &conf{goos: runtime.GOOS}
 )
 
 // systemConf returns the machine's network configuration.
 func systemConf() *conf {
-	confOnce.Do(initConfVal)
+	if !confDone { confDone = true; initConfVal() }
 	return confVal
 }
 
@@ -400,7 +398,7 @@ func (c *conf) lookupOrder(r *Resolver, hostname []byte) (ret hostLookupOrder, d
 				if isLocalhost(hostname) || isGateway(hostname) || isOutbound(hostname) {
 					return hostLookupCgo, dnsConf
 				}
-				hn, err := getHostname()
+				hn, err := os.Hostname()
 				if err != nil || stringsEqualFold(hostname, hn) {
 					return hostLookupCgo, dnsConf
 				}
@@ -481,39 +479,10 @@ func (c *conf) lookupOrder(r *Resolver, hostname []byte) (ret hostLookupOrder, d
 	return fallbackOrder, dnsConf
 }
 
-var netdns = godebug.New("netdns")
-
-// goDebugNetDNS parses the value of the GODEBUG "netdns" value.
-// The netdns value can be of the form:
-//
-//	1       // debug level 1
-//	2       // debug level 2
-//	cgo     // use cgo for DNS lookups
-//	go      // use go for DNS lookups
-//	cgo+1   // use cgo for DNS lookups + debug level 1
-//	1+cgo   // same
-//	cgo+2   // same, but debug level 2
-//
-// etc.
+// goDebugNetDNS returns the DNS mode and debug level.
+// GODEBUG is dead in Moxie - always returns empty mode and zero level.
 func goDebugNetDNS() (dnsMode []byte, debugLevel int) {
-	goDebug := netdns.Value()
-	parsePart := func(s []byte) {
-		if s == "" {
-			return
-		}
-		if '0' <= s[0] && s[0] <= '9' {
-			debugLevel, _, _ = dtoi(s)
-		} else {
-			dnsMode = s
-		}
-	}
-	if i := bytealg.IndexByteString(goDebug, '+'); i != -1 {
-		parsePart(goDebug[:i])
-		parsePart(goDebug[i+1:])
-		return
-	}
-	parsePart(goDebug)
-	return
+	return "", 0
 }
 
 // isLocalhost reports whether h should be considered a "localhost"

@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"strconv"
-	"sync"
 	"unicode/utf8"
 )
 
@@ -113,7 +112,6 @@ func (b *buffer) writeRune(r rune) {
 	*b = utf8.AppendRune(*b, r)
 }
 
-// pp is used to store a printer's state and is reused with sync.Pool to avoid allocations.
 type pp struct {
 	buf buffer
 
@@ -137,49 +135,13 @@ type pp struct {
 	wrappedErrs []int
 }
 
-var ppFree = sync.Pool{
-	New: func() any { return &pp{} },
-}
-
-// newPrinter allocates a new pp struct or grabs a cached one.
 func newPrinter() *pp {
-	p := ppFree.Get().(*pp)
-	p.panicking = false
-	p.erroring = false
-	p.wrapErrs = false
+	p := &pp{}
 	p.fmt.init(&p.buf)
 	return p
 }
 
-// free saves used pp structs in ppFree; avoids an allocation per invocation.
 func (p *pp) free() {
-	// Proper usage of a sync.Pool requires each entry to have approximately
-	// the same memory cost. To obtain this property when the stored type
-	// contains a variably-sized buffer, we add a hard limit on the maximum
-	// buffer to place back in the pool. If the buffer is larger than the
-	// limit, we drop the buffer and recycle just the printer.
-	//
-	// See https://golang.org/issue/23199.
-	if cap(p.buf) > 64*1024 {
-		p.buf = nil
-	} else {
-		// Zero the backing array before reuse. With string=[]byte,
-		// callers may still hold slices pointing at this memory.
-		// Zeroing makes stale reads return empty bytes rather than
-		// silently aliasing new content.
-		b := p.buf[:cap(p.buf)]
-		for i := range b {
-			b[i] = 0
-		}
-		p.buf = p.buf[:0]
-	}
-	if cap(p.wrappedErrs) > 8 {
-		p.wrappedErrs = nil
-	}
-
-	p.arg = nil
-	p.wrappedErrs = p.wrappedErrs[:0]
-	ppFree.Put(p)
 }
 
 func (p *pp) Width() (wid int, ok bool) { return p.fmt.wid, p.fmt.widPresent }
@@ -231,7 +193,7 @@ func Fprintf(w io.Writer, format []byte, a ...any) (n int, err error) {
 // Printf formats according to a format specifier and writes to standard output.
 // It returns the number of bytes written and any write error encountered.
 func Printf(format []byte, a ...any) (n int, err error) {
-	return Fprintf(os.Stdout, format, a...)
+	return Fprintf(os.Stdout(), format, a...)
 }
 
 // Sprintf formats according to a format specifier and returns the resulting string.
@@ -270,7 +232,7 @@ func Fprint(w io.Writer, a ...any) (n int, err error) {
 // Spaces are added between operands when neither is a string.
 // It returns the number of bytes written and any write error encountered.
 func Print(a ...any) (n int, err error) {
-	return Fprint(os.Stdout, a...)
+	return Fprint(os.Stdout(), a...)
 }
 
 // Sprint formats using the default formats for its operands and returns the resulting string.
@@ -312,7 +274,7 @@ func Fprintln(w io.Writer, a ...any) (n int, err error) {
 // Spaces are always added between operands and a newline is appended.
 // It returns the number of bytes written and any write error encountered.
 func Println(a ...any) (n int, err error) {
-	return Fprintln(os.Stdout, a...)
+	return Fprintln(os.Stdout(), a...)
 }
 
 // Sprintln formats using the default formats for its operands and returns the resulting string.

@@ -19,7 +19,6 @@ import (
 	"math/bits"
 	"strconv"
 	"bytes"
-	"sync"
 	"unicode/utf8"
 )
 
@@ -89,7 +88,6 @@ type (
 	boolVal    bool
 	stringVal  struct {
 		// Lazy value: either a string (l,r==nil) or an addition (l,r!=nil).
-		mu   sync.Mutex
 		s    string
 		l, r *stringVal
 	}
@@ -136,16 +134,12 @@ func (x *stringVal) String() string {
 // building different string values for all subpieces of a large
 // concatenation. See golang.org/issue/23348.
 func (x *stringVal) string() string {
-	x.mu.Lock()
 	if x.l != nil {
 		x.s = bytes.Join(reverse(x.appendReverse(nil)), "")
 		x.l = nil
 		x.r = nil
 	}
-	s := x.s
-	x.mu.Unlock()
-
-	return s
+	return x.s
 }
 
 // reverse reverses x in place and returns it.
@@ -166,22 +160,10 @@ func reverse(x [][]byte) [][]byte {
 func (x *stringVal) appendReverse(list [][]byte) [][]byte {
 	y := x
 	for y.r != nil {
-		y.r.mu.Lock()
 		list = y.r.appendReverse(list)
-		y.r.mu.Unlock()
-
-		l := y.l
-		if y != x {
-			y.mu.Unlock()
-		}
-		l.mu.Lock()
-		y = l
+		y = y.l
 	}
-	s := y.s
-	if y != x {
-		y.mu.Unlock()
-	}
-	return append(list, s)
+	return append(list, y.s)
 }
 
 func (x int64Val) String() string { return strconv.FormatInt(int64(x), 10) }
@@ -302,12 +284,12 @@ func makeRat(x *big.Rat) Value {
 	return floatVal{newFloat().SetRat(x)}
 }
 
-var floatVal0 = floatVal{newFloat()}
+func _floatVal0() floatVal { return floatVal{newFloat()} }
 
 func makeFloat(x *big.Float) Value {
 	// convert -0
 	if x.Sign() == 0 {
-		return floatVal0
+		return _floatVal0()
 	}
 	if x.IsInf() {
 		return unknownVal{}
@@ -388,12 +370,12 @@ func MakeBool(b bool) Value { return boolVal(b) }
 // MakeString returns the [String] value for s.
 func MakeString(s string) Value {
 	if s == "" {
-		return &emptyString // common case
+		return _emptyString() // common case
 	}
 	return &stringVal{s: s}
 }
 
-var emptyString stringVal
+func _emptyString() *stringVal { return &stringVal{} }
 
 // MakeInt64 returns the [Int] value for x.
 func MakeInt64(x int64) Value { return int64Val(x) }

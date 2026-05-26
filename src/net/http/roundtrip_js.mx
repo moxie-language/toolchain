@@ -16,7 +16,16 @@ import (
 	"syscall/js"
 )
 
-var uint8Array = js.Global().Get("Uint8Array")
+var _uint8ArrayDone bool
+var _uint8ArrayVal js.Value
+
+func _uint8Array() js.Value {
+	if !_uint8ArrayDone {
+		_uint8ArrayDone = true
+		_uint8ArrayVal = js.Global().Get("Uint8Array")
+	}
+	return _uint8ArrayVal
+}
 
 // jsFetchMode is a Request.Header map key that, if present,
 // signals that the map entry is actually an option to the Fetch API mode setting.
@@ -42,19 +51,37 @@ const jsFetchCreds = "js.fetch:credentials"
 // Reference: https://developer.mozilla.org/en-US/docs/Web/API/WindowOrWorkerGlobalScope/fetch#Parameters
 const jsFetchRedirect = "js.fetch:redirect"
 
-// jsFetchMissing will be true if the Fetch API is not present in
-// the browser globals.
-var jsFetchMissing = js.Global().Get("fetch").IsUndefined()
+var _jsFetchMissingDone bool
+var _jsFetchMissingVal bool
 
-// jsFetchDisabled controls whether the use of Fetch API is disabled.
-// It's set to true when we detect we're running in Node.js, so that
+// jsFetchMissing returns true if the Fetch API is not present in
+// the browser globals.
+func jsFetchMissing() bool {
+	if !_jsFetchMissingDone {
+		_jsFetchMissingDone = true
+		_jsFetchMissingVal = js.Global().Get("fetch").IsUndefined()
+	}
+	return _jsFetchMissingVal
+}
+
+var _jsFetchDisabledDone bool
+var _jsFetchDisabledVal bool
+
+// jsFetchDisabled returns whether the use of Fetch API is disabled.
+// It returns true when we detect we're running in Node.js, so that
 // RoundTrip ends up talking over the same fake network the HTTP servers
 // currently use in various tests and examples. See go.dev/issue/57613.
 //
 // TODO(go.dev/issue/60810): See if it's viable to test the Fetch API
 // code path.
-var jsFetchDisabled = js.Global().Get("process").Type() == js.TypeObject &&
-	bytes.HasPrefix(js.Global().Get("process").Get("argv0").String(), "node")
+func jsFetchDisabled() bool {
+	if !_jsFetchDisabledDone {
+		_jsFetchDisabledDone = true
+		_jsFetchDisabledVal = js.Global().Get("process").Type() == js.TypeObject &&
+			bytes.HasPrefix(js.Global().Get("process").Get("argv0").String(), "node")
+	}
+	return _jsFetchDisabledVal
+}
 
 // RoundTrip implements the [RoundTripper] interface using the WHATWG Fetch API.
 func (t *Transport) RoundTrip(req *Request) (*Response, error) {
@@ -64,7 +91,7 @@ func (t *Transport) RoundTrip(req *Request) (*Response, error) {
 	// though they are deprecated. Therefore, if any of these are set, we should obey
 	// the contract and dial using the regular round-trip instead. Otherwise, we'll try
 	// to fall back on the Fetch API, unless it's not available.
-	if t.Dial != nil || t.DialContext != nil || t.DialTLS != nil || t.DialTLSContext != nil || jsFetchMissing || jsFetchDisabled {
+	if t.Dial != nil || t.DialContext != nil || t.DialTLS != nil || t.DialTLSContext != nil || jsFetchMissing() || jsFetchDisabled() {
 		return t.roundTrip(req)
 	}
 
@@ -120,7 +147,7 @@ func (t *Transport) RoundTrip(req *Request) (*Response, error) {
 		}
 		req.Body.Close()
 		if len(body) != 0 {
-			buf := uint8Array.New(len(body))
+			buf := _uint8Array().New(len(body))
 			js.CopyBytesToJS(buf, body)
 			opt.Set("body", buf)
 		}
@@ -253,7 +280,7 @@ func (t *Transport) RoundTrip(req *Request) (*Response, error) {
 	}
 }
 
-var errClosed = errors.New("net/http: reader is closed")
+const errClosed = errors.Const("net/http: reader is closed")
 
 // streamReader implements an io.ReadCloser wrapper for ReadableStream.
 // See https://fetch.spec.whatwg.org/#readablestream for more information.
@@ -340,7 +367,7 @@ func (r *arrayReader) Read(p []byte) (n int, err error) {
 		)
 		success := js.FuncOf(func(this js.Value, args []js.Value) any {
 			// Wrap the input ArrayBuffer with a Uint8Array
-			uint8arrayWrapper := uint8Array.New(args[0])
+			uint8arrayWrapper := _uint8Array().New(args[0])
 			value := []byte{:uint8arrayWrapper.Get("byteLength").Int()}
 			js.CopyBytesToGo(value, uint8arrayWrapper)
 			bCh <- value

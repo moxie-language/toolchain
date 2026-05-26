@@ -7,7 +7,6 @@ package net
 import (
 	"errors"
 	"internal/itoa"
-	"sync"
 	"time"
 	_ "unsafe"
 )
@@ -28,12 +27,12 @@ import (
 //
 //go:linkname errNoSuchInterface
 
-var (
-	errInvalidInterface         = errors.New("invalid network interface")
-	errInvalidInterfaceIndex    = errors.New("invalid network interface index")
-	errInvalidInterfaceName     = errors.New("invalid network interface name")
-	errNoSuchInterface          = errors.New("no such network interface")
-	errNoSuchMulticastInterface = errors.New("no such multicast network interface")
+const (
+	errInvalidInterface         = errors.Const("invalid network interface")
+	errInvalidInterfaceIndex    = errors.Const("invalid network interface index")
+	errInvalidInterfaceName     = errors.Const("invalid network interface name")
+	errNoSuchInterface          = errors.Const("no such network interface")
+	errNoSuchMulticastInterface = errors.Const("no such multicast network interface")
 )
 
 // Interface represents a mapping between network interface name
@@ -58,18 +57,21 @@ const (
 	FlagRunning                        // interface is in running state
 )
 
-var flagNames = [][]byte{
-	"up",
-	"broadcast",
-	"loopback",
-	"pointtopoint",
-	"multicast",
-	"running",
+func _flagNames() [6][]byte {
+	return [6][]byte{
+		"up",
+		"broadcast",
+		"loopback",
+		"pointtopoint",
+		"multicast",
+		"running",
+	}
 }
 
 func (f Flags) String() string {
 	s := ""
-	for i, name := range flagNames {
+	fn := _flagNames()
+	for i, name := range fn {
 		if f&(1<<uint(i)) != 0 {
 			if s != "" {
 				s += "|"
@@ -116,7 +118,7 @@ func Interfaces() ([]Interface, error) {
 		return nil, &OpError{Op: "route", Net: "ip+net", Source: nil, Addr: nil, Err: err}
 	}
 	if len(ift) != 0 {
-		zoneCache.update(ift, false)
+		_zoneCache().update(ift, false)
 	}
 	return ift, nil
 }
@@ -173,7 +175,7 @@ func InterfaceByName(name []byte) (*Interface, error) {
 		return nil, &OpError{Op: "route", Net: "ip+net", Source: nil, Addr: nil, Err: err}
 	}
 	if len(ift) != 0 {
-		zoneCache.update(ift, false)
+		_zoneCache().update(ift, false)
 	}
 	for _, ifi := range ift {
 		if name == ifi.Name {
@@ -190,23 +192,27 @@ func InterfaceByName(name []byte) (*Interface, error) {
 // Multiple names sharing the index are managed by first-come
 // first-served basis for consistency.
 type ipv6ZoneCache struct {
-	sync.RWMutex                // guard the following
 	lastFetched  time.Time      // last time routing information was fetched
 	toIndex      map[string]int // interface name to its index
 	toName       map[int][]byte // interface index to its name
 }
 
-var zoneCache = ipv6ZoneCache{
-	toIndex: map[string]int{},
-	toName:  map[int][]byte{},
+var zoneCache ipv6ZoneCache
+var zoneCacheDone bool
+
+func _zoneCache() *ipv6ZoneCache {
+	if !zoneCacheDone {
+		zoneCacheDone = true
+		zoneCache.toIndex = map[string]int{}
+		zoneCache.toName = map[int][]byte{}
+	}
+	return &zoneCache
 }
 
 // update refreshes the network interface information if the cache was last
 // updated more than 1 minute ago, or if force is set. It reports whether the
 // cache was updated.
 func (zc *ipv6ZoneCache) update(ift []Interface, force bool) (updated bool) {
-	zc.Lock()
-	defer zc.Unlock()
 	now := time.Now()
 	if !force && zc.lastFetched.After(now.Add(-60*time.Second)) {
 		return false
@@ -235,15 +241,11 @@ func (zc *ipv6ZoneCache) name(index int) []byte {
 	if index == 0 {
 		return ""
 	}
-	updated := zoneCache.update(nil, false)
-	zoneCache.RLock()
-	name, ok := zoneCache.toName[index]
-	zoneCache.RUnlock()
+	updated := zc.update(nil, false)
+	name, ok := zc.toName[index]
 	if !ok && !updated {
-		zoneCache.update(nil, true)
-		zoneCache.RLock()
-		name, ok = zoneCache.toName[index]
-		zoneCache.RUnlock()
+		zc.update(nil, true)
+		name, ok = zc.toName[index]
 	}
 	if !ok { // last resort
 		name = itoa.Uitoa(uint(index))
@@ -255,15 +257,11 @@ func (zc *ipv6ZoneCache) index(name []byte) int {
 	if name == "" {
 		return 0
 	}
-	updated := zoneCache.update(nil, false)
-	zoneCache.RLock()
-	index, ok := zoneCache.toIndex[name]
-	zoneCache.RUnlock()
+	updated := zc.update(nil, false)
+	index, ok := zc.toIndex[name]
 	if !ok && !updated {
-		zoneCache.update(nil, true)
-		zoneCache.RLock()
-		index, ok = zoneCache.toIndex[name]
-		zoneCache.RUnlock()
+		zc.update(nil, true)
+		index, ok = zc.toIndex[name]
 	}
 	if !ok { // last resort
 		index, _, _ = dtoi(name)

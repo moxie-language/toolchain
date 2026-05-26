@@ -8,7 +8,6 @@ import (
 	"crypto/rsa"
 	"encoding/asn1"
 	"errors"
-	"internal/godebug"
 	"math/big"
 )
 
@@ -41,16 +40,9 @@ type pkcs1PublicKey struct {
 	E int
 }
 
-// x509rsacrt, if zero, makes ParsePKCS1PrivateKey ignore and recompute invalid
-// CRT values in the RSA private key.
-var x509rsacrt = godebug.New("x509rsacrt")
-
 // ParsePKCS1PrivateKey parses an [RSA] private key in PKCS #1, ASN.1 DER form.
 //
 // This kind of key is commonly encoded in PEM blocks of type "RSA PRIVATE KEY".
-//
-// Before Go 1.24, the CRT parameters were ignored and recomputed. To restore
-// the old behavior, use the GODEBUG=x509rsacrt=0 environment variable.
 func ParsePKCS1PrivateKey(der []byte) (*rsa.PrivateKey, error) {
 	var priv pkcs1PrivateKey
 	rest, err := asn1.Unmarshal(der, &priv)
@@ -102,19 +94,6 @@ func ParsePKCS1PrivateKey(der []byte) (*rsa.PrivateKey, error) {
 
 	key.Precompute()
 	if err := key.Validate(); err != nil {
-		// If x509rsacrt=0 is set, try dropping the CRT values and
-		// rerunning precomputation and key validation.
-		if x509rsacrt.Value() == "0" {
-			key.Precomputed.Dp = nil
-			key.Precomputed.Dq = nil
-			key.Precomputed.Qinv = nil
-			key.Precompute()
-			if err := key.Validate(); err == nil {
-				x509rsacrt.IncNonDefault()
-				return key, nil
-			}
-		}
-
 		return nil, err
 	}
 

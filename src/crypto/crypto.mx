@@ -6,6 +6,11 @@
 package crypto
 
 import (
+	"crypto/internal/fips140/sha256"
+	"crypto/internal/fips140/sha3"
+	"crypto/internal/fips140/sha512"
+	"crypto/md5"
+	"crypto/sha1"
 	"hash"
 	"io"
 	"strconv"
@@ -88,26 +93,28 @@ const (
 	maxHash
 )
 
-var digestSizes = []uint8{
-	MD4:         16,
-	MD5:         16,
-	SHA1:        20,
-	SHA224:      28,
-	SHA256:      32,
-	SHA384:      48,
-	SHA512:      64,
-	SHA512_224:  28,
-	SHA512_256:  32,
-	SHA3_224:    28,
-	SHA3_256:    32,
-	SHA3_384:    48,
-	SHA3_512:    64,
-	MD5SHA1:     36,
-	RIPEMD160:   20,
-	BLAKE2s_256: 32,
-	BLAKE2b_256: 32,
-	BLAKE2b_384: 48,
-	BLAKE2b_512: 64,
+func _digestSizes() [maxHash]uint8 {
+	return [maxHash]uint8{
+		MD4:         16,
+		MD5:         16,
+		SHA1:        20,
+		SHA224:      28,
+		SHA256:      32,
+		SHA384:      48,
+		SHA512:      64,
+		SHA512_224:  28,
+		SHA512_256:  32,
+		SHA3_224:    28,
+		SHA3_256:    32,
+		SHA3_384:    48,
+		SHA3_512:    64,
+		MD5SHA1:     36,
+		RIPEMD160:   20,
+		BLAKE2s_256: 32,
+		BLAKE2b_256: 32,
+		BLAKE2b_384: 48,
+		BLAKE2b_512: 64,
+	}
 }
 
 // Size returns the length, in bytes, of a digest resulting from the given hash
@@ -115,21 +122,40 @@ var digestSizes = []uint8{
 // into the program.
 func (h Hash) Size() int {
 	if h > 0 && h < maxHash {
-		return int(digestSizes[h])
+		ds := _digestSizes()
+		return int(ds[h])
 	}
 	panic("crypto: Size of unknown hash function")
 }
 
-var hashes = []func() hash.Hash{:maxHash}
-
 // New returns a new hash.Hash calculating the given hash function. New panics
-// if the hash function is not linked into the binary.
+// if the hash function is not supported.
 func (h Hash) New() hash.Hash {
-	if h > 0 && h < maxHash {
-		f := hashes[h]
-		if f != nil {
-			return f()
-		}
+	switch h {
+	case MD5:
+		return md5.New()
+	case SHA1:
+		return sha1.New()
+	case SHA224:
+		return sha256.New224()
+	case SHA256:
+		return sha256.New()
+	case SHA384:
+		return sha512.New384()
+	case SHA512:
+		return sha512.New()
+	case SHA512_224:
+		return sha512.New512_224()
+	case SHA512_256:
+		return sha512.New512_256()
+	case SHA3_224:
+		return sha3.New224()
+	case SHA3_256:
+		return sha3.New256()
+	case SHA3_384:
+		return sha3.New384()
+	case SHA3_512:
+		return sha3.New512()
 	}
 	var msg []byte
 	msg = append(msg, "crypto: requested hash function #"...)
@@ -138,19 +164,14 @@ func (h Hash) New() hash.Hash {
 	panic(msg)
 }
 
-// Available reports whether the given hash function is linked into the binary.
+// Available reports whether the given hash function is supported.
 func (h Hash) Available() bool {
-	return h < maxHash && hashes[h] != nil
-}
-
-// RegisterHash registers a function that returns a new instance of the given
-// hash function. This is intended to be called from the init function in
-// packages that implement hash functions.
-func RegisterHash(h Hash, f func() hash.Hash) {
-	if h >= maxHash {
-		panic("crypto: RegisterHash of unknown hash function")
+	switch h {
+	case MD5, SHA1, SHA224, SHA256, SHA384, SHA512,
+		SHA512_224, SHA512_256, SHA3_224, SHA3_256, SHA3_384, SHA3_512:
+		return true
 	}
-	hashes[h] = f
+	return false
 }
 
 // PublicKey represents a public key using an unspecified algorithm.

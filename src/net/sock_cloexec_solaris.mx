@@ -11,7 +11,6 @@
 package net
 
 import (
-	"internal/poll"
 	"internal/syscall/unix"
 	"os"
 	"syscall"
@@ -22,25 +21,22 @@ import (
 func sysSocket(family, sotype, proto int) (int, error) {
 	// Perform a cheap test and try the fast path first.
 	if unix.SupportSockNonblockCloexec() {
-		s, err := socketFunc(family, sotype|syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC, proto)
+		s, err := syscall.Socket(family, sotype|syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC, proto)
 		if err != nil {
 			return -1, os.NewSyscallError("socket", err)
 		}
 		return s, nil
 	}
 
-	// See ../syscall/exec_unix.go for description of ForkLock.
-	syscall.ForkLock.RLock()
-	s, err := socketFunc(family, sotype, proto)
+	s, err := syscall.Socket(family, sotype, proto)
 	if err == nil {
 		syscall.CloseOnExec(s)
 	}
-	syscall.ForkLock.RUnlock()
 	if err != nil {
 		return -1, os.NewSyscallError("socket", err)
 	}
 	if err = syscall.SetNonblock(s, true); err != nil {
-		poll.CloseFunc(s)
+		syscall.Close(s)
 		return -1, os.NewSyscallError("setnonblock", err)
 	}
 	return s, nil

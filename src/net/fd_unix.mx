@@ -45,7 +45,7 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa sysc
 	// Do not need to call fd.writeLock here,
 	// because fd is not yet accessible to user,
 	// so no concurrent operations are possible.
-	switch err := connectFunc(fd.pfd.Sysfd, ra); err {
+	switch err := syscall.Connect(fd.pfd.Sysfd, ra); err {
 	case syscall.EINPROGRESS, syscall.EALREADY, syscall.EINTR:
 	case nil, syscall.EISCONN:
 		select {
@@ -76,7 +76,7 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa sysc
 	}
 	if deadline, hasDeadline := ctx.Deadline(); hasDeadline {
 		fd.pfd.SetWriteDeadline(deadline)
-		defer fd.pfd.SetWriteDeadline(noDeadline)
+		defer fd.pfd.SetWriteDeadline(noDeadline())
 	}
 
 	// Moxie: no goroutines. Check context before connecting.
@@ -101,7 +101,7 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa sysc
 			}
 			return nil, err
 		}
-		nerr, err := getsockoptIntFunc(fd.pfd.Sysfd, syscall.SOL_SOCKET, syscall.SO_ERROR)
+		nerr, err := syscall.GetsockoptInt(fd.pfd.Sysfd, syscall.SOL_SOCKET, syscall.SO_ERROR)
 		if err != nil {
 			return nil, os.NewSyscallError("getsockopt", err)
 		}
@@ -133,7 +133,7 @@ func (fd *netFD) accept() (netfd *netFD, err error) {
 	}
 
 	if netfd, err = newFD(d, fd.family, fd.sotype, fd.net); err != nil {
-		poll.CloseFunc(d)
+		syscall.Close(d)
 		return nil, err
 	}
 	if err = netfd.init(); err != nil {

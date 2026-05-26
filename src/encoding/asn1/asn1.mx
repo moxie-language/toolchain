@@ -130,8 +130,6 @@ func parseInt32(bytes []byte) (int32, error) {
 	return int32(ret64), nil
 }
 
-var bigOne = big.NewInt(1)
-
 // parseBigInt treats the given bytes as a big-endian, signed integer and returns
 // the result.
 func parseBigInt(bytes []byte) (*big.Int, error) {
@@ -146,7 +144,7 @@ func parseBigInt(bytes []byte) (*big.Int, error) {
 			notBytes[i] = ^bytes[i]
 		}
 		ret.SetBytes(notBytes)
-		ret.Add(ret, bigOne)
+		ret.Add(ret, big.NewInt(1))
 		ret.Neg(ret)
 		return ret, nil
 	}
@@ -213,11 +211,9 @@ func parseBitString(bytes []byte) (ret BitString, err error) {
 
 // NULL
 
-// NullRawValue is a [RawValue] with its Tag set to the ASN.1 NULL type tag (5).
-var NullRawValue = RawValue{Tag: TagNull}
+func NullRawValue() RawValue { return RawValue{Tag: TagNull} }
 
-// NullBytes contains bytes representing the DER-encoded ASN.1 NULL type.
-var NullBytes = []byte{TagNull, 0}
+func NullBytes() []byte { return []byte{TagNull, 0} }
 
 // OBJECT IDENTIFIER
 
@@ -692,16 +688,14 @@ func parseSequenceOfUnsafe(data []byte, elemType *_rawType) (slicePtr unsafe.Poi
 
 // Type code pointers for known ASN.1 types. Obtained by decomposing
 // a nil pointer interface to extract the compiler's type descriptor.
-var (
-	_bitStringTC        = typeCodeOf((*BitString)(nil)).elem()
-	_objectIdentifierTC = typeCodeOf((*ObjectIdentifier)(nil)).elem()
-	_enumeratedTC       = typeCodeOf((*Enumerated)(nil)).elem()
-	_flagTC             = typeCodeOf((*Flag)(nil)).elem()
-	_timeTC             = typeCodeOf((*time.Time)(nil)).elem()
-	_rawValueTC         = typeCodeOf((*RawValue)(nil)).elem()
-	_rawContentsTC      = typeCodeOf((*RawContent)(nil)).elem()
-	_bigIntPtrTC        = typeCodeOf((**big.Int)(nil)).elem() // *big.Int, not big.Int
-)
+func _bitStringTC() *_rawType        { return typeCodeOf((*BitString)(nil)).elem() }
+func _objectIdentifierTC() *_rawType { return typeCodeOf((*ObjectIdentifier)(nil)).elem() }
+func _enumeratedTC() *_rawType       { return typeCodeOf((*Enumerated)(nil)).elem() }
+func _flagTC() *_rawType             { return typeCodeOf((*Flag)(nil)).elem() }
+func _timeTC() *_rawType             { return typeCodeOf((*time.Time)(nil)).elem() }
+func _rawValueTC() *_rawType         { return typeCodeOf((*RawValue)(nil)).elem() }
+func _rawContentsTC() *_rawType      { return typeCodeOf((*RawContent)(nil)).elem() }
+func _bigIntPtrTC() *_rawType        { return typeCodeOf((**big.Int)(nil)).elem() }
 
 // invalidLength reports whether offset + length > sliceLength, or if the
 // addition would overflow.
@@ -804,7 +798,7 @@ func parseFieldUnsafe(typ *_rawType, ptr unsafe.Pointer, data []byte, initOffset
 			return
 		}
 		if t.class == expectedClass && t.tag == *params.tag && (t.length == 0 || t.isCompound) {
-			if typ == _rawValueTC {
+			if typ == _rawValueTC() {
 				// The inner element should not be parsed for RawValues.
 			} else if t.length > 0 {
 				t, offset, err = parseTagAndLength(data, offset)
@@ -812,7 +806,7 @@ func parseFieldUnsafe(typ *_rawType, ptr unsafe.Pointer, data []byte, initOffset
 					return
 				}
 			} else {
-				if typ != _flagTC {
+				if typ != _flagTC() {
 					err = StructuralError{"zero length explicit tag was not an asn1.Flag"}
 					return
 				}
@@ -908,11 +902,11 @@ func parseFieldUnsafe(typ *_rawType, ptr unsafe.Pointer, data []byte, initOffset
 	offset += t.length
 
 	// Known concrete types by type code pointer comparison.
-	if typ == _rawValueTC {
+	if typ == _rawValueTC() {
 		*(*RawValue)(ptr) = RawValue{t.class, t.tag, t.isCompound, innerBytes, data[initOffset:offset]}
 		return
 	}
-	if typ == _objectIdentifierTC {
+	if typ == _objectIdentifierTC() {
 		oid, e := parseObjectIdentifier(innerBytes)
 		if e != nil {
 			err = e
@@ -921,7 +915,7 @@ func parseFieldUnsafe(typ *_rawType, ptr unsafe.Pointer, data []byte, initOffset
 		*(*ObjectIdentifier)(ptr) = oid
 		return
 	}
-	if typ == _bitStringTC {
+	if typ == _bitStringTC() {
 		bs, e := parseBitString(innerBytes)
 		if e != nil {
 			err = e
@@ -930,7 +924,7 @@ func parseFieldUnsafe(typ *_rawType, ptr unsafe.Pointer, data []byte, initOffset
 		*(*BitString)(ptr) = bs
 		return
 	}
-	if typ == _timeTC {
+	if typ == _timeTC() {
 		var tv time.Time
 		var e error
 		if universalTag == TagUTCTime {
@@ -945,7 +939,7 @@ func parseFieldUnsafe(typ *_rawType, ptr unsafe.Pointer, data []byte, initOffset
 		*(*time.Time)(ptr) = tv
 		return
 	}
-	if typ == _enumeratedTC {
+	if typ == _enumeratedTC() {
 		iv, e := parseInt32(innerBytes)
 		if e != nil {
 			err = e
@@ -954,11 +948,11 @@ func parseFieldUnsafe(typ *_rawType, ptr unsafe.Pointer, data []byte, initOffset
 		*(*Enumerated)(ptr) = Enumerated(iv)
 		return
 	}
-	if typ == _flagTC {
+	if typ == _flagTC() {
 		*(*Flag)(ptr) = true
 		return
 	}
-	if typ == _bigIntPtrTC {
+	if typ == _bigIntPtrTC() {
 		bi, e := parseBigInt(innerBytes)
 		if e != nil {
 			err = e
@@ -1000,14 +994,14 @@ func parseFieldUnsafe(typ *_rawType, ptr unsafe.Pointer, data []byte, initOffset
 			}
 		}
 
-		if typ.numField() > 0 && typ.fieldType(0) == _rawContentsTC {
+		if typ.numField() > 0 && typ.fieldType(0) == _rawContentsTC() {
 			rc := RawContent(data[initOffset:offset])
 			*(*RawContent)(unsafe.Add(ptr, typ.fieldOffset(0))) = rc
 		}
 
 		innerOffset := 0
 		for i := 0; i < typ.numField(); i++ {
-			if i == 0 && typ.fieldType(0) == _rawContentsTC {
+			if i == 0 && typ.fieldType(0) == _rawContentsTC() {
 				continue
 			}
 			ft := typ.fieldType(i)

@@ -9,40 +9,32 @@ package io
 
 import (
 	"errors"
-	"sync"
 )
 
 // onceError is an object that will only store an error once.
 type onceError struct {
-	sync.Mutex // guards following
 	err        error
 }
 
 func (a *onceError) Store(err error) {
-	a.Lock()
-	defer a.Unlock()
 	if a.err != nil {
 		return
 	}
 	a.err = err
 }
 func (a *onceError) Load() error {
-	a.Lock()
-	defer a.Unlock()
 	return a.err
 }
 
-// ErrClosedPipe is the error used for read or write operations on a closed pipe.
-var ErrClosedPipe = errors.New("io: read/write on closed pipe")
+const ErrClosedPipe = errors.Const("io: read/write on closed pipe")
 
 // A pipe is the shared pipe structure underlying PipeReader and PipeWriter.
 type pipe struct {
-	wrMu sync.Mutex // Serializes Write operations
 	wrCh chan []byte
 	rdCh chan int
 
-	once sync.Once // Protects closing done
-	done chan struct{}
+	closeDone bool // Protects closing done
+	done      chan struct{}
 	rerr onceError
 	werr onceError
 }
@@ -69,7 +61,7 @@ func (p *pipe) closeRead(err error) error {
 		err = ErrClosedPipe
 	}
 	p.rerr.Store(err)
-	p.once.Do(func() { close(p.done) })
+	if !p.closeDone { p.closeDone = true; close(p.done) }
 	return nil
 }
 
@@ -78,8 +70,6 @@ func (p *pipe) write(b []byte) (n int, err error) {
 	case <-p.done:
 		return 0, p.writeCloseError()
 	default:
-		p.wrMu.Lock()
-		defer p.wrMu.Unlock()
 	}
 
 	for once := true; once || len(b) > 0; once = false {
@@ -100,7 +90,7 @@ func (p *pipe) closeWrite(err error) error {
 		err = EOF
 	}
 	p.werr.Store(err)
-	p.once.Do(func() { close(p.done) })
+	if !p.closeDone { p.closeDone = true; close(p.done) }
 	return nil
 }
 

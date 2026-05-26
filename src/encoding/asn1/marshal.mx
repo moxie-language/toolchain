@@ -15,10 +15,8 @@ import (
 	"unsafe"
 )
 
-var (
-	byte00Encoder encoder = byteEncoder(0x00)
-	byteFFEncoder encoder = byteEncoder(0xff)
-)
+func _byte00Encoder() encoder { return byteEncoder(0x00) }
+func _byteFFEncoder() encoder { return byteEncoder(0xff) }
 
 // encoder represents an ASN.1 element that is waiting to be marshaled.
 type encoder interface {
@@ -203,24 +201,24 @@ func makeBigInt(n *big.Int) (encoder, error) {
 		// most-significant-bit isn't set then we'll need to pad the
 		// beginning with 0xff in order to keep the number negative.
 		nMinus1 := (&big.Int{}).Neg(n)
-		nMinus1.Sub(nMinus1, bigOne)
+		nMinus1.Sub(nMinus1, big.NewInt(1))
 		bytes := nMinus1.Bytes()
 		for i := range bytes {
 			bytes[i] ^= 0xff
 		}
 		if len(bytes) == 0 || bytes[0]&0x80 == 0 {
-			return multiEncoder([]encoder{byteFFEncoder, bytesEncoder(bytes)}), nil
+			return multiEncoder([]encoder{_byteFFEncoder(), bytesEncoder(bytes)}), nil
 		}
 		return bytesEncoder(bytes), nil
 	} else if n.Sign() == 0 {
 		// Zero is written as a single 0 zero rather than no bytes.
-		return byte00Encoder, nil
+		return _byte00Encoder(), nil
 	} else {
 		bytes := n.Bytes()
 		if len(bytes) > 0 && bytes[0]&0x80 != 0 {
 			// We'll have to pad this with 0x00 in order to stop it
 			// looking like a negative number.
-			return multiEncoder([]encoder{byte00Encoder, bytesEncoder(bytes)}), nil
+			return multiEncoder([]encoder{_byte00Encoder(), bytesEncoder(bytes)}), nil
 		}
 		return bytesEncoder(bytes), nil
 	}
@@ -458,23 +456,23 @@ func stripTagAndLength(in []byte) []byte {
 
 func makeBody(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e encoder, err error) {
 	// Known concrete types by type code pointer comparison.
-	if typ == _flagTC {
+	if typ == _flagTC() {
 		return bytesEncoder(nil), nil
 	}
-	if typ == _timeTC {
+	if typ == _timeTC() {
 		t := *(*time.Time)(ptr)
 		if params.timeType == TagGeneralizedTime || outsideUTCRange(t) {
 			return makeGeneralizedTime(t)
 		}
 		return makeUTCTime(t)
 	}
-	if typ == _bitStringTC {
+	if typ == _bitStringTC() {
 		return bitStringEncoder(*(*BitString)(ptr)), nil
 	}
-	if typ == _objectIdentifierTC {
+	if typ == _objectIdentifierTC() {
 		return makeObjectIdentifier(*(*ObjectIdentifier)(ptr))
 	}
-	if typ == _bigIntPtrTC {
+	if typ == _bigIntPtrTC() {
 		return makeBigInt(*(**big.Int)(ptr))
 	}
 
@@ -482,9 +480,9 @@ func makeBody(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enco
 	switch typ.kind() {
 	case akBool:
 		if *(*bool)(ptr) {
-			return byteFFEncoder, nil
+			return _byteFFEncoder(), nil
 		}
-		return byte00Encoder, nil
+		return _byte00Encoder(), nil
 	case akInt, akInt8, akInt16, akInt32, akInt64:
 		var intVal int64
 		switch typ.size() {
@@ -511,7 +509,7 @@ func makeBody(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enco
 			return bytesEncoder(nil), nil
 		}
 
-		if typ.fieldType(0) == _rawContentsTC {
+		if typ.fieldType(0) == _rawContentsTC() {
 			rc := *(*RawContent)(unsafe.Add(ptr, typ.fieldOffset(0)))
 			if len(rc) > 0 {
 				return bytesEncoder(stripTagAndLength([]byte(rc))), nil
@@ -645,7 +643,7 @@ func makeField(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enc
 		}
 	}
 
-	if typ == _rawValueTC {
+	if typ == _rawValueTC() {
 		rv := *(*RawValue)(ptr)
 		if len(rv.FullBytes) != 0 {
 			return bytesEncoder(rv.FullBytes), nil

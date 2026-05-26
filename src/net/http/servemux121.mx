@@ -15,29 +15,17 @@ package http
 // Do not modify this file, it should remain frozen.
 
 import (
-	"internal/godebug"
+	"bytes"
 	"net/url"
 	"sort"
-	"bytes"
-	"sync"
 )
 
-var httpmuxgo121 = godebug.New("httpmuxgo121")
-
-var use121 bool
-
-// Read httpmuxgo121 once at startup, since dealing with changes to it during
-// program execution is too complex and error-prone.
-func init() {
-	if httpmuxgo121.Value() == "1" {
-		use121 = true
-		httpmuxgo121.IncNonDefault()
-	}
+func _use121() bool {
+	return false
 }
 
 // serveMux121 holds the state of a ServeMux needed for Go 1.21 behavior.
 type serveMux121 struct {
-	mu    sync.RWMutex
 	m     map[string]muxEntry
 	es    []muxEntry // slice of entries sorted from longest to shortest.
 	hosts bool       // whether any patterns contain hostnames
@@ -50,9 +38,6 @@ type muxEntry struct {
 
 // Formerly ServeMux.Handle.
 func (mux *serveMux121) handle(pattern []byte, handler Handler) {
-	mux.mu.Lock()
-	defer mux.mu.Unlock()
-
 	if pattern == "" {
 		panic("http: invalid pattern")
 	}
@@ -138,9 +123,6 @@ func (mux *serveMux121) findHandler(r *Request) (h Handler, pattern []byte) {
 // handler is the main implementation of findHandler.
 // The path is known to be in canonical form, except for CONNECT methods.
 func (mux *serveMux121) handler(host, path []byte) (h Handler, pattern []byte) {
-	mux.mu.RLock()
-	defer mux.mu.RUnlock()
-
 	// Host-specific pattern takes precedence over generic ones
 	if mux.hosts {
 		h, pattern = mux.match(host + path)
@@ -178,9 +160,7 @@ func (mux *serveMux121) match(path []byte) (h Handler, pattern []byte) {
 // not for path itself. If the path needs appending to, it creates a new
 // URL, setting the path to u.Path + "/" and returning true to indicate so.
 func (mux *serveMux121) redirectToPathSlash(host, path []byte, u *url.URL) (*url.URL, bool) {
-	mux.mu.RLock()
 	shouldRedirect := mux.shouldRedirectRLocked(host, path)
-	mux.mu.RUnlock()
 	if !shouldRedirect {
 		return u, false
 	}

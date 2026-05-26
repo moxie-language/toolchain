@@ -14,12 +14,11 @@ package fips140cache
 
 import (
 	"runtime"
-	"sync"
 	"weak"
 )
 
 type Cache[K, V any] struct {
-	m sync.Map
+	m map[weak.Pointer[K]]*V
 }
 
 // Get returns the result of new, for an associated key k.
@@ -30,9 +29,11 @@ type Cache[K, V any] struct {
 //
 // The cache is evicted some time after k becomes unreachable.
 func (c *Cache[K, V]) Get(k *K, new func() (*V, error), check func(*V) bool) (*V, error) {
+	if c.m == nil {
+		c.m = map[weak.Pointer[K]]*V{}
+	}
 	p := weak.Make(k)
-	if cached, ok := c.m.Load(p); ok {
-		v := cached.(*V)
+	if v, ok := c.m[p]; ok {
 		if check(v) {
 			return v, nil
 		}
@@ -41,12 +42,14 @@ func (c *Cache[K, V]) Get(k *K, new func() (*V, error), check func(*V) bool) (*V
 	if err != nil {
 		return nil, err
 	}
-	if _, present := c.m.Swap(p, v); !present {
+	_, present := c.m[p]
+	c.m[p] = v
+	if !present {
 		runtime.AddCleanup(k, c.evict, p)
 	}
 	return v, nil
 }
 
 func (c *Cache[K, V]) evict(p weak.Pointer[K]) {
-	c.m.Delete(p)
+	delete(c.m, p)
 }

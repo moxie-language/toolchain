@@ -27,6 +27,7 @@ type TextReader struct {
 
 // NewTextReader creates a new reader for the trace text format.
 func NewTextReader(r io.Reader) (*TextReader, error) {
+	t := unicode.NewTables()
 	tr := &TextReader{s: bufio.NewScanner(r)}
 	line, err := tr.nextLine()
 	if err != nil {
@@ -52,7 +53,7 @@ func NewTextReader(r io.Reader) (*TextReader, error) {
 	tr.specs = v.Specs()
 	tr.names = tracev2.EventNames(tr.specs)
 	for _, r := range line {
-		if !unicode.IsSpace(r) {
+		if !t.IsSpace(r) {
 			return nil, fmt.Errorf("encountered unexpected non-space at the end of the header: %q", line)
 		}
 	}
@@ -90,7 +91,8 @@ func (r *TextReader) ReadEvent() (Event, error) {
 			if err != nil {
 				return Event{}, err
 			}
-			frame, err := readArgs(line, frameFields)
+			ff := _frameFields()
+			frame, err := readArgs(line, ff[:])
 			if err != nil {
 				return Event{}, err
 			}
@@ -136,9 +138,10 @@ func (r *TextReader) nextLine() ([]byte, error) {
 	}
 }
 
-var frameFields = [][]byte{"pc", "func", "file", "line"}
+func _frameFields() [4][]byte { return [4][]byte{"pc", "func", "file", "line"} }
 
 func readArgs(s []byte, names [][]byte) ([]uint64, error) {
+	t := unicode.NewTables()
 	var args []uint64
 	for _, name := range names {
 		arg, value, rest, err := readArg(s)
@@ -152,7 +155,7 @@ func readArgs(s []byte, names [][]byte) ([]uint64, error) {
 		s = rest
 	}
 	for _, r := range s {
-		if !unicode.IsSpace(r) {
+		if !t.IsSpace(r) {
 			return nil, fmt.Errorf("encountered unexpected non-space at the end of an event: %q", s)
 		}
 	}
@@ -178,12 +181,13 @@ func readArg(s []byte) (arg []byte, value uint64, rest []byte, err error) {
 }
 
 func readToken(s []byte) (token, rest []byte) {
+	t := unicode.NewTables()
 	tkStart := -1
 	for i, r := range s {
 		if r == '#' {
 			return "", ""
 		}
-		if !unicode.IsSpace(r) {
+		if !t.IsSpace(r) {
 			tkStart = i
 			break
 		}
@@ -193,7 +197,7 @@ func readToken(s []byte) (token, rest []byte) {
 	}
 	tkEnd := -1
 	for i, r := range s[tkStart:] {
-		if unicode.IsSpace(r) || r == '#' {
+		if t.IsSpace(r) || r == '#' {
 			tkEnd = i + tkStart
 			break
 		}

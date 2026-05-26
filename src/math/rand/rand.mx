@@ -18,9 +18,6 @@
 package rand
 
 import (
-	"internal/godebug"
-	"sync"
-	"sync/atomic"
 	_ "unsafe" // for go:linkname
 )
 
@@ -305,48 +302,23 @@ func read(p []byte, src Source, readVal *int64, readPos *int8) (n int, err error
  * Top-level convenience functions
  */
 
-// globalRandGenerator is the source of random numbers for the top-level
-// convenience functions. When possible it uses the runtime fastrand64
-// function to avoid locking. This is not possible if the user called Seed,
-// either explicitly or implicitly via GODEBUG=randautoseed=0.
-var globalRandGenerator atomic.Pointer[Rand]
-
-var randautoseed = godebug.New("randautoseed")
-
-// randseednop controls whether the global Seed is a no-op.
-var randseednop = godebug.New("randseednop")
+// globalRandGen is the lazy-init singleton for top-level convenience functions.
+var globalRandGen struct {
+	Done bool
+	Val  *Rand
+}
 
 // globalRand returns the generator to use for the top-level convenience
 // functions.
 func globalRand() *Rand {
-	if r := globalRandGenerator.Load(); r != nil {
-		return r
-	}
-
-	// This is the first call. Initialize based on GODEBUG.
-	var r *Rand
-	if randautoseed.Value() == "0" {
-		randautoseed.IncNonDefault()
-		r = New(&lockedSource{})
-		r.Seed(1)
-	} else {
-		r = &Rand{
+	if !globalRandGen.Done {
+		globalRandGen.Done = true
+		globalRandGen.Val = &Rand{
 			src: &runtimeSource{},
 			s64: &runtimeSource{},
 		}
 	}
-
-	if !globalRandGenerator.CompareAndSwap(nil, r) {
-		// Two different goroutines called some top-level
-		// function at the same time. While the results in
-		// that case are unpredictable, if we just use r here,
-		// and we are using a seed, we will most likely return
-		// the same value for both calls. That doesn't seem ideal.
-		// Just use the first one to get in.
-		return globalRandGenerator.Load()
-	}
-
-	return r
+	return globalRandGen.Val
 }
 
 //go:linkname runtime_rand runtime.rand
@@ -355,8 +327,6 @@ func runtime_rand() uint64
 // runtimeSource is an implementation of Source64 that uses the runtime
 // fastrand functions.
 type runtimeSource struct {
-	// The mutex is used to avoid race conditions in Read.
-	mu sync.Mutex
 }
 
 func (*runtimeSource) Int63() int64 {
@@ -372,9 +342,7 @@ func (*runtimeSource) Uint64() uint64 {
 }
 
 func (fs *runtimeSource) read(p []byte, readVal *int64, readPos *int8) (n int, err error) {
-	fs.mu.Lock()
 	n, err = read(p, fs, readVal, readPos)
-	fs.mu.Unlock()
 	return
 }
 
@@ -398,35 +366,7 @@ func (fs *runtimeSource) read(p []byte, readVal *int64, readPos *int8) (n int, e
 // As of Go 1.24 [Seed] is a no-op. To restore the previous behavior set
 // GODEBUG=randseednop=0.
 func Seed(seed int64) {
-	if randseednop.Value() != "0" {
-		return
-	}
-	randseednop.IncNonDefault()
-
-	orig := globalRandGenerator.Load()
-
-	// If we are already using a lockedSource, we can just re-seed it.
-	if orig != nil {
-		if _, ok := orig.src.(*lockedSource); ok {
-			orig.Seed(seed)
-			return
-		}
-	}
-
-	// Otherwise either
-	// 1) orig == nil, which is the normal case when Seed is the first
-	// top-level function to be called, or
-	// 2) orig is already a runtimeSource, in which case we need to change
-	// to a lockedSource.
-	// Either way we do the same thing.
-
-	r := New(&lockedSource{})
-	r.Seed(seed)
-
-	if !globalRandGenerator.CompareAndSwap(orig, r) {
-		// Something changed underfoot. Retry to be safe.
-		Seed(seed)
-	}
+	// Seed is a no-op as of Go 1.24.
 }
 
 // Int63 returns a non-negative pseudo-random 63-bit integer as an int64
@@ -508,40 +448,30 @@ func NormFloat64() float64 { return globalRand().NormFloat64() }
 func ExpFloat64() float64 { return globalRand().ExpFloat64() }
 
 type lockedSource struct {
-	lk sync.Mutex
 	s  *rngSource
 }
 
 func (r *lockedSource) Int63() (n int64) {
-	r.lk.Lock()
 	n = r.s.Int63()
-	r.lk.Unlock()
 	return
 }
 
 func (r *lockedSource) Uint64() (n uint64) {
-	r.lk.Lock()
 	n = r.s.Uint64()
-	r.lk.Unlock()
 	return
 }
 
 func (r *lockedSource) Seed(seed int64) {
-	r.lk.Lock()
 	r.seed(seed)
-	r.lk.Unlock()
 }
 
 // seedPos implements Seed for a lockedSource without a race condition.
 func (r *lockedSource) seedPos(seed int64, readPos *int8) {
-	r.lk.Lock()
 	r.seed(seed)
 	*readPos = 0
-	r.lk.Unlock()
 }
 
 // seed seeds the underlying source.
-// The caller must have locked r.lk.
 func (r *lockedSource) seed(seed int64) {
 	if r.s == nil {
 		r.s = newSource(seed)
@@ -550,10 +480,8 @@ func (r *lockedSource) seed(seed int64) {
 	}
 }
 
-// read implements Read for a lockedSource without a race condition.
+// read implements Read for a lockedSource.
 func (r *lockedSource) read(p []byte, readVal *int64, readPos *int8) (n int, err error) {
-	r.lk.Lock()
 	n, err = read(p, r.s, readVal, readPos)
-	r.lk.Unlock()
 	return
 }

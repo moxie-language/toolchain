@@ -11,10 +11,6 @@ const (
 	vxAlignMask = 15 // align to 16 bytes
 )
 
-// hasVX reports whether the machine has the z/Architecture
-// vector facility installed and enabled.
-var hasVX = cpu.S390X.HasVX
-
 // vectorizedCastagnoli implements CRC32 using vector instructions.
 // It is defined in crc32_s390x.s.
 //
@@ -27,27 +23,28 @@ func vectorizedCastagnoli(crc uint32, p []byte) uint32
 //go:noescape
 func vectorizedIEEE(crc uint32, p []byte) uint32
 
-func archAvailableCastagnoli() bool {
-	return hasVX
+type archState struct {
+	archCastagnoliTable8 *slicing8Table
+	archIeeeTable8       *slicing8Table
 }
 
-var archCastagnoliTable8 *slicing8Table
+func archAvailableCastagnoli() bool {
+	return cpu.S390X.HasVX
+}
 
-func archInitCastagnoli() {
-	if !hasVX {
+func (c *CRC32) archInitCastagnoli() {
+	if !cpu.S390X.HasVX {
 		panic("not available")
 	}
-	// We still use slicing-by-8 for small buffers.
-	archCastagnoliTable8 = slicingMakeTable(Castagnoli)
+	c.archCastagnoliTable8 = slicingMakeTable(Castagnoli)
 }
 
 // archUpdateCastagnoli calculates the checksum of p using
 // vectorizedCastagnoli.
-func archUpdateCastagnoli(crc uint32, p []byte) uint32 {
-	if !hasVX {
+func (c *CRC32) archUpdateCastagnoli(crc uint32, p []byte) uint32 {
+	if !cpu.S390X.HasVX {
 		panic("not available")
 	}
-	// Use vectorized function if data length is above threshold.
 	if len(p) >= vxMinLen {
 		aligned := len(p) & ^vxAlignMask
 		crc = vectorizedCastagnoli(crc, p[:aligned])
@@ -56,29 +53,25 @@ func archUpdateCastagnoli(crc uint32, p []byte) uint32 {
 	if len(p) == 0 {
 		return crc
 	}
-	return slicingUpdate(crc, archCastagnoliTable8, p)
+	return slicingUpdate(crc, c.archCastagnoliTable8, p)
 }
 
 func archAvailableIEEE() bool {
-	return hasVX
+	return cpu.S390X.HasVX
 }
 
-var archIeeeTable8 *slicing8Table
-
-func archInitIEEE() {
-	if !hasVX {
+func (c *CRC32) archInitIEEE() {
+	if !cpu.S390X.HasVX {
 		panic("not available")
 	}
-	// We still use slicing-by-8 for small buffers.
-	archIeeeTable8 = slicingMakeTable(IEEE)
+	c.archIeeeTable8 = slicingMakeTable(IEEE)
 }
 
 // archUpdateIEEE calculates the checksum of p using vectorizedIEEE.
-func archUpdateIEEE(crc uint32, p []byte) uint32 {
-	if !hasVX {
+func (c *CRC32) archUpdateIEEE(crc uint32, p []byte) uint32 {
+	if !cpu.S390X.HasVX {
 		panic("not available")
 	}
-	// Use vectorized function if data length is above threshold.
 	if len(p) >= vxMinLen {
 		aligned := len(p) & ^vxAlignMask
 		crc = vectorizedIEEE(crc, p[:aligned])
@@ -87,5 +80,5 @@ func archUpdateIEEE(crc uint32, p []byte) uint32 {
 	if len(p) == 0 {
 		return crc
 	}
-	return slicingUpdate(crc, archIeeeTable8, p)
+	return slicingUpdate(crc, c.archIeeeTable8, p)
 }

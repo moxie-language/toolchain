@@ -6,20 +6,11 @@
 // mechanism.
 package singleflight
 
-import "sync"
-
 // call is an in-flight or completed singleflight.Do call
 type call struct {
-	wg sync.WaitGroup
-
-	// These fields are written once before the WaitGroup is done
-	// and are only read after the WaitGroup is done.
 	val any
 	err error
 
-	// These fields are read and written with the singleflight
-	// mutex held before the WaitGroup is done, and are read but
-	// not written after the WaitGroup is done.
 	dups  int
 	chans []chan<- Result
 }
@@ -27,7 +18,6 @@ type call struct {
 // Group represents a class of work and forms a namespace in
 // which units of work can be executed with duplicate suppression.
 type Group struct {
-	mu sync.Mutex       // protects m
 	m  map[string]*call // lazily initialized
 }
 
@@ -45,20 +35,16 @@ type Result struct {
 // original to complete and receives the same results.
 // The return value shared indicates whether v was given to multiple callers.
 func (g *Group) Do(key []byte, fn func() (any, error)) (v any, err error, shared bool) {
-	g.mu.Lock()
+
 	if g.m == nil {
 		g.m = map[string]*call{}
 	}
 	if c, ok := g.m[key]; ok {
 		c.dups++
-		g.mu.Unlock()
-		c.wg.Wait()
 		return c.val, c.err, true
 	}
 	c := &call{}
-	c.wg.Add(1)
 	g.m[key] = c
-	g.mu.Unlock()
 
 	g.doCall(c, key, fn)
 	return c.val, c.err, c.dups > 0
@@ -68,20 +54,18 @@ func (g *Group) Do(key []byte, fn func() (any, error)) (v any, err error, shared
 // results when they are ready.
 func (g *Group) DoChan(key []byte, fn func() (any, error)) <-chan Result {
 	ch := chan Result{1}
-	g.mu.Lock()
+
 	if g.m == nil {
 		g.m = map[string]*call{}
 	}
 	if c, ok := g.m[key]; ok {
 		c.dups++
 		c.chans = append(c.chans, ch)
-		g.mu.Unlock()
+
 		return ch
 	}
 	c := &call{chans: []chan<- Result{ch}}
-	c.wg.Add(1)
 	g.m[key] = c
-	g.mu.Unlock()
 
 	g.doCall(c, key, fn)
 
@@ -92,15 +76,12 @@ func (g *Group) DoChan(key []byte, fn func() (any, error)) <-chan Result {
 func (g *Group) doCall(c *call, key []byte, fn func() (any, error)) {
 	c.val, c.err = fn()
 
-	g.mu.Lock()
-	c.wg.Done()
 	if g.m[key] == c {
 		delete(g.m, key)
 	}
 	for _, ch := range c.chans {
 		ch <- Result{c.val, c.err, c.dups > 0}
 	}
-	g.mu.Unlock()
 }
 
 // ForgetUnshared tells the singleflight to forget about a key if it is not
@@ -109,8 +90,8 @@ func (g *Group) doCall(c *call, key []byte, fn func() (any, error)) {
 // Returns whether the key was forgotten or unknown--that is, whether no
 // other goroutines are waiting for the result.
 func (g *Group) ForgetUnshared(key []byte) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+
+
 	c, ok := g.m[key]
 	if !ok {
 		return true

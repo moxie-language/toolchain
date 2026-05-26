@@ -10,13 +10,9 @@ package syscall
 
 import (
 	"runtime"
-	"sync"
 )
 
 var (
-	// envLock guards env and envs.
-	envLock sync.RWMutex
-
 	// env maps from an environment variable to its first occurrence in envs.
 	env map[string]int
 
@@ -28,7 +24,13 @@ var (
 
 func runtime_envs() []string // in package runtime
 
-var copyenv = sync.OnceFunc(func() {
+var copyenvDone bool
+
+func copyenv() {
+	if copyenvDone {
+		return
+	}
+	copyenvDone = true
 	env = make(map[string]int)
 	for i, s := range envs {
 		for j := 0; j < len(s); j++ {
@@ -47,13 +49,10 @@ var copyenv = sync.OnceFunc(func() {
 			}
 		}
 	}
-})
+}
 
 func Unsetenv(key string) error {
 	copyenv()
-
-	envLock.Lock()
-	defer envLock.Unlock()
 
 	if i, ok := env[key]; ok {
 		envs[i] = ""
@@ -68,9 +67,6 @@ func Getenv(key string) (value string, found bool) {
 	if len(key) == 0 {
 		return "", false
 	}
-
-	envLock.RLock()
-	defer envLock.RUnlock()
 
 	i, ok := env[key]
 	if !ok {
@@ -104,9 +100,6 @@ func Setenv(key, value string) error {
 		}
 	}
 
-	envLock.Lock()
-	defer envLock.Unlock()
-
 	i, ok := env[key]
 	kv := key + "=" + value
 	if ok {
@@ -123,9 +116,6 @@ func Setenv(key, value string) error {
 func Clearenv() {
 	copyenv()
 
-	envLock.Lock()
-	defer envLock.Unlock()
-
 	for k := range env {
 		runtimeUnsetenv(k)
 	}
@@ -135,8 +125,6 @@ func Clearenv() {
 
 func Environ() []string {
 	copyenv()
-	envLock.RLock()
-	defer envLock.RUnlock()
 	a := make([]string, 0, len(envs))
 	for _, env := range envs {
 		if env != "" {

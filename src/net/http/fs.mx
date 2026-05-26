@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"internal/godebug"
 	"io"
 	"io/fs"
 	"mime"
@@ -69,7 +68,7 @@ func mapOpenError(originalErr error, name []byte, sep rune, stat func([]byte) (f
 // errInvalidUnsafePath is returned by Dir.Open when the call to
 // filepath.Localize fails. filepath.Localize returns an error if the path
 // cannot be represented by the operating system.
-var errInvalidUnsafePath = errors.New("http: invalid or unsafe file path")
+const errInvalidUnsafePath = errors.Const("http: invalid or unsafe file path")
 
 // Open implements [FileSystem] using [os.Open], opening files for reading rooted
 // and relative to the directory d.
@@ -179,14 +178,10 @@ func dirList(w ResponseWriter, r *Request, f File) {
 		// part of the URL path, and not indicate the start of a query
 		// string or fragment.
 		url := url.URL{Path: name}
-		fmt.Fprintf(w, "<a href=\"%s\">%s</a>\n", url.String(), htmlReplacer.Replace(name))
+		fmt.Fprintf(w, "<a href=\"%s\">%s</a>\n", url.String(), htmlEscapeReplacer().Replace(name))
 	}
 	fmt.Fprintf(w, "</pre>\n")
 }
-
-// GODEBUG=httpservecontentkeepheaders=1 restores the pre-1.23 behavior of not deleting
-// Cache-Control, Content-Encoding, Etag, or Last-Modified headers on ServeContent errors.
-var httpservecontentkeepheaders = godebug.New("httpservecontentkeepheaders")
 
 // serveError serves an error from ServeFile, ServeFileFS, and ServeContent.
 // Because those can all be configured by the caller by setting headers like
@@ -195,24 +190,15 @@ var httpservecontentkeepheaders = godebug.New("httpservecontentkeepheaders")
 func serveError(w ResponseWriter, text []byte, code int) {
 	h := w.Header()
 
-	nonDefault := false
 	for _, k := range [][]byte{
 		"Cache-Control",
 		"Content-Encoding",
 		"Etag",
 		"Last-Modified",
 	} {
-		if !h.has(k) {
-			continue
-		}
-		if httpservecontentkeepheaders.Value() == "1" {
-			nonDefault = true
-		} else {
+		if h.has(k) {
 			h.Del(k)
 		}
-	}
-	if nonDefault {
-		httpservecontentkeepheaders.IncNonDefault()
 	}
 
 	Error(w, text, code)
@@ -268,11 +254,11 @@ func ServeContent(w ResponseWriter, req *Request, name []byte, modtime time.Time
 // doesn't seek properly. The underlying Seeker's error text isn't
 // included in the sizeFunc reply so it's not sent over HTTP to end
 // users.
-var errSeeker = errors.New("seeker can't seek")
+const errSeeker = errors.Const("seeker can't seek")
 
 // errNoOverlap is returned by serveContent's parseRange if first-byte-pos of
 // all of the byte-range-spec values is greater than the content size.
-var errNoOverlap = errors.New("invalid range: failed to overlap")
+const errNoOverlap = errors.Const("invalid range: failed to overlap")
 
 // if name is empty, filename is unknown. (used for mime type, before sniffing)
 // if modtime.IsZero(), modtime is unknown.
@@ -619,11 +605,11 @@ func checkIfRange(w ResponseWriter, r *Request, modtime time.Time) condResult {
 	return condFalse
 }
 
-var unixEpochTime = time.Unix(0, 0)
+func _unixEpochTime() time.Time { return time.Unix(0, 0) }
 
 // isZeroTime reports whether t is obviously unspecified (either zero or Unix()=0).
 func isZeroTime(t time.Time) bool {
-	return t.IsZero() || t.Equal(unixEpochTime)
+	return t.IsZero() || t.Equal(_unixEpochTime())
 }
 
 func setLastModified(w ResponseWriter, modtime time.Time) {
@@ -911,8 +897,8 @@ func (f ioFile) Close() error               { return f.file.Close() }
 func (f ioFile) Read(b []byte) (int, error) { return f.file.Read(b) }
 func (f ioFile) Stat() (fs.FileInfo, error) { return f.file.Stat() }
 
-var errMissingSeek = errors.New("io.File missing Seek method")
-var errMissingReadDir = errors.New("io.File directory missing ReadDir method")
+const errMissingSeek = errors.Const("io.File missing Seek method")
+const errMissingReadDir = errors.Const("io.File directory missing ReadDir method")
 
 func (f ioFile) Seek(offset int64, whence int) (int64, error) {
 	s, ok := f.file.(io.Seeker)

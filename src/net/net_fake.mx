@@ -14,16 +14,14 @@ import (
 	"errors"
 	"io"
 	"os"
-	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
 
 var (
-	sockets         sync.Map // fakeSockAddr → *netFD
-	fakePorts       sync.Map // int (port #) → *netFD
-	nextPortCounter atomic.Int32
+	sockets         = map[fakeSockAddr]*netFD{} // fakeSockAddr → *netFD
+	fakePorts       = map[int]*netFD{}          // int (port #) → *netFD
+	nextPortCounter int32
 )
 
 const defaultBuffer = 65535
@@ -211,8 +209,8 @@ type fakeNetFD struct {
 
 	queue         *packetQueue // incoming packets
 	peer          *netFD       // connected peer (for outgoing packets); nil for listeners and PacketConns
-	readDeadline  atomic.Pointer[deadlineTimer]
-	writeDeadline atomic.Pointer[deadlineTimer]
+	readDeadline  *deadlineTimer
+	writeDeadline *deadlineTimer
 
 	fakeAddr fakeSockAddr // cached fakeSockAddr equivalent of fd.laddr
 
@@ -225,13 +223,13 @@ type fakeNetFD struct {
 
 func newFakeNetFD(fd *netFD) *fakeNetFD {
 	ffd := &fakeNetFD{fd: fd}
-	ffd.readDeadline.Store(newDeadlineTimer(noDeadline))
-	ffd.writeDeadline.Store(newDeadlineTimer(noDeadline))
+	ffd.readDeadline = newDeadlineTimer(noDeadline())
+	ffd.writeDeadline = newDeadlineTimer(noDeadline())
 	return ffd
 }
 
 func (ffd *fakeNetFD) Read(p []byte) (n int, err error) {
-	n, _, err = ffd.queue.recvfrom(ffd.readDeadline.Load(), p, false, nil)
+	n, _, err = ffd.queue.recvfrom(ffd.readDeadline, p, false, nil)
 	return n, err
 }
 
@@ -241,11 +239,10 @@ func (ffd *fakeNetFD) Write(p []byte) (nn int, err error) {
 		if ffd.fd.raddr == nil {
 			return 0, os.NewSyscallError("write", syscall.ENOTCONN)
 		}
-		peeri, _ := sockets.Load(fakeAddr(ffd.fd.raddr.(sockaddr)))
-		if peeri == nil {
+		peer = sockets[fakeAddr(ffd.fd.raddr.(sockaddr))]
+		if peer == nil {
 			return 0, os.NewSyscallError("write", syscall.ECONNRESET)
 		}
-		peer = peeri.(*netFD)
 		if peer.queue == nil {
 			return 0, os.NewSyscallError("write", syscall.ECONNRESET)
 		}
@@ -254,12 +251,14 @@ func (ffd *fakeNetFD) Write(p []byte) (nn int, err error) {
 	if peer.fakeNetFD == nil {
 		return 0, os.NewSyscallError("write", syscall.EINVAL)
 	}
-	return peer.queue.write(ffd.writeDeadline.Load(), p, ffd.fd.laddr.(sockaddr))
+	return peer.queue.write(ffd.writeDeadline, p, ffd.fd.laddr.(sockaddr))
 }
 
 func (ffd *fakeNetFD) Close() (err error) {
 	if ffd.fakeAddr != (fakeSockAddr{}) {
-		sockets.CompareAndDelete(ffd.fakeAddr, ffd.fd)
+		if sockets[ffd.fakeAddr] == ffd.fd {
+			delete(sockets, ffd.fakeAddr)
+		}
 	}
 
 	if ffd.queue != nil {
@@ -272,8 +271,8 @@ func (ffd *fakeNetFD) Close() (err error) {
 			err = closeErr
 		}
 	}
-	ffd.readDeadline.Load().Reset(noDeadline)
-	ffd.writeDeadline.Load().Reset(noDeadline)
+	ffd.readDeadline.Reset(noDeadline())
+	ffd.writeDeadline.Reset(noDeadline())
 
 	if ffd.incoming != nil {
 		var (
@@ -298,7 +297,9 @@ func (ffd *fakeNetFD) Close() (err error) {
 	}
 
 	if ffd.assignedPort != 0 {
-		fakePorts.CompareAndDelete(ffd.assignedPort, ffd.fd)
+		if fakePorts[ffd.assignedPort] == ffd.fd {
+			delete(fakePorts, ffd.assignedPort)
+		}
 	}
 
 	return err
@@ -324,25 +325,25 @@ func (ffd *fakeNetFD) accept(laddr Addr) (*netFD, error) {
 		incoming []*netFD
 		ok       bool
 	)
-	expired := ffd.readDeadline.Load().expired
+	expired := ffd.readDeadline.expired
 	select {
 	case <-expired:
-		return nil, os.ErrDeadlineExceeded
+		return nil, os.ErrDeadlineExceeded()
 	case incoming, ok = <-ffd.incoming:
 		if !ok {
-			return nil, ErrClosed
+			return nil, ErrClosed()
 		}
 		select {
 		case <-expired:
 			ffd.incoming <- incoming
-			return nil, os.ErrDeadlineExceeded
+			return nil, os.ErrDeadlineExceeded()
 		default:
 		}
 	case incoming, ok = <-ffd.incomingFull:
 		select {
 		case <-expired:
 			ffd.incomingFull <- incoming
-			return nil, os.ErrDeadlineExceeded
+			return nil, os.ErrDeadlineExceeded()
 		default:
 		}
 	}
@@ -367,17 +368,15 @@ func (ffd *fakeNetFD) SetDeadline(t time.Time) error {
 }
 
 func (ffd *fakeNetFD) SetReadDeadline(t time.Time) error {
-	dt := ffd.readDeadline.Load()
-	if !dt.Reset(t) {
-		ffd.readDeadline.Store(newDeadlineTimer(t))
+	if !ffd.readDeadline.Reset(t) {
+		ffd.readDeadline = newDeadlineTimer(t)
 	}
 	return nil
 }
 
 func (ffd *fakeNetFD) SetWriteDeadline(t time.Time) error {
-	dt := ffd.writeDeadline.Load()
-	if !dt.Reset(t) {
-		ffd.writeDeadline.Store(newDeadlineTimer(t))
+	if !ffd.writeDeadline.Reset(t) {
+		ffd.writeDeadline = newDeadlineTimer(t)
 	}
 	return nil
 }
@@ -398,9 +397,6 @@ func (p *packet) clear() {
 	p.from = nil
 }
 
-var packetPool = sync.Pool{
-	New: func() any { return &packet{} },
-}
 
 type packetQueueState struct {
 	head, tail      *packet // unqueued packets
@@ -476,7 +472,7 @@ func (pq *packetQueue) setLinger(linger bool) error {
 	defer func() { pq.put(q) }()
 
 	if q.writeClosed {
-		return ErrClosed
+		return ErrClosed()
 	}
 	q.noLinger = !linger
 	return nil
@@ -518,7 +514,7 @@ func (pq *packetQueue) send(dt *deadlineTimer, b []byte, from sockaddr, block bo
 
 	select {
 	case <-dt.expired:
-		return 0, os.ErrDeadlineExceeded
+		return 0, os.ErrDeadlineExceeded()
 
 	case q = <-full:
 		pq.put(q)
@@ -533,16 +529,16 @@ func (pq *packetQueue) send(dt *deadlineTimer, b []byte, from sockaddr, block bo
 	// even if the select above chose a different branch.
 	select {
 	case <-dt.expired:
-		return 0, os.ErrDeadlineExceeded
+		return 0, os.ErrDeadlineExceeded()
 	default:
 	}
 	if q.writeClosed {
-		return 0, ErrClosed
+		return 0, ErrClosed()
 	} else if q.readClosed && q.nBytes >= q.readBufferBytes {
 		return 0, os.NewSyscallError("send", syscall.ECONNRESET)
 	}
 
-	p := packetPool.Get().(*packet)
+	p := &packet{}
 	p.buf = append(p.buf[:0], b...)
 	p.from = from
 
@@ -569,7 +565,7 @@ func (pq *packetQueue) recvfrom(dt *deadlineTimer, b []byte, wholePacket bool, c
 
 	select {
 	case <-dt.expired:
-		return 0, nil, os.ErrDeadlineExceeded
+		return 0, nil, os.ErrDeadlineExceeded()
 	case q = <-empty:
 	case q = <-pq.ready:
 	case q = <-pq.full:
@@ -577,7 +573,7 @@ func (pq *packetQueue) recvfrom(dt *deadlineTimer, b []byte, wholePacket bool, c
 	defer func() { pq.put(q) }()
 
 	if q.readClosed {
-		return 0, nil, ErrClosed
+		return 0, nil, ErrClosed()
 	}
 
 	p := q.head
@@ -601,7 +597,7 @@ func (pq *packetQueue) recvfrom(dt *deadlineTimer, b []byte, wholePacket bool, c
 
 	select {
 	case <-dt.expired:
-		return 0, nil, os.ErrDeadlineExceeded
+		return 0, nil, os.ErrDeadlineExceeded()
 	default:
 	}
 
@@ -617,7 +613,6 @@ func (pq *packetQueue) recvfrom(dt *deadlineTimer, b []byte, wholePacket bool, c
 		q.head = p.next
 		q.nBytes -= len(p.buf)
 		p.clear()
-		packetPool.Put(p)
 	} else {
 		p.bufOffset += n
 	}
@@ -658,7 +653,7 @@ func (dt *deadlineTimer) Reset(deadline time.Time) bool {
 	timer := <-dt.timer
 	defer func() { dt.timer <- timer }()
 
-	if deadline.Equal(noDeadline) {
+	if deadline.Equal(noDeadline()) {
 		if timer != nil && timer.Stop() {
 			timer = nil
 		}
@@ -731,10 +726,11 @@ func fakeListen(fd *netFD, laddr sockaddr) (err error) {
 	}
 
 	fd.fakeNetFD = ffd
-	if _, dup := sockets.LoadOrStore(ffd.fakeAddr, fd); dup {
+	if _, dup := sockets[ffd.fakeAddr]; dup {
 		fd.fakeNetFD = nil
 		return wrapErr(syscall.EADDRINUSE)
 	}
+	sockets[ffd.fakeAddr] = fd
 
 	return nil
 }
@@ -784,9 +780,10 @@ func fakeConnect(ctx context.Context, fd *netFD, laddr, raddr sockaddr) error {
 	case syscall.SOCK_DGRAM:
 		if ua, ok := fd.laddr.(*UnixAddr); !ok || ua.Name != "" {
 			fd.fakeNetFD.fakeAddr = fakeAddr(fd.laddr.(sockaddr))
-			if _, dup := sockets.LoadOrStore(fd.fakeNetFD.fakeAddr, fd); dup {
+			if _, dup := sockets[fd.fakeNetFD.fakeAddr]; dup {
 				return wrapErr(syscall.EADDRINUSE)
 			}
+			sockets[fd.fakeNetFD.fakeAddr] = fd
 		}
 		fd.isConnected = true
 		return nil
@@ -797,11 +794,10 @@ func fakeConnect(ctx context.Context, fd *netFD, laddr, raddr sockaddr) error {
 	}
 
 	fa := fakeAddr(raddr)
-	lni, ok := sockets.Load(fa)
+	ln, ok := sockets[fa]
 	if !ok {
 		return wrapErr(syscall.ECONNREFUSED)
 	}
-	ln := lni.(*netFD)
 	if ln.sotype != fd.sotype {
 		return wrapErr(syscall.EPROTOTYPE)
 	}
@@ -904,18 +900,12 @@ func (ffd *fakeNetFD) assignFakeAddr(addr sockaddr) error {
 			portWrapped := false
 			nextPort := func() (int, bool) {
 				for {
-					port := nextPortCounter.Add(1)
+					nextPortCounter++
+					port := nextPortCounter
 					if port <= 0 || port >= 1<<16 {
 						// nextPortCounter ran off the end of the port space.
 						// Bump it back into range.
-						for {
-							if nextPortCounter.CompareAndSwap(port, 0) {
-								break
-							}
-							if port = nextPortCounter.Load(); port >= 0 && port < 1<<16 {
-								break
-							}
-						}
+						nextPortCounter = 0
 						if portWrapped {
 							// This is the second wraparound, so we've scanned the whole port space
 							// at least once already and it's time to give up.
@@ -951,7 +941,8 @@ func (ffd *fakeNetFD) assignFakeAddr(addr sockaddr) error {
 				}
 
 				ffd.assignedPort = int(port)
-				if _, dup := fakePorts.LoadOrStore(ffd.assignedPort, ffd.fd); !dup {
+				if _, dup := fakePorts[ffd.assignedPort]; !dup {
+					fakePorts[ffd.assignedPort] = ffd.fd
 					break
 				}
 			}
@@ -1006,7 +997,7 @@ func (ffd *fakeNetFD) readFrom(p []byte) (n int, sa syscall.Sockaddr, err error)
 		return 0, nil, os.NewSyscallError("readFrom", syscall.EINVAL)
 	}
 
-	n, from, err := ffd.queue.recvfrom(ffd.readDeadline.Load(), p, true, nil)
+	n, from, err := ffd.queue.recvfrom(ffd.readDeadline, p, true, nil)
 
 	if from != nil {
 		// Convert the net.sockaddr to a syscall.Sockaddr type.
@@ -1021,7 +1012,7 @@ func (ffd *fakeNetFD) readFrom(p []byte) (n int, sa syscall.Sockaddr, err error)
 }
 
 func (ffd *fakeNetFD) readFromInet4(p []byte, sa *syscall.SockaddrInet4) (n int, err error) {
-	n, _, err = ffd.queue.recvfrom(ffd.readDeadline.Load(), p, true, func(from sockaddr) error {
+	n, _, err = ffd.queue.recvfrom(ffd.readDeadline, p, true, func(from sockaddr) error {
 		fromSA, err := from.sockaddr(syscall.AF_INET)
 		if err != nil {
 			return err
@@ -1036,7 +1027,7 @@ func (ffd *fakeNetFD) readFromInet4(p []byte, sa *syscall.SockaddrInet4) (n int,
 }
 
 func (ffd *fakeNetFD) readFromInet6(p []byte, sa *syscall.SockaddrInet6) (n int, err error) {
-	n, _, err = ffd.queue.recvfrom(ffd.readDeadline.Load(), p, true, func(from sockaddr) error {
+	n, _, err = ffd.queue.recvfrom(ffd.readDeadline, p, true, func(from sockaddr) error {
 		fromSA, err := from.sockaddr(syscall.AF_INET6)
 		if err != nil {
 			return err
@@ -1102,14 +1093,13 @@ func (ffd *fakeNetFD) writeTo(p []byte, sa syscall.Sockaddr) (n int, err error) 
 		return 0, os.NewSyscallError("writeTo", syscall.EINVAL)
 	}
 
-	peeri, _ := sockets.Load(fakeAddr(raddr.(sockaddr)))
-	if peeri == nil {
+	peer := sockets[fakeAddr(raddr.(sockaddr))]
+	if peer == nil {
 		if len(ffd.fd.net) >= 3 && ffd.fd.net[:3] == "udp" {
 			return len(p), nil
 		}
 		return 0, os.NewSyscallError("writeTo", syscall.ECONNRESET)
 	}
-	peer := peeri.(*netFD)
 	if peer.queue == nil {
 		if len(ffd.fd.net) >= 3 && ffd.fd.net[:3] == "udp" {
 			return len(p), nil
@@ -1121,7 +1111,7 @@ func (ffd *fakeNetFD) writeTo(p []byte, sa syscall.Sockaddr) (n int, err error) 
 	if len(ffd.fd.net) >= 3 && ffd.fd.net[:3] == "udp" {
 		block = false
 	}
-	return peer.queue.send(ffd.writeDeadline.Load(), p, ffd.fd.laddr.(sockaddr), block)
+	return peer.queue.send(ffd.writeDeadline, p, ffd.fd.laddr.(sockaddr), block)
 }
 
 func (ffd *fakeNetFD) writeToInet4(p []byte, sa *syscall.SockaddrInet4) (n int, err error) {

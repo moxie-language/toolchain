@@ -5,8 +5,6 @@
 package x509
 
 import (
-	"internal/godebug"
-	"sync"
 	_ "unsafe" // for linkname
 )
 
@@ -20,30 +18,23 @@ import (
 //
 //go:linkname systemRoots
 var (
-	once           sync.Once
-	systemRootsMu  sync.RWMutex
+	rootsDone      bool
 	systemRoots    *CertPool
 	systemRootsErr error
 	fallbacksSet   bool
 )
 
 func systemRootsPool() *CertPool {
-	once.Do(initSystemRoots)
-	systemRootsMu.RLock()
-	defer systemRootsMu.RUnlock()
+	if !rootsDone { rootsDone = true; initSystemRoots() }
 	return systemRoots
 }
 
 func initSystemRoots() {
-	systemRootsMu.Lock()
-	defer systemRootsMu.Unlock()
 	systemRoots, systemRootsErr = loadSystemRoots()
 	if systemRootsErr != nil {
 		systemRoots = nil
 	}
 }
-
-var x509usefallbackroots = godebug.New("x509usefallbackroots")
 
 // SetFallbackRoots sets the roots to use during certificate verification, if no
 // custom roots are specified and a platform verifier or a system certificate
@@ -52,12 +43,6 @@ var x509usefallbackroots = godebug.New("x509usefallbackroots")
 //
 // SetFallbackRoots may only be called once, if called multiple times it will
 // panic.
-//
-// The fallback behavior can be forced on all platforms, even when there is a
-// system certificate pool, by setting GODEBUG=x509usefallbackroots=1 (note that
-// on Windows and macOS this will disable usage of the platform verification
-// APIs and cause the pure Go verifier to be used). Setting
-// x509usefallbackroots=1 without calling SetFallbackRoots has no effect.
 func SetFallbackRoots(roots *CertPool) {
 	if roots == nil {
 		panic("roots must be non-nil")
@@ -67,19 +52,13 @@ func SetFallbackRoots(roots *CertPool) {
 	// take the lock
 	_ = systemRootsPool()
 
-	systemRootsMu.Lock()
-	defer systemRootsMu.Unlock()
-
 	if fallbacksSet {
 		panic("SetFallbackRoots has already been called")
 	}
 	fallbacksSet = true
 
 	if systemRoots != nil && (systemRoots.len() > 0 || systemRoots.systemPool) {
-		if x509usefallbackroots.Value() != "1" {
-			return
-		}
-		x509usefallbackroots.IncNonDefault()
+		return
 	}
 	systemRoots, systemRootsErr = roots, nil
 }

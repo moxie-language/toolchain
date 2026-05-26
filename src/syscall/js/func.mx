@@ -8,11 +8,9 @@ package js
 
 import (
 	"internal/synctest"
-	"sync"
 )
 
 var (
-	funcsMu    sync.Mutex
 	funcs             = make(map[uint32]func(Value, []Value) any)
 	nextFuncID uint32 = 1
 )
@@ -43,7 +41,7 @@ type Func struct {
 //
 // Func.Release must be called to free up resources when the function will not be invoked any more.
 func FuncOf(fn func(this Value, args []Value) any) Func {
-	funcsMu.Lock()
+	ensureEventHandler()
 	id := nextFuncID
 	nextFuncID++
 	bubble := synctest.Acquire()
@@ -58,7 +56,6 @@ func FuncOf(fn func(this Value, args []Value) any) Func {
 		}
 	}
 	funcs[id] = fn
-	funcsMu.Unlock()
 	return Func{
 		id:     id,
 		bubble: bubble,
@@ -71,15 +68,19 @@ func FuncOf(fn func(this Value, args []Value) any) Func {
 // It is allowed to call Release while the function is still running.
 func (c Func) Release() {
 	c.bubble.Release()
-	funcsMu.Lock()
 	delete(funcs, c.id)
-	funcsMu.Unlock()
 }
 
 // setEventHandler is defined in the runtime package.
 func setEventHandler(fn func() bool)
 
-func init() {
+var eventHandlerSet bool
+
+func ensureEventHandler() {
+	if eventHandlerSet {
+		return
+	}
+	eventHandlerSet = true
 	setEventHandler(handleEvent)
 }
 
@@ -99,9 +100,7 @@ func handleEvent() bool {
 	}
 
 	// Retrieve the associated js.Func
-	funcsMu.Lock()
 	f, ok := funcs[id]
-	funcsMu.Unlock()
 	if !ok {
 		Global().Get("console").Call("error", "call to released function")
 		return true

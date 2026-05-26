@@ -18,7 +18,6 @@ import (
 	"math/bits"
 	"math/rand"
 	"slices"
-	"sync"
 )
 
 // An unsigned integer x of the form
@@ -34,12 +33,10 @@ import (
 // representation of 0 is the empty or nil slice (length = 0).
 type nat []Word
 
-var (
-	natOne  = nat{1}
-	natTwo  = nat{2}
-	natFive = nat{5}
-	natTen  = nat{10}
-)
+func _natOne() nat  { return nat{1} }
+func _natTwo() nat  { return nat{2} }
+func _natFive() nat { return nat{5} }
+func _natTen() nat  { return nat{10} }
 
 func (z nat) String() string {
 	return "0x" | string(z.itoa(false, 16))
@@ -278,22 +275,11 @@ type stack struct {
 	w []Word
 }
 
-var stackPool sync.Pool
-
-// getStack returns a temporary stack.
-// The caller must call [stack.free] to give up use of the stack when finished.
 func getStack() *stack {
-	s, _ := stackPool.Get().(*stack)
-	if s == nil {
-		s = &stack{}
-	}
-	return s
+	return &stack{}
 }
 
-// free returns the stack for use by another calculation.
 func (s *stack) free() {
-	s.w = s.w[:0]
-	stackPool.Put(s)
 }
 
 // save returns the current stack pointer.
@@ -754,7 +740,7 @@ func (z nat) expNN(stk *stack, x, y, m nat, slow bool) nat {
 func (z nat) expNNMontgomeryEven(stk *stack, x, y, m nat) nat {
 	// Split m = m₁ × m₂ where m₁ = 2ⁿ
 	n := m.trailingZeroBits()
-	m1 := nat(nil).lsh(natOne, n)
+	m1 := nat(nil).lsh(_natOne(), n)
 	m2 := nat(nil).rsh(m, n)
 
 	// We want z = x**y mod m.
@@ -819,7 +805,7 @@ func (z nat) expNNWindowed(stk *stack, x, y nat, logM uint) nat {
 	for i := range powers {
 		powers[i] = stk.nat(w)
 	}
-	powers[0] = powers[0].set(natOne)
+	powers[0] = powers[0].set(_natOne())
 	powers[1] = powers[1].trunc(x, logM)
 	for i := 2; i < 1<<n; i += 2 {
 		p2, p, p1 := &powers[i/2], &powers[i], &powers[i+1]
@@ -1042,7 +1028,7 @@ func (z nat) setBytes(buf []byte) nat {
 // sqrt sets z = ⌊√x⌋
 // The caller may pass stk == nil to request that sqrt obtain and release one itself.
 func (z nat) sqrt(stk *stack, x nat) nat {
-	if x.cmp(natOne) <= 0 {
+	if x.cmp(_natOne()) <= 0 {
 		return z.set(x)
 	}
 	if alias(z, x) {
@@ -1109,5 +1095,5 @@ func (z nat) subMod2N(x, y nat, n uint) nat {
 		z[i] = ^z[i]
 	}
 	z = z.trunc(z, n)
-	return z.add(z, natOne)
+	return z.add(z, _natOne())
 }

@@ -102,7 +102,6 @@ import (
 	"internal/poll"
 	"io"
 	"os"
-	"sync"
 	"syscall"
 	"time"
 	_ "unsafe" // for linkname
@@ -384,8 +383,8 @@ type PacketConn interface {
 }
 
 var listenerBacklogCache struct {
-	sync.Once
-	val int
+	done bool
+	val  int
 }
 
 // listenerBacklog is a caching wrapper around maxListenerBacklog.
@@ -402,7 +401,10 @@ var listenerBacklogCache struct {
 //
 //go:linkname listenerBacklog
 func listenerBacklog() int {
-	listenerBacklogCache.Do(func() { listenerBacklogCache.val = maxListenerBacklog() })
+	if !listenerBacklogCache.done {
+		listenerBacklogCache.done = true
+		listenerBacklogCache.val = maxListenerBacklog()
+	}
 	return listenerBacklogCache.val
 }
 
@@ -433,20 +435,14 @@ type Error interface {
 }
 
 // Various errors contained in OpError.
-var (
-	// For connection setup operations.
-	errNoSuitableAddress = errors.New("no suitable address found")
-
-	// For connection setup and write operations.
-	errMissingAddress = errors.New("missing address")
-
-	// For both read and write operations.
-	errCanceled         = canceledError{}
-	ErrWriteToConnected = errors.New("use of WriteTo with pre-connected connection")
+const (
+	errNoSuitableAddress = errors.Const("no suitable address found")
+	errMissingAddress    = errors.Const("missing address")
+	ErrWriteToConnected  = errors.Const("use of WriteTo with pre-connected connection")
 )
 
-// canceledError lets us return the same error string we have always
-// returned, while still being Is context.Canceled.
+func errCanceled() error { return canceledError{} }
+
 type canceledError struct{}
 
 func (canceledError) Error() string { return "operation was canceled" }
@@ -458,9 +454,9 @@ func (canceledError) Is(err error) bool { return err == context.Canceled }
 func mapErr(err error) error {
 	switch err {
 	case context.Canceled:
-		return errCanceled
-	case context.DeadlineExceeded:
-		return errTimeout
+		return errCanceled()
+	case context.DeadlineExceeded():
+		return errTimeout()
 	default:
 		return err
 	}
@@ -521,16 +517,13 @@ func (e *OpError) Error() string {
 	return s
 }
 
-var (
-	// aLongTimeAgo is a non-zero time, far in the past, used for
-	// immediate cancellation of dials.
-	aLongTimeAgo = time.Unix(1, 0)
+// aLongTimeAgo is a non-zero time, far in the past, used for
+// immediate cancellation of dials.
+func aLongTimeAgo() time.Time { return time.Unix(1, 0) }
 
-	// noDeadline and noCancel are just zero values for
-	// readability with functions taking too many parameters.
-	noDeadline = time.Time{}
-	noCancel   = (chan struct{})(nil)
-)
+// noDeadline is a zero time.Time for readability with functions
+// taking too many parameters.
+func noDeadline() time.Time { return time.Time{} }
 
 type timeout interface {
 	Timeout() bool
@@ -611,17 +604,17 @@ func (e InvalidAddrError) Timeout() bool   { return false }
 func (e InvalidAddrError) Temporary() bool { return false }
 
 // errTimeout exists to return the historical "i/o timeout" string
-// for context.DeadlineExceeded. See mapErr.
+// for context.DeadlineExceeded(). See mapErr.
 // It is also used when Dialer.Deadline is exceeded.
-// error.Is(errTimeout, context.DeadlineExceeded) returns true.
+// error.Is(errTimeout, context.DeadlineExceeded()) returns true.
 //
 // TODO(iant): We could consider changing this to os.ErrDeadlineExceeded
 // in the future, if we make
 //
-//	errors.Is(os.ErrDeadlineExceeded, context.DeadlineExceeded)
+//	errors.Is(os.ErrDeadlineExceeded, context.DeadlineExceeded())
 //
 // return true.
-var errTimeout error = &timeoutError{}
+func errTimeout() error { return &timeoutError{} }
 
 type timeoutError struct{}
 
@@ -630,7 +623,7 @@ func (e *timeoutError) Timeout() bool   { return true }
 func (e *timeoutError) Temporary() bool { return true }
 
 func (e *timeoutError) Is(err error) bool {
-	return err == context.DeadlineExceeded
+	return err == context.DeadlineExceeded()
 }
 
 // DNSConfigError represents an error reading the machine's DNS configuration.
@@ -645,10 +638,8 @@ func (e *DNSConfigError) Timeout() bool   { return false }
 func (e *DNSConfigError) Temporary() bool { return false }
 
 // Various errors contained in DNSError.
-var (
-	errNoSuchHost  = &notFoundError{"no such host"}
-	errUnknownPort = &notFoundError{"unknown port"}
-)
+func errNoSuchHost() error  { return &notFoundError{"no such host"} }
+func errUnknownPort() error { return &notFoundError{"unknown port"} }
 
 // notFoundError is a special error understood by the newDNSError function,
 // which causes a creation of a DNSError with IsNotFound field set to true.
@@ -695,7 +686,7 @@ func newDNSError(err error, name, server string) *DNSError {
 
 	// At this time, the only errors we wrap are context errors, to allow
 	// users to check for canceled/timed out requests.
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.DeadlineExceeded()) || errors.Is(err, context.Canceled) {
 		unwrapErr = err
 	}
 
@@ -736,16 +727,7 @@ func (e *DNSError) Timeout() bool { return e.IsTimeout }
 // error and return a [DNSError] for which Temporary returns false.
 func (e *DNSError) Temporary() bool { return e.IsTimeout || e.IsTemporary }
 
-// errClosed exists just so that the docs for ErrClosed don't mention
-// the internal package poll.
-var errClosed = poll.ErrNetClosing
-
-// ErrClosed is the error returned by an I/O call on a network
-// connection that has already been closed, or that is closed by
-// another goroutine before the I/O is completed. This may be wrapped
-// in another error, and should normally be tested using
-// errors.Is(err, net.ErrClosed).
-var ErrClosed error = errClosed
+func ErrClosed() error { return poll.ErrNetClosing() }
 
 // noReadFrom can be embedded alongside another type to
 // hide the ReadFrom method of that other type.
@@ -804,12 +786,13 @@ func genericWriteTo(c *TCPConn, w io.Writer) (n int64, err error) {
 
 var threadLimit chan struct{}
 
-var threadOnce sync.Once
+var threadOnceDone bool
 
 func acquireThread(ctx context.Context) error {
-	threadOnce.Do(func() {
+	if !threadOnceDone {
+		threadOnceDone = true
 		threadLimit = chan struct{}{concurrentThreadsLimit()}
-	})
+	}
 	select {
 	case threadLimit <- struct{}{}:
 		return nil

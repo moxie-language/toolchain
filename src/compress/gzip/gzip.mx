@@ -36,6 +36,7 @@ type Writer struct {
 	digest      uint32 // CRC-32, IEEE polynomial (section 8)
 	size        uint32 // Uncompressed size (section 2.3.1)
 	err         error
+	cc          *crc32.CRC32
 }
 
 // NewWriter returns a new [Writer].
@@ -71,6 +72,10 @@ func (z *Writer) init(w io.Writer, level int) {
 	if compressor != nil {
 		compressor.Reset(w)
 	}
+	cc := z.cc
+	if cc == nil {
+		cc = crc32.NewCRC32()
+	}
 	*z = Writer{
 		Header: Header{
 			OS: 255, // unknown
@@ -78,6 +83,7 @@ func (z *Writer) init(w io.Writer, level int) {
 		w:          w,
 		level:      level,
 		compressor: compressor,
+		cc:         cc,
 	}
 }
 
@@ -192,7 +198,7 @@ func (z *Writer) Write(p []byte) (int, error) {
 		}
 	}
 	z.size += uint32(len(p))
-	z.digest = crc32.Update(z.digest, crc32.IEEETable, p)
+	z.digest = z.cc.Update(z.digest, z.cc.IEEETable(), p)
 	n, z.err = z.compressor.Write(p)
 	return n, z.err
 }

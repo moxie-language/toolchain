@@ -49,6 +49,7 @@ type encoder struct {
 	zw      *zlib.Writer
 	zwLevel int
 	bw      *bufio.Writer
+	cc      *crc32.CRC32
 }
 
 // CompressionLevel indicates the compression level.
@@ -102,15 +103,15 @@ func (e *encoder) writeChunk(b []byte, name []byte) {
 		e.err = UnsupportedError(string(append(append(append([]byte(nil), name...), " chunk is too large: "...), strconv.Itoa(len(b))...)))
 		return
 	}
-	binary.BigEndian.PutUint32(e.header[:4], n)
+	binary.BigEndian().PutUint32(e.header[:4], n)
 	e.header[4] = name[0]
 	e.header[5] = name[1]
 	e.header[6] = name[2]
 	e.header[7] = name[3]
-	crc := crc32.NewIEEE()
+	crc := e.cc.NewIEEE()
 	crc.Write(e.header[4:8])
 	crc.Write(b)
-	binary.BigEndian.PutUint32(e.footer[:4], crc.Sum32())
+	binary.BigEndian().PutUint32(e.footer[:4], crc.Sum32())
 
 	_, e.err = e.w.Write(e.header[:8])
 	if e.err != nil {
@@ -125,8 +126,8 @@ func (e *encoder) writeChunk(b []byte, name []byte) {
 
 func (e *encoder) writeIHDR() {
 	b := e.m.Bounds()
-	binary.BigEndian.PutUint32(e.tmp[0:4], uint32(b.Dx()))
-	binary.BigEndian.PutUint32(e.tmp[4:8], uint32(b.Dy()))
+	binary.BigEndian().PutUint32(e.tmp[0:4], uint32(b.Dx()))
+	binary.BigEndian().PutUint32(e.tmp[4:8], uint32(b.Dy()))
 	// Set bit depth and color type.
 	switch e.cb {
 	case cbG8:
@@ -173,7 +174,7 @@ func (e *encoder) writePLTEAndTRNS(p color.Palette) {
 	}
 	last := -1
 	for i, c := range p {
-		c1 := color.NRGBAModel.Convert(c).(color.NRGBA)
+		c1 := color.NRGBAModel().Convert(c).(color.NRGBA)
 		e.tmp[3*i+0] = c1.R
 		e.tmp[3*i+1] = c1.G
 		e.tmp[3*i+2] = c1.B
@@ -372,7 +373,7 @@ func (e *encoder) writeImage(w io.Writer, m image.Image, cb int, level int) erro
 				copy(cr[0][1:], gray.Pix[offset:offset+b.Dx()])
 			} else {
 				for x := b.Min.X; x < b.Max.X; x++ {
-					c := color.GrayModel.Convert(m.At(x, y)).(color.Gray)
+					c := color.GrayModel().Convert(m.At(x, y)).(color.Gray)
 					cr[0][i] = c.Y
 					i++
 				}
@@ -458,7 +459,7 @@ func (e *encoder) writeImage(w io.Writer, m image.Image, cb int, level int) erro
 					} else if s[3] == 0xff {
 						copy(d[:], s[:])
 					} else {
-						// This code does the same as color.NRGBAModel.Convert(
+						// This code does the same as color.NRGBAModel().Convert(
 						// rgba.At(x, y)).(color.NRGBA) but with no extra memory
 						// allocations or interface/function call overhead.
 						//
@@ -477,7 +478,7 @@ func (e *encoder) writeImage(w io.Writer, m image.Image, cb int, level int) erro
 			} else {
 				// Convert from image.Image (which is alpha-premultiplied) to PNG's non-alpha-premultiplied.
 				for x := b.Min.X; x < b.Max.X; x++ {
-					c := color.NRGBAModel.Convert(m.At(x, y)).(color.NRGBA)
+					c := color.NRGBAModel().Convert(m.At(x, y)).(color.NRGBA)
 					cr[0][i+0] = c.R
 					cr[0][i+1] = c.G
 					cr[0][i+2] = c.B
@@ -487,7 +488,7 @@ func (e *encoder) writeImage(w io.Writer, m image.Image, cb int, level int) erro
 			}
 		case cbG16:
 			for x := b.Min.X; x < b.Max.X; x++ {
-				c := color.Gray16Model.Convert(m.At(x, y)).(color.Gray16)
+				c := color.Gray16Model().Convert(m.At(x, y)).(color.Gray16)
 				cr[0][i+0] = uint8(c.Y >> 8)
 				cr[0][i+1] = uint8(c.Y)
 				i += 2
@@ -507,7 +508,7 @@ func (e *encoder) writeImage(w io.Writer, m image.Image, cb int, level int) erro
 		case cbTCA16:
 			// Convert from image.Image (which is alpha-premultiplied) to PNG's non-alpha-premultiplied.
 			for x := b.Min.X; x < b.Max.X; x++ {
-				c := color.NRGBA64Model.Convert(m.At(x, y)).(color.NRGBA64)
+				c := color.NRGBA64Model().Convert(m.At(x, y)).(color.NRGBA64)
 				cr[0][i+0] = uint8(c.R >> 8)
 				cr[0][i+1] = uint8(c.R)
 				cr[0][i+2] = uint8(c.G >> 8)
@@ -612,6 +613,9 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error {
 	e.enc = enc
 	e.w = w
 	e.m = m
+	if e.cc == nil {
+		e.cc = crc32.NewCRC32()
+	}
 
 	var pal color.Palette
 	// cbP8 encoding needs PalettedImage's ColorIndexAt method.
@@ -630,11 +634,11 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error {
 		}
 	} else {
 		switch m.ColorModel() {
-		case color.GrayModel:
+		case color.GrayModel():
 			e.cb = cbG8
-		case color.Gray16Model:
+		case color.Gray16Model():
 			e.cb = cbG16
-		case color.RGBAModel, color.NRGBAModel, color.AlphaModel:
+		case color.RGBAModel(), color.NRGBAModel(), color.AlphaModel():
 			if opaque(m) {
 				e.cb = cbTC8
 			} else {
@@ -649,7 +653,7 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error {
 		}
 	}
 
-	_, e.err = w.Write([]byte(pngHeader))
+	_, e.err = w.Write([]byte(Magic))
 	e.writeIHDR()
 	if pal != nil {
 		e.writePLTEAndTRNS(pal)

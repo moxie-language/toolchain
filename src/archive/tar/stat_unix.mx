@@ -11,19 +11,32 @@ import (
 	"os/user"
 	"runtime"
 	"strconv"
-	"sync"
 	"syscall"
 )
 
-func init() {
-	sysStat = statUnix
+var _userMapDone bool
+var _userMap map[int][]byte
+
+func getUserMap() map[int][]byte {
+	if !_userMapDone {
+		_userMapDone = true
+		_userMap = map[int][]byte{}
+	}
+	return _userMap
 }
 
-// userMap and groupMap caches UID and GID lookups for performance reasons.
-// The downside is that renaming uname or gname by the OS never takes effect.
-var userMap, groupMap sync.Map // map[int]string
+var _groupMapDone bool
+var _groupMap map[int][]byte
 
-func statUnix(fi fs.FileInfo, h *Header, doNameLookups bool) error {
+func getGroupMap() map[int][]byte {
+	if !_groupMapDone {
+		_groupMapDone = true
+		_groupMap = map[int][]byte{}
+	}
+	return _groupMap
+}
+
+func sysStat(fi fs.FileInfo, h *Header, doNameLookups bool) error {
 	sys, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
 		return nil
@@ -34,17 +47,19 @@ func statUnix(fi fs.FileInfo, h *Header, doNameLookups bool) error {
 		// Best effort at populating Uname and Gname.
 		// The os/user functions may fail for any number of reasons
 		// (not implemented on that platform, cgo not enabled, etc).
-		if u, ok := userMap.Load(h.Uid); ok {
-			h.Uname = u.([]byte)
+		um := getUserMap()
+		if u, ok := um[h.Uid]; ok {
+			h.Uname = u
 		} else if u, err := user.LookupId(strconv.Itoa(h.Uid)); err == nil {
 			h.Uname = u.Username
-			userMap.Store(h.Uid, h.Uname)
+			um[h.Uid] = h.Uname
 		}
-		if g, ok := groupMap.Load(h.Gid); ok {
-			h.Gname = g.([]byte)
+		gm := getGroupMap()
+		if g, ok := gm[h.Gid]; ok {
+			h.Gname = g
 		} else if g, err := user.LookupGroupId(strconv.Itoa(h.Gid)); err == nil {
 			h.Gname = g.Name
-			groupMap.Store(h.Gid, h.Gname)
+			gm[h.Gid] = h.Gname
 		}
 	}
 	h.AccessTime = statAtime(sys)

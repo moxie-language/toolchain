@@ -12,7 +12,6 @@ import (
 	errorspkg "errors"
 	"internal/bytealg"
 	"runtime"
-	"sync"
 	"unsafe"
 )
 
@@ -62,7 +61,7 @@ import (
 //     so live with the race.
 //   - [Dup]. Use [F_DUPFD_CLOEXEC] or dup3 if available. Otherwise,
 //     does not block, so use ForkLock.
-var ForkLock sync.RWMutex
+var ForkLock struct{}
 
 // StringSlicePtr converts a slice of strings to a slice of pointers
 // to NUL-terminated byte arrays. If any string contains a NUL byte
@@ -137,9 +136,6 @@ type ProcAttr struct {
 	Sys   *SysProcAttr
 }
 
-var zeroProcAttr ProcAttr
-var zeroSysProcAttr SysProcAttr
-
 func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int, err error) {
 	var p [2]int
 	var n int
@@ -147,11 +143,11 @@ func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int, err error) 
 	var wstatus WaitStatus
 
 	if attr == nil {
-		attr = &zeroProcAttr
+		attr = &ProcAttr{}
 	}
 	sys := attr.Sys
 	if sys == nil {
-		sys = &zeroSysProcAttr
+		sys = &SysProcAttr{}
 	}
 
 	// Convert args to C form.
@@ -263,12 +259,6 @@ func StartProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle 
 func runtime_BeforeExec()
 func runtime_AfterExec()
 
-// execveLibc is non-nil on OS using libc syscall, set to execve in exec_libc.go; this
-// avoids a build dependency for other platforms.
-var execveLibc func(path uintptr, argv uintptr, envp uintptr) Errno
-var execveDarwin func(path *byte, argv **byte, envp **byte) error
-var execveOpenBSD func(path *byte, argv **byte, envp **byte) error
-
 // Exec invokes the execve(2) system call.
 func Exec(argv0 string, argv []string, envv []string) (err error) {
 	argv0p, err := BytePtrFromString(argv0)
@@ -285,30 +275,13 @@ func Exec(argv0 string, argv []string, envv []string) (err error) {
 	}
 	runtime_BeforeExec()
 
-	rlim := origRlimitNofile.Load()
+	ensureRlimit()
+	rlim := origRlimitNofile
 	if rlim != nil {
 		Setrlimit(RLIMIT_NOFILE, rlim)
 	}
 
-	var err1 error
-	if runtime.GOOS == "solaris" || runtime.GOOS == "illumos" || runtime.GOOS == "aix" {
-		// RawSyscall should never be used on Solaris, illumos, or AIX.
-		err1 = execveLibc(
-			uintptr(unsafe.Pointer(argv0p)),
-			uintptr(unsafe.Pointer(&argvp[0])),
-			uintptr(unsafe.Pointer(&envvp[0])))
-	} else if runtime.GOOS == "darwin" || runtime.GOOS == "ios" {
-		// Similarly on Darwin.
-		err1 = execveDarwin(argv0p, &argvp[0], &envvp[0])
-	} else if runtime.GOOS == "openbsd" && runtime.GOARCH != "mips64" {
-		// Similarly on OpenBSD.
-		err1 = execveOpenBSD(argv0p, &argvp[0], &envvp[0])
-	} else {
-		_, _, err1 = RawSyscall(SYS_EXECVE,
-			uintptr(unsafe.Pointer(argv0p)),
-			uintptr(unsafe.Pointer(&argvp[0])),
-			uintptr(unsafe.Pointer(&envvp[0])))
-	}
+	err1 := _execve(argv0p, argvp, envvp)
 	runtime_AfterExec()
 	return err1
 }

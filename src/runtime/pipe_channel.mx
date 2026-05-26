@@ -223,7 +223,16 @@ func PipeSend(fd int32, chanID uint16, data []byte) bool {
 // multiplexer in PipeChanRecv can dispatch incoming messages to the
 // right channel's pending-receive slot. Key: uint64(fd)<<16 | chanID.
 // Single-threaded scheduler so no lock needed.
-var pipeBoundChannels = map[uint64]*channel{}
+var pipeBoundChannels map[uint64]*channel
+var _pipeBoundChannelsDone bool
+
+func _pipeBoundChannels() map[uint64]*channel {
+	if !_pipeBoundChannelsDone {
+		_pipeBoundChannelsDone = true
+		pipeBoundChannels = map[uint64]*channel{}
+	}
+	return pipeBoundChannels
+}
 
 func pipeBoundKey(fd int32, chanID uint16) uint64 {
 	return uint64(uint32(fd))<<16 | uint64(chanID)
@@ -240,7 +249,7 @@ func MarkChannelPipeBound(ch *channel, fd int32, chanID uint16) {
 	}
 	ch.pipeBoundFd = fd
 	ch.pipeChanID = chanID
-	pipeBoundChannels[pipeBoundKey(fd, chanID)] = ch
+	_pipeBoundChannels()[pipeBoundKey(fd, chanID)] = ch
 }
 
 // MarkChildPipeChannel is the child-side variant emitted by
@@ -282,23 +291,34 @@ type pipeIncomingBuf struct {
 	next *pipeIncomingBuf
 }
 
-var pipeIncomingByChan = map[uint64]*pipeIncomingBuf{}
+var pipeIncomingByChan map[uint64]*pipeIncomingBuf
+var _pipeIncomingByChanDone bool
+
+func _pipeIncomingByChan() map[uint64]*pipeIncomingBuf {
+	if !_pipeIncomingByChanDone {
+		_pipeIncomingByChanDone = true
+		pipeIncomingByChan = map[uint64]*pipeIncomingBuf{}
+	}
+	return pipeIncomingByChan
+}
 
 func pipeIncomingPush(fd int32, chanID uint16, data []byte) {
 	key := pipeBoundKey(fd, chanID)
-	pipeIncomingByChan[key] = &pipeIncomingBuf{
+	m := _pipeIncomingByChan()
+	m[key] = &pipeIncomingBuf{
 		data: data,
-		next: pipeIncomingByChan[key],
+		next: m[key],
 	}
 }
 
 func pipeIncomingPop(fd int32, chanID uint16) ([]byte, bool) {
 	key := pipeBoundKey(fd, chanID)
-	head := pipeIncomingByChan[key]
+	m := _pipeIncomingByChan()
+	head := m[key]
 	if head == nil {
 		return nil, false
 	}
-	pipeIncomingByChan[key] = head.next
+	m[key] = head.next
 	return head.data, true
 }
 
@@ -339,7 +359,7 @@ func PipeChanRecv(ch *channel) ([]byte, bool) {
 	if data, ok := pipeIncomingPop(ch.pipeBoundFd, ch.pipeChanID); ok {
 		return data, true
 	}
-	if pipeChanClosed[pipeBoundKey(ch.pipeBoundFd, ch.pipeChanID)] {
+	if _pipeChanClosed()[pipeBoundKey(ch.pipeBoundFd, ch.pipeChanID)] {
 		return nil, false
 	}
 	ticks := int32(0)
@@ -375,7 +395,7 @@ func PipeChanRecv(ch *channel) ([]byte, bool) {
 				if closedID == ch.pipeChanID {
 					return nil, false
 				}
-				pipeChanClosed[pipeBoundKey(ch.pipeBoundFd, closedID)] = true
+				_pipeChanClosed()[pipeBoundKey(ch.pipeBoundFd, closedID)] = true
 			}
 			continue
 		}
@@ -434,7 +454,7 @@ func PipeWaitChildReady() bool {
 			}
 			if chanID == 0 && len(data) >= 3 && data[0] == pipeCtrlClose {
 				closedID := uint16(data[1])<<8 | uint16(data[2])
-				pipeChanClosed[pipeBoundKey(fd, closedID)] = true
+				_pipeChanClosed()[pipeBoundKey(fd, closedID)] = true
 			} else if chanID != 0 {
 				pipeIncomingPush(fd, chanID, data)
 			}
@@ -447,7 +467,16 @@ func PipeWaitChildReady() bool {
 
 // pipeChanClosed records remote-closed chanIDs once observed. Keyed
 // by (fd<<16 | chanID). Single-threaded scheduler — no lock needed.
-var pipeChanClosed = map[uint64]bool{}
+var pipeChanClosed map[uint64]bool
+var _pipeChanClosedDone bool
+
+func _pipeChanClosed() map[uint64]bool {
+	if !_pipeChanClosedDone {
+		_pipeChanClosedDone = true
+		pipeChanClosed = map[uint64]bool{}
+	}
+	return pipeChanClosed
+}
 
 // PipeChanCloseSignal writes a close marker to the remote indicating
 // that the local end of chanID has been closed. Called from chanClose
@@ -595,7 +624,7 @@ func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
 		return true, true
 	}
 	// Sibling-marked close from earlier traffic.
-	if pipeChanClosed[pipeBoundKey(ch.pipeBoundFd, ch.pipeChanID)] {
+	if _pipeChanClosed()[pipeBoundKey(ch.pipeBoundFd, ch.pipeChanID)] {
 		memzero(value, ch.elementSize)
 		return true, false
 	}
@@ -633,7 +662,7 @@ func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
 				memzero(value, ch.elementSize)
 				return true, false
 			}
-			pipeChanClosed[pipeBoundKey(ch.pipeBoundFd, closedID)] = true
+			_pipeChanClosed()[pipeBoundKey(ch.pipeBoundFd, closedID)] = true
 		}
 		return false, false
 	}

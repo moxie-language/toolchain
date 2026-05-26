@@ -10,7 +10,6 @@ import (
 	"crypto/internal/fips140/aes"
 	"crypto/internal/fips140/subtle"
 	"crypto/internal/fips140deps/cpu"
-	"crypto/internal/impl"
 )
 
 // The following functions are defined in gcm_*.s.
@@ -31,23 +30,16 @@ func gcmAesDec(productTable *[256]byte, dst, src []byte, ctr, T *[16]byte, ks []
 func gcmAesFinish(productTable *[256]byte, tagMask, T *[16]byte, pLen, dLen uint64)
 
 // Keep in sync with crypto/tls.hasAESGCMHardwareSupport.
-var supportsAESGCM = cpu.X86HasAES && cpu.X86HasPCLMULQDQ && cpu.X86HasSSE41 && cpu.X86HasSSSE3 ||
-	cpu.ARM64HasAES && cpu.ARM64HasPMULL
-
-func init() {
-	if cpu.AMD64 {
-		impl.Register("gcm", "AES-NI", &supportsAESGCM)
-	}
-	if cpu.ARM64 {
-		impl.Register("gcm", "Armv8.0", &supportsAESGCM)
-	}
+func supportsAESGCM() bool {
+	return cpu.X86HasAES() && cpu.X86HasPCLMULQDQ() && cpu.X86HasSSE41() && cpu.X86HasSSSE3() ||
+		cpu.ARM64HasAES() && cpu.ARM64HasPMULL()
 }
 
 // checkGenericIsExpected is called by the variable-time implementation to make
 // sure it is not used when hardware support is available. It shouldn't happen,
 // but this way it's more evidently correct.
 func checkGenericIsExpected() {
-	if supportsAESGCM {
+	if supportsAESGCM() {
 		panic("gcm: internal error: using generic implementation despite hardware support")
 	}
 }
@@ -57,14 +49,14 @@ type gcmPlatformData struct {
 }
 
 func initGCM(g *GCM) {
-	if !supportsAESGCM {
+	if !supportsAESGCM() {
 		return
 	}
 	gcmAesInit(&g.productTable, aes.EncryptionKeySchedule(&g.cipher))
 }
 
 func seal(out []byte, g *GCM, nonce, plaintext, data []byte) {
-	if !supportsAESGCM {
+	if !supportsAESGCM() {
 		sealGeneric(out, g, nonce, plaintext, data)
 		return
 	}
@@ -94,7 +86,7 @@ func seal(out []byte, g *GCM, nonce, plaintext, data []byte) {
 }
 
 func open(out []byte, g *GCM, nonce, ciphertext, data []byte) error {
-	if !supportsAESGCM {
+	if !supportsAESGCM() {
 		return openGeneric(out, g, nonce, ciphertext, data)
 	}
 

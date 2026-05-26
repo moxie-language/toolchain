@@ -22,8 +22,6 @@ import (
 
 	"slices"
 	"bytes"
-	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -105,8 +103,17 @@ type Client struct {
 	Timeout time.Duration
 }
 
-// DefaultClient is the default [Client] and is used by [Get], [Head], and [Post].
-var DefaultClient = &Client{}
+var _defaultClientDone bool
+var _defaultClientVal *Client
+
+// DefaultClient returns the default [Client] used by [Get], [Head], and [Post].
+func DefaultClient() *Client {
+	if !_defaultClientDone {
+		_defaultClientDone = true
+		_defaultClientVal = &Client{}
+	}
+	return _defaultClientVal
+}
 
 // RoundTripper is an interface representing the ability to execute a
 // single HTTP transaction, obtaining the [Response] for a given [Request].
@@ -200,11 +207,11 @@ func (c *Client) transport() RoundTripper {
 	if c.Transport != nil {
 		return c.Transport
 	}
-	return DefaultTransport
+	return DefaultTransport()
 }
 
 // ErrSchemeMismatch is returned when a server returns an HTTP response to an HTTPS client.
-var ErrSchemeMismatch = errors.New("http: server gave HTTP response to HTTPS client")
+const ErrSchemeMismatch = errors.Const("http: server gave HTTP response to HTTPS client")
 
 // send issues an HTTP request.
 // Caller should close resp.Body when done reading from it.
@@ -381,15 +388,20 @@ func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTi
 	}
 
 	stopTimerCh := chan struct{}{}
-	stopTimer = sync.OnceFunc(func() {
+	var stopTimerDone bool
+	stopTimer = func() {
+		if stopTimerDone {
+			return
+		}
+		stopTimerDone = true
 		close(stopTimerCh)
 		if cancelCtx != nil {
 			cancelCtx()
 		}
-	})
+	}
 
 	timer := time.NewTimer(time.Until(deadline))
-	var timedOut atomic.Bool
+	var timedOut bool
 
 	func() {
 		select {
@@ -397,14 +409,14 @@ func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTi
 			doCancel()
 			timer.Stop()
 		case <-timer.C:
-			timedOut.Store(true)
+			timedOut = true
 			doCancel()
 		case <-stopTimerCh:
 			timer.Stop()
 		}
 	}()
 
-	return stopTimer, timedOut.Load
+	return stopTimer, func() bool { return timedOut }
 }
 
 // See 2 (end of page 4) https://www.ietf.org/rfc/rfc2617.txt
@@ -414,7 +426,7 @@ func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTi
 // It is not meant to be urlencoded.
 func basicAuth(username, password string) string {
 	auth := username + ":" + password
-	return base64.StdEncoding.EncodeToString([]byte(auth))
+	return base64.StdEncoding().EncodeToString([]byte(auth))
 }
 
 // Get issues a GET to the specified URL. If the response is one of
@@ -443,7 +455,7 @@ func basicAuth(username, password string) string {
 // To make a request with a specified context.Context, use [NewRequestWithContext]
 // and DefaultClient.Do.
 func Get(url string) (resp *Response, err error) {
-	return DefaultClient.Get(url)
+	return DefaultClient().Get(url)
 }
 
 // Get issues a GET to the specified URL. If the response is one of the
@@ -483,7 +495,7 @@ func alwaysFalse() bool { return false }
 // control how redirects are processed. If returned, the next request
 // is not sent and the most recent response is returned with its body
 // unclosed.
-var ErrUseLastResponse = errors.New("net/http: use last response")
+const ErrUseLastResponse = errors.Const("net/http: use last response")
 
 // checkRedirect calls either the user's configured CheckRedirect
 // function, or the default.
@@ -580,12 +592,7 @@ func (c *Client) Do(req *Request) (*Response, error) {
 	return c.do(req)
 }
 
-var testHookClientDoResult func(retres *Response, reterr error)
-
 func (c *Client) do(req *Request) (retres *Response, reterr error) {
-	if testHookClientDoResult != nil {
-		defer func() { testHookClientDoResult(retres, reterr) }()
-	}
 	if req.URL == nil {
 		req.closeBody()
 		return nil, &url.Error{
@@ -701,7 +708,7 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 			// fails, the Transport won't reuse it anyway.
 			const maxBodySlurpSize = 2 << 10
 			if resp.ContentLength == -1 || resp.ContentLength <= maxBodySlurpSize {
-				io.CopyN(io.Discard, resp.Body, maxBodySlurpSize)
+				io.CopyN(io.Discard(), resp.Body, maxBodySlurpSize)
 			}
 			resp.Body.Close()
 
@@ -834,7 +841,7 @@ func defaultCheckRedirect(req *Request, via []*Request) error {
 // To make a request with a specified context.Context, use [NewRequestWithContext]
 // and DefaultClient.Do.
 func Post(url, contentType string, body io.Reader) (resp *Response, err error) {
-	return DefaultClient.Post(url, contentType, body)
+	return DefaultClient().Post(url, contentType, body)
 }
 
 // Post issues a POST to the specified URL.
@@ -877,7 +884,7 @@ func (c *Client) Post(url, contentType string, body io.Reader) (resp *Response, 
 // To make a request with a specified [context.Context], use [NewRequestWithContext]
 // and DefaultClient.Do.
 func PostForm(url string, data url.Values) (resp *Response, err error) {
-	return DefaultClient.PostForm(url, data)
+	return DefaultClient().PostForm(url, data)
 }
 
 // PostForm issues a POST to the specified URL,
@@ -913,7 +920,7 @@ func (c *Client) PostForm(url string, data url.Values) (resp *Response, err erro
 // To make a request with a specified [context.Context], use [NewRequestWithContext]
 // and DefaultClient.Do.
 func Head(url string) (resp *Response, err error) {
-	return DefaultClient.Head(url)
+	return DefaultClient().Head(url)
 }
 
 // Head issues a HEAD to the specified URL. If the response is one of the

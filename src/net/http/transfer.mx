@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"internal/godebug"
 	"io"
 	"maps"
 	"net/http/httptrace"
@@ -18,15 +17,12 @@ import (
 	"net/textproto"
 
 	"strconv"
-	"sync"
 	"time"
 
 	"golang.org/x/net/http/httpguts"
 )
 
-// ErrLineTooLong is returned when reading request or response bodies
-// with malformed chunked encoding.
-var ErrLineTooLong = internal.ErrLineTooLong
+const ErrLineTooLong = internal.ErrLineTooLong
 
 type errorReader struct {
 	err error
@@ -377,7 +373,7 @@ func (t *transferWriter) writeBody(w io.Writer) (err error) {
 				return err
 			}
 			var nextra int64
-			nextra, err = t.doBodyCopy(io.Discard, body)
+			nextra, err = t.doBodyCopy(io.Discard(), body)
 			ncopy += nextra
 		}
 		if err != nil {
@@ -473,19 +469,23 @@ func bodyAllowedForStatus(status int) bool {
 	return true
 }
 
-var (
-	suppressedHeaders304    = [][]byte{"Content-Type", "Content-Length", "Transfer-Encoding"}
-	suppressedHeadersNoBody = [][]byte{"Content-Length", "Transfer-Encoding"}
-	excludedHeadersNoBody   = map[string]bool{"Content-Length": true, "Transfer-Encoding": true}
-)
+func _suppressedHeaders304() [][]byte {
+	return [][]byte{"Content-Type", "Content-Length", "Transfer-Encoding"}
+}
+func _suppressedHeadersNoBody() [][]byte {
+	return [][]byte{"Content-Length", "Transfer-Encoding"}
+}
+func _excludedHeadersNoBody() map[string]bool {
+	return map[string]bool{"Content-Length": true, "Transfer-Encoding": true}
+}
 
 func suppressedHeaders(status int) [][]byte {
 	switch {
 	case status == 304:
 		// RFC 7232 section 4.1
-		return suppressedHeaders304
+		return _suppressedHeaders304()
 	case !bodyAllowedForStatus(status):
-		return suppressedHeadersNoBody
+		return _suppressedHeadersNoBody()
 	}
 	return nil
 }
@@ -818,7 +818,6 @@ type body struct {
 	closing      bool          // is the connection to be closed after reading body?
 	doEarlyClose bool          // whether Close should stop early
 
-	mu         sync.Mutex // guards following, and calls to Read and Close
 	sawEOF     bool
 	closed     bool
 	earlyClose bool   // Close called and we didn't read to the end of src
@@ -829,11 +828,9 @@ type body struct {
 // Body after the body has been closed. This typically happens when the body is
 // read after an HTTP [Handler] calls WriteHeader or Write on its
 // [ResponseWriter].
-var ErrBodyReadAfterClose = errors.New("http: invalid Read on closed Body")
+const ErrBodyReadAfterClose = errors.Const("http: invalid Read on closed Body")
 
 func (b *body) Read(p []byte) (n int, err error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.closed {
 		return 0, ErrBodyReadAfterClose
 	}
@@ -889,9 +886,9 @@ func (b *body) readLocked(p []byte) (n int, err error) {
 	return n, err
 }
 
-var (
-	singleCRLF = []byte("\r\n")
-	doubleCRLF = []byte("\r\n\r\n")
+const (
+	singleCRLF = "\r\n"
+	doubleCRLF = "\r\n\r\n"
 )
 
 func seeUpcomingDoubleCRLF(r *bufio.Reader) bool {
@@ -909,7 +906,7 @@ func seeUpcomingDoubleCRLF(r *bufio.Reader) bool {
 	return false
 }
 
-var errTrailerEOF = errors.New("http: unexpected EOF reading trailer")
+const errTrailerEOF = errors.Const("http: unexpected EOF reading trailer")
 
 func (b *body) readTrailer() error {
 	// The common case, since nobody uses trailers.
@@ -972,8 +969,6 @@ func (b *body) unreadDataSizeLocked() int64 {
 }
 
 func (b *body) Close() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.closed {
 		return nil
 	}
@@ -995,7 +990,7 @@ func (b *body) Close() error {
 			var n int64
 			// Consume the body, or, which will also lead to us reading
 			// the trailer headers after the body, if present.
-			n, err = io.CopyN(io.Discard, bodyLocked{b}, maxPostHandlerReadBytes)
+			n, err = io.CopyN(io.Discard(), bodyLocked{b}, maxPostHandlerReadBytes)
 			if err == io.EOF {
 				err = nil
 			}
@@ -1006,29 +1001,23 @@ func (b *body) Close() error {
 	default:
 		// Fully consume the body, which will also lead to us reading
 		// the trailer headers after the body, if present.
-		_, err = io.Copy(io.Discard, bodyLocked{b})
+		_, err = io.Copy(io.Discard(), bodyLocked{b})
 	}
 	b.closed = true
 	return err
 }
 
 func (b *body) didEarlyClose() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	return b.earlyClose
 }
 
 // bodyRemains reports whether future Read calls might
 // yield data.
 func (b *body) bodyRemains() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	return !b.sawEOF
 }
 
 func (b *body) registerOnHitEOF(fn func()) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.onHitEOF = fn
 }
 
@@ -1045,8 +1034,6 @@ func (bl bodyLocked) Read(p []byte) (n int, err error) {
 	return bl.b.readLocked(p)
 }
 
-var httplaxcontentlength = godebug.New("httplaxcontentlength")
-
 // parseContentLength checks that the header is valid and then trims
 // whitespace. It returns -1 if no value is set otherwise the value
 // if it's >= 0.
@@ -1059,10 +1046,6 @@ func parseContentLength(clHeaders [][]byte) (int64, error) {
 	// The Content-Length must be a valid numeric value.
 	// See: https://datatracker.ietf.org/doc/html/rfc2616/#section-14.13
 	if cl == "" {
-		if httplaxcontentlength.Value() == "1" {
-			httplaxcontentlength.IncNonDefault()
-			return -1, nil
-		}
 		return 0, badStringError("invalid empty Content-Length", cl)
 	}
 	n, err := strconv.ParseUint(cl, 10, 63)

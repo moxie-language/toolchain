@@ -2,24 +2,33 @@ package tls
 
 import (
 	"crypto/x509"
-	"sync"
 )
 
 // weakCertCache caches parsed x509.Certificates so connections can share them.
-type weakCertCache struct{ sync.Map }
+type weakCertCache struct {
+	m map[string]*x509.Certificate
+}
 
 func (wcc *weakCertCache) newCert(der []byte) (*x509.Certificate, error) {
-	if entry, ok := wcc.Load([]byte(der)); ok {
-		return entry.(*x509.Certificate), nil
+	key := string(der)
+	if entry, ok := wcc.m[key]; ok {
+		return entry, nil
 	}
 	cert, err := x509.ParseCertificate(der)
 	if err != nil {
 		return nil, err
 	}
-	if actual, loaded := wcc.LoadOrStore([]byte(der), cert); loaded {
-		return actual.(*x509.Certificate), nil
-	}
+	wcc.m[key] = cert
 	return cert, nil
 }
 
-var globalCertCache = &weakCertCache{}
+var _globalCertCacheDone bool
+var _globalCertCacheVal *weakCertCache
+
+func _globalCertCache() *weakCertCache {
+	if !_globalCertCacheDone {
+		_globalCertCacheDone = true
+		_globalCertCacheVal = &weakCertCache{m: map[string]*x509.Certificate{}}
+	}
+	return _globalCertCacheVal
+}

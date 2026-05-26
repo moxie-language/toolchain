@@ -20,8 +20,6 @@ import (
 	"log/internal"
 	"os"
 	"runtime"
-	"sync"
-	"sync/atomic"
 	"time"
 	_ "unsafe"
 )
@@ -56,12 +54,11 @@ const (
 // the Writer's Write method. A Logger can be used simultaneously from
 // multiple goroutines; it guarantees to serialize access to the Writer.
 type Logger struct {
-	outMu sync.Mutex
 	out   io.Writer // destination for output
 
-	prefix    atomic.Pointer[string] // prefix on each line to identify the logger (but see Lmsgprefix)
-	flag      atomic.Int32           // properties
-	isDiscard atomic.Bool
+	prefix    *[]byte // prefix on each line to identify the logger (but see Lmsgprefix)
+	flag      int32   // properties
+	isDiscard bool
 }
 
 // New creates a new [Logger]. The out variable sets the
@@ -79,16 +76,21 @@ func New(out io.Writer, prefix []byte, flag int) *Logger {
 
 // SetOutput sets the output destination for the logger.
 func (l *Logger) SetOutput(w io.Writer) {
-	l.outMu.Lock()
-	defer l.outMu.Unlock()
 	l.out = w
-	l.isDiscard.Store(w == io.Discard)
+	l.isDiscard = (w == io.Discard())
 }
 
-var std = New(os.Stderr, "", LstdFlags)
+var _stdLogger *Logger
+
+func _std() *Logger {
+	if _stdLogger == nil {
+		_stdLogger = New(os.Stderr(), "", LstdFlags)
+	}
+	return _stdLogger
+}
 
 // Default returns the standard logger used by the package-level output functions.
-func Default() *Logger { return std }
+func Default() *Logger { return _std() }
 
 // Cheap integer to fixed-width decimal ASCII. Give a negative width to avoid zero-padding.
 func itoa(buf *[]byte, i int, wid int) {
@@ -164,25 +166,12 @@ func formatHeader(buf *[]byte, t time.Time, prefix []byte, flag int, file []byte
 	}
 }
 
-var bufferPool = sync.Pool{New: func() any { return &[]byte{} }}
-
 func getBuffer() *[]byte {
-	p := bufferPool.Get().(*[]byte)
-	*p = (*p)[:0]
-	return p
+	b := []byte{}
+	return &b
 }
 
 func putBuffer(p *[]byte) {
-	// Proper usage of a sync.Pool requires each entry to have approximately
-	// the same memory cost. To obtain this property when the stored type
-	// contains a variably-sized buffer, we add a hard limit on the maximum buffer
-	// to place back in the pool.
-	//
-	// See https://go.dev/issue/23199
-	if cap(*p) > 64<<10 {
-		*p = nil
-	}
-	bufferPool.Put(p)
 }
 
 // Output writes the output for a logging event. The string s contains
@@ -200,7 +189,8 @@ func (l *Logger) Output(calldepth int, s []byte) error {
 // output can take either a calldepth or a pc to get source line information.
 // It uses the pc if it is non-zero.
 func (l *Logger) output(pc uintptr, calldepth int, appendOutput func([]byte) []byte) error {
-	if l.isDiscard.Load() {
+	ensureLog()
+	if l.isDiscard {
 		return nil
 	}
 
@@ -240,15 +230,19 @@ func (l *Logger) output(pc uintptr, calldepth int, appendOutput func([]byte) []b
 		*buf = append(*buf, '\n')
 	}
 
-	l.outMu.Lock()
-	defer l.outMu.Unlock()
 	_, err := l.out.Write(*buf)
 	return err
 }
 
-func init() {
+var logInited bool
+
+func ensureLog() {
+	if logInited {
+		return
+	}
+	logInited = true
 	internal.DefaultOutput = func(pc uintptr, data []byte) error {
-		return std.output(pc, 0, func(buf []byte) []byte {
+		return _std().output(pc, 0, func(buf []byte) []byte {
 			return append(buf, data...)
 		})
 	}
@@ -332,19 +326,19 @@ func (l *Logger) Panicln(v ...any) {
 // Flags returns the output flags for the logger.
 // The flag bits are [Ldate], [Ltime], and so on.
 func (l *Logger) Flags() int {
-	return int(l.flag.Load())
+	return int(l.flag)
 }
 
 // SetFlags sets the output flags for the logger.
 // The flag bits are [Ldate], [Ltime], and so on.
 func (l *Logger) SetFlags(flag int) {
-	l.flag.Store(int32(flag))
+	l.flag = int32(flag)
 }
 
 // Prefix returns the output prefix for the logger.
 func (l *Logger) Prefix() []byte {
-	if p := l.prefix.Load(); p != nil {
-		return *p
+	if l.prefix != nil {
+		return *l.prefix
 	}
 	return ""
 }
@@ -352,46 +346,44 @@ func (l *Logger) Prefix() []byte {
 // SetPrefix sets the output prefix for the logger.
 func (l *Logger) SetPrefix(prefix []byte) {
 	s := []byte(prefix)
-	l.prefix.Store(&s)
+	l.prefix = &s
 }
 
 // Writer returns the output destination for the logger.
 func (l *Logger) Writer() io.Writer {
-	l.outMu.Lock()
-	defer l.outMu.Unlock()
 	return l.out
 }
 
 // SetOutput sets the output destination for the standard logger.
 func SetOutput(w io.Writer) {
-	std.SetOutput(w)
+	_std().SetOutput(w)
 }
 
 // Flags returns the output flags for the standard logger.
 // The flag bits are [Ldate], [Ltime], and so on.
 func Flags() int {
-	return std.Flags()
+	return _std().Flags()
 }
 
 // SetFlags sets the output flags for the standard logger.
 // The flag bits are [Ldate], [Ltime], and so on.
 func SetFlags(flag int) {
-	std.SetFlags(flag)
+	_std().SetFlags(flag)
 }
 
 // Prefix returns the output prefix for the standard logger.
 func Prefix() []byte {
-	return std.Prefix()
+	return _std().Prefix()
 }
 
 // SetPrefix sets the output prefix for the standard logger.
 func SetPrefix(prefix []byte) {
-	std.SetPrefix(prefix)
+	_std().SetPrefix(prefix)
 }
 
 // Writer returns the output destination for the standard logger.
 func Writer() io.Writer {
-	return std.Writer()
+	return _std().Writer()
 }
 
 // These functions write to the standard logger.
@@ -399,7 +391,7 @@ func Writer() io.Writer {
 // Print calls Output to print to the standard logger.
 // Arguments are handled in the manner of [fmt.Print].
 func Print(v ...any) {
-	std.output(0, 2, func(b []byte) []byte {
+	_std().output(0, 2, func(b []byte) []byte {
 		return fmt.Append(b, v...)
 	})
 }
@@ -407,7 +399,7 @@ func Print(v ...any) {
 // Printf calls Output to print to the standard logger.
 // Arguments are handled in the manner of [fmt.Printf].
 func Printf(format []byte, v ...any) {
-	std.output(0, 2, func(b []byte) []byte {
+	_std().output(0, 2, func(b []byte) []byte {
 		return fmt.Appendf(b, format, v...)
 	})
 }
@@ -415,14 +407,14 @@ func Printf(format []byte, v ...any) {
 // Println calls Output to print to the standard logger.
 // Arguments are handled in the manner of [fmt.Println].
 func Println(v ...any) {
-	std.output(0, 2, func(b []byte) []byte {
+	_std().output(0, 2, func(b []byte) []byte {
 		return fmt.Appendln(b, v...)
 	})
 }
 
 // Fatal is equivalent to [Print] followed by a call to [os.Exit](1).
 func Fatal(v ...any) {
-	std.output(0, 2, func(b []byte) []byte {
+	_std().output(0, 2, func(b []byte) []byte {
 		return fmt.Append(b, v...)
 	})
 	os.Exit(1)
@@ -430,7 +422,7 @@ func Fatal(v ...any) {
 
 // Fatalf is equivalent to [Printf] followed by a call to [os.Exit](1).
 func Fatalf(format []byte, v ...any) {
-	std.output(0, 2, func(b []byte) []byte {
+	_std().output(0, 2, func(b []byte) []byte {
 		return fmt.Appendf(b, format, v...)
 	})
 	os.Exit(1)
@@ -438,7 +430,7 @@ func Fatalf(format []byte, v ...any) {
 
 // Fatalln is equivalent to [Println] followed by a call to [os.Exit](1).
 func Fatalln(v ...any) {
-	std.output(0, 2, func(b []byte) []byte {
+	_std().output(0, 2, func(b []byte) []byte {
 		return fmt.Appendln(b, v...)
 	})
 	os.Exit(1)
@@ -447,7 +439,7 @@ func Fatalln(v ...any) {
 // Panic is equivalent to [Print] followed by a call to panic().
 func Panic(v ...any) {
 	s := fmt.Sprint(v...)
-	std.output(0, 2, func(b []byte) []byte {
+	_std().output(0, 2, func(b []byte) []byte {
 		return append(b, s...)
 	})
 	panic(s)
@@ -456,7 +448,7 @@ func Panic(v ...any) {
 // Panicf is equivalent to [Printf] followed by a call to panic().
 func Panicf(format []byte, v ...any) {
 	s := fmt.Sprintf(format, v...)
-	std.output(0, 2, func(b []byte) []byte {
+	_std().output(0, 2, func(b []byte) []byte {
 		return append(b, s...)
 	})
 	panic(s)
@@ -465,7 +457,7 @@ func Panicf(format []byte, v ...any) {
 // Panicln is equivalent to [Println] followed by a call to panic().
 func Panicln(v ...any) {
 	s := fmt.Sprintln(v...)
-	std.output(0, 2, func(b []byte) []byte {
+	_std().output(0, 2, func(b []byte) []byte {
 		return append(b, s...)
 	})
 	panic(s)
@@ -479,7 +471,7 @@ func Panicln(v ...any) {
 // if [Llongfile] or [Lshortfile] is set; a value of 1 will print the details
 // for the caller of Output.
 func Output(calldepth int, s []byte) error {
-	return std.output(0, calldepth+1, func(b []byte) []byte { // +1 for this frame.
+	return _std().output(0, calldepth+1, func(b []byte) []byte { // +1 for this frame.
 		return append(b, s...)
 	})
 }

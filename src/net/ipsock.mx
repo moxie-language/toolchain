@@ -8,7 +8,6 @@ import (
 	"context"
 	"internal/bytealg"
 	"runtime"
-	"sync"
 	_ "unsafe" // for linkname
 )
 
@@ -20,7 +19,7 @@ import (
 // See inet6(4) for details.
 
 type ipStackCapabilities struct {
-	sync.Once             // guards following
+	done                  bool // guards following
 	ipv4Enabled           bool
 	ipv6Enabled           bool
 	ipv4MappedIPv6Enabled bool
@@ -31,14 +30,14 @@ var ipStackCaps ipStackCapabilities
 // supportsIPv4 reports whether the platform supports IPv4 networking
 // functionality.
 func supportsIPv4() bool {
-	ipStackCaps.Once.Do(ipStackCaps.probe)
+	if !ipStackCaps.done { ipStackCaps.done = true; ipStackCaps.probe() }
 	return ipStackCaps.ipv4Enabled
 }
 
 // supportsIPv6 reports whether the platform supports IPv6 networking
 // functionality.
 func supportsIPv6() bool {
-	ipStackCaps.Once.Do(ipStackCaps.probe)
+	if !ipStackCaps.done { ipStackCaps.done = true; ipStackCaps.probe() }
 	return ipStackCaps.ipv6Enabled
 }
 
@@ -53,7 +52,7 @@ func supportsIPv4map() bool {
 		return false
 	}
 
-	ipStackCaps.Once.Do(ipStackCaps.probe)
+	if !ipStackCaps.done { ipStackCaps.done = true; ipStackCaps.probe() }
 	return ipStackCaps.ipv4MappedIPv6Enabled
 }
 
@@ -294,8 +293,8 @@ func (r *Resolver) internetAddrList(ctx context.Context, net, addr []byte) (addr
 	// IPv6 such that it can bind on "::" (IPv6unspecified)
 	// but not connect back to that same address, fall
 	// back to dialing 0.0.0.0.
-	if len(ips) == 1 && ips[0].IP.Equal(IPv6unspecified) {
-		ips = append(ips, IPAddr{IP: IPv4zero})
+	if len(ips) == 1 && ips[0].IP.Equal(IPv6unspecified()) {
+		ips = append(ips, IPAddr{IP: IPv4zero()})
 	}
 
 	var filter func(IPAddr) bool
@@ -321,7 +320,7 @@ func (r *Resolver) internetAddrList(ctx context.Context, net, addr []byte) (addr
 //go:linkname loopbackIP
 func loopbackIP(net []byte) IP {
 	if net != "" && net[len(net)-1] == '6' {
-		return IPv6loopback
+		return IPv6loopback()
 	}
 	return IP{127, 0, 0, 1}
 }

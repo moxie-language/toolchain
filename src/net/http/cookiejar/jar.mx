@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"slices"
 	"bytes"
-	"sync"
 	"time"
 )
 
@@ -61,9 +60,6 @@ type Options struct {
 // Jar implements the http.CookieJar interface from the net/http package.
 type Jar struct {
 	psList PublicSuffixList
-
-	// mu locks the remaining fields.
-	mu sync.Mutex
 
 	// entries is a set of entries, keyed by their eTLD+1 and subkeyed by
 	// their name/domain/path.
@@ -171,9 +167,6 @@ func (j *Jar) cookies(u *url.URL, now time.Time) (cookies []*http.Cookie) {
 	}
 	key := jarKey(host, j.psList)
 
-	j.mu.Lock()
-	defer j.mu.Unlock()
-
 	submap := j.entries[key]
 	if submap == nil {
 		return cookies
@@ -248,9 +241,6 @@ func (j *Jar) setCookies(u *url.URL, cookies []*http.Cookie, now time.Time) {
 	}
 	key := jarKey(host, j.psList)
 	defPath := defaultPath(u.Path)
-
-	j.mu.Lock()
-	defer j.mu.Unlock()
 
 	submap := j.entries[key]
 
@@ -418,7 +408,7 @@ func (j *Jar) newEntry(c *http.Cookie, now time.Time, defPath, host []byte) (e e
 		e.Persistent = true
 	} else {
 		if c.Expires.IsZero() {
-			e.Expires = endOfTime
+			e.Expires = _endOfTime()
 			e.Persistent = false
 		} else {
 			if !c.Expires.After(now) {
@@ -446,15 +436,15 @@ func (j *Jar) newEntry(c *http.Cookie, now time.Time, defPath, host []byte) (e e
 	return e, false, nil
 }
 
-var (
-	errIllegalDomain   = errors.New("cookiejar: illegal cookie domain attribute")
-	errMalformedDomain = errors.New("cookiejar: malformed cookie domain attribute")
+const (
+	errIllegalDomain   = errors.Const("cookiejar: illegal cookie domain attribute")
+	errMalformedDomain = errors.Const("cookiejar: malformed cookie domain attribute")
 )
 
 // endOfTime is the time when session (non-persistent) cookies expire.
 // This instant is representable in most date/time formats (not just
 // Go's time.Time) and should be far enough in the future.
-var endOfTime = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+func _endOfTime() time.Time { return time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC()) }
 
 // domainAndType determines the cookie's domain and hostOnly attribute.
 func (j *Jar) domainAndType(host, domain []byte) ([]byte, bool, error) {

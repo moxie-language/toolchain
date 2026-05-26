@@ -88,28 +88,31 @@ const (
 
 // String returns a string form of the EventKind.
 func (e EventKind) String() string {
-	if int(e) >= len(eventKindStrings) {
-		return eventKindStrings[0]
+	s := _eventKindStrings()
+	if int(e) >= len(s) {
+		return s[0]
 	}
-	return eventKindStrings[e]
+	return s[e]
 }
 
-var eventKindStrings = [...][]byte{
-	EventBad:             "Bad",
-	EventSync:            "Sync",
-	EventMetric:          "Metric",
-	EventLabel:           "Label",
-	EventStackSample:     "StackSample",
-	EventRangeBegin:      "RangeBegin",
-	EventRangeActive:     "RangeActive",
-	EventRangeEnd:        "RangeEnd",
-	EventTaskBegin:       "TaskBegin",
-	EventTaskEnd:         "TaskEnd",
-	EventRegionBegin:     "RegionBegin",
-	EventRegionEnd:       "RegionEnd",
-	EventLog:             "Log",
-	EventStateTransition: "StateTransition",
-	EventExperimental:    "Experimental",
+func _eventKindStrings() [15][]byte {
+	return [15][]byte{
+		EventBad:             "Bad",
+		EventSync:            "Sync",
+		EventMetric:          "Metric",
+		EventLabel:           "Label",
+		EventStackSample:     "StackSample",
+		EventRangeBegin:      "RangeBegin",
+		EventRangeActive:     "RangeActive",
+		EventRangeEnd:        "RangeEnd",
+		EventTaskBegin:       "TaskBegin",
+		EventTaskEnd:         "TaskEnd",
+		EventRegionBegin:     "RegionBegin",
+		EventRegionEnd:       "RegionEnd",
+		EventLog:             "Log",
+		EventStateTransition: "StateTransition",
+		EventExperimental:    "Experimental",
+	}
 }
 
 const maxTime = Time(math.MaxInt64)
@@ -289,7 +292,7 @@ func (s Stack) Frames() iter.Seq[StackFrame] {
 
 // NoStack is a sentinel value that can be compared against any Stack value, indicating
 // a lack of a stack trace.
-var NoStack = Stack{}
+func NoStack() Stack { return Stack{} }
 
 // StackFrame represents a single frame of a stack.
 type StackFrame struct {
@@ -355,7 +358,8 @@ type Event struct {
 
 // Kind returns the kind of event that this is.
 func (e Event) Kind() EventKind {
-	return tracev2Type2Kind[e.base.typ]
+	t := _tracev2Type2Kind()
+	return t[e.base.typ]
 }
 
 // Time returns the timestamp of the event.
@@ -405,21 +409,21 @@ func (e Event) Thread() ThreadID {
 // the current execution context.
 func (e Event) Stack() Stack {
 	if e.base.typ == evSync {
-		return NoStack
+		return NoStack()
 	}
 	if e.base.typ == tracev2.EvCPUSample {
 		return Stack{table: e.table, id: stackID(e.base.args[0])}
 	}
 	spec := tracev2.Specs()[e.base.typ]
 	if len(spec.StackIDs) == 0 {
-		return NoStack
+		return NoStack()
 	}
 	// The stack for the main execution context is always the
 	// first stack listed in StackIDs. Subtract one from this
 	// because we've peeled away the timestamp argument.
 	id := stackID(e.base.args[spec.StackIDs[0]-1])
 	if id == 0 {
-		return NoStack
+		return NoStack()
 	}
 	return Stack{table: e.table, id: id}
 }
@@ -611,7 +615,8 @@ func (e Event) StateTransition() StateTransition {
 		s = procStateTransition(ProcID(e.base.args[0]), beforeState, ProcIdle)
 	case tracev2.EvProcStatus:
 		// N.B. ordering.advance populates e.base.extra.
-		s = procStateTransition(ProcID(e.base.args[0]), ProcState(e.base.extra(version.Go122)[0]), tracev2ProcStatus2ProcState[e.base.args[1]])
+		procSt := _tracev2ProcStatus2ProcState()
+		s = procStateTransition(ProcID(e.base.args[0]), ProcState(e.base.extra(version.Go122)[0]), procSt[e.base.args[1]])
 	case tracev2.EvGoCreate, tracev2.EvGoCreateBlocked:
 		status := GoRunnable
 		if e.base.typ == tracev2.EvGoCreateBlocked {
@@ -653,7 +658,8 @@ func (e Event) StateTransition() StateTransition {
 	case tracev2.EvGoStatus, tracev2.EvGoStatusStack:
 		packedStatus := e.base.args[2]
 		from, to := packedStatus>>32, packedStatus&((1<<32)-1)
-		s = goStateTransition(GoID(e.base.args[0]), GoState(from), tracev2GoStatus2GoState[to])
+		goSt := _tracev2GoStatus2GoState()
+		s = goStateTransition(GoID(e.base.args[0]), GoState(from), goSt[to])
 	default:
 		panic(fmt.Sprintf("internal error: unexpected wire-format event type for StateTransition kind: %d", e.base.typ))
 	}
@@ -734,72 +740,78 @@ func (e Event) Experimental() ExperimentalEvent {
 
 const evSync = ^tracev2.EventType(0)
 
-var tracev2Type2Kind = [...]EventKind{
-	tracev2.EvCPUSample:           EventStackSample,
-	tracev2.EvProcsChange:         EventMetric,
-	tracev2.EvProcStart:           EventStateTransition,
-	tracev2.EvProcStop:            EventStateTransition,
-	tracev2.EvProcSteal:           EventStateTransition,
-	tracev2.EvProcStatus:          EventStateTransition,
-	tracev2.EvGoCreate:            EventStateTransition,
-	tracev2.EvGoCreateSyscall:     EventStateTransition,
-	tracev2.EvGoStart:             EventStateTransition,
-	tracev2.EvGoDestroy:           EventStateTransition,
-	tracev2.EvGoDestroySyscall:    EventStateTransition,
-	tracev2.EvGoStop:              EventStateTransition,
-	tracev2.EvGoBlock:             EventStateTransition,
-	tracev2.EvGoUnblock:           EventStateTransition,
-	tracev2.EvGoSyscallBegin:      EventStateTransition,
-	tracev2.EvGoSyscallEnd:        EventStateTransition,
-	tracev2.EvGoSyscallEndBlocked: EventStateTransition,
-	tracev2.EvGoStatus:            EventStateTransition,
-	tracev2.EvSTWBegin:            EventRangeBegin,
-	tracev2.EvSTWEnd:              EventRangeEnd,
-	tracev2.EvGCActive:            EventRangeActive,
-	tracev2.EvGCBegin:             EventRangeBegin,
-	tracev2.EvGCEnd:               EventRangeEnd,
-	tracev2.EvGCSweepActive:       EventRangeActive,
-	tracev2.EvGCSweepBegin:        EventRangeBegin,
-	tracev2.EvGCSweepEnd:          EventRangeEnd,
-	tracev2.EvGCMarkAssistActive:  EventRangeActive,
-	tracev2.EvGCMarkAssistBegin:   EventRangeBegin,
-	tracev2.EvGCMarkAssistEnd:     EventRangeEnd,
-	tracev2.EvHeapAlloc:           EventMetric,
-	tracev2.EvHeapGoal:            EventMetric,
-	tracev2.EvGoLabel:             EventLabel,
-	tracev2.EvUserTaskBegin:       EventTaskBegin,
-	tracev2.EvUserTaskEnd:         EventTaskEnd,
-	tracev2.EvUserRegionBegin:     EventRegionBegin,
-	tracev2.EvUserRegionEnd:       EventRegionEnd,
-	tracev2.EvUserLog:             EventLog,
-	tracev2.EvGoSwitch:            EventStateTransition,
-	tracev2.EvGoSwitchDestroy:     EventStateTransition,
-	tracev2.EvGoCreateBlocked:     EventStateTransition,
-	tracev2.EvGoStatusStack:       EventStateTransition,
-	tracev2.EvSpan:                EventExperimental,
-	tracev2.EvSpanAlloc:           EventExperimental,
-	tracev2.EvSpanFree:            EventExperimental,
-	tracev2.EvHeapObject:          EventExperimental,
-	tracev2.EvHeapObjectAlloc:     EventExperimental,
-	tracev2.EvHeapObjectFree:      EventExperimental,
-	tracev2.EvGoroutineStack:      EventExperimental,
-	tracev2.EvGoroutineStackAlloc: EventExperimental,
-	tracev2.EvGoroutineStackFree:  EventExperimental,
-	evSync:                        EventSync,
+func _tracev2Type2Kind() [256]EventKind {
+	return [256]EventKind{
+		tracev2.EvCPUSample:           EventStackSample,
+		tracev2.EvProcsChange:         EventMetric,
+		tracev2.EvProcStart:           EventStateTransition,
+		tracev2.EvProcStop:            EventStateTransition,
+		tracev2.EvProcSteal:           EventStateTransition,
+		tracev2.EvProcStatus:          EventStateTransition,
+		tracev2.EvGoCreate:            EventStateTransition,
+		tracev2.EvGoCreateSyscall:     EventStateTransition,
+		tracev2.EvGoStart:             EventStateTransition,
+		tracev2.EvGoDestroy:           EventStateTransition,
+		tracev2.EvGoDestroySyscall:    EventStateTransition,
+		tracev2.EvGoStop:              EventStateTransition,
+		tracev2.EvGoBlock:             EventStateTransition,
+		tracev2.EvGoUnblock:           EventStateTransition,
+		tracev2.EvGoSyscallBegin:      EventStateTransition,
+		tracev2.EvGoSyscallEnd:        EventStateTransition,
+		tracev2.EvGoSyscallEndBlocked: EventStateTransition,
+		tracev2.EvGoStatus:            EventStateTransition,
+		tracev2.EvSTWBegin:            EventRangeBegin,
+		tracev2.EvSTWEnd:              EventRangeEnd,
+		tracev2.EvGCActive:            EventRangeActive,
+		tracev2.EvGCBegin:             EventRangeBegin,
+		tracev2.EvGCEnd:               EventRangeEnd,
+		tracev2.EvGCSweepActive:       EventRangeActive,
+		tracev2.EvGCSweepBegin:        EventRangeBegin,
+		tracev2.EvGCSweepEnd:          EventRangeEnd,
+		tracev2.EvGCMarkAssistActive:  EventRangeActive,
+		tracev2.EvGCMarkAssistBegin:   EventRangeBegin,
+		tracev2.EvGCMarkAssistEnd:     EventRangeEnd,
+		tracev2.EvHeapAlloc:           EventMetric,
+		tracev2.EvHeapGoal:            EventMetric,
+		tracev2.EvGoLabel:             EventLabel,
+		tracev2.EvUserTaskBegin:       EventTaskBegin,
+		tracev2.EvUserTaskEnd:         EventTaskEnd,
+		tracev2.EvUserRegionBegin:     EventRegionBegin,
+		tracev2.EvUserRegionEnd:       EventRegionEnd,
+		tracev2.EvUserLog:             EventLog,
+		tracev2.EvGoSwitch:            EventStateTransition,
+		tracev2.EvGoSwitchDestroy:     EventStateTransition,
+		tracev2.EvGoCreateBlocked:     EventStateTransition,
+		tracev2.EvGoStatusStack:       EventStateTransition,
+		tracev2.EvSpan:                EventExperimental,
+		tracev2.EvSpanAlloc:           EventExperimental,
+		tracev2.EvSpanFree:            EventExperimental,
+		tracev2.EvHeapObject:          EventExperimental,
+		tracev2.EvHeapObjectAlloc:     EventExperimental,
+		tracev2.EvHeapObjectFree:      EventExperimental,
+		tracev2.EvGoroutineStack:      EventExperimental,
+		tracev2.EvGoroutineStackAlloc: EventExperimental,
+		tracev2.EvGoroutineStackFree:  EventExperimental,
+		evSync:                        EventSync,
+	}
 }
 
-var tracev2GoStatus2GoState = [...]GoState{
-	tracev2.GoRunnable: GoRunnable,
-	tracev2.GoRunning:  GoRunning,
-	tracev2.GoWaiting:  GoWaiting,
-	tracev2.GoSyscall:  GoSyscall,
+func _tracev2GoStatus2GoState() [5]GoState {
+	return [5]GoState{
+		tracev2.GoRunnable: GoRunnable,
+		tracev2.GoRunning:  GoRunning,
+		tracev2.GoWaiting:  GoWaiting,
+		tracev2.GoSyscall:  GoSyscall,
+	}
 }
 
-var tracev2ProcStatus2ProcState = [...]ProcState{
-	tracev2.ProcRunning:          ProcRunning,
-	tracev2.ProcIdle:             ProcIdle,
-	tracev2.ProcSyscall:          ProcRunning,
-	tracev2.ProcSyscallAbandoned: ProcIdle,
+func _tracev2ProcStatus2ProcState() [5]ProcState {
+	return [5]ProcState{
+		tracev2.ProcRunning:          ProcRunning,
+		tracev2.ProcIdle:             ProcIdle,
+		tracev2.ProcSyscall:          ProcRunning,
+		tracev2.ProcSyscallAbandoned: ProcIdle,
+	}
 }
 
 // String returns the event as a human-readable string.
@@ -856,7 +868,7 @@ func (e Event) String() string {
 			old, new := s.Proc()
 			fmt.Fprintf(&sb, " ProcID=%d %s->%s", id, old, new)
 		}
-		if s.Stack != NoStack {
+		if s.Stack != NoStack() {
 			fmt.Fprintln(&sb)
 			fmt.Fprintln(&sb, "TransitionStack=")
 			for f := range s.Stack.Frames() {
@@ -885,7 +897,7 @@ func (e Event) String() string {
 			)
 		}
 	}
-	if stk := e.Stack(); stk != NoStack {
+	if stk := e.Stack(); stk != NoStack() {
 		fmt.Fprintln(&sb)
 		fmt.Fprintln(&sb, "Stack=")
 		for f := range stk.Frames() {

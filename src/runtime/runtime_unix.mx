@@ -3,13 +3,42 @@
 package runtime
 
 import (
-	"internal/futex"
 	"internal/task"
 	"math/bits"
-	"sync/atomic"
 	"moxie"
 	"unsafe"
 )
+
+type futex struct {
+	v uint32
+}
+
+func (f *futex) Swap(new uint32) uint32 {
+	old := f.v
+	f.v = new
+	return old
+}
+
+func (f *futex) Wait(cmp uint32) {
+	moxie_futex_wait((*uint32)(unsafe.Pointer(&f.v)), cmp)
+}
+
+func (f *futex) WaitUntil(cmp uint32, timeout uint64) {
+	moxie_futex_wait_timeout((*uint32)(unsafe.Pointer(&f.v)), cmp, timeout)
+}
+
+func (f *futex) WakeAll() {
+	moxie_futex_wake_all((*uint32)(unsafe.Pointer(&f.v)))
+}
+
+//export moxie_futex_wait
+func moxie_futex_wait(addr *uint32, cmp uint32)
+
+//export moxie_futex_wait_timeout
+func moxie_futex_wait_timeout(addr *uint32, cmp uint32, timeout uint64)
+
+//export moxie_futex_wake_all
+func moxie_futex_wake_all(addr *uint32)
 
 //export write
 func libc_write(fd int32, buf unsafe.Pointer, count uint) int
@@ -407,11 +436,11 @@ var hasSignals bool
 // before, all waiters are awoken.
 // When a wait exits, the value is changed to 0 and if it wasn't 0 before, the
 // signals are checked.
-var signalFutex futex.Futex
+var signalFutex futex
 
 // Mask of signals that have been received. The signal handler atomically ORs
 // signals into this value.
-var receivedSignals atomic.Uint32
+var receivedSignals uint32
 
 //go:linkname signal_enable os/signal.signal_enable
 func signal_enable(s uint32) {
@@ -453,7 +482,7 @@ func signal_disable(s uint32) {
 //go:linkname signal_waitUntilIdle os/signal.signalWaitUntilIdle
 func signal_waitUntilIdle() {
 	// Wait until signal_recv has processed all signals.
-	for receivedSignals.Load() != 0 {
+	for receivedSignals != 0 {
 		// TODO: this becomes a busy loop when using threads.
 		// We might want to pause until signal_recv has no more incoming signals
 		// to process.
@@ -474,19 +503,7 @@ func moxie_signal_disable(s uint32)
 //
 //export moxie_signal_handler
 func moxie_signal_handler(s int32) {
-	// The following loop is equivalent to the following:
-	//
-	//     receivedSignals.Or(uint32(1) << uint32(s))
-	//
-	// TODO: use this instead of a loop once we drop support for Go 1.22.
-	for {
-		mask := uint32(1) << uint32(s)
-		val := receivedSignals.Load()
-		swapped := receivedSignals.CompareAndSwap(val, val|mask)
-		if swapped {
-			break
-		}
-	}
+	receivedSignals |= uint32(1) << uint32(s)
 
 	// Notify the main thread that there was a signal.
 	// This will exit the call to Wait or WaitUntil early.
@@ -500,40 +517,24 @@ func moxie_signal_handler(s int32) {
 
 // Task waiting for a signal to arrive, or nil if it is running or there are no
 // signals.
-var signalRecvWaiter atomic.Pointer[task.Task]
+var signalRecvWaiter *task.Task
 
 //go:linkname signal_recv os/signal.signal_recv
 func signal_recv() uint32 {
 	// Function called from os/signal to get the next received signal.
 	for {
-		val := receivedSignals.Load()
-		if val == 0 {
-			// There are no signals to receive. Sleep until there are.
-			if signalRecvWaiter.Swap(task.Current()) != nil {
-				// We expect only a single goroutine to call signal_recv.
+		if receivedSignals == 0 {
+			old := signalRecvWaiter
+			signalRecvWaiter = task.Current()
+			if old != nil {
 				runtimePanic("signal_recv called concurrently")
 			}
 			task.Pause()
 			continue
 		}
 
-		// Extract the lowest numbered signal number from receivedSignals.
-		num := uint32(bits.TrailingZeros32(val))
-
-		// Atomically clear the signal number from receivedSignals.
-		// TODO: use atomic.Uint32.And once we drop support for Go 1.22 instead
-		// of this loop, like so:
-		//
-		//   receivedSignals.And(^(uint32(1) << num))
-		//
-		for {
-			newVal := val &^ (1 << num)
-			swapped := receivedSignals.CompareAndSwap(val, newVal)
-			if swapped {
-				break
-			}
-			val = receivedSignals.Load()
-		}
+		num := uint32(bits.TrailingZeros32(receivedSignals))
+		receivedSignals &^= 1 << num
 
 		return num
 	}
@@ -543,8 +544,10 @@ func signal_recv() uint32 {
 // Return true if it was reactivated (and therefore the scheduler should run
 // again), and false otherwise.
 func checkSignals() bool {
-	if receivedSignals.Load() != 0 {
-		if waiter := signalRecvWaiter.Swap(nil); waiter != nil {
+	if receivedSignals != 0 {
+		waiter := signalRecvWaiter
+		signalRecvWaiter = nil
+		if waiter != nil {
 			scheduleTask(waiter)
 			return true
 		}

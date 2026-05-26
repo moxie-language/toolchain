@@ -6,9 +6,6 @@ package syscall
 
 import (
 	"internal/syscall/windows/sysdll"
-	"sync"
-	"sync/atomic"
-	"unsafe"
 )
 
 // DLLError describes reasons for DLL load failures.
@@ -69,7 +66,7 @@ func LoadDLL(name string) (*DLL, error) {
 	}
 	var h uintptr
 	var e Errno
-	if sysdll.IsSystemDLL[name] {
+	if sysdll.IsSystem(name) {
 		h, e = loadsystemlibrary(namep)
 	} else {
 		h, e = loadlibrary(namep)
@@ -178,7 +175,6 @@ func (p *Proc) Call(a ...uintptr) (uintptr, uintptr, error) {
 // Use LazyDLL in golang.org/x/sys/windows for a secure way to
 // load system DLLs.
 type LazyDLL struct {
-	mu   sync.Mutex
 	dll  *DLL // non nil once DLL is loaded
 	Name string
 }
@@ -186,20 +182,12 @@ type LazyDLL struct {
 // Load loads DLL file d.Name into memory. It returns an error if fails.
 // Load will not try to load DLL, if it is already loaded into memory.
 func (d *LazyDLL) Load() error {
-	// Non-racy version of:
-	// if d.dll == nil {
-	if atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&d.dll))) == nil {
-		d.mu.Lock()
-		defer d.mu.Unlock()
-		if d.dll == nil {
-			dll, e := LoadDLL(d.Name)
-			if e != nil {
-				return e
-			}
-			// Non-racy version of:
-			// d.dll = dll
-			atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&d.dll)), unsafe.Pointer(dll))
+	if d.dll == nil {
+		dll, e := LoadDLL(d.Name)
+		if e != nil {
+			return e
 		}
+		d.dll = dll
 	}
 	return nil
 }
@@ -231,7 +219,6 @@ func NewLazyDLL(name string) *LazyDLL {
 // A LazyProc implements access to a procedure inside a [LazyDLL].
 // It delays the lookup until the [LazyProc.Addr], [LazyProc.Call], or [LazyProc.Find] method is called.
 type LazyProc struct {
-	mu   sync.Mutex
 	Name string
 	l    *LazyDLL
 	proc *Proc
@@ -241,24 +228,16 @@ type LazyProc struct {
 // an error if search fails. Find will not search procedure,
 // if it is already found and loaded into memory.
 func (p *LazyProc) Find() error {
-	// Non-racy version of:
-	// if p.proc == nil {
-	if atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&p.proc))) == nil {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		if p.proc == nil {
-			e := p.l.Load()
-			if e != nil {
-				return e
-			}
-			proc, e := p.l.dll.FindProc(p.Name)
-			if e != nil {
-				return e
-			}
-			// Non-racy version of:
-			// p.proc = proc
-			atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&p.proc)), unsafe.Pointer(proc))
+	if p.proc == nil {
+		e := p.l.Load()
+		if e != nil {
+			return e
 		}
+		proc, e := p.l.dll.FindProc(p.Name)
+		if e != nil {
+			return e
+		}
+		p.proc = proc
 	}
 	return nil
 }

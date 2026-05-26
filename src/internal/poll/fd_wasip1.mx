@@ -6,7 +6,6 @@ package poll
 
 import (
 	"internal/byteorder"
-	"sync/atomic"
 	"syscall"
 	"unsafe"
 )
@@ -50,13 +49,16 @@ func (s *SysFile) init() {
 }
 
 func (s *SysFile) ref() SysFile {
-	atomic.AddInt32(s.RefCountPtr, +1)
+	*s.RefCountPtr++
 	return SysFile{RefCountPtr: s.RefCountPtr}
 }
 
 func (s *SysFile) destroy(fd int) error {
-	if s.RefCountPtr != nil && atomic.AddInt32(s.RefCountPtr, -1) > 0 {
-		return nil
+	if s.RefCountPtr != nil {
+		*s.RefCountPtr--
+		if *s.RefCountPtr > 0 {
+			return nil
+		}
 	}
 
 	// We don't use ignoringEINTR here because POSIX does not define
@@ -64,7 +66,7 @@ func (s *SysFile) destroy(fd int) error {
 	// If the descriptor is indeed closed, using a loop would race
 	// with some other goroutine opening a new descriptor.
 	// (The Linux kernel guarantees that it is closed on an EINTR error.)
-	return CloseFunc(fd)
+	return syscall.Close(fd)
 }
 
 // Copy creates a copy of the FD.
@@ -170,7 +172,7 @@ func (fd *FD) Seek(offset int64, whence int) (int64, error) {
 	// syscall.Filetype is a uint8 but we store it as a uint32 in SysFile in
 	// order to use atomic load/store on the field, which is why we have to
 	// perform this type conversion.
-	fileType := syscall.Filetype(atomic.LoadUint32(&fd.Filetype))
+	fileType := syscall.Filetype(fd.Filetype)
 
 	if fileType == syscall.FILETYPE_UNKNOWN {
 		var stat syscall.Stat_t
@@ -178,7 +180,7 @@ func (fd *FD) Seek(offset int64, whence int) (int64, error) {
 			return 0, err
 		}
 		fileType = stat.Filetype
-		atomic.StoreUint32(&fd.Filetype, uint32(fileType))
+		fd.Filetype = uint32(fileType)
 	}
 
 	if fileType == syscall.FILETYPE_DIRECTORY {

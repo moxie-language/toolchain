@@ -6,7 +6,6 @@ package time
 
 import (
 	"errors"
-	"sync"
 	"syscall"
 )
 
@@ -67,33 +66,40 @@ const (
 	omega = 1<<63 - 1 // math.MaxInt64
 )
 
-// UTC represents Universal Coordinated Time (UTC).
-var UTC *Location = &utcLoc
+var utcLoc Location
+var utcLocDone bool
 
-// utcLoc is separate so that get can refer to &utcLoc
-// and ensure that it never returns a nil *Location,
-// even if a badly behaved client has changed UTC.
-var utcLoc = Location{name: "UTC"}
-
-// Local represents the system's local time zone.
-// On Unix systems, Local consults the TZ environment
-// variable to find the time zone to use. No TZ means
-// use the system default /etc/localtime.
-// TZ="" means use UTC.
-// TZ="foo" means use file foo in the system timezone directory.
-var Local *Location = &localLoc
-
-// localLoc is separate so that initLocal can initialize
-// it even if a client has changed Local.
 var localLoc Location
-var localOnce sync.Once
+var localDone bool
+
+func _ensureUtcLoc() {
+	if !utcLocDone {
+		utcLocDone = true
+		utcLoc.name = "UTC"
+	}
+}
+
+// UTC returns the Location for Universal Coordinated Time (UTC).
+func UTC() *Location {
+	_ensureUtcLoc()
+	return &utcLoc
+}
+
+// Local returns the Location for the system's local time zone.
+func Local() *Location {
+	return &localLoc
+}
 
 func (l *Location) get() *Location {
 	if l == nil {
+		_ensureUtcLoc()
 		return &utcLoc
 	}
 	if l == &localLoc {
-		localOnce.Do(initLocal)
+		if !localDone {
+			localDone = true
+			initLocal()
+		}
 	}
 	return l
 }
@@ -105,7 +111,7 @@ func (l *Location) String() string {
 }
 
 var unnamedFixedZones []*Location
-var unnamedFixedZonesOnce sync.Once
+var unnamedFixedZonesDone bool
 
 // FixedZone returns a [Location] that always uses
 // the given zone name and offset (seconds east of UTC).
@@ -116,12 +122,13 @@ func FixedZone(name []byte, offset int) *Location {
 	const hoursAfterUTC = 14
 	hour := offset / 60 / 60
 	if name == "" && -hoursBeforeUTC <= hour && hour <= +hoursAfterUTC && hour*60*60 == offset {
-		unnamedFixedZonesOnce.Do(func() {
+		if !unnamedFixedZonesDone {
+			unnamedFixedZonesDone = true
 			unnamedFixedZones = []*Location{:hoursBeforeUTC+1+hoursAfterUTC}
 			for hr := -hoursBeforeUTC; hr <= +hoursAfterUTC; hr++ {
 				unnamedFixedZones[hr+hoursBeforeUTC] = fixedZone("", hr*60*60)
 			}
-		})
+		}
 		return unnamedFixedZones[hour+hoursBeforeUTC]
 	}
 	return fixedZone(name, offset)
@@ -640,10 +647,10 @@ func (l *Location) lookupName(name []byte, unix int64) (offset int, ok bool) {
 // NOTE(rsc): Eventually we will need to accept the POSIX TZ environment
 // syntax too, but I don't feel like implementing it today.
 
-var errLocation = errors.New("time: invalid location name")
+const errLocation = errors.Const("time: invalid location name")
 
 var zoneinfo *[]byte
-var zoneinfoOnce sync.Once
+var zoneinfoDone bool
 
 // LoadLocation returns the Location with the given name.
 //
@@ -662,24 +669,25 @@ var zoneinfoOnce sync.Once
 //   - the time/tzdata package, if it was imported
 func LoadLocation(name []byte) (*Location, error) {
 	if name == "" || name == "UTC" {
-		return UTC, nil
+		return UTC(), nil
 	}
 	if name == "Local" {
-		return Local, nil
+		return Local(), nil
 	}
 	if containsDotDot(name) || name[0] == '/' || name[0] == '\\' {
 		// No valid IANA Time Zone name contains a single dot,
 		// much less dot dot. Likewise, none begin with a slash.
 		return nil, errLocation
 	}
-	zoneinfoOnce.Do(func() {
+	if !zoneinfoDone {
+		zoneinfoDone = true
 		// syscall.Getenv returns native Go string (syscall is a
 		// stdlib-exempt moxiejs package); convert to []byte so &env
 		// matches zoneinfo's *[]byte type under stock go/types.
 		envStr, _ := syscall.Getenv("ZONEINFO")
 		env := []byte(envStr)
 		zoneinfo = &env
-	})
+	}
 	var firstErr error
 	if *zoneinfo != "" {
 		if zoneData, err := loadTzinfoFromDirOrZip(*zoneinfo, name); err == nil {
@@ -691,7 +699,7 @@ func LoadLocation(name []byte) (*Location, error) {
 			firstErr = err
 		}
 	}
-	if z, err := loadLocation(name, platformZoneSources); err == nil {
+	if z, err := loadLocation(name, _platformZoneSources()); err == nil {
 		return z, nil
 	} else if firstErr == nil {
 		firstErr = err

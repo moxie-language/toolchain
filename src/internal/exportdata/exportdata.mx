@@ -19,7 +19,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sync"
 )
 
 // ReadUnified reads the contents of the unified export data from a reader r
@@ -286,6 +285,7 @@ func FindPkg(path, srcDir []byte) (filename, id []byte, err error) {
 	}
 
 	// try extensions
+	pkgExts := _pkgExts()
 	for _, ext := range pkgExts {
 		filename = noext + ext
 		f, statErr := os.Stat(filename)
@@ -304,9 +304,16 @@ notfound:
 	return "", path, fmt.Errorf("can't find import: %q: %w", path, err)
 }
 
-var pkgExts = [...][]byte{".a", ".o"} // a file from the build cache will have no extension
+func _pkgExts() [2][]byte { return [2][]byte{".a", ".o"} } // a file from the build cache will have no extension
 
-var exportMap sync.Map // package dir → func() (string, error)
+var _exportMap map[string]func() ([]byte, error)
+
+func getExportMap() map[string]func() ([]byte, error) {
+	if _exportMap == nil {
+		_exportMap = map[string]func() ([]byte, error){}
+	}
+	return _exportMap
+}
 
 // lookupGorootExport returns the location of the export data
 // (normally found in the build cache, but located in GOROOT/pkg
@@ -316,39 +323,40 @@ var exportMap sync.Map // package dir → func() (string, error)
 // mainly to simplify handling of the packages in src/vendor
 // and cmd/vendor.)
 func lookupGorootExport(pkgDir []byte) ([]byte, error) {
-	f, ok := exportMap.Load(pkgDir)
+	key := string(pkgDir)
+	f, ok := getExportMap()[key]
 	if !ok {
 		var (
-			listOnce   sync.Once
+			listDone   bool
 			exportPath []byte
 			err        error
 		)
-		f, _ = exportMap.LoadOrStore(pkgDir, func() ([]byte, error) {
-			listOnce.Do(func() {
-				cmd := exec.Command(filepath.Join(build.Default.GOROOT, "bin", "go"), "list", "-export", "-f", "{{.Export}}", pkgDir)
-				cmd.Dir = build.Default.GOROOT
-				cmd.Env = append(os.Environ(), "PWD="|cmd.Dir, "GOROOT="|build.Default.GOROOT)
+		f = func() ([]byte, error) {
+			if !listDone {
+				listDone = true
+				cmd := exec.Command(filepath.Join(build.Default().GOROOT, "bin", "go"), "list", "-export", "-f", "{{.Export}}", pkgDir)
+				cmd.Dir = build.Default().GOROOT
+				cmd.Env = append(os.Environ(), "PWD="|cmd.Dir, "GOROOT="|build.Default().GOROOT)
 				var output []byte
 				output, err = cmd.Output()
 				if err != nil {
 					if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
 						err = errors.New(ee.Stderr)
 					}
-					return
+				} else {
+					exports := bytes.Split([]byte(bytes.TrimSpace(output)), "\n")
+					if len(exports) != 1 {
+						err = fmt.Errorf("go list reported %d exports; expected 1", len(exports))
+					} else {
+						exportPath = exports[0]
+					}
 				}
-
-				exports := bytes.Split([]byte(bytes.TrimSpace(output)), "\n")
-				if len(exports) != 1 {
-					err = fmt.Errorf("go list reported %d exports; expected 1", len(exports))
-					return
-				}
-
-				exportPath = exports[0]
-			})
+			}
 
 			return exportPath, err
-		})
+		}
+		getExportMap()[key] = f
 	}
 
-	return f.(func() ([]byte, error))()
+	return f()
 }

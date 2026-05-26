@@ -656,7 +656,8 @@ func (p *parser) readRawEvent(flags uint, ev *rawEvent) error {
 	// value 3 on the wire indicates length-prefixing. For us, that becomes narg
 	// == 4.
 	narg := b>>6 + 1
-	if typ == EvNone || typ >= EvCount || EventDescriptions[typ].minVersion > p.ver {
+	ed := EventDescriptions()
+	if typ == EvNone || typ >= EvCount || ed[typ].minVersion > p.ver {
 		return fmt.Errorf("unknown event type %d", typ)
 	}
 
@@ -892,7 +893,8 @@ func (p *parser) readStr() (s []byte, err error) {
 // parseEvent transforms raw events into events.
 // It does analyze and verify per-event-type arguments.
 func (p *parser) parseEvent(raw *rawEvent, ev *Event) error {
-	desc := &EventDescriptions[raw.typ]
+	ed2 := EventDescriptions()
+	desc := &ed2[raw.typ]
 	if desc.Name == "" {
 		return fmt.Errorf("missing description for event type %d", raw.typ)
 	}
@@ -1005,7 +1007,7 @@ func (p *parser) parseEvent(raw *rawEvent, ev *Event) error {
 
 // ErrTimeOrder is returned by Parse when the trace contains
 // time stamps that do not respect actual event ordering.
-var ErrTimeOrder = errors.New("time stamps out of order")
+const ErrTimeOrder = errors.Const("time stamps out of order")
 
 // postProcessTrace does inter-event verification and information restoration.
 // The resulting trace is guaranteed to be consistent
@@ -1039,7 +1041,8 @@ func (p *parser) postProcessTrace(events Events) error {
 	var evGC, evSTW *Event
 
 	checkRunning := func(p pdesc, g gdesc, ev *Event, allowG0 bool) error {
-		name := EventDescriptions[ev.Type].Name
+		ed3 := EventDescriptions()
+		name := ed3[ev.Type].Name
 		if g.state != gRunning {
 			return fmt.Errorf("g %d is not running while %s (time %d)", ev.G, name, ev.Ts)
 		}
@@ -1326,7 +1329,7 @@ func (p *parser) postProcessTrace(events Events) error {
 	return nil
 }
 
-var errMalformedVarint = errors.New("malformatted base-128 varint")
+const errMalformedVarint = errors.Const("malformatted base-128 varint")
 
 // readVal reads unsigned base-128 value from r.
 func (p *parser) readVal() (uint64, error) {
@@ -1347,7 +1350,8 @@ func readValFrom(buf []byte) (v uint64, rem []byte, err error) {
 }
 
 func (ev *Event) String() string {
-	desc := &EventDescriptions[ev.Type]
+	ed4 := EventDescriptions()
+	desc := &ed4[ev.Type]
 	w := &bytes.Buffer{}
 	fmt.Fprintf(w, "%d %s p=%d g=%d stk=%d", ev.Ts, desc.Name, ev.P, ev.G, ev.StkID)
 	for i, a := range desc.Args {
@@ -1359,7 +1363,8 @@ func (ev *Event) String() string {
 // argNum returns total number of args for the event accounting for timestamps,
 // sequence numbers and differences between trace format versions.
 func (raw *rawEvent) argNum() int {
-	desc := &EventDescriptions[raw.typ]
+	ed5 := EventDescriptions()
+	desc := &ed5[raw.typ]
 	if raw.typ == EvStack {
 		return len(raw.args)
 	}
@@ -1433,13 +1438,20 @@ const (
 	EvCount             EventType = 50
 )
 
-var EventDescriptions = [256]struct {
+func EventDescriptions() [256]struct {
 	Name       []byte
 	minVersion version.Version
 	Stack      bool
 	Args       [][]byte
 	SArgs      [][]byte // string arguments
-}{
+} {
+	return [256]struct {
+		Name       []byte
+		minVersion version.Version
+		Stack      bool
+		Args       [][]byte
+		SArgs      [][]byte // string arguments
+	}{
 	EvNone:              {"None", 5, false, [][]byte{}, nil},
 	EvBatch:             {"Batch", 5, false, [][]byte{"p", "ticks"}, nil}, // in 1.5 format it was {"p", "seq", "ticks"}
 	EvFrequency:         {"Frequency", 5, false, [][]byte{"freq"}, nil},   // in 1.5 format it was {"freq", "unused"}
@@ -1490,6 +1502,7 @@ var EventDescriptions = [256]struct {
 	EvUserRegion:        {"UserRegion", 11, true, [][]byte{"taskid", "mode", "typeid"}, [][]byte{"name"}},
 	EvUserLog:           {"UserLog", 11, true, [][]byte{"id", "keyid"}, [][]byte{"category", "message"}},
 	EvCPUSample:         {"CPUSample", 19, true, [][]byte{"ts", "p", "g"}, nil},
+	}
 }
 
 //gcassert:inline

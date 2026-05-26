@@ -16,9 +16,9 @@ import (
 	"unicode/utf8"
 )
 
-var (
-	errLongName  = errors.New("zip: FileHeader.Name too long")
-	errLongExtra = errors.New("zip: FileHeader.Extra too long")
+const (
+	errLongName  = errors.Const("zip: FileHeader.Name too long")
+	errLongExtra = errors.Const("zip: FileHeader.Extra too long")
 )
 
 // Writer implements a zip file writer.
@@ -29,6 +29,7 @@ type Writer struct {
 	closed      bool
 	compressors map[uint16]Compressor
 	comment     string
+	cc          *crc32.CRC32
 
 	// testHookCloseSizeOffset if non-nil is called with the size
 	// of offset of the central directory at Close.
@@ -43,7 +44,7 @@ type header struct {
 
 // NewWriter returns a new [Writer] writing a zip file to w.
 func NewWriter(w io.Writer) *Writer {
-	return &Writer{cw: &countWriter{w: bufio.NewWriter(w)}}
+	return &Writer{cw: &countWriter{w: bufio.NewWriter(w)}, cc: crc32.NewCRC32()}
 }
 
 // SetOffset sets the offset of the beginning of the zip data within the
@@ -361,7 +362,7 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.Writer, error) {
 		fw = &fileWriter{
 			zipw:      w.cw,
 			compCount: &countWriter{w: w.cw},
-			crc32:     crc32.NewIEEE(),
+			crc32:     w.cc.NewIEEE(),
 		}
 		comp := w.compressor(fh.Method)
 		if comp == nil {
@@ -665,16 +666,16 @@ func (b *writeBuf) uint8(v uint8) {
 }
 
 func (b *writeBuf) uint16(v uint16) {
-	binary.LittleEndian.PutUint16(*b, v)
+	binary.LittleEndian().PutUint16(*b, v)
 	*b = (*b)[2:]
 }
 
 func (b *writeBuf) uint32(v uint32) {
-	binary.LittleEndian.PutUint32(*b, v)
+	binary.LittleEndian().PutUint32(*b, v)
 	*b = (*b)[4:]
 }
 
 func (b *writeBuf) uint64(v uint64) {
-	binary.LittleEndian.PutUint64(*b, v)
+	binary.LittleEndian().PutUint64(*b, v)
 	*b = (*b)[8:]
 }

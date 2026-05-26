@@ -8,12 +8,10 @@ import (
 	"bufio"
 	"errors"
 	"io"
-	"sync"
-	"sync/atomic"
 )
 
 // ErrFormat indicates that decoding encountered an unknown format.
-var ErrFormat = errors.New("image: unknown format")
+const ErrFormat = errors.Const("image: unknown format")
 
 // A format holds an image format's name, magic header and how to decode it.
 type format struct {
@@ -22,23 +20,20 @@ type format struct {
 	decodeConfig func(io.Reader) (Config, error)
 }
 
-// Formats is the list of registered formats.
-var (
-	formatsMu     sync.Mutex
-	atomicFormats atomic.Value
-)
+// Decoder holds registered image formats and dispatches decoding.
+type Decoder struct {
+	formats []format
+}
 
-// RegisterFormat registers an image format for use by [Decode].
-// Name is the name of the format, like "jpeg" or "png".
-// Magic is the magic prefix that identifies the format's encoding. The magic
-// string can contain "?" wildcards that each match any one byte.
-// [Decode] is the function that decodes the encoded image.
-// [DecodeConfig] is the function that decodes just its configuration.
-func RegisterFormat(name, magic []byte, decode func(io.Reader) (Image, error), decodeConfig func(io.Reader) (Config, error)) {
-	formatsMu.Lock()
-	formats, _ := atomicFormats.Load().([]format)
-	atomicFormats.Store(append(formats, format{name, magic, decode, decodeConfig}))
-	formatsMu.Unlock()
+// NewDecoder returns a Decoder with no registered formats.
+func NewDecoder() *Decoder {
+	return &Decoder{}
+}
+
+// Register adds an image format. Name is the format name (e.g. "jpeg").
+// Magic is the prefix that identifies the encoding; "?" matches any byte.
+func (d *Decoder) Register(name, magic []byte, decode func(io.Reader) (Image, error), decodeConfig func(io.Reader) (Config, error)) {
+	d.formats = append(d.formats, format{name, magic, decode, decodeConfig})
 }
 
 // A reader is an io.Reader that can also peek ahead.
@@ -68,10 +63,8 @@ func match(magic []byte, b []byte) bool {
 	return true
 }
 
-// sniff determines the format of r's data.
-func sniff(r reader) format {
-	formats, _ := atomicFormats.Load().([]format)
-	for _, f := range formats {
+func (d *Decoder) sniff(r reader) format {
+	for _, f := range d.formats {
 		b, err := r.Peek(len(f.magic))
 		if err == nil && match(f.magic, b) {
 			return f
@@ -80,13 +73,11 @@ func sniff(r reader) format {
 	return format{}
 }
 
-// Decode decodes an image that has been encoded in a registered format.
-// The string returned is the format name used during format registration.
-// Format registration is typically done by an init function in the codec-
-// specific package.
-func Decode(r io.Reader) (Image, []byte, error) {
+// Decode decodes an image in one of the registered formats.
+// Returns the decoded image, the format name, and any error.
+func (d *Decoder) Decode(r io.Reader) (Image, []byte, error) {
 	rr := asReader(r)
-	f := sniff(rr)
+	f := d.sniff(rr)
 	if f.decode == nil {
 		return nil, "", ErrFormat
 	}
@@ -94,13 +85,11 @@ func Decode(r io.Reader) (Image, []byte, error) {
 	return m, f.name, err
 }
 
-// DecodeConfig decodes the color model and dimensions of an image that has
-// been encoded in a registered format. The string returned is the format name
-// used during format registration. Format registration is typically done by
-// an init function in the codec-specific package.
-func DecodeConfig(r io.Reader) (Config, []byte, error) {
+// DecodeConfig decodes the color model and dimensions of an image
+// in one of the registered formats without decoding the entire image.
+func (d *Decoder) DecodeConfig(r io.Reader) (Config, []byte, error) {
 	rr := asReader(r)
-	f := sniff(rr)
+	f := d.sniff(rr)
 	if f.decodeConfig == nil {
 		return Config{}, "", ErrFormat
 	}

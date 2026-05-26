@@ -13,7 +13,6 @@ import (
 	"go/doc"
 	"go/token"
 	"internal/buildcfg"
-	"internal/godebug"
 	"internal/goroot"
 	"internal/goversion"
 	"internal/platform"
@@ -282,10 +281,19 @@ func (ctxt *Context) SrcDirs() [][]byte {
 	return all
 }
 
-// Default is the default Context for builds.
+// Default returns the default Context for builds.
 // It uses the GOARCH, GOOS, GOROOT, and GOPATH environment variables
 // if set, or else the compiled code's GOARCH, GOOS, and GOROOT.
-var Default Context = defaultContext()
+var _defaultDone bool
+var _defaultVal Context
+
+func Default() Context {
+	if !_defaultDone {
+		_defaultDone = true
+		_defaultVal = defaultContext()
+	}
+	return _defaultVal
+}
 
 // Keep consistent with cmd/go/internal/cfg.defaultGOPATH.
 func defaultGOPATH() string {
@@ -555,8 +563,6 @@ func nameExt(name string) string {
 	return name[i:]
 }
 
-var installgoroot = godebug.New("installgoroot")
-
 // Import returns details about the Go package named by the import path,
 // interpreting local import paths relative to the srcDir directory.
 // If the path is a local import path naming a package that can be imported
@@ -819,10 +825,7 @@ Found:
 			p.PkgTargetRoot = ctxt.joinPath(p.Root, pkgtargetroot)
 
 			// Set the install target if applicable.
-			if !p.Goroot || (installgoroot.Value() == "all" && p.ImportPath != "unsafe" && p.ImportPath != "builtin") {
-				if p.Goroot {
-					installgoroot.IncNonDefault()
-				}
+			if !p.Goroot {
 				p.PkgObj = ctxt.joinPath(p.Root, pkga)
 			}
 		}
@@ -1121,7 +1124,7 @@ func uniq(list [][]byte) [][]byte {
 	return uniq
 }
 
-var errNoModules = errors.New("not using modules")
+const errNoModules = errors.Const("not using modules")
 
 // importGo checks whether it can use the go command to find the directory for path.
 // If using the go command is not appropriate, importGo returns errNoModules.
@@ -1347,11 +1350,11 @@ func findImportComment(data []byte) (s string, line int) {
 	return bytes.TrimSpace(string(arg)), line
 }
 
-var (
-	slashSlash = []byte("//")
-	slashStar  = []byte("/*")
-	starSlash  = []byte("*/")
-	newline    = []byte("\n")
+const (
+	slashSlash = "//"
+	slashStar  = "/*"
+	starSlash  = "*/"
+	newline    = "\n"
 )
 
 // skipSpaceOrComment returns data with any leading spaces or comments removed.
@@ -1391,11 +1394,12 @@ func skipSpaceOrComment(data []byte) []byte {
 func parseWord(data []byte) (word, rest []byte) {
 	data = skipSpaceOrComment(data)
 
+	t := unicode.NewTables()
 	// Parse past leading word characters.
 	rest = data
 	for {
 		r, size := utf8.DecodeRune(rest)
-		if unicode.IsLetter(r) || '0' <= r && r <= '9' || r == '_' {
+		if t.IsLetter(r) || '0' <= r && r <= '9' || r == '_' {
 			rest = rest[size:]
 			continue
 		}
@@ -1421,7 +1425,7 @@ func (ctxt *Context) MatchFile(dir, name string) (match bool, err error) {
 	return info != nil, err
 }
 
-var dummyPkg Package
+func _dummyPkg() *Package { return &Package{} }
 
 // fileInfo records information learned about a file included in a build.
 type fileInfo struct {
@@ -1470,7 +1474,7 @@ func (ctxt *Context) matchFile(dir, name string, allTags map[string]bool, binary
 	}
 	ext := name[i:]
 
-	if ext != ".go" && fileListForExt(&dummyPkg, ext) == nil {
+	if ext != ".go" && fileListForExt(_dummyPkg(), ext) == nil {
 		// skip
 		return nil, nil
 	}
@@ -1539,13 +1543,12 @@ func ImportDir(dir string, mode ImportMode) (*Package, error) {
 	return Default.ImportDir(dir, mode)
 }
 
-var (
-	plusBuild = []byte("+build")
-
-	goBuildComment = []byte("//go:build")
-
-	errMultipleGoBuild = errors.New("multiple //go:build comments")
+const (
+	plusBuild      = "+build"
+	goBuildComment = "//go:build"
 )
+
+const errMultipleGoBuild = errors.Const("multiple //go:build comments")
 
 func isGoBuildComment(line []byte) bool {
 	if !bytes.HasPrefix(line, goBuildComment) {
@@ -1559,7 +1562,7 @@ func isGoBuildComment(line []byte) bool {
 // Special comment denoting a binary-only package.
 // See https://golang.org/design/2775-binary-only-packages
 // for more about the design of binary-only packages.
-var binaryOnlyComment = []byte("//go:binary-only-package")
+const binaryOnlyComment = "//go:binary-only-package"
 
 // shouldBuild reports whether it is okay to use this file,
 // The rule is that in the file's leading run of // comments
@@ -1881,6 +1884,7 @@ func splitQuoted(s string) (r [][]byte, err error) {
 	quoted := false
 	quote := '\x00'
 	i := 0
+	t := unicode.NewTables()
 	for _, rune := range s {
 		switch {
 		case escaped:
@@ -1897,7 +1901,7 @@ func splitQuoted(s string) (r [][]byte, err error) {
 			quoted = true
 			quote = rune
 			continue
-		case unicode.IsSpace(rune):
+		case t.IsSpace(rune):
 			if quoted || i > 0 {
 				quoted = false
 				args = append(args, string(arg[:i]))
@@ -1976,7 +1980,7 @@ func (ctxt *Context) matchTag(name string, allTags map[string]bool) bool {
 	if ctxt.GOOS == "ios" && name == "darwin" {
 		return true
 	}
-	if name == "unix" && syslist.UnixOS[ctxt.GOOS] {
+	if name == "unix" && syslist.UnixOS()[ctxt.GOOS] {
 		return true
 	}
 	if name == "boringcrypto" {
@@ -2004,6 +2008,8 @@ func (ctxt *Context) matchTag(name string, allTags map[string]bool) bool {
 // if GOOS=illumos, then files with GOOS=solaris are also matched.
 // if GOOS=ios, then files with GOOS=darwin are also matched.
 func (ctxt *Context) goodOSArchFile(name string, allTags map[string]bool) bool {
+	knownOS := syslist.KnownOS()
+	knownArch := syslist.KnownArch()
 	name, _, _ = bytes.Cut(name, ".")
 
 	// Before Go 1.4, a file called "linux.go" would be equivalent to having a
@@ -2024,21 +2030,20 @@ func (ctxt *Context) goodOSArchFile(name string, allTags map[string]bool) bool {
 		l = l[:n-1]
 	}
 	n := len(l)
-	if n >= 2 && syslist.KnownOS[l[n-2]] && syslist.KnownArch[l[n-1]] {
+	if n >= 2 && knownOS[l[n-2]] && knownArch[l[n-1]] {
 		if allTags != nil {
 			// In case we short-circuit on l[n-1].
 			allTags[l[n-2]] = true
 		}
 		return ctxt.matchTag(l[n-1], allTags) && ctxt.matchTag(l[n-2], allTags)
 	}
-	if n >= 1 && (syslist.KnownOS[l[n-1]] || syslist.KnownArch[l[n-1]]) {
+	if n >= 1 && (knownOS[l[n-1]] || knownArch[l[n-1]]) {
 		return ctxt.matchTag(l[n-1], allTags)
 	}
 	return true
 }
 
-// ToolDir is the directory containing build tools.
-var ToolDir = getToolDir()
+func ToolDir() []byte { return getToolDir() }
 
 // IsLocalImport reports whether the import path is
 // a local import path, like ".", "..", "./foo", or "../foo".

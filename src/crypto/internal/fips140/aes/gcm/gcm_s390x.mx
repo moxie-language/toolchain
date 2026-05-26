@@ -11,7 +11,6 @@ import (
 	"crypto/internal/fips140/subtle"
 	"crypto/internal/fips140deps/byteorder"
 	"crypto/internal/fips140deps/cpu"
-	"crypto/internal/impl"
 )
 
 // This file contains two implementations of AES-GCM. The first implementation
@@ -21,16 +20,11 @@ import (
 // KIMD to hash large nonces).
 
 // Keep in sync with crypto/tls.hasAESGCMHardwareSupport.
-var useGHASH = cpu.S390XHasAES && cpu.S390XHasAESCTR && cpu.S390XHasGHASH
-var useGCM = useGHASH && cpu.S390XHasAESGCM
-
-func init() {
-	impl.Register("gcm", "CPACF/KIMD", &useGHASH)
-	impl.Register("gcm", "CPACF/KMA", &useGCM)
-}
+func useGHASH() bool { return cpu.S390XHasAES() && cpu.S390XHasAESCTR() && cpu.S390XHasGHASH() }
+func useGCM() bool  { return useGHASH() && cpu.S390XHasAESGCM() }
 
 func checkGenericIsExpected() {
-	if useGHASH || useGCM {
+	if useGHASH() || useGCM() {
 		panic("gcm: internal error: using generic implementation despite hardware support")
 	}
 }
@@ -51,7 +45,7 @@ type gcmPlatformData struct {
 }
 
 func initGCM(g *GCM) {
-	if !useGCM && !useGHASH {
+	if !useGCM() && !useGHASH() {
 		return
 	}
 	// Note that hashKey is also used in the KMA codepath to hash large nonces.
@@ -155,9 +149,9 @@ func gcmAuth(out []byte, H *gcmHashKey, tagMask *[gcmBlockSize]byte, ciphertext,
 
 func seal(out []byte, g *GCM, nonce, plaintext, data []byte) {
 	switch {
-	case useGCM:
+	case useGCM():
 		sealKMA(out, g, nonce, plaintext, data)
-	case useGHASH:
+	case useGHASH():
 		sealAsm(out, g, nonce, plaintext, data)
 	default:
 		sealGeneric(out, g, nonce, plaintext, data)
@@ -178,9 +172,9 @@ func sealAsm(out []byte, g *GCM, nonce, plaintext, additionalData []byte) {
 
 func open(out []byte, g *GCM, nonce, ciphertext, data []byte) error {
 	switch {
-	case useGCM:
+	case useGCM():
 		return openKMA(out, g, nonce, ciphertext, data)
-	case useGHASH:
+	case useGHASH():
 		return openAsm(out, g, nonce, ciphertext, data)
 	default:
 		return openGeneric(out, g, nonce, ciphertext, data)

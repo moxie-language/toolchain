@@ -7,13 +7,11 @@ package net
 import (
 	"io"
 	"os"
-	"sync"
 	"time"
 )
 
 // pipeDeadline is an abstraction for handling timeouts.
 type pipeDeadline struct {
-	mu     sync.Mutex // Guards timer and cancel
 	timer  *time.Timer
 	cancel chan struct{} // Must be non-nil
 }
@@ -29,9 +27,6 @@ func makePipeDeadline() pipeDeadline {
 //
 // A zero value for t prevents timeout.
 func (d *pipeDeadline) set(t time.Time) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	if d.timer != nil && !d.timer.Stop() {
 		<-d.cancel // Wait for the timer callback to finish and close cancel
 	}
@@ -65,8 +60,6 @@ func (d *pipeDeadline) set(t time.Time) {
 
 // wait returns a channel that is closed when the deadline is exceeded.
 func (d *pipeDeadline) wait() chan struct{} {
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	return d.cancel
 }
 
@@ -85,8 +78,6 @@ func (pipeAddr) Network() []byte { return "pipe" }
 func (pipeAddr) String() string  { return "pipe" }
 
 type pipe struct {
-	wrMu sync.Mutex // Serialize Write operations
-
 	// Used by local Read to interact with remote Write.
 	// Successful receive on rdRx is always followed by send on rdTx.
 	rdRx <-chan []byte
@@ -97,7 +88,7 @@ type pipe struct {
 	wrTx chan<- []byte
 	wrRx <-chan int
 
-	once       sync.Once // Protects closing localDone
+	closeDone  bool // Protects closing localDone
 	localDone  chan struct{}
 	remoteDone <-chan struct{}
 
@@ -153,7 +144,7 @@ func (p *pipe) read(b []byte) (n int, err error) {
 	case isClosedChan(p.remoteDone):
 		return 0, io.EOF
 	case isClosedChan(p.readDeadline.wait()):
-		return 0, os.ErrDeadlineExceeded
+		return 0, os.ErrDeadlineExceeded()
 	}
 
 	select {
@@ -166,7 +157,7 @@ func (p *pipe) read(b []byte) (n int, err error) {
 	case <-p.remoteDone:
 		return 0, io.EOF
 	case <-p.readDeadline.wait():
-		return 0, os.ErrDeadlineExceeded
+		return 0, os.ErrDeadlineExceeded()
 	}
 }
 
@@ -185,11 +176,9 @@ func (p *pipe) write(b []byte) (n int, err error) {
 	case isClosedChan(p.remoteDone):
 		return 0, io.ErrClosedPipe
 	case isClosedChan(p.writeDeadline.wait()):
-		return 0, os.ErrDeadlineExceeded
+		return 0, os.ErrDeadlineExceeded()
 	}
 
-	p.wrMu.Lock() // Ensure entirety of b is written together
-	defer p.wrMu.Unlock()
 	for once := true; once || len(b) > 0; once = false {
 		select {
 		case p.wrTx <- b:
@@ -201,7 +190,7 @@ func (p *pipe) write(b []byte) (n int, err error) {
 		case <-p.remoteDone:
 			return n, io.ErrClosedPipe
 		case <-p.writeDeadline.wait():
-			return n, os.ErrDeadlineExceeded
+			return n, os.ErrDeadlineExceeded()
 		}
 	}
 	return n, nil
@@ -233,6 +222,6 @@ func (p *pipe) SetWriteDeadline(t time.Time) error {
 }
 
 func (p *pipe) Close() error {
-	p.once.Do(func() { close(p.localDone) })
+	if !p.closeDone { p.closeDone = true; close(p.localDone) }
 	return nil
 }

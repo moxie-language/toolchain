@@ -33,6 +33,7 @@ type Scanner struct {
 	src  []byte       // source
 	err  ErrorHandler // error reporting; or nil
 	mode Mode         // scanning mode
+	utab *unicode.Tables
 
 	// scanning state
 	ch         rune      // current character
@@ -140,6 +141,7 @@ func (s *Scanner) Init(file *token.File, src []byte, err ErrorHandler, mode Mode
 	s.src = src
 	s.err = err
 	s.mode = mode
+	s.utab = unicode.NewTables()
 
 	s.ch = ' '
 	s.offset = 0
@@ -227,7 +229,7 @@ exit:
 
 	// interpret line directives
 	// (//line directives must start at the beginning of the current line)
-	if next >= 0 /* implies valid comment */ && (lit[1] == '*' || offs == s.lineOffset) && bytes.HasPrefix(lit[2:], prefix) {
+	if next >= 0 /* implies valid comment */ && (lit[1] == '*' || offs == s.lineOffset) && bytes.HasPrefix(lit[2:], _linePrefix) {
 		s.updateLineInfo(next, offs, lit)
 	}
 
@@ -238,7 +240,7 @@ exit:
 	return string(lit), nlOffset
 }
 
-var prefix = []byte("line ")
+const _linePrefix = "line "
 
 // updateLineInfo parses the incoming comment text at offset offs
 // as a line directive. If successful, it updates the line info table
@@ -316,12 +318,12 @@ func trailingDigits(text []byte) (int, int, bool) {
 	return i + 1, int(n), err == nil
 }
 
-func isLetter(ch rune) bool {
-	return 'a' <= lower(ch) && lower(ch) <= 'z' || ch == '_' || ch >= utf8.RuneSelf && unicode.IsLetter(ch)
+func (s *Scanner) isLetter(ch rune) bool {
+	return 'a' <= lower(ch) && lower(ch) <= 'z' || ch == '_' || ch >= utf8.RuneSelf && s.utab.IsLetter(ch)
 }
 
-func isDigit(ch rune) bool {
-	return isDecimal(ch) || ch >= utf8.RuneSelf && unicode.IsDigit(ch)
+func (s *Scanner) isDigit(ch rune) bool {
+	return isDecimal(ch) || ch >= utf8.RuneSelf && s.utab.IsDigit(ch)
 }
 
 // scanIdentifier reads the string of valid identifier characters at s.offset.
@@ -361,7 +363,7 @@ func (s *Scanner) scanIdentifier() string {
 		// scanIdentifier is only called when s.ch is a letter, so calling s.next()
 		// at s.rdOffset resets the scanner state.
 		s.next()
-		for isLetter(s.ch) || isDigit(s.ch) {
+		for s.isLetter(s.ch) || s.isDigit(s.ch) {
 			s.next()
 		}
 		goto exit
@@ -815,7 +817,7 @@ scanAgain:
 	// determine token value
 	insertSemi := false
 	switch ch := s.ch; {
-	case isLetter(ch):
+	case s.isLetter(ch):
 		lit = s.scanIdentifier()
 		if len(lit) > 1 {
 			// keywords are longer than one letter - avoid lookup otherwise

@@ -12,7 +12,6 @@ import (
 	"io"
 	"math/bits"
 	"strconv"
-	"sync"
 )
 
 const (
@@ -24,10 +23,6 @@ const (
 	maxNumDist = 30
 	numCodes   = 19 // number of codes in Huffman meta-code
 )
-
-// Initialize the fixedHuffmanDecoder only once upon first use.
-var fixedOnce sync.Once
-var fixedHuffmanDecoder huffmanDecoder
 
 // A CorruptInputError reports the presence of corrupt input at a given offset.
 type CorruptInputError int64
@@ -284,6 +279,9 @@ type decompressor struct {
 	// Output history, buffer.
 	dict dictDecoder
 
+	// Fixed Huffman decoder, initialized once per decompressor.
+	fixedHuffmanDecoder huffmanDecoder
+
 	// Temporary buffer (avoids repeated allocation).
 	buf [4]byte
 
@@ -315,7 +313,7 @@ func (f *decompressor) nextBlock() {
 		f.dataBlock()
 	case 1:
 		// compressed, fixed Huffman tables
-		f.hl = &fixedHuffmanDecoder
+		f.hl = &f.fixedHuffmanDecoder
 		f.hd = nil
 		f.huffmanBlock()
 	case 2:
@@ -362,9 +360,10 @@ func (f *decompressor) Close() error {
 // RFC 1951 section 3.2.7.
 // Compression with dynamic Huffman codes
 
-var codeOrder = [...]int{16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15}
-
 func (f *decompressor) readHuffman() error {
+	// RFC 1951 section 3.2.7.
+	codeOrder := [19]int{16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15}
+
 	// HLIT[5], HDIST[5], HCLEN[4].
 	for f.nb < 5+5+4 {
 		if err := f.moreBits(); err != nil {
@@ -763,24 +762,22 @@ func (f *decompressor) makeReader(r io.Reader) {
 	f.r = f.rBuf
 }
 
-func fixedHuffmanDecoderInit() {
-	fixedOnce.Do(func() {
-		// These come from the RFC section 3.2.6.
-		var bits [288]int
-		for i := 0; i < 144; i++ {
-			bits[i] = 8
-		}
-		for i := 144; i < 256; i++ {
-			bits[i] = 9
-		}
-		for i := 256; i < 280; i++ {
-			bits[i] = 7
-		}
-		for i := 280; i < 288; i++ {
-			bits[i] = 8
-		}
-		fixedHuffmanDecoder.init(bits[:])
-	})
+func (f *decompressor) initFixedHuffmanDecoder() {
+	// These come from the RFC section 3.2.6.
+	var bits [288]int
+	for i := 0; i < 144; i++ {
+		bits[i] = 8
+	}
+	for i := 144; i < 256; i++ {
+		bits[i] = 9
+	}
+	for i := 256; i < 280; i++ {
+		bits[i] = 7
+	}
+	for i := 280; i < 288; i++ {
+		bits[i] = 8
+	}
+	f.fixedHuffmanDecoder.init(bits[:])
 }
 
 func (f *decompressor) Reset(r io.Reader, dict []byte) error {
@@ -791,6 +788,7 @@ func (f *decompressor) Reset(r io.Reader, dict []byte) error {
 		dict:     f.dict,
 		step:     (*decompressor).nextBlock,
 	}
+	f.initFixedHuffmanDecoder()
 	f.makeReader(r)
 	f.dict.init(maxMatchOffset, dict)
 	return nil
@@ -805,9 +803,8 @@ func (f *decompressor) Reset(r io.Reader, dict []byte) error {
 //
 // The [io.ReadCloser] returned by NewReader also implements [Resetter].
 func NewReader(r io.Reader) io.ReadCloser {
-	fixedHuffmanDecoderInit()
-
 	var f decompressor
+	f.initFixedHuffmanDecoder()
 	f.makeReader(r)
 	f.bits = &[maxNumLit + maxNumDist]int{}
 	f.codebits = &[numCodes]int{}
@@ -824,9 +821,8 @@ func NewReader(r io.Reader) io.ReadCloser {
 //
 // The ReadCloser returned by NewReaderDict also implements [Resetter].
 func NewReaderDict(r io.Reader, dict []byte) io.ReadCloser {
-	fixedHuffmanDecoderInit()
-
 	var f decompressor
+	f.initFixedHuffmanDecoder()
 	f.makeReader(r)
 	f.bits = &[maxNumLit + maxNumDist]int{}
 	f.codebits = &[numCodes]int{}

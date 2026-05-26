@@ -5,7 +5,6 @@ package runtime
 
 import (
 	"internal/task"
-	"sync/atomic"
 )
 
 // Waiter queue for semaphores. Maps sema address → linked list of waiting tasks.
@@ -33,12 +32,9 @@ func semaAlloc() *semaWaiter {
 // semacquire1 blocks until *addr > 0, then decrements it.
 func semacquire1(addr *uint32, lifo bool) {
 	for {
-		v := atomic.LoadUint32(addr)
-		if v > 0 {
-			if atomic.CompareAndSwapUint32(addr, v, v-1) {
-				return
-			}
-			continue
+		if *addr > 0 {
+			*addr--
+			return
 		}
 		if !hasScheduler {
 			// Single-threaded: spin on event loop until released.
@@ -78,7 +74,7 @@ func semacquire1(addr *uint32, lifo bool) {
 
 // semrelease1 increments *addr and wakes one waiting goroutine if any.
 func semrelease1(addr *uint32) {
-	atomic.AddUint32(addr, 1)
+	*addr++
 
 	// Find and wake a waiter for this address.
 	var prev *semaWaiter

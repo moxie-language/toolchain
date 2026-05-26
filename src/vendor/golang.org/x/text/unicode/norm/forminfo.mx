@@ -150,10 +150,11 @@ func (p Properties) Decomposition() []byte {
 	if p.index == 0 {
 		return nil
 	}
+	d := _decomps()
 	i := p.index
-	n := decomps[i] & headerLenMask
+	n := d[i] & headerLenMask
 	i++
-	return decomps[i : i+uint16(n)]
+	return d[i : i+uint16(n)]
 }
 
 // Size returns the length of UTF-8 encoding of the rune.
@@ -166,19 +167,19 @@ func (p Properties) CCC() uint8 {
 	if p.index >= firstCCCZeroExcept {
 		return 0
 	}
-	return ccc[p.ccc]
+	return _ccc()[p.ccc]
 }
 
 // LeadCCC returns the CCC of the first rune in the decomposition.
 // If there is no decomposition, LeadCCC equals CCC.
 func (p Properties) LeadCCC() uint8 {
-	return ccc[p.ccc]
+	return _ccc()[p.ccc]
 }
 
 // TrailCCC returns the CCC of the last rune in the decomposition.
 // If there is no decomposition, TrailCCC equals CCC.
 func (p Properties) TrailCCC() uint8 {
-	return ccc[p.tccc]
+	return _ccc()[p.tccc]
 }
 
 func buildRecompMap() {
@@ -186,8 +187,8 @@ func buildRecompMap() {
 	var buf [8]byte
 	for i := 0; i < len(recompMapPacked); i += 8 {
 		copy(buf[:], recompMapPacked[i:i+8])
-		key := binary.BigEndian.Uint32(buf[:4])
-		val := binary.BigEndian.Uint32(buf[4:])
+		key := binary.BigEndian().Uint32(buf[:4])
+		val := binary.BigEndian().Uint32(buf[4:])
 		recompMap[key] = rune(val)
 	}
 }
@@ -224,17 +225,17 @@ func lookupInfoNFKC(b input, i int) Properties {
 // Properties returns properties for the first rune in s.
 func (f Form) Properties(s []byte) Properties {
 	if f == NFC || f == NFD {
-		return compInfo(nfcData.lookup(s))
+		return compInfo(_nfcData().lookup(s))
 	}
-	return compInfo(nfkcData.lookup(s))
+	return compInfo(_nfkcData().lookup(s))
 }
 
 // PropertiesString returns properties for the first rune in s.
 func (f Form) PropertiesString(s []byte) Properties {
 	if f == NFC || f == NFD {
-		return compInfo(nfcData.lookupString(s))
+		return compInfo(_nfcData().lookupString(s))
 	}
-	return compInfo(nfkcData.lookupString(s))
+	return compInfo(_nfkcData().lookupString(s))
 }
 
 // compInfo converts the information contained in v and sz
@@ -256,12 +257,13 @@ func compInfo(v uint16, sz int) Properties {
 		return p
 	}
 	// has decomposition
-	h := decomps[v]
+	d := _decomps()
+	h := d[v]
 	f := (qcInfo(h&headerFlagsMask) >> 2) | 0x4
 	p := Properties{size: uint8(sz), flags: f, index: v}
 	if v >= firstCCC {
 		v += uint16(h&headerLenMask) + 1
-		c := decomps[v]
+		c := d[v]
 		p.tccc = c >> 2
 		p.flags |= qcInfo(c & 0x3)
 		if v >= firstLeadingCCC {
@@ -272,7 +274,7 @@ func compInfo(v uint16, sz int) Properties {
 				p.index = 0
 				return p
 			}
-			p.ccc = decomps[v+1]
+			p.ccc = d[v+1]
 		}
 	}
 	return p

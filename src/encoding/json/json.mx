@@ -214,7 +214,8 @@ func appendString(buf []byte, s []byte) []byte {
 			esc = []byte(`\f`)
 		default:
 			if c < 0x20 {
-				esc = []byte{'\\', 'u', '0', '0', hexChars[c>>4], hexChars[c&0x0f]}
+				hc := _hexChars()
+				esc = []byte{'\\', 'u', '0', '0', hc[c>>4], hc[c&0x0f]}
 			} else {
 				continue
 			}
@@ -228,7 +229,9 @@ func appendString(buf []byte, s []byte) []byte {
 	return buf
 }
 
-var hexChars = [16]byte{'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'}
+func _hexChars() [16]byte {
+	return [16]byte{'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'}
+}
 
 // --- Tag parsing ---
 
@@ -244,12 +247,21 @@ type structFields struct {
 	params []fieldParams
 }
 
-var fieldCacheMu bool // single-threaded, no real mutex needed
-var fieldCacheMap = map[uintptr]*structFields{}
+var _fieldCacheMapDone bool
+var _fieldCacheMap map[uintptr]*structFields
+
+func fieldCache() map[uintptr]*structFields {
+	if !_fieldCacheMapDone {
+		_fieldCacheMapDone = true
+		_fieldCacheMap = map[uintptr]*structFields{}
+	}
+	return _fieldCacheMap
+}
 
 func structFieldsFor(typ *_rawType) *structFields {
 	key := uintptr(unsafe.Pointer(typ))
-	if sf, ok := fieldCacheMap[key]; ok {
+	fc := fieldCache()
+	if sf, ok := fc[key]; ok {
 		return sf
 	}
 	u := typ.underlying()
@@ -270,7 +282,7 @@ func structFieldsFor(typ *_rawType) *structFields {
 			sf.byName[string(p.jsonName)] = i
 		}
 	}
-	fieldCacheMap[key] = sf
+	fc[key] = sf
 	return sf
 }
 

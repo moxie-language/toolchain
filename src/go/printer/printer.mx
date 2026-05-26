@@ -13,7 +13,6 @@ import (
 	"io"
 	"os"
 	"bytes"
-	"sync"
 	"text/tabwriter"
 	"unicode"
 )
@@ -491,7 +490,8 @@ func commonPrefix(a, b string) string {
 
 // trimRight returns s with trailing whitespace removed.
 func trimRight(s string) string {
-	return bytes.TrimRightFunc(s, unicode.IsSpace)
+	t := unicode.NewTables()
+	return bytes.TrimRightFunc(s, t.IsSpace)
 }
 
 // stripCommonPrefix removes a common prefix from /*-style comment lines (unless no
@@ -992,7 +992,7 @@ func (p *printer) print(args ...any) {
 			p.lastTok = token.STRING
 
 		default:
-			fmt.Fprintf(os.Stderr, "print: unsupported argument %v (%T)\n", arg, arg)
+			fmt.Fprintf(os.Stderr(), "print: unsupported argument %v (%T)\n", arg, arg)
 			panic("go/printer type")
 		}
 		// data != ""
@@ -1213,7 +1213,7 @@ func (p *trimmer) resetSpace() {
 //              However, this would mess up any formatting done by
 //              the tabwriter.
 
-var aNewline = []byte("\n")
+const aNewline = "\n"
 
 func (p *trimmer) Write(data []byte) (n int, err error) {
 	// invariants:
@@ -1320,40 +1320,20 @@ type Config struct {
 	Indent   int  // default: 0 (all code is indented at least by this much)
 }
 
-var printerPool = sync.Pool{
-	New: func() any {
-		return &printer{
-			// Whitespace sequences are short.
-			wsbuf: []whiteSpace{:0:16},
-			// We start the printer with a 16K output buffer, which is currently
-			// larger than about 80% of Go files in the standard library.
-			output: []byte{:0:16<<10},
-		}
-	},
-}
-
 func newPrinter(cfg *Config, fset *token.FileSet, nodeSizes map[ast.Node]int) *printer {
-	p := printerPool.Get().(*printer)
-	*p = printer{
+	return &printer{
 		Config:    *cfg,
 		fset:      fset,
 		pos:       token.Position{Line: 1, Column: 1},
 		out:       token.Position{Line: 1, Column: 1},
-		wsbuf:     p.wsbuf[:0],
+		wsbuf:     []whiteSpace{:0:16},
 		nodeSizes: nodeSizes,
 		cachedPos: -1,
-		output:    p.output[:0],
+		output:    []byte{:0:16<<10},
 	}
-	return p
 }
 
 func (p *printer) free() {
-	// Hard limit on buffer size; see https://golang.org/issue/23199.
-	if cap(p.output) > 64<<10 {
-		return
-	}
-
-	printerPool.Put(p)
 }
 
 // fprint implements Fprint and takes a nodesSizes map for setting up the printer state.

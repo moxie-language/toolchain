@@ -11,25 +11,20 @@ import (
 	"fmt"
 	"hash"
 	"hash/crc32"
-	"internal/godebug"
 	"io"
 	"io/fs"
 	"os"
 	"path"
-	"path/filepath"
 	"slices"
 	"bytes"
-	"sync"
 	"time"
 )
 
-var zipinsecurepath = godebug.New("zipinsecurepath")
-
-var (
-	ErrFormat       = errors.New("zip: not a valid zip file")
-	ErrAlgorithm    = errors.New("zip: unsupported compression algorithm")
-	ErrChecksum     = errors.New("zip: checksum error")
-	ErrInsecurePath = errors.New("zip: insecure file path")
+const (
+	ErrFormat       = errors.Const("zip: not a valid zip file")
+	ErrAlgorithm    = errors.Const("zip: unsupported compression algorithm")
+	ErrChecksum     = errors.Const("zip: checksum error")
+	ErrInsecurePath = errors.Const("zip: insecure file path")
 )
 
 // A Reader serves content from a ZIP archive.
@@ -38,6 +33,7 @@ type Reader struct {
 	File          []*File
 	Comment       string
 	decompressors map[uint16]Decompressor
+	cc            *crc32.CRC32
 
 	// Some JAR files are zip files with a prefix that is a bash script.
 	// The baseOffset field is the start of the zip file proper.
@@ -45,7 +41,7 @@ type Reader struct {
 
 	// fileList is a list of files sorted by ename,
 	// for use by the Open method.
-	fileListOnce sync.Once
+	fileListDone bool
 	fileList     []fileListEntry
 }
 
@@ -108,7 +104,7 @@ func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
 	if size < 0 {
 		return nil, errors.New("zip: size cannot be negative")
 	}
-	zr := &Reader{}
+	zr := &Reader{cc: crc32.NewCRC32()}
 	var err error
 	if err = zr.init(r, size); err != nil && err != ErrInsecurePath {
 		return nil, err
@@ -159,20 +155,6 @@ func (r *Reader) init(rdr io.ReaderAt, size int64) error {
 		// Return the readDirectoryHeader error if we read
 		// the wrong number of directory entries.
 		return err
-	}
-	if zipinsecurepath.Value() == "0" {
-		for _, f := range r.File {
-			if f.Name == "" {
-				// Zip permits an empty file name field.
-				continue
-			}
-			// The zip specification states that names must use forward slashes,
-			// so consider any backslashes in the name insecure.
-			if !filepath.IsLocal(f.Name) || bytes.Contains(f.Name, `\`) {
-				zipinsecurepath.IncNonDefault()
-				return ErrInsecurePath
-			}
-		}
 	}
 	return nil
 }
@@ -249,7 +231,7 @@ func (f *File) Open() (io.ReadCloser, error) {
 	}
 	rc = &checksumReader{
 		rc:   rc,
-		hash: crc32.NewIEEE(),
+		hash: f.zip.cc.NewIEEE(),
 		f:    f,
 		desr: desr,
 	}
@@ -472,7 +454,7 @@ parseExtras:
 				ts := int64(attrBuf.uint64()) // ModTime since Windows epoch
 				secs := ts / ticksPerSecond
 				nsecs := (1e9 / ticksPerSecond) * (ts % ticksPerSecond)
-				epoch := time.Date(1601, time.January, 1, 0, 0, 0, 0, time.UTC)
+				epoch := time.Date(1601, time.January, 1, 0, 0, 0, 0, time.UTC())
 				modified = time.Unix(epoch.Unix()+secs, nsecs)
 			}
 		case unixExtraID, infoZipUnixExtraID:
@@ -721,19 +703,19 @@ func (b *readBuf) uint8() uint8 {
 }
 
 func (b *readBuf) uint16() uint16 {
-	v := binary.LittleEndian.Uint16(*b)
+	v := binary.LittleEndian().Uint16(*b)
 	*b = (*b)[2:]
 	return v
 }
 
 func (b *readBuf) uint32() uint32 {
-	v := binary.LittleEndian.Uint32(*b)
+	v := binary.LittleEndian().Uint32(*b)
 	*b = (*b)[4:]
 	return v
 }
 
 func (b *readBuf) uint64() uint64 {
-	v := binary.LittleEndian.Uint64(*b)
+	v := binary.LittleEndian().Uint64(*b)
 	*b = (*b)[8:]
 	return v
 }
@@ -804,7 +786,8 @@ func toValidName(name string) string {
 }
 
 func (r *Reader) initFileList() {
-	r.fileListOnce.Do(func() {
+	if !r.fileListDone {
+		r.fileListDone = true
 		// Preallocate the minimum size of the index.
 		// We may also synthesize additional directory entries.
 		r.fileList = []fileListEntry{:0:len(r.File)}
@@ -869,7 +852,7 @@ func (r *Reader) initFileList() {
 		slices.SortFunc(r.fileList, func(a, b fileListEntry) int {
 			return fileEntryCompare(a.name, b.name)
 		})
-	})
+	}
 }
 
 func fileEntryCompare(x, y string) int {
@@ -914,11 +897,11 @@ func split(name string) (dir, elem string, isDir bool) {
 	return name[:i], name[i+1:], isDir
 }
 
-var dotFile = &fileListEntry{name: "./", isDir: true}
+func _dotFile() *fileListEntry { return &fileListEntry{name: "./", isDir: true} }
 
 func (r *Reader) openLookup(name string) *fileListEntry {
 	if name == "." {
-		return dotFile
+		return _dotFile()
 	}
 
 	dir, elem, _ := split(name)

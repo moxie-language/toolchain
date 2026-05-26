@@ -11,7 +11,6 @@ import (
 	"errors"
 	"hash"
 	"internal/byteorder"
-	"sync"
 )
 
 // The size of a CRC-64 checksum in bytes.
@@ -29,16 +28,19 @@ const (
 // Table is a 256-word table representing the polynomial for efficient processing.
 type Table [256]uint64
 
-var (
-	slicing8TableISO  *[8]Table
-	slicing8TableECMA *[8]Table
-)
+var slicing8Tables struct {
+	Done bool
+	ISO  *[8]Table
+	ECMA *[8]Table
+}
 
-var buildSlicing8TablesOnce = sync.OnceFunc(buildSlicing8Tables)
-
-func buildSlicing8Tables() {
-	slicing8TableISO = makeSlicingBy8Table(makeTable(ISO))
-	slicing8TableECMA = makeSlicingBy8Table(makeTable(ECMA))
+func buildSlicing8TablesOnce() {
+	if slicing8Tables.Done {
+		return
+	}
+	slicing8Tables.Done = true
+	slicing8Tables.ISO = makeSlicingBy8Table(makeTable(ISO))
+	slicing8Tables.ECMA = makeSlicingBy8Table(makeTable(ECMA))
 }
 
 // MakeTable returns a [Table] constructed from the specified polynomial.
@@ -47,9 +49,9 @@ func MakeTable(poly uint64) *Table {
 	buildSlicing8TablesOnce()
 	switch poly {
 	case ISO:
-		return &slicing8TableISO[0]
+		return &slicing8Tables.ISO[0]
 	case ECMA:
-		return &slicing8TableECMA[0]
+		return &slicing8Tables.ECMA[0]
 	default:
 		return makeTable(poly)
 	}
@@ -144,10 +146,10 @@ func update(crc uint64, tab *Table, p []byte) uint64 {
 	// Table comparison is somewhat expensive, so avoid it for small sizes
 	for len(p) >= 64 {
 		var helperTable *[8]Table
-		if *tab == slicing8TableECMA[0] {
-			helperTable = slicing8TableECMA
-		} else if *tab == slicing8TableISO[0] {
-			helperTable = slicing8TableISO
+		if *tab == slicing8Tables.ECMA[0] {
+			helperTable = slicing8Tables.ECMA
+		} else if *tab == slicing8Tables.ISO[0] {
+			helperTable = slicing8Tables.ISO
 			// For smaller sizes creating extended table takes too much time
 		} else if len(p) >= 2048 {
 			// According to the tests between various x86 and arm CPUs, 2k is a reasonable

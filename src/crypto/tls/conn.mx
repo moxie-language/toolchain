@@ -15,11 +15,8 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-	"internal/godebug"
 	"io"
 	"net"
-	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -35,9 +32,8 @@ type Conn struct {
 	// isHandshakeComplete is true if the connection is currently transferring
 	// application data (i.e. is not currently processing a handshake).
 	// isHandshakeComplete is true implies handshakeErr == nil.
-	isHandshakeComplete atomic.Bool
-	// constant after handshake; protected by handshakeMutex
-	handshakeMutex sync.Mutex
+	isHandshakeComplete bool
+	// constant after handshake
 	handshakeErr   error   // error resulting from handshake
 	vers           uint16  // TLS version
 	haveVers       bool    // version has been negotiated
@@ -118,7 +114,7 @@ type Conn struct {
 
 	// activeCall indicates whether Close has been call in the low bit.
 	// the rest of the bits are the number of goroutines in Conn.Write.
-	activeCall atomic.Int32
+	activeCall int32
 
 	tmp [16]byte
 }
@@ -167,8 +163,6 @@ func (c *Conn) NetConn() net.Conn {
 // A halfConn represents one direction of the record layer
 // connection, either sending or receiving.
 type halfConn struct {
-	sync.Mutex
-
 	err     error  // first permanent error
 	version uint16 // protocol version
 	cipher  any    // cipher algorithm
@@ -610,7 +604,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 	if c.in.err != nil {
 		return c.in.err
 	}
-	handshakeComplete := c.isHandshakeComplete.Load()
+	handshakeComplete := c.isHandshakeComplete
 
 	// This function modifies c.rawInput, which owns the c.input memory.
 	if c.input.Len() != 0 {
@@ -863,8 +857,6 @@ func (c *Conn) sendAlertLocked(err alert) error {
 
 // sendAlert sends a TLS alert message.
 func (c *Conn) sendAlert(err alert) error {
-	c.out.Lock()
-	defer c.out.Unlock()
 	return c.sendAlertLocked(err)
 }
 
@@ -968,14 +960,6 @@ func (c *Conn) flush() (int, error) {
 	return n, err
 }
 
-// outBufPool pools the record-sized scratch buffers used by writeRecordLocked.
-var outBufPool = sync.Pool{
-	New: func() any {
-		b := []byte{:0}
-		return &b
-	},
-}
-
 // writeRecordLocked writes a TLS record with the given type and payload to the
 // connection and updates the record layer state.
 func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
@@ -992,17 +976,7 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
 		return len(data), nil
 	}
 
-	outBufPtr := outBufPool.Get().(*[]byte)
-	outBuf := *outBufPtr
-	defer func() {
-		// You might be tempted to simplify this by just passing &outBuf to Put,
-		// but that would make the local copy of the outBuf slice header escape
-		// to the heap, causing an allocation. Instead, we keep around the
-		// pointer to the slice header returned by Get, which is already on the
-		// heap, and overwrite and return that.
-		*outBufPtr = outBuf
-		outBufPool.Put(outBufPtr)
-	}()
+	outBuf := []byte{:0}
 
 	var n int
 	for len(data) > 0 {
@@ -1053,9 +1027,6 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
 // the record layer state. If transcript is non-nil the marshaled message is
 // written to it.
 func (c *Conn) writeHandshakeRecord(msg handshakeMessage, transcript transcriptHash) (int, error) {
-	c.out.Lock()
-	defer c.out.Unlock()
-
 	data, err := msg.marshal()
 	if err != nil {
 		return 0, err
@@ -1070,8 +1041,6 @@ func (c *Conn) writeHandshakeRecord(msg handshakeMessage, transcript transcriptH
 // writeChangeCipherRecord writes a ChangeCipherSpec message to the connection and
 // updates the record layer state.
 func (c *Conn) writeChangeCipherRecord() error {
-	c.out.Lock()
-	defer c.out.Unlock()
 	_, err := c.writeRecordLocked(recordTypeChangeCipherSpec, []byte{1})
 	return err
 }
@@ -1190,8 +1159,8 @@ func (c *Conn) unmarshalHandshakeMessage(data []byte, transcript transcriptHash)
 	return m, nil
 }
 
-var (
-	errShutdown = errors.New("tls: protocol is shutdown")
+const (
+	errShutdown = errors.Const("tls: protocol is shutdown")
 )
 
 // Write writes data to the connection.
@@ -1202,29 +1171,22 @@ var (
 // [Conn.SetWriteDeadline].
 func (c *Conn) Write(b []byte) (int, error) {
 	// interlock with Close below
-	for {
-		x := c.activeCall.Load()
-		if x&1 != 0 {
-			return 0, net.ErrClosed
-		}
-		if c.activeCall.CompareAndSwap(x, x+2) {
-			break
-		}
+	x := c.activeCall
+	if x&1 != 0 {
+		return 0, net.ErrClosed()
 	}
-	defer c.activeCall.Add(-2)
+	c.activeCall = x + 2
+	defer func() { c.activeCall -= 2 }()
 
 	if err := c.Handshake(); err != nil {
 		return 0, err
 	}
 
-	c.out.Lock()
-	defer c.out.Unlock()
-
 	if err := c.out.err; err != nil {
 		return 0, err
 	}
 
-	if !c.isHandshakeComplete.Load() {
+	if !c.isHandshakeComplete {
 		return 0, alertInternalError
 	}
 
@@ -1291,10 +1253,7 @@ func (c *Conn) handleRenegotiation() error {
 		return errors.New("tls: unknown Renegotiation value")
 	}
 
-	c.handshakeMutex.Lock()
-	defer c.handshakeMutex.Unlock()
-
-	c.isHandshakeComplete.Store(false)
+	c.isHandshakeComplete = false
 	if c.handshakeErr = c.clientHandshake(context.Background()); c.handshakeErr == nil {
 		c.handshakes++
 	}
@@ -1344,9 +1303,6 @@ func (c *Conn) handleKeyUpdate(keyUpdate *keyUpdateMsg) error {
 	}
 
 	if keyUpdate.updateRequested {
-		c.out.Lock()
-		defer c.out.Unlock()
-
 		msg := &keyUpdateMsg{}
 		msgBytes, err := msg.marshal()
 		if err != nil {
@@ -1387,9 +1343,6 @@ func (c *Conn) Read(b []byte) (int, error) {
 		return 0, nil
 	}
 
-	c.in.Lock()
-	defer c.in.Unlock()
-
 	for c.input.Len() == 0 {
 		if err := c.readRecord(); err != nil {
 			return 0, err
@@ -1423,16 +1376,11 @@ func (c *Conn) Read(b []byte) (int, error) {
 // Close closes the connection.
 func (c *Conn) Close() error {
 	// Interlock with Conn.Write above.
-	var x int32
-	for {
-		x = c.activeCall.Load()
-		if x&1 != 0 {
-			return net.ErrClosed
-		}
-		if c.activeCall.CompareAndSwap(x, x|1) {
-			break
-		}
+	x := c.activeCall
+	if x&1 != 0 {
+		return net.ErrClosed()
 	}
+	c.activeCall = x | 1
 	if x != 0 {
 		// io.Writer and io.Closer should not be used concurrently.
 		// If Close is called while a Write is currently in-flight,
@@ -1444,7 +1392,7 @@ func (c *Conn) Close() error {
 	}
 
 	var alertErr error
-	if c.isHandshakeComplete.Load() {
+	if c.isHandshakeComplete {
 		if err := c.closeNotify(); err != nil {
 			alertErr = fmt.Errorf("tls: failed to send closeNotify alert (but connection was closed anyway): %w", err)
 		}
@@ -1456,13 +1404,13 @@ func (c *Conn) Close() error {
 	return alertErr
 }
 
-var errEarlyCloseWrite = errors.New("tls: CloseWrite called before handshake complete")
+const errEarlyCloseWrite = errors.Const("tls: CloseWrite called before handshake complete")
 
 // CloseWrite shuts down the writing side of the connection. It should only be
 // called once the handshake has completed and does not call CloseWrite on the
 // underlying connection. Most callers should just use [Conn.Close].
 func (c *Conn) CloseWrite() error {
-	if !c.isHandshakeComplete.Load() {
+	if !c.isHandshakeComplete {
 		return errEarlyCloseWrite
 	}
 
@@ -1470,9 +1418,6 @@ func (c *Conn) CloseWrite() error {
 }
 
 func (c *Conn) closeNotify() error {
-	c.out.Lock()
-	defer c.out.Unlock()
-
 	if !c.closeNotifySent {
 		// Set a Write Deadline to prevent possibly blocking forever.
 		c.SetWriteDeadline(time.Now().Add(time.Second * 5))
@@ -1518,10 +1463,9 @@ func (c *Conn) HandshakeContext(ctx context.Context) error {
 }
 
 func (c *Conn) handshakeContext(ctx context.Context) (ret error) {
-	// Fast sync/atomic-based exit if there is no handshake in flight and the
-	// last one succeeded without an error. Avoids the expensive context setup
-	// and mutex for most Read and Write calls.
-	if c.isHandshakeComplete.Load() {
+	// Fast exit if there is no handshake in flight and the
+	// last one succeeded without an error.
+	if c.isHandshakeComplete {
 		return nil
 	}
 
@@ -1547,18 +1491,12 @@ func (c *Conn) handshakeContext(ctx context.Context) (ret error) {
 		}()
 	}
 
-	c.handshakeMutex.Lock()
-	defer c.handshakeMutex.Unlock()
-
 	if err := c.handshakeErr; err != nil {
 		return err
 	}
-	if c.isHandshakeComplete.Load() {
+	if c.isHandshakeComplete {
 		return nil
 	}
-
-	c.in.Lock()
-	defer c.in.Unlock()
 
 	c.handshakeErr = c.handshakeFn(handshakeCtx)
 	if c.handshakeErr == nil {
@@ -1569,10 +1507,10 @@ func (c *Conn) handshakeContext(ctx context.Context) (ret error) {
 		c.flush()
 	}
 
-	if c.handshakeErr == nil && !c.isHandshakeComplete.Load() {
+	if c.handshakeErr == nil && !c.isHandshakeComplete {
 		c.handshakeErr = errors.New("tls: internal error: handshake should have had a result")
 	}
-	if c.handshakeErr != nil && c.isHandshakeComplete.Load() {
+	if c.handshakeErr != nil && c.isHandshakeComplete {
 		panic("tls: internal error: handshake returned an error but is marked successful")
 	}
 
@@ -1586,12 +1524,10 @@ func (c *Conn) handshakeContext(ctx context.Context) (ret error) {
 				return err
 			}
 		} else {
-			c.out.Lock()
 			a, ok := c.out.err.(alert)
 			if !ok {
 				a = alertInternalError
 			}
-			c.out.Unlock()
 			// Return an error which wraps both the handshake error and
 			// any alert error we may have sent, or alertInternalError
 			// if we didn't send an alert.
@@ -1607,16 +1543,12 @@ func (c *Conn) handshakeContext(ctx context.Context) (ret error) {
 
 // ConnectionState returns basic TLS details about the connection.
 func (c *Conn) ConnectionState() ConnectionState {
-	c.handshakeMutex.Lock()
-	defer c.handshakeMutex.Unlock()
 	return c.connectionStateLocked()
 }
 
-var tlsunsafeekm = godebug.New("tlsunsafeekm")
-
 func (c *Conn) connectionStateLocked() ConnectionState {
 	var state ConnectionState
-	state.HandshakeComplete = c.isHandshakeComplete.Load()
+	state.HandshakeComplete = c.isHandshakeComplete
 	state.Version = c.vers
 	state.NegotiatedProtocol = c.clientProtocol
 	state.DidResume = c.didResume
@@ -1640,13 +1572,7 @@ func (c *Conn) connectionStateLocked() ConnectionState {
 	if c.config.Renegotiation != RenegotiateNever {
 		state.ekm = noEKMBecauseRenegotiation
 	} else if c.vers != VersionTLS13 && !c.extMasterSecret {
-		state.ekm = func(label []byte, context []byte, length int) ([]byte, error) {
-			if tlsunsafeekm.Value() == "1" {
-				tlsunsafeekm.IncNonDefault()
-				return c.ekm(label, context, length)
-			}
-			return noEKMBecauseNoEMS(label, context, length)
-		}
+		state.ekm = noEKMBecauseNoEMS
 	} else {
 		state.ekm = c.ekm
 	}
@@ -1657,9 +1583,6 @@ func (c *Conn) connectionStateLocked() ConnectionState {
 // OCSPResponse returns the stapled OCSP response from the TLS server, if
 // any. (Only valid for client connections.)
 func (c *Conn) OCSPResponse() []byte {
-	c.handshakeMutex.Lock()
-	defer c.handshakeMutex.Unlock()
-
 	return c.ocspResponse
 }
 
@@ -1667,12 +1590,10 @@ func (c *Conn) OCSPResponse() []byte {
 // connecting to host. If so, it returns nil; if not, it returns an error
 // describing the problem.
 func (c *Conn) VerifyHostname(host []byte) error {
-	c.handshakeMutex.Lock()
-	defer c.handshakeMutex.Unlock()
 	if !c.isClient {
 		return errors.New("tls: VerifyHostname called on TLS server connection")
 	}
-	if !c.isHandshakeComplete.Load() {
+	if !c.isHandshakeComplete {
 		return errors.New("tls: handshake has not yet been performed")
 	}
 	if len(c.verifiedChains) == 0 {

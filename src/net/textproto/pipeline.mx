@@ -4,9 +4,6 @@
 
 package textproto
 
-import (
-	"sync"
-)
 
 // A Pipeline manages a pipelined in-order request/response sequence.
 //
@@ -26,7 +23,6 @@ import (
 // A pipelined server can use the same calls to ensure that
 // responses computed in parallel are written in the correct order.
 type Pipeline struct {
-	mu       sync.Mutex
 	id       uint
 	request  sequencer
 	response sequencer
@@ -34,10 +30,8 @@ type Pipeline struct {
 
 // Next returns the next id for a request/response pair.
 func (p *Pipeline) Next() uint {
-	p.mu.Lock()
 	id := p.id
 	p.id++
-	p.mu.Unlock()
 	return id
 }
 
@@ -70,7 +64,6 @@ func (p *Pipeline) EndResponse(id uint) {
 // at 0 and increment without skipping. The event number wraps around
 // safely as long as there are not 2^32 simultaneous events pending.
 type sequencer struct {
-	mu   sync.Mutex
 	id   uint
 	wait map[uint]chan struct{}
 }
@@ -79,9 +72,7 @@ type sequencer struct {
 // That is, except for the first event, it waits until End(id-1) has
 // been called.
 func (s *sequencer) Start(id uint) {
-	s.mu.Lock()
 	if s.id == id {
-		s.mu.Unlock()
 		return
 	}
 	c := chan struct{}{}
@@ -89,7 +80,6 @@ func (s *sequencer) Start(id uint) {
 		s.wait = map[uint]chan struct{}{}
 	}
 	s.wait[id] = c
-	s.mu.Unlock()
 	<-c
 }
 
@@ -97,9 +87,7 @@ func (s *sequencer) Start(id uint) {
 // allowing it to schedule the event numbered id+1.  It is a run-time error
 // to call End with an id that is not the number of the active event.
 func (s *sequencer) End(id uint) {
-	s.mu.Lock()
 	if s.id != id {
-		s.mu.Unlock()
 		panic("out of sync")
 	}
 	id++
@@ -111,7 +99,6 @@ func (s *sequencer) End(id uint) {
 	if ok {
 		delete(s.wait, id)
 	}
-	s.mu.Unlock()
 	if ok {
 		close(c)
 	}

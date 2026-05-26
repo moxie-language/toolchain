@@ -28,14 +28,12 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rsa"
-	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"internal/godebug"
 	"io"
 	"math/big"
 	"net"
@@ -43,12 +41,6 @@ import (
 	"strconv"
 	"time"
 	"unicode"
-
-	// Explicitly import these for their crypto.RegisterHash init side-effects.
-	// Keep these as blank imports, even if they're imported above.
-	_ "crypto/sha1"
-	_ "crypto/sha256"
-	_ "crypto/sha512"
 
 	"golang.org/x/crypto/cryptobyte"
 	cryptobyte_asn1 "golang.org/x/crypto/cryptobyte/asn1"
@@ -92,10 +84,10 @@ func marshalPublicKey(pub any) (publicKeyBytes []byte, publicKeyAlgorithm pkix.A
 		if err != nil {
 			return nil, pkix.AlgorithmIdentifier{}, err
 		}
-		publicKeyAlgorithm.Algorithm = oidPublicKeyRSA
+		publicKeyAlgorithm.Algorithm = _oidPublicKeyRSA()
 		// This is a NULL parameters value which is required by
 		// RFC 3279, Section 2.3.1.
-		publicKeyAlgorithm.Parameters = asn1.NullRawValue
+		publicKeyAlgorithm.Parameters = asn1.NullRawValue()
 	case *ecdsa.PublicKey:
 		oid, ok := oidFromNamedCurve(pub.Curve)
 		if !ok {
@@ -105,7 +97,7 @@ func marshalPublicKey(pub any) (publicKeyBytes []byte, publicKeyAlgorithm pkix.A
 			return nil, pkix.AlgorithmIdentifier{}, errors.New("x509: invalid elliptic curve public key")
 		}
 		publicKeyBytes = elliptic.Marshal(pub.Curve, pub.X, pub.Y)
-		publicKeyAlgorithm.Algorithm = oidPublicKeyECDSA
+		publicKeyAlgorithm.Algorithm = _oidPublicKeyECDSA()
 		var paramBytes []byte
 		paramBytes, err = asn1.Marshal(oid)
 		if err != nil {
@@ -114,17 +106,17 @@ func marshalPublicKey(pub any) (publicKeyBytes []byte, publicKeyAlgorithm pkix.A
 		publicKeyAlgorithm.Parameters.FullBytes = paramBytes
 	case ed25519.PublicKey:
 		publicKeyBytes = pub
-		publicKeyAlgorithm.Algorithm = oidPublicKeyEd25519
+		publicKeyAlgorithm.Algorithm = _oidPublicKeyEd25519()
 	case *ecdh.PublicKey:
 		publicKeyBytes = pub.Bytes()
 		if pub.Curve() == ecdh.X25519() {
-			publicKeyAlgorithm.Algorithm = oidPublicKeyX25519
+			publicKeyAlgorithm.Algorithm = _oidPublicKeyX25519()
 		} else {
 			oid, ok := oidFromECDHCurve(pub.Curve())
 			if !ok {
 				return nil, pkix.AlgorithmIdentifier{}, errors.New("x509: unsupported elliptic curve")
 			}
-			publicKeyAlgorithm.Algorithm = oidPublicKeyECDSA
+			publicKeyAlgorithm.Algorithm = _oidPublicKeyECDSA()
 			var paramBytes []byte
 			paramBytes, err = asn1.Marshal(oid)
 			if err != nil {
@@ -234,7 +226,7 @@ const (
 )
 
 func (algo SignatureAlgorithm) isRSAPSS() bool {
-	for _, details := range signatureAlgorithmDetails {
+	for _, details := range _signatureAlgorithmDetails() {
 		if details.algo == algo {
 			return details.isRSAPSS
 		}
@@ -243,7 +235,7 @@ func (algo SignatureAlgorithm) isRSAPSS() bool {
 }
 
 func (algo SignatureAlgorithm) hashFunc() crypto.Hash {
-	for _, details := range signatureAlgorithmDetails {
+	for _, details := range _signatureAlgorithmDetails() {
 		if details.algo == algo {
 			return details.hash
 		}
@@ -252,7 +244,7 @@ func (algo SignatureAlgorithm) hashFunc() crypto.Hash {
 }
 
 func (algo SignatureAlgorithm) String() string {
-	for _, details := range signatureAlgorithmDetails {
+	for _, details := range _signatureAlgorithmDetails() {
 		if details.algo == algo {
 			return details.name
 		}
@@ -270,16 +262,19 @@ const (
 	Ed25519
 )
 
-var publicKeyAlgoName = [...]string{
-	RSA:     "RSA",
-	DSA:     "DSA",
-	ECDSA:   "ECDSA",
-	Ed25519: "Ed25519",
+func _publicKeyAlgoName() [5]string {
+	return [5]string{
+		RSA:     "RSA",
+		DSA:     "DSA",
+		ECDSA:   "ECDSA",
+		Ed25519: "Ed25519",
+	}
 }
 
 func (algo PublicKeyAlgorithm) String() string {
-	if 0 < algo && int(algo) < len(publicKeyAlgoName) {
-		return publicKeyAlgoName[algo]
+	names := _publicKeyAlgoName()
+	if 0 < algo && int(algo) < len(names) {
+		return names[algo]
 	}
 	return strconv.Itoa(int(algo))
 }
@@ -332,34 +327,66 @@ func (algo PublicKeyAlgorithm) String() string {
 // RFC 8410 3 Curve25519 and Curve448 Algorithm Identifiers
 //
 //	id-Ed25519   OBJECT IDENTIFIER ::= { 1 3 101 112 }
-var (
-	oidSignatureMD5WithRSA      = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 4}
-	oidSignatureSHA1WithRSA     = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 5}
-	oidSignatureSHA256WithRSA   = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 11}
-	oidSignatureSHA384WithRSA   = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 12}
-	oidSignatureSHA512WithRSA   = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 13}
-	oidSignatureRSAPSS          = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 10}
-	oidSignatureDSAWithSHA1     = asn1.ObjectIdentifier{1, 2, 840, 10040, 4, 3}
-	oidSignatureDSAWithSHA256   = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 3, 2}
-	oidSignatureECDSAWithSHA1   = asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 1}
-	oidSignatureECDSAWithSHA256 = asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2}
-	oidSignatureECDSAWithSHA384 = asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 3}
-	oidSignatureECDSAWithSHA512 = asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 4}
-	oidSignatureEd25519         = asn1.ObjectIdentifier{1, 3, 101, 112}
+func _oidSignatureMD5WithRSA() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 4}
+}
+func _oidSignatureSHA1WithRSA() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 5}
+}
+func _oidSignatureSHA256WithRSA() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 11}
+}
+func _oidSignatureSHA384WithRSA() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 12}
+}
+func _oidSignatureSHA512WithRSA() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 13}
+}
+func _oidSignatureRSAPSS() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 10}
+}
+func _oidSignatureDSAWithSHA1() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 10040, 4, 3}
+}
+func _oidSignatureDSAWithSHA256() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 3, 2}
+}
+func _oidSignatureECDSAWithSHA1() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 1}
+}
+func _oidSignatureECDSAWithSHA256() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2}
+}
+func _oidSignatureECDSAWithSHA384() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 3}
+}
+func _oidSignatureECDSAWithSHA512() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 4}
+}
+func _oidSignatureEd25519() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 101, 112}
+}
+func _oidSHA256() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}
+}
+func _oidSHA384() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 2}
+}
+func _oidSHA512() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 3}
+}
+func _oidMGF1() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 8}
+}
 
-	oidSHA256 = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}
-	oidSHA384 = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 2}
-	oidSHA512 = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 3}
+// _oidISOSignatureSHA1WithRSA means the same as _oidSignatureSHA1WithRSA
+// but it's specified by ISO. Microsoft's makecert.exe has been known
+// to produce certificates with this OID.
+func _oidISOSignatureSHA1WithRSA() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 14, 3, 2, 29}
+}
 
-	oidMGF1 = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 8}
-
-	// oidISOSignatureSHA1WithRSA means the same as oidSignatureSHA1WithRSA
-	// but it's specified by ISO. Microsoft's makecert.exe has been known
-	// to produce certificates with this OID.
-	oidISOSignatureSHA1WithRSA = asn1.ObjectIdentifier{1, 3, 14, 3, 2, 29}
-)
-
-var signatureAlgorithmDetails = []struct {
+func _signatureAlgorithmDetails() []struct {
 	algo       SignatureAlgorithm
 	name       string
 	oid        asn1.ObjectIdentifier
@@ -367,26 +394,36 @@ var signatureAlgorithmDetails = []struct {
 	pubKeyAlgo PublicKeyAlgorithm
 	hash       crypto.Hash
 	isRSAPSS   bool
-}{
-	{MD5WithRSA, "MD5-RSA", oidSignatureMD5WithRSA, asn1.NullRawValue, RSA, crypto.MD5, false},
-	{SHA1WithRSA, "SHA1-RSA", oidSignatureSHA1WithRSA, asn1.NullRawValue, RSA, crypto.SHA1, false},
-	{SHA1WithRSA, "SHA1-RSA", oidISOSignatureSHA1WithRSA, asn1.NullRawValue, RSA, crypto.SHA1, false},
-	{SHA256WithRSA, "SHA256-RSA", oidSignatureSHA256WithRSA, asn1.NullRawValue, RSA, crypto.SHA256, false},
-	{SHA384WithRSA, "SHA384-RSA", oidSignatureSHA384WithRSA, asn1.NullRawValue, RSA, crypto.SHA384, false},
-	{SHA512WithRSA, "SHA512-RSA", oidSignatureSHA512WithRSA, asn1.NullRawValue, RSA, crypto.SHA512, false},
-	{SHA256WithRSAPSS, "SHA256-RSAPSS", oidSignatureRSAPSS, pssParametersSHA256, RSA, crypto.SHA256, true},
-	{SHA384WithRSAPSS, "SHA384-RSAPSS", oidSignatureRSAPSS, pssParametersSHA384, RSA, crypto.SHA384, true},
-	{SHA512WithRSAPSS, "SHA512-RSAPSS", oidSignatureRSAPSS, pssParametersSHA512, RSA, crypto.SHA512, true},
-	{DSAWithSHA1, "DSA-SHA1", oidSignatureDSAWithSHA1, emptyRawValue, DSA, crypto.SHA1, false},
-	{DSAWithSHA256, "DSA-SHA256", oidSignatureDSAWithSHA256, emptyRawValue, DSA, crypto.SHA256, false},
-	{ECDSAWithSHA1, "ECDSA-SHA1", oidSignatureECDSAWithSHA1, emptyRawValue, ECDSA, crypto.SHA1, false},
-	{ECDSAWithSHA256, "ECDSA-SHA256", oidSignatureECDSAWithSHA256, emptyRawValue, ECDSA, crypto.SHA256, false},
-	{ECDSAWithSHA384, "ECDSA-SHA384", oidSignatureECDSAWithSHA384, emptyRawValue, ECDSA, crypto.SHA384, false},
-	{ECDSAWithSHA512, "ECDSA-SHA512", oidSignatureECDSAWithSHA512, emptyRawValue, ECDSA, crypto.SHA512, false},
-	{PureEd25519, "Ed25519", oidSignatureEd25519, emptyRawValue, Ed25519, crypto.Hash(0) /* no pre-hashing */, false},
+} {
+	return []struct {
+		algo       SignatureAlgorithm
+		name       string
+		oid        asn1.ObjectIdentifier
+		params     asn1.RawValue
+		pubKeyAlgo PublicKeyAlgorithm
+		hash       crypto.Hash
+		isRSAPSS   bool
+	}{
+		{MD5WithRSA, "MD5-RSA", _oidSignatureMD5WithRSA(), asn1.NullRawValue(), RSA, crypto.MD5, false},
+		{SHA1WithRSA, "SHA1-RSA", _oidSignatureSHA1WithRSA(), asn1.NullRawValue(), RSA, crypto.SHA1, false},
+		{SHA1WithRSA, "SHA1-RSA", _oidISOSignatureSHA1WithRSA(), asn1.NullRawValue(), RSA, crypto.SHA1, false},
+		{SHA256WithRSA, "SHA256-RSA", _oidSignatureSHA256WithRSA(), asn1.NullRawValue(), RSA, crypto.SHA256, false},
+		{SHA384WithRSA, "SHA384-RSA", _oidSignatureSHA384WithRSA(), asn1.NullRawValue(), RSA, crypto.SHA384, false},
+		{SHA512WithRSA, "SHA512-RSA", _oidSignatureSHA512WithRSA(), asn1.NullRawValue(), RSA, crypto.SHA512, false},
+		{SHA256WithRSAPSS, "SHA256-RSAPSS", _oidSignatureRSAPSS(), _pssParametersSHA256(), RSA, crypto.SHA256, true},
+		{SHA384WithRSAPSS, "SHA384-RSAPSS", _oidSignatureRSAPSS(), _pssParametersSHA384(), RSA, crypto.SHA384, true},
+		{SHA512WithRSAPSS, "SHA512-RSAPSS", _oidSignatureRSAPSS(), _pssParametersSHA512(), RSA, crypto.SHA512, true},
+		{DSAWithSHA1, "DSA-SHA1", _oidSignatureDSAWithSHA1(), _emptyRawValue(), DSA, crypto.SHA1, false},
+		{DSAWithSHA256, "DSA-SHA256", _oidSignatureDSAWithSHA256(), _emptyRawValue(), DSA, crypto.SHA256, false},
+		{ECDSAWithSHA1, "ECDSA-SHA1", _oidSignatureECDSAWithSHA1(), _emptyRawValue(), ECDSA, crypto.SHA1, false},
+		{ECDSAWithSHA256, "ECDSA-SHA256", _oidSignatureECDSAWithSHA256(), _emptyRawValue(), ECDSA, crypto.SHA256, false},
+		{ECDSAWithSHA384, "ECDSA-SHA384", _oidSignatureECDSAWithSHA384(), _emptyRawValue(), ECDSA, crypto.SHA384, false},
+		{ECDSAWithSHA512, "ECDSA-SHA512", _oidSignatureECDSAWithSHA512(), _emptyRawValue(), ECDSA, crypto.SHA512, false},
+		{PureEd25519, "Ed25519", _oidSignatureEd25519(), _emptyRawValue(), Ed25519, crypto.Hash(0) /* no pre-hashing */, false},
+	}
 }
 
-var emptyRawValue = asn1.RawValue{}
+func _emptyRawValue() asn1.RawValue { return asn1.RawValue{} }
 
 // DER encoded RSA PSS parameters for the
 // SHA256, SHA384, and SHA512 hashes as defined in RFC 3447, Appendix A.2.3.
@@ -395,11 +432,15 @@ var emptyRawValue = asn1.RawValue{}
 //   - maskGenAlgorithm always contains the default mgf1SHA1 identifier
 //   - saltLength contains the length of the associated hash
 //   - trailerField always contains the default trailerFieldBC value
-var (
-	pssParametersSHA256 = asn1.RawValue{FullBytes: []byte{48, 52, 160, 15, 48, 13, 6, 9, 96, 134, 72, 1, 101, 3, 4, 2, 1, 5, 0, 161, 28, 48, 26, 6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 8, 48, 13, 6, 9, 96, 134, 72, 1, 101, 3, 4, 2, 1, 5, 0, 162, 3, 2, 1, 32}}
-	pssParametersSHA384 = asn1.RawValue{FullBytes: []byte{48, 52, 160, 15, 48, 13, 6, 9, 96, 134, 72, 1, 101, 3, 4, 2, 2, 5, 0, 161, 28, 48, 26, 6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 8, 48, 13, 6, 9, 96, 134, 72, 1, 101, 3, 4, 2, 2, 5, 0, 162, 3, 2, 1, 48}}
-	pssParametersSHA512 = asn1.RawValue{FullBytes: []byte{48, 52, 160, 15, 48, 13, 6, 9, 96, 134, 72, 1, 101, 3, 4, 2, 3, 5, 0, 161, 28, 48, 26, 6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 8, 48, 13, 6, 9, 96, 134, 72, 1, 101, 3, 4, 2, 3, 5, 0, 162, 3, 2, 1, 64}}
-)
+func _pssParametersSHA256() asn1.RawValue {
+	return asn1.RawValue{FullBytes: []byte{48, 52, 160, 15, 48, 13, 6, 9, 96, 134, 72, 1, 101, 3, 4, 2, 1, 5, 0, 161, 28, 48, 26, 6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 8, 48, 13, 6, 9, 96, 134, 72, 1, 101, 3, 4, 2, 1, 5, 0, 162, 3, 2, 1, 32}}
+}
+func _pssParametersSHA384() asn1.RawValue {
+	return asn1.RawValue{FullBytes: []byte{48, 52, 160, 15, 48, 13, 6, 9, 96, 134, 72, 1, 101, 3, 4, 2, 2, 5, 0, 161, 28, 48, 26, 6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 8, 48, 13, 6, 9, 96, 134, 72, 1, 101, 3, 4, 2, 2, 5, 0, 162, 3, 2, 1, 48}}
+}
+func _pssParametersSHA512() asn1.RawValue {
+	return asn1.RawValue{FullBytes: []byte{48, 52, 160, 15, 48, 13, 6, 9, 96, 134, 72, 1, 101, 3, 4, 2, 3, 5, 0, 161, 28, 48, 26, 6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 8, 48, 13, 6, 9, 96, 134, 72, 1, 101, 3, 4, 2, 3, 5, 0, 162, 3, 2, 1, 64}}
+}
 
 // pssParameters reflects the parameters in an AlgorithmIdentifier that
 // specifies RSA PSS. See RFC 3447, Appendix A.2.3.
@@ -414,7 +455,7 @@ type pssParameters struct {
 }
 
 func getSignatureAlgorithmFromAI(ai pkix.AlgorithmIdentifier) SignatureAlgorithm {
-	if ai.Algorithm.Equal(oidSignatureEd25519) {
+	if ai.Algorithm.Equal(_oidSignatureEd25519()) {
 		// RFC 8410, Section 3
 		// > For all of the OIDs, the parameters MUST be absent.
 		if len(ai.Parameters.FullBytes) != 0 {
@@ -422,8 +463,8 @@ func getSignatureAlgorithmFromAI(ai pkix.AlgorithmIdentifier) SignatureAlgorithm
 		}
 	}
 
-	if !ai.Algorithm.Equal(oidSignatureRSAPSS) {
-		for _, details := range signatureAlgorithmDetails {
+	if !ai.Algorithm.Equal(_oidSignatureRSAPSS()) {
+		for _, details := range _signatureAlgorithmDetails() {
 			if ai.Algorithm.Equal(details.oid) {
 				return details.algo
 			}
@@ -449,63 +490,73 @@ func getSignatureAlgorithmFromAI(ai pkix.AlgorithmIdentifier) SignatureAlgorithm
 	// message hash function (as recommended in RFC 3447, Section 8.1), that the
 	// salt length matches the hash length, and that the trailer field has the
 	// default value.
-	if (len(params.Hash.Parameters.FullBytes) != 0 && !bytes.Equal(params.Hash.Parameters.FullBytes, asn1.NullBytes)) ||
-		!params.MGF.Algorithm.Equal(oidMGF1) ||
+	if (len(params.Hash.Parameters.FullBytes) != 0 && !bytes.Equal(params.Hash.Parameters.FullBytes, asn1.NullBytes())) ||
+		!params.MGF.Algorithm.Equal(_oidMGF1()) ||
 		!mgf1HashFunc.Algorithm.Equal(params.Hash.Algorithm) ||
-		(len(mgf1HashFunc.Parameters.FullBytes) != 0 && !bytes.Equal(mgf1HashFunc.Parameters.FullBytes, asn1.NullBytes)) ||
+		(len(mgf1HashFunc.Parameters.FullBytes) != 0 && !bytes.Equal(mgf1HashFunc.Parameters.FullBytes, asn1.NullBytes())) ||
 		params.TrailerField != 1 {
 		return UnknownSignatureAlgorithm
 	}
 
 	switch {
-	case params.Hash.Algorithm.Equal(oidSHA256) && params.SaltLength == 32:
+	case params.Hash.Algorithm.Equal(_oidSHA256()) && params.SaltLength == 32:
 		return SHA256WithRSAPSS
-	case params.Hash.Algorithm.Equal(oidSHA384) && params.SaltLength == 48:
+	case params.Hash.Algorithm.Equal(_oidSHA384()) && params.SaltLength == 48:
 		return SHA384WithRSAPSS
-	case params.Hash.Algorithm.Equal(oidSHA512) && params.SaltLength == 64:
+	case params.Hash.Algorithm.Equal(_oidSHA512()) && params.SaltLength == 64:
 		return SHA512WithRSAPSS
 	}
 
 	return UnknownSignatureAlgorithm
 }
 
-var (
-	// RFC 3279, 2.3 Public Key Algorithms
-	//
-	//	pkcs-1 OBJECT IDENTIFIER ::== { iso(1) member-body(2) us(840)
-	//		rsadsi(113549) pkcs(1) 1 }
-	//
-	// rsaEncryption OBJECT IDENTIFIER ::== { pkcs1-1 1 }
-	//
-	//	id-dsa OBJECT IDENTIFIER ::== { iso(1) member-body(2) us(840)
-	//		x9-57(10040) x9cm(4) 1 }
-	oidPublicKeyRSA = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 1}
-	oidPublicKeyDSA = asn1.ObjectIdentifier{1, 2, 840, 10040, 4, 1}
-	// RFC 5480, 2.1.1 Unrestricted Algorithm Identifier and Parameters
-	//
-	//	id-ecPublicKey OBJECT IDENTIFIER ::= {
-	//		iso(1) member-body(2) us(840) ansi-X9-62(10045) keyType(2) 1 }
-	oidPublicKeyECDSA = asn1.ObjectIdentifier{1, 2, 840, 10045, 2, 1}
-	// RFC 8410, Section 3
-	//
-	//	id-X25519    OBJECT IDENTIFIER ::= { 1 3 101 110 }
-	//	id-Ed25519   OBJECT IDENTIFIER ::= { 1 3 101 112 }
-	oidPublicKeyX25519  = asn1.ObjectIdentifier{1, 3, 101, 110}
-	oidPublicKeyEd25519 = asn1.ObjectIdentifier{1, 3, 101, 112}
-)
+// RFC 3279, 2.3 Public Key Algorithms
+//
+//	pkcs-1 OBJECT IDENTIFIER ::== { iso(1) member-body(2) us(840)
+//		rsadsi(113549) pkcs(1) 1 }
+//
+// rsaEncryption OBJECT IDENTIFIER ::== { pkcs1-1 1 }
+//
+//	id-dsa OBJECT IDENTIFIER ::== { iso(1) member-body(2) us(840)
+//		x9-57(10040) x9cm(4) 1 }
+func _oidPublicKeyRSA() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 1}
+}
+func _oidPublicKeyDSA() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 10040, 4, 1}
+}
+
+// RFC 5480, 2.1.1 Unrestricted Algorithm Identifier and Parameters
+//
+//	id-ecPublicKey OBJECT IDENTIFIER ::= {
+//		iso(1) member-body(2) us(840) ansi-X9-62(10045) keyType(2) 1 }
+func _oidPublicKeyECDSA() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 10045, 2, 1}
+}
+
+// RFC 8410, Section 3
+//
+//	id-X25519    OBJECT IDENTIFIER ::= { 1 3 101 110 }
+//	id-Ed25519   OBJECT IDENTIFIER ::= { 1 3 101 112 }
+func _oidPublicKeyX25519() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 101, 110}
+}
+func _oidPublicKeyEd25519() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 101, 112}
+}
 
 // getPublicKeyAlgorithmFromOID returns the exposed PublicKeyAlgorithm
 // identifier for public key types supported in certificates and CSRs. Marshal
 // and Parse functions may support a different set of public key types.
 func getPublicKeyAlgorithmFromOID(oid asn1.ObjectIdentifier) PublicKeyAlgorithm {
 	switch {
-	case oid.Equal(oidPublicKeyRSA):
+	case oid.Equal(_oidPublicKeyRSA()):
 		return RSA
-	case oid.Equal(oidPublicKeyDSA):
+	case oid.Equal(_oidPublicKeyDSA()):
 		return DSA
-	case oid.Equal(oidPublicKeyECDSA):
+	case oid.Equal(_oidPublicKeyECDSA()):
 		return ECDSA
-	case oid.Equal(oidPublicKeyEd25519):
+	case oid.Equal(_oidPublicKeyEd25519()):
 		return Ed25519
 	}
 	return UnknownPublicKeyAlgorithm
@@ -527,22 +578,22 @@ func getPublicKeyAlgorithmFromOID(oid asn1.ObjectIdentifier) PublicKeyAlgorithm 
 //	  iso(1) identified-organization(3) certicom(132) curve(0) 35 }
 //
 // NB: secp256r1 is equivalent to prime256v1
-var (
-	oidNamedCurveP224 = asn1.ObjectIdentifier{1, 3, 132, 0, 33}
-	oidNamedCurveP256 = asn1.ObjectIdentifier{1, 2, 840, 10045, 3, 1, 7}
-	oidNamedCurveP384 = asn1.ObjectIdentifier{1, 3, 132, 0, 34}
-	oidNamedCurveP521 = asn1.ObjectIdentifier{1, 3, 132, 0, 35}
-)
+func _oidNamedCurveP224() asn1.ObjectIdentifier { return asn1.ObjectIdentifier{1, 3, 132, 0, 33} }
+func _oidNamedCurveP256() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 10045, 3, 1, 7}
+}
+func _oidNamedCurveP384() asn1.ObjectIdentifier { return asn1.ObjectIdentifier{1, 3, 132, 0, 34} }
+func _oidNamedCurveP521() asn1.ObjectIdentifier { return asn1.ObjectIdentifier{1, 3, 132, 0, 35} }
 
 func namedCurveFromOID(oid asn1.ObjectIdentifier) elliptic.Curve {
 	switch {
-	case oid.Equal(oidNamedCurveP224):
+	case oid.Equal(_oidNamedCurveP224()):
 		return elliptic.P224()
-	case oid.Equal(oidNamedCurveP256):
+	case oid.Equal(_oidNamedCurveP256()):
 		return elliptic.P256()
-	case oid.Equal(oidNamedCurveP384):
+	case oid.Equal(_oidNamedCurveP384()):
 		return elliptic.P384()
-	case oid.Equal(oidNamedCurveP521):
+	case oid.Equal(_oidNamedCurveP521()):
 		return elliptic.P521()
 	}
 	return nil
@@ -551,13 +602,13 @@ func namedCurveFromOID(oid asn1.ObjectIdentifier) elliptic.Curve {
 func oidFromNamedCurve(curve elliptic.Curve) (asn1.ObjectIdentifier, bool) {
 	switch curve {
 	case elliptic.P224():
-		return oidNamedCurveP224, true
+		return _oidNamedCurveP224(), true
 	case elliptic.P256():
-		return oidNamedCurveP256, true
+		return _oidNamedCurveP256(), true
 	case elliptic.P384():
-		return oidNamedCurveP384, true
+		return _oidNamedCurveP384(), true
 	case elliptic.P521():
-		return oidNamedCurveP521, true
+		return _oidNamedCurveP521(), true
 	}
 
 	return nil, false
@@ -566,13 +617,13 @@ func oidFromNamedCurve(curve elliptic.Curve) (asn1.ObjectIdentifier, bool) {
 func oidFromECDHCurve(curve ecdh.Curve) (asn1.ObjectIdentifier, bool) {
 	switch curve {
 	case ecdh.X25519():
-		return oidPublicKeyX25519, true
+		return _oidPublicKeyX25519(), true
 	case ecdh.P256():
-		return oidNamedCurveP256, true
+		return _oidNamedCurveP256(), true
 	case ecdh.P384():
-		return oidNamedCurveP384, true
+		return _oidNamedCurveP384(), true
 	case ecdh.P521():
-		return oidNamedCurveP521, true
+		return _oidNamedCurveP521(), true
 	}
 
 	return nil, false
@@ -606,22 +657,48 @@ const (
 //	id-kp-emailProtection        OBJECT IDENTIFIER ::= { id-kp 4 }
 //	id-kp-timeStamping           OBJECT IDENTIFIER ::= { id-kp 8 }
 //	id-kp-OCSPSigning            OBJECT IDENTIFIER ::= { id-kp 9 }
-var (
-	oidExtKeyUsageAny                            = asn1.ObjectIdentifier{2, 5, 29, 37, 0}
-	oidExtKeyUsageServerAuth                     = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 1}
-	oidExtKeyUsageClientAuth                     = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 2}
-	oidExtKeyUsageCodeSigning                    = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 3}
-	oidExtKeyUsageEmailProtection                = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 4}
-	oidExtKeyUsageIPSECEndSystem                 = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 5}
-	oidExtKeyUsageIPSECTunnel                    = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 6}
-	oidExtKeyUsageIPSECUser                      = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 7}
-	oidExtKeyUsageTimeStamping                   = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 8}
-	oidExtKeyUsageOCSPSigning                    = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 9}
-	oidExtKeyUsageMicrosoftServerGatedCrypto     = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 311, 10, 3, 3}
-	oidExtKeyUsageNetscapeServerGatedCrypto      = asn1.ObjectIdentifier{2, 16, 840, 1, 113730, 4, 1}
-	oidExtKeyUsageMicrosoftCommercialCodeSigning = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 311, 2, 1, 22}
-	oidExtKeyUsageMicrosoftKernelCodeSigning     = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 311, 61, 1, 1}
-)
+func _oidExtKeyUsageAny() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{2, 5, 29, 37, 0}
+}
+func _oidExtKeyUsageServerAuth() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 1}
+}
+func _oidExtKeyUsageClientAuth() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 2}
+}
+func _oidExtKeyUsageCodeSigning() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 3}
+}
+func _oidExtKeyUsageEmailProtection() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 4}
+}
+func _oidExtKeyUsageIPSECEndSystem() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 5}
+}
+func _oidExtKeyUsageIPSECTunnel() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 6}
+}
+func _oidExtKeyUsageIPSECUser() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 7}
+}
+func _oidExtKeyUsageTimeStamping() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 8}
+}
+func _oidExtKeyUsageOCSPSigning() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 9}
+}
+func _oidExtKeyUsageMicrosoftServerGatedCrypto() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 311, 10, 3, 3}
+}
+func _oidExtKeyUsageNetscapeServerGatedCrypto() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{2, 16, 840, 1, 113730, 4, 1}
+}
+func _oidExtKeyUsageMicrosoftCommercialCodeSigning() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 311, 2, 1, 22}
+}
+func _oidExtKeyUsageMicrosoftKernelCodeSigning() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 311, 61, 1, 1}
+}
 
 // ExtKeyUsage represents an extended set of actions that are valid for a given key.
 // Each of the ExtKeyUsage* constants define a unique action.
@@ -644,29 +721,34 @@ const (
 	ExtKeyUsageMicrosoftKernelCodeSigning
 )
 
-// extKeyUsageOIDs contains the mapping between an ExtKeyUsage and its OID.
-var extKeyUsageOIDs = []struct {
+// _extKeyUsageOIDs contains the mapping between an ExtKeyUsage and its OID.
+func _extKeyUsageOIDs() []struct {
 	extKeyUsage ExtKeyUsage
 	oid         asn1.ObjectIdentifier
-}{
-	{ExtKeyUsageAny, oidExtKeyUsageAny},
-	{ExtKeyUsageServerAuth, oidExtKeyUsageServerAuth},
-	{ExtKeyUsageClientAuth, oidExtKeyUsageClientAuth},
-	{ExtKeyUsageCodeSigning, oidExtKeyUsageCodeSigning},
-	{ExtKeyUsageEmailProtection, oidExtKeyUsageEmailProtection},
-	{ExtKeyUsageIPSECEndSystem, oidExtKeyUsageIPSECEndSystem},
-	{ExtKeyUsageIPSECTunnel, oidExtKeyUsageIPSECTunnel},
-	{ExtKeyUsageIPSECUser, oidExtKeyUsageIPSECUser},
-	{ExtKeyUsageTimeStamping, oidExtKeyUsageTimeStamping},
-	{ExtKeyUsageOCSPSigning, oidExtKeyUsageOCSPSigning},
-	{ExtKeyUsageMicrosoftServerGatedCrypto, oidExtKeyUsageMicrosoftServerGatedCrypto},
-	{ExtKeyUsageNetscapeServerGatedCrypto, oidExtKeyUsageNetscapeServerGatedCrypto},
-	{ExtKeyUsageMicrosoftCommercialCodeSigning, oidExtKeyUsageMicrosoftCommercialCodeSigning},
-	{ExtKeyUsageMicrosoftKernelCodeSigning, oidExtKeyUsageMicrosoftKernelCodeSigning},
+} {
+	return []struct {
+		extKeyUsage ExtKeyUsage
+		oid         asn1.ObjectIdentifier
+	}{
+		{ExtKeyUsageAny, _oidExtKeyUsageAny()},
+		{ExtKeyUsageServerAuth, _oidExtKeyUsageServerAuth()},
+		{ExtKeyUsageClientAuth, _oidExtKeyUsageClientAuth()},
+		{ExtKeyUsageCodeSigning, _oidExtKeyUsageCodeSigning()},
+		{ExtKeyUsageEmailProtection, _oidExtKeyUsageEmailProtection()},
+		{ExtKeyUsageIPSECEndSystem, _oidExtKeyUsageIPSECEndSystem()},
+		{ExtKeyUsageIPSECTunnel, _oidExtKeyUsageIPSECTunnel()},
+		{ExtKeyUsageIPSECUser, _oidExtKeyUsageIPSECUser()},
+		{ExtKeyUsageTimeStamping, _oidExtKeyUsageTimeStamping()},
+		{ExtKeyUsageOCSPSigning, _oidExtKeyUsageOCSPSigning()},
+		{ExtKeyUsageMicrosoftServerGatedCrypto, _oidExtKeyUsageMicrosoftServerGatedCrypto()},
+		{ExtKeyUsageNetscapeServerGatedCrypto, _oidExtKeyUsageNetscapeServerGatedCrypto()},
+		{ExtKeyUsageMicrosoftCommercialCodeSigning, _oidExtKeyUsageMicrosoftCommercialCodeSigning()},
+		{ExtKeyUsageMicrosoftKernelCodeSigning, _oidExtKeyUsageMicrosoftKernelCodeSigning()},
+	}
 }
 
 func extKeyUsageFromOID(oid asn1.ObjectIdentifier) (eku ExtKeyUsage, ok bool) {
-	for _, pair := range extKeyUsageOIDs {
+	for _, pair := range _extKeyUsageOIDs() {
 		if oid.Equal(pair.oid) {
 			return pair.extKeyUsage, true
 		}
@@ -675,7 +757,7 @@ func extKeyUsageFromOID(oid asn1.ObjectIdentifier) (eku ExtKeyUsage, ok bool) {
 }
 
 func oidFromExtKeyUsage(eku ExtKeyUsage) (oid asn1.ObjectIdentifier, ok bool) {
-	for _, pair := range extKeyUsageOIDs {
+	for _, pair := range _extKeyUsageOIDs() {
 		if eku == pair.extKeyUsage {
 			return pair.oid, true
 		}
@@ -874,7 +956,7 @@ type PolicyMapping struct {
 
 // ErrUnsupportedAlgorithm results from attempting to perform an operation that
 // involves algorithms that are not currently implemented.
-var ErrUnsupportedAlgorithm = errors.New("x509: cannot verify signature: algorithm unimplemented")
+const ErrUnsupportedAlgorithm = errors.Const("x509: cannot verify signature: algorithm unimplemented")
 
 // An InsecureAlgorithmError indicates that the [SignatureAlgorithm] used to
 // generate the signature is not secure, and the signature has been rejected.
@@ -901,7 +983,7 @@ func (c *Certificate) Equal(other *Certificate) bool {
 }
 
 func (c *Certificate) hasSANExtension() bool {
-	return oidInExtensions(oidExtensionSubjectAltName, c.Extensions)
+	return oidInExtensions(_oidExtensionSubjectAltName(), c.Extensions)
 }
 
 // CheckSignatureFrom verifies that the signature on c is a valid signature from parent.
@@ -942,12 +1024,12 @@ func (c *Certificate) CheckSignature(algo SignatureAlgorithm, signed, signature 
 }
 
 func (c *Certificate) hasNameConstraints() bool {
-	return oidInExtensions(oidExtensionNameConstraints, c.Extensions)
+	return oidInExtensions(_oidExtensionNameConstraints(), c.Extensions)
 }
 
 func (c *Certificate) getSANExtension() []byte {
 	for _, e := range c.Extensions {
-		if e.Id.Equal(oidExtensionSubjectAltName) {
+		if e.Id.Equal(_oidExtensionSubjectAltName()) {
 			return e.Value
 		}
 	}
@@ -964,7 +1046,7 @@ func checkSignature(algo SignatureAlgorithm, signed, signature []byte, publicKey
 	var hashType crypto.Hash
 	var pubKeyAlgo PublicKeyAlgorithm
 
-	for _, details := range signatureAlgorithmDetails {
+	for _, details := range _signatureAlgorithmDetails() {
 		if details.algo == algo {
 			hashType = details.hash
 			pubKeyAlgo = details.pubKeyAlgo
@@ -1106,25 +1188,27 @@ func asn1BitLength(bitString []byte) int {
 	return 0
 }
 
-var (
-	oidExtensionSubjectKeyId          = []int{2, 5, 29, 14}
-	oidExtensionKeyUsage              = []int{2, 5, 29, 15}
-	oidExtensionExtendedKeyUsage      = []int{2, 5, 29, 37}
-	oidExtensionAuthorityKeyId        = []int{2, 5, 29, 35}
-	oidExtensionBasicConstraints      = []int{2, 5, 29, 19}
-	oidExtensionSubjectAltName        = []int{2, 5, 29, 17}
-	oidExtensionCertificatePolicies   = []int{2, 5, 29, 32}
-	oidExtensionNameConstraints       = []int{2, 5, 29, 30}
-	oidExtensionCRLDistributionPoints = []int{2, 5, 29, 31}
-	oidExtensionAuthorityInfoAccess   = []int{1, 3, 6, 1, 5, 5, 7, 1, 1}
-	oidExtensionCRLNumber             = []int{2, 5, 29, 20}
-	oidExtensionReasonCode            = []int{2, 5, 29, 21}
-)
+func _oidExtensionSubjectKeyId() asn1.ObjectIdentifier          { return []int{2, 5, 29, 14} }
+func _oidExtensionKeyUsage() asn1.ObjectIdentifier              { return []int{2, 5, 29, 15} }
+func _oidExtensionExtendedKeyUsage() asn1.ObjectIdentifier      { return []int{2, 5, 29, 37} }
+func _oidExtensionAuthorityKeyId() asn1.ObjectIdentifier        { return []int{2, 5, 29, 35} }
+func _oidExtensionBasicConstraints() asn1.ObjectIdentifier      { return []int{2, 5, 29, 19} }
+func _oidExtensionSubjectAltName() asn1.ObjectIdentifier        { return []int{2, 5, 29, 17} }
+func _oidExtensionCertificatePolicies() asn1.ObjectIdentifier   { return []int{2, 5, 29, 32} }
+func _oidExtensionNameConstraints() asn1.ObjectIdentifier       { return []int{2, 5, 29, 30} }
+func _oidExtensionCRLDistributionPoints() asn1.ObjectIdentifier { return []int{2, 5, 29, 31} }
+func _oidExtensionAuthorityInfoAccess() asn1.ObjectIdentifier {
+	return []int{1, 3, 6, 1, 5, 5, 7, 1, 1}
+}
+func _oidExtensionCRLNumber() asn1.ObjectIdentifier  { return []int{2, 5, 29, 20} }
+func _oidExtensionReasonCode() asn1.ObjectIdentifier { return []int{2, 5, 29, 21} }
 
-var (
-	oidAuthorityInfoAccessOcsp    = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 48, 1}
-	oidAuthorityInfoAccessIssuers = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 48, 2}
-)
+func _oidAuthorityInfoAccessOcsp() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 48, 1}
+}
+func _oidAuthorityInfoAccessIssuers() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 48, 2}
+}
 
 // oidInExtensions reports whether an extension with the given oid exists in
 // extensions.
@@ -1182,14 +1266,12 @@ func isIA5String(s string) error {
 	return nil
 }
 
-var x509usepolicies = godebug.New("x509usepolicies")
-
 func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKeyId []byte, subjectKeyId []byte) (ret []pkix.Extension, err error) {
 	ret = []pkix.Extension{:10 /* maximum number of elements. */}
 	n := 0
 
 	if template.KeyUsage != 0 &&
-		!oidInExtensions(oidExtensionKeyUsage, template.ExtraExtensions) {
+		!oidInExtensions(_oidExtensionKeyUsage(), template.ExtraExtensions) {
 		ret[n], err = marshalKeyUsage(template.KeyUsage)
 		if err != nil {
 			return nil, err
@@ -1198,7 +1280,7 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 	}
 
 	if (len(template.ExtKeyUsage) > 0 || len(template.UnknownExtKeyUsage) > 0) &&
-		!oidInExtensions(oidExtensionExtendedKeyUsage, template.ExtraExtensions) {
+		!oidInExtensions(_oidExtensionExtendedKeyUsage(), template.ExtraExtensions) {
 		ret[n], err = marshalExtKeyUsage(template.ExtKeyUsage, template.UnknownExtKeyUsage)
 		if err != nil {
 			return nil, err
@@ -1206,7 +1288,7 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 		n++
 	}
 
-	if template.BasicConstraintsValid && !oidInExtensions(oidExtensionBasicConstraints, template.ExtraExtensions) {
+	if template.BasicConstraintsValid && !oidInExtensions(_oidExtensionBasicConstraints(), template.ExtraExtensions) {
 		ret[n], err = marshalBasicConstraints(template.IsCA, template.MaxPathLen, template.MaxPathLenZero)
 		if err != nil {
 			return nil, err
@@ -1214,8 +1296,8 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 		n++
 	}
 
-	if len(subjectKeyId) > 0 && !oidInExtensions(oidExtensionSubjectKeyId, template.ExtraExtensions) {
-		ret[n].Id = oidExtensionSubjectKeyId
+	if len(subjectKeyId) > 0 && !oidInExtensions(_oidExtensionSubjectKeyId(), template.ExtraExtensions) {
+		ret[n].Id = _oidExtensionSubjectKeyId()
 		ret[n].Value, err = asn1.Marshal(subjectKeyId)
 		if err != nil {
 			return
@@ -1223,8 +1305,8 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 		n++
 	}
 
-	if len(authorityKeyId) > 0 && !oidInExtensions(oidExtensionAuthorityKeyId, template.ExtraExtensions) {
-		ret[n].Id = oidExtensionAuthorityKeyId
+	if len(authorityKeyId) > 0 && !oidInExtensions(_oidExtensionAuthorityKeyId(), template.ExtraExtensions) {
+		ret[n].Id = _oidExtensionAuthorityKeyId()
 		ret[n].Value, err = asn1.Marshal(authKeyId{authorityKeyId})
 		if err != nil {
 			return
@@ -1233,18 +1315,18 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 	}
 
 	if (len(template.OCSPServer) > 0 || len(template.IssuingCertificateURL) > 0) &&
-		!oidInExtensions(oidExtensionAuthorityInfoAccess, template.ExtraExtensions) {
-		ret[n].Id = oidExtensionAuthorityInfoAccess
+		!oidInExtensions(_oidExtensionAuthorityInfoAccess(), template.ExtraExtensions) {
+		ret[n].Id = _oidExtensionAuthorityInfoAccess()
 		var aiaValues []authorityInfoAccess
 		for _, name := range template.OCSPServer {
 			aiaValues = append(aiaValues, authorityInfoAccess{
-				Method:   oidAuthorityInfoAccessOcsp,
+				Method:   _oidAuthorityInfoAccessOcsp(),
 				Location: asn1.RawValue{Tag: 6, Class: 2, Bytes: []byte(name)},
 			})
 		}
 		for _, name := range template.IssuingCertificateURL {
 			aiaValues = append(aiaValues, authorityInfoAccess{
-				Method:   oidAuthorityInfoAccessIssuers,
+				Method:   _oidAuthorityInfoAccessIssuers(),
 				Location: asn1.RawValue{Tag: 6, Class: 2, Bytes: []byte(name)},
 			})
 		}
@@ -1256,8 +1338,8 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 	}
 
 	if (len(template.DNSNames) > 0 || len(template.EmailAddresses) > 0 || len(template.IPAddresses) > 0 || len(template.URIs) > 0) &&
-		!oidInExtensions(oidExtensionSubjectAltName, template.ExtraExtensions) {
-		ret[n].Id = oidExtensionSubjectAltName
+		!oidInExtensions(_oidExtensionSubjectAltName(), template.ExtraExtensions) {
+		ret[n].Id = _oidExtensionSubjectAltName()
 		// From RFC 5280, Section 4.2.1.6:
 		// “If the subject field contains an empty sequence ... then
 		// subjectAltName extension ... is marked as critical”
@@ -1269,9 +1351,8 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 		n++
 	}
 
-	usePolicies := x509usepolicies.Value() != "0"
-	if ((!usePolicies && len(template.PolicyIdentifiers) > 0) || (usePolicies && len(template.Policies) > 0)) &&
-		!oidInExtensions(oidExtensionCertificatePolicies, template.ExtraExtensions) {
+	if len(template.Policies) > 0 &&
+		!oidInExtensions(_oidExtensionCertificatePolicies(), template.ExtraExtensions) {
 		ret[n], err = marshalCertificatePolicies(template.Policies, template.PolicyIdentifiers)
 		if err != nil {
 			return nil, err
@@ -1283,8 +1364,8 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 		len(template.PermittedIPRanges) > 0 || len(template.ExcludedIPRanges) > 0 ||
 		len(template.PermittedEmailAddresses) > 0 || len(template.ExcludedEmailAddresses) > 0 ||
 		len(template.PermittedURIDomains) > 0 || len(template.ExcludedURIDomains) > 0) &&
-		!oidInExtensions(oidExtensionNameConstraints, template.ExtraExtensions) {
-		ret[n].Id = oidExtensionNameConstraints
+		!oidInExtensions(_oidExtensionNameConstraints(), template.ExtraExtensions) {
+		ret[n].Id = _oidExtensionNameConstraints()
 		ret[n].Critical = template.PermittedDNSDomainsCritical
 
 		ipAndMask := func(ipNet *net.IPNet) []byte {
@@ -1378,8 +1459,8 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 	}
 
 	if len(template.CRLDistributionPoints) > 0 &&
-		!oidInExtensions(oidExtensionCRLDistributionPoints, template.ExtraExtensions) {
-		ret[n].Id = oidExtensionCRLDistributionPoints
+		!oidInExtensions(_oidExtensionCRLDistributionPoints(), template.ExtraExtensions) {
+		ret[n].Id = _oidExtensionCRLDistributionPoints()
 
 		var crlDp []distributionPoint
 		for _, name := range template.CRLDistributionPoints {
@@ -1408,7 +1489,7 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 }
 
 func marshalKeyUsage(ku KeyUsage) (pkix.Extension, error) {
-	ext := pkix.Extension{Id: oidExtensionKeyUsage, Critical: true}
+	ext := pkix.Extension{Id: _oidExtensionKeyUsage(), Critical: true}
 
 	var a [2]byte
 	a[0] = reverseBitsInAByte(byte(ku))
@@ -1426,7 +1507,7 @@ func marshalKeyUsage(ku KeyUsage) (pkix.Extension, error) {
 }
 
 func marshalExtKeyUsage(extUsages []ExtKeyUsage, unknownUsages []asn1.ObjectIdentifier) (pkix.Extension, error) {
-	ext := pkix.Extension{Id: oidExtensionExtendedKeyUsage}
+	ext := pkix.Extension{Id: _oidExtensionExtendedKeyUsage()}
 
 	oids := []asn1.ObjectIdentifier{:len(extUsages)+len(unknownUsages)}
 	for i, u := range extUsages {
@@ -1445,7 +1526,7 @@ func marshalExtKeyUsage(extUsages []ExtKeyUsage, unknownUsages []asn1.ObjectIden
 }
 
 func marshalBasicConstraints(isCA bool, maxPathLen int, maxPathLenZero bool) (pkix.Extension, error) {
-	ext := pkix.Extension{Id: oidExtensionBasicConstraints, Critical: true}
+	ext := pkix.Extension{Id: _oidExtensionBasicConstraints(), Critical: true}
 	// Leaving MaxPathLen as zero indicates that no maximum path
 	// length is desired, unless MaxPathLenZero is set. A value of
 	// -1 causes encoding/asn1 to omit the value as desired.
@@ -1458,29 +1539,20 @@ func marshalBasicConstraints(isCA bool, maxPathLen int, maxPathLenZero bool) (pk
 }
 
 func marshalCertificatePolicies(policies []OID, policyIdentifiers []asn1.ObjectIdentifier) (pkix.Extension, error) {
-	ext := pkix.Extension{Id: oidExtensionCertificatePolicies}
+	ext := pkix.Extension{Id: _oidExtensionCertificatePolicies()}
 
 	b := cryptobyte.NewBuilder([]byte{:0:128})
 	b.AddASN1(cryptobyte_asn1.SEQUENCE, func(child *cryptobyte.Builder) {
-		if x509usepolicies.Value() != "0" {
-			x509usepolicies.IncNonDefault()
-			for _, v := range policies {
-				child.AddASN1(cryptobyte_asn1.SEQUENCE, func(child *cryptobyte.Builder) {
-					child.AddASN1(cryptobyte_asn1.OBJECT_IDENTIFIER, func(child *cryptobyte.Builder) {
-						if len(v.der) == 0 {
-							child.SetError(errors.New("invalid policy object identifier"))
-							return
-						}
-						child.AddBytes(v.der)
-					})
+		for _, v := range policies {
+			child.AddASN1(cryptobyte_asn1.SEQUENCE, func(child *cryptobyte.Builder) {
+				child.AddASN1(cryptobyte_asn1.OBJECT_IDENTIFIER, func(child *cryptobyte.Builder) {
+					if len(v.der) == 0 {
+						child.SetError(errors.New("invalid policy object identifier"))
+						return
+					}
+					child.AddBytes(v.der)
 				})
-			}
-		} else {
-			for _, v := range policyIdentifiers {
-				child.AddASN1(cryptobyte_asn1.SEQUENCE, func(child *cryptobyte.Builder) {
-					child.AddASN1ObjectIdentifier(v)
-				})
-			}
+			})
 		}
 	})
 
@@ -1493,14 +1565,14 @@ func buildCSRExtensions(template *CertificateRequest) ([]pkix.Extension, error) 
 	var ret []pkix.Extension
 
 	if (len(template.DNSNames) > 0 || len(template.EmailAddresses) > 0 || len(template.IPAddresses) > 0 || len(template.URIs) > 0) &&
-		!oidInExtensions(oidExtensionSubjectAltName, template.ExtraExtensions) {
+		!oidInExtensions(_oidExtensionSubjectAltName(), template.ExtraExtensions) {
 		sanBytes, err := marshalSANs(template.DNSNames, template.EmailAddresses, template.IPAddresses, template.URIs)
 		if err != nil {
 			return nil, err
 		}
 
 		ret = append(ret, pkix.Extension{
-			Id:    oidExtensionSubjectAltName,
+			Id:    _oidExtensionSubjectAltName(),
 			Value: sanBytes,
 		})
 	}
@@ -1554,7 +1626,7 @@ func signingParamsForKey(key crypto.Signer, sigAlgo SignatureAlgorithm) (Signatu
 		sigAlgo = defaultAlgo
 	}
 
-	for _, details := range signatureAlgorithmDetails {
+	for _, details := range _signatureAlgorithmDetails() {
 		if details.algo == sigAlgo {
 			if details.pubKeyAlgo != pubType {
 				return 0, ai, errors.New("x509: requested SignatureAlgorithm does not match private key type")
@@ -1599,7 +1671,7 @@ func signTBS(tbs []byte, key crypto.Signer, sigAlg SignatureAlgorithm, rand io.R
 
 // emptyASN1Subject is the ASN.1 DER encoding of an empty Subject, which is
 // just an empty SEQUENCE.
-var emptyASN1Subject = []byte{0x30, 0}
+const emptyASN1Subject = "\x30\x00"
 
 // CreateCertificate creates a new X.509 v3 certificate based on a template.
 // The following members of template are currently used:
@@ -1658,12 +1730,9 @@ var emptyASN1Subject = []byte{0x30, 0}
 // If template.SerialNumber is nil, a serial number will be generated which
 // conforms to RFC 5280, Section 4.1.2.2 using entropy from rand.
 //
-// The PolicyIdentifier and Policies fields can both be used to marshal certificate
-// policy OIDs. By default, only the Policies is marshaled, but if the
-// GODEBUG setting "x509usepolicies" has the value "0", the PolicyIdentifiers field will
-// be marshaled instead of the Policies field. This changed in Go 1.24. The Policies field can
-// be used to marshal policy OIDs which have components that are larger than 31
-// bits.
+// Only the Policies field is marshaled for certificate policy OIDs. The Policies
+// field can be used to marshal policy OIDs which have components that are larger
+// than 31 bits.
 func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv any) ([]byte, error) {
 	key, ok := priv.(crypto.Signer)
 	if !ok {
@@ -1734,22 +1803,12 @@ func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv 
 
 	subjectKeyId := template.SubjectKeyId
 	if len(subjectKeyId) == 0 && template.IsCA {
-		if x509sha256skid.Value() == "0" {
-			x509sha256skid.IncNonDefault()
-			// SubjectKeyId generated using method 1 in RFC 5280, Section 4.2.1.2:
-			//   (1) The keyIdentifier is composed of the 160-bit SHA-1 hash of the
-			//   value of the BIT STRING subjectPublicKey (excluding the tag,
-			//   length, and number of unused bits).
-			h := sha1.Sum(publicKeyBytes)
-			subjectKeyId = h[:]
-		} else {
-			// SubjectKeyId generated using method 1 in RFC 7093, Section 2:
-			//    1) The keyIdentifier is composed of the leftmost 160-bits of the
-			//    SHA-256 hash of the value of the BIT STRING subjectPublicKey
-			//    (excluding the tag, length, and number of unused bits).
-			h := sha256.Sum256(publicKeyBytes)
-			subjectKeyId = h[:20]
-		}
+		// SubjectKeyId generated using method 1 in RFC 7093, Section 2:
+		//    1) The keyIdentifier is composed of the leftmost 160-bits of the
+		//    SHA-256 hash of the value of the BIT STRING subjectPublicKey
+		//    (excluding the tag, length, and number of unused bits).
+		h := sha256.Sum256(publicKeyBytes)
+		subjectKeyId = h[:20]
 	}
 
 	// Check that the signer's public key matches the private key, if available.
@@ -1797,14 +1856,12 @@ func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv 
 	})
 }
 
-var x509sha256skid = godebug.New("x509sha256skid")
-
 // pemCRLPrefix is the magic string that indicates that we have a PEM encoded
 // CRL.
-var pemCRLPrefix = []byte("-----BEGIN X509 CRL")
+const pemCRLPrefix = "-----BEGIN X509 CRL"
 
 // pemType is the type of a PEM encoded CRL.
-var pemType = "X509 CRL"
+const pemType = "X509 CRL"
 
 // ParseCRL parses a CRL from the given bytes. It's often the case that PEM
 // encoded CRLs will appear where they should be DER encoded, so this function
@@ -1870,7 +1927,7 @@ func (c *Certificate) CreateCRL(rand io.Reader, priv any, revokedCerts []pkix.Re
 	// Authority Key Id
 	if len(c.SubjectKeyId) > 0 {
 		var aki pkix.Extension
-		aki.Id = oidExtensionAuthorityKeyId
+		aki.Id = _oidExtensionAuthorityKeyId()
 		aki.Value, err = asn1.Marshal(authKeyId{Id: c.SubjectKeyId})
 		if err != nil {
 			return nil, err
@@ -1958,9 +2015,11 @@ type certificateRequest struct {
 	SignatureValue     asn1.BitString
 }
 
-// oidExtensionRequest is a PKCS #9 OBJECT IDENTIFIER that indicates requested
+// _oidExtensionRequest is a PKCS #9 OBJECT IDENTIFIER that indicates requested
 // extensions in a CSR.
-var oidExtensionRequest = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 14}
+func _oidExtensionRequest() asn1.ObjectIdentifier {
+	return asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 14}
+}
 
 // newRawAttributes converts AttributeTypeAndValueSETs from a template
 // CertificateRequest's Attributes into tbsCertificateRequest RawAttributes.
@@ -2013,7 +2072,7 @@ func parseCSRExtensions(rawAttributes []asn1.RawValue) ([]pkix.Extension, error)
 			continue
 		}
 
-		if !attr.Id.Equal(oidExtensionRequest) {
+		if !attr.Id.Equal(_oidExtensionRequest()) {
 			continue
 		}
 
@@ -2091,7 +2150,7 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 	if len(extensions) > 0 {
 		// Append the extensions to an existing attribute if possible.
 		for _, atvSet := range attributes {
-			if !atvSet.Type.Equal(oidExtensionRequest) || len(atvSet.Value) == 0 {
+			if !atvSet.Type.Equal(_oidExtensionRequest()) || len(atvSet.Value) == 0 {
 				continue
 			}
 
@@ -2141,7 +2200,7 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 			Type  asn1.ObjectIdentifier
 			Value [][]pkix.Extension `asn1:"set"`
 		}{
-			Type:  oidExtensionRequest,
+			Type:  _oidExtensionRequest(),
 			Value: [][]pkix.Extension{extensions},
 		}
 
@@ -2251,7 +2310,7 @@ func parseCertificateRequest(in *certificateRequest) (*CertificateRequest, error
 
 	for _, extension := range out.Extensions {
 		switch {
-		case extension.Id.Equal(oidExtensionSubjectAltName):
+		case extension.Id.Equal(_oidExtensionSubjectAltName()):
 			out.DNSNames, out.EmailAddresses, out.IPAddresses, out.URIs, err = parseSANExtension(extension.Value)
 			if err != nil {
 				return nil, err
@@ -2458,7 +2517,7 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 			// because we'll synthesize that ourselves to ensure it is correct.
 			exts := []pkix.Extension{:0:len(rce.ExtraExtensions)}
 			for _, ext := range rce.ExtraExtensions {
-				if ext.Id.Equal(oidExtensionReasonCode) {
+				if ext.Id.Equal(_oidExtensionReasonCode()) {
 					return nil, errors.New("x509: template contains entry with ReasonCode ExtraExtension; use ReasonCode field instead")
 				}
 				exts = append(exts, ext)
@@ -2473,7 +2532,7 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 				}
 
 				exts = append(exts, pkix.Extension{
-					Id:    oidExtensionReasonCode,
+					Id:    _oidExtensionReasonCode(),
 					Value: reasonBytes,
 				})
 			}
@@ -2512,11 +2571,11 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 		NextUpdate: template.NextUpdate.UTC(),
 		Extensions: []pkix.Extension{
 			{
-				Id:    oidExtensionAuthorityKeyId,
+				Id:    _oidExtensionAuthorityKeyId(),
 				Value: aki,
 			},
 			{
-				Id:    oidExtensionCRLNumber,
+				Id:    _oidExtensionCRLNumber(),
 				Value: crlNum,
 			},
 		},

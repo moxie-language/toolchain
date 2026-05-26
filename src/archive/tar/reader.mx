@@ -7,7 +7,6 @@ package tar
 import (
 	"bytes"
 	"io"
-	"path/filepath"
 	"strconv"
 	"time"
 )
@@ -56,12 +55,6 @@ func (tr *Reader) Next() (*Header, error) {
 	}
 	hdr, err := tr.next()
 	tr.err = err
-	if err == nil && !filepath.IsLocal(hdr.Name) {
-		if tarinsecurepath.Value() == "0" {
-			tarinsecurepath.IncNonDefault()
-			err = ErrInsecurePath
-		}
-	}
 	return hdr, err
 }
 
@@ -356,11 +349,11 @@ func (tr *Reader) readHeader() (*Header, *block, error) {
 	if _, err := io.ReadFull(tr.r, tr.blk[:]); err != nil {
 		return nil, nil, err // EOF is okay here; exactly 0 bytes read
 	}
-	if bytes.Equal(tr.blk[:], zeroBlock[:]) {
+	if bytes.Equal(tr.blk[:], _zeroBlock()) {
 		if _, err := io.ReadFull(tr.r, tr.blk[:]); err != nil {
 			return nil, nil, err // EOF is okay here; exactly 1 block of zeros read
 		}
-		if bytes.Equal(tr.blk[:], zeroBlock[:]) {
+		if bytes.Equal(tr.blk[:], _zeroBlock()) {
 			return nil, nil, io.EOF // normal EOF; exactly 2 block of zeros read
 		}
 		return nil, nil, ErrHeader // Zero block and then non-zero block
@@ -861,7 +854,7 @@ func discard(r io.Reader, n int64) error {
 	// io.CopyN done shortly afterwards to trigger any IO errors.
 	var seekSkipped int64 // Number of bytes skipped via Seek
 	if sr, ok := r.(io.Seeker); ok && n > 1 {
-		// Not all io.Seeker can actually Seek. For example, os.Stdin implements
+		// Not all io.Seeker can actually Seek. For example, os.Stdin() implements
 		// io.Seeker, but calling Seek always returns an error and performs
 		// no action. Thus, we try an innocent seek to the current position
 		// to see if Seek is really supported.
@@ -876,7 +869,7 @@ func discard(r io.Reader, n int64) error {
 		}
 	}
 
-	copySkipped, err := io.CopyN(io.Discard, r, n-seekSkipped)
+	copySkipped, err := io.CopyN(io.Discard(), r, n-seekSkipped)
 	if err == io.EOF && seekSkipped+copySkipped < n {
 		err = io.ErrUnexpectedEOF
 	}

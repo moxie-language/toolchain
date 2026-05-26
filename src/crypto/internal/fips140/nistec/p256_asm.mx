@@ -26,15 +26,17 @@ import (
 // domain (with R 2²⁵⁶) as four limbs in little-endian order value.
 type p256Element [4]uint64
 
-// p256One is one in the Montgomery domain.
-var p256One = p256Element{0x0000000000000001, 0xffffffff00000000,
-	0xffffffffffffffff, 0x00000000fffffffe}
+func _p256One() p256Element {
+	return p256Element{0x0000000000000001, 0xffffffff00000000,
+		0xffffffffffffffff, 0x00000000fffffffe}
+}
 
-var p256Zero = p256Element{}
+func _p256Zero() p256Element { return p256Element{} }
 
-// p256P is 2²⁵⁶ - 2²²⁴ + 2¹⁹² + 2⁹⁶ - 1 in the Montgomery domain.
-var p256P = p256Element{0xffffffffffffffff, 0x00000000ffffffff,
-	0x0000000000000000, 0xffffffff00000001}
+func _p256P() p256Element {
+	return p256Element{0xffffffffffffffff, 0x00000000ffffffff,
+		0x0000000000000000, 0xffffffff00000001}
+}
 
 // P256Point is a P-256 point. The zero value should not be assumed to be valid
 // (although it is in this implementation).
@@ -47,7 +49,7 @@ type P256Point struct {
 // NewP256Point returns a new P256Point representing the point at infinity.
 func NewP256Point() *P256Point {
 	return &P256Point{
-		x: p256One, y: p256One, z: p256Zero,
+		x: _p256One(), y: _p256One(), z: _p256Zero(),
 	}
 }
 
@@ -57,7 +59,7 @@ func (p *P256Point) SetGenerator() *P256Point {
 		0x79fb732b77622510, 0x18905f76a53755c6}
 	p.y = p256Element{0xddf25357ce95560a, 0x8b4ab8e4ba19e45c,
 		0xd2e88688dd21f325, 0x8571ff1825885d85}
-	p.z = p256One
+	p.z = _p256One()
 	return p
 }
 
@@ -100,7 +102,7 @@ func (p *P256Point) SetBytes(b []byte) (*P256Point, error) {
 		if err := p256CheckOnCurve(&r.x, &r.y); err != nil {
 			return nil, err
 		}
-		r.z = p256One
+		r.z = _p256One()
 		return p.Set(&r), nil
 
 	// Compressed form.
@@ -125,7 +127,7 @@ func (p *P256Point) SetBytes(b []byte) (*P256Point, error) {
 		cond := int(yy[0]&1) ^ int(b[0]&1)
 		p256NegCond(&r.y, cond)
 
-		r.z = p256One
+		r.z = _p256One()
 		return p.Set(&r), nil
 
 	default:
@@ -169,11 +171,12 @@ func p256CheckOnCurve(x, y *p256Element) error {
 // not allowed to be equal to or greater than p, so if this function returns 0
 // then x is invalid.
 func p256LessThanP(x *p256Element) int {
+	p := _p256P()
 	var b uint64
-	_, b = bits.Sub64(x[0], p256P[0], b)
-	_, b = bits.Sub64(x[1], p256P[1], b)
-	_, b = bits.Sub64(x[2], p256P[2], b)
-	_, b = bits.Sub64(x[3], p256P[3], b)
+	_, b = bits.Sub64(x[0], p[0], b)
+	_, b = bits.Sub64(x[1], p[1], b)
+	_, b = bits.Sub64(x[2], p[2], b)
+	_, b = bits.Sub64(x[3], p[3], b)
 	return int(b)
 }
 
@@ -201,6 +204,7 @@ func limbsToBytes(b *[32]byte, l *[4]uint64) {
 
 // p256Add sets res = x + y.
 func p256Add(res, x, y *p256Element) {
+	p := _p256P()
 	var c, b uint64
 	t1 := []uint64{:4}
 	t1[0], c = bits.Add64(x[0], y[0], 0)
@@ -208,10 +212,10 @@ func p256Add(res, x, y *p256Element) {
 	t1[2], c = bits.Add64(x[2], y[2], c)
 	t1[3], c = bits.Add64(x[3], y[3], c)
 	t2 := []uint64{:4}
-	t2[0], b = bits.Sub64(t1[0], p256P[0], 0)
-	t2[1], b = bits.Sub64(t1[1], p256P[1], b)
-	t2[2], b = bits.Sub64(t1[2], p256P[2], b)
-	t2[3], b = bits.Sub64(t1[3], p256P[3], b)
+	t2[0], b = bits.Sub64(t1[0], p[0], 0)
+	t2[1], b = bits.Sub64(t1[1], p[1], b)
+	t2[2], b = bits.Sub64(t1[2], p[2], b)
+	t2[3], b = bits.Sub64(t1[3], p[3], b)
 	// Three options:
 	//   - a+b < p
 	//     then c is 0, b is 1, and t1 is correct
@@ -326,18 +330,16 @@ type p256AffineTable [32]p256AffinePoint
 // sliding window used in p256ScalarBaseMult, and having each table already
 // pre-doubled lets us avoid the doublings between windows entirely. This table
 // aliases into p256PrecomputedEmbed.
-var p256Precomputed *[43]p256AffineTable
-
-func init() {
-	p256PrecomputedPtr := unsafe.Pointer(&p256PrecomputedEmbed)
+func _p256Precomputed() *[43]p256AffineTable {
+	ptr := unsafe.Pointer(&p256PrecomputedEmbed)
 	if runtime.GOARCH == "s390x" {
 		var newTable [43 * 32 * 2 * 4]uint64
-		for i, x := range (*[43 * 32 * 2 * 4][8]byte)(p256PrecomputedPtr) {
+		for i, x := range (*[43 * 32 * 2 * 4][8]byte)(ptr) {
 			newTable[i] = byteorder.LEUint64(x[:])
 		}
-		p256PrecomputedPtr = unsafe.Pointer(&newTable)
+		ptr = unsafe.Pointer(&newTable)
 	}
-	p256Precomputed = (*[43]p256AffineTable)(p256PrecomputedPtr)
+	return (*[43]p256AffineTable)(ptr)
 }
 
 // p256SelectAffine sets res to the point at index idx in the table.
@@ -465,7 +467,7 @@ func p256Equal(a, b *p256Element) int {
 
 // isInfinity returns 1 if p is the point at infinity and 0 otherwise.
 func (p *P256Point) isInfinity() int {
-	return p256Equal(&p.z, &p256Zero)
+	return p256Equal(&p.z, &_p256Zero())
 }
 
 // Bytes returns the uncompressed or infinity encoding of p, as specified in
@@ -633,12 +635,13 @@ func boothW6(in uint) (int, int) {
 }
 
 func (p *P256Point) p256BaseMult(scalar *p256OrdElement) {
+	precomp := _p256Precomputed()
 	var t0 p256AffinePoint
 
 	wvalue := (scalar[0] << 1) & 0x7f
 	sel, sign := boothW6(uint(wvalue))
-	p256SelectAffine(&t0, &p256Precomputed[0], sel)
-	p.x, p.y, p.z = t0.x, t0.y, p256One
+	p256SelectAffine(&t0, &precomp[0], sel)
+	p.x, p.y, p.z = t0.x, t0.y, _p256One()
 	p256NegCond(&p.y, sign)
 
 	index := uint(5)
@@ -652,7 +655,7 @@ func (p *P256Point) p256BaseMult(scalar *p256OrdElement) {
 		}
 		index += 6
 		sel, sign = boothW6(uint(wvalue))
-		p256SelectAffine(&t0, &p256Precomputed[i], sel)
+		p256SelectAffine(&t0, &precomp[i], sel)
 		p256PointAddAffineAsm(p, p, &t0, sign, sel, zero)
 		zero |= sel
 	}

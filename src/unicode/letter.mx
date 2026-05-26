@@ -180,30 +180,25 @@ func isExcludingLatin(rangeTab *RangeTable, r rune) bool {
 	return false
 }
 
-// IsUpper reports whether the rune is an upper case letter.
-func IsUpper(r rune) bool {
-	// See comment in IsGraphic.
+func (t *Tables) IsUpper(r rune) bool {
 	if uint32(r) <= MaxLatin1 {
-		return properties[uint8(r)]&pLmask == pLu
+		return t.props[uint8(r)]&pLmask == pLu
 	}
-	return isExcludingLatin(Upper, r)
+	return isExcludingLatin(t.upper, r)
 }
 
-// IsLower reports whether the rune is a lower case letter.
-func IsLower(r rune) bool {
-	// See comment in IsGraphic.
+func (t *Tables) IsLower(r rune) bool {
 	if uint32(r) <= MaxLatin1 {
-		return properties[uint8(r)]&pLmask == pLl
+		return t.props[uint8(r)]&pLmask == pLl
 	}
-	return isExcludingLatin(Lower, r)
+	return isExcludingLatin(t.lower, r)
 }
 
-// IsTitle reports whether the rune is a title case letter.
-func IsTitle(r rune) bool {
+func (t *Tables) IsTitle(r rune) bool {
 	if r <= MaxLatin1 {
 		return false
 	}
-	return isExcludingLatin(Title, r)
+	return isExcludingLatin(t.title, r)
 }
 
 // lookupCaseRange returns the CaseRange mapping for rune r or nil if no
@@ -258,68 +253,79 @@ func to(_case int, r rune, caseRange []CaseRange) (mappedRune rune, foundMapping
 	return r, false
 }
 
-// To maps the rune to the specified case: [UpperCase], [LowerCase], or [TitleCase].
-func To(_case int, r rune) rune {
-	r, _ = to(_case, r, CaseRanges)
+func (t *Tables) To(_case int, r rune) rune {
+	r, _ = to(_case, r, t.caseRanges)
 	return r
 }
 
-// ToUpper maps the rune to upper case.
-func ToUpper(r rune) rune {
+func (t *Tables) ToUpper(r rune) rune {
 	if r <= MaxASCII {
 		if 'a' <= r && r <= 'z' {
 			r -= 'a' - 'A'
 		}
 		return r
 	}
-	return To(UpperCase, r)
+	return t.To(UpperCase, r)
 }
 
-// ToLower maps the rune to lower case.
-func ToLower(r rune) rune {
+func (t *Tables) ToLower(r rune) rune {
 	if r <= MaxASCII {
 		if 'A' <= r && r <= 'Z' {
 			r += 'a' - 'A'
 		}
 		return r
 	}
-	return To(LowerCase, r)
+	return t.To(LowerCase, r)
 }
 
-// ToTitle maps the rune to title case.
-func ToTitle(r rune) rune {
+func (t *Tables) ToTitle(r rune) rune {
 	if r <= MaxASCII {
-		if 'a' <= r && r <= 'z' { // title case is upper case for ASCII
+		if 'a' <= r && r <= 'z' {
 			r -= 'a' - 'A'
 		}
 		return r
 	}
-	return To(TitleCase, r)
+	return t.To(TitleCase, r)
 }
 
-// ToUpper maps the rune to upper case giving priority to the special mapping.
 func (special SpecialCase) ToUpper(r rune) rune {
 	r1, hadMapping := to(UpperCase, r, []CaseRange(special))
 	if r1 == r && !hadMapping {
-		r1 = ToUpper(r)
+		if r <= MaxASCII {
+			if 'a' <= r && r <= 'z' {
+				r -= 'a' - 'A'
+			}
+			return r
+		}
+		r1, _ = to(UpperCase, r, _CaseRanges())
 	}
 	return r1
 }
 
-// ToTitle maps the rune to title case giving priority to the special mapping.
 func (special SpecialCase) ToTitle(r rune) rune {
 	r1, hadMapping := to(TitleCase, r, []CaseRange(special))
 	if r1 == r && !hadMapping {
-		r1 = ToTitle(r)
+		if r <= MaxASCII {
+			if 'a' <= r && r <= 'z' {
+				r -= 'a' - 'A'
+			}
+			return r
+		}
+		r1, _ = to(TitleCase, r, _CaseRanges())
 	}
 	return r1
 }
 
-// ToLower maps the rune to lower case giving priority to the special mapping.
 func (special SpecialCase) ToLower(r rune) rune {
 	r1, hadMapping := to(LowerCase, r, []CaseRange(special))
 	if r1 == r && !hadMapping {
-		r1 = ToLower(r)
+		if r <= MaxASCII {
+			if 'A' <= r && r <= 'Z' {
+				r += 'a' - 'A'
+			}
+			return r
+		}
+		r1, _ = to(LowerCase, r, _CaseRanges())
 	}
 	return r1
 }
@@ -331,6 +337,44 @@ func (special SpecialCase) ToLower(r rune) rune {
 type foldPair struct {
 	From uint16
 	To   uint16
+}
+
+type Tables struct {
+	upper      *RangeTable
+	lower      *RangeTable
+	title      *RangeTable
+	letter     *RangeTable
+	mark       *RangeTable
+	number     *RangeTable
+	digit      *RangeTable
+	punct      *RangeTable
+	symbol     *RangeTable
+	whiteSpace *RangeTable
+	zs         *RangeTable
+	props      [MaxLatin1 + 1]uint8
+	caseRanges []CaseRange
+	asciiFold  [MaxASCII + 1]uint16
+	caseOrbit  []foldPair
+}
+
+func NewTables() *Tables {
+	return &Tables{
+		upper:      _Lu(),
+		lower:      _Ll(),
+		title:      _Lt(),
+		letter:     _L(),
+		mark:       _M(),
+		number:     _N(),
+		digit:      _Nd(),
+		punct:      _P(),
+		symbol:     _S(),
+		whiteSpace: _White_Space(),
+		zs:         _Zs(),
+		props:      _properties(),
+		caseRanges: _CaseRanges(),
+		asciiFold:  _asciiFold(),
+		caseOrbit:  _caseOrbit(),
+	}
 }
 
 // SimpleFold iterates over Unicode code points equivalent under
@@ -351,34 +395,30 @@ type foldPair struct {
 //	SimpleFold('1') = '1'
 //
 //	SimpleFold(-2) = -2
-func SimpleFold(r rune) rune {
+func (t *Tables) SimpleFold(r rune) rune {
 	if r < 0 || r > MaxRune {
 		return r
 	}
 
-	if int(r) < len(asciiFold) {
-		return rune(asciiFold[r])
+	if int(r) < len(t.asciiFold) {
+		return rune(t.asciiFold[r])
 	}
 
-	// Consult caseOrbit table for special cases.
 	lo := 0
-	hi := len(caseOrbit)
+	hi := len(t.caseOrbit)
 	for lo < hi {
 		m := int(uint(lo+hi) >> 1)
-		if rune(caseOrbit[m].From) < r {
+		if rune(t.caseOrbit[m].From) < r {
 			lo = m + 1
 		} else {
 			hi = m
 		}
 	}
-	if lo < len(caseOrbit) && rune(caseOrbit[lo].From) == r {
-		return rune(caseOrbit[lo].To)
+	if lo < len(t.caseOrbit) && rune(t.caseOrbit[lo].From) == r {
+		return rune(t.caseOrbit[lo].To)
 	}
 
-	// No folding specified. This is a one- or two-element
-	// equivalence class containing rune and ToLower(rune)
-	// and ToUpper(rune) if they are different from rune.
-	if cr := lookupCaseRange(r, CaseRanges); cr != nil {
+	if cr := lookupCaseRange(r, t.caseRanges); cr != nil {
 		if l := convertCase(LowerCase, r, cr); l != r {
 			return l
 		}

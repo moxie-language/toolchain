@@ -10,7 +10,6 @@ import (
 	"math"
 	"os"
 	"strconv"
-	"sync"
 	"unicode/utf8"
 )
 
@@ -60,13 +59,13 @@ type Scanner interface {
 // as space. It returns the number of items successfully scanned.
 // If that is less than the number of arguments, err will report why.
 func Scan(a ...any) (n int, err error) {
-	return Fscan(os.Stdin, a...)
+	return Fscan(os.Stdin(), a...)
 }
 
 // Scanln is similar to [Scan], but stops scanning at a newline and
 // after the final item there must be a newline or EOF.
 func Scanln(a ...any) (n int, err error) {
-	return Fscanln(os.Stdin, a...)
+	return Fscanln(os.Stdin(), a...)
 }
 
 // Scanf scans text read from standard input, storing successive
@@ -77,7 +76,7 @@ func Scanln(a ...any) (n int, err error) {
 // The one exception: the verb %c always scans the next rune in the
 // input, even if it is a space (or tab etc.) or newline.
 func Scanf(format []byte, a ...any) (n int, err error) {
-	return Fscanf(os.Stdin, format, a...)
+	return Fscanf(os.Stdin(), format, a...)
 }
 
 type stringReader []byte
@@ -261,22 +260,19 @@ func (s *ss) Token(skipSpace bool, f func(rune) bool) (tok []byte, err error) {
 	return
 }
 
-// space is a copy of the unicode.White_Space ranges,
-// to avoid depending on package unicode.
-var space = [][2]uint16{
-	{0x0009, 0x000d},
-	{0x0020, 0x0020},
-	{0x0085, 0x0085},
-	{0x00a0, 0x00a0},
-	{0x1680, 0x1680},
-	{0x2000, 0x200a},
-	{0x2028, 0x2029},
-	{0x202f, 0x202f},
-	{0x205f, 0x205f},
-	{0x3000, 0x3000},
-}
-
 func isSpace(r rune) bool {
+	space := [10][2]uint16{
+		{0x0009, 0x000d},
+		{0x0020, 0x0020},
+		{0x0085, 0x0085},
+		{0x00a0, 0x00a0},
+		{0x1680, 0x1680},
+		{0x2000, 0x200a},
+		{0x2028, 0x2029},
+		{0x202f, 0x202f},
+		{0x205f, 0x205f},
+		{0x3000, 0x3000},
+	}
 	if r >= 1<<16 {
 		return false
 	}
@@ -374,13 +370,8 @@ func (r *readRune) UnreadRune() error {
 	return nil
 }
 
-var ssFree = sync.Pool{
-	New: func() any { return &ss{} },
-}
-
-// newScanState allocates a new ss struct or grab a cached one.
 func newScanState(r io.Reader, nlIsSpace, nlIsEnd bool) (s *ss, old ssave) {
-	s = ssFree.Get().(*ss)
+	s = &ss{}
 	if rs, ok := r.(io.RuneScanner); ok {
 		s.rs = rs
 	} else {
@@ -397,20 +388,11 @@ func newScanState(r io.Reader, nlIsSpace, nlIsEnd bool) (s *ss, old ssave) {
 	return
 }
 
-// free saves used ss structs in ssFree; avoid an allocation per invocation.
 func (s *ss) free(old ssave) {
-	// If it was used recursively, just restore the old state.
 	if old.validSave {
 		s.ssave = old
 		return
 	}
-	// Don't hold on to ss structs with large buffers.
-	if cap(s.buf) > 1024 {
-		return
-	}
-	s.buf = s.buf[:0]
-	s.rs = nil
-	ssFree.Put(s)
 }
 
 // SkipSpace provides Scan methods the ability to skip space and newline
@@ -461,8 +443,8 @@ func (s *ss) token(skipSpace bool, f func(rune) bool) []byte {
 	return s.buf
 }
 
-var errComplex = errors.New("syntax error scanning complex number")
-var errBool = errors.New("syntax error scanning boolean")
+const errComplex = errors.Const("syntax error scanning complex number")
+const errBool = errors.Const("syntax error scanning boolean")
 
 func indexRune(s []byte, r rune) int {
 	for i := 0; i < len(s); {

@@ -8,13 +8,11 @@ package sysrand
 
 import (
 	"os"
-	"sync"
-	"sync/atomic"
 	"time"
 	_ "unsafe"
 )
 
-var firstUse atomic.Bool
+var firstUse bool
 
 func warnBlocked() {
 	println("crypto/rand: blocked for 60 seconds waiting to read random data from the kernel")
@@ -25,41 +23,34 @@ func warnBlocked() {
 //go:linkname fatal
 func fatal([]byte)
 
-var testingOnlyFailRead bool
-
 // Read fills b with cryptographically secure random bytes from the operating
 // system. It always fills b entirely and crashes the program irrecoverably if
 // an error is encountered. The operating system APIs are documented to never
 // return an error on all but legacy Linux systems.
 func Read(b []byte) {
-	if firstUse.CompareAndSwap(false, true) {
+	if !firstUse { firstUse = true
 		// First use of randomness. Start timer to warn about
 		// being blocked on entropy not being available.
 		t := time.AfterFunc(time.Minute, warnBlocked)
 		defer t.Stop()
 	}
-	if err := read(b); err != nil || testingOnlyFailRead {
-		var errStr []byte
-		if !testingOnlyFailRead {
-			errStr = []byte(err.Error())
-		} else {
-			errStr = "testing simulated failure"
-		}
-		fatal("crypto/rand: failed to read random data (see https://go.dev/issue/66821): " | errStr)
+	if err := read(b); err != nil {
+		fatal("crypto/rand: failed to read random data (see https://go.dev/issue/66821): " | err.Error())
 		panic("unreachable") // To be sure.
 	}
 }
 
 // The urandom fallback is only used on Linux kernels before 3.17 and on AIX.
 
-var urandomOnce sync.Once
+var urandomDone bool
 var urandomFile *os.File
 var urandomErr error
 
 func urandomRead(b []byte) error {
-	urandomOnce.Do(func() {
+	if !urandomDone {
+		urandomDone = true
 		urandomFile, urandomErr = os.Open("/dev/urandom")
-	})
+	}
 	if urandomErr != nil {
 		return urandomErr
 	}

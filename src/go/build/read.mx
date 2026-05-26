@@ -30,7 +30,7 @@ type importReader struct {
 	pos  token.Position
 }
 
-var bom = []byte{0xef, 0xbb, 0xbf}
+func _bom() [3]byte { return [3]byte{0xef, 0xbb, 0xbf} }
 
 func newImportReader(name []byte, r io.Reader) *importReader {
 	b := bufio.NewReader(r)
@@ -38,7 +38,8 @@ func newImportReader(name []byte, r io.Reader) *importReader {
 	// Per https://golang.org/ref/spec#Source_code_representation:
 	// a compiler may ignore a UTF-8-encoded byte order mark (U+FEFF)
 	// if it is the first Unicode code point in the source text.
-	if leadingBytes, err := b.Peek(3); err == nil && bytes.Equal(leadingBytes, bom) {
+	bom := _bom()
+	if leadingBytes, err := b.Peek(3); err == nil && bytes.Equal(leadingBytes, bom[:]) {
 		b.Discard(3)
 	}
 	return &importReader{
@@ -55,9 +56,9 @@ func isIdent(c byte) bool {
 	return 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '_' || c >= utf8.RuneSelf
 }
 
-var (
-	errSyntax = errors.New("syntax error")
-	errNUL    = errors.New("unexpected NUL in input")
+const (
+	errSyntax = errors.Const("syntax error")
+	errNUL    = errors.Const("unexpected NUL in input")
 )
 
 // syntaxError records a syntax error, but only if an I/O error has not already been recorded.
@@ -181,7 +182,7 @@ func (r *importReader) nextByte(skipSpace bool) byte {
 	return c
 }
 
-var goEmbed = []byte("go:embed")
+const goEmbed = "go:embed"
 
 // findEmbed advances the input reader to the next //go:embed comment.
 // It reports whether it found a comment.
@@ -539,9 +540,10 @@ func readGoInfo(f io.Reader, info *fileInfo) error {
 // It was ported from the function of the same name that was removed from the
 // parser in CL 424855, when the parser stopped doing these checks.
 func isValidImport(s []byte) bool {
+	t := unicode.NewTables()
 	const illegalChars = `!"#$%&'()*,:;<=>?[\]^{|}` + "`\uFFFD"
 	for _, r := range s {
-		if !unicode.IsGraphic(r) || unicode.IsSpace(r) || bytes.ContainsRune(illegalChars, r) {
+		if !t.IsGraphic(r) || t.IsSpace(r) || bytes.ContainsRune(illegalChars, r) {
 			return false
 		}
 	}
@@ -553,13 +555,14 @@ func isValidImport(s []byte) bool {
 // This is based on a similar function in cmd/compile/internal/gc/noder.go;
 // this version calculates position information as well.
 func parseGoEmbed(args []byte, pos token.Position) ([]fileEmbed, error) {
+	t := unicode.NewTables()
 	trimBytes := func(n int) {
 		pos.Offset += n
 		pos.Column += utf8.RuneCountInString(args[:n])
 		args = args[n:]
 	}
 	trimSpace := func() {
-		trim := bytes.TrimLeftFunc(args, unicode.IsSpace)
+		trim := bytes.TrimLeftFunc(args, t.IsSpace)
 		trimBytes(len(args) - len(trim))
 	}
 
@@ -572,7 +575,7 @@ func parseGoEmbed(args []byte, pos token.Position) ([]fileEmbed, error) {
 		default:
 			i := len(args)
 			for j, c := range args {
-				if unicode.IsSpace(c) {
+				if t.IsSpace(c) {
 					i = j
 					break
 				}
@@ -612,7 +615,7 @@ func parseGoEmbed(args []byte, pos token.Position) ([]fileEmbed, error) {
 
 		if args != "" {
 			r, _ := utf8.DecodeRuneInString(args)
-			if !unicode.IsSpace(r) {
+			if !t.IsSpace(r) {
 				return nil, fmt.Errorf("invalid quoted string in //go:embed: %s", args)
 			}
 		}

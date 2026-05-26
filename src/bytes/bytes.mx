@@ -453,7 +453,9 @@ func SplitAfter(s, sep []byte) [][]byte {
 	return genSplit(s, sep, len(sep), -1)
 }
 
-var asciiSpace = [256]uint8{'\t': 1, '\n': 1, '\v': 1, '\f': 1, '\r': 1, ' ': 1}
+func _asciiSpace() [256]uint8 {
+	return [256]uint8{'\t': 1, '\n': 1, '\v': 1, '\f': 1, '\r': 1, ' ': 1}
+}
 
 // Fields interprets s as a sequence of UTF-8-encoded code points.
 // It splits the slice s around each instance of one or more consecutive white space
@@ -462,11 +464,9 @@ var asciiSpace = [256]uint8{'\t': 1, '\n': 1, '\v': 1, '\f': 1, '\r': 1, ' ': 1}
 // non-empty. Unlike [Split], leading and trailing runs of white space characters
 // are discarded.
 func Fields(s []byte) [][]byte {
-	// First count the fields.
-	// This is an exact count if s is ASCII, otherwise it is an approximation.
+	asciiSpace := _asciiSpace()
 	n := 0
 	wasSpace := 1
-	// setBits is used to track which bits are set in the bytes of s.
 	setBits := uint8(0)
 	for i := 0; i < len(s); i++ {
 		r := s[i]
@@ -477,16 +477,14 @@ func Fields(s []byte) [][]byte {
 	}
 
 	if setBits >= utf8.RuneSelf {
-		// Some runes in the input slice are not ASCII.
-		return FieldsFunc(s, unicode.IsSpace)
+		t := unicode.NewTables()
+		return FieldsFunc(s, t.IsSpace)
 	}
 
-	// ASCII fast path
 	a := [][]byte{:n}
 	na := 0
 	fieldStart := 0
 	i := 0
-	// Skip spaces in the front of the input.
 	for i < len(s) && asciiSpace[s[i]] != 0 {
 		i++
 	}
@@ -499,7 +497,6 @@ func Fields(s []byte) [][]byte {
 		a[na] = s[fieldStart:i:i]
 		na++
 		i++
-		// Skip spaces in between fields.
 		for i < len(s) && asciiSpace[s[i]] != 0 {
 			i++
 		}
@@ -727,7 +724,8 @@ func ToUpper(s []byte) []byte {
 		}
 		return b
 	}
-	return Map(unicode.ToUpper, s)
+	t := unicode.NewTables()
+	return Map(t.ToUpper, s)
 }
 
 // ToLower returns a copy of the byte slice s with all Unicode letters mapped to
@@ -757,11 +755,15 @@ func ToLower(s []byte) []byte {
 		}
 		return b
 	}
-	return Map(unicode.ToLower, s)
+	t := unicode.NewTables()
+	return Map(t.ToLower, s)
 }
 
 // ToTitle treats s as UTF-8-encoded bytes and returns a copy with all the Unicode letters mapped to their title case.
-func ToTitle(s []byte) []byte { return Map(unicode.ToTitle, s) }
+func ToTitle(s []byte) []byte {
+	t := unicode.NewTables()
+	return Map(t.ToTitle, s)
+}
 
 // ToUpperSpecial treats s as UTF-8-encoded bytes and returns a copy with all the Unicode letters mapped to their
 // upper case, giving priority to the special casing rules.
@@ -828,11 +830,12 @@ func isSeparator(r rune) bool {
 		return true
 	}
 	// Letters and digits are not separators
-	if unicode.IsLetter(r) || unicode.IsDigit(r) {
+	t := unicode.NewTables()
+	if t.IsLetter(r) || t.IsDigit(r) {
 		return false
 	}
 	// Otherwise, all we can do for now is treat spaces as separators.
-	return unicode.IsSpace(r)
+	return t.IsSpace(r)
 }
 
 // Title treats s as UTF-8-encoded bytes and returns a copy with all Unicode letters that begin
@@ -844,12 +847,13 @@ func Title(s []byte) []byte {
 	// Use a closure here to remember state.
 	// Hackish but effective. Depends on Map scanning in order and calling
 	// the closure once per rune.
+	t := unicode.NewTables()
 	prev := ' '
 	return Map(
 		func(r rune) rune {
 			if isSeparator(prev) {
 				prev = r
-				return unicode.ToTitle(r)
+				return t.ToTitle(r)
 			}
 			prev = r
 			return r
@@ -1126,26 +1130,24 @@ func trimRightUnicode(s []byte, cutset []byte) []byte {
 // TrimSpace returns a subslice of s by slicing off all leading and
 // trailing white space, as defined by Unicode.
 func TrimSpace(s []byte) []byte {
-	// Fast path for ASCII: look for the first ASCII non-space byte
+	t := unicode.NewTables()
+	asciiSpace := _asciiSpace()
 	start := 0
 	for ; start < len(s); start++ {
 		c := s[start]
 		if c >= utf8.RuneSelf {
-			// If we run into a non-ASCII byte, fall back to the
-			// slower unicode-aware method on the remaining bytes
-			return TrimFunc(s[start:], unicode.IsSpace)
+			return TrimFunc(s[start:], t.IsSpace)
 		}
 		if asciiSpace[c] == 0 {
 			break
 		}
 	}
 
-	// Now look for the first ASCII non-space byte from the end
 	stop := len(s)
 	for ; stop > start; stop-- {
 		c := s[stop-1]
 		if c >= utf8.RuneSelf {
-			return TrimFunc(s[start:stop], unicode.IsSpace)
+			return TrimFunc(s[start:stop], t.IsSpace)
 		}
 		if asciiSpace[c] == 0 {
 			break
@@ -1303,9 +1305,10 @@ hasUnicode:
 
 		// General case. SimpleFold(x) returns the next equivalent rune > x
 		// or wraps around to smaller values.
-		r := unicode.SimpleFold(sr)
+		tb := unicode.NewTables()
+		r := tb.SimpleFold(sr)
 		for r != sr && r < tr {
-			r = unicode.SimpleFold(r)
+			r = tb.SimpleFold(r)
 		}
 		if r == tr {
 			continue

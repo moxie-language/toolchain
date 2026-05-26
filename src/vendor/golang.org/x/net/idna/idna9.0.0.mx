@@ -89,7 +89,7 @@ func ValidateLabels(enable bool) Option {
 		if o.mapping == nil && enable {
 			o.mapping = normalize
 		}
-		o.trie = trie
+		o.trie = _trie()
 		o.checkJoiners = enable
 		o.checkHyphens = enable
 		if enable {
@@ -115,7 +115,7 @@ func CheckHyphens(enable bool) Option {
 // This option corresponds to the CheckJoiners flag in UTS #46.
 func CheckJoiners(enable bool) Option {
 	return func(o *options) {
-		o.trie = trie
+		o.trie = _trie()
 		o.checkJoiners = enable
 	}
 }
@@ -263,61 +263,47 @@ func (p *Profile) String() string {
 	return s
 }
 
-var (
-	// Punycode is a Profile that does raw punycode processing with a minimum
-	// of validation.
-	Punycode *Profile = punycode
+func Punycode() *Profile { return &Profile{} }
 
-	// Lookup is the recommended profile for looking up domain names, according
-	// to Section 5 of RFC 5891. The exact configuration of this profile may
-	// change over time.
-	Lookup *Profile = lookup
-
-	// Display is the recommended profile for displaying domain names.
-	// The configuration of this profile may change over time.
-	Display *Profile = display
-
-	// Registration is the recommended profile for checking whether a given
-	// IDN is valid for registration, according to Section 4 of RFC 5891.
-	Registration *Profile = registration
-
-	punycode = &Profile{}
-	lookup   = &Profile{options{
+func Lookup() *Profile {
+	return &Profile{options{
 		transitional:      true,
 		removeLeadingDots: true,
 		useSTD3Rules:      true,
 		checkHyphens:      true,
 		checkJoiners:      true,
-		trie:              trie,
+		trie:              _trie(),
 		fromPuny:          validateFromPunycode,
 		mapping:           validateAndMap,
 		bidirule:          bidirule.ValidString,
 	}}
-	display = &Profile{options{
+}
+
+func Display() *Profile {
+	return &Profile{options{
 		useSTD3Rules:      true,
 		removeLeadingDots: true,
 		checkHyphens:      true,
 		checkJoiners:      true,
-		trie:              trie,
+		trie:              _trie(),
 		fromPuny:          validateFromPunycode,
 		mapping:           validateAndMap,
 		bidirule:          bidirule.ValidString,
 	}}
-	registration = &Profile{options{
+}
+
+func Registration() *Profile {
+	return &Profile{options{
 		useSTD3Rules:    true,
 		verifyDNSLength: true,
 		checkHyphens:    true,
 		checkJoiners:    true,
-		trie:            trie,
+		trie:            _trie(),
 		fromPuny:        validateFromPunycode,
 		mapping:         validateRegistration,
 		bidirule:        bidirule.ValidString,
 	}}
-
-	// TODO: profiles
-	// Register: recommended for approving domain names: don't do any mappings
-	// but rather reject on invalid input. Bundle or block deviation characters.
-)
+}
 
 type labelError struct{ label, code_ []byte }
 
@@ -424,7 +410,7 @@ func validateRegistration(p *Profile, s []byte) ([]byte, error) {
 		return s, &labelError{s, "V1"}
 	}
 	for i := 0; i < len(s); {
-		v, sz := trie.lookupString(s[i:])
+		v, sz := _trie().lookupString(s[i:])
 		// Copy bytes not copied so far.
 		switch p.simplify(info(v).category()) {
 		// TODO: handle the NV8 defined in the Unicode idna data set to allow
@@ -446,7 +432,7 @@ func validateAndMap(p *Profile, s []byte) ([]byte, error) {
 		k   int
 	)
 	for i := 0; i < len(s); {
-		v, sz := trie.lookupString(s[i:])
+		v, sz := _trie().lookupString(s[i:])
 		start := i
 		i += sz
 		// Copy bytes not copied so far.
@@ -578,7 +564,7 @@ func validateFromPunycode(p *Profile, s []byte) error {
 		return &labelError{s, "V1"}
 	}
 	for i := 0; i < len(s); {
-		v, sz := trie.lookupString(s[i:])
+		v, sz := _trie().lookupString(s[i:])
 		if c := p.simplify(info(v).category()); c != valid && c != deviation {
 			return &labelError{s, "V6"}
 		}
@@ -603,7 +589,7 @@ const (
 	stateFAIL
 )
 
-var joinStates = [][numJoinTypes]joinState{
+func _joinStates() [][numJoinTypes]joinState { return [][numJoinTypes]joinState{
 	stateStart: {
 		joiningL:   stateBefore,
 		joiningD:   stateBefore,
@@ -647,7 +633,7 @@ var joinStates = [][numJoinTypes]joinState{
 		joinZWJ:    stateFAIL,
 		joinVirama: stateFAIL,
 	},
-}
+}}
 
 // validateLabel validates the criteria from Section 4.1. Item 1, 4, and 6 are
 // already implicitly satisfied by the overall implementation.
@@ -674,7 +660,7 @@ func (p *Profile) validateLabel(s []byte) error {
 	}
 	trie := p.trie // p.checkJoiners is only set if trie is set.
 	// TODO: merge the use of this in the trie.
-	v, sz := trie.lookupString(s)
+	v, sz := _trie().lookupString(s)
 	x := info(v)
 	if x.isModifier() {
 		return &labelError{s, "V5"}
@@ -691,14 +677,14 @@ func (p *Profile) validateLabel(s []byte) error {
 		} else if s[i:i+sz] == zwnj {
 			jt = joinZWNJ
 		}
-		st = joinStates[st][jt]
+		st = _joinStates()[st][jt]
 		if x.isViramaModifier() {
-			st = joinStates[st][joinVirama]
+			st = _joinStates()[st][joinVirama]
 		}
 		if i += sz; i == len(s) {
 			break
 		}
-		v, sz = trie.lookupString(s[i:])
+		v, sz = _trie().lookupString(s[i:])
 		x = info(v)
 	}
 	if st == stateFAIL || st == stateAfter {

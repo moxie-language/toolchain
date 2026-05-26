@@ -7,7 +7,6 @@ package poll
 import (
 	"internal/itoa"
 	"runtime"
-	"sync"
 	"syscall"
 )
 
@@ -18,9 +17,6 @@ import (
 // interrupted by a note.
 type asyncIO struct {
 	res chan result
-
-	// mu guards the pid field.
-	mu sync.Mutex
 
 	// pid holds the process id of
 	// the process running the IO operation.
@@ -40,7 +36,6 @@ func newAsyncIO(fn func([]byte) (int, error), b []byte) *asyncIO {
 	aio := &asyncIO{
 		res: chan result{0},
 	}
-	aio.mu.Lock()
 	go func() {
 		// Lock the current goroutine to its process
 		// and store the pid in io so that Cancel can
@@ -50,14 +45,11 @@ func newAsyncIO(fn func([]byte) (int, error), b []byte) *asyncIO {
 		runtime.LockOSThread()
 		runtime_ignoreHangup()
 		aio.pid = syscall.Getpid()
-		aio.mu.Unlock()
 
 		n, err := fn(b)
 
-		aio.mu.Lock()
 		aio.pid = -1
 		runtime_unignoreHangup()
-		aio.mu.Unlock()
 
 		aio.res <- result{n, err}
 	}()
@@ -67,8 +59,6 @@ func newAsyncIO(fn func([]byte) (int, error), b []byte) *asyncIO {
 // Cancel interrupts the I/O operation, causing
 // the Wait function to return.
 func (aio *asyncIO) Cancel() {
-	aio.mu.Lock()
-	defer aio.mu.Unlock()
 	if aio.pid == -1 {
 		return
 	}

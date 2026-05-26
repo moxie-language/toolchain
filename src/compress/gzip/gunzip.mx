@@ -27,14 +27,13 @@ const (
 	flagComment = 1 << 4
 )
 
-var (
+const (
 	// ErrChecksum is returned when reading GZIP data that has an invalid checksum.
-	ErrChecksum = errors.New("gzip: invalid checksum")
+	ErrChecksum = errors.Const("gzip: invalid checksum")
 	// ErrHeader is returned when reading GZIP data that has an invalid header.
-	ErrHeader = errors.New("gzip: invalid header")
+	ErrHeader = errors.Const("gzip: invalid header")
 )
 
-var le = binary.LittleEndian
 
 // noEOF converts io.EOF to io.ErrUnexpectedEOF.
 func noEOF(err error) error {
@@ -80,6 +79,7 @@ type Reader struct {
 	buf          [512]byte
 	err          error
 	multistream  bool
+	cc           *crc32.CRC32
 }
 
 // NewReader creates a new [Reader] reading the given reader.
@@ -90,7 +90,7 @@ type Reader struct {
 //
 // The Reader.[Header] fields will be valid in the [Reader] returned.
 func NewReader(r io.Reader) (*Reader, error) {
-	z := &Reader{}
+	z := &Reader{cc: crc32.NewCRC32()}
 	if err := z.Reset(r); err != nil {
 		return nil, err
 	}
@@ -101,9 +101,14 @@ func NewReader(r io.Reader) (*Reader, error) {
 // result of its original state from [NewReader], but reading from r instead.
 // This permits reusing a [Reader] rather than allocating a new one.
 func (z *Reader) Reset(r io.Reader) error {
+	cc := z.cc
+	if cc == nil {
+		cc = crc32.NewCRC32()
+	}
 	*z = Reader{
 		decompressor: z.decompressor,
 		multistream:  true,
+		cc:           cc,
 	}
 	if rr, ok := r.(flate.Reader); ok {
 		z.r = rr
@@ -154,7 +159,7 @@ func (z *Reader) readString() ([]byte, error) {
 		}
 		if z.buf[i] == 0 {
 			// Digest covers the NUL terminator.
-			z.digest = crc32.Update(z.digest, crc32.IEEETable, z.buf[:i+1])
+			z.digest = z.cc.Update(z.digest, z.cc.IEEETable(), z.buf[:i+1])
 
 			// Strings are ISO 8859-1, Latin-1 (RFC 1952, section 2.3.1).
 			if needConv {
@@ -186,25 +191,25 @@ func (z *Reader) readHeader() (hdr Header, err error) {
 		return hdr, ErrHeader
 	}
 	flg := z.buf[3]
-	if t := int64(le.Uint32(z.buf[4:8])); t > 0 {
+	if t := int64(binary.LittleEndian().Uint32(z.buf[4:8])); t > 0 {
 		// Section 2.3.1, the zero value for MTIME means that the
 		// modified time is not set.
 		hdr.ModTime = time.Unix(t, 0)
 	}
 	// z.buf[8] is XFL and is currently ignored.
 	hdr.OS = z.buf[9]
-	z.digest = crc32.ChecksumIEEE(z.buf[:10])
+	z.digest = z.cc.ChecksumIEEE(z.buf[:10])
 
 	if flg&flagExtra != 0 {
 		if _, err = io.ReadFull(z.r, z.buf[:2]); err != nil {
 			return hdr, noEOF(err)
 		}
-		z.digest = crc32.Update(z.digest, crc32.IEEETable, z.buf[:2])
-		data := []byte{:le.Uint16(z.buf[:2])}
+		z.digest = z.cc.Update(z.digest, z.cc.IEEETable(), z.buf[:2])
+		data := []byte{:binary.LittleEndian().Uint16(z.buf[:2])}
 		if _, err = io.ReadFull(z.r, data); err != nil {
 			return hdr, noEOF(err)
 		}
-		z.digest = crc32.Update(z.digest, crc32.IEEETable, data)
+		z.digest = z.cc.Update(z.digest, z.cc.IEEETable(), data)
 		hdr.Extra = data
 	}
 
@@ -227,7 +232,7 @@ func (z *Reader) readHeader() (hdr Header, err error) {
 		if _, err = io.ReadFull(z.r, z.buf[:2]); err != nil {
 			return hdr, noEOF(err)
 		}
-		digest := le.Uint16(z.buf[:2])
+		digest := binary.LittleEndian().Uint16(z.buf[:2])
 		if digest != uint16(z.digest) {
 			return hdr, ErrHeader
 		}
@@ -250,7 +255,7 @@ func (z *Reader) Read(p []byte) (n int, err error) {
 
 	for n == 0 {
 		n, z.err = z.decompressor.Read(p)
-		z.digest = crc32.Update(z.digest, crc32.IEEETable, p[:n])
+		z.digest = z.cc.Update(z.digest, z.cc.IEEETable(), p[:n])
 		z.size += uint32(n)
 		if z.err != io.EOF {
 			// In the normal case we return here.
@@ -262,8 +267,8 @@ func (z *Reader) Read(p []byte) (n int, err error) {
 			z.err = noEOF(err)
 			return n, z.err
 		}
-		digest := le.Uint32(z.buf[:4])
-		size := le.Uint32(z.buf[4:8])
+		digest := binary.LittleEndian().Uint32(z.buf[:4])
+		size := binary.LittleEndian().Uint32(z.buf[4:8])
 		if digest != z.digest || size != z.size {
 			z.err = ErrChecksum
 			return n, z.err

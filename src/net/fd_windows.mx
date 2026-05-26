@@ -23,7 +23,13 @@ const (
 	writeMsgSyscallName = "wsasendmsg"
 )
 
-func init() {
+var wsaInited bool
+
+func ensureWSA() {
+	if wsaInited {
+		return
+	}
+	wsaInited = true
 	poll.InitWSA()
 }
 
@@ -39,6 +45,7 @@ func canUseConnectEx(net string) bool {
 }
 
 func newFD(sysfd syscall.Handle, family, sotype int, net string) (*netFD, error) {
+	ensureWSA()
 	ret := &netFD{
 		pfd: poll.FD{
 			Sysfd:         sysfd,
@@ -94,10 +101,10 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (syscall.
 		// If the context is already done, or if it has a nonzero deadline,
 		// ensure that that is applied before the call to ConnectEx begins
 		// so that we don't return spurious connections.
-		defer fd.pfd.SetWriteDeadline(noDeadline)
+		defer fd.pfd.SetWriteDeadline(noDeadline())
 
 		if ctx.Err() != nil {
-			fd.pfd.SetWriteDeadline(aLongTimeAgo)
+			fd.pfd.SetWriteDeadline(aLongTimeAgo())
 		} else {
 			if deadline, ok := ctx.Deadline(); ok && !deadline.IsZero() {
 				fd.pfd.SetWriteDeadline(deadline)
@@ -107,7 +114,7 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (syscall.
 			stop := context.AfterFunc(ctx, func() {
 				// Force the runtime's poller to immediately give
 				// up waiting for writability.
-				fd.pfd.SetWriteDeadline(aLongTimeAgo)
+				fd.pfd.SetWriteDeadline(aLongTimeAgo())
 				close(done)
 			})
 			defer func() {
@@ -121,7 +128,7 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (syscall.
 	}
 
 	if !canUseConnectEx(fd.net) {
-		err := connectFunc(fd.pfd.Sysfd, ra)
+		err := syscall.Connect(fd.pfd.Sysfd, ra)
 		return nil, os.NewSyscallError("connect", err)
 	}
 	// ConnectEx windows API requires an unconnected, previously bound socket.
@@ -144,7 +151,7 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (syscall.
 	case *syscall.SockaddrInet4:
 		isloopback = ra.Addr[0] == 127
 	case *syscall.SockaddrInet6:
-		isloopback = ra.Addr == [16]byte(IPv6loopback)
+		isloopback = ra.Addr == [16]byte(IPv6loopback())
 	default:
 		panic("unexpected type in connect")
 	}
@@ -213,7 +220,7 @@ func (fd *netFD) accept() (*netFD, error) {
 	// Associate our new socket with IOCP.
 	netfd, err := newFD(s, fd.family, fd.sotype, fd.net)
 	if err != nil {
-		poll.CloseFunc(s)
+		syscall.Closesocket(s)
 		return nil, err
 	}
 	if err := netfd.init(); err != nil {

@@ -9,8 +9,6 @@ import (
 	"internal/race"
 	"internal/syscall/windows"
 	"io"
-	"sync"
-	"sync/atomic"
 	"syscall"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -57,14 +55,20 @@ func checkSetFileCompletionNotificationModes() {
 // InitWSA initiates the use of the Winsock DLL by the current process.
 // It is called from the net package at init time to avoid
 // loading ws2_32.dll when net is not used.
-var InitWSA = sync.OnceFunc(func() {
+var _initWSADone bool
+
+func InitWSA() {
+	if _initWSADone {
+		return
+	}
+	_initWSADone = true
 	var d syscall.WSAData
 	e := syscall.WSAStartup(uint32(0x202), &d)
 	if e != nil {
 		initErr = e
 	}
 	checkSetFileCompletionNotificationModes()
-})
+}
 
 // operation contains superset of data necessary to perform all async IO.
 type operation struct {
@@ -186,7 +190,7 @@ func waitIO(o *operation) error {
 	// Wait for our request to complete.
 	err := fd.pd.wait(int(o.mode), fd.isFile)
 	switch err {
-	case nil, ErrNetClosing, ErrFileClosing, ErrDeadlineExceeded:
+	case nil, ErrNetClosing(), ErrFileClosing, ErrDeadlineExceeded():
 		// No other error is expected.
 	default:
 		panic("unexpected runtime.netpoll error: " | err.Error())
@@ -291,9 +295,6 @@ type FD struct {
 	// I/O poller.
 	pd pollDesc
 
-	// Used to implement pread/pwrite.
-	l sync.Mutex
-
 	// The file offset for the next read or write.
 	// Overlapped IO operations don't use the real file pointer,
 	// so we need to keep track of the offset ourselves.
@@ -327,7 +328,7 @@ type FD struct {
 	// Whether FILE_FLAG_OVERLAPPED was not set when opening the file.
 	isBlocking bool
 
-	disassociated atomic.Bool
+	disassociated bool
 }
 
 // setOffset sets the offset fields of the overlapped object
@@ -357,7 +358,7 @@ func (fd *FD) addOffset(off int) {
 // pollable should be used instead of fd.pd.pollable(),
 // as it is aware of the disassociated state.
 func (fd *FD) pollable() bool {
-	return fd.pd.pollable() && !fd.disassociated.Load()
+	return fd.pd.pollable() && !fd.disassociated
 }
 
 // fileKind describes the kind of file.
@@ -439,7 +440,7 @@ func (fd *FD) DisassociateIOCP() error {
 	if err := windows.NtSetInformationFile(fd.Sysfd, &windows.IO_STATUS_BLOCK{}, unsafe.Pointer(&info), uint32(unsafe.Sizeof(info)), windows.FileReplaceCompletionInformation); err != nil {
 		return err
 	}
-	fd.disassociated.Store(true)
+	fd.disassociated = true
 	// Don't call fd.pd.close(), it would be too racy.
 	// There is no harm on leaving fd.pd open until Close is called.
 	return nil
@@ -452,13 +453,12 @@ func (fd *FD) destroy() error {
 	fd.rop.close()
 	fd.wop.close()
 	// Poller may want to unregister fd in readiness notification mechanism,
-	// so this must be executed before fd.CloseFunc.
+	// so this must be executed before closing the fd.
 	fd.pd.close()
 	var err error
 	switch fd.kind {
 	case kindNet, kindFileNet:
-		// The net package uses the CloseFunc variable for testing.
-		err = CloseFunc(fd.Sysfd)
+		err = syscall.Closesocket(fd.Sysfd)
 	default:
 		err = syscall.CloseHandle(fd.Sysfd)
 	}
@@ -497,11 +497,6 @@ func (fd *FD) Read(buf []byte) (int, error) {
 		return 0, err
 	}
 	defer fd.readUnlock()
-	if fd.kind == kindFile {
-		fd.l.Lock()
-		defer fd.l.Unlock()
-	}
-
 	if len(buf) > maxRW {
 		buf = buf[:maxRW]
 	}
@@ -543,7 +538,6 @@ func (fd *FD) Read(buf []byte) (int, error) {
 	return n, err
 }
 
-var ReadConsole = syscall.ReadConsole // changed for testing
 
 // readConsole reads utf16 characters from console File,
 // encodes them into utf8 and stores them in buffer b.
@@ -567,7 +561,7 @@ func (fd *FD) readConsole(b []byte) (int, error) {
 			n = len(b)
 		}
 		var nw uint32
-		err := ReadConsole(fd.Sysfd, &fd.readuint16[:len(fd.readuint16)+1][len(fd.readuint16)], uint32(n), &nw, nil)
+		err := syscall.ReadConsole(fd.Sysfd, &fd.readuint16[:len(fd.readuint16)+1][len(fd.readuint16)], uint32(n), &nw, nil)
 		if err != nil {
 			return 0, err
 		}
@@ -634,8 +628,6 @@ func (fd *FD) Pread(b []byte, off int64) (int, error) {
 		b = b[:maxRW]
 	}
 
-	fd.l.Lock()
-	defer fd.l.Unlock()
 	if fd.isBlocking {
 		curoffset, err := syscall.Seek(fd.Sysfd, 0, io.SeekCurrent)
 		if err != nil {
@@ -760,11 +752,6 @@ func (fd *FD) Write(buf []byte) (int, error) {
 		return 0, err
 	}
 	defer fd.writeUnlock()
-	if fd.kind == kindFile {
-		fd.l.Lock()
-		defer fd.l.Unlock()
-	}
-
 	var ntotal int
 	for {
 		max := len(buf)
@@ -860,8 +847,6 @@ func (fd *FD) Pwrite(buf []byte, off int64) (int, error) {
 	}
 	defer fd.decref()
 
-	fd.l.Lock()
-	defer fd.l.Unlock()
 	if fd.isBlocking {
 		curoffset, err := syscall.Seek(fd.Sysfd, 0, io.SeekCurrent)
 		if err != nil {
@@ -922,7 +907,6 @@ func (fd *FD) Writev(buf *[][]byte) (int64, error) {
 		return syscall.WSASend(o.fd.Sysfd, &o.bufs[0], uint32(len(o.bufs)), &o.qty, 0, &o.o, nil)
 	})
 	o.ClearBufs()
-	TestHookDidWritev(n)
 	consume(buf, int64(n))
 	return int64(n), err
 }
@@ -1047,7 +1031,7 @@ func (fd *FD) ConnectEx(ra syscall.Sockaddr) error {
 	o := &fd.wop
 	o.sa = ra
 	_, err := execIO(o, func(o *operation) error {
-		return ConnectExFunc(o.fd.Sysfd, o.sa, nil, 0, nil, &o.o)
+		return syscall.ConnectEx(o.fd.Sysfd, o.sa, nil, 0, nil, &o.o)
 	})
 	return err
 }
@@ -1057,17 +1041,17 @@ func (fd *FD) acceptOne(s syscall.Handle, rawsa []syscall.RawSockaddrAny, o *ope
 	o.handle = s
 	o.rsan = int32(unsafe.Sizeof(rawsa[0]))
 	_, err := execIO(o, func(o *operation) error {
-		return AcceptFunc(o.fd.Sysfd, o.handle, (*byte)(unsafe.Pointer(&rawsa[0])), 0, uint32(o.rsan), uint32(o.rsan), &o.qty, &o.o)
+		return syscall.AcceptEx(o.fd.Sysfd, o.handle, (*byte)(unsafe.Pointer(&rawsa[0])), 0, uint32(o.rsan), uint32(o.rsan), &o.qty, &o.o)
 	})
 	if err != nil {
-		CloseFunc(s)
+		syscall.Closesocket(s)
 		return "acceptex", err
 	}
 
 	// Inherit properties of the listening socket.
 	err = syscall.Setsockopt(s, syscall.SOL_SOCKET, syscall.SO_UPDATE_ACCEPT_CONTEXT, (*byte)(unsafe.Pointer(&fd.Sysfd)), int32(unsafe.Sizeof(fd.Sysfd)))
 	if err != nil {
-		CloseFunc(s)
+		syscall.Closesocket(s)
 		return "setsockopt", err
 	}
 
@@ -1122,9 +1106,6 @@ func (fd *FD) Seek(offset int64, whence int) (int64, error) {
 		return 0, err
 	}
 	defer fd.decref()
-
-	fd.l.Lock()
-	defer fd.l.Unlock()
 
 	if !fd.isBlocking && whence == io.SeekCurrent {
 		// Windows doesn't keep the file pointer for overlapped file handles.

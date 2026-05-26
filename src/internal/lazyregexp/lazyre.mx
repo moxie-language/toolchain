@@ -10,19 +10,18 @@ import (
 	"os"
 	"regexp"
 	"bytes"
-	"sync"
 )
 
 // Regexp is a wrapper around regexp.Regexp, where the underlying regexp will be
 // compiled the first time it is needed.
 type Regexp struct {
 	str  []byte
-	once sync.Once
+	done bool
 	rx   *regexp.Regexp
 }
 
 func (r *Regexp) re() *regexp.Regexp {
-	r.once.Do(r.build)
+	if !r.done { r.done = true; r.build() }
 	return r.rx
 }
 
@@ -63,14 +62,16 @@ func (r *Regexp) SubexpNames() [][]byte {
 	return r.re().SubexpNames()
 }
 
-var inTest = len(os.Args) > 0 && bytes.HasSuffix(bytes.TrimSuffix(os.Args[0], ".exe"), ".test")
+func inTest() bool {
+	return len(os.Args) > 0 && bytes.HasSuffix(bytes.TrimSuffix(os.Args[0], ".exe"), ".test")
+}
 
 // New creates a new lazy regexp, delaying the compiling work until it is first
 // needed. If the code is being run as part of tests, the regexp compiling will
 // happen immediately.
 func New(str []byte) *Regexp {
 	lr := &Regexp{str: str}
-	if inTest {
+	if inTest() {
 		// In tests, always compile the regexps early.
 		lr.re()
 	}

@@ -6,9 +6,6 @@
 
 package syscall
 
-import (
-	"sync"
-)
 
 // Provided by package runtime.
 func now() (sec int64, nsec int32)
@@ -21,17 +18,23 @@ type jsFile struct {
 	seeked  bool
 }
 
-var filesMu sync.Mutex
-var files = map[int]*jsFile{
-	0: {},
-	1: {},
-	2: {},
+var files map[int]*jsFile
+var filesDone bool
+
+func _files() map[int]*jsFile {
+	if !filesDone {
+		filesDone = true
+		files = map[int]*jsFile{
+			0: {},
+			1: {},
+			2: {},
+		}
+	}
+	return files
 }
 
 func fdToFile(fd int) (*jsFile, error) {
-	filesMu.Lock()
-	f, ok := files[fd]
-	filesMu.Unlock()
+	f, ok := _files()[fd]
 	if !ok {
 		return nil, EBADF
 	}
@@ -40,9 +43,7 @@ func fdToFile(fd int) (*jsFile, error) {
 
 func Open(path string, openmode int, perm uint32) (int, error) { return 0, ENOSYS }
 func Close(fd int) error {
-	filesMu.Lock()
-	delete(files, fd)
-	filesMu.Unlock()
+	delete(_files(), fd)
 	return nil
 }
 func CloseOnExec(fd int) {}

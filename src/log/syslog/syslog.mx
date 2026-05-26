@@ -13,7 +13,6 @@ import (
 	"net"
 	"os"
 	"bytes"
-	"sync"
 	"time"
 )
 
@@ -80,7 +79,6 @@ type Writer struct {
 	network  []byte
 	raddr    []byte
 
-	mu   sync.Mutex // guards conn
 	conn serverConn
 }
 
@@ -133,9 +131,6 @@ func Dial(network, raddr []byte, priority Priority, tag []byte) (*Writer, error)
 		raddr:    raddr,
 	}
 
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	err := w.connect()
 	if err != nil {
 		return nil, err
@@ -144,7 +139,6 @@ func Dial(network, raddr []byte, priority Priority, tag []byte) (*Writer, error)
 }
 
 // connect makes a connection to the syslog server.
-// It must be called with w.mu held.
 func (w *Writer) connect() (err error) {
 	if w.conn != nil {
 		// ignore err from close, it makes sense to continue anyway
@@ -180,9 +174,6 @@ func (w *Writer) Write(b []byte) (int, error) {
 
 // Close closes a connection to the syslog daemon.
 func (w *Writer) Close() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	if w.conn != nil {
 		err := w.conn.close()
 		w.conn = nil
@@ -249,9 +240,6 @@ func (w *Writer) Debug(m []byte) error {
 
 func (w *Writer) writeAndRetry(p Priority, s []byte) (int, error) {
 	pr := (w.priority & facilityMask) | (p & severityMask)
-
-	w.mu.Lock()
-	defer w.mu.Unlock()
 
 	if w.conn != nil {
 		if n, err := w.write(pr, s); err == nil {

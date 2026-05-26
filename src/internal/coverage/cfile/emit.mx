@@ -20,7 +20,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"sync/atomic"
 	"time"
 	"unsafe"
 )
@@ -120,24 +119,24 @@ func emitMetaData() {
 	}
 	ml, err := prepareForMetaEmit()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: coverage meta-data prep failed: %v\n", err)
+		fmt.Fprintf(os.Stderr(), "error: coverage meta-data prep failed: %v\n", err)
 		if os.Getenv("GOCOVERDEBUG") != "" {
 			panic("meta-data write failure")
 		}
 	}
 	if len(ml) == 0 {
-		fmt.Fprintf(os.Stderr, "program not built with -cover\n")
+		fmt.Fprintf(os.Stderr(), "program not built with -cover\n")
 		return
 	}
 
 	goCoverDir = os.Getenv("GOCOVERDIR")
 	if goCoverDir == "" {
-		fmt.Fprintf(os.Stderr, "warning: GOCOVERDIR not set, no coverage data emitted\n")
+		fmt.Fprintf(os.Stderr(), "warning: GOCOVERDIR not set, no coverage data emitted\n")
 		return
 	}
 
 	if err := emitMetaDataToDirectory(goCoverDir, ml); err != nil {
-		fmt.Fprintf(os.Stderr, "error: coverage meta-data emit failed: %v\n", err)
+		fmt.Fprintf(os.Stderr(), "error: coverage meta-data emit failed: %v\n", err)
 		if os.Getenv("GOCOVERDEBUG") != "" {
 			panic("meta-data write failure")
 		}
@@ -189,19 +188,19 @@ func prepareForMetaEmit() ([]rtcov.CovMetaBlob, error) {
 	capturedOsArgs = captureOsArgs()
 
 	if s.debug {
-		fmt.Fprintf(os.Stderr, "=+= GOCOVERDIR is %s\n", os.Getenv("GOCOVERDIR"))
-		fmt.Fprintf(os.Stderr, "=+= contents of covmetalist:\n")
+		fmt.Fprintf(os.Stderr(), "=+= GOCOVERDIR is %s\n", os.Getenv("GOCOVERDIR"))
+		fmt.Fprintf(os.Stderr(), "=+= contents of covmetalist:\n")
 		for k, b := range ml {
-			fmt.Fprintf(os.Stderr, "=+= slot: %d path: %s ", k, b.PkgPath)
+			fmt.Fprintf(os.Stderr(), "=+= slot: %d path: %s ", k, b.PkgPath)
 			if b.PkgID != -1 {
-				fmt.Fprintf(os.Stderr, " hcid: %d", b.PkgID)
+				fmt.Fprintf(os.Stderr(), " hcid: %d", b.PkgID)
 			}
-			fmt.Fprintf(os.Stderr, "\n")
+			fmt.Fprintf(os.Stderr(), "\n")
 		}
 		pm := rtcov.Meta.PkgMap
-		fmt.Fprintf(os.Stderr, "=+= remap table:\n")
+		fmt.Fprintf(os.Stderr(), "=+= remap table:\n")
 		for from, to := range pm {
-			fmt.Fprintf(os.Stderr, "=+= from %d to %d\n",
+			fmt.Fprintf(os.Stderr(), "=+= from %d to %d\n",
 				uint32(from), uint32(to))
 		}
 	}
@@ -277,7 +276,7 @@ func emitCounterData() {
 		return
 	}
 	if err := emitCounterDataToDirectory(goCoverDir); err != nil {
-		fmt.Fprintf(os.Stderr, "error: coverage counter data emit failed: %v\n", err)
+		fmt.Fprintf(os.Stderr(), "error: coverage counter data emit failed: %v\n", err)
 		if os.Getenv("GOCOVERDEBUG") != "" {
 			panic("counter-data write failure")
 		}
@@ -452,28 +451,28 @@ func writeMetaData(w io.Writer, metalist []rtcov.CovMetaBlob, cmode coverage.Cou
 func (s *emitState) VisitFuncs(f encodecounter.CounterVisitorFn) error {
 	var tcounters []uint32
 
-	rdCounters := func(actrs []atomic.Uint32, ctrs []uint32) []uint32 {
+	rdCounters := func(actrs []uint32, ctrs []uint32) []uint32 {
 		ctrs = ctrs[:0]
 		for i := range actrs {
-			ctrs = append(ctrs, actrs[i].Load())
+			ctrs = append(ctrs, actrs[i])
 		}
 		return ctrs
 	}
 
 	dpkg := uint32(0)
 	for _, c := range s.counterlist {
-		sd := unsafe.Slice((*atomic.Uint32)(unsafe.Pointer(c.Counters)), int(c.Len))
+		sd := unsafe.Slice((*uint32)(unsafe.Pointer(c.Counters)), int(c.Len))
 		for i := 0; i < len(sd); i++ {
 			// Skip ahead until the next non-zero value.
-			sdi := sd[i].Load()
+			sdi := sd[i]
 			if sdi == 0 {
 				continue
 			}
 
 			// We found a function that was executed.
-			nCtrs := sd[i+coverage.NumCtrsOffset].Load()
-			pkgId := sd[i+coverage.PkgIdOffset].Load()
-			funcId := sd[i+coverage.FuncIdOffset].Load()
+			nCtrs := sd[i+coverage.NumCtrsOffset]
+			pkgId := sd[i+coverage.PkgIdOffset]
+			funcId := sd[i+coverage.FuncIdOffset]
 			cst := i + coverage.FirstCtrOffset
 			counters := sd[cst : cst+int(nCtrs)]
 
@@ -482,7 +481,7 @@ func (s *emitState) VisitFuncs(f encodecounter.CounterVisitorFn) error {
 			// for a description of why this is needed.
 			isLive := false
 			for i := 0; i < len(counters); i++ {
-				if counters[i].Load() != 0 {
+				if counters[i] != 0 {
 					isLive = true
 					break
 				}
@@ -496,10 +495,10 @@ func (s *emitState) VisitFuncs(f encodecounter.CounterVisitorFn) error {
 			if s.debug {
 				if pkgId != dpkg {
 					dpkg = pkgId
-					fmt.Fprintf(os.Stderr, "\n=+= %d: pk=%d visit live fcn",
+					fmt.Fprintf(os.Stderr(), "\n=+= %d: pk=%d visit live fcn",
 						i, pkgId)
 				}
-				fmt.Fprintf(os.Stderr, " {i=%d F%d NC%d}", i, funcId, nCtrs)
+				fmt.Fprintf(os.Stderr(), " {i=%d F%d NC%d}", i, funcId, nCtrs)
 			}
 
 			// Vet and/or fix up package ID. A package ID of zero
@@ -510,13 +509,13 @@ func (s *emitState) VisitFuncs(f encodecounter.CounterVisitorFn) error {
 			// Go development (e.g. tip).
 			ipk := int32(pkgId)
 			if ipk == 0 {
-				fmt.Fprintf(os.Stderr, "\n")
+				fmt.Fprintf(os.Stderr(), "\n")
 				reportErrorInHardcodedList(int32(i), ipk, funcId, nCtrs)
 			} else if ipk < 0 {
 				if newId, ok := s.pkgmap[int(ipk)]; ok {
 					pkgId = uint32(newId)
 				} else {
-					fmt.Fprintf(os.Stderr, "\n")
+					fmt.Fprintf(os.Stderr(), "\n")
 					reportErrorInHardcodedList(int32(i), ipk, funcId, nCtrs)
 				}
 			} else {
@@ -537,7 +536,7 @@ func (s *emitState) VisitFuncs(f encodecounter.CounterVisitorFn) error {
 			i += coverage.FirstCtrOffset + int(nCtrs) - 1
 		}
 		if s.debug {
-			fmt.Fprintf(os.Stderr, "\n")
+			fmt.Fprintf(os.Stderr(), "\n")
 		}
 	}
 	return nil

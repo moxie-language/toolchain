@@ -14,7 +14,6 @@ package io
 
 import (
 	"errors"
-	"sync"
 )
 
 // Seek whence values.
@@ -24,33 +23,19 @@ const (
 	SeekEnd     = 2 // seek relative to the end
 )
 
-// ErrShortWrite means that a write accepted fewer bytes than requested
-// but failed to return an explicit error.
-var ErrShortWrite = errors.New("short write")
+const ErrShortWrite = errors.Const("short write")
 
-// errInvalidWrite means that a write returned an impossible count.
-var errInvalidWrite = errors.New("invalid write result")
+const errInvalidWrite = errors.Const("invalid write result")
 
-// ErrShortBuffer means that a read required a longer buffer than was provided.
-var ErrShortBuffer = errors.New("short buffer")
+const ErrShortBuffer = errors.Const("short buffer")
 
 // EOF is the error returned by Read when no more input is available.
-// (Read must return EOF itself, not an error wrapping EOF,
-// because callers will test for EOF using ==.)
 // Functions should return EOF only to signal a graceful end of input.
-// If the EOF occurs unexpectedly in a structured data stream,
-// the appropriate error is either [ErrUnexpectedEOF] or some other error
-// giving more detail.
-var EOF = errors.New("EOF")
+const EOF = errors.Const("EOF")
 
-// ErrUnexpectedEOF means that EOF was encountered in the
-// middle of reading a fixed-size block or data structure.
-var ErrUnexpectedEOF = errors.New("unexpected EOF")
+const ErrUnexpectedEOF = errors.Const("unexpected EOF")
 
-// ErrNoProgress is returned by some clients of a [Reader] when
-// many calls to Read have failed to return any data or error,
-// usually the sign of a broken [Reader] implementation.
-var ErrNoProgress = errors.New("multiple Read calls return no data or error")
+const ErrNoProgress = errors.Const("multiple Read calls return no data or error")
 
 // Reader is the interface that wraps the basic Read method.
 //
@@ -518,8 +503,8 @@ func (s *SectionReader) Read(p []byte) (n int, err error) {
 	return
 }
 
-var errWhence = errors.New("Seek: invalid whence")
-var errOffset = errors.New("Seek: invalid offset")
+const errWhence = errors.Const("Seek: invalid whence")
+const errOffset = errors.Const("Seek: invalid offset")
 
 func (s *SectionReader) Seek(offset int64, whence int) (int64, error) {
 	switch whence {
@@ -634,16 +619,14 @@ func (t *teeReader) Read(p []byte) (n int, err error) {
 	return
 }
 
-// Discard is a [Writer] on which all Write calls succeed
+// Discard returns a [Writer] on which all Write calls succeed
 // without doing anything.
-var Discard Writer = discard{}
+func Discard() Writer { return discard{} }
 
 type discard struct{}
 
 // discard implements ReaderFrom as an optimization so Copy to
-// io.Discard can avoid doing unnecessary work.
-var _ ReaderFrom = discard{}
-
+// io.Discard() can avoid doing unnecessary work.
 func (discard) Write(p []byte) (int, error) {
 	return len(p), nil
 }
@@ -652,21 +635,13 @@ func (discard) WriteString(s []byte) (int, error) {
 	return len(s), nil
 }
 
-var blackHolePool = sync.Pool{
-	New: func() any {
-		b := []byte{:8192}
-		return &b
-	},
-}
-
 func (discard) ReadFrom(r Reader) (n int64, err error) {
-	bufp := blackHolePool.Get().(*[]byte)
+	buf := []byte{:8192}
 	readSize := 0
 	for {
-		readSize, err = r.Read(*bufp)
+		readSize, err = r.Read(buf)
 		n += int64(readSize)
 		if err != nil {
-			blackHolePool.Put(bufp)
 			if err == EOF {
 				return n, nil
 			}

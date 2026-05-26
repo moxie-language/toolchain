@@ -25,6 +25,7 @@ func (k KeySizeError) Error() string {
 // desCipher is an instance of DES encryption.
 type desCipher struct {
 	subkeys [16]uint64
+	fbox    *[8][64]uint32
 }
 
 // NewCipher creates and returns a new [cipher.Block].
@@ -54,7 +55,7 @@ func (c *desCipher) Encrypt(dst, src []byte) {
 	if alias.InexactOverlap(dst[:BlockSize], src[:BlockSize]) {
 		panic("crypto/des: invalid buffer overlap")
 	}
-	cryptBlock(c.subkeys[:], dst, src, false)
+	c.cryptBlock(dst, src, false)
 }
 
 func (c *desCipher) Decrypt(dst, src []byte) {
@@ -67,7 +68,7 @@ func (c *desCipher) Decrypt(dst, src []byte) {
 	if alias.InexactOverlap(dst[:BlockSize], src[:BlockSize]) {
 		panic("crypto/des: invalid buffer overlap")
 	}
-	cryptBlock(c.subkeys[:], dst, src, true)
+	c.cryptBlock(dst, src, true)
 }
 
 // A tripleDESCipher is an instance of TripleDES encryption.
@@ -87,7 +88,10 @@ func NewTripleDESCipher(key []byte) (cipher.Block, error) {
 
 	c := &tripleDESCipher{}
 	c.cipher1.generateSubkeys(key[:8])
+	// share the feistelBox across all three sub-ciphers
+	c.cipher2.fbox = c.cipher1.fbox
 	c.cipher2.generateSubkeys(key[8:16])
+	c.cipher3.fbox = c.cipher1.fbox
 	c.cipher3.generateSubkeys(key[16:])
 	return c, nil
 }
@@ -105,6 +109,7 @@ func (c *tripleDESCipher) Encrypt(dst, src []byte) {
 		panic("crypto/des: invalid buffer overlap")
 	}
 
+	fbox := c.cipher1.fbox
 	b := byteorder.BEUint64(src)
 	b = permuteInitialBlock(b)
 	left, right := uint32(b>>32), uint32(b)
@@ -113,13 +118,13 @@ func (c *tripleDESCipher) Encrypt(dst, src []byte) {
 	right = (right << 1) | (right >> 31)
 
 	for i := 0; i < 8; i++ {
-		left, right = feistel(left, right, c.cipher1.subkeys[2*i], c.cipher1.subkeys[2*i+1])
+		left, right = feistel(fbox, left, right, c.cipher1.subkeys[2*i], c.cipher1.subkeys[2*i+1])
 	}
 	for i := 0; i < 8; i++ {
-		right, left = feistel(right, left, c.cipher2.subkeys[15-2*i], c.cipher2.subkeys[15-(2*i+1)])
+		right, left = feistel(fbox, right, left, c.cipher2.subkeys[15-2*i], c.cipher2.subkeys[15-(2*i+1)])
 	}
 	for i := 0; i < 8; i++ {
-		left, right = feistel(left, right, c.cipher3.subkeys[2*i], c.cipher3.subkeys[2*i+1])
+		left, right = feistel(fbox, left, right, c.cipher3.subkeys[2*i], c.cipher3.subkeys[2*i+1])
 	}
 
 	left = (left << 31) | (left >> 1)
@@ -140,6 +145,7 @@ func (c *tripleDESCipher) Decrypt(dst, src []byte) {
 		panic("crypto/des: invalid buffer overlap")
 	}
 
+	fbox := c.cipher1.fbox
 	b := byteorder.BEUint64(src)
 	b = permuteInitialBlock(b)
 	left, right := uint32(b>>32), uint32(b)
@@ -148,13 +154,13 @@ func (c *tripleDESCipher) Decrypt(dst, src []byte) {
 	right = (right << 1) | (right >> 31)
 
 	for i := 0; i < 8; i++ {
-		left, right = feistel(left, right, c.cipher3.subkeys[15-2*i], c.cipher3.subkeys[15-(2*i+1)])
+		left, right = feistel(fbox, left, right, c.cipher3.subkeys[15-2*i], c.cipher3.subkeys[15-(2*i+1)])
 	}
 	for i := 0; i < 8; i++ {
-		right, left = feistel(right, left, c.cipher2.subkeys[2*i], c.cipher2.subkeys[2*i+1])
+		right, left = feistel(fbox, right, left, c.cipher2.subkeys[2*i], c.cipher2.subkeys[2*i+1])
 	}
 	for i := 0; i < 8; i++ {
-		left, right = feistel(left, right, c.cipher1.subkeys[15-2*i], c.cipher1.subkeys[15-(2*i+1)])
+		left, right = feistel(fbox, left, right, c.cipher1.subkeys[15-2*i], c.cipher1.subkeys[15-(2*i+1)])
 	}
 
 	left = (left << 31) | (left >> 1)

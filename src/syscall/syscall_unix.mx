@@ -15,7 +15,6 @@ import (
 	"internal/oserror"
 	"internal/race"
 	"runtime"
-	"sync"
 	"unsafe"
 )
 
@@ -41,7 +40,6 @@ func clen(n []byte) int {
 // Mmap manager, for use by operating system-specific implementations.
 
 type mmapper struct {
-	sync.Mutex
 	active map[*byte][]byte // active mappings; key is last byte in mapping
 	mmap   func(addr, length uintptr, prot, flags, fd int, offset int64) (uintptr, error)
 	munmap func(addr uintptr, length uintptr) error
@@ -63,8 +61,6 @@ func (m *mmapper) Mmap(fd int, offset int64, length int, prot int, flags int) (d
 
 	// Register mapping in m and return it.
 	p := &b[cap(b)-1]
-	m.Lock()
-	defer m.Unlock()
 	m.active[p] = b
 	return b, nil
 }
@@ -76,8 +72,6 @@ func (m *mmapper) Munmap(data []byte) (err error) {
 
 	// Find the base of the mapping.
 	p := &data[cap(data)-1]
-	m.Lock()
-	defer m.Unlock()
 	b := m.active[p]
 	if b == nil || &b[0] != &data[0] {
 		return EINVAL
@@ -108,6 +102,7 @@ func (m *mmapper) Munmap(data []byte) (err error) {
 type Errno uintptr
 
 func (e Errno) Error() string {
+	errors := _errors()
 	if 0 <= int(e) && int(e) < len(errors) {
 		s := errors[e]
 		if s != "" {
@@ -170,6 +165,7 @@ type Signal int
 func (s Signal) Signal() {}
 
 func (s Signal) String() string {
+	signals := _signals()
 	if 0 <= s && int(s) < len(signals) {
 		str := signals[s]
 		if str != "" {

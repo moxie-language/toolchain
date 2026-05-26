@@ -24,7 +24,9 @@ type UnsupportedError []byte
 
 func (e UnsupportedError) Error() string { return "unsupported JPEG feature: " + string(e) }
 
-var errUnsupportedSubsamplingRatio = UnsupportedError("luma/chroma subsampling ratio")
+func errUnsupportedSubsamplingRatio() UnsupportedError {
+	return UnsupportedError("luma/chroma subsampling ratio")
+}
 
 // Component specification, specified in section B.2.2.
 type component struct {
@@ -75,15 +77,17 @@ const (
 // unzig maps from the zig-zag ordering to the natural ordering. For example,
 // unzig[3] is the column and row of the fourth element in zig-zag order. The
 // value is 16, which means first column (16%8 == 0) and third row (16/8 == 2).
-var unzig = [blockSize]int{
-	0, 1, 8, 16, 9, 2, 3, 10,
-	17, 24, 32, 25, 18, 11, 4, 5,
-	12, 19, 26, 33, 40, 48, 41, 34,
-	27, 20, 13, 6, 7, 14, 21, 28,
-	35, 42, 49, 56, 57, 50, 43, 36,
-	29, 22, 15, 23, 30, 37, 44, 51,
-	58, 59, 52, 45, 38, 31, 39, 46,
-	53, 60, 61, 54, 47, 55, 62, 63,
+func _unzig() [blockSize]int {
+	return [blockSize]int{
+		0, 1, 8, 16, 9, 2, 3, 10,
+		17, 24, 32, 25, 18, 11, 4, 5,
+		12, 19, 26, 33, 40, 48, 41, 34,
+		27, 20, 13, 6, 7, 14, 21, 28,
+		35, 42, 49, 56, 57, 50, 43, 36,
+		29, 22, 15, 23, 30, 37, 44, 51,
+		58, 59, 52, 45, 38, 31, 39, 46,
+		53, 60, 61, 54, 47, 55, 62, 63,
+	}
 }
 
 // Deprecated: Reader is not used by the [image/jpeg] package and should
@@ -203,7 +207,7 @@ func (d *decoder) readByte() (x byte, err error) {
 
 // errMissingFF00 means that readByteStuffedByte encountered an 0xff byte (a
 // marker byte) that wasn't the expected byte-stuffed sequence 0xff, 0x00.
-var errMissingFF00 = FormatError("missing 0xff00 sequence")
+func errMissingFF00() FormatError { return FormatError("missing 0xff00 sequence") }
 
 // readByteStuffedByte is like readByte but is for byte-stuffed Huffman data.
 func (d *decoder) readByteStuffedByte() (x byte, err error) {
@@ -216,7 +220,7 @@ func (d *decoder) readByteStuffedByte() (x byte, err error) {
 			return x, err
 		}
 		if d.bytes.buf[d.bytes.i] != 0x00 {
-			return 0, errMissingFF00
+			return 0, errMissingFF00()
 		}
 		d.bytes.i++
 		d.bytes.nUnreadable = 2
@@ -240,7 +244,7 @@ func (d *decoder) readByteStuffedByte() (x byte, err error) {
 	}
 	d.bytes.nUnreadable = 2
 	if x != 0x00 {
-		return 0, errMissingFF00
+		return 0, errMissingFF00()
 	}
 	return 0xff, nil
 }
@@ -346,7 +350,7 @@ func (d *decoder) processSOF(n int) error {
 			return FormatError("luma/chroma subsampling ratio")
 		}
 		if h == 3 || v == 3 {
-			return errUnsupportedSubsamplingRatio
+			return errUnsupportedSubsamplingRatio()
 		}
 		switch d.nComp {
 		case 1:
@@ -377,15 +381,15 @@ func (d *decoder) processSOF(n int) error {
 				// either 1, 2 or 4, so invalid (h, v) combinations are those
 				// with v == 4.
 				if v == 4 {
-					return errUnsupportedSubsamplingRatio
+					return errUnsupportedSubsamplingRatio()
 				}
 			case 1: // Cb.
 				if d.comp[0].h%h != 0 || d.comp[0].v%v != 0 {
-					return errUnsupportedSubsamplingRatio
+					return errUnsupportedSubsamplingRatio()
 				}
 			case 2: // Cr.
 				if d.comp[1].h != h || d.comp[1].v != v {
-					return errUnsupportedSubsamplingRatio
+					return errUnsupportedSubsamplingRatio()
 				}
 			}
 
@@ -402,15 +406,15 @@ func (d *decoder) processSOF(n int) error {
 			switch i {
 			case 0:
 				if hv != 0x11 && hv != 0x22 {
-					return errUnsupportedSubsamplingRatio
+					return errUnsupportedSubsamplingRatio()
 				}
 			case 1, 2:
 				if hv != 0x11 {
-					return errUnsupportedSubsamplingRatio
+					return errUnsupportedSubsamplingRatio()
 				}
 			case 3:
 				if d.comp[0].h != h || d.comp[0].v != v {
-					return errUnsupportedSubsamplingRatio
+					return errUnsupportedSubsamplingRatio()
 				}
 			}
 		}
@@ -783,14 +787,14 @@ func DecodeConfig(r io.Reader) (image.Config, error) {
 	switch d.nComp {
 	case 1:
 		return image.Config{
-			ColorModel: color.GrayModel,
+			ColorModel: color.GrayModel(),
 			Width:      d.width,
 			Height:     d.height,
 		}, nil
 	case 3:
-		cm := color.YCbCrModel
+		cm := color.YCbCrModel()
 		if d.isRGB() {
-			cm = color.RGBAModel
+			cm = color.RGBAModel()
 		}
 		return image.Config{
 			ColorModel: cm,
@@ -799,7 +803,7 @@ func DecodeConfig(r io.Reader) (image.Config, error) {
 		}, nil
 	case 4:
 		return image.Config{
-			ColorModel: color.CMYKModel,
+			ColorModel: color.CMYKModel(),
 			Width:      d.width,
 			Height:     d.height,
 		}, nil
@@ -807,6 +811,5 @@ func DecodeConfig(r io.Reader) (image.Config, error) {
 	return image.Config{}, FormatError("missing SOF marker")
 }
 
-func init() {
-	image.RegisterFormat("jpeg", "\xff\xd8", Decode, DecodeConfig)
-}
+// Magic is the magic byte prefix for JPEG format detection.
+const Magic = "\xff\xd8"

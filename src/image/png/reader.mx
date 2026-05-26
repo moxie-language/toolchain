@@ -78,14 +78,16 @@ type interlaceScan struct {
 
 // interlacing defines Adam7 interlacing, with 7 passes of reduced images.
 // See https://www.w3.org/TR/PNG/#8Interlace
-var interlacing = []interlaceScan{
-	{8, 8, 0, 0},
-	{8, 8, 4, 0},
-	{4, 8, 0, 4},
-	{4, 4, 2, 0},
-	{2, 4, 0, 2},
-	{2, 2, 1, 0},
-	{1, 2, 0, 1},
+func _interlacing() [7]interlaceScan {
+	return [7]interlaceScan{
+		{8, 8, 0, 0},
+		{8, 8, 4, 0},
+		{4, 8, 0, 4},
+		{4, 4, 2, 0},
+		{2, 4, 0, 2},
+		{2, 2, 1, 0},
+		{1, 2, 0, 1},
+	}
 }
 
 // Decoding stage.
@@ -103,12 +105,14 @@ const (
 	dsSeenIEND
 )
 
-const pngHeader = "\x89PNG\r\n\x1a\n"
+// Magic is the magic byte prefix for PNG format detection.
+const Magic = "\x89PNG\r\n\x1a\n"
 
 type decoder struct {
 	r             io.Reader
 	img           image.Image
 	crc           hash.Hash32
+	cc            *crc32.CRC32
 	width, height int
 	depth         int
 	palette       color.Palette
@@ -131,7 +135,7 @@ func (e FormatError) Error() string {
 	return string(append([]byte("png: invalid format: "), e...))
 }
 
-var chunkOrderError = FormatError("chunk out of order")
+const chunkOrderError = FormatError("chunk out of order")
 
 // An UnsupportedError reports that the input uses a valid but unimplemented PNG feature.
 type UnsupportedError []byte
@@ -159,8 +163,8 @@ func (d *decoder) parseIHDR(length uint32) error {
 	}
 	d.interlace = int(d.tmp[12])
 
-	w := int32(binary.BigEndian.Uint32(d.tmp[0:4]))
-	h := int32(binary.BigEndian.Uint32(d.tmp[4:8]))
+	w := int32(binary.BigEndian().Uint32(d.tmp[0:4]))
+	h := int32(binary.BigEndian().Uint32(d.tmp[4:8]))
 	if w <= 0 || h <= 0 {
 		return FormatError("non-positive dimension")
 	}
@@ -347,7 +351,7 @@ func (d *decoder) Read(p []byte) (int, error) {
 		if _, err := io.ReadFull(d.r, d.tmp[:8]); err != nil {
 			return 0, err
 		}
-		d.idatLength = binary.BigEndian.Uint32(d.tmp[:4])
+		d.idatLength = binary.BigEndian().Uint32(d.tmp[:4])
 		if d.tmp[4:8] != "IDAT" {
 			return 0, FormatError("not enough pixel data")
 		}
@@ -413,6 +417,7 @@ func (d *decoder) decode() (image.Image, error) {
 
 // readImagePass reads a single image pass, sized according to the pass number.
 func (d *decoder) readImagePass(r io.Reader, pass int, allocateOnly bool) (image.Image, error) {
+	interlacing := _interlacing()
 	bitsPerPixel := 0
 	pixOffset := 0
 	var (
@@ -790,6 +795,7 @@ func (d *decoder) readImagePass(r io.Reader, pass int, allocateOnly bool) (image
 
 // mergePassInto merges a single pass into a full sized image.
 func (d *decoder) mergePassInto(dst image.Image, src image.Image, pass int) {
+	interlacing := _interlacing()
 	p := interlacing[pass]
 	var (
 		srcPix        []uint8
@@ -876,7 +882,7 @@ func (d *decoder) parseChunk(configOnly bool) error {
 	if _, err := io.ReadFull(d.r, d.tmp[:8]); err != nil {
 		return err
 	}
-	length := binary.BigEndian.Uint32(d.tmp[:4])
+	length := binary.BigEndian().Uint32(d.tmp[:4])
 	d.crc.Reset()
 	d.crc.Write(d.tmp[4:8])
 
@@ -951,18 +957,18 @@ func (d *decoder) verifyChecksum() error {
 	if _, err := io.ReadFull(d.r, d.tmp[:4]); err != nil {
 		return err
 	}
-	if binary.BigEndian.Uint32(d.tmp[:4]) != d.crc.Sum32() {
+	if binary.BigEndian().Uint32(d.tmp[:4]) != d.crc.Sum32() {
 		return FormatError("invalid checksum")
 	}
 	return nil
 }
 
 func (d *decoder) checkHeader() error {
-	_, err := io.ReadFull(d.r, d.tmp[:len(pngHeader)])
+	_, err := io.ReadFull(d.r, d.tmp[:len(Magic)])
 	if err != nil {
 		return err
 	}
-	if d.tmp[:len(pngHeader)] != pngHeader {
+	if d.tmp[:len(Magic)] != Magic {
 		return FormatError("not a PNG file")
 	}
 	return nil
@@ -971,9 +977,11 @@ func (d *decoder) checkHeader() error {
 // Decode reads a PNG image from r and returns it as an [image.Image].
 // The type of Image returned depends on the PNG contents.
 func Decode(r io.Reader) (image.Image, error) {
+	cc := crc32.NewCRC32()
 	d := &decoder{
 		r:   r,
-		crc: crc32.NewIEEE(),
+		crc: cc.NewIEEE(),
+		cc:  cc,
 	}
 	if err := d.checkHeader(); err != nil {
 		if err == io.EOF {
@@ -995,9 +1003,11 @@ func Decode(r io.Reader) (image.Image, error) {
 // DecodeConfig returns the color model and dimensions of a PNG image without
 // decoding the entire image.
 func DecodeConfig(r io.Reader) (image.Config, error) {
+	cc := crc32.NewCRC32()
 	d := &decoder{
 		r:   r,
-		crc: crc32.NewIEEE(),
+		crc: cc.NewIEEE(),
+		cc:  cc,
 	}
 	if err := d.checkHeader(); err != nil {
 		if err == io.EOF {
@@ -1028,23 +1038,23 @@ func DecodeConfig(r io.Reader) (image.Config, error) {
 	var cm color.Model
 	switch d.cb {
 	case cbG1, cbG2, cbG4, cbG8:
-		cm = color.GrayModel
+		cm = color.GrayModel()
 	case cbGA8:
-		cm = color.NRGBAModel
+		cm = color.NRGBAModel()
 	case cbTC8:
-		cm = color.RGBAModel
+		cm = color.RGBAModel()
 	case cbP1, cbP2, cbP4, cbP8:
 		cm = d.palette
 	case cbTCA8:
-		cm = color.NRGBAModel
+		cm = color.NRGBAModel()
 	case cbG16:
-		cm = color.Gray16Model
+		cm = color.Gray16Model()
 	case cbGA16:
-		cm = color.NRGBA64Model
+		cm = color.NRGBA64Model()
 	case cbTC16:
-		cm = color.RGBA64Model
+		cm = color.RGBA64Model()
 	case cbTCA16:
-		cm = color.NRGBA64Model
+		cm = color.NRGBA64Model()
 	}
 	return image.Config{
 		ColorModel: cm,
@@ -1053,6 +1063,3 @@ func DecodeConfig(r io.Reader) (image.Config, error) {
 	}, nil
 }
 
-func init() {
-	image.RegisterFormat("png", pngHeader, Decode, DecodeConfig)
-}

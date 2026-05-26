@@ -13,7 +13,6 @@ package tar
 import (
 	"errors"
 	"fmt"
-	"internal/godebug"
 	"io/fs"
 	"maps"
 	"math"
@@ -28,18 +27,16 @@ import (
 // architectures. If a large value is encountered when decoding, the result
 // stored in Header will be the truncated version.
 
-var tarinsecurepath = godebug.New("tarinsecurepath")
-
-var (
-	ErrHeader          = errors.New("archive/tar: invalid tar header")
-	ErrWriteTooLong    = errors.New("archive/tar: write too long")
-	ErrFieldTooLong    = errors.New("archive/tar: header field too long")
-	ErrWriteAfterClose = errors.New("archive/tar: write after close")
-	ErrInsecurePath    = errors.New("archive/tar: insecure file path")
-	errMissData        = errors.New("archive/tar: sparse file references non-existent data")
-	errUnrefData       = errors.New("archive/tar: sparse file contains unreferenced data")
-	errWriteHole       = errors.New("archive/tar: write non-NUL byte in sparse hole")
-	errSparseTooLong   = errors.New("archive/tar: sparse map too long")
+const (
+	ErrHeader          = errors.Const("archive/tar: invalid tar header")
+	ErrWriteTooLong    = errors.Const("archive/tar: write too long")
+	ErrFieldTooLong    = errors.Const("archive/tar: header field too long")
+	ErrWriteAfterClose = errors.Const("archive/tar: write after close")
+	ErrInsecurePath    = errors.Const("archive/tar: insecure file path")
+	errMissData        = errors.Const("archive/tar: sparse file references non-existent data")
+	errUnrefData       = errors.Const("archive/tar: sparse file contains unreferenced data")
+	errWriteHole       = errors.Const("archive/tar: write non-NUL byte in sparse hole")
+	errSparseTooLong   = errors.Const("archive/tar: sparse map too long")
 )
 
 type headerError [][]byte
@@ -133,9 +130,11 @@ const (
 // This does not contain "charset" or "comment", which are both PAX-specific,
 // so adding them as first-class features of Header is unlikely.
 // Users can use the PAXRecords field to set it themselves.
-var basicKeys = map[string]bool{
-	paxPath: true, paxLinkpath: true, paxSize: true, paxUid: true, paxGid: true,
-	paxUname: true, paxGname: true, paxMtime: true, paxAtime: true, paxCtime: true,
+func _basicKeys() map[string]bool {
+	return map[string]bool{
+		paxPath: true, paxLinkpath: true, paxSize: true, paxUid: true, paxGid: true,
+		paxUname: true, paxGname: true, paxMtime: true, paxAtime: true, paxCtime: true,
+	}
 }
 
 // A Header represents a single header in a tar archive.
@@ -479,7 +478,7 @@ func (h Header) allowedFormats() (format Format, paxHdrs map[string][]byte, err 
 				continue // Do not overwrite existing records
 			case h.Typeflag == TypeXGlobalHeader:
 				paxHdrs[k] = v // Copy all records
-			case !basicKeys[k] && !bytes.HasPrefix(k, paxGNUSparse):
+			case !_basicKeys()[k] && !bytes.HasPrefix(k, paxGNUSparse):
 				paxHdrs[k] = v // Ignore local records that may conflict
 			}
 		}
@@ -614,8 +613,6 @@ func (fi headerFileInfo) String() string {
 	return fs.FormatFileInfo(fi)
 }
 
-// sysStat, if non-nil, populates h from system-dependent fields of fi.
-var sysStat func(fi fs.FileInfo, h *Header, doNameLookups bool) error
 
 const (
 	// Mode constants from the USTAR spec:
@@ -721,10 +718,7 @@ func FileInfoHeader(fi fs.FileInfo, link []byte) (*Header, error) {
 			return nil, err
 		}
 	}
-	if sysStat != nil {
-		return h, sysStat(fi, h, doNameLookups)
-	}
-	return h, nil
+	return h, sysStat(fi, h, doNameLookups)
 }
 
 // FileInfoNames extends [fs.FileInfo].

@@ -19,11 +19,9 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-	"internal/godebug"
 	"io"
 	"net"
 	"slices"
-	"strconv"
 	"time"
 )
 
@@ -92,7 +90,7 @@ func (c *Conn) makeClientHello() (*clientHelloMsg, *keySharePrivateKeys, *echCli
 		hello.secureRenegotiation = c.clientFinished[:]
 	}
 
-	hello.cipherSuites = config.cipherSuites(hasAESGCMHardwareSupport)
+	hello.cipherSuites = config.cipherSuites(hasAESGCMHardwareSupport())
 	// Don't advertise TLS 1.2-only cipher suites unless we're attempting TLS 1.2.
 	if maxVersion < VersionTLS12 {
 		hello.cipherSuites = slices.DeleteFunc(hello.cipherSuites, func(id uint16) bool {
@@ -130,11 +128,11 @@ func (c *Conn) makeClientHello() (*clientHelloMsg, *keySharePrivateKeys, *echCli
 		}
 
 		if fips140tls.Required() {
-			hello.cipherSuites = append(hello.cipherSuites, allowedCipherSuitesTLS13FIPS...)
-		} else if hasAESGCMHardwareSupport {
-			hello.cipherSuites = append(hello.cipherSuites, defaultCipherSuitesTLS13...)
+			hello.cipherSuites = append(hello.cipherSuites, _allowedCipherSuitesTLS13FIPS()...)
+		} else if hasAESGCMHardwareSupport() {
+			hello.cipherSuites = append(hello.cipherSuites, _defaultCipherSuitesTLS13()...)
 		} else {
-			hello.cipherSuites = append(hello.cipherSuites, defaultCipherSuitesTLS13NoAES...)
+			hello.cipherSuites = append(hello.cipherSuites, _defaultCipherSuitesTLS13NoAES()...)
 		}
 
 		if len(hello.supportedCurves) == 0 {
@@ -614,7 +612,7 @@ func (hs *clientHandshakeState) handshake() error {
 	}
 
 	c.ekm = ekmFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.hello.random, hs.serverHello.random)
-	c.isHandshakeComplete.Store(true)
+	c.isHandshakeComplete = true
 
 	return nil
 }
@@ -623,15 +621,6 @@ func (hs *clientHandshakeState) pickCipherSuite() error {
 	if hs.suite = mutualCipherSuite(hs.hello.cipherSuites, hs.serverHello.cipherSuite); hs.suite == nil {
 		hs.c.sendAlert(alertHandshakeFailure)
 		return errors.New("tls: server chose an unconfigured cipher suite")
-	}
-
-	if hs.c.config.CipherSuites == nil && !fips140tls.Required() && rsaKexCiphers[hs.suite.id] {
-		tlsrsakex.Value() // ensure godebug is initialized
-		tlsrsakex.IncNonDefault()
-	}
-	if hs.c.config.CipherSuites == nil && !fips140tls.Required() && tdesCiphers[hs.suite.id] {
-		tls3des.Value() // ensure godebug is initialized
-		tls3des.IncNonDefault()
 	}
 
 	hs.c.cipherSuite = hs.suite.id
@@ -801,10 +790,6 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 			}
 			certVerify.hasSignatureAlgorithm = true
 			certVerify.signatureAlgorithm = signatureAlgorithm
-			if sigHash == crypto.SHA1 {
-				tlssha1.Value() // ensure godebug is initialized
-				tlssha1.IncNonDefault()
-			}
 			if hs.finishedHash.buffer == nil {
 				c.sendAlert(alertInternalError)
 				return errors.New("tls: internal error: did not keep handshake transcript for TLS 1.2")
@@ -1079,17 +1064,7 @@ func (hs *clientHandshakeState) sendFinished(out []byte) error {
 // to verify the signatures of during a TLS handshake.
 const defaultMaxRSAKeySize = 8192
 
-var tlsmaxrsasize = godebug.New("tlsmaxrsasize")
-
 func checkKeySize(n int) (max int, ok bool) {
-	if v := tlsmaxrsasize.Value(); v != "" {
-		if max, err := strconv.Atoi(v); err == nil {
-			if (n <= max) != (n <= defaultMaxRSAKeySize) {
-				tlsmaxrsasize.IncNonDefault()
-			}
-			return max, n <= max
-		}
-	}
 	return defaultMaxRSAKeySize, n <= defaultMaxRSAKeySize
 }
 
@@ -1098,7 +1073,7 @@ func checkKeySize(n int) (max int, ok bool) {
 func (c *Conn) verifyServerCertificate(certificates [][]byte) error {
 	certs := []*x509.Certificate{:len(certificates)}
 	for i, asn1Data := range certificates {
-		cert, err := globalCertCache.newCert(asn1Data)
+		cert, err := _globalCertCache().newCert(asn1Data)
 		if err != nil {
 			c.sendAlert(alertDecodeError)
 			return errors.New("tls: failed to parse certificate from server: " | err.Error())

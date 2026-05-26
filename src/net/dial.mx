@@ -7,7 +7,6 @@ package net
 import (
 	"context"
 	"internal/bytealg"
-	"internal/godebug"
 	"internal/nettrace"
 	"syscall"
 	"time"
@@ -32,14 +31,6 @@ const (
 	defaultMPTCPEnabledDial   = false
 )
 
-// The type of service offered
-//
-//	0 == MPTCP disabled
-//	1 == MPTCP enabled
-//	2 == MPTCP enabled on listeners only
-//	3 == MPTCP enabled on dialers only
-var multipathtcp = godebug.New("multipathtcp")
-
 // mptcpStatusDial is a tristate for Multipath TCP on clients,
 // see go.dev/issue/56539
 type mptcpStatusDial uint8
@@ -57,13 +48,6 @@ func (m *mptcpStatusDial) get() bool {
 		return true
 	case mptcpDisabledDial:
 		return false
-	}
-
-	// If MPTCP is forced via GODEBUG=multipathtcp=1
-	if multipathtcp.Value() == "1" || multipathtcp.Value() == "3" {
-		multipathtcp.IncNonDefault()
-
-		return true
 	}
 
 	return defaultMPTCPEnabledDial
@@ -93,14 +77,6 @@ func (m *mptcpStatusListen) get() bool {
 	case mptcpEnabledListen:
 		return true
 	case mptcpDisabledListen:
-		return false
-	}
-
-	// If MPTCP is disabled via GODEBUG=multipathtcp=0 or only
-	// enabled on dialers, but not on listeners.
-	if multipathtcp.Value() == "0" || multipathtcp.Value() == "3" {
-		multipathtcp.IncNonDefault()
-
 		return false
 	}
 
@@ -261,7 +237,7 @@ func (d *Dialer) resolver() *Resolver {
 	if d.Resolver != nil {
 		return d.Resolver
 	}
-	return DefaultResolver
+	return DefaultResolver()
 }
 
 // partialDeadline returns the deadline to use for a single address,
@@ -272,7 +248,7 @@ func partialDeadline(now, deadline time.Time, addrsRemaining int) (time.Time, er
 	}
 	timeRemaining := deadline.Sub(now)
 	if timeRemaining <= 0 {
-		return time.Time{}, errTimeout
+		return time.Time{}, errTimeout()
 	}
 	// Tentatively allocate equal time to each remaining address.
 	timeout := timeRemaining / time.Duration(addrsRemaining)
@@ -490,7 +466,6 @@ func DialTimeout(network, address string, timeout time.Duration) (Conn, error) {
 type sysDialer struct {
 	Dialer
 	network, address string
-	testHookDialTCP  func(ctx context.Context, net string, laddr, raddr *TCPAddr) (*TCPConn, error)
 }
 
 // Dial connects to the address on the named network.
@@ -528,7 +503,6 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn
 	}
 	deadline := d.deadline(ctx, time.Now())
 	if !deadline.IsZero() {
-		testHookStepTime()
 		if d, ok := ctx.Deadline(); !ok || deadline.Before(d) {
 			subCtx, cancel := context.WithDeadline(ctx, deadline)
 			defer cancel()
@@ -738,7 +712,7 @@ func (lc *ListenConfig) SetMultipathTCP(use bool) {
 // The ctx argument is used while resolving the address on which to listen;
 // it does not affect the returned Listener.
 func (lc *ListenConfig) Listen(ctx context.Context, network, address string) (Listener, error) {
-	addrs, err := DefaultResolver.resolveAddrList(ctx, "listen", network, address, nil)
+	addrs, err := DefaultResolver().resolveAddrList(ctx, "listen", network, address, nil)
 	if err != nil {
 		return nil, &OpError{Op: "listen", Net: network, Source: nil, Addr: nil, Err: err}
 	}
@@ -775,7 +749,7 @@ func (lc *ListenConfig) Listen(ctx context.Context, network, address string) (Li
 // The ctx argument is used while resolving the address on which to listen;
 // it does not affect the returned PacketConn.
 func (lc *ListenConfig) ListenPacket(ctx context.Context, network, address string) (PacketConn, error) {
-	addrs, err := DefaultResolver.resolveAddrList(ctx, "listen", network, address, nil)
+	addrs, err := DefaultResolver().resolveAddrList(ctx, "listen", network, address, nil)
 	if err != nil {
 		return nil, &OpError{Op: "listen", Net: network, Source: nil, Addr: nil, Err: err}
 	}

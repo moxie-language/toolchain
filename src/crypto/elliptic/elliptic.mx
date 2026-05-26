@@ -14,7 +14,6 @@ package elliptic
 import (
 	"io"
 	"math/big"
-	"sync"
 )
 
 // A Curve represents a short-form Weierstrass curve with a=-3.
@@ -65,7 +64,7 @@ type Curve interface {
 	ScalarBaseMult(k []byte) (x, y *big.Int)
 }
 
-var mask = []byte{0xff, 0x1, 0x3, 0x7, 0xf, 0x1f, 0x3f, 0x7f}
+func _mask() [8]byte { return [8]byte{0xff, 0x1, 0x3, 0x7, 0xf, 0x1f, 0x3f, 0x7f} }
 
 // GenerateKey returns a public/private key pair. The private key is
 // generated using the given reader, which must return random data.
@@ -85,7 +84,8 @@ func GenerateKey(curve Curve, rand io.Reader) (priv []byte, x, y *big.Int, err e
 		}
 		// We have to mask off any excess bits in the case that the size of the
 		// underlying field is not a whole number of bytes.
-		priv[0] &= mask[bitSize%8]
+		m := _mask()
+		priv[0] &= m[bitSize%8]
 		// This is because, in tests, rand will return all zeros and we don't
 		// want to get the point at infinity and loop forever.
 		priv[1] ^= 0x42
@@ -140,9 +140,6 @@ type unmarshaler interface {
 	Unmarshal([]byte) (x, y *big.Int)
 	UnmarshalCompressed([]byte) (x, y *big.Int)
 }
-
-// Assert that the known curves implement unmarshaler.
-var _ = []unmarshaler{p224, p256, p384, p521}
 
 // Unmarshal converts a point, serialized by [Marshal], into an x, y pair. It is
 // an error if the point is not in uncompressed form, is not on the curve, or is
@@ -221,13 +218,13 @@ func panicIfNotOnCurve(curve Curve, x, y *big.Int) {
 	}
 }
 
-var initonce sync.Once
+var _cachedCurves *nistCurves
 
-func initAll() {
-	initP224()
-	initP256()
-	initP384()
-	initP521()
+func _allCurves() *nistCurves {
+	if _cachedCurves == nil {
+		_cachedCurves = _curves()
+	}
+	return _cachedCurves
 }
 
 // P224 returns a [Curve] which implements NIST P-224 (FIPS 186-3, section D.2.2),
@@ -238,8 +235,7 @@ func initAll() {
 //
 // The cryptographic operations are implemented using constant-time algorithms.
 func P224() Curve {
-	initonce.Do(initAll)
-	return p224
+	return _allCurves().p224
 }
 
 // P256 returns a [Curve] which implements NIST P-256 (FIPS 186-3, section D.2.3),
@@ -251,8 +247,7 @@ func P224() Curve {
 //
 // The cryptographic operations are implemented using constant-time algorithms.
 func P256() Curve {
-	initonce.Do(initAll)
-	return p256
+	return _allCurves().p256
 }
 
 // P384 returns a [Curve] which implements NIST P-384 (FIPS 186-3, section D.2.4),
@@ -263,8 +258,7 @@ func P256() Curve {
 //
 // The cryptographic operations are implemented using constant-time algorithms.
 func P384() Curve {
-	initonce.Do(initAll)
-	return p384
+	return _allCurves().p384
 }
 
 // P521 returns a [Curve] which implements NIST P-521 (FIPS 186-3, section D.2.5),
@@ -275,6 +269,5 @@ func P384() Curve {
 //
 // The cryptographic operations are implemented using constant-time algorithms.
 func P521() Curve {
-	initonce.Do(initAll)
-	return p521
+	return _allCurves().p521
 }

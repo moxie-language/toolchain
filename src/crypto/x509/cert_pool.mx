@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/pem"
-	"sync"
 )
 
 type sum224 [sha256.Size224]byte
@@ -233,15 +232,16 @@ func (s *CertPool) AppendCertsFromPEM(pemCerts []byte) (ok bool) {
 			continue
 		}
 		var lazyCert struct {
-			sync.Once
-			v *Certificate
+			done bool
+			v    *Certificate
 		}
 		s.addCertFunc(sha256.Sum224(cert.Raw), string(cert.RawSubject), func() (*Certificate, error) {
-			lazyCert.Do(func() {
+			if !lazyCert.done {
+				lazyCert.done = true
 				// This can't fail, as the same bytes already parsed above.
 				lazyCert.v, _ = ParseCertificate(certBytes)
 				certBytes = nil
-			})
+			}
 			return lazyCert.v, nil
 		}, nil)
 		ok = true

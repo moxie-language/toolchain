@@ -18,10 +18,6 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-// testingOnlyGenerateKey is only used during testing, to provide
-// a fixed test key to use when checking the RFC 9180 vectors.
-var testingOnlyGenerateKey func() (*ecdh.PrivateKey, error)
-
 type hkdfKDF struct {
 	hash crypto.Hash
 }
@@ -58,17 +54,23 @@ type KemID uint16
 
 const DHKEM_X25519_HKDF_SHA256 = 0x0020
 
-var SupportedKEMs = map[uint16]struct {
+func SupportedKEMs() map[uint16]struct {
 	curve   ecdh.Curve
 	hash    crypto.Hash
 	nSecret uint16
-}{
-	// RFC 9180 Section 7.1
-	DHKEM_X25519_HKDF_SHA256: {ecdh.X25519(), crypto.SHA256, 32},
+} {
+	return map[uint16]struct {
+		curve   ecdh.Curve
+		hash    crypto.Hash
+		nSecret uint16
+	}{
+		// RFC 9180 Section 7.1
+		DHKEM_X25519_HKDF_SHA256: {ecdh.X25519(), crypto.SHA256, 32},
+	}
 }
 
 func newDHKem(kemID uint16) (*dhKEM, error) {
-	suite, ok := SupportedKEMs[kemID]
+	suite, ok := SupportedKEMs()[kemID]
 	if !ok {
 		return nil, errors.New("unsupported suite ID")
 	}
@@ -89,12 +91,7 @@ func (dh *dhKEM) ExtractAndExpand(dhKey, kemContext []byte) ([]byte, error) {
 }
 
 func (dh *dhKEM) Encap(pubRecipient *ecdh.PublicKey) (sharedSecret []byte, encapPub []byte, err error) {
-	var privEph *ecdh.PrivateKey
-	if testingOnlyGenerateKey != nil {
-		privEph, err = testingOnlyGenerateKey()
-	} else {
-		privEph, err = dh.dh.GenerateKey(rand.Reader)
-	}
+	privEph, err := dh.dh.GenerateKey(rand.Reader())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -148,7 +145,7 @@ type Recipient struct {
 	*context
 }
 
-var aesGCMNew = func(key []byte) (cipher.AEAD, error) {
+func _aesGCMNew(key []byte) (cipher.AEAD, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -164,36 +161,44 @@ const (
 	AEAD_ChaCha20Poly1305 = 0x0003
 )
 
-var SupportedAEADs = map[uint16]struct {
+func SupportedAEADs() map[uint16]struct {
 	keySize   int
 	nonceSize int
 	aead      func([]byte) (cipher.AEAD, error)
-}{
-	// RFC 9180, Section 7.3
-	AEAD_AES_128_GCM:      {keySize: 16, nonceSize: 12, aead: aesGCMNew},
-	AEAD_AES_256_GCM:      {keySize: 32, nonceSize: 12, aead: aesGCMNew},
-	AEAD_ChaCha20Poly1305: {keySize: chacha20poly1305.KeySize, nonceSize: chacha20poly1305.NonceSize, aead: chacha20poly1305.New},
+} {
+	return map[uint16]struct {
+		keySize   int
+		nonceSize int
+		aead      func([]byte) (cipher.AEAD, error)
+	}{
+		// RFC 9180, Section 7.3
+		AEAD_AES_128_GCM:      {keySize: 16, nonceSize: 12, aead: _aesGCMNew},
+		AEAD_AES_256_GCM:      {keySize: 32, nonceSize: 12, aead: _aesGCMNew},
+		AEAD_ChaCha20Poly1305: {keySize: chacha20poly1305.KeySize, nonceSize: chacha20poly1305.NonceSize, aead: chacha20poly1305.New},
+	}
 }
 
 type KDFID uint16
 
 const KDF_HKDF_SHA256 = 0x0001
 
-var SupportedKDFs = map[uint16]func() *hkdfKDF{
-	// RFC 9180, Section 7.2
-	KDF_HKDF_SHA256: func() *hkdfKDF { return &hkdfKDF{crypto.SHA256} },
+func SupportedKDFs() map[uint16]func() *hkdfKDF {
+	return map[uint16]func() *hkdfKDF{
+		// RFC 9180, Section 7.2
+		KDF_HKDF_SHA256: func() *hkdfKDF { return &hkdfKDF{crypto.SHA256} },
+	}
 }
 
 func newContext(sharedSecret []byte, kemID, kdfID, aeadID uint16, info []byte) (*context, error) {
 	sid := suiteID(kemID, kdfID, aeadID)
 
-	kdfInit, ok := SupportedKDFs[kdfID]
+	kdfInit, ok := SupportedKDFs()[kdfID]
 	if !ok {
 		return nil, errors.New("unsupported KDF id")
 	}
 	kdf := kdfInit()
 
-	aeadInfo, ok := SupportedAEADs[aeadID]
+	aeadInfo, ok := SupportedAEADs()[aeadID]
 	if !ok {
 		return nil, errors.New("unsupported AEAD id")
 	}
@@ -319,7 +324,7 @@ func suiteID(kemID, kdfID, aeadID uint16) []byte {
 }
 
 func ParseHPKEPublicKey(kemID uint16, bytes []byte) (*ecdh.PublicKey, error) {
-	kemInfo, ok := SupportedKEMs[kemID]
+	kemInfo, ok := SupportedKEMs()[kemID]
 	if !ok {
 		return nil, errors.New("unsupported KEM id")
 	}
@@ -327,7 +332,7 @@ func ParseHPKEPublicKey(kemID uint16, bytes []byte) (*ecdh.PublicKey, error) {
 }
 
 func ParseHPKEPrivateKey(kemID uint16, bytes []byte) (*ecdh.PrivateKey, error) {
-	kemInfo, ok := SupportedKEMs[kemID]
+	kemInfo, ok := SupportedKEMs()[kemID]
 	if !ok {
 		return nil, errors.New("unsupported KEM id")
 	}

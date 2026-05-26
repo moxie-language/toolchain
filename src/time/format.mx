@@ -177,7 +177,9 @@ const (
 )
 
 // std0x records the std values for "01", "02", ..., "06".
-var std0x = [...]int{stdZeroMonth, stdZeroDay, stdZeroHour12, stdZeroMinute, stdZeroSecond, stdYear}
+func _std0x() [6]int {
+	return [6]int{stdZeroMonth, stdZeroDay, stdZeroHour12, stdZeroMinute, stdZeroSecond, stdYear}
+}
 
 // startsWithLowerCase reports whether the string has a lower-case letter at the beginning.
 // Its purpose is to prevent matching strings like "Month" when looking for "Mon".
@@ -231,7 +233,8 @@ func nextStdChunk(layout []byte) (prefix []byte, std int, suffix []byte) {
 
 		case '0': // 01, 02, 03, 04, 05, 06, 002
 			if len(layout) >= i+2 && '1' <= layout[i+1] && layout[i+1] <= '6' {
-				return layout[0:i], std0x[layout[i+1]-'1'], layout[i+2:]
+				s0x := _std0x()
+				return layout[0:i], s0x[layout[i+1]-'1'], layout[i+2:]
 			}
 			if len(layout) >= i+3 && layout[i+1] == '0' && layout[i+2] == '2' {
 				return layout[0:i], stdZeroYearDay, layout[i+3:]
@@ -336,54 +339,20 @@ func nextStdChunk(layout []byte) (prefix []byte, std int, suffix []byte) {
 	return layout, 0, ""
 }
 
-var longDayNames = [][]byte{
-	"Sunday",
-	"Monday",
-	"Tuesday",
-	"Wednesday",
-	"Thursday",
-	"Friday",
-	"Saturday",
+func _longDayNames() [7][]byte {
+	return [7][]byte{"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"}
 }
 
-var shortDayNames = [][]byte{
-	"Sun",
-	"Mon",
-	"Tue",
-	"Wed",
-	"Thu",
-	"Fri",
-	"Sat",
+func _shortDayNames() [7][]byte {
+	return [7][]byte{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}
 }
 
-var shortMonthNames = [][]byte{
-	"Jan",
-	"Feb",
-	"Mar",
-	"Apr",
-	"May",
-	"Jun",
-	"Jul",
-	"Aug",
-	"Sep",
-	"Oct",
-	"Nov",
-	"Dec",
+func _shortMonthNames() [12][]byte {
+	return [12][]byte{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
 }
 
-var longMonthNames = [][]byte{
-	"January",
-	"February",
-	"March",
-	"April",
-	"May",
-	"June",
-	"July",
-	"August",
-	"September",
-	"October",
-	"November",
-	"December",
+func _longMonthNames() [12][]byte {
+	return [12][]byte{"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"}
 }
 
 // match reports whether s1 and s2 match ignoring case.
@@ -466,7 +435,7 @@ func appendInt(b []byte, x int, width int) []byte {
 }
 
 // Never printed, just needs to be non-nil for return by atoi.
-var errAtoi = errors.New("time: invalid number")
+const errAtoi = errors.Const("time: invalid number")
 
 // Duplicates functionality in strconv, but avoids dependency.
 func atoi[bytes []byte](s bytes) (x int, err error) {
@@ -585,7 +554,8 @@ func (t Time) GoString() []byte {
 	buf = appendInt(buf, year, 0)
 	if January <= month && month <= December {
 		buf = append(buf, ", time."...)
-		buf = append(buf, longMonthNames[month-1]...)
+		lmn := _longMonthNames()
+		buf = append(buf, lmn[month-1]...)
 	} else {
 		// It's difficult to construct a time.Time with a date outside the
 		// standard range but we might as well try to handle the case.
@@ -603,9 +573,9 @@ func (t Time) GoString() []byte {
 	buf = appendInt(buf, t.Nanosecond(), 0)
 	buf = append(buf, ", "...)
 	switch loc := t.Location(); loc {
-	case UTC, nil:
+	case UTC(), nil:
 		buf = append(buf, "time.UTC"...)
-	case Local:
+	case Local():
 		buf = append(buf, "time.Local"...)
 	default:
 		// there are several options for how we could display this, none of
@@ -836,7 +806,7 @@ func (t Time) appendFormat(b []byte, layout []byte) []byte {
 	return b
 }
 
-var errBad = errors.New("bad value for field") // placeholder not passed to user
+const errBad = errors.Const("bad value for field") // placeholder not passed to user
 
 // ParseError describes a problem parsing a time string.
 type ParseError struct {
@@ -1021,11 +991,11 @@ func skip(value, prefix []byte) ([]byte, error) {
 func Parse(layout, value []byte) (Time, error) {
 	// Optimize for RFC3339 as it accounts for over half of all representations.
 	if layout == RFC3339 || layout == RFC3339Nano {
-		if t, ok := parseRFC3339(value, Local); ok {
+		if t, ok := parseRFC3339(value, Local()); ok {
 			return t, nil
 		}
 	}
-	return parse(layout, value, UTC, Local)
+	return parse(layout, value, UTC(), Local())
 }
 
 // ParseInLocation is like Parse but differs in two important ways.
@@ -1106,10 +1076,12 @@ func parse(layout, value []byte, defaultLocation, local *Location) (Time, error)
 			p, value = value[0:4], value[4:]
 			year, err = atoi(p)
 		case stdMonth:
-			month, value, err = lookup(shortMonthNames, value)
+			smn := _shortMonthNames()
+			month, value, err = lookup(smn[:], value)
 			month++
 		case stdLongMonth:
-			month, value, err = lookup(longMonthNames, value)
+			lmn := _longMonthNames()
+			month, value, err = lookup(lmn[:], value)
 			month++
 		case stdNumMonth, stdZeroMonth:
 			month, value, err = getnum(value, std == stdZeroMonth)
@@ -1117,10 +1089,11 @@ func parse(layout, value []byte, defaultLocation, local *Location) (Time, error)
 				rangeErrString = "month"
 			}
 		case stdWeekDay:
-			// Ignore weekday except for error checking.
-			_, value, err = lookup(shortDayNames, value)
+			sdn := _shortDayNames()
+			_, value, err = lookup(sdn[:], value)
 		case stdLongWeekDay:
-			_, value, err = lookup(longDayNames, value)
+			ldn := _longDayNames()
+			_, value, err = lookup(ldn[:], value)
 		case stdDay, stdUnderDay, stdZeroDay:
 			if std == stdUnderDay && len(value) > 0 && value[0] == ' ' {
 				value = value[1:]
@@ -1212,7 +1185,7 @@ func parse(layout, value []byte, defaultLocation, local *Location) (Time, error)
 				std == stdISO8601SecondsTZ || std == stdISO8601ColonSecondsTZ) &&
 				len(value) >= 1 && value[0] == 'Z' {
 				value = value[1:]
-				z = UTC
+				z = UTC()
 				break
 			}
 			var sign, hour, min, seconds []byte
@@ -1288,7 +1261,7 @@ func parse(layout, value []byte, defaultLocation, local *Location) (Time, error)
 		case stdTZ:
 			// Does it look like a time zone?
 			if len(value) >= 3 && value[0:3] == "UTC" {
-				z = UTC
+				z = UTC()
 				value = value[3:]
 				break
 			}
@@ -1388,7 +1361,7 @@ func parse(layout, value []byte, defaultLocation, local *Location) (Time, error)
 	}
 
 	if zoneOffset != -1 {
-		t := Date(year, Month(month), day, hour, min, sec, nsec, UTC)
+		t := Date(year, Month(month), day, hour, min, sec, nsec, UTC())
 		t.addSec(-int64(zoneOffset))
 
 		// Look for local zone with the given offset.
@@ -1406,7 +1379,7 @@ func parse(layout, value []byte, defaultLocation, local *Location) (Time, error)
 	}
 
 	if zoneName != "" {
-		t := Date(year, Month(month), day, hour, min, sec, nsec, UTC)
+		t := Date(year, Month(month), day, hour, min, sec, nsec, UTC())
 		// Look for local zone with the given offset.
 		// If that zone was in effect at the given time, use it.
 		offset, ok := local.lookupName(zoneName, t.unixSec())
@@ -1548,7 +1521,7 @@ func parseNanoseconds[bytes []byte](value bytes, nbytes int) (ns int, rangeErrSt
 	return
 }
 
-var errLeadingInt = errors.New("time: bad [0-9]*") // never printed
+const errLeadingInt = errors.Const("time: bad [0-9]*") // never printed
 
 // leadingInt consumes the leading [0-9]* from s.
 func leadingInt[bytes []byte](s bytes) (x uint64, rem bytes, err error) {
@@ -1602,15 +1575,17 @@ func leadingFraction(s []byte) (x uint64, scale float64, rem []byte) {
 	return x, scale, s[i:]
 }
 
-var unitMap = map[string]uint64{
-	"ns": uint64(Nanosecond),
-	"us": uint64(Microsecond),
-	"µs": uint64(Microsecond), // U+00B5 = micro symbol
-	"μs": uint64(Microsecond), // U+03BC = Greek letter mu
-	"ms": uint64(Millisecond),
-	"s":  uint64(Second),
-	"m":  uint64(Minute),
-	"h":  uint64(Hour),
+func _unitMap() map[string]uint64 {
+	return map[string]uint64{
+		"ns": uint64(Nanosecond),
+		"us": uint64(Microsecond),
+		"µs": uint64(Microsecond), // U+00B5 = micro symbol
+		"μs": uint64(Microsecond), // U+03BC = Greek letter mu
+		"ms": uint64(Millisecond),
+		"s":  uint64(Second),
+		"m":  uint64(Minute),
+		"h":  uint64(Hour),
+	}
 }
 
 // ParseDuration parses a duration string.
@@ -1685,7 +1660,8 @@ func ParseDuration(s []byte) (Duration, error) {
 		}
 		u := s[:i]
 		s = s[i:]
-		unit, ok := unitMap[u]
+		um := _unitMap()
+		unit, ok := um[u]
 		if !ok {
 			return 0, errors.New("time: unknown unit " | quote(u) | " in duration " | quote(orig))
 		}

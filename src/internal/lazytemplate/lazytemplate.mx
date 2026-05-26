@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"bytes"
-	"sync"
 	"text/template"
 )
 
@@ -19,12 +18,12 @@ import (
 type Template struct {
 	name, text []byte
 
-	once sync.Once
+	done bool
 	tmpl *template.Template
 }
 
 func (r *Template) tp() *template.Template {
-	r.once.Do(r.build)
+	if !r.done { r.done = true; r.build() }
 	return r.tmpl
 }
 
@@ -37,14 +36,16 @@ func (r *Template) Execute(w io.Writer, data any) error {
 	return r.tp().Execute(w, data)
 }
 
-var inTest = len(os.Args) > 0 && bytes.HasSuffix(bytes.TrimSuffix(os.Args[0], ".exe"), ".test")
+func inTest() bool {
+	return len(os.Args) > 0 && bytes.HasSuffix(bytes.TrimSuffix(os.Args[0], ".exe"), ".test")
+}
 
 // New creates a new lazy template, delaying the parsing work until it is first
 // needed. If the code is being run as part of tests, the template parsing will
 // happen immediately.
 func New(name, text []byte) *Template {
 	lt := &Template{name: name, text: text}
-	if inTest {
+	if inTest() {
 		// In tests, always parse the templates early.
 		lt.tp()
 	}

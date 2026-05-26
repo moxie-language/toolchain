@@ -16,14 +16,11 @@ import (
 	"context"
 	"errors"
 	"internal/bytealg"
-	"internal/godebug"
 	"internal/itoa"
 	"internal/stringslite"
 	"io"
 	"os"
 	"runtime"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -39,22 +36,16 @@ const (
 	maxDNSPacketSize = 1232
 )
 
-var (
-	errLameReferral              = errors.New("lame referral")
-	errCannotUnmarshalDNSMessage = errors.New("cannot unmarshal DNS message")
-	errCannotMarshalDNSMessage   = errors.New("cannot marshal DNS message")
-	errServerMisbehaving         = errors.New("server misbehaving")
-	errInvalidDNSResponse        = errors.New("invalid DNS response")
-	errNoAnswerFromDNSServer     = errors.New("no answer from DNS server")
-
-	// errServerTemporarilyMisbehaving is like errServerMisbehaving, except
-	// that when it gets translated to a DNSError, the IsTemporary field
-	// gets set to true.
-	errServerTemporarilyMisbehaving = &temporaryError{"server misbehaving"}
+const (
+	errLameReferral              = errors.Const("lame referral")
+	errCannotUnmarshalDNSMessage = errors.Const("cannot unmarshal DNS message")
+	errCannotMarshalDNSMessage   = errors.Const("cannot marshal DNS message")
+	errServerMisbehaving         = errors.Const("server misbehaving")
+	errInvalidDNSResponse        = errors.Const("invalid DNS response")
+	errNoAnswerFromDNSServer     = errors.Const("no answer from DNS server")
 )
 
-// netedns0 controls whether we send an EDNS0 additional header.
-var netedns0 = godebug.New("netedns0")
+func errServerTemporarilyMisbehaving() error { return &temporaryError{"server misbehaving"} }
 
 func newRequest(q dnsmessage.Question, ad bool) (id uint16, udpReq, tcpReq []byte, err error) {
 	id = uint16(randInt())
@@ -66,20 +57,16 @@ func newRequest(q dnsmessage.Question, ad bool) (id uint16, udpReq, tcpReq []byt
 		return 0, nil, nil, err
 	}
 
-	if netedns0.Value() == "0" {
-		netedns0.IncNonDefault()
-	} else {
-		// Accept packets up to maxDNSPacketSize.  RFC 6891.
-		if err := b.StartAdditionals(); err != nil {
-			return 0, nil, nil, err
-		}
-		var rh dnsmessage.ResourceHeader
-		if err := rh.SetEDNS0(maxDNSPacketSize, dnsmessage.RCodeSuccess, false); err != nil {
-			return 0, nil, nil, err
-		}
-		if err := b.OPTResource(rh, dnsmessage.OPTResource{}); err != nil {
-			return 0, nil, nil, err
-		}
+	// Always send EDNS0 additional header. Accept packets up to maxDNSPacketSize. RFC 6891.
+	if err := b.StartAdditionals(); err != nil {
+		return 0, nil, nil, err
+	}
+	var rh dnsmessage.ResourceHeader
+	if err := rh.SetEDNS0(maxDNSPacketSize, dnsmessage.RCodeSuccess, false); err != nil {
+		return 0, nil, nil, err
+	}
+	if err := b.OPTResource(rh, dnsmessage.OPTResource{}); err != nil {
+		return 0, nil, nil, err
 	}
 
 	tcpReq, err = b.Finish()
@@ -223,7 +210,7 @@ func checkHeader(p *dnsmessage.Parser, h dnsmessage.Header) error {
 	rcode, hasAdd := extractExtendedRCode(*p, h)
 
 	if rcode == dnsmessage.RCodeNameError {
-		return errNoSuchHost
+		return errNoSuchHost()
 	}
 
 	_, err := p.AnswerHeader()
@@ -244,7 +231,7 @@ func checkHeader(p *dnsmessage.Parser, h dnsmessage.Header) error {
 		// the server is behaving incorrectly or
 		// having temporary trouble.
 		if rcode == dnsmessage.RCodeServerFailure {
-			return errServerTemporarilyMisbehaving
+			return errServerTemporarilyMisbehaving()
 		}
 		return errServerMisbehaving
 	}
@@ -256,7 +243,7 @@ func skipToAnswer(p *dnsmessage.Parser, qtype dnsmessage.Type) error {
 	for {
 		h, err := p.AnswerHeader()
 		if err == dnsmessage.ErrSectionDone {
-			return errNoSuchHost
+			return errNoSuchHost()
 		}
 		if err != nil {
 			return errCannotUnmarshalDNSMessage
@@ -326,20 +313,20 @@ func (r *Resolver) tryOneName(ctx context.Context, cfg *dnsConfig, name string, 
 			}
 
 			if err := checkHeader(&p, h); err != nil {
-				if err == errNoSuchHost {
+				if err.Error() == "no such host" {
 					// The name does not exist, so trying
 					// another server won't help.
-					return p, server, newDNSError(errNoSuchHost, name, server)
+					return p, server, newDNSError(errNoSuchHost(), name, server)
 				}
 				lastErr = newDNSError(err, name, server)
 				continue
 			}
 
 			if err := skipToAnswer(&p, qtype); err != nil {
-				if err == errNoSuchHost {
+				if err.Error() == "no such host" {
 					// The name does not exist, so trying
 					// another server won't help.
-					return p, server, newDNSError(errNoSuchHost, name, server)
+					return p, server, newDNSError(errNoSuchHost(), name, server)
 				}
 				lastErr = newDNSError(err, name, server)
 				continue
@@ -353,28 +340,28 @@ func (r *Resolver) tryOneName(ctx context.Context, cfg *dnsConfig, name string, 
 
 // A resolverConfig represents a DNS stub resolver configuration.
 type resolverConfig struct {
-	initOnce sync.Once // guards init of resolverConfig
+	initDone bool // guards init of resolverConfig
 
 	// ch is used as a semaphore that only allows one lookup at a
 	// time to recheck resolv.conf.
 	ch          chan struct{} // guards lastChecked and modTime
 	lastChecked time.Time     // last time resolv.conf was checked
 
-	dnsConfig atomic.Pointer[dnsConfig] // parsed resolv.conf structure used in lookups
+	dnsConfig *dnsConfig // parsed resolv.conf structure used in lookups
 }
 
 var resolvConf resolverConfig
 
 func getSystemDNSConfig() *dnsConfig {
 	resolvConf.tryUpdate("/etc/resolv.conf")
-	return resolvConf.dnsConfig.Load()
+	return resolvConf.dnsConfig
 }
 
 // init initializes conf and is only called via conf.initOnce.
 func (conf *resolverConfig) init() {
 	// Set dnsConfig and lastChecked so we don't parse
 	// resolv.conf twice the first time.
-	conf.dnsConfig.Store(dnsReadConfig("/etc/resolv.conf"))
+	conf.dnsConfig = dnsReadConfig("/etc/resolv.conf")
 	conf.lastChecked = time.Now()
 
 	// Prepare ch so that only one update of resolverConfig may
@@ -386,9 +373,9 @@ func (conf *resolverConfig) init() {
 // The name variable only exists for testing. It is otherwise always
 // "/etc/resolv.conf".
 func (conf *resolverConfig) tryUpdate(name string) {
-	conf.initOnce.Do(conf.init)
+	if !conf.initDone { conf.initDone = true; conf.init() }
 
-	if conf.dnsConfig.Load().noReload {
+	if conf.dnsConfig.noReload {
 		return
 	}
 
@@ -416,13 +403,13 @@ func (conf *resolverConfig) tryUpdate(name string) {
 		if fi, err := os.Stat(name); err == nil {
 			mtime = fi.ModTime()
 		}
-		if mtime.Equal(conf.dnsConfig.Load().mtime) {
+		if mtime.Equal(conf.dnsConfig.mtime) {
 			return
 		}
 	}
 
 	dnsConf := dnsReadConfig(name)
-	conf.dnsConfig.Store(dnsConf)
+	conf.dnsConfig = dnsConf
 }
 
 func (conf *resolverConfig) tryAcquireSema() bool {
@@ -445,7 +432,7 @@ func (r *Resolver) lookup(ctx context.Context, name string, qtype dnsmessage.Typ
 		// Other lookups might allow broader name syntax
 		// (for example Multicast DNS allows UTF-8; see RFC 6762).
 		// For consistency with libc resolvers, report no such host.
-		return dnsmessage.Parser{}, "", newDNSError(errNoSuchHost, name, "")
+		return dnsmessage.Parser{}, "", newDNSError(errNoSuchHost(), name, "")
 	}
 
 	if conf == nil {
@@ -547,16 +534,19 @@ const (
 	hostLookupDNS                      // only DNS
 )
 
-var lookupOrderName = map[hostLookupOrder]string{
-	hostLookupCgo:      "cgo",
-	hostLookupFilesDNS: "files,dns",
-	hostLookupDNSFiles: "dns,files",
-	hostLookupFiles:    "files",
-	hostLookupDNS:      "dns",
+func _lookupOrderName() map[hostLookupOrder]string {
+	return map[hostLookupOrder]string{
+		hostLookupCgo:      "cgo",
+		hostLookupFilesDNS: "files,dns",
+		hostLookupDNSFiles: "dns,files",
+		hostLookupFiles:    "files",
+		hostLookupDNS:      "dns",
+	}
 }
 
 func (o hostLookupOrder) String() string {
-	if s, ok := lookupOrderName[o]; ok {
+	m := _lookupOrderName()
+	if s, ok := m[o]; ok {
 		return s
 	}
 	return "hostLookupOrder=" + itoa.Itoa(int(o)) + "??"
@@ -571,7 +561,7 @@ func (r *Resolver) goLookupHostOrder(ctx context.Context, name string, order hos
 		}
 
 		if order == hostLookupFiles {
-			return nil, newDNSError(errNoSuchHost, name, "")
+			return nil, newDNSError(errNoSuchHost(), name, "")
 		}
 	}
 	ips, _, err := r.goLookupIPCNAMEOrder(ctx, "ip", name, order, conf)
@@ -625,13 +615,13 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
 		}
 
 		if order == hostLookupFiles {
-			return nil, dnsmessage.Name{}, newDNSError(errNoSuchHost, name, "")
+			return nil, dnsmessage.Name{}, newDNSError(errNoSuchHost(), name, "")
 		}
 	}
 
 	if !isDomainName(name) {
 		// See comment in func lookup above about use of errNoSuchHost.
-		return nil, dnsmessage.Name{}, newDNSError(errNoSuchHost, name, "")
+		return nil, dnsmessage.Name{}, newDNSError(errNoSuchHost(), name, "")
 	}
 	type result struct {
 		p      dnsmessage.Parser
@@ -655,23 +645,10 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
 	}
 	var queryFn func(fqdn string, qtype dnsmessage.Type)
 	var responseFn func(fqdn string, qtype dnsmessage.Type) result
-	if conf.singleRequest {
-		queryFn = func(fqdn string, qtype dnsmessage.Type) {}
-		responseFn = func(fqdn string, qtype dnsmessage.Type) result {
-			dnsWaitGroup.Add(1)
-			defer dnsWaitGroup.Done()
-			p, server, err := r.tryOneName(ctx, conf, fqdn, qtype)
-			return result{p, server, err}
-		}
-	} else {
-		// Moxie: no goroutines. Sequential queries like singleRequest.
-		queryFn = func(fqdn string, qtype dnsmessage.Type) {}
-		responseFn = func(fqdn string, qtype dnsmessage.Type) result {
-			dnsWaitGroup.Add(1)
-			defer dnsWaitGroup.Done()
-			p, server, err := r.tryOneName(ctx, conf, fqdn, qtype)
-			return result{p, server, err}
-		}
+	queryFn = func(fqdn string, qtype dnsmessage.Type) {}
+	responseFn = func(fqdn string, qtype dnsmessage.Type) result {
+		p, server, err := r.tryOneName(ctx, conf, fqdn, qtype)
+		return result{p, server, err}
 	}
 	var lastErr error
 	for _, fqdn := range conf.nameList(name) {
@@ -832,7 +809,7 @@ func (r *Resolver) goLookupPTR(ctx context.Context, addr string, order hostLooku
 		}
 
 		if order == hostLookupFiles {
-			return nil, newDNSError(errNoSuchHost, addr, "")
+			return nil, newDNSError(errNoSuchHost(), addr, "")
 		}
 	}
 

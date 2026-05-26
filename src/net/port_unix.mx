@@ -10,10 +10,9 @@ package net
 
 import (
 	"internal/bytealg"
-	"sync"
 )
 
-var onceReadServices sync.Once
+var readServicesDone bool
 
 func readServices() {
 	file, err := open("/etc/services")
@@ -37,10 +36,11 @@ func readServices() {
 			continue
 		}
 		netw := portnet[j+1:] // "tcp"
-		m, ok1 := services[netw]
+		sv := _services()
+		m, ok1 := sv[netw]
 		if !ok1 {
 			m = map[string]int{}
-			services[netw] = m
+			sv[netw] = m
 		}
 		for i := 0; i < len(f); i++ {
 			if i != 1 { // f[1] was port/net
@@ -52,6 +52,9 @@ func readServices() {
 
 // goLookupPort is the native Go implementation of LookupPort.
 func goLookupPort(network, service []byte) (port int, err error) {
-	onceReadServices.Do(readServices)
+	if !readServicesDone {
+		readServicesDone = true
+		readServices()
+	}
 	return lookupPortMap(network, service)
 }

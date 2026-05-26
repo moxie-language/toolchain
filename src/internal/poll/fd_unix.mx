@@ -10,7 +10,6 @@ import (
 	"internal/itoa"
 	"internal/syscall/unix"
 	"io"
-	"sync/atomic"
 	"syscall"
 )
 
@@ -76,7 +75,7 @@ func (fd *FD) Init(net []byte, pollable bool) error {
 // no remaining references.
 func (fd *FD) destroy() error {
 	// Poller may want to unregister fd in readiness notification mechanism,
-	// so this must be executed before CloseFunc.
+	// so this must be executed before closing the fd.
 	fd.pd.close()
 
 	err := fd.SysFile.destroy(fd.Sysfd)
@@ -126,7 +125,7 @@ func (fd *FD) SetBlocking() error {
 	// Atomic store so that concurrent calls to SetBlocking
 	// do not cause a race condition. isBlocking only ever goes
 	// from 0 to 1 so there is no real race here.
-	atomic.StoreUint32(&fd.isBlocking, 1)
+	fd.isBlocking = 1
 	return syscall.SetNonblock(fd.Sysfd, false)
 }
 
@@ -647,11 +646,11 @@ func (fd *FD) Fstat(s *syscall.Stat_t) error {
 }
 
 // dupCloexecUnsupported indicates whether F_DUPFD_CLOEXEC is supported by the kernel.
-var dupCloexecUnsupported atomic.Bool
+var dupCloexecUnsupported bool
 
 // DupCloseOnExec dups fd and marks it close-on-exec.
 func DupCloseOnExec(fd int) (int, []byte, error) {
-	if syscall.F_DUPFD_CLOEXEC != 0 && !dupCloexecUnsupported.Load() {
+	if syscall.F_DUPFD_CLOEXEC != 0 && !dupCloexecUnsupported {
 		r0, err := unix.Fcntl(fd, syscall.F_DUPFD_CLOEXEC, 0)
 		if err == nil {
 			return r0, "", nil
@@ -661,7 +660,7 @@ func DupCloseOnExec(fd int) (int, []byte, error) {
 			// Old kernel, or js/wasm (which returns
 			// ENOSYS). Fall back to the portable way from
 			// now on.
-			dupCloexecUnsupported.Store(true)
+			dupCloexecUnsupported = true
 		default:
 			return -1, "fcntl", err
 		}

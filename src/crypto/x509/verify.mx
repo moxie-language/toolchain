@@ -180,7 +180,7 @@ func (se SystemRootsError) Unwrap() error { return se.Err }
 
 // errNotParsed is returned when a certificate without ASN.1 contents is
 // verified. Platform-specific verification needs the ASN.1 contents.
-var errNotParsed = errors.New("x509: missing ASN.1 contents; use ParseCertificate")
+const errNotParsed = errors.Const("x509: missing ASN.1 contents; use ParseCertificate")
 
 // VerifyOptions contains parameters for Certificate.Verify.
 type VerifyOptions struct {
@@ -963,7 +963,7 @@ func alreadyInChain(candidate *Certificate, chain []*Certificate) bool {
 
 	var candidateSAN *pkix.Extension
 	for _, ext := range candidate.Extensions {
-		if ext.Id.Equal(oidExtensionSubjectAltName) {
+		if ext.Id.Equal(_oidExtensionSubjectAltName()) {
 			candidateSAN = &ext
 			break
 		}
@@ -981,7 +981,7 @@ func alreadyInChain(candidate *Certificate, chain []*Certificate) bool {
 		}
 		var certSAN *pkix.Extension
 		for _, ext := range cert.Extensions {
-			if ext.Id.Equal(oidExtensionSubjectAltName) {
+			if ext.Id.Equal(_oidExtensionSubjectAltName()) {
 				certSAN = &ext
 				break
 			}
@@ -1341,18 +1341,18 @@ type policyGraph struct {
 	depth       int
 }
 
-var anyPolicyOID = mustNewOIDFromInts([]uint64{2, 5, 29, 32, 0})
+func anyPolicyOID() OID { return mustNewOIDFromInts([]uint64{2, 5, 29, 32, 0}) }
 
 func newPolicyGraph() *policyGraph {
 	root := policyGraphNode{
-		validPolicy:       anyPolicyOID,
-		expectedPolicySet: []OID{anyPolicyOID},
+		validPolicy:       anyPolicyOID(),
+		expectedPolicySet: []OID{anyPolicyOID()},
 		children:          map[*policyGraphNode]bool{},
 		parents:           map[*policyGraphNode]bool{},
 	}
 	return &policyGraph{
 		depth:  0,
-		strata: []map[string]*policyGraphNode{{string(anyPolicyOID.der): &root}},
+		strata: []map[string]*policyGraphNode{{string(anyPolicyOID().der): &root}},
 	}
 }
 
@@ -1371,7 +1371,7 @@ func (pg *policyGraph) parentWithAnyPolicy() *policyGraphNode {
 	if pg.depth == 0 {
 		return nil
 	}
-	return pg.strata[pg.depth-1][string(anyPolicyOID.der)]
+	return pg.strata[pg.depth-1][string(anyPolicyOID().der)]
 }
 
 func (pg *policyGraph) parents() iter.Seq[*policyGraphNode] {
@@ -1407,13 +1407,13 @@ func (pg *policyGraph) validPolicyNodes() []*policyGraphNode {
 	var validNodes []*policyGraphNode
 	for i := pg.depth; i >= 0; i-- {
 		for _, n := range pg.strata[i] {
-			if n.validPolicy.Equal(anyPolicyOID) {
+			if n.validPolicy.Equal(anyPolicyOID()) {
 				continue
 			}
 
 			if len(n.parents) == 1 {
 				for p := range n.parents {
-					if p.validPolicy.Equal(anyPolicyOID) {
+					if p.validPolicy.Equal(anyPolicyOID()) {
 						validNodes = append(validNodes, n)
 					}
 				}
@@ -1485,7 +1485,7 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 	// If the user does not pass any policies, we consider
 	// that equivalent to passing anyPolicyOID.
 	if len(initialUserPolicySet) == 0 {
-		initialUserPolicySet[string(anyPolicyOID.der)] = true
+		initialUserPolicySet[string(anyPolicyOID().der)] = true
 	}
 
 	for i := n - 1; i >= 0; i-- {
@@ -1512,7 +1512,7 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 			for _, policy := range cert.Policies {
 				policies[string(policy.der)] = true
 
-				if policy.Equal(anyPolicyOID) {
+				if policy.Equal(anyPolicyOID()) {
 					continue
 				}
 
@@ -1534,7 +1534,7 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 			// In the specification chains go from the trust anchor to the leaf, whereas our
 			// chains go from the leaf to the trust anchor, so our i's our inverted. Our
 			// check here matches the check "i < n" in the specification.
-			if policies[string(anyPolicyOID.der)] && (inhibitAnyPolicy > 0 || (n-i < n && isSelfSigned)) {
+			if policies[string(anyPolicyOID().der)] && (inhibitAnyPolicy > 0 || (n-i < n && isSelfSigned)) {
 				missing := map[string][]*policyGraphNode{}
 				leaves := pg.leaves()
 				for p := range pg.parents() {
@@ -1561,7 +1561,7 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 
 					for _, mapping := range cert.PolicyMappings {
 						if policyMapping > 0 {
-							if mapping.IssuerDomainPolicy.Equal(anyPolicyOID) || mapping.SubjectDomainPolicy.Equal(anyPolicyOID) {
+							if mapping.IssuerDomainPolicy.Equal(anyPolicyOID()) || mapping.SubjectDomainPolicy.Equal(anyPolicyOID()) {
 								// Invalid mapping
 								return false
 							}
@@ -1579,7 +1579,7 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 						// 6.1.4 (b) (1) -- as updated by RFC 9618
 						if matching := pg.leafWithPolicy(OID{der: []byte(issuerStr)}); matching != nil {
 							matching.expectedPolicySet = subjectPolicies
-						} else if matching := pg.leafWithPolicy(anyPolicyOID); matching != nil {
+						} else if matching := pg.leafWithPolicy(anyPolicyOID()); matching != nil {
 							// 6.1.4 (b) (2) -- as updated by RFC 9618
 							n := newPolicyGraphNode(OID{der: []byte(issuerStr)}, []*policyGraphNode{matching})
 							n.expectedPolicySet = subjectPolicies
@@ -1634,7 +1634,7 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 	if pg != nil {
 		validPolicyNodeSet = pg.validPolicyNodes()
 		// 6.1.5 (g) (3) -- as updated by RFC 9618
-		if currentAny := pg.leafWithPolicy(anyPolicyOID); currentAny != nil {
+		if currentAny := pg.leafWithPolicy(anyPolicyOID()); currentAny != nil {
 			validPolicyNodeSet = append(validPolicyNodeSet, currentAny)
 		}
 	}
@@ -1647,7 +1647,7 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 	// 6.1.5 (g) (5) -- as updated by RFC 9618
 	userConstrainedPolicySet := maps.Clone(authorityConstrainedPolicySet)
 	// 6.1.5 (g) (6) -- as updated by RFC 9618
-	if len(initialUserPolicySet) != 1 || !initialUserPolicySet[string(anyPolicyOID.der)] {
+	if len(initialUserPolicySet) != 1 || !initialUserPolicySet[string(anyPolicyOID().der)] {
 		// 6.1.5 (g) (6) (i) -- as updated by RFC 9618
 		for p := range userConstrainedPolicySet {
 			if !initialUserPolicySet[p] {
@@ -1655,7 +1655,7 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 			}
 		}
 		// 6.1.5 (g) (6) (ii) -- as updated by RFC 9618
-		if authorityConstrainedPolicySet[string(anyPolicyOID.der)] {
+		if authorityConstrainedPolicySet[string(anyPolicyOID().der)] {
 			for policy := range initialUserPolicySet {
 				userConstrainedPolicySet[policy] = true
 			}

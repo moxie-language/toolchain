@@ -6,7 +6,6 @@ package windows
 
 import (
 	"errors"
-	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -53,10 +52,18 @@ func Version() (major, minor, build uint32) {
 // to a maximum of two. Please see:
 // https://learn.microsoft.com/en-us/windows/win32/api/mswsock/nf-mswsock-transmitfile
 // https://golang.org/issue/73746
-var SupportUnlimitedTransmitFile = sync.OnceValue(func() bool {
+var _supportUnlimitedTransmitFileDone bool
+var _supportUnlimitedTransmitFileVal bool
+
+func SupportUnlimitedTransmitFile() bool {
+	if _supportUnlimitedTransmitFileDone {
+		return _supportUnlimitedTransmitFileVal
+	}
+	_supportUnlimitedTransmitFileDone = true
 	info := getVersionInfo()
-	return info.productType != VER_NT_WORKSTATION
-})
+	_supportUnlimitedTransmitFileVal = info.productType != VER_NT_WORKSTATION
+	return _supportUnlimitedTransmitFileVal
+}
 
 var (
 	supportTCPKeepAliveIdle     bool
@@ -64,7 +71,13 @@ var (
 	supportTCPKeepAliveCount    bool
 )
 
-var initTCPKeepAlive = sync.OnceFunc(func() {
+var _initTCPKeepAliveDone bool
+
+func initTCPKeepAlive() {
+	if _initTCPKeepAliveDone {
+		return
+	}
+	_initTCPKeepAliveDone = true
 	s, err := WSASocket(syscall.AF_INET, syscall.SOCK_STREAM, syscall.IPPROTO_TCP, nil, 0, WSA_FLAG_NO_HANDLE_INHERIT)
 	if err != nil {
 		// Fallback to checking the Windows version.
@@ -82,7 +95,7 @@ var initTCPKeepAlive = sync.OnceFunc(func() {
 	supportTCPKeepAliveIdle = optSupported(TCP_KEEPIDLE)
 	supportTCPKeepAliveInterval = optSupported(TCP_KEEPINTVL)
 	supportTCPKeepAliveCount = optSupported(TCP_KEEPCNT)
-})
+}
 
 // SupportTCPKeepAliveIdle indicates whether TCP_KEEPIDLE is supported.
 // The minimal requirement is Windows 10.0.16299.
@@ -109,30 +122,48 @@ func SupportTCPKeepAliveCount() bool {
 // SupportTCPInitialRTONoSYNRetransmissions indicates whether the current
 // Windows version supports the TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS.
 // The minimal requirement is Windows 10.0.16299.
-var SupportTCPInitialRTONoSYNRetransmissions = sync.OnceValue(func() bool {
+var _supportTCPInitialRTODone bool
+var _supportTCPInitialRTOVal bool
+
+func SupportTCPInitialRTONoSYNRetransmissions() bool {
+	if _supportTCPInitialRTODone {
+		return _supportTCPInitialRTOVal
+	}
+	_supportTCPInitialRTODone = true
 	major, _, build := Version()
-	return major >= 10 && build >= 16299
-})
+	_supportTCPInitialRTOVal = major >= 10 && build >= 16299
+	return _supportTCPInitialRTOVal
+}
 
 // SupportUnixSocket indicates whether the current Windows version supports
 // Unix Domain Sockets.
 // The minimal requirement is Windows 10.0.17063.
-var SupportUnixSocket = sync.OnceValue(func() bool {
+var _supportUnixSocketDone bool
+var _supportUnixSocketVal bool
+
+func SupportUnixSocket() bool {
+	if _supportUnixSocketDone {
+		return _supportUnixSocketVal
+	}
+	_supportUnixSocketDone = true
 	var size uint32
 	// First call to get the required buffer size in bytes.
 	// Ignore the error, it will always fail.
 	_, _ = syscall.WSAEnumProtocols(nil, nil, &size)
 	n := int32(size) / int32(unsafe.Sizeof(syscall.WSAProtocolInfo{}))
 	// Second call to get the actual protocols.
-	buf := make([]syscall.WSAProtocolInfo, n)
+	buf := []syscall.WSAProtocolInfo{:n}
 	n, err := syscall.WSAEnumProtocols(nil, &buf[0], &size)
 	if err != nil {
+		_supportUnixSocketVal = false
 		return false
 	}
 	for i := int32(0); i < n; i++ {
 		if buf[i].AddressFamily == syscall.AF_UNIX {
+			_supportUnixSocketVal = true
 			return true
 		}
 	}
+	_supportUnixSocketVal = false
 	return false
-})
+}

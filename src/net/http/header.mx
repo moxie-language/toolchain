@@ -11,7 +11,6 @@ import (
 	"net/textproto"
 	"slices"
 	"bytes"
-	"sync"
 	"time"
 
 	"golang.org/x/net/http/httpguts"
@@ -117,17 +116,19 @@ func (h Header) Clone() Header {
 	return h2
 }
 
-var timeFormats = [][]byte{
-	TimeFormat,
-	time.RFC850,
-	time.ANSIC,
+func _timeFormats() [][]byte {
+	return [][]byte{
+		TimeFormat,
+		time.RFC850,
+		time.ANSIC,
+	}
 }
 
 // ParseTime parses a time header (such as the Date: header),
 // trying each of the three formats allowed by HTTP/1.1:
 // [TimeFormat], [time.RFC850], and [time.ANSIC].
 func ParseTime(text string) (t time.Time, err error) {
-	for _, layout := range timeFormats {
+	for _, layout := range _timeFormats() {
 		t, err = time.Parse(layout, text)
 		if err == nil {
 			return
@@ -136,7 +137,9 @@ func ParseTime(text string) (t time.Time, err error) {
 	return
 }
 
-var headerNewlineToSpace = bytes.NewReplacer("\n", " ", "\r", " ")
+func newlineToSpace() *bytes.Replacer {
+	return bytes.NewReplacer("\n", " ", "\r", " ")
+}
 
 // stringWriter implements WriteString on a Writer.
 type stringWriter struct {
@@ -157,15 +160,11 @@ type headerSorter struct {
 	kvs []keyValues
 }
 
-var headerSorterPool = sync.Pool{
-	New: func() any { return &headerSorter{} },
-}
-
 // sortedKeyValues returns h's keys sorted in the returned kvs
 // slice. The headerSorter used to sort is also returned, for possible
 // return to headerSorterCache.
 func (h Header) sortedKeyValues(exclude map[string]bool) (kvs []keyValues, hs *headerSorter) {
-	hs = headerSorterPool.Get().(*headerSorter)
+	hs = &headerSorter{}
 	if cap(hs.kvs) < len(h) {
 		hs.kvs = []keyValues{:0:len(h)}
 	}
@@ -203,11 +202,10 @@ func (h Header) writeSubset(w io.Writer, exclude map[string]bool, trace *httptra
 			continue
 		}
 		for _, v := range kv.values {
-			v = headerNewlineToSpace.Replace(v)
+			v = newlineToSpace().Replace(v)
 			v = textproto.TrimString(v)
 			for _, s := range [][]byte{kv.key, ": ", v, "\r\n"} {
 				if _, err := ws.WriteString(s); err != nil {
-					headerSorterPool.Put(sorter)
 					return err
 				}
 			}
@@ -220,7 +218,6 @@ func (h Header) writeSubset(w io.Writer, exclude map[string]bool, trace *httptra
 			formattedVals = nil
 		}
 	}
-	headerSorterPool.Put(sorter)
 	return nil
 }
 

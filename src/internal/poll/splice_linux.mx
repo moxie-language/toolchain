@@ -7,7 +7,6 @@ package poll
 import (
 	"internal/syscall/unix"
 	"runtime"
-	"sync"
 	"syscall"
 )
 
@@ -181,43 +180,22 @@ type splicePipe struct {
 	cleanup runtime.Cleanup
 }
 
-// splicePipePool caches pipes to avoid high-frequency construction and destruction of pipe buffers.
-// The garbage collector will free all pipes in the sync.Pool periodically, thus we need to set up
-// a finalizer for each pipe to close its file descriptors before the actual GC.
-var splicePipePool = sync.Pool{New: newPoolPipe}
-
-func newPoolPipe() any {
-	// Discard the error which occurred during the creation of pipe buffer,
-	// redirecting the data transmission to the conventional way utilizing read() + write() as a fallback.
+// getPipe creates a new pipe buffer for splice operations.
+func getPipe() (*splicePipe, error) {
 	p := newPipe()
 	if p == nil {
-		return nil
+		return nil, syscall.EINVAL
 	}
-
 	p.cleanup = runtime.AddCleanup(p, func(spf splicePipeFields) {
 		destroyPipe(&splicePipe{splicePipeFields: spf})
 	}, p.splicePipeFields)
-	return p
-}
-
-// getPipe tries to acquire a pipe buffer from the pool or create a new one with newPipe() if it gets nil from the cache.
-func getPipe() (*splicePipe, error) {
-	v := splicePipePool.Get()
-	if v == nil {
-		return nil, syscall.EINVAL
-	}
-	return v.(*splicePipe), nil
+	return p, nil
 }
 
 func putPipe(p *splicePipe) {
-	// If there is still data left in the pipe,
-	// then close and discard it instead of putting it back into the pool.
-	if p.data != 0 {
-		p.cleanup.Stop()
-		destroyPipe(p)
-		return
-	}
-	splicePipePool.Put(p)
+	// Always destroy the pipe when done.
+	p.cleanup.Stop()
+	destroyPipe(p)
 }
 
 // newPipe sets up a pipe for a splice operation.
@@ -239,6 +217,6 @@ func newPipe() *splicePipe {
 
 // destroyPipe destroys a pipe.
 func destroyPipe(p *splicePipe) {
-	CloseFunc(p.rfd)
-	CloseFunc(p.wfd)
+	syscall.Close(p.rfd)
+	syscall.Close(p.wfd)
 }

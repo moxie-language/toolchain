@@ -7,32 +7,28 @@ package os
 import (
 	"errors"
 	"internal/itoa"
-	"sync"
 	"time"
 )
 
 var minrandPreviousValue uint32
-var minrandMutex sync.Mutex
+var minrandSeeded bool
 
-func init() {
-	// Avoid getting same results on every run
+func ensureMinrand() {
+	if minrandSeeded {
+		return
+	}
+	minrandSeeded = true
 	now := time.Now()
 	seed := uint32(Getpid()) ^ uint32(now.Nanosecond()) ^ uint32(now.Unix())
-	// initial state must be odd
 	minrandPreviousValue = seed | 1
 }
 
 // minrand() is a simple and rather poor placeholder for fastrand()
 // TODO: provide fastrand in runtime, as go does.  It is hard to implement properly elsewhere.
 func minrand() uint32 {
-	// c++11's minstd_rand
-	// https://en.wikipedia.org/wiki/Linear_congruential_generator
-	// m=2^32, c=0, a=48271
-	minrandMutex.Lock()
+	ensureMinrand()
 	minrandPreviousValue *= 48271
-	val := minrandPreviousValue
-	minrandMutex.Unlock()
-	return val
+	return minrandPreviousValue
 }
 
 // We generate random temporary file names so that there's a good
@@ -77,7 +73,7 @@ func CreateTemp(dir, pattern string) (*File, error) {
 	}
 }
 
-var errPatternHasSeparator = errors.New("pattern contains path separator")
+const errPatternHasSeparator = errors.Const("pattern contains path separator")
 
 // prefixAndSuffix splits pattern by the last wildcard "*", if applicable,
 // returning prefix as the part before "*" and suffix as the part after "*".

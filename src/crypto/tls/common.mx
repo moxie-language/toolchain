@@ -19,12 +19,10 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"internal/godebug"
 	"io"
 	"net"
 	"runtime"
 	"slices"
-	"sync"
 	"time"
 	_ "unsafe" // for linkname
 )
@@ -220,15 +218,17 @@ const (
 // directSigning is a standard Hash value that signals that no pre-hashing
 // should be performed, and that the input should be signed directly. It is the
 // hash function associated with the Ed25519 signature scheme.
-var directSigning crypto.Hash = 0
+const directSigning crypto.Hash = 0
 
-// helloRetryRequestRandom is set as the Random value of a ServerHello
+// _helloRetryRequestRandom is set as the Random value of a ServerHello
 // to signal that the message is actually a HelloRetryRequest.
-var helloRetryRequestRandom = []byte{ // See RFC 8446, Section 4.1.3.
-	0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
-	0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
-	0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E,
-	0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
+func _helloRetryRequestRandom() []byte { // See RFC 8446, Section 4.1.3.
+	return []byte{
+		0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
+		0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+		0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E,
+		0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
+	}
 }
 
 const (
@@ -241,7 +241,7 @@ const (
 
 // testingOnlyForceDowngradeCanary is set in tests to force the server side to
 // include downgrade canaries even if it's using its highers supported version.
-var testingOnlyForceDowngradeCanary bool
+const testingOnlyForceDowngradeCanary = false
 
 // ConnectionState records basic TLS details about the connection.
 type ConnectionState struct {
@@ -899,8 +899,6 @@ type Config struct {
 	// clients, see the EncryptedClientHelloConfigList field.
 	EncryptedClientHelloKeys []EncryptedClientHelloKey
 
-	// mutex protects sessionTicketKeys and autoSessionTicketKeys.
-	mutex sync.RWMutex
 	// sessionTicketKeys contains zero or more ticket keys. If set, it means
 	// the keys were set with SessionTicketKey or SetSessionTicketKeys. The
 	// first key is used for new tickets and any subsequent keys can be used to
@@ -996,8 +994,6 @@ func (c *Config) Clone() *Config {
 	if c == nil {
 		return nil
 	}
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
 	return &Config{
 		Rand:                                c.Rand,
 		Time:                                c.Time,
@@ -1036,25 +1032,21 @@ func (c *Config) Clone() *Config {
 	}
 }
 
-// deprecatedSessionTicketKey is set as the prefix of SessionTicketKey if it was
+// _deprecatedSessionTicketKey is set as the prefix of SessionTicketKey if it was
 // randomized for backwards compatibility but is not in use.
-var deprecatedSessionTicketKey = []byte("DEPRECATED")
+func _deprecatedSessionTicketKey() []byte { return []byte("DEPRECATED") }
 
 // initLegacySessionTicketKeyRLocked ensures the legacy SessionTicketKey field is
 // randomized if empty, and that sessionTicketKeys is populated from it otherwise.
 func (c *Config) initLegacySessionTicketKeyRLocked() {
 	// Don't write if SessionTicketKey is already defined as our deprecated string,
 	// or if it is defined by the user but sessionTicketKeys is already set.
+	depKey := _deprecatedSessionTicketKey()
 	if c.SessionTicketKey != [32]byte{} &&
-		(bytes.HasPrefix(c.SessionTicketKey[:], deprecatedSessionTicketKey) || len(c.sessionTicketKeys) > 0) {
+		(bytes.HasPrefix(c.SessionTicketKey[:], depKey) || len(c.sessionTicketKeys) > 0) {
 		return
 	}
 
-	// We need to write some data, so get an exclusive lock and re-check any conditions.
-	c.mutex.RUnlock()
-	defer c.mutex.RLock()
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
 	if c.SessionTicketKey == [32]byte{} {
 		if _, err := io.ReadFull(c.rand(), c.SessionTicketKey[:]); err != nil {
 			panic(fmt.Sprintf("tls: unable to generate random session ticket key: %v", err))
@@ -1063,8 +1055,8 @@ func (c *Config) initLegacySessionTicketKeyRLocked() {
 		// it. This key with the DEPRECATED prefix isn't used as an actual
 		// session ticket key, and is only randomized in case the application
 		// reuses it for some reason.
-		copy(c.SessionTicketKey[:], deprecatedSessionTicketKey)
-	} else if !bytes.HasPrefix(c.SessionTicketKey[:], deprecatedSessionTicketKey) && len(c.sessionTicketKeys) == 0 {
+		copy(c.SessionTicketKey[:], depKey)
+	} else if !bytes.HasPrefix(c.SessionTicketKey[:], depKey) && len(c.sessionTicketKeys) == 0 {
 		c.sessionTicketKeys = []ticketKey{c.ticketKeyFromBytes(c.SessionTicketKey)}
 	}
 
@@ -1083,22 +1075,15 @@ func (c *Config) ticketKeys(configForClient *Config) []ticketKey {
 	// If the ConfigForClient callback returned a Config with explicitly set
 	// keys, use those, otherwise just use the original Config.
 	if configForClient != nil {
-		configForClient.mutex.RLock()
 		if configForClient.SessionTicketsDisabled {
-			configForClient.mutex.RUnlock()
 			return nil
 		}
 		configForClient.initLegacySessionTicketKeyRLocked()
 		if len(configForClient.sessionTicketKeys) != 0 {
-			ret := configForClient.sessionTicketKeys
-			configForClient.mutex.RUnlock()
-			return ret
+			return configForClient.sessionTicketKeys
 		}
-		configForClient.mutex.RUnlock()
 	}
 
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
 	if c.SessionTicketsDisabled {
 		return nil
 	}
@@ -1112,11 +1097,6 @@ func (c *Config) ticketKeys(configForClient *Config) []ticketKey {
 	}
 
 	// autoSessionTicketKeys are managed by auto-rotation.
-	c.mutex.RUnlock()
-	defer c.mutex.RLock()
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	// Re-check the condition in case it changed since obtaining the new lock.
 	if len(c.autoSessionTicketKeys) == 0 || c.time().Sub(c.autoSessionTicketKeys[0].created) >= ticketKeyRotation {
 		var newKey [32]byte
 		if _, err := io.ReadFull(c.rand(), newKey[:]); err != nil {
@@ -1158,15 +1138,13 @@ func (c *Config) SetSessionTicketKeys(keys [][32]byte) {
 		newKeys[i] = c.ticketKeyFromBytes(bytes)
 	}
 
-	c.mutex.Lock()
 	c.sessionTicketKeys = newKeys
-	c.mutex.Unlock()
 }
 
 func (c *Config) rand() io.Reader {
 	r := c.Rand
 	if r == nil {
-		return rand.Reader
+		return rand.Reader()
 	}
 	return r
 }
@@ -1191,7 +1169,7 @@ func (c *Config) cipherSuites(aesGCMPreferred bool) []uint16 {
 	}
 	if fips140tls.Required() {
 		cipherSuites = slices.DeleteFunc(cipherSuites, func(id uint16) bool {
-			return !slices.Contains(allowedCipherSuitesFIPS, id)
+			return !slices.Contains(_allowedCipherSuitesFIPS(), id)
 		})
 	}
 	return cipherSuites
@@ -1203,11 +1181,13 @@ func (c *Config) supportedCipherSuites() []uint16 {
 	return c.cipherSuites(false)
 }
 
-var supportedVersions = []uint16{
-	VersionTLS13,
-	VersionTLS12,
-	VersionTLS11,
-	VersionTLS10,
+func _supportedVersionsList() []uint16 {
+	return []uint16{
+		VersionTLS13,
+		VersionTLS12,
+		VersionTLS11,
+		VersionTLS10,
+	}
 }
 
 // roleClient and roleServer are meant to call supportedVersions and parents
@@ -1215,20 +1195,17 @@ var supportedVersions = []uint16{
 const roleClient = true
 const roleServer = false
 
-var tls10server = godebug.New("tls10server")
-
 // supportedVersions returns the list of supported TLS versions, sorted from
 // highest to lowest (and hence also in preference order).
 func (c *Config) supportedVersions(isClient bool) []uint16 {
-	versions := []uint16{:0:len(supportedVersions)}
-	for _, v := range supportedVersions {
-		if fips140tls.Required() && !slices.Contains(allowedSupportedVersionsFIPS, v) {
+	svl := _supportedVersionsList()
+	versions := []uint16{:0:len(svl)}
+	for _, v := range svl {
+		if fips140tls.Required() && !slices.Contains(_allowedSupportedVersionsFIPS(), v) {
 			continue
 		}
 		if (c == nil || c.MinVersion == 0) && v < VersionTLS12 {
-			if isClient || tls10server.Value() != "1" {
-				continue
-			}
+			continue
 		}
 		if isClient && c.EncryptedClientHelloConfigList != nil && v < VersionTLS13 {
 			continue
@@ -1256,8 +1233,9 @@ func (c *Config) maxSupportedVersion(isClient bool) uint16 {
 // legacy maximum version value. Note that only versions supported by this
 // library are returned. Any newer peer will use supportedVersions anyway.
 func supportedVersionsFromMax(maxVersion uint16) []uint16 {
-	versions := []uint16{:0:len(supportedVersions)}
-	for _, v := range supportedVersions {
+	svl := _supportedVersionsList()
+	versions := []uint16{:0:len(svl)}
+	for _, v := range svl {
 		if v > maxVersion {
 			continue
 		}
@@ -1270,7 +1248,7 @@ func (c *Config) curvePreferences(version uint16) []CurveID {
 	curvePreferences := defaultCurvePreferences()
 	if fips140tls.Required() {
 		curvePreferences = slices.DeleteFunc(curvePreferences, func(x CurveID) bool {
-			return !slices.Contains(allowedCurvePreferencesFIPS, x)
+			return !slices.Contains(_allowedCurvePreferencesFIPS(), x)
 		})
 	}
 	if c != nil && len(c.CurvePreferences) != 0 {
@@ -1309,7 +1287,7 @@ func (c *Config) mutualVersion(isClient bool, peerVersions []uint16) (uint16, bo
 // See go.dev/issue/67401.
 //
 //go:linkname errNoCertificates
-var errNoCertificates = errors.New("tls: no certificates configured")
+const errNoCertificates = errors.Const("tls: no certificates configured")
 
 // getCertificate returns the best certificate for the given ClientHelloInfo,
 // defaulting to the first element of c.Certificates.
@@ -1594,16 +1572,10 @@ func (c *Config) writeKeyLog(label []byte, clientRandom, secret []byte) error {
 
 	logLine := fmt.Appendf(nil, "%s %x %x\n", label, clientRandom, secret)
 
-	writerMutex.Lock()
 	_, err := c.KeyLogWriter.Write(logLine)
-	writerMutex.Unlock()
 
 	return err
 }
-
-// writerMutex protects all KeyLogWriters globally. It is rarely enabled,
-// and is only for debugging, so a global mutex saves space.
-var writerMutex sync.Mutex
 
 // A Certificate is a chain of one or more certificates, leaf first.
 type Certificate struct {
@@ -1659,8 +1631,6 @@ type handshakeMessageWithOriginalBytes interface {
 // lruSessionCache is a ClientSessionCache implementation that uses an LRU
 // caching strategy.
 type lruSessionCache struct {
-	sync.Mutex
-
 	m        map[string]*list.Element
 	q        *list.List
 	capacity int
@@ -1690,9 +1660,6 @@ func NewLRUClientSessionCache(capacity int) ClientSessionCache {
 // Put adds the provided (sessionKey, cs) pair to the cache. If cs is nil, the entry
 // corresponding to sessionKey is removed from the cache instead.
 func (c *lruSessionCache) Put(sessionKey []byte, cs *ClientSessionState) {
-	c.Lock()
-	defer c.Unlock()
-
 	if elem, ok := c.m[sessionKey]; ok {
 		if cs == nil {
 			c.q.Remove(elem)
@@ -1723,9 +1690,6 @@ func (c *lruSessionCache) Put(sessionKey []byte, cs *ClientSessionState) {
 // Get returns the [ClientSessionState] value associated with a given key. It
 // returns (nil, false) if no value is found.
 func (c *lruSessionCache) Get(sessionKey []byte) (*ClientSessionState, bool) {
-	c.Lock()
-	defer c.Unlock()
-
 	if elem, ok := c.m[sessionKey]; ok {
 		c.q.MoveToFront(elem)
 		return elem.Value.(*lruSessionCacheEntry).state, true
@@ -1733,35 +1697,26 @@ func (c *lruSessionCache) Get(sessionKey []byte) (*ClientSessionState, bool) {
 	return nil, false
 }
 
-var emptyConfig Config
-
 func defaultConfig() *Config {
-	return &emptyConfig
+	return &Config{}
 }
 
 func unexpectedMessageError(wanted, got any) error {
 	return fmt.Errorf("tls: received unexpected handshake message of type %T when waiting for %T", got, wanted)
 }
 
-var testingOnlySupportedSignatureAlgorithms []SignatureScheme
-
 // supportedSignatureAlgorithms returns the supported signature algorithms for
 // the given minimum TLS version, to advertise in ClientHello and
 // CertificateRequest messages.
 func supportedSignatureAlgorithms(minVers uint16) []SignatureScheme {
 	sigAlgs := defaultSupportedSignatureAlgorithms()
-	if testingOnlySupportedSignatureAlgorithms != nil {
-		sigAlgs = slices.Clone(testingOnlySupportedSignatureAlgorithms)
-	}
 	return slices.DeleteFunc(sigAlgs, func(s SignatureScheme) bool {
 		return isDisabledSignatureAlgorithm(minVers, s, false)
 	})
 }
 
-var tlssha1 = godebug.New("tlssha1")
-
 func isDisabledSignatureAlgorithm(version uint16, s SignatureScheme, isCert bool) bool {
-	if fips140tls.Required() && !slices.Contains(allowedSignatureAlgorithmsFIPS, s) {
+	if fips140tls.Required() && !slices.Contains(_allowedSignatureAlgorithmsFIPS(), s) {
 		return true
 	}
 
@@ -1782,7 +1737,7 @@ func isDisabledSignatureAlgorithm(version uint16, s SignatureScheme, isCert bool
 		if sigType == signaturePKCS1v15 || sigHash == crypto.SHA1 {
 			return true
 		}
-	} else if tlssha1.Value() != "1" {
+	} else {
 		_, sigHash, _ := typeAndHashFromSignatureScheme(s)
 		if sigHash == crypto.SHA1 {
 			return true

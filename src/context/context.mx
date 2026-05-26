@@ -58,8 +58,6 @@ package context
 
 import (
 	"errors"
-	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -163,11 +161,9 @@ type Context interface {
 
 // Canceled is the error returned by [Context.Err] when the context is canceled
 // for some reason other than its deadline passing.
-var Canceled = errors.New("context canceled")
+const Canceled = errors.Const("context canceled")
 
-// DeadlineExceeded is the error returned by [Context.Err] when the context is canceled
-// due to its deadline passing.
-var DeadlineExceeded error = deadlineExceededError{}
+func DeadlineExceeded() error { return deadlineExceededError{} }
 
 type deadlineExceededError struct{}
 
@@ -286,9 +282,7 @@ func withCancel(parent Context) *cancelCtx {
 // Cause returns nil if c has not been canceled yet.
 func Cause(c Context) error {
 	if cc, ok := c.Value(&cancelCtxKey).(*cancelCtx); ok {
-		cc.mu.Lock()
 		cause := cc.cause
-		cc.mu.Unlock()
 		if cause != nil {
 			return cause
 		}
@@ -327,14 +321,12 @@ func AfterFunc(ctx Context, f func()) (stop func() bool) {
 	}
 	a.cancelCtx.propagateCancel(ctx, a)
 	return func() bool {
-		stopped := false
-		a.once.Do(func() {
-			stopped = true
-		})
-		if stopped {
-			a.cancel(true, Canceled, nil)
+		if a.done {
+			return false
 		}
-		return stopped
+		a.done = true
+		a.cancel(true, Canceled, nil)
+		return true
 	}
 }
 
@@ -344,7 +336,7 @@ type afterFuncer interface {
 
 type afterFuncCtx struct {
 	cancelCtx
-	once sync.Once // either starts running f or stops f from running
+	done bool // either starts running f or stops f from running
 	f    func()
 }
 
@@ -353,9 +345,7 @@ func (a *afterFuncCtx) cancel(removeFromParent bool, err, cause error) {
 	if removeFromParent {
 		removeChild(a.Context, a)
 	}
-	a.once.Do(func() {
-		a.f()
-	})
+	if !a.done { a.done = true; a.f() }
 }
 
 // A stopCtx is used as the parent context of a cancelCtx when
@@ -377,14 +367,14 @@ var cancelCtxKey int
 // different done channel, in which case we should not bypass it.)
 func parentCancelCtx(parent Context) (*cancelCtx, bool) {
 	done := parent.Done()
-	if done == closedchan || done == nil {
+	if done == _closedchan() || done == nil {
 		return nil, false
 	}
 	p, ok := parent.Value(&cancelCtxKey).(*cancelCtx)
 	if !ok {
 		return nil, false
 	}
-	pdone, _ := p.done.Load().(chan struct{})
+	pdone, _ := p.done.(chan struct{})
 	if pdone != done {
 		return nil, false
 	}
@@ -401,11 +391,9 @@ func removeChild(parent Context, child canceler) {
 	if !ok {
 		return
 	}
-	p.mu.Lock()
 	if p.children != nil {
 		delete(p.children, child)
 	}
-	p.mu.Unlock()
 }
 
 // A canceler is a context type that can be canceled directly. The
@@ -416,10 +404,14 @@ type canceler interface {
 }
 
 // closedchan is a reusable closed channel.
-var closedchan = chan struct{}{}
+var closedchan chan struct{}
 
-func init() {
-	close(closedchan)
+func _closedchan() chan struct{} {
+	if closedchan == nil {
+		closedchan = chan struct{}{}
+		close(closedchan)
+	}
+	return closedchan
 }
 
 // A cancelCtx can be canceled. When canceled, it also cancels any children
@@ -427,10 +419,9 @@ func init() {
 type cancelCtx struct {
 	Context
 
-	mu       sync.Mutex            // protects following fields
-	done     atomic.Value          // of chan struct{}, created lazily, closed by first cancel call
+	done     any                    // of chan struct{}, created lazily, closed by first cancel call
 	children map[canceler]struct{} // set to nil by the first cancel call
-	err      atomic.Value          // set to non-nil by the first cancel call
+	err      error                 // set to non-nil by the first cancel call
 	cause    error                 // set to non-nil by the first cancel call
 }
 
@@ -442,26 +433,18 @@ func (c *cancelCtx) Value(key any) any {
 }
 
 func (c *cancelCtx) Done() <-chan struct{} {
-	d := c.done.Load()
-	if d != nil {
-		return d.(chan struct{})
+	if c.done != nil {
+		return c.done.(chan struct{})
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	d = c.done.Load()
-	if d == nil {
-		d = chan struct{}{}
-		c.done.Store(d)
-	}
-	return d.(chan struct{})
+	d := chan struct{}{}
+	c.done = d
+	return d
 }
 
 func (c *cancelCtx) Err() error {
-	// An atomic load is ~5x faster than a mutex, which can matter in tight loops.
-	if err := c.err.Load(); err != nil {
-		// Ensure the done channel has been closed before returning a non-nil error.
+	if c.err != nil {
 		<-c.Done()
-		return err.(error)
+		return c.err
 	}
 	return nil
 }
@@ -486,23 +469,20 @@ func (c *cancelCtx) propagateCancel(parent Context, child canceler) {
 
 	if p, ok := parentCancelCtx(parent); ok {
 		// parent is a *cancelCtx, or derives from one.
-		p.mu.Lock()
-		if err := p.err.Load(); err != nil {
+		if p.err != nil {
 			// parent has already been canceled
-			child.cancel(false, err.(error), p.cause)
+			child.cancel(false, p.err, p.cause)
 		} else {
 			if p.children == nil {
 				p.children = map[canceler]struct{}{}
 			}
 			p.children[child] = struct{}{}
 		}
-		p.mu.Unlock()
 		return
 	}
 
 	if a, ok := parent.(afterFuncer); ok {
 		// parent implements an AfterFunc method.
-		c.mu.Lock()
 		stop := a.AfterFunc(func() {
 			child.cancel(false, parent.Err(), Cause(parent))
 		})
@@ -510,7 +490,6 @@ func (c *cancelCtx) propagateCancel(parent Context, child canceler) {
 			Context: parent,
 			stop:    stop,
 		}
-		c.mu.Unlock()
 		return
 	}
 
@@ -544,25 +523,21 @@ func (c *cancelCtx) cancel(removeFromParent bool, err, cause error) {
 	if cause == nil {
 		cause = err
 	}
-	c.mu.Lock()
-	if c.err.Load() != nil {
-		c.mu.Unlock()
+	if c.err != nil {
 		return // already canceled
 	}
-	c.err.Store(err)
+	c.err = err
 	c.cause = cause
-	d, _ := c.done.Load().(chan struct{})
+	d, _ := c.done.(chan struct{})
 	if d == nil {
-		c.done.Store(closedchan)
+		c.done = _closedchan()
 	} else {
 		close(d)
 	}
 	for child := range c.children {
-		// NOTE: acquiring the child's lock while holding parent's lock.
 		child.cancel(false, err, cause)
 	}
 	c.children = nil
-	c.mu.Unlock()
 
 	if removeFromParent {
 		removeChild(c.Context, c)
@@ -634,14 +609,12 @@ func WithDeadlineCause(parent Context, d time.Time, cause error) (Context, Cance
 	c.cancelCtx.propagateCancel(parent, c)
 	dur := time.Until(d)
 	if dur <= 0 {
-		c.cancel(true, DeadlineExceeded, cause) // deadline has already passed
+		c.cancel(true, DeadlineExceeded(), cause) // deadline has already passed
 		return c, func() { c.cancel(false, Canceled, nil) }
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.err.Load() == nil {
+	if c.err == nil {
 		c.timer = time.AfterFunc(dur, func() {
-			c.cancel(true, DeadlineExceeded, cause)
+			c.cancel(true, DeadlineExceeded(), cause)
 		})
 	}
 	return c, func() { c.cancel(true, Canceled, nil) }
@@ -673,12 +646,10 @@ func (c *timerCtx) cancel(removeFromParent bool, err, cause error) {
 		// Remove this timerCtx from its parent cancelCtx's children.
 		removeChild(c.cancelCtx.Context, c)
 	}
-	c.mu.Lock()
 	if c.timer != nil {
 		c.timer.Stop()
 		c.timer = nil
 	}
-	c.mu.Unlock()
 }
 
 // WithTimeout returns WithDeadline(parent, time.Now().Add(timeout)).

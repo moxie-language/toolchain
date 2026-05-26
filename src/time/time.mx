@@ -337,7 +337,8 @@ const (
 // String returns the English name of the month ("January", "February", ...).
 func (m Month) String() string {
 	if January <= m && m <= December {
-		return longMonthNames[m-1]
+		lmn := _longMonthNames()
+		return lmn[m-1]
 	}
 	buf := []byte{:20}
 	n := fmtInt(buf, uint64(m))
@@ -360,7 +361,8 @@ const (
 // String returns the English name of the day ("Sunday", "Monday", ...).
 func (d Weekday) String() string {
 	if Sunday <= d && d <= Saturday {
-		return longDayNames[d]
+		ldn := _longDayNames()
+		return ldn[d]
 	}
 	buf := []byte{:20}
 	n := fmtInt(buf, uint64(d))
@@ -1223,7 +1225,7 @@ func subMono(t, u int64) Duration {
 func Since(t Time) Duration {
 	if t.wall&hasMonotonic != 0 && !runtimeIsBubbled() {
 		// Common case optimization: if t has monotonic time, then Sub will use only it.
-		return subMono(runtimeNano()-startNano, t.ext)
+		return subMono(runtimeNano()-_startNano(), t.ext)
 	}
 	return Now().Sub(t)
 }
@@ -1233,7 +1235,7 @@ func Since(t Time) Duration {
 func Until(t Time) Duration {
 	if t.wall&hasMonotonic != 0 && !runtimeIsBubbled() {
 		// Common case optimization: if t has monotonic time, then Sub will use only it.
-		return subMono(t.ext, runtimeNano()-startNano)
+		return subMono(t.ext, runtimeNano()-_startNano())
 	}
 	return t.Sub(Now())
 }
@@ -1334,7 +1336,16 @@ func runtimeIsBubbled() bool
 // which appears to have a default resolution of 15ms),
 // we avoid ever reporting a monotonic time of 0.
 // (Callers may want to use 0 as "time not set".)
-var startNano int64 = runtimeNano() - 1
+var _startNanoDone bool
+var _startNanoVal int64
+
+func _startNano() int64 {
+	if !_startNanoDone {
+		_startNanoDone = true
+		_startNanoVal = runtimeNano() - 1
+	}
+	return _startNanoVal
+}
 
 // x/tools uses a linkname of time.Now in its tests. No harm done.
 //go:linkname Now
@@ -1343,21 +1354,18 @@ var startNano int64 = runtimeNano() - 1
 func Now() Time {
 	sec, nsec, mono := runtimeNow()
 	if mono == 0 {
-		return Time{uint64(nsec), sec + unixToInternal, Local}
+		return Time{uint64(nsec), sec + unixToInternal, Local()}
 	}
-	mono -= startNano
+	mono -= _startNano()
 	sec += unixToInternal - minWall
 	if uint64(sec)>>33 != 0 {
-		// Seconds field overflowed the 33 bits available when
-		// storing a monotonic time. This will be true after
-		// March 16, 2157.
-		return Time{uint64(nsec), sec + minWall, Local}
+		return Time{uint64(nsec), sec + minWall, Local()}
 	}
-	return Time{hasMonotonic | uint64(sec)<<nsecShift | uint64(nsec), mono, Local}
+	return Time{hasMonotonic | uint64(sec)<<nsecShift | uint64(nsec), mono, Local()}
 }
 
 func unixTime(sec int64, nsec int32) Time {
-	return Time{uint64(nsec), sec + unixToInternal, Local}
+	return Time{uint64(nsec), sec + unixToInternal, Local()}
 }
 
 // UTC returns t with the location set to UTC.
@@ -1368,7 +1376,7 @@ func (t Time) UTC() Time {
 
 // Local returns t with the location set to local time.
 func (t Time) Local() Time {
-	t.setLoc(Local)
+	t.setLoc(Local())
 	return t
 }
 
@@ -1389,7 +1397,7 @@ func (t Time) In(loc *Location) Time {
 func (t Time) Location() *Location {
 	l := t.loc
 	if l == nil {
-		l = UTC
+		l = UTC()
 	}
 	return l
 }
@@ -1468,7 +1476,7 @@ func (t Time) AppendBinary(b []byte) ([]byte, error) {
 	var offsetSec int8
 	version := timeBinaryVersionV1
 
-	if t.Location() == UTC {
+	if t.Location() == UTC() {
 		offsetMin = -1
 	} else {
 		_, offset := t.Zone()
@@ -1557,8 +1565,8 @@ func (t *Time) UnmarshalBinary(data []byte) error {
 
 	if offset == -1*60 {
 		t.setLoc(&utcLoc)
-	} else if _, localoff, _, _, _ := Local.lookup(t.unixSec()); offset == localoff {
-		t.setLoc(Local)
+	} else if _, localoff, _, _, _ := Local().lookup(t.unixSec()); offset == localoff {
+		t.setLoc(Local())
 	} else {
 		t.setLoc(FixedZone("", offset))
 	}

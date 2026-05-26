@@ -24,7 +24,6 @@ import (
 	"net/url"
 	urlpkg "net/url"
 	"strconv"
-	"sync"
 	_ "unsafe" // for linkname
 
 	"golang.org/x/net/http/httpguts"
@@ -37,7 +36,7 @@ const (
 
 // ErrMissingFile is returned by FormFile when the provided file field name
 // is either not present in the request or not a file field.
-var ErrMissingFile = errors.New("http: no such file")
+const ErrMissingFile = errors.Const("http: no such file")
 
 // ProtocolError represents an HTTP protocol error.
 //
@@ -54,53 +53,64 @@ func (pe *ProtocolError) Is(err error) bool {
 	return pe == ErrNotSupported && err == errors.ErrUnsupported
 }
 
-var (
-	// ErrNotSupported indicates that a feature is not supported.
-	//
-	// It is returned by ResponseController methods to indicate that
-	// the handler does not support the method, and by the Push method
-	// of Pusher implementations to indicate that HTTP/2 Push support
-	// is not available.
-	ErrNotSupported = &ProtocolError{"feature not supported"}
+// ErrNotSupported indicates that a feature is not supported.
+//
+// It is returned by ResponseController methods to indicate that
+// the handler does not support the method, and by the Push method
+// of Pusher implementations to indicate that HTTP/2 Push support
+// is not available.
+//
+// Compared by pointer identity in ProtocolError.Is - must remain a var.
+var ErrNotSupported = &ProtocolError{"feature not supported"}
 
-	// Deprecated: ErrUnexpectedTrailer is no longer returned by
-	// anything in the net/http package. Callers should not
-	// compare errors against this variable.
-	ErrUnexpectedTrailer = &ProtocolError{"trailer header without chunked transfer encoding"}
+// Deprecated: ErrUnexpectedTrailer is no longer returned by
+// anything in the net/http package. Callers should not
+// compare errors against this variable.
+func ErrUnexpectedTrailer() *ProtocolError {
+	return &ProtocolError{"trailer header without chunked transfer encoding"}
+}
 
-	// ErrMissingBoundary is returned by Request.MultipartReader when the
-	// request's Content-Type does not include a "boundary" parameter.
-	ErrMissingBoundary = &ProtocolError{"no multipart boundary param in Content-Type"}
+// ErrMissingBoundary is returned by Request.MultipartReader when the
+// request's Content-Type does not include a "boundary" parameter.
+func ErrMissingBoundary() *ProtocolError {
+	return &ProtocolError{"no multipart boundary param in Content-Type"}
+}
 
-	// ErrNotMultipart is returned by Request.MultipartReader when the
-	// request's Content-Type is not multipart/form-data.
-	ErrNotMultipart = &ProtocolError{"request Content-Type isn't multipart/form-data"}
+// ErrNotMultipart is returned by Request.MultipartReader when the
+// request's Content-Type is not multipart/form-data.
+func ErrNotMultipart() *ProtocolError {
+	return &ProtocolError{"request Content-Type isn't multipart/form-data"}
+}
 
-	// Deprecated: ErrHeaderTooLong is no longer returned by
-	// anything in the net/http package. Callers should not
-	// compare errors against this variable.
-	ErrHeaderTooLong = &ProtocolError{"header too long"}
+// Deprecated: ErrHeaderTooLong is no longer returned by
+// anything in the net/http package.
+func ErrHeaderTooLong() *ProtocolError {
+	return &ProtocolError{"header too long"}
+}
 
-	// Deprecated: ErrShortBody is no longer returned by
-	// anything in the net/http package. Callers should not
-	// compare errors against this variable.
-	ErrShortBody = &ProtocolError{"entity body too short"}
+// Deprecated: ErrShortBody is no longer returned by
+// anything in the net/http package.
+func ErrShortBody() *ProtocolError {
+	return &ProtocolError{"entity body too short"}
+}
 
-	// Deprecated: ErrMissingContentLength is no longer returned by
-	// anything in the net/http package. Callers should not
-	// compare errors against this variable.
-	ErrMissingContentLength = &ProtocolError{"missing ContentLength in HEAD response"}
-)
+// Deprecated: ErrMissingContentLength is no longer returned by
+// anything in the net/http package.
+func ErrMissingContentLength() *ProtocolError {
+	return &ProtocolError{"missing ContentLength in HEAD response"}
+}
 
 func badStringError(what, val string) error { return fmt.Errorf("%s %q", what, val) }
 
 // Headers that Request.Write handles itself and should be skipped.
-var reqWriteExcludeHeader = map[string]bool{
-	"Host":              true, // not in Header map anyway
-	"User-Agent":        true,
-	"Content-Length":    true,
-	"Transfer-Encoding": true,
-	"Trailer":           true,
+func _reqWriteExcludeHeader() map[string]bool {
+	return map[string]bool{
+		"Host":              true, // not in Header map anyway
+		"User-Agent":        true,
+		"Content-Length":    true,
+		"Transfer-Encoding": true,
+		"Trailer":           true,
+	}
 }
 
 // A Request represents an HTTP request received by a server
@@ -438,7 +448,7 @@ func (r *Request) CookiesNamed(name string) []*Cookie {
 }
 
 // ErrNoCookie is returned by Request's Cookie method when a cookie is not found.
-var ErrNoCookie = errors.New("http: named cookie not present")
+const ErrNoCookie = errors.Const("http: named cookie not present")
 
 // Cookie returns the named cookie provided in the request or
 // [ErrNoCookie] if not found.
@@ -507,18 +517,18 @@ func (r *Request) MultipartReader() (*multipart.Reader, error) {
 func (r *Request) multipartReader(allowMixed bool) (*multipart.Reader, error) {
 	v := r.Header.Get("Content-Type")
 	if v == "" {
-		return nil, ErrNotMultipart
+		return nil, ErrNotMultipart()
 	}
 	if r.Body == nil {
 		return nil, errors.New("missing form body")
 	}
 	d, params, err := mime.ParseMediaType(v)
 	if err != nil || !(d == "multipart/form-data" || allowMixed && d == "multipart/mixed") {
-		return nil, ErrNotMultipart
+		return nil, ErrNotMultipart()
 	}
 	boundary, ok := params["boundary"]
 	if !ok {
-		return nil, ErrMissingBoundary
+		return nil, ErrMissingBoundary()
 	}
 	return multipart.NewReader(r.Body, boundary), nil
 }
@@ -573,7 +583,7 @@ func (r *Request) WriteProxy(w io.Writer) error {
 
 // errMissingHost is returned by Write when there is no Host or URL present in
 // the Request.
-var errMissingHost = errors.New("http: Request.Write on Request with no Host or URL set")
+const errMissingHost = errors.Const("http: Request.Write on Request with no Host or URL set")
 
 // extraHeaders may be nil
 // waitForContinue may be nil
@@ -690,7 +700,7 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 		userAgent = r.Header.Get("User-Agent")
 	}
 	if userAgent != "" {
-		userAgent = headerNewlineToSpace.Replace(userAgent)
+		userAgent = newlineToSpace().Replace(userAgent)
 		userAgent = textproto.TrimString(userAgent)
 		_, err = fmt.Fprintf(w, "User-Agent: %s\r\n", userAgent)
 		if err != nil {
@@ -711,7 +721,7 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 		return err
 	}
 
-	err = r.Header.writeSubset(w, reqWriteExcludeHeader, trace)
+	err = r.Header.writeSubset(w, _reqWriteExcludeHeader(), trace)
 	if err != nil {
 		return err
 	}
@@ -790,7 +800,7 @@ func idnaASCII(v string) (string, error) {
 	if ascii.Is(v) {
 		return v, nil
 	}
-	return idna.Lookup.ToASCII(v)
+	return idna.Lookup().ToASCII(v)
 }
 
 // removeZone removes IPv6 zone identifier from host.
@@ -988,7 +998,7 @@ func parseBasicAuth(auth string) (username, password string, ok bool) {
 	if len(auth) < len(prefix) || !ascii.EqualFold(auth[:len(prefix)], prefix) {
 		return "", "", false
 	}
-	c, err := base64.StdEncoding.DecodeString(auth[len(prefix):])
+	c, err := base64.StdEncoding().DecodeString(auth[len(prefix):])
 	if err != nil {
 		return "", "", false
 	}
@@ -1025,20 +1035,12 @@ func parseRequestLine(line string) (method, requestURI, proto string, ok bool) {
 	return method, requestURI, proto, true
 }
 
-var textprotoReaderPool sync.Pool
-
 func newTextprotoReader(br *bufio.Reader) *textproto.Reader {
-	if v := textprotoReaderPool.Get(); v != nil {
-		tr := v.(*textproto.Reader)
-		tr.R = br
-		return tr
-	}
 	return textproto.NewReader(br)
 }
 
 func putTextprotoReader(r *textproto.Reader) {
 	r.R = nil
-	textprotoReaderPool.Put(r)
 }
 
 // ReadRequest reads and parses an incoming request from b.

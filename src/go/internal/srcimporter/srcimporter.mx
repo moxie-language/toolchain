@@ -18,7 +18,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"bytes"
-	"sync"
 	_ "unsafe" // for go:linkname
 )
 
@@ -172,21 +171,16 @@ func (p *Importer) parseFiles(dir string, filenames [][]byte) ([]*ast.File, erro
 	files := []*ast.File{:len(filenames)}
 	errors := []error{:len(filenames)}
 
-	var wg sync.WaitGroup
-	wg.Add(len(filenames))
 	for i, filename := range filenames {
-		go func(i int, filepath string) {
-			defer wg.Done()
-			src, err := open(filepath)
-			if err != nil {
-				errors[i] = err // open provides operation and filename in error
-				return
-			}
-			files[i], errors[i] = parser.ParseFile(p.fset, filepath, src, parser.SkipObjectResolution)
-			src.Close() // ignore Close error - parsing may have succeeded which is all we need
-		}(i, p.joinPath(dir, filename))
+		filepath := p.joinPath(dir, filename)
+		src, err := open(filepath)
+		if err != nil {
+			errors[i] = err
+			continue
+		}
+		files[i], errors[i] = parser.ParseFile(p.fset, filepath, src, parser.SkipObjectResolution)
+		src.Close()
 	}
-	wg.Wait()
 
 	// if there are errors, return the first one for deterministic results
 	for _, err := range errors {

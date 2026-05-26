@@ -9,12 +9,11 @@ package syscall
 import (
 	"internal/itoa"
 	"runtime"
-	"sync"
 	"unsafe"
 )
 
 // ForkLock is not used on plan9.
-var ForkLock sync.RWMutex
+var ForkLock struct{}
 
 // gstringb reads a non-empty string from b, prefixed with a 16-bit length in little-endian order.
 // It returns the string as a byte slice, or nil if b is too short to contain the length or
@@ -108,8 +107,15 @@ func readdirnames(dirfd int) (names []string, err error) {
 	return
 }
 
-// name of the directory containing names and control files for all open file descriptors
-var dupdev, _ = BytePtrFromString("#d")
+var dupdev *byte
+var _dupdevDone bool
+
+func _ensureDupdev() {
+	if !_dupdevDone {
+		_dupdevDone = true
+		dupdev, _ = BytePtrFromString("#d")
+	}
+}
 
 // forkAndExecInChild forks the process, calling dup onto 0..len(fd)
 // and finally invoking exec(argv0, argvv, envv) in the child.
@@ -138,6 +144,8 @@ func forkAndExecInChild(argv0 *byte, argv []*byte, envv []envItem, dir *byte, at
 		n        int
 		b        []byte
 	)
+
+	_ensureDupdev()
 
 	// Guard against side effects of shuffling fds below.
 	// Make sure that nextfd is beyond any currently open files so
@@ -356,9 +364,6 @@ type SysProcAttr struct {
 	Rfork int // additional flags to pass to rfork
 }
 
-var zeroProcAttr ProcAttr
-var zeroSysProcAttr SysProcAttr
-
 func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int, err error) {
 	var (
 		p      [2]int
@@ -368,11 +373,11 @@ func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int, err error) 
 	)
 
 	if attr == nil {
-		attr = &zeroProcAttr
+		attr = &ProcAttr{}
 	}
 	sys := attr.Sys
 	if sys == nil {
-		sys = &zeroSysProcAttr
+		sys = &SysProcAttr{}
 	}
 
 	p[0] = -1
@@ -390,9 +395,7 @@ func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int, err error) 
 
 	destDir := attr.Dir
 	if destDir == "" {
-		wdmu.Lock()
 		destDir = wdStr
-		wdmu.Unlock()
 	}
 	var dir *byte
 	if destDir != "" {
@@ -468,7 +471,6 @@ type waitErr struct {
 }
 
 var procs struct {
-	sync.Mutex
 	waits map[int]chan *waitErr
 }
 
@@ -503,12 +505,12 @@ func startProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, err err
 		waitc := make(chan *waitErr, 1)
 
 		// Mark that the process is running.
-		procs.Lock()
+	
 		if procs.waits == nil {
 			procs.waits = make(map[int]chan *waitErr)
 		}
 		procs.waits[ret.pid] = waitc
-		procs.Unlock()
+	
 
 		forkc <- ret
 
@@ -584,18 +586,18 @@ func Exec(argv0 string, argv []string, envv []string) (err error) {
 // with [ForkExec]/[StartProcess] to wait for a
 // running process to exit.
 func WaitProcess(pid int, w *Waitmsg) (err error) {
-	procs.Lock()
+
 	ch := procs.waits[pid]
-	procs.Unlock()
+
 
 	var wmsg *waitErr
 	if ch != nil {
 		wmsg = <-ch
-		procs.Lock()
+	
 		if procs.waits[pid] == ch {
 			delete(procs.waits, pid)
 		}
-		procs.Unlock()
+	
 	}
 	if wmsg == nil {
 		// ch was missing or ch is closed

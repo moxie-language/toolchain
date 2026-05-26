@@ -289,8 +289,6 @@ func (q *QUICConn) HandleData(level QUICEncryptionLevel, data []byte) error {
 		return nil
 	}
 	// The handshake goroutine has exited.
-	c.handshakeMutex.Lock()
-	defer c.handshakeMutex.Unlock()
 	c.hand.Write(c.quic.readbuf)
 	c.quic.readbuf = nil
 	for q.conn.hand.Len() >= 4 && q.conn.handshakeErr == nil {
@@ -327,7 +325,7 @@ func (q *QUICConn) SendSessionTicket(opts QUICSessionTicketOptions) error {
 	if c.config.SessionTicketsDisabled {
 		return nil
 	}
-	if !c.isHandshakeComplete.Load() {
+	if !c.isHandshakeComplete {
 		return quicError(errors.New("tls: SendSessionTicket called before handshake completed"))
 	}
 	if c.isClient {
@@ -507,10 +505,6 @@ func (c *Conn) quicRejectedEarlyData() {
 // The handshake may become blocked waiting for handshake bytes
 // or for the user to provide transport parameters.
 func (c *Conn) quicWaitForSignal() error {
-	// Drop the handshake mutex while blocked to allow the user
-	// to call ConnectionState before the handshake completes.
-	c.handshakeMutex.Unlock()
-	defer c.handshakeMutex.Lock()
 	// Send on blockedc to notify the QUICConn that the handshake is blocked.
 	// Exported methods of QUICConn wait for the handshake to become blocked
 	// before returning to the user.
