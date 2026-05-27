@@ -57,6 +57,7 @@ type Config struct {
 	MXHPackages map[string]bool
 
 	// Various compiler options that determine how code is generated.
+	GC                 string
 	Scheduler          string
 	AutomaticStackSize bool
 	DefaultStackSize   uint64
@@ -206,6 +207,15 @@ type builder struct {
 	// in-runtime queue path. Populated by createSpawn (parent) and
 	// setupNativeSpawnTargetChannels (child).
 	pipeChannels map[ssa.Value]bool
+
+	// deallocHead is the stack-allocated **deallocEntry for this function's
+	// shadow list. Non-nil only when the dealloc GC is active and the
+	// function has heap allocations.
+	deallocHead llvm.Value
+
+	// deallocAllocs tracks SSA Alloc values that were pushed onto the shadow
+	// list, so we can emit deallocEscape before returning them.
+	deallocAllocs map[ssa.Value]bool
 }
 
 func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *builder {
@@ -1404,6 +1414,12 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		// because runtime.trackPointer is replaced by an alloca store.
 		b.stackChainAlloca = b.CreateAlloca(b.ctx.Int8Type(), "stackalloc")
 	}
+
+	if b.usesDealloc() {
+		b.deallocAllocs = make(map[ssa.Value]bool)
+		b.deallocHead = llvmutil.CreateEntryBlockAlloca(b.Builder, b.dataPtrType, "dealloc.head")
+		b.CreateStore(llvm.ConstNull(b.dataPtrType), b.deallocHead)
+	}
 }
 
 // createFunction builds the LLVM IR implementation for this function. The
@@ -1620,6 +1636,8 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		if b.hasDeferFrame() {
 			b.createRuntimeCall("destroyDeferFrame", []llvm.Value{b.deferFrame}, "")
 		}
+		b.deallocCheckReturn(instr)
+		b.deallocEmitFree()
 		if len(instr.Results) == 0 {
 			b.CreateRetVoid()
 		} else if len(instr.Results) == 1 {
@@ -1653,6 +1671,7 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 			return
 		}
 		b.CreateStore(llvmVal, llvmAddr)
+		b.deallocCheckStore(instr)
 	default:
 		b.addError(instr.Pos(), "unknown instruction: "+instr.String())
 	}
@@ -2042,6 +2061,13 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 			return b.createMoxieLt(instr), nil
 		case strings.HasPrefix(fn.Name(), "__moxie_secalloc"):
 			return b.createMoxieSecalloc(instr), nil
+		case name == "runtime.Free":
+			ptr := b.getValue(instr.Args[0], getPos(instr))
+			b.createRuntimeCall("free", []llvm.Value{ptr}, "")
+			if !b.deallocHead.IsNil() {
+				b.deallocEmitEscape(ptr)
+			}
+			return llvm.Value{}, nil
 		}
 	}
 
@@ -2213,6 +2239,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			if b.PrintAllocs != nil {
 				b.emitLogAlloc(expr.Pos())
 			}
+			b.deallocPushAlloc(buf, expr)
 			return buf, nil
 		} else {
 			buf := llvmutil.CreateEntryBlockAlloca(b.Builder, typ, expr.Comment)

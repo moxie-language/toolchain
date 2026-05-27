@@ -1,0 +1,65 @@
+package runtime
+
+// Per-function shadow list for deterministic deallocation.
+// The compiler inserts deallocPush after each heap allocation and
+// deallocFree before each return. Pointers that escape (returned,
+// stored in globals) are removed via deallocEscape.
+//
+// The shadow list is a singly-linked stack of entries. Each entry is
+// stack-allocated by the compiler (fixed size, no heap overhead).
+
+import "unsafe"
+
+// deallocEntry is a shadow-list node. The compiler stack-allocates these.
+type deallocEntry struct {
+	ptr  unsafe.Pointer
+	next *deallocEntry
+}
+
+// deallocPush registers a heap pointer in the function's shadow list.
+// If entry is already the head (same stack alloca reused in a loop body),
+// just update the pointer - previous alloc is assumed escaped via store.
+//
+//go:noinline
+func deallocPush(ptr unsafe.Pointer, head **deallocEntry, entry *deallocEntry) {
+	if *head == entry {
+		entry.ptr = ptr
+		return
+	}
+	entry.ptr = ptr
+	entry.next = *head
+	*head = entry
+}
+
+// deallocFree walks the shadow list and frees all non-escaped entries.
+//
+//go:noinline
+func deallocFree(head *deallocEntry) {
+	for head != nil {
+		if head.ptr != nil {
+			free(head.ptr)
+		}
+		head = head.next
+	}
+}
+
+// deallocEscape marks a pointer as escaped (won't be freed by deallocFree).
+// Called before returning a heap-allocated value or storing it in a global.
+//
+//go:noinline
+func deallocEscape(ptr unsafe.Pointer, head *deallocEntry) {
+	for head != nil {
+		if head.ptr == ptr {
+			head.ptr = nil
+			return
+		}
+		head = head.next
+	}
+}
+
+// Free explicitly deallocates a heap-allocated value. The pointer must
+// not be used after this call. When the dealloc GC is active, Free also
+// removes the pointer from the function's shadow list.
+func Free(ptr unsafe.Pointer) {
+	free(ptr)
+}

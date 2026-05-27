@@ -1,0 +1,250 @@
+//go:build gc.dealloc
+
+// Deterministic memory allocator with explicit free. No garbage collector.
+// Uses a free-list allocator: freed blocks are reused, no scanning.
+// Designed for WASM where GC mark-phase recursion overflows the call stack.
+
+package runtime
+
+import (
+	"internal/task"
+	"unsafe"
+)
+
+const needsStaticHeap = true
+
+var heapptr uintptr
+var gcTotalAlloc uint64
+var gcMallocs uint64
+var gcFrees uint64
+var gcLock task.PMutex
+
+// Free-list node. Stored in-place in freed blocks (minimum block size = 16 bytes).
+type freeNode struct {
+	size uintptr
+	next *freeNode
+}
+
+// Segregated free lists by size class.
+// Classes: 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, >4096
+const nSizeClasses = 10
+
+var freeLists [nSizeClasses]*freeNode
+
+// Block header prepended to every allocation. Padded to 16 bytes
+// to maintain alignment for the user-visible pointer.
+type blockHeader struct {
+	size uintptr
+	_pad uintptr
+}
+
+const headerSize = 16
+
+func sizeClass(size uintptr) int {
+	switch {
+	case size <= 16:
+		return 0
+	case size <= 32:
+		return 1
+	case size <= 64:
+		return 2
+	case size <= 128:
+		return 3
+	case size <= 256:
+		return 4
+	case size <= 512:
+		return 5
+	case size <= 1024:
+		return 6
+	case size <= 2048:
+		return 7
+	case size <= 4096:
+		return 8
+	default:
+		return 9
+	}
+}
+
+func classSize(class int) uintptr {
+	switch class {
+	case 0:
+		return 16
+	case 1:
+		return 32
+	case 2:
+		return 64
+	case 3:
+		return 128
+	case 4:
+		return 256
+	case 5:
+		return 512
+	case 6:
+		return 1024
+	case 7:
+		return 2048
+	case 8:
+		return 4096
+	default:
+		return 0 // large: exact size
+	}
+}
+
+//go:noinline
+func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
+	if size == 0 {
+		size = 1
+	}
+	gcLock.Lock()
+	size = align(size)
+	totalSize := size + uintptr(headerSize)
+	class := sizeClass(size)
+
+	// Try the free list first.
+	if class < 9 {
+		if freeLists[class] != nil {
+			node := freeLists[class]
+			freeLists[class] = node.next
+			hdr := (*blockHeader)(unsafe.Pointer(node))
+			hdr.size = size
+			ptr := unsafe.Add(unsafe.Pointer(hdr), headerSize)
+			memzero(ptr, size)
+			gcMallocs++
+			gcTotalAlloc += uint64(size)
+			gcLock.Unlock()
+			return ptr
+		}
+		totalSize = uintptr(headerSize) + classSize(class)
+	} else {
+		// Large allocation: scan large free list for best fit.
+		var prev *freeNode
+		var best *freeNode
+		var bestPrev *freeNode
+		cur := freeLists[9]
+		for cur != nil {
+			if cur.size >= totalSize {
+				if best == nil || cur.size < best.size {
+					best = cur
+					bestPrev = prev
+				}
+			}
+			prev = cur
+			cur = cur.next
+		}
+		if best != nil {
+			if bestPrev != nil {
+				bestPrev.next = best.next
+			} else {
+				freeLists[9] = best.next
+			}
+			hdr := (*blockHeader)(unsafe.Pointer(best))
+			hdr.size = size
+			ptr := unsafe.Add(unsafe.Pointer(hdr), headerSize)
+			memzero(ptr, size)
+			gcMallocs++
+			gcTotalAlloc += uint64(size)
+			gcLock.Unlock()
+			return ptr
+		}
+	}
+
+	// Bump allocate.
+	addr := heapptr
+	heapptr += totalSize
+	for heapptr >= heapEnd {
+		if growHeap() {
+			continue
+		}
+		runtimePanic("out of memory")
+	}
+	gcMallocs++
+	gcTotalAlloc += uint64(size)
+	gcLock.Unlock()
+
+	hdr := (*blockHeader)(unsafe.Pointer(addr))
+	hdr.size = size
+	ptr := unsafe.Pointer(addr + uintptr(headerSize))
+	memzero(ptr, size)
+	return ptr
+}
+
+func free(ptr unsafe.Pointer) {
+	if ptr == nil {
+		return
+	}
+	gcLock.Lock()
+	hdr := (*blockHeader)(unsafe.Add(ptr, -int(headerSize)))
+	size := hdr.size
+	totalSize := size + uintptr(headerSize)
+	class := sizeClass(size)
+	gcFrees++
+
+	node := (*freeNode)(unsafe.Pointer(hdr))
+	if class < 9 {
+		node.size = totalSize
+		node.next = freeLists[class]
+		freeLists[class] = node
+	} else {
+		node.size = totalSize
+		node.next = freeLists[9]
+		freeLists[9] = node
+	}
+	gcLock.Unlock()
+}
+
+func realloc(ptr unsafe.Pointer, size uintptr) unsafe.Pointer {
+	newAlloc := alloc(size, nil)
+	if ptr == nil {
+		return newAlloc
+	}
+	hdr := (*blockHeader)(unsafe.Add(ptr, -int(headerSize)))
+	oldSize := hdr.size
+	copySize := oldSize
+	if size < copySize {
+		copySize = size
+	}
+	memcpy(newAlloc, ptr, copySize)
+	free(ptr)
+	return newAlloc
+}
+
+func markRoots(start, end uintptr) {
+	// No GC scanning.
+}
+
+func ReadMemStats(m *MemStats) {
+	gcLock.Lock()
+	m.HeapIdle = 0
+	m.HeapInuse = gcTotalAlloc
+	m.HeapReleased = 0
+	m.HeapSys = m.HeapInuse + m.HeapIdle
+	m.GCSys = 0
+	m.TotalAlloc = gcTotalAlloc
+	m.Mallocs = gcMallocs
+	m.Frees = gcFrees
+	m.Sys = uint64(heapEnd - heapStart)
+	m.HeapAlloc = gcTotalAlloc
+	m.Alloc = m.HeapAlloc
+	gcLock.Unlock()
+}
+
+func GC() {
+	// No-op: deterministic deallocation, no collector.
+}
+
+func SetFinalizer(obj interface{}, finalizer interface{}) {
+	// No-op.
+}
+
+func initHeap() {
+	heapptr = heapStart
+}
+
+func setHeapEnd(newHeapEnd uintptr) {
+	heapEnd = newHeapEnd
+}
+
+//go:export moxie_scanstack
+func scanstack(sp uintptr) {
+	// No-op: no GC scanning.
+}

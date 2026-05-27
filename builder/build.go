@@ -183,6 +183,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		SizeLevel:       sizeLevel,
 		MoxieVersion:   goenv.Version(),
 
+		GC:                 config.GC(),
 		Scheduler:          config.Scheduler(),
 		AutomaticStackSize: false,
 		DefaultStackSize:   config.StackSize(),
