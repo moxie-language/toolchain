@@ -2,6 +2,7 @@ package builder
 
 import (
 	"fmt"
+	"go/constant"
 	"go/types"
 	"os"
 	"path/filepath"
@@ -15,17 +16,22 @@ import (
 )
 
 var (
-	bootstrapOnce        sync.Once
-	bootstrapLib         uintptr
-	bootstrapCompile     func(uintptr, int32, uintptr, int32, uintptr, int32) int32
-	bootstrapIRLen       func(int32) int32
-	bootstrapIRCopy      func(int32, uintptr, int32) int32
-	bootstrapIRFree      func(int32)
-	bootstrapRegPkg      func(uintptr, int32, uintptr, int32)
-	bootstrapRegFunc     func(uintptr, int32, uintptr, int32, uintptr, int32)
-	bootstrapRegVar      func(uintptr, int32, uintptr, int32, uintptr, int32)
-	bootstrapClearImport func()
-	bootstrapErr         error
+	bootstrapOnce           sync.Once
+	bootstrapLib            uintptr
+	bootstrapCompile        func(uintptr, int32, uintptr, int32, uintptr, int32) int32
+	bootstrapIRLen          func(int32) int32
+	bootstrapIRCopy         func(int32, uintptr, int32) int32
+	bootstrapIRFree         func(int32)
+	bootstrapRegPkg         func(uintptr, int32, uintptr, int32)
+	bootstrapRegFunc        func(uintptr, int32, uintptr, int32, uintptr, int32)
+	bootstrapRegVar         func(uintptr, int32, uintptr, int32, uintptr, int32)
+	bootstrapRegConst       func(uintptr, int32, uintptr, int32, uintptr, int32, int64)
+	bootstrapRegConstStr    func(uintptr, int32, uintptr, int32, uintptr, int32)
+	bootstrapRegIface       func(uintptr, int32, uintptr, int32, uintptr, int32)
+	bootstrapRegType        func(uintptr, int32, uintptr, int32, uintptr, int32)
+	bootstrapRegMethod      func(uintptr, int32, uintptr, int32, uintptr, int32, uintptr, int32, int32)
+	bootstrapClearImport    func()
+	bootstrapErr            error
 )
 
 func initBootstrap() {
@@ -56,6 +62,11 @@ func initBootstrap() {
 		purego.RegisterLibFunc(&bootstrapRegPkg, lib, "moxie_register_package")
 		purego.RegisterLibFunc(&bootstrapRegFunc, lib, "moxie_register_func")
 		purego.RegisterLibFunc(&bootstrapRegVar, lib, "moxie_register_var")
+		purego.RegisterLibFunc(&bootstrapRegConst, lib, "moxie_register_const")
+		purego.RegisterLibFunc(&bootstrapRegConstStr, lib, "moxie_register_const_string")
+		purego.RegisterLibFunc(&bootstrapRegIface, lib, "moxie_register_iface")
+		purego.RegisterLibFunc(&bootstrapRegType, lib, "moxie_register_type")
+		purego.RegisterLibFunc(&bootstrapRegMethod, lib, "moxie_register_method")
 		purego.RegisterLibFunc(&bootstrapClearImport, lib, "moxie_clear_imports")
 	})
 }
@@ -78,6 +89,39 @@ func bootstrapRegisterStr3(fn func(uintptr, int32, uintptr, int32, uintptr, int3
 	fn(uintptr(unsafe.Pointer(&ab[0])), int32(len(ab)),
 		uintptr(unsafe.Pointer(&bb[0])), int32(len(bb)),
 		uintptr(unsafe.Pointer(&cb[0])), int32(len(cb)))
+}
+
+func bootstrapRegisterStr4(fn func(uintptr, int32, uintptr, int32, uintptr, int32, uintptr, int32, int32), a, b, c, d string, flag int32) {
+	ab := []byte(a)
+	bb := []byte(b)
+	cb := []byte(c)
+	db := []byte(d)
+	fn(uintptr(unsafe.Pointer(&ab[0])), int32(len(ab)),
+		uintptr(unsafe.Pointer(&bb[0])), int32(len(bb)),
+		uintptr(unsafe.Pointer(&cb[0])), int32(len(cb)),
+		uintptr(unsafe.Pointer(&db[0])), int32(len(db)),
+		flag)
+}
+
+func bootstrapRegisterConst(pkgPath, name, typDesc string, val int64) {
+	ab := []byte(pkgPath)
+	bb := []byte(name)
+	cb := []byte(typDesc)
+	bootstrapRegConst(
+		uintptr(unsafe.Pointer(&ab[0])), int32(len(ab)),
+		uintptr(unsafe.Pointer(&bb[0])), int32(len(bb)),
+		uintptr(unsafe.Pointer(&cb[0])), int32(len(cb)),
+		val)
+}
+
+func bootstrapIfaceMethodsDesc(iface *types.Interface) string {
+	var parts []string
+	for i := 0; i < iface.NumMethods(); i++ {
+		m := iface.Method(i)
+		sig := m.Type().(*types.Signature)
+		parts = append(parts, m.Name()+"="+bootstrapSigDesc(sig))
+	}
+	return strings.Join(parts, ";")
 }
 
 func bootstrapTypeDesc(t types.Type) string {
@@ -115,6 +159,13 @@ func bootstrapTypeDesc(t types.Type) string {
 		return "[]" + bootstrapTypeDesc(t.Elem())
 	case *types.Pointer:
 		return "*" + bootstrapTypeDesc(t.Elem())
+	case *types.Interface:
+		if t.NumMethods() == 1 && t.Method(0).Name() == "Error" {
+			return "error"
+		}
+		return "interface{}"
+	case *types.Signature:
+		return "interface{}"
 	}
 	return "int32"
 }
@@ -161,6 +212,48 @@ func bootstrapRegisterImports(pkg *loader.Package) {
 				bootstrapRegisterStr3(bootstrapRegFunc, imp.Path(), name, bootstrapSigDesc(sig))
 			case *types.Var:
 				bootstrapRegisterStr3(bootstrapRegVar, imp.Path(), name, bootstrapTypeDesc(obj.Type()))
+			case *types.Const:
+				val := obj.Val()
+				switch val.Kind() {
+				case constant.String:
+					s := constant.StringVal(val)
+					bootstrapRegisterStr3(bootstrapRegConstStr, imp.Path(), name, s)
+				case constant.Int:
+					if v, ok := constant.Int64Val(val); ok {
+						bootstrapRegisterConst(imp.Path(), name, bootstrapTypeDesc(obj.Type()), v)
+					}
+				case constant.Float:
+					if v, ok := constant.Float64Val(val); ok {
+						bootstrapRegisterConst(imp.Path(), name, bootstrapTypeDesc(obj.Type()), int64(v))
+					}
+				case constant.Bool:
+					v := int64(0)
+					if constant.BoolVal(val) {
+						v = 1
+					}
+					bootstrapRegisterConst(imp.Path(), name, "bool", v)
+				}
+			case *types.TypeName:
+				underlying := obj.Type().Underlying()
+				if iface, ok := underlying.(*types.Interface); ok {
+					bootstrapRegisterStr3(bootstrapRegIface, imp.Path(), name, bootstrapIfaceMethodsDesc(iface))
+				} else {
+					bootstrapRegisterStr3(bootstrapRegType, imp.Path(), name, bootstrapTypeDesc(obj.Type()))
+					named, ok := obj.Type().(*types.Named)
+					if ok {
+						for i := 0; i < named.NumMethods(); i++ {
+							m := named.Method(i)
+							msig := m.Type().(*types.Signature)
+							ptrRecv := int32(0)
+							if msig.Recv() != nil {
+								if _, isPtr := msig.Recv().Type().(*types.Pointer); isPtr {
+									ptrRecv = 1
+								}
+							}
+							bootstrapRegisterStr4(bootstrapRegMethod, imp.Path(), name, m.Name(), bootstrapSigDesc(msig), ptrRecv)
+						}
+					}
+				}
 			}
 		}
 	}

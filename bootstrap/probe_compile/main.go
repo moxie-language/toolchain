@@ -347,6 +347,174 @@ func main() {
 		os.Exit(0)
 	}
 
+	// --dump-gen1 <output.ll>: concatenate all 23 compiler .mx files, compile via gen0, write IR
+	if len(os.Args) >= 4 && os.Args[2] == "--dump-gen1" {
+		outFile := os.Args[3]
+		warmup := []byte("package main\nfunc main() {}\n")
+		wpkg := []byte("main")
+		wh := compileToIR(
+			uintptr(unsafe.Pointer(&warmup[0])), int32(len(warmup)),
+			uintptr(unsafe.Pointer(&wpkg[0])), int32(len(wpkg)),
+			uintptr(unsafe.Pointer(&[]byte("x86_64-unknown-linux-musl")[0])), 25,
+		)
+		irFree(wh)
+		clearImports()
+		regPkg("go/token", "token")
+		regConst("go/token", "ILLEGAL", "int", 0)
+		regConst("go/token", "EOF", "int", 1)
+		regConst("go/token", "COMMENT", "int", 2)
+		regConst("go/token", "IDENT", "int", 4)
+		regConst("go/token", "INT", "int", 5)
+		regConst("go/token", "FLOAT", "int", 6)
+		regConst("go/token", "IMAG", "int", 7)
+		regConst("go/token", "CHAR", "int", 8)
+		regConst("go/token", "STRING", "int", 9)
+		regConst("go/token", "ADD", "int", 12)
+		regConst("go/token", "SUB", "int", 13)
+		regConst("go/token", "MUL", "int", 14)
+		regConst("go/token", "QUO", "int", 15)
+		regConst("go/token", "REM", "int", 16)
+		regConst("go/token", "AND", "int", 17)
+		regConst("go/token", "OR", "int", 18)
+		regConst("go/token", "XOR", "int", 19)
+		regConst("go/token", "SHL", "int", 20)
+		regConst("go/token", "SHR", "int", 21)
+		regConst("go/token", "AND_NOT", "int", 22)
+		regConst("go/token", "LAND", "int", 34)
+		regConst("go/token", "LOR", "int", 35)
+		regConst("go/token", "ARROW", "int", 36)
+		regConst("go/token", "INC", "int", 37)
+		regConst("go/token", "DEC", "int", 38)
+		regConst("go/token", "EQL", "int", 39)
+		regConst("go/token", "LSS", "int", 40)
+		regConst("go/token", "GTR", "int", 41)
+		regConst("go/token", "ASSIGN", "int", 42)
+		regConst("go/token", "NOT", "int", 43)
+		regConst("go/token", "NEQ", "int", 44)
+		regConst("go/token", "LEQ", "int", 45)
+		regConst("go/token", "GEQ", "int", 46)
+		regConst("go/token", "DEFINE", "int", 47)
+		regConst("go/token", "ELLIPSIS", "int", 48)
+		regConst("go/token", "DEFAULT", "int", 62)
+		regType("go/token", "Token", "int")
+		regPkg("go/constant", "constant")
+		regConst("go/constant", "Unknown", "int", 0)
+		regConst("go/constant", "Bool", "int", 1)
+		regConst("go/constant", "String", "int", 2)
+		regConst("go/constant", "Int", "int", 3)
+		regConst("go/constant", "Float", "int", 4)
+		regConst("go/constant", "Complex", "int", 5)
+		regIface("go/constant", "Value", "Kind=->int;String=->string;ExactString=->string")
+		regFn("go/constant", "MakeInt64", "int64->interface{}")
+		regFn("go/constant", "MakeFloat64", "float64->interface{}")
+		regFn("go/constant", "MakeString", "string->interface{}")
+		regFn("go/constant", "MakeFromLiteral", "string,int,int->interface{}")
+		regFn("go/constant", "BinaryOp", "interface{},int,interface{}->interface{}")
+		regFn("go/constant", "UnaryOp", "int,interface{},int->interface{}")
+		regFn("go/constant", "Compare", "interface{},int,interface{}->bool")
+		regFn("go/constant", "StringVal", "interface{}->string")
+		regFn("go/constant", "Int64Val", "interface{}->int64,bool")
+		regFn("go/constant", "Uint64Val", "interface{}->uint64,bool")
+		regFn("go/constant", "Float64Val", "interface{}->float64,bool")
+		regFn("go/constant", "BitLen", "interface{}->int")
+		regFn("go/constant", "Sign", "interface{}->int")
+		regPkg("fmt", "fmt")
+		regFn("fmt", "Sprintf", "string,interface{},interface{},interface{}->string")
+		regFn("fmt", "Fprintf", "interface{},string,interface{},interface{}->int,error")
+		regPkg("os", "os")
+		regVar("os", "Stderr", "interface{}")
+		regPkg("strconv", "strconv")
+		regFn("strconv", "Itoa", "int->string")
+		regFn("strconv", "FormatInt", "int64,int->string")
+		regFn("strconv", "FormatFloat", "float64,byte,int,int->string")
+		regFn("strconv", "ParseInt", "string,int,int->int64,error")
+		regFn("strconv", "ParseUint", "string,int,int->uint64,error")
+		regFn("strconv", "ParseFloat", "string,int->float64,error")
+		regFn("strconv", "Unquote", "string->string,error")
+		regPkg("bytes", "bytes")
+		regFn("bytes", "NewReader", "*byte->interface{}")
+		regType("bytes", "Reader", "")
+		regMethod("bytes", "Reader", "Read", "[]byte->int,error", true)
+		regFn("bytes", "IndexByte", "[]byte,byte->int")
+		regFn("bytes", "HasPrefix", "[]byte,[]byte->bool")
+		regFn("bytes", "TrimSpace", "[]byte->[]byte")
+		regFn("bytes", "Index", "[]byte,[]byte->int")
+		regFn("bytes", "LastIndexByte", "[]byte,byte->int")
+		regFn("bytes", "Trim", "[]byte,string->[]byte")
+		regPkg("io", "io")
+		regIface("io", "Reader", "Read=[]byte->int,error")
+		regVar("io", "EOF", "error")
+		regVar("io", "ErrNoProgress", "error")
+		regPkg("runtime", "runtime")
+		regFn("runtime", "InitCShared", "")
+		regPkg("unsafe", "unsafe")
+		regPkg("unicode", "unicode")
+		regType("unicode", "Tables", "")
+		regMethod("unicode", "Tables", "IsLetter", "int32->bool", true)
+		regMethod("unicode", "Tables", "IsDigit", "int32->bool", true)
+		regFn("unicode", "NewTables", "->ptr")
+		regFn("unicode", "IsLetter", "int32->bool")
+		regFn("unicode", "IsDigit", "int32->bool")
+		regFn("unicode", "IsSpace", "int32->bool")
+		regVar("unicode", "MaxRune", "int32")
+		regPkg("unicode/utf8", "utf8")
+		regFn("unicode/utf8", "DecodeRune", "[]byte->int32,int")
+		regFn("unicode/utf8", "RuneLen", "int32->int")
+		regVar("unicode/utf8", "RuneSelf", "int")
+		regVar("unicode/utf8", "UTFMax", "int")
+		regVar("unicode/utf8", "RuneError", "int32")
+		regFn("unicode/utf8", "FullRune", "[]byte->bool")
+		compileDir := filepath.Join(filepath.Dir(soPath), "compile")
+		mxFiles := []string{
+			"pos.mx", "source.mx", "tokens.mx", "nodes.mx", "syntax.mx",
+			"scanner.mx", "parser.mx",
+			"tc_scope.mx", "tc_package.mx", "tc_info.mx", "tc_object.mx",
+			"tc_types.mx", "tc_universe.mx", "tc_const.mx", "tc_resolve.mx",
+			"tc_checker.mx", "tc_decl.mx", "tc_expr.mx", "tc_stmt.mx", "tc_assign.mx",
+			"ssa_types.mx", "ssa_builder.mx", "ir_emit.mx",
+		}
+		combined, fc, tl := concatMxSources(compileDir, mxFiles)
+		exportsPath := filepath.Join(filepath.Dir(soPath), "gen1_exports.mx")
+		exportsData, eerr := os.ReadFile(exportsPath)
+		if eerr == nil {
+			lines := strings.Split(string(exportsData), "\n")
+			var body []string
+			for _, line := range lines {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "package ") {
+					continue
+				}
+				body = append(body, line)
+			}
+			combined = append(combined, []byte(strings.Join(body, "\n"))...)
+			fc++
+			tl += len(lines)
+		}
+		combined = append(combined, []byte("\nfunc main() {}\n")...)
+		fmt.Fprintf(os.Stderr, "gen1 extract: %d files, %d lines, %d bytes\n", fc, tl, len(combined))
+		triple := []byte("x86_64-unknown-linux-musl")
+		pkg := []byte("main")
+		h := compileToIR(
+			uintptr(unsafe.Pointer(&combined[0])), int32(len(combined)),
+			uintptr(unsafe.Pointer(&pkg[0])), int32(len(pkg)),
+			uintptr(unsafe.Pointer(&triple[0])), int32(len(triple)),
+		)
+		l := irLen(h)
+		if l == 0 {
+			fmt.Fprintf(os.Stderr, "FATAL: gen1 compilation produced no IR\n")
+			os.Exit(1)
+		}
+		buf := make([]byte, l)
+		irCopy(h, uintptr(unsafe.Pointer(&buf[0])), l)
+		ir := string(buf)
+		funcCount := strings.Count(ir, "\ndefine ")
+		fmt.Fprintf(os.Stderr, "gen1 IR: %d bytes, %d functions\n", len(ir), funcCount)
+		os.WriteFile(outFile, []byte(ir), 0644)
+		fmt.Fprintf(os.Stderr, "wrote %s\n", outFile)
+		irFree(h)
+		os.Exit(0)
+	}
+
 	pass := 0
 	fail := 0
 	assert := func(name string, cond bool) {

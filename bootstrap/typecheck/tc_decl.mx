@@ -4,10 +4,13 @@ package main
 // package-level names into pkg.scope. No type resolution yet - just
 // name registration so forward references work during pass 2.
 // Const groups are tracked so iota can be assigned correctly in pass 2.
+type constGroupEntry struct {
+	group *Group
+	decls []*ConstDecl
+}
+
 func (c *Checker) collectDecls(f *File) {
-	// Track const groups: group pointer -> ordered list of ConstDecls.
-	constGroups := map[*Group][]*ConstDecl{}
-	var constGroupOrder []*Group // preserve declaration order
+	var constEntries []constGroupEntry
 
 	for _, d := range f.DeclList {
 		switch d := d.(type) {
@@ -18,16 +21,21 @@ func (c *Checker) collectDecls(f *File) {
 				obj := NewTCConst(c.pkg, name.Value, nil, nil)
 				c.declare(c.pkg.scope, name, obj)
 			}
-			// Group nil means a standalone const (iota=0).
 			g := d.Group
 			if g == nil {
-				// Use a unique sentinel group for standalone consts.
 				g = &Group{}
 			}
-			if _, seen := constGroups[g]; !seen {
-				constGroupOrder = append(constGroupOrder, g)
+			found := false
+			for i := 0; i < len(constEntries); i++ {
+				if constEntries[i].group == g {
+					constEntries[i].decls = append(constEntries[i].decls, d)
+					found = true
+					break
+				}
 			}
-			constGroups[g] = append(constGroups[g], d)
+			if !found {
+				constEntries = append(constEntries, constGroupEntry{group: g, decls: []*ConstDecl{d}})
+			}
 		case *TypeDecl:
 			obj := NewTypeName(c.pkg, d.Name.Value, nil)
 			c.declare(c.pkg.scope, d.Name, obj)
@@ -38,7 +46,6 @@ func (c *Checker) collectDecls(f *File) {
 			}
 		case *FuncDecl:
 			if d.Recv == nil {
-				// init functions: multiple allowed per package, never called by name.
 				if d.Name.Value == "init" {
 					continue
 				}
@@ -48,9 +55,8 @@ func (c *Checker) collectDecls(f *File) {
 		}
 	}
 
-	// Resolve const groups now that all names are registered.
-	for _, g := range constGroupOrder {
-		c.checkConstGroup(constGroups[g])
+	for _, e := range constEntries {
+		c.checkConstGroup(e.decls)
 	}
 }
 

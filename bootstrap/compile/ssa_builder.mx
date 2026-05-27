@@ -415,14 +415,29 @@ func (fb *ssaFuncBuilder) buildBlock(b *BlockStmt) {
 	}
 	for _, s := range b.List {
 		fb.buildStmt(s)
-		if fb.currentBlock == nil {
-			return
-		}
 	}
 }
 
 func (fb *ssaFuncBuilder) buildStmt(s Stmt) {
-	if s == nil || fb.currentBlock == nil {
+	if s == nil {
+		return
+	}
+	if ls, ok := s.(*LabeledStmt); ok {
+		if ls.Label != nil {
+			fb.pendingLabel = ls.Label.Value
+			lblBlock := fb.labelBlock(ls.Label.Value)
+			if fb.currentBlock != nil {
+				fb.emit(&SSAJump{Comment: "goto.label." + ls.Label.Value})
+				fb.currentBlock.Succs = append(fb.currentBlock.Succs, lblBlock)
+				lblBlock.Preds = append(lblBlock.Preds, fb.currentBlock)
+			}
+			fb.currentBlock = lblBlock
+		}
+		fb.buildStmt(ls.Stmt)
+		fb.pendingLabel = ""
+		return
+	}
+	if fb.currentBlock == nil {
 		return
 	}
 	switch s := s.(type) {
@@ -450,19 +465,6 @@ func (fb *ssaFuncBuilder) buildStmt(s Stmt) {
 		fb.buildReturn(s)
 	case *BranchStmt:
 		fb.buildBranch(s)
-	case *LabeledStmt:
-		if s.Label != nil {
-			fb.pendingLabel = s.Label.Value
-			lblBlock := fb.labelBlock(s.Label.Value)
-			if fb.currentBlock != nil {
-				fb.emit(&SSAJump{Comment: "goto.label." + s.Label.Value})
-				fb.currentBlock.Succs = append(fb.currentBlock.Succs, lblBlock)
-				lblBlock.Preds = append(lblBlock.Preds, fb.currentBlock)
-			}
-			fb.currentBlock = lblBlock
-		}
-		fb.buildStmt(s.Stmt)
-		fb.pendingLabel = ""
 	case *SendStmt:
 		ch := fb.buildExpr(s.Chan)
 		val := fb.buildExpr(s.Value)
@@ -613,8 +615,14 @@ func (fb *ssaFuncBuilder) coerceToInterface(val SSAValue, targetType Type) SSAVa
 }
 
 func (fb *ssaFuncBuilder) buildStore(lhs Expr, val SSAValue) {
+	if lhs == nil {
+		panic("buildStore: nil lhs")
+	}
 	switch lhs := lhs.(type) {
 	case *Name:
+		if lhs == nil {
+			panic("buildStore: nil *Name after type switch")
+		}
 		if lhs.Value == "_" {
 			return
 		}
@@ -686,6 +694,9 @@ func (fb *ssaFuncBuilder) buildStore(lhs Expr, val SSAValue) {
 				ia.typ = NewPointer(ssaElemType(base.SSAType()))
 				ia.name = fb.nextName()
 				fb.emit(ia)
+				if p, ok2 := ia.SSAType().(*Pointer); ok2 && p.Elem() != nil {
+					val = fb.coerceToInterface(val, p.Elem())
+				}
 				fb.emitStore(ia, val)
 				return
 			}
@@ -694,6 +705,9 @@ func (fb *ssaFuncBuilder) buildStore(lhs Expr, val SSAValue) {
 		ia.typ = NewPointer(ssaElemType(base.SSAType()))
 		ia.name = fb.nextName()
 		fb.emit(ia)
+		if p, ok2 := ia.SSAType().(*Pointer); ok2 && p.Elem() != nil {
+			val = fb.coerceToInterface(val, p.Elem())
+		}
 		fb.emitStore(ia, val)
 	case *ListExpr:
 		for i, e := range lhs.ElemList {
@@ -897,14 +911,22 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d Decl) {
 }
 
 func (fb *ssaFuncBuilder) buildIf(s *IfStmt) {
+	var savedVars map[Object]*SSAAlloc
 	if s.Init != nil {
+		savedVars = fb.saveVars()
 		fb.buildStmt(s.Init)
 	}
 	if fb.currentBlock == nil {
+		if savedVars != nil {
+			fb.vars = savedVars
+		}
 		return
 	}
 	cond := fb.buildExpr(s.Cond)
 	if cond == nil {
+		if savedVars != nil {
+			fb.vars = savedVars
+		}
 		return
 	}
 
@@ -942,14 +964,19 @@ func (fb *ssaFuncBuilder) buildIf(s *IfStmt) {
 	}
 
 	fb.currentBlock = doneBlock
+	if savedVars != nil {
+		fb.vars = savedVars
+	}
 }
 
 func (fb *ssaFuncBuilder) buildFor(s *ForStmt) {
+	var savedVars map[Object]*SSAAlloc
 	if s.Init != nil {
 		if rc, ok := s.Init.(*RangeClause); ok {
 			fb.buildRangeLoop(s, rc)
 			return
 		}
+		savedVars = fb.saveVars()
 		fb.buildStmt(s.Init)
 	}
 
@@ -1000,6 +1027,9 @@ func (fb *ssaFuncBuilder) buildFor(s *ForStmt) {
 
 	fb.loops = fb.loops[:len(fb.loops)-1]
 	fb.currentBlock = doneBlock
+	if savedVars != nil {
+		fb.vars = savedVars
+	}
 }
 
 func (fb *ssaFuncBuilder) buildRangeLoop(s *ForStmt, rc *RangeClause) {
@@ -1016,10 +1046,10 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *ForStmt, rc *RangeClause) {
 	bodyBlock := fb.newBlock("range.body")
 	doneBlock := fb.newBlock("range.done")
 
-	fb.loops = append(fb.loops, ssaLoopState{label: fb.pendingLabel, body: bodyBlock, done: doneBlock})
-	fb.pendingLabel = ""
-
 	condBlock := fb.newBlock("range.cond")
+
+	fb.loops = append(fb.loops, ssaLoopState{label: fb.pendingLabel, body: bodyBlock, post: condBlock, done: doneBlock})
+	fb.pendingLabel = ""
 	fb.emit(&SSAJump{Comment: "range.cond"})
 	fb.currentBlock.Succs = append(fb.currentBlock.Succs, condBlock)
 	condBlock.Preds = append(condBlock.Preds, fb.currentBlock)
@@ -1090,10 +1120,15 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *ForStmt, rc *RangeClause) {
 }
 
 func (fb *ssaFuncBuilder) buildSwitch(s *SwitchStmt) {
+	var savedVars map[Object]*SSAAlloc
 	if s.Init != nil {
+		savedVars = fb.saveVars()
 		fb.buildStmt(s.Init)
 	}
 	if fb.currentBlock == nil {
+		if savedVars != nil {
+			fb.vars = savedVars
+		}
 		return
 	}
 
@@ -1107,6 +1142,9 @@ func (fb *ssaFuncBuilder) buildSwitch(s *SwitchStmt) {
 			fb.buildTypeSwitch(s, tsg, doneBlock)
 			fb.loops = savedLoops
 			fb.currentBlock = doneBlock
+			if savedVars != nil {
+				fb.vars = savedVars
+			}
 			return
 		}
 	}
@@ -1181,6 +1219,9 @@ func (fb *ssaFuncBuilder) buildSwitch(s *SwitchStmt) {
 
 	fb.loops = savedLoops
 	fb.currentBlock = doneBlock
+	if savedVars != nil {
+		fb.vars = savedVars
+	}
 }
 
 func (fb *ssaFuncBuilder) buildTypeSwitch(s *SwitchStmt, tsg *TypeSwitchGuard, doneBlock *SSABasicBlock) {
@@ -1765,7 +1806,9 @@ func (fb *ssaFuncBuilder) buildCall(e *CallExpr) SSAValue {
 				}
 				allArgs := []SSAValue{:0:len(args) + 1}
 				allArgs = append(allArgs, fixedRecv)
-				allArgs = append(allArgs, args...)
+				for _, ma := range args {
+					allArgs = append(allArgs, ma)
+				}
 				var retType Type
 				if fn.Signature != nil {
 					if fn.Signature.Results() != nil && fn.Signature.Results().Len() == 1 {
@@ -2200,11 +2243,17 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *SelectorExpr) SSAValue {
 			return nil
 		}
 		ia := &SSAIndexAddr{X: x, Index: idx}
-		ia.typ = NewPointer(ssaElemType(x.SSAType()))
+		elemT := ssaElemType(x.SSAType())
+		ia.typ = NewPointer(elemT)
 		ia.name = fb.nextName()
 		fb.emit(ia)
 		addr = ia
-		structType = ssaElemType(x.SSAType())
+		structType = elemT
+		if _, isPtr := safeUnderlying(elemT).(*Pointer); isPtr {
+			ld := fb.emitLoad(ia, elemT)
+			addr = ld
+			structType = elemT
+		}
 	} else {
 		x := fb.buildExpr(e.X)
 		if x == nil || x.SSAType() == nil {
@@ -2242,18 +2291,19 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *SelectorExpr) SSAValue {
 		fb.emit(fa)
 		return fa
 	}
-	embedIdx, innerIdx := fb.findEmbeddedField(structType, e.Sel.Value)
-	if embedIdx >= 0 {
-		embedAddr := &SSAFieldAddr{X: addr, Field: embedIdx}
-		embedAddr.typ = NewPointer(fb.fieldType(structType, embedIdx))
-		embedAddr.name = fb.nextName()
-		fb.emit(embedAddr)
-		embedType := fb.fieldType(structType, embedIdx)
-		innerFA := &SSAFieldAddr{X: embedAddr, Field: innerIdx}
-		innerFA.typ = NewPointer(fb.fieldType(embedType, innerIdx))
-		innerFA.name = fb.nextName()
-		fb.emit(innerFA)
-		return innerFA
+	path := fb.findEmbeddedFieldPath(structType, e.Sel.Value)
+	if len(path) >= 2 {
+		cur := addr
+		curType := structType
+		for _, idx := range path {
+			fa := &SSAFieldAddr{X: cur, Field: idx}
+			fa.typ = NewPointer(fb.fieldType(curType, idx))
+			fa.name = fb.nextName()
+			fb.emit(fa)
+			curType = fb.fieldType(curType, idx)
+			cur = fa
+		}
+		return cur
 	}
 	return nil
 }
@@ -2553,6 +2603,14 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *FuncLit) SSAValue {
 	mc.name = fb.nextName()
 	fb.emit(mc)
 	return mc
+}
+
+func (fb *ssaFuncBuilder) saveVars() map[Object]*SSAAlloc {
+	saved := map[Object]*SSAAlloc{}
+	for k, v := range fb.vars {
+		saved[k] = v
+	}
+	return saved
 }
 
 func (fb *ssaFuncBuilder) removeVar(name string) {
@@ -3060,15 +3118,23 @@ func (fb *ssaFuncBuilder) fieldIndex(t Type, name string) int {
 }
 
 func (fb *ssaFuncBuilder) findEmbeddedField(t Type, name string) (embedIdx int, innerIdx int) {
-	if t == nil {
+	path := fb.findEmbeddedFieldPath(t, name)
+	if len(path) < 2 {
 		return -1, -1
+	}
+	return path[0], path[1]
+}
+
+func (fb *ssaFuncBuilder) findEmbeddedFieldPath(t Type, name string) []int {
+	if t == nil {
+		return nil
 	}
 	if pt, ok := safeUnderlying(t).(*Pointer); ok {
 		t = pt.Elem()
 	}
 	st, ok := safeUnderlying(t).(*TCStruct)
 	if !ok {
-		return -1, -1
+		return nil
 	}
 	for i := 0; i < st.NumFields(); i++ {
 		f := st.Field(i)
@@ -3081,10 +3147,14 @@ func (fb *ssaFuncBuilder) findEmbeddedField(t Type, name string) (embedIdx int, 
 		}
 		inner := fb.fieldIndex(embedType, name)
 		if inner >= 0 {
-			return i, inner
+			return []int{i, inner}
+		}
+		sub := fb.findEmbeddedFieldPath(embedType, name)
+		if len(sub) > 0 {
+			return append([]int{i}, sub...)
 		}
 	}
-	return -1, -1
+	return nil
 }
 
 func (fb *ssaFuncBuilder) fieldType(t Type, idx int) Type {
