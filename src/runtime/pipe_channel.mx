@@ -262,17 +262,29 @@ func MarkChildPipeChannel(ch *channel, chanID uint16) {
 		return
 	}
 	MarkChannelPipeBound(ch, ChildPipeFd, chanID)
+	// Bind ring buffers (child reverses send/recv vs parent).
+	idx := int32(chanID) - 1
+	if idx >= 0 && idx < spawnRingCount {
+		ch.ringRecv = spawnRingSet[idx][0] // parent→child = child receives
+		ch.ringSend = spawnRingSet[idx][1] // child→parent = child sends
+	}
 }
 
 // MarkParentPipeChannel binds ch to the most recently spawned child's
 // parent fd at chanID. Emitted by createSpawn after spawnDomain returns.
-// No-op if no spawn has occurred (defensive — should not happen).
+// No-op if no spawn has occurred (defensive - should not happen).
 func MarkParentPipeChannel(ch *channel, chanID uint16) {
 	fd := LastSpawnedParentFd()
 	if fd < 0 {
 		return
 	}
 	MarkChannelPipeBound(ch, fd, chanID)
+	// Bind ring buffers (parent perspective).
+	idx := int32(chanID) - 1
+	if idx >= 0 && idx < spawnRingCount {
+		ch.ringSend = spawnRingSet[idx][0] // parent→child = parent sends
+		ch.ringRecv = spawnRingSet[idx][1] // child→parent = parent receives
+	}
 }
 
 // channelIsPipeBound reports whether the channel is on a spawn-boundary
@@ -323,16 +335,27 @@ func pipeIncomingPop(fd int32, chanID uint16) ([]byte, bool) {
 }
 
 // PipeChanSend is the runtime entry the compiler emits in place of the
-// in-runtime queue send for pipe-bound channels. Retries indefinitely
-// with 1ms yield on buffer-full. Returns false only on pipe closed.
+// in-runtime queue send for pipe-bound channels. Uses ring buffer when
+// available, falling back to socketpair pipe. Retries indefinitely
+// with 1ms yield on buffer-full/backpressure. Returns false on closed.
 func PipeChanSend(ch *channel, encoded []byte) bool {
 	if ch == nil || ch.pipeBoundFd == 0 {
 		return false
 	}
+	useRing := ch.ringSend != 0 && ringFits(ch.ringSend, len(encoded))
 	ticks := int32(0)
 	for {
-		if pipeSendNB(ch.pipeBoundFd, ch.pipeChanID, encoded) {
-			return true
+		if useRing {
+			if ringIsClosed(ch.ringSend) {
+				return false
+			}
+			if ringSend(ch.ringSend, encoded) {
+				return true
+			}
+		} else {
+			if pipeSendNB(ch.pipeBoundFd, ch.pipeChanID, encoded) {
+				return true
+			}
 		}
 		if PipeClosed(ch.pipeBoundFd) {
 			pipeBridgeOnClose(ch.pipeBoundFd)
@@ -347,15 +370,71 @@ func PipeChanSend(ch *channel, encoded []byte) bool {
 }
 
 // PipeChanRecv is the runtime entry the compiler emits in place of the
-// in-runtime queue recv for pipe-bound channels. Non-blocking with
-// Blocking receive on a pipe channel. Peeks for data, yields 1ms if
-// none, retries indefinitely until data arrives or the pipe closes.
-// Drains sibling frames into pipeIncomingByChan.
-// Returns (encoded_bytes, ok). ok=false means pipe closed.
+// in-runtime queue recv for pipe-bound channels. Uses ring buffer when
+// available, falling back to socketpair pipe. Retries with 1ms yield
+// until data arrives or the channel closes.
+// Returns (encoded_bytes, ok). ok=false means closed.
 func PipeChanRecv(ch *channel) ([]byte, bool) {
 	if ch == nil || ch.pipeBoundFd == 0 {
 		return nil, false
 	}
+	// Ring buffer path: poll ring first, then check pipe for both
+	// data (oversized messages that didn't fit the ring) and control.
+	if ch.ringRecv != 0 {
+		ticks := int32(0)
+		for {
+			data, ok := ringRecv(ch.ringRecv)
+			if ok {
+				return data, true
+			}
+			if ringIsClosed(ch.ringRecv) {
+				return nil, false
+			}
+			// Check pipe for data and control messages.
+			if pdata, pok := pipeIncomingPop(ch.pipeBoundFd, ch.pipeChanID); pok {
+				return pdata, true
+			}
+			var probe [1]byte
+			n := moxie_peek(ch.pipeBoundFd, unsafe.Pointer(&probe[0]), 1)
+			if n == 0 {
+				ringClose(ch.ringRecv)
+				pipeBridgeOnClose(ch.pipeBoundFd)
+				if ChildPipeFd >= 0 {
+					exit(0)
+				}
+				return nil, false
+			}
+			if n > 0 {
+				chanID, pdata, pok := pipeRead(ch.pipeBoundFd)
+				if !pok {
+					ringClose(ch.ringRecv)
+					pipeBridgeOnClose(ch.pipeBoundFd)
+					if ChildPipeFd >= 0 {
+						exit(0)
+					}
+					return nil, false
+				}
+				if chanID == 0 && len(pdata) >= 3 && pdata[0] == pipeCtrlClose {
+					closedID := uint16(pdata[1])<<8 | uint16(pdata[2])
+					if closedID == ch.pipeChanID {
+						ringClose(ch.ringRecv)
+						return nil, false
+					}
+					_pipeChanClosed()[pipeBoundKey(ch.pipeBoundFd, closedID)] = true
+				} else if chanID == ch.pipeChanID {
+					return pdata, true
+				} else {
+					pipeIncomingPush(ch.pipeBoundFd, chanID, pdata)
+				}
+			}
+			ticks++
+			if ticks == 3000 {
+				println("ring: recv stalled 3s chan=", ch.pipeChanID)
+			}
+			sleepTicks(nanosecondsToTicks(1_000_000))
+		}
+	}
+	// Pipe fallback path.
 	if data, ok := pipeIncomingPop(ch.pipeBoundFd, ch.pipeChanID); ok {
 		return data, true
 	}
@@ -551,6 +630,9 @@ func (ch *channel) tryPipeSend(value unsafe.Pointer) bool {
 	if sz > 0 {
 		data = unsafe.Slice((*byte)(value), sz)
 	}
+	if ch.ringSend != 0 {
+		return ringSend(ch.ringSend, data)
+	}
 	return pipeSendNB(ch.pipeBoundFd, ch.pipeChanID, data)
 }
 
@@ -614,7 +696,24 @@ func moxie_send_nb(fd int32, buf unsafe.Pointer, count int32) int32
 //   (true, false) : channel closed (EOF or close marker for our chanID)
 //   (false, _)    : no data right now, would block; caller should retry
 func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
-	// Sibling-frame buffered from a previous drain?
+	// Ring buffer path.
+	if ch.ringRecv != 0 {
+		data, rok := ringRecv(ch.ringRecv)
+		if rok {
+			if uintptr(len(data)) == ch.elementSize {
+				memcpy(value, unsafe.Pointer(&data[0]), ch.elementSize)
+			} else {
+				memzero(value, ch.elementSize)
+			}
+			return true, true
+		}
+		if ringIsClosed(ch.ringRecv) {
+			memzero(value, ch.elementSize)
+			return true, false
+		}
+		return false, false
+	}
+	// Pipe fallback path.
 	if data, hit := pipeIncomingPop(ch.pipeBoundFd, ch.pipeChanID); hit {
 		if uintptr(len(data)) == ch.elementSize {
 			memcpy(value, unsafe.Pointer(&data[0]), ch.elementSize)
@@ -623,16 +722,13 @@ func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
 		}
 		return true, true
 	}
-	// Sibling-marked close from earlier traffic.
 	if _pipeChanClosed()[pipeBoundKey(ch.pipeBoundFd, ch.pipeChanID)] {
 		memzero(value, ch.elementSize)
 		return true, false
 	}
-	// Non-blocking peek: any byte on the wire?
 	var probe [1]byte
 	n := moxie_peek(ch.pipeBoundFd, unsafe.Pointer(&probe[0]), 1)
 	if n == 0 {
-		// Remote closed the pipe entirely.
 		pipeBridgeOnClose(ch.pipeBoundFd)
 		if ChildPipeFd >= 0 {
 			exit(0)
@@ -641,10 +737,8 @@ func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
 		return true, false
 	}
 	if n < 0 {
-		// EAGAIN — no data right now.
 		return false, false
 	}
-	// Data is available: drain one frame.
 	chanID, data, frameOk := pipeRead(ch.pipeBoundFd)
 	if !frameOk {
 		pipeBridgeOnClose(ch.pipeBoundFd)
@@ -655,7 +749,6 @@ func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
 		return true, false
 	}
 	if chanID == 0 {
-		// Control frame.
 		if len(data) >= 3 && data[0] == pipeCtrlClose {
 			closedID := uint16(data[1])<<8 | uint16(data[2])
 			if closedID == ch.pipeChanID {
@@ -674,7 +767,6 @@ func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
 		}
 		return true, true
 	}
-	// Sibling chanID — buffer for the right channel's next op.
 	pipeIncomingPush(ch.pipeBoundFd, chanID, data)
 	return false, false
 }

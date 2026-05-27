@@ -43,5 +43,6 @@ fi
 
 export GOROOT="$MOXIE_GOROOT"
 export GOWORK=off
+export GOTOOLCHAIN=local
 
-exec go build -mod=vendor -tags "purego" -o moxie-purego "$@" .
+exec "$MOXIE_GOROOT/bin/go" build -mod=vendor -tags "purego" -o moxie-purego "$@" .

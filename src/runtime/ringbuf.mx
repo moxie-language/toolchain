@@ -1,0 +1,218 @@
+//go:build linux
+
+package runtime
+
+import "unsafe"
+
+// SPSC ring buffer for lock-free cross-domain channel IPC.
+// Allocated via mmap(MAP_SHARED) so the buffer survives fork and both
+// parent and child access the same physical memory. One ring per
+// channel direction - no multiplexing, no chanID headers.
+//
+// Layout: 16-byte header followed by data[size] bytes.
+//   [0:4]   writeIdx - monotonically increasing, producer-written
+//   [4:8]   readIdx  - monotonically increasing, consumer-written
+//   [8:12]  size     - data area size (power of 2)
+//   [12:16] closed   - 0=open, 1=closed
+//   [16:]   data
+//
+// Messages: [len:4][payload:len][pad to align 8].
+// Indices wrap via mask (size-1). Both sides use atomic load/store
+// for cross-process visibility.
+
+const (
+	ringHeaderSize  = 16
+	ringDefaultSize = 1 << 16 // 64KB data area
+	flag_MAP_SHARED = 0x1
+)
+
+type ringBuf struct {
+	writeIdx uint32
+	readIdx  uint32
+	size     uint32
+	closed   uint32
+}
+
+func ringCreate(dataSize uint32) uintptr {
+	total := uintptr(ringHeaderSize) + uintptr(dataSize)
+	p := mmap(nil, total, flag_PROT_READ|flag_PROT_WRITE,
+		flag_MAP_SHARED|flag_MAP_ANONYMOUS, -1, 0)
+	if uintptr(p) == 0 || uintptr(p) == ^uintptr(0) {
+		return 0
+	}
+	hdr := (*ringBuf)(p)
+	hdr.writeIdx = 0
+	hdr.readIdx = 0
+	hdr.size = dataSize
+	hdr.closed = 0
+	return uintptr(p)
+}
+
+func ringDestroy(ring uintptr) {
+	if ring == 0 {
+		return
+	}
+	hdr := (*ringBuf)(unsafe.Pointer(ring))
+	total := uintptr(ringHeaderSize) + uintptr(hdr.size)
+	munmap(unsafe.Pointer(ring), total)
+}
+
+func ringDataPtr(ring uintptr) unsafe.Pointer {
+	return unsafe.Pointer(ring + ringHeaderSize)
+}
+
+func ringAvail(ring uintptr) uint32 {
+	hdr := (*ringBuf)(unsafe.Pointer(ring))
+	w := atomicLoadU32(&hdr.writeIdx)
+	r := atomicLoadU32(&hdr.readIdx)
+	return w - r
+}
+
+func ringSpace(ring uintptr) uint32 {
+	hdr := (*ringBuf)(unsafe.Pointer(ring))
+	w := atomicLoadU32(&hdr.writeIdx)
+	r := atomicLoadU32(&hdr.readIdx)
+	return hdr.size - (w - r)
+}
+
+func ringIsClosed(ring uintptr) bool {
+	hdr := (*ringBuf)(unsafe.Pointer(ring))
+	return atomicLoadU32(&hdr.closed) != 0
+}
+
+func ringClose(ring uintptr) {
+	hdr := (*ringBuf)(unsafe.Pointer(ring))
+	atomicStoreU32(&hdr.closed, 1)
+}
+
+func ringAlign8(n uint32) uint32 {
+	return (n + 7) &^ 7
+}
+
+// ringWrite copies src[0:n] into the ring at offset pos, handling wrap.
+func ringWrite(ring uintptr, pos, n uint32, src unsafe.Pointer) {
+	hdr := (*ringBuf)(unsafe.Pointer(ring))
+	data := ringDataPtr(ring)
+	mask := hdr.size - 1
+	start := pos & mask
+	if start+n <= hdr.size {
+		memcpy(unsafe.Add(data, uintptr(start)), src, uintptr(n))
+	} else {
+		first := hdr.size - start
+		memcpy(unsafe.Add(data, uintptr(start)), src, uintptr(first))
+		memcpy(data, unsafe.Add(src, uintptr(first)), uintptr(n-first))
+	}
+}
+
+// ringRead copies n bytes from the ring at offset pos into dst, handling wrap.
+func ringRead(ring uintptr, pos, n uint32, dst unsafe.Pointer) {
+	hdr := (*ringBuf)(unsafe.Pointer(ring))
+	data := ringDataPtr(ring)
+	mask := hdr.size - 1
+	start := pos & mask
+	if start+n <= hdr.size {
+		memcpy(dst, unsafe.Add(data, uintptr(start)), uintptr(n))
+	} else {
+		first := hdr.size - start
+		memcpy(dst, unsafe.Add(data, uintptr(start)), uintptr(first))
+		memcpy(unsafe.Add(dst, uintptr(first)), data, uintptr(n-first))
+	}
+}
+
+// ringFits returns true if payload could ever fit in this ring buffer.
+func ringFits(ring uintptr, payloadLen int) bool {
+	if ring == 0 {
+		return false
+	}
+	hdr := (*ringBuf)(unsafe.Pointer(ring))
+	return ringAlign8(4+uint32(payloadLen)) <= hdr.size
+}
+
+// ringSend writes a length-prefixed message to the ring. Returns false
+// if the ring is full (backpressure) or closed.
+func ringSend(ring uintptr, payload []byte) bool {
+	if ring == 0 || ringIsClosed(ring) {
+		return false
+	}
+	hdr := (*ringBuf)(unsafe.Pointer(ring))
+	msgLen := uint32(len(payload))
+	total := ringAlign8(4 + msgLen)
+	if total > hdr.size {
+		return false
+	}
+	if ringSpace(ring) < total {
+		return false
+	}
+	w := atomicLoadU32(&hdr.writeIdx)
+	// Write length prefix.
+	var lenBuf [4]byte
+	lenBuf[0] = byte(msgLen >> 24)
+	lenBuf[1] = byte(msgLen >> 16)
+	lenBuf[2] = byte(msgLen >> 8)
+	lenBuf[3] = byte(msgLen)
+	ringWrite(ring, w, 4, unsafe.Pointer(&lenBuf[0]))
+	// Write payload.
+	if msgLen > 0 {
+		ringWrite(ring, w+4, msgLen, unsafe.Pointer(&payload[0]))
+	}
+	// Publish: advance writeIdx with release semantics.
+	atomicStoreU32(&hdr.writeIdx, w+total)
+	return true
+}
+
+// ringRecv reads one length-prefixed message from the ring. Returns
+// (data, true) on success, (nil, false) if empty or closed.
+func ringRecv(ring uintptr) ([]byte, bool) {
+	if ring == 0 {
+		return nil, false
+	}
+	hdr := (*ringBuf)(unsafe.Pointer(ring))
+	if ringAvail(ring) < 4 {
+		if ringIsClosed(ring) {
+			return nil, false
+		}
+		return nil, false
+	}
+	r := atomicLoadU32(&hdr.readIdx)
+	// Read length prefix.
+	var lenBuf [4]byte
+	ringRead(ring, r, 4, unsafe.Pointer(&lenBuf[0]))
+	msgLen := uint32(lenBuf[0])<<24 | uint32(lenBuf[1])<<16 | uint32(lenBuf[2])<<8 | uint32(lenBuf[3])
+	total := ringAlign8(4 + msgLen)
+	if ringAvail(ring) < total {
+		return nil, false
+	}
+	var data []byte
+	if msgLen > 0 {
+		data = make([]byte, msgLen)
+		ringRead(ring, r+4, msgLen, unsafe.Pointer(&data[0]))
+	}
+	// Consume: advance readIdx with release semantics.
+	atomicStoreU32(&hdr.readIdx, r+total)
+	return data, true
+}
+
+// Atomic operations - use C builtins for cross-process visibility.
+// On x86_64 regular aligned loads/stores are atomic but we use explicit
+// atomics for ARM64 correctness and to prevent compiler reordering.
+
+//go:noinline
+func atomicLoadU32(p *uint32) uint32 {
+	return moxie_atomic_load_u32(p)
+}
+
+//go:noinline
+func atomicStoreU32(p *uint32, val uint32) {
+	moxie_atomic_store_u32(p, val)
+}
+
+//export moxie_atomic_load_u32
+func moxie_atomic_load_u32(p *uint32) uint32
+
+//export moxie_atomic_store_u32
+func moxie_atomic_store_u32(p *uint32, val uint32)
+
+// spawnRingSet holds ring buffer pairs for the most recent spawn call.
+// Set before fork, inherited by child. Each pair: [0]=parent→child, [1]=child→parent.
+var spawnRingSet [16][2]uintptr
+var spawnRingCount int32

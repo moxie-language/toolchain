@@ -56,8 +56,9 @@ fi
 # Build.
 export GOROOT="$MOXIE_GOROOT"
 export GOWORK=off
+export GOTOOLCHAIN=local
 export CGO_CPPFLAGS="-I${LLVM_PREFIX}/include -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS"
 export CGO_CFLAGS="-I${LLVM_PREFIX}/include"
 export CGO_LDFLAGS="-L${LLVM_PREFIX}/lib -lLLVM-19 -lclang"
 
-exec go build -mod=vendor -tags llvm19 -o moxie "$@" .
+exec "$MOXIE_GOROOT/bin/go" build -mod=vendor -tags llvm19 -o moxie "$@" .

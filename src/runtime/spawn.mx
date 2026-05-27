@@ -20,8 +20,16 @@ import "unsafe"
 // for the lockdown fd. Spawn does not fail just because the lockdown
 // channel could not be created — the program is still functional, only
 // observability is degraded.
-func spawnDomain(fn uintptr, args unsafe.Pointer) {
-	// Create a socketpair for IPC between parent and child.
+func spawnDomain(fn uintptr, args unsafe.Pointer, nChans int32) {
+	// Create ring buffer pairs for each channel before fork.
+	// mmap(MAP_SHARED) so both processes share the same physical memory.
+	spawnRingCount = nChans
+	for i := int32(0); i < nChans && i < 16; i++ {
+		spawnRingSet[i][0] = ringCreate(ringDefaultSize) // parent→child
+		spawnRingSet[i][1] = ringCreate(ringDefaultSize) // child→parent
+	}
+
+	// Create a socketpair for control messages and lifecycle detection.
 	var fds [2]int32
 	r := moxie_socketpair(1, 1, 0, unsafe.Pointer(&fds[0])) // AF_UNIX=1, SOCK_STREAM=1
 	if r < 0 {

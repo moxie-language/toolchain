@@ -2071,6 +2071,12 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 		}
 	}
 
+	// Dispatch spawn before processing args - spawn validates its own args
+	// and some arg types (untyped nil to interface) can't be lowered generically.
+	if call, ok := instr.Value.(*ssa.Builtin); ok && call.Name() == "spawn" {
+		return b.createSpawn(instr)
+	}
+
 	var params []llvm.Value
 	for _, param := range instr.Args {
 		params = append(params, b.getValue(param, getPos(instr)))
@@ -2107,9 +2113,6 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 		}
 		exported = info.exported || strings.HasPrefix(info.linkName, "llvm.")
 	} else if call, ok := instr.Value.(*ssa.Builtin); ok {
-		if call.Name() == "spawn" {
-			return b.createSpawn(instr)
-		}
 		// Builtin function (append, close, delete, etc.).)
 		var argTypes []types.Type
 		for _, arg := range instr.Args {
@@ -3180,6 +3183,9 @@ func (b *builder) createBinOp(op token.Token, typ, ytyp types.Type, x, y llvm.Va
 func (c *compilerContext) createConst(expr *ssa.Const, pos token.Pos) llvm.Value {
 	switch typ := expr.Type().Underlying().(type) {
 	case *types.Basic:
+		if typ.Kind() == types.UntypedNil {
+			return llvm.ConstNull(c.dataPtrType)
+		}
 		llvmType := c.getLLVMType(typ)
 		if typ.Info()&types.IsBoolean != 0 {
 			n := uint64(0)

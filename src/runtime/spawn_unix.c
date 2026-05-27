@@ -312,3 +312,15 @@ int moxie_exec_binary(const char *path, int ipc_fd) {
 void moxie_spawn_call(void (*fn)(void *), void *args) {
     fn(args);
 }
+
+// Atomic operations for SPSC ring buffer (cross-process via MAP_SHARED).
+// Acquire/release semantics ensure visibility across fork'd processes.
+#include <stdint.h>
+
+uint32_t moxie_atomic_load_u32(volatile uint32_t *p) {
+    return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+}
+
+void moxie_atomic_store_u32(volatile uint32_t *p, uint32_t val) {
+    __atomic_store_n(p, val, __ATOMIC_RELEASE);
+}

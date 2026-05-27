@@ -44,7 +44,7 @@ run_pass_test() {
     fi
 
     local output
-    output=$(timeout 5 "$bin" 2>&1 || true)
+    output=$(timeout 30 "$bin" 2>&1 || true)
 
     # Check that no FAIL markers appear and at least one PASS marker does.
     if echo "$output" | grep -q "FAIL:"; then

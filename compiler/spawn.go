@@ -180,9 +180,10 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	// Create a goroutine-style wrapper that unpacks args and calls the function.
 	wrapper := b.createGoroutineStartWrapper(funcType, funcPtr, "spawn", false, false, instr.Pos())
 
-	// Call runtime.spawnDomain(wrapper, paramBundle).
+	// Call runtime.spawnDomain(wrapper, paramBundle, nChans).
+	nChans := llvm.ConstInt(b.ctx.Int32Type(), uint64(len(chanArgs)), false)
 	spawnFnType, spawnFn := b.getFunction(b.program.ImportedPackage("runtime").Members["spawnDomain"].(*ssa.Function))
-	b.createCall(spawnFnType, spawnFn, []llvm.Value{wrapper, paramBundle, llvm.Undef(b.dataPtrType)}, "")
+	b.createCall(spawnFnType, spawnFn, []llvm.Value{wrapper, paramBundle, nChans, llvm.Undef(b.dataPtrType)}, "")
 
 	// Mark every channel arg pipe-bound on the parent side. The child's
 	// setupNativeSpawnTargetChannels does the symmetric mark with ChildPipeFd.
@@ -214,22 +215,20 @@ func validateSpawnArg(t types.Type, argIndex int, codec *types.Interface) error 
 
 // validateSpawnElem rejects types that can't be serialized across a spawn
 // boundary. Named types that implement moxie.Codec are accepted immediately.
-// Channels are rejected here — they're only allowed at the top level.
+// Channels are rejected here - they're only allowed at the top level.
 // codec is non-nil (createSpawn enforces moxie.Codec availability before call).
 func validateSpawnElem(t types.Type, argIndex int, codec *types.Interface) error {
-	// Named type that implements Codec — accept directly.
-	// This handles moxie.Int32, moxie.Bytes, user structs with Codec methods, etc.
 	if loader.ImplementsCodecIface(t, codec) {
 		return nil
 	}
 
 	switch ut := t.Underlying().(type) {
+	case *types.Basic:
+		if isSpawnSafeBasic(ut) {
+			return nil
+		}
+		return fmt.Errorf("spawn: argument %d type %s is not spawn-safe", argIndex+1, t)
 	case *types.Pointer:
-		// A pointer that itself implements Codec is acceptable: the codec
-		// handles the contents, the receiver gets a fresh allocation. This
-		// is copy-not-alias semantics — distinct from sharing memory across
-		// the boundary, which is impossible by construction (no shared address
-		// space across fork or workers).
 		if loader.ImplementsCodecIface(t, codec) {
 			return nil
 		}
@@ -258,8 +257,21 @@ func validateSpawnElem(t types.Type, argIndex int, codec *types.Interface) error
 		return validateSpawnElem(ut.Elem(), argIndex, codec)
 	}
 
-	// Leaf type that doesn't implement Codec.
 	return fmt.Errorf("spawn: argument %d type %s does not implement moxie.Codec (use moxie.Int32, moxie.Uint64, etc.)", argIndex+1, t)
+}
+
+// isSpawnSafeBasic returns true for basic types that are safe to copy across
+// a fork-based spawn boundary (same binary, same architecture). All concrete
+// scalar types are safe; untyped types and unsafe.Pointer are not.
+func isSpawnSafeBasic(b *types.Basic) bool {
+	switch b.Kind() {
+	case types.Bool, types.Int, types.Int8, types.Int16, types.Int32, types.Int64,
+		types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uintptr,
+		types.Float32, types.Float64, types.Complex64, types.Complex128,
+		types.String:
+		return true
+	}
+	return false
 }
 
 // extractTransportString checks if an SSA value is a string constant
