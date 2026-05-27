@@ -4,12 +4,14 @@
 
 *a programming language without fluff*
 
-> "Perfection is achieved, not when there is nothing more to add, but when there is nothing left to take away."
-> - Antoine de Saint-Exupery
+> "*Perfection is achieved, not when there is nothing more to add, but 
+when there is nothing left to take away.*"
+> 
+> - *Antoine de Saint-Exupery*
 
 *Saint-Exupery was an aircraft engineer. Software is like aircraft - what fails in the air is usually needless complexity.*
 
-A compiled systems language for domain-isolated event-driven programs. Each program is a tree of **domains** — isolated OS processes communicating through serialized IPC channels. No goroutines, no shared memory, no data races.
+A compiled systems language for domain-isolated event-driven programs. Each program is a tree of **domains** - isolated OS processes communicating through serialized IPC channels. No goroutines, no shared memory, no data races.
 
 Moxie descends from [TinyGo](https://tinygo.org/). All embedded targets and threading infrastructure have been stripped. What remains is a compilation pipeline for Linux, Darwin, and browser JS, rewired for single-threaded domains with process-level isolation via `spawn`.
 
@@ -48,7 +50,7 @@ Each domain runs a single thread. No goroutines, no scheduler, no task switching
 |-----------|----------|
 | Unbuffered channel send | Execution jumps to the waiting `select` case |
 | Buffered channel send | Message queued for the next `select` iteration |
-| `select` | Event handler — blocks until a channel, I/O event, or timer fires |
+| `select` | Event handler - blocks until a channel, I/O event, or timer fires |
 | `spawn` | Creates a child domain (OS process) with IPC channels |
 
 Within a domain, channels and `select` are the event dispatch system. Between domains, `spawn` and IPC channels provide concurrent execution with complete memory isolation.
@@ -124,14 +126,14 @@ All native binaries are fully statically linked.
 
 ## Documentation
 
-- **[REFERENCE.md](REFERENCE.md)** — Complete language specification
-- **[TUTORIAL.md](TUTORIAL.md)** — Learn Moxie from scratch
-- **[EXAMPLE_CLAUDE.md](EXAMPLE_CLAUDE.md)** — AI coding assistant configuration
-- [docs/spawn.md](docs/spawn.md) — Spawn quick reference
-- [docs/architecture.md](docs/architecture.md) — Compiler pipeline and runtime internals
-- [docs/restrictions.md](docs/restrictions.md) — Active restrictions and exemptions
-- [docs/PORTING.md](docs/PORTING.md) — Migrating existing code to Moxie
-- [docs/building.md](docs/building.md) — Build instructions and flags
+- **[REFERENCE.md](REFERENCE.md)** - Complete language specification
+- **[TUTORIAL.md](TUTORIAL.md)** - Learn Moxie from scratch
+- **[EXAMPLE_CLAUDE.md](EXAMPLE_CLAUDE.md)** - AI coding assistant configuration
+- [docs/spawn.md](docs/spawn.md) - Spawn quick reference
+- [docs/architecture.md](docs/architecture.md) - Compiler pipeline and runtime internals
+- [docs/restrictions.md](docs/restrictions.md) - Active restrictions and exemptions
+- [docs/PORTING.md](docs/PORTING.md) - Migrating existing code to Moxie
+- [docs/building.md](docs/building.md) - Build instructions and flags
 
 ## Project Structure
 

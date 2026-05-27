@@ -46,7 +46,7 @@ Static ELF/Mach-O binary
 
 ## Cooperative Scheduler
 
-Each domain runs `scheduler = "tasks"` — a cooperative FIFO scheduler.
+Each domain runs `scheduler = "tasks"` - a cooperative FIFO scheduler.
 
 ```
                 ┌──────────┐
@@ -65,11 +65,11 @@ Each domain runs `scheduler = "tasks"` — a cooperative FIFO scheduler.
 - Context switch via assembly (`task_stack_amd64.S`, `task_stack_arm64.S`)
 - `task.Pause()` suspends the current task, `task.Resume()` re-queues it
 - No preemption, no timer interrupts, no signal-based stack inspection
-- Mutexes and atomics are no-ops (`mutex-cooperative.go`, `atomic-cooperative.go`) — single thread
+- Mutexes and atomics are no-ops (`mutex-cooperative.go`, `atomic-cooperative.go`) - single thread
 
 ## Spawn: Domain Creation
 
-`spawn` is a language builtin (like `make`, `append`). The type checker validates
+`spawn` is a language builtin (like `copy`, `append`). The type checker validates
 argument count and types. The SSA validator enforces `moxie.Codec` on all data
 arguments and channel element types.
 
@@ -127,6 +127,6 @@ Moxie supports exactly 4 native targets plus JS:
 | linux/arm64 | tasks | boehm | musl | ld.lld |
 | darwin/amd64 | tasks | boehm | darwin-libSystem | ld.lld |
 | darwin/arm64 | tasks | boehm | darwin-libSystem | ld.lld |
-| js | tasks | — | — | — |
+| js | tasks | - | - | - |
 
 No embedded targets. No WASI. No Windows.
