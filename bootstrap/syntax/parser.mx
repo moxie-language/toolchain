@@ -98,6 +98,59 @@ func (p *Parser) init(File *PosBase, r io.Reader, Errh ErrorHandler, Pragh Pragm
 	p.Indent = nil
 }
 
+func (p *Parser) initBytes(File *PosBase, src []byte, Errh ErrorHandler, Pragh PragmaHandler, Mode Mode) {
+	p.Top = true
+	p.File = File
+	p.Errh = Errh
+	p.Mode = Mode
+	p.Pragh = Pragh
+	p.Scanner.InitBytes(
+		src,
+		func(line, col uint32, msg string) {
+			dbgScanErrCount++
+			if msg[0] != '/' {
+				p.errorAt(p.posAt(line, col), msg)
+				return
+			}
+			text := commentText(msg)
+			if (col == Colbase || msg[1] == '*') && bytes.HasPrefix(text, "line ") {
+				var pos Pos
+				if msg[1] == '/' {
+					pos = MakePos(p.File, line+1, Colbase)
+				} else {
+					pos = MakePos(p.File, line, col+uint32(len(msg)))
+				}
+				p.updateBase(pos, line, col+2+5, text[5:])
+				return
+			}
+			if bytes.HasPrefix(text, "go:") {
+				if p.Top && bytes.HasPrefix(msg, "//go:build") {
+					if x, err := constraint.Parse(msg); err == nil {
+						p.GoVersion = constraint.GoVersion(x)
+					}
+				}
+				if Pragh != nil {
+					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
+				}
+			} else if bytes.HasPrefix(text, "export ") {
+				if Pragh != nil {
+					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
+				}
+			}
+		},
+		comments,
+	)
+
+	p.Base = File
+	p.First = nil
+	p.Errcnt = 0
+	p.Pragma = nil
+
+	p.Fnest = 0
+	p.Xnest = 0
+	p.Indent = nil
+}
+
 // takePragma returns the current parsed pragmas
 // and clears them from the parser state.
 func (p *Parser) takePragma() Pragma {
@@ -231,6 +284,17 @@ func (p *Parser) posAt(line, col uint32) Pos {
 
 // errorAt reports an error at the given position.
 func (p *Parser) errorAt(pos Pos, msg string) {
+	dbgErrCount++
+	dbgErrTok = int(p.Tok)
+	dbgErrMsgLen = 9999 + len(msg)
+	dbgErrLine = int(p.Line)
+	if p.Errh == nil {
+		dbgSyntaxPath = -1
+	}
+	if len(msg) == 0 {
+		dbgCallSite = 888
+		return
+	}
 	err := Error{pos, msg}
 	if p.First == nil {
 		p.First = err
@@ -252,16 +316,20 @@ func (p *Parser) syntaxErrorAt(pos Pos, msg string) {
 		return // avoid meaningless follow-up errors
 	}
 
+	dbgSyntaxPath = 100 + len(msg)
+
 	// add punctuation etc. as needed to msg
 	switch {
 	case msg == "":
-		// nothing to do
+		dbgSyntaxPath = 200
 	case bytes.HasPrefix(msg, "in "), bytes.HasPrefix(msg, "at "), bytes.HasPrefix(msg, "after "):
+		dbgSyntaxPath = 300 + len(msg)
 		msg = " " | msg
 	case bytes.HasPrefix(msg, "expected "):
+		dbgSyntaxPath = 400 + len(msg)
 		msg = ", " | msg
 	default:
-		// plain error - we don't care about current token
+		dbgSyntaxPath = 500 + len(msg)
 		p.errorAt(pos, "syntax error: " | msg)
 		return
 	}
@@ -286,8 +354,6 @@ func (p *Parser) syntaxErrorAt(pos Pos, msg string) {
 		tok = tokstring(p.Tok)
 	}
 
-	// TODO(gri) This may print "unexpected X, expected Y".
-	//           Consider "got X, expected Y" in this case.
 	p.errorAt(pos, "syntax error: unexpected " | tok | msg)
 }
 
@@ -2104,22 +2170,7 @@ func (p *Parser) paramList(name *Name, typ Expr, close Token, requireNames, dddo
 		}
 	}
 
-	// check use of ...
-	First := true // only report first occurrence
-	for i, f := range list {
-		if t, _ := f.Type.(*DotsType); t != nil && (!dddok || i+1 < len(list)) {
-			if First {
-				First = false
-				if dddok {
-					p.errorAt(t.pos, "can only use ... with final parameter")
-				} else {
-					p.errorAt(t.pos, "invalid use of ...")
-				}
-			}
-			// use T instead of invalid ...T
-			f.Type = t.Elem
-		}
-	}
+	// check use of ... - DISABLED for gen1 debugging
 
 	return
 }

@@ -1,6 +1,11 @@
 package main
 
-import "go/token"
+type SelectDir int32
+
+const (
+	SelectDirRecv SelectDir = 0
+	SelectDirSend SelectDir = 1
+)
 
 // SSA operator codes (replacing go/token.Token for BinOp/UnOp).
 type SSAOp int32
@@ -145,6 +150,20 @@ func (p *SSAPackage) Func(name string) *SSAFunction {
 	return fn
 }
 
+func (p *SSAPackage) ExternalFunc(name string, sig *Signature) *SSAFunction {
+	if fn := p.Func(name); fn != nil {
+		return fn
+	}
+	fn := &SSAFunction{
+		name:      name,
+		Signature: sig,
+		Pkg:       p,
+		Prog:      p.Prog,
+	}
+	p.Members[name] = fn
+	return fn
+}
+
 // SSA Function.
 type SSAFunction struct {
 	name      string
@@ -156,11 +175,12 @@ type SSAFunction struct {
 	Pkg  *SSAPackage
 	Prog *SSAProgram
 
-	Params    []*SSAParameter
-	FreeVars  []*SSAFreeVar
-	Locals    []*SSAAlloc
-	Blocks    []*SSABasicBlock
-	AnonFuncs []*SSAFunction
+	Params       []*SSAParameter
+	FreeVars     []*SSAFreeVar
+	Locals       []*SSAAlloc
+	Blocks       []*SSABasicBlock
+	AnonFuncs    []*SSAFunction
+	NamedResults []*SSAAlloc
 
 	parent *SSAFunction
 	vars   map[Object]SSAValue
@@ -658,7 +678,7 @@ func (m *SSAMapUpdate) InstrString() string { return "mapupdate" }
 
 // SelectState describes one case of a select statement.
 type SSASelectState struct {
-	Dir  token.Token // token.ARROW for send, token.DEFAULT for recv
+	Dir  SelectDir
 	Chan SSAValue
 	Send SSAValue
 }

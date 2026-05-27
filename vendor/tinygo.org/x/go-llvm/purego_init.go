@@ -18,7 +18,7 @@ func init() {
 		llvmPath = findLLVM()
 	}
 	if llvmPath == "" {
-		fmt.Fprintf(os.Stderr, "purego LLVM: cannot find libLLVM-19.so; set LLVM_LIB_PATH\n")
+		fmt.Fprintf(os.Stderr, "purego LLVM: cannot find libLLVM (tried 21, 19); set LLVM_LIB_PATH\n")
 		os.Exit(1)
 	}
 
@@ -47,6 +47,10 @@ func init() {
 
 func findLLVM() string {
 	candidates := []string{
+		"/usr/lib/libLLVM-21.so",
+		"/usr/lib64/libLLVM-21.so",
+		"/usr/lib/llvm-21/lib/libLLVM-21.so",
+		"/usr/local/lib/libLLVM-21.so",
 		"/usr/lib/libLLVM-19.so",
 		"/usr/lib64/libLLVM-19.so",
 		"/usr/lib/llvm-19/lib/libLLVM-19.so",
@@ -55,6 +59,8 @@ func findLLVM() string {
 	}
 	if runtime.GOOS == "darwin" {
 		candidates = append(candidates,
+			"/usr/local/opt/llvm@21/lib/libLLVM.dylib",
+			"/opt/homebrew/opt/llvm@21/lib/libLLVM.dylib",
 			"/usr/local/opt/llvm@19/lib/libLLVM.dylib",
 			"/opt/homebrew/opt/llvm@19/lib/libLLVM.dylib",
 		)
@@ -76,6 +82,7 @@ func findGlue() string {
 	candidates := []string{
 		filepath.Join(dir, "libmoxie-llvm-glue.so"),
 		filepath.Join(dir, "..", "lib", "libmoxie-llvm-glue.so"),
+		filepath.Join(dir, "bootstrap", "llvm-glue", "libmoxie-llvm-glue.so"),
 		filepath.Join(dir, "..", "bootstrap", "llvm-glue", "libmoxie-llvm-glue.so"),
 	}
 	moxieRoot := os.Getenv("MOXIEROOT")

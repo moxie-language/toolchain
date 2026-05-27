@@ -5,19 +5,24 @@ import (
 	"unicode/utf8"
 )
 
+type srcDone struct{}
+
+func (srcDone) Error() string { return "EOF" }
+
 type Source struct {
 	in   io.Reader
 	errh func(line, col uint32, msg string)
 
 	buf       []byte
 	ioerr     error
+	noFill    bool
 	b, r, e   int32
 	line, col uint32
 	ch        rune
 	chw       int32
 }
 
-const sentinel = utf8.RuneSelf
+const sentinel = 0x80
 
 func (s *Source) init(in io.Reader, errh func(line, col uint32, msg string)) {
 	s.in = in
@@ -28,7 +33,22 @@ func (s *Source) init(in io.Reader, errh func(line, col uint32, msg string)) {
 	}
 	s.buf[0] = sentinel
 	s.ioerr = nil
+	s.noFill = false
 	s.b, s.r, s.e = -1, 0, 0
+	s.line, s.col = 0, 0
+	s.ch = ' '
+	s.chw = 0
+}
+
+func (s *Source) initBytes(src []byte, errh func(line, col uint32, msg string)) {
+	s.in = nil
+	s.errh = errh
+	s.noFill = true
+	s.buf = []byte{:len(src) + 1}
+	copy(s.buf, src)
+	s.buf[len(src)] = sentinel
+	s.ioerr = nil
+	s.b, s.r, s.e = -1, 0, int32(len(src))
 	s.line, s.col = 0, 0
 	s.ch = ' '
 	s.chw = 0
@@ -96,7 +116,7 @@ redo:
 	}
 
 	if s.r == s.e {
-		if s.ioerr != io.EOF {
+		if s.ioerr != io.EOF && !s.noFill {
 			s.error("I/O error: " | s.ioerr.Error())
 			s.ioerr = nil
 		}
@@ -125,6 +145,10 @@ redo:
 }
 
 func (s *Source) fill() {
+	if s.noFill {
+		s.ioerr = srcDone{}
+		return
+	}
 	b := s.r
 	if s.b >= 0 {
 		b = s.b

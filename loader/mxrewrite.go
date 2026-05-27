@@ -20,6 +20,18 @@ func rewriteStringLiterals(file *ast.File) {
 	mxtext.RewriteStringLiterals(file)
 }
 
+func rewriteStringTypes(file *ast.File) {
+	mxtext.RewriteStringTypes(file)
+}
+
+func rewriteStringConversions(file *ast.File) {
+	mxtext.RewriteStringConversions(file)
+}
+
+func wrapInterfaceMandatedReturns(file *ast.File) {
+	mxtext.WrapInterfaceMandatedReturns(file)
+}
+
 func rewriteAddToPipe(file *ast.File) bool {
 	return mxtext.RewriteAddToPipe(file)
 }

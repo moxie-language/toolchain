@@ -627,6 +627,13 @@ func (b *builder) expr(fn *Function, e ast.Expr) Value {
 
 	tv := fn.info.Types[e]
 
+	// Moxie: string and []byte are the same type. When the Go type checker
+	// filters string/[]byte mismatch errors, some expressions end up with
+	// nil types. Fall back to []byte (Moxie's canonical text type).
+	if tv.Type == nil {
+		tv.Type = types.NewSlice(types.Typ[types.Byte])
+	}
+
 	// Is expression a constant?
 	if tv.Value != nil {
 		return NewConst(tv.Value, fn.typ(tv.Type))

@@ -112,7 +112,7 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"src/runtime/secalloc.c",
 			"src/runtime/signal.c",
 			"src/runtime/spawn_unix.c",
-			"src/internal/futex/futex_darwin.c")
+			"src/runtime/futex_darwin.c")
 	case "linux":
 		spec.GC = "boehm"
 		spec.Scheduler = "none" // moxie: no goroutines
@@ -128,7 +128,7 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"src/runtime/secalloc.c",
 			"src/runtime/signal.c",
 			"src/runtime/spawn_unix.c",
-			"src/internal/futex/futex_linux.c")
+			"src/runtime/futex_linux.c")
 	case "js":
 		spec.GC = "leaking"
 		spec.Scheduler = "none" // moxie: no goroutines

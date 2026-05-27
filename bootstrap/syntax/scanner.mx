@@ -28,12 +28,22 @@ type Scanner struct {
 
 	keywordMap   [1 << 6]Token
 	keywordsReady bool
+	utab *unicode.Tables
 }
 
 func (s *Scanner) Init(src io.Reader, errh func(line, col uint32, msg string), mode uint) {
 	s.Source.init(src, errh)
 	s.mode = mode
 	s.nlsemi = false
+	s.utab = unicode.NewTables()
+	s.initKeywords()
+}
+
+func (s *Scanner) InitBytes(src []byte, errh func(line, col uint32, msg string), mode uint) {
+	s.Source.initBytes(src, errh)
+	s.mode = mode
+	s.nlsemi = false
+	s.utab = unicode.NewTables()
 	s.initKeywords()
 }
 
@@ -210,12 +220,22 @@ redo:
 			goto redo
 		}
 		s.Op, s.Prec = Div, PrecMul
-		goto assignop
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = AssignOp
+		} else {
+			s.Tok = OperatorType
+		}
 
 	case '%':
 		s.nextch()
 		s.Op, s.Prec = Rem, PrecMul
-		goto assignop
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = AssignOp
+		} else {
+			s.Tok = OperatorType
+		}
 
 	case '&':
 		s.nextch()
@@ -230,7 +250,12 @@ redo:
 			s.nextch()
 			s.Op = AndNot
 		}
-		goto assignop
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = AssignOp
+		} else {
+			s.Tok = OperatorType
+		}
 
 	case '|':
 		s.nextch()
@@ -241,12 +266,22 @@ redo:
 			break
 		}
 		s.Op, s.Prec = Or, PrecAdd
-		goto assignop
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = AssignOp
+		} else {
+			s.Tok = OperatorType
+		}
 
 	case '^':
 		s.nextch()
 		s.Op, s.Prec = Xor, PrecAdd
-		goto assignop
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = AssignOp
+		} else {
+			s.Tok = OperatorType
+		}
 
 	case '<':
 		s.nextch()
@@ -363,8 +398,8 @@ func tokStrFast(tok Token) string {
 
 func (s *Scanner) AtIdentChar(first bool) bool {
 	switch {
-	case unicode.IsLetter(s.ch) || s.ch == '_':
-	case unicode.IsDigit(s.ch):
+	case s.utab.IsLetter(s.ch) || s.ch == '_':
+	case s.utab.IsDigit(s.ch):
 		if first {
 			s.Errorf("identifier cannot begin with digit %#U", s.ch)
 		}

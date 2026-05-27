@@ -269,7 +269,7 @@ func (p *Program) Parse() error {
 	// spawn is a true builtin (patched into go/types universe scope),
 	// no injection needed — available in all packages like make/append.
 
-	// Moxie AST rewrite: string literals → []byte() in user and moxie-pure packages.
+	// Moxie AST rewrite: string literals -> []byte() in user and moxie-pure packages.
 	for _, pkg := range p.sorted {
 		if isMoxieStringTarget(pkg.ImportPath) {
 			for _, file := range pkg.Files {
@@ -516,6 +516,7 @@ func (p *Package) Check() error {
 		typesPkg, err = checker2.Check(packageName, p.program.fset, p.Files, &p.info)
 		typeErrors = filterPipeErrors(typeErrors)
 		typeErrors = filterByteCompareErrors(typeErrors)
+		typeErrors = filterStringByteMismatch(typeErrors)
 		if err != nil && len(typeErrors) == 0 {
 			err = nil
 		}
@@ -526,7 +527,6 @@ func (p *Package) Check() error {
 			return err
 		}
 		if len(typeErrors) != 0 {
-			// Got type errors, so return them.
 			return Errors{p, typeErrors}
 		}
 		// This can happen in some weird cases.

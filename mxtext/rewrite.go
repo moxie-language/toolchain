@@ -49,13 +49,7 @@ func IsMoxieStringTarget(importPath string) bool {
 	if strings.HasPrefix(importPath, "runtime") || // language primitives
 		strings.HasPrefix(importPath, "internal/task") || // cooperative scheduler
 		strings.HasPrefix(importPath, "internal/abi") || // ABI type descriptors
-		strings.HasPrefix(importPath, "internal/reflectlite") || // type reflection
-			strings.HasPrefix(importPath, "internal/itoa") || // used by reflectlite, returns string
-		strings.HasPrefix(importPath, "syscall") || // syscall interfaces
-		strings.HasPrefix(importPath, "internal/syscall") || // syscall internals
-		strings.HasPrefix(importPath, "os") || // FDs, syscall wrappers
-		strings.HasPrefix(importPath, "unsafe") || // language primitive
-		strings.HasPrefix(importPath, "reflect") { // must handle all Go types
+		strings.HasPrefix(importPath, "unsafe") { // language primitive
 		return false
 	}
 	return true
@@ -694,23 +688,10 @@ func isInterfaceMandatedMethod(fd *ast.FuncDecl) bool {
 // but the Go type checker rejects returning a string where []byte is expected.
 // Must run after RewriteStringTypes so return types are already []byte.
 func RewriteStringConversions(file *ast.File) {
-	// Interface-mandated methods (Error/String) have return values wrapped
-	// in `string(...)` by wrapReturnsInStringConv before this runs. We can
-	// safely rewrite inner string(x) → []byte(x) throughout: the outer
-	// wrap handles the string return-type requirement.
-	ast.Inspect(file, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok || len(call.Args) != 1 {
-			return true
-		}
-		ident, ok := call.Fun.(*ast.Ident)
-		if !ok || ident.Name != "string" {
-			return true
-		}
-		// string(x) → []byte(x)
-		call.Fun = &ast.ArrayType{Elt: ast.NewIdent("byte")}
-		return true
-	})
+	// No-op: string(x) conversions are left as-is. In Moxie, string and
+	// []byte are the same underlying type, so string(x) is valid regardless
+	// of whether x is a rune, []byte, or other type. RewriteStringTypes
+	// handles the type declarations; explicit conversions don't need rewriting.
 }
 
 // RewriteUnsafeString rewrites `unsafe.String(ptr, len)` → `unsafe.Slice(ptr,
@@ -887,21 +868,14 @@ func rewriteStringExprs(node ast.Node) {
 				}
 			}
 		case *ast.ReturnStmt:
-			for i, result := range parent.Results {
-				if wrapped := wrapStringExpr(result); wrapped != nil {
-					parent.Results[i] = wrapped
-				}
-			}
+			// Don't wrap return values - the function's return type
+			// is still `string` in the Go type checker.
 		case *ast.CallExpr:
-			// Skip wrapping args to calls on exempt packages
-			// (e.g. os.Open("file") — os is exempt, expects string).
-			if !isExemptPackageCall(parent) {
-				for i, arg := range parent.Args {
-					if wrapped := wrapStringExpr(arg); wrapped != nil {
-						parent.Args[i] = wrapped
-					}
-				}
-			}
+			// Don't wrap CallExpr args - the callee signature types
+			// are resolved by the Go type checker from imported packages
+			// and may still be `string`. Wrapping to []byte would create
+			// a type mismatch. The Moxie codegen handles string/[]byte
+			// equivalence at the LLVM level.
 		case *ast.SendStmt:
 			if wrapped := wrapStringExpr(parent.Value); wrapped != nil {
 				parent.Value = wrapped

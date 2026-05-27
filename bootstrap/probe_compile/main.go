@@ -120,6 +120,15 @@ func main() {
 	var registerIface func(uintptr, int32, uintptr, int32, uintptr, int32)
 	purego.RegisterLibFunc(&registerIface, lib, "moxie_register_iface")
 
+	var registerType func(uintptr, int32, uintptr, int32, uintptr, int32)
+	purego.RegisterLibFunc(&registerType, lib, "moxie_register_type")
+
+	var registerMethod func(uintptr, int32, uintptr, int32, uintptr, int32, uintptr, int32, int32)
+	purego.RegisterLibFunc(&registerMethod, lib, "moxie_register_method")
+
+	var registerConst func(uintptr, int32, uintptr, int32, uintptr, int32, int64)
+	purego.RegisterLibFunc(&registerConst, lib, "moxie_register_const")
+
 	regPkg := func(path, name string) {
 		pb := []byte(path)
 		nb := []byte(name)
@@ -142,6 +151,13 @@ func main() {
 		registerVar(uintptr(unsafe.Pointer(&pp[0])), int32(len(pp)), uintptr(unsafe.Pointer(&nb[0])), int32(len(nb)), uintptr(unsafe.Pointer(&tb[0])), int32(len(tb)))
 	}
 	_ = regVar
+	regConst := func(pkgPath, name, typ string, val int64) {
+		pp := []byte(pkgPath)
+		nb := []byte(name)
+		tb := []byte(typ)
+		registerConst(uintptr(unsafe.Pointer(&pp[0])), int32(len(pp)), uintptr(unsafe.Pointer(&nb[0])), int32(len(nb)), uintptr(unsafe.Pointer(&tb[0])), int32(len(tb)), val)
+	}
+	_ = regConst
 	regIface := func(pkgPath, name, methods string) {
 		pp := []byte(pkgPath)
 		nb := []byte(name)
@@ -149,6 +165,33 @@ func main() {
 		registerIface(uintptr(unsafe.Pointer(&pp[0])), int32(len(pp)), uintptr(unsafe.Pointer(&nb[0])), int32(len(nb)), uintptr(unsafe.Pointer(&mb[0])), int32(len(mb)))
 	}
 	_ = regIface
+	regType := func(pkgPath, name, underlying string) {
+		pp := []byte(pkgPath)
+		nb := []byte(name)
+		if underlying == "" {
+			registerType(uintptr(unsafe.Pointer(&pp[0])), int32(len(pp)), uintptr(unsafe.Pointer(&nb[0])), int32(len(nb)), 0, 0)
+		} else {
+			ub := []byte(underlying)
+			registerType(uintptr(unsafe.Pointer(&pp[0])), int32(len(pp)), uintptr(unsafe.Pointer(&nb[0])), int32(len(nb)), uintptr(unsafe.Pointer(&ub[0])), int32(len(ub)))
+		}
+	}
+	_ = regType
+	regMethod := func(pkgPath, typeName, methodName, sig string, ptrRecv bool) {
+		pp := []byte(pkgPath)
+		tn := []byte(typeName)
+		mn := []byte(methodName)
+		sb := []byte(sig)
+		pr := int32(0)
+		if ptrRecv { pr = 1 }
+		registerMethod(
+			uintptr(unsafe.Pointer(&pp[0])), int32(len(pp)),
+			uintptr(unsafe.Pointer(&tn[0])), int32(len(tn)),
+			uintptr(unsafe.Pointer(&mn[0])), int32(len(mn)),
+			uintptr(unsafe.Pointer(&sb[0])), int32(len(sb)),
+			pr,
+		)
+	}
+	_ = regMethod
 
 	// Subprocess mode: compile a single file and report result
 	if len(os.Args) >= 4 && os.Args[2] == "--compile-file" {
@@ -169,9 +212,50 @@ func main() {
 		irFree(wh)
 		clearImports()
 		regPkg("go/token", "token")
-		regVar("go/token", "ARROW", "int")
-		regVar("go/token", "DEFAULT", "int")
+		regConst("go/token", "ILLEGAL", "int", 0)
+		regConst("go/token", "EOF", "int", 1)
+		regConst("go/token", "COMMENT", "int", 2)
+		regConst("go/token", "IDENT", "int", 4)
+		regConst("go/token", "INT", "int", 5)
+		regConst("go/token", "FLOAT", "int", 6)
+		regConst("go/token", "IMAG", "int", 7)
+		regConst("go/token", "CHAR", "int", 8)
+		regConst("go/token", "STRING", "int", 9)
+		regConst("go/token", "ADD", "int", 12)
+		regConst("go/token", "SUB", "int", 13)
+		regConst("go/token", "MUL", "int", 14)
+		regConst("go/token", "QUO", "int", 15)
+		regConst("go/token", "REM", "int", 16)
+		regConst("go/token", "AND", "int", 17)
+		regConst("go/token", "OR", "int", 18)
+		regConst("go/token", "XOR", "int", 19)
+		regConst("go/token", "SHL", "int", 20)
+		regConst("go/token", "SHR", "int", 21)
+		regConst("go/token", "AND_NOT", "int", 22)
+		regConst("go/token", "LAND", "int", 34)
+		regConst("go/token", "LOR", "int", 35)
+		regConst("go/token", "ARROW", "int", 36)
+		regConst("go/token", "INC", "int", 37)
+		regConst("go/token", "DEC", "int", 38)
+		regConst("go/token", "EQL", "int", 39)
+		regConst("go/token", "LSS", "int", 40)
+		regConst("go/token", "GTR", "int", 41)
+		regConst("go/token", "ASSIGN", "int", 42)
+		regConst("go/token", "NOT", "int", 43)
+		regConst("go/token", "NEQ", "int", 44)
+		regConst("go/token", "LEQ", "int", 45)
+		regConst("go/token", "GEQ", "int", 46)
+		regConst("go/token", "DEFINE", "int", 47)
+		regConst("go/token", "ELLIPSIS", "int", 48)
+		regConst("go/token", "DEFAULT", "int", 62)
+		regType("go/token", "Token", "int")
 		regPkg("go/constant", "constant")
+		regConst("go/constant", "Unknown", "int", 0)
+		regConst("go/constant", "Bool", "int", 1)
+		regConst("go/constant", "String", "int", 2)
+		regConst("go/constant", "Int", "int", 3)
+		regConst("go/constant", "Float", "int", 4)
+		regConst("go/constant", "Complex", "int", 5)
 		regIface("go/constant", "Value", "Kind=->int;String=->string;ExactString=->string")
 		regFn("go/constant", "MakeInt64", "int64->interface{}")
 		regFn("go/constant", "MakeFloat64", "float64->interface{}")
@@ -195,11 +279,20 @@ func main() {
 		regFn("strconv", "Itoa", "int->string")
 		regFn("strconv", "FormatInt", "int64,int->string")
 		regFn("strconv", "FormatFloat", "float64,byte,int,int->string")
+		regFn("strconv", "ParseInt", "string,int,int->int64,error")
+		regFn("strconv", "ParseUint", "string,int,int->uint64,error")
+		regFn("strconv", "ParseFloat", "string,int->float64,error")
+		regFn("strconv", "Unquote", "string->string,error")
 		regPkg("bytes", "bytes")
 		regFn("bytes", "NewReader", "*byte->interface{}")
+		regType("bytes", "Reader", "")
+		regMethod("bytes", "Reader", "Read", "[]byte->int,error", true)
 		regFn("bytes", "IndexByte", "[]byte,byte->int")
 		regFn("bytes", "HasPrefix", "[]byte,[]byte->bool")
 		regFn("bytes", "TrimSpace", "[]byte->[]byte")
+		regFn("bytes", "Index", "[]byte,[]byte->int")
+		regFn("bytes", "LastIndexByte", "[]byte,byte->int")
+		regFn("bytes", "Trim", "[]byte,string->[]byte")
 		regPkg("io", "io")
 		regIface("io", "Reader", "Read=[]byte->int,error")
 		regVar("io", "EOF", "error")
@@ -208,9 +301,14 @@ func main() {
 		regFn("runtime", "InitCShared", "")
 		regPkg("unsafe", "unsafe")
 		regPkg("unicode", "unicode")
+		regType("unicode", "Tables", "")
+		regMethod("unicode", "Tables", "IsLetter", "int32->bool", true)
+		regMethod("unicode", "Tables", "IsDigit", "int32->bool", true)
+		regFn("unicode", "NewTables", "->ptr")
 		regFn("unicode", "IsLetter", "int32->bool")
 		regFn("unicode", "IsDigit", "int32->bool")
 		regFn("unicode", "IsSpace", "int32->bool")
+		regVar("unicode", "MaxRune", "int32")
 		regPkg("unicode/utf8", "utf8")
 		regFn("unicode/utf8", "DecodeRune", "[]byte->int32,int")
 		regFn("unicode/utf8", "RuneLen", "int32->int")
@@ -266,7 +364,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "FAIL: %s llvm-verify (empty IR)\n", name)
 			return
 		}
-		cmd := exec.Command("llvm-as-19", "-o", "/dev/null")
+		cmd := exec.Command("llvm-as-21", "-o", "/dev/null")
 		cmd.Stdin = strings.NewReader(ir)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -1567,7 +1665,7 @@ func adder(x int32) func(int32) int32 {
 	fmt.Println(ir49)
 
 	llvmVerify("closure", ir49)
-	assert("closure has anon func", strings.Contains(ir49, "@mypkg.adder$"))
+	assert("closure has anon func", strings.Contains(ir49, "@mypkg.adder__anon"))
 	assert("closure has runtime.alloc", strings.Contains(ir49, "@runtime.alloc"))
 	assert("closure has insertvalue {ptr, ptr}", strings.Contains(ir49, "insertvalue {ptr, ptr}"))
 	assert("closure has getelementptr for context", strings.Contains(ir49, "getelementptr"))
@@ -1597,7 +1695,7 @@ func makeCounter(start int32, step int32) func() int32 {
 	fmt.Println(ir50)
 
 	llvmVerify("multi-capture closure", ir50)
-	assert("multi-capture has anon func", strings.Contains(ir50, "@mypkg.makeCounter$"))
+	assert("multi-capture has anon func", strings.Contains(ir50, "@mypkg.makeCounter__anon"))
 	assert("multi-capture has alloc", strings.Contains(ir50, "@runtime.alloc"))
 
 	irFree(h50)
@@ -2191,8 +2289,8 @@ func test() int32 {
 	fmt.Println(ir67)
 
 	llvmVerify("logical AND/OR", ir67)
-	assert("land has and i1", strings.Contains(ir67, "and i1"))
-	assert("lor has or i1", strings.Contains(ir67, "or i1"))
+	assert("land has short-circuit branch", strings.Contains(ir67, "phi i1 [false,") || strings.Contains(ir67, "and i1"))
+	assert("lor has short-circuit branch", strings.Contains(ir67, "phi i1 [true,") || strings.Contains(ir67, "or i1"))
 	assert("land/lor no parse error", !strings.Contains(ir67, "parse error"))
 
 	irFree(h67)
@@ -10615,7 +10713,7 @@ func main() {
 }
 `, func(ir string) {
 		assert("257: has Gen.emit", strings.Contains(ir, "@main.Gen.emit"))
-		assert("257: closure function", strings.Contains(ir, "@main.Gen.emit$1"))
+		assert("257: closure function", strings.Contains(ir, "@main.Gen.emit__anon1"))
 	})
 
 	test(258, `package main
@@ -14727,9 +14825,50 @@ func main() {
 	fmt.Fprintf(os.Stderr, ">>> Starting test 322 (full concat)\n")
 	clearImports()
 	regPkg("go/token", "token")
-	regVar("go/token", "ARROW", "int")
-	regVar("go/token", "DEFAULT", "int")
+	regConst("go/token", "ILLEGAL", "int", 0)
+	regConst("go/token", "EOF", "int", 1)
+	regConst("go/token", "COMMENT", "int", 2)
+	regConst("go/token", "IDENT", "int", 4)
+	regConst("go/token", "INT", "int", 5)
+	regConst("go/token", "FLOAT", "int", 6)
+	regConst("go/token", "IMAG", "int", 7)
+	regConst("go/token", "CHAR", "int", 8)
+	regConst("go/token", "STRING", "int", 9)
+	regConst("go/token", "ADD", "int", 12)
+	regConst("go/token", "SUB", "int", 13)
+	regConst("go/token", "MUL", "int", 14)
+	regConst("go/token", "QUO", "int", 15)
+	regConst("go/token", "REM", "int", 16)
+	regConst("go/token", "AND", "int", 17)
+	regConst("go/token", "OR", "int", 18)
+	regConst("go/token", "XOR", "int", 19)
+	regConst("go/token", "SHL", "int", 20)
+	regConst("go/token", "SHR", "int", 21)
+	regConst("go/token", "AND_NOT", "int", 22)
+	regConst("go/token", "LAND", "int", 34)
+	regConst("go/token", "LOR", "int", 35)
+	regConst("go/token", "ARROW", "int", 36)
+	regConst("go/token", "INC", "int", 37)
+	regConst("go/token", "DEC", "int", 38)
+	regConst("go/token", "EQL", "int", 39)
+	regConst("go/token", "LSS", "int", 40)
+	regConst("go/token", "GTR", "int", 41)
+	regConst("go/token", "ASSIGN", "int", 42)
+	regConst("go/token", "NOT", "int", 43)
+	regConst("go/token", "NEQ", "int", 44)
+	regConst("go/token", "LEQ", "int", 45)
+	regConst("go/token", "GEQ", "int", 46)
+	regConst("go/token", "DEFINE", "int", 47)
+	regConst("go/token", "ELLIPSIS", "int", 48)
+	regConst("go/token", "DEFAULT", "int", 62)
+	regType("go/token", "Token", "int")
 	regPkg("go/constant", "constant")
+	regConst("go/constant", "Unknown", "int", 0)
+	regConst("go/constant", "Bool", "int", 1)
+	regConst("go/constant", "String", "int", 2)
+	regConst("go/constant", "Int", "int", 3)
+	regConst("go/constant", "Float", "int", 4)
+	regConst("go/constant", "Complex", "int", 5)
 	regIface("go/constant", "Value", "Kind=->int;String=->string;ExactString=->string")
 	regFn("go/constant", "MakeInt64", "int64->interface{}")
 	regFn("go/constant", "MakeFloat64", "float64->interface{}")
@@ -14774,12 +14913,21 @@ func main() {
 	regFn("runtime", "InitCShared", "")
 	regPkg("unsafe", "unsafe")
 	regPkg("unicode", "unicode")
+	regType("unicode", "Tables", "")
+	regMethod("unicode", "Tables", "IsLetter", "int32->bool", true)
+	regMethod("unicode", "Tables", "IsDigit", "int32->bool", true)
+	regFn("unicode", "NewTables", "->ptr")
 	regFn("unicode", "IsLetter", "int32->bool")
 	regFn("unicode", "IsDigit", "int32->bool")
 	regFn("unicode", "IsSpace", "int32->bool")
+	regVar("unicode", "MaxRune", "int32")
 	regPkg("unicode/utf8", "utf8")
 	regFn("unicode/utf8", "DecodeRune", "[]byte->int32,int")
 	regFn("unicode/utf8", "RuneLen", "int32->int")
+	regVar("unicode/utf8", "RuneSelf", "int")
+	regVar("unicode/utf8", "UTFMax", "int")
+	regVar("unicode/utf8", "RuneError", "int32")
+	regFn("unicode/utf8", "FullRune", "[]byte->bool")
 	{
 		compileDir := filepath.Join(filepath.Dir(soPath), "compile")
 		mxFiles := []string{

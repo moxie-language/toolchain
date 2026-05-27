@@ -2948,9 +2948,10 @@ func (b *builder) createBinOp(op token.Token, typ, ytyp types.Type, x, y llvm.Va
 				panic("binop on pointer: " + op.String())
 			}
 		} else if typ.Info()&types.IsString != 0 {
-			// Operations on strings
+			// Operations on native string (exempt packages only).
+			// + is Go's string concat; | is Moxie's. Both lower to stringConcat.
 			switch op {
-			case token.ADD, token.OR: // + or | (Moxie pipe concat)
+			case token.ADD, token.OR:
 				return b.createRuntimeCall("stringConcat", []llvm.Value{x, y}, ""), nil
 			case token.EQL: // ==
 				return b.createRuntimeCall("stringEqual", []llvm.Value{x, y}, ""), nil
@@ -3032,7 +3033,7 @@ func (b *builder) createBinOp(op token.Token, typ, ytyp types.Type, x, y llvm.Va
 		// Other slice types only support nil comparison.
 		if basic, ok := typ.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {
 			switch op {
-			case token.ADD: // Moxie: []byte + []byte (exempt packages use + on text)
+			case token.OR: // Moxie: | is the only text concat operator
 				return b.createRuntimeCall("stringConcat", []llvm.Value{x, y}, ""), nil
 			case token.EQL:
 				return b.createRuntimeCall("stringEqual", []llvm.Value{x, y}, ""), nil

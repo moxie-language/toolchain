@@ -102,6 +102,35 @@ func moxie_register_var(pkgPathPtr unsafe.Pointer, pkgPathLen int32, namePtr uns
 	pkg.Scope().Insert(NewTCVar(pkg, name, typ))
 }
 
+//export moxie_register_const
+func moxie_register_const(pkgPathPtr unsafe.Pointer, pkgPathLen int32, namePtr unsafe.Pointer, nameLen int32, typDescPtr unsafe.Pointer, typDescLen int32, val int64) {
+	runtime.InitCShared()
+	ensureImportRegistry()
+	pkgPath := string(unsafe.Slice((*byte)(pkgPathPtr), pkgPathLen))
+	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
+	typDesc := string(unsafe.Slice((*byte)(typDescPtr), typDescLen))
+	pkg := importRegistry[pkgPath]
+	if pkg == nil {
+		return
+	}
+	typ := parseTypeDesc(typDesc)
+	pkg.Scope().Insert(NewTCConst(pkg, name, typ, constInt{val}))
+}
+
+//export moxie_register_const_string
+func moxie_register_const_string(pkgPathPtr unsafe.Pointer, pkgPathLen int32, namePtr unsafe.Pointer, nameLen int32, valPtr unsafe.Pointer, valLen int32) {
+	runtime.InitCShared()
+	ensureImportRegistry()
+	pkgPath := string(unsafe.Slice((*byte)(pkgPathPtr), pkgPathLen))
+	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
+	val := string(unsafe.Slice((*byte)(valPtr), valLen))
+	pkg := importRegistry[pkgPath]
+	if pkg == nil {
+		return
+	}
+	pkg.Scope().Insert(NewTCConst(pkg, name, Typ[UntypedString], constStr{val}))
+}
+
 //export moxie_register_iface
 func moxie_register_iface(pkgPathPtr unsafe.Pointer, pkgPathLen int32, namePtr unsafe.Pointer, nameLen int32, methodsPtr unsafe.Pointer, methodsLen int32) {
 	runtime.InitCShared()
@@ -136,6 +165,60 @@ func moxie_register_iface(pkgPathPtr unsafe.Pointer, pkgPathLen int32, namePtr u
 	iface.Complete()
 	tn := NewTypeName(pkg, name, iface)
 	pkg.Scope().Insert(tn)
+}
+
+//export moxie_register_type
+func moxie_register_type(pkgPathPtr unsafe.Pointer, pkgPathLen int32, namePtr unsafe.Pointer, nameLen int32, underlyingPtr unsafe.Pointer, underlyingLen int32) {
+	runtime.InitCShared()
+	ensureImportRegistry()
+	pkgPath := string(unsafe.Slice((*byte)(pkgPathPtr), pkgPathLen))
+	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
+	pkg := importRegistry[pkgPath]
+	if pkg == nil {
+		return
+	}
+	var underlying Type
+	if underlyingLen > 0 {
+		desc := string(unsafe.Slice((*byte)(underlyingPtr), underlyingLen))
+		underlying = parseTypeDesc(desc)
+	} else {
+		underlying = NewTCStruct(nil, nil)
+	}
+	tn := NewTypeName(pkg, name, nil)
+	NewNamed(tn, underlying)
+	pkg.Scope().Insert(tn)
+}
+
+//export moxie_register_method
+func moxie_register_method(pkgPathPtr unsafe.Pointer, pkgPathLen int32, typeNamePtr unsafe.Pointer, typeNameLen int32, methodNamePtr unsafe.Pointer, methodNameLen int32, sigPtr unsafe.Pointer, sigLen int32, ptrRecv int32) {
+	runtime.InitCShared()
+	ensureImportRegistry()
+	pkgPath := string(unsafe.Slice((*byte)(pkgPathPtr), pkgPathLen))
+	typeName := string(unsafe.Slice((*byte)(typeNamePtr), typeNameLen))
+	methodName := string(unsafe.Slice((*byte)(methodNamePtr), methodNameLen))
+	sigDesc := string(unsafe.Slice((*byte)(sigPtr), sigLen))
+	pkg := importRegistry[pkgPath]
+	if pkg == nil {
+		return
+	}
+	obj := pkg.Scope().Lookup(typeName)
+	if obj == nil {
+		return
+	}
+	tn, ok := obj.(*TypeName)
+	if !ok {
+		return
+	}
+	named, ok := tn.typ.(*Named)
+	if !ok {
+		return
+	}
+	sig := parseSignatureDesc(sigDesc)
+	fn := NewTCFunc(pkg, methodName, sig)
+	if ptrRecv != 0 {
+		fn.hasPtrRecv = true
+	}
+	named.AddMethod(fn)
 }
 
 func splitSemicolon(s string) []string {

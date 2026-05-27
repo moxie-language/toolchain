@@ -173,11 +173,18 @@ func defNil() {
 // become native Moxie values.
 type constBool struct{ v bool }
 type constInt struct{ v int64 }
+type constFloat struct {
+	v   float64
+	lit string
+}
+type constStr struct{ s string }
 type constNil struct{}
 
-func untypedBool(v bool) ConstVal  { return constBool{v} }
-func untypedInt(v int64) ConstVal  { return constInt{v} }
-func untypedNil() ConstVal         { return constNil{} }
+func untypedBool(v bool) ConstVal     { return constBool{v} }
+func untypedInt(v int64) ConstVal     { return constInt{v} }
+func untypedFloat(v float64) ConstVal { return constFloat{v: v} }
+func untypedStr(s string) ConstVal    { return constStr{s} }
+func untypedNil() ConstVal            { return constNil{} }
 
 func (c constBool) String() string { if c.v { return "true" }; return "false" }
 func (c constInt) String() string {
@@ -202,7 +209,60 @@ func (c constInt) String() string {
 	}
 	return string(buf)
 }
-func (c constNil) String() string  { return "nil" }
+func (c constFloat) String() string {
+	if c.lit != "" {
+		return normalizeLLVMFloat(c.lit)
+	}
+	if c.v == 0.0 {
+		return "0.0"
+	}
+	return "0.0"
+}
+func (c constStr) String() string { return c.s }
+func (c constNil) String() string { return "nil" }
+
+func normalizeLLVMFloat(s string) string {
+	if len(s) == 0 {
+		return "0.0"
+	}
+	start := 0
+	if s[0] == '-' || s[0] == '+' {
+		start = 1
+	}
+	hasDot := false
+	ePos := -1
+	for i := start; i < len(s); i++ {
+		if s[i] == '.' {
+			hasDot = true
+		}
+		if s[i] == 'e' || s[i] == 'E' {
+			ePos = i
+			break
+		}
+	}
+	if !hasDot {
+		if ePos >= 0 {
+			return s[:ePos] + ".0" + s[ePos:]
+		}
+		return s + ".0"
+	}
+	dotIdx := -1
+	for i := start; i < len(s); i++ {
+		if s[i] == '.' {
+			dotIdx = i
+			break
+		}
+	}
+	if dotIdx == start {
+		s = s[:start] + "0" + s[start:]
+		dotIdx++
+	}
+	afterDot := dotIdx + 1
+	if afterDot >= len(s) || s[afterDot] == 'e' || s[afterDot] == 'E' {
+		s = s[:afterDot] + "0" + s[afterDot:]
+	}
+	return s
+}
 
 // Predeclared returns the universe-scope object with the given name, or nil.
 func Predeclared(name string) Object {

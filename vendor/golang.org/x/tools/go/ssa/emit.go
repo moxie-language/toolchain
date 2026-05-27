@@ -210,6 +210,10 @@ func isValuePreserving(ut_src, ut_dst types.Type) bool {
 // by language assignability rules in assignments, parameter passing,
 // etc.
 func emitConv(f *Function, val Value, typ types.Type) Value {
+	// Moxie: nil target type means unresolved string/[]byte mismatch.
+	if typ == nil {
+		typ = types.NewSlice(types.Typ[types.Byte])
+	}
 	t_src := val.Type()
 
 	// Identical types?  Conversion is a no-op.
