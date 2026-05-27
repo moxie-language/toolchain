@@ -536,7 +536,7 @@ func main() {
 	if len(args) >= 2 {
 		cmd := args[1]
 		if cmd == "version" {
-			writeStr(1, "mxc 1.6.0\n")
+			writeStr(1, "mxc 1.6.1\n")
 			return
 		}
 		if cmd != "build" || len(args) < 3 {
