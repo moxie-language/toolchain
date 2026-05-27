@@ -4112,7 +4112,28 @@ func CompileToIR(src []byte, name string, triple string) string {
 
 	ssaPkg := prog.CreatePackage(pkg, []*File{file}, nil)
 	emitter := newIREmitter(ssaPkg, triple)
-	return emitter.emit()
+	ir := emitter.emit()
+
+	if len(ir) > 0 && ir[0] != ';' {
+		registerCompiledExports(pkg)
+	}
+	return ir
+}
+
+func registerCompiledExports(pkg *TCPackage) {
+	ensureImportRegistry()
+	path := pkg.Path()
+	regPkg := NewTCPackage(path, pkg.Name())
+	for _, name := range pkg.Scope().Names() {
+		if len(name) == 0 || name[0] < 'A' || name[0] > 'Z' {
+			continue
+		}
+		obj := pkg.Scope().Lookup(name)
+		if obj != nil {
+			regPkg.Scope().Insert(obj)
+		}
+	}
+	importRegistry[path] = regPkg
 }
 
 func tcInferTypeFromExpr(e Expr, scope *Scope) Type {
