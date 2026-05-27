@@ -3538,24 +3538,7 @@ func (b *builder) createUnOp(unop *ssa.UnOp) (llvm.Value, error) {
 	case token.MUL: // *x, dereference pointer
 		valueType := b.getLLVMType(unop.X.Type().Underlying().(*types.Pointer).Elem())
 		if b.targetData.TypeAllocSize(valueType) == 0 {
-			// zero-length data
 			return llvm.ConstNull(valueType), nil
-		} else if strings.HasSuffix(unop.X.String(), "$funcaddr") {
-			// CGo function pointer. The cgo part has rewritten CGo function
-			// pointers as stub global variables of the form:
-			//     var C.add unsafe.Pointer
-			// Instead of a load from the global, create a bitcast of the
-			// function pointer itself.
-			name := strings.TrimSuffix(unop.X.(*ssa.Global).Name(), "$funcaddr")
-			pkg := b.fn.Pkg
-			if pkg == nil {
-				pkg = b.fn.Origin().Pkg
-			}
-			_, fn := b.getFunction(pkg.Members[name].(*ssa.Function))
-			if fn.IsNil() {
-				return llvm.Value{}, b.makeError(unop.Pos(), "cgo function not found: "+name)
-			}
-			return fn, nil
 		} else {
 			b.createNilCheck(unop.X, x, "deref")
 			load := b.CreateLoad(valueType, x, "")

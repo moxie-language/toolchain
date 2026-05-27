@@ -26,7 +26,7 @@ func mxContext(goroot, goos, goarch string, buildTags []string) build.Context {
 	ctx.GOOS = goos
 	ctx.GOARCH = goarch
 	ctx.BuildTags = buildTags
-	ctx.CgoEnabled = true
+	ctx.CgoEnabled = false
 	ctx.Compiler = "gc"
 
 	ctx.ReadDir = mxReadDir

@@ -100,8 +100,7 @@ type Package struct {
 	Files        []*ast.File
 	SyntaxFiles  []*syntax.File // bootstrap-parser AST, used by the native type checker (B1)
 	FileHashes   map[string][]byte
-	CFlags       []string // CFlags used during CGo preprocessing (only set if CGo is used)
-	CGoHeaders   []string // text above 'import "C"' lines
+	CFlags       []string
 	EmbedGlobals map[string][]*EmbedFile
 	Pkg          *types.Package
 	info         types.Info
@@ -549,7 +548,6 @@ func (p *Package) parseFiles() ([]*ast.File, error) {
 	var files []*ast.File
 	var fileErrs []error
 
-	// Parse all files (including CgoFiles).
 	parseFile := func(file string) {
 		if !filepath.IsAbs(file) {
 			file = filepath.Join(p.Dir, file)
@@ -564,34 +562,7 @@ func (p *Package) parseFiles() ([]*ast.File, error) {
 	for _, file := range p.GoFiles {
 		parseFile(file)
 	}
-	for _, file := range p.CgoFiles {
-		parseFile(file)
-	}
 
-	// Do CGo processing.
-	// This is done when there are any CgoFiles at all. In that case, len(files)
-	// should be non-zero. However, if len(MxFiles) == 0 and len(CgoFiles) == 1
-	// and there is a syntax error in a CGo file, len(files) may be 0. Don't try
-	// to call cgo.Process in that case as it will only cause issues.
-	if len(p.CgoFiles) != 0 && len(files) != 0 {
-		var initialCFlags []string
-		initialCFlags = append(initialCFlags, p.program.config.CFlags()...)
-		initialCFlags = append(initialCFlags, "-I"+p.Dir)
-		generated, headerCode, cflags, ldflags, accessedFiles, errs := processCgoFiles(files, p.program.workingDir, p.ImportPath, p.program.fset, initialCFlags, p.program.config.GOOS())
-		p.CFlags = append(initialCFlags, cflags...)
-		p.CGoHeaders = headerCode
-		for path, hash := range accessedFiles {
-			p.FileHashes[path] = hash
-		}
-		if errs != nil {
-			fileErrs = append(fileErrs, errs...)
-		}
-		files = append(files, generated...)
-		p.program.LDFlags = append(p.program.LDFlags, ldflags...)
-	}
-
-	// Only return an error after CGo processing, so that errors in parsing and
-	// CGo can be reported together.
 	if len(fileErrs) != 0 {
 		return nil, Errors{p, fileErrs}
 	}

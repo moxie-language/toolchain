@@ -260,7 +260,11 @@ func (c *compilerContext) maybeCreateSyntheticFunction(fn *ssa.Function, llvmFn 
 	// should be created right away.
 	// The exception is the package initializer, which does appear in the
 	// *ssa.Package members and so shouldn't be created here.
-	if fn.Synthetic != "" && fn.Synthetic != "package initializer" && fn.Synthetic != "generic function" && fn.Synthetic != "range-over-func yield" {
+	if fn.Synthetic == "from type information" && c.isFFIFunction(fn) {
+		c.createFFIFunction(fn, llvmFn)
+		return
+	}
+	if fn.Synthetic != "" && fn.Synthetic != "package initializer" && fn.Synthetic != "generic function" && fn.Synthetic != "range-over-func yield" && fn.Synthetic != "from type information" {
 		if origin := fn.Origin(); origin != nil && origin.RelString(nil) == "internal/abi.Escape" {
 			// This is a special implementation or internal/abi.Escape, which
 			// can only really be implemented in the compiler.
@@ -299,8 +303,16 @@ func (c *compilerContext) getFunctionInfo(f *ssa.Function) functionInfo {
 		return info
 	}
 	info := functionInfo{
-		// Pick the default linkName.
 		linkName: f.RelString(nil),
+	}
+
+	if f.Package() != nil && f.Package().Pkg != nil {
+		pkgPath := f.Package().Pkg.Path()
+		if loader.MXHSymbol(pkgPath, f.Name()) != "" {
+			info.exported = true
+			c.functionInfos[f] = info
+			return info
+		}
 	}
 
 	// Check for a few runtime functions that are treated specially.
@@ -457,15 +469,6 @@ func (c *compilerContext) parsePragmas(info *functionInfo, f *ssa.Function) {
 			// declarations, not definitions.
 			if len(f.Blocks) == 0 {
 				info.noescape = true
-			}
-		case "//go:variadic":
-			// The //go:variadic pragma is emitted by the CGo preprocessing
-			// pass for C variadic functions. This includes both explicit
-			// (with ...) and implicit (no parameters in signature)
-			// functions.
-			if strings.HasPrefix(f.Name(), "_Cgo_") {
-				// This prefix was created as a result of CGo preprocessing.
-				info.variadic = true
 			}
 		}
 	}

@@ -63,4 +63,4 @@ echo "add to your shell profile:" >&2
 echo "  export PATH=\"$INSTALL_DIR/bin:\$PATH\"" >&2
 echo "  export MOXIEROOT=\"$INSTALL_DIR\"" >&2
 echo "" >&2
-echo "moxie requires LLVM 19 (libLLVM-19, libclang)." >&2
+echo "moxie requires LLVM 21 (libLLVM-21, clang-21, lld-21)." >&2

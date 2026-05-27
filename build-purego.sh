@@ -1,12 +1,12 @@
 #!/bin/bash
-# Build the Moxie compiler with PureGo LLVM bindings (no CGo LLVM dependency).
-# Still needs CGo for libclang (cgo package).
+# Build the Moxie compiler with PureGo LLVM bindings.
+# No C/C++ toolchain needed at build time.
+# Runtime deps: libLLVM-21.so, clang-21, ld.lld-21 (distro packages).
 set -e
 
 REAL_GOROOT=$(go env GOROOT)
 MOXIE_GOROOT="${MOXIE_GOROOT_CACHE:-/tmp/moxie-goroot}"
 
-# Create or update patched GOROOT (same as build.sh).
 STAMP="$MOXIE_GOROOT/.stamp"
 GO_VER=$(go version)
 PATCH_HASH=$(sha256sum build/patch-gotypes.go | cut -d' ' -f1)
@@ -41,19 +41,7 @@ if [ ! -f "$MOXIE_GOROOT/pkg/include/abi_amd64.h" ]; then
     cp "$REAL_GOROOT/src/runtime/cgo/abi_amd64.h" "$MOXIE_GOROOT/pkg/include/" 2>/dev/null || true
 fi
 
-# Detect LLVM 19 for libclang (still needed for the cgo package).
-LLVM_PREFIX="/usr/lib/llvm19"
-if [ ! -d "$LLVM_PREFIX" ]; then
-    LLVM_PREFIX="/usr/lib/llvm-19"
-fi
-if [ ! -d "$LLVM_PREFIX" ]; then
-    echo "error: LLVM 19 not found (needed for libclang)" >&2
-    exit 1
-fi
-
 export GOROOT="$MOXIE_GOROOT"
 export GOWORK=off
-export CGO_CFLAGS="-I${LLVM_PREFIX}/include"
-export CGO_LDFLAGS="-L${LLVM_PREFIX}/lib -lclang"
 
 exec go build -mod=vendor -tags "purego" -o moxie-purego "$@" .

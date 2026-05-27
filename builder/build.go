@@ -361,7 +361,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 
 				// Compile AST to IR.
 				var mod llvm.Module
-				if useBootstrap && len(pkg.CgoFiles) == 0 && pkg.ImportPath == lprogram.MainPkg().ImportPath {
+				if useBootstrap && pkg.ImportPath == lprogram.MainPkg().ImportPath {
 					var err error
 					mod, err = bootstrapCompilePackage(pkg, config.Triple())
 					if err != nil {
@@ -378,50 +378,6 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				defer mod.Dispose()
 				if err := llvm.VerifyModule(mod, llvm.PrintMessageAction); err != nil {
 					return errors.New("verification error after compiling package " + pkg.ImportPath)
-				}
-
-				// Load bitcode of CGo headers and join the modules together.
-				// This may seem vulnerable to cache problems, but this is not
-				// the case: the Go code that was just compiled already tracks
-				// all C files that are read and hashes them.
-				// These headers could be compiled in parallel but the benefit
-				// is so small that it's probably not worth parallelizing.
-				// Packages are compiled independently anyway.
-				for _, cgoHeader := range pkg.CGoHeaders {
-					// Store the header text in a temporary file.
-					f, err := os.CreateTemp(tmpdir, "cgosnippet-*.c")
-					if err != nil {
-						return err
-					}
-					_, err = f.Write([]byte(cgoHeader))
-					if err != nil {
-						return err
-					}
-					f.Close()
-
-					// Compile the code (if there is any) to bitcode.
-					flags := append([]string{"-c", "-emit-llvm", "-o", f.Name() + ".bc", f.Name()}, pkg.CFlags...)
-					if config.Options.PrintCommands != nil {
-						config.Options.PrintCommands("clang", flags...)
-					}
-					err = runCCompiler(flags...)
-					if err != nil {
-						return &commandError{"failed to build CGo header", "", err}
-					}
-
-					// Load and link the bitcode.
-					// This makes it possible to optimize the functions defined
-					// in the header together with the Go code. In particular,
-					// this allows inlining. It also ensures there is only one
-					// file per package to cache.
-					headerMod, err := mod.Context().ParseBitcodeFile(f.Name() + ".bc")
-					if err != nil {
-						return fmt.Errorf("failed to load bitcode file: %w", err)
-					}
-					err = llvm.LinkModules(mod, headerMod)
-					if err != nil {
-						return fmt.Errorf("failed to link module: %w", err)
-					}
 				}
 
 				// Erase all globals that are part of the undefinedGlobals list.
@@ -740,15 +696,12 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		linkerDependencies = append(linkerDependencies, job)
 	}
 
-	// Add jobs to compile C files in all packages. This is part of CGo.
-	// TODO: do this as part of building the package to be able to link the
-	// bitcode files together.
 	for _, pkg := range lprogram.Sorted() {
 		pkg := pkg
 		for _, filename := range pkg.CFiles {
 			abspath := filepath.Join(pkg.OriginalDir(), filename)
 			job := &compileJob{
-				description: "compile CGo file " + abspath,
+				description: "compile C file " + abspath,
 				run: func(job *compileJob) error {
 					result, err := compileAndCacheCFile(abspath, tmpdir, pkg.CFlags, config.Options.PrintCommands)
 					job.result = result
@@ -757,12 +710,6 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			}
 			linkerDependencies = append(linkerDependencies, job)
 		}
-	}
-
-	// Linker flags from CGo lines:
-	//     #cgo LDFLAGS: foo
-	if len(lprogram.LDFlags) > 0 {
-		ldflags = append(ldflags, lprogram.LDFlags...)
 	}
 
 	// Add libc dependencies, if they exist.

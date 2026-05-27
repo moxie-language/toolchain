@@ -19,9 +19,25 @@ func MXHProtocolsDir() string {
 	return filepath.Join(goenv.Get("GOCACHE"), "mxinstall", "protocols")
 }
 
+// mxhLibraries maps import paths to their shared library paths for FFI packages.
+var mxhLibraries = map[string]string{}
+
+// mxhSymbols maps "importpath.FuncName" to the C symbol name.
+var mxhSymbols = map[string]string{}
+
+// MXHLibrary returns the shared library path for an mxh FFI package,
+// or empty string if the package is not an FFI package.
+func MXHLibrary(importPath string) string {
+	return mxhLibraries[importPath]
+}
+
+// MXHSymbol returns the C symbol name for an mxh FFI function.
+func MXHSymbol(importPath, funcName string) string {
+	return mxhSymbols[importPath+"."+funcName]
+}
+
 // synthMXHPackage reads a .mxh file from path and returns a synthetic
-// *types.Package containing the declared struct types. Methods are not
-// declared; the compiler uses IsExternalMXH to identify these types.
+// *types.Package containing declared struct types and FFI function signatures.
 func synthMXHPackage(importPath, mxhPath string) (*types.Package, error) {
 	f, err := os.Open(mxhPath)
 	if err != nil {
@@ -34,13 +50,16 @@ func synthMXHPackage(importPath, mxhPath string) (*types.Package, error) {
 		return nil, fmt.Errorf("mxh %s: %w", mxhPath, err)
 	}
 
-	// Derive package name from the last segment of the import path.
 	pkgName := importPath
 	if i := strings.LastIndexByte(pkgName, '/'); i >= 0 {
 		pkgName = pkgName[i+1:]
 	}
 
 	pkg := types.NewPackage(importPath, pkgName)
+
+	if mxh.Library != "" {
+		mxhLibraries[importPath] = mxh.Library
+	}
 
 	for _, td := range mxh.Types {
 		var vars []*types.Var
@@ -55,9 +74,33 @@ func synthMXHPackage(importPath, mxhPath string) (*types.Package, error) {
 		underlying := types.NewStruct(vars, nil)
 		typeName := types.NewTypeName(token.NoPos, pkg, td.Name, nil)
 		types.NewNamed(typeName, underlying, nil)
-
-		// Export the type name into the package scope.
 		pkg.Scope().Insert(typeName)
+	}
+
+	for _, fd := range mxh.Funcs {
+		var params []*types.Var
+		for _, p := range fd.Params {
+			pt, err := parseTypeString(p.Type)
+			if err != nil {
+				return nil, fmt.Errorf("mxh %s func %s param %s: %w", mxhPath, fd.Name, p.Name, err)
+			}
+			params = append(params, types.NewVar(token.NoPos, pkg, p.Name, pt))
+		}
+		var results []*types.Var
+		for _, r := range fd.Results {
+			rt, err := parseTypeString(r.Type)
+			if err != nil {
+				return nil, fmt.Errorf("mxh %s func %s result: %w", mxhPath, fd.Name, err)
+			}
+			results = append(results, types.NewVar(token.NoPos, pkg, r.Name, rt))
+		}
+		sig := types.NewSignatureType(nil, nil, nil,
+			types.NewTuple(params...),
+			types.NewTuple(results...),
+			false)
+		fn := types.NewFunc(token.NoPos, pkg, fd.Name, sig)
+		pkg.Scope().Insert(fn)
+		mxhSymbols[importPath+"."+fd.Name] = fd.Symbol
 	}
 
 	pkg.MarkComplete()
