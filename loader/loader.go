@@ -17,7 +17,6 @@ import (
 	"strings"
 	"unicode"
 
-	"moxie/cgo"
 	"moxie/syntax"
 	"moxie/compileopts"
 	"moxie/goenv"
@@ -578,7 +577,7 @@ func (p *Package) parseFiles() ([]*ast.File, error) {
 		var initialCFlags []string
 		initialCFlags = append(initialCFlags, p.program.config.CFlags()...)
 		initialCFlags = append(initialCFlags, "-I"+p.Dir)
-		generated, headerCode, cflags, ldflags, accessedFiles, errs := cgo.Process(files, p.program.workingDir, p.ImportPath, p.program.fset, initialCFlags, p.program.config.GOOS())
+		generated, headerCode, cflags, ldflags, accessedFiles, errs := processCgoFiles(files, p.program.workingDir, p.ImportPath, p.program.fset, initialCFlags, p.program.config.GOOS())
 		p.CFlags = append(initialCFlags, cflags...)
 		p.CGoHeaders = headerCode
 		for path, hash := range accessedFiles {
