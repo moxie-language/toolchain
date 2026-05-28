@@ -6,13 +6,19 @@ set -e
 REAL_GOROOT=$(go env GOROOT)
 MOXIE_GOROOT="${MOXIE_GOROOT_CACHE:-/tmp/moxie-goroot}"
 
-# Detect LLVM 19.
-LLVM_PREFIX="/usr/lib/llvm19"
-if [ ! -d "$LLVM_PREFIX" ]; then
-    LLVM_PREFIX="/usr/lib/llvm-19"
-fi
-if [ ! -d "$LLVM_PREFIX" ]; then
-    echo "error: LLVM 19 not found at /usr/lib/llvm19 or /usr/lib/llvm-19" >&2
+LLVM_PREFIX=""
+LLVM_VER=""
+for v in 21 19; do
+    for p in /usr/lib/llvm-$v /usr/lib/llvm$v /usr/lib/llvm/$v; do
+        if [ -d "$p" ]; then
+            LLVM_PREFIX="$p"
+            LLVM_VER="$v"
+            break 2
+        fi
+    done
+done
+if [ -z "$LLVM_PREFIX" ]; then
+    echo "error: LLVM (21 or 19) not found" >&2
     exit 1
 fi
 
@@ -57,8 +63,7 @@ fi
 export GOROOT="$MOXIE_GOROOT"
 export GOWORK=off
 export GOTOOLCHAIN=local
-export CGO_CPPFLAGS="-I${LLVM_PREFIX}/include -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS"
-export CGO_CFLAGS="-I${LLVM_PREFIX}/include"
-export CGO_LDFLAGS="-L${LLVM_PREFIX}/lib -lLLVM-19 -lclang"
+export CGO_ENABLED=0
+export LLVM_LIB_PATH="${LLVM_PREFIX}/lib/libLLVM-${LLVM_VER}.so"
 
-exec "$MOXIE_GOROOT/bin/go" build -mod=vendor -tags llvm19 -o moxie "$@" .
+exec "$MOXIE_GOROOT/bin/go" build -mod=vendor -tags purego -o moxie "$@" .

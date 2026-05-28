@@ -366,9 +366,7 @@ func shouldSkipFile(name string) bool {
 	if hasSuffix(name, "_test.go") || hasSuffix(name, "_test.mx") {
 		return true
 	}
-	skip := []string{"_darwin", "_windows", "_wasm", "_wasip1", "_wasip2",
-		"_baremetal", "_arm", "_386", "_riscv", "_mips",
-		"_nintendoswitch", "_wasm_unknown"}
+	skip := []string{"_wasm"}
 	base := name
 	if hasSuffix(base, ".go") {
 		base = base[:len(base)-3]
@@ -433,7 +431,7 @@ func discoverPkg(pkgPath, root string) *pkgInfo {
 	mxFiles := listFiles(dir, ".mx")
 	cFiles := listFiles(dir, ".c")
 	allMx := append(mxFiles, goFiles...)
-	forbidden := []string{"darwin", "windows", "wasm", "wasip1", "wasip2", "js"}
+	forbidden := []string{"wasm", "js"}
 	var files []string
 	for _, f := range allMx {
 		if shouldSkipFile(f) {

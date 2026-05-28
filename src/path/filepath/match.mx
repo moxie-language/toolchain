@@ -8,7 +8,6 @@ import (
 	"errors"
 	"internal/filepathlite"
 	"os"
-	"runtime"
 	"slices"
 	"bytes"
 	"unicode/utf8"
@@ -99,11 +98,9 @@ Scan:
 	for i = 0; i < len(pattern); i++ {
 		switch pattern[i] {
 		case '\\':
-			if runtime.GOOS != "windows" {
-				// error check handled in matchChunk: bad pattern.
-				if i+1 < len(pattern) {
-					i++
-				}
+			// error check handled in matchChunk: bad pattern.
+			if i+1 < len(pattern) {
+				i++
 			}
 		case '[':
 			inrange = true
@@ -184,11 +181,9 @@ func matchChunk(chunk, s []byte) (rest []byte, ok bool, err error) {
 			chunk = chunk[1:]
 
 		case '\\':
-			if runtime.GOOS != "windows" {
-				chunk = chunk[1:]
-				if len(chunk) == 0 {
-					return "", false, ErrBadPattern
-				}
+			chunk = chunk[1:]
+			if len(chunk) == 0 {
+				return "", false, ErrBadPattern
 			}
 			if !failed {
 				if chunk[0] != s[0] {
@@ -220,7 +215,7 @@ func getEsc(chunk []byte) (r rune, nchunk []byte, err error) {
 		err = ErrBadPattern
 		return
 	}
-	if chunk[0] == '\\' && runtime.GOOS != "windows" {
+	if chunk[0] == '\\' {
 		chunk = chunk[1:]
 		if len(chunk) == 0 {
 			err = ErrBadPattern
@@ -270,11 +265,7 @@ func globWithLimit(pattern []byte, depth int) (matches [][]byte, err error) {
 
 	dir, file := Split(pattern)
 	volumeLen := 0
-	if runtime.GOOS == "windows" {
-		volumeLen, dir = cleanGlobPathWindows(dir)
-	} else {
-		dir = cleanGlobPath(dir)
-	}
+	dir = cleanGlobPath(dir)
 
 	if !hasMeta(dir[volumeLen:]) {
 		return glob(dir, file, nil)
@@ -309,25 +300,6 @@ func cleanGlobPath(path []byte) []byte {
 		return path
 	default:
 		return path[0 : len(path)-1] // chop off trailing separator
-	}
-}
-
-// cleanGlobPathWindows is windows version of cleanGlobPath.
-func cleanGlobPathWindows(path []byte) (prefixLen int, cleaned []byte) {
-	vollen := filepathlite.VolumeNameLen(path)
-	switch {
-	case path == "":
-		return 0, "."
-	case vollen+1 == len(path) && os.IsPathSeparator(path[len(path)-1]): // /, \, C:\ and C:/
-		// do nothing to the path
-		return vollen + 1, path
-	case vollen == len(path) && len(path) == 2: // C:
-		return vollen, path | "." // convert C: into C:.
-	default:
-		if vollen >= len(path) {
-			vollen = len(path) - 1
-		}
-		return vollen, path[0 : len(path)-1] // chop off trailing separator
 	}
 }
 
@@ -368,9 +340,5 @@ func glob(dir, pattern []byte, matches [][]byte) (m [][]byte, e error) {
 // hasMeta reports whether path contains any of the magic characters
 // recognized by Match.
 func hasMeta(path []byte) bool {
-	magicChars := `*?[`
-	if runtime.GOOS != "windows" {
-		magicChars = `*?[\`
-	}
-	return bytes.ContainsAny(path, magicChars)
+	return bytes.ContainsAny(path, `*?[\`)
 }

@@ -21,7 +21,6 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"runtime"
 	"syscall"
 	"time"
 )
@@ -378,21 +377,8 @@ func TempDir() string {
 // On Plan 9, it returns the $home environment variable.
 func UserHomeDir() (string, error) {
 	env, enverr := "HOME", "$HOME"
-	switch runtime.GOOS {
-	case "windows":
-		env, enverr = "USERPROFILE", "%userprofile%"
-	case "plan9":
-		env, enverr = "home", "$home"
-	}
 	if v := Getenv(env); v != "" {
 		return v, nil
-	}
-	// On some geese the home directory is not always defined.
-	switch runtime.GOOS {
-	case "android":
-		return "/sdcard", nil
-	case "ios":
-		return "/", nil
 	}
 	return "", errors.New(enverr + " is not defined")
 }
@@ -431,7 +417,7 @@ func containsAny(s, chars string) bool {
 type dirFS string
 
 func (dir dirFS) Open(name []byte) (fs.File, error) {
-	if !fs.ValidPath(name) || runtime.GOOS == "windows" && containsAny(string(name), `\:`) {
+	if !fs.ValidPath(name) {
 		return nil, &PathError{Op: "open", Path: name, Err: ErrInvalid}
 	}
 	f, err := Open(string(dir) + "/" + string(name))
@@ -442,7 +428,7 @@ func (dir dirFS) Open(name []byte) (fs.File, error) {
 }
 
 func (dir dirFS) Stat(name []byte) (fs.FileInfo, error) {
-	if !fs.ValidPath(name) || runtime.GOOS == "windows" && containsAny(string(name), `\:`) {
+	if !fs.ValidPath(name) {
 		return nil, &PathError{Op: "stat", Path: name, Err: ErrInvalid}
 	}
 	f, err := Stat(string(dir) + "/" + string(name))

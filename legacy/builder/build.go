@@ -99,8 +99,6 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		compiler.ResetAllocSites()
 	}
 
-	useBootstrap := os.Getenv("MOXIE_BOOTSTRAP_COMPILE") == "1" && bootstrapAvailable()
-
 	// Read the build ID of the moxie binary.
 	// Used as a cache key for package builds.
 	compilerBuildID, err := ReadBuildID()
@@ -151,9 +149,6 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	root := goenv.Get("MOXIEROOT")
 	var libcDependencies []*compileJob
 	switch config.Target.Libc {
-	case "darwin-libSystem":
-		libcJob := makeDarwinLibSystemJob(config, tmpdir)
-		libcDependencies = append(libcDependencies, libcJob)
 	case "musl":
 		var unlock func()
 		libcJob, unlock, err := libMusl.load(config, tmpdir)
@@ -361,19 +356,10 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				}
 
 				// Compile AST to IR.
-				var mod llvm.Module
-				if useBootstrap && pkg.ImportPath == lprogram.MainPkg().ImportPath {
-					var err error
-					mod, err = bootstrapCompilePackage(pkg, config.Triple())
-					if err != nil {
-						return fmt.Errorf("bootstrap compile %s: %w", pkg.ImportPath, err)
-					}
-				} else {
-					var errs []error
-					mod, errs = compiler.CompilePackage(pkg.ImportPath, pkg, program.Package(pkg.Pkg), machine, compilerConfig, config.DumpSSA(), config.Options.PrintAllocs)
-					if errs != nil {
-						return newMultiError(errs, pkg.ImportPath)
-					}
+				var errs []error
+				mod, errs := compiler.CompilePackage(pkg.ImportPath, pkg, program.Package(pkg.Pkg), machine, compilerConfig, config.DumpSSA(), config.Options.PrintAllocs)
+				if errs != nil {
+					return newMultiError(errs, pkg.ImportPath)
 				}
 				defer mod.Context().Dispose()
 				defer mod.Dispose()

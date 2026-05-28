@@ -1557,6 +1557,7 @@ func (fb *funcBuilder) buildFuncLit(e *syntax.FuncLit) Value {
 		obj := fb.lookupObject(fv.name)
 		if obj != nil {
 			if alloc, ok := fb.vars[obj]; ok {
+				alloc.Heap = true
 				bindings[i] = alloc
 			}
 		}

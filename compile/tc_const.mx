@@ -41,6 +41,13 @@ func (c *Checker) checkConstDeclAt(d *ConstDecl, typExpr Expr, valExpr Expr, iot
 			cv = vals[i]
 		}
 		obj.val = cv
+		if c.pkg.path == "strconv" {
+			cvStr := "nil"
+			if cv != nil {
+				cvStr = cv.String()
+			}
+			writeStr(2, "  TC-CONST-SET name=" | name.Value | " val=" | cvStr | " pkg=" | c.pkg.path | "\n")
+		}
 		if typ != nil {
 			obj.typ = typ
 		} else if cv != nil {
@@ -78,9 +85,13 @@ func (c *Checker) evalConst(e Expr, iotaVal int64) ConstVal {
 		}
 		_, obj := c.lookup(e.Value, c.pkg.scope)
 		if obj == nil {
+			writeStr(2, "  CONST-LOOKUP-FAIL name=" | e.Value | " pkg=" | c.pkg.path | "\n")
 			return nil
 		}
 		if k, ok := obj.(*TCConst); ok {
+			if k.val == nil {
+				writeStr(2, "  CONST-REF-NIL name=" | e.Value | " pkg=" | c.pkg.path | "\n")
+			}
 			return k.val
 		}
 		return nil
@@ -114,6 +125,11 @@ func (c *Checker) evalConst(e Expr, iotaVal int64) ConstVal {
 		}
 		targetType := c.resolveTypeExpr(e.Fun)
 		if targetType == nil {
+			funName := "?"
+			if id, ok2 := e.Fun.(*Name); ok2 {
+				funName = id.Value
+			}
+			writeStr(2, "  CONST-CONV-FAIL fun=" | funName | " pkg=" | c.pkg.path | "\n")
 			return nil
 		}
 		return convertConstLocal(inner, targetType)
@@ -135,8 +151,7 @@ func evalBasicLitLocal(e *BasicLit) ConstVal {
 	case RuneLit:
 		s := interpStringLocal(e.Value)
 		if len(s) > 0 {
-			r := []rune(s)
-			return constInt{int64(r[0])}
+			return constInt{int64(decodeFirstRune(s))}
 		}
 		return constInt{0}
 	}
@@ -401,9 +416,14 @@ func (c *Checker) evalConstOp(e *Operation, iotaVal int64) ConstVal {
 	if e.Y == nil {
 		x := c.evalConst(e.X, iotaVal)
 		if x == nil {
+			writeStr(2, "  CONSTOP-UNARY-NIL-X pkg=" | c.pkg.path | "\n")
 			return nil
 		}
-		return evalUnaryLocal(e.Op, x)
+		r := evalUnaryLocal(e.Op, x)
+		if r == nil {
+			writeStr(2, "  CONSTOP-UNARY-NIL-R pkg=" | c.pkg.path | " x=" | x.String() | "\n")
+		}
+		return r
 	}
 	x := c.evalConst(e.X, iotaVal)
 	y := c.evalConst(e.Y, iotaVal)
@@ -415,6 +435,8 @@ func (c *Checker) evalConstOp(e *Operation, iotaVal int64) ConstVal {
 
 func evalUnaryLocal(op Operator, x ConstVal) ConstVal {
 	switch op {
+	case Add:
+		return x
 	case Sub:
 		if ci, ok := x.(constInt); ok {
 			return constInt{-ci.v}
@@ -578,8 +600,7 @@ func convertConstLocal(v ConstVal, target Type) ConstVal {
 	case b.info&IsString != 0:
 		if cvKind(v) == 3 {
 			n := cvInt(v)
-			r := rune(n)
-			return constStr{string(r)}
+			return constStr{runeToStr(rune(n))}
 		}
 		return v
 	}
@@ -664,4 +685,51 @@ func cvStr(v ConstVal) string {
 		return cs.s
 	}
 	return ""
+}
+
+func decodeFirstRune(s string) int32 {
+	b := s[0]
+	if b < 0x80 {
+		return int32(b)
+	}
+	if b < 0xC0 {
+		return int32(b)
+	}
+	if b < 0xE0 && len(s) >= 2 {
+		return int32(b&0x1F)<<6 | int32(s[1]&0x3F)
+	}
+	if b < 0xF0 && len(s) >= 3 {
+		return int32(b&0x0F)<<12 | int32(s[1]&0x3F)<<6 | int32(s[2]&0x3F)
+	}
+	if len(s) >= 4 {
+		return int32(b&0x07)<<18 | int32(s[1]&0x3F)<<12 | int32(s[2]&0x3F)<<6 | int32(s[3]&0x3F)
+	}
+	return int32(b)
+}
+
+func runeToStr(r rune) string {
+	if r < 0 || r > 0x10FFFF {
+		r = 0xFFFD
+	}
+	var buf [4]byte
+	if r <= 0x7F {
+		buf[0] = byte(r)
+		return string(buf[:1])
+	}
+	if r <= 0x7FF {
+		buf[0] = byte(0xC0 | (r >> 6))
+		buf[1] = byte(0x80 | (r & 0x3F))
+		return string(buf[:2])
+	}
+	if r <= 0xFFFF {
+		buf[0] = byte(0xE0 | (r >> 12))
+		buf[1] = byte(0x80 | ((r >> 6) & 0x3F))
+		buf[2] = byte(0x80 | (r & 0x3F))
+		return string(buf[:3])
+	}
+	buf[0] = byte(0xF0 | (r >> 18))
+	buf[1] = byte(0x80 | ((r >> 12) & 0x3F))
+	buf[2] = byte(0x80 | ((r >> 6) & 0x3F))
+	buf[3] = byte(0x80 | (r & 0x3F))
+	return string(buf[:4])
 }

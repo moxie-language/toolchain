@@ -18,7 +18,7 @@ if [ -z "$LLVM_PREFIX" ]; then
     exit 1
 fi
 
-VENDOR="$(cd "$(dirname "$0")/../../vendor/tinygo.org/x/go-llvm" && pwd)"
+VENDOR="$(cd "$(dirname "$0")/../legacy/vendor/tinygo.org/x/go-llvm" && pwd)"
 OUT="$(dirname "$0")/libmoxie-llvm-glue.so"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

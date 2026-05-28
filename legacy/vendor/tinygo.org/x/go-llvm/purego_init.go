@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -50,20 +49,13 @@ func findLLVM() string {
 		"/usr/lib/libLLVM-21.so",
 		"/usr/lib64/libLLVM-21.so",
 		"/usr/lib/llvm-21/lib/libLLVM-21.so",
+		"/usr/lib/llvm21/lib/libLLVM-21.so",
 		"/usr/local/lib/libLLVM-21.so",
 		"/usr/lib/libLLVM-19.so",
 		"/usr/lib64/libLLVM-19.so",
 		"/usr/lib/llvm-19/lib/libLLVM-19.so",
+		"/usr/lib/llvm19/lib/libLLVM-19.so",
 		"/usr/local/lib/libLLVM-19.so",
-		"/opt/homebrew/lib/libLLVM-19.dylib",
-	}
-	if runtime.GOOS == "darwin" {
-		candidates = append(candidates,
-			"/usr/local/opt/llvm@21/lib/libLLVM.dylib",
-			"/opt/homebrew/opt/llvm@21/lib/libLLVM.dylib",
-			"/usr/local/opt/llvm@19/lib/libLLVM.dylib",
-			"/opt/homebrew/opt/llvm@19/lib/libLLVM.dylib",
-		)
 	}
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
@@ -82,12 +74,11 @@ func findGlue() string {
 	candidates := []string{
 		filepath.Join(dir, "libmoxie-llvm-glue.so"),
 		filepath.Join(dir, "..", "lib", "libmoxie-llvm-glue.so"),
-		filepath.Join(dir, "bootstrap", "llvm-glue", "libmoxie-llvm-glue.so"),
-		filepath.Join(dir, "..", "bootstrap", "llvm-glue", "libmoxie-llvm-glue.so"),
+		filepath.Join(dir, "..", "llvm-glue", "libmoxie-llvm-glue.so"),
 	}
 	moxieRoot := os.Getenv("MOXIEROOT")
 	if moxieRoot != "" {
-		candidates = append(candidates, filepath.Join(moxieRoot, "bootstrap", "llvm-glue", "libmoxie-llvm-glue.so"))
+		candidates = append(candidates, filepath.Join(moxieRoot, "llvm-glue", "libmoxie-llvm-glue.so"))
 	}
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {

@@ -134,6 +134,11 @@ func (prog *SSAProgram) ImportedPackage(path string) *SSAPackage {
 	return prog.imported[path]
 }
 
+func (prog *SSAProgram) release() {
+	prog.imported = nil
+	prog.packages = nil
+}
+
 // SSA Package.
 type SSAPackage struct {
 	Prog    *SSAProgram
@@ -164,13 +169,34 @@ func (p *SSAPackage) ExternalFunc(name string, sig *Signature) *SSAFunction {
 	return fn
 }
 
+func (p *SSAPackage) release() {
+	for k, m := range p.Members {
+		if fn, ok := m.(*SSAFunction); ok {
+			fn.Blocks = nil
+			fn.Locals = nil
+			fn.AnonFuncs = nil
+			fn.Params = nil
+			fn.FreeVars = nil
+			fn.NamedResults = nil
+			fn.vars = nil
+			fn.Pkg = nil
+			fn.Prog = nil
+		}
+		delete(p.Members, k)
+	}
+	p.Prog = nil
+	p.Pkg = nil
+}
+
 // SSA Function.
 type SSAFunction struct {
-	name      string
-	object    *TCFunc
-	Signature *Signature
-	pos       int32
-	Synthetic string
+	name           string
+	object         *TCFunc
+	Signature      *Signature
+	pos            int32
+	Synthetic      string
+	externalSymbol string
+	isExternC      bool
 
 	Pkg  *SSAPackage
 	Prog *SSAProgram
@@ -350,9 +376,10 @@ func (b *SSABuiltin) SSAPos() int32           { return 0 }
 
 // CallCommon describes a function/method call.
 type SSACallCommon struct {
-	Value SSAValue
-	Args  []SSAValue
-	pos   int32
+	Value   SSAValue
+	Args    []SSAValue
+	pos     int32
+	HasDots bool
 }
 
 // -- Instruction types --

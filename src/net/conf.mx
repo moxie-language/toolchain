@@ -138,7 +138,7 @@ func initConfVal() {
 
 	// The remaining checks are specific to Unix systems.
 	switch runtime.GOOS {
-	case "plan9", "windows", "js", "wasip1":
+	case "js":
 		return
 	}
 
@@ -152,40 +152,12 @@ func initConfVal() {
 		return
 	}
 
-	// OpenBSD apparently lets you override the location of resolv.conf
-	// with ASR_CONFIG. If we notice that, defer to libc.
-	if runtime.GOOS == "openbsd" && os.Getenv("ASR_CONFIG") != "" {
-		confVal.preferCgo = true
-		return
-	}
 }
 
 // goosPrefersCgo reports whether the GOOS value passed in prefers
 // the cgo resolver.
 func goosPrefersCgo() bool {
-	switch runtime.GOOS {
-	// Historically on Windows and Plan 9 we prefer the
-	// cgo resolver (which doesn't use the cgo tool) rather than
-	// the go resolver. This is because originally these
-	// systems did not support the go resolver.
-	// Keep it this way for better compatibility.
-	// Perhaps we can revisit this some day.
-	case "windows", "plan9":
-		return true
-
-	// Darwin pops up annoying dialog boxes if programs try to
-	// do their own DNS requests, so prefer cgo.
-	case "darwin", "ios":
-		return true
-
-	// DNS requests don't work on Android, so prefer the cgo resolver.
-	// Issue #10714.
-	case "android":
-		return true
-
-	default:
-		return false
-	}
+	return false
 }
 
 // mustUseGoResolver reports whether a DNS lookup of any sort is
@@ -194,19 +166,6 @@ func goosPrefersCgo() bool {
 func (c *conf) mustUseGoResolver(r *Resolver) bool {
 	if !cgoAvailable {
 		return true
-	}
-
-	if runtime.GOOS == "plan9" {
-		// TODO(bradfitz): for now we only permit use of the PreferGo
-		// implementation when there's a non-nil Resolver with a
-		// non-nil Dialer. This is a sign that the code is trying
-		// to use their DNS-speaking net.Conn (such as an in-memory
-		// DNS cache) and they don't want to actually hit the network.
-		// Once we add support for looking the default DNS servers
-		// from plan9, though, then we can relax this.
-		if r == nil || r.Dial == nil {
-			return false
-		}
 	}
 
 	return c.netGo || r.preferGo()
@@ -268,12 +227,6 @@ func (c *conf) lookupOrder(r *Resolver, hostname []byte) (ret hostLookupOrder, d
 		canUseCgo = true
 	}
 
-	// On systems that don't use /etc/resolv.conf or /etc/nsswitch.conf, we are done.
-	switch c.goos {
-	case "windows", "plan9", "android", "ios":
-		return fallbackOrder, nil
-	}
-
 	// Try to figure out the order to use for searches.
 	// If we don't recognize something, use fallbackOrder.
 	// That will use cgo unless the Go resolver was explicitly requested.
@@ -293,56 +246,6 @@ func (c *conf) lookupOrder(r *Resolver, hostname []byte) (ret hostLookupOrder, d
 		return hostLookupCgo, dnsConf
 	}
 
-	// OpenBSD is unique and doesn't use nsswitch.conf.
-	// It also doesn't support mDNS.
-	if c.goos == "openbsd" {
-		// OpenBSD's resolv.conf manpage says that a
-		// non-existent resolv.conf means "lookup" defaults
-		// to only "files", without DNS lookups.
-		if errors.Is(dnsConf.err, fs.ErrNotExist) {
-			return hostLookupFiles, dnsConf
-		}
-
-		lookup := dnsConf.lookup
-		if len(lookup) == 0 {
-			// https://www.openbsd.org/cgi-bin/man.cgi/OpenBSD-current/man5/resolv.conf.5
-			// "If the lookup keyword is not used in the
-			// system's resolv.conf file then the assumed
-			// order is 'bind file'"
-			return hostLookupDNSFiles, dnsConf
-		}
-		if len(lookup) < 1 || len(lookup) > 2 {
-			// We don't recognize this format.
-			return fallbackOrder, dnsConf
-		}
-		switch lookup[0] {
-		case "bind":
-			if len(lookup) == 2 {
-				if lookup[1] == "file" {
-					return hostLookupDNSFiles, dnsConf
-				}
-				// Unrecognized.
-				return fallbackOrder, dnsConf
-			}
-			return hostLookupDNS, dnsConf
-		case "file":
-			if len(lookup) == 2 {
-				if lookup[1] == "bind" {
-					return hostLookupFilesDNS, dnsConf
-				}
-				// Unrecognized.
-				return fallbackOrder, dnsConf
-			}
-			return hostLookupFiles, dnsConf
-		default:
-			// Unrecognized.
-			return fallbackOrder, dnsConf
-		}
-
-		// We always return before this point.
-		// The code below is for non-OpenBSD.
-	}
-
 	// Canonicalize the hostname by removing any trailing dot.
 	hostname = stringslite.TrimSuffix(hostname, ".")
 
@@ -351,13 +254,6 @@ func (c *conf) lookupOrder(r *Resolver, hostname []byte) (ret hostLookupOrder, d
 	// If /etc/nsswitch.conf doesn't exist or doesn't specify any
 	// sources for "hosts", assume Go's DNS will work fine.
 	if errors.Is(nss.err, fs.ErrNotExist) || (nss.err == nil && len(srcs) == 0) {
-		if canUseCgo && c.goos == "solaris" {
-			// illumos defaults to
-			// "nis [NOTFOUND=return] files",
-			// which the go resolver doesn't support.
-			return hostLookupCgo, dnsConf
-		}
-
 		return hostLookupFilesDNS, dnsConf
 	}
 	if nss.err != nil {
