@@ -481,7 +481,7 @@ func shouldSkipFile(name string) bool {
 		}
 	}
 	exact := []string{"pipe", "multi", "scan", "reader", "replace", "search",
-		"ioutil", "iter"}
+		"ioutil"}
 	for _, s := range exact {
 		if base == s {
 			return true
@@ -521,6 +521,16 @@ func hasBuildConstraint(data []byte, forbidden []string) bool {
 	return false
 }
 
+func hasImport(data []byte, pkg string) bool {
+	target := "\"" | pkg | "\""
+	for i := int32(0); i <= int32(len(data))-int32(len(target)); i++ {
+		if string(data[i:i+int32(len(target))]) == target {
+			return true
+		}
+	}
+	return false
+}
+
 type pkgInfo struct {
 	path    string
 	name    string
@@ -541,7 +551,9 @@ func discoverPkg(pkgPath, root string) *pkgInfo {
 	mxFiles := listFiles(dir, ".mx")
 	cFiles := listFiles(dir, ".c")
 	allMx := append(mxFiles, goFiles...)
-	forbidden := []string{"wasm", "js", "ignore", "compiler_bootstrap"}
+	forbidden := []string{"wasm", "js", "ignore", "compiler_bootstrap",
+		"scheduler.tasks", "scheduler.cores", "scheduler.asyncify",
+		"faketime", "baremetal", "nintendoswitch"}
 	var files []string
 	for _, f := range allMx {
 		if shouldSkipFile(f) {
@@ -554,6 +566,18 @@ func discoverPkg(pkgPath, root string) *pkgInfo {
 		bc := hasBuildConstraint(data, forbidden)
 		if bc {
 			writeStr(2, "    skip-constraint: " | f | "\n")
+			continue
+		}
+		fileImps := extractImports(data)
+		skipIter := false
+		for _, imp := range fileImps {
+			if imp == "iter" {
+				skipIter = true
+				break
+			}
+		}
+		if skipIter {
+			writeStr(2, "    skip-iter-import: " | f | "\n")
 			continue
 		}
 		writeStr(2, "    include: " | f | "\n")
@@ -576,6 +600,14 @@ func discoverPkg(pkgPath, root string) *pkgInfo {
 			allImports = appendUniq(allImports, imp)
 		}
 	}
+	writeStr(2, "  discover " | pkgPath | " [")
+	for fi, ff := range files {
+		if fi > 0 {
+			writeStr(2, ", ")
+		}
+		writeStr(2, ff)
+	}
+	writeStr(2, "]\n")
 	return &pkgInfo{
 		path:    pkgPath,
 		name:    pkgName,
@@ -876,12 +908,17 @@ func main() {
 		"@syscall.envs = external global {ptr, i64, i64}\n" |
 		"declare void @io.init(ptr)\n\n" |
 		"define void @runtime.initAll(ptr %context) {\nentry:\n" | stdlibInit | initCalls | "  ret void\n}\n"
+	declared := map[string]bool{"@io.init": true, "@syscall.runtime_envs": true}
 	for _, pkg := range pkgs {
 		compilePath := pkg.path
 		if hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
 		declSym := irGlobalSymbol(compilePath, "init")
+		if declared[declSym] {
+			continue
+		}
+		declared[declSym] = true
 		initAllIR = initAllIR | "declare void " | declSym | "(ptr)\n"
 	}
 	initAllFile := joinPath(tmpdir, "initall.ll")
@@ -898,6 +935,10 @@ func main() {
 	linkArgs := []string{llvmLink, "-o", mergedBc, runtimeBc}
 	shimsBc := joinPath(sysroot, "hashmap_shims.bc")
 	linkArgs = append(linkArgs, shimsBc)
+	runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
+	if _, gerr := os.ReadFile(runtimeGoBc); gerr == nil {
+		linkArgs = append(linkArgs, runtimeGoBc)
+	}
 	linkArgs = append(linkArgs, allBcFiles...)
 	linkArgs = append(linkArgs, initAllBc)
 	rc = run(linkArgs)
