@@ -47,5 +47,10 @@ func (s *Scope) Names() []string {
 	for n := range s.elems {
 		names = append(names, n)
 	}
+	for i := 1; i < len(names); i++ {
+		for j := i; j > 0 && names[j] < names[j-1]; j-- {
+			names[j], names[j-1] = names[j-1], names[j]
+		}
+	}
 	return names
 }

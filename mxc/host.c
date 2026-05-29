@@ -6,6 +6,66 @@
 #include <sys/syscall.h>
 #include <fcntl.h>
 
+int32_t mxc_writefile(const char* path, int32_t pathLen, const char* data, int32_t dataLen, uint32_t mode) {
+    char pbuf[4096];
+    if (pathLen > 4095) pathLen = 4095;
+    memcpy(pbuf, path, pathLen);
+    pbuf[pathLen] = 0;
+    int fd = syscall(SYS_openat, -100, pbuf, O_WRONLY|O_CREAT|O_TRUNC, mode);
+    if (fd < 0) return -1;
+    int32_t written = 0;
+    while (written < dataLen) {
+        long n = syscall(SYS_write, fd, data + written, dataLen - written);
+        if (n <= 0) break;
+        written += (int32_t)n;
+    }
+    syscall(SYS_close, fd);
+    return written;
+}
+
+int32_t mxc_mkdir(const char* path, int32_t pathLen, uint32_t mode) {
+    char pbuf[4096];
+    if (pathLen > 4095) return -1;
+    int i;
+    for (i = 1; i <= pathLen; i++) {
+        if (i == pathLen || path[i] == '/') {
+            memcpy(pbuf, path, i);
+            pbuf[i] = 0;
+            syscall(SYS_mkdirat, -100, pbuf, mode);
+        }
+    }
+    return 0;
+}
+
+int32_t mxc_readfile(const char* path, int32_t pathLen, char* buf, int32_t bufCap) {
+    char pbuf[4096];
+    if (pathLen > 4095) pathLen = 4095;
+    memcpy(pbuf, path, pathLen);
+    pbuf[pathLen] = 0;
+    int fd = syscall(SYS_openat, -100, pbuf, O_RDONLY, 0);
+    if (fd < 0) return -1;
+    int32_t total = 0;
+    while (total < bufCap) {
+        long n = syscall(SYS_read, fd, buf + total, bufCap - total);
+        if (n <= 0) break;
+        total += (int32_t)n;
+    }
+    syscall(SYS_close, fd);
+    return total;
+}
+
+int32_t mxc_filesize(const char* path, int32_t pathLen) {
+    char pbuf[4096];
+    if (pathLen > 4095) pathLen = 4095;
+    memcpy(pbuf, path, pathLen);
+    pbuf[pathLen] = 0;
+    int fd = syscall(SYS_openat, -100, pbuf, O_RDONLY, 0);
+    if (fd < 0) return -1;
+    long size = syscall(SYS_lseek, fd, 0, 2); /* SEEK_END=2 */
+    syscall(SYS_close, fd);
+    return (int32_t)size;
+}
+
 int32_t mxc_run(const char** argv, int32_t argc) {
     int pid = fork();
     if (pid < 0) return -1;

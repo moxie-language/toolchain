@@ -102,6 +102,7 @@ func (pb *ssaPkgBuilder) registerFunc(d *FuncDecl) {
 		return
 	}
 	if d.Name.Value == "init" {
+		writeStr(2, "compile error: init() is not allowed; use main() for package initialization\n")
 		return
 	}
 	var obj *TCFunc
@@ -126,7 +127,96 @@ func (pb *ssaPkgBuilder) registerFunc(d *FuncDecl) {
 			fn.isExternC = true
 		}
 	}
+	if d.Body == nil && isNoContextExtern(pb.pkg.Pkg.Path(), d.Name.Value) {
+		fn.isExternC = true
+	}
 	pb.pkg.Members[fn.name] = fn
+}
+
+func checkInitBody(body *BlockStmt) string {
+	for _, s := range body.List {
+		if err := checkInitStmt(s); err != "" {
+			return err
+		}
+	}
+	return ""
+}
+
+func checkInitStmt(s Stmt) string {
+	switch s := s.(type) {
+	case *SelectStmt:
+		return "select{} not allowed in init()"
+	case *BlockStmt:
+		for _, sub := range s.List {
+			if err := checkInitStmt(sub); err != "" {
+				return err
+			}
+		}
+	case *IfStmt:
+		if s.Then != nil {
+			if err := checkInitStmt(s.Then); err != "" {
+				return err
+			}
+		}
+		if s.Else != nil {
+			if err := checkInitStmt(s.Else); err != "" {
+				return err
+			}
+		}
+	case *ForStmt:
+		if s.Body != nil {
+			if err := checkInitStmt(s.Body); err != "" {
+				return err
+			}
+		}
+	case *SwitchStmt:
+		for _, cc := range s.Body {
+			for _, sub := range cc.Body {
+				if err := checkInitStmt(sub); err != "" {
+					return err
+				}
+			}
+		}
+	case *ExprStmt:
+		if err := checkInitExpr(s.X); err != "" {
+			return err
+		}
+	}
+	return ""
+}
+
+func checkInitExpr(x Expr) string {
+	if x == nil {
+		return ""
+	}
+	if c, ok := x.(*CallExpr); ok {
+		if n, ok2 := c.Fun.(*Name); ok2 && n.Value == "spawn" {
+			return "spawn() not allowed in init()"
+		}
+	}
+	return ""
+}
+
+func isNoContextExtern(pkg, name string) bool {
+	if pkg == "internal/runtime/syscall" && name == "Syscall6" {
+		return true
+	}
+	if pkg == "syscall" {
+		switch name {
+		case "runtime_entersyscall", "runtime_exitsyscall",
+			"Exit", "Getpagesize", "gettimeofday",
+			"runtime_BeforeExec", "runtime_AfterExec",
+			"runtime_BeforeFork", "runtime_AfterFork", "runtime_AfterForkInChild":
+			return true
+		}
+	}
+	if pkg == "os" {
+		switch name {
+		case "putchar", "getchar", "buffered", "gosched", "runtime_args":
+			return true
+		}
+	}
+	return false
 }
 
 func (pb *ssaPkgBuilder) registerMethod(d *FuncDecl) {
@@ -2173,6 +2263,18 @@ func (fb *ssaFuncBuilder) wrapVariadicArgs(args []SSAValue, sig *Signature) []SS
 	if sl, ok := safeUnderlying(sliceType).(*Slice); ok {
 		elemType = sl.Elem()
 	}
+	// HasDots lost in stage-2 compiled parser. Detect spread: if exactly 1
+	// variadic arg whose type matches the variadic param's slice type, and
+	// the element type is concrete, it must be a spread call (f(slice...)).
+	// Passing []T to ...T without dots is a type error for concrete T.
+	if nVariadic == 1 && elemType != nil {
+		if _, isIface := safeUnderlying(elemType).(*TCInterface); !isIface {
+			argT := args[nFixed].SSAType()
+			if argT != nil && Identical(argT, sliceType) {
+				return args
+			}
+		}
+	}
 	lenVal := NewSSAConst(constInt{int64(nVariadic)}, Typ[Int32])
 	ms := &SSAMakeSlice{Len: lenVal, Cap: lenVal}
 	ms.typ = sliceType
@@ -2980,6 +3082,9 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []E
 			Pkg:       impPkg,
 			Prog:      fb.fn.Prog,
 		}
+		if isNoContextExtern(imported.Path(), funcName) {
+			ssaFn.isExternC = true
+		}
 		impPkg.Members[funcName] = ssaFn
 	}
 	args := fb.buildArgs(argList)
@@ -3626,7 +3731,17 @@ func resolveTypeExprWithSubst(e Expr, typeSubst map[string]Type, pkgScope *Scope
 			}
 		}
 		if importRegistry != nil {
-			for _, pkg := range importRegistry {
+			var regKeys []string
+			for k := range importRegistry {
+				regKeys = append(regKeys, k)
+			}
+			for i := 1; i < len(regKeys); i++ {
+				for j := i; j > 0 && regKeys[j] < regKeys[j-1]; j-- {
+					regKeys[j], regKeys[j-1] = regKeys[j-1], regKeys[j]
+				}
+			}
+			for _, k := range regKeys {
+				pkg := importRegistry[k]
 				tobj := pkg.Scope().Lookup(e.Value)
 				if tobj != nil {
 					if tn, ok := tobj.(*TypeName); ok {
@@ -3670,7 +3785,17 @@ func resolveTypeExprWithSubst(e Expr, typeSubst map[string]Type, pkgScope *Scope
 	case *SelectorExpr:
 		if pkgName, ok := e.X.(*Name); ok {
 			if importRegistry != nil {
-				for _, pkg := range importRegistry {
+				var regKeys []string
+				for k := range importRegistry {
+					regKeys = append(regKeys, k)
+				}
+				for i := 1; i < len(regKeys); i++ {
+					for j := i; j > 0 && regKeys[j] < regKeys[j-1]; j-- {
+						regKeys[j], regKeys[j-1] = regKeys[j-1], regKeys[j]
+					}
+				}
+				for _, k := range regKeys {
+					pkg := importRegistry[k]
 					if pkg.Name() == pkgName.Value {
 						typeObj := pkg.Scope().Lookup(e.Sel.Value)
 						if typeObj != nil {

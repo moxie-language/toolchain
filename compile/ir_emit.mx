@@ -532,8 +532,7 @@ func (e *irEmitter) emit() string {
 			m.vars = nil
 		}
 	}
-
-	e.emitInitFunction()
+	e.emitLibMain()
 
 	for i, s := range e.strConst {
 		e.w(e.strConstGlobal(i))
@@ -797,19 +796,22 @@ func (e *irEmitter) emitAnonFuncs(f *SSAFunction) {
 	f.AnonFuncs = nil
 }
 
-func (e *irEmitter) emitInitFunction() {
+func (e *irEmitter) emitLibMain() {
 	pkgPath := e.pkg.Pkg.Path()
-	hasInit := false
+	if pkgPath == "main" {
+		return
+	}
+	hasMain := false
 	for _, m := range e.pkg.Members {
-		if fn, ok := m.(*SSAFunction); ok && fn.name == "init" {
-			hasInit = true
+		if fn, ok := m.(*SSAFunction); ok && fn.name == "main" {
+			hasMain = true
 			break
 		}
 	}
-	if hasInit {
+	if hasMain {
 		return
 	}
-	sym := irGlobalSymbol(pkgPath, "init")
+	sym := irGlobalSymbol(pkgPath, "main")
 	e.w("\ndefine void ")
 	e.w(sym)
 	e.w("(ptr %context) {\nentry:\n  ret void\n}\n")
@@ -1497,8 +1499,12 @@ func (e *irEmitter) inferAllocTypeFromFieldAddrs(a *SSAAlloc, baseType string) s
 		return ""
 	}
 	baseFields := parseStructFields(baseType)
+	top := maxField
+	if len(baseFields)-1 > top {
+		top = len(baseFields) - 1
+	}
 	s := "{"
-	for i := 0; i <= maxField; i++ {
+	for i := 0; i <= top; i++ {
 		if i > 0 {
 			s = s | ", "
 		}
@@ -1508,6 +1514,12 @@ func (e *irEmitter) inferAllocTypeFromFieldAddrs(a *SSAAlloc, baseType string) s
 				ft = baseFields[i]
 			} else {
 				ft = "ptr"
+			}
+		} else if i < len(baseFields) && baseFields[i] != "" {
+			bw := irParseIntWidth(baseFields[i])
+			fw := irParseIntWidth(ft)
+			if bw > 0 && fw > 0 && bw > fw {
+				ft = baseFields[i]
 			}
 		}
 		s = s | ft
@@ -1701,6 +1713,20 @@ func (e *irEmitter) emitStore(s *SSAStore) {
 				e.w(elemT)
 				e.w("\n")
 				val = trunc
+				valType = elemT
+			} else if ew > 0 && vw > 0 && vw < ew {
+				e.nextReg++
+				ext := "%se" | irItoa(e.nextReg)
+				e.w("  ")
+				e.w(ext)
+				e.w(" = sext ")
+				e.w(valType)
+				e.w(" ")
+				e.w(val)
+				e.w(" to ")
+				e.w(elemT)
+				e.w("\n")
+				val = ext
 				valType = elemT
 			}
 		}
@@ -2725,8 +2751,7 @@ func (e *irEmitter) emitUnOp(u *SSAUnOp) {
 		valType = resolved
 	}
 	val := e.operand(u.X)
-	switch u.Op {
-	case OpSub:
+	if u.Op == OpSub {
 		isFloat := false
 		if b, ok := safeUnderlying(u.X.SSAType()).(*Basic); ok {
 			isFloat = b.Info()&IsFloat != 0
@@ -2755,25 +2780,20 @@ func (e *irEmitter) emitUnOp(u *SSAUnOp) {
 			e.w("\n")
 		}
 		return
-	case OpNot:
-		e.w("  ")
-		e.w(reg)
-		e.w(" = xor ")
-		e.w(valType)
-		e.w(" ")
-		e.w(val)
-		e.w(", -1\n")
-	case OpXor:
-		e.w("  ")
-		e.w(reg)
-		e.w(" = xor ")
-		e.w(valType)
-		e.w(" ")
-		e.w(val)
-		e.w(", -1\n")
-	default:
-		e.w("  ; unsupported unop\n")
 	}
+	if u.Op == OpNot || u.Op == OpXor {
+		e.w("  ")
+		e.w(reg)
+		e.w(" = xor ")
+		e.w(valType)
+		e.w(" ")
+		e.w(val)
+		e.w(", -1\n")
+		return
+	}
+	e.w("  ; unsupported unop op=")
+	e.w(u.Op.String())
+	e.w("\n")
 }
 
 func (e *irEmitter) callArgType(arg SSAValue, sig *Signature, i int) string {
@@ -2906,10 +2926,19 @@ func (e *irEmitter) emitCall(c *SSACall) {
 func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 	reg := e.regName(c)
 	name := b.SSAName()
+	if name == "recover" {
+		e.w("  ; unhandled builtin: recover\n")
+		retType := e.ifaceType()
+		e.nextReg++
+		tmp := "%ub" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(tmp) ; e.w(" = alloca ") ; e.w(retType) ; e.w("\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(retType) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
+		e.allocTypes[c] = retType
+		return
+	}
 	ipt := e.intptrType()
 	sty := e.sliceType()
-	switch b.id {
-	case BuiltinLen:
+	if name == "len" {
 		if len(c.Call.Args) == 1 {
 			arg := e.operand(c.Call.Args[0])
 			u := safeUnderlying(c.Call.Args[0].SSAType())
@@ -2960,7 +2989,7 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 				return
 			}
 		}
-	case BuiltinCap:
+	} else if name == "cap" {
 		if len(c.Call.Args) == 1 {
 			arg := e.operand(c.Call.Args[0])
 			uc := safeUnderlying(c.Call.Args[0].SSAType())
@@ -2994,7 +3023,7 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 				return
 			}
 		}
-	case BuiltinAppend:
+	} else if name == "append" {
 		if len(c.Call.Args) > 2 {
 			src := e.operand(c.Call.Args[0])
 			elemType := ""
@@ -3094,6 +3123,25 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			e.w("  ") ; e.w(srcCap) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 2\n")
 			var elemsBuf, elemsLen string
 			arg1IsSlice := c.Call.HasDots
+			if !arg1IsSlice && c.Call.Args[1] != nil {
+				arg1t := c.Call.Args[1].SSAType()
+				if arg1t != nil {
+					arg1LT := e.llvmType(arg1t)
+					if arg1LT == e.sliceType() && elemType != e.sliceType() {
+						arg1IsSlice = true
+					}
+				}
+				if !arg1IsSlice {
+					arg0t := c.Call.Args[0].SSAType()
+					if arg0t != nil && arg1t != nil {
+						if Identical(arg0t, arg1t) {
+							if _, ok := safeUnderlying(arg0t).(*Slice); ok {
+								arg1IsSlice = true
+							}
+						}
+					}
+				}
+			}
 			if arg1IsSlice {
 				elemsBuf = e.nextReg2("ap")
 				e.w("  ") ; e.w(elemsBuf) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(elems) ; e.w(", 0\n")
@@ -3134,7 +3182,7 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			e.declareRuntime("runtime.sliceAppend", retTy, "ptr, ptr, " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType())
 			return
 		}
-	case BuiltinCopy:
+	} else if name == "copy" {
 		if len(c.Call.Args) == 2 {
 			dst := e.operand(c.Call.Args[0])
 			src := e.operand(c.Call.Args[1])
@@ -3171,7 +3219,7 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			e.declareRuntime("runtime.sliceCopy", e.intptrType(), "ptr, ptr, " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType())
 			return
 		}
-	case BuiltinPrint, BuiltinPrintln:
+	} else if name == "print" || name == "println" {
 		e.w("  call void @runtime.printlock()\n")
 		for i, arg := range c.Call.Args {
 			if i > 0 && b.id == BuiltinPrintln {
@@ -3192,7 +3240,7 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			e.declareRuntime("runtime.printspace", "void", "")
 		}
 		return
-	case BuiltinDelete:
+	} else if name == "delete" {
 		if len(c.Call.Args) == 2 {
 			mapVal := e.operand(c.Call.Args[0])
 			keyVal := e.operand(c.Call.Args[1])
@@ -3209,7 +3257,7 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			e.declareRuntime("runtime.hashmapBinaryDelete", "void", "ptr, ptr")
 			return
 		}
-	case BuiltinClose:
+	} else if name == "close" {
 		if len(c.Call.Args) == 1 {
 			e.w("  call void @runtime.chanClose(ptr ")
 			e.w(e.operand(c.Call.Args[0]))
@@ -3217,7 +3265,7 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			e.declareRuntime("runtime.chanClose", "void", "ptr")
 			return
 		}
-	case BuiltinMin, BuiltinMax:
+	} else if name == "min" || name == "max" {
 		if len(c.Call.Args) >= 2 {
 			retType := e.llvmType(c.SSAType())
 			if retType == "" || retType == "void" {
@@ -3245,18 +3293,12 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 	}
 	e.w("  ; unhandled builtin: ")
 	e.w(name)
-	e.w(" id=")
-	e.w(irItoa(int(b.id)))
 	e.w("\n")
 	retType := e.llvmType(c.SSAType())
-	if b.id == BuiltinRecover {
-		retType = e.ifaceType()
-	}
 	if retType != "void" && retType != "" {
 		if retType == "ptr" || e.intBits(retType) > 0 || retType == "i1" {
 			e.emitZeroReg(reg, c.SSAType())
 		} else {
-			// Aggregate type: use alloca to get zeroinitializer
 			e.nextReg++
 			tmp := "%ub" | irItoa(e.nextReg)
 			e.w("  ") ; e.w(tmp) ; e.w(" = alloca ") ; e.w(retType) ; e.w("\n")
@@ -3967,7 +4009,7 @@ func (e *irEmitter) emitIndexAddr(idx *SSAIndexAddr) {
 	} else if !isSlice && (baseType == e.sliceType() || resolvedBase == e.sliceType()) {
 		isSlice = true
 	}
-	if isSlice && (elemType == "void" || elemType == "ptr") {
+	if isSlice && elemType == "void" {
 		elemType = "i8"
 	}
 	if isSlice {
@@ -4545,12 +4587,22 @@ func (e *irEmitter) reflectTypeName(t Type) string {
 		return inner | ".ptr"
 	}
 	if _, ok := t.(*TCInterface); ok {
-		return "reflect/types.type:interface:{}"
+		result := "reflect/types.type:interface:{}"
+		if e.localTypeIDs == nil {
+			e.localTypeIDs = map[string]bool{}
+		}
+		e.localTypeIDs["\"" | result | "\""] = true
+		return result
 	}
 	if sl, ok := t.(*Slice); ok {
 		inner := e.reflectTypeName(sl.Elem())
 		if hasPrefix(inner, "reflect/types.type:") {
-			return "reflect/types.type:slice:" | inner[len("reflect/types.type:"):]
+			result := "reflect/types.type:slice:" | inner[len("reflect/types.type:"):]
+			if e.localTypeIDs == nil {
+				e.localTypeIDs = map[string]bool{}
+			}
+			e.localTypeIDs["\"" | result | "\""] = true
+			return result
 		}
 		return inner | ".slice"
 	}
@@ -5667,7 +5719,22 @@ func (e *irEmitter) constOperand(c *SSAConst) string {
 		case Int8, Int16, Int32, Int64, Uint8, Uint16, Uint32, Uint64,
 			UntypedInt, UntypedRune:
 			if ci, ok := c.val.(constInt); ok {
-				return ci.String()
+				v := ci.v
+				switch b.kind {
+				case Int8:
+					v = int64(int8(v))
+				case Uint8:
+					v = int64(uint8(v))
+				case Int16:
+					v = int64(int16(v))
+				case Uint16:
+					v = int64(uint16(v))
+				case Int32, UntypedInt, UntypedRune:
+					v = int64(int32(v))
+				case Uint32:
+					v = int64(uint32(v))
+				}
+				return irItoa64(v)
 			}
 			if cf, ok := c.val.(constFloat); ok {
 				return irItoa64(int64(cf.v))
@@ -5823,27 +5890,41 @@ func runeToUTF8(r rune) string {
 
 func scanExportPragmas(src []byte) map[string]string {
 	result := map[string]string{}
-	lines := bytes.Split(src, []byte("\n"))
-	for i := 0; i < len(lines); i++ {
-		line := bytes.TrimSpace(lines[i])
-		if bytes.HasPrefix(line, "//export ") {
-			exportName := string(bytes.TrimSpace(line[9:]))
-			for j := i + 1; j < len(lines); j++ {
-				fline := bytes.TrimSpace(lines[j])
-				if len(fline) == 0 || bytes.HasPrefix(fline, "//") {
-					continue
-				}
-				if bytes.HasPrefix(fline, "func ") {
-					rest := fline[5:]
-					paren := bytes.IndexByte(rest, '(')
-					if paren > 0 {
-						funcName := string(bytes.TrimSpace(rest[:paren]))
-						result[funcName] = exportName
-					}
-				}
-				break
-			}
+	exportPrefix := []byte("//export ")
+	funcPrefix := []byte("func ")
+	commentPrefix := []byte("//")
+	pendingExport := ""
+	i := 0
+	for i < len(src) {
+		nlIdx := bytes.IndexByte(src[i:], '\n')
+		var line []byte
+		var lineEnd int
+		if nlIdx < 0 {
+			line = src[i:]
+			lineEnd = len(src)
+		} else {
+			line = src[i : i+nlIdx]
+			lineEnd = i + nlIdx + 1
 		}
+		trimmed := bytes.TrimSpace(line)
+		if len(pendingExport) > 0 {
+			if len(trimmed) == 0 || bytes.HasPrefix(trimmed, commentPrefix) {
+				i = lineEnd
+				continue
+			}
+			if bytes.HasPrefix(trimmed, funcPrefix) {
+				rest := trimmed[5:]
+				paren := bytes.IndexByte(rest, '(')
+				if paren > 0 {
+					funcName := string(bytes.TrimSpace(rest[:paren]))
+					result[funcName] = pendingExport
+				}
+			}
+			pendingExport = ""
+		} else if bytes.HasPrefix(trimmed, exportPrefix) {
+			pendingExport = string(bytes.TrimSpace(trimmed[9:]))
+		}
+		i = lineEnd
 	}
 	return result
 }
@@ -5861,6 +5942,7 @@ func typeCheckPkg(src []byte, name string) (*TCPackage, *File) {
 	scope := pkg.Scope()
 
 	src = rewriteSliceMakeLiterals(src)
+	src = rewriteChanMakeLiterals(src)
 	src = stripDuplicatePackageClauses(src)
 
 	if len(src) == 0 {
@@ -5874,7 +5956,9 @@ func typeCheckPkg(src []byte, name string) (*TCPackage, *File) {
 	}
 	tcPkgSrc = src
 	compileExportMap = scanExportPragmas(src)
+	writeStr(2, "    parse-start srcLen=" | simpleItoa(len(src)) | "\n")
 	file, _ := ParseBytes(NewFileBase(name|".mx"), src, errh, nil, 0)
+	writeStr(2, "    parse-done\n")
 	if file == nil {
 		return nil, nil
 	}
@@ -5918,6 +6002,7 @@ func typeCheckPkg(src []byte, name string) (*TCPackage, *File) {
 		}
 	}
 
+	writeStr(2, "    scope-pass-done\n")
 	var curConstGroup *Group
 	var prevConstValues Expr
 	var prevConstType Expr
@@ -5986,6 +6071,7 @@ func typeCheckPkg(src []byte, name string) (*TCPackage, *File) {
 			}
 		}
 	}
+	writeStr(2, "    const-pass-done\n")
 	for _, d := range file.DeclList {
 		if td, ok := d.(*TypeDecl); ok {
 			obj := scope.Lookup(td.Name.Value)
@@ -6000,6 +6086,7 @@ func typeCheckPkg(src []byte, name string) (*TCPackage, *File) {
 			}
 		}
 	}
+	writeStr(2, "    type-pass-done\n")
 	for _, d := range file.DeclList {
 		switch d := d.(type) {
 		case *VarDecl:
@@ -6043,6 +6130,7 @@ func typeCheckPkg(src []byte, name string) (*TCPackage, *File) {
 			}
 		}
 	}
+	writeStr(2, "    var-func-pass-done\n")
 	for _, d := range file.DeclList {
 		if fd, ok := d.(*FuncDecl); ok && fd.Recv != nil {
 			recvType := tcResolveRecvType(fd.Recv, scope)
@@ -6352,6 +6440,33 @@ func tcEvalConstExpr(e Expr, scope *Scope, iotaVal int64) ConstVal {
 			return inner
 		}
 		return convertConstLocal(inner, targetType)
+	case *SelectorExpr:
+		pkgName, ok := e.X.(*Name)
+		if !ok {
+			return nil
+		}
+		var imported *TCPackage
+		if scope != nil {
+			_, obj := scope.LookupParent(pkgName.Value)
+			if pn, ok2 := obj.(*PkgName); ok2 && pn.imported != nil {
+				imported = pn.imported
+			}
+		}
+		if imported == nil {
+			ensureImportRegistry()
+			imported = importRegistry[pkgName.Value]
+		}
+		if imported == nil {
+			return nil
+		}
+		member := imported.Scope().Lookup(e.Sel.Value)
+		if member == nil {
+			return nil
+		}
+		if k, ok := member.(*TCConst); ok && k.val != nil {
+			return k.val
+		}
+		return nil
 	}
 	return nil
 }
@@ -6388,7 +6503,17 @@ func tcResolveNameInline(e Expr, scope *Scope) Type {
 		}
 		// Fallback: check importRegistry directly for external package types
 		if pkgName, ok := e.X.(*Name); ok {
-			for _, pkg := range importRegistry {
+			var irKeys []string
+			for k := range importRegistry {
+				irKeys = append(irKeys, k)
+			}
+			for i := 1; i < len(irKeys); i++ {
+				for j := i; j > 0 && irKeys[j] < irKeys[j-1]; j-- {
+					irKeys[j], irKeys[j-1] = irKeys[j-1], irKeys[j]
+				}
+			}
+			for _, k := range irKeys {
+				pkg := importRegistry[k]
 				if pkg.Name() == pkgName.Value {
 					typeObj := pkg.Scope().Lookup(e.Sel.Value)
 					if typeObj != nil {
@@ -6654,6 +6779,92 @@ func findMatchingBrace(src []byte, openIdx int) int {
 		}
 	}
 	return -1
+}
+
+func rewriteChanMakeLiterals(src []byte) []byte {
+	chanKw := []byte("chan ")
+	var out []byte
+	i := 0
+	for i < len(src) {
+		idx := bytes.Index(src[i:], chanKw)
+		if idx < 0 {
+			if out != nil {
+				out = append(out, src[i:]...)
+			}
+			break
+		}
+		idx = idx + i
+		j := idx + 5
+		for j < len(src) && (src[j] == ' ' || src[j] == '\t') {
+			j++
+		}
+		if j >= len(src) {
+			if out != nil {
+				out = append(out, src[i:]...)
+			}
+			break
+		}
+		if src[j] == '<' && j+1 < len(src) && src[j+1] == '-' {
+			if out != nil {
+				out = append(out, src[i:j+2]...)
+			}
+			i = j + 2
+			continue
+		}
+		for j < len(src) && (src[j] != '{' && src[j] != '\n' && src[j] != ';' && src[j] != '(' && src[j] != ')') {
+			if src[j] == ' ' || src[j] == '\t' {
+				break
+			}
+			j++
+		}
+		if j >= len(src) || src[j] != '{' {
+			if out == nil {
+				i = idx + 4
+			} else {
+				out = append(out, src[i:idx+4]...)
+				i = idx + 4
+			}
+			continue
+		}
+		braceOpen := j
+		close := findMatchingBrace(src, braceOpen)
+		if close < 0 {
+			if out == nil {
+				i = idx + 4
+			} else {
+				out = append(out, src[i:idx+4]...)
+				i = idx + 4
+			}
+			continue
+		}
+		inner := bytes.TrimSpace(src[braceOpen+1 : close])
+		chanType := src[idx : braceOpen]
+		for len(chanType) > 0 && (chanType[len(chanType)-1] == ' ' || chanType[len(chanType)-1] == '\t') {
+			chanType = chanType[:len(chanType)-1]
+		}
+		if out == nil {
+			out = []byte{:0:len(src)}
+			out = append(out, src[:idx]...)
+		} else {
+			out = append(out, src[i:idx]...)
+		}
+		if len(inner) == 0 {
+			out = append(out, "make("...)
+			out = append(out, chanType...)
+			out = append(out, ')')
+		} else {
+			out = append(out, "make("...)
+			out = append(out, chanType...)
+			out = append(out, ", "...)
+			out = append(out, inner...)
+			out = append(out, ')')
+		}
+		i = close + 1
+	}
+	if out == nil {
+		return src
+	}
+	return out
 }
 
 func tcResolveRecvType(recv *Field, scope *Scope) Type {

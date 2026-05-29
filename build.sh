@@ -12,9 +12,18 @@ if [ -n "$FAIL" ]; then
     exit 1
 fi
 
-MOXIE="${MOXIE:-$(command -v moxie 2>/dev/null || true)}"
+MOXIE="${MOXIE:-}"
 if [ -z "$MOXIE" ]; then
-    echo "error: moxie not found in PATH. install from https://git.smesh.lol/moxie-releases" >&2
+    # prefer legacy Go-compiled moxie for bootstrapping
+    for m in "$(pwd)/legacy/moxie" "$(command -v moxie 2>/dev/null || true)"; do
+        if [ -x "$m" ]; then
+            MOXIE="$m"
+            break
+        fi
+    done
+fi
+if [ -z "$MOXIE" ]; then
+    echo "error: moxie not found. ensure legacy/moxie exists or moxie is in PATH" >&2
     exit 1
 fi
 

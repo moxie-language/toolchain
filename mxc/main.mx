@@ -17,11 +17,59 @@ func cListdir(dir unsafe.Pointer, dirLen int32, buf unsafe.Pointer, bufCap int32
 //export write
 func cWrite(fd int32, buf unsafe.Pointer, count uint32) int32
 
+//export mxc_writefile
+func cWritefile(path unsafe.Pointer, pathLen int32, data unsafe.Pointer, dataLen int32, mode uint32) int32
+
+//export mxc_mkdir
+func cMkdir(path unsafe.Pointer, pathLen int32, mode uint32) int32
+
+//export mxc_readfile
+func cReadfile(path unsafe.Pointer, pathLen int32, buf unsafe.Pointer, bufCap int32) int32
+
+//export mxc_filesize
+func cFilesize(path unsafe.Pointer, pathLen int32) int32
+
 func writeStr(fd int32, s string) {
 	b := []byte(s)
 	if len(b) > 0 {
 		cWrite(fd, unsafe.Pointer(unsafe.SliceData(b)), uint32(len(b)))
 	}
+}
+
+func writeFile(path string, data []byte, mode uint32) {
+	if len(path) == 0 {
+		return
+	}
+	cWritefile(unsafe.Pointer(unsafe.SliceData([]byte(path))), int32(len(path)),
+		unsafe.Pointer(unsafe.SliceData(data)), int32(len(data)), mode)
+}
+
+func mkdirAll(path string, mode uint32) {
+	if len(path) == 0 {
+		return
+	}
+	cMkdir(unsafe.Pointer(unsafe.SliceData([]byte(path))), int32(len(path)), mode)
+}
+
+func readFile(path string) ([]byte, bool) {
+	if len(path) == 0 {
+		return nil, false
+	}
+	pb := []byte(path)
+	sz := cFilesize(unsafe.Pointer(unsafe.SliceData(pb)), int32(len(pb)))
+	if sz < 0 {
+		return nil, false
+	}
+	if sz == 0 {
+		sz = 65536
+	}
+	buf := []byte{:sz}
+	n := cReadfile(unsafe.Pointer(unsafe.SliceData(pb)), int32(len(pb)),
+		unsafe.Pointer(unsafe.SliceData(buf)), sz)
+	if n < 0 {
+		return nil, false
+	}
+	return buf[:n], true
 }
 
 func fatal(msg string) {
@@ -40,8 +88,8 @@ func getenv(name string) string {
 }
 
 func getArgs() []string {
-	data, err := os.ReadFile("/proc/self/cmdline")
-	if err != nil {
+	data, ok := readFile("/proc/self/cmdline")
+	if !ok {
 		return nil
 	}
 	var args []string
@@ -214,8 +262,9 @@ func pkgCacheKey(dir string, files []string) string {
 	}
 	var all []byte
 	for _, f := range sorted {
-		data, err := os.ReadFile(joinPath(dir, f))
-		if err != nil {
+		p := joinPath(dir, f)
+		data, ok := readFile(p)
+		if !ok {
 			continue
 		}
 		all = append(all, data...)
@@ -232,7 +281,7 @@ func isStdlib(path string) bool {
 	return !hasPrefix(path, "/") && !hasPrefix(path, "./") && !hasPrefix(path, "../")
 }
 
-var builtinOnly = []string{"unsafe", "runtime", "moxie"}
+var builtinOnly []string
 
 func isBuiltinOnly(path string) bool {
 	for _, b := range builtinOnly {
@@ -244,8 +293,8 @@ func isBuiltinOnly(path string) bool {
 }
 
 func loadSysroot(path string) {
-	data, err := os.ReadFile(path)
-	if err != nil {
+	data, ok := readFile(path)
+	if !ok {
 		return
 	}
 	for _, line := range splitLines(string(data)) {
@@ -376,8 +425,8 @@ func concatSources(dir string, files []string) []byte {
 	var bodies [][]byte
 	pkgName := ""
 	for _, f := range files {
-		data, err := os.ReadFile(joinPath(dir, f))
-		if err != nil {
+		data, ok := readFile(joinPath(dir, f))
+		if !ok {
 			continue
 		}
 		if pkgName == "" {
@@ -559,8 +608,8 @@ func discoverPkg(pkgPath, root string) *pkgInfo {
 		if shouldSkipFile(f) {
 			continue
 		}
-		data, err := os.ReadFile(joinPath(dir, f))
-		if err != nil {
+		data, ok := readFile(joinPath(dir, f))
+		if !ok {
 			continue
 		}
 		bc := hasBuildConstraint(data, forbidden)
@@ -589,8 +638,8 @@ func discoverPkg(pkgPath, root string) *pkgInfo {
 	var allImports []string
 	pkgName := ""
 	for _, f := range files {
-		data, err := os.ReadFile(joinPath(dir, f))
-		if err != nil {
+		data, ok := readFile(joinPath(dir, f))
+		if !ok {
 			continue
 		}
 		if pkgName == "" {
@@ -726,6 +775,7 @@ func cacheClean() {
 }
 
 func main() {
+	builtinOnly = []string{"unsafe", "runtime", "moxie"}
 	args := getArgs()
 	if len(args) < 2 {
 		writeStr(2, "usage: mxc <build|version|cache> ...\n")
@@ -791,7 +841,7 @@ func main() {
 	}
 
 	tmpdir := "/tmp/mxc-build"
-	os.MkdirAll(tmpdir, 0755)
+	mkdirAll(tmpdir, 0755)
 
 	cacheBase := pkgCacheDir()
 	var allBcFiles []string
@@ -805,11 +855,13 @@ func main() {
 		if isStdlib(pkg.path) {
 			hash := pkgCacheKey(pkg.dir, pkg.files)
 			cached := cachedBcPath(cacheBase, pkg.path, hash)
-			_, cacheErr := os.ReadFile(cached)
-			if cacheErr == nil && !forceRebuild {
+			_, cacheOk := readFile(cached)
+			if cacheOk && !forceRebuild {
 				writeStr(2, "  cached " | pkg.path | "\n")
 				src := concatSources(pkg.dir, pkg.files)
+				writeStr(2, "    tc-start " | compilePath | " srcLen=" | simpleItoa(len(src)) | "\n")
 				TypeCheckOnly(src, compilePath)
+				writeStr(2, "    tc-done " | compilePath | "\n")
 				src = nil
 				allBcFiles = append(allBcFiles, cached)
 				continue
@@ -819,7 +871,7 @@ func main() {
 			ir := compileSource(src, compilePath, triple)
 			src = nil
 			llFile := joinPath(tmpdir, safeName(pkg.path) | ".ll")
-			os.WriteFile(llFile, []byte(ir), 0644)
+			writeFile(llFile, []byte(ir), 0644)
 			ir = ""
 			bcFile := joinPath(tmpdir, safeName(pkg.path) | ".bc")
 			rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
@@ -827,10 +879,10 @@ func main() {
 				fatal("clang failed for " | pkg.path)
 			}
 			cacheDir := joinPath(cacheBase, safeName(pkg.path))
-			os.MkdirAll(cacheDir, 0755)
-			data, rerr := os.ReadFile(bcFile)
-			if rerr == nil {
-				os.WriteFile(cached, data, 0644)
+			mkdirAll(cacheDir, 0755)
+			data, rok := readFile(bcFile)
+			if rok {
+				writeFile(cached, data, 0644)
 			}
 			data = nil
 			allBcFiles = append(allBcFiles, bcFile)
@@ -843,7 +895,7 @@ func main() {
 				writeStr(1, ir)
 			}
 			llFile := joinPath(tmpdir, safeName(pkg.path) | ".ll")
-			os.WriteFile(llFile, []byte(ir), 0644)
+			writeFile(llFile, []byte(ir), 0644)
 			ir = ""
 			bcFile := joinPath(tmpdir, safeName(pkg.path) | ".bc")
 			rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
@@ -869,8 +921,8 @@ func main() {
 	runtimeBc := getenv("RUNTIME_BC")
 	if runtimeBc == "" {
 		runtimeBc = joinPath(sysroot, "runtime.bc")
-		_, rerr := os.ReadFile(runtimeBc)
-		if rerr != nil {
+		_, rok := readFile(runtimeBc)
+		if !rok {
 			runtimeBc = joinPath(root, "_runtime.bc")
 		}
 	}
@@ -898,23 +950,23 @@ func main() {
 		if hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
-		initSym := irGlobalSymbol(compilePath, "init")
+		if compilePath == "main" {
+			continue
+		}
+		initSym := irGlobalSymbol(compilePath, "main")
 		initCalls = initCalls | "  call void " | initSym | "(ptr %context)\n"
 	}
-	stdlibInit := "  %envs = call {ptr, i64, i64} @syscall.runtime_envs(ptr undef)\n" |
-		"  store {ptr, i64, i64} %envs, ptr @syscall.envs\n" |
-		"  call void @io.init(ptr null)\n"
-	initAllIR := "declare {ptr, i64, i64} @syscall.runtime_envs(ptr)\n" |
-		"@syscall.envs = external global {ptr, i64, i64}\n" |
-		"declare void @io.init(ptr)\n\n" |
-		"define void @runtime.initAll(ptr %context) {\nentry:\n" | stdlibInit | initCalls | "  ret void\n}\n"
-	declared := map[string]bool{"@io.init": true, "@syscall.runtime_envs": true}
+	initAllIR := "\ndefine void @runtime.initAll(ptr %context) {\nentry:\n" | initCalls | "  ret void\n}\n"
+	declared := map[string]bool{}
 	for _, pkg := range pkgs {
 		compilePath := pkg.path
 		if hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
-		declSym := irGlobalSymbol(compilePath, "init")
+		if compilePath == "main" {
+			continue
+		}
+		declSym := irGlobalSymbol(compilePath, "main")
 		if declared[declSym] {
 			continue
 		}
@@ -922,7 +974,7 @@ func main() {
 		initAllIR = initAllIR | "declare void " | declSym | "(ptr)\n"
 	}
 	initAllFile := joinPath(tmpdir, "initall.ll")
-	os.WriteFile(initAllFile, []byte(initAllIR), 0644)
+	writeFile(initAllFile, []byte(initAllIR), 0644)
 	initAllBc := joinPath(tmpdir, "initall.bc")
 	rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", initAllFile, "-o", initAllBc})
 	if rc != 0 {
@@ -936,7 +988,7 @@ func main() {
 	shimsBc := joinPath(sysroot, "hashmap_shims.bc")
 	linkArgs = append(linkArgs, shimsBc)
 	runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
-	if _, gerr := os.ReadFile(runtimeGoBc); gerr == nil {
+	if _, gok := readFile(runtimeGoBc); gok {
 		linkArgs = append(linkArgs, runtimeGoBc)
 	}
 	linkArgs = append(linkArgs, allBcFiles...)
