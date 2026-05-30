@@ -763,6 +763,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				ldflags = append(ldflags,
 					"--lto-O"+strconv.Itoa(speedLevel),
 					"--thinlto-cache-dir="+filepath.Join(cacheDir, "thinlto"),
+					"-z", "stack-size=67108864",
 				)
 			}
 			if config.CodeModel() != "default" {

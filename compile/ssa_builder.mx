@@ -15,6 +15,9 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*File, info *Info)
 	pb := &ssaPkgBuilder{pkg: p, info: info, prog: prog}
 
 	for _, f := range files {
+		pb.registerImportsAndTypes(f)
+	}
+	for _, f := range files {
 		pb.registerFile(f)
 	}
 	for _, f := range files {
@@ -30,17 +33,24 @@ type ssaPkgBuilder struct {
 	prog *SSAProgram
 }
 
-func (pb *ssaPkgBuilder) registerFile(f *File) {
+func (pb *ssaPkgBuilder) registerImportsAndTypes(f *File) {
 	for _, d := range f.DeclList {
 		switch d := d.(type) {
 		case *ImportDecl:
 			pb.registerImport(d)
+		case *TypeDecl:
+			pb.registerType(d)
+		}
+	}
+}
+
+func (pb *ssaPkgBuilder) registerFile(f *File) {
+	for _, d := range f.DeclList {
+		switch d := d.(type) {
 		case *FuncDecl:
 			pb.registerFunc(d)
 		case *VarDecl:
 			pb.registerVar(d)
-		case *TypeDecl:
-			pb.registerType(d)
 		case *ConstDecl:
 			pb.registerConst(d)
 		}
@@ -87,10 +97,96 @@ func (pb *ssaPkgBuilder) registerImport(d *ImportDecl) {
 		if regPkg != nil {
 			pn := NewPkgName(nil, localName, regPkg)
 			pb.pkg.Pkg.Scope().Insert(pn)
-		} else {
-			writeStr(2, "  IMPORT-MISS path=" | path | " local=" | localName | "\n")
 		}
 	}
+}
+
+func pkgResolveTypeAST(pkg *SSAPackage, e Expr) Type {
+	if e == nil {
+		return nil
+	}
+	switch e := e.(type) {
+	case *Name:
+		if _, obj := Universe.LookupParent(e.Value); obj != nil {
+			if tn, ok := obj.(*TypeName); ok {
+				return tn.Type()
+			}
+		}
+		if pkg != nil {
+			obj := pkg.Pkg.Scope().Lookup(e.Value)
+			if tn, ok := obj.(*TypeName); ok {
+				return tn.Type()
+			}
+		}
+	case *Operation:
+		if e.Y == nil && e.Op == Mul {
+			base := pkgResolveTypeAST(pkg, e.X)
+			if base != nil {
+				return NewPointer(base)
+			}
+		}
+	case *SliceType:
+		elem := pkgResolveTypeAST(pkg, e.Elem)
+		if elem != nil {
+			if b, ok := elem.(*Basic); ok && b.kind == Uint8 {
+				return Typ[TCString]
+			}
+			return NewSlice(elem)
+		}
+	case *MapType:
+		key := pkgResolveTypeAST(pkg, e.Key)
+		val := pkgResolveTypeAST(pkg, e.Value)
+		if key != nil && val != nil {
+			return NewTCMap(key, val)
+		}
+	case *FuncType:
+		return pkgResolveSigAST(pkg, e)
+	case *SelectorExpr:
+		if x, ok := e.X.(*Name); ok {
+			pn, _ := pkg.Pkg.Scope().Lookup(x.Value).(*PkgName)
+			if pn != nil && pn.Imported() != nil {
+				sel := pn.Imported().Scope().Lookup(e.Sel.Value)
+				if tn, ok2 := sel.(*TypeName); ok2 {
+					return tn.Type()
+				}
+			}
+		}
+	case *InterfaceType:
+		return NewTCInterface(nil, nil)
+	}
+	return nil
+}
+
+func pkgResolveSigAST(pkg *SSAPackage, ft *FuncType) *Signature {
+	if ft == nil {
+		return nil
+	}
+	var params []*TCVar
+	for _, p := range ft.ParamList {
+		typ := pkgResolveTypeAST(pkg, p.Type)
+		pname := ""
+		if p.Name != nil {
+			pname = p.Name.Value
+		}
+		params = append(params, NewTCVar(nil, pname, typ))
+	}
+	var results []*TCVar
+	for _, r := range ft.ResultList {
+		typ := pkgResolveTypeAST(pkg, r.Type)
+		rname := ""
+		if r.Name != nil {
+			rname = r.Name.Value
+		}
+		results = append(results, NewTCVar(nil, rname, typ))
+	}
+	var pTuple, rTuple *Tuple
+	if len(params) > 0 {
+		pTuple = NewTuple(params...)
+	}
+	if len(results) > 0 {
+		rTuple = NewTuple(results...)
+	}
+	return NewSignature(nil, pTuple, rTuple, false)
 }
 
 func (pb *ssaPkgBuilder) registerFunc(d *FuncDecl) {
@@ -112,6 +208,9 @@ func (pb *ssaPkgBuilder) registerFunc(d *FuncDecl) {
 	var sig *Signature
 	if obj != nil {
 		sig, _ = obj.Type().(*Signature)
+	}
+	if sig == nil && d.Type != nil {
+		sig = pkgResolveSigAST(pb.pkg, d.Type)
 	}
 	fn := &SSAFunction{
 		name:      d.Name.Value,
@@ -231,6 +330,9 @@ func (pb *ssaPkgBuilder) registerMethod(d *FuncDecl) {
 	if obj != nil {
 		sig, _ = obj.Type().(*Signature)
 	}
+	if sig == nil && d.Type != nil {
+		sig = pkgResolveSigAST(pb.pkg, d.Type)
+	}
 	fn := &SSAFunction{
 		name:      mangledName,
 		object:    obj,
@@ -291,6 +393,9 @@ func (pb *ssaPkgBuilder) registerVar(d *VarDecl) {
 		if obj != nil {
 			typ = obj.Type()
 		}
+		if typ == nil && d.Type != nil {
+			typ = pkgResolveTypeAST(pb.pkg, d.Type)
+		}
 		g := &SSAGlobal{
 			name:   name.Value,
 			object: obj,
@@ -308,7 +413,14 @@ func (pb *ssaPkgBuilder) registerType(d *TypeDecl) {
 		obj, _ = o.(*TypeName)
 	}
 	if obj == nil {
-		return
+		underlying := pkgResolveTypeAST(pb.pkg, d.Type)
+		if underlying == nil {
+			underlying = &TCStruct{}
+		}
+		named := NewNamed(NewTypeName(pb.pkg.Pkg, d.Name.Value, nil), underlying)
+		named.obj.typ = named
+		pb.pkg.Pkg.Scope().Insert(named.obj)
+		obj = named.obj
 	}
 	t := &SSAType_{object: obj, pkg: pb.pkg}
 	pb.pkg.Members[d.Name.Value] = t
@@ -1005,9 +1117,6 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *AssignStmt) {
 		if obj == nil {
 			obj = NewTCVar(fb.fn.Pkg.Pkg, name.Value, typ)
 		}
-		if fb.fn.name == "Join" {
-			writeStr(2, "  SVD name=" | name.Value | " fn=Join\n")
-		}
 		alloc := fb.emitAlloc(typ, 0)
 		fb.vars[obj] = alloc
 		var initVal SSAValue
@@ -1657,31 +1766,18 @@ func (fb *ssaFuncBuilder) buildReturn(s *ReturnStmt) {
 	var vals []SSAValue
 	if s.Results != nil {
 		if list, ok := s.Results.(*ListExpr); ok {
-			writeStr(2, "  RETURN-LIST fn=" | fb.fn.name | " count=" | simpleItoa(len(list.ElemList)) | "\n")
-			for idx, el := range list.ElemList {
-				blkOk := "Y"
-				if fb.currentBlock == nil {
-					blkOk = "N"
-				}
+			for _, el := range list.ElemList {
 				v := fb.buildExpr(el)
-				blkOk2 := "Y"
-				if fb.currentBlock == nil {
-					blkOk2 = "N"
-				}
-				vOk := "ok"
-				if v == nil {
-					vOk = "NIL"
-				}
-				writeStr(2, "  RETURN-VAL fn=" | fb.fn.name | " idx=" | simpleItoa(idx) | " v=" | vOk | " blk=" | blkOk | "->" | blkOk2 | "\n")
 				if v != nil {
 					vals = append(vals, v)
 				}
 			}
 		} else {
-			writeStr(2, "  RETURN-SINGLE fn=" | fb.fn.name | "\n")
 			v := fb.buildExpr(s.Results)
 			if v != nil {
-				if tup, ok := v.SSAType().(*Tuple); ok && tup.Len() > 1 {
+				if v.SSAType() == nil {
+					vals = append(vals, v)
+				} else if tup, ok := v.SSAType().(*Tuple); ok && tup.Len() > 1 {
 					for i := 0; i < tup.Len(); i++ {
 						ext := &SSAExtract{Tuple: v, Index: i}
 						ext.typ = tup.At(i).Type()
@@ -1842,8 +1938,13 @@ func (fb *ssaFuncBuilder) buildIdent(e *Name) SSAValue {
 		obj = fb.info.Uses[e]
 	}
 	if obj == nil {
-		if fb.fn.name == "trigReduce" {
-			writeStr(2, "  IDENT-MISS fn=trigReduce name=" | e.Value | "\n")
+		if fb.fn.Pkg != nil {
+			if fn, ok := fb.fn.Pkg.Members[e.Value].(*SSAFunction); ok {
+				return fn
+			}
+			if g, ok := fb.fn.Pkg.Members[e.Value].(*SSAGlobal); ok {
+				return fb.emitLoad(g, g.typ)
+			}
 		}
 		return fb.builtinValue(e.Value)
 	}
@@ -1851,14 +1952,6 @@ func (fb *ssaFuncBuilder) buildIdent(e *Name) SSAValue {
 	case *TCVar:
 		if alloc, ok := fb.vars[obj]; ok {
 			return fb.emitLoad(alloc, obj.Type())
-		}
-		if fb.fn.name == "Join" && e.Value == "b" {
-			writeStr(2, "  IDENT-B-MISS fn=Join vars-len=" | irItoa(len(fb.vars)) | "\n")
-			for o := range fb.vars {
-				if o.Name() == "b" {
-					writeStr(2, "  IDENT-B-FOUND-BY-NAME\n")
-				}
-			}
 		}
 		if fv, ok := fb.freeVarPtrs[e.Value]; ok {
 			return fb.emitLoad(fv, obj.Type())
@@ -1874,21 +1967,6 @@ func (fb *ssaFuncBuilder) buildIdent(e *Name) SSAValue {
 		}
 		return &SSAConst{typ: obj.Type(), val: nil}
 	case *TCConst:
-		if obj.Val() == nil || obj.Type() == nil {
-			typStr := "nil"
-			if obj.Type() != nil {
-				typStr = obj.Type().String()
-			}
-			valStr := "nil"
-			if obj.Val() != nil {
-				valStr = obj.Val().String()
-			}
-			pkgPath := "?"
-			if obj.Pkg() != nil {
-				pkgPath = obj.Pkg().Path()
-			}
-			writeStr(2, "  SSA-CONST-BROKEN name=" | e.Value | " typ=" | typStr | " val=" | valStr | " fn=" | fb.fn.name | " cpkg=" | pkgPath | "\n")
-		}
 		return &SSAConst{typ: obj.Type(), val: localizeConstVal(obj.Val(), obj.Type())}
 	case *TCFunc:
 		fn, _ := fb.fn.Pkg.Members[e.Value].(*SSAFunction)
@@ -2094,9 +2172,6 @@ func (fb *ssaFuncBuilder) buildCall(e *CallExpr) SSAValue {
 	}
 	if name, ok := e.Fun.(*Name); ok {
 		obj := fb.lookupObject(name.Value)
-		if obj == nil {
-			writeStr(2, "  CALL-LOOKUP-NIL name=" | name.Value | " fn=" | fb.fn.name | "\n")
-		}
 		if tn, ok2 := obj.(*TypeName); ok2 {
 			if _, isTP := tn.Type().(*TypeParam); !isTP {
 				args := fb.buildArgs(e.ArgList)
@@ -2107,7 +2182,6 @@ func (fb *ssaFuncBuilder) buildCall(e *CallExpr) SSAValue {
 					fb.emit(conv)
 					return conv
 				}
-				writeStr(2, "  TYPECONV-NIL name=" | name.Value | " fn=" | fb.fn.name | " arglen=" | simpleItoa(len(args)) | "\n")
 				return nil
 			}
 		}
@@ -2131,9 +2205,6 @@ func (fb *ssaFuncBuilder) buildCall(e *CallExpr) SSAValue {
 			obj := fb.lookupObject(name.Value)
 			if pn, ok3 := obj.(*PkgName); ok3 {
 				return fb.buildPkgCall(pn, sel.Sel.Value, e.ArgList, e.HasDots)
-			}
-			if obj == nil && fb.fn.name == "Join" {
-				writeStr(2, "  CALL-NOPKG name=" | name.Value | " sel=" | sel.Sel.Value | " fn=" | fb.fn.name | "\n")
 			}
 		}
 		recv := fb.buildExpr(sel.X)
@@ -2191,6 +2262,13 @@ func (fb *ssaFuncBuilder) buildCall(e *CallExpr) SSAValue {
 			} else if sig.Results() != nil && sig.Results().Len() > 1 {
 				retType = sig.Results()
 			}
+		}
+	} else if ssaFn, ok := fn.(*SSAFunction); ok && ssaFn.Signature != nil {
+		sig := ssaFn.Signature
+		if sig.Results() != nil && sig.Results().Len() == 1 {
+			retType = sig.Results().At(0).Type()
+		} else if sig.Results() != nil && sig.Results().Len() > 1 {
+			retType = sig.Results()
 		}
 	}
 
@@ -3064,12 +3142,10 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []E
 	}
 	obj := imported.Scope().Lookup(funcName)
 	if obj == nil {
-		writeStr(2, "  PKGCALL-NIL pkg=" | imported.Path() | " func=" | funcName | " fn=" | fb.fn.name | "\n")
 		return nil
 	}
 	fn, ok := obj.(*TCFunc)
 	if !ok {
-		writeStr(2, "  PKGCALL-NOTFUNC pkg=" | imported.Path() | " func=" | funcName | " fn=" | fb.fn.name | "\n")
 		return nil
 	}
 	impPkg := fb.ensureImportedSSAPackage(imported)
@@ -3105,7 +3181,6 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []E
 	call.name = fb.nextName()
 	fb.emit(call)
 	if retType == nil {
-		writeStr(2, "  PKGCALL-RETNIL pkg=" | imported.Path() | " func=" | funcName | " fn=" | fb.fn.name | "\n")
 		return nil
 	}
 	return call
@@ -3155,17 +3230,11 @@ func (fb *ssaFuncBuilder) lookupObject(name string) Object {
 	}
 	if fb.fn.Pkg != nil {
 		if _, obj := fb.fn.Pkg.Pkg.Scope().LookupParent(name); obj != nil {
-			if k, ok := obj.(*TCConst); ok && (k.Val() == nil || k.Type() == nil) {
-				writeStr(2, "  LOOKUP-PKGSCOPE name=" | name | " fn=" | fb.fn.name | "\n")
-			}
 			return obj
 		}
 	}
 	if fb.srcScope != nil {
 		if _, obj := fb.srcScope.LookupParent(name); obj != nil {
-			if k, ok := obj.(*TCConst); ok && (k.Val() == nil || k.Type() == nil) {
-				writeStr(2, "  LOOKUP-SRCSCOPE name=" | name | " fn=" | fb.fn.name | "\n")
-			}
 			return obj
 		}
 	}

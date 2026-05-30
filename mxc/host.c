@@ -4,7 +4,18 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/syscall.h>
+#include <sys/resource.h>
 #include <fcntl.h>
+
+__attribute__((constructor))
+static void raise_stack_limit(void) {
+    struct rlimit rl;
+    getrlimit(RLIMIT_STACK, &rl);
+    if (rl.rlim_cur < 268435456UL) {
+        rl.rlim_cur = 268435456UL;
+        setrlimit(RLIMIT_STACK, &rl);
+    }
+}
 
 int32_t mxc_writefile(const char* path, int32_t pathLen, const char* data, int32_t dataLen, uint32_t mode) {
     char pbuf[4096];

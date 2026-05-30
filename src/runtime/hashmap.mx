@@ -20,6 +20,7 @@ type hashmap struct {
 	bucketBits uint8
 	keyEqual   func(x, y unsafe.Pointer, n uintptr) bool
 	keyHash    func(key unsafe.Pointer, size, seed uintptr) uint32
+	keyLess    func(x, y unsafe.Pointer, n uintptr) bool
 }
 
 // A hashmap bucket. A bucket is a container of 8 key/value pairs: first the
@@ -34,14 +35,12 @@ type hashmapBucket struct {
 }
 
 type hashmapIterator struct {
-	buckets      unsafe.Pointer // pointer to array of hashapBuckets
-	numBuckets   uintptr        // length of buckets array
-	bucketNumber uintptr        // current index into buckets array
-	startBucket  uintptr        // starting location for iterator
-	bucket       *hashmapBucket // current bucket in chain
-	bucketIndex  uint8          // current index into bucket
-	startIndex   uint8          // starting bucket index for iterator
-	wrapped      bool           // true if the iterator has wrapped
+	sortedKeys unsafe.Pointer // allocated buffer of sorted keys
+	count      uintptr        // total number of keys
+	index      uintptr        // current position in sorted keys
+	keySize    uintptr        // size of each key (copied from hashmap)
+	valueSize  uintptr        // size of each value (copied from hashmap)
+	_pad       [8]uint8       // pad to 48 bytes
 }
 
 func hashmapNewIterator() unsafe.Pointer {
@@ -70,6 +69,7 @@ func hashmapMake(keySize, valueSize uintptr, sizeHint uintptr, alg uint8) *hashm
 
 	keyHash := hashmapKeyHashAlg(moxie.HashmapAlgorithm(alg))
 	keyEqual := hashmapKeyEqualAlg(moxie.HashmapAlgorithm(alg))
+	keyLess := hashmapKeyLessAlg(moxie.HashmapAlgorithm(alg))
 
 	return &hashmap{
 		buckets:    buckets,
@@ -79,6 +79,7 @@ func hashmapMake(keySize, valueSize uintptr, sizeHint uintptr, alg uint8) *hashm
 		bucketBits: bucketBits,
 		keyEqual:   keyEqual,
 		keyHash:    keyHash,
+		keyLess:    keyLess,
 	}
 }
 
@@ -137,6 +138,55 @@ func hashmapKeyHashAlg(alg moxie.HashmapAlgorithm) func(key unsafe.Pointer, n, s
 		// compiler bug :(
 		return nil
 	}
+}
+
+func hashmapKeyLessAlg(alg moxie.HashmapAlgorithm) func(x, y unsafe.Pointer, n uintptr) bool {
+	switch alg {
+	case moxie.HashmapAlgorithmBinary:
+		return memless
+	case moxie.HashmapAlgorithmContent:
+		return hashmapContentLess
+	case moxie.HashmapAlgorithmInterface:
+		return memless
+	default:
+		return memless
+	}
+}
+
+func memless(x, y unsafe.Pointer, n uintptr) bool {
+	for i := uintptr(0); i < n; i++ {
+		cx := *(*uint8)(unsafe.Add(x, i))
+		cy := *(*uint8)(unsafe.Add(y, i))
+		if cx < cy {
+			return true
+		}
+		if cx > cy {
+			return false
+		}
+	}
+	return false
+}
+
+func hashmapContentLess(x, y unsafe.Pointer, n uintptr) bool {
+	sx := *(*_string)(x)
+	sy := *(*_string)(y)
+	lx := uintptr(sx.length)
+	ly := uintptr(sy.length)
+	min := lx
+	if ly < min {
+		min = ly
+	}
+	for i := uintptr(0); i < min; i++ {
+		cx := *(*uint8)(unsafe.Add(unsafe.Pointer(sx.ptr), i))
+		cy := *(*uint8)(unsafe.Add(unsafe.Pointer(sy.ptr), i))
+		if cx < cy {
+			return true
+		}
+		if cx > cy {
+			return false
+		}
+	}
+	return lx < ly
 }
 
 func hashmapHasSpaceToGrow(bucketBits uint8) bool {
@@ -385,83 +435,76 @@ func hashmapDelete(m *hashmap, key unsafe.Pointer, hash uint32) {
 	}
 }
 
-// Iterate over a hashmap.
+// Iterate over a hashmap in lexicographic key order.
 //
 //go:nobounds
 func hashmapNext(m *hashmap, it *hashmapIterator, key, value unsafe.Pointer) bool {
 	if m == nil {
-		// From the spec: If the map is nil, the number of iterations is 0.
 		return false
 	}
 
-	if it.buckets == nil {
-		// initialize iterator
-		it.buckets = m.buckets
-		it.numBuckets = uintptr(1) << m.bucketBits
-		it.startBucket = uintptr(fastrand()) & (it.numBuckets - 1)
-		it.startIndex = uint8(fastrand() & 7)
-
-		it.bucketNumber = it.startBucket
-		it.bucket = hashmapBucketAddr(m, it.buckets, it.bucketNumber)
-		it.bucketIndex = it.startIndex
-	}
-
-	for {
-		// If we've wrapped and we're back at our starting location, terminate the iteration.
-		if it.wrapped && it.bucketNumber == it.startBucket && it.bucketIndex == it.startIndex {
+	if it.sortedKeys == nil {
+		// First call: collect all keys, sort them.
+		n := m.count
+		if n == 0 {
 			return false
 		}
+		it.keySize = m.keySize
+		it.valueSize = m.valueSize
+		it.count = n
+		it.index = 0
 
-		if it.bucketIndex >= 8 {
-			// end of bucket, move to the next in the chain
-			it.bucketIndex = 0
-			it.bucket = it.bucket.next
-		}
+		buf := alloc(m.keySize*n, nil)
+		it.sortedKeys = buf
 
-		if it.bucket == nil {
-			it.bucketNumber++ // next bucket
-			if it.bucketNumber >= it.numBuckets {
-				// went through all buckets -- wrap around
-				it.bucketNumber = 0
-				it.wrapped = true
+		// Walk all buckets and collect keys.
+		numBuckets := uintptr(1) << m.bucketBits
+		pos := uintptr(0)
+		for bi := uintptr(0); bi < numBuckets; bi++ {
+			bucket := hashmapBucketAddr(m, m.buckets, bi)
+			for bucket != nil {
+				for si := uint8(0); si < 8; si++ {
+					if bucket.tophash[si] != 0 {
+						slotKey := hashmapSlotKey(m, bucket, si)
+						dst := unsafe.Add(buf, pos*m.keySize)
+						memcpy(dst, slotKey, m.keySize)
+						pos++
+					}
+				}
+				bucket = bucket.next
 			}
-			it.bucket = hashmapBucketAddr(m, it.buckets, it.bucketNumber)
-			continue
 		}
+		it.count = pos
 
-		if it.bucket.tophash[it.bucketIndex] == 0 {
-			// slot is empty - move on
-			it.bucketIndex++
-			continue
-		}
-
-		// Found a key.
-		slotKey := hashmapSlotKey(m, it.bucket, it.bucketIndex)
-		memcpy(key, slotKey, m.keySize)
-
-		if it.buckets == m.buckets {
-			// Our view of the buckets is the same as the parent map.
-			// Just copy the value we have
-			slotValue := hashmapSlotValue(m, it.bucket, it.bucketIndex)
-			memcpy(value, slotValue, m.valueSize)
-			it.bucketIndex++
-		} else {
-			it.bucketIndex++
-
-			// Our view of the buckets doesn't match the parent map.
-			// Look up the key in the new buckets and return that value if it exists
-			hash := m.keyHash(key, m.keySize, m.seed)
-			ok := hashmapGet(m, key, value, m.valueSize, hash)
-			if !ok {
-				// doesn't exist in parent map; try next key
-				continue
+		// Insertion sort by keyLess.
+		less := m.keyLess
+		ks := m.keySize
+		tmp := alloc(ks, nil)
+		for i := uintptr(1); i < pos; i++ {
+			for j := i; j > 0; j-- {
+				kj := unsafe.Add(buf, j*ks)
+				kjm1 := unsafe.Add(buf, (j-1)*ks)
+				if !less(kj, kjm1, ks) {
+					break
+				}
+				memcpy(tmp, kj, ks)
+				memcpy(kj, kjm1, ks)
+				memcpy(kjm1, tmp, ks)
 			}
-
-			// All good.
 		}
-
-		return true
 	}
+
+	if it.index >= it.count {
+		return false
+	}
+
+	// Copy sorted key, look up current value from the live map.
+	sortedKey := unsafe.Add(it.sortedKeys, it.index*it.keySize)
+	memcpy(key, sortedKey, it.keySize)
+	hash := m.keyHash(key, m.keySize, m.seed)
+	hashmapGet(m, key, value, m.valueSize, hash)
+	it.index++
+	return true
 }
 
 // Hashmap with plain binary data keys (not containing strings etc.).
