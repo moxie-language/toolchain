@@ -50,17 +50,15 @@ import (
 
 // The runtime implementation of the Go 'chan' type.
 type channel struct {
-	closed       bool
-	selectLocked bool
-	elementSize  uintptr
+	closed      bool
+	elementSize uintptr
 	bufCap       uintptr // 'cap'
 	bufLen       uintptr // 'len'
 	bufHead      uintptr
 	bufTail      uintptr
 	senders      chanQueue
 	receivers    chanQueue
-	lock         task.PMutex
-	buf          unsafe.Pointer
+	buf unsafe.Pointer
 
 	// Spawn-boundary metadata (native targets only). When pipeBoundFd != 0
 	// the channel is on a fork+socketpair pipe, not a local in-runtime
@@ -250,11 +248,9 @@ func chanSend(ch *channel, value unsafe.Pointer, op *channelOp) {
 	}
 
 	mask := interrupt.Disable()
-	ch.lock.Lock()
 
 	// See whether we can proceed immediately, and if so, return early.
 	if ch.trySend(value) {
-		ch.lock.Unlock()
 		interrupt.Restore(mask)
 		return
 	}
@@ -266,7 +262,6 @@ func chanSend(ch *channel, value unsafe.Pointer, op *channelOp) {
 	op.index = 0
 	op.value = value
 	ch.senders.push(op)
-	ch.lock.Unlock()
 	interrupt.Restore(mask)
 
 	// Wait until a receiver picks up the value.
@@ -341,10 +336,8 @@ func chanRecv(ch *channel, value unsafe.Pointer, op *channelOp) bool {
 	}
 
 	mask := interrupt.Disable()
-	ch.lock.Lock()
 
 	if received, ok := ch.tryRecv(value); received {
-		ch.lock.Unlock()
 		interrupt.Restore(mask)
 		return ok
 	}
@@ -357,7 +350,6 @@ func chanRecv(ch *channel, value unsafe.Pointer, op *channelOp) bool {
 	op.task = t
 	op.index = 0
 	ch.receivers.push(op)
-	ch.lock.Unlock()
 	interrupt.Restore(mask)
 
 	// Wait until a sender provides a value.
@@ -387,11 +379,9 @@ func chanClose(ch *channel) {
 	}
 
 	mask := interrupt.Disable()
-	ch.lock.Lock()
 
 	if ch.closed {
 		// Not allowed by the language spec.
-		ch.lock.Unlock()
 		interrupt.Restore(mask)
 		runtimePanic("close of closed channel")
 	}
@@ -424,7 +414,6 @@ func chanClose(ch *channel) {
 
 	ch.closed = true
 
-	ch.lock.Unlock()
 	interrupt.Restore(mask)
 
 	// Spawn-boundary: if this is a pipe-bound channel, signal the remote
@@ -434,41 +423,14 @@ func chanClose(ch *channel) {
 	}
 }
 
-// We currently use a global select lock to avoid deadlocks while locking each
-// individual channel in the select. Without this global lock, two select
-// operations that have a different order of the same channels could end up in a
-// deadlock. This global lock is inefficient if there are many select operations
-// happening in parallel, but gets the job done.
-//
-// If this becomes a performance issue, we can see how the Go runtime does this.
-// I think it does this by sorting all states by channel address and then
-// locking them in that order to avoid this deadlock.
-var chanSelectLock task.PMutex
-
 // Lock all channels (taking care to skip duplicate channels).
+// No-op: Moxie is single-threaded, hasParallelism is always false.
 func lockAllStates(states []chanSelectState) {
-	if !hasParallelism {
-		return
-	}
-	for _, state := range states {
-		if state.ch != nil && !state.ch.selectLocked {
-			state.ch.lock.Lock()
-			state.ch.selectLocked = true
-		}
-	}
 }
 
 // Unlock all channels (taking care to skip duplicate channels).
+// No-op: Moxie is single-threaded, hasParallelism is always false.
 func unlockAllStates(states []chanSelectState) {
-	if !hasParallelism {
-		return
-	}
-	for _, state := range states {
-		if state.ch != nil && state.ch.selectLocked {
-			state.ch.lock.Unlock()
-			state.ch.selectLocked = false
-		}
-	}
 }
 
 // chanSelect implements blocking or non-blocking select operations.
@@ -477,7 +439,6 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 	mask := interrupt.Disable()
 
 	// Lock everything.
-	chanSelectLock.Lock()
 	lockAllStates(states)
 
 	const selectNoIndex = ^uint32(0)
@@ -512,7 +473,6 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 	blocking := len(ops) != 0
 	if selectIndex != selectNoIndex || !blocking {
 		unlockAllStates(states)
-		chanSelectLock.Unlock()
 		interrupt.Restore(mask)
 		return selectIndex, selectOk
 	}
@@ -543,7 +503,6 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 
 	// Now we wait until one of the send/receive operations can proceed.
 	unlockAllStates(states)
-	chanSelectLock.Unlock()
 	interrupt.Restore(mask)
 
 	// Single-threaded event loop: poll for I/O and timers until a
@@ -595,7 +554,6 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 
 	// Make sure all channel ops are removed from the senders/receivers
 	// queue before we return and the memory of them becomes invalid.
-	chanSelectLock.Lock()
 	lockAllStates(states)
 	for i, state := range states {
 		if state.ch == nil {
@@ -611,7 +569,6 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 		interrupt.Restore(mask)
 	}
 	unlockAllStates(states)
-	chanSelectLock.Unlock()
 
 	// Pull the return values out of t.Data (which contains two bitfields).
 	selectIndex = t.DataUint32() >> 2

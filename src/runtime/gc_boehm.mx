@@ -20,7 +20,6 @@ package runtime
 
 import (
 	"internal/gclayout"
-	"internal/task"
 	"unsafe"
 )
 
@@ -28,8 +27,6 @@ const needsStaticHeap = false
 
 // zeroSizedAlloc is just a sentinel that gets returned when allocating 0 bytes.
 var zeroSizedAlloc uint8
-
-var gcLock task.PMutex
 
 func initHeap() {
 	libgc_init()
@@ -70,7 +67,6 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 		return unsafe.Pointer(&zeroSizedAlloc)
 	}
 
-	gcLock.Lock()
 	var ptr unsafe.Pointer
 	if layout == gclayout.NoPtrs.AsPtr() {
 		// This object is entirely pointer free, for example make([]int, ...).
@@ -88,7 +84,6 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 		// to do here.
 	}
 	gcResumeWorld()
-	gcLock.Unlock()
 	if ptr == nil {
 		runtimePanic("gc: out of memory")
 	}
@@ -101,10 +96,8 @@ func free(ptr unsafe.Pointer) {
 }
 
 func GC() {
-	gcLock.Lock()
 	libgc_gcollect()
 	gcResumeWorld()
-	gcLock.Unlock()
 }
 
 // This should be stack-allocated, but we don't currently have a good way of
@@ -112,8 +105,6 @@ func GC() {
 var gcMemStats libgc_prof_stats
 
 func ReadMemStats(m *MemStats) {
-	gcLock.Lock()
-
 	libgc_get_prof_stats(&gcMemStats, unsafe.Sizeof(gcMemStats))
 
 	// Fill in MemStats as well as we can, given the information that bdwgc
@@ -127,8 +118,6 @@ func ReadMemStats(m *MemStats) {
 	m.Mallocs = 0 // not provided by bdwgc
 	m.Frees = 0   // not provided by bdwgc
 	m.Sys = uint64(gcMemStats.obtained_from_os_bytes)
-
-	gcLock.Unlock()
 }
 
 func setHeapEnd(newHeapEnd uintptr) {

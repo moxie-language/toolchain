@@ -7,7 +7,6 @@
 package runtime
 
 import (
-	"internal/task"
 	"unsafe"
 )
 
@@ -17,7 +16,6 @@ var heapptr uintptr
 var gcTotalAlloc uint64
 var gcMallocs uint64
 var gcFrees uint64
-var gcLock task.PMutex
 
 // Free-list node. Stored in-place in freed blocks (minimum block size = 16 bytes).
 type freeNode struct {
@@ -95,7 +93,7 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 	if size == 0 {
 		size = 1
 	}
-	gcLock.Lock()
+
 	size = align(size)
 	totalSize := size + uintptr(headerSize)
 	class := sizeClass(size)
@@ -111,7 +109,6 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 			memzero(ptr, size)
 			gcMallocs++
 			gcTotalAlloc += uint64(size)
-			gcLock.Unlock()
 			return ptr
 		}
 		totalSize = uintptr(headerSize) + classSize(class)
@@ -143,7 +140,6 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 			memzero(ptr, size)
 			gcMallocs++
 			gcTotalAlloc += uint64(size)
-			gcLock.Unlock()
 			return ptr
 		}
 	}
@@ -159,7 +155,6 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 	}
 	gcMallocs++
 	gcTotalAlloc += uint64(size)
-	gcLock.Unlock()
 
 	hdr := (*blockHeader)(unsafe.Pointer(addr))
 	hdr.size = size
@@ -172,7 +167,7 @@ func free(ptr unsafe.Pointer) {
 	if ptr == nil {
 		return
 	}
-	gcLock.Lock()
+
 	hdr := (*blockHeader)(unsafe.Add(ptr, -int(headerSize)))
 	size := hdr.size
 	totalSize := size + uintptr(headerSize)
@@ -189,7 +184,6 @@ func free(ptr unsafe.Pointer) {
 		node.next = freeLists[9]
 		freeLists[9] = node
 	}
-	gcLock.Unlock()
 }
 
 func realloc(ptr unsafe.Pointer, size uintptr) unsafe.Pointer {
@@ -213,7 +207,6 @@ func markRoots(start, end uintptr) {
 }
 
 func ReadMemStats(m *MemStats) {
-	gcLock.Lock()
 	m.HeapIdle = 0
 	m.HeapInuse = gcTotalAlloc
 	m.HeapReleased = 0
@@ -225,7 +218,6 @@ func ReadMemStats(m *MemStats) {
 	m.Sys = uint64(heapEnd - heapStart)
 	m.HeapAlloc = gcTotalAlloc
 	m.Alloc = m.HeapAlloc
-	gcLock.Unlock()
 }
 
 func GC() {
