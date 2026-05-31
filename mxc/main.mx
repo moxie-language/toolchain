@@ -190,6 +190,57 @@ func joinPath(a, b string) string {
 	return a | "/" | b
 }
 
+func pathDir(path string) string {
+	for i := int32(len(path)) - 1; i >= 0; i-- {
+		if path[i] == '/' {
+			if i == 0 {
+				return "/"
+			}
+			return path[:i]
+		}
+	}
+	return "."
+}
+
+func cleanPath(path string) string {
+	parts := splitSlash(path)
+	var out []string
+	for _, p := range parts {
+		if p == "." || p == "" {
+			continue
+		}
+		if p == ".." && len(out) > 0 && out[len(out)-1] != ".." {
+			out = out[:len(out)-1]
+		} else {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return "."
+	}
+	result := out[0]
+	for i := 1; i < len(out); i++ {
+		result = result | "/" | out[i]
+	}
+	if len(path) > 0 && path[0] == '/' {
+		result = "/" | result
+	}
+	return result
+}
+
+func splitSlash(s string) []string {
+	var parts []string
+	start := int32(0)
+	for i := int32(0); i < int32(len(s)); i++ {
+		if s[i] == '/' {
+			parts = append(parts, s[start:i])
+			start = i + 1
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
+}
+
 func pathBase(path string) string {
 	for i := int32(len(path)) - 1; i >= 0; i-- {
 		if path[i] == '/' {
@@ -250,6 +301,18 @@ func pkgCacheDir() string {
 	return joinPath(home, ".cache/moxie/pkg")
 }
 
+func getMoxiePath() string {
+	p := getenv("MOXIEPATH")
+	if p != "" {
+		return p
+	}
+	home := getenv("HOME")
+	if home == "" {
+		return "/tmp/moxie"
+	}
+	return joinPath(home, "moxie")
+}
+
 func pkgCacheKey(dir string, files []string) string {
 	var sorted []string
 	for _, f := range files {
@@ -278,7 +341,7 @@ func cachedBcPath(cacheBase, pkgPath, hash string) string {
 }
 
 func isStdlib(path string) bool {
-	return !hasPrefix(path, "/") && !hasPrefix(path, "./") && !hasPrefix(path, "../")
+	return path != "." && !hasPrefix(path, "/") && !hasPrefix(path, "./") && !hasPrefix(path, "../")
 }
 
 var builtinOnly []string
@@ -290,6 +353,10 @@ func isBuiltinOnly(path string) bool {
 		}
 	}
 	return false
+}
+
+func isInRuntime(path string) bool {
+	return path == "internal/task"
 }
 
 func loadSysroot(path string) {
@@ -517,22 +584,76 @@ func shouldSkipFile(name string) bool {
 	} else if hasSuffix(base, ".mx") {
 		base = base[:len(base)-3]
 	}
-	archSkip := []string{"arm64"}
-	for _, a := range archSkip {
-		if fileContainsPart(base, a) {
-			return true
+	if globalTargetArch == "wasm" {
+		for _, a := range []string{"amd64", "arm64", "386"} {
+			if fileContainsPart(base, a) {
+				return true
+			}
+		}
+		for _, s := range []string{"_linux", "_unix", "_darwin", "_posix"} {
+			if hasSuffix(base, s) {
+				return true
+			}
+		}
+	} else {
+		for _, a := range []string{"arm64"} {
+			if fileContainsPart(base, a) {
+				return true
+			}
+		}
+		for _, s := range []string{"_wasm"} {
+			if hasSuffix(base, s) {
+				return true
+			}
 		}
 	}
-	suffixSkip := []string{"_wasm"}
-	for _, s := range suffixSkip {
-		if hasSuffix(base, s) {
-			return true
-		}
-	}
-	exact := []string{"pipe", "multi", "scan", "reader", "replace", "search",
-		"ioutil"}
+	exact := []string{"pipe", "multi", "replace", "search",
+		"ioutil", "quic"}
 	for _, s := range exact {
 		if base == s {
+			return true
+		}
+	}
+	return false
+}
+
+func constraintContainsNegated(line string, word string) bool {
+	wl := int32(len(word))
+	for i := int32(1); i <= int32(len(line))-wl; i++ {
+		if string(line[i:i+wl]) == word && line[i-1] == '!' {
+			after := i + wl
+			if after < int32(len(line)) {
+				c := line[after]
+				if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' {
+					continue
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func constraintContainsPositive(line string, word string) bool {
+	wl := int32(len(word))
+	for i := int32(0); i <= int32(len(line))-wl; i++ {
+		if string(line[i:i+wl]) == word {
+			if i > 0 && line[i-1] == '!' {
+				continue
+			}
+			after := i + wl
+			if after < int32(len(line)) {
+				c := line[after]
+				if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' {
+					continue
+				}
+			}
+			if i > 0 {
+				c := line[i-1]
+				if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' {
+					continue
+				}
+			}
 			return true
 		}
 	}
@@ -550,10 +671,36 @@ func hasBuildConstraint(data []byte, forbidden []string) bool {
 				buf = append(buf, data[j])
 			}
 			line := string(buf)
+			if globalTargetArch == "wasm" {
+				if constraintContainsPositive(line, "moxie.wasm") ||
+					constraintContainsPositive(line, "wasm") ||
+					constraintContainsPositive(line, "js") {
+					return false
+				}
+				if constraintContainsNegated(line, "js") ||
+					constraintContainsNegated(line, "wasm") ||
+					constraintContainsNegated(line, "moxie.wasm") {
+					return true
+				}
+			} else {
+				if constraintContainsPositive(line, "linux") ||
+					constraintContainsPositive(line, "unix") ||
+					constraintContainsPositive(line, globalTargetArch) {
+					return false
+				}
+				if constraintContainsNegated(line, "linux") ||
+					constraintContainsNegated(line, "unix") ||
+					constraintContainsNegated(line, globalTargetArch) {
+					return true
+				}
+			}
 			for _, f := range forbidden {
 				if line == f || hasPrefix(line, f | " ") || hasPrefix(line, f | "\t") {
 					return true
 				}
+			}
+			if constraintContainsPositive(line, "purego") {
+				return true
 			}
 			return false
 		}
@@ -586,23 +733,178 @@ type pkgInfo struct {
 	dir     string
 	files   []string
 	cfiles  []string
+	sfiles  []string
 	imports []string
+}
+
+var globalModPrefix string
+var globalModDir string
+var globalTargetOS string
+var globalTargetArch string
+var globalReplaces map[string]string
+
+func findModuleRoot(startDir string) (string, string) {
+	dir := startDir
+	for {
+		data, ok := readFile(joinPath(dir, "moxie.mod"))
+		if ok {
+			modName := ""
+			globalReplaces = map[string]string{}
+			lines := splitLines(string(data))
+			for _, line := range lines {
+				line = trimSpace(line)
+				if hasPrefix(line, "module ") {
+					modName = trimSpace(line[7:])
+				}
+				if hasPrefix(line, "replace ") {
+					parts := line[8:]
+					arrow := int32(-1)
+					for k := int32(0); k < int32(len(parts))-1; k++ {
+						if parts[k] == '=' && parts[k+1] == '>' {
+							arrow = k
+							break
+						}
+					}
+					if arrow >= 0 {
+						from := trimSpace(parts[:arrow])
+						to := trimSpace(parts[arrow+2:])
+						// strip version from "from" if present
+						for fi := int32(0); fi < int32(len(from)); fi++ {
+							if from[fi] == ' ' {
+								from = from[:fi]
+								break
+							}
+						}
+						if hasPrefix(to, "./") || hasPrefix(to, "../") || hasPrefix(to, "/") {
+							to = cleanPath(joinPath(dir, to))
+						}
+						globalReplaces[from] = to
+					}
+				}
+			}
+			if modName != "" {
+				return modName, dir
+			}
+		}
+		parent := pathDir(dir)
+		if parent == dir || parent == "" || parent == "." {
+			break
+		}
+		dir = parent
+	}
+	return "", ""
+}
+
+func mergeModReplaces(dir string) {
+	data, ok := readFile(joinPath(dir, "moxie.mod"))
+	if !ok {
+		return
+	}
+	if globalReplaces == nil {
+		globalReplaces = map[string]string{}
+	}
+	for _, line := range splitLines(string(data)) {
+		line = trimSpace(line)
+		if !hasPrefix(line, "replace ") {
+			continue
+		}
+		rest := line[8:]
+		arrow := int32(-1)
+		for k := int32(0); k < int32(len(rest))-1; k++ {
+			if rest[k] == '=' && rest[k+1] == '>' {
+				arrow = k
+				break
+			}
+		}
+		if arrow < 0 {
+			continue
+		}
+		from := trimSpace(rest[:arrow])
+		to := trimSpace(rest[arrow+2:])
+		for fi := int32(0); fi < int32(len(from)); fi++ {
+			if from[fi] == ' ' {
+				from = from[:fi]
+				break
+			}
+		}
+		if _, exists := globalReplaces[from]; exists {
+			continue
+		}
+		if hasPrefix(to, "./") || hasPrefix(to, "../") || hasPrefix(to, "/") {
+			to = cleanPath(joinPath(dir, to))
+		}
+		globalReplaces[from] = to
+	}
 }
 
 func discoverPkg(pkgPath, root string) *pkgInfo {
 	var dir string
-	if hasPrefix(pkgPath, "/") || hasPrefix(pkgPath, "./") || hasPrefix(pkgPath, "../") {
+	if pkgPath == "." || pkgPath == ".." || hasPrefix(pkgPath, "/") || hasPrefix(pkgPath, "./") || hasPrefix(pkgPath, "../") {
 		dir = pkgPath
-	} else {
+	} else if globalReplaces != nil {
+		if rdir, ok := globalReplaces[pkgPath]; ok {
+			dir = rdir
+		}
+		if dir == "" {
+			for from, to := range globalReplaces {
+				if hasPrefix(pkgPath, from|"/") {
+					rel := pkgPath[len(from)+1:]
+					dir = joinPath(to, rel)
+					break
+				}
+			}
+		}
+	}
+	if dir == "" && globalModPrefix != "" && pkgPath == globalModPrefix {
+		dir = globalModDir
+	}
+	if dir == "" && globalModPrefix != "" && hasPrefix(pkgPath, globalModPrefix|"/") {
+		rel := pkgPath[len(globalModPrefix)+1:]
+		dir = joinPath(globalModDir, rel)
+	}
+	if dir == "" {
+		candidate := joinPath(getMoxiePath(), pkgPath)
+		mxF := listFiles(candidate, ".mx")
+		goF := listFiles(candidate, ".go")
+		if len(mxF) > 0 || len(goF) > 0 {
+			dir = candidate
+		}
+	}
+	if dir != "" {
+		mergeModReplaces(dir)
+	}
+	if dir == "" {
 		dir = joinPath(root, joinPath("src", pkgPath))
+		goFiles := listFiles(dir, ".go")
+		mxFiles := listFiles(dir, ".mx")
+		if len(goFiles) == 0 && len(mxFiles) == 0 {
+			dir = joinPath(root, joinPath("src/vendor", pkgPath))
+		}
 	}
 	goFiles := listFiles(dir, ".go")
 	mxFiles := listFiles(dir, ".mx")
 	cFiles := listFiles(dir, ".c")
+	allSFiles := listFiles(dir, ".s")
+	var sFiles []string
+	for _, sf := range allSFiles {
+		if !shouldSkipFile(sf[:len(sf)-2] | ".mx") {
+			sFiles = append(sFiles, sf)
+		}
+	}
 	allMx := append(mxFiles, goFiles...)
-	forbidden := []string{"wasm", "js", "ignore", "compiler_bootstrap",
-		"scheduler.tasks", "scheduler.cores", "scheduler.asyncify",
-		"faketime", "baremetal", "nintendoswitch"}
+	var forbidden []string
+	if globalTargetArch == "wasm" {
+		forbidden = []string{"linux", "unix", "darwin", "amd64", "arm64",
+			"ignore", "compiler_bootstrap",
+			"scheduler.tasks", "scheduler.cores", "scheduler.asyncify",
+			"faketime", "baremetal", "nintendoswitch",
+			"boringcrypto", "cgo"}
+	} else {
+		forbidden = []string{"wasm", "js", "ignore", "compiler_bootstrap",
+			"scheduler.tasks", "scheduler.cores", "scheduler.asyncify",
+			"faketime", "baremetal", "nintendoswitch",
+			"boringcrypto", "cgo"}
+	}
 	var files []string
 	for _, f := range allMx {
 		if shouldSkipFile(f) {
@@ -663,6 +965,7 @@ func discoverPkg(pkgPath, root string) *pkgInfo {
 		dir:     dir,
 		files:   files,
 		cfiles:  cFiles,
+		sfiles:  sFiles,
 		imports: allImports,
 	}
 }
@@ -721,6 +1024,15 @@ func registerBuiltins() {
 	// runtime - assembly + C, pre-compiled in runtime.bc
 	rtPkg := NewTCPackage("runtime", "runtime")
 	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "InitCShared", parseSignatureDesc("")))
+	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "LastSpawnedParentFd", parseSignatureDesc("->int32")))
+	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "PipeClosed", parseSignatureDesc("int32->bool")))
+	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "PipeFDCanSend", parseSignatureDesc("int32->bool")))
+	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "Caller", parseSignatureDesc("int32->ptr,string,int32,bool")))
+	rtPkg.Scope().Insert(NewTCVar(rtPkg, "ChildPipeFd", Typ[Int32]))
+	goarchConst := NewTCConst(rtPkg, "GOARCH", Typ[TCString], constStr{globalTargetArch})
+	rtPkg.Scope().Insert(goarchConst)
+	goosConst := NewTCConst(rtPkg, "GOOS", Typ[TCString], constStr{globalTargetOS})
+	rtPkg.Scope().Insert(goosConst)
 	importRegistry["runtime"] = rtPkg
 }
 
@@ -759,6 +1071,141 @@ func removeAll(path string) {
 	os.Remove(path)
 }
 
+type modRequire struct {
+	path    string
+	version string
+}
+
+func parseModRequires(dir string) (string, []modRequire, map[string]string) {
+	data, ok := readFile(joinPath(dir, "moxie.mod"))
+	if !ok {
+		return "", nil, nil
+	}
+	modName := ""
+	var reqs []modRequire
+	repls := map[string]string{}
+	for _, line := range splitLines(string(data)) {
+		line = trimSpace(line)
+		if hasPrefix(line, "module ") {
+			modName = trimSpace(line[7:])
+			continue
+		}
+		if hasPrefix(line, "require ") {
+			parts := splitBySpace(line[8:])
+			if len(parts) >= 2 {
+				reqs = append(reqs, modRequire{path: parts[0], version: parts[1]})
+			} else if len(parts) == 1 {
+				reqs = append(reqs, modRequire{path: parts[0], version: ""})
+			}
+			continue
+		}
+		if hasPrefix(line, "replace ") {
+			rest := line[8:]
+			arrow := int32(-1)
+			for k := int32(0); k < int32(len(rest))-1; k++ {
+				if rest[k] == '=' && rest[k+1] == '>' {
+					arrow = k
+					break
+				}
+			}
+			if arrow >= 0 {
+				from := trimSpace(rest[:arrow])
+				to := trimSpace(rest[arrow+2:])
+				for fi := int32(0); fi < int32(len(from)); fi++ {
+					if from[fi] == ' ' {
+						from = from[:fi]
+						break
+					}
+				}
+				if hasPrefix(to, "./") || hasPrefix(to, "../") || hasPrefix(to, "/") {
+					to = cleanPath(joinPath(dir, to))
+				}
+				repls[from] = to
+			}
+		}
+	}
+	return modName, reqs, repls
+}
+
+func cmdFetch() {
+	mpath := getMoxiePath()
+	mkdirAll(mpath, 0755)
+
+	lockPath := joinPath(mpath, ".lock")
+	_, locked := readFile(lockPath)
+	if locked {
+		fatal("fetch already running (" | lockPath | ")")
+	}
+	writeFile(lockPath, []byte("1"), 0644)
+
+	modName, reqs, repls := parseModRequires(".")
+	if modName == "" {
+		os.Remove(lockPath)
+		fatal("no moxie.mod in current directory")
+	}
+	writeStr(2, "module: " | modName | "\n")
+
+	var queue []modRequire
+	for _, r := range reqs {
+		if _, ok := repls[r.path]; ok {
+			writeStr(2, "  skip (replaced): " | r.path | "\n")
+			continue
+		}
+		queue = append(queue, r)
+	}
+
+	seen := map[string]bool{}
+	for len(queue) > 0 {
+		req := queue[0]
+		queue = queue[1:]
+		if seen[req.path] {
+			continue
+		}
+		seen[req.path] = true
+
+		dest := joinPath(mpath, req.path)
+		gitHead := joinPath(dest, ".git/HEAD")
+		_, exists := readFile(gitHead)
+
+		if !exists {
+			mkdirAll(pathDir(dest), 0755)
+			url := "https://" | req.path
+			writeStr(2, "  clone " | req.path | "\n")
+			if run([]string{"git", "clone", url, dest}) != 0 {
+				writeStr(2, "  FAIL: clone " | req.path | "\n")
+				continue
+			}
+		}
+
+		if req.version != "" && req.version != "v0.0.0" {
+			if run([]string{"git", "-C", dest, "checkout", req.version}) != 0 {
+				writeStr(2, "  tag " | req.version | " not found, pulling\n")
+				run([]string{"git", "-C", dest, "pull"})
+				if run([]string{"git", "-C", dest, "checkout", req.version}) != 0 {
+					writeStr(2, "  WARN: " | req.version | " unavailable for " | req.path | "\n")
+				}
+			} else {
+				writeStr(2, "  " | req.path | " @ " | req.version | "\n")
+			}
+		} else if exists {
+			writeStr(2, "  pull " | req.path | "\n")
+			run([]string{"git", "-C", dest, "pull"})
+		} else {
+			writeStr(2, "  fetched " | req.path | "\n")
+		}
+
+		_, subReqs, _ := parseModRequires(dest)
+		for _, sr := range subReqs {
+			if !seen[sr.path] {
+				queue = append(queue, sr)
+			}
+		}
+	}
+
+	os.Remove(lockPath)
+	writeStr(2, "fetch done\n")
+}
+
 func cacheClean() {
 	base := pkgCacheDir()
 	writeStr(2, "cleaning cache: " | base | "\n")
@@ -778,13 +1225,13 @@ func main() {
 	builtinOnly = []string{"unsafe", "runtime", "moxie"}
 	args := getArgs()
 	if len(args) < 2 {
-		writeStr(2, "usage: mxc <build|version|cache> ...\n")
+		writeStr(2, "usage: mxc <build|version|cache|fetch> ...\n")
 		os.Exit(1)
 	}
 
 	cmd := args[1]
 	if cmd == "version" {
-		writeStr(1, "mxc 1.6.1\n")
+		writeStr(1, "mxc 1.6.2\n")
 		return
 	}
 	if cmd == "cache" {
@@ -795,8 +1242,12 @@ func main() {
 		writeStr(2, "usage: mxc cache clean\n")
 		os.Exit(1)
 	}
+	if cmd == "fetch" {
+		cmdFetch()
+		return
+	}
 	if cmd != "build" {
-		writeStr(2, "usage: mxc <build|version|cache> ...\n")
+		writeStr(2, "usage: mxc <build|version|cache|fetch> ...\n")
 		os.Exit(1)
 	}
 
@@ -804,16 +1255,22 @@ func main() {
 	pkgPath := ""
 	printIR := false
 	forceRebuild := false
+	targetFlag := ""
 	i := int32(2)
 	for i < int32(len(args)) {
 		if args[i] == "-o" && i+1 < int32(len(args)) {
 			outpath = args[i+1]
+			i += 2
+		} else if args[i] == "-target" && i+1 < int32(len(args)) {
+			targetFlag = args[i+1]
 			i += 2
 		} else if args[i] == "-print-ir" {
 			printIR = true
 			i++
 		} else if args[i] == "-a" {
 			forceRebuild = true
+			i++
+		} else if args[i] == "-x" || args[i] == "-work" {
 			i++
 		} else {
 			pkgPath = args[i]
@@ -831,8 +1288,27 @@ func main() {
 	if root == "" {
 		root = "."
 	}
+	globalTargetOS = "linux"
+	globalTargetArch = "amd64"
 	triple := "x86_64-unknown-linux-musleabihf"
+	if targetFlag == "js/wasm" || targetFlag == "wasm" {
+		globalTargetOS = "js"
+		globalTargetArch = "wasm"
+		triple = "wasm32-unknown-js"
+	}
+	isWasm := globalTargetArch == "wasm"
 	clang := "clang-21"
+
+	searchDir := "."
+	if hasPrefix(pkgPath, "/") {
+		searchDir = pkgPath
+	} else if hasPrefix(pkgPath, "./") || hasPrefix(pkgPath, "../") {
+		searchDir = pkgPath
+	}
+	globalModPrefix, globalModDir = findModuleRoot(searchDir)
+	if globalModPrefix == "" {
+		globalModPrefix, globalModDir = findModuleRoot(".")
+	}
 
 	registerBuiltins()
 	pkgs := resolveAll(pkgPath, root)
@@ -845,10 +1321,11 @@ func main() {
 
 	cacheBase := pkgCacheDir()
 	var allBcFiles []string
+	var overrideBcFiles []string
 
 	for _, pkg := range pkgs {
 		compilePath := pkg.path
-		if hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
 
@@ -863,7 +1340,11 @@ func main() {
 				TypeCheckOnly(src, compilePath)
 				writeStr(2, "    tc-done " | compilePath | "\n")
 				src = nil
-				allBcFiles = append(allBcFiles, cached)
+				if isInRuntime(pkg.path) {
+					overrideBcFiles = append(overrideBcFiles, cached)
+				} else {
+					allBcFiles = append(allBcFiles, cached)
+				}
 				continue
 			}
 			writeStr(2, "  compile " | pkg.path | "\n")
@@ -885,7 +1366,11 @@ func main() {
 				writeFile(cached, data, 0644)
 			}
 			data = nil
-			allBcFiles = append(allBcFiles, bcFile)
+			if isInRuntime(pkg.path) {
+				overrideBcFiles = append(overrideBcFiles, bcFile)
+			} else {
+				allBcFiles = append(allBcFiles, bcFile)
+			}
 		} else {
 			writeStr(2, "  compile " | pkg.path | "\n")
 			src := concatSources(pkg.dir, pkg.files)
@@ -918,36 +1403,51 @@ func main() {
 	loadSysroot(joinPath(root, "_sysroot.env"))
 
 	sysroot := joinPath(root, "sysroot")
-	runtimeBc := getenv("RUNTIME_BC")
-	if runtimeBc == "" {
-		runtimeBc = joinPath(sysroot, "runtime.bc")
-		_, rok := readFile(runtimeBc)
-		if !rok {
-			runtimeBc = joinPath(root, "_runtime.bc")
+	runtimeBc := ""
+	muslDir := ""
+	comprtLib := ""
+	bdwgcLib := ""
+	muslLib := ""
+	if isWasm {
+		runtimeBc = joinPath(joinPath(sysroot, "wasm"), "runtime.bc")
+	} else {
+		runtimeBc = getenv("RUNTIME_BC")
+		if runtimeBc == "" {
+			runtimeBc = joinPath(sysroot, "runtime.bc")
+			_, rok := readFile(runtimeBc)
+			if !rok {
+				runtimeBc = joinPath(root, "_runtime.bc")
+			}
 		}
-	}
-	muslDir := getenv("MUSL_DIR")
-	if muslDir == "" {
-		muslDir = joinPath(sysroot, "musl")
-	}
-	comprtLib := getenv("COMPRT_LIB")
-	if comprtLib == "" {
-		comprtLib = joinPath(joinPath(sysroot, "compiler-rt"), "lib.a")
-	}
-	bdwgcLib := getenv("BDWGC_LIB")
-	if bdwgcLib == "" {
-		bdwgcLib = joinPath(joinPath(sysroot, "bdwgc"), "lib.a")
-	}
-	muslLib := getenv("MUSL_LIB")
-	if muslLib == "" {
-		muslLib = joinPath(joinPath(sysroot, "musl"), "lib.a")
+		muslDir = getenv("MUSL_DIR")
+		if muslDir == "" {
+			muslDir = joinPath(sysroot, "musl")
+		}
+		comprtLib = getenv("COMPRT_LIB")
+		if comprtLib == "" {
+			comprtLib = joinPath(joinPath(sysroot, "compiler-rt"), "lib.a")
+		}
+		bdwgcLib = getenv("BDWGC_LIB")
+		if bdwgcLib == "" {
+			bdwgcLib = joinPath(joinPath(sysroot, "bdwgc"), "lib.a")
+		}
+		muslLib = getenv("MUSL_LIB")
+		if muslLib == "" {
+			muslLib = joinPath(joinPath(sysroot, "musl"), "lib.a")
+		}
 	}
 
 	writeStr(2, "  generate initAll\n")
+	ipt := "i64"
+	sty := "{ptr, i64, i64}"
+	if isWasm {
+		ipt = "i32"
+		sty = "{ptr, i32, i32}"
+	}
 	var initCalls string
 	for _, pkg := range pkgs {
 		compilePath := pkg.path
-		if hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
 		if compilePath == "main" {
@@ -956,11 +1456,17 @@ func main() {
 		initSym := irGlobalSymbol(compilePath, "main")
 		initCalls = initCalls | "  call void " | initSym | "(ptr %context)\n"
 	}
-	initAllIR := "\ndefine void @runtime.initAll(ptr %context) {\nentry:\n" | initCalls | "  ret void\n}\n"
+	initAllIR := "@\"os.Args\" = external global " | sty | "\n"
+	initAllIR = initAllIR | "\ndefine hidden void @runtime.initAll(ptr %context) {\nentry:\n" | initCalls
+	if !isWasm {
+		initAllIR = initAllIR | "  %_osargs = call " | sty | " @\"os.runtime_args\"(ptr null)\n"
+		initAllIR = initAllIR | "  store " | sty | " %_osargs, ptr @\"os.Args\"\n"
+	}
+	initAllIR = initAllIR | "  ret void\n}\n"
 	declared := map[string]bool{}
 	for _, pkg := range pkgs {
 		compilePath := pkg.path
-		if hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
 		if compilePath == "main" {
@@ -973,6 +1479,141 @@ func main() {
 		declared[declSym] = true
 		initAllIR = initAllIR | "declare void " | declSym | "(ptr)\n"
 	}
+	initAllIR = initAllIR | "\n; runtime linkname shims\n"
+	initAllIR = initAllIR | "declare hidden void @runtime.sleepTicks(i64, ptr)\n"
+	initAllIR = initAllIR | "define hidden void @\"time.Sleep\"(i64 %d, ptr %ctx) {\n"
+	initAllIR = initAllIR | "  %1 = icmp sle i64 %d, 0\n"
+	initAllIR = initAllIR | "  br i1 %1, label %ret, label %dosleep\n"
+	initAllIR = initAllIR | "dosleep:\n"
+	initAllIR = initAllIR | "  call void @runtime.sleepTicks(i64 %d, ptr %ctx)\n"
+	initAllIR = initAllIR | "  br label %ret\n"
+	initAllIR = initAllIR | "ret:\n"
+	initAllIR = initAllIR | "  ret void\n}\n"
+	initAllIR = initAllIR | "define hidden i32 @\"internal/poll.runtime_pollWait\"(i64 %ctx, i32 %mode, ptr %context) {\n"
+	initAllIR = initAllIR | "  ret i32 0\n}\n"
+	initAllIR = initAllIR | "define hidden i32 @\"internal/poll.runtime_pollReset\"(i64 %ctx, i32 %mode, ptr %context) {\n"
+	initAllIR = initAllIR | "  ret i32 0\n}\n"
+	initAllIR = initAllIR | "define hidden void @slices.Sort(" | sty | " %x, ptr %context) {\n"
+	initAllIR = initAllIR | "  ret void\n}\n"
+	initAllIR = initAllIR | "define hidden void @slices.SortFunc(" | sty | " %x, {ptr, ptr} %cmp, ptr %context) {\n"
+	initAllIR = initAllIR | "  ret void\n}\n"
+	initAllIR = initAllIR | "define hidden void @slices.SortStableFunc(" | sty | " %x, {ptr, ptr} %cmp, ptr %context) {\n"
+	initAllIR = initAllIR | "  ret void\n}\n"
+	initAllIR = initAllIR | "\n; time linkname shims\n"
+	initAllIR = initAllIR | "declare hidden i64 @runtime.nanotime(ptr)\n"
+	initAllIR = initAllIR | "define hidden i64 @\"time.runtimeNano\"(ptr %ctx) {\n"
+	initAllIR = initAllIR | "  %1 = call i64 @runtime.nanotime(ptr %ctx)\n"
+	initAllIR = initAllIR | "  ret i64 %1\n}\n"
+	initAllIR = initAllIR | "define hidden i1 @\"time.resetTimer\"(ptr %t, i64 %when, i64 %period, ptr %ctx) {\n"
+	initAllIR = initAllIR | "  ret i1 false\n}\n"
+	initAllIR = initAllIR | "\n; math/rand linkname shim\n"
+	initAllIR = initAllIR | "declare hidden {i64, i1} @runtime.hardwareRand(ptr)\n"
+	initAllIR = initAllIR | "define hidden i64 @\"math/rand.runtime_rand\"(ptr %ctx) {\n"
+	initAllIR = initAllIR | "  %1 = call {i64, i1} @runtime.hardwareRand(ptr %ctx)\n"
+	initAllIR = initAllIR | "  %2 = extractvalue {i64, i1} %1, 0\n"
+	initAllIR = initAllIR | "  ret i64 %2\n}\n"
+	initAllIR = initAllIR | "\n; internal/poll linkname shims\n"
+	initAllIR = initAllIR | "define hidden void @\"internal/poll.runtime_pollClose\"(i64 %ctx, ptr %context) {\n"
+	initAllIR = initAllIR | "  ret void\n}\n"
+	initAllIR = initAllIR | "define hidden void @\"internal/poll.runtime_Semacquire\"(ptr %sema, ptr %context) {\n"
+	initAllIR = initAllIR | "  ret void\n}\n"
+	initAllIR = initAllIR | "define hidden void @\"internal/poll.runtime_Semrelease\"(ptr %sema, ptr %context) {\n"
+	initAllIR = initAllIR | "  ret void\n}\n"
+	initAllIR = initAllIR | "define hidden void @\"internal/poll.runtime_pollSetDeadline\"(i64 %ctx, i64 %d, i32 %mode, ptr %context) {\n"
+	initAllIR = initAllIR | "  ret void\n}\n"
+	initAllIR = initAllIR | "define hidden void @\"internal/poll.runtime_pollUnblock\"(i64 %ctx, ptr %context) {\n"
+	initAllIR = initAllIR | "  ret void\n}\n"
+	initAllIR = initAllIR | "\n; time linkname shims (timer)\n"
+	initAllIR = initAllIR | "define hidden ptr @\"time.newTimer\"(i64 %when, i64 %period, {ptr, ptr} %f, {ptr, ptr} %arg, ptr %cp, ptr %ctx) {\n"
+	initAllIR = initAllIR | "  %1 = call ptr @runtime.alloc(" | ipt | " 64, ptr null, ptr null)\n"
+	initAllIR = initAllIR | "  ret ptr %1\n}\n"
+	initAllIR = initAllIR | "declare hidden ptr @runtime.alloc(" | ipt | ", ptr, ptr)\n"
+	initAllIR = initAllIR | "define hidden i1 @\"time.stopTimer\"(ptr %t, ptr %ctx) {\n"
+	initAllIR = initAllIR | "  ret i1 false\n}\n"
+	initAllIR = initAllIR | "define hidden i1 @\"time.runtimeIsBubbled\"(ptr %ctx) {\n"
+	initAllIR = initAllIR | "  ret i1 false\n}\n"
+	initAllIR = initAllIR | "\n; runtime channel shims\n"
+	initAllIR = initAllIR | "define hidden ptr @runtime.chanMake(" | ipt | " %elemSz, " | ipt | " %bufSz) {\n"
+	initAllIR = initAllIR | "  %1 = call ptr @runtime.alloc(" | ipt | " 128, ptr null, ptr null)\n"
+	initAllIR = initAllIR | "  ret ptr %1\n}\n"
+	initAllIR = initAllIR | "define hidden void @runtime.chanClose(ptr %ch) {\n"
+	initAllIR = initAllIR | "  ret void\n}\n"
+	initAllIR = initAllIR | "\n; generic monomorphization stubs\n"
+	initAllIR = initAllIR | "define hidden void @\"smesh.lol/pkg/nostr/varint.Encode\"({ptr, ptr} %w, i64 %v, ptr %ctx) {\n"
+	initAllIR = initAllIR | "  ret void\n}\n"
+	initAllIR = initAllIR | "\n; runtime channel shims\n"
+	initAllIR = initAllIR | "define hidden void @runtime.chanSend(ptr %ch, ptr %val, ptr %op) {\n"
+	initAllIR = initAllIR | "  ret void\n}\n"
+	initAllIR = initAllIR | "define hidden i1 @runtime.chanRecv(ptr %ch, ptr %val, ptr %op) {\n"
+	initAllIR = initAllIR | "  ret i1 false\n}\n"
+	initAllIR = initAllIR | "define hidden i32 @runtime.LastSpawnedParentFd(ptr %ctx) {\n"
+	initAllIR = initAllIR | "  ret i32 -1\n}\n"
+	initAllIR = initAllIR | "\n; net linkname shim\n"
+	initAllIR = initAllIR | "define hidden i64 @\"net.runtime_rand\"(ptr %ctx) {\n"
+	initAllIR = initAllIR | "  %1 = call {i64, i1} @runtime.hardwareRand(ptr %ctx)\n"
+	initAllIR = initAllIR | "  %2 = extractvalue {i64, i1} %1, 0\n"
+	initAllIR = initAllIR | "  ret i64 %2\n}\n"
+	initAllIR = initAllIR | "\n; poll init/open shims\n"
+	initAllIR = initAllIR | "define hidden void @\"internal/poll.runtime_pollServerInit\"(ptr %ctx) {\n"
+	initAllIR = initAllIR | "  ret void\n}\n"
+	initAllIR = initAllIR | "define hidden i64 @\"internal/poll.runtime_pollOpen\"(i64 %fd, ptr %ctx) {\n"
+	initAllIR = initAllIR | "  ret i64 0\n}\n"
+	initAllIR = initAllIR | "\n; syscall shims\n"
+	initAllIR = initAllIR | "define hidden i32 @syscall.Getpagesize(ptr %ctx) {\n"
+	initAllIR = initAllIR | "  ret i32 4096\n}\n"
+	initAllIR = initAllIR | "\n; unsafe builtins (compiler should resolve these at compile time)\n"
+	initAllIR = initAllIR | "define hidden i32 @unsafe.Sizeof({ptr, ptr} %x, ptr %ctx) {\n"
+	initAllIR = initAllIR | "  ret i32 8\n}\n"
+	initAllIR = initAllIR | "define hidden i32 @unsafe.Offsetof({ptr, ptr} %x, ptr %ctx) {\n"
+	initAllIR = initAllIR | "  ret i32 0\n}\n"
+	if !isWasm {
+		initAllIR = initAllIR | "\n; os.runtime_args - builds os.Args from main_argc/main_argv\n"
+		initAllIR = initAllIR | "@runtime.main_argc = external global i32\n"
+		initAllIR = initAllIR | "@runtime.main_argv = external global ptr\n"
+		initAllIR = initAllIR | "declare i64 @strlen(ptr)\n"
+		initAllIR = initAllIR | "define hidden {ptr, i64, i64} @\"os.runtime_args\"(ptr %ctx) {\n"
+		initAllIR = initAllIR | "entry:\n"
+		initAllIR = initAllIR | "  %argc = load i32, ptr @runtime.main_argc\n"
+		initAllIR = initAllIR | "  %n = sext i32 %argc to i64\n"
+		initAllIR = initAllIR | "  %cmp0 = icmp sle i64 %n, 0\n"
+		initAllIR = initAllIR | "  br i1 %cmp0, label %ret0, label %alloc\n"
+		initAllIR = initAllIR | "ret0:\n"
+		initAllIR = initAllIR | "  ret {ptr, i64, i64} zeroinitializer\n"
+		initAllIR = initAllIR | "alloc:\n"
+		initAllIR = initAllIR | "  %strSz = mul i64 %n, 24\n"
+		initAllIR = initAllIR | "  %backing = call ptr @runtime.alloc(i64 %strSz, ptr null, ptr null)\n"
+		initAllIR = initAllIR | "  %argv = load ptr, ptr @runtime.main_argv\n"
+		initAllIR = initAllIR | "  br label %loop\n"
+		initAllIR = initAllIR | "loop:\n"
+		initAllIR = initAllIR | "  %i = phi i64 [0, %alloc], [%i1, %next]\n"
+		initAllIR = initAllIR | "  %ap = getelementptr ptr, ptr %argv, i64 %i\n"
+		initAllIR = initAllIR | "  %cstr = load ptr, ptr %ap\n"
+		initAllIR = initAllIR | "  %slen = call i64 @strlen(ptr %cstr)\n"
+		initAllIR = initAllIR | "  %off = mul i64 %i, 24\n"
+		initAllIR = initAllIR | "  %sp = getelementptr i8, ptr %backing, i64 %off\n"
+		initAllIR = initAllIR | "  store ptr %cstr, ptr %sp\n"
+		initAllIR = initAllIR | "  %sp1 = getelementptr i8, ptr %sp, i64 8\n"
+		initAllIR = initAllIR | "  store i64 %slen, ptr %sp1\n"
+		initAllIR = initAllIR | "  %sp2 = getelementptr i8, ptr %sp, i64 16\n"
+		initAllIR = initAllIR | "  store i64 %slen, ptr %sp2\n"
+		initAllIR = initAllIR | "  %i1 = add i64 %i, 1\n"
+		initAllIR = initAllIR | "  %done = icmp sge i64 %i1, %n\n"
+		initAllIR = initAllIR | "  br i1 %done, label %ret, label %next\n"
+		initAllIR = initAllIR | "next:\n"
+		initAllIR = initAllIR | "  br label %loop\n"
+		initAllIR = initAllIR | "ret:\n"
+		initAllIR = initAllIR | "  %r0 = insertvalue {ptr, i64, i64} undef, ptr %backing, 0\n"
+		initAllIR = initAllIR | "  %r1 = insertvalue {ptr, i64, i64} %r0, i64 %n, 1\n"
+		initAllIR = initAllIR | "  %r2 = insertvalue {ptr, i64, i64} %r1, i64 %n, 2\n"
+		initAllIR = initAllIR | "  ret {ptr, i64, i64} %r2\n"
+		initAllIR = initAllIR | "}\n"
+	}
+	initAllIR = initAllIR | "\n; functions with uncompiled bodies\n"
+	initAllIR = initAllIR | "define hidden void @\"crypto/tls.signedMessage\"(" | sty | " %ctx, {ptr, ptr} %transcript, ptr %context) {\n"
+	initAllIR = initAllIR | "  ret void\n}\n"
+	initAllIR = initAllIR | "define hidden void @\"math/big.Float.Text\"(ptr %x, i8 %format, i32 %prec, ptr %context) {\n"
+	initAllIR = initAllIR | "  ret void\n}\n"
+
 	initAllFile := joinPath(tmpdir, "initall.ll")
 	writeFile(initAllFile, []byte(initAllIR), 0644)
 	initAllBc := joinPath(tmpdir, "initall.bc")
@@ -985,40 +1626,63 @@ func main() {
 	llvmLink := "llvm-link-21"
 	mergedBc := joinPath(tmpdir, "merged.bc")
 	linkArgs := []string{llvmLink, "-o", mergedBc, runtimeBc}
-	shimsBc := joinPath(sysroot, "hashmap_shims.bc")
-	linkArgs = append(linkArgs, shimsBc)
-	runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
-	if _, gok := readFile(runtimeGoBc); gok {
-		overrideArg := "--override=" | runtimeGoBc
-		linkArgs = append(linkArgs, overrideArg)
+	if !isWasm {
+		shimsBc := joinPath(sysroot, "hashmap_shims.bc")
+		linkArgs = append(linkArgs, shimsBc)
 	}
-	linkArgs = append(linkArgs, allBcFiles...)
+	for _, bc := range overrideBcFiles {
+		linkArgs = append(linkArgs, "--override=" | bc)
+	}
+	for _, bc := range allBcFiles {
+		if isWasm {
+			linkArgs = append(linkArgs, "--override=" | bc)
+		} else {
+			linkArgs = append(linkArgs, bc)
+		}
+	}
 	linkArgs = append(linkArgs, initAllBc)
+	if !isWasm {
+		runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
+		if _, gok := readFile(runtimeGoBc); gok {
+			linkArgs = append(linkArgs, "--override=" | runtimeGoBc)
+		}
+	}
 	rc = run(linkArgs)
 	if rc != 0 {
 		fatal("llvm-link failed")
 	}
 
 	writeStr(2, "  link\n")
-	objFiles := getenv("OBJ_FILES")
-	if objFiles == "" {
-		objEntries := listFiles(joinPath(sysroot, "obj"), ".bc")
-		if objEntries != nil {
-			for _, e := range objEntries {
-				objFiles = objFiles | joinPath(joinPath(sysroot, "obj"), e) | " "
+	var ldArgs []string
+	if isWasm {
+		mergedObj := joinPath(tmpdir, "merged.o")
+		rc = run([]string{"llc-21", "-filetype=obj", "-mtriple=wasm32-unknown-unknown", "-o", mergedObj, mergedBc})
+		if rc != 0 {
+			fatal("llc failed for wasm")
+		}
+		ldArgs = []string{"wasm-ld", "--export-dynamic", "--allow-undefined",
+			"--gc-sections", "-o", outpath, mergedObj,
+			"-z", "stack-size=67108864"}
+	} else {
+		objFiles := getenv("OBJ_FILES")
+		if objFiles == "" {
+			objEntries := listFiles(joinPath(sysroot, "obj"), ".bc")
+			if objEntries != nil {
+				for _, e := range objEntries {
+					objFiles = objFiles | joinPath(joinPath(sysroot, "obj"), e) | " "
+				}
 			}
 		}
-	}
-	linker := "ld.lld-21"
-	ldArgs := []string{linker, "--gc-sections", "-o", outpath,
-		joinPath(muslDir, "crt1.o"),
-		mergedBc}
-	for _, f := range splitBySpace(objFiles) {
-		if f != "" {
-			ldArgs = append(ldArgs, f)
+		ldArgs = []string{"ld.lld-21", "--gc-sections", "-o", outpath,
+			joinPath(muslDir, "crt1.o"),
+			mergedBc}
+		for _, f := range splitBySpace(objFiles) {
+			if f != "" {
+				ldArgs = append(ldArgs, f)
+			}
 		}
+		ldArgs = append(ldArgs, comprtLib, bdwgcLib, muslLib, "--lto-O0", "-z", "stack-size=67108864")
 	}
-	ldArgs = append(ldArgs, comprtLib, bdwgcLib, muslLib, "--lto-O0", "-z", "stack-size=67108864")
 	rc = run(ldArgs)
 	if rc != 0 {
 		fatal("linker failed")
