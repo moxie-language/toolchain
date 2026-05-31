@@ -28,7 +28,7 @@ const maxBaseSmall = 10 + ('z' - 'a' + 1)
 // For instance maxPow(10) == (1e19, 19) for 19 decimal digits in a 64bit Word.
 // In other words, at most n digits in base b fit into a Word.
 // TODO(gri) replace this with a table, generated at build time.
-func maxPow(b Word) (p Word, n int) {
+func maxPow(b Word) (p Word, n int32) {
 	p, n = b, 1 // assuming b <= _M
 	for max := _M / b; p <= max; {
 		// p == b**n && p <= max
@@ -40,7 +40,7 @@ func maxPow(b Word) (p Word, n int) {
 }
 
 // pow returns x**n for n > 0, and 1 otherwise.
-func pow(x Word, n int) (p Word) {
+func pow(x Word, n int32) (p Word) {
 	// n == sum of bi * 2**i, for 0 <= i < imax, and bi is 0 or 1
 	// thus x**n == product of x**(2**i) for all i where bi == 1
 	// (Russian Peasant Method for exponentiation)
@@ -105,7 +105,7 @@ const (
 // parsed. A digit count <= 0 indicates the presence of a period (if fracOk
 // is set, only), and -count is the number of fractional digits found.
 // In this case, the actual value of the scanned number is res * b**count.
-func (z nat) scan(r io.ByteScanner, base int, fracOk bool) (res nat, b, count int, err error) {
+func (z nat) scan(r io.ByteScanner, base int32, fracOk bool) (res nat, b, count int32, err error) {
 	// Reject invalid bases.
 	baseOk := base == 0 ||
 		!fracOk && 2 <= base && base <= MaxBase ||
@@ -160,7 +160,7 @@ func (z nat) scan(r io.ByteScanner, base int, fracOk bool) (res nat, b, count in
 	// Convert string.
 	// Algorithm: Collect digits in groups of at most n digits in di.
 	// For bases that pack exactly into words (2, 4, 16), append di's
-	// directly to the int representation and then reverse at the end (bn==0 marks this case).
+	// directly to the int32 representation and then reverse at the end (bn==0 marks this case).
 	// For other bases, use mulAddWW for every such group to shift
 	// z up one group and add di to the result.
 	// With more cleverness we could also handle binary bases like 8 and 32
@@ -169,7 +169,7 @@ func (z nat) scan(r io.ByteScanner, base int, fracOk bool) (res nat, b, count in
 	z = z[:0]
 	b1 := Word(b)
 	var bn Word // b1**n (or 0 for the special bit-packing cases b=2,4,16)
-	var n int   // max digits that fit into Word
+	var n int32   // max digits that fit into Word
 	switch b {
 	case 2: // 1 bit per digit
 		n = _W
@@ -267,7 +267,7 @@ func (z nat) scan(r io.ByteScanner, base int, fracOk bool) (res nat, b, count in
 		slices.Reverse(z)
 		z = z.norm()
 		if i > 0 {
-			z = z.rsh(z, uint(n-i)*uint(_W/n))
+			z = z.rsh(z, uint32(n-i)*uint32(_W/n))
 		}
 	} else {
 		if i > 0 {
@@ -288,12 +288,12 @@ func (z nat) scan(r io.ByteScanner, base int, fracOk bool) (res nat, b, count in
 
 // utoa converts x to an ASCII representation in the given base;
 // base must be between 2 and MaxBase, inclusive.
-func (x nat) utoa(base int) []byte {
+func (x nat) utoa(base int32) []byte {
 	return x.itoa(false, base)
 }
 
 // itoa is like utoa but it prepends a '-' if neg && x != 0.
-func (x nat) itoa(neg bool, base int) []byte {
+func (x nat) itoa(neg bool, base int32) []byte {
 	if base < 2 || base > MaxBase {
 		panic("invalid base")
 	}
@@ -305,7 +305,7 @@ func (x nat) itoa(neg bool, base int) []byte {
 	// len(x) > 0
 
 	// allocate buffer for conversion
-	i := int(float64(x.bitLen())/math.Log2(float64(base))) + 1 // off by 1 at most
+	i := int32(float64(x.bitLen())/math.Log2(float64(base))) + 1 // off by 1 at most
 	if neg {
 		i++
 	}
@@ -314,10 +314,10 @@ func (x nat) itoa(neg bool, base int) []byte {
 	// convert power of two and non power of two bases separately
 	if b := Word(base); b == b&-b {
 		// shift is base b digit size in bits
-		shift := uint(bits.TrailingZeros(uint(b))) // shift > 0 because b >= 2
+		shift := uint32(bits.TrailingZeros(uint32(b))) // shift > 0 because b >= 2
 		mask := Word(1<<shift - 1)
 		w := x[0]         // current word
-		nbits := uint(_W) // number of unprocessed bits in w
+		nbits := uint32(_W) // number of unprocessed bits in w
 
 		// convert less-significant words (include leading zeros)
 		for k := 1; k < len(x); k++ {
@@ -401,7 +401,7 @@ func (x nat) itoa(neg bool, base int) []byte {
 // range 2..64 shows that values of 8 and 16 work well, with a 4x speedup at medium lengths and
 // ~30x for 20000 digits. Use nat_test.go's BenchmarkLeafSize tests to optimize leafSize for
 // specific hardware.
-func (q nat) convertWords(stk *stack, s []byte, b Word, ndigits int, bb Word, table []divisor) {
+func (q nat) convertWords(stk *stack, s []byte, b Word, ndigits int32, bb Word, table []divisor) {
 	// split larger blocks recursively
 	if table != nil {
 		// len(q) > leafSize > 0
@@ -441,7 +441,7 @@ func (q nat) convertWords(stk *stack, s []byte, b Word, ndigits int, bb Word, ta
 			q, r = q.divW(q, bb)
 			for j := 0; j < ndigits && i > 0; j++ {
 				i--
-				// avoid % computation since r%10 == r - int(r/10)*10;
+				// avoid % computation since r%10 == r - int32(r/10)*10;
 				// this appears to be faster for BenchmarkString10000Base10
 				// and smaller strings (but a bit slower for larger ones)
 				t := r / 10
@@ -477,8 +477,8 @@ const leafSize = 8 // number of Word-size binary values treat as a monolithic bl
 
 type divisor struct {
 	bbb     nat // divisor
-	nbits   int // bit length of divisor (discounting leading zeros) ~= log2(bbb)
-	ndigits int // digit length of divisor in terms of output base digits
+	nbits   int32 // bit length of divisor (discounting leading zeros) ~= log2(bbb)
+	ndigits int32 // digit length of divisor in terms of output base digits
 }
 
 var cacheBase10 struct {
@@ -491,7 +491,7 @@ func (z nat) expWW(stk *stack, x, y Word) nat {
 }
 
 // construct table of powers of bb*leafSize to use in subdivisions.
-func divisors(stk *stack, m int, b Word, ndigits int, bb Word) []divisor {
+func divisors(stk *stack, m int32, b Word, ndigits int32, bb Word) []divisor {
 	// only compute table when recursive conversion is enabled and x is large
 	if leafSize == 0 || m <= leafSize {
 		return nil

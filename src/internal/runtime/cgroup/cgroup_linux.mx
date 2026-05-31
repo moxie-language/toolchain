@@ -11,10 +11,19 @@ import (
 )
 
 var (
-	ErrNoCgroup error = stringError("not in a cgroup")
+	ErrNoCgroup error
 
-	errMalformedFile error = stringError("malformed file")
+	errMalformedFile error
+
+	_cgroupInitDone bool
 )
+
+func cgroupInit() {
+	if _cgroupInitDone { return }
+	_cgroupInitDone = true
+	ErrNoCgroup = stringError("not in a cgroup")
+	errMalformedFile = stringError("malformed file")
+}
 
 const _PATH_MAX = 4096
 
@@ -53,7 +62,7 @@ const (
 )
 
 // Version indicates the cgroup version.
-type Version int
+type Version int32
 
 const (
 	VersionUnknown Version = iota
@@ -67,11 +76,11 @@ type CPU struct {
 
 	// For cgroup v1, this is cpu.cfs_quota_us.
 	// For cgroup v2, this is cpu.max.
-	quotaFD int
+	quotaFD int32
 
 	// For cgroup v1, this is cpu.cfs_period_us.
 	// For cgroup v2, this is unused.
-	periodFD int
+	periodFD int32
 }
 
 func (c CPU) Close() {
@@ -86,7 +95,7 @@ func (c CPU) Close() {
 	}
 }
 
-func checkBufferSize(s []byte, size int) {
+func checkBufferSize(s []byte, size int32) {
 	if len(s) != size {
 		println("runtime: cgroup buffer length", len(s), "want", size)
 		throw("runtime: cgroup invalid buffer length")
@@ -98,6 +107,7 @@ func checkBufferSize(s []byte, size int) {
 //
 // scratch must have length ScratchSize.
 func OpenCPU(scratch []byte) (CPU, error) {
+	cgroupInit()
 	checkBufferSize(scratch, ScratchSize)
 
 	base := scratch[:PathSize]
@@ -162,6 +172,7 @@ func OpenCPU(scratch []byte) (CPU, error) {
 // Returns average CPU throughput limit from the cgroup, or ok false if there
 // is no limit.
 func ReadCPULimit(c CPU) (float64, bool, error) {
+	cgroupInit()
 	switch c.version {
 	case 1:
 		quota, err := readV1Number(c.quotaFD)
@@ -190,7 +201,7 @@ func ReadCPULimit(c CPU) (float64, bool, error) {
 }
 
 // Returns the value from the quota/period file.
-func readV1Number(fd int) (int64, error) {
+func readV1Number(fd int32) (int64, error) {
 	// The format of the file is "<value>\n" where the value is in
 	// int64 microseconds and, if quota, may be -1 to indicate no limit.
 	//
@@ -229,7 +240,7 @@ func parseV1Number(buf []byte) (int64, error) {
 }
 
 // Returns CPU throughput limit, or ok false if there is no limit.
-func readV2Limit(fd int) (float64, bool, error) {
+func readV2Limit(fd int32) (float64, bool, error) {
 	// The format of the file is "<quota> <period>\n" where quota and
 	// period are microseconds and quota may be "max" to indicate no limit.
 	//
@@ -301,7 +312,8 @@ func parseV2Limit(buf []byte) (float64, bool, error) {
 // Returns the number of bytes written to out and the cgroup version (1 or 2).
 //
 // Returns ErrNoCgroup if the process is not in a CPU cgroup.
-func FindCPU(out []byte, scratch []byte) (int, Version, error) {
+func FindCPU(out []byte, scratch []byte) (int32, Version, error) {
+	cgroupInit()
 	checkBufferSize(out, PathSize)
 	checkBufferSize(scratch, ParseSize)
 
@@ -343,7 +355,8 @@ func FindCPU(out []byte, scratch []byte) (int, Version, error) {
 // Returns the number of bytes written to out and the cgroup version (1 or 2).
 //
 // Returns ErrNoCgroup if the process is not in a CPU cgroup.
-func FindCPURelativePath(out []byte, scratch []byte) (int, Version, error) {
+func FindCPURelativePath(out []byte, scratch []byte) (int32, Version, error) {
+	cgroupInit()
 	path := []byte("/proc/self/cgroup\x00")
 	fd, errno := syscall.Open(&path[0], syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 	if errno == syscall.ENOENT {
@@ -368,7 +381,7 @@ func FindCPURelativePath(out []byte, scratch []byte) (int, Version, error) {
 // mount and writes it to out.
 //
 // Returns the number of bytes written and the cgroup version (1 or 2).
-func parseCPURelativePath(fd int, read func(fd int, b []byte) (int, uintptr), out []byte, scratch []byte) (int, Version, error) {
+func parseCPURelativePath(fd int32, read func(fd int32, b []byte) (int32, uintptr), out []byte, scratch []byte) (int32, Version, error) {
 	// The format of each line is
 	//
 	//   hierarchy-ID:controller-list:cgroup-path
@@ -484,7 +497,8 @@ func containsCPU(b []byte) bool {
 // Returns the number of bytes written to out.
 //
 // Returns ErrNoCgroup if the process is not in a CPU cgroup.
-func FindCPUMountPoint(out []byte, scratch []byte) (int, error) {
+func FindCPUMountPoint(out []byte, scratch []byte) (int32, error) {
+	cgroupInit()
 	checkBufferSize(out, PathSize)
 	checkBufferSize(scratch, ParseSize)
 
@@ -508,7 +522,7 @@ func FindCPUMountPoint(out []byte, scratch []byte) (int, error) {
 
 // Returns the mount point for the cpu cgroup controller (v1 or v2) from
 // /proc/self/mountinfo.
-func parseCPUMount(fd int, read func(fd int, b []byte) (int, uintptr), out []byte, scratch []byte) (int, error) {
+func parseCPUMount(fd int32, read func(fd int32, b []byte) (int32, uintptr), out []byte, scratch []byte) (int32, error) {
 	// The format of each line is:
 	//
 	// 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue
@@ -664,14 +678,14 @@ const errInvalidEscape = stringError("invalid path escape sequence")
 // Returns the number of bytes written to out.
 //
 // Also see escapePath in cgroup_linux_test.go.
-func unescapePath(out []byte, in []byte) (int, error) {
+func unescapePath(out []byte, in []byte) (int32, error) {
 	// Not strictly necessary, but simplifies the implementation and will
 	// always hold in users.
 	if len(out) < len(in) {
 		throw("output too small")
 	}
 
-	var outi, ini int
+	var outi, ini int32
 	for ini < len(in) {
 		c := in[ini]
 		if c != '\\' {

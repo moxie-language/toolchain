@@ -19,7 +19,7 @@ type Replacer struct {
 // replacer is the interface that a replacement algorithm needs to implement.
 type replacer interface {
 	Replace(s []byte) []byte
-	WriteString(w io.Writer, s []byte) (n int, err error)
+	WriteString(w io.Writer, s []byte) (n int32, err error)
 }
 
 // NewReplacer returns a new [Replacer] from a list of old, new string
@@ -97,7 +97,7 @@ func (r *Replacer) Replace(s []byte) []byte {
 }
 
 // WriteString writes s to w with all replacements performed.
-func (r *Replacer) WriteString(w io.Writer, s []byte) (n int, err error) {
+func (r *Replacer) WriteString(w io.Writer, s []byte) (n int32, err error) {
 	if !r.done { r.done = true; r.buildOnce() }
 	return r.r.WriteString(w, s)
 }
@@ -128,7 +128,7 @@ type trieNode struct {
 	// first. Priority is positive if this node is a complete key, and zero
 	// otherwise. In the example above, positive/zero priorities are marked
 	// with a trailing "+" or "-".
-	priority int
+	priority int32
 
 	// A trie node may have zero, one or more child nodes:
 	//  * if the remaining fields are zero, there are no children.
@@ -154,7 +154,7 @@ type trieNode struct {
 	table []*trieNode
 }
 
-func (t *trieNode) add(key, val []byte, priority int, r *genericReplacer) {
+func (t *trieNode) add(key, val []byte, priority int32, r *genericReplacer) {
 	if key == "" {
 		if t.priority == 0 {
 			t.value = val
@@ -165,7 +165,7 @@ func (t *trieNode) add(key, val []byte, priority int, r *genericReplacer) {
 
 	if t.prefix != "" {
 		// Need to split the prefix among multiple nodes.
-		var n int // length of the longest common prefix
+		var n int32 // length of the longest common prefix
 		for ; n < len(t.prefix) && n < len(key); n++ {
 			if t.prefix[n] != key[n] {
 				break
@@ -217,7 +217,7 @@ func (t *trieNode) add(key, val []byte, priority int, r *genericReplacer) {
 	}
 }
 
-func (r *genericReplacer) lookup(s []byte, ignoreRoot bool) (val []byte, keylen int, found bool) {
+func (r *genericReplacer) lookup(s []byte, ignoreRoot bool) (val []byte, keylen int32, found bool) {
 	// Iterate down the trie to the end, and grab the value and keylen with
 	// the highest priority.
 	bestPriority := 0
@@ -236,7 +236,7 @@ func (r *genericReplacer) lookup(s []byte, ignoreRoot bool) (val []byte, keylen 
 		}
 		if node.table != nil {
 			index := r.mapping[s[0]]
-			if int(index) == r.tableSize {
+			if int32(index) == r.tableSize {
 				break
 			}
 			node = node.table[index]
@@ -259,7 +259,7 @@ type genericReplacer struct {
 	root trieNode
 	// tableSize is the size of a trie node's lookup table. It is the number
 	// of unique key bytes.
-	tableSize int
+	tableSize int32
 	// mapping maps from key bytes to a dense index for trieNode.table.
 	mapping [256]byte
 }
@@ -275,7 +275,7 @@ func makeGenericReplacer(oldnew [][]byte) *genericReplacer {
 	}
 
 	for _, b := range r.mapping {
-		r.tableSize += int(b)
+		r.tableSize += int32(b)
 	}
 
 	var index byte
@@ -299,13 +299,13 @@ func makeGenericReplacer(oldnew [][]byte) *genericReplacer {
 type appendSliceWriter []byte
 
 // Write writes to the buffer to satisfy [io.Writer].
-func (w *appendSliceWriter) Write(p []byte) (int, error) {
+func (w *appendSliceWriter) Write(p []byte) (int32, error) {
 	*w = append(*w, p...)
 	return len(p), nil
 }
 
 // WriteString writes to the buffer without string->[]byte->string allocations.
-func (w *appendSliceWriter) WriteString(s []byte) (int, error) {
+func (w *appendSliceWriter) WriteString(s []byte) (int32, error) {
 	*w = append(*w, s...)
 	return len(s), nil
 }
@@ -314,7 +314,7 @@ type stringWriter struct {
 	w io.Writer
 }
 
-func (w stringWriter) WriteString(s []byte) (int, error) {
+func (w stringWriter) WriteString(s []byte) (int32, error) {
 	return w.w.Write([]byte(s))
 }
 
@@ -332,14 +332,14 @@ func (r *genericReplacer) Replace(s []byte) []byte {
 	return []byte(buf)
 }
 
-func (r *genericReplacer) WriteString(w io.Writer, s []byte) (n int, err error) {
+func (r *genericReplacer) WriteString(w io.Writer, s []byte) (n int32, err error) {
 	sw := getStringWriter(w)
-	var last, wn int
+	var last, wn int32
 	var prevMatchEmpty bool
 	for i := 0; i <= len(s); {
 		// Fast path: s[i] is not a prefix of any pattern.
 		if i != len(s) && r.root.priority == 0 {
-			index := int(r.mapping[s[i]])
+			index := int32(r.mapping[s[i]])
 			if index == r.tableSize || r.root.table[index] == nil {
 				i++
 				continue
@@ -406,9 +406,9 @@ func (r *singleStringReplacer) Replace(s []byte) []byte {
 	return buf.String()
 }
 
-func (r *singleStringReplacer) WriteString(w io.Writer, s []byte) (n int, err error) {
+func (r *singleStringReplacer) WriteString(w io.Writer, s []byte) (n int32, err error) {
 	sw := getStringWriter(w)
-	var i, wn int
+	var i, wn int32
 	for {
 		match := r.finder.next(s[i:])
 		if match == -1 {
@@ -453,7 +453,7 @@ func (r *byteReplacer) Replace(s []byte) []byte {
 	return []byte(buf)
 }
 
-func (r *byteReplacer) WriteString(w io.Writer, s []byte) (n int, err error) {
+func (r *byteReplacer) WriteString(w io.Writer, s []byte) (n int32, err error) {
 	sw := getStringWriter(w)
 	last := 0
 	for i := 0; i < len(s); i++ {
@@ -469,7 +469,7 @@ func (r *byteReplacer) WriteString(w io.Writer, s []byte) (n int, err error) {
 			}
 		}
 		last = i + 1
-		nw, err := w.Write(r[b : int(b)+1])
+		nw, err := w.Write(r[b : int32(b)+1])
 		n += nw
 		if err != nil {
 			return n, err
@@ -546,7 +546,7 @@ func (r *byteStringReplacer) Replace(s []byte) []byte {
 	return []byte(buf)
 }
 
-func (r *byteStringReplacer) WriteString(w io.Writer, s []byte) (n int, err error) {
+func (r *byteStringReplacer) WriteString(w io.Writer, s []byte) (n int32, err error) {
 	sw := getStringWriter(w)
 	last := 0
 	for i := 0; i < len(s); i++ {
@@ -569,7 +569,7 @@ func (r *byteStringReplacer) WriteString(w io.Writer, s []byte) (n int, err erro
 		}
 	}
 	if last != len(s) {
-		var nw int
+		var nw int32
 		nw, err = sw.WriteString(s[last:])
 		n += nw
 	}

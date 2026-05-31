@@ -21,13 +21,13 @@ type fseEntry struct {
 // The FSE is written into table, which must be at least 1<<maxBits in size.
 // This returns the number of bits in the FSE table and the new offset.
 // RFC 4.1.1.
-func (r *Reader) readFSE(data block, off, maxSym, maxBits int, table []fseEntry) (tableBits, roff int, err error) {
+func (r *Reader) readFSE(data block, off, maxSym, maxBits int32, table []fseEntry) (tableBits, roff int32, err error) {
 	br := r.makeBitReader(data, off)
 	if err := br.moreBits(); err != nil {
 		return 0, 0, err
 	}
 
-	accuracyLog := int(br.val(4)) + 5
+	accuracyLog := int32(br.val(4)) + 5
 	if accuracyLog > maxBits {
 		return 0, 0, br.makeError("FSE accuracy log too large")
 	}
@@ -82,7 +82,7 @@ func (r *Reader) readFSE(data block, off, maxSym, maxBits int, table []fseEntry)
 			// We have at least 14 bits here,
 			// no need to call moreBits
 
-			zsym += int(br.val(2))
+			zsym += int32(br.val(2))
 
 			if zsym > maxSym {
 				return 0, 0, br.makeError("FSE symbol index overflow")
@@ -97,15 +97,15 @@ func (r *Reader) readFSE(data block, off, maxSym, maxBits int, table []fseEntry)
 		}
 
 		max := (2*threshold - 1) - remaining
-		var count int
-		if int(br.bits&uint32(threshold-1)) < max {
+		var count int32
+		if int32(br.bits&uint32(threshold-1)) < max {
 			// A small value.
-			count = int(br.bits & uint32((threshold - 1)))
+			count = int32(br.bits & uint32((threshold - 1)))
 			br.bits >>= bitsNeeded - 1
 			br.cnt -= uint32(bitsNeeded - 1)
 		} else {
 			// A large value.
-			count = int(br.bits & uint32((2*threshold - 1)))
+			count = int32(br.bits & uint32((2*threshold - 1)))
 			if count >= threshold {
 				count -= max
 			}
@@ -147,13 +147,13 @@ func (r *Reader) readFSE(data block, off, maxSym, maxBits int, table []fseEntry)
 		return 0, 0, err
 	}
 
-	return accuracyLog, int(br.off), nil
+	return accuracyLog, int32(br.off), nil
 }
 
 // buildFSE builds an FSE decoding table from a list of probabilities.
 // The probabilities are in norm. next is scratch space. The number of bits
 // in the table is tableBits.
-func (r *Reader) buildFSE(off int, norm []int16, table []fseEntry, tableBits int) error {
+func (r *Reader) buildFSE(off int32, norm []int16, table []fseEntry, tableBits int32) error {
 	tableSize := 1 << tableBits
 	highThreshold := tableSize - 1
 
@@ -173,7 +173,7 @@ func (r *Reader) buildFSE(off int, norm []int16, table []fseEntry, tableBits int
 	step := (tableSize >> 1) + (tableSize >> 3) + 3
 	mask := tableSize - 1
 	for i, n := range norm {
-		for j := 0; j < int(n); j++ {
+		for j := 0; j < int32(n); j++ {
 			table[pos].sym = uint8(i)
 			pos = (pos + step) & mask
 			for pos > highThreshold {
@@ -249,7 +249,7 @@ func _literalLengthBase() [20]uint32 {
 }
 
 // makeLiteralBaselineFSE converts the literal length fseTable to baselineTable.
-func (r *Reader) makeLiteralBaselineFSE(off int, fseTable []fseEntry, baselineTable []fseBaselineEntry) error {
+func (r *Reader) makeLiteralBaselineFSE(off int32, fseTable []fseEntry, baselineTable []fseBaselineEntry) error {
 	for i, e := range fseTable {
 		be := fseBaselineEntry{
 			bits: e.bits,
@@ -274,7 +274,7 @@ func (r *Reader) makeLiteralBaselineFSE(off int, fseTable []fseEntry, baselineTa
 }
 
 // makeOffsetBaselineFSE converts the offset length fseTable to baselineTable.
-func (r *Reader) makeOffsetBaselineFSE(off int, fseTable []fseEntry, baselineTable []fseBaselineEntry) error {
+func (r *Reader) makeOffsetBaselineFSE(off int32, fseTable []fseEntry, baselineTable []fseBaselineEntry) error {
 	for i, e := range fseTable {
 		be := fseBaselineEntry{
 			bits: e.bits,
@@ -345,7 +345,7 @@ func _matchLengthBase() [21]uint32 {
 }
 
 // makeMatchBaselineFSE converts the match length fseTable to baselineTable.
-func (r *Reader) makeMatchBaselineFSE(off int, fseTable []fseEntry, baselineTable []fseBaselineEntry) error {
+func (r *Reader) makeMatchBaselineFSE(off int32, fseTable []fseEntry, baselineTable []fseBaselineEntry) error {
 	for i, e := range fseTable {
 		be := fseBaselineEntry{
 			bits: e.bits,

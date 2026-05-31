@@ -54,7 +54,7 @@ var secInited bool
 // secLockdownFd is the write end of the notification pipe. Default 2 is
 // stderr; spawned children that want a private lockdown channel call
 // SetSecureLockdownFd with a pipe fd inherited from the parent domain.
-var secLockdownFd int32 = 2
+var secLockdownFd int32
 
 // SetSecureLockdownFd routes fault notifications to fd instead of stderr.
 // Typical use: a parent domain creates a pipe, spawns a child with the
@@ -111,6 +111,9 @@ func secureGenerateNoise() {
 func secureInit() {
 	if secInited {
 		return
+	}
+	if secLockdownFd == 0 {
+		secLockdownFd = 2 // default to stderr
 	}
 	secureGenerateNoise()
 	moxie_secalloc_configure(
@@ -308,7 +311,7 @@ func SecureRotate(old []byte) []byte {
 	// Register the replacement. If the registry is full the old arena is
 	// still live; unmap the replacement and panic.
 	if moxie_secalloc_register_arena(newBase, newDataSize) != 0 {
-		_ = munmap(unsafe.Add(newBase, -int(secPageSize)), newDataSize+2*secPageSize)
+		_ = munmap(unsafe.Add(newBase, -int32(secPageSize)), newDataSize+2*secPageSize)
 		runtimePanic("secalloc: arena registry full")
 	}
 
@@ -330,7 +333,7 @@ func SecureRotate(old []byte) []byte {
 	moxie_secalloc_unregister_arena(oldBase)
 
 	// Unmap the full three-page mapping (head guard, data, tail guard).
-	_ = munmap(unsafe.Add(oldBase, -int(secPageSize)), oldDataSize+2*secPageSize)
+	_ = munmap(unsafe.Add(oldBase, -int32(secPageSize)), oldDataSize+2*secPageSize)
 
 	return dst
 }

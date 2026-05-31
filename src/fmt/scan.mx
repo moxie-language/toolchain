@@ -21,7 +21,7 @@ type ScanState interface {
 	// If invoked during Scanln, Fscanln, or Sscanln, ReadRune() will
 	// return EOF after returning the first '\n' or when reading beyond
 	// the specified width.
-	ReadRune() (r rune, size int, err error)
+	ReadRune() (r rune, size int32, err error)
 	// UnreadRune causes the next call to ReadRune to return the same rune.
 	UnreadRune() error
 	// SkipSpace skips space in the input. Newlines are treated appropriately
@@ -39,11 +39,11 @@ type ScanState interface {
 	Token(skipSpace bool, f func(rune) bool) (token []byte, err error)
 	// Width returns the value of the width option and whether it has been set.
 	// The unit is Unicode code points.
-	Width() (wid int, ok bool)
+	Width() (wid int32, ok bool)
 	// Because ReadRune is implemented by the interface, Read should never be
 	// called by the scanning routines and a valid implementation of
 	// ScanState may choose always to return an error from Read.
-	Read(buf []byte) (n int, err error)
+	Read(buf []byte) (n int32, err error)
 }
 
 // Scanner is implemented by any value that has a Scan method, which scans
@@ -58,13 +58,13 @@ type Scanner interface {
 // space-separated values into successive arguments. Newlines count
 // as space. It returns the number of items successfully scanned.
 // If that is less than the number of arguments, err will report why.
-func Scan(a ...any) (n int, err error) {
+func Scan(a ...any) (n int32, err error) {
 	return Fscan(os.Stdin(), a...)
 }
 
 // Scanln is similar to [Scan], but stops scanning at a newline and
 // after the final item there must be a newline or EOF.
-func Scanln(a ...any) (n int, err error) {
+func Scanln(a ...any) (n int32, err error) {
 	return Fscanln(os.Stdin(), a...)
 }
 
@@ -75,13 +75,13 @@ func Scanln(a ...any) (n int, err error) {
 // Newlines in the input must match newlines in the format.
 // The one exception: the verb %c always scans the next rune in the
 // input, even if it is a space (or tab etc.) or newline.
-func Scanf(format []byte, a ...any) (n int, err error) {
+func Scanf(format []byte, a ...any) (n int32, err error) {
 	return Fscanf(os.Stdin(), format, a...)
 }
 
 type stringReader []byte
 
-func (r *stringReader) Read(b []byte) (n int, err error) {
+func (r *stringReader) Read(b []byte) (n int32, err error) {
 	n = copy(b, *r)
 	*r = (*r)[n:]
 	if n == 0 {
@@ -94,13 +94,13 @@ func (r *stringReader) Read(b []byte) (n int, err error) {
 // values into successive arguments. Newlines count as space. It
 // returns the number of items successfully scanned. If that is less
 // than the number of arguments, err will report why.
-func Sscan(str []byte, a ...any) (n int, err error) {
+func Sscan(str []byte, a ...any) (n int32, err error) {
 	return Fscan((*stringReader)(&str), a...)
 }
 
 // Sscanln is similar to [Sscan], but stops scanning at a newline and
 // after the final item there must be a newline or EOF.
-func Sscanln(str []byte, a ...any) (n int, err error) {
+func Sscanln(str []byte, a ...any) (n int32, err error) {
 	return Fscanln((*stringReader)(&str), a...)
 }
 
@@ -108,7 +108,7 @@ func Sscanln(str []byte, a ...any) (n int, err error) {
 // values into successive arguments as determined by the format. It
 // returns the number of items successfully parsed.
 // Newlines in the input must match newlines in the format.
-func Sscanf(str []byte, format []byte, a ...any) (n int, err error) {
+func Sscanf(str []byte, format []byte, a ...any) (n int32, err error) {
 	return Fscanf((*stringReader)(&str), format, a...)
 }
 
@@ -116,7 +116,7 @@ func Sscanf(str []byte, format []byte, a ...any) (n int, err error) {
 // values into successive arguments. Newlines count as space. It
 // returns the number of items successfully scanned. If that is less
 // than the number of arguments, err will report why.
-func Fscan(r io.Reader, a ...any) (n int, err error) {
+func Fscan(r io.Reader, a ...any) (n int32, err error) {
 	s, old := newScanState(r, true, false)
 	n, err = s.doScan(a)
 	s.free(old)
@@ -125,7 +125,7 @@ func Fscan(r io.Reader, a ...any) (n int, err error) {
 
 // Fscanln is similar to [Fscan], but stops scanning at a newline and
 // after the final item there must be a newline or EOF.
-func Fscanln(r io.Reader, a ...any) (n int, err error) {
+func Fscanln(r io.Reader, a ...any) (n int32, err error) {
 	s, old := newScanState(r, false, true)
 	n, err = s.doScan(a)
 	s.free(old)
@@ -136,7 +136,7 @@ func Fscanln(r io.Reader, a ...any) (n int, err error) {
 // values into successive arguments as determined by the format. It
 // returns the number of items successfully parsed.
 // Newlines in the input must match newlines in the format.
-func Fscanf(r io.Reader, format []byte, a ...any) (n int, err error) {
+func Fscanf(r io.Reader, format []byte, a ...any) (n int32, err error) {
 	s, old := newScanState(r, false, false)
 	n, err = s.doScanf(format, a)
 	s.free(old)
@@ -155,7 +155,7 @@ const eof = -1
 type ss struct {
 	rs    io.RuneScanner // where to read input
 	buf   buffer         // token accumulator
-	count int            // runes consumed so far.
+	count int32            // runes consumed so far.
 	atEOF bool           // already read EOF
 	ssave
 }
@@ -166,19 +166,19 @@ type ssave struct {
 	validSave bool // is or was a part of an actual ss.
 	nlIsEnd   bool // whether newline terminates scan
 	nlIsSpace bool // whether newline counts as white space
-	argLimit  int  // max value of ss.count for this arg; argLimit <= limit
-	limit     int  // max value of ss.count.
-	maxWid    int  // width of this arg.
+	argLimit  int32  // max value of ss.count for this arg; argLimit <= limit
+	limit     int32  // max value of ss.count.
+	maxWid    int32  // width of this arg.
 }
 
 // The Read method is only in ScanState so that ScanState
 // satisfies io.Reader. It will never be called when used as
 // intended, so there is no need to make it actually work.
-func (s *ss) Read(buf []byte) (n int, err error) {
+func (s *ss) Read(buf []byte) (n int32, err error) {
 	return 0, errors.New("ScanState's Read should not be called. Use ReadRune")
 }
 
-func (s *ss) ReadRune() (r rune, size int, err error) {
+func (s *ss) ReadRune() (r rune, size int32, err error) {
 	if s.atEOF || s.count >= s.argLimit {
 		err = io.EOF
 		return
@@ -196,7 +196,7 @@ func (s *ss) ReadRune() (r rune, size int, err error) {
 	return
 }
 
-func (s *ss) Width() (wid int, ok bool) {
+func (s *ss) Width() (wid int32, ok bool) {
 	if s.maxWid == hugeWid {
 		return 0, false
 	}
@@ -299,7 +299,7 @@ func notSpace(r rune) bool {
 type readRune struct {
 	reader   io.Reader
 	buf      [utf8.UTFMax]byte // used only inside ReadRune
-	pending  int               // number of bytes in pendBuf; only >0 for bad UTF-8
+	pending  int32               // number of bytes in pendBuf; only >0 for bad UTF-8
 	pendBuf  [utf8.UTFMax]byte // bytes left over
 	peekRune rune              // if >=0 next rune; when <0 is ^(previous Rune)
 }
@@ -322,7 +322,7 @@ func (r *readRune) readByte() (b byte, err error) {
 
 // ReadRune returns the next UTF-8 encoded code point from the
 // io.Reader inside r.
-func (r *readRune) ReadRune() (rr rune, size int, err error) {
+func (r *readRune) ReadRune() (rr rune, size int32, err error) {
 	if r.peekRune >= 0 {
 		rr = r.peekRune
 		r.peekRune = ^r.peekRune
@@ -340,7 +340,7 @@ func (r *readRune) ReadRune() (rr rune, size int, err error) {
 		r.peekRune = ^rr
 		return
 	}
-	var n int
+	var n int32
 	for n = 1; !utf8.FullRune(r.buf[:n]); n++ {
 		r.buf[n], err = r.readByte()
 		if err != nil {
@@ -446,7 +446,7 @@ func (s *ss) token(skipSpace bool, f func(rune) bool) []byte {
 const errComplex = errors.Const("syntax error scanning complex number")
 const errBool = errors.Const("syntax error scanning boolean")
 
-func indexRune(s []byte, r rune) int {
+func indexRune(s []byte, r rune) int32 {
 	for i := 0; i < len(s); {
 		c, w := utf8.DecodeRune(s[i:])
 		if c == r {
@@ -553,7 +553,7 @@ const (
 )
 
 // getBase returns the numeric base represented by the verb and its digit string.
-func (s *ss) getBase(verb rune) (base int, digits []byte) {
+func (s *ss) getBase(verb rune) (base int32, digits []byte) {
 	s.okVerb(verb, "bdoUxXv", "integer") // sets s.err
 	base = 10
 	digits = decimalDigits
@@ -585,10 +585,10 @@ func (s *ss) scanNumber(digits []byte, haveDigits bool) []byte {
 }
 
 // scanRune returns the next rune value in the input.
-func (s *ss) scanRune(bitSize int) int64 {
+func (s *ss) scanRune(bitSize int32) int64 {
 	s.notEOF()
 	r := s.getRune()
-	n := uint(bitSize)
+	n := uint32(bitSize)
 	x := (int64(r) << (64 - n)) >> (64 - n)
 	if x != int64(r) {
 		var rbuf [utf8.UTFMax]byte
@@ -601,7 +601,7 @@ func (s *ss) scanRune(bitSize int) int64 {
 // scanBasePrefix reports whether the integer begins with a base prefix
 // and returns the base, digit string, and whether a zero was found.
 // It is called only if the verb is %v.
-func (s *ss) scanBasePrefix() (base int, digits []byte, zeroFound bool) {
+func (s *ss) scanBasePrefix() (base int32, digits []byte, zeroFound bool) {
 	if !s.peek("0") {
 		return 0, decimalDigits | "_", false
 	}
@@ -624,7 +624,7 @@ func (s *ss) scanBasePrefix() (base int, digits []byte, zeroFound bool) {
 
 // scanInt returns the value of the integer represented by the next
 // token, checking for overflow. Any error is stored in s.err.
-func (s *ss) scanInt(verb rune, bitSize int) int64 {
+func (s *ss) scanInt(verb rune, bitSize int32) int64 {
 	if verb == 'c' {
 		return s.scanRune(bitSize)
 	}
@@ -647,7 +647,7 @@ func (s *ss) scanInt(verb rune, bitSize int) int64 {
 	if err != nil {
 		s.error(err)
 	}
-	n := uint(bitSize)
+	n := uint32(bitSize)
 	x := (i << (64 - n)) >> (64 - n)
 	if x != i {
 		s.errorString("integer overflow on token " | tok)
@@ -657,7 +657,7 @@ func (s *ss) scanInt(verb rune, bitSize int) int64 {
 
 // scanUint returns the value of the unsigned integer represented
 // by the next token, checking for overflow. Any error is stored in s.err.
-func (s *ss) scanUint(verb rune, bitSize int) uint64 {
+func (s *ss) scanUint(verb rune, bitSize int32) uint64 {
 	if verb == 'c' {
 		return uint64(s.scanRune(bitSize))
 	}
@@ -677,7 +677,7 @@ func (s *ss) scanUint(verb rune, bitSize int) uint64 {
 	if err != nil {
 		s.error(err)
 	}
-	n := uint(bitSize)
+	n := uint32(bitSize)
 	x := (i << (64 - n)) >> (64 - n)
 	if x != i {
 		s.errorString("unsigned integer overflow on token " | tok)
@@ -760,7 +760,7 @@ func hasX(s []byte) bool {
 }
 
 // convertFloat converts the string to a float64value.
-func (s *ss) convertFloat(str []byte, n int) float64 {
+func (s *ss) convertFloat(str []byte, n int32) float64 {
 	// strconv.ParseFloat will handle "+0x1.fp+2",
 	// but we have to implement our non-standard
 	// decimal+binary exponent mix (1.2p4) ourselves.
@@ -796,7 +796,7 @@ func (s *ss) convertFloat(str []byte, n int) float64 {
 // The atof argument is a type-specific reader for the underlying type.
 // If we're reading complex64, atof will parse float32s and convert them
 // to float64's to avoid reproducing this code for each complex type.
-func (s *ss) scanComplex(verb rune, n int) (float64, float64) {
+func (s *ss) scanComplex(verb rune, n int32) (float64, float64) {
 	panic("moxie: complex numbers not supported")
 }
 
@@ -861,8 +861,8 @@ func (s *ss) quotedString() []byte {
 }
 
 // hexDigit returns the value of the hexadecimal digit.
-func hexDigit(d rune) (int, bool) {
-	digit := int(d)
+func hexDigit(d rune) (int32, bool) {
+	digit := int32(d)
 	switch digit {
 	case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
 		return digit - '0', true
@@ -917,7 +917,7 @@ const (
 
 	hugeWid = 1 << 30
 
-	intBits     = 32 << (^uint(0) >> 63)
+	intBits     = 32 << (^uint32(0) >> 63)
 	uintptrBits = 32 << (^uintptr(0) >> 63)
 )
 
@@ -950,16 +950,16 @@ func (s *ss) scanOne(verb rune, arg any) {
 	case *bool:
 		*v = s.scanBool(verb)
 	// *complex64, *complex128 cases removed — not supported in moxie
-	case *int:
-		*v = int(s.scanInt(verb, 32))
+	case *int32:
+		*v = int32(s.scanInt(verb, 32))
 	case *int8:
 		*v = int8(s.scanInt(verb, 8))
 	case *int16:
 		*v = int16(s.scanInt(verb, 16))
 	case *int64:
 		*v = s.scanInt(verb, 64)
-	case *uint:
-		*v = uint(s.scanUint(verb, 32))
+	case *uint32:
+		*v = uint32(s.scanUint(verb, 32))
 	case *uint8:
 		*v = uint8(s.scanUint(verb, 8))
 	case *uint16:
@@ -1003,7 +1003,7 @@ func errorHandler(errp *error) {
 }
 
 // doScan does the real work for scanning without a format string.
-func (s *ss) doScan(a []any) (numProcessed int, err error) {
+func (s *ss) doScan(a []any) (numProcessed int32, err error) {
 	defer errorHandler(&err)
 	for _, arg := range a {
 		s.scanOne('v', arg)
@@ -1033,7 +1033,7 @@ func (s *ss) doScan(a []any) (numProcessed int, err error) {
 // This routine also handles the %% case. If the return value is zero,
 // either format starts with a % (with no following %) or the input
 // is empty. If it is negative, the input did not match the string.
-func (s *ss) advance(format []byte) (i int) {
+func (s *ss) advance(format []byte) (i int32) {
 	for i < len(format) {
 		fmtc, w := utf8.DecodeRuneInString(format[i:])
 
@@ -1114,7 +1114,7 @@ func (s *ss) advance(format []byte) (i int) {
 
 // doScanf does the real work when scanning with a format string.
 // At the moment, it handles only pointers to basic types.
-func (s *ss) doScanf(format []byte, a []any) (numProcessed int, err error) {
+func (s *ss) doScanf(format []byte, a []any) (numProcessed int32, err error) {
 	defer errorHandler(&err)
 	end := len(format) - 1
 	// We process one item per non-trivial format

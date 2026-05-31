@@ -25,8 +25,8 @@ import (
 // segment's size in bytes, its width in runes, and whether it's an htab
 // ('\t') terminated cell.
 type cell struct {
-	size  int  // cell size in bytes
-	width int  // cell width in runes
+	size  int32  // cell size in bytes
+	width int32  // cell width in runes
 	htab  bool // true if the cell is terminated by an htab ('\t')
 }
 
@@ -90,19 +90,19 @@ type cell struct {
 type Writer struct {
 	// configuration
 	output   io.Writer
-	minwidth int
-	tabwidth int
-	padding  int
+	minwidth int32
+	tabwidth int32
+	padding  int32
 	padbytes [8]byte
-	flags    uint
+	flags    uint32
 
 	// current state
 	buf     []byte   // collected text excluding tabs or line breaks
-	pos     int      // buffer position up to which cell.width of incomplete cell has been computed
+	pos     int32      // buffer position up to which cell.width of incomplete cell has been computed
 	cell    cell     // current incomplete cell; cell.width is up to buf[pos] excluding ignored sections
 	endChar byte     // terminating char of escaped sequence (Escape for escapes, '>', ';' for HTML tags/entities, or 0)
 	lines   [][]cell // list of lines; each line is a list of cells
-	widths  []int    // list of column widths in runes - re-used during formatting
+	widths  []int32    // list of column widths in runes - re-used during formatting
 }
 
 // addLine adds a new line.
@@ -170,7 +170,7 @@ func (b *Writer) reset() {
 const (
 	// Ignore html tags and treat entities (starting with '&'
 	// and ending in ';') as single characters (width = 1).
-	FilterHTML uint = 1 << iota
+	FilterHTML uint32 = 1 << iota
 
 	// Strip Escape characters bracketing escaped text segments
 	// instead of passing them through unchanged with the text.
@@ -206,7 +206,7 @@ const (
 //			(for correct-looking results, tabwidth must correspond
 //			to the tab width in the viewer displaying the result)
 //	flags		formatting control
-func (b *Writer) Init(output io.Writer, minwidth, tabwidth, padding int, padchar byte, flags uint) *Writer {
+func (b *Writer) Init(output io.Writer, minwidth, tabwidth, padding int32, padchar byte, flags uint32) *Writer {
 	if minwidth < 0 || tabwidth < 0 || padding < 0 {
 		panic("negative minwidth, tabwidth, or padding")
 	}
@@ -258,7 +258,7 @@ func (b *Writer) write0(buf []byte) {
 	}
 }
 
-func (b *Writer) writeN(src []byte, n int) {
+func (b *Writer) writeN(src []byte, n int32) {
 	for n > len(src) {
 		b.write0(src)
 		n -= len(src)
@@ -269,7 +269,7 @@ func (b *Writer) writeN(src []byte, n int) {
 func _newline() []byte { return []byte{'\n'} }
 func _tabs() []byte    { return []byte("\t\t\t\t\t\t\t\t") }
 
-func (b *Writer) writePadding(textw, cellw int, useTabs bool) {
+func (b *Writer) writePadding(textw, cellw int32, useTabs bool) {
 	if b.padbytes[0] == '\t' || useTabs {
 		// padding is done with tabs
 		if b.tabwidth == 0 {
@@ -291,7 +291,7 @@ func (b *Writer) writePadding(textw, cellw int, useTabs bool) {
 
 const vbar = "|"
 
-func (b *Writer) writeLines(pos0 int, line0, line1 int) (pos int) {
+func (b *Writer) writeLines(pos0 int32, line0, line1 int32) (pos int32) {
 	pos = pos0
 	for i := line0; i < line1; i++ {
 		line := b.lines[i]
@@ -346,7 +346,7 @@ func (b *Writer) writeLines(pos0 int, line0, line1 int) (pos int) {
 // is the buffer position corresponding to the beginning of line0.
 // Returns the buffer position corresponding to the beginning of
 // line1 and an error, if any.
-func (b *Writer) format(pos0 int, line0, line1 int) (pos int) {
+func (b *Writer) format(pos0 int32, line0, line1 int32) (pos int32) {
 	pos = pos0
 	column := len(b.widths)
 	for this := line0; this < line1; this++ {
@@ -457,7 +457,7 @@ func (b *Writer) endEscape() {
 
 // Terminate the current cell by adding it to the list of cells of the
 // current line. Returns the number of cells in that line.
-func (b *Writer) terminateCell(htab bool) int {
+func (b *Writer) terminateCell(htab bool) int32 {
 	b.cell.htab = htab
 	line := &b.lines[len(b.lines)-1]
 	*line = append(*line, b.cell)
@@ -518,7 +518,7 @@ const hbar = "---\n"
 // Write writes buf to the writer b.
 // The only errors returned are ones encountered
 // while writing to the underlying output stream.
-func (b *Writer) Write(buf []byte) (n int, err error) {
+func (b *Writer) Write(buf []byte) (n int32, err error) {
 	defer b.handlePanic(&err, "Write")
 
 	// split text into cells
@@ -594,6 +594,6 @@ func (b *Writer) Write(buf []byte) (n int, err error) {
 
 // NewWriter allocates and initializes a new [Writer].
 // The parameters are the same as for the Init function.
-func NewWriter(output io.Writer, minwidth, tabwidth, padding int, padchar byte, flags uint) *Writer {
+func NewWriter(output io.Writer, minwidth, tabwidth, padding int32, padchar byte, flags uint32) *Writer {
 	return (&Writer{}).Init(output, minwidth, tabwidth, padding, padchar, flags)
 }

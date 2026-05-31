@@ -222,18 +222,18 @@ type encoder struct {
 	enc  *Encoding
 	w    io.Writer
 	buf  [5]byte    // buffered data waiting to be encoded
-	nbuf int        // number of bytes in buf
+	nbuf int32        // number of bytes in buf
 	out  [1024]byte // output buffer
 }
 
-func (e *encoder) Write(p []byte) (n int, err error) {
+func (e *encoder) Write(p []byte) (n int32, err error) {
 	if e.err != nil {
 		return 0, e.err
 	}
 
 	// Leading fringe.
 	if e.nbuf > 0 {
-		var i int
+		var i int32
 		for i = 0; i < len(p) && e.nbuf < 5; i++ {
 			e.buf[e.nbuf] = p[i]
 			e.nbuf++
@@ -296,7 +296,7 @@ func NewEncoder(enc *Encoding, w io.Writer) io.WriteCloser {
 
 // EncodedLen returns the length in bytes of the base32 encoding
 // of an input buffer of length n.
-func (enc *Encoding) EncodedLen(n int) int {
+func (enc *Encoding) EncodedLen(n int32) int32 {
 	if enc.padChar == NoPadding {
 		return n/5*8 + (n%5*8+4)/5
 	}
@@ -317,7 +317,7 @@ func (e CorruptInputError) Error() string {
 // indicates if end-of-message padding was encountered and thus any
 // additional data is an error. This method assumes that src has been
 // stripped of all supported whitespace ('\r' and '\n').
-func (enc *Encoding) decode(dst, src []byte) (n int, end bool, err error) {
+func (enc *Encoding) decode(dst, src []byte) (n int32, end bool, err error) {
 	// Lift the nil check outside of the loop.
 	_ = enc.decodeMap
 
@@ -422,7 +422,7 @@ func (enc *Encoding) decode(dst, src []byte) (n int, end bool, err error) {
 // the decoded data. If src contains invalid base32 data, it will return the
 // number of bytes successfully written and [CorruptInputError].
 // Newline characters (\r and \n) are ignored.
-func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
+func (enc *Encoding) Decode(dst, src []byte) (n int32, err error) {
 	buf := []byte{:len(src)}
 	l := stripNewlines(buf, src)
 	n, _, err = enc.decode(dst, buf[:l])
@@ -462,14 +462,14 @@ type decoder struct {
 	r      io.Reader
 	end    bool       // saw end of message
 	buf    [1024]byte // leftover input
-	nbuf   int
+	nbuf   int32
 	out    []byte // leftover decoded output
 	outbuf [1024 / 8 * 5]byte
 }
 
-func readEncodedData(r io.Reader, buf []byte, min int, expectsPadding bool) (n int, err error) {
+func readEncodedData(r io.Reader, buf []byte, min int32, expectsPadding bool) (n int32, err error) {
 	for n < min && err == nil {
-		var nn int
+		var nn int32
 		nn, err = r.Read(buf[n:])
 		n += nn
 	}
@@ -486,7 +486,7 @@ func readEncodedData(r io.Reader, buf []byte, min int, expectsPadding bool) (n i
 	return
 }
 
-func (d *decoder) Read(p []byte) (n int, err error) {
+func (d *decoder) Read(p []byte) (n int32, err error) {
 	// Use leftover decoded output from last read.
 	if len(d.out) > 0 {
 		n = copy(p, d.out)
@@ -511,7 +511,7 @@ func (d *decoder) Read(p []byte) (n int, err error) {
 	}
 
 	// Minimum amount of bytes that needs to be read each cycle
-	var min int
+	var min int32
 	var expectsPadding bool
 	if d.enc.padChar == NoPadding {
 		min = 1
@@ -531,7 +531,7 @@ func (d *decoder) Read(p []byte) (n int, err error) {
 	}
 
 	// Decode chunk into p, or d.out and then p if p is too small.
-	var nr int
+	var nr int32
 	if d.enc.padChar == NoPadding {
 		nr = d.nbuf
 	} else {
@@ -573,7 +573,7 @@ type newlineFilteringReader struct {
 
 // stripNewlines removes newline characters and returns the number
 // of non-newline characters copied to dst.
-func stripNewlines(dst, src []byte) int {
+func stripNewlines(dst, src []byte) int32 {
 	offset := 0
 	for _, b := range src {
 		if b == '\r' || b == '\n' {
@@ -585,7 +585,7 @@ func stripNewlines(dst, src []byte) int {
 	return offset
 }
 
-func (r *newlineFilteringReader) Read(p []byte) (int, error) {
+func (r *newlineFilteringReader) Read(p []byte) (int32, error) {
 	n, err := r.wrapped.Read(p)
 	for n > 0 {
 		s := p[0:n]
@@ -606,11 +606,11 @@ func NewDecoder(enc *Encoding, r io.Reader) io.Reader {
 
 // DecodedLen returns the maximum length in bytes of the decoded data
 // corresponding to n bytes of base32-encoded data.
-func (enc *Encoding) DecodedLen(n int) int {
+func (enc *Encoding) DecodedLen(n int32) int32 {
 	return decodedLen(n, enc.padChar)
 }
 
-func decodedLen(n int, padChar rune) int {
+func decodedLen(n int32, padChar rune) int32 {
 	if padChar == NoPadding {
 		return n/8*5 + n%8*5/8
 	}

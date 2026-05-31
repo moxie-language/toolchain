@@ -41,53 +41,53 @@ func moxie_futex_wait_timeout(addr *uint32, cmp uint32, timeout uint64)
 func moxie_futex_wake_all(addr *uint32)
 
 //export write
-func libc_write(fd int32, buf unsafe.Pointer, count uint) int
+func libc_write(fd int32, buf unsafe.Pointer, count uint32) int32
 
 //export getrlimit
-func libc_getrlimit(resource int, rlim *[2]uint64) int
+func libc_getrlimit(resource int32, rlim *[2]uint64) int32
 
 //export setrlimit
-func libc_setrlimit(resource int, rlim *[2]uint64) int
+func libc_setrlimit(resource int32, rlim *[2]uint64) int32
 
 //export usleep
-func usleep(usec uint) int
+func usleep(usec uint32) int32
 
 //export pause
 func pause() int32
 
-// void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
+// void *mmap(void *addr, size_t length, int32 prot, int32 flags, int32 fd, off_t offset);
 // Note: off_t is defined as int64 because:
 //   - musl (used on Linux) always defines it as int64
 //   - darwin is practically always 64-bit anyway
 //
 //export mmap
-func mmap(addr unsafe.Pointer, length uintptr, prot, flags, fd int, offset int64) unsafe.Pointer
+func mmap(addr unsafe.Pointer, length uintptr, prot, flags, fd int32, offset int64) unsafe.Pointer
 
-// int mprotect(void *addr, size_t len, int prot);
+// int32 mprotect(void *addr, size_t len, int32 prot);
 //
 //export mprotect
-func mprotect(addr unsafe.Pointer, length uintptr, prot int) int32
+func mprotect(addr unsafe.Pointer, length uintptr, prot int32) int32
 
-// int munmap(void *addr, size_t length);
+// int32 munmap(void *addr, size_t length);
 //
 //export munmap
 func munmap(addr unsafe.Pointer, length uintptr) int32
 
-// int mlock(const void *addr, size_t len);
+// int32 mlock(const void *addr, size_t len);
 //
 //export mlock
 func mlock(addr unsafe.Pointer, length uintptr) int32
 
-// int madvise(void *addr, size_t length, int advice);
+// int32 madvise(void *addr, size_t length, int32 advice);
 //
 //export madvise
-func madvise(addr unsafe.Pointer, length uintptr, advice int) int32
+func madvise(addr unsafe.Pointer, length uintptr, advice int32) int32
 
 //export abort
 func abort()
 
 //export exit
-func exit(code int)
+func exit(code int32)
 
 //export raise
 func raise(sig int32)
@@ -147,6 +147,9 @@ func InitCShared() {
 		return
 	}
 	csharedInitDone = true
+	ChildPipeFd = -1
+	epfd = -1
+	secLockdownFd = 2
 	if needsStaticHeap {
 		allocateHeap()
 	}
@@ -158,7 +161,12 @@ func InitCShared() {
 // Entry point for Go. Initialize all packages and call main.main().
 //
 //export main
-func main(argc int32, argv *unsafe.Pointer) int {
+func main(argc int32, argv *unsafe.Pointer) int32 {
+	// Initialize sentinel values that must differ from zero.
+	ChildPipeFd = -1
+	epfd = -1
+	secLockdownFd = 2
+
 	var rl [2]uint64
 	libc_getrlimit(3, &rl)
 	if rl[0] < 268435456 {
@@ -207,7 +215,7 @@ func os_runtime_args() []string {
 
 		// Initialize command line parameters.
 		argv := main_argv
-		for i := 0; i < int(main_argc); i++ {
+		for i := 0; i < int32(main_argc); i++ {
 			// Convert the C string to a Go string.
 			length := strlen(*argv)
 			arg := (*_string)(unsafe.Pointer(&args[i]))
@@ -326,7 +334,7 @@ func sleepTicks(d timeUnit) {
 		if hasPoll {
 			// Use epoll_wait instead of futex so I/O-parked goroutines
 			// (e.g. Accept) get woken during timer sleeps.
-			ms := int(ticksToNanoseconds(d) / 1000000)
+			ms := int32(ticksToNanoseconds(d) / 1000000)
 			if ms < 1 {
 				ms = 1
 			}
@@ -381,18 +389,19 @@ func now() (sec int64, nsec int32, mono int64) {
 }
 
 //go:linkname syscall_Exit syscall.Exit
-func syscall_Exit(code int) {
+func syscall_Exit(code int32) {
 	exit(code)
 }
 
 // procPin/procUnpin: no-ops, defined directly in sync/atomic.
 
-var heapSize uintptr = 128 * 1024 // small amount to start
+var heapSize uintptr
 var heapMaxSize uintptr
 
 var heapStart, heapEnd uintptr
 
 func allocateHeap() {
+	heapSize = 128 * 1024 // small amount to start
 	// Allocate a large chunk of virtual memory. Because it is virtual, it won't
 	// really be allocated in RAM. Memory will only be allocated when it is
 	// first touched.
@@ -506,7 +515,7 @@ func moxie_signal_ignore(s uint32)
 //export moxie_signal_disable
 func moxie_signal_disable(s uint32)
 
-// void moxie_signal_handler(int sig);
+// void moxie_signal_handler(int32 sig);
 //
 //export moxie_signal_handler
 func moxie_signal_handler(s int32) {

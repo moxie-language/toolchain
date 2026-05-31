@@ -37,14 +37,14 @@ type Scanner struct {
 
 	// scanning state
 	ch         rune      // current character
-	offset     int       // character offset
-	rdOffset   int       // reading offset (position after current character)
-	lineOffset int       // current line offset
+	offset     int32       // character offset
+	rdOffset   int32       // reading offset (position after current character)
+	lineOffset int32       // current line offset
 	insertSemi bool      // insert a semicolon before next newline
 	nlPos      token.Pos // position of newline in preceding comment
 
 	// public state - ok to modify
-	ErrorCount int // number of errors encountered
+	ErrorCount int32 // number of errors encountered
 }
 
 const (
@@ -110,7 +110,7 @@ func (s *Scanner) peek() byte {
 
 // A mode value is a set of flags (or 0).
 // They control scanner behavior.
-type Mode uint
+type Mode uint32
 
 const (
 	ScanComments    Mode = 1 << iota // return comments as COMMENT tokens
@@ -156,21 +156,21 @@ func (s *Scanner) Init(file *token.File, src []byte, err ErrorHandler, mode Mode
 	}
 }
 
-func (s *Scanner) error(offs int, msg string) {
+func (s *Scanner) error(offs int32, msg string) {
 	if s.err != nil {
 		s.err(s.file.Position(s.file.Pos(offs)), msg)
 	}
 	s.ErrorCount++
 }
 
-func (s *Scanner) errorf(offs int, format string, args ...any) {
+func (s *Scanner) errorf(offs int32, format string, args ...any) {
 	s.error(offs, fmt.Sprintf(format, args...))
 }
 
 // scanComment returns the text of the comment and (if nonzero)
 // the offset of the first newline within it, which implies a
 // /*...*/ comment.
-func (s *Scanner) scanComment() (string, int) {
+func (s *Scanner) scanComment() (string, int32) {
 	// initial '/' already consumed; s.ch == '/' || s.ch == '*'
 	offs := s.offset - 1 // position of initial '/'
 	next := -1           // position immediately following the comment; < 0 means invalid comment
@@ -245,7 +245,7 @@ const _linePrefix = "line "
 // updateLineInfo parses the incoming comment text at offset offs
 // as a line directive. If successful, it updates the line info table
 // for the position next per the line directive.
-func (s *Scanner) updateLineInfo(next, offs int, text []byte) {
+func (s *Scanner) updateLineInfo(next, offs int32, text []byte) {
 	// extract comment text
 	if text[1] == '*' {
 		text = text[:len(text)-2] // lop off trailing "*/"
@@ -269,7 +269,7 @@ func (s *Scanner) updateLineInfo(next, offs int, text []byte) {
 	// 30 bits allows for some additional space before wrapping an int32.
 	// Keep this consistent with cmd/compile/internal/syntax.PosMax.
 	const maxLineCol = 1 << 30
-	var line, col int
+	var line, col int32
 	i2, n2, ok2 := trailingDigits(text[:i-1])
 	if ok2 {
 		//line filename:line:col
@@ -308,14 +308,14 @@ func (s *Scanner) updateLineInfo(next, offs int, text []byte) {
 	s.file.AddLineColumnInfo(next, filename, line, col)
 }
 
-func trailingDigits(text []byte) (int, int, bool) {
+func trailingDigits(text []byte) (int32, int32, bool) {
 	i := bytes.LastIndexByte(text, ':') // look from right (Windows filenames may contain ':')
 	if i < 0 {
 		return 0, 0, false // no ":"
 	}
 	// i >= 0
 	n, err := strconv.ParseUint(string(text[i+1:]), 10, 0)
-	return i + 1, int(n), err == nil
+	return i + 1, int32(n), err == nil
 }
 
 func (s *Scanner) isLetter(ch rune) bool {
@@ -376,12 +376,12 @@ exit:
 	return string(s.src[offs:s.offset])
 }
 
-func digitVal(ch rune) int {
+func digitVal(ch rune) int32 {
 	switch {
 	case '0' <= ch && ch <= '9':
-		return int(ch - '0')
+		return int32(ch - '0')
 	case 'a' <= lower(ch) && lower(ch) <= 'f':
-		return int(lower(ch) - 'a' + 10)
+		return int32(lower(ch) - 'a' + 10)
 	}
 	return 16 // larger than any legal digit val
 }
@@ -396,7 +396,7 @@ func isHex(ch rune) bool     { return '0' <= ch && ch <= '9' || 'a' <= lower(ch)
 // in *invalid, if *invalid < 0.
 // digits returns a bitset describing whether the sequence contained
 // digits (bit 0 is set), or separators '_' (bit 1 is set).
-func (s *Scanner) digits(base int, invalid *int) (digsep int) {
+func (s *Scanner) digits(base int32, invalid *int32) (digsep int32) {
 	if base <= 10 {
 		max := rune('0' + base)
 		for isDecimal(s.ch) || s.ch == '_' {
@@ -522,7 +522,7 @@ func litname(prefix rune) string {
 }
 
 // invalidSep returns the index of the first invalid separator in x, or -1.
-func invalidSep(x string) int {
+func invalidSep(x string) int32 {
 	x1 := ' ' // prefix char, we only care if it's 'x'
 	d := '.'  // digit, one of '_', '0' (a digit), or '.' (anything else)
 	i := 0
@@ -568,7 +568,7 @@ func invalidSep(x string) int {
 func (s *Scanner) scanEscape(quote rune) bool {
 	offs := s.offset
 
-	var n int
+	var n int32
 	var base, max uint32
 	switch s.ch {
 	case 'a', 'b', 'f', 'n', 'r', 't', 'v', '\\', quote:

@@ -26,7 +26,7 @@ import (
 )
 
 // Order specifies the bit ordering in an LZW data stream.
-type Order int
+type Order int32
 
 const (
 	// LSB means Least Significant Bits first, as used in the GIF file format.
@@ -47,10 +47,10 @@ const (
 type Reader struct {
 	r        io.ByteReader
 	bits     uint32
-	nBits    uint
-	width    uint
+	nBits    uint32
+	width    uint32
 	read     func(*Reader) (uint16, error) // readLSB or readMSB
-	litWidth int                           // width in bits of literal codes
+	litWidth int32                           // width in bits of literal codes
 	err      error
 
 	// The first 1<<litWidth codes are literal codes.
@@ -82,7 +82,7 @@ type Reader struct {
 	// It is flushed when it contains >= 1<<maxWidth bytes,
 	// so that there is always room to decode an entire code.
 	output [2 * 1 << maxWidth]byte
-	o      int    // write index into output
+	o      int32    // write index into output
 	toRead []byte // bytes to return from Read
 }
 
@@ -119,7 +119,7 @@ func (r *Reader) readMSB() (uint16, error) {
 }
 
 // Read implements io.Reader, reading uncompressed bytes from its underlying reader.
-func (r *Reader) Read(b []byte) (int, error) {
+func (r *Reader) Read(b []byte) (int32, error) {
 	for {
 		if len(r.toRead) > 0 {
 			n := copy(b, r.toRead)
@@ -159,7 +159,7 @@ loop:
 				r.prefix[r.hi] = r.last
 			}
 		case code == r.clear:
-			r.width = 1 + uint(r.litWidth)
+			r.width = 1 + uint32(r.litWidth)
 			r.hi = r.eof
 			r.overflow = 1 << r.width
 			r.last = decoderInvalidCode
@@ -234,7 +234,7 @@ func (r *Reader) Close() error {
 
 // Reset clears the [Reader]'s state and allows it to be reused again
 // as a new [Reader].
-func (r *Reader) Reset(src io.Reader, order Order, litWidth int) {
+func (r *Reader) Reset(src io.Reader, order Order, litWidth int32) {
 	*r = Reader{}
 	r.init(src, order, litWidth)
 }
@@ -251,17 +251,17 @@ func (r *Reader) Reset(src io.Reader, order Order, litWidth int) {
 //
 // It is guaranteed that the underlying type of the returned [io.ReadCloser]
 // is a *[Reader].
-func NewReader(r io.Reader, order Order, litWidth int) io.ReadCloser {
+func NewReader(r io.Reader, order Order, litWidth int32) io.ReadCloser {
 	return newReader(r, order, litWidth)
 }
 
-func newReader(src io.Reader, order Order, litWidth int) *Reader {
+func newReader(src io.Reader, order Order, litWidth int32) *Reader {
 	r := &Reader{}
 	r.init(src, order, litWidth)
 	return r
 }
 
-func (r *Reader) init(src io.Reader, order Order, litWidth int) {
+func (r *Reader) init(src io.Reader, order Order, litWidth int32) {
 	switch order {
 	case LSB:
 		r.read = (*Reader).readLSB
@@ -282,8 +282,8 @@ func (r *Reader) init(src io.Reader, order Order, litWidth int) {
 	}
 	r.r = br
 	r.litWidth = litWidth
-	r.width = 1 + uint(litWidth)
-	r.clear = uint16(1) << uint(litWidth)
+	r.width = 1 + uint32(litWidth)
+	r.clear = uint16(1) << uint32(litWidth)
 	r.eof, r.hi = r.clear+1, r.clear+1
 	r.overflow = uint16(1) << r.width
 	r.last = decoderInvalidCode

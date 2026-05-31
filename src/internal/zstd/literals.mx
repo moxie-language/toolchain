@@ -11,7 +11,7 @@ import (
 // readLiterals reads and decompresses the literals from data at off.
 // The literals are appended to outbuf, which is returned.
 // Also returns the new input offset. RFC 3.1.1.3.1.
-func (r *Reader) readLiterals(data block, off int, outbuf []byte) (int, []byte, error) {
+func (r *Reader) readLiterals(data block, off int32, outbuf []byte) (int32, []byte, error) {
 	if off >= len(data) {
 		return 0, nil, r.makeEOFError(off)
 	}
@@ -29,24 +29,24 @@ func (r *Reader) readLiterals(data block, off int, outbuf []byte) (int, []byte, 
 
 // readRawRLELiterals reads and decompresses a Raw_Literals_Block or
 // a RLE_Literals_Block. RFC 3.1.1.3.1.1.
-func (r *Reader) readRawRLELiterals(data block, off int, hdr byte, outbuf []byte) (int, []byte, error) {
+func (r *Reader) readRawRLELiterals(data block, off int32, hdr byte, outbuf []byte) (int32, []byte, error) {
 	raw := (hdr & 3) == 0
 
-	var regeneratedSize int
+	var regeneratedSize int32
 	switch (hdr >> 2) & 3 {
 	case 0, 2:
-		regeneratedSize = int(hdr >> 3)
+		regeneratedSize = int32(hdr >> 3)
 	case 1:
 		if off >= len(data) {
 			return 0, nil, r.makeEOFError(off)
 		}
-		regeneratedSize = int(hdr>>4) + (int(data[off]) << 4)
+		regeneratedSize = int32(hdr>>4) + (int32(data[off]) << 4)
 		off++
 	case 3:
 		if off+1 >= len(data) {
 			return 0, nil, r.makeEOFError(off)
 		}
-		regeneratedSize = int(hdr>>4) + (int(data[off]) << 4) + (int(data[off+1]) << 12)
+		regeneratedSize = int32(hdr>>4) + (int32(data[off]) << 4) + (int32(data[off+1]) << 12)
 		off += 2
 	}
 
@@ -81,19 +81,19 @@ func (r *Reader) readRawRLELiterals(data block, off int, hdr byte, outbuf []byte
 
 // readHuffLiterals reads and decompresses a Compressed_Literals_Block or
 // a Treeless_Literals_Block. RFC 3.1.1.3.1.4.
-func (r *Reader) readHuffLiterals(data block, off int, hdr byte, outbuf []byte) (int, []byte, error) {
+func (r *Reader) readHuffLiterals(data block, off int32, hdr byte, outbuf []byte) (int32, []byte, error) {
 	var (
-		regeneratedSize int
-		compressedSize  int
-		streams         int
+		regeneratedSize int32
+		compressedSize  int32
+		streams         int32
 	)
 	switch (hdr >> 2) & 3 {
 	case 0, 1:
 		if off+1 >= len(data) {
 			return 0, nil, r.makeEOFError(off)
 		}
-		regeneratedSize = (int(hdr) >> 4) | ((int(data[off]) & 0x3f) << 4)
-		compressedSize = (int(data[off]) >> 6) | (int(data[off+1]) << 2)
+		regeneratedSize = (int32(hdr) >> 4) | ((int32(data[off]) & 0x3f) << 4)
+		compressedSize = (int32(data[off]) >> 6) | (int32(data[off+1]) << 2)
 		off += 2
 		if ((hdr >> 2) & 3) == 0 {
 			streams = 1
@@ -104,16 +104,16 @@ func (r *Reader) readHuffLiterals(data block, off int, hdr byte, outbuf []byte) 
 		if off+2 >= len(data) {
 			return 0, nil, r.makeEOFError(off)
 		}
-		regeneratedSize = (int(hdr) >> 4) | (int(data[off]) << 4) | ((int(data[off+1]) & 3) << 12)
-		compressedSize = (int(data[off+1]) >> 2) | (int(data[off+2]) << 6)
+		regeneratedSize = (int32(hdr) >> 4) | (int32(data[off]) << 4) | ((int32(data[off+1]) & 3) << 12)
+		compressedSize = (int32(data[off+1]) >> 2) | (int32(data[off+2]) << 6)
 		off += 3
 		streams = 4
 	case 3:
 		if off+3 >= len(data) {
 			return 0, nil, r.makeEOFError(off)
 		}
-		regeneratedSize = (int(hdr) >> 4) | (int(data[off]) << 4) | ((int(data[off+1]) & 0x3f) << 12)
-		compressedSize = (int(data[off+1]) >> 6) | (int(data[off+2]) << 2) | (int(data[off+3]) << 10)
+		regeneratedSize = (int32(hdr) >> 4) | (int32(data[off]) << 4) | ((int32(data[off+1]) & 0x3f) << 12)
+		compressedSize = (int32(data[off+1]) >> 6) | (int32(data[off+2]) << 2) | (int32(data[off+3]) << 10)
 		off += 4
 		streams = 4
 	}
@@ -176,7 +176,7 @@ func (r *Reader) readHuffLiterals(data block, off int, hdr byte, outbuf []byte) 
 }
 
 // readLiteralsOneStream reads a single stream of compressed literals.
-func (r *Reader) readLiteralsOneStream(data block, off, compressedSize, regeneratedSize int, outbuf []byte) ([]byte, error) {
+func (r *Reader) readLiteralsOneStream(data block, off, compressedSize, regeneratedSize int32, outbuf []byte) ([]byte, error) {
 	// We let the reverse bit reader read earlier bytes,
 	// because the Huffman table ignores bits that it doesn't need.
 	rbr, err := r.makeReverseBitReader(data, off+compressedSize-1, off-2)
@@ -205,7 +205,7 @@ func (r *Reader) readLiteralsOneStream(data block, off, compressedSize, regenera
 
 // readLiteralsFourStreams reads four interleaved streams of
 // compressed literals.
-func (r *Reader) readLiteralsFourStreams(data block, off, totalStreamsSize, regeneratedSize int, outbuf []byte) ([]byte, error) {
+func (r *Reader) readLiteralsFourStreams(data block, off, totalStreamsSize, regeneratedSize int32, outbuf []byte) ([]byte, error) {
 	// Read the jump table to find out where the streams are.
 	// RFC 3.1.1.3.1.6.
 	if off+5 >= len(data) {
@@ -235,16 +235,16 @@ func (r *Reader) readLiteralsFourStreams(data block, off, totalStreamsSize, rege
 	streamSize4 := uint32(totalStreamsSize) - 6 - uint32(tot)
 
 	off--
-	off1 := off + int(streamSize1)
+	off1 := off + int32(streamSize1)
 	start1 := off + 1
 
-	off2 := off1 + int(streamSize2)
+	off2 := off1 + int32(streamSize2)
 	start2 := off1 + 1
 
-	off3 := off2 + int(streamSize3)
+	off3 := off2 + int32(streamSize3)
 	start3 := off2 + 1
 
-	off4 := off3 + int(streamSize4)
+	off4 := off3 + int32(streamSize4)
 	start4 := off3 + 1
 
 	// We let the reverse bit readers read earlier bytes,

@@ -41,7 +41,7 @@ func (b *Builder) addASN1Signed(tag asn1.Tag, v int64) {
 		}
 
 		for ; length > 0; length-- {
-			i := v >> uint((length-1)*8) & 0xff
+			i := v >> uint32((length-1)*8) & 0xff
 			c.AddUint8(uint8(i))
 		}
 	})
@@ -56,7 +56,7 @@ func (b *Builder) AddASN1Uint64(v uint64) {
 		}
 
 		for ; length > 0; length-- {
-			i := v >> uint((length-1)*8) & 0xff
+			i := v >> uint32((length-1)*8) & 0xff
 			c.AddUint8(uint8(i))
 		}
 	})
@@ -139,7 +139,7 @@ func (b *Builder) AddASN1BitString(data []byte) {
 }
 
 func (b *Builder) addBase128Int(n int64) {
-	var length int
+	var length int32
 	if n == 0 {
 		length = 1
 	} else {
@@ -149,7 +149,7 @@ func (b *Builder) addBase128Int(n int64) {
 	}
 
 	for i := length - 1; i >= 0; i-- {
-		o := byte(n >> uint(i*7))
+		o := byte(n >> uint32(i*7))
 		o &= 0x7f
 		if i != 0 {
 			o |= 0x80
@@ -271,12 +271,12 @@ func (s *String) ReadASN1Boolean(out *bool) bool {
 // ReadASN1Integer reports whether the read was successful.
 func (s *String) ReadASN1Integer(out interface{}) bool {
 	switch out := out.(type) {
-	case *int:
+	case *int32:
 		var i int64
-		if !s.readASN1Int64(&i) || int64(int(i)) != i {
+		if !s.readASN1Int64(&i) || int64(int32(i)) != i {
 			return false
 		}
-		*out = int(i)
+		*out = int32(i)
 		return true
 	case *int8:
 		var i int64
@@ -299,12 +299,12 @@ func (s *String) ReadASN1Integer(out interface{}) bool {
 		}
 		*out = i
 		return true
-	case *uint:
+	case *uint32:
 		var u uint64
-		if !s.readASN1Uint64(&u) || uint64(uint(u)) != u {
+		if !s.readASN1Uint64(&u) || uint64(uint32(u)) != u {
 			return false
 		}
-		*out = uint(u)
+		*out = uint32(u)
 		return true
 	case *uint8:
 		var u uint64
@@ -446,26 +446,26 @@ func (s *String) ReadASN1Int64WithTag(out *int64, tag asn1.Tag) bool {
 
 // ReadASN1Enum decodes an ASN.1 ENUMERATION into out and advances. It reports
 // whether the read was successful.
-func (s *String) ReadASN1Enum(out *int) bool {
+func (s *String) ReadASN1Enum(out *int32) bool {
 	var bytes String
 	var i int64
 	if !s.ReadASN1(&bytes, asn1.ENUM) || !checkASN1Integer(bytes) || !asn1Signed(&i, bytes) {
 		return false
 	}
-	if int64(int(i)) != i {
+	if int64(int32(i)) != i {
 		return false
 	}
-	*out = int(i)
+	*out = int32(i)
 	return true
 }
 
-func (s *String) readBase128Int(out *int) bool {
+func (s *String) readBase128Int(out *int32) bool {
 	ret := 0
 	for i := 0; len(*s) > 0; i++ {
 		if i == 5 {
 			return false
 		}
-		// Avoid overflowing int on a 32-bit platform.
+		// Avoid overflowing int32 on a 32-bit platform.
 		// We don't want different behavior based on the architecture.
 		if ret >= 1<<(31-7) {
 			return false
@@ -480,7 +480,7 @@ func (s *String) readBase128Int(out *int) bool {
 			return false
 		}
 
-		ret |= int(b & 0x7f)
+		ret |= int32(b & 0x7f)
 		if b&0x80 == 0 {
 			*out = ret
 			return true
@@ -499,13 +499,13 @@ func (s *String) ReadASN1ObjectIdentifier(out *encoding_asn1.ObjectIdentifier) b
 
 	// In the worst case, we get two elements from the first byte (which is
 	// encoded differently) and then every varint is a single byte long.
-	components := []int{:len(bytes)+1}
+	components := []int32{:len(bytes)+1}
 
 	// The first varint is 40*value1 + value2:
 	// According to this packing, value1 can take the values 0, 1 and 2 only.
 	// When value1 = 0 or value1 = 1, then value2 is <= 39. When value1 = 2,
 	// then there are no restrictions on value2.
-	var v int
+	var v int32
 	if !bytes.readBase128Int(&v) {
 		return false
 	}
@@ -603,7 +603,7 @@ func (s *String) ReadASN1BitString(out *encoding_asn1.BitString) bool {
 		return false
 	}
 
-	out.BitLength = len(bytes)*8 - int(paddingBits)
+	out.BitLength = len(bytes)*8 - int32(paddingBits)
 	out.Bytes = bytes
 	return true
 }
@@ -729,16 +729,16 @@ func (s *String) ReadOptionalASN1Integer(out interface{}, tag asn1.Tag, defaultV
 	}
 	if !present {
 		switch o := out.(type) {
-		case *int:
-			*o = defaultValue.(int)
+		case *int32:
+			*o = defaultValue.(int32)
 		case *int8:
 			*o = defaultValue.(int8)
 		case *int16:
 			*o = defaultValue.(int16)
 		case *int64:
 			*o = defaultValue.(int64)
-		case *uint:
-			*o = defaultValue.(uint)
+		case *uint32:
+			*o = defaultValue.(uint32)
 		case *uint8:
 			*o = defaultValue.(uint8)
 		case *uint16:
@@ -842,12 +842,12 @@ func (s *String) readASN1(out *String, outTag *asn1.Tag, skipHeader bool) bool {
 		lenLen := lenByte & 0x7f
 		var len32 uint32
 
-		if lenLen == 0 || lenLen > 4 || len(*s) < int(2+lenLen) {
+		if lenLen == 0 || lenLen > 4 || len(*s) < int32(2+lenLen) {
 			return false
 		}
 
 		lenBytes := String((*s)[2 : 2+lenLen])
-		if !lenBytes.readUnsigned(&len32, int(lenLen)) {
+		if !lenBytes.readUnsigned(&len32, int32(lenLen)) {
 			return false
 		}
 
@@ -870,10 +870,10 @@ func (s *String) readASN1(out *String, outTag *asn1.Tag, skipHeader bool) bool {
 		length = headerLen + len32
 	}
 
-	if int(length) < 0 || !s.ReadBytes((*[]byte)(out), int(length)) {
+	if int32(length) < 0 || !s.ReadBytes((*[]byte)(out), int32(length)) {
 		return false
 	}
-	if skipHeader && !out.Skip(int(headerLen)) {
+	if skipHeader && !out.Skip(int32(headerLen)) {
 		panic("cryptobyte: internal error")
 	}
 

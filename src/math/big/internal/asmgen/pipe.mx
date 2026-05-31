@@ -32,13 +32,13 @@ type Pipe struct {
 	outPtr          []RegPtr // output slice pointers
 	index           Reg      // index register, if in use
 	useIndexCounter bool     // index counter requested
-	indexCounter    int      // index is also counter (386); 0 no, -1 negative counter, +1 positive counter
-	readOff         int      // read offset not yet added to index
-	writeOff        int      // write offset not yet added to index
-	factors         []int    // unrolling factors
+	indexCounter    int32      // index is also counter (386); 0 no, -1 negative counter, +1 positive counter
+	readOff         int32      // read offset not yet added to index
+	writeOff        int32      // write offset not yet added to index
+	factors         []int32    // unrolling factors
 	counts          []Reg    // iterations for each factor
 	needWrite       bool     // need a write call during Loop1/LoopN
-	maxColumns      int      // maximum columns during unrolled loop
+	maxColumns      int32      // maximum columns during unrolled loop
 	unrollStart     func()   // emit code at start of unrolled body
 	unrollEnd       func()   // emit code end of unrolled body
 }
@@ -85,7 +85,7 @@ func (p *Pipe) SetLabel(label []byte) {
 
 // SetMaxColumns sets the maximum number of
 // columns processed in a single loop body call.
-func (p *Pipe) SetMaxColumns(m int) {
+func (p *Pipe) SetMaxColumns(m int32) {
 	p.maxColumns = m
 }
 
@@ -195,7 +195,7 @@ func (p *Pipe) LoadPtrs(n Reg) {
 // LoadN returns the next n columns of input words as a slice of rows.
 // Regs for inputs that have been marked using p.SetMemOK will be direct memory references.
 // Regs for other inputs will be newly allocated registers and must be freed.
-func (p *Pipe) LoadN(n int) [][]Reg {
+func (p *Pipe) LoadN(n int32) [][]Reg {
 	a := p.f.Asm
 	regs := [][]Reg{:len(p.inPtr)}
 	for i, ptr := range p.inPtr {
@@ -286,7 +286,7 @@ func (p *Pipe) StoreN(regs [][]Reg) {
 // advancePtrs advances the pointers by step
 // or handles bookkeeping for an imminent index advance by step
 // that the caller will do.
-func (p *Pipe) advancePtrs(step int) {
+func (p *Pipe) advancePtrs(step int32) {
 	a := p.f.Asm
 	switch {
 	case a.Arch.loadIncN != nil:
@@ -349,7 +349,7 @@ func (p *Pipe) DropInput(name []byte) {
 // Start must be followed by a call to Loop1 or LoopN,
 // but it is permitted to emit other instructions first,
 // for example to set an initial carry flag.
-func (p *Pipe) Start(n Reg, factors ...int) {
+func (p *Pipe) Start(n Reg, factors ...int32) {
 	a := p.f.Asm
 	if p.started {
 		a.Fatalf("loop already started")
@@ -389,7 +389,7 @@ func (p *Pipe) Start(n Reg, factors ...int) {
 
 // Restart prepares to loop over an additional n columns,
 // beyond a previous loop run by p.Start/p.Loop.
-func (p *Pipe) Restart(n Reg, factors ...int) {
+func (p *Pipe) Restart(n Reg, factors ...int32) {
 	a := p.f.Asm
 	if !p.started {
 		a.Fatalf("pipe not started")
@@ -397,7 +397,7 @@ func (p *Pipe) Restart(n Reg, factors ...int) {
 	p.factors = factors
 	p.counts = []Reg{:len(factors)}
 	if len(factors) == 0 {
-		factors = []int{1}
+		factors = []int32{1}
 	}
 
 	// Compute the loop lengths for each unrolled section into separate registers.
@@ -423,7 +423,7 @@ func (p *Pipe) Restart(n Reg, factors ...int) {
 			t := p.f.Asm.Reg()
 			f /= div
 			a.And(a.Imm(f-1), n, t)
-			a.Rsh(a.Imm(bits.TrailingZeros(uint(f))), n, n)
+			a.Rsh(a.Imm(bits.TrailingZeros(uint32(f))), n, n)
 			div *= f
 			p.counts[i] = t
 		}
@@ -439,7 +439,7 @@ func (p *Pipe) Restart(n Reg, factors ...int) {
 				a.Fatalf("non-power-of-two factors %v", factors)
 			}
 			t := p.f.Asm.Reg()
-			a.Rsh(a.Imm(bits.TrailingZeros(uint(f))), n, t)
+			a.Rsh(a.Imm(bits.TrailingZeros(uint32(f))), n, t)
 			a.And(a.Imm(f-1), n, n)
 			p.counts[i] = t
 		}
@@ -507,7 +507,7 @@ func (p *Pipe) AtUnrollEnd(end func()) {
 }
 
 // unroll emits a single unrolled loop for the given factor, iterating n times.
-func (p *Pipe) unroll(n Reg, factor int, block func(in, out [][]Reg)) {
+func (p *Pipe) unroll(n Reg, factor int32, block func(in, out [][]Reg)) {
 	a := p.f.Asm
 	label := fmt.Sprintf("%s%d", p.label, factor)
 

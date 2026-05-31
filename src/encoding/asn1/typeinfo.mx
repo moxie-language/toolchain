@@ -96,8 +96,8 @@ type _structFieldDesc struct {
 // _sliceHeader is the memory layout of a slice.
 type _sliceHeader struct {
 	data unsafe.Pointer
-	len  int
-	cap  int
+	len  int32
+	cap  int32
 }
 
 func (t *_rawType) kind() aKind {
@@ -135,7 +135,7 @@ func (t *_rawType) size() uintptr {
 	case akInt64, akUint64, akFloat64:
 		return 8
 	case akInt, akUint:
-		return unsafe.Sizeof(int(0))
+		return unsafe.Sizeof(int32(0))
 	case akUintptr:
 		return unsafe.Sizeof(uintptr(0))
 	case akBytes:
@@ -143,7 +143,7 @@ func (t *_rawType) size() uintptr {
 	case akUnsafePointer, akChan, akMap, akPointer:
 		return unsafe.Sizeof(uintptr(0))
 	case akSlice:
-		return unsafe.Sizeof([]int{})
+		return unsafe.Sizeof([]int32{})
 	case akInterface:
 		return unsafe.Sizeof(interface{}(nil))
 	case akStruct:
@@ -165,11 +165,11 @@ func (t *_rawType) elem() *_rawType {
 	return (*_elemType)(unsafe.Pointer(u)).elem
 }
 
-func (t *_rawType) numField() int {
-	return int((*_structType)(unsafe.Pointer(t.underlying())).numField)
+func (t *_rawType) numField() int32 {
+	return int32((*_structType)(unsafe.Pointer(t.underlying())).numField)
 }
 
-func (t *_rawType) fieldDesc(i int) *_structFieldDesc {
+func (t *_rawType) fieldDesc(i int32) *_structFieldDesc {
 	st := (*_structType)(unsafe.Pointer(t.underlying()))
 	return (*_structFieldDesc)(unsafe.Add(
 		unsafe.Pointer(&st.fields[0]),
@@ -177,13 +177,13 @@ func (t *_rawType) fieldDesc(i int) *_structFieldDesc {
 	))
 }
 
-func (t *_rawType) fieldType(i int) *_rawType {
+func (t *_rawType) fieldType(i int32) *_rawType {
 	return t.fieldDesc(i).fieldType
 }
 
 // fieldData reads the field descriptor data blob for the i-th field.
 // Returns: flags, field offset, name, and tag.
-func (t *_rawType) fieldData(i int) (flags uint8, offset uintptr, name []byte, tag []byte) {
+func (t *_rawType) fieldData(i int32) (flags uint8, offset uintptr, name []byte, tag []byte) {
 	fd := t.fieldDesc(i)
 	p := (*byte)(fd.data)
 
@@ -192,7 +192,7 @@ func (t *_rawType) fieldData(i int) (flags uint8, offset uintptr, name []byte, t
 	p = (*byte)(unsafe.Add(unsafe.Pointer(p), 1))
 
 	// varint-encoded offset
-	var shift uint
+	var shift uint32
 	for {
 		b := *p
 		offset |= uintptr(b&0x7f) << shift
@@ -216,29 +216,29 @@ func (t *_rawType) fieldData(i int) (flags uint8, offset uintptr, name []byte, t
 
 	// tag (if present)
 	if flags&_sfHasTag != 0 {
-		tagLen := int(*p)
+		tagLen := int32(*p)
 		p = (*byte)(unsafe.Add(unsafe.Pointer(p), 1))
 		tag = unsafe.Slice((*byte)(unsafe.Pointer(p)), tagLen)
 	}
 	return
 }
 
-func (t *_rawType) fieldOffset(i int) uintptr {
+func (t *_rawType) fieldOffset(i int32) uintptr {
 	_, off, _, _ := t.fieldData(i)
 	return off
 }
 
-func (t *_rawType) fieldTag(i int) []byte {
+func (t *_rawType) fieldTag(i int32) []byte {
 	_, _, _, tag := t.fieldData(i)
 	return tag
 }
 
-func (t *_rawType) fieldExported(i int) bool {
+func (t *_rawType) fieldExported(i int32) bool {
 	flags, _, _, _ := t.fieldData(i)
 	return flags&_sfExported != 0
 }
 
-func (t *_rawType) fieldName(i int) []byte {
+func (t *_rawType) fieldName(i int32) []byte {
 	_, _, name, _ := t.fieldData(i)
 	return name
 }
@@ -342,7 +342,7 @@ func makeZero(t *_rawType) unsafe.Pointer {
 
 // makeSliceOf creates a new slice with the given element type, length, and capacity.
 // Returns a pointer to the slice header.
-func makeSliceOf(elemType *_rawType, length, capacity int) unsafe.Pointer {
+func makeSliceOf(elemType *_rawType, length, capacity int32) unsafe.Pointer {
 	elemSize := elemType.size()
 	buf := []byte{:elemSize*uintptr(capacity)}
 	var dataPtr unsafe.Pointer
@@ -381,7 +381,7 @@ func sliceAppend(slicePtr unsafe.Pointer, elemType *_rawType) unsafe.Pointer {
 }
 
 // sliceIndex returns a pointer to the i-th element of a slice.
-func sliceIndex(slicePtr unsafe.Pointer, elemType *_rawType, i int) unsafe.Pointer {
+func sliceIndex(slicePtr unsafe.Pointer, elemType *_rawType, i int32) unsafe.Pointer {
 	hdr := (*_sliceHeader)(slicePtr)
 	return unsafe.Add(hdr.data, elemType.size()*uintptr(i))
 }

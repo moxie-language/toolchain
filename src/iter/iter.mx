@@ -263,7 +263,7 @@ func Pull[V any](seq Seq[V]) (next func() (V, bool), stop func()) {
 		done       bool
 		yieldNext  bool
 		seqDone    bool // to detect Goexit
-		racer      int
+		racer      int32
 		panicValue any
 	}
 	c := newcoro(func(c *coro) {
@@ -291,7 +291,7 @@ func Pull[V any](seq Seq[V]) (next func() (V, bool), stop func()) {
 			if p := recover(); p != nil {
 				pull.panicValue = p
 			} else if !pull.seqDone {
-				pull.panicValue = goexitPanicValue
+				pull.panicValue = ensureGoexitPanicValue()
 			}
 			pull.done = true // Invalidate iterator
 			race.Release(unsafe.Pointer(&pull.racer))
@@ -317,7 +317,7 @@ func Pull[V any](seq Seq[V]) (next func() (V, bool), stop func()) {
 
 		// Propagate panics and goexits from seq.
 		if pull.panicValue != nil {
-			if pull.panicValue == goexitPanicValue {
+			if pull.panicValue == ensureGoexitPanicValue() {
 				// Propagate runtime.Goexit from seq.
 				runtime.Goexit()
 			} else {
@@ -337,7 +337,7 @@ func Pull[V any](seq Seq[V]) (next func() (V, bool), stop func()) {
 
 			// Propagate panics and goexits from seq.
 			if pull.panicValue != nil {
-				if pull.panicValue == goexitPanicValue {
+				if pull.panicValue == ensureGoexitPanicValue() {
 					// Propagate runtime.Goexit from seq.
 					runtime.Goexit()
 				} else {
@@ -379,7 +379,7 @@ func Pull2[K, V any](seq Seq2[K, V]) (next func() (K, V, bool), stop func()) {
 		done       bool
 		yieldNext  bool
 		seqDone    bool
-		racer      int
+		racer      int32
 		panicValue any
 	}
 	c := newcoro(func(c *coro) {
@@ -407,7 +407,7 @@ func Pull2[K, V any](seq Seq2[K, V]) (next func() (K, V, bool), stop func()) {
 			if p := recover(); p != nil {
 				pull.panicValue = p
 			} else if !pull.seqDone {
-				pull.panicValue = goexitPanicValue
+				pull.panicValue = ensureGoexitPanicValue()
 			}
 			pull.done = true // Invalidate iterator.
 			race.Release(unsafe.Pointer(&pull.racer))
@@ -434,7 +434,7 @@ func Pull2[K, V any](seq Seq2[K, V]) (next func() (K, V, bool), stop func()) {
 
 		// Propagate panics and goexits from seq.
 		if pull.panicValue != nil {
-			if pull.panicValue == goexitPanicValue {
+			if pull.panicValue == ensureGoexitPanicValue() {
 				// Propagate runtime.Goexit from seq.
 				runtime.Goexit()
 			} else {
@@ -454,7 +454,7 @@ func Pull2[K, V any](seq Seq2[K, V]) (next func() (K, V, bool), stop func()) {
 
 			// Propagate panics and goexits from seq.
 			if pull.panicValue != nil {
-				if pull.panicValue == goexitPanicValue {
+				if pull.panicValue == ensureGoexitPanicValue() {
 					// Propagate runtime.Goexit from seq.
 					runtime.Goexit()
 				} else {
@@ -468,5 +468,12 @@ func Pull2[K, V any](seq Seq2[K, V]) (next func() (K, V, bool), stop func()) {
 
 // goexitPanicValue is a sentinel value indicating that an iterator
 // exited via runtime.Goexit.
-var _goexitSentinel int
-var goexitPanicValue any = &_goexitSentinel
+var _goexitSentinel int32
+var goexitPanicValue any
+
+func ensureGoexitPanicValue() any {
+	if goexitPanicValue == nil {
+		goexitPanicValue = &_goexitSentinel
+	}
+	return goexitPanicValue
+}

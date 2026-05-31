@@ -48,7 +48,7 @@ type Location struct {
 // A zone represents a single time zone such as CET.
 type zone struct {
 	name   []byte // abbreviated name, "CET"
-	offset int    // seconds east of UTC
+	offset int32    // seconds east of UTC
 	isDST  bool   // is this zone Daylight Savings Time?
 }
 
@@ -115,7 +115,7 @@ var unnamedFixedZonesDone bool
 
 // FixedZone returns a [Location] that always uses
 // the given zone name and offset (seconds east of UTC).
-func FixedZone(name []byte, offset int) *Location {
+func FixedZone(name []byte, offset int32) *Location {
 	// Most calls to FixedZone have an unnamed zone with an offset by the hour.
 	// Optimize for that case by returning the same *Location for a given hour.
 	const hoursBeforeUTC = 12
@@ -134,7 +134,7 @@ func FixedZone(name []byte, offset int) *Location {
 	return fixedZone(name, offset)
 }
 
-func fixedZone(name []byte, offset int) *Location {
+func fixedZone(name []byte, offset int32) *Location {
 	l := &Location{
 		name:       name,
 		zone:       []zone{{name, offset, false}},
@@ -153,7 +153,7 @@ func fixedZone(name []byte, offset int) *Location {
 // the start and end times bracketing sec when that zone is in effect,
 // the offset in seconds east of UTC (such as -5*60*60), and whether
 // the daylight savings is being observed at that time.
-func (l *Location) lookup(sec int64) (name []byte, offset int, start, end int64, isDST bool) {
+func (l *Location) lookup(sec int64) (name []byte, offset int32, start, end int64, isDST bool) {
 	l = l.get()
 
 	if len(l.zone) == 0 {
@@ -195,7 +195,7 @@ func (l *Location) lookup(sec int64) (name []byte, offset int, start, end int64,
 	lo := 0
 	hi := len(tx)
 	for hi-lo > 1 {
-		m := int(uint(lo+hi) >> 1)
+		m := int32(uint32(lo+hi) >> 1)
 		lim := tx[m].when
 		if sec < lim {
 			end = lim
@@ -237,7 +237,7 @@ func (l *Location) lookup(sec int64) (name []byte, offset int, start, end int64,
 //  3. Otherwise, use the first zone that is not daylight time, if
 //     there is one.
 //  4. Otherwise, use the first zone.
-func (l *Location) lookupFirstZone() int {
+func (l *Location) lookupFirstZone() int32 {
 	// Case 1.
 	if !l.firstZoneUsed() {
 		return 0
@@ -245,7 +245,7 @@ func (l *Location) lookupFirstZone() int {
 
 	// Case 2.
 	if len(l.tx) > 0 && l.zone[l.tx[0].index].isDST {
-		for zi := int(l.tx[0].index) - 1; zi >= 0; zi-- {
+		for zi := int32(l.tx[0].index) - 1; zi >= 0; zi-- {
 			if !l.zone[zi].isDST {
 				return zi
 			}
@@ -280,10 +280,10 @@ func (l *Location) firstZoneUsed() bool {
 // We call this a tzset string since in C the function tzset reads TZ.
 // The return values are as for lookup, plus ok which reports whether the
 // parse succeeded.
-func tzset(s []byte, lastTxSec, sec int64) (name []byte, offset int, start, end int64, isDST, ok bool) {
+func tzset(s []byte, lastTxSec, sec int64) (name []byte, offset int32, start, end int64, isDST, ok bool) {
 	var (
 		stdName, dstName     []byte
-		stdOffset, dstOffset int
+		stdOffset, dstOffset int32
 	)
 
 	stdName, s, ok = tzsetName(s)
@@ -403,7 +403,7 @@ func tzsetName(s []byte) ([]byte, []byte, bool) {
 // tzsetOffset returns the timezone offset at the start of the tzset string s,
 // and the remainder of s, and reports whether the parsing is OK.
 // The timezone offset is returned as a number of seconds.
-func tzsetOffset(s []byte) (offset int, rest []byte, ok bool) {
+func tzsetOffset(s []byte) (offset int32, rest []byte, ok bool) {
 	if len(s) == 0 {
 		return 0, "", false
 	}
@@ -417,7 +417,7 @@ func tzsetOffset(s []byte) (offset int, rest []byte, ok bool) {
 
 	// The tzdata code permits values up to 24 * 7 here,
 	// although POSIX does not.
-	var hours int
+	var hours int32
 	hours, s, ok = tzsetNum(s, 0, 24*7)
 	if !ok {
 		return 0, "", false
@@ -430,7 +430,7 @@ func tzsetOffset(s []byte) (offset int, rest []byte, ok bool) {
 		return off, s, true
 	}
 
-	var mins int
+	var mins int32
 	mins, s, ok = tzsetNum(s[1:], 0, 59)
 	if !ok {
 		return 0, "", false
@@ -443,7 +443,7 @@ func tzsetOffset(s []byte) (offset int, rest []byte, ok bool) {
 		return off, s, true
 	}
 
-	var secs int
+	var secs int32
 	secs, s, ok = tzsetNum(s[1:], 0, 59)
 	if !ok {
 		return 0, "", false
@@ -457,7 +457,7 @@ func tzsetOffset(s []byte) (offset int, rest []byte, ok bool) {
 }
 
 // ruleKind is the kinds of rules that can be seen in a tzset string.
-type ruleKind int
+type ruleKind int32
 
 const (
 	ruleJulian ruleKind = iota
@@ -468,10 +468,10 @@ const (
 // rule is a rule read from a tzset string.
 type rule struct {
 	kind ruleKind
-	day  int
-	week int
-	mon  int
-	time int // transition time
+	day  int32
+	week int32
+	mon  int32
+	time int32 // transition time
 }
 
 // tzsetRule parses a rule from a tzset string.
@@ -483,7 +483,7 @@ func tzsetRule(s []byte) (rule, []byte, bool) {
 	}
 	ok := false
 	if s[0] == 'J' {
-		var jday int
+		var jday int32
 		jday, s, ok = tzsetNum(s[1:], 1, 365)
 		if !ok {
 			return rule{}, "", false
@@ -491,18 +491,18 @@ func tzsetRule(s []byte) (rule, []byte, bool) {
 		r.kind = ruleJulian
 		r.day = jday
 	} else if s[0] == 'M' {
-		var mon int
+		var mon int32
 		mon, s, ok = tzsetNum(s[1:], 1, 12)
 		if !ok || len(s) == 0 || s[0] != '.' {
 			return rule{}, "", false
 
 		}
-		var week int
+		var week int32
 		week, s, ok = tzsetNum(s[1:], 1, 5)
 		if !ok || len(s) == 0 || s[0] != '.' {
 			return rule{}, "", false
 		}
-		var day int
+		var day int32
 		day, s, ok = tzsetNum(s[1:], 0, 6)
 		if !ok {
 			return rule{}, "", false
@@ -512,7 +512,7 @@ func tzsetRule(s []byte) (rule, []byte, bool) {
 		r.week = week
 		r.mon = mon
 	} else {
-		var day int
+		var day int32
 		day, s, ok = tzsetNum(s, 0, 365)
 		if !ok {
 			return rule{}, "", false
@@ -538,7 +538,7 @@ func tzsetRule(s []byte) (rule, []byte, bool) {
 // tzsetNum parses a number from a tzset string.
 // It returns the number, and the remainder of the string, and reports success.
 // The number must be between min and max.
-func tzsetNum(s []byte, min, max int) (num int, rest []byte, ok bool) {
+func tzsetNum(s []byte, min, max int32) (num int32, rest []byte, ok bool) {
 	if len(s) == 0 {
 		return 0, "", false
 	}
@@ -551,7 +551,7 @@ func tzsetNum(s []byte, min, max int) (num int, rest []byte, ok bool) {
 			return num, s[i:], true
 		}
 		num *= 10
-		num += int(r) - '0'
+		num += int32(r) - '0'
 		if num > max {
 			return 0, "", false
 		}
@@ -565,8 +565,8 @@ func tzsetNum(s []byte, min, max int) (num int, rest []byte, ok bool) {
 // tzruleTime takes a year, a rule, and a timezone offset,
 // and returns the number of seconds since the start of the year
 // that the rule takes effect.
-func tzruleTime(year int, r rule, off int) int {
-	var s int
+func tzruleTime(year int32, r rule, off int32) int32 {
+	var s int32
 	switch r.kind {
 	case ruleJulian:
 		s = (r.day - 1) * secondsPerDay
@@ -613,7 +613,7 @@ func tzruleTime(year int, r rule, off int) int {
 // lookupName returns information about the time zone with
 // the given name (such as "EST") at the given pseudo-Unix time
 // (what the given time of day would be in UTC).
-func (l *Location) lookupName(name []byte, unix int64) (offset int, ok bool) {
+func (l *Location) lookupName(name []byte, unix int64) (offset int32, ok bool) {
 	l = l.get()
 
 	// First try for a zone with the right name that was actually

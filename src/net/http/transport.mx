@@ -109,7 +109,7 @@ type Transport struct {
 
 	altProto map[string]RoundTripper // key is URI scheme
 
-	connsPerHost     map[connectMethodKey]int
+	connsPerHost     map[connectMethodKey]int32
 	connsPerHostWait map[connectMethodKey]wantConnQueue // waiting getConns
 	dialsInProgress  wantConnQueue
 
@@ -205,19 +205,19 @@ type Transport struct {
 
 	// MaxIdleConns controls the maximum number of idle (keep-alive)
 	// connections across all hosts. Zero means no limit.
-	MaxIdleConns int
+	MaxIdleConns int32
 
 	// MaxIdleConnsPerHost, if non-zero, controls the maximum idle
 	// (keep-alive) connections to keep per-host. If zero,
 	// DefaultMaxIdleConnsPerHost is used.
-	MaxIdleConnsPerHost int
+	MaxIdleConnsPerHost int32
 
 	// MaxConnsPerHost optionally limits the total number of
 	// connections per host, including connections in the dialing,
 	// active, and idle states. On limit violation, dials will block.
 	//
 	// Zero means no limit.
-	MaxConnsPerHost int
+	MaxConnsPerHost int32
 
 	// IdleConnTimeout is the maximum amount of time an idle
 	// (keep-alive) connection will remain idle before closing
@@ -276,12 +276,12 @@ type Transport struct {
 	// WriteBufferSize specifies the size of the write buffer used
 	// when writing to the transport.
 	// If zero, a default (currently 4KB) is used.
-	WriteBufferSize int
+	WriteBufferSize int32
 
 	// ReadBufferSize specifies the size of the read buffer used
 	// when reading from the transport.
 	// If zero, a default (currently 4KB) is used.
-	ReadBufferSize int
+	ReadBufferSize int32
 
 	// nextProtoOnce guards initialization of TLSNextProto and
 	// h2transport (via onceSetNextProtoDefaults)
@@ -313,14 +313,14 @@ type Transport struct {
 	Protocols *Protocols
 }
 
-func (t *Transport) writeBufferSize() int {
+func (t *Transport) writeBufferSize() int32 {
 	if t.WriteBufferSize > 0 {
 		return t.WriteBufferSize
 	}
 	return 4 << 10
 }
 
-func (t *Transport) readBufferSize() int {
+func (t *Transport) readBufferSize() int32 {
 	if t.ReadBufferSize > 0 {
 		return t.ReadBufferSize
 	}
@@ -744,7 +744,7 @@ type readTrackingBody struct {
 	didClose bool
 }
 
-func (r *readTrackingBody) Read(data []byte) (int, error) {
+func (r *readTrackingBody) Read(data []byte) (int32, error) {
 	r.didRead = true
 	return r.ReadCloser.Read(data)
 }
@@ -1011,7 +1011,7 @@ func (t *Transport) putOrCloseIdleConn(pconn *persistConn) {
 	}
 }
 
-func (t *Transport) maxIdleConnsPerHost() int {
+func (t *Transport) maxIdleConnsPerHost() int32 {
 	if v := t.MaxIdleConnsPerHost; v != 0 {
 		return v
 	}
@@ -1340,12 +1340,12 @@ type wantConnQueue struct {
 	// in Okasaki's purely functional queue but without the
 	// overhead of reversing the list when swapping stages.
 	head    []*wantConn
-	headPos int
+	headPos int32
 	tail    []*wantConn
 }
 
 // len returns the number of items in the queue.
-func (q *wantConnQueue) len() int {
+func (q *wantConnQueue) len() int32 {
 	return len(q.head) - q.headPos + len(q.tail)
 }
 
@@ -1515,7 +1515,7 @@ func (t *Transport) queueForDial(w *wantConn) {
 
 	if n := t.connsPerHost[w.key]; n < t.MaxConnsPerHost {
 		if t.connsPerHost == nil {
-			t.connsPerHost = map[connectMethodKey]int{}
+			t.connsPerHost = map[connectMethodKey]int32{}
 		}
 		t.connsPerHost[w.key] = n + 1
 		t.startDialConnForLocked(w)
@@ -1892,7 +1892,7 @@ type persistConnWriter struct {
 	pc *persistConn
 }
 
-func (w persistConnWriter) Write(p []byte) (n int, err error) {
+func (w persistConnWriter) Write(p []byte) (n int32, err error) {
 	n, err = w.pc.conn.Write(p)
 	w.pc.nwrite += int64(n)
 	return
@@ -2027,7 +2027,7 @@ type persistConn struct {
 	idleAt    time.Time   // time it last become idle
 	idleTimer *time.Timer // holding an AfterFunc to close it
 
-	numExpectedResponses int
+	numExpectedResponses int32
 	closed               error // set non-nil when conn is closed, before closech is closed
 	canceledErr          error // set non-nil if conn is canceled
 	broken               bool  // an error has happened on this connection; marked broken so it's not reused.
@@ -2045,7 +2045,7 @@ func (pc *persistConn) maxHeaderResponseSize() int64 {
 	return 10 << 20 // conservative default; same as http2
 }
 
-func (pc *persistConn) Read(p []byte) (n int, err error) {
+func (pc *persistConn) Read(p []byte) (n int32, err error) {
 	if pc.readLimit <= 0 {
 		return 0, fmt.Errorf("read limit of %d bytes exhausted", pc.maxHeaderResponseSize())
 	}
@@ -2468,7 +2468,7 @@ type readWriteCloserBody struct {
 	io.ReadWriteCloser
 }
 
-func (b *readWriteCloserBody) Read(p []byte) (n int, err error) {
+func (b *readWriteCloserBody) Read(p []byte) (n int32, err error) {
 	if b.br != nil {
 		if n := b.br.Buffered(); len(p) > n {
 			p = p[:n]
@@ -2486,6 +2486,7 @@ func (b *readWriteCloserBody) CloseWrite() error {
 	if cw, ok := b.ReadWriteCloser.(interface{ CloseWrite() error }); ok {
 		return cw.CloseWrite()
 	}
+	requestInitOnce()
 	return fmt.Errorf("CloseWrite: %w", ErrNotSupported)
 }
 
@@ -2865,7 +2866,7 @@ type bodyEOFSignal struct {
 
 const errReadOnClosedResBody = errors.Const("http: read on closed response body")
 
-func (es *bodyEOFSignal) Read(p []byte) (n int, err error) {
+func (es *bodyEOFSignal) Read(p []byte) (n int32, err error) {
 	closed, rerr := es.closed, es.rerr
 	if closed {
 		return 0, errReadOnClosedResBody
@@ -2915,7 +2916,7 @@ type gzipReader struct {
 	zerr error          // any error from gzip.NewReader; sticky
 }
 
-func (gz *gzipReader) Read(p []byte) (n int, err error) {
+func (gz *gzipReader) Read(p []byte) (n int32, err error) {
 	if gz.zr == nil {
 		if gz.zerr == nil {
 			gz.zr, gz.zerr = gzip.NewReader(gz.body)
@@ -3000,6 +3001,6 @@ func (cl *connLRU) remove(pc *persistConn) {
 }
 
 // len returns the number of items in the cache.
-func (cl *connLRU) len() int {
+func (cl *connLRU) len() int32 {
 	return len(cl.m)
 }

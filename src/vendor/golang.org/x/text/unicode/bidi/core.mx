@@ -85,12 +85,12 @@ type paragraph struct {
 	// characters, the value of matchingPDI will be set to -1. For isolate
 	// initiators with no matching PDI, matchingPDI will be set to the length of
 	// the input string.
-	matchingPDI []int
+	matchingPDI []int32
 
 	// Index of matching isolate initiator for PDI characters. For other
 	// characters, and for PDIs with no matching isolate initiator, the value of
 	// matchingIsolateInitiator will be set to -1.
-	matchingIsolateInitiator []int
+	matchingIsolateInitiator []int32
 }
 
 // newParagraph initializes a paragraph. The user needs to supply a few arrays
@@ -128,7 +128,7 @@ func newParagraph(types []Class, pairTypes []bracketType, pairValues []rune, lev
 	return p, nil
 }
 
-func (p *paragraph) Len() int { return len(p.initialTypes) }
+func (p *paragraph) Len() int32 { return len(p.initialTypes) }
 
 // The algorithm. Does not include line-based processing (Rules L1, L2).
 // These are applied later in the line-based phase of the algorithm.
@@ -202,8 +202,8 @@ func (p *paragraph) run() {
 //     If there is no matching isolate initiator, or the character is not a PDI,
 //     it is set to -1.
 func (p *paragraph) determineMatchingIsolates() {
-	p.matchingPDI = []int{:p.Len()}
-	p.matchingIsolateInitiator = []int{:p.Len()}
+	p.matchingPDI = []int32{:p.Len()}
+	p.matchingIsolateInitiator = []int32{:p.Len()}
 
 	for i := range p.matchingIsolateInitiator {
 		p.matchingIsolateInitiator[i] = -1
@@ -237,7 +237,7 @@ func (p *paragraph) determineMatchingIsolates() {
 //
 // Determines the paragraph level based on rules P2, P3. This is also used
 // in rule X5c to find if an FSI should resolve to LRI or RLI.
-func (p *paragraph) determineParagraphEmbeddingLevel(start, end int) level {
+func (p *paragraph) determineParagraphEmbeddingLevel(start, end int32) level {
 	var strongType Class = unknownClass
 
 	// Rule P2.
@@ -269,7 +269,7 @@ const maxDepth = 125
 // This stack will store the embedding levels and override and isolated
 // statuses
 type directionalStatusStack struct {
-	stackCounter        int
+	stackCounter        int32
 	embeddingLevelStack [maxDepth + 1]level
 	overrideStatusStack [maxDepth + 1]Class
 	isolateStatusStack  [maxDepth + 1]bool
@@ -277,7 +277,7 @@ type directionalStatusStack struct {
 
 func (s *directionalStatusStack) empty()     { s.stackCounter = 0 }
 func (s *directionalStatusStack) pop()       { s.stackCounter-- }
-func (s *directionalStatusStack) depth() int { return s.stackCounter }
+func (s *directionalStatusStack) depth() int32 { return s.stackCounter }
 
 func (s *directionalStatusStack) push(level level, overrideStatus Class, isolateStatus bool) {
 	s.embeddingLevelStack[s.stackCounter] = level
@@ -301,7 +301,7 @@ func (s *directionalStatusStack) lastDirectionalIsolateStatus() bool {
 // Determine explicit levels using rules X1 - X8
 func (p *paragraph) determineExplicitEmbeddingLevels() {
 	var stack directionalStatusStack
-	var overflowIsolateCount, overflowEmbeddingCount, validIsolateCount int
+	var overflowIsolateCount, overflowEmbeddingCount, validIsolateCount int32
 
 	// Rule X1.
 	stack.push(p.embeddingLevel, ON, false)
@@ -417,7 +417,7 @@ func (p *paragraph) determineExplicitEmbeddingLevels() {
 type isolatingRunSequence struct {
 	p *paragraph
 
-	indexes []int // indexes to the original string
+	indexes []int32 // indexes to the original string
 
 	types          []Class // type of each character using the index
 	resolvedLevels []level // resolved levels after application of rules
@@ -425,7 +425,7 @@ type isolatingRunSequence struct {
 	sos, eos       Class
 }
 
-func (i *isolatingRunSequence) Len() int { return len(i.indexes) }
+func (i *isolatingRunSequence) Len() int32 { return len(i.indexes) }
 
 func maxLevel(a, b level) level {
 	if a > b {
@@ -436,7 +436,7 @@ func maxLevel(a, b level) level {
 
 // Rule X10, second bullet: Determine the start-of-sequence (sos) and end-of-sequence (eos) types,
 // either L or R, for each isolating run sequence.
-func (p *paragraph) isolatingRunSequence(indexes []int) *isolatingRunSequence {
+func (p *paragraph) isolatingRunSequence(indexes []int32) *isolatingRunSequence {
 	length := len(indexes)
 	types := []Class{:length}
 	for i, x := range indexes {
@@ -712,7 +712,7 @@ func (s *isolatingRunSequence) applyLevelsAndTypes() {
 // Return the limit of the run consisting only of the types in validSet
 // starting at index. This checks the value at index, and will return
 // index if that value is not in validSet.
-func (s *isolatingRunSequence) findRunLimit(index int, validSet ...Class) int {
+func (s *isolatingRunSequence) findRunLimit(index int32, validSet ...Class) int32 {
 loop:
 	for ; index < len(s.types); index++ {
 		t := s.types[index]
@@ -746,9 +746,9 @@ loop:
 // Determines the level runs. Rule X9 will be applied in determining the
 // runs, in the way that makes sure the characters that are supposed to be
 // removed are not included in the runs.
-func (p *paragraph) determineLevelRuns() [][]int {
-	run := []int{}
-	allRuns := [][]int{}
+func (p *paragraph) determineLevelRuns() [][]int32 {
+	run := []int32{}
+	allRuns := [][]int32{}
 	currentLevel := implicitLevel
 
 	for i := range p.initialTypes {
@@ -777,7 +777,7 @@ func (p *paragraph) determineIsolatingRunSequences() []*isolatingRunSequence {
 	levelRuns := p.determineLevelRuns()
 
 	// Compute the run that each character belongs to
-	runForCharacter := []int{:p.Len()}
+	runForCharacter := []int32{:p.Len()}
 	for i, run := range levelRuns {
 		for _, index := range run {
 			runForCharacter[index] = i
@@ -786,13 +786,13 @@ func (p *paragraph) determineIsolatingRunSequences() []*isolatingRunSequence {
 
 	sequences := []*isolatingRunSequence{}
 
-	var currentRunSequence []int
+	var currentRunSequence []int32
 
 	for _, run := range levelRuns {
 		first := run[0]
 		if p.initialTypes[first] != PDI || p.matchingIsolateInitiator[first] == -1 {
 			currentRunSequence = nil
-			// int run = i;
+			// int32 run = i;
 			for {
 				// Copy this level run into currentRunSequence
 				currentRunSequence = append(currentRunSequence, run...)
@@ -848,7 +848,7 @@ func (p *paragraph) assignLevelsToCharactersRemovedByX9() {
 // The linebreaks array must include at least one value. The values must be
 // in strictly increasing order (no duplicates) between 1 and the length of
 // the text, inclusive. The last value must be the length of the text.
-func (p *paragraph) getLevels(linebreaks []int) []level {
+func (p *paragraph) getLevels(linebreaks []int32) []level {
 	// Note that since the previous processing has removed all
 	// P, S, and WS values from resultTypes, the values referred to
 	// in these rules are the initial types, before any processing
@@ -914,7 +914,7 @@ func (p *paragraph) getLevels(linebreaks []int) []level {
 // The linebreaks array must include at least one value. The values must be
 // in strictly increasing order (no duplicates) between 1 and the length of
 // the text, inclusive. The last value must be the length of the text.
-func (p *paragraph) getReordering(linebreaks []int) []int {
+func (p *paragraph) getReordering(linebreaks []int32) []int32 {
 	validateLineBreaks(linebreaks, p.Len())
 
 	return computeMultilineReordering(p.getLevels(linebreaks), linebreaks)
@@ -922,8 +922,8 @@ func (p *paragraph) getReordering(linebreaks []int) []int {
 
 // Return multiline reordering array for a given level array. Reordering
 // does not occur across a line break.
-func computeMultilineReordering(levels []level, linebreaks []int) []int {
-	result := []int{:len(levels)}
+func computeMultilineReordering(levels []level, linebreaks []int32) []int32 {
+	result := []int32{:len(levels)}
 
 	start := 0
 	for _, limit := range linebreaks {
@@ -941,8 +941,8 @@ func computeMultilineReordering(levels []level, linebreaks []int) []int {
 // Return reordering array for a given level array. This reorders a single
 // line. The reordering is a visual to logical map. For example, the
 // leftmost char is string.charAt(order[0]). Rule L2.
-func computeReordering(levels []level) []int {
-	result := []int{:len(levels)}
+func computeReordering(levels []level) []int32 {
+	result := []int32{:len(levels)}
 	// initialize order
 	for i := range result {
 		result[i] = i
@@ -1032,7 +1032,7 @@ func validateParagraphEmbeddingLevel(embeddingLevel level) error {
 	return nil
 }
 
-func validateLineBreaks(linebreaks []int, textLength int) error {
+func validateLineBreaks(linebreaks []int32, textLength int32) error {
 	prev := 0
 	for i, next := range linebreaks {
 		if next <= prev {

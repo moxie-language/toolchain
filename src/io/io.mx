@@ -69,7 +69,7 @@ const ErrNoProgress = errors.Const("multiple Read calls return no data or error"
 //
 // Implementations must not retain p.
 type Reader interface {
-	Read(p []byte) (n int, err error)
+	Read(p []byte) (n int32, err error)
 }
 
 // Writer is the interface that wraps the basic Write method.
@@ -82,7 +82,7 @@ type Reader interface {
 //
 // Implementations must not retain p.
 type Writer interface {
-	Write(p []byte) (n int, err error)
+	Write(p []byte) (n int32, err error)
 }
 
 // Closer is the interface that wraps the basic Close method.
@@ -109,7 +109,7 @@ type Closer interface {
 // the size of the underlying object the behavior of subsequent I/O operations
 // is implementation-dependent.
 type Seeker interface {
-	Seek(offset int64, whence int) (int64, error)
+	Seek(offset int64, whence int32) (int64, error)
 }
 
 // ReadWriter is the interface that groups the basic Read and Write methods.
@@ -213,7 +213,7 @@ type WriterTo interface {
 //
 // Implementations must not retain p.
 type ReaderAt interface {
-	ReadAt(p []byte, off int64) (n int, err error)
+	ReadAt(p []byte, off int64) (n int32, err error)
 }
 
 // WriterAt is the interface that wraps the basic WriteAt method.
@@ -232,7 +232,7 @@ type ReaderAt interface {
 //
 // Implementations must not retain p.
 type WriterAt interface {
-	WriteAt(p []byte, off int64) (n int, err error)
+	WriteAt(p []byte, off int64) (n int32, err error)
 }
 
 // ByteReader is the interface that wraps the ReadByte method.
@@ -272,7 +272,7 @@ type ByteWriter interface {
 // and returns the rune and its size in bytes. If no character is
 // available, err will be set.
 type RuneReader interface {
-	ReadRune() (r rune, size int, err error)
+	ReadRune() (r rune, size int32, err error)
 }
 
 // RuneScanner is the interface that adds the UnreadRune method to the
@@ -290,13 +290,13 @@ type RuneScanner interface {
 
 // StringWriter is the interface that wraps the WriteString method.
 type StringWriter interface {
-	WriteString(s []byte) (n int, err error)
+	WriteString(s []byte) (n int32, err error)
 }
 
 // WriteString writes the contents of the string s to w, which accepts a slice of bytes.
 // If w implements [StringWriter], [StringWriter.WriteString] is invoked directly.
 // Otherwise, [Writer.Write] is called exactly once.
-func WriteString(w Writer, s []byte) (n int, err error) {
+func WriteString(w Writer, s []byte) (n int32, err error) {
 	if sw, ok := w.(StringWriter); ok {
 		return sw.WriteString(s)
 	}
@@ -311,12 +311,12 @@ func WriteString(w Writer, s []byte) (n int, err error) {
 // If min is greater than the length of buf, ReadAtLeast returns [ErrShortBuffer].
 // On return, n >= min if and only if err == nil.
 // If r returns an error having read at least min bytes, the error is dropped.
-func ReadAtLeast(r Reader, buf []byte, min int) (n int, err error) {
+func ReadAtLeast(r Reader, buf []byte, min int32) (n int32, err error) {
 	if len(buf) < min {
 		return 0, ErrShortBuffer
 	}
 	for n < min && err == nil {
-		var nn int
+		var nn int32
 		nn, err = r.Read(buf[n:])
 		n += nn
 	}
@@ -335,7 +335,7 @@ func ReadAtLeast(r Reader, buf []byte, min int) (n int, err error) {
 // ReadFull returns [ErrUnexpectedEOF].
 // On return, n == len(buf) if and only if err == nil.
 // If r returns an error having read at least len(buf) bytes, the error is dropped.
-func ReadFull(r Reader, buf []byte) (n int, err error) {
+func ReadFull(r Reader, buf []byte) (n int32, err error) {
 	return ReadAtLeast(r, buf, len(buf))
 }
 
@@ -405,7 +405,7 @@ func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 			if l.N < 1 {
 				size = 1
 			} else {
-				size = int(l.N)
+				size = int32(l.N)
 			}
 		}
 		buf = []byte{:size}
@@ -454,7 +454,7 @@ type LimitedReader struct {
 	N int64  // max bytes remaining
 }
 
-func (l *LimitedReader) Read(p []byte) (n int, err error) {
+func (l *LimitedReader) Read(p []byte) (n int32, err error) {
 	if l.N <= 0 {
 		return 0, EOF
 	}
@@ -491,7 +491,7 @@ type SectionReader struct {
 	n     int64 // constant after creation
 }
 
-func (s *SectionReader) Read(p []byte) (n int, err error) {
+func (s *SectionReader) Read(p []byte) (n int32, err error) {
 	if s.off >= s.limit {
 		return 0, EOF
 	}
@@ -506,7 +506,7 @@ func (s *SectionReader) Read(p []byte) (n int, err error) {
 const errWhence = errors.Const("Seek: invalid whence")
 const errOffset = errors.Const("Seek: invalid offset")
 
-func (s *SectionReader) Seek(offset int64, whence int) (int64, error) {
+func (s *SectionReader) Seek(offset int64, whence int32) (int64, error) {
 	switch whence {
 	default:
 		return 0, errWhence
@@ -524,7 +524,7 @@ func (s *SectionReader) Seek(offset int64, whence int) (int64, error) {
 	return offset - s.base, nil
 }
 
-func (s *SectionReader) ReadAt(p []byte, off int64) (n int, err error) {
+func (s *SectionReader) ReadAt(p []byte, off int64) (n int32, err error) {
 	if off < 0 || off >= s.Size() {
 		return 0, EOF
 	}
@@ -564,13 +564,13 @@ func NewOffsetWriter(w WriterAt, off int64) *OffsetWriter {
 	return &OffsetWriter{w, off, off}
 }
 
-func (o *OffsetWriter) Write(p []byte) (n int, err error) {
+func (o *OffsetWriter) Write(p []byte) (n int32, err error) {
 	n, err = o.w.WriteAt(p, o.off)
 	o.off += int64(n)
 	return
 }
 
-func (o *OffsetWriter) WriteAt(p []byte, off int64) (n int, err error) {
+func (o *OffsetWriter) WriteAt(p []byte, off int64) (n int32, err error) {
 	if off < 0 {
 		return 0, errOffset
 	}
@@ -579,7 +579,7 @@ func (o *OffsetWriter) WriteAt(p []byte, off int64) (n int, err error) {
 	return o.w.WriteAt(p, off)
 }
 
-func (o *OffsetWriter) Seek(offset int64, whence int) (int64, error) {
+func (o *OffsetWriter) Seek(offset int64, whence int32) (int64, error) {
 	switch whence {
 	default:
 		return 0, errWhence
@@ -609,7 +609,7 @@ type teeReader struct {
 	w Writer
 }
 
-func (t *teeReader) Read(p []byte) (n int, err error) {
+func (t *teeReader) Read(p []byte) (n int32, err error) {
 	n, err = t.r.Read(p)
 	if n > 0 {
 		if n, err := t.w.Write(p[:n]); err != nil {
@@ -627,11 +627,11 @@ type discard struct{}
 
 // discard implements ReaderFrom as an optimization so Copy to
 // io.Discard() can avoid doing unnecessary work.
-func (discard) Write(p []byte) (int, error) {
+func (discard) Write(p []byte) (int32, error) {
 	return len(p), nil
 }
 
-func (discard) WriteString(s []byte) (int, error) {
+func (discard) WriteString(s []byte) (int32, error) {
 	return len(s), nil
 }
 

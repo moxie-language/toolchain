@@ -41,13 +41,6 @@ func (c *Checker) checkConstDeclAt(d *ConstDecl, typExpr Expr, valExpr Expr, iot
 			cv = vals[i]
 		}
 		obj.val = cv
-		if c.pkg.path == "strconv" {
-			cvStr := "nil"
-			if cv != nil {
-				cvStr = cv.String()
-			}
-			writeStr(2, "  TC-CONST-SET name=" | name.Value | " val=" | cvStr | " pkg=" | c.pkg.path | "\n")
-		}
 		if typ != nil {
 			obj.typ = typ
 		} else if cv != nil {
@@ -95,6 +88,19 @@ func (c *Checker) evalConst(e Expr, iotaVal int64) ConstVal {
 			return k.val
 		}
 		return nil
+	case *SelectorExpr:
+		if pkgName, ok := e.X.(*Name); ok {
+			if imp := c.pkg.scope.Lookup(pkgName.Value); imp != nil {
+				if pn, ok2 := imp.(*PkgName); ok2 && pn.Imported() != nil {
+					if obj := pn.Imported().Scope().Lookup(e.Sel.Value); obj != nil {
+						if k, ok3 := obj.(*TCConst); ok3 {
+							return k.val
+						}
+					}
+				}
+			}
+		}
+		return nil
 	case *Operation:
 		return c.evalConstOp(e, iotaVal)
 	case *ParenExpr:
@@ -106,6 +112,10 @@ func (c *Checker) evalConst(e Expr, iotaVal int64) ConstVal {
 				if cs, ok := lv.(constStr); ok {
 					return constInt{int64(len(cs.s))}
 				}
+			}
+			inner := c.evalConst(e.ArgList[0], iotaVal)
+			if cs, ok := inner.(constStr); ok {
+				return constInt{int64(len(cs.s))}
 			}
 		}
 		if sel, ok := e.Fun.(*SelectorExpr); ok {
@@ -260,13 +270,13 @@ func parseFloatLocal(s string) float64 {
 		} else if i < len(s) && s[i] == '+' {
 			i++
 		}
-		var exp int
+		var exp int32
 		for ; i < len(s); i++ {
 			ch := s[i]
 			if ch < '0' || ch > '9' {
 				break
 			}
-			exp = exp*10 + int(ch-'0')
+			exp = exp*10 + int32(ch-'0')
 		}
 		mul := 1.0
 		for j := 0; j < exp; j++ {
@@ -362,12 +372,12 @@ func interpStringLocal(s string) string {
 			}
 		default:
 			if s[i] >= '0' && s[i] <= '7' {
-				v := int(s[i] - '0')
+				v := int32(s[i] - '0')
 				if i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '7' {
-					v = v*8 + int(s[i+1]-'0')
+					v = v*8 + int32(s[i+1]-'0')
 					i++
 					if i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '7' {
-						v = v*8 + int(s[i+1]-'0')
+						v = v*8 + int32(s[i+1]-'0')
 						i++
 					}
 				}
@@ -380,15 +390,15 @@ func interpStringLocal(s string) string {
 	return string(buf)
 }
 
-func hexDigit(c byte) int {
+func hexDigit(c byte) int32 {
 	if c >= '0' && c <= '9' {
-		return int(c - '0')
+		return int32(c - '0')
 	}
 	if c >= 'a' && c <= 'f' {
-		return int(c-'a') + 10
+		return int32(c-'a') + 10
 	}
 	if c >= 'A' && c <= 'F' {
-		return int(c-'A') + 10
+		return int32(c-'A') + 10
 	}
 	return 0
 }
@@ -526,12 +536,12 @@ func evalBinaryLocal(op Operator, x ConstVal, y ConstVal) ConstVal {
 		}
 	case Shl:
 		if xi, ok := x.(constInt); ok {
-			shift := uint(cvInt(y))
+			shift := uint32(cvInt(y))
 			return constInt{xi.v << shift}
 		}
 	case Shr:
 		if xi, ok := x.(constInt); ok {
-			shift := uint(cvInt(y))
+			shift := uint32(cvInt(y))
 			return constInt{xi.v >> shift}
 		}
 	case AndNot:
@@ -550,6 +560,18 @@ func evalBinaryLocal(op Operator, x ConstVal, y ConstVal) ConstVal {
 		return constBool{constLess(y, x)}
 	case Geq:
 		return constBool{constLess(y, x) || constEqual(x, y)}
+	case OrOr:
+		xb, xok := x.(constBool)
+		yb, yok := y.(constBool)
+		if xok && yok {
+			return constBool{xb.v || yb.v}
+		}
+	case AndAnd:
+		xb, xok := x.(constBool)
+		yb, yok := y.(constBool)
+		if xok && yok {
+			return constBool{xb.v && yb.v}
+		}
 	}
 	return nil
 }
@@ -621,7 +643,7 @@ func untypedTypeOfCV(v ConstVal) Type {
 	return nil
 }
 
-func cvKind(val ConstVal) int {
+func cvKind(val ConstVal) int32 {
 	switch val.(type) {
 	case constBool:
 		return 1
@@ -711,25 +733,15 @@ func runeToStr(r rune) string {
 	if r < 0 || r > 0x10FFFF {
 		r = 0xFFFD
 	}
-	var buf [4]byte
+	var out []byte
 	if r <= 0x7F {
-		buf[0] = byte(r)
-		return string(buf[:1])
+		out = append(out, byte(r))
+	} else if r <= 0x7FF {
+		out = append(out, byte(0xC0|(r>>6)), byte(0x80|(r&0x3F)))
+	} else if r <= 0xFFFF {
+		out = append(out, byte(0xE0|(r>>12)), byte(0x80|((r>>6)&0x3F)), byte(0x80|(r&0x3F)))
+	} else {
+		out = append(out, byte(0xF0|(r>>18)), byte(0x80|((r>>12)&0x3F)), byte(0x80|((r>>6)&0x3F)), byte(0x80|(r&0x3F)))
 	}
-	if r <= 0x7FF {
-		buf[0] = byte(0xC0 | (r >> 6))
-		buf[1] = byte(0x80 | (r & 0x3F))
-		return string(buf[:2])
-	}
-	if r <= 0xFFFF {
-		buf[0] = byte(0xE0 | (r >> 12))
-		buf[1] = byte(0x80 | ((r >> 6) & 0x3F))
-		buf[2] = byte(0x80 | (r & 0x3F))
-		return string(buf[:3])
-	}
-	buf[0] = byte(0xF0 | (r >> 18))
-	buf[1] = byte(0x80 | ((r >> 12) & 0x3F))
-	buf[2] = byte(0x80 | ((r >> 6) & 0x3F))
-	buf[3] = byte(0x80 | (r & 0x3F))
-	return string(buf[:4])
+	return string(out)
 }

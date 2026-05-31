@@ -39,7 +39,7 @@ type encoder struct {
 	enc     *Encoder
 	w       io.Writer
 	m       image.Image
-	cb      int
+	cb      int32
 	err     error
 	header  [8]byte
 	footer  [4]byte
@@ -47,13 +47,13 @@ type encoder struct {
 	cr      [nFilter][]uint8
 	pr      []uint8
 	zw      *zlib.Writer
-	zwLevel int
+	zwLevel int32
 	bw      *bufio.Writer
 	cc      *crc32.CRC32
 }
 
 // CompressionLevel indicates the compression level.
-type CompressionLevel int
+type CompressionLevel int32
 
 const (
 	DefaultCompression CompressionLevel = 0
@@ -87,11 +87,11 @@ func opaque(m image.Image) bool {
 }
 
 // The absolute value of a byte interpreted as a signed int8.
-func abs8(d uint8) int {
+func abs8(d uint8) int32 {
 	if d < 128 {
-		return int(d)
+		return int32(d)
 	}
-	return 256 - int(d)
+	return 256 - int32(d)
 }
 
 func (e *encoder) writeChunk(b []byte, name []byte) {
@@ -99,7 +99,7 @@ func (e *encoder) writeChunk(b []byte, name []byte) {
 		return
 	}
 	n := uint32(len(b))
-	if int(n) != len(b) {
+	if int32(n) != len(b) {
 		e.err = UnsupportedError(string(append(append(append([]byte(nil), name...), " chunk is too large: "...), strconv.Itoa(len(b))...)))
 		return
 	}
@@ -195,7 +195,7 @@ func (e *encoder) writePLTEAndTRNS(p color.Palette) {
 //
 // This method should only be called from writeIDATs (via writeImage).
 // No other code should treat an encoder as an io.Writer.
-func (e *encoder) Write(b []byte) (int, error) {
+func (e *encoder) Write(b []byte) (int32, error) {
 	e.writeChunk(b, "IDAT")
 	if e.err != nil {
 		return 0, e.err
@@ -205,7 +205,7 @@ func (e *encoder) Write(b []byte) (int, error) {
 
 // Chooses the filter to use for encoding the current row, and applies it.
 // The return value is the index of the filter and also of the row in cr that has had it applied.
-func filter(cr *[nFilter][]byte, pr []byte, bpp int) int {
+func filter(cr *[nFilter][]byte, pr []byte, bpp int32) int32 {
 	// We try all five filter types, and pick the one that minimizes the sum of absolute differences.
 	// This is the same heuristic that libpng uses, although the filters are attempted in order of
 	// estimated most likely to be minimal (ftUp, ftPaeth, ftNone, ftSub, ftAverage), rather than
@@ -283,7 +283,7 @@ func filter(cr *[nFilter][]byte, pr []byte, bpp int) int {
 		sum += abs8(cdat3[i])
 	}
 	for i := bpp; i < n; i++ {
-		cdat3[i] = cdat0[i] - uint8((int(cdat0[i-bpp])+int(pdat[i]))/2)
+		cdat3[i] = cdat0[i] - uint8((int32(cdat0[i-bpp])+int32(pdat[i]))/2)
 		sum += abs8(cdat3[i])
 		if sum >= best {
 			break
@@ -296,7 +296,7 @@ func filter(cr *[nFilter][]byte, pr []byte, bpp int) int {
 	return filter
 }
 
-func (e *encoder) writeImage(w io.Writer, m image.Image, cb int, level int) error {
+func (e *encoder) writeImage(w io.Writer, m image.Image, cb int32, level int32) error {
 	if e.zw == nil || e.zwLevel != level {
 		zw, err := zlib.NewWriterLevel(w, level)
 		if err != nil {
@@ -421,10 +421,10 @@ func (e *encoder) writeImage(w io.Writer, m image.Image, cb int, level int) erro
 			pi := m.(image.PalettedImage)
 
 			var a uint8
-			var c int
+			var c int32
 			pixelsPerByte := 8 / bitsPerPixel
 			for x := b.Min.X; x < b.Max.X; x++ {
-				a = a<<uint(bitsPerPixel) | pi.ColorIndexAt(x, y)
+				a = a<<uint32(bitsPerPixel) | pi.ColorIndexAt(x, y)
 				c++
 				if c == pixelsPerByte {
 					cr[0][i] = a
@@ -435,7 +435,7 @@ func (e *encoder) writeImage(w io.Writer, m image.Image, cb int, level int) erro
 			}
 			if c != 0 {
 				for c != pixelsPerByte {
-					a = a << uint(bitsPerPixel)
+					a = a << uint32(bitsPerPixel)
 					c++
 				}
 				cr[0][i] = a
@@ -563,7 +563,7 @@ func (e *encoder) writeIDATs() {
 
 // This function is required because we want the zero value of
 // Encoder.CompressionLevel to map to zlib.DefaultCompression.
-func levelToZlib(l CompressionLevel) int {
+func levelToZlib(l CompressionLevel) int32 {
 	switch l {
 	case DefaultCompression:
 		return zlib.DefaultCompression

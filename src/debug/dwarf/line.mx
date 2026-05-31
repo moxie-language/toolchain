@@ -28,26 +28,26 @@ type LineReader struct {
 
 	// Header information
 	version              uint16
-	addrsize             int
-	segmentSelectorSize  int
-	minInstructionLength int
-	maxOpsPerInstruction int
+	addrsize             int32
+	segmentSelectorSize  int32
+	minInstructionLength int32
+	maxOpsPerInstruction int32
 	defaultIsStmt        bool
-	lineBase             int
-	lineRange            int
-	opcodeBase           int
-	opcodeLengths        []int
+	lineBase             int32
+	lineRange            int32
+	opcodeBase           int32
+	opcodeLengths        []int32
 	directories          [][]byte
 	fileEntries          []*LineFile
 
 	programOffset Offset // section offset of line number program
 	endOffset     Offset // section offset of byte following program
 
-	initialFileEntries int // initial length of fileEntries
+	initialFileEntries int32 // initial length of fileEntries
 
 	// Current line number program state machine registers
 	state     LineEntry // public state
-	fileIndex int       // private state
+	fileIndex int32       // private state
 }
 
 // A LineEntry is a row in a DWARF line table.
@@ -64,7 +64,7 @@ type LineEntry struct {
 	// OpIndex together form an operation pointer that can
 	// reference any individual operation within the instruction
 	// stream.
-	OpIndex int
+	OpIndex int32
 
 	// File is the source file corresponding to these
 	// instructions.
@@ -74,12 +74,12 @@ type LineEntry struct {
 	// instructions. Lines are numbered beginning at 1. It may be
 	// 0 if these instructions cannot be attributed to any source
 	// line.
-	Line int
+	Line int32
 
 	// Column is the column number within the source line of these
 	// instructions. Columns are numbered beginning at 1. It may
 	// be 0 to indicate the "left edge" of the line.
-	Column int
+	Column int32
 
 	// IsStmt indicates that Address is a recommended breakpoint
 	// location, such as the beginning of a line, statement, or a
@@ -109,7 +109,7 @@ type LineEntry struct {
 	// applicable ABI specification.
 	//
 	// Added in DWARF 3.
-	ISA int
+	ISA int32
 
 	// Discriminator is an arbitrary integer indicating the block
 	// to which these instructions belong. It serves to
@@ -118,7 +118,7 @@ type LineEntry struct {
 	// block exists for a given source position, it should be 0.
 	//
 	// Added in DWARF 3.
-	Discriminator int
+	Discriminator int32
 
 	// EndSequence indicates that Address is the first byte after
 	// the end of a sequence of target machine instructions. If it
@@ -133,7 +133,7 @@ type LineEntry struct {
 type LineFile struct {
 	Name   string
 	Mtime  uint64 // Implementation defined modification time, or 0 if unknown
-	Length int    // File length, or 0 if unknown
+	Length int32    // File length, or 0 if unknown
 }
 
 // LineReader returns a new reader for the line table of compilation
@@ -203,8 +203,8 @@ func (r *LineReader) readHeader(compDir string) error {
 		return DecodeError{"line", hdrOffset, fmt.Sprintf("unknown line table version %d", r.version)}
 	}
 	if r.version >= 5 {
-		r.addrsize = int(buf.uint8())
-		r.segmentSelectorSize = int(buf.uint8())
+		r.addrsize = int32(buf.uint8())
+		r.segmentSelectorSize = int32(buf.uint8())
 	} else {
 		r.addrsize = buf.format.addrsize()
 		r.segmentSelectorSize = 0
@@ -220,16 +220,16 @@ func (r *LineReader) readHeader(compDir string) error {
 		return DecodeError{"line", hdrOffset, fmt.Sprintf("malformed line table: program offset %d exceeds end offset %d", programOffset, r.endOffset)}
 	}
 	r.programOffset = programOffset
-	r.minInstructionLength = int(buf.uint8())
+	r.minInstructionLength = int32(buf.uint8())
 	if r.version >= 4 {
 		// [DWARF4 6.2.4]
-		r.maxOpsPerInstruction = int(buf.uint8())
+		r.maxOpsPerInstruction = int32(buf.uint8())
 	} else {
 		r.maxOpsPerInstruction = 1
 	}
 	r.defaultIsStmt = buf.uint8() != 0
-	r.lineBase = int(int8(buf.uint8()))
-	r.lineRange = int(buf.uint8())
+	r.lineBase = int32(int8(buf.uint8()))
+	r.lineRange = int32(buf.uint8())
 
 	// Validate header.
 	if buf.err != nil {
@@ -243,10 +243,10 @@ func (r *LineReader) readHeader(compDir string) error {
 	}
 
 	// Read standard opcode length table. This table starts with opcode 1.
-	r.opcodeBase = int(buf.uint8())
-	r.opcodeLengths = []int{:r.opcodeBase}
+	r.opcodeBase = int32(buf.uint8())
+	r.opcodeLengths = []int32{:r.opcodeBase}
 	for i := 1; i < r.opcodeBase; i++ {
-		r.opcodeLengths[i] = int(buf.uint8())
+		r.opcodeLengths[i] = int32(buf.uint8())
 	}
 
 	// Validate opcode lengths.
@@ -291,7 +291,7 @@ func (r *LineReader) readHeader(compDir string) error {
 		}
 	} else {
 		dirFormat := r.readLNCTFormat()
-		c := buf.uint()
+		c := buf.uint32()
 		r.directories = [][]byte{:c}
 		for i := range r.directories {
 			dir, _, _, err := r.readLNCT(dirFormat, dwarf64)
@@ -301,14 +301,14 @@ func (r *LineReader) readHeader(compDir string) error {
 			r.directories[i] = dir
 		}
 		fileFormat := r.readLNCTFormat()
-		c = buf.uint()
+		c = buf.uint32()
 		r.fileEntries = []*LineFile{:c}
 		for i := range r.fileEntries {
 			name, mtime, size, err := r.readLNCT(fileFormat, dwarf64)
 			if err != nil {
 				return err
 			}
-			r.fileEntries[i] = &LineFile{name, mtime, int(size)}
+			r.fileEntries[i] = &LineFile{name, mtime, int32(size)}
 		}
 	}
 
@@ -321,7 +321,7 @@ func (r *LineReader) readHeader(compDir string) error {
 // entry in the directory name or file name description in the DWARF 5
 // line number program header.
 type lnctForm struct {
-	lnct int
+	lnct int32
 	form format
 }
 
@@ -330,8 +330,8 @@ func (r *LineReader) readLNCTFormat() []lnctForm {
 	c := r.buf.uint8()
 	ret := []lnctForm{:c}
 	for i := range ret {
-		ret[i].lnct = int(r.buf.uint())
-		ret[i].form = format(r.buf.uint())
+		ret[i].lnct = int32(r.buf.uint32())
+		ret[i].form = format(r.buf.uint32())
 	}
 	return ret
 }
@@ -352,7 +352,7 @@ func (r *LineReader) readLNCT(s []lnctForm, dwarf64 bool) (path string, mtime ui
 			} else {
 				off = uint64(r.buf.uint32())
 			}
-			if uint64(int(off)) != off {
+			if uint64(int32(off)) != off {
 				return "", 0, 0, DecodeError{"line", r.buf.off, "strp/line_strp offset out of range"}
 			}
 			var b1 buf
@@ -361,7 +361,7 @@ func (r *LineReader) readLNCT(s []lnctForm, dwarf64 bool) (path string, mtime ui
 			} else {
 				b1 = makeBuf(r.buf.dwarf, r.buf.format, "line_str", 0, r.lineStr)
 			}
-			b1.skip(int(off))
+			b1.skip(int32(off))
 			str = b1.string()
 			if b1.err != nil {
 				return "", 0, 0, DecodeError{"line", r.buf.off, b1.err.Error()}
@@ -375,7 +375,7 @@ func (r *LineReader) readLNCT(s []lnctForm, dwarf64 bool) (path string, mtime ui
 			}
 		case formStrx:
 			// .debug_line.dwo sections not yet supported.
-			r.buf.uint()
+			r.buf.uint32()
 		case formStrx1:
 			r.buf.uint8()
 		case formStrx2:
@@ -395,9 +395,9 @@ func (r *LineReader) readLNCT(s []lnctForm, dwarf64 bool) (path string, mtime ui
 		case formData16:
 			r.buf.bytes(16)
 		case formDwarfBlock:
-			r.buf.bytes(int(r.buf.uint()))
+			r.buf.bytes(int32(r.buf.uint32()))
 		case formUdata:
-			val = r.buf.uint()
+			val = r.buf.uint32()
 		}
 
 		switch lf.lnct {
@@ -436,15 +436,15 @@ func (r *LineReader) readFileEntry() (bool, error) {
 		return true, nil
 	}
 	off := r.buf.off
-	dirIndex := int(r.buf.uint())
+	dirIndex := int32(r.buf.uint32())
 	if !pathIsAbs(name) {
 		if dirIndex >= len(r.directories) {
 			return false, DecodeError{"line", off, "directory index too large"}
 		}
 		name = pathJoin(r.directories[dirIndex], name)
 	}
-	mtime := r.buf.uint()
-	length := int(r.buf.uint())
+	mtime := r.buf.uint32()
+	length := int32(r.buf.uint32())
 
 	// If this is a dynamically added path and the cursor was
 	// backed up, we may have already added this entry. Avoid
@@ -502,7 +502,7 @@ func (r *LineReader) Next(entry *LineEntry) error {
 
 // knownOpcodeLengths gives the opcode lengths (in varint arguments)
 // of known standard opcodes.
-func _knownOpcodeLengths() map[int]int { return map[int]int{
+func _knownOpcodeLengths() map[int32]int32 { return map[int32]int32{
 	lnsCopy:             0,
 	lnsAdvancePC:        1,
 	lnsAdvanceLine:      1,
@@ -522,7 +522,7 @@ func _knownOpcodeLengths() map[int]int { return map[int]int{
 // emits a row in the line table, this updates *entry and returns
 // true.
 func (r *LineReader) step(entry *LineEntry) bool {
-	opcode := int(r.buf.uint8())
+	opcode := int32(r.buf.uint8())
 
 	if opcode >= r.opcodeBase {
 		// Special opcode [DWARF2 6.2.5.1, DWARF4 6.2.5.1]
@@ -536,7 +536,7 @@ func (r *LineReader) step(entry *LineEntry) bool {
 	switch opcode {
 	case 0:
 		// Extended opcode [DWARF2 6.2.5.3]
-		length := Offset(r.buf.uint())
+		length := Offset(r.buf.uint32())
 		startOff := r.buf.off
 		opcode := r.buf.uint8()
 
@@ -572,10 +572,10 @@ func (r *LineReader) step(entry *LineEntry) bool {
 
 		case lneSetDiscriminator:
 			// [DWARF4 6.2.5.3]
-			r.state.Discriminator = int(r.buf.uint())
+			r.state.Discriminator = int32(r.buf.uint32())
 		}
 
-		r.buf.skip(int(startOff + length - r.buf.off))
+		r.buf.skip(int32(startOff + length - r.buf.off))
 
 		if opcode == lneEndSequence {
 			return true
@@ -586,17 +586,17 @@ func (r *LineReader) step(entry *LineEntry) bool {
 		goto emit
 
 	case lnsAdvancePC:
-		r.advancePC(int(r.buf.uint()))
+		r.advancePC(int32(r.buf.uint32()))
 
 	case lnsAdvanceLine:
-		r.state.Line += int(r.buf.int())
+		r.state.Line += int32(r.buf.int32())
 
 	case lnsSetFile:
-		r.fileIndex = int(r.buf.uint())
+		r.fileIndex = int32(r.buf.uint32())
 		r.updateFile()
 
 	case lnsSetColumn:
-		r.state.Column = int(r.buf.uint())
+		r.state.Column = int32(r.buf.uint32())
 
 	case lnsNegateStmt:
 		r.state.IsStmt = !r.state.IsStmt
@@ -618,13 +618,13 @@ func (r *LineReader) step(entry *LineEntry) bool {
 		r.state.EpilogueBegin = true
 
 	case lnsSetISA:
-		r.state.ISA = int(r.buf.uint())
+		r.state.ISA = int32(r.buf.uint32())
 
 	default:
 		// Unhandled standard opcode. Skip the number of
 		// arguments that the prologue says this opcode has.
 		for i := 0; i < r.opcodeLengths[opcode]; i++ {
-			r.buf.uint()
+			r.buf.uint32()
 		}
 	}
 	return false
@@ -640,7 +640,7 @@ emit:
 
 // advancePC advances "operation pointer" (the combination of Address
 // and OpIndex) in r.state by opAdvance steps.
-func (r *LineReader) advancePC(opAdvance int) {
+func (r *LineReader) advancePC(opAdvance int32) {
 	opIndex := r.state.OpIndex + opAdvance
 	r.state.Address += uint64(r.minInstructionLength * (opIndex / r.maxOpsPerInstruction))
 	r.state.OpIndex = opIndex % r.maxOpsPerInstruction
@@ -651,11 +651,11 @@ type LineReaderPos struct {
 	// off is the current offset in the DWARF line section.
 	off Offset
 	// numFileEntries is the length of fileEntries.
-	numFileEntries int
+	numFileEntries int32
 	// state and fileIndex are the statement machine state at
 	// offset off.
 	state     LineEntry
-	fileIndex int
+	fileIndex int32
 }
 
 // Tell returns the current position in the line table.

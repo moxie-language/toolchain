@@ -27,9 +27,9 @@ import (
 // A position is valid if Line > 0.
 type Position struct {
 	Filename []byte // filename, if any
-	Offset   int    // byte offset, starting at 0
-	Line     int    // line number, starting at 1
-	Column   int    // column number, starting at 1 (character count per line)
+	Offset   int32    // byte offset, starting at 0
+	Line     int32    // line number, starting at 1
+	Column   int32    // column number, starting at 1 (character count per line)
 }
 
 // IsValid reports whether the position is valid.
@@ -121,23 +121,23 @@ type Scanner struct {
 
 	// Source buffer
 	srcBuf [bufLen + 1]byte // +1 for sentinel for common case of s.next()
-	srcPos int              // reading position (srcBuf index)
-	srcEnd int              // source end (srcBuf index)
+	srcPos int32              // reading position (srcBuf index)
+	srcEnd int32              // source end (srcBuf index)
 
 	// Source position
-	srcBufOffset int // byte offset of srcBuf[0] in source
-	line         int // line count
-	column       int // character count
-	lastLineLen  int // length of last line in characters (for correct column reporting)
-	lastCharLen  int // length of last character in bytes
+	srcBufOffset int32 // byte offset of srcBuf[0] in source
+	line         int32 // line count
+	column       int32 // character count
+	lastLineLen  int32 // length of last line in characters (for correct column reporting)
+	lastCharLen  int32 // length of last character in bytes
 
 	// Token text buffer
 	// Typically, token text is stored completely in srcBuf, but in general
 	// the token text's head may be buffered in tokBuf while the token text's
 	// tail is stored in srcBuf.
 	tokBuf bytes.Buffer // token text head that is not in srcBuf anymore
-	tokPos int          // token text tail position (srcBuf index); valid if >= 0
-	tokEnd int          // token text tail end (srcBuf index)
+	tokPos int32          // token text tail position (srcBuf index); valid if >= 0
+	tokEnd int32          // token text tail end (srcBuf index)
 
 	// One character look-ahead
 	ch rune // character before current srcPos
@@ -147,12 +147,12 @@ type Scanner struct {
 	Error func(s *Scanner, msg []byte)
 
 	// ErrorCount is incremented by one for each error encountered.
-	ErrorCount int
+	ErrorCount int32
 
 	// The Mode field controls which tokens are recognized. For instance,
 	// to recognize Ints, set the ScanInts bit in Mode. The field may be
 	// changed at any time.
-	Mode uint
+	Mode uint32
 
 	// The Whitespace field controls which characters are recognized
 	// as white space. To recognize a character ch <= ' ' as white space,
@@ -165,7 +165,7 @@ type Scanner struct {
 	// must not intersect with the set of white space characters.
 	// If no IsIdentRune function is set, regular Go identifiers are
 	// accepted instead. The field may be changed at any time.
-	IsIdentRune func(ch rune, i int) bool
+	IsIdentRune func(ch rune, i int32) bool
 
 	// Start position of most recently scanned token; set by Scan.
 	// Calling Init or Next invalidates the position (Line == 0).
@@ -345,7 +345,7 @@ func (s *Scanner) errorf(format []byte, args ...any) {
 	s.error(fmt.Sprintf(format, args...))
 }
 
-func (s *Scanner) isIdentRune(ch rune, i int) bool {
+func (s *Scanner) isIdentRune(ch rune, i int32) bool {
 	if s.IsIdentRune != nil {
 		return ch != EOF && s.IsIdentRune(ch, i)
 	}
@@ -372,7 +372,7 @@ func isHex(ch rune) bool     { return '0' <= ch && ch <= '9' || 'a' <= lower(ch)
 // digits returns the first rune that is not part of the sequence
 // anymore, and a bitset describing whether the sequence contained
 // digits (bit 0 is set), or separators '_' (bit 1 is set).
-func (s *Scanner) digits(ch0 rune, base int, invalid *rune) (ch rune, digsep int) {
+func (s *Scanner) digits(ch0 rune, base int32, invalid *rune) (ch rune, digsep int32) {
 	ch = ch0
 	if base <= 10 {
 		max := rune('0' + base)
@@ -407,7 +407,7 @@ func (s *Scanner) scanNumber(ch rune, seenDot bool) (rune, rune) {
 
 	// integer part
 	var tok rune
-	var ds int
+	var ds int32
 	if !seenDot {
 		tok = Int
 		if ch == '0' {
@@ -499,7 +499,7 @@ func litname(prefix rune) []byte {
 }
 
 // invalidSep returns the index of the first invalid separator in x, or -1.
-func invalidSep(x []byte) int {
+func invalidSep(x []byte) int32 {
 	x1 := ' ' // prefix char, we only care if it's 'x'
 	d := '.'  // digit, one of '_', '0' (a digit), or '.' (anything else)
 	i := 0
@@ -538,17 +538,17 @@ func invalidSep(x []byte) int {
 	return -1
 }
 
-func digitVal(ch rune) int {
+func digitVal(ch rune) int32 {
 	switch {
 	case '0' <= ch && ch <= '9':
-		return int(ch - '0')
+		return int32(ch - '0')
 	case 'a' <= lower(ch) && lower(ch) <= 'f':
-		return int(lower(ch) - 'a' + 10)
+		return int32(lower(ch) - 'a' + 10)
 	}
 	return 16 // larger than any legal digit val
 }
 
-func (s *Scanner) scanDigits(ch rune, base, n int) rune {
+func (s *Scanner) scanDigits(ch rune, base, n int32) rune {
 	for n > 0 && digitVal(ch) < base {
 		ch = s.next()
 		n--
@@ -579,7 +579,7 @@ func (s *Scanner) scanEscape(quote rune) rune {
 	return ch
 }
 
-func (s *Scanner) scanString(quote rune) (n int) {
+func (s *Scanner) scanString(quote rune) (n int32) {
 	ch := s.next() // read character after quote
 	for ch != quote {
 		if ch == '\n' || ch < 0 {
@@ -655,7 +655,7 @@ func (s *Scanner) Scan() rune {
 
 redo:
 	// skip white space
-	for s.Whitespace&(1<<uint(ch)) != 0 {
+	for s.Whitespace&(1<<uint32(ch)) != 0 {
 		ch = s.next()
 	}
 

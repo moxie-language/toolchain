@@ -10,8 +10,6 @@ import (
 	"crypto/x509/pkix"
 	"errors"
 	"fmt"
-	"iter"
-	"maps"
 	"net"
 	"net/netip"
 	"net/url"
@@ -20,7 +18,7 @@ import (
 	"unicode/utf8"
 )
 
-type InvalidReason int
+type InvalidReason int32
 
 const (
 	// NotAuthorizedToSign results when a certificate is signed by another
@@ -209,7 +207,7 @@ type VerifyOptions struct {
 	// zero, a sensible default is used. This limit prevents pathological
 	// certificates from consuming excessive amounts of CPU time when
 	// validating. It does not apply to the platform verifier.
-	MaxConstraintComparisions int
+	MaxConstraintComparisions int32
 
 	// CertificatePolicies specifies which certificate policy OIDs are
 	// acceptable during policy validation. An empty CertificatePolices
@@ -548,7 +546,7 @@ func matchDomainConstraint(domain, constraint string, reversedDomainsCache map[s
 // of comparisons is tracked in the given count and should not exceed the given
 // limit.
 // constraintSliceLen returns the length of a constraint slice ([]string or []*net.IPNet).
-func constraintSliceLen(v any) int {
+func constraintSliceLen(v any) int32 {
 	switch s := v.(type) {
 	case []string:
 		return len(s)
@@ -559,7 +557,7 @@ func constraintSliceLen(v any) int {
 }
 
 // constraintSliceAt returns the i-th element of a constraint slice.
-func constraintSliceAt(v any, i int) any {
+func constraintSliceAt(v any, i int32) any {
 	switch s := v.(type) {
 	case []string:
 		return s[i]
@@ -569,8 +567,8 @@ func constraintSliceAt(v any, i int) any {
 	return nil
 }
 
-func (c *Certificate) checkNameConstraints(count *int,
-	maxConstraintComparisons int,
+func (c *Certificate) checkNameConstraints(count *int32,
+	maxConstraintComparisons int32,
 	nameType string,
 	name string,
 	parsedName any,
@@ -626,7 +624,7 @@ func (c *Certificate) checkNameConstraints(count *int,
 
 // isValid performs validity checks on c given that it is a candidate to append
 // to the chain in currentChain.
-func (c *Certificate) isValid(certType int, currentChain []*Certificate, opts *VerifyOptions) error {
+func (c *Certificate) isValid(certType int32, currentChain []*Certificate, opts *VerifyOptions) error {
 	if len(c.UnhandledCriticalExtensions) > 0 {
 		return UnhandledCriticalExtension{}
 	}
@@ -690,7 +688,7 @@ func (c *Certificate) isValid(certType int, currentChain []*Certificate, opts *V
 			}
 		}
 		for _, sanCert := range toCheck {
-			err := forEachSAN(sanCert.getSANExtension(), func(tag int, data []byte) error {
+			err := forEachSAN(sanCert.getSANExtension(), func(tag int32, data []byte) error {
 				switch tag {
 				case nameTypeEmail:
 					name := string(data)
@@ -869,7 +867,7 @@ func (c *Certificate) Verify(opts VerifyOptions) (chains [][]*Certificate, err e
 
 	chains = [][]*Certificate{:0:len(candidateChains)}
 
-	var invalidPoliciesChains int
+	var invalidPoliciesChains int32
 	for _, candidate := range candidateChains {
 		if !policiesValid(candidate, opts) {
 			invalidPoliciesChains++
@@ -897,7 +895,7 @@ func (c *Certificate) Verify(opts VerifyOptions) (chains [][]*Certificate, err e
 	candidateChains = chains
 	chains = chains[:0]
 
-	var incompatibleKeyUsageChains int
+	var incompatibleKeyUsageChains int32
 	for _, candidate := range candidateChains {
 		if !checkChainForKeyUsage(candidate, opts.KeyUsages) {
 			incompatibleKeyUsageChains++
@@ -984,19 +982,19 @@ func alreadyInChain(candidate *Certificate, chain []*Certificate) bool {
 // for failed checks due to different intermediates having the same Subject.
 const maxChainSignatureChecks = 100
 
-func (c *Certificate) buildChains(currentChain []*Certificate, sigChecks *int, opts *VerifyOptions) (chains [][]*Certificate, err error) {
+func (c *Certificate) buildChains(currentChain []*Certificate, sigChecks *int32, opts *VerifyOptions) (chains [][]*Certificate, err error) {
 	var (
 		hintErr  error
 		hintCert *Certificate
 	)
 
-	considerCandidate := func(certType int, candidate potentialParent) {
+	considerCandidate := func(certType int32, candidate potentialParent) {
 		if candidate.cert.PublicKey == nil || alreadyInChain(candidate.cert, currentChain) {
 			return
 		}
 
 		if sigChecks == nil {
-			var _sigChecks int
+			var _sigChecks int32
 			sigChecks = &_sigChecks
 		}
 		*sigChecks++
@@ -1318,7 +1316,7 @@ type policyGraph struct {
 	strata []map[string]*policyGraphNode
 	// map of OID -> nodes at strata[depth-1] with OID in their expectedPolicySet
 	parentIndex map[string][]*policyGraphNode
-	depth       int
+	depth       int32
 }
 
 func anyPolicyOID() OID { return mustNewOIDFromInts([]uint64{2, 5, 29, 32, 0}) }
@@ -1354,11 +1352,15 @@ func (pg *policyGraph) parentWithAnyPolicy() *policyGraphNode {
 	return pg.strata[pg.depth-1][string(anyPolicyOID().der)]
 }
 
-func (pg *policyGraph) parents() iter.Seq[*policyGraphNode] {
+func (pg *policyGraph) parents() []*policyGraphNode {
 	if pg.depth == 0 {
 		return nil
 	}
-	return maps.Values(pg.strata[pg.depth-1])
+	var out []*policyGraphNode
+	for _, v := range pg.strata[pg.depth-1] {
+		out = append(out, v)
+	}
+	return out
 }
 
 func (pg *policyGraph) leaves() map[string]*policyGraphNode {
@@ -1447,7 +1449,7 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 	n := len(chain) - 1
 
 	pg := newPolicyGraph()
-	var inhibitAnyPolicy, explicitPolicy, policyMapping int
+	var inhibitAnyPolicy, explicitPolicy, policyMapping int32
 	if !opts.inhibitAnyPolicy {
 		inhibitAnyPolicy = n + 1
 	}
@@ -1517,7 +1519,7 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 			if policies[string(anyPolicyOID().der)] && (inhibitAnyPolicy > 0 || (n-i < n && isSelfSigned)) {
 				missing := map[string][]*policyGraphNode{}
 				leaves := pg.leaves()
-				for p := range pg.parents() {
+				for _, p := range pg.parents() {
 					for _, expected := range p.expectedPolicySet {
 						if leaves[string(expected.der)] == nil {
 							missing[string(expected.der)] = append(missing[string(expected.der)], p)
@@ -1625,7 +1627,10 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 		authorityConstrainedPolicySet[string(n.validPolicy.der)] = true
 	}
 	// 6.1.5 (g) (5) -- as updated by RFC 9618
-	userConstrainedPolicySet := maps.Clone(authorityConstrainedPolicySet)
+	userConstrainedPolicySet := map[string]bool{}
+	for k, v := range authorityConstrainedPolicySet {
+		userConstrainedPolicySet[k] = v
+	}
 	// 6.1.5 (g) (6) -- as updated by RFC 9618
 	if len(initialUserPolicySet) != 1 || !initialUserPolicySet[string(anyPolicyOID().der)] {
 		// 6.1.5 (g) (6) (i) -- as updated by RFC 9618

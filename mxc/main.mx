@@ -575,13 +575,11 @@ func fileContainsPart(base string, part string) bool {
 }
 
 func shouldSkipFile(name string) bool {
-	if hasSuffix(name, "_test.go") || hasSuffix(name, "_test.mx") {
+	if hasSuffix(name, "_test.mx") {
 		return true
 	}
 	base := name
-	if hasSuffix(base, ".go") {
-		base = base[:len(base)-3]
-	} else if hasSuffix(base, ".mx") {
+	if hasSuffix(base, ".mx") {
 		base = base[:len(base)-3]
 	}
 	if globalTargetArch == "wasm" {
@@ -601,16 +599,44 @@ func shouldSkipFile(name string) bool {
 				return true
 			}
 		}
-		for _, s := range []string{"_wasm"} {
-			if hasSuffix(base, s) {
-				return true
-			}
+		if hasSuffix(base, "_wasm") {
+			return true
 		}
 	}
 	exact := []string{"pipe", "multi", "replace", "search",
 		"ioutil", "quic"}
 	for _, s := range exact {
 		if base == s {
+			return true
+		}
+	}
+	return false
+}
+
+func constraintRequiresForbidden(line string, forbidden []string) bool {
+	if len(line) == 0 {
+		return false
+	}
+	if line[0] == '!' {
+		return false
+	}
+	topOR := false
+	depth := int32(0)
+	for i := int32(0); i < int32(len(line)); i++ {
+		if line[i] == '(' {
+			depth++
+		} else if line[i] == ')' {
+			depth--
+		} else if depth == 0 && i+2 <= int32(len(line)) && string(line[i:i+2]) == "||" {
+			topOR = true
+			break
+		}
+	}
+	if topOR {
+		return false
+	}
+	for _, f := range forbidden {
+		if constraintContainsPositive(line, f) {
 			return true
 		}
 	}
@@ -671,6 +697,9 @@ func hasBuildConstraint(data []byte, forbidden []string) bool {
 				buf = append(buf, data[j])
 			}
 			line := string(buf)
+			if constraintRequiresForbidden(line, forbidden) {
+				return true
+			}
 			if globalTargetArch == "wasm" {
 				if constraintContainsPositive(line, "moxie.wasm") ||
 					constraintContainsPositive(line, "wasm") ||
@@ -695,7 +724,7 @@ func hasBuildConstraint(data []byte, forbidden []string) bool {
 				}
 			}
 			for _, f := range forbidden {
-				if line == f || hasPrefix(line, f | " ") || hasPrefix(line, f | "\t") {
+				if line == f || hasPrefix(line, f | " ") || hasPrefix(line, f | "\t") || hasPrefix(line, f | "(") {
 					return true
 				}
 			}
@@ -743,6 +772,31 @@ var globalTargetOS string
 var globalTargetArch string
 var globalReplaces map[string]string
 
+func parseReplaceLine(line string, baseDir string) (string, string, bool) {
+	arrow := int32(-1)
+	for k := int32(0); k < int32(len(line))-1; k++ {
+		if line[k] == '=' && line[k+1] == '>' {
+			arrow = k
+			break
+		}
+	}
+	if arrow < 0 {
+		return "", "", false
+	}
+	from := trimSpace(line[:arrow])
+	to := trimSpace(line[arrow+2:])
+	for fi := int32(0); fi < int32(len(from)); fi++ {
+		if from[fi] == ' ' {
+			from = from[:fi]
+			break
+		}
+	}
+	if hasPrefix(to, "./") || hasPrefix(to, "../") || hasPrefix(to, "/") {
+		to = cleanPath(joinPath(baseDir, to))
+	}
+	return from, to, true
+}
+
 func findModuleRoot(startDir string) (string, string) {
 	dir := startDir
 	for {
@@ -751,33 +805,31 @@ func findModuleRoot(startDir string) (string, string) {
 			modName := ""
 			globalReplaces = map[string]string{}
 			lines := splitLines(string(data))
+			inReplace := false
 			for _, line := range lines {
 				line = trimSpace(line)
 				if hasPrefix(line, "module ") {
 					modName = trimSpace(line[7:])
+					continue
+				}
+				if line == "replace (" {
+					inReplace = true
+					continue
+				}
+				if inReplace {
+					if line == ")" {
+						inReplace = false
+						continue
+					}
+					from, to, ok2 := parseReplaceLine(line, dir)
+					if ok2 {
+						globalReplaces[from] = to
+					}
+					continue
 				}
 				if hasPrefix(line, "replace ") {
-					parts := line[8:]
-					arrow := int32(-1)
-					for k := int32(0); k < int32(len(parts))-1; k++ {
-						if parts[k] == '=' && parts[k+1] == '>' {
-							arrow = k
-							break
-						}
-					}
-					if arrow >= 0 {
-						from := trimSpace(parts[:arrow])
-						to := trimSpace(parts[arrow+2:])
-						// strip version from "from" if present
-						for fi := int32(0); fi < int32(len(from)); fi++ {
-							if from[fi] == ' ' {
-								from = from[:fi]
-								break
-							}
-						}
-						if hasPrefix(to, "./") || hasPrefix(to, "../") || hasPrefix(to, "/") {
-							to = cleanPath(joinPath(dir, to))
-						}
+					from, to, ok2 := parseReplaceLine(line[8:], dir)
+					if ok2 {
 						globalReplaces[from] = to
 					}
 				}
@@ -803,37 +855,34 @@ func mergeModReplaces(dir string) {
 	if globalReplaces == nil {
 		globalReplaces = map[string]string{}
 	}
+	inReplace := false
 	for _, line := range splitLines(string(data)) {
 		line = trimSpace(line)
-		if !hasPrefix(line, "replace ") {
+		if line == "replace (" {
+			inReplace = true
 			continue
 		}
-		rest := line[8:]
-		arrow := int32(-1)
-		for k := int32(0); k < int32(len(rest))-1; k++ {
-			if rest[k] == '=' && rest[k+1] == '>' {
-				arrow = k
-				break
+		if inReplace {
+			if line == ")" {
+				inReplace = false
+				continue
+			}
+			from, to, ok2 := parseReplaceLine(line, dir)
+			if ok2 {
+				if _, exists := globalReplaces[from]; !exists {
+					globalReplaces[from] = to
+				}
+			}
+			continue
+		}
+		if hasPrefix(line, "replace ") {
+			from, to, ok2 := parseReplaceLine(line[8:], dir)
+			if ok2 {
+				if _, exists := globalReplaces[from]; !exists {
+					globalReplaces[from] = to
+				}
 			}
 		}
-		if arrow < 0 {
-			continue
-		}
-		from := trimSpace(rest[:arrow])
-		to := trimSpace(rest[arrow+2:])
-		for fi := int32(0); fi < int32(len(from)); fi++ {
-			if from[fi] == ' ' {
-				from = from[:fi]
-				break
-			}
-		}
-		if _, exists := globalReplaces[from]; exists {
-			continue
-		}
-		if hasPrefix(to, "./") || hasPrefix(to, "../") || hasPrefix(to, "/") {
-			to = cleanPath(joinPath(dir, to))
-		}
-		globalReplaces[from] = to
 	}
 }
 
@@ -865,8 +914,7 @@ func discoverPkg(pkgPath, root string) *pkgInfo {
 	if dir == "" {
 		candidate := joinPath(getMoxiePath(), pkgPath)
 		mxF := listFiles(candidate, ".mx")
-		goF := listFiles(candidate, ".go")
-		if len(mxF) > 0 || len(goF) > 0 {
+		if len(mxF) > 0 {
 			dir = candidate
 		}
 	}
@@ -875,13 +923,11 @@ func discoverPkg(pkgPath, root string) *pkgInfo {
 	}
 	if dir == "" {
 		dir = joinPath(root, joinPath("src", pkgPath))
-		goFiles := listFiles(dir, ".go")
 		mxFiles := listFiles(dir, ".mx")
-		if len(goFiles) == 0 && len(mxFiles) == 0 {
+		if len(mxFiles) == 0 {
 			dir = joinPath(root, joinPath("src/vendor", pkgPath))
 		}
 	}
-	goFiles := listFiles(dir, ".go")
 	mxFiles := listFiles(dir, ".mx")
 	cFiles := listFiles(dir, ".c")
 	allSFiles := listFiles(dir, ".s")
@@ -891,7 +937,7 @@ func discoverPkg(pkgPath, root string) *pkgInfo {
 			sFiles = append(sFiles, sf)
 		}
 	}
-	allMx := append(mxFiles, goFiles...)
+	allMx := mxFiles
 	var forbidden []string
 	if globalTargetArch == "wasm" {
 		forbidden = []string{"linux", "unix", "darwin", "amd64", "arm64",
@@ -902,7 +948,7 @@ func discoverPkg(pkgPath, root string) *pkgInfo {
 	} else {
 		forbidden = []string{"wasm", "js", "ignore", "compiler_bootstrap",
 			"scheduler.tasks", "scheduler.cores", "scheduler.asyncify",
-			"faketime", "baremetal", "nintendoswitch",
+			"faketime", "baremetal", "nintendoswitch", "wasm_unknown",
 			"boringcrypto", "cgo"}
 	}
 	var files []string
@@ -1084,10 +1130,29 @@ func parseModRequires(dir string) (string, []modRequire, map[string]string) {
 	modName := ""
 	var reqs []modRequire
 	repls := map[string]string{}
+	inRequire := false
+	inReplace := false
 	for _, line := range splitLines(string(data)) {
 		line = trimSpace(line)
 		if hasPrefix(line, "module ") {
 			modName = trimSpace(line[7:])
+			continue
+		}
+		if line == "require (" {
+			inRequire = true
+			continue
+		}
+		if inRequire {
+			if line == ")" {
+				inRequire = false
+				continue
+			}
+			parts := splitBySpace(line)
+			if len(parts) >= 2 {
+				reqs = append(reqs, modRequire{path: parts[0], version: parts[1]})
+			} else if len(parts) == 1 {
+				reqs = append(reqs, modRequire{path: parts[0], version: ""})
+			}
 			continue
 		}
 		if hasPrefix(line, "require ") {
@@ -1099,27 +1164,24 @@ func parseModRequires(dir string) (string, []modRequire, map[string]string) {
 			}
 			continue
 		}
-		if hasPrefix(line, "replace ") {
-			rest := line[8:]
-			arrow := int32(-1)
-			for k := int32(0); k < int32(len(rest))-1; k++ {
-				if rest[k] == '=' && rest[k+1] == '>' {
-					arrow = k
-					break
-				}
+		if line == "replace (" {
+			inReplace = true
+			continue
+		}
+		if inReplace {
+			if line == ")" {
+				inReplace = false
+				continue
 			}
-			if arrow >= 0 {
-				from := trimSpace(rest[:arrow])
-				to := trimSpace(rest[arrow+2:])
-				for fi := int32(0); fi < int32(len(from)); fi++ {
-					if from[fi] == ' ' {
-						from = from[:fi]
-						break
-					}
-				}
-				if hasPrefix(to, "./") || hasPrefix(to, "../") || hasPrefix(to, "/") {
-					to = cleanPath(joinPath(dir, to))
-				}
+			from, to, ok2 := parseReplaceLine(line, dir)
+			if ok2 {
+				repls[from] = to
+			}
+			continue
+		}
+		if hasPrefix(line, "replace ") {
+			from, to, ok2 := parseReplaceLine(line[8:], dir)
+			if ok2 {
 				repls[from] = to
 			}
 		}
@@ -1317,6 +1379,7 @@ func main() {
 	}
 
 	tmpdir := "/tmp/mxc-build"
+	os.RemoveAll(tmpdir)
 	mkdirAll(tmpdir, 0755)
 
 	cacheBase := pkgCacheDir()

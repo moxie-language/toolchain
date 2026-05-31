@@ -50,7 +50,7 @@ type Frame struct {
 	Fn uint64
 	// string ID of the file name
 	File uint64
-	Line int
+	Line int32
 }
 
 const (
@@ -81,18 +81,18 @@ type Trace struct {
 // batch is a sequence of events emitted by a P. Events within a single batch
 // are sorted by time.
 type batchOffset struct {
-	offset    int
-	numEvents int
+	offset    int32
+	numEvents int32
 }
 
 type parser struct {
 	ver  version.Version
 	data []byte
-	off  int
+	off  int32
 
 	strings              map[uint64][]byte
 	inlineStrings        [][]byte
-	inlineStringsMapping map[string]int
+	inlineStringsMapping map[string]int32
 	// map from Ps to their batch offsets
 	batchOffsets map[int32][]batchOffset
 	stacks       map[uint32][]uint64
@@ -117,7 +117,7 @@ func (p *parser) discard(n uint64) bool {
 	if n > math.MaxInt {
 		return false
 	}
-	if noff := p.off + int(n); noff < p.off || noff > len(p.data) {
+	if noff := p.off + int32(n); noff < p.off || noff > len(p.data) {
 		return false
 	} else {
 		p.off = noff
@@ -202,7 +202,7 @@ func (p *parser) parse() (Trace, error) {
 	p.lastGs = map[int32]uint64{}
 	p.stacks = map[uint32][]uint64{}
 	p.pcs = map[uint64]Frame{}
-	p.inlineStringsMapping = map[string]int{}
+	p.inlineStringsMapping = map[string]int32{}
 
 	if err := p.collectBatchesAndCPUSamples(); err != nil {
 		return Trace{}, err
@@ -258,7 +258,7 @@ type rawEvent struct {
 
 	// if typ == EvBatch, these fields describe the batch.
 	batchPid    int32
-	batchOffset int
+	batchOffset int32
 }
 
 type proc struct {
@@ -279,9 +279,9 @@ type Events struct {
 	// at a time. This avoids the O(n) cost of slice growth in append, and
 	// additionally allows consumers to drop references to parts of the data,
 	// freeing memory piecewise.
-	n       int
+	n       int32
 	buckets []*[eventsBucketSize]Event
-	off     int
+	off     int32
 }
 
 // grow grows the slice by one and returns a pointer to the new element, without
@@ -303,27 +303,27 @@ func (l *Events) append(v Event) *Event {
 	return ptr
 }
 
-func (l *Events) Ptr(i int) *Event {
+func (l *Events) Ptr(i int32) *Event {
 	a, b := l.index(i + l.off)
 	return &l.buckets[a][b]
 }
 
-func (l *Events) index(i int) (int, int) {
-	// Doing the division on uint instead of int compiles this function to a
+func (l *Events) index(i int32) (int32, int32) {
+	// Doing the division on uint32 instead of int32 compiles this function to a
 	// shift and an AND (for power of 2 bucket sizes), versus a whole bunch of
-	// instructions for int.
-	return int(uint(i) / eventsBucketSize), int(uint(i) % eventsBucketSize)
+	// instructions for int32.
+	return int32(uint32(i) / eventsBucketSize), int32(uint32(i) % eventsBucketSize)
 }
 
-func (l *Events) Len() int {
+func (l *Events) Len() int32 {
 	return l.n - l.off
 }
 
-func (l *Events) Less(i, j int) bool {
+func (l *Events) Less(i, j int32) bool {
 	return l.Ptr(i).Ts < l.Ptr(j).Ts
 }
 
-func (l *Events) Swap(i, j int) {
+func (l *Events) Swap(i, j int32) {
 	*l.Ptr(i), *l.Ptr(j) = *l.Ptr(j), *l.Ptr(i)
 }
 
@@ -377,7 +377,7 @@ func (p *parser) parseEventBatches() (Events, error) {
 	// with original timestamps corresponding to when ReadTrace pulled the data
 	// off of the profBuf queue. Re-sort them by the timestamp we captured
 	// inside the signal handler.
-	slices.SortFunc(p.cpuSamples, func(a, b Event) int {
+	slices.SortFunc(p.cpuSamples, func(a, b Event) int32 {
 		return cmp.Compare(a.Ts, b.Ts)
 	})
 
@@ -616,7 +616,7 @@ func (p *parser) readByte() (byte, bool) {
 	}
 }
 
-func (p *parser) readFull(n int) ([]byte, error) {
+func (p *parser) readFull(n int32) ([]byte, error) {
 	if p.off >= len(p.data) || p.off < 0 || p.off+n > len(p.data) {
 		// p.off < 0 is impossible but makes BCE happy.
 		//
@@ -631,7 +631,7 @@ func (p *parser) readFull(n int) ([]byte, error) {
 
 // readRawEvent reads a raw event into ev. The slices in ev are only valid until
 // the next call to readRawEvent, even when storing to a different location.
-func (p *parser) readRawEvent(flags uint, ev *rawEvent) error {
+func (p *parser) readRawEvent(flags uint32, ev *rawEvent) error {
 	// The number of arguments is encoded using two bits and can thus only
 	// represent the values 0–3. The value 3 (on the wire) indicates that
 	// arguments are prefixed by their byte length, to encode >=3 arguments.
@@ -698,7 +698,7 @@ func (p *parser) readRawEvent(flags uint, ev *rawEvent) error {
 			if ln > 1e6 {
 				return fmt.Errorf("string has too large length %d", ln)
 			}
-			buf, err := p.readFull(int(ln))
+			buf, err := p.readFull(int32(ln))
 			if err != nil {
 				return fmt.Errorf("failed to read trace: %w", err)
 			}
@@ -747,7 +747,7 @@ func (p *parser) readRawEvent(flags uint, ev *rawEvent) error {
 		*ev = rawEvent{typ: typ, args: p.args[:0]}
 		if narg <= inlineArgs {
 			if flags&skipArgs == 0 {
-				for i := 0; i < int(narg); i++ {
+				for i := 0; i < int32(narg); i++ {
 					v, err := p.readVal()
 					if err != nil {
 						return fmt.Errorf("failed to read event %d argument: %w", typ, err)
@@ -755,7 +755,7 @@ func (p *parser) readRawEvent(flags uint, ev *rawEvent) error {
 					ev.args = append(ev.args, v)
 				}
 			} else {
-				for i := 0; i < int(narg); i++ {
+				for i := 0; i < int32(narg); i++ {
 					if _, err := p.readVal(); err != nil {
 						return fmt.Errorf("failed to read event %d argument: %w", typ, errMalformedVarint)
 					}
@@ -776,7 +776,7 @@ func (p *parser) readRawEvent(flags uint, ev *rawEvent) error {
 			}
 
 			if flags&skipArgs == 0 || typ == EvCPUSample {
-				buf, err := p.readFull(int(v))
+				buf, err := p.readFull(int32(v))
 				if err != nil {
 					return fmt.Errorf("failed to read trace: %w", err)
 				}
@@ -883,7 +883,7 @@ func (p *parser) readStr() (s []byte, err error) {
 	if sz > 1e6 {
 		return "", fmt.Errorf("string is too large (len=%d)", sz)
 	}
-	buf, err := p.readFull(int(sz))
+	buf, err := p.readFull(int32(sz))
 	if err != nil {
 		return "", fmt.Errorf("failed to read trace: %w", err)
 	}
@@ -938,7 +938,7 @@ func (p *parser) parseEvent(raw *rawEvent, ev *Event) error {
 		id := uint32(raw.args[0])
 		if id != 0 && size > 0 {
 			stk := p.allocateStack(size)
-			for i := 0; i < int(size); i++ {
+			for i := 0; i < int32(size); i++ {
 				pc := raw.args[2+i*4+0]
 				fn := raw.args[2+i*4+1]
 				file := raw.args[2+i*4+2]
@@ -946,7 +946,7 @@ func (p *parser) parseEvent(raw *rawEvent, ev *Event) error {
 				stk[i] = pc
 
 				if _, ok := p.pcs[pc]; !ok {
-					p.pcs[pc] = Frame{PC: pc, Fn: fn, File: file, Line: int(line)}
+					p.pcs[pc] = Frame{PC: pc, Fn: fn, File: file, Line: int32(line)}
 				}
 			}
 			p.stacks[id] = stk
@@ -956,7 +956,7 @@ func (p *parser) parseEvent(raw *rawEvent, ev *Event) error {
 		// belong to the batch.
 	default:
 		*ev = Event{Type: raw.typ, P: p.lastP, G: p.lastG}
-		var argOffset int
+		var argOffset int32
 		ev.Ts = p.lastTs + Timestamp(raw.args[0])
 		argOffset = 1
 		p.lastTs = ev.Ts
@@ -1019,7 +1019,7 @@ func (p *parser) postProcessTrace(events Events) error {
 		gWaiting
 	)
 	type gdesc struct {
-		state        int
+		state        int32
 		ev           *Event
 		evStart      *Event
 		evCreate     *Event
@@ -1360,7 +1360,7 @@ func (ev *Event) String() string {
 
 // argNum returns total number of args for the event accounting for timestamps,
 // sequence numbers and differences between trace format versions.
-func (raw *rawEvent) argNum() int {
+func (raw *rawEvent) argNum() int32 {
 	ed5 := EventDescriptions()
 	desc := &ed5[raw.typ]
 	if raw.typ == EvStack {
@@ -1539,7 +1539,7 @@ func (tr *Trace) STWReason(kindID uint64) STWReason {
 	}
 }
 
-type STWReason int
+type STWReason int32
 
 const (
 	STWUnknown                 STWReason = 0

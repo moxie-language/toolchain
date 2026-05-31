@@ -35,11 +35,11 @@ func Splice(dst, src *FD, remain int64) (written int64, handled bool, err error)
 		return 0, false, err
 	}
 	defer putPipe(p)
-	var inPipe, n int
+	var inPipe, n int32
 	for err == nil && remain > 0 {
 		max := maxSpliceSize
 		if int64(max) > remain {
-			max = int(remain)
+			max = int32(remain)
 		}
 		inPipe, err = spliceDrain(p.wfd, src, max)
 		// The operation is considered handled if splice returns no
@@ -82,7 +82,7 @@ func Splice(dst, src *FD, remain int64) (written int64, handled bool, err error)
 // ready for reading.
 //
 // If spliceDrain returns (0, nil), src is at EOF.
-func spliceDrain(pipefd int, sock *FD, max int) (int, error) {
+func spliceDrain(pipefd int32, sock *FD, max int32) (int32, error) {
 	if err := sock.readLock(); err != nil {
 		return 0, err
 	}
@@ -123,7 +123,7 @@ func spliceDrain(pipefd int, sock *FD, max int) (int, error) {
 // splice(2), it loops over the buffered data until it has written
 // all of it to the socket. This behavior is similar to the Write
 // step of an io.Copy in userspace.
-func splicePump(sock *FD, pipefd int, inPipe int) (int, error) {
+func splicePump(sock *FD, pipefd int32, inPipe int32) (int32, error) {
 	if err := sock.writeLock(); err != nil {
 		return 0, err
 	}
@@ -162,17 +162,17 @@ func splicePump(sock *FD, pipefd int, inPipe int) (int, error) {
 
 // splice wraps the splice system call. Since the current implementation
 // only uses splice on sockets and pipes, the offset arguments are unused.
-// splice returns int instead of int64, because callers never ask it to
+// splice returns int32 instead of int64, because callers never ask it to
 // move more data in a single call than can fit in an int32.
-func splice(out int, in int, max int, flags int) (int, error) {
+func splice(out int32, in int32, max int32, flags int32) (int32, error) {
 	n, err := syscall.Splice(in, nil, out, nil, max, flags)
-	return int(n), err
+	return int32(n), err
 }
 
 type splicePipeFields struct {
-	rfd  int
-	wfd  int
-	data int
+	rfd  int32
+	wfd  int32
+	data int32
 }
 
 type splicePipe struct {
@@ -200,7 +200,7 @@ func putPipe(p *splicePipe) {
 
 // newPipe sets up a pipe for a splice operation.
 func newPipe() *splicePipe {
-	var fds [2]int
+	var fds [2]int32
 	if err := syscall.Pipe2(fds[:], syscall.O_CLOEXEC|syscall.O_NONBLOCK); err != nil {
 		return nil
 	}

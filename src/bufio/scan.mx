@@ -29,13 +29,13 @@ import (
 type Scanner struct {
 	r            io.Reader // The reader provided by the client.
 	split        SplitFunc // The function to split the tokens.
-	maxTokenSize int       // Maximum size of a token; modified by tests.
+	maxTokenSize int32       // Maximum size of a token; modified by tests.
 	token        []byte    // Last token returned by split.
 	buf          []byte    // Buffer used as argument to split.
-	start        int       // First non-processed byte in buf.
-	end          int       // End of data in buf.
+	start        int32       // First non-processed byte in buf.
+	end          int32       // End of data in buf.
 	err          error     // Sticky error.
-	empties      int       // Count of successive empty tokens.
+	empties      int32       // Count of successive empty tokens.
 	scanCalled   bool      // Scan has been called; buffer is in use.
 	done         bool      // Scan has finished.
 }
@@ -64,7 +64,7 @@ type Scanner struct {
 // The function is never called with an empty data slice unless atEOF
 // is true. If atEOF is true, however, data may be non-empty and,
 // as always, holds unprocessed text.
-type SplitFunc func(data []byte, atEOF bool) (advance int, token []byte, err error)
+type SplitFunc func(data []byte, atEOF bool) (advance int32, token []byte, err error)
 
 // Errors returned by Scanner.
 const (
@@ -196,7 +196,7 @@ func (s *Scanner) Scan() bool {
 		// Is the buffer full? If so, resize.
 		if s.end == len(s.buf) {
 			// Guarantee no overflow in the multiplication below.
-			const maxInt = int(^uint(0) >> 1)
+			const maxInt = int32(^uint32(0) >> 1)
 			if len(s.buf) >= s.maxTokenSize || len(s.buf) > maxInt/2 {
 				s.setErr(ErrTooLong)
 				return false
@@ -240,7 +240,7 @@ func (s *Scanner) Scan() bool {
 }
 
 // advance consumes n bytes of the buffer. It reports whether the advance was legal.
-func (s *Scanner) advance(n int) bool {
+func (s *Scanner) advance(n int32) bool {
 	if n < 0 {
 		s.setErr(ErrNegativeAdvance)
 		return false
@@ -272,7 +272,7 @@ func (s *Scanner) setErr(err error) {
 // maximum token size to [MaxScanTokenSize].
 //
 // Buffer panics if it is called after scanning has started.
-func (s *Scanner) Buffer(buf []byte, max int) {
+func (s *Scanner) Buffer(buf []byte, max int32) {
 	if s.scanCalled {
 		panic("Buffer called after Scan")
 	}
@@ -294,7 +294,7 @@ func (s *Scanner) Split(split SplitFunc) {
 // Split functions
 
 // ScanBytes is a split function for a [Scanner] that returns each byte as a token.
-func ScanBytes(data []byte, atEOF bool) (advance int, token []byte, err error) {
+func ScanBytes(data []byte, atEOF bool) (advance int32, token []byte, err error) {
 	if atEOF && len(data) == 0 {
 		return 0, nil, nil
 	}
@@ -309,7 +309,7 @@ func errorRune() []byte { return []byte(string(utf8.RuneError)) }
 // means that erroneous UTF-8 encodings translate to U+FFFD = "\xef\xbf\xbd".
 // Because of the Scan interface, this makes it impossible for the client to
 // distinguish correctly encoded replacement runes from encoding errors.
-func ScanRunes(data []byte, atEOF bool) (advance int, token []byte, err error) {
+func ScanRunes(data []byte, atEOF bool) (advance int32, token []byte, err error) {
 	if atEOF && len(data) == 0 {
 		return 0, nil, nil
 	}
@@ -355,7 +355,7 @@ func dropCR(data []byte) []byte {
 // by one mandatory newline. In regular expression notation, it is `\r?\n`.
 // The last non-empty line of input will be returned even if it has no
 // newline.
-func ScanLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+func ScanLines(data []byte, atEOF bool) (advance int32, token []byte, err error) {
 	if atEOF && len(data) == 0 {
 		return 0, nil, nil
 	}
@@ -400,7 +400,7 @@ func isSpace(r rune) bool {
 // space-separated word of text, with surrounding spaces deleted. It will
 // never return an empty string. The definition of space is set by
 // unicode.IsSpace.
-func ScanWords(data []byte, atEOF bool) (advance int, token []byte, err error) {
+func ScanWords(data []byte, atEOF bool) (advance int32, token []byte, err error) {
 	// Skip leading spaces.
 	start := 0
 	for width := 0; start < len(data); start += width {

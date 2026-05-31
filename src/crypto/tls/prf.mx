@@ -17,7 +17,7 @@ import (
 	"hash"
 )
 
-type prfFunc func(secret []byte, label []byte, seed []byte, keyLen int) []byte
+type prfFunc func(secret []byte, label []byte, seed []byte, keyLen int32) []byte
 
 // Split a premaster secret in two as specified in RFC 4346, Section 5.
 func splitPreMasterSecret(secret []byte) (s1, s2 []byte) {
@@ -48,7 +48,7 @@ func pHash(result, secret, seed []byte, hash func() hash.Hash) {
 }
 
 // prf10 implements the TLS 1.0 pseudo-random function, as defined in RFC 2246, Section 5.
-func prf10(secret []byte, label []byte, seed []byte, keyLen int) []byte {
+func prf10(secret []byte, label []byte, seed []byte, keyLen int32) []byte {
 	result := []byte{:keyLen}
 	hashSHA1 := sha1.New
 	hashMD5 := md5.New
@@ -71,7 +71,7 @@ func prf10(secret []byte, label []byte, seed []byte, keyLen int) []byte {
 
 // prf12 implements the TLS 1.2 pseudo-random function, as defined in RFC 5246, Section 5.
 func prf12(hashFunc func() hash.Hash) prfFunc {
-	return func(secret []byte, label []byte, seed []byte, keyLen int) []byte {
+	return func(secret []byte, label []byte, seed []byte, keyLen int32) []byte {
 		return tls12.PRF(hashFunc, secret, label, seed, keyLen)
 	}
 }
@@ -131,7 +131,7 @@ func extMasterFromPreMasterSecret(version uint16, suite *cipherSuite, preMasterS
 // keysFromMasterSecret generates the connection keys from the master
 // secret, given the lengths of the MAC key, cipher key and IV, as defined in
 // RFC 2246, Section 6.3.
-func keysFromMasterSecret(version uint16, suite *cipherSuite, masterSecret, clientRandom, serverRandom []byte, macLen, keyLen, ivLen int) (clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV []byte) {
+func keysFromMasterSecret(version uint16, suite *cipherSuite, masterSecret, clientRandom, serverRandom []byte, macLen, keyLen, ivLen int32) (clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV []byte) {
 	seed := []byte{:0:len(serverRandom)+len(clientRandom)}
 	seed = append(seed, serverRandom...)
 	seed = append(seed, clientRandom...)
@@ -183,7 +183,7 @@ type finishedHash struct {
 	prf     prfFunc
 }
 
-func (h *finishedHash) Write(msg []byte) (n int, err error) {
+func (h *finishedHash) Write(msg []byte) (n int32, err error) {
 	h.client.Write(msg)
 	h.server.Write(msg)
 
@@ -240,20 +240,20 @@ func (h *finishedHash) discardHandshakeBuffer() {
 // noEKMBecauseRenegotiation is used as a value of
 // ConnectionState.ekm when renegotiation is enabled and thus
 // we wish to fail all key-material export requests.
-func noEKMBecauseRenegotiation(label []byte, context []byte, length int) ([]byte, error) {
+func noEKMBecauseRenegotiation(label []byte, context []byte, length int32) ([]byte, error) {
 	return nil, errors.New("crypto/tls: ExportKeyingMaterial is unavailable when renegotiation is enabled")
 }
 
 // noEKMBecauseNoEMS is used as a value of ConnectionState.ekm when Extended
 // Master Secret is not negotiated and thus we wish to fail all key-material
 // export requests.
-func noEKMBecauseNoEMS(label []byte, context []byte, length int) ([]byte, error) {
+func noEKMBecauseNoEMS(label []byte, context []byte, length int32) ([]byte, error) {
 	return nil, errors.New("crypto/tls: ExportKeyingMaterial is unavailable when neither TLS 1.3 nor Extended Master Secret are negotiated; override with GODEBUG=tlsunsafeekm=1")
 }
 
 // ekmFromMasterSecret generates exported keying material as defined in RFC 5705.
-func ekmFromMasterSecret(version uint16, suite *cipherSuite, masterSecret, clientRandom, serverRandom []byte) func([]byte, []byte, int) ([]byte, error) {
-	return func(label []byte, context []byte, length int) ([]byte, error) {
+func ekmFromMasterSecret(version uint16, suite *cipherSuite, masterSecret, clientRandom, serverRandom []byte) func([]byte, []byte, int32) ([]byte, error) {
+	return func(label []byte, context []byte, length int32) ([]byte, error) {
 		switch label {
 		case "client finished", "server finished", "master secret", "key expansion":
 			// These values are reserved and may not be used.

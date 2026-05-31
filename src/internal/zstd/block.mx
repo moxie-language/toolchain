@@ -14,7 +14,7 @@ const debug = false
 // compressedBlock decompresses a compressed block, storing the decompressed
 // data in r.buffer. The blockSize argument is the compressed size.
 // RFC 3.1.1.3.
-func (r *Reader) compressedBlock(blockSize int) error {
+func (r *Reader) compressedBlock(blockSize int32) error {
 	if len(r.compressedBuf) >= blockSize {
 		r.compressedBuf = r.compressedBuf[:blockSize]
 	} else {
@@ -60,7 +60,7 @@ func (r *Reader) compressedBlock(blockSize int) error {
 }
 
 // seqCode is the kind of sequence codes we have to handle.
-type seqCode int
+type seqCode int32
 
 const (
 	seqLiteral seqCode = iota
@@ -72,12 +72,12 @@ const (
 // seqTableBits for a particular kind of sequence code.
 type seqCodeInfoData struct {
 	predefTable     []fseBaselineEntry // predefined FSE
-	predefTableBits int                // number of bits in predefTable
-	maxSym          int                // max symbol value in FSE
-	maxBits         int                // max bits for FSE
+	predefTableBits int32                // number of bits in predefTable
+	maxSym          int32                // max symbol value in FSE
+	maxBits         int32                // max bits for FSE
 
 	// toBaseline converts from an FSE table to an FSE baseline table.
-	toBaseline func(*Reader, int, []fseEntry, []fseBaselineEntry) error
+	toBaseline func(*Reader, int32, []fseEntry, []fseBaselineEntry) error
 }
 
 func _seqCodeInfo() [3]seqCodeInfoData {
@@ -112,7 +112,7 @@ func _seqCodeInfo() [3]seqCodeInfoData {
 // initSeqs reads the Sequences_Section_Header and sets up the FSE
 // tables used to read the sequence codes. It returns the number of
 // sequences and the new offset. RFC 3.1.1.3.2.1.
-func (r *Reader) initSeqs(data block, off int) (int, int, error) {
+func (r *Reader) initSeqs(data block, off int32) (int32, int32, error) {
 	if off >= len(data) {
 		return 0, 0, r.makeEOFError(off)
 	}
@@ -123,20 +123,20 @@ func (r *Reader) initSeqs(data block, off int) (int, int, error) {
 		return 0, off, nil
 	}
 
-	var seqCount int
+	var seqCount int32
 	if seqHdr < 128 {
-		seqCount = int(seqHdr)
+		seqCount = int32(seqHdr)
 	} else if seqHdr < 255 {
 		if off >= len(data) {
 			return 0, 0, r.makeEOFError(off)
 		}
-		seqCount = ((int(seqHdr) - 128) << 8) + int(data[off])
+		seqCount = ((int32(seqHdr) - 128) << 8) + int32(data[off])
 		off++
 	} else {
 		if off+1 >= len(data) {
 			return 0, 0, r.makeEOFError(off)
 		}
-		seqCount = int(data[off]) + (int(data[off+1]) << 8) + 0x7f00
+		seqCount = int32(data[off]) + (int32(data[off+1]) << 8) + 0x7f00
 		off += 2
 	}
 
@@ -175,7 +175,7 @@ func (r *Reader) initSeqs(data block, off int) (int, int, error) {
 // setSeqTable uses the Compression_Mode in mode to set up r.seqTables and
 // r.seqTableBits for kind. We store these in the Reader because one of
 // the modes simply reuses the value from the last block in the frame.
-func (r *Reader) setSeqTable(data block, off int, kind seqCode, mode byte) (int, error) {
+func (r *Reader) setSeqTable(data block, off int32, kind seqCode, mode byte) (int32, error) {
 	sci := _seqCodeInfo()
 	info := &sci[kind]
 	switch mode {
@@ -251,7 +251,7 @@ func (r *Reader) setSeqTable(data block, off int, kind seqCode, mode byte) (int,
 }
 
 // execSeqs reads and executes the sequences. RFC 3.1.1.3.2.1.2.
-func (r *Reader) execSeqs(data block, off int, litbuf []byte, seqCount int) error {
+func (r *Reader) execSeqs(data block, off int32, litbuf []byte, seqCount int32) error {
 	// Set up the initial states for the sequence code readers.
 
 	rbr, err := r.makeReverseBitReader(data, len(data)-1, off)

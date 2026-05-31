@@ -19,7 +19,6 @@ import (
 	"internal/itoa"
 	"math"
 	"strconv"
-	"unique"
 )
 
 // Sizes: (64-bit)
@@ -54,7 +53,7 @@ type Addr struct {
 	addr uint128
 
 	// Details about the address, wrapped up together and canonicalized.
-	z unique.Handle[addrDetail]
+	z *addrDetail
 }
 
 // addrDetail represents the details of an Addr, like address family and IPv6 zone.
@@ -66,30 +65,37 @@ type addrDetail struct {
 // z0, z4, and z6noz are sentinel Addr.z values.
 // See the Addr type's field docs.
 var (
-	z0    unique.Handle[addrDetail]
-	z4    = unique.Make(addrDetail{})
-	z6noz = unique.Make(addrDetail{isV6: true})
+	z0    *addrDetail
+	z4    *addrDetail
+	z6noz *addrDetail
 )
+
+func netipInit() {
+	if z4 != nil { return }
+	z4 = &addrDetail{}
+	z6noz = &addrDetail{isV6: true}
+}
 
 // IPv6LinkLocalAllNodes returns the IPv6 link-local all nodes multicast
 // address ff02::1.
-func IPv6LinkLocalAllNodes() Addr { return AddrFrom16([16]byte{0: 0xff, 1: 0x02, 15: 0x01}) }
+func IPv6LinkLocalAllNodes() Addr { netipInit(); return AddrFrom16([16]byte{0: 0xff, 1: 0x02, 15: 0x01}) }
 
 // IPv6LinkLocalAllRouters returns the IPv6 link-local all routers multicast
 // address ff02::2.
-func IPv6LinkLocalAllRouters() Addr { return AddrFrom16([16]byte{0: 0xff, 1: 0x02, 15: 0x02}) }
+func IPv6LinkLocalAllRouters() Addr { netipInit(); return AddrFrom16([16]byte{0: 0xff, 1: 0x02, 15: 0x02}) }
 
 // IPv6Loopback returns the IPv6 loopback address ::1.
-func IPv6Loopback() Addr { return AddrFrom16([16]byte{15: 0x01}) }
+func IPv6Loopback() Addr { netipInit(); return AddrFrom16([16]byte{15: 0x01}) }
 
 // IPv6Unspecified returns the IPv6 unspecified address "::".
-func IPv6Unspecified() Addr { return Addr{z: z6noz} }
+func IPv6Unspecified() Addr { netipInit(); return Addr{z: z6noz} }
 
 // IPv4Unspecified returns the IPv4 unspecified address "0.0.0.0".
-func IPv4Unspecified() Addr { return AddrFrom4([4]byte{}) }
+func IPv4Unspecified() Addr { netipInit(); return AddrFrom4([4]byte{}) }
 
 // AddrFrom4 returns the address of the IPv4 address given by the bytes in addr.
 func AddrFrom4(addr [4]byte) Addr {
+	netipInit()
 	return Addr{
 		addr: uint128{0, 0xffff00000000 | uint64(addr[0])<<24 | uint64(addr[1])<<16 | uint64(addr[2])<<8 | uint64(addr[3])},
 		z:    z4,
@@ -100,6 +106,7 @@ func AddrFrom4(addr [4]byte) Addr {
 // An IPv4-mapped IPv6 address is left as an IPv6 address.
 // (Use Unmap to convert them if needed.)
 func AddrFrom16(addr [16]byte) Addr {
+	netipInit()
 	return Addr{
 		addr: uint128{
 			byteorder.BEUint64(addr[:8]),
@@ -113,6 +120,7 @@ func AddrFrom16(addr [16]byte) Addr {
 // s can be in dotted decimal ("192.0.2.1"), IPv6 ("2001:db8::68"),
 // or IPv6 with a scoped addressing zone ("fe80::1cc0:3e8c:119f:c2e1%ens18").
 func ParseAddr(s string) (Addr, error) {
+	netipInit()
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
 		case '.':
@@ -152,16 +160,16 @@ func (err parseAddrError) Error() string {
 	return "ParseAddr(" + q(err.in) + "): " + err.msg
 }
 
-func parseIPv4Fields(in string, off, end int, fields []uint8) error {
-	var val, pos int
-	var digLen int // number of digits in current octet
+func parseIPv4Fields(in string, off, end int32, fields []uint8) error {
+	var val, pos int32
+	var digLen int32 // number of digits in current octet
 	s := in[off:end]
 	for i := 0; i < len(s); i++ {
 		if s[i] >= '0' && s[i] <= '9' {
 			if digLen == 1 && val == 0 {
 				return parseAddrError{in: in, msg: "IPv4 field has octet with leading zero"}
 			}
-			val = val*10 + int(s[i]) - '0'
+			val = val*10 + int32(s[i]) - '0'
 			digLen++
 			if val > 255 {
 				return parseAddrError{in: in, msg: "IPv4 field has value >255"}
@@ -395,7 +403,7 @@ func (ip Addr) IsValid() bool { return ip.z != z0 }
 //
 // Note that IPv4-mapped IPv6 addresses are considered IPv6 addresses
 // and therefore have bit length 128.
-func (ip Addr) BitLen() int {
+func (ip Addr) BitLen() int32 {
 	switch ip.z {
 	case z0:
 		return 0
@@ -410,13 +418,13 @@ func (ip Addr) Zone() string {
 	if ip.z == z0 {
 		return ""
 	}
-	return ip.z.Value().zoneV6
+	return ip.z.zoneV6
 }
 
 // Compare returns an integer comparing two IPs.
 // The result will be 0 if ip == ip2, -1 if ip < ip2, and +1 if ip > ip2.
 // The definition of "less than" is the same as the [Addr.Less] method.
-func (ip Addr) Compare(ip2 Addr) int {
+func (ip Addr) Compare(ip2 Addr) int32 {
 	f1, f2 := ip.BitLen(), ip2.BitLen()
 	if f1 < f2 {
 		return -1
@@ -497,7 +505,7 @@ func (ip Addr) WithZone(zone string) Addr {
 		ip.z = z6noz
 		return ip
 	}
-	ip.z = unique.Make(addrDetail{isV6: true, zoneV6: zone})
+	ip.z = &addrDetail{isV6: true, zoneV6: zone}
 	return ip
 }
 
@@ -674,7 +682,7 @@ func (ip Addr) IsUnspecified() bool {
 // If ip is a zero [Addr], Prefix always returns a zero Prefix and a nil error.
 // Otherwise, if bits is less than zero or greater than ip.BitLen(),
 // Prefix returns an error.
-func (ip Addr) Prefix(b int) (Prefix, error) {
+func (ip Addr) Prefix(b int32) (Prefix, error) {
 	if b < 0 {
 		return Prefix{}, errors.New("negative Prefix bits")
 	}
@@ -1025,7 +1033,7 @@ func (ip Addr) AppendBinary(b []byte) ([]byte, error) {
 	return b, nil
 }
 
-func (ip Addr) marshalBinarySize() int {
+func (ip Addr) marshalBinarySize() int32 {
 	switch ip.z {
 	case z0:
 		return 0
@@ -1154,7 +1162,7 @@ func (p AddrPort) IsValid() bool { return p.ip.IsValid() }
 // Compare returns an integer comparing two AddrPorts.
 // The result will be 0 if p == p2, -1 if p < p2, and +1 if p > p2.
 // AddrPorts sort first by IP address, then port.
-func (p AddrPort) Compare(p2 AddrPort) int {
+func (p AddrPort) Compare(p2 AddrPort) int32 {
 	if c := p.Addr().Compare(p2.Addr()); c != 0 {
 		return c
 	}
@@ -1301,7 +1309,7 @@ type Prefix struct {
 //
 // If bits is less than zero or greater than ip.BitLen, [Prefix.Bits]
 // will return an invalid value -1.
-func PrefixFrom(ip Addr, bits int) Prefix {
+func PrefixFrom(ip Addr, bits int32) Prefix {
 	var bitsPlusOne uint8
 	if !ip.isZero() && bits >= 0 && bits <= ip.BitLen() {
 		bitsPlusOne = uint8(bits) + 1
@@ -1318,7 +1326,7 @@ func (p Prefix) Addr() Addr { return p.ip }
 // Bits returns p's prefix length.
 //
 // It reports -1 if invalid.
-func (p Prefix) Bits() int { return int(p.bitsPlusOne) - 1 }
+func (p Prefix) Bits() int32 { return int32(p.bitsPlusOne) - 1 }
 
 // IsValid reports whether p.Bits() has a valid range for p.Addr().
 // If p.Addr() is the zero [Addr], IsValid returns false.
@@ -1338,7 +1346,7 @@ func (p Prefix) IsSingleIP() bool { return p.IsValid() && p.Bits() == p.ip.BitLe
 //
 // Unexported for Go 1.22 because we may want to compare by p.Addr first.
 // See post-acceptance discussion on go.dev/issue/61642.
-func (p Prefix) compare(p2 Prefix) int {
+func (p Prefix) compare(p2 Prefix) int32 {
 	if c := cmp.Compare(p.Addr().BitLen(), p2.Addr().BitLen()); c != 0 {
 		return c
 	}
@@ -1465,7 +1473,7 @@ func (p Prefix) Overlaps(o Prefix) bool {
 	if p.ip.Is4() != o.ip.Is4() {
 		return false
 	}
-	var minBits int
+	var minBits int32
 	if pb, ob := p.Bits(), o.Bits(); pb < ob {
 		minBits = pb
 	} else {
@@ -1582,7 +1590,7 @@ func (p *Prefix) UnmarshalBinary(b []byte) error {
 	if err != nil {
 		return err
 	}
-	*p = PrefixFrom(addr, int(b[len(b)-1]))
+	*p = PrefixFrom(addr, int32(b[len(b)-1]))
 	return nil
 }
 

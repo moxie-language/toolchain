@@ -21,14 +21,14 @@ func _byteFFEncoder() encoder { return byteEncoder(0xff) }
 // encoder represents an ASN.1 element that is waiting to be marshaled.
 type encoder interface {
 	// Len returns the number of bytes needed to marshal this element.
-	Len() int
+	Len() int32
 	// Encode encodes this element by writing Len() bytes to dst.
 	Encode(dst []byte)
 }
 
 type byteEncoder byte
 
-func (c byteEncoder) Len() int {
+func (c byteEncoder) Len() int32 {
 	return 1
 }
 
@@ -38,7 +38,7 @@ func (c byteEncoder) Encode(dst []byte) {
 
 type bytesEncoder []byte
 
-func (b bytesEncoder) Len() int {
+func (b bytesEncoder) Len() int32 {
 	return len(b)
 }
 
@@ -50,7 +50,7 @@ func (b bytesEncoder) Encode(dst []byte) {
 
 type stringEncoder []byte
 
-func (s stringEncoder) Len() int {
+func (s stringEncoder) Len() int32 {
 	return len(s)
 }
 
@@ -62,8 +62,8 @@ func (s stringEncoder) Encode(dst []byte) {
 
 type multiEncoder []encoder
 
-func (m multiEncoder) Len() int {
-	var size int
+func (m multiEncoder) Len() int32 {
+	var size int32
 	for _, e := range m {
 		size += e.Len()
 	}
@@ -71,7 +71,7 @@ func (m multiEncoder) Len() int {
 }
 
 func (m multiEncoder) Encode(dst []byte) {
-	var off int
+	var off int32
 	for _, e := range m {
 		e.Encode(dst[off:])
 		off += e.Len()
@@ -80,8 +80,8 @@ func (m multiEncoder) Encode(dst []byte) {
 
 type setEncoder []encoder
 
-func (s setEncoder) Len() int {
-	var size int
+func (s setEncoder) Len() int32 {
+	var size int32
 	for _, e := range s {
 		size += e.Len()
 	}
@@ -111,7 +111,7 @@ func (s setEncoder) Encode(dst []byte) {
 	// padding step.
 	slices.SortFunc(l, bytes.Compare)
 
-	var off int
+	var off int32
 	for _, b := range l {
 		copy(dst[off:], b)
 		off += len(b)
@@ -126,7 +126,7 @@ type taggedEncoder struct {
 	body    encoder
 }
 
-func (t *taggedEncoder) Len() int {
+func (t *taggedEncoder) Len() int32 {
 	return t.tag.Len() + t.body.Len()
 }
 
@@ -137,7 +137,7 @@ func (t *taggedEncoder) Encode(dst []byte) {
 
 type int64Encoder int64
 
-func (i int64Encoder) Len() int {
+func (i int64Encoder) Len() int32 {
 	n := 1
 
 	for i > 127 {
@@ -157,11 +157,11 @@ func (i int64Encoder) Encode(dst []byte) {
 	n := i.Len()
 
 	for j := 0; j < n; j++ {
-		dst[j] = byte(i >> uint((n-1-j)*8))
+		dst[j] = byte(i >> uint32((n-1-j)*8))
 	}
 }
 
-func base128IntLength(n int64) int {
+func base128IntLength(n int64) int32 {
 	if n == 0 {
 		return 1
 	}
@@ -178,7 +178,7 @@ func appendBase128Int(dst []byte, n int64) []byte {
 	l := base128IntLength(n)
 
 	for i := l - 1; i >= 0; i-- {
-		o := byte(n >> uint(i*7))
+		o := byte(n >> uint32(i*7))
 		o &= 0x7f
 		if i != 0 {
 			o |= 0x80
@@ -224,17 +224,17 @@ func makeBigInt(n *big.Int) (encoder, error) {
 	}
 }
 
-func appendLength(dst []byte, i int) []byte {
+func appendLength(dst []byte, i int32) []byte {
 	n := lengthLength(i)
 
 	for ; n > 0; n-- {
-		dst = append(dst, byte(i>>uint((n-1)*8)))
+		dst = append(dst, byte(i>>uint32((n-1)*8)))
 	}
 
 	return dst
 }
 
-func lengthLength(i int) (numBytes int) {
+func lengthLength(i int32) (numBytes int32) {
 	numBytes = 1
 	for i > 255 {
 		numBytes++
@@ -270,7 +270,7 @@ func appendTagAndLength(dst []byte, t tagAndLength) []byte {
 
 type bitStringEncoder BitString
 
-func (b bitStringEncoder) Len() int {
+func (b bitStringEncoder) Len() int32 {
 	return len(b.Bytes) + 1
 }
 
@@ -281,9 +281,9 @@ func (b bitStringEncoder) Encode(dst []byte) {
 	}
 }
 
-type oidEncoder []int
+type oidEncoder []int32
 
-func (oid oidEncoder) Len() int {
+func (oid oidEncoder) Len() int32 {
 	l := base128IntLength(int64(oid[0]*40 + oid[1]))
 	for i := 2; i < len(oid); i++ {
 		l += base128IntLength(int64(oid[i]))
@@ -298,7 +298,7 @@ func (oid oidEncoder) Encode(dst []byte) {
 	}
 }
 
-func makeObjectIdentifier(oid []int) (e encoder, err error) {
+func makeObjectIdentifier(oid []int32) (e encoder, err error) {
 	if len(oid) < 2 || oid[0] > 2 || (oid[0] < 2 && oid[1] >= 40) {
 		return nil, StructuralError{"invalid object identifier"}
 	}
@@ -346,11 +346,11 @@ func makeUTF8String(s []byte) encoder {
 	return stringEncoder(s)
 }
 
-func appendTwoDigits(dst []byte, v int) []byte {
+func appendTwoDigits(dst []byte, v int32) []byte {
 	return append(dst, byte('0'+(v/10)%10), byte('0'+v%10))
 }
 
-func appendFourDigits(dst []byte, v int) []byte {
+func appendFourDigits(dst []byte, v int32) []byte {
 	return append(dst,
 		byte('0'+(v/1000)%10),
 		byte('0'+(v/100)%10),
@@ -414,7 +414,7 @@ func appendGeneralizedTime(dst []byte, t time.Time) (ret []byte, err error) {
 func appendTimeCommon(dst []byte, t time.Time) []byte {
 	_, month, day := t.Date()
 
-	dst = appendTwoDigits(dst, int(month))
+	dst = appendTwoDigits(dst, int32(month))
 	dst = appendTwoDigits(dst, day)
 
 	hour, min, sec := t.Clock()

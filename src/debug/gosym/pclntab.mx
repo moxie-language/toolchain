@@ -15,7 +15,7 @@ import (
 )
 
 // version of the pclntab
-type version int
+type version int32
 
 const (
 	verUnknown version = iota
@@ -42,7 +42,7 @@ const (
 type LineTable struct {
 	Data []byte
 	PC   uint64
-	Line int
+	Line int32
 
 	// Contains the version of the pclntab section.
 	version version
@@ -74,7 +74,7 @@ type LineTable struct {
 // fixing.
 const oldQuantum = 1
 
-func (t *LineTable) parse(targetPC uint64, targetLine int) (b []byte, pc uint64, line int) {
+func (t *LineTable) parse(targetPC uint64, targetLine int32) (b []byte, pc uint64, line int32) {
 	// The PC/line table can be thought of as a sequence of
 	//  <pc update>* <line update>
 	// batches. Each update batch results in a (pc, line) pair,
@@ -95,11 +95,11 @@ func (t *LineTable) parse(targetPC uint64, targetLine int) (b []byte, pc uint64,
 			}
 			val := binary.BigEndian().Uint32(b)
 			b = b[4:]
-			line += int(val)
+			line += int32(val)
 		case code <= 64:
-			line += int(code)
+			line += int32(code)
 		case code <= 128:
-			line -= int(code - 64)
+			line -= int32(code - 64)
 		default:
 			pc += oldQuantum * uint64(code-128)
 			continue
@@ -117,7 +117,7 @@ func (t *LineTable) slice(pc uint64) *LineTable {
 // PCToLine returns the line number for the given program counter.
 //
 // Deprecated: Use Table's PCToLine method instead.
-func (t *LineTable) PCToLine(pc uint64) int {
+func (t *LineTable) PCToLine(pc uint64) int32 {
 	if t.isGo12() {
 		return t.go12PCToLine(pc)
 	}
@@ -129,7 +129,7 @@ func (t *LineTable) PCToLine(pc uint64) int {
 // considering only program counters before maxpc.
 //
 // Deprecated: Use Table's LineToPC method instead.
-func (t *LineTable) LineToPC(line int, maxpc uint64) uint64 {
+func (t *LineTable) LineToPC(line int32, maxpc uint64) uint64 {
 	if t.isGo12() {
 		return 0
 	}
@@ -260,7 +260,7 @@ func (t *LineTable) parsePclnTab() {
 		t.pctab = data(6)
 		t.funcdata = data(7)
 		t.functab = data(7)
-		functabsize := (int(t.nfunctab)*2 + 1) * t.functabFieldSize()
+		functabsize := (int32(t.nfunctab)*2 + 1) * t.functabFieldSize()
 		t.functab = t.functab[:functabsize]
 	case ver116:
 		t.nfunctab = uint32(offset(0))
@@ -271,7 +271,7 @@ func (t *LineTable) parsePclnTab() {
 		t.pctab = data(5)
 		t.funcdata = data(6)
 		t.functab = data(6)
-		functabsize := (int(t.nfunctab)*2 + 1) * t.functabFieldSize()
+		functabsize := (int32(t.nfunctab)*2 + 1) * t.functabFieldSize()
 		t.functab = t.functab[:functabsize]
 	case ver12:
 		t.nfunctab = uint32(t.uintptr(t.Data[8:]))
@@ -279,7 +279,7 @@ func (t *LineTable) parsePclnTab() {
 		t.funcnametab = t.Data
 		t.functab = t.Data[8+t.ptrsize:]
 		t.pctab = t.Data
-		functabsize := (int(t.nfunctab)*2 + 1) * t.functabFieldSize()
+		functabsize := (int32(t.nfunctab)*2 + 1) * t.functabFieldSize()
 		fileoff := t.binary.Uint32(t.functab[functabsize:])
 		t.functab = t.functab[:functabsize]
 		t.filetab = t.Data[fileoff:]
@@ -308,7 +308,7 @@ func (t *LineTable) go12Funcs() []Func {
 		f.End = ft.pc(i + 1)
 		info := t.funcData(uint32(i))
 		f.LineTable = t
-		f.FrameSize = int(info.deferreturn())
+		f.FrameSize = int32(info.deferreturn())
 		syms[i] = Sym{
 			Value:     f.Entry,
 			Type:      'T',
@@ -328,7 +328,7 @@ func (t *LineTable) findFunc(pc uint64) funcData {
 	if pc < ft.pc(0) || pc >= ft.pc(ft.Count()) {
 		return funcData{}
 	}
-	idx := sort.Search(int(t.nfunctab), func(i int) bool {
+	idx := sort.Search(int32(t.nfunctab), func(i int32) bool {
 		return ft.pc(i) > pc
 	})
 	idx--
@@ -379,11 +379,11 @@ func (t *LineTable) string(off uint32) string {
 }
 
 // functabFieldSize returns the size in bytes of a single functab field.
-func (t *LineTable) functabFieldSize() int {
+func (t *LineTable) functabFieldSize() int32 {
 	if t.version >= ver118 {
 		return 4
 	}
-	return int(t.ptrsize)
+	return int32(t.ptrsize)
 }
 
 // funcTab returns t's funcTab.
@@ -395,17 +395,17 @@ func (t *LineTable) funcTab() funcTab {
 // A functab struct is a PC and a func offset.
 type funcTab struct {
 	*LineTable
-	sz int // cached result of t.functabFieldSize
+	sz int32 // cached result of t.functabFieldSize
 }
 
 // Count returns the number of func entries in f.
-func (f funcTab) Count() int {
-	return int(f.nfunctab)
+func (f funcTab) Count() int32 {
+	return int32(f.nfunctab)
 }
 
 // pc returns the PC of the i'th func in f.
-func (f funcTab) pc(i int) uint64 {
-	u := f.uint(f.functab[2*i*f.sz:])
+func (f funcTab) pc(i int32) uint64 {
+	u := f.uint32(f.functab[2*i*f.sz:])
 	if f.version >= ver118 {
 		u += f.textStart
 	}
@@ -413,12 +413,12 @@ func (f funcTab) pc(i int) uint64 {
 }
 
 // funcOff returns the funcdata offset of the i'th func in f.
-func (f funcTab) funcOff(i int) uint64 {
-	return f.uint(f.functab[(2*i+1)*f.sz:])
+func (f funcTab) funcOff(i int32) uint64 {
+	return f.uint32(f.functab[(2*i+1)*f.sz:])
 }
 
-// uint returns the uint stored at b.
-func (f funcTab) uint(b []byte) uint64 {
+// uint32 returns the uint32 stored at b.
+func (f funcTab) uint32(b []byte) uint64 {
 	if f.sz == 4 {
 		return uint64(f.binary.Uint32(b))
 	}
@@ -433,7 +433,7 @@ type funcData struct {
 
 // funcData returns the ith funcData in t.functab.
 func (t *LineTable) funcData(i uint32) funcData {
-	data := t.funcdata[t.funcTab().funcOff(int(i)):]
+	data := t.funcdata[t.funcTab().funcOff(int32(i)):]
 	return funcData{t: t, data: data}
 }
 
@@ -560,7 +560,7 @@ func (t *LineTable) findFileLine(entry uint64, filetab, linetab uint32, filenum,
 }
 
 // go12PCToLine maps program counter to line number for the Go 1.2+ pcln table.
-func (t *LineTable) go12PCToLine(pc uint64) (line int) {
+func (t *LineTable) go12PCToLine(pc uint64) (line int32) {
 	defer func() {
 		if !disableRecover && recover() != nil {
 			line = -1
@@ -573,7 +573,7 @@ func (t *LineTable) go12PCToLine(pc uint64) (line int) {
 	}
 	entry := f.entryPC()
 	linetab := f.pcln()
-	return int(t.pcvalue(linetab, entry, pc))
+	return int32(t.pcvalue(linetab, entry, pc))
 }
 
 // go12PCToFile maps program counter to file name for the Go 1.2+ pcln table.
@@ -609,7 +609,7 @@ func (t *LineTable) go12PCToFile(pc uint64) (file string) {
 }
 
 // go12LineToPC maps a (file, line) pair to a program counter for the Go 1.2+ pcln table.
-func (t *LineTable) go12LineToPC(file string, line int) (pc uint64) {
+func (t *LineTable) go12LineToPC(file string, line int32) (pc uint64) {
 	defer func() {
 		if !disableRecover && recover() != nil {
 			pc = 0

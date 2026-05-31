@@ -1,1 +1,299 @@
-../typecheck/tc_decl.mx
+package main
+
+// collectDecls walks a file's top-level declarations and inserts all
+// package-level names into pkg.scope. No type resolution yet - just
+// name registration so forward references work during pass 2.
+// Const groups are tracked so iota can be assigned correctly in pass 2.
+type constGroupEntry struct {
+	group *Group
+	decls []*ConstDecl
+}
+
+func (c *Checker) collectDecls(f *File) {
+	var constEntries []constGroupEntry
+
+	for _, d := range f.DeclList {
+		switch d := d.(type) {
+		case *ImportDecl:
+			c.collectImport(d)
+		case *ConstDecl:
+			for _, name := range d.NameList {
+				obj := NewTCConst(c.pkg, name.Value, nil, nil)
+				c.declare(c.pkg.scope, name, obj)
+			}
+			g := d.Group
+			if g == nil {
+				g = &Group{}
+			}
+			found := false
+			for i := 0; i < len(constEntries); i++ {
+				if constEntries[i].group == g {
+					constEntries[i].decls = append(constEntries[i].decls, d)
+					found = true
+					break
+				}
+			}
+			if !found {
+				constEntries = append(constEntries, constGroupEntry{group: g, decls: []*ConstDecl{d}})
+			}
+		case *TypeDecl:
+			obj := NewTypeName(c.pkg, d.Name.Value, nil)
+			c.declare(c.pkg.scope, d.Name, obj)
+		case *VarDecl:
+			for _, name := range d.NameList {
+				obj := NewTCVar(c.pkg, name.Value, nil)
+				c.declare(c.pkg.scope, name, obj)
+			}
+		case *FuncDecl:
+			if d.Recv == nil {
+				if d.Name.Value == "init" {
+					continue
+				}
+				obj := NewTCFunc(c.pkg, d.Name.Value, nil)
+				c.declare(c.pkg.scope, d.Name, obj)
+			}
+		}
+	}
+
+	for _, e := range constEntries {
+		c.checkConstGroup(e.decls)
+	}
+}
+
+// collectImport resolves an import declaration and adds the package name
+// to the file scope. (File scope is per-file; we approximate it with
+// pkg.scope for now - proper file scopes come in the full implementation.)
+func (c *Checker) collectImport(d *ImportDecl) {
+	if d.Path == nil {
+		return
+	}
+	path := d.Path.Value
+	if len(path) >= 2 {
+		path = path[1 : len(path)-1] // strip quotes
+	}
+	if c.conf.Importer == nil {
+		return
+	}
+	imported, err := c.conf.Importer.Import(path)
+	if err != nil {
+		c.errorf(d.Pos(), "cannot import %q: %v", path, err)
+		return
+	}
+	localName := imported.name
+	if d.LocalPkgName != nil {
+		localName = d.LocalPkgName.Value
+	}
+	if localName == "_" {
+		return
+	}
+	pkgObj := NewPkgName(c.pkg, localName, imported)
+	// File-level imports go into pkg.scope for now (proper file scopes in B3).
+	// Silently skip if the same name is already declared - multi-file packages
+	// often repeat the same import alias in each file (e.g. errorspkg "errors").
+	if existing := c.pkg.scope.Lookup(localName); existing != nil {
+		if ep, ok := existing.(*PkgName); ok && ep.imported == imported {
+			return // same import, already registered
+		}
+	}
+	if d.LocalPkgName != nil {
+		c.declare(c.pkg.scope, d.LocalPkgName, pkgObj)
+	} else {
+		c.pkg.scope.Insert(pkgObj)
+	}
+}
+
+// checkDecl resolves the type of a top-level declaration.
+// Const decls are handled in collectDecls via checkConstGroup.
+func (c *Checker) checkDecl(d Decl) {
+	switch d := d.(type) {
+	case *TypeDecl:
+		c.checkTypeDecl(d)
+	case *VarDecl:
+		c.checkVarDecl(d)
+	case *FuncDecl:
+		c.checkFuncDecl(d)
+	}
+}
+
+func (c *Checker) checkTypeDecl(d *TypeDecl) {
+	obj, ok := c.pkg.scope.Lookup(d.Name.Value).(*TypeName)
+	if !ok {
+		return
+	}
+	// Generic type declaration: register type params in a temporary scope so
+	// the underlying type can reference them (e.g. type Seq[V any] func(...V...)).
+	if len(d.TParamList) > 0 {
+		tmpScope := NewScope(c.pkg.scope)
+		for _, tp := range d.TParamList {
+			if tp.Name != nil && tp.Name.Value != "" {
+				tpObj := NewTypeName(c.pkg, tp.Name.Value,
+					NewTypeParam(NewTypeName(c.pkg, tp.Name.Value, nil), nil))
+				tmpScope.Insert(tpObj)
+			}
+		}
+		saved := c.localScope
+		c.localScope = tmpScope
+		defer func() { c.localScope = saved }()
+	}
+	named := NewNamed(obj, nil)
+	underlying := c.resolveTypeExpr(d.Type)
+	named.SetUnderlying(underlying)
+}
+
+func (c *Checker) checkVarDecl(d *VarDecl) {
+	var typ Type
+	if d.Type != nil {
+		typ = c.resolveTypeExpr(d.Type)
+	}
+	for _, name := range d.NameList {
+		if obj, ok := c.pkg.scope.Lookup(name.Value).(*TCVar); ok {
+			obj.typ = typ
+		}
+	}
+}
+
+func (c *Checker) checkFuncDecl(d *FuncDecl) {
+	// Build a temporary scope containing all type parameters visible in this
+	// function declaration: (1) explicit type params on the function itself,
+	// (2) type args from a generic receiver (func (h Handle[T]) ...).
+	typeParams := collectFuncTypeParams(d)
+	if len(typeParams) > 0 {
+		tmpScope := NewScope(c.pkg.scope)
+		for _, name := range typeParams {
+			obj := NewTypeName(c.pkg, name, NewTypeParam(NewTypeName(c.pkg, name, nil), nil))
+			tmpScope.Insert(obj)
+		}
+		saved := c.localScope
+		c.localScope = tmpScope
+		defer func() { c.localScope = saved }()
+	}
+	sig := c.resolveFuncType(d.Type, d.Recv)
+	fn := NewTCFunc(c.pkg, d.Name.Value, sig)
+	if d.Recv == nil {
+		// plain function - update the already-registered object
+		if obj, ok := c.pkg.scope.Lookup(d.Name.Value).(*TCFunc); ok {
+			obj.typ = sig
+		}
+		return
+	}
+	// method - find the named receiver type and attach the method
+	recvTyp := c.resolveTypeExpr(d.Recv.Type)
+	if recvTyp == nil {
+		return
+	}
+	// unwrap pointer receiver: func (p *T) F() -> receiver type is T
+	if pt, ok := recvTyp.(*Pointer); ok {
+		fn.hasPtrRecv = true
+		recvTyp = pt.base
+	}
+	if named, ok := recvTyp.(*Named); ok {
+		named.AddMethod(fn)
+	}
+	if c.info != nil && d.Name != nil {
+		c.info.Defs[d.Name] = fn
+	}
+}
+
+// checkFuncBody type-checks the body of a function declaration.
+func (c *Checker) checkFuncBody(fd *FuncDecl) {
+	if fd.Body == nil {
+		return
+	}
+	scope := c.openScope(fd.Body, c.pkg.scope)
+	// Set localScope so resolveTypeExpr can find locally-defined types.
+	saved := c.localScope
+	c.localScope = scope
+	defer func() { c.localScope = saved }()
+	// Register all type parameters (function-level + receiver type args) in
+	// the body scope so the signature and body can reference them.
+	for _, name := range collectFuncTypeParams(fd) {
+		obj := NewTypeName(c.pkg, name, NewTypeParam(NewTypeName(c.pkg, name, nil), nil))
+		scope.Insert(obj)
+	}
+	sig := c.resolveFuncType(fd.Type, fd.Recv)
+	if sig != nil {
+		// Receiver variable (for methods).
+		if sig.recv != nil && sig.recv.name != "" {
+			scope.Insert(sig.recv)
+		}
+		// Parameters.
+		if sig.params != nil {
+			for i := 0; i < sig.params.Len(); i++ {
+				p := sig.params.At(i)
+				if p.name != "" {
+					scope.Insert(p)
+				}
+			}
+		}
+		// Named results.
+		if sig.results != nil {
+			for i := 0; i < sig.results.Len(); i++ {
+				r := sig.results.At(i)
+				if r.name != "" {
+					scope.Insert(r)
+				}
+			}
+		}
+	}
+	c.checkBlock(fd.Body, scope)
+}
+
+// collectFuncTypeParams returns all type parameter names visible in a function
+// declaration: explicit type params on the function (TParamList) plus type
+// arguments on a generic receiver (func (h Handle[T]) F() needs T in scope).
+func collectFuncTypeParams(d *FuncDecl) []string {
+	seen := map[string]bool{}
+	var names []string
+	add := func(name string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	for _, tp := range d.TParamList {
+		if tp.Name != nil {
+			add(tp.Name.Value)
+		}
+	}
+	// Extract type args from a generic receiver: func (h Foo[T, U]) ...
+	if d.Recv != nil {
+		extractTypeArgs(d.Recv.Type, add)
+	}
+	return names
+}
+
+// extractTypeArgs recursively extracts bare Name nodes from a generic receiver
+// type expression like Handle[T] or Ptr[K, V].
+func extractTypeArgs(e Expr, add func(string)) {
+	if e == nil {
+		return
+	}
+	switch e := e.(type) {
+	case *IndexExpr:
+		// Handle[T] or Handle[T, U] (ListExpr inside)
+		extractTypeArgs(e.Index, add)
+	case *Name:
+		add(e.Value)
+	case *ListExpr:
+		for _, el := range e.ElemList {
+			extractTypeArgs(el, add)
+		}
+	case *Operation:
+		if e.Y == nil {
+			extractTypeArgs(e.X, add)
+		}
+	}
+}
+
+// declare inserts obj into s, recording the definition in info.
+func (c *Checker) declare(s *Scope, id *Name, obj Object) {
+	if id != nil && id.Value != "_" {
+		if alt := s.Insert(obj); alt != nil {
+			c.errorf(id.Pos(), "%s redeclared in this block", id.Value)
+			return
+		}
+	}
+	if c.info != nil && id != nil {
+		c.info.Defs[id] = obj
+	}
+}

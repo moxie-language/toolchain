@@ -23,13 +23,13 @@ package textproto
 // A pipelined server can use the same calls to ensure that
 // responses computed in parallel are written in the correct order.
 type Pipeline struct {
-	id       uint
+	id       uint32
 	request  sequencer
 	response sequencer
 }
 
 // Next returns the next id for a request/response pair.
-func (p *Pipeline) Next() uint {
+func (p *Pipeline) Next() uint32 {
 	id := p.id
 	p.id++
 	return id
@@ -37,25 +37,25 @@ func (p *Pipeline) Next() uint {
 
 // StartRequest blocks until it is time to send (or, if this is a server, receive)
 // the request with the given id.
-func (p *Pipeline) StartRequest(id uint) {
+func (p *Pipeline) StartRequest(id uint32) {
 	p.request.Start(id)
 }
 
 // EndRequest notifies p that the request with the given id has been sent
 // (or, if this is a server, received).
-func (p *Pipeline) EndRequest(id uint) {
+func (p *Pipeline) EndRequest(id uint32) {
 	p.request.End(id)
 }
 
 // StartResponse blocks until it is time to receive (or, if this is a server, send)
 // the request with the given id.
-func (p *Pipeline) StartResponse(id uint) {
+func (p *Pipeline) StartResponse(id uint32) {
 	p.response.Start(id)
 }
 
 // EndResponse notifies p that the response with the given id has been received
 // (or, if this is a server, sent).
-func (p *Pipeline) EndResponse(id uint) {
+func (p *Pipeline) EndResponse(id uint32) {
 	p.response.End(id)
 }
 
@@ -64,20 +64,20 @@ func (p *Pipeline) EndResponse(id uint) {
 // at 0 and increment without skipping. The event number wraps around
 // safely as long as there are not 2^32 simultaneous events pending.
 type sequencer struct {
-	id   uint
-	wait map[uint]chan struct{}
+	id   uint32
+	wait map[uint32]chan struct{}
 }
 
 // Start waits until it is time for the event numbered id to begin.
 // That is, except for the first event, it waits until End(id-1) has
 // been called.
-func (s *sequencer) Start(id uint) {
+func (s *sequencer) Start(id uint32) {
 	if s.id == id {
 		return
 	}
 	c := chan struct{}{}
 	if s.wait == nil {
-		s.wait = map[uint]chan struct{}{}
+		s.wait = map[uint32]chan struct{}{}
 	}
 	s.wait[id] = c
 	<-c
@@ -86,14 +86,14 @@ func (s *sequencer) Start(id uint) {
 // End notifies the sequencer that the event numbered id has completed,
 // allowing it to schedule the event numbered id+1.  It is a run-time error
 // to call End with an id that is not the number of the active event.
-func (s *sequencer) End(id uint) {
+func (s *sequencer) End(id uint32) {
 	if s.id != id {
 		panic("out of sync")
 	}
 	id++
 	s.id = id
 	if s.wait == nil {
-		s.wait = map[uint]chan struct{}{}
+		s.wait = map[uint32]chan struct{}{}
 	}
 	c, ok := s.wait[id]
 	if ok {

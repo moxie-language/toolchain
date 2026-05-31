@@ -23,7 +23,7 @@ type MutatorUtil struct {
 }
 
 // UtilFlags controls the behavior of MutatorUtilization.
-type UtilFlags int
+type UtilFlags int32
 
 const (
 	// UtilSTW means utilization should account for STW events.
@@ -56,17 +56,17 @@ func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
 	// Set up a bunch of analysis state.
 	type perP struct {
 		// gc > 0 indicates that GC is active on this P.
-		gc int
+		gc int32
 		// series the logical series number for this P. This
 		// is necessary because Ps may be removed and then
 		// re-added, and then the new P needs a new series.
-		series int
+		series int32
 	}
 	type procsCount struct {
 		// time at which procs changed.
 		time int64
 		// n is the number of procs at that point.
-		n int
+		n int32
 	}
 	out := [][]MutatorUtil{}
 	stw := 0
@@ -103,7 +103,7 @@ func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
 			if m.Name != "/sched/gomaxprocs:threads" {
 				break
 			}
-			gomaxprocs := int(m.Value.Uint64())
+			gomaxprocs := int32(m.Value.Uint64())
 			if len(ps) > gomaxprocs {
 				if flags&UtilPerProc != 0 {
 					// End each P's series.
@@ -434,7 +434,7 @@ func newMMUSeries(util []MutatorUtil) mmuSeries {
 	return s
 }
 
-func (s *mmuSeries) bandTime(i int) (start, end int64) {
+func (s *mmuSeries) bandTime(i int32) (start, end int64) {
 	start = int64(i)*s.bandDur + s.util[0].Time
 	end = start + s.bandDur
 	return
@@ -442,9 +442,9 @@ func (s *mmuSeries) bandTime(i int) (start, end int64) {
 
 type bandUtil struct {
 	// Utilization series index
-	series int
+	series int32
 	// Band index
-	i int
+	i int32
 	// Lower bound of mutator utilization for all windows
 	// with a left edge in this band.
 	utilBound float64
@@ -452,15 +452,15 @@ type bandUtil struct {
 
 type bandUtilHeap []bandUtil
 
-func (h bandUtilHeap) Len() int {
+func (h bandUtilHeap) Len() int32 {
 	return len(h)
 }
 
-func (h bandUtilHeap) Less(i, j int) bool {
+func (h bandUtilHeap) Less(i, j int32) bool {
 	return h[i].utilBound < h[j].utilBound
 }
 
-func (h bandUtilHeap) Swap(i, j int) {
+func (h bandUtilHeap) Swap(i, j int32) {
 	h[i], h[j] = h[j], h[i]
 }
 
@@ -483,18 +483,18 @@ type UtilWindow struct {
 
 type utilHeap []UtilWindow
 
-func (h utilHeap) Len() int {
+func (h utilHeap) Len() int32 {
 	return len(h)
 }
 
-func (h utilHeap) Less(i, j int) bool {
+func (h utilHeap) Less(i, j int32) bool {
 	if h[i].MutatorUtil != h[j].MutatorUtil {
 		return h[i].MutatorUtil > h[j].MutatorUtil
 	}
 	return h[i].Time > h[j].Time
 }
 
-func (h utilHeap) Swap(i, j int) {
+func (h utilHeap) Swap(i, j int32) {
 	h[i], h[j] = h[j], h[i]
 }
 
@@ -519,7 +519,7 @@ type accumulator struct {
 	bound float64
 
 	// Worst N window tracking
-	nWorst int
+	nWorst int32
 	wHeap  utilHeap
 
 	// Mutator utilization distribution tracking
@@ -632,7 +632,7 @@ func (c *MMUCurve) MMU(window time.Duration) (mmu float64) {
 // disjoint (otherwise there would be a huge number of
 // mostly-overlapping windows at the single lowest point). There are
 // no guarantees on which set of disjoint windows this returns.
-func (c *MMUCurve) Examples(window time.Duration, n int) (worst []UtilWindow) {
+func (c *MMUCurve) Examples(window time.Duration, n int32) (worst []UtilWindow) {
 	acc := accumulator{mmu: 1.0, bound: 1.0, nWorst: n}
 	c.mmu(window, &acc)
 	sort.Sort(sort.Reverse(acc.wHeap))
@@ -753,15 +753,15 @@ func (c *MMUCurve) mmu(window time.Duration, acc *accumulator) {
 	}
 }
 
-func (c *mmuSeries) mkBandUtil(series int, window time.Duration) []bandUtil {
+func (c *mmuSeries) mkBandUtil(series int32, window time.Duration) []bandUtil {
 	// For each band, compute the worst-possible total mutator
 	// utilization for all windows that start in that band.
 
 	// minBands is the minimum number of bands a window can span
 	// and maxBands is the maximum number of bands a window can
 	// span in any alignment.
-	minBands := int((int64(window) + c.bandDur - 1) / c.bandDur)
-	maxBands := int((int64(window) + 2*(c.bandDur-1)) / c.bandDur)
+	minBands := int32((int64(window) + c.bandDur - 1) / c.bandDur)
+	maxBands := int32((int64(window) + 2*(c.bandDur-1)) / c.bandDur)
 	if window > 1 && maxBands < 2 {
 		panic("maxBands < 2")
 	}
@@ -817,7 +817,7 @@ func (c *mmuSeries) mkBandUtil(series int, window time.Duration) []bandUtil {
 
 // bandMMU computes the precise minimum mutator utilization for
 // windows with a left edge in band bandIdx.
-func (c *mmuSeries) bandMMU(bandIdx int, window time.Duration, acc *accumulator) {
+func (c *mmuSeries) bandMMU(bandIdx int32, window time.Duration, acc *accumulator) {
 	util := c.util
 
 	// We think of the mutator utilization over time as the
@@ -884,7 +884,7 @@ type integrator struct {
 	u *mmuSeries
 	// pos is the index in u.util of the current time's non-strict
 	// predecessor.
-	pos int
+	pos int32
 }
 
 // advance returns the integral of the utilization function from 0 to
@@ -908,7 +908,7 @@ func (in *integrator) advance(time int64) totalUtil {
 		// Far. Binary search for time's strict successor.
 		l, r := pos, len(util)
 		for l < r {
-			h := int(uint(l+r) >> 1)
+			h := int32(uint32(l+r) >> 1)
 			if util[h].Time <= time {
 				l = h + 1
 			} else {

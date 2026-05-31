@@ -11,17 +11,25 @@ import (
 	"sync"
 )
 
-var bufPool = sync.Pool{
-	New: func() interface{} { return &bytes.Buffer{} },
+var bufPool sync.Pool
+var _bufPoolInited bool
+
+func ensureBufPool() *sync.Pool {
+	if !_bufPoolInited {
+		bufPool.New = func() interface{} { return &bytes.Buffer{} }
+		_bufPoolInited = true
+	}
+	return &bufPool
 }
 
 // HuffmanDecode decodes the string in v and writes the expanded
 // result to w, returning the number of bytes written to w and the
 // Write call's return value. At most one Write call is made.
-func HuffmanDecode(w io.Writer, v []byte) (int, error) {
-	buf := bufPool.Get().(*bytes.Buffer)
+func HuffmanDecode(w io.Writer, v []byte) (int32, error) {
+	p := ensureBufPool()
+	buf := p.Get().(*bytes.Buffer)
 	buf.Reset()
-	defer bufPool.Put(buf)
+	defer p.Put(buf)
 	if err := huffmanDecode(buf, 0, v); err != nil {
 		return 0, err
 	}
@@ -30,9 +38,10 @@ func HuffmanDecode(w io.Writer, v []byte) (int, error) {
 
 // HuffmanDecodeToString decodes the string in v.
 func HuffmanDecodeToString(v []byte) ([]byte, error) {
-	buf := bufPool.Get().(*bytes.Buffer)
+	p := ensureBufPool()
+	buf := p.Get().(*bytes.Buffer)
 	buf.Reset()
-	defer bufPool.Put(buf)
+	defer p.Put(buf)
 	if err := huffmanDecode(buf, 0, v); err != nil {
 		return "", err
 	}
@@ -46,15 +55,15 @@ const ErrInvalidHuffman = errors.Const("hpack: invalid Huffman-encoded data")
 // huffmanDecode decodes v to buf.
 // If maxLen is greater than 0, attempts to write more to buf than
 // maxLen bytes will return ErrStringLength.
-func huffmanDecode(buf *bytes.Buffer, maxLen int, v []byte) error {
+func huffmanDecode(buf *bytes.Buffer, maxLen int32, v []byte) error {
 	rootHuffmanNode := getRootHuffmanNode()
 	n := rootHuffmanNode
 	// cur is the bit buffer that has not been fed into n.
 	// cbits is the number of low order bits in cur that are valid.
 	// sbits is the number of bits of the symbol prefix being decoded.
-	cur, cbits, sbits := uint(0), uint8(0), uint8(0)
+	cur, cbits, sbits := uint32(0), uint8(0), uint8(0)
 	for _, b := range v {
-		cur = cur<<8 | uint(b)
+		cur = cur<<8 | uint32(b)
 		cbits += 8
 		sbits += 8
 		for cbits >= 8 {
@@ -97,7 +106,7 @@ func huffmanDecode(buf *bytes.Buffer, maxLen int, v []byte) error {
 		// Both are decoding errors per RFC 7541 section 5.2.
 		return ErrInvalidHuffman
 	}
-	if mask := uint(1<<cbits - 1); cur&mask != mask {
+	if mask := uint32(1<<cbits - 1); cur&mask != mask {
 		// Trailing bits must be a prefix of EOS per RFC 7541 section 5.2.
 		return ErrInvalidHuffman
 	}
@@ -156,7 +165,7 @@ func buildRootHuffmanNode() {
 			cur = cur.children[i]
 		}
 		shift := 8 - codeLen
-		start, end := int(uint8(code<<shift)), int(1<<shift)
+		start, end := int32(uint8(code<<shift)), int32(1<<shift)
 
 		leaves[sym].sym = byte(sym)
 		leaves[sym].codeLen = codeLen
@@ -173,11 +182,11 @@ func AppendHuffmanString(dst []byte, s []byte) []byte {
 	// So if a uint64 buffer has less than 32 valid bits can always accommodate another huffmanCode.
 	var (
 		x uint64 // buffer
-		n uint   // number valid of bits present in x
+		n uint32   // number valid of bits present in x
 	)
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		n += uint(_huffmanCodeLen()[c])
+		n += uint32(_huffmanCodeLen()[c])
 		x <<= _huffmanCodeLen()[c] % 64
 		x |= uint64(_huffmanCodes()[c])
 		if n >= 32 {

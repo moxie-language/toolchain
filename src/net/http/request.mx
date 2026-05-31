@@ -50,6 +50,7 @@ func (pe *ProtocolError) Error() string { return pe.ErrorString }
 
 // Is lets http.ErrNotSupported match errors.ErrUnsupported.
 func (pe *ProtocolError) Is(err error) bool {
+	requestInitOnce()
 	return pe == ErrNotSupported && err == errors.ErrUnsupported
 }
 
@@ -61,7 +62,21 @@ func (pe *ProtocolError) Is(err error) bool {
 // is not available.
 //
 // Compared by pointer identity in ProtocolError.Is - must remain a var.
-var ErrNotSupported = &ProtocolError{"feature not supported"}
+var ErrNotSupported *ProtocolError
+
+var _requestInitDone bool
+
+func requestInitOnce() {
+	if _requestInitDone {
+		return
+	}
+	_requestInitDone = true
+	ErrNotSupported = &ProtocolError{"feature not supported"}
+	multipartByReader = &multipart.Form{
+		Value: map[string][][]byte{},
+		File:  map[string][]*multipart.FileHeader{},
+	}
+}
 
 // Deprecated: ErrUnexpectedTrailer is no longer returned by
 // anything in the net/http package. Callers should not
@@ -144,8 +159,8 @@ type Request struct {
 	// client code always uses either HTTP/1.1 or HTTP/2.
 	// See the docs on Transport for details.
 	Proto      string // "HTTP/1.0"
-	ProtoMajor int    // 1
-	ProtoMinor int    // 0
+	ProtoMajor int32    // 1
+	ProtoMinor int32    // 0
 
 	// Header contains the request header fields either received
 	// by the server or to be sent by the client.
@@ -423,7 +438,7 @@ func (r *Request) Clone(ctx context.Context) *Request {
 
 // ProtoAtLeast reports whether the HTTP protocol used
 // in the request is at least major.minor.
-func (r *Request) ProtoAtLeast(major, minor int) bool {
+func (r *Request) ProtoAtLeast(major, minor int32) bool {
 	return r.ProtoMajor > major ||
 		r.ProtoMajor == major && r.ProtoMinor >= minor
 }
@@ -494,16 +509,14 @@ func (r *Request) Referer() string {
 // multipartByReader is a sentinel value.
 // Its presence in Request.MultipartForm indicates that parsing of the request
 // body has been handed off to a MultipartReader instead of ParseMultipartForm.
-var multipartByReader = &multipart.Form{
-	Value: map[string][][]byte{},
-	File:  map[string][]*multipart.FileHeader{},
-}
+var multipartByReader *multipart.Form
 
 // MultipartReader returns a MIME multipart reader if this is a
 // multipart/form-data or a multipart/mixed POST request, else returns nil and an error.
 // Use this function instead of [Request.ParseMultipartForm] to
 // process the request body as a stream.
 func (r *Request) MultipartReader() (*multipart.Reader, error) {
+	requestInitOnce()
 	if r.MultipartForm == multipartByReader {
 		return nil, errors.New("http: MultipartReader called twice")
 	}
@@ -823,7 +836,7 @@ func removeZone(host string) string {
 // ParseHTTPVersion parses an HTTP version string according to RFC 7230, section 2.6.
 // "HTTP/1.0" returns (1, 0, true). Note that strings without
 // a minor version, such as "HTTP/2", are not valid.
-func ParseHTTPVersion(vers string) (major, minor int, ok bool) {
+func ParseHTTPVersion(vers string) (major, minor int32, ok bool) {
 	switch vers {
 	case "HTTP/1.1":
 		return 1, 1, true
@@ -847,7 +860,7 @@ func ParseHTTPVersion(vers string) (major, minor int, ok bool) {
 	if err != nil {
 		return 0, 0, false
 	}
-	return int(maj), int(min), true
+	return int32(maj), int32(min), true
 }
 
 func validMethod(method string) bool {
@@ -1202,7 +1215,7 @@ type maxBytesReader struct {
 	err error         // sticky error
 }
 
-func (l *maxBytesReader) Read(p []byte) (n int, err error) {
+func (l *maxBytesReader) Read(p []byte) (n int32, err error) {
 	if l.err != nil {
 		return 0, l.err
 	}
@@ -1224,7 +1237,7 @@ func (l *maxBytesReader) Read(p []byte) (n int, err error) {
 		return n, err
 	}
 
-	n = int(l.n)
+	n = int32(l.n)
 	l.n = 0
 
 	// The server code and client code both use
@@ -1362,6 +1375,7 @@ func (r *Request) ParseForm() error {
 // continues parsing the request body.
 // After one call to ParseMultipartForm, subsequent calls have no effect.
 func (r *Request) ParseMultipartForm(maxMemory int64) error {
+	requestInitOnce()
 	if r.MultipartForm == multipartByReader {
 		return errors.New("http: multipart handled by MultipartReader")
 	}
@@ -1438,6 +1452,7 @@ func (r *Request) PostFormValue(key string) string {
 // FormFile returns the first file for the provided form key.
 // FormFile calls [Request.ParseMultipartForm] and [Request.ParseForm] if necessary.
 func (r *Request) FormFile(key string) (multipart.File, *multipart.FileHeader, error) {
+	requestInitOnce()
 	if r.MultipartForm == multipartByReader {
 		return nil, nil, errors.New("http: multipart handled by MultipartReader")
 	}
@@ -1482,7 +1497,7 @@ func (r *Request) SetPathValue(name, value string) {
 
 // patIndex returns the index of name in the list of named wildcards of the
 // request's pattern, or -1 if there is no such name.
-func (r *Request) patIndex(name string) int {
+func (r *Request) patIndex(name string) int32 {
 	// The linear search seems expensive compared to a map, but just creating the map
 	// takes a lot of time, and most patterns will just have a couple of wildcards.
 	if r.pat == nil {

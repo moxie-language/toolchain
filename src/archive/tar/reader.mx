@@ -267,10 +267,10 @@ func mergePAX(hdr *Header, paxHdrs map[string][]byte) (err error) {
 			hdr.Gname = v
 		case paxUid:
 			id64, err = strconv.ParseInt(v, 10, 64)
-			hdr.Uid = int(id64) // Integer overflow possible
+			hdr.Uid = int32(id64) // Integer overflow possible
 		case paxGid:
 			id64, err = strconv.ParseInt(v, 10, 64)
-			hdr.Gid = int(id64) // Integer overflow possible
+			hdr.Gid = int32(id64) // Integer overflow possible
 		case paxAtime:
 			hdr.AccessTime, err = parsePAXTime(v)
 		case paxMtime:
@@ -375,8 +375,8 @@ func (tr *Reader) readHeader() (*Header, *block, error) {
 	hdr.Linkname = p.parseString(v7.linkName())
 	hdr.Size = p.parseNumeric(v7.size())
 	hdr.Mode = p.parseNumeric(v7.mode())
-	hdr.Uid = int(p.parseNumeric(v7.uid()))
-	hdr.Gid = int(p.parseNumeric(v7.gid()))
+	hdr.Uid = int32(p.parseNumeric(v7.uid()))
+	hdr.Gid = int32(p.parseNumeric(v7.gid()))
 	hdr.ModTime = time.Unix(p.parseNumeric(v7.modTime()), 0)
 
 	// Unpack format specific fields.
@@ -400,7 +400,7 @@ func (tr *Reader) readHeader() (*Header, *block, error) {
 			if bytes.IndexFunc(tr.blk[:], notASCII) >= 0 {
 				hdr.Format = FormatUnknown // Non-ASCII characters in block.
 			}
-			nul := func(b []byte) bool { return int(b[len(b)-1]) == 0 }
+			nul := func(b []byte) bool { return int32(b[len(b)-1]) == 0 }
 			if !(nul(v7.size()) && nul(v7.mode()) && nul(v7.uid()) && nul(v7.gid()) &&
 				nul(v7.modTime()) && nul(ustar.devMajor()) && nul(ustar.devMinor())) {
 				hdr.Format = FormatUnknown // Numeric fields must end in NUL
@@ -523,7 +523,7 @@ func readGNUSparseMap1x0(r io.Reader) (sparseDatas, error) {
 		cntNewline int64
 		buf        bytes.Buffer
 		blk        block
-		totalSize  int
+		totalSize  int32
 	)
 
 	// feedTokens copies data in blocks from r into buf until there are
@@ -560,8 +560,8 @@ func readGNUSparseMap1x0(r io.Reader) (sparseDatas, error) {
 	if err := feedTokens(1); err != nil {
 		return nil, err
 	}
-	numEntries, err := strconv.ParseInt(nextToken(), 10, 0) // Intentionally parse as native int
-	if err != nil || numEntries < 0 || int(2*numEntries) < int(numEntries) {
+	numEntries, err := strconv.ParseInt(nextToken(), 10, 0) // Intentionally parse as native int32
+	if err != nil || numEntries < 0 || int32(2*numEntries) < int32(numEntries) {
 		return nil, ErrHeader
 	}
 
@@ -589,8 +589,8 @@ func readGNUSparseMap0x1(paxHdrs map[string][]byte) (sparseDatas, error) {
 	// Get number of entries.
 	// Use integer overflow resistant math to check this.
 	numEntriesStr := paxHdrs[paxGNUSparseNumBlocks]
-	numEntries, err := strconv.ParseInt(numEntriesStr, 10, 0) // Intentionally parse as native int
-	if err != nil || numEntries < 0 || int(2*numEntries) < int(numEntries) {
+	numEntries, err := strconv.ParseInt(numEntriesStr, 10, 0) // Intentionally parse as native int32
+	if err != nil || numEntries < 0 || int32(2*numEntries) < int32(numEntries) {
 		return nil, ErrHeader
 	}
 
@@ -628,7 +628,7 @@ func readGNUSparseMap0x1(paxHdrs map[string][]byte) (sparseDatas, error) {
 // Calling Read on special types like [TypeLink], [TypeSymlink], [TypeChar],
 // [TypeBlock], [TypeDir], and [TypeFifo] returns (0, [io.EOF]) regardless of what
 // the [Header.Size] claims.
-func (tr *Reader) Read(b []byte) (int, error) {
+func (tr *Reader) Read(b []byte) (int32, error) {
 	if tr.err != nil {
 		return 0, tr.err
 	}
@@ -666,7 +666,7 @@ type regFileReader struct {
 	nb int64     // Number of remaining bytes to read
 }
 
-func (fr *regFileReader) Read(b []byte) (n int, err error) {
+func (fr *regFileReader) Read(b []byte) (n int32, err error) {
 	if int64(len(b)) > fr.nb {
 		b = b[:fr.nb]
 	}
@@ -705,7 +705,7 @@ type sparseFileReader struct {
 	pos int64       // Current position in sparse file
 }
 
-func (sr *sparseFileReader) Read(b []byte) (n int, err error) {
+func (sr *sparseFileReader) Read(b []byte) (n int32, err error) {
 	finished := int64(len(b)) >= sr.logicalRemaining()
 	if finished {
 		b = b[:sr.logicalRemaining()]
@@ -714,7 +714,7 @@ func (sr *sparseFileReader) Read(b []byte) (n int, err error) {
 	b0 := b
 	endPos := sr.pos + int64(len(b))
 	for endPos > sr.pos && err == nil {
-		var nf int // Bytes read in fragment
+		var nf int32 // Bytes read in fragment
 		holeStart, holeEnd := sr.sp[0].Offset, sr.sp[0].endOffset()
 		if sr.pos < holeStart { // In a data fragment
 			bf := b[:min(int64(len(b)), holeStart-sr.pos)]
@@ -807,14 +807,14 @@ func (sr sparseFileReader) physicalRemaining() int64 {
 
 type zeroReader struct{}
 
-func (zeroReader) Read(b []byte) (int, error) {
+func (zeroReader) Read(b []byte) (int32, error) {
 	clear(b)
 	return len(b), nil
 }
 
 // mustReadFull is like io.ReadFull except it returns
 // io.ErrUnexpectedEOF when io.EOF is hit before len(b) bytes are read.
-func mustReadFull(r io.Reader, b []byte) (int, error) {
+func mustReadFull(r io.Reader, b []byte) (int32, error) {
 	n, err := tryReadFull(r, b)
 	if err == io.EOF {
 		err = io.ErrUnexpectedEOF
@@ -824,9 +824,9 @@ func mustReadFull(r io.Reader, b []byte) (int, error) {
 
 // tryReadFull is like io.ReadFull except it returns
 // io.EOF when it is hit before len(b) bytes are read.
-func tryReadFull(r io.Reader, b []byte) (n int, err error) {
+func tryReadFull(r io.Reader, b []byte) (n int32, err error) {
 	for len(b) > n && err == nil {
-		var nn int
+		var nn int32
 		nn, err = r.Read(b[n:])
 		n += nn
 	}

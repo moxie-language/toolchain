@@ -59,7 +59,7 @@ const (
 )
 
 type compressionLevel struct {
-	level, good, lazy, nice, chain, fastSkipHashing int
+	level, good, lazy, nice, chain, fastSkipHashing int32
 }
 
 type compressor struct {
@@ -69,7 +69,7 @@ type compressor struct {
 	bulkHasher func([]byte, []uint32)
 
 	// compression algorithm
-	fill      func(*compressor, []byte) int // copy data to window
+	fill      func(*compressor, []byte) int32 // copy data to window
 	step      func(*compressor)             // process window
 	bestSpeed *deflateFast                  // Encoder for BestSpeed
 
@@ -78,16 +78,16 @@ type compressor struct {
 	// If hashHead[hashValue] is within the current window, then
 	// hashPrev[hashHead[hashValue] & windowMask] contains the previous index
 	// with the same hash value.
-	chainHead  int
+	chainHead  int32
 	hashHead   [hashSize]uint32
 	hashPrev   [windowSize]uint32
-	hashOffset int
+	hashOffset int32
 
 	// input window: unprocessed data is window[index:windowEnd]
-	index         int
+	index         int32
 	window        []byte
-	windowEnd     int
-	blockStart    int  // window index where current tokens start
+	windowEnd     int32
+	blockStart    int32  // window index where current tokens start
 	byteAvailable bool // if true, still need to process window[index-1].
 
 	sync bool // requesting flush
@@ -96,16 +96,16 @@ type compressor struct {
 	tokens []token
 
 	// deflate state
-	length         int
-	offset         int
-	maxInsertIndex int
+	length         int32
+	offset         int32
+	maxInsertIndex int32
 	err            error
 
 	// hashMatch must be able to contain hashes for the maximum match length.
 	hashMatch [maxMatchLength - 1]uint32
 }
 
-func (d *compressor) fillDeflate(b []byte) int {
+func (d *compressor) fillDeflate(b []byte) int32 {
 	if d.index >= 2*windowSize-(minMatchLength+maxMatchLength) {
 		// shift the window by windowSize
 		copy(d.window, d.window[windowSize:2*windowSize])
@@ -125,15 +125,15 @@ func (d *compressor) fillDeflate(b []byte) int {
 			// Iterate over slices instead of arrays to avoid copying
 			// the entire table onto the stack (Issue #18625).
 			for i, v := range d.hashPrev[:] {
-				if int(v) > delta {
-					d.hashPrev[i] = uint32(int(v) - delta)
+				if int32(v) > delta {
+					d.hashPrev[i] = uint32(int32(v) - delta)
 				} else {
 					d.hashPrev[i] = 0
 				}
 			}
 			for i, v := range d.hashHead[:] {
-				if int(v) > delta {
-					d.hashHead[i] = uint32(int(v) - delta)
+				if int32(v) > delta {
+					d.hashHead[i] = uint32(int32(v) - delta)
 				} else {
 					d.hashHead[i] = 0
 				}
@@ -145,7 +145,7 @@ func (d *compressor) fillDeflate(b []byte) int {
 	return n
 }
 
-func (d *compressor) writeBlock(tokens []token, index int) error {
+func (d *compressor) writeBlock(tokens []token, index int32) error {
 	if index > 0 {
 		var window []byte
 		if d.blockStart <= index {
@@ -212,7 +212,7 @@ func (d *compressor) fillWindow(b []byte) {
 
 // Try to find a match starting at index whose length is greater than prevSize.
 // We only look at chainCount possibilities before giving up.
-func (d *compressor) findMatch(pos int, prevHead int, prevLength int, lookahead int) (length, offset int, ok bool) {
+func (d *compressor) findMatch(pos int32, prevHead int32, prevLength int32, lookahead int32) (length, offset int32, ok bool) {
 	minMatchLook := maxMatchLength
 	if lookahead < minMatchLook {
 		minMatchLook = lookahead
@@ -256,7 +256,7 @@ func (d *compressor) findMatch(pos int, prevHead int, prevLength int, lookahead 
 			// hashPrev[i & windowMask] has already been overwritten, so stop now.
 			break
 		}
-		i = int(d.hashPrev[i&windowMask]) - d.hashOffset
+		i = int32(d.hashPrev[i&windowMask]) - d.hashOffset
 		if i < minIndex || i < 0 {
 			break
 		}
@@ -299,7 +299,7 @@ func bulkHash4(b []byte, dst []uint32) {
 // matchLen returns the number of matching bytes in a and b
 // up to length 'max'. Both slices must be at least 'max'
 // bytes in size.
-func matchLen(a, b []byte, max int) int {
+func matchLen(a, b []byte, max int32) int32 {
 	a = a[:max]
 	b = b[:len(a)]
 	for i, av := range a {
@@ -402,7 +402,7 @@ Loop:
 			// Update the hash
 			hash := hash4(d.window[d.index : d.index+minMatchLength])
 			hh := &d.hashHead[hash&hashMask]
-			d.chainHead = int(*hh)
+			d.chainHead = int32(*hh)
 			d.hashPrev[d.index&windowMask] = uint32(d.chainHead)
 			*hh = uint32(d.index + d.hashOffset)
 		}
@@ -437,7 +437,7 @@ Loop:
 			// lookahead, the last two strings are not inserted into the hash
 			// table.
 			if d.length <= d.fastSkipHashing {
-				var newIndex int
+				var newIndex int32
 				if d.fastSkipHashing != skipNever {
 					newIndex = d.index + d.length
 				} else {
@@ -495,7 +495,7 @@ Loop:
 	}
 }
 
-func (d *compressor) fillStore(b []byte) int {
+func (d *compressor) fillStore(b []byte) int32 {
 	n := copy(d.window[d.windowEnd:], b)
 	d.windowEnd += n
 	return n
@@ -520,7 +520,7 @@ func (d *compressor) storeHuff() {
 	d.windowEnd = 0
 }
 
-func (d *compressor) write(b []byte) (n int, err error) {
+func (d *compressor) write(b []byte) (n int32, err error) {
 	if d.err != nil {
 		return 0, d.err
 	}
@@ -550,7 +550,7 @@ func (d *compressor) syncFlush() error {
 	return d.err
 }
 
-func (d *compressor) init(w io.Writer, level int) (err error) {
+func (d *compressor) init(w io.Writer, level int32) (err error) {
 	d.w = newHuffmanBitWriter(w)
 
 	levels := [10]compressionLevel{
@@ -662,7 +662,7 @@ func (d *compressor) close() error {
 //
 // If level is in the range [-2, 9] then the error returned will be nil.
 // Otherwise the error returned will be non-nil.
-func NewWriter(w io.Writer, level int) (*Writer, error) {
+func NewWriter(w io.Writer, level int32) (*Writer, error) {
 	var dw Writer
 	if err := dw.d.init(w, level); err != nil {
 		return nil, err
@@ -676,7 +676,7 @@ func NewWriter(w io.Writer, level int) (*Writer, error) {
 // any compressed output. The compressed data written to w
 // can only be decompressed by a reader initialized with the
 // same dictionary (see [NewReaderDict]).
-func NewWriterDict(w io.Writer, level int, dict []byte) (*Writer, error) {
+func NewWriterDict(w io.Writer, level int32, dict []byte) (*Writer, error) {
 	dw := &dictWriter{w}
 	zw, err := NewWriter(dw, level)
 	if err != nil {
@@ -691,7 +691,7 @@ type dictWriter struct {
 	w io.Writer
 }
 
-func (w *dictWriter) Write(b []byte) (n int, err error) {
+func (w *dictWriter) Write(b []byte) (n int32, err error) {
 	return w.w.Write(b)
 }
 
@@ -706,7 +706,7 @@ type Writer struct {
 
 // Write writes data to w, which will eventually write the
 // compressed form of data to its underlying writer.
-func (w *Writer) Write(data []byte) (n int, err error) {
+func (w *Writer) Write(data []byte) (n int32, err error) {
 	return w.d.write(data)
 }
 

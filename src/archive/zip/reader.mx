@@ -253,7 +253,7 @@ type dirReader struct {
 	err error
 }
 
-func (r *dirReader) Read([]byte) (int, error) {
+func (r *dirReader) Read([]byte) (int32, error) {
 	return 0, r.err
 }
 
@@ -274,7 +274,7 @@ func (r *checksumReader) Stat() (fs.FileInfo, error) {
 	return headerFileInfo{&r.f.FileHeader}, nil
 }
 
-func (r *checksumReader) Read(b []byte) (n int, err error) {
+func (r *checksumReader) Read(b []byte) (n int32, err error) {
 	if r.err != nil {
 		return 0, r.err
 	}
@@ -328,8 +328,8 @@ func (f *File) findBodyOffset() (int64, error) {
 		return 0, ErrFormat
 	}
 	b = b[22:] // skip over most of the header
-	filenameLen := int(b.uint16())
-	extraLen := int(b.uint16())
+	filenameLen := int32(b.uint16())
+	extraLen := int32(b.uint16())
 	return int64(fileHeaderLen + filenameLen + extraLen), nil
 }
 
@@ -356,9 +356,9 @@ func readDirectoryHeader(f *File, r io.Reader) error {
 	f.UncompressedSize = b.uint32()
 	f.CompressedSize64 = uint64(f.CompressedSize)
 	f.UncompressedSize64 = uint64(f.UncompressedSize)
-	filenameLen := int(b.uint16())
-	extraLen := int(b.uint16())
-	commentLen := int(b.uint16())
+	filenameLen := int32(b.uint16())
+	extraLen := int32(b.uint16())
+	commentLen := int32(b.uint16())
 	b = b[4:] // skipped start disk number and internal attributes (2x uint16)
 	f.ExternalAttrs = b.uint32()
 	f.headerOffset = int64(b.uint32())
@@ -399,7 +399,7 @@ func readDirectoryHeader(f *File, r io.Reader) error {
 parseExtras:
 	for extra := readBuf(f.Extra); len(extra) >= 4; { // need at least tag and size
 		fieldTag := extra.uint16()
-		fieldSize := int(extra.uint16())
+		fieldSize := int32(extra.uint16())
 		if len(extra) < fieldSize {
 			break
 		}
@@ -441,7 +441,7 @@ parseExtras:
 			fieldBuf.uint32()        // reserved (ignored)
 			for len(fieldBuf) >= 4 { // need at least tag and size
 				attrTag := fieldBuf.uint16()
-				attrSize := int(fieldBuf.uint16())
+				attrSize := int32(fieldBuf.uint16())
 				if len(fieldBuf) < attrSize {
 					continue parseExtras
 				}
@@ -555,7 +555,7 @@ func readDirectoryEnd(r io.ReaderAt, size int64) (dir *directoryEnd, baseOffset 
 		if bLen > size {
 			bLen = size
 		}
-		buf = []byte{:int(bLen)}
+		buf = []byte{:int32(bLen)}
 		if _, err := r.ReadAt(buf, size-bLen); err != nil && err != io.EOF {
 			return nil, 0, err
 		}
@@ -580,7 +580,7 @@ func readDirectoryEnd(r io.ReaderAt, size int64) (dir *directoryEnd, baseOffset 
 		directoryOffset:    uint64(b.uint32()),
 		commentLen:         b.uint16(),
 	}
-	l := int(d.commentLen)
+	l := int32(d.commentLen)
 	if l > len(b) {
 		return nil, 0, errors.New("zip: invalid comment length")
 	}
@@ -676,12 +676,12 @@ func readDirectory64End(r io.ReaderAt, offset int64, d *directoryEnd) (err error
 	return nil
 }
 
-func findSignatureInBlock(b []byte) int {
+func findSignatureInBlock(b []byte) int32 {
 	for i := len(b) - directoryEndLen; i >= 0; i-- {
 		// defined from directoryEndSignature in struct.go
 		if b[i] == 'P' && b[i+1] == 'K' && b[i+2] == 0x05 && b[i+3] == 0x06 {
 			// n is length of comment
-			n := int(b[i+directoryEndLen-2]) | int(b[i+directoryEndLen-1])<<8
+			n := int32(b[i+directoryEndLen-2]) | int32(b[i+directoryEndLen-1])<<8
 			if n+directoryEndLen+i > len(b) {
 				// Truncated comment.
 				// Some parsers (such as Info-ZIP) ignore the truncated comment
@@ -720,7 +720,7 @@ func (b *readBuf) uint64() uint64 {
 	return v
 }
 
-func (b *readBuf) sub(n int) readBuf {
+func (b *readBuf) sub(n int32) readBuf {
 	b2 := (*b)[:n]
 	*b = (*b)[n:]
 	return b2
@@ -794,8 +794,8 @@ func (r *Reader) initFileList() {
 		// files and knownDirs map from a file/directory name
 		// to an index into the r.fileList entry that we are
 		// building. They are used to mark duplicate entries.
-		files := map[string]int{}
-		knownDirs := map[string]int{}
+		files := map[string]int32{}
+		knownDirs := map[string]int32{}
 
 		// dirs[name] is true if name is known to be a directory,
 		// because it appears as a prefix in a path.
@@ -849,13 +849,13 @@ func (r *Reader) initFileList() {
 			}
 		}
 
-		slices.SortFunc(r.fileList, func(a, b fileListEntry) int {
+		slices.SortFunc(r.fileList, func(a, b fileListEntry) int32 {
 			return fileEntryCompare(a.name, b.name)
 		})
 	}
 }
 
-func fileEntryCompare(x, y string) int {
+func fileEntryCompare(x, y string) int32 {
 	xdir, xelem, _ := split(x)
 	ydir, yelem, _ := split(y)
 	if xdir != ydir {
@@ -906,7 +906,7 @@ func (r *Reader) openLookup(name string) *fileListEntry {
 
 	dir, elem, _ := split(name)
 	files := r.fileList
-	i, _ := slices.BinarySearchFunc(files, dir, func(a fileListEntry, dir string) (ret int) {
+	i, _ := slices.BinarySearchFunc(files, dir, func(a fileListEntry, dir string) (ret int32) {
 		idir, ielem, _ := split(a.name)
 		if dir != idir {
 			return bytes.Compare(idir, dir)
@@ -924,7 +924,7 @@ func (r *Reader) openLookup(name string) *fileListEntry {
 
 func (r *Reader) openReadDir(dir string) []fileListEntry {
 	files := r.fileList
-	i, _ := slices.BinarySearchFunc(files, dir, func(a fileListEntry, dir string) int {
+	i, _ := slices.BinarySearchFunc(files, dir, func(a fileListEntry, dir string) int32 {
 		idir, _, _ := split(a.name)
 		if dir != idir {
 			return bytes.Compare(idir, dir)
@@ -932,7 +932,7 @@ func (r *Reader) openReadDir(dir string) []fileListEntry {
 		// find the first entry with dir
 		return +1
 	})
-	j, _ := slices.BinarySearchFunc(files, dir, func(a fileListEntry, dir string) int {
+	j, _ := slices.BinarySearchFunc(files, dir, func(a fileListEntry, dir string) int32 {
 		jdir, _, _ := split(a.name)
 		if dir != jdir {
 			return bytes.Compare(jdir, dir)
@@ -946,17 +946,17 @@ func (r *Reader) openReadDir(dir string) []fileListEntry {
 type openDir struct {
 	e      *fileListEntry
 	files  []fileListEntry
-	offset int
+	offset int32
 }
 
 func (d *openDir) Close() error               { return nil }
 func (d *openDir) Stat() (fs.FileInfo, error) { return d.e.stat() }
 
-func (d *openDir) Read([]byte) (int, error) {
+func (d *openDir) Read([]byte) (int32, error) {
 	return 0, &fs.PathError{Op: "read", Path: d.e.name, Err: errors.New("is a directory")}
 }
 
-func (d *openDir) ReadDir(count int) ([]fs.DirEntry, error) {
+func (d *openDir) ReadDir(count int32) ([]fs.DirEntry, error) {
 	n := len(d.files) - d.offset
 	if count > 0 && n > count {
 		n = count

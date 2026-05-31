@@ -19,15 +19,21 @@ import (
 )
 
 var (
-	sockets         = map[fakeSockAddr]*netFD{} // fakeSockAddr → *netFD
-	fakePorts       = map[int]*netFD{}          // int (port #) → *netFD
+	sockets         map[fakeSockAddr]*netFD // fakeSockAddr → *netFD
+	fakePorts       map[int32]*netFD        // int32 (port #) → *netFD
 	nextPortCounter int32
 )
+
+func fakeNetInit() {
+	if sockets != nil { return }
+	sockets = map[fakeSockAddr]*netFD{}
+	fakePorts = map[int32]*netFD{}
+}
 
 const defaultBuffer = 65535
 
 type fakeSockAddr struct {
-	family  int
+	family  int32
 	address string
 }
 
@@ -40,7 +46,8 @@ func fakeAddr(sa sockaddr) fakeSockAddr {
 
 // socket returns a network file descriptor that is ready for
 // I/O using the fake network.
-func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only bool, laddr, raddr sockaddr, ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) (*netFD, error) {
+func socket(ctx context.Context, net string, family, sotype, proto int32, ipv6only bool, laddr, raddr sockaddr, ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) (*netFD, error) {
+	fakeNetInit()
 	if raddr != nil && ctrlCtxFn != nil {
 		return nil, os.NewSyscallError("socket", syscall.ENOTSUP)
 	}
@@ -72,7 +79,7 @@ func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only
 	return fd, nil
 }
 
-func validateResolvedAddr(net string, family int, sa sockaddr) error {
+func validateResolvedAddr(net string, family int32, sa sockaddr) error {
 	validateIP := func(ip IP) error {
 		switch family {
 		case syscall.AF_INET:
@@ -173,7 +180,7 @@ func validateResolvedAddr(net string, family int, sa sockaddr) error {
 	}
 }
 
-func matchIPFamily(family int, addr sockaddr) sockaddr {
+func matchIPFamily(family int32, addr sockaddr) sockaddr {
 	convertIP := func(ip IP) IP {
 		switch family {
 		case syscall.AF_INET:
@@ -205,7 +212,7 @@ func matchIPFamily(family int, addr sockaddr) sockaddr {
 
 type fakeNetFD struct {
 	fd           *netFD
-	assignedPort int // 0 if no port has been assigned for this socket
+	assignedPort int32 // 0 if no port has been assigned for this socket
 
 	queue         *packetQueue // incoming packets
 	peer          *netFD       // connected peer (for outgoing packets); nil for listeners and PacketConns
@@ -228,12 +235,12 @@ func newFakeNetFD(fd *netFD) *fakeNetFD {
 	return ffd
 }
 
-func (ffd *fakeNetFD) Read(p []byte) (n int, err error) {
+func (ffd *fakeNetFD) Read(p []byte) (n int32, err error) {
 	n, _, err = ffd.queue.recvfrom(ffd.readDeadline, p, false, nil)
 	return n, err
 }
 
-func (ffd *fakeNetFD) Write(p []byte) (nn int, err error) {
+func (ffd *fakeNetFD) Write(p []byte) (nn int32, err error) {
 	peer := ffd.peer
 	if peer == nil {
 		if ffd.fd.raddr == nil {
@@ -385,7 +392,7 @@ const maxPacketSize = 65535
 
 type packet struct {
 	buf       []byte
-	bufOffset int
+	bufOffset int32
 	next      *packet
 	from      sockaddr
 }
@@ -400,8 +407,8 @@ func (p *packet) clear() {
 
 type packetQueueState struct {
 	head, tail      *packet // unqueued packets
-	nBytes          int     // number of bytes enqueued in the packet buffers starting from head
-	readBufferBytes int     // soft limit on nbytes; no more packets may be enqueued when the limit is exceeded
+	nBytes          int32     // number of bytes enqueued in the packet buffers starting from head
+	readBufferBytes int32     // soft limit on nbytes; no more packets may be enqueued when the limit is exceeded
 	readClosed      bool    // true if the reader of the queue has stopped reading
 	writeClosed     bool    // true if the writer of the queue has stopped writing; the reader sees either io.EOF or syscall.ECONNRESET when they have read all buffered packets
 	noLinger        bool    // if true, the reader sees ECONNRESET instead of EOF
@@ -415,7 +422,7 @@ type packetQueue struct {
 	full  chan packetQueueState // contains the packets when buffer is full and not closed
 }
 
-func newPacketQueue(readBufferBytes int) *packetQueue {
+func newPacketQueue(readBufferBytes int32) *packetQueue {
 	pq := &packetQueue{
 		empty: chan packetQueueState{1},
 		ready: chan packetQueueState{1},
@@ -478,7 +485,7 @@ func (pq *packetQueue) setLinger(linger bool) error {
 	return nil
 }
 
-func (pq *packetQueue) write(dt *deadlineTimer, b []byte, from sockaddr) (n int, err error) {
+func (pq *packetQueue) write(dt *deadlineTimer, b []byte, from sockaddr) (n int32, err error) {
 	for {
 		dn := len(b)
 		if dn > maxPacketSize {
@@ -498,7 +505,7 @@ func (pq *packetQueue) write(dt *deadlineTimer, b []byte, from sockaddr) (n int,
 	}
 }
 
-func (pq *packetQueue) send(dt *deadlineTimer, b []byte, from sockaddr, block bool) (n int, err error) {
+func (pq *packetQueue) send(dt *deadlineTimer, b []byte, from sockaddr, block bool) (n int32, err error) {
 	if from == nil {
 		return 0, os.NewSyscallError("send", syscall.EINVAL)
 	}
@@ -553,7 +560,7 @@ func (pq *packetQueue) send(dt *deadlineTimer, b []byte, from sockaddr, block bo
 	return len(b), nil
 }
 
-func (pq *packetQueue) recvfrom(dt *deadlineTimer, b []byte, wholePacket bool, checkFrom func(sockaddr) error) (n int, from sockaddr, err error) {
+func (pq *packetQueue) recvfrom(dt *deadlineTimer, b []byte, wholePacket bool, checkFrom func(sockaddr) error) (n int32, from sockaddr, err error) {
 	var q packetQueueState
 	var empty chan packetQueueState
 	if len(b) == 0 {
@@ -622,7 +629,7 @@ func (pq *packetQueue) recvfrom(dt *deadlineTimer, b []byte, wholePacket bool, c
 
 // setReadBuffer sets a soft limit on the number of bytes available to read
 // from the pipe.
-func (pq *packetQueue) setReadBuffer(bytes int) error {
+func (pq *packetQueue) setReadBuffer(bytes int32) error {
 	if bytes <= 0 {
 		return os.NewSyscallError("setReadBuffer", syscall.EINVAL)
 	}
@@ -677,7 +684,7 @@ func (dt *deadlineTimer) Reset(deadline time.Time) bool {
 	return true
 }
 
-func sysSocket(family, sotype, proto int) (int, error) {
+func sysSocket(family, sotype, proto int32) (int32, error) {
 	return 0, os.NewSyscallError("sysSocket", syscall.ENOSYS)
 }
 
@@ -858,7 +865,7 @@ func (ffd *fakeNetFD) assignFakeAddr(addr sockaddr) error {
 	assignIP := func(addr sockaddr) error {
 		var (
 			ip   IP
-			port int
+			port int32
 			zone string
 		)
 		switch addr := addr.(type) {
@@ -898,7 +905,7 @@ func (ffd *fakeNetFD) assignFakeAddr(addr sockaddr) error {
 		if port == 0 {
 			var prevPort int32
 			portWrapped := false
-			nextPort := func() (int, bool) {
+			nextPort := func() (int32, bool) {
 				for {
 					nextPortCounter++
 					port := nextPortCounter
@@ -928,7 +935,7 @@ func (ffd *fakeNetFD) assignFakeAddr(addr sockaddr) error {
 					}
 
 					prevPort = port
-					return int(port), true
+					return int32(port), true
 				}
 			}
 
@@ -940,7 +947,7 @@ func (ffd *fakeNetFD) assignFakeAddr(addr sockaddr) error {
 					return syscall.EADDRINUSE
 				}
 
-				ffd.assignedPort = int(port)
+				ffd.assignedPort = int32(port)
 				if _, dup := fakePorts[ffd.assignedPort]; !dup {
 					fakePorts[ffd.assignedPort] = ffd.fd
 					break
@@ -992,7 +999,7 @@ func (ffd *fakeNetFD) assignFakeAddr(addr sockaddr) error {
 	}
 }
 
-func (ffd *fakeNetFD) readFrom(p []byte) (n int, sa syscall.Sockaddr, err error) {
+func (ffd *fakeNetFD) readFrom(p []byte) (n int32, sa syscall.Sockaddr, err error) {
 	if ffd.queue == nil {
 		return 0, nil, os.NewSyscallError("readFrom", syscall.EINVAL)
 	}
@@ -1011,7 +1018,7 @@ func (ffd *fakeNetFD) readFrom(p []byte) (n int, sa syscall.Sockaddr, err error)
 	return n, sa, err
 }
 
-func (ffd *fakeNetFD) readFromInet4(p []byte, sa *syscall.SockaddrInet4) (n int, err error) {
+func (ffd *fakeNetFD) readFromInet4(p []byte, sa *syscall.SockaddrInet4) (n int32, err error) {
 	n, _, err = ffd.queue.recvfrom(ffd.readDeadline, p, true, func(from sockaddr) error {
 		fromSA, err := from.sockaddr(syscall.AF_INET)
 		if err != nil {
@@ -1026,7 +1033,7 @@ func (ffd *fakeNetFD) readFromInet4(p []byte, sa *syscall.SockaddrInet4) (n int,
 	return n, err
 }
 
-func (ffd *fakeNetFD) readFromInet6(p []byte, sa *syscall.SockaddrInet6) (n int, err error) {
+func (ffd *fakeNetFD) readFromInet6(p []byte, sa *syscall.SockaddrInet6) (n int32, err error) {
 	n, _, err = ffd.queue.recvfrom(ffd.readDeadline, p, true, func(from sockaddr) error {
 		fromSA, err := from.sockaddr(syscall.AF_INET6)
 		if err != nil {
@@ -1041,7 +1048,7 @@ func (ffd *fakeNetFD) readFromInet6(p []byte, sa *syscall.SockaddrInet6) (n int,
 	return n, err
 }
 
-func (ffd *fakeNetFD) readMsg(p []byte, oob []byte, flags int) (n, oobn, retflags int, sa syscall.Sockaddr, err error) {
+func (ffd *fakeNetFD) readMsg(p []byte, oob []byte, flags int32) (n, oobn, retflags int32, sa syscall.Sockaddr, err error) {
 	if flags != 0 {
 		return 0, 0, 0, nil, os.NewSyscallError("readMsg", syscall.ENOTSUP)
 	}
@@ -1049,7 +1056,7 @@ func (ffd *fakeNetFD) readMsg(p []byte, oob []byte, flags int) (n, oobn, retflag
 	return n, 0, 0, sa, err
 }
 
-func (ffd *fakeNetFD) readMsgInet4(p []byte, oob []byte, flags int, sa *syscall.SockaddrInet4) (n, oobn, retflags int, err error) {
+func (ffd *fakeNetFD) readMsgInet4(p []byte, oob []byte, flags int32, sa *syscall.SockaddrInet4) (n, oobn, retflags int32, err error) {
 	if flags != 0 {
 		return 0, 0, 0, os.NewSyscallError("readMsgInet4", syscall.ENOTSUP)
 	}
@@ -1057,7 +1064,7 @@ func (ffd *fakeNetFD) readMsgInet4(p []byte, oob []byte, flags int, sa *syscall.
 	return n, 0, 0, err
 }
 
-func (ffd *fakeNetFD) readMsgInet6(p []byte, oob []byte, flags int, sa *syscall.SockaddrInet6) (n, oobn, retflags int, err error) {
+func (ffd *fakeNetFD) readMsgInet6(p []byte, oob []byte, flags int32, sa *syscall.SockaddrInet6) (n, oobn, retflags int32, err error) {
 	if flags != 0 {
 		return 0, 0, 0, os.NewSyscallError("readMsgInet6", syscall.ENOTSUP)
 	}
@@ -1065,7 +1072,7 @@ func (ffd *fakeNetFD) readMsgInet6(p []byte, oob []byte, flags int, sa *syscall.
 	return n, 0, 0, err
 }
 
-func (ffd *fakeNetFD) writeMsg(p []byte, oob []byte, sa syscall.Sockaddr) (n int, oobn int, err error) {
+func (ffd *fakeNetFD) writeMsg(p []byte, oob []byte, sa syscall.Sockaddr) (n int32, oobn int32, err error) {
 	if len(oob) > 0 {
 		return 0, 0, os.NewSyscallError("writeMsg", syscall.ENOTSUP)
 	}
@@ -1073,15 +1080,15 @@ func (ffd *fakeNetFD) writeMsg(p []byte, oob []byte, sa syscall.Sockaddr) (n int
 	return n, 0, err
 }
 
-func (ffd *fakeNetFD) writeMsgInet4(p []byte, oob []byte, sa *syscall.SockaddrInet4) (n int, oobn int, err error) {
+func (ffd *fakeNetFD) writeMsgInet4(p []byte, oob []byte, sa *syscall.SockaddrInet4) (n int32, oobn int32, err error) {
 	return ffd.writeMsg(p, oob, sa)
 }
 
-func (ffd *fakeNetFD) writeMsgInet6(p []byte, oob []byte, sa *syscall.SockaddrInet6) (n int, oobn int, err error) {
+func (ffd *fakeNetFD) writeMsgInet6(p []byte, oob []byte, sa *syscall.SockaddrInet6) (n int32, oobn int32, err error) {
 	return ffd.writeMsg(p, oob, sa)
 }
 
-func (ffd *fakeNetFD) writeTo(p []byte, sa syscall.Sockaddr) (n int, err error) {
+func (ffd *fakeNetFD) writeTo(p []byte, sa syscall.Sockaddr) (n int32, err error) {
 	raddr := ffd.fd.raddr
 	if sa != nil {
 		if ffd.fd.isConnected {
@@ -1114,11 +1121,11 @@ func (ffd *fakeNetFD) writeTo(p []byte, sa syscall.Sockaddr) (n int, err error) 
 	return peer.queue.send(ffd.writeDeadline, p, ffd.fd.laddr.(sockaddr), block)
 }
 
-func (ffd *fakeNetFD) writeToInet4(p []byte, sa *syscall.SockaddrInet4) (n int, err error) {
+func (ffd *fakeNetFD) writeToInet4(p []byte, sa *syscall.SockaddrInet4) (n int32, err error) {
 	return ffd.writeTo(p, sa)
 }
 
-func (ffd *fakeNetFD) writeToInet6(p []byte, sa *syscall.SockaddrInet6) (n int, err error) {
+func (ffd *fakeNetFD) writeToInet6(p []byte, sa *syscall.SockaddrInet6) (n int32, err error) {
 	return ffd.writeTo(p, sa)
 }
 
@@ -1126,7 +1133,7 @@ func (ffd *fakeNetFD) dup() (f *os.File, err error) {
 	return nil, os.NewSyscallError("dup", syscall.ENOSYS)
 }
 
-func (ffd *fakeNetFD) setReadBuffer(bytes int) error {
+func (ffd *fakeNetFD) setReadBuffer(bytes int32) error {
 	if ffd.queue == nil {
 		return os.NewSyscallError("setReadBuffer", syscall.EINVAL)
 	}
@@ -1134,11 +1141,11 @@ func (ffd *fakeNetFD) setReadBuffer(bytes int) error {
 	return nil
 }
 
-func (ffd *fakeNetFD) setWriteBuffer(bytes int) error {
+func (ffd *fakeNetFD) setWriteBuffer(bytes int32) error {
 	return os.NewSyscallError("setWriteBuffer", syscall.ENOTSUP)
 }
 
-func (ffd *fakeNetFD) setLinger(sec int) error {
+func (ffd *fakeNetFD) setLinger(sec int32) error {
 	if sec < 0 || ffd.peer == nil {
 		return os.NewSyscallError("setLinger", syscall.EINVAL)
 	}

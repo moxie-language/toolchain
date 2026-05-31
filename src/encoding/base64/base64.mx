@@ -154,7 +154,7 @@ func (enc *Encoding) Encode(dst, src []byte) {
 	n := (len(src) / 3) * 3
 	for si < n {
 		// Convert 3x 8bit source bytes into 4 bytes
-		val := uint(src[si+0])<<16 | uint(src[si+1])<<8 | uint(src[si+2])
+		val := uint32(src[si+0])<<16 | uint32(src[si+1])<<8 | uint32(src[si+2])
 
 		dst[di+0] = enc.encode[val>>18&0x3F]
 		dst[di+1] = enc.encode[val>>12&0x3F]
@@ -170,9 +170,9 @@ func (enc *Encoding) Encode(dst, src []byte) {
 		return
 	}
 	// Add the remaining small block
-	val := uint(src[si+0]) << 16
+	val := uint32(src[si+0]) << 16
 	if remain == 2 {
-		val |= uint(src[si+1]) << 8
+		val |= uint32(src[si+1]) << 8
 	}
 
 	dst[di+0] = enc.encode[val>>18&0x3F]
@@ -213,18 +213,18 @@ type encoder struct {
 	enc  *Encoding
 	w    io.Writer
 	buf  [3]byte    // buffered data waiting to be encoded
-	nbuf int        // number of bytes in buf
+	nbuf int32        // number of bytes in buf
 	out  [1024]byte // output buffer
 }
 
-func (e *encoder) Write(p []byte) (n int, err error) {
+func (e *encoder) Write(p []byte) (n int32, err error) {
 	if e.err != nil {
 		return 0, e.err
 	}
 
 	// Leading fringe.
 	if e.nbuf > 0 {
-		var i int
+		var i int32
 		for i = 0; i < len(p) && e.nbuf < 3; i++ {
 			e.buf[e.nbuf] = p[i]
 			e.nbuf++
@@ -286,7 +286,7 @@ func NewEncoder(enc *Encoding, w io.Writer) io.WriteCloser {
 
 // EncodedLen returns the length in bytes of the base64 encoding
 // of an input buffer of length n.
-func (enc *Encoding) EncodedLen(n int) int {
+func (enc *Encoding) EncodedLen(n int32) int32 {
 	if enc.padChar == NoPadding {
 		return n/3*4 + (n%3*8+5)/6 // minimum # chars at 6 bits per char
 	}
@@ -308,7 +308,7 @@ func (e CorruptInputError) Error() string {
 // source buffer si.
 // It returns the number of bytes read from src, the number of bytes written
 // to dst, and an error, if any.
-func (enc *Encoding) decodeQuantum(dst, src []byte, si int) (nsi, n int, err error) {
+func (enc *Encoding) decodeQuantum(dst, src []byte, si int32) (nsi, n int32, err error) {
 	// Decode quantum using the base64 alphabet
 	var dbuf [4]byte
 	dlen := 4
@@ -381,7 +381,7 @@ func (enc *Encoding) decodeQuantum(dst, src []byte, si int) (nsi, n int, err err
 	}
 
 	// Convert 4x 6bit source bytes into 3 bytes
-	val := uint(dbuf[0])<<18 | uint(dbuf[1])<<12 | uint(dbuf[2])<<6 | uint(dbuf[3])
+	val := uint32(dbuf[0])<<18 | uint32(dbuf[1])<<12 | uint32(dbuf[2])<<6 | uint32(dbuf[3])
 	dbuf[2], dbuf[1], dbuf[0] = byte(val>>0), byte(val>>8), byte(val>>16)
 	switch dlen {
 	case 4:
@@ -448,12 +448,12 @@ type decoder struct {
 	enc     *Encoding
 	r       io.Reader
 	buf     [1024]byte // leftover input
-	nbuf    int
+	nbuf    int32
 	out     []byte // leftover decoded output
 	outbuf  [1024 / 4 * 3]byte
 }
 
-func (d *decoder) Read(p []byte) (n int, err error) {
+func (d *decoder) Read(p []byte) (n int32, err error) {
 	// Use leftover decoded output from last read.
 	if len(d.out) > 0 {
 		n = copy(p, d.out)
@@ -483,7 +483,7 @@ func (d *decoder) Read(p []byte) (n int, err error) {
 	if d.nbuf < 4 {
 		if d.enc.padChar == NoPadding && d.nbuf > 0 {
 			// Decode final fragment, without padding.
-			var nw int
+			var nw int32
 			nw, d.err = d.enc.Decode(d.outbuf[:], d.buf[:d.nbuf])
 			d.nbuf = 0
 			d.out = d.outbuf[:nw]
@@ -525,7 +525,7 @@ func (d *decoder) Read(p []byte) (n int, err error) {
 // the decoded data. If src contains invalid base64 data, it will return the
 // number of bytes successfully written and [CorruptInputError].
 // New line characters (\r and \n) are ignored.
-func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
+func (enc *Encoding) Decode(dst, src []byte) (n int32, err error) {
 	if len(src) == 0 {
 		return 0, nil
 	}
@@ -552,7 +552,7 @@ func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
 			n += 6
 			si += 8
 		} else {
-			var ninc int
+			var ninc int32
 			si, ninc, err = enc.decodeQuantum(dst[n:], src, si)
 			n += ninc
 			if err != nil {
@@ -573,7 +573,7 @@ func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
 			n += 3
 			si += 4
 		} else {
-			var ninc int
+			var ninc int32
 			si, ninc, err = enc.decodeQuantum(dst[n:], src, si)
 			n += ninc
 			if err != nil {
@@ -583,7 +583,7 @@ func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
 	}
 
 	for si < len(src) {
-		var ninc int
+		var ninc int32
 		si, ninc, err = enc.decodeQuantum(dst[n:], src, si)
 		n += ninc
 		if err != nil {
@@ -633,7 +633,7 @@ type newlineFilteringReader struct {
 	wrapped io.Reader
 }
 
-func (r *newlineFilteringReader) Read(p []byte) (int, error) {
+func (r *newlineFilteringReader) Read(p []byte) (int32, error) {
 	n, err := r.wrapped.Read(p)
 	for n > 0 {
 		offset := 0
@@ -661,11 +661,11 @@ func NewDecoder(enc *Encoding, r io.Reader) io.Reader {
 
 // DecodedLen returns the maximum length in bytes of the decoded data
 // corresponding to n bytes of base64-encoded data.
-func (enc *Encoding) DecodedLen(n int) int {
+func (enc *Encoding) DecodedLen(n int32) int32 {
 	return decodedLen(n, enc.padChar)
 }
 
-func decodedLen(n int, padChar rune) int {
+func decodedLen(n int32, padChar rune) int32 {
 	if padChar == NoPadding {
 		// Unpadded data may end with partial block of 2-3 characters.
 		return n/4*3 + n%4*6/8

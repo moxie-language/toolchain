@@ -18,12 +18,21 @@ import (
 // os.Process.Signal is not implemented; it will return an error instead of
 // sending a signal.
 var (
-	Interrupt Signal = syscall.SIGINT
-	Kill      Signal = syscall.SIGKILL
+	Interrupt Signal
+	Kill      Signal
+	_signalsReady bool
 )
 
+func signalsInit() {
+	if _signalsReady { return }
+	_signalsReady = true
+	Interrupt = syscall.SIGINT
+	Kill = syscall.SIGKILL
+}
+
 // Keep compatible with golang and always succeed and return new proc with pid on Linux.
-func findProcess(pid int) (*Process, error) {
+func findProcess(pid int32) (*Process, error) {
+	signalsInit()
 	return &Process{Pid: pid}, nil
 }
 
@@ -44,7 +53,7 @@ func (p *Process) release() error {
 // * No ForkLocking (might be introduced by #4273)
 // * No parent-child communication via pipes (TODO)
 // * No waiting for crashes child processes to prohibit zombie process accumulation / Wait status checking (TODO)
-func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int, err error) {
+func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int32, err error) {
 	if argv == nil {
 		return 0, errors.New("exec: no argv")
 	}
@@ -72,7 +81,7 @@ func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int, err error) 
 	}
 
 	// Parent process: return child PID.
-	return int(p), nil
+	return int32(p), nil
 }
 
 // In Golang, the idiomatic way to create a new process is to use the StartProcess function.
@@ -81,6 +90,7 @@ func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int, err error) 
 // The StartProcess function creates a new process by forking the current process and then calling execve to replace the current process with the new process.
 // It thereby replaces the newly created process with the specified command and arguments.
 func startProcess(name string, argv []string, attr *ProcAttr) (p *Process, err error) {
+	signalsInit()
 	if attr != nil {
 		if attr.Dir != "" {
 			return nil, ErrNotImplementedDir

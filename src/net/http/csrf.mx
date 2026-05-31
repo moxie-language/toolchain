@@ -76,7 +76,17 @@ type noopHandler struct{}
 
 func (noopHandler) ServeHTTP(ResponseWriter, *Request) {}
 
-var sentinelHandler Handler = &noopHandler{}
+var sentinelHandler Handler
+
+var _csrfInitDone bool
+
+func csrfInitOnce() {
+	if _csrfInitDone {
+		return
+	}
+	_csrfInitDone = true
+	sentinelHandler = &noopHandler{}
+}
 
 // AddInsecureBypassPattern permits all requests that match the given pattern.
 //
@@ -88,6 +98,7 @@ var sentinelHandler Handler = &noopHandler{}
 // AddInsecureBypassPattern can be called concurrently with other methods or
 // request handling, and applies to future requests.
 func (c *CrossOriginProtection) AddInsecureBypassPattern(pattern []byte) {
+	csrfInitOnce()
 	if c.bypass == nil {
 		c.bypass = NewServeMux()
 	}
@@ -164,6 +175,7 @@ const (
 // isRequestExempt checks the bypasses which require taking a lock, and should
 // be deferred until the last moment.
 func (c *CrossOriginProtection) isRequestExempt(req *Request) bool {
+	csrfInitOnce()
 	if bypass := c.bypass; bypass != nil {
 		if h, _ := bypass.Handler(req); h == sentinelHandler {
 			// The request matches a bypass pattern.

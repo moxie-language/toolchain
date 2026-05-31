@@ -45,7 +45,7 @@ type Reader struct {
 	// Buffered decompressed data.
 	buffer []byte
 	// Current read offset in buffer.
-	off int
+	off int32
 
 	// The current repeated offsets.
 	repeatedOffset1 uint32
@@ -54,7 +54,7 @@ type Reader struct {
 
 	// The current Huffman tree used for compressing literals.
 	huffmanTable     []uint16
-	huffmanTableBits int
+	huffmanTableBits int32
 
 	// The window for back references.
 	window window
@@ -120,7 +120,7 @@ func (r *Reader) Reset(input io.Reader) {
 }
 
 // Read implements [io.Reader].
-func (r *Reader) Read(p []byte) (int, error) {
+func (r *Reader) Read(p []byte) (int32, error) {
 	if err := r.refillIfNeeded(); err != nil {
 		return 0, err
 	}
@@ -203,7 +203,7 @@ retry:
 		fcsFieldSize = 0
 	}
 
-	var windowDescriptorSize int
+	var windowDescriptorSize int32
 	if singleSegment {
 		windowDescriptorSize = 0
 	} else {
@@ -306,7 +306,7 @@ retry:
 	r.repeatedOffset2 = 4
 	r.repeatedOffset3 = 8
 	r.huffmanTableBits = 0
-	r.window.reset(int(windowSize))
+	r.window.reset(int32(windowSize))
 	r.seqTables[0] = nil
 	r.seqTables[1] = nil
 	r.seqTables[2] = nil
@@ -357,7 +357,7 @@ func (r *Reader) skipFrame() error {
 	}
 
 	n, err := io.CopyN(io.Discard(), r.r, int64(size))
-	relativeOffset += int(n)
+	relativeOffset += int32(n)
 	if err != nil {
 		return r.wrapNonEOFError(relativeOffset, err)
 	}
@@ -380,7 +380,7 @@ func (r *Reader) readBlock() error {
 
 	lastBlock := header&1 != 0
 	blockType := (header >> 1) & 3
-	blockSize := int(header >> 3)
+	blockSize := int32(header >> 3)
 
 	// Maximum block size is smaller of window size and 128K.
 	// We don't record the window size for a single segment frame,
@@ -458,7 +458,7 @@ func (r *Reader) readBlock() error {
 
 // setBufferSize sets the decompressed buffer size.
 // When this is called the buffer is empty.
-func (r *Reader) setBufferSize(size int) {
+func (r *Reader) setBufferSize(size int32) {
 	if cap(r.buffer) < size {
 		need := size - cap(r.buffer)
 		r.buffer = append(r.buffer[:cap(r.buffer)], []byte{:need}...)
@@ -480,22 +480,22 @@ func (ze *zstdError) Unwrap() error {
 	return ze.err
 }
 
-func (r *Reader) makeEOFError(off int) error {
+func (r *Reader) makeEOFError(off int32) error {
 	return r.wrapError(off, io.ErrUnexpectedEOF)
 }
 
-func (r *Reader) wrapNonEOFError(off int, err error) error {
+func (r *Reader) wrapNonEOFError(off int32, err error) error {
 	if err == io.EOF {
 		err = io.ErrUnexpectedEOF
 	}
 	return r.wrapError(off, err)
 }
 
-func (r *Reader) makeError(off int, msg []byte) error {
+func (r *Reader) makeError(off int32, msg []byte) error {
 	return r.wrapError(off, errors.New(msg))
 }
 
-func (r *Reader) wrapError(off int, err error) error {
+func (r *Reader) wrapError(off int32, err error) error {
 	if err == io.EOF {
 		return err
 	}

@@ -97,7 +97,7 @@ const (
 )
 
 type huffmanDecoder struct {
-	min      int                      // the minimum code length
+	min      int32                      // the minimum code length
 	chunks   [huffmanNumChunks]uint32 // chunks as described above
 	links    [][]uint32               // overflow links
 	linkMask uint32                   // mask the width of the link table
@@ -108,7 +108,7 @@ type huffmanDecoder struct {
 // tree (i.e., neither over-subscribed nor under-subscribed). The exception is a
 // degenerate case where the tree has only a single symbol with length 1. Empty
 // trees are permitted.
-func (h *huffmanDecoder) init(lengths []int) bool {
+func (h *huffmanDecoder) init(lengths []int32) bool {
 	// Sanity enables additional runtime tests during Huffman
 	// table construction. It's intended to be used during
 	// development to supplement the currently ad-hoc unit tests.
@@ -120,8 +120,8 @@ func (h *huffmanDecoder) init(lengths []int) bool {
 
 	// Count number of codes of each length,
 	// compute min and max length.
-	var count [maxCodeLen]int
-	var min, max int
+	var count [maxCodeLen]int32
+	var min, max int32
 	for _, n := range lengths {
 		if n == 0 {
 			continue
@@ -147,7 +147,7 @@ func (h *huffmanDecoder) init(lengths []int) bool {
 	}
 
 	code := 0
-	var nextcode [maxCodeLen]int
+	var nextcode [maxCodeLen]int32
 	for i := min; i <= max; i++ {
 		code <<= 1
 		nextcode[i] = code
@@ -159,22 +159,22 @@ func (h *huffmanDecoder) init(lengths []int) bool {
 	// Exception: To be compatible with zlib, we also need to
 	// accept degenerate single-code codings. See also
 	// TestDegenerateHuffmanCoding.
-	if code != 1<<uint(max) && !(code == 1 && max == 1) {
+	if code != 1<<uint32(max) && !(code == 1 && max == 1) {
 		return false
 	}
 
 	h.min = min
 	if max > huffmanChunkBits {
-		numLinks := 1 << (uint(max) - huffmanChunkBits)
+		numLinks := 1 << (uint32(max) - huffmanChunkBits)
 		h.linkMask = uint32(numLinks - 1)
 
 		// create link tables
 		link := nextcode[huffmanChunkBits+1] >> 1
 		h.links = [][]uint32{:huffmanNumChunks-link}
-		for j := uint(link); j < huffmanNumChunks; j++ {
-			reverse := int(bits.Reverse16(uint16(j)))
-			reverse >>= uint(16 - huffmanChunkBits)
-			off := j - uint(link)
+		for j := uint32(link); j < huffmanNumChunks; j++ {
+			reverse := int32(bits.Reverse16(uint16(j)))
+			reverse >>= uint32(16 - huffmanChunkBits)
+			off := j - uint32(link)
 			if sanity && h.chunks[reverse] != 0 {
 				panic("impossible: overwriting existing chunk")
 			}
@@ -190,10 +190,10 @@ func (h *huffmanDecoder) init(lengths []int) bool {
 		code := nextcode[n]
 		nextcode[n]++
 		chunk := uint32(i<<huffmanValueShift | n)
-		reverse := int(bits.Reverse16(uint16(code)))
-		reverse >>= uint(16 - n)
+		reverse := int32(bits.Reverse16(uint16(code)))
+		reverse >>= uint32(16 - n)
 		if n <= huffmanChunkBits {
-			for off := reverse; off < len(h.chunks); off += 1 << uint(n) {
+			for off := reverse; off < len(h.chunks); off += 1 << uint32(n) {
 				// We should never need to overwrite
 				// an existing chunk. Also, 0 is
 				// never a valid chunk, because the
@@ -214,7 +214,7 @@ func (h *huffmanDecoder) init(lengths []int) bool {
 			value := h.chunks[j] >> huffmanValueShift
 			linktab := h.links[value]
 			reverse >>= huffmanChunkBits
-			for off := reverse; off < len(linktab); off += 1 << uint(n-huffmanChunkBits) {
+			for off := reverse; off < len(linktab); off += 1 << uint32(n-huffmanChunkBits) {
 				if sanity && linktab[off] != 0 {
 					panic("impossible: overwriting existing chunk")
 				}
@@ -267,14 +267,14 @@ type decompressor struct {
 
 	// Input bits, in top of b.
 	b  uint32
-	nb uint
+	nb uint32
 
 	// Huffman decoders for literal/length, distance.
 	h1, h2 huffmanDecoder
 
 	// Length arrays used to define Huffman codes.
-	bits     *[maxNumLit + maxNumDist]int
-	codebits *[numCodes]int
+	bits     *[maxNumLit + maxNumDist]int32
+	codebits *[numCodes]int32
 
 	// Output history, buffer.
 	dict dictDecoder
@@ -288,13 +288,13 @@ type decompressor struct {
 	// Next step in the decompression,
 	// and decompression state.
 	step      func(*decompressor)
-	stepState int
+	stepState int32
 	final     bool
 	err       error
 	toRead    []byte
 	hl, hd    *huffmanDecoder
-	copyLen   int
-	copyDist  int
+	copyLen   int32
+	copyDist  int32
 }
 
 func (f *decompressor) nextBlock() {
@@ -330,7 +330,7 @@ func (f *decompressor) nextBlock() {
 	}
 }
 
-func (f *decompressor) Read(b []byte) (int, error) {
+func (f *decompressor) Read(b []byte) (int32, error) {
 	for {
 		if len(f.toRead) > 0 {
 			n := copy(b, f.toRead)
@@ -362,7 +362,7 @@ func (f *decompressor) Close() error {
 
 func (f *decompressor) readHuffman() error {
 	// RFC 1951 section 3.2.7.
-	codeOrder := [19]int{16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15}
+	codeOrder := [19]int32{16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15}
 
 	// HLIT[5], HDIST[5], HCLEN[4].
 	for f.nb < 5+5+4 {
@@ -370,17 +370,17 @@ func (f *decompressor) readHuffman() error {
 			return err
 		}
 	}
-	nlit := int(f.b&0x1F) + 257
+	nlit := int32(f.b&0x1F) + 257
 	if nlit > maxNumLit {
 		return CorruptInputError(f.roffset)
 	}
 	f.b >>= 5
-	ndist := int(f.b&0x1F) + 1
+	ndist := int32(f.b&0x1F) + 1
 	if ndist > maxNumDist {
 		return CorruptInputError(f.roffset)
 	}
 	f.b >>= 5
-	nclen := int(f.b&0xF) + 4
+	nclen := int32(f.b&0xF) + 4
 	// numCodes is 19, so nclen is always valid.
 	f.b >>= 4
 	f.nb -= 5 + 5 + 4
@@ -392,7 +392,7 @@ func (f *decompressor) readHuffman() error {
 				return err
 			}
 		}
-		f.codebits[codeOrder[i]] = int(f.b & 0x7)
+		f.codebits[codeOrder[i]] = int32(f.b & 0x7)
 		f.b >>= 3
 		f.nb -= 3
 	}
@@ -417,9 +417,9 @@ func (f *decompressor) readHuffman() error {
 			continue
 		}
 		// Repeat previous length or zero.
-		var rep int
-		var nb uint
-		var b int
+		var rep int32
+		var nb uint32
+		var b int32
 		switch x {
 		default:
 			return InternalError("unexpected length code")
@@ -444,7 +444,7 @@ func (f *decompressor) readHuffman() error {
 				return err
 			}
 		}
-		rep += int(f.b & uint32(1<<nb-1))
+		rep += int32(f.b & uint32(1<<nb-1))
 		f.b >>= nb
 		f.nb -= nb
 		if i+rep > n {
@@ -496,8 +496,8 @@ readLiteral:
 			f.err = err
 			return
 		}
-		var n uint // number of bits extra
-		var length int
+		var n uint32 // number of bits extra
+		var length int32
 		switch {
 		case v < 256:
 			f.dict.writeByte(byte(v))
@@ -544,12 +544,12 @@ readLiteral:
 					return
 				}
 			}
-			length += int(f.b & uint32(1<<n-1))
+			length += int32(f.b & uint32(1<<n-1))
 			f.b >>= n
 			f.nb -= n
 		}
 
-		var dist int
+		var dist int32
 		if f.hd == nil {
 			for f.nb < 5 {
 				if err = f.moreBits(); err != nil {
@@ -557,7 +557,7 @@ readLiteral:
 					return
 				}
 			}
-			dist = int(bits.Reverse8(uint8(f.b & 0x1F << 3)))
+			dist = int32(bits.Reverse8(uint8(f.b & 0x1F << 3)))
 			f.b >>= 5
 			f.nb -= 5
 		} else {
@@ -571,7 +571,7 @@ readLiteral:
 		case dist < 4:
 			dist++
 		case dist < maxNumDist:
-			nb := uint(dist-2) >> 1
+			nb := uint32(dist-2) >> 1
 			// have 1 bit in bottom of dist, need nb more.
 			extra := (dist & 1) << nb
 			for f.nb < nb {
@@ -580,7 +580,7 @@ readLiteral:
 					return
 				}
 			}
-			extra |= int(f.b & uint32(1<<nb-1))
+			extra |= int32(f.b & uint32(1<<nb-1))
 			f.b >>= nb
 			f.nb -= nb
 			dist = 1<<(nb+1) + 1 + extra
@@ -632,8 +632,8 @@ func (f *decompressor) dataBlock() {
 		f.err = noEOF(err)
 		return
 	}
-	n := int(f.buf[0]) | int(f.buf[1])<<8
-	nn := int(f.buf[2]) | int(f.buf[3])<<8
+	n := int32(f.buf[0]) | int32(f.buf[1])<<8
+	nn := int32(f.buf[2]) | int32(f.buf[3])<<8
 	if uint16(nn) != uint16(^n) {
 		f.err = CorruptInputError(f.roffset)
 		return
@@ -704,12 +704,12 @@ func (f *decompressor) moreBits() error {
 }
 
 // Read the next Huffman-encoded symbol from f according to h.
-func (f *decompressor) huffSym(h *huffmanDecoder) (int, error) {
+func (f *decompressor) huffSym(h *huffmanDecoder) (int32, error) {
 	// Since a huffmanDecoder can be empty or be composed of a degenerate tree
 	// with single element, huffSym must error on these two edge cases. In both
 	// cases, the chunks slice will be 0 for the invalid sequence, leading it
 	// satisfy the n == 0 check below.
-	n := uint(h.min)
+	n := uint32(h.min)
 	// Optimization. Compiler isn't smart enough to keep f.b,f.nb in registers,
 	// but is smart enough to keep local variables in registers, so use nb and b,
 	// inline call to moreBits and reassign b,nb back to f on return.
@@ -727,10 +727,10 @@ func (f *decompressor) huffSym(h *huffmanDecoder) (int, error) {
 			nb += 8
 		}
 		chunk := h.chunks[b&(huffmanNumChunks-1)]
-		n = uint(chunk & huffmanCountMask)
+		n = uint32(chunk & huffmanCountMask)
 		if n > huffmanChunkBits {
 			chunk = h.links[chunk>>huffmanValueShift][(b>>huffmanChunkBits)&h.linkMask]
-			n = uint(chunk & huffmanCountMask)
+			n = uint32(chunk & huffmanCountMask)
 		}
 		if n <= nb {
 			if n == 0 {
@@ -741,7 +741,7 @@ func (f *decompressor) huffSym(h *huffmanDecoder) (int, error) {
 			}
 			f.b = b >> (n & 31)
 			f.nb = nb - n
-			return int(chunk >> huffmanValueShift), nil
+			return int32(chunk >> huffmanValueShift), nil
 		}
 	}
 }
@@ -764,7 +764,7 @@ func (f *decompressor) makeReader(r io.Reader) {
 
 func (f *decompressor) initFixedHuffmanDecoder() {
 	// These come from the RFC section 3.2.6.
-	var bits [288]int
+	var bits [288]int32
 	for i := 0; i < 144; i++ {
 		bits[i] = 8
 	}
@@ -806,8 +806,8 @@ func NewReader(r io.Reader) io.ReadCloser {
 	var f decompressor
 	f.initFixedHuffmanDecoder()
 	f.makeReader(r)
-	f.bits = &[maxNumLit + maxNumDist]int{}
-	f.codebits = &[numCodes]int{}
+	f.bits = &[maxNumLit + maxNumDist]int32{}
+	f.codebits = &[numCodes]int32{}
 	f.step = (*decompressor).nextBlock
 	f.dict.init(maxMatchOffset, nil)
 	return &f
@@ -824,8 +824,8 @@ func NewReaderDict(r io.Reader, dict []byte) io.ReadCloser {
 	var f decompressor
 	f.initFixedHuffmanDecoder()
 	f.makeReader(r)
-	f.bits = &[maxNumLit + maxNumDist]int{}
-	f.codebits = &[numCodes]int{}
+	f.bits = &[maxNumLit + maxNumDist]int32{}
+	f.codebits = &[numCodes]int32{}
 	f.step = (*decompressor).nextBlock
 	f.dict.init(maxMatchOffset, dict)
 	return &f

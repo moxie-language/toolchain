@@ -81,10 +81,10 @@ int32_t mxc_run(const char** argv, int32_t argc) {
     int pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        char* args[64];
-        int i;
-        for (i = 0; i < argc && i < 63; i++) args[i] = (char*)argv[i];
-        args[i] = NULL;
+        char** args = (char**)malloc((argc + 1) * sizeof(char*));
+        if (!args) _exit(127);
+        for (int i = 0; i < argc; i++) args[i] = (char*)argv[i];
+        args[argc] = NULL;
         execvp(args[0], args);
         _exit(127);
     }

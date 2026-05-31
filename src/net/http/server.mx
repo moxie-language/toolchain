@@ -133,7 +133,7 @@ type ResponseWriter interface {
 	// writing the response. However, such behavior may not be supported
 	// by all HTTP/2 clients. Handlers should read before writing if
 	// possible to maximize compatibility.
-	Write([]byte) (int, error)
+	Write([]byte) (int32, error)
 
 	// WriteHeader sends an HTTP response header with the provided
 	// status code.
@@ -153,7 +153,7 @@ type ResponseWriter interface {
 	// The server will automatically send a 100 (Continue) header
 	// on the first read from the request body if the request has
 	// an "Expect: 100-continue" header.
-	WriteHeader(statusCode int)
+	WriteHeader(statusCode int32)
 }
 
 // The Flusher interface is implemented by ResponseWriters that allow
@@ -237,14 +237,26 @@ var (
 	// handlers with Context.Value to access the server that
 	// started the handler. The associated value will be of
 	// type *Server.
-	ServerContextKey = &contextKey{"http-server"}
+	ServerContextKey *contextKey
 
 	// LocalAddrContextKey is a context key. It can be used in
 	// HTTP handlers with Context.Value to access the local
 	// address the connection arrived on.
 	// The associated value will be of type net.Addr.
-	LocalAddrContextKey = &contextKey{"local-addr"}
+	LocalAddrContextKey *contextKey
 )
+
+var _serverInitDone bool
+
+func serverInitOnce() {
+	if _serverInitDone {
+		return
+	}
+	_serverInitDone = true
+	ServerContextKey = &contextKey{"http-server"}
+	LocalAddrContextKey = &contextKey{"local-addr"}
+	DefaultServeMux = &defaultServeMux
+}
 
 // A conn represents the server side of an HTTP connection.
 type conn struct {
@@ -363,7 +375,7 @@ const (
 	colonSpace = ": "
 )
 
-func (cw *chunkWriter) Write(p []byte) (n int, err error) {
+func (cw *chunkWriter) Write(p []byte) (n int32, err error) {
 	if !cw.wroteHeader {
 		cw.writeHeader(p)
 	}
@@ -438,7 +450,7 @@ type response struct {
 
 	written       int64 // number of bytes written in body
 	contentLength int64 // explicitly-declared Content-Length; or -1
-	status        int   // status code passed to WriteHeader
+	status        int32   // status code passed to WriteHeader
 
 	// close connection after this reply.  set on request and
 	// updated after response from handler if there's a
@@ -617,7 +629,7 @@ func (s *Server) newConn(rwc net.Conn) *conn {
 
 type readResult struct {
 	_   incomparable
-	n   int
+	n   int32
 	err error
 	b   byte // byte read, if n == 1
 }
@@ -731,7 +743,7 @@ func (cr *connReader) handleReadErrorLocked(_ error) {
 	}
 }
 
-func (cr *connReader) Read(p []byte) (n int, err error) {
+func (cr *connReader) Read(p []byte) (n int32, err error) {
 	cr.lock()
 	if cr.conn == nil {
 		cr.unlock()
@@ -822,7 +834,7 @@ func putBufioReader(br *bufio.Reader) {
 // See go.dev/issue/67401.
 //
 //go:linkname newBufioWriterSize
-func newBufioWriterSize(w io.Writer, size int) *bufio.Writer {
+func newBufioWriterSize(w io.Writer, size int32) *bufio.Writer {
 	return bufio.NewWriterSize(w, size)
 }
 
@@ -844,7 +856,7 @@ func putBufioWriter(bw *bufio.Writer) {
 // This can be overridden by setting [Server.MaxHeaderBytes].
 const DefaultMaxHeaderBytes = 1 << 20 // 1 MB
 
-func (s *Server) maxHeaderBytes() int {
+func (s *Server) maxHeaderBytes() int32 {
 	if s.MaxHeaderBytes > 0 {
 		return s.MaxHeaderBytes
 	}
@@ -886,7 +898,7 @@ type expectContinueReader struct {
 	sawEOF     bool
 }
 
-func (ecr *expectContinueReader) Read(p []byte) (n int, err error) {
+func (ecr *expectContinueReader) Read(p []byte) (n int32, err error) {
 	if ecr.closed {
 		return 0, ErrBodyReadAfterClose
 	}
@@ -1057,7 +1069,7 @@ func (w *response) Header() Header {
 // well read them)
 const maxPostHandlerReadBytes = 256 << 10
 
-func checkWriteHeaderCode(code int) {
+func checkWriteHeaderCode(code int32) {
 	// Issue 22880: require valid WriteHeader status codes.
 	// For now we only enforce that it's three digits.
 	// In the future we might block things over 599 (600 and above aren't defined
@@ -1092,7 +1104,7 @@ func relevantCaller() runtime.Frame {
 	return frame
 }
 
-func (w *response) WriteHeader(code int) {
+func (w *response) WriteHeader(code int32) {
 	if w.conn.hijacked() {
 		caller := relevantCaller()
 		w.conn.server.logf("http: response.WriteHeader on hijacked connection from %s (%s:%d)", caller.Function, path.Base(caller.File), caller.Line)
@@ -1504,7 +1516,7 @@ func foreachHeaderElement(v string, fn func(string)) {
 // to bw. is11 is whether the HTTP request is HTTP/1.1. false means HTTP/1.0.
 // code is the response status code.
 // scratch is an optional scratch buffer. If it has at least capacity 3, it's used.
-func writeStatusLine(bw *bufio.Writer, is11 bool, code int, scratch []byte) {
+func writeStatusLine(bw *bufio.Writer, is11 bool, code int32, scratch []byte) {
 	if is11 {
 		bw.WriteString("HTTP/1.1 ")
 	} else {
@@ -1564,16 +1576,16 @@ func (w *response) bodyAllowed() bool {
 // threshold and nothing is in (2).  The answer might be mostly making
 // bufferBeforeChunkingSize smaller and having bufio's fast-paths deal
 // with this instead.
-func (w *response) Write(data []byte) (n int, err error) {
+func (w *response) Write(data []byte) (n int32, err error) {
 	return w.write(len(data), data, "")
 }
 
-func (w *response) WriteString(data string) (n int, err error) {
+func (w *response) WriteString(data string) (n int32, err error) {
 	return w.write(len(data), nil, data)
 }
 
 // either dataB or dataS is non-zero.
-func (w *response) write(lenData int, dataB []byte, dataS string) (n int, err error) {
+func (w *response) write(lenData int32, dataB []byte, dataS string) (n int32, err error) {
 	if w.conn.hijacked() {
 		if lenData > 0 {
 			caller := relevantCaller()
@@ -1805,7 +1817,7 @@ func badRequestError(e string) error { return statusError{StatusBadRequest, e} }
 // statusError is an error used to respond to a request with an HTTP status.
 // The text should be plain text without user info or other embedded errors.
 type statusError struct {
-	code int
+	code int32
 	text string
 }
 
@@ -1840,6 +1852,7 @@ type connectionStater interface {
 
 // Serve a new connection.
 func (c *conn) serve(ctx context.Context) {
+	serverInitOnce()
 	if ra := c.rwc.RemoteAddr(); ra != nil {
 		c.remoteAddr = ra.String()
 	}
@@ -2237,7 +2250,7 @@ func (f HandlerFunc) ServeHTTP(w ResponseWriter, r *Request) {
 // and sets X-Content-Type-Options to “nosniff”.
 // This configures the header properly for the error message,
 // in case the caller had set it up expecting a successful output.
-func Error(w ResponseWriter, error string, code int) {
+func Error(w ResponseWriter, error string, code int32) {
 	h := w.Header()
 
 	// Delete the Content-Length header, which might be for some other content.
@@ -2303,7 +2316,7 @@ func StripPrefix(prefix string, h Handler) Handler {
 // to "text/html; charset=utf-8" and writes a small HTML body.
 // Setting the Content-Type header to any value, including nil,
 // disables that behavior.
-func Redirect(w ResponseWriter, r *Request, url string, code int) {
+func Redirect(w ResponseWriter, r *Request, url string, code int32) {
 	if u, err := urlpkg.Parse(url); err == nil {
 		// If url was relative, make its path absolute by
 		// combining with request path.
@@ -2377,7 +2390,7 @@ func htmlEscape(s string) string {
 // Redirect to a fixed URL
 type redirectHandler struct {
 	url  string
-	code int
+	code int32
 }
 
 func (rh *redirectHandler) ServeHTTP(w ResponseWriter, r *Request) {
@@ -2390,7 +2403,7 @@ func (rh *redirectHandler) ServeHTTP(w ResponseWriter, r *Request) {
 //
 // The provided code should be in the 3xx range and is usually
 // [StatusMovedPermanently], [StatusFound] or [StatusSeeOther].
-func RedirectHandler(url string, code int) Handler {
+func RedirectHandler(url string, code int32) Handler {
 	return &redirectHandler{url, code}
 }
 
@@ -2525,7 +2538,7 @@ func NewServeMux() *ServeMux {
 }
 
 // DefaultServeMux is the default [ServeMux] used by [Serve].
-var DefaultServeMux = &defaultServeMux
+var DefaultServeMux *ServeMux
 
 var defaultServeMux ServeMux
 
@@ -2788,6 +2801,7 @@ func (mux *ServeMux) HandleFunc(pattern string, handler func(ResponseWriter, *Re
 // Handle registers the handler for the given pattern in [DefaultServeMux].
 // The documentation for [ServeMux] explains how patterns are matched.
 func Handle(pattern string, handler Handler) {
+	serverInitOnce()
 	if _use121() {
 		DefaultServeMux.mux121.handle(pattern, handler)
 	} else {
@@ -2798,6 +2812,7 @@ func Handle(pattern string, handler Handler) {
 // HandleFunc registers the handler function for the given pattern in [DefaultServeMux].
 // The documentation for [ServeMux] explains how patterns are matched.
 func HandleFunc(pattern string, handler func(ResponseWriter, *Request)) {
+	serverInitOnce()
 	if _use121() {
 		DefaultServeMux.mux121.handleFunc(pattern, handler)
 	} else {
@@ -2945,7 +2960,7 @@ type Server struct {
 	// values, including the request line. It does not limit the
 	// size of the request body.
 	// If zero, DefaultMaxHeaderBytes is used.
-	MaxHeaderBytes int
+	MaxHeaderBytes int32
 
 	// TLSNextProto optionally specifies a function to take over
 	// ownership of the provided TLS connection when an ALPN
@@ -3071,7 +3086,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	pollIntervalBase := time.Millisecond
 	nextPollInterval := func() time.Duration {
 		// Add 10% jitter.
-		interval := pollIntervalBase + time.Duration(rand.Intn(int(pollIntervalBase/10)))
+		interval := pollIntervalBase + time.Duration(rand.Intn(int32(pollIntervalBase/10)))
 		// Double and clamp for next time.
 		pollIntervalBase *= 2
 		if pollIntervalBase > shutdownPollIntervalMax {
@@ -3140,7 +3155,7 @@ func (s *Server) closeListenersLocked() error {
 
 // A ConnState represents the state of a client connection to a server.
 // It's used by the optional [Server.ConnState] hook.
-type ConnState int
+type ConnState int32
 
 const (
 	// StateNew represents a new connection that is expected to
@@ -3208,6 +3223,7 @@ type serverHandler struct {
 //
 //go:linkname badServeHTTP net/http.serverHandler.ServeHTTP
 func (sh serverHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+	serverInitOnce()
 	handler := sh.srv.Handler
 	if handler == nil {
 		handler = DefaultServeMux
@@ -3313,6 +3329,7 @@ const ErrServerClosed = errors.Const("http: Server closed")
 // Serve always returns a non-nil error and closes l.
 // After [Server.Shutdown] or [Server.Close], the returned error is [ErrServerClosed].
 func (s *Server) Serve(l net.Listener) error {
+	serverInitOnce()
 	origListener := l
 	l = &onceCloseListener{Listener: l}
 	defer l.Close()
@@ -3549,6 +3566,7 @@ func (s *Server) logf(format string, args ...any) {
 // via ServerContextKey. If there's no associated server, or if ErrorLog
 // is nil, logging is done via the log package's standard logger.
 func logf(r *Request, format string, args ...any) {
+	serverInitOnce()
 	s, _ := r.Context().Value(ServerContextKey).(*Server)
 	if s != nil && s.ErrorLog != nil {
 		s.ErrorLog.Printf(format, args...)
@@ -3757,11 +3775,12 @@ type timeoutWriter struct {
 
 	err         error
 	wroteHeader bool
-	code        int
+	code        int32
 }
 
 // Push implements the [Pusher] interface.
 func (tw *timeoutWriter) Push(target string, opts *PushOptions) error {
+	requestInitOnce()
 	if pusher, ok := tw.w.(Pusher); ok {
 		return pusher.Push(target, opts)
 	}
@@ -3770,7 +3789,7 @@ func (tw *timeoutWriter) Push(target string, opts *PushOptions) error {
 
 func (tw *timeoutWriter) Header() Header { return tw.h }
 
-func (tw *timeoutWriter) Write(p []byte) (int, error) {
+func (tw *timeoutWriter) Write(p []byte) (int32, error) {
 	if tw.err != nil {
 		return 0, tw.err
 	}
@@ -3780,7 +3799,7 @@ func (tw *timeoutWriter) Write(p []byte) (int, error) {
 	return tw.wbuf.Write(p)
 }
 
-func (tw *timeoutWriter) writeHeaderLocked(code int) {
+func (tw *timeoutWriter) writeHeaderLocked(code int32) {
 	checkWriteHeaderCode(code)
 
 	switch {
@@ -3797,7 +3816,7 @@ func (tw *timeoutWriter) writeHeaderLocked(code int) {
 	}
 }
 
-func (tw *timeoutWriter) WriteHeader(code int) {
+func (tw *timeoutWriter) WriteHeader(code int32) {
 	tw.writeHeaderLocked(code)
 }
 
@@ -3868,7 +3887,7 @@ type checkConnErrorWriter struct {
 	c *conn
 }
 
-func (w checkConnErrorWriter) Write(p []byte) (n int, err error) {
+func (w checkConnErrorWriter) Write(p []byte) (n int32, err error) {
 	n, err = w.c.rwc.Write(p)
 	if err != nil && w.c.werr == nil {
 		w.c.werr = err
@@ -3877,7 +3896,7 @@ func (w checkConnErrorWriter) Write(p []byte) (n int, err error) {
 	return
 }
 
-func numLeadingCRorLF(v []byte) (n int) {
+func numLeadingCRorLF(v []byte) (n int32) {
 	for _, b := range v {
 		if b == '\r' || b == '\n' {
 			n++

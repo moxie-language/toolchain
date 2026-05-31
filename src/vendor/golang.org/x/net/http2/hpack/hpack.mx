@@ -25,10 +25,10 @@ func (de DecodingError) Error() string {
 
 // An InvalidIndexError is returned when an encoder references a table
 // entry before the static table or after the end of the dynamic table.
-type InvalidIndexError int
+type InvalidIndexError int32
 
 func (e InvalidIndexError) Error() string {
-	return fmt.Sprintf("invalid indexed representation index %d", int(e))
+	return fmt.Sprintf("invalid indexed representation index %d", int32(e))
 }
 
 // A HeaderField is a name-value pair. Both the name and value are
@@ -81,7 +81,7 @@ type Decoder struct {
 	emit   func(f HeaderField)
 
 	emitEnabled bool // whether calls to emit are enabled
-	maxStrLen   int  // 0 means unlimited
+	maxStrLen   int32  // 0 means unlimited
 
 	// buf is the unparsed buffer. It's only written to
 	// saveBuf if it was truncated in the middle of a header
@@ -119,7 +119,7 @@ const ErrStringLength = errors.Const("hpack: string too long")
 // value string. If a string exceeds this length (even after any
 // decompression), Write will return ErrStringLength.
 // A value of 0 means unlimited and is the default from NewDecoder.
-func (d *Decoder) SetMaxStringLength(n int) {
+func (d *Decoder) SetMaxStringLength(n int32) {
 	d.maxStrLen = n
 }
 
@@ -178,7 +178,7 @@ func (dt *dynamicTable) add(f HeaderField) {
 
 // If we're too big, evict old stuff.
 func (dt *dynamicTable) evict() {
-	var n int
+	var n int32
 	for dt.size > dt.maxSize && n < dt.table.len() {
 		dt.size -= dt.table.ents[n].Size()
 		n++
@@ -186,11 +186,11 @@ func (dt *dynamicTable) evict() {
 	dt.table.evictOldest(n)
 }
 
-func (d *Decoder) maxTableIndex() int {
+func (d *Decoder) maxTableIndex() int32 {
 	// This should never overflow. RFC 7540 Section 6.5.2 limits the size of
 	// the dynamic table to 2^32 bytes, where each entry will occupy more than
 	// one byte. Further, the staticTable has a fixed, small length.
-	return d.dynTab.table.len() + staticTable.len()
+	return d.dynTab.table.len() + ensureStaticTable().len()
 }
 
 func (d *Decoder) at(i uint64) (hf HeaderField, ok bool) {
@@ -198,8 +198,9 @@ func (d *Decoder) at(i uint64) (hf HeaderField, ok bool) {
 	if i == 0 {
 		return
 	}
-	if i <= uint64(staticTable.len()) {
-		return staticTable.ents[i-1], true
+	st := ensureStaticTable()
+	if i <= uint64(st.len()) {
+		return st.ents[i-1], true
 	}
 	if i > uint64(d.maxTableIndex()) {
 		return
@@ -208,7 +209,7 @@ func (d *Decoder) at(i uint64) (hf HeaderField, ok bool) {
 	// However, dt.ents[0] is the oldest entry. Hence, dt.ents is
 	// the reversed dynamic table.
 	dt := d.dynTab.table
-	return dt.ents[dt.len()-(int(i)-staticTable.len())], true
+	return dt.ents[dt.len()-(int32(i)-st.len())], true
 }
 
 // DecodeFull decodes an entire block.
@@ -241,7 +242,7 @@ func (d *Decoder) Close() error {
 	return nil
 }
 
-func (d *Decoder) Write(p []byte) (n int, err error) {
+func (d *Decoder) Write(p []byte) (n int32, err error) {
 	if len(p) == 0 {
 		// Prevent state machine CPU attacks (making us redo
 		// work up to the point of finding out we don't have
@@ -286,7 +287,7 @@ func (d *Decoder) Write(p []byte) (n int, err error) {
 // continue parsing.
 const errNeedMore = errors.Const("need more data")
 
-type indexType int
+type indexType int32
 
 const (
 	indexedTrue indexType = iota
@@ -510,7 +511,8 @@ func (d *Decoder) decodeString(u undecodedString) ([]byte, error) {
 	if !u.isHuff {
 		return []byte(u.b), nil
 	}
-	buf := bufPool.Get().(*bytes.Buffer)
+	p := ensureBufPool()
+	buf := p.Get().(*bytes.Buffer)
 	buf.Reset() // don't trust others
 	var s []byte
 	err := huffmanDecode(buf, d.maxStrLen, u.b)
@@ -518,6 +520,6 @@ func (d *Decoder) decodeString(u undecodedString) ([]byte, error) {
 		s = buf.String()
 	}
 	buf.Reset() // be nice to GC
-	bufPool.Put(buf)
+	p.Put(buf)
 	return s, err
 }

@@ -47,11 +47,11 @@ const (
 	cbTCA16
 )
 
-func cbPaletted(cb int) bool {
+func cbPaletted(cb int32) bool {
 	return cbP1 <= cb && cb <= cbP8
 }
 
-func cbTrueColor(cb int) bool {
+func cbTrueColor(cb int32) bool {
 	return cb == cbTC8 || cb == cbTC16
 }
 
@@ -73,7 +73,7 @@ const (
 
 // interlaceScan defines the placement and size of a pass for Adam7 interlacing.
 type interlaceScan struct {
-	xFactor, yFactor, xOffset, yOffset int
+	xFactor, yFactor, xOffset, yOffset int32
 }
 
 // interlacing defines Adam7 interlacing, with 7 passes of reduced images.
@@ -113,14 +113,14 @@ type decoder struct {
 	img           image.Image
 	crc           hash.Hash32
 	cc            *crc32.CRC32
-	width, height int
-	depth         int
+	width, height int32
+	depth         int32
 	palette       color.Palette
-	cb            int
-	stage         int
+	cb            int32
+	stage         int32
 	idatLength    uint32
 	tmp           [3 * 256]byte
-	interlace     int
+	interlace     int32
 
 	// useTransparent and transparent are used for grayscale and truecolor
 	// transparency, as opposed to palette transparency.
@@ -161,7 +161,7 @@ func (d *decoder) parseIHDR(length uint32) error {
 	if d.tmp[12] != itNone && d.tmp[12] != itAdam7 {
 		return FormatError("invalid interlace method")
 	}
-	d.interlace = int(d.tmp[12])
+	d.interlace = int32(d.tmp[12])
 
 	w := int32(binary.BigEndian().Uint32(d.tmp[0:4]))
 	h := int32(binary.BigEndian().Uint32(d.tmp[4:8]))
@@ -169,7 +169,7 @@ func (d *decoder) parseIHDR(length uint32) error {
 		return FormatError("non-positive dimension")
 	}
 	nPixels64 := int64(w) * int64(h)
-	nPixels := int(nPixels64)
+	nPixels := int32(nPixels64)
 	if nPixels64 != int64(nPixels) {
 		return UnsupportedError("dimension overflow")
 	}
@@ -179,7 +179,7 @@ func (d *decoder) parseIHDR(length uint32) error {
 	}
 
 	d.cb = cbInvalid
-	d.depth = int(d.tmp[8])
+	d.depth = int32(d.tmp[8])
 	switch d.depth {
 	case 1:
 		switch d.tmp[9] {
@@ -230,13 +230,13 @@ func (d *decoder) parseIHDR(length uint32) error {
 	if d.cb == cbInvalid {
 		return UnsupportedError([]byte(fmt.Sprintf("bit depth %d, color type %d", d.tmp[8], d.tmp[9])))
 	}
-	d.width, d.height = int(w), int(h)
+	d.width, d.height = int32(w), int32(h)
 	return d.verifyChecksum()
 }
 
 func (d *decoder) parsePLTE(length uint32) error {
-	np := int(length / 3) // The number of palette entries.
-	if length%3 != 0 || np <= 0 || np > 256 || np > 1<<uint(d.depth) {
+	np := int32(length / 3) // The number of palette entries.
+	if length%3 != 0 || np <= 0 || np > 256 || np > 1<<uint32(d.depth) {
 		return FormatError("bad PLTE length")
 	}
 	n, err := io.ReadFull(d.r, d.tmp[:3*np])
@@ -337,7 +337,7 @@ func (d *decoder) parsetRNS(length uint32) error {
 // immediately before the first Read call is that d.r is positioned between the
 // first IDAT and xxx, and the decoder state immediately after the last Read
 // call is that d.r is positioned between yy and crc1.
-func (d *decoder) Read(p []byte) (int, error) {
+func (d *decoder) Read(p []byte) (int32, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -358,10 +358,10 @@ func (d *decoder) Read(p []byte) (int, error) {
 		d.crc.Reset()
 		d.crc.Write(d.tmp[4:8])
 	}
-	if int(d.idatLength) < 0 {
+	if int32(d.idatLength) < 0 {
 		return 0, UnsupportedError("IDAT chunk length overflow")
 	}
-	n, err := d.r.Read(p[:min(len(p), int(d.idatLength))])
+	n, err := d.r.Read(p[:min(len(p), int32(d.idatLength))])
 	d.crc.Write(p[:n])
 	d.idatLength -= uint32(n)
 	return n, err
@@ -416,7 +416,7 @@ func (d *decoder) decode() (image.Image, error) {
 }
 
 // readImagePass reads a single image pass, sized according to the pass number.
-func (d *decoder) readImagePass(r io.Reader, pass int, allocateOnly bool) (image.Image, error) {
+func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (image.Image, error) {
 	interlacing := _interlacing()
 	bitsPerPixel := 0
 	pixOffset := 0
@@ -508,7 +508,7 @@ func (d *decoder) readImagePass(r io.Reader, pass int, allocateOnly bool) (image
 
 	// The +1 is for the per-row filter type, which is at cr[0].
 	rowSize := 1 + (int64(bitsPerPixel)*int64(width)+7)/8
-	if rowSize != int64(int(rowSize)) {
+	if rowSize != int64(int32(rowSize)) {
 		return nil, UnsupportedError("dimension overflow")
 	}
 	// cr and pr are the bytes for the current and previous row.
@@ -547,7 +547,7 @@ func (d *decoder) readImagePass(r io.Reader, pass int, allocateOnly bool) (image
 				cdat[i] += pdat[i] / 2
 			}
 			for i := bytesPerPixel; i < len(cdat); i++ {
-				cdat[i] += uint8((int(cdat[i-bytesPerPixel]) + int(pdat[i])) / 2)
+				cdat[i] += uint8((int32(cdat[i-bytesPerPixel]) + int32(pdat[i])) / 2)
 			}
 		case ftPaeth:
 			filterPaeth(cdat, pdat, bytesPerPixel)
@@ -686,8 +686,8 @@ func (d *decoder) readImagePass(r io.Reader, pass int, allocateOnly bool) (image
 				b := cdat[x/8]
 				for x2 := 0; x2 < 8 && x+x2 < width; x2++ {
 					idx := b >> 7
-					if len(paletted.Palette) <= int(idx) {
-						paletted.Palette = paletted.Palette[:int(idx)+1]
+					if len(paletted.Palette) <= int32(idx) {
+						paletted.Palette = paletted.Palette[:int32(idx)+1]
 					}
 					paletted.SetColorIndex(x+x2, y, idx)
 					b <<= 1
@@ -698,8 +698,8 @@ func (d *decoder) readImagePass(r io.Reader, pass int, allocateOnly bool) (image
 				b := cdat[x/4]
 				for x2 := 0; x2 < 4 && x+x2 < width; x2++ {
 					idx := b >> 6
-					if len(paletted.Palette) <= int(idx) {
-						paletted.Palette = paletted.Palette[:int(idx)+1]
+					if len(paletted.Palette) <= int32(idx) {
+						paletted.Palette = paletted.Palette[:int32(idx)+1]
 					}
 					paletted.SetColorIndex(x+x2, y, idx)
 					b <<= 2
@@ -710,8 +710,8 @@ func (d *decoder) readImagePass(r io.Reader, pass int, allocateOnly bool) (image
 				b := cdat[x/2]
 				for x2 := 0; x2 < 2 && x+x2 < width; x2++ {
 					idx := b >> 4
-					if len(paletted.Palette) <= int(idx) {
-						paletted.Palette = paletted.Palette[:int(idx)+1]
+					if len(paletted.Palette) <= int32(idx) {
+						paletted.Palette = paletted.Palette[:int32(idx)+1]
 					}
 					paletted.SetColorIndex(x+x2, y, idx)
 					b <<= 4
@@ -720,8 +720,8 @@ func (d *decoder) readImagePass(r io.Reader, pass int, allocateOnly bool) (image
 		case cbP8:
 			if len(paletted.Palette) != 256 {
 				for x := 0; x < width; x++ {
-					if len(paletted.Palette) <= int(cdat[x]) {
-						paletted.Palette = paletted.Palette[:int(cdat[x])+1]
+					if len(paletted.Palette) <= int32(cdat[x]) {
+						paletted.Palette = paletted.Palette[:int32(cdat[x])+1]
 					}
 				}
 			}
@@ -794,15 +794,15 @@ func (d *decoder) readImagePass(r io.Reader, pass int, allocateOnly bool) (image
 }
 
 // mergePassInto merges a single pass into a full sized image.
-func (d *decoder) mergePassInto(dst image.Image, src image.Image, pass int) {
+func (d *decoder) mergePassInto(dst image.Image, src image.Image, pass int32) {
 	interlacing := _interlacing()
 	p := interlacing[pass]
 	var (
 		srcPix        []uint8
 		dstPix        []uint8
-		stride        int
+		stride        int32
 		rect          image.Rectangle
-		bytesPerPixel int
+		bytesPerPixel int32
 	)
 	switch target := dst.(type) {
 	case *image.Alpha:
@@ -943,7 +943,7 @@ func (d *decoder) parseChunk(configOnly bool) error {
 	// Ignore this chunk (of a known length).
 	var ignored [4096]byte
 	for length > 0 {
-		n, err := io.ReadFull(d.r, ignored[:min(len(ignored), int(length))])
+		n, err := io.ReadFull(d.r, ignored[:min(len(ignored), int32(length))])
 		if err != nil {
 			return err
 		}

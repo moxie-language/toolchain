@@ -36,7 +36,7 @@ type abbrevTable map[uint32]abbrev
 
 // parseAbbrev returns the abbreviation table that starts at byte off
 // in the .debug_abbrev section.
-func (d *Data) parseAbbrev(off uint64, vers int) (abbrevTable, error) {
+func (d *Data) parseAbbrev(off uint64, vers int32) (abbrevTable, error) {
 	if m, ok := d.abbrevCache[off]; ok {
 		return m, nil
 	}
@@ -54,7 +54,7 @@ func (d *Data) parseAbbrev(off uint64, vers int) (abbrevTable, error) {
 	m := abbrevTable{}
 	for {
 		// Table ends with id == 0.
-		id := uint32(b.uint())
+		id := uint32(b.uint32())
 		if id == 0 {
 			break
 		}
@@ -62,16 +62,16 @@ func (d *Data) parseAbbrev(off uint64, vers int) (abbrevTable, error) {
 		// Walk over attributes, counting.
 		n := 0
 		b1 := b // Read from copy of b.
-		b1.uint()
+		b1.uint32()
 		b1.uint8()
 		for {
-			tag := b1.uint()
-			fmt := b1.uint()
+			tag := b1.uint32()
+			fmt := b1.uint32()
 			if tag == 0 && fmt == 0 {
 				break
 			}
 			if format(fmt) == formImplicitConst {
-				b1.int()
+				b1.int32()
 			}
 			n++
 		}
@@ -81,19 +81,19 @@ func (d *Data) parseAbbrev(off uint64, vers int) (abbrevTable, error) {
 
 		// Walk over attributes again, this time writing them down.
 		var a abbrev
-		a.tag = Tag(b.uint())
+		a.tag = Tag(b.uint32())
 		a.children = b.uint8() != 0
 		a.field = []afield{:n}
 		for i := range a.field {
-			a.field[i].attr = Attr(b.uint())
-			a.field[i].fmt = format(b.uint())
+			a.field[i].attr = Attr(b.uint32())
+			a.field[i].fmt = format(b.uint32())
 			a.field[i].class = formToClass(a.field[i].fmt, a.field[i].attr, vers, &b)
 			if a.field[i].fmt == formImplicitConst {
-				a.field[i].val = b.int()
+				a.field[i].val = b.int32()
 			}
 		}
-		b.uint()
-		b.uint()
+		b.uint32()
+		b.uint32()
 
 		m[id] = a
 	}
@@ -156,7 +156,7 @@ func _attrPtrClass() map[Attr]Class { return map[Attr]Class{
 // formToClass returns the DWARF 4 Class for the given form. If the
 // DWARF version is less then 4, it will disambiguate some forms
 // depending on the attribute.
-func formToClass(form format, attr Attr, vers int, b *buf) Class {
+func formToClass(form format, attr Attr, vers int32, b *buf) Class {
 	aie := _attrIsExprloc()
 	apc := _attrPtrClass()
 	switch form {
@@ -282,7 +282,7 @@ type Field struct {
 // canonicalize attributes in DWARF 2 files that refer to section
 // offsets to one of the Class*Ptr classes, even though these classes
 // were only defined in DWARF 3.
-type Class int
+type Class int32
 
 const (
 	// ClassUnknown represents values of unknown DWARF class.
@@ -412,7 +412,7 @@ type Offset uint32
 func (b *buf) entry(cu *Entry, u *unit) *Entry {
 	atab, ubase, vers := u.atable, u.base, u.vers
 	off := b.off
-	id := uint32(b.uint())
+	id := uint32(b.uint32())
 	if id == 0 {
 		return &Entry{}
 	}
@@ -430,12 +430,12 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 
 	resolveStrx := func(strBase, off uint64) string {
 		off += strBase
-		if uint64(int(off)) != off {
+		if uint64(int32(off)) != off {
 			b.error("DW_FORM_strx offset out of range")
 		}
 
 		b1 := makeBuf(b.dwarf, b.format, "str_offsets", 0, b.dwarf.strOffsets)
-		b1.skip(int(off))
+		b1.skip(int32(off))
 		is64, _ := b.format.dwarf64()
 		if is64 {
 			off = b1.uint64()
@@ -446,11 +446,11 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 			b.err = b1.err
 			return ""
 		}
-		if uint64(int(off)) != off {
+		if uint64(int32(off)) != off {
 			b.error("DW_FORM_strx indirect offset out of range")
 		}
 		b1 = makeBuf(b.dwarf, b.format, "str", 0, b.dwarf.str)
-		b1.skip(int(off))
+		b1.skip(int32(off))
 		val := b1.string()
 		if b1.err != nil {
 			b.err = b1.err
@@ -466,12 +466,12 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 			off *= 4
 		}
 		off += rnglistsBase
-		if uint64(int(off)) != off {
+		if uint64(int32(off)) != off {
 			b.error("DW_FORM_rnglistx offset out of range")
 		}
 
 		b1 := makeBuf(b.dwarf, b.format, "rnglists", 0, b.dwarf.rngLists)
-		b1.skip(int(off))
+		b1.skip(int32(off))
 		if is64 {
 			off = b1.uint64()
 		} else {
@@ -481,7 +481,7 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 			b.err = b1.err
 			return 0
 		}
-		if uint64(int(off)) != off {
+		if uint64(int32(off)) != off {
 			b.error("DW_FORM_rnglistx indirect offset out of range")
 		}
 		return rnglistsBase + off
@@ -492,7 +492,7 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 		e.Field[i].Class = a.field[i].class
 		fmt := a.field[i].fmt
 		if fmt == formIndirect {
-			fmt = format(b.uint())
+			fmt = format(b.uint32())
 			e.Field[i].Class = formToClass(fmt, a.field[i].attr, vers, b)
 		}
 		var val any
@@ -507,7 +507,7 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 			var off uint64
 			switch fmt {
 			case formAddrx:
-				off = b.uint()
+				off = b.uint32()
 			case formAddrx1:
 				off = uint64(b.uint8())
 			case formAddrx2:
@@ -536,13 +536,13 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 
 		// block
 		case formDwarfBlock1:
-			val = b.bytes(int(b.uint8()))
+			val = b.bytes(int32(b.uint8()))
 		case formDwarfBlock2:
-			val = b.bytes(int(b.uint16()))
+			val = b.bytes(int32(b.uint16()))
 		case formDwarfBlock4:
-			val = b.bytes(int(b.uint32()))
+			val = b.bytes(int32(b.uint32()))
 		case formDwarfBlock:
-			val = b.bytes(int(b.uint()))
+			val = b.bytes(int32(b.uint32()))
 
 		// constant
 		case formData1:
@@ -556,9 +556,9 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 		case formData16:
 			val = b.bytes(16)
 		case formSdata:
-			val = int64(b.int())
+			val = int64(b.int32())
 		case formUdata:
-			val = int64(b.uint())
+			val = int64(b.uint32())
 		case formImplicitConst:
 			val = a.field[i].val
 
@@ -597,7 +597,7 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 		case formRef8:
 			val = Offset(b.uint64()) + ubase
 		case formRefUdata:
-			val = Offset(b.uint()) + ubase
+			val = Offset(b.uint32()) + ubase
 
 		// string
 		case formString:
@@ -612,7 +612,7 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 			} else {
 				off = uint64(b.uint32())
 			}
-			if uint64(int(off)) != off {
+			if uint64(int32(off)) != off {
 				b.error("DW_FORM_strp/line_strp offset out of range")
 			}
 			if b.err != nil {
@@ -628,7 +628,7 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 				}
 				b1 = makeBuf(b.dwarf, b.format, "line_str", 0, b.dwarf.lineStr)
 			}
-			b1.skip(int(off))
+			b1.skip(int32(off))
 			val = b1.string()
 			if b1.err != nil {
 				b.err = b1.err
@@ -638,7 +638,7 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 			var off uint64
 			switch fmt {
 			case formStrx:
-				off = b.uint()
+				off = b.uint32()
 			case formStrx1:
 				off = uint64(b.uint8())
 			case formStrx2:
@@ -693,7 +693,7 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 		// exprloc
 		// New in DWARF 4.
 		case formExprloc:
-			val = b.bytes(int(b.uint()))
+			val = b.bytes(int32(b.uint32()))
 
 		// reference
 		// New in DWARF 4.
@@ -707,11 +707,11 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 
 		// loclist
 		case formLoclistx:
-			val = b.uint()
+			val = b.uint32()
 
 		// rnglist
 		case formRnglistx:
-			off := b.uint()
+			off := b.uint32()
 
 			rnglistsBase := int64(u.rngListsBase())
 			val = resolveRnglistx(uint64(rnglistsBase), off)
@@ -734,7 +734,7 @@ type Reader struct {
 	b            buf
 	d            *Data
 	err          error
-	unit         int
+	unit         int32
 	lastUnit     bool   // set if last entry returned by Next is TagCompileUnit/TagPartialUnit
 	lastChildren bool   // .Children of last entry returned by Next
 	lastSibling  Offset // .Val(AttrSibling) of last entry returned by Next
@@ -751,7 +751,7 @@ func (d *Data) Reader() *Reader {
 
 // AddressSize returns the size in bytes of addresses in the current compilation
 // unit.
-func (r *Reader) AddressSize() int {
+func (r *Reader) AddressSize() int32 {
 	return r.d.unit[r.unit].asize
 }
 
@@ -1067,7 +1067,7 @@ func (d *Data) dwarf2Ranges(u *unit, base uint64, ranges int64, ret [][2]uint64)
 			break
 		}
 
-		if low == ^uint64(0)>>uint((8-u.addrsize())*8) {
+		if low == ^uint64(0)>>uint32((8-u.addrsize())*8) {
 			base = high
 		} else {
 			ret = append(ret, [2]uint64{base + low, base + high})
@@ -1089,7 +1089,7 @@ func (d *Data) dwarf5Ranges(u *unit, cu *Entry, base uint64, ranges int64, ret [
 	}
 
 	buf := makeBuf(d, u, "rnglists", 0, d.rngLists)
-	buf.skip(int(ranges))
+	buf.skip(int32(ranges))
 	for {
 		opcode := buf.uint8()
 		switch opcode {
@@ -1100,7 +1100,7 @@ func (d *Data) dwarf5Ranges(u *unit, cu *Entry, base uint64, ranges int64, ret [
 			return ret, nil
 
 		case rleBaseAddressx:
-			baseIdx := buf.uint()
+			baseIdx := buf.uint32()
 			var err error
 			base, err = d.debugAddr(u, uint64(addrBase), baseIdx)
 			if err != nil {
@@ -1108,8 +1108,8 @@ func (d *Data) dwarf5Ranges(u *unit, cu *Entry, base uint64, ranges int64, ret [
 			}
 
 		case rleStartxEndx:
-			startIdx := buf.uint()
-			endIdx := buf.uint()
+			startIdx := buf.uint32()
+			endIdx := buf.uint32()
 
 			start, err := d.debugAddr(u, uint64(addrBase), startIdx)
 			if err != nil {
@@ -1122,8 +1122,8 @@ func (d *Data) dwarf5Ranges(u *unit, cu *Entry, base uint64, ranges int64, ret [
 			ret = append(ret, [2]uint64{start, end})
 
 		case rleStartxLength:
-			startIdx := buf.uint()
-			len := buf.uint()
+			startIdx := buf.uint32()
+			len := buf.uint32()
 			start, err := d.debugAddr(u, uint64(addrBase), startIdx)
 			if err != nil {
 				return nil, err
@@ -1131,8 +1131,8 @@ func (d *Data) dwarf5Ranges(u *unit, cu *Entry, base uint64, ranges int64, ret [
 			ret = append(ret, [2]uint64{start, start + len})
 
 		case rleOffsetPair:
-			off1 := buf.uint()
-			off2 := buf.uint()
+			off1 := buf.uint32()
+			off2 := buf.uint32()
 			ret = append(ret, [2]uint64{base + off1, base + off2})
 
 		case rleBaseAddress:
@@ -1145,7 +1145,7 @@ func (d *Data) dwarf5Ranges(u *unit, cu *Entry, base uint64, ranges int64, ret [
 
 		case rleStartLength:
 			start := buf.addr()
-			len := buf.uint()
+			len := buf.uint32()
 			ret = append(ret, [2]uint64{start, start + len})
 		}
 	}
@@ -1155,12 +1155,12 @@ func (d *Data) dwarf5Ranges(u *unit, cu *Entry, base uint64, ranges int64, ret [
 func (d *Data) debugAddr(format dataFormat, addrBase, idx uint64) (uint64, error) {
 	off := idx*uint64(format.addrsize()) + addrBase
 
-	if uint64(int(off)) != off {
+	if uint64(int32(off)) != off {
 		return 0, errors.New("offset out of range")
 	}
 
 	b := makeBuf(d, format, "addr", 0, d.addr)
-	b.skip(int(off))
+	b.skip(int32(off))
 	val := b.addr()
 	if b.err != nil {
 		return 0, b.err

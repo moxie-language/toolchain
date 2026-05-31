@@ -159,24 +159,24 @@ func parseBigInt(bytes []byte) (*big.Int, error) {
 // valid bits is recorded. Padding bits will be zero.
 type BitString struct {
 	Bytes     []byte // bits packed into bytes.
-	BitLength int    // length in bits.
+	BitLength int32    // length in bits.
 }
 
 // At returns the bit at the given index. If the index is out of range it
 // returns 0.
-func (b BitString) At(i int) int {
+func (b BitString) At(i int32) int32 {
 	if i < 0 || i >= b.BitLength {
 		return 0
 	}
 	x := i / 8
-	y := 7 - uint(i%8)
-	return int(b.Bytes[x]>>y) & 1
+	y := 7 - uint32(i%8)
+	return int32(b.Bytes[x]>>y) & 1
 }
 
 // RightAlign returns a slice where the padding bits are at the beginning. The
 // slice may share memory with the BitString.
 func (b BitString) RightAlign() []byte {
-	shift := uint(8 - (b.BitLength % 8))
+	shift := uint32(8 - (b.BitLength % 8))
 	if shift == 8 || len(b.Bytes) == 0 {
 		return b.Bytes
 	}
@@ -197,7 +197,7 @@ func parseBitString(bytes []byte) (ret BitString, err error) {
 		err = SyntaxError{"zero length BIT STRING"}
 		return
 	}
-	paddingBits := int(bytes[0])
+	paddingBits := int32(bytes[0])
 	if paddingBits > 7 ||
 		len(bytes) == 1 && paddingBits > 0 ||
 		bytes[len(bytes)-1]&((1<<bytes[0])-1) != 0 {
@@ -218,7 +218,7 @@ func NullBytes() []byte { return []byte{TagNull, 0} }
 // OBJECT IDENTIFIER
 
 // An ObjectIdentifier represents an ASN.1 OBJECT IDENTIFIER.
-type ObjectIdentifier []int
+type ObjectIdentifier []int32
 
 // Equal reports whether oi and other represent the same identifier.
 func (oi ObjectIdentifier) Equal(other ObjectIdentifier) bool {
@@ -251,7 +251,7 @@ func parseObjectIdentifier(bytes []byte) (s ObjectIdentifier, err error) {
 
 	// In the worst case, we get two elements from the first byte (which is
 	// encoded differently) and then every varint is a single byte long.
-	s = []int{:len(bytes)+1}
+	s = []int32{:len(bytes)+1}
 
 	// The first varint is 40*value1 + value2:
 	// According to this packing, value1 can take the values 0, 1 and 2 only.
@@ -283,17 +283,17 @@ func parseObjectIdentifier(bytes []byte) (s ObjectIdentifier, err error) {
 
 // ENUMERATED
 
-// An Enumerated is represented as a plain int.
-type Enumerated int
+// An Enumerated is represented as a plain int32.
+type Enumerated int32
 
 // FLAG
 
 // A Flag accepts any data and is set to true if present.
 type Flag bool
 
-// parseBase128Int parses a base-128 encoded int from the given offset in the
+// parseBase128Int parses a base-128 encoded int32 from the given offset in the
 // given byte slice. It returns the value and the new offset.
-func parseBase128Int(bytes []byte, initOffset int) (ret, offset int, err error) {
+func parseBase128Int(bytes []byte, initOffset int32) (ret, offset int32, err error) {
 	offset = initOffset
 	var ret64 int64
 	for shifted := 0; offset < len(bytes); shifted++ {
@@ -314,8 +314,8 @@ func parseBase128Int(bytes []byte, initOffset int) (ret, offset int, err error) 
 		ret64 |= int64(b & 0x7f)
 		offset++
 		if b&0x80 == 0 {
-			ret = int(ret64)
-			// Ensure that the returned value fits in an int on all platforms
+			ret = int32(ret64)
+			// Ensure that the returned value fits in an int32 on all platforms
 			if ret64 > math.MaxInt32 {
 				err = StructuralError{"base 128 integer too large"}
 			}
@@ -537,7 +537,7 @@ func parseBMPString(bmpString []byte) ([]byte, error) {
 
 // A RawValue represents an undecoded ASN.1 object.
 type RawValue struct {
-	Class, Tag int
+	Class, Tag int32
 	IsCompound bool
 	Bytes      []byte
 	FullBytes  []byte // includes the tag and length
@@ -554,7 +554,7 @@ type RawContent []byte
 // into a byte slice. It returns the parsed data and the new offset. SET and
 // SET OF (tag 17) are mapped to SEQUENCE and SEQUENCE OF (tag 16) since we
 // don't distinguish between ordered and unordered objects in this code.
-func parseTagAndLength(bytes []byte, initOffset int) (ret tagAndLength, offset int, err error) {
+func parseTagAndLength(bytes []byte, initOffset int32) (ret tagAndLength, offset int32, err error) {
 	offset = initOffset
 	// parseTagAndLength should not be called without at least a single
 	// byte to read. Thus this check is for robustness:
@@ -564,9 +564,9 @@ func parseTagAndLength(bytes []byte, initOffset int) (ret tagAndLength, offset i
 	}
 	b := bytes[offset]
 	offset++
-	ret.class = int(b >> 6)
+	ret.class = int32(b >> 6)
 	ret.isCompound = b&0x20 == 0x20
-	ret.tag = int(b & 0x1f)
+	ret.tag = int32(b & 0x1f)
 
 	// If the bottom five bits are set, then the tag number is actually base 128
 	// encoded afterwards
@@ -589,10 +589,10 @@ func parseTagAndLength(bytes []byte, initOffset int) (ret tagAndLength, offset i
 	offset++
 	if b&0x80 == 0 {
 		// The length is encoded in the bottom 7 bits.
-		ret.length = int(b & 0x7f)
+		ret.length = int32(b & 0x7f)
 	} else {
 		// Bottom 7 bits give the number of length bytes to follow.
-		numBytes := int(b & 0x7f)
+		numBytes := int32(b & 0x7f)
 		if numBytes == 0 {
 			err = SyntaxError{"indefinite length found (not DER)"}
 			return
@@ -612,7 +612,7 @@ func parseTagAndLength(bytes []byte, initOffset int) (ret tagAndLength, offset i
 				return
 			}
 			ret.length <<= 8
-			ret.length |= int(b)
+			ret.length |= int32(b)
 			if ret.length == 0 {
 				// DER requires that lengths be minimal.
 				err = StructuralError{"superfluous leading zeros in length"}
@@ -699,7 +699,7 @@ func _bigIntPtrTC() *_rawType        { return typeCodeOf((**big.Int)(nil)).elem(
 
 // invalidLength reports whether offset + length > sliceLength, or if the
 // addition would overflow.
-func invalidLength(offset, length, sliceLength int) bool {
+func invalidLength(offset, length, sliceLength int32) bool {
 	return offset+length < offset || offset+length > sliceLength
 }
 
@@ -721,7 +721,7 @@ func getASN1Tag(tag []byte) []byte {
 // parseFieldUnsafe is the main parsing function. Given a type code, a pointer
 // to the destination, and a byte slice with offset, it parses an ASN.1 value
 // and writes it directly through the unsafe pointer.
-func parseFieldUnsafe(typ *_rawType, ptr unsafe.Pointer, data []byte, initOffset int, params fieldParameters) (offset int, err error) {
+func parseFieldUnsafe(typ *_rawType, ptr unsafe.Pointer, data []byte, initOffset int32, params fieldParameters) (offset int32, err error) {
 	offset = initOffset
 
 	if offset == len(data) {

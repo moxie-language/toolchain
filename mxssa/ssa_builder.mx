@@ -224,12 +224,12 @@ type ssaFuncBuilder struct {
 	vars         map[Object]*SSAAlloc
 	freeVarPtrs  map[string]*SSAFreeVar
 	namedResults []*SSAAlloc
-	counter      int
+	counter      int32
 
 	loops        []ssaLoopState
 	pendingLabel string
 	labels       map[string]*SSABasicBlock
-	deferred     int
+	deferred     int32
 }
 
 type ssaLoopState struct {
@@ -1822,13 +1822,13 @@ func (fb *ssaFuncBuilder) wrapVariadicArgs(args []SSAValue, sig *Signature) []SS
 	if sl, ok := safeUnderlying(sliceType).(*Slice); ok {
 		elemType = sl.Elem()
 	}
-	lenVal := NewSSAConst(constInt{int64(nVariadic)}, Typ[Int32])
+	lenVal := NewSSAConst(constInt{int32(nVariadic)}, Typ[Int32])
 	ms := &SSAMakeSlice{Len: lenVal, Cap: lenVal}
 	ms.typ = sliceType
 	ms.name = fb.nextName()
 	fb.emit(ms)
 	for i := 0; i < nVariadic; i++ {
-		idx := NewSSAConst(constInt{int64(i)}, Typ[Int32])
+		idx := NewSSAConst(constInt{int32(i)}, Typ[Int32])
 		ia := &SSAIndexAddr{X: ms, Index: idx}
 		ia.typ = NewPointer(elemType)
 		ia.name = fb.nextName()
@@ -2331,7 +2331,7 @@ func (fb *ssaFuncBuilder) buildCompositeLit(e *CompositeLit) SSAValue {
 
 func (fb *ssaFuncBuilder) buildArrayLit(e *CompositeLit, typ Type, ar *Array) SSAValue {
 	if ar.Len() < 0 {
-		ar = NewArray(ar.Elem(), int64(len(e.ElemList)))
+		ar = NewArray(ar.Elem(), int32(len(e.ElemList)))
 		typ = ar
 	}
 	alloc := fb.emitAlloc(typ, 0)
@@ -2352,7 +2352,7 @@ func (fb *ssaFuncBuilder) buildArrayLit(e *CompositeLit, typ Type, ar *Array) SS
 		if v == nil {
 			continue
 		}
-		idx := &SSAConst{typ: Typ[Int32], val: constant.MakeInt64(int64(i))}
+		idx := &SSAConst{typ: Typ[Int32], val: constant.MakeInt64(int32(i))}
 		ia := &SSAIndexAddr{X: alloc, Index: idx}
 		ia.typ = NewPointer(elemTyp)
 		ia.name = fb.nextName()
@@ -2410,7 +2410,7 @@ func (fb *ssaFuncBuilder) buildCompositeLitWithType(e *CompositeLit, typ Type) S
 
 func (fb *ssaFuncBuilder) buildSliceLit(e *CompositeLit, typ Type, sl *Slice) SSAValue {
 	n := len(e.ElemList)
-	nVal := &SSAConst{typ: Typ[Int32], val: constant.MakeInt64(int64(n))}
+	nVal := &SSAConst{typ: Typ[Int32], val: constant.MakeInt64(int32(n))}
 	ms := &SSAMakeSlice{}
 	ms.typ = typ
 	ms.name = fb.nextName()
@@ -2428,7 +2428,7 @@ func (fb *ssaFuncBuilder) buildSliceLit(e *CompositeLit, typ Type, sl *Slice) SS
 		if v == nil {
 			continue
 		}
-		idx := &SSAConst{typ: Typ[Int32], val: constant.MakeInt64(int64(i))}
+		idx := &SSAConst{typ: Typ[Int32], val: constant.MakeInt64(int32(i))}
 		ia := &SSAIndexAddr{X: ms, Index: idx}
 		ia.typ = NewPointer(sl.Elem())
 		ia.name = fb.nextName()
@@ -2809,7 +2809,7 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e Expr) Type {
 	case *ArrayType:
 		elem := fb.resolveTypeAST(e.Elem)
 		if elem != nil {
-			n := int64(-1)
+			n := int32(-1)
 			if lit, ok := e.Len.(*BasicLit); ok {
 				n = ssaParseInt64(lit.Value)
 			}
@@ -2903,7 +2903,7 @@ func (fb *ssaFuncBuilder) resolveFuncTypeAST(ft *FuncType) *Signature {
 	return NewSignature(nil, pTuple, rTuple, false)
 }
 
-func (fb *ssaFuncBuilder) fieldIndex(t Type, name string) int {
+func (fb *ssaFuncBuilder) fieldIndex(t Type, name string) int32 {
 	if t == nil {
 		return -1
 	}
@@ -2920,7 +2920,7 @@ func (fb *ssaFuncBuilder) fieldIndex(t Type, name string) int {
 	return -1
 }
 
-func (fb *ssaFuncBuilder) findEmbeddedField(t Type, name string) (embedIdx int, innerIdx int) {
+func (fb *ssaFuncBuilder) findEmbeddedField(t Type, name string) (embedIdx int32, innerIdx int32) {
 	if t == nil {
 		return -1, -1
 	}
@@ -2948,7 +2948,7 @@ func (fb *ssaFuncBuilder) findEmbeddedField(t Type, name string) (embedIdx int, 
 	return -1, -1
 }
 
-func (fb *ssaFuncBuilder) fieldType(t Type, idx int) Type {
+func (fb *ssaFuncBuilder) fieldType(t Type, idx int32) Type {
 	if t == nil {
 		return nil
 	}

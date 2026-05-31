@@ -30,7 +30,7 @@ type parser struct {
 	typeData [][]byte                  // unparsed type data (v3 and later)
 	fixups   []fixupRecord             // fixups to apply at end of parsing
 	initdata InitData                  // package init priority data
-	aliases  map[int]string            // maps saved type number to alias name
+	aliases  map[int32]string            // maps saved type number to alias name
 }
 
 // When reading export data it's possible to encounter a defined type
@@ -57,7 +57,7 @@ func (p *parser) init(filename string, src io.Reader, imports map[string]*types.
 	p.scanner = &scanner.Scanner{}
 	p.initScanner(filename, src)
 	p.imports = imports
-	p.aliases = map[int]string{}
+	p.aliases = map[int32]string{}
 	p.typeList = []types.Type{:1 /* type numbers start at 1 */:16}
 }
 
@@ -132,7 +132,7 @@ func (p *parser) parseUnquotedString() string {
 	b.WriteString(p.scanner.TokenText())
 	// This loop needs to examine each character before deciding whether to consume it. If we see a semicolon,
 	// we need to let it be consumed by p.next().
-	for ch := p.scanner.Peek(); ch != '\n' && ch != ';' && ch != scanner.EOF && p.scanner.Whitespace&(1<<uint(ch)) == 0; ch = p.scanner.Peek() {
+	for ch := p.scanner.Peek(); ch != '\n' && ch != ';' && ch != scanner.EOF && p.scanner.Whitespace&(1<<uint32(ch)) == 0; ch = p.scanner.Peek() {
 		b.WriteRune(ch)
 		p.scanner.Next()
 	}
@@ -271,7 +271,7 @@ func (p *parser) parseParam(kind types.VarKind, pkg *types.Package) (param *type
 		name = ""
 	}
 	if p.tok == '<' && p.scanner.Peek() == 'e' {
-		// EscInfo = "<esc:" int ">" . (optional and ignored)
+		// EscInfo = "<esc:" int32 ">" . (optional and ignored)
 		p.next()
 		p.expectKeyword("esc")
 		p.expect(':')
@@ -317,7 +317,7 @@ func (p *parser) parseConversion(pkg *types.Package) (val constant.Value, typ ty
 	return
 }
 
-// ConstValue     = string | "false" | "true" | ["-"] (int ["'"] | FloatOrComplex) | Conversion .
+// ConstValue     = string | "false" | "true" | ["-"] (int32 ["'"] | FloatOrComplex) | Conversion .
 // FloatOrComplex = float ["i" | ("+"|"-") float "i"] .
 func (p *parser) parseConstValue(pkg *types.Package) (val constant.Value, typ types.Type) {
 	// v3 changed to $false, $true, $convert, to avoid confusion
@@ -444,10 +444,17 @@ func (p *parser) parseConst(pkg *types.Package) *types.Const {
 // which don't have their actual type yet. When the type map is updated,
 // the actual type must replace a reserved entry (or we have an internal
 // error). Used for self-verification only - not required for correctness.
-var reserved = &struct{ types.Type }{}
+var reserved *struct{ types.Type }
+
+func ensureReserved() *struct{ types.Type } {
+	if reserved == nil {
+		reserved = &struct{ types.Type }{}
+	}
+	return reserved
+}
 
 // reserve reserves the type map entry n for future use.
-func (p *parser) reserve(n int) {
+func (p *parser) reserve(n int32) {
 	// Notes:
 	// - for pre-V3 export data, the type numbers we see are
 	//   guaranteed to be in increasing order, so we append a
@@ -459,12 +466,12 @@ func (p *parser) reserve(n int) {
 		if n != len(p.typeList) {
 			p.errorf("invalid type number %d (out of sync)", n)
 		}
-		p.typeList = append(p.typeList, reserved)
+		p.typeList = append(p.typeList, ensureReserved())
 	} else {
 		if p.typeList[n] != nil {
 			p.errorf("previously visited type number %d", n)
 		}
-		p.typeList[n] = reserved
+		p.typeList[n] = ensureReserved()
 	}
 }
 
@@ -474,7 +481,7 @@ func (p *parser) reserve(n int) {
 // used to resolve pointers to named types in case they are referenced
 // by embedded fields.
 func (p *parser) update(t types.Type, nlist []any) {
-	if t == reserved {
+	if t == ensureReserved() {
 		p.errorf("internal error: update(%v) invoked on reserved", nlist)
 	}
 	if t == nil {
@@ -482,11 +489,11 @@ func (p *parser) update(t types.Type, nlist []any) {
 	}
 	for _, n := range nlist {
 		switch n := n.(type) {
-		case int:
+		case int32:
 			if p.typeList[n] == t {
 				continue
 			}
-			if p.typeList[n] != reserved {
+			if p.typeList[n] != ensureReserved() {
 				p.errorf("internal error: update(%v): %d not reserved", nlist, n)
 			}
 			p.typeList[n] = t
@@ -526,7 +533,7 @@ func (p *parser) parseNamedType(nlist []any) types.Type {
 	// type alias
 	if p.tok == '=' {
 		p.next()
-		p.aliases[nlist[len(nlist)-1].(int)] = name
+		p.aliases[nlist[len(nlist)-1].(int32)] = name
 		if obj != nil {
 			// use the previously imported (canonical) type
 			t := obj.Type()
@@ -615,16 +622,16 @@ func (p *parser) parseInt64() int64 {
 	return n
 }
 
-func (p *parser) parseInt() int {
+func (p *parser) parseInt() int32 {
 	lit := p.expect(scanner.Int)
-	n, err := strconv.ParseInt(lit, 10, 0 /* int */)
+	n, err := strconv.ParseInt(lit, 10, 0 /* int32 */)
 	if err != nil {
 		p.error(err)
 	}
-	return int(n)
+	return int32(n)
 }
 
-// ArrayOrSliceType = "[" [ int ] "]" Type .
+// ArrayOrSliceType = "[" [ int32 ] "]" Type .
 func (p *parser) parseArrayOrSliceType(pkg *types.Package, nlist []any) types.Type {
 	p.expect('[')
 	if p.tok == ']' {
@@ -908,7 +915,7 @@ const (
 	gccgoBuiltinANY        = 22
 )
 
-func lookupBuiltinType(typ int) types.Type {
+func lookupBuiltinType(typ int32) types.Type {
 	return [...]types.Type{
 		gccgoBuiltinINT8:       types.Typ[types.Int8],
 		gccgoBuiltinINT16:      types.Typ[types.Int16],
@@ -934,7 +941,7 @@ func lookupBuiltinType(typ int) types.Type {
 	}[typ]
 }
 
-// Type = "<" "type" ( "-" int | int [ TypeSpec ] ) ">" .
+// Type = "<" "type" ( "-" int32 | int32 [ TypeSpec ] ) ">" .
 //
 // parseType updates the type map to t for all type numbers n.
 func (p *parser) parseType(pkg *types.Package, n ...any) types.Type {
@@ -944,7 +951,7 @@ func (p *parser) parseType(pkg *types.Package, n ...any) types.Type {
 }
 
 // (*parser).Type after reading the "<".
-func (p *parser) parseTypeAfterAngle(pkg *types.Package, n ...any) (t types.Type, n1 int) {
+func (p *parser) parseTypeAfterAngle(pkg *types.Package, n ...any) (t types.Type, n1 int32) {
 	p.expectKeyword("type")
 
 	n1 = 0
@@ -956,7 +963,7 @@ func (p *parser) parseTypeAfterAngle(pkg *types.Package, n ...any) (t types.Type
 				p.parseSavedType(pkg, n1, n)
 			}
 			t = p.typeList[n1]
-			if len(p.typeData) == 0 && t == reserved {
+			if len(p.typeData) == 0 && t == ensureReserved() {
 				p.errorf("invalid type cycle, type %d not yet defined (nlist=%v)", n1, n)
 			}
 			p.update(t, n)
@@ -976,7 +983,7 @@ func (p *parser) parseTypeAfterAngle(pkg *types.Package, n ...any) (t types.Type
 		return nil, 0
 	}
 
-	if t == nil || t == reserved {
+	if t == nil || t == ensureReserved() {
 		p.errorf("internal error: bad return from parseType(%v)", n)
 	}
 
@@ -987,7 +994,7 @@ func (p *parser) parseTypeAfterAngle(pkg *types.Package, n ...any) (t types.Type
 // parseTypeExtended is identical to parseType, but if the type in
 // question is a saved type, returns the index as well as the type
 // pointer (index returned is zero if we parsed a builtin).
-func (p *parser) parseTypeExtended(pkg *types.Package, n ...any) (t types.Type, n1 int) {
+func (p *parser) parseTypeExtended(pkg *types.Package, n ...any) (t types.Type, n1 int32) {
 	p.expect('<')
 	t, n1 = p.parseTypeAfterAngle(pkg, n...)
 	return
@@ -1033,8 +1040,8 @@ func (p *parser) parseTypes(pkg *types.Package) {
 	p.typeList = []types.Type{:maxp1:maxp1}
 
 	type typeOffset struct {
-		offset int
-		length int
+		offset int32
+		length int32
 	}
 	var typeOffsets []typeOffset
 
@@ -1074,7 +1081,7 @@ func (p *parser) parseTypes(pkg *types.Package) {
 }
 
 // parseSavedType parses one saved type definition.
-func (p *parser) parseSavedType(pkg *types.Package, i int, nlist []any) {
+func (p *parser) parseSavedType(pkg *types.Package, i int32, nlist []any) {
 	defer func(s *scanner.Scanner, tok rune, lit string) {
 		p.scanner = s
 		p.tok = tok
@@ -1088,19 +1095,19 @@ func (p *parser) parseSavedType(pkg *types.Package, i int, nlist []any) {
 	if id != i {
 		p.errorf("type ID mismatch: got %d, want %d", id, i)
 	}
-	if p.typeList[i] == reserved {
+	if p.typeList[i] == ensureReserved() {
 		p.errorf("internal error: %d already reserved in parseSavedType", i)
 	}
 	if p.typeList[i] == nil {
 		p.reserve(i)
 		p.parseTypeSpec(pkg, append(nlist, i))
 	}
-	if p.typeList[i] == nil || p.typeList[i] == reserved {
+	if p.typeList[i] == nil || p.typeList[i] == ensureReserved() {
 		p.errorf("internal error: parseSavedType(%d,%v) reserved/nil", i, nlist)
 	}
 }
 
-// PackageInit = unquotedString unquotedString int .
+// PackageInit = unquotedString unquotedString int32 .
 func (p *parser) parsePackageInit() PackageInit {
 	name := p.parseUnquotedString()
 	initfunc := p.parseUnquotedString()
@@ -1120,7 +1127,7 @@ func (p *parser) maybeCreatePackage() {
 
 // InitDataDirective = ( "v1" | "v2" | "v3" ) ";" |
 //
-//	"priority" int ";" |
+//	"priority" int32 ";" |
 //	"init" { PackageInit } ";" |
 //	"checksum" unquotedString ";" .
 func (p *parser) parseInitDataDirective() {
@@ -1159,7 +1166,7 @@ func (p *parser) parseInitDataDirective() {
 
 	case "checksum":
 		// Don't let the scanner try to parse the checksum as a number.
-		defer func(mode uint) {
+		defer func(mode uint32) {
 			p.scanner.Mode = mode
 		}(p.scanner.Mode)
 		p.scanner.Mode &^= scanner.ScanInts | scanner.ScanFloats

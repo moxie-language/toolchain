@@ -35,9 +35,9 @@ type Handler interface {
 
 // Loop is a single-threaded epoll event loop.
 type Loop struct {
-	epfd    int
-	lnFD    int
-	conns   map[int]*Conn
+	epfd    int32
+	lnFD    int32
+	conns   map[int32]*Conn
 	extraFDs map[int32]bool // fds registered via AddFD (not connections)
 	handler Handler
 	readBuf []byte
@@ -48,7 +48,7 @@ func New(h Handler) *Loop {
 	return &Loop{
 		epfd:     -1,
 		lnFD:     -1,
-		conns:    map[int]*Conn{},
+		conns:    map[int32]*Conn{},
 		extraFDs: map[int32]bool{},
 		handler:  h,
 		readBuf:  []byte{:32768},
@@ -57,7 +57,7 @@ func New(h Handler) *Loop {
 
 // Run starts the event loop listening on lnFD (a non-blocking TCP listen socket).
 // Blocks until SIGTERM/SIGINT or a fatal epoll error.
-func (l *Loop) Run(lnFD int) error {
+func (l *Loop) Run(lnFD int32) error {
 	epfd, err := syscall.EpollCreate1(syscall.EPOLL_CLOEXEC)
 	if err != nil {
 		return fmt.Errorf("evloop: epoll_create1: %w", err)
@@ -71,7 +71,7 @@ func (l *Loop) Run(lnFD int) error {
 	}
 	// Register pre-added extra fds.
 	for fd := range l.extraFDs {
-		if err := l.epollAdd(int(fd), syscall.EPOLLIN); err != nil {
+		if err := l.epollAdd(int32(fd), syscall.EPOLLIN); err != nil {
 			return fmt.Errorf("evloop: epoll add fd %d: %w", fd, err)
 		}
 	}
@@ -91,7 +91,7 @@ func (l *Loop) Run(lnFD int) error {
 		}
 		for i := 0; i < n; i++ {
 			ev := events[i]
-			fd := int(ev.Fd)
+			fd := int32(ev.Fd)
 			if fd == lnFD {
 				l.acceptAll()
 				continue
@@ -124,10 +124,10 @@ func (l *Loop) Run(lnFD int) error {
 // AddFD registers an existing fd (e.g. a worker pipe) for EPOLLIN dispatch
 // via Handler.OnFD. The fd is set non-blocking.
 func (l *Loop) AddFD(fd int32) {
-	syscall.SetNonblock(int(fd), true)
+	syscall.SetNonblock(int32(fd), true)
 	l.extraFDs[fd] = true
 	if l.epfd >= 0 {
-		l.epollAdd(int(fd), syscall.EPOLLIN)
+		l.epollAdd(int32(fd), syscall.EPOLLIN)
 	}
 }
 
@@ -135,12 +135,12 @@ func (l *Loop) AddFD(fd int32) {
 func (l *Loop) RemoveFD(fd int32) {
 	delete(l.extraFDs, fd)
 	if l.epfd >= 0 {
-		syscall.EpollCtl(l.epfd, syscall.EPOLL_CTL_DEL, int(fd), nil)
+		syscall.EpollCtl(l.epfd, syscall.EPOLL_CTL_DEL, int32(fd), nil)
 	}
 }
 
 // Conn returns the Conn for a given fd, or nil.
-func (l *Loop) Conn(fd int) *Conn {
+func (l *Loop) Conn(fd int32) *Conn {
 	return l.conns[fd]
 }
 
@@ -187,17 +187,17 @@ func (l *Loop) closeConn(c *Conn) {
 	delete(l.conns, c.FD)
 }
 
-func (l *Loop) modWrite(fd int) {
+func (l *Loop) modWrite(fd int32) {
 	ev := syscall.EpollEvent{Events: syscall.EPOLLIN | syscall.EPOLLOUT, Fd: int32(fd)}
 	syscall.EpollCtl(l.epfd, syscall.EPOLL_CTL_MOD, fd, &ev)
 }
 
-func (l *Loop) modRead(fd int) {
+func (l *Loop) modRead(fd int32) {
 	ev := syscall.EpollEvent{Events: syscall.EPOLLIN, Fd: int32(fd)}
 	syscall.EpollCtl(l.epfd, syscall.EPOLL_CTL_MOD, fd, &ev)
 }
 
-func (l *Loop) epollAdd(fd int, events uint32) error {
+func (l *Loop) epollAdd(fd int32, events uint32) error {
 	ev := syscall.EpollEvent{Events: events, Fd: int32(fd)}
 	return syscall.EpollCtl(l.epfd, syscall.EPOLL_CTL_ADD, fd, &ev)
 }

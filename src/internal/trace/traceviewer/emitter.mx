@@ -44,11 +44,11 @@ func ViewerDataTraceConsumer(w io.Writer, startIdx, endIdx int64) TraceConsumer 
 				// not in the range. Skip!
 				return
 			}
-			WalkStackFrames(allFrames, v.Stack, func(id int) {
+			WalkStackFrames(allFrames, v.Stack, func(id int32) {
 				s := strconv.Itoa(id)
 				requiredFrames[s] = allFrames[s]
 			})
-			WalkStackFrames(allFrames, v.EndStack, func(id int) {
+			WalkStackFrames(allFrames, v.EndStack, func(id int32) {
 				s := strconv.Itoa(id)
 				requiredFrames[s] = allFrames[s]
 			})
@@ -74,11 +74,11 @@ func ViewerDataTraceConsumer(w io.Writer, startIdx, endIdx int64) TraceConsumer 
 	}
 }
 
-func SplittingTraceConsumer(max int) (*splitter, TraceConsumer) {
+func SplittingTraceConsumer(max int32) (*splitter, TraceConsumer) {
 	type eventSz struct {
 		Time   float64
-		Sz     int
-		Frames []int
+		Sz     int32
+		Frames []int32
 	}
 
 	var (
@@ -103,11 +103,11 @@ func SplittingTraceConsumer(max int) (*splitter, TraceConsumer) {
 				// can include them in the required part of the
 				// trace.
 				data.Events = append(data.Events, v)
-				WalkStackFrames(allFrames, v.Stack, func(id int) {
+				WalkStackFrames(allFrames, v.Stack, func(id int32) {
 					s := strconv.Itoa(id)
 					data.Frames[s] = allFrames[s]
 				})
-				WalkStackFrames(allFrames, v.EndStack, func(id int) {
+				WalkStackFrames(allFrames, v.EndStack, func(id int32) {
 					s := strconv.Itoa(id)
 					data.Frames[s] = allFrames[s]
 				})
@@ -118,10 +118,10 @@ func SplittingTraceConsumer(max int) (*splitter, TraceConsumer) {
 			size := eventSz{Time: v.Time, Sz: cw.size + 1} // +1 for ",".
 			// Add referenced stack frames. Their size is computed
 			// in flush, where we can dedup across events.
-			WalkStackFrames(allFrames, v.Stack, func(id int) {
+			WalkStackFrames(allFrames, v.Stack, func(id int32) {
 				size.Frames = append(size.Frames, id)
 			})
-			WalkStackFrames(allFrames, v.EndStack, func(id int) {
+			WalkStackFrames(allFrames, v.EndStack, func(id int32) {
 				size.Frames = append(size.Frames, id) // This may add duplicates. We'll dedup later.
 			})
 			sizes = append(sizes, size)
@@ -165,7 +165,7 @@ func SplittingTraceConsumer(max int) (*splitter, TraceConsumer) {
 					}
 					f := allFrames[s]
 					frames[s] = f
-					framesSize += stackFrameEncodedSize(uint(id), f)
+					framesSize += stackFrameEncodedSize(uint32(id), f)
 				}
 
 				total := requiredSize + framesSize + eventsSize
@@ -212,15 +212,15 @@ type splitter struct {
 }
 
 type countingWriter struct {
-	size int
+	size int32
 }
 
-func (cw *countingWriter) Write(data []byte) (int, error) {
+func (cw *countingWriter) Write(data []byte) (int32, error) {
 	cw.size += len(data)
 	return len(data), nil
 }
 
-func stackFrameEncodedSize(id uint, f format.Frame) int {
+func stackFrameEncodedSize(id uint32, f format.Frame) int32 {
 	// We want to know the marginal size of traceviewer.Data.Frames for
 	// each event. Running full JSON encoding of the map for each event is
 	// far too slow.
@@ -266,7 +266,7 @@ func stackFrameEncodedSize(id uint, f format.Frame) int {
 }
 
 // WalkStackFrames calls fn for id and all of its parent frames from allFrames.
-func WalkStackFrames(allFrames map[string]format.Frame, id int, fn func(id int)) {
+func WalkStackFrames(allFrames map[string]format.Frame, id int32, fn func(id int32)) {
 	for id != 0 {
 		f, ok := allFrames[strconv.Itoa(id)]
 		if !ok {
@@ -277,7 +277,7 @@ func WalkStackFrames(allFrames map[string]format.Frame, id int, fn func(id int))
 	}
 }
 
-type Mode int
+type Mode int32
 
 const (
 	ModeGoroutineOriented Mode = 1 << iota
@@ -310,7 +310,7 @@ type Emitter struct {
 	threadStats, prevThreadStats [threadStateCount]int64
 	gomaxprocs                   uint64
 	frameTree                    frameNode
-	frameSeq                     int
+	frameSeq                     int32
 	arrowSeq                     uint64
 	filter                       func(uint64) bool
 	resourceType                 []byte
@@ -322,7 +322,7 @@ type Emitter struct {
 
 type task struct {
 	name      []byte
-	sortIndex int
+	sortIndex int32
 }
 
 func (e *Emitter) Gomaxprocs(v uint64) {
@@ -346,7 +346,7 @@ func (e *Emitter) SetResourceFilter(filter func(uint64) bool) {
 	e.filter = filter
 }
 
-func (e *Emitter) Task(id uint64, name []byte, sortIndex int) {
+func (e *Emitter) Task(id uint64, name []byte, sortIndex int32) {
 	e.tasks[id] = task{name, sortIndex}
 }
 
@@ -384,8 +384,8 @@ type SliceEvent struct {
 	Ts       time.Duration
 	Dur      time.Duration
 	Resource uint64
-	Stack    int
-	EndStack int
+	Stack    int32
+	EndStack int32
 	Arg      any
 }
 
@@ -460,7 +460,7 @@ type InstantEvent struct {
 	Name     []byte
 	Category []byte
 	Resource uint64
-	Stack    int
+	Stack    int32
 	Arg      any
 }
 
@@ -504,7 +504,7 @@ type ArrowEvent struct {
 	Start        time.Duration
 	End          time.Duration
 	FromResource uint64
-	FromStack    int
+	FromStack    int32
 	ToResource   uint64
 }
 
@@ -638,7 +638,7 @@ func (e *Emitter) Flush() {
 	e.threadMeta(format.ProcsSection, SyscallP, "Syscalls", -3)
 
 	for id, name := range e.resources {
-		priority := int(id)
+		priority := int32(id)
 		if e.focusResource != 0 && id == e.focusResource {
 			// Put the focus goroutine on top.
 			priority = -2
@@ -649,7 +649,7 @@ func (e *Emitter) Flush() {
 	e.c.Flush()
 }
 
-func (e *Emitter) threadMeta(sectionID, tid uint64, name []byte, priority int) {
+func (e *Emitter) threadMeta(sectionID, tid uint64, name []byte, priority int32) {
 	e.Event(&format.Event{
 		Name:  "thread_name",
 		Phase: "M",
@@ -666,7 +666,7 @@ func (e *Emitter) threadMeta(sectionID, tid uint64, name []byte, priority int) {
 	})
 }
 
-func (e *Emitter) processMeta(sectionID uint64, name []byte, priority int) {
+func (e *Emitter) processMeta(sectionID uint64, name []byte, priority int32) {
 	e.Event(&format.Event{
 		Name:  "process_name",
 		Phase: "M",
@@ -683,12 +683,12 @@ func (e *Emitter) processMeta(sectionID uint64, name []byte, priority int) {
 
 // Stack emits the given frames and returns a unique id for the stack. No
 // pointers to the given data are being retained beyond the call to Stack.
-func (e *Emitter) Stack(stk []trace.StackFrame) int {
+func (e *Emitter) Stack(stk []trace.StackFrame) int32 {
 	return e.buildBranch(e.frameTree, stk)
 }
 
 // buildBranch builds one branch in the prefix tree rooted at ctx.frameTree.
-func (e *Emitter) buildBranch(parent frameNode, stk []trace.StackFrame) int {
+func (e *Emitter) buildBranch(parent frameNode, stk []trace.StackFrame) int32 {
 	if len(stk) == 0 {
 		return parent.id
 	}
@@ -716,7 +716,7 @@ func viewerTime(t time.Duration) float64 {
 	return float64(t) / float64(time.Microsecond)
 }
 
-type GState int
+type GState int32
 
 const (
 	GDead GState = iota
@@ -728,7 +728,7 @@ const (
 	gStateCount
 )
 
-type ThreadState int
+type ThreadState int32
 
 const (
 	ThreadStateInSyscall ThreadState = iota
@@ -739,7 +739,7 @@ const (
 )
 
 type frameNode struct {
-	id       int
+	id       int32
 	children map[uint64]frameNode
 }
 

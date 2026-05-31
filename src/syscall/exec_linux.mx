@@ -59,9 +59,9 @@ const (
 // versions (due to security issues), or are available but subject to AppArmor
 // restrictions like in Ubuntu 24.04.
 type SysProcIDMap struct {
-	ContainerID int // Container ID.
-	HostID      int // Host ID.
-	Size        int // Size.
+	ContainerID int32 // Container ID.
+	HostID      int32 // Host ID.
+	Size        int32 // Size.
 }
 
 type SysProcAttr struct {
@@ -81,14 +81,14 @@ type SysProcAttr struct {
 	// This is only meaningful if Setsid is true.
 	Setctty bool
 	Noctty  bool // Detach fd 0 from controlling terminal.
-	Ctty    int  // Controlling TTY fd.
+	Ctty    int32  // Controlling TTY fd.
 	// Foreground places the child process group in the foreground.
 	// This implies Setpgid. The Ctty field must be set to
 	// the descriptor of the controlling TTY.
 	// Unlike Setctty, in this case Ctty must be a descriptor
 	// number in the parent process.
 	Foreground bool
-	Pgid       int // Child's process group ID if Setpgid.
+	Pgid       int32 // Child's process group ID if Setpgid.
 	// Pdeathsig, if non-zero, is a signal that the kernel will send to
 	// the child process when the creating thread dies. Note that the signal
 	// is sent on thread termination, which may happen before process termination.
@@ -105,19 +105,27 @@ type SysProcAttr struct {
 	GidMappingsEnableSetgroups bool
 	AmbientCaps                []uintptr // Ambient capabilities.
 	UseCgroupFD                bool      // Whether to make use of the CgroupFD field.
-	CgroupFD                   int       // File descriptor of a cgroup to put the new process into.
+	CgroupFD                   int32       // File descriptor of a cgroup to put the new process into.
 	// PidFD, if not nil, is used to store the pidfd of a child, if the
 	// functionality is supported by the kernel, or -1. Note *PidFD is
 	// changed only if the process starts successfully.
-	PidFD *int
+	PidFD *int32
 }
 
 var (
-	none  = [...]byte{'n', 'o', 'n', 'e', 0}
-	slash = [...]byte{'/', 0}
+	none  [5]byte
+	slash [2]byte
 
-	forceClone3 = false // Used by unit tests only.
+	forceClone3    bool // Used by unit tests only.
+	_execVarsReady bool
 )
+
+func execVarsInit() {
+	if _execVarsReady { return }
+	_execVarsReady = true
+	none = [5]byte{'n', 'o', 'n', 'e', 0}
+	slash = [2]byte{'/', 0}
+}
 
 // Implemented in runtime package.
 func runtime_BeforeFork()
@@ -135,7 +143,7 @@ func runtime_AfterForkInChild()
 // functions that do not grow the stack.
 //
 //go:norace
-func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr *ProcAttr, sys *SysProcAttr, pipe int) (pid int, err Errno) {
+func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr *ProcAttr, sys *SysProcAttr, pipe int32) (pid int32, err Errno) {
 	// Set up and fork. This returns immediately in the parent or
 	// if there's an error.
 	upid, pidfd, err, mapPipe, locked := forkAndExecInChild1(argv0, argv, envv, chroot, dir, attr, sys, pipe)
@@ -147,9 +155,9 @@ func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr
 	}
 
 	// parent; return PID
-	pid = int(upid)
+	pid = int32(upid)
 	if sys.PidFD != nil {
-		*sys.PidFD = int(pidfd)
+		*sys.PidFD = int32(pidfd)
 	}
 
 	if sys.UidMappings != nil || sys.GidMappings != nil {
@@ -190,12 +198,12 @@ type caps struct {
 func capToIndex(cap uintptr) uintptr { return cap >> 5 }
 
 // See CAP_TO_MASK in linux/capability.h:
-func capToMask(cap uintptr) uint32 { return 1 << uint(cap&31) }
+func capToMask(cap uintptr) uint32 { return 1 << uint32(cap&31) }
 
 // cloneArgs holds arguments for clone3 Linux syscall.
 type cloneArgs struct {
 	flags      uint64 // Flags bit mask
-	pidFD      uint64 // Where to store PID file descriptor (int *)
+	pidFD      uint64 // Where to store PID file descriptor (int32 *)
 	childTID   uint64 // Where to store child TID, in child's memory (pid_t *)
 	parentTID  uint64 // Where to store child TID, in parent's memory (pid_t *)
 	exitSignal uint64 // Signal to deliver to parent on child termination
@@ -218,7 +226,7 @@ type cloneArgs struct {
 //go:noinline
 //go:norace
 //go:nocheckptr
-func forkAndExecInChild1(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr *ProcAttr, sys *SysProcAttr, pipe int) (pid uintptr, pidfd int32, err1 Errno, mapPipe [2]int, locked bool) {
+func forkAndExecInChild1(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr *ProcAttr, sys *SysProcAttr, pipe int32) (pid uintptr, pidfd int32, err1 Errno, mapPipe [2]int32, locked bool) {
 	// Defined in linux/prctl.h starting with Linux 4.3.
 	const (
 		PR_CAP_AMBIENT       = 0x2f
@@ -241,15 +249,15 @@ func forkAndExecInChild1(argv0 *byte, argv, envv []*byte, chroot, dir *byte, att
 	// by an otherwise-correct change in the compiler.
 	var (
 		err2                      Errno
-		nextfd                    int
-		i                         int
+		nextfd                    int32
+		i                         int32
 		caps                      caps
 		fd1, flags                uintptr
 		puid, psetgroups, pgid    []byte
 		uidmap, setgroups, gidmap []byte
 		clone3                    *cloneArgs
 		pgrp                      int32
-		dirfd                     int
+		dirfd                     int32
 		cred                      *Credential
 		ngroups, groups           uintptr
 		c                         uintptr
@@ -284,13 +292,13 @@ func forkAndExecInChild1(argv0 *byte, argv, envv []*byte, chroot, dir *byte, att
 	// Guard against side effects of shuffling fds below.
 	// Make sure that nextfd is beyond any currently open files so
 	// that we can't run the risk of overwriting any of them.
-	fd := []int{:len(attr.Files)}
+	fd := []int32{:len(attr.Files)}
 	nextfd = len(attr.Files)
 	for i, ufd := range attr.Files {
-		if nextfd < int(ufd) {
-			nextfd = int(ufd)
+		if nextfd < int32(ufd) {
+			nextfd = int32(ufd)
 		}
-		fd[i] = int(ufd)
+		fd[i] = int32(ufd)
 	}
 	nextfd++
 
@@ -424,7 +432,7 @@ func forkAndExecInChild1(argv0 *byte, argv, envv []*byte, chroot, dir *byte, att
 		}
 
 		if sys.Unshareflags&CLONE_NEWUSER != 0 && sys.GidMappings != nil {
-			dirfd = int(_AT_FDCWD)
+			dirfd = int32(_AT_FDCWD)
 			if fd1, _, err1 = RawSyscall6(SYS_OPENAT, uintptr(dirfd), uintptr(unsafe.Pointer(&psetgroups[0])), uintptr(O_WRONLY), 0, 0, 0); err1 != 0 {
 				goto childerror
 			}
@@ -449,7 +457,7 @@ func forkAndExecInChild1(argv0 *byte, argv, envv []*byte, chroot, dir *byte, att
 		}
 
 		if sys.Unshareflags&CLONE_NEWUSER != 0 && sys.UidMappings != nil {
-			dirfd = int(_AT_FDCWD)
+			dirfd = int32(_AT_FDCWD)
 			if fd1, _, err1 = RawSyscall6(SYS_OPENAT, uintptr(dirfd), uintptr(unsafe.Pointer(&puid[0])), uintptr(O_WRONLY), 0, 0, 0); err1 != 0 {
 				goto childerror
 			}
@@ -708,7 +716,7 @@ func writeIDMappings(path string, idMap []SysProcIDMap) error {
 // and "allow" if enable is true.
 // This is needed since kernel 3.19, because you can't write gid_map without
 // disabling setgroups() system call.
-func writeSetgroups(pid int, enable bool) error {
+func writeSetgroups(pid int32, enable bool) error {
 	sgf := "/proc/" + itoa.Itoa(pid) + "/setgroups"
 	fd, err := Open(sgf, O_RDWR, 0)
 	if err != nil {
@@ -732,7 +740,7 @@ func writeSetgroups(pid int, enable bool) error {
 
 // writeUidGidMappings writes User ID and Group ID mappings for user namespaces
 // for a process and it is called from the parent process.
-func writeUidGidMappings(pid int, sys *SysProcAttr) error {
+func writeUidGidMappings(pid int32, sys *SysProcAttr) error {
 	if sys.UidMappings != nil {
 		uidf := "/proc/" + itoa.Itoa(pid) + "/uid_map"
 		if err := writeIDMappings(uidf, sys.UidMappings); err != nil {
@@ -781,11 +789,11 @@ func os_checkClonePidfd() error {
 		for {
 			var status WaitStatus
 			// WCLONE is an untyped constant that sets bit 31, so
-			// it cannot convert directly to int on 32-bit
+			// it cannot convert directly to int32 on 32-bit
 			// GOARCHes. We must convert through another type
 			// first.
-			flags := uint(WCLONE)
-			_, err = Wait4(int(pid), &status, int(flags), nil)
+			flags := uint32(WCLONE)
+			_, err = Wait4(int32(pid), &status, int32(flags), nil)
 			if err != EINTR {
 				break
 			}
@@ -799,14 +807,14 @@ func os_checkClonePidfd() error {
 
 	// Good: CLONE_PIDFD provided a pidfd. Reap the process and close the
 	// pidfd.
-	defer Close(int(pidfd))
+	defer Close(int32(pidfd))
 
 	// TODO(roland): this is necessary to prevent valgrind from complaining
 	// about passing 0x0 to waitid, which is doesn't like. This is clearly not
 	// ideal. The structures are copied (mostly) verbatim from syscall/unix,
 	// which we obviously cannot import because of an import loop.
 
-	const is64bit = ^uint(0) >> 63 // 0 for 32-bit hosts, 1 for 64-bit ones.
+	const is64bit = ^uint32(0) >> 63 // 0 for 32-bit hosts, 1 for 64-bit ones.
 	type sigInfo struct {
 		Signo int32
 		_     struct {
