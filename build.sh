@@ -56,11 +56,14 @@ if [ -z "$COMPILER_SRC" ]; then
 fi
 echo "Source: $COMPILER_SRC"
 
-rm -rf ~/.cache/moxie/pkg
 $MOXIE build -o "$MOXIEROOT/moxie-new" "$COMPILER_SRC/"
 
 # verify the new binary works
 "$MOXIEROOT/moxie-new" version
 
 mv "$MOXIEROOT/moxie-new" "$MOXIEROOT/moxie"
+
+# rebuild all cached packages with the new compiler and remove old version caches
+"$MOXIEROOT/moxie" update --all
+
 echo "=== Done: ./moxie ==="

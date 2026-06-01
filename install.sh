@@ -56,8 +56,13 @@ if [ ! -x "$INSTALL_DIR/bin/moxie" ]; then
     exit 1
 fi
 
-echo "" >&2
 echo "installed to $INSTALL_DIR" >&2
+echo "rebuilding package cache with new compiler ..." >&2
+MOXIEROOT="$INSTALL_DIR" LLVM_GLUE_PATH="$INSTALL_DIR/llvm-glue/libmoxie-llvm-glue.so" \
+    "$INSTALL_DIR/bin/moxie" update --all
+
+echo "" >&2
+echo "done." >&2
 echo "" >&2
 echo "add to your shell profile:" >&2
 echo "  export PATH=\"$INSTALL_DIR/bin:\$PATH\"" >&2
