@@ -12,10 +12,20 @@ if [ -n "$FAIL" ]; then
     exit 1
 fi
 
+MOXIEROOT="$(pwd)"
+export MOXIEROOT
+export LLVM_GLUE_PATH="$MOXIEROOT/llvm-glue/libmoxie-llvm-glue.so"
+
+# build llvm glue if missing
+if [ ! -f "$LLVM_GLUE_PATH" ]; then
+    echo "Building llvm-glue ..."
+    bash "$MOXIEROOT/llvm-glue/build.sh"
+fi
+
+# find a moxie binary to bootstrap with
 MOXIE="${MOXIE:-}"
 if [ -z "$MOXIE" ]; then
-    # prefer legacy Go-compiled moxie for bootstrapping
-    for m in "$(pwd)/legacy/moxie" "$(command -v moxie 2>/dev/null || true)"; do
+    for m in "$MOXIEROOT/moxie" "$MOXIEROOT/legacy/moxie" "$(command -v moxie 2>/dev/null || true)"; do
         if [ -x "$m" ]; then
             MOXIE="$m"
             break
@@ -23,99 +33,34 @@ if [ -z "$MOXIE" ]; then
     done
 fi
 if [ -z "$MOXIE" ]; then
-    echo "error: moxie not found. ensure legacy/moxie exists or moxie is in PATH" >&2
+    echo "error: no moxie binary found" >&2
+    echo "  place a bootstrap binary at ./moxie or ./legacy/moxie" >&2
     exit 1
 fi
 
 MOXIE="$(cd "$(dirname "$MOXIE")" && pwd)/$(basename "$MOXIE")"
-MOXIEROOT="$(pwd)"
-export MOXIEROOT
-export LLVM_GLUE_PATH="$MOXIEROOT/llvm-glue/libmoxie-llvm-glue.so"
+echo "=== Building moxie (self-hosting) ==="
+echo "Bootstrap: $MOXIE"
 
-echo "=== Building moxie from .mx source ==="
-echo "Using: $MOXIE"
-
-# build llvm glue if missing
-if [ ! -f "$MOXIEROOT/llvm-glue/libmoxie-llvm-glue.so" ]; then
-    echo "Building llvm-glue ..."
-    bash "$MOXIEROOT/llvm-glue/build.sh"
-fi
-
-# locate sysroot: installed moxie's sysroot, or local
-INSTALLED_ROOT="$(dirname "$(dirname "$MOXIE")")"
-SYSROOT=""
-for d in "$INSTALLED_ROOT/sysroot" "$MOXIEROOT/sysroot"; do
-    if [ -d "$d" ] && [ -f "$d/runtime.bc" ]; then
-        SYSROOT="$d"
+# find compiler source directory
+COMPILER_SRC=""
+for d in "$MOXIEROOT/_mxc_stage4" "$MOXIEROOT/compiler"; do
+    if [ -d "$d" ] && [ -f "$d/main.mx" ]; then
+        COMPILER_SRC="$d"
         break
     fi
 done
-
-if [ -n "$SYSROOT" ]; then
-    echo "Sysroot: $SYSROOT"
-    cat > _sysroot.env << EOF
-RUNTIME_BC=$SYSROOT/runtime.bc
-MUSL_DIR=$SYSROOT/musl
-COMPRT_LIB=$SYSROOT/compiler-rt/lib.a
-BDWGC_LIB=$SYSROOT/bdwgc/lib.a
-MUSL_LIB=$SYSROOT/musl/lib.a
-OBJ_FILES=$(echo $SYSROOT/obj/*.bc)
-EOF
-else
-    # no packaged sysroot - extract from a bootstrap build
-    echo "Step 1: Build runtime bundle"
-    RT_DIR=$(mktemp -d)
-    cat > "$RT_DIR/main.mx" << 'RTEOF'
-package main
-func main() {}
-RTEOF
-    BUILD_OUT=$(cd "$RT_DIR" && $MOXIE build -x -work -o "$RT_DIR/rt" . 2>&1)
-    WORK=$(echo "$BUILD_OUT" | sed -n 's/^WORK=//p')
-    LD_CMD=$(echo "$BUILD_OUT" | grep "^ld.lld")
-    if [ -z "$WORK" ] || [ ! -f "$WORK/main.o" ]; then
-        echo "error: failed to build runtime bundle"
-        echo "$BUILD_OUT"
-        rm -rf "$RT_DIR"
-        exit 1
-    fi
-    llvm-extract-21 --delete --func=main.main --func=runtime.initAll \
-        -o _runtime.bc "$WORK/main.o"
-    OBJ_FILES=$(echo "$LD_CMD" | tr ' ' '\n' | grep '/obj-' | tr '\n' ' ')
-    MUSL_DIR=$(echo "$LD_CMD" | tr ' ' '\n' | grep 'musl.*crt1.o' | sed 's|/crt1.o||')
-    COMPRT=$(echo "$LD_CMD" | tr ' ' '\n' | grep '/compiler-rt-[^/]*/lib.a')
-    BDWGC=$(echo "$LD_CMD" | tr ' ' '\n' | grep '/bdwgc-[^/]*/lib.a')
-    MUSL_LIB=$(echo "$LD_CMD" | tr ' ' '\n' | grep '/musl-[^/]*/lib.a')
-    rm -rf "$RT_DIR"
-    cat > _sysroot.env << EOF
-RUNTIME_BC=$MOXIEROOT/_runtime.bc
-MUSL_DIR=$MUSL_DIR
-COMPRT_LIB=$COMPRT
-BDWGC_LIB=$BDWGC
-MUSL_LIB=$MUSL_LIB
-OBJ_FILES=$OBJ_FILES
-EOF
-    echo "  runtime bundle: _runtime.bc"
+if [ -z "$COMPILER_SRC" ]; then
+    echo "error: compiler source not found in _mxc_stage4/ or compiler/" >&2
+    exit 1
 fi
+echo "Source: $COMPILER_SRC"
 
-# stage and build
-echo "Building mxc binary ..."
-STAGE=_mxc_stage
-rm -rf "$STAGE"
-mkdir -p "$STAGE"
+rm -rf ~/.cache/moxie/pkg
+$MOXIE build -o "$MOXIEROOT/moxie-new" "$COMPILER_SRC/"
 
-cp compile/*.mx "$STAGE/"
-cp mxc/main.mx "$STAGE/"
-cp mxc/host.c "$STAGE/"
-sed -i '/^func main() {}$/d' "$STAGE/compile_exports.mx"
+# verify the new binary works
+"$MOXIEROOT/moxie-new" version
 
-# Pre-compile host.c for self-hosted mxc (which doesn't handle .c files)
-if [ -f "$STAGE/host.c" ]; then
-    clang-21 --target=x86_64-unknown-linux-musleabihf -emit-llvm -c \
-        "$STAGE/host.c" -o "$STAGE/host.bc" 2>/dev/null || true
-fi
-
-$MOXIE build -o moxie "./$STAGE"
-rm -rf "$STAGE"
-
-./moxie version
+mv "$MOXIEROOT/moxie-new" "$MOXIEROOT/moxie"
 echo "=== Done: ./moxie ==="
