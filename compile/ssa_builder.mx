@@ -153,6 +153,14 @@ func pkgResolveTypeAST(pkg *SSAPackage, e Expr) Type {
 		}
 	case *InterfaceType:
 		return NewTCInterface(nil, nil)
+	case *DotsType:
+		elem := pkgResolveTypeAST(pkg, e.Elem)
+		if elem != nil {
+			if b, ok := elem.(*Basic); ok && b.kind == Uint8 {
+				return Typ[TCString]
+			}
+			return NewSlice(elem)
+		}
 	}
 	return nil
 }
@@ -179,6 +187,12 @@ func pkgResolveSigAST(pkg *SSAPackage, ft *FuncType) *Signature {
 		}
 		results = append(results, NewTCVar(nil, rname, typ))
 	}
+	variadic := false
+	if len(ft.ParamList) > 0 {
+		if _, ok := ft.ParamList[len(ft.ParamList)-1].Type.(*DotsType); ok {
+			variadic = true
+		}
+	}
 	var pTuple, rTuple *Tuple
 	if len(params) > 0 {
 		pTuple = NewTuple(params...)
@@ -186,7 +200,7 @@ func pkgResolveSigAST(pkg *SSAPackage, ft *FuncType) *Signature {
 	if len(results) > 0 {
 		rTuple = NewTuple(results...)
 	}
-	return NewSignature(nil, pTuple, rTuple, false)
+	return NewSignature(nil, pTuple, rTuple, variadic)
 }
 
 func (pb *ssaPkgBuilder) registerFunc(d *FuncDecl) {
@@ -1688,6 +1702,7 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *SwitchStmt, tsg *TypeSwitchGuard, d
 			fb.currentBlock = caseBlock
 		}
 
+		caseSaved := fb.saveVars()
 		for _, stmt := range clause.Body {
 			fb.buildStmt(stmt)
 			if fb.currentBlock == nil {
@@ -1699,6 +1714,7 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *SwitchStmt, tsg *TypeSwitchGuard, d
 			fb.currentBlock.Succs = append(fb.currentBlock.Succs, doneBlock)
 			doneBlock.Preds = append(doneBlock.Preds, fb.currentBlock)
 		}
+		fb.vars = caseSaved
 		fb.currentBlock = nextBlock
 	}
 	if fb.currentBlock != nil {
@@ -2419,14 +2435,12 @@ func (fb *ssaFuncBuilder) buildCall(e *CallExpr) SSAValue {
 				call.typ = retType
 				call.name = fb.nextName()
 				fb.emit(call)
-				if retType == nil {
-					return nil
-				}
 				return call
 			}
 			if inv := fb.buildIfaceMethodCall(sel, recv, e.ArgList); inv != nil {
 				return inv
 			}
+			println("MCALL-FAIL:", sel.Sel.Value, recv.SSAType().String())
 		}
 	}
 	fn := fb.buildExpr(e.Fun)
@@ -3726,6 +3740,13 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *SelectorExpr, recv SSAV
 			recv = alloc
 		}
 	}
+	return fb.resolveEmbeddedMethod(st, recv, sel.Sel.Value, 4)
+}
+
+func (fb *ssaFuncBuilder) resolveEmbeddedMethod(st *TCStruct, recv SSAValue, methodName string, maxDepth int) (*SSAFunction, SSAValue) {
+	if maxDepth <= 0 || st == nil {
+		return nil, nil
+	}
 	for i := 0; i < st.NumFields(); i++ {
 		f := st.Field(i)
 		if !f.Anonymous() {
@@ -3742,13 +3763,10 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *SelectorExpr, recv SSAV
 			continue
 		}
 		embedName := embedNamed.Obj().Name()
-		embedMangledName := embedName | "." | sel.Sel.Value
+		embedMangledName := embedName | "." | methodName
 		embedFn, _ := fb.fn.Pkg.Members[embedMangledName].(*SSAFunction)
 		if embedFn != nil {
-			fieldAddr := &SSAFieldAddr{
-				X:     recv,
-				Field: i,
-			}
+			fieldAddr := &SSAFieldAddr{X: recv, Field: i}
 			fieldAddr.typ = NewPointer(embedType)
 			fieldAddr.name = fb.nextName()
 			fb.emit(fieldAddr)
@@ -3766,55 +3784,20 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *SelectorExpr, recv SSAV
 		if !ok5 || embedSt == nil {
 			continue
 		}
-		for j := 0; j < embedSt.NumFields(); j++ {
-			f2 := embedSt.Field(j)
-			if !f2.Anonymous() {
-				continue
-			}
-			embed2Type := f2.Type()
-			embed2Named, ok6 := embed2Type.(*Named)
-			if !ok6 {
-				if p2, ok7 := embed2Type.(*Pointer); ok7 {
-					embed2Named, ok6 = p2.Elem().(*Named)
-				}
-			}
-			if !ok6 || embed2Named.Obj() == nil {
-				continue
-			}
-			embed2Name := embed2Named.Obj().Name()
-			embed2Mangled := embed2Name | "." | sel.Sel.Value
-			embed2Fn, _ := fb.fn.Pkg.Members[embed2Mangled].(*SSAFunction)
-			if embed2Fn == nil {
-				continue
-			}
-			fieldAddr1 := &SSAFieldAddr{X: recv, Field: i}
-			fieldAddr1.typ = NewPointer(embedType)
-			fieldAddr1.name = fb.nextName()
-			fb.emit(fieldAddr1)
-			var cur1 SSAValue = fieldAddr1
-			curEmbedType := embedType
-			if p5, ok8 := safeUnderlying(embedType).(*Pointer); ok8 {
-				ld := &SSAUnOp{Op: OpMul, X: fieldAddr1}
-				ld.typ = embedType
-				ld.name = fb.nextName()
-				fb.emit(ld)
-				cur1 = ld
-				curEmbedType = p5.Elem()
-			}
-			_ = curEmbedType
-			fieldAddr2 := &SSAFieldAddr{X: cur1, Field: j}
-			fieldAddr2.typ = NewPointer(embed2Type)
-			fieldAddr2.name = fb.nextName()
-			fb.emit(fieldAddr2)
-			var embedRecv2 SSAValue = fieldAddr2
-			if _, isEmbedPtr2 := safeUnderlying(embed2Type).(*Pointer); isEmbedPtr2 {
-				ld2 := &SSAUnOp{Op: OpMul, X: fieldAddr2}
-				ld2.typ = embed2Type
-				ld2.name = fb.nextName()
-				fb.emit(ld2)
-				embedRecv2 = ld2
-			}
-			return embed2Fn, embedRecv2
+		fieldAddr := &SSAFieldAddr{X: recv, Field: i}
+		fieldAddr.typ = NewPointer(embedType)
+		fieldAddr.name = fb.nextName()
+		fb.emit(fieldAddr)
+		var nextRecv SSAValue = fieldAddr
+		if _, isEmbedPtr := safeUnderlying(embedType).(*Pointer); isEmbedPtr {
+			ld := &SSAUnOp{Op: OpMul, X: fieldAddr}
+			ld.typ = embedType
+			ld.name = fb.nextName()
+			fb.emit(ld)
+			nextRecv = ld
+		}
+		if fn, r := fb.resolveEmbeddedMethod(embedSt, nextRecv, methodName, maxDepth-1); fn != nil {
+			return fn, r
 		}
 	}
 	return nil, nil
@@ -3829,13 +3812,7 @@ func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *SelectorExpr, recv SSAValue,
 	if !ok {
 		return nil
 	}
-	var methodSig *Signature
-	for i := 0; i < iface.NumMethods(); i++ {
-		if iface.Method(i).Name() == sel.Sel.Value {
-			methodSig = iface.Method(i).Sig()
-			break
-		}
-	}
+	methodSig := findIfaceMethod(iface, sel.Sel.Value)
 	var retType Type
 	if methodSig != nil && methodSig.Results() != nil {
 		if methodSig.Results().Len() == 1 {
@@ -3854,10 +3831,23 @@ func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *SelectorExpr, recv SSAValue,
 	inv.typ = retType
 	inv.name = fb.nextName()
 	fb.emit(inv)
-	if retType == nil {
-		return nil
-	}
 	return inv
+}
+
+func findIfaceMethod(iface *TCInterface, name string) *Signature {
+	for i := 0; i < iface.NumMethods(); i++ {
+		if iface.Method(i).Name() == name {
+			return iface.Method(i).Sig()
+		}
+	}
+	for j := 0; j < iface.NumEmbeddeds(); j++ {
+		if ei, ok := safeUnderlying(iface.EmbeddedType(j)).(*TCInterface); ok {
+			if sig := findIfaceMethod(ei, name); sig != nil {
+				return sig
+			}
+		}
+	}
+	return nil
 }
 
 func (fb *ssaFuncBuilder) resolveType(e Expr) Type {
@@ -3957,6 +3947,14 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e Expr) Type {
 		}
 	case *ParenExpr:
 		return fb.resolveTypeAST(e.X)
+	case *DotsType:
+		elem := fb.resolveTypeAST(e.Elem)
+		if elem != nil {
+			if b, ok := elem.(*Basic); ok && b.kind == Uint8 {
+				return Typ[TCString]
+			}
+			return NewSlice(elem)
+		}
 	}
 	return nil
 }
@@ -4025,6 +4023,12 @@ func (fb *ssaFuncBuilder) resolveFuncTypeAST(ft *FuncType) *Signature {
 		}
 		results = append(results, NewTCVar(nil, rname, typ))
 	}
+	variadic := false
+	if len(ft.ParamList) > 0 {
+		if _, ok := ft.ParamList[len(ft.ParamList)-1].Type.(*DotsType); ok {
+			variadic = true
+		}
+	}
 	var pTuple, rTuple *Tuple
 	if len(params) > 0 {
 		pTuple = NewTuple(params...)
@@ -4032,7 +4036,7 @@ func (fb *ssaFuncBuilder) resolveFuncTypeAST(ft *FuncType) *Signature {
 	if len(results) > 0 {
 		rTuple = NewTuple(results...)
 	}
-	return NewSignature(nil, pTuple, rTuple, false)
+	return NewSignature(nil, pTuple, rTuple, variadic)
 }
 
 func (fb *ssaFuncBuilder) fieldIndex(t Type, name string) int32 {
