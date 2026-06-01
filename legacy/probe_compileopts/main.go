@@ -82,19 +82,18 @@ func main() {
 	h := loadTarget(targetLoad, "linux", "amd64", 0)
 	expectS(targetTriple, h, "x86_64-unknown-linux-musleabihf", "linux/amd64 triple")
 	expectS(targetCPU, h, "x86-64", "linux/amd64 cpu")
-	expectS(targetGC, h, "boehm", "linux/amd64 gc")
+	expectS(targetGC, h, "dealloc", "linux/amd64 gc")
 	expectS(targetLinker, h, "ld.lld", "linux/amd64 linker")
 	expectS(targetLibc, h, "musl", "linux/amd64 libc")
 	expectI64(targetStackSize(h), 65536, "linux/amd64 stack_size")
 	expectContainsFile(targetExtraFile, targetExtraFileCount, h, "src/runtime/asm_amd64.S", "linux/amd64 asm file")
-	expectContainsFile(targetExtraFile, targetExtraFileCount, h, "src/runtime/gc_boehm.c", "linux/amd64 gc file")
 	targetFree(h)
 
 	// Test darwin/arm64
 	h = loadTarget(targetLoad, "darwin", "arm64", 0)
 	expectS(targetTriple, h, "arm64-apple-macosx11.0.0", "darwin/arm64 triple")
 	expectS(targetCPU, h, "generic", "darwin/arm64 cpu")
-	expectS(targetGC, h, "boehm", "darwin/arm64 gc")
+	expectS(targetGC, h, "dealloc", "darwin/arm64 gc")
 	expectS(targetLibc, h, "darwin-libSystem", "darwin/arm64 libc")
 	targetFree(h)
 

@@ -657,15 +657,6 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		linkerDependencies = append(linkerDependencies, job)
 	}
 
-	// The Boehm collector is stored in a separate C library.
-	if config.GC() == "boehm" {
-		job, unlock, err := BoehmGC.load(config, tmpdir)
-		if err != nil {
-			return BuildResult{}, err
-		}
-		defer unlock()
-		linkerDependencies = append(linkerDependencies, job)
-	}
 
 	// Add jobs to compile extra files. These files are in C or assembly and
 	// contain things like the interrupt vector table and low level operations

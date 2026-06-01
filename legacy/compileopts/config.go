@@ -11,8 +11,7 @@ import (
 )
 
 var libVersions = map[string]int{
-	"musl":  3,
-	"bdwgc": 2,
+	"musl": 3,
 }
 
 // Config keeps all configuration affecting the build in a single struct.
@@ -149,9 +148,6 @@ func (c *Config) LibraryPath(name string) string {
 	}
 	if c.ABI() != "" {
 		archname += "-" + c.ABI()
-	}
-	if name == "bdwgc" {
-		archname += "-" + c.Target.Libc
 	}
 	if c.BuildMode() == "c-shared" {
 		archname += "-pic"

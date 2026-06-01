@@ -90,7 +90,7 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 	llvmvendor := "unknown"
 	switch options.GOOS {
 	case "darwin":
-		spec.GC = "boehm"
+		spec.GC = "dealloc"
 		platformVersion := "10.12.0"
 		if options.GOARCH == "arm64" {
 			platformVersion = "11.0.0"
@@ -114,7 +114,7 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"src/runtime/spawn_unix.c",
 			"src/runtime/futex_darwin.c")
 	case "linux":
-		spec.GC = "boehm"
+		spec.GC = "dealloc"
 		spec.Scheduler = "none" // moxie: no goroutines
 		spec.Linker = "ld.lld"
 		spec.RTLib = "compiler-rt"
@@ -147,9 +147,6 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 	// CLI -gc flag overrides target default before we add GC-specific files.
 	if options.GC != "" {
 		spec.GC = options.GC
-	}
-	if spec.GC == "boehm" {
-		spec.ExtraFiles = append(spec.ExtraFiles, "src/runtime/gc_boehm.c")
 	}
 
 	// Target triple: arch-vendor-os[-environment]

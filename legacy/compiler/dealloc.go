@@ -1,8 +1,7 @@
 package compiler
 
 import (
-	"go/types"
-	"strings"
+	"fmt"
 
 	"moxie/compiler/llvmutil"
 
@@ -10,23 +9,9 @@ import (
 	"tinygo.org/x/go-llvm"
 )
 
-// usesDealloc returns true when the dealloc GC is active and the current
-// function is in a user package (not stdlib). Stdlib packages have complex
-// internal escape patterns (sync.Pool, interface boxing) that the shadow
-// list escape analysis cannot track.
+// usesDealloc returns true when the dealloc GC is active.
 func (b *builder) usesDealloc() bool {
-	if b.GC != "dealloc" {
-		return false
-	}
-	if b.fn.Pkg == nil || b.fn.Pkg.Pkg == nil {
-		return false
-	}
-	pkg := b.fn.Pkg.Pkg.Path()
-	if pkg == "main" || pkg == "command-line-arguments" {
-		return true
-	}
-	// stdlib paths have no dot (fmt, os, net/http, internal/task, etc.)
-	return strings.Contains(pkg, ".")
+	return b.GC == "dealloc"
 }
 
 // deallocPushAlloc emits a runtime.deallocPush call to register a heap
@@ -90,9 +75,6 @@ func (b *builder) deallocEscapeValue(val ssa.Value) {
 	case *ssa.IndexAddr:
 		b.deallocEscapeValue(v.X)
 	case *ssa.Phi:
-		// Escape the phi value itself (defined in the phi block which
-		// dominates the return block), not individual edge values which
-		// may be defined in non-dominating blocks (e.g., loop bodies).
 		for _, edge := range v.Edges {
 			if alloc, ok := edge.(*ssa.Alloc); ok && b.deallocAllocs[alloc] {
 				b.deallocEmitEscape(b.getValue(v, v.Pos()))
@@ -109,16 +91,24 @@ func (b *builder) deallocEscapeValue(val ssa.Value) {
 // deallocAddrIsHeap returns true if addr is derived from a tracked
 // heap allocation (FieldAddr/IndexAddr chain rooted at a tracked Alloc).
 func (b *builder) deallocAddrIsHeap(addr ssa.Value) bool {
+	return b.deallocAddrIsHeapSeen(addr, make(map[ssa.Value]bool))
+}
+
+func (b *builder) deallocAddrIsHeapSeen(addr ssa.Value, seen map[ssa.Value]bool) bool {
+	if seen[addr] {
+		return false
+	}
+	seen[addr] = true
 	switch a := addr.(type) {
 	case *ssa.Alloc:
 		return b.deallocAllocs[a]
 	case *ssa.FieldAddr:
-		return b.deallocAddrIsHeap(a.X)
+		return b.deallocAddrIsHeapSeen(a.X, seen)
 	case *ssa.IndexAddr:
-		return b.deallocAddrIsHeap(a.X)
+		return b.deallocAddrIsHeapSeen(a.X, seen)
 	case *ssa.Phi:
 		for _, edge := range a.Edges {
-			if b.deallocAddrIsHeap(edge) {
+			if b.deallocAddrIsHeapSeen(edge, seen) {
 				return true
 			}
 		}
@@ -142,18 +132,57 @@ func (b *builder) deallocCheckStore(instr *ssa.Store) {
 	}
 }
 
-// createFreeCall handles the Free(x) builtin. Emits runtime.free and
-// removes x from the shadow list.
-func (b *builder) createFreeCall(args []llvm.Value, argTypes []types.Type) {
-	if len(args) != 1 {
-		return
+// createFreeBuiltin handles the free(x) builtin. Rejects freeing
+// parameters or return values (caller-owned). Emits runtime.free and
+// removes the pointer from the shadow list.
+// Accepts pointers (*T, unsafe.Pointer) and slices/strings (extracts
+// the backing data pointer at compile time).
+func (b *builder) createFreeBuiltin(instr *ssa.CallCommon) (llvm.Value, error) {
+	if len(instr.Args) != 1 {
+		b.addError(instr.Pos(), "free requires exactly one argument")
+		return llvm.Value{}, nil
 	}
-	ptr := args[0]
+	arg := instr.Args[0]
+	if derivesFromParam(arg, b.fn) {
+		b.addError(instr.Pos(), "free: cannot free parameter (caller-owned)")
+		return llvm.Value{}, nil
+	}
+	ptr := b.getValue(arg, instr.Pos())
+	if ptr.Type().TypeKind() == llvm.StructTypeKind {
+		ptr = b.CreateExtractValue(ptr, 0, "free.data")
+	}
 	if ptr.Type().TypeKind() != llvm.PointerTypeKind {
-		return
+		b.addError(instr.Pos(), fmt.Sprintf("free: argument must be a pointer or slice, got %s", arg.Type()))
+		return llvm.Value{}, nil
 	}
 	b.createRuntimeCall("free", []llvm.Value{ptr}, "")
 	if !b.deallocHead.IsNil() {
 		b.deallocEmitEscape(ptr)
 	}
+	return llvm.Value{}, nil
+}
+
+// derivesFromParam returns true if val is a function parameter or is
+// derived from one via field/index addressing. Freeing such values is
+// a compile error because parameters are caller-owned.
+func derivesFromParam(val ssa.Value, fn *ssa.Function) bool {
+	switch v := val.(type) {
+	case *ssa.Parameter:
+		return true
+	case *ssa.FieldAddr:
+		return derivesFromParam(v.X, fn)
+	case *ssa.IndexAddr:
+		return derivesFromParam(v.X, fn)
+	case *ssa.UnOp:
+		if v.Op.String() == "*" {
+			return derivesFromParam(v.X, fn)
+		}
+	case *ssa.Phi:
+		for _, edge := range v.Edges {
+			if derivesFromParam(edge, fn) {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -323,9 +323,29 @@ func hashmapInsertIntoNewBucket(m *hashmap, key, value unsafe.Pointer, tophash u
 }
 
 func hashmapGrow(m *hashmap) {
-	// allocate our new buckets twice as big
+	oldBuckets := m.buckets
+	oldBits := m.bucketBits
 	n := hashmapCopy(m, m.bucketBits+1)
 	*m = n
+	hashmapFreeBuckets(oldBuckets, oldBits, m)
+}
+
+func hashmapFreeBuckets(buckets unsafe.Pointer, bits uint8, m *hashmap) {
+	if buckets == nil {
+		return
+	}
+	bucketSize := hashmapBucketSize(m)
+	numBuckets := uintptr(1) << bits
+	for i := uintptr(0); i < numBuckets; i++ {
+		bucket := (*hashmapBucket)(unsafe.Add(buckets, bucketSize*i))
+		overflow := bucket.next
+		for overflow != nil {
+			next := overflow.next
+			free(unsafe.Pointer(overflow))
+			overflow = next
+		}
+	}
+	free(buckets)
 }
 
 //go:linkname hashmapClone maps.clone
@@ -357,6 +377,8 @@ func hashmapCopy(m *hashmap, sizeBits uint8) hashmap {
 		h := n.keyHash(key, uintptr(n.keySize), n.seed)
 		hashmapSet(&n, key, value, h)
 	}
+	free(key)
+	free(value)
 
 	return n
 }
@@ -492,9 +514,12 @@ func hashmapNext(m *hashmap, it *hashmapIterator, key, value unsafe.Pointer) boo
 				memcpy(kjm1, tmp, ks)
 			}
 		}
+		free(tmp)
 	}
 
 	if it.index >= it.count {
+		free(it.sortedKeys)
+		it.sortedKeys = nil
 		return false
 	}
 

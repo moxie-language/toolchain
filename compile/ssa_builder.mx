@@ -2650,7 +2650,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *CallExpr, b *SSABuiltin, args []SS
 			fb.currentBlock = nil
 		}
 		return nil
-	case BuiltinClose, BuiltinDelete, BuiltinClear, BuiltinPrint, BuiltinPrintln:
+	case BuiltinClose, BuiltinDelete, BuiltinClear, BuiltinPrint, BuiltinPrintln, BuiltinFree:
 		call := &SSACall{Call: SSACallCommon{Value: b, Args: args}}
 		call.name = fb.nextName()
 		fb.emit(call)
@@ -3648,8 +3648,15 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *SelectorExpr, recv SSAV
 		typ = p.Elem()
 		isPtr = true
 	}
-	if _, ok := safeUnderlying(typ).(*TCInterface); ok {
-		return nil, nil
+	if ifc, ok := safeUnderlying(typ).(*TCInterface); ok {
+		if !ifc.IsEmpty() {
+			return nil, nil
+		}
+		if named, ok2 := typ.(*Named); ok2 && named.Obj() != nil && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() != fb.fn.Pkg.Pkg.Path() {
+			// imported named type with empty interface underlying (struct from mxh) - treat as concrete
+		} else {
+			return nil, nil
+		}
 	}
 	named, ok := typ.(*Named)
 	if !ok {
@@ -3743,7 +3750,7 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *SelectorExpr, recv SSAV
 	return fb.resolveEmbeddedMethod(st, recv, sel.Sel.Value, 4)
 }
 
-func (fb *ssaFuncBuilder) resolveEmbeddedMethod(st *TCStruct, recv SSAValue, methodName string, maxDepth int) (*SSAFunction, SSAValue) {
+func (fb *ssaFuncBuilder) resolveEmbeddedMethod(st *TCStruct, recv SSAValue, methodName string, maxDepth int32) (*SSAFunction, SSAValue) {
 	if maxDepth <= 0 || st == nil {
 		return nil, nil
 	}

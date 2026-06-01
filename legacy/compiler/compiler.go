@@ -1916,6 +1916,12 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 	case "real":
 		cplx := argValues[0]
 		return b.CreateExtractValue(cplx, 0, "real"), nil
+	case "free":
+		if len(argValues) != 1 {
+			return llvm.Value{}, b.makeError(pos, "free requires exactly one argument")
+		}
+		b.createRuntimeCall("free", []llvm.Value{argValues[0]}, "")
+		return llvm.Value{}, nil
 	case "recover":
 		useParentFrame := uint64(0)
 		if b.hasDeferFrame() {
@@ -2061,20 +2067,17 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 			return b.createMoxieLt(instr), nil
 		case strings.HasPrefix(fn.Name(), "__moxie_secalloc"):
 			return b.createMoxieSecalloc(instr), nil
-		case name == "runtime.Free":
-			ptr := b.getValue(instr.Args[0], getPos(instr))
-			b.createRuntimeCall("free", []llvm.Value{ptr}, "")
-			if !b.deallocHead.IsNil() {
-				b.deallocEmitEscape(ptr)
-			}
-			return llvm.Value{}, nil
 		}
 	}
 
-	// Dispatch spawn before processing args - spawn validates its own args
-	// and some arg types (untyped nil to interface) can't be lowered generically.
-	if call, ok := instr.Value.(*ssa.Builtin); ok && call.Name() == "spawn" {
-		return b.createSpawn(instr)
+	// Dispatch builtins that need SSA-level analysis before generic arg lowering.
+	if call, ok := instr.Value.(*ssa.Builtin); ok {
+		switch call.Name() {
+		case "spawn":
+			return b.createSpawn(instr)
+		case "free":
+			return b.createFreeBuiltin(instr)
+		}
 	}
 
 	var params []llvm.Value
