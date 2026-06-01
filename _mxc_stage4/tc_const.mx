@@ -41,13 +41,6 @@ func (c *Checker) checkConstDeclAt(d *ConstDecl, typExpr Expr, valExpr Expr, iot
 			cv = vals[i]
 		}
 		obj.val = cv
-		if c.pkg.path == "strconv" {
-			cvStr := "nil"
-			if cv != nil {
-				cvStr = cv.String()
-			}
-			writeStr(2, "  TC-CONST-SET name=" | name.Value | " val=" | cvStr | " pkg=" | c.pkg.path | "\n")
-		}
 		if typ != nil {
 			obj.typ = typ
 		} else if cv != nil {
@@ -95,6 +88,19 @@ func (c *Checker) evalConst(e Expr, iotaVal int64) ConstVal {
 			return k.val
 		}
 		return nil
+	case *SelectorExpr:
+		if pkgName, ok := e.X.(*Name); ok {
+			if imp := c.pkg.scope.Lookup(pkgName.Value); imp != nil {
+				if pn, ok2 := imp.(*PkgName); ok2 && pn.Imported() != nil {
+					if obj := pn.Imported().Scope().Lookup(e.Sel.Value); obj != nil {
+						if k, ok3 := obj.(*TCConst); ok3 {
+							return k.val
+						}
+					}
+				}
+			}
+		}
+		return nil
 	case *Operation:
 		return c.evalConstOp(e, iotaVal)
 	case *ParenExpr:
@@ -106,6 +112,10 @@ func (c *Checker) evalConst(e Expr, iotaVal int64) ConstVal {
 				if cs, ok := lv.(constStr); ok {
 					return constInt{int64(len(cs.s))}
 				}
+			}
+			inner := c.evalConst(e.ArgList[0], iotaVal)
+			if cs, ok := inner.(constStr); ok {
+				return constInt{int64(len(cs.s))}
 			}
 		}
 		if sel, ok := e.Fun.(*SelectorExpr); ok {
@@ -550,6 +560,18 @@ func evalBinaryLocal(op Operator, x ConstVal, y ConstVal) ConstVal {
 		return constBool{constLess(y, x)}
 	case Geq:
 		return constBool{constLess(y, x) || constEqual(x, y)}
+	case OrOr:
+		xb, xok := x.(constBool)
+		yb, yok := y.(constBool)
+		if xok && yok {
+			return constBool{xb.v || yb.v}
+		}
+	case AndAnd:
+		xb, xok := x.(constBool)
+		yb, yok := y.(constBool)
+		if xok && yok {
+			return constBool{xb.v && yb.v}
+		}
 	}
 	return nil
 }

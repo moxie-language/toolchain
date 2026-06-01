@@ -153,6 +153,14 @@ func pkgResolveTypeAST(pkg *SSAPackage, e Expr) Type {
 		}
 	case *InterfaceType:
 		return NewTCInterface(nil, nil)
+	case *DotsType:
+		elem := pkgResolveTypeAST(pkg, e.Elem)
+		if elem != nil {
+			if b, ok := elem.(*Basic); ok && b.kind == Uint8 {
+				return Typ[TCString]
+			}
+			return NewSlice(elem)
+		}
 	}
 	return nil
 }
@@ -179,6 +187,12 @@ func pkgResolveSigAST(pkg *SSAPackage, ft *FuncType) *Signature {
 		}
 		results = append(results, NewTCVar(nil, rname, typ))
 	}
+	variadic := false
+	if len(ft.ParamList) > 0 {
+		if _, ok := ft.ParamList[len(ft.ParamList)-1].Type.(*DotsType); ok {
+			variadic = true
+		}
+	}
 	var pTuple, rTuple *Tuple
 	if len(params) > 0 {
 		pTuple = NewTuple(params...)
@@ -186,7 +200,7 @@ func pkgResolveSigAST(pkg *SSAPackage, ft *FuncType) *Signature {
 	if len(results) > 0 {
 		rTuple = NewTuple(results...)
 	}
-	return NewSignature(nil, pTuple, rTuple, false)
+	return NewSignature(nil, pTuple, rTuple, variadic)
 }
 
 func (pb *ssaPkgBuilder) registerFunc(d *FuncDecl) {
@@ -384,6 +398,12 @@ func (pb *ssaPkgBuilder) findMethod(typeName string, methodName string) *TCFunc 
 }
 
 func (pb *ssaPkgBuilder) registerVar(d *VarDecl) {
+	if d.Values != nil {
+		for _, name := range d.NameList {
+			writeStr(2, "compile error: package-level var " | name.Value | " has initializer; assign in main() instead\n")
+		}
+		return
+	}
 	for _, name := range d.NameList {
 		var obj *TCVar
 		if o := pb.pkg.Pkg.Scope().Lookup(name.Value); o != nil {
@@ -1181,7 +1201,7 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d Decl) {
 				for i, name := range d.NameList {
 					if i < len(list.ElemList) {
 						if v := fb.buildExpr(list.ElemList[i]); v != nil {
-							if c, ok2 := v.(*SSAConst); ok2 {
+							if c := ssaExtractConst(v); c != nil {
 								fb.localConsts[name.Value] = c
 							}
 						}
@@ -1189,7 +1209,7 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d Decl) {
 				}
 			} else if len(d.NameList) == 1 {
 				if v := fb.buildExpr(d.Values); v != nil {
-					if c, ok2 := v.(*SSAConst); ok2 {
+					if c := ssaExtractConst(v); c != nil {
 						fb.localConsts[d.NameList[0].Value] = c
 					}
 				}
@@ -1328,6 +1348,7 @@ func (fb *ssaFuncBuilder) buildFor(s *ForStmt) {
 }
 
 func (fb *ssaFuncBuilder) buildRangeLoop(s *ForStmt, rc *RangeClause) {
+	savedVars := fb.saveVars()
 	iterExpr := fb.buildExpr(rc.X)
 	if iterExpr == nil {
 		return
@@ -1351,10 +1372,16 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *ForStmt, rc *RangeClause) {
 
 	fb.currentBlock = condBlock
 	iterSSAType := iterExpr.SSAType()
+	if iterSSAType == nil {
+		tv := rc.X.GetTypeInfo()
+		if tv.Type != nil {
+			iterSSAType = tv.Type
+		}
+	}
 	nxt := &SSANext{Iter: r, IsString: ssaIsStringType(iterSSAType)}
 	keyTyp := asType(Typ[Int32])
 	valTyp := asType(Typ[Invalid])
-	iterT := iterExpr.SSAType()
+	iterT := iterSSAType
 	iterU := safeUnderlying(iterT)
 	if sl, ok := iterU.(*Slice); ok {
 		valTyp = sl.Elem()
@@ -1370,6 +1397,13 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *ForStmt, rc *RangeClause) {
 		valTyp = ar.Elem()
 	} else if ar, ok := iterT.(*Array); ok {
 		valTyp = ar.Elem()
+	} else if p, ok := iterU.(*Pointer); ok && p.Elem() != nil {
+		if ar, ok2 := safeUnderlying(p.Elem()).(*Array); ok2 {
+			valTyp = ar.Elem()
+		}
+	}
+	if valTyp == asType(Typ[Invalid]) && ssaIsStringType(iterSSAType) {
+		valTyp = asType(Typ[Uint8])
 	}
 	nxt.typ = NewTuple(
 		NewTCVar(nil, "ok", Typ[Bool]),
@@ -1412,6 +1446,18 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *ForStmt, rc *RangeClause) {
 			fb.vars[obj] = alloc
 			fb.emitStore(alloc, ext)
 		}
+	} else if rc.Lhs != nil && !rc.Def {
+		names := ssaExprNames(rc.Lhs)
+		for i, name := range names {
+			if name.Value == "_" {
+				continue
+			}
+			ext := &SSAExtract{Tuple: nxt, Index: i + 1}
+			ext.typ = ssaTupleElemType(nxt.typ, i+1)
+			ext.name = fb.nextName()
+			fb.emit(ext)
+			fb.buildStore(name, ext)
+		}
 	}
 	fb.buildBlock(s.Body)
 	if fb.currentBlock != nil && !fb.blockTerminated(fb.currentBlock) {
@@ -1422,6 +1468,7 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *ForStmt, rc *RangeClause) {
 
 	fb.loops = fb.loops[:len(fb.loops)-1]
 	fb.currentBlock = doneBlock
+	fb.vars = savedVars
 }
 
 func (fb *ssaFuncBuilder) buildSwitch(s *SwitchStmt) {
@@ -1502,6 +1549,7 @@ func (fb *ssaFuncBuilder) buildSwitch(s *SwitchStmt) {
 		}
 
 		fb.currentBlock = caseBlock
+		caseSaved := fb.saveVars()
 		for _, stmt := range clause.Body {
 			fb.buildStmt(stmt)
 			if fb.currentBlock == nil {
@@ -1513,6 +1561,7 @@ func (fb *ssaFuncBuilder) buildSwitch(s *SwitchStmt) {
 			fb.currentBlock.Succs = append(fb.currentBlock.Succs, doneBlock)
 			doneBlock.Preds = append(doneBlock.Preds, fb.currentBlock)
 		}
+		fb.vars = caseSaved
 		fb.currentBlock = nextBlock
 	}
 
@@ -1531,6 +1580,17 @@ func (fb *ssaFuncBuilder) buildSwitch(s *SwitchStmt) {
 
 func (fb *ssaFuncBuilder) buildTypeSwitch(s *SwitchStmt, tsg *TypeSwitchGuard, doneBlock *SSABasicBlock) {
 	x := fb.buildExpr(tsg.X)
+	var savedObj Object
+	var savedAlloc *SSAAlloc
+	if tsg.Lhs != nil {
+		for obj, alloc := range fb.vars {
+			if obj.Name() == tsg.Lhs.Value {
+				savedObj = obj
+				savedAlloc = alloc
+				break
+			}
+		}
+	}
 	for _, clause := range s.Body {
 		caseBlock := fb.newBlock("typeswitch.case")
 		nextBlock := fb.newBlock("typeswitch.next")
@@ -1642,6 +1702,7 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *SwitchStmt, tsg *TypeSwitchGuard, d
 			fb.currentBlock = caseBlock
 		}
 
+		caseSaved := fb.saveVars()
 		for _, stmt := range clause.Body {
 			fb.buildStmt(stmt)
 			if fb.currentBlock == nil {
@@ -1653,7 +1714,17 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *SwitchStmt, tsg *TypeSwitchGuard, d
 			fb.currentBlock.Succs = append(fb.currentBlock.Succs, doneBlock)
 			doneBlock.Preds = append(doneBlock.Preds, fb.currentBlock)
 		}
+		fb.vars = caseSaved
 		fb.currentBlock = nextBlock
+	}
+	if savedObj != nil && savedAlloc != nil {
+		for old := range fb.vars {
+			if old.Name() == tsg.Lhs.Value {
+				delete(fb.vars, old)
+				break
+			}
+		}
+		fb.vars[savedObj] = savedAlloc
 	}
 	if fb.currentBlock != nil {
 		fb.emit(&SSAJump{Comment: "switch.done"})
@@ -3718,6 +3789,18 @@ func (fb *ssaFuncBuilder) fieldType(t Type, idx int32) Type {
 	if st, ok := safeUnderlying(t).(*TCStruct); ok {
 		if idx >= 0 && idx < st.NumFields() {
 			return st.Field(idx).Type()
+		}
+	}
+	return nil
+}
+
+func ssaExtractConst(v SSAValue) *SSAConst {
+	if c, ok := v.(*SSAConst); ok {
+		return c
+	}
+	if conv, ok := v.(*SSAConvert); ok {
+		if c, ok2 := conv.X.(*SSAConst); ok2 {
+			return &SSAConst{typ: conv.SSAType(), val: c.val}
 		}
 	}
 	return nil
