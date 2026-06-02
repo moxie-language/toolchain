@@ -133,9 +133,9 @@ Types:
 
 ```
 bool    byte    error   float32   float64
-int     int8    int16   int32     int64
-rune    string  uint    uint8     uint16
-uint32  uint64  comparable
+int8    int16   int32   int64     rune
+string  uint8   uint16  uint32    uint64
+comparable
 ```
 
 Constants:
@@ -310,17 +310,29 @@ Values: `true`, `false`.
 | `uint64` | 8 bytes | Unsigned 64-bit integer |
 | `float32` | 4 bytes | IEEE 754 32-bit float |
 | `float64` | 8 bytes | IEEE 754 64-bit float |
-| `int` | 4 bytes | Alias for `int32` on all targets |
-| `uint` | 4 bytes | Alias for `uint32` on all targets |
 | `byte` | 1 byte | Alias for `uint8` |
 | `rune` | 4 bytes | Alias for `int32` |
 
-`int` and `uint` are always 32-bit regardless of target architecture.
+`int` and `uint` are **illegal types** - they do not exist in Moxie. Always use
+explicit widths (`int32`, `int64`, `uint32`, `uint64`). Slice/array indexes and
+`len()`/`cap()` return `int32`.
 
 `uintptr` is available only in packages that `import "unsafe"`. It is an alias
 for `uint64`.
 
 Complex number types do not exist.
+
+#### Builtin Type Stringers
+
+All builtin numeric and boolean types implement `String() string`, satisfying
+`fmt.Stringer`. This is how `fmt` works without reflection or empty interfaces -
+`fmt` variadics use `...Stringer` not `...any`/`...interface{}`, and each
+argument's `.String()` method is called directly:
+
+```moxie
+n := int32(42)
+msg := "count: " | n.String() | " items"
+```
 
 ### Text Type
 
@@ -1522,7 +1534,7 @@ and are mutually assignable. The spelling is a hint to the code generator only.
 | Module file | `moxie.mod` |
 | Text type | `string = []byte`, mutable, `string` is a WASM representation pragma |
 | Text concatenation | `\|` operator |
-| Integer sizes | `int` = `uint` = 32-bit on all targets |
+| Integer sizes | Explicit widths only; `int`/`uint` are illegal |
 | Concurrency | Channels + `select` within a domain, `spawn` for new domains |
 | Process isolation | `spawn(fn, args...)` via `fork()` + socketpair |
 | Serialization | `moxie.Codec` interface at spawn boundary |

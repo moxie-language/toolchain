@@ -92,6 +92,23 @@ Five laws. Five elements. One generative cycle. One destructive cycle. Every arc
 - Do not introduce abstractions "for future flexibility"
 - Do not modify build configuration without approval
 
+## Type System: No int/uint, Builtin Stringers, No fmt
+
+`int` and `uint` are **illegal types** - they do not exist in Moxie. Always use
+explicit widths (`int32`, `int64`, `uint32`, `uint64`). Slice/array indexes and
+`len()`/`cap()` return `int32`.
+
+All builtin types (`int32`, `int64`, `uint32`, `uint64`, `int8`, `int16`,
+`uint8`, `uint16`, `float32`, `float64`, `bool`) have `String() string` methods,
+satisfying `fmt.Stringer`. This is how `fmt` works without reflection or empty
+interfaces - `fmt` variadics use `...Stringer` not `...any`/`...interface{}`.
+Each argument's `.String()` method is called directly:
+
+```moxie
+n := int32(42)
+msg := "count: " | n.String() | " items"
+```
+
 ## Browser Target: WASM Only
 
 Moxie's browser target is WebAssembly exclusively. New web-app surface area lives in `jsruntime/`.
