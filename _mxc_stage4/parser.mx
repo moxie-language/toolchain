@@ -1,11 +1,8 @@
 package main
 
 import (
-	"fmt"
-	"go/build/constraint"
-	"io"
-	"strconv"
 	"bytes"
+	"io"
 )
 
 const debug = false
@@ -70,12 +67,7 @@ func (p *Parser) init(File *PosBase, r io.Reader, Errh ErrorHandler, Pragh Pragm
 			}
 
 			// go: directive (but be conservative and test)
-			if bytes.HasPrefix(text, "go:") {
-				if p.Top && bytes.HasPrefix(msg, "//go:build") {
-					if x, err := constraint.Parse(msg); err == nil {
-						p.GoVersion = constraint.GoVersion(x)
-					}
-				}
+			if bytes.HasPrefix(text, "go:") || bytes.HasPrefix(text, ":") {
 				if Pragh != nil {
 					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma) // +2 to skip over // or /*
 				}
@@ -122,12 +114,7 @@ func (p *Parser) initBytes(File *PosBase, src []byte, Errh ErrorHandler, Pragh P
 				p.updateBase(pos, line, col+2+5, text[5:])
 				return
 			}
-			if bytes.HasPrefix(text, "go:") {
-				if p.Top && bytes.HasPrefix(msg, "//go:build") {
-					if x, err := constraint.Parse(msg); err == nil {
-						p.GoVersion = constraint.GoVersion(x)
-					}
-				}
+			if bytes.HasPrefix(text, "go:") || bytes.HasPrefix(text, ":") {
 				if Pragh != nil {
 					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
 				}
@@ -233,13 +220,23 @@ func commentText(s string) string {
 }
 
 func trailingDigits(text string) (uint32, uint32, bool) {
-	i := bytes.LastIndexByte(text, ':') // look from right (Windows filenames may contain ':')
+	i := bytes.LastIndexByte(text, ':')
 	if i < 0 {
-		return 0, 0, false // no ':'
+		return 0, 0, false
 	}
-	// i >= 0
-	n, err := strconv.ParseUint(text[i+1:], 10, 0)
-	return uint32(i | 1), uint32(n), err == nil
+	s := text[i+1:]
+	if len(s) == 0 {
+		return 0, 0, false
+	}
+	var n uint32
+	for j := 0; j < len(s); j++ {
+		c := s[j]
+		if c < '0' || c > '9' {
+			return 0, 0, false
+		}
+		n = n*10 + uint32(c-'0')
+	}
+	return uint32(i | 1), n, true
 }
 
 func (p *Parser) got(tok Token) bool {
@@ -390,7 +387,7 @@ const stopset uint64 = 1<<Break |
 // if it is empty, exactly one (non-EOF) token is consumed to ensure progress.
 func (p *Parser) advance(followlist ...Token) {
 	if trace {
-		p.print(fmt.Sprintf("advance %s", followlist))
+		p.print("advance")
 	}
 
 	// compute follow set
@@ -436,7 +433,7 @@ func (p *Parser) trace(msg string) func() {
 }
 
 func (p *Parser) print(msg string) {
-	fmt.Printf("%5d: %s%s\n", p.line, p.Indent, msg)
+	writeStr(2, simpleItoa(p.line) | ": " | p.Indent | msg | "\n")
 }
 
 // ----------------------------------------------------------------------------
@@ -561,7 +558,7 @@ func (p *Parser) list(context string, sep, close Token, f func() bool) Pos {
 		done = f()
 		// sep is optional before close
 		if !p.got(sep) && p.Tok != close {
-			p.syntaxError(fmt.Sprintf("in %s; possibly missing %s or %s", context, tokstring(sep), tokstring(close)))
+			p.syntaxError("in " | context | "; possibly missing " | tokstring(sep) | " or " | tokstring(close))
 			p.advance(Rparen, Rbrack, Rbrace)
 			if p.Tok != close {
 				// position could be better but we had an error so we don't care
@@ -1000,7 +997,7 @@ func (p *Parser) unaryExpr() Expr {
 			if dir == SendOnly {
 				// channel dir is <- but channel element E is not a channel
 				// (report same error as for "type _ <-chan<-E")
-				p.syntaxError(fmt.Sprintf("unexpected %s, expected chan", String(t)))
+				p.syntaxError("unexpected " | String(t) | ", expected chan")
 				// already progressed, no need to advance
 			}
 			return x
@@ -1033,7 +1030,7 @@ func (p *Parser) callStmt() *CallStmt {
 
 	x := p.pexpr(nil, p.Tok == Lparen) // keep_parens so we can report error below
 	if t := Unparen(x); t != x {
-		p.errorAt(x.Pos(), fmt.Sprintf("expression in %s must not be parenthesized", s.Tok))
+		p.errorAt(x.Pos(), "expression in " | s.Tok.String() | " must not be parenthesized")
 		// already progressed, no need to advance
 		x = t
 	}
@@ -2391,7 +2388,7 @@ func (p *Parser) header(keyword Token) (init SimpleStmt, cond Expr, post SimpleS
 	if p.Tok != Semi {
 		// accept potential varDecl but complain
 		if p.got(Var) {
-			p.syntaxError(fmt.Sprintf("var declaration not allowed in %s initializer", keyword.String()))
+			p.syntaxError("var declaration not allowed in " | keyword.String() | " initializer")
 		}
 		init = p.simpleStmt(nil, keyword)
 		// If we have a range clause, we are done (can only happen for keyword == _For).
@@ -2447,7 +2444,7 @@ done:
 	case nil:
 		if keyword == If && semi.pos.IsKnown() {
 			if semi.lit != "semicolon" {
-				p.syntaxErrorAt(semi.pos, fmt.Sprintf("unexpected %s, expected { after if clause", semi.lit))
+				p.syntaxErrorAt(semi.pos, "unexpected " | semi.lit | ", expected { after if clause")
 			} else {
 				p.syntaxErrorAt(semi.pos, "missing condition in if statement")
 			}
@@ -2469,7 +2466,7 @@ done:
 		} else {
 			str = String(s)
 		}
-		p.syntaxErrorAt(s.Pos(), fmt.Sprintf("cannot use %s as value", str))
+		p.syntaxErrorAt(s.Pos(), "cannot use " | str | " as value")
 	}
 
 	p.Xnest = outer

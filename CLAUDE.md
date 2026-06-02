@@ -92,7 +92,13 @@ Five laws. Five elements. One generative cycle. One destructive cycle. Every arc
 - Do not introduce abstractions "for future flexibility"
 - Do not modify build configuration without approval
 
-## Type System: No int/uint, Builtin Stringers, No fmt
+## Source Files
+
+Moxie source files use the `.mx` extension. The compiler does **not** read `.go`
+files. There are no Go stdlib imports (`fmt`, `strconv`, `go/*`, `strings`,
+`reflect`, `sync`, `context`, `encoding/*`). Moxie has its own stdlib.
+
+## Type System: No int/uint, Builtin Stringers
 
 `int` and `uint` are **illegal types** - they do not exist in Moxie. Always use
 explicit widths (`int32`, `int64`, `uint32`, `uint64`). Slice/array indexes and

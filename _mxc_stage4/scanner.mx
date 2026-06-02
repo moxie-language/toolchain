@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"unicode"
 	"unicode/utf8"
@@ -56,12 +55,12 @@ func (s *Scanner) InitBytes(src []byte, errh func(line, col uint32, msg string),
 	s.initKeywords()
 }
 
-func (s *Scanner) Errorf(format string, args ...interface{}) {
-	s.error(fmt.Sprintf(format, args...))
+func (s *Scanner) Errorf(msg string) {
+	s.error(msg)
 }
 
-func (s *Scanner) ErrorAtf(offset int32, format string, args ...interface{}) {
-	s.errh(s.line, s.col+uint32(offset), fmt.Sprintf(format, args...))
+func (s *Scanner) ErrorAtf(offset int32, msg string) {
+	s.errh(s.line, s.col+uint32(offset), msg)
 }
 
 func (s *Scanner) SetLit(kind LitKind, ok bool) {
@@ -360,7 +359,7 @@ redo:
 		s.Tok = OperatorType
 
 	default:
-		s.Errorf("invalid character %#U", s.ch)
+		s.Errorf("invalid character " | fmtRuneU(s.ch))
 		s.nextch()
 		goto redo
 	}
@@ -415,10 +414,10 @@ func (s *Scanner) AtIdentChar(first bool) bool {
 	case s.utab.IsLetter(s.ch) || s.ch == '_':
 	case s.utab.IsDigit(s.ch):
 		if first {
-			s.Errorf("identifier cannot begin with digit %#U", s.ch)
+			s.Errorf("identifier cannot begin with digit " | fmtRuneU(s.ch))
 		}
 	case s.ch >= utf8.RuneSelf:
-		s.Errorf("invalid character %#U in identifier", s.ch)
+		s.Errorf("invalid character " | fmtRuneU(s.ch) | " in identifier")
 	default:
 		return false
 	}
@@ -501,7 +500,7 @@ func (s *Scanner) Number(seenPoint bool) {
 		digsep |= s.Digits(base, &invalid)
 		if s.ch == '.' {
 			if prefix == 'o' || prefix == 'b' {
-				s.Errorf("invalid radix point in %s literal", baseName(base))
+				s.Errorf("invalid radix point in " | baseName(base) | " literal")
 				ok = false
 			}
 			s.nextch()
@@ -515,7 +514,7 @@ func (s *Scanner) Number(seenPoint bool) {
 	}
 
 	if digsep&1 == 0 && ok {
-		s.Errorf("%s literal has no digits", baseName(base))
+		s.Errorf(baseName(base) | " literal has no digits")
 		ok = false
 	}
 
@@ -523,10 +522,10 @@ func (s *Scanner) Number(seenPoint bool) {
 		if ok {
 			switch {
 			case e == 'e' && prefix != 0 && prefix != '0':
-				s.Errorf("%q exponent requires decimal mantissa", s.ch)
+				s.Errorf(fmtQuoteRune(s.ch) | " exponent requires decimal mantissa")
 				ok = false
 			case e == 'p' && prefix != 'x':
-				s.Errorf("%q exponent requires hexadecimal mantissa", s.ch)
+				s.Errorf(fmtQuoteRune(s.ch) | " exponent requires hexadecimal mantissa")
 				ok = false
 			}
 		}
@@ -553,7 +552,7 @@ func (s *Scanner) Number(seenPoint bool) {
 	s.SetLit(kind, ok)
 
 	if kind == IntLit && invalid >= 0 && ok {
-		s.ErrorAtf(invalid, "invalid digit %q in %s literal", s.Lit[invalid], baseName(base))
+		s.ErrorAtf(invalid, "invalid digit " | fmtQuoteRune(rune(s.Lit[invalid])) | " in " | baseName(base) | " literal")
 		ok = false
 	}
 
@@ -717,7 +716,7 @@ func (s *Scanner) rawString() {
 }
 
 func (s *Scanner) comment(text string) {
-	s.ErrorAtf(0, "%s", text)
+	s.ErrorAtf(0, text)
 }
 
 func (s *Scanner) skipLine() {
@@ -839,7 +838,7 @@ func (s *Scanner) escape(quote rune) bool {
 			d = uint32(Lower(s.ch)) - 'a' + 10
 		}
 		if d >= base {
-			s.Errorf("invalid character %q in %s escape", s.ch, baseName(int32(base)))
+			s.Errorf("invalid character " | fmtQuoteRune(s.ch) | " in " | baseName(int32(base)) | " escape")
 			return false
 		}
 		x = x*base + d
@@ -847,12 +846,12 @@ func (s *Scanner) escape(quote rune) bool {
 	}
 
 	if x > max && base == 8 {
-		s.Errorf("octal escape value %d > 255", x)
+		s.Errorf("octal escape value " | simpleItoaU32(x) | " > 255")
 		return false
 	}
 
 	if x > max || 0xD800 <= x && x < 0xE000 {
-		s.Errorf("escape is invalid Unicode code point %#U", x)
+		s.Errorf("escape is invalid Unicode code point " | fmtRuneU(rune(x)))
 		return false
 	}
 
@@ -860,9 +859,139 @@ func (s *Scanner) escape(quote rune) bool {
 }
 
 func String(n Node) string {
-	return fmt.Sprintf("%T", n)
+	switch n.(type) {
+	case *Name:
+		return "Name"
+	case *BasicLit:
+		return "BasicLit"
+	case *CompositeLit:
+		return "CompositeLit"
+	case *FuncLit:
+		return "FuncLit"
+	case *ParenExpr:
+		return "ParenExpr"
+	case *SelectorExpr:
+		return "SelectorExpr"
+	case *IndexExpr:
+		return "IndexExpr"
+	case *SliceExpr:
+		return "SliceExpr"
+	case *AssertExpr:
+		return "AssertExpr"
+	case *TypeSwitchGuard:
+		return "TypeSwitchGuard"
+	case *Operation:
+		return "Operation"
+	case *CallExpr:
+		return "CallExpr"
+	case *ListExpr:
+		return "ListExpr"
+	case *ArrayType:
+		return "ArrayType"
+	case *SliceType:
+		return "SliceType"
+	case *DotsType:
+		return "DotsType"
+	case *StructType:
+		return "StructType"
+	case *InterfaceType:
+		return "InterfaceType"
+	case *FuncType:
+		return "FuncType"
+	case *ChanType:
+		return "ChanType"
+	case *MapType:
+		return "MapType"
+	case *BadExpr:
+		return "BadExpr"
+	case *EmptyStmt:
+		return "EmptyStmt"
+	case *LabeledStmt:
+		return "LabeledStmt"
+	case *BlockStmt:
+		return "BlockStmt"
+	case *ExprStmt:
+		return "ExprStmt"
+	case *SendStmt:
+		return "SendStmt"
+	case *DeclStmt:
+		return "DeclStmt"
+	case *AssignStmt:
+		return "AssignStmt"
+	case *BranchStmt:
+		return "BranchStmt"
+	case *CallStmt:
+		return "CallStmt"
+	case *ReturnStmt:
+		return "ReturnStmt"
+	case *IfStmt:
+		return "IfStmt"
+	case *ForStmt:
+		return "ForStmt"
+	case *SwitchStmt:
+		return "SwitchStmt"
+	case *SelectStmt:
+		return "SelectStmt"
+	case *RangeClause:
+		return "RangeClause"
+	case *CaseClause:
+		return "CaseClause"
+	case *CommClause:
+		return "CommClause"
+	case *ImportDecl:
+		return "ImportDecl"
+	case *ConstDecl:
+		return "ConstDecl"
+	case *TypeDecl:
+		return "TypeDecl"
+	case *VarDecl:
+		return "VarDecl"
+	case *FuncDecl:
+		return "FuncDecl"
+	case *File:
+		return "File"
+	}
+	return "Node"
 }
 
 func StartPos(n Node) Pos {
 	return n.Pos()
+}
+
+// fmtRuneU formats a rune as "U+XXXX 'c'" (like %#U).
+func fmtRuneU(r rune) string {
+	hex := fmtHex32(uint32(r))
+	s := "U+" | hex
+	if r >= 0x20 && r < 0x7f {
+		s = s | " '" | string([]byte{byte(r)}) | "'"
+	}
+	return s
+}
+
+// fmtQuoteRune formats a rune as 'c' (like %q for rune).
+func fmtQuoteRune(r rune) string {
+	if r >= 0x20 && r < 0x7f {
+		return "'" | string([]byte{byte(r)}) | "'"
+	}
+	return "U+" | fmtHex32(uint32(r))
+}
+
+// fmtHex32 formats a uint32 as uppercase hex with at least 4 digits.
+func fmtHex32(v uint32) string {
+	const digits = "0123456789ABCDEF"
+	buf := []byte{:0:8}
+	if v == 0 {
+		return "0000"
+	}
+	for v > 0 {
+		buf = append(buf, digits[v&0xf])
+		v >>= 4
+	}
+	for len(buf) < 4 {
+		buf = append(buf, '0')
+	}
+	for i, j := int32(0), len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
 }

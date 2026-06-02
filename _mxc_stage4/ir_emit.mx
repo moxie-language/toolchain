@@ -6,6 +6,7 @@ import (
 )
 
 var parseErrors []string
+var compileErrors []string
 var genericFuncDecls map[string]*FuncDecl
 var genericPkgScopes map[string]*Scope
 
@@ -5847,12 +5848,18 @@ func (e *irEmitter) constOperand(c *SSAConst) string {
 			return c.val.String()
 		case Float32:
 			if cf, ok := c.val.(constFloat); ok {
+				if cf.lit != "" {
+					return normalizeLLVMFloat(cf.lit)
+				}
 				bits := math.Float64bits(float64(float32(cf.v)))
 				return "0x" | irHex64(bits)
 			}
 			return "0.0"
 		case Float64, UntypedFloat:
 			if cf, ok := c.val.(constFloat); ok {
+				if cf.lit != "" {
+					return normalizeLLVMFloat(cf.lit)
+				}
 				bits := math.Float64bits(cf.v)
 				return "0x" | irHex64(bits)
 			}
@@ -6577,6 +6584,7 @@ func typeCheckPkg(src []byte, name string) (*TCPackage, *File) {
 
 func releasePerPkgState() {
 	parseErrors = nil
+	compileErrors = nil
 	constValMap = nil
 	compileExportMap = nil
 	tcPkgSrc = nil
@@ -6608,11 +6616,26 @@ func CompileToIR(src []byte, name string, triple string) string {
 		releasePerPkgState()
 		return out
 	}
-
 	prog := NewSSAProgram()
 	ssaPkg := prog.CreatePackage(pkg, []*File{file}, nil)
 	emitter := newIREmitter(ssaPkg, triple)
 	ir := emitter.emit()
+
+	if len(compileErrors) > 0 {
+		out := "; compile error\n"
+		for _, ce := range compileErrors {
+			out = out | "; " | ce | "\n"
+		}
+		emitter.releaseAfterEmit()
+		ssaPkg.release()
+		prog.release()
+		if pkg != nil {
+			pkg.Release()
+		}
+		file.DeclList = nil
+		releasePerPkgState()
+		return out
+	}
 
 	if len(ir) > 0 && ir[0] != ';' {
 		registerCompiledExports(pkg)
@@ -7449,6 +7472,28 @@ func simpleItoa(n int32) string {
 		buf = append(buf, '-')
 	}
 	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
+
+func simpleItoa64(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	buf := []byte{:0:20}
+	for n > 0 {
+		buf = append(buf, byte('0'+n%10))
+		n /= 10
+	}
+	if neg {
+		buf = append(buf, '-')
+	}
+	for i, j := int32(0), len(buf)-1; i < j; i, j = i+1, j-1 {
 		buf[i], buf[j] = buf[j], buf[i]
 	}
 	return string(buf)

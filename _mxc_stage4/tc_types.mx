@@ -12,7 +12,6 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 )
 
 // Type is already defined in nodes.mx (syntax.Type interface).
@@ -73,16 +72,44 @@ const (
 
 // Basic is an elementary type (bool, int32, string, etc.).
 type Basic struct {
-	kind BasicKind
-	info BasicInfo
-	name string
+	kind    BasicKind
+	info    BasicInfo
+	name    string
+	methods []*TCFunc
 }
 
-func (t *Basic) Kind() BasicKind  { return t.kind }
-func (t *Basic) Info() BasicInfo  { return t.info }
-func (t *Basic) Name() string     { return t.name }
-func (t *Basic) Underlying() Type { return t }
-func (t *Basic) String() string   { return t.name }
+func (t *Basic) Kind() BasicKind    { return t.kind }
+func (t *Basic) Info() BasicInfo    { return t.info }
+func (t *Basic) Name() string       { return t.name }
+func (t *Basic) Underlying() Type   { return t }
+func (t *Basic) String() string     { return t.name }
+func (t *Basic) NumMethods() int32  { return len(t.methods) }
+func (t *Basic) Method(i int32) *TCFunc { return t.methods[i] }
+func (t *Basic) AddMethod(m *TCFunc) { t.methods = append(t.methods, m) }
+
+func untypedToTyped(b *Basic) Type {
+	switch b.kind {
+	case UntypedBool:
+		return Typ[Bool]
+	case UntypedInt:
+		return Typ[Int64]
+	case UntypedRune:
+		if Universe != nil {
+			obj := Universe.Lookup("rune")
+			if obj != nil {
+				if tn, ok := obj.(*TypeName); ok {
+					return tn.Type()
+				}
+			}
+		}
+		return Typ[Int32]
+	case UntypedFloat:
+		return Typ[Float64]
+	case UntypedString:
+		return Typ[TCString]
+	}
+	return nil
+}
 
 // ----------------------------------------------------------------------------
 // Array
@@ -96,7 +123,7 @@ func NewArray(elem Type, n int64) *Array { return &Array{len: n, elem: elem} }
 func (t *Array) Len() int64             { return t.len }
 func (t *Array) Elem() Type             { return t.elem }
 func (t *Array) Underlying() Type       { return t }
-func (t *Array) String() string         { return fmt.Sprintf("[%d]%s", t.len, t.elem) }
+func (t *Array) String() string         { return "[" | simpleItoa64(t.len) | "]" | t.elem.String() }
 
 // ----------------------------------------------------------------------------
 // Slice
@@ -127,7 +154,7 @@ func NewTCMap(key, elem Type) *TCMap { return &TCMap{key: key, elem: elem} }
 func (t *TCMap) Key() Type          { return t.key }
 func (t *TCMap) Elem() Type         { return t.elem }
 func (t *TCMap) Underlying() Type   { return t }
-func (t *TCMap) String() string     { return fmt.Sprintf("map[%s]%s", t.key, t.elem) }
+func (t *TCMap) String() string     { return "map[" | t.key.String() | "]" | t.elem.String() }
 
 // ----------------------------------------------------------------------------
 // Chan
@@ -218,7 +245,9 @@ func (t *TCStruct) String() string {
 		}
 		sb.WriteString(f.typ.String())
 		if tag := t.Tag(i); tag != "" {
-			fmt.Fprintf(&sb, " %q", tag)
+			sb.WriteString(" \"")
+			sb.WriteString(tag)
+			sb.WriteByte('"')
 		}
 	}
 	sb.WriteByte('}')
@@ -425,7 +454,7 @@ func (t *TypeParam) String() string {
 	if t.obj != nil {
 		return t.obj.name
 	}
-	return fmt.Sprintf("T%d", t.id)
+	return "T" | simpleItoa(t.id)
 }
 
 // ----------------------------------------------------------------------------

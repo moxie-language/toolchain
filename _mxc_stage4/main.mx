@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	_ "strconv"
 	"unsafe"
 )
 
@@ -262,7 +263,7 @@ func getMoxiePath() string {
 	return joinPath(home, "moxie")
 }
 
-func mxcVersion() string { return "1.7.0" }
+func mxcVersion() string { return "1.8.1" }
 
 func moxieCacheDir() string {
 	return joinPath(joinPath(getMoxiePath(), "cache"), "mxc-" | mxcVersion())
@@ -942,13 +943,11 @@ func fileContainsPart(base string, part string) bool {
 }
 
 func shouldSkipFile(name string) bool {
-	if hasSuffix(name, "_test.go") || hasSuffix(name, "_test.mx") {
+	if hasSuffix(name, "_test.mx") {
 		return true
 	}
 	base := name
-	if hasSuffix(base, ".go") {
-		base = base[:len(base)-3]
-	} else if hasSuffix(base, ".mx") {
+	if hasSuffix(base, ".mx") {
 		base = base[:len(base)-3]
 	}
 	archSkip := []string{"arm64"}
@@ -978,9 +977,15 @@ func hasBuildConstraint(data []byte, forbidden []string) bool {
 		if data[i] == 'p' {
 			return false
 		}
+		skip := int32(0)
 		if i+11 < int32(len(data)) && string(data[i:i+11]) == "//go:build " {
+			skip = 11
+		} else if i+9 < int32(len(data)) && string(data[i:i+9]) == "//:build " {
+			skip = 9
+		}
+		if skip > 0 {
 			var buf []byte
-			for j := i + 11; j < int32(len(data)) && data[j] != '\n'; j++ {
+			for j := i + skip; j < int32(len(data)) && data[j] != '\n'; j++ {
 				buf = append(buf, data[j])
 			}
 			line := string(buf)
@@ -1086,11 +1091,10 @@ func discoverPkg(pkgPath, root string) *pkgInfo {
 			dir = joinPath(root, joinPath("src/vendor", pkgPath))
 		}
 	}
-	goFiles := listFiles(dir, ".go")
 	mxFiles := listFiles(dir, ".mx")
 	cFiles := listFiles(dir, ".c")
 	bcFiles := listFiles(dir, ".bc")
-	allMx := append(mxFiles, goFiles...)
+	allMx := mxFiles
 	forbidden := []string{"wasm", "js", "ignore", "compiler_bootstrap",
 		"scheduler.tasks", "scheduler.cores", "scheduler.asyncify",
 		"faketime", "baremetal", "nintendoswitch"}
@@ -1899,6 +1903,10 @@ func main() {
 	linkArgs := []string{llvmLink, "-o", mergedBc, runtimeBc}
 	shimsBc := joinPath(sysroot, "hashmap_shims.bc")
 	linkArgs = append(linkArgs, shimsBc)
+	stringerBc := joinPath(sysroot, "stringer.bc")
+	if _, sok := readFile(stringerBc); sok {
+		linkArgs = append(linkArgs, stringerBc)
+	}
 	runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
 	if _, gok := readFile(runtimeGoBc); gok {
 		overrideArg := "--override=" | runtimeGoBc

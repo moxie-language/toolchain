@@ -182,7 +182,7 @@ func compileAndCacheCFile(abspath, tmpdir string, cflags []string, printCommands
 	}
 
 	// Move temporary object file to final location.
-	outpath, err := makeCFileCachePath(dependencySlice, depfileNameHash)
+	outpath, err := makeCFileCachePath(dependencySlice, depfileNameHash, srcLabel)
 	if err != nil {
 		return "", err
 	}

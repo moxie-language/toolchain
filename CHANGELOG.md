@@ -1,9 +1,37 @@
 # Moxie Changelog
 
-Versions are tagged with `vX.Y.Z` and capture user-visible changes — compiler
+Versions are tagged with `vX.Y.Z` and capture user-visible changes - compiler
 features, language rules, runtime additions, and fixes that change observable
 behaviour. Point-releases under the same minor typically group related
 work; the headline of each entry matches the tag's commit subject.
+
+## v1.8.1
+
+- **Self-hosting fixpoint reached** - stage4 compiler builds itself to a
+  reproducible binary. No Go toolchain required.
+- **Float hex encoding fix** - float literals emitted via source text
+  (`cf.lit`) instead of `Float64bits(cf.v)`, eliminating bootstrap poison
+  where corrupted float constants in the compiler binary produced wrong
+  IR for the next generation.
+- **Rune/string concatenation is now a compile error** - `"s" | 'r'` and
+  `'r' | "s"` produce `cannot concatenate rune with string - convert to
+  UTF-8 first`. Use `r.String()` for explicit conversion.
+- **Builtin `.String()` methods on all primitive types** - `int32`, `int64`,
+  `uint32`, `uint64`, `int8`, `int16`, `uint8`, `uint16`, `float32`,
+  `float64`, `bool`, `string`, `byte` (hex), `rune` (hex), `uintptr` (hex).
+  `fmt` variadics use `...Stringer` - no reflection, no empty interfaces.
+- **compileErrors separation** - deliberate compile errors (rune concat)
+  separated from benign parser warnings (scanner UTF-8 noise), preventing
+  false-positive build failures on stdlib packages.
+- **Versioned binary installs** - `release.sh` and `install.sh` install
+  `moxie-X.Y.Z` to `~/.local/bin/` with `moxie` as symlink to latest.
+- **LLVM 21 required** - build scripts and README updated.
+- **`moxie fetch`/`moxie install`** - network-free builds with `.mxh`
+  protocol headers for cross-binary spawn type checking.
+- **`moxie update --all`** - rebuilds cached packages after compiler upgrade,
+  cleans stale version caches.
+- **Forward-port compile/ from stage4** - compile library converged with
+  stage4 compiler source.
 
 ## v1.2.19
 

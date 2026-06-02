@@ -242,7 +242,14 @@ s |= " suffix"
 '\U00000041'
 ```
 
-Rune literals have type `rune` (alias for `int32`).
+Rune literals have type `rune` (alias for `int32`). A rune is strictly a
+Unicode code point value, not a byte or text fragment. `rune.String()` returns
+a hexadecimal representation (e.g. `'a'.String()` returns `"0x0061"`), not a
+UTF-8 encoding. To produce the UTF-8 byte sequence for a rune, use
+`unicode/utf8.AppendRune` or `unicode/utf8.EncodeRune`.
+
+Appending a rune directly to a string or `[]byte` with `|` is a compile error.
+The programmer must explicitly convert the rune to its UTF-8 encoding first.
 
 ### String Literals
 
@@ -251,11 +258,15 @@ Rune literals have type `rune` (alias for `int32`).
 `hello\nworld`    // raw string literal (backslash is literal)
 ```
 
-String literals produce values of type `string`. The `string` keyword is a
-representation pragma - it is the same type as `[]byte` at the language level,
-but on the WASM target the compiler uses the source spelling to choose between
-a native JS string (`string`) and a byte-array object (`[]byte`). See
-[WASM String Pragma](#wasm-string-pragma).
+String literals produce values of type `string`. String constants are stored as
+UTF-8 encoded byte sequences. The literal `"hello"` is five bytes of UTF-8; the
+literal `"é"` is two bytes (`0xc3 0xa9`). To tokenize a string into runes
+or process characters beyond raw bytes, iterate with `unicode/utf8`.
+
+The `string` keyword is a representation pragma - it is the same type as
+`[]byte` at the language level, but on the WASM target the compiler uses the
+source spelling to choose between a native JS string (`string`) and a
+byte-array object (`[]byte`). See [WASM String Pragma](#wasm-string-pragma).
 
 ### Slice Size Literals
 
@@ -333,6 +344,22 @@ argument's `.String()` method is called directly:
 n := int32(42)
 msg := "count: " | n.String() | " items"
 ```
+
+Output formats:
+
+| Type | Example | Output |
+|------|---------|--------|
+| `bool` | `true.String()` | `"true"` |
+| `int8`..`int64` | `int32(42).String()` | `"42"` |
+| `uint8`..`uint64` | `uint64(255).String()` | `"255"` |
+| `float32`, `float64` | `float64(3.14).String()` | `"+3.14000000000000e+000"` |
+| `byte` | `byte(0xff).String()` | `"ff"` (hex pair) |
+| `rune` | `'a'.String()` | `"0x0061"` (hex code point) |
+| `string` | `"hi".String()` | `"hi"` (identity) |
+
+Untyped constants resolve to their maximal typed equivalent for `.String()`:
+`UntypedBool` to `bool`, `UntypedInt` to `int64`, `UntypedFloat` to `float64`,
+`UntypedRune` to `rune`, `UntypedString` to `string`.
 
 ### Text Type
 

@@ -6,6 +6,7 @@ import (
 )
 
 var parseErrors []string
+var compileErrors []string
 var genericFuncDecls map[string]*FuncDecl
 var genericPkgScopes map[string]*Scope
 
@@ -7715,6 +7716,7 @@ func typeCheckPkg(src []byte, name string) (*TCPackage, *File) {
 
 func releasePerPkgState() {
 	parseErrors = nil
+	compileErrors = nil
 	constValMap = nil
 	compileExportMap = nil
 	tcPkgSrc = nil
@@ -7750,6 +7752,22 @@ func CompileToIR(src []byte, name string, triple string) string {
 	ssaPkg := prog.CreatePackage(pkg, []*File{file}, nil)
 	emitter := newIREmitter(ssaPkg, triple)
 	ir := emitter.emit()
+
+	if len(compileErrors) > 0 {
+		out := "; compile error\n"
+		for _, ce := range compileErrors {
+			out = out | "; " | ce | "\n"
+		}
+		emitter.releaseAfterEmit()
+		ssaPkg.release()
+		prog.release()
+		if pkg != nil {
+			pkg.Release()
+		}
+		file.DeclList = nil
+		releasePerPkgState()
+		return out
+	}
 
 	if len(ir) > 0 && ir[0] != ';' {
 		registerCompiledExports(pkg)

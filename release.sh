@@ -85,5 +85,13 @@ SHA=$(sha256sum "$TARBALL" | cut -d' ' -f1)
 echo "tarball: $TARBALL ($SIZE)" >&2
 echo "sha256:  $SHA" >&2
 
+# install versioned binary to ~/.local/bin
+BINDIR="$HOME/.local/bin"
+VNUM="${VERSION#v}"
+mkdir -p "$BINDIR"
+cp moxie "$BINDIR/moxie-${VNUM}"
+ln -sf "moxie-${VNUM}" "$BINDIR/moxie"
+echo "installed: $BINDIR/moxie-${VNUM} (symlink: $BINDIR/moxie)" >&2
+
 rm -rf "$STAGE"
 echo "release $VERSION ready at $TARBALL" >&2

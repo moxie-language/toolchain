@@ -19,7 +19,7 @@ Moxie descends from [TinyGo](https://tinygo.org/). All embedded targets and thre
 ## Quick Start
 
 ```sh
-# Build the compiler (requires Go 1.25+ and LLVM 19)
+# Build the compiler (requires LLVM 21)
 ./build.sh
 
 # Build a program
@@ -140,24 +140,17 @@ All native binaries are fully statically linked.
 
 ```
 moxie/
-├── main.go                  # CLI entry point
-├── build.sh                 # Compiler build (patched GOROOT + LLVM linking)
-├── build/                   # Build-time tools (go/types patcher)
-├── compiler/                # Moxie SSA → LLVM IR (+ spawn detection, restrictions)
-├── builder/                 # Build orchestration, library compilation
-├── loader/                  # Package loading, .mx rewriting, pipe/concat transforms
-├── compileopts/             # Target configuration
-├── cgo/                     # CGo processing via libclang
-├── goenv/                   # Environment and version detection
-├── transform/               # LLVM IR optimization passes
-├── interp/                  # Compile-time partial evaluation
-├── diagnostics/             # Error reporting
-├── jsruntime/               # JS host shims for WASM target (channels, domains, browser bridges)
+├── _mxc_stage4/             # Self-hosting compiler (Moxie source)
+├── compile/                 # Compiler library (forward-ported from stage4)
+├── build.sh                 # Bootstrap build script
+├── release.sh               # Release tarball builder
+├── install.sh               # Remote install script
+├── jsruntime/               # JS host shims for WASM target
+├── sysroot/                 # Precompiled runtime bitcode, musl, bdwgc, compiler-rt
 ├── src/                     # Target-side sources (compiled INTO programs)
-│   ├── runtime/             # Runtime: scheduler, channels, GC, spawn
+│   ├── runtime/             # Runtime: scheduler, channels, GC, spawn, stringers
 │   ├── internal/task/       # Cooperative task system, context switching
 │   ├── moxie/               # Codec interface, built-in codec types
-│   └── ...                  # Stdlib overlays (.mx files)
-├── lib/                     # C libraries (musl, bdwgc, compiler-rt)
+│   └── ...                  # Stdlib (.mx files)
 └── docs/                    # Language reference, porting guide, architecture
 ```

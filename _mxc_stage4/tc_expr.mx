@@ -65,7 +65,7 @@ func (c *Checker) typeIdent(e *Name, scope *Scope) TCTypeAndValue {
 	}
 	_, obj := c.lookup(e.Value, scope)
 	if obj == nil {
-		c.errorf(e.Pos(), "undefined: %s", e.Value)
+		c.errorf(e.Pos(), "undefined: " | e.Value)
 		return TCTypeAndValue{}
 	}
 	if c.info != nil {
@@ -133,7 +133,9 @@ func (c *Checker) typeOperation(e *Operation, scope *Scope) TCTypeAndValue {
 		AndAnd, OrOr:
 		return TCTypeAndValue{Type: Typ[Bool], mode: modeValue}
 	case Or, Add:
-		// In Moxie, | on strings is concat. Use dominant side's type.
+		if isRuneKind(xt) && isStringKind(yt) || isStringKind(xt) && isRuneKind(yt) {
+			c.errorf(e.Pos(), "cannot concatenate rune with string - convert to UTF-8 first")
+		}
 		if xt != nil {
 			return TCTypeAndValue{Type: xt, mode: modeValue}
 		}
@@ -407,7 +409,26 @@ func (c *Checker) lookupFieldOrMethod(t Type, name string) *Selection {
 		indirect = true
 	}
 
+	// check Named methods before unwrapping to underlying
+	if n, ok := t.(*Named); ok {
+		for _, m := range n.methods {
+			if m.name == name {
+				return &Selection{kind: MethodVal, recv: n, obj: m, indir: indirect}
+			}
+		}
+	}
+
 	switch t := safeUnderlying(t).(type) {
+	case *Basic:
+		for _, m := range t.methods {
+			if m.name == name {
+				return &Selection{kind: MethodVal, recv: t, obj: m, indir: indirect}
+			}
+		}
+		typed := untypedToTyped(t)
+		if typed != nil {
+			return c.lookupFieldOrMethod(typed, name)
+		}
 	case *TCStruct:
 		for i, f := range t.fields {
 			if f.name == name {
@@ -427,15 +448,29 @@ func (c *Checker) lookupFieldOrMethod(t Type, name string) *Selection {
 				return &Selection{kind: MethodVal, recv: t, obj: fn, indir: indirect}
 			}
 		}
-	case *Named:
-		for _, m := range t.methods {
-			if m.name == name {
-				return &Selection{kind: MethodVal, recv: t, obj: m, indir: indirect}
-			}
-		}
-		if t.underlying != nil {
-			return c.lookupFieldOrMethod(t.underlying, name)
-		}
 	}
 	return nil
+}
+
+func isRuneKind(t Type) bool {
+	if t == nil {
+		return false
+	}
+	if n, ok := t.(*Named); ok {
+		return n.obj != nil && n.obj.name == "rune"
+	}
+	if b, ok := t.(*Basic); ok {
+		return b.kind == UntypedRune
+	}
+	return false
+}
+
+func isStringKind(t Type) bool {
+	if t == nil {
+		return false
+	}
+	if b, ok := safeUnderlying(t).(*Basic); ok {
+		return b.info&IsString != 0
+	}
+	return false
 }

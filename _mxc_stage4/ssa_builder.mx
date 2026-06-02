@@ -377,6 +377,9 @@ func ssaRecvTypeName(recv *Field) string {
 
 func (pb *ssaPkgBuilder) findMethod(typeName string, methodName string) *TCFunc {
 	obj := pb.pkg.Pkg.Scope().Lookup(typeName)
+	if obj == nil && Universe != nil {
+		obj = Universe.Lookup(typeName)
+	}
 	if obj == nil {
 		return nil
 	}
@@ -384,14 +387,20 @@ func (pb *ssaPkgBuilder) findMethod(typeName string, methodName string) *TCFunc 
 	if !ok {
 		return nil
 	}
-	named, ok := tn.Type().(*Named)
-	if !ok {
-		return nil
-	}
-	for i := 0; i < named.NumMethods(); i++ {
-		m := named.Method(i)
-		if m.Name() == methodName {
-			return m
+	switch t := tn.Type().(type) {
+	case *Named:
+		for i := int32(0); i < t.NumMethods(); i++ {
+			m := t.Method(i)
+			if m.Name() == methodName {
+				return m
+			}
+		}
+	case *Basic:
+		for i := int32(0); i < t.NumMethods(); i++ {
+			m := t.Method(i)
+			if m.Name() == methodName {
+				return m
+			}
 		}
 	}
 	return nil
@@ -2194,6 +2203,12 @@ func (fb *ssaFuncBuilder) buildOperation(e *Operation) SSAValue {
 	if x == nil || y == nil {
 		return nil
 	}
+	if (op == OpOr || op == OpAdd) && x.SSAType() != nil && y.SSAType() != nil {
+		if isRuneKind(x.SSAType()) && isStringKind(y.SSAType()) || isStringKind(x.SSAType()) && isRuneKind(y.SSAType()) {
+			writeStr(2, "compile error: cannot concatenate rune with string - convert to UTF-8 first\n")
+			compileErrors = append(compileErrors, "cannot concatenate rune with string")
+		}
+	}
 	if xc, ok := x.(*SSAConst); ok {
 		if yc, ok2 := y.(*SSAConst); ok2 {
 			if xc.val != nil && yc.val != nil {
@@ -3348,6 +3363,43 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *SelectorExpr, recv SSAV
 	if _, ok := safeUnderlying(typ).(*TCInterface); ok {
 		return nil, nil
 	}
+	// Handle Basic types (builtin stringers in runtime package)
+	if basic, ok2 := typ.(*Basic); ok2 {
+		typeName := basic.Name()
+		mangledName := typeName | "." | sel.Sel.Value
+		extSym := "runtime." | mangledName
+		for i := int32(0); i < basic.NumMethods(); i++ {
+			m := basic.Method(i)
+			if m.Name() == sel.Sel.Value {
+				fn := fb.fn.Pkg.ExternalFunc(mangledName, m.Signature())
+				fn.externalSymbol = extSym
+				return fn, recv
+			}
+		}
+		resolved := untypedToTyped(basic)
+		if resolved == nil {
+			return nil, nil
+		}
+		switch rt := resolved.(type) {
+		case *Basic:
+			typeName = rt.Name()
+			mangledName = typeName | "." | sel.Sel.Value
+			extSym = "runtime." | mangledName
+			for i := int32(0); i < rt.NumMethods(); i++ {
+				m := rt.Method(i)
+				if m.Name() == sel.Sel.Value {
+					fn := fb.fn.Pkg.ExternalFunc(mangledName, m.Signature())
+					fn.externalSymbol = extSym
+					return fn, recv
+				}
+			}
+			return nil, nil
+		case *Named:
+			typ = rt
+		default:
+			return nil, nil
+		}
+	}
 	named, ok := typ.(*Named)
 	if !ok {
 		return nil, nil
@@ -3369,6 +3421,8 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *SelectorExpr, recv SSAV
 				if named.Obj() != nil && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() != fb.fn.Pkg.Pkg.Path() {
 					pkgPath := named.Obj().Pkg().Path()
 					fn.externalSymbol = pkgPath | "." | typeName | "." | sel.Sel.Value
+				} else if named.Obj() != nil && named.Obj().Pkg() == nil {
+					fn.externalSymbol = "runtime." | mangledName
 				}
 				break
 			}

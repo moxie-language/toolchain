@@ -2,7 +2,8 @@
 set -e
 
 BASE_URL="https://git.smesh.lol/moxie-releases"
-INSTALL_DIR="${MOXIE_INSTALL_DIR:-/opt/moxie}"
+INSTALL_DIR="${MOXIE_INSTALL_DIR:-$HOME/.local/share/moxie}"
+BINDIR="${MOXIE_BINDIR:-$HOME/.local/bin}"
 
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -38,32 +39,35 @@ trap "rm -rf $DL" EXIT
 
 curl -fsSL "${BASE_URL}/raw/${LATEST}" -o "${DL}/${LATEST}"
 
-SUDO=""
-if [ ! -w "$(dirname "$INSTALL_DIR")" ] && [ "$(id -u)" != "0" ]; then
-    SUDO=sudo
-fi
-
 if [ -d "$INSTALL_DIR" ]; then
     echo "removing old installation ..." >&2
-    $SUDO rm -rf "$INSTALL_DIR"
+    rm -rf "$INSTALL_DIR"
 fi
 
-$SUDO mkdir -p "$INSTALL_DIR"
-$SUDO tar xzf "${DL}/${LATEST}" --strip-components=1 -C "$INSTALL_DIR"
+mkdir -p "$INSTALL_DIR"
+tar xzf "${DL}/${LATEST}" --strip-components=1 -C "$INSTALL_DIR"
 
 if [ ! -x "$INSTALL_DIR/bin/moxie" ]; then
     echo "error: install failed - moxie binary not found" >&2
     exit 1
 fi
 
+# extract version from tarball name and install versioned binary
+VNUM=$(echo "$LATEST" | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+')
+mkdir -p "$BINDIR"
+cp "$INSTALL_DIR/bin/moxie" "$BINDIR/moxie-${VNUM}"
+ln -sf "moxie-${VNUM}" "$BINDIR/moxie"
+
 echo "installed to $INSTALL_DIR" >&2
+echo "binary: $BINDIR/moxie-${VNUM} (symlink: $BINDIR/moxie)" >&2
+
 echo "rebuilding package cache with new compiler ..." >&2
 MOXIEROOT="$INSTALL_DIR" LLVM_GLUE_PATH="$INSTALL_DIR/llvm-glue/libmoxie-llvm-glue.so" \
-    "$INSTALL_DIR/bin/moxie" update --all
+    "$BINDIR/moxie" update --all
 
 echo "" >&2
 echo "done." >&2
 echo "" >&2
 echo "add to your shell profile:" >&2
-echo "  export PATH=\"$INSTALL_DIR/bin:\$PATH\"" >&2
+echo "  export PATH=\"$BINDIR:\$PATH\"" >&2
 echo "  export MOXIEROOT=\"$INSTALL_DIR\"" >&2
