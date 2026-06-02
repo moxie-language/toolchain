@@ -1507,10 +1507,18 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 			}
 		}
 		if elemType == "i32" {
-			usage := e.inferAllocTypeFromUsage(a)
-			if usage != "" && usage != "i32" && usage != "void" {
-				elemType = usage
-				e.allocTypes[a] = elemType
+			ssaIsInt := false
+			if p, ok2 := safeUnderlying(a.SSAType()).(*Pointer); ok2 && p.Elem() != nil {
+				if b2, ok3 := safeUnderlying(p.Elem()).(*Basic); ok3 && b2.Info()&IsInteger != 0 {
+					ssaIsInt = true
+				}
+			}
+			if !ssaIsInt {
+				usage := e.inferAllocTypeFromUsage(a)
+				if usage != "" && usage != "i32" && usage != "void" && usage != "ptr" {
+					elemType = usage
+					e.allocTypes[a] = elemType
+				}
 			}
 		}
 	}
@@ -3337,7 +3345,16 @@ func (e *irEmitter) emitUnOp(u *SSAUnOp) {
 		}
 		return
 	}
-	if u.Op == OpNot || u.Op == OpXor {
+	if u.Op == OpNot {
+		e.w("  ")
+		e.w(reg)
+		e.w(" = xor i1 ")
+		e.w(val)
+		e.w(", true\n")
+		e.setRegType(u, reg, "i1")
+		return
+	}
+	if u.Op == OpXor {
 		e.w("  ")
 		e.w(reg)
 		e.w(" = xor ")
@@ -4419,6 +4436,14 @@ func (e *irEmitter) emitIf(i *SSAIf) {
 	}
 	if bop, ok := i.Cond.(*SSABinOp); ok && isComparisonOp(bop.Op) {
 		condType = "i1"
+	}
+	if cond == "true" || cond == "false" {
+		condType = "i1"
+	}
+	if _, isNot := i.Cond.(*SSAUnOp); isNot {
+		if rt, ok2 := e.regTypes[e.regName(i.Cond)]; ok2 && rt == "i1" {
+			condType = "i1"
+		}
 	}
 	if condType != "i1" && condType != "" && condType != "void" {
 		e.nextReg++
@@ -6864,17 +6889,26 @@ func (e *irEmitter) constOperand(c *SSAConst) string {
 				return irItoa64(v)
 			}
 			if cf, ok := c.val.(constFloat); ok {
+				if len(cf.lit) > 0 {
+					return irItoa64(parseIntFromFloatLit(cf.lit))
+				}
 				return irItoa64(int64(cf.v))
 			}
 			return c.val.String()
 		case Float32:
 			if cf, ok := c.val.(constFloat); ok {
+				if len(cf.lit) > 0 {
+					return floatLitForLLVM(cf.lit)
+				}
 				bits := math.Float64bits(float64(float32(cf.v)))
 				return "0x" | irHex64(bits)
 			}
 			return "0.0"
 		case Float64, UntypedFloat:
 			if cf, ok := c.val.(constFloat); ok {
+				if len(cf.lit) > 0 {
+					return floatLitForLLVM(cf.lit)
+				}
 				bits := math.Float64bits(cf.v)
 				return "0x" | irHex64(bits)
 			}
@@ -7260,6 +7294,65 @@ func irItoa(n int32) string {
 	}
 	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
 		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
+
+func parseIntFromFloatLit(lit string) int64 {
+	neg := false
+	i := 0
+	if len(lit) > 0 && lit[0] == '-' {
+		neg = true
+		i = 1
+	} else if len(lit) > 0 && lit[0] == '+' {
+		i = 1
+	}
+	var n int64
+	for ; i < len(lit); i++ {
+		ch := lit[i]
+		if ch == '_' {
+			continue
+		}
+		if ch < '0' || ch > '9' {
+			break
+		}
+		n = n*10 + int64(ch-'0')
+	}
+	if neg {
+		return -n
+	}
+	return n
+}
+
+func floatLitForLLVM(lit string) string {
+	var buf []byte
+	hasDot := false
+	ePos := -1
+	for i := 0; i < len(lit); i++ {
+		ch := lit[i]
+		if ch == '_' {
+			continue
+		}
+		if ch == '.' {
+			hasDot = true
+			if len(buf) == 0 || (len(buf) == 1 && (buf[0] == '-' || buf[0] == '+')) {
+				buf = append(buf, '0')
+			}
+		}
+		if ch == 'e' || ch == 'E' {
+			ePos = len(buf)
+		}
+		buf = append(buf, ch)
+	}
+	if !hasDot {
+		if ePos >= 0 {
+			var out []byte
+			out = append(out, buf[:ePos]...)
+			out = append(out, '.', '0')
+			out = append(out, buf[ePos:]...)
+			return string(out)
+		}
+		buf = append(buf, '.', '0')
 	}
 	return string(buf)
 }

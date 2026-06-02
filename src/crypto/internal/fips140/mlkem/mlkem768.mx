@@ -21,7 +21,7 @@ package mlkem
 // This file implements the recommended parameter set ML-KEM-768. The ML-KEM-1024
 // parameter set implementation is auto-generated from this file.
 //
-//go:generate go run generate1024.go -input mlkem768.go -output mlkem1024.go
+//:generate go run generate1024.go -input mlkem768.go -output mlkem1024.go
 
 import (
 	"bytes"
@@ -76,7 +76,7 @@ type DecapsulationKey768 struct {
 	d [32]byte // decapsulation key seed
 	z [32]byte // implicit rejection sampling seed
 
-	ρ [32]byte // sampleNTT seed for A, stored for the encapsulation key
+	rho [32]byte // sampleNTT seed for A, stored for the encapsulation key
 	h [32]byte // H(ek), stored for ML-KEM.Decaps_internal
 
 	encryptionKey
@@ -106,11 +106,11 @@ func TestingOnlyExpandedBytes768(dk *DecapsulationKey768) []byte {
 		b = polyByteEncode(b, dk.s[i])
 	}
 
-	// ByteEncode₁₂(t) || ρ
+	// ByteEncode₁₂(t) || rho
 	for i := range dk.t {
 		b = polyByteEncode(b, dk.t[i])
 	}
-	b = append(b, dk.ρ[:]...)
+	b = append(b, dk.rho[:]...)
 
 	// H(ek) || z
 	b = append(b, dk.h[:]...)
@@ -123,7 +123,7 @@ func TestingOnlyExpandedBytes768(dk *DecapsulationKey768) []byte {
 // ciphertexts.
 func (dk *DecapsulationKey768) EncapsulationKey() *EncapsulationKey768 {
 	return &EncapsulationKey768{
-		ρ:             dk.ρ,
+		rho:             dk.rho,
 		h:             dk.h,
 		encryptionKey: dk.encryptionKey,
 	}
@@ -132,7 +132,7 @@ func (dk *DecapsulationKey768) EncapsulationKey() *EncapsulationKey768 {
 // An EncapsulationKey768 is the public key used to produce ciphertexts to be
 // decapsulated by the corresponding [DecapsulationKey768].
 type EncapsulationKey768 struct {
-	ρ [32]byte // sampleNTT seed for A
+	rho [32]byte // sampleNTT seed for A
 	h [32]byte // H(ek)
 	encryptionKey
 }
@@ -148,14 +148,14 @@ func (ek *EncapsulationKey768) bytes(b []byte) []byte {
 	for i := range ek.t {
 		b = polyByteEncode(b, ek.t[i])
 	}
-	b = append(b, ek.ρ[:]...)
+	b = append(b, ek.rho[:]...)
 	return b
 }
 
 // encryptionKey is the parsed and expanded form of a PKE encryption key.
 type encryptionKey struct {
 	t [k]nttElement     // ByteDecode₁₂(ek[:384k])
-	a [k * k]nttElement // A[i*k+j] = sampleNTT(ρ, j, i)
+	a [k * k]nttElement // A[i*k+j] = sampleNTT(rho, j, i)
 }
 
 // decryptionKey is the parsed and expanded form of a PKE decryption key.
@@ -235,7 +235,7 @@ func TestingOnlyNewDecapsulationKey768(b []byte) (*DecapsulationKey768, error) {
 	if err != nil {
 		return nil, err
 	}
-	dk.ρ = ek.ρ
+	dk.rho = ek.rho
 	dk.h = ek.h
 	dk.encryptionKey = ek.encryptionKey
 	b = b[EncapsulationKeySize768:]
@@ -269,25 +269,25 @@ func kemKeyGen(dk *DecapsulationKey768, d, z *[32]byte) {
 	g.Write(d[:])
 	g.Write([]byte{k}) // Module dimension as a domain separator.
 	G := g.Sum([]byte{:0:64})
-	ρ, σ := G[:32], G[32:]
-	dk.ρ = [32]byte(ρ)
+	rho, sigma := G[:32], G[32:]
+	dk.rho = [32]byte(rho)
 
 	A := &dk.a
 	for i := byte(0); i < k; i++ {
 		for j := byte(0); j < k; j++ {
-			A[i*k+j] = sampleNTT(ρ, j, i)
+			A[i*k+j] = sampleNTT(rho, j, i)
 		}
 	}
 
 	var N byte
 	s := &dk.s
 	for i := range s {
-		s[i] = ntt(samplePolyCBD(σ, N))
+		s[i] = ntt(samplePolyCBD(sigma, N))
 		N++
 	}
 	e := []nttElement{:k}
 	for i := range e {
-		e[i] = ntt(samplePolyCBD(σ, N))
+		e[i] = ntt(samplePolyCBD(sigma, N))
 		N++
 	}
 
@@ -394,11 +394,11 @@ func parseEK(ek *EncapsulationKey768, ekPKE []byte) (*EncapsulationKey768, error
 		}
 		ekPKE = ekPKE[encodingSize12:]
 	}
-	copy(ek.ρ[:], ekPKE)
+	copy(ek.rho[:], ekPKE)
 
 	for i := byte(0); i < k; i++ {
 		for j := byte(0); j < k; j++ {
-			ek.a[i*k+j] = sampleNTT(ek.ρ[:], j, i)
+			ek.a[i*k+j] = sampleNTT(ek.rho[:], j, i)
 		}
 	}
 

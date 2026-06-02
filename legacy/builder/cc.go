@@ -86,7 +86,8 @@ func compileAndCacheCFile(abspath, tmpdir string, cflags []string, printCommands
 	depfileNameHash := hex.EncodeToString(depfileNameHashBuf[:])
 
 	// Load dependencies file, if possible.
-	depfileName := "dep-" + depfileNameHash + ".json"
+	srcLabel := cacheSafeLabel(abspath)
+	depfileName := "dep-" + srcLabel + "-" + depfileNameHash + ".json"
 	depfileCachePath := filepath.Join(goenv.Get("GOCACHE"), depfileName)
 	depfileBuf, err := os.ReadFile(depfileCachePath)
 	var dependencies []string // sorted list of dependency paths
@@ -99,7 +100,7 @@ func compileAndCacheCFile(abspath, tmpdir string, cflags []string, printCommands
 		}
 
 		// Obtain hashes of all the files listed as a dependency.
-		outpath, err := makeCFileCachePath(dependencies, depfileNameHash)
+		outpath, err := makeCFileCachePath(dependencies, depfileNameHash, srcLabel)
 		if err == nil {
 			if _, err := os.Stat(outpath); err == nil {
 				return outpath, nil
@@ -196,7 +197,7 @@ func compileAndCacheCFile(abspath, tmpdir string, cflags []string, printCommands
 // Create a cache path (a path in GOCACHE) to store the output of a compiler
 // job. This path is based on the dep file name (which is a hash of metadata
 // including compiler flags) and the hash of all input files in the paths slice.
-func makeCFileCachePath(paths []string, depfileNameHash string) (string, error) {
+func makeCFileCachePath(paths []string, depfileNameHash, srcLabel string) (string, error) {
 	// Hash all input files.
 	fileHashes := make(map[string]string, len(paths))
 	for _, path := range paths {
@@ -221,8 +222,28 @@ func makeCFileCachePath(paths []string, depfileNameHash string) (string, error) 
 	outFileNameBuf := sha512.Sum512_224(buf)
 	cacheKey := hex.EncodeToString(outFileNameBuf[:])
 
-	outpath := filepath.Join(goenv.Get("GOCACHE"), "obj-"+cacheKey+".bc")
+	outpath := filepath.Join(goenv.Get("GOCACHE"), "obj-"+srcLabel+"-"+cacheKey+".bc")
 	return outpath, nil
+}
+
+func cacheSafeLabel(abspath string) string {
+	base := filepath.Base(abspath)
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	var b strings.Builder
+	for _, r := range name {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	label := b.String()
+	if len(label) > 40 {
+		label = label[:40]
+	}
+	if label == "" {
+		label = "unknown"
+	}
+	return label
 }
 
 // hashFile hashes the given file path and returns the hash as a hex string.

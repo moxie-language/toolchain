@@ -1193,24 +1193,29 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d Decl) {
 			}
 		}
 	case *ConstDecl:
-		if d.Values != nil && len(d.NameList) > 0 {
+		if len(d.NameList) > 0 {
 			if fb.localConsts == nil {
 				fb.localConsts = map[string]*SSAConst{}
 			}
-			if list, ok := d.Values.(*ListExpr); ok {
-				for i, name := range d.NameList {
-					if i < len(list.ElemList) {
-						if v := fb.buildExpr(list.ElemList[i]); v != nil {
+			for _, name := range d.NameList {
+				if d.Values != nil {
+					var valExpr Expr
+					if list, ok := d.Values.(*ListExpr); ok {
+						for i, n := range d.NameList {
+							if n == name && i < len(list.ElemList) {
+								valExpr = list.ElemList[i]
+								break
+							}
+						}
+					} else if len(d.NameList) == 1 {
+						valExpr = d.Values
+					}
+					if valExpr != nil {
+						if v := fb.buildExpr(valExpr); v != nil {
 							if c := ssaExtractConst(v); c != nil {
 								fb.localConsts[name.Value] = c
 							}
 						}
-					}
-				}
-			} else if len(d.NameList) == 1 {
-				if v := fb.buildExpr(d.Values); v != nil {
-					if c := ssaExtractConst(v); c != nil {
-						fb.localConsts[d.NameList[0].Value] = c
 					}
 				}
 			}
@@ -1950,19 +1955,34 @@ func (fb *ssaFuncBuilder) buildBranch(s *BranchStmt) {
 			fb.currentBlock = nil
 		}
 	case Continue:
-		for i := len(fb.loops) - 1; i >= 0; i-- {
-			postBlock := fb.loops[i].post
-			if postBlock == nil {
-				postBlock = fb.loops[i].body
+		var postBlock *SSABasicBlock
+		if s.Label != nil {
+			for i := len(fb.loops) - 1; i >= 0; i-- {
+				if fb.loops[i].label == s.Label.Value {
+					postBlock = fb.loops[i].post
+					if postBlock == nil {
+						postBlock = fb.loops[i].body
+					}
+					break
+				}
 			}
-			if postBlock == nil {
-				continue
+		}
+		if postBlock == nil {
+			for i := len(fb.loops) - 1; i >= 0; i-- {
+				postBlock = fb.loops[i].post
+				if postBlock == nil {
+					postBlock = fb.loops[i].body
+				}
+				if postBlock != nil {
+					break
+				}
 			}
+		}
+		if postBlock != nil {
 			fb.emit(&SSAJump{Comment: "continue"})
 			fb.currentBlock.Succs = append(fb.currentBlock.Succs, postBlock)
 			postBlock.Preds = append(postBlock.Preds, fb.currentBlock)
 			fb.currentBlock = nil
-			break
 		}
 	case Goto:
 		if s.Label != nil {
@@ -3319,6 +3339,27 @@ func ssaExtractConst(v SSAValue) *SSAConst {
 	if conv, ok := v.(*SSAConvert); ok {
 		if c, ok2 := conv.X.(*SSAConst); ok2 {
 			return &SSAConst{typ: conv.SSAType(), val: c.val}
+		}
+	}
+	if u, ok := v.(*SSAUnOp); ok {
+		xc := ssaExtractConst(u.X)
+		if xc == nil {
+			return nil
+		}
+		r := evalUnaryLocal(ssaOpToSyntaxOp(u.Op), xc.val)
+		if r != nil {
+			return &SSAConst{typ: u.SSAType(), val: r}
+		}
+	}
+	if b, ok := v.(*SSABinOp); ok {
+		xc := ssaExtractConst(b.X)
+		yc := ssaExtractConst(b.Y)
+		if xc == nil || yc == nil {
+			return nil
+		}
+		r := evalBinaryLocal(ssaOpToSyntaxOp(b.Op), xc.val, yc.val)
+		if r != nil {
+			return &SSAConst{typ: b.SSAType(), val: r}
 		}
 	}
 	return nil

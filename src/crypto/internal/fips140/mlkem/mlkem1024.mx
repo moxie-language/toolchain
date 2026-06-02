@@ -17,7 +17,7 @@ type DecapsulationKey1024 struct {
 	d [32]byte // decapsulation key seed
 	z [32]byte // implicit rejection sampling seed
 
-	ρ [32]byte // sampleNTT seed for A, stored for the encapsulation key
+	rho [32]byte // sampleNTT seed for A, stored for the encapsulation key
 	h [32]byte // H(ek), stored for ML-KEM.Decaps_internal
 
 	encryptionKey1024
@@ -47,11 +47,11 @@ func TestingOnlyExpandedBytes1024(dk *DecapsulationKey1024) []byte {
 		b = polyByteEncode(b, dk.s[i])
 	}
 
-	// ByteEncode₁₂(t) || ρ
+	// ByteEncode₁₂(t) || rho
 	for i := range dk.t {
 		b = polyByteEncode(b, dk.t[i])
 	}
-	b = append(b, dk.ρ[:]...)
+	b = append(b, dk.rho[:]...)
 
 	// H(ek) || z
 	b = append(b, dk.h[:]...)
@@ -64,7 +64,7 @@ func TestingOnlyExpandedBytes1024(dk *DecapsulationKey1024) []byte {
 // ciphertexts.
 func (dk *DecapsulationKey1024) EncapsulationKey() *EncapsulationKey1024 {
 	return &EncapsulationKey1024{
-		ρ:                 dk.ρ,
+		rho:                 dk.rho,
 		h:                 dk.h,
 		encryptionKey1024: dk.encryptionKey1024,
 	}
@@ -73,7 +73,7 @@ func (dk *DecapsulationKey1024) EncapsulationKey() *EncapsulationKey1024 {
 // An EncapsulationKey1024 is the public key used to produce ciphertexts to be
 // decapsulated by the corresponding [DecapsulationKey1024].
 type EncapsulationKey1024 struct {
-	ρ [32]byte // sampleNTT seed for A
+	rho [32]byte // sampleNTT seed for A
 	h [32]byte // H(ek)
 	encryptionKey1024
 }
@@ -89,14 +89,14 @@ func (ek *EncapsulationKey1024) bytes(b []byte) []byte {
 	for i := range ek.t {
 		b = polyByteEncode(b, ek.t[i])
 	}
-	b = append(b, ek.ρ[:]...)
+	b = append(b, ek.rho[:]...)
 	return b
 }
 
 // encryptionKey1024 is the parsed and expanded form of a PKE encryption key.
 type encryptionKey1024 struct {
 	t [k1024]nttElement         // ByteDecode₁₂(ek[:384k])
-	a [k1024 * k1024]nttElement // A[i*k+j] = sampleNTT(ρ, j, i)
+	a [k1024 * k1024]nttElement // A[i*k+j] = sampleNTT(rho, j, i)
 }
 
 // decryptionKey1024 is the parsed and expanded form of a PKE decryption key.
@@ -176,7 +176,7 @@ func TestingOnlyNewDecapsulationKey1024(b []byte) (*DecapsulationKey1024, error)
 	if err != nil {
 		return nil, err
 	}
-	dk.ρ = ek.ρ
+	dk.rho = ek.rho
 	dk.h = ek.h
 	dk.encryptionKey1024 = ek.encryptionKey1024
 	b = b[EncapsulationKeySize1024:]
@@ -210,25 +210,25 @@ func kemKeyGen1024(dk *DecapsulationKey1024, d, z *[32]byte) {
 	g.Write(d[:])
 	g.Write([]byte{k1024}) // Module dimension as a domain separator.
 	G := g.Sum([]byte{:0:64})
-	ρ, σ := G[:32], G[32:]
-	dk.ρ = [32]byte(ρ)
+	rho, sigma := G[:32], G[32:]
+	dk.rho = [32]byte(rho)
 
 	A := &dk.a
 	for i := byte(0); i < k1024; i++ {
 		for j := byte(0); j < k1024; j++ {
-			A[i*k1024+j] = sampleNTT(ρ, j, i)
+			A[i*k1024+j] = sampleNTT(rho, j, i)
 		}
 	}
 
 	var N byte
 	s := &dk.s
 	for i := range s {
-		s[i] = ntt(samplePolyCBD(σ, N))
+		s[i] = ntt(samplePolyCBD(sigma, N))
 		N++
 	}
 	e := []nttElement{:k1024}
 	for i := range e {
-		e[i] = ntt(samplePolyCBD(σ, N))
+		e[i] = ntt(samplePolyCBD(sigma, N))
 		N++
 	}
 
@@ -335,11 +335,11 @@ func parseEK1024(ek *EncapsulationKey1024, ekPKE []byte) (*EncapsulationKey1024,
 		}
 		ekPKE = ekPKE[encodingSize12:]
 	}
-	copy(ek.ρ[:], ekPKE)
+	copy(ek.rho[:], ekPKE)
 
 	for i := byte(0); i < k1024; i++ {
 		for j := byte(0); j < k1024; j++ {
-			ek.a[i*k1024+j] = sampleNTT(ek.ρ[:], j, i)
+			ek.a[i*k1024+j] = sampleNTT(ek.rho[:], j, i)
 		}
 	}
 

@@ -1323,58 +1323,29 @@ hasUnicode:
 // Index returns the index of the first instance of sep in s, or -1 if sep is not present in s.
 func Index(s, sep []byte) int32 {
 	n := len(sep)
-	switch {
-	case n == 0:
+	if n == 0 {
 		return 0
-	case n == 1:
+	}
+	if n == 1 {
 		return IndexByte(s, sep[0])
-	case n == len(s):
+	}
+	if n == len(s) {
 		if Equal(sep, s) {
 			return 0
 		}
 		return -1
-	case n > len(s):
-		return -1
-	case n <= bytealg.MaxLen:
-		// Use brute force when s and sep both are small
-		if len(s) <= bytealg.MaxBruteForce {
-			return bytealg.Index(s, sep)
-		}
-		c0 := sep[0]
-		c1 := sep[1]
-		i := 0
-		t := len(s) - n + 1
-		fails := 0
-		for i < t {
-			if s[i] != c0 {
-				// IndexByte is faster than bytealg.Index, so use it as long as
-				// we're not getting lots of false positives.
-				o := IndexByte(s[i+1:t], c0)
-				if o < 0 {
-					return -1
-				}
-				i += o + 1
-			}
-			if s[i+1] == c1 && Equal(s[i:i+n], sep) {
-				return i
-			}
-			fails++
-			i++
-			// Switch to bytealg.Index when IndexByte produces too many false positives.
-			if fails > bytealg.Cutover(i) {
-				r := bytealg.Index(s[i:], sep)
-				if r >= 0 {
-					return r + i
-				}
-				return -1
-			}
-		}
+	}
+	if n > len(s) {
 		return -1
 	}
+	return indexBrute(s, sep, n)
+}
+
+func indexBrute(s, sep []byte, n int32) int32 {
 	c0 := sep[0]
 	c1 := sep[1]
-	i := 0
-	fails := 0
+	i := int32(0)
+	fails := int32(0)
 	t := len(s) - n + 1
 	for i < t {
 		if s[i] != c0 {
@@ -1390,14 +1361,6 @@ func Index(s, sep []byte) int32 {
 		i++
 		fails++
 		if fails >= 4+i>>4 && i < t {
-			// Give up on IndexByte, it isn't skipping ahead
-			// far enough to be better than Rabin-Karp.
-			// Experiments (using IndexPeriodic) suggest
-			// the cutover is about 16 byte skips.
-			// TODO: if large prefixes of sep are matching
-			// we should cutover at even larger average skips,
-			// because Equal becomes that much more expensive.
-			// This code does not take that effect into account.
 			j := bytealg.IndexRabinKarp(s[i:], sep)
 			if j < 0 {
 				return -1
