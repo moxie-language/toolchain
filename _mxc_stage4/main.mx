@@ -263,7 +263,7 @@ func getMoxiePath() string {
 	return joinPath(home, "moxie")
 }
 
-func mxcVersion() string { return "1.8.1" }
+func mxcVersion() string { return "1.8.2" }
 
 func moxieCacheDir() string {
 	return joinPath(joinPath(getMoxiePath(), "cache"), "mxc-" | mxcVersion())
@@ -1238,6 +1238,8 @@ func addPtrMethod(pkg *TCPackage, named *Named, name, sigDesc string) {
 	} else {
 		sig = parseSignatureDesc(sigDesc)
 	}
+	recvType := NewPointer(named)
+	sig = NewSignature(NewTCVar(pkg, "", recvType), sig.Params(), sig.Results(), sig.Variadic())
 	fn := NewTCFunc(pkg, name, sig)
 	fn.hasPtrRecv = true
 	named.AddMethod(fn)
@@ -1361,19 +1363,31 @@ func generateMxh(pkg *TCPackage) string {
 		case *TypeName:
 			typ := v.Type()
 			if named, ok := typ.(*Named); ok {
-				ud := ""
-				if named.underlying != nil {
-					ud = typeDescStr(named.underlying)
-				}
-				out = out | "type " | objName | " " | ud | "\n"
-				for _, m := range named.methods {
-					ptrRecv := "0"
-					if m.hasPtrRecv {
-						ptrRecv = "1"
+				if ui, ok2 := named.underlying.(*TCInterface); ok2 && !ui.IsEmpty() {
+					var methods string
+					for mi := int32(0); mi < ui.NumMethods(); mi++ {
+						m := ui.Method(mi)
+						if mi > 0 {
+							methods = methods | ";"
+						}
+						methods = methods | m.name | "=" | sigDescStr(m.sig)
 					}
-					msig := m.Signature()
-					if msig != nil {
-						out = out | "method " | objName | " " | m.Name() | " " | sigDescStr(msig) | " " | ptrRecv | "\n"
+					out = out | "iface " | objName | " " | methods | "\n"
+				} else {
+					ud := ""
+					if named.underlying != nil {
+						ud = typeDescStr(named.underlying)
+					}
+					out = out | "type " | objName | " " | ud | "\n"
+					for _, m := range named.methods {
+						ptrRecv := "0"
+						if m.hasPtrRecv {
+							ptrRecv = "1"
+						}
+						msig := m.Signature()
+						if msig != nil {
+							out = out | "method " | objName | " " | m.Name() | " " | sigDescStr(msig) | " " | ptrRecv | "\n"
+						}
 					}
 				}
 			} else if iface, ok := typ.(*TCInterface); ok {
@@ -1444,7 +1458,27 @@ func loadMxh(path string) bool {
 				typ := parseTypeDesc(parts[1])
 				var val ConstVal
 				if len(parts) >= 3 {
-					val = constStr{parts[2]}
+					rest := parts[2]
+					for k := int32(3); k < int32(len(parts)); k++ {
+						rest = rest | " " | parts[k]
+					}
+					isNum := true
+					for ci := int32(0); ci < int32(len(rest)); ci++ {
+						ch := rest[ci]
+						if !((ch >= '0' && ch <= '9') || ch == '-' || ch == '+' || ch == 'x' || ch == 'X' || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
+							isNum = false
+							break
+						}
+					}
+					if isNum {
+						n := ssaParseInt64(rest)
+						val = constInt{n}
+					} else {
+						val = constStr{rest}
+						if b, ok := typ.(*Basic); ok && b.kind != TCString && b.kind != UntypedString {
+							typ = Typ[TCString]
+						}
+					}
 				} else {
 					val = constInt{0}
 				}
@@ -1478,6 +1512,11 @@ func loadMxh(path string) bool {
 					if tn, ok := obj.(*TypeName); ok {
 						if named, ok := tn.typ.(*Named); ok {
 							sig := parseSignatureDesc(sigDesc)
+							var recvType Type = named
+							if ptrRecv {
+								recvType = NewPointer(named)
+							}
+							sig = NewSignature(NewTCVar(pkg, "", recvType), sig.Params(), sig.Results(), sig.Variadic())
 							fn := NewTCFunc(pkg, methodName, sig)
 							fn.hasPtrRecv = ptrRecv
 							named.AddMethod(fn)
@@ -1767,6 +1806,14 @@ func main() {
 			writeStr(2, "\n")
 			loadMxh(cachedMxh)
 			allBcFiles = append(allBcFiles, cached)
+			for _, cf := range pkg.cfiles {
+				cPath := joinPath(pkg.dir, cf)
+				cbcFile := joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
+				rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+				if rc == 0 {
+					allBcFiles = append(allBcFiles, cbcFile)
+				}
+			}
 			for _, bf := range pkg.bcfiles {
 				allBcFiles = append(allBcFiles, joinPath(pkg.dir, bf))
 			}

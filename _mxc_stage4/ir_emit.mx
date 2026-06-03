@@ -1954,6 +1954,19 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 		if !isSig2 && !isIfce2 && u2 == nil && lt == "{ptr, ptr}" {
 			isIfce2 = true
 		}
+		if !isSig2 && !isIfce2 && b.Y != nil && b.Y.SSAType() != nil {
+			u2y := safeUnderlying(b.Y.SSAType())
+			_, isIfce2y := u2y.(*TCInterface)
+			if isIfce2y {
+				isIfce2 = true
+			}
+		}
+		if !isSig2 && !isIfce2 && lt == "ptr" && b.Y != nil && b.Y.SSAType() != nil {
+			rt2c := e.llvmType(b.Y.SSAType())
+			if rt2c == "{ptr, ptr}" {
+				isIfce2 = true
+			}
+		}
 		if isSig2 || isIfce2 {
 			nilField := "0"
 			if isSig2 {
@@ -2529,6 +2542,8 @@ func (e *irEmitter) emitStructCompare(reg string, op SSAOp, st *TCStruct, lt, lv
 			sty := e.sliceType()
 			e.w("  ") ; e.w(cmp) ; e.w(" = call i1 @runtime.stringEqual(") ; e.w(sty) ; e.w(" ") ; e.w(lf) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rf) ; e.w(")\n")
 			e.declareRuntime("runtime.stringEqual", "i1", sty | ", " | sty)
+		} else if subst, ok := safeUnderlying(st.Field(i).Type()).(*TCStruct); ok && len(ft) > 0 && ft[0] == '{' {
+			e.emitStructCompare(cmp, OpEql, subst, ft, lf, rf)
 		} else {
 			e.w("  ") ; e.w(cmp) ; e.w(" = icmp eq ") ; e.w(ft) ; e.w(" ") ; e.w(lf) ; e.w(", ") ; e.w(rf) ; e.w("\n")
 		}
@@ -3828,6 +3843,15 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 		}
 		e.w("  ") ; e.w(reg) ; e.w(" = call ") ; e.w(e.sliceType()) ; e.w(" @runtime.stringFromUnicode(i32 ") ; e.w(srcVal) ; e.w(", ptr null)\n")
 		return
+	}
+
+	if _, slOK := safeUnderlying(c.X.SSAType()).(*Slice); slOK {
+		if _, arOK := safeUnderlying(c.SSAType()).(*Array); arOK {
+			dp := e.nextReg2("cv")
+			e.w("  ") ; e.w(dp) ; e.w(" = extractvalue ") ; e.w(srcType) ; e.w(" ") ; e.w(val) ; e.w(", 0\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(dstType) ; e.w(", ptr ") ; e.w(dp) ; e.w("\n")
+			return
+		}
 	}
 
 	op := e.conversionOp(c.X.SSAType(), c.SSAType())

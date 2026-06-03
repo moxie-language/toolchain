@@ -2473,6 +2473,13 @@ func (fb *ssaFuncBuilder) buildArgs(argList []Expr) []SSAValue {
 func (fb *ssaFuncBuilder) buildBuiltinCall(e *CallExpr, b *SSABuiltin, args []SSAValue) SSAValue {
 	switch b.id {
 	case BuiltinLen, BuiltinCap:
+		if b.id == BuiltinLen && len(args) == 1 {
+			if c, ok := args[0].(*SSAConst); ok {
+				if cs, ok2 := c.val.(constStr); ok2 {
+					return &SSAConst{typ: Typ[Int32], val: constInt{int64(len(cs.s))}}
+				}
+			}
+		}
 		call := &SSACall{Call: SSACallCommon{Value: b, Args: args}}
 		call.typ = Typ[Int32]
 		call.name = fb.nextName()
@@ -3361,7 +3368,9 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *SelectorExpr, recv SSAV
 		isPtr = true
 	}
 	if _, ok := safeUnderlying(typ).(*TCInterface); ok {
-		return nil, nil
+		if named2, ok2 := typ.(*Named); !ok2 || named2.NumMethods() == 0 {
+			return nil, nil
+		}
 	}
 	// Handle Basic types (builtin stringers in runtime package)
 	if basic, ok2 := typ.(*Basic); ok2 {
