@@ -50,7 +50,7 @@ const (
 const ErrTooLarge = errors.Const("bytes.Buffer: too large")
 const errNegativeRead = errors.Const("bytes.Buffer: reader returned negative count from Read")
 
-const maxInt = int32(^uint32(0) >> 1)
+const maxInt = int32(2147483647)
 
 // Bytes returns a slice of length b.Len() holding the unread portion of the buffer.
 // The slice is valid for use only until the next buffer modification (that is,
@@ -230,26 +230,12 @@ func (b *Buffer) ReadFrom(r io.Reader) (n int64, err error) {
 	}
 }
 
-// growSlice grows b by n, preserving the original content of b.
-// If the allocation fails, it panics with ErrTooLarge.
 func growSlice(b []byte, n int32) []byte {
-	defer func() {
-		if recover() != nil {
-			panic(ErrTooLarge)
-		}
-	}()
-	// TODO(http://golang.org/issue/51462): We should rely on the append-make
-	// pattern so that the compiler can call runtime.growslice. For example:
-	//	return append(b, make([]byte, n)...)
-	// This avoids unnecessary zero-ing of the first len(b) bytes of the
-	// allocated slice, but this pattern causes b to escape onto the heap.
-	//
-	// Instead use the append-make pattern with a nil slice to ensure that
-	// we allocate buffers rounded up to the closest size class.
-	c := len(b) + n // ensure enough space for n elements
+	c := len(b) + n
+	if c < 0 {
+		panic(ErrTooLarge)
+	}
 	if c < 2*cap(b) {
-		// The growth rate has historically always been 2x. In the future,
-		// we could rely purely on append to determine the growth rate.
 		c = 2 * cap(b)
 	}
 	b2 := append([]byte(nil), []byte{:c}...)

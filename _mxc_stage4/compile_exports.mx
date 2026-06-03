@@ -83,7 +83,10 @@ func moxie_register_func(pkgPathPtr unsafe.Pointer, pkgPathLen int32, namePtr un
 	if pkg == nil {
 		return
 	}
+	old := parseTypePkgScope
+	parseTypePkgScope = pkg.Scope()
 	sig := parseSignatureDesc(sigDesc)
+	parseTypePkgScope = old
 	pkg.Scope().Insert(NewTCFunc(pkg, name, sig))
 }
 
@@ -213,7 +216,10 @@ func moxie_register_method(pkgPathPtr unsafe.Pointer, pkgPathLen int32, typeName
 	if !ok {
 		return
 	}
+	old := parseTypePkgScope
+	parseTypePkgScope = pkg.Scope()
 	sig := parseSignatureDesc(sigDesc)
+	parseTypePkgScope = old
 	var recvType Type = named
 	if ptrRecv != 0 {
 		recvType = NewPointer(named)
@@ -281,6 +287,8 @@ func parseTypeDesc(desc string) Type {
 		errorIface := NewTCInterface([]*IfaceMethod{NewTCIfaceMethod("Error", errorSig)}, nil)
 		errorIface.Complete()
 		return errorIface
+	case "struct":
+		return NewTCStruct(nil, nil)
 	case "interface{}":
 		emptyIface := NewTCInterface(nil, nil)
 		emptyIface.Complete()
@@ -295,6 +303,24 @@ func parseTypeDesc(desc string) Type {
 	}
 	if len(desc) > 1 && desc[0] == '*' {
 		return NewPointer(parseTypeDesc(desc[1:]))
+	}
+	dotIdx := int32(-1)
+	for i := int32(len(desc)) - 1; i >= 0; i-- {
+		if desc[i] == '.' {
+			dotIdx = i
+			break
+		}
+	}
+	if dotIdx > 0 {
+		pkgPath := desc[:dotIdx]
+		typeName := desc[dotIdx+1:]
+		ensureImportRegistry()
+		if extPkg, ok := importRegistry[pkgPath]; ok {
+			obj := extPkg.Scope().Lookup(typeName)
+			if tn, ok := obj.(*TypeName); ok && tn.Type() != nil {
+				return tn.Type()
+			}
+		}
 	}
 	if parseTypePkgScope != nil {
 		obj := parseTypePkgScope.Lookup(desc)

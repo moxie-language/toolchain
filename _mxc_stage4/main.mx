@@ -263,7 +263,7 @@ func getMoxiePath() string {
 	return joinPath(home, "moxie")
 }
 
-func mxcVersion() string { return "1.8.3" }
+func mxcVersion() string { return "1.8.4" }
 
 func moxieCacheDir() string {
 	return joinPath(joinPath(getMoxiePath(), "cache"), "mxc-" | mxcVersion())
@@ -921,10 +921,13 @@ func concatSources(dir string, files []string) []byte {
 		}
 		out = append(out, ")\n"...)
 	}
-	for _, b := range bodies {
+	for i, b := range bodies {
 		out = append(out, b...)
 		out = append(out, '\n')
+		bodies[i] = nil // replace with free()
 	}
+	bodies = nil // replace with free()
+	imports = nil // replace with free()
 	return out
 }
 
@@ -959,13 +962,6 @@ func shouldSkipFile(name string) bool {
 	suffixSkip := []string{"_wasm"}
 	for _, s := range suffixSkip {
 		if hasSuffix(base, s) {
-			return true
-		}
-	}
-	exact := []string{"pipe", "multi", "scan", "reader", "replace", "search",
-		"ioutil"}
-	for _, s := range exact {
-		if base == s {
 			return true
 		}
 	}
@@ -1113,15 +1109,15 @@ func discoverPkg(pkgPath, root string) *pkgInfo {
 			continue
 		}
 		fileImps := extractImports(data)
-		skipIter := false
+		skipFile := ""
 		for _, imp := range fileImps {
-			if imp == "iter" {
-				skipIter = true
+			if imp == "iter" || imp == "math/big" {
+				skipFile = imp
 				break
 			}
 		}
-		if skipIter {
-			writeStr(2, "    skip-iter-import: " | f | "\n")
+		if skipFile != "" {
+			writeStr(2, "    skip-import(" | skipFile | "): " | f | "\n")
 			continue
 		}
 		writeStr(2, "    include: " | f | "\n")
@@ -1257,6 +1253,8 @@ func compileSource(src []byte, pkgName, triple string) string {
 	return ir
 }
 
+var typeDescPkgPath string
+
 func typeDescStr(t Type) string {
 	if t == nil {
 		return "interface{}"
@@ -1296,6 +1294,8 @@ func typeDescStr(t Type) string {
 		return "[]" | typeDescStr(v.Elem())
 	case *Pointer:
 		return "*" | typeDescStr(v.Elem())
+	case *TCStruct:
+		return "struct"
 	case *TCInterface:
 		if v.IsEmpty() {
 			return "interface{}"
@@ -1303,6 +1303,9 @@ func typeDescStr(t Type) string {
 		return "interface{}"
 	case *Named:
 		if v.obj != nil {
+			if typeDescPkgPath != "" && v.obj.pkg != nil && v.obj.pkg.Path() != typeDescPkgPath {
+				return v.obj.pkg.Path() | "." | v.obj.name
+			}
 			return v.obj.name
 		}
 		return typeDescStr(v.underlying)
@@ -1335,15 +1338,28 @@ func sigDescStr(sig *Signature) string {
 func generateMxh(pkg *TCPackage) string {
 	path := pkg.Path()
 	name := pkg.Name()
+	typeDescPkgPath = path
 	var out string
 	out = "package " | path | " " | name | "\n"
 	for _, objName := range pkg.Scope().Names() {
-		if len(objName) == 0 || objName[0] < 'A' || objName[0] > 'Z' {
+		if len(objName) == 0 {
 			continue
 		}
+		exported := objName[0] >= 'A' && objName[0] <= 'Z'
 		obj := pkg.Scope().Lookup(objName)
 		if obj == nil {
 			continue
+		}
+		if !exported {
+			if tn, ok := obj.(*TypeName); ok {
+				if named, ok2 := tn.typ.(*Named); ok2 && named.NumMethods() > 0 {
+					// include unexported types with methods for interface dispatch
+				} else {
+					continue
+				}
+			} else {
+				continue
+			}
 		}
 		switch v := obj.(type) {
 		case *TCFunc:
@@ -1435,6 +1451,9 @@ func loadMxh(path string) bool {
 	pkgName := rest[spaceIdx+1:]
 	pkg := NewTCPackage(pkgPath, pkgName)
 
+	oldScope := parseTypePkgScope
+	parseTypePkgScope = pkg.Scope()
+
 	for li := 1; li < len(lines); li++ {
 		line := lines[li]
 		if hasPrefix(line, "func ") {
@@ -1474,9 +1493,10 @@ func loadMxh(path string) bool {
 						n := ssaParseInt64(rest)
 						val = constInt{n}
 					} else {
-						val = constStr{rest}
-						if b, ok := typ.(*Basic); ok && b.kind != TCString && b.kind != UntypedString {
-							typ = Typ[TCString]
+						if b, ok := typ.(*Basic); ok && (b.kind == TCString || b.kind == UntypedString) {
+							val = constStr{rest}
+						} else {
+							val = constInt{0}
 						}
 					}
 				} else {
@@ -1559,6 +1579,9 @@ func loadMxh(path string) bool {
 		}
 	}
 
+	parseTypePkgScope = oldScope
+	data = nil // replace with free()
+	lines = nil // replace with free()
 	importRegistry[pkgPath] = pkg
 	return true
 }
@@ -1661,7 +1684,7 @@ func cmdUpdate(rebuildAll bool) {
 			continue
 		}
 		compilePath := pkg.path
-		if hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
 		src := concatSources(pkg.dir, pkg.files)
@@ -1791,7 +1814,24 @@ func main() {
 
 	for _, pkg := range pkgs {
 		compilePath := pkg.path
-		if hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+			compilePath = pkg.name
+		}
+		hash := pkgCacheKey(pkg.dir, pkg.files)
+		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+		_, mxhOk := readFile(cachedMxh)
+		if mxhOk && !forceRebuild {
+			loadMxh(cachedMxh)
+		} else {
+			src := concatSources(pkg.dir, pkg.files)
+			TypeCheckOnly(src, compilePath)
+			src = nil
+		}
+	}
+
+	for _, pkg := range pkgs {
+		compilePath := pkg.path
+		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
 
@@ -1913,7 +1953,7 @@ func main() {
 	var initCalls string
 	for _, pkg := range pkgs {
 		compilePath := pkg.path
-		if hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
 		if compilePath == "main" {
@@ -1926,7 +1966,7 @@ func main() {
 	declared := map[string]bool{}
 	for _, pkg := range pkgs {
 		compilePath := pkg.path
-		if hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
 		if compilePath == "main" {

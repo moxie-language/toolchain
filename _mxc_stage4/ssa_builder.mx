@@ -1382,9 +1382,25 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *ForStmt, rc *RangeClause) {
 	fb.currentBlock = condBlock
 	iterSSAType := iterExpr.SSAType()
 	if iterSSAType == nil {
-		tv := rc.X.GetTypeInfo()
-		if tv.Type != nil {
-			iterSSAType = tv.Type
+		switch x := rc.X.(type) {
+		case *SelectorExpr:
+			if x != nil {
+				tv := x.GetTypeInfo()
+				if tv.Type != nil {
+					iterSSAType = tv.Type
+				}
+			}
+		case *Name:
+			if x != nil {
+				tv := x.GetTypeInfo()
+				if tv.Type != nil {
+					iterSSAType = tv.Type
+				}
+			}
+		}
+		if iterSSAType == nil {
+			writeStr(2, "WARN: unresolved range type in " | fb.fn.Pkg.Pkg.Path() | "." | fb.fn.name | "\n")
+			return
 		}
 	}
 	nxt := &SSANext{Iter: r, IsString: ssaIsStringType(iterSSAType)}
@@ -2885,11 +2901,12 @@ func (fb *ssaFuncBuilder) buildIndex(e *IndexExpr) SSAValue {
 		fb.emit(l)
 		return l
 	default:
+		et := ssaElemType(x.SSAType())
 		ia := &SSAIndexAddr{X: x, Index: idx}
-		ia.typ = NewPointer(ssaElemType(x.SSAType()))
+		ia.typ = NewPointer(et)
 		ia.name = fb.nextName()
 		fb.emit(ia)
-		return fb.emitLoad(ia, ssaElemType(x.SSAType()))
+		return fb.emitLoad(ia, et)
 	}
 }
 
@@ -3362,6 +3379,9 @@ func (fb *ssaFuncBuilder) lookupVar(name string) *TCVar {
 
 func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *SelectorExpr, recv SSAValue) (*SSAFunction, SSAValue) {
 	typ := recv.SSAType()
+	if typ == nil {
+		return nil, nil
+	}
 	isPtr := false
 	if p, ok := safeUnderlying(typ).(*Pointer); ok {
 		typ = p.Elem()
@@ -3420,16 +3440,26 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *SelectorExpr, recv SSAV
 	if typeName == "" {
 		return nil, nil
 	}
+	namedPkgPath := ""
+	if named.Obj() != nil && named.Obj().Pkg() != nil {
+		namedPkgPath = named.Obj().Pkg().Path()
+	}
+	samePackage := namedPkgPath != "" && namedPkgPath == fb.fn.Pkg.Pkg.Path()
 	mangledName := typeName | "." | sel.Sel.Value
-	fn, _ := fb.fn.Pkg.Members[mangledName].(*SSAFunction)
+	if !samePackage && namedPkgPath != "" {
+		mangledName = namedPkgPath | "." | typeName | "." | sel.Sel.Value
+	}
+	var fn *SSAFunction
+	if samePackage {
+		fn, _ = fb.fn.Pkg.Members[mangledName].(*SSAFunction)
+	}
 	if fn == nil {
 		for i := 0; i < named.NumMethods(); i++ {
 			m := named.Method(i)
 			if m.Name() == sel.Sel.Value {
 				fn = fb.fn.Pkg.ExternalFunc(mangledName, m.Signature())
-				if named.Obj() != nil && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() != fb.fn.Pkg.Pkg.Path() {
-					pkgPath := named.Obj().Pkg().Path()
-					fn.externalSymbol = pkgPath | "." | typeName | "." | sel.Sel.Value
+				if !samePackage && namedPkgPath != "" {
+					fn.externalSymbol = namedPkgPath | "." | typeName | "." | sel.Sel.Value
 				} else if named.Obj() != nil && named.Obj().Pkg() == nil {
 					fn.externalSymbol = "runtime." | mangledName
 				}
@@ -3509,8 +3539,27 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *SelectorExpr, recv SSAV
 			continue
 		}
 		embedName := embedNamed.Obj().Name()
+		embedSamePkg := embedNamed.Obj().Pkg() != nil && embedNamed.Obj().Pkg().Path() == fb.fn.Pkg.Pkg.Path()
 		embedMangledName := embedName | "." | sel.Sel.Value
-		embedFn, _ := fb.fn.Pkg.Members[embedMangledName].(*SSAFunction)
+		if !embedSamePkg && embedNamed.Obj().Pkg() != nil {
+			embedMangledName = embedNamed.Obj().Pkg().Path() | "." | embedName | "." | sel.Sel.Value
+		}
+		var embedFn *SSAFunction
+		if embedSamePkg {
+			embedFn, _ = fb.fn.Pkg.Members[embedMangledName].(*SSAFunction)
+		}
+		if embedFn == nil {
+			for mi := int32(0); mi < int32(embedNamed.NumMethods()); mi++ {
+				m := embedNamed.Method(int32(mi))
+				if m.Name() == sel.Sel.Value {
+					embedFn = fb.fn.Pkg.ExternalFunc(embedMangledName, m.Signature())
+					if !embedSamePkg && embedNamed.Obj().Pkg() != nil {
+						embedFn.externalSymbol = embedNamed.Obj().Pkg().Path() | "." | embedName | "." | sel.Sel.Value
+					}
+					break
+				}
+			}
+		}
 		if embedFn != nil {
 			fieldAddr := &SSAFieldAddr{
 				X:     recv,
@@ -3549,8 +3598,27 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *SelectorExpr, recv SSAV
 				continue
 			}
 			embed2Name := embed2Named.Obj().Name()
+			embed2SamePkg := embed2Named.Obj().Pkg() != nil && embed2Named.Obj().Pkg().Path() == fb.fn.Pkg.Pkg.Path()
 			embed2Mangled := embed2Name | "." | sel.Sel.Value
-			embed2Fn, _ := fb.fn.Pkg.Members[embed2Mangled].(*SSAFunction)
+			if !embed2SamePkg && embed2Named.Obj().Pkg() != nil {
+				embed2Mangled = embed2Named.Obj().Pkg().Path() | "." | embed2Name | "." | sel.Sel.Value
+			}
+			var embed2Fn *SSAFunction
+			if embed2SamePkg {
+				embed2Fn, _ = fb.fn.Pkg.Members[embed2Mangled].(*SSAFunction)
+			}
+			if embed2Fn == nil {
+				for mi := int32(0); mi < int32(embed2Named.NumMethods()); mi++ {
+					m := embed2Named.Method(int32(mi))
+					if m.Name() == sel.Sel.Value {
+						embed2Fn = fb.fn.Pkg.ExternalFunc(embed2Mangled, m.Signature())
+						if !embed2SamePkg && embed2Named.Obj().Pkg() != nil {
+							embed2Fn.externalSymbol = embed2Named.Obj().Pkg().Path() | "." | embed2Name | "." | sel.Sel.Value
+						}
+						break
+					}
+				}
+			}
 			if embed2Fn == nil {
 				continue
 			}

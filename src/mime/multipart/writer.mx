@@ -8,11 +8,8 @@ import (
 	"bytes"
 	"crypto/rand"
 	"errors"
-	"fmt"
 	"io"
-	"maps"
 	"net/textproto"
-	"slices"
 )
 
 // A Writer generates multipart messages.
@@ -82,12 +79,17 @@ func (w *Writer) FormDataContentType() []byte {
 }
 
 func randomBoundary() []byte {
-	var buf [30]byte
-	_, err := io.ReadFull(rand.Reader(), buf[:])
+	buf := []byte{:30}
+	_, err := io.ReadFull(rand.Reader(), buf)
 	if err != nil {
 		panic(err)
 	}
-	return fmt.Sprintf("%x", buf[:])
+	const hex = "0123456789abcdef"
+	out := []byte{:0:60}
+	for _, b := range buf {
+		out = append(out, hex[b>>4], hex[b&0x0f])
+	}
+	return out
 }
 
 // CreatePart creates a new multipart section with the provided
@@ -102,17 +104,33 @@ func (w *Writer) CreatePart(header textproto.MIMEHeader) (io.Writer, error) {
 	}
 	var b bytes.Buffer
 	if w.lastpart != nil {
-		fmt.Fprintf(&b, "\r\n--%s\r\n", w.boundary)
+		b.WriteString("\r\n--")
+		b.WriteString(w.boundary)
+		b.WriteString("\r\n")
 	} else {
-		fmt.Fprintf(&b, "--%s\r\n", w.boundary)
+		b.WriteString("--")
+		b.WriteString(w.boundary)
+		b.WriteString("\r\n")
 	}
 
-	for _, k := range slices.Sorted(maps.Keys(header)) {
-		for _, v := range header[k] {
-			fmt.Fprintf(&b, "%s: %s\r\n", k, v)
+	keys := []string{:0:len(header)}
+	for k := range header {
+		keys = append(keys, k)
+	}
+	for i := 1; i < len(keys); i++ {
+		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
+			keys[j], keys[j-1] = keys[j-1], keys[j]
 		}
 	}
-	fmt.Fprintf(&b, "\r\n")
+	for _, k := range keys {
+		for _, v := range header[k] {
+			b.WriteString(k)
+			b.WriteString(": ")
+			b.WriteString(v)
+			b.WriteString("\r\n")
+		}
+	}
+	b.WriteString("\r\n")
 	_, err := io.Copy(w.w, &b)
 	if err != nil {
 		return nil, err
@@ -142,15 +160,14 @@ func (w *Writer) CreateFormFile(fieldname, filename []byte) (io.Writer, error) {
 func (w *Writer) CreateFormField(fieldname []byte) (io.Writer, error) {
 	h := textproto.MIMEHeader{}
 	h.Set("Content-Disposition",
-		fmt.Sprintf(`form-data; name="%s"`, escapeQuotes(fieldname)))
+		`form-data; name="` | escapeQuotes(fieldname) | `"`)
 	return w.CreatePart(h)
 }
 
 // FileContentDisposition returns the value of a Content-Disposition header
 // with the provided field name and file name.
 func FileContentDisposition(fieldname, filename []byte) []byte {
-	return fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
-		escapeQuotes(fieldname), escapeQuotes(filename))
+	return `form-data; name="` | escapeQuotes(fieldname) | `"; filename="` | escapeQuotes(filename) | `"`
 }
 
 // WriteField calls [Writer.CreateFormField] and then writes the given value.
@@ -172,7 +189,7 @@ func (w *Writer) Close() error {
 		}
 		w.lastpart = nil
 	}
-	_, err := fmt.Fprintf(w.w, "\r\n--%s--\r\n", w.boundary)
+	_, err := io.WriteString(w.w, "\r\n--" | w.boundary | "--\r\n")
 	return err
 }
 
