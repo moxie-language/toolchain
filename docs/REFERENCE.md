@@ -7,6 +7,9 @@ Programs compile to static native binaries or WebAssembly. Source files use the
 This document specifies the Moxie language. Familiarity with C-family syntax is
 assumed.
 
+For canonical formatting rules and the `moxiefmt` tool, see
+[FORMAT.md](FORMAT.md).
+
 ---
 
 ## Notation
@@ -209,7 +212,13 @@ text and slice concatenation:
 ```moxie
 msg := "hello " | name | "!"
 s |= " suffix"
+combined := sliceA | sliceB
 ```
+
+The `...` token is **only valid in variadic parameter declarations**
+(`func f(args ...T)`). It is not a spread/unpack operator. `append(a, b...)`
+and `f(slice...)` are compile errors. For slice-to-slice concatenation, use
+`a | b`.
 
 ### Integer Literals
 
@@ -1116,7 +1125,7 @@ cleanup:
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `append` | `append(s []T, elems ...T) []T` | Appends elements to a slice |
+| `append` | `append(s []T, elems ...T) []T` | Appends individual elements to a slice. `append(a, b...)` is illegal - use `a \| b` for slice concatenation. |
 | `cap` | `cap(v) int32` | Capacity of a slice, channel, or array |
 | `clear` | `clear(m)` | Clears a map or zeroes a slice |
 | `close` | `close(ch)` | Closes a channel |
@@ -1331,7 +1340,7 @@ that exits unexpectedly is reaped on the next scheduler tick.
 ### WASM Implementation
 
 1. A new Worker is created with an isolated microtask context.
-2. Slices are spread-copied, maps are shallow-copied.
+2. Slices are element-copied, maps are shallow-copied.
 3. Each domain gets its own event loop.
 4. IPC uses `BroadcastChannel` for inter-domain messaging.
 
