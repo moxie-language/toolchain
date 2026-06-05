@@ -1601,6 +1601,108 @@ func removeAll(path string) {
 	os.Remove(path)
 }
 
+func walkStdlibPkgs(srcDir, prefix string, out []string) []string {
+	entries := listFiles(srcDir, "")
+	if entries == nil {
+		return out
+	}
+	mxFiles := listFiles(srcDir, ".mx")
+	if len(mxFiles) > 0 && prefix != "" {
+		out = append(out, prefix)
+	}
+	for _, e := range entries {
+		if e[0] == '.' || e[0] == '_' {
+			continue
+		}
+		sub := joinPath(srcDir, e)
+		subEntries := listFiles(sub, "")
+		if subEntries != nil {
+			var subPrefix string
+			if prefix == "" {
+				subPrefix = e
+			} else {
+				subPrefix = prefix | "/" | e
+			}
+			out = walkStdlibPkgs(sub, subPrefix, out)
+		}
+	}
+	return out
+}
+
+func cmdCacheWarm() {
+	root := getenv("MOXIEROOT")
+	if root == "" {
+		root = "."
+	}
+	srcDir := joinPath(root, "src")
+	writeStr(2, "warming stdlib cache from " | srcDir | " ...\n")
+	pkgPaths := walkStdlibPkgs(srcDir, "", nil)
+	if len(pkgPaths) == 0 {
+		writeStr(2, "  no stdlib packages found\n")
+		return
+	}
+	triple := "x86_64-unknown-linux-musleabihf"
+	clang := "clang-21"
+	tmpdir := "/tmp/mxc-build"
+	mkdirAll(tmpdir, 0755)
+	cacheBase := pkgCacheDir()
+	registerBuiltins()
+	compiled := int32(0)
+	skipped := int32(0)
+	failed := int32(0)
+	for _, pkgPath := range pkgPaths {
+		if isBuiltinOnly(pkgPath) {
+			continue
+		}
+		pkg := discoverPkg(pkgPath, root)
+		if pkg == nil {
+			skipped++
+			continue
+		}
+		hash := pkgCacheKey(pkg.dir, pkg.files)
+		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
+		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+		_, bcOk := readFile(cached)
+		_, mxhOk := readFile(cachedMxh)
+		if bcOk && mxhOk {
+			skipped++
+			continue
+		}
+		compilePath := pkg.path
+		if hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+			compilePath = pkg.name
+		}
+		src := concatSources(pkg.dir, pkg.files)
+		ir := compileSource(src, compilePath, triple)
+		src = nil
+		llFile := joinPath(tmpdir, safeName(pkg.path) | ".ll")
+		writeFile(llFile, []byte(ir), 0644)
+		ir = ""
+		bcFile := joinPath(tmpdir, safeName(pkg.path) | ".bc")
+		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
+		if rc != 0 {
+			writeStr(2, "  FAIL: " | pkg.path | "\n")
+			failed++
+			continue
+		}
+		cdir := joinPath(cacheBase, safeName(pkg.path))
+		mkdirAll(cdir, 0755)
+		data, rok := readFile(bcFile)
+		if rok {
+			writeFile(cached, data, 0644)
+		}
+		data = nil
+		regPkg := importRegistry[compilePath]
+		if regPkg != nil {
+			mxhData := generateMxh(regPkg)
+			writeFile(cachedMxh, []byte(mxhData), 0644)
+		}
+		compiled++
+		writeStr(2, "  " | pkg.path | "\n")
+	}
+	writeStr(2, "warm done: " | simpleItoa(compiled) | " compiled, " | simpleItoa(skipped) | " cached, " | simpleItoa(failed) | " failed\n")
+}
+
 func cacheClean() {
 	base := pkgCacheDir()
 	writeStr(2, "cleaning cache: " | base | "\n")
@@ -1736,7 +1838,11 @@ func main() {
 			cacheClean()
 			return
 		}
-		writeStr(2, "usage: mxc cache clean\n")
+		if len(args) >= 3 && args[2] == "warm" {
+			cmdCacheWarm()
+			return
+		}
+		writeStr(2, "usage: mxc cache <clean|warm>\n")
 		os.Exit(1)
 	}
 	if cmd == "fetch" {
@@ -2028,7 +2134,7 @@ func main() {
 			ldArgs = append(ldArgs, f)
 		}
 	}
-	ldArgs = append(ldArgs, comprtLib, bdwgcLib, muslLib, "--lto-O0", "-z", "stack-size=67108864")
+	ldArgs = append(ldArgs, comprtLib, muslLib, "--lto-O0", "-z", "stack-size=67108864")
 	rc = run(ldArgs)
 	if rc != 0 {
 		fatal("linker failed")

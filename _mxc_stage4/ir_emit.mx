@@ -192,8 +192,11 @@ func (e *irEmitter) llvmType(t Type) string {
 		if t.obj != nil && t.obj.Name() == "error" {
 			return e.ifaceType()
 		}
-		if t.NumMethods() > 0 {
-			return e.ifaceType()
+		u := t.Underlying()
+		if u != nil {
+			if _, isIface := u.(*TCInterface); isIface {
+				return e.ifaceType()
+			}
 		}
 		return "ptr"
 	case *Tuple:
@@ -1987,6 +1990,9 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 			rt2 := "ptr"
 			if b.Y != nil && b.Y.SSAType() != nil {
 				rt2 = e.llvmType(b.Y.SSAType())
+			}
+			if at, ok := e.allocTypes[b.Y]; ok && at != "" {
+				rt2 = at
 			}
 			if lt == "{ptr, ptr}" && rt2 == "ptr" {
 				e.nextReg++
@@ -5273,10 +5279,28 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 	ifaceVal := e.operand(inv.X)
 	retType := e.llvmType(inv.SSAType())
 	isVoid := retType == "void"
+
+	xtype := inv.X.SSAType()
+	concretePtr := false
+	if xtype != nil {
+		u := safeUnderlying(xtype)
+		if u != nil {
+			_, isP := u.(*Pointer)
+			_, isI := u.(*TCInterface)
+			if isP && !isI {
+				concretePtr = true
+			}
+		}
+		}
+
 	tidPtr := e.nextReg2("tid")
-	e.w("  ") ; e.w(tidPtr) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(ifaceVal) ; e.w(", 0\n")
 	valPtr := e.nextReg2("vp")
-	e.w("  ") ; e.w(valPtr) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(ifaceVal) ; e.w(", 1\n")
+	if concretePtr {
+		e.w("  ") ; e.w(valPtr) ; e.w(" = bitcast ptr ") ; e.w(ifaceVal) ; e.w(" to ptr\n")
+	} else {
+		e.w("  ") ; e.w(tidPtr) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(ifaceVal) ; e.w(", 0\n")
+		e.w("  ") ; e.w(valPtr) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(ifaceVal) ; e.w(", 1\n")
+	}
 
 	impls := e.findIfaceImpls(inv.MethodName)
 	for _, impl := range impls {
@@ -6016,6 +6040,16 @@ func (e *irEmitter) constOperand(c *SSAConst) string {
 			}
 			if cf, ok := c.val.(constFloat); ok {
 				return irItoa64(int64(cf.v))
+			}
+			if cs, ok := c.val.(constStr); ok {
+				if len(cs.s) == 0 {
+					return "zeroinitializer"
+				}
+				idx := e.addStringConst(cs.s)
+				ipt := e.intptrType()
+				slen := irItoa64(int64(len(cs.s)))
+				e.allocTypes[c] = e.sliceType()
+				return "{ ptr " | e.strConstGlobal(idx) | ", " | ipt | " " | slen | ", " | ipt | " " | slen | " }"
 			}
 			return c.val.String()
 		case Float32:

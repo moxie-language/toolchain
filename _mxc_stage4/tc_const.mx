@@ -28,6 +28,14 @@ func (c *Checker) checkConstDeclAt(d *ConstDecl, typExpr Expr, valExpr Expr, iot
 		vals = c.evalConstExprList(valExpr, iotaVal)
 	}
 
+	// When no explicit type and the value is a type conversion (CallExpr
+	// with a type name as Fun), infer the type from the conversion target.
+	// e.g. const EOF = errors.Const("EOF") -> type is errors.Const
+	var inferredTypes []Type
+	if typ == nil && valExpr != nil {
+		inferredTypes = c.inferConstTypeList(valExpr)
+	}
+
 	for i, name := range d.NameList {
 		if name.Value == "_" {
 			continue
@@ -43,6 +51,8 @@ func (c *Checker) checkConstDeclAt(d *ConstDecl, typExpr Expr, valExpr Expr, iot
 		obj.val = cv
 		if typ != nil {
 			obj.typ = typ
+		} else if i < len(inferredTypes) && inferredTypes[i] != nil {
+			obj.typ = inferredTypes[i]
 		} else if cv != nil {
 			obj.typ = untypedTypeOfCV(cv)
 		}
@@ -50,6 +60,31 @@ func (c *Checker) checkConstDeclAt(d *ConstDecl, typExpr Expr, valExpr Expr, iot
 			c.info.Defs[name] = obj
 		}
 	}
+}
+
+func (c *Checker) inferConstTypeList(e Expr) []Type {
+	if l, ok := e.(*ListExpr); ok {
+		var out []Type
+		for _, el := range l.ElemList {
+			out = append(out, c.inferConstType(el))
+		}
+		return out
+	}
+	return []Type{c.inferConstType(e)}
+}
+
+func (c *Checker) inferConstType(e Expr) Type {
+	if e == nil {
+		return nil
+	}
+	ce, ok := e.(*CallExpr)
+	if !ok {
+		return nil
+	}
+	if len(ce.ArgList) != 1 {
+		return nil
+	}
+	return c.resolveTypeExpr(ce.Fun)
 }
 
 func (c *Checker) evalConstExprList(e Expr, iotaVal int64) []ConstVal {

@@ -65,6 +65,10 @@ echo "rebuilding package cache with new compiler ..." >&2
 MOXIEROOT="$INSTALL_DIR" LLVM_GLUE_PATH="$INSTALL_DIR/llvm-glue/libmoxie-llvm-glue.so" \
     "$BINDIR/moxie" update --all
 
+echo "warming stdlib cache ..." >&2
+MOXIEROOT="$INSTALL_DIR" LLVM_GLUE_PATH="$INSTALL_DIR/llvm-glue/libmoxie-llvm-glue.so" \
+    "$INSTALL_DIR/bin/moxie" cache warm
+
 echo "" >&2
 echo "done." >&2
 echo "" >&2

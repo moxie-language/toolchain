@@ -3440,9 +3440,27 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *SelectorExpr, recv SSAV
 	if typeName == "" {
 		return nil, nil
 	}
+	resolveNamed := named
+	if resolveNamed.NumMethods() == 0 {
+		cur := Type(resolveNamed)
+		for depth := 0; depth < 10; depth++ {
+			n, ok2 := cur.(*Named)
+			if !ok2 || n == nil { break }
+			if n.NumMethods() > 0 {
+				resolveNamed = n
+				if n.Obj() != nil && n.Obj().Name() != "" {
+					typeName = n.Obj().Name()
+				}
+				break
+			}
+			raw := n.RawUnderlying()
+			if raw == nil || raw == cur { break }
+			cur = raw
+		}
+	}
 	namedPkgPath := ""
-	if named.Obj() != nil && named.Obj().Pkg() != nil {
-		namedPkgPath = named.Obj().Pkg().Path()
+	if resolveNamed.Obj() != nil && resolveNamed.Obj().Pkg() != nil {
+		namedPkgPath = resolveNamed.Obj().Pkg().Path()
 	}
 	samePackage := namedPkgPath != "" && namedPkgPath == fb.fn.Pkg.Pkg.Path()
 	mangledName := typeName | "." | sel.Sel.Value
@@ -3454,13 +3472,13 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *SelectorExpr, recv SSAV
 		fn, _ = fb.fn.Pkg.Members[mangledName].(*SSAFunction)
 	}
 	if fn == nil {
-		for i := 0; i < named.NumMethods(); i++ {
-			m := named.Method(i)
+		for i := 0; i < resolveNamed.NumMethods(); i++ {
+			m := resolveNamed.Method(i)
 			if m.Name() == sel.Sel.Value {
 				fn = fb.fn.Pkg.ExternalFunc(mangledName, m.Signature())
 				if !samePackage && namedPkgPath != "" {
 					fn.externalSymbol = namedPkgPath | "." | typeName | "." | sel.Sel.Value
-				} else if named.Obj() != nil && named.Obj().Pkg() == nil {
+				} else if resolveNamed.Obj() != nil && resolveNamed.Obj().Pkg() == nil {
 					fn.externalSymbol = "runtime." | mangledName
 				}
 				break
