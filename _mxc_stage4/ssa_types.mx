@@ -135,8 +135,8 @@ func (prog *SSAProgram) ImportedPackage(path string) *SSAPackage {
 }
 
 func (prog *SSAProgram) release() {
-	prog.imported = nil
-	prog.packages = nil
+	free(prog.imported)
+	free(prog.packages)
 }
 
 // SSA Package.
@@ -170,22 +170,18 @@ func (p *SSAPackage) ExternalFunc(name string, sig *Signature) *SSAFunction {
 }
 
 func (p *SSAPackage) release() {
-	for k, m := range p.Members {
+	for _, m := range p.Members {
 		if fn, ok := m.(*SSAFunction); ok {
-			fn.Blocks = nil
-			fn.Locals = nil
-			fn.AnonFuncs = nil
-			fn.Params = nil
-			fn.FreeVars = nil
-			fn.NamedResults = nil
-			fn.vars = nil
-			fn.Pkg = nil
-			fn.Prog = nil
+			free(fn.Blocks)
+			free(fn.Locals)
+			free(fn.AnonFuncs)
+			free(fn.Params)
+			free(fn.FreeVars)
+			free(fn.NamedResults)
+			free(fn.vars)
 		}
-		delete(p.Members, k)
 	}
-	p.Prog = nil
-	p.Pkg = nil
+	free(p.Members)
 }
 
 // SSA Function.
@@ -398,6 +394,14 @@ func (a *SSAAlloc) InstrString() string {
 	}
 	return "local " | a.typ.String()
 }
+
+type SSAScopeFree struct {
+	ssaRegister
+	Allocs []*SSAAlloc
+}
+
+func (s *SSAScopeFree) InstrPos() int32    { return 0 }
+func (s *SSAScopeFree) InstrString() string { return "scope_free" }
 
 // Phi node.
 type SSAPhi struct {
@@ -828,13 +832,13 @@ func ssaBuiltinID(name string) (BuiltinID, bool) {
 		return BuiltinDelete, true
 	case "len":
 		return BuiltinLen, true
-	case "make":
+	case "__slicealloc", "make":
 		return BuiltinMake, true
 	case "max":
 		return BuiltinMax, true
 	case "min":
 		return BuiltinMin, true
-	case "new":
+	case "__ptralloc", "new":
 		return BuiltinNew, true
 	case "panic":
 		return BuiltinPanic, true

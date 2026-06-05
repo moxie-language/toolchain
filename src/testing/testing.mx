@@ -6,44 +6,43 @@ import (
 )
 
 type T struct {
-	name   string
-	failed bool
+	name    string
+	failed  bool
+	skipped bool
 }
 
-func (t *T) Fatal(args ...any) {
-	fmt.Print("    ")
-	fmt.Println(args...)
-	t.failed = true
-	panic(testFailedPanic{})
-}
-
-func (t *T) Fatalf(format string, args ...any) {
-	fmt.Print("    ")
-	fmt.Printf(format, args...)
-	fmt.Println()
-	t.failed = true
-	panic(testFailedPanic{})
-}
-
-func (t *T) Error(args ...any) {
+func (t *T) Fatal(args ...fmt.Stringer) {
 	fmt.Print("    ")
 	fmt.Println(args...)
 	t.failed = true
 }
 
-func (t *T) Errorf(format string, args ...any) {
+func (t *T) Fatalf(format string, args ...fmt.Stringer) {
 	fmt.Print("    ")
 	fmt.Printf(format, args...)
 	fmt.Println()
 	t.failed = true
 }
 
-func (t *T) Log(args ...any) {
+func (t *T) Error(args ...fmt.Stringer) {
+	fmt.Print("    ")
+	fmt.Println(args...)
+	t.failed = true
+}
+
+func (t *T) Errorf(format string, args ...fmt.Stringer) {
+	fmt.Print("    ")
+	fmt.Printf(format, args...)
+	fmt.Println()
+	t.failed = true
+}
+
+func (t *T) Log(args ...fmt.Stringer) {
 	fmt.Print("    ")
 	fmt.Println(args...)
 }
 
-func (t *T) Logf(format string, args ...any) {
+func (t *T) Logf(format string, args ...fmt.Stringer) {
 	fmt.Print("    ")
 	fmt.Printf(format, args...)
 	fmt.Println()
@@ -53,16 +52,17 @@ func (t *T) Name() string {
 	return t.name
 }
 
-func (t *T) Skip(args ...any) {
+func (t *T) Failed() bool {
+	return t.failed
+}
+
+func (t *T) Skip(args ...fmt.Stringer) {
 	fmt.Print("    SKIP: ")
 	fmt.Println(args...)
-	panic(testSkippedPanic{})
+	t.skipped = true
 }
 
 func (t *T) Helper() {}
-
-type testFailedPanic struct{}
-type testSkippedPanic struct{}
 
 type InternalTest struct {
 	Name string
@@ -70,29 +70,17 @@ type InternalTest struct {
 }
 
 func Main(tests []InternalTest) {
-	passed := 0
-	failed := 0
-	skipped := 0
+	passed := int32(0)
+	failed := int32(0)
+	skipped := int32(0)
 	for _, test := range tests {
 		t := &T{name: test.Name}
 		fmt.Println("=== RUN  ", test.Name)
-		func() {
-			defer func() {
-				r := recover()
-				if r != nil {
-					if _, ok := r.(testFailedPanic); ok {
-						return
-					}
-					if _, ok := r.(testSkippedPanic); ok {
-						return
-					}
-					fmt.Println("    panic:", r)
-					t.failed = true
-				}
-			}()
-			test.F(t)
-		}()
-		if t.failed {
+		test.F(t)
+		if t.skipped {
+			fmt.Println("--- SKIP:", test.Name)
+			skipped++
+		} else if t.failed {
 			fmt.Println("--- FAIL:", test.Name)
 			failed++
 		} else {
@@ -102,8 +90,8 @@ func Main(tests []InternalTest) {
 	}
 	fmt.Println()
 	if failed > 0 {
-		fmt.Printf("FAIL: %d passed, %d failed, %d skipped\n", passed, failed, skipped)
+		fmt.Println("FAIL:", passed, "passed,", failed, "failed,", skipped, "skipped")
 		os.Exit(1)
 	}
-	fmt.Printf("PASS: %d passed, %d skipped\n", passed, skipped)
+	fmt.Println("PASS:", passed, "passed,", skipped, "skipped")
 }

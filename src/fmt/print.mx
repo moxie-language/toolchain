@@ -52,7 +52,7 @@ type Formatter interface {
 }
 
 // Stringer is implemented by any value that has a String method,
-// which defines the “native” format for that value.
+// which defines the "native" format for that value.
 // The String method is used to print values passed as an operand
 // to any format that accepts a string or to an unformatted printer
 // such as [Print].
@@ -115,8 +115,8 @@ func (b *buffer) writeRune(r rune) {
 type pp struct {
 	buf buffer
 
-	// arg holds the current item, as an interface{}.
-	arg any
+	// arg holds the current item.
+	arg Stringer
 
 	// fmt is used to format basic items such as integers or strings.
 	fmt fmt
@@ -182,7 +182,7 @@ func (p *pp) WriteString(s []byte) (ret int32, err error) {
 
 // Fprintf formats according to a format specifier and writes to w.
 // It returns the number of bytes written and any write error encountered.
-func Fprintf(w io.Writer, format []byte, a ...any) (n int32, err error) {
+func Fprintf(w io.Writer, format []byte, a ...Stringer) (n int32, err error) {
 	p := newPrinter()
 	p.doPrintf(format, a)
 	n, err = w.Write(p.buf)
@@ -192,12 +192,12 @@ func Fprintf(w io.Writer, format []byte, a ...any) (n int32, err error) {
 
 // Printf formats according to a format specifier and writes to standard output.
 // It returns the number of bytes written and any write error encountered.
-func Printf(format []byte, a ...any) (n int32, err error) {
+func Printf(format []byte, a ...Stringer) (n int32, err error) {
 	return Fprintf(os.Stdout(), format, a...)
 }
 
 // Sprintf formats according to a format specifier and returns the resulting string.
-func Sprintf(format []byte, a ...any) []byte {
+func Sprintf(format []byte, a ...Stringer) []byte {
 	p := newPrinter()
 	p.doPrintf(format, a)
 	s := copyBuf(p.buf)
@@ -207,7 +207,7 @@ func Sprintf(format []byte, a ...any) []byte {
 
 // Appendf formats according to a format specifier, appends the result to the byte
 // slice, and returns the updated slice.
-func Appendf(b []byte, format []byte, a ...any) []byte {
+func Appendf(b []byte, format []byte, a ...Stringer) []byte {
 	p := newPrinter()
 	p.doPrintf(format, a)
 	b = append(b, p.buf...)
@@ -220,7 +220,7 @@ func Appendf(b []byte, format []byte, a ...any) []byte {
 // Fprint formats using the default formats for its operands and writes to w.
 // Spaces are added between operands when neither is a string.
 // It returns the number of bytes written and any write error encountered.
-func Fprint(w io.Writer, a ...any) (n int32, err error) {
+func Fprint(w io.Writer, a ...Stringer) (n int32, err error) {
 	p := newPrinter()
 	p.doPrint(a)
 	n, err = w.Write(p.buf)
@@ -231,13 +231,13 @@ func Fprint(w io.Writer, a ...any) (n int32, err error) {
 // Print formats using the default formats for its operands and writes to standard output.
 // Spaces are added between operands when neither is a string.
 // It returns the number of bytes written and any write error encountered.
-func Print(a ...any) (n int32, err error) {
+func Print(a ...Stringer) (n int32, err error) {
 	return Fprint(os.Stdout(), a...)
 }
 
 // Sprint formats using the default formats for its operands and returns the resulting string.
 // Spaces are added between operands when neither is a string.
-func Sprint(a ...any) []byte {
+func Sprint(a ...Stringer) []byte {
 	p := newPrinter()
 	p.doPrint(a)
 	s := copyBuf(p.buf)
@@ -247,7 +247,7 @@ func Sprint(a ...any) []byte {
 
 // Append formats using the default formats for its operands, appends the result to
 // the byte slice, and returns the updated slice.
-func Append(b []byte, a ...any) []byte {
+func Append(b []byte, a ...Stringer) []byte {
 	p := newPrinter()
 	p.doPrint(a)
 	b = append(b, p.buf...)
@@ -262,7 +262,7 @@ func Append(b []byte, a ...any) []byte {
 // Fprintln formats using the default formats for its operands and writes to w.
 // Spaces are always added between operands and a newline is appended.
 // It returns the number of bytes written and any write error encountered.
-func Fprintln(w io.Writer, a ...any) (n int32, err error) {
+func Fprintln(w io.Writer, a ...Stringer) (n int32, err error) {
 	p := newPrinter()
 	p.doPrintln(a)
 	n, err = w.Write(p.buf)
@@ -273,13 +273,13 @@ func Fprintln(w io.Writer, a ...any) (n int32, err error) {
 // Println formats using the default formats for its operands and writes to standard output.
 // Spaces are always added between operands and a newline is appended.
 // It returns the number of bytes written and any write error encountered.
-func Println(a ...any) (n int32, err error) {
+func Println(a ...Stringer) (n int32, err error) {
 	return Fprintln(os.Stdout(), a...)
 }
 
 // Sprintln formats using the default formats for its operands and returns the resulting string.
 // Spaces are always added between operands and a newline is appended.
-func Sprintln(a ...any) []byte {
+func Sprintln(a ...Stringer) []byte {
 	p := newPrinter()
 	p.doPrintln(a)
 	s := copyBuf(p.buf)
@@ -302,7 +302,7 @@ func copyBuf(b []byte) []byte {
 // Appendln formats using the default formats for its operands, appends the result
 // to the byte slice, and returns the updated slice. Spaces are always added
 // between operands and a newline is appended.
-func Appendln(b []byte, a ...any) []byte {
+func Appendln(b []byte, a ...Stringer) []byte {
 	p := newPrinter()
 	p.doPrintln(a)
 	b = append(b, p.buf...)
@@ -332,7 +332,7 @@ func parsenum(s []byte, start, end int32) (num int32, isnum bool, newi int32) {
 	return
 }
 
-func (p *pp) unknownType(v any) {
+func (p *pp) unknownType(v Stringer) {
 	p.buf.writeByte('?')
 }
 
@@ -451,7 +451,7 @@ func (p *pp) fmtBytes(v []byte, verb rune, typeString []byte) {
 	p.fmt.fmtBs(v)
 }
 
-func (p *pp) catchPanic(arg any, verb rune, method []byte) {
+func (p *pp) catchPanic(arg Stringer, verb rune, method []byte) {
 	if err := recover(); err != nil {
 		// If it's a nil pointer, just say "<nil>". The likeliest causes are a
 		// Stringer that fails to guard against nil or a nil pointer for a
@@ -545,7 +545,7 @@ func (p *pp) handleMethods(verb rune) (handled bool) {
 	return false
 }
 
-func (p *pp) printArg(arg any, verb rune) {
+func (p *pp) printArg(arg Stringer, verb rune) {
 	p.arg = arg
 
 	if arg == nil {
@@ -605,7 +605,7 @@ func (p *pp) printArg(arg any, verb rune) {
 }
 
 // intFromArg gets the argNumth element of a. On return, isInt reports whether the argument has integer type.
-func intFromArg(a []any, argNum int32) (num int32, isInt bool, newArgNum int32) {
+func intFromArg(a []Stringer, argNum int32) (num int32, isInt bool, newArgNum int32) {
 	newArgNum = argNum
 	if argNum < len(a) {
 		num, isInt = a[argNum].(int32) // Almost always OK.
@@ -671,7 +671,7 @@ func (p *pp) missingArg(verb rune) {
 	p.buf.writeString(missingString)
 }
 
-func (p *pp) doPrintf(format []byte, a []any) {
+func (p *pp) doPrintf(format []byte, a []Stringer) {
 	end := len(format)
 	argNum := 0         // we process one argument per non-trivial format
 	afterIndex := false // previous item in format was an index like [3].
@@ -861,7 +861,7 @@ formatLoop:
 	}
 }
 
-func (p *pp) doPrint(a []any) {
+func (p *pp) doPrint(a []Stringer) {
 	prevString := false
 	for argNum, arg := range a {
 		_, isString := arg.([]byte)
@@ -876,7 +876,7 @@ func (p *pp) doPrint(a []any) {
 
 // doPrintln is like doPrint but always adds a space between arguments
 // and a newline after the last argument.
-func (p *pp) doPrintln(a []any) {
+func (p *pp) doPrintln(a []Stringer) {
 	for argNum, arg := range a {
 		if argNum > 0 {
 			p.buf.writeByte(' ')

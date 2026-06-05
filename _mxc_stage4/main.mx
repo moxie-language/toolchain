@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	_ "strconv"
 	"unsafe"
 )
 
@@ -855,9 +854,33 @@ func extractQuoted(s string) string {
 	return ""
 }
 
+type srcSpan struct {
+	file      string
+	outStart  int32
+	srcLine   int32
+}
+
+var concatSourceMap []srcSpan
+
+func concatLineToFile(concatLine int32) (string, int32) {
+	if len(concatSourceMap) == 0 {
+		return "", concatLine
+	}
+	best := int32(0)
+	for i, s := range concatSourceMap {
+		if s.outStart <= concatLine {
+			best = int32(i)
+		}
+	}
+	sp := concatSourceMap[best]
+	return sp.file, sp.srcLine + (concatLine - sp.outStart)
+}
+
 func concatSources(dir string, files []string) []byte {
 	imports := map[string]bool{}
 	var bodies [][]byte
+	var bodyFiles []string
+	var bodyStartLines []int32
 	pkgName := ""
 	for _, f := range files {
 		data, ok := readFile(joinPath(dir, f))
@@ -870,6 +893,7 @@ func concatSources(dir string, files []string) []byte {
 		lines := splitLines(string(data))
 		var body []string
 		i := int32(0)
+		firstBodyLine := int32(0)
 		for i < int32(len(lines)) {
 			line := trimSpace(lines[i])
 			if hasPrefix(line, "package ") {
@@ -896,10 +920,15 @@ func concatSources(dir string, files []string) []byte {
 				i++
 				continue
 			}
+			if len(body) == 0 {
+				firstBodyLine = i + 1
+			}
 			body = append(body, lines[i])
 			i++
 		}
 		bodies = append(bodies, []byte(joinStrings(body, "\n")))
+		bodyFiles = append(bodyFiles, f)
+		bodyStartLines = append(bodyStartLines, firstBodyLine)
 	}
 	var out []byte
 	out = append(out, ("package " | pkgName | "\n")...)
@@ -921,13 +950,31 @@ func concatSources(dir string, files []string) []byte {
 		}
 		out = append(out, ")\n"...)
 	}
+	concatSourceMap = nil
+	outLine := int32(1)
+	for j := int32(0); j < int32(len(out)); j++ {
+		if out[j] == '\n' {
+			outLine++
+		}
+	}
 	for i, b := range bodies {
+		concatSourceMap = append(concatSourceMap, srcSpan{
+			file:     bodyFiles[i],
+			outStart: outLine,
+			srcLine:  bodyStartLines[i],
+		})
+		for j := int32(0); j < int32(len(b)); j++ {
+			if b[j] == '\n' {
+				outLine++
+			}
+		}
+		outLine++
 		out = append(out, b...)
 		out = append(out, '\n')
-		bodies[i] = nil // replace with free()
+		bodies[i] = nil
 	}
-	bodies = nil // replace with free()
-	imports = nil // replace with free()
+	bodies = nil
+	imports = nil
 	return out
 }
 
@@ -1093,7 +1140,7 @@ func discoverPkg(pkgPath, root string) *pkgInfo {
 	allMx := mxFiles
 	forbidden := []string{"wasm", "js", "ignore", "compiler_bootstrap",
 		"scheduler.tasks", "scheduler.cores", "scheduler.asyncify",
-		"faketime", "baremetal", "nintendoswitch"}
+		"faketime", "baremetal", "nintendoswitch", "boringcrypto"}
 	var files []string
 	for _, f := range allMx {
 		if shouldSkipFile(f) {
@@ -1111,7 +1158,7 @@ func discoverPkg(pkgPath, root string) *pkgInfo {
 		fileImps := extractImports(data)
 		skipFile := ""
 		for _, imp := range fileImps {
-			if imp == "iter" || imp == "math/big" {
+			if imp == "iter" || imp == "weak" || imp == "crypto/internal/fips140cache" {
 				skipFile = imp
 				break
 			}
@@ -1224,6 +1271,10 @@ func registerBuiltins() {
 	// runtime - assembly + C, pre-compiled in runtime.bc
 	rtPkg := NewTCPackage("runtime", "runtime")
 	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "InitCShared", parseSignatureDesc("")))
+	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "LastSpawnedParentFd", parseSignatureDesc("->int32")))
+	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "PipeClosed", parseSignatureDesc("int32->bool")))
+	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "PipeFDCanSend", parseSignatureDesc("int32->bool")))
+	rtPkg.Scope().Insert(NewTCVar(rtPkg, "ChildPipeFd", Typ[Int32]))
 	importRegistry["runtime"] = rtPkg
 }
 
@@ -1241,10 +1292,63 @@ func addPtrMethod(pkg *TCPackage, named *Named, name, sigDesc string) {
 	named.AddMethod(fn)
 }
 
+func remapErrorLines(msg string) string {
+	if len(concatSourceMap) == 0 {
+		return msg
+	}
+	lines := splitLines(msg)
+	var out []string
+	for _, line := range lines {
+		out = append(out, remapOneLine(line))
+	}
+	return joinStrings(out, "\n")
+}
+
+func remapOneLine(line string) string {
+	if len(concatSourceMap) == 0 {
+		return line
+	}
+	colonCount := int32(0)
+	firstColon := int32(-1)
+	secondColon := int32(-1)
+	for i := int32(0); i < int32(len(line)); i++ {
+		if line[i] == ':' {
+			colonCount++
+			if colonCount == 1 {
+				firstColon = i
+			} else if colonCount == 2 {
+				secondColon = i
+				break
+			}
+		}
+	}
+	if secondColon < 0 {
+		return line
+	}
+	numStr := line[firstColon+1 : secondColon]
+	n := int32(0)
+	valid := len(numStr) > 0
+	for i := int32(0); i < int32(len(numStr)); i++ {
+		if numStr[i] < '0' || numStr[i] > '9' {
+			valid = false
+			break
+		}
+		n = n*10 + int32(numStr[i]-'0')
+	}
+	if !valid {
+		return line
+	}
+	file, srcLine := concatLineToFile(n)
+	if file == "" {
+		return line
+	}
+	return file | ":" | simpleItoa(srcLine) | line[secondColon:]
+}
+
 func compileSource(src []byte, pkgName, triple string) string {
 	ir := CompileToIR(src, pkgName, triple)
 	if len(ir) > 0 && ir[0] == ';' {
-		writeStr(2, ir)
+		writeStr(2, remapErrorLines(ir))
 		fatal("compile error for " | pkgName)
 	}
 	if len(ir) == 0 {
@@ -1292,15 +1396,38 @@ func typeDescStr(t Type) string {
 		return "int32"
 	case *Slice:
 		return "[]" | typeDescStr(v.Elem())
+	case *Array:
+		return "[" | simpleItoa64(v.Len()) | "]" | typeDescStr(v.Elem())
 	case *Pointer:
 		return "*" | typeDescStr(v.Elem())
 	case *TCStruct:
-		return "struct"
+		s := "struct{"
+		for i := int32(0); i < v.NumFields(); i++ {
+			if i > 0 {
+				s = s | ","
+			}
+			f := v.Field(i)
+			s = s | f.Name() | ":" | typeDescStr(f.Type())
+		}
+		return s | "}"
 	case *TCInterface:
 		if v.IsEmpty() {
 			return "interface{}"
 		}
+		if v.NumMethods() == 1 && v.Method(0).Name() == "Error" {
+			return "error"
+		}
 		return "interface{}"
+	case *TCChan:
+		switch v.dir {
+		case TCSendOnly:
+			return "chan<-:" | typeDescStr(v.elem)
+		case TCRecvOnly:
+			return "<-chan:" | typeDescStr(v.elem)
+		}
+		return "chan:" | typeDescStr(v.elem)
+	case *TCMap:
+		return "map[" | typeDescStr(v.key) | "]" | typeDescStr(v.elem)
 	case *Named:
 		if v.obj != nil {
 			if typeDescPkgPath != "" && v.obj.pkg != nil && v.obj.pkg.Path() != typeDescPkgPath {
@@ -1454,6 +1581,91 @@ func loadMxh(path string) bool {
 	oldScope := parseTypePkgScope
 	parseTypePkgScope = pkg.Scope()
 
+	// Pass 1a: register all type and interface names with placeholder types
+	for li := 1; li < len(lines); li++ {
+		line := lines[li]
+		if hasPrefix(line, "type ") {
+			parts := splitBySpace(line[5:])
+			if len(parts) >= 1 {
+				tn := NewTypeName(pkg, parts[0], nil)
+				NewNamed(tn, nil)
+				pkg.Scope().Insert(tn)
+			}
+		} else if hasPrefix(line, "iface ") {
+			parts := splitBySpace(line[6:])
+			if len(parts) >= 1 {
+				placeholder := NewTCInterface(nil, nil)
+				placeholder.Complete()
+				tn := NewTypeName(pkg, parts[0], nil)
+				NewNamed(tn, placeholder)
+				pkg.Scope().Insert(tn)
+			}
+		}
+	}
+
+	// Pass 1b: resolve underlying types and interface methods (all names exist now)
+	for li := 1; li < len(lines); li++ {
+		line := lines[li]
+		if hasPrefix(line, "type ") {
+			parts := splitBySpace(line[5:])
+			if len(parts) >= 2 {
+				underlying := parseTypeDesc(parts[1])
+				obj := pkg.Scope().Lookup(parts[0])
+				if tn, ok := obj.(*TypeName); ok {
+					if named, ok2 := tn.typ.(*Named); ok2 {
+						named.SetUnderlying(underlying)
+					}
+				}
+			} else if len(parts) == 1 {
+				obj := pkg.Scope().Lookup(parts[0])
+				if tn, ok := obj.(*TypeName); ok {
+					if named, ok2 := tn.typ.(*Named); ok2 {
+						named.SetUnderlying(NewTCStruct(nil, nil))
+					}
+				}
+			}
+		} else if hasPrefix(line, "iface ") {
+			parts := splitBySpace(line[6:])
+			if len(parts) >= 1 {
+				ifaceName := parts[0]
+				methodsDesc := ""
+				if len(parts) >= 2 {
+					methodsDesc = parts[1]
+				}
+				var methods []*IfaceMethod
+				if methodsDesc != "" {
+					mparts := splitSemicolon(methodsDesc)
+					for _, p := range mparts {
+						eqIdx := -1
+						for i := 0; i < len(p); i++ {
+							if p[i] == '=' {
+								eqIdx = i
+								break
+							}
+						}
+						if eqIdx < 0 {
+							continue
+						}
+						mname := p[:eqIdx]
+						msig := parseSignatureDesc(p[eqIdx+1:])
+						methods = append(methods, NewTCIfaceMethod(mname, msig))
+					}
+				}
+				iface := NewTCInterface(methods, nil)
+				iface.Complete()
+				obj := pkg.Scope().Lookup(ifaceName)
+				if tn, ok := obj.(*TypeName); ok {
+					if named, ok2 := tn.typ.(*Named); ok2 {
+						named.SetUnderlying(iface)
+					} else {
+						tn.typ = iface
+					}
+				}
+			}
+		}
+	}
+
+	// Pass 2: funcs, methods, vars, consts can now resolve types from pass 1
 	for li := 1; li < len(lines); li++ {
 		line := lines[li]
 		if hasPrefix(line, "func ") {
@@ -1504,19 +1716,6 @@ func loadMxh(path string) bool {
 				}
 				pkg.Scope().Insert(NewTCConst(pkg, parts[0], typ, val))
 			}
-		} else if hasPrefix(line, "type ") {
-			parts := splitBySpace(line[5:])
-			if len(parts) >= 2 {
-				underlying := parseTypeDesc(parts[1])
-				tn := NewTypeName(pkg, parts[0], nil)
-				NewNamed(tn, underlying)
-				pkg.Scope().Insert(tn)
-			} else if len(parts) == 1 {
-				underlying := NewTCStruct(nil, nil)
-				tn := NewTypeName(pkg, parts[0], nil)
-				NewNamed(tn, underlying)
-				pkg.Scope().Insert(tn)
-			}
 		} else if hasPrefix(line, "method ") {
 			parts := splitBySpace(line[7:])
 			if len(parts) >= 3 {
@@ -1543,38 +1742,6 @@ func loadMxh(path string) bool {
 						}
 					}
 				}
-			}
-		} else if hasPrefix(line, "iface ") {
-			parts := splitBySpace(line[6:])
-			if len(parts) >= 1 {
-				ifaceName := parts[0]
-				methodsDesc := ""
-				if len(parts) >= 2 {
-					methodsDesc = parts[1]
-				}
-				var methods []*IfaceMethod
-				if methodsDesc != "" {
-					mparts := splitSemicolon(methodsDesc)
-					for _, p := range mparts {
-						eqIdx := -1
-						for i := 0; i < len(p); i++ {
-							if p[i] == '=' {
-								eqIdx = i
-								break
-							}
-						}
-						if eqIdx < 0 {
-							continue
-						}
-						mname := p[:eqIdx]
-						msig := parseSignatureDesc(p[eqIdx+1:])
-						methods = append(methods, NewTCIfaceMethod(mname, msig))
-					}
-				}
-				iface := NewTCInterface(methods, nil)
-				iface.Complete()
-				tn := NewTypeName(pkg, ifaceName, iface)
-				pkg.Scope().Insert(tn)
 			}
 		}
 	}
@@ -1820,11 +1987,594 @@ func cmdUpdate(rebuildAll bool) {
 	writeStr(2, "rebuild done\n")
 }
 
+func scanTestFuncs(data []byte) []string {
+	var funcs []string
+	lines := splitLines(string(data))
+	for _, line := range lines {
+		line = trimSpace(line)
+		if !hasPrefix(line, "func Test") {
+			continue
+		}
+		paren := int32(-1)
+		for i := int32(5); i < int32(len(line)); i++ {
+			if line[i] == '(' {
+				paren = i
+				break
+			}
+		}
+		if paren < 0 {
+			continue
+		}
+		name := line[5:paren] // "func " is 5 chars, so name starts at "Test..."
+		if len(name) == 0 {
+			continue
+		}
+		if name[0] < 'A' || name[0] > 'Z' {
+			continue
+		}
+		rest := line[paren:]
+		if hasPrefix(rest, "(t *testing.T)") {
+			funcs = append(funcs, name)
+		}
+	}
+	return funcs
+}
+
+func generateTestMain(pkgName string, testFuncs []string) []byte {
+	var out []byte
+	out = append(out, ("package " | pkgName | "\n\nimport \"testing\"\n\nfunc main() {\n\ttests := []testing.InternalTest{\n")...)
+	for _, name := range testFuncs {
+		out = append(out, ("\t\t{Name: \"" | name | "\", F: " | name | "},\n")...)
+	}
+	out = append(out, "\t}\n\ttesting.Main(tests)\n}\n"...)
+	return out
+}
+
+func cmdTest(args []string) {
+	pkgPath := ""
+	forceRebuild := false
+	verbose := false
+	i := int32(2)
+	for i < int32(len(args)) {
+		if args[i] == "-a" {
+			forceRebuild = true
+			i++
+		} else if args[i] == "-v" {
+			verbose = true
+			i++
+		} else {
+			pkgPath = args[i]
+			i++
+		}
+	}
+	if pkgPath == "" {
+		pkgPath = "."
+	}
+	_ = verbose
+
+	root := getenv("MOXIEROOT")
+	if root == "" {
+		root = "."
+	}
+	triple := "x86_64-unknown-linux-musleabihf"
+	clang := "clang-21"
+
+	if hasPrefix(pkgPath, "./") || hasPrefix(pkgPath, "../") || pkgPath == "." || hasPrefix(pkgPath, "/") {
+		absDir := pkgPath
+		if absDir == "." {
+			absDir = ""
+		}
+		globalModPrefix, globalModDir = findModuleRoot(absDir)
+	}
+
+	registerBuiltins()
+
+	var testPkgDir string
+	if pkgPath == "." || pkgPath == ".." || hasPrefix(pkgPath, "/") || hasPrefix(pkgPath, "./") || hasPrefix(pkgPath, "../") {
+		testPkgDir = pkgPath
+	} else {
+		testPkgDir = joinPath(root, joinPath("src", pkgPath))
+	}
+
+	testFiles := listFiles(testPkgDir, "_test.mx")
+	if len(testFiles) == 0 {
+		writeStr(2, "no test files found in " | testPkgDir | "\n")
+		return
+	}
+
+	var allTestFuncs []string
+	for _, tf := range testFiles {
+		data, ok := readFile(joinPath(testPkgDir, tf))
+		if !ok {
+			continue
+		}
+		funcs := scanTestFuncs(data)
+		for _, fn := range funcs {
+			allTestFuncs = append(allTestFuncs, fn)
+		}
+	}
+	if len(allTestFuncs) == 0 {
+		writeStr(2, "no Test* functions found\n")
+		return
+	}
+
+	writeStr(2, "=== test: " | pkgPath | " ===\n")
+	for _, fn := range allTestFuncs {
+		writeStr(2, "  found " | fn | "\n")
+	}
+
+	pkgName := ""
+	for _, tf := range testFiles {
+		data, ok := readFile(joinPath(testPkgDir, tf))
+		if ok && pkgName == "" {
+			pkgName = extractPkgName(data)
+		}
+	}
+	if pkgName == "" {
+		pkgName = "main"
+	}
+
+	tmpdir := "/tmp/mxc-testbuild"
+	mkdirAll(tmpdir, 0755)
+
+	testMainSrc := generateTestMain(pkgName, allTestFuncs)
+	testMainFile := joinPath(tmpdir, "_testmain.mx")
+	writeFile(testMainFile, testMainSrc, 0644)
+
+	pkg := discoverPkg(pkgPath, root)
+	if pkg == nil {
+		fatal("cannot find package " | pkgPath)
+	}
+
+	for _, tf := range testFiles {
+		pkg.files = append(pkg.files, tf)
+	}
+	pkg.files = append(pkg.files, testMainFile)
+	pkg.name = "main"
+
+	if !hasImportStr(pkg.imports, "testing") {
+		pkg.imports = append(pkg.imports, "testing")
+	}
+
+	pkgs := resolveTestDeps(pkg, root)
+
+	cacheBase := pkgCacheDir()
+
+	for _, dp := range pkgs {
+		compilePath := dp.path
+		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+			compilePath = dp.name
+		}
+		if dp == pkg {
+			compilePath = "main"
+		}
+		hash := pkgCacheKey(dp.dir, dp.files)
+		cachedMxh := cachedMxhPath(cacheBase, dp.path, hash, dp.version)
+		_, mxhOk := readFile(cachedMxh)
+		if mxhOk && !forceRebuild && dp != pkg {
+			loadMxh(cachedMxh)
+			src := concatSources(dp.dir, dp.files)
+			ScanGenericDecls(src, compilePath)
+			src = nil
+		} else {
+			var src []byte
+			if dp == pkg {
+				src = concatTestSources(dp.dir, dp.files, testMainFile)
+			} else {
+				src = concatSources(dp.dir, dp.files)
+			}
+			TypeCheckOnly(src, compilePath)
+			src = nil
+		}
+	}
+
+	var allBcFiles []string
+
+	for _, dp := range pkgs {
+		compilePath := dp.path
+		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+			compilePath = dp.name
+		}
+		if dp == pkg {
+			compilePath = "main"
+		}
+
+		hash := pkgCacheKey(dp.dir, dp.files)
+		cached := cachedBcPath(cacheBase, dp.path, hash, dp.version)
+		cachedMxh := cachedMxhPath(cacheBase, dp.path, hash, dp.version)
+
+		if dp != pkg {
+			_, bcOk := readFile(cached)
+			_, mxhOk := readFile(cachedMxh)
+			if bcOk && mxhOk && !forceRebuild {
+				writeStr(2, "  cached " | dp.path | "\n")
+				loadMxh(cachedMxh)
+				allBcFiles = append(allBcFiles, cached)
+				for _, cf := range dp.cfiles {
+					cPath := joinPath(dp.dir, cf)
+					cbcFile := joinPath(tmpdir, safeName(dp.path) | "_" | cf | ".bc")
+					rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+					if rc == 0 {
+						allBcFiles = append(allBcFiles, cbcFile)
+					}
+				}
+				for _, bf := range dp.bcfiles {
+					allBcFiles = append(allBcFiles, joinPath(dp.dir, bf))
+				}
+				continue
+			}
+
+			if isStdlib(dp.path) && bcOk && !forceRebuild {
+				writeStr(2, "  cached " | dp.path | "\n")
+				src := concatSources(dp.dir, dp.files)
+				TypeCheckOnly(src, compilePath)
+				src = nil
+				regPkg := importRegistry[compilePath]
+				if regPkg != nil {
+					cacheDir := joinPath(cacheBase, safeName(dp.path))
+					mkdirAll(cacheDir, 0755)
+					mxhData := generateMxh(regPkg)
+					writeFile(cachedMxh, []byte(mxhData), 0644)
+				}
+				allBcFiles = append(allBcFiles, cached)
+				continue
+			}
+		}
+
+		writeStr(2, "  compile " | dp.path | "\n")
+		var src []byte
+		if dp == pkg {
+			src = concatTestSources(dp.dir, dp.files, testMainFile)
+		} else {
+			src = concatSources(dp.dir, dp.files)
+		}
+		ir := compileSource(src, compilePath, triple)
+		src = nil
+		llFile := joinPath(tmpdir, safeName(dp.path) | ".ll")
+		writeFile(llFile, []byte(ir), 0644)
+		ir = ""
+		bcFile := joinPath(tmpdir, safeName(dp.path) | ".bc")
+		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
+		if rc != 0 {
+			fatal("clang failed for " | dp.path)
+		}
+		if dp != pkg {
+			cacheDir := joinPath(cacheBase, safeName(dp.path))
+			mkdirAll(cacheDir, 0755)
+			data, rok := readFile(bcFile)
+			if rok {
+				writeFile(cached, data, 0644)
+			}
+			data = nil
+			regPkg := importRegistry[compilePath]
+			if regPkg != nil {
+				mxhData := generateMxh(regPkg)
+				writeFile(cachedMxh, []byte(mxhData), 0644)
+			}
+		}
+		allBcFiles = append(allBcFiles, bcFile)
+		for _, cf := range dp.cfiles {
+			cPath := joinPath(dp.dir, cf)
+			cbcFile := joinPath(tmpdir, safeName(dp.path) | "_" | cf | ".bc")
+			rc = run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+			if rc != 0 {
+				fatal("clang failed for " | cf)
+			}
+			allBcFiles = append(allBcFiles, cbcFile)
+		}
+		for _, bf := range dp.bcfiles {
+			allBcFiles = append(allBcFiles, joinPath(dp.dir, bf))
+		}
+	}
+
+	loadSysroot(joinPath(root, "_sysroot.env"))
+
+	sysroot := joinPath(root, "sysroot")
+	runtimeBc := getenv("RUNTIME_BC")
+	if runtimeBc == "" {
+		runtimeBc = joinPath(sysroot, "runtime_dealloc.bc")
+		_, rok := readFile(runtimeBc)
+		if !rok {
+			runtimeBc = joinPath(sysroot, "runtime.bc")
+			_, rok2 := readFile(runtimeBc)
+			if !rok2 {
+				runtimeBc = joinPath(root, "_runtime.bc")
+			}
+		}
+	}
+	muslDir := getenv("MUSL_DIR")
+	if muslDir == "" {
+		muslDir = joinPath(sysroot, "musl")
+	}
+	comprtLib := getenv("COMPRT_LIB")
+	if comprtLib == "" {
+		comprtLib = joinPath(joinPath(sysroot, "compiler-rt"), "lib.a")
+	}
+	muslLib := getenv("MUSL_LIB")
+	if muslLib == "" {
+		muslLib = joinPath(joinPath(sysroot, "musl"), "lib.a")
+	}
+
+	writeStr(2, "  generate initAll\n")
+	var initCalls string
+	for _, dp := range pkgs {
+		compilePath := dp.path
+		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+			compilePath = dp.name
+		}
+		if dp == pkg {
+			continue
+		}
+		initSym := irGlobalSymbol(compilePath, "main")
+		initCalls = initCalls | "  call void " | initSym | "(ptr %context)\n"
+	}
+	initAllIR := "\ndefine dso_local void @runtime.initAll(ptr %context) {\nentry:\n" | initCalls | "  ret void\n}\n"
+	declared := map[string]bool{}
+	for _, dp := range pkgs {
+		compilePath := dp.path
+		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+			compilePath = dp.name
+		}
+		if dp == pkg {
+			continue
+		}
+		declSym := irGlobalSymbol(compilePath, "main")
+		if declared[declSym] {
+			continue
+		}
+		declared[declSym] = true
+		initAllIR = initAllIR | "declare void " | declSym | "(ptr)\n"
+	}
+	initAllFile := joinPath(tmpdir, "initall.ll")
+	writeFile(initAllFile, []byte(initAllIR), 0644)
+	initAllBc := joinPath(tmpdir, "initall.bc")
+	rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", initAllFile, "-o", initAllBc})
+	if rc != 0 {
+		fatal("clang failed for initall")
+	}
+
+	writeStr(2, "  merge bitcode\n")
+	llvmLink := "llvm-link-21"
+	mergedBc := joinPath(tmpdir, "merged.bc")
+	linkArgs := []string{llvmLink, "-o", mergedBc, runtimeBc}
+	shimsBc := joinPath(sysroot, "hashmap_shims.bc")
+	linkArgs = append(linkArgs, shimsBc)
+	stringerBc := joinPath(sysroot, "stringer.bc")
+	if _, sok := readFile(stringerBc); sok {
+		linkArgs = append(linkArgs, stringerBc)
+	}
+	runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
+	if _, gok := readFile(runtimeGoBc); gok {
+		linkArgs = append(linkArgs, "--override=" | runtimeGoBc)
+	}
+	lnShims := joinPath(sysroot, "linkname_shims.bc")
+	if _, lok := readFile(lnShims); lok {
+		linkArgs = append(linkArgs, lnShims)
+	}
+	for _, bf := range allBcFiles {
+		linkArgs = append(linkArgs, "--override=" | bf)
+	}
+	linkArgs = append(linkArgs, "--override=" | initAllBc)
+	rc = run(linkArgs)
+	if rc != 0 {
+		fatal("llvm-link failed")
+	}
+
+	outpath := joinPath(tmpdir, "test.bin")
+	writeStr(2, "  link\n")
+	objFiles := getenv("OBJ_FILES")
+	if objFiles == "" {
+		objEntries := listFiles(joinPath(sysroot, "obj"), ".bc")
+		if objEntries != nil {
+			for _, e := range objEntries {
+				objFiles = objFiles | joinPath(joinPath(sysroot, "obj"), e) | " "
+			}
+		}
+	}
+	linker := "ld.lld-21"
+	ldArgs := []string{linker, "--gc-sections", "-o", outpath,
+		joinPath(muslDir, "crt1.o"),
+		mergedBc}
+	for _, f := range splitBySpace(objFiles) {
+		if f != "" {
+			ldArgs = append(ldArgs, f)
+		}
+	}
+	ldArgs = append(ldArgs, comprtLib, muslLib, "--lto-O0", "-z", "stack-size=67108864")
+	rc = run(ldArgs)
+	if rc != 0 {
+		fatal("linker failed")
+	}
+
+	writeStr(2, "  run tests\n")
+	rc = run([]string{outpath})
+	os.Exit(int32(rc))
+}
+
+func hasImportStr(imports []string, pkg string) bool {
+	for _, imp := range imports {
+		if imp == pkg {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveTestDeps(testPkg *pkgInfo, root string) []*pkgInfo {
+	r := &resolver{
+		visited: map[string]bool{},
+		root:    root,
+	}
+	for _, imp := range testPkg.imports {
+		r.walk(imp)
+	}
+	r.order = append(r.order, testPkg)
+	return r.order
+}
+
+func concatTestSources(dir string, files []string, testMainFile string) []byte {
+	imports := map[string]bool{}
+	var bodies [][]byte
+	var bodyFiles []string
+	var bodyStartLines []int32
+	pkgName := "main"
+
+	allFiles := []string{:0:len(files) + 1}
+	for _, f := range files {
+		if f == testMainFile {
+			continue
+		}
+		allFiles = append(allFiles, f)
+	}
+
+	for _, f := range allFiles {
+		var data []byte
+		var ok bool
+		if hasPrefix(f, "/") {
+			data, ok = readFile(f)
+		} else {
+			data, ok = readFile(joinPath(dir, f))
+		}
+		if !ok {
+			continue
+		}
+		lines := splitLines(string(data))
+		var body []string
+		i := int32(0)
+		firstBodyLine := int32(0)
+		for i < int32(len(lines)) {
+			line := trimSpace(lines[i])
+			if hasPrefix(line, "package ") {
+				i++
+				continue
+			}
+			if line == "import (" {
+				i++
+				for i < int32(len(lines)) {
+					imp := trimSpace(lines[i])
+					i++
+					if imp == ")" {
+						break
+					}
+					if imp != "" {
+						imports[imp] = true
+					}
+				}
+				continue
+			}
+			if hasPrefix(line, "import ") && !hasPrefix(line, "import (") {
+				imp := line[7:]
+				imports[imp] = true
+				i++
+				continue
+			}
+			if len(body) == 0 {
+				firstBodyLine = i + 1
+			}
+			body = append(body, lines[i])
+			i++
+		}
+		bodies = append(bodies, []byte(joinStrings(body, "\n")))
+		bodyFiles = append(bodyFiles, f)
+		bodyStartLines = append(bodyStartLines, firstBodyLine)
+	}
+
+	tmData, tmOk := readFile(testMainFile)
+	if tmOk {
+		lines := splitLines(string(tmData))
+		var body []string
+		i := int32(0)
+		firstBodyLine := int32(0)
+		for i < int32(len(lines)) {
+			line := trimSpace(lines[i])
+			if hasPrefix(line, "package ") {
+				i++
+				continue
+			}
+			if line == "import (" {
+				i++
+				for i < int32(len(lines)) {
+					imp := trimSpace(lines[i])
+					i++
+					if imp == ")" {
+						break
+					}
+					if imp != "" {
+						imports[imp] = true
+					}
+				}
+				continue
+			}
+			if hasPrefix(line, "import ") && !hasPrefix(line, "import (") {
+				imp := line[7:]
+				imports[imp] = true
+				i++
+				continue
+			}
+			if len(body) == 0 {
+				firstBodyLine = i + 1
+			}
+			body = append(body, lines[i])
+			i++
+		}
+		bodies = append(bodies, []byte(joinStrings(body, "\n")))
+		bodyFiles = append(bodyFiles, "_testmain.mx")
+		bodyStartLines = append(bodyStartLines, firstBodyLine)
+	}
+
+	var out []byte
+	out = append(out, ("package " | pkgName | "\n")...)
+	if len(imports) > 0 {
+		var impKeys []string
+		for imp := range imports {
+			impKeys = append(impKeys, imp)
+		}
+		for i := int32(1); i < int32(len(impKeys)); i++ {
+			for j := i; j > 0 && impKeys[j] < impKeys[j-1]; j-- {
+				impKeys[j], impKeys[j-1] = impKeys[j-1], impKeys[j]
+			}
+		}
+		out = append(out, "import (\n"...)
+		for _, imp := range impKeys {
+			out = append(out, '\t')
+			out = append(out, imp...)
+			out = append(out, '\n')
+		}
+		out = append(out, ")\n"...)
+	}
+	concatSourceMap = nil
+	outLine := int32(1)
+	for j := int32(0); j < int32(len(out)); j++ {
+		if out[j] == '\n' {
+			outLine++
+		}
+	}
+	for i, b := range bodies {
+		concatSourceMap = append(concatSourceMap, srcSpan{
+			file:     bodyFiles[i],
+			outStart: outLine,
+			srcLine:  bodyStartLines[i],
+		})
+		for j := int32(0); j < int32(len(b)); j++ {
+			if b[j] == '\n' {
+				outLine++
+			}
+		}
+		outLine++
+		out = append(out, b...)
+		out = append(out, '\n')
+		bodies[i] = nil
+	}
+	bodies = nil
+	imports = nil
+	return out
+}
+
 func main() {
 	builtinOnly = []string{"unsafe", "runtime", "moxie"}
 	args := getArgs()
 	if len(args) < 2 {
-		writeStr(2, "usage: mxc <build|version|cache|fetch|update> ...\n")
+		writeStr(2, "usage: mxc <build|test|version|cache|fetch|update> ...\n")
 		os.Exit(1)
 	}
 
@@ -1859,8 +2609,12 @@ func main() {
 		cmdUpdate(rebuildAll)
 		return
 	}
+	if cmd == "test" {
+		cmdTest(args)
+		return
+	}
 	if cmd != "build" {
-		writeStr(2, "usage: mxc <build|version|cache|fetch|update> ...\n")
+		writeStr(2, "usage: mxc <build|test|version|cache|fetch|update> ...\n")
 		os.Exit(1)
 	}
 
@@ -1898,7 +2652,7 @@ func main() {
 	triple := "x86_64-unknown-linux-musleabihf"
 	clang := "clang-21"
 
-	if hasPrefix(pkgPath, "./") || hasPrefix(pkgPath, "../") || pkgPath == "." {
+	if hasPrefix(pkgPath, "./") || hasPrefix(pkgPath, "../") || pkgPath == "." || hasPrefix(pkgPath, "/") {
 		absDir := pkgPath
 		if absDir == "." {
 			absDir = ""
@@ -1918,7 +2672,7 @@ func main() {
 	cacheBase := pkgCacheDir()
 	var allBcFiles []string
 
-	for _, pkg := range pkgs {
+	for pi, pkg := range pkgs {
 		compilePath := pkg.path
 		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = pkg.name
@@ -1928,6 +2682,9 @@ func main() {
 		_, mxhOk := readFile(cachedMxh)
 		if mxhOk && !forceRebuild {
 			loadMxh(cachedMxh)
+			src := concatSources(pkg.dir, pkg.files)
+			ScanGenericDecls(src, compilePath)
+			src = nil
 		} else {
 			src := concatSources(pkg.dir, pkg.files)
 			TypeCheckOnly(src, compilePath)
@@ -2032,10 +2789,14 @@ func main() {
 	sysroot := joinPath(root, "sysroot")
 	runtimeBc := getenv("RUNTIME_BC")
 	if runtimeBc == "" {
-		runtimeBc = joinPath(sysroot, "runtime.bc")
+		runtimeBc = joinPath(sysroot, "runtime_dealloc.bc")
 		_, rok := readFile(runtimeBc)
 		if !rok {
-			runtimeBc = joinPath(root, "_runtime.bc")
+			runtimeBc = joinPath(sysroot, "runtime.bc")
+			_, rok2 := readFile(runtimeBc)
+			if !rok2 {
+				runtimeBc = joinPath(root, "_runtime.bc")
+			}
 		}
 	}
 	muslDir := getenv("MUSL_DIR")
@@ -2045,10 +2806,6 @@ func main() {
 	comprtLib := getenv("COMPRT_LIB")
 	if comprtLib == "" {
 		comprtLib = joinPath(joinPath(sysroot, "compiler-rt"), "lib.a")
-	}
-	bdwgcLib := getenv("BDWGC_LIB")
-	if bdwgcLib == "" {
-		bdwgcLib = joinPath(joinPath(sysroot, "bdwgc"), "lib.a")
 	}
 	muslLib := getenv("MUSL_LIB")
 	if muslLib == "" {
@@ -2068,7 +2825,7 @@ func main() {
 		initSym := irGlobalSymbol(compilePath, "main")
 		initCalls = initCalls | "  call void " | initSym | "(ptr %context)\n"
 	}
-	initAllIR := "\ndefine void @runtime.initAll(ptr %context) {\nentry:\n" | initCalls | "  ret void\n}\n"
+	initAllIR := "\ndefine dso_local void @runtime.initAll(ptr %context) {\nentry:\n" | initCalls | "  ret void\n}\n"
 	declared := map[string]bool{}
 	for _, pkg := range pkgs {
 		compilePath := pkg.path
@@ -2105,11 +2862,16 @@ func main() {
 	}
 	runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
 	if _, gok := readFile(runtimeGoBc); gok {
-		overrideArg := "--override=" | runtimeGoBc
-		linkArgs = append(linkArgs, overrideArg)
+		linkArgs = append(linkArgs, "--override=" | runtimeGoBc)
 	}
-	linkArgs = append(linkArgs, allBcFiles...)
-	linkArgs = append(linkArgs, initAllBc)
+	lnShims := joinPath(sysroot, "linkname_shims.bc")
+	if _, lok := readFile(lnShims); lok {
+		linkArgs = append(linkArgs, lnShims)
+	}
+	for _, bf := range allBcFiles {
+		linkArgs = append(linkArgs, "--override=" | bf)
+	}
+	linkArgs = append(linkArgs, "--override=" | initAllBc)
 	rc = run(linkArgs)
 	if rc != 0 {
 		fatal("llvm-link failed")
