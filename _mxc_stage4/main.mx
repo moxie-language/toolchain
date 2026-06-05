@@ -6,28 +6,28 @@ import (
 )
 
 //export mxc_run
-func cRun(argv unsafe.Pointer, argc int32) int32
+func cRun(argv unsafe.Pointer, argc int32) (n int32)
 
 //export mxc_getenv
-func cGetenv(name unsafe.Pointer, nameLen int32, buf unsafe.Pointer, bufCap int32) int32
+func cGetenv(name unsafe.Pointer, nameLen int32, buf unsafe.Pointer, bufCap int32) (n int32)
 
 //export mxc_listdir
-func cListdir(dir unsafe.Pointer, dirLen int32, buf unsafe.Pointer, bufCap int32) int32
+func cListdir(dir unsafe.Pointer, dirLen int32, buf unsafe.Pointer, bufCap int32) (n int32)
 
 //export write
-func cWrite(fd int32, buf unsafe.Pointer, count uint32) int32
+func cWrite(fd int32, buf unsafe.Pointer, count uint32) (n int32)
 
 //export mxc_writefile
-func cWritefile(path unsafe.Pointer, pathLen int32, data unsafe.Pointer, dataLen int32, mode uint32) int32
+func cWritefile(path unsafe.Pointer, pathLen int32, data unsafe.Pointer, dataLen int32, mode uint32) (n int32)
 
 //export mxc_mkdir
-func cMkdir(path unsafe.Pointer, pathLen int32, mode uint32) int32
+func cMkdir(path unsafe.Pointer, pathLen int32, mode uint32) (n int32)
 
 //export mxc_readfile
-func cReadfile(path unsafe.Pointer, pathLen int32, buf unsafe.Pointer, bufCap int32) int32
+func cReadfile(path unsafe.Pointer, pathLen int32, buf unsafe.Pointer, bufCap int32) (n int32)
 
 //export mxc_filesize
-func cFilesize(path unsafe.Pointer, pathLen int32) int32
+func cFilesize(path unsafe.Pointer, pathLen int32) (n int32)
 
 func writeStr(fd int32, s string) {
 	b := []byte(s)
@@ -77,7 +77,7 @@ func fatal(msg string) {
 	os.Exit(1)
 }
 
-func getenv(name string) string {
+func getenv(name string) (s string) {
 	nb := []byte(name)
 	buf := []byte{:4096}
 	n := cGetenv(unsafe.Pointer(unsafe.SliceData(nb)), int32(len(nb)), unsafe.Pointer(unsafe.SliceData(buf)), int32(len(buf)))
@@ -87,7 +87,7 @@ func getenv(name string) string {
 	return string(buf[:n])
 }
 
-func getArgs() []string {
+func getArgs() (ss []string) {
 	data, ok := readFile("/proc/self/cmdline")
 	if !ok {
 		return nil
@@ -108,7 +108,7 @@ func getArgs() []string {
 	return args
 }
 
-func listFiles(dir, ext string) []string {
+func listFiles(dir, ext string) (ss []string) {
 	db := []byte(dir)
 	buf := []byte{:65536}
 	n := cListdir(unsafe.Pointer(unsafe.SliceData(db)), int32(len(db)),
@@ -130,7 +130,7 @@ func listFiles(dir, ext string) []string {
 	return result
 }
 
-func run(args []string) int32 {
+func run(args []string) (n int32) {
 	argv := []unsafe.Pointer{:len(args) + 1}
 	cstrs := [][]byte{:len(args)}
 	for i, a := range args {
@@ -143,7 +143,7 @@ func run(args []string) int32 {
 	return cRun(unsafe.Pointer(unsafe.SliceData(argv)), int32(len(args)))
 }
 
-func splitLines(s string) []string {
+func splitLines(s string) (ss []string) {
 	var result []string
 	start := int32(0)
 	for i := int32(0); i < int32(len(s)); i++ {
@@ -160,15 +160,15 @@ func splitLines(s string) []string {
 	return result
 }
 
-func hasPrefix(s, prefix string) bool {
+func hasPrefix(s, prefix string) (ok bool) {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
 
-func hasSuffix(s, suffix string) bool {
+func hasSuffix(s, suffix string) (ok bool) {
 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }
 
-func trimSpace(s string) string {
+func trimSpace(s string) (sv string) {
 	i := int32(0)
 	for i < int32(len(s)) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
 		i++
@@ -180,7 +180,7 @@ func trimSpace(s string) string {
 	return s[i:j]
 }
 
-func joinPath(a, b string) string {
+func joinPath(a, b string) (s string) {
 	if len(a) == 0 {
 		return b
 	}
@@ -190,7 +190,7 @@ func joinPath(a, b string) string {
 	return a | "/" | b
 }
 
-func pathBase(path string) string {
+func pathBase(path string) (s string) {
 	for i := int32(len(path)) - 1; i >= 0; i-- {
 		if path[i] == '/' {
 			return path[i+1:]
@@ -199,7 +199,7 @@ func pathBase(path string) string {
 	return path
 }
 
-func pathDir(path string) string {
+func pathDir(path string) (s string) {
 	for i := int32(len(path)) - 1; i >= 0; i-- {
 		if path[i] == '/' {
 			if i == 0 {
@@ -211,7 +211,7 @@ func pathDir(path string) string {
 	return "."
 }
 
-func splitSlash(s string) []string {
+func splitSlash(s string) (ss []string) {
 	var parts []string
 	start := int32(0)
 	for i := int32(0); i < int32(len(s)); i++ {
@@ -224,7 +224,7 @@ func splitSlash(s string) []string {
 	return parts
 }
 
-func cleanPath(path string) string {
+func cleanPath(path string) (s string) {
 	parts := splitSlash(path)
 	var out []string
 	for _, p := range parts {
@@ -250,7 +250,7 @@ func cleanPath(path string) string {
 	return result
 }
 
-func getMoxiePath() string {
+func getMoxiePath() (s string) {
 	p := getenv("MOXIEPATH")
 	if p != "" {
 		return p
@@ -262,9 +262,9 @@ func getMoxiePath() string {
 	return joinPath(home, "moxie")
 }
 
-func mxcVersion() string { return "1.8.4" }
+func mxcVersion() (s string) { return "1.8.4" }
 
-func moxieCacheDir() string {
+func moxieCacheDir() (s string) {
 	return joinPath(joinPath(getMoxiePath(), "cache"), "mxc-" | mxcVersion())
 }
 
@@ -458,7 +458,7 @@ func parseModRequires(dir string) (string, []modRequire, map[string]string) {
 	return modName, reqs, repls
 }
 
-func isRemotePath(path string) bool {
+func isRemotePath(path string) (ok bool) {
 	slash := int32(-1)
 	for i := int32(0); i < int32(len(path)); i++ {
 		if path[i] == '/' {
@@ -478,11 +478,11 @@ func isRemotePath(path string) bool {
 	return false
 }
 
-func repoLockPath(mpath, repoPath string) string {
+func repoLockPath(mpath, repoPath string) (s string) {
 	return joinPath(mpath, repoPath | ".lock")
 }
 
-func acquireRepoLock(mpath, repoPath string) bool {
+func acquireRepoLock(mpath, repoPath string) (ok bool) {
 	lp := repoLockPath(mpath, repoPath)
 	_, locked := readFile(lp)
 	if locked {
@@ -497,7 +497,7 @@ func releaseRepoLock(mpath, repoPath string) {
 	os.Remove(repoLockPath(mpath, repoPath))
 }
 
-func autoFetchRepo(pkgPath, version string) string {
+func autoFetchRepo(pkgPath, version string) (s string) {
 	mpath := getMoxiePath()
 	repoPath := pkgPath
 	for {
@@ -630,7 +630,7 @@ func cmdFetch() {
 	writeStr(2, "fetch done\n")
 }
 
-func joinStrings(ss []string, sep string) string {
+func joinStrings(ss []string, sep string) (s string) {
 	if len(ss) == 0 {
 		return ""
 	}
@@ -649,7 +649,7 @@ func joinStrings(ss []string, sep string) string {
 	return string(buf)
 }
 
-func appendUniq(ss []string, s string) []string {
+func appendUniq(ss []string, s string) (ss2 []string) {
 	for _, x := range ss {
 		if x == s {
 			return ss
@@ -658,7 +658,7 @@ func appendUniq(ss []string, s string) []string {
 	return append(ss, s)
 }
 
-func fnvHash(data []byte) string {
+func fnvHash(data []byte) (s string) {
 	h := uint32(2166136261)
 	for i := int32(0); i < int32(len(data)); i++ {
 		h ^= uint32(data[i])
@@ -673,11 +673,11 @@ func fnvHash(data []byte) string {
 	return string(buf)
 }
 
-func pkgCacheDir() string {
+func pkgCacheDir() (s string) {
 	return joinPath(moxieCacheDir(), "pkg")
 }
 
-func pkgCacheKey(dir string, files []string) string {
+func pkgCacheKey(dir string, files []string) (s string) {
 	var sorted []string
 	for _, f := range files {
 		sorted = append(sorted, f)
@@ -700,24 +700,24 @@ func pkgCacheKey(dir string, files []string) string {
 	return fnvHash(all)
 }
 
-func versionedCacheName(hash, version, ext string) string {
+func versionedCacheName(hash, version, ext string) (s string) {
 	if version != "" {
 		return hash | "_" | version | ext
 	}
 	return hash | ext
 }
 
-func cachedBcPath(cacheBase, pkgPath, hash, version string) string {
+func cachedBcPath(cacheBase, pkgPath, hash, version string) (s string) {
 	return joinPath(joinPath(cacheBase, safeName(pkgPath)), versionedCacheName(hash, version, ".bc"))
 }
 
-func isStdlib(path string) bool {
+func isStdlib(path string) (ok bool) {
 	return !hasPrefix(path, "/") && !hasPrefix(path, "./") && !hasPrefix(path, "../")
 }
 
 var builtinOnly []string
 
-func isBuiltinOnly(path string) bool {
+func isBuiltinOnly(path string) (ok bool) {
 	for _, b := range builtinOnly {
 		if path == b {
 			return true
@@ -752,7 +752,7 @@ func loadSysroot(path string) {
 	}
 }
 
-func splitBySpace(s string) []string {
+func splitBySpace(s string) (ss []string) {
 	var result []string
 	start := int32(0)
 	inWord := false
@@ -775,7 +775,7 @@ func splitBySpace(s string) []string {
 	return result
 }
 
-func safeName(pkg string) string {
+func safeName(pkg string) (s string) {
 	b := []byte{:len(pkg)}
 	for i := int32(0); i < int32(len(pkg)); i++ {
 		if pkg[i] == '/' {
@@ -787,7 +787,7 @@ func safeName(pkg string) string {
 	return string(b)
 }
 
-func extractPkgName(data []byte) string {
+func extractPkgName(data []byte) (s string) {
 	for i := int32(0); i < int32(len(data)); i++ {
 		if i+8 < int32(len(data)) && string(data[i:i+8]) == "package " {
 			j := i + 8
@@ -810,7 +810,7 @@ func extractPkgName(data []byte) string {
 	return "main"
 }
 
-func extractImports(data []byte) []string {
+func extractImports(data []byte) (ss []string) {
 	var imports []string
 	lines := splitLines(string(data))
 	inBlock := false
@@ -840,7 +840,7 @@ func extractImports(data []byte) []string {
 	return imports
 }
 
-func extractQuoted(s string) string {
+func extractQuoted(s string) (sv string) {
 	start := int32(-1)
 	for i := int32(0); i < int32(len(s)); i++ {
 		if s[i] == '"' {
@@ -876,7 +876,7 @@ func concatLineToFile(concatLine int32) (string, int32) {
 	return sp.file, sp.srcLine + (concatLine - sp.outStart)
 }
 
-func concatSources(dir string, files []string) []byte {
+func concatSources(dir string, files []string) (buf []byte) {
 	imports := map[string]bool{}
 	var bodies [][]byte
 	var bodyFiles []string
@@ -978,7 +978,7 @@ func concatSources(dir string, files []string) []byte {
 	return out
 }
 
-func fileContainsPart(base string, part string) bool {
+func fileContainsPart(base string, part string) (ok bool) {
 	plen := len(part)
 	for i := 0; i <= len(base)-plen; i++ {
 		if base[i:i+plen] == part {
@@ -992,7 +992,7 @@ func fileContainsPart(base string, part string) bool {
 	return false
 }
 
-func shouldSkipFile(name string) bool {
+func shouldSkipFile(name string) (ok bool) {
 	if hasSuffix(name, "_test.mx") {
 		return true
 	}
@@ -1015,7 +1015,7 @@ func shouldSkipFile(name string) bool {
 	return false
 }
 
-func hasBuildConstraint(data []byte, forbidden []string) bool {
+func hasBuildConstraint(data []byte, forbidden []string) (ok bool) {
 	for i := int32(0); i < int32(len(data)) && i < 512; i++ {
 		if data[i] == 'p' {
 			return false
@@ -1052,7 +1052,7 @@ func hasBuildConstraint(data []byte, forbidden []string) bool {
 	return false
 }
 
-func hasImport(data []byte, pkg string) bool {
+func hasImport(data []byte, pkg string) (ok bool) {
 	target := "\"" | pkg | "\""
 	for i := int32(0); i <= int32(len(data))-int32(len(target)); i++ {
 		if string(data[i:i+int32(len(target))]) == target {
@@ -1073,7 +1073,7 @@ type pkgInfo struct {
 	version string
 }
 
-func discoverPkg(pkgPath, root string) *pkgInfo {
+func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 	var dir string
 	if pkgPath == "." || pkgPath == ".." || hasPrefix(pkgPath, "/") || hasPrefix(pkgPath, "./") || hasPrefix(pkgPath, "../") {
 		dir = pkgPath
@@ -1241,7 +1241,7 @@ func (r *resolver) walk(path string) {
 	r.order = append(r.order, pkg)
 }
 
-func resolveAll(rootPkg string, root string) []*pkgInfo {
+func resolveAll(rootPkg string, root string) (ss []*pkgInfo) {
 	r := &resolver{
 		visited: map[string]bool{},
 		root:    root,
@@ -1292,7 +1292,7 @@ func addPtrMethod(pkg *TCPackage, named *Named, name, sigDesc string) {
 	named.AddMethod(fn)
 }
 
-func remapErrorLines(msg string) string {
+func remapErrorLines(msg string) (s string) {
 	if len(concatSourceMap) == 0 {
 		return msg
 	}
@@ -1304,7 +1304,7 @@ func remapErrorLines(msg string) string {
 	return joinStrings(out, "\n")
 }
 
-func remapOneLine(line string) string {
+func remapOneLine(line string) (s string) {
 	if len(concatSourceMap) == 0 {
 		return line
 	}
@@ -1345,7 +1345,7 @@ func remapOneLine(line string) string {
 	return file | ":" | simpleItoa(srcLine) | line[secondColon:]
 }
 
-func compileSource(src []byte, pkgName, triple string) string {
+func compileSource(src []byte, pkgName, triple string) (s string) {
 	ir := CompileToIR(src, pkgName, triple)
 	if len(ir) > 0 && ir[0] == ';' {
 		writeStr(2, remapErrorLines(ir))
@@ -1359,7 +1359,7 @@ func compileSource(src []byte, pkgName, triple string) string {
 
 var typeDescPkgPath string
 
-func typeDescStr(t Type) string {
+func typeDescStr(t Type) (s string) {
 	if t == nil {
 		return "interface{}"
 	}
@@ -1440,7 +1440,7 @@ func typeDescStr(t Type) string {
 	return "interface{}"
 }
 
-func sigDescStr(sig *Signature) string {
+func sigDescStr(sig *Signature) (s string) {
 	var out string
 	if sig.params != nil {
 		for i := int32(0); i < sig.params.Len(); i++ {
@@ -1462,7 +1462,7 @@ func sigDescStr(sig *Signature) string {
 	return out
 }
 
-func generateMxh(pkg *TCPackage) string {
+func generateMxh(pkg *TCPackage) (s string) {
 	path := pkg.Path()
 	name := pkg.Name()
 	typeDescPkgPath = path
@@ -1549,7 +1549,7 @@ func generateMxh(pkg *TCPackage) string {
 	return out
 }
 
-func loadMxh(path string) bool {
+func loadMxh(path string) (ok bool) {
 	data, ok := readFile(path)
 	if !ok {
 		return false
@@ -1753,7 +1753,7 @@ func loadMxh(path string) bool {
 	return true
 }
 
-func cachedMxhPath(cacheBase, pkgPath, hash, version string) string {
+func cachedMxhPath(cacheBase, pkgPath, hash, version string) (s string) {
 	return joinPath(joinPath(cacheBase, safeName(pkgPath)), versionedCacheName(hash, version, ".mxh"))
 }
 
@@ -1987,7 +1987,7 @@ func cmdUpdate(rebuildAll bool) {
 	writeStr(2, "rebuild done\n")
 }
 
-func scanTestFuncs(data []byte) []string {
+func scanTestFuncs(data []byte) (ss []string) {
 	var funcs []string
 	lines := splitLines(string(data))
 	for _, line := range lines {
@@ -2020,7 +2020,7 @@ func scanTestFuncs(data []byte) []string {
 	return funcs
 }
 
-func generateTestMain(pkgName string, testFuncs []string) []byte {
+func generateTestMain(pkgName string, testFuncs []string) (buf []byte) {
 	var out []byte
 	out = append(out, ("package " | pkgName | "\n\nimport \"testing\"\n\nfunc main() {\n\ttests := []testing.InternalTest{\n")...)
 	for _, name := range testFuncs {
@@ -2391,7 +2391,7 @@ func cmdTest(args []string) {
 	os.Exit(int32(rc))
 }
 
-func hasImportStr(imports []string, pkg string) bool {
+func hasImportStr(imports []string, pkg string) (ok bool) {
 	for _, imp := range imports {
 		if imp == pkg {
 			return true
@@ -2400,7 +2400,7 @@ func hasImportStr(imports []string, pkg string) bool {
 	return false
 }
 
-func resolveTestDeps(testPkg *pkgInfo, root string) []*pkgInfo {
+func resolveTestDeps(testPkg *pkgInfo, root string) (ss []*pkgInfo) {
 	r := &resolver{
 		visited: map[string]bool{},
 		root:    root,
@@ -2412,7 +2412,7 @@ func resolveTestDeps(testPkg *pkgInfo, root string) []*pkgInfo {
 	return r.order
 }
 
-func concatTestSources(dir string, files []string, testMainFile string) []byte {
+func concatTestSources(dir string, files []string, testMainFile string) (buf []byte) {
 	imports := map[string]bool{}
 	var bodies [][]byte
 	var bodyFiles []string

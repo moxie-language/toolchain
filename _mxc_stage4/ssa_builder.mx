@@ -1,9 +1,9 @@
 package main
 
-func asType(t Type) Type { return t }
+func asType(t Type) (tv Type) { return t }
 
 // CreatePackage builds the SSA Package from type-checked syntax files.
-func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*File, info *Info) *SSAPackage {
+func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*File, info *Info) (s *SSAPackage) {
 	p := &SSAPackage{
 		Prog:    prog,
 		Pkg:     pkg,
@@ -105,7 +105,7 @@ func (pb *ssaPkgBuilder) registerImport(d *ImportDecl) {
 	}
 }
 
-func pkgResolveTypeAST(pkg *SSAPackage, e Expr) Type {
+func pkgResolveTypeAST(pkg *SSAPackage, e Expr) (t Type) {
 	if e == nil {
 		return nil
 	}
@@ -178,7 +178,7 @@ func pkgResolveTypeAST(pkg *SSAPackage, e Expr) Type {
 	return nil
 }
 
-func pkgResolveSigAST(pkg *SSAPackage, ft *FuncType) *Signature {
+func pkgResolveSigAST(pkg *SSAPackage, ft *FuncType) (s *Signature) {
 	if ft == nil {
 		return nil
 	}
@@ -259,7 +259,7 @@ func (pb *ssaPkgBuilder) registerFunc(d *FuncDecl) {
 	pb.pkg.Members[fn.name] = fn
 }
 
-func checkInitBody(body *BlockStmt) string {
+func checkInitBody(body *BlockStmt) (s string) {
 	for _, s := range body.List {
 		if err := checkInitStmt(s); err != "" {
 			return err
@@ -268,7 +268,7 @@ func checkInitBody(body *BlockStmt) string {
 	return ""
 }
 
-func checkInitStmt(s Stmt) string {
+func checkInitStmt(s Stmt) (sv string) {
 	switch s := s.(type) {
 	case *SelectStmt:
 		return "select{} not allowed in init()"
@@ -311,7 +311,7 @@ func checkInitStmt(s Stmt) string {
 	return ""
 }
 
-func checkInitExpr(x Expr) string {
+func checkInitExpr(x Expr) (s string) {
 	if x == nil {
 		return ""
 	}
@@ -323,7 +323,7 @@ func checkInitExpr(x Expr) string {
 	return ""
 }
 
-func isNoContextExtern(pkg, name string) bool {
+func isNoContextExtern(pkg, name string) (ok bool) {
 	if pkg == "internal/runtime/syscall" && name == "Syscall6" {
 		return true
 	}
@@ -371,7 +371,7 @@ func (pb *ssaPkgBuilder) registerMethod(d *FuncDecl) {
 	pb.pkg.Members[mangledName] = fn
 }
 
-func ssaRecvTypeName(recv *Field) string {
+func ssaRecvTypeName(recv *Field) (s string) {
 	if recv == nil {
 		return ""
 	}
@@ -388,7 +388,7 @@ func ssaRecvTypeName(recv *Field) string {
 	return ""
 }
 
-func (pb *ssaPkgBuilder) findMethod(typeName string, methodName string) *TCFunc {
+func (pb *ssaPkgBuilder) findMethod(typeName string, methodName string) (t *TCFunc) {
 	obj := pb.pkg.Pkg.Scope().Lookup(typeName)
 	if obj == nil && Universe != nil {
 		obj = Universe.Lookup(typeName)
@@ -623,7 +623,7 @@ type ssaLoopState struct {
 	done  *SSABasicBlock
 }
 
-func newSSAFuncBuilder(fn *SSAFunction, info *Info) *ssaFuncBuilder {
+func newSSAFuncBuilder(fn *SSAFunction, info *Info) (p *ssaFuncBuilder) {
 	return &ssaFuncBuilder{
 		fn:         fn,
 		info:       info,
@@ -632,11 +632,11 @@ func newSSAFuncBuilder(fn *SSAFunction, info *Info) *ssaFuncBuilder {
 	}
 }
 
-func (fb *ssaFuncBuilder) newBlock(comment string) *SSABasicBlock {
+func (fb *ssaFuncBuilder) newBlock(comment string) (s *SSABasicBlock) {
 	return NewSSABasicBlock(fb.fn, comment)
 }
 
-func (fb *ssaFuncBuilder) labelBlock(name string) *SSABasicBlock {
+func (fb *ssaFuncBuilder) labelBlock(name string) (s *SSABasicBlock) {
 	if fb.labels == nil {
 		fb.labels = map[string]*SSABasicBlock{}
 	}
@@ -656,7 +656,7 @@ func (fb *ssaFuncBuilder) emit(instr SSAInstruction) {
 	fb.currentBlock.Instrs = append(fb.currentBlock.Instrs, instr)
 }
 
-func (fb *ssaFuncBuilder) nextName() string {
+func (fb *ssaFuncBuilder) nextName() (s string) {
 	fb.counter++
 	return "t" | ssaItoa(fb.counter)
 }
@@ -756,7 +756,7 @@ func (fb *ssaFuncBuilder) buildBody(d *FuncDecl) {
 	fb.fn.NamedResults = fb.namedResults
 }
 
-func (fb *ssaFuncBuilder) emitAlloc(typ Type, pos int32) *SSAAlloc {
+func (fb *ssaFuncBuilder) emitAlloc(typ Type, pos int32) (s *SSAAlloc) {
 	a := &SSAAlloc{Heap: false}
 	a.typ = NewPointer(typ)
 	a.pos = pos
@@ -770,7 +770,7 @@ func (fb *ssaFuncBuilder) emitStore(addr SSAValue, val SSAValue) {
 	fb.emit(&SSAStore{Addr: addr, Val: val})
 }
 
-func (fb *ssaFuncBuilder) emitLoad(addr SSAValue, typ Type) SSAValue {
+func (fb *ssaFuncBuilder) emitLoad(addr SSAValue, typ Type) (s SSAValue) {
 	u := &SSAUnOp{Op: OpMul, X: addr}
 	u.typ = typ
 	u.name = fb.nextName()
@@ -783,7 +783,7 @@ func (fb *ssaFuncBuilder) emitReturn(vals []SSAValue, pos int32) {
 	fb.currentBlock = nil
 }
 
-func (fb *ssaFuncBuilder) blockTerminated(b *SSABasicBlock) bool {
+func (fb *ssaFuncBuilder) blockTerminated(b *SSABasicBlock) (ok bool) {
 	if len(b.Instrs) == 0 {
 		return false
 	}
@@ -985,7 +985,7 @@ func (fb *ssaFuncBuilder) buildAssign(s *AssignStmt) {
 	fb.buildStore(s.Lhs, rhs)
 }
 
-func (fb *ssaFuncBuilder) coerceToInterface(val SSAValue, targetType Type) SSAValue {
+func (fb *ssaFuncBuilder) coerceToInterface(val SSAValue, targetType Type) (s SSAValue) {
 	if targetType == nil || val == nil || val.SSAType() == nil {
 		return val
 	}
@@ -1344,7 +1344,7 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d Decl) {
 	}
 }
 
-func (fb *ssaFuncBuilder) evalLocalConstExpr(e Expr) ConstVal {
+func (fb *ssaFuncBuilder) evalLocalConstExpr(e Expr) (c ConstVal) {
 	if e == nil {
 		return nil
 	}
@@ -2150,7 +2150,7 @@ func (fb *ssaFuncBuilder) buildDeferStmt(call *CallExpr) {
 
 // Expression builders.
 
-func (fb *ssaFuncBuilder) buildExpr(e Expr) SSAValue {
+func (fb *ssaFuncBuilder) buildExpr(e Expr) (s SSAValue) {
 	if e == nil || fb.currentBlock == nil {
 		return nil
 	}
@@ -2189,7 +2189,7 @@ func (fb *ssaFuncBuilder) buildExpr(e Expr) SSAValue {
 	return nil
 }
 
-func (fb *ssaFuncBuilder) buildIdent(e *Name) SSAValue {
+func (fb *ssaFuncBuilder) buildIdent(e *Name) (s SSAValue) {
 	if e.Value == "_" || e.Value == "nil" {
 		return &SSAConst{typ: nil, val: nil}
 	}
@@ -2250,7 +2250,7 @@ func (fb *ssaFuncBuilder) buildIdent(e *Name) SSAValue {
 	return nil
 }
 
-func (fb *ssaFuncBuilder) builtinValue(name string) SSAValue {
+func (fb *ssaFuncBuilder) builtinValue(name string) (s SSAValue) {
 	id, ok := ssaBuiltinID(name)
 	if !ok {
 		return nil
@@ -2258,7 +2258,7 @@ func (fb *ssaFuncBuilder) builtinValue(name string) SSAValue {
 	return &SSABuiltin{id: id, name: name}
 }
 
-func (fb *ssaFuncBuilder) buildLit(e *BasicLit) SSAValue {
+func (fb *ssaFuncBuilder) buildLit(e *BasicLit) (s SSAValue) {
 	cv := evalBasicLitLocal(e)
 	if cv == nil {
 		return nil
@@ -2276,7 +2276,7 @@ func (fb *ssaFuncBuilder) buildLit(e *BasicLit) SSAValue {
 	return nil
 }
 
-func (fb *ssaFuncBuilder) buildOperation(e *Operation) SSAValue {
+func (fb *ssaFuncBuilder) buildOperation(e *Operation) (s SSAValue) {
 	if e.Y == nil {
 		if e.Op == Add {
 			return fb.buildExpr(e.X)
@@ -2438,7 +2438,7 @@ func (fb *ssaFuncBuilder) buildOperation(e *Operation) SSAValue {
 	return b
 }
 
-func (fb *ssaFuncBuilder) buildCall(e *CallExpr) SSAValue {
+func (fb *ssaFuncBuilder) buildCall(e *CallExpr) (s SSAValue) {
 	if ie, ok := e.Fun.(*IndexExpr); ok {
 		if result := fb.tryGenericCallFromIndex(ie, e.ArgList, e.HasDots); result != nil {
 			return result
@@ -2566,7 +2566,7 @@ func (fb *ssaFuncBuilder) buildCall(e *CallExpr) SSAValue {
 	return call
 }
 
-func (fb *ssaFuncBuilder) coerceArgsToInterface(args []SSAValue, sig *Signature) []SSAValue {
+func (fb *ssaFuncBuilder) coerceArgsToInterface(args []SSAValue, sig *Signature) (ss []SSAValue) {
 	if sig.Params() == nil {
 		return args
 	}
@@ -2592,7 +2592,7 @@ func (fb *ssaFuncBuilder) coerceArgsToInterface(args []SSAValue, sig *Signature)
 	return args
 }
 
-func (fb *ssaFuncBuilder) wrapVariadicArgs(args []SSAValue, sig *Signature) []SSAValue {
+func (fb *ssaFuncBuilder) wrapVariadicArgs(args []SSAValue, sig *Signature) (ss []SSAValue) {
 	if sig.Params() == nil {
 		return args
 	}
@@ -2647,7 +2647,7 @@ func (fb *ssaFuncBuilder) wrapVariadicArgs(args []SSAValue, sig *Signature) []SS
 	return append(result, ms)
 }
 
-func (fb *ssaFuncBuilder) buildArgs(argList []Expr) []SSAValue {
+func (fb *ssaFuncBuilder) buildArgs(argList []Expr) (ss []SSAValue) {
 	args := []SSAValue{:0:len(argList)}
 	for _, a := range argList {
 		v := fb.buildExpr(a)
@@ -2671,7 +2671,7 @@ func (fb *ssaFuncBuilder) buildArgs(argList []Expr) []SSAValue {
 	return args
 }
 
-func (fb *ssaFuncBuilder) buildBuiltinCall(e *CallExpr, b *SSABuiltin, args []SSAValue) SSAValue {
+func (fb *ssaFuncBuilder) buildBuiltinCall(e *CallExpr, b *SSABuiltin, args []SSAValue) (s SSAValue) {
 	switch b.id {
 	case BuiltinLen, BuiltinCap:
 		if b.id == BuiltinLen && len(args) == 1 {
@@ -2772,7 +2772,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *CallExpr, b *SSABuiltin, args []SS
 	return call
 }
 
-func (fb *ssaFuncBuilder) emitMake(typ Type, sizeArgs []SSAValue) SSAValue {
+func (fb *ssaFuncBuilder) emitMake(typ Type, sizeArgs []SSAValue) (s SSAValue) {
 	if typ == nil {
 		return nil
 	}
@@ -2825,7 +2825,7 @@ func (fb *ssaFuncBuilder) emitMake(typ Type, sizeArgs []SSAValue) SSAValue {
 	return nil
 }
 
-func (fb *ssaFuncBuilder) buildSelector(e *SelectorExpr) SSAValue {
+func (fb *ssaFuncBuilder) buildSelector(e *SelectorExpr) (s SSAValue) {
 	if name, ok := e.X.(*Name); ok {
 		obj := fb.lookupObject(name.Value)
 		if pn, ok2 := obj.(*PkgName); ok2 {
@@ -2847,7 +2847,7 @@ func (fb *ssaFuncBuilder) buildSelector(e *SelectorExpr) SSAValue {
 	return fb.buildMethodValue(e, recv)
 }
 
-func (fb *ssaFuncBuilder) buildMethodValue(sel *SelectorExpr, recv SSAValue) SSAValue {
+func (fb *ssaFuncBuilder) buildMethodValue(sel *SelectorExpr, recv SSAValue) (s SSAValue) {
 	fn, fixedRecv := fb.resolveMethodCallWithRecv(sel, recv)
 	if fn == nil || fn.Signature == nil {
 		return nil
@@ -2911,7 +2911,7 @@ func (fb *ssaFuncBuilder) buildMethodValue(sel *SelectorExpr, recv SSAValue) SSA
 	return mc
 }
 
-func (fb *ssaFuncBuilder) ensureImportedSSAPackage(imported *TCPackage) *SSAPackage {
+func (fb *ssaFuncBuilder) ensureImportedSSAPackage(imported *TCPackage) (s *SSAPackage) {
 	impPkg := fb.fn.Prog.ImportedPackage(imported.Path())
 	if impPkg == nil {
 		impPkg = &SSAPackage{
@@ -2925,7 +2925,7 @@ func (fb *ssaFuncBuilder) ensureImportedSSAPackage(imported *TCPackage) *SSAPack
 	return impPkg
 }
 
-func (fb *ssaFuncBuilder) buildPkgMember(pn *PkgName, memberName string) SSAValue {
+func (fb *ssaFuncBuilder) buildPkgMember(pn *PkgName, memberName string) (s SSAValue) {
 	imported := pn.Imported()
 	if imported == nil {
 		return nil
@@ -2960,7 +2960,7 @@ func (fb *ssaFuncBuilder) buildPkgMember(pn *PkgName, memberName string) SSAValu
 	return nil
 }
 
-func (fb *ssaFuncBuilder) buildSelectorAddr(e *SelectorExpr) SSAValue {
+func (fb *ssaFuncBuilder) buildSelectorAddr(e *SelectorExpr) (s SSAValue) {
 	var addr SSAValue
 	var structType Type
 	if inner, ok := e.X.(*SelectorExpr); ok {
@@ -3080,7 +3080,7 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *SelectorExpr) SSAValue {
 	return nil
 }
 
-func (fb *ssaFuncBuilder) buildIndex(e *IndexExpr) SSAValue {
+func (fb *ssaFuncBuilder) buildIndex(e *IndexExpr) (s SSAValue) {
 	x := fb.buildExpr(e.X)
 	idx := fb.buildExpr(e.Index)
 	if x == nil || idx == nil {
@@ -3121,7 +3121,7 @@ func (fb *ssaFuncBuilder) buildIndex(e *IndexExpr) SSAValue {
 	}
 }
 
-func (fb *ssaFuncBuilder) buildSlice(e *SliceExpr) SSAValue {
+func (fb *ssaFuncBuilder) buildSlice(e *SliceExpr) (s SSAValue) {
 	x := fb.buildExpr(e.X)
 	if x == nil {
 		return nil
@@ -3142,7 +3142,7 @@ func (fb *ssaFuncBuilder) buildSlice(e *SliceExpr) SSAValue {
 	return sl
 }
 
-func (fb *ssaFuncBuilder) buildAssert(e *AssertExpr) SSAValue {
+func (fb *ssaFuncBuilder) buildAssert(e *AssertExpr) (s SSAValue) {
 	x := fb.buildExpr(e.X)
 	assertedType := fb.resolveType(e.Type)
 	if x == nil {
@@ -3155,7 +3155,7 @@ func (fb *ssaFuncBuilder) buildAssert(e *AssertExpr) SSAValue {
 	return ta
 }
 
-func (fb *ssaFuncBuilder) buildCompositeLit(e *CompositeLit) SSAValue {
+func (fb *ssaFuncBuilder) buildCompositeLit(e *CompositeLit) (s SSAValue) {
 	var typ Type
 	if e.Type != nil {
 		typ = fb.resolveType(e.Type)
@@ -3229,7 +3229,7 @@ func (fb *ssaFuncBuilder) buildCompositeLit(e *CompositeLit) SSAValue {
 	return fb.emitLoad(alloc, typ)
 }
 
-func (fb *ssaFuncBuilder) buildArrayLit(e *CompositeLit, typ Type, ar *Array) SSAValue {
+func (fb *ssaFuncBuilder) buildArrayLit(e *CompositeLit, typ Type, ar *Array) (s SSAValue) {
 	if ar.Len() < 0 {
 		ar = NewArray(ar.Elem(), int64(len(e.ElemList)))
 		typ = ar
@@ -3263,7 +3263,7 @@ func (fb *ssaFuncBuilder) buildArrayLit(e *CompositeLit, typ Type, ar *Array) SS
 	return fb.emitLoad(alloc, typ)
 }
 
-func (fb *ssaFuncBuilder) buildCompositeLitWithType(e *CompositeLit, typ Type) SSAValue {
+func (fb *ssaFuncBuilder) buildCompositeLitWithType(e *CompositeLit, typ Type) (s SSAValue) {
 	if sl, ok := safeUnderlying(typ).(*Slice); ok {
 		return fb.buildSliceLit(e, typ, sl)
 	}
@@ -3308,7 +3308,7 @@ func (fb *ssaFuncBuilder) buildCompositeLitWithType(e *CompositeLit, typ Type) S
 	return fb.emitLoad(alloc, typ)
 }
 
-func (fb *ssaFuncBuilder) buildSliceLit(e *CompositeLit, typ Type, sl *Slice) SSAValue {
+func (fb *ssaFuncBuilder) buildSliceLit(e *CompositeLit, typ Type, sl *Slice) (s SSAValue) {
 	n := len(e.ElemList)
 	nVal := &SSAConst{typ: Typ[Int32], val: constInt{int64(n)}}
 	ms := &SSAMakeSlice{}
@@ -3346,7 +3346,7 @@ func (fb *ssaFuncBuilder) buildSliceLit(e *CompositeLit, typ Type, sl *Slice) SS
 	return ms
 }
 
-func (fb *ssaFuncBuilder) buildFuncLit(e *FuncLit) SSAValue {
+func (fb *ssaFuncBuilder) buildFuncLit(e *FuncLit) (s SSAValue) {
 	var sig *Signature
 	if fb.info != nil {
 		if tv, ok := fb.info.Types[e]; ok {
@@ -3400,7 +3400,7 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *FuncLit) SSAValue {
 	return mc
 }
 
-func (fb *ssaFuncBuilder) saveVars() map[Object]*SSAAlloc {
+func (fb *ssaFuncBuilder) saveVars() (m map[Object]*SSAAlloc) {
 	saved := map[Object]*SSAAlloc{}
 	for k, v := range fb.vars {
 		saved[k] = v
@@ -3433,7 +3433,7 @@ func (fb *ssaFuncBuilder) removeVar(name string) {
 }
 
 
-func (fb *ssaFuncBuilder) buildPkgMemberAddr(pn *PkgName, memberName string) SSAValue {
+func (fb *ssaFuncBuilder) buildPkgMemberAddr(pn *PkgName, memberName string) (s SSAValue) {
 	imported := pn.Imported()
 	if imported == nil {
 		return nil
@@ -3461,7 +3461,7 @@ func (fb *ssaFuncBuilder) buildPkgMemberAddr(pn *PkgName, memberName string) SSA
 	return nil
 }
 
-func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []Expr, hasDots bool) SSAValue {
+func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []Expr, hasDots bool) (s SSAValue) {
 	imported := pn.Imported()
 	if imported == nil {
 		return nil
@@ -3527,7 +3527,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []E
 	return call
 }
 
-func (fb *ssaFuncBuilder) buildUnsafeSlice(argList []Expr) SSAValue {
+func (fb *ssaFuncBuilder) buildUnsafeSlice(argList []Expr) (s SSAValue) {
 	if len(argList) < 2 {
 		return nil
 	}
@@ -3556,7 +3556,7 @@ func (fb *ssaFuncBuilder) buildUnsafeSlice(argList []Expr) SSAValue {
 
 // Helpers.
 
-func (fb *ssaFuncBuilder) lookupObject(name string) Object {
+func (fb *ssaFuncBuilder) lookupObject(name string) (o Object) {
 	for obj := range fb.vars {
 		if obj.Name() == name {
 			return obj
@@ -3585,7 +3585,7 @@ func (fb *ssaFuncBuilder) lookupObject(name string) Object {
 	return nil
 }
 
-func (fb *ssaFuncBuilder) getOrCreateFreeVar(name string, typ Type) SSAValue {
+func (fb *ssaFuncBuilder) getOrCreateFreeVar(name string, typ Type) (s SSAValue) {
 	for _, fv := range fb.fn.FreeVars {
 		if fv.name == name {
 			return fv
@@ -3604,7 +3604,7 @@ func (fb *ssaFuncBuilder) getOrCreateFreeVar(name string, typ Type) SSAValue {
 	return fv
 }
 
-func (fb *ssaFuncBuilder) lookupVar(name string) *TCVar {
+func (fb *ssaFuncBuilder) lookupVar(name string) (t *TCVar) {
 	obj := fb.lookupObject(name)
 	v, _ := obj.(*TCVar)
 	return v
@@ -3906,7 +3906,7 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *SelectorExpr, recv SSAV
 	return nil, nil
 }
 
-func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *SelectorExpr, recv SSAValue, argExprs []Expr) SSAValue {
+func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *SelectorExpr, recv SSAValue, argExprs []Expr) (s SSAValue) {
 	typ := recv.SSAType()
 	if p, ok := safeUnderlying(typ).(*Pointer); ok {
 		typ = p.Elem()
@@ -3950,7 +3950,7 @@ func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *SelectorExpr, recv SSAValue,
 	return inv
 }
 
-func (fb *ssaFuncBuilder) resolveType(e Expr) Type {
+func (fb *ssaFuncBuilder) resolveType(e Expr) (t Type) {
 	if fb.info != nil {
 		if tv, ok := fb.info.Types[e]; ok && tv.Type != nil {
 			return tv.Type
@@ -3960,7 +3960,7 @@ func (fb *ssaFuncBuilder) resolveType(e Expr) Type {
 	return t
 }
 
-func (fb *ssaFuncBuilder) resolveTypeAST(e Expr) Type {
+func (fb *ssaFuncBuilder) resolveTypeAST(e Expr) (t Type) {
 	if e == nil {
 		return nil
 	}
@@ -4054,7 +4054,7 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e Expr) Type {
 	return nil
 }
 
-func (fb *ssaFuncBuilder) resolveInterfaceTypeAST(e *InterfaceType) *TCInterface {
+func (fb *ssaFuncBuilder) resolveInterfaceTypeAST(e *InterfaceType) (t *TCInterface) {
 	var methods []*IfaceMethod
 	for _, f := range e.MethodList {
 		if f.Name == nil {
@@ -4074,7 +4074,7 @@ func (fb *ssaFuncBuilder) resolveInterfaceTypeAST(e *InterfaceType) *TCInterface
 	return iface
 }
 
-func (fb *ssaFuncBuilder) resolveStructTypeAST(e *StructType) *TCStruct {
+func (fb *ssaFuncBuilder) resolveStructTypeAST(e *StructType) (t *TCStruct) {
 	var fields []*TCVar
 	var tags []string
 	for i, f := range e.FieldList {
@@ -4096,7 +4096,7 @@ func (fb *ssaFuncBuilder) resolveStructTypeAST(e *StructType) *TCStruct {
 	return NewTCStruct(fields, tags)
 }
 
-func (fb *ssaFuncBuilder) resolveFuncTypeAST(ft *FuncType) *Signature {
+func (fb *ssaFuncBuilder) resolveFuncTypeAST(ft *FuncType) (s *Signature) {
 	if ft == nil {
 		return nil
 	}
@@ -4128,7 +4128,7 @@ func (fb *ssaFuncBuilder) resolveFuncTypeAST(ft *FuncType) *Signature {
 	return NewSignature(nil, pTuple, rTuple, false)
 }
 
-func (fb *ssaFuncBuilder) fieldIndex(t Type, name string) int32 {
+func (fb *ssaFuncBuilder) fieldIndex(t Type, name string) (n int32) {
 	if t == nil {
 		return -1
 	}
@@ -4153,7 +4153,7 @@ func (fb *ssaFuncBuilder) findEmbeddedField(t Type, name string) (embedIdx int32
 	return path[0], path[1]
 }
 
-func (fb *ssaFuncBuilder) findEmbeddedFieldPath(t Type, name string) []int32 {
+func (fb *ssaFuncBuilder) findEmbeddedFieldPath(t Type, name string) (ss []int32) {
 	if t == nil {
 		return nil
 	}
@@ -4185,7 +4185,7 @@ func (fb *ssaFuncBuilder) findEmbeddedFieldPath(t Type, name string) []int32 {
 	return nil
 }
 
-func (fb *ssaFuncBuilder) fieldType(t Type, idx int32) Type {
+func (fb *ssaFuncBuilder) fieldType(t Type, idx int32) (tv Type) {
 	if t == nil {
 		return nil
 	}
@@ -4200,7 +4200,7 @@ func (fb *ssaFuncBuilder) fieldType(t Type, idx int32) Type {
 	return nil
 }
 
-func ssaExtractConst(v SSAValue) *SSAConst {
+func ssaExtractConst(v SSAValue) (s *SSAConst) {
 	if c, ok := v.(*SSAConst); ok {
 		return c
 	}
@@ -4212,7 +4212,7 @@ func ssaExtractConst(v SSAValue) *SSAConst {
 	return nil
 }
 
-func ssaExprNames(e Expr) []*Name {
+func ssaExprNames(e Expr) (ns []*Name) {
 	if e == nil {
 		return nil
 	}
@@ -4231,14 +4231,14 @@ func ssaExprNames(e Expr) []*Name {
 	return nil
 }
 
-func localizeConstVal(val ConstVal, typ Type) ConstVal {
+func localizeConstVal(val ConstVal, typ Type) (c ConstVal) {
 	if val == nil {
 		return nil
 	}
 	return val
 }
 
-func mangleGenericName(baseName string, typeArgs []Type) string {
+func mangleGenericName(baseName string, typeArgs []Type) (s string) {
 	s := baseName | "__"
 	for i, t := range typeArgs {
 		if i > 0 {
@@ -4263,7 +4263,7 @@ func mangleGenericName(baseName string, typeArgs []Type) string {
 	return s
 }
 
-func resolveTypeExprWithSubst(e Expr, typeSubst map[string]Type, pkgScope *Scope) Type {
+func resolveTypeExprWithSubst(e Expr, typeSubst map[string]Type, pkgScope *Scope) (t Type) {
 	if e == nil {
 		return nil
 	}
@@ -4379,7 +4379,7 @@ func resolveTypeExprWithSubst(e Expr, typeSubst map[string]Type, pkgScope *Scope
 	return nil
 }
 
-func resolveSignatureWithSubst(ft *FuncType, typeSubst map[string]Type, pkgScope *Scope) *Signature {
+func resolveSignatureWithSubst(ft *FuncType, typeSubst map[string]Type, pkgScope *Scope) (s *Signature) {
 	if ft == nil {
 		return nil
 	}
@@ -4498,7 +4498,7 @@ func extractConstraintTypeParams(constraint Expr, concreteType Type, tparams []*
 	}
 }
 
-func inferTypeArgsFromFunc(fd *FuncDecl, args []SSAValue) []Type {
+func inferTypeArgsFromFunc(fd *FuncDecl, args []SSAValue) (ts []Type) {
 	typeMap := map[string]Type{}
 	if fd.Type != nil {
 		for i, param := range fd.Type.ParamList {
@@ -4518,7 +4518,7 @@ func inferTypeArgsFromFunc(fd *FuncDecl, args []SSAValue) []Type {
 	return result
 }
 
-func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *FuncDecl, baseName string, typeArgs []Type, args []SSAValue, targetPkg *SSAPackage, srcPkgPath string, hasDots bool) SSAValue {
+func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *FuncDecl, baseName string, typeArgs []Type, args []SSAValue, targetPkg *SSAPackage, srcPkgPath string, hasDots bool) (s SSAValue) {
 	for _, ta := range typeArgs {
 		if ta == nil {
 			return nil
@@ -4558,7 +4558,7 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *FuncDecl, baseName string, typ
 	return fb.emitCallToSSAFunc(fn, args, hasDots)
 }
 
-func (fb *ssaFuncBuilder) emitCallToSSAFunc(fn *SSAFunction, args []SSAValue, hasDots bool) SSAValue {
+func (fb *ssaFuncBuilder) emitCallToSSAFunc(fn *SSAFunction, args []SSAValue, hasDots bool) (s SSAValue) {
 	if fn.Signature != nil {
 		if fn.Signature.Variadic() && !hasDots {
 			args = fb.wrapVariadicArgs(args, fn.Signature)
@@ -4583,7 +4583,7 @@ func (fb *ssaFuncBuilder) emitCallToSSAFunc(fn *SSAFunction, args []SSAValue, ha
 	return call
 }
 
-func (fb *ssaFuncBuilder) tryGenericLocalCall(funcName string, argList []Expr, hasDots bool) SSAValue {
+func (fb *ssaFuncBuilder) tryGenericLocalCall(funcName string, argList []Expr, hasDots bool) (s SSAValue) {
 	pkgPath := fb.fn.Pkg.Pkg.Path()
 	key := pkgPath + "." + funcName
 	fd, ok := genericFuncDecls[key]
@@ -4607,7 +4607,7 @@ func (fb *ssaFuncBuilder) tryGenericLocalCall(funcName string, argList []Expr, h
 	return fb.monomorphizeAndCall(fd, funcName, typeArgs, args, fb.fn.Pkg, pkgPath, hasDots)
 }
 
-func (fb *ssaFuncBuilder) tryGenericPkgCall(pn *PkgName, funcName string, argList []Expr, hasDots bool) SSAValue {
+func (fb *ssaFuncBuilder) tryGenericPkgCall(pn *PkgName, funcName string, argList []Expr, hasDots bool) (s SSAValue) {
 	imported := pn.Imported()
 	if imported == nil {
 		return nil
@@ -4622,7 +4622,7 @@ func (fb *ssaFuncBuilder) tryGenericPkgCall(pn *PkgName, funcName string, argLis
 	return fb.monomorphizeAndCall(fd, funcName, typeArgs, args, fb.fn.Pkg, imported.Path(), hasDots)
 }
 
-func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *IndexExpr, argList []Expr, hasDots bool) SSAValue {
+func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *IndexExpr, argList []Expr, hasDots bool) (s SSAValue) {
 	switch x := ie.X.(type) {
 	case *Name:
 		pkgPath := fb.fn.Pkg.Pkg.Path()
@@ -4664,7 +4664,7 @@ func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *IndexExpr, argList []Expr,
 	return nil
 }
 
-func (fb *ssaFuncBuilder) resolveExplicitTypeArgs(indexExpr Expr, fd *FuncDecl) []Type {
+func (fb *ssaFuncBuilder) resolveExplicitTypeArgs(indexExpr Expr, fd *FuncDecl) (ts []Type) {
 	var typeExprs []Expr
 	if le, ok := indexExpr.(*ListExpr); ok {
 		typeExprs = le.ElemList
@@ -4694,7 +4694,7 @@ func (fb *ssaFuncBuilder) resolveExplicitTypeArgs(indexExpr Expr, fd *FuncDecl) 
 	return result
 }
 
-func exprTypeName(e Expr) string {
+func exprTypeName(e Expr) (s string) {
 	switch e := e.(type) {
 	case *Name:
 		return "Name(" | e.Value | ")"

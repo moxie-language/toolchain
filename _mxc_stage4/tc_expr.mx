@@ -2,7 +2,7 @@ package main
 
 // checkExpr type-checks an expression and returns its type.
 // It also records the type info in c.info if non-nil.
-func (c *Checker) checkExpr(e Expr, scope *Scope) Type {
+func (c *Checker) checkExpr(e Expr, scope *Scope) (t Type) {
 	if e == nil {
 		return nil
 	}
@@ -12,7 +12,7 @@ func (c *Checker) checkExpr(e Expr, scope *Scope) Type {
 }
 
 // typeExpr computes the TCTypeAndValue for expression e.
-func (c *Checker) typeExpr(e Expr, scope *Scope) TCTypeAndValue {
+func (c *Checker) typeExpr(e Expr, scope *Scope) (t TCTypeAndValue) {
 	switch e := e.(type) {
 	case *Name:
 		return c.typeIdent(e, scope)
@@ -59,7 +59,7 @@ func (c *Checker) typeExpr(e Expr, scope *Scope) TCTypeAndValue {
 	return TCTypeAndValue{}
 }
 
-func (c *Checker) typeIdent(e *Name, scope *Scope) TCTypeAndValue {
+func (c *Checker) typeIdent(e *Name, scope *Scope) (t TCTypeAndValue) {
 	if e.Value == "_" {
 		return TCTypeAndValue{mode: modeValue}
 	}
@@ -88,7 +88,7 @@ func (c *Checker) typeIdent(e *Name, scope *Scope) TCTypeAndValue {
 	return TCTypeAndValue{}
 }
 
-func (c *Checker) typeBasicLit(e *BasicLit) TCTypeAndValue {
+func (c *Checker) typeBasicLit(e *BasicLit) (t TCTypeAndValue) {
 	switch e.Kind {
 	case IntLit:
 		return TCTypeAndValue{Type: Typ[UntypedInt], mode: modeConst}
@@ -102,7 +102,7 @@ func (c *Checker) typeBasicLit(e *BasicLit) TCTypeAndValue {
 	return TCTypeAndValue{}
 }
 
-func (c *Checker) typeOperation(e *Operation, scope *Scope) TCTypeAndValue {
+func (c *Checker) typeOperation(e *Operation, scope *Scope) (t TCTypeAndValue) {
 	if e.Y == nil {
 		// unary
 		xt := c.checkExpr(e.X, scope)
@@ -148,7 +148,7 @@ func (c *Checker) typeOperation(e *Operation, scope *Scope) TCTypeAndValue {
 	}
 }
 
-func (c *Checker) typeCall(e *CallExpr, scope *Scope) TCTypeAndValue {
+func (c *Checker) typeCall(e *CallExpr, scope *Scope) (t TCTypeAndValue) {
 	funTV := c.typeExpr(e.Fun, scope)
 	if c.info != nil {
 		c.info.Types[e.Fun] = funTV
@@ -186,7 +186,7 @@ func (c *Checker) typeCall(e *CallExpr, scope *Scope) TCTypeAndValue {
 	return TCTypeAndValue{Type: sig.results, mode: modeValue}
 }
 
-func (c *Checker) typeBuiltinCall(e *CallExpr, scope *Scope) TCTypeAndValue {
+func (c *Checker) typeBuiltinCall(e *CallExpr, scope *Scope) (t TCTypeAndValue) {
 	// Determine which builtin from the ident.
 	name, ok := e.Fun.(*Name)
 	if !ok {
@@ -228,7 +228,7 @@ func (c *Checker) typeBuiltinCall(e *CallExpr, scope *Scope) TCTypeAndValue {
 	return TCTypeAndValue{}
 }
 
-func (c *Checker) typeSelector(e *SelectorExpr, scope *Scope) TCTypeAndValue {
+func (c *Checker) typeSelector(e *SelectorExpr, scope *Scope) (t TCTypeAndValue) {
 	xt := c.typeExpr(e.X, scope)
 	if c.info != nil {
 		c.info.Types[e.X] = xt
@@ -268,7 +268,7 @@ func (c *Checker) typeSelector(e *SelectorExpr, scope *Scope) TCTypeAndValue {
 	return TCTypeAndValue{}
 }
 
-func (c *Checker) typeIndex(e *IndexExpr, scope *Scope) TCTypeAndValue {
+func (c *Checker) typeIndex(e *IndexExpr, scope *Scope) (t TCTypeAndValue) {
 	xt := c.checkExpr(e.X, scope)
 	c.checkExpr(e.Index, scope)
 	if xt == nil {
@@ -285,7 +285,7 @@ func (c *Checker) typeIndex(e *IndexExpr, scope *Scope) TCTypeAndValue {
 	return TCTypeAndValue{}
 }
 
-func (c *Checker) typeSlice(e *SliceExpr, scope *Scope) TCTypeAndValue {
+func (c *Checker) typeSlice(e *SliceExpr, scope *Scope) (t TCTypeAndValue) {
 	xt := c.checkExpr(e.X, scope)
 	for _, idx := range e.Index {
 		if idx != nil {
@@ -311,13 +311,13 @@ func (c *Checker) typeSlice(e *SliceExpr, scope *Scope) TCTypeAndValue {
 	return TCTypeAndValue{}
 }
 
-func (c *Checker) typeAssert(e *AssertExpr, scope *Scope) TCTypeAndValue {
+func (c *Checker) typeAssert(e *AssertExpr, scope *Scope) (t TCTypeAndValue) {
 	c.checkExpr(e.X, scope)
 	assertedType := c.resolveTypeExpr(e.Type)
 	return TCTypeAndValue{Type: assertedType, mode: modeValue}
 }
 
-func (c *Checker) typeCompositeLit(e *CompositeLit, scope *Scope) TCTypeAndValue {
+func (c *Checker) typeCompositeLit(e *CompositeLit, scope *Scope) (t TCTypeAndValue) {
 	var typ Type
 	if e.Type != nil {
 		typ = c.resolveTypeExpr(e.Type)
@@ -356,7 +356,7 @@ func (c *Checker) typeCompositeLit(e *CompositeLit, scope *Scope) TCTypeAndValue
 // because composite literals with key:value syntax on a Named type are
 // always struct literals in Moxie code - map literals use an explicit
 // map[K]V type, never a Named alias at this level.
-func isStructType(t Type) bool {
+func isStructType(t Type) (ok bool) {
 	if t == nil {
 		return false
 	}
@@ -372,7 +372,7 @@ func isStructType(t Type) bool {
 	return false
 }
 
-func (c *Checker) typeFuncLit(e *FuncLit, scope *Scope) TCTypeAndValue {
+func (c *Checker) typeFuncLit(e *FuncLit, scope *Scope) (t TCTypeAndValue) {
 	sig := c.resolveFuncType(e.Type, nil)
 	inner := c.openScope(e.Body, scope)
 	if sig != nil {
@@ -398,7 +398,7 @@ func (c *Checker) typeFuncLit(e *FuncLit, scope *Scope) TCTypeAndValue {
 }
 
 // lookupFieldOrMethod finds a field or method named name on type t.
-func (c *Checker) lookupFieldOrMethod(t Type, name string) *Selection {
+func (c *Checker) lookupFieldOrMethod(t Type, name string) (s *Selection) {
 	if t == nil {
 		return nil
 	}
@@ -452,7 +452,7 @@ func (c *Checker) lookupFieldOrMethod(t Type, name string) *Selection {
 	return nil
 }
 
-func isRuneKind(t Type) bool {
+func isRuneKind(t Type) (ok bool) {
 	if t == nil {
 		return false
 	}
@@ -465,7 +465,7 @@ func isRuneKind(t Type) bool {
 	return false
 }
 
-func isStringKind(t Type) bool {
+func isStringKind(t Type) (ok bool) {
 	if t == nil {
 		return false
 	}

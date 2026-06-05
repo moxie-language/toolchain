@@ -4,14 +4,14 @@ import (
 	"math"
 )
 
-func lIndexByte(b []byte, c byte) int32 {
+func lIndexByte(b []byte, c byte) (n int32) {
 	for i := int32(0); i < int32(len(b)); i++ {
 		if b[i] == c { return i }
 	}
 	return -1
 }
 
-func lIndex(s, sep []byte) int32 {
+func lIndex(s, sep []byte) (n int32) {
 	n := len(sep)
 	if n == 0 { return 0 }
 	if n > len(s) { return -1 }
@@ -28,7 +28,7 @@ func lIndex(s, sep []byte) int32 {
 	return -1
 }
 
-func lTrimSpace(s []byte) []byte {
+func lTrimSpace(s []byte) (buf []byte) {
 	start := int32(0)
 	for start < int32(len(s)) && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r') {
 		start++
@@ -40,7 +40,7 @@ func lTrimSpace(s []byte) []byte {
 	return s[start:stop]
 }
 
-func lHasPrefix(s, prefix []byte) bool {
+func lHasPrefix(s, prefix []byte) (ok bool) {
 	if len(s) < len(prefix) { return false }
 	for i := int32(0); i < int32(len(prefix)); i++ {
 		if s[i] != prefix[i] { return false }
@@ -88,7 +88,7 @@ type irEmitter struct {
 	ctxParamName string
 }
 
-func sortedKeys(m map[string]bool) []string {
+func sortedKeys(m map[string]bool) (ss []string) {
 	var keys []string
 	for k := range m {
 		keys = append(keys, k)
@@ -101,7 +101,7 @@ func sortedKeys(m map[string]bool) []string {
 	return keys
 }
 
-func newIREmitter(pkg *SSAPackage, triple string) *irEmitter {
+func newIREmitter(pkg *SSAPackage, triple string) (p *irEmitter) {
 	ptrBits := 64
 	if len(triple) >= 4 && triple[:4] == "wasm" {
 		ptrBits = 32
@@ -122,7 +122,7 @@ func newIREmitter(pkg *SSAPackage, triple string) *irEmitter {
 	}
 }
 
-func (e *irEmitter) dataLayout() string {
+func (e *irEmitter) dataLayout() (s string) {
 	if len(e.triple) >= 6 && e.triple[:6] == "x86_64" {
 		return "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
 	}
@@ -142,7 +142,7 @@ func (e *irEmitter) w(s string) {
 	e.buf = append(e.buf, s...)
 }
 
-func (e *irEmitter) regName(v SSAValue) string {
+func (e *irEmitter) regName(v SSAValue) (s string) {
 	if v == nil {
 		e.nextReg++
 		return "%r" | irItoa(e.nextReg)
@@ -172,7 +172,7 @@ func (e *irEmitter) setRegType(v SSAValue, reg string, typ string) {
 	}
 }
 
-func (e *irEmitter) resolvedType(v SSAValue, fallback string) string {
+func (e *irEmitter) resolvedType(v SSAValue, fallback string) (s string) {
 	if _, isIA := v.(*SSAIndexAddr); !isIA {
 		if at, ok := e.allocTypes[v]; ok {
 			return at
@@ -192,7 +192,7 @@ func (e *irEmitter) resolvedType(v SSAValue, fallback string) string {
 	return fallback
 }
 
-func (e *irEmitter) llvmType(t Type) string {
+func (e *irEmitter) llvmType(t Type) (s string) {
 	if t == nil {
 		return "void"
 	}
@@ -280,7 +280,7 @@ func (e *irEmitter) llvmType(t Type) string {
 	return "i8"
 }
 
-func (e *irEmitter) llvmBasicType(t *Basic) string {
+func (e *irEmitter) llvmBasicType(t *Basic) (s string) {
 	switch t.Kind() {
 	case Bool:
 		return "i1"
@@ -312,32 +312,32 @@ func (e *irEmitter) llvmBasicType(t *Basic) string {
 	return "i32"
 }
 
-func (e *irEmitter) ptrType() string {
+func (e *irEmitter) ptrType() (s string) {
 	return "ptr"
 }
 
-func (e *irEmitter) intptrType() string {
+func (e *irEmitter) intptrType() (s string) {
 	if e.ptrBits == 32 {
 		return "i32"
 	}
 	return "i64"
 }
 
-func (e *irEmitter) sliceType() string {
+func (e *irEmitter) sliceType() (s string) {
 	ipt := e.intptrType()
 	return "{ptr, " | ipt | ", " | ipt | "}"
 }
 
-func (e *irEmitter) ifaceType() string {
+func (e *irEmitter) ifaceType() (s string) {
 	return "{ptr, ptr}"
 }
 
-func (e *irEmitter) nextReg2(prefix string) string {
+func (e *irEmitter) nextReg2(prefix string) (s string) {
 	e.nextReg++
 	return "%" | prefix | irItoa(e.nextReg)
 }
 
-func (e *irEmitter) llvmStructType(t *TCStruct) string {
+func (e *irEmitter) llvmStructType(t *TCStruct) (s string) {
 	if t == nil {
 		fn := ""
 		if e.curFunc != nil {
@@ -419,7 +419,7 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 	e.extDecls[sym] = retType | " " | sym | "(" | params | ")"
 }
 
-func (e *irEmitter) addStringConst(s string) int32 {
+func (e *irEmitter) addStringConst(s string) (n int32) {
 	if idx, ok := e.strMap[s]; ok {
 		return idx
 	}
@@ -429,11 +429,11 @@ func (e *irEmitter) addStringConst(s string) int32 {
 	return idx
 }
 
-func (e *irEmitter) strConstGlobal(idx int32) string {
+func (e *irEmitter) strConstGlobal(idx int32) (s string) {
 	return "@.str." | irItoa(idx)
 }
 
-func irEscapeString(s string) string {
+func irEscapeString(s string) (sv string) {
 	var buf []byte
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -448,7 +448,7 @@ func irEscapeString(s string) string {
 	return string(buf)
 }
 
-func (e *irEmitter) emit() string {
+func (e *irEmitter) emit() (s string) {
 	dl := e.dataLayout()
 	if dl != "" {
 		e.w("target datalayout = \"")
@@ -749,7 +749,7 @@ func (e *irEmitter) releaseAfterEmit() {
 	free(e.usedAs)
 }
 
-func (e *irEmitter) pkgMembersSorted() []SSAMember {
+func (e *irEmitter) pkgMembersSorted() (ss []SSAMember) {
 	if e.sortedMembers != nil {
 		return e.sortedMembers
 	}
@@ -766,7 +766,7 @@ func (e *irEmitter) pkgMembersSorted() []SSAMember {
 	return members
 }
 
-func (e *irEmitter) inferGlobalTypeFromLoads(g *SSAGlobal) string {
+func (e *irEmitter) inferGlobalTypeFromLoads(g *SSAGlobal) (s string) {
 	gname := g.SSAName()
 	for _, member := range e.pkgMembersSorted() {
 		fn, ok := member.(*SSAFunction)
@@ -787,7 +787,7 @@ func (e *irEmitter) inferGlobalTypeFromLoads(g *SSAGlobal) string {
 	return ""
 }
 
-func (e *irEmitter) resolveGlobalDeclType(g *SSAGlobal) string {
+func (e *irEmitter) resolveGlobalDeclType(g *SSAGlobal) (s string) {
 	name := e.globalName(g)
 	if dt, ok := e.globalDeclTypes[name]; ok {
 		return dt
@@ -825,7 +825,7 @@ func (e *irEmitter) emitGlobal(g *SSAGlobal) {
 	e.w(" zeroinitializer\n")
 }
 
-func (e *irEmitter) globalName(g *SSAGlobal) string {
+func (e *irEmitter) globalName(g *SSAGlobal) (s string) {
 	pkg := e.pkg.Pkg.Path()
 	if g.pkg != nil {
 		pkg = g.pkg.Pkg.Path()
@@ -833,7 +833,7 @@ func (e *irEmitter) globalName(g *SSAGlobal) string {
 	return irGlobalSymbol(pkg, g.name)
 }
 
-func irNeedsQuote(s string) bool {
+func irNeedsQuote(s string) (ok bool) {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '$' {
@@ -844,7 +844,7 @@ func irNeedsQuote(s string) bool {
 	return false
 }
 
-func irGlobalSymbol(pkg, name string) string {
+func irGlobalSymbol(pkg, name string) (s string) {
 	sym := pkg | "." | name
 	if irNeedsQuote(sym) {
 		return "@\"" | sym | "\""
@@ -852,7 +852,7 @@ func irGlobalSymbol(pkg, name string) string {
 	return "@" | sym
 }
 
-func (e *irEmitter) funcSymbol(f *SSAFunction) string {
+func (e *irEmitter) funcSymbol(f *SSAFunction) (s string) {
 	if f.externalSymbol != "" {
 		sym := f.externalSymbol
 		if irNeedsQuote(sym) {
@@ -867,7 +867,7 @@ func (e *irEmitter) funcSymbol(f *SSAFunction) string {
 	return irGlobalSymbol(pkg, f.name)
 }
 
-func (e *irEmitter) isPkgFunc(f *SSAFunction) bool {
+func (e *irEmitter) isPkgFunc(f *SSAFunction) (ok bool) {
 	if f.Pkg == e.pkg {
 		return true
 	}
@@ -1147,7 +1147,7 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 	e.extDecls[sym] = ""
 }
 
-func (e *irEmitter) resolveResultType(t Type) string {
+func (e *irEmitter) resolveResultType(t Type) (s string) {
 	rt := e.llvmType(t)
 	if rt != "void" { return rt }
 	if t == nil { return "ptr" }
@@ -1166,7 +1166,7 @@ func (e *irEmitter) resolveResultType(t Type) string {
 	return "ptr"
 }
 
-func (e *irEmitter) funcRetType(f *SSAFunction) string {
+func (e *irEmitter) funcRetType(f *SSAFunction) (s string) {
 	if f.Signature == nil || f.Signature.Results() == nil || f.Signature.Results().Len() == 0 {
 		return "void"
 	}
@@ -1226,7 +1226,7 @@ func (e *irEmitter) emitBlock(b *SSABasicBlock) {
 	}
 }
 
-func (e *irEmitter) blockLabel(b *SSABasicBlock) string {
+func (e *irEmitter) blockLabel(b *SSABasicBlock) (s string) {
 	if b.Index == 0 {
 		return "%_entry"
 	}
@@ -1427,7 +1427,7 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 	}
 }
 
-func (e *irEmitter) inferAllocTypeFromStores(a *SSAAlloc) string {
+func (e *irEmitter) inferAllocTypeFromStores(a *SSAAlloc) (s string) {
 	allocName := a.SSAName()
 	for _, b := range e.curFunc.Blocks {
 		for _, instr := range b.Instrs {
@@ -1456,7 +1456,7 @@ func (e *irEmitter) inferAllocTypeFromStores(a *SSAAlloc) string {
 	return "ptr"
 }
 
-func (e *irEmitter) inferAllocTypeFromReturn(a *SSAAlloc) string {
+func (e *irEmitter) inferAllocTypeFromReturn(a *SSAAlloc) (s string) {
 	allocName := a.SSAName()
 	for _, b := range e.curFunc.Blocks {
 		for _, instr := range b.Instrs {
@@ -1484,7 +1484,7 @@ func (e *irEmitter) inferAllocTypeFromReturn(a *SSAAlloc) string {
 	return ""
 }
 
-func (e *irEmitter) inferAllocTypeFromCallArgs(a *SSAAlloc) string {
+func (e *irEmitter) inferAllocTypeFromCallArgs(a *SSAAlloc) (s string) {
 	allocName := a.SSAName()
 	loadNames := map[string]bool{}
 	for _, b := range e.curFunc.Blocks {
@@ -1524,7 +1524,7 @@ func (e *irEmitter) inferAllocTypeFromCallArgs(a *SSAAlloc) string {
 	return ""
 }
 
-func (e *irEmitter) inferAllocTypeFromAppendUsage(a *SSAAlloc) string {
+func (e *irEmitter) inferAllocTypeFromAppendUsage(a *SSAAlloc) (s string) {
 	allocName := a.SSAName()
 	loadNames := map[string]bool{}
 	for _, b := range e.curFunc.Blocks {
@@ -1577,7 +1577,7 @@ func (e *irEmitter) inferAllocTypeFromAppendUsage(a *SSAAlloc) string {
 	return ""
 }
 
-func (e *irEmitter) inferAllocTypeFromFieldAddrs(a *SSAAlloc, baseType string) string {
+func (e *irEmitter) inferAllocTypeFromFieldAddrs(a *SSAAlloc, baseType string) (s string) {
 	allocName := a.SSAName()
 	names := map[string]bool{allocName: true}
 	for _, b := range e.curFunc.Blocks {
@@ -1651,7 +1651,7 @@ func (e *irEmitter) inferAllocTypeFromFieldAddrs(a *SSAAlloc, baseType string) s
 	return s | "}"
 }
 
-func parseStructFields(s string) []string {
+func parseStructFields(s string) (ss []string) {
 	if len(s) < 2 || s[0] != '{' || s[len(s)-1] != '}' {
 		return nil
 	}
@@ -1680,7 +1680,7 @@ func parseStructFields(s string) []string {
 	return fields
 }
 
-func llvmTrimSpace(s string) string {
+func llvmTrimSpace(s string) (sv string) {
 	i := int32(0)
 	for i < int32(len(s)) && s[i] == ' ' {
 		i++
@@ -1692,7 +1692,7 @@ func llvmTrimSpace(s string) string {
 	return string(s[i:j])
 }
 
-func (e *irEmitter) inferAllocTypeFromUsage(a *SSAAlloc) string {
+func (e *irEmitter) inferAllocTypeFromUsage(a *SSAAlloc) (s string) {
 	allocName := a.SSAName()
 	loadNames := map[string]bool{}
 	for _, b := range e.curFunc.Blocks {
@@ -2480,7 +2480,7 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 	e.w("\n")
 }
 
-func looksLikeFloat(s string) bool {
+func looksLikeFloat(s string) (ok bool) {
 	if len(s) == 0 {
 		return false
 	}
@@ -2573,14 +2573,14 @@ func floatLitToInt(s string) (int64, bool) {
 	return result, true
 }
 
-func isConstOperand(s string) bool {
+func isConstOperand(s string) (ok bool) {
 	if len(s) == 0 {
 		return false
 	}
 	return s[0] != '%' && s[0] != '@'
 }
 
-func ensureFloatLit(s string) string {
+func ensureFloatLit(s string) (sv string) {
 	if len(s) == 0 || s[0] == '%' || s[0] == '@' {
 		return s
 	}
@@ -2642,7 +2642,7 @@ func (e *irEmitter) emitSliceConcat(reg string, sl *Slice, lv, rv string) {
 	e.declareRuntime("runtime.sliceAppend", retTy, "ptr, ptr, " | ipt | ", " | ipt | ", " | ipt | ", " | ipt)
 }
 
-func isBareLiteral(s string) bool {
+func isBareLiteral(s string) (ok bool) {
 	if len(s) == 0 { return false }
 	return s[0] >= '0' && s[0] <= '9'
 }
@@ -2848,7 +2848,7 @@ func (e *irEmitter) emitArrayCompareByLLVM(reg string, op SSAOp, lt, lv, rv stri
 	}
 }
 
-func (e *irEmitter) llvmBinOp(op SSAOp, typ Type) string {
+func (e *irEmitter) llvmBinOp(op SSAOp, typ Type) (s string) {
 	isFloat := false
 	isSigned := true
 	if typ != nil {
@@ -3075,7 +3075,7 @@ func (e *irEmitter) emitUnOp(u *SSAUnOp) {
 	e.w("\n")
 }
 
-func (e *irEmitter) callArgType(arg SSAValue, sig *Signature, i int32) string {
+func (e *irEmitter) callArgType(arg SSAValue, sig *Signature, i int32) (s string) {
 	if _, isFreeVar := arg.(*SSAFreeVar); isFreeVar {
 		return "ptr"
 	}
@@ -3129,7 +3129,7 @@ func (e *irEmitter) callArgType(arg SSAValue, sig *Signature, i int32) string {
 	return "ptr"
 }
 
-func (e *irEmitter) callSig(c *SSACall) *Signature {
+func (e *irEmitter) callSig(c *SSACall) (s *Signature) {
 	if fn, ok := c.Call.Value.(*SSAFunction); ok && fn.Signature != nil {
 		return fn.Signature
 	}
@@ -3795,7 +3795,7 @@ func (e *irEmitter) emitPhi(p *SSAPhi) {
 	e.w("\n")
 }
 
-func isNumericLiteral(s string) bool {
+func isNumericLiteral(s string) (ok bool) {
 	if len(s) == 0 {
 		return false
 	}
@@ -3806,7 +3806,7 @@ func isNumericLiteral(s string) bool {
 	return c >= '0' && c <= '9'
 }
 
-func (e *irEmitter) coerceInt(valReg string, fromType string, toType string) string {
+func (e *irEmitter) coerceInt(valReg string, fromType string, toType string) (s string) {
 	if fromType == toType {
 		return valReg
 	}
@@ -3828,7 +3828,7 @@ func (e *irEmitter) coerceInt(valReg string, fromType string, toType string) str
 	return r
 }
 
-func (e *irEmitter) intBits(ty string) int32 {
+func (e *irEmitter) intBits(ty string) (n int32) {
 	switch ty {
 	case "i1":
 		return 1
@@ -3844,7 +3844,7 @@ func (e *irEmitter) intBits(ty string) int32 {
 	return 0
 }
 
-func (e *irEmitter) intToFloat(valReg string, fromType string, toType string) string {
+func (e *irEmitter) intToFloat(valReg string, fromType string, toType string) (s string) {
 	if rt, ok := e.regTypes[valReg]; ok && (rt == "double" || rt == "float") {
 		return valReg
 	}
@@ -3854,7 +3854,7 @@ func (e *irEmitter) intToFloat(valReg string, fromType string, toType string) st
 	return r
 }
 
-func (e *irEmitter) floatBinOp(op SSAOp) string {
+func (e *irEmitter) floatBinOp(op SSAOp) (s string) {
 	switch op {
 	case OpAdd: return "fadd"
 	case OpSub: return "fsub"
@@ -3870,7 +3870,7 @@ func (e *irEmitter) floatBinOp(op SSAOp) string {
 	return "fadd"
 }
 
-func (e *irEmitter) arrayElemType(arrType string) string {
+func (e *irEmitter) arrayElemType(arrType string) (s string) {
 	// "[6 x double]" -> "double"
 	xPos := -1
 	for i := 0; i < len(arrType); i++ {
@@ -3889,7 +3889,7 @@ func (e *irEmitter) arrayElemType(arrType string) string {
 	return arrType[xPos+2 : end]
 }
 
-func (e *irEmitter) namedResultType(nr *SSAAlloc) string {
+func (e *irEmitter) namedResultType(nr *SSAAlloc) (s string) {
 	if p, ok := safeUnderlying(nr.SSAType()).(*Pointer); ok && p.Elem() != nil {
 		return e.llvmType(p.Elem())
 	}
@@ -4070,7 +4070,7 @@ func (e *irEmitter) emitJump(j *SSAJump) {
 	}
 }
 
-func isComparisonOp(op SSAOp) bool {
+func isComparisonOp(op SSAOp) (ok bool) {
 	return op == OpEql || op == OpNeq || op == OpLss || op == OpLeq || op == OpGtr || op == OpGeq
 }
 
@@ -4310,7 +4310,7 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 	}
 }
 
-func (e *irEmitter) conversionOp(from, to Type) string {
+func (e *irEmitter) conversionOp(from, to Type) (s string) {
 	fromBits := e.typeBits(from)
 	toBits := e.typeBits(to)
 
@@ -4377,7 +4377,7 @@ func (e *irEmitter) conversionOp(from, to Type) string {
 	return "bitcast"
 }
 
-func (e *irEmitter) typeBits(t Type) int32 {
+func (e *irEmitter) typeBits(t Type) (n int32) {
 	if t == nil {
 		return 0
 	}
@@ -4430,7 +4430,7 @@ func (e *irEmitter) emitChangeType(c *SSAChangeType) {
 	e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(dstType) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
 }
 
-func (e *irEmitter) resolveFieldAddrBase(f *SSAFieldAddr) string {
+func (e *irEmitter) resolveFieldAddrBase(f *SSAFieldAddr) (s string) {
 	baseType := e.llvmType(f.X.SSAType())
 	if p, ok := safeUnderlying(f.X.SSAType()).(*Pointer); ok && p.Elem() != nil {
 		elem := p.Elem()
@@ -4683,7 +4683,7 @@ func (e *irEmitter) emitExtract(ex *SSAExtract) {
 	e.w("\n")
 }
 
-func extractTupleField(tupType string, index int32) string {
+func extractTupleField(tupType string, index int32) (s string) {
 	if len(tupType) < 3 || tupType[0] != '{' {
 		return ""
 	}
@@ -4717,7 +4717,7 @@ func extractTupleField(tupType string, index int32) string {
 	return ""
 }
 
-func (e *irEmitter) sextToIpt(val SSAValue, op string) string {
+func (e *irEmitter) sextToIpt(val SSAValue, op string) (s string) {
 	ipt := e.intptrType()
 	if val == nil {
 		return op
@@ -4967,7 +4967,7 @@ func (e *irEmitter) emitSliceOp(s *SSASlice) {
 	e.w(", 2\n")
 }
 
-func (e *irEmitter) sliceIdxToIpt(val SSAValue, ipt string) string {
+func (e *irEmitter) sliceIdxToIpt(val SSAValue, ipt string) (s string) {
 	operandStr := e.operand(val)
 	valType := e.llvmType(val.SSAType())
 	if valType == ipt {
@@ -4983,11 +4983,11 @@ func (e *irEmitter) sliceIdxToIpt(val SSAValue, ipt string) string {
 	return ext
 }
 
-func (e *irEmitter) isScalarType(t string) bool {
+func (e *irEmitter) isScalarType(t string) (ok bool) {
 	return t == "i1" || t == "i8" || t == "i16" || t == "i32" || t == "i64" || t == "float" || t == "double"
 }
 
-func (e *irEmitter) structField0Type(t string) string {
+func (e *irEmitter) structField0Type(t string) (s string) {
 	if len(t) < 2 || t[0] != '{' {
 		return t
 	}
@@ -5076,7 +5076,7 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue {ptr, ptr} ") ; e.w(t1) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
 }
 
-func (e *irEmitter) typeIDGlobal(t Type) string {
+func (e *irEmitter) typeIDGlobal(t Type) (s string) {
 	name := e.reflectTypeName(t)
 	if e.typeIDs == nil {
 		e.typeIDs = map[string]int32{}
@@ -5091,7 +5091,7 @@ func (e *irEmitter) typeIDGlobal(t Type) string {
 	return "@" | name
 }
 
-func (e *irEmitter) reflectTypeName(t Type) string {
+func (e *irEmitter) reflectTypeName(t Type) (s string) {
 	if b, ok := t.(*Basic); ok {
 		switch b.Kind() {
 		case Bool, UntypedBool:
@@ -5179,7 +5179,7 @@ func (e *irEmitter) reflectTypeName(t Type) string {
 	return pkg | ".typeid.unknown"
 }
 
-func (e *irEmitter) findIfaceImpls(methodName string) []ifaceImpl {
+func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 	var impls []ifaceImpl
 	hasType := map[string]bool{}
 	var memberKeys []string
@@ -5360,7 +5360,7 @@ type ifaceImpl struct {
 	extSig     *Signature
 }
 
-func (e *irEmitter) implFuncSym(impl ifaceImpl) string {
+func (e *irEmitter) implFuncSym(impl ifaceImpl) (s string) {
 	if impl.extSymbol != "" {
 		if irNeedsQuote(impl.extSymbol) {
 			return "@\"" | impl.extSymbol | "\""
@@ -5407,7 +5407,7 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 	e.extDecls[sym] = retType | " " | sym | "(" | params | ")"
 }
 
-func flattenTypeStr(t string) string {
+func flattenTypeStr(t string) (s string) {
 	if len(t) == 0 || t[0] != '{' {
 		return t
 	}
@@ -5447,7 +5447,7 @@ func flattenTypeStr(t string) string {
 	return result
 }
 
-func trimSpaces(s string) string {
+func trimSpaces(s string) (sv string) {
 	for len(s) > 0 && s[0] == ' ' {
 		s = s[1:]
 	}
@@ -5533,7 +5533,7 @@ func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv stri
 	e.w(")\n")
 }
 
-func (e *irEmitter) implTypeID(impl ifaceImpl) string {
+func (e *irEmitter) implTypeID(impl ifaceImpl) (s string) {
 	if impl.extTypeID != "" {
 		if e.extTypeIDs == nil {
 			e.extTypeIDs = map[string]bool{}
@@ -5545,7 +5545,7 @@ func (e *irEmitter) implTypeID(impl ifaceImpl) string {
 	return e.typeIDGlobal(impl.recvType)
 }
 
-func (e *irEmitter) emitEmbedChainGEP(impl ifaceImpl, valPtr string) string {
+func (e *irEmitter) emitEmbedChainGEP(impl ifaceImpl, valPtr string) (s string) {
 	chain := impl.embedChain
 	if len(chain) == 0 {
 		chain = []int32{impl.embedField}
@@ -5575,7 +5575,7 @@ type invokeArg struct {
 	val string
 }
 
-func (e *irEmitter) prepareInvokeArgs(inv *SSAInvoke, impl ifaceImpl) []invokeArg {
+func (e *irEmitter) prepareInvokeArgs(inv *SSAInvoke, impl ifaceImpl) (ss []invokeArg) {
 	var sig *Signature
 	if impl.fn != nil {
 		sig = impl.fn.Signature
@@ -5894,7 +5894,7 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 	}
 }
 
-func (e *irEmitter) extractScalarFromIface(valPtr string, assertedType string) string {
+func (e *irEmitter) extractScalarFromIface(valPtr string, assertedType string) (s string) {
 	ipt := e.intptrType()
 	raw := e.nextReg2("ta")
 	e.w("  ") ; e.w(raw) ; e.w(" = ptrtoint ptr ") ; e.w(valPtr) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
@@ -6072,7 +6072,7 @@ func (e *irEmitter) emitLookup(l *SSALookup) {
 	}
 }
 
-func (e *irEmitter) isStringLike(t Type) bool {
+func (e *irEmitter) isStringLike(t Type) (ok bool) {
 	if t == nil {
 		return false
 	}
@@ -6127,11 +6127,11 @@ func (e *irEmitter) emitMakeClosure(m *SSAMakeClosure) {
 	e.w(", ptr ") ; e.w(e.funcSymbol(fn)) ; e.w(", 1\n")
 }
 
-func (e *irEmitter) closureBindingType(b SSAValue) string {
+func (e *irEmitter) closureBindingType(b SSAValue) (s string) {
 	return "ptr"
 }
 
-func (e *irEmitter) closureContextType(bindings []SSAValue) string {
+func (e *irEmitter) closureContextType(bindings []SSAValue) (s string) {
 	s := "{"
 	for i, b := range bindings {
 		if i > 0 {
@@ -6142,7 +6142,7 @@ func (e *irEmitter) closureContextType(bindings []SSAValue) string {
 	return s | "}"
 }
 
-func (e *irEmitter) freeVarType(fv *SSAFreeVar) string {
+func (e *irEmitter) freeVarType(fv *SSAFreeVar) (s string) {
 	return "ptr"
 }
 
@@ -6370,7 +6370,7 @@ func (e *irEmitter) emitNextMap(reg, iterPtr, collVal string, mt *TCMap, n *SSAN
 	e.declareRuntime("runtime.hashmapNext", "i1", "ptr, ptr, ptr, ptr")
 }
 
-func (e *irEmitter) operandNoSideEffect(v SSAValue) string {
+func (e *irEmitter) operandNoSideEffect(v SSAValue) (s string) {
 	if v == nil {
 		return "zeroinitializer"
 	}
@@ -6383,7 +6383,7 @@ func (e *irEmitter) operandNoSideEffect(v SSAValue) string {
 	return ""
 }
 
-func (e *irEmitter) operand(v SSAValue) string {
+func (e *irEmitter) operand(v SSAValue) (s string) {
 	if v == nil {
 		return "zeroinitializer"
 	}
@@ -6403,7 +6403,7 @@ func (e *irEmitter) operand(v SSAValue) string {
 	return e.regName(v)
 }
 
-func (e *irEmitter) constOperand(c *SSAConst) string {
+func (e *irEmitter) constOperand(c *SSAConst) (s string) {
 	if c.val == nil {
 		if c.typ == nil {
 			return "null"
@@ -6507,7 +6507,7 @@ func (e *irEmitter) constOperand(c *SSAConst) string {
 	return "zeroinitializer"
 }
 
-func underlyingBasic(t Type) *Basic {
+func underlyingBasic(t Type) (b *Basic) {
 	if t == nil {
 		return nil
 	}
@@ -6522,7 +6522,7 @@ func underlyingBasic(t Type) *Basic {
 	return b
 }
 
-func newTCPackageWithUniverse(path, name string) *TCPackage {
+func newTCPackageWithUniverse(path, name string) (t *TCPackage) {
 	return &TCPackage{
 		path:  path,
 		name:  name,
@@ -6530,7 +6530,7 @@ func newTCPackageWithUniverse(path, name string) *TCPackage {
 	}
 }
 
-func irParseIntWidth(t string) int32 {
+func irParseIntWidth(t string) (n int32) {
 	if len(t) < 2 || t[0] != 'i' {
 		return 0
 	}
@@ -6544,7 +6544,7 @@ func irParseIntWidth(t string) int32 {
 	return n
 }
 
-func (e *irEmitter) deferRetType(d *SSADefer) string {
+func (e *irEmitter) deferRetType(d *SSADefer) (s string) {
 	if fn, ok := d.Call.Value.(*SSAFunction); ok {
 		if fn.Signature == nil {
 			return "void"
@@ -6570,7 +6570,7 @@ func (e *irEmitter) deferRetType(d *SSADefer) string {
 	return "void"
 }
 
-func (e *irEmitter) deferArgType(arg SSAValue) string {
+func (e *irEmitter) deferArgType(arg SSAValue) (s string) {
 	t := e.llvmType(arg.SSAType())
 	if t == "void" {
 		return "ptr"
@@ -6578,7 +6578,7 @@ func (e *irEmitter) deferArgType(arg SSAValue) string {
 	return t
 }
 
-func (e *irEmitter) deferIsDirectCall(d *SSADefer) bool {
+func (e *irEmitter) deferIsDirectCall(d *SSADefer) (ok bool) {
 	if _, ok := d.Call.Value.(*SSAFunction); ok {
 		return true
 	}
@@ -6588,7 +6588,7 @@ func (e *irEmitter) deferIsDirectCall(d *SSADefer) bool {
 	return false
 }
 
-func (e *irEmitter) deferStructType(d *SSADefer) string {
+func (e *irEmitter) deferStructType(d *SSADefer) (s string) {
 	ipt := e.intptrType()
 	s := "{" | ipt | ", ptr"
 	if !e.deferIsDirectCall(d) {
@@ -6850,7 +6850,7 @@ func (e *irEmitter) emitDeferDispatch(d *SSADefer, pfx string, idx int32) {
 	}
 }
 
-func irItoa(n int32) string {
+func irItoa(n int32) (s string) {
 	if n == 0 {
 		return "0"
 	}
@@ -6872,7 +6872,7 @@ func irItoa(n int32) string {
 	return string(buf)
 }
 
-func irItoa64(n int64) string {
+func irItoa64(n int64) (s string) {
 	if n == 0 {
 		return "0"
 	}
@@ -6897,7 +6897,7 @@ func irItoa64(n int64) string {
 	return string(buf)
 }
 
-func irHex64(v uint64) string {
+func irHex64(v uint64) (s string) {
 	digits := "0123456789ABCDEF"
 	buf := []byte{:16}
 	for i := 15; i >= 0; i-- {
@@ -6907,11 +6907,11 @@ func irHex64(v uint64) string {
 	return string(buf)
 }
 
-func irFtoa(f float64) string {
+func irFtoa(f float64) (s string) {
 	return "0.0"
 }
 
-func irParseInt64(s string) int64 {
+func irParseInt64(s string) (n int64) {
 	var n int64
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -6923,7 +6923,7 @@ func irParseInt64(s string) int64 {
 	return n
 }
 
-func runeToUTF8(r rune) string {
+func runeToUTF8(r rune) (s string) {
 	if r < 0 || r > 0x10FFFF {
 		r = 0xFFFD
 	}
@@ -6940,7 +6940,7 @@ func runeToUTF8(r rune) string {
 	return string(out)
 }
 
-func scanExportPragmas(src []byte) map[string]string {
+func scanExportPragmas(src []byte) (m map[string]string) {
 	result := map[string]string{}
 	exportPrefix := []byte("//export ")
 	funcPrefix := []byte("func ")
@@ -7372,7 +7372,7 @@ func TypeCheckOnly(src []byte, name string) {
 func releaseFileDeep(f *File) {
 }
 
-func CompileToIR(src []byte, name string, triple string) string {
+func CompileToIR(src []byte, name string, triple string) (s string) {
 	compileTargetTriple = triple
 	pkg, file := typeCheckPkg(src, name)
 	ScanGenericDecls(src, name)
@@ -7450,7 +7450,7 @@ func registerCompiledExports(pkg *TCPackage) {
 	importRegistry[path] = regPkg
 }
 
-func tcInferTypeFromExpr(e Expr, scope *Scope) Type {
+func tcInferTypeFromExpr(e Expr, scope *Scope) (t Type) {
 	switch e := e.(type) {
 	case *BasicLit:
 		switch e.Kind {
@@ -7486,7 +7486,7 @@ func tcInferTypeFromExpr(e Expr, scope *Scope) Type {
 	return nil
 }
 
-func tcResolveFuncReturn(e Expr, scope *Scope) Type {
+func tcResolveFuncReturn(e Expr, scope *Scope) (t Type) {
 	var obj Object
 	switch e := e.(type) {
 	case *Name:
@@ -7534,7 +7534,7 @@ var constValMap map[string]int64
 var tcPkgSrc []byte
 var compileTargetTriple string
 
-func compileTargetArch() string {
+func compileTargetArch() (s string) {
 	if hasPrefix(compileTargetTriple, "x86_64") {
 		return "amd64"
 	}
@@ -7547,7 +7547,7 @@ func compileTargetArch() string {
 	return "amd64"
 }
 
-func compileTargetOS() string {
+func compileTargetOS() (s string) {
 	if lIndexByte(compileTargetTriple, '-') >= 0 {
 		rest := compileTargetTriple[lIndexByte(compileTargetTriple, '-')+1:]
 		if lIndexByte(rest, '-') >= 0 {
@@ -7566,7 +7566,7 @@ func compileTargetOS() string {
 	return "linux"
 }
 
-func resolveArrayLenFromSrc(p Pos, cmap map[string]int64) int64 {
+func resolveArrayLenFromSrc(p Pos, cmap map[string]int64) (n int64) {
 	line := p.Line()
 	col := p.Col()
 	if line == 0 || col == 0 || tcPkgSrc == nil {
@@ -7651,7 +7651,7 @@ func resolveArrayLenFromSrc(p Pos, cmap map[string]int64) int64 {
 	return -1
 }
 
-func resolveLocalConst(src []byte, off int32, cmap map[string]int64) int64 {
+func resolveLocalConst(src []byte, off int32, cmap map[string]int64) (n int64) {
 	start := off
 	for off < len(src) && ((src[off] >= 'a' && src[off] <= 'z') || (src[off] >= 'A' && src[off] <= 'Z') || (src[off] >= '0' && src[off] <= '9') || src[off] == '_') {
 		off++
@@ -7696,7 +7696,7 @@ func resolveLocalConst(src []byte, off int32, cmap map[string]int64) int64 {
 	return -1
 }
 
-func resolveArrayLenFromConstMap(e Expr, cmap map[string]int64) int64 {
+func resolveArrayLenFromConstMap(e Expr, cmap map[string]int64) (n int64) {
 	line := e.Pos().Line()
 	col := e.Pos().Col()
 	if line == 0 || col == 0 || tcPkgSrc == nil {
@@ -7733,7 +7733,7 @@ func resolveArrayLenFromConstMap(e Expr, cmap map[string]int64) int64 {
 	return -1
 }
 
-func tcEvalConstExpr(e Expr, scope *Scope, iotaVal int64) ConstVal {
+func tcEvalConstExpr(e Expr, scope *Scope, iotaVal int64) (c ConstVal) {
 	if e == nil {
 		return nil
 	}
@@ -7843,7 +7843,7 @@ func tcEvalConstExpr(e Expr, scope *Scope, iotaVal int64) ConstVal {
 	return nil
 }
 
-func tcResolveNameInline(e Expr, scope *Scope) Type {
+func tcResolveNameInline(e Expr, scope *Scope) (t Type) {
 	if e == nil {
 		return nil
 	}
@@ -7986,7 +7986,7 @@ func tcResolveNameInline(e Expr, scope *Scope) Type {
 	return nil
 }
 
-func tcResolveInterfaceInline(e *InterfaceType, scope *Scope) *TCInterface {
+func tcResolveInterfaceInline(e *InterfaceType, scope *Scope) (t *TCInterface) {
 	var methods []*IfaceMethod
 	var embeds []Type
 	for _, f := range e.MethodList {
@@ -8011,7 +8011,7 @@ func tcResolveInterfaceInline(e *InterfaceType, scope *Scope) *TCInterface {
 	return iface
 }
 
-func stripDuplicatePackageClauses(src []byte) []byte {
+func stripDuplicatePackageClauses(src []byte) (buf []byte) {
 	found := false
 	var out []byte
 	i := 0
@@ -8055,7 +8055,7 @@ func stripDuplicatePackageClauses(src []byte) []byte {
 	return out
 }
 
-func stripDuplicatePackageClauses2(src []byte) []byte {
+func stripDuplicatePackageClauses2(src []byte) (buf []byte) {
 	found := false
 	var out []byte
 	i := int32(0)
@@ -8102,7 +8102,7 @@ func stripDuplicatePackageClauses2(src []byte) []byte {
 	return out
 }
 
-func rewriteSliceMakeLiterals(src []byte) []byte {
+func rewriteSliceMakeLiterals(src []byte) (buf []byte) {
 	var out []byte
 	i := 0
 	for i < len(src) {
@@ -8153,7 +8153,7 @@ func rewriteSliceMakeLiterals(src []byte) []byte {
 	return out
 }
 
-func findSliceTypeStart(src []byte, braceIdx int32) int32 {
+func findSliceTypeStart(src []byte, braceIdx int32) (n int32) {
 	j := braceIdx - 1
 	for j >= 0 && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n') {
 		j--
@@ -8210,7 +8210,7 @@ func findSliceTypeStart(src []byte, braceIdx int32) int32 {
 	return -1
 }
 
-func findMatchingBrace(src []byte, openIdx int32) int32 {
+func findMatchingBrace(src []byte, openIdx int32) (n int32) {
 	depth := 1
 	for i := openIdx + 1; i < len(src); i++ {
 		if src[i] == '{' {
@@ -8225,7 +8225,7 @@ func findMatchingBrace(src []byte, openIdx int32) int32 {
 	return -1
 }
 
-func rewriteChanMakeLiterals(src []byte) []byte {
+func rewriteChanMakeLiterals(src []byte) (buf []byte) {
 	chanKw := []byte("chan ")
 	var out []byte
 	i := 0
@@ -8339,14 +8339,14 @@ func rewriteChanMakeLiterals(src []byte) []byte {
 	return out
 }
 
-func tcResolveRecvType(recv *Field, scope *Scope) Type {
+func tcResolveRecvType(recv *Field, scope *Scope) (t Type) {
 	if recv == nil {
 		return nil
 	}
 	return tcResolveNameInline(recv.Type, scope)
 }
 
-func tcResolveFuncInlineWithRecv(ft *FuncType, recv *Field, scope *Scope) *Signature {
+func tcResolveFuncInlineWithRecv(ft *FuncType, recv *Field, scope *Scope) (s *Signature) {
 	if ft == nil {
 		return nil
 	}
@@ -8370,7 +8370,7 @@ func tcResolveFuncInlineWithRecv(ft *FuncType, recv *Field, scope *Scope) *Signa
 	return NewSignature(recvVar, params, results, variadic)
 }
 
-func tcResolveFieldList(fields []*Field, scope *Scope) *Tuple {
+func tcResolveFieldList(fields []*Field, scope *Scope) (t *Tuple) {
 	if len(fields) == 0 {
 		return nil
 	}
@@ -8386,7 +8386,7 @@ func tcResolveFieldList(fields []*Field, scope *Scope) *Tuple {
 	return NewTuple(vars...)
 }
 
-func tcResolveFuncInline(ft *FuncType, scope *Scope) *Signature {
+func tcResolveFuncInline(ft *FuncType, scope *Scope) (s *Signature) {
 	if ft == nil {
 		return nil
 	}
@@ -8443,7 +8443,7 @@ func tcResolveFuncInline(ft *FuncType, scope *Scope) *Signature {
 	return NewSignature(nil, pTuple, rTuple, variadic)
 }
 
-func (e *irEmitter) instrOperands(instr SSAInstruction) []SSAValue {
+func (e *irEmitter) instrOperands(instr SSAInstruction) (ss []SSAValue) {
 	switch i := instr.(type) {
 	case *SSAStore:
 		return []SSAValue{i.Addr, i.Val}
@@ -8506,7 +8506,7 @@ func (e *irEmitter) instrOperands(instr SSAInstruction) []SSAValue {
 	return nil
 }
 
-func simpleItoa(n int32) string {
+func simpleItoa(n int32) (s string) {
 	if n == 0 {
 		return "0"
 	}
@@ -8528,7 +8528,7 @@ func simpleItoa(n int32) string {
 	return string(buf)
 }
 
-func simpleItoa64(n int64) string {
+func simpleItoa64(n int64) (s string) {
 	if n == 0 {
 		return "0"
 	}
@@ -8550,7 +8550,7 @@ func simpleItoa64(n int64) string {
 	return string(buf)
 }
 
-func (e *irEmitter) chanPanicStr() string {
+func (e *irEmitter) chanPanicStr() (s string) {
 	msg := "channels not implemented"
 	idx := e.addStringConst(msg)
 	ipt := e.intptrType()
