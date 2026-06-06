@@ -202,7 +202,25 @@ func (e *irEmitter) llvmType(t Type) (s string) {
 			return e.sliceType()
 		}
 		if n, ok := t.(*Named); ok {
-			_ = n
+			if n.underlying != nil {
+				return e.llvmType(n.underlying)
+			}
+			if n.obj != nil && n.obj.pkg != nil {
+				pkgPath := n.obj.pkg.path
+				nm := n.obj.Name()
+				pkg := importRegistry[pkgPath]
+				if pkg == nil && e.pkg != nil && e.pkg.Pkg != nil && e.pkg.Pkg.Path() == pkgPath {
+					pkg = e.pkg.Pkg
+				}
+				if pkg != nil && pkg.Scope() != nil {
+					obj := pkg.Scope().Lookup(nm)
+					if obj != nil {
+						if nt, ok2 := obj.Type().(*Named); ok2 && nt.underlying != nil {
+							return e.llvmType(nt.underlying)
+						}
+					}
+				}
+			}
 			return "ptr"
 		}
 		return "ptr"
@@ -243,9 +261,14 @@ func (e *irEmitter) llvmType(t Type) (s string) {
 			return e.llvmType(t.underlying)
 		}
 		if t.obj != nil && t.obj.pkg != nil {
-			pkg := importRegistry[t.obj.pkg.path]
+			pkgPath := t.obj.pkg.path
+			nm := t.obj.Name()
+			pkg := importRegistry[pkgPath]
+			if pkg == nil && e.pkg != nil && e.pkg.Pkg != nil && e.pkg.Pkg.Path() == pkgPath {
+				pkg = e.pkg.Pkg
+			}
 			if pkg != nil && pkg.Scope() != nil {
-				obj := pkg.Scope().Lookup(t.obj.Name())
+				obj := pkg.Scope().Lookup(nm)
 				if obj != nil {
 					if nt, ok := obj.Type().(*Named); ok && nt.underlying != nil {
 						return e.llvmType(nt.underlying)
@@ -4025,6 +4048,13 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 				ex := "%rv" | irItoa(e.nextReg)
 				e.w("  ") ; e.w(ex) ; e.w(" = extractvalue ") ; e.w(valType) ; e.w(" ") ; e.w(valOp) ; e.w(", 0\n")
 				valOp = ex
+				valType = elemType
+			}
+			if valType == "ptr" && len(elemType) > 0 && elemType[0] == '{' {
+				e.nextReg++
+				ld := "%rv" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(ld) ; e.w(" = load ") ; e.w(elemType) ; e.w(", ptr ") ; e.w(valOp) ; e.w("\n")
+				valOp = ld
 				valType = elemType
 			}
 			if valOp == "null" && elemType != "ptr" {
