@@ -550,37 +550,94 @@ func autoFetchRepo(pkgPath, version string) (s string) {
 	return joinPath(mpath, pkgPath)
 }
 
+func gitURLToModPath(url string) (s string) {
+	u := url
+	// strip scheme
+	for _, scheme := range []string{"ssh://", "https://", "http://", "git://"} {
+		if hasPrefix(u, scheme) {
+			u = u[len(scheme):]
+			break
+		}
+	}
+	// strip user@
+	for i := int32(0); i < int32(len(u)); i++ {
+		if u[i] == '@' {
+			u = u[i+1:]
+			break
+		}
+		if u[i] == '/' {
+			break
+		}
+	}
+	// host:port/path or host:path (scp-style) or host/path
+	// extract host, skip port if numeric, keep path
+	host := ""
+	rest := ""
+	for i := int32(0); i < int32(len(u)); i++ {
+		if u[i] == ':' {
+			host = u[:i]
+			after := u[i+1:]
+			// skip port (digits until /)
+			j := int32(0)
+			for j < int32(len(after)) && after[j] >= '0' && after[j] <= '9' {
+				j++
+			}
+			if j > 0 && j < int32(len(after)) && after[j] == '/' {
+				rest = after[j+1:]
+			} else if j > 0 && j == int32(len(after)) {
+				rest = ""
+			} else {
+				rest = after
+			}
+			break
+		}
+		if u[i] == '/' {
+			host = u[:i]
+			rest = u[i+1:]
+			break
+		}
+	}
+	if host == "" {
+		return ""
+	}
+	// strip ~/ prefix from path
+	if hasPrefix(rest, "~/") {
+		rest = rest[2:]
+	}
+	// strip .git suffix
+	if hasSuffix(rest, ".git") {
+		rest = rest[:len(rest)-4]
+	}
+	if rest == "" {
+		return ""
+	}
+	return host | "/" | rest
+}
+
 func cmdFetch(url string) {
 	mpath := getMoxiePath()
 	mkdirAll(mpath, 0755)
 
 	rootDir := "."
 	if url != "" {
-		tmpdir := "/tmp/mxc-fetch"
-		run([]string{"rm", "-rf", tmpdir})
-		writeStr(2, "clone " | url | "\n")
-		if run([]string{"git", "clone", url, tmpdir}) != 0 {
-			fatal("clone failed: " | url)
+		modPath := gitURLToModPath(url)
+		if modPath == "" {
+			fatal("cannot derive module path from URL: " | url)
 		}
-		modName, _, _ := parseModRequires(tmpdir)
-		if modName == "" {
-			run([]string{"rm", "-rf", tmpdir})
-			fatal("cloned repo has no moxie.mod")
-		}
-		dest := joinPath(mpath, modName)
+		dest := joinPath(mpath, modPath)
 		_, exists := readFile(joinPath(dest, ".git/HEAD"))
 		if exists {
-			run([]string{"rm", "-rf", tmpdir})
-			writeStr(2, "  already exists: " | modName | ", pulling\n")
-			run([]string{"git", "-C", dest, "pull"})
+			writeStr(2, modPath | ": fetch\n")
+			run([]string{"git", "-C", dest, "remote", "set-url", "origin", url})
+			run([]string{"git", "-C", dest, "fetch", "origin"})
+			run([]string{"git", "-C", dest, "reset", "--hard", "origin/HEAD"})
 		} else {
+			writeStr(2, modPath | ": clone\n")
 			mkdirAll(pathDir(dest), 0755)
-			if run([]string{"mv", tmpdir, dest}) != 0 {
-				run([]string{"rm", "-rf", tmpdir})
-				fatal("move failed: " | tmpdir | " -> " | dest)
+			if run([]string{"git", "clone", url, dest}) != 0 {
+				fatal("clone failed: " | url)
 			}
 		}
-		writeStr(2, "module: " | modName | "\n")
 		rootDir = dest
 	}
 
