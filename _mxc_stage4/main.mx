@@ -30,9 +30,8 @@ func cReadfile(path unsafe.Pointer, pathLen int32, buf unsafe.Pointer, bufCap in
 func cFilesize(path unsafe.Pointer, pathLen int32) (n int32)
 
 func writeStr(fd int32, s string) {
-	b := []byte(s)
-	if len(b) > 0 {
-		cWrite(fd, unsafe.Pointer(unsafe.SliceData(b)), uint32(len(b)))
+	if len(s) > 0 {
+		cWrite(fd, unsafe.Pointer(unsafe.SliceData(s)), uint32(len(s)))
 	}
 }
 
@@ -40,7 +39,7 @@ func writeFile(path string, data []byte, mode uint32) {
 	if len(path) == 0 {
 		return
 	}
-	cWritefile(unsafe.Pointer(unsafe.SliceData([]byte(path))), int32(len(path)),
+	cWritefile(unsafe.Pointer(unsafe.SliceData(path)), int32(len(path)),
 		unsafe.Pointer(unsafe.SliceData(data)), int32(len(data)), mode)
 }
 
@@ -48,15 +47,16 @@ func mkdirAll(path string, mode uint32) {
 	if len(path) == 0 {
 		return
 	}
-	cMkdir(unsafe.Pointer(unsafe.SliceData([]byte(path))), int32(len(path)), mode)
+	cMkdir(unsafe.Pointer(unsafe.SliceData(path)), int32(len(path)), mode)
 }
 
 func readFile(path string) ([]byte, bool) {
 	if len(path) == 0 {
 		return nil, false
 	}
-	pb := []byte(path)
-	sz := cFilesize(unsafe.Pointer(unsafe.SliceData(pb)), int32(len(pb)))
+	pp := unsafe.Pointer(unsafe.SliceData(path))
+	pl := int32(len(path))
+	sz := cFilesize(pp, pl)
 	if sz < 0 {
 		return nil, false
 	}
@@ -64,7 +64,7 @@ func readFile(path string) ([]byte, bool) {
 		sz = 65536
 	}
 	buf := []byte{:sz}
-	n := cReadfile(unsafe.Pointer(unsafe.SliceData(pb)), int32(len(pb)),
+	n := cReadfile(pp, pl,
 		unsafe.Pointer(unsafe.SliceData(buf)), sz)
 	if n < 0 {
 		return nil, false
@@ -78,9 +78,8 @@ func fatal(msg string) {
 }
 
 func getenv(name string) (s string) {
-	nb := []byte(name)
 	buf := []byte{:4096}
-	n := cGetenv(unsafe.Pointer(unsafe.SliceData(nb)), int32(len(nb)), unsafe.Pointer(unsafe.SliceData(buf)), int32(len(buf)))
+	n := cGetenv(unsafe.Pointer(unsafe.SliceData(name)), int32(len(name)), unsafe.Pointer(unsafe.SliceData(buf)), int32(len(buf)))
 	if n <= 0 {
 		return ""
 	}
@@ -109,9 +108,8 @@ func getArgs() (ss []string) {
 }
 
 func listFiles(dir, ext string) (ss []string) {
-	db := []byte(dir)
 	buf := []byte{:65536}
-	n := cListdir(unsafe.Pointer(unsafe.SliceData(db)), int32(len(db)),
+	n := cListdir(unsafe.Pointer(unsafe.SliceData(dir)), int32(len(dir)),
 		unsafe.Pointer(unsafe.SliceData(buf)), int32(len(buf)))
 	if n <= 0 {
 		return nil
@@ -262,7 +260,7 @@ func getMoxiePath() (s string) {
 	return joinPath(home, "moxie")
 }
 
-func mxcVersion() (s string) { return "1.8.4" }
+func mxcVersion() (s string) { return "1.9.0" }
 
 func moxieCacheDir() (s string) {
 	return joinPath(joinPath(getMoxiePath(), "cache"), "mxc-" | mxcVersion())
@@ -2347,6 +2345,14 @@ func cmdTest(args []string) {
 	if _, gok := readFile(runtimeGoBc); gok {
 		linkArgs = append(linkArgs, "--override=" | runtimeGoBc)
 	}
+	stubsBc := joinPath(sysroot, "stubs_moxie.bc")
+	if _, sok2 := readFile(stubsBc); sok2 {
+		linkArgs = append(linkArgs, "--override=" | stubsBc)
+	}
+	deallocBc := joinPath(sysroot, "dealloc_freelist.bc")
+	if _, dok := readFile(deallocBc); dok {
+		linkArgs = append(linkArgs, "--override=" | deallocBc)
+	}
 	lnShims := joinPath(sysroot, "linkname_shims.bc")
 	if _, lok := readFile(lnShims); lok {
 		linkArgs = append(linkArgs, lnShims)
@@ -2863,6 +2869,14 @@ func main() {
 	runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
 	if _, gok := readFile(runtimeGoBc); gok {
 		linkArgs = append(linkArgs, "--override=" | runtimeGoBc)
+	}
+	stubsBc := joinPath(sysroot, "stubs_moxie.bc")
+	if _, sok2 := readFile(stubsBc); sok2 {
+		linkArgs = append(linkArgs, "--override=" | stubsBc)
+	}
+	deallocBc := joinPath(sysroot, "dealloc_freelist.bc")
+	if _, dok := readFile(deallocBc); dok {
+		linkArgs = append(linkArgs, "--override=" | deallocBc)
 	}
 	lnShims := joinPath(sysroot, "linkname_shims.bc")
 	if _, lok := readFile(lnShims); lok {

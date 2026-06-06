@@ -24,16 +24,16 @@ syntax.so: syntax/tokens.mx syntax/pos.mx syntax/source.mx syntax/nodes.mx synta
 	cd $(MOXIEROOT) && MOXIEROOT=. ./moxie build -buildmode=c-shared -o bootstrap/syntax.so ./bootstrap/syntax/
 
 typecheck.so: typecheck/*.mx typecheck/moxie.mod
-	cd $(MOXIEROOT) && MOXIEROOT=. ./moxie build -gc=leaking -buildmode=c-shared -o bootstrap/typecheck.so ./bootstrap/typecheck/
+	cd $(MOXIEROOT) && MOXIEROOT=. ./moxie build -gc=dealloc -buildmode=c-shared -o bootstrap/typecheck.so ./bootstrap/typecheck/
 
 mxssa.so: mxssa/*.mx mxssa/moxie.mod
-	cd $(MOXIEROOT) && MOXIEROOT=. ./moxie build -gc=leaking -buildmode=c-shared -o bootstrap/mxssa.so ./bootstrap/mxssa/
+	cd $(MOXIEROOT) && MOXIEROOT=. ./moxie build -gc=dealloc -buildmode=c-shared -o bootstrap/mxssa.so ./bootstrap/mxssa/
 
 loader.so: loader/*.mx loader/moxie.mod
-	cd $(MOXIEROOT) && MOXIEROOT=. ./moxie build -gc=leaking -buildmode=c-shared -o bootstrap/loader.so ./bootstrap/loader/
+	cd $(MOXIEROOT) && MOXIEROOT=. ./moxie build -gc=dealloc -buildmode=c-shared -o bootstrap/loader.so ./bootstrap/loader/
 
 compile.so: compile/*.mx compile/moxie.mod
-	cd $(MOXIEROOT) && MOXIEROOT=. ./moxie build -gc=leaking -buildmode=c-shared -o bootstrap/compile.so ./bootstrap/compile/
+	cd $(MOXIEROOT) && MOXIEROOT=. ./moxie build -gc=dealloc -buildmode=c-shared -o bootstrap/compile.so ./bootstrap/compile/
 
 test: test-hello test-parsemxh test-goenv test-compileopts test-syntax test-typecheck test-mxssa test-loader test-llvm test-compile
 
