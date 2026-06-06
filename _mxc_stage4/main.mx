@@ -260,7 +260,7 @@ func getMoxiePath() (s string) {
 	return joinPath(home, "moxie")
 }
 
-func mxcVersion() (s string) { return "1.9.0" }
+func mxcVersion() (s string) { return "1.9.1" }
 
 func moxieCacheDir() (s string) {
 	return joinPath(joinPath(getMoxiePath(), "cache"), "mxc-" | mxcVersion())
@@ -550,15 +550,47 @@ func autoFetchRepo(pkgPath, version string) (s string) {
 	return joinPath(mpath, pkgPath)
 }
 
-func cmdFetch() {
+func cmdFetch(url string) {
 	mpath := getMoxiePath()
 	mkdirAll(mpath, 0755)
 
-	modName, reqs, repls := parseModRequires(".")
-	if modName == "" {
-		fatal("no moxie.mod in current directory")
+	rootDir := "."
+	if url != "" {
+		tmpdir := "/tmp/mxc-fetch"
+		run([]string{"rm", "-rf", tmpdir})
+		writeStr(2, "clone " | url | "\n")
+		if run([]string{"git", "clone", url, tmpdir}) != 0 {
+			fatal("clone failed: " | url)
+		}
+		modName, _, _ := parseModRequires(tmpdir)
+		if modName == "" {
+			run([]string{"rm", "-rf", tmpdir})
+			fatal("cloned repo has no moxie.mod")
+		}
+		dest := joinPath(mpath, modName)
+		_, exists := readFile(joinPath(dest, ".git/HEAD"))
+		if exists {
+			run([]string{"rm", "-rf", tmpdir})
+			writeStr(2, "  already exists: " | modName | ", pulling\n")
+			run([]string{"git", "-C", dest, "pull"})
+		} else {
+			mkdirAll(pathDir(dest), 0755)
+			if run([]string{"mv", tmpdir, dest}) != 0 {
+				run([]string{"rm", "-rf", tmpdir})
+				fatal("move failed: " | tmpdir | " -> " | dest)
+			}
+		}
+		writeStr(2, "module: " | modName | "\n")
+		rootDir = dest
 	}
-	writeStr(2, "module: " | modName | "\n")
+
+	modName, reqs, repls := parseModRequires(rootDir)
+	if modName == "" {
+		fatal("no moxie.mod in " | rootDir)
+	}
+	if url == "" {
+		writeStr(2, "module: " | modName | "\n")
+	}
 
 	var queue []modRequire
 	for _, r := range reqs {
@@ -589,9 +621,9 @@ func cmdFetch() {
 
 		if !exists {
 			mkdirAll(pathDir(dest), 0755)
-			url := "https://" | req.path
+			cloneURL := "https://" | req.path
 			writeStr(2, "  clone " | req.path | "\n")
-			if run([]string{"git", "clone", url, dest}) != 0 {
+			if run([]string{"git", "clone", cloneURL, dest}) != 0 {
 				releaseRepoLock(mpath, req.path)
 				writeStr(2, "  FAIL: clone " | req.path | "\n")
 				continue
@@ -2602,7 +2634,11 @@ func main() {
 		os.Exit(1)
 	}
 	if cmd == "fetch" {
-		cmdFetch()
+		fetchURL := ""
+		if len(args) >= 3 {
+			fetchURL = args[2]
+		}
+		cmdFetch(fetchURL)
 		return
 	}
 	if cmd == "update" {

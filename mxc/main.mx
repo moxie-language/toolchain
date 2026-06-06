@@ -311,7 +311,7 @@ func fnvHash(data []byte) string {
 }
 
 func pkgCacheDir() string {
-	return joinPath(joinPath(getMoxiePath(), "cache"), "mxc-1.9.0/pkg")
+	return joinPath(joinPath(getMoxiePath(), "cache"), "mxc-1.9.1/pkg")
 }
 
 func getMoxiePath() string {
@@ -1216,7 +1216,7 @@ func parseModRequires(dir string) (string, []modRequire, map[string]string) {
 	return modName, reqs, repls
 }
 
-func cmdFetch() {
+func cmdFetch(url string) {
 	mpath := getMoxiePath()
 	mkdirAll(mpath, 0755)
 
@@ -1227,12 +1227,47 @@ func cmdFetch() {
 	}
 	writeFile(lockPath, []byte("1"), 0644)
 
-	modName, reqs, repls := parseModRequires(".")
+	rootDir := "."
+	if url != "" {
+		tmpdir := "/tmp/mxc-fetch"
+		removeAll(tmpdir)
+		writeStr(2, "clone " | url | "\n")
+		if run([]string{"git", "clone", url, tmpdir}) != 0 {
+			os.Remove(lockPath)
+			fatal("clone failed: " | url)
+		}
+		modName, _, _ := parseModRequires(tmpdir)
+		if modName == "" {
+			removeAll(tmpdir)
+			os.Remove(lockPath)
+			fatal("cloned repo has no moxie.mod")
+		}
+		dest := joinPath(mpath, modName)
+		_, exists := readFile(joinPath(dest, ".git/HEAD"))
+		if exists {
+			removeAll(tmpdir)
+			writeStr(2, "  already exists: " | modName | ", pulling\n")
+			run([]string{"git", "-C", dest, "pull"})
+		} else {
+			mkdirAll(pathDir(dest), 0755)
+			if run([]string{"mv", tmpdir, dest}) != 0 {
+				removeAll(tmpdir)
+				os.Remove(lockPath)
+				fatal("move failed: " | tmpdir | " -> " | dest)
+			}
+		}
+		writeStr(2, "module: " | modName | "\n")
+		rootDir = dest
+	}
+
+	modName, reqs, repls := parseModRequires(rootDir)
 	if modName == "" {
 		os.Remove(lockPath)
-		fatal("no moxie.mod in current directory")
+		fatal("no moxie.mod in " | rootDir)
 	}
-	writeStr(2, "module: " | modName | "\n")
+	if url == "" {
+		writeStr(2, "module: " | modName | "\n")
+	}
 
 	var queue []modRequire
 	for _, r := range reqs {
@@ -1258,9 +1293,9 @@ func cmdFetch() {
 
 		if !exists {
 			mkdirAll(pathDir(dest), 0755)
-			url := "https://" | req.path
+			cloneURL := "https://" | req.path
 			writeStr(2, "  clone " | req.path | "\n")
-			if run([]string{"git", "clone", url, dest}) != 0 {
+			if run([]string{"git", "clone", cloneURL, dest}) != 0 {
 				writeStr(2, "  FAIL: clone " | req.path | "\n")
 				continue
 			}
@@ -1320,7 +1355,7 @@ func main() {
 
 	cmd := args[1]
 	if cmd == "version" {
-		writeStr(1, "mxc 1.9.0\n")
+		writeStr(1, "mxc 1.9.1\n")
 		return
 	}
 	if cmd == "cache" {
@@ -1332,7 +1367,11 @@ func main() {
 		os.Exit(1)
 	}
 	if cmd == "fetch" {
-		cmdFetch()
+		fetchURL := ""
+		if len(args) >= 3 {
+			fetchURL = args[2]
+		}
+		cmdFetch(fetchURL)
 		return
 	}
 	if cmd != "build" {
