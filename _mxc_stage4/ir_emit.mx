@@ -83,9 +83,14 @@ type irEmitter struct {
 	storedTo        map[string]bool
 	usedAs          map[string]bool
 	deferList  []*SSADefer
-	deferID      int32
-	blockDead    bool
-	ctxParamName string
+	deferID    int32
+	blockDead  bool
+	deallocActive bool
+	deallocAllocs map[SSAValue]int32
+	deallocCount  int32
+	scopeAllocs map[int32][]string
+	instrScope  map[SSAInstruction]int32
+	scopeActive bool
 }
 
 func sortedKeys(m map[string]bool) (ss []string) {
@@ -771,6 +776,8 @@ func (e *irEmitter) releaseAfterEmit() {
 	free(e.allocBlock)
 	free(e.storedTo)
 	free(e.usedAs)
+	free(e.scopeAllocs)
+	free(e.instrScope)
 }
 
 func (e *irEmitter) pkgMembersSorted() (ss []SSAMember) {
@@ -946,6 +953,12 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 	e.nextReg = 0
 	e.deferList = nil
 	e.deferID = 0
+	e.deallocActive = false
+	e.deallocAllocs = nil
+	e.deallocCount = 0
+	e.scopeActive = false
+	e.scopeAllocs = map[int32][]string{}
+	e.instrScope = map[SSAInstruction]int32{}
 	e.valName = map[SSAValue]string{}
 	e.nameUsed = map[string]bool{}
 	e.allocTypes = map[SSAValue]string{}
@@ -990,15 +1003,15 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		if len(f.Params) > 0 {
 			e.w(", ")
 		}
-		e.ctxParamName = "context"
+		ctxName := "context"
 		for _, p := range f.Params {
 			if p.SSAName() == "context" {
-				e.ctxParamName = "context.1"
+				ctxName = "context.1"
 				break
 			}
 		}
 		e.w("ptr %")
-		e.w(e.ctxParamName)
+		e.w(ctxName)
 	}
 	e.w(") {\n")
 
@@ -1088,6 +1101,11 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 			}
 		}
 	}
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			e.instrScope[instr] = b.ScopeID
+		}
+	}
 	var hoistList []*SSAAlloc
 	for v := range hoistAllocs {
 		if a, ok := v.(*SSAAlloc); ok {
@@ -1106,6 +1124,23 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 			}
 		}
 	}
+	scopeIDs := map[int32]bool{}
+	hasHeapAllocs := false
+	for _, b := range f.Blocks {
+		if b.ScopeID > 0 {
+			scopeIDs[b.ScopeID] = true
+		}
+		for _, instr := range b.Instrs {
+			switch instr.(type) {
+			case *SSAAlloc:
+				if instr.(*SSAAlloc).Heap {
+					hasHeapAllocs = true
+				}
+			case *SSAMakeSlice, *SSAMakeMap, *SSAMakeChan, *SSAMakeClosure, *SSASlice:
+				hasHeapAllocs = true
+			}
+		}
+	}
 	for _, b := range f.Blocks {
 		if b.Index == 0 {
 			e.w("_entry:\n")
@@ -1116,6 +1151,23 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 				e.w("  %deferPtr = alloca ptr\n")
 				e.w("  store ptr null, ptr %deferPtr\n")
 			}
+			if len(scopeIDs) > 0 || hasHeapAllocs {
+				e.scopeActive = true
+				e.w("  %scope.head = alloca ptr\n")
+				e.w("  store ptr null, ptr %scope.head\n")
+				for sid := range scopeIDs {
+					e.w("  %scope.save.")
+					e.w(irItoa(sid))
+					e.w(" = alloca ptr\n")
+					e.w("  store ptr null, ptr %scope.save.")
+					e.w(irItoa(sid))
+					e.w("\n")
+				}
+				e.declareRuntime("runtime.scopePush", "void", "ptr, ptr")
+				e.declareRuntime("runtime.scopeFreeTo", "ptr", "ptr, ptr")
+				e.declareRuntime("runtime.scopeRelocate", "void", "ptr, ptr, ptr")
+			}
+			e.deallocSetup(f)
 			if len(e.curFunc.FreeVars) > 0 {
 				e.emitFreeVarUnpack(e.curFunc)
 			}
@@ -1221,8 +1273,15 @@ func (e *irEmitter) emitBlock(b *SSABasicBlock) {
 	}
 
 	e.blockDead = false
+	scopeSaveEmitted := false
 	for _, instr := range b.Instrs {
 		if e.blockDead { break }
+		if !scopeSaveEmitted {
+			if _, isPhi := instr.(*SSAPhi); !isPhi {
+				scopeSaveEmitted = true
+				e.emitScopeSave(b)
+			}
+		}
 		e.emitInstr(instr)
 		if e.missingStores != nil {
 			if v, ok2 := instr.(SSAValue); ok2 {
@@ -1326,24 +1385,6 @@ func (e *irEmitter) emitInstr(instr SSAInstruction) {
 		e.emitNext(i)
 	case *SSAMakeChan:
 		e.emitMakeChan(i)
-	case *SSAScopeFree:
-		e.emitScopeFree(i)
-	}
-}
-
-func (e *irEmitter) emitScopeFree(sf *SSAScopeFree) {
-	for _, a := range sf.Allocs {
-		if !a.Heap {
-			continue
-		}
-		reg := e.regName(a)
-		e.w("  ; scope_free ") ; e.w(reg) ; e.w("\n")
-		e.nextReg++
-		tmp := "%sf" | irItoa(e.nextReg)
-		e.w("  ") ; e.w(tmp) ; e.w(" = load ptr, ptr ") ; e.w(reg) ; e.w("\n")
-		e.w("  call void @runtime.free(ptr ") ; e.w(tmp) ; e.w(", ptr undef)\n")
-		e.w("  store ptr null, ptr ") ; e.w(reg) ; e.w("\n")
-		e.declareRuntime("runtime.free", "void", "ptr, ptr")
 	}
 }
 
@@ -1361,6 +1402,8 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 			e.w(" = call ptr @runtime.alloc(") ; e.w(ipt)
 			e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
 			e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr, ptr")
+			e.deallocAfterAlloc(a, reg)
+			e.scopeTrackAlloc(reg)
 		} else {
 			e.w("  ") ; e.w(reg) ; e.w(" = alloca ") ; e.w(at) ; e.w("\n")
 			e.w("  store ") ; e.w(at) ; e.w(" zeroinitializer, ptr ") ; e.w(reg) ; e.w("\n")
@@ -1441,6 +1484,8 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 		e.w(" = call ptr @runtime.alloc(") ; e.w(ipt)
 		e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
 		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr, ptr")
+		e.deallocAfterAlloc(a, reg)
+		e.scopeTrackAlloc(reg)
 	} else {
 		e.w("  ")
 		e.w(reg)
@@ -1896,6 +1941,7 @@ func (e *irEmitter) emitStore(s *SSAStore) {
 			}
 		}
 	}
+	e.emitScopeRelocateOnStore(s, val, valType)
 	e.w("  store ")
 	e.w(valType)
 	e.w(" ")
@@ -2654,6 +2700,7 @@ func (e *irEmitter) emitSliceConcat(reg string, sl *Slice, lv, rv string) {
 	e.w(")\n")
 	newPtr := e.nextReg2("cc")
 	e.w("  ") ; e.w(newPtr) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 0\n")
+	e.scopeTrackAlloc(newPtr)
 	newLen := e.nextReg2("cc")
 	e.w("  ") ; e.w(newLen) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 1\n")
 	newCap := e.nextReg2("cc")
@@ -3418,6 +3465,7 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			e.w(")\n")
 			newPtr := e.nextReg2("ap")
 			e.w("  ") ; e.w(newPtr) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 0\n")
+			e.scopeTrackAlloc(newPtr)
 			newLen := e.nextReg2("ap")
 			e.w("  ") ; e.w(newLen) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 1\n")
 			newCap := e.nextReg2("ap")
@@ -3504,6 +3552,7 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			e.w(")\n")
 			newPtr := e.nextReg2("ap")
 			e.w("  ") ; e.w(newPtr) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 0\n")
+			e.scopeTrackAlloc(newPtr)
 			newLen := e.nextReg2("ap")
 			e.w("  ") ; e.w(newLen) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 1\n")
 			newCap := e.nextReg2("ap")
@@ -3937,6 +3986,12 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 	if len(e.deferList) > 0 {
 		e.emitRunDefers()
 	}
+	blk := r.InstrBlock()
+	if blk != nil && blk.ScopeID > 0 {
+		e.emitScopeFreesTo(blk.ScopeID)
+	}
+	e.emitScopeFreeAll()
+	e.deallocBeforeReturn(r)
 	frt := e.funcRetType(e.curFunc)
 	if len(r.Results) == 0 {
 		rt := e.funcRetType(e.curFunc)
@@ -4108,8 +4163,12 @@ func (e *irEmitter) emitJump(j *SSAJump) {
 		return
 	}
 	if len(blk.Succs) > 0 {
+		target := blk.Succs[0]
+		if blk.ScopeID > 0 && target.ScopeID != blk.ScopeID {
+			e.emitScopeFreesTo(blk.ScopeID)
+		}
 		e.w("  br label ")
-		e.w(e.blockLabel(blk.Succs[0]))
+		e.w(e.blockLabel(target))
 		e.w("\n")
 	}
 }
@@ -4827,6 +4886,7 @@ func (e *irEmitter) emitMakeSlice(m *SSAMakeSlice) {
 		e.w(allocSz)
 		e.w(", ptr null, ptr undef)\n")
 		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr, ptr")
+		e.scopeTrackAlloc(dataPtr)
 	}
 	e.nextReg++
 	s1 := "%ms" | irItoa(e.nextReg)
@@ -4941,74 +5001,31 @@ func (e *irEmitter) emitSliceOp(s *SSASlice) {
 			elemType = e.llvmType(ar.Elem())
 		}
 	}
-	e.nextReg++
-	newPtr := "%sl" | irItoa(e.nextReg)
-	e.w("  ")
-	e.w(newPtr)
-	e.w(" = getelementptr inbounds ")
-	e.w(elemType)
-	e.w(", ptr ")
-	e.w(oldPtr)
-	e.w(", ")
-	e.w(ipt)
-	e.w(" ")
-	e.w(low)
-	e.w("\n")
-	e.nextReg++
-	newLen := "%sl" | irItoa(e.nextReg)
-	e.w("  ")
-	e.w(newLen)
-	e.w(" = sub ")
-	e.w(ipt)
-	e.w(" ")
-	e.w(high)
-	e.w(", ")
-	e.w(low)
-	e.w("\n")
-	e.nextReg++
-	newCap := "%sl" | irItoa(e.nextReg)
-	e.w("  ")
-	e.w(newCap)
-	e.w(" = sub ")
-	e.w(ipt)
-	e.w(" ")
-	e.w(maxCap)
-	e.w(", ")
-	e.w(low)
-	e.w("\n")
-	e.nextReg++
-	s1 := "%sl" | irItoa(e.nextReg)
-	e.w("  ")
-	e.w(s1)
-	e.w(" = insertvalue ")
-	e.w(sty)
-	e.w(" undef, ptr ")
-	e.w(newPtr)
-	e.w(", 0\n")
-	e.nextReg++
-	s2 := "%sl" | irItoa(e.nextReg)
-	e.w("  ")
-	e.w(s2)
-	e.w(" = insertvalue ")
-	e.w(sty)
-	e.w(" ")
-	e.w(s1)
-	e.w(", ")
-	e.w(ipt)
-	e.w(" ")
-	e.w(newLen)
-	e.w(", 1\n")
-	e.w("  ")
-	e.w(reg)
-	e.w(" = insertvalue ")
-	e.w(sty)
-	e.w(" ")
-	e.w(s2)
-	e.w(", ")
-	e.w(ipt)
-	e.w(" ")
-	e.w(newCap)
-	e.w(", 2\n")
+	srcOff := e.nextReg2("sl")
+	e.w("  ") ; e.w(srcOff) ; e.w(" = getelementptr inbounds ") ; e.w(elemType)
+	e.w(", ptr ") ; e.w(oldPtr) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(low) ; e.w("\n")
+	newLen := e.nextReg2("sl")
+	e.w("  ") ; e.w(newLen) ; e.w(" = sub ") ; e.w(ipt) ; e.w(" ") ; e.w(high) ; e.w(", ") ; e.w(low) ; e.w("\n")
+	elemSz := e.nextReg2("sl")
+	e.w("  ") ; e.w(elemSz) ; e.w(" = ptrtoint ptr getelementptr (")
+	e.w(elemType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+	totalBytes := e.nextReg2("sl")
+	e.w("  ") ; e.w(totalBytes) ; e.w(" = mul ") ; e.w(ipt) ; e.w(" ") ; e.w(newLen) ; e.w(", ") ; e.w(elemSz) ; e.w("\n")
+	freshPtr := e.nextReg2("sl")
+	e.w("  ") ; e.w(freshPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt)
+	e.w(" ") ; e.w(totalBytes) ; e.w(", ptr null, ptr null)\n")
+	e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr, ptr")
+	e.scopeTrackAlloc(freshPtr)
+	cpReg := e.nextReg2("sl")
+	e.w("  ") ; e.w(cpReg) ; e.w(" = call ") ; e.w(ipt) ; e.w(" @runtime.sliceCopy(ptr ") ; e.w(freshPtr)
+	e.w(", ptr ") ; e.w(srcOff) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(newLen)
+	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(newLen) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(elemSz) ; e.w(")\n")
+	e.declareRuntime("runtime.sliceCopy", ipt, "ptr, ptr, " | ipt | ", " | ipt | ", " | ipt)
+	s1 := e.nextReg2("sl")
+	e.w("  ") ; e.w(s1) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" undef, ptr ") ; e.w(freshPtr) ; e.w(", 0\n")
+	s2 := e.nextReg2("sl")
+	e.w("  ") ; e.w(s2) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s1) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(newLen) ; e.w(", 1\n")
+	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s2) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(newLen) ; e.w(", 2\n")
 }
 
 func (e *irEmitter) sliceIdxToIpt(val SSAValue, ipt string) (s string) {
@@ -5113,6 +5130,7 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 		e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
 		e.w("  store ") ; e.w(valType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
 		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr, ptr")
+		e.scopeTrackAlloc(valPtr)
 	}
 	typeid := e.typeIDGlobal(m.X.SSAType())
 	t1 := e.nextReg2("mi")
@@ -5994,6 +6012,7 @@ func (e *irEmitter) emitMakeMap(m *SSAMakeMap) {
 	e.w(ipt) ; e.w(" ") ; e.w(valSz) ; e.w(", ")
 	e.w(ipt) ; e.w(" ") ; e.w(hint) ; e.w(", i8 ") ; e.w(alg) ; e.w(")\n")
 	e.declareRuntime("runtime.hashmapMake", "ptr", ipt | ", " | ipt | ", " | ipt | ", i8")
+	e.scopeTrackAlloc(reg)
 }
 
 func (e *irEmitter) emitMapUpdate(m *SSAMapUpdate) {
@@ -6147,6 +6166,7 @@ func (e *irEmitter) emitMakeClosure(m *SSAMakeClosure) {
 	e.w("  ") ; e.w(ctxPtr) ; e.w(" = call ptr @runtime.alloc(")
 	e.w(ipt) ; e.w(" ") ; e.w(ctxSz) ; e.w(", ptr null, ptr undef)\n")
 	e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr, ptr")
+	e.scopeTrackAlloc(ctxPtr)
 
 	for i, b := range m.Bindings {
 		bval := e.operand(b)
@@ -6191,6 +6211,13 @@ func (e *irEmitter) freeVarType(fv *SSAFreeVar) (s string) {
 }
 
 func (e *irEmitter) emitFreeVarUnpack(f *SSAFunction) {
+	ctxName := "context"
+	for _, p := range f.Params {
+		if p.SSAName() == "context" {
+			ctxName = "context.1"
+			break
+		}
+	}
 	ctxType := "{"
 	for i, fv := range f.FreeVars {
 		if i > 0 {
@@ -6205,7 +6232,7 @@ func (e *irEmitter) emitFreeVarUnpack(f *SSAFunction) {
 		e.nextReg++
 		gep := "%fv" | irItoa(e.nextReg)
 		e.w("  ") ; e.w(gep) ; e.w(" = getelementptr ") ; e.w(ctxType)
-		e.w(", ptr %") ; e.w(e.ctxParamName) ; e.w(", i32 0, i32 ") ; e.w(irItoa(i)) ; e.w("\n")
+		e.w(", ptr %") ; e.w(ctxName) ; e.w(", i32 0, i32 ") ; e.w(irItoa(i)) ; e.w("\n")
 		e.w("  ") ; e.w(fvName) ; e.w(" = load ptr, ptr ") ; e.w(gep) ; e.w("\n")
 	}
 }
@@ -8675,5 +8702,201 @@ func checkUseAfterFree(f *SSAFunction) {
 			}
 		}
 	}
+}
+
+func (e *irEmitter) deallocSetup(f *SSAFunction) {
+	heapCount := int32(0)
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			if a, ok := instr.(*SSAAlloc); ok && a.Heap {
+				heapCount++
+			}
+		}
+	}
+	if heapCount == 0 {
+		return
+	}
+	e.deallocActive = true
+	e.deallocAllocs = map[SSAValue]int32{}
+	e.w("  %dealloc.head = alloca ptr\n")
+	e.w("  store ptr null, ptr %dealloc.head\n")
+	idx := int32(0)
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			if a, ok := instr.(*SSAAlloc); ok && a.Heap {
+				e.deallocAllocs[a] = idx
+				e.w("  %dealloc.entry." | irItoa(idx) | " = alloca {ptr, ptr}\n")
+				e.w("  store {ptr, ptr} zeroinitializer, ptr %dealloc.entry." | irItoa(idx) | "\n")
+				idx++
+			}
+		}
+	}
+	e.deallocCount = idx
+	e.declareRuntime("runtime.deallocPush", "void", "ptr, ptr, ptr")
+	e.declareRuntime("runtime.deallocFree", "void", "ptr")
+	e.declareRuntime("runtime.deallocEscape", "void", "ptr, ptr")
+}
+
+func (e *irEmitter) deallocAfterAlloc(a *SSAAlloc, reg string) {
+	if !e.deallocActive {
+		return
+	}
+	idx, ok := e.deallocAllocs[a]
+	if !ok {
+		return
+	}
+	entry := "%dealloc.entry." | irItoa(idx)
+	e.w("  call void @runtime.deallocPush(ptr " | reg | ", ptr %dealloc.head, ptr " | entry | ")\n")
+}
+
+func (e *irEmitter) deallocBeforeReturn(r *SSAReturn) {
+	if !e.deallocActive {
+		return
+	}
+	for _, res := range r.Results {
+		e.deallocEscapeResult(res)
+	}
+	e.nextReg++
+	tmp := "%dealloc.list" | irItoa(e.nextReg)
+	e.w("  " | tmp | " = load ptr, ptr %dealloc.head\n")
+	e.w("  call void @runtime.deallocFree(ptr " | tmp | ")\n")
+}
+
+func (e *irEmitter) deallocEscapeResult(v SSAValue) {
+	if v == nil {
+		return
+	}
+	if a, ok := v.(*SSAAlloc); ok {
+		if _, tracked := e.deallocAllocs[a]; tracked {
+			e.nextReg++
+			tmp := "%dealloc.esc.list" | irItoa(e.nextReg)
+			e.w("  " | tmp | " = load ptr, ptr %dealloc.head\n")
+			e.w("  call void @runtime.deallocEscape(ptr " | e.operand(v) | ", ptr " | tmp | ")\n")
+		}
+	}
+}
+
+func (e *irEmitter) scopeTrackAlloc(ptrReg string) {
+	if !e.scopeActive {
+		return
+	}
+	e.w("  call void @runtime.scopePush(ptr ")
+	e.w(ptrReg)
+	e.w(", ptr %scope.head)\n")
+}
+
+func (e *irEmitter) emitScopeFreeAll() {
+	if !e.scopeActive {
+		return
+	}
+	e.nextReg++
+	cur := "%sf.all" | irItoa(e.nextReg)
+	e.w("  ")
+	e.w(cur)
+	e.w(" = load ptr, ptr %scope.head\n")
+	e.nextReg++
+	fn := "%sf.fn" | irItoa(e.nextReg)
+	e.w("  ")
+	e.w(fn)
+	e.w(" = call ptr @runtime.scopeFreeTo(ptr ")
+	e.w(cur)
+	e.w(", ptr null)\n")
+	e.w("  store ptr ")
+	e.w(fn)
+	e.w(", ptr %scope.head\n")
+}
+
+func (e *irEmitter) emitScopeFreesTo(scopeID int32) {
+	e.nextReg++
+	saved := "%sf.sv" | irItoa(e.nextReg)
+	e.w("  ")
+	e.w(saved)
+	e.w(" = load ptr, ptr %scope.save.")
+	e.w(irItoa(scopeID))
+	e.w("\n")
+	e.nextReg++
+	cur := "%sf.cur" | irItoa(e.nextReg)
+	e.w("  ")
+	e.w(cur)
+	e.w(" = load ptr, ptr %scope.head\n")
+	e.nextReg++
+	fn := "%sf.fn" | irItoa(e.nextReg)
+	e.w("  ")
+	e.w(fn)
+	e.w(" = call ptr @runtime.scopeFreeTo(ptr ")
+	e.w(cur)
+	e.w(", ptr ")
+	e.w(saved)
+	e.w(")\n")
+	e.w("  store ptr ")
+	e.w(fn)
+	e.w(", ptr %scope.head\n")
+}
+
+func (e *irEmitter) emitScopeSave(b *SSABasicBlock) {
+	if b.ScopeID <= 0 {
+		return
+	}
+	enteringScope := false
+	for _, pred := range b.Preds {
+		if pred.ScopeID != b.ScopeID {
+			enteringScope = true
+			break
+		}
+	}
+	if enteringScope || len(b.Preds) == 0 {
+		e.nextReg++
+		tmp := "%ss" | irItoa(e.nextReg)
+		e.w("  ")
+		e.w(tmp)
+		e.w(" = load ptr, ptr %scope.head\n")
+		e.w("  store ptr ")
+		e.w(tmp)
+		e.w(", ptr %scope.save.")
+		e.w(irItoa(b.ScopeID))
+		e.w("\n")
+	}
+}
+
+func (e *irEmitter) emitScopeRelocateOnStore(s *SSAStore, val, valType string) {
+	if !e.scopeActive {
+		return
+	}
+	blk := s.InstrBlock()
+	if blk == nil || blk.ScopeID == 0 {
+		return
+	}
+	addrScope := int32(0)
+	if aid, ok := e.instrScope[s.Addr]; ok {
+		addrScope = aid
+	}
+	if addrScope >= blk.ScopeID {
+		return
+	}
+	if val == "null" || val == "zeroinitializer" || val == "0" {
+		return
+	}
+	ptrReg := ""
+	sty := e.sliceType()
+	if valType == "ptr" {
+		ptrReg = val
+	} else if valType == sty {
+		e.nextReg++
+		ptrReg = "%sr.p" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(ptrReg) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(val) ; e.w(", 0\n")
+	} else if valType == "{ptr, ptr}" {
+		e.nextReg++
+		ptrReg = "%sr.p" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(ptrReg) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(val) ; e.w(", 0\n")
+	}
+	if ptrReg == "" {
+		return
+	}
+	e.w("  call void @runtime.scopeRelocate(ptr ")
+	e.w(ptrReg)
+	e.w(", ptr %scope.head, ptr %scope.save.")
+	e.w(irItoa(blk.ScopeID))
+	e.w(")\n")
+	e.declareRuntime("runtime.scopeRelocate", "void", "ptr, ptr, ptr")
 }
 

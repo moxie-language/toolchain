@@ -542,6 +542,8 @@ type ssaFuncBuilder struct {
 	deferred     int32
 	typeSubst    map[string]Type
 	srcScope     *Scope
+	scopeID      int32
+	nextScopeID  int32
 }
 
 type ssaLoopState struct {
@@ -561,7 +563,9 @@ func newSSAFuncBuilder(fn *SSAFunction, info *Info) *ssaFuncBuilder {
 }
 
 func (fb *ssaFuncBuilder) newBlock(comment string) *SSABasicBlock {
-	return NewSSABasicBlock(fb.fn, comment)
+	b := NewSSABasicBlock(fb.fn, comment)
+	b.ScopeID = fb.scopeID
+	return b
 }
 
 func (fb *ssaFuncBuilder) labelBlock(name string) *SSABasicBlock {
@@ -574,6 +578,17 @@ func (fb *ssaFuncBuilder) labelBlock(name string) *SSABasicBlock {
 	b := fb.newBlock("label." + name)
 	fb.labels[name] = b
 	return b
+}
+
+func (fb *ssaFuncBuilder) enterScope() int32 {
+	fb.nextScopeID++
+	old := fb.scopeID
+	fb.scopeID = fb.nextScopeID
+	return old
+}
+
+func (fb *ssaFuncBuilder) exitScope(old int32) {
+	fb.scopeID = old
 }
 
 func (fb *ssaFuncBuilder) emit(instr SSAInstruction) {
@@ -1295,6 +1310,8 @@ func (fb *ssaFuncBuilder) buildIf(s *IfStmt) {
 	thenBlock.Preds = append(thenBlock.Preds, fb.currentBlock)
 	elseBlock.Preds = append(elseBlock.Preds, fb.currentBlock)
 
+	oldThen := fb.enterScope()
+	thenBlock.ScopeID = fb.scopeID
 	fb.currentBlock = thenBlock
 	fb.buildBlock(s.Then)
 	if fb.currentBlock != nil && !fb.blockTerminated(fb.currentBlock) {
@@ -1302,8 +1319,11 @@ func (fb *ssaFuncBuilder) buildIf(s *IfStmt) {
 		fb.currentBlock.Succs = append(fb.currentBlock.Succs, doneBlock)
 		doneBlock.Preds = append(doneBlock.Preds, fb.currentBlock)
 	}
+	fb.exitScope(oldThen)
 
 	if s.Else != nil {
+		oldElse := fb.enterScope()
+		elseBlock.ScopeID = fb.scopeID
 		fb.currentBlock = elseBlock
 		fb.buildStmt(s.Else)
 		if fb.currentBlock != nil && !fb.blockTerminated(fb.currentBlock) {
@@ -1311,6 +1331,7 @@ func (fb *ssaFuncBuilder) buildIf(s *IfStmt) {
 			fb.currentBlock.Succs = append(fb.currentBlock.Succs, doneBlock)
 			doneBlock.Preds = append(doneBlock.Preds, fb.currentBlock)
 		}
+		fb.exitScope(oldElse)
 	}
 
 	fb.currentBlock = doneBlock
@@ -1357,6 +1378,8 @@ func (fb *ssaFuncBuilder) buildFor(s *ForStmt) {
 		bodyBlock.Preds = append(bodyBlock.Preds, condBlock)
 	}
 
+	forScope := fb.enterScope()
+	bodyBlock.ScopeID = fb.scopeID
 	fb.currentBlock = bodyBlock
 	fb.buildBlock(s.Body)
 	if fb.currentBlock != nil && !fb.blockTerminated(fb.currentBlock) {
@@ -1365,6 +1388,7 @@ func (fb *ssaFuncBuilder) buildFor(s *ForStmt) {
 		postBlock.Preds = append(postBlock.Preds, fb.currentBlock)
 	}
 
+	postBlock.ScopeID = fb.scopeID
 	fb.currentBlock = postBlock
 	if s.Post != nil {
 		fb.buildStmt(s.Post)
@@ -1374,6 +1398,7 @@ func (fb *ssaFuncBuilder) buildFor(s *ForStmt) {
 		fb.currentBlock.Succs = append(fb.currentBlock.Succs, condBlock)
 		condBlock.Preds = append(condBlock.Preds, fb.currentBlock)
 	}
+	fb.exitScope(forScope)
 
 	fb.loops = fb.loops[:len(fb.loops)-1]
 	fb.currentBlock = doneBlock
@@ -1458,6 +1483,8 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *ForStmt, rc *RangeClause) {
 	bodyBlock.Preds = append(bodyBlock.Preds, condBlock)
 	doneBlock.Preds = append(doneBlock.Preds, condBlock)
 
+	rangeScope := fb.enterScope()
+	bodyBlock.ScopeID = fb.scopeID
 	fb.currentBlock = bodyBlock
 	if rc.Lhs != nil && rc.Def {
 		names := ssaExprNames(rc.Lhs)
@@ -1500,6 +1527,7 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *ForStmt, rc *RangeClause) {
 		fb.currentBlock.Succs = append(fb.currentBlock.Succs, condBlock)
 		condBlock.Preds = append(condBlock.Preds, fb.currentBlock)
 	}
+	fb.exitScope(rangeScope)
 
 	fb.loops = fb.loops[:len(fb.loops)-1]
 	fb.currentBlock = doneBlock
@@ -1583,6 +1611,8 @@ func (fb *ssaFuncBuilder) buildSwitch(s *SwitchStmt) {
 			caseBlock.Preds = append(caseBlock.Preds, fb.currentBlock)
 		}
 
+		caseScope := fb.enterScope()
+		caseBlock.ScopeID = fb.scopeID
 		fb.currentBlock = caseBlock
 		caseSaved := fb.saveVars()
 		for _, stmt := range clause.Body {
@@ -1596,6 +1626,7 @@ func (fb *ssaFuncBuilder) buildSwitch(s *SwitchStmt) {
 			fb.currentBlock.Succs = append(fb.currentBlock.Succs, doneBlock)
 			doneBlock.Preds = append(doneBlock.Preds, fb.currentBlock)
 		}
+		fb.exitScope(caseScope)
 		fb.vars = caseSaved
 		fb.currentBlock = nextBlock
 	}
@@ -1737,6 +1768,8 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *SwitchStmt, tsg *TypeSwitchGuard, d
 			fb.currentBlock = caseBlock
 		}
 
+		tsScope := fb.enterScope()
+		caseBlock.ScopeID = fb.scopeID
 		caseSaved := fb.saveVars()
 		for _, stmt := range clause.Body {
 			fb.buildStmt(stmt)
@@ -1749,6 +1782,7 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *SwitchStmt, tsg *TypeSwitchGuard, d
 			fb.currentBlock.Succs = append(fb.currentBlock.Succs, doneBlock)
 			doneBlock.Preds = append(doneBlock.Preds, fb.currentBlock)
 		}
+		fb.exitScope(tsScope)
 		fb.vars = caseSaved
 		fb.currentBlock = nextBlock
 	}
@@ -1812,6 +1846,8 @@ func (fb *ssaFuncBuilder) buildSelect(s *SelectStmt) {
 	fb.emit(sel)
 
 	for i, clause := range s.Body {
+		selScope := fb.enterScope()
+		caseBlocks[i].ScopeID = fb.scopeID
 		fb.currentBlock = caseBlocks[i]
 		var selectCommVars []Object
 		savedVars := map[Object]*SSAAlloc{}
@@ -1866,6 +1902,7 @@ func (fb *ssaFuncBuilder) buildSelect(s *SelectStmt) {
 			fb.currentBlock.Succs = append(fb.currentBlock.Succs, doneBlock)
 			doneBlock.Preds = append(doneBlock.Preds, fb.currentBlock)
 		}
+		fb.exitScope(selScope)
 	}
 
 	fb.currentBlock = doneBlock
