@@ -2237,6 +2237,22 @@ func (fb *ssaFuncBuilder) buildIdent(e *Name) (s SSAValue) {
 	if obj == nil && fb.info != nil {
 		obj = fb.info.Uses[e]
 	}
+	if obj == nil && fb.parent != nil {
+		for p := fb.parent; p != nil; p = p.parent {
+			for pobj := range p.vars {
+				if pobj.Name() == e.Value {
+					fv := fb.getOrCreateFreeVar(e.Value, pobj.Type())
+					return fb.emitLoad(fv, pobj.Type())
+				}
+			}
+			if p.freeVarPtrs != nil {
+				if pfv, ok := p.freeVarPtrs[e.Value]; ok {
+					fv := fb.getOrCreateFreeVar(e.Value, pfv.typ)
+					return fb.emitLoad(fv, pfv.typ)
+				}
+			}
+		}
+	}
 	if obj == nil {
 		if fb.fn.Pkg != nil {
 			if fn, ok := fb.fn.Pkg.Members[e.Value].(*SSAFunction); ok {
@@ -2259,8 +2275,25 @@ func (fb *ssaFuncBuilder) buildIdent(e *Name) (s SSAValue) {
 		if fv, ok := fb.freeVarPtrs[e.Value]; ok {
 			return fb.emitLoad(fv, obj.Type())
 		}
-		if fb.parent != nil {
-			if _, ok := fb.parent.vars[obj]; ok {
+		for p := fb.parent; p != nil; p = p.parent {
+			found := false
+			if _, ok := p.vars[obj]; ok {
+				found = true
+			}
+			if !found {
+				for pobj := range p.vars {
+					if pobj.Name() == e.Value {
+						found = true
+						break
+					}
+				}
+			}
+			if !found && p.freeVarPtrs != nil {
+				if _, ok := p.freeVarPtrs[e.Value]; ok {
+					found = true
+				}
+			}
+			if found {
 				fv := fb.getOrCreateFreeVar(e.Value, obj.Type())
 				return fb.emitLoad(fv, obj.Type())
 			}
@@ -3421,9 +3454,13 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *FuncLit) (s SSAValue) {
 			if alloc, ok := fb.vars[obj]; ok {
 				alloc.Heap = true
 				bindings = append(bindings, alloc)
+			} else if pfv, ok := fb.freeVarPtrs[fv.name]; ok {
+				bindings = append(bindings, pfv)
 			} else {
 				bindings = append(bindings, &SSAConst{typ: NewPointer(fv.typ), val: nil})
 			}
+		} else if pfv, ok := fb.freeVarPtrs[fv.name]; ok {
+			bindings = append(bindings, pfv)
 		} else {
 			bindings = append(bindings, &SSAConst{typ: NewPointer(fv.typ), val: nil})
 		}

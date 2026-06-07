@@ -3062,6 +3062,12 @@ func (e *irEmitter) emitUnOp(u *SSAUnOp) {
 				}
 			}
 		}
+		if _, isIA := u.X.(*SSAIndexAddr); isIA && len(loadType) > 0 && loadType[0] == '[' {
+			if at, ok2 := e.allocTypes[u.X]; ok2 && at != loadType {
+				loadType = at
+				e.allocTypes[u] = loadType
+			}
+		}
 		isGlobalLoad := false
 		if g, ok := u.X.(*SSAGlobal); ok {
 			loadType = e.resolveGlobalDeclType(g)
@@ -6170,8 +6176,9 @@ func (e *irEmitter) emitMakeClosure(m *SSAMakeClosure) {
 
 	for i, b := range m.Bindings {
 		bval := e.operand(b)
+		_, isFreeVar := b.(*SSAFreeVar)
 		actualType := e.llvmType(b.SSAType())
-		if actualType != "ptr" && actualType != "" && actualType != "void" {
+		if !isFreeVar && actualType != "ptr" && actualType != "" && actualType != "void" {
 			boxAlloc := e.nextReg2("mc")
 			e.w("  ") ; e.w(boxAlloc) ; e.w(" = call ptr @runtime.alloc(")
 			e.w(ipt) ; e.w(" ptrtoint (ptr getelementptr (") ; e.w(actualType)

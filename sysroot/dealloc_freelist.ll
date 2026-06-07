@@ -370,7 +370,10 @@ start:
   %saved = load ptr, ptr %saveSlot, align 8
   %head = load ptr, ptr %headSlot, align 8
   %headIsSave = icmp eq ptr %head, %saved
-  br i1 %headIsSave, label %done, label %checkhead
+  br i1 %headIsSave, label %done, label %headnullchk
+headnullchk:
+  %headNull = icmp eq ptr %head, null
+  br i1 %headNull, label %done, label %checkhead
 checkhead:
   %headPay = load ptr, ptr %head, align 8
   %headMatch = icmp eq ptr %headPay, %payload
