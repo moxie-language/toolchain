@@ -317,7 +317,10 @@ func (r *Resolver) lookupIPAddr(ctx context.Context, network, host string) ([]IP
 	if ip, err := netip.ParseAddr(host); err == nil {
 		return []IPAddr{{IP: IP(ip.AsSlice()).To16(), Zone: ip.Zone()}}, nil
 	}
-	trace, _ := ctx.Value(nettrace.TraceKey{}).(*nettrace.Trace)
+	var trace *nettrace.Trace
+	if okv, okok := ctx.Value(nettrace.TraceKey{}).(*nettrace.Trace); okok {
+		trace = okv
+	}
 	if trace != nil && trace.DNSStart != nil {
 		trace.DNSStart(host)
 	}
@@ -325,7 +328,7 @@ func (r *Resolver) lookupIPAddr(ctx context.Context, network, host string) ([]IP
 	// can be overridden by tests. This is needed by net/http, so it
 	// uses a context key instead of unexported variables.
 	resolverFunc := r.lookupIP
-	if alt, _ := ctx.Value(nettrace.LookupIPAltResolverKey{}).(func(context.Context, []byte, []byte) ([]IPAddr, error)); alt != nil {
+	if alt, okta := ctx.Value(nettrace.LookupIPAltResolverKey{}).(func(context.Context, []byte, []byte) ([]IPAddr, error)); okta && (alt != nil) {
 		resolverFunc = alt
 	}
 
@@ -364,7 +367,10 @@ func (r *Resolver) lookupIPAddr(ctx context.Context, network, host string) ([]IP
 			}
 		}
 		if trace != nil && trace.DNSDone != nil {
-			addrs, _ := r.Val.([]IPAddr)
+			var addrs []IPAddr
+			if okv, okok := r.Val.([]IPAddr); okok {
+				addrs = okv
+			}
 			trace.DNSDone(ipAddrsEface(addrs), r.Shared, err)
 		}
 		return lookupIPReturn(r.Val, err, r.Shared)
