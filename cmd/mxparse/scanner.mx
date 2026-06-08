@@ -1519,6 +1519,15 @@ func (i Operator) String() (s string) {
 
 // --- AST nodes ---
 
+type File struct {
+	Pragma    Pragma
+	PkgName   *Name
+	DeclList  []Decl
+	EOF       Pos
+	GoVersion string
+	node
+}
+
 type node struct {
 	pos Pos
 }
@@ -1709,7 +1718,7 @@ type typeInfo interface {
 	GetTypeInfo() TypeAndValue
 }
 
-type ConstVal = interface{ String() string }
+type ConstVal interface{ String() string }
 
 type TypeAndValue struct {
 	Type  Type
@@ -2389,7 +2398,6 @@ func (p *Parser) fileOrNil() (f *File) {
 	// { ( ImportDecl | TopLevelDecl ) ";" }
 	prev := Import
 	for p.Tok != EOF {
-		dbg("loop tok: " | p.Tok.String() | " val=" | Itoa(int32(p.Tok)) | " Func=" | Itoa(int32(Func)) | " eq=" | Itoa(int32(p.Tok) - int32(Func)) | "\n")
 		if p.Tok == Import && prev != Import {
 			p.syntaxError("imports must appear before other declarations")
 		}
@@ -2787,6 +2795,7 @@ func (p *Parser) funcDeclOrNil() (f *FuncDecl) {
 		f.Name = p.name()
 		f.TParamList, f.Type = p.funcType(context)
 	} else {
+		dbg("funcDecl: not a name, falling to error\n")
 		f.Name = NewName(p.pos(), "_")
 		f.Type = &FuncType{}
 		f.Type.pos = p.pos()
@@ -4842,24 +4851,13 @@ func UnpackListExpr(x Expr) (es []Expr) {
 	}
 }
 
-func dbg(s string) {
-	if len(s) > 0 {
-		cWrite(2, unsafe.Pointer(&[]byte(s)[0]), uint32(len(s)))
-	}
-}
 
 func parseSource(name string, src []byte) (f *File) {
 	errh := func(err error) {}
 	var p Parser
-	dbg("init...\n")
 	p.initBytes(NewFileBase(name), src, errh, nil, 0)
-	dbg("next...\n")
 	p.Next()
-	dbg("tok: " | p.Tok.String() | " val=" | Itoa(int32(p.Tok)) | " pkg=" | Itoa(int32(Package)) | "\n")
-	dbg("parse...\n")
-	f = p.fileOrNil()
-	dbg("done\n")
-	return f
+	return p.fileOrNil()
 }
 
 func bytesHasPrefix(s, prefix string) (ok bool) {
