@@ -491,10 +491,14 @@ reduce runtime memory:
 cmd/mxlex/    .mx -> token stream     (imports token/)
 cmd/mxparse/  tokens -> AST           (imports token/, syntax/)
 cmd/mxcheck/  AST -> typed AST        (imports token/, syntax/, types/)
-cmd/mxssa/    typed AST -> SSA        (imports token/, syntax/, types/, ssa/)
-cmd/mxemit/   SSA -> LLVM IR          (imports all of the above)
+cmd/mxssa/    typed AST -> SSA        (imports token/, types/, ssa/)
+cmd/mxemit/   SSA -> LLVM IR          (imports token/, ssa/, emit/)
 cmd/mxc/      orchestrator            (invokes the above, handles linking)
 ```
+
+Each tool imports only what it needs. Earlier pipeline stages are separate
+processes by this point - mxemit receives serialized SSA, not syntax trees,
+so it has no dependency on syntax/ or types/.
 
 Each tool reads from stdin/files and writes to stdout/files. Memory usage
 is bounded by the largest single package being processed, not the whole
