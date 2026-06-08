@@ -482,6 +482,34 @@ func irEscapeString(s string) (sv string) {
 	return string(buf)
 }
 
+func (e *irEmitter) resolveAllNamedTypes() {
+	if e.pkg == nil || e.pkg.Pkg == nil || e.pkg.Pkg.Scope() == nil {
+		return
+	}
+	scope := e.pkg.Pkg.Scope()
+	for _, name := range scope.Names() {
+		obj := scope.Lookup(name)
+		if obj == nil {
+			continue
+		}
+		tn, ok := obj.(*TypeName)
+		if !ok || tn == nil {
+			continue
+		}
+		named, ok2 := tn.typ.(*Named)
+		if !ok2 || named == nil {
+			continue
+		}
+		if named.underlying != nil {
+			continue
+		}
+		u := safeUnderlying(named)
+		if u != nil && u != Type(named) {
+			named.SetUnderlying(u)
+		}
+	}
+}
+
 func (e *irEmitter) emit() (s string) {
 	dl := e.dataLayout()
 	if dl != "" {
@@ -493,6 +521,7 @@ func (e *irEmitter) emit() (s string) {
 	e.w(e.triple)
 	e.w("\"\n\n")
 
+	e.resolveAllNamedTypes()
 	e.globalTypes = map[string]string{}
 	e.globalDeclTypes = map[string]string{}
 	sortedM := e.pkgMembersSorted()
@@ -7142,6 +7171,21 @@ func typeCheckPkg(src []byte, name string) (*TCPackage, *syntax.File) {
 		case *syntax.ConstDecl:
 			for _, n := range d.NameList {
 				scope.Insert(NewTCConst(pkg, n.Value, nil, nil))
+			}
+		}
+	}
+	for _, d := range file.DeclList {
+		if td, ok := d.(*syntax.TypeDecl); ok {
+			obj := scope.Lookup(td.Name.Value)
+			if tn, ok2 := obj.(*TypeName); ok2 && tn != nil {
+				if n, ok3 := tn.typ.(*Named); ok3 && n != nil && n.underlying == nil {
+					if td.Type != nil {
+						under := resolveTypeExprWithSubst(td.Type, nil, scope)
+						if under != nil {
+							n.SetUnderlying(under)
+						}
+					}
+				}
 			}
 		}
 	}
