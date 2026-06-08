@@ -1,0 +1,1518 @@
+package main
+
+
+const runeError = '�'
+const runeSelf = 0x80
+const maxRune = '\U0010FFFF'
+const utfMax = 4
+
+func decodeRune(p []byte) (r rune, size int32) {
+	n := int32(len(p))
+	if n < 1 { return runeError, 0 }
+	p0 := p[0]
+	if p0 < runeSelf { return rune(p0), 1 }
+	if p0 < 0xC0 { return runeError, 1 }
+	if n < 2 { return runeError, 1 }
+	p1 := p[1]
+	if p1 < 0x80 || p1 >= 0xC0 { return runeError, 1 }
+	if p0 < 0xE0 {
+		r = rune(p0&0x1F)<<6 | rune(p1&0x3F)
+		if r < 0x80 { return runeError, 1 }
+		return r, 2
+	}
+	if n < 3 { return runeError, 1 }
+	p2 := p[2]
+	if p2 < 0x80 || p2 >= 0xC0 { return runeError, 1 }
+	if p0 < 0xF0 {
+		r = rune(p0&0x0F)<<12 | rune(p1&0x3F)<<6 | rune(p2&0x3F)
+		if r < 0x800 { return runeError, 1 }
+		if r >= 0xD800 && r <= 0xDFFF { return runeError, 1 }
+		return r, 3
+	}
+	if n < 4 { return runeError, 1 }
+	p3 := p[3]
+	if p3 < 0x80 || p3 >= 0xC0 { return runeError, 1 }
+	if p0 < 0xF8 {
+		r = rune(p0&0x07)<<18 | rune(p1&0x3F)<<12 | rune(p2&0x3F)<<6 | rune(p3&0x3F)
+		if r < 0x10000 || r > maxRune { return runeError, 1 }
+		return r, 4
+	}
+	return runeError, 1
+}
+
+func fullRune(p []byte) (ok bool) {
+	n := int32(len(p))
+	if n == 0 { return false }
+	if p[0] < runeSelf { return true }
+	if p[0] < 0xC0 { return true }
+	if n < 2 { return false }
+	if p[0] < 0xE0 { return true }
+	if n < 3 { return false }
+	if p[0] < 0xF0 { return true }
+	return n >= 4
+}
+
+func uIsLetter(ch rune) (ok bool) {
+	if ch < runeSelf { return 'a' <= (ch|0x20) && (ch|0x20) <= 'z' || ch == '_' }
+	return true
+}
+
+func uIsDigit(ch rune) (ok bool) {
+	if ch < runeSelf { return '0' <= ch && ch <= '9' }
+	return false
+}
+
+
+type srcDone struct{}
+
+func (srcDone) Error() (s string) { return "EOF" }
+
+type Source struct {
+	in   interface{}
+	errh func(line, col uint32, msg string)
+
+	buf       []byte
+	ioerr     error
+	noFill    bool
+	b, r, e   int32
+	line, col uint32
+	ch        rune
+	chw       int32
+}
+
+const sentinel = 0x80
+
+func (s *Source) release() {
+	s.buf = nil
+	s.in = nil
+	s.errh = nil
+	s.ioerr = nil
+}
+
+func (s *Source) init(in interface{}, errh func(line, col uint32, msg string)) {
+	s.in = in
+	s.errh = errh
+
+	if s.buf == nil {
+		s.buf = []byte{:nextSize(0)}
+	}
+	s.buf[0] = sentinel
+	s.ioerr = nil
+	s.noFill = false
+	s.b, s.r, s.e = -1, 0, 0
+	s.line, s.col = 0, 0
+	s.ch = ' '
+	s.chw = 0
+}
+
+func (s *Source) initBytes(src []byte, errh func(line, col uint32, msg string)) {
+	s.in = nil
+	s.errh = errh
+	s.noFill = true
+	s.buf = []byte{:len(src) + 1}
+	copy(s.buf, src)
+	s.buf[len(src)] = sentinel
+	s.ioerr = nil
+	s.b, s.r, s.e = -1, 0, int32(len(src))
+	s.line, s.col = 0, 0
+	s.ch = ' '
+	s.chw = 0
+}
+
+func (s *Source) pos() (line, col uint32) {
+	return Linebase + s.line, Colbase + s.col
+}
+
+func (s *Source) Debugpos() (line, col uint32) {
+	return Linebase + s.line, Colbase + s.col
+}
+
+func (s *Source) error(msg string) {
+	line, col := s.pos()
+	s.errh(line, col, msg)
+}
+
+func (s *Source) start()          { s.b = s.r - s.chw }
+func (s *Source) stop()           { s.b = -1 }
+func (s *Source) segment() (buf []byte) { return s.buf[s.b : s.r-s.chw] }
+
+// segmentCopy returns a copy of the current segment that survives buffer
+// reallocation in fill(). In Moxie string=[]byte so string(segment()) does
+// NOT copy - the returned slice still aliases s.buf.
+func (s *Source) segmentCopy() (buf []byte) {
+	b := s.buf[s.b : s.r-s.chw]
+	c := []byte{:len(b)}
+	copy(c, b)
+	return c
+}
+
+func (s *Source) rewind() {
+	if s.b < 0 {
+		panic("no active segment")
+	}
+	s.col -= uint32(s.r - s.b)
+	s.r = s.b
+	s.nextch()
+}
+
+func (s *Source) nextch() {
+redo:
+	s.col += uint32(s.chw)
+	if s.ch == '\n' {
+		s.line++
+		s.col = 0
+	}
+
+	if s.ch = rune(s.buf[s.r]); s.ch < sentinel {
+		s.r++
+		s.chw = 1
+		if s.ch == 0 {
+			s.error("invalid NUL character")
+			goto redo
+		}
+		return
+	}
+
+	for s.e-s.r < utfMax && !fullRune(s.buf[s.r:s.e]) && s.ioerr == nil {
+		s.fill()
+	}
+
+	if s.r == s.e {
+		if (s.ioerr == nil || s.ioerr == nil) && !s.noFill {
+			s.error("I/O error: " | s.ioerr.Error())
+			s.ioerr = nil
+		}
+		s.ch = -1
+		s.chw = 0
+		return
+	}
+
+	var w int32
+	s.ch, w = decodeRune(s.buf[s.r:s.e])
+	s.chw = int32(w)
+	s.r += s.chw
+
+	if s.ch == runeError && s.chw == 1 {
+		s.error("invalid UTF-8 encoding")
+		goto redo
+	}
+
+	const BOM = 0xfeff
+	if s.ch == BOM {
+		if s.line > 0 || s.col > 0 {
+			s.error("invalid BOM in the middle of the file")
+		}
+		goto redo
+	}
+}
+
+func (s *Source) fill() {
+	if s.noFill {
+		s.ioerr = srcDone{}
+		return
+	}
+	b := s.r
+	if s.b >= 0 {
+		b = s.b
+		s.b = 0
+	}
+	content := s.buf[b:s.e]
+
+	if len(content)*2 > len(s.buf) {
+		s.buf = []byte{:nextSize(int32(len(s.buf)))}
+		copy(s.buf, content)
+	} else if b > 0 {
+		copy(s.buf, content)
+	}
+	s.r -= b
+	s.e -= b
+
+	for i := 0; i < 10; i++ {
+		var n int32
+		var nn int32
+		panic("stream read not supported")
+		n = int32(nn)
+		if n < 0 {
+			panic("negative read")
+		}
+		if n > 0 || s.ioerr != nil {
+			s.e += n
+			s.buf[s.e] = sentinel
+			return
+		}
+	}
+
+	s.buf[s.e] = sentinel
+	
+}
+
+func nextSize(size int32) (n int32) {
+	const min = 4 << 10
+	const max = 1 << 20
+	if size < min {
+		return min
+	}
+	if size <= max {
+		return size << 1
+	}
+	return size + max
+}
+
+
+const (
+	comments   uint32 = 1 << iota
+	directives
+)
+
+
+
+
+type Scanner struct {
+	Source
+	mode   uint32
+	nlsemi bool
+
+	Line, Col uint32
+	Blank     bool
+	Tok       Token
+	Lit       string
+	Bad       bool
+	Kind      LitKind
+	Op        Operator
+	Prec      int32
+
+	keywordMap   [1 << 6]Token
+	keywordsReady bool
+}
+
+
+func (s *Scanner) InitBytes(src []byte, errh func(line, col uint32, msg string), mode uint32) {
+	s.Source.initBytes(src, errh)
+	s.mode = 0
+	s.nlsemi = false
+	
+	s.initKeywords()
+}
+
+func (s *Scanner) Errorf(msg string) {
+	s.error(msg)
+}
+
+func (s *Scanner) ErrorAtf(offset int32, msg string) {
+	s.errh(s.line, s.col+uint32(offset), msg)
+}
+
+func (s *Scanner) SetLit(kind LitKind, ok bool) {
+	s.nlsemi = true
+	s.Tok = Literal
+	s.Lit = string(s.segmentCopy())
+	s.Bad = !ok
+	s.Kind = kind
+}
+
+func (s *Scanner) Next() {
+	nlsemi := s.nlsemi
+	s.nlsemi = false
+
+redo:
+	s.stop()
+	startLine, startCol := s.pos()
+	for s.ch == ' ' || s.ch == '\t' || s.ch == '\n' && !nlsemi || s.ch == '\r' {
+		s.nextch()
+	}
+
+	s.Line, s.Col = s.pos()
+	s.Blank = s.line > startLine || startCol == Colbase
+	s.start()
+	if IsLetter(s.ch) || s.ch >= runeSelf && s.AtIdentChar(true) {
+		s.nextch()
+		s.Ident()
+		return
+	}
+
+	switch s.ch {
+	case -1:
+		if nlsemi {
+			s.Lit = "EOF"
+			s.Tok = Semi
+			break
+		}
+		s.Tok = EOF
+
+	case '\n':
+		s.nextch()
+		s.Lit = "newline"
+		s.Tok = Semi
+
+	case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		s.Number(false)
+
+	case '"':
+		s.stdString()
+
+	case '`':
+		s.rawString()
+
+	case '\'':
+		s.rune()
+
+	case '(':
+		s.nextch()
+		s.Tok = Lparen
+
+	case '[':
+		s.nextch()
+		s.Tok = Lbrack
+
+	case '{':
+		s.nextch()
+		s.Tok = Lbrace
+
+	case ',':
+		s.nextch()
+		s.Tok = Comma
+
+	case ';':
+		s.nextch()
+		s.Lit = "semicolon"
+		s.Tok = Semi
+
+	case ')':
+		s.nextch()
+		s.nlsemi = true
+		s.Tok = Rparen
+
+	case ']':
+		s.nextch()
+		s.nlsemi = true
+		s.Tok = Rbrack
+
+	case '}':
+		s.nextch()
+		s.nlsemi = true
+		s.Tok = Rbrace
+
+	case ':':
+		s.nextch()
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = Define
+			break
+		}
+		s.Tok = Colon
+
+	case '.':
+		s.nextch()
+		if IsDecimal(s.ch) {
+			s.Number(true)
+			break
+		}
+		if s.ch == '.' {
+			s.nextch()
+			if s.ch == '.' {
+				s.nextch()
+				s.Tok = DotDotDot
+				break
+			}
+			s.rewind()
+			s.nextch()
+		}
+		s.Tok = Dot
+
+	case '+':
+		s.nextch()
+		s.Op, s.Prec = Add, PrecAdd
+		if s.ch != '+' {
+			s.assignOp()
+			return
+		}
+		s.nextch()
+		s.nlsemi = true
+		s.Tok = IncOp
+
+	case '-':
+		s.nextch()
+		s.Op, s.Prec = Sub, PrecAdd
+		if s.ch != '-' {
+			s.assignOp()
+			return
+		}
+		s.nextch()
+		s.nlsemi = true
+		s.Tok = IncOp
+
+	case '*':
+		s.nextch()
+		s.Op, s.Prec = Mul, PrecMul
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = AssignOp
+			break
+		}
+		s.Tok = Star
+
+	case '/':
+		s.nextch()
+		if s.ch == '/' {
+			s.nextch()
+			s.lineComment()
+			goto redo
+		}
+		if s.ch == '*' {
+			s.nextch()
+			s.fullComment()
+			if line, _ := s.pos(); line > s.Line && nlsemi {
+				s.Lit = "newline"
+				s.Tok = Semi
+				break
+			}
+			goto redo
+		}
+		s.Op, s.Prec = Div, PrecMul
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = AssignOp
+		} else {
+			s.Tok = OperatorType
+		}
+
+	case '%':
+		s.nextch()
+		s.Op, s.Prec = Rem, PrecMul
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = AssignOp
+		} else {
+			s.Tok = OperatorType
+		}
+
+	case '&':
+		s.nextch()
+		if s.ch == '&' {
+			s.nextch()
+			s.Op, s.Prec = AndAnd, PrecAndAnd
+			s.Tok = OperatorType
+			break
+		}
+		s.Op, s.Prec = And, PrecMul
+		if s.ch == '^' {
+			s.nextch()
+			s.Op = AndNot
+		}
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = AssignOp
+		} else {
+			s.Tok = OperatorType
+		}
+
+	case '|':
+		s.nextch()
+		if s.ch == '|' {
+			s.nextch()
+			s.Op, s.Prec = OrOr, PrecOrOr
+			s.Tok = OperatorType
+			break
+		}
+		s.Op, s.Prec = Or, PrecAdd
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = AssignOp
+		} else {
+			s.Tok = OperatorType
+		}
+
+	case '^':
+		s.nextch()
+		s.Op, s.Prec = Xor, PrecAdd
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = AssignOp
+		} else {
+			s.Tok = OperatorType
+		}
+
+	case '<':
+		s.nextch()
+		if s.ch == '=' {
+			s.nextch()
+			s.Op, s.Prec = Leq, PrecCmp
+			s.Tok = OperatorType
+			break
+		}
+		if s.ch == '<' {
+			s.nextch()
+			s.Op, s.Prec = Shl, PrecMul
+			s.assignOp()
+			return
+		}
+		if s.ch == '-' {
+			s.nextch()
+			s.Tok = Arrow
+			break
+		}
+		s.Op, s.Prec = Lss, PrecCmp
+		s.Tok = OperatorType
+
+	case '>':
+		s.nextch()
+		if s.ch == '=' {
+			s.nextch()
+			s.Op, s.Prec = Geq, PrecCmp
+			s.Tok = OperatorType
+			break
+		}
+		if s.ch == '>' {
+			s.nextch()
+			s.Op, s.Prec = Shr, PrecMul
+			s.assignOp()
+			return
+		}
+		s.Op, s.Prec = Gtr, PrecCmp
+		s.Tok = OperatorType
+
+	case '=':
+		s.nextch()
+		if s.ch == '=' {
+			s.nextch()
+			s.Op, s.Prec = Eql, PrecCmp
+			s.Tok = OperatorType
+			break
+		}
+		s.Tok = Assign
+
+	case '!':
+		s.nextch()
+		if s.ch == '=' {
+			s.nextch()
+			s.Op, s.Prec = Neq, PrecCmp
+			s.Tok = OperatorType
+			break
+		}
+		s.Op, s.Prec = Not, 0
+		s.Tok = OperatorType
+
+	case '~':
+		s.nextch()
+		s.Op, s.Prec = Tilde, 0
+		s.Tok = OperatorType
+
+	default:
+		s.Errorf("invalid character " | fmtRuneU(s.ch))
+		s.nextch()
+		goto redo
+	}
+
+	return
+}
+
+func (s *Scanner) assignOp() {
+	if s.ch == '=' {
+		s.nextch()
+		s.Tok = AssignOp
+		return
+	}
+	s.Tok = OperatorType
+}
+
+func (s *Scanner) Ident() {
+	for IsLetter(s.ch) || IsDecimal(s.ch) {
+		s.nextch()
+	}
+
+	if s.ch >= runeSelf {
+		for s.AtIdentChar(false) {
+			s.nextch()
+		}
+	}
+
+	lit := s.segment()
+	if len(lit) >= 2 {
+		h := (uint32(lit[0])<<4 ^ uint32(lit[1]) + uint32(len(lit))) & 63
+		if tok := s.keywordMap[h]; tok != 0 && tokStrFast(tok) == string(lit) {
+			s.nlsemi = Contains(1<<Break|1<<Continue|1<<Fallthrough|1<<Return, tok)
+			s.Tok = tok
+			return
+		}
+	}
+
+	s.nlsemi = true
+	c := []byte{:len(lit)}
+	copy(c, lit)
+	s.Lit = string(c)
+	s.Tok = NameType
+}
+
+func tokStrFast(tok Token) (s string) {
+	idx := [48]uint8{0, 3, 7, 14, 16, 19, 23, 24, 26, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 42, 47, 51, 55, 60, 68, 75, 80, 84, 95, 98, 102, 104, 108, 110, 116, 125, 128, 135, 140, 146, 152, 158, 164, 168, 171, 171}
+	return token_name[idx[tok-1]:idx[tok]]
+}
+
+func (s *Scanner) AtIdentChar(first bool) (ok bool) {
+	switch {
+	case uIsLetter(s.ch) || s.ch == '_':
+	case uIsDigit(s.ch):
+		if first {
+			s.Errorf("identifier cannot begin with digit " | fmtRuneU(s.ch))
+		}
+	case s.ch >= runeSelf:
+		s.Errorf("invalid character " | fmtRuneU(s.ch) | " in identifier")
+	default:
+		return false
+	}
+	return true
+}
+
+func (s *Scanner) initKeywords() {
+	if s.keywordsReady {
+		return
+	}
+	s.keywordsReady = true
+	for tok := Break; tok <= Var; tok++ {
+		b := []byte(tok.String())
+		h := (uint32(b[0])<<4 ^ uint32(b[1]) + uint32(len(b))) & 63
+		if s.keywordMap[h] != 0 {
+			panic("imperfect hash")
+		}
+		s.keywordMap[h] = tok
+	}
+}
+
+func Lower(ch rune) (r rune) { return ('a' - 'A') | ch }
+func IsLetter(ch rune) (ok bool) { return 'a' <= Lower(ch) && Lower(ch) <= 'z' || ch == '_' }
+func IsDecimal(ch rune) (ok bool) { return '0' <= ch && ch <= '9' }
+func IsHex(ch rune) (ok bool) { return '0' <= ch && ch <= '9' || 'a' <= Lower(ch) && Lower(ch) <= 'f' }
+
+func (s *Scanner) Digits(base int32, invalid *int32) (digsep int32) {
+	if base <= 10 {
+		max := rune('0' + base)
+		for IsDecimal(s.ch) || s.ch == '_' {
+			ds := int32(1)
+			if s.ch == '_' {
+				ds = 2
+			} else if s.ch >= max && *invalid < 0 {
+				_, col := s.pos()
+				*invalid = int32(col - s.col)
+			}
+			digsep |= ds
+			s.nextch()
+		}
+	} else {
+		for IsHex(s.ch) || s.ch == '_' {
+			ds := int32(1)
+			if s.ch == '_' {
+				ds = 2
+			}
+			digsep |= ds
+			s.nextch()
+		}
+	}
+	return
+}
+
+func (s *Scanner) Number(seenPoint bool) {
+	ok := true
+	kind := IntLit
+	base := int32(10)
+	prefix := rune(0)
+	digsep := int32(0)
+	invalid := int32(-1)
+
+	if !seenPoint {
+		if s.ch == '0' {
+			s.nextch()
+			switch Lower(s.ch) {
+			case 'x':
+				s.nextch()
+				base, prefix = 16, 'x'
+			case 'o':
+				s.nextch()
+				base, prefix = 8, 'o'
+			case 'b':
+				s.nextch()
+				base, prefix = 2, 'b'
+			default:
+				base, prefix = 8, '0'
+				digsep = 1
+			}
+		}
+		digsep |= s.Digits(base, &invalid)
+		if s.ch == '.' {
+			if prefix == 'o' || prefix == 'b' {
+				s.Errorf("invalid radix point in " | baseName(base) | " literal")
+				ok = false
+			}
+			s.nextch()
+			seenPoint = true
+		}
+	}
+
+	if seenPoint {
+		kind = FloatLit
+		digsep |= s.Digits(base, &invalid)
+	}
+
+	if digsep&1 == 0 && ok {
+		s.Errorf(baseName(base) | " literal has no digits")
+		ok = false
+	}
+
+	if e := Lower(s.ch); e == 'e' || e == 'p' {
+		if ok {
+			switch {
+			case e == 'e' && prefix != 0 && prefix != '0':
+				s.Errorf(fmtQuoteRune(s.ch) | " exponent requires decimal mantissa")
+				ok = false
+			case e == 'p' && prefix != 'x':
+				s.Errorf(fmtQuoteRune(s.ch) | " exponent requires hexadecimal mantissa")
+				ok = false
+			}
+		}
+		s.nextch()
+		kind = FloatLit
+		if s.ch == '+' || s.ch == '-' {
+			s.nextch()
+		}
+		digsep = s.Digits(10, nil) | digsep&2
+		if digsep&1 == 0 && ok {
+			s.Errorf("exponent has no digits")
+			ok = false
+		}
+	} else if prefix == 'x' && kind == FloatLit && ok {
+		s.Errorf("hexadecimal mantissa requires a 'p' exponent")
+		ok = false
+	}
+
+	if s.ch == 'i' {
+		kind = ImagLit
+		s.nextch()
+	}
+
+	s.SetLit(kind, ok)
+
+	if kind == IntLit && invalid >= 0 && ok {
+		s.ErrorAtf(invalid, "invalid digit " | fmtQuoteRune(rune(s.Lit[invalid])) | " in " | baseName(base) | " literal")
+		ok = false
+	}
+
+	if digsep&2 != 0 && ok {
+		if i := invalidSep(s.Lit); i >= 0 {
+			s.ErrorAtf(i, "'_' must separate successive digits")
+			ok = false
+		}
+	}
+
+	s.Bad = !ok
+}
+
+func baseName(base int32) (s string) {
+	switch base {
+	case 2:
+		return "binary"
+	case 8:
+		return "octal"
+	case 10:
+		return "decimal"
+	case 16:
+		return "hexadecimal"
+	}
+	panic("invalid base")
+}
+
+func invalidSep(x string) (n int32) {
+	x1 := ' '
+	d := '.'
+	i := int32(0)
+
+	if len(x) >= 2 && x[0] == '0' {
+		x1 = Lower(rune(x[1]))
+		if x1 == 'x' || x1 == 'o' || x1 == 'b' {
+			d = '0'
+			i = 2
+		}
+	}
+
+	for ; i < int32(len(x)); i++ {
+		p := d
+		d = rune(x[i])
+		switch {
+		case d == '_':
+			if p != '0' {
+				return i
+			}
+		case IsDecimal(d) || x1 == 'x' && IsHex(d):
+			d = '0'
+		default:
+			if p == '_' {
+				return i - 1
+			}
+			d = '.'
+		}
+	}
+	if d == '_' {
+		return int32(len(x)) - 1
+	}
+
+	return -1
+}
+
+func (s *Scanner) rune() {
+	ok := true
+	s.nextch()
+
+	n := 0
+	for ; ; n++ {
+		if s.ch == '\'' {
+			if ok {
+				if n == 0 {
+					s.Errorf("empty rune literal or unescaped '")
+					ok = false
+				} else if n != 1 {
+					s.ErrorAtf(0, "more than one character in rune literal")
+					ok = false
+				}
+			}
+			s.nextch()
+			break
+		}
+		if s.ch == '\\' {
+			s.nextch()
+			if !s.escape('\'') {
+				ok = false
+			}
+			continue
+		}
+		if s.ch == '\n' {
+			if ok {
+				s.Errorf("newline in rune literal")
+				ok = false
+			}
+			break
+		}
+		if s.ch < 0 {
+			if ok {
+				s.ErrorAtf(0, "rune literal not terminated")
+				ok = false
+			}
+			break
+		}
+		s.nextch()
+	}
+
+	s.SetLit(RuneLit, ok)
+}
+
+func (s *Scanner) stdString() {
+	ok := true
+	s.nextch()
+
+	for {
+		if s.ch == '"' {
+			s.nextch()
+			break
+		}
+		if s.ch == '\\' {
+			s.nextch()
+			if !s.escape('"') {
+				ok = false
+			}
+			continue
+		}
+		if s.ch == '\n' {
+			s.Errorf("newline in string")
+			ok = false
+			break
+		}
+		if s.ch < 0 {
+			s.ErrorAtf(0, "string not terminated")
+			ok = false
+			break
+		}
+		s.nextch()
+	}
+
+	s.SetLit(StringLit, ok)
+}
+
+func (s *Scanner) rawString() {
+	ok := true
+	s.nextch()
+
+	for {
+		if s.ch == '`' {
+			s.nextch()
+			break
+		}
+		if s.ch < 0 {
+			s.ErrorAtf(0, "string not terminated")
+			ok = false
+			break
+		}
+		s.nextch()
+	}
+
+	s.SetLit(StringLit, ok)
+}
+
+func (s *Scanner) comment(text string) {
+	s.ErrorAtf(0, text)
+}
+
+func (s *Scanner) skipLine() {
+	for s.ch >= 0 && s.ch != '\n' {
+		s.nextch()
+	}
+}
+
+func (s *Scanner) lineComment() {
+	if s.mode&comments != 0 {
+		s.skipLine()
+		s.comment(string(s.segment()))
+		return
+	}
+
+	if s.mode&directives == 0 || (s.ch != 'g' && s.ch != 'l') {
+		s.stop()
+		s.skipLine()
+		return
+	}
+
+	prefix := "go:"
+	if s.ch == 'l' {
+		prefix = "line "
+	}
+
+	for _, r := range prefix {
+		if s.ch != rune(r) {
+			s.stop()
+			s.skipLine()
+			return
+		}
+		s.nextch()
+	}
+	s.skipLine()
+	s.comment(string(s.segment()))
+}
+
+func (s *Scanner) skipComment() (ok bool) {
+	for s.ch >= 0 {
+		for s.ch == '*' {
+			s.nextch()
+			if s.ch == '/' {
+				s.nextch()
+				return true
+			}
+		}
+		s.nextch()
+	}
+	s.ErrorAtf(0, "comment not terminated")
+	return false
+}
+
+func (s *Scanner) fullComment() {
+	if s.mode&comments != 0 {
+		if s.skipComment() {
+			s.comment(string(s.segment()))
+		}
+		return
+	}
+
+	if s.mode&directives == 0 || s.ch != 'l' {
+		s.stop()
+		s.skipComment()
+		return
+	}
+
+	const prefix = "line "
+
+	for _, r := range prefix {
+		if s.ch != rune(r) {
+			s.stop()
+			s.skipComment()
+			return
+		}
+		s.nextch()
+	}
+	if s.skipComment() {
+		s.comment(string(s.segment()))
+	}
+}
+
+func (s *Scanner) escape(quote rune) (ok bool) {
+	var n int32
+	var base, max uint32
+
+	switch s.ch {
+	case quote, 'a', 'b', 'f', 'n', 'r', 't', 'v', '\\':
+		s.nextch()
+		return true
+	case '0', '1', '2', '3', '4', '5', '6', '7':
+		n, base, max = 3, 8, 255
+	case 'x':
+		s.nextch()
+		n, base, max = 2, 16, 255
+	case 'u':
+		s.nextch()
+		n, base, max = 4, 16, maxRune
+	case 'U':
+		s.nextch()
+		n, base, max = 8, 16, maxRune
+	default:
+		if s.ch < 0 {
+			return true
+		}
+		s.Errorf("unknown escape")
+		return false
+	}
+
+	var x uint32
+	for i := n; i > 0; i-- {
+		if s.ch < 0 {
+			return true
+		}
+		d := base
+		if IsDecimal(s.ch) {
+			d = uint32(s.ch) - '0'
+		} else if 'a' <= Lower(s.ch) && Lower(s.ch) <= 'f' {
+			d = uint32(Lower(s.ch)) - 'a' + 10
+		}
+		if d >= base {
+			s.Errorf("invalid character " | fmtQuoteRune(s.ch) | " in " | baseName(int32(base)) | " escape")
+			return false
+		}
+		x = x*base + d
+		s.nextch()
+	}
+
+	if x > max && base == 8 {
+		s.Errorf("octal escape value " | ItoaU32(x) | " > 255")
+		return false
+	}
+
+	if x > max || 0xD800 <= x && x < 0xE000 {
+		s.Errorf("escape is invalid Unicode code point " | fmtRuneU(rune(x)))
+		return false
+	}
+
+	return true
+}
+
+
+
+// fmtRuneU formats a rune as "U+XXXX 'c'" (like %#U).
+func fmtRuneU(r rune) (s string) {
+	hex := fmtHex32(uint32(r))
+	s = "U+" | hex
+	if r >= 0x20 && r < 0x7f {
+		s = s | " '" | string([]byte{byte(r)}) | "'"
+	}
+	return s
+}
+
+// fmtQuoteRune formats a rune as 'c' (like %q for rune).
+func fmtQuoteRune(r rune) (s string) {
+	if r >= 0x20 && r < 0x7f {
+		return "'" | string([]byte{byte(r)}) | "'"
+	}
+	return "U+" | fmtHex32(uint32(r))
+}
+
+// fmtHex32 formats a uint32 as uppercase hex with at least 4 digits.
+func fmtHex32(v uint32) (s string) {
+	const digits = "0123456789ABCDEF"
+	buf := []byte{:0:8}
+	if v == 0 {
+		return "0000"
+	}
+	for v > 0 {
+		buf = append(buf, digits[v&0xf])
+		v >>= 4
+	}
+	for len(buf) < 4 {
+		buf = append(buf, '0')
+	}
+	for i, j := int32(0), len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
+
+
+const PosMax = 1 << 30
+const Linebase = 1
+const Colbase = 1
+
+type Pos struct {
+	base      *PosBase
+	line, col uint32
+}
+
+func MakePos(base *PosBase, line, col uint32) (p Pos) { return Pos{base, sat32(line), sat32(col)} }
+
+func (pos Pos) Pos() (p Pos) { return pos }
+func (pos Pos) IsKnown() (ok bool) { return pos.line > 0 }
+func (pos Pos) Base() (p *PosBase) { return pos.base }
+func (pos Pos) Line() (n uint32) { return pos.line }
+func (pos Pos) Col() (n uint32) { return pos.col }
+
+func (pos Pos) FileBase() (p *PosBase) {
+	b := pos.base
+	for b != nil && b != b.pos.base {
+		b = b.pos.base
+	}
+	return b
+}
+
+func (pos Pos) RelFilename() (s string) { return pos.base.Filename() }
+
+func (pos Pos) RelLine() (n uint32) {
+	b := pos.base
+	if b.Line() == 0 {
+		return 0
+	}
+	return b.Line() + (pos.Line() - b.Pos().Line())
+}
+
+func (pos Pos) RelCol() (n uint32) {
+	b := pos.base
+	if b.Col() == 0 {
+		return 0
+	}
+	if pos.Line() == b.Pos().Line() {
+		return b.Col() + (pos.Col() - b.Pos().Col())
+	}
+	return pos.Col()
+}
+
+func (p Pos) Cmp(q Pos) (n int32) {
+	pname := p.RelFilename()
+	qname := q.RelFilename()
+	switch {
+	case pname < qname:
+		return -1
+	case pname > qname:
+		return +1
+	}
+
+	pline := p.Line()
+	qline := q.Line()
+	switch {
+	case pline < qline:
+		return -1
+	case pline > qline:
+		return +1
+	}
+
+	pcol := p.Col()
+	qcol := q.Col()
+	switch {
+	case pcol < qcol:
+		return -1
+	case pcol > qcol:
+		return +1
+	}
+
+	return 0
+}
+
+func (pos Pos) String() (s string) {
+	rel := position_{pos.RelFilename(), pos.RelLine(), pos.RelCol()}
+	abs := position_{pos.Base().Pos().RelFilename(), pos.Line(), pos.Col()}
+	s = rel.String()
+	if string(rel.filename) != string(abs.filename) || rel.line != abs.line || rel.col != abs.col {
+		s = s | "[" | abs.String() | "]"
+	}
+	return s
+}
+
+type position_ struct {
+	filename  string
+	line, col uint32
+}
+
+func (p position_) String() (s string) {
+	if p.line == 0 {
+		if p.filename == "" {
+			return "<unknown position>"
+		}
+		return p.filename
+	}
+	if p.col == 0 {
+		return p.filename | ":" | ItoaU32(p.line)
+	}
+	return p.filename | ":" | ItoaU32(p.line) | ":" | ItoaU32(p.col)
+}
+
+func ItoaU32(n uint32) (s string) {
+	if n == 0 {
+		return "0"
+	}
+	buf := []byte{:0:10}
+	for n > 0 {
+		buf = append(buf, byte('0'+n%10))
+		n /= 10
+	}
+	for i, j := int32(0), len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
+
+type PosBase struct {
+	pos       Pos
+	filename  string
+	line, col uint32
+	trimmed   bool
+}
+
+func NewFileBase(filename string) (p *PosBase) {
+	return NewTrimmedFileBase(filename, false)
+}
+
+func NewTrimmedFileBase(filename string, trimmed bool) (p *PosBase) {
+	base := &PosBase{MakePos(nil, Linebase, Colbase), filename, Linebase, Colbase, trimmed}
+	base.pos.base = base
+	return base
+}
+
+func NewLineBase(pos Pos, filename string, trimmed bool, line, col uint32) (p *PosBase) {
+	return &PosBase{pos, filename, sat32(line), sat32(col), trimmed}
+}
+
+func (base *PosBase) IsFileBase() (ok bool) {
+	if base == nil {
+		return false
+	}
+	return base.pos.base == base
+}
+
+func (base *PosBase) Pos() (_ Pos) {
+	if base == nil {
+		return
+	}
+	return base.pos
+}
+
+func (base *PosBase) Filename() (s string) {
+	if base == nil {
+		return ""
+	}
+	return base.filename
+}
+
+func (base *PosBase) Line() (n uint32) {
+	if base == nil {
+		return 0
+	}
+	return base.line
+}
+
+func (base *PosBase) Col() (n uint32) {
+	if base == nil {
+		return 0
+	}
+	return base.col
+}
+
+func (base *PosBase) Trimmed() (ok bool) {
+	if base == nil {
+		return false
+	}
+	return base.trimmed
+}
+
+func sat32(x uint32) (n uint32) {
+	if x > PosMax {
+		return PosMax
+	}
+	return uint32(x)
+}
+
+func Itoa(n int32) (s string) {
+	if n == 0 {
+		return "0"
+	}
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	buf := []byte{:0:12}
+	for n > 0 {
+		buf = append(buf, byte('0'+n%10))
+		n /= 10
+	}
+	if neg {
+		buf = append(buf, '-')
+	}
+	for i, j := int32(0), len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
+
+func Itoa64(n int64) (s string) {
+	if n == 0 {
+		return "0"
+	}
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	buf := []byte{:0:20}
+	for n > 0 {
+		buf = append(buf, byte('0'+n%10))
+		n /= 10
+	}
+	if neg {
+		buf = append(buf, '-')
+	}
+	for i, j := int32(0), len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
+
+func Contains(tokset uint64, tok Token) (ok bool) {
+	var bit uint64 = 1
+	bit = bit << tok
+	return tokset&bit != 0
+}
+
+
+type Token uint32
+
+const (
+	_    Token = iota
+	EOF
+
+	NameType
+	Literal
+
+	OperatorType
+	AssignOp
+	IncOp
+	Assign
+	Define
+	Arrow
+	Star
+
+	Lparen
+	Lbrack
+	Lbrace
+	Rparen
+	Rbrack
+	Rbrace
+	Comma
+	Semi
+	Colon
+	Dot
+	DotDotDot
+
+	Break
+	Case
+	Chan
+	Const
+	Continue
+	Default
+	Defer
+	Else
+	Fallthrough
+	For
+	Func
+	Go
+	Goto
+	If
+	Import
+	Interface
+	Map
+	Package
+	Range
+	Return
+	Select
+	Struct
+	Switch
+	TypeType
+	Var
+
+	tokenCount
+)
+
+const _ uint64 = 1 << (tokenCount - 1)
+
+type LitKind uint8
+
+const (
+	IntLit LitKind = iota
+	FloatLit
+	ImagLit
+	RuneLit
+	StringLit
+)
+
+type Operator uint32
+
+const (
+	_ Operator = iota
+
+	Def
+	Not
+	Recv
+	Tilde
+
+	OrOr
+
+	AndAnd
+
+	Eql
+	Neq
+	Lss
+	Leq
+	Gtr
+	Geq
+
+	Add
+	Sub
+	Or
+	Xor
+
+	Mul
+	Div
+	Rem
+	And
+	AndNot
+	Shl
+	Shr
+)
+
+const (
+	_ = iota
+	PrecOrOr
+	PrecAndAnd
+	PrecCmp
+	PrecAdd
+	PrecMul
+)
+
+const token_name = "EOFnameliteralopop=opop=:=<-*([{)]},;:....breakcasechanconstcontinuedefaultdeferelsefallthroughforfuncgogotoifimportinterfacemappackagerangereturnselectstructswitchtypevar"
+
+func (i Token) String() (s string) {
+	idx := [48]uint8{0, 3, 7, 14, 16, 19, 23, 24, 26, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 42, 47, 51, 55, 60, 68, 75, 80, 84, 95, 98, 102, 104, 108, 110, 116, 125, 128, 135, 140, 146, 152, 158, 164, 168, 171, 171}
+	i -= 1
+	if i >= Token(len(idx)-1) {
+		return "token(" | Itoa64(int64(i+1)) | ")"
+	}
+	return token_name[idx[i]:idx[i+1]]
+}
+
+const _Operator_name = ":!<-~||&&==!=<<=>>=+-|^*/%&&^<<>>"
+
+func (i Operator) String() (s string) {
+	idx := [24]uint8{0, 1, 2, 4, 5, 7, 9, 11, 13, 14, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 29, 31, 33}
+	i -= 1
+	if i >= Operator(len(idx)-1) {
+		return "Operator(" | Itoa64(int64(i+1)) | ")"
+	}
+	return _Operator_name[idx[i]:idx[i+1]]
+}

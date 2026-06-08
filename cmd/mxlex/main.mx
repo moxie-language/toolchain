@@ -1,0 +1,147 @@
+package main
+
+import "unsafe"
+
+//export write
+func cWrite(fd int32, buf unsafe.Pointer, count uint32) (n int32)
+
+//export mxc_readfile
+func cReadfile(path unsafe.Pointer, pathLen int32, buf unsafe.Pointer, bufCap int32) (n int32)
+
+//export mxc_filesize
+func cFilesize(path unsafe.Pointer, pathLen int32) (n int32)
+
+func out(s string) {
+	if len(s) > 0 {
+		cWrite(1, unsafe.Pointer(&[]byte(s)[0]), uint32(len(s)))
+	}
+}
+
+func fatal(s string) {
+	if len(s) > 0 {
+		cWrite(2, unsafe.Pointer(&[]byte(s)[0]), uint32(len(s)))
+	}
+}
+
+func readFile(path string) (data []byte, ok bool) {
+	sz := cFilesize(unsafe.Pointer(&[]byte(path)[0]), int32(len(path)))
+	if sz < 0 {
+		return nil, false
+	}
+	buf := []byte{:sz+1}
+	n := cReadfile(unsafe.Pointer(&[]byte(path)[0]), int32(len(path)),
+		unsafe.Pointer(&buf[0]), sz+1)
+	if n < 0 {
+		return nil, false
+	}
+	return buf[:n], true
+}
+
+func getArgs() (ss []string) {
+	buf := []byte{:4096}
+	n := cReadfile(unsafe.Pointer(&[]byte("/proc/self/cmdline")[0]), 18,
+		unsafe.Pointer(&buf[0]), 4096)
+	if n <= 0 {
+		return nil
+	}
+	var args []string
+	start := int32(0)
+	for i := int32(0); i < n; i++ {
+		if buf[i] == 0 {
+			if i > start {
+				args = append(args, string(buf[start:i]))
+			}
+			start = i + 1
+		}
+	}
+	return args
+}
+
+func escapeStr(s string) (r string) {
+	r = ""
+	for i := int32(0); i < int32(len(s)); i++ {
+		c := s[i]
+		switch c {
+		case '\n':
+			r = r | "\\n"
+		case '\r':
+			r = r | "\\r"
+		case '\t':
+			r = r | "\\t"
+		case '\\':
+			r = r | "\\\\"
+		case ' ':
+			r = r | "\\s"
+		default:
+			r = r | string(s[i:i+1])
+		}
+	}
+	return r
+}
+
+func main() {
+	args := getArgs()
+	if len(args) < 2 {
+		fatal("usage: mxlex <file.mx>\n")
+		return
+	}
+	path := args[1]
+	data, ok := readFile(path)
+	if !ok {
+		fatal("error: cannot read " | path | "\n")
+		return
+	}
+
+	errh := func(line, col uint32, msg string) {
+		fatal("E " | ItoaU32(line) | ":" | ItoaU32(col) | " " | msg | "\n")
+	}
+
+	var s Scanner
+	s.InitBytes(data, errh, 0)
+
+	for {
+		s.Next()
+		ln := ItoaU32(s.Line)
+		cl := ItoaU32(s.Col)
+		tok := s.Tok
+
+		if tok == EOF {
+			out(ln | ":" | cl | " EOF\n")
+			break
+		}
+
+		switch tok {
+		case NameType:
+			out(ln | ":" | cl | " NAME " | s.Lit | "\n")
+		case Literal:
+			k := "?"
+			switch s.Kind {
+			case IntLit:
+				k = "INT"
+			case FloatLit:
+				k = "FLOAT"
+			case ImagLit:
+				k = "IMAG"
+			case RuneLit:
+				k = "RUNE"
+			case StringLit:
+				k = "STRING"
+			}
+			out(ln | ":" | cl | " LIT:" | k | " " | escapeStr(s.Lit) | "\n")
+		case OperatorType, AssignOp, IncOp:
+			out(ln | ":" | cl | " OP " | s.Op.String() | "\n")
+		case Semi:
+			out(ln | ":" | cl | " SEMI\n")
+		case Assign:
+			out(ln | ":" | cl | " ASSIGN\n")
+		case Define:
+			out(ln | ":" | cl | " DEFINE\n")
+		case Arrow:
+			out(ln | ":" | cl | " ARROW\n")
+		case Star:
+			out(ln | ":" | cl | " STAR\n")
+		default:
+			out(ln | ":" | cl | " " | tok.String() | "\n")
+		}
+	}
+}
