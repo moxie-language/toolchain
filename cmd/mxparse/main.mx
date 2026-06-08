@@ -11,16 +11,24 @@ func cReadfile(path unsafe.Pointer, pathLen int32, buf unsafe.Pointer, bufCap in
 //export mxc_filesize
 func cFilesize(path unsafe.Pointer, pathLen int32) (n int32)
 
+var nl = []byte{10}
+
 func out(s string) {
 	if len(s) > 0 {
 		cWrite(1, unsafe.Pointer(&[]byte(s)[0]), uint32(len(s)))
 	}
 }
 
+func outln(s string) {
+	out(s)
+	cWrite(1, unsafe.Pointer(&nl[0]), 1)
+}
+
 func fatal(s string) {
 	if len(s) > 0 {
 		cWrite(2, unsafe.Pointer(&[]byte(s)[0]), uint32(len(s)))
 	}
+	cWrite(2, unsafe.Pointer(&nl[0]), 1)
 }
 
 func readFile(path string) (data []byte, ok bool) {
@@ -49,18 +57,39 @@ func getArgs() (ss []string) {
 
 func main() {
 	args := getArgs()
-	if len(args) < 2 { fatal("usage: mxparse <file.mx>\n"); return }
+	if len(args) < 2 { fatal("usage: mxparse <file.mx>"); return }
 	path := args[1]
 	data, ok := readFile(path)
-	if !ok { fatal("error: cannot read " | path | "\n"); return }
+	if !ok { fatal("error: cannot read " | path); return }
 	file := parseSource(path, data)
-	if file == nil { fatal("parse failed\n"); return }
-	out("File " | path | "\n")
+	if file == nil { fatal("parse failed"); return }
+	outln("File " | path)
 	if file.PkgName == nil {
-		out("PkgName: nil\n")
+		outln("PkgName: nil")
 	} else {
-		out("Package " | file.PkgName.Value | "\n")
+		outln("Package " | file.PkgName.Value)
 	}
-	out("Decls: " | ItoaU32(uint32(len(file.DeclList))) | "\n")
-	out("(decl details require type assertion fix)\n")
+	outln("Decls: " | ItoaU32(uint32(len(file.DeclList))))
+	for i := int32(0); i < int32(len(file.DeclList)); i++ {
+		d := file.DeclList[i]
+		if fd, ok := d.(*FuncDecl); ok && fd != nil {
+			r := ""
+			if fd.Recv != nil { r = "(method) " }
+			name := "_"
+			if fd.Name != nil { name = fd.Name.Value }
+			outln("Func " | r | name)
+		} else if td, ok := d.(*TypeDecl); ok && td != nil {
+			outln("Type " | td.Name.Value)
+		} else if _, ok := d.(*VarDecl); ok {
+			outln("Var")
+		} else if _, ok := d.(*ConstDecl); ok {
+			outln("Const")
+		} else if id, ok := d.(*ImportDecl); ok && id != nil {
+			p := ""
+			if id.Path != nil { p = id.Path.Value }
+			outln("Import " | p)
+		} else {
+			outln("Decl?")
+		}
+	}
 }
