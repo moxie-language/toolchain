@@ -403,7 +403,7 @@ func (e *irEmitter) declareExternalGlobal(g *SSAGlobal) {
 }
 
 func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
-	if len(fn.Blocks) > 0 {
+	if fn == nil || len(fn.Blocks) > 0 {
 		return
 	}
 	sym := e.funcSymbol(fn)
@@ -880,6 +880,9 @@ func irGlobalSymbol(pkg, name string) string {
 }
 
 func (e *irEmitter) funcSymbol(f *SSAFunction) string {
+	if f == nil {
+		return "@__mxc_nil_func"
+	}
 	if f.externalSymbol != "" {
 		sym := f.externalSymbol
 		if irNeedsQuote(sym) {
@@ -895,6 +898,9 @@ func (e *irEmitter) funcSymbol(f *SSAFunction) string {
 }
 
 func (e *irEmitter) isPkgFunc(f *SSAFunction) bool {
+	if f == nil {
+		return false
+	}
 	if f.Pkg == e.pkg {
 		return true
 	}
@@ -4305,11 +4311,6 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 	if len(e.deferList) > 0 {
 		e.emitRunDefers()
 	}
-	blk := r.InstrBlock()
-	if blk != nil && blk.ScopeID > 0 {
-		e.emitScopeFreesTo(blk.ScopeID)
-	}
-	e.emitScopeFreeAll()
 	e.deallocBeforeReturn(r)
 	frt := e.funcRetType(e.curFunc)
 	if len(r.Results) == 0 {
@@ -4489,6 +4490,15 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 	e.w("\n")
 }
 
+func blockHasReturn(b *SSABasicBlock) bool {
+	for _, instr := range b.Instrs {
+		if _, ok := instr.(*SSAReturn); ok {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *irEmitter) emitJump(j *SSAJump) {
 	blk := j.InstrBlock()
 	if blk == nil {
@@ -4496,7 +4506,7 @@ func (e *irEmitter) emitJump(j *SSAJump) {
 	}
 	if len(blk.Succs) > 0 {
 		target := blk.Succs[0]
-		if blk.ScopeID > 0 && target.ScopeID != blk.ScopeID {
+		if blk.ScopeID > 0 && target.ScopeID != blk.ScopeID && !blockHasReturn(target) {
 			e.emitScopeFreesTo(blk.ScopeID)
 		}
 		e.w("  br label ")
@@ -5477,7 +5487,6 @@ func (e *irEmitter) emitSliceOp(s *SSASlice) {
 	e.w("  ") ; e.w(freshPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt)
 	e.w(" ") ; e.w(totalBytes) ; e.w(", ptr null, ptr null)\n")
 	e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr, ptr")
-	e.scopeTrackAlloc(freshPtr)
 	cpReg := e.nextReg2("sl")
 	e.w("  ") ; e.w(cpReg) ; e.w(" = call ") ; e.w(ipt) ; e.w(" @runtime.sliceCopy(ptr ") ; e.w(freshPtr)
 	e.w(", ptr ") ; e.w(srcOff) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(newLen)
@@ -8848,6 +8857,73 @@ func (e *irEmitter) scopeTrackAlloc(ptrReg string) {
 	e.w("  call void @runtime.scopePush(ptr ")
 	e.w(ptrReg)
 	e.w(", ptr %scope.head)\n")
+}
+
+func (e *irEmitter) scopeEscapeReturnResults(r *SSAReturn) {
+	if !e.scopeActive {
+		return
+	}
+	for _, res := range r.Results {
+		if res == nil {
+			continue
+		}
+		typ := e.llvmType(res.SSAType())
+		val := e.operand(res)
+		if val == "null" || val == "zeroinitializer" || val == "0" {
+			continue
+		}
+		ptrReg := ""
+		sty := e.sliceType()
+		if typ == "ptr" {
+			ptrReg = val
+		} else if typ == sty {
+			e.nextReg++
+			ptrReg = "%esc.p" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(ptrReg) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(val) ; e.w(", 0\n")
+		} else if typ == "{ptr, ptr}" {
+			e.nextReg++
+			ptrReg = "%esc.p" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(ptrReg) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(val) ; e.w(", 0\n")
+		}
+		if ptrReg == "" {
+			continue
+		}
+		e.w("  call void @runtime.scopeEscapeReturn(ptr ")
+		e.w(ptrReg)
+		e.w(", ptr %scope.head)\n")
+		e.declareRuntime("runtime.scopeEscapeReturn", "void", "ptr, ptr")
+	}
+	if len(e.curFunc.NamedResults) > 0 {
+		for _, nr := range e.curFunc.NamedResults {
+			nrt := e.namedResultType(nr)
+			if nrt != "ptr" && nrt != e.sliceType() && nrt != "{ptr, ptr}" {
+				continue
+			}
+			e.nextReg++
+			tmp := "%esc.nr" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(tmp) ; e.w(" = load ") ; e.w(nrt) ; e.w(", ptr ") ; e.w(e.regName(nr)) ; e.w("\n")
+			ptrReg := ""
+			sty := e.sliceType()
+			if nrt == "ptr" {
+				ptrReg = tmp
+			} else if nrt == sty {
+				e.nextReg++
+				ptrReg = "%esc.nrp" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(ptrReg) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(tmp) ; e.w(", 0\n")
+			} else if nrt == "{ptr, ptr}" {
+				e.nextReg++
+				ptrReg = "%esc.nrp" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(ptrReg) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(tmp) ; e.w(", 0\n")
+			}
+			if ptrReg == "" {
+				continue
+			}
+			e.w("  call void @runtime.scopeEscapeReturn(ptr ")
+			e.w(ptrReg)
+			e.w(", ptr %scope.head)\n")
+			e.declareRuntime("runtime.scopeEscapeReturn", "void", "ptr, ptr")
+		}
+	}
 }
 
 func (e *irEmitter) emitScopeFreeAll() {

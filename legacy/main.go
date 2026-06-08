@@ -464,6 +464,7 @@ func main() {
 	ldflags := flag.String("ldflags", "", "Go link tool compatible ldflags")
 	llvmFeatures := flag.String("llvm-features", "", "comma separated LLVM features to enable")
 	cpuprofile := flag.String("cpuprofile", "", "cpuprofile output")
+	memprofile := flag.String("memprofile", "", "heap profile output")
 
 	// Internal flags.
 	printIR := flag.Bool("internal-printir", false, "print LLVM IR")
@@ -579,6 +580,21 @@ func main() {
 			os.Exit(1)
 		}
 		defer pprof.StopCPUProfile()
+	}
+
+	if *memprofile != "" {
+		defer func() {
+			runtime.GC()
+			f, err := os.Create(*memprofile)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "could not create memory profile: ", err)
+				return
+			}
+			defer f.Close()
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				fmt.Fprintln(os.Stderr, "could not write memory profile: ", err)
+			}
+		}()
 	}
 
 	switch command {

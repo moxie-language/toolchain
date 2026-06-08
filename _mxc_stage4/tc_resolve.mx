@@ -1,19 +1,24 @@
 package main
 
+import (
+	"mxc/syntax"
+	"mxc/token"
+)
+
 // resolveTypeExpr resolves a type expression to a Type.
 // This is the core of the type system - translating AST type nodes to Type values.
-func (c *Checker) resolveTypeExpr(e Expr) (t Type) {
+func (c *Checker) resolveTypeExpr(e syntax.Expr) (t Type) {
 	if e == nil {
 		return nil
 	}
 	switch e := e.(type) {
-	case *Name:
+	case *syntax.Name:
 		return c.resolveTypeName(e)
-	case *SelectorExpr:
+	case *syntax.SelectorExpr:
 		return c.resolveQualifiedTypeName(e)
-	case *Operation:
+	case *syntax.Operation:
 		// *T (pointer)
-		if e.Y == nil && e.Op == Mul {
+		if e.Y == nil && e.Op == token.Mul {
 			base := c.resolveTypeExpr(e.X)
 			if base == nil {
 				return nil
@@ -21,15 +26,15 @@ func (c *Checker) resolveTypeExpr(e Expr) (t Type) {
 			return NewPointer(base)
 		}
 		// ~T (approximation element in type constraints) - treat as T for B1
-		if e.Y == nil && e.Op == Tilde {
+		if e.Y == nil && e.Op == token.Tilde {
 			return c.resolveTypeExpr(e.X)
 		}
 		// T | U (union element in type constraints) - return first operand for B1
-		if e.Y != nil && e.Op == Or {
+		if e.Y != nil && e.Op == token.Or {
 			c.resolveTypeExpr(e.Y) // resolve both sides to catch undefined errors
 			return c.resolveTypeExpr(e.X)
 		}
-	case *SliceType:
+	case *syntax.SliceType:
 		elem := c.resolveTypeExpr(e.Elem)
 		if elem == nil {
 			return nil
@@ -38,7 +43,7 @@ func (c *Checker) resolveTypeExpr(e Expr) (t Type) {
 			return Typ[TCString]
 		}
 		return NewSlice(elem)
-	case *ArrayType:
+	case *syntax.ArrayType:
 		elem := c.resolveTypeExpr(e.Elem)
 		if elem == nil {
 			return nil
@@ -48,38 +53,38 @@ func (c *Checker) resolveTypeExpr(e Expr) (t Type) {
 		}
 		n := c.evalArrayLen(e.Len)
 		return NewArray(elem, n)
-	case *MapType:
+	case *syntax.MapType:
 		key := c.resolveTypeExpr(e.Key)
 		val := c.resolveTypeExpr(e.Value)
 		if key == nil || val == nil {
 			return nil
 		}
 		return NewTCMap(key, val)
-	case *ChanType:
+	case *syntax.ChanType:
 		elem := c.resolveTypeExpr(e.Elem)
 		if elem == nil {
 			return nil
 		}
 		var dir TCChanDir
 		switch e.Dir {
-		case SendOnly:
+		case syntax.SendOnly:
 			dir = TCSendOnly
-		case RecvOnly:
+		case syntax.RecvOnly:
 			dir = TCRecvOnly
 		default:
 			dir = TCSendRecv
 		}
 		return NewTCChan(dir, elem)
-	case *StructType:
+	case *syntax.StructType:
 		return c.resolveStructType(e)
-	case *InterfaceType:
+	case *syntax.InterfaceType:
 		return c.resolveInterfaceType(e)
-	case *FuncType:
+	case *syntax.FuncType:
 		return c.resolveFuncType(e, nil)
-	case *IndexExpr:
+	case *syntax.IndexExpr:
 		// generic instantiation T[A, B, ...]
 		return c.resolveGenericInst(e)
-	case *DotsType:
+	case *syntax.DotsType:
 		elem := c.resolveTypeExpr(e.Elem)
 		if elem == nil {
 			return nil
@@ -93,7 +98,7 @@ func (c *Checker) resolveTypeExpr(e Expr) (t Type) {
 	return nil
 }
 
-func (c *Checker) resolveTypeName(e *Name) (t Type) {
+func (c *Checker) resolveTypeName(e *syntax.Name) (t Type) {
 	_, obj := c.lookupType(e.Value)
 	if obj == nil {
 		c.errorf(e.Pos(), "undefined: " | e.Value)
@@ -109,8 +114,8 @@ func (c *Checker) resolveTypeName(e *Name) (t Type) {
 	return nil
 }
 
-func (c *Checker) resolveQualifiedTypeName(e *SelectorExpr) (t Type) {
-	pkgName, ok := e.X.(*Name)
+func (c *Checker) resolveQualifiedTypeName(e *syntax.SelectorExpr) (t Type) {
+	pkgName, ok := e.X.(*syntax.Name)
 	if !ok {
 		c.errorf(e.Pos(), "invalid type expression")
 		return nil
@@ -141,7 +146,7 @@ func (c *Checker) resolveQualifiedTypeName(e *SelectorExpr) (t Type) {
 	return nil
 }
 
-func (c *Checker) resolveStructType(e *StructType) (t *TCStruct) {
+func (c *Checker) resolveStructType(e *syntax.StructType) (t *TCStruct) {
 	var fields []*TCVar
 	var tags []string
 	for i, f := range e.FieldList {
@@ -162,7 +167,7 @@ func (c *Checker) resolveStructType(e *StructType) (t *TCStruct) {
 	return NewTCStruct(fields, tags)
 }
 
-func (c *Checker) resolveInterfaceType(e *InterfaceType) (t *TCInterface) {
+func (c *Checker) resolveInterfaceType(e *syntax.InterfaceType) (t *TCInterface) {
 	var methods []*IfaceMethod
 	var embeds []Type
 	for _, f := range e.MethodList {
@@ -174,7 +179,7 @@ func (c *Checker) resolveInterfaceType(e *InterfaceType) (t *TCInterface) {
 			}
 			continue
 		}
-		ft, ok := f.Type.(*FuncType)
+		ft, ok := f.Type.(*syntax.FuncType)
 		if !ok {
 			continue
 		}
@@ -190,7 +195,7 @@ func (c *Checker) resolveInterfaceType(e *InterfaceType) (t *TCInterface) {
 
 // resolveFuncType converts a FuncType AST node to a Signature.
 // recv is optional (non-nil only for method declarations).
-func (c *Checker) resolveFuncType(ft *FuncType, recv *Field) (s *Signature) {
+func (c *Checker) resolveFuncType(ft *syntax.FuncType, recv *syntax.Field) (s *Signature) {
 	if ft == nil {
 		return nil
 	}
@@ -210,7 +215,7 @@ func (c *Checker) resolveFuncType(ft *FuncType, recv *Field) (s *Signature) {
 	variadic := false
 	if len(ft.ParamList) > 0 {
 		last := ft.ParamList[len(ft.ParamList)-1]
-		if _, ok := last.Type.(*DotsType); ok {
+		if _, ok := last.Type.(*syntax.DotsType); ok {
 			variadic = true
 			// unwrap: the slice type is already resolved in resolveFieldList
 		}
@@ -219,7 +224,7 @@ func (c *Checker) resolveFuncType(ft *FuncType, recv *Field) (s *Signature) {
 	return NewSignature(recvVar, params, results, variadic)
 }
 
-func (c *Checker) resolveFieldList(fields []*Field) (t *Tuple) {
+func (c *Checker) resolveFieldList(fields []*syntax.Field) (t *Tuple) {
 	if len(fields) == 0 {
 		return nil
 	}
@@ -235,7 +240,7 @@ func (c *Checker) resolveFieldList(fields []*Field) (t *Tuple) {
 	return NewTuple(vars...)
 }
 
-func (c *Checker) resolveGenericInst(e *IndexExpr) (t Type) {
+func (c *Checker) resolveGenericInst(e *syntax.IndexExpr) (t Type) {
 	// TODO: full generic instantiation
 	return c.resolveTypeExpr(e.X)
 }

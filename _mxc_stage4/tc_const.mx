@@ -1,8 +1,13 @@
 package main
 
-func (c *Checker) checkConstGroup(decls []*ConstDecl) {
-	var prevType Expr
-	var prevValues Expr
+import (
+	"mxc/syntax"
+	"mxc/token"
+)
+
+func (c *Checker) checkConstGroup(decls []*syntax.ConstDecl) {
+	var prevType syntax.Expr
+	var prevValues syntax.Expr
 	for i, d := range decls {
 		typ := d.Type
 		vals := d.Values
@@ -17,7 +22,7 @@ func (c *Checker) checkConstGroup(decls []*ConstDecl) {
 	}
 }
 
-func (c *Checker) checkConstDeclAt(d *ConstDecl, typExpr Expr, valExpr Expr, iotaVal int64) {
+func (c *Checker) checkConstDeclAt(d *syntax.ConstDecl, typExpr syntax.Expr, valExpr syntax.Expr, iotaVal int64) {
 	var typ Type
 	if typExpr != nil {
 		typ = c.resolveTypeExpr(typExpr)
@@ -62,8 +67,8 @@ func (c *Checker) checkConstDeclAt(d *ConstDecl, typExpr Expr, valExpr Expr, iot
 	}
 }
 
-func (c *Checker) inferConstTypeList(e Expr) (ts []Type) {
-	if l, ok := e.(*ListExpr); ok {
+func (c *Checker) inferConstTypeList(e syntax.Expr) (ts []Type) {
+	if l, ok := e.(*syntax.ListExpr); ok {
 		var out []Type
 		for _, el := range l.ElemList {
 			out = append(out, c.inferConstType(el))
@@ -73,11 +78,11 @@ func (c *Checker) inferConstTypeList(e Expr) (ts []Type) {
 	return []Type{c.inferConstType(e)}
 }
 
-func (c *Checker) inferConstType(e Expr) (t Type) {
+func (c *Checker) inferConstType(e syntax.Expr) (t Type) {
 	if e == nil {
 		return nil
 	}
-	ce, ok := e.(*CallExpr)
+	ce, ok := e.(*syntax.CallExpr)
 	if !ok {
 		return nil
 	}
@@ -87,8 +92,8 @@ func (c *Checker) inferConstType(e Expr) (t Type) {
 	return c.resolveTypeExpr(ce.Fun)
 }
 
-func (c *Checker) evalConstExprList(e Expr, iotaVal int64) (cs []ConstVal) {
-	if l, ok := e.(*ListExpr); ok {
+func (c *Checker) evalConstExprList(e syntax.Expr, iotaVal int64) (cs []ConstVal) {
+	if l, ok := e.(*syntax.ListExpr); ok {
 		var out []ConstVal
 		for _, el := range l.ElemList {
 			v := c.evalConst(el, iotaVal)
@@ -100,14 +105,14 @@ func (c *Checker) evalConstExprList(e Expr, iotaVal int64) (cs []ConstVal) {
 	return []ConstVal{v}
 }
 
-func (c *Checker) evalConst(e Expr, iotaVal int64) (cv ConstVal) {
+func (c *Checker) evalConst(e syntax.Expr, iotaVal int64) (cv ConstVal) {
 	if e == nil {
 		return nil
 	}
 	switch e := e.(type) {
-	case *BasicLit:
+	case *syntax.BasicLit:
 		return evalBasicLitLocal(e)
-	case *Name:
+	case *syntax.Name:
 		if e.Value == "iota" {
 			return constInt{iotaVal}
 		}
@@ -129,8 +134,8 @@ func (c *Checker) evalConst(e Expr, iotaVal int64) (cv ConstVal) {
 			return k.val
 		}
 		return nil
-	case *SelectorExpr:
-		if pkgName, ok := e.X.(*Name); ok {
+	case *syntax.SelectorExpr:
+		if pkgName, ok := e.X.(*syntax.Name); ok {
 			if imp := c.pkg.scope.Lookup(pkgName.Value); imp != nil {
 				if pn, ok2 := imp.(*PkgName); ok2 && pn.Imported() != nil {
 					if obj := pn.Imported().Scope().Lookup(e.Sel.Value); obj != nil {
@@ -142,13 +147,13 @@ func (c *Checker) evalConst(e Expr, iotaVal int64) (cv ConstVal) {
 			}
 		}
 		return nil
-	case *Operation:
+	case *syntax.Operation:
 		return c.evalConstOp(e, iotaVal)
-	case *ParenExpr:
+	case *syntax.ParenExpr:
 		return c.evalConst(e.X, iotaVal)
-	case *CallExpr:
-		if id, ok := e.Fun.(*Name); ok && id.Value == "len" && len(e.ArgList) == 1 {
-			if lit, ok := e.ArgList[0].(*BasicLit); ok && lit.Kind == StringLit {
+	case *syntax.CallExpr:
+		if id, ok := e.Fun.(*syntax.Name); ok && id.Value == "len" && len(e.ArgList) == 1 {
+			if lit, ok := e.ArgList[0].(*syntax.BasicLit); ok && lit.Kind == token.StringLit {
 				lv := evalBasicLitLocal(lit)
 				if cs, ok := lv.(constStr); ok {
 					return constInt{int64(len(cs.s))}
@@ -159,8 +164,8 @@ func (c *Checker) evalConst(e Expr, iotaVal int64) (cv ConstVal) {
 				return constInt{int64(len(cs.s))}
 			}
 		}
-		if sel, ok := e.Fun.(*SelectorExpr); ok {
-			if pkg, ok := sel.X.(*Name); ok && pkg.Value == "unsafe" {
+		if sel, ok := e.Fun.(*syntax.SelectorExpr); ok {
+			if pkg, ok := sel.X.(*syntax.Name); ok && pkg.Value == "unsafe" {
 				switch sel.Sel.Value {
 				case "Sizeof", "Alignof", "Offsetof":
 					return constInt{8}
@@ -177,7 +182,7 @@ func (c *Checker) evalConst(e Expr, iotaVal int64) (cv ConstVal) {
 		targetType := c.resolveTypeExpr(e.Fun)
 		if targetType == nil {
 			funName := "?"
-			if id, ok2 := e.Fun.(*Name); ok2 {
+			if id, ok2 := e.Fun.(*syntax.Name); ok2 {
 				funName = id.Value
 			}
 			writeStr(2, "  CONST-CONV-FAIL fun=" | funName | " pkg=" | c.pkg.path | "\n")
@@ -188,18 +193,18 @@ func (c *Checker) evalConst(e Expr, iotaVal int64) (cv ConstVal) {
 	return nil
 }
 
-func evalBasicLitLocal(e *BasicLit) (c ConstVal) {
+func evalBasicLitLocal(e *syntax.BasicLit) (c ConstVal) {
 	switch e.Kind {
-	case IntLit:
+	case token.IntLit:
 		n := parseIntLocal(e.Value)
 		return constInt{n}
-	case FloatLit:
+	case token.FloatLit:
 		f := parseFloatLocal(e.Value)
 		return constFloat{v: f, lit: e.Value}
-	case StringLit:
+	case token.StringLit:
 		s := interpStringLocal(e.Value)
 		return constStr{s}
-	case RuneLit:
+	case token.RuneLit:
 		s := interpStringLocal(e.Value)
 		if len(s) > 0 {
 			return constInt{int64(decodeFirstRune(s))}
@@ -463,7 +468,7 @@ func appendRuneUTF8(buf []byte, r rune) (buf2 []byte) {
 	return append(buf, byte(0x80|(r&0x3F)))
 }
 
-func (c *Checker) evalConstOp(e *Operation, iotaVal int64) (cv ConstVal) {
+func (c *Checker) evalConstOp(e *syntax.Operation, iotaVal int64) (cv ConstVal) {
 	if e.Y == nil {
 		x := c.evalConst(e.X, iotaVal)
 		if x == nil {
@@ -484,11 +489,11 @@ func (c *Checker) evalConstOp(e *Operation, iotaVal int64) (cv ConstVal) {
 	return evalBinaryLocal(e.Op, x, y)
 }
 
-func evalUnaryLocal(op Operator, x ConstVal) (c ConstVal) {
+func evalUnaryLocal(op token.Operator, x ConstVal) (c ConstVal) {
 	switch op {
-	case Add:
+	case token.Add:
 		return x
-	case Sub:
+	case token.Sub:
 		if ci, ok := x.(constInt); ok {
 			return constInt{-ci.v}
 		}
@@ -499,11 +504,11 @@ func evalUnaryLocal(op Operator, x ConstVal) (c ConstVal) {
 			}
 			return constFloat{v: -cf.v, lit: neg}
 		}
-	case Xor:
+	case token.Xor:
 		if ci, ok := x.(constInt); ok {
 			return constInt{^ci.v}
 		}
-	case Not:
+	case token.Not:
 		if cb, ok := x.(constBool); ok {
 			return constBool{!cb.v}
 		}
@@ -511,9 +516,9 @@ func evalUnaryLocal(op Operator, x ConstVal) (c ConstVal) {
 	return nil
 }
 
-func evalBinaryLocal(op Operator, x ConstVal, y ConstVal) (c ConstVal) {
+func evalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 	switch op {
-	case Add:
+	case token.Add:
 		if xi, ok := x.(constInt); ok {
 			return constInt{xi.v + cvInt(y)}
 		}
@@ -523,21 +528,21 @@ func evalBinaryLocal(op Operator, x ConstVal, y ConstVal) (c ConstVal) {
 		if xs, ok := x.(constStr); ok {
 			return constStr{xs.s + cvStr(y)}
 		}
-	case Sub:
+	case token.Sub:
 		if xi, ok := x.(constInt); ok {
 			return constInt{xi.v - cvInt(y)}
 		}
 		if xf, ok := x.(constFloat); ok {
 			return constFloat{v: xf.v - cvFloat(y)}
 		}
-	case Mul:
+	case token.Mul:
 		if xi, ok := x.(constInt); ok {
 			return constInt{xi.v * cvInt(y)}
 		}
 		if xf, ok := x.(constFloat); ok {
 			return constFloat{v: xf.v * cvFloat(y)}
 		}
-	case Div:
+	case token.Div:
 		if xi, ok := x.(constInt); ok {
 			d := cvInt(y)
 			if d == 0 {
@@ -552,7 +557,7 @@ func evalBinaryLocal(op Operator, x ConstVal, y ConstVal) (c ConstVal) {
 			}
 			return constFloat{v: xf.v / d}
 		}
-	case Rem:
+	case token.Rem:
 		if xi, ok := x.(constInt); ok {
 			d := cvInt(y)
 			if d == 0 {
@@ -560,54 +565,54 @@ func evalBinaryLocal(op Operator, x ConstVal, y ConstVal) (c ConstVal) {
 			}
 			return constInt{xi.v % d}
 		}
-	case And:
+	case token.And:
 		if xi, ok := x.(constInt); ok {
 			return constInt{xi.v & cvInt(y)}
 		}
-	case Or:
+	case token.Or:
 		if xi, ok := x.(constInt); ok {
 			return constInt{xi.v | cvInt(y)}
 		}
 		if xs, ok := x.(constStr); ok {
 			return constStr{xs.s + cvStr(y)}
 		}
-	case Xor:
+	case token.Xor:
 		if xi, ok := x.(constInt); ok {
 			return constInt{xi.v ^ cvInt(y)}
 		}
-	case Shl:
+	case token.Shl:
 		if xi, ok := x.(constInt); ok {
 			shift := uint32(cvInt(y))
 			return constInt{xi.v << shift}
 		}
-	case Shr:
+	case token.Shr:
 		if xi, ok := x.(constInt); ok {
 			shift := uint32(cvInt(y))
 			return constInt{xi.v >> shift}
 		}
-	case AndNot:
+	case token.AndNot:
 		if xi, ok := x.(constInt); ok {
 			return constInt{xi.v &^ cvInt(y)}
 		}
-	case Eql:
+	case token.Eql:
 		return constBool{constEqual(x, y)}
-	case Neq:
+	case token.Neq:
 		return constBool{!constEqual(x, y)}
-	case Lss:
+	case token.Lss:
 		return constBool{constLess(x, y)}
-	case Leq:
+	case token.Leq:
 		return constBool{constLess(x, y) || constEqual(x, y)}
-	case Gtr:
+	case token.Gtr:
 		return constBool{constLess(y, x)}
-	case Geq:
+	case token.Geq:
 		return constBool{constLess(y, x) || constEqual(x, y)}
-	case OrOr:
+	case token.OrOr:
 		xb, xok := x.(constBool)
 		yb, yok := y.(constBool)
 		if xok && yok {
 			return constBool{xb.v || yb.v}
 		}
-	case AndAnd:
+	case token.AndAnd:
 		xb, xok := x.(constBool)
 		yb, yok := y.(constBool)
 		if xok && yok {
@@ -713,11 +718,11 @@ func constInt64CV(v ConstVal) (int64, bool) {
 	return 0, false
 }
 
-func (c *Checker) IsConstExpr(e Expr) (ok bool) {
+func (c *Checker) IsConstExpr(e syntax.Expr) (ok bool) {
 	return c.evalConst(e, 0) != nil
 }
 
-func (c *Checker) evalArrayLen(e Expr) (n int64) {
+func (c *Checker) evalArrayLen(e syntax.Expr) (n int64) {
 	v := c.evalConst(e, 0)
 	if v == nil {
 		return 0

@@ -1,8 +1,13 @@
 package main
 
+import (
+	"mxc/syntax"
+	"mxc/token"
+)
+
 // checkExpr type-checks an expression and returns its type.
 // It also records the type info in c.info if non-nil.
-func (c *Checker) checkExpr(e Expr, scope *Scope) (t Type) {
+func (c *Checker) checkExpr(e syntax.Expr, scope *Scope) (t Type) {
 	if e == nil {
 		return nil
 	}
@@ -12,37 +17,37 @@ func (c *Checker) checkExpr(e Expr, scope *Scope) (t Type) {
 }
 
 // typeExpr computes the TCTypeAndValue for expression e.
-func (c *Checker) typeExpr(e Expr, scope *Scope) (t TCTypeAndValue) {
+func (c *Checker) typeExpr(e syntax.Expr, scope *Scope) (t TCTypeAndValue) {
 	switch e := e.(type) {
-	case *Name:
+	case *syntax.Name:
 		return c.typeIdent(e, scope)
-	case *BasicLit:
+	case *syntax.BasicLit:
 		return c.typeBasicLit(e)
-	case *Operation:
+	case *syntax.Operation:
 		return c.typeOperation(e, scope)
-	case *CallExpr:
+	case *syntax.CallExpr:
 		return c.typeCall(e, scope)
-	case *SelectorExpr:
+	case *syntax.SelectorExpr:
 		return c.typeSelector(e, scope)
-	case *IndexExpr:
+	case *syntax.IndexExpr:
 		return c.typeIndex(e, scope)
-	case *SliceExpr:
+	case *syntax.SliceExpr:
 		return c.typeSlice(e, scope)
-	case *AssertExpr:
+	case *syntax.AssertExpr:
 		return c.typeAssert(e, scope)
-	case *TypeSwitchGuard:
+	case *syntax.TypeSwitchGuard:
 		return TCTypeAndValue{Type: c.checkExpr(e.X, scope), mode: modeValue}
-	case *CompositeLit:
+	case *syntax.CompositeLit:
 		return c.typeCompositeLit(e, scope)
-	case *FuncLit:
+	case *syntax.FuncLit:
 		return c.typeFuncLit(e, scope)
-	case *KeyValueExpr:
+	case *syntax.KeyValueExpr:
 		// key:value - type is the value's type
 		c.checkExpr(e.Key, scope)
 		return c.typeExpr(e.Value, scope)
-	case *ParenExpr:
+	case *syntax.ParenExpr:
 		return c.typeExpr(e.X, scope)
-	case *ListExpr:
+	case *syntax.ListExpr:
 		// multi-value list (tuple unpacking context)
 		var last TCTypeAndValue
 		for _, el := range e.ElemList {
@@ -50,16 +55,16 @@ func (c *Checker) typeExpr(e Expr, scope *Scope) (t TCTypeAndValue) {
 		}
 		return last
 	// type expressions used where a value is expected
-	case *SliceType, *ArrayType, *MapType,
-		*ChanType, *StructType, *InterfaceType,
-		*FuncType, *DotsType:
+	case *syntax.SliceType, *syntax.ArrayType, *syntax.MapType,
+		*syntax.ChanType, *syntax.StructType, *syntax.InterfaceType,
+		*syntax.FuncType, *syntax.DotsType:
 		typ := c.resolveTypeExpr(e)
 		return TCTypeAndValue{Type: typ, mode: modeType}
 	}
 	return TCTypeAndValue{}
 }
 
-func (c *Checker) typeIdent(e *Name, scope *Scope) (t TCTypeAndValue) {
+func (c *Checker) typeIdent(e *syntax.Name, scope *Scope) (t TCTypeAndValue) {
 	if e.Value == "_" {
 		return TCTypeAndValue{mode: modeValue}
 	}
@@ -88,21 +93,21 @@ func (c *Checker) typeIdent(e *Name, scope *Scope) (t TCTypeAndValue) {
 	return TCTypeAndValue{}
 }
 
-func (c *Checker) typeBasicLit(e *BasicLit) (t TCTypeAndValue) {
+func (c *Checker) typeBasicLit(e *syntax.BasicLit) (t TCTypeAndValue) {
 	switch e.Kind {
-	case IntLit:
+	case token.IntLit:
 		return TCTypeAndValue{Type: Typ[UntypedInt], mode: modeConst}
-	case FloatLit:
+	case token.FloatLit:
 		return TCTypeAndValue{Type: Typ[UntypedFloat], mode: modeConst}
-	case StringLit:
+	case token.StringLit:
 		return TCTypeAndValue{Type: Typ[UntypedString], mode: modeConst}
-	case RuneLit:
+	case token.RuneLit:
 		return TCTypeAndValue{Type: Typ[UntypedRune], mode: modeConst}
 	}
 	return TCTypeAndValue{}
 }
 
-func (c *Checker) typeOperation(e *Operation, scope *Scope) (t TCTypeAndValue) {
+func (c *Checker) typeOperation(e *syntax.Operation, scope *Scope) (t TCTypeAndValue) {
 	if e.Y == nil {
 		// unary
 		xt := c.checkExpr(e.X, scope)
@@ -110,13 +115,13 @@ func (c *Checker) typeOperation(e *Operation, scope *Scope) (t TCTypeAndValue) {
 			return TCTypeAndValue{mode: modeValue}
 		}
 		switch e.Op {
-		case Recv: // <-ch
+		case token.Recv: // <-ch
 			if ch, ok := safeUnderlying(xt).(*TCChan); ok {
 				return TCTypeAndValue{Type: ch.elem, mode: modeValue}
 			}
-		case And: // &x
+		case token.And: // &x
 			return TCTypeAndValue{Type: NewPointer(xt), mode: modeValue}
-		case Mul: // *x (dereference)
+		case token.Mul: // *x (dereference)
 			if pt, ok := safeUnderlying(xt).(*Pointer); ok {
 				return TCTypeAndValue{Type: pt.base, mode: modeVar}
 			}
@@ -129,10 +134,10 @@ func (c *Checker) typeOperation(e *Operation, scope *Scope) (t TCTypeAndValue) {
 	xt := c.checkExpr(e.X, scope)
 	yt := c.checkExpr(e.Y, scope)
 	switch e.Op {
-	case Eql, Neq, Lss, Leq, Gtr, Geq,
-		AndAnd, OrOr:
+	case token.Eql, token.Neq, token.Lss, token.Leq, token.Gtr, token.Geq,
+		token.AndAnd, token.OrOr:
 		return TCTypeAndValue{Type: Typ[Bool], mode: modeValue}
-	case Or, Add:
+	case token.Or, token.Add:
 		if isRuneKind(xt) && isStringKind(yt) || isStringKind(xt) && isRuneKind(yt) {
 			c.errorf(e.Pos(), "cannot concatenate rune with string - convert to UTF-8 first")
 		}
@@ -148,7 +153,7 @@ func (c *Checker) typeOperation(e *Operation, scope *Scope) (t TCTypeAndValue) {
 	}
 }
 
-func (c *Checker) typeCall(e *CallExpr, scope *Scope) (t TCTypeAndValue) {
+func (c *Checker) typeCall(e *syntax.CallExpr, scope *Scope) (t TCTypeAndValue) {
 	funTV := c.typeExpr(e.Fun, scope)
 	if c.info != nil {
 		c.info.Types[e.Fun] = funTV
@@ -186,9 +191,9 @@ func (c *Checker) typeCall(e *CallExpr, scope *Scope) (t TCTypeAndValue) {
 	return TCTypeAndValue{Type: sig.results, mode: modeValue}
 }
 
-func (c *Checker) typeBuiltinCall(e *CallExpr, scope *Scope) (t TCTypeAndValue) {
+func (c *Checker) typeBuiltinCall(e *syntax.CallExpr, scope *Scope) (t TCTypeAndValue) {
 	// Determine which builtin from the ident.
-	name, ok := e.Fun.(*Name)
+	name, ok := e.Fun.(*syntax.Name)
 	if !ok {
 		return TCTypeAndValue{}
 	}
@@ -228,14 +233,14 @@ func (c *Checker) typeBuiltinCall(e *CallExpr, scope *Scope) (t TCTypeAndValue) 
 	return TCTypeAndValue{}
 }
 
-func (c *Checker) typeSelector(e *SelectorExpr, scope *Scope) (t TCTypeAndValue) {
+func (c *Checker) typeSelector(e *syntax.SelectorExpr, scope *Scope) (t TCTypeAndValue) {
 	xt := c.typeExpr(e.X, scope)
 	if c.info != nil {
 		c.info.Types[e.X] = xt
 	}
 	if xt.mode == modePkg {
 		// package.Name
-		if pkgName, ok := e.X.(*Name); ok {
+		if pkgName, ok := e.X.(*syntax.Name); ok {
 			_, pkgObj := c.lookup(pkgName.Value, scope)
 			if pn, ok := pkgObj.(*PkgName); ok && pn.imported != nil {
 				obj := pn.imported.scope.Lookup(e.Sel.Value)
@@ -268,7 +273,7 @@ func (c *Checker) typeSelector(e *SelectorExpr, scope *Scope) (t TCTypeAndValue)
 	return TCTypeAndValue{}
 }
 
-func (c *Checker) typeIndex(e *IndexExpr, scope *Scope) (t TCTypeAndValue) {
+func (c *Checker) typeIndex(e *syntax.IndexExpr, scope *Scope) (t TCTypeAndValue) {
 	xt := c.checkExpr(e.X, scope)
 	c.checkExpr(e.Index, scope)
 	if xt == nil {
@@ -285,7 +290,7 @@ func (c *Checker) typeIndex(e *IndexExpr, scope *Scope) (t TCTypeAndValue) {
 	return TCTypeAndValue{}
 }
 
-func (c *Checker) typeSlice(e *SliceExpr, scope *Scope) (t TCTypeAndValue) {
+func (c *Checker) typeSlice(e *syntax.SliceExpr, scope *Scope) (t TCTypeAndValue) {
 	xt := c.checkExpr(e.X, scope)
 	for _, idx := range e.Index {
 		if idx != nil {
@@ -311,13 +316,13 @@ func (c *Checker) typeSlice(e *SliceExpr, scope *Scope) (t TCTypeAndValue) {
 	return TCTypeAndValue{}
 }
 
-func (c *Checker) typeAssert(e *AssertExpr, scope *Scope) (t TCTypeAndValue) {
+func (c *Checker) typeAssert(e *syntax.AssertExpr, scope *Scope) (t TCTypeAndValue) {
 	c.checkExpr(e.X, scope)
 	assertedType := c.resolveTypeExpr(e.Type)
 	return TCTypeAndValue{Type: assertedType, mode: modeValue}
 }
 
-func (c *Checker) typeCompositeLit(e *CompositeLit, scope *Scope) (t TCTypeAndValue) {
+func (c *Checker) typeCompositeLit(e *syntax.CompositeLit, scope *Scope) (t TCTypeAndValue) {
 	var typ Type
 	if e.Type != nil {
 		typ = c.resolveTypeExpr(e.Type)
@@ -330,12 +335,12 @@ func (c *Checker) typeCompositeLit(e *CompositeLit, scope *Scope) (t TCTypeAndVa
 	// Fallback: if we have key:value elements but couldn't determine the type,
 	// assume struct (struct field names don't exist as scope variables).
 	if !isStruct && len(e.ElemList) > 0 {
-		if _, ok := e.ElemList[0].(*KeyValueExpr); ok {
+		if _, ok := e.ElemList[0].(*syntax.KeyValueExpr); ok {
 			isStruct = true
 		}
 	}
 	for _, el := range e.ElemList {
-		if kv, ok := el.(*KeyValueExpr); ok {
+		if kv, ok := el.(*syntax.KeyValueExpr); ok {
 			if isStruct {
 				// Struct field: only check value, skip key lookup.
 				c.checkExpr(kv.Value, scope)
@@ -372,7 +377,7 @@ func isStructType(t Type) (ok bool) {
 	return false
 }
 
-func (c *Checker) typeFuncLit(e *FuncLit, scope *Scope) (t TCTypeAndValue) {
+func (c *Checker) typeFuncLit(e *syntax.FuncLit, scope *Scope) (t TCTypeAndValue) {
 	sig := c.resolveFuncType(e.Type, nil)
 	inner := c.openScope(e.Body, scope)
 	if sig != nil {

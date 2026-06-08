@@ -1,5 +1,10 @@
 package main
 
+import (
+	"mxc/syntax"
+	"mxc/token"
+)
+
 // Importer resolves import paths to Packages.
 type Importer interface {
 	Import(path string) (*TCPackage, error)
@@ -17,7 +22,7 @@ type Checker struct {
 	conf         *Config
 	pkg          *TCPackage
 	info         *Info
-	files        []*File
+	files        []*syntax.File
 	iota         int64  // current iota value
 	errors       []error
 	localScope   *Scope // innermost scope during function body checking; nil at pkg level
@@ -30,7 +35,7 @@ func NewChecker(conf *Config, pkg *TCPackage, info *Info) (c *Checker) {
 
 // Check type-checks the given files as package pkg.
 // It returns an error if type checking fails.
-func Check(path string, files []*File, importer Importer) (*TCPackage, *Info, error) {
+func Check(path string, files []*syntax.File, importer Importer) (*TCPackage, *Info, error) {
 	pkg := NewTCPackage(path, packageName(files))
 	info := newInfo()
 	conf := &Config{Importer: importer}
@@ -42,7 +47,7 @@ func Check(path string, files []*File, importer Importer) (*TCPackage, *Info, er
 }
 
 // packageName returns the package name declared in the first file, or "main".
-func packageName(files []*File) (s string) {
+func packageName(files []*syntax.File) (s string) {
 	for _, f := range files {
 		if f.PkgName != nil {
 			return f.PkgName.Value
@@ -52,7 +57,7 @@ func packageName(files []*File) (s string) {
 }
 
 // Files type-checks the given files as the checker's package.
-func (c *Checker) Files(files []*File) (err error) {
+func (c *Checker) Files(files []*syntax.File) (err error) {
 	c.files = files
 
 	for _, f := range files {
@@ -61,7 +66,7 @@ func (c *Checker) Files(files []*File) (err error) {
 
 	for _, f := range files {
 		for _, decl := range f.DeclList {
-			if d, ok := decl.(*TypeDecl); ok {
+			if d, ok := decl.(*syntax.TypeDecl); ok {
 				c.checkTypeDecl(d)
 			}
 		}
@@ -70,7 +75,7 @@ func (c *Checker) Files(files []*File) (err error) {
 	for _, f := range files {
 		for _, decl := range f.DeclList {
 			switch decl.(type) {
-			case *TypeDecl:
+			case *syntax.TypeDecl:
 			default:
 				c.checkDecl(decl)
 			}
@@ -79,7 +84,7 @@ func (c *Checker) Files(files []*File) (err error) {
 
 	for _, f := range files {
 		for _, decl := range f.DeclList {
-			if fd, ok := decl.(*FuncDecl); ok {
+			if fd, ok := decl.(*syntax.FuncDecl); ok {
 				c.checkFuncBody(fd)
 			}
 		}
@@ -92,7 +97,7 @@ func (c *Checker) Files(files []*File) (err error) {
 }
 
 // error records a type error at pos.
-func (c *Checker) errorf(pos Pos, msg string) {
+func (c *Checker) errorf(pos token.Pos, msg string) {
 	err := &TypeError{Pos: pos, Msg: msg}
 	if c.conf.Error != nil {
 		c.conf.Error(err)
@@ -102,7 +107,7 @@ func (c *Checker) errorf(pos Pos, msg string) {
 
 // TypeError is a type-checking error with position info.
 type TypeError struct {
-	Pos Pos
+	Pos token.Pos
 	Msg string
 }
 
@@ -111,17 +116,17 @@ func (e *TypeError) Error() (s string) {
 }
 
 // record stores type info for an expression.
-func (c *Checker) record(e Expr, tv TCTypeAndValue) {
+func (c *Checker) record(e syntax.Expr, tv TCTypeAndValue) {
 	if c.info != nil {
 		c.info.Types[e] = tv
 	}
-	stv := TypeAndValue{Type: tv.Type}
+	stv := syntax.TypeAndValue{Type: tv.Type}
 	stv.Value = tv.Value
 	e.SetTypeInfo(stv)
 }
 
 // openScope creates a child scope of s and records it for node n.
-func (c *Checker) openScope(n Node, parent *Scope) (s *Scope) {
+func (c *Checker) openScope(n syntax.Node, parent *Scope) (s *Scope) {
 	s := NewScope(parent)
 	if c.info != nil {
 		c.info.Scopes[n] = s

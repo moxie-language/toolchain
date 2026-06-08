@@ -1,29 +1,31 @@
 package main
 
+import "mxc/syntax"
+
 // collectDecls walks a file's top-level declarations and inserts all
 // package-level names into pkg.scope. No type resolution yet - just
 // name registration so forward references work during pass 2.
 // Const groups are tracked so iota can be assigned correctly in pass 2.
 type constGroupEntry struct {
-	group *Group
-	decls []*ConstDecl
+	group *syntax.Group
+	decls []*syntax.ConstDecl
 }
 
-func (c *Checker) collectDecls(f *File) {
+func (c *Checker) collectDecls(f *syntax.File) {
 	var constEntries []constGroupEntry
 
 	for _, d := range f.DeclList {
 		switch d := d.(type) {
-		case *ImportDecl:
+		case *syntax.ImportDecl:
 			c.collectImport(d)
-		case *ConstDecl:
+		case *syntax.ConstDecl:
 			for _, name := range d.NameList {
 				obj := NewTCConst(c.pkg, name.Value, nil, nil)
 				c.declare(c.pkg.scope, name, obj)
 			}
 			g := d.Group
 			if g == nil {
-				g = &Group{}
+				g = &syntax.Group{}
 			}
 			found := false
 			for i := 0; i < len(constEntries); i++ {
@@ -34,17 +36,17 @@ func (c *Checker) collectDecls(f *File) {
 				}
 			}
 			if !found {
-				constEntries = append(constEntries, constGroupEntry{group: g, decls: []*ConstDecl{d}})
+				constEntries = append(constEntries, constGroupEntry{group: g, decls: []*syntax.ConstDecl{d}})
 			}
-		case *TypeDecl:
+		case *syntax.TypeDecl:
 			obj := NewTypeName(c.pkg, d.Name.Value, nil)
 			c.declare(c.pkg.scope, d.Name, obj)
-		case *VarDecl:
+		case *syntax.VarDecl:
 			for _, name := range d.NameList {
 				obj := NewTCVar(c.pkg, name.Value, nil)
 				c.declare(c.pkg.scope, name, obj)
 			}
-		case *FuncDecl:
+		case *syntax.FuncDecl:
 			if d.Recv == nil {
 				if d.Name.Value == "init" {
 					continue
@@ -63,7 +65,7 @@ func (c *Checker) collectDecls(f *File) {
 // collectImport resolves an import declaration and adds the package name
 // to the file scope. (File scope is per-file; we approximate it with
 // pkg.scope for now - proper file scopes come in the full implementation.)
-func (c *Checker) collectImport(d *ImportDecl) {
+func (c *Checker) collectImport(d *syntax.ImportDecl) {
 	if d.Path == nil {
 		return
 	}
@@ -104,18 +106,18 @@ func (c *Checker) collectImport(d *ImportDecl) {
 
 // checkDecl resolves the type of a top-level declaration.
 // Const decls are handled in collectDecls via checkConstGroup.
-func (c *Checker) checkDecl(d Decl) {
+func (c *Checker) checkDecl(d syntax.Decl) {
 	switch d := d.(type) {
-	case *TypeDecl:
+	case *syntax.TypeDecl:
 		c.checkTypeDecl(d)
-	case *VarDecl:
+	case *syntax.VarDecl:
 		c.checkVarDecl(d)
-	case *FuncDecl:
+	case *syntax.FuncDecl:
 		c.checkFuncDecl(d)
 	}
 }
 
-func (c *Checker) checkTypeDecl(d *TypeDecl) {
+func (c *Checker) checkTypeDecl(d *syntax.TypeDecl) {
 	obj, ok := c.pkg.scope.Lookup(d.Name.Value).(*TypeName)
 	if !ok {
 		return
@@ -140,7 +142,7 @@ func (c *Checker) checkTypeDecl(d *TypeDecl) {
 	named.SetUnderlying(underlying)
 }
 
-func (c *Checker) checkVarDecl(d *VarDecl) {
+func (c *Checker) checkVarDecl(d *syntax.VarDecl) {
 	var typ Type
 	if d.Type != nil {
 		typ = c.resolveTypeExpr(d.Type)
@@ -152,7 +154,7 @@ func (c *Checker) checkVarDecl(d *VarDecl) {
 	}
 }
 
-func (c *Checker) checkFuncDecl(d *FuncDecl) {
+func (c *Checker) checkFuncDecl(d *syntax.FuncDecl) {
 	// Build a temporary scope containing all type parameters visible in this
 	// function declaration: (1) explicit type params on the function itself,
 	// (2) type args from a generic receiver (func (h Handle[T]) ...).
@@ -198,7 +200,7 @@ func (c *Checker) checkFuncDecl(d *FuncDecl) {
 }
 
 // checkFuncBody type-checks the body of a function declaration.
-func (c *Checker) checkFuncBody(fd *FuncDecl) {
+func (c *Checker) checkFuncBody(fd *syntax.FuncDecl) {
 	if fd.Body == nil {
 		return
 	}
@@ -244,7 +246,7 @@ func (c *Checker) checkFuncBody(fd *FuncDecl) {
 // collectFuncTypeParams returns all type parameter names visible in a function
 // declaration: explicit type params on the function (TParamList) plus type
 // arguments on a generic receiver (func (h Handle[T]) F() needs T in scope).
-func collectFuncTypeParams(d *FuncDecl) (ss []string) {
+func collectFuncTypeParams(d *syntax.FuncDecl) (ss []string) {
 	seen := map[string]bool{}
 	var names []string
 	add := func(name string) {
@@ -267,21 +269,21 @@ func collectFuncTypeParams(d *FuncDecl) (ss []string) {
 
 // extractTypeArgs recursively extracts bare Name nodes from a generic receiver
 // type expression like Handle[T] or Ptr[K, V].
-func extractTypeArgs(e Expr, add func(string)) {
+func extractTypeArgs(e syntax.Expr, add func(string)) {
 	if e == nil {
 		return
 	}
 	switch e := e.(type) {
-	case *IndexExpr:
+	case *syntax.IndexExpr:
 		// Handle[T] or Handle[T, U] (ListExpr inside)
 		extractTypeArgs(e.Index, add)
-	case *Name:
+	case *syntax.Name:
 		add(e.Value)
-	case *ListExpr:
+	case *syntax.ListExpr:
 		for _, el := range e.ElemList {
 			extractTypeArgs(el, add)
 		}
-	case *Operation:
+	case *syntax.Operation:
 		if e.Y == nil {
 			extractTypeArgs(e.X, add)
 		}
@@ -289,7 +291,7 @@ func extractTypeArgs(e Expr, add func(string)) {
 }
 
 // declare inserts obj into s, recording the definition in info.
-func (c *Checker) declare(s *Scope, id *Name, obj Object) {
+func (c *Checker) declare(s *Scope, id *syntax.Name, obj Object) {
 	if id != nil && id.Value != "_" {
 		if alt := s.Insert(obj); alt != nil {
 			c.errorf(id.Pos(), id.Value | " redeclared in this block")

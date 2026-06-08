@@ -1,10 +1,15 @@
 package main
 
+import (
+	"mxc/syntax"
+	"mxc/token"
+)
+
 // checkBlock type-checks a block statement. It always opens a fresh child
 // scope so that local declarations inside the block don't leak into the
 // parent scope and don't conflict with sibling declarations (e.g. var ok
 // in an if-body vs ok from the if-init).
-func (c *Checker) checkBlock(b *BlockStmt, parent *Scope) {
+func (c *Checker) checkBlock(b *syntax.BlockStmt, parent *Scope) {
 	if b == nil {
 		return
 	}
@@ -17,28 +22,28 @@ func (c *Checker) checkBlock(b *BlockStmt, parent *Scope) {
 	}
 }
 
-func (c *Checker) checkStmt(s Stmt, scope *Scope) {
+func (c *Checker) checkStmt(s syntax.Stmt, scope *Scope) {
 	if s == nil {
 		return
 	}
 	switch s := s.(type) {
-	case *EmptyStmt:
+	case *syntax.EmptyStmt:
 		// nothing
-	case *ExprStmt:
+	case *syntax.ExprStmt:
 		c.checkExpr(s.X, scope)
-	case *SendStmt:
+	case *syntax.SendStmt:
 		c.checkExpr(s.Chan, scope)
 		c.checkExpr(s.Value, scope)
-	case *AssignStmt:
+	case *syntax.AssignStmt:
 		c.checkAssign(s, scope)
-	case *BlockStmt:
+	case *syntax.BlockStmt:
 		inner := c.openScope(s, scope)
 		c.checkBlock(s, inner)
-	case *DeclStmt:
+	case *syntax.DeclStmt:
 		for _, d := range s.DeclList {
 			c.checkLocalDecl(d, scope)
 		}
-	case *IfStmt:
+	case *syntax.IfStmt:
 		inner := c.openScope(s, scope)
 		if s.Init != nil {
 			c.checkStmt(s.Init, inner)
@@ -48,9 +53,9 @@ func (c *Checker) checkStmt(s Stmt, scope *Scope) {
 		if s.Else != nil {
 			c.checkStmt(s.Else, inner)
 		}
-	case *ForStmt:
+	case *syntax.ForStmt:
 		inner := c.openScope(s, scope)
-		if rc, ok := s.Init.(*RangeClause); ok {
+		if rc, ok := s.Init.(*syntax.RangeClause); ok {
 			c.checkRange(rc, inner)
 		} else {
 			if s.Init != nil {
@@ -64,31 +69,31 @@ func (c *Checker) checkStmt(s Stmt, scope *Scope) {
 			c.checkStmt(s.Post, inner)
 		}
 		c.checkBlock(s.Body, inner)
-	case *SwitchStmt:
+	case *syntax.SwitchStmt:
 		c.checkSwitch(s, scope)
-	case *SelectStmt:
+	case *syntax.SelectStmt:
 		c.checkSelect(s, scope)
-	case *ReturnStmt:
+	case *syntax.ReturnStmt:
 		if s.Results != nil {
 			c.checkExpr(s.Results, scope)
 		}
-	case *BranchStmt:
+	case *syntax.BranchStmt:
 		// break/continue/goto/fallthrough - label checking deferred
-	case *LabeledStmt:
+	case *syntax.LabeledStmt:
 		c.checkStmt(s.Stmt, scope)
-	case *CallStmt:
+	case *syntax.CallStmt:
 		// go/defer
 		c.checkExpr(s.Call, scope)
 	}
 }
 
-func (c *Checker) checkAssign(s *AssignStmt, scope *Scope) {
+func (c *Checker) checkAssign(s *syntax.AssignStmt, scope *Scope) {
 	if s.Rhs == nil {
 		// x++ or x--
 		c.checkExpr(s.Lhs, scope)
 		return
 	}
-	if s.Op == Def {
+	if s.Op == token.Def {
 		// short variable declaration: x, y := ...
 		c.checkShortVarDecl(s, scope)
 		return
@@ -97,7 +102,7 @@ func (c *Checker) checkAssign(s *AssignStmt, scope *Scope) {
 	c.checkExpr(s.Rhs, scope)
 }
 
-func (c *Checker) checkShortVarDecl(s *AssignStmt, scope *Scope) {
+func (c *Checker) checkShortVarDecl(s *syntax.AssignStmt, scope *Scope) {
 	// Evaluate rhs first.
 	rhsType := c.checkExpr(s.Rhs, scope)
 
@@ -135,9 +140,9 @@ func (c *Checker) checkShortVarDecl(s *AssignStmt, scope *Scope) {
 	}
 }
 
-func (c *Checker) checkLocalDecl(d Decl, scope *Scope) {
+func (c *Checker) checkLocalDecl(d syntax.Decl, scope *Scope) {
 	switch d := d.(type) {
-	case *VarDecl:
+	case *syntax.VarDecl:
 		var typ Type
 		if d.Type != nil {
 			typ = c.resolveTypeExpr(d.Type)
@@ -149,13 +154,13 @@ func (c *Checker) checkLocalDecl(d Decl, scope *Scope) {
 			obj := NewTCVar(c.pkg, name.Value, typ)
 			c.declare(scope, name, obj)
 		}
-	case *TypeDecl:
+	case *syntax.TypeDecl:
 		underlying := c.resolveTypeExpr(d.Type)
 		obj := NewTypeName(c.pkg, d.Name.Value, nil)
 		named := NewNamed(obj, underlying)
 		obj.typ = named
 		c.declare(scope, d.Name, obj)
-	case *ConstDecl:
+	case *syntax.ConstDecl:
 		var vals []ConstVal
 		if d.Values != nil {
 			vals = c.evalConstExprList(d.Values, 0)
@@ -181,7 +186,7 @@ func (c *Checker) checkLocalDecl(d Decl, scope *Scope) {
 	}
 }
 
-func (c *Checker) checkRange(rc *RangeClause, scope *Scope) {
+func (c *Checker) checkRange(rc *syntax.RangeClause, scope *Scope) {
 	rangeType := c.checkExpr(rc.X, scope)
 	if rc.Lhs != nil && rc.Def {
 		names := exprNames(rc.Lhs)
@@ -201,7 +206,7 @@ func (c *Checker) checkRange(rc *RangeClause, scope *Scope) {
 	}
 }
 
-func (c *Checker) checkSwitch(s *SwitchStmt, scope *Scope) {
+func (c *Checker) checkSwitch(s *syntax.SwitchStmt, scope *Scope) {
 	inner := c.openScope(s, scope)
 	if s.Init != nil {
 		c.checkStmt(s.Init, inner)
@@ -209,7 +214,7 @@ func (c *Checker) checkSwitch(s *SwitchStmt, scope *Scope) {
 
 	// Type switch: switch v := x.(type) { case T: ... }
 	if s.Tag != nil {
-		if tsg, ok := s.Tag.(*TypeSwitchGuard); ok {
+		if tsg, ok := s.Tag.(*syntax.TypeSwitchGuard); ok {
 			xTyp := c.checkExpr(tsg.X, inner)
 			for _, clause := range s.Body {
 				clauseScope := c.openScope(clause, inner)
@@ -217,9 +222,9 @@ func (c *Checker) checkSwitch(s *SwitchStmt, scope *Scope) {
 				if tsg.Lhs != nil {
 					caseTyp := xTyp // default / multi-type: keep interface type
 					if clause.Cases != nil {
-						if _, multi := clause.Cases.(*ListExpr); !multi {
+						if _, multi := clause.Cases.(*syntax.ListExpr); !multi {
 							// nil case or single type: nil keeps interface type.
-							if n, isNil := clause.Cases.(*Name); !isNil || n.Value != "nil" {
+							if n, isNil := clause.Cases.(*syntax.Name); !isNil || n.Value != "nil" {
 								if t := c.resolveTypeExpr(clause.Cases); t != nil {
 									caseTyp = t
 								}
@@ -255,7 +260,7 @@ func (c *Checker) checkSwitch(s *SwitchStmt, scope *Scope) {
 	}
 }
 
-func (c *Checker) checkSelect(s *SelectStmt, scope *Scope) {
+func (c *Checker) checkSelect(s *syntax.SelectStmt, scope *Scope) {
 	for _, clause := range s.Body {
 		clauseScope := c.openScope(clause, scope)
 		if clause.Comm != nil {
@@ -267,19 +272,19 @@ func (c *Checker) checkSelect(s *SelectStmt, scope *Scope) {
 	}
 }
 
-// exprNames extracts *Name nodes from an expression.
+// exprNames extracts *syntax.Name nodes from an expression.
 // Used for the LHS of := and range clauses.
-func exprNames(e Expr) (ns []*Name) {
+func exprNames(e syntax.Expr) (ns []*syntax.Name) {
 	if e == nil {
 		return nil
 	}
-	if n, ok := e.(*Name); ok {
-		return []*Name{n}
+	if n, ok := e.(*syntax.Name); ok {
+		return []*syntax.Name{n}
 	}
-	if l, ok := e.(*ListExpr); ok {
-		var names []*Name
+	if l, ok := e.(*syntax.ListExpr); ok {
+		var names []*syntax.Name
 		for _, el := range l.ElemList {
-			if n, ok := el.(*Name); ok {
+			if n, ok := el.(*syntax.Name); ok {
 				names = append(names, n)
 			}
 		}

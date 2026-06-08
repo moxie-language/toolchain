@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	goruntime "runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,6 +32,13 @@ import (
 	"moxie/transform"
 	"tinygo.org/x/go-llvm"
 )
+
+func logMem(label string) {
+	var m goruntime.MemStats
+	goruntime.ReadMemStats(&m)
+	fmt.Fprintf(os.Stderr, "[mem] %-40s alloc=%6dMB sys=%6dMB heapInuse=%6dMB heapObjects=%d\n",
+		label, m.Alloc/1024/1024, m.Sys/1024/1024, m.HeapInuse/1024/1024, m.HeapObjects)
+}
 
 // BuildResult is the output of a build. This includes the binary itself and
 // some other metadata that is obtained while building the binary.
@@ -198,6 +206,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	}
 	defer machine.Dispose()
 
+	logMem("before loader.Load")
 	// Load entire program AST into memory.
 	lprogram, err := loader.Load(config, pkgName, types.Config{
 		Sizes: compiler.Sizes(machine),
@@ -205,6 +214,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	if err != nil {
 		return BuildResult{}, err
 	}
+	logMem("after loader.Load")
 	result := BuildResult{
 		ModuleRoot: lprogram.MainPkg().Module.Dir,
 		MainDir:    lprogram.MainPkg().Dir,
@@ -218,6 +228,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	if err != nil {
 		return result, err
 	}
+	logMem("after lprogram.Parse")
 	compilerConfig.MXHPackages = lprogram.MXHPackages
 
 	// Store which filesystem paths map to which package name.
@@ -229,6 +240,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	// Create the *ssa.Program. This does not yet build the entire SSA of the
 	// program so it's pretty fast and doesn't need to be parallelized.
 	program := lprogram.LoadSSA()
+	logMem("after LoadSSA")
 
 	// Add jobs to compile each package.
 	// Packages that have a cache hit will not be compiled again.
@@ -456,6 +468,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		description:  "link+optimize packages (LTO)",
 		dependencies: packageJobs,
 		run: func(*compileJob) error {
+			logMem("before LTO link")
 			// Load and link all the bitcode files. This does not yet optimize
 			// anything, it only links the bitcode files together.
 			ctx := llvm.NewContext()
@@ -470,6 +483,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 					return fmt.Errorf("failed to link module: %w", err)
 				}
 			}
+			logMem("after LTO link")
 			// Insert values from -ldflags="-X ..." into the IR.
 			// This is a separate module, so that the "runtime._string" type
 			// doesn't need to match precisely. LLVM tends to rename that type
@@ -540,12 +554,14 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				fmt.Println(mod.String())
 			}
 
+			logMem("before optimizeProgram")
 			// Run all optimization passes, which are much more effective now
 			// that the optimizer can see the whole program at once.
 			err := optimizeProgram(mod, config)
 			if err != nil {
 				return err
 			}
+			logMem("after optimizeProgram")
 
 			// Make sure stack sizes are loaded from a separate section so they can be
 			// modified after linking.
@@ -1006,10 +1022,12 @@ func createEmbedObjectFile(data, hexSum, sourceFile, sourceDir, tmpdir string, c
 // needed to convert a program to its final form. Some transformations are not
 // optional and must be run as the compiler expects them to run.
 func optimizeProgram(mod llvm.Module, config *compileopts.Config) error {
+	logMem("  optimizeProgram: before interp.Run")
 	err := interp.Run(mod, config.Options.InterpTimeout, config.DumpSSA())
 	if err != nil {
 		return err
 	}
+	logMem("  optimizeProgram: after interp.Run")
 	if config.VerifyIR() {
 		// Only verify if we really need it.
 		// The IR has already been verified before writing the bitcode to disk
@@ -1023,12 +1041,14 @@ func optimizeProgram(mod llvm.Module, config *compileopts.Config) error {
 		}
 	}
 
+	logMem("  optimizeProgram: before transform.Optimize")
 	// Run most of the whole-program optimizations (including the whole
 	// O0/O1/O2/Os/Oz optimization pipeline).
 	errs := transform.Optimize(mod, config)
 	if len(errs) > 0 {
 		return newMultiError(errs, "")
 	}
+	logMem("  optimizeProgram: after transform.Optimize")
 	if err := llvm.VerifyModule(mod, llvm.PrintMessageAction); err != nil {
 		return errors.New("verification failure after LLVM optimization passes")
 	}
