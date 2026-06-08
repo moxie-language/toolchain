@@ -1519,6 +1519,14 @@ func (i Operator) String() (s string) {
 
 // --- AST nodes ---
 
+type node struct {
+	pos Pos
+}
+
+func (n *node) Pos() (p Pos) { return n.pos }
+func (n *node) SetPos(pos Pos) { n.pos = pos }
+func (*node) aNode() {}
+
 type Node interface {
 	Pos() Pos
 	aNode()
@@ -1908,6 +1916,11 @@ type Comment struct {
 const debug = false
 const trace = false
 
+type ErrorHandler func(err error)
+type PragmaHandler func(pos Pos, blank bool, text string, current Pragma)
+type Pragma interface{}
+type Mode uint32
+
 type Parser struct {
 	File  *PosBase
 	Errh  ErrorHandler
@@ -1950,7 +1963,7 @@ func (p *Parser) init(File *PosBase, r io.Reader, Errh ErrorHandler, Pragh Pragm
 			// //line directives must be at the start of the line (column colbase).
 			// /*line*/ directives can be anywhere in the line.
 			text := commentText(msg)
-			if (col == Colbase || msg[1] == '*') && bytes.HasPrefix(text, "line ") {
+			if (col == Colbase || msg[1] == '*') && bytesHasPrefix(text, "line ") {
 				var pos Pos // position immediately following the comment
 				if msg[1] == '/' {
 					// line comment (newline is part of the comment)
@@ -1967,11 +1980,11 @@ func (p *Parser) init(File *PosBase, r io.Reader, Errh ErrorHandler, Pragh Pragm
 			}
 
 			// go: directive (but be conservative and test)
-			if bytes.HasPrefix(text, "go:") || bytes.HasPrefix(text, ":") {
+			if bytesHasPrefix(text, "go:") || bytesHasPrefix(text, ":") {
 				if Pragh != nil {
 					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma) // +2 to skip over // or /*
 				}
-			} else if bytes.HasPrefix(text, "export ") {
+			} else if bytesHasPrefix(text, "export ") {
 				if Pragh != nil {
 					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
 				}
@@ -2004,7 +2017,7 @@ func (p *Parser) initBytes(File *PosBase, src []byte, Errh ErrorHandler, Pragh P
 				return
 			}
 			text := commentText(msg)
-			if (col == Colbase || msg[1] == '*') && bytes.HasPrefix(text, "line ") {
+			if (col == Colbase || msg[1] == '*') && bytesHasPrefix(text, "line ") {
 				var pos Pos
 				if msg[1] == '/' {
 					pos = MakePos(p.File, line+1, Colbase)
@@ -2014,11 +2027,11 @@ func (p *Parser) initBytes(File *PosBase, src []byte, Errh ErrorHandler, Pragh P
 				p.updateBase(pos, line, col+2+5, text[5:])
 				return
 			}
-			if bytes.HasPrefix(text, "go:") || bytes.HasPrefix(text, ":") {
+			if bytesHasPrefix(text, "go:") || bytesHasPrefix(text, ":") {
 				if Pragh != nil {
 					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
 				}
-			} else if bytes.HasPrefix(text, "export ") {
+			} else if bytesHasPrefix(text, "export ") {
 				if Pragh != nil {
 					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
 				}
@@ -2120,7 +2133,7 @@ func commentText(s string) (sv string) {
 }
 
 func trailingDigits(text string) (uint32, uint32, bool) {
-	i := bytes.LastIndexByte(text, ':')
+	i := bytesLastIndexByte(text, ':')
 	if i < 0 {
 		return 0, 0, false
 	}
@@ -2208,9 +2221,9 @@ func (p *Parser) syntaxErrorAt(pos Pos, msg string) {
 	switch {
 	case msg == "":
 		// nothing
-	case bytes.HasPrefix(msg, "in "), bytes.HasPrefix(msg, "at "), bytes.HasPrefix(msg, "after "):
+	case bytesHasPrefix(msg, "in "), bytesHasPrefix(msg, "at "), bytesHasPrefix(msg, "after "):
 		msg = " " | msg
-	case bytes.HasPrefix(msg, "expected "):
+	case bytesHasPrefix(msg, "expected "):
 		msg = ", " | msg
 	default:
 		p.errorAt(pos, "syntax error: " | msg)
@@ -2376,6 +2389,7 @@ func (p *Parser) fileOrNil() (f *File) {
 	// { ( ImportDecl | TopLevelDecl ) ";" }
 	prev := Import
 	for p.Tok != EOF {
+		dbg("loop tok: " | p.Tok.String() | " val=" | Itoa(int32(p.Tok)) | " Func=" | Itoa(int32(Func)) | " eq=" | Itoa(int32(p.Tok) - int32(Func)) | "\n")
 		if p.Tok == Import && prev != Import {
 			p.syntaxError("imports must appear before other declarations")
 		}
@@ -4826,4 +4840,43 @@ func UnpackListExpr(x Expr) (es []Expr) {
 	default:
 		return []Expr{x}
 	}
+}
+
+func dbg(s string) {
+	if len(s) > 0 {
+		cWrite(2, unsafe.Pointer(&[]byte(s)[0]), uint32(len(s)))
+	}
+}
+
+func parseSource(name string, src []byte) (f *File) {
+	errh := func(err error) {}
+	var p Parser
+	dbg("init...\n")
+	p.initBytes(NewFileBase(name), src, errh, nil, 0)
+	dbg("next...\n")
+	p.Next()
+	dbg("tok: " | p.Tok.String() | " val=" | Itoa(int32(p.Tok)) | " pkg=" | Itoa(int32(Package)) | "\n")
+	dbg("parse...\n")
+	f = p.fileOrNil()
+	dbg("done\n")
+	return f
+}
+
+func bytesHasPrefix(s, prefix string) (ok bool) {
+	if len(prefix) > len(s) { return false }
+	return s[:len(prefix)] == prefix
+}
+
+func bytesIndexByte(s string, c byte) (n int32) {
+	for i := int32(0); i < int32(len(s)); i++ {
+		if s[i] == c { return i }
+	}
+	return -1
+}
+
+func bytesLastIndexByte(s string, c byte) (n int32) {
+	for i := int32(len(s)) - 1; i >= 0; i-- {
+		if s[i] == c { return i }
+	}
+	return -1
 }
