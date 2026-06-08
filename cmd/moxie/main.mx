@@ -855,7 +855,7 @@ func versionedCacheName(hash, version, ext string) (s string) {
 }
 
 func cachedBcPath(cacheBase, pkgPath, hash, version string) (s string) {
-	return joinPath(joinPath(cacheBase, safeName(pkgPath)), versionedCacheName(hash, version, ".bc"))
+	return joinPath(joinPath(cacheBase, safeName(pkgPath)), versionedCacheName(hash, version, ".o"))
 }
 
 func isStdlib(path string) (ok bool) {
@@ -1992,8 +1992,8 @@ func cmdCacheWarm() {
 		llFile := joinPath(tmpdir, safeName(pkg.path) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		ir = ""
-		bcFile := joinPath(tmpdir, safeName(pkg.path) | ".bc")
-		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
+		bcFile := joinPath(tmpdir, safeName(pkg.path) | ".o")
+		rc := run([]string{clang, "--target=" | triple, "-c", llFile, "-o", bcFile})
 		if rc != 0 {
 			writeStr(2, "  FAIL: " | pkg.path | "\n")
 			failed++
@@ -2109,8 +2109,8 @@ func cmdUpdate(rebuildAll bool) {
 		llFile := joinPath(tmpdir, safeName(pkg.path) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		ir = ""
-		bcFile := joinPath(tmpdir, safeName(pkg.path) | ".bc")
-		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
+		bcFile := joinPath(tmpdir, safeName(pkg.path) | ".o")
+		rc := run([]string{clang, "--target=" | triple, "-c", llFile, "-o", bcFile})
 		if rc != 0 {
 			writeStr(2, "    FAIL: clang for " | pkg.path | "\n")
 			continue
@@ -2339,8 +2339,8 @@ func cmdTest(args []string) {
 				allBcFiles = append(allBcFiles, cached)
 				for _, cf := range dp.cfiles {
 					cPath := joinPath(dp.dir, cf)
-					cbcFile := joinPath(tmpdir, safeName(dp.path) | "_" | cf | ".bc")
-					rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+					cbcFile := joinPath(tmpdir, safeName(dp.path) | "_" | cf | ".o")
+					rc := run([]string{clang, "--target=" | triple, "-c", cPath, "-o", cbcFile})
 					if rc == 0 {
 						allBcFiles = append(allBcFiles, cbcFile)
 					}
@@ -2380,8 +2380,8 @@ func cmdTest(args []string) {
 		llFile := joinPath(tmpdir, safeName(dp.path) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		ir = ""
-		bcFile := joinPath(tmpdir, safeName(dp.path) | ".bc")
-		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
+		bcFile := joinPath(tmpdir, safeName(dp.path) | ".o")
+		rc := run([]string{clang, "--target=" | triple, "-c", llFile, "-o", bcFile})
 		if rc != 0 {
 			fatal("clang failed for " | dp.path)
 		}
@@ -2402,8 +2402,8 @@ func cmdTest(args []string) {
 		allBcFiles = append(allBcFiles, bcFile)
 		for _, cf := range dp.cfiles {
 			cPath := joinPath(dp.dir, cf)
-			cbcFile := joinPath(tmpdir, safeName(dp.path) | "_" | cf | ".bc")
-			rc = run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+			cbcFile := joinPath(tmpdir, safeName(dp.path) | "_" | cf | ".o")
+			rc = run([]string{clang, "--target=" | triple, "-c", cPath, "-o", cbcFile})
 			if rc != 0 {
 				fatal("clang failed for " | cf)
 			}
@@ -2466,55 +2466,54 @@ func cmdTest(args []string) {
 	}
 	initAllFile := joinPath(tmpdir, "initall.ll")
 	writeFile(initAllFile, []byte(initAllIR), 0644)
-	initAllBc := joinPath(tmpdir, "initall.bc")
-	rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", initAllFile, "-o", initAllBc})
+	initAllObj := joinPath(tmpdir, "initall.o")
+	rc := run([]string{clang, "--target=" | triple, "-c", initAllFile, "-o", initAllObj})
 	if rc != 0 {
 		fatal("clang failed for initall")
 	}
 
-	writeStr(2, "  merge bitcode\n")
-	llvmLink := "llvm-link-21"
-	mergedBc := joinPath(tmpdir, "merged.bc")
-	linkArgs := []string{llvmLink, "-o", mergedBc, runtimeBc}
+	writeStr(2, "  compile sysroot\n")
+	runtimeObj := joinPath(tmpdir, "runtime.o")
+	compileBc(clang, triple, runtimeBc, runtimeObj)
 	stdlibBc := joinPath(sysroot, "stdlib.bc")
+	stdlibObj := joinPath(tmpdir, "stdlib.o")
 	if _, slok := readFile(stdlibBc); slok {
-		linkArgs = append(linkArgs, stdlibBc)
+		compileBc(clang, triple, stdlibBc, stdlibObj)
 	}
 	shimsBc := joinPath(sysroot, "hashmap_shims.bc")
-	linkArgs = append(linkArgs, shimsBc)
+	shimsObj := joinPath(tmpdir, "hashmap_shims.o")
+	compileBc(clang, triple, shimsBc, shimsObj)
 	stringerBc := joinPath(sysroot, "stringer.bc")
+	stringerObj := joinPath(tmpdir, "stringer.o")
 	if _, sok := readFile(stringerBc); sok {
-		linkArgs = append(linkArgs, stringerBc)
+		compileBc(clang, triple, stringerBc, stringerObj)
 	}
 	runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
+	runtimeGoObj := joinPath(tmpdir, "runtime_go.o")
 	if _, gok := readFile(runtimeGoBc); gok {
-		linkArgs = append(linkArgs, "--override=" | runtimeGoBc)
+		compileBc(clang, triple, runtimeGoBc, runtimeGoObj)
 	}
 	stubsBc := joinPath(sysroot, "stubs_moxie.bc")
+	stubsObj := joinPath(tmpdir, "stubs_moxie.o")
 	if _, sok2 := readFile(stubsBc); sok2 {
-		linkArgs = append(linkArgs, "--override=" | stubsBc)
+		compileBc(clang, triple, stubsBc, stubsObj)
 	}
 	deallocBc := joinPath(sysroot, "dealloc_freelist.bc")
+	deallocObj := joinPath(tmpdir, "dealloc_freelist.o")
 	if _, dok := readFile(deallocBc); dok {
-		linkArgs = append(linkArgs, "--override=" | deallocBc)
+		compileBc(clang, triple, deallocBc, deallocObj)
 	}
+	diagObj := joinPath(tmpdir, "alloc_diag.o")
 	if getenv("ALLOC_DIAG") != "" {
 		diagBc := joinPath(sysroot, "alloc_diag.bc")
 		if _, diagOk := readFile(diagBc); diagOk {
-			linkArgs = append(linkArgs, "--override=" | diagBc)
+			compileBc(clang, triple, diagBc, diagObj)
 		}
 	}
 	lnShims := joinPath(sysroot, "linkname_shims.bc")
+	lnShimsObj := joinPath(tmpdir, "linkname_shims.o")
 	if _, lok := readFile(lnShims); lok {
-		linkArgs = append(linkArgs, lnShims)
-	}
-	for _, bf := range allBcFiles {
-		linkArgs = append(linkArgs, "--override=" | bf)
-	}
-	linkArgs = append(linkArgs, "--override=" | initAllBc)
-	rc = run(linkArgs)
-	if rc != 0 {
-		fatal("llvm-link failed")
+		compileBc(clang, triple, lnShims, lnShimsObj)
 	}
 
 	outpath := joinPath(tmpdir, "test.bin")
@@ -2529,15 +2528,43 @@ func cmdTest(args []string) {
 		}
 	}
 	linker := "ld.lld-21"
-	ldArgs := []string{linker, "--gc-sections", "-o", outpath,
-		joinPath(muslDir, "crt1.o"),
-		mergedBc}
+	ldArgs := []string{linker, "--gc-sections", "--allow-multiple-definition", "-o", outpath,
+		joinPath(muslDir, "crt1.o")}
+	ldArgs = append(ldArgs, initAllObj)
+	for _, bf := range allBcFiles {
+		ldArgs = append(ldArgs, bf)
+	}
+	if _, gok2 := readFile(runtimeGoBc); gok2 {
+		ldArgs = append(ldArgs, runtimeGoObj)
+	}
+	if _, sok3 := readFile(stubsBc); sok3 {
+		ldArgs = append(ldArgs, stubsObj)
+	}
+	if _, dok2 := readFile(deallocBc); dok2 {
+		ldArgs = append(ldArgs, deallocObj)
+	}
+	if getenv("ALLOC_DIAG") != "" {
+		if _, diagOk2 := readFile(joinPath(sysroot, "alloc_diag.bc")); diagOk2 {
+			ldArgs = append(ldArgs, diagObj)
+		}
+	}
+	ldArgs = append(ldArgs, runtimeObj)
+	if _, slok2 := readFile(stdlibBc); slok2 {
+		ldArgs = append(ldArgs, stdlibObj)
+	}
+	ldArgs = append(ldArgs, shimsObj)
+	if _, sok4 := readFile(stringerBc); sok4 {
+		ldArgs = append(ldArgs, stringerObj)
+	}
+	if _, lok2 := readFile(lnShims); lok2 {
+		ldArgs = append(ldArgs, lnShimsObj)
+	}
 	for _, f := range splitBySpace(objFiles) {
 		if f != "" {
 			ldArgs = append(ldArgs, f)
 		}
 	}
-	ldArgs = append(ldArgs, comprtLib, muslLib, "--lto-O0", "-z", "stack-size=67108864")
+	ldArgs = append(ldArgs, comprtLib, muslLib, "-z", "stack-size=67108864")
 	rc = run(ldArgs)
 	if rc != 0 {
 		fatal("linker failed")
@@ -2546,6 +2573,13 @@ func cmdTest(args []string) {
 	writeStr(2, "  run tests\n")
 	rc = run([]string{outpath})
 	os.Exit(int32(rc))
+}
+
+func compileBc(clang, target, inpath, outpath string) {
+	rc := run([]string{clang, "--target=" | target, "-c", inpath, "-o", outpath})
+	if rc != 0 {
+		fatal("clang failed for " | inpath)
+	}
 }
 
 func hasImportStr(imports []string, pkg string) (ok bool) {
@@ -2875,8 +2909,8 @@ func main() {
 			allBcFiles = append(allBcFiles, cached)
 			for _, cf := range pkg.cfiles {
 				cPath := joinPath(pkg.dir, cf)
-				cbcFile := joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
-				rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+				cbcFile := joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".o")
+				rc := run([]string{clang, "--target=" | triple, "-c", cPath, "-o", cbcFile})
 				if rc == 0 {
 					allBcFiles = append(allBcFiles, cbcFile)
 				}
@@ -2913,8 +2947,8 @@ func main() {
 		llFile := joinPath(tmpdir, safeName(pkg.path) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		ir = ""
-		bcFile := joinPath(tmpdir, safeName(pkg.path) | ".bc")
-		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
+		bcFile := joinPath(tmpdir, safeName(pkg.path) | ".o")
+		rc := run([]string{clang, "--target=" | triple, "-c", llFile, "-o", bcFile})
 		if rc != 0 {
 			fatal("clang failed for " | pkg.path)
 		}
@@ -2933,8 +2967,8 @@ func main() {
 		allBcFiles = append(allBcFiles, bcFile)
 		for _, cf := range pkg.cfiles {
 			cPath := joinPath(pkg.dir, cf)
-			cbcFile := joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
-			rc = run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+			cbcFile := joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".o")
+			rc = run([]string{clang, "--target=" | triple, "-c", cPath, "-o", cbcFile})
 			if rc != 0 {
 				fatal("clang failed for " | cf)
 			}
@@ -2997,55 +3031,54 @@ func main() {
 	}
 	initAllFile := joinPath(tmpdir, "initall.ll")
 	writeFile(initAllFile, []byte(initAllIR), 0644)
-	initAllBc := joinPath(tmpdir, "initall.bc")
-	rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", initAllFile, "-o", initAllBc})
+	initAllObj := joinPath(tmpdir, "initall.o")
+	rc := run([]string{clang, "--target=" | triple, "-c", initAllFile, "-o", initAllObj})
 	if rc != 0 {
 		fatal("clang failed for initall")
 	}
 
-	writeStr(2, "  merge bitcode\n")
-	llvmLink := "llvm-link-21"
-	mergedBc := joinPath(tmpdir, "merged.bc")
-	linkArgs := []string{llvmLink, "-o", mergedBc, runtimeBc}
+	writeStr(2, "  compile sysroot\n")
+	runtimeObj := joinPath(tmpdir, "runtime.o")
+	compileBc(clang, triple, runtimeBc, runtimeObj)
 	stdlibBc := joinPath(sysroot, "stdlib.bc")
+	stdlibObj := joinPath(tmpdir, "stdlib.o")
 	if _, slok := readFile(stdlibBc); slok {
-		linkArgs = append(linkArgs, stdlibBc)
+		compileBc(clang, triple, stdlibBc, stdlibObj)
 	}
 	shimsBc := joinPath(sysroot, "hashmap_shims.bc")
-	linkArgs = append(linkArgs, shimsBc)
+	shimsObj := joinPath(tmpdir, "hashmap_shims.o")
+	compileBc(clang, triple, shimsBc, shimsObj)
 	stringerBc := joinPath(sysroot, "stringer.bc")
+	stringerObj := joinPath(tmpdir, "stringer.o")
 	if _, sok := readFile(stringerBc); sok {
-		linkArgs = append(linkArgs, stringerBc)
+		compileBc(clang, triple, stringerBc, stringerObj)
 	}
 	runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
+	runtimeGoObj := joinPath(tmpdir, "runtime_go.o")
 	if _, gok := readFile(runtimeGoBc); gok {
-		linkArgs = append(linkArgs, "--override=" | runtimeGoBc)
+		compileBc(clang, triple, runtimeGoBc, runtimeGoObj)
 	}
 	stubsBc := joinPath(sysroot, "stubs_moxie.bc")
+	stubsObj := joinPath(tmpdir, "stubs_moxie.o")
 	if _, sok2 := readFile(stubsBc); sok2 {
-		linkArgs = append(linkArgs, "--override=" | stubsBc)
+		compileBc(clang, triple, stubsBc, stubsObj)
 	}
 	deallocBc := joinPath(sysroot, "dealloc_freelist.bc")
+	deallocObj := joinPath(tmpdir, "dealloc_freelist.o")
 	if _, dok := readFile(deallocBc); dok {
-		linkArgs = append(linkArgs, "--override=" | deallocBc)
+		compileBc(clang, triple, deallocBc, deallocObj)
 	}
+	diagObj := joinPath(tmpdir, "alloc_diag.o")
 	if getenv("ALLOC_DIAG") != "" {
 		diagBc := joinPath(sysroot, "alloc_diag.bc")
 		if _, diagOk := readFile(diagBc); diagOk {
-			linkArgs = append(linkArgs, "--override=" | diagBc)
+			compileBc(clang, triple, diagBc, diagObj)
 		}
 	}
 	lnShims := joinPath(sysroot, "linkname_shims.bc")
+	lnShimsObj := joinPath(tmpdir, "linkname_shims.o")
 	if _, lok := readFile(lnShims); lok {
-		linkArgs = append(linkArgs, lnShims)
-	}
-	for _, bf := range allBcFiles {
-		linkArgs = append(linkArgs, "--override=" | bf)
-	}
-	linkArgs = append(linkArgs, "--override=" | initAllBc)
-	rc = run(linkArgs)
-	if rc != 0 {
-		fatal("llvm-link failed")
+		compileBc(clang, triple, lnShims, lnShimsObj)
 	}
 
 	writeStr(2, "  link\n")
@@ -3059,15 +3092,43 @@ func main() {
 		}
 	}
 	linker := "ld.lld-21"
-	ldArgs := []string{linker, "--gc-sections", "-o", outpath,
-		joinPath(muslDir, "crt1.o"),
-		mergedBc}
+	ldArgs := []string{linker, "--gc-sections", "--allow-multiple-definition", "-o", outpath,
+		joinPath(muslDir, "crt1.o")}
+	ldArgs = append(ldArgs, initAllObj)
+	for _, bf := range allBcFiles {
+		ldArgs = append(ldArgs, bf)
+	}
+	if _, gok2 := readFile(runtimeGoBc); gok2 {
+		ldArgs = append(ldArgs, runtimeGoObj)
+	}
+	if _, sok3 := readFile(stubsBc); sok3 {
+		ldArgs = append(ldArgs, stubsObj)
+	}
+	if _, dok2 := readFile(deallocBc); dok2 {
+		ldArgs = append(ldArgs, deallocObj)
+	}
+	if getenv("ALLOC_DIAG") != "" {
+		if _, diagOk2 := readFile(joinPath(sysroot, "alloc_diag.bc")); diagOk2 {
+			ldArgs = append(ldArgs, diagObj)
+		}
+	}
+	ldArgs = append(ldArgs, runtimeObj)
+	if _, slok2 := readFile(stdlibBc); slok2 {
+		ldArgs = append(ldArgs, stdlibObj)
+	}
+	ldArgs = append(ldArgs, shimsObj)
+	if _, sok4 := readFile(stringerBc); sok4 {
+		ldArgs = append(ldArgs, stringerObj)
+	}
+	if _, lok2 := readFile(lnShims); lok2 {
+		ldArgs = append(ldArgs, lnShimsObj)
+	}
 	for _, f := range splitBySpace(objFiles) {
 		if f != "" {
 			ldArgs = append(ldArgs, f)
 		}
 	}
-	ldArgs = append(ldArgs, comprtLib, muslLib, "--lto-O0", "-z", "stack-size=67108864")
+	ldArgs = append(ldArgs, comprtLib, muslLib, "-z", "stack-size=67108864")
 	rc = run(ldArgs)
 	if rc != 0 {
 		fatal("linker failed")
