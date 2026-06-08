@@ -433,8 +433,39 @@ Fields and functions that must be exported for cross-package access:
 - All `emit*` methods -> stay unexported (methods on unexported struct)
 - `irGlobalSymbol` -> already has exported `IrGlobalSymbol` wrapper
 
+## ConstVal Interface Location
+
+`ConstVal` appears in both `syntax/` and `types/` export lists. It is the same
+interface (`interface{ String() string }`). To avoid a hidden circular dependency,
+it must live in exactly one place. `token/` is the bottom of the graph and both
+`syntax/` and `types/` already import it. Define `ConstVal` in `pkg/token/` and
+have both `syntax/` and `types/` reference `token.ConstVal`.
+
+## Blockers
+
+### Map iteration nondeterminism (STEP 0)
+
+The imported Named type resolution bug - where `safeUnderlying` returns `ptr`
+nondeterministically based on map iteration order - must be fixed BEFORE step 6.
+The types/ssa split will hit this wall when Named types cross package boundaries.
+The fix (commit a96928c9) added deterministic member iteration but the underlying
+issue in `Underlying()` resolution for imported types may still be latent.
+Verify with a reproducible test case before proceeding to step 6.
+
+### pkg/rewrite/ concern separation (noted for phase 2)
+
+`pkg/rewrite/` mixes two pipeline stages:
+- Pre-parse source transforms (rewriteSliceMakeLiterals - operates on raw []byte)
+- Post-parse type resolution (resolveNameInline - operates on syntax.Expr + types.Scope)
+
+These sit at different points in the pipeline. Fine as one package for the
+decomposition phase, but when building streaming pipeline tools (phase 2),
+the byte transforms go between lex and parse, the type resolution goes
+between parse and check. Plan to split `pkg/rewrite/` accordingly.
+
 ## Execution Order
 
+0. Fix map iteration nondeterminism in Named type resolution (BLOCKER for step 6)
 1. Split `pkg/syntax/parser.mx` into 5 files (same package, no export changes)
 2. Split `pkg/ssa/ssa_builder.mx` into 6 files (same package, no export changes)
 3. Split `pkg/emit/ir_emit.mx` into 12 files (same package, no export changes)
@@ -442,9 +473,41 @@ Fields and functions that must be exported for cross-package access:
 5. Extract `pkg/rewrite/` from emit/ir_emit.mx (the inline typecheck)
 6. Export required symbols in pkg/types/, pkg/syntax/, pkg/ssa/
 7. Build `cmd/mxc/` that imports pkg/* instead of vendoring flat copies
-8. Verify each package compiles independently via legacy Go compiler
+8. Verify each package compiles independently (legacy Go compiler AND moxie self-compile)
 9. Delete `_mxc_stage4/` flat copy once `cmd/mxc/` works
 
 Steps 1-3 are safe refactors (same package, just file splits). Steps 4-5
 create new packages. Steps 6-7 are the interface boundary work. Step 8
-verifies nothing exceeds LLVM memory limits per compilation unit.
+verifies nothing exceeds LLVM memory limits per compilation unit AND that
+the self-hosting bootstrap path works end-to-end.
+
+## Phase 2: Pipeline Tool Decomposition
+
+This plan covers phase 1 (reducing compilation unit size via package splits).
+Phase 2 builds on top of this to create the streaming pipeline tools that
+reduce runtime memory:
+
+```
+cmd/mxlex/    .mx -> token stream     (imports token/)
+cmd/mxparse/  tokens -> AST           (imports token/, syntax/)
+cmd/mxcheck/  AST -> typed AST        (imports token/, syntax/, types/)
+cmd/mxssa/    typed AST -> SSA        (imports token/, syntax/, types/, ssa/)
+cmd/mxemit/   SSA -> LLVM IR          (imports all of the above)
+cmd/mxc/      orchestrator            (invokes the above, handles linking)
+```
+
+Each tool reads from stdin/files and writes to stdout/files. Memory usage
+is bounded by the largest single package being processed, not the whole
+program. The package split from phase 1 is the prerequisite since each tool
+needs to import specific packages without pulling in the entire compiler.
+
+## Notes
+
+- emit/ at 9540 lines is the largest package after splitting but the 12-file
+  split keeps all files under ~1400 lines. If compilation memory is still a
+  problem after everything else lands, emit/ is the candidate for further
+  decomposition (e.g., splitting the irEmitter struct into sub-emitters).
+
+- Step 8 must verify BOTH the legacy Go compiler path (bootstrap) AND moxie
+  self-compilation. The legacy build is the escape hatch, not the target state.
+  The goal is a moxie compiler that can compile itself without the Go toolchain.
