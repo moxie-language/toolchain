@@ -474,6 +474,7 @@ func (p *Package) Check() error {
 			applyByteSwitchRewrites(byteSwitches)
 			typeErrors = filterPipeErrors(typeErrors)
 			typeErrors = filterByteCompareErrors(typeErrors)
+		typeErrors = filterNoNewVarErrors(typeErrors)
 
 			if !p.hasBuiltins {
 				if f := injectMoxieByteBuiltins(p.program.fset, p.Name); f != nil {
@@ -516,6 +517,7 @@ func (p *Package) Check() error {
 		typesPkg, err = checker2.Check(packageName, p.program.fset, p.Files, &p.info)
 		typeErrors = filterPipeErrors(typeErrors)
 		typeErrors = filterByteCompareErrors(typeErrors)
+		typeErrors = filterNoNewVarErrors(typeErrors)
 		typeErrors = filterStringByteMismatch(typeErrors)
 		if err != nil && len(typeErrors) == 0 {
 			err = nil

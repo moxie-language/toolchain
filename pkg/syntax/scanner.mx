@@ -1,0 +1,999 @@
+package syntax
+
+import (
+	"io"
+	"git.smesh.lol/moxie/pkg/token"
+	"unicode"
+	"unicode/utf8"
+)
+
+const (
+	comments   uint32 = 1 << iota
+	directives
+)
+
+var sharedUtab *unicode.Tables
+
+func getSharedUtab() (p *unicode.Tables) {
+	if sharedUtab == nil {
+		sharedUtab = unicode.NewTables()
+	}
+	return sharedUtab
+}
+
+
+type Scanner struct {
+	Source
+	mode   uint32
+	nlsemi bool
+
+	Line, Col uint32
+	Blank     bool
+	Tok       token.Token
+	Lit       string
+	Bad       bool
+	Kind      token.LitKind
+	Op        token.Operator
+	Prec      int32
+
+	keywordMap   [1 << 6]token.Token
+	keywordsReady bool
+	utab *unicode.Tables
+}
+
+func (s *Scanner) Init(src io.Reader, errh func(line, col uint32, msg string), mode uint32) {
+	s.Source.init(src, errh)
+	s.mode = mode
+	s.nlsemi = false
+	s.utab = getSharedUtab()
+	s.initKeywords()
+}
+
+func (s *Scanner) InitBytes(src []byte, errh func(line, col uint32, msg string), mode uint32) {
+	s.Source.initBytes(src, errh)
+	s.mode = 0
+	s.nlsemi = false
+	s.utab = getSharedUtab()
+	s.initKeywords()
+}
+
+func (s *Scanner) Errorf(msg string) {
+	s.error(msg)
+}
+
+func (s *Scanner) ErrorAtf(offset int32, msg string) {
+	s.errh(s.line, s.col+uint32(offset), msg)
+}
+
+func (s *Scanner) SetLit(kind token.LitKind, ok bool) {
+	s.nlsemi = true
+	s.Tok = token.Literal
+	s.Lit = string(s.segmentCopy())
+	s.Bad = !ok
+	s.Kind = kind
+}
+
+func (s *Scanner) Next() {
+	nlsemi := s.nlsemi
+	s.nlsemi = false
+
+redo:
+	s.stop()
+	startLine, startCol := s.pos()
+	for s.ch == ' ' || s.ch == '\t' || s.ch == '\n' && !nlsemi || s.ch == '\r' {
+		s.nextch()
+	}
+
+	s.Line, s.Col = s.pos()
+	s.Blank = s.line > startLine || startCol == Colbase
+	s.start()
+	if IsLetter(s.ch) || s.ch >= utf8.RuneSelf && s.AtIdentChar(true) {
+		s.nextch()
+		s.Ident()
+		return
+	}
+
+	switch s.ch {
+	case -1:
+		if nlsemi {
+			s.Lit = "EOF"
+			s.Tok = token.Semi
+			break
+		}
+		s.Tok = token.EOF
+
+	case '\n':
+		s.nextch()
+		s.Lit = "newline"
+		s.Tok = token.Semi
+
+	case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		s.Number(false)
+
+	case '"':
+		s.stdString()
+
+	case '`':
+		s.rawString()
+
+	case '\'':
+		s.rune()
+
+	case '(':
+		s.nextch()
+		s.Tok = token.Lparen
+
+	case '[':
+		s.nextch()
+		s.Tok = token.Lbrack
+
+	case '{':
+		s.nextch()
+		s.Tok = token.Lbrace
+
+	case ',':
+		s.nextch()
+		s.Tok = token.Comma
+
+	case ';':
+		s.nextch()
+		s.Lit = "semicolon"
+		s.Tok = token.Semi
+
+	case ')':
+		s.nextch()
+		s.nlsemi = true
+		s.Tok = token.Rparen
+
+	case ']':
+		s.nextch()
+		s.nlsemi = true
+		s.Tok = token.Rbrack
+
+	case '}':
+		s.nextch()
+		s.nlsemi = true
+		s.Tok = token.Rbrace
+
+	case ':':
+		s.nextch()
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = token.Define
+			break
+		}
+		s.Tok = token.Colon
+
+	case '.':
+		s.nextch()
+		if IsDecimal(s.ch) {
+			s.Number(true)
+			break
+		}
+		if s.ch == '.' {
+			s.nextch()
+			if s.ch == '.' {
+				s.nextch()
+				s.Tok = token.DotDotDot
+				break
+			}
+			s.rewind()
+			s.nextch()
+		}
+		s.Tok = token.Dot
+
+	case '+':
+		s.nextch()
+		s.Op, s.Prec = token.Add, token.PrecAdd
+		if s.ch != '+' {
+			s.assignOp()
+			return
+		}
+		s.nextch()
+		s.nlsemi = true
+		s.Tok = token.IncOp
+
+	case '-':
+		s.nextch()
+		s.Op, s.Prec = token.Sub, token.PrecAdd
+		if s.ch != '-' {
+			s.assignOp()
+			return
+		}
+		s.nextch()
+		s.nlsemi = true
+		s.Tok = token.IncOp
+
+	case '*':
+		s.nextch()
+		s.Op, s.Prec = token.Mul, token.PrecMul
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = token.AssignOp
+			break
+		}
+		s.Tok = token.Star
+
+	case '/':
+		s.nextch()
+		if s.ch == '/' {
+			s.nextch()
+			s.lineComment()
+			goto redo
+		}
+		if s.ch == '*' {
+			s.nextch()
+			s.fullComment()
+			if line, _ := s.pos(); line > s.Line && nlsemi {
+				s.Lit = "newline"
+				s.Tok = token.Semi
+				break
+			}
+			goto redo
+		}
+		s.Op, s.Prec = token.Div, token.PrecMul
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = token.AssignOp
+		} else {
+			s.Tok = token.OperatorType
+		}
+
+	case '%':
+		s.nextch()
+		s.Op, s.Prec = token.Rem, token.PrecMul
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = token.AssignOp
+		} else {
+			s.Tok = token.OperatorType
+		}
+
+	case '&':
+		s.nextch()
+		if s.ch == '&' {
+			s.nextch()
+			s.Op, s.Prec = token.AndAnd, token.PrecAndAnd
+			s.Tok = token.OperatorType
+			break
+		}
+		s.Op, s.Prec = token.And, token.PrecMul
+		if s.ch == '^' {
+			s.nextch()
+			s.Op = token.AndNot
+		}
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = token.AssignOp
+		} else {
+			s.Tok = token.OperatorType
+		}
+
+	case '|':
+		s.nextch()
+		if s.ch == '|' {
+			s.nextch()
+			s.Op, s.Prec = token.OrOr, token.PrecOrOr
+			s.Tok = token.OperatorType
+			break
+		}
+		s.Op, s.Prec = token.Or, token.PrecAdd
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = token.AssignOp
+		} else {
+			s.Tok = token.OperatorType
+		}
+
+	case '^':
+		s.nextch()
+		s.Op, s.Prec = token.Xor, token.PrecAdd
+		if s.ch == '=' {
+			s.nextch()
+			s.Tok = token.AssignOp
+		} else {
+			s.Tok = token.OperatorType
+		}
+
+	case '<':
+		s.nextch()
+		if s.ch == '=' {
+			s.nextch()
+			s.Op, s.Prec = token.Leq, token.PrecCmp
+			s.Tok = token.OperatorType
+			break
+		}
+		if s.ch == '<' {
+			s.nextch()
+			s.Op, s.Prec = token.Shl, token.PrecMul
+			s.assignOp()
+			return
+		}
+		if s.ch == '-' {
+			s.nextch()
+			s.Tok = token.Arrow
+			break
+		}
+		s.Op, s.Prec = token.Lss, token.PrecCmp
+		s.Tok = token.OperatorType
+
+	case '>':
+		s.nextch()
+		if s.ch == '=' {
+			s.nextch()
+			s.Op, s.Prec = token.Geq, token.PrecCmp
+			s.Tok = token.OperatorType
+			break
+		}
+		if s.ch == '>' {
+			s.nextch()
+			s.Op, s.Prec = token.Shr, token.PrecMul
+			s.assignOp()
+			return
+		}
+		s.Op, s.Prec = token.Gtr, token.PrecCmp
+		s.Tok = token.OperatorType
+
+	case '=':
+		s.nextch()
+		if s.ch == '=' {
+			s.nextch()
+			s.Op, s.Prec = token.Eql, token.PrecCmp
+			s.Tok = token.OperatorType
+			break
+		}
+		s.Tok = token.Assign
+
+	case '!':
+		s.nextch()
+		if s.ch == '=' {
+			s.nextch()
+			s.Op, s.Prec = token.Neq, token.PrecCmp
+			s.Tok = token.OperatorType
+			break
+		}
+		s.Op, s.Prec = token.Not, 0
+		s.Tok = token.OperatorType
+
+	case '~':
+		s.nextch()
+		s.Op, s.Prec = token.Tilde, 0
+		s.Tok = token.OperatorType
+
+	default:
+		s.Errorf("invalid character " | fmtRuneU(s.ch))
+		s.nextch()
+		goto redo
+	}
+
+	return
+}
+
+func (s *Scanner) assignOp() {
+	if s.ch == '=' {
+		s.nextch()
+		s.Tok = token.AssignOp
+		return
+	}
+	s.Tok = token.OperatorType
+}
+
+func (s *Scanner) Ident() {
+	for IsLetter(s.ch) || IsDecimal(s.ch) {
+		s.nextch()
+	}
+
+	if s.ch >= utf8.RuneSelf {
+		for s.AtIdentChar(false) {
+			s.nextch()
+		}
+	}
+
+	lit := s.segment()
+	if len(lit) >= 2 {
+		h := (uint32(lit[0])<<4 ^ uint32(lit[1]) + uint32(len(lit))) & 63
+		if tok := s.keywordMap[h]; tok != 0 && tokStrFast(tok) == string(lit) {
+			s.nlsemi = token.Contains(1<<token.Break|1<<token.Continue|1<<token.Fallthrough|1<<token.Return, tok)
+			s.Tok = tok
+			return
+		}
+	}
+
+	s.nlsemi = true
+	c := []byte{:len(lit)}
+	copy(c, lit)
+	s.Lit = string(c)
+	s.Tok = token.NameType
+}
+
+func tokStrFast(tok token.Token) (s string) {
+	idx := [48]uint8{0, 3, 7, 14, 16, 19, 23, 24, 26, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 42, 47, 51, 55, 60, 68, 75, 80, 84, 95, 98, 102, 104, 108, 110, 116, 125, 128, 135, 140, 146, 152, 158, 164, 168, 171, 171}
+	return token.Token_name[idx[tok-1]:idx[tok]]
+}
+
+func (s *Scanner) AtIdentChar(first bool) (ok bool) {
+	switch {
+	case s.utab.IsLetter(s.ch) || s.ch == '_':
+	case s.utab.IsDigit(s.ch):
+		if first {
+			s.Errorf("identifier cannot begin with digit " | fmtRuneU(s.ch))
+		}
+	case s.ch >= utf8.RuneSelf:
+		s.Errorf("invalid character " | fmtRuneU(s.ch) | " in identifier")
+	default:
+		return false
+	}
+	return true
+}
+
+func (s *Scanner) initKeywords() {
+	if s.keywordsReady {
+		return
+	}
+	s.keywordsReady = true
+	for tok := token.Break; tok <= token.Var; tok++ {
+		b := []byte(tok.String())
+		h := (uint32(b[0])<<4 ^ uint32(b[1]) + uint32(len(b))) & 63
+		if s.keywordMap[h] != 0 {
+			panic("imperfect hash")
+		}
+		s.keywordMap[h] = tok
+	}
+}
+
+func Lower(ch rune) (r rune) { return ('a' - 'A') | ch }
+func IsLetter(ch rune) (ok bool) { return 'a' <= Lower(ch) && Lower(ch) <= 'z' || ch == '_' }
+func IsDecimal(ch rune) (ok bool) { return '0' <= ch && ch <= '9' }
+func IsHex(ch rune) (ok bool) { return '0' <= ch && ch <= '9' || 'a' <= Lower(ch) && Lower(ch) <= 'f' }
+
+func (s *Scanner) Digits(base int32, invalid *int32) (digsep int32) {
+	if base <= 10 {
+		max := rune('0' + base)
+		for IsDecimal(s.ch) || s.ch == '_' {
+			ds := int32(1)
+			if s.ch == '_' {
+				ds = 2
+			} else if s.ch >= max && *invalid < 0 {
+				_, col := s.pos()
+				*invalid = int32(col - s.col)
+			}
+			digsep |= ds
+			s.nextch()
+		}
+	} else {
+		for IsHex(s.ch) || s.ch == '_' {
+			ds := int32(1)
+			if s.ch == '_' {
+				ds = 2
+			}
+			digsep |= ds
+			s.nextch()
+		}
+	}
+	return
+}
+
+func (s *Scanner) Number(seenPoint bool) {
+	ok := true
+	kind := token.IntLit
+	base := int32(10)
+	prefix := rune(0)
+	digsep := int32(0)
+	invalid := int32(-1)
+
+	if !seenPoint {
+		if s.ch == '0' {
+			s.nextch()
+			switch Lower(s.ch) {
+			case 'x':
+				s.nextch()
+				base, prefix = 16, 'x'
+			case 'o':
+				s.nextch()
+				base, prefix = 8, 'o'
+			case 'b':
+				s.nextch()
+				base, prefix = 2, 'b'
+			default:
+				base, prefix = 8, '0'
+				digsep = 1
+			}
+		}
+		digsep |= s.Digits(base, &invalid)
+		if s.ch == '.' {
+			if prefix == 'o' || prefix == 'b' {
+				s.Errorf("invalid radix point in " | baseName(base) | " literal")
+				ok = false
+			}
+			s.nextch()
+			seenPoint = true
+		}
+	}
+
+	if seenPoint {
+		kind = token.FloatLit
+		digsep |= s.Digits(base, &invalid)
+	}
+
+	if digsep&1 == 0 && ok {
+		s.Errorf(baseName(base) | " literal has no digits")
+		ok = false
+	}
+
+	if e := Lower(s.ch); e == 'e' || e == 'p' {
+		if ok {
+			switch {
+			case e == 'e' && prefix != 0 && prefix != '0':
+				s.Errorf(fmtQuoteRune(s.ch) | " exponent requires decimal mantissa")
+				ok = false
+			case e == 'p' && prefix != 'x':
+				s.Errorf(fmtQuoteRune(s.ch) | " exponent requires hexadecimal mantissa")
+				ok = false
+			}
+		}
+		s.nextch()
+		kind = token.FloatLit
+		if s.ch == '+' || s.ch == '-' {
+			s.nextch()
+		}
+		digsep = s.Digits(10, nil) | digsep&2
+		if digsep&1 == 0 && ok {
+			s.Errorf("exponent has no digits")
+			ok = false
+		}
+	} else if prefix == 'x' && kind == token.FloatLit && ok {
+		s.Errorf("hexadecimal mantissa requires a 'p' exponent")
+		ok = false
+	}
+
+	if s.ch == 'i' {
+		kind = token.ImagLit
+		s.nextch()
+	}
+
+	s.SetLit(kind, ok)
+
+	if kind == token.IntLit && invalid >= 0 && ok {
+		s.ErrorAtf(invalid, "invalid digit " | fmtQuoteRune(rune(s.Lit[invalid])) | " in " | baseName(base) | " literal")
+		ok = false
+	}
+
+	if digsep&2 != 0 && ok {
+		if i := invalidSep(s.Lit); i >= 0 {
+			s.ErrorAtf(i, "'_' must separate successive digits")
+			ok = false
+		}
+	}
+
+	s.Bad = !ok
+}
+
+func baseName(base int32) (s string) {
+	switch base {
+	case 2:
+		return "binary"
+	case 8:
+		return "octal"
+	case 10:
+		return "decimal"
+	case 16:
+		return "hexadecimal"
+	}
+	panic("invalid base")
+}
+
+func invalidSep(x string) (n int32) {
+	x1 := ' '
+	d := '.'
+	i := int32(0)
+
+	if len(x) >= 2 && x[0] == '0' {
+		x1 = Lower(rune(x[1]))
+		if x1 == 'x' || x1 == 'o' || x1 == 'b' {
+			d = '0'
+			i = 2
+		}
+	}
+
+	for ; i < int32(len(x)); i++ {
+		p := d
+		d = rune(x[i])
+		switch {
+		case d == '_':
+			if p != '0' {
+				return i
+			}
+		case IsDecimal(d) || x1 == 'x' && IsHex(d):
+			d = '0'
+		default:
+			if p == '_' {
+				return i - 1
+			}
+			d = '.'
+		}
+	}
+	if d == '_' {
+		return int32(len(x)) - 1
+	}
+
+	return -1
+}
+
+func (s *Scanner) rune() {
+	ok := true
+	s.nextch()
+
+	n := 0
+	for ; ; n++ {
+		if s.ch == '\'' {
+			if ok {
+				if n == 0 {
+					s.Errorf("empty rune literal or unescaped '")
+					ok = false
+				} else if n != 1 {
+					s.ErrorAtf(0, "more than one character in rune literal")
+					ok = false
+				}
+			}
+			s.nextch()
+			break
+		}
+		if s.ch == '\\' {
+			s.nextch()
+			if !s.escape('\'') {
+				ok = false
+			}
+			continue
+		}
+		if s.ch == '\n' {
+			if ok {
+				s.Errorf("newline in rune literal")
+				ok = false
+			}
+			break
+		}
+		if s.ch < 0 {
+			if ok {
+				s.ErrorAtf(0, "rune literal not terminated")
+				ok = false
+			}
+			break
+		}
+		s.nextch()
+	}
+
+	s.SetLit(token.RuneLit, ok)
+}
+
+func (s *Scanner) stdString() {
+	ok := true
+	s.nextch()
+
+	for {
+		if s.ch == '"' {
+			s.nextch()
+			break
+		}
+		if s.ch == '\\' {
+			s.nextch()
+			if !s.escape('"') {
+				ok = false
+			}
+			continue
+		}
+		if s.ch == '\n' {
+			s.Errorf("newline in string")
+			ok = false
+			break
+		}
+		if s.ch < 0 {
+			s.ErrorAtf(0, "string not terminated")
+			ok = false
+			break
+		}
+		s.nextch()
+	}
+
+	s.SetLit(token.StringLit, ok)
+}
+
+func (s *Scanner) rawString() {
+	ok := true
+	s.nextch()
+
+	for {
+		if s.ch == '`' {
+			s.nextch()
+			break
+		}
+		if s.ch < 0 {
+			s.ErrorAtf(0, "string not terminated")
+			ok = false
+			break
+		}
+		s.nextch()
+	}
+
+	s.SetLit(token.StringLit, ok)
+}
+
+func (s *Scanner) comment(text string) {
+	s.ErrorAtf(0, text)
+}
+
+func (s *Scanner) skipLine() {
+	for s.ch >= 0 && s.ch != '\n' {
+		s.nextch()
+	}
+}
+
+func (s *Scanner) lineComment() {
+	if s.mode&comments != 0 {
+		s.skipLine()
+		s.comment(string(s.segment()))
+		return
+	}
+
+	if s.mode&directives == 0 || (s.ch != 'g' && s.ch != 'l') {
+		s.stop()
+		s.skipLine()
+		return
+	}
+
+	prefix := "go:"
+	if s.ch == 'l' {
+		prefix = "line "
+	}
+
+	for _, r := range prefix {
+		if s.ch != rune(r) {
+			s.stop()
+			s.skipLine()
+			return
+		}
+		s.nextch()
+	}
+	s.skipLine()
+	s.comment(string(s.segment()))
+}
+
+func (s *Scanner) skipComment() (ok bool) {
+	for s.ch >= 0 {
+		for s.ch == '*' {
+			s.nextch()
+			if s.ch == '/' {
+				s.nextch()
+				return true
+			}
+		}
+		s.nextch()
+	}
+	s.ErrorAtf(0, "comment not terminated")
+	return false
+}
+
+func (s *Scanner) fullComment() {
+	if s.mode&comments != 0 {
+		if s.skipComment() {
+			s.comment(string(s.segment()))
+		}
+		return
+	}
+
+	if s.mode&directives == 0 || s.ch != 'l' {
+		s.stop()
+		s.skipComment()
+		return
+	}
+
+	const prefix = "line "
+
+	for _, r := range prefix {
+		if s.ch != rune(r) {
+			s.stop()
+			s.skipComment()
+			return
+		}
+		s.nextch()
+	}
+	if s.skipComment() {
+		s.comment(string(s.segment()))
+	}
+}
+
+func (s *Scanner) escape(quote rune) (ok bool) {
+	var n int32
+	var base, max uint32
+
+	switch s.ch {
+	case quote, 'a', 'b', 'f', 'n', 'r', 't', 'v', '\\':
+		s.nextch()
+		return true
+	case '0', '1', '2', '3', '4', '5', '6', '7':
+		n, base, max = 3, 8, 255
+	case 'x':
+		s.nextch()
+		n, base, max = 2, 16, 255
+	case 'u':
+		s.nextch()
+		n, base, max = 4, 16, unicode.MaxRune
+	case 'U':
+		s.nextch()
+		n, base, max = 8, 16, unicode.MaxRune
+	default:
+		if s.ch < 0 {
+			return true
+		}
+		s.Errorf("unknown escape")
+		return false
+	}
+
+	var x uint32
+	for i := n; i > 0; i-- {
+		if s.ch < 0 {
+			return true
+		}
+		d := base
+		if IsDecimal(s.ch) {
+			d = uint32(s.ch) - '0'
+		} else if 'a' <= Lower(s.ch) && Lower(s.ch) <= 'f' {
+			d = uint32(Lower(s.ch)) - 'a' + 10
+		}
+		if d >= base {
+			s.Errorf("invalid character " | fmtQuoteRune(s.ch) | " in " | baseName(int32(base)) | " escape")
+			return false
+		}
+		x = x*base + d
+		s.nextch()
+	}
+
+	if x > max && base == 8 {
+		s.Errorf("octal escape value " | token.SimpleItoaU32(x) | " > 255")
+		return false
+	}
+
+	if x > max || 0xD800 <= x && x < 0xE000 {
+		s.Errorf("escape is invalid Unicode code point " | fmtRuneU(rune(x)))
+		return false
+	}
+
+	return true
+}
+
+func String(n Node) (s string) {
+	switch n.(type) {
+	case *Name:
+		return "Name"
+	case *BasicLit:
+		return "BasicLit"
+	case *CompositeLit:
+		return "CompositeLit"
+	case *FuncLit:
+		return "FuncLit"
+	case *ParenExpr:
+		return "ParenExpr"
+	case *SelectorExpr:
+		return "SelectorExpr"
+	case *IndexExpr:
+		return "IndexExpr"
+	case *SliceExpr:
+		return "SliceExpr"
+	case *AssertExpr:
+		return "AssertExpr"
+	case *TypeSwitchGuard:
+		return "TypeSwitchGuard"
+	case *Operation:
+		return "Operation"
+	case *CallExpr:
+		return "CallExpr"
+	case *ListExpr:
+		return "ListExpr"
+	case *ArrayType:
+		return "ArrayType"
+	case *SliceType:
+		return "SliceType"
+	case *DotsType:
+		return "DotsType"
+	case *StructType:
+		return "StructType"
+	case *InterfaceType:
+		return "InterfaceType"
+	case *FuncType:
+		return "FuncType"
+	case *ChanType:
+		return "ChanType"
+	case *MapType:
+		return "MapType"
+	case *BadExpr:
+		return "BadExpr"
+	case *EmptyStmt:
+		return "EmptyStmt"
+	case *LabeledStmt:
+		return "LabeledStmt"
+	case *BlockStmt:
+		return "BlockStmt"
+	case *ExprStmt:
+		return "ExprStmt"
+	case *SendStmt:
+		return "SendStmt"
+	case *DeclStmt:
+		return "DeclStmt"
+	case *AssignStmt:
+		return "AssignStmt"
+	case *BranchStmt:
+		return "BranchStmt"
+	case *CallStmt:
+		return "CallStmt"
+	case *ReturnStmt:
+		return "ReturnStmt"
+	case *IfStmt:
+		return "IfStmt"
+	case *ForStmt:
+		return "ForStmt"
+	case *SwitchStmt:
+		return "SwitchStmt"
+	case *SelectStmt:
+		return "SelectStmt"
+	case *RangeClause:
+		return "RangeClause"
+	case *CaseClause:
+		return "CaseClause"
+	case *CommClause:
+		return "CommClause"
+	case *ImportDecl:
+		return "ImportDecl"
+	case *ConstDecl:
+		return "ConstDecl"
+	case *TypeDecl:
+		return "TypeDecl"
+	case *VarDecl:
+		return "VarDecl"
+	case *FuncDecl:
+		return "FuncDecl"
+	case *File:
+		return "File"
+	}
+	return "Node"
+}
+
+func StartPos(n Node) (p token.Pos) {
+	return n.Pos()
+}
+
+// fmtRuneU formats a rune as "U+XXXX 'c'" (like %#U).
+func fmtRuneU(r rune) (s string) {
+	hex := fmtHex32(uint32(r))
+	s = "U+" | hex
+	if r >= 0x20 && r < 0x7f {
+		s = s | " '" | string([]byte{byte(r)}) | "'"
+	}
+	return s
+}
+
+// fmtQuoteRune formats a rune as 'c' (like %q for rune).
+func fmtQuoteRune(r rune) (s string) {
+	if r >= 0x20 && r < 0x7f {
+		return "'" | string([]byte{byte(r)}) | "'"
+	}
+	return "U+" | fmtHex32(uint32(r))
+}
+
+// fmtHex32 formats a uint32 as uppercase hex with at least 4 digits.
+func fmtHex32(v uint32) (s string) {
+	const digits = "0123456789ABCDEF"
+	buf := []byte{:0:8}
+	if v == 0 {
+		return "0000"
+	}
+	for v > 0 {
+		buf = append(buf, digits[v&0xf])
+		v >>= 4
+	}
+	for len(buf) < 4 {
+		buf = append(buf, '0')
+	}
+	for i, j := int32(0), len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}

@@ -1,0 +1,82 @@
+package syntax
+
+import (
+	"io"
+	"os"
+	"git.smesh.lol/moxie/pkg/token"
+)
+
+type Mode uint32
+
+const (
+	CheckBranches Mode = 1 << iota
+)
+
+type Error struct {
+	Pos token.Pos
+	Msg string
+}
+
+func (err Error) Error() (s string) {
+	return err.Pos.String() | ": " | err.Msg
+}
+
+func (err Error) String() (s string) { return err.Error() }
+
+var compileExportMap map[string]string
+
+type ErrorHandler func(err error)
+
+type Pragma interface{}
+
+type PragmaHandler func(pos token.Pos, blank bool, text string, current Pragma) Pragma
+
+func Parse(base *token.PosBase, src io.Reader, errh ErrorHandler, pragh PragmaHandler, mode Mode) (_ *File, first error) {
+	defer func() {
+		if p := recover(); p != nil {
+			if err, ok := p.(Error); ok {
+				first = err
+				return
+			}
+			panic(p)
+		}
+	}()
+
+	var p Parser
+	p.init(base, src, errh, pragh, mode)
+	p.Next()
+	return p.fileOrNil(), p.First
+}
+
+func ParseBytes(base *token.PosBase, src []byte, errh ErrorHandler, pragh PragmaHandler, mode Mode) (_ *File, first error) {
+	var parseFirst error
+	defer func() {
+		if p := recover(); p != nil {
+			if err, ok := p.(Error); ok {
+				parseFirst = err
+				first = err
+				return
+			}
+			panic(p)
+		}
+	}()
+
+	var p Parser
+	p.initBytes(base, src, errh, pragh, mode)
+	p.Next()
+	f := p.fileOrNil()
+	_ = parseFirst
+	return f, p.First
+}
+
+func ParseFile(filename string, errh ErrorHandler, pragh PragmaHandler, mode Mode) (*File, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		if errh != nil {
+			errh(err)
+		}
+		return nil, err
+	}
+	defer f.Close()
+	return Parse(token.NewFileBase(filename), f, errh, pragh, mode)
+}
