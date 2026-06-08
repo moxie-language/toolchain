@@ -261,7 +261,7 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 	if d.Body == nil && isNoContextExtern(pb.pkg.Pkg.Path(), d.Name.Value) {
 		fn.isExternC = true
 	}
-	pb.pkg.Members[fn.name] = fn
+	pb.pkg.SetMember(fn.name, fn)
 }
 
 func checkInitBody(body *syntax.BlockStmt) (s string) {
@@ -373,7 +373,7 @@ func (pb *ssaPkgBuilder) registerMethod(d *syntax.FuncDecl) {
 		Pkg:       pb.pkg,
 		Prog:      pb.prog,
 	}
-	pb.pkg.Members[mangledName] = fn
+	pb.pkg.SetMember(mangledName, fn)
 }
 
 func ssaRecvTypeName(recv *syntax.Field) (s string) {
@@ -447,7 +447,7 @@ func (pb *ssaPkgBuilder) registerVar(d *syntax.VarDecl) {
 			pos:    0,
 			pkg:    pb.pkg,
 		}
-		pb.pkg.Members[name.Value] = g
+		pb.pkg.SetMember(name.Value, g)
 	}
 	if d.Values != nil {
 		pb.varInits = append(pb.varInits, d)
@@ -470,7 +470,7 @@ func (pb *ssaPkgBuilder) registerType(d *syntax.TypeDecl) {
 		obj = named.obj
 	}
 	t := &SSAType_{object: obj, pkg: pb.pkg}
-	pb.pkg.Members[d.Name.Value] = t
+	pb.pkg.SetMember(d.Name.Value, t)
 }
 
 func (pb *ssaPkgBuilder) registerConst(d *syntax.ConstDecl) {
@@ -487,7 +487,7 @@ func (pb *ssaPkgBuilder) registerConst(d *syntax.ConstDecl) {
 			Value:  &SSAConst{typ: obj.Type(), val: localizeConstVal(obj.Val(), obj.Type())},
 			pkg:    pb.pkg,
 		}
-		pb.pkg.Members[name.Value] = c
+		pb.pkg.SetMember(name.Value, c)
 	}
 }
 
@@ -512,7 +512,7 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 			Pkg:       pb.pkg,
 			Prog:      pb.prog,
 		}
-		pb.pkg.Members["main"] = fn
+		pb.pkg.SetMember("main", fn)
 	}
 	if len(fn.Blocks) > 0 {
 		initSig := &Signature{params: NewTuple(), results: NewTuple()}
@@ -522,7 +522,7 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 			Pkg:       pb.pkg,
 			Prog:      pb.prog,
 		}
-		pb.pkg.Members["__varinit"] = initFn
+		pb.pkg.SetMember("__varinit", initFn)
 		fb := newSSAFuncBuilder(initFn, pb.info)
 		entry := fb.newBlock("entry")
 		fb.currentBlock = entry
@@ -2108,6 +2108,21 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 		for i, v := range vals {
 			if i < fb.fn.Signature.Results().Len() {
 				retType := fb.fn.Signature.Results().At(i).Type()
+				if n, ok := retType.(*Named); ok && n != nil {
+					u := n.Underlying()
+					if u != nil && u != Type(n) {
+						if _, isIface := u.(*TCInterface); isIface {
+							if _, alreadyIface := safeUnderlying(v.SSAType()).(*TCInterface); !alreadyIface {
+								mi := &SSAMakeInterface{X: v}
+								mi.typ = retType
+								mi.name = fb.nextName()
+								fb.emit(mi)
+								vals[i] = mi
+								continue
+							}
+						}
+					}
+				}
 				vals[i] = fb.coerceToInterface(v, retType)
 			}
 		}
@@ -3019,7 +3034,7 @@ func (fb *ssaFuncBuilder) buildPkgMember(pn *PkgName, memberName string) (s SSAV
 				typ:  NewPointer(obj.Type()),
 				pkg:  impPkg,
 			}
-			impPkg.Members[memberName] = g
+			impPkg.SetMember(memberName, g)
 		}
 		return fb.emitLoad(g, obj.Type())
 	case *TCFunc:
@@ -3516,7 +3531,7 @@ func (fb *ssaFuncBuilder) buildPkgMemberAddr(pn *PkgName, memberName string) (s 
 				typ:  NewPointer(obj.Type()),
 				pkg:  impPkg,
 			}
-			impPkg.Members[memberName] = g
+			impPkg.SetMember(memberName, g)
 		}
 		return g
 	}
@@ -3564,7 +3579,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		if isNoContextExtern(imported.Path(), funcName) {
 			ssaFn.isExternC = true
 		}
-		impPkg.Members[funcName] = ssaFn
+		impPkg.SetMember(funcName, ssaFn)
 	}
 	args := fb.buildArgs(argList)
 	var retType Type
@@ -4614,7 +4629,7 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, baseName stri
 		Pkg:       targetPkg,
 		Prog:      fb.fn.Prog,
 	}
-	targetPkg.Members[mangledName] = fn
+	targetPkg.SetMember(mangledName, fn)
 	subFb := newSSAFuncBuilder(fn, fb.info)
 	subFb.typeSubst = typeSubst
 	subFb.srcScope = srcScope
