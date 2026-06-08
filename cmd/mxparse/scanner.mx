@@ -1550,15 +1550,86 @@ type decl struct{ node }
 
 func (*decl) aDecl() {}
 
+type (
+	ImportDecl struct {
+		Group        *Group
+		Pragma       Pragma
+		LocalPkgName *Name
+		Path         *BasicLit
+		decl
+	}
+
+	ConstDecl struct {
+		Group    *Group
+		Pragma   Pragma
+		NameList []*Name
+		Type     Expr
+		Values   Expr
+		decl
+	}
+
+	TypeDecl struct {
+		Group      *Group
+		Pragma     Pragma
+		Name       *Name
+		TParamList []*Field
+		Alias      bool
+		Type       Expr
+		decl
+	}
+
+	VarDecl struct {
+		Group    *Group
+		Pragma   Pragma
+		NameList []*Name
+		Type     Expr
+		Values   Expr
+		decl
+	}
+
+	FuncDecl struct {
+		Pragma     Pragma
+		Recv       *Field
+		Name       *Name
+		TParamList []*Field
+		Type       *FuncType
+		Body       *BlockStmt
+		decl
+	}
+)
+
 type Group struct {
 	_ int32
 }
 
 func NewName(pos Pos, value string) (n *Name) {
-	n := &Name{}
+	n = &Name{}
 	n.pos = pos
 	n.Value = value
 	return n
+}
+
+type Error struct {
+	Pos Pos
+	Msg string
+}
+
+func (err Error) Error() (s string) {
+	return err.Msg
+}
+
+func String(n Node) (s string) {
+	return "node"
+}
+
+func StartPos(n Node) (p Pos) {
+	return n.Pos()
+}
+
+func dbg(s string) {
+	if debug {
+		out(s)
+	}
 }
 
 type (
@@ -1949,69 +2020,6 @@ type Parser struct {
 	Indent []byte // tracing support
 }
 
-func (p *Parser) init(File *PosBase, r io.Reader, Errh ErrorHandler, Pragh PragmaHandler, Mode Mode) {
-	p.Top = true
-	p.File = File
-	p.Errh = Errh
-	p.Mode = Mode
-	p.Pragh = Pragh
-	p.Scanner.Init(
-		r,
-		// Error and directive handler for scanner.
-		// Because the (line, col) positions passed to the
-		// handler is always at or after the current reading
-		// position, it is safe to use the most recent position
-		// base to compute the corresponding Pos value.
-		func(line, col uint32, msg string) {
-			if msg[0] != '/' {
-				p.errorAt(p.posAt(line, col), msg)
-				return
-			}
-
-			// otherwise it must be a comment containing a line or go: directive.
-			// //line directives must be at the start of the line (column colbase).
-			// /*line*/ directives can be anywhere in the line.
-			text := commentText(msg)
-			if (col == Colbase || msg[1] == '*') && bytesHasPrefix(text, "line ") {
-				var pos Pos // position immediately following the comment
-				if msg[1] == '/' {
-					// line comment (newline is part of the comment)
-					pos = MakePos(p.File, line+1, Colbase)
-				} else {
-					// regular comment
-					// (if the comment spans multiple lines it's not
-					// a valid line directive and will be discarded
-					// by updateBase)
-					pos = MakePos(p.File, line, col+uint32(len(msg)))
-				}
-				p.updateBase(pos, line, col+2+5, text[5:]) // +2 to skip over // or /*
-				return
-			}
-
-			// go: directive (but be conservative and test)
-			if bytesHasPrefix(text, "go:") || bytesHasPrefix(text, ":") {
-				if Pragh != nil {
-					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma) // +2 to skip over // or /*
-				}
-			} else if bytesHasPrefix(text, "export ") {
-				if Pragh != nil {
-					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
-				}
-			}
-		},
-		comments,
-	)
-
-	p.Base = File
-	p.First = nil
-	p.Errcnt = 0
-	p.Pragma = nil
-
-	p.Fnest = 0
-	p.Xnest = 0
-	p.Indent = nil
-}
-
 func (p *Parser) initBytes(File *PosBase, src []byte, Errh ErrorHandler, Pragh PragmaHandler, Mode Mode) {
 	p.Top = true
 	p.File = File
@@ -2038,11 +2046,11 @@ func (p *Parser) initBytes(File *PosBase, src []byte, Errh ErrorHandler, Pragh P
 			}
 			if bytesHasPrefix(text, "go:") || bytesHasPrefix(text, ":") {
 				if Pragh != nil {
-					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
+					Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
 				}
 			} else if bytesHasPrefix(text, "export ") {
 				if Pragh != nil {
-					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
+					Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
 				}
 			}
 		},
@@ -2273,7 +2281,7 @@ func tokstring(tok Token) (s string) {
 	case Semi:
 		return "semicolon or newline"
 	}
-	s := tok.String()
+	s = tok.String()
 	if Break <= tok && tok <= Var {
 		return "keyword " | s
 	}
@@ -2356,7 +2364,7 @@ func (p *Parser) trace(msg string) (fn func()) {
 
 func (p *Parser) print(msg string) {
 	// trace is const false; this is dead code but must type-check
-	_ = Itoa(p.line) | ": " | p.Indent | msg | "\n"
+	_ = Itoa(int32(p.line)) | ": " | p.Indent | msg | "\n"
 }
 
 // ----------------------------------------------------------------------------
@@ -2375,7 +2383,7 @@ func (p *Parser) fileOrNil() (f *File) {
 		defer p.trace("file")()
 	}
 
-	f := &File{}
+	f = &File{}
 	f.pos = p.pos()
 
 	// PackageClause
@@ -2785,7 +2793,7 @@ func (p *Parser) funcDeclOrNil() (f *FuncDecl) {
 		defer p.trace("funcDecl")()
 	}
 
-	f := &FuncDecl{}
+	f = &FuncDecl{}
 	f.pos = p.pos()
 	f.Pragma = p.takePragma()
 
@@ -3720,7 +3728,7 @@ func (p *Parser) arrayOrTArgs() (e Expr) {
 
 func (p *Parser) oliteral() (b *BasicLit) {
 	if p.Tok == Literal {
-		b := &BasicLit{}
+		b = &BasicLit{}
 		b.pos = p.pos()
 		b.Value = p.Lit
 		b.Kind = p.Kind
@@ -3739,7 +3747,7 @@ func (p *Parser) methodDecl() (f *Field) {
 		defer p.trace("methodDecl")()
 	}
 
-	f := &Field{}
+	f = &Field{}
 	f.pos = p.pos()
 	name := p.name()
 
@@ -3894,7 +3902,7 @@ func (p *Parser) paramDeclOrNil(name *Name, follow Token) (f *Field) {
 		return p.embeddedElem(nil)
 	}
 
-	f := &Field{}
+	f = &Field{}
 	f.pos = pos
 
 	if p.Tok == NameType || name != nil {
@@ -4101,7 +4109,7 @@ func (p *Parser) paramList(name *Name, typ Expr, close Token, requireNames, dddo
 }
 
 func (p *Parser) badExpr() (b *BadExpr) {
-	b := &BadExpr{}
+	b = &BadExpr{}
 	b.pos = p.pos()
 	return b
 }
@@ -4145,19 +4153,19 @@ func (p *Parser) simpleStmt(lhs Expr, keyword Token) (s SimpleStmt) {
 
 		case Arrow:
 			// lhs <- rhs
-			s := &SendStmt{}
-			s.pos = pos
+			ss := &SendStmt{}
+			ss.pos = pos
 			p.Next()
-			s.Chan = lhs
-			s.Value = p.expr()
-			return s
+			ss.Chan = lhs
+			ss.Value = p.expr()
+			return ss
 
 		default:
 			// expr
-			s := &ExprStmt{}
-			s.pos = lhs.Pos()
-			s.X = lhs
-			return s
+			es := &ExprStmt{}
+			es.pos = lhs.Pos()
+			es.X = lhs
+			return es
 		}
 	}
 
@@ -4183,10 +4191,10 @@ func (p *Parser) simpleStmt(lhs Expr, keyword Token) (s SimpleStmt) {
 			if lhs, ok := lhs.(*Name); ok {
 				// switch … lhs := rhs.(type)
 				x.Lhs = lhs
-				s := &ExprStmt{}
-				s.pos = x.Pos()
-				s.X = x
-				return s
+				es := &ExprStmt{}
+				es.pos = x.Pos()
+				es.X = x
+				return es
 			}
 		}
 
@@ -4195,19 +4203,18 @@ func (p *Parser) simpleStmt(lhs Expr, keyword Token) (s SimpleStmt) {
 	default:
 		p.syntaxError("expected := or = or comma")
 		p.advance(Semi, Rbrace)
-		// make the best of what we have
 		if x, ok := lhs.(*ListExpr); ok {
 			lhs = x.ElemList[0]
 		}
-		s := &ExprStmt{}
-		s.pos = lhs.Pos()
-		s.X = lhs
-		return s
+		es := &ExprStmt{}
+		es.pos = lhs.Pos()
+		es.X = lhs
+		return es
 	}
 }
 
 func (p *Parser) newRangeClause(lhs Expr, def bool) (r *RangeClause) {
-	r := &RangeClause{}
+	r = &RangeClause{}
 	r.pos = p.pos()
 	p.Next() // consume _Range
 	r.Lhs = lhs
@@ -4217,7 +4224,7 @@ func (p *Parser) newRangeClause(lhs Expr, def bool) (r *RangeClause) {
 }
 
 func (p *Parser) newAssignStmt(pos Pos, op Operator, lhs, rhs Expr) (a *AssignStmt) {
-	a := &AssignStmt{}
+	a = &AssignStmt{}
 	a.pos = pos
 	a.Op = op
 	a.Lhs = lhs
@@ -4225,7 +4232,7 @@ func (p *Parser) newAssignStmt(pos Pos, op Operator, lhs, rhs Expr) (a *AssignSt
 	return a
 }
 
-func (p *Parser) labeledStmtOrNil(label *Name) (s Stmt) {
+func (p *Parser) labeledStmtOrNil(label *Name) Stmt {
 	if trace {
 		defer p.trace("labeledStmt")()
 	}
@@ -4237,9 +4244,6 @@ func (p *Parser) labeledStmtOrNil(label *Name) (s Stmt) {
 	p.want(Colon)
 
 	if p.Tok == Rbrace {
-		// We expect a statement (incl. an empty statement), which must be
-		// terminated by a semicolon. Because semicolons may be omitted before
-		// an _Rbrace, seeing an _Rbrace implies an empty statement.
 		e := &EmptyStmt{}
 		e.pos = p.pos()
 		s.Stmt = e
@@ -4251,10 +4255,8 @@ func (p *Parser) labeledStmtOrNil(label *Name) (s Stmt) {
 		return s
 	}
 
-	// report error at line of ':' token
 	p.syntaxErrorAt(s.pos, "missing statement after label")
-	// we are already at the end of the labeled statement - no need to advance
-	return nil // avoids follow-on errors (see e.g., fixedbugs/bug274.go)
+	return nil
 }
 
 // context must be a non-empty string unless we know that p.tok == _Lbrace.
@@ -4297,7 +4299,7 @@ func (p *Parser) declStmt(f func(*Group) Decl) (d *DeclStmt) {
 	return s
 }
 
-func (p *Parser) forStmt() (s Stmt) {
+func (p *Parser) forStmt() Stmt {
 	if trace {
 		defer p.trace("forStmt")()
 	}
@@ -4451,7 +4453,7 @@ func (p *Parser) switchStmt() (s *SwitchStmt) {
 		defer p.trace("switchStmt")()
 	}
 
-	s := &SwitchStmt{}
+	s = &SwitchStmt{}
 	s.pos = p.pos()
 
 	s.Init, s.Tag, _ = p.header(Switch)
@@ -4474,7 +4476,7 @@ func (p *Parser) selectStmt() (s *SelectStmt) {
 		defer p.trace("selectStmt")()
 	}
 
-	s := &SelectStmt{}
+	s = &SelectStmt{}
 	s.pos = p.pos()
 
 	p.want(Select)
@@ -4496,7 +4498,7 @@ func (p *Parser) caseClause() (c *CaseClause) {
 		defer p.trace("caseClause")()
 	}
 
-	c := &CaseClause{}
+	c = &CaseClause{}
 	c.pos = p.pos()
 
 	switch p.Tok {
@@ -4524,7 +4526,7 @@ func (p *Parser) commClause() (c *CommClause) {
 		defer p.trace("commClause")()
 	}
 
-	c := &CommClause{}
+	c = &CommClause{}
 	c.pos = p.pos()
 
 	switch p.Tok {
@@ -4621,46 +4623,46 @@ func (p *Parser) stmtOrNil() (s Stmt) {
 		return p.ifStmt()
 
 	case Fallthrough:
-		s := &BranchStmt{}
-		s.pos = p.pos()
+		b := &BranchStmt{}
+		b.pos = p.pos()
 		p.Next()
-		s.Tok = Fallthrough
-		return s
+		b.Tok = Fallthrough
+		return b
 
 	case Break, Continue:
-		s := &BranchStmt{}
-		s.pos = p.pos()
-		s.Tok = p.Tok
+		b := &BranchStmt{}
+		b.pos = p.pos()
+		b.Tok = p.Tok
 		p.Next()
 		if p.Tok == NameType {
-			s.Label = p.name()
+			b.Label = p.name()
 		}
-		return s
+		return b
 
 	case Go, Defer:
 		return p.callStmt()
 
 	case Goto:
-		s := &BranchStmt{}
-		s.pos = p.pos()
-		s.Tok = Goto
+		b := &BranchStmt{}
+		b.pos = p.pos()
+		b.Tok = Goto
 		p.Next()
-		s.Label = p.name()
-		return s
+		b.Label = p.name()
+		return b
 
 	case Return:
-		s := &ReturnStmt{}
-		s.pos = p.pos()
+		r := &ReturnStmt{}
+		r.pos = p.pos()
 		p.Next()
 		if p.Tok != Semi && p.Tok != Rbrace {
-			s.Results = p.exprList()
+			r.Results = p.exprList()
 		}
-		return s
+		return r
 
 	case Semi:
-		s := &EmptyStmt{}
-		s.pos = p.pos()
-		return s
+		e := &EmptyStmt{}
+		e.pos = p.pos()
+		return e
 	}
 
 	return nil
@@ -4717,12 +4719,12 @@ func (p *Parser) name() (n *Name) {
 	// no tracing to avoid overly verbose output
 
 	if p.Tok == NameType {
-		n := NewName(p.pos(), p.Lit)
+		n = NewName(p.pos(), p.Lit)
 		p.Next()
 		return n
 	}
 
-	n := NewName(p.pos(), "_")
+	n = NewName(p.pos(), "_")
 	p.syntaxError("expected name")
 	p.advance()
 	return n
