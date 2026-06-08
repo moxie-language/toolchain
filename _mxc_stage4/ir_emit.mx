@@ -7136,7 +7136,9 @@ func typeCheckPkg(src []byte, name string) (*TCPackage, *syntax.File) {
 				scope.Insert(NewTCFunc(pkg, d.Name.Value, nil))
 			}
 		case *syntax.TypeDecl:
-			scope.Insert(NewTypeName(pkg, d.Name.Value, nil))
+			tn := NewTypeName(pkg, d.Name.Value, nil)
+			scope.Insert(tn)
+			NewNamed(tn, nil)
 		case *syntax.ConstDecl:
 			for _, n := range d.NameList {
 				scope.Insert(NewTCConst(pkg, n.Value, nil, nil))
@@ -7408,7 +7410,8 @@ func ScanGenericDecls(src []byte, name string) {
 				}
 			}
 		case *syntax.TypeDecl:
-			if scope.Lookup(d.Name.Value) == nil {
+			existing := scope.Lookup(d.Name.Value)
+			if existing == nil {
 				tn := NewTypeName(thePkg, d.Name.Value, nil)
 				named := NewNamed(tn, nil)
 				if d.Type != nil {
@@ -7418,6 +7421,15 @@ func ScanGenericDecls(src []byte, name string) {
 					}
 				}
 				scope.Insert(tn)
+			} else if tn, ok := existing.(*TypeName); ok {
+				if n, ok2 := tn.typ.(*Named); ok2 && n.underlying == nil {
+					if d.Type != nil {
+						under := resolveTypeExprWithSubst(d.Type, nil, scope)
+						if under != nil {
+							n.SetUnderlying(under)
+						}
+					}
+				}
 			}
 		case *syntax.ConstDecl:
 			for _, cn := range d.NameList {
