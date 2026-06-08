@@ -372,7 +372,7 @@ func (e *irEmitter) llvmStructType(t *TCStruct) (s string) {
 	if t == nil {
 		fn := ""
 		if e.curFunc != nil {
-			fn = e.curFunc.Name()
+			fn = e.curFunc.name
 		}
 		writeStr(2, "BUG: llvmStructType nil in " | fn | "\n")
 		return "{}"
@@ -3702,7 +3702,7 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			isStr := e.isStringLike(arg.SSAType())
 			_, isPtr := u.(*Pointer)
 			isMap := false
-			if _, mp := u.(*Map); mp { isMap = true }
+			if _, mp := u.(*TCMap); mp { isMap = true }
 			if st, ok := u.(*TCStruct); ok {
 				var baseAddr string
 				if uop, ok2 := arg.(*SSAUnOp); ok2 && uop.Op == OpMul {
@@ -5037,9 +5037,9 @@ func (e *irEmitter) emitSliceOp(s *SSASlice) {
 	if s.High != nil {
 		high = e.sliceIdxToIpt(s.High, ipt)
 	}
-	maxCap := oldCap
+	_ = oldCap
 	if s.Max != nil {
-		maxCap = e.sliceIdxToIpt(s.Max, ipt)
+		_ = e.sliceIdxToIpt(s.Max, ipt)
 	}
 	elemType := "i8"
 	if sl, ok := safeUnderlying(s.X.SSAType()).(*Slice); ok {
@@ -5293,7 +5293,6 @@ func (e *irEmitter) reflectTypeName(t Type) (s string) {
 func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 	var impls []ifaceImpl
 	hasType := map[string]bool{}
-	var memberKeys []string
 	for _, mname := range e.pkg.MemberKeys() {
 		m := e.pkg.Members[mname]
 		fn, ok := m.(*SSAFunction)
@@ -7025,7 +7024,6 @@ func irFtoa(f float64) (s string) {
 }
 
 func irParseInt64(s string) (n int64) {
-	var n int64
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c < '0' || c > '9' {
@@ -8059,7 +8057,7 @@ func tcResolveNameInline(e syntax.Expr, scope *Scope) (t Type) {
 					}
 				}
 				if n == -1 && constValMap != nil {
-					n = resolveArrayLenFromSrc(e.pos, constValMap)
+					n = resolveArrayLenFromSrc(e.Pos(), constValMap)
 				}
 			}
 			return NewArray(elem, n)
@@ -8530,24 +8528,17 @@ func tcResolveFuncInline(ft *syntax.FuncType, scope *Scope) (s *Signature) {
 		params = append(params, NewTCVar(nil, pname, typ))
 	}
 	var results []*TCVar
-	for ri, r := range ft.ResultList {
+	for _, r := range ft.ResultList {
 		typ := tcResolveNameInline(r.Type, scope)
 		if typ == nil {
-			rTypeName := "?"
-			if nm, ok := r.Type.(*syntax.Name); ok {
-				rTypeName = nm.Value
+			_ = "?"
+			if _, ok := r.Type.(*syntax.Name); ok {
 			} else if op, ok := r.Type.(*syntax.Operation); ok && op.Op == token.Mul && op.Y == nil {
-				if nm2, ok2 := op.X.(*syntax.Name); ok2 {
-					rTypeName = "*" | nm2.Value
-				} else if sel, ok2 := op.X.(*syntax.SelectorExpr); ok2 {
-					if pn, ok3 := sel.X.(*syntax.Name); ok3 {
-						rTypeName = "*" | pn.Value | "." | sel.Sel.Value
-					}
+				if _, ok2 := op.X.(*syntax.Name); ok2 {
+				} else if _, ok2 := op.X.(*syntax.SelectorExpr); ok2 {
 				}
-			} else if sel, ok := r.Type.(*syntax.SelectorExpr); ok {
-				if pn, ok2 := sel.X.(*syntax.Name); ok2 {
-					rTypeName = pn.Value | "." | sel.Sel.Value
-				}
+			} else if _, ok := r.Type.(*syntax.SelectorExpr); ok {
+				_ = ok
 			}
 		}
 		rname := ""
@@ -8926,8 +8917,10 @@ func (e *irEmitter) emitScopeRelocateOnStore(s *SSAStore, val, valType string) {
 		return
 	}
 	addrScope := int32(0)
-	if aid, ok := e.instrScope[s.Addr]; ok {
-		addrScope = aid
+	if ai, ok2 := s.Addr.(SSAInstruction); ok2 {
+		if aid, ok := e.instrScope[ai]; ok {
+			addrScope = aid
+		}
 	}
 	if addrScope >= blk.ScopeID {
 		return

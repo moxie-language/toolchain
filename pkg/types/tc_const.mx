@@ -1,0 +1,801 @@
+package types
+
+import (
+	"git.smesh.lol/moxie/pkg/syntax"
+	"git.smesh.lol/moxie/pkg/token"
+)
+
+func (c *Checker) checkConstGroup(decls []*syntax.ConstDecl) {
+	var prevType syntax.Expr
+	var prevValues syntax.Expr
+	for i, d := range decls {
+		typ := d.Type
+		vals := d.Values
+		if vals == nil {
+			typ = prevType
+			vals = prevValues
+		} else {
+			prevType = typ
+			prevValues = vals
+		}
+		c.checkConstDeclAt(d, typ, vals, int64(i))
+	}
+}
+
+func (c *Checker) checkConstDeclAt(d *syntax.ConstDecl, typExpr syntax.Expr, valExpr syntax.Expr, iotaVal int64) {
+	var typ syntax.Type
+	if typExpr != nil {
+		typ = c.resolveTypeExpr(typExpr)
+	}
+
+	var vals []ConstVal
+	if valExpr != nil {
+		vals = c.evalConstExprList(valExpr, iotaVal)
+	}
+
+	// When no explicit type and the value is a type conversion (CallExpr
+	// with a type name as Fun), infer the type from the conversion target.
+	// e.g. const EOF = errors.Const("EOF") -> type is errors.Const
+	var inferredTypes []syntax.Type
+	if typ == nil && valExpr != nil {
+		inferredTypes = c.inferConstTypeList(valExpr)
+	}
+
+	for i, name := range d.NameList {
+		if name.Value == "_" {
+			continue
+		}
+		obj, ok := c.pkg.scope.Lookup(name.Value).(*TCConst)
+		if !ok {
+			continue
+		}
+		var cv ConstVal
+		if i < len(vals) {
+			cv = vals[i]
+		}
+		obj.val = cv
+		if typ != nil {
+			obj.typ = typ
+		} else if i < len(inferredTypes) && inferredTypes[i] != nil {
+			obj.typ = inferredTypes[i]
+		} else if cv != nil {
+			obj.typ = UntypedTypeOfCV(cv)
+		}
+		if c.info != nil {
+			c.info.Defs[name] = obj
+		}
+	}
+}
+
+func (c *Checker) inferConstTypeList(e syntax.Expr) (ts []syntax.Type) {
+	if l, ok := e.(*syntax.ListExpr); ok {
+		var out []syntax.Type
+		for _, el := range l.ElemList {
+			out = append(out, c.inferConstType(el))
+		}
+		return out
+	}
+	return []syntax.Type{c.inferConstType(e)}
+}
+
+func (c *Checker) inferConstType(e syntax.Expr) (t syntax.Type) {
+	if e == nil {
+		return nil
+	}
+	ce, ok := e.(*syntax.CallExpr)
+	if !ok {
+		return nil
+	}
+	if len(ce.ArgList) != 1 {
+		return nil
+	}
+	return c.resolveTypeExpr(ce.Fun)
+}
+
+func (c *Checker) evalConstExprList(e syntax.Expr, iotaVal int64) (cs []ConstVal) {
+	if l, ok := e.(*syntax.ListExpr); ok {
+		var out []ConstVal
+		for _, el := range l.ElemList {
+			v := c.evalConst(el, iotaVal)
+			out = append(out, v)
+		}
+		return out
+	}
+	v := c.evalConst(e, iotaVal)
+	return []ConstVal{v}
+}
+
+func (c *Checker) evalConst(e syntax.Expr, iotaVal int64) (cv ConstVal) {
+	if e == nil {
+		return nil
+	}
+	switch e := e.(type) {
+	case *syntax.BasicLit:
+		return EvalBasicLitLocal(e)
+	case *syntax.Name:
+		if e.Value == "iota" {
+			return constInt{iotaVal}
+		}
+		var obj Object
+		if c.localScope != nil {
+			_, obj = c.localScope.LookupParent(e.Value)
+		}
+		if obj == nil {
+			_, obj = c.lookup(e.Value, c.pkg.scope)
+		}
+		if obj == nil {
+			writeStr(2, "  CONST-LOOKUP-FAIL name=" | e.Value | " pkg=" | c.pkg.path | "\n")
+			return nil
+		}
+		if k, ok := obj.(*TCConst); ok {
+			if k.val == nil {
+				writeStr(2, "  CONST-REF-NIL name=" | e.Value | " pkg=" | c.pkg.path | "\n")
+			}
+			return k.val
+		}
+		return nil
+	case *syntax.SelectorExpr:
+		if pkgName, ok := e.X.(*syntax.Name); ok {
+			if imp := c.pkg.scope.Lookup(pkgName.Value); imp != nil {
+				if pn, ok2 := imp.(*PkgName); ok2 && pn.Imported() != nil {
+					if obj := pn.Imported().Scope().Lookup(e.Sel.Value); obj != nil {
+						if k, ok3 := obj.(*TCConst); ok3 {
+							return k.val
+						}
+					}
+				}
+			}
+		}
+		return nil
+	case *syntax.Operation:
+		return c.evalConstOp(e, iotaVal)
+	case *syntax.ParenExpr:
+		return c.evalConst(e.X, iotaVal)
+	case *syntax.CallExpr:
+		if id, ok := e.Fun.(*syntax.Name); ok && id.Value == "len" && len(e.ArgList) == 1 {
+			if lit, ok := e.ArgList[0].(*syntax.BasicLit); ok && lit.Kind == token.StringLit {
+				lv := EvalBasicLitLocal(lit)
+				if cs, ok := lv.(constStr); ok {
+					return constInt{int64(len(cs.s))}
+				}
+			}
+			inner := c.evalConst(e.ArgList[0], iotaVal)
+			if cs, ok := inner.(constStr); ok {
+				return constInt{int64(len(cs.s))}
+			}
+		}
+		if sel, ok := e.Fun.(*syntax.SelectorExpr); ok {
+			if pkg, ok := sel.X.(*syntax.Name); ok && pkg.Value == "unsafe" {
+				switch sel.Sel.Value {
+				case "Sizeof", "Alignof", "Offsetof":
+					return constInt{8}
+				}
+			}
+		}
+		if len(e.ArgList) != 1 {
+			return nil
+		}
+		inner := c.evalConst(e.ArgList[0], iotaVal)
+		if inner == nil {
+			return nil
+		}
+		targetType := c.resolveTypeExpr(e.Fun)
+		if targetType == nil {
+			funName := "?"
+			if id, ok2 := e.Fun.(*syntax.Name); ok2 {
+				funName = id.Value
+			}
+			writeStr(2, "  CONST-CONV-FAIL fun=" | funName | " pkg=" | c.pkg.path | "\n")
+			return nil
+		}
+		return convertConstLocal(inner, targetType)
+	}
+	return nil
+}
+
+func EvalBasicLitLocal(e *syntax.BasicLit) (c ConstVal) {
+	switch e.Kind {
+	case token.IntLit:
+		n := ParseIntLocal(e.Value)
+		return constInt{n}
+	case token.FloatLit:
+		f := parseFloatLocal(e.Value)
+		return constFloat{v: f, lit: e.Value}
+	case token.StringLit:
+		s := interpStringLocal(e.Value)
+		return constStr{s}
+	case token.RuneLit:
+		s := interpStringLocal(e.Value)
+		if len(s) > 0 {
+			return constInt{int64(decodeFirstRune(s))}
+		}
+		return constInt{0}
+	}
+	return nil
+}
+
+func ParseIntLocal(s string) (n int64) {
+	if len(s) == 0 {
+		return 0
+	}
+	neg := false
+	i := 0
+	if s[0] == '-' {
+		neg = true
+		i = 1
+	} else if s[0] == '+' {
+		i = 1
+	}
+	base := int64(10)
+	if i < len(s)-1 && s[i] == '0' {
+		c := s[i+1]
+		if c == 'x' || c == 'X' {
+			base = 16
+			i += 2
+		} else if c == 'o' || c == 'O' {
+			base = 8
+			i += 2
+		} else if c == 'b' || c == 'B' {
+			base = 2
+			i += 2
+		} else if c >= '0' && c <= '7' {
+			base = 8
+			i += 1
+		}
+	}
+	var n int64
+	for ; i < len(s); i++ {
+		ch := s[i]
+		if ch == '_' {
+			continue
+		}
+		var d int64
+		if ch >= '0' && ch <= '9' {
+			d = int64(ch - '0')
+		} else if ch >= 'a' && ch <= 'f' {
+			d = int64(ch-'a') + 10
+		} else if ch >= 'A' && ch <= 'F' {
+			d = int64(ch-'A') + 10
+		} else {
+			break
+		}
+		n = n*base + d
+	}
+	if neg {
+		return -n
+	}
+	return n
+}
+
+func parseFloatLocal(s string) (f float64) {
+	if len(s) == 0 {
+		return 0.0
+	}
+	neg := false
+	i := 0
+	if s[0] == '-' {
+		neg = true
+		i = 1
+	} else if s[0] == '+' {
+		i = 1
+	}
+	var intPart float64
+	for ; i < len(s); i++ {
+		ch := s[i]
+		if ch == '_' {
+			continue
+		}
+		if ch < '0' || ch > '9' {
+			break
+		}
+		intPart = intPart*10.0 + float64(ch-'0')
+	}
+	var fracPart float64
+	if i < len(s) && s[i] == '.' {
+		i++
+		divisor := 10.0
+		for ; i < len(s); i++ {
+			ch := s[i]
+			if ch == '_' {
+				continue
+			}
+			if ch < '0' || ch > '9' {
+				break
+			}
+			fracPart = fracPart + float64(ch-'0')/divisor
+			divisor = divisor * 10.0
+		}
+	}
+	result := intPart + fracPart
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		expNeg := false
+		if i < len(s) && s[i] == '-' {
+			expNeg = true
+			i++
+		} else if i < len(s) && s[i] == '+' {
+			i++
+		}
+		var exp int32
+		for ; i < len(s); i++ {
+			ch := s[i]
+			if ch < '0' || ch > '9' {
+				break
+			}
+			exp = exp*10 + int32(ch-'0')
+		}
+		mul := 1.0
+		for j := 0; j < exp; j++ {
+			mul = mul * 10.0
+		}
+		if expNeg {
+			result = result / mul
+		} else {
+			result = result * mul
+		}
+	}
+	if neg {
+		return -result
+	}
+	return result
+}
+
+func interpStringLocal(s string) (sv string) {
+	if len(s) < 2 {
+		return s
+	}
+	if s[0] == '`' {
+		return s[1 : len(s)-1]
+	}
+	quote := s[0]
+	if quote != '"' && quote != '\'' {
+		return s
+	}
+	s = s[1 : len(s)-1]
+	hasEsc := false
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' {
+			hasEsc = true
+			break
+		}
+	}
+	if !hasEsc {
+		return s
+	}
+	var buf []byte
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' {
+			buf = append(buf, s[i])
+			continue
+		}
+		i++
+		if i >= len(s) {
+			break
+		}
+		switch s[i] {
+		case 'n':
+			buf = append(buf, '\n')
+		case 't':
+			buf = append(buf, '\t')
+		case 'r':
+			buf = append(buf, '\r')
+		case '\\':
+			buf = append(buf, '\\')
+		case '\'':
+			buf = append(buf, '\'')
+		case '"':
+			buf = append(buf, '"')
+		case '0':
+			buf = append(buf, 0)
+		case 'a':
+			buf = append(buf, '\a')
+		case 'b':
+			buf = append(buf, '\b')
+		case 'f':
+			buf = append(buf, '\f')
+		case 'v':
+			buf = append(buf, '\v')
+		case 'x':
+			if i+2 < len(s) {
+				h := hexDigit(s[i+1])*16 + hexDigit(s[i+2])
+				buf = append(buf, byte(h))
+				i += 2
+			}
+		case 'u':
+			if i+4 < len(s) {
+				r := rune(hexDigit(s[i+1]))*4096 + rune(hexDigit(s[i+2]))*256 + rune(hexDigit(s[i+3]))*16 + rune(hexDigit(s[i+4]))
+				buf = appendRuneUTF8(buf, r)
+				i += 4
+			}
+		case 'U':
+			if i+8 < len(s) {
+				var r rune
+				for j := 1; j <= 8; j++ {
+					r = r*16 + rune(hexDigit(s[i+j]))
+				}
+				buf = appendRuneUTF8(buf, r)
+				i += 8
+			}
+		default:
+			if s[i] >= '0' && s[i] <= '7' {
+				v := int32(s[i] - '0')
+				if i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '7' {
+					v = v*8 + int32(s[i+1]-'0')
+					i++
+					if i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '7' {
+						v = v*8 + int32(s[i+1]-'0')
+						i++
+					}
+				}
+				buf = append(buf, byte(v))
+			} else {
+				buf = append(buf, s[i])
+			}
+		}
+	}
+	return string(buf)
+}
+
+func hexDigit(c byte) (n int32) {
+	if c >= '0' && c <= '9' {
+		return int32(c - '0')
+	}
+	if c >= 'a' && c <= 'f' {
+		return int32(c-'a') + 10
+	}
+	if c >= 'A' && c <= 'F' {
+		return int32(c-'A') + 10
+	}
+	return 0
+}
+
+func appendRuneUTF8(buf []byte, r rune) (buf2 []byte) {
+	if r < 0x80 {
+		return append(buf, byte(r))
+	}
+	if r < 0x800 {
+		buf = append(buf, byte(0xC0|(r>>6)))
+		return append(buf, byte(0x80|(r&0x3F)))
+	}
+	if r < 0x10000 {
+		buf = append(buf, byte(0xE0|(r>>12)))
+		buf = append(buf, byte(0x80|((r>>6)&0x3F)))
+		return append(buf, byte(0x80|(r&0x3F)))
+	}
+	buf = append(buf, byte(0xF0|(r>>18)))
+	buf = append(buf, byte(0x80|((r>>12)&0x3F)))
+	buf = append(buf, byte(0x80|((r>>6)&0x3F)))
+	return append(buf, byte(0x80|(r&0x3F)))
+}
+
+func (c *Checker) evalConstOp(e *syntax.Operation, iotaVal int64) (cv ConstVal) {
+	if e.Y == nil {
+		x := c.evalConst(e.X, iotaVal)
+		if x == nil {
+			writeStr(2, "  CONSTOP-UNARY-NIL-X pkg=" | c.pkg.path | "\n")
+			return nil
+		}
+		r := evalUnaryLocal(e.Op, x)
+		if r == nil {
+			writeStr(2, "  CONSTOP-UNARY-NIL-R pkg=" | c.pkg.path | " x=" | x.String() | "\n")
+		}
+		return r
+	}
+	x := c.evalConst(e.X, iotaVal)
+	y := c.evalConst(e.Y, iotaVal)
+	if x == nil || y == nil {
+		return nil
+	}
+	return evalBinaryLocal(e.Op, x, y)
+}
+
+func evalUnaryLocal(op token.Operator, x ConstVal) (c ConstVal) {
+	switch op {
+	case token.Add:
+		return x
+	case token.Sub:
+		if ci, ok := x.(constInt); ok {
+			return constInt{-ci.v}
+		}
+		if cf, ok := x.(constFloat); ok {
+			neg := ""
+			if cf.lit != "" {
+				neg = "-" + cf.lit
+			}
+			return constFloat{v: -cf.v, lit: neg}
+		}
+	case token.Xor:
+		if ci, ok := x.(constInt); ok {
+			return constInt{^ci.v}
+		}
+	case token.Not:
+		if cb, ok := x.(constBool); ok {
+			return constBool{!cb.v}
+		}
+	}
+	return nil
+}
+
+func evalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
+	switch op {
+	case token.Add:
+		if xi, ok := x.(constInt); ok {
+			return constInt{xi.v + cvInt(y)}
+		}
+		if xf, ok := x.(constFloat); ok {
+			return constFloat{v: xf.v + cvFloat(y)}
+		}
+		if xs, ok := x.(constStr); ok {
+			return constStr{xs.s + cvStr(y)}
+		}
+	case token.Sub:
+		if xi, ok := x.(constInt); ok {
+			return constInt{xi.v - cvInt(y)}
+		}
+		if xf, ok := x.(constFloat); ok {
+			return constFloat{v: xf.v - cvFloat(y)}
+		}
+	case token.Mul:
+		if xi, ok := x.(constInt); ok {
+			return constInt{xi.v * cvInt(y)}
+		}
+		if xf, ok := x.(constFloat); ok {
+			return constFloat{v: xf.v * cvFloat(y)}
+		}
+	case token.Div:
+		if xi, ok := x.(constInt); ok {
+			d := cvInt(y)
+			if d == 0 {
+				return constInt{0}
+			}
+			return constInt{xi.v / d}
+		}
+		if xf, ok := x.(constFloat); ok {
+			d := cvFloat(y)
+			if d == 0.0 {
+				return constFloat{v: 0.0}
+			}
+			return constFloat{v: xf.v / d}
+		}
+	case token.Rem:
+		if xi, ok := x.(constInt); ok {
+			d := cvInt(y)
+			if d == 0 {
+				return constInt{0}
+			}
+			return constInt{xi.v % d}
+		}
+	case token.And:
+		if xi, ok := x.(constInt); ok {
+			return constInt{xi.v & cvInt(y)}
+		}
+	case token.Or:
+		if xi, ok := x.(constInt); ok {
+			return constInt{xi.v | cvInt(y)}
+		}
+		if xs, ok := x.(constStr); ok {
+			return constStr{xs.s + cvStr(y)}
+		}
+	case token.Xor:
+		if xi, ok := x.(constInt); ok {
+			return constInt{xi.v ^ cvInt(y)}
+		}
+	case token.Shl:
+		if xi, ok := x.(constInt); ok {
+			shift := uint32(cvInt(y))
+			return constInt{xi.v << shift}
+		}
+	case token.Shr:
+		if xi, ok := x.(constInt); ok {
+			shift := uint32(cvInt(y))
+			return constInt{xi.v >> shift}
+		}
+	case token.AndNot:
+		if xi, ok := x.(constInt); ok {
+			return constInt{xi.v &^ cvInt(y)}
+		}
+	case token.Eql:
+		return constBool{constEqual(x, y)}
+	case token.Neq:
+		return constBool{!constEqual(x, y)}
+	case token.Lss:
+		return constBool{constLess(x, y)}
+	case token.Leq:
+		return constBool{constLess(x, y) || constEqual(x, y)}
+	case token.Gtr:
+		return constBool{constLess(y, x)}
+	case token.Geq:
+		return constBool{constLess(y, x) || constEqual(x, y)}
+	case token.OrOr:
+		xb, xok := x.(constBool)
+		yb, yok := y.(constBool)
+		if xok && yok {
+			return constBool{xb.v || yb.v}
+		}
+	case token.AndAnd:
+		xb, xok := x.(constBool)
+		yb, yok := y.(constBool)
+		if xok && yok {
+			return constBool{xb.v && yb.v}
+		}
+	}
+	return nil
+}
+
+func constEqual(x ConstVal, y ConstVal) (ok bool) {
+	if xi, ok := x.(constInt); ok {
+		return xi.v == cvInt(y)
+	}
+	if xf, ok := x.(constFloat); ok {
+		return xf.v == cvFloat(y)
+	}
+	if xs, ok := x.(constStr); ok {
+		return xs.s == cvStr(y)
+	}
+	if xb, ok := x.(constBool); ok {
+		if yb, ok := y.(constBool); ok {
+			return xb.v == yb.v
+		}
+	}
+	return false
+}
+
+func constLess(x ConstVal, y ConstVal) (ok bool) {
+	if xi, ok := x.(constInt); ok {
+		return xi.v < cvInt(y)
+	}
+	if xf, ok := x.(constFloat); ok {
+		return xf.v < cvFloat(y)
+	}
+	if xs, ok := x.(constStr); ok {
+		return xs.s < cvStr(y)
+	}
+	return false
+}
+
+func convertConstLocal(v ConstVal, target syntax.Type) (c ConstVal) {
+	b, ok := SafeUnderlying(target).(*Basic)
+	if !ok {
+		return v
+	}
+	switch {
+	case b.info&IsInteger != 0:
+		iv := cvInt(v)
+		return constInt{iv}
+	case b.info&IsFloat != 0:
+		fv := cvFloat(v)
+		if cf, ok := v.(constFloat); ok {
+			return constFloat{v: fv, lit: cf.lit}
+		}
+		return constFloat{v: fv}
+	case b.info&IsString != 0:
+		if cvKind(v) == 3 {
+			n := cvInt(v)
+			return constStr{runeToStr(rune(n))}
+		}
+		return v
+	}
+	return v
+}
+
+func UntypedTypeOfCV(v ConstVal) (t syntax.Type) {
+	switch cvKind(v) {
+	case 1:
+		return Typ[UntypedBool]
+	case 3:
+		return Typ[UntypedInt]
+	case 4:
+		return Typ[UntypedFloat]
+	case 2:
+		return Typ[UntypedString]
+	}
+	return nil
+}
+
+func cvKind(val ConstVal) (n int32) {
+	switch val.(type) {
+	case constBool:
+		return 1
+	case constStr:
+		return 2
+	case constInt:
+		return 3
+	case constFloat:
+		return 4
+	case constNil:
+		return 0
+	}
+	return 0
+}
+
+func constInt64CV(v ConstVal) (int64, bool) {
+	if v == nil || cvKind(v) != 3 {
+		return 0, false
+	}
+	if ci, ok := v.(constInt); ok {
+		return ci.v, true
+	}
+	return 0, false
+}
+
+func (c *Checker) IsConstExpr(e syntax.Expr) (ok bool) {
+	return c.evalConst(e, 0) != nil
+}
+
+func (c *Checker) evalArrayLen(e syntax.Expr) (n int64) {
+	v := c.evalConst(e, 0)
+	if v == nil {
+		return 0
+	}
+	n, _ := constInt64CV(v)
+	return n
+}
+
+func cvInt(v ConstVal) (n int64) {
+	if ci, ok := v.(constInt); ok {
+		return ci.v
+	}
+	if cf, ok := v.(constFloat); ok {
+		return int64(cf.v)
+	}
+	return 0
+}
+
+func cvFloat(v ConstVal) (f float64) {
+	if cf, ok := v.(constFloat); ok {
+		return cf.v
+	}
+	if ci, ok := v.(constInt); ok {
+		return float64(ci.v)
+	}
+	return 0
+}
+
+func cvStr(v ConstVal) (s string) {
+	if cs, ok := v.(constStr); ok {
+		return cs.s
+	}
+	return ""
+}
+
+func decodeFirstRune(s string) (n int32) {
+	b := s[0]
+	if b < 0x80 {
+		return int32(b)
+	}
+	if b < 0xC0 {
+		return int32(b)
+	}
+	if b < 0xE0 && len(s) >= 2 {
+		return int32(b&0x1F)<<6 | int32(s[1]&0x3F)
+	}
+	if b < 0xF0 && len(s) >= 3 {
+		return int32(b&0x0F)<<12 | int32(s[1]&0x3F)<<6 | int32(s[2]&0x3F)
+	}
+	if len(s) >= 4 {
+		return int32(b&0x07)<<18 | int32(s[1]&0x3F)<<12 | int32(s[2]&0x3F)<<6 | int32(s[3]&0x3F)
+	}
+	return int32(b)
+}
+
+func runeToStr(r rune) (s string) {
+	if r < 0 || r > 0x10FFFF {
+		r = 0xFFFD
+	}
+	var out []byte
+	if r <= 0x7F {
+		out = append(out, byte(r))
+	} else if r <= 0x7FF {
+		out = append(out, byte(0xC0|(r>>6)), byte(0x80|(r&0x3F)))
+	} else if r <= 0xFFFF {
+		out = append(out, byte(0xE0|(r>>12)), byte(0x80|((r>>6)&0x3F)), byte(0x80|(r&0x3F)))
+	} else {
+		out = append(out, byte(0xF0|(r>>18)), byte(0x80|((r>>12)&0x3F)), byte(0x80|((r>>6)&0x3F)), byte(0x80|(r&0x3F)))
+	}
+	return string(out)
+}
+
+func writeStr(fd int32, s string) {
+	// debug logging to stderr - uses println as standalone substitute
+	println(s)
+}

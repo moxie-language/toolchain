@@ -1,0 +1,63 @@
+package types
+
+type Scope struct {
+	parent *Scope
+	elems  map[string]Object
+}
+
+func NewScope(parent *Scope) (s *Scope) {
+	return &Scope{parent: parent, elems: map[string]Object{}}
+}
+
+func (s *Scope) Parent() (sv *Scope) { return s.parent }
+func (s *Scope) Len() (n int32) { return len(s.elems) }
+
+func (s *Scope) Release() {
+	for k := range s.elems {
+		delete(s.elems, k)
+	}
+	s.elems = nil
+	s.parent = nil
+}
+
+func (s *Scope) Lookup(name string) (o Object) {
+	return s.elems[name]
+}
+
+// LookupParent looks up name starting at s, walking the parent chain.
+// Returns the scope where it was found and the object, or nil, nil.
+func (s *Scope) LookupParent(name string) (*Scope, Object) {
+	for sc := s; sc != nil; sc = sc.parent {
+		if obj, ok := sc.elems[name]; ok {
+			return sc, obj
+		}
+	}
+	return nil, nil
+}
+
+// Insert inserts obj into s. Returns an existing object with the same name
+// if there is one (caller must report the error).
+func (s *Scope) Insert(obj Object) (o Object) {
+	name := obj.Name()
+	if alt, ok := s.elems[name]; ok {
+		return alt
+	}
+	// Copy name to avoid aliasing with parser's internal buffer.
+	// Moxie's string=[]byte means map keys can be mutated through shared backing.
+	key := string(append([]byte(nil), name...))
+	s.elems[key] = obj
+	return nil
+}
+
+func (s *Scope) Names() (ss []string) {
+	names := []string{:0:len(s.elems)}
+	for n := range s.elems {
+		names = append(names, n)
+	}
+	for i := 1; i < len(names); i++ {
+		for j := i; j > 0 && names[j] < names[j-1]; j-- {
+			names[j], names[j-1] = names[j-1], names[j]
+		}
+	}
+	return names
+}

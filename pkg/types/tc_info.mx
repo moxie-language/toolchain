@@ -1,0 +1,150 @@
+package types
+
+import (
+	"git.smesh.lol/moxie/pkg/syntax"
+)
+
+// TCTypeAndValue records the type and optional constant value for an expression.
+type TCTypeAndValue struct {
+	Type  syntax.Type
+	Value ConstVal // nil for non-constant expressions
+	mode  exprMode
+}
+
+type exprMode uint8
+
+const (
+	modeInvalid exprMode = iota
+	modeVoid             // no value (statement context)
+	modeValue            // an addressable or non-addressable value
+	modeVar              // addressable variable
+	modeConst            // constant expression
+	modeType             // a type expression
+	modeBuiltin          // a builtin identifier
+	modePkg              // a package name
+	modeNil              // the predeclared nil
+)
+
+func (tv TCTypeAndValue) IsValue() (ok bool) { return tv.mode == modeValue || tv.mode == modeVar || tv.mode == modeConst || tv.mode == modeNil }
+func (tv TCTypeAndValue) IsType() (ok bool) { return tv.mode == modeType }
+func (tv TCTypeAndValue) IsBuiltin() (ok bool) { return tv.mode == modeBuiltin }
+func (tv TCTypeAndValue) IsConst() (ok bool) { return tv.mode == modeConst }
+func (tv TCTypeAndValue) Addressable() (ok bool) { return tv.mode == modeVar }
+
+// Info holds the result of type-checking a set of Files.
+// Consumers access type info for each expression and identifier.
+type Info struct {
+	// Types maps each expression to its type and value.
+	// For type expressions, TCTypeAndValue.IsType() is true.
+	// For constants, TCTypeAndValue.Value is non-nil.
+	Types map[syntax.Expr]TCTypeAndValue
+
+	// Defs maps each identifier that declares something to the object it declares.
+	// nil objects represent anonymous declarations (blank _ idents).
+	Defs map[*syntax.Name]Object
+
+	// Uses maps each identifier that is used (not declared) to the object it denotes.
+	Uses map[*syntax.Name]Object
+
+	// Implicits maps nodes to the object they implicitly declare.
+	// For imports: ImportDecl -> *PkgName
+	// For type switches: the guarded var in each case clause
+	Implicits map[syntax.Node]Object
+
+	// Scopes maps AST nodes to the scope they open.
+	// File -> file scope, FuncDecl/FuncLit -> function scope, etc.
+	Scopes map[syntax.Node]*Scope
+
+	// Selections maps selector expressions X.f to the selection.
+	Selections map[*syntax.SelectorExpr]*Selection
+}
+
+// Selection describes a field or method selection X.f.
+type Selection struct {
+	kind  SelectionKind
+	recv  syntax.Type   // type of X
+	obj   Object // selected field or method
+	index []int32  // path of field indices (for embedded fields)
+	indir bool   // true if recv contains a pointer indirection
+}
+
+type SelectionKind int32
+
+const (
+	FieldVal SelectionKind = iota
+	MethodVal
+	MethodExpr
+)
+
+func (s *Selection) Kind() (sv SelectionKind) { return s.kind }
+func (s *Selection) Recv() (t syntax.Type) { return s.recv }
+func (s *Selection) Obj() (o Object) { return s.obj }
+func (s *Selection) Index() (ss []int32) { return s.index }
+func (s *Selection) Indirect() (ok bool) { return s.indir }
+func (s *Selection) Type() (t syntax.Type) {
+	switch s.kind {
+	case FieldVal:
+		return s.obj.Type()
+	case MethodVal:
+		sig := s.obj.(*TCFunc).Signature()
+		// bound method: drop the receiver parameter
+		return NewSignature(nil, sig.params, sig.results, sig.variadic)
+	case MethodExpr:
+		// unbound: receiver becomes first parameter
+		return s.obj.(*TCFunc).Signature()
+	}
+	return nil
+}
+
+func newInfo() (i *Info) {
+	return &Info{
+		Types:      map[syntax.Expr]TCTypeAndValue{},
+		Defs:       map[*syntax.Name]Object{},
+		Uses:       map[*syntax.Name]Object{},
+		Implicits:  map[syntax.Node]Object{},
+		Scopes:     map[syntax.Node]*Scope{},
+		Selections: map[*syntax.SelectorExpr]*Selection{},
+	}
+}
+
+func (info *Info) Release() {
+	for k := range info.Types {
+		delete(info.Types, k)
+	}
+	info.Types = nil
+	for k := range info.Defs {
+		delete(info.Defs, k)
+	}
+	info.Defs = nil
+	for k := range info.Uses {
+		delete(info.Uses, k)
+	}
+	info.Uses = nil
+	for k := range info.Implicits {
+		delete(info.Implicits, k)
+	}
+	info.Implicits = nil
+	for k := range info.Scopes {
+		delete(info.Scopes, k)
+	}
+	info.Scopes = nil
+	for k := range info.Selections {
+		delete(info.Selections, k)
+	}
+	info.Selections = nil
+}
+
+func (info *Info) TypeOf(e syntax.Expr) (t syntax.Type) {
+	if tv, ok := info.Types[e]; ok {
+		return tv.Type
+	}
+	return nil
+}
+
+// ObjectOf returns the object denoted by identifier id, or nil.
+func (info *Info) ObjectOf(id *syntax.Name) (o Object) {
+	if obj, ok := info.Defs[id]; ok {
+		return obj
+	}
+	return info.Uses[id]
+}
