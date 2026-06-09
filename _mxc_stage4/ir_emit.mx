@@ -766,12 +766,8 @@ func (e *irEmitter) emit() (s string) {
 	for _, member := range e.pkgMembers() {
 		switch m := member.(type) {
 		case *SSAFunction:
-			writeStr(2, "  emit: " | m.name | " buflen=")
-			println(len(e.buf))
 			checkUseAfterFree(m)
 			e.emitFunction(m)
-			writeStr(2, "  after emit: buflen=")
-			println(len(e.buf))
 			e.emitAnonFuncs(m)
 			m.Blocks = nil
 			m.Locals = nil
@@ -792,38 +788,6 @@ func (e *irEmitter) emit() (s string) {
 		e.w("\"\n")
 	}
 
-	var tidKeys []string
-	for name := range e.typeIDs {
-		tidKeys = append(tidKeys, name)
-	}
-	for i := 1; i < len(tidKeys); i++ {
-		for j := i; j > 0 && tidKeys[j] < tidKeys[j-1]; j-- {
-			tidKeys[j], tidKeys[j-1] = tidKeys[j-1], tidKeys[j]
-		}
-	}
-	for _, name := range tidKeys {
-		if hasPrefix(name, "reflect/types.type:") {
-			quoted := "\"" | name | "\""
-			if e.extTypeIDs != nil {
-				if _, dup := e.extTypeIDs[quoted]; dup {
-					continue
-				}
-			}
-			e.w("@\"")
-			e.w(name)
-			e.w("\" = linkonce_odr global i8 0\n")
-		} else {
-			if lIndexByte(name, '/') >= 0 {
-				e.w("@\"")
-				e.w(name)
-				e.w("\" = private constant i32 0\n")
-			} else {
-				e.w("@")
-				e.w(name)
-				e.w(" = private constant i32 0\n")
-			}
-		}
-	}
 
 	if len(e.extDecls) > 0 {
 		e.w("\n")
@@ -869,13 +833,6 @@ func (e *irEmitter) emit() (s string) {
 		}
 	}
 
-	if len(e.extTypeIDs) > 0 {
-		e.w("\n")
-		for _, tid := range sortedKeys(e.extTypeIDs) {
-			e.w("@") ; e.w(tid) ; e.w(" = linkonce_odr global i8 0\n")
-		}
-	}
-
 	return string(e.buf)
 }
 
@@ -906,11 +863,8 @@ func (e *irEmitter) releaseAfterEmit() {
 }
 
 func (e *irEmitter) pkgMembers() (ss []SSAMember) {
-	writeStr(2, "  pkgMembers: len=")
-	println(len(e.pkg.Members))
 	var members []SSAMember
-	for k, m := range e.pkg.Members {
-		writeStr(2, "    member: " | k | "\n")
+	for _, m := range e.pkg.Members {
 		if m != nil {
 			members = append(members, m)
 		}
@@ -4603,7 +4557,7 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 				e.w("  store ") ; e.w(srcType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
 				e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 			}
-			typeid := e.typeIDGlobal(c.X.SSAType())
+			typeid := e.typeIDHash(c.X.SSAType())
 			t1 := e.nextReg2("cv")
 			e.w("  ") ; e.w(t1) ; e.w(" = insertvalue {ptr, ptr} undef, ptr ") ; e.w(typeid) ; e.w(", 0\n")
 			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue {ptr, ptr} ") ; e.w(t1) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
@@ -4696,7 +4650,7 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 	}
 	if op == "ptrtoint" && e.intBits(dstType) == 0 {
 		if dstType == e.ifaceType() {
-			typeid := e.typeIDGlobal(c.X.SSAType())
+			typeid := e.typeIDHash(c.X.SSAType())
 			t1 := e.nextReg2("cv")
 			e.w("  ") ; e.w(t1) ; e.w(" = insertvalue {ptr, ptr} undef, ptr ") ; e.w(typeid) ; e.w(", 0\n")
 			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue {ptr, ptr} ") ; e.w(t1) ; e.w(", ptr ") ; e.w(val) ; e.w(", 1\n")
@@ -5443,13 +5397,22 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 		e.scopeTrackAlloc(valPtr)
 	}
-	typeid := e.typeIDGlobal(m.X.SSAType())
+	typeid := e.typeIDHash(m.X.SSAType())
 	t1 := e.nextReg2("mi")
 	e.w("  ") ; e.w(t1) ; e.w(" = insertvalue {ptr, ptr} undef, ptr ") ; e.w(typeid) ; e.w(", 0\n")
 	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue {ptr, ptr} ") ; e.w(t1) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
 }
 
-func (e *irEmitter) typeIDGlobal(t Type) (s string) {
+func fnv1a64(s string) (h uint64) {
+	h = 14695981039346656037
+	for i := 0; i < len(s); i++ {
+		h = h ^ uint64(s[i])
+		h = h * 1099511628211
+	}
+	return h
+}
+
+func (e *irEmitter) typeIDHash(t Type) (s string) {
 	name := e.reflectTypeName(t)
 	if e.typeIDs == nil {
 		e.typeIDs = map[string]int32{}
@@ -5457,11 +5420,24 @@ func (e *irEmitter) typeIDGlobal(t Type) (s string) {
 	if _, ok := e.typeIDs[name]; !ok {
 		e.typeIDNext++
 		e.typeIDs[name] = e.typeIDNext
+		writeStr(2, "  typeID: " | name | " -> " | irUitoa64(fnv1a64(name)) | "\n")
 	}
-	if hasPrefix(name, "reflect/types.type:") || lIndexByte(name, '/') >= 0 {
-		return "@\"" | name | "\""
+	h := fnv1a64(name)
+	return "inttoptr (i64 " | irUitoa64(h) | " to ptr)"
+}
+
+func irUitoa64(v uint64) (s string) {
+	if v == 0 {
+		return "0"
 	}
-	return "@" | name
+	var buf [20]byte
+	i := 19
+	for v > 0 {
+		buf[i] = byte(v%10) + '0'
+		v = v / 10
+		i--
+	}
+	return string(buf[i+1:])
 }
 
 func (e *irEmitter) reflectTypeName(t Type) (s string) {
@@ -5898,14 +5874,10 @@ func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv stri
 
 func (e *irEmitter) implTypeID(impl ifaceImpl) (s string) {
 	if impl.extTypeID != "" {
-		if e.extTypeIDs == nil {
-			e.extTypeIDs = map[string]bool{}
-		}
-		quoted := "\"" | impl.extTypeID | "\""
-		e.extTypeIDs[quoted] = true
-		return "@" | quoted
+		h := fnv1a64(impl.extTypeID)
+		return "inttoptr (i64 " | irUitoa64(h) | " to ptr)"
 	}
-	return e.typeIDGlobal(impl.recvType)
+	return e.typeIDHash(impl.recvType)
 }
 
 func (e *irEmitter) emitEmbedChainGEP(impl ifaceImpl, valPtr string) (s string) {
@@ -6204,7 +6176,7 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 		e.w("  ") ; e.w(typePtr) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(val) ; e.w(", 0\n")
 	}
 	if t.CommaOk {
-		tidGlobal := e.typeIDGlobal(t.AssertedType)
+		tidGlobal := e.typeIDHash(t.AssertedType)
 		ok := e.nextReg2("ta")
 		e.w("  ") ; e.w(ok) ; e.w(" = icmp eq ptr ") ; e.w(typePtr) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
 		var loaded string
