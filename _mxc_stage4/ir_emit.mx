@@ -2426,16 +2426,30 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 				e.w("  ") ; e.w(extReg) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(nilField) ; e.w("\n")
 				cmpOp := "icmp eq"
 				if b.Op == OpNeq { cmpOp = "icmp ne" }
-				e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ptr ") ; e.w(extReg) ; e.w(", ") ; e.w(rv) ; e.w("\n")
+				if lt == "{i64, ptr}" && nilField == "0" {
+					e.nextReg++
+					p2i := "%fc" | irItoa(e.nextReg)
+					e.w("  ") ; e.w(p2i) ; e.w(" = ptrtoint ptr ") ; e.w(rv) ; e.w(" to i64\n")
+					e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" i64 ") ; e.w(extReg) ; e.w(", ") ; e.w(p2i) ; e.w("\n")
+				} else {
+					e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ptr ") ; e.w(extReg) ; e.w(", ") ; e.w(rv) ; e.w("\n")
+				}
 				return
 			}
 			if lt == "ptr" && (rt2 == "{ptr, ptr}" || rt2 == "{i64, ptr}") {
 				e.nextReg++
 				extReg := "%fc" | irItoa(e.nextReg)
-				e.w("  ") ; e.w(extReg) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(nilField) ; e.w("\n")
+				e.w("  ") ; e.w(extReg) ; e.w(" = extractvalue ") ; e.w(rt2) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(nilField) ; e.w("\n")
 				cmpOp := "icmp eq"
 				if b.Op == OpNeq { cmpOp = "icmp ne" }
-				e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ptr ") ; e.w(lv) ; e.w(", ") ; e.w(extReg) ; e.w("\n")
+				if rt2 == "{i64, ptr}" && nilField == "0" {
+					e.nextReg++
+					p2i := "%fc" | irItoa(e.nextReg)
+					e.w("  ") ; e.w(p2i) ; e.w(" = ptrtoint ptr ") ; e.w(lv) ; e.w(" to i64\n")
+					e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" i64 ") ; e.w(p2i) ; e.w(", ") ; e.w(extReg) ; e.w("\n")
+				} else {
+					e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ptr ") ; e.w(lv) ; e.w(", ") ; e.w(extReg) ; e.w("\n")
+				}
 				return
 			}
 			if (lt == "{ptr, ptr}" || lt == "{i64, ptr}") && rt2 != "{ptr, ptr}" && rt2 != "{i64, ptr}" && rt2 != "ptr" {
@@ -4567,7 +4581,7 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 			typeid := e.typeIDHash(c.X.SSAType())
 			t1 := e.nextReg2("cv")
 			e.w("  ") ; e.w(t1) ; e.w(" = insertvalue {i64, ptr} undef, i64 ") ; e.w(typeid) ; e.w(", 0\n")
-			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue {ptr, ptr} ") ; e.w(t1) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue {i64, ptr} ") ; e.w(t1) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
 			return
 		}
 	}
@@ -4660,7 +4674,7 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 			typeid := e.typeIDHash(c.X.SSAType())
 			t1 := e.nextReg2("cv")
 			e.w("  ") ; e.w(t1) ; e.w(" = insertvalue {i64, ptr} undef, i64 ") ; e.w(typeid) ; e.w(", 0\n")
-			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue {ptr, ptr} ") ; e.w(t1) ; e.w(", ptr ") ; e.w(val) ; e.w(", 1\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue {i64, ptr} ") ; e.w(t1) ; e.w(", ptr ") ; e.w(val) ; e.w(", 1\n")
 		} else {
 			e.valName[c] = "zeroinitializer"
 		}
@@ -4670,7 +4684,7 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 		if srcType == e.ifaceType() {
 			e.nextReg++
 			r := "%cv" | irItoa(e.nextReg)
-			e.w("  ") ; e.w(r) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(val) ; e.w(", 1\n")
+			e.w("  ") ; e.w(r) ; e.w(" = extractvalue ") ; e.w(srcType) ; e.w(" ") ; e.w(val) ; e.w(", 1\n")
 			e.valName[c] = r
 		} else {
 			e.valName[c] = "null"
