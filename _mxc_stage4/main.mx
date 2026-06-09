@@ -2397,60 +2397,66 @@ func cmdTest(args []string) {
 		fatal("clang failed for initall")
 	}
 
-	writeStr(2, "  merge bitcode\n")
-	llvmLink := "llvm-link-21"
-	mergedBc := joinPath(tmpdir, "merged.bc")
-	linkArgs := []string{llvmLink, "-o", mergedBc, runtimeBc}
-	runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
-	if _, gok := readFile(runtimeGoBc); gok {
-		linkArgs = append(linkArgs, "--override=" | runtimeGoBc)
+	writeStr(2, "  compile objects\n")
+	var objList []string
+	compileToObj := func(bcFile string) string {
+		oFile := bcFile | ".o"
+		rc = run([]string{clang, "--target=" | triple, "-c", "-O0", bcFile, "-o", oFile})
+		if rc != 0 {
+			fatal("clang -c failed for " | bcFile)
+		}
+		return oFile
+	}
+	if !hasRuntimePkg {
+		runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
+		if _, gok := readFile(runtimeGoBc); gok {
+			objList = append(objList, compileToObj(runtimeGoBc))
+		} else {
+			objList = append(objList, compileToObj(runtimeBc))
+		}
 	}
 	rtShims := joinPath(sysroot, "rt_shims.bc")
 	if _, rsk := readFile(rtShims); rsk {
-		linkArgs = append(linkArgs, "--override=" | rtShims)
+		objList = append(objList, compileToObj(rtShims))
 	}
 	for _, bf := range allBcFiles {
-		linkArgs = append(linkArgs, "--override=" | bf)
+		objList = append(objList, compileToObj(bf))
 	}
-	linkArgs = append(linkArgs, "--override=" | initAllBc)
+	objList = append(objList, compileToObj(initAllBc))
 	if !hasRuntimePkg {
 		cstubDir := joinPath(root, joinPath("src/runtime", "_cstubs"))
 		cstubFiles := listFiles(cstubDir, ".c")
 		for _, cf := range cstubFiles {
 			cPath := joinPath(cstubDir, cf)
-			cbcFile := joinPath(tmpdir, "cstub_" | cf | ".bc")
-			rc = run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+			coFile := joinPath(tmpdir, "cstub_" | cf | ".o")
+			rc = run([]string{clang, "--target=" | triple, "-c", "-O0", cPath, "-o", coFile})
 			if rc == 0 {
-				linkArgs = append(linkArgs, "--override=" | cbcFile)
+				objList = append(objList, coFile)
 			}
 		}
 	}
-	rc = run(linkArgs)
-	if rc != 0 {
-		fatal("llvm-link failed")
+	objDir := joinPath(sysroot, "obj")
+	objEntries := listFiles(objDir, ".bc")
+	if objEntries != nil {
+		for _, e := range objEntries {
+			objList = append(objList, compileToObj(joinPath(objDir, e)))
+		}
 	}
-
+	oEntries := listFiles(objDir, ".o")
+	if oEntries != nil {
+		for _, e := range oEntries {
+			objList = append(objList, joinPath(objDir, e))
+		}
+	}
 	outpath := joinPath(tmpdir, "test.bin")
 	writeStr(2, "  link\n")
-	objFiles := getenv("OBJ_FILES")
-	if objFiles == "" {
-		objEntries := listFiles(joinPath(sysroot, "obj"), ".bc")
-		if objEntries != nil {
-			for _, e := range objEntries {
-				objFiles = objFiles | joinPath(joinPath(sysroot, "obj"), e) | " "
-			}
-		}
-	}
 	linker := "ld.lld-21"
 	ldArgs := []string{linker, "--gc-sections", "-o", outpath,
-		joinPath(muslDir, "crt1.o"),
-		mergedBc}
-	for _, f := range splitBySpace(objFiles) {
-		if f != "" {
-			ldArgs = append(ldArgs, f)
-		}
+		joinPath(muslDir, "crt1.o")}
+	for _, o := range objList {
+		ldArgs = append(ldArgs, o)
 	}
-	ldArgs = append(ldArgs, comprtLib, muslLib, "--lto-O0", "-z", "stack-size=67108864")
+	ldArgs = append(ldArgs, comprtLib, muslLib, "-z", "stack-size=67108864")
 	rc = run(ldArgs)
 	if rc != 0 {
 		fatal("linker failed")
@@ -2924,59 +2930,65 @@ func main() {
 		fatal("clang failed for initall")
 	}
 
-	writeStr(2, "  merge bitcode\n")
-	llvmLink := "llvm-link-21"
-	mergedBc := joinPath(tmpdir, "merged.bc")
-	linkArgs := []string{llvmLink, "-o", mergedBc, runtimeBc}
-	runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
-	if _, gok := readFile(runtimeGoBc); gok {
-		linkArgs = append(linkArgs, "--override=" | runtimeGoBc)
+	writeStr(2, "  compile objects\n")
+	var objList []string
+	compileToObj := func(bcFile string) string {
+		oFile := bcFile | ".o"
+		rc = run([]string{clang, "--target=" | triple, "-c", "-O0", bcFile, "-o", oFile})
+		if rc != 0 {
+			fatal("clang -c failed for " | bcFile)
+		}
+		return oFile
+	}
+	if !hasRuntimePkg {
+		runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
+		if _, gok := readFile(runtimeGoBc); gok {
+			objList = append(objList, compileToObj(runtimeGoBc))
+		} else {
+			objList = append(objList, compileToObj(runtimeBc))
+		}
 	}
 	rtShims := joinPath(sysroot, "rt_shims.bc")
 	if _, rsk := readFile(rtShims); rsk {
-		linkArgs = append(linkArgs, "--override=" | rtShims)
+		objList = append(objList, compileToObj(rtShims))
 	}
 	for _, bf := range allBcFiles {
-		linkArgs = append(linkArgs, "--override=" | bf)
+		objList = append(objList, compileToObj(bf))
 	}
-	linkArgs = append(linkArgs, "--override=" | initAllBc)
+	objList = append(objList, compileToObj(initAllBc))
 	if !hasRuntimePkg {
 		cstubDir := joinPath(root, joinPath("src/runtime", "_cstubs"))
 		cstubFiles := listFiles(cstubDir, ".c")
 		for _, cf := range cstubFiles {
 			cPath := joinPath(cstubDir, cf)
-			cbcFile := joinPath(tmpdir, "cstub_" | cf | ".bc")
-			rc = run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+			coFile := joinPath(tmpdir, "cstub_" | cf | ".o")
+			rc = run([]string{clang, "--target=" | triple, "-c", "-O0", cPath, "-o", coFile})
 			if rc == 0 {
-				linkArgs = append(linkArgs, "--override=" | cbcFile)
+				objList = append(objList, coFile)
 			}
 		}
 	}
-	rc = run(linkArgs)
-	if rc != 0 {
-		fatal("llvm-link failed")
+	objDir := joinPath(sysroot, "obj")
+	objEntries := listFiles(objDir, ".bc")
+	if objEntries != nil {
+		for _, e := range objEntries {
+			objList = append(objList, compileToObj(joinPath(objDir, e)))
+		}
 	}
-
+	oEntries := listFiles(objDir, ".o")
+	if oEntries != nil {
+		for _, e := range oEntries {
+			objList = append(objList, joinPath(objDir, e))
+		}
+	}
 	writeStr(2, "  link\n")
-	objFiles := getenv("OBJ_FILES")
-	if objFiles == "" {
-		objEntries := listFiles(joinPath(sysroot, "obj"), ".bc")
-		if objEntries != nil {
-			for _, e := range objEntries {
-				objFiles = objFiles | joinPath(joinPath(sysroot, "obj"), e) | " "
-			}
-		}
-	}
 	linker := "ld.lld-21"
 	ldArgs := []string{linker, "--gc-sections", "-o", outpath,
-		joinPath(muslDir, "crt1.o"),
-		mergedBc}
-	for _, f := range splitBySpace(objFiles) {
-		if f != "" {
-			ldArgs = append(ldArgs, f)
-		}
+		joinPath(muslDir, "crt1.o")}
+	for _, o := range objList {
+		ldArgs = append(ldArgs, o)
 	}
-	ldArgs = append(ldArgs, comprtLib, muslLib, "--lto-O0", "-z", "stack-size=67108864")
+	ldArgs = append(ldArgs, comprtLib, muslLib, "-z", "stack-size=67108864")
 	rc = run(ldArgs)
 	if rc != 0 {
 		fatal("linker failed")
