@@ -496,6 +496,9 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 	}
 	retType := e.funcRetType(fn)
 	useSret := needsSret(retType)
+	isIntrinsic := hasPrefix(sym, "@llvm.") || hasPrefix(sym, "@\"llvm.")
+	isExport := fn.externalSymbol != ""
+	skipCtx := isIntrinsic || isExport
 	params := ""
 	if useSret {
 		params = "ptr"
@@ -517,6 +520,10 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 			}
 			params = params | pt
 		}
+	}
+	if !skipCtx {
+		if params != "" { params = params | ", " }
+		params = params | "ptr"
 	}
 	if useSret {
 		e.extDecls[sym] = "void " | sym | "(" | params | ")"
@@ -1129,7 +1136,7 @@ func (e *irEmitter) emitLibMain() {
 	writeStr(2, "  emitLibMain pkgPath=[" | pkgPath | "]\n")
 	if pkgPath == "main" || pkgPath == "command-line-arguments" {
 		e.w("\ndefine void @runtime.callMain() {\n")
-		e.w("  call void @main.main()\n")
+		e.w("  call void @main.main(ptr null)\n")
 		e.w("  ret void\n")
 		e.w("}\n")
 		return
@@ -1146,7 +1153,7 @@ func (e *irEmitter) emitLibMain() {
 	sym := irGlobalSymbol(pkgPath, "main")
 	e.w("\ndefine void ")
 	e.w(sym)
-	e.w("() {\n_entry:\n  ret void\n}\n")
+	e.w("(ptr %context) {\n_entry:\n  ret void\n}\n")
 }
 
 func (e *irEmitter) emitFunction(f *SSAFunction) {
@@ -1211,12 +1218,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		e.w("ptr sret(") ; e.w(retType) ; e.w(") %retval")
 		nParam++
 	}
-	hasFreeVars := len(f.FreeVars) > 0
-	if hasFreeVars {
-		if nParam > 0 { e.w(", ") }
-		e.w("ptr %context")
-		nParam++
-	}
+	isExport := f.externalSymbol != ""
 	for _, p := range f.Params {
 		if nParam > 0 { e.w(", ") }
 		pt := e.llvmType(p.SSAType())
@@ -1227,6 +1229,10 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		e.w(" ")
 		e.w(e.regName(p))
 		nParam++
+	}
+	if !isExport {
+		if nParam > 0 { e.w(", ") }
+		e.w("ptr %context")
 	}
 	e.w(") {\n")
 
@@ -1418,6 +1424,7 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 		e.w("ptr")
 		n++
 	}
+	isIntrinsic := hasPrefix(sym, "@llvm.") || hasPrefix(sym, "@\"llvm.")
 	hasRecv := f.Signature != nil && f.Signature.Recv() != nil
 	if hasRecv {
 		if n > 0 { e.w(", ") }
@@ -1437,6 +1444,10 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 			e.w(pt)
 			n++
 		}
+	}
+	if !isIntrinsic {
+		if n > 0 { e.w(", ") }
+		e.w("ptr")
 	}
 	e.w(")\n")
 	e.extDecls[sym] = ""
@@ -3496,6 +3507,9 @@ func (e *irEmitter) emitCall(c *SSACall) {
 			e.w("ptr sret(") ; e.w(retType) ; e.w(") ") ; e.w(sretTmp)
 			np++
 		}
+		sym := e.funcSymbol(fn)
+		isIntrinsic := hasPrefix(sym, "@llvm.") || hasPrefix(sym, "@\"llvm.")
+		isExport := fn.externalSymbol != ""
 		for i, arg := range c.Call.Args {
 			if np > 0 { e.w(", ") }
 			if arg == nil {
@@ -3510,6 +3524,10 @@ func (e *irEmitter) emitCall(c *SSACall) {
 			}
 			e.w(at) ; e.w(" ") ; e.w(av)
 			np++
+		}
+		if !isIntrinsic && !isExport {
+			if np > 0 { e.w(", ") }
+			e.w("ptr null")
 		}
 		e.w(")\n")
 		if useSret {
@@ -3529,23 +3547,28 @@ func (e *irEmitter) emitCall(c *SSACall) {
 		e.nextReg++
 		sretTmp = "%sret." | irItoa(e.nextReg)
 		e.w("  ") ; e.w(sretTmp) ; e.w(" = alloca ") ; e.w(retType) ; e.w("\n")
-		e.w("  call void ") ; e.w(funcPtr) ; e.w("(ptr sret(") ; e.w(retType) ; e.w(") ") ; e.w(sretTmp) ; e.w(", ptr ") ; e.w(ctxPtr)
+		e.w("  call void ") ; e.w(funcPtr) ; e.w("(ptr sret(") ; e.w(retType) ; e.w(") ") ; e.w(sretTmp)
 	} else {
 		e.w("  ")
 		if !isVoid {
 			e.w(reg) ; e.w(" = ")
 		}
-		e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(funcPtr) ; e.w("(ptr ") ; e.w(ctxPtr)
+		e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(funcPtr) ; e.w("(")
 	}
+	np2 := 0
+	if useSret { np2++ }
 	for i, arg := range c.Call.Args {
-		e.w(", ")
+		if np2 > 0 { e.w(", ") }
 		at := e.callArgType(arg, sig, int32(i))
 		av := e.operand(arg)
 		if av == "null" && at != "ptr" {
 			av = "zeroinitializer"
 		}
 		e.w(at) ; e.w(" ") ; e.w(av)
+		np2++
 	}
+	if np2 > 0 { e.w(", ") }
+	e.w("ptr ") ; e.w(ctxPtr)
 	e.w(")\n")
 	if useSret {
 		e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(retType) ; e.w(", ptr ") ; e.w(sretTmp) ; e.w("\n")
@@ -7172,11 +7195,13 @@ func (e *irEmitter) emitDeferDispatch(d *SSADefer, pfx string, idx int32) {
 			fieldIdx++
 		}
 		rt := e.deferRetType(d)
-		e.w("  call ") ; e.w(rt) ; e.w(" ") ; e.w(fpReg) ; e.w("(ptr ") ; e.w(ctxReg)
+		e.w("  call ") ; e.w(rt) ; e.w(" ") ; e.w(fpReg) ; e.w("(")
 		for i, av := range args {
-			e.w(", ")
+			if i > 0 { e.w(", ") }
 			e.w(argTypes[i]) ; e.w(" ") ; e.w(av)
 		}
+		if len(args) > 0 { e.w(", ") }
+		e.w("ptr ") ; e.w(ctxReg)
 		e.w(")\n")
 	}
 }
