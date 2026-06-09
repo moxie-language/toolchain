@@ -86,26 +86,6 @@ func getenv(name string) (s string) {
 	return string(buf[:n])
 }
 
-func getArgs() (ss []string) {
-	data, ok := readFile("/proc/self/cmdline")
-	if !ok {
-		return nil
-	}
-	var args []string
-	start := int32(0)
-	for i := int32(0); i < int32(len(data)); i++ {
-		if data[i] == 0 {
-			if i > start {
-				args = append(args, string(data[start:i]))
-			}
-			start = i + 1
-		}
-	}
-	if start < int32(len(data)) {
-		args = append(args, string(data[start:]))
-	}
-	return args
-}
 
 func listFiles(dir, ext string) (ss []string) {
 	buf := []byte{:65536}
@@ -2257,8 +2237,12 @@ func cmdTest(args []string) {
 	}
 
 	var allBcFiles []string
+	hasRuntimePkg := false
 
 	for _, dp := range pkgs {
+		if dp.path == "runtime" {
+			hasRuntimePkg = true
+		}
 		compilePath := dp.path
 		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = dp.name
@@ -2360,15 +2344,7 @@ func cmdTest(args []string) {
 	sysroot := joinPath(root, "sysroot")
 	runtimeBc := getenv("RUNTIME_BC")
 	if runtimeBc == "" {
-		runtimeBc = joinPath(sysroot, "runtime_dealloc.bc")
-		_, rok := readFile(runtimeBc)
-		if !rok {
-			runtimeBc = joinPath(sysroot, "runtime.bc")
-			_, rok2 := readFile(runtimeBc)
-			if !rok2 {
-				runtimeBc = joinPath(root, "_runtime.bc")
-			}
-		}
+		runtimeBc = joinPath(sysroot, "runtime.bc")
 	}
 	muslDir := getenv("MUSL_DIR")
 	if muslDir == "" {
@@ -2394,7 +2370,7 @@ func cmdTest(args []string) {
 			continue
 		}
 		initSym := irGlobalSymbol(compilePath, "main")
-		initCalls = initCalls | "  call void " | initSym | "(ptr %context)\n"
+		initCalls = initCalls | "  call void " | initSym | "()\n"
 	}
 	initAllIR := "\ndefine dso_local void @runtime.initAll(ptr %context) {\nentry:\n" | initCalls | "  ret void\n}\n"
 	declared := map[string]bool{}
@@ -2411,7 +2387,7 @@ func cmdTest(args []string) {
 			continue
 		}
 		declared[declSym] = true
-		initAllIR = initAllIR | "declare void " | declSym | "(ptr)\n"
+		initAllIR = initAllIR | "declare void " | declSym | "()\n"
 	}
 	initAllFile := joinPath(tmpdir, "initall.ll")
 	writeFile(initAllFile, []byte(initAllIR), 0644)
@@ -2451,10 +2427,26 @@ func cmdTest(args []string) {
 	if _, lok := readFile(lnShims); lok {
 		linkArgs = append(linkArgs, "--override=" | lnShims)
 	}
+	rtShims := joinPath(sysroot, "rt_shims.bc")
+	if _, rsk := readFile(rtShims); rsk {
+		linkArgs = append(linkArgs, "--override=" | rtShims)
+	}
 	for _, bf := range allBcFiles {
 		linkArgs = append(linkArgs, "--override=" | bf)
 	}
 	linkArgs = append(linkArgs, "--override=" | initAllBc)
+	if !hasRuntimePkg {
+		cstubDir := joinPath(root, joinPath("src/runtime", "_cstubs"))
+		cstubFiles := listFiles(cstubDir, ".c")
+		for _, cf := range cstubFiles {
+			cPath := joinPath(cstubDir, cf)
+			cbcFile := joinPath(tmpdir, "cstub_" | cf | ".bc")
+			rc = run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+			if rc == 0 {
+				linkArgs = append(linkArgs, "--override=" | cbcFile)
+			}
+		}
+	}
 	rc = run(linkArgs)
 	if rc != 0 {
 		fatal("llvm-link failed")
@@ -2672,7 +2664,7 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 
 func main() {
 	builtinOnly = []string{"unsafe"}
-	args := getArgs()
+	args := os.Args
 	if len(args) < 2 {
 		writeStr(2, "usage: mxc <build|test|version|cache|fetch|update> ...\n")
 		os.Exit(1)
@@ -2717,8 +2709,12 @@ func main() {
 		cmdTest(args)
 		return
 	}
+	if cmd == "build-runtime" {
+		cmdBuildRuntime()
+		return
+	}
 	if cmd != "build" {
-		writeStr(2, "usage: mxc <build|test|version|cache|fetch|update> ...\n")
+		writeStr(2, "usage: mxc <build|test|version|cache|fetch|update|build-runtime> ...\n")
 		os.Exit(1)
 	}
 
@@ -2775,8 +2771,12 @@ func main() {
 
 	cacheBase := pkgCacheDir()
 	var allBcFiles []string
+	hasRuntimePkg := false
 
 	for _, pkg := range pkgs {
+		if pkg.path == "runtime" {
+			hasRuntimePkg = true
+		}
 		compilePath := pkg.path
 		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = pkg.name
@@ -2893,15 +2893,7 @@ func main() {
 	sysroot := joinPath(root, "sysroot")
 	runtimeBc := getenv("RUNTIME_BC")
 	if runtimeBc == "" {
-		runtimeBc = joinPath(sysroot, "runtime_dealloc.bc")
-		_, rok := readFile(runtimeBc)
-		if !rok {
-			runtimeBc = joinPath(sysroot, "runtime.bc")
-			_, rok2 := readFile(runtimeBc)
-			if !rok2 {
-				runtimeBc = joinPath(root, "_runtime.bc")
-			}
-		}
+		runtimeBc = joinPath(sysroot, "runtime.bc")
 	}
 	muslDir := getenv("MUSL_DIR")
 	if muslDir == "" {
@@ -2927,7 +2919,7 @@ func main() {
 			continue
 		}
 		initSym := irGlobalSymbol(compilePath, "main")
-		initCalls = initCalls | "  call void " | initSym | "(ptr %context)\n"
+		initCalls = initCalls | "  call void " | initSym | "()\n"
 	}
 	initAllIR := "\ndefine dso_local void @runtime.initAll(ptr %context) {\nentry:\n" | initCalls | "  ret void\n}\n"
 	declared := map[string]bool{}
@@ -2944,7 +2936,7 @@ func main() {
 			continue
 		}
 		declared[declSym] = true
-		initAllIR = initAllIR | "declare void " | declSym | "(ptr)\n"
+		initAllIR = initAllIR | "declare void " | declSym | "()\n"
 	}
 	initAllFile := joinPath(tmpdir, "initall.ll")
 	writeFile(initAllFile, []byte(initAllIR), 0644)
@@ -2984,10 +2976,26 @@ func main() {
 	if _, lok := readFile(lnShims); lok {
 		linkArgs = append(linkArgs, "--override=" | lnShims)
 	}
+	rtShims := joinPath(sysroot, "rt_shims.bc")
+	if _, rsk := readFile(rtShims); rsk {
+		linkArgs = append(linkArgs, "--override=" | rtShims)
+	}
 	for _, bf := range allBcFiles {
 		linkArgs = append(linkArgs, "--override=" | bf)
 	}
 	linkArgs = append(linkArgs, "--override=" | initAllBc)
+	if !hasRuntimePkg {
+		cstubDir := joinPath(root, joinPath("src/runtime", "_cstubs"))
+		cstubFiles := listFiles(cstubDir, ".c")
+		for _, cf := range cstubFiles {
+			cPath := joinPath(cstubDir, cf)
+			cbcFile := joinPath(tmpdir, "cstub_" | cf | ".bc")
+			rc = run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+			if rc == 0 {
+				linkArgs = append(linkArgs, "--override=" | cbcFile)
+			}
+		}
+	}
 	rc = run(linkArgs)
 	if rc != 0 {
 		fatal("llvm-link failed")
@@ -3018,4 +3026,63 @@ func main() {
 		fatal("linker failed")
 	}
 	writeStr(2, "  -> " | outpath | "\n")
+}
+
+func cmdBuildRuntime() {
+	root := getenv("MOXIEROOT")
+	if root == "" {
+		root = "."
+	}
+	triple := "x86_64-unknown-linux-musleabihf"
+	clang := "clang-21"
+	sysroot := joinPath(root, "sysroot")
+	tmpdir := "/tmp/mxc-rt-build"
+	mkdirAll(tmpdir, 0755)
+
+	registerBuiltins()
+
+	rtPkgs := []string{"internal/task", "runtime"}
+	var bcFiles []string
+	for _, pkg := range rtPkgs {
+		dir := joinPath(root, joinPath("src", pkg))
+		info := discoverPkg(pkg, root)
+		if info == nil || len(info.files) == 0 {
+			writeStr(2, "  skip " | pkg | " (no files)\n")
+			continue
+		}
+		writeStr(2, "  compile " | pkg | "\n")
+		src := concatSources(dir, info.files)
+		ir := compileSource(src, pkg, triple, dir)
+		src = nil
+		llFile := joinPath(tmpdir, safeName(pkg) | ".ll")
+		writeFile(llFile, []byte(ir), 0644)
+		ir = ""
+		bcFile := joinPath(tmpdir, safeName(pkg) | ".bc")
+		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
+		if rc != 0 {
+			fatal("clang failed for " | pkg)
+		}
+		bcFiles = append(bcFiles, bcFile)
+	}
+	if len(bcFiles) == 0 {
+		fatal("no runtime packages compiled")
+	}
+	outBc := joinPath(sysroot, "runtime_go.bc")
+	if len(bcFiles) == 1 {
+		data, ok := readFile(bcFiles[0])
+		if !ok {
+			fatal("cannot read " | bcFiles[0])
+		}
+		writeFile(outBc, data, 0644)
+	} else {
+		linkArgs := []string{"llvm-link-21", "-o", outBc}
+		for _, bf := range bcFiles {
+			linkArgs = append(linkArgs, bf)
+		}
+		rc := run(linkArgs)
+		if rc != 0 {
+			fatal("llvm-link failed merging runtime")
+		}
+	}
+	writeStr(2, "  -> " | outBc | "\n")
 }

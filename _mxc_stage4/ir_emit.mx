@@ -99,6 +99,7 @@ type irEmitter struct {
 	scopeAllocs map[int32][]string
 	instrScope  map[SSAInstruction]int32
 	scopeActive bool
+	sretType    string
 }
 
 func sortedKeys(m map[string]bool) (ss []string) {
@@ -462,7 +463,6 @@ func (e *irEmitter) declareRuntime(name, retType, params string) {
 	e.extDecls[name] = retType | " @" | name | "(" | params | ")"
 }
 
-func (e *irEmitter) rtCtx() { e.w(", ptr null") }
 
 func (e *irEmitter) declareExternalGlobal(g *SSAGlobal) {
 	if g.pkg == nil || g.pkg == e.pkg {
@@ -495,10 +495,15 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 		return
 	}
 	retType := e.funcRetType(fn)
+	useSret := needsSret(retType)
 	params := ""
+	if useSret {
+		params = "ptr"
+	}
 	hasRecv := fn.Signature != nil && fn.Signature.Recv() != nil
 	if hasRecv {
-		params = "ptr"
+		if params != "" { params = params | ", " }
+		params = params | "ptr"
 	}
 	if fn.Signature != nil && fn.Signature.Params() != nil {
 		for i := 0; i < fn.Signature.Params().Len(); i++ {
@@ -513,13 +518,11 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 			params = params | pt
 		}
 	}
-	if !fn.isExternC {
-		if params != "" {
-			params = params | ", "
-		}
-		params = params | "ptr"
+	if useSret {
+		e.extDecls[sym] = "void " | sym | "(" | params | ")"
+	} else {
+		e.extDecls[sym] = retType | " " | sym | "(" | params | ")"
 	}
-	e.extDecls[sym] = retType | " " | sym | "(" | params | ")"
 }
 
 func (e *irEmitter) addStringConst(s string) (n int32) {
@@ -1079,6 +1082,14 @@ func (e *irEmitter) funcSymbol(f *SSAFunction) (s string) {
 		}
 		return "@" | sym
 	}
+	if linknameMap != nil {
+		if target, ok := linknameMap[f.name]; ok {
+			if irNeedsQuote(target) {
+				return "@\"" | target | "\""
+			}
+			return "@" | target
+		}
+	}
 	pkg := e.pkg.Pkg.Path()
 	if f.Pkg != nil {
 		pkg = f.Pkg.Pkg.Path()
@@ -1115,9 +1126,10 @@ func (e *irEmitter) emitAnonFuncs(f *SSAFunction) {
 
 func (e *irEmitter) emitLibMain() {
 	pkgPath := e.pkg.Pkg.Path()
-	if pkgPath == "main" {
-		e.w("\ndefine void @runtime.callMain(ptr %context) {\n")
-		e.w("  call void @main.main(ptr null)\n")
+	writeStr(2, "  emitLibMain pkgPath=[" | pkgPath | "]\n")
+	if pkgPath == "main" || pkgPath == "command-line-arguments" {
+		e.w("\ndefine void @runtime.callMain() {\n")
+		e.w("  call void @main.main()\n")
 		e.w("  ret void\n")
 		e.w("}\n")
 		return
@@ -1134,7 +1146,7 @@ func (e *irEmitter) emitLibMain() {
 	sym := irGlobalSymbol(pkgPath, "main")
 	e.w("\ndefine void ")
 	e.w(sym)
-	e.w("(ptr %context) {\n_entry:\n  ret void\n}\n")
+	e.w("() {\n_entry:\n  ret void\n}\n")
 }
 
 func (e *irEmitter) emitFunction(f *SSAFunction) {
@@ -1182,14 +1194,31 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 	if f.parent != nil {
 		e.w("hidden ")
 	}
-	e.w(e.funcRetType(f))
-	e.w(" ")
+	retType := e.funcRetType(f)
+	useSret := needsSret(retType)
+	e.sretType = ""
+	if useSret {
+		e.w("void ")
+		e.sretType = retType
+	} else {
+		e.w(retType)
+		e.w(" ")
+	}
 	e.w(e.funcSymbol(f))
 	e.w("(")
-	for i, p := range f.Params {
-		if i > 0 {
-			e.w(", ")
-		}
+	nParam := 0
+	if useSret {
+		e.w("ptr sret(") ; e.w(retType) ; e.w(") %retval")
+		nParam++
+	}
+	hasFreeVars := len(f.FreeVars) > 0
+	if hasFreeVars {
+		if nParam > 0 { e.w(", ") }
+		e.w("ptr %context")
+		nParam++
+	}
+	for _, p := range f.Params {
+		if nParam > 0 { e.w(", ") }
 		pt := e.llvmType(p.SSAType())
 		if pt == "void" {
 			pt = "ptr"
@@ -1197,20 +1226,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		e.w(pt)
 		e.w(" ")
 		e.w(e.regName(p))
-	}
-	if !f.isExternC {
-		if len(f.Params) > 0 {
-			e.w(", ")
-		}
-		ctxName := "context"
-		for _, p := range f.Params {
-			if p.SSAName() == "context" {
-				ctxName = "context.1"
-				break
-			}
-		}
-		e.w("ptr %")
-		e.w(ctxName)
+		nParam++
 	}
 	e.w(") {\n")
 
@@ -1387,14 +1403,24 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 	if _, ok := e.extDecls[sym]; ok {
 		return
 	}
+	retType := e.funcRetType(f)
+	useSret := needsSret(retType)
 	e.w("\ndeclare ")
-	e.w(e.funcRetType(f))
-	e.w(" ")
+	if useSret {
+		e.w("void ")
+	} else {
+		e.w(retType) ; e.w(" ")
+	}
 	e.w(sym)
 	e.w("(")
 	n := 0
+	if useSret {
+		e.w("ptr")
+		n++
+	}
 	hasRecv := f.Signature != nil && f.Signature.Recv() != nil
 	if hasRecv {
+		if n > 0 { e.w(", ") }
 		e.w("ptr")
 		n++
 	}
@@ -1411,12 +1437,6 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 			e.w(pt)
 			n++
 		}
-	}
-	if !f.isExternC {
-		if n > 0 {
-			e.w(", ")
-		}
-		e.w("ptr")
 	}
 	e.w(")\n")
 	e.extDecls[sym] = ""
@@ -1439,6 +1459,10 @@ func (e *irEmitter) resolveResultType(t Type) (s string) {
 		return e.sliceType()
 	}
 	return "ptr"
+}
+
+func needsSret(retType string) (ok bool) {
+	return false
 }
 
 func (e *irEmitter) funcRetType(f *SSAFunction) (s string) {
@@ -1599,8 +1623,8 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 			e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 			e.w("  ") ; e.w(reg)
 			e.w(" = call ptr @runtime.alloc(") ; e.w(ipt)
-			e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
-			e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr, ptr")
+			e.w(" ") ; e.w(sz) ; e.w(", ptr null)\n")
+			e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 			e.deallocAfterAlloc(a, reg)
 			e.scopeTrackAlloc(reg)
 		} else {
@@ -1683,8 +1707,8 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 		e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 		e.w("  ") ; e.w(reg)
 		e.w(" = call ptr @runtime.alloc(") ; e.w(ipt)
-		e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
-		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr, ptr")
+		e.w(" ") ; e.w(sz) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 		e.deallocAfterAlloc(a, reg)
 		e.scopeTrackAlloc(reg)
 	} else {
@@ -2319,6 +2343,11 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 		_, isSlice := u.(*Slice)
 		_, isSig := u.(*Signature)
 		_, isPtr := u.(*Pointer)
+		if !isPtr {
+			if b2, ok2 := u.(*Basic); ok2 && b2.Kind() == UnsafePointer {
+				isPtr = true
+			}
+		}
 		_, isMap := u.(*TCMap)
 		_, isChan := u.(*TCChan)
 		if !isIface && !isSlice && !isSig && !isPtr && u == nil && (lt == "{ptr, ptr}" || lt == "{ptr, i64}") {
@@ -2451,7 +2480,7 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 					e.w("  ") ; e.w(ldp) ; e.w(" = load ") ; e.w(sty) ; e.w(", ptr ") ; e.w(dp) ; e.w("\n")
 					e.nextReg++
 					eqR := "%fc" | irItoa(e.nextReg)
-					e.w("  ") ; e.w(eqR) ; e.w(" = call i1 @runtime.stringEqual(") ; e.w(sty) ; e.w(" ") ; e.w(ldp) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(", ptr null)\n")
+					e.w("  ") ; e.w(eqR) ; e.w(" = call i1 @runtime.stringEqual(") ; e.w(sty) ; e.w(" ") ; e.w(ldp) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(")\n")
 					e.declareRuntime("runtime.stringEqual", "i1", sty | ", " | sty)
 					cmpResult := eqR
 					if b.Op == OpNeq {
@@ -2899,7 +2928,7 @@ func (e *irEmitter) emitSliceConcat(reg string, sl *Slice, lv, rv string) {
 	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(xLen)
 	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(yLen)
 	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(elemSz)
-	e.w(", ptr null)\n")
+	e.w(")\n")
 	newPtr := e.nextReg2("cc")
 	e.w("  ") ; e.w(newPtr) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 0\n")
 	e.scopeTrackAlloc(newPtr)
@@ -2930,32 +2959,32 @@ func (e *irEmitter) emitStringCompare(reg string, op SSAOp, lv, rv string) {
 	switch op {
 	case OpEql:
 		e.w("  ") ; e.w(reg) ; e.w(" = call i1 @runtime.stringEqual(")
-		e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(", ptr null)\n")
+		e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(")\n")
 		e.declareRuntime("runtime.stringEqual", "i1", sty | ", " | sty)
 	case OpNeq:
 		tmp := e.nextReg2("sc")
 		e.w("  ") ; e.w(tmp) ; e.w(" = call i1 @runtime.stringEqual(")
-		e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(", ptr null)\n")
+		e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(")\n")
 		e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(tmp) ; e.w(", -1\n")
 		e.declareRuntime("runtime.stringEqual", "i1", sty | ", " | sty)
 	case OpLss:
 		e.w("  ") ; e.w(reg) ; e.w(" = call i1 @runtime.stringLess(")
-		e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(", ptr null)\n")
+		e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(")\n")
 		e.declareRuntime("runtime.stringLess", "i1", sty | ", " | sty)
 	case OpGtr:
 		e.w("  ") ; e.w(reg) ; e.w(" = call i1 @runtime.stringLess(")
-		e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", ptr null)\n")
+		e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(")\n")
 		e.declareRuntime("runtime.stringLess", "i1", sty | ", " | sty)
 	case OpLeq:
 		tmp := e.nextReg2("sc")
 		e.w("  ") ; e.w(tmp) ; e.w(" = call i1 @runtime.stringLess(")
-		e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", ptr null)\n")
+		e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(")\n")
 		e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(tmp) ; e.w(", -1\n")
 		e.declareRuntime("runtime.stringLess", "i1", sty | ", " | sty)
 	case OpGeq:
 		tmp := e.nextReg2("sc")
 		e.w("  ") ; e.w(tmp) ; e.w(" = call i1 @runtime.stringLess(")
-		e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(", ptr null)\n")
+		e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(")\n")
 		e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(tmp) ; e.w(", -1\n")
 		e.declareRuntime("runtime.stringLess", "i1", sty | ", " | sty)
 	default:
@@ -2993,7 +3022,7 @@ func (e *irEmitter) emitStructCompare(reg string, op SSAOp, st *TCStruct, lt, lv
 		cmp := e.nextReg2("sf")
 		if e.isStringLike(st.Field(i).Type()) {
 			sty := e.sliceType()
-			e.w("  ") ; e.w(cmp) ; e.w(" = call i1 @runtime.stringEqual(") ; e.w(sty) ; e.w(" ") ; e.w(lf) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rf) ; e.w(", ptr null)\n")
+			e.w("  ") ; e.w(cmp) ; e.w(" = call i1 @runtime.stringEqual(") ; e.w(sty) ; e.w(" ") ; e.w(lf) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rf) ; e.w(")\n")
 			e.declareRuntime("runtime.stringEqual", "i1", sty | ", " | sty)
 		} else if subst, ok := safeUnderlying(st.Field(i).Type()).(*TCStruct); ok && len(ft) > 0 && ft[0] == '{' {
 			e.emitStructCompare(cmp, OpEql, subst, ft, lf, rf)
@@ -3446,56 +3475,81 @@ func (e *irEmitter) emitCall(c *SSACall) {
 		if !e.isPkgFunc(fn) {
 			e.declareExternalFunc(fn)
 		}
-		e.w("  ")
-		if !isVoid {
-			e.w(reg) ; e.w(" = ")
+		useSret := needsSret(retType)
+		sretTmp := ""
+		if useSret {
+			e.nextReg++
+			sretTmp = "%sret." | irItoa(e.nextReg)
+			e.w("  ") ; e.w(sretTmp) ; e.w(" = alloca ") ; e.w(retType) ; e.w("\n")
+			e.w("  call void ")
+		} else {
+			e.w("  ")
+			if !isVoid {
+				e.w(reg) ; e.w(" = ")
+			}
+			e.w("call ") ; e.w(retType) ; e.w(" ")
 		}
-		e.w("call ") ; e.w(retType) ; e.w(" ")
 		e.w(e.funcSymbol(fn))
 		e.w("(")
+		np := 0
+		if useSret {
+			e.w("ptr sret(") ; e.w(retType) ; e.w(") ") ; e.w(sretTmp)
+			np++
+		}
 		for i, arg := range c.Call.Args {
-			if i > 0 { e.w(", ") }
+			if np > 0 { e.w(", ") }
 			if arg == nil {
 				e.w("ptr null")
+				np++
 				continue
 			}
-			at := e.callArgType(arg, sig, i)
+			at := e.callArgType(arg, sig, int32(i))
 			av := e.operand(arg)
 			if av == "null" && at != "ptr" {
 				av = "zeroinitializer"
 			}
 			e.w(at) ; e.w(" ") ; e.w(av)
-		}
-		if !fn.isExternC {
-			if len(c.Call.Args) > 0 { e.w(", ") }
-			e.w("ptr null")
+			np++
 		}
 		e.w(")\n")
+		if useSret {
+			e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(retType) ; e.w(", ptr ") ; e.w(sretTmp) ; e.w("\n")
+		}
 		return
 	}
 
 	funcVal := e.operand(c.Call.Value)
 	funcPtr := e.nextReg2("fp")
-	ctx := e.nextReg2("ctx")
+	ctxPtr := e.nextReg2("fp")
 	e.w("  ") ; e.w(funcPtr) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(funcVal) ; e.w(", 1\n")
-	e.w("  ") ; e.w(ctx) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(funcVal) ; e.w(", 0\n")
-	e.w("  ")
-	if !isVoid {
-		e.w(reg) ; e.w(" = ")
+	e.w("  ") ; e.w(ctxPtr) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(funcVal) ; e.w(", 0\n")
+	useSret := needsSret(retType)
+	sretTmp := ""
+	if useSret {
+		e.nextReg++
+		sretTmp = "%sret." | irItoa(e.nextReg)
+		e.w("  ") ; e.w(sretTmp) ; e.w(" = alloca ") ; e.w(retType) ; e.w("\n")
+		e.w("  call void ") ; e.w(funcPtr) ; e.w("(ptr sret(") ; e.w(retType) ; e.w(") ") ; e.w(sretTmp) ; e.w(", ptr ") ; e.w(ctxPtr)
+	} else {
+		e.w("  ")
+		if !isVoid {
+			e.w(reg) ; e.w(" = ")
+		}
+		e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(funcPtr) ; e.w("(ptr ") ; e.w(ctxPtr)
 	}
-	e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(funcPtr) ; e.w("(")
 	for i, arg := range c.Call.Args {
-		if i > 0 { e.w(", ") }
-		at := e.callArgType(arg, sig, i)
+		e.w(", ")
+		at := e.callArgType(arg, sig, int32(i))
 		av := e.operand(arg)
 		if av == "null" && at != "ptr" {
 			av = "zeroinitializer"
 		}
 		e.w(at) ; e.w(" ") ; e.w(av)
 	}
-	if len(c.Call.Args) > 0 { e.w(", ") }
-	e.w("ptr ") ; e.w(ctx)
 	e.w(")\n")
+	if useSret {
+		e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(retType) ; e.w(", ptr ") ; e.w(sretTmp) ; e.w("\n")
+	}
 }
 
 func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
@@ -3542,7 +3596,7 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 				retType := e.llvmType(c.SSAType())
 				e.nextReg++
 				tmp := "%bl" | irItoa(e.nextReg)
-				e.w("  ") ; e.w(tmp) ; e.w(" = call ") ; e.w(ipt) ; e.w(" @runtime.hashmapLen(ptr ") ; e.w(arg) ; e.w(", ptr null)\n")
+				e.w("  ") ; e.w(tmp) ; e.w(" = call ") ; e.w(ipt) ; e.w(" @runtime.hashmapLen(ptr ") ; e.w(arg) ; e.w(")\n")
 				if retType != ipt {
 					e.w("  ") ; e.w(reg) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(tmp) ; e.w(" to ") ; e.w(retType) ; e.w("\n")
 				} else {
@@ -3671,7 +3725,7 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(srcCap)
 			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(irItoa(nElems))
 			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(elemSz)
-			e.w(", ptr null)\n")
+			e.w(")\n")
 			newPtr := e.nextReg2("ap")
 			e.w("  ") ; e.w(newPtr) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 0\n")
 			e.scopeTrackAlloc(newPtr)
@@ -3758,7 +3812,7 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(srcCap)
 			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(elemsLen)
 			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(elemSz)
-			e.w(", ptr null)\n")
+			e.w(")\n")
 			newPtr := e.nextReg2("ap")
 			e.w("  ") ; e.w(newPtr) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 0\n")
 			e.scopeTrackAlloc(newPtr)
@@ -3801,7 +3855,7 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(dstLen)
 			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(srcLen)
 			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(elemSz)
-			e.w(", ptr null)\n")
+			e.w(")\n")
 			retType := e.llvmType(c.SSAType())
 			if retType != e.intptrType() {
 				e.w("  ") ; e.w(reg) ; e.w(" = trunc ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(callReg) ; e.w(" to ") ; e.w(retType) ; e.w("\n")
@@ -3812,20 +3866,20 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			return
 		}
 	} else if name == "print" || name == "println" {
-		e.w("  call void @runtime.printlock(ptr null, ptr null)\n")
+		e.w("  call void @runtime.printlock()\n")
 		for i, arg := range c.Call.Args {
 			if i > 0 && b.id == BuiltinPrintln {
-				e.w("  call void @runtime.printspace(ptr null, ptr null)\n")
+				e.w("  call void @runtime.printspace()\n")
 			}
 			av := e.operand(arg)
 			at := arg.SSAType()
 			e.emitPrintArg(av, at)
 		}
 		if b.id == BuiltinPrintln {
-			e.w("  call void @runtime.printnl(ptr null, ptr null)\n")
+			e.w("  call void @runtime.printnl()\n")
 			e.declareRuntime("runtime.printnl", "void", "")
 		}
-		e.w("  call void @runtime.printunlock(ptr null, ptr null)\n")
+		e.w("  call void @runtime.printunlock()\n")
 		e.declareRuntime("runtime.printlock", "void", "")
 		e.declareRuntime("runtime.printunlock", "void", "")
 		if b.id == BuiltinPrintln && len(c.Call.Args) > 1 {
@@ -3847,7 +3901,7 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			e.w("  ") ; e.w(keyAlloca) ; e.w(" = alloca ") ; e.w(keyType) ; e.w("\n")
 			e.w("  store ") ; e.w(keyType) ; e.w(" ") ; e.w(keyVal) ; e.w(", ptr ") ; e.w(keyAlloca) ; e.w("\n")
 			e.w("  call void @runtime.hashmapBinaryDelete(ptr ") ; e.w(mapVal)
-			e.w(", ptr ") ; e.w(keyAlloca) ; e.w(", ptr null)\n")
+			e.w(", ptr ") ; e.w(keyAlloca) ; e.w(")\n")
 			e.declareRuntime("runtime.hashmapBinaryDelete", "void", "ptr, ptr")
 			return
 		}
@@ -3884,8 +3938,8 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 				e.nextReg++
 				tmp := "%free.idata" | irItoa(e.nextReg)
 				e.w("  ") ; e.w(tmp) ; e.w(" = extractvalue { ptr, ptr } ") ; e.w(argOp) ; e.w(", 1\n")
-				e.w("  call void @runtime.free(ptr ") ; e.w(tmp) ; e.w(", ptr null)\n")
-				e.declareRuntime("runtime.free", "void", "ptr, ptr")
+				e.w("  call void @runtime.free(ptr ") ; e.w(tmp) ; e.w(")\n")
+				e.declareRuntime("runtime.free", "void", "ptr")
 				return
 			}
 			if isSlice || isStr {
@@ -3895,11 +3949,11 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 				argOp = tmp
 			}
 			if isMap {
-				e.w("  call void @runtime.hashmapDestroy(ptr ") ; e.w(argOp) ; e.w(", ptr null)\n")
-				e.declareRuntime("runtime.hashmapDestroy", "void", "ptr, ptr")
+				e.w("  call void @runtime.hashmapDestroy(ptr ") ; e.w(argOp) ; e.w(")\n")
+				e.declareRuntime("runtime.hashmapDestroy", "void", "ptr")
 			} else {
-				e.w("  call void @runtime.free(ptr ") ; e.w(argOp) ; e.w(", ptr null)\n")
-				e.declareRuntime("runtime.free", "void", "ptr, ptr")
+				e.w("  call void @runtime.free(ptr ") ; e.w(argOp) ; e.w(")\n")
+				e.declareRuntime("runtime.free", "void", "ptr")
 			}
 			if uop, ok := arg.(*SSAUnOp); ok && uop.Op == OpMul {
 				addrOp := e.operand(uop.X)
@@ -3979,23 +4033,23 @@ func (e *irEmitter) emitStructFree(st *TCStruct, baseAddr string) {
 			e.nextReg++
 			dataPtr := "%free.dp" | irItoa(e.nextReg)
 			e.w("  ") ; e.w(dataPtr) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(sliceVal) ; e.w(", 0\n")
-			e.w("  call void @runtime.free(ptr ") ; e.w(dataPtr) ; e.w(", ptr null)\n")
+			e.w("  call void @runtime.free(ptr ") ; e.w(dataPtr) ; e.w(")\n")
 			e.w("  store ") ; e.w(sty) ; e.w(" zeroinitializer, ptr ") ; e.w(fieldAddr) ; e.w("\n")
-			e.declareRuntime("runtime.free", "void", "ptr, ptr")
+			e.declareRuntime("runtime.free", "void", "ptr")
 		} else if isMap {
 			e.nextReg++
 			ptrVal := "%free.pv" | irItoa(e.nextReg)
 			e.w("  ") ; e.w(ptrVal) ; e.w(" = load ptr, ptr ") ; e.w(fieldAddr) ; e.w("\n")
-			e.w("  call void @runtime.hashmapDestroy(ptr ") ; e.w(ptrVal) ; e.w(", ptr null)\n")
+			e.w("  call void @runtime.hashmapDestroy(ptr ") ; e.w(ptrVal) ; e.w(")\n")
 			e.w("  store ptr null, ptr ") ; e.w(fieldAddr) ; e.w("\n")
-			e.declareRuntime("runtime.hashmapDestroy", "void", "ptr, ptr")
+			e.declareRuntime("runtime.hashmapDestroy", "void", "ptr")
 		} else if isPtr {
 			e.nextReg++
 			ptrVal := "%free.pv" | irItoa(e.nextReg)
 			e.w("  ") ; e.w(ptrVal) ; e.w(" = load ptr, ptr ") ; e.w(fieldAddr) ; e.w("\n")
-			e.w("  call void @runtime.free(ptr ") ; e.w(ptrVal) ; e.w(", ptr null)\n")
+			e.w("  call void @runtime.free(ptr ") ; e.w(ptrVal) ; e.w(")\n")
 			e.w("  store ptr null, ptr ") ; e.w(fieldAddr) ; e.w("\n")
-			e.declareRuntime("runtime.free", "void", "ptr, ptr")
+			e.declareRuntime("runtime.free", "void", "ptr")
 		}
 	}
 }
@@ -4009,16 +4063,16 @@ func (e *irEmitter) emitPrintArg(val string, t Type) {
 	case *Basic:
 		switch {
 		case u.Info()&IsString != 0:
-			e.w("  call void @runtime.printstring(") ; e.w(sty) ; e.w(" ") ; e.w(val) ; e.w(", ptr null)\n")
+			e.w("  call void @runtime.printstring(") ; e.w(sty) ; e.w(" ") ; e.w(val) ; e.w(")\n")
 			e.declareRuntime("runtime.printstring", "void", sty)
 		case u.Kind() == Bool || u.Kind() == UntypedBool:
-			e.w("  call void @runtime.printbool(i1 ") ; e.w(val) ; e.w(", ptr null)\n")
+			e.w("  call void @runtime.printbool(i1 ") ; e.w(val) ; e.w(")\n")
 			e.declareRuntime("runtime.printbool", "void", "i1")
 		case u.Kind() == Float32:
-			e.w("  call void @runtime.printfloat32(float ") ; e.w(val) ; e.w(", ptr null)\n")
+			e.w("  call void @runtime.printfloat32(float ") ; e.w(val) ; e.w(")\n")
 			e.declareRuntime("runtime.printfloat32", "void", "float")
 		case u.Kind() == Float64 || u.Kind() == UntypedFloat:
-			e.w("  call void @runtime.printfloat64(double ") ; e.w(val) ; e.w(", ptr null)\n")
+			e.w("  call void @runtime.printfloat64(double ") ; e.w(val) ; e.w(")\n")
 			e.declareRuntime("runtime.printfloat64", "void", "double")
 		case u.Info()&IsUnsigned != 0:
 			lt := e.llvmType(t)
@@ -4036,18 +4090,18 @@ func (e *irEmitter) emitPrintArg(val string, t Type) {
 		e.nextReg++
 		tmp := "%pr" | irItoa(e.nextReg)
 		e.w("  ") ; e.w(tmp) ; e.w(" = ptrtoint ptr ") ; e.w(val) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
-		e.w("  call void @runtime.printptr(") ; e.w(ipt) ; e.w(" ") ; e.w(tmp) ; e.w(", ptr null)\n")
+		e.w("  call void @runtime.printptr(") ; e.w(ipt) ; e.w(" ") ; e.w(tmp) ; e.w(")\n")
 		e.declareRuntime("runtime.printptr", "void", ipt)
 	case *Slice:
 		if b, ok := u.Elem().(*Basic); ok && (b.Kind() == Uint8 || b.Kind() == Int8) {
-			e.w("  call void @runtime.printbytes(") ; e.w(sty) ; e.w(" ") ; e.w(val) ; e.w(", ptr null)\n")
+			e.w("  call void @runtime.printbytes(") ; e.w(sty) ; e.w(" ") ; e.w(val) ; e.w(")\n")
 			e.declareRuntime("runtime.printbytes", "void", sty)
 		} else {
-			e.w("  call void @runtime.printstring(") ; e.w(sty) ; e.w(" ") ; e.w(val) ; e.w(", ptr null)\n")
+			e.w("  call void @runtime.printstring(") ; e.w(sty) ; e.w(" ") ; e.w(val) ; e.w(")\n")
 			e.declareRuntime("runtime.printstring", "void", sty)
 		}
 	case *TCMap:
-		e.w("  call void @runtime.printmap(ptr ") ; e.w(val) ; e.w(", ptr null)\n")
+		e.w("  call void @runtime.printmap(ptr ") ; e.w(val) ; e.w(")\n")
 		e.declareRuntime("runtime.printmap", "void", "ptr")
 	}
 }
@@ -4208,7 +4262,12 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 				e.nextReg++
 				tmp := "%nr" | irItoa(e.nextReg)
 				e.w("  ") ; e.w(tmp) ; e.w(" = load ") ; e.w(nrt) ; e.w(", ptr ") ; e.w(e.regName(nr)) ; e.w("\n")
-				e.w("  ret ") ; e.w(nrt) ; e.w(" ") ; e.w(tmp) ; e.w("\n")
+				if e.sretType != "" {
+					e.w("  store ") ; e.w(nrt) ; e.w(" ") ; e.w(tmp) ; e.w(", ptr %retval\n")
+					e.w("  ret void\n")
+				} else {
+					e.w("  ret ") ; e.w(nrt) ; e.w(" ") ; e.w(tmp) ; e.w("\n")
+				}
 			} else {
 				retType := rt
 				e.nextReg++
@@ -4228,10 +4287,20 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 				e.nextReg++
 				rv := "%nr" | irItoa(e.nextReg)
 				e.w("  ") ; e.w(rv) ; e.w(" = load ") ; e.w(retType) ; e.w(", ptr ") ; e.w(agg) ; e.w("\n")
-				e.w("  ret ") ; e.w(retType) ; e.w(" ") ; e.w(rv) ; e.w("\n")
+				if e.sretType != "" {
+					e.w("  store ") ; e.w(retType) ; e.w(" ") ; e.w(rv) ; e.w(", ptr %retval\n")
+					e.w("  ret void\n")
+				} else {
+					e.w("  ret ") ; e.w(retType) ; e.w(" ") ; e.w(rv) ; e.w("\n")
+				}
 			}
 		} else {
-			e.w("  ret ") ; e.w(rt) ; e.w(" zeroinitializer\n")
+			if e.sretType != "" {
+				e.w("  store ") ; e.w(rt) ; e.w(" zeroinitializer, ptr %retval\n")
+				e.w("  ret void\n")
+			} else {
+				e.w("  ret ") ; e.w(rt) ; e.w(" zeroinitializer\n")
+			}
 		}
 		return
 	}
@@ -4268,11 +4337,12 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 				val = "zeroinitializer"
 			}
 		}
-		e.w("  ret ")
-		e.w(expectType)
-		e.w(" ")
-		e.w(val)
-		e.w("\n")
+		if e.sretType != "" {
+			e.w("  store ") ; e.w(expectType) ; e.w(" ") ; e.w(val) ; e.w(", ptr %retval\n")
+			e.w("  ret void\n")
+		} else {
+			e.w("  ret ") ; e.w(expectType) ; e.w(" ") ; e.w(val) ; e.w("\n")
+		}
 		return
 	}
 	var expectTypes []string
@@ -4354,11 +4424,12 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 		e.w("\n")
 		prev = cur
 	}
-	e.w("  ret ")
-	e.w(retType)
-	e.w(" ")
-	e.w(prev)
-	e.w("\n")
+	if e.sretType != "" {
+		e.w("  store ") ; e.w(retType) ; e.w(" ") ; e.w(prev) ; e.w(", ptr %retval\n")
+		e.w("  ret void\n")
+	} else {
+		e.w("  ret ") ; e.w(retType) ; e.w(" ") ; e.w(prev) ; e.w("\n")
+	}
 }
 
 func blockHasReturn(b *SSABasicBlock) (ok bool) {
@@ -4493,9 +4564,9 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 				sz := e.nextReg2("cv")
 				e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(srcType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 				valPtr = e.nextReg2("cv")
-				e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
+				e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null)\n")
 				e.w("  store ") ; e.w(srcType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
-				e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr, ptr")
+				e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 			}
 			typeid := e.typeIDGlobal(c.X.SSAType())
 			t1 := e.nextReg2("cv")
@@ -4536,7 +4607,7 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 				e.w("  ") ; e.w(srcVal) ; e.w(" = trunc ") ; e.w(srcType) ; e.w(" ") ; e.w(val) ; e.w(" to i32\n")
 			}
 		}
-		e.w("  ") ; e.w(reg) ; e.w(" = call ") ; e.w(e.sliceType()) ; e.w(" @runtime.stringFromUnicode(i32 ") ; e.w(srcVal) ; e.w(", ptr null)\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = call ") ; e.w(e.sliceType()) ; e.w(" @runtime.stringFromUnicode(i32 ") ; e.w(srcVal) ; e.w(")\n")
 		return
 	}
 
@@ -5097,8 +5168,8 @@ func (e *irEmitter) emitMakeSlice(m *SSAMakeSlice) {
 		e.w(ipt)
 		e.w(" ")
 		e.w(allocSz)
-		e.w(", ptr null, ptr null)\n")
-		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr, ptr")
+		e.w(", ptr null)\n")
+		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 		e.scopeTrackAlloc(dataPtr)
 	}
 	e.nextReg++
@@ -5331,9 +5402,9 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 		sz := e.nextReg2("ha")
 		e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(valType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 		valPtr = e.nextReg2("mi")
-		e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
+		e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null)\n")
 		e.w("  store ") ; e.w(valType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
-		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr, ptr")
+		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 		e.scopeTrackAlloc(valPtr)
 	}
 	typeid := e.typeIDGlobal(m.X.SSAType())
@@ -5976,7 +6047,7 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 			e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(e.implFuncSym(impl)) ; e.w("(")
 			e.w(recvLLVM) ; e.w(" ") ; e.w(recv)
 			e.emitInvokeArgs(prepArgs)
-			e.w(", ptr null)\n")
+			e.w(")\n")
 		}
 		return
 	}
@@ -6051,7 +6122,7 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 			e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(e.implFuncSym(impl)) ; e.w("(")
 			e.w(recvLLVM) ; e.w(" ") ; e.w(recv)
 			e.emitInvokeArgs(prepArgs)
-			e.w(", ptr null)\n")
+			e.w(")\n")
 		}
 		e.w("  br label %") ; e.w(mergeLabel) ; e.w("\n")
 	}
@@ -6204,7 +6275,7 @@ func (e *irEmitter) emitMakeMap(m *SSAMakeMap) {
 	e.w("  ") ; e.w(reg) ; e.w(" = call ptr @runtime.hashmapMake(")
 	e.w(ipt) ; e.w(" ") ; e.w(keySz) ; e.w(", ")
 	e.w(ipt) ; e.w(" ") ; e.w(valSz) ; e.w(", ")
-	e.w(ipt) ; e.w(" ") ; e.w(hint) ; e.w(", i8 ") ; e.w(alg) ; e.w(", ptr null)\n")
+	e.w(ipt) ; e.w(" ") ; e.w(hint) ; e.w(", i8 ") ; e.w(alg) ; e.w(")\n")
 	e.declareRuntime("runtime.hashmapMake", "ptr", ipt | ", " | ipt | ", " | ipt | ", i8")
 	e.scopeTrackAlloc(reg)
 }
@@ -6250,12 +6321,12 @@ func (e *irEmitter) emitMapUpdate(m *SSAMapUpdate) {
 		e.w(", ptr ") ; e.w(kd)
 		e.w(", i64 ") ; e.w(kl)
 		e.w(", i64 ") ; e.w(kc)
-		e.w(", ptr ") ; e.w(valAlloca) ; e.w(", ptr null)\n")
+		e.w(", ptr ") ; e.w(valAlloca) ; e.w(")\n")
 		e.declareRuntime("runtime.hashmapContentSet", "void", "ptr, ptr, i64, i64, ptr")
 	} else {
 		e.w("  call void @runtime.hashmapBinarySet(ptr ") ; e.w(mapVal)
 		e.w(", ptr ") ; e.w(keyAlloca)
-		e.w(", ptr ") ; e.w(valAlloca) ; e.w(", ptr null)\n")
+		e.w(", ptr ") ; e.w(valAlloca) ; e.w(")\n")
 		e.declareRuntime("runtime.hashmapBinarySet", "void", "ptr, ptr, ptr")
 	}
 }
@@ -6294,7 +6365,7 @@ func (e *irEmitter) emitLookup(l *SSALookup) {
 		e.w(", i64 ") ; e.w(kl)
 		e.w(", i64 ") ; e.w(kc)
 		e.w(", ptr ") ; e.w(valAlloca)
-		e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(valSz) ; e.w(", ptr null)\n")
+		e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(valSz) ; e.w(")\n")
 		e.declareRuntime("runtime.hashmapContentGet", "i1", "ptr, ptr, i64, i64, ptr, " | ipt)
 		if l.CommaOk {
 			loaded := e.nextReg2("ml")
@@ -6314,7 +6385,7 @@ func (e *irEmitter) emitLookup(l *SSALookup) {
 		e.w("  ") ; e.w(okReg) ; e.w(" = call i1 @runtime.hashmapBinaryGet(ptr ") ; e.w(mapVal)
 		e.w(", ptr ") ; e.w(keyAlloca)
 		e.w(", ptr ") ; e.w(valAlloca)
-		e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(valSz) ; e.w(", ptr null)\n")
+		e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(valSz) ; e.w(")\n")
 		e.declareRuntime("runtime.hashmapBinaryGet", "i1", "ptr, ptr, ptr, " | ipt)
 		if l.CommaOk {
 			loaded := e.nextReg2("ml")
@@ -6358,8 +6429,8 @@ func (e *irEmitter) emitMakeClosure(m *SSAMakeClosure) {
 	e.w(ctxType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 	ctxPtr := e.nextReg2("mc")
 	e.w("  ") ; e.w(ctxPtr) ; e.w(" = call ptr @runtime.alloc(")
-	e.w(ipt) ; e.w(" ") ; e.w(ctxSz) ; e.w(", ptr null, ptr null)\n")
-	e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr, ptr")
+	e.w(ipt) ; e.w(" ") ; e.w(ctxSz) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 	e.scopeTrackAlloc(ctxPtr)
 
 	for i, b := range m.Bindings {
@@ -6370,7 +6441,7 @@ func (e *irEmitter) emitMakeClosure(m *SSAMakeClosure) {
 			boxAlloc := e.nextReg2("mc")
 			e.w("  ") ; e.w(boxAlloc) ; e.w(" = call ptr @runtime.alloc(")
 			e.w(ipt) ; e.w(" ptrtoint (ptr getelementptr (") ; e.w(actualType)
-			e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("), ptr null, ptr null)\n")
+			e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("), ptr null)\n")
 			e.w("  store ") ; e.w(actualType) ; e.w(" ") ; e.w(bval) ; e.w(", ptr ") ; e.w(boxAlloc) ; e.w("\n")
 			bval = boxAlloc
 		}
@@ -6436,13 +6507,13 @@ func (e *irEmitter) emitPanic(p *SSAPanic) {
 	if c, ok := p.X.(*SSAConst); ok && e.isStringLike(c.SSAType()) {
 		arg := e.operand(c)
 		sty := e.sliceType()
-		e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(", ptr null)\n")
+		e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(")\n")
 		e.declareRuntime("runtime._panicstr", "void", sty)
 		e.w("  unreachable\n")
 		return
 	}
-	e.w("  call void @runtime._panic(ptr null, ptr null)\n")
-	e.declareRuntime("runtime._panic", "void", "ptr")
+	e.w("  call void @runtime._panic({ptr, ptr} zeroinitializer)\n")
+	e.declareRuntime("runtime._panic", "void", "{ptr, ptr}")
 	e.w("  unreachable\n")
 }
 
@@ -6622,7 +6693,7 @@ func (e *irEmitter) emitNextMap(reg, iterPtr, collVal string, mt *TCMap, n *SSAN
 	e.w("  ") ; e.w(ok) ; e.w(" = call i1 @runtime.hashmapNext(ptr ") ; e.w(collVal)
 	e.w(", ptr ") ; e.w(iterPtr)
 	e.w(", ptr ") ; e.w(keyAlloca)
-	e.w(", ptr ") ; e.w(valAlloca) ; e.w(", ptr null)\n")
+	e.w(", ptr ") ; e.w(valAlloca) ; e.w(")\n")
 	key := e.nextReg2("mn")
 	e.w("  ") ; e.w(key) ; e.w(" = load ") ; e.w(keyType) ; e.w(", ptr ") ; e.w(keyAlloca) ; e.w("\n")
 	val := e.nextReg2("mn")
@@ -6999,24 +7070,24 @@ func (e *irEmitter) emitDeferBuiltin(d *SSADefer, bi *SSABuiltin, pfx string, id
 		e.emitChanPanic()
 	} else if name == "panic" && len(args) == 1 {
 		e.declareRuntime("runtime._panicstr", "void", argTypes[0])
-		e.w("  call void @runtime._panicstr(") ; e.w(argTypes[0]) ; e.w(" ") ; e.w(args[0]) ; e.w(", ptr null)\n")
+		e.w("  call void @runtime._panicstr(") ; e.w(argTypes[0]) ; e.w(" ") ; e.w(args[0]) ; e.w(")\n")
 	} else if name == "println" || name == "print" {
 		e.declareRuntime("runtime.printlock", "void", "")
 		e.declareRuntime("runtime.printunlock", "void", "")
 		e.declareRuntime("runtime.printnl", "void", "")
-		e.w("  call void @runtime.printlock(ptr null, ptr null)\n")
+		e.w("  call void @runtime.printlock()\n")
 		for ai, av := range args {
 			if ai > 0 {
 				e.declareRuntime("runtime.printspace", "void", "")
-				e.w("  call void @runtime.printspace(ptr null, ptr null)\n")
+				e.w("  call void @runtime.printspace()\n")
 			}
 			at := argTypes[ai]
 			if at == e.sliceType() || at == "{ptr, i64, i64}" {
 				e.declareRuntime("runtime.printstring", "void", e.sliceType())
-				e.w("  call void @runtime.printstring(") ; e.w(at) ; e.w(" ") ; e.w(av) ; e.w(", ptr null)\n")
+				e.w("  call void @runtime.printstring(") ; e.w(at) ; e.w(" ") ; e.w(av) ; e.w(")\n")
 			} else if at == "i1" {
 				e.declareRuntime("runtime.printbool", "void", "i1")
-				e.w("  call void @runtime.printbool(i1 ") ; e.w(av) ; e.w(", ptr null)\n")
+				e.w("  call void @runtime.printbool(i1 ") ; e.w(av) ; e.w(")\n")
 			} else if at == "i32" || at == "i64" || at == "i16" || at == "i8" {
 				fname := "runtime.printint" | at[1:]
 				e.declareRuntime(fname, "void", at)
@@ -7026,13 +7097,13 @@ func (e *irEmitter) emitDeferBuiltin(d *SSADefer, bi *SSABuiltin, pfx string, id
 				e.declareRuntime("runtime.printptr", "void", ipt)
 				tmp := "%" | pfx | ".ptmp" | irItoa(ai)
 				e.w("  ") ; e.w(tmp) ; e.w(" = ptrtoint ptr ") ; e.w(av) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
-				e.w("  call void @runtime.printptr(") ; e.w(ipt) ; e.w(" ") ; e.w(tmp) ; e.w(", ptr null)\n")
+				e.w("  call void @runtime.printptr(") ; e.w(ipt) ; e.w(" ") ; e.w(tmp) ; e.w(")\n")
 			}
 		}
 		if name == "println" {
-			e.w("  call void @runtime.printnl(ptr null, ptr null)\n")
+			e.w("  call void @runtime.printnl()\n")
 		}
-		e.w("  call void @runtime.printunlock(ptr null, ptr null)\n")
+		e.w("  call void @runtime.printunlock()\n")
 	} else if name == "delete" && len(args) == 2 {
 		e.declareRuntime("runtime.hashmapBinaryDelete", "void", "ptr, ptr, i32")
 		e.w("  ; defer delete - not fully implemented\n")
@@ -7075,10 +7146,6 @@ func (e *irEmitter) emitDeferDispatch(d *SSADefer, pfx string, idx int32) {
 			if i > 0 { e.w(", ") }
 			e.w(argTypes[i]) ; e.w(" ") ; e.w(av)
 		}
-		if !fn.isExternC {
-			if len(args) > 0 { e.w(", ") }
-			e.w("ptr null")
-		}
 		e.w(")\n")
 	} else {
 		fvGep := "%" | pfx | ".dfv" | irItoa(idx)
@@ -7105,13 +7172,11 @@ func (e *irEmitter) emitDeferDispatch(d *SSADefer, pfx string, idx int32) {
 			fieldIdx++
 		}
 		rt := e.deferRetType(d)
-		e.w("  call ") ; e.w(rt) ; e.w(" ") ; e.w(fpReg) ; e.w("(")
+		e.w("  call ") ; e.w(rt) ; e.w(" ") ; e.w(fpReg) ; e.w("(ptr ") ; e.w(ctxReg)
 		for i, av := range args {
-			if i > 0 { e.w(", ") }
+			e.w(", ")
 			e.w(argTypes[i]) ; e.w(" ") ; e.w(av)
 		}
-		if len(args) > 0 { e.w(", ") }
-		e.w("ptr ") ; e.w(ctxReg)
 		e.w(")\n")
 	}
 }
@@ -7289,6 +7354,49 @@ func scanExportPragmas(src []byte) (m map[string]string) {
 	}
 	return result
 }
+
+func scanLinknameMap(src []byte) (m map[string]string) {
+	result := map[string]string{}
+	prefix := []byte("//:linkname ")
+	i := 0
+	for i < len(src) {
+		nlIdx := lIndexByte(src[i:], '\n')
+		var line []byte
+		var lineEnd int32
+		if nlIdx < 0 {
+			line = src[i:]
+			lineEnd = len(src)
+		} else {
+			line = src[i : i+nlIdx]
+			lineEnd = i + nlIdx + 1
+		}
+		trimmed := lTrimSpace(line)
+		if lHasPrefix(trimmed, prefix) {
+			rest := string(lTrimSpace(trimmed[12:]))
+			sp := 0
+			for sp < len(rest) && rest[sp] != ' ' && rest[sp] != '\t' {
+				sp++
+			}
+			if sp < len(rest) {
+				localName := rest[:sp]
+				targetName := ""
+				for j := sp + 1; j < len(rest); j++ {
+					if rest[j] != ' ' && rest[j] != '\t' {
+						targetName = rest[j:]
+						break
+					}
+				}
+				if targetName != "" {
+					result[localName] = targetName
+				}
+			}
+		}
+		i = lineEnd
+	}
+	return result
+}
+
+var linknameMap map[string]string
 
 func typeCheckPkg(src []byte, name string) (*TCPackage, *syntax.File) {
 	initUniverse()
@@ -7701,6 +7809,7 @@ func releaseFileDeep(f *syntax.File) {
 func CompileToIR(src []byte, name string, triple string) (s string) {
 	compileTargetTriple = triple
 	scanEmbedPragmas(src, compilePkgDir)
+	linknameMap = scanLinknameMap(src)
 	pkg, file := typeCheckPkg(src, name)
 	ScanGenericDecls(src, name)
 	if file == nil {
@@ -8882,7 +8991,7 @@ func (e *irEmitter) chanPanicStr() (s string) {
 func (e *irEmitter) emitChanPanic() {
 	sty := e.sliceType()
 	e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" ")
-	e.w(e.chanPanicStr()) ; e.w(", ptr null)\n")
+	e.w(e.chanPanicStr()) ; e.w(")\n")
 	e.declareRuntime("runtime._panicstr", "void", sty)
 	e.w("  unreachable\n")
 	e.blockDead = true
@@ -9046,7 +9155,7 @@ func (e *irEmitter) deallocAfterAlloc(a *SSAAlloc, reg string) {
 		return
 	}
 	entry := "%dealloc.entry." | irItoa(idx)
-	e.w("  call void @runtime.deallocPush(ptr " | reg | ", ptr %dealloc.head, ptr " | entry | ", ptr null)\n")
+	e.w("  call void @runtime.deallocPush(ptr " | reg | ", ptr %dealloc.head, ptr " | entry | ")\n")
 }
 
 func (e *irEmitter) deallocBeforeReturn(r *SSAReturn) {
@@ -9059,7 +9168,7 @@ func (e *irEmitter) deallocBeforeReturn(r *SSAReturn) {
 	e.nextReg++
 	tmp := "%dealloc.list" | irItoa(e.nextReg)
 	e.w("  " | tmp | " = load ptr, ptr %dealloc.head\n")
-	e.w("  call void @runtime.deallocFree(ptr " | tmp | ", ptr null)\n")
+	e.w("  call void @runtime.deallocFree(ptr " | tmp | ")\n")
 }
 
 func (e *irEmitter) deallocEscapeResult(v SSAValue) {
@@ -9071,18 +9180,19 @@ func (e *irEmitter) deallocEscapeResult(v SSAValue) {
 			e.nextReg++
 			tmp := "%dealloc.esc.list" | irItoa(e.nextReg)
 			e.w("  " | tmp | " = load ptr, ptr %dealloc.head\n")
-			e.w("  call void @runtime.deallocEscape(ptr " | e.operand(v) | ", ptr " | tmp | ", ptr null)\n")
+			e.w("  call void @runtime.deallocEscape(ptr " | e.operand(v) | ", ptr " | tmp | ")\n")
 		}
 	}
 }
 
 func (e *irEmitter) scopeTrackAlloc(ptrReg string) {
+	return
 	if !e.scopeActive {
 		return
 	}
 	e.w("  call void @runtime.scopePush(ptr ")
 	e.w(ptrReg)
-	e.w(", ptr %scope.head, ptr null)\n")
+	e.w(", ptr %scope.head)\n")
 }
 
 func (e *irEmitter) emitScopeFreeAll() {
@@ -9127,7 +9237,7 @@ func (e *irEmitter) emitScopeFreesTo(scopeID int32) {
 	e.w(cur)
 	e.w(", ptr ")
 	e.w(saved)
-	e.w(", ptr null)\n")
+	e.w(")\n")
 	e.w("  store ptr ")
 	e.w(fn)
 	e.w(", ptr %scope.head\n")
@@ -9159,6 +9269,7 @@ func (e *irEmitter) emitScopeSave(b *SSABasicBlock) {
 }
 
 func (e *irEmitter) emitScopeRelocateOnStore(s *SSAStore, val, valType string) {
+	return
 	if !e.scopeActive {
 		return
 	}
@@ -9198,7 +9309,7 @@ func (e *irEmitter) emitScopeRelocateOnStore(s *SSAStore, val, valType string) {
 	e.w(ptrReg)
 	e.w(", ptr %scope.head, ptr %scope.save.")
 	e.w(irItoa(blk.ScopeID))
-	e.w(", ptr null)\n")
+	e.w(")\n")
 	e.declareRuntime("runtime.scopeRelocate", "void", "ptr, ptr, ptr")
 }
 
