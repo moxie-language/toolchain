@@ -2270,6 +2270,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		y := b.getValue(expr.Y, getPos(expr))
 		return b.createBinOp(expr.Op, expr.X.Type(), expr.Y.Type(), x, y, expr.Pos())
 	case *ssa.Call:
+		b.deallocCheckCall(expr.Common())
 		return b.createFunctionCall(expr.Common())
 	case *ssa.ChangeInterface:
 		// Do not change between interface types: always use the underlying

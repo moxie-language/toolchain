@@ -802,15 +802,8 @@ func isStdlib(path string) (ok bool) {
 	return !hasPrefix(path, "/") && !hasPrefix(path, "./") && !hasPrefix(path, "../")
 }
 
-var builtinOnly []string
-
 func isBuiltinOnly(path string) (ok bool) {
-	for _, b := range builtinOnly {
-		if path == b {
-			return true
-		}
-	}
-	return false
+	return path == "unsafe"
 }
 
 func loadSysroot(path string) {
@@ -1350,6 +1343,7 @@ func registerBuiltins() {
 	unsafePkg.Scope().Insert(NewTCFunc(unsafePkg, "Alignof", parseSignatureDesc("interface{}->int32")))
 	unsafePkg.Scope().Insert(NewTCFunc(unsafePkg, "Slice", parseSignatureDesc("ptr,int32->[]uint8")))
 	unsafePkg.Scope().Insert(NewTCFunc(unsafePkg, "SliceData", parseSignatureDesc("[]uint8->ptr")))
+	unsafePkg.Scope().Insert(NewTCFunc(unsafePkg, "Add", parseSignatureDesc("ptr,int64->ptr")))
 	importRegistry["unsafe"] = unsafePkg
 
 	// moxie - spawn/codec runtime, special handling
@@ -2454,32 +2448,52 @@ func cmdTest(args []string) {
 		linkArgs = append(linkArgs, "--override=" | bf)
 	}
 	linkArgs = append(linkArgs, "--override=" | initAllBc)
+	var testNativeObjs []string
+	objFiles := getenv("OBJ_FILES")
+	if objFiles == "" {
+		objEntries := listFiles(joinPath(sysroot, "obj"), ".bc")
+		if objEntries != nil {
+			for _, e := range objEntries {
+				objPath := joinPath(joinPath(sysroot, "obj"), e)
+				odata, rok := readFile(objPath)
+				if !rok || len(odata) < 4 {
+					continue
+				}
+				if odata[0] == 0x7f && odata[1] == 'E' && odata[2] == 'L' && odata[3] == 'F' {
+					testNativeObjs = append(testNativeObjs, objPath)
+				} else {
+					linkArgs = append(linkArgs, "--override=" | objPath)
+				}
+			}
+		}
+	} else {
+		for _, f := range splitBySpace(objFiles) {
+			if f != "" {
+				testNativeObjs = append(testNativeObjs, f)
+			}
+		}
+	}
 	rc = run(linkArgs)
 	if rc != 0 {
 		fatal("llvm-link failed")
 	}
 
 	outpath := joinPath(tmpdir, "test.bin")
-	writeStr(2, "  link\n")
-	objFiles := getenv("OBJ_FILES")
-	if objFiles == "" {
-		objEntries := listFiles(joinPath(sysroot, "obj"), ".bc")
-		if objEntries != nil {
-			for _, e := range objEntries {
-				objFiles = objFiles | joinPath(joinPath(sysroot, "obj"), e) | " "
-			}
-		}
+	writeStr(2, "  compile merged\n")
+	testMergedObj := joinPath(tmpdir, "merged.o")
+	rc = run([]string{clang, "--target=" | triple, "-c", "-O0", mergedBc, "-o", testMergedObj})
+	if rc != 0 {
+		fatal("clang merged compile failed")
 	}
+	writeStr(2, "  link\n")
 	linker := "ld.lld-21"
 	ldArgs := []string{linker, "--gc-sections", "-o", outpath,
 		joinPath(muslDir, "crt1.o"),
-		mergedBc}
-	for _, f := range splitBySpace(objFiles) {
-		if f != "" {
-			ldArgs = append(ldArgs, f)
-		}
+		testMergedObj}
+	for _, no := range testNativeObjs {
+		ldArgs = append(ldArgs, no)
 	}
-	ldArgs = append(ldArgs, comprtLib, muslLib, "--lto-O0", "-z", "stack-size=67108864")
+	ldArgs = append(ldArgs, comprtLib, muslLib, "-z", "stack-size=67108864")
 	rc = run(ldArgs)
 	if rc != 0 {
 		fatal("linker failed")
@@ -2670,7 +2684,6 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 }
 
 func main() {
-	builtinOnly = []string{"unsafe", "runtime", "moxie", "internal/task"}
 	args := getArgs()
 	if len(args) < 2 {
 		writeStr(2, "usage: mxc <build|test|version|cache|fetch|update> ...\n")
@@ -2987,31 +3000,51 @@ func main() {
 		linkArgs = append(linkArgs, "--override=" | bf)
 	}
 	linkArgs = append(linkArgs, "--override=" | initAllBc)
-	rc = run(linkArgs)
-	if rc != 0 {
-		fatal("llvm-link failed")
-	}
-
-	writeStr(2, "  link\n")
+	var nativeObjs []string
 	objFiles := getenv("OBJ_FILES")
 	if objFiles == "" {
 		objEntries := listFiles(joinPath(sysroot, "obj"), ".bc")
 		if objEntries != nil {
 			for _, e := range objEntries {
-				objFiles = objFiles | joinPath(joinPath(sysroot, "obj"), e) | " "
+				objPath := joinPath(joinPath(sysroot, "obj"), e)
+				odata, rok := readFile(objPath)
+				if !rok || len(odata) < 4 {
+					continue
+				}
+				if odata[0] == 0x7f && odata[1] == 'E' && odata[2] == 'L' && odata[3] == 'F' {
+					nativeObjs = append(nativeObjs, objPath)
+				} else {
+					linkArgs = append(linkArgs, "--override=" | objPath)
+				}
+			}
+		}
+	} else {
+		for _, f := range splitBySpace(objFiles) {
+			if f != "" {
+				nativeObjs = append(nativeObjs, f)
 			}
 		}
 	}
+	rc = run(linkArgs)
+	if rc != 0 {
+		fatal("llvm-link failed")
+	}
+
+	writeStr(2, "  compile merged\n")
+	mergedObj := joinPath(tmpdir, "merged.o")
+	rc = run([]string{clang, "--target=" | triple, "-c", "-O0", mergedBc, "-o", mergedObj})
+	if rc != 0 {
+		fatal("clang merged compile failed")
+	}
+	writeStr(2, "  link\n")
 	linker := "ld.lld-21"
 	ldArgs := []string{linker, "--gc-sections", "-o", outpath,
 		joinPath(muslDir, "crt1.o"),
-		mergedBc}
-	for _, f := range splitBySpace(objFiles) {
-		if f != "" {
-			ldArgs = append(ldArgs, f)
-		}
+		mergedObj}
+	for _, no := range nativeObjs {
+		ldArgs = append(ldArgs, no)
 	}
-	ldArgs = append(ldArgs, comprtLib, muslLib, "--lto-O0", "-z", "stack-size=67108864")
+	ldArgs = append(ldArgs, comprtLib, muslLib, "-z", "stack-size=67108864")
 	rc = run(ldArgs)
 	if rc != 0 {
 		fatal("linker failed")

@@ -1,9 +1,5 @@
-//go:build gc.dealloc
-//:build gc.dealloc
-
-// Deterministic memory allocator with explicit free. No garbage collector.
-// Uses a free-list allocator: freed blocks are reused, no scanning.
-// Designed for WASM where GC mark-phase recursion overflows the call stack.
+// Free-list allocator with block-scoped deallocation. No garbage collector.
+// Freed blocks are reused. Scope tracking via blockHeader.next chain.
 
 package runtime
 
@@ -30,14 +26,15 @@ const nSizeClasses = 10
 
 var freeLists [nSizeClasses]*freeNode
 
-// Block header prepended to every allocation. Padded to 16 bytes
-// to maintain alignment for the user-visible pointer.
+// Block header prepended to every allocation. 16 bytes to maintain
+// alignment. The next field doubles as the scope chain link.
 type blockHeader struct {
-	size uintptr
-	_pad uintptr
+	size uintptr           // allocation size; high bit = escaped flag
+	next unsafe.Pointer    // next allocation in scope chain
 }
 
 const headerSize = 16
+const escapedBit = uintptr(1) << 63
 
 func sizeClass(size uintptr) int32 {
 	switch {
@@ -169,7 +166,7 @@ func free(ptr unsafe.Pointer) {
 		return
 	}
 	hdr := (*blockHeader)(unsafe.Add(ptr, -int32(headerSize)))
-	size := hdr.size
+	size := hdr.size & ^escapedBit
 	if size == 0 {
 		return
 	}
@@ -194,7 +191,7 @@ func realloc(ptr unsafe.Pointer, size uintptr) unsafe.Pointer {
 		return newAlloc
 	}
 	hdr := (*blockHeader)(unsafe.Add(ptr, -int32(headerSize)))
-	oldSize := hdr.size
+	oldSize := hdr.size & ^escapedBit
 	copySize := oldSize
 	if size < copySize {
 		copySize = size

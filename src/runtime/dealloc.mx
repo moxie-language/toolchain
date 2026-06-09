@@ -1,43 +1,52 @@
 package runtime
 
-// Per-function shadow list for deterministic deallocation.
-// The compiler inserts deallocPush after each heap allocation and
-// deallocFree before each return. Pointers that escape (returned,
-// stored in globals) are removed via deallocEscape.
-//
-// The shadow list is a singly-linked stack of entries. Each entry is
-// stack-allocated by the compiler (fixed size, no heap overhead).
-
 import "unsafe"
 
-// deallocEntry is a shadow-list node. The compiler stack-allocates these.
-type deallocEntry struct {
-	ptr  unsafe.Pointer
-	next *deallocEntry
-}
-
-// deallocPush registers a heap pointer in the function's shadow list.
-// If entry is already the head (same stack alloca reused in a loop body),
-// just update the pointer - previous alloc is assumed escaped via store.
+// scopePush links a heap allocation into the current scope chain.
 //
 //:noinline
-func deallocPush(ptr unsafe.Pointer, head **deallocEntry, entry *deallocEntry) {
-	// No-op during bootstrap: free() is disabled, shadow list serves no purpose.
+func scopePush(ptr unsafe.Pointer, head *unsafe.Pointer) {
+	if ptr == nil {
+		return
+	}
+	hdr := (*blockHeader)(unsafe.Add(ptr, -int32(headerSize)))
+	hdr.next = *head
+	*head = ptr
 }
 
+// scopeFreeTo walks the scope chain from current back to saved,
+// freeing non-escaped allocations and relinking escaped ones into
+// the outer scope. Returns the new outer head.
+//
 //:noinline
-func deallocFree(head *deallocEntry) {
-	// No-op during bootstrap: free() is disabled.
+func scopeFreeTo(current unsafe.Pointer, saved unsafe.Pointer) unsafe.Pointer {
+	for current != saved && current != nil {
+		hdr := (*blockHeader)(unsafe.Add(current, -int32(headerSize)))
+		next := hdr.next
+		if hdr.size&escapedBit != 0 {
+			hdr.size = hdr.size & ^escapedBit
+			hdr.next = saved
+			saved = current
+		} else {
+			free(current)
+		}
+		current = next
+	}
+	return saved
 }
 
+// scopeRelocate marks an allocation as escaped from its current scope.
+//
 //:noinline
-func deallocEscape(ptr unsafe.Pointer, head *deallocEntry) {
-	// No-op during bootstrap: free() is disabled.
+func scopeRelocate(ptr unsafe.Pointer, head *unsafe.Pointer, savedHead *unsafe.Pointer) {
+	if ptr == nil {
+		return
+	}
+	hdr := (*blockHeader)(unsafe.Add(ptr, -int32(headerSize)))
+	hdr.size = hdr.size | escapedBit
 }
 
-// Free explicitly deallocates a heap-allocated value. The pointer must
-// not be used after this call. When the dealloc GC is active, Free also
-// removes the pointer from the function's shadow list.
+// Free explicitly deallocates a heap-allocated value.
 func Free(ptr unsafe.Pointer) {
 	free(ptr)
 }
