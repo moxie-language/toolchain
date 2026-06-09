@@ -55,6 +55,14 @@ var compileErrors []string
 var genericFuncDecls map[string]*syntax.FuncDecl
 var genericPkgScopes map[string]*Scope
 
+type embedInfo struct {
+	path     string
+	elemType string
+}
+
+var embedVars map[string]*embedInfo
+var compilePkgDir string
+
 type irEmitter struct {
 	buf        []byte
 	triple     string
@@ -753,9 +761,6 @@ func (e *irEmitter) emit() (s string) {
 			if decl == "" {
 				continue
 			}
-			if e.isPkgFunc2(k) {
-				continue
-			}
 			e.w("declare ")
 			e.w(decl)
 			e.w("\n")
@@ -884,11 +889,80 @@ func (e *irEmitter) resolveGlobalDeclType(g *SSAGlobal) (s string) {
 
 func (e *irEmitter) emitGlobal(g *SSAGlobal) {
 	name := e.globalName(g)
+	if ei, ok := embedVars[g.name]; ok {
+		e.emitEmbedGlobal(g, name, ei)
+		return
+	}
 	typ := e.resolveGlobalDeclType(g)
 	e.w(name)
 	e.w(" = global ")
 	e.w(typ)
 	e.w(" zeroinitializer\n")
+}
+
+func (e *irEmitter) emitEmbedGlobal(g *SSAGlobal, name string, ei *embedInfo) {
+	data, ok := readFile(ei.path)
+	if !ok {
+		e.w("; embed: file not found: " | ei.path | "\n")
+		e.w(name | " = global {ptr, i64, i64} zeroinitializer\n")
+		return
+	}
+	elemSize := e.embedElemSize(ei.elemType)
+	if elemSize <= 0 {
+		e.w("; embed: unknown element type: " | ei.elemType | "\n")
+		e.w(name | " = global {ptr, i64, i64} zeroinitializer\n")
+		return
+	}
+	count := int32(len(data)) / elemSize
+	constName := name | ".data"
+	e.w(constName | " = private constant [" | irItoa(int32(len(data))) | " x i8] c\"")
+	for i := 0; i < len(data); i++ {
+		b := data[i]
+		e.w("\\")
+		hi := b >> 4
+		lo := b & 0x0f
+		if hi < 10 {
+			e.buf = append(e.buf, '0'+hi)
+		} else {
+			e.buf = append(e.buf, 'A'+hi-10)
+		}
+		if lo < 10 {
+			e.buf = append(e.buf, '0'+lo)
+		} else {
+			e.buf = append(e.buf, 'A'+lo-10)
+		}
+	}
+	e.w("\"\n")
+	ipt := e.intptrType()
+	e.w(name | " = global {ptr, " | ipt | ", " | ipt | "} {ptr " | constName | ", " | ipt | " " | irItoa(count) | ", " | ipt | " " | irItoa(count) | "}\n")
+}
+
+func (e *irEmitter) embedElemSize(elemType string) int32 {
+	if elemType == "[]Range16" {
+		return 6
+	}
+	if elemType == "[]Range32" {
+		return 12
+	}
+	if elemType == "[]CaseRange" {
+		return 20
+	}
+	if elemType == "[]foldPair" {
+		return 8
+	}
+	if elemType == "[]uint8" || elemType == "[]byte" {
+		return 1
+	}
+	if elemType == "[]uint16" {
+		return 2
+	}
+	if elemType == "[]uint32" || elemType == "[]int32" {
+		return 4
+	}
+	if elemType == "[]uint64" || elemType == "[]int64" {
+		return 8
+	}
+	return 0
 }
 
 func (e *irEmitter) globalName(g *SSAGlobal) (s string) {
@@ -897,23 +971,6 @@ func (e *irEmitter) globalName(g *SSAGlobal) (s string) {
 		pkg = g.pkg.Pkg.Path()
 	}
 	return irGlobalSymbol(pkg, g.name)
-}
-
-func (e *irEmitter) isPkgFunc2(name string) (ok bool) {
-	for _, m := range e.sortedMembers {
-		if f, ok := m.(*SSAFunction); ok {
-			sym := e.funcSymbol(f)
-			if len(sym) > 2 && sym[0] == '@' && sym[1] == '"' {
-				sym = sym[2 : len(sym)-1]
-			} else if len(sym) > 1 && sym[0] == '@' {
-				sym = sym[1:]
-			}
-			if sym == name {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func irNeedsQuote(s string) (ok bool) {
@@ -1002,11 +1059,6 @@ func (e *irEmitter) emitLibMain() {
 
 func (e *irEmitter) emitFunction(f *SSAFunction) {
 	e.w("; [emit] " | f.name | "\n")
-	sym := e.funcSymbol(f)
-	if len(sym) > 5 && (hasPrefix(sym, "@llvm.") || hasPrefix(sym, "@\"llvm.")) {
-		e.emitFuncDecl(f)
-		return
-	}
 	if len(f.Blocks) == 0 {
 		e.emitFuncDecl(f)
 		return
@@ -1489,36 +1541,33 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 	}
 	if isDoublePtr && elemType == "ptr" {
 		e.allocTypes[a] = elemType
-	} else if elemType == "void" {
+	} else if elemType == "void" || (elemType == "ptr" && nilElem) {
 		inferred := e.inferAllocTypeFromStores(a)
-		elemType = inferred
-		e.allocTypes[a] = elemType
-	} else if elemType == "ptr" && nilElem {
-		inferred := e.inferAllocTypeFromStores(a)
-		if inferred == "ptr" || (len(inferred) > 0 && inferred[0] == '{') {
-			// keep ptr - don't override with aggregates
-		} else {
+		if inferred != "ptr" || elemType == "void" {
 			elemType = inferred
 		}
 		e.allocTypes[a] = elemType
 	} else {
-		isKnownScalar := elemType == "i1" || elemType == "i8" || elemType == "i16" || elemType == "i32" || elemType == "i64" || elemType == "float" || elemType == "double"
-		if !isKnownScalar {
-			override := e.inferAllocTypeFromStores(a)
-			if override != "ptr" && override != elemType {
-				bothScalar := len(elemType) > 0 && elemType[0] == 'i' && len(override) > 0 && override[0] == 'i'
-				isFloatToInt := (elemType == "double" || elemType == "float") && len(override) > 0 && override[0] == 'i'
-				isScalarToAgg := len(elemType) > 0 && (elemType[0] == 'i' || elemType == "double" || elemType == "float") && len(override) > 0 && override[0] == '{'
-				isAggToScalar := len(elemType) > 0 && elemType[0] == '{' && len(override) > 0 && (override[0] == 'i' || override == "double" || override == "float")
-				if !bothScalar && !isFloatToInt && !isScalarToAgg && !isAggToScalar {
-					elemType = override
-					e.allocTypes[a] = elemType
-				}
+		override := e.inferAllocTypeFromStores(a)
+		if override != "ptr" && override != elemType {
+			bothScalar := len(elemType) > 0 && elemType[0] == 'i' && len(override) > 0 && override[0] == 'i'
+			isFloatToInt := (elemType == "double" || elemType == "float") && len(override) > 0 && override[0] == 'i'
+			isScalarToAgg := len(elemType) > 0 && (elemType[0] == 'i' || elemType == "double" || elemType == "float") && len(override) > 0 && override[0] == '{'
+			isAggToScalar := len(elemType) > 0 && elemType[0] == '{' && len(override) > 0 && (override[0] == 'i' || override == "double" || override == "float")
+			if !bothScalar && !isFloatToInt && !isScalarToAgg && !isAggToScalar {
+				elemType = override
+				e.allocTypes[a] = elemType
+			}
+		}
+		if elemType == "i32" && override == "ptr" {
+			usage := e.inferAllocTypeFromUsage(a)
+			if usage != "ptr" && usage != "i32" {
+				elemType = usage
+				e.allocTypes[a] = elemType
 			}
 		}
 	}
-	isScalar := elemType == "i1" || elemType == "i8" || elemType == "i16" || elemType == "i32" || elemType == "i64" || elemType == "float" || elemType == "double" || elemType == "ptr"
-	if !isDoublePtr && !isScalar {
+	if !isDoublePtr {
 		if faType := e.inferAllocTypeFromFieldAddrs(a, elemType); faType != "" {
 			retType := e.inferAllocTypeFromReturn(a)
 			callType := e.inferAllocTypeFromCallArgs(a)
@@ -7083,6 +7132,50 @@ func runeToUTF8(r rune) (s string) {
 	return string(out)
 }
 
+func scanEmbedPragmas(src []byte, pkgDir string) {
+	embedVars = map[string]*embedInfo{}
+	embedPrefix := []byte("//moxie:embed_le ")
+	varPrefix := []byte("var ")
+	commentPrefix := []byte("//")
+	pendingPath := ""
+	i := 0
+	for i < len(src) {
+		nlIdx := lIndexByte(src[i:], '\n')
+		var line []byte
+		var lineEnd int32
+		if nlIdx < 0 {
+			line = src[i:]
+			lineEnd = len(src)
+		} else {
+			line = src[i : i+nlIdx]
+			lineEnd = i + nlIdx + 1
+		}
+		trimmed := lTrimSpace(line)
+		if len(pendingPath) > 0 {
+			if len(trimmed) == 0 || lHasPrefix(trimmed, commentPrefix) {
+				i = lineEnd
+				continue
+			}
+			if lHasPrefix(trimmed, varPrefix) {
+				rest := trimmed[4:]
+				spIdx := lIndexByte(rest, ' ')
+				if spIdx > 0 {
+					varName := string(rest[:spIdx])
+					typeStr := string(lTrimSpace(rest[spIdx+1:]))
+					embedVars[varName] = &embedInfo{path: pendingPath, elemType: typeStr}
+				}
+			}
+			pendingPath = ""
+		} else if lHasPrefix(trimmed, embedPrefix) {
+			pendingPath = string(lTrimSpace(trimmed[18:]))
+			if len(pendingPath) > 0 && pkgDir != "" {
+				pendingPath = joinPath(pkgDir, pendingPath)
+			}
+		}
+		i = lineEnd
+	}
+}
+
 func scanExportPragmas(src []byte) (m map[string]string) {
 	result := map[string]string{}
 	exportPrefix := []byte("//export ")
@@ -7534,6 +7627,7 @@ func releaseFileDeep(f *syntax.File) {
 
 func CompileToIR(src []byte, name string, triple string) (s string) {
 	compileTargetTriple = triple
+	scanEmbedPragmas(src, compilePkgDir)
 	pkg, file := typeCheckPkg(src, name)
 	ScanGenericDecls(src, name)
 	if file == nil {
