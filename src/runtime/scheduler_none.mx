@@ -1,25 +1,12 @@
-//go:build scheduler.none
-//:build scheduler.none
-
 package runtime
 
-import (
-	"internal/task"
-	"runtime/interrupt"
-)
+import "internal/task"
 
 const hasScheduler = false
-
-// No goroutines - single-threaded event dispatch.
 const hasParallelism = false
 
-// Set to true after main.main returns.
 var mainExited bool
 
-// dummy flag, not used without scheduler
-var schedulerExit bool
-
-// run is called by the program entry point to execute the go program.
 func run() {
 	initHeap()
 	initRand()
@@ -34,8 +21,6 @@ func sleep(duration int64) {
 	if duration <= 0 {
 		return
 	}
-
-	// Sleep in chunks, firing expired timers between chunks.
 	target := ticks() + nanosecondsToTicks(duration)
 	for {
 		now := ticks()
@@ -43,28 +28,20 @@ func sleep(duration int64) {
 		if remaining <= 0 {
 			break
 		}
-
-		// If a timer fires before our target, only sleep until that timer.
 		if timerQueue != nil {
 			nextTimer := timerQueue.whenTicks() - now
 			if nextTimer < remaining {
 				remaining = nextTimer
 			}
 		}
-
 		if remaining > 0 {
 			sleepTicks(remaining)
 		}
-
-		// Fire all expired timers.
 		fireTimers()
 	}
-
-	// Final timer check after sleep completes.
 	fireTimers()
 }
 
-// fireTimers runs callbacks for all expired timers.
 func fireTimers() {
 	now := ticks()
 	for timerQueue != nil && timerQueue.whenTicks() <= now {
@@ -75,72 +52,29 @@ func fireTimers() {
 	}
 }
 
-// addTimer adds a timer to the queue. Timers fire during sleep or
-// at explicit yield points.
 func addTimer(tim *timerNode) {
-	mask := interrupt.Disable()
 	timerQueueAdd(tim)
-	interrupt.Restore(mask)
 }
 
-// removeTimer removes a timer from the queue.
 func removeTimer(tim *timer) *timerNode {
-	mask := interrupt.Disable()
-	n := timerQueueRemove(tim)
-	interrupt.Restore(mask)
-	return n
+	return timerQueueRemove(tim)
 }
 
 func deadlock() {
-	runtimePanic("all goroutines are asleep - deadlock!")
+	runtimePanic("deadlock")
 }
 
-func scheduleTask(t *task.Task) {
-	// Single-threaded: no task scheduling. Channel operations
-	// that would block will deadlock (by design).
-}
+func scheduleTask(t *task.Task) {}
 
 func Gosched() {
-	// Single-threaded: fire pending timers as a yield point.
 	fireTimers()
 }
 
-func scheduler(returnAtDeadlock bool) {
-	runtimePanic("unreachable: scheduler must not be called without goroutines")
-}
+func NumCPU() int32 { return 1 }
 
-func schedulerRunQueue() *task.Queue {
-	runtimePanic("unreachable: no runqueue without goroutines")
-	return nil
-}
+func printlock()   {}
+func printunlock() {}
 
-// NumCPU returns the number of logical CPUs usable by the current process.
-func NumCPU() int32 {
-	return 1
-}
-
-func lockAtomics() interrupt.State {
-	return interrupt.Disable()
-}
-
-func unlockAtomics(mask interrupt.State) {
-	interrupt.Restore(mask)
-}
-
-func printlock() {
-	// nothing to do
-}
-
-func printunlock() {
-	// nothing to do
-}
-
-// eventLoopTick runs one iteration of the single-threaded event loop.
-// Called from internal/task when blocking operations need to poll for
-// I/O events and timers without a scheduler.
 func eventLoopTick() {
-	if hasPoll {
-		netpollBlock(1) // 1ms poll
-	}
 	fireTimers()
 }
