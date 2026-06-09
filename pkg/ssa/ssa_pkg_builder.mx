@@ -1,0 +1,629 @@
+package ssa
+
+import (
+	"git.smesh.lol/moxie/pkg/token"
+	"git.smesh.lol/moxie/pkg/syntax"
+	"git.smesh.lol/moxie/pkg/types"
+)
+
+func asType(t syntax.Type) (tv syntax.Type) { return t }
+
+// CreatePackage builds the SSA Package from type-checked syntax files.
+func (prog *SSAProgram) CreatePackage(pkg *types.TCPackage, files []*syntax.File, info *types.Info) (s *SSAPackage) {
+	p := &SSAPackage{
+		Prog:    prog,
+		Pkg:     pkg,
+		Members: map[string]SSAMember{},
+	}
+	prog.packages[pkg] = p
+	prog.imported[pkg.Path()] = p
+
+	pb := &ssaPkgBuilder{pkg: p, info: info, prog: prog}
+
+	for _, f := range files {
+		pb.registerImportsAndTypes(f)
+	}
+	for _, f := range files {
+		pb.registerFile(f)
+	}
+	for _, f := range files {
+		pb.buildFile(f)
+	}
+	if len(pb.varInits) > 0 {
+		pb.buildVarInits()
+	}
+	return p
+}
+
+// ssaPkgBuilder builds one SSAPackage.
+type ssaPkgBuilder struct {
+	pkg      *SSAPackage
+	info     *types.Info
+	prog     *SSAProgram
+	varInits []*syntax.VarDecl
+}
+
+func (pb *ssaPkgBuilder) registerImportsAndTypes(f *syntax.File) {
+	for _, d := range f.DeclList {
+		switch d := d.(type) {
+		case *syntax.ImportDecl:
+			pb.registerImport(d)
+		case *syntax.TypeDecl:
+			pb.registerType(d)
+		}
+	}
+}
+
+func (pb *ssaPkgBuilder) registerFile(f *syntax.File) {
+	for _, d := range f.DeclList {
+		switch d := d.(type) {
+		case *syntax.FuncDecl:
+			pb.registerFunc(d)
+		case *syntax.VarDecl:
+			pb.registerVar(d)
+		case *syntax.ConstDecl:
+			pb.registerConst(d)
+		}
+	}
+}
+
+func (pb *ssaPkgBuilder) registerImport(d *syntax.ImportDecl) {
+	if d.Path == nil {
+		return
+	}
+	path := d.Path.Value
+	if len(path) >= 2 && path[0] == '"' {
+		path = path[1 : len(path)-1]
+	}
+	localName := ""
+	if d.LocalPkgName != nil {
+		localName = d.LocalPkgName.Value
+	}
+	if localName == "" {
+		for i := len(path) - 1; i >= 0; i-- {
+			if path[i] == '/' {
+				localName = path[i+1:]
+				break
+			}
+		}
+		if localName == "" {
+			localName = path
+		}
+	}
+	if localName == "." || localName == "_" {
+		return
+	}
+	existing := pb.pkg.Pkg.Scope().Lookup(localName)
+	if existing != nil {
+		return
+	}
+	impPkg := pb.prog.ImportedPackage(path)
+	if impPkg != nil && impPkg.Pkg != nil {
+		pn := types.NewPkgName(nil, localName, impPkg.Pkg)
+		pb.pkg.Pkg.Scope().Insert(pn)
+	} else {
+		ensureImportRegistry()
+		regPkg := importRegistry[path]
+		if regPkg != nil {
+			pn := types.NewPkgName(nil, localName, regPkg)
+			pb.pkg.Pkg.Scope().Insert(pn)
+		}
+	}
+}
+
+func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t syntax.Type) {
+	if e == nil {
+		return nil
+	}
+	switch e := e.(type) {
+	case *syntax.Name:
+		if _, obj := types.Universe.LookupParent(e.Value); obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				return tn.Type()
+			}
+		}
+		if pkg != nil {
+			obj := pkg.Pkg.Scope().Lookup(e.Value)
+			if tn, ok := obj.(*types.TypeName); ok {
+				return tn.Type()
+			}
+		}
+	case *syntax.Operation:
+		if e.Y == nil && e.Op == token.Mul {
+			base := pkgResolveTypeAST(pkg, e.X)
+			if base != nil {
+				return types.NewPointer(base)
+			}
+		}
+	case *syntax.ArrayType:
+		elem := pkgResolveTypeAST(pkg, e.Elem)
+		if elem != nil {
+			n := int64(-1)
+			if lit, ok := e.Len.(*syntax.BasicLit); ok {
+				n = ssaParseInt64(lit.Value)
+			}
+			return types.NewArray(elem, n)
+		}
+	case *syntax.SliceType:
+		elem := pkgResolveTypeAST(pkg, e.Elem)
+		if elem != nil {
+			if b, ok := elem.(*types.Basic); ok && b.Kind() == types.Uint8 {
+				return types.Typ[types.TCString]
+			}
+			return types.NewSlice(elem)
+		}
+	case *syntax.MapType:
+		key := pkgResolveTypeAST(pkg, e.Key)
+		val := pkgResolveTypeAST(pkg, e.Value)
+		if key != nil && val != nil {
+			return types.NewTCMap(key, val)
+		}
+	case *syntax.FuncType:
+		return pkgResolveSigAST(pkg, e)
+	case *syntax.SelectorExpr:
+		if x, ok := e.X.(*syntax.Name); ok {
+			pn, _ := pkg.Pkg.Scope().Lookup(x.Value).(*types.PkgName)
+			if pn != nil && pn.Imported() != nil {
+				sel := pn.Imported().Scope().Lookup(e.Sel.Value)
+				if tn, ok2 := sel.(*types.TypeName); ok2 {
+					return tn.Type()
+				}
+			}
+		}
+	case *syntax.InterfaceType:
+		return types.NewTCInterface(nil, nil)
+	case *syntax.DotsType:
+		elem := pkgResolveTypeAST(pkg, e.Elem)
+		if elem != nil {
+			if b, ok := elem.(*types.Basic); ok && b.Kind() == types.Uint8 {
+				return types.Typ[types.TCString]
+			}
+			return types.NewSlice(elem)
+		}
+	}
+	return nil
+}
+
+func pkgResolveSigAST(pkg *SSAPackage, ft *syntax.FuncType) (s *types.Signature) {
+	if ft == nil {
+		return nil
+	}
+	var params []*types.TCVar
+	for _, p := range ft.ParamList {
+		typ := pkgResolveTypeAST(pkg, p.Type)
+		pname := ""
+		if p.Name != nil {
+			pname = p.Name.Value
+		}
+		params = append(params, types.NewTCVar(nil, pname, typ))
+	}
+	var results []*types.TCVar
+	for _, r := range ft.ResultList {
+		typ := pkgResolveTypeAST(pkg, r.Type)
+		rname := ""
+		if r.Name != nil {
+			rname = r.Name.Value
+		}
+		results = append(results, types.NewTCVar(nil, rname, typ))
+	}
+	variadic := false
+	if len(ft.ParamList) > 0 {
+		if _, ok := ft.ParamList[len(ft.ParamList)-1].Type.(*syntax.DotsType); ok {
+			variadic = true
+		}
+	}
+	var pTuple, rTuple *types.Tuple
+	if len(params) > 0 {
+		pTuple = types.NewTuple(params...)
+	}
+	if len(results) > 0 {
+		rTuple = types.NewTuple(results...)
+	}
+	return types.NewSignature(nil, pTuple, rTuple, variadic)
+}
+
+func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
+	if len(d.TParamList) > 0 {
+		return
+	}
+	if d.Recv != nil {
+		pb.registerMethod(d)
+		return
+	}
+	if d.Name.Value == "init" {
+		writeStr(2, "compile error: init() is not allowed; use main() for package initialization\n")
+		return
+	}
+	var obj *types.TCFunc
+	if o := pb.pkg.Pkg.Scope().Lookup(d.Name.Value); o != nil {
+		obj, _ = o.(*types.TCFunc)
+	}
+	var sig *types.Signature
+	if obj != nil {
+		sig, _ = obj.Type().(*types.Signature)
+	}
+	if sig == nil && d.Type != nil {
+		sig = pkgResolveSigAST(pb.pkg, d.Type)
+	}
+	fn := &SSAFunction{
+		name:      d.Name.Value,
+		object:    obj,
+		Signature: sig,
+		pos:       0,
+		Pkg:       pb.pkg,
+		Prog:      pb.prog,
+	}
+	if CompileExportMap != nil {
+		if ename, ok := CompileExportMap[d.Name.Value]; ok {
+			fn.externalSymbol = ename
+			fn.isExternC = true
+		}
+	}
+	if d.Body == nil && isNoContextExtern(pb.pkg.Pkg.Path(), d.Name.Value) {
+		fn.isExternC = true
+	}
+	pb.pkg.Members[fn.name] = fn
+}
+
+func checkInitBody(body *syntax.BlockStmt) (s string) {
+	for _, s := range body.List {
+		if err := checkInitStmt(s); err != "" {
+			return err
+		}
+	}
+	return ""
+}
+
+func checkInitStmt(s syntax.Stmt) (sv string) {
+	switch s := s.(type) {
+	case *syntax.SelectStmt:
+		return "select{} not allowed in init()"
+	case *syntax.BlockStmt:
+		for _, sub := range s.List {
+			if err := checkInitStmt(sub); err != "" {
+				return err
+			}
+		}
+	case *syntax.IfStmt:
+		if s.Then != nil {
+			if err := checkInitStmt(s.Then); err != "" {
+				return err
+			}
+		}
+		if s.Else != nil {
+			if err := checkInitStmt(s.Else); err != "" {
+				return err
+			}
+		}
+	case *syntax.ForStmt:
+		if s.Body != nil {
+			if err := checkInitStmt(s.Body); err != "" {
+				return err
+			}
+		}
+	case *syntax.SwitchStmt:
+		for _, cc := range s.Body {
+			for _, sub := range cc.Body {
+				if err := checkInitStmt(sub); err != "" {
+					return err
+				}
+			}
+		}
+	case *syntax.ExprStmt:
+		if err := checkInitExpr(s.X); err != "" {
+			return err
+		}
+	}
+	return ""
+}
+
+func checkInitExpr(x syntax.Expr) (s string) {
+	if x == nil {
+		return ""
+	}
+	if c, ok := x.(*syntax.CallExpr); ok {
+		if n, ok2 := c.Fun.(*syntax.Name); ok2 && n.Value == "spawn" {
+			return "spawn() not allowed in init()"
+		}
+	}
+	return ""
+}
+
+func isNoContextExtern(pkg, name string) (ok bool) {
+	if pkg == "internal/runtime/syscall" && name == "Syscall6" {
+		return true
+	}
+	if pkg == "syscall" {
+		switch name {
+		case "runtime_entersyscall", "runtime_exitsyscall",
+			"Exit", "Getpagesize", "gettimeofday",
+			"runtime_BeforeExec", "runtime_AfterExec",
+			"runtime_BeforeFork", "runtime_AfterFork", "runtime_AfterForkInChild":
+			return true
+		}
+	}
+	if pkg == "os" {
+		switch name {
+		case "putchar", "getchar", "buffered", "gosched", "runtime_args":
+			return true
+		}
+	}
+	return false
+}
+
+func (pb *ssaPkgBuilder) registerMethod(d *syntax.FuncDecl) {
+	recvTypeName := ssaRecvTypeName(d.Recv)
+	if recvTypeName == "" {
+		return
+	}
+	mangledName := recvTypeName | "." | d.Name.Value
+	var obj *types.TCFunc
+	obj = pb.findMethod(recvTypeName, d.Name.Value)
+	var sig *types.Signature
+	if obj != nil {
+		sig, _ = obj.Type().(*types.Signature)
+	}
+	if sig == nil && d.Type != nil {
+		sig = pkgResolveSigAST(pb.pkg, d.Type)
+	}
+	fn := &SSAFunction{
+		name:      mangledName,
+		object:    obj,
+		Signature: sig,
+		pos:       0,
+		Pkg:       pb.pkg,
+		Prog:      pb.prog,
+	}
+	pb.pkg.Members[mangledName] = fn
+}
+
+func ssaRecvTypeName(recv *syntax.Field) (s string) {
+	if recv == nil {
+		return ""
+	}
+	switch t := recv.Type.(type) {
+	case *syntax.Name:
+		return t.Value
+	case *syntax.Operation:
+		if t.Y == nil && t.Op == token.Mul {
+			if n, ok := t.X.(*syntax.Name); ok {
+				return n.Value
+			}
+		}
+	}
+	return ""
+}
+
+func (pb *ssaPkgBuilder) findMethod(typeName string, methodName string) (t *types.TCFunc) {
+	obj := pb.pkg.Pkg.Scope().Lookup(typeName)
+	if obj == nil && types.Universe != nil {
+		obj = types.Universe.Lookup(typeName)
+	}
+	if obj == nil {
+		return nil
+	}
+	tn, ok := obj.(*types.TypeName)
+	if !ok {
+		return nil
+	}
+	switch t := tn.Type().(type) {
+	case *types.Named:
+		for i := int32(0); i < t.NumMethods(); i++ {
+			m := t.Method(i)
+			if m.Name() == methodName {
+				return m
+			}
+		}
+	case *types.Basic:
+		for i := int32(0); i < t.NumMethods(); i++ {
+			m := t.Method(i)
+			if m.Name() == methodName {
+				return m
+			}
+		}
+	}
+	return nil
+}
+
+func (pb *ssaPkgBuilder) registerVar(d *syntax.VarDecl) {
+	for _, name := range d.NameList {
+		var obj *types.TCVar
+		if o := pb.pkg.Pkg.Scope().Lookup(name.Value); o != nil {
+			obj, _ = o.(*types.TCVar)
+		}
+		var typ syntax.Type
+		if obj != nil {
+			typ = obj.Type()
+		}
+		if typ == nil && d.Type != nil {
+			typ = pkgResolveTypeAST(pb.pkg, d.Type)
+		}
+		if typ == nil && d.Values != nil {
+			typ = pkgResolveTypeAST(pb.pkg, d.Values)
+		}
+		g := &SSAGlobal{
+			name:   name.Value,
+			object: obj,
+			typ:    types.NewPointer(typ),
+			pos:    0,
+			pkg:    pb.pkg,
+		}
+		pb.pkg.Members[name.Value] = g
+	}
+	if d.Values != nil {
+		pb.varInits = append(pb.varInits, d)
+	}
+}
+
+func (pb *ssaPkgBuilder) registerType(d *syntax.TypeDecl) {
+	var obj *types.TypeName
+	if o := pb.pkg.Pkg.Scope().Lookup(d.Name.Value); o != nil {
+		obj, _ = o.(*types.TypeName)
+	}
+	if obj == nil {
+		underlying := pkgResolveTypeAST(pb.pkg, d.Type)
+		if underlying == nil {
+			underlying = &types.TCStruct{}
+		}
+		named := types.NewNamed(types.NewTypeName(pb.pkg.Pkg, d.Name.Value, nil), underlying)
+		named.Obj().SetType(named)
+		pb.pkg.Pkg.Scope().Insert(named.Obj())
+		obj = named.Obj()
+	}
+	t := &SSAType_{object: obj, pkg: pb.pkg}
+	pb.pkg.Members[d.Name.Value] = t
+}
+
+func (pb *ssaPkgBuilder) registerConst(d *syntax.ConstDecl) {
+	for _, name := range d.NameList {
+		var obj *types.TCConst
+		if o := pb.pkg.Pkg.Scope().Lookup(name.Value); o != nil {
+			obj, _ = o.(*types.TCConst)
+		}
+		if obj == nil {
+			continue
+		}
+		c := &SSANamedConst{
+			object: obj,
+			Value:  &SSAConst{typ: obj.Type(), val: localizeConstVal(obj.Val(), obj.Type())},
+			pkg:    pb.pkg,
+		}
+		pb.pkg.Members[name.Value] = c
+	}
+}
+
+func (pb *ssaPkgBuilder) buildFile(f *syntax.File) {
+	for _, d := range f.DeclList {
+		if fd, ok := d.(*syntax.FuncDecl); ok {
+			pb.buildFunc(fd)
+		}
+	}
+}
+
+func (pb *ssaPkgBuilder) buildVarInits() {
+	sig := types.NewSignature(nil, types.NewTuple(), types.NewTuple(), false)
+	fn, _ := pb.pkg.Members["main"].(*SSAFunction)
+	if fn == nil {
+		fn = &SSAFunction{
+			name:      "main",
+			Signature: sig,
+			Pkg:       pb.pkg,
+			Prog:      pb.prog,
+		}
+		pb.pkg.Members["main"] = fn
+	}
+	if len(fn.Blocks) > 0 {
+		initSig := types.NewSignature(nil, types.NewTuple(), types.NewTuple(), false)
+		initFn := &SSAFunction{
+			name:      "__varinit",
+			Signature: initSig,
+			Pkg:       pb.pkg,
+			Prog:      pb.prog,
+		}
+		pb.pkg.Members["__varinit"] = initFn
+		fb := newSSAFuncBuilder(initFn, pb.info)
+		entry := fb.newBlock("entry")
+		fb.currentBlock = entry
+		for _, d := range pb.varInits {
+			if d.Values == nil {
+				continue
+			}
+			rhs := fb.buildExpr(d.Values)
+			if rhs == nil {
+				continue
+			}
+			for _, name := range d.NameList {
+				if name.Value == "_" {
+					continue
+				}
+				fb.buildStore(name, rhs)
+			}
+		}
+		fb.emit(&SSAReturn{})
+		// Inject call to __varinit at start of main
+		callInstr := &SSACall{Call: SSACallCommon{Value: initFn}}
+		callInstr.name = "vinit"
+		oldEntry := fn.Blocks[0]
+		n := int32(len(oldEntry.Instrs))
+		combined := []SSAInstruction{:n+1}
+		combined[0] = callInstr
+		for i := int32(0); i < n; i++ {
+			combined[i+1] = oldEntry.Instrs[i]
+		}
+		oldEntry.Instrs = combined
+		return
+	}
+	fb := newSSAFuncBuilder(fn, pb.info)
+	entry := fb.newBlock("entry")
+	fb.currentBlock = entry
+	for _, d := range pb.varInits {
+		if d.Values == nil {
+			continue
+		}
+		rhs := fb.buildExpr(d.Values)
+		if rhs == nil {
+			continue
+		}
+		for _, name := range d.NameList {
+			if name.Value == "_" {
+				continue
+			}
+			fb.buildStore(name, rhs)
+		}
+	}
+	fb.emit(&SSAReturn{})
+}
+
+func (pb *ssaPkgBuilder) buildFunc(d *syntax.FuncDecl) {
+	if len(d.TParamList) > 0 {
+		return
+	}
+	if d.Body == nil {
+		return
+	}
+	name := d.Name.Value
+	if d.Recv != nil {
+		rtn := ssaRecvTypeName(d.Recv)
+		if rtn != "" {
+			name = rtn | "." | d.Name.Value
+		}
+	}
+	fn, _ := pb.pkg.Members[name].(*SSAFunction)
+	if fn == nil {
+		return
+	}
+	fb := newSSAFuncBuilder(fn, pb.info)
+	fb.buildBody(d)
+}
+
+// ssaFuncBuilder builds one SSAFunction body.
+type ssaFuncBuilder struct {
+	fn           *SSAFunction
+	info         *types.Info
+	parent       *ssaFuncBuilder
+	currentBlock *SSABasicBlock
+	vars         map[types.Object]*SSAAlloc
+	localTypes   map[string]syntax.Type
+	localConsts  map[string]*SSAConst
+	freeVarPtrs  map[string]*SSAFreeVar
+	namedResults []*SSAAlloc
+	paramAllocas []*SSAAlloc
+	tailBlock    *SSABasicBlock
+	counter      int32
+
+	loops        []ssaLoopState
+	pendingLabel string
+	labels       map[string]*SSABasicBlock
+	deferred     int32
+	typeSubst    map[string]syntax.Type
+	srcScope     *types.Scope
+	scopeID      int32
+	nextScopeID  int32
+}
+
+type ssaLoopState struct {
+	label string
+	body  *SSABasicBlock
+	post  *SSABasicBlock
+	done  *SSABasicBlock
+}

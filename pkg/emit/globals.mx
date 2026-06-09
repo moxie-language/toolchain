@@ -1,0 +1,603 @@
+package emit
+
+import (
+	"math"
+	"git.smesh.lol/moxie/pkg/ssa"
+	"git.smesh.lol/moxie/pkg/types"
+)
+
+func (e *irEmitter) declareRuntime(name, retType, params string) {
+	e.extDecls[name] = retType | " @" | name | "(" | params | ")"
+}
+
+func (e *irEmitter) declareExternalGlobal(g *ssa.SSAGlobal) {
+	if g.MemberPkg() == nil || g.MemberPkg() == e.pkg {
+		return
+	}
+	name := e.globalName(g)
+	if _, ok := e.extGlobals[name]; ok {
+		return
+	}
+	typ := e.llvmType(g.SSAType())
+	if p, ok := types.SafeUnderlying(g.SSAType()).(*types.Pointer); ok {
+		typ = e.llvmType(p.Elem())
+	}
+	e.extGlobals[name] = typ
+}
+
+func (e *irEmitter) declareExternalFunc(fn *ssa.SSAFunction) {
+	if len(fn.Blocks) > 0 {
+		return
+	}
+	sym := e.funcSymbol(fn)
+	if _, ok := e.extDecls[sym]; ok {
+		return
+	}
+	retType := e.funcRetType(fn)
+	params := ""
+	hasRecv := fn.Signature != nil && fn.Signature.Recv() != nil
+	if hasRecv {
+		params = "ptr"
+	}
+	if fn.Signature != nil && fn.Signature.Params() != nil {
+		for i := 0; i < fn.Signature.Params().Len(); i++ {
+			if params != "" {
+				params = params | ", "
+			}
+			params = params | e.llvmType(fn.Signature.Params().At(i).Type())
+		}
+	}
+	if !fn.IsExternC() {
+		if params != "" {
+			params = params | ", "
+		}
+		params = params | "ptr"
+	}
+	e.extDecls[sym] = retType | " " | sym | "(" | params | ")"
+}
+
+func (e *irEmitter) addStringConst(s string) int32 {
+	if idx, ok := e.strMap[s]; ok {
+		return idx
+	}
+	idx := len(e.strConst)
+	e.strConst = append(e.strConst, s)
+	e.strMap[s] = idx
+	return idx
+}
+
+func (e *irEmitter) strConstGlobal(idx int32) string {
+	return "@.str." | irItoa(idx)
+}
+
+func irEscapeString(s string) string {
+	var buf []byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 32 && c < 127 && c != '\\' && c != '"' {
+			buf = append(buf, c)
+		} else {
+			buf = append(buf, '\\')
+			buf = append(buf, "0123456789ABCDEF"[c>>4])
+			buf = append(buf, "0123456789ABCDEF"[c&0xf])
+		}
+	}
+	return string(buf)
+}
+
+func (e *irEmitter) emit() string {
+	dl := e.dataLayout()
+	if dl != "" {
+		e.w("target datalayout = \"")
+		e.w(dl)
+		e.w("\"\n")
+	}
+	e.w("target triple = \"")
+	e.w(e.triple)
+	e.w("\"\n\n")
+
+	e.globalTypes = map[string]string{}
+	e.globalDeclTypes = map[string]string{}
+	sortedM := e.pkgMembersSorted()
+	for _, member := range sortedM {
+		fn, ok := member.(*ssa.SSAFunction)
+		if !ok { continue }
+		for _, b := range fn.Blocks {
+			for _, instr := range b.Instrs {
+				if s, ok2 := instr.(*ssa.SSAStore); ok2 && s.Addr != nil && s.Val != nil {
+					if g, ok3 := s.Addr.(*ssa.SSAGlobal); ok3 {
+						vt := e.llvmType(s.Val.SSAType())
+						if vt != "ptr" && vt != "void" && vt != "i1" && vt != "" {
+							name := e.globalName(g)
+							gt := ""
+							if p, ok4 := types.SafeUnderlying(g.SSAType()).(*types.Pointer); ok4 {
+								gt = e.llvmType(p.Elem())
+							}
+							if gt != "" && gt != "ptr" && gt != "i8" && gt[0] == '{' && vt[0] != '{' {
+								vt = gt
+							}
+							e.globalTypes[name] = vt
+						}
+					}
+				}
+			}
+		}
+		e.loadToGlobal = nil
+		e.loadToGlobal = map[string]*ssa.SSAGlobal{}
+		for _, b := range fn.Blocks {
+			for _, instr := range b.Instrs {
+				load, ok2 := instr.(*ssa.SSAUnOp)
+				if !ok2 || load.Op != ssa.OpMul { continue }
+				g, ok3 := load.X.(*ssa.SSAGlobal)
+				if !ok3 { continue }
+				e.loadToGlobal[load.SSAName()] = g
+			}
+		}
+		for _, b := range fn.Blocks {
+			for _, instr := range b.Instrs {
+				if ret, ok2 := instr.(*ssa.SSAReturn); ok2 {
+					if fn.Signature == nil { continue }
+					rets := fn.Signature.Results()
+					if rets == nil || rets.Len() == 0 { continue }
+					for i, res := range ret.Results {
+						if i >= rets.Len() { break }
+						if g, ok3 := e.loadToGlobal[res.SSAName()]; ok3 {
+							rt := rets.At(i)
+							if rt == nil { continue }
+							expectType := e.llvmType(rt.Type())
+							if expectType != "ptr" && expectType != "void" && expectType != "i1" && expectType != "" {
+								name := e.globalName(g)
+								if _, exists := e.globalTypes[name]; !exists {
+									e.globalTypes[name] = expectType
+								}
+							}
+						}
+					}
+				}
+				call, ok2 := instr.(*ssa.SSACall)
+				if !ok2 { continue }
+				callee := call.Call.Value
+				if callee == nil { continue }
+				var sig *types.Signature
+				if cfn, ok3 := callee.(*ssa.SSAFunction); ok3 && cfn.Signature != nil {
+					sig = cfn.Signature
+				} else {
+					ct := callee.SSAType()
+					if ct != nil {
+						if okv, okok := types.SafeUnderlying(ct).(*types.Signature); okok {
+							sig = okv
+						}
+					}
+				}
+				if sig == nil { continue }
+				params := sig.Params()
+				if params == nil || params.Len() == 0 { continue }
+				recvOff := 0
+				if sig.Recv() != nil {
+					recvOff = 1
+				}
+				for i, arg := range call.Call.Args {
+					if arg == nil { continue }
+					sigIdx := i - recvOff
+					if sigIdx < 0 || sigIdx >= params.Len() { continue }
+					pt := params.At(sigIdx)
+					if pt == nil { continue }
+					g, found := e.loadToGlobal[arg.SSAName()]
+					if !found { continue }
+					expectType := e.llvmType(pt.Type())
+					name := e.globalName(g)
+					if expectType != "void" && expectType != "i1" && expectType != "" {
+						if _, exists := e.globalTypes[name]; !exists {
+							e.globalTypes[name] = expectType
+						}
+					}
+				}
+			}
+		}
+		for _, b := range fn.Blocks {
+			for _, instr := range b.Instrs {
+				if rng, ok2 := instr.(*ssa.SSARange); ok2 && rng.X != nil {
+					if g, ok3 := e.loadToGlobal[rng.X.SSAName()]; ok3 {
+						name := e.globalName(g)
+						if _, exists := e.globalTypes[name]; !exists {
+							e.globalTypes[name] = "ptr"
+						}
+					}
+				}
+				if mu, ok2 := instr.(*ssa.SSAMapUpdate); ok2 && mu.Map != nil {
+					if g, ok3 := e.loadToGlobal[mu.Map.SSAName()]; ok3 {
+						name := e.globalName(g)
+						if _, exists := e.globalTypes[name]; !exists {
+							e.globalTypes[name] = "ptr"
+						}
+					}
+				}
+				if lu, ok2 := instr.(*ssa.SSALookup); ok2 && lu.X != nil {
+					if g, ok3 := e.loadToGlobal[lu.X.SSAName()]; ok3 {
+						name := e.globalName(g)
+						if _, exists := e.globalTypes[name]; !exists {
+							e.globalTypes[name] = "ptr"
+						}
+					}
+				}
+				bop, ok2 := instr.(*ssa.SSABinOp)
+				if !ok2 { continue }
+				if bop.X == nil || bop.Y == nil { continue }
+				gx, xIsGlobal := e.loadToGlobal[bop.X.SSAName()]
+				gy, yIsGlobal := e.loadToGlobal[bop.Y.SSAName()]
+				if xIsGlobal {
+					yt := e.llvmType(bop.Y.SSAType())
+					if yt != "ptr" && yt != "void" && yt != "i1" && yt != "" {
+						name := e.globalName(gx)
+						if _, exists := e.globalTypes[name]; !exists {
+							e.globalTypes[name] = yt
+						}
+					}
+				}
+				if yIsGlobal {
+					xt := e.llvmType(bop.X.SSAType())
+					if xt != "ptr" && xt != "void" && xt != "i1" && xt != "" {
+						name := e.globalName(gy)
+						if _, exists := e.globalTypes[name]; !exists {
+							e.globalTypes[name] = xt
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for _, member := range e.pkgMembersSorted() {
+		switch m := member.(type) {
+		case *ssa.SSAGlobal:
+			if m.MemberName() != "_" {
+				e.emitGlobal(m)
+			}
+		}
+	}
+	for _, member := range e.pkgMembersSorted() {
+		switch m := member.(type) {
+		case *ssa.SSAFunction:
+			e.emitFunction(m)
+			e.emitAnonFuncs(m)
+			m.Blocks = nil
+			m.Locals = nil
+			m.Params = nil
+			m.FreeVars = nil
+			m.NamedResults = nil
+			m.vars = nil
+		}
+	}
+	e.emitLibMain()
+
+	for i, s := range e.strConst {
+		e.w(e.strConstGlobal(i))
+		e.w(" = private constant [")
+		e.w(irItoa(len(s)))
+		e.w(" x i8] c\"")
+		e.w(irEscapeString(s))
+		e.w("\"\n")
+	}
+
+	var tidKeys []string
+	for name := range e.typeIDs {
+		tidKeys = append(tidKeys, name)
+	}
+	for i := 1; i < len(tidKeys); i++ {
+		for j := i; j > 0 && tidKeys[j] < tidKeys[j-1]; j-- {
+			tidKeys[j], tidKeys[j-1] = tidKeys[j-1], tidKeys[j]
+		}
+	}
+	for _, name := range tidKeys {
+		if hasPrefix(name, "reflect/types.type:") {
+			quoted := "\"" | name | "\""
+			if e.extTypeIDs != nil {
+				if _, dup := e.extTypeIDs[quoted]; dup {
+					continue
+				}
+			}
+			e.w("@\"")
+			e.w(name)
+			e.w("\" = linkonce_odr hidden global i8 0\n")
+		} else {
+			e.w("@\"")
+			e.w(name)
+			e.w("\" = private constant i32 0\n")
+		}
+	}
+
+	if len(e.extDecls) > 0 {
+		e.w("\n")
+		var edKeys []string
+		for k := range e.extDecls {
+			edKeys = append(edKeys, k)
+		}
+		for i := 1; i < len(edKeys); i++ {
+			for j := i; j > 0 && edKeys[j] < edKeys[j-1]; j-- {
+				edKeys[j], edKeys[j-1] = edKeys[j-1], edKeys[j]
+			}
+		}
+		for _, k := range edKeys {
+			decl := e.extDecls[k]
+			if decl == "" {
+				continue
+			}
+			localName := k
+			if len(localName) > 0 && localName[0] == '@' {
+				localName = localName[1:]
+			}
+			if len(localName) > 1 && localName[0] == '"' && localName[len(localName)-1] == '"' {
+				localName = localName[1 : len(localName)-1]
+			}
+			pkgPrefix := e.pkg.Pkg.Path() | "."
+			if hasPrefix(localName, pkgPrefix) {
+				memberName := localName[len(pkgPrefix):]
+				if _, ok := e.pkg.Members[memberName]; ok {
+					continue
+				}
+			}
+			e.w("declare ")
+			e.w(decl)
+			e.w("\n")
+		}
+	}
+
+	if len(e.extGlobals) > 0 {
+		e.w("\n")
+		var egKeys []string
+		for name := range e.extGlobals {
+			egKeys = append(egKeys, name)
+		}
+		for i := 1; i < len(egKeys); i++ {
+			for j := i; j > 0 && egKeys[j] < egKeys[j-1]; j-- {
+				egKeys[j], egKeys[j-1] = egKeys[j-1], egKeys[j]
+			}
+		}
+		for _, name := range egKeys {
+			e.w(name)
+			e.w(" = external global ")
+			e.w(e.extGlobals[name])
+			e.w("\n")
+		}
+	}
+
+	if len(e.extTypeIDs) > 0 {
+		e.w("\n")
+		for _, tid := range sortedKeys(e.extTypeIDs) {
+			e.w("@") ; e.w(tid) ; e.w(" = linkonce_odr hidden global i8 0\n")
+		}
+	}
+
+	return string(e.buf)
+}
+
+func (e *irEmitter) releaseAfterEmit() {
+	e.buf = nil
+	e.valName = nil
+	e.extDecls = nil
+	e.extGlobals = nil
+	e.strMap = nil
+	e.strConst = nil
+	e.typeIDs = nil
+	e.extTypeIDs = nil
+	e.localTypeIDs = nil
+	e.allocTypes = nil
+	e.regTypes = nil
+	e.hoisted = nil
+	e.blockExitLabel = nil
+	e.nameUsed = nil
+	e.missingStores = nil
+	e.globalTypes = nil
+	e.globalDeclTypes = nil
+	e.sortedMembers = nil
+	e.loadToGlobal = nil
+	e.allocBlock = nil
+	e.storedTo = nil
+	e.usedAs = nil
+	e.scopeAllocs = nil
+	e.instrScope = nil
+	e.pkg = nil
+	e.curFunc = nil
+}
+
+func (e *irEmitter) pkgMembersSorted() []ssa.SSAMember {
+	if e.sortedMembers != nil {
+		return e.sortedMembers
+	}
+	var members []ssa.SSAMember
+	for _, m := range e.pkg.Members {
+		members = append(members, m)
+	}
+	for i := 1; i < len(members); i++ {
+		for j := i; j > 0 && members[j].MemberName() < members[j-1].MemberName(); j-- {
+			members[j], members[j-1] = members[j-1], members[j]
+		}
+	}
+	e.sortedMembers = members
+	return members
+}
+
+func (e *irEmitter) inferGlobalTypeFromLoads(g *ssa.SSAGlobal) string {
+	gname := g.SSAName()
+	for _, member := range e.pkgMembersSorted() {
+		fn, ok := member.(*ssa.SSAFunction)
+		if !ok { continue }
+		for _, b := range fn.Blocks {
+			for _, instr := range b.Instrs {
+				if load, ok2 := instr.(*ssa.SSAUnOp); ok2 && load.Op == ssa.OpMul {
+					if lg, ok3 := load.X.(*ssa.SSAGlobal); ok3 && lg.SSAName() == gname {
+						lt := e.llvmType(load.SSAType())
+						if lt != "void" && lt != "i8" && lt != "ptr" {
+							return lt
+						}
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (e *irEmitter) resolveGlobalDeclType(g *ssa.SSAGlobal) string {
+	name := e.globalName(g)
+	if dt, ok := e.globalDeclTypes[name]; ok {
+		return dt
+	}
+	typ := e.llvmType(g.SSAType())
+	gtu := types.SafeUnderlying(g.SSAType())
+	elemNil := false
+	if p, ok := gtu.(*types.Pointer); ok {
+		pElem := p.Elem()
+		if pElem == nil {
+			elemNil = true
+		} else {
+			typ = e.llvmType(pElem)
+		}
+	}
+	if !elemNil && (typ == "ptr" || typ == "i8") {
+		if gt, ok := e.globalTypes[name]; ok && gt != "ptr" && gt != "void" && gt != "" {
+			typ = gt
+		}
+	}
+	if typ == "void" {
+		typ = "i1"
+	}
+	e.globalDeclTypes[name] = typ
+	return typ
+}
+
+func (e *irEmitter) emitGlobal(g *ssa.SSAGlobal) {
+	name := e.globalName(g)
+	typ := e.resolveGlobalDeclType(g)
+	e.w(name)
+	e.w(" = global ")
+	e.w(typ)
+	e.w(" zeroinitializer\n")
+}
+
+func (e *irEmitter) globalName(g *ssa.SSAGlobal) string {
+	pkg := e.pkg.Pkg.Path()
+	if g.MemberPkg() != nil {
+		pkg = g.MemberPkg().Pkg.Path()
+	}
+	return irGlobalSymbol(pkg, g.MemberName())
+}
+
+func irNeedsQuote(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '$' {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func irGlobalSymbol(pkg, name string) string {
+	return IrGlobalSymbol(pkg, name)
+}
+
+func IrGlobalSymbol(pkg, name string) string {
+	sym := pkg | "." | name
+	if irNeedsQuote(sym) {
+		return "@\"" | sym | "\""
+	}
+	return "@" | sym
+}
+
+func (e *irEmitter) funcSymbol(f *ssa.SSAFunction) string {
+	if f.ExternalSymbol() != "" {
+		sym := f.ExternalSymbol()
+		if irNeedsQuote(sym) {
+			return "@\"" | sym | "\""
+		}
+		return "@" | sym
+	}
+	pkg := e.pkg.Pkg.Path()
+	if f.Pkg != nil {
+		pkg = f.Pkg.Pkg.Path()
+	}
+	return irGlobalSymbol(pkg, f.SSAName())
+}
+
+func (e *irEmitter) isPkgFunc(f *ssa.SSAFunction) bool {
+	if f.Pkg == e.pkg {
+		return true
+	}
+	if f.SSAParent() != nil {
+		return e.isPkgFunc(f.SSAParent())
+	}
+	return false
+}
+
+func (e *irEmitter) emitAnonFuncs(f *ssa.SSAFunction) {
+	for _, af := range f.AnonFuncs {
+		e.emitFunction(af)
+		e.emitAnonFuncs(af)
+		af.Blocks = nil
+		af.Locals = nil
+		af.Params = nil
+		af.FreeVars = nil
+		af.NamedResults = nil
+		af.vars = nil
+	}
+	f.AnonFuncs = nil
+}
+
+func (e *irEmitter) emitLibMain() {
+	pkgPath := e.pkg.Pkg.Path()
+	if pkgPath == "main" {
+		return
+	}
+	hasMain := false
+	for _, m := range e.pkg.Members {
+		if fn, ok := m.(*ssa.SSAFunction); ok && fn.SSAName() == "main" {
+			hasMain = true
+			break
+		}
+	}
+	if hasMain {
+		return
+	}
+	sym := irGlobalSymbol(pkgPath, "main")
+	e.w("\ndefine hidden void ")
+	e.w(sym)
+	e.w("(ptr %context) {\nentry:\n  ret void\n}\n")
+}
+
+func (e *irEmitter) asmAlias(linkName string) string {
+	switch linkName {
+	case "math.archLog":
+		return "math.log"
+	case "math.archExp":
+		return "math.exp"
+	case "math.archExp2":
+		return "math.exp2"
+	case "math.archFloor":
+		return "math.floor"
+	case "math.archCeil":
+		return "math.ceil"
+	case "math.archTrunc":
+		return "math.trunc"
+	case "math.archHypot":
+		return "math.hypot"
+	case "math.archMax":
+		return "math.max"
+	case "math.archMin":
+		return "math.min"
+	case "math.archModf":
+		return "math.modf"
+	case "crypto/md5.block":
+		return "crypto/md5.blockGeneric"
+	case "crypto/sha1.block":
+		return "crypto/sha1.blockGeneric"
+	case "crypto/sha1.blockAMD64":
+		return "crypto/sha1.blockGeneric"
+	case "crypto/sha256.block":
+		return "crypto/sha256.blockGeneric"
+	case "crypto/sha512.blockAMD64":
+		return "crypto/sha512.blockGeneric"
+	}
+	return ""
+}

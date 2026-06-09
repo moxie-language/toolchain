@@ -1,0 +1,635 @@
+package syntax
+
+import (
+	"git.smesh.lol/moxie/pkg/token"
+)
+
+func (p *Parser) expr() Expr {
+	if trace {
+		defer p.trace("expr")()
+	}
+
+	return p.binaryExpr(nil, 0)
+}
+
+// Expression = UnaryExpr | Expression binary_op Expression .
+func (p *Parser) binaryExpr(x Expr, prec int32) Expr {
+	// don't trace binaryExpr - only leads to overly nested trace output
+
+	if x == nil {
+		x = p.unaryExpr()
+	}
+	for (p.Tok == token.OperatorType || p.Tok == token.Star) && p.Prec > prec {
+		t := &Operation{}
+		t.pos = p.pos()
+		t.Op = p.Op
+		tprec := p.Prec
+		p.Next()
+		t.X = x
+		t.Y = p.binaryExpr(nil, tprec)
+		x = t
+	}
+	return x
+}
+
+// UnaryExpr = PrimaryExpr | unary_op UnaryExpr .
+func (p *Parser) unaryExpr() Expr {
+	if trace {
+		defer p.trace("unaryExpr")()
+	}
+
+	switch p.Tok {
+	case token.OperatorType, token.Star:
+		switch p.Op {
+		case token.Mul, token.Add, token.Sub, token.Not, token.Xor, token.Tilde:
+			x := &Operation{}
+			x.pos = p.pos()
+			x.Op = p.Op
+			p.Next()
+			x.X = p.unaryExpr()
+			return x
+
+		case token.And:
+			x := &Operation{}
+			x.pos = p.pos()
+			x.Op = token.And
+			p.Next()
+			// unaryExpr may have returned a parenthesized composite literal
+			// (see comment in operand) - remove parentheses if any
+			x.X = Unparen(p.unaryExpr())
+			return x
+		}
+
+	case token.Arrow:
+		// receive op (<-x) or receive-only channel (<-chan E)
+		pos := p.pos()
+		p.Next()
+
+		// If the next token is _Chan we still don't know if it is
+		// a channel (<-chan int32) or a receive op (<-chan int32(ch)).
+		// We only know once we have found the end of the unaryExpr.
+
+		x := p.unaryExpr()
+
+		// There are two cases:
+		//
+		//   <-chan...  => <-x is a channel type
+		//   <-x        => <-x is a receive operation
+		//
+		// In the first case, <- must be re-associated with
+		// the channel type parsed already:
+		//
+		//   <-(chan E)   =>  (<-chan E)
+		//   <-(chan<-E)  =>  (<-chan (<-E))
+
+		if _, ok := x.(*ChanType); ok {
+			// x is a channel type => re-associate <-
+			dir := SendOnly
+			t := x
+			for dir == SendOnly {
+				c, ok := t.(*ChanType)
+				if !ok {
+					break
+				}
+				dir = c.Dir
+				if dir == RecvOnly {
+					// t is type <-chan E but <-<-chan E is not permitted
+					// (report same error as for "type _ <-<-chan E")
+					p.syntaxError("unexpected <-, expected chan")
+					// already progressed, no need to advance
+				}
+				c.Dir = RecvOnly
+				t = c.Elem
+			}
+			if dir == SendOnly {
+				// channel dir is <- but channel element E is not a channel
+				// (report same error as for "type _ <-chan<-E")
+				p.syntaxError("unexpected " | String(t) | ", expected chan")
+				// already progressed, no need to advance
+			}
+			return x
+		}
+
+		// x is not a channel type => we have a receive op
+		o := &Operation{}
+		o.pos = pos
+		o.Op = token.Recv
+		o.X = x
+		return o
+	}
+
+	// TODO(mdempsky): We need parens here so we can report an
+	// error for "(x) := true". It should be possible to detect
+	// and reject that more efficiently though.
+	return p.pexpr(nil, true)
+}
+
+// callStmt parses call-like statements that can be preceded by 'defer' and 'go'.
+func (p *Parser) callStmt() (c *CallStmt) {
+	if trace {
+		defer p.trace("callStmt")()
+	}
+
+	s := &CallStmt{}
+	s.pos = p.pos()
+	s.Tok = p.Tok // _Defer or _Go
+	p.Next()
+
+	x := p.pexpr(nil, p.Tok == token.Lparen) // keep_parens so we can report error below
+	if t := Unparen(x); t != x {
+		p.errorAt(x.Pos(), "expression in " | s.Tok.String() | " must not be parenthesized")
+		// already progressed, no need to advance
+		x = t
+	}
+
+	s.Call = x
+	return s
+}
+
+// Operand     = Literal | OperandName | MethodExpr + "(" Expression ")" .
+// Literal     = BasicLit | CompositeLit | FunctionLit .
+// BasicLit    = int_lit | float_lit | imaginary_lit | rune_lit | string_lit .
+// OperandName = identifier | QualifiedIdent.
+func (p *Parser) operand(keep_parens bool) Expr {
+	if trace {
+		defer p.trace("operand " | p.Tok.String())()
+	}
+
+	switch p.Tok {
+	case token.NameType:
+		return p.name()
+
+	case token.Literal:
+		return p.oliteral()
+
+	case token.Lparen:
+		pos := p.pos()
+		p.Next()
+		p.Xnest++
+		x := p.expr()
+		p.Xnest--
+		p.want(token.Rparen)
+
+		// Optimization: Record presence of ()'s only where needed
+		// for error reporting. Don't bother in other cases; it is
+		// just a waste of memory and time.
+		//
+		// Parentheses are not permitted around T in a composite
+		// literal T{}. If the next token is a {, assume x is a
+		// composite literal type T (it may not be, { could be
+		// the opening brace of a block, but we don't know yet).
+		if p.Tok == token.Lbrace {
+			keep_parens = true
+		}
+
+		// Parentheses are also not permitted around the expression
+		// in a go/defer statement. In that case, operand is called
+		// with keep_parens set.
+		if keep_parens {
+			px := &ParenExpr{}
+			px.pos = pos
+			px.X = x
+			x = px
+		}
+		return x
+
+	case token.Func:
+		pos := p.pos()
+		p.Next()
+		_, ftyp := p.funcType("function type")
+		if p.Tok == token.Lbrace {
+			p.Xnest++
+
+			f := &FuncLit{}
+			f.pos = pos
+			f.Type = ftyp
+			f.Body = p.funcBody()
+
+			p.Xnest--
+			return f
+		}
+		return ftyp
+
+	case token.Lbrack, token.Chan, token.Map, token.Struct, token.Interface:
+		return p.type_() // othertype
+
+	default:
+		x := p.badExpr()
+		p.syntaxError("expected expression")
+		p.advance(token.Rparen, token.Rbrack, token.Rbrace)
+		return x
+	}
+
+	// Syntactically, composite literals are operands. Because a complit
+	// type may be a qualified identifier which is handled by pexpr
+	// (together with selector expressions), complits are parsed there
+	// as well (operand is only called from pexpr).
+}
+
+// pexpr parses a PrimaryExpr.
+//
+//	PrimaryExpr =
+//		Operand |
+//		Conversion |
+//		PrimaryExpr Selector |
+//		PrimaryExpr Index |
+//		PrimaryExpr Slice |
+//		PrimaryExpr TypeAssertion |
+//		PrimaryExpr Arguments .
+//
+//	Selector       = "." identifier .
+//	Index          = "[" Expression "]" .
+//	Slice          = "[" ( [ Expression ] ":" [ Expression ] ) |
+//	                     ( [ Expression ] ":" Expression ":" Expression )
+//	                 "]" .
+//	TypeAssertion  = "." "(" Type ")" .
+//	Arguments      = "(" [ ( ExpressionList | Type [ "," ExpressionList ] ) [ "..." ] [ "," ] ] ")" .
+func (p *Parser) pexpr(x Expr, keep_parens bool) Expr {
+	if trace {
+		defer p.trace("pexpr")()
+	}
+
+	if x == nil {
+		x = p.operand(keep_parens)
+	}
+
+loop:
+	for {
+		pos := p.pos()
+		switch p.Tok {
+		case token.Dot:
+			p.Next()
+			switch p.Tok {
+			case token.NameType:
+				// pexpr '.' sym
+				t := &SelectorExpr{}
+				t.pos = pos
+				t.X = x
+				t.Sel = p.name()
+				x = t
+
+			case token.Lparen:
+				p.Next()
+				if p.got(token.TypeType) {
+					t := &TypeSwitchGuard{}
+					// t.Lhs is filled in by parser.simpleStmt
+					t.pos = pos
+					t.X = x
+					x = t
+				} else {
+					t := &AssertExpr{}
+					t.pos = pos
+					t.X = x
+					t.Type = p.type_()
+					x = t
+				}
+				p.want(token.Rparen)
+
+			default:
+				p.syntaxError("expected name or (")
+				p.advance(token.Semi, token.Rparen)
+			}
+
+		case token.Lbrack:
+			p.Next()
+
+			var i Expr
+			if p.Tok != token.Colon {
+				var comma bool
+				if p.Tok == token.Rbrack {
+					// invalid empty instance, slice or index expression; accept but complain
+					p.syntaxError("expected operand")
+					i = p.badExpr()
+				} else {
+					i, comma = p.typeList(false)
+				}
+				if comma || p.Tok == token.Rbrack {
+					p.want(token.Rbrack)
+					// x[], x[i,] or x[i, j, ...]
+					t := &IndexExpr{}
+					t.pos = pos
+					t.X = x
+					t.Index = i
+					x = t
+					break
+				}
+			}
+
+			// x[i:...
+			// For better error message, don't simply use p.want(_Colon) here (go.dev/issue/47704).
+			if !p.got(token.Colon) {
+				p.syntaxError("expected comma, : or ]")
+				p.advance(token.Comma, token.Colon, token.Rbrack)
+			}
+			p.Xnest++
+			t := &SliceExpr{}
+			t.pos = pos
+			t.X = x
+			t.Index[0] = i
+			if p.Tok != token.Colon && p.Tok != token.Rbrack {
+				// x[i:j...
+				t.Index[1] = p.expr()
+			}
+			if p.Tok == token.Colon {
+				t.Full = true
+				// x[i:j:...]
+				if t.Index[1] == nil {
+					p.error("middle index required in 3-index slice")
+					t.Index[1] = p.badExpr()
+				}
+				p.Next()
+				if p.Tok != token.Rbrack {
+					// x[i:j:k...
+					t.Index[2] = p.expr()
+				} else {
+					p.error("final index required in 3-index slice")
+					t.Index[2] = p.badExpr()
+				}
+			}
+			p.Xnest--
+			p.want(token.Rbrack)
+			x = t
+
+		case token.Lparen:
+			t := &CallExpr{}
+			t.pos = pos
+			p.Next()
+			t.Fun = x
+			t.ArgList, t.HasDots = p.argList()
+			x = t
+
+		case token.Lbrace:
+			// operand may have returned a parenthesized complit
+			// type; accept it but complain if we have a complit
+			t := Unparen(x)
+			// determine if '{' belongs to a composite literal or a block statement
+			complit_ok := false
+			switch t.(type) {
+			case *Name, *SelectorExpr:
+				if p.Xnest >= 0 {
+					// x is possibly a composite literal type
+					complit_ok = true
+				}
+			case *IndexExpr:
+				if p.Xnest >= 0 && !isValue(t) {
+					// x is possibly a composite literal type
+					complit_ok = true
+				}
+			case *ArrayType, *SliceType, *StructType, *MapType:
+				// x is a comptype
+				complit_ok = true
+			}
+			if !complit_ok {
+				break loop
+			}
+			if t != x {
+				p.syntaxError("cannot parenthesize type in composite literal")
+				// already progressed, no need to advance
+			}
+			n := p.complitexpr()
+			n.Type = x
+			x = n
+
+		default:
+			break loop
+		}
+	}
+
+	return x
+}
+
+// isValue reports whether x syntactically must be a value (and not a type) expression.
+func isValue(x Expr) (ok bool) {
+	switch x := x.(type) {
+	case *BasicLit, *CompositeLit, *FuncLit, *SliceExpr, *AssertExpr, *TypeSwitchGuard, *CallExpr:
+		return true
+	case *Operation:
+		return x.Op != token.Mul || x.Y != nil // *T may be a type
+	case *ParenExpr:
+		return isValue(x.X)
+	case *IndexExpr:
+		return isValue(x.X) || isValue(x.Index)
+	}
+	return false
+}
+
+// Element = Expression | LiteralValue .
+func (p *Parser) bare_complitexpr() Expr {
+	if trace {
+		defer p.trace("bare_complitexpr")()
+	}
+
+	if p.Tok == token.Lbrace {
+		// '{' start_complit braced_keyval_list '}'
+		return p.complitexpr()
+	}
+
+	return p.expr()
+}
+
+// LiteralValue = "{" [ ElementList [ "," ] ] "}" .
+func (p *Parser) complitexpr() (c *CompositeLit) {
+	if trace {
+		defer p.trace("complitexpr")()
+	}
+
+	x := &CompositeLit{}
+	x.pos = p.pos()
+
+	p.Xnest++
+	p.want(token.Lbrace)
+	x.Rbrace = p.list("composite literal", token.Comma, token.Rbrace, func() bool {
+		// value
+		e := p.bare_complitexpr()
+		if p.Tok == token.Colon {
+			// key ':' value
+			l := &KeyValueExpr{}
+			l.pos = p.pos()
+			p.Next()
+			l.Key = e
+			l.Value = p.bare_complitexpr()
+			e = l
+			x.NKeys++
+		}
+		x.ElemList = append(x.ElemList, e)
+		return false
+	})
+	p.Xnest--
+
+	return x
+}
+
+// ----------------------------------------------------------------------------
+// Common productions
+
+// argList parses a possibly empty, comma-separated list of arguments,
+// optionally followed by a comma (if not empty), and closed by ")".
+// The last argument may be followed by "...".
+//
+// argList = [ arg { "," arg } [ "..." ] [ "," ] ] ")" .
+func (p *Parser) argList() (list []Expr, hasDots bool) {
+	if trace {
+		defer p.trace("argList")()
+	}
+
+	p.Xnest++
+	p.list("argument list", token.Comma, token.Rparen, func() bool {
+		list = append(list, p.expr())
+		hasDots = p.got(token.DotDotDot)
+		return hasDots
+	})
+	p.Xnest--
+
+	return
+}
+
+func (p *Parser) name() (n *Name) {
+	// no tracing to avoid overly verbose output
+
+	if p.Tok == token.NameType {
+		n = NewName(p.pos(), p.Lit)
+		p.Next()
+		return n
+	}
+
+	n = NewName(p.pos(), "_")
+	p.syntaxError("expected name")
+	p.advance()
+	return n
+}
+
+// IdentifierList = identifier { "," identifier } .
+// The first name must be provided.
+func (p *Parser) nameList(First *Name) (ns []*Name) {
+	if trace {
+		defer p.trace("nameList")()
+	}
+
+	if debug && First == nil {
+		panic("first name not provided")
+	}
+
+	l := []*Name{First}
+	for p.got(token.Comma) {
+		l = append(l, p.name())
+	}
+
+	return l
+}
+
+// The first name may be provided, or nil.
+func (p *Parser) qualifiedName(name *Name) Expr {
+	if trace {
+		defer p.trace("qualifiedName")()
+	}
+
+	var x Expr
+	switch {
+	case name != nil:
+		x = name
+	case p.Tok == token.NameType:
+		x = p.name()
+	default:
+		x = NewName(p.pos(), "_")
+		p.syntaxError("expected name")
+		p.advance(token.Dot, token.Semi, token.Rbrace)
+	}
+
+	if p.Tok == token.Dot {
+		s := &SelectorExpr{}
+		s.pos = p.pos()
+		p.Next()
+		s.X = x
+		s.Sel = p.name()
+		x = s
+	}
+
+	if p.Tok == token.Lbrack {
+		x = p.typeInstance(x)
+	}
+
+	return x
+}
+
+// ExpressionList = Expression { "," Expression } .
+func (p *Parser) exprList() Expr {
+	if trace {
+		defer p.trace("exprList")()
+	}
+
+	x := p.expr()
+	if p.got(token.Comma) {
+		list := []Expr{x, p.expr()}
+		for p.got(token.Comma) {
+			list = append(list, p.expr())
+		}
+		t := &ListExpr{}
+		t.pos = x.Pos()
+		t.ElemList = list
+		x = t
+	}
+	return x
+}
+
+// typeList parses a non-empty, comma-separated list of types,
+// optionally followed by a comma. If strict is set to false,
+// the first element may also be a (non-type) expression.
+// If there is more than one argument, the result is a *ListExpr.
+// The comma result indicates whether there was a (separating or
+// trailing) comma.
+//
+// typeList = arg { "," arg } [ "," ] .
+func (p *Parser) typeList(strict bool) (x Expr, comma bool) {
+	if trace {
+		defer p.trace("typeList")()
+	}
+
+	p.Xnest++
+	if strict {
+		x = p.type_()
+	} else {
+		x = p.expr()
+	}
+	if p.got(token.Comma) {
+		comma = true
+		if t := p.typeOrNil(); t != nil {
+			list := []Expr{x, t}
+			for p.got(token.Comma) {
+				if t = p.typeOrNil(); t == nil {
+					break
+				}
+				list = append(list, t)
+			}
+			l := &ListExpr{}
+			l.pos = x.Pos() // == list[0].Pos()
+			l.ElemList = list
+			x = l
+		}
+	}
+	p.Xnest--
+	return
+}
+
+// Unparen returns e with any enclosing parentheses stripped.
+func Unparen(x Expr) Expr {
+	for {
+		p, ok := x.(*ParenExpr)
+		if !ok {
+			break
+		}
+		x = p.X
+	}
+	return x
+}
+
+// UnpackListExpr unpacks a *ListExpr into a []Expr.
+func UnpackListExpr(x Expr) (es []Expr) {
+	switch x := x.(type) {
+	case nil:
+		return nil
+	case *ListExpr:
+		return x.ElemList
+	default:
+		return []Expr{x}
+	}
+}

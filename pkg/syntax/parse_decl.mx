@@ -1,0 +1,444 @@
+package syntax
+
+import (
+	"git.smesh.lol/moxie/pkg/token"
+)
+
+// SourceFile = PackageClause ";" { ImportDecl ";" } { TopLevelDecl ";" } .
+func (p *Parser) fileOrNil() (f *File) {
+	if trace {
+		defer p.trace("file")()
+	}
+
+	f := &File{}
+	f.pos = p.pos()
+
+	// PackageClause
+	f.GoVersion = p.GoVersion
+	p.Top = false
+	if !p.got(token.Package) {
+		p.syntaxError("package statement must be first")
+		return nil
+	}
+	f.Pragma = p.takePragma()
+	f.PkgName = p.name()
+	p.want(token.Semi)
+
+	// don't bother continuing if package clause has errors
+	if p.First != nil {
+		return nil
+	}
+
+	// Accept import declarations anywhere for error tolerance, but complain.
+	// { ( ImportDecl | TopLevelDecl ) ";" }
+	prev := token.Import
+	for p.Tok != token.EOF {
+		if p.Tok == token.Import && prev != token.Import {
+			p.syntaxError("imports must appear before other declarations")
+		}
+		prev = p.Tok
+
+		switch p.Tok {
+		case token.Import:
+			p.Next()
+			f.DeclList = p.appendGroup(f.DeclList, p.importDecl)
+
+		case token.Const:
+			p.Next()
+			f.DeclList = p.appendGroup(f.DeclList, p.constDecl)
+
+		case token.TypeType:
+			p.Next()
+			f.DeclList = p.appendGroup(f.DeclList, p.typeDecl)
+
+		case token.Var:
+			p.Next()
+			f.DeclList = p.appendGroup(f.DeclList, p.varDecl)
+
+		case token.Func:
+			p.Next()
+			if d := p.funcDeclOrNil(); d != nil {
+				f.DeclList = append(f.DeclList, d)
+			}
+
+		default:
+			if p.Tok == token.Lbrace && len(f.DeclList) > 0 && isEmptyFuncDecl(f.DeclList[len(f.DeclList)-1]) {
+				// opening { of function declaration on next line
+				p.syntaxError("unexpected semicolon or newline before {")
+			} else {
+				p.syntaxError("non-declaration statement outside function body")
+			}
+			p.advance(token.Import, token.Const, token.TypeType, token.Var, token.Func)
+			continue
+		}
+
+		// Reset p.pragma BEFORE advancing to the next token (consuming ';')
+		// since comments before may set pragmas for the next function decl.
+		p.clearPragma()
+
+		if p.Tok != token.EOF && !p.got(token.Semi) {
+			p.syntaxError("after top level declaration")
+			p.advance(token.Import, token.Const, token.TypeType, token.Var, token.Func)
+		}
+	}
+	// p.tok == _EOF
+
+	p.clearPragma()
+	f.EOF = p.pos()
+
+	return f
+}
+
+func isEmptyFuncDecl(dcl Decl) (ok bool) {
+	f, ok := dcl.(*FuncDecl)
+	return ok && f.Body == nil
+}
+
+// ----------------------------------------------------------------------------
+// Declarations
+
+// list parses a possibly empty, sep-separated list of elements, optionally
+// followed by sep, and closed by close (or EOF). sep must be one of _Comma
+// or _Semi, and close must be one of _Rparen, _Rbrace, or _Rbrack.
+//
+// For each list element, f is called. Specifically, unless we're at close
+// (or EOF), f is called at least once. After f returns true, no more list
+// elements are accepted. list returns the position of the closing token.
+//
+// list = [ f { sep f } [sep] ] close .
+func (p *Parser) list(context string, sep, close token.Token, f func() bool) (pv token.Pos) {
+	if debug && (sep != token.Comma && sep != token.Semi || close != token.Rparen && close != token.Rbrace && close != token.Rbrack) {
+		panic("invalid sep or close argument for list")
+	}
+
+	done := false
+	for p.Tok != token.EOF && p.Tok != close && !done {
+		done = f()
+		// sep is optional before close
+		if !p.got(sep) && p.Tok != close {
+			p.syntaxError("in " | context | "; possibly missing " | tokstring(sep) | " or " | tokstring(close))
+			p.advance(token.Rparen, token.Rbrack, token.Rbrace)
+			if p.Tok != close {
+				// position could be better but we had an error so we don't care
+				return p.pos()
+			}
+		}
+	}
+
+	pos := p.pos()
+	p.want(close)
+	return pos
+}
+
+// appendGroup(f) = f + "(" { f ";" } ")" . // ";" is optional before ")"
+func (p *Parser) appendGroup(list []Decl, f func(*Group) Decl) (ds []Decl) {
+	if p.Tok == token.Lparen {
+		g := &Group{}
+		p.clearPragma()
+		p.Next() // must consume "(" after calling clearPragma!
+		p.list("grouped declaration", token.Semi, token.Rparen, func() bool {
+			if x := f(g); x != nil {
+				list = append(list, x)
+			}
+			return false
+		})
+	} else {
+		if x := f(nil); x != nil {
+			list = append(list, x)
+		}
+	}
+	return list
+}
+
+// ImportSpec = [ "." + PackageName ] ImportPath .
+// ImportPath = string_lit .
+func (p *Parser) importDecl(group *Group) Decl {
+	if trace {
+		defer p.trace("importDecl")()
+	}
+
+	d := &ImportDecl{}
+	d.pos = p.pos()
+	d.Group = group
+	d.Pragma = p.takePragma()
+
+	switch p.Tok {
+	case token.NameType:
+		n := p.name()
+		if n.Value == "_" {
+			p.syntaxErrorAt(n.Pos(), "blank imports are not allowed in Moxie")
+		}
+		d.LocalPkgName = n
+	case token.Dot:
+		d.LocalPkgName = NewName(p.pos(), ".")
+		p.Next()
+	}
+	d.Path = p.oliteral()
+	if d.Path == nil {
+		p.syntaxError("missing import path")
+		p.advance(token.Semi, token.Rparen)
+		return d
+	}
+	if !d.Path.Bad && d.Path.Kind != token.StringLit {
+		p.syntaxErrorAt(d.Path.Pos(), "import path must be a string")
+		d.Path.Bad = true
+	}
+	// d.Path.Bad || d.Path.Kind == StringLit
+
+	return d
+}
+
+// ConstSpec = IdentifierList [ [ Type ] "=" ExpressionList ] .
+func (p *Parser) constDecl(group *Group) Decl {
+	if trace {
+		defer p.trace("constDecl")()
+	}
+
+	d := &ConstDecl{}
+	d.pos = p.pos()
+	d.Group = group
+	d.Pragma = p.takePragma()
+
+	d.NameList = p.nameList(p.name())
+	if p.Tok != token.EOF && p.Tok != token.Semi && p.Tok != token.Rparen {
+		d.Type = p.typeOrNil()
+		if p.gotAssign() {
+			d.Values = p.exprList()
+		}
+	}
+
+	return d
+}
+
+// TypeSpec = identifier [ TypeParams ] [ "=" ] Type .
+func (p *Parser) typeDecl(group *Group) Decl {
+	if trace {
+		defer p.trace("typeDecl")()
+	}
+
+	d := &TypeDecl{}
+	d.pos = p.pos()
+	d.Group = group
+	d.Pragma = p.takePragma()
+
+	d.Name = p.name()
+	if p.Tok == token.Lbrack {
+		// d.Name "[" ...
+		// array/slice type or type parameter list
+		pos := p.pos()
+		p.Next()
+		switch p.Tok {
+		case token.NameType:
+			// We may have an array type or a type parameter list.
+			// In either case we expect an expression x (which may
+			// just be a name, or a more complex expression) which
+			// we can analyze further.
+			//
+			// A type parameter list may have a type bound starting
+			// with a "[" as in: P []E. In that case, simply parsing
+			// an expression would lead to an error: P[] is invalid.
+			// But since index or slice expressions are never constant
+			// and thus invalid array length expressions, if the name
+			// is followed by "[" it must be the start of an array or
+			// slice constraint. Only if we don't see a "[" do we
+			// need to parse a full expression. Notably, name <- x
+			// is not a concern because name <- x is a statement and
+			// not an expression.
+			var x Expr = p.name()
+			if p.Tok != token.Lbrack {
+				// To parse the expression starting with name, expand
+				// the call sequence we would get by passing in name
+				// to parser.expr, and pass in name to parser.pexpr.
+				p.Xnest++
+				x = p.binaryExpr(p.pexpr(x, false), 0)
+				p.Xnest--
+			}
+			// Analyze expression x. If we can split x into a type parameter
+			// name, possibly followed by a type parameter type, we consider
+			// this the start of a type parameter list, with some caveats:
+			// a single name followed by "]" tilts the decision towards an
+			// array declaration; a type parameter type that could also be
+			// an ordinary expression but which is followed by a comma tilts
+			// the decision towards a type parameter list.
+			if pname, ptype := extractName(x, p.Tok == token.Comma); pname != nil && (ptype != nil || p.Tok != token.Rbrack) {
+				// d.Name "[" pname ...
+				// d.Name "[" pname ptype ...
+				// d.Name "[" pname ptype "," ...
+				d.TParamList = p.paramList(pname, ptype, token.Rbrack, true, false) // ptype may be nil
+				d.Alias = p.gotAssign()
+				d.Type = p.typeOrNil()
+			} else {
+				// d.Name "[" pname "]" ...
+				// d.Name "[" x ...
+				d.Type = p.arrayType(pos, x)
+			}
+		case token.Rbrack:
+			// d.Name "[" "]" ...
+			p.Next()
+			d.Type = p.sliceType(pos)
+		default:
+			// d.Name "[" ...
+			d.Type = p.arrayType(pos, nil)
+		}
+	} else {
+		d.Alias = p.gotAssign()
+		d.Type = p.typeOrNil()
+	}
+
+	if d.Type == nil {
+		d.Type = p.badExpr()
+		p.syntaxError("in type declaration")
+		p.advance(token.Semi, token.Rparen)
+	}
+
+	return d
+}
+
+// extractName splits the expression x into (name, expr) if syntactically
+// x can be written as name expr. The split only happens if expr is a type
+// element (per the isTypeElem predicate) or if force is set.
+// If x is just a name, the result is (name, nil). If the split succeeds,
+// the result is (name, expr). Otherwise the result is (nil, x).
+func extractName(x Expr, force bool) (*Name, Expr) {
+	switch x := x.(type) {
+	case *Name:
+		return x, nil
+	case *Operation:
+		if x.Y == nil {
+			break // unary expr
+		}
+		switch x.Op {
+		case token.Mul:
+			if name, _ := x.X.(*Name); name != nil && (force || isTypeElem(x.Y)) {
+				// x = name *x.Y
+				op := *x
+				op.X, op.Y = op.Y, nil // change op into unary *op.Y
+				return name, &op
+			}
+		case token.Or:
+			if name, lhs := extractName(x.X, force || isTypeElem(x.Y)); name != nil && lhs != nil {
+				// x = name lhs|x.Y
+				op := *x
+				op.X = lhs
+				return name, &op
+			}
+		}
+	case *CallExpr:
+		if name, _ := x.Fun.(*Name); name != nil {
+			if len(x.ArgList) == 1 && !x.HasDots && (force || isTypeElem(x.ArgList[0])) {
+				// The parser doesn't keep unnecessary parentheses.
+				// Set the flag below to keep them, for testing
+				// (see go.dev/issues/69206).
+				const keep_parens = false
+				if keep_parens {
+					// x = name (x.ArgList[0])
+					px := &ParenExpr{}
+					px.pos = x.pos // position of "(" in call
+					px.X = x.ArgList[0]
+					return name, px
+				} else {
+					// x = name x.ArgList[0]
+					return name, Unparen(x.ArgList[0])
+				}
+			}
+		}
+	}
+	return nil, x
+}
+
+// isTypeElem reports whether x is a (possibly parenthesized) type element expression.
+// The result is false if x could be a type element OR an ordinary (value) expression.
+func isTypeElem(x Expr) (ok bool) {
+	switch x := x.(type) {
+	case *ArrayType, *StructType, *FuncType, *InterfaceType, *SliceType, *MapType, *ChanType:
+		return true
+	case *Operation:
+		return isTypeElem(x.X) || (x.Y != nil && isTypeElem(x.Y)) || x.Op == token.Tilde
+	case *ParenExpr:
+		return isTypeElem(x.X)
+	}
+	return false
+}
+
+// VarSpec = IdentifierList ( Type [ "=" ExpressionList ] + "=" ExpressionList ) .
+func (p *Parser) varDecl(group *Group) Decl {
+	if trace {
+		defer p.trace("varDecl")()
+	}
+
+	d := &VarDecl{}
+	d.pos = p.pos()
+	d.Group = group
+	d.Pragma = p.takePragma()
+
+	d.NameList = p.nameList(p.name())
+	if p.gotAssign() {
+		d.Values = p.exprList()
+	} else {
+		d.Type = p.type_()
+		if p.gotAssign() {
+			d.Values = p.exprList()
+		}
+	}
+
+	return d
+}
+
+// FunctionDecl = "func" FunctionName [ TypeParams ] ( Function | Signature ) .
+// FunctionName = identifier .
+// Function     = Signature FunctionBody .
+// MethodDecl   = "func" Receiver MethodName ( Function | Signature ) .
+// Receiver     = Parameters .
+func (p *Parser) funcDeclOrNil() (f *FuncDecl) {
+	if trace {
+		defer p.trace("funcDecl")()
+	}
+
+	f := &FuncDecl{}
+	f.pos = p.pos()
+	f.Pragma = p.takePragma()
+
+	var context string
+	if p.got(token.Lparen) {
+		context = "method"
+		rcvr := p.paramList(nil, nil, token.Rparen, false, false)
+		switch len(rcvr) {
+		case 0:
+			p.error("method has no receiver")
+		default:
+			p.error("method has multiple receivers")
+			f.Recv = rcvr[0]
+		case 1:
+			f.Recv = rcvr[0]
+		}
+	}
+
+	if p.Tok == token.NameType {
+		f.Name = p.name()
+		f.TParamList, f.Type = p.funcType(context)
+	} else {
+		f.Name = NewName(p.pos(), "_")
+		f.Type = &FuncType{}
+		f.Type.pos = p.pos()
+		msg := "expected name or ("
+		if context != "" {
+			msg = "expected name"
+		}
+		p.syntaxError(msg)
+		p.advance(token.Lbrace, token.Semi)
+	}
+
+	if p.Tok == token.Lbrace {
+		f.Body = p.funcBody()
+	}
+
+	return f
+}
+
+func (p *Parser) funcBody() (b *BlockStmt) {
+	p.Fnest++
+	body := p.blockStmt("")
+	p.Fnest--
+
+	return body
+}

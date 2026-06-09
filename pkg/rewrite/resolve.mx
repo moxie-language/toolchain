@@ -1,0 +1,570 @@
+package rewrite
+
+import (
+	"git.smesh.lol/moxie/pkg/syntax"
+	"git.smesh.lol/moxie/pkg/token"
+	"git.smesh.lol/moxie/pkg/types"
+)
+
+// Package-level vars referenced by the resolve functions.
+var ConstValMap map[string]int64
+var PkgSrc []byte
+var ImportRegistry map[string]*types.TCPackage
+
+func EnsureImportRegistry() {
+	if ImportRegistry == nil {
+		ImportRegistry = map[string]*types.TCPackage{}
+	}
+}
+
+// irParseInt64 is a local copy of the emit helper.
+func irParseInt64(s string) int64 {
+	var n int64
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			break
+		}
+		n = n*10 + int64(c-'0')
+	}
+	return n
+}
+
+// typeBaseName is a local copy of the types helper.
+func typeBaseName(t syntax.Type) string {
+	if t == nil {
+		return ""
+	}
+	switch t := t.(type) {
+	case *types.Named:
+		if tn := t.Obj(); tn != nil {
+			return tn.Name()
+		}
+	case *types.Pointer:
+		return typeBaseName(t.Elem())
+	case *types.Basic:
+		return t.Name()
+	}
+	return ""
+}
+
+func ResolveNameInline(e syntax.Expr, scope *types.Scope) syntax.Type {
+	if e == nil {
+		return nil
+	}
+	switch e := e.(type) {
+	case *syntax.Name:
+		var obj Object
+		if scope != nil {
+			_, obj = scope.LookupParent(e.Value)
+		} else {
+			_, obj = types.Universe.LookupParent(e.Value)
+		}
+		if obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				return tn.Type()
+			}
+			if fn, ok := obj.(*types.TCFunc); ok {
+				if sig := fn.Signature(); sig != nil {
+					return sig
+				}
+			}
+		}
+	case *syntax.SelectorExpr:
+		pkgName, ok := e.X.(*syntax.Name)
+		if ok && scope != nil {
+			_, pkgObj := scope.LookupParent(pkgName.Value)
+			if pn, ok2 := pkgObj.(*types.PkgName); ok2 && pn.Imported() != nil {
+				typeObj := pn.Imported().Scope().Lookup(e.Sel.Value)
+				if typeObj != nil {
+					if tn, ok3 := typeObj.(*types.TypeName); ok3 {
+						return tn.Type()
+					}
+					if fn, ok3 := typeObj.(*types.TCFunc); ok3 {
+						if sig := fn.Signature(); sig != nil {
+							return sig
+						}
+					}
+				}
+			}
+		}
+		// Fallback: check ImportRegistry directly for external package types
+		if pkgName, ok := e.X.(*syntax.Name); ok {
+			var irKeys []string
+			for k := range ImportRegistry {
+				irKeys = append(irKeys, k)
+			}
+			for i := 1; i < len(irKeys); i++ {
+				for j := i; j > 0 && irKeys[j] < irKeys[j-1]; j-- {
+					irKeys[j], irKeys[j-1] = irKeys[j-1], irKeys[j]
+				}
+			}
+			for _, k := range irKeys {
+				pkg := ImportRegistry[k]
+				if pkg.Name() == pkgName.Value {
+					typeObj := pkg.Scope().Lookup(e.Sel.Value)
+					if typeObj != nil {
+						if tn, ok2 := typeObj.(*types.TypeName); ok2 {
+							return tn.Type()
+						}
+					}
+					break
+				}
+			}
+		}
+	case *syntax.Operation:
+		if e.Y == nil && e.Op == Mul {
+			base := ResolveNameInline(e.X, scope)
+			if base == nil {
+				base = types.Typ[types.Int8]
+			}
+			return types.NewPointer(base)
+		}
+	case *types.SliceType:
+		elem := ResolveNameInline(e.Elem, scope)
+		if elem != nil {
+			if b, ok := elem.(*types.Basic); ok && b.Kind() == Uint8 {
+				return types.Typ[types.TCString]
+			}
+			return types.NewSlice(elem)
+		}
+	case *syntax.ArrayType:
+		elem := ResolveNameInline(e.Elem, scope)
+		if elem != nil {
+			n := int64(-1)
+			if lit, ok := e.Len.(*syntax.BasicLit); ok {
+				n = irParseInt64(lit.Value)
+			} else if e.Len != nil {
+				cv := EvalConstExpr(e.Len, scope, -1)
+				if cv != nil {
+					if ci, ok := cv.(types.ConstInt); ok {
+						n = ci.V
+					}
+				}
+				if n == -1 && ConstValMap != nil {
+					n = ResolveArrayLenFromSrc(e.pos, ConstValMap)
+				}
+			}
+			return types.NewArray(elem, n)
+		}
+	case *syntax.MapType:
+		key := ResolveNameInline(e.Key, scope)
+		val := ResolveNameInline(e.Value, scope)
+		if key != nil && val != nil {
+			return types.NewTCMap(key, val)
+		}
+	case *syntax.StructType:
+		var fields []*types.TCVar
+		var tags []string
+		for i, field := range e.FieldList {
+			typ := ResolveNameInline(field.Type, scope)
+			fname := ""
+			if field.Name != nil {
+				fname = field.Name.Value
+			} else {
+				fname = typeBaseName(typ)
+			}
+			fields = append(fields, NewTCField(nil, fname, typ, field.Name == nil))
+			tag := ""
+			if i < len(e.TagList) && e.TagList[i] != nil {
+				tag = e.TagList[i].Value
+			}
+			tags = append(tags, tag)
+		}
+		return types.NewTCStruct(fields, tags)
+	case *syntax.FuncType:
+		return ResolveFuncInline(e, scope)
+	case *syntax.InterfaceType:
+		return ResolveInterfaceInline(e, scope)
+	case *syntax.ChanType:
+		elem := ResolveNameInline(e.Elem, scope)
+		if elem == nil {
+			elem = types.NewTCStruct(nil, nil)
+		}
+		var dir types.TCChanDir
+		switch e.Dir {
+		case syntax.SendOnly:
+			dir = types.TCSendOnly
+		case syntax.RecvOnly:
+			dir = types.TCRecvOnly
+		default:
+			dir = types.TCSendRecv
+		}
+		return types.NewTCChan(dir, elem)
+	case *syntax.DotsType:
+		elem := ResolveNameInline(e.Elem, scope)
+		if elem != nil {
+			if b, ok := elem.(*types.Basic); ok && b.Kind() == Uint8 {
+				return types.Typ[types.TCString]
+			}
+			return types.NewSlice(elem)
+		}
+	}
+	return nil
+}
+
+func ResolveInterfaceInline(e *syntax.InterfaceType, scope *types.Scope) *types.TCInterface {
+	var methods []*types.IfaceMethod
+	var embeds []syntax.Type
+	for _, f := range e.MethodList {
+		if f.Name == nil {
+			if f.Type != nil {
+				embed := ResolveNameInline(f.Type, scope)
+				if embed != nil {
+					embeds = append(embeds, embed)
+				}
+			}
+			continue
+		}
+		ft, ok := f.Type.(*syntax.FuncType)
+		if !ok {
+			continue
+		}
+		sig := ResolveFuncInline(ft, scope)
+		if sig != nil {
+			methods = append(methods, types.NewTCIfaceMethod(f.Name.Value, sig))
+		}
+	}
+	iface := types.NewTCInterface(methods, embeds)
+	iface.Complete()
+	return iface
+}
+
+func ResolveFuncInline(ft *syntax.FuncType, scope *types.Scope) *types.Signature {
+	if ft == nil {
+		return nil
+	}
+	var params []*types.TCVar
+	for _, p := range ft.ParamList {
+		typ := ResolveNameInline(p.Type, scope)
+		pname := ""
+		if p.Name != nil {
+			pname = p.Name.Value
+		}
+		params = append(params, types.NewTCVar(nil, pname, typ))
+	}
+	var results []*types.TCVar
+	for _, r := range ft.ResultList {
+		typ := ResolveNameInline(r.Type, scope)
+		rname := ""
+		if r.Name != nil {
+			rname = r.Name.Value
+		}
+		results = append(results, types.NewTCVar(nil, rname, typ))
+	}
+	variadic := false
+	if len(ft.ParamList) > 0 {
+		if _, ok := ft.ParamList[len(ft.ParamList)-1].Type.(*syntax.DotsType); ok {
+			variadic = true
+		}
+	}
+	var pTuple *types.Tuple
+	if len(params) > 0 {
+		pTuple = types.NewTuple(params...)
+	}
+	var rTuple *types.Tuple
+	if len(results) > 0 {
+		rTuple = types.NewTuple(results...)
+	}
+	return types.NewSignature(nil, pTuple, rTuple, variadic)
+}
+
+func ResolveFuncInlineWithRecv(ft *syntax.FuncType, recv *syntax.Field, scope *types.Scope) *types.Signature {
+	if ft == nil {
+		return nil
+	}
+	var recvVar *types.TCVar
+	if recv != nil {
+		recvTyp := ResolveNameInline(recv.Type, scope)
+		recvName := ""
+		if recv.Name != nil {
+			recvName = recv.Name.Value
+		}
+		recvVar = types.NewTCVar(nil, recvName, recvTyp)
+	}
+	params := ResolveFieldList(ft.ParamList, scope)
+	results := ResolveFieldList(ft.ResultList, scope)
+	variadic := false
+	if len(ft.ParamList) > 0 {
+		if _, ok := ft.ParamList[len(ft.ParamList)-1].Type.(*syntax.DotsType); ok {
+			variadic = true
+		}
+	}
+	return types.NewSignature(recvVar, params, results, variadic)
+}
+
+func ResolveRecvType(recv *syntax.Field, scope *types.Scope) syntax.Type {
+	if recv == nil {
+		return nil
+	}
+	return ResolveNameInline(recv.Type, scope)
+}
+
+func ResolveFieldList(fields []*syntax.Field, scope *types.Scope) *types.Tuple {
+	if len(fields) == 0 {
+		return nil
+	}
+	var vars []*types.TCVar
+	for _, f := range fields {
+		typ := ResolveNameInline(f.Type, scope)
+		pname := ""
+		if f.Name != nil {
+			pname = f.Name.Value
+		}
+		vars = append(vars, types.NewTCVar(nil, pname, typ))
+	}
+	return types.NewTuple(vars...)
+}
+
+func InferTypeFromExpr(e syntax.Expr, scope *types.Scope) syntax.Type {
+	switch e := e.(type) {
+	case *syntax.BasicLit:
+		switch e.Kind {
+		case token.StringLit:
+			return types.Typ[types.TCString]
+		case token.IntLit:
+			return types.Typ[types.Int32]
+		case token.FloatLit:
+			return types.Typ[types.Float64]
+		}
+	case *syntax.Name:
+		if e.Value == "true" || e.Value == "false" {
+			return types.Typ[types.Bool]
+		}
+		return ResolveNameInline(e, scope)
+	case *syntax.CallExpr:
+		ft := ResolveNameInline(e.Fun, scope)
+		if sig, ok := ft.(*types.Signature); ok && sig != nil {
+			res := sig.Results()
+			if res != nil && res.Len() == 1 {
+				return res.At(0).Type()
+			}
+			if res != nil && res.Len() > 1 {
+				return res
+			}
+		}
+		return ft
+	case *syntax.CompositeLit:
+		t := ResolveNameInline(e.Type, scope)
+		if arr, ok := t.(*types.Array); ok && arr.Len() < 0 {
+			return types.NewArray(arr.Elem(), int64(len(e.ElemList)))
+		}
+		return t
+	case *syntax.Operation:
+		if e.Y == nil && e.Op == And {
+			return types.NewPointer(InferTypeFromExpr(e.X, scope))
+		}
+	}
+	return nil
+}
+
+func EvalConstExpr(e syntax.Expr, scope *types.Scope, iotaVal int64) types.ConstVal {
+	if e == nil {
+		return nil
+	}
+	switch e := e.(type) {
+	case *syntax.BasicLit:
+		return types.EvalBasicLitLocal(e)
+	case *syntax.Name:
+		if e.Value == "iota" && iotaVal >= 0 {
+			return types.ConstInt{iotaVal}
+		}
+		if scope != nil {
+			_, obj := scope.LookupParent(e.Value)
+			if c, ok := obj.(*types.TCConst); ok && c.Val() != nil {
+				return c.Val()
+			}
+		}
+		if ConstValMap != nil {
+			if v, ok := ConstValMap[e.Value]; ok {
+				return types.ConstInt{v}
+			}
+		}
+	case *syntax.Operation:
+		if e.Y == nil {
+			xr := EvalConstExpr(e.X, scope, iotaVal)
+			if xr == nil {
+				return nil
+			}
+			return evalUnaryLocal(e.Op, xr)
+		}
+		xr := EvalConstExpr(e.X, scope, iotaVal)
+		yr := EvalConstExpr(e.Y, scope, iotaVal)
+		if xr == nil || yr == nil {
+			return nil
+		}
+		return evalBinaryLocal(e.Op, xr, yr)
+	case *syntax.ParenExpr:
+		return EvalConstExpr(e.X, scope, iotaVal)
+	case *syntax.CallExpr:
+		if id, ok := e.Fun.(*syntax.Name); ok && id.Value == "len" && len(e.ArgList) == 1 {
+			if lit, ok2 := e.ArgList[0].(*syntax.BasicLit); ok2 && lit.Kind == token.StringLit {
+				lv := types.EvalBasicLitLocal(lit)
+				if cs, ok3 := lv.(types.ConstStr); ok3 {
+					return types.ConstInt{int64(len(cs.S))}
+				}
+			}
+			inner := EvalConstExpr(e.ArgList[0], scope, iotaVal)
+			if cs, ok2 := inner.(types.ConstStr); ok2 {
+				return types.ConstInt{int64(len(cs.S))}
+			}
+		}
+		if sel, ok := e.Fun.(*syntax.SelectorExpr); ok {
+			if pkg, ok2 := sel.X.(*syntax.Name); ok2 && pkg.Value == "unsafe" {
+				switch sel.Sel.Value {
+				case "Sizeof", "Alignof", "Offsetof":
+					return types.ConstInt{8}
+				}
+			}
+		}
+		if len(e.ArgList) != 1 {
+			return nil
+		}
+		inner := EvalConstExpr(e.ArgList[0], scope, iotaVal)
+		if inner == nil {
+			return nil
+		}
+		targetType := ResolveNameInline(e.Fun, scope)
+		if targetType == nil {
+			return inner
+		}
+		return convertConstLocal(inner, targetType)
+	case *syntax.SelectorExpr:
+		pkgName, ok := e.X.(*syntax.Name)
+		if !ok {
+			return nil
+		}
+		var imported *types.TCPackage
+		if scope != nil {
+			_, obj := scope.LookupParent(pkgName.Value)
+			if pn, ok2 := obj.(*types.PkgName); ok2 && pn.Imported() != nil {
+				imported = pn.Imported()
+			}
+		}
+		if imported == nil {
+			EnsureImportRegistry()
+			imported = ImportRegistry[pkgName.Value]
+		}
+		if imported == nil {
+			return nil
+		}
+		member := imported.Scope().Lookup(e.Sel.Value)
+		if member == nil {
+			return nil
+		}
+		if k, ok := member.(*types.TCConst); ok && k.Val() != nil {
+			return k.Val()
+		}
+		return nil
+	}
+	return nil
+}
+
+func ResolveArrayLenFromSrc(p token.Pos, cmap map[string]int64) int64 {
+	line := p.Line()
+	col := p.Col()
+	if line == 0 || col == 0 || PkgSrc == nil {
+		return -1
+	}
+	off := 0
+	curLine := uint32(1)
+	for off < len(PkgSrc) && curLine < line {
+		if PkgSrc[off] == '\n' {
+			curLine++
+		}
+		off++
+	}
+	off += int32(col) - 1
+	if off >= len(PkgSrc) || PkgSrc[off] != '[' {
+		return -1
+	}
+	off++
+	for off < len(PkgSrc) && PkgSrc[off] == ' ' {
+		off++
+	}
+	start := off
+	for off < len(PkgSrc) {
+		c := PkgSrc[off]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+			off++
+		} else {
+			break
+		}
+	}
+	if off == start {
+		return -1
+	}
+	name := string(PkgSrc[start:off])
+	if v, ok := cmap[name]; ok {
+		if off < len(PkgSrc) && PkgSrc[off] == '+' {
+			off++
+			for off < len(PkgSrc) && PkgSrc[off] == ' ' {
+				off++
+			}
+			numStart := off
+			for off < len(PkgSrc) && PkgSrc[off] >= '0' && PkgSrc[off] <= '9' {
+				off++
+			}
+			if off > numStart {
+				addend := int64(0)
+				for i := numStart; i < off; i++ {
+					addend = addend*10 + int64(PkgSrc[i]-'0')
+				}
+				return v + addend
+			}
+		}
+		return v
+	}
+	n := int64(0)
+	isNum := true
+	for i := start; i < off; i++ {
+		c := PkgSrc[i]
+		if c >= '0' && c <= '9' {
+			n = n*10 + int64(c-'0')
+		} else {
+			isNum = false
+			break
+		}
+	}
+	if isNum && off > start {
+		return n
+	}
+	return -1
+}
+
+func ResolveArrayLenFromConstMap(e syntax.Expr, cmap map[string]int64) int64 {
+	line := e.Pos().Line()
+	col := e.Pos().Col()
+	if line == 0 || col == 0 || PkgSrc == nil {
+		return -1
+	}
+	curLine := uint32(1)
+	off := 0
+	for off < len(PkgSrc) && curLine < line {
+		if PkgSrc[off] == '\n' {
+			curLine++
+		}
+		off++
+	}
+	off += int32(col) - 1
+	if off >= len(PkgSrc) {
+		return -1
+	}
+	start := off
+	for off < len(PkgSrc) {
+		c := PkgSrc[off]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+			off++
+		} else {
+			break
+		}
+	}
+	if off == start {
+		return -1
+	}
+	name := string(PkgSrc[start:off])
+	if v, ok := cmap[name]; ok {
+		return v
+	}
+	return -1
+}

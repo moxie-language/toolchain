@@ -1,0 +1,287 @@
+package emit
+
+import (
+	"git.smesh.lol/moxie/pkg/syntax"
+	"git.smesh.lol/moxie/pkg/ssa"
+	"git.smesh.lol/moxie/pkg/types"
+)
+
+func llvmArrayByteSize(t string) int64 {
+	if len(t) == 0 || t[0] != '[' {
+		return 0
+	}
+	i := 1
+	for i < len(t) && t[i] >= '0' && t[i] <= '9' {
+		i++
+	}
+	if i <= 1 {
+		return 0
+	}
+	n := int64(0)
+	for j := 1; j < i; j++ {
+		n = n*10 + int64(t[j]-'0')
+	}
+	xpos := -1
+	for k := i; k < len(t)-1; k++ {
+		if t[k] == 'x' && t[k-1] == ' ' && k+2 < len(t) && t[k+1] == ' ' {
+			xpos = k + 2
+			break
+		}
+	}
+	if xpos < 0 {
+		return 0
+	}
+	elemT := t[xpos:]
+	if len(elemT) > 0 && elemT[len(elemT)-1] == ']' {
+		elemT = elemT[:len(elemT)-1]
+	}
+	var elemSize int64
+	switch elemT {
+	case "i8":
+		elemSize = 1
+	case "i16":
+		elemSize = 2
+	case "i32", "float":
+		elemSize = 4
+	case "i64", "double", "ptr":
+		elemSize = 8
+	default:
+		inner := llvmArrayByteSize(elemT)
+		if inner > 0 {
+			elemSize = inner
+		} else {
+			elemSize = 8
+		}
+	}
+	return n * elemSize
+}
+
+func (e *irEmitter) emitZeroInit(typ, reg string) {
+	sz := llvmArrayByteSize(typ)
+	if sz >= 1024 {
+		e.w("  call void @llvm.memset.p0.i64(ptr ") ; e.w(reg) ; e.w(", i8 0, i64 ") ; e.w(irItoa64(sz)) ; e.w(", i1 false)\n")
+		e.declareRuntime("llvm.memset.p0.i64", "void", "ptr, i8, i64, i1")
+	} else {
+		e.w("  store ") ; e.w(typ) ; e.w(" zeroinitializer, ptr ") ; e.w(reg) ; e.w("\n")
+	}
+}
+
+func (e *irEmitter) regName(v ssa.SSAValue) string {
+	if v == nil {
+		e.nextReg++
+		return "%r" | irItoa(e.nextReg)
+	}
+	if n, ok := e.valName[v]; ok {
+		return n
+	}
+	name := v.SSAName()
+	if name == "" {
+		e.nextReg++
+		name = "r" | irItoa(e.nextReg)
+	}
+	n := "%" | name
+	for e.nameUsed[n] {
+		e.nextReg++
+		n = "%r" | irItoa(e.nextReg)
+	}
+	e.valName[v] = n
+	e.nameUsed[n] = true
+	return n
+}
+
+func (e *irEmitter) setRegType(v ssa.SSAValue, reg string, typ string) {
+	e.allocTypes[v] = typ
+	if len(reg) > 0 && reg[0] == '%' {
+		e.regTypes[reg] = typ
+	}
+}
+
+func (e *irEmitter) resolvedType(v ssa.SSAValue, fallback string) string {
+	if _, isIdx := v.(*ssa.SSAIndexAddr); isIdx {
+		return "ptr"
+	}
+	if at, ok := e.allocTypes[v]; ok {
+		return at
+	}
+	if n, ok := e.valName[v]; ok {
+		if rt, ok2 := e.regTypes[n]; ok2 {
+			return rt
+		}
+	}
+	op := e.operandNoSideEffect(v)
+	if len(op) > 0 && op[0] == '%' {
+		if rt, ok := e.regTypes[op]; ok {
+			return rt
+		}
+	}
+	return fallback
+}
+
+func (e *irEmitter) llvmType(t syntax.Type) string {
+	if t == nil {
+		return "void"
+	}
+	u := types.SafeUnderlying(t)
+	if u == nil {
+		if _, ok := t.(*types.Slice); ok {
+			return e.sliceType()
+		}
+		if n, ok := t.(*types.Named); ok {
+			_ = n
+			return "ptr"
+		}
+		return "ptr"
+	}
+	t = u
+	switch t := t.(type) {
+	case *types.Basic:
+		return e.llvmBasicType(t)
+	case *types.Pointer:
+		return "ptr"
+	case *types.Slice:
+		return e.sliceType()
+	case *types.Array:
+		n := t.Len()
+		if n < 0 {
+			return e.sliceType()
+		}
+		elem := e.llvmType(t.Elem())
+		return "[" | irItoa(int32(n)) | " x " | elem | "]"
+	case *types.TCStruct:
+		return e.llvmStructType(t)
+	case *types.Signature:
+		return "{ptr, ptr}"
+	case *types.TCMap:
+		return "ptr"
+	case *types.TCChan:
+		return "ptr"
+	case *types.TCInterface:
+		return e.ifaceType()
+	case *types.Named:
+		if t.Obj() != nil && t.Obj().Name() == "error" {
+			return e.ifaceType()
+		}
+		if t.NumMethods() > 0 && len(t.TypeArgs()) == 0 {
+			return e.ifaceType()
+		}
+		return "ptr"
+	case *types.Tuple:
+		if t == nil || t.Len() == 0 {
+			return "void"
+		}
+		if t.Len() == 1 {
+			return e.llvmType(t.At(0).Type())
+		}
+		s := "{"
+		for i := 0; i < t.Len(); i++ {
+			if i > 0 {
+				s = s | ", "
+			}
+			ft := e.llvmType(t.At(i).Type())
+			if ft == "void" {
+				ft = "ptr"
+			}
+			s = s | ft
+		}
+		return s | "}"
+	}
+	return "i8"
+}
+
+func (e *irEmitter) llvmBasicType(t *types.Basic) string {
+	switch t.Kind() {
+	case types.Bool:
+		return "i1"
+	case types.Int8, types.Uint8:
+		return "i8"
+	case types.Int16, types.Uint16:
+		return "i16"
+	case types.Int32, types.Uint32:
+		return "i32"
+	case types.Int64, types.Uint64:
+		return "i64"
+	case types.Float32:
+		return "float"
+	case types.Float64:
+		return "double"
+	case types.TCString:
+		return e.sliceType()
+	case types.UnsafePointer:
+		return "ptr"
+	case types.UntypedBool:
+		return "i1"
+	case types.UntypedInt, types.UntypedRune:
+		return "i32"
+	case types.UntypedFloat:
+		return "double"
+	case types.UntypedString:
+		return e.sliceType()
+	}
+	return "i32"
+}
+
+func (e *irEmitter) ptrType() string {
+	return "ptr"
+}
+
+func (e *irEmitter) intptrType() string {
+	if e.ptrBits == 32 {
+		return "i32"
+	}
+	return "i64"
+}
+
+func (e *irEmitter) sliceType() string {
+	ipt := e.intptrType()
+	return "{ptr, " | ipt | ", " | ipt | "}"
+}
+
+func (e *irEmitter) ifaceType() string {
+	return "{ptr, ptr}"
+}
+
+func (e *irEmitter) emitIntCast(dst, srcType, src, dstType string) string {
+	if srcType == dstType {
+		return src
+	}
+	srcBits := llvmTypeBits(srcType)
+	dstBits := llvmTypeBits(dstType)
+	if srcBits > dstBits {
+		e.w("  ") ; e.w(dst) ; e.w(" = trunc ") ; e.w(srcType) ; e.w(" ") ; e.w(src) ; e.w(" to ") ; e.w(dstType) ; e.w("\n")
+	} else {
+		e.w("  ") ; e.w(dst) ; e.w(" = sext ") ; e.w(srcType) ; e.w(" ") ; e.w(src) ; e.w(" to ") ; e.w(dstType) ; e.w("\n")
+	}
+	return dst
+}
+
+func llvmTypeBits(t string) int32 {
+	if t == "i1" { return 1 }
+	if t == "i8" { return 8 }
+	if t == "i16" { return 16 }
+	if t == "i32" { return 32 }
+	if t == "i64" { return 64 }
+	return 0
+}
+
+func (e *irEmitter) nextReg2(prefix string) string {
+	e.nextReg++
+	return "%" | prefix | irItoa(e.nextReg)
+}
+
+func (e *irEmitter) llvmStructType(t *types.TCStruct) string {
+	if t == nil {
+		return "{}"
+	}
+	s := "{"
+	for i := 0; i < t.NumFields(); i++ {
+		if i > 0 {
+			s = s | ", "
+		}
+		ft := e.llvmType(t.Field(i).Type())
+		if ft == "void" {
+			ft = "ptr"
+		}
+		s = s | ft
+	}
+	return s | "}"
+}

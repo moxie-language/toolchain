@@ -1,0 +1,815 @@
+package syntax
+
+import (
+	"git.smesh.lol/moxie/pkg/token"
+)
+
+func (p *Parser) type_() Expr {
+	if trace {
+		defer p.trace("type_")()
+	}
+
+	typ := p.typeOrNil()
+	if typ == nil {
+		typ = p.badExpr()
+		p.syntaxError("expected type")
+		p.advance(token.Comma, token.Colon, token.Semi, token.Rparen, token.Rbrack, token.Rbrace)
+	}
+
+	return typ
+}
+
+func newIndirect(pos token.Pos, typ Expr) Expr {
+	oc := &Operation{}
+	oc.pos = pos
+	oc.Op = token.Mul
+	oc.X = typ
+	return oc
+}
+
+// typeOrNil is like type_ but it returns nil if there was no type
+// instead of reporting an error.
+//
+//	Type     = TypeName | TypeLit + "(" Type ")" .
+//	TypeName = identifier | QualifiedIdent .
+//	TypeLit  = ArrayType | StructType | PointerType | FunctionType | InterfaceType |
+//		      SliceType | MapType | Channel_Type .
+func (p *Parser) typeOrNil() Expr {
+	if trace {
+		defer p.trace("typeOrNil")()
+	}
+
+	pos := p.pos()
+	switch p.Tok {
+	case token.Star:
+		// ptrtype
+		p.Next()
+		return newIndirect(pos, p.type_())
+
+	case token.Arrow:
+		// recvchantype
+		p.Next()
+		p.want(token.Chan)
+		t := &ChanType{}
+		t.pos = pos
+		t.Dir = RecvOnly
+		t.Elem = p.chanElem()
+		return t
+
+	case token.Func:
+		// fntype
+		p.Next()
+		_, t := p.funcType("function type")
+		return t
+
+	case token.Lbrack:
+		// '[' oexpr ']' ntype
+		// '[' _DotDotDot ']' ntype
+		p.Next()
+		if p.got(token.Rbrack) {
+			return p.sliceType(pos)
+		}
+		return p.arrayType(pos, nil)
+
+	case token.Chan:
+		// _Chan non_recvchantype
+		// _Chan _Comm ntype
+		p.Next()
+		t := &ChanType{}
+		t.pos = pos
+		if p.got(token.Arrow) {
+			t.Dir = SendOnly
+		}
+		t.Elem = p.chanElem()
+		return t
+
+	case token.Map:
+		// _Map '[' ntype ']' ntype
+		p.Next()
+		p.want(token.Lbrack)
+		t := &MapType{}
+		t.pos = pos
+		t.Key = p.type_()
+		p.want(token.Rbrack)
+		t.Value = p.type_()
+		return t
+
+	case token.Struct:
+		return p.structType()
+
+	case token.Interface:
+		return p.interfaceType()
+
+	case token.NameType:
+		return p.qualifiedName(nil)
+
+	case token.Lparen:
+		p.Next()
+		t := p.type_()
+		p.want(token.Rparen)
+		// The parser doesn't keep unnecessary parentheses.
+		// Set the flag below to keep them, for testing
+		// (see e.g. tests for go.dev/issue/68639).
+		const keep_parens = false
+		if keep_parens {
+			px := &ParenExpr{}
+			px.pos = pos
+			px.X = t
+			t = px
+		}
+		return t
+	}
+
+	return nil
+}
+
+func (p *Parser) typeInstance(typ Expr) Expr {
+	if trace {
+		defer p.trace("typeInstance")()
+	}
+
+	pos := p.pos()
+	p.want(token.Lbrack)
+	x := &IndexExpr{}
+	x.pos = pos
+	x.X = typ
+	if p.Tok == token.Rbrack {
+		p.syntaxError("expected type argument list")
+		x.Index = p.badExpr()
+	} else {
+		x.Index, _ = p.typeList(true)
+	}
+	p.want(token.Rbrack)
+	return x
+}
+
+// If context != "", type parameters are not permitted.
+func (p *Parser) funcType(context string) ([]*Field, *FuncType) {
+	if trace {
+		defer p.trace("funcType")()
+	}
+
+	typ := &FuncType{}
+	typ.pos = p.pos()
+
+	var tparamList []*Field
+	if p.got(token.Lbrack) {
+		if context != "" {
+			// accept but complain
+			p.syntaxErrorAt(typ.pos, context | " must have no type parameters")
+		}
+		if p.Tok == token.Rbrack {
+			p.syntaxError("empty type parameter list")
+			p.Next()
+		} else {
+			tparamList = p.paramList(nil, nil, token.Rbrack, true, false)
+		}
+	}
+
+	p.want(token.Lparen)
+	typ.ParamList = p.paramList(nil, nil, token.Rparen, false, true)
+	typ.ResultList = p.funcResult()
+
+	return tparamList, typ
+}
+
+// "[" has already been consumed, and pos is its position.
+// If len != nil it is the already consumed array length.
+func (p *Parser) arrayType(pos token.Pos, len Expr) Expr {
+	if trace {
+		defer p.trace("arrayType")()
+	}
+
+	if len == nil && !p.got(token.DotDotDot) {
+		p.Xnest++
+		len = p.expr()
+		p.Xnest--
+	}
+	if p.Tok == token.Comma {
+		// Trailing commas are accepted in type parameter
+		// lists but not in array type declarations.
+		// Accept for better error handling but complain.
+		p.syntaxError("unexpected comma; expected ]")
+		p.Next()
+	}
+	p.want(token.Rbrack)
+	t := &ArrayType{}
+	t.pos = pos
+	t.Len = len
+	t.Elem = p.type_()
+	return t
+}
+
+// "[" and "]" have already been consumed, and pos is the position of "[".
+func (p *Parser) sliceType(pos token.Pos) Expr {
+	tc := &SliceType{}
+	tc.pos = pos
+	tc.Elem = p.type_()
+	return tc
+}
+
+func (p *Parser) chanElem() Expr {
+	if trace {
+		defer p.trace("chanElem")()
+	}
+
+	typ := p.typeOrNil()
+	if typ == nil {
+		typ = p.badExpr()
+		p.syntaxError("missing channel element type")
+		// assume element type is simply absent - don't advance
+	}
+
+	return typ
+}
+
+// StructType = "struct" "{" { FieldDecl ";" } "}" .
+func (p *Parser) structType() (s *StructType) {
+	if trace {
+		defer p.trace("structType")()
+	}
+
+	typ := &StructType{}
+	typ.pos = p.pos()
+
+	p.want(token.Struct)
+	p.want(token.Lbrace)
+	p.list("struct type", token.Semi, token.Rbrace, func() bool {
+		p.fieldDecl(typ)
+		return false
+	})
+
+	return typ
+}
+
+// InterfaceType = "interface" "{" { ( MethodDecl | EmbeddedElem ) ";" } "}" .
+func (p *Parser) interfaceType() (i *InterfaceType) {
+	if trace {
+		defer p.trace("interfaceType")()
+	}
+
+	typ := &InterfaceType{}
+	typ.pos = p.pos()
+
+	p.want(token.Interface)
+	p.want(token.Lbrace)
+	p.list("interface type", token.Semi, token.Rbrace, func() bool {
+		var f *Field
+		if p.Tok == token.NameType {
+			f = p.methodDecl()
+		}
+		if f == nil || f.Name == nil {
+			f = p.embeddedElem(f)
+		}
+		typ.MethodList = append(typ.MethodList, f)
+		return false
+	})
+
+	return typ
+}
+
+// Result = Parameters | Type .
+func (p *Parser) funcResult() (fs []*Field) {
+	if trace {
+		defer p.trace("funcResult")()
+	}
+
+	if p.got(token.Lparen) {
+		return p.paramList(nil, nil, token.Rparen, false, false)
+	}
+
+	pos := p.pos()
+	if typ := p.typeOrNil(); typ != nil {
+		f := &Field{}
+		f.pos = pos
+		f.Type = typ
+		return []*Field{f}
+	}
+
+	return nil
+}
+
+func (p *Parser) addField(styp *StructType, pos token.Pos, name *Name, typ Expr, tag *BasicLit) {
+	if tag != nil {
+		for i := len(styp.FieldList) - len(styp.TagList); i > 0; i-- {
+			styp.TagList = append(styp.TagList, nil)
+		}
+		styp.TagList = append(styp.TagList, tag)
+	}
+
+	f := &Field{}
+	f.pos = pos
+	f.Name = name
+	f.Type = typ
+	styp.FieldList = append(styp.FieldList, f)
+
+	if debug && tag != nil && len(styp.FieldList) != len(styp.TagList) {
+		panic("inconsistent struct field list")
+	}
+}
+
+// FieldDecl      = (IdentifierList Type | AnonymousField) [ Tag ] .
+// AnonymousField = [ "*" ] TypeName .
+// Tag            = string_lit .
+func (p *Parser) fieldDecl(styp *StructType) {
+	if trace {
+		defer p.trace("fieldDecl")()
+	}
+
+	pos := p.pos()
+	switch p.Tok {
+	case token.NameType:
+		name := p.name()
+		if p.Tok == token.Dot || p.Tok == token.Literal || p.Tok == token.Semi || p.Tok == token.Rbrace {
+			// embedded type
+			typ := p.qualifiedName(name)
+			tag := p.oliteral()
+			p.addField(styp, pos, nil, typ, tag)
+			break
+		}
+
+		// name1, name2, ... Type [ tag ]
+		names := p.nameList(name)
+		var typ Expr
+
+		// Careful dance: We don't know if we have an embedded instantiated
+		// type T[P1, P2, ...] or a field T of array/slice type [P]E or []E.
+		if len(names) == 1 && p.Tok == token.Lbrack {
+			typ = p.arrayOrTArgs()
+			if typ, ok := typ.(*IndexExpr); ok {
+				// embedded type T[P1, P2, ...]
+				typ.X = name // name == names[0]
+				tag := p.oliteral()
+				p.addField(styp, pos, nil, typ, tag)
+				break
+			}
+		} else {
+			// T P
+			typ = p.type_()
+		}
+
+		tag := p.oliteral()
+
+		for _, name := range names {
+			p.addField(styp, name.Pos(), name, typ, tag)
+		}
+
+	case token.Star:
+		p.Next()
+		var typ Expr
+		if p.Tok == token.Lparen {
+			// *(T)
+			p.syntaxError("cannot parenthesize embedded type")
+			p.Next()
+			typ = p.qualifiedName(nil)
+			p.got(token.Rparen) // no need to complain if missing
+		} else {
+			// *T
+			typ = p.qualifiedName(nil)
+		}
+		tag := p.oliteral()
+		p.addField(styp, pos, nil, newIndirect(pos, typ), tag)
+
+	case token.Lparen:
+		p.syntaxError("cannot parenthesize embedded type")
+		p.Next()
+		var typ Expr
+		if p.Tok == token.Star {
+			// (*T)
+			pos := p.pos()
+			p.Next()
+			typ = newIndirect(pos, p.qualifiedName(nil))
+		} else {
+			// (T)
+			typ = p.qualifiedName(nil)
+		}
+		p.got(token.Rparen) // no need to complain if missing
+		tag := p.oliteral()
+		p.addField(styp, pos, nil, typ, tag)
+
+	default:
+		p.syntaxError("expected field name or embedded type")
+		p.advance(token.Semi, token.Rbrace)
+	}
+}
+
+func (p *Parser) arrayOrTArgs() Expr {
+	if trace {
+		defer p.trace("arrayOrTArgs")()
+	}
+
+	pos := p.pos()
+	p.want(token.Lbrack)
+	if p.got(token.Rbrack) {
+		return p.sliceType(pos)
+	}
+
+	// x [n]E or x[n,], x[n1, n2], ...
+	n, comma := p.typeList(false)
+	p.want(token.Rbrack)
+	if !comma {
+		if elem := p.typeOrNil(); elem != nil {
+			// x [n]E
+			t := &ArrayType{}
+			t.pos = pos
+			t.Len = n
+			t.Elem = elem
+			return t
+		}
+	}
+
+	// x[n,], x[n1, n2], ...
+	t := &IndexExpr{}
+	t.pos = pos
+	// t.X will be filled in by caller
+	t.Index = n
+	return t
+}
+
+func (p *Parser) oliteral() (b *BasicLit) {
+	if p.Tok == token.Literal {
+		b = &BasicLit{}
+		b.pos = p.pos()
+		b.Value = p.Lit
+		b.Kind = p.Kind
+		b.Bad = p.Bad
+		p.Next()
+		return b
+	}
+	return nil
+}
+
+// MethodSpec        = MethodName Signature | InterfaceTypeName .
+// MethodName        = identifier .
+// InterfaceTypeName = TypeName .
+func (p *Parser) methodDecl() (f *Field) {
+	if trace {
+		defer p.trace("methodDecl")()
+	}
+
+	f := &Field{}
+	f.pos = p.pos()
+	name := p.name()
+
+	const context = "interface method"
+
+	switch p.Tok {
+	case token.Lparen:
+		// method
+		f.Name = name
+		_, f.Type = p.funcType(context)
+
+	case token.Lbrack:
+		// Careful dance: We don't know if we have a generic method m[T C](x T)
+		// or an embedded instantiated type T[P1, P2] (we accept generic methods
+		// for generality and robustness of parsing but complain with an error).
+		pos := p.pos()
+		p.Next()
+
+		// Empty type parameter or argument lists are not permitted.
+		// Treat as if [] were absent.
+		if p.Tok == token.Rbrack {
+			// name[]
+			pos := p.pos()
+			p.Next()
+			if p.Tok == token.Lparen {
+				// name[](
+				p.errorAt(pos, "empty type parameter list")
+				f.Name = name
+				_, f.Type = p.funcType(context)
+			} else {
+				p.errorAt(pos, "empty type argument list")
+				f.Type = name
+			}
+			break
+		}
+
+		// A type argument list looks like a parameter list with only
+		// types. Parse a parameter list and decide afterwards.
+		list := p.paramList(nil, nil, token.Rbrack, false, false)
+		if len(list) == 0 {
+			// The type parameter list is not [] but we got nothing
+			// due to other errors (reported by paramList). Treat
+			// as if [] were absent.
+			if p.Tok == token.Lparen {
+				f.Name = name
+				_, f.Type = p.funcType(context)
+			} else {
+				f.Type = name
+			}
+			break
+		}
+
+		// len(list) > 0
+		if list[0].Name != nil {
+			// generic method
+			f.Name = name
+			_, f.Type = p.funcType(context)
+			p.errorAt(pos, "interface method must have no type parameters")
+			break
+		}
+
+		// embedded instantiated type
+		t := &IndexExpr{}
+		t.pos = pos
+		t.X = name
+		if len(list) == 1 {
+			t.Index = list[0].Type
+		} else {
+			// len(list) > 1
+			l := &ListExpr{}
+			l.pos = list[0].Pos()
+			l.ElemList = []Expr{:len(list)}
+			for i := range list {
+				l.ElemList[i] = list[i].Type
+			}
+			t.Index = l
+		}
+		f.Type = t
+
+	default:
+		// embedded type
+		f.Type = p.qualifiedName(name)
+	}
+
+	return f
+}
+
+// EmbeddedElem = MethodSpec | EmbeddedTerm { "|" EmbeddedTerm } .
+func (p *Parser) embeddedElem(f *Field) (fv *Field) {
+	if trace {
+		defer p.trace("embeddedElem")()
+	}
+
+	if f == nil {
+		f = &Field{}
+		f.pos = p.pos()
+		f.Type = p.embeddedTerm()
+	}
+
+	for p.Tok == token.OperatorType && p.Op == token.Or {
+		t := &Operation{}
+		t.pos = p.pos()
+		t.Op = token.Or
+		p.Next()
+		t.X = f.Type
+		t.Y = p.embeddedTerm()
+		f.Type = t
+	}
+
+	return f
+}
+
+// EmbeddedTerm = [ "~" ] Type .
+func (p *Parser) embeddedTerm() Expr {
+	if trace {
+		defer p.trace("embeddedTerm")()
+	}
+
+	if p.Tok == token.OperatorType && p.Op == token.Tilde {
+		t := &Operation{}
+		t.pos = p.pos()
+		t.Op = token.Tilde
+		p.Next()
+		t.X = p.type_()
+		return t
+	}
+
+	t := p.typeOrNil()
+	if t == nil {
+		t = p.badExpr()
+		p.syntaxError("expected ~ term or type")
+		p.advance(token.OperatorType, token.Semi, token.Rparen, token.Rbrack, token.Rbrace)
+	}
+
+	return t
+}
+
+// ParameterDecl = [ IdentifierList ] [ "..." ] Type .
+func (p *Parser) paramDeclOrNil(name *Name, follow token.Token) (f *Field) {
+	if trace {
+		defer p.trace("paramDeclOrNil")()
+	}
+
+	// type set notation is ok in type parameter lists
+	typeSetsOk := follow == token.Rbrack
+
+	pos := p.pos()
+	if name != nil {
+		pos = name.pos
+	} else if typeSetsOk && p.Tok == token.OperatorType && p.Op == token.Tilde {
+		// "~" ...
+		return p.embeddedElem(nil)
+	}
+
+	f := &Field{}
+	f.pos = pos
+
+	if p.Tok == token.NameType || name != nil {
+		// name
+		if name == nil {
+			name = p.name()
+		}
+
+		if p.Tok == token.Lbrack {
+			// name "[" ...
+			f.Type = p.arrayOrTArgs()
+			if typ, ok := f.Type.(*IndexExpr); ok {
+				// name "[" ... "]"
+				typ.X = name
+			} else {
+				// name "[" n "]" E
+				f.Name = name
+			}
+			if typeSetsOk && p.Tok == token.OperatorType && p.Op == token.Or {
+				// name "[" ... "]" "|" ...
+				// name "[" n "]" E "|" ...
+				f = p.embeddedElem(f)
+			}
+			return f
+		}
+
+		if p.Tok == token.Dot {
+			// name "." ...
+			f.Type = p.qualifiedName(name)
+			if typeSetsOk && p.Tok == token.OperatorType && p.Op == token.Or {
+				// name "." name "|" ...
+				f = p.embeddedElem(f)
+			}
+			return f
+		}
+
+		if typeSetsOk && p.Tok == token.OperatorType && p.Op == token.Or {
+			// name "|" ...
+			f.Type = name
+			return p.embeddedElem(f)
+		}
+
+		f.Name = name
+	}
+
+	if p.Tok == token.DotDotDot {
+		// [name] "..." ...
+		t := &DotsType{}
+		t.pos = p.pos()
+		p.Next()
+		t.Elem = p.typeOrNil()
+		if t.Elem == nil {
+			f.Type = p.badExpr()
+			p.syntaxError("... is missing type")
+		} else {
+			f.Type = t
+		}
+		return f
+	}
+
+	if typeSetsOk && p.Tok == token.OperatorType && p.Op == token.Tilde {
+		// [name] "~" ...
+		f.Type = p.embeddedElem(nil).Type
+		return f
+	}
+
+	f.Type = p.typeOrNil()
+	if typeSetsOk && p.Tok == token.OperatorType && p.Op == token.Or && f.Type != nil {
+		// [name] type "|"
+		f = p.embeddedElem(f)
+	}
+	if f.Name != nil || f.Type != nil {
+		return f
+	}
+
+	p.syntaxError("expected " | tokstring(follow))
+	p.advance(token.Comma, follow)
+	return nil
+}
+
+// Parameters    = "(" [ ParameterList [ "," ] ] ")" .
+// ParameterList = ParameterDecl { "," ParameterDecl } .
+// "(" or "[" has already been consumed.
+// If name != nil, it is the first name after "(" or "[".
+// If typ != nil, name must be != nil, and (name, typ) is the first field in the list.
+// In the result list, either all fields have a name, or no field has a name.
+func (p *Parser) paramList(name *Name, typ Expr, close token.Token, requireNames, dddok bool) (list []*Field) {
+	if trace {
+		defer p.trace("paramList")()
+	}
+
+	// p.list won't invoke its function argument if we're at the end of the
+	// parameter list. If we have a complete field, handle this case here.
+	if name != nil && typ != nil && p.Tok == close {
+		p.Next()
+		par := &Field{}
+		par.pos = name.pos
+		par.Name = name
+		par.Type = typ
+		return []*Field{par}
+	}
+
+	var named int32 // number of parameters that have an explicit name and type
+	var typed int32 // number of parameters that have an explicit type
+	end := p.list("parameter list", token.Comma, close, func() bool {
+		var par *Field
+		if typ != nil {
+			if debug && name == nil {
+				panic("initial type provided without name")
+			}
+			par = &Field{}
+			par.pos = name.pos
+			par.Name = name
+			par.Type = typ
+		} else {
+			par = p.paramDeclOrNil(name, close)
+		}
+		name = nil // 1st name was consumed if present
+		typ = nil  // 1st type was consumed if present
+		if par != nil {
+			if debug && par.Name == nil && par.Type == nil {
+				panic("parameter without name or type")
+			}
+			if par.Name != nil && par.Type != nil {
+				named++
+			}
+			if par.Type != nil {
+				typed++
+			}
+			list = append(list, par)
+		}
+		return false
+	})
+
+	if len(list) == 0 {
+		return
+	}
+
+	// distribute parameter types (len(list) > 0)
+	if named == 0 && !requireNames {
+		// all unnamed and we're not in a type parameter list => found names are named types
+		for _, par := range list {
+			if typ := par.Name; typ != nil {
+				par.Type = typ
+				par.Name = nil
+			}
+		}
+	} else if named != len(list) {
+		// some named or we're in a type parameter list => all must be named
+		var errPos token.Pos // left-most error position (or unknown)
+		var typ Expr   // current type (from right to left)
+		for i := len(list) - 1; i >= 0; i-- {
+			par := list[i]
+			if par.Type != nil {
+				typ = par.Type
+				if par.Name == nil {
+					errPos = StartPos(typ)
+					par.Name = NewName(errPos, "_")
+				}
+			} else if typ != nil {
+				par.Type = typ
+			} else {
+				// par.Type == nil && typ == nil => we only have a par.Name
+				errPos = par.Name.Pos()
+				t := p.badExpr()
+				t.pos = errPos // correct position
+				par.Type = t
+			}
+		}
+		if errPos.IsKnown() {
+			// Not all parameters are named because named != len(list).
+			// If named == typed, there must be parameters that have no types.
+			// They must be at the end of the parameter list, otherwise types
+			// would have been filled in by the right-to-left sweep above and
+			// there would be no error.
+			// If requireNames is set, the parameter list is a type parameter
+			// list.
+			var msg string
+			if named == typed {
+				errPos = end // position error at closing token ) or ]
+				if requireNames {
+					msg = "missing type constraint"
+				} else {
+					msg = "missing parameter type"
+				}
+			} else {
+				if requireNames {
+					msg = "missing type parameter name"
+					// go.dev/issue/60812
+					if len(list) == 1 {
+						msg = msg | " or invalid array length"
+					}
+				} else {
+					msg = "missing parameter name"
+				}
+			}
+			p.syntaxErrorAt(errPos, msg)
+		}
+	}
+
+	// check use of ... - DISABLED for gen1 debugging
+
+	return
+}
+
+func (p *Parser) badExpr() (b *BadExpr) {
+	b := &BadExpr{}
+	b.pos = p.pos()
+	return b
+}

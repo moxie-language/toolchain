@@ -5132,6 +5132,10 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 	reg := e.regName(m)
 	val := e.operand(m.X)
 	valType := e.llvmType(m.X.SSAType())
+	if valType == "void" {
+		e.w("  ") ; e.w(reg) ; e.w(" = insertvalue {ptr, ptr} zeroinitializer, ptr null, 0\n")
+		return
+	}
 	if _, isAlloc := m.X.(*SSAAlloc); !isAlloc {
 		if _, isIA := m.X.(*SSAIndexAddr); !isIA {
 			if at, ok := e.allocTypes[m.X]; ok && at != "ptr" && at != "void" {
@@ -8057,7 +8061,8 @@ func tcResolveNameInline(e syntax.Expr, scope *Scope) (t Type) {
 					}
 				}
 				if n == -1 && constValMap != nil {
-					n = resolveArrayLenFromSrc(e.Pos(), constValMap)
+					epos := e.Pos()
+					n = resolveArrayLenFromSrc(epos, constValMap)
 				}
 			}
 			return NewArray(elem, n)
@@ -8754,37 +8759,87 @@ func checkUseAfterFree(f *SSAFunction) {
 	}
 }
 
+func allocEscapesViaCall(a *SSAAlloc, f *SSAFunction) (ok bool) {
+	escaped := map[SSAValue]bool{}
+	escaped[SSAValue(a)] = true
+	changed := true
+	for changed {
+		changed = false
+		for _, b := range f.Blocks {
+			for _, instr := range b.Instrs {
+				switch i := instr.(type) {
+				case *SSAFieldAddr:
+					if escaped[i.X] {
+						if v, ok2 := instr.(SSAValue); ok2 && !escaped[v] {
+							escaped[v] = true
+							changed = true
+						}
+					}
+				case *SSAMakeInterface:
+					if escaped[i.X] {
+						if v, ok2 := instr.(SSAValue); ok2 && !escaped[v] {
+							escaped[v] = true
+							changed = true
+						}
+					}
+				case *SSAStore:
+					if escaped[i.Val] || escaped[i.Addr] {
+						if escaped[i.Val] && !escaped[i.Addr] {
+							escaped[i.Addr] = true
+							changed = true
+						}
+					}
+				case *SSAPhi:
+					for _, edge := range i.Edges {
+						if escaped[edge] {
+							if v, ok2 := instr.(SSAValue); ok2 && !escaped[v] {
+								escaped[v] = true
+								changed = true
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			switch i := instr.(type) {
+			case *SSACall:
+				for _, arg := range i.Call.Args {
+					if escaped[arg] {
+						return true
+					}
+				}
+			case *SSAMapUpdate:
+				if escaped[i.Key] || escaped[i.Value] || escaped[i.Map] {
+					return true
+				}
+			case *SSASend:
+				if escaped[i.X] {
+					return true
+				}
+			case *SSAInvoke:
+				if escaped[i.X] {
+					return true
+				}
+				for _, arg := range i.Args {
+					if escaped[arg] {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
 func (e *irEmitter) deallocSetup(f *SSAFunction) {
-	heapCount := int32(0)
-	for _, b := range f.Blocks {
-		for _, instr := range b.Instrs {
-			if a, ok := instr.(*SSAAlloc); ok && a.Heap {
-				heapCount++
-			}
-		}
-	}
-	if heapCount == 0 {
-		return
-	}
-	e.deallocActive = true
-	e.deallocAllocs = map[SSAValue]int32{}
-	e.w("  %dealloc.head = alloca ptr\n")
-	e.w("  store ptr null, ptr %dealloc.head\n")
-	idx := int32(0)
-	for _, b := range f.Blocks {
-		for _, instr := range b.Instrs {
-			if a, ok := instr.(*SSAAlloc); ok && a.Heap {
-				e.deallocAllocs[a] = idx
-				e.w("  %dealloc.entry." | irItoa(idx) | " = alloca {ptr, ptr}\n")
-				e.w("  store {ptr, ptr} zeroinitializer, ptr %dealloc.entry." | irItoa(idx) | "\n")
-				idx++
-			}
-		}
-	}
-	e.deallocCount = idx
-	e.declareRuntime("runtime.deallocPush", "void", "ptr, ptr, ptr")
-	e.declareRuntime("runtime.deallocFree", "void", "ptr")
-	e.declareRuntime("runtime.deallocEscape", "void", "ptr, ptr")
+	// Dealloc for heap allocs is disabled: without full escape analysis,
+	// any alloc passed to a function or stored through indirection can
+	// escape. Freeing it at function return corrupts long-lived structures.
+	// The scope-based system handles block-scoped stack allocs instead.
 }
 
 func (e *irEmitter) deallocAfterAlloc(a *SSAAlloc, reg string) {

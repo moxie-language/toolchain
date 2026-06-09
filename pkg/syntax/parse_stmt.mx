@@ -1,0 +1,590 @@
+package syntax
+
+import (
+	"git.smesh.lol/moxie/pkg/token"
+)
+
+// SimpleStmt = EmptyStmt | ExpressionStmt | SendStmt | IncDecStmt | Assignment | ShortVarDecl .
+func (p *Parser) simpleStmt(lhs Expr, keyword token.Token) SimpleStmt {
+	if trace {
+		defer p.trace("simpleStmt")()
+	}
+
+	if keyword == token.For && p.Tok == token.Range {
+		// _Range expr
+		if debug && lhs != nil {
+			panic("invalid call of simpleStmt")
+		}
+		return p.newRangeClause(nil, false)
+	}
+
+	if lhs == nil {
+		lhs = p.exprList()
+	}
+
+	if _, ok := lhs.(*ListExpr); !ok && p.Tok != token.Assign && p.Tok != token.Define {
+		// expr
+		pos := p.pos()
+		switch p.Tok {
+		case token.AssignOp:
+			// lhs op= rhs
+			op := p.Op
+			p.Next()
+			return p.newAssignStmt(pos, op, lhs, p.expr())
+
+		case token.IncOp:
+			// lhs++ or lhs--
+			op := p.Op
+			p.Next()
+			return p.newAssignStmt(pos, op, lhs, nil)
+
+		case token.Arrow:
+			// lhs <- rhs
+			sc := &SendStmt{}
+			sc.pos = pos
+			p.Next()
+			sc.Chan = lhs
+			sc.Value = p.expr()
+			return sc
+
+		default:
+			// expr
+			sc := &ExprStmt{}
+			sc.pos = lhs.Pos()
+			sc.X = lhs
+			return sc
+		}
+	}
+
+	// expr_list
+	switch p.Tok {
+	case token.Assign, token.Define:
+		pos := p.pos()
+		var op token.Operator
+		if p.Tok == token.Define {
+			op = token.Def
+		}
+		p.Next()
+
+		if keyword == token.For && p.Tok == token.Range {
+			// expr_list op= _Range expr
+			return p.newRangeClause(lhs, op == token.Def)
+		}
+
+		// expr_list op= expr_list
+		rhs := p.exprList()
+
+		if x, ok := rhs.(*TypeSwitchGuard); ok && keyword == token.Switch && op == token.Def {
+			if lhs, ok := lhs.(*Name); ok {
+				// switch ... lhs := rhs.(type)
+				x.Lhs = lhs
+				sc := &ExprStmt{}
+				sc.pos = x.Pos()
+				sc.X = x
+				return sc
+			}
+		}
+
+		return p.newAssignStmt(pos, op, lhs, rhs)
+
+	default:
+		p.syntaxError("expected := or = or comma")
+		p.advance(token.Semi, token.Rbrace)
+		// make the best of what we have
+		if x, ok := lhs.(*ListExpr); ok {
+			lhs = x.ElemList[0]
+		}
+		sc := &ExprStmt{}
+		sc.pos = lhs.Pos()
+		sc.X = lhs
+		return sc
+	}
+}
+
+func (p *Parser) newRangeClause(lhs Expr, def bool) (r *RangeClause) {
+	r := &RangeClause{}
+	r.pos = p.pos()
+	p.Next() // consume _Range
+	r.Lhs = lhs
+	r.Def = def
+	r.X = p.expr()
+	return r
+}
+
+func (p *Parser) newAssignStmt(pos token.Pos, op token.Operator, lhs, rhs Expr) (a *AssignStmt) {
+	a := &AssignStmt{}
+	a.pos = pos
+	a.Op = op
+	a.Lhs = lhs
+	a.Rhs = rhs
+	return a
+}
+
+func (p *Parser) labeledStmtOrNil(label *Name) Stmt {
+	if trace {
+		defer p.trace("labeledStmt")()
+	}
+
+	s := &LabeledStmt{}
+	s.pos = p.pos()
+	s.Label = label
+
+	p.want(token.Colon)
+
+	if p.Tok == token.Rbrace {
+		// We expect a statement (incl. an empty statement), which must be
+		// terminated by a semicolon. Because semicolons may be omitted before
+		// an _Rbrace, seeing an _Rbrace implies an empty statement.
+		e := &EmptyStmt{}
+		e.pos = p.pos()
+		s.Stmt = e
+		return s
+	}
+
+	s.Stmt = p.stmtOrNil()
+	if s.Stmt != nil {
+		return s
+	}
+
+	// report error at line of ':' token
+	p.syntaxErrorAt(s.pos, "missing statement after label")
+	// we are already at the end of the labeled statement - no need to advance
+	return nil // avoids follow-on errors (see e.g., fixedbugs/bug274.go)
+}
+
+// context must be a non-empty string unless we know that p.tok == _Lbrace.
+func (p *Parser) blockStmt(context string) (b *BlockStmt) {
+	if trace {
+		defer p.trace("blockStmt")()
+	}
+
+	s := &BlockStmt{}
+	s.pos = p.pos()
+
+	// people coming from C may forget that braces are mandatory in Go
+	if !p.got(token.Lbrace) {
+		p.syntaxError("expected { after " | context)
+		p.advance(token.NameType, token.Rbrace)
+		s.Rbrace = p.pos() // in case we found "}"
+		if p.got(token.Rbrace) {
+			return s
+		}
+	}
+
+	s.List = p.stmtList()
+	s.Rbrace = p.pos()
+	p.want(token.Rbrace)
+
+	return s
+}
+
+func (p *Parser) declStmt(f func(*Group) Decl) (d *DeclStmt) {
+	if trace {
+		defer p.trace("declStmt")()
+	}
+
+	s := &DeclStmt{}
+	s.pos = p.pos()
+
+	p.Next() // _Const, _Type, or _Var
+	s.DeclList = p.appendGroup(nil, f)
+
+	return s
+}
+
+func (p *Parser) forStmt() Stmt {
+	if trace {
+		defer p.trace("forStmt")()
+	}
+
+	s := &ForStmt{}
+	s.pos = p.pos()
+
+	s.Init, s.Cond, s.Post = p.header(token.For)
+	s.Body = p.blockStmt("for clause")
+
+	return s
+}
+
+func (p *Parser) header(keyword token.Token) (init SimpleStmt, cond Expr, post SimpleStmt) {
+	p.want(keyword)
+
+	if p.Tok == token.Lbrace {
+		if keyword == token.If {
+			p.syntaxError("missing condition in if statement")
+			cond = p.badExpr()
+		}
+		return
+	}
+	// p.tok != _Lbrace
+
+	outer := p.Xnest
+	p.Xnest = -1
+
+	if p.Tok != token.Semi {
+		// accept potential varDecl but complain
+		if p.got(token.Var) {
+			p.syntaxError("var declaration not allowed in " | keyword.String() | " initializer")
+		}
+		init = p.simpleStmt(nil, keyword)
+		// If we have a range clause, we are done (can only happen for keyword == _For).
+		if _, ok := init.(*RangeClause); ok {
+			p.Xnest = outer
+			return
+		}
+	}
+
+	var condStmt SimpleStmt
+	var semi struct {
+		pos token.Pos
+		lit string // valid if pos.IsKnown()
+	}
+	if p.Tok != token.Lbrace {
+		if p.Tok == token.Semi {
+			semi.pos = p.pos()
+			semi.lit = p.Lit
+			p.Next()
+		} else {
+			// asking for a '{' rather than a ';' here leads to a better error message
+			p.want(token.Lbrace)
+			if p.Tok != token.Lbrace {
+				p.advance(token.Lbrace, token.Rbrace) // for better synchronization (e.g., go.dev/issue/22581)
+			}
+		}
+		if keyword == token.For {
+			if p.Tok != token.Semi {
+				if p.Tok == token.Lbrace {
+					p.syntaxError("expected for loop condition")
+					goto done
+				}
+				condStmt = p.simpleStmt(nil, 0 /* range not permitted */)
+			}
+			p.want(token.Semi)
+			if p.Tok != token.Lbrace {
+				post = p.simpleStmt(nil, 0 /* range not permitted */)
+				if a, _ := post.(*AssignStmt); a != nil && a.Op == token.Def {
+					p.syntaxErrorAt(a.Pos(), "cannot declare in post statement of for loop")
+				}
+			}
+		} else if p.Tok != token.Lbrace {
+			condStmt = p.simpleStmt(nil, keyword)
+		}
+	} else {
+		condStmt = init
+		init = nil
+	}
+
+done:
+	// unpack condStmt
+	switch s := condStmt.(type) {
+	case nil:
+		if keyword == token.If && semi.pos.IsKnown() {
+			if semi.lit != "semicolon" {
+				p.syntaxErrorAt(semi.pos, "unexpected " | semi.lit | ", expected { after if clause")
+			} else {
+				p.syntaxErrorAt(semi.pos, "missing condition in if statement")
+			}
+			b := &BadExpr{}
+			b.pos = semi.pos
+			cond = b
+		}
+	case *ExprStmt:
+		cond = s.X
+	default:
+		// A common syntax error is to write '=' instead of '==',
+		// which turns an expression into an assignment. Provide
+		// a more explicit error message in that case to prevent
+		// further confusion.
+		var str string
+		if as, ok := s.(*AssignStmt); ok && as.Op == 0 {
+			// Emphasize complex Lhs and Rhs of assignment with parentheses to highlight '='.
+			str = "assignment " | emphasize(as.Lhs) | " = " | emphasize(as.Rhs)
+		} else {
+			str = String(s)
+		}
+		p.syntaxErrorAt(s.Pos(), "cannot use " | str | " as value")
+	}
+
+	p.Xnest = outer
+	return
+}
+
+// emphasize returns a string representation of x, with (top-level)
+// binary expressions emphasized by enclosing them in parentheses.
+func emphasize(x Expr) (s string) {
+	s = String(x)
+	if op, _ := x.(*Operation); op != nil && op.Y != nil {
+		// binary expression
+		return "(" | s | ")"
+	}
+	return s
+}
+
+func (p *Parser) ifStmt() (i *IfStmt) {
+	if trace {
+		defer p.trace("ifStmt")()
+	}
+
+	s := &IfStmt{}
+	s.pos = p.pos()
+
+	s.Init, s.Cond, _ = p.header(token.If)
+	s.Then = p.blockStmt("if clause")
+
+	if p.got(token.Else) {
+		switch p.Tok {
+		case token.If:
+			s.Else = p.ifStmt()
+		case token.Lbrace:
+			s.Else = p.blockStmt("")
+		default:
+			p.syntaxError("else must be followed by if or statement block")
+			p.advance(token.NameType, token.Rbrace)
+		}
+	}
+
+	return s
+}
+
+func (p *Parser) switchStmt() (s *SwitchStmt) {
+	if trace {
+		defer p.trace("switchStmt")()
+	}
+
+	s := &SwitchStmt{}
+	s.pos = p.pos()
+
+	s.Init, s.Tag, _ = p.header(token.Switch)
+
+	if !p.got(token.Lbrace) {
+		p.syntaxError("missing { after switch clause")
+		p.advance(token.Case, token.Default, token.Rbrace)
+	}
+	for p.Tok != token.EOF && p.Tok != token.Rbrace {
+		s.Body = append(s.Body, p.caseClause())
+	}
+	s.Rbrace = p.pos()
+	p.want(token.Rbrace)
+
+	return s
+}
+
+func (p *Parser) selectStmt() (s *SelectStmt) {
+	if trace {
+		defer p.trace("selectStmt")()
+	}
+
+	s := &SelectStmt{}
+	s.pos = p.pos()
+
+	p.want(token.Select)
+	if !p.got(token.Lbrace) {
+		p.syntaxError("missing { after select clause")
+		p.advance(token.Case, token.Default, token.Rbrace)
+	}
+	for p.Tok != token.EOF && p.Tok != token.Rbrace {
+		s.Body = append(s.Body, p.commClause())
+	}
+	s.Rbrace = p.pos()
+	p.want(token.Rbrace)
+
+	return s
+}
+
+func (p *Parser) caseClause() (c *CaseClause) {
+	if trace {
+		defer p.trace("caseClause")()
+	}
+
+	c := &CaseClause{}
+	c.pos = p.pos()
+
+	switch p.Tok {
+	case token.Case:
+		p.Next()
+		c.Cases = p.exprList()
+
+	case token.Default:
+		p.Next()
+
+	default:
+		p.syntaxError("expected case or default or }")
+		p.advance(token.Colon, token.Case, token.Default, token.Rbrace)
+	}
+
+	c.Colon = p.pos()
+	p.want(token.Colon)
+	c.Body = p.stmtList()
+
+	return c
+}
+
+func (p *Parser) commClause() (c *CommClause) {
+	if trace {
+		defer p.trace("commClause")()
+	}
+
+	c := &CommClause{}
+	c.pos = p.pos()
+
+	switch p.Tok {
+	case token.Case:
+		p.Next()
+		c.Comm = p.simpleStmt(nil, 0)
+
+		// The syntax restricts the possible simple statements here to:
+		//
+		//     lhs <- x (send statement)
+		//     <-x
+		//     lhs = <-x
+		//     lhs := <-x
+		//
+		// All these (and more) are recognized by simpleStmt and invalid
+		// syntax trees are flagged later, during type checking.
+
+	case token.Default:
+		p.Next()
+
+	default:
+		p.syntaxError("expected case or default or }")
+		p.advance(token.Colon, token.Case, token.Default, token.Rbrace)
+	}
+
+	c.Colon = p.pos()
+	p.want(token.Colon)
+	c.Body = p.stmtList()
+
+	return c
+}
+
+// stmtOrNil parses a statement if one is present, or else returns nil.
+//
+//	Statement =
+//		Declaration | LabeledStmt | SimpleStmt |
+//		GoStmt | ReturnStmt | BreakStmt | ContinueStmt | GotoStmt |
+//		FallthroughStmt | Block | IfStmt | SwitchStmt | SelectStmt | ForStmt |
+//		DeferStmt .
+func (p *Parser) stmtOrNil() Stmt {
+	if trace {
+		defer p.trace("stmt " | p.Tok.String())()
+	}
+
+	// Most statements (assignments) start with an identifier;
+	// look for it first before doing anything more expensive.
+	if p.Tok == token.NameType {
+		p.clearPragma()
+		lhs := p.exprList()
+		if label, ok := lhs.(*Name); ok && p.Tok == token.Colon {
+			return p.labeledStmtOrNil(label)
+		}
+		return p.simpleStmt(lhs, 0)
+	}
+
+	switch p.Tok {
+	case token.Var:
+		return p.declStmt(p.varDecl)
+
+	case token.Const:
+		return p.declStmt(p.constDecl)
+
+	case token.TypeType:
+		return p.declStmt(p.typeDecl)
+	}
+
+	p.clearPragma()
+
+	switch p.Tok {
+	case token.Lbrace:
+		return p.blockStmt("")
+
+	case token.OperatorType, token.Star:
+		switch p.Op {
+		case token.Add, token.Sub, token.Mul, token.And, token.Xor, token.Not:
+			return p.simpleStmt(nil, 0) // unary operators
+		}
+
+	case token.Literal, token.Func, token.Lparen, // operands
+		token.Lbrack, token.Struct, token.Map, token.Chan, token.Interface, // composite types
+		token.Arrow: // receive operator
+		return p.simpleStmt(nil, 0)
+
+	case token.For:
+		return p.forStmt()
+
+	case token.Switch:
+		return p.switchStmt()
+
+	case token.Select:
+		return p.selectStmt()
+
+	case token.If:
+		return p.ifStmt()
+
+	case token.Fallthrough:
+		sc := &BranchStmt{}
+		sc.pos = p.pos()
+		p.Next()
+		sc.Tok = token.Fallthrough
+		return sc
+
+	case token.Break, token.Continue:
+		sc := &BranchStmt{}
+		sc.pos = p.pos()
+		sc.Tok = p.Tok
+		p.Next()
+		if p.Tok == token.NameType {
+			sc.Label = p.name()
+		}
+		return sc
+
+	case token.Go, token.Defer:
+		return p.callStmt()
+
+	case token.Goto:
+		sc := &BranchStmt{}
+		sc.pos = p.pos()
+		sc.Tok = token.Goto
+		p.Next()
+		sc.Label = p.name()
+		return sc
+
+	case token.Return:
+		sc := &ReturnStmt{}
+		sc.pos = p.pos()
+		p.Next()
+		if p.Tok != token.Semi && p.Tok != token.Rbrace {
+			sc.Results = p.exprList()
+		}
+		return sc
+
+	case token.Semi:
+		sc := &EmptyStmt{}
+		sc.pos = p.pos()
+		return sc
+	}
+
+	return nil
+}
+
+// StatementList = { Statement ";" } .
+func (p *Parser) stmtList() (l []Stmt) {
+	if trace {
+		defer p.trace("stmtList")()
+	}
+
+	for p.Tok != token.EOF && p.Tok != token.Rbrace && p.Tok != token.Case && p.Tok != token.Default {
+		s := p.stmtOrNil()
+		p.clearPragma()
+		if s == nil {
+			break
+		}
+		l = append(l, s)
+		// ";" is optional before "}"
+		if !p.got(token.Semi) && p.Tok != token.Rbrace {
+			p.syntaxError("at end of statement")
+			p.advance(token.Semi, token.Rbrace, token.Case, token.Default)
+			p.got(token.Semi) // avoid spurious empty statement
+		}
+	}
+	return
+}

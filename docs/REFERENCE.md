@@ -1147,7 +1147,9 @@ cleanup:
 
 ## Memory Management
 
-Moxie uses an ownership model for memory. There is no garbage collector.
+Moxie uses a block-scoped ownership model for memory. There is no garbage
+collector and no escape analysis. Every allocation has a deterministic
+lifetime derived from the source structure.
 
 ### Allocation
 
@@ -1155,23 +1157,59 @@ Variables are allocated at the point of declaration in execution order. There
 is no hoisting - a variable does not exist until the line that declares it
 executes.
 
-### Implicit Deallocation
+### Scope Tags
 
-All variables declared within a function (parameters and locals) are
-implicitly freed when the function returns. The deallocation order is:
+Every allocation carries a scope tag identifying the block where it was
+created. The scope tag determines when the allocation is freed.
 
-1. Deferred calls execute in LIFO order.
-2. All local variables and parameters are freed.
-3. Return values are handed to the caller - they are the only allocations
-   that survive function return.
+### Block-Scoped Deallocation
 
-This means every allocation has a clear owner: the function that declared it.
-When the function exits, its allocations die with it unless explicitly returned.
+Every `{}` block that contains statements (`if`, `for`, `switch`, `select`,
+bare blocks) is a scope boundary. All variables created within a block are
+freed at the end of that block:
+
+```moxie
+func example() {
+    a := int32(1)          // scope: function body
+    if cond {
+        b := []byte{:1024} // scope: if-block
+        // ...
+    }                      // b is freed here
+    // a is still live
+}                          // a is freed here
+```
+
+Function parameters and return values are owned by the caller, not the
+callee. Parameters arrive already allocated; return values survive function
+return and become the caller's responsibility.
+
+### Scope Promotion via Pointer
+
+When a pointer to a variable is taken and assigned to another variable, the
+pointed-to variable's scope tag is promoted to the scope of the variable it
+is embedded in. This prevents the inner-scope variable from being freed
+while an outer-scope pointer still references it:
+
+```moxie
+func example() *Item {
+    var result *Item           // scope: function body
+    for _, v := range items {
+        item := &Item{v}      // scope: for-block initially
+        result = item         // item's scope promoted to function body
+    }                         // item is NOT freed here (scope was promoted)
+    return result             // result survives via return
+}
+```
+
+No escape analysis is needed. The compiler sees the pointer assignment
+(`result = item`) and moves item's scope tag to match result's scope. This
+is a local, syntactic operation on the scope tag - not a whole-program
+analysis.
 
 ### Explicit Deallocation with `free`
 
-The `free` builtin explicitly marks a variable for deallocation before function
-return:
+The `free` builtin explicitly ends a variable's lifetime before its scope
+closes:
 
 ```moxie
 func process() {
@@ -1179,16 +1217,17 @@ func process() {
     // ... use buf ...
     free(buf)
     // buf is now dead - using it here is a compile error
-    buf = []byte{:128}    // legal: redeclaring/reassigning revives it
+    buf = []byte{:128}    // legal: reassigning starts a new lifetime
 }
 ```
 
-After `free(v)`, using `v` without first reassigning it or redeclaring it is a
-compile error. Assigning a new value (including zero value) to a freed variable
-is legal and starts a new lifetime for that variable.
+After `free(v)`, using `v` without first reassigning it is a compile error.
+Assigning a new value (including zero value) to a freed variable is legal
+and starts a new lifetime for that variable.
 
 `free` is useful for releasing large allocations mid-function rather than
-waiting for function return, and for making ownership transfers explicit. It is essential for long running event loops with `select`.
+waiting for block exit, and for making ownership transfers explicit. It is
+essential for long-running event loops with `select`.
 
 ### Between Domains
 

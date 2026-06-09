@@ -1,0 +1,445 @@
+package syntax
+
+import (
+	"bytes"
+	"io"
+	"unsafe"
+	"git.smesh.lol/moxie/pkg/token"
+)
+
+//export write
+func cWrite(fd int32, p unsafe.Pointer, n uint32) (nn int32)
+
+const debug = false
+const trace = false
+
+type Parser struct {
+	File  *token.PosBase
+	Errh  ErrorHandler
+	Mode  Mode
+	Pragh PragmaHandler
+	Scanner
+
+	Base      *token.PosBase // current position base
+	First     error    // first error encountered
+	Errcnt    int32      // number of errors encountered
+	Pragma    Pragma   // pragmas
+	GoVersion string   // Go version from //go:build line
+
+	Top    bool   // in top of file (before package clause)
+	Fnest  int32    // function nesting level (for error handling)
+	Xnest  int32    // expression nesting level (for complit ambiguity resolution)
+	Indent []byte // tracing support
+}
+
+func (p *Parser) init(File *token.PosBase, r io.Reader, Errh ErrorHandler, Pragh PragmaHandler, Mode Mode) {
+	p.Top = true
+	p.File = File
+	p.Errh = Errh
+	p.Mode = Mode
+	p.Pragh = Pragh
+	p.Scanner.Init(
+		r,
+		// Error and directive handler for scanner.
+		// Because the (line, col) positions passed to the
+		// handler is always at or after the current reading
+		// position, it is safe to use the most recent position
+		// base to compute the corresponding Pos value.
+		func(line, col uint32, msg string) {
+			if msg[0] != '/' {
+				p.errorAt(p.posAt(line, col), msg)
+				return
+			}
+
+			// otherwise it must be a comment containing a line or go: directive.
+			// //line directives must be at the start of the line (column colbase).
+			// /*line*/ directives can be anywhere in the line.
+			text := commentText(msg)
+			if (col == Colbase || msg[1] == '*') && bytes.HasPrefix(text, "line ") {
+				var pos token.Pos // position immediately following the comment
+				if msg[1] == '/' {
+					// line comment (newline is part of the comment)
+					pos = token.MakePos(p.File, line+1, Colbase)
+				} else {
+					// regular comment
+					// (if the comment spans multiple lines it's not
+					// a valid line directive and will be discarded
+					// by updateBase)
+					pos = token.MakePos(p.File, line, col+uint32(len(msg)))
+				}
+				p.updateBase(pos, line, col+2+5, text[5:]) // +2 to skip over // or /*
+				return
+			}
+
+			// go: directive (but be conservative and test)
+			if bytes.HasPrefix(text, "go:") || bytes.HasPrefix(text, ":") {
+				if Pragh != nil {
+					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma) // +2 to skip over // or /*
+				}
+			} else if bytes.HasPrefix(text, "export ") {
+				if Pragh != nil {
+					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
+				}
+			}
+		},
+		comments,
+	)
+
+	p.Base = File
+	p.First = nil
+	p.Errcnt = 0
+	p.Pragma = nil
+
+	p.Fnest = 0
+	p.Xnest = 0
+	p.Indent = nil
+}
+
+func (p *Parser) initBytes(File *token.PosBase, src []byte, Errh ErrorHandler, Pragh PragmaHandler, Mode Mode) {
+	p.Top = true
+	p.File = File
+	p.Errh = Errh
+	p.Mode = Mode
+	p.Pragh = Pragh
+	p.Scanner.InitBytes(
+		src,
+		func(line, col uint32, msg string) {
+			if msg[0] != '/' {
+				p.errorAt(p.posAt(line, col), msg)
+				return
+			}
+			text := commentText(msg)
+			if (col == Colbase || msg[1] == '*') && bytes.HasPrefix(text, "line ") {
+				var pos token.Pos
+				if msg[1] == '/' {
+					pos = token.MakePos(p.File, line+1, Colbase)
+				} else {
+					pos = token.MakePos(p.File, line, col+uint32(len(msg)))
+				}
+				p.updateBase(pos, line, col+2+5, text[5:])
+				return
+			}
+			if bytes.HasPrefix(text, "go:") || bytes.HasPrefix(text, ":") {
+				if Pragh != nil {
+					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
+				}
+			} else if bytes.HasPrefix(text, "export ") {
+				if Pragh != nil {
+					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
+				}
+			}
+		},
+		comments,
+	)
+
+	p.Base = File
+	p.First = nil
+	p.Errcnt = 0
+	p.Pragma = nil
+
+	p.Fnest = 0
+	p.Xnest = 0
+	p.Indent = nil
+}
+
+// takePragma returns the current parsed pragmas
+// and clears them from the parser state.
+func (p *Parser) takePragma() (pv Pragma) {
+	prag := p.Pragma
+	p.Pragma = nil
+	return prag
+}
+
+// clearPragma is called at the end of a statement or
+// other Go form that does NOT accept a pragma.
+// It sends the pragma back to the pragma handler
+// to be reported as unused.
+func (p *Parser) clearPragma() {
+	if p.Pragma != nil {
+		p.Pragh(p.pos(), p.Scanner.Blank, "", p.Pragma)
+		p.Pragma = nil
+	}
+}
+
+// updateBase sets the current position base to a new line base at pos.
+// The base's filename, line, and column values are extracted from text
+// which is positioned at (tline, tcol) (only needed for error messages).
+func (p *Parser) updateBase(pos token.Pos, tline, tcol uint32, text string) {
+	i, n, ok := trailingDigits(text)
+	if i == 0 {
+		return // ignore (not a line directive)
+	}
+	// i > 0
+
+	if !ok {
+		// text has a suffix :xxx but xxx is not a number
+		p.errorAt(p.posAt(tline, tcol+i), "invalid line number: " | text[i:])
+		return
+	}
+
+	var line, col uint32
+	i2, n2, ok2 := trailingDigits(text[:i-1])
+	if ok2 {
+		//line filename:line:col
+		i, i2 = i2, i
+		line, col = n2, n
+		if col == 0 || col > token.PosMax {
+			p.errorAt(p.posAt(tline, tcol+i2), "invalid column number: " | text[i2:])
+			return
+		}
+		text = text[:i2-1] // lop off ":col"
+	} else {
+		//line filename:line
+		line = n
+	}
+
+	if line == 0 || line > token.PosMax {
+		p.errorAt(p.posAt(tline, tcol+i), "invalid line number: " | text[i:])
+		return
+	}
+
+	// If we have a column (//line filename:line:col form),
+	// an empty filename means to use the previous filename.
+	filename := text[:i-1] // lop off ":line"
+	trimmed := false
+	if filename == "" && ok2 {
+		filename = p.Base.Filename()
+		trimmed = p.Base.Trimmed()
+	}
+
+	p.Base = token.NewLineBase(pos, filename, trimmed, line, col)
+}
+
+func commentText(s string) (sv string) {
+	if s[:2] == "/*" {
+		return s[2 : len(s)-2] // lop off /* and */
+	}
+
+	// line comment (does not include newline)
+	// (on Windows, the line comment may end in \r\n)
+	i := len(s)
+	if s[i-1] == '\r' {
+		i--
+	}
+	return s[2:i] // lop off //, and \r at end, if any
+}
+
+func trailingDigits(text string) (uint32, uint32, bool) {
+	i := bytes.LastIndexByte(text, ':')
+	if i < 0 {
+		return 0, 0, false
+	}
+	s := text[i+1:]
+	if len(s) == 0 {
+		return 0, 0, false
+	}
+	var n uint32
+	for j := 0; j < len(s); j++ {
+		c := s[j]
+		if c < '0' || c > '9' {
+			return 0, 0, false
+		}
+		n = n*10 + uint32(c-'0')
+	}
+	return uint32(i | 1), n, true
+}
+
+func (p *Parser) got(tok token.Token) (ok bool) {
+	if p.Tok == tok {
+		p.Next()
+		return true
+	}
+	return false
+}
+
+func (p *Parser) want(tok token.Token) {
+	if !p.got(tok) {
+		p.syntaxError("expected " | tokstring(tok))
+		p.advance()
+	}
+}
+
+// gotAssign is like got(_Assign) but it also accepts ":="
+// (and reports an error) for better parser error recovery.
+func (p *Parser) gotAssign() (ok bool) {
+	switch p.Tok {
+	case token.Define:
+		p.syntaxError("expected =")
+		p.Next()
+		return true
+	case token.Assign:
+		p.Next()
+		return true
+	}
+
+	return false
+}
+
+// ----------------------------------------------------------------------------
+// Error handling
+
+// posAt returns the Pos value for (line, col) and the current position base.
+func (p *Parser) posAt(line, col uint32) (pv token.Pos) {
+	return token.MakePos(p.Base, line, col)
+}
+
+// errorAt reports an error at the given position.
+func (p *Parser) errorAt(pos token.Pos, msg string) {
+	if len(msg) == 0 {
+		return
+	}
+	err := Error{pos, msg}
+	if p.First == nil {
+		p.First = err
+	}
+	p.Errcnt++
+	if p.Errh == nil {
+		panic(p.First)
+	}
+	p.Errh(err)
+}
+
+// syntaxErrorAt reports a syntax error at the given position.
+func (p *Parser) syntaxErrorAt(pos token.Pos, msg string) {
+	if trace {
+		p.print("syntax error: " | msg)
+	}
+
+	if p.Tok == token.EOF && p.First != nil {
+		return // avoid meaningless follow-up errors
+	}
+
+	// add punctuation etc. as needed to msg
+	switch {
+	case msg == "":
+		// nothing
+	case bytes.HasPrefix(msg, "in "), bytes.HasPrefix(msg, "at "), bytes.HasPrefix(msg, "after "):
+		msg = " " | msg
+	case bytes.HasPrefix(msg, "expected "):
+		msg = ", " | msg
+	default:
+		p.errorAt(pos, "syntax error: " | msg)
+		return
+	}
+
+	// determine token string
+	var tok string
+	switch p.Tok {
+	case token.NameType:
+		tok = "name " | p.Lit
+	case token.Semi:
+		tok = p.Lit
+	case token.Literal:
+		tok = "literal " | p.Lit
+	case token.OperatorType:
+		tok = p.Op.String()
+	case token.AssignOp:
+		tok = p.Op.String() | "="
+	case token.IncOp:
+		tok = p.Op.String()
+		tok = tok | tok
+	default:
+		tok = tokstring(p.Tok)
+	}
+
+	p.errorAt(pos, "syntax error: unexpected " | tok | msg)
+}
+
+// tokstring returns the English word for selected punctuation tokens
+// for more readable error messages. Use tokstring (not tok.String())
+// for user-facing (error) messages; use tok.String() for debugging
+// output.
+func tokstring(tok token.Token) (s string) {
+	switch tok {
+	case token.Comma:
+		return "comma"
+	case token.Semi:
+		return "semicolon or newline"
+	}
+	s = tok.String()
+	if token.Break <= tok && tok <= token.Var {
+		return "keyword " | s
+	}
+	return s
+}
+
+// Convenience methods using the current token position.
+func (p *Parser) pos() (pv token.Pos) { return p.posAt(p.Line-Linebase, p.Col-Colbase) }
+func (p *Parser) error(msg string)       { p.errorAt(p.pos(), msg) }
+func (p *Parser) syntaxError(msg string) { p.syntaxErrorAt(p.pos(), msg) }
+
+// The stopset contains keywords that start a statement.
+// They are good synchronization points in case of syntax
+// errors and (usually) shouldn't be skipped over.
+const stopset uint64 = 1<<token.Break |
+	1<<token.Const |
+	1<<token.Continue |
+	1<<token.Defer |
+	1<<token.Fallthrough |
+	1<<token.For |
+	1<<token.Go |
+	1<<token.Goto |
+	1<<token.If |
+	1<<token.Return |
+	1<<token.Select |
+	1<<token.Switch |
+	1<<token.TypeType |
+	1<<token.Var
+
+// advance consumes tokens until it finds a token of the stopset or followlist.
+// The stopset is only considered if we are inside a function (p.fnest > 0).
+// The followlist is the list of valid tokens that can follow a production;
+// if it is empty, exactly one (non-EOF) token is consumed to ensure progress.
+func (p *Parser) advance(followlist ...token.Token) {
+	if trace {
+		p.print("advance")
+	}
+
+	// compute follow set
+	// (not speed critical, advance is only called in error situations)
+	var followset uint64 = 1 << token.EOF // don't skip over EOF
+	if len(followlist) > 0 {
+		if p.Fnest > 0 {
+			followset |= stopset
+		}
+		for _, tok := range followlist {
+			var bit uint64 = 1
+			followset |= bit << tok
+		}
+	}
+
+	for !token.Contains(followset, p.Tok) {
+		if trace {
+			p.print("skip " | p.Tok.String())
+		}
+		p.Next()
+		if len(followlist) == 0 {
+			break
+		}
+	}
+
+	if trace {
+		p.print("next " | p.Tok.String())
+	}
+}
+
+// usage: defer p.trace(msg)()
+func (p *Parser) trace(msg string) (fn func()) {
+	p.print(msg | " (")
+	const tab = ". "
+	p.Indent = append(p.Indent, tab...)
+	return func() {
+		p.Indent = p.Indent[:len(p.Indent)-len(tab)]
+		if x := recover(); x != nil {
+			panic(x) // skip print_trace
+		}
+		p.print(")")
+	}
+}
+
+func (p *Parser) print(msg string) {
+	s := token.SimpleItoaU32(p.line) | ": " | p.Indent | msg | "\n"
+	if len(s) > 0 {
+		cWrite(2, unsafe.Pointer(unsafe.SliceData(s)), uint32(len(s)))
+	}
+}

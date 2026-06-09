@@ -1,0 +1,1265 @@
+package emit
+
+import (
+	"bytes"
+	"git.smesh.lol/moxie/pkg/syntax"
+	"git.smesh.lol/moxie/pkg/ssa"
+	"git.smesh.lol/moxie/pkg/token"
+	"git.smesh.lol/moxie/pkg/types"
+)
+
+func scanExportPragmas(src []byte) map[string]string {
+	result := map[string]string{}
+	exportPrefix := []byte("//export ")
+	funcPrefix := []byte("func ")
+	commentPrefix := []byte("//")
+	pendingExport := ""
+	i := 0
+	for i < len(src) {
+		nlIdx := bytes.IndexByte(src[i:], '\n')
+		var line []byte
+		var lineEnd int32
+		if nlIdx < 0 {
+			line = src[i:]
+			lineEnd = len(src)
+		} else {
+			line = src[i : i+nlIdx]
+			lineEnd = i + nlIdx + 1
+		}
+		trimmed := bytes.TrimSpace(line)
+		if len(pendingExport) > 0 {
+			if len(trimmed) == 0 || bytes.HasPrefix(trimmed, commentPrefix) {
+				i = lineEnd
+				continue
+			}
+			if bytes.HasPrefix(trimmed, funcPrefix) {
+				rest := trimmed[5:]
+				paren := bytes.IndexByte(rest, '(')
+				if paren > 0 {
+					funcName := string(bytes.TrimSpace(rest[:paren]))
+					result[funcName] = pendingExport
+				}
+			}
+			pendingExport = ""
+		} else if bytes.HasPrefix(trimmed, exportPrefix) {
+			pendingExport = string(bytes.TrimSpace(trimmed[9:]))
+		}
+		i = lineEnd
+	}
+	return result
+}
+
+func typeCheckPkg(src []byte, name string) (*types.TCPackage, *syntax.File) {
+	inittypes.Universe()
+	shortName := name
+	for i := len(name) - 1; i >= 0; i-- {
+		if name[i] == '/' {
+			shortName = name[i+1:]
+			break
+		}
+	}
+	pkg := newTCPackageWithUniverse(name, shortName)
+	scope := pkg.Scope()
+
+	src = rewriteSliceMakeLiterals(src)
+	src = rewriteChanMakeLiterals(src)
+	src = stripDuplicatePackageClauses(src)
+
+	if len(src) == 0 {
+		return nil, nil
+	}
+
+	parseErrors = nil
+	constValMap = nil
+	errh := func(err error) {
+		parseErrors = append(parseErrors, err.Error())
+	}
+	tcPkgSrc = src
+	CompileExportMap = scanExportPragmas(src)
+	file, _ := syntax.ParseBytes(token.NewFileBase(name|".mx"), src, errh, nil, 0)
+	if file == nil {
+		return nil, nil
+	}
+	for _, d := range file.DeclList {
+		switch d := d.(type) {
+		case *syntax.ImportDecl:
+			if d.Path == nil {
+				continue
+			}
+			path := d.Path.Value
+			if len(path) >= 2 && path[0] == '"' {
+				path = path[1 : len(path)-1]
+			}
+			EnsureImportRegistry()
+			imported := ImportRegistry[path]
+			if imported == nil {
+				continue
+			}
+			if path == "unsafe" && imported.Scope().Lookup("Pointer") == nil {
+				imported.Scope().Insert(types.NewTypeName(imported, "Pointer", types.Typ[types.UnsafePointer]))
+			}
+			localName := imported.Name()
+			if d.LocalPkgName != nil {
+				localName = d.LocalPkgName.Value
+			}
+			scope.Insert(types.NewPkgName(pkg, localName, imported))
+		case *syntax.VarDecl:
+			for _, n := range d.NameList {
+				scope.Insert(types.NewTCVar(pkg, n.Value, nil))
+			}
+		case *syntax.FuncDecl:
+			if d.Recv == nil && d.Name.Value != "init" {
+				scope.Insert(types.NewTCFunc(pkg, d.Name.Value, nil))
+			}
+		case *syntax.TypeDecl:
+			scope.Insert(types.NewTypeName(pkg, d.Name.Value, nil))
+		case *syntax.ConstDecl:
+			for _, n := range d.NameList {
+				scope.Insert(types.NewTCConst(pkg, n.Value, nil, nil))
+			}
+		}
+	}
+
+	var curConstGroup *Group
+	var prevConstValues syntax.Expr
+	var prevConstType syntax.Expr
+	iotaVal := int64(-1)
+	for _, d := range file.DeclList {
+		if td, ok := d.(*syntax.TypeDecl); ok {
+			obj := scope.Lookup(td.Name.Value)
+			if obj != nil {
+				if tn, ok2 := obj.(*types.TypeName); ok2 {
+					types.NewNamed(tn, nil)
+				}
+			}
+		}
+	}
+	for _, d := range file.DeclList {
+		if cd, ok := d.(*syntax.ConstDecl); ok {
+			if cd.Group == nil || cd.Group != curConstGroup {
+				curConstGroup = cd.Group
+				iotaVal = int64(0)
+				prevConstValues = nil
+				prevConstType = nil
+			} else {
+				iotaVal++
+			}
+			valExpr := cd.Values
+			typeExpr := cd.Type
+			if valExpr == nil {
+				valExpr = prevConstValues
+				if typeExpr == nil {
+					typeExpr = prevConstType
+				}
+			} else {
+				prevConstValues = cd.Values
+				prevConstType = cd.Type
+			}
+			typ := tcResolveNameInline(typeExpr, scope)
+			if typ == nil && valExpr != nil {
+				typ = tcInferTypeFromExpr(valExpr, scope)
+			}
+			var val types.ConstVal
+			if valExpr != nil {
+				val = tcEvalConstExpr(valExpr, scope, iotaVal)
+			}
+			if typ == nil && val != nil {
+				typ = types.UntypedTypeOfCV(val)
+			}
+			for _, n := range cd.NameList {
+				if val != nil {
+					if ci, ok2 := val.(types.ConstInt); ok2 {
+						if constValMap == nil {
+							constValMap = map[string]int64{}
+						}
+						constValMap[n.Value] = ci.V
+					}
+				}
+				obj := scope.Lookup(n.Value)
+				if obj != nil {
+					if c, ok := obj.(*types.TCConst); ok {
+						c.SetType(typ)
+						c.SetVal(val)
+					}
+				}
+			}
+		}
+	}
+	for _, d := range file.DeclList {
+		if cd, ok := d.(*syntax.ConstDecl); ok {
+			for _, n := range cd.NameList {
+				obj := scope.Lookup(n.Value)
+				if obj == nil {
+					continue
+				}
+				c, ok2 := obj.(*types.TCConst)
+				if !ok2 || c.Val() != nil {
+					continue
+				}
+				valExpr := cd.Values
+				if valExpr == nil {
+					continue
+				}
+				val := tcEvalConstExpr(valExpr, scope, int64(0))
+				if val != nil {
+					c.SetVal(val)
+					if c.Type() == nil {
+						c.SetType(types.UntypedTypeOfCV(val))
+					}
+				}
+			}
+		}
+	}
+	for _, d := range file.DeclList {
+		if td, ok := d.(*syntax.TypeDecl); ok {
+			obj := scope.Lookup(td.Name.Value)
+			if obj != nil {
+				if tn, ok2 := obj.(*types.TypeName); ok2 {
+					named, ok3 := tn.Type().(*types.Named)
+					if ok3 {
+						typ := tcResolveNameInline(td.Type, scope)
+						named.SetUnderlying(typ)
+					}
+				}
+			}
+		}
+	}
+	for _, d := range file.DeclList {
+		switch d := d.(type) {
+		case *syntax.VarDecl:
+			typ := tcResolveNameInline(d.Type, scope)
+			if arr, ok := typ.(*types.Array); ok && arr.Len() < 0 && d.Values != nil {
+				if cl, ok2 := d.Values.(*syntax.CompositeLit); ok2 {
+					typ = types.NewArray(arr.Elem(), int64(len(cl.ElemList)))
+				}
+			}
+			if typ == nil && d.Values != nil {
+				typ = tcInferTypeFromExpr(d.Values, scope)
+			}
+			for _, n := range d.NameList {
+				obj := scope.Lookup(n.Value)
+				if obj != nil {
+					if v, ok := obj.(*types.TCVar); ok {
+						v.SetType(typ)
+					}
+				}
+			}
+		case *syntax.FuncDecl:
+			if d.Recv == nil && d.Name.Value != "init" {
+				if len(d.TParamList) > 0 {
+					if genericFuncDecls == nil {
+						genericFuncDecls = map[string]*syntax.FuncDecl{}
+					}
+					genericFuncDecls[name+"."+d.Name.Value] = d
+					if genericPkgScopes == nil {
+						genericPkgScopes = map[string]*types.Scope{}
+					}
+					genericPkgScopes[name] = pkg.Scope()
+					continue
+				}
+				sig := tcResolveFuncInline(d.Type, scope)
+				obj := scope.Lookup(d.Name.Value)
+				if obj != nil {
+					if fn, ok := obj.(*types.TCFunc); ok && sig != nil {
+						fn.SetType(sig)
+					}
+				}
+			}
+		}
+	}
+	print("  tcpkg-methods\n")
+	for _, d := range file.DeclList {
+		if fd, ok := d.(*syntax.FuncDecl); ok && fd.Recv != nil {
+			recvType := tcResolveRecvType(fd.Recv, scope)
+			if recvType == nil {
+				continue
+			}
+			sig := tcResolveFuncInlineWithRecv(fd.Type, fd.Recv, scope)
+			fn := types.NewTCFunc(pkg, fd.Name.Value, sig)
+			isPtr := false
+			var named *types.Named
+			if pt, ok := recvType.(*types.Pointer); ok {
+				if okv, okok := pt.Elem().(*types.Named); okok {
+					named = okv
+				}
+				isPtr = true
+			} else {
+				if okv, okok := recvType.(*types.Named); okok {
+					named = okv
+				}
+			}
+			if named != nil {
+				if isPtr {
+					fn.SetPtrRecv(true)
+				}
+				named.AddMethod(fn)
+			}
+		}
+	}
+
+	return pkg, file
+}
+
+func releasePerPkgState() {
+	parseErrors = nil
+	compileErrors = nil
+	constValMap = nil
+	CompileExportMap = nil
+	tcPkgSrc = nil
+}
+
+func TypeCheckOnly(src []byte, name string) {
+	pkg, file := typeCheckPkg(src, name)
+	if pkg != nil && file != nil {
+		registerCompiledExports(pkg)
+	}
+	hasGenerics := pkg != nil && genericPkgScopes != nil && genericPkgScopes[pkg.Path()] != nil
+	if pkg != nil && !hasGenerics {
+		pkg.Release()
+	}
+	if file != nil {
+		file.DeclList = nil
+	}
+	releasePerPkgState()
+}
+
+func CompileToIR(src []byte, name string, triple string) string {
+	pkg, file := typeCheckPkg(src, name)
+	if file == nil {
+		out := "; parse error parseErrs=" | simpleItoa(len(parseErrors)) | "\n"
+		for _, pe := range parseErrors {
+			out = out | "; " | pe | "\n"
+		}
+		releasePerPkgState()
+		return out
+	}
+
+	prog := ssa.NewSSAProgram()
+	ssaPkg := prog.CreatePackage(pkg, []*syntax.File{file}, nil)
+	emitter := newIREmitter(ssaPkg, triple)
+	ir := emitter.emit()
+
+	if len(compileErrors) > 0 {
+		out := "; compile error\n"
+		for _, ce := range compileErrors {
+			out = out | "; " | ce | "\n"
+		}
+		emitter.releaseAfterEmit()
+		ssaPkg.release()
+		prog.release()
+		if pkg != nil {
+			pkg.Release()
+		}
+		file.DeclList = nil
+		releasePerPkgState()
+		return out
+	}
+
+	if len(ir) > 0 && ir[0] != ';' {
+		registerCompiledExports(pkg)
+	}
+
+	emitter.releaseAfterEmit()
+	ssaPkg.release()
+	prog.release()
+	hasGenerics := genericPkgScopes != nil && genericPkgScopes[pkg.Path()] != nil
+	if pkg != nil && !hasGenerics {
+		pkg.Release()
+	}
+	file.DeclList = nil
+	releasePerPkgState()
+	return ir
+}
+
+func registerCompiledExports(pkg *types.TCPackage) {
+	EnsureImportRegistry()
+	path := pkg.Path()
+	regPkg := types.NewTCPackage(path, pkg.Name())
+	for _, name := range pkg.Scope().Names() {
+		if len(name) == 0 || name[0] < 'A' || name[0] > 'Z' {
+			continue
+		}
+		obj := pkg.Scope().Lookup(name)
+		if obj != nil {
+			regPkg.Scope().Insert(obj)
+		}
+	}
+	ImportRegistry[path] = regPkg
+}
+
+func tcInferTypeFromExpr(e syntax.Expr, scope *types.Scope) syntax.Type {
+	switch e := e.(type) {
+	case *syntax.BasicLit:
+		switch e.Kind {
+		case token.StringLit:
+			return types.Typ[types.TCString]
+		case token.IntLit:
+			return types.Typ[types.Int32]
+		case token.FloatLit:
+			return types.Typ[types.Float64]
+		}
+	case *syntax.Name:
+		if e.Value == "true" || e.Value == "false" {
+			return types.Typ[types.Bool]
+		}
+		return tcResolveNameInline(e, scope)
+	case *syntax.CallExpr:
+		ft := tcResolveNameInline(e.Fun, scope)
+		if sig, ok := ft.(*types.Signature); ok && sig != nil {
+			res := sig.Results()
+			if res != nil && res.Len() == 1 {
+				return res.At(0).Type()
+			}
+			if res != nil && res.Len() > 1 {
+				return res
+			}
+		}
+		return ft
+	case *syntax.CompositeLit:
+		t := tcResolveNameInline(e.Type, scope)
+		if arr, ok := t.(*types.Array); ok && arr.Len() < 0 {
+			return types.NewArray(arr.Elem(), int64(len(e.ElemList)))
+		}
+		return t
+	case *syntax.Operation:
+		if e.Y == nil && e.Op == And {
+			return types.NewPointer(tcInferTypeFromExpr(e.X, scope))
+		}
+	}
+	return nil
+}
+
+var constValMap map[string]int64
+var tcPkgSrc []byte
+
+func resolveArrayLenFromSrc(p token.Pos, cmap map[string]int64) int64 {
+	line := p.Line()
+	col := p.Col()
+	if line == 0 || col == 0 || tcPkgSrc == nil {
+		return -1
+	}
+	off := 0
+	curLine := uint32(1)
+	for off < len(tcPkgSrc) && curLine < line {
+		if tcPkgSrc[off] == '\n' {
+			curLine++
+		}
+		off++
+	}
+	off += int32(col) - 1
+	if off >= len(tcPkgSrc) || tcPkgSrc[off] != '[' {
+		return -1
+	}
+	off++
+	for off < len(tcPkgSrc) && tcPkgSrc[off] == ' ' {
+		off++
+	}
+	start := off
+	for off < len(tcPkgSrc) {
+		c := tcPkgSrc[off]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+			off++
+		} else {
+			break
+		}
+	}
+	if off == start {
+		return -1
+	}
+	name := string(tcPkgSrc[start:off])
+	if v, ok := cmap[name]; ok {
+		if off < len(tcPkgSrc) && tcPkgSrc[off] == '+' {
+			off++
+			for off < len(tcPkgSrc) && tcPkgSrc[off] == ' ' {
+				off++
+			}
+			numStart := off
+			for off < len(tcPkgSrc) && tcPkgSrc[off] >= '0' && tcPkgSrc[off] <= '9' {
+				off++
+			}
+			if off > numStart {
+				addend := int64(0)
+				for i := numStart; i < off; i++ {
+					addend = addend*10 + int64(tcPkgSrc[i]-'0')
+				}
+				return v + addend
+			}
+		}
+		return v
+	}
+	n := int64(0)
+	isNum := true
+	for i := start; i < off; i++ {
+		c := tcPkgSrc[i]
+		if c >= '0' && c <= '9' {
+			n = n*10 + int64(c-'0')
+		} else {
+			isNum = false
+			break
+		}
+	}
+	if isNum && off > start {
+		return n
+	}
+	return -1
+}
+
+func resolveArrayLenFromConstMap(e syntax.Expr, cmap map[string]int64) int64 {
+	line := e.Pos().Line()
+	col := e.Pos().Col()
+	if line == 0 || col == 0 || tcPkgSrc == nil {
+		return -1
+	}
+	curLine := uint32(1)
+	off := 0
+	for off < len(tcPkgSrc) && curLine < line {
+		if tcPkgSrc[off] == '\n' {
+			curLine++
+		}
+		off++
+	}
+	off += int32(col) - 1
+	if off >= len(tcPkgSrc) {
+		return -1
+	}
+	start := off
+	for off < len(tcPkgSrc) {
+		c := tcPkgSrc[off]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+			off++
+		} else {
+			break
+		}
+	}
+	if off == start {
+		return -1
+	}
+	name := string(tcPkgSrc[start:off])
+	if v, ok := cmap[name]; ok {
+		return v
+	}
+	return -1
+}
+
+func tcEvalConstExpr(e syntax.Expr, scope *types.Scope, iotaVal int64) types.ConstVal {
+	if e == nil {
+		return nil
+	}
+	switch e := e.(type) {
+	case *syntax.BasicLit:
+		return types.EvalBasicLitLocal(e)
+	case *syntax.Name:
+		if e.Value == "iota" && iotaVal >= 0 {
+			return types.ConstInt{iotaVal}
+		}
+		if scope != nil {
+			_, obj := scope.LookupParent(e.Value)
+			if c, ok := obj.(*types.TCConst); ok && c.Val() != nil {
+				return c.Val()
+			}
+		}
+		if constValMap != nil {
+			if v, ok := constValMap[e.Value]; ok {
+				return types.ConstInt{v}
+			}
+		}
+	case *syntax.Operation:
+		if e.Y == nil {
+			xr := tcEvalConstExpr(e.X, scope, iotaVal)
+			if xr == nil {
+				return nil
+			}
+			return evalUnaryLocal(e.Op, xr)
+		}
+		xr := tcEvalConstExpr(e.X, scope, iotaVal)
+		yr := tcEvalConstExpr(e.Y, scope, iotaVal)
+		if xr == nil || yr == nil {
+			return nil
+		}
+		return evalBinaryLocal(e.Op, xr, yr)
+	case *syntax.ParenExpr:
+		return tcEvalConstExpr(e.X, scope, iotaVal)
+	case *syntax.CallExpr:
+		if id, ok := e.Fun.(*syntax.Name); ok && id.Value == "len" && len(e.ArgList) == 1 {
+			if lit, ok2 := e.ArgList[0].(*syntax.BasicLit); ok2 && lit.Kind == token.StringLit {
+				lv := types.EvalBasicLitLocal(lit)
+				if cs, ok3 := lv.(types.ConstStr); ok3 {
+					return types.ConstInt{int64(len(cs.S))}
+				}
+			}
+			inner := tcEvalConstExpr(e.ArgList[0], scope, iotaVal)
+			if cs, ok2 := inner.(types.ConstStr); ok2 {
+				return types.ConstInt{int64(len(cs.S))}
+			}
+		}
+		if sel, ok := e.Fun.(*syntax.SelectorExpr); ok {
+			if pkg, ok2 := sel.X.(*syntax.Name); ok2 && pkg.Value == "unsafe" {
+				switch sel.Sel.Value {
+				case "Sizeof", "Alignof", "Offsetof":
+					return types.ConstInt{8}
+				}
+			}
+		}
+		if len(e.ArgList) != 1 {
+			return nil
+		}
+		inner := tcEvalConstExpr(e.ArgList[0], scope, iotaVal)
+		if inner == nil {
+			return nil
+		}
+		targetType := tcResolveNameInline(e.Fun, scope)
+		if targetType == nil {
+			return inner
+		}
+		return convertConstLocal(inner, targetType)
+	case *syntax.SelectorExpr:
+		pkgName, ok := e.X.(*syntax.Name)
+		if !ok {
+			return nil
+		}
+		var imported *types.TCPackage
+		if scope != nil {
+			_, obj := scope.LookupParent(pkgName.Value)
+			if pn, ok2 := obj.(*types.PkgName); ok2 && pn.Imported() != nil {
+				imported = pn.Imported()
+			}
+		}
+		if imported == nil {
+			EnsureImportRegistry()
+			imported = ImportRegistry[pkgName.Value]
+		}
+		if imported == nil {
+			return nil
+		}
+		member := imported.Scope().Lookup(e.Sel.Value)
+		if member == nil {
+			return nil
+		}
+		if k, ok := member.(*types.TCConst); ok && k.Val() != nil {
+			return k.Val()
+		}
+		return nil
+	}
+	return nil
+}
+
+func tcResolveNameInline(e syntax.Expr, scope *types.Scope) syntax.Type {
+	if e == nil {
+		return nil
+	}
+	switch e := e.(type) {
+	case *syntax.Name:
+		var obj Object
+		if scope != nil {
+			_, obj = scope.LookupParent(e.Value)
+		} else {
+			_, obj = types.Universe.LookupParent(e.Value)
+		}
+		if obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				return tn.Type()
+			}
+			if fn, ok := obj.(*types.TCFunc); ok {
+				if sig := fn.Signature(); sig != nil {
+					return sig
+				}
+			}
+		}
+	case *syntax.SelectorExpr:
+		pkgName, ok := e.X.(*syntax.Name)
+		if ok && scope != nil {
+			_, pkgObj := scope.LookupParent(pkgName.Value)
+			if pn, ok2 := pkgObj.(*types.PkgName); ok2 && pn.Imported() != nil {
+				typeObj := pn.Imported().Scope().Lookup(e.Sel.Value)
+				if typeObj != nil {
+					if tn, ok3 := typeObj.(*types.TypeName); ok3 {
+						return tn.Type()
+					}
+					if fn, ok3 := typeObj.(*types.TCFunc); ok3 {
+						if sig := fn.Signature(); sig != nil {
+							return sig
+						}
+					}
+				}
+			}
+		}
+		// Fallback: check ImportRegistry directly for external package types
+		if pkgName, ok := e.X.(*syntax.Name); ok {
+			var irKeys []string
+			for k := range ImportRegistry {
+				irKeys = append(irKeys, k)
+			}
+			for i := 1; i < len(irKeys); i++ {
+				for j := i; j > 0 && irKeys[j] < irKeys[j-1]; j-- {
+					irKeys[j], irKeys[j-1] = irKeys[j-1], irKeys[j]
+				}
+			}
+			for _, k := range irKeys {
+				pkg := ImportRegistry[k]
+				if pkg.Name() == pkgName.Value {
+					typeObj := pkg.Scope().Lookup(e.Sel.Value)
+					if typeObj != nil {
+						if tn, ok2 := typeObj.(*types.TypeName); ok2 {
+							return tn.Type()
+						}
+					}
+					break
+				}
+			}
+		}
+	case *syntax.Operation:
+		if e.Y == nil && e.Op == Mul {
+			base := tcResolveNameInline(e.X, scope)
+			if base == nil {
+				base = types.Typ[types.Int8]
+			}
+			return types.NewPointer(base)
+		}
+	case *types.SliceType:
+		elem := tcResolveNameInline(e.Elem, scope)
+		if elem != nil {
+			if b, ok := elem.(*types.Basic); ok && b.Kind() == Uint8 {
+				return types.Typ[types.TCString]
+			}
+			return types.NewSlice(elem)
+		}
+	case *syntax.ArrayType:
+		elem := tcResolveNameInline(e.Elem, scope)
+		if elem != nil {
+			n := int64(-1)
+			if lit, ok := e.Len.(*syntax.BasicLit); ok {
+				n = irParseInt64(lit.Value)
+			} else if e.Len != nil {
+				cv := tcEvalConstExpr(e.Len, scope, -1)
+				if cv != nil {
+					if ci, ok := cv.(types.ConstInt); ok {
+						n = ci.V
+					}
+				}
+				if n == -1 && constValMap != nil {
+					n = resolveArrayLenFromSrc(e.pos, constValMap)
+				}
+			}
+			return types.NewArray(elem, n)
+		}
+	case *syntax.MapType:
+		key := tcResolveNameInline(e.Key, scope)
+		val := tcResolveNameInline(e.Value, scope)
+		if key != nil && val != nil {
+			return types.NewTCMap(key, val)
+		}
+	case *syntax.StructType:
+		var fields []*types.TCVar
+		var tags []string
+		for i, field := range e.FieldList {
+			typ := tcResolveNameInline(field.Type, scope)
+			fname := ""
+			if field.Name != nil {
+				fname = field.Name.Value
+			} else {
+				fname = typeBaseName(typ)
+			}
+			fields = append(fields, NewTCField(nil, fname, typ, field.Name == nil))
+			tag := ""
+			if i < len(e.TagList) && e.TagList[i] != nil {
+				tag = e.TagList[i].Value
+			}
+			tags = append(tags, tag)
+		}
+		return types.NewTCStruct(fields, tags)
+	case *syntax.FuncType:
+		return tcResolveFuncInline(e, scope)
+	case *syntax.InterfaceType:
+		return tcResolveInterfaceInline(e, scope)
+	case *syntax.ChanType:
+		elem := tcResolveNameInline(e.Elem, scope)
+		if elem == nil {
+			elem = types.NewTCStruct(nil, nil)
+		}
+		var dir types.TCChanDir
+		switch e.Dir {
+		case syntax.SendOnly:
+			dir = types.TCSendOnly
+		case syntax.RecvOnly:
+			dir = types.TCRecvOnly
+		default:
+			dir = types.TCSendRecv
+		}
+		return types.NewTCChan(dir, elem)
+	case *syntax.DotsType:
+		elem := tcResolveNameInline(e.Elem, scope)
+		if elem != nil {
+			if b, ok := elem.(*types.Basic); ok && b.Kind() == Uint8 {
+				return types.Typ[types.TCString]
+			}
+			return types.NewSlice(elem)
+		}
+	}
+	return nil
+}
+
+func tcResolveInterfaceInline(e *syntax.InterfaceType, scope *types.Scope) *types.TCInterface {
+	var methods []*types.IfaceMethod
+	var embeds []syntax.Type
+	for _, f := range e.MethodList {
+		if f.Name == nil {
+			if f.Type != nil {
+				embed := tcResolveNameInline(f.Type, scope)
+				if embed != nil {
+					embeds = append(embeds, embed)
+				}
+			}
+			continue
+		}
+		ft, ok := f.Type.(*syntax.FuncType)
+		if !ok {
+			continue
+		}
+		sig := tcResolveFuncInline(ft, scope)
+		if sig != nil {
+			methods = append(methods, types.NewTCIfaceMethod(f.Name.Value, sig))
+		}
+	}
+	iface := types.NewTCInterface(methods, embeds)
+	iface.Complete()
+	return iface
+}
+
+func stripDuplicatePackageClauses(src []byte) []byte {
+	found := false
+	var out []byte
+	i := 0
+	for i < len(src) {
+		nlIdx := bytes.IndexByte(src[i:], '\n')
+		var line []byte
+		var lineEnd int32
+		if nlIdx < 0 {
+			line = src[i:]
+			lineEnd = len(src)
+		} else {
+			line = src[i : i+nlIdx]
+			lineEnd = i + nlIdx + 1
+		}
+		trimmed := bytes.TrimSpace(line)
+		if bytes.HasPrefix(trimmed, "package ") {
+			if found {
+				if out == nil {
+					out = []byte{:0:len(src)}
+					out = append(out, src[:i]...)
+				}
+				for k := 0; k < len(line); k++ {
+					out = append(out, ' ')
+				}
+				if nlIdx >= 0 {
+					out = append(out, '\n')
+				}
+				i = lineEnd
+				continue
+			}
+			found = true
+		}
+		if out != nil {
+			out = append(out, src[i:lineEnd]...)
+		}
+		i = lineEnd
+	}
+	if out == nil {
+		return src
+	}
+	return out
+}
+
+func rewriteSliceMakeLiterals(src []byte) []byte {
+	var out []byte
+	i := 0
+	for i < len(src) {
+		start := bytes.Index(src[i:], []byte("{:"))
+		if start < 0 {
+			out = append(out, src[i:]...)
+			break
+		}
+		start = start + i
+		lbrack := findSliceTypeStart(src, start)
+		if lbrack < 0 {
+			out = append(out, src[i:start+2]...)
+			i = start + 2
+			continue
+		}
+		close := findMatchingBrace(src, start)
+		if close < 0 {
+			out = append(out, src[i:start+2]...)
+			i = start + 2
+			continue
+		}
+		inner := src[start+2 : close]
+		colonIdx := bytes.IndexByte(inner, ':')
+		typeText := src[lbrack:start]
+		out = append(out, src[i:lbrack]...)
+		if colonIdx < 0 {
+			out = append(out, "make("...)
+			out = append(out, typeText...)
+			out = append(out, ", "...)
+			out = append(out, bytes.TrimSpace(inner)...)
+			out = append(out, ')')
+		} else {
+			lenExpr := bytes.TrimSpace(inner[:colonIdx])
+			capExpr := bytes.TrimSpace(inner[colonIdx+1:])
+			out = append(out, "make("...)
+			out = append(out, typeText...)
+			out = append(out, ", "...)
+			out = append(out, lenExpr...)
+			out = append(out, ", "...)
+			out = append(out, capExpr...)
+			out = append(out, ')')
+		}
+		i = close + 1
+	}
+	if out == nil {
+		return src
+	}
+	return out
+}
+
+func findSliceTypeStart(src []byte, braceIdx int32) int32 {
+	j := braceIdx - 1
+	for j >= 0 && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n') {
+		j--
+	}
+	if j < 0 {
+		return -1
+	}
+	depth := 0
+	parenDepth := 0
+	candidate := -1
+	for j >= 0 {
+		ch := src[j]
+		if ch == ')' {
+			parenDepth++
+		} else if ch == '(' {
+			if parenDepth == 0 {
+				if candidate >= 0 {
+					return candidate
+				}
+				return -1
+			}
+			parenDepth--
+		} else if parenDepth > 0 {
+			j--
+			continue
+		}
+		if ch == ']' {
+			depth++
+		} else if ch == '[' {
+			depth--
+			if depth == 0 {
+				candidate = j
+			}
+		} else if ch == '{' || ch == ';' {
+			if candidate >= 0 {
+				return candidate
+			}
+			return -1
+		} else if depth == 0 && parenDepth == 0 {
+			if candidate >= 0 {
+				return candidate
+			}
+			if ch == ' ' || ch == '\t' || ch == '\n' || ch == '*' || ch == '(' || ch == ')' {
+				j--
+				continue
+			}
+			if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '.' {
+				j--
+				continue
+			}
+			return -1
+		}
+		j--
+	}
+	if candidate >= 0 {
+		return candidate
+	}
+	return -1
+}
+
+func findMatchingBrace(src []byte, openIdx int32) int32 {
+	depth := 1
+	for i := openIdx + 1; i < len(src); i++ {
+		if src[i] == '{' {
+			depth++
+		} else if src[i] == '}' {
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func rewriteChanMakeLiterals(src []byte) []byte {
+	chanKw := []byte("chan ")
+	var out []byte
+	i := 0
+	for i < len(src) {
+		idx := bytes.Index(src[i:], chanKw)
+		if idx < 0 {
+			if out != nil {
+				out = append(out, src[i:]...)
+			}
+			break
+		}
+		idx = idx + i
+		j := idx + 5
+		for j < len(src) && (src[j] == ' ' || src[j] == '\t') {
+			j++
+		}
+		if j >= len(src) {
+			if out != nil {
+				out = append(out, src[i:]...)
+			}
+			break
+		}
+		if src[j] == '<' && j+1 < len(src) && src[j+1] == '-' {
+			if out != nil {
+				out = append(out, src[i:j+2]...)
+			}
+			i = j + 2
+			continue
+		}
+		for j < len(src) && (src[j] != '{' && src[j] != '\n' && src[j] != ';' && src[j] != '(' && src[j] != ')') {
+			if src[j] == ' ' || src[j] == '\t' {
+				break
+			}
+			j++
+		}
+		if j >= len(src) || src[j] != '{' {
+			if out == nil {
+				i = idx + 4
+			} else {
+				out = append(out, src[i:idx+4]...)
+				i = idx + 4
+			}
+			continue
+		}
+		braceOpen := j
+		endsStruct := braceOpen >= 6 && string(src[braceOpen-6:braceOpen]) == "struct"
+		if !endsStruct && braceOpen >= 7 {
+			k := braceOpen - 1
+			for k > idx && (src[k] == ' ' || src[k] == '\t') {
+				k--
+			}
+			if k >= 5 && string(src[k-5:k+1]) == "struct" {
+				endsStruct = true
+			}
+		}
+		if endsStruct {
+			structClose := findMatchingBrace(src, braceOpen)
+			if structClose < 0 {
+				if out == nil {
+					i = idx + 4
+				} else {
+					out = append(out, src[i:idx+4]...)
+					i = idx + 4
+				}
+				continue
+			}
+			nj := structClose + 1
+			if nj >= len(src) || src[nj] != '{' {
+				if out == nil {
+					i = structClose + 1
+				} else {
+					out = append(out, src[i:structClose+1]...)
+					i = structClose + 1
+				}
+				continue
+			}
+			braceOpen = nj
+		}
+		close := findMatchingBrace(src, braceOpen)
+		if close < 0 {
+			if out == nil {
+				i = idx + 4
+			} else {
+				out = append(out, src[i:idx+4]...)
+				i = idx + 4
+			}
+			continue
+		}
+		inner := bytes.TrimSpace(src[braceOpen+1 : close])
+		chanType := src[idx : braceOpen]
+		for len(chanType) > 0 && (chanType[len(chanType)-1] == ' ' || chanType[len(chanType)-1] == '\t') {
+			chanType = chanType[:len(chanType)-1]
+		}
+		if out == nil {
+			out = []byte{:0:len(src)}
+			out = append(out, src[:idx]...)
+		} else {
+			out = append(out, src[i:idx]...)
+		}
+		if len(inner) == 0 {
+			out = append(out, "make("...)
+			out = append(out, chanType...)
+			out = append(out, ')')
+		} else {
+			out = append(out, "make("...)
+			out = append(out, chanType...)
+			out = append(out, ", "...)
+			out = append(out, inner...)
+			out = append(out, ')')
+		}
+		i = close + 1
+	}
+	if out == nil {
+		return src
+	}
+	return out
+}
+
+func tcResolveRecvType(recv *syntax.Field, scope *types.Scope) syntax.Type {
+	if recv == nil {
+		return nil
+	}
+	return tcResolveNameInline(recv.Type, scope)
+}
+
+func tcResolveFuncInlineWithRecv(ft *syntax.FuncType, recv *syntax.Field, scope *types.Scope) *types.Signature {
+	if ft == nil {
+		return nil
+	}
+	var recvVar *types.TCVar
+	if recv != nil {
+		recvTyp := tcResolveNameInline(recv.Type, scope)
+		recvName := ""
+		if recv.Name != nil {
+			recvName = recv.Name.Value
+		}
+		recvVar = types.NewTCVar(nil, recvName, recvTyp)
+	}
+	params := tcResolveFieldList(ft.ParamList, scope)
+	results := tcResolveFieldList(ft.ResultList, scope)
+	variadic := false
+	if len(ft.ParamList) > 0 {
+		if _, ok := ft.ParamList[len(ft.ParamList)-1].Type.(*syntax.DotsType); ok {
+			variadic = true
+		}
+	}
+	return types.NewSignature(recvVar, params, results, variadic)
+}
+
+func tcResolveFieldList(fields []*syntax.Field, scope *types.Scope) *types.Tuple {
+	if len(fields) == 0 {
+		return nil
+	}
+	var vars []*types.TCVar
+	for _, f := range fields {
+		typ := tcResolveNameInline(f.Type, scope)
+		pname := ""
+		if f.Name != nil {
+			pname = f.Name.Value
+		}
+		vars = append(vars, types.NewTCVar(nil, pname, typ))
+	}
+	return types.NewTuple(vars...)
+}
+
+func tcResolveFuncInline(ft *syntax.FuncType, scope *types.Scope) *types.Signature {
+	if ft == nil {
+		return nil
+	}
+	var params []*types.TCVar
+	for _, p := range ft.ParamList {
+		typ := tcResolveNameInline(p.Type, scope)
+		pname := ""
+		if p.Name != nil {
+			pname = p.Name.Value
+		}
+		params = append(params, types.NewTCVar(nil, pname, typ))
+	}
+	var results []*types.TCVar
+	for _, r := range ft.ResultList {
+		typ := tcResolveNameInline(r.Type, scope)
+		rname := ""
+		if r.Name != nil {
+			rname = r.Name.Value
+		}
+		results = append(results, types.NewTCVar(nil, rname, typ))
+	}
+	variadic := false
+	if len(ft.ParamList) > 0 {
+		if _, ok := ft.ParamList[len(ft.ParamList)-1].Type.(*syntax.DotsType); ok {
+			variadic = true
+		}
+	}
+	var pTuple *types.Tuple
+	if len(params) > 0 {
+		pTuple = types.NewTuple(params...)
+	}
+	var rTuple *types.Tuple
+	if len(results) > 0 {
+		rTuple = types.NewTuple(results...)
+	}
+	return types.NewSignature(nil, pTuple, rTuple, variadic)
+}
+
+func (e *irEmitter) instrOperands(instr ssa.SSAInstruction) []ssa.SSAValue {
+	switch i := instr.(type) {
+	case *ssa.SSAStore:
+		return []ssa.SSAValue{i.Addr, i.Val}
+	case *ssa.SSAUnOp:
+		return []ssa.SSAValue{i.X}
+	case *ssa.SSABinOp:
+		return []ssa.SSAValue{i.X, i.Y}
+	case *ssa.SSACall:
+		out := []ssa.SSAValue{i.Call.Value}
+		for _, a := range i.Call.Args {
+			out = append(out, a)
+		}
+		return out
+	case *ssa.SSAFieldAddr:
+		return []ssa.SSAValue{i.X}
+	case *ssa.SSAIndexAddr:
+		return []ssa.SSAValue{i.X, i.Index}
+	case *ssa.SSAExtract:
+		return []ssa.SSAValue{i.Tuple}
+	case *ssa.SSAPhi:
+		return i.Edges
+	case *ssa.SSAReturn:
+		var out []ssa.SSAValue
+		for _, r := range i.Results {
+			out = append(out, r)
+		}
+		return out
+	case *ssa.SSAIf:
+		return []ssa.SSAValue{i.Cond}
+	case *ssa.SSAConvert:
+		return []ssa.SSAValue{i.X}
+	case *ssa.SSAChangeType:
+		return []ssa.SSAValue{i.X}
+	case *ssa.SSAMakeInterface:
+		return []ssa.SSAValue{i.X}
+	case *ssa.SSATypeAssert:
+		return []ssa.SSAValue{i.X}
+	case *ssa.SSASlice:
+		out := []ssa.SSAValue{i.X}
+		if i.Low != nil { out = append(out, i.Low) }
+		if i.High != nil { out = append(out, i.High) }
+		if i.Max != nil { out = append(out, i.Max) }
+		return out
+	case *ssa.SSAMapUpdate:
+		return []ssa.SSAValue{i.Map, i.Key, i.Value}
+	case *ssa.SSALookup:
+		return []ssa.SSAValue{i.X, i.Index}
+	case *ssa.SSARange:
+		return []ssa.SSAValue{i.X}
+	case *ssa.SSANext:
+		return []ssa.SSAValue{i.Iter}
+	case *ssa.SSASend:
+		return []ssa.SSAValue{i.Chan, i.X}
+	case *ssa.SSAMakeSlice:
+		out := []ssa.SSAValue{i.Len}
+		if i.Cap != nil { out = append(out, i.Cap) }
+		if i.Data != nil { out = append(out, i.Data) }
+		return out
+	}
+	return nil
+}

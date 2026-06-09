@@ -1,0 +1,629 @@
+package emit
+
+import (
+	"math"
+	"git.smesh.lol/moxie/pkg/syntax"
+	"git.smesh.lol/moxie/pkg/ssa"
+	"git.smesh.lol/moxie/pkg/token"
+	"git.smesh.lol/moxie/pkg/types"
+)
+
+func (e *irEmitter) operandNoSideEffect(v ssa.SSAValue) string {
+	if v == nil {
+		return "zeroinitializer"
+	}
+	if c, ok := v.(*ssa.SSAConst); ok {
+		return e.constOperand(c)
+	}
+	if n, ok := e.valName[v]; ok {
+		return n
+	}
+	return ""
+}
+
+func (e *irEmitter) operand(v ssa.SSAValue) string {
+	if v == nil {
+		return "zeroinitializer"
+	}
+	if c, ok := v.(*ssa.SSAConst); ok {
+		return e.constOperand(c)
+	}
+	if b, ok := v.(*ssa.SSABuiltin); ok {
+		return "@runtime." | b.SSAName()
+	}
+	if f, ok := v.(*ssa.SSAFunction); ok {
+		e.declareExternalFunc(f)
+		return "{ ptr null, ptr " | e.funcSymbol(f) | " }"
+	}
+	if g, ok := v.(*ssa.SSAGlobal); ok {
+		e.declareExternalGlobal(g)
+		return e.globalName(g)
+	}
+	return e.regName(v)
+}
+
+func (e *irEmitter) constOperand(c *ssa.SSAConst) string {
+	if c.Value() == nil {
+		if c.SSAType() == nil {
+			return "null"
+		}
+		typ := e.llvmType(c.SSAType())
+		if typ == "ptr" {
+			return "null"
+		}
+		if typ == "i1" {
+			return "false"
+		}
+		return "zeroinitializer"
+	}
+	b := underlyingBasic(c.SSAType())
+	if b != nil {
+		switch b.Kind() {
+		case types.Bool, types.UntypedBool:
+			if cb, ok := c.Value().(types.ConstBool); ok {
+				if cb.V {
+					return "true"
+				}
+				return "false"
+			}
+			s := c.Value().String()
+			if s == "true" {
+				return "true"
+			}
+			return "false"
+		case types.Int8, types.Int16, types.Int32, types.Int64, types.Uint8, types.Uint16, types.Uint32, types.Uint64,
+			types.UntypedInt, types.UntypedRune:
+			if ci, ok := c.Value().(types.ConstInt); ok {
+				v := ci.V
+				switch b.Kind() {
+				case types.Int8:
+					v = int64(int8(v))
+				case types.Uint8:
+					v = int64(uint8(v))
+				case types.Int16:
+					v = int64(int16(v))
+				case types.Uint16:
+					v = int64(uint16(v))
+				case types.Int32:
+					v = int64(int32(v))
+				case types.Uint32:
+					v = int64(uint32(v))
+				case types.UntypedInt, types.UntypedRune:
+					if v < -2147483648 || v > 4294967295 {
+						e.allocTypes[c] = "i64"
+					}
+				}
+				return irItoa64(v)
+			}
+			if cf, ok := c.Value().(types.ConstFloat); ok {
+				if len(cf.Lit) > 0 {
+					return irItoa64(parseIntFromtoken.FloatLit(cf.Lit))
+				}
+				return irItoa64(int64(cf.V))
+			}
+			return c.Value().String()
+		case types.Float32:
+			if cf, ok := c.Value().(types.ConstFloat); ok {
+				if len(cf.Lit) > 0 {
+					return floatLitForLLVM(cf.Lit)
+				}
+				bits := math.Float64bits(float64(float32(cf.V)))
+				return "0x" | irHex64(bits)
+			}
+			return "0.0"
+		case types.Float64, types.UntypedFloat:
+			if cf, ok := c.Value().(types.ConstFloat); ok {
+				if len(cf.Lit) > 0 {
+					return floatLitForLLVM(cf.Lit)
+				}
+				bits := math.Float64bits(cf.V)
+				return "0x" | irHex64(bits)
+			}
+			return c.Value().String()
+		case types.TCString, types.UntypedString:
+			if cs, ok := c.Value().(types.ConstStr); ok {
+				if len(cs.S) == 0 {
+					return "zeroinitializer"
+				}
+				idx := e.addStringConst(cs.S)
+				ipt := e.intptrType()
+				slen := irItoa64(int64(len(cs.S)))
+				return "{ ptr " | e.strConstGlobal(idx) | ", " | ipt | " " | slen | ", " | ipt | " " | slen | " }"
+			}
+			return "zeroinitializer"
+		}
+	}
+	if c.SSAType() == nil {
+		return c.Value().String()
+	}
+	return "zeroinitializer"
+}
+
+func underlyingBasic(t syntax.Type) *types.Basic {
+	if t == nil {
+		return nil
+	}
+	u := types.SafeUnderlying(t)
+	if u == nil {
+		return nil
+	}
+	b, ok := u.(*types.Basic)
+	if !ok {
+		return nil
+	}
+	return b
+}
+
+func newTCPackageWithUniverse(path, name string) *types.TCPackage {
+	return types.NewTCPackageWithParent(path, name, types.Universe)
+}
+
+func irParseIntWidth(t string) int32 {
+	if len(t) < 2 || t[0] != 'i' {
+		return 0
+	}
+	n := 0
+	for i := 1; i < len(t); i++ {
+		if t[i] < '0' || t[i] > '9' {
+			return 0
+		}
+		n = n*10 + int32(t[i]-'0')
+	}
+	return n
+}
+
+func (e *irEmitter) deferRetType(d *ssa.SSADefer) string {
+	if fn, ok := d.Call.Value.(*ssa.SSAFunction); ok {
+		if fn.Signature == nil {
+			return "void"
+		}
+		r := fn.Signature.Results()
+		if r == nil {
+			return "void"
+		}
+		return e.llvmType(r)
+	}
+	t := d.Call.Value.SSAType()
+	if t == nil {
+		return "void"
+	}
+	u := types.SafeUnderlying(t)
+	if sig, ok := u.(*types.Signature); ok {
+		r := sig.Results()
+		if r == nil || r.Len() == 0 {
+			return "void"
+		}
+		return e.llvmType(r)
+	}
+	return "void"
+}
+
+func (e *irEmitter) deferArgType(arg ssa.SSAValue) string {
+	t := e.llvmType(arg.SSAType())
+	if t == "void" {
+		return "ptr"
+	}
+	return t
+}
+
+func (e *irEmitter) deferIsDirectCall(d *ssa.SSADefer) bool {
+	if _, ok := d.Call.Value.(*ssa.SSAFunction); ok {
+		return true
+	}
+	if _, ok := d.Call.Value.(*ssa.SSABuiltin); ok {
+		return true
+	}
+	return false
+}
+
+func (e *irEmitter) deferStructType(d *ssa.SSADefer) string {
+	ipt := e.intptrType()
+	s := "{" | ipt | ", ptr"
+	if !e.deferIsDirectCall(d) {
+		s = s | ", {ptr, ptr}"
+	}
+	for _, arg := range d.Call.Args {
+		s = s | ", " | e.deferArgType(arg)
+	}
+	return s | "}"
+}
+
+func (e *irEmitter) emitDefer(d *ssa.SSADefer) {
+	idx := -1
+	for i, dd := range e.deferList {
+		if dd == d {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		e.w("  ; defer: not found in list\n")
+		return
+	}
+	ipt := e.intptrType()
+	id := e.deferID
+	e.deferID++
+	pfx := "%df" | irItoa(id) | "."
+	sty := e.deferStructType(d)
+
+	e.w("  ") ; e.w(pfx) ; e.w("a = alloca ") ; e.w(sty) ; e.w("\n")
+
+	cbGep := pfx | "cb"
+	e.w("  ") ; e.w(cbGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
+	e.w(", ptr ") ; e.w(pfx) ; e.w("a, i32 0, i32 0\n")
+	e.w("  store ") ; e.w(ipt) ; e.w(" ") ; e.w(irItoa(idx))
+	e.w(", ptr ") ; e.w(cbGep) ; e.w("\n")
+
+	nxGep := pfx | "nx"
+	e.w("  ") ; e.w(nxGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
+	e.w(", ptr ") ; e.w(pfx) ; e.w("a, i32 0, i32 1\n")
+	prev := pfx | "prev"
+	e.w("  ") ; e.w(prev) ; e.w(" = load ptr, ptr %deferPtr\n")
+	e.w("  store ptr ") ; e.w(prev) ; e.w(", ptr ") ; e.w(nxGep) ; e.w("\n")
+
+	fieldIdx := int32(2)
+	if !e.deferIsDirectCall(d) {
+		fvGep := pfx | "fv"
+		e.w("  ") ; e.w(fvGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
+		e.w(", ptr ") ; e.w(pfx) ; e.w("a, i32 0, i32 ") ; e.w(irItoa(int32(fieldIdx))) ; e.w("\n")
+		fvOp := e.operand(d.Call.Value)
+		e.w("  store {ptr, ptr} ") ; e.w(fvOp)
+		e.w(", ptr ") ; e.w(fvGep) ; e.w("\n")
+		fieldIdx++
+	}
+
+	for i, arg := range d.Call.Args {
+		_ = i
+		aGep := pfx | "a" | irItoa(int32(fieldIdx))
+		e.w("  ") ; e.w(aGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
+		e.w(", ptr ") ; e.w(pfx) ; e.w("a, i32 0, i32 ") ; e.w(irItoa(int32(fieldIdx))) ; e.w("\n")
+		at := e.deferArgType(arg)
+		av := e.operand(arg)
+		e.w("  store ") ; e.w(at) ; e.w(" ") ; e.w(av)
+		e.w(", ptr ") ; e.w(aGep) ; e.w("\n")
+		fieldIdx++
+	}
+
+	e.w("  store ptr ") ; e.w(pfx) ; e.w("a, ptr %deferPtr\n")
+}
+
+func (e *irEmitter) emitRunDefers() {
+	if len(e.deferList) == 0 {
+		return
+	}
+	ipt := e.intptrType()
+	id := e.deferID
+	e.deferID++
+	pfx := "rundefers" | irItoa(id)
+
+	e.w("  br label %") ; e.w(pfx) ; e.w(".head\n")
+	e.w(pfx) ; e.w(".head:\n")
+	e.w("  %") ; e.w(pfx) ; e.w(".cur = load ptr, ptr %deferPtr\n")
+	e.w("  %") ; e.w(pfx) ; e.w(".nil = icmp eq ptr %") ; e.w(pfx) ; e.w(".cur, null\n")
+	e.w("  br i1 %") ; e.w(pfx) ; e.w(".nil, label %") ; e.w(pfx) ; e.w(".end, label %")
+	e.w(pfx) ; e.w(".body\n")
+
+	e.w(pfx) ; e.w(".body:\n")
+	e.w("  %") ; e.w(pfx) ; e.w(".cb = load ") ; e.w(ipt) ; e.w(", ptr %") ; e.w(pfx) ; e.w(".cur\n")
+	nxGep := "%" | pfx | ".nxp"
+	e.w("  ") ; e.w(nxGep) ; e.w(" = getelementptr inbounds {") ; e.w(ipt) ; e.w(", ptr}, ptr %")
+	e.w(pfx) ; e.w(".cur, i32 0, i32 1\n")
+	e.w("  %") ; e.w(pfx) ; e.w(".nx = load ptr, ptr ") ; e.w(nxGep) ; e.w("\n")
+	e.w("  store ptr %") ; e.w(pfx) ; e.w(".nx, ptr %deferPtr\n")
+
+	for i, d := range e.deferList {
+		checkLabel := pfx | ".c" | irItoa(i)
+		callLabel := pfx | ".k" | irItoa(i)
+		var nextLabel string
+		if i+1 < len(e.deferList) {
+			nextLabel = pfx | ".c" | irItoa(i+1)
+		} else {
+			nextLabel = pfx | ".head"
+		}
+		if i == 0 {
+			e.w("  %") ; e.w(checkLabel) ; e.w(".eq = icmp eq ") ; e.w(ipt) ; e.w(" %")
+			e.w(pfx) ; e.w(".cb, 0\n")
+			e.w("  br i1 %") ; e.w(checkLabel) ; e.w(".eq, label %") ; e.w(callLabel)
+			e.w(", label %") ; e.w(nextLabel) ; e.w("\n")
+		} else {
+			e.w(checkLabel) ; e.w(":\n")
+			e.w("  %") ; e.w(checkLabel) ; e.w(".eq = icmp eq ") ; e.w(ipt) ; e.w(" %")
+			e.w(pfx) ; e.w(".cb, ") ; e.w(irItoa(i)) ; e.w("\n")
+			e.w("  br i1 %") ; e.w(checkLabel) ; e.w(".eq, label %") ; e.w(callLabel)
+			e.w(", label %") ; e.w(nextLabel) ; e.w("\n")
+		}
+
+		e.w(callLabel) ; e.w(":\n")
+		e.emitDeferDispatch(d, pfx, i)
+		e.w("  br label %") ; e.w(pfx) ; e.w(".head\n")
+	}
+
+	e.w(pfx) ; e.w(".end:\n")
+}
+
+func (e *irEmitter) emitDeferBuiltin(d *ssa.SSADefer, bi *ssa.SSABuiltin, pfx string, idx int32, sty string, dp string) {
+	fieldIdx := int32(2)
+	var args []string
+	var argTypes []string
+	for i, arg := range d.Call.Args {
+		aGep := "%" | pfx | ".da" | irItoa(idx) | "f" | irItoa(i)
+		e.w("  ") ; e.w(aGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
+		e.w(", ptr ") ; e.w(dp) ; e.w(", i32 0, i32 ") ; e.w(irItoa(int32(fieldIdx))) ; e.w("\n")
+		at := e.deferArgType(arg)
+		aVal := "%" | pfx | ".dv" | irItoa(idx) | "f" | irItoa(i)
+		e.w("  ") ; e.w(aVal) ; e.w(" = load ") ; e.w(at) ; e.w(", ptr ") ; e.w(aGep) ; e.w("\n")
+		args = append(args, aVal)
+		argTypes = append(argTypes, at)
+		fieldIdx++
+	}
+	name := bi.SSAName()
+	if name == "close" && len(args) == 1 {
+		e.declareRuntime("runtime.chanClose", "void", "ptr")
+		e.w("  call void @runtime.chanClose(") ; e.w(argTypes[0]) ; e.w(" ") ; e.w(args[0]) ; e.w(")\n")
+	} else if name == "panic" && len(args) == 1 {
+		e.declareRuntime("runtime._panicstr", "void", argTypes[0])
+		e.w("  call void @runtime._panicstr(") ; e.w(argTypes[0]) ; e.w(" ") ; e.w(args[0]) ; e.w(")\n")
+	} else if name == "println" || name == "print" {
+		e.declareRuntime("runtime.printlock", "void", "")
+		e.declareRuntime("runtime.printunlock", "void", "")
+		e.declareRuntime("runtime.printnl", "void", "")
+		e.w("  call void @runtime.printlock()\n")
+		for ai, av := range args {
+			if ai > 0 {
+				e.declareRuntime("runtime.printspace", "void", "")
+				e.w("  call void @runtime.printspace()\n")
+			}
+			at := argTypes[ai]
+			if at == e.sliceType() || at == "{ptr, i64, i64}" || at == "{ptr, i32, i32}" {
+				e.declareRuntime("runtime.printstring", "void", e.sliceType())
+				e.w("  call void @runtime.printstring(") ; e.w(at) ; e.w(" ") ; e.w(av) ; e.w(")\n")
+			} else if at == "i1" {
+				e.declareRuntime("runtime.printbool", "void", "i1")
+				e.w("  call void @runtime.printbool(i1 ") ; e.w(av) ; e.w(")\n")
+			} else if at == "i32" || at == "i64" || at == "i16" || at == "i8" {
+				fname := "runtime.printint" | at[1:]
+				e.declareRuntime(fname, "void", at)
+				e.w("  call void @") ; e.w(fname) ; e.w("(") ; e.w(at) ; e.w(" ") ; e.w(av) ; e.w(")\n")
+			} else if at == "ptr" {
+				ipt := e.intptrType()
+				e.declareRuntime("runtime.printptr", "void", ipt)
+				tmp := "%" | pfx | ".ptmp" | irItoa(ai)
+				e.w("  ") ; e.w(tmp) ; e.w(" = ptrtoint ptr ") ; e.w(av) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+				e.w("  call void @runtime.printptr(") ; e.w(ipt) ; e.w(" ") ; e.w(tmp) ; e.w(")\n")
+			}
+		}
+		if name == "println" {
+			e.w("  call void @runtime.printnl()\n")
+		}
+		e.w("  call void @runtime.printunlock()\n")
+	} else if name == "delete" && len(args) == 2 {
+		e.declareRuntime("runtime.hashmapBinaryDelete", "void", "ptr, ptr, i32")
+		e.w("  ; defer delete - not fully implemented\n")
+	} else if name == "recover" {
+		e.w("  ; defer recover() is a no-op\n")
+	} else {
+		e.w("  ; defer builtin ") ; e.w(name) ; e.w(" - not implemented\n")
+	}
+}
+
+func (e *irEmitter) emitDeferDispatch(d *ssa.SSADefer, pfx string, idx int32) {
+	sty := e.deferStructType(d)
+	dp := "%" | pfx | ".cur"
+
+	fieldIdx := int32(2)
+	if bi, isBi := d.Call.Value.(*ssa.SSABuiltin); isBi {
+		e.emitDeferBuiltin(d, bi, pfx, idx, sty, dp)
+		return
+	}
+	if fn, isFn := d.Call.Value.(*ssa.SSAFunction); isFn {
+		var args []string
+		var argTypes []string
+		for i, arg := range d.Call.Args {
+			aGep := "%" | pfx | ".da" | irItoa(idx) | "f" | irItoa(i)
+			e.w("  ") ; e.w(aGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
+			e.w(", ptr ") ; e.w(dp) ; e.w(", i32 0, i32 ") ; e.w(irItoa(int32(fieldIdx))) ; e.w("\n")
+			at := e.deferArgType(arg)
+			aVal := "%" | pfx | ".dv" | irItoa(idx) | "f" | irItoa(i)
+			e.w("  ") ; e.w(aVal) ; e.w(" = load ") ; e.w(at) ; e.w(", ptr ") ; e.w(aGep) ; e.w("\n")
+			args = append(args, aVal)
+			argTypes = append(argTypes, at)
+			fieldIdx++
+		}
+		if !e.isPkgFunc(fn) {
+			e.declareExternalFunc(fn)
+		}
+		rt := e.deferRetType(d)
+		e.w("  call ") ; e.w(rt) ; e.w(" ") ; e.w(e.funcSymbol(fn)) ; e.w("(")
+		for i, av := range args {
+			if i > 0 { e.w(", ") }
+			e.w(argTypes[i]) ; e.w(" ") ; e.w(av)
+		}
+		if !fn.IsExternC() {
+			if len(args) > 0 { e.w(", ") }
+			e.w("ptr null")
+		}
+		e.w(")\n")
+	} else {
+		fvGep := "%" | pfx | ".dfv" | irItoa(idx)
+		e.w("  ") ; e.w(fvGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
+		e.w(", ptr ") ; e.w(dp) ; e.w(", i32 0, i32 2\n")
+		fvVal := "%" | pfx | ".fvv" | irItoa(idx)
+		e.w("  ") ; e.w(fvVal) ; e.w(" = load {ptr, ptr}, ptr ") ; e.w(fvGep) ; e.w("\n")
+		fpReg := "%" | pfx | ".fp" | irItoa(idx)
+		ctxReg := "%" | pfx | ".ctx" | irItoa(idx)
+		e.w("  ") ; e.w(fpReg) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(fvVal) ; e.w(", 1\n")
+		e.w("  ") ; e.w(ctxReg) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(fvVal) ; e.w(", 0\n")
+		fieldIdx = 3
+		var args []string
+		var argTypes []string
+		for i, arg := range d.Call.Args {
+			aGep := "%" | pfx | ".da" | irItoa(idx) | "f" | irItoa(i)
+			e.w("  ") ; e.w(aGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
+			e.w(", ptr ") ; e.w(dp) ; e.w(", i32 0, i32 ") ; e.w(irItoa(int32(fieldIdx))) ; e.w("\n")
+			at := e.deferArgType(arg)
+			aVal := "%" | pfx | ".dv" | irItoa(idx) | "f" | irItoa(i)
+			e.w("  ") ; e.w(aVal) ; e.w(" = load ") ; e.w(at) ; e.w(", ptr ") ; e.w(aGep) ; e.w("\n")
+			args = append(args, aVal)
+			argTypes = append(argTypes, at)
+			fieldIdx++
+		}
+		rt := e.deferRetType(d)
+		e.w("  call ") ; e.w(rt) ; e.w(" ") ; e.w(fpReg) ; e.w("(")
+		for i, av := range args {
+			if i > 0 { e.w(", ") }
+			e.w(argTypes[i]) ; e.w(" ") ; e.w(av)
+		}
+		if len(args) > 0 { e.w(", ") }
+		e.w("ptr ") ; e.w(ctxReg)
+		e.w(")\n")
+	}
+}
+
+func irItoa(n int32) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	buf := []byte{:0:20}
+	for n > 0 {
+		buf = append(buf, byte('0'+n%10))
+		n /= 10
+	}
+	if neg {
+		buf = append(buf, '-')
+	}
+	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
+
+func parseIntFromtoken.FloatLit(lit string) int64 {
+	neg := false
+	i := 0
+	if len(lit) > 0 && lit[0] == '-' {
+		neg = true
+		i = 1
+	} else if len(lit) > 0 && lit[0] == '+' {
+		i = 1
+	}
+	var n int64
+	for ; i < len(lit); i++ {
+		ch := lit[i]
+		if ch == '_' {
+			continue
+		}
+		if ch < '0' || ch > '9' {
+			break
+		}
+		n = n*10 + int64(ch-'0')
+	}
+	if neg {
+		return -n
+	}
+	return n
+}
+
+func floatLitForLLVM(lit string) string {
+	var buf []byte
+	hasDot := false
+	ePos := -1
+	for i := 0; i < len(lit); i++ {
+		ch := lit[i]
+		if ch == '_' {
+			continue
+		}
+		if ch == '.' {
+			hasDot = true
+			if len(buf) == 0 || (len(buf) == 1 && (buf[0] == '-' || buf[0] == '+')) {
+				buf = append(buf, '0')
+			}
+		}
+		if ch == 'e' || ch == 'E' {
+			ePos = len(buf)
+		}
+		buf = append(buf, ch)
+	}
+	if !hasDot {
+		if ePos >= 0 {
+			var out []byte
+			out = append(out, buf[:ePos]...)
+			out = append(out, '.', '0')
+			out = append(out, buf[ePos:]...)
+			return string(out)
+		}
+		buf = append(buf, '.', '0')
+	}
+	return string(buf)
+}
+
+func irHex64(v uint64) string {
+	digits := "0123456789ABCDEF"
+	buf := []byte{:16}
+	for i := 15; i >= 0; i-- {
+		buf[i] = digits[v&0xf]
+		v >>= 4
+	}
+	return string(buf)
+}
+
+func irItoa64(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	if n < 0 {
+		return "-9223372036854775808"
+	}
+	buf := []byte{:0:20}
+	for n > 0 {
+		buf = append(buf, byte('0'+n%10))
+		n /= 10
+	}
+	if neg {
+		buf = append(buf, '-')
+	}
+	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
+
+func irFtoa(f float64) string {
+	return "0.0"
+}
+
+func irParseInt64(s string) int64 {
+	var n int64
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			break
+		}
+		n = n*10 + int64(c-'0')
+	}
+	return n
+}
+
+func runeToUTF8(r rune) string {
+	if r < 0 || r > 0x10FFFF {
+		r = 0xFFFD
+	}
+	var out []byte
+	if r <= 0x7F {
+		out = append(out, byte(r))
+	} else if r <= 0x7FF {
+		out = append(out, byte(0xC0|(r>>6)), byte(0x80|(r&0x3F)))
+	} else if r <= 0xFFFF {
+		out = append(out, byte(0xE0|(r>>12)), byte(0x80|((r>>6)&0x3F)), byte(0x80|(r&0x3F)))
+	} else {
+		out = append(out, byte(0xF0|(r>>18)), byte(0x80|((r>>12)&0x3F)), byte(0x80|((r>>6)&0x3F)), byte(0x80|(r&0x3F)))
+	}
+	return string(out)
+}

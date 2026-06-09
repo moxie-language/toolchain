@@ -1,0 +1,482 @@
+package ssa
+
+import (
+	"git.smesh.lol/moxie/pkg/token"
+	"git.smesh.lol/moxie/pkg/syntax"
+	"git.smesh.lol/moxie/pkg/types"
+)
+
+func mangleGenericName(baseName string, typeArgs []syntax.Type) (s string) {
+	s = baseName | "__"
+	for i, t := range typeArgs {
+		if i > 0 {
+			s = s | "_"
+		}
+		if t == nil {
+			s = s | "nil"
+		} else {
+			ts := t.String()
+			for j := 0; j < len(ts); j++ {
+				c := ts[j]
+				if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+					s = s | string([]byte{c})
+				} else if c == '.' {
+					s = s | "."
+				} else {
+					s = s | "_"
+				}
+			}
+		}
+	}
+	return s
+}
+
+func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]syntax.Type, pkgScope *types.Scope) (t syntax.Type) {
+	if e == nil {
+		return nil
+	}
+	switch e := e.(type) {
+	case *syntax.Name:
+		if t, ok := typeSubst[e.Value]; ok {
+			return t
+		}
+		_, obj := types.Universe.LookupParent(e.Value)
+		if obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				return tn.typ
+			}
+		}
+		if pkgScope != nil {
+			tobj := pkgScope.Lookup(e.Value)
+			if tobj != nil {
+				if tn, ok := tobj.(*types.TypeName); ok {
+					return tn.typ
+				}
+			}
+		}
+		if importRegistry != nil {
+			var regKeys []string
+			for k := range importRegistry {
+				regKeys = append(regKeys, k)
+			}
+			for i := 1; i < len(regKeys); i++ {
+				for j := i; j > 0 && regKeys[j] < regKeys[j-1]; j-- {
+					regKeys[j], regKeys[j-1] = regKeys[j-1], regKeys[j]
+				}
+			}
+			for _, k := range regKeys {
+				pkg := importRegistry[k]
+				tobj := pkg.Scope().Lookup(e.Value)
+				if tobj != nil {
+					if tn, ok := tobj.(*types.TypeName); ok {
+						return tn.typ
+					}
+				}
+			}
+		}
+		return nil
+	case *syntax.DotsType:
+		elem := resolveTypeExprWithSubst(e.Elem, typeSubst, pkgScope)
+		if elem != nil {
+			if b, ok := elem.(*types.Basic); ok && b.Kind() == types.Uint8 {
+				return types.Typ[types.TCString]
+			}
+			return types.NewSlice(elem)
+		}
+	case *syntax.SliceType:
+		elem := resolveTypeExprWithSubst(e.Elem, typeSubst, pkgScope)
+		if elem != nil {
+			if b, ok := elem.(*types.Basic); ok && b.Kind() == types.Uint8 {
+				return types.Typ[types.TCString]
+			}
+			return types.NewSlice(elem)
+		}
+	case *syntax.Operation:
+		if e.Y == nil && e.Op == token.Mul {
+			base := resolveTypeExprWithSubst(e.X, typeSubst, pkgScope)
+			if base != nil {
+				return types.NewPointer(base)
+			}
+		}
+	case *syntax.MapType:
+		key := resolveTypeExprWithSubst(e.Key, typeSubst, pkgScope)
+		val := resolveTypeExprWithSubst(e.Value, typeSubst, pkgScope)
+		if key != nil && val != nil {
+			return types.NewTCMap(key, val)
+		}
+	case *syntax.ChanType:
+		elem := resolveTypeExprWithSubst(e.Elem, typeSubst, pkgScope)
+		if elem != nil {
+			dir := types.TCSendRecv
+			if e.Dir == syntax.SendOnly {
+				dir = types.TCSendOnly
+			} else if e.Dir == syntax.RecvOnly {
+				dir = types.TCRecvOnly
+			}
+			return types.NewTCChan(dir, elem)
+		}
+	case *syntax.FuncType:
+		return resolveSignatureWithSubst(e, typeSubst, pkgScope)
+	case *syntax.SelectorExpr:
+		if pkgName, ok := e.X.(*syntax.Name); ok {
+			if importRegistry != nil {
+				var regKeys []string
+				for k := range importRegistry {
+					regKeys = append(regKeys, k)
+				}
+				for i := 1; i < len(regKeys); i++ {
+					for j := i; j > 0 && regKeys[j] < regKeys[j-1]; j-- {
+						regKeys[j], regKeys[j-1] = regKeys[j-1], regKeys[j]
+					}
+				}
+				for _, k := range regKeys {
+					pkg := importRegistry[k]
+					if pkg.Name() == pkgName.Value {
+						typeObj := pkg.Scope().Lookup(e.Sel.Value)
+						if typeObj != nil {
+							if tn, ok2 := typeObj.(*types.TypeName); ok2 {
+								return tn.typ
+							}
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func resolveSignatureWithSubst(ft *syntax.FuncType, typeSubst map[string]syntax.Type, pkgScope *types.Scope) (s *types.Signature) {
+	if ft == nil {
+		return nil
+	}
+	var params []*types.TCVar
+	variadic := false
+	for _, p := range ft.ParamList {
+		typ := resolveTypeExprWithSubst(p.Type, typeSubst, pkgScope)
+		name := ""
+		if p.Name != nil {
+			name = p.Name.Value
+		}
+		params = append(params, types.NewTCVar(nil, name, typ))
+	}
+	if len(ft.ParamList) > 0 {
+		last := ft.ParamList[len(ft.ParamList)-1]
+		if _, ok := last.Type.(*syntax.DotsType); ok {
+			variadic = true
+		}
+	}
+	var results []*types.TCVar
+	for _, r := range ft.ResultList {
+		typ := resolveTypeExprWithSubst(r.Type, typeSubst, pkgScope)
+		name := ""
+		if r.Name != nil {
+			name = r.Name.Value
+		}
+		if typ == nil && r.Name != nil {
+			rname := ""
+			if rn, ok := r.Type.(*syntax.Name); ok {
+				rname = rn.Value
+			}
+		}
+		results = append(results, types.NewTCVar(nil, name, typ))
+	}
+	var paramTuple *types.Tuple
+	if len(params) > 0 {
+		paramTuple = types.NewTuple(params...)
+	}
+	var resultTuple *types.Tuple
+	if len(results) > 0 {
+		resultTuple = types.NewTuple(results...)
+	}
+	return types.NewSignature(nil, paramTuple, resultTuple, variadic)
+}
+
+func matchTypeParam(paramType syntax.Expr, argType syntax.Type, tparams []*syntax.Field, typeMap map[string]syntax.Type) {
+	if paramType == nil || argType == nil {
+		return
+	}
+	switch pt := paramType.(type) {
+	case *syntax.Name:
+		for _, tp := range tparams {
+			if tp.Name != nil && tp.Name.Value == pt.Value {
+				typeMap[pt.Value] = argType
+				return
+			}
+		}
+	case *syntax.DotsType:
+		matchTypeParam(pt.Elem, argType, tparams, typeMap)
+	case *syntax.SliceType:
+		if sl, ok := types.SafeUnderlying(argType).(*types.Slice); ok {
+			matchTypeParam(pt.Elem, sl.Elem(), tparams, typeMap)
+		}
+	case *syntax.FuncType:
+		sig, ok := types.SafeUnderlying(argType).(*types.Signature)
+		if !ok {
+			return
+		}
+		for i, p := range pt.ParamList {
+			if sig.Params() != nil && i < int32(sig.Params().Len()) {
+				matchTypeParam(p.Type, sig.Params().At(int32(i)).Type(), tparams, typeMap)
+			}
+		}
+		for i, r := range pt.ResultList {
+			if sig.Results() != nil && i < int32(sig.Results().Len()) {
+				matchTypeParam(r.Type, sig.Results().At(int32(i)).Type(), tparams, typeMap)
+			}
+		}
+	}
+}
+
+func inferFromConstraints(tparams []*syntax.Field, typeMap map[string]syntax.Type) {
+	for _, tp := range tparams {
+		if tp.Name == nil || tp.Type == nil {
+			continue
+		}
+		knownType, ok := typeMap[tp.Name.Value]
+		if !ok {
+			continue
+		}
+		extractConstraintTypeParams(tp.Type, knownType, tparams, typeMap)
+	}
+}
+
+func extractConstraintTypeParams(constraint syntax.Expr, concreteType syntax.Type, tparams []*syntax.Field, typeMap map[string]syntax.Type) {
+	if constraint == nil || concreteType == nil {
+		return
+	}
+	switch c := constraint.(type) {
+	case *syntax.Operation:
+		if c.Op == token.Tilde && c.Y == nil {
+			extractConstraintTypeParams(c.X, concreteType, tparams, typeMap)
+		}
+	case *syntax.SliceType:
+		if sl, ok := types.SafeUnderlying(concreteType).(*types.Slice); ok {
+			if name, ok2 := c.Elem.(*syntax.Name); ok2 {
+				for _, tp := range tparams {
+					if tp.Name != nil && tp.Name.Value == name.Value {
+						if _, already := typeMap[name.Value]; !already {
+							typeMap[name.Value] = sl.Elem()
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func inferTypeArgsFromFunc(fd *syntax.FuncDecl, args []SSAValue) (ts []syntax.Type) {
+	typeMap := map[string]syntax.Type{}
+	if fd.Type != nil {
+		for i, param := range fd.Type.ParamList {
+			if i >= len(args) || args[i] == nil || args[i].SSAType() == nil {
+				continue
+			}
+			matchTypeParam(param.Type, args[i].SSAType(), fd.TParamList, typeMap)
+		}
+	}
+	inferFromConstraints(fd.TParamList, typeMap)
+	var result []syntax.Type
+	for _, tp := range fd.TParamList {
+		if tp.Name != nil {
+			result = append(result, typeMap[tp.Name.Value])
+		}
+	}
+	return result
+}
+
+func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, baseName string, typeArgs []syntax.Type, args []SSAValue, targetPkg *SSAPackage, srcPkgPath string, hasDots bool) (s SSAValue) {
+	for _, ta := range typeArgs {
+		if ta == nil {
+			return nil
+		}
+	}
+	mangledName := mangleGenericName(baseName, typeArgs)
+	if fn, ok := targetPkg.Members[mangledName].(*SSAFunction); ok {
+		return fb.emitCallToSSAFunc(fn, args, hasDots)
+	}
+	typeSubst := map[string]syntax.Type{}
+	for i, tp := range fd.TParamList {
+		if tp.Name != nil && i < len(typeArgs) && typeArgs[i] != nil {
+			typeSubst[tp.Name.Value] = typeArgs[i]
+		}
+	}
+	var srcScope *types.Scope
+	if genericPkgScopes != nil {
+		if sc, ok := genericPkgScopes[srcPkgPath]; ok {
+			srcScope = sc
+		}
+	}
+	sig := resolveSignatureWithSubst(fd.Type, typeSubst, srcScope)
+	if sig == nil {
+		return nil
+	}
+	fn := &SSAFunction{
+		name:      mangledName,
+		Signature: sig,
+		Pkg:       targetPkg,
+		Prog:      fb.fn.Prog,
+	}
+	targetPkg.Members[mangledName] = fn
+	subFb := newSSAFuncBuilder(fn, fb.info)
+	subFb.typeSubst = typeSubst
+	subFb.srcScope = srcScope
+	subFb.buildBody(fd)
+	return fb.emitCallToSSAFunc(fn, args, hasDots)
+}
+
+func (fb *ssaFuncBuilder) emitCallToSSAFunc(fn *SSAFunction, args []SSAValue, hasDots bool) (s SSAValue) {
+	if fn.Signature != nil {
+		if fn.Signature.Variadic() && !hasDots {
+			args = fb.wrapVariadicArgs(args, fn.Signature)
+		}
+		args = fb.coerceArgsToInterface(args, fn.Signature)
+	}
+	var retType syntax.Type
+	if fn.Signature != nil && fn.Signature.Results() != nil {
+		if fn.Signature.Results().Len() == 1 {
+			retType = fn.Signature.Results().At(0).Type()
+		} else if fn.Signature.Results().Len() > 1 {
+			retType = fn.Signature.Results()
+		}
+	}
+	call := &SSACall{Call: SSACallCommon{Value: fn, Args: args}}
+	call.typ = retType
+	call.name = fb.nextName()
+	fb.emit(call)
+	if retType == nil {
+		return nil
+	}
+	return call
+}
+
+func (fb *ssaFuncBuilder) tryGenericLocalCall(funcName string, argList []syntax.Expr, hasDots bool) (s SSAValue) {
+	pkgPath := fb.fn.Pkg.Pkg.Path()
+	key := pkgPath + "." + funcName
+	fd, ok := genericFuncDecls[key]
+	if !ok && fb.srcScope != nil {
+		for gPkg, gScope := range genericPkgScopes {
+			if gScope == fb.srcScope {
+				key = gPkg + "." + funcName
+				fd, ok = genericFuncDecls[key]
+				if ok {
+					pkgPath = gPkg
+					break
+				}
+			}
+		}
+	}
+	if !ok {
+		return nil
+	}
+	args := fb.buildArgs(argList)
+	typeArgs := inferTypeArgsFromFunc(fd, args)
+	return fb.monomorphizeAndCall(fd, funcName, typeArgs, args, fb.fn.Pkg, pkgPath, hasDots)
+}
+
+func (fb *ssaFuncBuilder) tryGenericPkgCall(pn *types.PkgName, funcName string, argList []syntax.Expr, hasDots bool) (s SSAValue) {
+	imported := pn.Imported()
+	if imported == nil {
+		return nil
+	}
+	key := imported.Path() + "." + funcName
+	fd, ok := genericFuncDecls[key]
+	if !ok {
+		return nil
+	}
+	args := fb.buildArgs(argList)
+	typeArgs := inferTypeArgsFromFunc(fd, args)
+	return fb.monomorphizeAndCall(fd, funcName, typeArgs, args, fb.fn.Pkg, imported.Path(), hasDots)
+}
+
+func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList []syntax.Expr, hasDots bool) (s SSAValue) {
+	switch x := ie.X.(type) {
+	case *syntax.Name:
+		pkgPath := fb.fn.Pkg.Pkg.Path()
+		key := pkgPath + "." + x.Value
+		fd, ok := genericFuncDecls[key]
+		if !ok && fb.srcScope != nil {
+			for gPkg, gScope := range genericPkgScopes {
+				if gScope == fb.srcScope {
+					key = gPkg + "." + x.Value
+					fd, ok = genericFuncDecls[key]
+					if ok {
+						pkgPath = gPkg
+						break
+					}
+				}
+			}
+		}
+		if !ok {
+			return nil
+		}
+		typeArgs := fb.resolveExplicitTypeArgs(ie.Index, fd)
+		args := fb.buildArgs(argList)
+		return fb.monomorphizeAndCall(fd, x.Value, typeArgs, args, fb.fn.Pkg, pkgPath, hasDots)
+	case *syntax.SelectorExpr:
+		if pkgName, ok2 := x.X.(*syntax.Name); ok2 {
+			obj := fb.lookupObject(pkgName.Value)
+			if pn, ok3 := obj.(*types.PkgName); ok3 && pn.Imported() != nil {
+				key := pn.Imported().Path() + "." + x.Sel.Value
+				fd, ok4 := genericFuncDecls[key]
+				if !ok4 {
+					return nil
+				}
+				typeArgs := fb.resolveExplicitTypeArgs(ie.Index, fd)
+				args := fb.buildArgs(argList)
+				return fb.monomorphizeAndCall(fd, x.Sel.Value, typeArgs, args, fb.fn.Pkg, pn.Imported().Path(), hasDots)
+			}
+		}
+	}
+	return nil
+}
+
+func (fb *ssaFuncBuilder) resolveExplicitTypeArgs(indexExpr syntax.Expr, fd *syntax.FuncDecl) (ts []syntax.Type) {
+	var typeExprs []syntax.Expr
+	if le, ok := indexExpr.(*syntax.ListExpr); ok {
+		typeExprs = le.ElemList
+	} else {
+		typeExprs = []syntax.Expr{indexExpr}
+	}
+	var result []syntax.Type
+	for _, te := range typeExprs {
+		t := fb.resolveTypeAST(te)
+		result = append(result, t)
+	}
+	if len(result) < len(fd.TParamList) {
+		typeMap := map[string]syntax.Type{}
+		for i, tp := range fd.TParamList {
+			if tp.Name != nil && i < len(result) && result[i] != nil {
+				typeMap[tp.Name.Value] = result[i]
+			}
+		}
+		inferFromConstraints(fd.TParamList, typeMap)
+		result = nil
+		for _, tp := range fd.TParamList {
+			if tp.Name != nil {
+				result = append(result, typeMap[tp.Name.Value])
+			}
+		}
+	}
+	return result
+}
+
+func exprTypeName(e syntax.Expr) (s string) {
+	switch e := e.(type) {
+	case *syntax.Name:
+		return "Name(" | e.Value | ")"
+	case *syntax.BasicLit:
+		return "BasicLit"
+	case *syntax.SelectorExpr:
+		if x, ok := e.X.(*syntax.Name); ok {
+			return "Selector(" | x.Value | "." | e.Sel.Value | ")"
+		}
+		return "Selector"
+	case *syntax.CallExpr:
+		return "Call"
+	case *syntax.Operation:
+		return "Op"
+	}
+	return "unknown"
+}
