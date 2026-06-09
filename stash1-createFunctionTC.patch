@@ -1,0 +1,456 @@
+diff --git a/compiler/calls.go b/compiler/calls.go
+index df0cff15..ba847f71 100644
+--- a/compiler/calls.go
++++ b/compiler/calls.go
+@@ -79,6 +79,17 @@ func (b *builder) createCall(fnType llvm.Type, fn llvm.Value, args []llvm.Value,
+ 		fragments := b.expandFormalParam(arg)
+ 		expanded = append(expanded, fragments...)
+ 	}
++	// Coerce named↔anonymous struct mismatches (TC path may produce
++	// anonymous struct types where the callee expects named ones).
++	if paramTypes := fnType.ParamTypes(); len(paramTypes) == len(expanded) {
++		for i, pt := range paramTypes {
++			if expanded[i].Type() != pt &&
++				pt.TypeKind() == llvm.StructTypeKind &&
++				expanded[i].Type().TypeKind() == llvm.StructTypeKind {
++				expanded[i] = b.coerceStructType(expanded[i], pt)
++			}
++		}
++	}
+ 	call := b.CreateCall(fnType, fn, expanded, name)
+ 	if !fn.IsAFunction().IsNil() {
+ 		if cc := fn.FunctionCallConv(); cc != llvm.CCallConv {
+diff --git a/compiler/compiler.go b/compiler/compiler.go
+index f34d5cc8..41424880 100644
+--- a/compiler/compiler.go
++++ b/compiler/compiler.go
+@@ -1379,6 +1379,25 @@ func (b *builder) createFunctionStart(intrinsic bool) {
+ 		// because runtime.trackPointer is replaced by an alloca store.
+ 		b.stackChainAlloca = b.CreateAlloca(b.ctx.Int8Type(), "stackalloc")
+ 	}
++
++	// Bridge ssa locals → mxssa locals so getValueTC works for intrinsics
++	// and any other path that calls createFunctionStart directly.
++	if b.mxFn != nil {
++		for i, ssaParam := range b.fn.Params {
++			if i < len(b.mxFn.Params) {
++				if val, ok := b.locals[ssaParam]; ok {
++					b.mxLocals[b.mxFn.Params[i]] = val
++				}
++			}
++		}
++		for i, ssaFV := range b.fn.FreeVars {
++			if i < len(b.mxFn.FreeVars) {
++				if val, ok := b.locals[ssaFV]; ok {
++					b.mxLocals[b.mxFn.FreeVars[i]] = val
++				}
++			}
++		}
++	}
+ }
+ 
+ // createFunction builds the LLVM IR implementation for this function. The
+@@ -1492,27 +1511,17 @@ func (b *builder) createFunction() {
+ }
+ 
+ func (b *builder) createFunctionTC() {
++	if len(b.mxFn.Blocks) == 0 {
++		b.createFunction()
++		return
++	}
++	if mxFnHasInvalidTypes(b.mxFn) {
++		b.createFunction()
++		return
++	}
+ 	b.createFunctionStart(false)
+ 	b.checkMoxieRestrictions()
+ 
+-	// Bridge parameters: ssa locals → mxssa locals.
+-	if b.mxFn != nil {
+-		for i, ssaParam := range b.fn.Params {
+-			if i < len(b.mxFn.Params) {
+-				if val, ok := b.locals[ssaParam]; ok {
+-					b.mxLocals[b.mxFn.Params[i]] = val
+-				}
+-			}
+-		}
+-		for i, ssaFV := range b.fn.FreeVars {
+-			if i < len(b.mxFn.FreeVars) {
+-				if val, ok := b.locals[ssaFV]; ok {
+-					b.mxLocals[b.mxFn.FreeVars[i]] = val
+-				}
+-			}
+-		}
+-	}
+-
+ 	for _, block := range b.fn.DomPreorder() {
+ 		if b.DumpSSA {
+ 			fmt.Printf("%d: %s:\n", block.Index, block.Comment)
+@@ -1784,7 +1793,9 @@ func (b *builder) createInstructionTC(instr mxssa.Instruction) {
+ 		if len(instr.Results) == 0 {
+ 			b.CreateRetVoid()
+ 		} else if len(instr.Results) == 1 {
+-			b.CreateRet(b.getValueTC(instr.Results[0], instr.Pos()))
++			val := b.getValueTC(instr.Results[0], instr.Pos())
++			val = b.fixReturnType(val)
++			b.CreateRet(val)
+ 		} else {
+ 			retVal := llvm.ConstNull(b.llvmFn.GlobalValueType().ReturnType())
+ 			for i, result := range instr.Results {
+@@ -4938,9 +4949,8 @@ func (b *builder) createUnOpTC(unop *mxssa.UnOp) (llvm.Value, error) {
+ 		valueType := b.getLLVMTypeTC(unop.X.Type().Underlying().(*typecheck.Pointer).Elem())
+ 		if b.targetData.TypeAllocSize(valueType) == 0 {
+ 			return llvm.ConstNull(valueType), nil
+-		} else if strings.HasSuffix(unop.X.String(), "$funcaddr") {
+-			// CGo function pointer — Moxie has no CGo, so this is dead code.
+-			name := strings.TrimSuffix(unop.X.(*mxssa.Global).Name(), "$funcaddr")
++		} else if g, ok := unop.X.(*mxssa.Global); ok && strings.HasSuffix(g.Name(), "$funcaddr") {
++			name := strings.TrimSuffix(g.Name(), "$funcaddr")
+ 			pkg := b.mxFn.Pkg
+ 			fn := pkg.Members[name].(*mxssa.Function)
+ 			goFn := b.mxTranslator.ReverseFunction(fn)
+diff --git a/compiler/tccompat.go b/compiler/tccompat.go
+index 05724261..5c8988cc 100644
+--- a/compiler/tccompat.go
++++ b/compiler/tccompat.go
+@@ -122,16 +122,26 @@ func (c *compilerContext) getLLVMFunctionTypeTC(typ *typecheck.Signature) llvm.T
+ 
+ 	var paramTypes []llvm.Type
+ 	if recv := typ.Recv(); recv != nil {
+-		paramTypes = append(paramTypes, c.getLLVMTypeTC(recv.Type()))
++		recv := c.getLLVMTypeTC(recv.Type())
++		if recv.StructName() == "runtime._interface" {
++			recv = c.dataPtrType
++		}
++		for _, info := range c.expandFormalParamType(recv, "", nil) {
++			paramTypes = append(paramTypes, info.llvmType)
++		}
+ 	}
+ 	params := typ.Params()
+ 	if params != nil {
+ 		for i := 0; i < params.Len(); i++ {
+-			paramTypes = append(paramTypes, c.getLLVMTypeTC(params.At(i).Type()))
++			subType := c.getLLVMTypeTC(params.At(i).Type())
++			for _, info := range c.expandFormalParamType(subType, "", nil) {
++				paramTypes = append(paramTypes, info.llvmType)
++			}
+ 		}
+ 	}
++	paramTypes = append(paramTypes, c.dataPtrType) // context
+ 
+-	return llvm.FunctionType(returnType, paramTypes, typ.Variadic())
++	return llvm.FunctionType(returnType, paramTypes, false)
+ }
+ 
+ // isPointerTC checks whether a typecheck.Type is a pointer type.
+@@ -316,15 +326,31 @@ func (b *builder) getValueTC(expr mxssa.Value, pos token.Pos) llvm.Value {
+ 			}
+ 		}
+ 		return b.createConstTC(expr, pos)
++	case *mxssa.Function:
++		goFn := b.mxTranslator.ReverseFunction(expr)
++		if goFn == nil {
++			b.addError(expr.Pos(), "cannot reverse-bridge function: "+expr.Name())
++			return llvm.Undef(b.getLLVMTypeTC(expr.Type()))
++		}
++		if b.getFunctionInfo(goFn).exported {
++			b.addError(expr.Pos(), "cannot use an exported function as value: "+expr.String())
++			return llvm.Undef(b.getLLVMTypeTC(expr.Type()))
++		}
++		_, fn := b.getFunction(goFn)
++		return b.createFuncValue(fn, llvm.Undef(b.dataPtrType), goFn.Signature)
+ 	case *mxssa.Global:
+-		// Look up via the old path: find the corresponding ssa.Global and delegate.
+-		if b.fn != nil {
+-			for _, m := range b.fn.Package().Members {
+-				if g, ok := m.(*ssa.Global); ok && g.Name() == expr.Name() {
+-					value := b.getGlobal(g)
+-					if !value.IsNil() {
+-						return value
+-					}
++		pkgPath := ""
++		if expr.Package() != nil {
++			pkgPath = expr.Package().Pkg.Path()
++		}
++		for _, p := range b.fn.Prog.AllPackages() {
++			if pkgPath != "" && p.Pkg.Path() != pkgPath {
++				continue
++			}
++			if g, ok := p.Members[expr.Name()].(*ssa.Global); ok {
++				value := b.getGlobal(g)
++				if !value.IsNil() {
++					return value
+ 				}
+ 			}
+ 		}
+@@ -343,6 +369,9 @@ func (c *compilerContext) createConstTC(expr *mxssa.Const, pos token.Pos) llvm.V
+ 	switch typ := expr.Type().Underlying().(type) {
+ 	case *typecheck.Basic:
+ 		llvmType := c.getLLVMTypeTC(typ)
++		if expr.Value() == nil {
++			return llvm.ConstNull(llvmType)
++		}
+ 		if typ.Info()&typecheck.IsBoolean != 0 {
+ 			n := uint64(0)
+ 			if constant.BoolVal(expr.Value()) {
+@@ -390,6 +419,10 @@ func (c *compilerContext) createConstTC(expr *mxssa.Const, pos token.Pos) llvm.V
+ 		*typecheck.Pointer, *typecheck.Array, *typecheck.Slice,
+ 		*typecheck.Struct, *typecheck.Map:
+ 		if !expr.IsNil() {
++			switch typ.(type) {
++			case *typecheck.Struct, *typecheck.Array:
++				return llvm.ConstNull(c.getLLVMTypeTC(expr.Type()))
++			}
+ 			panic("tccompat: expected nil constant for " + typ.String())
+ 		}
+ 		if _, ok := typ.(*typecheck.Interface); ok {
+@@ -405,6 +438,76 @@ func (c *compilerContext) createConstTC(expr *mxssa.Const, pos token.Pos) llvm.V
+ 	}
+ }
+ 
++func isInvalidTC(t typecheck.Type) bool {
++	if t == nil {
++		return false
++	}
++	u := t.Underlying()
++	if b, ok := u.(*typecheck.Basic); ok && b.Kind() == typecheck.Invalid {
++		return true
++	}
++	return false
++}
++
++func mxFnHasInvalidTypes(fn *mxssa.Function) bool {
++	if fn.Signature != nil {
++		if fn.Signature.Params() != nil {
++			for i := 0; i < fn.Signature.Params().Len(); i++ {
++				if isInvalidTC(fn.Signature.Params().At(i).Type()) {
++					return true
++				}
++			}
++		}
++		if fn.Signature.Results() != nil {
++			for i := 0; i < fn.Signature.Results().Len(); i++ {
++				if isInvalidTC(fn.Signature.Results().At(i).Type()) {
++					return true
++				}
++			}
++		}
++	}
++	for _, b := range fn.Blocks {
++		for _, instr := range b.Instrs {
++			if v, ok := instr.(mxssa.Value); ok {
++				if isInvalidTC(v.Type()) {
++					return true
++				}
++			}
++			switch instr.(type) {
++			case *mxssa.Defer, *mxssa.Go:
++				return true
++			}
++		}
++	}
++	return false
++}
++
++// fixReturnType ensures a return value matches the function's declared return type.
++// TC path may produce anonymous struct types where the function expects named types.
++func (b *builder) fixReturnType(val llvm.Value) llvm.Value {
++	expected := b.llvmFn.GlobalValueType().ReturnType()
++	return b.coerceStructType(val, expected)
++}
++
++func (b *builder) coerceStructType(val llvm.Value, expected llvm.Type) llvm.Value {
++	got := val.Type()
++	if expected == got {
++		return val
++	}
++	if expected.TypeKind() == llvm.StructTypeKind && got.TypeKind() == llvm.StructTypeKind {
++		n := expected.StructElementTypesCount()
++		if n == got.StructElementTypesCount() {
++			result := llvm.ConstNull(expected)
++			for i := 0; i < n; i++ {
++				field := b.CreateExtractValue(val, i, "")
++				result = b.CreateInsertValue(result, field, i, "")
++			}
++			return result
++		}
++	}
++	return val
++}
++
+ // getPosTC extracts token.Pos from an mxssa value.
+ func getPosTC(v mxssa.Value) token.Pos {
+ 	if v == nil {
+diff --git a/jsruntime/dom.mjs b/jsruntime/dom.mjs
+index f1bbbcfd..e11389e8 100644
+--- a/jsruntime/dom.mjs
++++ b/jsruntime/dom.mjs
+@@ -870,21 +870,23 @@ export function OnPasteImage(elId, fn) {
+ export function OnDropImage(elId, fn) {
+   const el = _elements.get(elId);
+   if (!el) return;
+-  el.addEventListener('dragover', function(e) { e.preventDefault(); });
++  el.addEventListener('dragenter', function(e) { e.preventDefault(); e.stopPropagation(); });
++  el.addEventListener('dragover', function(e) { e.preventDefault(); e.stopPropagation(); });
+   el.addEventListener('drop', function(e) {
+     e.preventDefault();
++    e.stopPropagation();
+     const files = e.dataTransfer && e.dataTransfer.files;
+-    if (!files) return;
++    if (!files || files.length === 0) return;
+     for (let i = 0; i < files.length; i++) {
+-      if (files[i].type.indexOf('image/') === 0) {
+-        const mime = files[i].type;
+-        const reader = new FileReader();
+-        reader.onload = function() {
+-          const b64 = reader.result.split(',')[1] || '';
+-          fn(b64, mime);
+-        };
+-        reader.readAsDataURL(files[i]);
+-      }
++      const f = files[i];
++      const mime = f.type || 'application/octet-stream';
++      if (mime.indexOf('image/') !== 0) continue;
++      const reader = new FileReader();
++      reader.onload = function() {
++        const b64 = reader.result.split(',')[1] || '';
++        fn(b64, mime);
++      };
++      reader.readAsDataURL(f);
+     }
+   });
+ }
+diff --git a/ssabridge/ssabridge.go b/ssabridge/ssabridge.go
+index c6f30f73..8bdadfd5 100644
+--- a/ssabridge/ssabridge.go
++++ b/ssabridge/ssabridge.go
+@@ -104,6 +104,14 @@ func (t *Translator) typ(gt types.Type) typecheck.Type {
+ 	tc := tcbridge.TranslateType(t.imp, gt)
+ 	if tc != nil && gt != nil {
+ 		t.revTypes[tc] = gt
++		if u := tc.Underlying(); u != nil && u != tc {
++			if _, exists := t.revTypes[u]; !exists {
++				gu := gt.Underlying()
++				if gu != nil {
++					t.revTypes[u] = gu
++				}
++			}
++		}
+ 	}
+ 	return tc
+ }
+@@ -124,6 +132,16 @@ func (t *Translator) translateFunctionShell(f *ssa.Function, pkg *mxssa.Package)
+ 	}
+ 	fn := mxssa.NewFunction(f.Name(), sig, f.Synthetic, pkg, t.prog)
+ 	fn.SetPos(f.Pos())
++	for _, p := range f.Params {
++		mp := mxssa.NewParameter(p.Name(), t.typ(p.Type()), fn)
++		mp.SetPos(p.Pos())
++		fn.Params = append(fn.Params, mp)
++	}
++	for _, fv := range f.FreeVars {
++		mfv := mxssa.NewFreeVar(fv.Name(), t.typ(fv.Type()), fn)
++		mfv.SetPos(fv.Pos())
++		fn.FreeVars = append(fn.FreeVars, mfv)
++	}
+ 	t.funcs[f] = fn
+ 	t.revFuncs[fn] = f
+ 	return fn
+@@ -153,20 +171,6 @@ func (t *Translator) translateFunctionBody(sf *ssa.Function, mf *mxssa.Function)
+ 		return // external function, no body
+ 	}
+ 
+-	// Parameters.
+-	for _, p := range sf.Params {
+-		mp := mxssa.NewParameter(p.Name(), t.typ(p.Type()), mf)
+-		mp.SetPos(p.Pos())
+-		mf.Params = append(mf.Params, mp)
+-	}
+-
+-	// Free variables.
+-	for _, fv := range sf.FreeVars {
+-		mfv := mxssa.NewFreeVar(fv.Name(), t.typ(fv.Type()), mf)
+-		mfv.SetPos(fv.Pos())
+-		mf.FreeVars = append(mf.FreeVars, mfv)
+-	}
+-
+ 	// Create blocks first (instructions reference blocks by index).
+ 	blockMap := map[*ssa.BasicBlock]*mxssa.BasicBlock{}
+ 	for _, b := range sf.Blocks {
+@@ -206,14 +210,31 @@ func (t *Translator) translateFunctionBody(sf *ssa.Function, mf *mxssa.Function)
+ 		_ = g
+ 	}
+ 
+-	// Translate instructions.
+-	for _, b := range sf.Blocks {
++	// Translate instructions in dominator-tree preorder so that definitions
++	// are visited before their uses (SSA dominance property).
++	// Phi edges are deferred because they can reference values from predecessor
++	// blocks that aren't dominators (e.g. loop back-edges).
++	type deferredPhi struct {
++		phi   *mxssa.Phi
++		edges []ssa.Value
++	}
++	var deferred []deferredPhi
++	for _, b := range sf.DomPreorder() {
+ 		mb := blockMap[b]
+ 		for _, instr := range b.Instrs {
++			if phiInstr, ok := instr.(*ssa.Phi); ok {
++				edges := make([]mxssa.Value, len(phiInstr.Edges))
++				p := mxssa.NewPhi(t.typ(phiInstr.Type()), phiInstr.Comment, edges, mb)
++				p.SetPos(phiInstr.Pos())
++				p.SetName(phiInstr.Name())
++				mb.Instrs = append(mb.Instrs, p)
++				valMap[phiInstr] = p
++				deferred = append(deferred, deferredPhi{p, phiInstr.Edges})
++				continue
++			}
+ 			mi := t.translateInstruction(instr, mb, blockMap, valMap)
+ 			if mi != nil {
+ 				mb.Instrs = append(mb.Instrs, mi)
+-				// If the instruction defines a value, register it.
+ 				if v, ok := instr.(ssa.Value); ok {
+ 					if mv, ok := mi.(mxssa.Value); ok {
+ 						valMap[v] = mv
+@@ -222,6 +243,11 @@ func (t *Translator) translateFunctionBody(sf *ssa.Function, mf *mxssa.Function)
+ 			}
+ 		}
+ 	}
++	for _, dp := range deferred {
++		for j, e := range dp.edges {
++			dp.phi.Edges[j] = t.value(e, valMap)
++		}
++	}
+ 
+ 	// Anonymous functions.
+ 	for _, af := range sf.AnonFuncs {
+@@ -287,14 +313,7 @@ func (t *Translator) translateInstruction(
+ 		return a
+ 
+ 	case *ssa.Phi:
+-		edges := make([]mxssa.Value, len(i.Edges))
+-		for j, e := range i.Edges {
+-			edges[j] = v(e)
+-		}
+-		p := mxssa.NewPhi(t.typ(i.Type()), i.Comment, edges, mb)
+-		p.SetPos(i.Pos())
+-		p.SetName(i.Name())
+-		return p
++		return nil // handled in deferred pass
+ 
+ 	case *ssa.Call:
+ 		cc := t.translateCallCommon(&i.Call, valMap)
+diff --git a/typecheck/bridge/bridge.go b/typecheck/bridge/bridge.go
+index fa496ce0..c69d561e 100644
+--- a/typecheck/bridge/bridge.go
++++ b/typecheck/bridge/bridge.go
+@@ -228,6 +228,9 @@ func translateType(t types.Type, cache *typeCache, imp *Importer) typecheck.Type
+ 
+ 	case *types.Alias:
+ 		return translateType(types.Unalias(t), cache, imp)
++
++	case *types.Tuple:
++		return translateTuple(t, cache, imp)
+ 	}
+ 	return nil
+ }

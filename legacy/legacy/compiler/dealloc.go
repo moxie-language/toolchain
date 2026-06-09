@@ -2,7 +2,6 @@ package compiler
 
 import (
 	"go/types"
-	"strings"
 
 	"moxie/compiler/llvmutil"
 
@@ -15,18 +14,12 @@ import (
 // internal escape patterns (sync.Pool, interface boxing) that the shadow
 // list escape analysis cannot track.
 func (b *builder) usesDealloc() bool {
-	if b.GC != "dealloc" {
-		return false
-	}
-	if b.fn.Pkg == nil || b.fn.Pkg.Pkg == nil {
-		return false
-	}
-	pkg := b.fn.Pkg.Pkg.Path()
-	if pkg == "main" || pkg == "command-line-arguments" {
-		return true
-	}
-	// stdlib paths have no dot (fmt, os, net/http, internal/task, etc.)
-	return strings.Contains(pkg, ".")
+	// Legacy compiler dealloc is disabled: the function-level shadow list
+	// lacks proper escape tracking. The stage4 compiler uses scope-based
+	// dealloc instead. The runtime's free() and scope functions still work;
+	// only the legacy compiler's auto-generated deallocPush/deallocFree
+	// calls are suppressed.
+	return false
 }
 
 // deallocPushAlloc emits a runtime.deallocPush call to register a heap
