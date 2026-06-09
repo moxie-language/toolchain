@@ -3555,6 +3555,50 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		fb.currentBlock.Instrs = append(fb.currentBlock.Instrs, extract)
 		return extract
 	}
+	if imported.Path() == "unsafe" && funcName == "Add" {
+		if len(argList) != 2 {
+			return nil
+		}
+		ptr := fb.buildExpr(argList[0])
+		offset := fb.buildExpr(argList[1])
+		idx := &SSAIndexAddr{X: ptr, Index: offset}
+		idx.typ = NewPointer(Typ[Uint8])
+		idx.name = fb.nextName()
+		idx.setBlock(fb.currentBlock)
+		fb.currentBlock.Instrs = append(fb.currentBlock.Instrs, idx)
+		return idx
+	}
+	if imported.Path() == "unsafe" && funcName == "Sizeof" {
+		sz := int64(8)
+		if len(argList) == 1 {
+			arg := fb.buildExpr(argList[0])
+			if arg != nil && arg.SSAType() != nil {
+				u := safeUnderlying(arg.SSAType())
+				if b, ok := u.(*Basic); ok {
+					switch b.Kind() {
+					case Bool, Int8, Uint8:
+						sz = 1
+					case Int16, Uint16:
+						sz = 2
+					case Int32, Uint32, Float32:
+						sz = 4
+					case Int64, Uint64, Float64, UnsafePointer:
+						sz = 8
+					}
+				}
+				if _, ok := u.(*Pointer); ok {
+					sz = 8
+				}
+			}
+		}
+		return NewSSAConst(constInt{sz}, Typ[Int64])
+	}
+	if imported.Path() == "unsafe" && funcName == "Alignof" {
+		return NewSSAConst(constInt{8}, Typ[Int64])
+	}
+	if imported.Path() == "unsafe" && funcName == "Offsetof" {
+		return NewSSAConst(constInt{0}, Typ[Int64])
+	}
 	if result := fb.tryGenericPkgCall(pn, funcName, argList, hasDots); result != nil {
 		return result
 	}
