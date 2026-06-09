@@ -54,14 +54,13 @@ var parseErrors []string
 var compileErrors []string
 var genericFuncDecls map[string]*syntax.FuncDecl
 var genericPkgScopes map[string]*Scope
+var compilePkgDir string
 
 type embedInfo struct {
 	path     string
 	elemType string
 }
-
 var embedVars map[string]*embedInfo
-var compilePkgDir string
 
 type irEmitter struct {
 	buf        []byte
@@ -821,6 +820,9 @@ func (e *irEmitter) emit() (s string) {
 			if decl == "" {
 				continue
 			}
+			if e.isPkgFunc2(k) {
+				continue
+			}
 			e.w("declare ")
 			e.w(decl)
 			e.w("\n")
@@ -1028,6 +1030,23 @@ func (e *irEmitter) globalName(g *SSAGlobal) (s string) {
 	return irGlobalSymbol(pkg, g.name)
 }
 
+func (e *irEmitter) isPkgFunc2(name string) (ok bool) {
+	for _, m := range e.pkg.Members {
+		if f, ok := m.(*SSAFunction); ok {
+			sym := e.funcSymbol(f)
+			if len(sym) > 2 && sym[0] == '@' && sym[1] == '"' {
+				sym = sym[2 : len(sym)-1]
+			} else if len(sym) > 1 && sym[0] == '@' {
+				sym = sym[1:]
+			}
+			if sym == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func irNeedsQuote(s string) (ok bool) {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -1095,6 +1114,10 @@ func (e *irEmitter) emitAnonFuncs(f *SSAFunction) {
 func (e *irEmitter) emitLibMain() {
 	pkgPath := e.pkg.Pkg.Path()
 	if pkgPath == "main" {
+		e.w("\ndefine void @runtime.callMain(ptr %context) {\n")
+		e.w("  call void @main.main(ptr null)\n")
+		e.w("  ret void\n")
+		e.w("}\n")
 		return
 	}
 	hasMain := false
@@ -1114,6 +1137,11 @@ func (e *irEmitter) emitLibMain() {
 
 func (e *irEmitter) emitFunction(f *SSAFunction) {
 	e.w("; [emit] " | f.name | "\n")
+	sym := e.funcSymbol(f)
+	if len(sym) > 5 && (hasPrefix(sym, "@llvm.") || hasPrefix(sym, "@\"llvm.")) {
+		e.emitFuncDecl(f)
+		return
+	}
 	if len(f.Blocks) == 0 {
 		e.emitFuncDecl(f)
 		return
@@ -1596,33 +1624,34 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 	}
 	if isDoublePtr && elemType == "ptr" {
 		e.allocTypes[a] = elemType
-	} else if elemType == "void" || (elemType == "ptr" && nilElem) {
+	} else if elemType == "void" {
 		inferred := e.inferAllocTypeFromStores(a)
-		if inferred != "ptr" || elemType == "void" {
+		elemType = inferred
+		e.allocTypes[a] = elemType
+	} else if elemType == "ptr" && nilElem {
+		inferred := e.inferAllocTypeFromStores(a)
+		if inferred != "ptr" && (len(inferred) == 0 || inferred[0] != '{') {
 			elemType = inferred
 		}
 		e.allocTypes[a] = elemType
 	} else {
-		override := e.inferAllocTypeFromStores(a)
-		if override != "ptr" && override != elemType {
-			bothScalar := len(elemType) > 0 && elemType[0] == 'i' && len(override) > 0 && override[0] == 'i'
-			isFloatToInt := (elemType == "double" || elemType == "float") && len(override) > 0 && override[0] == 'i'
-			isScalarToAgg := len(elemType) > 0 && (elemType[0] == 'i' || elemType == "double" || elemType == "float") && len(override) > 0 && override[0] == '{'
-			isAggToScalar := len(elemType) > 0 && elemType[0] == '{' && len(override) > 0 && (override[0] == 'i' || override == "double" || override == "float")
-			if !bothScalar && !isFloatToInt && !isScalarToAgg && !isAggToScalar {
-				elemType = override
-				e.allocTypes[a] = elemType
-			}
-		}
-		if elemType == "i32" && override == "ptr" {
-			usage := e.inferAllocTypeFromUsage(a)
-			if usage != "ptr" && usage != "i32" {
-				elemType = usage
-				e.allocTypes[a] = elemType
+		isSimple := elemType == "i1" || elemType == "i8" || elemType == "i16" || elemType == "i32" || elemType == "i64" || elemType == "float" || elemType == "double" || elemType == "ptr"
+		if !isSimple {
+			override := e.inferAllocTypeFromStores(a)
+			if override != "ptr" && override != elemType {
+				bothScalar := len(elemType) > 0 && elemType[0] == 'i' && len(override) > 0 && override[0] == 'i'
+				isFloatToInt := (elemType == "double" || elemType == "float") && len(override) > 0 && override[0] == 'i'
+				isScalarToAgg := len(elemType) > 0 && (elemType[0] == 'i' || elemType == "double" || elemType == "float") && len(override) > 0 && override[0] == '{'
+				isAggToScalar := len(elemType) > 0 && elemType[0] == '{' && len(override) > 0 && (override[0] == 'i' || override == "double" || override == "float")
+				if !bothScalar && !isFloatToInt && !isScalarToAgg && !isAggToScalar {
+					elemType = override
+					e.allocTypes[a] = elemType
+				}
 			}
 		}
 	}
-	if !isDoublePtr {
+	isSimple2 := elemType == "i1" || elemType == "i8" || elemType == "i16" || elemType == "i32" || elemType == "i64" || elemType == "float" || elemType == "double" || elemType == "ptr"
+	if !isDoublePtr && !isSimple2 {
 		if faType := e.inferAllocTypeFromFieldAddrs(a, elemType); faType != "" {
 			retType := e.inferAllocTypeFromReturn(a)
 			callType := e.inferAllocTypeFromCallArgs(a)
