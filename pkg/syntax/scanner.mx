@@ -3,7 +3,6 @@ package syntax
 import (
 	"io"
 	"git.smesh.lol/moxie/pkg/token"
-	"unicode"
 	"unicode/utf8"
 )
 
@@ -12,13 +11,20 @@ const (
 	directives
 )
 
-var sharedUtab *unicode.Tables
+const maxRune = 0x10FFFF
 
-func getSharedUtab() (p *unicode.Tables) {
-	if sharedUtab == nil {
-		sharedUtab = unicode.NewTables()
+func isLetter(ch rune) bool {
+	if ch < 0x80 {
+		return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_'
 	}
-	return sharedUtab
+	return ch >= 0xC0
+}
+
+func isDigit(ch rune) bool {
+	if ch < 0x80 {
+		return ch >= '0' && ch <= '9'
+	}
+	return false
 }
 
 
@@ -38,14 +44,12 @@ type Scanner struct {
 
 	keywordMap   [1 << 6]token.Token
 	keywordsReady bool
-	utab *unicode.Tables
 }
 
 func (s *Scanner) Init(src io.Reader, errh func(line, col uint32, msg string), mode uint32) {
 	s.Source.init(src, errh)
 	s.mode = mode
 	s.nlsemi = false
-	s.utab = getSharedUtab()
 	s.initKeywords()
 }
 
@@ -53,7 +57,6 @@ func (s *Scanner) InitBytes(src []byte, errh func(line, col uint32, msg string),
 	s.Source.initBytes(src, errh)
 	s.mode = 0
 	s.nlsemi = false
-	s.utab = getSharedUtab()
 	s.initKeywords()
 }
 
@@ -413,8 +416,8 @@ func tokStrFast(tok token.Token) (s string) {
 
 func (s *Scanner) AtIdentChar(first bool) (ok bool) {
 	switch {
-	case s.utab.IsLetter(s.ch) || s.ch == '_':
-	case s.utab.IsDigit(s.ch):
+	case isLetter(s.ch) || s.ch == '_':
+	case isDigit(s.ch):
 		if first {
 			s.Errorf("identifier cannot begin with digit " | fmtRuneU(s.ch))
 		}
@@ -816,10 +819,10 @@ func (s *Scanner) escape(quote rune) (ok bool) {
 		n, base, max = 2, 16, 255
 	case 'u':
 		s.nextch()
-		n, base, max = 4, 16, unicode.MaxRune
+		n, base, max = 4, 16, maxRune
 	case 'U':
 		s.nextch()
-		n, base, max = 8, 16, unicode.MaxRune
+		n, base, max = 8, 16, maxRune
 	default:
 		if s.ch < 0 {
 			return true
