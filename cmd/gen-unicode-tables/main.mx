@@ -1,0 +1,193 @@
+package main
+
+import (
+	"os"
+	"unicode"
+	"unsafe"
+)
+
+func writeLE16(fd int32, v uint16) {
+	var buf [2]byte
+	buf[0] = byte(v)
+	buf[1] = byte(v >> 8)
+	os.Write(fd, buf[:])
+}
+
+func writeLE32(fd int32, v uint32) {
+	var buf [4]byte
+	buf[0] = byte(v)
+	buf[1] = byte(v >> 8)
+	buf[2] = byte(v >> 16)
+	buf[3] = byte(v >> 24)
+	os.Write(fd, buf[:])
+}
+
+func writeRange16(fd int32, ranges []unicode.Range16) {
+	for _, r := range ranges {
+		writeLE16(fd, r.Lo)
+		writeLE16(fd, r.Hi)
+		writeLE16(fd, r.Stride)
+	}
+}
+
+func writeRange32(fd int32, ranges []unicode.Range32) {
+	for _, r := range ranges {
+		writeLE32(fd, r.Lo)
+		writeLE32(fd, r.Hi)
+		writeLE32(fd, r.Stride)
+	}
+}
+
+func writeRangeTable(dir string, name string, t *unicode.RangeTable) {
+	if t == nil {
+		return
+	}
+	r16path := dir | "/" | name | "_r16.bin"
+	r32path := dir | "/" | name | "_r32.bin"
+
+	fd16 := os.Create(r16path)
+	if fd16 < 0 {
+		println("error creating " | r16path)
+		return
+	}
+	writeRange16(fd16, t.R16)
+	os.Close(fd16)
+
+	fd32 := os.Create(r32path)
+	if fd32 < 0 {
+		println("error creating " | r32path)
+		return
+	}
+	writeRange32(fd32, t.R32)
+	os.Close(fd32)
+
+	println("  " | name | " r16=" | itoa(len(t.R16)) | " r32=" | itoa(len(t.R32)) | " latin=" | itoa(int32(t.LatinOffset)))
+}
+
+func itoa(n int32) string {
+	if n == 0 {
+		return "0"
+	}
+	buf := []byte{:0:20}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	for n > 0 {
+		buf = append(buf, byte('0'+n%10))
+		n /= 10
+	}
+	if neg {
+		buf = append(buf, '-')
+	}
+	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
+
+func writeCaseRanges(path string, ranges []unicode.CaseRange) {
+	fd := os.Create(path)
+	if fd < 0 {
+		println("error creating " | path)
+		return
+	}
+	for _, cr := range ranges {
+		writeLE32(fd, cr.Lo)
+		writeLE32(fd, cr.Hi)
+		writeLE32(fd, uint32(cr.Delta[0]))
+		writeLE32(fd, uint32(cr.Delta[1]))
+		writeLE32(fd, uint32(cr.Delta[2]))
+	}
+	os.Close(fd)
+	println("  CaseRanges: " | itoa(len(ranges)) | " entries")
+}
+
+func writeAsciiFold(path string, fold [128]uint16) {
+	fd := os.Create(path)
+	if fd < 0 {
+		return
+	}
+	for i := 0; i < 128; i++ {
+		writeLE16(fd, fold[i])
+	}
+	os.Close(fd)
+}
+
+func writeProperties(path string, props [256]uint8) {
+	fd := os.Create(path)
+	if fd < 0 {
+		return
+	}
+	os.Write(fd, props[:])
+	os.Close(fd)
+}
+
+func writeFoldPairs(path string, pairs []unicode.foldPair) {
+	fd := os.Create(path)
+	if fd < 0 {
+		return
+	}
+	for _, fp := range pairs {
+		writeLE32(fd, uint32(fp.from))
+		writeLE32(fd, uint32(fp.to))
+	}
+	os.Close(fd)
+	println("  foldPairs: " | itoa(len(pairs)) | " entries")
+}
+
+func main() {
+	t := unicode.NewTables()
+
+	catDir := "src/unicode/data/cat"
+	os.MkdirAll(catDir, 0755)
+
+	println("Categories:")
+	writeRangeTable(catDir, "C", unicode.C())
+	writeRangeTable(catDir, "Cc", unicode.Cc())
+	writeRangeTable(catDir, "Cf", unicode.Cf())
+	writeRangeTable(catDir, "Cn", unicode.Cn())
+	writeRangeTable(catDir, "Co", unicode.Co())
+	writeRangeTable(catDir, "Cs", unicode.Cs())
+	writeRangeTable(catDir, "L", unicode.L())
+	writeRangeTable(catDir, "LC", unicode.LC())
+	writeRangeTable(catDir, "Ll", unicode.Ll())
+	writeRangeTable(catDir, "Lm", unicode.Lm())
+	writeRangeTable(catDir, "Lo", unicode.Lo())
+	writeRangeTable(catDir, "Lt", unicode.Lt())
+	writeRangeTable(catDir, "Lu", unicode.Lu())
+	writeRangeTable(catDir, "M", unicode.M())
+	writeRangeTable(catDir, "Mc", unicode.Mc())
+	writeRangeTable(catDir, "Me", unicode.Me())
+	writeRangeTable(catDir, "Mn", unicode.Mn())
+	writeRangeTable(catDir, "N", unicode.N())
+	writeRangeTable(catDir, "Nd", unicode.Nd())
+	writeRangeTable(catDir, "Nl", unicode.Nl())
+	writeRangeTable(catDir, "No", unicode.No())
+	writeRangeTable(catDir, "P", unicode.P())
+	writeRangeTable(catDir, "Pc", unicode.Pc())
+	writeRangeTable(catDir, "Pd", unicode.Pd())
+	writeRangeTable(catDir, "Pe", unicode.Pe())
+	writeRangeTable(catDir, "Pf", unicode.Pf())
+	writeRangeTable(catDir, "Pi", unicode.Pi())
+	writeRangeTable(catDir, "Po", unicode.Po())
+	writeRangeTable(catDir, "Ps", unicode.Ps())
+	writeRangeTable(catDir, "S", unicode.S())
+	writeRangeTable(catDir, "Sc", unicode.Sc())
+	writeRangeTable(catDir, "Sk", unicode.Sk())
+	writeRangeTable(catDir, "Sm", unicode.Sm())
+	writeRangeTable(catDir, "So", unicode.So())
+	writeRangeTable(catDir, "Z", unicode.Z())
+	writeRangeTable(catDir, "Zl", unicode.Zl())
+	writeRangeTable(catDir, "Zp", unicode.Zp())
+	writeRangeTable(catDir, "Zs", unicode.Zs())
+	writeRangeTable(catDir, "White_Space", unicode.Space())
+
+	caseDir := "src/unicode/data/case"
+	os.MkdirAll(caseDir, 0755)
+	println("Case data:")
+	// TODO: writeCaseRanges, writeAsciiFold, writeProperties, writeFoldPairs
+	// These need access to internal Tables fields
+
+	println("Done.")
+}
