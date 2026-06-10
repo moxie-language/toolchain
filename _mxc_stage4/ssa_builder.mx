@@ -19,15 +19,33 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 
 	pb := &ssaPkgBuilder{pkg: p, info: info, prog: prog}
 
+	// Imports are file-scoped: each file gets a scope (parent = pkg scope)
+	// holding its own PkgName bindings, so two files can bind the same
+	// local name to different packages. The driver concatenates all package
+	// files into one syntax.File with a hoisted+deduped import block, so the
+	// per-file association comes from concatImportSegs (per-file import
+	// specs + concat start line), and decls map to their file's scope by
+	// position.
+	pb.fileScopes = map[*syntax.File]*Scope{}
+	pb.varInitScopes = map[*syntax.VarDecl]*Scope{}
 	for _, f := range files {
+		pb.fileScopes[f] = NewScope(pkg.Scope())
+	}
+	pb.buildImportSegScopes()
+
+	for _, f := range files {
+		pb.curFileScope = pb.fileScopes[f]
 		pb.registerImportsAndTypes(f)
 	}
 	for _, f := range files {
+		pb.curFileScope = pb.fileScopes[f]
 		pb.registerFile(f)
 	}
 	for _, f := range files {
+		pb.curFileScope = pb.fileScopes[f]
 		pb.buildFile(f)
 	}
+	pb.curFileScope = nil
 	if len(pb.varInits) > 0 {
 		pb.buildVarInits()
 	}
@@ -36,14 +54,118 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 
 // ssaPkgBuilder builds one SSAPackage.
 type ssaPkgBuilder struct {
-	pkg      *SSAPackage
-	info     *Info
-	prog     *SSAProgram
-	varInits []*syntax.VarDecl
+	pkg           *SSAPackage
+	info          *Info
+	prog          *SSAProgram
+	varInits      []*syntax.VarDecl
+	fileScopes    map[*syntax.File]*Scope
+	curFileScope  *Scope
+	varInitScopes map[*syntax.VarDecl]*Scope
+	segScopes     []segScope
+}
+
+// segScope is one source file's import scope in the concatenated package
+// stream, keyed by the concat line its body starts at.
+type segScope struct {
+	outStart int32
+	scope    *Scope
+}
+
+// buildImportSegScopes turns the driver's per-file import segments into
+// scopes holding each file's PkgName bindings.
+func (pb *ssaPkgBuilder) buildImportSegScopes() {
+	pb.segScopes = nil
+	for si := 0; si < len(concatImportSegs); si++ {
+		seg := concatImportSegs[si]
+		sc := NewScope(pb.pkg.Pkg.Scope())
+		for _, spec := range seg.specs {
+			path := extractQuoted(spec)
+			if path == "" {
+				continue
+			}
+			alias := importSpecAlias(spec)
+			if alias == "." || alias == "_" {
+				continue
+			}
+			target := pb.resolveImportTarget(path)
+			if target == nil {
+				continue
+			}
+			localName := alias
+			if localName == "" {
+				localName = target.Name()
+			}
+			if localName == "" {
+				for i := len(path) - 1; i >= 0; i-- {
+					if path[i] == '/' {
+						localName = path[i+1:]
+						break
+					}
+				}
+				if localName == "" {
+					localName = path
+				}
+			}
+			sc.Insert(NewPkgName(nil, localName, target))
+		}
+		pb.segScopes = append(pb.segScopes, segScope{outStart: seg.outStart, scope: sc})
+	}
+}
+
+// importSpecAlias returns the local alias of a raw import spec line
+// (`alias "path"`), or "" when the spec has no alias.
+func importSpecAlias(spec string) (s string) {
+	for i := int32(0); i < int32(len(spec)); i++ {
+		if spec[i] == '"' {
+			return trimSpace(spec[:i])
+		}
+	}
+	return ""
+}
+
+func (pb *ssaPkgBuilder) resolveImportTarget(path string) (t *TCPackage) {
+	impPkg := pb.prog.ImportedPackage(path)
+	if impPkg != nil && impPkg.Pkg != nil {
+		return impPkg.Pkg
+	}
+	ensureImportRegistry()
+	return importRegistry[path]
+}
+
+// declScope returns the import scope of the source file a decl came from.
+// Decls before the first segment (the hoisted import block) get nil.
+func (pb *ssaPkgBuilder) declScope(d syntax.Decl) (sc *Scope) {
+	if len(pb.segScopes) == 0 {
+		return pb.curFileScope
+	}
+	// Pos() lives on the embedded node base; interface dispatch does not
+	// cover embedded-base methods of another package's types, so switch on
+	// the concrete decl types.
+	line := int32(0)
+	switch dd := d.(type) {
+	case *syntax.ImportDecl:
+		line = int32(dd.Pos().Line())
+	case *syntax.ConstDecl:
+		line = int32(dd.Pos().Line())
+	case *syntax.TypeDecl:
+		line = int32(dd.Pos().Line())
+	case *syntax.VarDecl:
+		line = int32(dd.Pos().Line())
+	case *syntax.FuncDecl:
+		line = int32(dd.Pos().Line())
+	}
+	var best *Scope
+	for i := 0; i < len(pb.segScopes); i++ {
+		if pb.segScopes[i].outStart <= line {
+			best = pb.segScopes[i].scope
+		}
+	}
+	return best
 }
 
 func (pb *ssaPkgBuilder) registerImportsAndTypes(f *syntax.File) {
 	for _, d := range f.DeclList {
+		pb.curFileScope = pb.declScope(d)
 		switch d := d.(type) {
 		case *syntax.ImportDecl:
 			pb.registerImport(d)
@@ -55,6 +177,7 @@ func (pb *ssaPkgBuilder) registerImportsAndTypes(f *syntax.File) {
 
 func (pb *ssaPkgBuilder) registerFile(f *syntax.File) {
 	for _, d := range f.DeclList {
+		pb.curFileScope = pb.declScope(d)
 		switch d := d.(type) {
 		case *syntax.FuncDecl:
 			pb.registerFunc(d)
@@ -78,14 +201,7 @@ func (pb *ssaPkgBuilder) registerImport(d *syntax.ImportDecl) {
 	if d.LocalPkgName != nil {
 		localName = d.LocalPkgName.Value
 	}
-	var target *TCPackage
-	impPkg := pb.prog.ImportedPackage(path)
-	if impPkg != nil && impPkg.Pkg != nil {
-		target = impPkg.Pkg
-	} else {
-		ensureImportRegistry()
-		target = importRegistry[path]
-	}
+	target := pb.resolveImportTarget(path)
 	if target == nil {
 		return
 	}
@@ -108,11 +224,27 @@ func (pb *ssaPkgBuilder) registerImport(d *syntax.ImportDecl) {
 	if localName == "." || localName == "_" {
 		return
 	}
-	existing := pb.pkg.Pkg.Scope().Lookup(localName)
-	if existing != nil {
-		return
+	// Track all direct imports regardless of local-name collisions.
+	tcp := pb.pkg.Pkg
+	found := false
+	for _, ip := range tcp.imports {
+		if ip == target {
+			found = true
+			break
+		}
+	}
+	if !found {
+		tcp.imports = append(tcp.imports, target)
 	}
 	pn := NewPkgName(nil, localName, target)
+	// File scope binding wins over a same-named import in another file.
+	if pb.curFileScope != nil {
+		pb.curFileScope.Insert(pn)
+	}
+	// Legacy fallback for lookup paths without file context: first-wins.
+	if existing := pb.pkg.Pkg.Scope().Lookup(localName); existing != nil {
+		return
+	}
 	pb.pkg.Pkg.Scope().Insert(pn)
 }
 
@@ -457,6 +589,7 @@ func (pb *ssaPkgBuilder) registerVar(d *syntax.VarDecl) {
 	}
 	if d.Values != nil {
 		pb.varInits = append(pb.varInits, d)
+		pb.varInitScopes[d] = pb.curFileScope
 	}
 }
 
@@ -500,6 +633,7 @@ func (pb *ssaPkgBuilder) registerConst(d *syntax.ConstDecl) {
 func (pb *ssaPkgBuilder) buildFile(f *syntax.File) {
 	for _, d := range f.DeclList {
 		if fd, ok := d.(*syntax.FuncDecl); ok {
+			pb.curFileScope = pb.declScope(d)
 			pb.buildFunc(fd)
 		}
 	}
@@ -536,6 +670,7 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 			if d.Values == nil {
 				continue
 			}
+			fb.fileScope = pb.varInitScopes[d]
 			rhs := fb.buildExpr(d.Values)
 			if rhs == nil {
 				continue
@@ -568,6 +703,7 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 		if d.Values == nil {
 			continue
 		}
+		fb.fileScope = pb.varInitScopes[d]
 		rhs := fb.buildExpr(d.Values)
 		if rhs == nil {
 			continue
@@ -601,6 +737,7 @@ func (pb *ssaPkgBuilder) buildFunc(d *syntax.FuncDecl) {
 		return
 	}
 	fb := newSSAFuncBuilder(fn, pb.info)
+	fb.fileScope = pb.curFileScope
 	fb.buildBody(d)
 }
 
@@ -625,6 +762,7 @@ type ssaFuncBuilder struct {
 	deferred     int32
 	typeSubst    map[string]Type
 	srcScope     *Scope
+	fileScope    *Scope // imports of the file declaring this function
 	decl         *syntax.FuncDecl
 	scopeID      int32
 	nextScopeID  int32
@@ -2409,6 +2547,14 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 				if base == nil {
 					return nil
 				}
+				// &s.field[i] where field is a slice: base is a pointer to
+				// the slice header; load the header so IndexAddr indexes the
+				// slice's data pointer, not the header itself.
+				if pt, okp := safeUnderlying(base.SSAType()).(*Pointer); okp && pt.Elem() != nil {
+					if _, isSl := safeUnderlying(pt.Elem()).(*Slice); isSl {
+						base = fb.emitLoad(base, pt.Elem())
+					}
+				}
 				ia := &SSAIndexAddr{X: base, Index: idx}
 				ia.typ = NewPointer(ssaElemType(base.SSAType()))
 				ia.name = fb.nextName()
@@ -3595,6 +3741,7 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *syntax.FuncLit) (s SSAValue) {
 	// their parent, or calls to source-package functions silently vanish.
 	ab.typeSubst = fb.typeSubst
 	ab.srcScope = fb.srcScope
+	ab.fileScope = fb.fileScope
 	d := &syntax.FuncDecl{
 		Name: &syntax.Name{Value: name},
 		Type: e.Type,
@@ -3907,6 +4054,11 @@ func (fb *ssaFuncBuilder) lookupObject(name string) (o Object) {
 	}
 	if fb.srcScope != nil {
 		if _, obj := fb.srcScope.LookupParent(name); obj != nil {
+			return obj
+		}
+	}
+	if fb.fileScope != nil {
+		if _, obj := fb.fileScope.LookupParent(name); obj != nil {
 			return obj
 		}
 	}
@@ -4893,6 +5045,13 @@ func matchTypeParam(paramType syntax.Expr, argType Type, tparams []*syntax.Field
 		}
 	case *syntax.DotsType:
 		matchTypeParam(pt.Elem, argType, tparams, typeMap)
+	case *syntax.Operation:
+		// pointer param AST: *T is Operation{Op: Mul, Y: nil}
+		if pt.Y == nil && pt.Op == token.Mul {
+			if p, ok := safeUnderlying(argType).(*Pointer); ok {
+				matchTypeParam(pt.X, p.Elem(), tparams, typeMap)
+			}
+		}
 	case *syntax.SliceType:
 		if sl, ok := safeUnderlying(argType).(*Slice); ok {
 			matchTypeParam(pt.Elem, sl.Elem(), tparams, typeMap)

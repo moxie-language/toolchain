@@ -932,7 +932,8 @@ func extractImports(data []byte) (ss []string) {
 				imports = appendUniq(imports, imp)
 			}
 		}
-		if hasPrefix(line, "import \"") {
+		// single-line import, plain or aliased: import "p" / import x "p"
+		if hasPrefix(line, "import ") {
 			imp := extractQuoted(line[7:])
 			if imp != "" {
 				imports = appendUniq(imports, imp)
@@ -955,6 +956,18 @@ func extractQuoted(s string) (sv string) {
 	}
 	return ""
 }
+
+// importSeg records one source file's import specs and the concat line its
+// body starts at. The SSA builder uses this to give each file its own
+// pkg-name scope: two files may bind the same local name to different
+// packages, and the hoisted+deduped import block in the concat destroys
+// that association.
+type importSeg struct {
+	outStart int32
+	specs    []string // raw specs as written: `"path"` or `alias "path"`
+}
+
+var concatImportSegs []importSeg
 
 type srcSpan struct {
 	file      string
@@ -983,6 +996,7 @@ func concatSources(dir string, files []string) (buf []byte) {
 	var bodies [][]byte
 	var bodyFiles []string
 	var bodyStartLines []int32
+	var bodyImports [][]string
 	pkgName := ""
 	for _, f := range files {
 		data, ok := readFile(joinPath(dir, f))
@@ -994,6 +1008,7 @@ func concatSources(dir string, files []string) (buf []byte) {
 		}
 		lines := splitLines(string(data))
 		var body []string
+		var fimps []string
 		i := int32(0)
 		firstBodyLine := int32(0)
 		for i < int32(len(lines)) {
@@ -1012,6 +1027,7 @@ func concatSources(dir string, files []string) (buf []byte) {
 					}
 					if imp != "" {
 						imports[imp] = true
+						fimps = append(fimps, imp)
 					}
 				}
 				continue
@@ -1019,6 +1035,7 @@ func concatSources(dir string, files []string) (buf []byte) {
 			if hasPrefix(line, "import ") && !hasPrefix(line, "import (") {
 				imp := line[7:]
 				imports[imp] = true
+				fimps = append(fimps, imp)
 				i++
 				continue
 			}
@@ -1031,6 +1048,7 @@ func concatSources(dir string, files []string) (buf []byte) {
 		bodies = append(bodies, []byte(joinStrings(body, "\n")))
 		bodyFiles = append(bodyFiles, f)
 		bodyStartLines = append(bodyStartLines, firstBodyLine)
+		bodyImports = append(bodyImports, fimps)
 	}
 	var out []byte
 	out = append(out, ("package " | pkgName | "\n")...)
@@ -1053,6 +1071,7 @@ func concatSources(dir string, files []string) (buf []byte) {
 		out = append(out, ")\n"...)
 	}
 	concatSourceMap = nil
+	concatImportSegs = nil
 	outLine := int32(1)
 	for j := int32(0); j < int32(len(out)); j++ {
 		if out[j] == '\n' {
@@ -1064,6 +1083,10 @@ func concatSources(dir string, files []string) (buf []byte) {
 			file:     bodyFiles[i],
 			outStart: outLine,
 			srcLine:  bodyStartLines[i],
+		})
+		concatImportSegs = append(concatImportSegs, importSeg{
+			outStart: outLine,
+			specs:    bodyImports[i],
 		})
 		for j := int32(0); j < int32(len(b)); j++ {
 			if b[j] == '\n' {
@@ -2604,6 +2627,7 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 	var bodies [][]byte
 	var bodyFiles []string
 	var bodyStartLines []int32
+	var bodyImports [][]string
 	pkgName := "main"
 
 	allFiles := []string{:0:len(files) + 1}
@@ -2627,6 +2651,7 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 		}
 		lines := splitLines(string(data))
 		var body []string
+		var fimps []string
 		i := int32(0)
 		firstBodyLine := int32(0)
 		for i < int32(len(lines)) {
@@ -2645,6 +2670,7 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 					}
 					if imp != "" {
 						imports[imp] = true
+						fimps = append(fimps, imp)
 					}
 				}
 				continue
@@ -2652,6 +2678,7 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 			if hasPrefix(line, "import ") && !hasPrefix(line, "import (") {
 				imp := line[7:]
 				imports[imp] = true
+				fimps = append(fimps, imp)
 				i++
 				continue
 			}
@@ -2664,12 +2691,14 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 		bodies = append(bodies, []byte(joinStrings(body, "\n")))
 		bodyFiles = append(bodyFiles, f)
 		bodyStartLines = append(bodyStartLines, firstBodyLine)
+		bodyImports = append(bodyImports, fimps)
 	}
 
 	tmData, tmOk := readFile(testMainFile)
 	if tmOk {
 		lines := splitLines(string(tmData))
 		var body []string
+		var fimps []string
 		i := int32(0)
 		firstBodyLine := int32(0)
 		for i < int32(len(lines)) {
@@ -2688,6 +2717,7 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 					}
 					if imp != "" {
 						imports[imp] = true
+						fimps = append(fimps, imp)
 					}
 				}
 				continue
@@ -2695,6 +2725,7 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 			if hasPrefix(line, "import ") && !hasPrefix(line, "import (") {
 				imp := line[7:]
 				imports[imp] = true
+				fimps = append(fimps, imp)
 				i++
 				continue
 			}
@@ -2707,6 +2738,7 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 		bodies = append(bodies, []byte(joinStrings(body, "\n")))
 		bodyFiles = append(bodyFiles, "_testmain.mx")
 		bodyStartLines = append(bodyStartLines, firstBodyLine)
+		bodyImports = append(bodyImports, fimps)
 	}
 
 	var out []byte
@@ -2730,6 +2762,7 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 		out = append(out, ")\n"...)
 	}
 	concatSourceMap = nil
+	concatImportSegs = nil
 	outLine := int32(1)
 	for j := int32(0); j < int32(len(out)); j++ {
 		if out[j] == '\n' {
@@ -2741,6 +2774,10 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 			file:     bodyFiles[i],
 			outStart: outLine,
 			srcLine:  bodyStartLines[i],
+		})
+		concatImportSegs = append(concatImportSegs, importSeg{
+			outStart: outLine,
+			specs:    bodyImports[i],
 		})
 		for j := int32(0); j < int32(len(b)); j++ {
 			if b[j] == '\n' {
