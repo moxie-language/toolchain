@@ -8,6 +8,12 @@ import (
 //export mxc_run
 func cRun(argv unsafe.Pointer, argc int32) (n int32)
 
+//export mxc_run_async
+func cRunAsync(argv unsafe.Pointer, argc int32) (n int32)
+
+//export mxc_wait_any
+func cWaitAny() (n int32)
+
 //export mxc_getenv
 func cGetenv(name unsafe.Pointer, nameLen int32, buf unsafe.Pointer, bufCap int32) (n int32)
 
@@ -119,6 +125,68 @@ func run(args []string) (n int32) {
 		argv[i] = unsafe.Pointer(unsafe.SliceData(b))
 	}
 	return cRun(unsafe.Pointer(unsafe.SliceData(argv)), int32(len(args)))
+}
+
+// runAsync forks+execs args without waiting. Returns child pid, or -1 on
+// fork failure. The forked child copies the argv buffers, so parent-side
+// lifetimes end at return.
+func runAsync(args []string) (pid int32) {
+	argv := []unsafe.Pointer{:len(args) + 1}
+	cstrs := [][]byte{:len(args)}
+	for i, a := range args {
+		b := []byte{:len(a) + 1}
+		copy(b, a)
+		b[len(a)] = 0
+		cstrs[i] = b
+		argv[i] = unsafe.Pointer(unsafe.SliceData(b))
+	}
+	return cRunAsync(unsafe.Pointer(unsafe.SliceData(argv)), int32(len(args)))
+}
+
+// runPool runs cmds with at most jobs concurrent children. Returns false if
+// any command exits nonzero (remaining in-flight children are drained, no
+// new ones are dispatched).
+func runPool(cmds [][]string, jobs int32) (ok bool) {
+	if jobs < 1 {
+		jobs = 1
+	}
+	next := int32(0)
+	running := int32(0)
+	failed := false
+	for {
+		for !failed && running < jobs && next < int32(len(cmds)) {
+			pid := runAsync(cmds[next])
+			if pid < 0 {
+				failed = true
+				break
+			}
+			running++
+			next++
+		}
+		if running == 0 {
+			break
+		}
+		r := cWaitAny()
+		if r == -1 {
+			return false
+		}
+		running--
+		if r < 0 {
+			failed = true
+		}
+	}
+	return !failed
+}
+
+func parseInt32(s string) (n int32) {
+	v := int32(0)
+	for i := int32(0); i < int32(len(s)); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0
+		}
+		v = v*10 + int32(s[i]-'0')
+	}
+	return v
 }
 
 func splitLines(s string) (ss []string) {
@@ -1187,6 +1255,14 @@ func hasImport(data []byte, pkg string) (ok bool) {
 	return false
 }
 
+// quietDiscover suppresses per-file discovery chatter. Set by build-pkg
+// workers, which re-run discovery the orchestrator already printed.
+var quietDiscover bool
+
+// buildJobs is the max number of concurrent child processes (workers and
+// clang) used by build/test. Set by the -j flag; 1 forces the serial path.
+var buildJobs = int32(4)
+
 type pkgInfo struct {
 	path    string
 	name    string
@@ -1286,7 +1362,9 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		}
 		bc := hasBuildConstraint(data, forbidden)
 		if bc {
-			writeStr(2, "    skip-constraint: " | f | "\n")
+			if !quietDiscover {
+				writeStr(2, "    skip-constraint: " | f | "\n")
+			}
 			continue
 		}
 		fileImps := extractImports(data)
@@ -1298,10 +1376,14 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 			}
 		}
 		if skipFile != "" {
-			writeStr(2, "    skip-import(" | skipFile | "): " | f | "\n")
+			if !quietDiscover {
+				writeStr(2, "    skip-import(" | skipFile | "): " | f | "\n")
+			}
 			continue
 		}
-		writeStr(2, "    include: " | f | "\n")
+		if !quietDiscover {
+			writeStr(2, "    include: " | f | "\n")
+		}
 		files = append(files, f)
 	}
 	if len(files) == 0 {
@@ -1321,14 +1403,16 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 			allImports = appendUniq(allImports, imp)
 		}
 	}
-	writeStr(2, "  discover " | pkgPath | " [")
-	for fi, ff := range files {
-		if fi > 0 {
-			writeStr(2, ", ")
+	if !quietDiscover {
+		writeStr(2, "  discover " | pkgPath | " [")
+		for fi, ff := range files {
+			if fi > 0 {
+				writeStr(2, ", ")
+			}
+			writeStr(2, ff)
 		}
-		writeStr(2, ff)
+		writeStr(2, "]\n")
 	}
-	writeStr(2, "]\n")
 	version := ""
 	if isRemotePath(pkgPath) && globalModDir != "" {
 		_, reqs, _ := parseModRequires(globalModDir)
@@ -2553,8 +2637,22 @@ func cmdTest(args []string) {
 	if _, rsk := readFile(rtShims); rsk {
 		objList = append(objList, compileToObj(rtShims))
 	}
-	for _, bf := range allBcFiles {
-		objList = append(objList, compileToObj(bf))
+	if buildJobs > 1 {
+		var objCmds [][]string
+		for _, bf := range allBcFiles {
+			objCmds = append(objCmds, []string{clang, "--target=" | triple,
+				"-c", "-O0", bf, "-o", bf | ".o"})
+		}
+		if !runPool(objCmds, buildJobs) {
+			fatal("clang -c failed")
+		}
+		for _, bf := range allBcFiles {
+			objList = append(objList, bf|".o")
+		}
+	} else {
+		for _, bf := range allBcFiles {
+			objList = append(objList, compileToObj(bf))
+		}
 	}
 	objList = append(objList, compileToObj(initAllBc))
 	if !hasRuntimePkg {
@@ -2845,6 +2943,14 @@ func main() {
 		cmdBuildRuntime()
 		return
 	}
+	if cmd == "build-pkg" {
+		// Internal worker mode used by the parallel build orchestrator.
+		if len(args) < 3 {
+			fatal("usage: mxc build-pkg <pkg>")
+		}
+		cmdBuildPkg(args[2])
+		return
+	}
 	if cmd != "build" {
 		writeStr(2, "usage: mxc <build|test|version|cache|fetch|update|build-runtime> ...\n")
 		os.Exit(1)
@@ -2865,10 +2971,20 @@ func main() {
 		} else if args[i] == "-a" {
 			forceRebuild = true
 			i++
+		} else if args[i] == "-j" && i+1 < int32(len(args)) {
+			buildJobs = parseInt32(args[i+1])
+			if buildJobs < 1 {
+				buildJobs = 1
+			}
+			i += 2
 		} else {
 			pkgPath = args[i]
 			i++
 		}
+	}
+	if printIR {
+		// -print-ir needs the in-process compile path.
+		buildJobs = 1
 	}
 	if pkgPath == "" {
 		fatal("no package specified")
@@ -2903,121 +3019,15 @@ func main() {
 
 	cacheBase := pkgCacheDir()
 	var allBcFiles []string
-	hasRuntimePkg := false
-
-	for _, pkg := range pkgs {
-		if pkg.path == "runtime" {
-			hasRuntimePkg = true
-		}
-		compilePath := pkg.path
-		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
-			compilePath = pkg.name
-		}
-		hash := pkgCacheKey(pkg.dir, pkg.files)
-		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
-		_, mxhOk := readFile(cachedMxh)
-		if mxhOk && !forceRebuild {
-			loadMxh(cachedMxh)
-			src := concatSources(pkg.dir, pkg.files)
-			ScanGenericDecls(src, compilePath)
-			src = nil
-		} else {
-			src := concatSources(pkg.dir, pkg.files)
-			TypeCheckOnly(src, compilePath)
-			src = nil
-		}
-	}
-
-	for _, pkg := range pkgs {
-		compilePath := pkg.path
-		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
-			compilePath = pkg.name
-		}
-
-		hash := pkgCacheKey(pkg.dir, pkg.files)
-		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
-		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
-
-		_, bcOk := readFile(cached)
-		_, mxhOk := readFile(cachedMxh)
-		if bcOk && mxhOk && !forceRebuild {
-			writeStr(2, "  cached " | pkg.path)
-			if pkg.version != "" {
-				writeStr(2, " @ " | pkg.version)
-			}
-			writeStr(2, "\n")
-			loadMxh(cachedMxh)
-			allBcFiles = append(allBcFiles, cached)
-			for _, cf := range pkg.cfiles {
-				cPath := joinPath(pkg.dir, cf)
-				cbcFile := joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
-				rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
-				if rc == 0 {
-					allBcFiles = append(allBcFiles, cbcFile)
-				}
-			}
-			for _, bf := range pkg.bcfiles {
-				allBcFiles = append(allBcFiles, joinPath(pkg.dir, bf))
-			}
-			continue
-		}
-
-		if isStdlib(pkg.path) && bcOk && !forceRebuild {
-			writeStr(2, "  cached " | pkg.path | "\n")
-			src := concatSources(pkg.dir, pkg.files)
-			TypeCheckOnly(src, compilePath)
-			src = nil
-			regPkg := importRegistry[compilePath]
-			if regPkg != nil {
-				cacheDir := joinPath(cacheBase, safeName(pkg.path))
-				mkdirAll(cacheDir, 0755)
-				mxhData := generateMxh(regPkg)
-				writeFile(cachedMxh, []byte(mxhData), 0644)
-			}
-			allBcFiles = append(allBcFiles, cached)
-			continue
-		}
-
-		writeStr(2, "  compile " | pkg.path | "\n")
-		src := concatSources(pkg.dir, pkg.files)
-		ir := compileSource(src, compilePath, triple, pkg.dir)
-		src = nil
-		if printIR {
-			writeStr(1, ir)
-		}
-		llFile := joinPath(tmpdir, safeName(pkg.path) | ".ll")
-		writeFile(llFile, []byte(ir), 0644)
-		ir = ""
-		bcFile := joinPath(tmpdir, safeName(pkg.path) | ".bc")
-		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
-		if rc != 0 {
-			fatal("clang failed for " | pkg.path)
-		}
-		cacheDir := joinPath(cacheBase, safeName(pkg.path))
-		mkdirAll(cacheDir, 0755)
-		data, rok := readFile(bcFile)
-		if rok {
-			writeFile(cached, data, 0644)
-		}
-		data = nil
-		regPkg := importRegistry[compilePath]
-		if regPkg != nil {
-			mxhData := generateMxh(regPkg)
-			writeFile(cachedMxh, []byte(mxhData), 0644)
-		}
-		allBcFiles = append(allBcFiles, bcFile)
-		for _, cf := range pkg.cfiles {
-			cPath := joinPath(pkg.dir, cf)
-			cbcFile := joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
-			rc = run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
-			if rc != 0 {
-				fatal("clang failed for " | cf)
-			}
-			allBcFiles = append(allBcFiles, cbcFile)
-		}
-		for _, bf := range pkg.bcfiles {
-			allBcFiles = append(allBcFiles, joinPath(pkg.dir, bf))
-		}
+	var hasRuntimePkg bool
+	if buildJobs > 1 {
+		a, h := buildPkgsParallel(pkgs, triple, clang, tmpdir, cacheBase, forceRebuild, buildJobs)
+		allBcFiles = a
+		hasRuntimePkg = h
+	} else {
+		a, h := buildPkgsSerial(pkgs, triple, clang, tmpdir, cacheBase, forceRebuild, printIR)
+		allBcFiles = a
+		hasRuntimePkg = h
 	}
 
 	loadSysroot(joinPath(root, "_sysroot.env"))
@@ -3100,8 +3110,22 @@ func main() {
 	if _, rsk := readFile(rtShims); rsk {
 		objList = append(objList, compileToObj(rtShims))
 	}
-	for _, bf := range allBcFiles {
-		objList = append(objList, compileToObj(bf))
+	if buildJobs > 1 {
+		var objCmds [][]string
+		for _, bf := range allBcFiles {
+			objCmds = append(objCmds, []string{clang, "--target=" | triple,
+				"-c", "-O0", bf, "-o", bf | ".o"})
+		}
+		if !runPool(objCmds, buildJobs) {
+			fatal("clang -c failed")
+		}
+		for _, bf := range allBcFiles {
+			objList = append(objList, bf|".o")
+		}
+	} else {
+		for _, bf := range allBcFiles {
+			objList = append(objList, compileToObj(bf))
+		}
 	}
 	objList = append(objList, compileToObj(initAllBc))
 	if !hasRuntimePkg {
@@ -3142,6 +3166,369 @@ func main() {
 		fatal("linker failed")
 	}
 	writeStr(2, "  -> " | outpath | "\n")
+}
+
+// buildPkgsSerial is the original in-process build path: typecheck/load all
+// packages in dependency order, then compile each uncached package in this
+// process. Used for -j 1 and -print-ir.
+func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, forceRebuild, printIR bool) (bcs []string, hasRT bool) {
+	for _, pkg := range pkgs {
+		if pkg.path == "runtime" {
+			hasRT = true
+		}
+		compilePath := pkg.path
+		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+			compilePath = pkg.name
+		}
+		hash := pkgCacheKey(pkg.dir, pkg.files)
+		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+		_, mxhOk := readFile(cachedMxh)
+		if mxhOk && !forceRebuild {
+			loadMxh(cachedMxh)
+			src := concatSources(pkg.dir, pkg.files)
+			ScanGenericDecls(src, compilePath)
+			src = nil
+		} else {
+			src := concatSources(pkg.dir, pkg.files)
+			TypeCheckOnly(src, compilePath)
+			src = nil
+		}
+	}
+
+	for _, pkg := range pkgs {
+		compilePath := pkg.path
+		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+			compilePath = pkg.name
+		}
+
+		hash := pkgCacheKey(pkg.dir, pkg.files)
+		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
+		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+
+		_, bcOk := readFile(cached)
+		_, mxhOk := readFile(cachedMxh)
+		if bcOk && mxhOk && !forceRebuild {
+			writeStr(2, "  cached " | pkg.path)
+			if pkg.version != "" {
+				writeStr(2, " @ " | pkg.version)
+			}
+			writeStr(2, "\n")
+			loadMxh(cachedMxh)
+			bcs = append(bcs, cached)
+			for _, cf := range pkg.cfiles {
+				cPath := joinPath(pkg.dir, cf)
+				cbcFile := joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
+				rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+				if rc == 0 {
+					bcs = append(bcs, cbcFile)
+				}
+			}
+			for _, bf := range pkg.bcfiles {
+				bcs = append(bcs, joinPath(pkg.dir, bf))
+			}
+			continue
+		}
+
+		if isStdlib(pkg.path) && bcOk && !forceRebuild {
+			writeStr(2, "  cached " | pkg.path | "\n")
+			src := concatSources(pkg.dir, pkg.files)
+			TypeCheckOnly(src, compilePath)
+			src = nil
+			regPkg := importRegistry[compilePath]
+			if regPkg != nil {
+				cacheDir := joinPath(cacheBase, safeName(pkg.path))
+				mkdirAll(cacheDir, 0755)
+				mxhData := generateMxh(regPkg)
+				writeFile(cachedMxh, []byte(mxhData), 0644)
+			}
+			bcs = append(bcs, cached)
+			continue
+		}
+
+		writeStr(2, "  compile " | pkg.path | "\n")
+		src := concatSources(pkg.dir, pkg.files)
+		ir := compileSource(src, compilePath, triple, pkg.dir)
+		src = nil
+		if printIR {
+			writeStr(1, ir)
+		}
+		llFile := joinPath(tmpdir, safeName(pkg.path) | ".ll")
+		writeFile(llFile, []byte(ir), 0644)
+		ir = ""
+		bcFile := joinPath(tmpdir, safeName(pkg.path) | ".bc")
+		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
+		if rc != 0 {
+			fatal("clang failed for " | pkg.path)
+		}
+		cacheDir := joinPath(cacheBase, safeName(pkg.path))
+		mkdirAll(cacheDir, 0755)
+		data, rok := readFile(bcFile)
+		if rok {
+			writeFile(cached, data, 0644)
+		}
+		data = nil
+		regPkg := importRegistry[compilePath]
+		if regPkg != nil {
+			mxhData := generateMxh(regPkg)
+			writeFile(cachedMxh, []byte(mxhData), 0644)
+		}
+		bcs = append(bcs, bcFile)
+		for _, cf := range pkg.cfiles {
+			cPath := joinPath(pkg.dir, cf)
+			cbcFile := joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
+			rc = run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+			if rc != 0 {
+				fatal("clang failed for " | cf)
+			}
+			bcs = append(bcs, cbcFile)
+		}
+		for _, bf := range pkg.bcfiles {
+			bcs = append(bcs, joinPath(pkg.dir, bf))
+		}
+	}
+	return bcs, hasRT
+}
+
+type buildJob struct {
+	pid int32
+	idx int32
+}
+
+// buildPkgsParallel is the orchestrator: it walks the dependency graph and
+// fans package compiles out to up to jobs concurrent worker processes
+// (this same binary, invoked as `build-pkg <path>`). A package is dispatched
+// only once every direct dependency is done, so workers always find fresh
+// .mxh headers for their imports in the cache. The orchestrator itself never
+// compiles - it only schedules, reaps, and assembles the .bc list.
+func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, forceRebuild bool, jobs int32) (bcs []string, hasRT bool) {
+	n := int32(len(pkgs))
+	done := []bool{:n}
+	needBuild := []bool{:n}
+	idxByPath := map[string]int32{}
+	for i := int32(0); i < n; i++ {
+		idxByPath[pkgs[i].path] = i
+	}
+	for i := int32(0); i < n; i++ {
+		pkg := pkgs[i]
+		hash := pkgCacheKey(pkg.dir, pkg.files)
+		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
+		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+		_, bcOk := readFile(cached)
+		_, mxhOk := readFile(cachedMxh)
+		if bcOk && mxhOk && !forceRebuild {
+			done[i] = true
+			writeStr(2, "  cached " | pkg.path)
+			if pkg.version != "" {
+				writeStr(2, " @ " | pkg.version)
+			}
+			writeStr(2, "\n")
+		} else {
+			needBuild[i] = true
+		}
+	}
+
+	var running []buildJob
+	failed := false
+	for {
+		if !failed {
+			for int32(len(running)) < jobs {
+				di := int32(-1)
+				for i := int32(0); i < n && di < 0; i++ {
+					if done[i] || !needBuild[i] {
+						continue
+					}
+					inFlight := false
+					for ri := int32(0); ri < int32(len(running)); ri++ {
+						if running[ri].idx == i {
+							inFlight = true
+						}
+					}
+					if inFlight {
+						continue
+					}
+					ready := true
+					for _, imp := range pkgs[i].imports {
+						if j, ok := idxByPath[imp]; ok && !done[j] {
+							ready = false
+							break
+						}
+					}
+					if ready {
+						di = i
+					}
+				}
+				if di < 0 {
+					break
+				}
+				pid := runAsync([]string{"/proc/self/exe", "build-pkg", pkgs[di].path})
+				if pid < 0 {
+					fatal("fork failed dispatching " | pkgs[di].path)
+				}
+				running = append(running, buildJob{pid: pid, idx: di})
+			}
+		}
+		if len(running) == 0 {
+			break
+		}
+		r := cWaitAny()
+		if r == -1 {
+			fatal("wait failed")
+		}
+		pid := r
+		jfail := false
+		if r < 0 {
+			pid = -r
+			jfail = true
+		}
+		idx := int32(-1)
+		for ri := int32(0); ri < int32(len(running)); ri++ {
+			if running[ri].pid == pid {
+				idx = running[ri].idx
+				running[ri] = running[int32(len(running))-1]
+				running = running[:len(running)-1]
+				break
+			}
+		}
+		if idx < 0 {
+			continue
+		}
+		if jfail {
+			writeStr(2, "  FAILED " | pkgs[idx].path | "\n")
+			failed = true
+		} else {
+			done[idx] = true
+		}
+	}
+	if failed {
+		fatal("build failed")
+	}
+	for i := int32(0); i < n; i++ {
+		if needBuild[i] && !done[i] {
+			fatal("dependency cycle: cannot schedule " | pkgs[i].path)
+		}
+	}
+	for i := int32(0); i < n; i++ {
+		pkg := pkgs[i]
+		if pkg.path == "runtime" {
+			hasRT = true
+		}
+		if needBuild[i] {
+			// Worker wrote tmpdir .bc plus per-cfile .bc files.
+			bcs = append(bcs, joinPath(tmpdir, safeName(pkg.path) | ".bc"))
+			for _, cf := range pkg.cfiles {
+				bcs = append(bcs, joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc"))
+			}
+		} else {
+			hash := pkgCacheKey(pkg.dir, pkg.files)
+			bcs = append(bcs, cachedBcPath(cacheBase, pkg.path, hash, pkg.version))
+			for _, cf := range pkg.cfiles {
+				cPath := joinPath(pkg.dir, cf)
+				cbcFile := joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
+				rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+				if rc == 0 {
+					bcs = append(bcs, cbcFile)
+				}
+			}
+		}
+		for _, bf := range pkg.bcfiles {
+			bcs = append(bcs, joinPath(pkg.dir, bf))
+		}
+	}
+	return bcs, hasRT
+}
+
+// cmdBuildPkg compiles exactly one package in a fresh process. All
+// dependencies must already have .mxh headers in the cache (the orchestrator
+// guarantees this by dispatching in dependency order). This mirrors the
+// incremental-build path: deps load via loadMxh + ScanGenericDecls, only the
+// target package is compiled.
+func cmdBuildPkg(pkgPath string) {
+	root := getenv("MOXIEROOT")
+	if root == "" {
+		root = "."
+	}
+	triple := "x86_64-unknown-linux-musleabihf"
+	clang := "clang-21"
+
+	if hasPrefix(pkgPath, "./") || hasPrefix(pkgPath, "../") || pkgPath == "." || hasPrefix(pkgPath, "/") {
+		absDir := pkgPath
+		if absDir == "." {
+			absDir = ""
+		}
+		globalModPrefix, globalModDir = findModuleRoot(absDir)
+	}
+
+	quietDiscover = true
+	registerBuiltins()
+	pkgs := resolveAll(pkgPath, root)
+	if len(pkgs) == 0 {
+		fatal("build-pkg: cannot resolve " | pkgPath)
+	}
+	pkg := pkgs[len(pkgs)-1]
+	if pkg.path != pkgPath {
+		fatal("build-pkg: resolution mismatch: got " | pkg.path | " want " | pkgPath)
+	}
+
+	tmpdir := "/tmp/mxc-build"
+	mkdirAll(tmpdir, 0755)
+	cacheBase := pkgCacheDir()
+
+	for pi := int32(0); pi < int32(len(pkgs))-1; pi++ {
+		dp := pkgs[pi]
+		compilePath := dp.path
+		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+			compilePath = dp.name
+		}
+		hash := pkgCacheKey(dp.dir, dp.files)
+		cachedMxh := cachedMxhPath(cacheBase, dp.path, hash, dp.version)
+		if !loadMxh(cachedMxh) {
+			fatal("build-pkg: missing dep header for " | dp.path | " (" | cachedMxh | ")")
+		}
+		src := concatSources(dp.dir, dp.files)
+		ScanGenericDecls(src, compilePath)
+		src = nil
+	}
+
+	compilePath := pkg.path
+	if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		compilePath = pkg.name
+	}
+	hash := pkgCacheKey(pkg.dir, pkg.files)
+	cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
+	cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+
+	writeStr(2, "  compile " | pkg.path | "\n")
+	src := concatSources(pkg.dir, pkg.files)
+	ir := compileSource(src, compilePath, triple, pkg.dir)
+	src = nil
+	llFile := joinPath(tmpdir, safeName(pkg.path) | ".ll")
+	writeFile(llFile, []byte(ir), 0644)
+	ir = ""
+	bcFile := joinPath(tmpdir, safeName(pkg.path) | ".bc")
+	rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
+	if rc != 0 {
+		fatal("clang failed for " | pkg.path)
+	}
+	cacheDir := joinPath(cacheBase, safeName(pkg.path))
+	mkdirAll(cacheDir, 0755)
+	data, rok := readFile(bcFile)
+	if rok {
+		writeFile(cached, data, 0644)
+	}
+	data = nil
+	regPkg := importRegistry[compilePath]
+	if regPkg != nil {
+		mxhData := generateMxh(regPkg)
+		writeFile(cachedMxh, []byte(mxhData), 0644)
+	}
+	for _, cf := range pkg.cfiles {
+		cPath := joinPath(pkg.dir, cf)
+		cbcFile := joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
+		rc = run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+		if rc != 0 {
+			fatal("clang failed for " | cf)
+		}
+	}
 }
 
 func cmdBuildRuntime() {

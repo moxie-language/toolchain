@@ -95,6 +95,30 @@ int32_t mxc_run(const char** argv, int32_t argc) {
     return -1;
 }
 
+int32_t mxc_run_async(const char** argv, int32_t argc) {
+    int pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        char** args = (char**)malloc((argc + 1) * sizeof(char*));
+        if (!args) _exit(127);
+        int i;
+        for (i = 0; i < argc; i++) args[i] = (char*)argv[i];
+        args[i] = NULL;
+        execvp(args[0], args);
+        _exit(127);
+    }
+    return pid;
+}
+
+/* Reap any child. Returns pid on exit 0, -pid on failure, -1 if no children. */
+int32_t mxc_wait_any(void) {
+    int status;
+    int pid = waitpid(-1, &status, 0);
+    if (pid < 0) return -1;
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) return pid;
+    return -pid;
+}
+
 struct linux_dirent64 {
     uint64_t d_ino;
     int64_t  d_off;
