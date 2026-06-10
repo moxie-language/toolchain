@@ -594,6 +594,18 @@ func gitURLToModPath(url string) (s string) {
 	return host | "/" | rest
 }
 
+func currentBranch(dest string) (s string) {
+	data, ok := readFile(joinPath(dest, ".git/HEAD"))
+	if !ok {
+		return ""
+	}
+	line := trimSpace(string(data))
+	if !hasPrefix(line, "ref: refs/heads/") {
+		return ""
+	}
+	return line[len("ref: refs/heads/"):]
+}
+
 func cmdFetch(url string) {
 	mpath := getMoxiePath()
 	mkdirAll(mpath, 0755)
@@ -610,7 +622,17 @@ func cmdFetch(url string) {
 			writeStr(2, modPath | ": fetch\n")
 			run([]string{"git", "-C", dest, "remote", "set-url", "origin", url})
 			run([]string{"git", "-C", dest, "fetch", "origin"})
-			run([]string{"git", "-C", dest, "reset", "--hard", "origin/HEAD"})
+			// older clones lack the origin/HEAD symbolic ref; resolve it
+			// from the remote before resetting to it
+			run([]string{"git", "-C", dest, "remote", "set-head", "origin", "-a"})
+			if run([]string{"git", "-C", dest, "reset", "--hard", "origin/HEAD"}) != 0 {
+				// server advertises no HEAD (default branch unset);
+				// fall back to the upstream of the current branch
+				br := currentBranch(dest)
+				if br != "" {
+					run([]string{"git", "-C", dest, "reset", "--hard", "origin/" | br})
+				}
+			}
 		} else {
 			writeStr(2, modPath | ": clone\n")
 			mkdirAll(pathDir(dest), 0755)
