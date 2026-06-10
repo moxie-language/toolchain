@@ -53,6 +53,12 @@ func lHasPrefix(s, prefix []byte) (ok bool) {
 var parseErrors []string
 var compileErrors []string
 var genericFuncDecls map[string]*syntax.FuncDecl
+
+// Non-generic top-level funcs of generic-bearing packages: a monomorphized
+// body may call package-local helpers that exist only in that package's
+// compiled object as unexported symbols, so they must be instantiated into
+// the calling module too.
+var genericPkgLocalDecls map[string]*syntax.FuncDecl
 var genericPkgScopes map[string]*Scope
 var compilePkgDir string
 
@@ -511,7 +517,16 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 	hasRecv := fn.Signature != nil && fn.Signature.Recv() != nil
 	if hasRecv {
 		if params != "" { params = params | ", " }
-		params = params | "ptr"
+		// Value receivers are passed by value (mirrors emitFunction's
+		// definition convention); only pointer receivers are ptr.
+		rt := "ptr"
+		if _, isP := safeUnderlying(fn.Signature.Recv().Type()).(*Pointer); !isP {
+			rt = e.llvmType(fn.Signature.Recv().Type())
+			if rt == "" || rt == "void" {
+				rt = "ptr"
+			}
+		}
+		params = params | rt
 	}
 	if fn.Signature != nil && fn.Signature.Params() != nil {
 		for i := 0; i < fn.Signature.Params().Len(); i++ {
@@ -937,18 +952,25 @@ func (e *irEmitter) emitGlobal(g *SSAGlobal) {
 func (e *irEmitter) emitEmbedGlobal(g *SSAGlobal, name string, ei *embedInfo) {
 	data, ok := readFile(ei.path)
 	if !ok {
-		e.w("; embed: file not found: " | ei.path | "\n")
+		// Fail loud: a zeroinitializer embed global is a nil slice at runtime
+		// and SIGSEGVs far from the cause.
+		compileErrors = append(compileErrors, "embed: file not found: "|ei.path)
 		e.w(name | " = global {ptr, i64, i64} zeroinitializer\n")
 		return
 	}
 	elemSize := e.embedElemSize(ei.elemType)
 	if elemSize <= 0 {
-		e.w("; embed: unknown element type: " | ei.elemType | "\n")
+		compileErrors = append(compileErrors, "embed: unknown element type: "|ei.elemType|" for "|ei.path)
 		e.w(name | " = global {ptr, i64, i64} zeroinitializer\n")
 		return
 	}
 	count := int32(len(data)) / elemSize
+	// name may be quoted (@"pkg/path.var"); the .data suffix must land
+	// inside the quotes or the symbol is malformed IR.
 	constName := name | ".data"
+	if len(name) > 0 && name[len(name)-1] == '"' {
+		constName = name[:len(name)-1] | ".data\""
+	}
 	e.w(constName | " = private constant [" | irItoa(int32(len(data))) | " x i8] c\"")
 	for i := 0; i < len(data); i++ {
 		b := data[i]
@@ -1133,6 +1155,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		return
 	}
 	e.curFunc = f
+	markReturnEscapes(f)
 	e.nextReg = 0
 	e.deferList = nil
 	e.deferID = 0
@@ -1393,7 +1416,16 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 	hasRecv := f.Signature != nil && f.Signature.Recv() != nil
 	if hasRecv {
 		if n > 0 { e.w(", ") }
-		e.w("ptr")
+		// Value receivers are passed by value (mirrors emitFunction's
+		// definition convention); only pointer receivers are ptr.
+		rt := "ptr"
+		if _, isP := safeUnderlying(f.Signature.Recv().Type()).(*Pointer); !isP {
+			rt = e.llvmType(f.Signature.Recv().Type())
+			if rt == "" || rt == "void" {
+				rt = "ptr"
+			}
+		}
+		e.w(rt)
 		n++
 	}
 	if f.Signature != nil && f.Signature.Params() != nil {
@@ -2123,8 +2155,9 @@ func (e *irEmitter) emitStore(s *SSAStore) {
 				} else {
 					e.nextReg++
 					ext := "%se" | irItoa(e.nextReg)
+					// Source signedness decides the extension (Go semantics).
 					extOp := "sext"
-					if b, ok2 := safeUnderlying(p.Elem()).(*Basic); ok2 && b.Info()&IsUnsigned != 0 {
+					if b, ok2 := safeUnderlying(s.Val.SSAType()).(*Basic); ok2 && b.Info()&IsUnsigned != 0 {
 						extOp = "zext"
 					}
 					e.w("  ")
@@ -3024,6 +3057,8 @@ func (e *irEmitter) emitStructCompare(reg string, op SSAOp, st *TCStruct, lt, lv
 			e.declareRuntime("runtime.stringEqual", "i1", sty | ", " | sty)
 		} else if subst, ok := safeUnderlying(st.Field(i).Type()).(*TCStruct); ok && len(ft) > 0 && ft[0] == '{' {
 			e.emitStructCompare(cmp, OpEql, subst, ft, lf, rf)
+		} else if subarr, ok := safeUnderlying(st.Field(i).Type()).(*Array); ok && len(ft) > 0 && ft[0] == '[' {
+			e.emitArrayCompare(cmp, OpEql, subarr, ft, lf, rf)
 		} else {
 			e.w("  ") ; e.w(cmp) ; e.w(" = icmp eq ") ; e.w(ft) ; e.w(" ") ; e.w(lf) ; e.w(", ") ; e.w(rf) ; e.w("\n")
 		}
@@ -3407,6 +3442,23 @@ func (e *irEmitter) callArgType(arg SSAValue, sig *Signature, i int32) (s string
 		resolved := e.resolvedType(arg, t)
 		if resolved != t {
 			t = resolved
+		}
+	}
+	// Integer constants take the signature's param width: an untyped const
+	// defaults to i32, and passing "i32 -1" to an i64 param silently zeroes
+	// the high half at the ABI boundary.
+	if k, isConst := arg.(*SSAConst); isConst && sig != nil && sig.Params() != nil {
+		if _, isInt := k.val.(constInt); isInt {
+			sigIdx := i
+			if sig.Recv() != nil {
+				sigIdx = i - 1
+			}
+			if sigIdx >= 0 && sigIdx < sig.Params().Len() {
+				sigT := e.llvmType(sig.Params().At(sigIdx).Type())
+				if e.intBits(sigT) > 0 {
+					return sigT
+				}
+			}
 		}
 	}
 	if (t == "ptr" || t == "i1") && sig != nil && sig.Params() != nil {
@@ -4551,6 +4603,24 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 		return
 	}
 
+	// Constant int->int conversions fold at emission. Materializing an
+	// untyped constant at its default width and extending loses high bits
+	// (e.g. uint64(0xFFFFFFFFFFFFFFFF) emitted as zext i32 -1 -> 0xFFFFFFFF).
+	if k, ok := c.X.(*SSAConst); ok {
+		if ci, ok2 := k.val.(constInt); ok2 {
+			sb := e.intBits(srcType)
+			db := e.intBits(dstType)
+			if sb > 0 && db > 0 {
+				v := ci.v
+				if db < 64 {
+					v = v & ((int64(1) << uint32(db)) - 1)
+				}
+				e.valName[c] = irItoa64(v)
+				return
+			}
+		}
+	}
+
 	if dstType == e.ifaceType() {
 		_, dstIsIface := safeUnderlying(c.SSAType()).(*TCInterface)
 		if dstIsIface {
@@ -4759,11 +4829,9 @@ func (e *irEmitter) conversionOp(from, to Type) (s string) {
 	}
 
 	if fromBits < toBits {
-		toUnsigned := false
-		if b, ok := safeUnderlying(to).(*Basic); ok && b.Info()&IsUnsigned != 0 {
-			toUnsigned = true
-		}
-		if fromSigned && !toUnsigned {
+		// Go semantics: the SOURCE signedness decides the extension.
+		// int32(-1) -> uint64 must sign-extend to 0xFFFFFFFFFFFFFFFF.
+		if fromSigned {
 			return "sext"
 		}
 		return "zext"
@@ -4913,6 +4981,21 @@ func (e *irEmitter) emitIndexAddr(idx *SSAIndexAddr) {
 		}
 	}
 	idxType := e.resolvedType(idx.Index, e.llvmType(idx.Index.SSAType()))
+	// GEP indices are interpreted as signed: a raw i8/i16 index from a
+	// uint8/uint16 value >= half-range goes negative and reads garbage.
+	// Normalize narrow indices to i32 with the extension matching the
+	// source signedness.
+	if idxType == "i8" || idxType == "i16" {
+		ext := "sext"
+		if b, okx := safeUnderlying(idx.Index.SSAType()).(*Basic); okx && b.Info()&IsUnsigned != 0 {
+			ext = "zext"
+		}
+		e.nextReg++
+		widened := "%ixw" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(widened) ; e.w(" = ") ; e.w(ext) ; e.w(" ") ; e.w(idxType) ; e.w(" ") ; e.w(index) ; e.w(" to i32\n")
+		index = widened
+		idxType = "i32"
+	}
 	if isSlice {
 		e.nextReg++
 		dataPtr := "%sp" | irItoa(e.nextReg)
@@ -4992,6 +5075,31 @@ func (e *irEmitter) emitIndexAddr(idx *SSAIndexAddr) {
 			e.w(arrType) ; e.w(", ptr ") ; e.w(base) ; e.w(", i32 0, ")
 			e.w(idxType) ; e.w(" ") ; e.w(index) ; e.w("\n")
 			return
+		}
+		if load, ok4 := idx.X.(*SSAUnOp); ok4 && load.Op == OpMul {
+			_, srcAlloc := load.X.(*SSAAlloc)
+			_, srcGlobal := load.X.(*SSAGlobal)
+			_, srcField := load.X.(*SSAFieldAddr)
+			// A load of an index/field-addr result is a load from an
+			// addressable chain (e.g. global[i][j]): forwarding to the
+			// source GEP keeps the element addressable so mutations
+			// through method receivers hit the original, not a spill copy.
+			_, srcIndex := load.X.(*SSAIndexAddr)
+			if srcAlloc || srcGlobal || srcField || srcIndex {
+				// Index into a load-of-array: GEP the source address
+				// instead of spilling a copy. The spill alloca lands in
+				// the current block - inside a loop that grows the frame
+				// per iteration until the stack is gone.
+				allocBase := e.operand(load.X)
+				e.w("  ") ; e.w(reg) ; e.w(" = getelementptr inbounds ")
+				e.w(arrType) ; e.w(", ptr ") ; e.w(allocBase) ; e.w(", i32 0, ")
+				e.w(idxType) ; e.w(" ") ; e.w(index) ; e.w("\n")
+				aet0 := e.arrayElemType(arrType)
+				if aet0 != "" {
+					e.setRegType(idx, reg, aet0)
+				}
+				return
+			}
 		}
 		e.nextReg++
 		arrPtr := "%ai" | irItoa(e.nextReg)
@@ -5236,10 +5344,16 @@ func (e *irEmitter) emitSliceOp(s *SSASlice) {
 	}
 	if !ptrToArr {
 		if arr, ok := srcType.(*Array); ok {
+			// Heap-allocate the array copy: the resulting slice can escape
+			// (e.g. returned), so a stack alloca would dangle.
 			arrType := e.llvmType(s.X.SSAType())
 			e.nextReg++
+			sz := "%sl" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(arrType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+			e.nextReg++
 			tmp := "%sl" | irItoa(e.nextReg)
-			e.w("  ") ; e.w(tmp) ; e.w(" = alloca ") ; e.w(arrType) ; e.w("\n")
+			e.w("  ") ; e.w(tmp) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null)\n")
+			e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 			e.w("  store ") ; e.w(arrType) ; e.w(" ") ; e.w(src) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
 			oldPtr = tmp
 			oldLen = irItoa64(arr.Len())
@@ -5620,6 +5734,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 	}
 	selfPath := e.pkg.Pkg.Path()
 	var importedPkgs []*TCPackage
+	seenPkg := map[string]bool{}
 	scopeNames2 := e.pkg.Pkg.Scope().Names()
 	for sni2 := 0; sni2 < len(scopeNames2); sni2++ {
 		obj := e.pkg.Pkg.Scope().Lookup(scopeNames2[sni2])
@@ -5628,6 +5743,28 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 			continue
 		}
 		importedPkgs = append(importedPkgs, pn.Imported())
+		seenPkg[pn.Imported().Path()] = true
+	}
+	// The build is two-phase: every package in the link set is type-checked
+	// (TypeCheckOnly/loadMxh) before any package is emitted, so the registry
+	// holds the whole link set here. Scan it all: an interface parameter can
+	// receive values of any type in the link, including types from packages
+	// downstream of this one (io.ReadFull dispatching Read on a
+	// crypto/rand.reader). Cross-package impl symbols are declared
+	// extern_weak (see declareExtInvoke): a link reusing this package's
+	// cached .bc without some impl's package resolves the weak ref to null,
+	// and that dispatch arm is dead there because no make-interface site can
+	// produce the matching type-ID without the defining package linked.
+	// moxie/runtime/unsafe are runtime-provided (legacy symbol mangling,
+	// local linkage) and never linkable.
+	for rPath, rPkg := range importRegistry {
+		if rPkg == nil || seenPkg[rPath] {
+			continue
+		}
+		if rPath == "moxie" || rPath == "runtime" || rPath == "unsafe" {
+			continue
+		}
+		importedPkgs = append(importedPkgs, rPkg)
 	}
 	for ipi := 0; ipi < len(importedPkgs); ipi++ {
 		ipkg := importedPkgs[ipi]
@@ -5647,6 +5784,11 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 			}
 			named3, ok8 := tn3.typ.(*Named)
 			if !ok8 {
+				continue
+			}
+			// Generic types' methods are never emitted as standalone symbols
+			// (monomorphization only); a direct extern call would be undefined.
+			if len(named3.tparams) > 0 {
 				continue
 			}
 			for mi := 0; mi < named3.NumMethods(); mi++ {
@@ -5758,7 +5900,7 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 			if pt == "void" {
 				pt = "ptr"
 			}
-			params = params | ", " | flattenTypeStr(pt)
+			params = params | ", " | pt
 		}
 	} else {
 		for _, arg := range inv.Args {
@@ -5766,65 +5908,18 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 			if argT == "void" {
 				argT = "ptr"
 			}
-			params = params | ", " | flattenTypeStr(argT)
+			params = params | ", " | argT
 		}
 	}
 	params = params | ", ptr"
-	e.extDecls[sym] = retType | " " | sym | "(" | params | ")"
-}
-
-func flattenTypeStr(t string) (s string) {
-	if len(t) == 0 || t[0] != '{' {
-		return t
-	}
-	if t == "{}" {
-		return t
-	}
-	result := ""
-	depth := 0
-	start := 1
-	for i := 1; i < len(t)-1; i++ {
-		if t[i] == '{' {
-			depth++
-		} else if t[i] == '}' {
-			depth--
-		} else if t[i] == ',' && depth == 0 {
-			f := trimSpaces(t[start:i])
-			if f != "" {
-				sub := flattenTypeStr(f)
-				if result != "" {
-					result = result | ", " | sub
-				} else {
-					result = sub
-				}
-			}
-			start = i + 1
-		}
-	}
-	f := trimSpaces(t[start : len(t)-1])
-	if f != "" {
-		sub := flattenTypeStr(f)
-		if result != "" {
-			result = result | ", " | sub
-		} else {
-			result = sub
-		}
-	}
-	return result
-}
-
-func trimSpaces(s string) (sv string) {
-	for len(s) > 0 && s[0] == ' ' {
-		s = s[1:]
-	}
-	for len(s) > 0 && s[len(s)-1] == ' ' {
-		s = s[:len(s)-1]
-	}
-	return s
+	// extern_weak: dispatch lists enumerate impls from the whole link set;
+	// a link reusing this module's cached .bc without an impl's package
+	// resolves the ref to null instead of failing, and the guarded call arm
+	// is dead there (no make-interface site can produce the type-ID).
+	e.extDecls[sym] = "extern_weak " | retType | " " | sym | "(" | params | ")"
 }
 
 func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv string, inv *SSAInvoke, isVoid bool, impl ifaceImpl) {
-	extracts := ""
 	callArgs := recvLLVM | " " | recv
 	var sig *Signature
 	if impl.fn != nil {
@@ -5856,40 +5951,12 @@ func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv stri
 				argVal = loaded
 			}
 		}
-		if len(argT) > 0 && argT[0] == '{' && argT != "{}" {
-			depth := 0
-			start := 1
-			fi := 0
-			for j := 1; j < len(argT)-1; j++ {
-				if argT[j] == '{' {
-					depth++
-				} else if argT[j] == '}' {
-					depth--
-				} else if argT[j] == ',' && depth == 0 {
-					ft := trimSpaces(argT[start:j])
-					if ft != "" {
-						e.nextReg++
-						ex := "%ef" | irItoa(e.nextReg)
-						extracts = extracts | "  " | ex | " = extractvalue " | argT | " " | argVal | ", " | irItoa(fi) | "\n"
-						callArgs = callArgs | ", " | ft | " " | ex
-						fi++
-					}
-					start = j + 1
-				}
-			}
-			ft := trimSpaces(argT[start : len(argT)-1])
-			if ft != "" {
-				e.nextReg++
-				ex := "%ef" | irItoa(e.nextReg)
-				extracts = extracts | "  " | ex | " = extractvalue " | argT | " " | argVal | ", " | irItoa(fi) | "\n"
-				callArgs = callArgs | ", " | ft | " " | ex
-			}
-		} else {
-			callArgs = callArgs | ", " | argT | " " | argVal
-		}
+		// Aggregates pass as-is: method definitions keep slice/struct params
+		// as single aggregate values, and flattening them here splits the
+		// SysV ABI classes (registers vs stack) - garbage in the callee.
+		callArgs = callArgs | ", " | argT | " " | argVal
 	}
 	callArgs = callArgs | ", ptr null"
-	e.w(extracts)
 	e.w("  ")
 	if !isVoid {
 		e.w(reg) ; e.w(" = ")
@@ -6163,6 +6230,17 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 	}
 
 	e.w(defaultLabel) ; e.w(":\n")
+	// A typeID that matches no impl means the dispatch list is incomplete -
+	// fail loud instead of executing unreachable-UB with a garbage method.
+	{
+		sty := e.sliceType()
+		msg := "interface dispatch: no impl for " | inv.MethodName
+		idx := e.addStringConst(msg)
+		ipt := e.intptrType()
+		slen := irItoa64(int64(len(msg)))
+		e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" { ptr ") ; e.w(e.strConstGlobal(idx)) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(" }, ptr null)\n")
+		e.declareRuntime("runtime._panicstr", "void", sty)
+	}
 	e.w("  unreachable\n")
 
 	e.w(mergeLabel) ; e.w(":\n")
@@ -6206,14 +6284,25 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 		tidGlobal := e.typeIDHash(t.AssertedType)
 		ok := e.nextReg2("ta")
 		e.w("  ") ; e.w(ok) ; e.w(" = icmp eq i64 ") ; e.w(typePtr) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
+		// A failed comma-ok assertion must yield the zero value, never the
+		// raw interface data reinterpreted as the asserted type.
 		var loaded string
 		if assertedType == "ptr" {
-			loaded = valPtr
+			loaded = e.nextReg2("ta")
+			e.w("  ") ; e.w(loaded) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", ptr null\n")
 		} else if e.isScalarType(assertedType) {
-			loaded = e.extractScalarFromIface(valPtr, assertedType)
+			extracted := e.extractScalarFromIface(valPtr, assertedType)
+			zero := "0"
+			if assertedType == "float" || assertedType == "double" {
+				zero = "0.000000e+00"
+			}
+			loaded = e.nextReg2("ta")
+			e.w("  ") ; e.w(loaded) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ") ; e.w(assertedType) ; e.w(" ") ; e.w(extracted) ; e.w(", ") ; e.w(assertedType) ; e.w(" ") ; e.w(zero) ; e.w("\n")
 		} else {
+			nonnull0 := e.nextReg2("ta")
+			e.w("  ") ; e.w(nonnull0) ; e.w(" = icmp ne ptr ") ; e.w(valPtr) ; e.w(", null\n")
 			nonnull := e.nextReg2("ta")
-			e.w("  ") ; e.w(nonnull) ; e.w(" = icmp ne ptr ") ; e.w(valPtr) ; e.w(", null\n")
+			e.w("  ") ; e.w(nonnull) ; e.w(" = and i1 ") ; e.w(ok) ; e.w(", ") ; e.w(nonnull0) ; e.w("\n")
 			e.nextReg++
 			safeLabel := "ta.safe" | irItoa(e.nextReg)
 			e.nextReg++
@@ -6242,6 +6331,32 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 			e.allocTypes[t] = tupType
 		}
 	} else {
+		// Single-result assertion: panic on type-ID mismatch (Go semantics).
+		// typePtr == "null" means the input was already a concrete pointer,
+		// so there is no runtime type information to check.
+		if typePtr != "null" {
+			tidGlobal := e.typeIDHash(t.AssertedType)
+			ok := e.nextReg2("ta")
+			e.w("  ") ; e.w(ok) ; e.w(" = icmp eq i64 ") ; e.w(typePtr) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
+			e.nextReg++
+			goodLabel := "ta.good" | irItoa(e.nextReg)
+			e.nextReg++
+			badLabel := "ta.bad" | irItoa(e.nextReg)
+			e.w("  br i1 ") ; e.w(ok) ; e.w(", label %") ; e.w(goodLabel) ; e.w(", label %") ; e.w(badLabel) ; e.w("\n")
+			e.w(badLabel) ; e.w(":\n")
+			sty := e.sliceType()
+			msg := "type assertion failed"
+			idx := e.addStringConst(msg)
+			ipt := e.intptrType()
+			slen := irItoa64(int64(len(msg)))
+			e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" { ptr ") ; e.w(e.strConstGlobal(idx)) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(" }, ptr null)\n")
+			e.declareRuntime("runtime._panicstr", "void", sty)
+			e.w("  unreachable\n")
+			e.w(goodLabel) ; e.w(":\n")
+			if blk := t.InstrBlock(); blk != nil {
+				e.blockExitLabel[blk.Index] = "%" | goodLabel
+			}
+		}
 		if assertedType == "ptr" {
 			e.w("  ") ; e.w(reg) ; e.w(" = select i1 true, ptr ") ; e.w(valPtr) ; e.w(", ptr null\n")
 		} else if e.isScalarType(assertedType) {
@@ -6760,6 +6875,11 @@ func (e *irEmitter) operand(v SSAValue) (s string) {
 		return "@runtime." | b.SSAName()
 	}
 	if f, ok := v.(*SSAFunction); ok {
+		if !e.isPkgFunc(f) {
+			// Func used as a value: ensure the symbol is declared, the
+			// call-emission path is never reached for it.
+			e.declareExternalFunc(f)
+		}
 		return "{ ptr null, ptr " | e.funcSymbol(f) | " }"
 	}
 	if g, ok := v.(*SSAGlobal); ok {
@@ -7303,7 +7423,10 @@ func runeToUTF8(r rune) (s string) {
 
 func scanEmbedPragmas(src []byte, pkgDir string) {
 	embedVars = map[string]*embedInfo{}
+	// Two accepted forms: //:embed (canonical, see src/embed) and
+	// //moxie:embed_le (explicit little-endian element interpretation).
 	embedPrefix := []byte("//moxie:embed_le ")
+	embedPrefix2 := []byte("//:embed ")
 	varPrefix := []byte("var ")
 	commentPrefix := []byte("//")
 	pendingPath := ""
@@ -7336,7 +7459,12 @@ func scanEmbedPragmas(src []byte, pkgDir string) {
 			}
 			pendingPath = ""
 		} else if lHasPrefix(trimmed, embedPrefix) {
-			pendingPath = string(lTrimSpace(trimmed[18:]))
+			pendingPath = string(lTrimSpace(trimmed[len(embedPrefix):]))
+			if len(pendingPath) > 0 && pkgDir != "" {
+				pendingPath = joinPath(pkgDir, pendingPath)
+			}
+		} else if lHasPrefix(trimmed, embedPrefix2) {
+			pendingPath = string(lTrimSpace(trimmed[len(embedPrefix2):]))
 			if len(pendingPath) > 0 && pkgDir != "" {
 				pendingPath = joinPath(pkgDir, pendingPath)
 			}
@@ -7458,6 +7586,12 @@ func typeCheckPkg(src []byte, name string) (*TCPackage, *syntax.File) {
 	file, _ := syntax.ParseBytes(token.NewFileBase(name|".mx"), src, errh, nil, 0)
 	if file == nil {
 		return nil, nil
+	}
+	// The package name is the clause name from the source, not the import
+	// path tail - they differ for packages like crypto/ec (package btcec).
+	// The name flows into the mxh and importer PkgName registration.
+	if file.PkgName != nil && file.PkgName.Value != "" {
+		pkg.name = file.PkgName.Value
 	}
 	for _, d := range file.DeclList {
 		switch d := d.(type) {
@@ -7584,15 +7718,28 @@ func typeCheckPkg(src []byte, name string) (*TCPackage, *syntax.File) {
 	}
 	for _, d := range file.DeclList {
 		if td, ok := d.(*syntax.TypeDecl); ok {
-			if len(td.TParamList) > 0 {
-				continue
-			}
+			// Generic type decls resolve in a child scope holding their type
+			// params, so fields like newPoint func() P keep a TypeParam that
+			// monomorphized bodies substitute via fb.typeSubst.
+			tScope := scope
 			obj := scope.Lookup(td.Name.Value)
 			if obj != nil {
 				if tn, ok2 := obj.(*TypeName); ok2 {
 					named, ok3 := tn.typ.(*Named)
 					if ok3 {
-						typ := tcResolveNameInline(td.Type, scope)
+						if len(td.TParamList) > 0 {
+							tScope = NewScope(scope)
+							for _, tp := range td.TParamList {
+								if tp.Name != nil && tp.Name.Value != "" {
+									tpv := NewTypeParam(NewTypeName(pkg, tp.Name.Value, nil), nil)
+									tScope.Insert(NewTypeName(pkg, tp.Name.Value, tpv))
+									if len(named.tparams) < len(td.TParamList) {
+										named.tparams = append(named.tparams, tpv)
+									}
+								}
+							}
+						}
+						typ := tcResolveNameInline(td.Type, tScope)
 						if typ != nil {
 							named.SetUnderlying(typ)
 						}
@@ -7765,23 +7912,50 @@ func ScanGenericDecls(src []byte, name string) {
 			}
 		}
 	}
+	// The package's own registered scope (mxh-loaded or freshly compiled)
+	// carries real types with method sets and real signatures; synthetic
+	// nil-typed stand-ins are only a fallback for unexported decls. Without
+	// this, method calls on package types inside monomorphized bodies
+	// silently resolve to nothing.
+	regPkg := importRegistry[name]
+	regLookup := func(n string) (o Object) {
+		if regPkg == nil {
+			return nil
+		}
+		return regPkg.Scope().Lookup(n)
+	}
 	for _, d := range file.DeclList {
 		switch d := d.(type) {
 		case *syntax.FuncDecl:
-			if d.Recv == nil && d.Name != nil && d.Name.Value != "init" && len(d.TParamList) > 0 {
-				if genericFuncDecls == nil {
-					genericFuncDecls = map[string]*syntax.FuncDecl{}
+			if d.Recv == nil && d.Name != nil && d.Name.Value != "init" {
+				if len(d.TParamList) > 0 {
+					if genericFuncDecls == nil {
+						genericFuncDecls = map[string]*syntax.FuncDecl{}
+					}
+					genericFuncDecls[name+"."+d.Name.Value] = d
+				} else {
+					if genericPkgLocalDecls == nil {
+						genericPkgLocalDecls = map[string]*syntax.FuncDecl{}
+					}
+					genericPkgLocalDecls[name+"."+d.Name.Value] = d
 				}
-				genericFuncDecls[name+"."+d.Name.Value] = d
 			}
 			if d.Recv == nil && d.Name != nil {
 				if scope.Lookup(d.Name.Value) == nil {
-					scope.Insert(NewTCFunc(thePkg, d.Name.Value, nil))
+					if ro := regLookup(d.Name.Value); ro != nil {
+						scope.Insert(ro)
+					} else {
+						scope.Insert(NewTCFunc(thePkg, d.Name.Value, nil))
+					}
 				}
 			}
 		case *syntax.TypeDecl:
 			existing := scope.Lookup(d.Name.Value)
 			if existing == nil {
+				if ro := regLookup(d.Name.Value); ro != nil {
+					scope.Insert(ro)
+					continue
+				}
 				tn := NewTypeName(thePkg, d.Name.Value, nil)
 				named := NewNamed(tn, nil)
 				if d.Type != nil {
@@ -7804,13 +7978,21 @@ func ScanGenericDecls(src []byte, name string) {
 		case *syntax.ConstDecl:
 			for _, cn := range d.NameList {
 				if scope.Lookup(cn.Value) == nil {
-					scope.Insert(NewTCConst(thePkg, cn.Value, nil, nil))
+					if ro := regLookup(cn.Value); ro != nil {
+						scope.Insert(ro)
+					} else {
+						scope.Insert(NewTCConst(thePkg, cn.Value, nil, nil))
+					}
 				}
 			}
 		case *syntax.VarDecl:
 			for _, vn := range d.NameList {
 				if scope.Lookup(vn.Value) == nil {
-					scope.Insert(NewTCVar(thePkg, vn.Value, nil))
+					if ro := regLookup(vn.Value); ro != nil {
+						scope.Insert(ro)
+					} else {
+						scope.Insert(NewTCVar(thePkg, vn.Value, nil))
+					}
 				}
 			}
 		}
@@ -7891,6 +8073,10 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 func registerCompiledExports(pkg *TCPackage) {
 	ensureImportRegistry()
 	path := pkg.Path()
+	// The registry package is export-trimmed and loses the PkgName scope
+	// entries; capture the direct import list from the full source scope
+	// now, while it still exists, for transitive dispatch-list collection.
+	directImportPaths(pkg)
 	regPkg := NewTCPackage(path, pkg.Name())
 	for _, name := range pkg.Scope().Names() {
 		if len(name) == 0 {
@@ -8200,6 +8386,38 @@ func resolveArrayLenFromConstMap(e syntax.Expr, cmap map[string]int64) (n int64)
 	return -1
 }
 
+// tcConstExprBasic resolves the basic type of a constant expression in the
+// emitter's scope-based evaluator, mirroring Checker.constExprBasic.
+func tcConstExprBasic(e syntax.Expr, scope *Scope) (b *Basic) {
+	switch e := e.(type) {
+	case *syntax.Name:
+		if scope != nil {
+			_, obj := scope.LookupParent(e.Value)
+			if k, ok := obj.(*TCConst); ok && k.typ != nil {
+				if bb, ok2 := safeUnderlying(k.typ).(*Basic); ok2 {
+					return bb
+				}
+			}
+		}
+	case *syntax.ParenExpr:
+		return tcConstExprBasic(e.X, scope)
+	case *syntax.CallExpr:
+		if t := tcResolveNameInline(e.Fun, scope); t != nil {
+			if bb, ok := safeUnderlying(t).(*Basic); ok {
+				return bb
+			}
+		}
+	case *syntax.Operation:
+		if bb := tcConstExprBasic(e.X, scope); bb != nil && bb.info&IsUntyped == 0 {
+			return bb
+		}
+		if e.Y != nil {
+			return tcConstExprBasic(e.Y, scope)
+		}
+	}
+	return nil
+}
+
 func tcEvalConstExpr(e syntax.Expr, scope *Scope, iotaVal int64) (c ConstVal) {
 	if e == nil {
 		return nil
@@ -8228,7 +8446,14 @@ func tcEvalConstExpr(e syntax.Expr, scope *Scope, iotaVal int64) (c ConstVal) {
 			if xr == nil {
 				return nil
 			}
-			return evalUnaryLocal(e.Op, xr)
+			r := evalUnaryLocal(e.Op, xr)
+			// Mask ^x to the typed operand's width (see evalConstOp).
+			if r != nil && e.Op == token.Xor {
+				if b := tcConstExprBasic(e.X, scope); b != nil {
+					r = maskConstToBasic(r, b)
+				}
+			}
+			return r
 		}
 		xr := tcEvalConstExpr(e.X, scope, iotaVal)
 		yr := tcEvalConstExpr(e.Y, scope, iotaVal)
@@ -9088,6 +9313,127 @@ func checkUseAfterFree(f *SSAFunction) {
 				if freed[load.X.SSAName()] {
 					compileErrors = append(compileErrors,
 						fname|": use of freed variable '"|load.X.SSAName()|"'")
+				}
+			}
+		}
+	}
+}
+
+// markReturnEscapes promotes stack allocas to heap when their address can
+// reach a return value. Returning r[:] over a local array (or &local routed
+// through a named-result variable) otherwise hands the caller a pointer into
+// a dead frame. Tracks which allocas each SSA value may point into
+// (derived), and which allocas each alloca's contents may point into
+// (stored), to a fixpoint; any alloca reachable from a return result is
+// marked Heap. Over-marking is safe (heap-allocates more), under-marking
+// dangles.
+func markReturnEscapes(f *SSAFunction) {
+	derived := map[SSAValue][]*SSAAlloc{}
+	stored := map[*SSAAlloc][]*SSAAlloc{}
+	mergeInto := func(dst []*SSAAlloc, srcs []*SSAAlloc) ([]*SSAAlloc, bool) {
+		changed := false
+		for _, s := range srcs {
+			found := false
+			for _, c := range dst {
+				if c == s {
+					found = true
+					break
+				}
+			}
+			if !found {
+				dst = append(dst, s)
+				changed = true
+			}
+		}
+		return dst, changed
+	}
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			if a, ok := instr.(*SSAAlloc); ok {
+				derived[SSAValue(a)] = []*SSAAlloc{a}
+			}
+		}
+	}
+	changed := true
+	for changed {
+		changed = false
+		for _, b := range f.Blocks {
+			for _, instr := range b.Instrs {
+				var dst SSAValue
+				var srcs []*SSAAlloc
+				switch i := instr.(type) {
+				case *SSASlice:
+					dst = i
+					srcs = derived[i.X]
+				case *SSAFieldAddr:
+					dst = i
+					srcs = derived[i.X]
+				case *SSAIndexAddr:
+					dst = i
+					srcs = derived[i.X]
+				case *SSAChangeType:
+					dst = i
+					srcs = derived[i.X]
+				case *SSAConvert:
+					dst = i
+					srcs = derived[i.X]
+				case *SSAMakeInterface:
+					dst = i
+					srcs = derived[i.X]
+				case *SSAPhi:
+					dst = i
+					for _, edge := range i.Edges {
+						srcs = srcs | derived[edge]
+					}
+				case *SSAUnOp:
+					// Load: the result carries whatever pointers were
+					// stored into the loaded alloca(s).
+					if i.Op == OpMul {
+						dst = i
+						for _, a := range derived[i.X] {
+							srcs = srcs | stored[a]
+						}
+					}
+				case *SSAStore:
+					if d := derived[i.Val]; len(d) > 0 {
+						for _, a := range derived[i.Addr] {
+							ns, ch := mergeInto(stored[a], d)
+							if ch {
+								stored[a] = ns
+								changed = true
+							}
+						}
+					}
+				}
+				if dst != nil && len(srcs) > 0 {
+					nd, ch := mergeInto(derived[dst], srcs)
+					if ch {
+						derived[dst] = nd
+						changed = true
+					}
+				}
+			}
+		}
+	}
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			r, ok := instr.(*SSAReturn)
+			if !ok {
+				continue
+			}
+			for _, res := range r.Results {
+				// An escaping alloca may itself hold pointers into other
+				// allocas (struct with slice field), recursively.
+				work := derived[res]
+				seen := map[*SSAAlloc]bool{}
+				for wi := 0; wi < len(work); wi++ {
+					a := work[wi]
+					if seen[a] {
+						continue
+					}
+					seen[a] = true
+					a.Heap = true
+					work = work | stored[a]
 				}
 			}
 		}

@@ -8,10 +8,40 @@ import (
 var irResults []string
 var importRegistry map[string]*TCPackage
 
+// pkgDirectImports records each package's direct import paths. Source-compiled
+// packages derive it from their scope's PkgName entries; mxh-loaded packages
+// get it from "import" lines. findIfaceImpls needs it to walk the transitive
+// import closure when building dispatch lists for cached packages.
+var pkgDirectImports map[string][]string
+
 func ensureImportRegistry() {
 	if importRegistry == nil {
 		importRegistry = map[string]*TCPackage{}
 	}
+}
+
+func directImportPaths(pkg *TCPackage) (paths []string) {
+	if pkg == nil {
+		return nil
+	}
+	if ps, ok := pkgDirectImports[pkg.Path()]; ok {
+		return ps
+	}
+	sc := pkg.Scope()
+	if sc == nil {
+		return nil
+	}
+	var out []string
+	for _, n := range sc.Names() {
+		if pn, ok := sc.Lookup(n).(*PkgName); ok && pn.Imported() != nil {
+			out = append(out, pn.Imported().Path())
+		}
+	}
+	if pkgDirectImports == nil {
+		pkgDirectImports = map[string][]string{}
+	}
+	pkgDirectImports[pkg.Path()] = out
+	return out
 }
 
 //export moxie_compile_to_ir
@@ -344,6 +374,9 @@ func parseTypeDesc(desc string) (t Type) {
 	if len(desc) > 1 && desc[0] == '*' {
 		return NewPointer(parseTypeDesc(desc[1:]))
 	}
+	if len(desc) > 5 && desc[:5] == "func(" && desc[len(desc)-1] == ')' {
+		return parseSignatureDesc(desc[5 : len(desc)-1])
+	}
 	if len(desc) > 5 && desc[:5] == "chan:" {
 		return NewTCChan(TCSendRecv, parseTypeDesc(desc[5:]))
 	}
@@ -397,15 +430,36 @@ func parseTypeDesc(desc string) (t Type) {
 			return tn.Type()
 		}
 	}
+	// Universe-scope named types (uintptr, byte, rune) appear in mxh descs by
+	// name; without this lookup they degrade to int32 and receiver widths in
+	// cached packages diverge from the source-compiled layout.
+	if Universe != nil {
+		obj := Universe.Lookup(desc)
+		if tn, ok := obj.(*TypeName); ok && tn.Type() != nil {
+			return tn.Type()
+		}
+	}
 	return Typ[Int32]
 }
 
 func parseSignatureDesc(desc string) (s *Signature) {
 	// format: "param1,param2->result1,result2" or "param1,param2" (void) or "->result" (no params)
+	// The arrow and commas are matched at depth 0 only: nested func/struct
+	// descs carry their own arrows and commas inside brackets.
 	arrow := -1
+	depth := 0
 	for i := 0; i < len(desc)-1; i++ {
-		if desc[i] == '-' && desc[i+1] == '>' {
-			arrow = i
+		switch desc[i] {
+		case '{', '[', '(':
+			depth++
+		case '}', ']', ')':
+			depth--
+		case '-':
+			if depth == 0 && desc[i+1] == '>' {
+				arrow = i
+			}
+		}
+		if arrow >= 0 {
 			break
 		}
 	}
@@ -417,15 +471,21 @@ func parseSignatureDesc(desc string) (s *Signature) {
 		paramStr = desc
 	}
 	var params []*TCVar
+	variadic := false
 	if paramStr != "" {
-		parts := splitComma(paramStr)
-		for _, p := range parts {
+		parts := splitCommaBalanced(paramStr)
+		for pi, p := range parts {
+			if pi == len(parts)-1 && len(p) > 3 && p[:3] == "..." {
+				variadic = true
+				params = append(params, NewTCVar(nil, "", NewSlice(parseTypeDesc(p[3:]))))
+				continue
+			}
 			params = append(params, NewTCVar(nil, "", parseTypeDesc(p)))
 		}
 	}
 	var results []*TCVar
 	if resultStr != "" {
-		parts := splitComma(resultStr)
+		parts := splitCommaBalanced(resultStr)
 		for _, r := range parts {
 			results = append(results, NewTCVar(nil, "", parseTypeDesc(r)))
 		}
@@ -437,7 +497,7 @@ func parseSignatureDesc(desc string) (s *Signature) {
 	if len(results) > 0 {
 		rTuple = NewTuple(results...)
 	}
-	return NewSignature(nil, pTuple, rTuple, false)
+	return NewSignature(nil, pTuple, rTuple, variadic)
 }
 
 func splitCommaBalanced(s string) (ss []string) {

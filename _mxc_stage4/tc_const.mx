@@ -478,6 +478,15 @@ func (c *Checker) evalConstOp(e *syntax.Operation, iotaVal int64) (cv ConstVal) 
 		if r == nil {
 			writeStr(2, "  CONSTOP-UNARY-NIL-R pkg=" | c.pkg.path | " x=" | x.String() | "\n")
 		}
+		// ^x on a typed operand must be masked to the operand's width: the
+		// arbitrary-precision result (-x-1) is only correct for untyped
+		// constants.  Without this, uint64(^someUint32Const) sign-extends
+		// the stored negative value to 0xffffffffXXXXXXXX.
+		if r != nil && e.Op == token.Xor {
+			if b := c.constExprBasic(e.X); b != nil {
+				r = maskConstToBasic(r, b)
+			}
+		}
 		return r
 	}
 	x := c.evalConst(e.X, iotaVal)
@@ -660,7 +669,7 @@ func convertConstLocal(v ConstVal, target Type) (c ConstVal) {
 	switch {
 	case b.info&IsInteger != 0:
 		iv := cvInt(v)
-		return constInt{iv}
+		return maskConstToBasic(constInt{iv}, b)
 	case b.info&IsFloat != 0:
 		fv := cvFloat(v)
 		if cf, ok := v.(constFloat); ok {
@@ -675,6 +684,87 @@ func convertConstLocal(v ConstVal, target Type) (c ConstVal) {
 		return v
 	}
 	return v
+}
+
+// maskConstToBasic truncates a constInt to the width and signedness of the
+// given sized basic integer type.  Untyped and non-integer types pass
+// through unchanged.
+func maskConstToBasic(v ConstVal, b *Basic) (c ConstVal) {
+	ci, ok := v.(constInt)
+	if !ok || b == nil || b.info&IsInteger == 0 || b.info&IsUntyped != 0 {
+		return v
+	}
+	n := ci.v
+	switch b.kind {
+	case Int8:
+		n = int64(int8(n))
+	case Int16:
+		n = int64(int16(n))
+	case Int32:
+		n = int64(int32(n))
+	case Uint8:
+		n = int64(uint8(n))
+	case Uint16:
+		n = int64(uint16(n))
+	case Uint32:
+		n = int64(uint32(n))
+	case Int64, Uint64:
+		// 64-bit: int64 bit pattern is already exact.
+	default:
+		return v
+	}
+	return constInt{n}
+}
+
+// constExprBasic resolves the basic type of a constant expression, used to
+// apply width masking to typed constant operations.  Returns nil when the
+// type cannot be determined (untyped literals and untracked forms).
+func (c *Checker) constExprBasic(e syntax.Expr) (b *Basic) {
+	switch e := e.(type) {
+	case *syntax.Name:
+		var obj Object
+		if c.localScope != nil {
+			_, obj = c.localScope.LookupParent(e.Value)
+		}
+		if obj == nil {
+			_, obj = c.lookup(e.Value, c.pkg.scope)
+		}
+		if k, ok := obj.(*TCConst); ok && k.typ != nil {
+			if bb, ok2 := safeUnderlying(k.typ).(*Basic); ok2 {
+				return bb
+			}
+		}
+	case *syntax.SelectorExpr:
+		if pkgName, ok := e.X.(*syntax.Name); ok {
+			if imp := c.pkg.scope.Lookup(pkgName.Value); imp != nil {
+				if pn, ok2 := imp.(*PkgName); ok2 && pn.Imported() != nil {
+					if obj := pn.Imported().Scope().Lookup(e.Sel.Value); obj != nil {
+						if k, ok3 := obj.(*TCConst); ok3 && k.typ != nil {
+							if bb, ok4 := safeUnderlying(k.typ).(*Basic); ok4 {
+								return bb
+							}
+						}
+					}
+				}
+			}
+		}
+	case *syntax.ParenExpr:
+		return c.constExprBasic(e.X)
+	case *syntax.CallExpr:
+		if t := c.resolveTypeExpr(e.Fun); t != nil {
+			if bb, ok := safeUnderlying(t).(*Basic); ok {
+				return bb
+			}
+		}
+	case *syntax.Operation:
+		if bb := c.constExprBasic(e.X); bb != nil && bb.info&IsUntyped == 0 {
+			return bb
+		}
+		if e.Y != nil {
+			return c.constExprBasic(e.Y)
+		}
+	}
+	return nil
 }
 
 func untypedTypeOfCV(v ConstVal) (t Type) {
