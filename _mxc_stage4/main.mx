@@ -1582,6 +1582,15 @@ func registerBuiltins() {
 	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "LastSpawnedParentFd", parseSignatureDesc("->int32")))
 	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "PipeClosed", parseSignatureDesc("int32->bool")))
 	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "PipeFDCanSend", parseSignatureDesc("int32->bool")))
+	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "LockOSThread", parseSignatureDesc("")))
+	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "UnlockOSThread", parseSignatureDesc("")))
+	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "KeepAlive", parseSignatureDesc("interface{}")))
+	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "GOROOT", parseSignatureDesc("->string")))
+	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "SetFinalizer", parseSignatureDesc("interface{},interface{}")))
+	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "Gosched", parseSignatureDesc("")))
+	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "Version", parseSignatureDesc("->string")))
+	rtPkg.Scope().Insert(NewTCVar(rtPkg, "GOOS", Typ[String]))
+	rtPkg.Scope().Insert(NewTCVar(rtPkg, "GOARCH", Typ[String]))
 	rtPkg.Scope().Insert(NewTCVar(rtPkg, "ChildPipeFd", Typ[Int32]))
 	importRegistry["runtime"] = rtPkg
 }
@@ -3690,23 +3699,25 @@ func workerSendResult(ring unsafe.Pointer, idx int32, errMsg string) {
 	ringSend(ring, msg)
 }
 
-// workerCompilePkg compiles one package in the worker thread. All deps must
-// already have .mxh in cache. Returns empty string on success, error text on failure.
-func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map[string]int32, hashes []string) (errMsg string) {
-	// Load all dependency .mxh from cache
+// workerLoadDeps recursively loads .mxh files for a package's imports,
+// ensuring transitive deps are loaded before the package that references them.
+func workerLoadDeps(pkg *pkgInfo, meta *workerMeta, idxByPath map[string]int32, hashes []string) (errMsg string) {
 	for _, imp := range pkg.imports {
 		di, ok := idxByPath[imp]
 		if !ok {
-			continue // builtin or already loaded
+			continue
 		}
 		dep := meta.pkgs[di]
 		compilePath := dep.path
 		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = dep.name
 		}
-		// Skip if already in this thread's importRegistry
 		if importRegistry[compilePath] != nil {
 			continue
+		}
+		// Recursively load this dep's deps first
+		if errMsg := workerLoadDeps(dep, meta, idxByPath, hashes); errMsg != "" {
+			return errMsg
 		}
 		depHash := hashes[di]
 		cachedMxh := cachedMxhPath(meta.cacheBase, dep.path, depHash, dep.version)
@@ -3716,6 +3727,16 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 		src := concatSources(dep.dir, dep.files)
 		ScanGenericDecls(src, compilePath)
 		src = nil
+	}
+	return ""
+}
+
+// workerCompilePkg compiles one package in the worker thread. All deps must
+// already have .mxh in cache. Returns empty string on success, error text on failure.
+func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map[string]int32, hashes []string) (errMsg string) {
+	// Load all dependency .mxh from cache (recursively, transitive deps first)
+	if errMsg := workerLoadDeps(pkg, meta, idxByPath, hashes); errMsg != "" {
+		return errMsg
 	}
 
 	compilePath := pkg.path

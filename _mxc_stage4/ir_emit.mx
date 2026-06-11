@@ -1137,10 +1137,6 @@ func (e *irEmitter) emitAnonFuncs(f *SSAFunction) {
 func (e *irEmitter) emitLibMain() {
 	pkgPath := e.pkg.Pkg.Path()
 	if pkgPath == "main" || pkgPath == "command-line-arguments" {
-		e.w("\ndefine void @runtime.callMain() {\n")
-		e.w("  call void @main.main(ptr null)\n")
-		e.w("  ret void\n")
-		e.w("}\n")
 		return
 	}
 	hasMain := false
@@ -1187,6 +1183,11 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 				pkgDot := pkg | "."
 				samePackage := hasPrefix(target, pkgDot)
 				if !samePackage {
+					e.emitFuncDecl(f)
+				} else if origSym == tgtSym {
+					// Self-referential linkname: the function's linkname
+					// target is its own fully-qualified name. Body is
+					// provided by another package. Emit a declare.
 					e.emitFuncDecl(f)
 				}
 				if origSym != tgtSym {
@@ -5415,6 +5416,8 @@ func (e *irEmitter) emitMakeSlice(m *SSAMakeSlice) {
 		elemType := "i8"
 		if sl, ok := safeUnderlying(m.SSAType()).(*Slice); ok {
 			elemType = e.llvmType(sl.Elem())
+		} else if b, ok2 := safeUnderlying(m.SSAType()).(*Basic); ok2 && b.Info()&IsString != 0 {
+			elemType = "i8"
 		}
 		e.nextReg++
 		elemSz := "%ms" | irItoa(e.nextReg)
