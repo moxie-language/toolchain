@@ -923,6 +923,30 @@ func (fb *ssaFuncBuilder) buildAssign(s *AssignStmt) {
 				}
 			}
 		}
+		if oe, ok := s.Rhs.(*Operation); ok && oe.Y == nil && oe.Op == Recv {
+			x := fb.buildExpr(oe.X)
+			if x != nil {
+				elemType := ssaChanElemType(x.SSAType())
+				u := &SSAUnOp{Op: OpArrow, X: x, CommaOk: true}
+				u.typ = NewTuple(
+					NewTCVar(nil, "v", elemType),
+					NewTCVar(nil, "ok", Typ[Bool]),
+				)
+				u.name = fb.nextName()
+				fb.emit(u)
+				for i, le := range lhsList.ElemList {
+					if n, ok := le.(*Name); ok && n.Value == "_" {
+						continue
+					}
+					ext := &SSAExtract{Tuple: u, Index: i}
+					ext.typ = ssaTupleElemType(u.typ, i)
+					ext.name = fb.nextName()
+					fb.emit(ext)
+					fb.buildStore(le, ext)
+				}
+				return
+			}
+		}
 	}
 	rhs := fb.buildExpr(s.Rhs)
 	if rhs == nil {
@@ -1119,6 +1143,40 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *AssignStmt) {
 					}
 					return
 				}
+			}
+		}
+		if oe, ok := s.Rhs.(*Operation); ok && oe.Y == nil && oe.Op == Recv {
+			x := fb.buildExpr(oe.X)
+			if x != nil {
+				elemType := ssaChanElemType(x.SSAType())
+				u := &SSAUnOp{Op: OpArrow, X: x, CommaOk: true}
+				u.typ = NewTuple(
+					NewTCVar(nil, "v", elemType),
+					NewTCVar(nil, "ok", Typ[Bool]),
+				)
+				u.name = fb.nextName()
+				fb.emit(u)
+				for i, name := range names {
+					if name.Value == "_" {
+						continue
+					}
+					ext := &SSAExtract{Tuple: u, Index: i}
+					ext.typ = ssaTupleElemType(u.typ, i)
+					ext.name = fb.nextName()
+					fb.emit(ext)
+					fb.removeVar(name.Value)
+					var obj Object
+					if fb.info != nil {
+						obj = fb.info.Defs[name]
+					}
+					if obj == nil {
+						obj = NewTCVar(fb.fn.Pkg.Pkg, name.Value, ext.typ)
+					}
+					alloc := fb.emitAlloc(ext.typ, 0)
+					fb.vars[obj] = alloc
+					fb.emitStore(alloc, ext)
+				}
+				return
 			}
 		}
 	}

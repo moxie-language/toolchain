@@ -1160,6 +1160,30 @@ func (fb *ssaFuncBuilder) buildAssign(s *syntax.AssignStmt) {
 				}
 			}
 		}
+		if oe, ok := s.Rhs.(*syntax.Operation); ok && oe.Y == nil && oe.Op == token.Recv {
+			x := fb.buildExpr(oe.X)
+			if x != nil {
+				elemType := ssaChanElemType(x.SSAType())
+				u := &SSAUnOp{Op: OpArrow, X: x, CommaOk: true}
+				u.typ = NewTuple(
+					NewTCVar(nil, "v", elemType),
+					NewTCVar(nil, "ok", Typ[Bool]),
+				)
+				u.name = fb.nextName()
+				fb.emit(u)
+				for i, le := range lhsList.ElemList {
+					if n, ok := le.(*syntax.Name); ok && n.Value == "_" {
+						continue
+					}
+					ext := &SSAExtract{Tuple: u, Index: i}
+					ext.typ = ssaTupleElemType(u.typ, i)
+					ext.name = fb.nextName()
+					fb.emit(ext)
+					fb.buildStore(le, ext)
+				}
+				return
+			}
+		}
 	}
 	rhs := fb.buildExpr(s.Rhs)
 	if rhs == nil {
@@ -1359,6 +1383,40 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *syntax.AssignStmt) {
 					}
 					return
 				}
+			}
+		}
+		if oe, ok := s.Rhs.(*syntax.Operation); ok && oe.Y == nil && oe.Op == token.Recv {
+			x := fb.buildExpr(oe.X)
+			if x != nil {
+				elemType := ssaChanElemType(x.SSAType())
+				u := &SSAUnOp{Op: OpArrow, X: x, CommaOk: true}
+				u.typ = NewTuple(
+					NewTCVar(nil, "v", elemType),
+					NewTCVar(nil, "ok", Typ[Bool]),
+				)
+				u.name = fb.nextName()
+				fb.emit(u)
+				for i, name := range names {
+					if name.Value == "_" {
+						continue
+					}
+					ext := &SSAExtract{Tuple: u, Index: i}
+					ext.typ = ssaTupleElemType(u.typ, i)
+					ext.name = fb.nextName()
+					fb.emit(ext)
+					fb.removeVar(name.Value)
+					var obj Object
+					if fb.info != nil {
+						obj = fb.info.Defs[name]
+					}
+					if obj == nil {
+						obj = NewTCVar(fb.fn.Pkg.Pkg, name.Value, ext.typ)
+					}
+					alloc := fb.emitAlloc(ext.typ, 0)
+					fb.vars[obj] = alloc
+					fb.emitStore(alloc, ext)
+				}
+				return
 			}
 		}
 	}
@@ -2153,21 +2211,98 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 		_ = i
 	}
 
-	sel := &SSASelect{States: states, Blocking: true}
-	sel.typ = NewTuple(
+	// Build tuple type with recv element types.
+	tupleVars := []*TCVar{
 		NewTCVar(nil, "index", Typ[Int32]),
 		NewTCVar(nil, "recvOk", Typ[Bool]),
-	)
+	}
+	recvFieldIdx := int32(2) // first recv value in tuple
+	for _, st := range states {
+		if st.Dir == SelectDirRecv && st.Chan != nil {
+			elemType := ssaChanElemType(st.Chan.SSAType())
+			tupleVars = append(tupleVars, NewTCVar(nil, "recv", elemType))
+		}
+	}
+	hasDefault := false
+	for _, clause := range s.Body {
+		if clause.Comm == nil {
+			hasDefault = true
+			break
+		}
+	}
+	sel := &SSASelect{States: states, Blocking: !hasDefault}
+	sel.typ = &Tuple{vars: tupleVars}
 	sel.name = fb.nextName()
 	fb.emit(sel)
 
+	// Extract index from select result.
+	idxExt := &SSAExtract{Tuple: sel, Index: 0}
+	idxExt.typ = Typ[Int32]
+	idxExt.name = fb.nextName()
+	fb.emit(idxExt)
+
+	// Build if/else chain: if index == 0 -> case0, elif index == 1 -> case1, ...
+	entryBlock := fb.currentBlock
+	for i := int32(0); i < int32(len(s.Body)); i++ {
+		if i == int32(len(s.Body))-1 {
+			// Last case: unconditional jump.
+			fb.emit(&SSAJump{Comment: "select.last"})
+			entryBlock.Succs = append(entryBlock.Succs, caseBlocks[i])
+			caseBlocks[i].Preds = append(caseBlocks[i].Preds, entryBlock)
+			break
+		}
+		nextCheck := fb.newBlock("select.check")
+		cmpVal := &SSAConst{typ: Typ[Int32], val: constInt{int64(i)}}
+		cmp := &SSABinOp{Op: OpEql, X: idxExt, Y: cmpVal}
+		cmp.typ = Typ[Bool]
+		cmp.name = fb.nextName()
+		fb.emit(cmp)
+		fb.emit(&SSAIf{Cond: cmp})
+		entryBlock.Succs = append(entryBlock.Succs, caseBlocks[i])
+		caseBlocks[i].Preds = append(caseBlocks[i].Preds, entryBlock)
+		entryBlock.Succs = append(entryBlock.Succs, nextCheck)
+		nextCheck.Preds = append(nextCheck.Preds, entryBlock)
+		fb.currentBlock = nextCheck
+		entryBlock = nextCheck
+	}
+
+	// Build case bodies.
+	recvIdx := recvFieldIdx
 	for i, clause := range s.Body {
 		selScope := fb.enterScope()
 		caseBlocks[i].ScopeID = fb.scopeID
 		fb.currentBlock = caseBlocks[i]
-		if clause.Comm != nil {
-			fb.buildStmt(clause.Comm)
+
+		// For recv cases, extract the received value from the select tuple
+		// and bind it to the variable (don't re-do chanRecv).
+		if clause.Comm != nil && states[i].Dir == SelectDirRecv {
+			switch comm := clause.Comm.(type) {
+			case *syntax.AssignStmt:
+				// v := <-ch or v = <-ch
+				ext := &SSAExtract{Tuple: sel, Index: recvIdx}
+				ext.typ = ssaChanElemType(states[i].Chan.SSAType())
+				ext.name = fb.nextName()
+				fb.emit(ext)
+				if comm.Op == token.Def {
+					names := ssaExprNames(comm.Lhs)
+					for _, name := range names {
+						if name.Value == "_" {
+							continue
+						}
+						fb.removeVar(name.Value)
+						obj := NewTCVar(fb.fn.Pkg.Pkg, name.Value, ext.typ)
+						alloc := fb.emitAlloc(ext.typ, 0)
+						fb.vars[obj] = alloc
+						fb.emitStore(alloc, ext)
+					}
+				} else {
+					fb.buildStore(comm.Lhs, ext)
+				}
+			}
+			recvIdx++
 		}
+		// For send cases, the send was already done by chanSelect. Skip comm.
+
 		for _, stmt := range clause.Body {
 			fb.buildStmt(stmt)
 			if fb.currentBlock == nil {
