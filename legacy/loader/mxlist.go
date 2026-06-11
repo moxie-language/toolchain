@@ -320,6 +320,9 @@ func (r *resolver) walk(importPath string, srcDir string) error {
 	// Walk dependencies first (depth-first, deps before dependents).
 	allImports := pkg.Imports
 	for _, imp := range allImports {
+		if false {
+			fmt.Fprintf(os.Stderr, "DEBUG: %q imports %q (dir=%s)\n", importPath, imp, dir)
+		}
 		if err := r.walk(imp, dir); err != nil {
 			return err
 		}

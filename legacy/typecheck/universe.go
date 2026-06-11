@@ -96,9 +96,11 @@ func init() {
 	defObj(uintptrType.obj)
 	uintptrType.obj.typ = uintptrType
 
-	// error interface
-	errMeth := &IfaceMethod{name: "Error", sig: NewSignature(nil, nil, NewTuple(NewVar(nil, "", Typ[String])), false)}
-	errIface := NewInterface([]*IfaceMethod{errMeth}, nil)
+	// error interface - includes String() so error values satisfy stringer
+	errStrSig := NewSignature(nil, nil, NewTuple(NewVar(nil, "", Typ[String])), false)
+	errMeth := &IfaceMethod{name: "Error", sig: errStrSig}
+	errStringMeth := &IfaceMethod{name: "String", sig: errStrSig}
+	errIface := NewInterface([]*IfaceMethod{errMeth, errStringMeth}, nil)
 	errIface.Complete()
 	universeError = NewTypeName(nil, "error", errIface)
 	defObj(universeError)

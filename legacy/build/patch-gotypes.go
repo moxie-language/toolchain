@@ -70,6 +70,7 @@ func main() {
 	patchUnify(dstDir)
 	patchTypeTerm(dstDir)
 	patchSpawnBuiltin(dstDir)
+	patchErrorString(dstDir)
 
 	fmt.Fprintf(os.Stderr, "patched go/types in %s\n", dstDir)
 }
@@ -296,6 +297,19 @@ func patchSpawnBuiltin(dir string) {
 		}
 
 	case _Add:`)
+
+	mustWrite(f, src)
+}
+
+func patchErrorString(dir string) {
+	f := filepath.Join(dir, "universe.go")
+	src := mustRead(f)
+
+	// Add String() method to the error interface alongside Error().
+	// Moxie stdlib calls err.String() everywhere; error must satisfy stringer.
+	src = mustReplace(f, src,
+		"\t\t// interface{ Error() string }\n\t\tityp := &Interface{methods: []*Func{err}, complete: true}",
+		"\t\t// Moxie: error also has String() so it satisfies stringer.\n\t\tstrFn := NewFunc(nopos, nil, \"String\", sig)\n\n\t\t// interface{ Error() string; String() string }\n\t\tityp := &Interface{methods: []*Func{err, strFn}, complete: true}")
 
 	mustWrite(f, src)
 }

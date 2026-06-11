@@ -5076,7 +5076,13 @@ func matchTypeParam(paramType syntax.Expr, argType Type, tparams []*syntax.Field
 			}
 		}
 	case *syntax.SliceType:
-		if sl, ok := safeUnderlying(argType).(*Slice); ok {
+		u := safeUnderlying(argType)
+		// In Moxie, string and []byte are the same type. Treat string as
+		// []byte when matching against a slice type parameter.
+		if b, ok := u.(*Basic); ok && b.Kind() == TCString {
+			u = NewSlice(Typ[Uint8])
+		}
+		if sl, ok := u.(*Slice); ok {
 			matchTypeParam(pt.Elem, sl.Elem(), tparams, typeMap)
 		}
 	case *syntax.FuncType:
@@ -5120,7 +5126,15 @@ func extractConstraintTypeParams(constraint syntax.Expr, concreteType Type, tpar
 			extractConstraintTypeParams(c.X, concreteType, tparams, typeMap)
 		}
 	case *syntax.SliceType:
-		if sl, ok := safeUnderlying(concreteType).(*Slice); ok {
+		// In Moxie, string and []byte are the same type. When the concrete
+		// type is string (Basic), treat it as []byte for constraint matching.
+		ct := concreteType
+		u := safeUnderlying(ct)
+		if b, ok := u.(*Basic); ok && b.Kind() == TCString {
+			ct = NewSlice(Typ[Uint8])
+			u = ct
+		}
+		if sl, ok := u.(*Slice); ok {
 			if name, ok2 := c.Elem.(*syntax.Name); ok2 {
 				for _, tp := range tparams {
 					if tp.Name != nil && tp.Name.Value == name.Value {

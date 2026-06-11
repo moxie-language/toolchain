@@ -1166,6 +1166,35 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		return
 	}
 	if len(f.Blocks) == 0 {
+		// If function has a linkname, the declare uses the target symbol
+		// but consuming packages reference the original fully-qualified name.
+		// Emit a forwarding wrapper so the linker can resolve both.
+		if linknameMap != nil {
+			if target, ok := linknameMap[f.name]; ok {
+				_ = target
+				pkg := e.pkg.Pkg.Path()
+				if f.Pkg != nil {
+					pkg = f.Pkg.Pkg.Path()
+				}
+				origSym := irGlobalSymbol(pkg, f.name)
+				tgtSym := sym // already the linkname target from funcSymbol
+				// Check if the target is defined in the same package
+				// (has a body). If so, skip the declare to avoid
+				// conflicting with the existing define.
+				// If the linkname target is in the same package, the
+				// target function is already defined - skip the declare
+				// to avoid conflicting with the existing define.
+				pkgDot := pkg | "."
+				samePackage := hasPrefix(target, pkgDot)
+				if !samePackage {
+					e.emitFuncDecl(f)
+				}
+				if origSym != tgtSym {
+					e.emitLinknameForwarder(f, origSym, tgtSym)
+				}
+				return
+			}
+		}
 		e.emitFuncDecl(f)
 		return
 	}
@@ -1463,6 +1492,79 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 	}
 	e.w(")\n")
 	e.extDecls[sym] = ""
+}
+
+// emitLinknameForwarder emits a thin wrapper definition with origSym that
+// calls tgtSym. This allows consuming packages (which reference origSym)
+// to resolve to the linkname target (tgtSym) at link time.
+func (e *irEmitter) emitLinknameForwarder(f *SSAFunction, origSym, tgtSym string) {
+	retType := e.funcRetType(f)
+	useSret := needsSret(retType)
+	// Build parameter list with names
+	var paramTypes []string
+	var paramArgs []string
+	idx := int32(0)
+	if useSret {
+		pn := "%sret"
+		paramTypes = append(paramTypes, "ptr " | pn)
+		paramArgs = append(paramArgs, "ptr " | pn)
+		idx++
+	}
+	hasRecv := f.Signature != nil && f.Signature.Recv() != nil
+	if hasRecv {
+		rt := "ptr"
+		if _, isP := safeUnderlying(f.Signature.Recv().Type()).(*Pointer); !isP {
+			rt = e.llvmType(f.Signature.Recv().Type())
+			if rt == "" || rt == "void" { rt = "ptr" }
+		}
+		pn := "%p" | irItoa(idx)
+		paramTypes = append(paramTypes, rt | " " | pn)
+		paramArgs = append(paramArgs, rt | " " | pn)
+		idx++
+	}
+	if f.Signature != nil && f.Signature.Params() != nil {
+		for i := 0; i < f.Signature.Params().Len(); i++ {
+			pt := e.llvmType(f.Signature.Params().At(i).Type())
+			if pt == "" || pt == "void" { pt = "ptr" }
+			pn := "%p" | irItoa(idx)
+			paramTypes = append(paramTypes, pt | " " | pn)
+			paramArgs = append(paramArgs, pt | " " | pn)
+			idx++
+		}
+	}
+	// context pointer
+	ctxPN := "%p" | irItoa(idx)
+	paramTypes = append(paramTypes, "ptr " | ctxPN)
+	paramArgs = append(paramArgs, "ptr " | ctxPN)
+	// Emit define
+	e.w("\ndefine ")
+	if useSret {
+		e.w("void ")
+	} else {
+		e.w(retType) ; e.w(" ")
+	}
+	e.w(origSym) ; e.w("(")
+	for i, pt := range paramTypes {
+		if i > 0 { e.w(", ") }
+		e.w(pt)
+	}
+	e.w(") {\n")
+	if useSret || retType == "void" {
+		e.w("  call void ") ; e.w(tgtSym) ; e.w("(")
+		for i, pa := range paramArgs {
+			if i > 0 { e.w(", ") }
+			e.w(pa)
+		}
+		e.w(")\n  ret void\n")
+	} else {
+		e.w("  %fwd = call ") ; e.w(retType) ; e.w(" ") ; e.w(tgtSym) ; e.w("(")
+		for i, pa := range paramArgs {
+			if i > 0 { e.w(", ") }
+			e.w(pa)
+		}
+		e.w(")\n  ret ") ; e.w(retType) ; e.w(" %fwd\n")
+	}
+	e.w("}\n")
 }
 
 func (e *irEmitter) resolveResultType(t Type) (s string) {

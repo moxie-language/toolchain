@@ -252,14 +252,18 @@ func (c *Checker) checkFuncBody(fd *syntax.FuncDecl) {
 	if sig != nil {
 		// Receiver variable (for methods).
 		if sig.recv != nil && sig.recv.name != "" {
-			scope.Insert(sig.recv)
+			c.insertWithShadowCheck(scope, sig.recv, fd.Recv.Name)
 		}
 		// Parameters.
 		if sig.params != nil {
 			for i := 0; i < sig.params.Len(); i++ {
 				p := sig.params.At(i)
-				if p.name != "" {
-					scope.Insert(p)
+				if p.name != "" && p.name != "_" {
+					var nameNode *syntax.Name
+					if i < len(fd.Type.ParamList) && fd.Type.ParamList[i].Name != nil {
+						nameNode = fd.Type.ParamList[i].Name
+					}
+					c.insertWithShadowCheck(scope, p, nameNode)
 				}
 			}
 		}
@@ -267,13 +271,42 @@ func (c *Checker) checkFuncBody(fd *syntax.FuncDecl) {
 		if sig.results != nil {
 			for i := 0; i < sig.results.Len(); i++ {
 				r := sig.results.At(i)
-				if r.name != "" {
-					scope.Insert(r)
+				if r.name != "" && r.name != "_" {
+					var nameNode *syntax.Name
+					if i < len(fd.Type.ResultList) && fd.Type.ResultList[i].Name != nil {
+						nameNode = fd.Type.ResultList[i].Name
+					}
+					c.insertWithShadowCheck(scope, r, nameNode)
 				}
 			}
 		}
 	}
 	c.checkBlock(fd.Body, scope)
+}
+
+// insertWithShadowCheck inserts obj into scope and checks for shadowing of
+// outer scope names, imported package names, and predeclared identifiers.
+// Used for function parameters and named results which bypass declare().
+func (c *Checker) insertWithShadowCheck(s *Scope, obj Object, nameNode *syntax.Name) {
+	name := obj.Name()
+	if alt := s.Insert(obj); alt != nil {
+		if nameNode != nil {
+			c.errorf(nameNode.Pos(), name | " redeclared in this block")
+		}
+		return
+	}
+	var pos token.Pos
+	if nameNode != nil {
+		pos = nameNode.Pos()
+	}
+	if s.parent != nil {
+		if _, outer := s.parent.LookupParent(name); outer != nil {
+			c.errorf(pos, name | " shadows declaration in outer scope")
+		}
+	}
+	if Universe.Lookup(name) != nil {
+		c.errorf(pos, name | " shadows predeclared identifier")
+	}
 }
 
 // collectFuncTypeParams returns all type parameter names visible in a function
@@ -324,11 +357,28 @@ func extractTypeArgs(e syntax.Expr, add func(string)) {
 }
 
 // declare inserts obj into s, recording the definition in info.
+// Moxie prohibits all variable shadowing: a name declared in an inner scope
+// must not collide with any name in an outer scope, the file scope (imported
+// package names), or the universe scope (predeclared identifiers).
 func (c *Checker) declare(s *Scope, id *syntax.Name, obj Object) {
 	if id != nil && id.Value != "_" {
 		if alt := s.Insert(obj); alt != nil {
 			c.errorf(id.Pos(), id.Value | " redeclared in this block")
 			return
+		}
+		// Reject shadowing of any name from an outer scope (includes
+		// file-scope imports, package-level names, and universe builtins).
+		if s.parent != nil {
+			if _, outer := s.parent.LookupParent(id.Value); outer != nil {
+				c.errorf(id.Pos(), id.Value | " shadows declaration in outer scope")
+			}
+		}
+		// Explicit universe check for package-level declarations whose
+		// parent IS universe (LookupParent above wouldn't reach it from
+		// package scope since universe is package scope's parent only
+		// if file scopes are interposed).
+		if Universe.Lookup(id.Value) != nil {
+			c.errorf(id.Pos(), id.Value | " shadows predeclared identifier")
 		}
 	}
 	if c.info != nil && id != nil {
