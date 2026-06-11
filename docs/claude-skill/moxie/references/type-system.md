@@ -81,7 +81,18 @@ type Events []Event              // compile error
 type Index map[string]int32      // compile error
 ```
 
-Named slice/map types are banned. Methods belong on the struct that holds the slice, not on the slice itself.
+Named slice/map types are banned. Wrap in a struct to add methods:
+
+```moxie
+type Events struct {
+    items []*Event
+}
+
+func (e *Events) Add(ev *Event) { e.items = append(e.items, ev) }
+func (e *Events) Len() (n int32) { return len(e.items) }
+```
+
+Methods belong on the struct that holds the slice, not on the slice itself.
 
 ## Interfaces
 
