@@ -89,14 +89,21 @@ type Codec interface {
 
 ### IPC Channels
 
-Channels passed to `spawn` become IPC channels multiplexed over a single socketpair. Operations are non-blocking with retry-and-yield (1ms sleep, indefinite retry until success or pipe close). Backpressure expressed by pipe buffer fullness, not blocking.
+Channels passed to `spawn` become IPC channels. Two-layer transport on native:
 
-### Native: socketpair + fork
+1. **MAP_SHARED SPSC ring buffers** (fast data path) - one pair per channel (parent->child, child->parent). Allocated via `mmap(MAP_SHARED|MAP_ANONYMOUS)` before `fork()`, so both processes share the same physical memory. 64KB data area per ring. Lock-free: producer writes `writeIdx` with release semantics, consumer reads with acquire semantics. Messages are length-prefixed `[len:4][payload][pad-to-align-8]`.
 
-1. `socketpair(AF_UNIX, SOCK_STREAM)`
-2. `fork()` - child gets COW copy
-3. Child closes parent's fd, runs function, exits on completion
-4. Parent closes child's fd, registers domain, continues
+2. **Unix socketpair** (control channel) - lifecycle detection, close signals, child-ready handshake, and fallback for oversized messages that exceed the ring buffer.
+
+Operations are non-blocking with retry-and-yield (1ms sleep, indefinite retry until success or ring/pipe close). Backpressure expressed by ring buffer fullness, not blocking.
+
+### Native: ring buffers + fork
+
+1. `mmap(MAP_SHARED)` ring buffer pairs created for each channel (before fork)
+2. `socketpair(AF_UNIX, SOCK_STREAM)` for control
+3. `fork()` - child inherits shared ring buffer mappings (same physical pages) and COW copy of everything else
+4. Child closes parent's socket fd, runs function, exits on completion
+5. Parent closes child's socket fd, registers domain, continues
 
 ### WASM: Worker
 
