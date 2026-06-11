@@ -101,8 +101,8 @@ Operations are non-blocking with retry-and-yield (1ms sleep, indefinite retry un
 
 1. `mmap(MAP_SHARED)` ring buffer pairs created for each channel (before fork)
 2. `socketpair(AF_UNIX, SOCK_STREAM)` for control
-3. `fork()` - child inherits shared ring buffer mappings (same physical pages) and COW copy of everything else
-4. Child closes parent's socket fd, runs function, exits on completion
+3. `fork()` - child is a new process but **not** an independent program. It inherits the parent's entire address space: all package globals already initialized by `init()`, all heap state. Pages are shared (COW on write) but the child typically only runs `fn(args)` and exits, so most pages are never written. The MAP_SHARED ring buffer mappings are explicitly shared physical memory (not COW) - both processes read/write the same pages.
+4. Child closes parent's socket fd, runs `fn(args)`, exits
 5. Parent closes child's socket fd, registers domain, continues
 
 ### WASM: Worker
