@@ -65,13 +65,14 @@ Essential for long-running event loops with `select` - large allocations should 
 - Child receives independent copy.
 - When a domain exits, all its memory is released.
 
-## Long-Running WASM Workers
+## Long-Running Workers (all targets)
 
-The WASM target's mark phase uses recursive depth-first scan with a fixed call stack (~1MB). Large live heap graphs overflow the stack.
+The scope-tag system frees at block exit, but long-running event loops (`for { select { ... } }`) never exit their block. Allocations inside the loop body accumulate unless explicitly managed.
 
-Rules for long-lived WASM workers:
-1. `delete(map, key)` is mandatory when done. `map[k] = nil` keeps slot reachable.
+Rules for long-lived workers:
+1. `delete(map, key)` is mandatory when done. `map[k] = nil` keeps slot allocated.
 2. Every add path needs a corresponding remove path.
 3. Clean ALL containers at the same boundary.
 4. `slice = nil` releases backing array. `slice = slice[:0]` retains allocation.
 5. Monotonically growing maps need delete paths or two-generation rotation.
+6. Use `free()` for large temporary buffers mid-function rather than waiting for block exit.

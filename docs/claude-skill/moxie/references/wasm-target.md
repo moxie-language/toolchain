@@ -49,9 +49,9 @@ Helper modules used as WASM host shims. Not importable from Moxie source; wired 
 
 ## WASM Memory
 
-The WASM target uses Boehm conservative GC with recursive depth-first mark phase. Fixed WASM call stack (~1MB = ~10k-20k frames). Large live heap graphs overflow the stack.
+The WASM target uses the same scope-tag dealloc system as native - block-scoped ownership with `scopePush`/`scopeFreeTo`/`scopeRelocate`, `free()`, and escape-bit promotion. No GC. The memory model described in `memory-management.md` applies uniformly across all targets.
 
-Do not write "allocate freely, GC will clean up" code in long-lived WASM workers. Every allocation needs an explicit free path.
+Long-lived WASM workers must still be disciplined about cleanup: `delete(map, key)` when entries are done, `free()` large buffers mid-function, and explicit remove paths for every add path. The WASM call stack is fixed (~1MB), so deeply recursive algorithms can overflow it independently of memory management.
 
 ## spawn in WASM
 
