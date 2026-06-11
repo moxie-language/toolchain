@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"runtime"
 	"unsafe"
 )
 
@@ -10,6 +11,9 @@ func cRun(argv unsafe.Pointer, argc int32) (n int32)
 
 //export mxc_run_async
 func cRunAsync(argv unsafe.Pointer, argc int32) (n int32)
+
+//export mxc_fork
+func cFork() (n int32)
 
 //export mxc_wait_any
 func cWaitAny() (n int32)
@@ -34,6 +38,51 @@ func cReadfile(path unsafe.Pointer, pathLen int32, buf unsafe.Pointer, bufCap in
 
 //export mxc_filesize
 func cFilesize(path unsafe.Pointer, pathLen int32) (n int32)
+
+// Ring buffer FFI
+//export mxc_ring_create
+func cRingCreate(dataSize int32) (p unsafe.Pointer)
+//export mxc_ring_destroy
+func cRingDestroy(ring unsafe.Pointer)
+//export mxc_ring_close
+func cRingClose(ring unsafe.Pointer)
+//export mxc_ring_closed
+func cRingClosed(ring unsafe.Pointer) (n int32)
+//export mxc_ring_send
+func cRingSend(ring unsafe.Pointer, data unsafe.Pointer, dlen int32) (n int32)
+//export mxc_ring_peek_len
+func cRingPeekLen(ring unsafe.Pointer) (n int32)
+//export mxc_ring_recv
+func cRingRecv(ring unsafe.Pointer, buf unsafe.Pointer, bufcap int32) (n int32)
+
+// Thread FFI
+//export mxc_spawn_thread
+func cSpawnThread(fn unsafe.Pointer, arg unsafe.Pointer, handleOut unsafe.Pointer, statusOut unsafe.Pointer) (n int32)
+//export mxc_thread_alive
+func cThreadAlive(statusPtr unsafe.Pointer) (n int32)
+//export mxc_thread_join
+func cThreadJoin(handlePtr unsafe.Pointer, statusPtr unsafe.Pointer)
+//export mxc_usleep
+func cUsleep(us int32)
+//export mxc_spawn_worker
+func cSpawnWorker(arg unsafe.Pointer, handleOut unsafe.Pointer, statusOut unsafe.Pointer) (n int32)
+//export mxc_detect_tls
+func cDetectTLS() (n int32)
+
+// TLS probe: the C side spawns a thread that calls mxc_tls_probe_write,
+// then the parent calls mxc_tls_probe_read. If the global is TLS, the
+// child's write is invisible to the parent.
+var tlsProbeVar int32
+
+//export mxc_tls_probe_write
+func tlsProbeWrite() {
+	tlsProbeVar = 1
+}
+
+//export mxc_tls_probe_read
+func tlsProbeRead() (n int32) {
+	return tlsProbeVar
+}
 
 func writeStr(fd int32, s string) {
 	if len(s) > 0 {
@@ -308,7 +357,7 @@ func getMoxiePath() (s string) {
 	return joinPath(home, "moxie")
 }
 
-func mxcVersion() (s string) { return "1.9.8" }
+func mxcVersion() (s string) { return "1.9.9" }
 
 func moxieCacheDir() (s string) {
 	return joinPath(joinPath(getMoxiePath(), "cache"), "mxc-" | mxcVersion())
@@ -855,6 +904,41 @@ func pkgCacheKey(dir string, files []string) (s string) {
 		all = append(all, 0)
 	}
 	return fnvHash(all)
+}
+
+// pkgKeyMemo caches each package's transitive hash by import path. Filled
+// in dependency order (resolver emits deps before dependents), so a
+// dependent's key always sees its deps' final hashes. Without dep hashes in
+// the key, a dependency's layout change would leave a dependent's cached .bc
+// reusable with a stale ABI - silent struct-offset corruption at link time.
+var pkgKeyMemo map[string]string
+
+func pkgHash(p *pkgInfo) (s string) {
+	if pkgKeyMemo == nil {
+		pkgKeyMemo = map[string]string{}
+	}
+	if h, ok := pkgKeyMemo[p.path]; ok {
+		return h
+	}
+	var sorted []string
+	for _, imp := range p.imports {
+		sorted = append(sorted, imp)
+	}
+	for i := int32(1); i < int32(len(sorted)); i++ {
+		for j := i; j > 0 && sorted[j] < sorted[j-1]; j-- {
+			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
+		}
+	}
+	acc := []byte(pkgCacheKey(p.dir, p.files))
+	for _, imp := range sorted {
+		if dh, ok := pkgKeyMemo[imp]; ok {
+			acc = append(acc, '|')
+			acc = append(acc, dh...)
+		}
+	}
+	hv := fnvHash(acc)
+	pkgKeyMemo[p.path] = hv
+	return hv
 }
 
 func versionedCacheName(hash, version, ext string) (s string) {
@@ -1723,9 +1807,16 @@ func generateMxh(pkg *TCPackage) (s string) {
 			continue
 		}
 		if !exported {
+			// Unexported types must be emitted when they carry layout
+			// information that dependents need: struct types (for embedding
+			// chains and GEP offsets) and types with methods (for interface
+			// dispatch). Everything else is internal.
 			if tn, ok := obj.(*TypeName); ok {
-				if named, ok2 := tn.typ.(*Named); ok2 && named.NumMethods() > 0 {
-					// include unexported types with methods for interface dispatch
+				if named, ok2 := tn.typ.(*Named); ok2 {
+					_, isStruct := named.underlying.(*TCStruct)
+					if named.NumMethods() == 0 && !isStruct {
+						continue
+					}
 				} else {
 					continue
 				}
@@ -2112,7 +2203,7 @@ func cmdCacheWarm() {
 			skipped++
 			continue
 		}
-		hash := pkgCacheKey(pkg.dir, pkg.files)
+		hash := pkgHash(pkg)
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
 		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
 		_, bcOk := readFile(cached)
@@ -2254,7 +2345,7 @@ func cmdUpdate(rebuildAll bool) {
 			writeStr(2, "    FAIL: clang for " | pkg.path | "\n")
 			continue
 		}
-		hash := pkgCacheKey(pkg.dir, pkg.files)
+		hash := pkgHash(pkg)
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
 		cdir := joinPath(cacheBase, safeName(pkg.path))
 		mkdirAll(cdir, 0755)
@@ -2434,7 +2525,7 @@ func cmdTest(args []string) {
 		if dp == pkg {
 			compilePath = "main"
 		}
-		hash := pkgCacheKey(dp.dir, dp.files)
+		hash := pkgHash(dp)
 		cachedMxh := cachedMxhPath(cacheBase, dp.path, hash, dp.version)
 		_, mxhOk := readFile(cachedMxh)
 		if mxhOk && !forceRebuild && dp != pkg {
@@ -2469,7 +2560,7 @@ func cmdTest(args []string) {
 			compilePath = "main"
 		}
 
-		hash := pkgCacheKey(dp.dir, dp.files)
+		hash := pkgHash(dp)
 		cached := cachedBcPath(cacheBase, dp.path, hash, dp.version)
 		cachedMxh := cachedMxhPath(cacheBase, dp.path, hash, dp.version)
 
@@ -2943,14 +3034,6 @@ func main() {
 		cmdBuildRuntime()
 		return
 	}
-	if cmd == "build-pkg" {
-		// Internal worker mode used by the parallel build orchestrator.
-		if len(args) < 3 {
-			fatal("usage: mxc build-pkg <pkg>")
-		}
-		cmdBuildPkg(args[2])
-		return
-	}
 	if cmd != "build" {
 		writeStr(2, "usage: mxc <build|test|version|cache|fetch|update|build-runtime> ...\n")
 		os.Exit(1)
@@ -3018,6 +3101,12 @@ func main() {
 	mkdirAll(tmpdir, 0755)
 
 	cacheBase := pkgCacheDir()
+	// TLS probe: if this binary's globals aren't thread_local, the parallel
+	// path would corrupt shared state. Fall back to serial.
+	if buildJobs > 1 && cDetectTLS() == 0 {
+		writeStr(2, "  note: globals not TLS-isolated, forcing -j 1 (rebuild with self-compiled mxc for parallel)\n")
+		buildJobs = 1
+	}
 	var allBcFiles []string
 	var hasRuntimePkg bool
 	if buildJobs > 1 {
@@ -3180,7 +3269,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
-		hash := pkgCacheKey(pkg.dir, pkg.files)
+		hash := pkgHash(pkg)
 		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
 		_, mxhOk := readFile(cachedMxh)
 		if mxhOk && !forceRebuild {
@@ -3201,7 +3290,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			compilePath = pkg.name
 		}
 
-		hash := pkgCacheKey(pkg.dir, pkg.files)
+		hash := pkgHash(pkg)
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
 		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
 
@@ -3289,17 +3378,419 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 	return bcs, hasRT
 }
 
-type buildJob struct {
-	pid int32
-	idx int32
+// --- Ring buffer helpers ---
+
+func ringSend(ring unsafe.Pointer, data []byte) (ok bool) {
+	var dp unsafe.Pointer
+	if len(data) > 0 {
+		dp = unsafe.Pointer(unsafe.SliceData(data))
+	}
+	for {
+		rc := cRingSend(ring, dp, int32(len(data)))
+		if rc == 0 {
+			return true
+		}
+		if rc < 0 {
+			return false
+		}
+		cUsleep(100) // backpressure
+	}
 }
 
-// buildPkgsParallel is the orchestrator: it walks the dependency graph and
-// fans package compiles out to up to jobs concurrent worker processes
-// (this same binary, invoked as `build-pkg <path>`). A package is dispatched
-// only once every direct dependency is done, so workers always find fresh
-// .mxh headers for their imports in the cache. The orchestrator itself never
-// compiles - it only schedules, reaps, and assembles the .bc list.
+func ringRecv(ring unsafe.Pointer) (data []byte, ok bool) {
+	for {
+		pn := cRingPeekLen(ring)
+		if pn > 0 {
+			buf := []byte{:pn}
+			n := cRingRecv(ring, unsafe.Pointer(unsafe.SliceData(buf)), pn)
+			if n > 0 {
+				return buf[:n], true
+			}
+			if n < 0 {
+				return nil, false
+			}
+		}
+		if pn < 0 {
+			return nil, false
+		}
+		cUsleep(100)
+	}
+}
+
+// ringRecvNonblock polls once. Returns (data, true) on message, (nil, true)
+// if empty but open, (nil, false) if closed+empty.
+// Allocates a buffer of exactly the right size for the message.
+func ringRecvNonblock(ring unsafe.Pointer) (data []byte, ok bool) {
+	pn := cRingPeekLen(ring)
+	if pn == 0 {
+		return nil, true // empty but open
+	}
+	if pn < 0 {
+		return nil, false // closed+empty
+	}
+	buf := []byte{:pn}
+	n := cRingRecv(ring, unsafe.Pointer(unsafe.SliceData(buf)), pn)
+	if n > 0 {
+		return buf[:n], true
+	}
+	if n < 0 {
+		return nil, false
+	}
+	return nil, true
+}
+
+func ringSendInt32(ring unsafe.Pointer, v int32) (ok bool) {
+	var b [4]byte
+	b[0] = byte(v >> 24)
+	b[1] = byte(v >> 16)
+	b[2] = byte(v >> 8)
+	b[3] = byte(v)
+	return ringSend(ring, b[:])
+}
+
+func ringRecvInt32(ring unsafe.Pointer) (v int32, ok bool) {
+	d, rok := ringRecv(ring)
+	if !rok || len(d) < 4 {
+		return -1, false
+	}
+	v = int32(d[0])<<24 | int32(d[1])<<16 | int32(d[2])<<8 | int32(d[3])
+	return v, true
+}
+
+// --- Package metadata serialization ---
+// Text format: newline-separated fields. All strings are raw UTF-8.
+// Layout:
+//   numPkgs\n
+//   triple\n clang\n tmpdir\n cacheBase\n root\n modPrefix\n modDir\n
+//   for each pkg: path\n name\n dir\n version\n
+//     numFiles\n file1\n ... numCfiles\n cf1\n ... numBcfiles\n bf1\n ...
+//     numImports\n imp1\n ...
+
+func serializePkgMeta(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase, root, modPrefix, modDir string) (data []byte) {
+	var b []byte
+	b = append(b, simpleItoa(len(pkgs))...)
+	b = append(b, '\n')
+	b = append(b, triple...)
+	b = append(b, '\n')
+	b = append(b, clang...)
+	b = append(b, '\n')
+	b = append(b, tmpdir...)
+	b = append(b, '\n')
+	b = append(b, cacheBase...)
+	b = append(b, '\n')
+	b = append(b, root...)
+	b = append(b, '\n')
+	b = append(b, modPrefix...)
+	b = append(b, '\n')
+	b = append(b, modDir...)
+	b = append(b, '\n')
+	for _, p := range pkgs {
+		b = append(b, p.path...)
+		b = append(b, '\n')
+		b = append(b, p.name...)
+		b = append(b, '\n')
+		b = append(b, p.dir...)
+		b = append(b, '\n')
+		b = append(b, p.version...)
+		b = append(b, '\n')
+		b = append(b, simpleItoa(len(p.files))...)
+		b = append(b, '\n')
+		for _, f := range p.files {
+			b = append(b, f...)
+			b = append(b, '\n')
+		}
+		b = append(b, simpleItoa(len(p.cfiles))...)
+		b = append(b, '\n')
+		for _, f := range p.cfiles {
+			b = append(b, f...)
+			b = append(b, '\n')
+		}
+		b = append(b, simpleItoa(len(p.bcfiles))...)
+		b = append(b, '\n')
+		for _, f := range p.bcfiles {
+			b = append(b, f...)
+			b = append(b, '\n')
+		}
+		b = append(b, simpleItoa(len(p.imports))...)
+		b = append(b, '\n')
+		for _, im := range p.imports {
+			b = append(b, im...)
+			b = append(b, '\n')
+		}
+	}
+	return b
+}
+
+// deserLine reads the next line from data[pos:], returns it and advances pos.
+func deserLine(data []byte, pos int32) (line string, next int32) {
+	start := pos
+	for pos < int32(len(data)) && data[pos] != '\n' {
+		pos++
+	}
+	line = string(data[start:pos])
+	if pos < int32(len(data)) {
+		pos++ // skip \n
+	}
+	return line, pos
+}
+
+func deserInt(data []byte, pos int32) (v int32, next int32) {
+	s, np := deserLine(data, pos)
+	return parseInt32(s), np
+}
+
+type workerMeta struct {
+	pkgs      []*pkgInfo
+	triple    string
+	clang     string
+	tmpdir    string
+	cacheBase string
+	root      string
+	modPrefix string
+	modDir    string
+}
+
+func deserializePkgMeta(data []byte) (m *workerMeta) {
+	pos := int32(0)
+	numPkgs, pos := deserInt(data, pos)
+	m = &workerMeta{}
+	m.triple, pos = deserLine(data, pos)
+	m.clang, pos = deserLine(data, pos)
+	m.tmpdir, pos = deserLine(data, pos)
+	m.cacheBase, pos = deserLine(data, pos)
+	m.root, pos = deserLine(data, pos)
+	m.modPrefix, pos = deserLine(data, pos)
+	m.modDir, pos = deserLine(data, pos)
+	m.pkgs = []*pkgInfo{:numPkgs}
+	for i := int32(0); i < numPkgs; i++ {
+		p := &pkgInfo{}
+		p.path, pos = deserLine(data, pos)
+		p.name, pos = deserLine(data, pos)
+		p.dir, pos = deserLine(data, pos)
+		p.version, pos = deserLine(data, pos)
+		nf, np := deserInt(data, pos)
+		pos = np
+		if nf > 0 {
+			p.files = []string{:nf}
+			for j := int32(0); j < nf; j++ {
+				p.files[j], pos = deserLine(data, pos)
+			}
+		}
+		nc, npc := deserInt(data, pos)
+		pos = npc
+		if nc > 0 {
+			p.cfiles = []string{:nc}
+			for j := int32(0); j < nc; j++ {
+				p.cfiles[j], pos = deserLine(data, pos)
+			}
+		}
+		nb, npb := deserInt(data, pos)
+		pos = npb
+		if nb > 0 {
+			p.bcfiles = []string{:nb}
+			for j := int32(0); j < nb; j++ {
+				p.bcfiles[j], pos = deserLine(data, pos)
+			}
+		}
+		ni, npi := deserInt(data, pos)
+		pos = npi
+		if ni > 0 {
+			p.imports = []string{:ni}
+			for j := int32(0); j < ni; j++ {
+				p.imports[j], pos = deserLine(data, pos)
+			}
+		}
+		m.pkgs[i] = p
+	}
+	return m
+}
+
+// --- Worker entry (runs in a new thread) ---
+// Receives metadata via ringA, then receives job indices. Compiles each
+// package, writes .bc + .mxh to cache, sends result on ringB.
+// ringA/ringB pointers are passed as a 2-element unsafe.Pointer array.
+
+type workerRings struct {
+	ringA unsafe.Pointer // parent -> worker (jobs)
+	ringB unsafe.Pointer // worker -> parent (results)
+}
+
+//export mxc_worker_entry
+func workerEntryExport(arg unsafe.Pointer) {
+	// Initialize this thread's heap and package state (TLS globals start zeroed).
+	// Must happen before any Moxie allocation. allocateHeap() mmaps a fresh
+	// region, initHeap() sets the bump pointer, initAll() runs package inits.
+	runtime.InitCShared()
+
+	wr := (*workerRings)(arg)
+	ringA := wr.ringA
+	ringB := wr.ringB
+
+	metaData, metaOk := ringRecv(ringA)
+	if !metaOk {
+		return
+	}
+	meta := deserializePkgMeta(metaData)
+	metaData = nil
+	metaBuf = nil
+
+	// Set up module context from metadata
+	globalModPrefix = meta.modPrefix
+	globalModDir = meta.modDir
+	quietDiscover = true
+
+	// Initialize this thread's compiler state (TLS globals are zeroed)
+	registerBuiltins()
+
+	// Build idxByPath for this thread's copy
+	idxByPath := map[string]int32{}
+	for i := int32(0); i < int32(len(meta.pkgs)); i++ {
+		idxByPath[meta.pkgs[i].path] = i
+	}
+
+	// Compute hashes for all packages (worker's own pkgKeyMemo)
+	hashes := []string{:len(meta.pkgs)}
+	for i := int32(0); i < int32(len(meta.pkgs)); i++ {
+		hashes[i] = pkgHash(meta.pkgs[i])
+	}
+
+	// Work loop: receive job index, compile, send result
+	for {
+		idx, ok := ringRecvInt32(ringA)
+		if !ok {
+			break // ring closed, shutdown
+		}
+		if idx < 0 || idx >= int32(len(meta.pkgs)) {
+			workerSendResult(ringB, idx, "invalid package index")
+			continue
+		}
+		pkg := meta.pkgs[idx]
+		errMsg := workerCompilePkg(pkg, hashes[idx], meta, idxByPath, hashes)
+		workerSendResult(ringB, idx, errMsg)
+	}
+}
+
+// workerSendResult sends idx + error text on ringB.
+// Empty errMsg = success. Non-empty = error description.
+// Wire format: [idx:4 BE] [errlen:4 BE] [error text]
+func workerSendResult(ring unsafe.Pointer, idx int32, errMsg string) {
+	elen := int32(len(errMsg))
+	msg := []byte{:8 + elen}
+	msg[0] = byte(idx >> 24)
+	msg[1] = byte(idx >> 16)
+	msg[2] = byte(idx >> 8)
+	msg[3] = byte(idx)
+	msg[4] = byte(elen >> 24)
+	msg[5] = byte(elen >> 16)
+	msg[6] = byte(elen >> 8)
+	msg[7] = byte(elen)
+	for i := int32(0); i < elen; i++ {
+		msg[8+i] = errMsg[i]
+	}
+	ringSend(ring, msg)
+}
+
+// workerCompilePkg compiles one package in the worker thread. All deps must
+// already have .mxh in cache. Returns empty string on success, error text on failure.
+func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map[string]int32, hashes []string) (errMsg string) {
+	// Load all dependency .mxh from cache
+	for _, imp := range pkg.imports {
+		di, ok := idxByPath[imp]
+		if !ok {
+			continue // builtin or already loaded
+		}
+		dep := meta.pkgs[di]
+		compilePath := dep.path
+		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+			compilePath = dep.name
+		}
+		// Skip if already in this thread's importRegistry
+		if importRegistry[compilePath] != nil {
+			continue
+		}
+		depHash := hashes[di]
+		cachedMxh := cachedMxhPath(meta.cacheBase, dep.path, depHash, dep.version)
+		if !loadMxh(cachedMxh) {
+			return "missing dep .mxh for " | dep.path
+		}
+		src := concatSources(dep.dir, dep.files)
+		ScanGenericDecls(src, compilePath)
+		src = nil
+	}
+
+	compilePath := pkg.path
+	if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		compilePath = pkg.name
+	}
+
+	writeStr(2, "  compile " | pkg.path | "\n")
+	src := concatSources(pkg.dir, pkg.files)
+	compilePkgDir = pkg.dir
+	ir := CompileToIR(src, compilePath, meta.triple)
+	src = nil
+	if len(ir) > 0 && ir[0] == ';' {
+		return remapErrorLines(ir)
+	}
+	if len(ir) == 0 {
+		return "empty IR for " | pkg.path
+	}
+
+	llFile := joinPath(meta.tmpdir, safeName(pkg.path) | ".ll")
+	writeFile(llFile, []byte(ir), 0644)
+	ir = ""
+
+	bcFile := joinPath(meta.tmpdir, safeName(pkg.path) | ".bc")
+	rc := run([]string{meta.clang, "--target=" | meta.triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
+	if rc != 0 {
+		return "clang failed for " | pkg.path
+	}
+
+	// Cache .bc
+	cacheDir := joinPath(meta.cacheBase, safeName(pkg.path))
+	mkdirAll(cacheDir, 0755)
+	cached := cachedBcPath(meta.cacheBase, pkg.path, hash, pkg.version)
+	bcData, rok := readFile(bcFile)
+	if rok {
+		writeFile(cached, bcData, 0644)
+	}
+	bcData = nil
+
+	// Cache .mxh
+	regPkg := importRegistry[compilePath]
+	if regPkg != nil {
+		cachedMxh := cachedMxhPath(meta.cacheBase, pkg.path, hash, pkg.version)
+		mxhData := generateMxh(regPkg)
+		writeFile(cachedMxh, []byte(mxhData), 0644)
+	}
+
+	// Compile C files
+	for _, cf := range pkg.cfiles {
+		cPath := joinPath(pkg.dir, cf)
+		cbcFile := joinPath(meta.tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
+		rc = run([]string{meta.clang, "--target=" | meta.triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+		if rc != 0 {
+			return "clang failed for " | cf
+		}
+	}
+
+	return ""
+}
+
+// --- Worker info for the orchestrator ---
+
+type workerInfo struct {
+	ringA    unsafe.Pointer // parent -> worker
+	ringB    unsafe.Pointer // worker -> parent
+	handle   uint64
+	status   uint64
+	busy     bool
+	busyIdx  int32
+}
+
+// buildPkgsParallel spawns worker threads with ring buffer IPC. Workers
+// receive package metadata at startup, then job indices. Each worker
+// independently loads deps from cache, compiles, writes .bc + .mxh to cache.
+// No shared mutable state - this IS the Moxie spawn model.
 func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, forceRebuild bool, jobs int32) (bcs []string, hasRT bool) {
 	n := int32(len(pkgs))
 	done := []bool{:n}
@@ -3308,9 +3799,11 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 	for i := int32(0); i < n; i++ {
 		idxByPath[pkgs[i].path] = i
 	}
+
+	// Phase 1: check cache
 	for i := int32(0); i < n; i++ {
 		pkg := pkgs[i]
-		hash := pkgCacheKey(pkg.dir, pkg.files)
+		hash := pkgHash(pkg)
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
 		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
 		_, bcOk := readFile(cached)
@@ -3327,99 +3820,224 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 		}
 	}
 
-	var running []buildJob
+	// Phase 2: serialize metadata and spawn workers
+	root := getenv("MOXIEROOT")
+	if root == "" {
+		root = "."
+	}
+	meta := serializePkgMeta(pkgs, triple, clang, tmpdir, cacheBase, root,
+		globalModPrefix, globalModDir)
+
+	workers := []*workerInfo{:jobs}
+	for wi := int32(0); wi < jobs; wi++ {
+		w := &workerInfo{}
+		w.ringA = cRingCreate(262144) // 256KB jobs+metadata
+		w.ringB = cRingCreate(262144) // 256KB results+errors
+		if w.ringA == nil || w.ringB == nil {
+			fatal("ring_create failed for worker " | simpleItoa(wi))
+		}
+
+		// Pack rings into arg struct (lives until thread reads it)
+		wr := &workerRings{ringA: w.ringA, ringB: w.ringB}
+
+		rc := cSpawnWorker(unsafe.Pointer(wr), unsafe.Pointer(&w.handle), unsafe.Pointer(&w.status))
+		if rc != 0 {
+			fatal("spawn_worker failed for worker " | simpleItoa(wi))
+		}
+
+		// Send metadata to worker via ringA
+		if !ringSend(w.ringA, meta) {
+			fatal("failed to send metadata to worker " | simpleItoa(wi))
+		}
+
+		workers[wi] = w
+	}
+	meta = nil
+
+	// Phase 3: three-check dispatch loop
 	failed := false
 	for {
-		if !failed {
-			for int32(len(running)) < jobs {
-				di := int32(-1)
-				for i := int32(0); i < n && di < 0; i++ {
-					if done[i] || !needBuild[i] {
-						continue
-					}
-					inFlight := false
-					for ri := int32(0); ri < int32(len(running)); ri++ {
-						if running[ri].idx == i {
-							inFlight = true
-						}
-					}
-					if inFlight {
-						continue
-					}
-					ready := true
-					for _, imp := range pkgs[i].imports {
-						if j, ok := idxByPath[imp]; ok && !done[j] {
-							ready = false
-							break
-						}
-					}
-					if ready {
-						di = i
-					}
-				}
-				if di < 0 {
-					break
-				}
-				pid := runAsync([]string{"/proc/self/exe", "build-pkg", pkgs[di].path})
-				if pid < 0 {
-					fatal("fork failed dispatching " | pkgs[di].path)
-				}
-				running = append(running, buildJob{pid: pid, idx: di})
-			}
-		}
-		if len(running) == 0 {
-			break
-		}
-		r := cWaitAny()
-		if r == -1 {
-			fatal("wait failed")
-		}
-		pid := r
-		jfail := false
-		if r < 0 {
-			pid = -r
-			jfail = true
-		}
-		idx := int32(-1)
-		for ri := int32(0); ri < int32(len(running)); ri++ {
-			if running[ri].pid == pid {
-				idx = running[ri].idx
-				running[ri] = running[int32(len(running))-1]
-				running = running[:len(running)-1]
+		allDone := true
+		for i := int32(0); i < n; i++ {
+			if needBuild[i] && !done[i] {
+				allDone = false
 				break
 			}
 		}
-		if idx < 0 {
-			continue
+		if allDone {
+			break
 		}
-		if jfail {
-			writeStr(2, "  FAILED " | pkgs[idx].path | "\n")
-			failed = true
-		} else {
-			done[idx] = true
+
+		// On failure: close all ringAs to signal workers to stop, drain busy
+		if failed {
+			for wi := int32(0); wi < int32(len(workers)); wi++ {
+				w := workers[wi]
+				if w != nil {
+					cRingClose(w.ringA) // idempotent
+				}
+			}
+			anyBusy := false
+			for wi := int32(0); wi < int32(len(workers)); wi++ {
+				w := workers[wi]
+				if w != nil && w.busy {
+					anyBusy = true
+					break
+				}
+			}
+			if !anyBusy {
+				break
+			}
+			// Fall through to collection to drain in-flight results
+		}
+
+		if !failed {
+			// Check 1: death check
+			for wi := int32(0); wi < int32(len(workers)); wi++ {
+				w := workers[wi]
+				if w == nil {
+					continue
+				}
+				alive := cThreadAlive(unsafe.Pointer(&w.status))
+				if alive < 0 {
+					if w.busy {
+						writeStr(2, "  CRASHED worker " | simpleItoa(wi) | " compiling " | pkgs[w.busyIdx].path | "\n")
+					} else {
+						writeStr(2, "  CRASHED worker " | simpleItoa(wi) | "\n")
+					}
+					failed = true
+					workers[wi] = nil
+				}
+			}
+
+			// Check 2: dispatch jobs to idle workers
+			if !failed {
+				for wi := int32(0); wi < int32(len(workers)); wi++ {
+					w := workers[wi]
+					if w == nil || w.busy {
+						continue
+					}
+					// Find a dispatchable package
+					di := int32(-1)
+					for i := int32(0); i < n; i++ {
+						if done[i] || !needBuild[i] {
+							continue
+						}
+						// Check not already in flight
+						inFlight := false
+						for wj := int32(0); wj < int32(len(workers)); wj++ {
+							wk := workers[wj]
+							if wk != nil && wk.busy && wk.busyIdx == i {
+								inFlight = true
+								break
+							}
+						}
+						if inFlight {
+							continue
+						}
+						// Check all deps done
+						ready := true
+						for _, imp := range pkgs[i].imports {
+							if j, ok := idxByPath[imp]; ok && !done[j] {
+								ready = false
+								break
+							}
+						}
+						if ready {
+							di = i
+							break
+						}
+					}
+					if di < 0 {
+						continue
+					}
+					// Dispatch
+					if !ringSendInt32(w.ringA, di) {
+						writeStr(2, "  dispatch failed for " | pkgs[di].path | "\n")
+						failed = true
+						break
+					}
+					w.busy = true
+					w.busyIdx = di
+				}
+			}
+		}
+
+		// Check 3: collect results from busy workers (always runs - drains on failure)
+		progress := false
+		for wi := int32(0); wi < int32(len(workers)); wi++ {
+			w := workers[wi]
+			if w == nil || !w.busy {
+				continue
+			}
+			rd, rok := ringRecvNonblock(w.ringB)
+			if rd == nil {
+				if !rok {
+					writeStr(2, "  worker " | simpleItoa(wi) | " ringB closed\n")
+					failed = true
+				}
+				continue
+			}
+			if len(rd) < 8 {
+				continue
+			}
+			ridx := int32(rd[0])<<24 | int32(rd[1])<<16 | int32(rd[2])<<8 | int32(rd[3])
+			elen := int32(rd[4])<<24 | int32(rd[5])<<16 | int32(rd[6])<<8 | int32(rd[7])
+			w.busy = false
+			progress = true
+			if elen > 0 && int32(len(rd)) >= 8+elen {
+				errText := string(rd[8 : 8+elen])
+				writeStr(2, errText)
+				writeStr(2, "mxc: compile error for " | pkgs[ridx].path | "\n")
+				failed = true
+			} else if elen > 0 {
+				writeStr(2, "mxc: compile error for " | pkgs[ridx].path | "\n")
+				failed = true
+			} else {
+				done[ridx] = true
+			}
+		}
+
+		// Join point
+		if !progress {
+			cUsleep(1000)
 		}
 	}
+
+	// Phase 4: shutdown - close rings, join threads
+	for wi := int32(0); wi < int32(len(workers)); wi++ {
+		w := workers[wi]
+		if w == nil {
+			continue
+		}
+		cRingClose(w.ringA)
+		cThreadJoin(unsafe.Pointer(&w.handle), unsafe.Pointer(&w.status))
+		cRingDestroy(w.ringA)
+		cRingDestroy(w.ringB)
+	}
+	workers = nil
+
 	if failed {
-		fatal("build failed")
+		fatal("parallel build failed")
 	}
 	for i := int32(0); i < n; i++ {
 		if needBuild[i] && !done[i] {
 			fatal("dependency cycle: cannot schedule " | pkgs[i].path)
 		}
 	}
+
+	// Phase 5: assemble .bc list
 	for i := int32(0); i < n; i++ {
 		pkg := pkgs[i]
 		if pkg.path == "runtime" {
 			hasRT = true
 		}
 		if needBuild[i] {
-			// Worker wrote tmpdir .bc plus per-cfile .bc files.
 			bcs = append(bcs, joinPath(tmpdir, safeName(pkg.path) | ".bc"))
 			for _, cf := range pkg.cfiles {
 				bcs = append(bcs, joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc"))
 			}
 		} else {
-			hash := pkgCacheKey(pkg.dir, pkg.files)
+			hash := pkgHash(pkg)
 			bcs = append(bcs, cachedBcPath(cacheBase, pkg.path, hash, pkg.version))
 			for _, cf := range pkg.cfiles {
 				cPath := joinPath(pkg.dir, cf)
@@ -3435,100 +4053,6 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 		}
 	}
 	return bcs, hasRT
-}
-
-// cmdBuildPkg compiles exactly one package in a fresh process. All
-// dependencies must already have .mxh headers in the cache (the orchestrator
-// guarantees this by dispatching in dependency order). This mirrors the
-// incremental-build path: deps load via loadMxh + ScanGenericDecls, only the
-// target package is compiled.
-func cmdBuildPkg(pkgPath string) {
-	root := getenv("MOXIEROOT")
-	if root == "" {
-		root = "."
-	}
-	triple := "x86_64-unknown-linux-musleabihf"
-	clang := "clang-21"
-
-	if hasPrefix(pkgPath, "./") || hasPrefix(pkgPath, "../") || pkgPath == "." || hasPrefix(pkgPath, "/") {
-		absDir := pkgPath
-		if absDir == "." {
-			absDir = ""
-		}
-		globalModPrefix, globalModDir = findModuleRoot(absDir)
-	}
-
-	quietDiscover = true
-	registerBuiltins()
-	pkgs := resolveAll(pkgPath, root)
-	if len(pkgs) == 0 {
-		fatal("build-pkg: cannot resolve " | pkgPath)
-	}
-	pkg := pkgs[len(pkgs)-1]
-	if pkg.path != pkgPath {
-		fatal("build-pkg: resolution mismatch: got " | pkg.path | " want " | pkgPath)
-	}
-
-	tmpdir := "/tmp/mxc-build"
-	mkdirAll(tmpdir, 0755)
-	cacheBase := pkgCacheDir()
-
-	for pi := int32(0); pi < int32(len(pkgs))-1; pi++ {
-		dp := pkgs[pi]
-		compilePath := dp.path
-		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
-			compilePath = dp.name
-		}
-		hash := pkgCacheKey(dp.dir, dp.files)
-		cachedMxh := cachedMxhPath(cacheBase, dp.path, hash, dp.version)
-		if !loadMxh(cachedMxh) {
-			fatal("build-pkg: missing dep header for " | dp.path | " (" | cachedMxh | ")")
-		}
-		src := concatSources(dp.dir, dp.files)
-		ScanGenericDecls(src, compilePath)
-		src = nil
-	}
-
-	compilePath := pkg.path
-	if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
-		compilePath = pkg.name
-	}
-	hash := pkgCacheKey(pkg.dir, pkg.files)
-	cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
-	cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
-
-	writeStr(2, "  compile " | pkg.path | "\n")
-	src := concatSources(pkg.dir, pkg.files)
-	ir := compileSource(src, compilePath, triple, pkg.dir)
-	src = nil
-	llFile := joinPath(tmpdir, safeName(pkg.path) | ".ll")
-	writeFile(llFile, []byte(ir), 0644)
-	ir = ""
-	bcFile := joinPath(tmpdir, safeName(pkg.path) | ".bc")
-	rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
-	if rc != 0 {
-		fatal("clang failed for " | pkg.path)
-	}
-	cacheDir := joinPath(cacheBase, safeName(pkg.path))
-	mkdirAll(cacheDir, 0755)
-	data, rok := readFile(bcFile)
-	if rok {
-		writeFile(cached, data, 0644)
-	}
-	data = nil
-	regPkg := importRegistry[compilePath]
-	if regPkg != nil {
-		mxhData := generateMxh(regPkg)
-		writeFile(cachedMxh, []byte(mxhData), 0644)
-	}
-	for _, cf := range pkg.cfiles {
-		cPath := joinPath(pkg.dir, cf)
-		cbcFile := joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
-		rc = run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
-		if rc != 0 {
-			fatal("clang failed for " | cf)
-		}
-	}
 }
 
 func cmdBuildRuntime() {

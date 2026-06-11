@@ -44,12 +44,15 @@ func LastSpawnedLockdownFd() int32 {
 	return domainList.lockdownFd
 }
 
-// SpawnLifecycleChannel creates an unbuffered chan struct{} and stores
-// it in the most recently registered domain entry. The compiler emits
-// a call to this after spawnDomain returns. The channel is closed by
-// domainReapChildren when the child exits, making <-done observable.
+// SpawnLifecycleChannel creates a buffered chan string (capacity 1) and
+// stores it in the most recently registered domain entry. The compiler
+// emits a call to this after spawnDomain returns. domainReapChildren
+// sends the exit status string on the channel then closes it.
+// Empty string = clean exit, non-empty = error description.
 func SpawnLifecycleChannel() *channel {
-	ch := chanMake(0, 0)
+	// string = {ptr, len, cap} = 3 pointers
+	ptrSize := unsafe.Sizeof(uintptr(0))
+	ch := chanMake(ptrSize*3, 1)
 	if domainList != nil {
 		domainList.doneCh = ch
 	}
@@ -86,6 +89,7 @@ func domainLookupByFd(fd int32) *domainEntry {
 
 // domainReapChildren checks for exited children and marks them dead.
 // Non-blocking (WNOHANG). Call periodically from the scheduler.
+// Sends exit status string on the lifecycle channel before closing it.
 func domainReapChildren() {
 	for e := domainList; e != nil; e = e.next {
 		if !e.alive {
@@ -100,6 +104,17 @@ func domainReapChildren() {
 				moxie_close(e.lockdownFd)
 			}
 			if e.doneCh != nil && !e.doneCh.closed {
+				// Send exit status string (buffered cap 1, won't block)
+				var msg string
+				sig := status & 0x7f
+				code := (status >> 8) & 0xff
+				if sig != 0 {
+					msg = "killed by signal"
+				} else if code != 0 {
+					msg = "non-zero exit"
+				}
+				// msg == "" for clean exit
+				e.doneCh.trySend(unsafe.Pointer(&msg))
 				chanClose(e.doneCh)
 			}
 		}

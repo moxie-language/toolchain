@@ -63,8 +63,8 @@ func (c *Checker) collectDecls(f *syntax.File) {
 }
 
 // collectImport resolves an import declaration and adds the package name
-// to the file scope. (File scope is per-file; we approximate it with
-// pkg.scope for now - proper file scopes come in the full implementation.)
+// to the current file's scope. A best-effort copy also lands in pkg.scope
+// (first-wins) for legacy lookup paths without file context.
 func (c *Checker) collectImport(d *syntax.ImportDecl) {
 	if d.Path == nil {
 		return
@@ -81,6 +81,17 @@ func (c *Checker) collectImport(d *syntax.ImportDecl) {
 		c.errorf(d.Pos(), "cannot import \"" | path | "\": " | err.Error())
 		return
 	}
+	// Track all direct imports regardless of local-name collisions.
+	found := false
+	for _, ip := range c.pkg.imports {
+		if ip == imported {
+			found = true
+			break
+		}
+	}
+	if !found {
+		c.pkg.imports = append(c.pkg.imports, imported)
+	}
 	localName := imported.name
 	if d.LocalPkgName != nil {
 		localName = d.LocalPkgName.Value
@@ -89,19 +100,20 @@ func (c *Checker) collectImport(d *syntax.ImportDecl) {
 		return
 	}
 	pkgObj := NewPkgName(c.pkg, localName, imported)
-	// File-level imports go into pkg.scope for now (proper file scopes in B3).
-	// Silently skip if the same name is already declared - multi-file packages
-	// often repeat the same import alias in each file (e.g. errorspkg "errors").
-	if existing := c.pkg.scope.Lookup(localName); existing != nil {
-		if ep, ok := existing.(*PkgName); ok && ep.imported == imported {
-			return // same import, already registered
+	if c.fileScope != nil {
+		if existing := c.fileScope.Lookup(localName); existing != nil {
+			if ep, ok := existing.(*PkgName); ok && ep.imported == imported {
+				return // same import repeated in this file
+			}
+			c.errorf(d.Pos(), localName | " redeclared in this file")
+			return
 		}
+		c.fileScope.Insert(pkgObj)
 	}
-	if d.LocalPkgName != nil {
-		c.declare(c.pkg.scope, d.LocalPkgName, pkgObj)
-	} else {
-		c.pkg.scope.Insert(pkgObj)
-	}
+	// Legacy fallback: first-wins, silent on collision (the file scope
+	// disambiguates; paths without file context keep working for the
+	// common no-collision case).
+	c.pkg.scope.Insert(pkgObj)
 }
 
 // checkDecl resolves the type of a top-level declaration.
@@ -125,7 +137,11 @@ func (c *Checker) checkTypeDecl(d *syntax.TypeDecl) {
 	// Generic type declaration: register type params in a temporary scope so
 	// the underlying type can reference them (e.g. type Seq[V any] func(...V...)).
 	if len(d.TParamList) > 0 {
-		tmpScope := NewScope(c.pkg.scope)
+		tpParent := c.pkg.scope
+		if c.fileScope != nil {
+			tpParent = c.fileScope
+		}
+		tmpScope := NewScope(tpParent)
 		for _, tp := range d.TParamList {
 			if tp.Name != nil && tp.Name.Value != "" {
 				tpObj := NewTypeName(c.pkg, tp.Name.Value,
@@ -169,7 +185,11 @@ func (c *Checker) checkFuncDecl(d *syntax.FuncDecl) {
 	// (2) type args from a generic receiver (func (h Handle[T]) ...).
 	typeParams := collectFuncTypeParams(d)
 	if len(typeParams) > 0 {
-		tmpScope := NewScope(c.pkg.scope)
+		tpParent := c.pkg.scope
+		if c.fileScope != nil {
+			tpParent = c.fileScope
+		}
+		tmpScope := NewScope(tpParent)
 		for _, name := range typeParams {
 			obj := NewTypeName(c.pkg, name, NewTypeParam(NewTypeName(c.pkg, name, nil), nil))
 			tmpScope.Insert(obj)
@@ -213,7 +233,11 @@ func (c *Checker) checkFuncBody(fd *syntax.FuncDecl) {
 	if fd.Body == nil {
 		return
 	}
-	scope := c.openScope(fd.Body, c.pkg.scope)
+	bodyParent := c.pkg.scope
+	if c.fileScope != nil {
+		bodyParent = c.fileScope
+	}
+	scope := c.openScope(fd.Body, bodyParent)
 	// Set localScope so resolveTypeExpr can find locally-defined types.
 	saved := c.localScope
 	c.localScope = scope

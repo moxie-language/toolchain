@@ -841,7 +841,8 @@ func (e *irEmitter) emit() (s string) {
 		}
 		for _, name := range egKeys {
 			e.w(name)
-			e.w(" = external global ")
+			e.w(" = ")
+			e.w(e.tlsExternalPrefix())
 			e.w(e.extGlobals[name])
 			e.w("\n")
 		}
@@ -936,6 +937,20 @@ func (e *irEmitter) resolveGlobalDeclType(g *SSAGlobal) (s string) {
 	return typ
 }
 
+func (e *irEmitter) tlsPrefix() (s string) {
+	if len(e.triple) >= 4 && e.triple[:4] == "wasm" {
+		return "global "
+	}
+	return "thread_local global "
+}
+
+func (e *irEmitter) tlsExternalPrefix() (s string) {
+	if len(e.triple) >= 4 && e.triple[:4] == "wasm" {
+		return "external global "
+	}
+	return "external thread_local global "
+}
+
 func (e *irEmitter) emitGlobal(g *SSAGlobal) {
 	name := e.globalName(g)
 	if ei, ok := embedVars[g.name]; ok {
@@ -944,7 +959,8 @@ func (e *irEmitter) emitGlobal(g *SSAGlobal) {
 	}
 	typ := e.resolveGlobalDeclType(g)
 	e.w(name)
-	e.w(" = global ")
+	e.w(" = ")
+	e.w(e.tlsPrefix())
 	e.w(typ)
 	e.w(" zeroinitializer\n")
 }
@@ -955,13 +971,13 @@ func (e *irEmitter) emitEmbedGlobal(g *SSAGlobal, name string, ei *embedInfo) {
 		// Fail loud: a zeroinitializer embed global is a nil slice at runtime
 		// and SIGSEGVs far from the cause.
 		compileErrors = append(compileErrors, "embed: file not found: "|ei.path)
-		e.w(name | " = global {ptr, i64, i64} zeroinitializer\n")
+		e.w(name | " = " | e.tlsPrefix() | "{ptr, i64, i64} zeroinitializer\n")
 		return
 	}
 	elemSize := e.embedElemSize(ei.elemType)
 	if elemSize <= 0 {
 		compileErrors = append(compileErrors, "embed: unknown element type: "|ei.elemType|" for "|ei.path)
-		e.w(name | " = global {ptr, i64, i64} zeroinitializer\n")
+		e.w(name | " = " | e.tlsPrefix() | "{ptr, i64, i64} zeroinitializer\n")
 		return
 	}
 	count := int32(len(data)) / elemSize
@@ -990,7 +1006,7 @@ func (e *irEmitter) emitEmbedGlobal(g *SSAGlobal, name string, ei *embedInfo) {
 	}
 	e.w("\"\n")
 	ipt := e.intptrType()
-	e.w(name | " = global {ptr, " | ipt | ", " | ipt | "} {ptr " | constName | ", " | ipt | " " | irItoa(count) | ", " | ipt | " " | irItoa(count) | "}\n")
+	e.w(name | " = " | e.tlsPrefix() | "{ptr, " | ipt | ", " | ipt | "} {ptr " | constName | ", " | ipt | " " | irItoa(count) | ", " | ipt | " " | irItoa(count) | "}\n")
 }
 
 func (e *irEmitter) embedElemSize(elemType string) int32 {
@@ -1120,7 +1136,6 @@ func (e *irEmitter) emitAnonFuncs(f *SSAFunction) {
 
 func (e *irEmitter) emitLibMain() {
 	pkgPath := e.pkg.Pkg.Path()
-	writeStr(2, "  emitLibMain pkgPath=[" | pkgPath | "]\n")
 	if pkgPath == "main" || pkgPath == "command-line-arguments" {
 		e.w("\ndefine void @runtime.callMain() {\n")
 		e.w("  call void @main.main(ptr null)\n")
@@ -4052,6 +4067,28 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			e.w("  ") ; e.w(reg) ; e.w(" = select i1 ") ; e.w(cmpReg) ; e.w(", ") ; e.w(retType) ; e.w(" ") ; e.w(a) ; e.w(", ") ; e.w(retType) ; e.w(" ") ; e.w(b2) ; e.w("\n")
 			return
 		}
+	} else if name == "spawn" {
+		if len(c.Call.Args) >= 1 {
+			fnVal := e.operand(c.Call.Args[0])
+			// Extract raw function pointer from fat pointer {funcptr, context}
+			fnPtr := e.nextReg2("sp")
+			e.w("  ") ; e.w(fnPtr) ; e.w(" = ptrtoint ptr ") ; e.w(fnVal) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+			// Count channel args
+			nChans := int32(0)
+			for i := 1; i < len(c.Call.Args); i++ {
+				if _, ok := safeUnderlying(c.Call.Args[i].SSAType()).(*TCChan); ok {
+					nChans++
+				}
+			}
+			// TODO: serialize args for Codec boundary, set up ring buffers per channel
+			e.w("  call void @runtime.spawnDomain(") ; e.w(ipt) ; e.w(" ") ; e.w(fnPtr)
+			e.w(", ptr null, i32 ") ; e.w(irItoa(nChans)) ; e.w(", ptr null)\n")
+			// Get lifecycle channel - returns ptr to channel struct
+			e.w("  ") ; e.w(reg) ; e.w(" = call ptr @runtime.SpawnLifecycleChannel(ptr null)\n")
+			e.declareRuntime("runtime.spawnDomain", "void", ipt | ", ptr, i32")
+			e.declareRuntime("runtime.SpawnLifecycleChannel", "ptr", "")
+		}
+		return
 	}
 	e.w("  ; unhandled builtin: ")
 	e.w(name)
@@ -5735,11 +5772,20 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 	selfPath := e.pkg.Pkg.Path()
 	var importedPkgs []*TCPackage
 	seenPkg := map[string]bool{}
+	// Explicit import list first: scope scanning misses imports that lost
+	// a local-name collision (imports are file-scoped).
+	for _, ip := range e.pkg.Pkg.Imports() {
+		if seenPkg[ip.Path()] {
+			continue
+		}
+		importedPkgs = append(importedPkgs, ip)
+		seenPkg[ip.Path()] = true
+	}
 	scopeNames2 := e.pkg.Pkg.Scope().Names()
 	for sni2 := 0; sni2 < len(scopeNames2); sni2++ {
 		obj := e.pkg.Pkg.Scope().Lookup(scopeNames2[sni2])
 		pn, ok := obj.(*PkgName)
-		if !ok || pn.Imported() == nil {
+		if !ok || pn.Imported() == nil || seenPkg[pn.Imported().Path()] {
 			continue
 		}
 		importedPkgs = append(importedPkgs, pn.Imported())
@@ -5972,6 +6018,140 @@ func (e *irEmitter) implTypeID(impl ifaceImpl) (s string) {
 		return irUitoa64(h)
 	}
 	return e.typeIDHash(impl.recvType)
+}
+
+// emitIfaceAssertOK emits an i1 that is true when the dynamic type-ID in
+// typeID belongs to a type whose method set covers every method of the
+// asserted interface. Candidates come from the same whole-link-set scan
+// invoke dispatch uses (findIfaceImpls), so assert and invoke agree on
+// what implements what. Pointer types carry the full method set; value
+// types only value-receiver methods (Go method-set rules).
+func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s string) {
+	mnames := collectIfaceMethodNames(ifaceT, 0)
+	// The universe error interface carries an implicit String() string so fmt
+	// can print errors; concrete error types are not required to declare it.
+	// Drop it from the required set whenever Error is present, or no type
+	// would ever cover the full set.
+	hasError := false
+	for mi := 0; mi < len(mnames); mi++ {
+		if mnames[mi] == "Error" {
+			hasError = true
+		}
+	}
+	if hasError {
+		var keep []string
+		for mi := 0; mi < len(mnames); mi++ {
+			if mnames[mi] != "String" {
+				keep = append(keep, mnames[mi])
+			}
+		}
+		mnames = keep
+	}
+	n := int32(len(mnames))
+	allCount := map[string]int32{}
+	valCount := map[string]int32{}
+	var order []string
+	for mi := int32(0); mi < n; mi++ {
+		impls := e.findIfaceImpls(mnames[mi])
+		seen := map[string]bool{}
+		for ii := 0; ii < len(impls); ii++ {
+			base := e.implBaseTypeName(impls[ii])
+			if base == "" || seen[base] {
+				continue
+			}
+			seen[base] = true
+			if _, have := allCount[base]; !have {
+				order = append(order, base)
+			}
+			allCount[base] = allCount[base] + 1
+			if !impls[ii].ptrRecv {
+				valCount[base] = valCount[base] + 1
+			}
+		}
+	}
+	pfx := "reflect/types.type:"
+	var tids []string
+	for oi := 0; oi < len(order); oi++ {
+		base := order[oi]
+		if allCount[base] == n {
+			tids = append(tids, irUitoa64(fnv1a64(pfx|"pointer:"|base[len(pfx):])))
+		}
+		if valCount[base] == n {
+			tids = append(tids, irUitoa64(fnv1a64(base)))
+		}
+	}
+	ok := ""
+	for ti := 0; ti < len(tids); ti++ {
+		cmp := e.nextReg2("ta")
+		e.w("  ") ; e.w(cmp) ; e.w(" = icmp eq i64 ") ; e.w(typeID) ; e.w(", ") ; e.w(tids[ti]) ; e.w("\n")
+		if ok == "" {
+			ok = cmp
+		} else {
+			acc := e.nextReg2("ta")
+			e.w("  ") ; e.w(acc) ; e.w(" = or i1 ") ; e.w(ok) ; e.w(", ") ; e.w(cmp) ; e.w("\n")
+			ok = acc
+		}
+	}
+	if ok == "" {
+		// no implementer in the link set: the assertion can never succeed
+		ok = e.nextReg2("ta")
+		e.w("  ") ; e.w(ok) ; e.w(" = icmp eq i64 ") ; e.w(typeID) ; e.w(", -1\n")
+	}
+	return ok
+}
+
+// collectIfaceMethodNames returns the deduplicated method names of an
+// interface, walking embedded interfaces when the completed allMethods
+// list is unavailable.
+func collectIfaceMethodNames(ifaceT *TCInterface, depth int32) (ss []string) {
+	if ifaceT == nil || depth > 4 {
+		return nil
+	}
+	var names []string
+	if ifaceT.NumMethods() > 0 {
+		for i := int32(0); i < ifaceT.NumMethods(); i++ {
+			names = append(names, ifaceT.Method(i).Name())
+		}
+	} else {
+		for i := int32(0); i < ifaceT.NumExplicitMethods(); i++ {
+			names = append(names, ifaceT.ExplicitMethod(i).Name())
+		}
+		for i := int32(0); i < ifaceT.NumEmbeddeds(); i++ {
+			if em, ok := safeUnderlying(ifaceT.EmbeddedType(i)).(*TCInterface); ok {
+				names = names | collectIfaceMethodNames(em, depth+1)
+			}
+		}
+	}
+	seen := map[string]bool{}
+	var out []string
+	for i := 0; i < len(names); i++ {
+		if seen[names[i]] {
+			continue
+		}
+		seen[names[i]] = true
+		out = append(out, names[i])
+	}
+	return out
+}
+
+// implBaseTypeName returns the reflect name of the impl's receiver base
+// (non-pointer) type, used to intersect method coverage across impls.
+func (e *irEmitter) implBaseTypeName(impl ifaceImpl) (s string) {
+	if impl.extTypeID != "" {
+		name := impl.extTypeID
+		if hasPrefix(name, "reflect/types.type:pointer:") {
+			name = "reflect/types.type:" | name[len("reflect/types.type:pointer:"):]
+		}
+		return name
+	}
+	rt := impl.recvType
+	if pt, isP := rt.(*Pointer); isP {
+		rt = pt.Elem()
+	}
+	if rt == nil {
+		return ""
+	}
+	return e.reflectTypeName(rt)
 }
 
 func (e *irEmitter) emitEmbedChainGEP(impl ifaceImpl, valPtr string) (s string) {
@@ -6280,14 +6460,49 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 		typePtr = e.nextReg2("ta")
 		e.w("  ") ; e.w(typePtr) ; e.w(" = extractvalue {i64, ptr} ") ; e.w(val) ; e.w(", 0\n")
 	}
+	// Asserting to an interface type: no concrete value ever carries the
+	// interface type's own hash, so the check must instead admit the
+	// type-ID of any type in the link set whose method set covers the
+	// interface (same scan invoke dispatch uses).
+	var ifaceT *TCInterface
+	if it, okI := safeUnderlying(t.AssertedType).(*TCInterface); okI && assertedType == e.ifaceType() {
+		ifaceT = it
+	}
+	isIfaceAssert := ifaceT != nil
 	if t.CommaOk {
-		tidGlobal := e.typeIDHash(t.AssertedType)
-		ok := e.nextReg2("ta")
-		e.w("  ") ; e.w(ok) ; e.w(" = icmp eq i64 ") ; e.w(typePtr) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
+		var ok string
+		if isIfaceAssert && typePtr != "null" {
+			ok = e.emitIfaceAssertOK(ifaceT, typePtr)
+		} else if isIfaceAssert {
+			// degenerate concrete-ptr input: statically typed, non-nil check
+			ok = e.nextReg2("ta")
+			e.w("  ") ; e.w(ok) ; e.w(" = icmp ne ptr ") ; e.w(valPtr) ; e.w(", null\n")
+		} else {
+			tidGlobal := e.typeIDHash(t.AssertedType)
+			ok = e.nextReg2("ta")
+			e.w("  ") ; e.w(ok) ; e.w(" = icmp eq i64 ") ; e.w(typePtr) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
+		}
 		// A failed comma-ok assertion must yield the zero value, never the
 		// raw interface data reinterpreted as the asserted type.
 		var loaded string
-		if assertedType == "ptr" {
+		if isIfaceAssert {
+			// result keeps the {i64, ptr} interface representation
+			tidOut := typePtr
+			if typePtr == "null" {
+				tidOut = "0"
+				if t.X.SSAType() != nil {
+					tidOut = e.typeIDHash(t.X.SSAType())
+				}
+			}
+			selTid := e.nextReg2("ta")
+			e.w("  ") ; e.w(selTid) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", i64 ") ; e.w(tidOut) ; e.w(", i64 0\n")
+			selPtr := e.nextReg2("ta")
+			e.w("  ") ; e.w(selPtr) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", ptr null\n")
+			agg0 := e.nextReg2("ta")
+			e.w("  ") ; e.w(agg0) ; e.w(" = insertvalue {i64, ptr} undef, i64 ") ; e.w(selTid) ; e.w(", 0\n")
+			loaded = e.nextReg2("ta")
+			e.w("  ") ; e.w(loaded) ; e.w(" = insertvalue {i64, ptr} ") ; e.w(agg0) ; e.w(", ptr ") ; e.w(selPtr) ; e.w(", 1\n")
+		} else if assertedType == "ptr" {
 			loaded = e.nextReg2("ta")
 			e.w("  ") ; e.w(loaded) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", ptr null\n")
 		} else if e.isScalarType(assertedType) {
@@ -6335,9 +6550,14 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 		// typePtr == "null" means the input was already a concrete pointer,
 		// so there is no runtime type information to check.
 		if typePtr != "null" {
-			tidGlobal := e.typeIDHash(t.AssertedType)
-			ok := e.nextReg2("ta")
-			e.w("  ") ; e.w(ok) ; e.w(" = icmp eq i64 ") ; e.w(typePtr) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
+			var ok string
+			if isIfaceAssert {
+				ok = e.emitIfaceAssertOK(ifaceT, typePtr)
+			} else {
+				tidGlobal := e.typeIDHash(t.AssertedType)
+				ok = e.nextReg2("ta")
+				e.w("  ") ; e.w(ok) ; e.w(" = icmp eq i64 ") ; e.w(typePtr) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
+			}
 			e.nextReg++
 			goodLabel := "ta.good" | irItoa(e.nextReg)
 			e.nextReg++
@@ -6357,7 +6577,18 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 				e.blockExitLabel[blk.Index] = "%" | goodLabel
 			}
 		}
-		if assertedType == "ptr" {
+		if isIfaceAssert {
+			tidOut := typePtr
+			if typePtr == "null" {
+				tidOut = "0"
+				if t.X.SSAType() != nil {
+					tidOut = e.typeIDHash(t.X.SSAType())
+				}
+			}
+			agg0 := e.nextReg2("ta")
+			e.w("  ") ; e.w(agg0) ; e.w(" = insertvalue {i64, ptr} undef, i64 ") ; e.w(tidOut) ; e.w(", 0\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue {i64, ptr} ") ; e.w(agg0) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
+		} else if assertedType == "ptr" {
 			e.w("  ") ; e.w(reg) ; e.w(" = select i1 true, ptr ") ; e.w(valPtr) ; e.w(", ptr null\n")
 		} else if e.isScalarType(assertedType) {
 			extracted := e.extractScalarFromIface(valPtr, assertedType)

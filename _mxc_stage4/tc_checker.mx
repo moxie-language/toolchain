@@ -26,6 +26,8 @@ type Checker struct {
 	iota         int64  // current iota value
 	errors       []error
 	localScope   *Scope // innermost scope during function body checking; nil at pkg level
+	fileScope    *Scope // scope of the file currently being checked; holds its imports
+	fileScopes   map[*syntax.File]*Scope
 }
 
 // NewChecker creates a checker for pkg. info receives the type information.
@@ -60,11 +62,24 @@ func packageName(files []*syntax.File) (s string) {
 func (c *Checker) Files(files []*syntax.File) (err error) {
 	c.files = files
 
+	// Imports are file-scoped: each file gets its own scope (parent =
+	// pkg.scope) holding the PkgNames it imports. Two files may bind the
+	// same local name to different packages.
+	c.fileScopes = map[*syntax.File]*Scope{}
 	for _, f := range files {
+		c.fileScopes[f] = NewScope(c.pkg.scope)
+		if c.info != nil && c.info.Scopes != nil {
+			c.info.Scopes[f] = c.fileScopes[f]
+		}
+	}
+
+	for _, f := range files {
+		c.fileScope = c.fileScopes[f]
 		c.collectDecls(f)
 	}
 
 	for _, f := range files {
+		c.fileScope = c.fileScopes[f]
 		for _, decl := range f.DeclList {
 			if d, ok := decl.(*syntax.TypeDecl); ok {
 				c.checkTypeDecl(d)
@@ -73,6 +88,7 @@ func (c *Checker) Files(files []*syntax.File) (err error) {
 	}
 
 	for _, f := range files {
+		c.fileScope = c.fileScopes[f]
 		for _, decl := range f.DeclList {
 			switch decl.(type) {
 			case *syntax.TypeDecl:
@@ -83,12 +99,14 @@ func (c *Checker) Files(files []*syntax.File) (err error) {
 	}
 
 	for _, f := range files {
+		c.fileScope = c.fileScopes[f]
 		for _, decl := range f.DeclList {
 			if fd, ok := decl.(*syntax.FuncDecl); ok {
 				c.checkFuncBody(fd)
 			}
 		}
 	}
+	c.fileScope = nil
 
 	if len(c.errors) > 0 {
 		return c.errors[0]
@@ -151,11 +169,17 @@ func (c *Checker) lookup(name string, s *Scope) (*Scope, Object) {
 	return nil, nil
 }
 
-// lookupType finds a type name in localScope (if set), then package scope, then universe.
+// lookupType finds a type name in localScope (if set), then the current
+// file scope (imports), then package scope, then universe.
 // Used by resolveTypeName to find locally-defined types (e.g. inside function bodies).
 func (c *Checker) lookupType(name string) (*Scope, Object) {
 	if c.localScope != nil {
 		if sc, obj := c.localScope.LookupParent(name); obj != nil {
+			return sc, obj
+		}
+	}
+	if c.fileScope != nil {
+		if sc, obj := c.fileScope.LookupParent(name); obj != nil {
 			return sc, obj
 		}
 	}
