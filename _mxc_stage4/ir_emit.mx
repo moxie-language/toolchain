@@ -3974,12 +3974,27 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			} else if c.Call.Args[1].SSAType() != nil {
 				keyType = e.llvmType(c.Call.Args[1].SSAType())
 			}
-			keyAlloca := e.nextReg2("dl")
-			e.w("  ") ; e.w(keyAlloca) ; e.w(" = alloca ") ; e.w(keyType) ; e.w("\n")
-			e.w("  store ") ; e.w(keyType) ; e.w(" ") ; e.w(keyVal) ; e.w(", ptr ") ; e.w(keyAlloca) ; e.w("\n")
-			e.w("  call void @runtime.hashmapBinaryDelete(ptr ") ; e.w(mapVal)
-			e.w(", ptr ") ; e.w(keyAlloca) ; e.w(", ptr null)\n")
-			e.declareRuntime("runtime.hashmapBinaryDelete", "void", "ptr, ptr")
+			if mt != nil && e.isStringLike(mt.Key()) {
+				kd := e.nextReg2("dl")
+				kl := e.nextReg2("dl")
+				kc := e.nextReg2("dl")
+				e.w("  ") ; e.w(kd) ; e.w(" = extractvalue {ptr, i64, i64} ") ; e.w(keyVal) ; e.w(", 0\n")
+				e.w("  ") ; e.w(kl) ; e.w(" = extractvalue {ptr, i64, i64} ") ; e.w(keyVal) ; e.w(", 1\n")
+				e.w("  ") ; e.w(kc) ; e.w(" = extractvalue {ptr, i64, i64} ") ; e.w(keyVal) ; e.w(", 2\n")
+				e.w("  call void @runtime.hashmapContentDelete(ptr ") ; e.w(mapVal)
+				e.w(", ptr ") ; e.w(kd)
+				e.w(", i64 ") ; e.w(kl)
+				e.w(", i64 ") ; e.w(kc)
+				e.w(", ptr null)\n")
+				e.declareRuntime("runtime.hashmapContentDelete", "void", "ptr, ptr, i64, i64")
+			} else {
+				keyAlloca := e.nextReg2("dl")
+				e.w("  ") ; e.w(keyAlloca) ; e.w(" = alloca ") ; e.w(keyType) ; e.w("\n")
+				e.w("  store ") ; e.w(keyType) ; e.w(" ") ; e.w(keyVal) ; e.w(", ptr ") ; e.w(keyAlloca) ; e.w("\n")
+				e.w("  call void @runtime.hashmapBinaryDelete(ptr ") ; e.w(mapVal)
+				e.w(", ptr ") ; e.w(keyAlloca) ; e.w(", ptr null)\n")
+				e.declareRuntime("runtime.hashmapBinaryDelete", "void", "ptr, ptr")
+			}
 			return
 		}
 	} else if name == "close" {
@@ -6480,7 +6495,9 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 		} else {
 			tidGlobal := e.typeIDHash(t.AssertedType)
 			ok = e.nextReg2("ta")
-			e.w("  ") ; e.w(ok) ; e.w(" = icmp eq i64 ") ; e.w(typePtr) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
+			tp := typePtr
+			if tp == "null" { tp = "0" }
+			e.w("  ") ; e.w(ok) ; e.w(" = icmp eq i64 ") ; e.w(tp) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
 		}
 		// A failed comma-ok assertion must yield the zero value, never the
 		// raw interface data reinterpreted as the asserted type.
@@ -9209,9 +9226,8 @@ func rewriteChanMakeLiterals(src []byte) (buf []byte) {
 				continue
 			}
 			k := typeClose + 1
-			for k < len(src) && (src[k] == ' ' || src[k] == '\t') {
-				k++
-			}
+			// Channel literal requires '{' immediately after struct{}/interface{} closing '}'.
+			// Any whitespace means it's NOT a literal (e.g. return type before function body).
 			if k >= len(src) || src[k] != '{' {
 				if out == nil {
 					i = typeClose + 1

@@ -8,28 +8,30 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"sync"
 )
 
-var bufPool sync.Pool
-var _bufPoolInited bool
+var bufPoolItems []*bytes.Buffer
 
-func ensureBufPool() *sync.Pool {
-	if !_bufPoolInited {
-		bufPool.New = func() interface{} { return &bytes.Buffer{} }
-		_bufPoolInited = true
+func bufPoolGet() *bytes.Buffer {
+	if len(bufPoolItems) > 0 {
+		b := bufPoolItems[len(bufPoolItems)-1]
+		bufPoolItems = bufPoolItems[:len(bufPoolItems)-1]
+		return b
 	}
-	return &bufPool
+	return &bytes.Buffer{}
+}
+
+func bufPoolPut(b *bytes.Buffer) {
+	bufPoolItems = append(bufPoolItems, b)
 }
 
 // HuffmanDecode decodes the string in v and writes the expanded
 // result to w, returning the number of bytes written to w and the
 // Write call's return value. At most one Write call is made.
 func HuffmanDecode(w io.Writer, v []byte) (int32, error) {
-	p := ensureBufPool()
-	buf := p.Get().(*bytes.Buffer)
+	buf := bufPoolGet()
 	buf.Reset()
-	defer p.Put(buf)
+	defer bufPoolPut(buf)
 	if err := huffmanDecode(buf, 0, v); err != nil {
 		return 0, err
 	}
@@ -38,10 +40,9 @@ func HuffmanDecode(w io.Writer, v []byte) (int32, error) {
 
 // HuffmanDecodeToString decodes the string in v.
 func HuffmanDecodeToString(v []byte) ([]byte, error) {
-	p := ensureBufPool()
-	buf := p.Get().(*bytes.Buffer)
+	buf := bufPoolGet()
 	buf.Reset()
-	defer p.Put(buf)
+	defer bufPoolPut(buf)
 	if err := huffmanDecode(buf, 0, v); err != nil {
 		return "", err
 	}
@@ -134,13 +135,12 @@ func newInternalNode() *node {
 	return &node{children: &[256]*node{}}
 }
 
-var (
-	buildRootOnce       sync.Once
-	lazyRootHuffmanNode *node
-)
+var lazyRootHuffmanNode *node
 
 func getRootHuffmanNode() *node {
-	buildRootOnce.Do(buildRootHuffmanNode)
+	if lazyRootHuffmanNode == nil {
+		buildRootHuffmanNode()
+	}
 	return lazyRootHuffmanNode
 }
 

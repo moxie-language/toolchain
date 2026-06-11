@@ -506,6 +506,9 @@ func (pb *ssaPkgBuilder) registerMethod(d *syntax.FuncDecl) {
 	if sig == nil && d.Type != nil {
 		sig = pkgResolveSigAST(pb.pkg, d.Type)
 	}
+	if sig == nil {
+		writeStr(2, "WARN: nil sig for method " | mangledName | "\n")
+	}
 	fn := &SSAFunction{
 		name:      mangledName,
 		object:    obj,
@@ -637,6 +640,11 @@ func (pb *ssaPkgBuilder) buildFile(f *syntax.File) {
 	for _, d := range f.DeclList {
 		if fd, ok := d.(*syntax.FuncDecl); ok {
 			pb.curFileScope = pb.declScope(d)
+			name := fd.Name.Value
+			if fd.Recv != nil {
+				rtn := ssaRecvTypeName(fd.Recv)
+				if rtn != "" { name = rtn | "." | fd.Name.Value }
+			}
 			pb.buildFunc(fd)
 		}
 	}
@@ -735,8 +743,14 @@ func (pb *ssaPkgBuilder) buildFunc(d *syntax.FuncDecl) {
 			name = rtn | "." | d.Name.Value
 		}
 	}
-	fn, _ := pb.pkg.Members[name].(*SSAFunction)
-	if fn == nil {
+	member := pb.pkg.Members[name]
+	if member == nil {
+		writeStr(2, "WARN: buildFunc no member for " | name | "\n")
+		return
+	}
+	fn, ok := member.(*SSAFunction)
+	if !ok || fn == nil {
+		writeStr(2, "WARN: buildFunc member not SSAFunction for " | name | "\n")
 		return
 	}
 	fb := newSSAFuncBuilder(fn, pb.info)
