@@ -130,11 +130,22 @@ All native binaries are fully statically linked.
 - **[REFERENCE.md](REFERENCE.md)** - Complete language specification
 - **[TUTORIAL.md](TUTORIAL.md)** - Learn Moxie from scratch
 - **[EXAMPLE_CLAUDE.md](EXAMPLE_CLAUDE.md)** - AI coding assistant configuration
+- **[Architecture Patterns](docs/MOXIE_ARCHITECTURE_PATTERNS.md)** - CSP/Actor/DDD design patterns and worked examples
 - [docs/spawn.md](docs/spawn.md) - Spawn quick reference
 - [docs/architecture.md](docs/architecture.md) - Compiler pipeline and runtime internals
 - [docs/restrictions.md](docs/restrictions.md) - Active restrictions and exemptions
 - [docs/PORTING.md](docs/PORTING.md) - Migrating existing code to Moxie
 - [docs/building.md](docs/building.md) - Build instructions and flags
+
+## Actor Libraries
+
+The architecture patterns document describes a general CSP/Actor model
+that applies beyond Moxie. Three libraries implement the intra-domain
+actor patterns (sections 3.1-3.6) for other languages:
+
+- **[actor](https://git.smesh.lol/actor)** (Go) - `go get git.smesh.lol/actor`
+- **[pickle](https://git.smesh.lol/pickle)** (Rust) - `pickle = { git = "https://git.smesh.lol/pickle" }`
+- **[anneal](https://git.smesh.lol/anneal)** (TypeScript) - `npm install anneal`
 
 ## Project Structure
 
