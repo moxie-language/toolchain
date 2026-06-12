@@ -84,9 +84,11 @@ type irEmitter struct {
 	typeIDNext   int32
 	extTypeIDs   map[string]bool
 	localTypeIDs map[string]bool
-	allocTypes map[SSAValue]string
-	regTypes   map[string]string
-	hoisted    map[SSAValue]bool
+	allocTypes  map[SSAValue]string
+	regTypes    map[string]string
+	hoisted     map[SSAValue]bool
+	wasmAttrID  int32
+	wasmAttrs   [][3]string
 	blockExitLabel map[int32]string
 	nameUsed   map[string]bool
 	missingStores map[SSAValue]SSAValue
@@ -139,6 +141,7 @@ func newIREmitter(pkg *SSAPackage, triple string) (p *irEmitter) {
 		regTypes:   map[string]string{},
 		blockExitLabel: map[int32]string{},
 		nameUsed:   map[string]bool{},
+		wasmAttrID: 99,
 	}
 }
 
@@ -839,6 +842,22 @@ func (e *irEmitter) emit() (s string) {
 			}
 			e.w("declare ")
 			e.w(decl)
+			// Check for wasm import attributes
+			if len(wasmImportMap) > 0 {
+				sym := k
+				if len(sym) > 0 && sym[0] == '@' {
+					sym = sym[1:]
+				}
+				if len(sym) >= 2 && sym[0] == '"' && sym[len(sym)-1] == '"' {
+					sym = sym[1 : len(sym)-1]
+				}
+				if wi, ok := wasmImportMap[sym]; ok {
+					e.wasmAttrID++
+					aid := e.wasmAttrID
+					e.w(" #" | simpleItoa(aid))
+					e.wasmAttrs = append(e.wasmAttrs, [3]string{simpleItoa(aid), wi[0], wi[1]})
+				}
+			}
 			e.w("\n")
 		}
 	}
@@ -861,6 +880,11 @@ func (e *irEmitter) emit() (s string) {
 			e.w(e.extGlobals[name])
 			e.w("\n")
 		}
+	}
+
+	// Emit wasm import attribute groups
+	for _, wa := range e.wasmAttrs {
+		e.w("attributes #" | wa[0] | " = { \"wasm-import-module\"=\"" | wa[1] | "\" \"wasm-import-name\"=\"" | wa[2] | "\" }\n")
 	}
 
 	return string(e.buf)
@@ -1502,11 +1526,31 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 			n++
 		}
 	}
-	if !isIntrinsic {
+	// Check for wasm import BEFORE deciding on context ptr
+	isWasmImport := false
+	if len(wasmImportMap) > 0 {
+		wsym := sym
+		if len(wsym) > 0 && wsym[0] == '@' { wsym = wsym[1:] }
+		if len(wsym) >= 2 && wsym[0] == '"' && wsym[len(wsym)-1] == '"' { wsym = wsym[1 : len(wsym)-1] }
+		_, isWasmImport = wasmImportMap[wsym]
+	}
+	if !isIntrinsic && !isWasmImport {
 		if n > 0 { e.w(", ") }
 		e.w("ptr")
 	}
-	e.w(")\n")
+	e.w(")")
+	// Add wasm import attributes
+	if isWasmImport {
+		wsym := sym
+		if len(wsym) > 0 && wsym[0] == '@' { wsym = wsym[1:] }
+		if len(wsym) >= 2 && wsym[0] == '"' && wsym[len(wsym)-1] == '"' { wsym = wsym[1 : len(wsym)-1] }
+		wi := wasmImportMap[wsym]
+		e.wasmAttrID++
+		aid := e.wasmAttrID
+		e.w(" #" | simpleItoa(aid))
+		e.wasmAttrs = append(e.wasmAttrs, [3]string{simpleItoa(aid), wi[0], wi[1]})
+	}
+	e.w("\n")
 	e.extDecls[sym] = ""
 }
 
@@ -3699,7 +3743,16 @@ func (e *irEmitter) emitCall(c *SSACall) {
 			e.w(at) ; e.w(" ") ; e.w(av)
 			np++
 		}
-		if !isIntrinsic && !isExport {
+		skipCtx := isIntrinsic || isExport
+		if !skipCtx && len(wasmImportMap) > 0 {
+			wsym := sym
+			if len(wsym) > 0 && wsym[0] == '@' { wsym = wsym[1:] }
+			if len(wsym) >= 2 && wsym[0] == '"' && wsym[len(wsym)-1] == '"' { wsym = wsym[1 : len(wsym)-1] }
+			if _, wok := wasmImportMap[wsym]; wok {
+				skipCtx = true
+			}
+		}
+		if !skipCtx {
 			if np > 0 { e.w(", ") }
 			e.w("ptr null")
 		}
@@ -7987,6 +8040,79 @@ func scanLinknameMap(src []byte) (m map[string]string) {
 
 var linknameMap map[string]string
 
+// wasmImportMap maps IR symbol (e.g. "time.timezoneOffsetMinutes") -> [module, import_name].
+// Populated from //:wasmimport pragmas.
+var wasmImportMap map[string][2]string
+
+// scanWasmImportMap scans source for //:wasmimport <module> <name> pragmas.
+// The pragma applies to the next function declaration (body-less).
+// pkgPath is the package import path used to construct full IR symbols.
+func scanWasmImportMap(src []byte, pkgPath string) map[string][2]string {
+	if !hasPrefix(compileTargetTriple, "wasm32") {
+		return nil
+	}
+	m := map[string][2]string{}
+	lines := splitLines(string(src))
+	for i := int32(0); i < int32(len(lines)); i++ {
+		ln := trimSpace(lines[i])
+		if !hasPrefix(ln, "//:wasmimport ") {
+			continue
+		}
+		parts := ln[len("//:wasmimport "):]
+		sp := int32(-1)
+		for j := int32(0); j < int32(len(parts)); j++ {
+			if parts[j] == ' ' || parts[j] == '\t' {
+				sp = j
+				break
+			}
+		}
+		if sp < 0 {
+			continue
+		}
+		mod := trimSpace(string(parts[:sp]))
+		impName := trimSpace(string(parts[sp+1:]))
+		// Find next func declaration
+		for j := i + 1; j < int32(len(lines)); j++ {
+			fl := trimSpace(lines[j])
+			if !hasPrefix(fl, "func ") {
+				continue
+			}
+			// extract function name from "func NAME(" or "func (recv) NAME("
+			rest := fl[5:]
+			// skip receiver if present
+			if len(rest) > 0 && rest[0] == '(' {
+				depth := int32(1)
+				k := int32(1)
+				for k < int32(len(rest)) && depth > 0 {
+					if rest[k] == '(' { depth++ }
+					if rest[k] == ')' { depth-- }
+					k++
+				}
+				rest = trimSpace(string(rest[k:]))
+			}
+			// now rest starts with funcName(
+			paren := int32(-1)
+			for k := int32(0); k < int32(len(rest)); k++ {
+				if rest[k] == '(' {
+					paren = k
+					break
+				}
+			}
+			if paren < 0 {
+				break
+			}
+			funcName := trimSpace(string(rest[:paren]))
+			sym := pkgPath | "." | funcName
+			m[sym] = [2]string{mod, impName}
+			break
+		}
+	}
+	if len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
 func typeCheckPkg(src []byte, name string) (*TCPackage, *syntax.File) {
 	initUniverse()
 	shortName := name
@@ -8453,6 +8579,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	compileTargetTriple = triple
 	scanEmbedPragmas(src, compilePkgDir)
 	linknameMap = scanLinknameMap(src)
+	wasmImportMap = scanWasmImportMap(src, name)
 	pkg, file := typeCheckPkg(src, name)
 	ScanGenericDecls(src, name)
 	if file == nil {

@@ -1417,9 +1417,11 @@ var buildJobs = int32(4)
 var globalTargetOS string
 var globalTargetArch string
 
-// Packages already compiled into sysroot/wasm/runtime.bc.
-// When targeting wasm, these are skipped during compilation and linked
-// from the prebuilt runtime.bc instead to avoid duplicate/mismatched symbols.
+// Packages baked into sysroot/wasm/runtime.bc (compiled by the old
+// TinyGo-based compiler). Stage4 type-checks these but does not compile
+// them - the prebuilt versions are used instead. This avoids ABI
+// mismatches between old-compiler and stage4-compiled code (different
+// context-pointer conventions).
 var wasmRtPkgs = map[string]bool{
 	"runtime": true, "runtime/interrupt": true,
 	"internal/task": true, "internal/itoa": true,
@@ -3250,10 +3252,10 @@ func main() {
 	globalTargetOS = "linux"
 	globalTargetArch = "amd64"
 	triple := "x86_64-unknown-linux-musleabihf"
-	if targetFlag == "js/wasm" || targetFlag == "wasm" {
+	if targetFlag == "js/wasm" || targetFlag == "wasm" || targetFlag == "wasi/wasm" {
 		globalTargetOS = "js"
 		globalTargetArch = "wasm"
-		triple = "wasm32-unknown-js"
+		triple = "wasm32-unknown-wasi"
 	}
 	isWasm := globalTargetArch == "wasm"
 	clang := "clang-21"
@@ -3331,6 +3333,11 @@ func main() {
 		if compilePath == "main" {
 			continue
 		}
+		// wasm: skip init calls for packages in prebuilt runtime.bc
+		// (their init functions are not exported symbols)
+		if isWasm && wasmRtPkgs[pkg.path] {
+			continue
+		}
 		initSym := irGlobalSymbol(compilePath, "main")
 		initCalls = initCalls | "  call void " | initSym | "(ptr null)\n"
 	}
@@ -3342,6 +3349,9 @@ func main() {
 			compilePath = pkg.name
 		}
 		if compilePath == "main" {
+			continue
+		}
+		if isWasm && wasmRtPkgs[pkg.path] {
 			continue
 		}
 		declSym := irGlobalSymbol(compilePath, "main")
@@ -3373,6 +3383,7 @@ func main() {
 			}
 			return oFile
 		}
+		// runtime.bc first (provides _start, allocator, scheduler, stdlib)
 		if !hasRuntimePkg {
 			objList = append(objList, wasmCompileToObj(runtimeBc))
 		}
@@ -3394,6 +3405,42 @@ func main() {
 			}
 		}
 		objList = append(objList, wasmCompileToObj(initAllBc))
+		// WASI stubs for host imports that wasmtime can't satisfy.
+		// Includes no-op scope/dealloc stubs: runtime.bc uses a bump
+		// allocator with no block headers, so stage4's scope-based
+		// dealloc cannot walk the heap. No-ops are correct here;
+		// runtime.bc already leaks (it relies on TinyGo's GC).
+		wasiStubs := joinPath(tmpdir, "wasi_stubs.ll")
+		writeFile(wasiStubs, []byte(
+			"target datalayout = \"e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20\"\n" |
+			"target triple = \"wasm32-unknown-wasi\"\n" |
+			"define void @moxie_longjmp(ptr %0) {\n" |
+			"  call void @llvm.trap()\n" |
+			"  unreachable\n" |
+			"}\n" |
+			"define i32 @\"time.timezoneOffsetMinutes\"() {\n" |
+			"  ret i32 0\n" |
+			"}\n" |
+			"define ptr @\"runtime.scopeFreeTo\"(ptr %0, ptr %1, ptr %2) {\n" |
+			"  ret ptr null\n" |
+			"}\n" |
+			"define void @\"runtime.scopePush\"(ptr %0, ptr %1, ptr %2) {\n" |
+			"  ret void\n" |
+			"}\n" |
+			"define void @\"runtime.scopeRelocate\"(ptr %0, ptr %1, ptr %2, ptr %3) {\n" |
+			"  ret void\n" |
+			"}\n" |
+			"define void @\"runtime.deallocPush\"(ptr %0, ptr %1, ptr %2, ptr %3) {\n" |
+			"  ret void\n" |
+			"}\n" |
+			"define void @\"runtime.deallocFree\"(ptr %0, ptr %1) {\n" |
+			"  ret void\n" |
+			"}\n" |
+			"define void @\"runtime.deallocEscape\"(ptr %0, ptr %1, ptr %2) {\n" |
+			"  ret void\n" |
+			"}\n" |
+			"declare void @llvm.trap()\n"), 0644)
+		objList = append(objList, wasmCompileToObj(wasiStubs))
 		writeStr(2, "  link\n")
 		ldArgs := []string{"wasm-ld", "--export-dynamic", "--allow-undefined",
 			"--gc-sections", "-o", outpath}
