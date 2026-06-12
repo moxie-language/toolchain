@@ -357,7 +357,7 @@ func getMoxiePath() (s string) {
 	return joinPath(home, "moxie")
 }
 
-func mxcVersion() (s string) { return "1.9.9" }
+func mxcVersion() (s string) { return "1.9.10" }
 
 func moxieCacheDir() (s string) {
 	return joinPath(joinPath(getMoxiePath(), "cache"), "mxc-" | mxcVersion())
@@ -1304,6 +1304,10 @@ func shouldSkipFile(name string) (ok bool) {
 	return false
 }
 
+func isTagChar(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.'
+}
+
 func constraintContainsPositive(line string, word string) (ok bool) {
 	wl := int32(len(word))
 	for i := int32(0); i <= int32(len(line))-wl; i++ {
@@ -1313,16 +1317,18 @@ func constraintContainsPositive(line string, word string) (ok bool) {
 			}
 			after := i + wl
 			if after < int32(len(line)) {
-				c := line[after]
-				if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' {
+				if isTagChar(line[after]) {
 					continue
 				}
 			}
 			if i > 0 {
-				c := line[i-1]
-				if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' {
+				if isTagChar(line[i-1]) {
 					continue
 				}
+			}
+			// check if inside a negated group !(...)
+			if isInsideNegatedGroup(line, i) {
+				continue
 			}
 			return true
 		}
@@ -1330,18 +1336,54 @@ func constraintContainsPositive(line string, word string) (ok bool) {
 	return false
 }
 
+func isInsideNegatedGroup(line string, pos int32) bool {
+	// scan backwards from pos for !(, counting parens
+	for j := pos - 1; j >= 1; j-- {
+		if line[j] == '(' && line[j-1] == '!' {
+			// found !(, now check the matching ) is after pos
+			depth := int32(1)
+			k := j + 1
+			for k < int32(len(line)) && depth > 0 {
+				if line[k] == '(' { depth++ }
+				if line[k] == ')' { depth-- }
+				k++
+			}
+			if k-1 > pos { // closing ) is after our position
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func constraintContainsNegated(line string, word string) (ok bool) {
 	wl := int32(len(word))
+	// check direct negation: !word
 	for i := int32(1); i <= int32(len(line))-wl; i++ {
 		if string(line[i:i+wl]) == word && line[i-1] == '!' {
 			after := i + wl
 			if after < int32(len(line)) {
-				c := line[after]
-				if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' {
+				if isTagChar(line[after]) {
 					continue
 				}
 			}
 			return true
+		}
+	}
+	// check parenthesized negation: !(... word ...)
+	for i := int32(0); i+1 < int32(len(line)); i++ {
+		if line[i] == '!' && line[i+1] == '(' {
+			depth := int32(1)
+			j := i + 2
+			for j < int32(len(line)) && depth > 0 {
+				if line[j] == '(' { depth++ }
+				if line[j] == ')' { depth-- }
+				j++
+			}
+			group := string(line[i+2 : j-1])
+			if constraintContainsPositive(group, word) {
+				return true
+			}
 		}
 	}
 	return false
@@ -1353,9 +1395,7 @@ func hasBuildConstraint(data []byte, forbidden []string) (ok bool) {
 			return false
 		}
 		skip := int32(0)
-		if i+11 < int32(len(data)) && string(data[i:i+11]) == "//go:build " {
-			skip = 11
-		} else if i+9 < int32(len(data)) && string(data[i:i+9]) == "//:build " {
+		if i+9 < int32(len(data)) && string(data[i:i+9]) == "//:build " {
 			skip = 9
 		}
 		if skip > 0 {
@@ -1365,14 +1405,49 @@ func hasBuildConstraint(data []byte, forbidden []string) (ok bool) {
 			}
 			line := string(buf)
 			if globalTargetArch == "wasm" {
+				// Tags true for all wasm: wasm, moxie.wasm, go1.23, !linux, !baremetal
+				// js tag only true when globalTargetOS == "js" (js/wasm target)
 				if constraintContainsPositive(line, "moxie.wasm") ||
 					constraintContainsPositive(line, "wasm") ||
-					constraintContainsPositive(line, "js") {
+					constraintContainsPositive(line, "go1.23") {
+					// Only reject js requirement when it's conjunctive (js && wasm)
+					// not disjunctive (js || wasm)
+					if constraintContainsPositive(line, "js") && globalTargetOS != "js" {
+						// Check if js and wasm are in a conjunction
+						isConjunction := false
+						for ci := int32(0); ci < int32(len(line))-1; ci++ {
+							if line[ci] == '&' && line[ci+1] == '&' {
+								isConjunction = true
+								break
+							}
+						}
+						if isConjunction {
+							return true
+						}
+					}
+					return false
+				}
+				if globalTargetOS == "js" && constraintContainsPositive(line, "js") {
 					return false
 				}
 				if constraintContainsNegated(line, "js") ||
 					constraintContainsNegated(line, "wasm") ||
-					constraintContainsNegated(line, "moxie.wasm") {
+					constraintContainsNegated(line, "moxie.wasm") ||
+					constraintContainsNegated(line, "go1.23") {
+					return true
+				}
+				// Architecture tags: amd64, arm64, 386 are false on wasm.
+				for _, arch := range []string{"amd64", "arm64", "386"} {
+					if constraintContainsPositive(line, arch) {
+						return true
+					}
+				}
+				// !linux is true for wasm - include files that need it
+				if constraintContainsNegated(line, "linux") {
+					return false
+				}
+				// linux-only constraints don't apply to wasm
+				if constraintContainsPositive(line, "linux") {
 					return true
 				}
 			}
@@ -1509,29 +1584,36 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		}
 	}
 	mxFiles := listFiles(dir, ".mx")
-	cFilesAll := listFiles(dir, ".c")
-	var cFiles []string
-	for _, cf := range cFilesAll {
-		// _test.c files (e.g. crypto/internal/boring/div_test.c) are
-		// standalone verification programs with their own main.
-		if hasSuffix(cf, "_test.c") {
-			continue
-		}
-		cFiles = append(cFiles, cf)
-	}
 	bcFiles := listFiles(dir, ".bc")
 	allMx := mxFiles
 	var forbidden []string
 	if globalTargetArch == "wasm" {
-		forbidden = []string{"linux", "unix", "darwin", "amd64", "arm64",
+		forbidden = []string{"none", "linux", "unix", "darwin", "amd64", "arm64",
 			"ignore", "compiler_bootstrap",
 			"scheduler.tasks", "scheduler.cores", "scheduler.asyncify",
 			"faketime", "baremetal", "nintendoswitch",
-			"boringcrypto", "cgo"}
+			"boringcrypto", "cgo",
+			"runtime_memhash_leveldb", "runtime_memhash_tsip",
+			"runtime_asserts", "moxie.stringer"}
 	} else {
-		forbidden = []string{"wasm", "js", "ignore", "compiler_bootstrap",
+		forbidden = []string{"none", "wasm", "js", "ignore", "compiler_bootstrap",
 			"scheduler.tasks", "scheduler.cores", "scheduler.asyncify",
 			"faketime", "baremetal", "nintendoswitch", "boringcrypto", "gc"}
+	}
+	cFilesAll := listFiles(dir, ".c")
+	var cFiles []string
+	for _, cf := range cFilesAll {
+		if hasSuffix(cf, "_test.c") {
+			continue
+		}
+		if shouldSkipFile(cf) {
+			continue
+		}
+		cdata, cok := readFile(joinPath(dir, cf))
+		if cok && hasBuildConstraint(cdata, forbidden) {
+			continue
+		}
+		cFiles = append(cFiles, cf)
 	}
 	var files []string
 	for _, f := range allMx {
@@ -2887,9 +2969,11 @@ func cmdTest(args []string) {
 			objList = append(objList, compileToObj(runtimeBc))
 		}
 	}
-	rtShims := joinPath(sysroot, "rt_shims.bc")
-	if _, rsk := readFile(rtShims); rsk {
-		objList = append(objList, compileToObj(rtShims))
+	if !hasRuntimePkg {
+		rtShims := joinPath(sysroot, "rt_shims.bc")
+		if _, rsk := readFile(rtShims); rsk {
+			objList = append(objList, compileToObj(rtShims))
+		}
 	}
 	if buildJobs > 1 {
 		var objCmds [][]string
@@ -3252,8 +3336,12 @@ func main() {
 	globalTargetOS = "linux"
 	globalTargetArch = "amd64"
 	triple := "x86_64-unknown-linux-musleabihf"
-	if targetFlag == "js/wasm" || targetFlag == "wasm" || targetFlag == "wasi/wasm" {
+	if targetFlag == "js/wasm" || targetFlag == "wasm" {
 		globalTargetOS = "js"
+		globalTargetArch = "wasm"
+		triple = "wasm32-unknown-wasi"
+	} else if targetFlag == "wasi/wasm" {
+		globalTargetOS = "wasi"
 		globalTargetArch = "wasm"
 		triple = "wasm32-unknown-wasi"
 	}
@@ -3270,6 +3358,35 @@ func main() {
 
 	registerBuiltins()
 	pkgs := resolveAll(pkgPath, root)
+	// wasm: runtime must be compiled from source (no prebuilt runtime.bc)
+	if isWasm {
+		hasRT := false
+		for _, p := range pkgs {
+			if p.path == "runtime" {
+				hasRT = true
+				break
+			}
+		}
+		if !hasRT {
+			rtPkgs := resolveAll("runtime", root)
+			// prepend runtime deps before user packages
+			var merged []*pkgInfo
+			seen := map[string]bool{}
+			for _, p := range rtPkgs {
+				if !seen[p.path] {
+					seen[p.path] = true
+					merged = append(merged, p)
+				}
+			}
+			for _, p := range pkgs {
+				if !seen[p.path] {
+					seen[p.path] = true
+					merged = append(merged, p)
+				}
+			}
+			pkgs = merged
+		}
+	}
 	if len(pkgs) == 0 {
 		fatal("no packages to compile")
 	}
@@ -3302,9 +3419,7 @@ func main() {
 	muslDir := ""
 	comprtLib := ""
 	muslLib := ""
-	if isWasm {
-		runtimeBc = joinPath(joinPath(sysroot, "wasm"), "runtime.bc")
-	} else {
+	if !isWasm {
 		runtimeBc = getenv("RUNTIME_BC")
 		if runtimeBc == "" {
 			runtimeBc = joinPath(sysroot, "runtime.bc")
@@ -3333,11 +3448,6 @@ func main() {
 		if compilePath == "main" {
 			continue
 		}
-		// wasm: skip init calls for packages in prebuilt runtime.bc
-		// (their init functions are not exported symbols)
-		if isWasm && wasmRtPkgs[pkg.path] {
-			continue
-		}
 		initSym := irGlobalSymbol(compilePath, "main")
 		initCalls = initCalls | "  call void " | initSym | "(ptr null)\n"
 	}
@@ -3349,9 +3459,6 @@ func main() {
 			compilePath = pkg.name
 		}
 		if compilePath == "main" {
-			continue
-		}
-		if isWasm && wasmRtPkgs[pkg.path] {
 			continue
 		}
 		declSym := irGlobalSymbol(compilePath, "main")
@@ -3371,7 +3478,6 @@ func main() {
 
 	if isWasm {
 		// wasm: compile each .bc to .o individually, then wasm-ld
-		// wasmRtPkgs are already excluded from allBcFiles by the build functions.
 		writeStr(2, "  compile objects\n")
 		wasmTriple := "wasm32-unknown-wasi"
 		var objList []string
@@ -3382,10 +3488,6 @@ func main() {
 				fatal("clang -c failed for " | bcFile)
 			}
 			return oFile
-		}
-		// runtime.bc first (provides _start, allocator, scheduler, stdlib)
-		if !hasRuntimePkg {
-			objList = append(objList, wasmCompileToObj(runtimeBc))
 		}
 		if buildJobs > 1 {
 			var objCmds [][]string
@@ -3405,39 +3507,42 @@ func main() {
 			}
 		}
 		objList = append(objList, wasmCompileToObj(initAllBc))
-		// WASI stubs for host imports that wasmtime can't satisfy.
-		// Includes no-op scope/dealloc stubs: runtime.bc uses a bump
-		// allocator with no block headers, so stage4's scope-based
-		// dealloc cannot walk the heap. No-ops are correct here;
-		// runtime.bc already leaks (it relies on TinyGo's GC).
+		// Stubs for symbols not provided by stage4-compiled runtime
 		wasiStubs := joinPath(tmpdir, "wasi_stubs.ll")
 		writeFile(wasiStubs, []byte(
 			"target datalayout = \"e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20\"\n" |
 			"target triple = \"wasm32-unknown-wasi\"\n" |
-			"define void @moxie_longjmp(ptr %0) {\n" |
+			"declare ptr @llvm.stacksave.p0()\n" |
+			"define ptr @runtime.stacksave(ptr %_ctx) {\n" |
+			"  %1 = call ptr @llvm.stacksave.p0()\n" |
+			"  ret ptr %1\n" |
+			"}\n" |
+			"define void @moxie_longjmp(ptr %0, ptr %1) {\n" |
 			"  call void @llvm.trap()\n" |
 			"  unreachable\n" |
 			"}\n" |
 			"define i32 @\"time.timezoneOffsetMinutes\"() {\n" |
 			"  ret i32 0\n" |
 			"}\n" |
-			"define ptr @\"runtime.scopeFreeTo\"(ptr %0, ptr %1, ptr %2) {\n" |
-			"  ret ptr null\n" |
+			"declare ptr @runtime.alloc(i32, ptr, ptr)\n" |
+			"define ptr @malloc(i32 %size, ptr %_ctx) {\n" |
+			"  %p = call ptr @runtime.alloc(i32 %size, ptr null, ptr null)\n" |
+			"  ret ptr %p\n" |
 			"}\n" |
-			"define void @\"runtime.scopePush\"(ptr %0, ptr %1, ptr %2) {\n" |
-			"  ret void\n" |
-			"}\n" |
-			"define void @\"runtime.scopeRelocate\"(ptr %0, ptr %1, ptr %2, ptr %3) {\n" |
-			"  ret void\n" |
-			"}\n" |
-			"define void @\"runtime.deallocPush\"(ptr %0, ptr %1, ptr %2, ptr %3) {\n" |
-			"  ret void\n" |
-			"}\n" |
-			"define void @\"runtime.deallocFree\"(ptr %0, ptr %1) {\n" |
-			"  ret void\n" |
-			"}\n" |
-			"define void @\"runtime.deallocEscape\"(ptr %0, ptr %1, ptr %2) {\n" |
-			"  ret void\n" |
+			"define i32 @strlen(ptr %s, ptr %_ctx) {\n" |
+			"entry:\n" |
+			"  br label %loop\n" |
+			"loop:\n" |
+			"  %i = phi i32 [0, %entry], [%i1, %next]\n" |
+			"  %cp = getelementptr i8, ptr %s, i32 %i\n" |
+			"  %c = load i8, ptr %cp\n" |
+			"  %z = icmp eq i8 %c, 0\n" |
+			"  br i1 %z, label %done, label %next\n" |
+			"next:\n" |
+			"  %i1 = add i32 %i, 1\n" |
+			"  br label %loop\n" |
+			"done:\n" |
+			"  ret i32 %i\n" |
 			"}\n" |
 			"declare void @llvm.trap()\n"), 0644)
 		objList = append(objList, wasmCompileToObj(wasiStubs))
@@ -3494,16 +3599,14 @@ func main() {
 			}
 		}
 		objList = append(objList, compileToObj(initAllBc))
-		if !hasRuntimePkg {
-			cstubDir := joinPath(root, joinPath("src/runtime", "_cstubs"))
-			cstubFiles := listFiles(cstubDir, ".c")
-			for _, cf := range cstubFiles {
-				cPath := joinPath(cstubDir, cf)
-				coFile := joinPath(tmpdir, "cstub_" | cf | ".o")
-				rc = run([]string{clang, "--target=" | triple, "-c", "-O0", cPath, "-o", coFile})
-				if rc == 0 {
-					objList = append(objList, coFile)
-				}
+		cstubDir := joinPath(root, joinPath("src/runtime", "_cstubs"))
+		cstubFiles := listFiles(cstubDir, ".c")
+		for _, cf := range cstubFiles {
+			cPath := joinPath(cstubDir, cf)
+			coFile := joinPath(tmpdir, "cstub_" | cf | ".o")
+			rc = run([]string{clang, "--target=" | triple, "-c", "-O0", cPath, "-o", coFile})
+			if rc == 0 {
+				objList = append(objList, coFile)
 			}
 		}
 		objDir := joinPath(sysroot, "obj")
@@ -3565,9 +3668,6 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 	}
 
 	for _, pkg := range pkgs {
-		if isWasmTarget && wasmRtPkgs[pkg.path] {
-			continue
-		}
 		compilePath := pkg.path
 		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = pkg.name
@@ -3922,6 +4022,15 @@ func workerEntryExport(arg unsafe.Pointer) {
 	globalModDir = meta.modDir
 	quietDiscover = true
 
+	// Set target globals from triple (needed by registerBuiltins for uintptr sizing)
+	if len(meta.triple) >= 4 && meta.triple[:4] == "wasm" {
+		globalTargetArch = "wasm"
+		globalTargetOS = "js"
+	} else {
+		globalTargetArch = "amd64"
+		globalTargetOS = "linux"
+	}
+
 	// Initialize this thread's compiler state (TLS globals are zeroed)
 	registerBuiltins()
 
@@ -4113,11 +4222,37 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 		} else {
 			needBuild[i] = true
 		}
-		// wasm: skip packages in prebuilt runtime.bc
-		if globalTargetArch == "wasm" && wasmRtPkgs[pkg.path] {
-			done[i] = true
-			needBuild[i] = false
+	}
+
+	// Phase 1b: compute transitive dep indices for dispatch readiness.
+	// A package is ready when ALL transitive deps (not just direct) are done.
+	transDeps := [][]int32{:n}
+	for i := int32(0); i < n; i++ {
+		visited := map[int32]bool{}
+		stack := []int32{:0:8}
+		for _, imp := range pkgs[i].imports {
+			if j, ok := idxByPath[imp]; ok {
+				stack = append(stack, j)
+			}
 		}
+		for len(stack) > 0 {
+			top := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if visited[top] {
+				continue
+			}
+			visited[top] = true
+			for _, imp := range pkgs[top].imports {
+				if j, ok := idxByPath[imp]; ok && !visited[j] {
+					stack = append(stack, j)
+				}
+			}
+		}
+		td := []int32{:0:len(visited)}
+		for j := range visited {
+			td = append(td, j)
+		}
+		transDeps[i] = td
 	}
 
 	// Phase 2: serialize metadata and spawn workers
@@ -4234,10 +4369,10 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 						if inFlight {
 							continue
 						}
-						// Check all deps done
+						// Check all transitive deps done
 						ready := true
-						for _, imp := range pkgs[i].imports {
-							if j, ok := idxByPath[imp]; ok && !done[j] {
+						for _, j := range transDeps[i] {
+							if !done[j] {
 								ready = false
 								break
 							}
@@ -4328,9 +4463,6 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 	// Phase 5: assemble .bc list
 	for i := int32(0); i < n; i++ {
 		pkg := pkgs[i]
-		if globalTargetArch == "wasm" && wasmRtPkgs[pkg.path] {
-			continue
-		}
 		if pkg.path == "runtime" {
 			hasRT = true
 		}

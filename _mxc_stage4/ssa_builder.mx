@@ -860,9 +860,17 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 			if recvName == "" && d.Recv.Name != nil {
 				recvName = d.Recv.Name.Value
 			}
+			// All receivers are ptr in Moxie. If the type checker says
+			// value receiver, wrap in pointer so the SSA type is *T.
+			recvType := recv.Type()
+			isValRecv := false
+			if _, isP := safeUnderlying(recvType).(*Pointer); !isP {
+				recvType = NewPointer(recvType)
+				isValRecv = true
+			}
 			p := &SSAParameter{
 				name:   recvName,
-				typ:    recv.Type(),
+				typ:    recvType,
 				pos:    0,
 				parent: fb.fn,
 			}
@@ -873,7 +881,15 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 				alloc := fb.emitAlloc(recv.Type(), 0)
 				fb.vars[recvObj] = alloc
 				fb.paramAllocas = append(fb.paramAllocas, alloc)
-				fb.emitStore(alloc, p)
+				if isValRecv {
+					// p is *T; load the value T from the pointer, then store.
+					deref := &SSAUnOp{Op: OpMul, X: p}
+					deref.SetType(recv.Type())
+					fb.fn.Blocks[0].Instrs = append(fb.fn.Blocks[0].Instrs, deref)
+					fb.emitStore(alloc, deref)
+				} else {
+					fb.emitStore(alloc, p)
+				}
 			}
 		}
 	}
@@ -4293,18 +4309,21 @@ func (fb *ssaFuncBuilder) derefValueRecv(fn *SSAFunction, recv SSAValue) (s SSAV
 	if fn == nil || recv == nil || fn.Signature == nil || fn.Signature.Recv() == nil {
 		return recv
 	}
+	// All receivers are ptr in Moxie. If the Signature says value receiver
+	// and the caller has a pointer, pass it through (already ptr).
+	// If the caller has a value, take its address.
 	if _, recvIsPtr := safeUnderlying(fn.Signature.Recv().Type()).(*Pointer); recvIsPtr {
 		return recv
 	}
-	p, ok := safeUnderlying(recv.SSAType()).(*Pointer)
-	if !ok {
+	// Source-level value receiver - function now expects ptr.
+	// If recv is already a pointer, pass through.
+	if _, ok := safeUnderlying(recv.SSAType()).(*Pointer); ok {
 		return recv
 	}
-	elem := p.Elem()
-	if elem == nil {
-		elem = fn.Signature.Recv().Type()
-	}
-	return fb.emitLoad(recv, elem)
+	// recv is a value - take its address by storing to an alloca.
+	alloc := fb.emitAlloc(recv.SSAType(), 0)
+	fb.emitStore(alloc, recv)
+	return alloc
 }
 
 func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, recv SSAValue) (*SSAFunction, SSAValue) {

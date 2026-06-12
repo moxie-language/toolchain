@@ -535,16 +535,7 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 	hasRecv := fn.Signature != nil && fn.Signature.Recv() != nil
 	if hasRecv {
 		if params != "" { params = params | ", " }
-		// Value receivers are passed by value (mirrors emitFunction's
-		// definition convention); only pointer receivers are ptr.
-		rt := "ptr"
-		if _, isP := safeUnderlying(fn.Signature.Recv().Type()).(*Pointer); !isP {
-			rt = e.llvmType(fn.Signature.Recv().Type())
-			if rt == "" || rt == "void" {
-				rt = "ptr"
-			}
-		}
-		params = params | rt
+		params = params | "ptr"
 	}
 	if fn.Signature != nil && fn.Signature.Params() != nil {
 		for i := 0; i < fn.Signature.Params().Len(); i++ {
@@ -1500,16 +1491,7 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 	hasRecv := f.Signature != nil && f.Signature.Recv() != nil
 	if hasRecv {
 		if n > 0 { e.w(", ") }
-		// Value receivers are passed by value (mirrors emitFunction's
-		// definition convention); only pointer receivers are ptr.
-		rt := "ptr"
-		if _, isP := safeUnderlying(f.Signature.Recv().Type()).(*Pointer); !isP {
-			rt = e.llvmType(f.Signature.Recv().Type())
-			if rt == "" || rt == "void" {
-				rt = "ptr"
-			}
-		}
-		e.w(rt)
+		e.w("ptr")
 		n++
 	}
 	if f.Signature != nil && f.Signature.Params() != nil {
@@ -1572,14 +1554,9 @@ func (e *irEmitter) emitLinknameForwarder(f *SSAFunction, origSym, tgtSym string
 	}
 	hasRecv := f.Signature != nil && f.Signature.Recv() != nil
 	if hasRecv {
-		rt := "ptr"
-		if _, isP := safeUnderlying(f.Signature.Recv().Type()).(*Pointer); !isP {
-			rt = e.llvmType(f.Signature.Recv().Type())
-			if rt == "" || rt == "void" { rt = "ptr" }
-		}
 		pn := "%p" | irItoa(idx)
-		paramTypes = append(paramTypes, rt | " " | pn)
-		paramArgs = append(paramArgs, rt | " " | pn)
+		paramTypes = append(paramTypes, "ptr " | pn)
+		paramArgs = append(paramArgs, "ptr " | pn)
 		idx++
 	}
 	if f.Signature != nil && f.Signature.Params() != nil {
@@ -1808,7 +1785,7 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 			e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 			e.w("  ") ; e.w(reg)
 			e.w(" = call ptr @runtime.alloc(") ; e.w(ipt)
-			e.w(" ") ; e.w(sz) ; e.w(", ptr null)\n")
+			e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
 			e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 			e.deallocAfterAlloc(a, reg)
 			e.scopeTrackAlloc(reg)
@@ -1892,7 +1869,7 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 		e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 		e.w("  ") ; e.w(reg)
 		e.w(" = call ptr @runtime.alloc(") ; e.w(ipt)
-		e.w(" ") ; e.w(sz) ; e.w(", ptr null)\n")
+		e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
 		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 		e.deallocAfterAlloc(a, reg)
 		e.scopeTrackAlloc(reg)
@@ -4865,7 +4842,7 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 					sz := e.nextReg2("cv")
 					e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(srcType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 					valPtr = e.nextReg2("cv")
-					e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null)\n")
+					e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
 					e.w("  store ") ; e.w(srcType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
 					e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 				} else {
@@ -4883,7 +4860,7 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 				sz := e.nextReg2("cv")
 				e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(srcType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 				valPtr = e.nextReg2("cv")
-				e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null)\n")
+				e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
 				e.w("  store ") ; e.w(srcType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
 				e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 			}
@@ -4915,7 +4892,7 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 			e.valName[c] = "{ ptr " | e.strConstGlobal(idx) | ", " | ipt | " " | slen | ", " | ipt | " " | slen | " }"
 			return
 		}
-		e.declareRuntime("runtime.stringFromUnicode", e.sliceType(), "i32, ptr")
+		e.declareRuntime("runtime.stringFromUnicode", e.sliceType(), "i32")
 		srcVal := val
 		if srcType != "i32" {
 			e.nextReg++
@@ -5534,7 +5511,7 @@ func (e *irEmitter) emitMakeSlice(m *SSAMakeSlice) {
 		e.w(ipt)
 		e.w(" ")
 		e.w(allocSz)
-		e.w(", ptr null)\n")
+		e.w(", ptr null, ptr null)\n")
 		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 		e.scopeTrackAlloc(dataPtr)
 	}
@@ -5599,7 +5576,7 @@ func (e *irEmitter) emitSliceOp(s *SSASlice) {
 			e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(arrType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 			e.nextReg++
 			tmp := "%sl" | irItoa(e.nextReg)
-			e.w("  ") ; e.w(tmp) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null)\n")
+			e.w("  ") ; e.w(tmp) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
 			e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 			e.w("  store ") ; e.w(arrType) ; e.w(" ") ; e.w(src) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
 			oldPtr = tmp
@@ -5768,7 +5745,7 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 			sz := e.nextReg2("mi")
 			e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(valType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 			valPtr = e.nextReg2("mi")
-			e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null)\n")
+			e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
 			e.w("  store ") ; e.w(valType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
 			e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 		} else {
@@ -5794,7 +5771,7 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 		sz := e.nextReg2("ha")
 		e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(valType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 		valPtr = e.nextReg2("mi")
-		e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null)\n")
+		e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
 		e.w("  store ") ; e.w(valType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
 		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 		e.scopeTrackAlloc(valPtr)
@@ -5814,6 +5791,14 @@ func fnv1a64(s string) (h uint64) {
 	return h
 }
 
+// hashToIntptr folds a 64-bit FNV-1a hash to intptr width (32-bit on wasm32).
+func (e *irEmitter) hashToIntptr(h uint64) (s string) {
+	if e.intptrType() == "i32" {
+		return irUitoa64((h >> 32) ^ (h & 0xFFFFFFFF))
+	}
+	return irUitoa64(h)
+}
+
 func (e *irEmitter) typeIDHash(t Type) (s string) {
 	name := e.reflectTypeName(t)
 	if e.typeIDs == nil {
@@ -5823,21 +5808,12 @@ func (e *irEmitter) typeIDHash(t Type) (s string) {
 		e.typeIDNext++
 		e.typeIDs[name] = e.typeIDNext
 	}
-	h := fnv1a64(name)
-	if e.intptrType() == "i32" {
-		return irUitoa64((h >> 32) ^ (h & 0xFFFFFFFF))
-	}
-	return irUitoa64(h)
+	return e.hashToIntptr(fnv1a64(name))
 }
 
 func (e *irEmitter) typeIDHashI64(t Type) (s string) {
 	name := e.reflectTypeName(t)
-	h := fnv1a64(name)
-	ipt := e.intptrType()
-	if ipt == "i32" {
-		return "i32 " | irUitoa64((h >> 32) ^ (h & 0xFFFFFFFF))
-	}
-	return "i64 " | irUitoa64(h)
+	return e.intptrType() | " " | e.hashToIntptr(fnv1a64(name))
 }
 
 func irUitoa64(v uint64) (s string) {
@@ -6168,8 +6144,28 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 	if _, ok := e.extDecls[sym]; ok {
 		return
 	}
+	// Use the impl's actual return type (not the caller's expected type)
+	// so the declaration matches the definition in the defining package.
 	retType := e.llvmType(inv.SSAType())
-	params := "ptr"
+	if impl.fn != nil && impl.fn.Signature != nil && impl.fn.Signature.Results() != nil {
+		implRet := e.llvmType(impl.fn.Signature.Results())
+		if implRet != "" && implRet != "void" {
+			retType = implRet
+		}
+	} else if impl.extSig != nil && impl.extSig.Results() != nil {
+		implRet := e.llvmType(impl.extSig.Results())
+		if implRet != "" && implRet != "void" {
+			retType = implRet
+		}
+	}
+	useSret := needsSret(retType)
+	// All receivers are ptr in Moxie (no value receivers).
+	recvLLVM := "ptr"
+	params := ""
+	if useSret {
+		params = "ptr, "
+	}
+	params = params | recvLLVM
 	var sig *Signature
 	if impl.fn != nil && impl.fn.Signature != nil {
 		sig = impl.fn.Signature
@@ -6198,7 +6194,11 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 	// a link reusing this module's cached .bc without an impl's package
 	// resolves the ref to null instead of failing, and the guarded call arm
 	// is dead there (no make-interface site can produce the type-ID).
-	e.extDecls[sym] = "extern_weak " | retType | " " | sym | "(" | params | ")"
+	declRet := retType
+	if useSret {
+		declRet = "void"
+	}
+	e.extDecls[sym] = "extern_weak " | declRet | " " | sym | "(" | params | ")"
 }
 
 func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv string, inv *SSAInvoke, isVoid bool, impl ifaceImpl) {
@@ -6250,8 +6250,7 @@ func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv stri
 
 func (e *irEmitter) implTypeID(impl ifaceImpl) (s string) {
 	if impl.extTypeID != "" {
-		h := fnv1a64(impl.extTypeID)
-		return irUitoa64(h)
+		return e.hashToIntptr(fnv1a64(impl.extTypeID))
 	}
 	return e.typeIDHash(impl.recvType)
 }
@@ -6263,7 +6262,7 @@ func (e *irEmitter) implTypeID(impl ifaceImpl) (s string) {
 // what implements what. Pointer types carry the full method set; value
 // types only value-receiver methods (Go method-set rules).
 func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s string) {
-	mnames := collectIfaceMethodNames(ifaceT, 0)
+	mnames, msigs := collectIfaceMethodInfo(ifaceT, 0)
 	// The universe error interface carries an implicit String() string so fmt
 	// can print errors; concrete error types are not required to declare it.
 	// Drop it from the required set whenever Error is present, or no type
@@ -6275,13 +6274,16 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 		}
 	}
 	if hasError {
-		var keep []string
+		var keepN []string
+		var keepS []*Signature
 		for mi := 0; mi < len(mnames); mi++ {
 			if mnames[mi] != "String" {
-				keep = append(keep, mnames[mi])
+				keepN = append(keepN, mnames[mi])
+				keepS = append(keepS, msigs[mi])
 			}
 		}
-		mnames = keep
+		mnames = keepN
+		msigs = keepS
 	}
 	n := int32(len(mnames))
 	allCount := map[string]int32{}
@@ -6291,6 +6293,25 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 		impls := e.findIfaceImpls(mnames[mi])
 		seen := map[string]bool{}
 		for ii := 0; ii < len(impls); ii++ {
+			// Check return type and parameter count compatibility.
+			if msigs[mi] != nil && impls[ii].fn != nil && impls[ii].fn.Signature != nil {
+				ifaceRet := e.llvmType(msigs[mi].Results())
+				implRet := e.llvmType(impls[ii].fn.Signature.Results())
+				if ifaceRet != implRet {
+					continue
+				}
+				ifaceParams := int32(0)
+				if msigs[mi].Params() != nil {
+					ifaceParams = int32(msigs[mi].Params().Len())
+				}
+				implParams := int32(0)
+				if impls[ii].fn.Signature.Params() != nil {
+					implParams = int32(impls[ii].fn.Signature.Params().Len())
+				}
+				if ifaceParams != implParams {
+					continue
+				}
+			}
 			base := e.implBaseTypeName(impls[ii])
 			if base == "" || seen[base] {
 				continue
@@ -6310,10 +6331,10 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 	for oi := 0; oi < len(order); oi++ {
 		base := order[oi]
 		if allCount[base] == n {
-			tids = append(tids, irUitoa64(fnv1a64(pfx|"pointer:"|base[len(pfx):])))
+			tids = append(tids, e.hashToIntptr(fnv1a64(pfx|"pointer:"|base[len(pfx):])))
 		}
 		if valCount[base] == n {
-			tids = append(tids, irUitoa64(fnv1a64(base)))
+			tids = append(tids, e.hashToIntptr(fnv1a64(base)))
 		}
 	}
 	ok := ""
@@ -6340,34 +6361,50 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 // interface, walking embedded interfaces when the completed allMethods
 // list is unavailable.
 func collectIfaceMethodNames(ifaceT *TCInterface, depth int32) (ss []string) {
+	names, _ := collectIfaceMethodInfo(ifaceT, depth)
+	return names
+}
+
+func collectIfaceMethodInfo(ifaceT *TCInterface, depth int32) (ss []string, sigs []*Signature) {
 	if ifaceT == nil || depth > 4 {
-		return nil
+		return nil, nil
 	}
 	var names []string
+	var sigList []*Signature
 	if ifaceT.NumMethods() > 0 {
 		for i := int32(0); i < ifaceT.NumMethods(); i++ {
 			names = append(names, ifaceT.Method(i).Name())
+			sigList = append(sigList, ifaceT.Method(i).Sig())
 		}
 	} else {
 		for i := int32(0); i < ifaceT.NumExplicitMethods(); i++ {
 			names = append(names, ifaceT.ExplicitMethod(i).Name())
+			sigList = append(sigList, ifaceT.ExplicitMethod(i).Sig())
 		}
 		for i := int32(0); i < ifaceT.NumEmbeddeds(); i++ {
 			if em, ok := safeUnderlying(ifaceT.EmbeddedType(i)).(*TCInterface); ok {
-				names = names | collectIfaceMethodNames(em, depth+1)
+				en, es := collectIfaceMethodInfo(em, depth+1)
+				names = names | en
+				sigList = sigList | es
 			}
 		}
 	}
 	seen := map[string]bool{}
-	var out []string
+	var outN []string
+	var outS []*Signature
 	for i := 0; i < len(names); i++ {
 		if seen[names[i]] {
 			continue
 		}
 		seen[names[i]] = true
-		out = append(out, names[i])
+		outN = append(outN, names[i])
+		if i < len(sigList) {
+			outS = append(outS, sigList[i])
+		} else {
+			outS = append(outS, nil)
+		}
 	}
-	return out
+	return outN, outS
 }
 
 // implBaseTypeName returns the reflect name of the impl's receiver base
@@ -6508,7 +6545,35 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 		e.w("  ") ; e.w(valPtr) ; e.w(" = extractvalue " | e.ifaceType() | " ") ; e.w(ifaceVal) ; e.w(", 1\n")
 	}
 
-	impls := e.findIfaceImpls(inv.MethodName)
+	allImpls := e.findIfaceImpls(inv.MethodName)
+	// Filter impls by return type and parameter count compatibility.
+	nInvokeArgs := int32(len(inv.Args))
+	var impls []ifaceImpl
+	for _, impl := range allImpls {
+		if impl.fn != nil && impl.fn.Signature != nil {
+			implRet := e.llvmType(impl.fn.Signature.Results())
+			if retType != implRet && retType != "void" && implRet != "void" {
+				continue
+			}
+			// Parameter count must match the invoke arg count.
+			implParams := int32(0)
+			if impl.fn.Signature.Params() != nil {
+				implParams = int32(impl.fn.Signature.Params().Len())
+			}
+			if implParams != nInvokeArgs {
+				continue
+			}
+		} else if impl.extSig != nil {
+			implParams := int32(0)
+			if impl.extSig.Params() != nil {
+				implParams = int32(impl.extSig.Params().Len())
+			}
+			if implParams != nInvokeArgs {
+				continue
+			}
+		}
+		impls = append(impls, impl)
+	}
 	for _, impl := range impls {
 		e.declareExtInvoke(impl, inv)
 	}
@@ -6531,29 +6596,9 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 		if impl.embedType != nil {
 			callRecv = e.emitEmbedChainGEP(impl, valPtr)
 		}
-		var recvLLVM, recv string
-		if impl.ptrRecv {
-			recvLLVM = "ptr"
-			recv = callRecv
-		} else {
-			if impl.embedType != nil {
-				recvLLVM = e.llvmType(impl.embedType)
-			} else {
-				recvType := impl.recvType
-				if pt, ok := recvType.(*Pointer); ok {
-					recvType = pt.Elem()
-				}
-				recvLLVM = e.llvmType(recvType)
-			}
-			if recvLLVM == "ptr" {
-				recv = callRecv
-			} else if e.isScalarType(recvLLVM) {
-				recv = e.extractScalarFromIface(callRecv, recvLLVM)
-			} else {
-				recv = e.nextReg2("ld")
-				e.w("  ") ; e.w(recv) ; e.w(" = load ") ; e.w(recvLLVM) ; e.w(", ptr ") ; e.w(callRecv) ; e.w("\n")
-			}
-		}
+		// All receivers are ptr in Moxie.
+		recvLLVM := "ptr"
+		recv := callRecv
 		if impl.extSymbol != "" {
 			e.emitExtInvokeCall(reg, retType, e.implFuncSym(impl), recvLLVM, recv, inv, isVoid, impl)
 		} else {
@@ -6565,7 +6610,7 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 			e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(e.implFuncSym(impl)) ; e.w("(")
 			e.w(recvLLVM) ; e.w(" ") ; e.w(recv)
 			e.emitInvokeArgs(prepArgs)
-			e.w(")\n")
+			e.w(", ptr null)\n")
 		}
 		return
 	}
@@ -6598,33 +6643,13 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 		e.w("  br i1 ") ; e.w(cmpReg) ; e.w(", label %") ; e.w(caseLabels[i]) ; e.w(", label %") ; e.w(nextCheck) ; e.w("\n")
 
 		e.w(caseLabels[i]) ; e.w(":\n")
-		var recvLLVM, recv string
+		// All receivers are ptr in Moxie.
 		callRecv := valPtr
 		if impl.embedType != nil {
 			callRecv = e.emitEmbedChainGEP(impl, valPtr)
 		}
-		if impl.ptrRecv {
-			recvLLVM = "ptr"
-			recv = callRecv
-		} else {
-			if impl.embedType != nil {
-				recvLLVM = e.llvmType(impl.embedType)
-			} else {
-				recvType := impl.recvType
-				if pt, ok := recvType.(*Pointer); ok {
-					recvType = pt.Elem()
-				}
-				recvLLVM = e.llvmType(recvType)
-			}
-			if recvLLVM == "ptr" {
-				recv = callRecv
-			} else if e.isScalarType(recvLLVM) {
-				recv = e.extractScalarFromIface(callRecv, recvLLVM)
-			} else {
-				recv = e.nextReg2("ld")
-				e.w("  ") ; e.w(recv) ; e.w(" = load ") ; e.w(recvLLVM) ; e.w(", ptr ") ; e.w(callRecv) ; e.w("\n")
-			}
-		}
+		recvLLVM := "ptr"
+		recv := callRecv
 		if impl.extSymbol != "" {
 			creg := ""
 			if !isVoid {
@@ -6640,7 +6665,7 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 			e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(e.implFuncSym(impl)) ; e.w("(")
 			e.w(recvLLVM) ; e.w(" ") ; e.w(recv)
 			e.emitInvokeArgs(prepArgs)
-			e.w(")\n")
+			e.w(", ptr null)\n")
 		}
 		e.w("  br label %") ; e.w(mergeLabel) ; e.w("\n")
 	}
@@ -6654,8 +6679,8 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 		idx := e.addStringConst(msg)
 		ipt := e.intptrType()
 		slen := irItoa64(int64(len(msg)))
-		e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" { ptr ") ; e.w(e.strConstGlobal(idx)) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(" })\n")
-		e.declareRuntimeNoCtx("runtime._panicstr", "void", sty)
+		e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" { ptr ") ; e.w(e.strConstGlobal(idx)) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(" }, ptr null)\n")
+		e.declareRuntime("runtime._panicstr", "void", sty)
 	}
 	e.w("  unreachable\n")
 
@@ -6808,8 +6833,8 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 			idx := e.addStringConst(msg)
 			ipt := e.intptrType()
 			slen := irItoa64(int64(len(msg)))
-			e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" { ptr ") ; e.w(e.strConstGlobal(idx)) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(" })\n")
-			e.declareRuntimeNoCtx("runtime._panicstr", "void", sty)
+			e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" { ptr ") ; e.w(e.strConstGlobal(idx)) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(" }, ptr null)\n")
+			e.declareRuntime("runtime._panicstr", "void", sty)
 			e.w("  unreachable\n")
 			e.w(goodLabel) ; e.w(":\n")
 			if blk := t.InstrBlock(); blk != nil {
@@ -7059,7 +7084,7 @@ func (e *irEmitter) emitMakeClosure(m *SSAMakeClosure) {
 	e.w(ctxType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 	ctxPtr := e.nextReg2("mc")
 	e.w("  ") ; e.w(ctxPtr) ; e.w(" = call ptr @runtime.alloc(")
-	e.w(ipt) ; e.w(" ") ; e.w(ctxSz) ; e.w(", ptr null)\n")
+	e.w(ipt) ; e.w(" ") ; e.w(ctxSz) ; e.w(", ptr null, ptr null)\n")
 	e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 	e.scopeTrackAlloc(ctxPtr)
 
@@ -7071,7 +7096,7 @@ func (e *irEmitter) emitMakeClosure(m *SSAMakeClosure) {
 			boxAlloc := e.nextReg2("mc")
 			e.w("  ") ; e.w(boxAlloc) ; e.w(" = call ptr @runtime.alloc(")
 			e.w(ipt) ; e.w(" ptrtoint (ptr getelementptr (") ; e.w(actualType)
-			e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("), ptr null)\n")
+			e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("), ptr null, ptr null)\n")
 			e.w("  store ") ; e.w(actualType) ; e.w(" ") ; e.w(bval) ; e.w(", ptr ") ; e.w(boxAlloc) ; e.w("\n")
 			bval = boxAlloc
 		}
@@ -7131,8 +7156,8 @@ func (e *irEmitter) emitPanic(p *SSAPanic) {
 	if c, ok := p.X.(*SSAConst); ok && e.isStringLike(c.SSAType()) {
 		arg := e.operand(c)
 		sty := e.sliceType()
-		e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(")\n")
-		e.declareRuntimeNoCtx("runtime._panicstr", "void", sty)
+		e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime._panicstr", "void", sty)
 		e.w("  unreachable\n")
 		return
 	}
@@ -7701,8 +7726,8 @@ func (e *irEmitter) emitDeferBuiltin(d *SSADefer, bi *SSABuiltin, pfx string, id
 		e.declareRuntime("runtime.chanClose", "void", "ptr")
 		e.w("  call void @runtime.chanClose(") ; e.w(argTypes[0]) ; e.w(" ") ; e.w(args[0]) ; e.w(", ptr null)\n")
 	} else if name == "panic" && len(args) == 1 {
-		e.declareRuntimeNoCtx("runtime._panicstr", "void", argTypes[0])
-		e.w("  call void @runtime._panicstr(") ; e.w(argTypes[0]) ; e.w(" ") ; e.w(args[0]) ; e.w(")\n")
+		e.declareRuntime("runtime._panicstr", "void", argTypes[0])
+		e.w("  call void @runtime._panicstr(") ; e.w(argTypes[0]) ; e.w(" ") ; e.w(args[0]) ; e.w(", ptr null)\n")
 	} else if name == "println" || name == "print" {
 		e.declareRuntime("runtime.printlock", "void", "")
 		e.declareRuntime("runtime.printunlock", "void", "")
@@ -9803,8 +9828,8 @@ func (e *irEmitter) chanPanicStr() (s string) {
 func (e *irEmitter) emitChanPanic() {
 	sty := e.sliceType()
 	e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" ")
-	e.w(e.chanPanicStr()) ; e.w(")\n")
-	e.declareRuntimeNoCtx("runtime._panicstr", "void", sty)
+	e.w(e.chanPanicStr()) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime._panicstr", "void", sty)
 	e.w("  unreachable\n")
 	e.blockDead = true
 }
