@@ -428,13 +428,24 @@ func (e *irEmitter) intptrType() (s string) {
 	return "i64"
 }
 
+// truncToI32 emits a trunc from intptr to i32, or returns val unchanged
+// if intptr is already i32 (wasm32 target).
+func (e *irEmitter) truncToI32(dst, val string) {
+	ipt := e.intptrType()
+	if ipt == "i32" {
+		e.w("  ") ; e.w(dst) ; e.w(" = add i32 ") ; e.w(val) ; e.w(", 0\n")
+		return
+	}
+	e.w("  ") ; e.w(dst) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(val) ; e.w(" to i32\n")
+}
+
 func (e *irEmitter) sliceType() (s string) {
 	ipt := e.intptrType()
 	return "{ptr, " | ipt | ", " | ipt | "}"
 }
 
 func (e *irEmitter) ifaceType() (s string) {
-	return "{i64, ptr}"
+	return "{" | e.intptrType() | ", ptr}"
 }
 
 func (e *irEmitter) nextReg2(prefix string) (s string) {
@@ -471,6 +482,10 @@ func (e *irEmitter) declareRuntime(name, retType, params string) {
 	} else {
 		params = "ptr"
 	}
+	e.extDecls[name] = retType | " @" | name | "(" | params | ")"
+}
+
+func (e *irEmitter) declareRuntimeNoCtx(name, retType, params string) {
 	e.extDecls[name] = retType | " @" | name | "(" | params | ")"
 }
 
@@ -971,13 +986,13 @@ func (e *irEmitter) emitEmbedGlobal(g *SSAGlobal, name string, ei *embedInfo) {
 		// Fail loud: a zeroinitializer embed global is a nil slice at runtime
 		// and SIGSEGVs far from the cause.
 		compileErrors = append(compileErrors, "embed: file not found: "|ei.path)
-		e.w(name | " = " | e.tlsPrefix() | "{ptr, i64, i64} zeroinitializer\n")
+		e.w(name | " = " | e.tlsPrefix() | e.sliceType() | " zeroinitializer\n")
 		return
 	}
 	elemSize := e.embedElemSize(ei.elemType)
 	if elemSize <= 0 {
 		compileErrors = append(compileErrors, "embed: unknown element type: "|ei.elemType|" for "|ei.path)
-		e.w(name | " = " | e.tlsPrefix() | "{ptr, i64, i64} zeroinitializer\n")
+		e.w(name | " = " | e.tlsPrefix() | e.sliceType() | " zeroinitializer\n")
 		return
 	}
 	count := int32(len(data)) / elemSize
@@ -2309,7 +2324,7 @@ func (e *irEmitter) emitZeroReg(reg string, typ Type) {
 		rt = "i32"
 	}
 	if rt == "ptr" {
-		e.w("  ") ; e.w(reg) ; e.w(" = inttoptr i64 0 to ptr\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = inttoptr " | e.intptrType() | " 0 to ptr\n")
 	} else if rt == "i1" {
 		e.w("  ") ; e.w(reg) ; e.w(" = add i1 false, false\n")
 	} else if e.intBits(rt) > 0 {
@@ -2477,7 +2492,7 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 		}
 		_, isMap := u.(*TCMap)
 		_, isChan := u.(*TCChan)
-		if !isIface && !isSlice && !isSig && !isPtr && u == nil && (lt == "{ptr, ptr}" || lt == "{i64, ptr}" || lt == "{ptr, i64}") {
+		if !isIface && !isSlice && !isSig && !isPtr && u == nil && (lt == "{ptr, ptr}" || lt == e.ifaceType() || lt == "{ptr, " | e.intptrType() | "}") {
 			isIface = true
 		}
 		if isSig {
@@ -2511,7 +2526,7 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 				cmpOp = "icmp ne"
 			}
 			if lt == e.ifaceType() {
-				e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" i64 ") ; e.w(extReg) ; e.w(", 0\n")
+				e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" " | e.intptrType() | " ") ; e.w(extReg) ; e.w(", 0\n")
 			} else {
 				e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ptr ") ; e.w(extReg) ; e.w(", null\n")
 			}
@@ -2543,7 +2558,7 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 		u2 := safeUnderlying(b.X.SSAType())
 		_, isSig2 := u2.(*Signature)
 		_, isIfce2 := u2.(*TCInterface)
-		if !isSig2 && !isIfce2 && u2 == nil && (lt == "{ptr, ptr}" || lt == "{i64, ptr}") {
+		if !isSig2 && !isIfce2 && u2 == nil && (lt == "{ptr, ptr}" || lt == e.ifaceType()) {
 			isIfce2 = true
 		}
 		if !isSig2 && !isIfce2 && b.Y != nil && b.Y.SSAType() != nil {
@@ -2555,7 +2570,7 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 		}
 		if !isSig2 && !isIfce2 && lt == "ptr" && b.Y != nil && b.Y.SSAType() != nil {
 			rt2c := e.llvmType(b.Y.SSAType())
-			if rt2c == "{ptr, ptr}" || rt2c == "{i64, ptr}" {
+			if rt2c == "{ptr, ptr}" || rt2c == e.ifaceType() {
 				isIfce2 = true
 			}
 		}
@@ -2571,39 +2586,41 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 			if at, ok := e.allocTypes[b.Y]; ok && at != "" {
 				rt2 = at
 			}
-			if (lt == "{ptr, ptr}" || lt == "{i64, ptr}") && rt2 == "ptr" {
+			if (lt == "{ptr, ptr}" || lt == e.ifaceType()) && rt2 == "ptr" {
 				e.nextReg++
 				extReg := "%fc" | irItoa(e.nextReg)
 				e.w("  ") ; e.w(extReg) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(nilField) ; e.w("\n")
 				cmpOp := "icmp eq"
 				if b.Op == OpNeq { cmpOp = "icmp ne" }
-				if lt == "{i64, ptr}" && nilField == "0" {
+				ipt := e.intptrType()
+				if lt == e.ifaceType() && nilField == "0" {
 					e.nextReg++
 					p2i := "%fc" | irItoa(e.nextReg)
-					e.w("  ") ; e.w(p2i) ; e.w(" = ptrtoint ptr ") ; e.w(rv) ; e.w(" to i64\n")
-					e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" i64 ") ; e.w(extReg) ; e.w(", ") ; e.w(p2i) ; e.w("\n")
+					e.w("  ") ; e.w(p2i) ; e.w(" = ptrtoint ptr ") ; e.w(rv) ; e.w(" to " | ipt | "\n")
+					e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" " | ipt | " ") ; e.w(extReg) ; e.w(", ") ; e.w(p2i) ; e.w("\n")
 				} else {
 					e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ptr ") ; e.w(extReg) ; e.w(", ") ; e.w(rv) ; e.w("\n")
 				}
 				return
 			}
-			if lt == "ptr" && (rt2 == "{ptr, ptr}" || rt2 == "{i64, ptr}") {
+			if lt == "ptr" && (rt2 == "{ptr, ptr}" || rt2 == e.ifaceType()) {
 				e.nextReg++
 				extReg := "%fc" | irItoa(e.nextReg)
 				e.w("  ") ; e.w(extReg) ; e.w(" = extractvalue ") ; e.w(rt2) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(nilField) ; e.w("\n")
 				cmpOp := "icmp eq"
 				if b.Op == OpNeq { cmpOp = "icmp ne" }
-				if rt2 == "{i64, ptr}" && nilField == "0" {
+				if rt2 == e.ifaceType() && nilField == "0" {
+					ipt2 := e.intptrType()
 					e.nextReg++
 					p2i := "%fc" | irItoa(e.nextReg)
-					e.w("  ") ; e.w(p2i) ; e.w(" = ptrtoint ptr ") ; e.w(lv) ; e.w(" to i64\n")
-					e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" i64 ") ; e.w(p2i) ; e.w(", ") ; e.w(extReg) ; e.w("\n")
+					e.w("  ") ; e.w(p2i) ; e.w(" = ptrtoint ptr ") ; e.w(lv) ; e.w(" to " | ipt2 | "\n")
+					e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" " | ipt2 | " ") ; e.w(p2i) ; e.w(", ") ; e.w(extReg) ; e.w("\n")
 				} else {
 					e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ptr ") ; e.w(lv) ; e.w(", ") ; e.w(extReg) ; e.w("\n")
 				}
 				return
 			}
-			if (lt == "{ptr, ptr}" || lt == "{i64, ptr}") && rt2 != "{ptr, ptr}" && rt2 != "{i64, ptr}" && rt2 != "ptr" {
+			if (lt == "{ptr, ptr}" || lt == e.ifaceType()) && rt2 != "{ptr, ptr}" && rt2 != e.ifaceType() && rt2 != "ptr" {
 				sty := e.sliceType()
 				e.nextReg++
 				dp := "%fc" | irItoa(e.nextReg)
@@ -2678,7 +2695,7 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 			}
 			f0type := "ptr"
 			if lt == e.ifaceType() {
-				f0type = "i64"
+				f0type = e.intptrType()
 			}
 			e.w("  ") ; e.w(cA) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ") ; e.w(f0type) ; e.w(" ") ; e.w(pA) ; e.w(", ") ; e.w(pB) ; e.w("\n")
 			e.w("  ") ; e.w(cB) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ptr ") ; e.w(qA) ; e.w(", ") ; e.w(qB) ; e.w("\n")
@@ -4081,15 +4098,16 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 				kd := e.nextReg2("dl")
 				kl := e.nextReg2("dl")
 				kc := e.nextReg2("dl")
-				e.w("  ") ; e.w(kd) ; e.w(" = extractvalue {ptr, i64, i64} ") ; e.w(keyVal) ; e.w(", 0\n")
-				e.w("  ") ; e.w(kl) ; e.w(" = extractvalue {ptr, i64, i64} ") ; e.w(keyVal) ; e.w(", 1\n")
-				e.w("  ") ; e.w(kc) ; e.w(" = extractvalue {ptr, i64, i64} ") ; e.w(keyVal) ; e.w(", 2\n")
+				e.w("  ") ; e.w(kd) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 0\n")
+				e.w("  ") ; e.w(kl) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 1\n")
+				e.w("  ") ; e.w(kc) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 2\n")
+				ipt := e.intptrType()
 				e.w("  call void @runtime.hashmapContentDelete(ptr ") ; e.w(mapVal)
 				e.w(", ptr ") ; e.w(kd)
-				e.w(", i64 ") ; e.w(kl)
-				e.w(", i64 ") ; e.w(kc)
+				e.w(", " | ipt | " ") ; e.w(kl)
+				e.w(", " | ipt | " ") ; e.w(kc)
 				e.w(", ptr null)\n")
-				e.declareRuntime("runtime.hashmapContentDelete", "void", "ptr, ptr, i64, i64")
+				e.declareRuntime("runtime.hashmapContentDelete", "void", "ptr, ptr, " | ipt | ", " | ipt)
 			} else {
 				keyAlloca := e.nextReg2("dl")
 				e.w("  ") ; e.w(keyAlloca) ; e.w(" = alloca ") ; e.w(keyType) ; e.w("\n")
@@ -4787,16 +4805,26 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 				valPtr = val
 			} else if e.isScalarType(srcType) {
 				ipt := e.intptrType()
-				ext := e.nextReg2("cv")
-				if srcType == "i1" || srcType == "i8" || srcType == "i16" || srcType == "i32" {
-					e.w("  ") ; e.w(ext) ; e.w(" = zext ") ; e.w(srcType) ; e.w(" ") ; e.w(val) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
-				} else if srcType == "i64" {
-					ext = val
+				srcBits := e.intBits(srcType)
+				dstBits := e.intBits(ipt)
+				if srcBits > dstBits {
+					// Value doesn't fit in intptr - heap allocate
+					sz := e.nextReg2("cv")
+					e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(srcType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+					valPtr = e.nextReg2("cv")
+					e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null)\n")
+					e.w("  store ") ; e.w(srcType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
+					e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 				} else {
-					ext = val
+					ext := e.nextReg2("cv")
+					if srcBits == dstBits {
+						ext = val
+					} else {
+						e.w("  ") ; e.w(ext) ; e.w(" = zext ") ; e.w(srcType) ; e.w(" ") ; e.w(val) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+					}
+					valPtr = e.nextReg2("cv")
+					e.w("  ") ; e.w(valPtr) ; e.w(" = inttoptr ") ; e.w(ipt) ; e.w(" ") ; e.w(ext) ; e.w(" to ptr\n")
 				}
-				valPtr = e.nextReg2("cv")
-				e.w("  ") ; e.w(valPtr) ; e.w(" = inttoptr ") ; e.w(ipt) ; e.w(" ") ; e.w(ext) ; e.w(" to ptr\n")
 			} else {
 				ipt := e.intptrType()
 				sz := e.nextReg2("cv")
@@ -4808,8 +4836,8 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 			}
 			typeid := e.typeIDHash(c.X.SSAType())
 			t1 := e.nextReg2("cv")
-			e.w("  ") ; e.w(t1) ; e.w(" = insertvalue {i64, ptr} undef, i64 ") ; e.w(typeid) ; e.w(", 0\n")
-			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue {i64, ptr} ") ; e.w(t1) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
+			e.w("  ") ; e.w(t1) ; e.w(" = insertvalue " | e.ifaceType() | " undef, " | e.intptrType() | " ") ; e.w(typeid) ; e.w(", 0\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue " | e.ifaceType() | " ") ; e.w(t1) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
 			return
 		}
 	}
@@ -4901,8 +4929,8 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 		if dstType == e.ifaceType() {
 			typeid := e.typeIDHash(c.X.SSAType())
 			t1 := e.nextReg2("cv")
-			e.w("  ") ; e.w(t1) ; e.w(" = insertvalue {i64, ptr} undef, i64 ") ; e.w(typeid) ; e.w(", 0\n")
-			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue {i64, ptr} ") ; e.w(t1) ; e.w(", ptr ") ; e.w(val) ; e.w(", 1\n")
+			e.w("  ") ; e.w(t1) ; e.w(" = insertvalue " | e.ifaceType() | " undef, " | e.intptrType() | " ") ; e.w(typeid) ; e.w(", 0\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue " | e.ifaceType() | " ") ; e.w(t1) ; e.w(", ptr ") ; e.w(val) ; e.w(", 1\n")
 		} else {
 			e.valName[c] = "zeroinitializer"
 		}
@@ -5392,6 +5420,12 @@ func (e *irEmitter) sextToIpt(val SSAValue, op string) (s string) {
 	}
 	e.nextReg++
 	ext := "%sx" | irItoa(e.nextReg)
+	srcBits := e.intBits(valType)
+	dstBits := e.intBits(ipt)
+	if srcBits > dstBits {
+		e.w("  ") ; e.w(ext) ; e.w(" = trunc ") ; e.w(valType) ; e.w(" ") ; e.w(op) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+		return ext
+	}
 	extOp := "sext"
 	if b, ok := safeUnderlying(val.SSAType()).(*Basic); ok && b.Info()&IsUnsigned != 0 {
 		extOp = "zext"
@@ -5592,6 +5626,12 @@ func (e *irEmitter) sliceIdxToIpt(val SSAValue, ipt string) (s string) {
 	}
 	e.nextReg++
 	ext := "%sl" | irItoa(e.nextReg)
+	srcBits := e.intBits(valType)
+	dstBits := e.intBits(ipt)
+	if srcBits > dstBits {
+		e.w("  ") ; e.w(ext) ; e.w(" = trunc ") ; e.w(valType) ; e.w(" ") ; e.w(operandStr) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+		return ext
+	}
 	op := "sext"
 	if b, ok2 := safeUnderlying(val.SSAType()).(*Basic); ok2 && b.Info()&IsUnsigned != 0 {
 		op = "zext"
@@ -5641,7 +5681,8 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 	valType := e.llvmType(m.X.SSAType())
 	ity := e.ifaceType()
 	if valType == "void" {
-		e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(ity) ; e.w(" zeroinitializer, i64 0, 0\n")
+		ipt := e.intptrType()
+		e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(ity) ; e.w(" zeroinitializer, " | ipt | " 0, 0\n")
 		return
 	}
 	if _, isAlloc := m.X.(*SSAAlloc); !isAlloc {
@@ -5657,7 +5698,8 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 		dp := e.nextReg2("mi")
 		e.w("  ") ; e.w(dp) ; e.w(" = extractvalue ") ; e.w(ity) ; e.w(" ") ; e.w(val) ; e.w(", 1\n")
 		t1 := e.nextReg2("mi")
-		e.w("  ") ; e.w(t1) ; e.w(" = insertvalue ") ; e.w(ity) ; e.w(" undef, i64 ") ; e.w(tp) ; e.w(", 0\n")
+		ipt := e.intptrType()
+		e.w("  ") ; e.w(t1) ; e.w(" = insertvalue ") ; e.w(ity) ; e.w(" undef, " | ipt | " ") ; e.w(tp) ; e.w(", 0\n")
 		e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(ity) ; e.w(" ") ; e.w(t1) ; e.w(", ptr ") ; e.w(dp) ; e.w(", 1\n")
 		return
 	}
@@ -5666,23 +5708,34 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 		valPtr = val
 	} else if e.isScalarType(valType) {
 		ipt := e.intptrType()
-		ext := e.nextReg2("mi")
-		if valType == "i1" || valType == "i8" || valType == "i16" || valType == "i32" {
-			e.w("  ") ; e.w(ext) ; e.w(" = zext ") ; e.w(valType) ; e.w(" ") ; e.w(val) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
-		} else if valType == "i64" {
-			ext = val
-		} else if valType == "float" {
-			ftmp := e.nextReg2("mi")
-			e.w("  ") ; e.w(ftmp) ; e.w(" = bitcast float ") ; e.w(val) ; e.w(" to i32\n")
-			e.w("  ") ; e.w(ext) ; e.w(" = zext i32 ") ; e.w(ftmp) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
-		} else if valType == "double" {
-			ext = e.nextReg2("mi")
-			e.w("  ") ; e.w(ext) ; e.w(" = bitcast double ") ; e.w(val) ; e.w(" to i64\n")
+		srcBits := e.intBits(valType)
+		dstBits := e.intBits(ipt)
+		if srcBits > dstBits || (valType == "double" && dstBits < 64) {
+			// Value doesn't fit in intptr - heap allocate
+			sz := e.nextReg2("mi")
+			e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(valType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+			valPtr = e.nextReg2("mi")
+			e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null)\n")
+			e.w("  store ") ; e.w(valType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
+			e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 		} else {
-			ext = val
+			ext := e.nextReg2("mi")
+			if valType == "float" {
+				ftmp := e.nextReg2("mi")
+				e.w("  ") ; e.w(ftmp) ; e.w(" = bitcast float ") ; e.w(val) ; e.w(" to i32\n")
+				if dstBits > 32 {
+					e.w("  ") ; e.w(ext) ; e.w(" = zext i32 ") ; e.w(ftmp) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+				} else {
+					ext = ftmp
+				}
+			} else if srcBits == dstBits {
+				ext = val
+			} else {
+				e.w("  ") ; e.w(ext) ; e.w(" = zext ") ; e.w(valType) ; e.w(" ") ; e.w(val) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+			}
+			valPtr = e.nextReg2("mi")
+			e.w("  ") ; e.w(valPtr) ; e.w(" = inttoptr ") ; e.w(ipt) ; e.w(" ") ; e.w(ext) ; e.w(" to ptr\n")
 		}
-		valPtr = e.nextReg2("mi")
-		e.w("  ") ; e.w(valPtr) ; e.w(" = inttoptr ") ; e.w(ipt) ; e.w(" ") ; e.w(ext) ; e.w(" to ptr\n")
 	} else {
 		ipt := e.intptrType()
 		sz := e.nextReg2("ha")
@@ -5695,8 +5748,8 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 	}
 	typeid := e.typeIDHash(m.X.SSAType())
 	t1 := e.nextReg2("mi")
-	e.w("  ") ; e.w(t1) ; e.w(" = insertvalue {i64, ptr} undef, i64 ") ; e.w(typeid) ; e.w(", 0\n")
-	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue {i64, ptr} ") ; e.w(t1) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
+	e.w("  ") ; e.w(t1) ; e.w(" = insertvalue " | e.ifaceType() | " undef, " | e.intptrType() | " ") ; e.w(typeid) ; e.w(", 0\n")
+	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue " | e.ifaceType() | " ") ; e.w(t1) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
 }
 
 func fnv1a64(s string) (h uint64) {
@@ -5718,12 +5771,19 @@ func (e *irEmitter) typeIDHash(t Type) (s string) {
 		e.typeIDs[name] = e.typeIDNext
 	}
 	h := fnv1a64(name)
+	if e.intptrType() == "i32" {
+		return irUitoa64((h >> 32) ^ (h & 0xFFFFFFFF))
+	}
 	return irUitoa64(h)
 }
 
 func (e *irEmitter) typeIDHashI64(t Type) (s string) {
 	name := e.reflectTypeName(t)
 	h := fnv1a64(name)
+	ipt := e.intptrType()
+	if ipt == "i32" {
+		return "i32 " | irUitoa64((h >> 32) ^ (h & 0xFFFFFFFF))
+	}
 	return "i64 " | irUitoa64(h)
 }
 
@@ -6206,7 +6266,7 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 	ok := ""
 	for ti := 0; ti < len(tids); ti++ {
 		cmp := e.nextReg2("ta")
-		e.w("  ") ; e.w(cmp) ; e.w(" = icmp eq i64 ") ; e.w(typeID) ; e.w(", ") ; e.w(tids[ti]) ; e.w("\n")
+		e.w("  ") ; e.w(cmp) ; e.w(" = icmp eq " | e.intptrType() | " ") ; e.w(typeID) ; e.w(", ") ; e.w(tids[ti]) ; e.w("\n")
 		if ok == "" {
 			ok = cmp
 		} else {
@@ -6218,7 +6278,7 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 	if ok == "" {
 		// no implementer in the link set: the assertion can never succeed
 		ok = e.nextReg2("ta")
-		e.w("  ") ; e.w(ok) ; e.w(" = icmp eq i64 ") ; e.w(typeID) ; e.w(", -1\n")
+		e.w("  ") ; e.w(ok) ; e.w(" = icmp eq " | e.intptrType() | " ") ; e.w(typeID) ; e.w(", -1\n")
 	}
 	return ok
 }
@@ -6391,8 +6451,8 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 	if concretePtr {
 		e.w("  ") ; e.w(valPtr) ; e.w(" = bitcast ptr ") ; e.w(ifaceVal) ; e.w(" to ptr\n")
 	} else {
-		e.w("  ") ; e.w(tidPtr) ; e.w(" = extractvalue {i64, ptr} ") ; e.w(ifaceVal) ; e.w(", 0\n")
-		e.w("  ") ; e.w(valPtr) ; e.w(" = extractvalue {i64, ptr} ") ; e.w(ifaceVal) ; e.w(", 1\n")
+		e.w("  ") ; e.w(tidPtr) ; e.w(" = extractvalue " | e.ifaceType() | " ") ; e.w(ifaceVal) ; e.w(", 0\n")
+		e.w("  ") ; e.w(valPtr) ; e.w(" = extractvalue " | e.ifaceType() | " ") ; e.w(ifaceVal) ; e.w(", 1\n")
 	}
 
 	impls := e.findIfaceImpls(inv.MethodName)
@@ -6481,7 +6541,7 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 		e.w(checkLabels[i]) ; e.w(":\n")
 		tidGlobal := e.implTypeID(impl)
 		cmpReg := e.nextReg2("cmp")
-		e.w("  ") ; e.w(cmpReg) ; e.w(" = icmp eq i64 ") ; e.w(tidPtr) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
+		e.w("  ") ; e.w(cmpReg) ; e.w(" = icmp eq " | e.intptrType() | " ") ; e.w(tidPtr) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
 		e.w("  br i1 ") ; e.w(cmpReg) ; e.w(", label %") ; e.w(caseLabels[i]) ; e.w(", label %") ; e.w(nextCheck) ; e.w("\n")
 
 		e.w(caseLabels[i]) ; e.w(":\n")
@@ -6541,8 +6601,8 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 		idx := e.addStringConst(msg)
 		ipt := e.intptrType()
 		slen := irItoa64(int64(len(msg)))
-		e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" { ptr ") ; e.w(e.strConstGlobal(idx)) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(" }, ptr null)\n")
-		e.declareRuntime("runtime._panicstr", "void", sty)
+		e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" { ptr ") ; e.w(e.strConstGlobal(idx)) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(" })\n")
+		e.declareRuntimeNoCtx("runtime._panicstr", "void", sty)
 	}
 	e.w("  unreachable\n")
 
@@ -6579,9 +6639,9 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 		typePtr = "null"
 	} else {
 		valPtr = e.nextReg2("ta")
-		e.w("  ") ; e.w(valPtr) ; e.w(" = extractvalue {i64, ptr} ") ; e.w(val) ; e.w(", 1\n")
+		e.w("  ") ; e.w(valPtr) ; e.w(" = extractvalue " | e.ifaceType() | " ") ; e.w(val) ; e.w(", 1\n")
 		typePtr = e.nextReg2("ta")
-		e.w("  ") ; e.w(typePtr) ; e.w(" = extractvalue {i64, ptr} ") ; e.w(val) ; e.w(", 0\n")
+		e.w("  ") ; e.w(typePtr) ; e.w(" = extractvalue " | e.ifaceType() | " ") ; e.w(val) ; e.w(", 0\n")
 	}
 	// Asserting to an interface type: no concrete value ever carries the
 	// interface type's own hash, so the check must instead admit the
@@ -6605,7 +6665,7 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 			ok = e.nextReg2("ta")
 			tp := typePtr
 			if tp == "null" { tp = "0" }
-			e.w("  ") ; e.w(ok) ; e.w(" = icmp eq i64 ") ; e.w(tp) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
+			e.w("  ") ; e.w(ok) ; e.w(" = icmp eq " | e.intptrType() | " ") ; e.w(tp) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
 		}
 		// A failed comma-ok assertion must yield the zero value, never the
 		// raw interface data reinterpreted as the asserted type.
@@ -6620,13 +6680,14 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 				}
 			}
 			selTid := e.nextReg2("ta")
-			e.w("  ") ; e.w(selTid) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", i64 ") ; e.w(tidOut) ; e.w(", i64 0\n")
+			ipt := e.intptrType()
+			e.w("  ") ; e.w(selTid) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", " | ipt | " ") ; e.w(tidOut) ; e.w(", " | ipt | " 0\n")
 			selPtr := e.nextReg2("ta")
 			e.w("  ") ; e.w(selPtr) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", ptr null\n")
 			agg0 := e.nextReg2("ta")
-			e.w("  ") ; e.w(agg0) ; e.w(" = insertvalue {i64, ptr} undef, i64 ") ; e.w(selTid) ; e.w(", 0\n")
+			e.w("  ") ; e.w(agg0) ; e.w(" = insertvalue " | e.ifaceType() | " undef, " | e.intptrType() | " ") ; e.w(selTid) ; e.w(", 0\n")
 			loaded = e.nextReg2("ta")
-			e.w("  ") ; e.w(loaded) ; e.w(" = insertvalue {i64, ptr} ") ; e.w(agg0) ; e.w(", ptr ") ; e.w(selPtr) ; e.w(", 1\n")
+			e.w("  ") ; e.w(loaded) ; e.w(" = insertvalue " | e.ifaceType() | " ") ; e.w(agg0) ; e.w(", ptr ") ; e.w(selPtr) ; e.w(", 1\n")
 		} else if assertedType == "ptr" {
 			loaded = e.nextReg2("ta")
 			e.w("  ") ; e.w(loaded) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", ptr null\n")
@@ -6681,7 +6742,7 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 			} else {
 				tidGlobal := e.typeIDHash(t.AssertedType)
 				ok = e.nextReg2("ta")
-				e.w("  ") ; e.w(ok) ; e.w(" = icmp eq i64 ") ; e.w(typePtr) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
+				e.w("  ") ; e.w(ok) ; e.w(" = icmp eq " | e.intptrType() | " ") ; e.w(typePtr) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
 			}
 			e.nextReg++
 			goodLabel := "ta.good" | irItoa(e.nextReg)
@@ -6694,8 +6755,8 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 			idx := e.addStringConst(msg)
 			ipt := e.intptrType()
 			slen := irItoa64(int64(len(msg)))
-			e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" { ptr ") ; e.w(e.strConstGlobal(idx)) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(" }, ptr null)\n")
-			e.declareRuntime("runtime._panicstr", "void", sty)
+			e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" { ptr ") ; e.w(e.strConstGlobal(idx)) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(" })\n")
+			e.declareRuntimeNoCtx("runtime._panicstr", "void", sty)
 			e.w("  unreachable\n")
 			e.w(goodLabel) ; e.w(":\n")
 			if blk := t.InstrBlock(); blk != nil {
@@ -6711,8 +6772,8 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 				}
 			}
 			agg0 := e.nextReg2("ta")
-			e.w("  ") ; e.w(agg0) ; e.w(" = insertvalue {i64, ptr} undef, i64 ") ; e.w(tidOut) ; e.w(", 0\n")
-			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue {i64, ptr} ") ; e.w(agg0) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
+			e.w("  ") ; e.w(agg0) ; e.w(" = insertvalue " | e.ifaceType() | " undef, " | e.intptrType() | " ") ; e.w(tidOut) ; e.w(", 0\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue " | e.ifaceType() | " ") ; e.w(agg0) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
 		} else if assertedType == "ptr" {
 			e.w("  ") ; e.w(reg) ; e.w(" = select i1 true, ptr ") ; e.w(valPtr) ; e.w(", ptr null\n")
 		} else if e.isScalarType(assertedType) {
@@ -6729,6 +6790,15 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 
 func (e *irEmitter) extractScalarFromIface(valPtr string, assertedType string) (s string) {
 	ipt := e.intptrType()
+	srcBits := e.intBits(ipt)
+	dstBits := e.intBits(assertedType)
+	// On wasm32 (ipt=i32), values wider than intptr are heap-allocated;
+	// the interface data field holds a pointer to the value.
+	if dstBits > srcBits && dstBits > 0 {
+		loaded := e.nextReg2("ta")
+		e.w("  ") ; e.w(loaded) ; e.w(" = load ") ; e.w(assertedType) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
+		return loaded
+	}
 	raw := e.nextReg2("ta")
 	e.w("  ") ; e.w(raw) ; e.w(" = ptrtoint ptr ") ; e.w(valPtr) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
 	if assertedType == ipt {
@@ -6741,15 +6811,15 @@ func (e *irEmitter) extractScalarFromIface(valPtr string, assertedType string) (
 	}
 	if assertedType == "float" {
 		tr := e.nextReg2("ta")
-		e.w("  ") ; e.w(tr) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(raw) ; e.w(" to i32\n")
+		e.truncToI32(tr, raw)
 		bc := e.nextReg2("ta")
 		e.w("  ") ; e.w(bc) ; e.w(" = bitcast i32 ") ; e.w(tr) ; e.w(" to float\n")
 		return bc
 	}
 	if assertedType == "double" {
-		bc := e.nextReg2("ta")
-		e.w("  ") ; e.w(bc) ; e.w(" = bitcast ") ; e.w(ipt) ; e.w(" ") ; e.w(raw) ; e.w(" to double\n")
-		return bc
+		loaded := e.nextReg2("ta")
+		e.w("  ") ; e.w(loaded) ; e.w(" = load double, ptr ") ; e.w(valPtr) ; e.w("\n")
+		return loaded
 	}
 	return raw
 }
@@ -6787,6 +6857,7 @@ func (e *irEmitter) emitMakeMap(m *SSAMakeMap) {
 }
 
 func (e *irEmitter) emitMapUpdate(m *SSAMapUpdate) {
+	ipt := e.intptrType()
 	mapVal := e.operand(m.Map)
 	keyVal := e.operand(m.Key)
 	valVal := e.operand(m.Value)
@@ -6820,15 +6891,15 @@ func (e *irEmitter) emitMapUpdate(m *SSAMapUpdate) {
 		kd := e.nextReg2("mu")
 		kl := e.nextReg2("mu")
 		kc := e.nextReg2("mu")
-		e.w("  ") ; e.w(kd) ; e.w(" = extractvalue {ptr, i64, i64} ") ; e.w(keyVal) ; e.w(", 0\n")
-		e.w("  ") ; e.w(kl) ; e.w(" = extractvalue {ptr, i64, i64} ") ; e.w(keyVal) ; e.w(", 1\n")
-		e.w("  ") ; e.w(kc) ; e.w(" = extractvalue {ptr, i64, i64} ") ; e.w(keyVal) ; e.w(", 2\n")
+		e.w("  ") ; e.w(kd) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 0\n")
+		e.w("  ") ; e.w(kl) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 1\n")
+		e.w("  ") ; e.w(kc) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 2\n")
 		e.w("  call void @runtime.hashmapContentSet(ptr ") ; e.w(mapVal)
 		e.w(", ptr ") ; e.w(kd)
-		e.w(", i64 ") ; e.w(kl)
-		e.w(", i64 ") ; e.w(kc)
+		e.w(", " | ipt | " ") ; e.w(kl)
+		e.w(", " | ipt | " ") ; e.w(kc)
 		e.w(", ptr ") ; e.w(valAlloca) ; e.w(", ptr null)\n")
-		e.declareRuntime("runtime.hashmapContentSet", "void", "ptr, ptr, i64, i64, ptr")
+		e.declareRuntime("runtime.hashmapContentSet", "void", "ptr, ptr, " | ipt | ", " | ipt | ", ptr")
 	} else {
 		e.w("  call void @runtime.hashmapBinarySet(ptr ") ; e.w(mapVal)
 		e.w(", ptr ") ; e.w(keyAlloca)
@@ -6862,17 +6933,17 @@ func (e *irEmitter) emitLookup(l *SSALookup) {
 		kd := e.nextReg2("ml")
 		kl := e.nextReg2("ml")
 		kc := e.nextReg2("ml")
-		e.w("  ") ; e.w(kd) ; e.w(" = extractvalue {ptr, i64, i64} ") ; e.w(keyVal) ; e.w(", 0\n")
-		e.w("  ") ; e.w(kl) ; e.w(" = extractvalue {ptr, i64, i64} ") ; e.w(keyVal) ; e.w(", 1\n")
-		e.w("  ") ; e.w(kc) ; e.w(" = extractvalue {ptr, i64, i64} ") ; e.w(keyVal) ; e.w(", 2\n")
+		e.w("  ") ; e.w(kd) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 0\n")
+		e.w("  ") ; e.w(kl) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 1\n")
+		e.w("  ") ; e.w(kc) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 2\n")
 		okReg := e.nextReg2("ml")
 		e.w("  ") ; e.w(okReg) ; e.w(" = call i1 @runtime.hashmapContentGet(ptr ") ; e.w(mapVal)
 		e.w(", ptr ") ; e.w(kd)
-		e.w(", i64 ") ; e.w(kl)
-		e.w(", i64 ") ; e.w(kc)
+		e.w(", " | ipt | " ") ; e.w(kl)
+		e.w(", " | ipt | " ") ; e.w(kc)
 		e.w(", ptr ") ; e.w(valAlloca)
 		e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(valSz) ; e.w(", ptr null)\n")
-		e.declareRuntime("runtime.hashmapContentGet", "i1", "ptr, ptr, i64, i64, ptr, " | ipt)
+		e.declareRuntime("runtime.hashmapContentGet", "i1", "ptr, ptr, " | ipt | ", " | ipt | ", ptr, " | ipt)
 		if l.CommaOk {
 			loaded := e.nextReg2("ml")
 			e.w("  ") ; e.w(loaded) ; e.w(" = load ") ; e.w(valType) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
@@ -7007,22 +7078,24 @@ func (e *irEmitter) emitPanic(p *SSAPanic) {
 	if c, ok := p.X.(*SSAConst); ok && e.isStringLike(c.SSAType()) {
 		arg := e.operand(c)
 		sty := e.sliceType()
-		e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(", ptr null)\n")
-		e.declareRuntime("runtime._panicstr", "void", sty)
+		e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(")\n")
+		e.declareRuntimeNoCtx("runtime._panicstr", "void", sty)
 		e.w("  unreachable\n")
 		return
 	}
-	e.w("  call void @runtime._panic({i64, ptr} zeroinitializer, ptr null)\n")
-	e.declareRuntime("runtime._panic", "void", "{i64, ptr}")
+	ity := e.ifaceType()
+	e.w("  call void @runtime._panic(" | ity | " zeroinitializer, ptr null)\n")
+	e.declareRuntime("runtime._panic", "void", ity)
 	e.w("  unreachable\n")
 }
 
 func (e *irEmitter) emitRange(r *SSARange) {
 	reg := e.regName(r)
+	ipt := e.intptrType()
 	if _, ok := safeUnderlying(r.X.SSAType()).(*TCMap); ok {
 		e.w("  ") ; e.w(reg) ; e.w(" = alloca [48 x i8]\n")
-		e.w("  call void @llvm.memset.p0.i64(ptr ") ; e.w(reg) ; e.w(", i8 0, i64 48, i1 false)\n")
-		e.declareRuntime("llvm.memset.p0.i64", "void", "ptr, i8, i64, i1")
+		e.w("  call void @llvm.memset.p0." | ipt | "(ptr ") ; e.w(reg) ; e.w(", i8 0, " | ipt | " 48, i1 false)\n")
+		e.declareRuntime("llvm.memset.p0." | ipt, "void", "ptr, i8, " | ipt | ", i1")
 		return
 	}
 	ipt := e.intptrType()
@@ -7071,7 +7144,7 @@ func (e *irEmitter) emitNextSlice(reg, iterPtr, collVal string, rangeInstr *SSAR
 	ok := e.nextReg2("rn")
 	e.w("  ") ; e.w(ok) ; e.w(" = icmp ult ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(", ") ; e.w(slLen) ; e.w("\n")
 	key := e.nextReg2("rn")
-	e.w("  ") ; e.w(key) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(" to i32\n")
+	e.truncToI32(key, idx)
 	dataPtr := e.nextReg2("rn")
 	e.w("  ") ; e.w(dataPtr) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(collVal) ; e.w(", 0\n")
 	elemType := "i32"
@@ -7114,7 +7187,7 @@ func (e *irEmitter) emitNextArray(reg, iterPtr, collVal string, arr *Array, n *S
 	ok := e.nextReg2("rn")
 	e.w("  ") ; e.w(ok) ; e.w(" = icmp ult ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(", ") ; e.w(irItoa(int32(arrLen))) ; e.w("\n")
 	key := e.nextReg2("rn")
-	e.w("  ") ; e.w(key) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(" to i32\n")
+	e.truncToI32(key, idx)
 	// Store array to memory to get element pointer via GEP
 	arrAlloca := e.nextReg2("rn")
 	e.w("  ") ; e.w(arrAlloca) ; e.w(" = alloca ") ; e.w(arrType) ; e.w("\n")
@@ -7155,7 +7228,7 @@ func (e *irEmitter) emitNextPtrArray(reg, iterPtr, collVal string, arr *Array, n
 	ok := e.nextReg2("rn")
 	e.w("  ") ; e.w(ok) ; e.w(" = icmp ult ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(", ") ; e.w(irItoa(int32(arrLen))) ; e.w("\n")
 	key := e.nextReg2("rn")
-	e.w("  ") ; e.w(key) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(" to i32\n")
+	e.truncToI32(key, idx)
 	eptr := e.nextReg2("rn")
 	e.w("  ") ; e.w(eptr) ; e.w(" = getelementptr inbounds ") ; e.w(arrType)
 	e.w(", ptr ") ; e.w(collVal) ; e.w(", i32 0, ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w("\n")
@@ -7575,8 +7648,8 @@ func (e *irEmitter) emitDeferBuiltin(d *SSADefer, bi *SSABuiltin, pfx string, id
 		e.declareRuntime("runtime.chanClose", "void", "ptr")
 		e.w("  call void @runtime.chanClose(") ; e.w(argTypes[0]) ; e.w(" ") ; e.w(args[0]) ; e.w(", ptr null)\n")
 	} else if name == "panic" && len(args) == 1 {
-		e.declareRuntime("runtime._panicstr", "void", argTypes[0])
-		e.w("  call void @runtime._panicstr(") ; e.w(argTypes[0]) ; e.w(" ") ; e.w(args[0]) ; e.w(", ptr null)\n")
+		e.declareRuntimeNoCtx("runtime._panicstr", "void", argTypes[0])
+		e.w("  call void @runtime._panicstr(") ; e.w(argTypes[0]) ; e.w(" ") ; e.w(args[0]) ; e.w(")\n")
 	} else if name == "println" || name == "print" {
 		e.declareRuntime("runtime.printlock", "void", "")
 		e.declareRuntime("runtime.printunlock", "void", "")
@@ -7588,7 +7661,7 @@ func (e *irEmitter) emitDeferBuiltin(d *SSADefer, bi *SSABuiltin, pfx string, id
 				e.w("  call void @runtime.printspace(ptr null)\n")
 			}
 			at := argTypes[ai]
-			if at == e.sliceType() || at == "{ptr, i64, i64}" {
+			if at == e.sliceType() {
 				e.declareRuntime("runtime.printstring", "void", e.sliceType())
 				e.w("  call void @runtime.printstring(") ; e.w(at) ; e.w(" ") ; e.w(av) ; e.w(", ptr null)\n")
 			} else if at == "i1" {
@@ -9603,8 +9676,8 @@ func (e *irEmitter) chanPanicStr() (s string) {
 func (e *irEmitter) emitChanPanic() {
 	sty := e.sliceType()
 	e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" ")
-	e.w(e.chanPanicStr()) ; e.w(", ptr null)\n")
-	e.declareRuntime("runtime._panicstr", "void", sty)
+	e.w(e.chanPanicStr()) ; e.w(")\n")
+	e.declareRuntimeNoCtx("runtime._panicstr", "void", sty)
 	e.w("  unreachable\n")
 	e.blockDead = true
 }

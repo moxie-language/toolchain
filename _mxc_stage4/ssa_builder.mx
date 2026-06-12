@@ -3356,6 +3356,17 @@ func (fb *ssaFuncBuilder) buildPkgMember(pn *PkgName, memberName string) (s SSAV
 	if obj == nil {
 		return nil
 	}
+	// runtime.GOOS and runtime.GOARCH are declared as TCVar in the
+	// skeleton but are target-dependent consts. Return them as SSAConst
+	// so the SSA builder sees string values, not global loads.
+	if imported.Path() == "runtime" {
+		if memberName == "GOOS" {
+			return &SSAConst{typ: Typ[TCString], val: constStr{compileTargetOS()}}
+		}
+		if memberName == "GOARCH" {
+			return &SSAConst{typ: Typ[TCString], val: constStr{compileTargetArch()}}
+		}
+	}
 	switch obj := obj.(type) {
 	case *TCConst:
 		return &SSAConst{typ: obj.Type(), val: localizeConstVal(obj.Val(), obj.Type())}
@@ -3481,6 +3492,16 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue)
 		}
 	}
 	fieldIdx := fb.fieldIndex(structType, e.Sel.Value)
+	if fieldIdx < 0 {
+		stName := "?"
+		if n, ok := structType.(*Named); ok && n.Obj() != nil {
+			stName = n.Obj().Name()
+		}
+		nf := int32(-1)
+		if st, ok := safeUnderlying(structType).(*TCStruct); ok {
+			nf = st.NumFields()
+		}
+	}
 	if fieldIdx >= 0 {
 		fa := &SSAFieldAddr{X: addr, Field: fieldIdx}
 		fa.typ = NewPointer(fb.fieldType(structType, fieldIdx))
@@ -4351,20 +4372,39 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 	}
 	resolveNamed := named
 	if resolveNamed.NumMethods() == 0 {
-		cur := Type(resolveNamed)
-		for depth := 0; depth < 10; depth++ {
-			n, ok2 := cur.(*Named)
-			if !ok2 || n == nil { break }
-			if n.NumMethods() > 0 {
-				resolveNamed = n
-				if n.Obj() != nil && n.Obj().Name() != "" {
-					typeName = n.Obj().Name()
+		// The Named type from typeSubst may be a bare copy without methods.
+		// Look up the canonical type in importRegistry which has methods
+		// attached from mxh loading.
+		if resolveNamed.Obj() != nil && resolveNamed.Obj().Pkg() != nil {
+			pkgPath := resolveNamed.Obj().Pkg().Path()
+			nm := resolveNamed.Obj().Name()
+			if importRegistry != nil {
+				if pkg := importRegistry[pkgPath]; pkg != nil && pkg.Scope() != nil {
+					if obj := pkg.Scope().Lookup(nm); obj != nil {
+						if regNamed, ok2 := obj.Type().(*Named); ok2 && regNamed.NumMethods() > 0 {
+							resolveNamed = regNamed
+							typeName = nm
+						}
+					}
 				}
-				break
 			}
-			raw := n.RawUnderlying()
-			if raw == nil || raw == cur { break }
-			cur = raw
+		}
+		if resolveNamed.NumMethods() == 0 {
+			cur := Type(resolveNamed)
+			for depth := 0; depth < 10; depth++ {
+				n, ok2 := cur.(*Named)
+				if !ok2 || n == nil { break }
+				if n.NumMethods() > 0 {
+					resolveNamed = n
+					if n.Obj() != nil && n.Obj().Name() != "" {
+						typeName = n.Obj().Name()
+					}
+					break
+				}
+				raw := n.RawUnderlying()
+				if raw == nil || raw == cur { break }
+				cur = raw
+			}
 		}
 	}
 	namedPkgPath := ""

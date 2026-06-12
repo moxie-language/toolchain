@@ -880,6 +880,9 @@ func fnvHash(data []byte) (s string) {
 }
 
 func pkgCacheDir() (s string) {
+	if globalTargetArch == "wasm" {
+		return joinPath(moxieCacheDir(), "pkg-wasm")
+	}
 	return joinPath(moxieCacheDir(), "pkg")
 }
 
@@ -1277,15 +1280,67 @@ func shouldSkipFile(name string) (ok bool) {
 	if hasSuffix(base, ".mx") {
 		base = base[:len(base)-3]
 	}
-	archSkip := []string{"arm64"}
-	for _, a := range archSkip {
-		if fileContainsPart(base, a) {
+	if globalTargetArch == "wasm" {
+		for _, a := range []string{"amd64", "arm64", "386"} {
+			if fileContainsPart(base, a) {
+				return true
+			}
+		}
+		for _, s := range []string{"_linux", "_unix", "_darwin", "_posix"} {
+			if hasSuffix(base, s) {
+				return true
+			}
+		}
+	} else {
+		for _, a := range []string{"arm64"} {
+			if fileContainsPart(base, a) {
+				return true
+			}
+		}
+		if hasSuffix(base, "_wasm") {
 			return true
 		}
 	}
-	suffixSkip := []string{"_wasm"}
-	for _, s := range suffixSkip {
-		if hasSuffix(base, s) {
+	return false
+}
+
+func constraintContainsPositive(line string, word string) (ok bool) {
+	wl := int32(len(word))
+	for i := int32(0); i <= int32(len(line))-wl; i++ {
+		if string(line[i:i+wl]) == word {
+			if i > 0 && line[i-1] == '!' {
+				continue
+			}
+			after := i + wl
+			if after < int32(len(line)) {
+				c := line[after]
+				if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' {
+					continue
+				}
+			}
+			if i > 0 {
+				c := line[i-1]
+				if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' {
+					continue
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func constraintContainsNegated(line string, word string) (ok bool) {
+	wl := int32(len(word))
+	for i := int32(1); i <= int32(len(line))-wl; i++ {
+		if string(line[i:i+wl]) == word && line[i-1] == '!' {
+			after := i + wl
+			if after < int32(len(line)) {
+				c := line[after]
+				if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' {
+					continue
+				}
+			}
 			return true
 		}
 	}
@@ -1309,8 +1364,20 @@ func hasBuildConstraint(data []byte, forbidden []string) (ok bool) {
 				buf = append(buf, data[j])
 			}
 			line := string(buf)
+			if globalTargetArch == "wasm" {
+				if constraintContainsPositive(line, "moxie.wasm") ||
+					constraintContainsPositive(line, "wasm") ||
+					constraintContainsPositive(line, "js") {
+					return false
+				}
+				if constraintContainsNegated(line, "js") ||
+					constraintContainsNegated(line, "wasm") ||
+					constraintContainsNegated(line, "moxie.wasm") {
+					return true
+				}
+			}
 			for _, f := range forbidden {
-				if line == f || hasPrefix(line, f | " ") || hasPrefix(line, f | "\t") {
+				if line == f || hasPrefix(line, f | " ") || hasPrefix(line, f | "\t") || hasPrefix(line, f | "(") {
 					return true
 				}
 			}
@@ -1346,6 +1413,26 @@ var quietDiscover bool
 // buildJobs is the max number of concurrent child processes (workers and
 // clang) used by build/test. Set by the -j flag; 1 forces the serial path.
 var buildJobs = int32(4)
+
+var globalTargetOS string
+var globalTargetArch string
+
+// Packages already compiled into sysroot/wasm/runtime.bc.
+// When targeting wasm, these are skipped during compilation and linked
+// from the prebuilt runtime.bc instead to avoid duplicate/mismatched symbols.
+var wasmRtPkgs = map[string]bool{
+	"runtime": true, "runtime/interrupt": true,
+	"internal/task": true, "internal/itoa": true,
+	"math": true, "math/bits": true,
+	"unicode/utf8": true, "strconv": true,
+	"errors": true, "io": true, "io/fs": true,
+	"os": true, "syscall": true, "time": true,
+	"fmt": true, "path": true,
+	"internal/bytealg": true, "internal/byteorder": true,
+	"internal/goarch": true, "internal/binary": true,
+	"internal/gclayout": true, "internal/oserror": true,
+	"internal/stringslite": true, "internal/testlog": true,
+}
 
 type pkgInfo struct {
 	path    string
@@ -1432,9 +1519,18 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 	}
 	bcFiles := listFiles(dir, ".bc")
 	allMx := mxFiles
-	forbidden := []string{"wasm", "js", "ignore", "compiler_bootstrap",
-		"scheduler.tasks", "scheduler.cores", "scheduler.asyncify",
-		"faketime", "baremetal", "nintendoswitch", "boringcrypto", "gc"}
+	var forbidden []string
+	if globalTargetArch == "wasm" {
+		forbidden = []string{"linux", "unix", "darwin", "amd64", "arm64",
+			"ignore", "compiler_bootstrap",
+			"scheduler.tasks", "scheduler.cores", "scheduler.asyncify",
+			"faketime", "baremetal", "nintendoswitch",
+			"boringcrypto", "cgo"}
+	} else {
+		forbidden = []string{"wasm", "js", "ignore", "compiler_bootstrap",
+			"scheduler.tasks", "scheduler.cores", "scheduler.asyncify",
+			"faketime", "baremetal", "nintendoswitch", "boringcrypto", "gc"}
+	}
 	var files []string
 	for _, f := range allMx {
 		if shouldSkipFile(f) {
@@ -1589,8 +1685,8 @@ func registerBuiltins() {
 	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "SetFinalizer", parseSignatureDesc("interface{},interface{}")))
 	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "Gosched", parseSignatureDesc("")))
 	rtPkg.Scope().Insert(NewTCFunc(rtPkg, "Version", parseSignatureDesc("->string")))
-	rtPkg.Scope().Insert(NewTCVar(rtPkg, "GOOS", Typ[String]))
-	rtPkg.Scope().Insert(NewTCVar(rtPkg, "GOARCH", Typ[String]))
+	rtPkg.Scope().Insert(NewTCVar(rtPkg, "GOOS", Typ[TCString]))
+	rtPkg.Scope().Insert(NewTCVar(rtPkg, "GOARCH", Typ[TCString]))
 	rtPkg.Scope().Insert(NewTCVar(rtPkg, "ChildPipeFd", Typ[Int32]))
 	importRegistry["runtime"] = rtPkg
 }
@@ -1751,6 +1847,8 @@ func typeDescStr(t Type) (s string) {
 		// interface{} makes the importer box func values while the owning
 		// package reads a raw {ctx, fn} pair - calls then jump to the box.
 		return "func(" | sigDescStr(v) | ")"
+	case *TypeParam:
+		return "$" | v.String()
 	case *Named:
 		if v.obj != nil {
 			if typeDescPkgPath != "" && v.obj.pkg != nil && v.obj.pkg.Path() != typeDescPkgPath {
@@ -1869,14 +1967,36 @@ func generateMxh(pkg *TCPackage) (s string) {
 						methods = methods | m.name | "=" | sigDescStr(m.sig)
 					}
 					if complete {
-						out = out | "iface " | objName | " " | methods | "\n"
+						ifTpStr := ""
+						if len(named.tparams) > 0 {
+							ifTpStr = "["
+							for tpi, tp := range named.tparams {
+								if tpi > 0 {
+									ifTpStr = ifTpStr | ","
+								}
+								ifTpStr = ifTpStr | "$" | tp.String()
+							}
+							ifTpStr = ifTpStr | "]"
+						}
+						out = out | "iface " | objName | ifTpStr | " " | methods | "\n"
 					}
 				} else {
 					ud := ""
 					if named.underlying != nil {
 						ud = typeDescStr(named.underlying)
 					}
-					out = out | "type " | objName | " " | ud | "\n"
+					tpStr := ""
+					if len(named.tparams) > 0 {
+						tpStr = "["
+						for tpi, tp := range named.tparams {
+							if tpi > 0 {
+								tpStr = tpStr | ","
+							}
+							tpStr = tpStr | "$" | tp.String()
+						}
+						tpStr = tpStr | "]"
+					}
+					out = out | "type " | objName | tpStr | " " | ud | "\n"
 					// Generic types' methods are never emitted; importers must
 					// not see them or dispatch will reference undefined symbols.
 					if len(named.tparams) == 0 {
@@ -1913,6 +2033,31 @@ func generateMxh(pkg *TCPackage) (s string) {
 		}
 	}
 	return out
+}
+
+// parseMxhTParams splits "Curve[$P,$Q]" into ("Curve", [TypeParam P, TypeParam Q]).
+// For plain names like "Foo" it returns ("Foo", nil).
+func parseMxhTParams(raw string) (name string, tparams []*TypeParam) {
+	bracketIdx := int32(-1)
+	for i := int32(0); i < int32(len(raw)); i++ {
+		if raw[i] == '[' {
+			bracketIdx = i
+			break
+		}
+	}
+	if bracketIdx < 0 {
+		return raw, nil
+	}
+	name = raw[:bracketIdx]
+	inner := raw[bracketIdx+1 : int32(len(raw))-1]
+	parts := splitCommaBalanced(inner)
+	for _, p := range parts {
+		if len(p) > 1 && p[0] == '$' {
+			tpn := p[1:]
+			tparams = append(tparams, NewTypeParam(NewTypeName(nil, tpn, nil), nil))
+		}
+	}
+	return name, tparams
 }
 
 func loadMxh(path string) (ok bool) {
@@ -1966,17 +2111,21 @@ func loadMxh(path string) (ok bool) {
 		if hasPrefix(line, "type ") {
 			parts := splitBySpace(line[5:])
 			if len(parts) >= 1 {
-				tn := NewTypeName(pkg, parts[0], nil)
-				NewNamed(tn, nil)
+				actualName, tparams := parseMxhTParams(parts[0])
+				tn := NewTypeName(pkg, actualName, nil)
+				named := NewNamed(tn, nil)
+				named.tparams = tparams
 				pkg.Scope().Insert(tn)
 			}
 		} else if hasPrefix(line, "iface ") {
 			parts := splitBySpace(line[6:])
 			if len(parts) >= 1 {
+				actualName, tparams := parseMxhTParams(parts[0])
 				placeholder := NewTCInterface(nil, nil)
 				placeholder.Complete()
-				tn := NewTypeName(pkg, parts[0], nil)
-				NewNamed(tn, placeholder)
+				tn := NewTypeName(pkg, actualName, nil)
+				named := NewNamed(tn, placeholder)
+				named.tparams = tparams
 				pkg.Scope().Insert(tn)
 			}
 		}
@@ -1988,15 +2137,17 @@ func loadMxh(path string) (ok bool) {
 		if hasPrefix(line, "type ") {
 			parts := splitBySpace(line[5:])
 			if len(parts) >= 2 {
+				actualName, _ := parseMxhTParams(parts[0])
 				underlying := parseTypeDesc(parts[1])
-				obj := pkg.Scope().Lookup(parts[0])
+				obj := pkg.Scope().Lookup(actualName)
 				if tn, ok := obj.(*TypeName); ok {
 					if named, ok2 := tn.typ.(*Named); ok2 {
 						named.SetUnderlying(underlying)
 					}
 				}
 			} else if len(parts) == 1 {
-				obj := pkg.Scope().Lookup(parts[0])
+				actualName, _ := parseMxhTParams(parts[0])
+				obj := pkg.Scope().Lookup(actualName)
 				if tn, ok := obj.(*TypeName); ok {
 					if named, ok2 := tn.typ.(*Named); ok2 {
 						named.SetUnderlying(NewTCStruct(nil, nil))
@@ -2006,7 +2157,8 @@ func loadMxh(path string) (ok bool) {
 		} else if hasPrefix(line, "iface ") {
 			parts := splitBySpace(line[6:])
 			if len(parts) >= 1 {
-				ifaceName := parts[0]
+				ifaceName0, _ := parseMxhTParams(parts[0])
+				ifaceName := ifaceName0
 				methodsDesc := ""
 				if len(parts) >= 2 {
 					methodsDesc = parts[1]
@@ -3052,10 +3204,14 @@ func main() {
 	pkgPath := ""
 	printIR := false
 	forceRebuild := false
+	targetFlag := ""
 	i := int32(2)
 	for i < int32(len(args)) {
 		if args[i] == "-o" && i+1 < int32(len(args)) {
 			outpath = args[i+1]
+			i += 2
+		} else if args[i] == "-target" && i+1 < int32(len(args)) {
+			targetFlag = args[i+1]
 			i += 2
 		} else if args[i] == "-print-ir" {
 			printIR = true
@@ -3069,6 +3225,8 @@ func main() {
 				buildJobs = 1
 			}
 			i += 2
+		} else if args[i] == "-gc=dealloc" || args[i] == "-buildmode=c-shared" || args[i] == "-x" || args[i] == "-work" {
+			i++
 		} else {
 			pkgPath = args[i]
 			i++
@@ -3089,7 +3247,15 @@ func main() {
 	if root == "" {
 		root = "."
 	}
+	globalTargetOS = "linux"
+	globalTargetArch = "amd64"
 	triple := "x86_64-unknown-linux-musleabihf"
+	if targetFlag == "js/wasm" || targetFlag == "wasm" {
+		globalTargetOS = "js"
+		globalTargetArch = "wasm"
+		triple = "wasm32-unknown-js"
+	}
+	isWasm := globalTargetArch == "wasm"
 	clang := "clang-21"
 
 	if hasPrefix(pkgPath, "./") || hasPrefix(pkgPath, "../") || pkgPath == "." || hasPrefix(pkgPath, "/") {
@@ -3127,25 +3293,32 @@ func main() {
 		allBcFiles = a
 		hasRuntimePkg = h
 	}
-
 	loadSysroot(joinPath(root, "_sysroot.env"))
 
 	sysroot := joinPath(root, "sysroot")
-	runtimeBc := getenv("RUNTIME_BC")
-	if runtimeBc == "" {
-		runtimeBc = joinPath(sysroot, "runtime.bc")
-	}
-	muslDir := getenv("MUSL_DIR")
-	if muslDir == "" {
-		muslDir = joinPath(sysroot, "musl")
-	}
-	comprtLib := getenv("COMPRT_LIB")
-	if comprtLib == "" {
-		comprtLib = joinPath(joinPath(sysroot, "compiler-rt"), "lib.a")
-	}
-	muslLib := getenv("MUSL_LIB")
-	if muslLib == "" {
-		muslLib = joinPath(joinPath(sysroot, "musl"), "lib.a")
+	runtimeBc := ""
+	muslDir := ""
+	comprtLib := ""
+	muslLib := ""
+	if isWasm {
+		runtimeBc = joinPath(joinPath(sysroot, "wasm"), "runtime.bc")
+	} else {
+		runtimeBc = getenv("RUNTIME_BC")
+		if runtimeBc == "" {
+			runtimeBc = joinPath(sysroot, "runtime.bc")
+		}
+		muslDir = getenv("MUSL_DIR")
+		if muslDir == "" {
+			muslDir = joinPath(sysroot, "musl")
+		}
+		comprtLib = getenv("COMPRT_LIB")
+		if comprtLib == "" {
+			comprtLib = joinPath(joinPath(sysroot, "compiler-rt"), "lib.a")
+		}
+		muslLib = getenv("MUSL_LIB")
+		if muslLib == "" {
+			muslLib = joinPath(joinPath(sysroot, "musl"), "lib.a")
+		}
 	}
 
 	writeStr(2, "  generate initAll\n")
@@ -3186,82 +3359,130 @@ func main() {
 		fatal("clang failed for initall")
 	}
 
-	writeStr(2, "  compile objects\n")
-	var objList []string
-	compileToObj := func(bcFile string) string {
-		oFile := bcFile | ".o"
-		rc = run([]string{clang, "--target=" | triple, "-c", "-O0", bcFile, "-o", oFile})
-		if rc != 0 {
-			fatal("clang -c failed for " | bcFile)
+	if isWasm {
+		// wasm: compile each .bc to .o individually, then wasm-ld
+		// wasmRtPkgs are already excluded from allBcFiles by the build functions.
+		writeStr(2, "  compile objects\n")
+		wasmTriple := "wasm32-unknown-wasi"
+		var objList []string
+		wasmCompileToObj := func(bcFile string) string {
+			oFile := bcFile | ".o"
+			rc = run([]string{clang, "--target=" | wasmTriple, "-c", bcFile, "-o", oFile})
+			if rc != 0 {
+				fatal("clang -c failed for " | bcFile)
+			}
+			return oFile
 		}
-		return oFile
-	}
-	if !hasRuntimePkg {
-		runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
-		if _, gok := readFile(runtimeGoBc); gok {
-			objList = append(objList, compileToObj(runtimeGoBc))
+		if !hasRuntimePkg {
+			objList = append(objList, wasmCompileToObj(runtimeBc))
+		}
+		if buildJobs > 1 {
+			var objCmds [][]string
+			for _, bf := range allBcFiles {
+				objCmds = append(objCmds, []string{clang, "--target=" | wasmTriple,
+					"-c", bf, "-o", bf | ".o"})
+			}
+			if !runPool(objCmds, buildJobs) {
+				fatal("clang -c failed")
+			}
+			for _, bf := range allBcFiles {
+				objList = append(objList, bf|".o")
+			}
 		} else {
-			objList = append(objList, compileToObj(runtimeBc))
-		}
-	}
-	rtShims := joinPath(sysroot, "rt_shims.bc")
-	if _, rsk := readFile(rtShims); rsk {
-		objList = append(objList, compileToObj(rtShims))
-	}
-	if buildJobs > 1 {
-		var objCmds [][]string
-		for _, bf := range allBcFiles {
-			objCmds = append(objCmds, []string{clang, "--target=" | triple,
-				"-c", "-O0", bf, "-o", bf | ".o"})
-		}
-		if !runPool(objCmds, buildJobs) {
-			fatal("clang -c failed")
-		}
-		for _, bf := range allBcFiles {
-			objList = append(objList, bf|".o")
-		}
-	} else {
-		for _, bf := range allBcFiles {
-			objList = append(objList, compileToObj(bf))
-		}
-	}
-	objList = append(objList, compileToObj(initAllBc))
-	if !hasRuntimePkg {
-		cstubDir := joinPath(root, joinPath("src/runtime", "_cstubs"))
-		cstubFiles := listFiles(cstubDir, ".c")
-		for _, cf := range cstubFiles {
-			cPath := joinPath(cstubDir, cf)
-			coFile := joinPath(tmpdir, "cstub_" | cf | ".o")
-			rc = run([]string{clang, "--target=" | triple, "-c", "-O0", cPath, "-o", coFile})
-			if rc == 0 {
-				objList = append(objList, coFile)
+			for _, bf := range allBcFiles {
+				objList = append(objList, wasmCompileToObj(bf))
 			}
 		}
-	}
-	objDir := joinPath(sysroot, "obj")
-	objEntries := listFiles(objDir, ".bc")
-	if objEntries != nil {
-		for _, e := range objEntries {
-			objList = append(objList, compileToObj(joinPath(objDir, e)))
+		objList = append(objList, wasmCompileToObj(initAllBc))
+		writeStr(2, "  link\n")
+		ldArgs := []string{"wasm-ld", "--export-dynamic", "--allow-undefined",
+			"--gc-sections", "-o", outpath}
+		for _, o := range objList {
+			ldArgs = append(ldArgs, o)
 		}
-	}
-	oEntries := listFiles(objDir, ".o")
-	if oEntries != nil {
-		for _, e := range oEntries {
-			objList = append(objList, joinPath(objDir, e))
+		ldArgs = append(ldArgs, "-z", "stack-size=67108864")
+		rc = run(ldArgs)
+		if rc != 0 {
+			fatal("linker failed")
 		}
-	}
-	writeStr(2, "  link\n")
-	linker := "ld.lld-21"
-	ldArgs := []string{linker, "--gc-sections", "-o", outpath,
-		joinPath(muslDir, "crt1.o")}
-	for _, o := range objList {
-		ldArgs = append(ldArgs, o)
-	}
-	ldArgs = append(ldArgs, comprtLib, muslLib, "-z", "stack-size=67108864")
-	rc = run(ldArgs)
-	if rc != 0 {
-		fatal("linker failed")
+	} else {
+		// native: compile each .bc to .o, then ld.lld
+		writeStr(2, "  compile objects\n")
+		var objList []string
+		compileToObj := func(bcFile string) string {
+			oFile := bcFile | ".o"
+			rc = run([]string{clang, "--target=" | triple, "-c", "-O0", bcFile, "-o", oFile})
+			if rc != 0 {
+				fatal("clang -c failed for " | bcFile)
+			}
+			return oFile
+		}
+		if !hasRuntimePkg {
+			runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
+			if _, gok := readFile(runtimeGoBc); gok {
+				objList = append(objList, compileToObj(runtimeGoBc))
+			} else {
+				objList = append(objList, compileToObj(runtimeBc))
+			}
+		}
+		rtShims := joinPath(sysroot, "rt_shims.bc")
+		if _, rsk := readFile(rtShims); rsk {
+			objList = append(objList, compileToObj(rtShims))
+		}
+		if buildJobs > 1 {
+			var objCmds [][]string
+			for _, bf := range allBcFiles {
+				objCmds = append(objCmds, []string{clang, "--target=" | triple,
+					"-c", "-O0", bf, "-o", bf | ".o"})
+			}
+			if !runPool(objCmds, buildJobs) {
+				fatal("clang -c failed")
+			}
+			for _, bf := range allBcFiles {
+				objList = append(objList, bf|".o")
+			}
+		} else {
+			for _, bf := range allBcFiles {
+				objList = append(objList, compileToObj(bf))
+			}
+		}
+		objList = append(objList, compileToObj(initAllBc))
+		if !hasRuntimePkg {
+			cstubDir := joinPath(root, joinPath("src/runtime", "_cstubs"))
+			cstubFiles := listFiles(cstubDir, ".c")
+			for _, cf := range cstubFiles {
+				cPath := joinPath(cstubDir, cf)
+				coFile := joinPath(tmpdir, "cstub_" | cf | ".o")
+				rc = run([]string{clang, "--target=" | triple, "-c", "-O0", cPath, "-o", coFile})
+				if rc == 0 {
+					objList = append(objList, coFile)
+				}
+			}
+		}
+		objDir := joinPath(sysroot, "obj")
+		objEntries := listFiles(objDir, ".bc")
+		if objEntries != nil {
+			for _, e := range objEntries {
+				objList = append(objList, compileToObj(joinPath(objDir, e)))
+			}
+		}
+		oEntries := listFiles(objDir, ".o")
+		if oEntries != nil {
+			for _, e := range oEntries {
+				objList = append(objList, joinPath(objDir, e))
+			}
+		}
+		writeStr(2, "  link\n")
+		ldArgs := []string{"ld.lld-21", "--gc-sections", "-o", outpath,
+			joinPath(muslDir, "crt1.o")}
+		for _, o := range objList {
+			ldArgs = append(ldArgs, o)
+		}
+		ldArgs = append(ldArgs, comprtLib, muslLib, "-z", "stack-size=67108864")
+		rc = run(ldArgs)
+		if rc != 0 {
+			fatal("linker failed")
+		}
 	}
 	writeStr(2, "  -> " | outpath | "\n")
 }
@@ -3270,9 +3491,12 @@ func main() {
 // packages in dependency order, then compile each uncached package in this
 // process. Used for -j 1 and -print-ir.
 func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, forceRebuild, printIR bool) (bcs []string, hasRT bool) {
+	isWasmTarget := globalTargetArch == "wasm"
 	for _, pkg := range pkgs {
 		if pkg.path == "runtime" {
-			hasRT = true
+			if !isWasmTarget {
+				hasRT = true
+			}
 		}
 		compilePath := pkg.path
 		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
@@ -3294,6 +3518,9 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 	}
 
 	for _, pkg := range pkgs {
+		if isWasmTarget && wasmRtPkgs[pkg.path] {
+			continue
+		}
 		compilePath := pkg.path
 		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
 			compilePath = pkg.name
@@ -3839,6 +4066,11 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 		} else {
 			needBuild[i] = true
 		}
+		// wasm: skip packages in prebuilt runtime.bc
+		if globalTargetArch == "wasm" && wasmRtPkgs[pkg.path] {
+			done[i] = true
+			needBuild[i] = false
+		}
 	}
 
 	// Phase 2: serialize metadata and spawn workers
@@ -4049,6 +4281,9 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 	// Phase 5: assemble .bc list
 	for i := int32(0); i < n; i++ {
 		pkg := pkgs[i]
+		if globalTargetArch == "wasm" && wasmRtPkgs[pkg.path] {
+			continue
+		}
 		if pkg.path == "runtime" {
 			hasRT = true
 		}
