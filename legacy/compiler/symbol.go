@@ -441,9 +441,6 @@ func (c *compilerContext) parsePragmas(info *functionInfo, f *ssa.Function) {
 				continue
 			}
 			// Only enable go:linkname when the package imports "unsafe".
-			// This is a slightly looser requirement than what gc uses: gc
-			// requires the file to import "unsafe", not the package as a
-			// whole.
 			if hasUnsafeImport(f.Pkg.Pkg) {
 				info.linkName = parts[2]
 			}

@@ -2,29 +2,39 @@
 set -e
 
 LLVM_PREFIX=""
-LLVM_VER=""
-for v in 21 19; do
-    for p in /usr/lib/llvm-$v /usr/lib/llvm$v /usr/lib/llvm/$v; do
+LLVM_VER="22"
+
+# Arch Linux style
+if [ -f "/usr/lib/libLLVM-22.so" ]; then
+    LLVM_PREFIX="/usr"
+fi
+
+# Debian/Ubuntu style
+if [ -z "$LLVM_PREFIX" ]; then
+    for p in /usr/lib/llvm-22 /usr/lib/llvm22 /usr/lib/llvm/22; do
         if [ -d "$p" ]; then
             LLVM_PREFIX="$p"
-            LLVM_VER="$v"
-            break 2
+            break
         fi
     done
-done
+fi
 
 if [ -z "$LLVM_PREFIX" ]; then
-    echo "error: LLVM (21 or 19) not found" >&2
+    echo "error: LLVM 22 not found" >&2
     exit 1
 fi
 
-VENDOR="$(cd "$(dirname "$0")/../legacy/vendor/tinygo.org/x/go-llvm" && pwd)"
-OUT="$(dirname "$0")/libmoxie-llvm-glue.so"
+echo "using LLVM $LLVM_VER at $LLVM_PREFIX"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VENDOR="$(cd "$SCRIPT_DIR/../vendor/tinygo.org/x/go-llvm" && pwd)"
+OUT="$SCRIPT_DIR/libmoxie-llvm-glue.so"
 
-CXX="${CXX:-clang++-$LLVM_VER}"
-command -v "$CXX" >/dev/null 2>&1 || CXX="clang++"
+CXX="${CXX:-clang++}"
+if command -v "clang++-$LLVM_VER" >/dev/null 2>&1; then
+    CXX="clang++-$LLVM_VER"
+fi
+
 $CXX -shared -fPIC \
     -o "$OUT" \
     "$VENDOR/IRBindings.cpp" \

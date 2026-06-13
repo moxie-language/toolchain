@@ -34,6 +34,10 @@ func (r *runner) run(fn *function, params []value, parentMem *memoryView, indent
 	var operands []value
 	startRTInsts := len(mem.instructions)
 	for instIndex := 0; instIndex < len(bb.instructions); instIndex++ {
+		// Check timeout at every basic block entry to catch infinite loops.
+		if instIndex == 0 && time.Since(r.start) > r.timeout {
+			return nil, mem, r.errorAt(bb.instructions[0], errTimeout)
+		}
 		if instIndex == 0 {
 			// This is the start of a new basic block.
 			if len(mem.instructions) != startRTInsts {
@@ -142,9 +146,7 @@ func (r *runner) run(fn *function, params []value, parentMem *memoryView, indent
 		switch inst.opcode {
 		case llvm.Ret:
 			if time.Since(r.start) > r.timeout {
-				// Running for more than the allowed timeout; This shouldn't happen, but it does.
-				// See moxie/issues/2124
-				return nil, mem, r.errorAt(fn.blocks[0].instructions[0], fmt.Errorf("interp: running for more than %s, timing out (executed calls: %d)", r.timeout, r.callsExecuted))
+				return nil, mem, r.errorAt(fn.blocks[0].instructions[0], errTimeout)
 			}
 
 			if len(operands) != 0 {

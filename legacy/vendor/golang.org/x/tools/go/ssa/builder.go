@@ -642,9 +642,31 @@ func (b *builder) expr(fn *Function, e ast.Expr) Value {
 
 	// Moxie: string and []byte are the same type. When the Go type checker
 	// filters string/[]byte mismatch errors, some expressions end up with
-	// nil types. Fall back to []byte (Moxie's canonical text type).
+	// nil types. Fall back based on context:
+	//  - Comparisons always return bool.
+	//  - For | on non-text slices (e.g. []*T), use the operand's type
+	//    so the compiler sees the correct element size for sliceAppend.
+	//  - Otherwise default to []byte (Moxie's canonical text type).
 	if tv.Type == nil {
-		tv.Type = types.NewSlice(types.Typ[types.Byte])
+		if bin, ok := e.(*ast.BinaryExpr); ok {
+			switch bin.Op {
+			case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ:
+				tv.Type = types.Typ[types.Bool]
+			default:
+				// Try to recover the operand type so non-text slice
+				// concat (e.g. []*Alloc | []*Alloc) preserves the
+				// element type through emitArith.
+				if ltv := fn.info.Types[bin.X]; ltv.Type != nil {
+					tv.Type = ltv.Type
+				} else if rtv := fn.info.Types[bin.Y]; rtv.Type != nil {
+					tv.Type = rtv.Type
+				} else {
+					tv.Type = types.NewSlice(types.Typ[types.Byte])
+				}
+			}
+		} else {
+			tv.Type = types.NewSlice(types.Typ[types.Byte])
+		}
 	}
 
 	// Is expression a constant?
@@ -739,6 +761,18 @@ func (b *builder) expr0(fn *Function, e ast.Expr, tv types.TypeAndValue) Value {
 					return v
 				}
 			}
+			// Moxie universe-scope functions (free, spawn) registered as *types.Func.
+			if obj, ok := fn.info.Uses[id].(*types.Func); ok && obj.Parent() == types.Universe {
+				bi := &Builtin{name: obj.Name()}
+				var v Call
+				v.Call.Value = bi
+				v.Call.pos = e.Lparen
+				for _, arg := range e.Args {
+					v.Call.Args = append(v.Call.Args, b.expr(fn, arg))
+				}
+				v.setType(fn.typ(tv.Type))
+				return emitCall(fn, &v)
+			}
 		}
 		// Regular function call.
 		var v Call
@@ -831,7 +865,14 @@ func (b *builder) expr0(fn *Function, e ast.Expr, tv types.TypeAndValue) Value {
 		// Universal built-in or nil?
 		switch obj := obj.(type) {
 		case *types.Builtin:
-			return &Builtin{name: obj.Name(), sig: fn.instanceType(e).(*types.Signature)}
+			instType := fn.instanceType(e)
+			sig, ok := instType.(*types.Signature)
+			if !ok {
+				// Moxie: type patching may cause builtins to resolve
+				// with non-Signature types. Return a Builtin without sig.
+				return &Builtin{name: obj.Name()}
+			}
+			return &Builtin{name: obj.Name(), sig: sig}
 		case *types.Nil:
 			return zeroConst(fn.instanceType(e))
 		}
@@ -848,6 +889,11 @@ func (b *builder) expr0(fn *Function, e ast.Expr, tv types.TypeAndValue) Value {
 				callee = callee.instance(targs, b)
 			}
 			return callee
+		}
+		// Moxie universe-scope functions (free, spawn) used as values.
+		if fobj, ok := obj.(*types.Func); ok && fobj.Parent() == types.Universe {
+			sig, _ := fobj.Type().(*types.Signature)
+			return &Builtin{name: fobj.Name(), sig: sig}
 		}
 		// Local var.
 		return emitLoad(fn, fn.lookup(obj.(*types.Var), false)) // var (address)
@@ -1167,9 +1213,15 @@ func (b *builder) setCall(fn *Function, e *ast.CallExpr, c *CallCommon) {
 	// Then append the other actual parameters.
 	sig, _ := typeparams.CoreType(fn.typeOf(e.Fun)).(*types.Signature)
 	if sig == nil {
-		panic(fmt.Sprintf("no signature for call of %s", e.Fun))
+		// Moxie: builtin calls may have Invalid type after string/byte
+		// unification error filtering. Evaluate args directly without
+		// signature-based conversions.
+		for _, arg := range e.Args {
+			c.Args = append(c.Args, b.expr(fn, arg))
+		}
+	} else {
+		c.Args = b.emitCallArgs(fn, sig, e, c.Args)
 	}
-	c.Args = b.emitCallArgs(fn, sig, e, c.Args)
 }
 
 // assignOp emits to fn code to perform loc <op>= val.

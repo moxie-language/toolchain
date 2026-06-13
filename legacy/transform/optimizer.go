@@ -30,7 +30,7 @@ func OptimizePackage(mod llvm.Module, config *compileopts.Config) {
 // Please note that some optimizations are not optional, thus Optimize must
 // always be run before emitting machine code.
 func Optimize(mod llvm.Module, config *compileopts.Config) []error {
-	optLevel, speedLevel, _ := config.OptLevel()
+	_, speedLevel, _ := config.OptLevel()
 
 	// Make sure these functions are kept in tact during Moxie transformation passes.
 	for _, name := range functionsUsedInTransforms {
@@ -142,16 +142,15 @@ func Optimize(mod llvm.Module, config *compileopts.Config) []error {
 		fn.SetLinkage(llvm.InternalLinkage)
 	}
 
-	// Run the ThinLTO pre-link passes, meant to be run on each individual
-	// module. This saves compilation time compared to "default<#>" and is meant
-	// to better match the optimization passes that are happening during
-	// ThinLTO.
+	// No ThinLTO pre-link passes - we emit native objects and link without LTO.
+	// Run a basic cleanup pass instead of the full thinlto-pre-link pipeline.
 	po := llvm.NewPassBuilderOptions()
 	defer po.Dispose()
-	passes := fmt.Sprintf("thinlto-pre-link<%s>", optLevel)
-	err := mod.RunPasses(passes, llvm.TargetMachine{}, po)
-	if err != nil {
-		return []error{fmt.Errorf("could not build pass pipeline: %w", err)}
+	if speedLevel > 0 {
+		err := mod.RunPasses("globaldce", llvm.TargetMachine{}, po)
+		if err != nil {
+			return []error{fmt.Errorf("could not build pass pipeline: %w", err)}
+		}
 	}
 
 	hasGCPass := MakeGCStackSlots(mod)

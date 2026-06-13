@@ -44,28 +44,23 @@ func CreateTemporaryAlloca(builder llvm.Builder, mod llvm.Module, t llvm.Type, n
 	alloca = CreateEntryBlockAlloca(builder, t, name)
 	size = llvm.ConstInt(ctx.Int64Type(), targetData.TypeAllocSize(t), false)
 	fnType, fn := getLifetimeStartFunc(mod)
-	builder.CreateCall(fnType, fn, []llvm.Value{size, alloca}, "")
+	builder.CreateCall(fnType, fn, []llvm.Value{alloca}, "")
 	return
 }
 
 // CreateInstructionAlloca creates an alloca in the entry block, and places lifetime control intrinsics around the instruction
 func CreateInstructionAlloca(builder llvm.Builder, mod llvm.Module, t llvm.Type, inst llvm.Value, name string) llvm.Value {
-	ctx := mod.Context()
-	targetData := llvm.NewTargetData(mod.DataLayout())
-	defer targetData.Dispose()
-
 	alloca := CreateEntryBlockAlloca(builder, t, name)
 	builder.SetInsertPointBefore(inst)
-	size := llvm.ConstInt(ctx.Int64Type(), targetData.TypeAllocSize(t), false)
 	fnType, fn := getLifetimeStartFunc(mod)
-	builder.CreateCall(fnType, fn, []llvm.Value{size, alloca}, "")
+	builder.CreateCall(fnType, fn, []llvm.Value{alloca}, "")
 	if next := llvm.NextInstruction(inst); !next.IsNil() {
 		builder.SetInsertPointBefore(next)
 	} else {
 		builder.SetInsertPointAtEnd(inst.InstructionParent())
 	}
 	fnType, fn = getLifetimeEndFunc(mod)
-	builder.CreateCall(fnType, fn, []llvm.Value{size, alloca}, "")
+	builder.CreateCall(fnType, fn, []llvm.Value{alloca}, "")
 	return alloca
 }
 
@@ -74,17 +69,18 @@ func CreateInstructionAlloca(builder llvm.Builder, mod llvm.Module, t llvm.Type,
 // createTemporaryAlloca.
 func EmitLifetimeEnd(builder llvm.Builder, mod llvm.Module, ptr, size llvm.Value) {
 	fnType, fn := getLifetimeEndFunc(mod)
-	builder.CreateCall(fnType, fn, []llvm.Value{size, ptr}, "")
+	builder.CreateCall(fnType, fn, []llvm.Value{ptr}, "")
 }
 
 // getLifetimeStartFunc returns the llvm.lifetime.start intrinsic and creates it
 // first if it doesn't exist yet.
+// LLVM 22: signature is (ptr), no size argument.
 func getLifetimeStartFunc(mod llvm.Module) (llvm.Type, llvm.Value) {
 	fnName := "llvm.lifetime.start.p0"
 	fn := mod.NamedFunction(fnName)
 	ctx := mod.Context()
 	ptrType := llvm.PointerType(ctx.Int8Type(), 0)
-	fnType := llvm.FunctionType(ctx.VoidType(), []llvm.Type{ctx.Int64Type(), ptrType}, false)
+	fnType := llvm.FunctionType(ctx.VoidType(), []llvm.Type{ptrType}, false)
 	if fn.IsNil() {
 		fn = llvm.AddFunction(mod, fnName, fnType)
 	}
@@ -93,12 +89,13 @@ func getLifetimeStartFunc(mod llvm.Module) (llvm.Type, llvm.Value) {
 
 // getLifetimeEndFunc returns the llvm.lifetime.end intrinsic and creates it
 // first if it doesn't exist yet.
+// LLVM 22: signature is (ptr), no size argument.
 func getLifetimeEndFunc(mod llvm.Module) (llvm.Type, llvm.Value) {
 	fnName := "llvm.lifetime.end.p0"
 	fn := mod.NamedFunction(fnName)
 	ctx := mod.Context()
 	ptrType := llvm.PointerType(ctx.Int8Type(), 0)
-	fnType := llvm.FunctionType(ctx.VoidType(), []llvm.Type{ctx.Int64Type(), ptrType}, false)
+	fnType := llvm.FunctionType(ctx.VoidType(), []llvm.Type{ptrType}, false)
 	if fn.IsNil() {
 		fn = llvm.AddFunction(mod, fnName, fnType)
 	}

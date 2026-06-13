@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"strings"
 
 	"moxie/mxtext"
 )
@@ -74,6 +75,21 @@ func filterByteCompareErrors(errs []error) []error {
 
 func filterStringByteMismatch(errs []error) []error {
 	return mxtext.FilterStringByteMismatch(errs)
+}
+
+func filterNoNewVarErrors(errs []error) []error {
+	var out []error
+	for _, e := range errs {
+		msg := e.Error()
+		if strings.Contains(msg, "no new variables on left side of :=") {
+			continue
+		}
+		if strings.Contains(msg, "declared and not used") {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func rewriteAddAssign(files []*ast.File, info *types.Info) int {

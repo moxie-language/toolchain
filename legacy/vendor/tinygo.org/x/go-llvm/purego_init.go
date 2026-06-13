@@ -17,7 +17,7 @@ func init() {
 		llvmPath = findLLVM()
 	}
 	if llvmPath == "" {
-		fmt.Fprintf(os.Stderr, "purego LLVM: cannot find libLLVM (tried 21, 19); set LLVM_LIB_PATH\n")
+		fmt.Fprintf(os.Stderr, "purego LLVM: cannot find libLLVM-22; set LLVM_LIB_PATH\n")
 		os.Exit(1)
 	}
 
@@ -46,16 +46,11 @@ func init() {
 
 func findLLVM() string {
 	candidates := []string{
-		"/usr/lib/libLLVM-21.so",
-		"/usr/lib64/libLLVM-21.so",
-		"/usr/lib/llvm-21/lib/libLLVM-21.so",
-		"/usr/lib/llvm21/lib/libLLVM-21.so",
-		"/usr/local/lib/libLLVM-21.so",
-		"/usr/lib/libLLVM-19.so",
-		"/usr/lib64/libLLVM-19.so",
-		"/usr/lib/llvm-19/lib/libLLVM-19.so",
-		"/usr/lib/llvm19/lib/libLLVM-19.so",
-		"/usr/local/lib/libLLVM-19.so",
+		"/usr/lib/libLLVM-22.so",
+		"/usr/lib64/libLLVM-22.so",
+		"/usr/lib/llvm-22/lib/libLLVM-22.so",
+		"/usr/lib/llvm22/lib/libLLVM-22.so",
+		"/usr/local/lib/libLLVM-22.so",
 	}
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {

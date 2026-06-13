@@ -22,11 +22,12 @@ import (
 	"unsafe"
 )
 
-// patchIntTypes makes int≡int32 and uint≡uint32 in the type checker.
+// patchIntTypes makes int≡int32 and uint≡uint32 in the type checker,
+// and adds Moxie builtins (free, spawn) to the universe scope.
 // Applied unconditionally on all targets. Must be called before any type
-// checking begins. Idempotent — safe to call multiple times.
+// checking begins. Idempotent - safe to call multiple times.
 func patchIntTypes() {
-	// Already patched — idempotent guard.
+	// Already patched - idempotent guard.
 	if types.Typ[types.Int].Kind() == types.Int32 {
 		return
 	}
@@ -38,4 +39,14 @@ func patchIntTypes() {
 	// Patch uint.kind from Uint(7) to Uint32(10).
 	kindPtr = (*types.BasicKind)(unsafe.Pointer(types.Typ[types.Uint]))
 	*kindPtr = types.Uint32
+
+	// Add Moxie builtins to the universe scope.
+	// free(x) deallocates heap memory. Accepts any type in Moxie.
+	anyIface := types.NewInterfaceType(nil, nil)
+	anyIface.Complete()
+	freeSig := types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(types.NewParam(0, nil, "ptr", anyIface)),
+		nil, false)
+	freeObj := types.NewFunc(0, nil, "free", freeSig)
+	types.Universe.Insert(freeObj)
 }

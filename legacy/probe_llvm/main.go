@@ -9,7 +9,7 @@ import (
 )
 
 func main() {
-	llvmPath := "/usr/lib/libLLVM-19.so"
+	llvmPath := "/usr/lib/libLLVM-22.so"
 	gluePath := ""
 
 	if len(os.Args) >= 2 {

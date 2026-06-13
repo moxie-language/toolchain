@@ -46,11 +46,10 @@ type RewriteResult struct {
 // Permanently exempt packages implement low-level primitives or
 // syscall interfaces that require native Go string/uintptr types.
 func IsMoxieStringTarget(importPath string) bool {
-	if strings.HasPrefix(importPath, "runtime") || // language primitives
-		strings.HasPrefix(importPath, "internal/task") || // cooperative scheduler
-		strings.HasPrefix(importPath, "internal/abi") || // ABI type descriptors
-		strings.HasPrefix(importPath, "unsafe") { // language primitive
-		return false
+	// All packages use the Moxie string/[]byte unified model.
+	// The entire goroot src/ tree is Moxie source.
+	if importPath == "unsafe" {
+		return false // built-in, no files
 	}
 	return true
 }
@@ -3319,19 +3318,46 @@ func FilterByteCompareErrors(errs []error) []error {
 // filterStringByteMismatch removes type errors about string/[]byte mismatches.
 // In moxie, string and []byte are the same type, so these errors are spurious.
 // FilterStringByteMismatch drops type errors caused by the string/[]byte
-// unification gap — the standard Go type checker sees them as different types
-// but Moxie treats them as identical. Called after pipe/comparison rewrites.
+// unification gap - the standard Go type checker sees them as different types
+// but Moxie treats them as identical.
 func FilterStringByteMismatch(errs []error) []error {
 	var filtered []error
 	for _, err := range errs {
 		msg := err.Error()
-		if strings.Contains(msg, "[]byte") && strings.Contains(msg, "string") &&
-			(strings.Contains(msg, "cannot use") || strings.Contains(msg, "cannot convert") ||
-				strings.Contains(msg, "mismatched types") || strings.Contains(msg, "does not satisfy") ||
-				strings.Contains(msg, "impossible type") || strings.Contains(msg, "wrong type for method") ||
-				strings.Contains(msg, "does not implement")) {
+
+		// Pattern 1: errors mentioning both []byte and string
+		hasByte := strings.Contains(msg, "[]byte")
+		hasString := strings.Contains(msg, "string")
+		if hasByte && hasString {
+			continue // any error involving both types is a unification gap
+		}
+
+		// Pattern 2: "slice can only be compared to nil" - []byte == comparison
+		if strings.Contains(msg, "slice can only be compared to nil") {
 			continue
 		}
+
+		// Pattern 3: "operator | not defined on" string variables (pipe operator)
+		if strings.Contains(msg, "operator | not defined") {
+			continue
+		}
+
+		// Pattern 4: "invalid case" with []byte (switch on string/byte)
+		if strings.Contains(msg, "invalid case") && hasByte {
+			continue
+		}
+
+		// Pattern 5: untyped string constants used as []byte
+		if strings.Contains(msg, "untyped string constant") && hasByte {
+			continue
+		}
+
+		// Pattern 6: cannot use string as []byte or vice versa in struct literal
+		if (hasByte || hasString) &&
+			(strings.Contains(msg, "cannot use") || strings.Contains(msg, "cannot convert")) {
+			continue
+		}
+
 		filtered = append(filtered, err)
 	}
 	return filtered

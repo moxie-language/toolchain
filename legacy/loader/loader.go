@@ -343,6 +343,11 @@ func (p *Package) parseFile(path string, mode parser.Mode) (*ast.File, error) {
 	sum := sha512.Sum512_224(data)
 	p.FileHashes[originalPath] = sum[:]
 
+	// Rewrite Moxie pragmas (//:linkname, //:inline, etc) to //go: form
+	// so the Go parser associates them correctly with function declarations.
+	data = rewriteMoxiePragmas(data)
+	data = rewritePkgMainToInit(data)
+
 	chanResult := rewriteChanLiterals(data, p.program.fset)
 	sliceResult := rewriteSliceLiterals(chanResult.Src, p.program.fset, chanResult.MakeOffsets)
 	data = sliceResult.Src
@@ -453,6 +458,15 @@ func (p *Package) Check() error {
 	}
 	typesPkg, err := checker.Check(packageName, p.program.fset, p.Files, &p.info)
 
+	// Filter Moxie-specific type errors from the first pass.
+	// string/[]byte unification: these are the same type in Moxie.
+	// no-new-var errors: string==[]byte makes some := seem redundant.
+	typeErrors = filterStringByteMismatch(typeErrors)
+	typeErrors = filterNoNewVarErrors(typeErrors)
+	if err != nil && len(typeErrors) == 0 {
+		err = nil
+	}
+
 	// Two-pass Moxie rewrite: pipe concat (|), byte comparisons, switches.
 	needsRecheck := false
 	if isMoxieStringTarget(p.ImportPath) {
@@ -514,6 +528,7 @@ func (p *Package) Check() error {
 		typesPkg, err = checker2.Check(packageName, p.program.fset, p.Files, &p.info)
 		typeErrors = filterPipeErrors(typeErrors)
 		typeErrors = filterByteCompareErrors(typeErrors)
+		typeErrors = filterNoNewVarErrors(typeErrors)
 		typeErrors = filterStringByteMismatch(typeErrors)
 		if err != nil && len(typeErrors) == 0 {
 			err = nil

@@ -9,6 +9,7 @@
 package loader
 
 import (
+	"bytes"
 	"go/build"
 	"io"
 	"io/fs"
@@ -83,11 +84,166 @@ func mxReadDir(dir string) ([]fs.FileInfo, error) {
 func mxOpenFile(path string) (io.ReadCloser, error) {
 	if strings.HasSuffix(path, ".go") {
 		mxPath := strings.TrimSuffix(path, ".go") + ".mx"
-		if f, err := os.Open(mxPath); err == nil {
-			return f, nil
+		if data, err := os.ReadFile(mxPath); err == nil {
+			rewritten := rewriteBuildDirectives(data)
+			rewritten = rewriteMoxiePragmas(rewritten)
+			rewritten = rewritePkgMainToInit(rewritten)
+			return io.NopCloser(bytes.NewReader(rewritten)), nil
 		}
 	}
 	return os.Open(path)
+}
+
+// rewritePkgMainToInit renames "func main()" to "func init()" in
+// non-main packages. Moxie uses func main() for package initialization
+// but Go's SSA builder only recognizes init().
+func rewritePkgMainToInit(data []byte) []byte {
+	// Check if this is the main package — don't rewrite main.main.
+	if isMainPackage(data) {
+		return data
+	}
+	// Replace "func main()" declarations with "func init()".
+	return bytes.ReplaceAll(data, []byte("func main()"), []byte("func init()"))
+}
+
+// isMainPackage returns true if the source declares "package main".
+func isMainPackage(data []byte) bool {
+	// Scan past comments and blank lines to find the package declaration.
+	rest := data
+	for len(rest) > 0 {
+		// Skip whitespace/newlines.
+		i := 0
+		for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t' || rest[i] == '\n' || rest[i] == '\r') {
+			i++
+		}
+		rest = rest[i:]
+		if len(rest) == 0 {
+			break
+		}
+		// Skip line comments.
+		if len(rest) >= 2 && rest[0] == '/' && rest[1] == '/' {
+			nl := bytes.IndexByte(rest, '\n')
+			if nl < 0 {
+				break
+			}
+			rest = rest[nl+1:]
+			continue
+		}
+		// Skip block comments.
+		if len(rest) >= 2 && rest[0] == '/' && rest[1] == '*' {
+			end := bytes.Index(rest[2:], []byte("*/"))
+			if end < 0 {
+				break
+			}
+			rest = rest[2+end+2:]
+			continue
+		}
+		// Should be the package declaration.
+		if bytes.HasPrefix(rest, []byte("package main")) {
+			after := rest[len("package main"):]
+			if len(after) == 0 || after[0] == '\n' || after[0] == '\r' || after[0] == ' ' || after[0] == '\t' || after[0] == '/' {
+				return true
+			}
+		}
+		break
+	}
+	return false
+}
+
+// rewriteMoxiePragmas rewrites //:pragma lines to //go:pragma so that
+// the Go compiler toolchain recognizes them (linkname, inline, nobounds,
+// extern, noinline, section, wasmimport, etc).
+func rewriteMoxiePragmas(data []byte) []byte {
+	// Fast path: no //: lines.
+	if !bytes.Contains(data, []byte("//:")) {
+		return data
+	}
+	var out []byte
+	rest := data
+	for len(rest) > 0 {
+		nl := bytes.IndexByte(rest, '\n')
+		var line []byte
+		if nl >= 0 {
+			line = rest[:nl+1]
+			rest = rest[nl+1:]
+		} else {
+			line = rest
+			rest = nil
+		}
+		trimmed := bytes.TrimLeft(line, " \t")
+		// Rewrite //:<word> to //go:<word> but NOT //:build (already handled)
+		// and NOT //: (bare, no word following).
+		if len(trimmed) > 3 && trimmed[0] == '/' && trimmed[1] == '/' && trimmed[2] == ':' &&
+			trimmed[3] >= 'a' && trimmed[3] <= 'z' && !bytes.HasPrefix(trimmed, []byte("//:build ")) {
+			idx := bytes.Index(line, []byte("//:"))
+			out = append(out, line[:idx]...)
+			out = append(out, "//go:"...)
+			out = append(out, line[idx+3:]...)
+		} else {
+			out = append(out, line...)
+		}
+	}
+	return out
+}
+
+// rewriteBuildDirectives rewrites //:build lines to a single //go:build
+// line so that go/build can evaluate Moxie build constraints.
+// Multiple //:build lines are combined with &&.
+// Only scans before the package clause.
+func rewriteBuildDirectives(data []byte) []byte {
+	// Fast path: no //:build in the file.
+	if !bytes.Contains(data[:min(len(data), 512)], []byte("//:build")) {
+		return data
+	}
+
+	// First pass: collect all //:build constraints and non-directive lines.
+	var constraints []string
+	type lineInfo struct {
+		data        []byte
+		isDirective bool
+	}
+	var lines []lineInfo
+	rest := data
+	pastPackage := false
+	for len(rest) > 0 && !pastPackage {
+		nl := bytes.IndexByte(rest, '\n')
+		var line []byte
+		if nl >= 0 {
+			line = rest[:nl+1]
+			rest = rest[nl+1:]
+		} else {
+			line = rest
+			rest = nil
+		}
+		trimmed := bytes.TrimSpace(line)
+		if bytes.HasPrefix(trimmed, []byte("//:build ")) {
+			expr := string(bytes.TrimPrefix(trimmed, []byte("//:build ")))
+			constraints = append(constraints, expr)
+			lines = append(lines, lineInfo{data: line, isDirective: true})
+		} else {
+			lines = append(lines, lineInfo{data: line, isDirective: false})
+		}
+		if bytes.HasPrefix(trimmed, []byte("package ")) {
+			pastPackage = true
+		}
+	}
+
+	// Build output: emit single //go:build line, then non-directive lines.
+	var out []byte
+	if len(constraints) > 0 {
+		combined := constraints[0]
+		for _, c := range constraints[1:] {
+			combined = "(" + combined + ") && (" + c + ")"
+		}
+		out = append(out, []byte("//go:build "+combined+"\n")...)
+	}
+	for _, li := range lines {
+		if !li.isDirective {
+			out = append(out, li.data...)
+		}
+	}
+	out = append(out, rest...)
+	return out
 }
 
 // renamedFileInfo wraps fs.FileInfo with an overridden Name().

@@ -19,7 +19,6 @@ import (
 	"runtime"
 	goruntime "runtime"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/gofrs/flock"
@@ -172,7 +171,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		return BuildResult{}, fmt.Errorf("unknown libc: %s", config.Target.Libc)
 	}
 
-	optLevel, speedLevel, sizeLevel := config.OptLevel()
+	optLevel, _, sizeLevel := config.OptLevel()
 	compilerConfig := &compiler.Config{
 		Triple:          config.Triple(),
 		CPU:             config.CPU(),
@@ -594,7 +593,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			defer llvmBuf.Dispose()
 			return result, os.WriteFile(outpath, llvmBuf.Bytes(), 0666)
 		case ".bc":
-			buf := llvm.WriteThinLTOBitcodeToMemoryBuffer(mod)
+			buf := llvm.WriteBitcodeToMemoryBuffer(mod)
 			defer buf.Dispose()
 			return result, os.WriteFile(outpath, buf.Bytes(), 0666)
 		case ".ll":
@@ -609,27 +608,19 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	// First add all jobs necessary to build this object file, then afterwards
 	// run all jobs in parallel as far as possible.
 
-	// Native c-shared builds use regular object emission instead of ThinLTO
-	// bitcode. ThinLTO partitioning duplicates type descriptors, which breaks
-	// type switches (interface dispatch) in the loaded .so.
-	nativeCShared := config.Options.BuildMode == "c-shared" && !strings.HasPrefix(config.Triple(), "wasm32-")
-
-	// Add job to write the output object file.
+	// Emit native object files instead of ThinLTO bitcode.
+	// This matches the stage4 compiler: compile to .o, then link with ld.lld
+	// without LTO. Avoids the LLVM LTO pass manager which hangs even at O0.
 	objfile := filepath.Join(tmpdir, "main.o")
 	outputObjectFileJob := &compileJob{
 		description:  "generate output file",
 		dependencies: []*compileJob{programJob},
 		result:       objfile,
 		run: func(*compileJob) error {
-			if nativeCShared {
-				llvmBuf, err := machine.EmitToMemoryBuffer(mod, llvm.ObjectFile)
-				if err != nil {
-					return err
-				}
-				defer llvmBuf.Dispose()
-				return os.WriteFile(objfile, llvmBuf.Bytes(), 0666)
+			llvmBuf, err := machine.EmitToMemoryBuffer(mod, llvm.ObjectFile)
+			if err != nil {
+				return err
 			}
-			llvmBuf := llvm.WriteThinLTOBitcodeToMemoryBuffer(mod)
 			defer llvmBuf.Dispose()
 			return os.WriteFile(objfile, llvmBuf.Bytes(), 0666)
 		},
@@ -750,39 +741,13 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				}
 				ldflags = append(ldflags, dependency.result)
 			}
-			ldflags = append(ldflags, "-mllvm", "-mcpu="+config.CPU())
-			ldflags = append(ldflags, "-mllvm", "-mattr="+config.Features()) // needed for MIPS softfloat
-			if config.GOOS() == "windows" {
-				// Options for the MinGW wrapper for the lld COFF linker.
+			// Native object linking - no LTO flags. Matches stage4 approach:
+			// compile .bc -> .o with clang, link .o files with ld.lld.
+			if !strings.HasPrefix(config.Triple(), "wasm32-") {
 				ldflags = append(ldflags,
-					"-Xlink=/opt:lldlto="+strconv.Itoa(speedLevel),
-					"--thinlto-cache-dir="+filepath.Join(cacheDir, "thinlto"))
-			} else if config.GOOS() == "darwin" {
-				// Options for the ld64-compatible lld linker.
-				ldflags = append(ldflags,
-					"--lto-O"+strconv.Itoa(speedLevel),
-					"-cache_path_lto", filepath.Join(cacheDir, "thinlto"))
-			} else if nativeCShared {
-				// Native c-shared: object file is native, not bitcode.
-				// No ThinLTO flags needed.
-			} else {
-				// Options for the ELF linker.
-				ldflags = append(ldflags,
-					"--lto-O"+strconv.Itoa(speedLevel),
-					"--thinlto-cache-dir="+filepath.Join(cacheDir, "thinlto"),
+					"--gc-sections",
 					"-z", "stack-size=67108864",
 				)
-			}
-			if config.CodeModel() != "default" {
-				ldflags = append(ldflags,
-					"-mllvm", "-code-model="+config.CodeModel())
-			}
-			if sizeLevel >= 2 {
-				// Workaround with roughly the same effect as
-				// https://reviews.llvm.org/D119342.
-				// Can hopefully be removed in LLVM 19.
-				ldflags = append(ldflags,
-					"-mllvm", "--rotation-max-header-size=0")
 			}
 			if config.Options.PrintCommands != nil {
 				config.Options.PrintCommands(config.Target.Linker, ldflags...)

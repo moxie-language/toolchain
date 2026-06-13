@@ -9,9 +9,20 @@ import (
 	"tinygo.org/x/go-llvm"
 )
 
-// usesDealloc returns true when the dealloc GC is active.
+// usesDealloc returns true when the dealloc GC is active and this function
+// should be instrumented. The dealloc runtime functions themselves are excluded
+// to prevent infinite recursion (deallocFree calling deallocFree at its return).
 func (b *builder) usesDealloc() bool {
-	return b.GC == "dealloc"
+	if b.GC != "dealloc" {
+		return false
+	}
+	name := b.fn.RelString(nil)
+	switch name {
+	case "runtime.deallocFree", "runtime.deallocPush", "runtime.deallocEscape",
+		"runtime.Free", "runtime.free", "runtime.alloc":
+		return false
+	}
+	return true
 }
 
 // deallocPushAlloc emits a runtime.deallocPush call to register a heap
@@ -143,10 +154,8 @@ func (b *builder) createFreeBuiltin(instr *ssa.CallCommon) (llvm.Value, error) {
 		return llvm.Value{}, nil
 	}
 	arg := instr.Args[0]
-	if derivesFromParam(arg, b.fn) {
-		b.addError(instr.Pos(), "free: cannot free parameter (caller-owned)")
-		return llvm.Value{}, nil
-	}
+	// Moxie: free() on parameters is valid - ownership transfer is the
+	// programmer's responsibility. No derivesFromParam check.
 	ptr := b.getValue(arg, instr.Pos())
 	if ptr.Type().TypeKind() == llvm.StructTypeKind {
 		ptr = b.CreateExtractValue(ptr, 0, "free.data")
@@ -162,27 +171,3 @@ func (b *builder) createFreeBuiltin(instr *ssa.CallCommon) (llvm.Value, error) {
 	return llvm.Value{}, nil
 }
 
-// derivesFromParam returns true if val is a function parameter or is
-// derived from one via field/index addressing. Freeing such values is
-// a compile error because parameters are caller-owned.
-func derivesFromParam(val ssa.Value, fn *ssa.Function) bool {
-	switch v := val.(type) {
-	case *ssa.Parameter:
-		return true
-	case *ssa.FieldAddr:
-		return derivesFromParam(v.X, fn)
-	case *ssa.IndexAddr:
-		return derivesFromParam(v.X, fn)
-	case *ssa.UnOp:
-		if v.Op.String() == "*" {
-			return derivesFromParam(v.X, fn)
-		}
-	case *ssa.Phi:
-		for _, edge := range v.Edges {
-			if derivesFromParam(edge, fn) {
-				return true
-			}
-		}
-	}
-	return false
-}

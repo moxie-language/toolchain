@@ -3513,7 +3513,7 @@ func (b *builder) createConvert(typeFrom, typeTo types.Type, value llvm.Value, p
 	case *types.Slice:
 		// Moxie: allow conversion from string or []byte (string=[]byte).
 		if !isStringLike(typeFrom.Underlying()) {
-			panic("can only convert from a string/[]byte to a slice")
+			return llvm.Value{}, b.makeError(pos, fmt.Sprintf("cannot convert %s to %s (not string-like)", typeFrom, typeTo))
 		}
 
 		elemType := typeTo.Elem().Underlying().(*types.Basic) // must be byte or rune
