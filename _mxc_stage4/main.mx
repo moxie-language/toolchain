@@ -4,6 +4,8 @@ import (
 	"os"
 	"runtime"
 	"unsafe"
+
+	"git.smesh.lol/moxie/pkg/mxutil"
 )
 
 //export mxc_run
@@ -24,20 +26,11 @@ func cGetenv(name unsafe.Pointer, nameLen int32, buf unsafe.Pointer, bufCap int3
 //export mxc_listdir
 func cListdir(dir unsafe.Pointer, dirLen int32, buf unsafe.Pointer, bufCap int32) (n int32)
 
-//export write
-func cWrite(fd int32, buf unsafe.Pointer, count uint32) (n int32)
-
 //export mxc_writefile
 func cWritefile(path unsafe.Pointer, pathLen int32, data unsafe.Pointer, dataLen int32, mode uint32) (n int32)
 
 //export mxc_mkdir
 func cMkdir(path unsafe.Pointer, pathLen int32, mode uint32) (n int32)
-
-//export mxc_readfile
-func cReadfile(path unsafe.Pointer, pathLen int32, buf unsafe.Pointer, bufCap int32) (n int32)
-
-//export mxc_filesize
-func cFilesize(path unsafe.Pointer, pathLen int32) (n int32)
 
 // Ring buffer FFI
 //export mxc_ring_create
@@ -84,12 +77,6 @@ func tlsProbeRead() (n int32) {
 	return tlsProbeVar
 }
 
-func writeStr(fd int32, s string) {
-	if len(s) > 0 {
-		cWrite(fd, unsafe.Pointer(unsafe.SliceData([]byte(s))), uint32(len(s)))
-	}
-}
-
 func writeFile(path string, data []byte, mode uint32) {
 	if len(path) == 0 {
 		return
@@ -105,30 +92,8 @@ func mkdirAll(path string, mode uint32) {
 	cMkdir(unsafe.Pointer(unsafe.SliceData([]byte(path))), int32(len(path)), mode)
 }
 
-func readFile(path string) ([]byte, bool) {
-	if len(path) == 0 {
-		return nil, false
-	}
-	pp := unsafe.Pointer(unsafe.SliceData([]byte(path)))
-	pl := int32(len(path))
-	sz := cFilesize(pp, pl)
-	if sz < 0 {
-		return nil, false
-	}
-	if sz == 0 {
-		sz = 65536
-	}
-	buf := []byte{:sz}
-	n := cReadfile(pp, pl,
-		unsafe.Pointer(unsafe.SliceData(buf)), sz)
-	if n < 0 {
-		return nil, false
-	}
-	return buf[:n], true
-}
-
 func fatal(msg string) {
-	writeStr(2, "mxc: " | msg | "\n")
+	mxutil.WriteStr(2, "mxc: " | msg | "\n")
 	os.Exit(1)
 }
 
@@ -154,7 +119,7 @@ func listFiles(dir, ext string) (ss []string) {
 	for i := int32(0); i < n; i++ {
 		if buf[i] == 0 {
 			name := string(buf[start:i])
-			if hasSuffix(name, ext) {
+			if mxutil.HasSuffix(name, ext) {
 				result = append(result, name)
 			}
 			start = i + 1
@@ -238,53 +203,6 @@ func parseInt32(s string) (n int32) {
 	return v
 }
 
-func splitLines(s string) (ss []string) {
-	var result []string
-	start := int32(0)
-	for i := int32(0); i < int32(len(s)); i++ {
-		if s[i] == '\n' {
-			if i > start {
-				result = append(result, s[start:i])
-			}
-			start = i + 1
-		}
-	}
-	if start < int32(len(s)) {
-		result = append(result, s[start:])
-	}
-	return result
-}
-
-func hasPrefix(s, prefix string) (ok bool) {
-	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
-}
-
-func hasSuffix(s, suffix string) (ok bool) {
-	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
-}
-
-func trimSpace(s string) (sv string) {
-	i := int32(0)
-	for i < int32(len(s)) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
-		i++
-	}
-	j := int32(len(s))
-	for j > i && (s[j-1] == ' ' || s[j-1] == '\t' || s[j-1] == '\n' || s[j-1] == '\r') {
-		j--
-	}
-	return s[i:j]
-}
-
-func joinPath(a, b string) (s string) {
-	if len(a) == 0 {
-		return b
-	}
-	if a[len(a)-1] == '/' {
-		return a | b
-	}
-	return a | "/" | b
-}
-
 func pathBase(path string) (s string) {
 	for i := int32(len(path)) - 1; i >= 0; i-- {
 		if path[i] == '/' {
@@ -354,13 +272,13 @@ func getMoxiePath() (s string) {
 	if home == "" {
 		return "/tmp/moxie"
 	}
-	return joinPath(home, "moxie")
+	return mxutil.JoinPath(home, "moxie")
 }
 
 func mxcVersion() (s string) { return "1.9.10" }
 
 func moxieCacheDir() (s string) {
-	return joinPath(joinPath(getMoxiePath(), "cache"), "mxc-" | mxcVersion())
+	return mxutil.JoinPath(mxutil.JoinPath(getMoxiePath(), "cache"), "mxc-" | mxcVersion())
 }
 
 var globalModPrefix string
@@ -378,16 +296,16 @@ func parseReplaceLine(line string, baseDir string) (string, string, bool) {
 	if arrow < 0 {
 		return "", "", false
 	}
-	from := trimSpace(line[:arrow])
-	to := trimSpace(line[arrow+2:])
+	from := mxutil.TrimSpace(line[:arrow])
+	to := mxutil.TrimSpace(line[arrow+2:])
 	for fi := int32(0); fi < int32(len(from)); fi++ {
 		if from[fi] == ' ' {
 			from = from[:fi]
 			break
 		}
 	}
-	if hasPrefix(to, "./") || hasPrefix(to, "../") || hasPrefix(to, "/") {
-		to = cleanPath(joinPath(baseDir, to))
+	if mxutil.HasPrefix(to, "./") || mxutil.HasPrefix(to, "../") || mxutil.HasPrefix(to, "/") {
+		to = cleanPath(mxutil.JoinPath(baseDir, to))
 	}
 	return from, to, true
 }
@@ -395,16 +313,16 @@ func parseReplaceLine(line string, baseDir string) (string, string, bool) {
 func findModuleRoot(startDir string) (string, string) {
 	dir := startDir
 	for {
-		data, ok := readFile(joinPath(dir, "moxie.mod"))
+		data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, "moxie.mod"))
 		if ok {
 			modName := ""
 			globalReplaces = map[string]string{}
-			lines := splitLines(string(data))
+			lines := mxutil.SplitLines(string(data))
 			inReplace := false
 			for _, line := range lines {
-				line = trimSpace(line)
-				if hasPrefix(line, "module ") {
-					modName = trimSpace(line[7:])
+				line = mxutil.TrimSpace(line)
+				if mxutil.HasPrefix(line, "module ") {
+					modName = mxutil.TrimSpace(line[7:])
 					continue
 				}
 				if line == "replace (" {
@@ -422,7 +340,7 @@ func findModuleRoot(startDir string) (string, string) {
 					}
 					continue
 				}
-				if hasPrefix(line, "replace ") {
+				if mxutil.HasPrefix(line, "replace ") {
 					from, to, ok2 := parseReplaceLine(line[8:], dir)
 					if ok2 {
 						globalReplaces[from] = to
@@ -443,7 +361,7 @@ func findModuleRoot(startDir string) (string, string) {
 }
 
 func mergeModReplaces(dir string) {
-	data, ok := readFile(joinPath(dir, "moxie.mod"))
+	data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, "moxie.mod"))
 	if !ok {
 		return
 	}
@@ -451,8 +369,8 @@ func mergeModReplaces(dir string) {
 		globalReplaces = map[string]string{}
 	}
 	inReplace := false
-	for _, line := range splitLines(string(data)) {
-		line = trimSpace(line)
+	for _, line := range mxutil.SplitLines(string(data)) {
+		line = mxutil.TrimSpace(line)
 		if line == "replace (" {
 			inReplace = true
 			continue
@@ -470,7 +388,7 @@ func mergeModReplaces(dir string) {
 			}
 			continue
 		}
-		if hasPrefix(line, "replace ") {
+		if mxutil.HasPrefix(line, "replace ") {
 			from, to, ok2 := parseReplaceLine(line[8:], dir)
 			if ok2 {
 				if _, exists := globalReplaces[from]; !exists {
@@ -487,7 +405,7 @@ type modRequire struct {
 }
 
 func parseModRequires(dir string) (string, []modRequire, map[string]string) {
-	data, ok := readFile(joinPath(dir, "moxie.mod"))
+	data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, "moxie.mod"))
 	if !ok {
 		return "", nil, nil
 	}
@@ -496,10 +414,10 @@ func parseModRequires(dir string) (string, []modRequire, map[string]string) {
 	repls := map[string]string{}
 	inRequire := false
 	inReplace := false
-	for _, line := range splitLines(string(data)) {
-		line = trimSpace(line)
-		if hasPrefix(line, "module ") {
-			modName = trimSpace(line[7:])
+	for _, line := range mxutil.SplitLines(string(data)) {
+		line = mxutil.TrimSpace(line)
+		if mxutil.HasPrefix(line, "module ") {
+			modName = mxutil.TrimSpace(line[7:])
 			continue
 		}
 		if line == "require (" {
@@ -519,7 +437,7 @@ func parseModRequires(dir string) (string, []modRequire, map[string]string) {
 			}
 			continue
 		}
-		if hasPrefix(line, "require ") {
+		if mxutil.HasPrefix(line, "require ") {
 			parts := splitBySpace(line[8:])
 			if len(parts) >= 2 {
 				reqs = append(reqs, modRequire{path: parts[0], version: parts[1]})
@@ -543,7 +461,7 @@ func parseModRequires(dir string) (string, []modRequire, map[string]string) {
 			}
 			continue
 		}
-		if hasPrefix(line, "replace ") {
+		if mxutil.HasPrefix(line, "replace ") {
 			from, to, ok2 := parseReplaceLine(line[8:], dir)
 			if ok2 {
 				repls[from] = to
@@ -574,12 +492,12 @@ func isRemotePath(path string) (ok bool) {
 }
 
 func repoLockPath(mpath, repoPath string) (s string) {
-	return joinPath(mpath, repoPath | ".lock")
+	return mxutil.JoinPath(mpath, repoPath | ".lock")
 }
 
 func acquireRepoLock(mpath, repoPath string) (ok bool) {
 	lp := repoLockPath(mpath, repoPath)
-	_, locked := readFile(lp)
+	_, locked := mxutil.ReadFile(lp)
 	if locked {
 		return false
 	}
@@ -596,9 +514,9 @@ func autoFetchRepo(pkgPath, version string) (s string) {
 	mpath := getMoxiePath()
 	repoPath := pkgPath
 	for {
-		dest := joinPath(mpath, repoPath)
-		gitHead := joinPath(dest, ".git/HEAD")
-		_, exists := readFile(gitHead)
+		dest := mxutil.JoinPath(mpath, repoPath)
+		gitHead := mxutil.JoinPath(dest, ".git/HEAD")
+		_, exists := mxutil.ReadFile(gitHead)
 		if exists {
 			break
 		}
@@ -606,9 +524,9 @@ func autoFetchRepo(pkgPath, version string) (s string) {
 		if parent == repoPath || parent == "." || parent == "" {
 			break
 		}
-		parentDest := joinPath(mpath, parent)
-		parentGit := joinPath(parentDest, ".git/HEAD")
-		_, parentExists := readFile(parentGit)
+		parentDest := mxutil.JoinPath(mpath, parent)
+		parentGit := mxutil.JoinPath(parentDest, ".git/HEAD")
+		_, parentExists := mxutil.ReadFile(parentGit)
 		if parentExists {
 			repoPath = parent
 			break
@@ -617,18 +535,18 @@ func autoFetchRepo(pkgPath, version string) (s string) {
 	}
 
 	if !acquireRepoLock(mpath, repoPath) {
-		writeStr(2, "  waiting for lock: " | repoPath | "\n")
+		mxutil.WriteStr(2, "  waiting for lock: " | repoPath | "\n")
 		fatal("repo locked: " | repoPath)
 	}
 
-	dest := joinPath(mpath, repoPath)
-	gitHead := joinPath(dest, ".git/HEAD")
-	_, exists := readFile(gitHead)
+	dest := mxutil.JoinPath(mpath, repoPath)
+	gitHead := mxutil.JoinPath(dest, ".git/HEAD")
+	_, exists := mxutil.ReadFile(gitHead)
 
 	if !exists {
 		mkdirAll(pathDir(dest), 0755)
 		url := "https://" | repoPath
-		writeStr(2, "  auto-fetch " | repoPath | "\n")
+		mxutil.WriteStr(2, "  auto-fetch " | repoPath | "\n")
 		if run([]string{"git", "clone", url, dest}) != 0 {
 			releaseRepoLock(mpath, repoPath)
 			return ""
@@ -644,14 +562,14 @@ func autoFetchRepo(pkgPath, version string) (s string) {
 	}
 
 	releaseRepoLock(mpath, repoPath)
-	return joinPath(mpath, pkgPath)
+	return mxutil.JoinPath(mpath, pkgPath)
 }
 
 func gitURLToModPath(url string) (s string) {
 	u := url
 	// strip scheme
 	for _, scheme := range []string{"ssh://", "https://", "http://", "git://"} {
-		if hasPrefix(u, scheme) {
+		if mxutil.HasPrefix(u, scheme) {
 			u = u[len(scheme):]
 			break
 		}
@@ -698,11 +616,11 @@ func gitURLToModPath(url string) (s string) {
 		return ""
 	}
 	// strip ~/ prefix from path
-	if hasPrefix(rest, "~/") {
+	if mxutil.HasPrefix(rest, "~/") {
 		rest = rest[2:]
 	}
 	// strip .git suffix
-	if hasSuffix(rest, ".git") {
+	if mxutil.HasSuffix(rest, ".git") {
 		rest = rest[:len(rest)-4]
 	}
 	if rest == "" {
@@ -712,12 +630,12 @@ func gitURLToModPath(url string) (s string) {
 }
 
 func currentBranch(dest string) (s string) {
-	data, ok := readFile(joinPath(dest, ".git/HEAD"))
+	data, ok := mxutil.ReadFile(mxutil.JoinPath(dest, ".git/HEAD"))
 	if !ok {
 		return ""
 	}
-	line := trimSpace(string(data))
-	if !hasPrefix(line, "ref: refs/heads/") {
+	line := mxutil.TrimSpace(string(data))
+	if !mxutil.HasPrefix(line, "ref: refs/heads/") {
 		return ""
 	}
 	return line[len("ref: refs/heads/"):]
@@ -733,10 +651,10 @@ func cmdFetch(url string) {
 		if modPath == "" {
 			fatal("cannot derive module path from URL: " | url)
 		}
-		dest := joinPath(mpath, modPath)
-		_, exists := readFile(joinPath(dest, ".git/HEAD"))
+		dest := mxutil.JoinPath(mpath, modPath)
+		_, exists := mxutil.ReadFile(mxutil.JoinPath(dest, ".git/HEAD"))
 		if exists {
-			writeStr(2, modPath | ": fetch\n")
+			mxutil.WriteStr(2, modPath | ": fetch\n")
 			run([]string{"git", "-C", dest, "remote", "set-url", "origin", url})
 			run([]string{"git", "-C", dest, "fetch", "origin"})
 			// older clones lack the origin/HEAD symbolic ref; resolve it
@@ -751,7 +669,7 @@ func cmdFetch(url string) {
 				}
 			}
 		} else {
-			writeStr(2, modPath | ": clone\n")
+			mxutil.WriteStr(2, modPath | ": clone\n")
 			mkdirAll(pathDir(dest), 0755)
 			if run([]string{"git", "clone", url, dest}) != 0 {
 				fatal("clone failed: " | url)
@@ -765,13 +683,13 @@ func cmdFetch(url string) {
 		fatal("no moxie.mod in " | rootDir)
 	}
 	if url == "" {
-		writeStr(2, "module: " | modName | "\n")
+		mxutil.WriteStr(2, "module: " | modName | "\n")
 	}
 
 	var queue []modRequire
 	for _, r := range reqs {
 		if _, ok := repls[r.path]; ok {
-			writeStr(2, "  skip (replaced): " | r.path | "\n")
+			mxutil.WriteStr(2, "  skip (replaced): " | r.path | "\n")
 			continue
 		}
 		queue = append(queue, r)
@@ -787,40 +705,40 @@ func cmdFetch(url string) {
 		seen[req.path] = true
 
 		if !acquireRepoLock(mpath, req.path) {
-			writeStr(2, "  locked: " | req.path | " (another build in progress)\n")
+			mxutil.WriteStr(2, "  locked: " | req.path | " (another build in progress)\n")
 			fatal("repo locked: " | req.path)
 		}
 
-		dest := joinPath(mpath, req.path)
-		gitHead := joinPath(dest, ".git/HEAD")
-		_, exists := readFile(gitHead)
+		dest := mxutil.JoinPath(mpath, req.path)
+		gitHead := mxutil.JoinPath(dest, ".git/HEAD")
+		_, exists := mxutil.ReadFile(gitHead)
 
 		if !exists {
 			mkdirAll(pathDir(dest), 0755)
 			cloneURL := "https://" | req.path
-			writeStr(2, "  clone " | req.path | "\n")
+			mxutil.WriteStr(2, "  clone " | req.path | "\n")
 			if run([]string{"git", "clone", cloneURL, dest}) != 0 {
 				releaseRepoLock(mpath, req.path)
-				writeStr(2, "  FAIL: clone " | req.path | "\n")
+				mxutil.WriteStr(2, "  FAIL: clone " | req.path | "\n")
 				continue
 			}
 		}
 
 		if req.version != "" && req.version != "v0.0.0" {
 			if run([]string{"git", "-C", dest, "checkout", req.version}) != 0 {
-				writeStr(2, "  tag " | req.version | " not found, pulling\n")
+				mxutil.WriteStr(2, "  tag " | req.version | " not found, pulling\n")
 				run([]string{"git", "-C", dest, "pull"})
 				if run([]string{"git", "-C", dest, "checkout", req.version}) != 0 {
-					writeStr(2, "  WARN: " | req.version | " unavailable for " | req.path | "\n")
+					mxutil.WriteStr(2, "  WARN: " | req.version | " unavailable for " | req.path | "\n")
 				}
 			} else {
-				writeStr(2, "  " | req.path | " @ " | req.version | "\n")
+				mxutil.WriteStr(2, "  " | req.path | " @ " | req.version | "\n")
 			}
 		} else if exists {
-			writeStr(2, "  pull " | req.path | "\n")
+			mxutil.WriteStr(2, "  pull " | req.path | "\n")
 			run([]string{"git", "-C", dest, "pull"})
 		} else {
-			writeStr(2, "  fetched " | req.path | "\n")
+			mxutil.WriteStr(2, "  fetched " | req.path | "\n")
 		}
 
 		releaseRepoLock(mpath, req.path)
@@ -833,7 +751,7 @@ func cmdFetch(url string) {
 		}
 	}
 
-	writeStr(2, "fetch done\n")
+	mxutil.WriteStr(2, "fetch done\n")
 }
 
 func joinStrings(ss []string, sep string) (s string) {
@@ -880,10 +798,10 @@ func fnvHash(data []byte) (s string) {
 }
 
 func pkgCacheDir() (s string) {
-	if globalTargetArch == "wasm" {
-		return joinPath(moxieCacheDir(), "pkg-wasm")
+	if mxutil.TargetArch == "wasm" {
+		return mxutil.JoinPath(moxieCacheDir(), "pkg-wasm")
 	}
-	return joinPath(moxieCacheDir(), "pkg")
+	return mxutil.JoinPath(moxieCacheDir(), "pkg")
 }
 
 func pkgCacheKey(dir string, files []string) (s string) {
@@ -898,8 +816,8 @@ func pkgCacheKey(dir string, files []string) (s string) {
 	}
 	var all []byte
 	for _, f := range sorted {
-		p := joinPath(dir, f)
-		data, ok := readFile(p)
+		p := mxutil.JoinPath(dir, f)
+		data, ok := mxutil.ReadFile(p)
 		if !ok {
 			continue
 		}
@@ -952,11 +870,11 @@ func versionedCacheName(hash, version, ext string) (s string) {
 }
 
 func cachedBcPath(cacheBase, pkgPath, hash, version string) (s string) {
-	return joinPath(joinPath(cacheBase, safeName(pkgPath)), versionedCacheName(hash, version, ".bc"))
+	return mxutil.JoinPath(mxutil.JoinPath(cacheBase, safeName(pkgPath)), versionedCacheName(hash, version, ".bc"))
 }
 
 func isStdlib(path string) (ok bool) {
-	return !hasPrefix(path, "/") && !hasPrefix(path, "./") && !hasPrefix(path, "../")
+	return !mxutil.HasPrefix(path, "/") && !mxutil.HasPrefix(path, "./") && !mxutil.HasPrefix(path, "../")
 }
 
 var builtinOnly []string
@@ -971,12 +889,12 @@ func isBuiltinOnly(path string) (ok bool) {
 }
 
 func loadSysroot(path string) {
-	data, ok := readFile(path)
+	data, ok := mxutil.ReadFile(path)
 	if !ok {
 		return
 	}
-	for _, line := range splitLines(string(data)) {
-		line = trimSpace(line)
+	for _, line := range mxutil.SplitLines(string(data)) {
+		line = mxutil.TrimSpace(line)
 		if len(line) == 0 || line[0] == '#' {
 			continue
 		}
@@ -1069,10 +987,10 @@ func extractPkgName(data []byte) (s string) {
 
 func extractImports(data []byte) (ss []string) {
 	var imports []string
-	lines := splitLines(string(data))
+	lines := mxutil.SplitLines(string(data))
 	inBlock := false
 	for _, line := range lines {
-		line = trimSpace(line)
+		line = mxutil.TrimSpace(line)
 		if line == "import (" {
 			inBlock = true
 			continue
@@ -1082,14 +1000,14 @@ func extractImports(data []byte) (ss []string) {
 			continue
 		}
 		if inBlock {
-			imp := extractQuoted(line)
+			imp := mxutil.ExtractQuoted(line)
 			if imp != "" {
 				imports = appendUniq(imports, imp)
 			}
 		}
 		// single-line import, plain or aliased: import "p" / import x "p"
-		if hasPrefix(line, "import ") {
-			imp := extractQuoted(line[7:])
+		if mxutil.HasPrefix(line, "import ") {
+			imp := mxutil.ExtractQuoted(line[7:])
 			if imp != "" {
 				imports = appendUniq(imports, imp)
 			}
@@ -1097,32 +1015,6 @@ func extractImports(data []byte) (ss []string) {
 	}
 	return imports
 }
-
-func extractQuoted(s string) (sv string) {
-	start := int32(-1)
-	for i := int32(0); i < int32(len(s)); i++ {
-		if s[i] == '"' {
-			if start < 0 {
-				start = i + 1
-			} else {
-				return s[start:i]
-			}
-		}
-	}
-	return ""
-}
-
-// importSeg records one source file's import specs and the concat line its
-// body starts at. The SSA builder uses this to give each file its own
-// pkg-name scope: two files may bind the same local name to different
-// packages, and the hoisted+deduped import block in the concat destroys
-// that association.
-type importSeg struct {
-	outStart int32
-	specs    []string // raw specs as written: `"path"` or `alias "path"`
-}
-
-var concatImportSegs []importSeg
 
 type srcSpan struct {
 	file      string
@@ -1154,28 +1046,28 @@ func concatSources(dir string, files []string) (buf []byte) {
 	var bodyImports [][]string
 	pkgName := ""
 	for _, f := range files {
-		data, ok := readFile(joinPath(dir, f))
+		data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, f))
 		if !ok {
 			continue
 		}
 		if pkgName == "" {
 			pkgName = extractPkgName(data)
 		}
-		lines := splitLines(string(data))
+		lines := mxutil.SplitLines(string(data))
 		var body []string
 		var fimps []string
 		i := int32(0)
 		firstBodyLine := int32(0)
 		for i < int32(len(lines)) {
-			line := trimSpace(lines[i])
-			if hasPrefix(line, "package ") {
+			line := mxutil.TrimSpace(lines[i])
+			if mxutil.HasPrefix(line, "package ") {
 				i++
 				continue
 			}
 			if line == "import (" {
 				i++
 				for i < int32(len(lines)) {
-					imp := trimSpace(lines[i])
+					imp := mxutil.TrimSpace(lines[i])
 					i++
 					if imp == ")" {
 						break
@@ -1187,7 +1079,7 @@ func concatSources(dir string, files []string) (buf []byte) {
 				}
 				continue
 			}
-			if hasPrefix(line, "import ") && !hasPrefix(line, "import (") {
+			if mxutil.HasPrefix(line, "import ") && !mxutil.HasPrefix(line, "import (") {
 				imp := line[7:]
 				imports[imp] = true
 				fimps = append(fimps, imp)
@@ -1226,7 +1118,7 @@ func concatSources(dir string, files []string) (buf []byte) {
 		out = append(out, ")\n"...)
 	}
 	concatSourceMap = nil
-	concatImportSegs = nil
+	mxutil.ConcatImportSegs = nil
 	outLine := int32(1)
 	for j := int32(0); j < int32(len(out)); j++ {
 		if out[j] == '\n' {
@@ -1239,9 +1131,9 @@ func concatSources(dir string, files []string) (buf []byte) {
 			outStart: outLine,
 			srcLine:  bodyStartLines[i],
 		})
-		concatImportSegs = append(concatImportSegs, importSeg{
-			outStart: outLine,
-			specs:    bodyImports[i],
+		mxutil.ConcatImportSegs = append(mxutil.ConcatImportSegs, mxutil.ImportSeg{
+			OutStart: outLine,
+			Specs:    bodyImports[i],
 		})
 		for j := int32(0); j < int32(len(b)); j++ {
 			if b[j] == '\n' {
@@ -1273,21 +1165,21 @@ func fileContainsPart(base string, part string) (ok bool) {
 }
 
 func shouldSkipFile(name string) (ok bool) {
-	if hasSuffix(name, "_test.mx") {
+	if mxutil.HasSuffix(name, "_test.mx") {
 		return true
 	}
 	base := name
-	if hasSuffix(base, ".mx") {
+	if mxutil.HasSuffix(base, ".mx") {
 		base = base[:len(base)-3]
 	}
-	if globalTargetArch == "wasm" {
+	if mxutil.TargetArch == "wasm" {
 		for _, a := range []string{"amd64", "arm64", "386"} {
 			if fileContainsPart(base, a) {
 				return true
 			}
 		}
 		for _, s := range []string{"_linux", "_unix", "_darwin", "_posix"} {
-			if hasSuffix(base, s) {
+			if mxutil.HasSuffix(base, s) {
 				return true
 			}
 		}
@@ -1297,7 +1189,7 @@ func shouldSkipFile(name string) (ok bool) {
 				return true
 			}
 		}
-		if hasSuffix(base, "_wasm") {
+		if mxutil.HasSuffix(base, "_wasm") {
 			return true
 		}
 	}
@@ -1404,15 +1296,15 @@ func hasBuildConstraint(data []byte, forbidden []string) (ok bool) {
 				buf = append(buf, data[j])
 			}
 			line := string(buf)
-			if globalTargetArch == "wasm" {
+			if mxutil.TargetArch == "wasm" {
 				// Tags true for all wasm: wasm, moxie.wasm, go1.23, !linux, !baremetal
-				// js tag only true when globalTargetOS == "js" (js/wasm target)
+				// js tag only true when mxutil.TargetOS == "js" (js/wasm target)
 				if constraintContainsPositive(line, "moxie.wasm") ||
 					constraintContainsPositive(line, "wasm") ||
 					constraintContainsPositive(line, "go1.23") {
 					// Only reject js requirement when it's conjunctive (js && wasm)
 					// not disjunctive (js || wasm)
-					if constraintContainsPositive(line, "js") && globalTargetOS != "js" {
+					if constraintContainsPositive(line, "js") && mxutil.TargetOS != "js" {
 						// Check if js and wasm are in a conjunction
 						isConjunction := false
 						for ci := int32(0); ci < int32(len(line))-1; ci++ {
@@ -1427,7 +1319,7 @@ func hasBuildConstraint(data []byte, forbidden []string) (ok bool) {
 					}
 					return false
 				}
-				if globalTargetOS == "js" && constraintContainsPositive(line, "js") {
+				if mxutil.TargetOS == "js" && constraintContainsPositive(line, "js") {
 					return false
 				}
 				if constraintContainsNegated(line, "js") ||
@@ -1452,7 +1344,7 @@ func hasBuildConstraint(data []byte, forbidden []string) (ok bool) {
 				}
 			}
 			for _, f := range forbidden {
-				if line == f || hasPrefix(line, f | " ") || hasPrefix(line, f | "\t") || hasPrefix(line, f | "(") {
+				if line == f || mxutil.HasPrefix(line, f | " ") || mxutil.HasPrefix(line, f | "\t") || mxutil.HasPrefix(line, f | "(") {
 					return true
 				}
 			}
@@ -1489,9 +1381,6 @@ var quietDiscover bool
 // clang) used by build/test. Set by the -j flag; 1 forces the serial path.
 var buildJobs = int32(4)
 
-var globalTargetOS string
-var globalTargetArch string
-
 // Packages baked into sysroot/wasm/runtime.bc (compiled by the old
 // TinyGo-based compiler). Stage4 type-checks these but does not compile
 // them - the prebuilt versions are used instead. This avoids ABI
@@ -1524,7 +1413,7 @@ type pkgInfo struct {
 
 func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 	var dir string
-	if pkgPath == "." || pkgPath == ".." || hasPrefix(pkgPath, "/") || hasPrefix(pkgPath, "./") || hasPrefix(pkgPath, "../") {
+	if pkgPath == "." || pkgPath == ".." || mxutil.HasPrefix(pkgPath, "/") || mxutil.HasPrefix(pkgPath, "./") || mxutil.HasPrefix(pkgPath, "../") {
 		dir = pkgPath
 	} else if globalReplaces != nil {
 		if rdir, ok := globalReplaces[pkgPath]; ok {
@@ -1532,9 +1421,9 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		}
 		if dir == "" {
 			for from, to := range globalReplaces {
-				if hasPrefix(pkgPath, from|"/") {
+				if mxutil.HasPrefix(pkgPath, from|"/") {
 					rel := pkgPath[len(from)+1:]
-					dir = joinPath(to, rel)
+					dir = mxutil.JoinPath(to, rel)
 					break
 				}
 			}
@@ -1543,12 +1432,12 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 	if dir == "" && globalModPrefix != "" && pkgPath == globalModPrefix {
 		dir = globalModDir
 	}
-	if dir == "" && globalModPrefix != "" && hasPrefix(pkgPath, globalModPrefix|"/") {
+	if dir == "" && globalModPrefix != "" && mxutil.HasPrefix(pkgPath, globalModPrefix|"/") {
 		rel := pkgPath[len(globalModPrefix)+1:]
-		dir = joinPath(globalModDir, rel)
+		dir = mxutil.JoinPath(globalModDir, rel)
 	}
 	if dir == "" {
-		candidate := joinPath(getMoxiePath(), pkgPath)
+		candidate := mxutil.JoinPath(getMoxiePath(), pkgPath)
 		mxF := listFiles(candidate, ".mx")
 		if len(mxF) > 0 {
 			dir = candidate
@@ -1577,17 +1466,17 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		mergeModReplaces(dir)
 	}
 	if dir == "" {
-		dir = joinPath(root, joinPath("src", pkgPath))
+		dir = mxutil.JoinPath(root, mxutil.JoinPath("src", pkgPath))
 		mxFiles := listFiles(dir, ".mx")
 		if len(mxFiles) == 0 {
-			dir = joinPath(root, joinPath("src/vendor", pkgPath))
+			dir = mxutil.JoinPath(root, mxutil.JoinPath("src/vendor", pkgPath))
 		}
 	}
 	mxFiles := listFiles(dir, ".mx")
 	bcFiles := listFiles(dir, ".bc")
 	allMx := mxFiles
 	var forbidden []string
-	if globalTargetArch == "wasm" {
+	if mxutil.TargetArch == "wasm" {
 		forbidden = []string{"none", "linux", "unix", "darwin", "amd64", "arm64",
 			"ignore", "compiler_bootstrap",
 			"scheduler.tasks", "scheduler.cores", "scheduler.asyncify",
@@ -1603,13 +1492,13 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 	cFilesAll := listFiles(dir, ".c")
 	var cFiles []string
 	for _, cf := range cFilesAll {
-		if hasSuffix(cf, "_test.c") {
+		if mxutil.HasSuffix(cf, "_test.c") {
 			continue
 		}
 		if shouldSkipFile(cf) {
 			continue
 		}
-		cdata, cok := readFile(joinPath(dir, cf))
+		cdata, cok := mxutil.ReadFile(mxutil.JoinPath(dir, cf))
 		if cok && hasBuildConstraint(cdata, forbidden) {
 			continue
 		}
@@ -1620,14 +1509,14 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		if shouldSkipFile(f) {
 			continue
 		}
-		data, ok := readFile(joinPath(dir, f))
+		data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, f))
 		if !ok {
 			continue
 		}
 		bc := hasBuildConstraint(data, forbidden)
 		if bc {
 			if !quietDiscover {
-				writeStr(2, "    skip-constraint: " | f | "\n")
+				mxutil.WriteStr(2, "    skip-constraint: " | f | "\n")
 			}
 			continue
 		}
@@ -1641,12 +1530,12 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		}
 		if skipFile != "" {
 			if !quietDiscover {
-				writeStr(2, "    skip-import(" | skipFile | "): " | f | "\n")
+				mxutil.WriteStr(2, "    skip-import(" | skipFile | "): " | f | "\n")
 			}
 			continue
 		}
 		if !quietDiscover {
-			writeStr(2, "    include: " | f | "\n")
+			mxutil.WriteStr(2, "    include: " | f | "\n")
 		}
 		files = append(files, f)
 	}
@@ -1656,7 +1545,7 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 	var allImports []string
 	pkgName := ""
 	for _, f := range files {
-		data, ok := readFile(joinPath(dir, f))
+		data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, f))
 		if !ok {
 			continue
 		}
@@ -1668,20 +1557,20 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		}
 	}
 	if !quietDiscover {
-		writeStr(2, "  discover " | pkgPath | " [")
+		mxutil.WriteStr(2, "  discover " | pkgPath | " [")
 		for fi, ff := range files {
 			if fi > 0 {
-				writeStr(2, ", ")
+				mxutil.WriteStr(2, ", ")
 			}
-			writeStr(2, ff)
+			mxutil.WriteStr(2, ff)
 		}
-		writeStr(2, "]\n")
+		mxutil.WriteStr(2, "]\n")
 	}
 	version := ""
 	if isRemotePath(pkgPath) && globalModDir != "" {
 		_, reqs, _ := parseModRequires(globalModDir)
 		for _, r := range reqs {
-			if r.path == pkgPath || hasPrefix(pkgPath, r.path|"/") {
+			if r.path == pkgPath || mxutil.HasPrefix(pkgPath, r.path|"/") {
 				version = r.version
 				break
 			}
@@ -1752,7 +1641,7 @@ func registerBuiltins() {
 	if mroot == "" {
 		mroot = "."
 	}
-	if !loadMxh(joinPath(joinPath(joinPath(mroot, "src"), "moxie"), "moxie.mxh")) {
+	if !loadMxh(mxutil.JoinPath(mxutil.JoinPath(mxutil.JoinPath(mroot, "src"), "moxie"), "moxie.mxh")) {
 		fatal("cannot load src/moxie/moxie.mxh (MOXIEROOT=" | mroot | ")")
 	}
 
@@ -1793,7 +1682,7 @@ func remapErrorLines(msg string) (s string) {
 	if len(concatSourceMap) == 0 {
 		return msg
 	}
-	lines := splitLines(msg)
+	lines := mxutil.SplitLines(msg)
 	var out []string
 	for _, line := range lines {
 		out = append(out, remapOneLine(line))
@@ -1846,7 +1735,7 @@ func compileSource(src []byte, pkgName, triple, pkgDir string) (s string) {
 	compilePkgDir = pkgDir
 	ir := CompileToIR(src, pkgName, triple)
 	if len(ir) > 0 && ir[0] == ';' {
-		writeStr(2, remapErrorLines(ir))
+		mxutil.WriteStr(2, remapErrorLines(ir))
 		fatal("compile error for " | pkgName)
 	}
 	if len(ir) == 0 {
@@ -2145,17 +2034,17 @@ func parseMxhTParams(raw string) (name string, tparams []*TypeParam) {
 }
 
 func loadMxh(path string) (ok bool) {
-	data, ok := readFile(path)
+	data, ok := mxutil.ReadFile(path)
 	if !ok {
 		return false
 	}
 	ensureImportRegistry()
-	lines := splitLines(string(data))
+	lines := mxutil.SplitLines(string(data))
 	if len(lines) == 0 {
 		return false
 	}
 	first := lines[0]
-	if !hasPrefix(first, "package ") {
+	if !mxutil.HasPrefix(first, "package ") {
 		return false
 	}
 	rest := first[8:]
@@ -2177,7 +2066,7 @@ func loadMxh(path string) (ok bool) {
 	// warm-cache builds where no source scope exists.
 	var dimps []string
 	for li := 1; li < len(lines); li++ {
-		if hasPrefix(lines[li], "import ") {
+		if mxutil.HasPrefix(lines[li], "import ") {
 			dimps = append(dimps, lines[li][7:])
 		}
 	}
@@ -2192,7 +2081,7 @@ func loadMxh(path string) (ok bool) {
 	// Pass 1a: register all type and interface names with placeholder types
 	for li := 1; li < len(lines); li++ {
 		line := lines[li]
-		if hasPrefix(line, "type ") {
+		if mxutil.HasPrefix(line, "type ") {
 			parts := splitBySpace(line[5:])
 			if len(parts) >= 1 {
 				actualName, tparams := parseMxhTParams(parts[0])
@@ -2201,7 +2090,7 @@ func loadMxh(path string) (ok bool) {
 				named.tparams = tparams
 				pkg.Scope().Insert(tn)
 			}
-		} else if hasPrefix(line, "iface ") {
+		} else if mxutil.HasPrefix(line, "iface ") {
 			parts := splitBySpace(line[6:])
 			if len(parts) >= 1 {
 				actualName, tparams := parseMxhTParams(parts[0])
@@ -2218,7 +2107,7 @@ func loadMxh(path string) (ok bool) {
 	// Pass 1b: resolve underlying types and interface methods (all names exist now)
 	for li := 1; li < len(lines); li++ {
 		line := lines[li]
-		if hasPrefix(line, "type ") {
+		if mxutil.HasPrefix(line, "type ") {
 			parts := splitBySpace(line[5:])
 			if len(parts) >= 2 {
 				actualName, _ := parseMxhTParams(parts[0])
@@ -2238,7 +2127,7 @@ func loadMxh(path string) (ok bool) {
 					}
 				}
 			}
-		} else if hasPrefix(line, "iface ") {
+		} else if mxutil.HasPrefix(line, "iface ") {
 			parts := splitBySpace(line[6:])
 			if len(parts) >= 1 {
 				ifaceName0, _ := parseMxhTParams(parts[0])
@@ -2283,7 +2172,7 @@ func loadMxh(path string) (ok bool) {
 	// Pass 2: funcs, methods, vars, consts can now resolve types from pass 1
 	for li := 1; li < len(lines); li++ {
 		line := lines[li]
-		if hasPrefix(line, "func ") {
+		if mxutil.HasPrefix(line, "func ") {
 			parts := splitBySpace(line[5:])
 			if len(parts) >= 2 {
 				sig := parseSignatureDesc(parts[1])
@@ -2292,13 +2181,13 @@ func loadMxh(path string) (ok bool) {
 				sig := parseSignatureDesc("")
 				pkg.Scope().Insert(NewTCFunc(pkg, parts[0], sig))
 			}
-		} else if hasPrefix(line, "var ") {
+		} else if mxutil.HasPrefix(line, "var ") {
 			parts := splitBySpace(line[4:])
 			if len(parts) >= 2 {
 				typ := parseTypeDesc(parts[1])
 				pkg.Scope().Insert(NewTCVar(pkg, parts[0], typ))
 			}
-		} else if hasPrefix(line, "const ") {
+		} else if mxutil.HasPrefix(line, "const ") {
 			parts := splitBySpace(line[6:])
 			if len(parts) >= 2 {
 				typ := parseTypeDesc(parts[1])
@@ -2331,7 +2220,7 @@ func loadMxh(path string) (ok bool) {
 				}
 				pkg.Scope().Insert(NewTCConst(pkg, parts[0], typ, val))
 			}
-		} else if hasPrefix(line, "method ") {
+		} else if mxutil.HasPrefix(line, "method ") {
 			parts := splitBySpace(line[7:])
 			if len(parts) >= 3 {
 				typeName := parts[0]
@@ -2376,7 +2265,7 @@ func loadMxh(path string) (ok bool) {
 }
 
 func cachedMxhPath(cacheBase, pkgPath, hash, version string) (s string) {
-	return joinPath(joinPath(cacheBase, safeName(pkgPath)), versionedCacheName(hash, version, ".mxh"))
+	return mxutil.JoinPath(mxutil.JoinPath(cacheBase, safeName(pkgPath)), versionedCacheName(hash, version, ".mxh"))
 }
 
 func removeAll(path string) {
@@ -2385,7 +2274,7 @@ func removeAll(path string) {
 		return
 	}
 	for _, e := range entries {
-		os.Remove(joinPath(path, e))
+		os.Remove(mxutil.JoinPath(path, e))
 	}
 	os.Remove(path)
 }
@@ -2403,7 +2292,7 @@ func walkStdlibPkgs(srcDir, prefix string, out []string) []string {
 		if e[0] == '.' || e[0] == '_' {
 			continue
 		}
-		sub := joinPath(srcDir, e)
+		sub := mxutil.JoinPath(srcDir, e)
 		subEntries := listFiles(sub, "")
 		if subEntries != nil {
 			var subPrefix string
@@ -2423,11 +2312,11 @@ func cmdCacheWarm() {
 	if root == "" {
 		root = "."
 	}
-	srcDir := joinPath(root, "src")
-	writeStr(2, "warming stdlib cache from " | srcDir | " ...\n")
+	srcDir := mxutil.JoinPath(root, "src")
+	mxutil.WriteStr(2, "warming stdlib cache from " | srcDir | " ...\n")
 	pkgPaths := walkStdlibPkgs(srcDir, "", nil)
 	if len(pkgPaths) == 0 {
-		writeStr(2, "  no stdlib packages found\n")
+		mxutil.WriteStr(2, "  no stdlib packages found\n")
 		return
 	}
 	triple := "x86_64-unknown-linux-musleabihf"
@@ -2451,32 +2340,32 @@ func cmdCacheWarm() {
 		hash := pkgHash(pkg)
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
 		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
-		_, bcOk := readFile(cached)
-		_, mxhOk := readFile(cachedMxh)
+		_, bcOk := mxutil.ReadFile(cached)
+		_, mxhOk := mxutil.ReadFile(cachedMxh)
 		if bcOk && mxhOk {
 			skipped++
 			continue
 		}
 		compilePath := pkg.path
-		if hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
 		src := concatSources(pkg.dir, pkg.files)
 		ir := compileSource(src, compilePath, triple, pkg.dir)
 		src = nil
-		llFile := joinPath(tmpdir, safeName(pkg.path) | ".ll")
+		llFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		ir = ""
-		bcFile := joinPath(tmpdir, safeName(pkg.path) | ".bc")
+		bcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc")
 		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
 		if rc != 0 {
-			writeStr(2, "  FAIL: " | pkg.path | "\n")
+			mxutil.WriteStr(2, "  FAIL: " | pkg.path | "\n")
 			failed++
 			continue
 		}
-		cdir := joinPath(cacheBase, safeName(pkg.path))
+		cdir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
 		mkdirAll(cdir, 0755)
-		data, rok := readFile(bcFile)
+		data, rok := mxutil.ReadFile(bcFile)
 		if rok {
 			writeFile(cached, data, 0644)
 		}
@@ -2487,52 +2376,52 @@ func cmdCacheWarm() {
 			writeFile(cachedMxh, []byte(mxhData), 0644)
 		}
 		compiled++
-		writeStr(2, "  " | pkg.path | "\n")
+		mxutil.WriteStr(2, "  " | pkg.path | "\n")
 	}
-	writeStr(2, "warm done: " | simpleItoa(compiled) | " compiled, " | simpleItoa(skipped) | " cached, " | simpleItoa(failed) | " failed\n")
+	mxutil.WriteStr(2, "warm done: " | simpleItoa(compiled) | " compiled, " | simpleItoa(skipped) | " cached, " | simpleItoa(failed) | " failed\n")
 }
 
 func cacheClean() {
 	base := pkgCacheDir()
-	writeStr(2, "cleaning cache: " | base | "\n")
+	mxutil.WriteStr(2, "cleaning cache: " | base | "\n")
 	entries := listFiles(base, "")
 	if entries == nil {
-		writeStr(2, "  (empty)\n")
+		mxutil.WriteStr(2, "  (empty)\n")
 		return
 	}
 	for _, e := range entries {
-		removeAll(joinPath(base, e))
+		removeAll(mxutil.JoinPath(base, e))
 	}
 	os.Remove(base)
-	writeStr(2, "  done\n")
+	mxutil.WriteStr(2, "  done\n")
 }
 
 func cmdUpdate(rebuildAll bool) {
-	cacheRoot := joinPath(getMoxiePath(), "cache")
+	cacheRoot := mxutil.JoinPath(getMoxiePath(), "cache")
 	currentDir := "mxc-" | mxcVersion()
 	entries := listFiles(cacheRoot, "")
 	if entries == nil {
-		writeStr(2, "cache is empty\n")
+		mxutil.WriteStr(2, "cache is empty\n")
 		return
 	}
 	for _, e := range entries {
-		if hasPrefix(e, "mxc-") && e != currentDir {
-			writeStr(2, "  remove old: " | e | "\n")
-			fullPath := joinPath(cacheRoot, e)
+		if mxutil.HasPrefix(e, "mxc-") && e != currentDir {
+			mxutil.WriteStr(2, "  remove old: " | e | "\n")
+			fullPath := mxutil.JoinPath(cacheRoot, e)
 			pkgEntries := listFiles(fullPath, "")
 			if pkgEntries != nil {
 				for _, pe := range pkgEntries {
-					removeAll(joinPath(fullPath, pe))
+					removeAll(mxutil.JoinPath(fullPath, pe))
 				}
 			}
 			os.Remove(fullPath)
 		}
 	}
 	if !rebuildAll {
-		writeStr(2, "update done\n")
+		mxutil.WriteStr(2, "update done\n")
 		return
 	}
-	writeStr(2, "rebuilding all cached packages...\n")
+	mxutil.WriteStr(2, "rebuilding all cached packages...\n")
 	mpath := getMoxiePath()
 	root := getenv("MOXIEROOT")
 	if root == "" {
@@ -2541,7 +2430,7 @@ func cmdUpdate(rebuildAll bool) {
 	cacheBase := pkgCacheDir()
 	pkgDirs := listFiles(cacheBase, "")
 	if pkgDirs == nil {
-		writeStr(2, "  no packages to rebuild\n")
+		mxutil.WriteStr(2, "  no packages to rebuild\n")
 		return
 	}
 	triple := "x86_64-unknown-linux-musleabihf"
@@ -2561,40 +2450,40 @@ func cmdUpdate(rebuildAll bool) {
 		if len(pkgPath) > 0 && pkgPath[0] == '/' {
 			continue
 		}
-		writeStr(2, "  rebuild " | pkgPath | "\n")
+		mxutil.WriteStr(2, "  rebuild " | pkgPath | "\n")
 		pkg := discoverPkg(pkgPath, root)
 		if pkg == nil {
-			candidate := joinPath(mpath, pkgPath)
+			candidate := mxutil.JoinPath(mpath, pkgPath)
 			mxF := listFiles(candidate, ".mx")
 			if len(mxF) > 0 {
 				pkg = discoverPkg(pkgPath, root)
 			}
 		}
 		if pkg == nil {
-			writeStr(2, "    skip (source not found)\n")
+			mxutil.WriteStr(2, "    skip (source not found)\n")
 			continue
 		}
 		compilePath := pkg.path
-		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
 		src := concatSources(pkg.dir, pkg.files)
 		ir := compileSource(src, compilePath, triple, pkg.dir)
 		src = nil
-		llFile := joinPath(tmpdir, safeName(pkg.path) | ".ll")
+		llFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		ir = ""
-		bcFile := joinPath(tmpdir, safeName(pkg.path) | ".bc")
+		bcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc")
 		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
 		if rc != 0 {
-			writeStr(2, "    FAIL: clang for " | pkg.path | "\n")
+			mxutil.WriteStr(2, "    FAIL: clang for " | pkg.path | "\n")
 			continue
 		}
 		hash := pkgHash(pkg)
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
-		cdir := joinPath(cacheBase, safeName(pkg.path))
+		cdir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
 		mkdirAll(cdir, 0755)
-		data, rok := readFile(bcFile)
+		data, rok := mxutil.ReadFile(bcFile)
 		if rok {
 			writeFile(cached, data, 0644)
 		}
@@ -2606,15 +2495,15 @@ func cmdUpdate(rebuildAll bool) {
 			writeFile(cachedMxh, []byte(mxhData), 0644)
 		}
 	}
-	writeStr(2, "rebuild done\n")
+	mxutil.WriteStr(2, "rebuild done\n")
 }
 
 func scanTestFuncs(data []byte) (ss []string) {
 	var funcs []string
-	lines := splitLines(string(data))
+	lines := mxutil.SplitLines(string(data))
 	for _, line := range lines {
-		line = trimSpace(line)
-		if !hasPrefix(line, "func Test") {
+		line = mxutil.TrimSpace(line)
+		if !mxutil.HasPrefix(line, "func Test") {
 			continue
 		}
 		paren := int32(-1)
@@ -2635,7 +2524,7 @@ func scanTestFuncs(data []byte) (ss []string) {
 			continue
 		}
 		rest := line[paren:]
-		if hasPrefix(rest, "(t *testing.T)") {
+		if mxutil.HasPrefix(rest, "(t *testing.T)") {
 			funcs = append(funcs, name)
 		}
 	}
@@ -2681,7 +2570,7 @@ func cmdTest(args []string) {
 	triple := "x86_64-unknown-linux-musleabihf"
 	clang := "clang-21"
 
-	if hasPrefix(pkgPath, "./") || hasPrefix(pkgPath, "../") || pkgPath == "." || hasPrefix(pkgPath, "/") {
+	if mxutil.HasPrefix(pkgPath, "./") || mxutil.HasPrefix(pkgPath, "../") || pkgPath == "." || mxutil.HasPrefix(pkgPath, "/") {
 		absDir := pkgPath
 		if absDir == "." {
 			absDir = ""
@@ -2692,21 +2581,21 @@ func cmdTest(args []string) {
 	registerBuiltins()
 
 	var testPkgDir string
-	if pkgPath == "." || pkgPath == ".." || hasPrefix(pkgPath, "/") || hasPrefix(pkgPath, "./") || hasPrefix(pkgPath, "../") {
+	if pkgPath == "." || pkgPath == ".." || mxutil.HasPrefix(pkgPath, "/") || mxutil.HasPrefix(pkgPath, "./") || mxutil.HasPrefix(pkgPath, "../") {
 		testPkgDir = pkgPath
 	} else {
-		testPkgDir = joinPath(root, joinPath("src", pkgPath))
+		testPkgDir = mxutil.JoinPath(root, mxutil.JoinPath("src", pkgPath))
 	}
 
 	testFiles := listFiles(testPkgDir, "_test.mx")
 	if len(testFiles) == 0 {
-		writeStr(2, "no test files found in " | testPkgDir | "\n")
+		mxutil.WriteStr(2, "no test files found in " | testPkgDir | "\n")
 		return
 	}
 
 	var allTestFuncs []string
 	for _, tf := range testFiles {
-		data, ok := readFile(joinPath(testPkgDir, tf))
+		data, ok := mxutil.ReadFile(mxutil.JoinPath(testPkgDir, tf))
 		if !ok {
 			continue
 		}
@@ -2716,18 +2605,18 @@ func cmdTest(args []string) {
 		}
 	}
 	if len(allTestFuncs) == 0 {
-		writeStr(2, "no Test* functions found\n")
+		mxutil.WriteStr(2, "no Test* functions found\n")
 		return
 	}
 
-	writeStr(2, "=== test: " | pkgPath | " ===\n")
+	mxutil.WriteStr(2, "=== test: " | pkgPath | " ===\n")
 	for _, fn := range allTestFuncs {
-		writeStr(2, "  found " | fn | "\n")
+		mxutil.WriteStr(2, "  found " | fn | "\n")
 	}
 
 	pkgName := ""
 	for _, tf := range testFiles {
-		data, ok := readFile(joinPath(testPkgDir, tf))
+		data, ok := mxutil.ReadFile(mxutil.JoinPath(testPkgDir, tf))
 		if ok && pkgName == "" {
 			pkgName = extractPkgName(data)
 		}
@@ -2740,7 +2629,7 @@ func cmdTest(args []string) {
 	mkdirAll(tmpdir, 0755)
 
 	testMainSrc := generateTestMain(pkgName, allTestFuncs)
-	testMainFile := joinPath(tmpdir, "_testmain.mx")
+	testMainFile := mxutil.JoinPath(tmpdir, "_testmain.mx")
 	writeFile(testMainFile, testMainSrc, 0644)
 
 	pkg := discoverPkg(pkgPath, root)
@@ -2764,7 +2653,7 @@ func cmdTest(args []string) {
 
 	for _, dp := range pkgs {
 		compilePath := dp.path
-		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 			compilePath = dp.name
 		}
 		if dp == pkg {
@@ -2772,7 +2661,7 @@ func cmdTest(args []string) {
 		}
 		hash := pkgHash(dp)
 		cachedMxh := cachedMxhPath(cacheBase, dp.path, hash, dp.version)
-		_, mxhOk := readFile(cachedMxh)
+		_, mxhOk := mxutil.ReadFile(cachedMxh)
 		if mxhOk && !forceRebuild && dp != pkg {
 			loadMxh(cachedMxh)
 			src := concatSources(dp.dir, dp.files)
@@ -2798,7 +2687,7 @@ func cmdTest(args []string) {
 			hasRuntimePkg = true
 		}
 		compilePath := dp.path
-		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 			compilePath = dp.name
 		}
 		if dp == pkg {
@@ -2810,34 +2699,34 @@ func cmdTest(args []string) {
 		cachedMxh := cachedMxhPath(cacheBase, dp.path, hash, dp.version)
 
 		if dp != pkg {
-			_, bcOk := readFile(cached)
-			_, mxhOk := readFile(cachedMxh)
+			_, bcOk := mxutil.ReadFile(cached)
+			_, mxhOk := mxutil.ReadFile(cachedMxh)
 			if bcOk && mxhOk && !forceRebuild {
-				writeStr(2, "  cached " | dp.path | "\n")
+				mxutil.WriteStr(2, "  cached " | dp.path | "\n")
 				loadMxh(cachedMxh)
 				allBcFiles = append(allBcFiles, cached)
 				for _, cf := range dp.cfiles {
-					cPath := joinPath(dp.dir, cf)
-					cbcFile := joinPath(tmpdir, safeName(dp.path) | "_" | cf | ".bc")
+					cPath := mxutil.JoinPath(dp.dir, cf)
+					cbcFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | "_" | cf | ".bc")
 					rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
 					if rc == 0 {
 						allBcFiles = append(allBcFiles, cbcFile)
 					}
 				}
 				for _, bf := range dp.bcfiles {
-					allBcFiles = append(allBcFiles, joinPath(dp.dir, bf))
+					allBcFiles = append(allBcFiles, mxutil.JoinPath(dp.dir, bf))
 				}
 				continue
 			}
 
 			if isStdlib(dp.path) && bcOk && !forceRebuild {
-				writeStr(2, "  cached " | dp.path | "\n")
+				mxutil.WriteStr(2, "  cached " | dp.path | "\n")
 				src := concatSources(dp.dir, dp.files)
 				TypeCheckOnly(src, compilePath)
 				src = nil
 				regPkg := importRegistry[compilePath]
 				if regPkg != nil {
-					cacheDir := joinPath(cacheBase, safeName(dp.path))
+					cacheDir := mxutil.JoinPath(cacheBase, safeName(dp.path))
 					mkdirAll(cacheDir, 0755)
 					mxhData := generateMxh(regPkg)
 					writeFile(cachedMxh, []byte(mxhData), 0644)
@@ -2847,7 +2736,7 @@ func cmdTest(args []string) {
 			}
 		}
 
-		writeStr(2, "  compile " | dp.path | "\n")
+		mxutil.WriteStr(2, "  compile " | dp.path | "\n")
 		var src []byte
 		if dp == pkg {
 			src = concatTestSources(dp.dir, dp.files, testMainFile)
@@ -2856,18 +2745,18 @@ func cmdTest(args []string) {
 		}
 		ir := compileSource(src, compilePath, triple, dp.dir)
 		src = nil
-		llFile := joinPath(tmpdir, safeName(dp.path) | ".ll")
+		llFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		ir = ""
-		bcFile := joinPath(tmpdir, safeName(dp.path) | ".bc")
+		bcFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | ".bc")
 		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
 		if rc != 0 {
 			fatal("clang failed for " | dp.path)
 		}
 		if dp != pkg {
-			cacheDir := joinPath(cacheBase, safeName(dp.path))
+			cacheDir := mxutil.JoinPath(cacheBase, safeName(dp.path))
 			mkdirAll(cacheDir, 0755)
-			data, rok := readFile(bcFile)
+			data, rok := mxutil.ReadFile(bcFile)
 			if rok {
 				writeFile(cached, data, 0644)
 			}
@@ -2880,8 +2769,8 @@ func cmdTest(args []string) {
 		}
 		allBcFiles = append(allBcFiles, bcFile)
 		for _, cf := range dp.cfiles {
-			cPath := joinPath(dp.dir, cf)
-			cbcFile := joinPath(tmpdir, safeName(dp.path) | "_" | cf | ".bc")
+			cPath := mxutil.JoinPath(dp.dir, cf)
+			cbcFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | "_" | cf | ".bc")
 			rc = run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
 			if rc != 0 {
 				fatal("clang failed for " | cf)
@@ -2889,35 +2778,35 @@ func cmdTest(args []string) {
 			allBcFiles = append(allBcFiles, cbcFile)
 		}
 		for _, bf := range dp.bcfiles {
-			allBcFiles = append(allBcFiles, joinPath(dp.dir, bf))
+			allBcFiles = append(allBcFiles, mxutil.JoinPath(dp.dir, bf))
 		}
 	}
 
-	loadSysroot(joinPath(root, "_sysroot.env"))
+	loadSysroot(mxutil.JoinPath(root, "_sysroot.env"))
 
-	sysroot := joinPath(root, "sysroot")
+	sysroot := mxutil.JoinPath(root, "sysroot")
 	runtimeBc := getenv("RUNTIME_BC")
 	if runtimeBc == "" {
-		runtimeBc = joinPath(sysroot, "runtime.bc")
+		runtimeBc = mxutil.JoinPath(sysroot, "runtime.bc")
 	}
 	muslDir := getenv("MUSL_DIR")
 	if muslDir == "" {
-		muslDir = joinPath(sysroot, "musl")
+		muslDir = mxutil.JoinPath(sysroot, "musl")
 	}
 	comprtLib := getenv("COMPRT_LIB")
 	if comprtLib == "" {
-		comprtLib = joinPath(joinPath(sysroot, "compiler-rt"), "lib.a")
+		comprtLib = mxutil.JoinPath(mxutil.JoinPath(sysroot, "compiler-rt"), "lib.a")
 	}
 	muslLib := getenv("MUSL_LIB")
 	if muslLib == "" {
-		muslLib = joinPath(joinPath(sysroot, "musl"), "lib.a")
+		muslLib = mxutil.JoinPath(mxutil.JoinPath(sysroot, "musl"), "lib.a")
 	}
 
-	writeStr(2, "  generate initAll\n")
+	mxutil.WriteStr(2, "  generate initAll\n")
 	var initCalls string
 	for _, dp := range pkgs {
 		compilePath := dp.path
-		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 			compilePath = dp.name
 		}
 		if dp == pkg {
@@ -2930,7 +2819,7 @@ func cmdTest(args []string) {
 	declared := map[string]bool{}
 	for _, dp := range pkgs {
 		compilePath := dp.path
-		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 			compilePath = dp.name
 		}
 		if dp == pkg {
@@ -2943,15 +2832,15 @@ func cmdTest(args []string) {
 		declared[declSym] = true
 		initAllIR = initAllIR | "declare void " | declSym | "(ptr)\n"
 	}
-	initAllFile := joinPath(tmpdir, "initall.ll")
+	initAllFile := mxutil.JoinPath(tmpdir, "initall.ll")
 	writeFile(initAllFile, []byte(initAllIR), 0644)
-	initAllBc := joinPath(tmpdir, "initall.bc")
+	initAllBc := mxutil.JoinPath(tmpdir, "initall.bc")
 	rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", initAllFile, "-o", initAllBc})
 	if rc != 0 {
 		fatal("clang failed for initall")
 	}
 
-	writeStr(2, "  compile objects\n")
+	mxutil.WriteStr(2, "  compile objects\n")
 	var objList []string
 	compileToObj := func(bcFile string) string {
 		oFile := bcFile | ".o"
@@ -2962,16 +2851,16 @@ func cmdTest(args []string) {
 		return oFile
 	}
 	if !hasRuntimePkg {
-		runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
-		if _, gok := readFile(runtimeGoBc); gok {
+		runtimeGoBc := mxutil.JoinPath(sysroot, "runtime_go.bc")
+		if _, gok := mxutil.ReadFile(runtimeGoBc); gok {
 			objList = append(objList, compileToObj(runtimeGoBc))
 		} else {
 			objList = append(objList, compileToObj(runtimeBc))
 		}
 	}
 	if !hasRuntimePkg {
-		rtShims := joinPath(sysroot, "rt_shims.bc")
-		if _, rsk := readFile(rtShims); rsk {
+		rtShims := mxutil.JoinPath(sysroot, "rt_shims.bc")
+		if _, rsk := mxutil.ReadFile(rtShims); rsk {
 			objList = append(objList, compileToObj(rtShims))
 		}
 	}
@@ -2994,35 +2883,35 @@ func cmdTest(args []string) {
 	}
 	objList = append(objList, compileToObj(initAllBc))
 	if !hasRuntimePkg {
-		cstubDir := joinPath(root, "src/runtime")
+		cstubDir := mxutil.JoinPath(root, "src/runtime")
 		cstubFiles := listFiles(cstubDir, ".c")
 		for _, cf := range cstubFiles {
-			cPath := joinPath(cstubDir, cf)
-			coFile := joinPath(tmpdir, "cstub_" | cf | ".o")
+			cPath := mxutil.JoinPath(cstubDir, cf)
+			coFile := mxutil.JoinPath(tmpdir, "cstub_" | cf | ".o")
 			rc = run([]string{clang, "--target=" | triple, "-c", "-O0", cPath, "-o", coFile})
 			if rc == 0 {
 				objList = append(objList, coFile)
 			}
 		}
 	}
-	objDir := joinPath(sysroot, "obj")
+	objDir := mxutil.JoinPath(sysroot, "obj")
 	objEntries := listFiles(objDir, ".bc")
 	if objEntries != nil {
 		for _, e := range objEntries {
-			objList = append(objList, compileToObj(joinPath(objDir, e)))
+			objList = append(objList, compileToObj(mxutil.JoinPath(objDir, e)))
 		}
 	}
 	oEntries := listFiles(objDir, ".o")
 	if oEntries != nil {
 		for _, e := range oEntries {
-			objList = append(objList, joinPath(objDir, e))
+			objList = append(objList, mxutil.JoinPath(objDir, e))
 		}
 	}
-	outpath := joinPath(tmpdir, "test.bin")
-	writeStr(2, "  link\n")
+	outpath := mxutil.JoinPath(tmpdir, "test.bin")
+	mxutil.WriteStr(2, "  link\n")
 	linker := "ld.lld-21"
 	ldArgs := []string{linker, "--gc-sections", "-o", outpath,
-		joinPath(muslDir, "crt1.o")}
+		mxutil.JoinPath(muslDir, "crt1.o")}
 	for _, o := range objList {
 		ldArgs = append(ldArgs, o)
 	}
@@ -3032,7 +2921,7 @@ func cmdTest(args []string) {
 		fatal("linker failed")
 	}
 
-	writeStr(2, "  run tests\n")
+	mxutil.WriteStr(2, "  run tests\n")
 	rc = run([]string{outpath})
 	os.Exit(int32(rc))
 }
@@ -3077,29 +2966,29 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 	for _, f := range allFiles {
 		var data []byte
 		var ok bool
-		if hasPrefix(f, "/") {
-			data, ok = readFile(f)
+		if mxutil.HasPrefix(f, "/") {
+			data, ok = mxutil.ReadFile(f)
 		} else {
-			data, ok = readFile(joinPath(dir, f))
+			data, ok = mxutil.ReadFile(mxutil.JoinPath(dir, f))
 		}
 		if !ok {
 			continue
 		}
-		lines := splitLines(string(data))
+		lines := mxutil.SplitLines(string(data))
 		var body []string
 		var fimps []string
 		i := int32(0)
 		firstBodyLine := int32(0)
 		for i < int32(len(lines)) {
-			line := trimSpace(lines[i])
-			if hasPrefix(line, "package ") {
+			line := mxutil.TrimSpace(lines[i])
+			if mxutil.HasPrefix(line, "package ") {
 				i++
 				continue
 			}
 			if line == "import (" {
 				i++
 				for i < int32(len(lines)) {
-					imp := trimSpace(lines[i])
+					imp := mxutil.TrimSpace(lines[i])
 					i++
 					if imp == ")" {
 						break
@@ -3111,7 +3000,7 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 				}
 				continue
 			}
-			if hasPrefix(line, "import ") && !hasPrefix(line, "import (") {
+			if mxutil.HasPrefix(line, "import ") && !mxutil.HasPrefix(line, "import (") {
 				imp := line[7:]
 				imports[imp] = true
 				fimps = append(fimps, imp)
@@ -3130,23 +3019,23 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 		bodyImports = append(bodyImports, fimps)
 	}
 
-	tmData, tmOk := readFile(testMainFile)
+	tmData, tmOk := mxutil.ReadFile(testMainFile)
 	if tmOk {
-		lines := splitLines(string(tmData))
+		lines := mxutil.SplitLines(string(tmData))
 		var body []string
 		var fimps []string
 		i := int32(0)
 		firstBodyLine := int32(0)
 		for i < int32(len(lines)) {
-			line := trimSpace(lines[i])
-			if hasPrefix(line, "package ") {
+			line := mxutil.TrimSpace(lines[i])
+			if mxutil.HasPrefix(line, "package ") {
 				i++
 				continue
 			}
 			if line == "import (" {
 				i++
 				for i < int32(len(lines)) {
-					imp := trimSpace(lines[i])
+					imp := mxutil.TrimSpace(lines[i])
 					i++
 					if imp == ")" {
 						break
@@ -3158,7 +3047,7 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 				}
 				continue
 			}
-			if hasPrefix(line, "import ") && !hasPrefix(line, "import (") {
+			if mxutil.HasPrefix(line, "import ") && !mxutil.HasPrefix(line, "import (") {
 				imp := line[7:]
 				imports[imp] = true
 				fimps = append(fimps, imp)
@@ -3198,7 +3087,7 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 		out = append(out, ")\n"...)
 	}
 	concatSourceMap = nil
-	concatImportSegs = nil
+	mxutil.ConcatImportSegs = nil
 	outLine := int32(1)
 	for j := int32(0); j < int32(len(out)); j++ {
 		if out[j] == '\n' {
@@ -3211,9 +3100,9 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 			outStart: outLine,
 			srcLine:  bodyStartLines[i],
 		})
-		concatImportSegs = append(concatImportSegs, importSeg{
-			outStart: outLine,
-			specs:    bodyImports[i],
+		mxutil.ConcatImportSegs = append(mxutil.ConcatImportSegs, mxutil.ImportSeg{
+			OutStart: outLine,
+			Specs:    bodyImports[i],
 		})
 		for j := int32(0); j < int32(len(b)); j++ {
 			if b[j] == '\n' {
@@ -3234,13 +3123,13 @@ func main() {
 	builtinOnly = []string{"unsafe"}
 	args := os.Args
 	if len(args) < 2 {
-		writeStr(2, "usage: mxc <build|test|version|cache|fetch|update> ...\n")
+		mxutil.WriteStr(2, "usage: mxc <build|test|version|cache|fetch|update> ...\n")
 		os.Exit(1)
 	}
 
 	cmd := args[1]
 	if cmd == "version" {
-		writeStr(1, "mxc " | mxcVersion() | "\n")
+		mxutil.WriteStr(1, "mxc " | mxcVersion() | "\n")
 		return
 	}
 	if cmd == "cache" {
@@ -3252,7 +3141,7 @@ func main() {
 			cmdCacheWarm()
 			return
 		}
-		writeStr(2, "usage: mxc cache <clean|warm>\n")
+		mxutil.WriteStr(2, "usage: mxc cache <clean|warm>\n")
 		os.Exit(1)
 	}
 	if cmd == "fetch" {
@@ -3282,7 +3171,7 @@ func main() {
 		return
 	}
 	if cmd != "build" {
-		writeStr(2, "usage: mxc <build|test|version|cache|fetch|update|build-runtime> ...\n")
+		mxutil.WriteStr(2, "usage: mxc <build|test|version|cache|fetch|update|build-runtime> ...\n")
 		os.Exit(1)
 	}
 
@@ -3333,22 +3222,22 @@ func main() {
 	if root == "" {
 		root = "."
 	}
-	globalTargetOS = "linux"
-	globalTargetArch = "amd64"
+	mxutil.TargetOS = "linux"
+	mxutil.TargetArch = "amd64"
 	triple := "x86_64-unknown-linux-musleabihf"
 	if targetFlag == "js/wasm" || targetFlag == "wasm" {
-		globalTargetOS = "js"
-		globalTargetArch = "wasm"
+		mxutil.TargetOS = "js"
+		mxutil.TargetArch = "wasm"
 		triple = "wasm32-unknown-wasi"
 	} else if targetFlag == "wasi/wasm" {
-		globalTargetOS = "wasi"
-		globalTargetArch = "wasm"
+		mxutil.TargetOS = "wasi"
+		mxutil.TargetArch = "wasm"
 		triple = "wasm32-unknown-wasi"
 	}
-	isWasm := globalTargetArch == "wasm"
+	isWasm := mxutil.TargetArch == "wasm"
 	clang := "clang-21"
 
-	if hasPrefix(pkgPath, "./") || hasPrefix(pkgPath, "../") || pkgPath == "." || hasPrefix(pkgPath, "/") {
+	if mxutil.HasPrefix(pkgPath, "./") || mxutil.HasPrefix(pkgPath, "../") || pkgPath == "." || mxutil.HasPrefix(pkgPath, "/") {
 		absDir := pkgPath
 		if absDir == "." {
 			absDir = ""
@@ -3398,7 +3287,7 @@ func main() {
 	// TLS probe: if this binary's globals aren't thread_local, the parallel
 	// path would corrupt shared state. Fall back to serial.
 	if buildJobs > 1 && cDetectTLS() == 0 {
-		writeStr(2, "  note: globals not TLS-isolated, forcing -j 1 (rebuild with self-compiled mxc for parallel)\n")
+		mxutil.WriteStr(2, "  note: globals not TLS-isolated, forcing -j 1 (rebuild with self-compiled mxc for parallel)\n")
 		buildJobs = 1
 	}
 	var allBcFiles []string
@@ -3412,9 +3301,9 @@ func main() {
 		allBcFiles = a
 		hasRuntimePkg = h
 	}
-	loadSysroot(joinPath(root, "_sysroot.env"))
+	loadSysroot(mxutil.JoinPath(root, "_sysroot.env"))
 
-	sysroot := joinPath(root, "sysroot")
+	sysroot := mxutil.JoinPath(root, "sysroot")
 	runtimeBc := ""
 	muslDir := ""
 	comprtLib := ""
@@ -3422,27 +3311,27 @@ func main() {
 	if !isWasm {
 		runtimeBc = getenv("RUNTIME_BC")
 		if runtimeBc == "" {
-			runtimeBc = joinPath(sysroot, "runtime.bc")
+			runtimeBc = mxutil.JoinPath(sysroot, "runtime.bc")
 		}
 		muslDir = getenv("MUSL_DIR")
 		if muslDir == "" {
-			muslDir = joinPath(sysroot, "musl")
+			muslDir = mxutil.JoinPath(sysroot, "musl")
 		}
 		comprtLib = getenv("COMPRT_LIB")
 		if comprtLib == "" {
-			comprtLib = joinPath(joinPath(sysroot, "compiler-rt"), "lib.a")
+			comprtLib = mxutil.JoinPath(mxutil.JoinPath(sysroot, "compiler-rt"), "lib.a")
 		}
 		muslLib = getenv("MUSL_LIB")
 		if muslLib == "" {
-			muslLib = joinPath(joinPath(sysroot, "musl"), "lib.a")
+			muslLib = mxutil.JoinPath(mxutil.JoinPath(sysroot, "musl"), "lib.a")
 		}
 	}
 
-	writeStr(2, "  generate initAll\n")
+	mxutil.WriteStr(2, "  generate initAll\n")
 	var initCalls string
 	for _, pkg := range pkgs {
 		compilePath := pkg.path
-		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
 		if compilePath == "main" {
@@ -3455,7 +3344,7 @@ func main() {
 	declared := map[string]bool{}
 	for _, pkg := range pkgs {
 		compilePath := pkg.path
-		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
 		if compilePath == "main" {
@@ -3468,9 +3357,9 @@ func main() {
 		declared[declSym] = true
 		initAllIR = initAllIR | "declare void " | declSym | "(ptr)\n"
 	}
-	initAllFile := joinPath(tmpdir, "initall.ll")
+	initAllFile := mxutil.JoinPath(tmpdir, "initall.ll")
 	writeFile(initAllFile, []byte(initAllIR), 0644)
-	initAllBc := joinPath(tmpdir, "initall.bc")
+	initAllBc := mxutil.JoinPath(tmpdir, "initall.bc")
 	rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", initAllFile, "-o", initAllBc})
 	if rc != 0 {
 		fatal("clang failed for initall")
@@ -3478,7 +3367,7 @@ func main() {
 
 	if isWasm {
 		// wasm: compile each .bc to .o individually, then wasm-ld
-		writeStr(2, "  compile objects\n")
+		mxutil.WriteStr(2, "  compile objects\n")
 		wasmTriple := "wasm32-unknown-wasi"
 		var objList []string
 		wasmCompileToObj := func(bcFile string) string {
@@ -3508,7 +3397,7 @@ func main() {
 		}
 		objList = append(objList, wasmCompileToObj(initAllBc))
 		// Stubs for symbols not provided by stage4-compiled runtime
-		wasiStubs := joinPath(tmpdir, "wasi_stubs.ll")
+		wasiStubs := mxutil.JoinPath(tmpdir, "wasi_stubs.ll")
 		writeFile(wasiStubs, []byte(
 			"target datalayout = \"e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20\"\n" |
 			"target triple = \"wasm32-unknown-wasi\"\n" |
@@ -3546,7 +3435,7 @@ func main() {
 			"}\n" |
 			"declare void @llvm.trap()\n"), 0644)
 		objList = append(objList, wasmCompileToObj(wasiStubs))
-		writeStr(2, "  link\n")
+		mxutil.WriteStr(2, "  link\n")
 		ldArgs := []string{"wasm-ld", "--export-dynamic", "--allow-undefined",
 			"--gc-sections", "-o", outpath}
 		for _, o := range objList {
@@ -3559,7 +3448,7 @@ func main() {
 		}
 	} else {
 		// native: compile each .bc to .o, then ld.lld
-		writeStr(2, "  compile objects\n")
+		mxutil.WriteStr(2, "  compile objects\n")
 		var objList []string
 		compileToObj := func(bcFile string) string {
 			oFile := bcFile | ".o"
@@ -3570,15 +3459,15 @@ func main() {
 			return oFile
 		}
 		if !hasRuntimePkg {
-			runtimeGoBc := joinPath(sysroot, "runtime_go.bc")
-			if _, gok := readFile(runtimeGoBc); gok {
+			runtimeGoBc := mxutil.JoinPath(sysroot, "runtime_go.bc")
+			if _, gok := mxutil.ReadFile(runtimeGoBc); gok {
 				objList = append(objList, compileToObj(runtimeGoBc))
 			} else {
 				objList = append(objList, compileToObj(runtimeBc))
 			}
 		}
-		rtShims := joinPath(sysroot, "rt_shims.bc")
-		if _, rsk := readFile(rtShims); rsk {
+		rtShims := mxutil.JoinPath(sysroot, "rt_shims.bc")
+		if _, rsk := mxutil.ReadFile(rtShims); rsk {
 			objList = append(objList, compileToObj(rtShims))
 		}
 		if buildJobs > 1 {
@@ -3600,33 +3489,33 @@ func main() {
 		}
 		objList = append(objList, compileToObj(initAllBc))
 		if !hasRuntimePkg {
-			cstubDir := joinPath(root, "src/runtime")
+			cstubDir := mxutil.JoinPath(root, "src/runtime")
 			cstubFiles := listFiles(cstubDir, ".c")
 			for _, cf := range cstubFiles {
-				cPath := joinPath(cstubDir, cf)
-				coFile := joinPath(tmpdir, "cstub_" | cf | ".o")
+				cPath := mxutil.JoinPath(cstubDir, cf)
+				coFile := mxutil.JoinPath(tmpdir, "cstub_" | cf | ".o")
 				rc = run([]string{clang, "--target=" | triple, "-c", "-O0", cPath, "-o", coFile})
 				if rc == 0 {
 					objList = append(objList, coFile)
 				}
 			}
 		}
-		objDir := joinPath(sysroot, "obj")
+		objDir := mxutil.JoinPath(sysroot, "obj")
 		objEntries := listFiles(objDir, ".bc")
 		if objEntries != nil {
 			for _, e := range objEntries {
-				objList = append(objList, compileToObj(joinPath(objDir, e)))
+				objList = append(objList, compileToObj(mxutil.JoinPath(objDir, e)))
 			}
 		}
 		oEntries := listFiles(objDir, ".o")
 		if oEntries != nil {
 			for _, e := range oEntries {
-				objList = append(objList, joinPath(objDir, e))
+				objList = append(objList, mxutil.JoinPath(objDir, e))
 			}
 		}
-		writeStr(2, "  link\n")
+		mxutil.WriteStr(2, "  link\n")
 		ldArgs := []string{"ld.lld-21", "--gc-sections", "-o", outpath,
-			joinPath(muslDir, "crt1.o")}
+			mxutil.JoinPath(muslDir, "crt1.o")}
 		for _, o := range objList {
 			ldArgs = append(ldArgs, o)
 		}
@@ -3636,14 +3525,14 @@ func main() {
 			fatal("linker failed")
 		}
 	}
-	writeStr(2, "  -> " | outpath | "\n")
+	mxutil.WriteStr(2, "  -> " | outpath | "\n")
 }
 
 // buildPkgsSerial is the original in-process build path: typecheck/load all
 // packages in dependency order, then compile each uncached package in this
 // process. Used for -j 1 and -print-ir.
 func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, forceRebuild, printIR bool) (bcs []string, hasRT bool) {
-	isWasmTarget := globalTargetArch == "wasm"
+	isWasmTarget := mxutil.TargetArch == "wasm"
 	for _, pkg := range pkgs {
 		if pkg.path == "runtime" {
 			if !isWasmTarget {
@@ -3651,12 +3540,12 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			}
 		}
 		compilePath := pkg.path
-		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
 		hash := pkgHash(pkg)
 		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
-		_, mxhOk := readFile(cachedMxh)
+		_, mxhOk := mxutil.ReadFile(cachedMxh)
 		if mxhOk && !forceRebuild {
 			loadMxh(cachedMxh)
 			src := concatSources(pkg.dir, pkg.files)
@@ -3671,7 +3560,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 
 	for _, pkg := range pkgs {
 		compilePath := pkg.path
-		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
 
@@ -3679,38 +3568,38 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
 		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
 
-		_, bcOk := readFile(cached)
-		_, mxhOk := readFile(cachedMxh)
+		_, bcOk := mxutil.ReadFile(cached)
+		_, mxhOk := mxutil.ReadFile(cachedMxh)
 		if bcOk && mxhOk && !forceRebuild {
-			writeStr(2, "  cached " | pkg.path)
+			mxutil.WriteStr(2, "  cached " | pkg.path)
 			if pkg.version != "" {
-				writeStr(2, " @ " | pkg.version)
+				mxutil.WriteStr(2, " @ " | pkg.version)
 			}
-			writeStr(2, "\n")
+			mxutil.WriteStr(2, "\n")
 			loadMxh(cachedMxh)
 			bcs = append(bcs, cached)
 			for _, cf := range pkg.cfiles {
-				cPath := joinPath(pkg.dir, cf)
-				cbcFile := joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
+				cPath := mxutil.JoinPath(pkg.dir, cf)
+				cbcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
 				rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
 				if rc == 0 {
 					bcs = append(bcs, cbcFile)
 				}
 			}
 			for _, bf := range pkg.bcfiles {
-				bcs = append(bcs, joinPath(pkg.dir, bf))
+				bcs = append(bcs, mxutil.JoinPath(pkg.dir, bf))
 			}
 			continue
 		}
 
 		if isStdlib(pkg.path) && bcOk && !forceRebuild {
-			writeStr(2, "  cached " | pkg.path | "\n")
+			mxutil.WriteStr(2, "  cached " | pkg.path | "\n")
 			src := concatSources(pkg.dir, pkg.files)
 			TypeCheckOnly(src, compilePath)
 			src = nil
 			regPkg := importRegistry[compilePath]
 			if regPkg != nil {
-				cacheDir := joinPath(cacheBase, safeName(pkg.path))
+				cacheDir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
 				mkdirAll(cacheDir, 0755)
 				mxhData := generateMxh(regPkg)
 				writeFile(cachedMxh, []byte(mxhData), 0644)
@@ -3719,24 +3608,24 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			continue
 		}
 
-		writeStr(2, "  compile " | pkg.path | "\n")
+		mxutil.WriteStr(2, "  compile " | pkg.path | "\n")
 		src := concatSources(pkg.dir, pkg.files)
 		ir := compileSource(src, compilePath, triple, pkg.dir)
 		src = nil
 		if printIR {
-			writeStr(1, ir)
+			mxutil.WriteStr(1, ir)
 		}
-		llFile := joinPath(tmpdir, safeName(pkg.path) | ".ll")
+		llFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		ir = ""
-		bcFile := joinPath(tmpdir, safeName(pkg.path) | ".bc")
+		bcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc")
 		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
 		if rc != 0 {
 			fatal("clang failed for " | pkg.path)
 		}
-		cacheDir := joinPath(cacheBase, safeName(pkg.path))
+		cacheDir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
 		mkdirAll(cacheDir, 0755)
-		data, rok := readFile(bcFile)
+		data, rok := mxutil.ReadFile(bcFile)
 		if rok {
 			writeFile(cached, data, 0644)
 		}
@@ -3748,8 +3637,8 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		}
 		bcs = append(bcs, bcFile)
 		for _, cf := range pkg.cfiles {
-			cPath := joinPath(pkg.dir, cf)
-			cbcFile := joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
+			cPath := mxutil.JoinPath(pkg.dir, cf)
+			cbcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
 			rc = run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
 			if rc != 0 {
 				fatal("clang failed for " | cf)
@@ -3757,7 +3646,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			bcs = append(bcs, cbcFile)
 		}
 		for _, bf := range pkg.bcfiles {
-			bcs = append(bcs, joinPath(pkg.dir, bf))
+			bcs = append(bcs, mxutil.JoinPath(pkg.dir, bf))
 		}
 	}
 	return bcs, hasRT
@@ -4026,11 +3915,11 @@ func workerEntryExport(arg unsafe.Pointer) {
 
 	// Set target globals from triple (needed by registerBuiltins for uintptr sizing)
 	if len(meta.triple) >= 4 && meta.triple[:4] == "wasm" {
-		globalTargetArch = "wasm"
-		globalTargetOS = "js"
+		mxutil.TargetArch = "wasm"
+		mxutil.TargetOS = "js"
 	} else {
-		globalTargetArch = "amd64"
-		globalTargetOS = "linux"
+		mxutil.TargetArch = "amd64"
+		mxutil.TargetOS = "linux"
 	}
 
 	// Initialize this thread's compiler state (TLS globals are zeroed)
@@ -4094,7 +3983,7 @@ func workerLoadDeps(pkg *pkgInfo, meta *workerMeta, idxByPath map[string]int32, 
 		}
 		dep := meta.pkgs[di]
 		compilePath := dep.path
-		if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 			compilePath = dep.name
 		}
 		if importRegistry[compilePath] != nil {
@@ -4125,11 +4014,11 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 	}
 
 	compilePath := pkg.path
-	if compilePath == "." || compilePath == ".." || hasPrefix(compilePath, "/") || hasPrefix(compilePath, "./") || hasPrefix(compilePath, "../") {
+	if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 		compilePath = pkg.name
 	}
 
-	writeStr(2, "  compile " | pkg.path | "\n")
+	mxutil.WriteStr(2, "  compile " | pkg.path | "\n")
 	src := concatSources(pkg.dir, pkg.files)
 	compilePkgDir = pkg.dir
 	ir := CompileToIR(src, compilePath, meta.triple)
@@ -4141,21 +4030,21 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 		return "empty IR for " | pkg.path
 	}
 
-	llFile := joinPath(meta.tmpdir, safeName(pkg.path) | ".ll")
+	llFile := mxutil.JoinPath(meta.tmpdir, safeName(pkg.path) | ".ll")
 	writeFile(llFile, []byte(ir), 0644)
 	ir = ""
 
-	bcFile := joinPath(meta.tmpdir, safeName(pkg.path) | ".bc")
+	bcFile := mxutil.JoinPath(meta.tmpdir, safeName(pkg.path) | ".bc")
 	rc := run([]string{meta.clang, "--target=" | meta.triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
 	if rc != 0 {
 		return "clang failed for " | pkg.path
 	}
 
 	// Cache .bc
-	cacheDir := joinPath(meta.cacheBase, safeName(pkg.path))
+	cacheDir := mxutil.JoinPath(meta.cacheBase, safeName(pkg.path))
 	mkdirAll(cacheDir, 0755)
 	cached := cachedBcPath(meta.cacheBase, pkg.path, hash, pkg.version)
-	bcData, rok := readFile(bcFile)
+	bcData, rok := mxutil.ReadFile(bcFile)
 	if rok {
 		writeFile(cached, bcData, 0644)
 	}
@@ -4171,8 +4060,8 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 
 	// Compile C files
 	for _, cf := range pkg.cfiles {
-		cPath := joinPath(pkg.dir, cf)
-		cbcFile := joinPath(meta.tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
+		cPath := mxutil.JoinPath(pkg.dir, cf)
+		cbcFile := mxutil.JoinPath(meta.tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
 		rc = run([]string{meta.clang, "--target=" | meta.triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
 		if rc != 0 {
 			return "clang failed for " | cf
@@ -4212,15 +4101,15 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 		hash := pkgHash(pkg)
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
 		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
-		_, bcOk := readFile(cached)
-		_, mxhOk := readFile(cachedMxh)
+		_, bcOk := mxutil.ReadFile(cached)
+		_, mxhOk := mxutil.ReadFile(cachedMxh)
 		if bcOk && mxhOk && !forceRebuild {
 			done[i] = true
-			writeStr(2, "  cached " | pkg.path)
+			mxutil.WriteStr(2, "  cached " | pkg.path)
 			if pkg.version != "" {
-				writeStr(2, " @ " | pkg.version)
+				mxutil.WriteStr(2, " @ " | pkg.version)
 			}
-			writeStr(2, "\n")
+			mxutil.WriteStr(2, "\n")
 		} else {
 			needBuild[i] = true
 		}
@@ -4337,9 +4226,9 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 				alive := cThreadAlive(unsafe.Pointer(&w.status))
 				if alive < 0 {
 					if w.busy {
-						writeStr(2, "  CRASHED worker " | simpleItoa(wi) | " compiling " | pkgs[w.busyIdx].path | "\n")
+						mxutil.WriteStr(2, "  CRASHED worker " | simpleItoa(wi) | " compiling " | pkgs[w.busyIdx].path | "\n")
 					} else {
-						writeStr(2, "  CRASHED worker " | simpleItoa(wi) | "\n")
+						mxutil.WriteStr(2, "  CRASHED worker " | simpleItoa(wi) | "\n")
 					}
 					failed = true
 					workers[wi] = nil
@@ -4389,7 +4278,7 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 					}
 					// Dispatch
 					if !ringSendInt32(w.ringA, di) {
-						writeStr(2, "  dispatch failed for " | pkgs[di].path | "\n")
+						mxutil.WriteStr(2, "  dispatch failed for " | pkgs[di].path | "\n")
 						failed = true
 						break
 					}
@@ -4409,7 +4298,7 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 			rd, rok := ringRecvNonblock(w.ringB)
 			if rd == nil {
 				if !rok {
-					writeStr(2, "  worker " | simpleItoa(wi) | " ringB closed\n")
+					mxutil.WriteStr(2, "  worker " | simpleItoa(wi) | " ringB closed\n")
 					failed = true
 				}
 				continue
@@ -4423,11 +4312,11 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 			progress = true
 			if elen > 0 && int32(len(rd)) >= 8+elen {
 				errText := string(rd[8 : 8+elen])
-				writeStr(2, errText)
-				writeStr(2, "mxc: compile error for " | pkgs[ridx].path | "\n")
+				mxutil.WriteStr(2, errText)
+				mxutil.WriteStr(2, "mxc: compile error for " | pkgs[ridx].path | "\n")
 				failed = true
 			} else if elen > 0 {
-				writeStr(2, "mxc: compile error for " | pkgs[ridx].path | "\n")
+				mxutil.WriteStr(2, "mxc: compile error for " | pkgs[ridx].path | "\n")
 				failed = true
 			} else {
 				done[ridx] = true
@@ -4469,16 +4358,16 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 			hasRT = true
 		}
 		if needBuild[i] {
-			bcs = append(bcs, joinPath(tmpdir, safeName(pkg.path) | ".bc"))
+			bcs = append(bcs, mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc"))
 			for _, cf := range pkg.cfiles {
-				bcs = append(bcs, joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc"))
+				bcs = append(bcs, mxutil.JoinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc"))
 			}
 		} else {
 			hash := pkgHash(pkg)
 			bcs = append(bcs, cachedBcPath(cacheBase, pkg.path, hash, pkg.version))
 			for _, cf := range pkg.cfiles {
-				cPath := joinPath(pkg.dir, cf)
-				cbcFile := joinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
+				cPath := mxutil.JoinPath(pkg.dir, cf)
+				cbcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
 				rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
 				if rc == 0 {
 					bcs = append(bcs, cbcFile)
@@ -4486,7 +4375,7 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 			}
 		}
 		for _, bf := range pkg.bcfiles {
-			bcs = append(bcs, joinPath(pkg.dir, bf))
+			bcs = append(bcs, mxutil.JoinPath(pkg.dir, bf))
 		}
 	}
 	return bcs, hasRT
@@ -4499,7 +4388,7 @@ func cmdBuildRuntime() {
 	}
 	triple := "x86_64-unknown-linux-musleabihf"
 	clang := "clang-21"
-	sysroot := joinPath(root, "sysroot")
+	sysroot := mxutil.JoinPath(root, "sysroot")
 	tmpdir := "/tmp/mxc-rt-build"
 	mkdirAll(tmpdir, 0755)
 
@@ -4508,20 +4397,20 @@ func cmdBuildRuntime() {
 	rtPkgs := []string{"internal/task", "runtime"}
 	var bcFiles []string
 	for _, pkg := range rtPkgs {
-		dir := joinPath(root, joinPath("src", pkg))
+		dir := mxutil.JoinPath(root, mxutil.JoinPath("src", pkg))
 		info := discoverPkg(pkg, root)
 		if info == nil || len(info.files) == 0 {
-			writeStr(2, "  skip " | pkg | " (no files)\n")
+			mxutil.WriteStr(2, "  skip " | pkg | " (no files)\n")
 			continue
 		}
-		writeStr(2, "  compile " | pkg | "\n")
+		mxutil.WriteStr(2, "  compile " | pkg | "\n")
 		src := concatSources(dir, info.files)
 		ir := compileSource(src, pkg, triple, dir)
 		src = nil
-		llFile := joinPath(tmpdir, safeName(pkg) | ".ll")
+		llFile := mxutil.JoinPath(tmpdir, safeName(pkg) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		ir = ""
-		bcFile := joinPath(tmpdir, safeName(pkg) | ".bc")
+		bcFile := mxutil.JoinPath(tmpdir, safeName(pkg) | ".bc")
 		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
 		if rc != 0 {
 			fatal("clang failed for " | pkg)
@@ -4531,9 +4420,9 @@ func cmdBuildRuntime() {
 	if len(bcFiles) == 0 {
 		fatal("no runtime packages compiled")
 	}
-	outBc := joinPath(sysroot, "runtime_go.bc")
+	outBc := mxutil.JoinPath(sysroot, "runtime_go.bc")
 	if len(bcFiles) == 1 {
-		data, ok := readFile(bcFiles[0])
+		data, ok := mxutil.ReadFile(bcFiles[0])
 		if !ok {
 			fatal("cannot read " | bcFiles[0])
 		}
@@ -4548,5 +4437,5 @@ func cmdBuildRuntime() {
 			fatal("llvm-link failed merging runtime")
 		}
 	}
-	writeStr(2, "  -> " | outBc | "\n")
+	mxutil.WriteStr(2, "  -> " | outBc | "\n")
 }

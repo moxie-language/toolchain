@@ -1,6 +1,7 @@
 package main
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"git.smesh.lol/moxie/pkg/syntax"
 	"git.smesh.lol/moxie/pkg/token"
 )
@@ -23,7 +24,7 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 	// holding its own PkgName bindings, so two files can bind the same
 	// local name to different packages. The driver concatenates all package
 	// files into one syntax.File with a hoisted+deduped import block, so the
-	// per-file association comes from concatImportSegs (per-file import
+	// per-file association comes from mxutil.ConcatImportSegs (per-file import
 	// specs + concat start line), and decls map to their file's scope by
 	// position.
 	pb.fileScopes = map[*syntax.File]*Scope{}
@@ -75,11 +76,11 @@ type segScope struct {
 // scopes holding each file's PkgName bindings.
 func (pb *ssaPkgBuilder) buildImportSegScopes() {
 	pb.segScopes = nil
-	for si := 0; si < len(concatImportSegs); si++ {
-		seg := concatImportSegs[si]
+	for si := 0; si < len(mxutil.ConcatImportSegs); si++ {
+		seg := mxutil.ConcatImportSegs[si]
 		sc := NewScope(pb.pkg.Pkg.Scope())
-		for _, spec := range seg.specs {
-			path := extractQuoted(spec)
+		for _, spec := range seg.Specs {
+			path := mxutil.ExtractQuoted(spec)
 			if path == "" {
 				continue
 			}
@@ -108,7 +109,7 @@ func (pb *ssaPkgBuilder) buildImportSegScopes() {
 			}
 			sc.Insert(NewPkgName(nil, localName, target))
 		}
-		pb.segScopes = append(pb.segScopes, segScope{outStart: seg.outStart, scope: sc})
+		pb.segScopes = append(pb.segScopes, segScope{outStart: seg.OutStart, scope: sc})
 	}
 }
 
@@ -117,7 +118,7 @@ func (pb *ssaPkgBuilder) buildImportSegScopes() {
 func importSpecAlias(spec string) (s string) {
 	for i := int32(0); i < int32(len(spec)); i++ {
 		if spec[i] == '"' {
-			return trimSpace(spec[:i])
+			return mxutil.TrimSpace(spec[:i])
 		}
 	}
 	return ""
@@ -371,7 +372,7 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 		return
 	}
 	if d.Name.Value == "init" {
-		writeStr(2, "compile error: init() is not allowed; use main() for package initialization\n")
+		mxutil.WriteStr(2, "compile error: init() is not allowed; use main() for package initialization\n")
 		return
 	}
 	var obj *TCFunc
@@ -507,7 +508,7 @@ func (pb *ssaPkgBuilder) registerMethod(d *syntax.FuncDecl) {
 		sig = pkgResolveSigAST(pb.pkg, d.Type)
 	}
 	if sig == nil {
-		writeStr(2, "WARN: nil sig for method " | mangledName | "\n")
+		mxutil.WriteStr(2, "WARN: nil sig for method " | mangledName | "\n")
 	}
 	fn := &SSAFunction{
 		name:      mangledName,
@@ -745,12 +746,12 @@ func (pb *ssaPkgBuilder) buildFunc(d *syntax.FuncDecl) {
 	}
 	member := pb.pkg.Members[name]
 	if member == nil {
-		writeStr(2, "WARN: buildFunc no member for " | name | "\n")
+		mxutil.WriteStr(2, "WARN: buildFunc no member for " | name | "\n")
 		return
 	}
 	fn, ok := member.(*SSAFunction)
 	if !ok || fn == nil {
-		writeStr(2, "WARN: buildFunc member not SSAFunction for " | name | "\n")
+		mxutil.WriteStr(2, "WARN: buildFunc member not SSAFunction for " | name | "\n")
 		return
 	}
 	fb := newSSAFuncBuilder(fn, pb.info)
@@ -1808,7 +1809,7 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *syntax.ForStmt, rc *syntax.RangeClau
 			}
 		}
 		if iterSSAType == nil {
-			writeStr(2, "WARN: unresolved range type in " | fb.fn.Pkg.Pkg.Path() | "." | fb.fn.name | "\n")
+			mxutil.WriteStr(2, "WARN: unresolved range type in " | fb.fn.Pkg.Pkg.Path() | "." | fb.fn.name | "\n")
 			return
 		}
 	}
@@ -2824,7 +2825,7 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 	}
 	if (op == OpOr || op == OpAdd) && x.SSAType() != nil && y.SSAType() != nil {
 		if isRuneKind(x.SSAType()) && isStringKind(y.SSAType()) || isStringKind(x.SSAType()) && isRuneKind(y.SSAType()) {
-			writeStr(2, "compile error: cannot concatenate rune with string - convert to UTF-8 first\n")
+			mxutil.WriteStr(2, "compile error: cannot concatenate rune with string - convert to UTF-8 first\n")
 			compileErrors = append(compileErrors, "cannot concatenate rune with string")
 		}
 	}

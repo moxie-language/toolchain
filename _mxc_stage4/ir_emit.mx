@@ -3,6 +3,7 @@ package main
 import (
 	"git.smesh.lol/moxie/pkg/syntax"
 	"math"
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"git.smesh.lol/moxie/pkg/token"
 )
 
@@ -291,7 +292,7 @@ func safeSSAName(v SSAValue) (s string) {
 	case *SSAInvoke:
 		return v.SSAName()
 	}
-	writeStr(2, "BUG: unknown SSAValue type in safeSSAName\n")
+	mxutil.WriteStr(2, "BUG: unknown SSAValue type in safeSSAName\n")
 	return "UNKNOWN"
 }
 
@@ -531,7 +532,7 @@ func (e *irEmitter) llvmStructType(t *TCStruct) (s string) {
 		if e.curFunc != nil {
 			fn = e.curFunc.name
 		}
-		writeStr(2, "BUG: llvmStructType nil in " | fn | "\n")
+		mxutil.WriteStr(2, "BUG: llvmStructType nil in " | fn | "\n")
 		return "{}"
 	}
 	s := "{"
@@ -594,7 +595,7 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 	}
 	retType := e.funcRetType(fn)
 	useSret := needsSret(retType)
-	isIntrinsic := hasPrefix(sym, "@llvm.") || hasPrefix(sym, "@\"llvm.")
+	isIntrinsic := mxutil.HasPrefix(sym, "@llvm.") || mxutil.HasPrefix(sym, "@\"llvm.")
 	isExport := fn.externalSymbol != ""
 	skipCtx := isIntrinsic || isExport
 	params := ""
@@ -613,7 +614,7 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 			}
 			pt := e.llvmType(fn.Signature.Params().At(i).Type())
 			if pt == "" || pt == "void" {
-				writeStr(2, "BUG-DECL: empty param type in " | sym | " param " | irItoa(int32(i)) | "\n")
+				mxutil.WriteStr(2, "BUG-DECL: empty param type in " | sym | " param " | irItoa(int32(i)) | "\n")
 				pt = "ptr"
 			}
 			params = params | pt
@@ -1065,7 +1066,7 @@ func (e *irEmitter) emitGlobal(g *SSAGlobal) {
 }
 
 func (e *irEmitter) emitEmbedGlobal(g *SSAGlobal, name string, ei *embedInfo) {
-	data, ok := readFile(ei.path)
+	data, ok := mxutil.ReadFile(ei.path)
 	if !ok {
 		// Fail loud: a zeroinitializer embed global is a nil slice at runtime
 		// and SIGSEGVs far from the cause.
@@ -1256,7 +1257,7 @@ func (e *irEmitter) emitLibMain() {
 func (e *irEmitter) emitFunction(f *SSAFunction) {
 	e.w("; [emit] " | f.name | "\n")
 	sym := e.funcSymbol(f)
-	if len(sym) > 5 && (hasPrefix(sym, "@llvm.") || hasPrefix(sym, "@\"llvm.")) {
+	if len(sym) > 5 && (mxutil.HasPrefix(sym, "@llvm.") || mxutil.HasPrefix(sym, "@\"llvm.")) {
 		e.emitFuncDecl(f)
 		return
 	}
@@ -1280,7 +1281,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 				// target function is already defined - skip the declare
 				// to avoid conflicting with the existing define.
 				pkgDot := pkg | "."
-				samePackage := hasPrefix(target, pkgDot)
+				samePackage := mxutil.HasPrefix(target, pkgDot)
 				if !samePackage {
 					e.emitFuncDecl(f)
 				} else if origSym == tgtSym {
@@ -1558,7 +1559,7 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 		e.w("ptr")
 		n++
 	}
-	isIntrinsic := hasPrefix(sym, "@llvm.") || hasPrefix(sym, "@\"llvm.")
+	isIntrinsic := mxutil.HasPrefix(sym, "@llvm.") || mxutil.HasPrefix(sym, "@\"llvm.")
 	hasRecv := f.Signature != nil && f.Signature.Recv() != nil
 	if hasRecv {
 		if n > 0 { e.w(", ") }
@@ -1572,7 +1573,7 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 			}
 			pt := e.llvmType(f.Signature.Params().At(i).Type())
 			if pt == "" || pt == "void" {
-				writeStr(2, "BUG: empty param type in decl " | sym | " param " | irItoa(int32(i)) | "\n")
+				mxutil.WriteStr(2, "BUG: empty param type in decl " | sym | " param " | irItoa(int32(i)) | "\n")
 				pt = "ptr"
 			}
 			e.w(pt)
@@ -3252,7 +3253,7 @@ func (e *irEmitter) emitStringCompare(reg string, op SSAOp, lv, rv string) {
 
 func (e *irEmitter) emitStructCompare(reg string, op SSAOp, st *TCStruct, lt, lv, rv string) {
 	if st == nil {
-		writeStr(2, "BUG: emitStructCompare called with nil TCStruct\n")
+		mxutil.WriteStr(2, "BUG: emitStructCompare called with nil TCStruct\n")
 		if op == OpEql {
 			e.w("  ") ; e.w(reg) ; e.w(" = icmp eq i32 0, 0\n")
 		} else {
@@ -3774,7 +3775,7 @@ func (e *irEmitter) emitCall(c *SSACall) {
 			np++
 		}
 		sym := e.funcSymbol(fn)
-		isIntrinsic := hasPrefix(sym, "@llvm.") || hasPrefix(sym, "@\"llvm.")
+		isIntrinsic := mxutil.HasPrefix(sym, "@llvm.") || mxutil.HasPrefix(sym, "@\"llvm.")
 		isExport := fn.externalSymbol != ""
 		for i, arg := range c.Call.Args {
 			if np > 0 { e.w(", ") }
@@ -5951,7 +5952,7 @@ func (e *irEmitter) reflectTypeName(t Type) (s string) {
 	}
 	if p, ok := t.(*Pointer); ok {
 		inner := e.reflectTypeName(p.Elem())
-		if hasPrefix(inner, "reflect/types.type:") {
+		if mxutil.HasPrefix(inner, "reflect/types.type:") {
 			result := "reflect/types.type:pointer:" | inner[len("reflect/types.type:"):]
 			quoted := "\"" | result | "\""
 			if e.localTypeIDs != nil && e.localTypeIDs["\"" | inner | "\""] {
@@ -5975,7 +5976,7 @@ func (e *irEmitter) reflectTypeName(t Type) (s string) {
 			return "reflect/types.type:basic:bytes"
 		}
 		inner := e.reflectTypeName(elem)
-		if hasPrefix(inner, "reflect/types.type:") {
+		if mxutil.HasPrefix(inner, "reflect/types.type:") {
 			result := "reflect/types.type:slice:" | inner[len("reflect/types.type:"):]
 			if e.localTypeIDs == nil {
 				e.localTypeIDs = map[string]bool{}
@@ -6483,7 +6484,7 @@ func collectIfaceMethodInfo(ifaceT *TCInterface, depth int32) (ss []string, sigs
 func (e *irEmitter) implBaseTypeName(impl ifaceImpl) (s string) {
 	if impl.extTypeID != "" {
 		name := impl.extTypeID
-		if hasPrefix(name, "reflect/types.type:pointer:") {
+		if mxutil.HasPrefix(name, "reflect/types.type:pointer:") {
 			name = "reflect/types.type:" | name[len("reflect/types.type:pointer:"):]
 		}
 		return name
@@ -8040,12 +8041,12 @@ func scanEmbedPragmas(src []byte, pkgDir string) {
 		} else if lHasPrefix(trimmed, embedPrefix) {
 			pendingPath = string(lTrimSpace(trimmed[len(embedPrefix):]))
 			if len(pendingPath) > 0 && pkgDir != "" {
-				pendingPath = joinPath(pkgDir, pendingPath)
+				pendingPath = mxutil.JoinPath(pkgDir, pendingPath)
 			}
 		} else if lHasPrefix(trimmed, embedPrefix2) {
 			pendingPath = string(lTrimSpace(trimmed[len(embedPrefix2):]))
 			if len(pendingPath) > 0 && pkgDir != "" {
-				pendingPath = joinPath(pkgDir, pendingPath)
+				pendingPath = mxutil.JoinPath(pkgDir, pendingPath)
 			}
 		}
 		i = lineEnd
@@ -8144,14 +8145,14 @@ var wasmImportMap map[string][2]string
 // The pragma applies to the next function declaration (body-less).
 // pkgPath is the package import path used to construct full IR symbols.
 func scanWasmImportMap(src []byte, pkgPath string) map[string][2]string {
-	if !hasPrefix(compileTargetTriple, "wasm32") {
+	if !mxutil.HasPrefix(compileTargetTriple, "wasm32") {
 		return nil
 	}
 	m := map[string][2]string{}
-	lines := splitLines(string(src))
+	lines := mxutil.SplitLines(string(src))
 	for i := int32(0); i < int32(len(lines)); i++ {
-		ln := trimSpace(lines[i])
-		if !hasPrefix(ln, "//:wasmimport ") {
+		ln := mxutil.TrimSpace(lines[i])
+		if !mxutil.HasPrefix(ln, "//:wasmimport ") {
 			continue
 		}
 		parts := ln[len("//:wasmimport "):]
@@ -8165,12 +8166,12 @@ func scanWasmImportMap(src []byte, pkgPath string) map[string][2]string {
 		if sp < 0 {
 			continue
 		}
-		mod := trimSpace(string(parts[:sp]))
-		impName := trimSpace(string(parts[sp+1:]))
+		mod := mxutil.TrimSpace(string(parts[:sp]))
+		impName := mxutil.TrimSpace(string(parts[sp+1:]))
 		// Find next func declaration
 		for j := i + 1; j < int32(len(lines)); j++ {
-			fl := trimSpace(lines[j])
-			if !hasPrefix(fl, "func ") {
+			fl := mxutil.TrimSpace(lines[j])
+			if !mxutil.HasPrefix(fl, "func ") {
 				continue
 			}
 			// extract function name from "func NAME(" or "func (recv) NAME("
@@ -8184,7 +8185,7 @@ func scanWasmImportMap(src []byte, pkgPath string) map[string][2]string {
 					if rest[k] == ')' { depth-- }
 					k++
 				}
-				rest = trimSpace(string(rest[k:]))
+				rest = mxutil.TrimSpace(string(rest[k:]))
 			}
 			// now rest starts with funcName(
 			paren := int32(-1)
@@ -8197,7 +8198,7 @@ func scanWasmImportMap(src []byte, pkgPath string) map[string][2]string {
 			if paren < 0 {
 				break
 			}
-			funcName := trimSpace(string(rest[:paren]))
+			funcName := mxutil.TrimSpace(string(rest[:paren]))
 			sym := pkgPath | "." | funcName
 			m[sym] = [2]string{mod, impName}
 			break
@@ -8841,13 +8842,13 @@ var tcPkgSrc []byte
 var compileTargetTriple string
 
 func compileTargetArch() (s string) {
-	if hasPrefix(compileTargetTriple, "x86_64") {
+	if mxutil.HasPrefix(compileTargetTriple, "x86_64") {
 		return "amd64"
 	}
-	if hasPrefix(compileTargetTriple, "aarch64") {
+	if mxutil.HasPrefix(compileTargetTriple, "aarch64") {
 		return "arm64"
 	}
-	if hasPrefix(compileTargetTriple, "wasm32") {
+	if mxutil.HasPrefix(compileTargetTriple, "wasm32") {
 		return "wasm"
 	}
 	return "amd64"
@@ -8858,13 +8859,13 @@ func compileTargetOS() (s string) {
 		rest := compileTargetTriple[lIndexByte(compileTargetTriple, '-')+1:]
 		if lIndexByte(rest, '-') >= 0 {
 			os := rest[lIndexByte(rest, '-')+1:]
-			if hasPrefix(os, "linux") {
+			if mxutil.HasPrefix(os, "linux") {
 				return "linux"
 			}
-			if hasPrefix(os, "darwin") {
+			if mxutil.HasPrefix(os, "darwin") {
 				return "darwin"
 			}
-			if hasPrefix(os, "js") || hasPrefix(os, "wasi") {
+			if mxutil.HasPrefix(os, "js") || mxutil.HasPrefix(os, "wasi") {
 				return "js"
 			}
 		}

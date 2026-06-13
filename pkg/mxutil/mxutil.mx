@@ -1,0 +1,119 @@
+// Package mxutil holds the io/string helpers and target globals shared by
+// the stage4 compiler packages (driver, types, ssa, emit).
+package mxutil
+
+import "unsafe"
+
+//export write
+func cWrite(fd int32, buf unsafe.Pointer, count uint32) (n int32)
+
+//export mxc_readfile
+func cReadfile(path unsafe.Pointer, pathLen int32, buf unsafe.Pointer, bufCap int32) (n int32)
+
+//export mxc_filesize
+func cFilesize(path unsafe.Pointer, pathLen int32) (n int32)
+
+// Target triple components for the current compile.
+var TargetOS string
+var TargetArch string
+
+// ImportSeg records one source file's import specs and the concat line its
+// body starts at. The SSA builder uses this to give each file its own
+// pkg-name scope: two files may bind the same local name to different
+// packages, and the hoisted+deduped import block in the concat destroys
+// that association.
+type ImportSeg struct {
+	OutStart int32
+	Specs    []string // raw specs as written: `"path"` or `alias "path"`
+}
+
+var ConcatImportSegs []ImportSeg
+
+func WriteStr(fd int32, s string) {
+	if len(s) > 0 {
+		cWrite(fd, unsafe.Pointer(unsafe.SliceData([]byte(s))), uint32(len(s)))
+	}
+}
+
+func ReadFile(path string) ([]byte, bool) {
+	if len(path) == 0 {
+		return nil, false
+	}
+	pp := unsafe.Pointer(unsafe.SliceData([]byte(path)))
+	pl := int32(len(path))
+	sz := cFilesize(pp, pl)
+	if sz < 0 {
+		return nil, false
+	}
+	if sz == 0 {
+		sz = 65536
+	}
+	buf := []byte{:sz}
+	n := cReadfile(pp, pl,
+		unsafe.Pointer(unsafe.SliceData(buf)), sz)
+	if n < 0 {
+		return nil, false
+	}
+	return buf[:n], true
+}
+
+func SplitLines(s string) (ss []string) {
+	var result []string
+	start := int32(0)
+	for i := int32(0); i < int32(len(s)); i++ {
+		if s[i] == '\n' {
+			if i > start {
+				result = append(result, s[start:i])
+			}
+			start = i + 1
+		}
+	}
+	if start < int32(len(s)) {
+		result = append(result, s[start:])
+	}
+	return result
+}
+
+func HasPrefix(s, prefix string) (ok bool) {
+	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+}
+
+func HasSuffix(s, suffix string) (ok bool) {
+	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
+}
+
+func TrimSpace(s string) (sv string) {
+	i := int32(0)
+	for i < int32(len(s)) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+		i++
+	}
+	j := int32(len(s))
+	for j > i && (s[j-1] == ' ' || s[j-1] == '\t' || s[j-1] == '\n' || s[j-1] == '\r') {
+		j--
+	}
+	return s[i:j]
+}
+
+func JoinPath(a, b string) (s string) {
+	if len(a) == 0 {
+		return b
+	}
+	if a[len(a)-1] == '/' {
+		return a | b
+	}
+	return a | "/" | b
+}
+
+func ExtractQuoted(s string) (sv string) {
+	start := int32(-1)
+	for i := int32(0); i < int32(len(s)); i++ {
+		if s[i] == '"' {
+			if start < 0 {
+				start = i + 1
+			} else {
+				return s[start:i]
+			}
+		}
+	}
+	return ""
+}
