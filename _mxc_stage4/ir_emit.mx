@@ -165,6 +165,75 @@ func (e *irEmitter) w(s string) {
 	e.buf = append(e.buf, s...)
 }
 
+// hoistAllocaText moves every alloca line emitted since start to the top of
+// the _entry block. LLVM allocas outside the entry block grow the stack on
+// every execution with no implicit stackrestore; in long-running loops this
+// overflows the stack (observed: 256MB of stack drift in the parallel build
+// dispatch loop). All emitted allocas are static-size, so hoisting to entry
+// is always legal: entry dominates every block and names are unique.
+func (e *irEmitter) hoistAllocaText(start int32) {
+	body := e.buf[start:]
+	marker := "_entry:\n"
+	mlen := int32(len(marker))
+	insert := int32(-1)
+	for i := int32(0); i+mlen <= int32(len(body)); i++ {
+		if (i == 0 || body[i-1] == '\n') && body[i:i+mlen] == marker {
+			insert = i + mlen
+			break
+		}
+	}
+	if insert < 0 {
+		return
+	}
+	seg := body[insert:]
+	n := int32(len(seg))
+	var allocas []byte
+	var rest []byte
+	moved := false
+	ls := int32(0)
+	for ls < n {
+		le := ls
+		for le < n && seg[le] != '\n' {
+			le++
+		}
+		if le < n {
+			le++
+		}
+		line := seg[ls:le]
+		isAlloca := false
+		if int32(len(line)) > 13 && line[0] == ' ' && line[1] == ' ' && line[2] == '%' {
+			for k := int32(3); k+10 <= int32(len(line)); k++ {
+				if line[k:k+10] == " = alloca " {
+					isAlloca = true
+					break
+				}
+			}
+		}
+		if isAlloca && !moved {
+			// Lines before the first alloca are copied lazily so functions
+			// without movable allocas cost only the line scan.
+			allocas = []byte{:0:1024}
+			rest = []byte{:0:n}
+			rest = append(rest, seg[:ls]...)
+			moved = true
+		}
+		if moved {
+			if isAlloca {
+				allocas = append(allocas, line...)
+			} else {
+				rest = append(rest, line...)
+			}
+		}
+		ls = le
+	}
+	if !moved {
+		return
+	}
+	e.buf = e.buf[:start+insert]
+	e.buf = append(e.buf, allocas...)
+	e.buf = append(e.buf, rest...)
+}
+
 func safeSSAName(v SSAValue) (s string) {
 	switch v.(type) {
 	case *SSAAlloc:
@@ -1298,6 +1367,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		e.w("ptr %_ctx")
 	}
 	e.w(") {\n")
+	fnBodyStart := int32(len(e.buf))
 
 	// Pre-scan: set allocTypes, detect cross-block alloca references
 	e.allocBlock = map[SSAValue]int32{}
@@ -1463,6 +1533,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		}
 	}
 	e.hoisted = nil
+	e.hoistAllocaText(fnBodyStart)
 
 	e.w("}\n")
 }
