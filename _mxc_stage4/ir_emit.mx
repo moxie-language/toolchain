@@ -109,6 +109,14 @@ type irEmitter struct {
 	instrScope  map[SSAInstruction]int32
 	scopeActive bool
 	sretType    string
+	pendingPhiTruncs []phiTrunc
+}
+
+type phiTrunc struct {
+	rawReg string
+	dstReg string
+	from   string
+	to     string
 }
 
 func sortedKeys(m map[string]bool) (ss []string) {
@@ -1529,6 +1537,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 			for _, instr := range b.Instrs {
 				e.emitInstr(instr)
 			}
+			e.flushPhiTruncs()
 		} else {
 			e.emitBlock(b)
 		}
@@ -1736,6 +1745,7 @@ func (e *irEmitter) emitBlock(b *SSABasicBlock) {
 		if !scopeSaveEmitted {
 			if _, isPhi := instr.(*SSAPhi); !isPhi {
 				scopeSaveEmitted = true
+				e.flushPhiTruncs()
 				e.emitScopeSave(b)
 			}
 		}
@@ -1752,6 +1762,7 @@ func (e *irEmitter) emitBlock(b *SSABasicBlock) {
 		}
 	}
 
+	e.flushPhiTruncs()
 	hasTerminator := e.blockDead
 	if !hasTerminator {
 		if n := len(b.Instrs); n > 0 {
@@ -3585,9 +3596,7 @@ func (e *irEmitter) emitUnOp(u *SSAUnOp) {
 		e.w(", ptr ")
 		e.w(addr)
 		e.w("\n")
-		if loadType == "double" || loadType == "float" {
-			e.setRegType(u, reg, loadType)
-		}
+		e.setRegType(u, reg, loadType)
 		return
 	}
 	valType := e.llvmType(u.X.SSAType())
@@ -4468,39 +4477,76 @@ func (e *irEmitter) emitPrintArg(val string, t Type) {
 func (e *irEmitter) emitPhi(p *SSAPhi) {
 	reg := e.regName(p)
 	typ := e.llvmType(p.SSAType())
-	e.w("  ")
-	e.w(reg)
-	e.w(" = phi ")
-	e.w(typ)
-	e.w(" ")
 	blk := p.InstrBlock()
 	if blk == nil {
 		return
 	}
-	for i, edge := range p.Edges {
-		if i > 0 {
-			e.w(", ")
-		}
-		e.w("[")
-		e.w(e.operand(edge))
-		e.w(", ")
-		if blk != nil && i < len(blk.Preds) {
-			pred := blk.Preds[i]
-			if pred != nil {
-				if exitLbl, ok := e.blockExitLabel[pred.Index]; ok {
-					e.w(exitLbl)
-				} else {
-					e.w(e.blockLabel(pred))
+	// Collect operands and check for i1/i32 mismatch.
+	ops := []string{:len(p.Edges):len(p.Edges)}
+	widen := false
+	if typ == "i1" {
+		for i, edge := range p.Edges {
+			ops[i] = e.operand(edge)
+			if !widen && len(ops[i]) > 0 && ops[i][0] == '%' {
+				if rt, ok := e.regTypes[ops[i]]; ok && rt == "i32" {
+					widen = true
 				}
-			} else {
-				e.w("%unknown")
 			}
-		} else {
-			e.w("%unknown")
 		}
+	}
+	if !widen {
+		// Normal path: emit phi as-is.
+		for i, edge := range p.Edges {
+			if ops[i] == "" {
+				ops[i] = e.operand(edge)
+			}
+		}
+		e.w("  ") ; e.w(reg) ; e.w(" = phi ") ; e.w(typ) ; e.w(" ")
+		for i, op := range ops {
+			if i > 0 { e.w(", ") }
+			e.w("[") ; e.w(op) ; e.w(", ")
+			e.emitPhiPred(blk, i)
+			e.w("]")
+		}
+		e.w("\n")
+		return
+	}
+	// Widen i1 phi to i32 to match edge types, trunc after all phis.
+	rawReg := e.nextReg2("phw")
+	e.w("  ") ; e.w(rawReg) ; e.w(" = phi i32 ")
+	for i, op := range ops {
+		if i > 0 { e.w(", ") }
+		e.w("[")
+		if op == "false" { op = "0" }
+		if op == "true" { op = "1" }
+		e.w(op) ; e.w(", ")
+		e.emitPhiPred(blk, i)
 		e.w("]")
 	}
 	e.w("\n")
+	e.pendingPhiTruncs = append(e.pendingPhiTruncs, phiTrunc{rawReg, reg, "i32", "i1"})
+}
+
+func (e *irEmitter) emitPhiPred(blk *SSABasicBlock, i int32) {
+	if i < len(blk.Preds) {
+		pred := blk.Preds[i]
+		if pred != nil {
+			if exitLbl, ok := e.blockExitLabel[pred.Index]; ok {
+				e.w(exitLbl)
+			} else {
+				e.w(e.blockLabel(pred))
+			}
+			return
+		}
+	}
+	e.w("%unknown")
+}
+
+func (e *irEmitter) flushPhiTruncs() {
+	for _, pt := range e.pendingPhiTruncs {
+		e.w("  ") ; e.w(pt.dstReg) ; e.w(" = trunc ") ; e.w(pt.from) ; e.w(" ") ; e.w(pt.rawReg) ; e.w(" to ") ; e.w(pt.to) ; e.w("\n")
+	}
+	e.pendingPhiTruncs = e.pendingPhiTruncs[:0]
 }
 
 func isNumericLiteral(s string) (ok bool) {
