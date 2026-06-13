@@ -4309,11 +4309,30 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			return
 		}
 	} else if name == "spawn" {
+		ipt := e.intptrType()
 		if len(c.Call.Args) >= 1 {
-			fnVal := e.operand(c.Call.Args[0])
-			// Extract raw function pointer from fat pointer {funcptr, context}
+			// For spawn, we need the raw function pointer, not the fat pointer.
+			// operand() wraps SSAFunction in { ptr null, ptr @fn } but ptrtoint
+			// needs a plain pointer.
+			var rawFnSym string
+			if fn, ok := c.Call.Args[0].(*SSAFunction); ok {
+				if !e.isPkgFunc(fn) {
+					e.declareExternalFunc(fn)
+				}
+				rawFnSym = e.funcSymbol(fn)
+			} else {
+				// Closure or indirect - extract funcptr from fat pointer via alloca
+				fnVal := e.operand(c.Call.Args[0])
+				fpTmp := e.nextReg2("sp")
+				e.w("  ") ; e.w(fpTmp) ; e.w(" = alloca {ptr, ptr}\n")
+				e.w("  store {ptr, ptr} ") ; e.w(fnVal) ; e.w(", ptr ") ; e.w(fpTmp) ; e.w("\n")
+				fpGep := e.nextReg2("sp")
+				e.w("  ") ; e.w(fpGep) ; e.w(" = getelementptr inbounds {ptr, ptr}, ptr ") ; e.w(fpTmp) ; e.w(", i32 0, i32 1\n")
+				rawFnSym = e.nextReg2("sp")
+				e.w("  ") ; e.w(rawFnSym) ; e.w(" = load ptr, ptr ") ; e.w(fpGep) ; e.w("\n")
+			}
 			fnPtr := e.nextReg2("sp")
-			e.w("  ") ; e.w(fnPtr) ; e.w(" = ptrtoint ptr ") ; e.w(fnVal) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+			e.w("  ") ; e.w(fnPtr) ; e.w(" = ptrtoint ptr ") ; e.w(rawFnSym) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
 			// Count channel args
 			nChans := int32(0)
 			for i := 1; i < len(c.Call.Args); i++ {
@@ -5809,35 +5828,16 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 	if valType == "ptr" {
 		valPtr = val
 	} else if e.isScalarType(valType) {
+		// Always heap-allocate scalar values for interface boxing.
+		// The invoke dispatch passes the value pointer to methods that
+		// dereference it; inlining via inttoptr produces an invalid address.
 		ipt := e.intptrType()
-		srcBits := e.intBits(valType)
-		dstBits := e.intBits(ipt)
-		if srcBits > dstBits || (valType == "double" && dstBits < 64) {
-			// Value doesn't fit in intptr - heap allocate
-			sz := e.nextReg2("mi")
-			e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(valType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
-			valPtr = e.nextReg2("mi")
-			e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
-			e.w("  store ") ; e.w(valType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
-			e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
-		} else {
-			ext := e.nextReg2("mi")
-			if valType == "float" {
-				ftmp := e.nextReg2("mi")
-				e.w("  ") ; e.w(ftmp) ; e.w(" = bitcast float ") ; e.w(val) ; e.w(" to i32\n")
-				if dstBits > 32 {
-					e.w("  ") ; e.w(ext) ; e.w(" = zext i32 ") ; e.w(ftmp) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
-				} else {
-					ext = ftmp
-				}
-			} else if srcBits == dstBits {
-				ext = val
-			} else {
-				e.w("  ") ; e.w(ext) ; e.w(" = zext ") ; e.w(valType) ; e.w(" ") ; e.w(val) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
-			}
-			valPtr = e.nextReg2("mi")
-			e.w("  ") ; e.w(valPtr) ; e.w(" = inttoptr ") ; e.w(ipt) ; e.w(" ") ; e.w(ext) ; e.w(" to ptr\n")
-		}
+		sz := e.nextReg2("mi")
+		e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(valType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+		valPtr = e.nextReg2("mi")
+		e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
+		e.w("  store ") ; e.w(valType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
+		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 	} else {
 		ipt := e.intptrType()
 		sz := e.nextReg2("ha")
@@ -10237,6 +10237,9 @@ func markReturnEscapes(f *SSAFunction) {
 	mergeInto := func(dst []*SSAAlloc, srcs []*SSAAlloc) ([]*SSAAlloc, bool) {
 		changed := false
 		for _, s := range srcs {
+			if s == nil {
+				continue // legacy compiler hashmap codegen can produce nil entries
+			}
 			found := false
 			for _, c := range dst {
 				if c == s {
@@ -10332,6 +10335,9 @@ func markReturnEscapes(f *SSAFunction) {
 				seen := map[*SSAAlloc]bool{}
 				for wi := 0; wi < len(work); wi++ {
 					a := work[wi]
+					if a == nil {
+						continue // legacy compiler hashmap codegen guard
+					}
 					if seen[a] {
 						continue
 					}
