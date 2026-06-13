@@ -79,8 +79,6 @@ import (
 	"go/token"
 	"go/types"
 	"os"
-	"runtime"
-	"sync"
 
 	"slices"
 
@@ -3143,8 +3141,6 @@ func (b *builder) buildYieldFunc(fn *Function) {
 //
 // Acquires prog.makeInterfaceTypesMu.
 func addMakeInterfaceType(prog *Program, t types.Type) {
-	prog.makeInterfaceTypesMu.Lock()
-	defer prog.makeInterfaceTypesMu.Unlock()
 	if prog.makeInterfaceTypes == nil {
 		prog.makeInterfaceTypes = make(map[types.Type]unit)
 	}
@@ -3157,27 +3153,13 @@ func addMakeInterfaceType(prog *Program, t types.Type) {
 // Build is intended for whole-program analysis; a typical compiler
 // need only build a single package.
 //
-// Build is idempotent and thread-safe.
+// Build is idempotent.
 func (prog *Program) Build() {
-	var wg sync.WaitGroup
-	for _, p := range prog.packages {
-		if prog.mode&BuildSerially != 0 {
-			p.Build()
-		} else {
-			wg.Add(1)
-			cpuLimit <- unit{} // acquire a token
-			go func(p *Package) {
-				p.Build()
-				wg.Done()
-				<-cpuLimit // release a token
-			}(p)
-		}
+	pkgs := prog.AllPackages() // sorted by import path
+	for _, p := range pkgs {
+		p.Build()
 	}
-	wg.Wait()
 }
-
-// cpuLimit is a counting semaphore to limit CPU parallelism.
-var cpuLimit = make(chan unit, runtime.GOMAXPROCS(0))
 
 // Build builds SSA code for all functions and vars in package p.
 //
@@ -3188,7 +3170,13 @@ var cpuLimit = make(chan unit, runtime.GOMAXPROCS(0))
 // packages on demand.
 //
 // Build is idempotent and thread-safe.
-func (p *Package) Build() { p.buildOnce.Do(p.build) }
+func (p *Package) Build() {
+	if p.built {
+		return
+	}
+	p.built = true
+	p.build()
+}
 
 func (p *Package) build() {
 	if p.info == nil {

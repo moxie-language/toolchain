@@ -8,13 +8,11 @@ import (
 	"fmt"
 	"go/types"
 	"slices"
-	"sync"
 )
 
 // A generic records information about a generic origin function,
 // including a cache of existing instantiations.
 type generic struct {
-	instancesMu sync.Mutex
 	instances   map[*typeList]*Function // canonical type arguments to an instance.
 }
 
@@ -29,8 +27,6 @@ func (fn *Function) instance(targs []types.Type, b *builder) *Function {
 
 	gen := fn.generic
 
-	gen.instancesMu.Lock()
-	defer gen.instancesMu.Unlock()
 	inst, ok := gen.instances[key]
 	if !ok {
 		inst = createInstance(fn, targs)
@@ -116,9 +112,6 @@ func createInstance(fn *Function, targs []types.Type) *Function {
 // isParameterized reports whether any of the specified types contains
 // a free type parameter. It is safe to call concurrently.
 func (prog *Program) isParameterized(ts ...types.Type) bool {
-	prog.hasParamsMu.Lock()
-	defer prog.hasParamsMu.Unlock()
-
 	// TODO(adonovan): profile. If this operation is expensive,
 	// handle the most common but shallow cases such as T, pkg.T,
 	// *T without consulting the cache under the lock.

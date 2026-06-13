@@ -13,7 +13,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
-	"sync"
+	"sort"
 
 	"golang.org/x/tools/internal/versions"
 )
@@ -266,9 +266,7 @@ func (prog *Program) CreatePackage(pkg *types.Package, files []*ast.File, info *
 	}
 
 	if prog.mode&PrintPackages != 0 {
-		printMu.Lock()
 		p.WriteTo(os.Stdout)
-		printMu.Unlock()
 	}
 
 	if importable {
@@ -279,16 +277,16 @@ func (prog *Program) CreatePackage(pkg *types.Package, files []*ast.File, info *
 	return p
 }
 
-// printMu serializes printing of Packages/Functions to stdout.
-var printMu sync.Mutex
-
 // AllPackages returns a new slice containing all packages created by
-// prog.CreatePackage in unspecified order.
+// prog.CreatePackage, sorted by import path for determinism.
 func (prog *Program) AllPackages() []*Package {
 	pkgs := make([]*Package, 0, len(prog.packages))
 	for _, pkg := range prog.packages {
 		pkgs = append(pkgs, pkg)
 	}
+	sort.Slice(pkgs, func(i, j int) bool {
+		return pkgs[i].Pkg.Path() < pkgs[j].Pkg.Path()
+	})
 	return pkgs
 }
 

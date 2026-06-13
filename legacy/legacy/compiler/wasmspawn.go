@@ -26,6 +26,7 @@ package compiler
 import (
 	"fmt"
 	"go/types"
+	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
@@ -53,8 +54,13 @@ func (c *compilerContext) scanWasmSpawnTargets(pkg *ssa.Package) {
 		return
 	}
 	seen := make(map[*ssa.Function]bool)
-	for _, mem := range pkg.Members {
-		fn, ok := mem.(*ssa.Function)
+	var memberNames []string
+	for name := range pkg.Members {
+		memberNames = append(memberNames, name)
+	}
+	sort.Strings(memberNames)
+	for _, name := range memberNames {
+		fn, ok := pkg.Members[name].(*ssa.Function)
 		if !ok {
 			continue
 		}

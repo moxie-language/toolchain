@@ -78,7 +78,7 @@ type (
 	ComdatSelectionKind C.LLVMComdatSelectionKind
 	IntPredicate        C.LLVMIntPredicate
 	FloatPredicate      C.LLVMRealPredicate
-	LandingPadClause    C.LLVMLandingPadClauseTy
+	LandingPadClause    int
 	InlineAsmDialect    C.LLVMInlineAsmDialect
 )
 
@@ -351,8 +351,8 @@ const (
 //-------------------------------------------------------------------------
 
 const (
-	LandingPadCatch  LandingPadClause = C.LLVMLandingPadCatch
-	LandingPadFilter LandingPadClause = C.LLVMLandingPadFilter
+	LandingPadCatch  LandingPadClause = 0
+	LandingPadFilter LandingPadClause = 1
 )
 
 //-------------------------------------------------------------------------
@@ -930,9 +930,9 @@ func ConstNUWAdd(lhs, rhs Value) (v Value) { v.C = C.LLVMConstNUWAdd(lhs.C, rhs.
 func ConstSub(lhs, rhs Value) (v Value)    { v.C = C.LLVMConstSub(lhs.C, rhs.C); return }
 func ConstNSWSub(lhs, rhs Value) (v Value) { v.C = C.LLVMConstNSWSub(lhs.C, rhs.C); return }
 func ConstNUWSub(lhs, rhs Value) (v Value) { v.C = C.LLVMConstNUWSub(lhs.C, rhs.C); return }
-func ConstMul(lhs, rhs Value) (v Value)    { v.C = C.LLVMConstMul(lhs.C, rhs.C); return }
-func ConstNSWMul(lhs, rhs Value) (v Value) { v.C = C.LLVMConstNSWMul(lhs.C, rhs.C); return }
-func ConstNUWMul(lhs, rhs Value) (v Value) { v.C = C.LLVMConstNUWMul(lhs.C, rhs.C); return }
+func ConstMul(lhs, rhs Value) (v Value)    { panic("LLVMConstMul removed in LLVM 21") }
+func ConstNSWMul(lhs, rhs Value) (v Value) { panic("LLVMConstNSWMul removed in LLVM 21") }
+func ConstNUWMul(lhs, rhs Value) (v Value) { panic("LLVMConstNUWMul removed in LLVM 21") }
 func ConstXor(lhs, rhs Value) (v Value)    { v.C = C.LLVMConstXor(lhs.C, rhs.C); return }
 
 func ConstGEP(t Type, v Value, indices []Value) (rv Value) {

@@ -17,7 +17,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/shlex"
@@ -622,48 +621,20 @@ func main() {
 			os.Exit(1)
 		}
 
-		fail := make(chan struct{}, 1)
-		var wg sync.WaitGroup
-		bufs := make([]testOutputBuf, len(explicitPkgNames))
-		for i := range bufs {
-			bufs[i].done = make(chan struct{})
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range bufs {
-				bufs[i].flush(os.Stdout, os.Stderr)
+		// Run tests sequentially. No goroutines, deterministic output order.
+		failed := false
+		for _, pkgName := range explicitPkgNames {
+			passed, err := Test(pkgName, os.Stdout, os.Stderr, options, outpath)
+			if err != nil {
+				wd, _ := os.Getwd()
+				diagnostics.CreateDiagnostics(err).WriteTo(os.Stderr, wd)
+				os.Exit(1)
 			}
-		}()
-		testSema := make(chan struct{}, cap(options.Semaphore))
-		for i, pkgName := range explicitPkgNames {
-			pkgName := pkgName
-			buf := &bufs[i]
-			testSema <- struct{}{}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				defer func() { <-testSema }()
-				defer close(buf.done)
-				stdout := (*testStdout)(buf)
-				stderr := (*testStderr)(buf)
-				passed, err := Test(pkgName, stdout, stderr, options, outpath)
-				if err != nil {
-					wd, _ := os.Getwd()
-					diagnostics.CreateDiagnostics(err).WriteTo(os.Stderr, wd)
-					os.Exit(1)
-				}
-				if !passed {
-					select {
-					case fail <- struct{}{}:
-					default:
-					}
-				}
-			}()
+			if !passed {
+				failed = true
+			}
 		}
-		wg.Wait()
-		close(fail)
-		if _, fail := <-fail; fail {
+		if failed {
 			os.Exit(1)
 		}
 	case "targets":
@@ -845,78 +816,3 @@ func main() {
 	}
 }
 
-// testOutputBuf buffers the output of concurrent tests.
-type testOutputBuf struct {
-	mu             sync.Mutex
-	output         []outputEntry
-	stdout, stderr io.Writer
-	outerr, errerr error
-	done           chan struct{}
-}
-
-func (b *testOutputBuf) flush(stdout, stderr io.Writer) error {
-	b.mu.Lock()
-	b.stdout = stdout
-	b.stderr = stderr
-	for _, e := range b.output {
-		var w io.Writer
-		if e.stderr {
-			w = stderr
-		} else {
-			w = stdout
-		}
-		w.Write(e.data)
-	}
-	b.mu.Unlock()
-	<-b.done
-	return nil
-}
-
-type testStdout testOutputBuf
-
-func (out *testStdout) Write(data []byte) (int, error) {
-	buf := (*testOutputBuf)(out)
-	buf.mu.Lock()
-	if buf.stdout != nil {
-		err := out.outerr
-		buf.mu.Unlock()
-		if err != nil {
-			return 0, err
-		}
-		return buf.stdout.Write(data)
-	}
-	defer buf.mu.Unlock()
-	if len(buf.output) == 0 || buf.output[len(buf.output)-1].stderr {
-		buf.output = append(buf.output, outputEntry{stderr: false})
-	}
-	last := &buf.output[len(buf.output)-1]
-	last.data = append(last.data, data...)
-	return len(data), nil
-}
-
-type testStderr testOutputBuf
-
-func (out *testStderr) Write(data []byte) (int, error) {
-	buf := (*testOutputBuf)(out)
-	buf.mu.Lock()
-	if buf.stderr != nil {
-		err := out.errerr
-		buf.mu.Unlock()
-		if err != nil {
-			return 0, err
-		}
-		return buf.stderr.Write(data)
-	}
-	defer buf.mu.Unlock()
-	if len(buf.output) == 0 || !buf.output[len(buf.output)-1].stderr {
-		buf.output = append(buf.output, outputEntry{stderr: true})
-	}
-	last := &buf.output[len(buf.output)-1]
-	last.data = append(last.data, data...)
-	return len(data), nil
-}
-
-type outputEntry struct {
-	stderr bool
-	data   []byte
-}

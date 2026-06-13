@@ -24,6 +24,7 @@ package compiler
 
 import (
 	"go/types"
+	"sort"
 
 	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
@@ -62,8 +63,13 @@ func (c *compilerContext) scanNativeSpawnTargets(pkg *ssa.Package) {
 	// referenced from anonymous functions / closures get picked up via
 	// fn.AnonFuncs.
 	for _, p := range c.program.AllPackages() {
-		for _, mem := range p.Members {
-			switch m := mem.(type) {
+		var names []string
+		for name := range p.Members {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			switch m := p.Members[name].(type) {
 			case *ssa.Function:
 				c.scanFnDeep(m, seen, scanned)
 			case *ssa.Type:

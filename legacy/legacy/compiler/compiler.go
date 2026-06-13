@@ -354,7 +354,13 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 	c.loadASTComments(pkg)
 	// Also scan all imported packages for //:linkname directives.
 	if pkg.Program() != nil {
-		for _, iPkg := range pkg.Program().Packages {
+		var importPaths []string
+		for path := range pkg.Program().Packages {
+			importPaths = append(importPaths, path)
+		}
+		sort.Strings(importPaths)
+		for _, path := range importPaths {
+			iPkg := pkg.Program().Packages[path]
 			if iPkg != pkg {
 				c.loadASTComments(iPkg)
 			}

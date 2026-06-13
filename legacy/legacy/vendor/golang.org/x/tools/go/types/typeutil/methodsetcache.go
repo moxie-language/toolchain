@@ -8,19 +8,17 @@ package typeutil
 
 import (
 	"go/types"
-	"sync"
 )
 
 // A MethodSetCache records the method set of each type T for which
 // MethodSet(T) is called so that repeat queries are fast.
 // The zero value is a ready-to-use cache instance.
 type MethodSetCache struct {
-	mu     sync.Mutex
 	named  map[*types.Named]struct{ value, pointer *types.MethodSet } // method sets for named N and *N
 	others map[types.Type]*types.MethodSet                            // all other types
 }
 
-// MethodSet returns the method set of type T.  It is thread-safe.
+// MethodSet returns the method set of type T.
 //
 // If cache is nil, this function is equivalent to types.NewMethodSet(T).
 // Utility functions can thus expose an optional *MethodSetCache
@@ -29,8 +27,6 @@ func (cache *MethodSetCache) MethodSet(T types.Type) *types.MethodSet {
 	if cache == nil {
 		return types.NewMethodSet(T)
 	}
-	cache.mu.Lock()
-	defer cache.mu.Unlock()
 
 	switch T := types.Unalias(T).(type) {
 	case *types.Named:

@@ -13,7 +13,6 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
-	"sync"
 
 	"golang.org/x/tools/go/types/typeutil"
 	"golang.org/x/tools/internal/typeparams"
@@ -30,20 +29,16 @@ type Program struct {
 	canon *canonizer     // type canonicalization map
 	ctxt  *types.Context // cache for type checking instantiations
 
-	methodsMu  sync.Mutex
 	methodSets typeutil.Map // maps type to its concrete *methodSet
 
 	// memoization of whether a type refers to type parameters
-	hasParamsMu sync.Mutex
 	hasParams   typeparams.Free
 
 	// set of concrete types used as MakeInterface operands
-	makeInterfaceTypesMu sync.Mutex
 	makeInterfaceTypes   map[types.Type]unit // (may contain redundant identical types)
 
 	// objectMethods is a memoization of objectMethod
 	// to avoid creation of duplicate methods from type information.
-	objectMethodsMu sync.Mutex
 	objectMethods   map[*types.Func]*Function
 
 	noReturn func(*types.Func) bool // (optional) predicate that decides whether a given call cannot return
@@ -68,7 +63,7 @@ type Package struct {
 
 	// The following fields are set transiently, then cleared
 	// after building.
-	buildOnce   sync.Once           // ensures package building occurs once
+	built       bool                // ensures package building occurs once
 	ninit       int32               // number of init functions
 	info        *types.Info         // package type information
 	files       []*ast.File         // package ASTs

@@ -3,7 +3,6 @@ package llvmpure
 import (
 	"fmt"
 	"os"
-	"sync"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -254,27 +253,29 @@ const (
 var (
 	libLLVM  uintptr
 	libGlue  uintptr
-	initOnce sync.Once
+	initDone bool
 	initErr  error
 )
 
 func Init(llvmPath, gluePath string) error {
-	initOnce.Do(func() {
-		var err error
-		libLLVM, err = purego.Dlopen(llvmPath, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+	if initDone {
+		return initErr
+	}
+	initDone = true
+	var err error
+	libLLVM, err = purego.Dlopen(llvmPath, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+	if err != nil {
+		initErr = fmt.Errorf("dlopen %s: %w", llvmPath, err)
+		return initErr
+	}
+	if gluePath != "" {
+		libGlue, err = purego.Dlopen(gluePath, purego.RTLD_NOW|purego.RTLD_GLOBAL)
 		if err != nil {
-			initErr = fmt.Errorf("dlopen %s: %w", llvmPath, err)
-			return
+			initErr = fmt.Errorf("dlopen %s: %w", gluePath, err)
+			return initErr
 		}
-		if gluePath != "" {
-			libGlue, err = purego.Dlopen(gluePath, purego.RTLD_NOW|purego.RTLD_GLOBAL)
-			if err != nil {
-				initErr = fmt.Errorf("dlopen %s: %w", gluePath, err)
-				return
-			}
-		}
-		registerAll()
-	})
+	}
+	registerAll()
 	return initErr
 }
 

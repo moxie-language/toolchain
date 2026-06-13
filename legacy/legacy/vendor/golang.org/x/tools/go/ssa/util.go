@@ -13,7 +13,6 @@ import (
 	"go/types"
 	"io"
 	"os"
-	"sync"
 	_ "unsafe" // for go:linkname hack
 
 	"golang.org/x/tools/go/types/typeutil"
@@ -262,7 +261,6 @@ func instanceArgs(info *types.Info, id *ast.Ident) []types.Type {
 // Mapping of a type T to a canonical instance C s.t. types.Identical(T, C).
 // Thread-safe.
 type canonizer struct {
-	mu    sync.Mutex
 	types typeutil.Map // map from type to a canonical instance
 	lists typeListMap  // map from a list of types to a canonical instance
 }
@@ -303,8 +301,6 @@ func (c *canonizer) List(ts []types.Type) *typeList {
 	}
 	l := unaliasAll(ts)
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	return c.lists.rep(l)
 }
 
@@ -315,9 +311,6 @@ func (c *canonizer) List(ts []types.Type) *typeList {
 // and may contain deeply nested aliases.
 func (c *canonizer) Type(T types.Type) types.Type {
 	T = types.Unalias(T) // remove the top level alias.
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	if r := c.types.At(T); r != nil {
 		return r.(types.Type)

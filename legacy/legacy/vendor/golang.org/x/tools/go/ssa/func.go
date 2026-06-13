@@ -408,9 +408,7 @@ func (f *Function) done() {
 		f.build = nil // function is built
 
 		if f.Prog.mode&PrintFunctions != 0 {
-			printMu.Lock()
 			f.WriteTo(os.Stdout)
-			printMu.Unlock()
 		}
 
 		if f.Prog.mode&SanityCheckFunctions != 0 {

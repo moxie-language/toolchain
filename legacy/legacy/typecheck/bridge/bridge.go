@@ -8,7 +8,6 @@ package bridge
 
 import (
 	"go/types"
-	"sync"
 	"unsafe"
 
 	"moxie/typecheck"
@@ -17,7 +16,6 @@ import (
 // Importer wraps a go/types package map and satisfies typecheck.Importer.
 // Each package is translated lazily and cached.
 type Importer struct {
-	mu    sync.Mutex
 	pkgs  map[string]*types.Package // import path → go/types Package
 	cache map[string]*typecheck.Package
 }
@@ -32,8 +30,6 @@ func New(pkgs map[string]*types.Package) *Importer {
 
 // Import satisfies typecheck.Importer.
 func (imp *Importer) Import(path string) (*typecheck.Package, error) {
-	imp.mu.Lock()
-	defer imp.mu.Unlock()
 	if p, ok := imp.cache[path]; ok {
 		return p, nil
 	}

@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 )
 
 // Keys is a slice of all available environment variable keys.
@@ -47,13 +46,17 @@ var goEnvVars struct {
 	GOVERSION string
 }
 
-var goEnvVarsOnce sync.Once
-var goEnvVarsErr error // error returned from cmd.Run
+var goEnvVarsDone bool
+var goEnvVarsErr error
 
 // Make sure goEnvVars is fresh. This can be called multiple times, the first
 // time will update all environment variables in goEnvVars.
 func readGoEnvVars() error {
-	goEnvVarsOnce.Do(func() {
+	if goEnvVarsDone {
+		return goEnvVarsErr
+	}
+	goEnvVarsDone = true
+	func() {
 		cmd := exec.Command("go", "env", "-json", "GOPATH", "GOROOT", "GOVERSION")
 		output, err := cmd.Output()
 		if err != nil {
@@ -82,7 +85,7 @@ func readGoEnvVars() error {
 			// installed.
 			goEnvVarsErr = fmt.Errorf("unexpected error while unmarshalling `go env` output: %w", err)
 		}
-	})
+	}()
 
 	return goEnvVarsErr
 }

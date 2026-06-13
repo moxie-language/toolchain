@@ -43,9 +43,6 @@ func (prog *Program) MethodValue(sel *types.Selection) *Function {
 	var b builder
 
 	m := func() *Function {
-		prog.methodsMu.Lock()
-		defer prog.methodsMu.Unlock()
-
 		// Get or create SSA method set.
 		mset, ok := prog.methodSets.At(T).(*methodSet)
 		if !ok {
@@ -111,8 +108,6 @@ func (prog *Program) objectMethod(obj *types.Func, b *builder) *Function {
 	}
 
 	// Consult/update cache of methods created from types.Func.
-	prog.objectMethodsMu.Lock()
-	defer prog.objectMethodsMu.Unlock()
 	fn, ok := prog.objectMethods[obj]
 	if !ok {
 		fn = createFunction(prog, obj, obj.Name(), nil, nil, "")
@@ -160,9 +155,6 @@ type methodSet struct {
 //
 // Acquires prog.makeInterfaceTypesMu.
 func (prog *Program) RuntimeTypes() []types.Type {
-	prog.makeInterfaceTypesMu.Lock()
-	defer prog.makeInterfaceTypesMu.Unlock()
-
 	// Compute the derived types on demand, since many SSA clients
 	// never call RuntimeTypes, and those that do typically call
 	// it once (often within ssautil.AllFunctions, which will
