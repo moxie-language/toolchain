@@ -1,6 +1,9 @@
 package main
 
-import "git.smesh.lol/moxie/pkg/token"
+import (
+	"git.smesh.lol/moxie/pkg/token"
+	. "git.smesh.lol/moxie/pkg/types"
+)
 
 type SelectDir int32
 
@@ -288,7 +291,7 @@ type SSAGlobal struct {
 }
 
 func (g *SSAGlobal) MemberName() (s string) { return g.name }
-func (g *SSAGlobal) MemberString() (s string) { return g.pkg.Pkg.Path() | "." | g.name }
+func (g *SSAGlobal) MemberString() (s string) { return g.pkg.Pkg.Path | "." | g.name }
 func (g *SSAGlobal) MemberType() (t Type) { return g.typ }
 func (g *SSAGlobal) MemberPkg() (s *SSAPackage) { return g.pkg }
 func (g *SSAGlobal) SSAName() (s string) { return g.name }
@@ -303,9 +306,9 @@ type SSAType_ struct {
 	pkg    *SSAPackage
 }
 
-func (t *SSAType_) MemberName() (s string) { return t.object.Name() }
-func (t *SSAType_) MemberString() (s string) { return t.pkg.Pkg.Path() | "." | t.object.Name() }
-func (t *SSAType_) MemberType() (tv Type) { return t.object.Type() }
+func (t *SSAType_) MemberName() (s string) { return t.object.Name }
+func (t *SSAType_) MemberString() (s string) { return t.pkg.Pkg.Path | "." | t.object.Name }
+func (t *SSAType_) MemberType() (tv Type) { return t.object.Typ }
 func (t *SSAType_) MemberPkg() (s *SSAPackage) { return t.pkg }
 
 // Package-level named constant.
@@ -315,9 +318,9 @@ type SSANamedConst struct {
 	pkg    *SSAPackage
 }
 
-func (c *SSANamedConst) MemberName() (s string) { return c.object.Name() }
-func (c *SSANamedConst) MemberString() (s string) { return c.pkg.Pkg.Path() | "." | c.object.Name() }
-func (c *SSANamedConst) MemberType() (t Type) { return c.object.Type() }
+func (c *SSANamedConst) MemberName() (s string) { return c.object.Name }
+func (c *SSANamedConst) MemberString() (s string) { return c.pkg.Pkg.Path | "." | c.object.Name }
+func (c *SSANamedConst) MemberType() (t Type) { return c.object.Typ }
 func (c *SSANamedConst) MemberPkg() (s *SSAPackage) { return c.pkg }
 
 // Parameter.
@@ -882,17 +885,17 @@ func ssaElemType(t Type) (tv Type) {
 	if t == nil {
 		return nil
 	}
-	switch t := safeUnderlying(t).(type) {
+	switch t := SafeUnderlying(t).(type) {
 	case *Slice:
-		return t.Elem()
+		return t.Elem
 	case *Array:
-		return t.Elem()
+		return t.Elem
 	case *TCMap:
-		return t.Elem()
+		return t.Elem
 	case *Pointer:
-		return t.Elem()
+		return t.Base
 	case *Basic:
-		if t.Info()&IsString != 0 {
+		if t.Info&IsString != 0 {
 			return Typ[Uint8]
 		}
 	}
@@ -903,8 +906,8 @@ func ssaChanElemType(t Type) (tv Type) {
 	if t == nil {
 		return nil
 	}
-	if ch, ok := safeUnderlying(t).(*TCChan); ok {
-		return ch.Elem()
+	if ch, ok := SafeUnderlying(t).(*TCChan); ok {
+		return ch.Elem
 	}
 	return nil
 }
@@ -913,8 +916,8 @@ func ssaIsStringType(t Type) (ok bool) {
 	if t == nil {
 		return false
 	}
-	if b, ok := safeUnderlying(t).(*Basic); ok {
-		return b.Info()&IsString != 0
+	if b, ok := SafeUnderlying(t).(*Basic); ok {
+		return b.Info&IsString != 0
 	}
 	return false
 }
@@ -923,20 +926,20 @@ func ssaSliceOf(t Type) (tv Type) {
 	if t == nil {
 		return nil
 	}
-	if b, ok := safeUnderlying(t).(*Basic); ok && b.Info()&IsString != 0 {
+	if b, ok := SafeUnderlying(t).(*Basic); ok && b.Info&IsString != 0 {
 		return t
 	}
-	switch t := safeUnderlying(t).(type) {
+	switch t := SafeUnderlying(t).(type) {
 	case *Slice:
 		return t
 	case *Array:
-		if b, ok := t.Elem().(*Basic); ok && b.kind == Uint8 {
+		if b, ok := t.Elem.(*Basic); ok && b.Kind == Uint8 {
 			return Typ[TCString]
 		}
-		return NewSlice(t.Elem())
+		return NewSlice(t.Elem)
 	case *Pointer:
-		if t.Elem() != nil {
-			return ssaSliceOf(t.Elem())
+		if t.Base != nil {
+			return ssaSliceOf(t.Base)
 		}
 	}
 	return Typ[TCString]
@@ -947,7 +950,7 @@ func ssaTupleElemType(t Type, i int32) (tv Type) {
 		return nil
 	}
 	if tup, ok := t.(*Tuple); ok && i < tup.Len() {
-		return tup.At(i).Type()
+		return tup.At(i).Typ
 	}
 	return nil
 }

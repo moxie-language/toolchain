@@ -4,6 +4,7 @@ import (
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"git.smesh.lol/moxie/pkg/syntax"
 	"git.smesh.lol/moxie/pkg/token"
+	. "git.smesh.lol/moxie/pkg/types"
 )
 
 func asType(t Type) (tv Type) { return t }
@@ -16,7 +17,7 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 		Members: map[string]SSAMember{},
 	}
 	prog.packages[pkg] = p
-	prog.imported[pkg.Path()] = p
+	prog.imported[pkg.Path] = p
 
 	pb := &ssaPkgBuilder{pkg: p, info: info, prog: prog}
 
@@ -30,7 +31,7 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 	pb.fileScopes = map[*syntax.File]*Scope{}
 	pb.varInitScopes = map[*syntax.VarDecl]*Scope{}
 	for _, f := range files {
-		pb.fileScopes[f] = NewScope(pkg.Scope())
+		pb.fileScopes[f] = NewScope(pkg.Scope)
 	}
 	pb.buildImportSegScopes()
 
@@ -78,7 +79,7 @@ func (pb *ssaPkgBuilder) buildImportSegScopes() {
 	pb.segScopes = nil
 	for si := 0; si < len(mxutil.ConcatImportSegs); si++ {
 		seg := mxutil.ConcatImportSegs[si]
-		sc := NewScope(pb.pkg.Pkg.Scope())
+		sc := NewScope(pb.pkg.Pkg.Scope)
 		for _, spec := range seg.Specs {
 			path := mxutil.ExtractQuoted(spec)
 			if path == "" {
@@ -94,7 +95,7 @@ func (pb *ssaPkgBuilder) buildImportSegScopes() {
 			}
 			localName := alias
 			if localName == "" {
-				localName = target.Name()
+				localName = target.Name
 			}
 			if localName == "" {
 				for i := len(path) - 1; i >= 0; i-- {
@@ -129,8 +130,8 @@ func (pb *ssaPkgBuilder) resolveImportTarget(path string) (t *TCPackage) {
 	if impPkg != nil && impPkg.Pkg != nil {
 		return impPkg.Pkg
 	}
-	ensureImportRegistry()
-	return importRegistry[path]
+	EnsureImportRegistry()
+	return ImportRegistry[path]
 }
 
 // declScope returns the import scope of the source file a decl came from.
@@ -212,7 +213,7 @@ func (pb *ssaPkgBuilder) registerImport(d *syntax.ImportDecl) {
 	// Default name is the package clause name, NOT the path tail: the two
 	// differ for packages like crypto/ec (package btcec).
 	if localName == "" {
-		localName = target.Name()
+		localName = target.Name
 	}
 	if localName == "" {
 		for i := len(path) - 1; i >= 0; i-- {
@@ -231,14 +232,14 @@ func (pb *ssaPkgBuilder) registerImport(d *syntax.ImportDecl) {
 	// Track all direct imports regardless of local-name collisions.
 	tcp := pb.pkg.Pkg
 	found := false
-	for _, ip := range tcp.imports {
+	for _, ip := range tcp.Imports {
 		if ip == target {
 			found = true
 			break
 		}
 	}
 	if !found {
-		tcp.imports = append(tcp.imports, target)
+		tcp.Imports = append(tcp.Imports, target)
 	}
 	pn := NewPkgName(nil, localName, target)
 	// File scope binding wins over a same-named import in another file.
@@ -246,10 +247,10 @@ func (pb *ssaPkgBuilder) registerImport(d *syntax.ImportDecl) {
 		pb.curFileScope.Insert(pn)
 	}
 	// Legacy fallback for lookup paths without file context: first-wins.
-	if existing := pb.pkg.Pkg.Scope().Lookup(localName); existing != nil {
+	if existing := pb.pkg.Pkg.Scope.Lookup(localName); existing != nil {
 		return
 	}
-	pb.pkg.Pkg.Scope().Insert(pn)
+	pb.pkg.Pkg.Scope.Insert(pn)
 }
 
 func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t Type) {
@@ -260,13 +261,13 @@ func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t Type) {
 	case *syntax.Name:
 		if _, obj := Universe.LookupParent(e.Value); obj != nil {
 			if tn, ok := obj.(*TypeName); ok {
-				return tn.Type()
+				return tn.Typ
 			}
 		}
 		if pkg != nil {
-			obj := pkg.Pkg.Scope().Lookup(e.Value)
+			obj := pkg.Pkg.Scope.Lookup(e.Value)
 			if tn, ok := obj.(*TypeName); ok {
-				return tn.Type()
+				return tn.Typ
 			}
 		}
 	case *syntax.Operation:
@@ -288,7 +289,7 @@ func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t Type) {
 	case *syntax.SliceType:
 		elem := pkgResolveTypeAST(pkg, e.Elem)
 		if elem != nil {
-			if b, ok := elem.(*Basic); ok && b.kind == Uint8 {
+			if b, ok := elem.(*Basic); ok && b.Kind == Uint8 {
 				return Typ[TCString]
 			}
 			return NewSlice(elem)
@@ -303,11 +304,11 @@ func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t Type) {
 		return pkgResolveSigAST(pkg, e)
 	case *syntax.SelectorExpr:
 		if x, ok := e.X.(*syntax.Name); ok {
-			pn, _ := pkg.Pkg.Scope().Lookup(x.Value).(*PkgName)
-			if pn != nil && pn.Imported() != nil {
-				sel := pn.Imported().Scope().Lookup(e.Sel.Value)
+			pn, _ := pkg.Pkg.Scope.Lookup(x.Value).(*PkgName)
+			if pn != nil && pn.Imported != nil {
+				sel := pn.Imported.Scope.Lookup(e.Sel.Value)
 				if tn, ok2 := sel.(*TypeName); ok2 {
-					return tn.Type()
+					return tn.Typ
 				}
 			}
 		}
@@ -316,7 +317,7 @@ func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t Type) {
 	case *syntax.DotsType:
 		elem := pkgResolveTypeAST(pkg, e.Elem)
 		if elem != nil {
-			if b, ok := elem.(*Basic); ok && b.kind == Uint8 {
+			if b, ok := elem.(*Basic); ok && b.Kind == Uint8 {
 				return Typ[TCString]
 			}
 			return NewSlice(elem)
@@ -376,12 +377,12 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 		return
 	}
 	var obj *TCFunc
-	if o := pb.pkg.Pkg.Scope().Lookup(d.Name.Value); o != nil {
+	if o := pb.pkg.Pkg.Scope.Lookup(d.Name.Value); o != nil {
 		obj, _ = o.(*TCFunc)
 	}
 	var sig *Signature
 	if obj != nil {
-		sig, _ = obj.Type().(*Signature)
+		sig, _ = obj.Typ.(*Signature)
 	}
 	if sig == nil && d.Type != nil {
 		sig = pkgResolveSigAST(pb.pkg, d.Type)
@@ -400,7 +401,7 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 			fn.isExternC = true
 		}
 	}
-	if d.Body == nil && isNoContextExtern(pb.pkg.Pkg.Path(), d.Name.Value) {
+	if d.Body == nil && isNoContextExtern(pb.pkg.Pkg.Path, d.Name.Value) {
 		fn.isExternC = true
 	}
 	pb.pkg.SetMember(fn.name, fn)
@@ -502,7 +503,7 @@ func (pb *ssaPkgBuilder) registerMethod(d *syntax.FuncDecl) {
 	obj = pb.findMethod(recvTypeName, d.Name.Value)
 	var sig *Signature
 	if obj != nil {
-		sig, _ = obj.Type().(*Signature)
+		sig, _ = obj.Typ.(*Signature)
 	}
 	if sig == nil && d.Type != nil {
 		sig = pkgResolveSigAST(pb.pkg, d.Type)
@@ -539,7 +540,7 @@ func ssaRecvTypeName(recv *syntax.Field) (s string) {
 }
 
 func (pb *ssaPkgBuilder) findMethod(typeName string, methodName string) (t *TCFunc) {
-	obj := pb.pkg.Pkg.Scope().Lookup(typeName)
+	obj := pb.pkg.Pkg.Scope.Lookup(typeName)
 	if obj == nil && Universe != nil {
 		obj = Universe.Lookup(typeName)
 	}
@@ -550,18 +551,18 @@ func (pb *ssaPkgBuilder) findMethod(typeName string, methodName string) (t *TCFu
 	if !ok {
 		return nil
 	}
-	switch t := tn.Type().(type) {
+	switch t := tn.Typ.(type) {
 	case *Named:
 		for i := int32(0); i < t.NumMethods(); i++ {
 			m := t.Method(i)
-			if m.Name() == methodName {
+			if m.Name == methodName {
 				return m
 			}
 		}
 	case *Basic:
 		for i := int32(0); i < t.NumMethods(); i++ {
 			m := t.Method(i)
-			if m.Name() == methodName {
+			if m.Name == methodName {
 				return m
 			}
 		}
@@ -572,12 +573,12 @@ func (pb *ssaPkgBuilder) findMethod(typeName string, methodName string) (t *TCFu
 func (pb *ssaPkgBuilder) registerVar(d *syntax.VarDecl) {
 	for _, name := range d.NameList {
 		var obj *TCVar
-		if o := pb.pkg.Pkg.Scope().Lookup(name.Value); o != nil {
+		if o := pb.pkg.Pkg.Scope.Lookup(name.Value); o != nil {
 			obj, _ = o.(*TCVar)
 		}
 		var typ Type
 		if obj != nil {
-			typ = obj.Type()
+			typ = obj.Typ
 		}
 		if typ == nil && d.Type != nil {
 			typ = pkgResolveTypeAST(pb.pkg, d.Type)
@@ -602,7 +603,7 @@ func (pb *ssaPkgBuilder) registerVar(d *syntax.VarDecl) {
 
 func (pb *ssaPkgBuilder) registerType(d *syntax.TypeDecl) {
 	var obj *TypeName
-	if o := pb.pkg.Pkg.Scope().Lookup(d.Name.Value); o != nil {
+	if o := pb.pkg.Pkg.Scope.Lookup(d.Name.Value); o != nil {
 		obj, _ = o.(*TypeName)
 	}
 	if obj == nil {
@@ -611,9 +612,9 @@ func (pb *ssaPkgBuilder) registerType(d *syntax.TypeDecl) {
 			underlying = &TCStruct{}
 		}
 		named := NewNamed(NewTypeName(pb.pkg.Pkg, d.Name.Value, nil), underlying)
-		named.obj.typ = named
-		pb.pkg.Pkg.Scope().Insert(named.obj)
-		obj = named.obj
+		named.Obj.Typ = named
+		pb.pkg.Pkg.Scope.Insert(named.Obj)
+		obj = named.Obj
 	}
 	t := &SSAType_{object: obj, pkg: pb.pkg}
 	pb.pkg.SetMember(d.Name.Value, t)
@@ -622,7 +623,7 @@ func (pb *ssaPkgBuilder) registerType(d *syntax.TypeDecl) {
 func (pb *ssaPkgBuilder) registerConst(d *syntax.ConstDecl) {
 	for _, name := range d.NameList {
 		var obj *TCConst
-		if o := pb.pkg.Pkg.Scope().Lookup(name.Value); o != nil {
+		if o := pb.pkg.Pkg.Scope.Lookup(name.Value); o != nil {
 			obj, _ = o.(*TCConst)
 		}
 		if obj == nil {
@@ -630,7 +631,7 @@ func (pb *ssaPkgBuilder) registerConst(d *syntax.ConstDecl) {
 		}
 		c := &SSANamedConst{
 			object: obj,
-			Value:  &SSAConst{typ: obj.Type(), val: localizeConstVal(obj.Val(), obj.Type())},
+			Value:  &SSAConst{typ: obj.Typ, val: localizeConstVal(obj.Val, obj.Typ)},
 			pkg:    pb.pkg,
 		}
 		pb.pkg.SetMember(name.Value, c)
@@ -653,8 +654,8 @@ func (pb *ssaPkgBuilder) buildFile(f *syntax.File) {
 
 func (pb *ssaPkgBuilder) buildVarInits() {
 	sig := &Signature{
-		params:  NewTuple(),
-		results: NewTuple(),
+		Params:  NewTuple(),
+		Results: NewTuple(),
 	}
 	fn, _ := pb.pkg.Members["main"].(*SSAFunction)
 	if fn == nil {
@@ -667,7 +668,7 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 		pb.pkg.SetMember("main", fn)
 	}
 	if len(fn.Blocks) > 0 {
-		initSig := &Signature{params: NewTuple(), results: NewTuple()}
+		initSig := &Signature{Params: NewTuple(), Results: NewTuple()}
 		initFn := &SSAFunction{
 			name:      "__varinit",
 			Signature: initSig,
@@ -853,19 +854,19 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 	if sig == nil {
 		return
 	}
-	params := sig.Params()
+	params := sig.Params
 	if d.Recv != nil {
-		recv := sig.Recv()
+		recv := sig.Recv
 		if recv != nil {
-			recvName := recv.Name()
+			recvName := recv.Name
 			if recvName == "" && d.Recv.Name != nil {
 				recvName = d.Recv.Name.Value
 			}
 			// All receivers are ptr in Moxie. If the type checker says
 			// value receiver, wrap in pointer so the SSA type is *T.
-			recvType := recv.Type()
+			recvType := recv.Typ
 			isValRecv := false
-			if _, isP := safeUnderlying(recvType).(*Pointer); !isP {
+			if _, isP := SafeUnderlying(recvType).(*Pointer); !isP {
 				recvType = NewPointer(recvType)
 				isValRecv = true
 			}
@@ -877,15 +878,15 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 			}
 			fb.fn.Params = append(fb.fn.Params, p)
 			if recvName != "" && recvName != "_" {
-				recvObj := NewTCVar(fb.fn.Pkg.Pkg, recvName, recv.Type())
+				recvObj := NewTCVar(fb.fn.Pkg.Pkg, recvName, recv.Typ)
 				p.object = recvObj
-				alloc := fb.emitAlloc(recv.Type(), 0)
+				alloc := fb.emitAlloc(recv.Typ, 0)
 				fb.vars[recvObj] = alloc
 				fb.paramAllocas = append(fb.paramAllocas, alloc)
 				if isValRecv {
 					// p is *T; load the value T from the pointer, then store.
 					deref := &SSAUnOp{Op: OpMul, X: p}
-					deref.typ = recv.Type()
+					deref.typ = recv.Typ
 					fb.fn.Blocks[0].Instrs = append(fb.fn.Blocks[0].Instrs, deref)
 					fb.emitStore(alloc, deref)
 				} else {
@@ -898,15 +899,15 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 		for i := 0; i < params.Len(); i++ {
 			pvar := params.At(i)
 			p := &SSAParameter{
-				name:   pvar.Name(),
-				typ:    pvar.Type(),
+				name:   pvar.Name,
+				typ:    pvar.Typ,
 				pos:    fb.fn.pos,
 				parent: fb.fn,
 			}
 			fb.fn.Params = append(fb.fn.Params, p)
-			if pvar.Name() != "" && pvar.Name() != "_" {
-				obj := NewTCVar(fb.fn.Pkg.Pkg, pvar.Name(), pvar.Type())
-				alloc := fb.emitAlloc(pvar.Type(), p.pos)
+			if pvar.Name != "" && pvar.Name != "_" {
+				obj := NewTCVar(fb.fn.Pkg.Pkg, pvar.Name, pvar.Typ)
+				alloc := fb.emitAlloc(pvar.Typ, p.pos)
 				fb.vars[obj] = alloc
 				fb.paramAllocas = append(fb.paramAllocas, alloc)
 				fb.emitStore(alloc, p)
@@ -914,11 +915,11 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 		}
 	}
 
-	if sig.Results() != nil {
-		for i := 0; i < sig.Results().Len(); i++ {
-			r := sig.Results().At(i)
-			if r.Name() != "" && r.Name() != "_" {
-				alloc := fb.emitAlloc(r.Type(), fb.fn.pos)
+	if sig.Results != nil {
+		for i := 0; i < sig.Results.Len(); i++ {
+			r := sig.Results.At(i)
+			if r.Name != "" && r.Name != "_" {
+				alloc := fb.emitAlloc(r.Typ, fb.fn.pos)
 				fb.namedResults = append(fb.namedResults, alloc)
 				fb.fn.Locals = append(fb.fn.Locals, alloc)
 				fb.vars[r] = alloc
@@ -944,7 +945,7 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 			for _, nr := range fb.namedResults {
 				elemType := nr.SSAType()
 				if p, ok := elemType.(*Pointer); ok {
-					elemType = p.Elem()
+					elemType = p.Base
 				}
 				vals = append(vals, fb.emitLoad(nr, elemType))
 			}
@@ -1081,7 +1082,7 @@ func (fb *ssaFuncBuilder) buildAssign(s *syntax.AssignStmt) {
 		if lv == nil {
 			return
 		}
-		one := &SSAConst{typ: lv.SSAType(), val: constInt{1}}
+		one := &SSAConst{typ: lv.SSAType(), val: ConstInt{1}}
 		op := OpAdd
 		if s.Op == token.Sub {
 			op = OpSub
@@ -1154,11 +1155,11 @@ func (fb *ssaFuncBuilder) buildAssign(s *syntax.AssignStmt) {
 			x := fb.buildExpr(ie.X)
 			idx := fb.buildExpr(ie.Index)
 			if x != nil && idx != nil {
-				if mt, ok2 := safeUnderlying(x.SSAType()).(*TCMap); ok2 {
-					idx = fb.coerceToInterface(idx, mt.Key())
+				if mt, ok2 := SafeUnderlying(x.SSAType()).(*TCMap); ok2 {
+					idx = fb.coerceToInterface(idx, mt.Key)
 					l := &SSALookup{X: x, Index: idx, CommaOk: true}
 					l.typ = NewTuple(
-						NewTCVar(nil, "v", mt.Elem()),
+						NewTCVar(nil, "v", mt.Elem),
 						NewTCVar(nil, "ok", Typ[Bool]),
 					)
 					l.name = fb.nextName()
@@ -1213,8 +1214,8 @@ func (fb *ssaFuncBuilder) coerceToInterface(val SSAValue, targetType Type) (s SS
 	if targetType == nil || val == nil || val.SSAType() == nil {
 		return val
 	}
-	if _, isIface := safeUnderlying(targetType).(*TCInterface); isIface {
-		if _, alreadyIface := safeUnderlying(val.SSAType()).(*TCInterface); !alreadyIface {
+	if _, isIface := SafeUnderlying(targetType).(*TCInterface); isIface {
+		if _, alreadyIface := SafeUnderlying(val.SSAType()).(*TCInterface); !alreadyIface {
 			mi := &SSAMakeInterface{X: val}
 			mi.typ = targetType
 			mi.name = fb.nextName()
@@ -1242,14 +1243,30 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 			return
 		}
 		if alloc, ok := fb.vars[obj]; ok {
-			val = fb.coerceToInterface(val, obj.Type())
+			val = fb.coerceToInterface(val, ObjectType(obj))
 			fb.emitStore(alloc, val)
 		} else if fv, ok := fb.freeVarPtrs[lhs.Value]; ok {
-			val = fb.coerceToInterface(val, obj.Type())
+			val = fb.coerceToInterface(val, ObjectType(obj))
 			fb.emitStore(fv, val)
 		} else if g, ok := fb.fn.Pkg.Members[lhs.Value].(*SSAGlobal); ok {
-			if p, ok2 := g.SSAType().(*Pointer); ok2 && p.Elem() != nil {
-				val = fb.coerceToInterface(val, p.Elem())
+			if p, ok2 := g.SSAType().(*Pointer); ok2 && p.Base != nil {
+				val = fb.coerceToInterface(val, p.Base)
+			}
+			fb.emitStore(g, val)
+		} else if v, ok := obj.(*TCVar); ok && v.Pkg != nil && v.Pkg != fb.fn.Pkg.Pkg {
+			// dot-imported global from another package
+			impPkg := fb.ensureImportedSSAPackage(v.Pkg)
+			g, ok := impPkg.Members[lhs.Value].(*SSAGlobal)
+			if !ok {
+				g = &SSAGlobal{
+					name: lhs.Value,
+					typ:  NewPointer(v.Typ),
+					pkg:  impPkg,
+				}
+				impPkg.SetMember(lhs.Value, g)
+			}
+			if p, ok2 := g.SSAType().(*Pointer); ok2 && p.Base != nil {
+				val = fb.coerceToInterface(val, p.Base)
 			}
 			fb.emitStore(g, val)
 		}
@@ -1257,8 +1274,8 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 		if lhs.Y == nil && lhs.Op == token.Mul {
 			ptr := fb.buildExpr(lhs.X)
 			if ptr != nil {
-				if p, ok2 := ptr.SSAType().(*Pointer); ok2 && p.Elem() != nil {
-					val = fb.coerceToInterface(val, p.Elem())
+				if p, ok2 := ptr.SSAType().(*Pointer); ok2 && p.Base != nil {
+					val = fb.coerceToInterface(val, p.Base)
 				}
 				fb.emitStore(ptr, val)
 			}
@@ -1268,8 +1285,8 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 		if addr == nil {
 			return
 		}
-		if p, ok2 := addr.SSAType().(*Pointer); ok2 && p.Elem() != nil {
-			val = fb.coerceToInterface(val, p.Elem())
+		if p, ok2 := addr.SSAType().(*Pointer); ok2 && p.Base != nil {
+			val = fb.coerceToInterface(val, p.Base)
 		}
 		fb.emitStore(addr, val)
 	case *syntax.IndexExpr:
@@ -1278,9 +1295,9 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 		if base == nil || idx == nil {
 			return
 		}
-		if m, isMap := safeUnderlying(base.SSAType()).(*TCMap); isMap {
-			idx = fb.coerceToInterface(idx, m.Key())
-			val = fb.coerceToInterface(val, m.Elem())
+		if m, isMap := SafeUnderlying(base.SSAType()).(*TCMap); isMap {
+			idx = fb.coerceToInterface(idx, m.Key)
+			val = fb.coerceToInterface(val, m.Elem)
 			fb.emit(&SSAMapUpdate{Map: base, Key: idx, Value: val})
 			return
 		}
@@ -1300,13 +1317,13 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 			baseAddr = fb.buildSelectorAddr(sel)
 		}
 		if baseAddr != nil {
-			if _, isArr := safeUnderlying(base.SSAType()).(*Array); isArr {
+			if _, isArr := SafeUnderlying(base.SSAType()).(*Array); isArr {
 				ia := &SSAIndexAddr{X: baseAddr, Index: idx}
 				ia.typ = NewPointer(ssaElemType(base.SSAType()))
 				ia.name = fb.nextName()
 				fb.emit(ia)
-				if p, ok2 := ia.SSAType().(*Pointer); ok2 && p.Elem() != nil {
-					val = fb.coerceToInterface(val, p.Elem())
+				if p, ok2 := ia.SSAType().(*Pointer); ok2 && p.Base != nil {
+					val = fb.coerceToInterface(val, p.Base)
 				}
 				fb.emitStore(ia, val)
 				return
@@ -1316,8 +1333,8 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 		ia.typ = NewPointer(ssaElemType(base.SSAType()))
 		ia.name = fb.nextName()
 		fb.emit(ia)
-		if p, ok2 := ia.SSAType().(*Pointer); ok2 && p.Elem() != nil {
-			val = fb.coerceToInterface(val, p.Elem())
+		if p, ok2 := ia.SSAType().(*Pointer); ok2 && p.Base != nil {
+			val = fb.coerceToInterface(val, p.Base)
 		}
 		fb.emitStore(ia, val)
 	case *syntax.ListExpr:
@@ -1369,11 +1386,11 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *syntax.AssignStmt) {
 			x := fb.buildExpr(ie.X)
 			idx := fb.buildExpr(ie.Index)
 			if x != nil && idx != nil {
-				if mt, ok2 := safeUnderlying(x.SSAType()).(*TCMap); ok2 {
-					idx = fb.coerceToInterface(idx, mt.Key())
+				if mt, ok2 := SafeUnderlying(x.SSAType()).(*TCMap); ok2 {
+					idx = fb.coerceToInterface(idx, mt.Key)
 					l := &SSALookup{X: x, Index: idx, CommaOk: true}
 					l.typ = NewTuple(
-						NewTCVar(nil, "v", mt.Elem()),
+						NewTCVar(nil, "v", mt.Elem),
 						NewTCVar(nil, "ok", Typ[Bool]),
 					)
 					l.name = fb.nextName()
@@ -1481,7 +1498,7 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *syntax.AssignStmt) {
 		var typ Type
 		if rhs != nil {
 			if isTuple && i < tup.Len() {
-				typ = tup.At(i).Type()
+				typ = tup.At(i).Typ
 			} else if i == 0 {
 				typ = rhs.SSAType()
 			}
@@ -1494,7 +1511,7 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *syntax.AssignStmt) {
 				} else if tup2, ok2 := rhs.SSAType().(*Tuple); ok2 {
 					rhsInfo = "tuple[" | token.Itoa(tup2.Len()) | "] i=" | token.Itoa(i)
 					if i < tup2.Len() {
-						if tup2.At(i).Type() == nil {
+						if tup2.At(i).Typ == nil {
 							rhsInfo = rhsInfo | " At.Type=nil"
 						} else {
 							rhsInfo = rhsInfo | " At.Type=set"
@@ -1540,7 +1557,7 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 		var typ Type
 		if fb.info != nil && len(d.NameList) > 0 {
 			if obj := fb.info.Defs[d.NameList[0]]; obj != nil {
-				typ = obj.Type()
+				typ = ObjectType(obj)
 			}
 		}
 		if typ == nil && d.Type != nil {
@@ -1559,14 +1576,14 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			if obj == nil {
 				obj = NewTCVar(fb.fn.Pkg.Pkg, name.Value, typ)
 			}
-			alloc := fb.emitAlloc(obj.Type(), 0)
+			alloc := fb.emitAlloc(ObjectType(obj), 0)
 			fb.vars[obj] = alloc
 			fb.fn.Locals = append(fb.fn.Locals, alloc)
 			if initVal != nil {
-				initVal = fb.coerceToInterface(initVal, obj.Type())
+				initVal = fb.coerceToInterface(initVal, ObjectType(obj))
 				fb.emitStore(alloc, initVal)
 			} else {
-				fb.emitStore(alloc, &SSAConst{typ: obj.Type(), val: nil})
+				fb.emitStore(alloc, &SSAConst{typ: ObjectType(obj), val: nil})
 			}
 		}
 	case *syntax.ConstDecl:
@@ -1608,26 +1625,26 @@ func (fb *ssaFuncBuilder) evalLocalConstExpr(e syntax.Expr) (c ConstVal) {
 	}
 	switch e := e.(type) {
 	case *syntax.BasicLit:
-		return evalBasicLitLocal(e)
+		return EvalBasicLitLocal(e)
 	case *syntax.Name:
 		if c, ok := fb.localConsts[e.Value]; ok && c != nil && c.val != nil {
 			return c.val
 		}
-		return tcEvalConstExpr(e, fb.fn.Pkg.Pkg.Scope(), -1)
+		return tcEvalConstExpr(e, fb.fn.Pkg.Pkg.Scope, -1)
 	case *syntax.Operation:
 		if e.Y == nil {
 			xr := fb.evalLocalConstExpr(e.X)
 			if xr == nil {
 				return nil
 			}
-			return evalUnaryLocal(e.Op, xr)
+			return EvalUnaryLocal(e.Op, xr)
 		}
 		xr := fb.evalLocalConstExpr(e.X)
 		yr := fb.evalLocalConstExpr(e.Y)
 		if xr == nil || yr == nil {
 			return nil
 		}
-		return evalBinaryLocal(e.Op, xr, yr)
+		return EvalBinaryLocal(e.Op, xr, yr)
 	case *syntax.ParenExpr:
 		return fb.evalLocalConstExpr(e.X)
 	}
@@ -1809,7 +1826,7 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *syntax.ForStmt, rc *syntax.RangeClau
 			}
 		}
 		if iterSSAType == nil {
-			mxutil.WriteStr(2, "WARN: unresolved range type in " | fb.fn.Pkg.Pkg.Path() | "." | fb.fn.name | "\n")
+			mxutil.WriteStr(2, "WARN: unresolved range type in " | fb.fn.Pkg.Pkg.Path | "." | fb.fn.name | "\n")
 			return
 		}
 	}
@@ -1817,24 +1834,24 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *syntax.ForStmt, rc *syntax.RangeClau
 	keyTyp := asType(Typ[Int32])
 	valTyp := asType(Typ[Invalid])
 	iterT := iterSSAType
-	iterU := safeUnderlying(iterT)
+	iterU := SafeUnderlying(iterT)
 	if sl, ok := iterU.(*Slice); ok {
-		valTyp = sl.Elem()
+		valTyp = sl.Elem
 	} else if sl, ok := iterT.(*Slice); ok {
-		valTyp = sl.Elem()
+		valTyp = sl.Elem
 	} else if mt, ok := iterU.(*TCMap); ok {
-		keyTyp = mt.Key()
-		valTyp = mt.Elem()
+		keyTyp = mt.Key
+		valTyp = mt.Elem
 	} else if mt, ok := iterT.(*TCMap); ok {
-		keyTyp = mt.Key()
-		valTyp = mt.Elem()
+		keyTyp = mt.Key
+		valTyp = mt.Elem
 	} else if ar, ok := iterU.(*Array); ok {
-		valTyp = ar.Elem()
+		valTyp = ar.Elem
 	} else if ar, ok := iterT.(*Array); ok {
-		valTyp = ar.Elem()
-	} else if p, ok := iterU.(*Pointer); ok && p.Elem() != nil {
-		if ar, ok2 := safeUnderlying(p.Elem()).(*Array); ok2 {
-			valTyp = ar.Elem()
+		valTyp = ar.Elem
+	} else if p, ok := iterU.(*Pointer); ok && p.Base != nil {
+		if ar, ok2 := SafeUnderlying(p.Base).(*Array); ok2 {
+			valTyp = ar.Elem
 		}
 	}
 	if valTyp == asType(Typ[Invalid]) && ssaIsStringType(iterSSAType) {
@@ -2025,7 +2042,7 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.Type
 	var savedAlloc *SSAAlloc
 	if tsg.Lhs != nil {
 		for obj, alloc := range fb.vars {
-			if obj.Name() == tsg.Lhs.Value {
+			if ObjectName(obj) == tsg.Lhs.Value {
 				savedObj = obj
 				savedAlloc = alloc
 				break
@@ -2126,7 +2143,7 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.Type
 					guardVal = &SSAConst{typ: guardType, val: nil}
 				}
 				for old := range fb.vars {
-					if old.Name() == tsg.Lhs.Value {
+					if ObjectName(old) == tsg.Lhs.Value {
 						delete(fb.vars, old)
 						break
 					}
@@ -2147,7 +2164,7 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.Type
 					guardType = NewTCInterface(nil, nil)
 				}
 				for old := range fb.vars {
-					if old.Name() == tsg.Lhs.Value {
+					if ObjectName(old) == tsg.Lhs.Value {
 						delete(fb.vars, old)
 						break
 					}
@@ -2179,7 +2196,7 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.Type
 	}
 	if savedObj != nil && savedAlloc != nil {
 		for old := range fb.vars {
-			if old.Name() == tsg.Lhs.Value {
+			if ObjectName(old) == tsg.Lhs.Value {
 				delete(fb.vars, old)
 				break
 			}
@@ -2248,7 +2265,7 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 		}
 	}
 	sel := &SSASelect{States: states, Blocking: !hasDefault}
-	sel.typ = &Tuple{vars: tupleVars}
+	sel.typ = &Tuple{Vars: tupleVars}
 	sel.name = fb.nextName()
 	fb.emit(sel)
 
@@ -2269,7 +2286,7 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 			break
 		}
 		nextCheck := fb.newBlock("select.check")
-		cmpVal := &SSAConst{typ: Typ[Int32], val: constInt{int64(i)}}
+		cmpVal := &SSAConst{typ: Typ[Int32], val: ConstInt{int64(i)}}
 		cmp := &SSABinOp{Op: OpEql, X: idxExt, Y: cmpVal}
 		cmp.typ = Typ[Bool]
 		cmp.name = fb.nextName()
@@ -2386,8 +2403,8 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 					vals = append(vals, v)
 				} else {
 					var zeroType Type
-					if fb.fn.Signature != nil && fb.fn.Signature.Results() != nil && int32(i) < int32(fb.fn.Signature.Results().Len()) {
-						zeroType = fb.fn.Signature.Results().At(int32(i)).Type()
+					if fb.fn.Signature != nil && fb.fn.Signature.Results != nil && int32(i) < int32(fb.fn.Signature.Results.Len()) {
+						zeroType = fb.fn.Signature.Results.At(int32(i)).Typ
 					}
 					vals = append(vals, &SSAConst{typ: zeroType, val: nil})
 				}
@@ -2400,7 +2417,7 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 				} else if tup, ok := v.SSAType().(*Tuple); ok && tup.Len() > 1 {
 					for i := 0; i < tup.Len(); i++ {
 						ext := &SSAExtract{Tuple: v, Index: i}
-						ext.typ = tup.At(i).Type()
+						ext.typ = tup.At(i).Typ
 						ext.name = fb.nextName()
 						fb.emit(ext)
 						vals = append(vals, ext)
@@ -2414,20 +2431,20 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 		for _, nr := range fb.namedResults {
 			elemType := nr.SSAType()
 			if p, ok := elemType.(*Pointer); ok {
-				elemType = p.Elem()
+				elemType = p.Base
 			}
 			vals = append(vals, fb.emitLoad(nr, elemType))
 		}
 	}
-	if fb.fn.Signature != nil && fb.fn.Signature.Results() != nil {
+	if fb.fn.Signature != nil && fb.fn.Signature.Results != nil {
 		for i, v := range vals {
-			if i < fb.fn.Signature.Results().Len() {
-				retType := fb.fn.Signature.Results().At(i).Type()
+			if i < fb.fn.Signature.Results.Len() {
+				retType := fb.fn.Signature.Results.At(i).Typ
 				if n, ok := retType.(*Named); ok && n != nil {
 					u := n.Underlying()
 					if u != nil && u != Type(n) {
 						if _, isIface := u.(*TCInterface); isIface {
-							if _, alreadyIface := safeUnderlying(v.SSAType()).(*TCInterface); !alreadyIface {
+							if _, alreadyIface := SafeUnderlying(v.SSAType()).(*TCInterface); !alreadyIface {
 								mi := &SSAMakeInterface{X: v}
 								mi.typ = retType
 								mi.name = fb.nextName()
@@ -2579,9 +2596,9 @@ func (fb *ssaFuncBuilder) buildIdent(e *syntax.Name) (s SSAValue) {
 	if obj == nil && fb.parent != nil {
 		for p := fb.parent; p != nil; p = p.parent {
 			for pobj := range p.vars {
-				if pobj.Name() == e.Value {
-					fv := fb.getOrCreateFreeVar(e.Value, pobj.Type())
-					return fb.emitLoad(fv, pobj.Type())
+				if ObjectName(pobj) == e.Value {
+					fv := fb.getOrCreateFreeVar(e.Value, ObjectType(pobj))
+					return fb.emitLoad(fv, ObjectType(pobj))
 				}
 			}
 			if p.freeVarPtrs != nil {
@@ -2609,10 +2626,10 @@ func (fb *ssaFuncBuilder) buildIdent(e *syntax.Name) (s SSAValue) {
 	switch obj := obj.(type) {
 	case *TCVar:
 		if alloc, ok := fb.vars[obj]; ok {
-			return fb.emitLoad(alloc, obj.Type())
+			return fb.emitLoad(alloc, obj.Typ)
 		}
 		if fv, ok := fb.freeVarPtrs[e.Value]; ok {
-			return fb.emitLoad(fv, obj.Type())
+			return fb.emitLoad(fv, obj.Typ)
 		}
 		for p := fb.parent; p != nil; p = p.parent {
 			found := false
@@ -2621,7 +2638,7 @@ func (fb *ssaFuncBuilder) buildIdent(e *syntax.Name) (s SSAValue) {
 			}
 			if !found {
 				for pobj := range p.vars {
-					if pobj.Name() == e.Value {
+					if ObjectName(pobj) == e.Value {
 						found = true
 						break
 					}
@@ -2633,26 +2650,57 @@ func (fb *ssaFuncBuilder) buildIdent(e *syntax.Name) (s SSAValue) {
 				}
 			}
 			if found {
-				fv := fb.getOrCreateFreeVar(e.Value, obj.Type())
-				return fb.emitLoad(fv, obj.Type())
+				fv := fb.getOrCreateFreeVar(e.Value, obj.Typ)
+				return fb.emitLoad(fv, obj.Typ)
 			}
 		}
 		if g, ok := fb.fn.Pkg.Members[e.Value].(*SSAGlobal); ok {
-			return fb.emitLoad(g, obj.Type())
+			return fb.emitLoad(g, obj.Typ)
 		}
-		return &SSAConst{typ: obj.Type(), val: nil}
+		// dot-imported variable from another package
+		if obj.Pkg != nil && obj.Pkg != fb.fn.Pkg.Pkg {
+			impPkg := fb.ensureImportedSSAPackage(obj.Pkg)
+			g, ok := impPkg.Members[e.Value].(*SSAGlobal)
+			if !ok {
+				g = &SSAGlobal{
+					name: e.Value,
+					typ:  NewPointer(obj.Typ),
+					pkg:  impPkg,
+				}
+				impPkg.SetMember(e.Value, g)
+			}
+			return fb.emitLoad(g, obj.Typ)
+		}
+		return &SSAConst{typ: obj.Typ, val: nil}
 	case *TCConst:
-		return &SSAConst{typ: obj.Type(), val: localizeConstVal(obj.Val(), obj.Type())}
+		return &SSAConst{typ: obj.Typ, val: localizeConstVal(obj.Val, obj.Typ)}
 	case *TCFunc:
 		fn, _ := fb.fn.Pkg.Members[e.Value].(*SSAFunction)
 		if fn != nil {
 			return fn
 		}
-		return &SSAConst{typ: obj.Type(), val: nil}
+		// dot-imported function from another package
+		if obj.Pkg != nil && obj.Pkg != fb.fn.Pkg.Pkg {
+			impPkg := fb.ensureImportedSSAPackage(obj.Pkg)
+			fn = impPkg.Func(e.Value)
+			if fn == nil {
+				sig, _ := obj.Typ.(*Signature)
+				fn = &SSAFunction{
+					name:      e.Value,
+					object:    obj,
+					Signature: sig,
+					Pkg:       impPkg,
+					Prog:      fb.fn.Prog,
+				}
+				impPkg.SetMember(e.Value, fn)
+			}
+			return fn
+		}
+		return &SSAConst{typ: obj.Typ, val: nil}
 	case *TypeName:
 		return nil
 	case *Builtin:
-		return &SSABuiltin{id: obj.ID(), name: obj.Name()}
+		return &SSABuiltin{id: obj.Id, name: obj.Name}
 	}
 	return nil
 }
@@ -2666,7 +2714,7 @@ func (fb *ssaFuncBuilder) builtinValue(name string) (s SSAValue) {
 }
 
 func (fb *ssaFuncBuilder) buildLit(e *syntax.BasicLit) (s SSAValue) {
-	cv := evalBasicLitLocal(e)
+	cv := EvalBasicLitLocal(e)
 	if cv == nil {
 		return nil
 	}
@@ -2719,13 +2767,13 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 				// &s.field[i] where field is a slice: base is a pointer to
 				// the slice header; load the header so IndexAddr indexes the
 				// slice's data pointer, not the header itself.
-				if pt, okp := safeUnderlying(base.SSAType()).(*Pointer); okp && pt.Elem() != nil {
-					pte := pt.Elem()
-					pteu := safeUnderlying(pte)
+				if pt, okp := SafeUnderlying(base.SSAType()).(*Pointer); okp && pt.Base != nil {
+					pte := pt.Base
+					pteu := SafeUnderlying(pte)
 					isSl := false
 					if _, ok2 := pteu.(*Slice); ok2 {
 						isSl = true
-					} else if b, okb := pteu.(*Basic); okb && b.Info()&IsString != 0 {
+					} else if b, okb := pteu.(*Basic); okb && b.Info&IsString != 0 {
 						isSl = true
 					}
 					if isSl {
@@ -2769,7 +2817,7 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 		u := &SSAUnOp{Op: op, X: x}
 		if op == OpMul {
 			if p, ok := x.SSAType().(*Pointer); ok {
-				u.typ = p.Elem()
+				u.typ = p.Base
 			} else {
 				u.typ = x.SSAType()
 			}
@@ -2800,7 +2848,7 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 		fb.currentBlock = rhsBlock
 		y := fb.buildExpr(e.Y)
 		if y == nil {
-			y = &SSAConst{typ: Typ[Bool], val: constBool{false}}
+			y = &SSAConst{typ: Typ[Bool], val: ConstBool{false}}
 		}
 		fb.emit(&SSAJump{Comment: "sc.merge"})
 		fb.currentBlock.Succs = append(fb.currentBlock.Succs, mergeBlock)
@@ -2808,9 +2856,9 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 		fb.currentBlock = mergeBlock
 		var shortVal SSAValue
 		if op == OpLand {
-			shortVal = &SSAConst{typ: Typ[Bool], val: constBool{false}}
+			shortVal = &SSAConst{typ: Typ[Bool], val: ConstBool{false}}
 		} else {
-			shortVal = &SSAConst{typ: Typ[Bool], val: constBool{true}}
+			shortVal = &SSAConst{typ: Typ[Bool], val: ConstBool{true}}
 		}
 		phi := &SSAPhi{Edges: []SSAValue{shortVal, y}, Comment: "sc"}
 		phi.typ = Typ[Bool]
@@ -2824,7 +2872,7 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 		return nil
 	}
 	if (op == OpOr || op == OpAdd) && x.SSAType() != nil && y.SSAType() != nil {
-		if isRuneKind(x.SSAType()) && isStringKind(y.SSAType()) || isStringKind(x.SSAType()) && isRuneKind(y.SSAType()) {
+		if IsRuneKind(x.SSAType()) && IsStringKind(y.SSAType()) || IsStringKind(x.SSAType()) && IsRuneKind(y.SSAType()) {
 			mxutil.WriteStr(2, "compile error: cannot concatenate rune with string - convert to UTF-8 first\n")
 			compileErrors = append(compileErrors, "cannot concatenate rune with string")
 		}
@@ -2832,13 +2880,13 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 	if xc, ok := x.(*SSAConst); ok {
 		if yc, ok2 := y.(*SSAConst); ok2 {
 			if xc.val != nil && yc.val != nil {
-				folded := evalBinaryLocal(e.Op, xc.val, yc.val)
+				folded := EvalBinaryLocal(e.Op, xc.val, yc.val)
 				if folded != nil {
 					ct := xc.typ
 					if ct == nil {
 						ct = yc.typ
 					}
-					if _, isBool := folded.(constBool); isBool {
+					if _, isBool := folded.(ConstBool); isBool {
 						ct = Typ[Bool]
 					}
 					return &SSAConst{typ: ct, val: folded}
@@ -2855,7 +2903,7 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 		xT := x.SSAType()
 		yT := y.SSAType()
 		xUntyped := false
-		if xB, ok := safeUnderlying(xT).(*Basic); ok && xB.Info()&IsUntyped != 0 {
+		if xB, ok := SafeUnderlying(xT).(*Basic); ok && xB.Info&IsUntyped != 0 {
 			xUntyped = true
 		}
 		if xT != nil && !xUntyped {
@@ -2879,11 +2927,11 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 	if name, ok := e.Fun.(*syntax.Name); ok {
 		obj := fb.lookupObject(name.Value)
 		if tn, ok2 := obj.(*TypeName); ok2 {
-			if _, isTP := tn.Type().(*TypeParam); !isTP {
+			if _, isTP := tn.Typ.(*TypeParam); !isTP {
 				args := fb.buildArgs(e.ArgList)
 				if len(args) == 1 && args[0] != nil {
 					conv := &SSAConvert{X: args[0]}
-					conv.typ = tn.Type()
+					conv.typ = tn.Typ
 					conv.name = fb.nextName()
 					fb.emit(conv)
 					return conv
@@ -2919,7 +2967,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 				fixedRecv = fb.derefValueRecv(fn, fixedRecv)
 				args := fb.buildArgs(e.ArgList)
 				if fn.Signature != nil {
-					if fn.Signature.Variadic() && !e.HasDots {
+					if fn.Signature.Variadic && !e.HasDots {
 						args = fb.wrapVariadicArgs(args, fn.Signature)
 					}
 					args = fb.coerceArgsToInterface(args, fn.Signature)
@@ -2931,10 +2979,10 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 				}
 				var retType Type
 				if fn.Signature != nil {
-					if fn.Signature.Results() != nil && fn.Signature.Results().Len() == 1 {
-						retType = fn.Signature.Results().At(0).Type()
-					} else if fn.Signature.Results() != nil && fn.Signature.Results().Len() > 1 {
-						retType = fn.Signature.Results()
+					if fn.Signature.Results != nil && fn.Signature.Results.Len() == 1 {
+						retType = fn.Signature.Results.At(0).Typ
+					} else if fn.Signature.Results != nil && fn.Signature.Results.Len() > 1 {
+						retType = fn.Signature.Results
 					}
 				}
 				call := &SSACall{Call: SSACallCommon{Value: fn, Args: allArgs}}
@@ -2963,25 +3011,25 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 
 	var retType Type
 	if fn.SSAType() != nil {
-		if sig, ok := safeUnderlying(fn.SSAType()).(*Signature); ok {
-			if sig.Results() != nil && sig.Results().Len() == 1 {
-				retType = sig.Results().At(0).Type()
-			} else if sig.Results() != nil && sig.Results().Len() > 1 {
-				retType = sig.Results()
+		if sig, ok := SafeUnderlying(fn.SSAType()).(*Signature); ok {
+			if sig.Results != nil && sig.Results.Len() == 1 {
+				retType = sig.Results.At(0).Typ
+			} else if sig.Results != nil && sig.Results.Len() > 1 {
+				retType = sig.Results
 			}
 		}
 	} else if ssaFn, ok := fn.(*SSAFunction); ok && ssaFn.Signature != nil {
 		sig := ssaFn.Signature
-		if sig.Results() != nil && sig.Results().Len() == 1 {
-			retType = sig.Results().At(0).Type()
-		} else if sig.Results() != nil && sig.Results().Len() > 1 {
-			retType = sig.Results()
+		if sig.Results != nil && sig.Results.Len() == 1 {
+			retType = sig.Results.At(0).Typ
+		} else if sig.Results != nil && sig.Results.Len() > 1 {
+			retType = sig.Results
 		}
 	}
 
 	if fn.SSAType() != nil {
-		if sig, ok := safeUnderlying(fn.SSAType()).(*Signature); ok {
-			if sig.Variadic() && !e.HasDots {
+		if sig, ok := SafeUnderlying(fn.SSAType()).(*Signature); ok {
+			if sig.Variadic && !e.HasDots {
 				args = fb.wrapVariadicArgs(args, sig)
 			}
 			args = fb.coerceArgsToInterface(args, sig)
@@ -3000,19 +3048,19 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 }
 
 func (fb *ssaFuncBuilder) coerceArgsToInterface(args []SSAValue, sig *Signature) (ss []SSAValue) {
-	if sig.Params() == nil {
+	if sig.Params == nil {
 		return args
 	}
-	for i := 0; i < len(args) && i < sig.Params().Len(); i++ {
-		paramType := sig.Params().At(i).Type()
+	for i := 0; i < len(args) && i < sig.Params.Len(); i++ {
+		paramType := sig.Params.At(i).Typ
 		if paramType == nil || args[i] == nil || args[i].SSAType() == nil {
 			continue
 		}
-		_, isIface := safeUnderlying(paramType).(*TCInterface)
+		_, isIface := SafeUnderlying(paramType).(*TCInterface)
 		if !isIface {
 			continue
 		}
-		_, argIsIface := safeUnderlying(args[i].SSAType()).(*TCInterface)
+		_, argIsIface := SafeUnderlying(args[i].SSAType()).(*TCInterface)
 		if argIsIface {
 			continue
 		}
@@ -3026,10 +3074,10 @@ func (fb *ssaFuncBuilder) coerceArgsToInterface(args []SSAValue, sig *Signature)
 }
 
 func (fb *ssaFuncBuilder) wrapVariadicArgs(args []SSAValue, sig *Signature) (ss []SSAValue) {
-	if sig.Params() == nil {
+	if sig.Params == nil {
 		return args
 	}
-	nFixed := sig.Params().Len() - 1
+	nFixed := sig.Params.Len() - 1
 	if nFixed < 0 {
 		nFixed = 0
 	}
@@ -3038,15 +3086,15 @@ func (fb *ssaFuncBuilder) wrapVariadicArgs(args []SSAValue, sig *Signature) (ss 
 	}
 	nVariadic := len(args) - nFixed
 	if nVariadic <= 0 {
-		nilSlice := NewSSAConst(constNil{}, sig.Params().At(sig.Params().Len()-1).Type())
+		nilSlice := NewSSAConst(ConstNil{}, sig.Params.At(sig.Params.Len()-1).Typ)
 		result := []SSAValue{:nFixed:nFixed}
 		copy(result, args[:nFixed])
 		return append(result, nilSlice)
 	}
-	sliceType := sig.Params().At(sig.Params().Len() - 1).Type()
+	sliceType := sig.Params.At(sig.Params.Len() - 1).Typ
 	var elemType Type
-	if sl, ok := safeUnderlying(sliceType).(*Slice); ok {
-		elemType = sl.Elem()
+	if sl, ok := SafeUnderlying(sliceType).(*Slice); ok {
+		elemType = sl.Elem
 	}
 	// HasDots lost because closures can't write to captured named returns.
 	// Detect spread: if exactly 1 variadic arg whose type matches the
@@ -3058,13 +3106,13 @@ func (fb *ssaFuncBuilder) wrapVariadicArgs(args []SSAValue, sig *Signature) (ss 
 			return args
 		}
 	}
-	lenVal := NewSSAConst(constInt{int64(nVariadic)}, Typ[Int32])
+	lenVal := NewSSAConst(ConstInt{int64(nVariadic)}, Typ[Int32])
 	ms := &SSAMakeSlice{Len: lenVal, Cap: lenVal}
 	ms.typ = sliceType
 	ms.name = fb.nextName()
 	fb.emit(ms)
 	for i := 0; i < nVariadic; i++ {
-		idx := NewSSAConst(constInt{int64(i)}, Typ[Int32])
+		idx := NewSSAConst(ConstInt{int64(i)}, Typ[Int32])
 		ia := &SSAIndexAddr{X: ms, Index: idx}
 		ia.typ = NewPointer(elemType)
 		ia.name = fb.nextName()
@@ -3093,7 +3141,7 @@ func (fb *ssaFuncBuilder) buildArgs(argList []syntax.Expr) (ss []SSAValue) {
 			expanded := []SSAValue{:0:t.Len()}
 			for i := int32(0); i < int32(t.Len()); i++ {
 				ext := &SSAExtract{Tuple: args[0], Index: int32(i)}
-				ext.typ = t.At(int32(i)).Type()
+				ext.typ = t.At(int32(i)).Typ
 				ext.name = fb.nextName()
 				fb.emit(ext)
 				expanded = append(expanded, ext)
@@ -3109,8 +3157,8 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 	case BuiltinLen, BuiltinCap:
 		if b.id == BuiltinLen && len(args) == 1 {
 			if c, ok := args[0].(*SSAConst); ok {
-				if cs, ok2 := c.val.(constStr); ok2 {
-					return &SSAConst{typ: Typ[Int32], val: constInt{int64(len(cs.s))}}
+				if cs, ok2 := c.val.(ConstStr); ok2 {
+					return &SSAConst{typ: Typ[Int32], val: ConstInt{int64(len(cs.s))}}
 				}
 			}
 		}
@@ -3121,8 +3169,8 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		return call
 	case BuiltinAppend:
 		if len(args) > 1 {
-			if sl, ok := safeUnderlying(args[0].SSAType()).(*Slice); ok {
-				if _, isIface := safeUnderlying(sl.Elem()).(*TCInterface); isIface {
+			if sl, ok := SafeUnderlying(args[0].SSAType()).(*Slice); ok {
+				if _, isIface := SafeUnderlying(sl.Elem).(*TCInterface); isIface {
 					for i := 1; i < len(args); i++ {
 						if e.HasDots && i == 1 {
 							continue
@@ -3130,11 +3178,11 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 						if args[i] == nil || args[i].SSAType() == nil {
 							continue
 						}
-						if _, argIface := safeUnderlying(args[i].SSAType()).(*TCInterface); argIface {
+						if _, argIface := SafeUnderlying(args[i].SSAType()).(*TCInterface); argIface {
 							continue
 						}
-						mi := &SSAMakeInterface{X: args[i], IType: sl.Elem()}
-						mi.typ = sl.Elem()
+						mi := &SSAMakeInterface{X: args[i], IType: sl.Elem}
+						mi.typ = sl.Elem
 						mi.name = fb.nextName()
 						fb.emit(mi)
 						args[i] = mi
@@ -3215,9 +3263,9 @@ func (fb *ssaFuncBuilder) emitMake(typ Type, sizeArgs []SSAValue) (s SSAValue) {
 	if typ == nil {
 		return nil
 	}
-	switch u := safeUnderlying(typ).(type) {
+	switch u := SafeUnderlying(typ).(type) {
 	case *Basic:
-		if u.kind == TCString {
+		if u.Kind == TCString {
 			ms := &SSAMakeSlice{}
 			ms.typ = typ
 			ms.name = fb.nextName()
@@ -3274,8 +3322,8 @@ func (fb *ssaFuncBuilder) buildSelector(e *syntax.SelectorExpr) (s SSAValue) {
 	fa := fb.buildSelectorAddr(e)
 	if fa != nil {
 		elemType := fa.SSAType()
-		if p, ok := safeUnderlying(elemType).(*Pointer); ok {
-			elemType = p.Elem()
+		if p, ok := SafeUnderlying(elemType).(*Pointer); ok {
+			elemType = p.Base
 		}
 		return fb.emitLoad(fa, elemType)
 	}
@@ -3293,14 +3341,14 @@ func (fb *ssaFuncBuilder) buildMethodValue(sel *syntax.SelectorExpr, recv SSAVal
 	}
 	methodSig := fn.Signature
 	var wrapperParams *Tuple
-	if methodSig.Params() != nil && methodSig.Params().Len() > 0 {
-		vars := []*TCVar{:0:methodSig.Params().Len()}
-		for i := 0; i < methodSig.Params().Len(); i++ {
-			vars = append(vars, methodSig.Params().At(i))
+	if methodSig.Params != nil && methodSig.Params.Len() > 0 {
+		vars := []*TCVar{:0:methodSig.Params.Len()}
+		for i := 0; i < methodSig.Params.Len(); i++ {
+			vars = append(vars, methodSig.Params.At(i))
 		}
 		wrapperParams = NewTuple(vars...)
 	}
-	wrapperSig := NewSignature(nil, wrapperParams, methodSig.Results(), methodSig.Variadic())
+	wrapperSig := NewSignature(nil, wrapperParams, methodSig.Results, methodSig.Variadic)
 	name := fb.fn.name | "__mval" | ssaItoa(len(fb.fn.AnonFuncs)+1)
 	wrapper := &SSAFunction{
 		name:      name,
@@ -3316,7 +3364,7 @@ func (fb *ssaFuncBuilder) buildMethodValue(sel *syntax.SelectorExpr, recv SSAVal
 	if wrapperParams != nil {
 		for i := 0; i < wrapperParams.Len(); i++ {
 			v := wrapperParams.At(i)
-			p := &SSAParameter{name: v.Name(), typ: v.Type(), parent: wrapper}
+			p := &SSAParameter{name: v.Name, typ: v.Typ, parent: wrapper}
 			wrapper.Params = append(wrapper.Params, p)
 		}
 	}
@@ -3327,10 +3375,10 @@ func (fb *ssaFuncBuilder) buildMethodValue(sel *syntax.SelectorExpr, recv SSAVal
 		args = append(args, p)
 	}
 	var retType Type
-	if methodSig.Results() != nil && methodSig.Results().Len() == 1 {
-		retType = methodSig.Results().At(0).Type()
-	} else if methodSig.Results() != nil && methodSig.Results().Len() > 1 {
-		retType = methodSig.Results()
+	if methodSig.Results != nil && methodSig.Results.Len() == 1 {
+		retType = methodSig.Results.At(0).Typ
+	} else if methodSig.Results != nil && methodSig.Results.Len() > 1 {
+		retType = methodSig.Results
 	}
 	call := &SSACall{Call: SSACallCommon{Value: fn, Args: args}}
 	call.typ = retType
@@ -3351,54 +3399,54 @@ func (fb *ssaFuncBuilder) buildMethodValue(sel *syntax.SelectorExpr, recv SSAVal
 }
 
 func (fb *ssaFuncBuilder) ensureImportedSSAPackage(imported *TCPackage) (s *SSAPackage) {
-	impPkg := fb.fn.Prog.ImportedPackage(imported.Path())
+	impPkg := fb.fn.Prog.ImportedPackage(imported.Path)
 	if impPkg == nil {
 		impPkg = &SSAPackage{
 			Prog:    fb.fn.Prog,
 			Pkg:     imported,
 			Members: map[string]SSAMember{},
 		}
-		fb.fn.Prog.imported[imported.Path()] = impPkg
+		fb.fn.Prog.imported[imported.Path] = impPkg
 		fb.fn.Prog.packages[imported] = impPkg
 	}
 	return impPkg
 }
 
 func (fb *ssaFuncBuilder) buildPkgMember(pn *PkgName, memberName string) (s SSAValue) {
-	imported := pn.Imported()
+	imported := pn.Imported
 	if imported == nil {
 		return nil
 	}
-	obj := imported.Scope().Lookup(memberName)
+	obj := imported.Scope.Lookup(memberName)
 	if obj == nil {
 		return nil
 	}
 	// runtime.GOOS and runtime.GOARCH are declared as TCVar in the
 	// skeleton but are target-dependent consts. Return them as SSAConst
 	// so the SSA builder sees string values, not global loads.
-	if imported.Path() == "runtime" {
+	if imported.Path == "runtime" {
 		if memberName == "GOOS" {
-			return &SSAConst{typ: Typ[TCString], val: constStr{compileTargetOS()}}
+			return &SSAConst{typ: Typ[TCString], val: ConstStr{compileTargetOS()}}
 		}
 		if memberName == "GOARCH" {
-			return &SSAConst{typ: Typ[TCString], val: constStr{compileTargetArch()}}
+			return &SSAConst{typ: Typ[TCString], val: ConstStr{compileTargetArch()}}
 		}
 	}
 	switch obj := obj.(type) {
 	case *TCConst:
-		return &SSAConst{typ: obj.Type(), val: localizeConstVal(obj.Val(), obj.Type())}
+		return &SSAConst{typ: obj.Typ, val: localizeConstVal(obj.Val, obj.Typ)}
 	case *TCVar:
 		impPkg := fb.ensureImportedSSAPackage(imported)
 		g, ok := impPkg.Members[memberName].(*SSAGlobal)
 		if !ok {
 			g = &SSAGlobal{
 				name: memberName,
-				typ:  NewPointer(obj.Type()),
+				typ:  NewPointer(obj.Typ),
 				pkg:  impPkg,
 			}
 			impPkg.SetMember(memberName, g)
 		}
-		return fb.emitLoad(g, obj.Type())
+		return fb.emitLoad(g, obj.Typ)
 	case *TCFunc:
 		impPkg := fb.ensureImportedSSAPackage(imported)
 		fn := impPkg.Func(memberName)
@@ -3406,7 +3454,7 @@ func (fb *ssaFuncBuilder) buildPkgMember(pn *PkgName, memberName string) (s SSAV
 			// Materialize the imported function for use as a value; the
 			// direct-call path does the same lazily, but a func referenced
 			// as an argument never goes through it.
-			sig, _ := obj.Type().(*Signature)
+			sig, _ := obj.Typ.(*Signature)
 			fn = &SSAFunction{
 				name:      memberName,
 				object:    obj,
@@ -3414,7 +3462,7 @@ func (fb *ssaFuncBuilder) buildPkgMember(pn *PkgName, memberName string) (s SSAV
 				Pkg:       impPkg,
 				Prog:      fb.fn.Prog,
 			}
-			if isNoContextExtern(imported.Path(), memberName) {
+			if isNoContextExtern(imported.Path, memberName) {
 				fn.isExternC = true
 			}
 			impPkg.SetMember(memberName, fn)
@@ -3433,16 +3481,16 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue)
 			return nil
 		}
 		structType = addr.SSAType()
-		if p, ok := safeUnderlying(structType).(*Pointer); ok {
-			structType = p.Elem()
+		if p, ok := SafeUnderlying(structType).(*Pointer); ok {
+			structType = p.Base
 		}
-		if p, ok := safeUnderlying(structType).(*Pointer); ok {
+		if p, ok := SafeUnderlying(structType).(*Pointer); ok {
 			ld := &SSAUnOp{Op: OpMul, X: addr}
 			ld.typ = structType
 			ld.name = fb.nextName()
 			fb.emit(ld)
 			addr = ld
-			structType = p.Elem()
+			structType = p.Base
 		}
 	} else if ie, ok := e.X.(*syntax.IndexExpr); ok {
 		x := fb.buildExpr(ie.X)
@@ -3457,7 +3505,7 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue)
 		fb.emit(ia)
 		addr = ia
 		structType = elemT
-		if _, isPtr := safeUnderlying(elemT).(*Pointer); isPtr {
+		if _, isPtr := SafeUnderlying(elemT).(*Pointer); isPtr {
 			ld := fb.emitLoad(ia, elemT)
 			addr = ld
 			structType = elemT
@@ -3475,7 +3523,7 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue)
 		}
 		baseType := x.SSAType()
 		addr = x
-		if _, ok := safeUnderlying(baseType).(*Pointer); !ok {
+		if _, ok := SafeUnderlying(baseType).(*Pointer); !ok {
 			found := false
 			if name, ok := e.X.(*syntax.Name); ok {
 				obj := fb.lookupObject(name.Value)
@@ -3504,18 +3552,18 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue)
 			}
 		}
 		structType = baseType
-		if p, ok := safeUnderlying(structType).(*Pointer); ok {
-			structType = p.Elem()
+		if p, ok := SafeUnderlying(structType).(*Pointer); ok {
+			structType = p.Base
 		}
 	}
 	fieldIdx := fb.fieldIndex(structType, e.Sel.Value)
 	if fieldIdx < 0 {
 		stName := "?"
-		if n, ok := structType.(*Named); ok && n.Obj() != nil {
-			stName = n.Obj().Name()
+		if n, ok := structType.(*Named); ok && n.Obj != nil {
+			stName = n.Obj.Name
 		}
 		nf := int32(-1)
-		if st, ok := safeUnderlying(structType).(*TCStruct); ok {
+		if st, ok := SafeUnderlying(structType).(*TCStruct); ok {
 			nf = st.NumFields()
 		}
 	}
@@ -3537,13 +3585,13 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue)
 			fb.emit(fa)
 			curType = fb.fieldType(curType, idx)
 			if pi < len(path)-1 {
-				if p, ok := safeUnderlying(curType).(*Pointer); ok {
+				if p, ok := SafeUnderlying(curType).(*Pointer); ok {
 					ld := &SSAUnOp{Op: OpMul, X: fa}
 					ld.typ = curType
 					ld.name = fb.nextName()
 					fb.emit(ld)
 					cur = ld
-					curType = p.Elem()
+					curType = p.Base
 					continue
 				}
 			}
@@ -3563,21 +3611,21 @@ func (fb *ssaFuncBuilder) buildIndex(e *syntax.IndexExpr) (s SSAValue) {
 	if x.SSAType() == nil {
 		return nil
 	}
-	switch t := safeUnderlying(x.SSAType()).(type) {
+	switch t := SafeUnderlying(x.SSAType()).(type) {
 	case *TCMap:
-		idx = fb.coerceToInterface(idx, t.Key())
+		idx = fb.coerceToInterface(idx, t.Key)
 		l := &SSALookup{X: x, Index: idx}
-		l.typ = t.Elem()
+		l.typ = t.Elem
 		l.name = fb.nextName()
 		fb.emit(l)
 		return l
 	case *Pointer:
-		if arr, ok2 := safeUnderlying(t.Elem()).(*Array); ok2 {
+		if arr, ok2 := SafeUnderlying(t.Base).(*Array); ok2 {
 			ia := &SSAIndexAddr{X: x, Index: idx}
-			ia.typ = NewPointer(t.Elem())
+			ia.typ = NewPointer(t.Base)
 			ia.name = fb.nextName()
 			fb.emit(ia)
-			return fb.emitLoad(ia, arr.Elem())
+			return fb.emitLoad(ia, arr.Elem)
 		}
 		et := ssaElemType(x.SSAType())
 		ia := &SSAIndexAddr{X: x, Index: idx}
@@ -3632,8 +3680,8 @@ func (fb *ssaFuncBuilder) buildArrayAddr(x syntax.Expr) (s SSAValue) {
 			// (*p)[low:high] - p already points at the array
 			p := fb.buildExpr(ex.X)
 			if p != nil {
-				if pt, ok := safeUnderlying(p.SSAType()).(*Pointer); ok && pt.Elem() != nil {
-					if _, isArr := safeUnderlying(pt.Elem()).(*Array); isArr {
+				if pt, ok := SafeUnderlying(p.SSAType()).(*Pointer); ok && pt.Base != nil {
+					if _, isArr := SafeUnderlying(pt.Base).(*Array); isArr {
 						return p
 					}
 				}
@@ -3641,10 +3689,10 @@ func (fb *ssaFuncBuilder) buildArrayAddr(x syntax.Expr) (s SSAValue) {
 		}
 	case *syntax.Name:
 		obj := fb.lookupObject(ex.Value)
-		if obj == nil || obj.Type() == nil {
+		if obj == nil || ObjectType(obj) == nil {
 			return nil
 		}
-		if _, isArr := safeUnderlying(obj.Type()).(*Array); !isArr {
+		if _, isArr := SafeUnderlying(ObjectType(obj)).(*Array); !isArr {
 			return nil
 		}
 		if alloc, ok := fb.vars[obj]; ok {
@@ -3669,8 +3717,8 @@ func (fb *ssaFuncBuilder) buildArrayAddr(x syntax.Expr) (s SSAValue) {
 		if addr == nil {
 			return nil
 		}
-		if pt, ok := safeUnderlying(addr.SSAType()).(*Pointer); ok && pt.Elem() != nil {
-			if _, isArr := safeUnderlying(pt.Elem()).(*Array); isArr {
+		if pt, ok := SafeUnderlying(addr.SSAType()).(*Pointer); ok && pt.Base != nil {
+			if _, isArr := SafeUnderlying(pt.Base).(*Array); isArr {
 				return addr
 			}
 		}
@@ -3691,14 +3739,14 @@ func (fb *ssaFuncBuilder) buildArrayAddr(x syntax.Expr) (s SSAValue) {
 			return nil
 		}
 		bt := base.SSAType()
-		if pt, ok := safeUnderlying(bt).(*Pointer); ok && pt.Elem() != nil {
-			bt = pt.Elem()
+		if pt, ok := SafeUnderlying(bt).(*Pointer); ok && pt.Base != nil {
+			bt = pt.Base
 		}
 		elem := ssaElemType(bt)
 		if elem == nil {
 			return nil
 		}
-		if _, isArr := safeUnderlying(elem).(*Array); !isArr {
+		if _, isArr := SafeUnderlying(elem).(*Array); !isArr {
 			return nil
 		}
 		idx := fb.buildExpr(ex.Index)
@@ -3736,11 +3784,11 @@ func (fb *ssaFuncBuilder) buildCompositeLit(e *syntax.CompositeLit) (s SSAValue)
 		return nil
 	}
 
-	if sl, ok := safeUnderlying(typ).(*Slice); ok {
+	if sl, ok := SafeUnderlying(typ).(*Slice); ok {
 		return fb.buildSliceLit(e, typ, sl)
 	}
 
-	if mt, isMap := safeUnderlying(typ).(*TCMap); isMap {
+	if mt, isMap := SafeUnderlying(typ).(*TCMap); isMap {
 		mm := &SSAMakeMap{}
 		mm.typ = typ
 		mm.name = fb.nextName()
@@ -3750,8 +3798,8 @@ func (fb *ssaFuncBuilder) buildCompositeLit(e *syntax.CompositeLit) (s SSAValue)
 				k := fb.buildExpr(kv.Key)
 				v := fb.buildExpr(kv.Value)
 				if k != nil && v != nil {
-					k = fb.coerceToInterface(k, mt.Key())
-					v = fb.coerceToInterface(v, mt.Elem())
+					k = fb.coerceToInterface(k, mt.Key)
+					v = fb.coerceToInterface(v, mt.Elem)
 					fb.emit(&SSAMapUpdate{Map: mm, Key: k, Value: v})
 				}
 			}
@@ -3759,7 +3807,7 @@ func (fb *ssaFuncBuilder) buildCompositeLit(e *syntax.CompositeLit) (s SSAValue)
 		return mm
 	}
 
-	if ar, isArr := safeUnderlying(typ).(*Array); isArr {
+	if ar, isArr := SafeUnderlying(typ).(*Array); isArr {
 		return fb.buildArrayLit(e, typ, ar)
 	}
 
@@ -3767,7 +3815,7 @@ func (fb *ssaFuncBuilder) buildCompositeLit(e *syntax.CompositeLit) (s SSAValue)
 	posIdx := 0
 	for _, el := range e.ElemList {
 		if kv, ok := el.(*syntax.KeyValueExpr); ok {
-			if _, ok2 := safeUnderlying(typ).(*TCStruct); ok2 {
+			if _, ok2 := SafeUnderlying(typ).(*TCStruct); ok2 {
 				idx := fb.fieldIndex(typ, kv.Key.(*syntax.Name).Value)
 				if idx >= 0 {
 					fa := &SSAFieldAddr{X: alloc, Field: idx}
@@ -3785,7 +3833,7 @@ func (fb *ssaFuncBuilder) buildCompositeLit(e *syntax.CompositeLit) (s SSAValue)
 		} else {
 			v := fb.buildExpr(el)
 			if v != nil {
-				if _, ok2 := safeUnderlying(typ).(*TCStruct); ok2 {
+				if _, ok2 := SafeUnderlying(typ).(*TCStruct); ok2 {
 					ft := fb.fieldType(typ, posIdx)
 					fa := &SSAFieldAddr{X: alloc, Field: posIdx}
 					fa.typ = NewPointer(ft)
@@ -3802,12 +3850,12 @@ func (fb *ssaFuncBuilder) buildCompositeLit(e *syntax.CompositeLit) (s SSAValue)
 }
 
 func (fb *ssaFuncBuilder) buildArrayLit(e *syntax.CompositeLit, typ Type, ar *Array) (s SSAValue) {
-	if ar.Len() < 0 {
-		ar = NewArray(ar.Elem(), int64(len(e.ElemList)))
+	if ar.Len < 0 {
+		ar = NewArray(ar.Elem, int64(len(e.ElemList)))
 		typ = ar
 	}
 	alloc := fb.emitAlloc(typ, 0)
-	elemTyp := ar.Elem()
+	elemTyp := ar.Elem
 	for i, el := range e.ElemList {
 		var expr syntax.Expr
 		if kv, ok := el.(*syntax.KeyValueExpr); ok {
@@ -3824,7 +3872,7 @@ func (fb *ssaFuncBuilder) buildArrayLit(e *syntax.CompositeLit, typ Type, ar *Ar
 		if v == nil {
 			continue
 		}
-		idx := &SSAConst{typ: Typ[Int32], val: constInt{int64(i)}}
+		idx := &SSAConst{typ: Typ[Int32], val: ConstInt{int64(i)}}
 		ia := &SSAIndexAddr{X: alloc, Index: idx}
 		ia.typ = NewPointer(elemTyp)
 		ia.name = fb.nextName()
@@ -3836,17 +3884,17 @@ func (fb *ssaFuncBuilder) buildArrayLit(e *syntax.CompositeLit, typ Type, ar *Ar
 }
 
 func (fb *ssaFuncBuilder) buildCompositeLitWithType(e *syntax.CompositeLit, typ Type) (s SSAValue) {
-	if sl, ok := safeUnderlying(typ).(*Slice); ok {
+	if sl, ok := SafeUnderlying(typ).(*Slice); ok {
 		return fb.buildSliceLit(e, typ, sl)
 	}
-	if ar, isArr := safeUnderlying(typ).(*Array); isArr {
+	if ar, isArr := SafeUnderlying(typ).(*Array); isArr {
 		return fb.buildArrayLit(e, typ, ar)
 	}
 	alloc := fb.emitAlloc(typ, 0)
 	posIdx := 0
 	for _, el := range e.ElemList {
 		if kv, ok := el.(*syntax.KeyValueExpr); ok {
-			if _, ok2 := safeUnderlying(typ).(*TCStruct); ok2 {
+			if _, ok2 := SafeUnderlying(typ).(*TCStruct); ok2 {
 				idx := fb.fieldIndex(typ, kv.Key.(*syntax.Name).Value)
 				if idx >= 0 {
 					ft := fb.fieldType(typ, idx)
@@ -3864,7 +3912,7 @@ func (fb *ssaFuncBuilder) buildCompositeLitWithType(e *syntax.CompositeLit, typ 
 		} else {
 			v := fb.buildExpr(el)
 			if v != nil {
-				if _, ok2 := safeUnderlying(typ).(*TCStruct); ok2 {
+				if _, ok2 := SafeUnderlying(typ).(*TCStruct); ok2 {
 					ft := fb.fieldType(typ, posIdx)
 					fa := &SSAFieldAddr{X: alloc, Field: posIdx}
 					fa.typ = NewPointer(ft)
@@ -3882,7 +3930,7 @@ func (fb *ssaFuncBuilder) buildCompositeLitWithType(e *syntax.CompositeLit, typ 
 
 func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ Type, sl *Slice) (s SSAValue) {
 	n := len(e.ElemList)
-	nVal := &SSAConst{typ: Typ[Int32], val: constInt{int64(n)}}
+	nVal := &SSAConst{typ: Typ[Int32], val: ConstInt{int64(n)}}
 	ms := &SSAMakeSlice{}
 	ms.typ = typ
 	ms.name = fb.nextName()
@@ -3890,7 +3938,7 @@ func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ Type, sl *Sl
 	ms.Cap = nVal
 	fb.emit(ms)
 
-	elemTyp := sl.Elem()
+	elemTyp := sl.Elem
 	for i, el := range e.ElemList {
 		var expr syntax.Expr
 		if kv, ok := el.(*syntax.KeyValueExpr); ok {
@@ -3907,7 +3955,7 @@ func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ Type, sl *Sl
 		if v == nil {
 			continue
 		}
-		idx := &SSAConst{typ: Typ[Int32], val: constInt{int64(i)}}
+		idx := &SSAConst{typ: Typ[Int32], val: ConstInt{int64(i)}}
 		ia := &SSAIndexAddr{X: ms, Index: idx}
 		ia.typ = NewPointer(elemTyp)
 		ia.name = fb.nextName()
@@ -3926,7 +3974,7 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *syntax.FuncLit) (s SSAValue) {
 		}
 	}
 	if sig == nil && e.Type != nil {
-		sig = tcResolveFuncInline(e.Type, fb.fn.Pkg.Pkg.Scope())
+		sig = tcResolveFuncInline(e.Type, fb.fn.Pkg.Pkg.Scope)
 	}
 	name := fb.fn.name | "__anon" | ssaItoa(len(fb.fn.AnonFuncs)+1)
 	anon := &SSAFunction{
@@ -3991,7 +4039,7 @@ func (fb *ssaFuncBuilder) saveVars() (m map[Object]*SSAAlloc) {
 
 func (fb *ssaFuncBuilder) removeVar(name string) {
 	for o := range fb.vars {
-		if o.Name() == name {
+		if ObjectName(o) == name {
 			delete(fb.vars, o)
 			return
 		}
@@ -4000,11 +4048,11 @@ func (fb *ssaFuncBuilder) removeVar(name string) {
 
 
 func (fb *ssaFuncBuilder) buildPkgMemberAddr(pn *PkgName, memberName string) (s SSAValue) {
-	imported := pn.Imported()
+	imported := pn.Imported
 	if imported == nil {
 		return nil
 	}
-	obj := imported.Scope().Lookup(memberName)
+	obj := imported.Scope.Lookup(memberName)
 	if obj == nil {
 		return nil
 	}
@@ -4017,7 +4065,7 @@ func (fb *ssaFuncBuilder) buildPkgMemberAddr(pn *PkgName, memberName string) (s 
 		if !ok {
 			g = &SSAGlobal{
 				name: memberName,
-				typ:  NewPointer(obj.Type()),
+				typ:  NewPointer(obj.Typ),
 				pkg:  impPkg,
 			}
 			impPkg.SetMember(memberName, g)
@@ -4028,16 +4076,16 @@ func (fb *ssaFuncBuilder) buildPkgMemberAddr(pn *PkgName, memberName string) (s 
 }
 
 func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []syntax.Expr, hasDots bool) (s SSAValue) {
-	imported := pn.Imported()
+	imported := pn.Imported
 	if imported == nil {
 		return nil
 	}
-	if imported.Path() == "unsafe" && (funcName == "Slice" || funcName == "String") {
+	if imported.Path == "unsafe" && (funcName == "Slice" || funcName == "String") {
 		// string and []byte are the same type: unsafe.String(ptr, len) is
 		// unsafe.Slice with a byte element, which already yields string.
 		return fb.buildUnsafeSlice(argList)
 	}
-	if imported.Path() == "unsafe" && (funcName == "SliceData" || funcName == "StringData") {
+	if imported.Path == "unsafe" && (funcName == "SliceData" || funcName == "StringData") {
 		arg := fb.buildExpr(argList[0])
 		extract := &SSAExtract{Tuple: arg, Index: 0}
 		extract.typ = Typ[UnsafePointer]
@@ -4046,7 +4094,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		fb.currentBlock.Instrs = append(fb.currentBlock.Instrs, extract)
 		return extract
 	}
-	if imported.Path() == "unsafe" && funcName == "Add" {
+	if imported.Path == "unsafe" && funcName == "Add" {
 		if len(argList) != 2 {
 			return nil
 		}
@@ -4059,14 +4107,14 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		fb.currentBlock.Instrs = append(fb.currentBlock.Instrs, idx)
 		return idx
 	}
-	if imported.Path() == "unsafe" && funcName == "Sizeof" {
+	if imported.Path == "unsafe" && funcName == "Sizeof" {
 		sz := int64(8)
 		if len(argList) == 1 {
 			arg := fb.buildExpr(argList[0])
 			if arg != nil && arg.SSAType() != nil {
-				u := safeUnderlying(arg.SSAType())
+				u := SafeUnderlying(arg.SSAType())
 				if b, ok := u.(*Basic); ok {
-					switch b.Kind() {
+					switch b.Kind {
 					case Bool, Int8, Uint8:
 						sz = 1
 					case Int16, Uint16:
@@ -4085,9 +4133,9 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 					for i := 0; i < st.NumFields(); i++ {
 						f := st.Field(i)
 						fsz := int64(8)
-						fu := safeUnderlying(f.Type())
+						fu := SafeUnderlying(f.Typ)
 						if fb, ok2 := fu.(*Basic); ok2 {
-							switch fb.Kind() {
+							switch fb.Kind {
 							case Bool, Int8, Uint8:
 								fsz = 1
 							case Int16, Uint16:
@@ -4103,8 +4151,8 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 						}
 						if ar, ok2 := fu.(*Array); ok2 {
 							elemSz := int64(8)
-							if eb, ok3 := safeUnderlying(ar.Elem()).(*Basic); ok3 {
-								switch eb.Kind() {
+							if eb, ok3 := SafeUnderlying(ar.Elem).(*Basic); ok3 {
+								switch eb.Kind {
 								case Bool, Int8, Uint8:
 									elemSz = 1
 								case Int16, Uint16:
@@ -4115,7 +4163,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 									elemSz = 8
 								}
 							}
-							fsz = elemSz * ar.Len()
+							fsz = elemSz * ar.Len
 						}
 						if fsz < 8 {
 							total = total + fsz
@@ -4137,8 +4185,8 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 				}
 				if ar, ok := u.(*Array); ok {
 					elemSz := int64(8)
-					if eb, ok2 := safeUnderlying(ar.Elem()).(*Basic); ok2 {
-						switch eb.Kind() {
+					if eb, ok2 := SafeUnderlying(ar.Elem).(*Basic); ok2 {
+						switch eb.Kind {
 						case Bool, Int8, Uint8:
 							elemSz = 1
 						case Int16, Uint16:
@@ -4149,27 +4197,27 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 							elemSz = 8
 						}
 					}
-					sz = elemSz * ar.Len()
+					sz = elemSz * ar.Len
 				}
 			}
 		}
-		return NewSSAConst(constInt{sz}, Typ[Int64])
+		return NewSSAConst(ConstInt{sz}, Typ[Int64])
 	}
-	if imported.Path() == "unsafe" && funcName == "Alignof" {
-		return NewSSAConst(constInt{8}, Typ[Int64])
+	if imported.Path == "unsafe" && funcName == "Alignof" {
+		return NewSSAConst(ConstInt{8}, Typ[Int64])
 	}
-	if imported.Path() == "unsafe" && funcName == "Offsetof" {
-		return NewSSAConst(constInt{0}, Typ[Int64])
+	if imported.Path == "unsafe" && funcName == "Offsetof" {
+		return NewSSAConst(ConstInt{0}, Typ[Int64])
 	}
 	if result, handled := fb.tryGenericPkgCall(pn, funcName, argList, hasDots); handled {
 		return result
 	}
-	obj := imported.Scope().Lookup(funcName)
+	obj := imported.Scope.Lookup(funcName)
 	if obj == nil {
 		// Fail loud: a dropped call compiles the caller to garbage
 		// (zeroinitializer returns) and crashes far from the cause.
 		compileErrors = append(compileErrors,
-			"undefined: "|imported.Path()|"."|funcName|" (called from "|fb.fn.name|")")
+			"undefined: "|imported.Path|"."|funcName|" (called from "|fb.fn.name|")")
 		return nil
 	}
 	fn, ok := obj.(*TCFunc)
@@ -4182,11 +4230,11 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		ssaFn = &SSAFunction{
 			name:      funcName,
 			object:    fn,
-			Signature: fn.Type().(*Signature),
+			Signature: fn.Typ.(*Signature),
 			Pkg:       impPkg,
 			Prog:      fb.fn.Prog,
 		}
-		if isNoContextExtern(imported.Path(), funcName) {
+		if isNoContextExtern(imported.Path, funcName) {
 			ssaFn.isExternC = true
 		}
 		impPkg.SetMember(funcName, ssaFn)
@@ -4194,14 +4242,14 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 	args := fb.buildArgs(argList)
 	var retType Type
 	if ssaFn.Signature != nil {
-		if ssaFn.Signature.Variadic() && !hasDots {
+		if ssaFn.Signature.Variadic && !hasDots {
 			args = fb.wrapVariadicArgs(args, ssaFn.Signature)
 		}
 		args = fb.coerceArgsToInterface(args, ssaFn.Signature)
-		if ssaFn.Signature.Results() != nil && ssaFn.Signature.Results().Len() == 1 {
-			retType = ssaFn.Signature.Results().At(0).Type()
-		} else if ssaFn.Signature.Results() != nil && ssaFn.Signature.Results().Len() > 1 {
-			retType = ssaFn.Signature.Results()
+		if ssaFn.Signature.Results != nil && ssaFn.Signature.Results.Len() == 1 {
+			retType = ssaFn.Signature.Results.At(0).Typ
+		} else if ssaFn.Signature.Results != nil && ssaFn.Signature.Results.Len() > 1 {
+			retType = ssaFn.Signature.Results
 		}
 	}
 	call := &SSACall{Call: SSACallCommon{Value: ssaFn, Args: args}}
@@ -4224,14 +4272,14 @@ func (fb *ssaFuncBuilder) buildUnsafeSlice(argList []syntax.Expr) (s SSAValue) {
 		return nil
 	}
 	var elemType Type
-	if pt, ok := safeUnderlying(ptrVal.SSAType()).(*Pointer); ok {
-		elemType = pt.Elem()
+	if pt, ok := SafeUnderlying(ptrVal.SSAType()).(*Pointer); ok {
+		elemType = pt.Base
 	}
 	if elemType == nil {
 		elemType = Typ[Uint8]
 	}
 	ms := &SSAMakeSlice{Len: lenVal, Cap: lenVal, Data: ptrVal}
-	if b, ok := elemType.(*Basic); ok && b.kind == Uint8 {
+	if b, ok := elemType.(*Basic); ok && b.Kind == Uint8 {
 		ms.typ = Typ[TCString]
 	} else {
 		ms.typ = NewSlice(elemType)
@@ -4245,13 +4293,13 @@ func (fb *ssaFuncBuilder) buildUnsafeSlice(argList []syntax.Expr) (s SSAValue) {
 
 func (fb *ssaFuncBuilder) lookupObject(name string) (o Object) {
 	for obj := range fb.vars {
-		if obj.Name() == name {
+		if ObjectName(obj) == name {
 			return obj
 		}
 	}
 	if fb.parent != nil {
 		for obj := range fb.parent.vars {
-			if obj.Name() == name {
+			if ObjectName(obj) == name {
 				return obj
 			}
 		}
@@ -4267,7 +4315,7 @@ func (fb *ssaFuncBuilder) lookupObject(name string) (o Object) {
 		}
 	}
 	if fb.fn.Pkg != nil {
-		if _, obj := fb.fn.Pkg.Pkg.Scope().LookupParent(name); obj != nil {
+		if _, obj := fb.fn.Pkg.Pkg.Scope.LookupParent(name); obj != nil {
 			return obj
 		}
 	}
@@ -4307,18 +4355,18 @@ func (fb *ssaFuncBuilder) lookupVar(name string) (t *TCVar) {
 // (an LLVM aggregate), so passing the raw pointer reinterprets pointer bits
 // as field data.
 func (fb *ssaFuncBuilder) derefValueRecv(fn *SSAFunction, recv SSAValue) (s SSAValue) {
-	if fn == nil || recv == nil || fn.Signature == nil || fn.Signature.Recv() == nil {
+	if fn == nil || recv == nil || fn.Signature == nil || fn.Signature.Recv == nil {
 		return recv
 	}
 	// All receivers are ptr in Moxie. If the Signature says value receiver
 	// and the caller has a pointer, pass it through (already ptr).
 	// If the caller has a value, take its address.
-	if _, recvIsPtr := safeUnderlying(fn.Signature.Recv().Type()).(*Pointer); recvIsPtr {
+	if _, recvIsPtr := SafeUnderlying(fn.Signature.Recv.Typ).(*Pointer); recvIsPtr {
 		return recv
 	}
 	// Source-level value receiver - function now expects ptr.
 	// If recv is already a pointer, pass through.
-	if _, ok := safeUnderlying(recv.SSAType()).(*Pointer); ok {
+	if _, ok := SafeUnderlying(recv.SSAType()).(*Pointer); ok {
 		return recv
 	}
 	// recv is a value - take its address by storing to an alloca.
@@ -4333,40 +4381,40 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 		return nil, nil
 	}
 	isPtr := false
-	if p, ok := safeUnderlying(typ).(*Pointer); ok {
-		typ = p.Elem()
+	if p, ok := SafeUnderlying(typ).(*Pointer); ok {
+		typ = p.Base
 		isPtr = true
 	}
-	if _, ok := safeUnderlying(typ).(*TCInterface); ok {
+	if _, ok := SafeUnderlying(typ).(*TCInterface); ok {
 		if named2, ok2 := typ.(*Named); !ok2 || named2.NumMethods() == 0 {
 			return nil, nil
 		}
 	}
 	// Handle Basic types (builtin stringers in runtime package)
 	if basic, ok2 := typ.(*Basic); ok2 {
-		typeName := basic.Name()
+		typeName := basic.Name
 		mangledName := typeName | "." | sel.Sel.Value
 		extSym := "runtime." | mangledName
 		for i := int32(0); i < basic.NumMethods(); i++ {
 			m := basic.Method(i)
-			if m.Name() == sel.Sel.Value {
+			if m.Name == sel.Sel.Value {
 				fn := fb.fn.Pkg.ExternalFunc(mangledName, m.Signature())
 				fn.externalSymbol = extSym
 				return fn, recv
 			}
 		}
-		resolved := untypedToTyped(basic)
+		resolved := UntypedToTyped(basic)
 		if resolved == nil {
 			return nil, nil
 		}
 		switch rt := resolved.(type) {
 		case *Basic:
-			typeName = rt.Name()
+			typeName = rt.Name
 			mangledName = typeName | "." | sel.Sel.Value
 			extSym = "runtime." | mangledName
 			for i := int32(0); i < rt.NumMethods(); i++ {
 				m := rt.Method(i)
-				if m.Name() == sel.Sel.Value {
+				if m.Name == sel.Sel.Value {
 					fn := fb.fn.Pkg.ExternalFunc(mangledName, m.Signature())
 					fn.externalSymbol = extSym
 					return fn, recv
@@ -4384,8 +4432,8 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 		return nil, nil
 	}
 	typeName := ""
-	if named.Obj() != nil {
-		typeName = named.Obj().Name()
+	if named.Obj != nil {
+		typeName = named.Obj.Name
 	}
 	if typeName == "" {
 		return nil, nil
@@ -4393,15 +4441,15 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 	resolveNamed := named
 	if resolveNamed.NumMethods() == 0 {
 		// The Named type from typeSubst may be a bare copy without methods.
-		// Look up the canonical type in importRegistry which has methods
+		// Look up the canonical type in ImportRegistry which has methods
 		// attached from mxh loading.
-		if resolveNamed.Obj() != nil && resolveNamed.Obj().Pkg() != nil {
-			pkgPath := resolveNamed.Obj().Pkg().Path()
-			nm := resolveNamed.Obj().Name()
-			if importRegistry != nil {
-				if pkg := importRegistry[pkgPath]; pkg != nil && pkg.Scope() != nil {
-					if obj := pkg.Scope().Lookup(nm); obj != nil {
-						if regNamed, ok2 := obj.Type().(*Named); ok2 && regNamed.NumMethods() > 0 {
+		if resolveNamed.Obj != nil && resolveNamed.Obj.Pkg != nil {
+			pkgPath := resolveNamed.Obj.Pkg.Path
+			nm := resolveNamed.Obj.Name
+			if ImportRegistry != nil {
+				if pkg := ImportRegistry[pkgPath]; pkg != nil && pkg.Scope != nil {
+					if obj := pkg.Scope.Lookup(nm); obj != nil {
+						if regNamed, ok2 := ObjectType(obj).(*Named); ok2 && regNamed.NumMethods() > 0 {
 							resolveNamed = regNamed
 							typeName = nm
 						}
@@ -4416,22 +4464,22 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 				if !ok2 || n == nil { break }
 				if n.NumMethods() > 0 {
 					resolveNamed = n
-					if n.Obj() != nil && n.Obj().Name() != "" {
-						typeName = n.Obj().Name()
+					if n.Obj != nil && n.Obj.Name != "" {
+						typeName = n.Obj.Name
 					}
 					break
 				}
-				raw := n.RawUnderlying()
+				raw := n.Under
 				if raw == nil || raw == cur { break }
 				cur = raw
 			}
 		}
 	}
 	namedPkgPath := ""
-	if resolveNamed.Obj() != nil && resolveNamed.Obj().Pkg() != nil {
-		namedPkgPath = resolveNamed.Obj().Pkg().Path()
+	if resolveNamed.Obj != nil && resolveNamed.Obj.Pkg != nil {
+		namedPkgPath = resolveNamed.Obj.Pkg.Path
 	}
-	samePackage := namedPkgPath != "" && namedPkgPath == fb.fn.Pkg.Pkg.Path()
+	samePackage := namedPkgPath != "" && namedPkgPath == fb.fn.Pkg.Pkg.Path
 	mangledName := typeName | "." | sel.Sel.Value
 	if !samePackage && namedPkgPath != "" {
 		mangledName = namedPkgPath | "." | typeName | "." | sel.Sel.Value
@@ -4443,17 +4491,17 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 	if fn == nil {
 		for i := 0; i < resolveNamed.NumMethods(); i++ {
 			m := resolveNamed.Method(i)
-			if m.Name() == sel.Sel.Value {
+			if m.Name == sel.Sel.Value {
 				if !samePackage && namedPkgPath != "" {
 					// Imported method: register in the imported package so the
 					// emitter uses the moxie convention (value receivers passed
 					// by value, trailing ctx param). The externalSymbol path is
 					// C-export ABI and drops the ctx argument.
-					impPkg := fb.ensureImportedSSAPackage(resolveNamed.Obj().Pkg())
+					impPkg := fb.ensureImportedSSAPackage(resolveNamed.Obj.Pkg)
 					fn = impPkg.ExternalFunc(typeName|"."|sel.Sel.Value, m.Signature())
 				} else {
 					fn = fb.fn.Pkg.ExternalFunc(mangledName, m.Signature())
-					if resolveNamed.Obj() != nil && resolveNamed.Obj().Pkg() == nil {
+					if resolveNamed.Obj != nil && resolveNamed.Obj.Pkg == nil {
 						fn.externalSymbol = "runtime." | mangledName
 					}
 				}
@@ -4462,9 +4510,9 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 		}
 	}
 	if fn != nil {
-		if fn.Signature != nil && fn.Signature.Recv() != nil {
-			recvParam := fn.Signature.Recv()
-			_, recvIsPtr := safeUnderlying(recvParam.Type()).(*Pointer)
+		if fn.Signature != nil && fn.Signature.Recv != nil {
+			recvParam := fn.Signature.Recv
+			_, recvIsPtr := SafeUnderlying(recvParam.Typ).(*Pointer)
 			if recvIsPtr && !isPtr {
 				if nameExpr, ok2 := sel.X.(*syntax.Name); ok2 {
 					obj := fb.lookupObject(nameExpr.Value)
@@ -4483,7 +4531,7 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 		}
 		return fn, recv
 	}
-	st, ok2 := safeUnderlying(named).(*TCStruct)
+	st, ok2 := SafeUnderlying(named).(*TCStruct)
 	if !ok2 {
 		return nil, nil
 	}
@@ -4519,24 +4567,24 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 	}
 	for i := 0; i < st.NumFields(); i++ {
 		f := st.Field(i)
-		if !f.Anonymous() {
+		if !f.Anonymous {
 			continue
 		}
-		embedType := f.Type()
+		embedType := f.Typ
 		embedNamed, ok3 := embedType.(*Named)
 		if !ok3 {
 			if p, ok4 := embedType.(*Pointer); ok4 {
-				embedNamed, ok3 = p.Elem().(*Named)
+				embedNamed, ok3 = p.Base.(*Named)
 			}
 		}
-		if !ok3 || embedNamed.Obj() == nil {
+		if !ok3 || embedNamed.Obj == nil {
 			continue
 		}
-		embedName := embedNamed.Obj().Name()
-		embedSamePkg := embedNamed.Obj().Pkg() != nil && embedNamed.Obj().Pkg().Path() == fb.fn.Pkg.Pkg.Path()
+		embedName := embedNamed.Obj.Name
+		embedSamePkg := embedNamed.Obj.Pkg != nil && embedNamed.Obj.Pkg.Path == fb.fn.Pkg.Pkg.Path
 		embedMangledName := embedName | "." | sel.Sel.Value
-		if !embedSamePkg && embedNamed.Obj().Pkg() != nil {
-			embedMangledName = embedNamed.Obj().Pkg().Path() | "." | embedName | "." | sel.Sel.Value
+		if !embedSamePkg && embedNamed.Obj.Pkg != nil {
+			embedMangledName = embedNamed.Obj.Pkg.Path | "." | embedName | "." | sel.Sel.Value
 		}
 		var embedFn *SSAFunction
 		if embedSamePkg {
@@ -4545,9 +4593,9 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 		if embedFn == nil {
 			for mi := int32(0); mi < int32(embedNamed.NumMethods()); mi++ {
 				m := embedNamed.Method(int32(mi))
-				if m.Name() == sel.Sel.Value {
-					if !embedSamePkg && embedNamed.Obj().Pkg() != nil {
-						impPkg := fb.ensureImportedSSAPackage(embedNamed.Obj().Pkg())
+				if m.Name == sel.Sel.Value {
+					if !embedSamePkg && embedNamed.Obj.Pkg != nil {
+						impPkg := fb.ensureImportedSSAPackage(embedNamed.Obj.Pkg)
 						embedFn = impPkg.ExternalFunc(embedName|"."|sel.Sel.Value, m.Signature())
 					} else {
 						embedFn = fb.fn.Pkg.ExternalFunc(embedMangledName, m.Signature())
@@ -4565,7 +4613,7 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 			fieldAddr.name = fb.nextName()
 			fb.emit(fieldAddr)
 			var embedRecv SSAValue = fieldAddr
-			if _, isEmbedPtr := safeUnderlying(embedType).(*Pointer); isEmbedPtr {
+			if _, isEmbedPtr := SafeUnderlying(embedType).(*Pointer); isEmbedPtr {
 				ld := &SSAUnOp{Op: OpMul, X: fieldAddr}
 				ld.typ = embedType
 				ld.name = fb.nextName()
@@ -4574,30 +4622,30 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 			}
 			return embedFn, embedRecv
 		}
-		embedSt, ok5 := safeUnderlying(embedNamed).(*TCStruct)
+		embedSt, ok5 := SafeUnderlying(embedNamed).(*TCStruct)
 		if !ok5 {
 			continue
 		}
 		for j := 0; j < embedSt.NumFields(); j++ {
 			f2 := embedSt.Field(j)
-			if !f2.Anonymous() {
+			if !f2.Anonymous {
 				continue
 			}
-			embed2Type := f2.Type()
+			embed2Type := f2.Typ
 			embed2Named, ok6 := embed2Type.(*Named)
 			if !ok6 {
 				if p2, ok7 := embed2Type.(*Pointer); ok7 {
-					embed2Named, ok6 = p2.Elem().(*Named)
+					embed2Named, ok6 = p2.Base.(*Named)
 				}
 			}
-			if !ok6 || embed2Named.Obj() == nil {
+			if !ok6 || embed2Named.Obj == nil {
 				continue
 			}
-			embed2Name := embed2Named.Obj().Name()
-			embed2SamePkg := embed2Named.Obj().Pkg() != nil && embed2Named.Obj().Pkg().Path() == fb.fn.Pkg.Pkg.Path()
+			embed2Name := embed2Named.Obj.Name
+			embed2SamePkg := embed2Named.Obj.Pkg != nil && embed2Named.Obj.Pkg.Path == fb.fn.Pkg.Pkg.Path
 			embed2Mangled := embed2Name | "." | sel.Sel.Value
-			if !embed2SamePkg && embed2Named.Obj().Pkg() != nil {
-				embed2Mangled = embed2Named.Obj().Pkg().Path() | "." | embed2Name | "." | sel.Sel.Value
+			if !embed2SamePkg && embed2Named.Obj.Pkg != nil {
+				embed2Mangled = embed2Named.Obj.Pkg.Path | "." | embed2Name | "." | sel.Sel.Value
 			}
 			var embed2Fn *SSAFunction
 			if embed2SamePkg {
@@ -4606,9 +4654,9 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 			if embed2Fn == nil {
 				for mi := int32(0); mi < int32(embed2Named.NumMethods()); mi++ {
 					m := embed2Named.Method(int32(mi))
-					if m.Name() == sel.Sel.Value {
-						if !embed2SamePkg && embed2Named.Obj().Pkg() != nil {
-							impPkg := fb.ensureImportedSSAPackage(embed2Named.Obj().Pkg())
+					if m.Name == sel.Sel.Value {
+						if !embed2SamePkg && embed2Named.Obj.Pkg != nil {
+							impPkg := fb.ensureImportedSSAPackage(embed2Named.Obj.Pkg)
 							embed2Fn = impPkg.ExternalFunc(embed2Name|"."|sel.Sel.Value, m.Signature())
 						} else {
 							embed2Fn = fb.fn.Pkg.ExternalFunc(embed2Mangled, m.Signature())
@@ -4626,13 +4674,13 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 			fb.emit(fieldAddr1)
 			var cur1 SSAValue = fieldAddr1
 			curEmbedType := embedType
-			if p5, ok8 := safeUnderlying(embedType).(*Pointer); ok8 {
+			if p5, ok8 := SafeUnderlying(embedType).(*Pointer); ok8 {
 				ld := &SSAUnOp{Op: OpMul, X: fieldAddr1}
 				ld.typ = embedType
 				ld.name = fb.nextName()
 				fb.emit(ld)
 				cur1 = ld
-				curEmbedType = p5.Elem()
+				curEmbedType = p5.Base
 			}
 			_ = curEmbedType
 			fieldAddr2 := &SSAFieldAddr{X: cur1, Field: j}
@@ -4640,7 +4688,7 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 			fieldAddr2.name = fb.nextName()
 			fb.emit(fieldAddr2)
 			var embedRecv2 SSAValue = fieldAddr2
-			if _, isEmbedPtr2 := safeUnderlying(embed2Type).(*Pointer); isEmbedPtr2 {
+			if _, isEmbedPtr2 := SafeUnderlying(embed2Type).(*Pointer); isEmbedPtr2 {
 				ld2 := &SSAUnOp{Op: OpMul, X: fieldAddr2}
 				ld2.typ = embed2Type
 				ld2.name = fb.nextName()
@@ -4655,10 +4703,10 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 
 func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *syntax.SelectorExpr, recv SSAValue, argExprs []syntax.Expr) (s SSAValue) {
 	typ := recv.SSAType()
-	if p, ok := safeUnderlying(typ).(*Pointer); ok {
-		typ = p.Elem()
+	if p, ok := SafeUnderlying(typ).(*Pointer); ok {
+		typ = p.Base
 	}
-	iface, ok := safeUnderlying(typ).(*TCInterface)
+	iface, ok := SafeUnderlying(typ).(*TCInterface)
 	if !ok {
 		return nil
 	}
@@ -4668,17 +4716,17 @@ func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *syntax.SelectorExpr, recv SS
 		if m == nil {
 			continue
 		}
-		if m.Name() == sel.Sel.Value {
-			methodSig = m.Sig()
+		if m.Name == sel.Sel.Value {
+			methodSig = m.Sig
 			break
 		}
 	}
 	var retType Type
-	if methodSig != nil && methodSig.Results() != nil {
-		if methodSig.Results().Len() == 1 {
-			retType = methodSig.Results().At(0).Type()
-		} else if methodSig.Results().Len() > 1 {
-			retType = methodSig.Results()
+	if methodSig != nil && methodSig.Results != nil {
+		if methodSig.Results.Len() == 1 {
+			retType = methodSig.Results.At(0).Typ
+		} else if methodSig.Results.Len() > 1 {
+			retType = methodSig.Results
 		}
 	}
 	args := fb.buildArgs(argExprs)
@@ -4723,12 +4771,12 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
 		}
 		obj := fb.lookupObject(e.Value)
 		if tn, ok := obj.(*TypeName); ok {
-			if tp, ok2 := tn.Type().(*TypeParam); ok2 && fb.typeSubst != nil {
+			if tp, ok2 := tn.Typ.(*TypeParam); ok2 && fb.typeSubst != nil {
 				if t, ok3 := fb.typeSubst[tp.String()]; ok3 {
 					return t
 				}
 			}
-			return tn.Type()
+			return tn.Typ
 		}
 	case *syntax.Operation:
 		if e.Y == nil && e.Op == token.Mul {
@@ -4740,7 +4788,7 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
 	case *syntax.SliceType:
 		elem := fb.resolveTypeAST(e.Elem)
 		if elem != nil {
-			if b, ok := elem.(*Basic); ok && b.kind == Uint8 {
+			if b, ok := elem.(*Basic); ok && b.Kind == Uint8 {
 				return Typ[TCString]
 			}
 			return NewSlice(elem)
@@ -4752,11 +4800,11 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
 			if lit, ok := e.Len.(*syntax.BasicLit); ok {
 				n = ssaParseInt64(lit.Value)
 			} else if e.Len != nil {
-				cv := tcEvalConstExpr(e.Len, fb.fn.Pkg.Pkg.Scope(), -1)
+				cv := tcEvalConstExpr(e.Len, fb.fn.Pkg.Pkg.Scope, -1)
 				if cv == nil && fb.localConsts != nil {
 					cv = fb.evalLocalConstExpr(e.Len)
 				}
-				if ci, ok := cv.(constInt); ok {
+				if ci, ok := cv.(ConstInt); ok {
 					n = ci.v
 				}
 			}
@@ -4788,10 +4836,10 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
 	case *syntax.SelectorExpr:
 		if x, ok := e.X.(*syntax.Name); ok {
 			obj := fb.lookupObject(x.Value)
-			if pn, ok2 := obj.(*PkgName); ok2 && pn.Imported() != nil {
-				sel := pn.Imported().Scope().Lookup(e.Sel.Value)
+			if pn, ok2 := obj.(*PkgName); ok2 && pn.Imported != nil {
+				sel := pn.Imported.Scope.Lookup(e.Sel.Value)
 				if tn, ok3 := sel.(*TypeName); ok3 {
-					return tn.Type()
+					return tn.Typ
 				}
 			}
 		}
@@ -4879,12 +4927,12 @@ func (fb *ssaFuncBuilder) fieldIndex(t Type, name string) (n int32) {
 	if t == nil {
 		return -1
 	}
-	if pt, ok := safeUnderlying(t).(*Pointer); ok {
-		t = pt.Elem()
+	if pt, ok := SafeUnderlying(t).(*Pointer); ok {
+		t = pt.Base
 	}
-	if st, ok := safeUnderlying(t).(*TCStruct); ok {
+	if st, ok := SafeUnderlying(t).(*TCStruct); ok {
 		for i := 0; i < st.NumFields(); i++ {
-			if st.Field(i).Name() == name {
+			if st.Field(i).Name == name {
 				return i
 			}
 		}
@@ -4904,21 +4952,21 @@ func (fb *ssaFuncBuilder) findEmbeddedFieldPath(t Type, name string) (ss []int32
 	if t == nil {
 		return nil
 	}
-	if pt, ok := safeUnderlying(t).(*Pointer); ok {
-		t = pt.Elem()
+	if pt, ok := SafeUnderlying(t).(*Pointer); ok {
+		t = pt.Base
 	}
-	st, ok := safeUnderlying(t).(*TCStruct)
+	st, ok := SafeUnderlying(t).(*TCStruct)
 	if !ok {
 		return nil
 	}
 	for i := 0; i < st.NumFields(); i++ {
 		f := st.Field(i)
-		if !f.Anonymous() {
+		if !f.Anonymous {
 			continue
 		}
-		embedType := f.Type()
-		if pt, ok := safeUnderlying(embedType).(*Pointer); ok {
-			embedType = pt.Elem()
+		embedType := f.Typ
+		if pt, ok := SafeUnderlying(embedType).(*Pointer); ok {
+			embedType = pt.Base
 		}
 		inner := fb.fieldIndex(embedType, name)
 		if inner >= 0 {
@@ -4936,12 +4984,12 @@ func (fb *ssaFuncBuilder) fieldType(t Type, idx int32) (tv Type) {
 	if t == nil {
 		return nil
 	}
-	if pt, ok := safeUnderlying(t).(*Pointer); ok {
-		t = pt.Elem()
+	if pt, ok := SafeUnderlying(t).(*Pointer); ok {
+		t = pt.Base
 	}
-	if st, ok := safeUnderlying(t).(*TCStruct); ok {
+	if st, ok := SafeUnderlying(t).(*TCStruct); ok {
 		if idx >= 0 && idx < st.NumFields() {
-			return fb.substTypeParams(st.Field(idx).Type())
+			return fb.substTypeParams(st.Field(idx).Typ)
 		}
 	}
 	return nil
@@ -4961,38 +5009,38 @@ func (fb *ssaFuncBuilder) substTypeParams(t Type) (tv Type) {
 			return r
 		}
 	case *Pointer:
-		e := fb.substTypeParams(tt.Elem())
-		if e != tt.Elem() {
+		e := fb.substTypeParams(tt.Base)
+		if e != tt.Base {
 			return NewPointer(e)
 		}
 	case *Slice:
-		e := fb.substTypeParams(tt.Elem())
-		if e != tt.Elem() {
+		e := fb.substTypeParams(tt.Elem)
+		if e != tt.Elem {
 			return NewSlice(e)
 		}
 	case *Signature:
 		changed := false
 		var params []*TCVar
-		if tt.Params() != nil {
-			for i := 0; i < tt.Params().Len(); i++ {
-				p := tt.Params().At(i)
-				nt := fb.substTypeParams(p.Type())
-				if nt != p.Type() {
+		if tt.Params != nil {
+			for i := 0; i < tt.Params.Len(); i++ {
+				p := tt.Params.At(i)
+				nt := fb.substTypeParams(p.Typ)
+				if nt != p.Typ {
 					changed = true
-					params = append(params, NewTCVar(nil, p.Name(), nt))
+					params = append(params, NewTCVar(nil, p.Name, nt))
 				} else {
 					params = append(params, p)
 				}
 			}
 		}
 		var results []*TCVar
-		if tt.Results() != nil {
-			for i := 0; i < tt.Results().Len(); i++ {
-				r := tt.Results().At(i)
-				nt := fb.substTypeParams(r.Type())
-				if nt != r.Type() {
+		if tt.Results != nil {
+			for i := 0; i < tt.Results.Len(); i++ {
+				r := tt.Results.At(i)
+				nt := fb.substTypeParams(r.Typ)
+				if nt != r.Typ {
 					changed = true
-					results = append(results, NewTCVar(nil, r.Name(), nt))
+					results = append(results, NewTCVar(nil, r.Name, nt))
 				} else {
 					results = append(results, r)
 				}
@@ -5007,7 +5055,7 @@ func (fb *ssaFuncBuilder) substTypeParams(t Type) (tv Type) {
 			if len(results) > 0 {
 				rT = NewTuple(results...)
 			}
-			return NewSignature(nil, pT, rT, tt.Variadic())
+			return NewSignature(nil, pT, rT, tt.Variadic)
 		}
 	}
 	return t
@@ -5088,20 +5136,20 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope
 		_, obj := Universe.LookupParent(e.Value)
 		if obj != nil {
 			if tn, ok := obj.(*TypeName); ok {
-				return tn.typ
+				return tn.Typ
 			}
 		}
 		if pkgScope != nil {
 			tobj := pkgScope.Lookup(e.Value)
 			if tobj != nil {
 				if tn, ok := tobj.(*TypeName); ok {
-					return tn.typ
+					return tn.Typ
 				}
 			}
 		}
-		if importRegistry != nil {
+		if ImportRegistry != nil {
 			var regKeys []string
-			for k := range importRegistry {
+			for k := range ImportRegistry {
 				regKeys = append(regKeys, k)
 			}
 			for i := 1; i < len(regKeys); i++ {
@@ -5110,11 +5158,11 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope
 				}
 			}
 			for _, k := range regKeys {
-				pkg := importRegistry[k]
-				tobj := pkg.Scope().Lookup(e.Value)
+				pkg := ImportRegistry[k]
+				tobj := pkg.Scope.Lookup(e.Value)
 				if tobj != nil {
 					if tn, ok := tobj.(*TypeName); ok {
-						return tn.typ
+						return tn.Typ
 					}
 				}
 			}
@@ -5123,7 +5171,7 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope
 	case *syntax.DotsType:
 		elem := resolveTypeExprWithSubst(e.Elem, typeSubst, pkgScope)
 		if elem != nil {
-			if b, ok := elem.(*Basic); ok && b.kind == Uint8 {
+			if b, ok := elem.(*Basic); ok && b.Kind == Uint8 {
 				return Typ[TCString]
 			}
 			return NewSlice(elem)
@@ -5131,7 +5179,7 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope
 	case *syntax.SliceType:
 		elem := resolveTypeExprWithSubst(e.Elem, typeSubst, pkgScope)
 		if elem != nil {
-			if b, ok := elem.(*Basic); ok && b.kind == Uint8 {
+			if b, ok := elem.(*Basic); ok && b.Kind == Uint8 {
 				return Typ[TCString]
 			}
 			return NewSlice(elem)
@@ -5144,7 +5192,7 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope
 				n = ssaParseInt64(lit.Value)
 			} else if e.Len != nil && pkgScope != nil {
 				cv := tcEvalConstExpr(e.Len, pkgScope, -1)
-				if ci, ok := cv.(constInt); ok {
+				if ci, ok := cv.(ConstInt); ok {
 					n = ci.v
 				}
 			}
@@ -5185,9 +5233,9 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope
 		return resolveTypeExprWithSubst(e.X, typeSubst, pkgScope)
 	case *syntax.SelectorExpr:
 		if pkgName, ok := e.X.(*syntax.Name); ok {
-			if importRegistry != nil {
+			if ImportRegistry != nil {
 				var regKeys []string
-				for k := range importRegistry {
+				for k := range ImportRegistry {
 					regKeys = append(regKeys, k)
 				}
 				for i := 1; i < len(regKeys); i++ {
@@ -5196,12 +5244,12 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope
 					}
 				}
 				for _, k := range regKeys {
-					pkg := importRegistry[k]
-					if pkg.Name() == pkgName.Value {
-						typeObj := pkg.Scope().Lookup(e.Sel.Value)
+					pkg := ImportRegistry[k]
+					if pkg.Name == pkgName.Value {
+						typeObj := pkg.Scope.Lookup(e.Sel.Value)
 						if typeObj != nil {
 							if tn, ok2 := typeObj.(*TypeName); ok2 {
-								return tn.typ
+								return tn.Typ
 							}
 						}
 						break
@@ -5274,33 +5322,33 @@ func matchTypeParam(paramType syntax.Expr, argType Type, tparams []*syntax.Field
 	case *syntax.Operation:
 		// pointer param AST: *T is Operation{Op: Mul, Y: nil}
 		if pt.Y == nil && pt.Op == token.Mul {
-			if p, ok := safeUnderlying(argType).(*Pointer); ok {
-				matchTypeParam(pt.X, p.Elem(), tparams, typeMap)
+			if p, ok := SafeUnderlying(argType).(*Pointer); ok {
+				matchTypeParam(pt.X, p.Base, tparams, typeMap)
 			}
 		}
 	case *syntax.SliceType:
-		u := safeUnderlying(argType)
+		u := SafeUnderlying(argType)
 		// In Moxie, string and []byte are the same type. Treat string as
 		// []byte when matching against a slice type parameter.
-		if b, ok := u.(*Basic); ok && b.Kind() == TCString {
+		if b, ok := u.(*Basic); ok && b.Kind == TCString {
 			u = NewSlice(Typ[Uint8])
 		}
 		if sl, ok := u.(*Slice); ok {
-			matchTypeParam(pt.Elem, sl.Elem(), tparams, typeMap)
+			matchTypeParam(pt.Elem, sl.Elem, tparams, typeMap)
 		}
 	case *syntax.FuncType:
-		sig, ok := safeUnderlying(argType).(*Signature)
+		sig, ok := SafeUnderlying(argType).(*Signature)
 		if !ok {
 			return
 		}
 		for i, p := range pt.ParamList {
-			if sig.Params() != nil && i < int32(sig.Params().Len()) {
-				matchTypeParam(p.Type, sig.Params().At(int32(i)).Type(), tparams, typeMap)
+			if sig.Params != nil && i < int32(sig.Params.Len()) {
+				matchTypeParam(p.Type, sig.Params.At(int32(i)).Typ, tparams, typeMap)
 			}
 		}
 		for i, r := range pt.ResultList {
-			if sig.Results() != nil && i < int32(sig.Results().Len()) {
-				matchTypeParam(r.Type, sig.Results().At(int32(i)).Type(), tparams, typeMap)
+			if sig.Results != nil && i < int32(sig.Results.Len()) {
+				matchTypeParam(r.Type, sig.Results.At(int32(i)).Typ, tparams, typeMap)
 			}
 		}
 	}
@@ -5332,8 +5380,8 @@ func extractConstraintTypeParams(constraint syntax.Expr, concreteType Type, tpar
 		// In Moxie, string and []byte are the same type. When the concrete
 		// type is string (Basic), treat it as []byte for constraint matching.
 		ct := concreteType
-		u := safeUnderlying(ct)
-		if b, ok := u.(*Basic); ok && b.Kind() == TCString {
+		u := SafeUnderlying(ct)
+		if b, ok := u.(*Basic); ok && b.Kind == TCString {
 			ct = NewSlice(Typ[Uint8])
 			u = ct
 		}
@@ -5342,7 +5390,7 @@ func extractConstraintTypeParams(constraint syntax.Expr, concreteType Type, tpar
 				for _, tp := range tparams {
 					if tp.Name != nil && tp.Name.Value == name.Value {
 						if _, already := typeMap[name.Value]; !already {
-							typeMap[name.Value] = sl.Elem()
+							typeMap[name.Value] = sl.Elem
 						}
 					}
 				}
@@ -5429,13 +5477,13 @@ func (fb *ssaFuncBuilder) declaredTypeAST(arg syntax.Expr) (e syntax.Expr, m map
 		switch fun := a.Fun.(type) {
 		case *syntax.SelectorExpr:
 			if pkgName, ok := fun.X.(*syntax.Name); ok {
-				if pn, ok2 := fb.lookupObject(pkgName.Value).(*PkgName); ok2 && pn.Imported() != nil {
-					path = pn.Imported().Path()
+				if pn, ok2 := fb.lookupObject(pkgName.Value).(*PkgName); ok2 && pn.Imported != nil {
+					path = pn.Imported.Path
 					fname = fun.Sel.Value
 				}
 			}
 		case *syntax.Name:
-			path = fb.fn.Pkg.Pkg.Path()
+			path = fb.fn.Pkg.Pkg.Path
 			fname = fun.Value
 			if fb.srcScope != nil {
 				for gPkg, gScope := range genericPkgScopes {
@@ -5590,17 +5638,17 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, baseName stri
 
 func (fb *ssaFuncBuilder) emitCallToSSAFunc(fn *SSAFunction, args []SSAValue, hasDots bool) (s SSAValue) {
 	if fn.Signature != nil {
-		if fn.Signature.Variadic() && !hasDots {
+		if fn.Signature.Variadic && !hasDots {
 			args = fb.wrapVariadicArgs(args, fn.Signature)
 		}
 		args = fb.coerceArgsToInterface(args, fn.Signature)
 	}
 	var retType Type
-	if fn.Signature != nil && fn.Signature.Results() != nil {
-		if fn.Signature.Results().Len() == 1 {
-			retType = fn.Signature.Results().At(0).Type()
-		} else if fn.Signature.Results().Len() > 1 {
-			retType = fn.Signature.Results()
+	if fn.Signature != nil && fn.Signature.Results != nil {
+		if fn.Signature.Results.Len() == 1 {
+			retType = fn.Signature.Results.At(0).Typ
+		} else if fn.Signature.Results.Len() > 1 {
+			retType = fn.Signature.Results
 		}
 	}
 	call := &SSACall{Call: SSACallCommon{Value: fn, Args: args}}
@@ -5614,7 +5662,7 @@ func (fb *ssaFuncBuilder) emitCallToSSAFunc(fn *SSAFunction, args []SSAValue, ha
 }
 
 func (fb *ssaFuncBuilder) tryGenericLocalCall(funcName string, argList []syntax.Expr, hasDots bool) (s SSAValue, handled bool) {
-	pkgPath := fb.fn.Pkg.Pkg.Path()
+	pkgPath := fb.fn.Pkg.Pkg.Path
 	key := pkgPath + "." + funcName
 	fd, ok := genericFuncDecls[key]
 	if !ok && fb.srcScope != nil {
@@ -5622,7 +5670,7 @@ func (fb *ssaFuncBuilder) tryGenericLocalCall(funcName string, argList []syntax.
 			if gScope == fb.srcScope {
 				key = gPkg + "." + funcName
 				fd, ok = genericFuncDecls[key]
-				if !ok && gPkg != fb.fn.Pkg.Pkg.Path() {
+				if !ok && gPkg != fb.fn.Pkg.Pkg.Path {
 					// Package-local non-generic helper called from a
 					// monomorphized body in ANOTHER package: instantiate it
 					// here, its symbol is unexported in the source package's
@@ -5647,11 +5695,11 @@ func (fb *ssaFuncBuilder) tryGenericLocalCall(funcName string, argList []syntax.
 }
 
 func (fb *ssaFuncBuilder) tryGenericPkgCall(pn *PkgName, funcName string, argList []syntax.Expr, hasDots bool) (s SSAValue, handled bool) {
-	imported := pn.Imported()
+	imported := pn.Imported
 	if imported == nil {
 		return nil, false
 	}
-	key := imported.Path() + "." + funcName
+	key := imported.Path + "." + funcName
 	fd, ok := genericFuncDecls[key]
 	if !ok {
 		return nil, false
@@ -5659,13 +5707,13 @@ func (fb *ssaFuncBuilder) tryGenericPkgCall(pn *PkgName, funcName string, argLis
 	args := fb.buildArgs(argList)
 	typeArgs := inferTypeArgsFromFunc(fd, args)
 	typeArgs = fb.inferTypeArgsFromArgASTs(fd, argList, typeArgs)
-	return fb.monomorphizeAndCall(fd, funcName, typeArgs, args, fb.fn.Pkg, imported.Path(), hasDots)
+	return fb.monomorphizeAndCall(fd, funcName, typeArgs, args, fb.fn.Pkg, imported.Path, hasDots)
 }
 
 func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList []syntax.Expr, hasDots bool) (s SSAValue, handled bool) {
 	switch x := ie.X.(type) {
 	case *syntax.Name:
-		pkgPath := fb.fn.Pkg.Pkg.Path()
+		pkgPath := fb.fn.Pkg.Pkg.Path
 		key := pkgPath + "." + x.Value
 		fd, ok := genericFuncDecls[key]
 		if !ok && fb.srcScope != nil {
@@ -5689,15 +5737,15 @@ func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList 
 	case *syntax.SelectorExpr:
 		if pkgName, ok2 := x.X.(*syntax.Name); ok2 {
 			obj := fb.lookupObject(pkgName.Value)
-			if pn, ok3 := obj.(*PkgName); ok3 && pn.Imported() != nil {
-				key := pn.Imported().Path() + "." + x.Sel.Value
+			if pn, ok3 := obj.(*PkgName); ok3 && pn.Imported != nil {
+				key := pn.Imported.Path + "." + x.Sel.Value
 				fd, ok4 := genericFuncDecls[key]
 				if !ok4 {
 					return nil, false
 				}
 				typeArgs := fb.resolveExplicitTypeArgs(ie.Index, fd)
 				args := fb.buildArgs(argList)
-				return fb.monomorphizeAndCall(fd, x.Sel.Value, typeArgs, args, fb.fn.Pkg, pn.Imported().Path(), hasDots)
+				return fb.monomorphizeAndCall(fd, x.Sel.Value, typeArgs, args, fb.fn.Pkg, pn.Imported.Path, hasDots)
 			}
 		}
 	}

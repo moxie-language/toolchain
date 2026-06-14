@@ -1,8 +1,6 @@
 package types
 
-import (
-	"git.smesh.lol/moxie/pkg/syntax"
-)
+import "git.smesh.lol/moxie/pkg/mxutil"
 
 // Universe is the outermost scope containing all predeclared identifiers.
 // All package scopes have Universe as their ultimate ancestor.
@@ -54,7 +52,7 @@ func InitUniverse() {
 		{UntypedNil, IsUntyped, "untyped nil"},
 	}
 	for i, info := range infos {
-		Typ[i] = &Basic{kind: info.kind, info: info.info, name: info.name}
+		Typ[i] = &Basic{Kind: info.kind, Info: info.info, Name: info.name}
 	}
 
 	defTypeName("bool", Typ[Bool])
@@ -83,26 +81,31 @@ func InitUniverse() {
 
 	// byte = uint8
 	byteType := NewNamed(NewTypeName(nil, "byte", nil), Typ[Uint8])
-	defObj(byteType.obj)
-	byteType.obj.typ = byteType
+	defObj(byteType.Obj)
+	byteType.Obj.Typ = byteType
 	addStringMethod(byteType)
 
 	// rune = int32
 	runeType := NewNamed(NewTypeName(nil, "rune", nil), Typ[Int32])
-	defObj(runeType.obj)
-	runeType.obj.typ = runeType
+	defObj(runeType.Obj)
+	runeType.Obj.Typ = runeType
 	addStringMethod(runeType)
 
 	// uintptr (allowed only with import "unsafe")
-	uintptrType := NewNamed(NewTypeName(nil, "uintptr", nil), Typ[Uint64])
-	defObj(uintptrType.obj)
-	uintptrType.obj.typ = uintptrType
+	// wasm32: uintptr is 32-bit; native: 64-bit
+	uintptrUnderlying := Typ[Uint64]
+	if mxutil.TargetArch == "wasm" {
+		uintptrUnderlying = Typ[Uint32]
+	}
+	uintptrType := NewNamed(NewTypeName(nil, "uintptr", nil), uintptrUnderlying)
+	defObj(uintptrType.Obj)
+	uintptrType.Obj.Typ = uintptrType
 	addStringMethod(uintptrType)
 
 	// error = interface{ Error() string; String() string }
 	errSig := NewSignature(nil, nil, NewTuple(NewTCVar(nil, "", Typ[TCString])), false)
-	strMeth := &IfaceMethod{name: "String", sig: errSig}
-	errMeth := &IfaceMethod{name: "Error", sig: errSig}
+	strMeth := &IfaceMethod{Name: "String", Sig: errSig}
+	errMeth := &IfaceMethod{Name: "Error", Sig: errSig}
 	errIface := NewTCInterface([]*IfaceMethod{errMeth, strMeth}, nil)
 	errIface.Complete()
 	universeError = NewTypeName(nil, "error", errIface)
@@ -111,9 +114,9 @@ func InitUniverse() {
 	// complex64/128 are not valid in Moxie programs but appear in stdlib source.
 	// Register them as invalid basic types so the checker doesn't report "undefined".
 	complex64Type := NewNamed(NewTypeName(nil, "complex64", nil), Typ[Invalid])
-	defObj(complex64Type.obj)
+	defObj(complex64Type.Obj)
 	complex128Type := NewNamed(NewTypeName(nil, "complex128", nil), Typ[Invalid])
-	defObj(complex128Type.obj)
+	defObj(complex128Type.Obj)
 
 	anyIface := NewTCInterface(nil, nil)
 	anyIface.Complete()
@@ -161,7 +164,7 @@ func InitUniverse() {
 	Universe.Insert(newBuiltin("max", BuiltinMax))
 }
 
-func defTypeName(name string, typ syntax.Type) {
+func defTypeName(name string, typ Type) {
 	tn := NewTypeName(nil, name, typ)
 	Universe.Insert(tn)
 }
@@ -192,7 +195,7 @@ func defObj(obj Object) {
 	Universe.Insert(obj)
 }
 
-func defConst(name string, typ syntax.Type, val ConstVal) {
+func defConst(name string, typ Type, val ConstVal) {
 	Universe.Insert(NewTCConst(nil, name, typ, val))
 }
 
@@ -202,27 +205,24 @@ func defNil() {
 
 // Placeholder constant values. These wrap go/constant values. In B4 they
 // become native Moxie values.
-type ConstBool struct{ V bool }
-type ConstInt struct{ V int64 }
+type ConstBool struct{ v bool }
+type ConstInt struct{ v int64 }
 type ConstFloat struct {
-	V   float64
-	Lit string
+	v   float64
+	lit string
 }
-type ConstStr struct{ S string }
+type ConstStr struct{ s string }
 type ConstNil struct{}
 
 func untypedBool(v bool) (c ConstVal) { return ConstBool{v} }
 func untypedInt(v int64) (c ConstVal) { return ConstInt{v} }
-func untypedFloat(v float64) (c ConstVal) { return ConstFloat{V: v} }
+func untypedFloat(v float64) (c ConstVal) { return ConstFloat{v: v} }
 func untypedStr(s string) (c ConstVal) { return ConstStr{s} }
 func untypedNil() (c ConstVal) { return ConstNil{} }
 
-func NewConstInt(v int64) (c ConstVal) { return ConstInt{v} }
-func NewConstStr(s string) (c ConstVal) { return ConstStr{s} }
-
-func (c ConstBool) String() (s string) { if c.V { return "true" }; return "false" }
+func (c ConstBool) String() (s string) { if c.v { return "true" }; return "false" }
 func (c ConstInt) String() (s string) {
-	n := c.V
+	n := c.v
 	if n == 0 {
 		return "0"
 	}
@@ -247,15 +247,15 @@ func (c ConstInt) String() (s string) {
 	return string(buf)
 }
 func (c ConstFloat) String() (s string) {
-	if c.Lit != "" {
-		return NormalizeLLVMFloat(c.Lit)
+	if c.lit != "" {
+		return NormalizeLLVMFloat(c.lit)
 	}
-	if c.V == 0.0 {
+	if c.v == 0.0 {
 		return "0.0"
 	}
 	return "0.0"
 }
-func (c ConstStr) String() (s string) { return c.S }
+func (c ConstStr) String() (s string) { return c.s }
 func (c ConstNil) String() (s string) { return "nil" }
 
 func NormalizeLLVMFloat(s string) (sv string) {

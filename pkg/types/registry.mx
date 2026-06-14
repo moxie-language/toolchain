@@ -1,0 +1,48 @@
+package types
+
+// ImportRegistry maps package paths to their type-checked packages for the
+// current compile.
+var ImportRegistry map[string]*TCPackage
+
+// PkgDirectImports records each package's direct import paths. Source-compiled
+// packages derive it from their scope's PkgName entries; mxh-loaded packages
+// get it from "import" lines. findIfaceImpls needs it to walk the transitive
+// import closure when building dispatch lists for cached packages.
+var PkgDirectImports map[string][]string
+
+func EnsureImportRegistry() {
+	if ImportRegistry == nil {
+		ImportRegistry = map[string]*TCPackage{}
+	}
+}
+
+func DirectImportPaths(pkg *TCPackage) (paths []string) {
+	if pkg == nil {
+		return nil
+	}
+	if ps, ok := PkgDirectImports[pkg.Path]; ok {
+		return ps
+	}
+	var out []string
+	// Prefer the explicit import list: scope scanning misses imports that
+	// lost a local-name collision (imports are file-scoped).
+	for _, ip := range pkg.Imports {
+		out = append(out, ip.Path)
+	}
+	if len(out) == 0 {
+		sc := pkg.Scope
+		if sc == nil {
+			return nil
+		}
+		for _, n := range sc.Names() {
+			if pn, ok := sc.Lookup(n).(*PkgName); ok && pn.Imported != nil {
+				out = append(out, pn.Imported.Path)
+			}
+		}
+	}
+	if PkgDirectImports == nil {
+		PkgDirectImports = map[string][]string{}
+	}
+	PkgDirectImports[pkg.Path] = out
+	return out
+}

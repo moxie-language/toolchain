@@ -1,6 +1,7 @@
 package types
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"git.smesh.lol/moxie/pkg/syntax"
 	"git.smesh.lol/moxie/pkg/token"
 )
@@ -23,7 +24,7 @@ func (c *Checker) checkConstGroup(decls []*syntax.ConstDecl) {
 }
 
 func (c *Checker) checkConstDeclAt(d *syntax.ConstDecl, typExpr syntax.Expr, valExpr syntax.Expr, iotaVal int64) {
-	var typ syntax.Type
+	var typ Type
 	if typExpr != nil {
 		typ = c.resolveTypeExpr(typExpr)
 	}
@@ -36,7 +37,7 @@ func (c *Checker) checkConstDeclAt(d *syntax.ConstDecl, typExpr syntax.Expr, val
 	// When no explicit type and the value is a type conversion (CallExpr
 	// with a type name as Fun), infer the type from the conversion target.
 	// e.g. const EOF = errors.Const("EOF") -> type is errors.Const
-	var inferredTypes []syntax.Type
+	var inferredTypes []Type
 	if typ == nil && valExpr != nil {
 		inferredTypes = c.inferConstTypeList(valExpr)
 	}
@@ -45,7 +46,7 @@ func (c *Checker) checkConstDeclAt(d *syntax.ConstDecl, typExpr syntax.Expr, val
 		if name.Value == "_" {
 			continue
 		}
-		obj, ok := c.pkg.scope.Lookup(name.Value).(*TCConst)
+		obj, ok := c.pkg.Scope.Lookup(name.Value).(*TCConst)
 		if !ok {
 			continue
 		}
@@ -53,13 +54,13 @@ func (c *Checker) checkConstDeclAt(d *syntax.ConstDecl, typExpr syntax.Expr, val
 		if i < len(vals) {
 			cv = vals[i]
 		}
-		obj.val = cv
+		obj.Val = cv
 		if typ != nil {
-			obj.typ = typ
+			obj.Typ = typ
 		} else if i < len(inferredTypes) && inferredTypes[i] != nil {
-			obj.typ = inferredTypes[i]
+			obj.Typ = inferredTypes[i]
 		} else if cv != nil {
-			obj.typ = UntypedTypeOfCV(cv)
+			obj.Typ = UntypedTypeOfCV(cv)
 		}
 		if c.info != nil {
 			c.info.Defs[name] = obj
@@ -67,18 +68,18 @@ func (c *Checker) checkConstDeclAt(d *syntax.ConstDecl, typExpr syntax.Expr, val
 	}
 }
 
-func (c *Checker) inferConstTypeList(e syntax.Expr) (ts []syntax.Type) {
+func (c *Checker) inferConstTypeList(e syntax.Expr) (ts []Type) {
 	if l, ok := e.(*syntax.ListExpr); ok {
-		var out []syntax.Type
+		var out []Type
 		for _, el := range l.ElemList {
 			out = append(out, c.inferConstType(el))
 		}
 		return out
 	}
-	return []syntax.Type{c.inferConstType(e)}
+	return []Type{c.inferConstType(e)}
 }
 
-func (c *Checker) inferConstType(e syntax.Expr) (t syntax.Type) {
+func (c *Checker) inferConstType(e syntax.Expr) (t Type) {
 	if e == nil {
 		return nil
 	}
@@ -114,33 +115,33 @@ func (c *Checker) evalConst(e syntax.Expr, iotaVal int64) (cv ConstVal) {
 		return EvalBasicLitLocal(e)
 	case *syntax.Name:
 		if e.Value == "iota" {
-			return constInt{iotaVal}
+			return ConstInt{iotaVal}
 		}
 		var obj Object
 		if c.localScope != nil {
 			_, obj = c.localScope.LookupParent(e.Value)
 		}
 		if obj == nil {
-			_, obj = c.lookup(e.Value, c.pkg.scope)
+			_, obj = c.lookup(e.Value, c.pkg.Scope)
 		}
 		if obj == nil {
-			writeStr(2, "  CONST-LOOKUP-FAIL name=" | e.Value | " pkg=" | c.pkg.path | "\n")
+			mxutil.WriteStr(2, "  CONST-LOOKUP-FAIL name=" | e.Value | " pkg=" | c.pkg.Path | "\n")
 			return nil
 		}
 		if k, ok := obj.(*TCConst); ok {
-			if k.val == nil {
-				writeStr(2, "  CONST-REF-NIL name=" | e.Value | " pkg=" | c.pkg.path | "\n")
+			if k.Val == nil {
+				mxutil.WriteStr(2, "  CONST-REF-NIL name=" | e.Value | " pkg=" | c.pkg.Path | "\n")
 			}
-			return k.val
+			return k.Val
 		}
 		return nil
 	case *syntax.SelectorExpr:
 		if pkgName, ok := e.X.(*syntax.Name); ok {
-			if imp := c.pkg.scope.Lookup(pkgName.Value); imp != nil {
-				if pn, ok2 := imp.(*PkgName); ok2 && pn.Imported() != nil {
-					if obj := pn.Imported().Scope().Lookup(e.Sel.Value); obj != nil {
+			if _, imp := c.lookupType(pkgName.Value); imp != nil {
+				if pn, ok2 := imp.(*PkgName); ok2 && pn.Imported != nil {
+					if obj := pn.Imported.Scope.Lookup(e.Sel.Value); obj != nil {
 						if k, ok3 := obj.(*TCConst); ok3 {
-							return k.val
+							return k.Val
 						}
 					}
 				}
@@ -155,20 +156,20 @@ func (c *Checker) evalConst(e syntax.Expr, iotaVal int64) (cv ConstVal) {
 		if id, ok := e.Fun.(*syntax.Name); ok && id.Value == "len" && len(e.ArgList) == 1 {
 			if lit, ok := e.ArgList[0].(*syntax.BasicLit); ok && lit.Kind == token.StringLit {
 				lv := EvalBasicLitLocal(lit)
-				if cs, ok := lv.(constStr); ok {
-					return constInt{int64(len(cs.s))}
+				if cs, ok := lv.(ConstStr); ok {
+					return ConstInt{int64(len(cs.s))}
 				}
 			}
 			inner := c.evalConst(e.ArgList[0], iotaVal)
-			if cs, ok := inner.(constStr); ok {
-				return constInt{int64(len(cs.s))}
+			if cs, ok := inner.(ConstStr); ok {
+				return ConstInt{int64(len(cs.s))}
 			}
 		}
 		if sel, ok := e.Fun.(*syntax.SelectorExpr); ok {
 			if pkg, ok := sel.X.(*syntax.Name); ok && pkg.Value == "unsafe" {
 				switch sel.Sel.Value {
 				case "Sizeof", "Alignof", "Offsetof":
-					return constInt{8}
+					return ConstInt{8}
 				}
 			}
 		}
@@ -185,7 +186,7 @@ func (c *Checker) evalConst(e syntax.Expr, iotaVal int64) (cv ConstVal) {
 			if id, ok2 := e.Fun.(*syntax.Name); ok2 {
 				funName = id.Value
 			}
-			writeStr(2, "  CONST-CONV-FAIL fun=" | funName | " pkg=" | c.pkg.path | "\n")
+			mxutil.WriteStr(2, "  CONST-CONV-FAIL fun=" | funName | " pkg=" | c.pkg.Path | "\n")
 			return nil
 		}
 		return ConvertConstLocal(inner, targetType)
@@ -197,19 +198,19 @@ func EvalBasicLitLocal(e *syntax.BasicLit) (c ConstVal) {
 	switch e.Kind {
 	case token.IntLit:
 		n := ParseIntLocal(e.Value)
-		return constInt{n}
+		return ConstInt{n}
 	case token.FloatLit:
 		f := parseFloatLocal(e.Value)
-		return constFloat{v: f, lit: e.Value}
+		return ConstFloat{v: f, lit: e.Value}
 	case token.StringLit:
 		s := interpStringLocal(e.Value)
-		return constStr{s}
+		return ConstStr{s}
 	case token.RuneLit:
 		s := interpStringLocal(e.Value)
 		if len(s) > 0 {
-			return constInt{int64(decodeFirstRune(s))}
+			return ConstInt{int64(decodeFirstRune(s))}
 		}
-		return constInt{0}
+		return ConstInt{0}
 	}
 	return nil
 }
@@ -243,7 +244,6 @@ func ParseIntLocal(s string) (n int64) {
 			i += 1
 		}
 	}
-	var n int64
 	for ; i < len(s); i++ {
 		ch := s[i]
 		if ch == '_' {
@@ -472,12 +472,21 @@ func (c *Checker) evalConstOp(e *syntax.Operation, iotaVal int64) (cv ConstVal) 
 	if e.Y == nil {
 		x := c.evalConst(e.X, iotaVal)
 		if x == nil {
-			writeStr(2, "  CONSTOP-UNARY-NIL-X pkg=" | c.pkg.path | "\n")
+			mxutil.WriteStr(2, "  CONSTOP-UNARY-NIL-X pkg=" | c.pkg.Path | "\n")
 			return nil
 		}
 		r := EvalUnaryLocal(e.Op, x)
 		if r == nil {
-			writeStr(2, "  CONSTOP-UNARY-NIL-R pkg=" | c.pkg.path | " x=" | x.String() | "\n")
+			mxutil.WriteStr(2, "  CONSTOP-UNARY-NIL-R pkg=" | c.pkg.Path | " x=" | x.String() | "\n")
+		}
+		// ^x on a typed operand must be masked to the operand's width: the
+		// arbitrary-precision result (-x-1) is only correct for untyped
+		// constants.  Without this, uint64(^someUint32Const) sign-extends
+		// the stored negative value to 0xffffffffXXXXXXXX.
+		if r != nil && e.Op == token.Xor {
+			if b := c.constExprBasic(e.X); b != nil {
+				r = MaskConstToBasic(r, b)
+			}
 		}
 		return r
 	}
@@ -494,23 +503,23 @@ func EvalUnaryLocal(op token.Operator, x ConstVal) (c ConstVal) {
 	case token.Add:
 		return x
 	case token.Sub:
-		if ci, ok := x.(constInt); ok {
-			return constInt{-ci.v}
+		if ci, ok := x.(ConstInt); ok {
+			return ConstInt{-ci.v}
 		}
-		if cf, ok := x.(constFloat); ok {
+		if cf, ok := x.(ConstFloat); ok {
 			neg := ""
 			if cf.lit != "" {
 				neg = "-" + cf.lit
 			}
-			return constFloat{v: -cf.v, lit: neg}
+			return ConstFloat{v: -cf.v, lit: neg}
 		}
 	case token.Xor:
-		if ci, ok := x.(constInt); ok {
-			return constInt{^ci.v}
+		if ci, ok := x.(ConstInt); ok {
+			return ConstInt{^ci.v}
 		}
 	case token.Not:
-		if cb, ok := x.(constBool); ok {
-			return constBool{!cb.v}
+		if cb, ok := x.(ConstBool); ok {
+			return ConstBool{!cb.v}
 		}
 	}
 	return nil
@@ -519,121 +528,121 @@ func EvalUnaryLocal(op token.Operator, x ConstVal) (c ConstVal) {
 func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 	switch op {
 	case token.Add:
-		if xi, ok := x.(constInt); ok {
-			return constInt{xi.v + cvInt(y)}
+		if xi, ok := x.(ConstInt); ok {
+			return ConstInt{xi.v + cvInt(y)}
 		}
-		if xf, ok := x.(constFloat); ok {
-			return constFloat{v: xf.v + cvFloat(y)}
+		if xf, ok := x.(ConstFloat); ok {
+			return ConstFloat{v: xf.v + cvFloat(y)}
 		}
-		if xs, ok := x.(constStr); ok {
-			return constStr{xs.s + cvStr(y)}
+		if xs, ok := x.(ConstStr); ok {
+			return ConstStr{xs.s + cvStr(y)}
 		}
 	case token.Sub:
-		if xi, ok := x.(constInt); ok {
-			return constInt{xi.v - cvInt(y)}
+		if xi, ok := x.(ConstInt); ok {
+			return ConstInt{xi.v - cvInt(y)}
 		}
-		if xf, ok := x.(constFloat); ok {
-			return constFloat{v: xf.v - cvFloat(y)}
+		if xf, ok := x.(ConstFloat); ok {
+			return ConstFloat{v: xf.v - cvFloat(y)}
 		}
 	case token.Mul:
-		if xi, ok := x.(constInt); ok {
-			return constInt{xi.v * cvInt(y)}
+		if xi, ok := x.(ConstInt); ok {
+			return ConstInt{xi.v * cvInt(y)}
 		}
-		if xf, ok := x.(constFloat); ok {
-			return constFloat{v: xf.v * cvFloat(y)}
+		if xf, ok := x.(ConstFloat); ok {
+			return ConstFloat{v: xf.v * cvFloat(y)}
 		}
 	case token.Div:
-		if xi, ok := x.(constInt); ok {
+		if xi, ok := x.(ConstInt); ok {
 			d := cvInt(y)
 			if d == 0 {
-				return constInt{0}
+				return ConstInt{0}
 			}
-			return constInt{xi.v / d}
+			return ConstInt{xi.v / d}
 		}
-		if xf, ok := x.(constFloat); ok {
+		if xf, ok := x.(ConstFloat); ok {
 			d := cvFloat(y)
 			if d == 0.0 {
-				return constFloat{v: 0.0}
+				return ConstFloat{v: 0.0}
 			}
-			return constFloat{v: xf.v / d}
+			return ConstFloat{v: xf.v / d}
 		}
 	case token.Rem:
-		if xi, ok := x.(constInt); ok {
+		if xi, ok := x.(ConstInt); ok {
 			d := cvInt(y)
 			if d == 0 {
-				return constInt{0}
+				return ConstInt{0}
 			}
-			return constInt{xi.v % d}
+			return ConstInt{xi.v % d}
 		}
 	case token.And:
-		if xi, ok := x.(constInt); ok {
-			return constInt{xi.v & cvInt(y)}
+		if xi, ok := x.(ConstInt); ok {
+			return ConstInt{xi.v & cvInt(y)}
 		}
 	case token.Or:
-		if xi, ok := x.(constInt); ok {
-			return constInt{xi.v | cvInt(y)}
+		if xi, ok := x.(ConstInt); ok {
+			return ConstInt{xi.v | cvInt(y)}
 		}
-		if xs, ok := x.(constStr); ok {
-			return constStr{xs.s + cvStr(y)}
+		if xs, ok := x.(ConstStr); ok {
+			return ConstStr{xs.s + cvStr(y)}
 		}
 	case token.Xor:
-		if xi, ok := x.(constInt); ok {
-			return constInt{xi.v ^ cvInt(y)}
+		if xi, ok := x.(ConstInt); ok {
+			return ConstInt{xi.v ^ cvInt(y)}
 		}
 	case token.Shl:
-		if xi, ok := x.(constInt); ok {
+		if xi, ok := x.(ConstInt); ok {
 			shift := uint32(cvInt(y))
-			return constInt{xi.v << shift}
+			return ConstInt{xi.v << shift}
 		}
 	case token.Shr:
-		if xi, ok := x.(constInt); ok {
+		if xi, ok := x.(ConstInt); ok {
 			shift := uint32(cvInt(y))
-			return constInt{xi.v >> shift}
+			return ConstInt{xi.v >> shift}
 		}
 	case token.AndNot:
-		if xi, ok := x.(constInt); ok {
-			return constInt{xi.v &^ cvInt(y)}
+		if xi, ok := x.(ConstInt); ok {
+			return ConstInt{xi.v &^ cvInt(y)}
 		}
 	case token.Eql:
-		return constBool{constEqual(x, y)}
+		return ConstBool{constEqual(x, y)}
 	case token.Neq:
-		return constBool{!constEqual(x, y)}
+		return ConstBool{!constEqual(x, y)}
 	case token.Lss:
-		return constBool{constLess(x, y)}
+		return ConstBool{constLess(x, y)}
 	case token.Leq:
-		return constBool{constLess(x, y) || constEqual(x, y)}
+		return ConstBool{constLess(x, y) || constEqual(x, y)}
 	case token.Gtr:
-		return constBool{constLess(y, x)}
+		return ConstBool{constLess(y, x)}
 	case token.Geq:
-		return constBool{constLess(y, x) || constEqual(x, y)}
+		return ConstBool{constLess(y, x) || constEqual(x, y)}
 	case token.OrOr:
-		xb, xok := x.(constBool)
-		yb, yok := y.(constBool)
+		xb, xok := x.(ConstBool)
+		yb, yok := y.(ConstBool)
 		if xok && yok {
-			return constBool{xb.v || yb.v}
+			return ConstBool{xb.v || yb.v}
 		}
 	case token.AndAnd:
-		xb, xok := x.(constBool)
-		yb, yok := y.(constBool)
+		xb, xok := x.(ConstBool)
+		yb, yok := y.(ConstBool)
 		if xok && yok {
-			return constBool{xb.v && yb.v}
+			return ConstBool{xb.v && yb.v}
 		}
 	}
 	return nil
 }
 
 func constEqual(x ConstVal, y ConstVal) (ok bool) {
-	if xi, ok := x.(constInt); ok {
+	if xi, ok := x.(ConstInt); ok {
 		return xi.v == cvInt(y)
 	}
-	if xf, ok := x.(constFloat); ok {
+	if xf, ok := x.(ConstFloat); ok {
 		return xf.v == cvFloat(y)
 	}
-	if xs, ok := x.(constStr); ok {
+	if xs, ok := x.(ConstStr); ok {
 		return xs.s == cvStr(y)
 	}
-	if xb, ok := x.(constBool); ok {
-		if yb, ok := y.(constBool); ok {
+	if xb, ok := x.(ConstBool); ok {
+		if yb, ok := y.(ConstBool); ok {
 			return xb.v == yb.v
 		}
 	}
@@ -641,44 +650,125 @@ func constEqual(x ConstVal, y ConstVal) (ok bool) {
 }
 
 func constLess(x ConstVal, y ConstVal) (ok bool) {
-	if xi, ok := x.(constInt); ok {
+	if xi, ok := x.(ConstInt); ok {
 		return xi.v < cvInt(y)
 	}
-	if xf, ok := x.(constFloat); ok {
+	if xf, ok := x.(ConstFloat); ok {
 		return xf.v < cvFloat(y)
 	}
-	if xs, ok := x.(constStr); ok {
+	if xs, ok := x.(ConstStr); ok {
 		return xs.s < cvStr(y)
 	}
 	return false
 }
 
-func ConvertConstLocal(v ConstVal, target syntax.Type) (c ConstVal) {
+func ConvertConstLocal(v ConstVal, target Type) (c ConstVal) {
 	b, ok := SafeUnderlying(target).(*Basic)
 	if !ok {
 		return v
 	}
 	switch {
-	case b.info&IsInteger != 0:
+	case b.Info&IsInteger != 0:
 		iv := cvInt(v)
-		return constInt{iv}
-	case b.info&IsFloat != 0:
+		return MaskConstToBasic(ConstInt{iv}, b)
+	case b.Info&IsFloat != 0:
 		fv := cvFloat(v)
-		if cf, ok := v.(constFloat); ok {
-			return constFloat{v: fv, lit: cf.lit}
+		if cf, ok := v.(ConstFloat); ok {
+			return ConstFloat{v: fv, lit: cf.lit}
 		}
-		return constFloat{v: fv}
-	case b.info&IsString != 0:
+		return ConstFloat{v: fv}
+	case b.Info&IsString != 0:
 		if cvKind(v) == 3 {
 			n := cvInt(v)
-			return constStr{runeToStr(rune(n))}
+			return ConstStr{runeToStr(rune(n))}
 		}
 		return v
 	}
 	return v
 }
 
-func UntypedTypeOfCV(v ConstVal) (t syntax.Type) {
+// MaskConstToBasic truncates a ConstInt to the width and signedness of the
+// given sized basic integer type.  Untyped and non-integer types pass
+// through unchanged.
+func MaskConstToBasic(v ConstVal, b *Basic) (c ConstVal) {
+	ci, ok := v.(ConstInt)
+	if !ok || b == nil || b.Info&IsInteger == 0 || b.Info&IsUntyped != 0 {
+		return v
+	}
+	n := ci.v
+	switch b.Kind {
+	case Int8:
+		n = int64(int8(n))
+	case Int16:
+		n = int64(int16(n))
+	case Int32:
+		n = int64(int32(n))
+	case Uint8:
+		n = int64(uint8(n))
+	case Uint16:
+		n = int64(uint16(n))
+	case Uint32:
+		n = int64(uint32(n))
+	case Int64, Uint64:
+		// 64-bit: int64 bit pattern is already exact.
+	default:
+		return v
+	}
+	return ConstInt{n}
+}
+
+// constExprBasic resolves the basic type of a constant expression, used to
+// apply width masking to typed constant operations.  Returns nil when the
+// type cannot be determined (untyped literals and untracked forms).
+func (c *Checker) constExprBasic(e syntax.Expr) (b *Basic) {
+	switch e := e.(type) {
+	case *syntax.Name:
+		var obj Object
+		if c.localScope != nil {
+			_, obj = c.localScope.LookupParent(e.Value)
+		}
+		if obj == nil {
+			_, obj = c.lookup(e.Value, c.pkg.Scope)
+		}
+		if k, ok := obj.(*TCConst); ok && k.Typ != nil {
+			if bb, ok2 := SafeUnderlying(k.Typ).(*Basic); ok2 {
+				return bb
+			}
+		}
+	case *syntax.SelectorExpr:
+		if pkgName, ok := e.X.(*syntax.Name); ok {
+			if _, imp := c.lookupType(pkgName.Value); imp != nil {
+				if pn, ok2 := imp.(*PkgName); ok2 && pn.Imported != nil {
+					if obj := pn.Imported.Scope.Lookup(e.Sel.Value); obj != nil {
+						if k, ok3 := obj.(*TCConst); ok3 && k.Typ != nil {
+							if bb, ok4 := SafeUnderlying(k.Typ).(*Basic); ok4 {
+								return bb
+							}
+						}
+					}
+				}
+			}
+		}
+	case *syntax.ParenExpr:
+		return c.constExprBasic(e.X)
+	case *syntax.CallExpr:
+		if t := c.resolveTypeExpr(e.Fun); t != nil {
+			if bb, ok := SafeUnderlying(t).(*Basic); ok {
+				return bb
+			}
+		}
+	case *syntax.Operation:
+		if bb := c.constExprBasic(e.X); bb != nil && bb.Info&IsUntyped == 0 {
+			return bb
+		}
+		if e.Y != nil {
+			return c.constExprBasic(e.Y)
+		}
+	}
+	return nil
+}
+
+func UntypedTypeOfCV(v ConstVal) (t Type) {
 	switch cvKind(v) {
 	case 1:
 		return Typ[UntypedBool]
@@ -694,15 +784,15 @@ func UntypedTypeOfCV(v ConstVal) (t syntax.Type) {
 
 func cvKind(val ConstVal) (n int32) {
 	switch val.(type) {
-	case constBool:
+	case ConstBool:
 		return 1
-	case constStr:
+	case ConstStr:
 		return 2
-	case constInt:
+	case ConstInt:
 		return 3
-	case constFloat:
+	case ConstFloat:
 		return 4
-	case constNil:
+	case ConstNil:
 		return 0
 	}
 	return 0
@@ -712,7 +802,7 @@ func constInt64CV(v ConstVal) (int64, bool) {
 	if v == nil || cvKind(v) != 3 {
 		return 0, false
 	}
-	if ci, ok := v.(constInt); ok {
+	if ci, ok := v.(ConstInt); ok {
 		return ci.v, true
 	}
 	return 0, false
@@ -732,27 +822,27 @@ func (c *Checker) evalArrayLen(e syntax.Expr) (n int64) {
 }
 
 func cvInt(v ConstVal) (n int64) {
-	if ci, ok := v.(constInt); ok {
+	if ci, ok := v.(ConstInt); ok {
 		return ci.v
 	}
-	if cf, ok := v.(constFloat); ok {
+	if cf, ok := v.(ConstFloat); ok {
 		return int64(cf.v)
 	}
 	return 0
 }
 
 func cvFloat(v ConstVal) (f float64) {
-	if cf, ok := v.(constFloat); ok {
+	if cf, ok := v.(ConstFloat); ok {
 		return cf.v
 	}
-	if ci, ok := v.(constInt); ok {
+	if ci, ok := v.(ConstInt); ok {
 		return float64(ci.v)
 	}
 	return 0
 }
 
 func cvStr(v ConstVal) (s string) {
-	if cs, ok := v.(constStr); ok {
+	if cs, ok := v.(ConstStr); ok {
 		return cs.s
 	}
 	return ""
@@ -793,9 +883,4 @@ func runeToStr(r rune) (s string) {
 		out = append(out, byte(0xF0|(r>>18)), byte(0x80|((r>>12)&0x3F)), byte(0x80|((r>>6)&0x3F)), byte(0x80|(r&0x3F)))
 	}
 	return string(out)
-}
-
-func writeStr(fd int32, s string) {
-	// debug logging to stderr - uses println as standalone substitute
-	println(s)
 }

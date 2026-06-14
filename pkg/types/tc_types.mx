@@ -12,8 +12,10 @@ package types
 
 import (
 	"bytes"
-	"git.smesh.lol/moxie/pkg/syntax"
+	"git.smesh.lol/moxie/pkg/token"
 )
+
+// Type is already defined in nodes.mx (syntax.Type interface).
 
 // ----------------------------------------------------------------------------
 // BasicKind
@@ -71,23 +73,20 @@ const (
 
 // Basic is an elementary type (bool, int32, string, etc.).
 type Basic struct {
-	kind    BasicKind
-	info    BasicInfo
-	name    string
-	methods []*TCFunc
+	Kind    BasicKind
+	Info    BasicInfo
+	Name    string
+	Methods []*TCFunc
 }
 
-func (t *Basic) Kind() (b BasicKind) { return t.kind }
-func (t *Basic) Info() (b BasicInfo) { return t.info }
-func (t *Basic) Name() (s string) { return t.name }
-func (t *Basic) Underlying() (tv syntax.Type) { return t }
-func (t *Basic) String() (s string) { return t.name }
-func (t *Basic) NumMethods() (n int32) { return len(t.methods) }
-func (t *Basic) Method(i int32) (tv *TCFunc) { return t.methods[i] }
-func (t *Basic) AddMethod(m *TCFunc) { t.methods = append(t.methods, m) }
+func (t *Basic) Underlying() (tv Type) { return t }
+func (t *Basic) String() (s string) { return t.Name }
+func (t *Basic) NumMethods() (n int32) { return len(t.Methods) }
+func (t *Basic) Method(i int32) (tv *TCFunc) { return t.Methods[i] }
+func (t *Basic) AddMethod(m *TCFunc) { t.Methods = append(t.Methods, m) }
 
-func UntypedToTyped(b *Basic) (t syntax.Type) {
-	switch b.kind {
+func UntypedToTyped(b *Basic) (t Type) {
+	switch b.Kind {
 	case UntypedBool:
 		return Typ[Bool]
 	case UntypedInt:
@@ -97,7 +96,7 @@ func UntypedToTyped(b *Basic) (t syntax.Type) {
 			obj := Universe.Lookup("rune")
 			if obj != nil {
 				if tn, ok := obj.(*TypeName); ok {
-					return tn.Type()
+					return tn.Typ
 				}
 			}
 		}
@@ -114,46 +113,41 @@ func UntypedToTyped(b *Basic) (t syntax.Type) {
 // Array
 
 type Array struct {
-	len  int64
-	elem syntax.Type
+	Len  int64
+	Elem Type
 }
 
-func NewArray(elem syntax.Type, n int64) (a *Array) { return &Array{len: n, elem: elem} }
-func (t *Array) Len() (n int64) { return t.len }
-func (t *Array) Elem() (tv syntax.Type) { return t.elem }
-func (t *Array) Underlying() (tv syntax.Type) { return t }
-func (t *Array) String() (s string) { return "[" | simpleItoa64(t.len) | "]" | t.elem.String() }
+func NewArray(elem Type, n int64) (a *Array) { return &Array{Len: n, Elem: elem} }
+func (t *Array) Underlying() (tv Type) { return t }
+func (t *Array) String() (s string) { return "[" | token.Itoa64(t.Len) | "]" | t.Elem.String() }
 
 // ----------------------------------------------------------------------------
 // Slice
 
-type Slice struct{ elem syntax.Type }
+type Slice struct{ Elem Type }
 
-func NewSlice(elem syntax.Type) (s *Slice) { return &Slice{elem: elem} }
-func (t *Slice) Elem() (tv syntax.Type) { return t.elem }
-func (t *Slice) Underlying() (tv syntax.Type) { return t }
-func (t *Slice) String() (s string) { return "[]" | t.elem.String() }
+func NewSlice(elem Type) (s *Slice) { return &Slice{Elem: elem} }
+func (t *Slice) Underlying() (tv Type) { return t }
+func (t *Slice) String() (s string) { return "[]" | t.Elem.String() }
 
 // ----------------------------------------------------------------------------
 // Pointer
 
-type Pointer struct{ base syntax.Type }
+type Pointer struct{ Base Type }
 
-func NewPointer(base syntax.Type) (p *Pointer) { return &Pointer{base: base} }
-func (t *Pointer) Elem() (tv syntax.Type) { return t.base }
-func (t *Pointer) Underlying() (tv syntax.Type) { return t }
-func (t *Pointer) String() (s string) { return "*" | t.base.String() }
+func NewPointer(base Type) (p *Pointer) { return &Pointer{Base: base} }
+func (t *Pointer) Elem() (tv Type) { return t.Base }
+func (t *Pointer) Underlying() (tv Type) { return t }
+func (t *Pointer) String() (s string) { return "*" | t.Base.String() }
 
 // ----------------------------------------------------------------------------
 // Map
 
-type TCMap struct{ key, elem syntax.Type }
+type TCMap struct{ Key, Elem Type }
 
-func NewTCMap(key, elem syntax.Type) (t *TCMap) { return &TCMap{key: key, elem: elem} }
-func (t *TCMap) Key() (tv syntax.Type) { return t.key }
-func (t *TCMap) Elem() (tv syntax.Type) { return t.elem }
-func (t *TCMap) Underlying() (tv syntax.Type) { return t }
-func (t *TCMap) String() (s string) { return "map[" | t.key.String() | "]" | t.elem.String() }
+func NewTCMap(key, elem Type) (t *TCMap) { return &TCMap{Key: key, Elem: elem} }
+func (t *TCMap) Underlying() (tv Type) { return t }
+func (t *TCMap) String() (s string) { return "map[" | t.Key.String() | "]" | t.Elem.String() }
 
 // ----------------------------------------------------------------------------
 // Chan
@@ -167,92 +161,86 @@ const (
 )
 
 type TCChan struct {
-	dir  TCChanDir
-	elem syntax.Type
+	Dir  TCChanDir
+	Elem Type
 }
 
-func NewTCChan(dir TCChanDir, elem syntax.Type) (t *TCChan) { return &TCChan{dir: dir, elem: elem} }
-func (t *TCChan) Dir() (tv TCChanDir) { return t.dir }
-func (t *TCChan) Elem() (tv syntax.Type) { return t.elem }
-func (t *TCChan) Underlying() (tv syntax.Type) { return t }
+func NewTCChan(dir TCChanDir, elem Type) (t *TCChan) { return &TCChan{Dir: dir, Elem: elem} }
+func (t *TCChan) Underlying() (tv Type) { return t }
 func (t *TCChan) String() (s string) {
-	switch t.dir {
+	switch t.Dir {
 	case TCSendOnly:
-		return "chan<- " | t.elem.String()
+		return "chan<- " | t.Elem.String()
 	case TCRecvOnly:
-		return "<-chan " | t.elem.String()
+		return "<-chan " | t.Elem.String()
 	}
-	return "chan " | t.elem.String()
+	return "chan " | t.Elem.String()
 }
 
 // ----------------------------------------------------------------------------
 // Var (a field or variable, used in Struct/Signature/Tuple)
 
 type TCVar struct {
-	pkg       *TCPackage
-	name      string
-	typ       syntax.Type
-	anonymous bool // embedded field (no explicit name)
-	used      bool
-	pos       interface{} // Pos - stored as interface to avoid import cycle
+	Pkg       *TCPackage
+	Name      string
+	Typ       Type
+	Anonymous bool // embedded field (no explicit name)
+	Used      bool
+	Pos       interface{} // Pos - stored as interface to avoid import cycle
 }
 
-func NewTCVar(pkg *TCPackage, name string, typ syntax.Type) (t *TCVar) {
-	return &TCVar{pkg: pkg, name: name, typ: typ}
+func NewTCVar(pkg *TCPackage, name string, typ Type) (t *TCVar) {
+	return &TCVar{Pkg: pkg, Name: name, Typ: typ}
 }
-func NewTCField(pkg *TCPackage, name string, typ syntax.Type, anonymous bool) (t *TCVar) {
-	return &TCVar{pkg: pkg, name: name, typ: typ, anonymous: anonymous}
+func NewTCField(pkg *TCPackage, name string, typ Type, anonymous bool) (t *TCVar) {
+	return &TCVar{Pkg: pkg, Name: name, Typ: typ, Anonymous: anonymous}
 }
-func (v *TCVar) Name() (s string) { return v.name }
-func (v *TCVar) Type() (t syntax.Type) { return v.typ }
-func (v *TCVar) Anonymous() (ok bool) { return v.anonymous }
-func (v *TCVar) Pkg() (t *TCPackage) { return v.pkg }
-func (v *TCVar) Exported() (ok bool) { return len(v.name) > 0 && v.name[0] >= 'A' && v.name[0] <= 'Z' }
+func (v *TCVar) Exported() (ok bool) { return len(v.Name) > 0 && v.Name[0] >= 'A' && v.Name[0] <= 'Z' }
 func (v *TCVar) objectTag()        {}
-func (v *TCVar) String() (s string) { return v.name }
+func (v *TCVar) String() (s string) { return v.Name }
 
 // ----------------------------------------------------------------------------
 // Struct
 
 type TCStruct struct {
-	fields []*TCVar
-	tags   []string
+	Fields []*TCVar
+	Tags   []string
 }
 
 func NewTCStruct(fields []*TCVar, tags []string) (t *TCStruct) {
-	return &TCStruct{fields: fields, tags: tags}
+	return &TCStruct{Fields: fields, Tags: tags}
 }
 func (t *TCStruct) NumFields() (n int32) {
 	if t == nil {
 		return 0
 	}
-	return len(t.fields)
+	return len(t.Fields)
 }
 func (t *TCStruct) Field(i int32) (tv *TCVar) {
 	if t == nil {
 		return nil
 	}
-	return t.fields[i]
+	return t.Fields[i]
 }
 func (t *TCStruct) Tag(i int32) (s string) {
-	if i < len(t.tags) {
-		return t.tags[i]
+	if i < len(t.Tags) {
+		return t.Tags[i]
 	}
 	return ""
 }
-func (t *TCStruct) Underlying() (tv syntax.Type) { return t }
+func (t *TCStruct) Underlying() (tv Type) { return t }
 func (t *TCStruct) String() (s string) {
 	var sb bytes.Buffer
 	sb.WriteString("struct{")
-	for i, f := range t.fields {
+	for i, f := range t.Fields {
 		if i > 0 {
 			sb.WriteString("; ")
 		}
-		if !f.anonymous {
-			sb.WriteString(f.name)
+		if !f.Anonymous {
+			sb.WriteString(f.Name)
 			sb.WriteByte(' ')
 		}
-		sb.WriteString(f.typ.String())
+		sb.WriteString(f.Typ.String())
 		if tag := t.Tag(i); tag != "" {
 			sb.WriteString(" \"")
 			sb.WriteString(tag)
@@ -266,23 +254,23 @@ func (t *TCStruct) String() (s string) {
 // ----------------------------------------------------------------------------
 // Tuple (multi-return, parameter list)
 
-type Tuple struct{ vars []*TCVar }
+type Tuple struct{ Vars []*TCVar }
 
-func NewTuple(vars ...*TCVar) (t *Tuple) { return &Tuple{vars: vars} }
-func (t *Tuple) Len() (n int32) { return len(t.vars) }
-func (t *Tuple) At(i int32) (tv *TCVar) { return t.vars[i] }
-func (t *Tuple) Underlying() (tv syntax.Type) { return t }
+func NewTuple(vars ...*TCVar) (t *Tuple) { return &Tuple{Vars: vars} }
+func (t *Tuple) Len() (n int32) { return len(t.Vars) }
+func (t *Tuple) At(i int32) (tv *TCVar) { return t.Vars[i] }
+func (t *Tuple) Underlying() (tv Type) { return t }
 func (t *Tuple) String() (s string) {
-	if t == nil || len(t.vars) == 0 {
+	if t == nil || len(t.Vars) == 0 {
 		return "()"
 	}
 	var sb bytes.Buffer
 	sb.WriteByte('(')
-	for i, v := range t.vars {
+	for i, v := range t.Vars {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		sb.WriteString(v.typ.String())
+		sb.WriteString(v.Typ.String())
 	}
 	sb.WriteByte(')')
 	return sb.String()
@@ -292,34 +280,30 @@ func (t *Tuple) String() (s string) {
 // Signature (function type)
 
 type Signature struct {
-	recv     *TCVar // nil for plain functions
-	params   *Tuple
-	results  *Tuple
-	variadic bool
+	Recv     *TCVar // nil for plain functions
+	Params   *Tuple
+	Results  *Tuple
+	Variadic bool
 }
 
 func NewSignature(recv *TCVar, params, results *Tuple, variadic bool) (s *Signature) {
-	return &Signature{recv: recv, params: params, results: results, variadic: variadic}
+	return &Signature{Recv: recv, Params: params, Results: results, Variadic: variadic}
 }
-func (t *Signature) Recv() (tv *TCVar) { if t == nil { return nil }; return t.recv }
-func (t *Signature) Params() (tv *Tuple) { if t == nil { return nil }; return t.params }
-func (t *Signature) Results() (tv *Tuple) { if t == nil { return nil }; return t.results }
-func (t *Signature) Variadic() (ok bool) { if t == nil { return false }; return t.variadic }
-func (t *Signature) Underlying() (tv syntax.Type) { return t }
+func (t *Signature) Underlying() (tv Type) { return t }
 func (t *Signature) String() (s string) {
 	var sb bytes.Buffer
 	sb.WriteString("func")
-	if t.params != nil {
-		writeParams(&sb, t.params, t.variadic)
+	if t.Params != nil {
+		writeParams(&sb, t.Params, t.Variadic)
 	} else {
 		sb.WriteString("()")
 	}
-	if t.results != nil && t.results.Len() > 0 {
+	if t.Results != nil && t.Results.Len() > 0 {
 		sb.WriteByte(' ')
-		if t.results.Len() == 1 && t.results.At(0).name == "" {
-			sb.WriteString(t.results.At(0).typ.String())
+		if t.Results.Len() == 1 && t.Results.At(0).Name == "" {
+			sb.WriteString(t.Results.At(0).Typ.String())
 		} else {
-			writeParams(&sb, t.results, false)
+			writeParams(&sb, t.Results, false)
 		}
 	}
 	return sb.String()
@@ -327,22 +311,22 @@ func (t *Signature) String() (s string) {
 
 func writeParams(sb *bytes.Buffer, t *Tuple, variadic bool) {
 	sb.WriteByte('(')
-	for i, v := range t.vars {
+	for i, v := range t.Vars {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		if v.name != "" {
-			sb.WriteString(v.name)
+		if v.Name != "" {
+			sb.WriteString(v.Name)
 			sb.WriteByte(' ')
 		}
-		if variadic && i == len(t.vars)-1 {
-			if sl, ok := v.typ.(*Slice); ok {
+		if variadic && i == len(t.Vars)-1 {
+			if sl, ok := v.Typ.(*Slice); ok {
 				sb.WriteString("...")
-				sb.WriteString(sl.elem.String())
+				sb.WriteString(sl.Elem.String())
 				continue
 			}
 		}
-		sb.WriteString(v.typ.String())
+		sb.WriteString(v.Typ.String())
 	}
 	sb.WriteByte(')')
 }
@@ -352,60 +336,56 @@ func writeParams(sb *bytes.Buffer, t *Tuple, variadic bool) {
 
 // IfaceMethod holds a method signature for an interface.
 type IfaceMethod struct {
-	name string
-	sig  *Signature
+	Name string
+	Sig  *Signature
 }
-
-func (m *IfaceMethod) Name() (s string) { return m.name }
-func (m *IfaceMethod) Sig() (s *Signature) { return m.sig }
 
 // IfaceMethod constructor used by the bridge package.
 func NewTCIfaceMethod(name string, sig *Signature) (i *IfaceMethod) {
-	return &IfaceMethod{name: name, sig: sig}
+	return &IfaceMethod{Name: name, Sig: sig}
 }
 
 type TCInterface struct {
-	methods    []*IfaceMethod
-	embeds     []syntax.Type
-	complete   bool
-	allMethods []*IfaceMethod
+	XMethods   []*IfaceMethod
+	Embeds     []Type
+	Completed  bool
+	AllMethods []*IfaceMethod
 }
 
-func NewTCInterface(methods []*IfaceMethod, embeds []syntax.Type) (t *TCInterface) {
-	return &TCInterface{methods: methods, embeds: embeds}
+func NewTCInterface(methods []*IfaceMethod, embeds []Type) (t *TCInterface) {
+	return &TCInterface{XMethods: methods, Embeds: embeds}
 }
-func (t *TCInterface) NumMethods() (n int32) { return len(t.allMethods) }
-func (t *TCInterface) Method(i int32) (i2 *IfaceMethod) { return t.allMethods[i] }
-func (t *TCInterface) NumExplicitMethods() (n int32) { return len(t.methods) }
-func (t *TCInterface) ExplicitMethod(i int32) (i2 *IfaceMethod) { return t.methods[i] }
-func (t *TCInterface) NumEmbeddeds() (n int32) { return len(t.embeds) }
-func (t *TCInterface) EmbeddedType(i int32) (tv syntax.Type) { return t.embeds[i] }
-func (t *TCInterface) IsEmpty() (ok bool) { return len(t.allMethods) == 0 }
-func (t *TCInterface) Underlying() (tv syntax.Type) { return t }
+func (t *TCInterface) NumMethods() (n int32) { return len(t.AllMethods) }
+func (t *TCInterface) Method(i int32) (i2 *IfaceMethod) { return t.AllMethods[i] }
+func (t *TCInterface) NumExplicitMethods() (n int32) { return len(t.XMethods) }
+func (t *TCInterface) ExplicitMethod(i int32) (i2 *IfaceMethod) { return t.XMethods[i] }
+func (t *TCInterface) NumEmbeddeds() (n int32) { return len(t.Embeds) }
+func (t *TCInterface) EmbeddedType(i int32) (tv Type) { return t.Embeds[i] }
+func (t *TCInterface) IsEmpty() (ok bool) { return len(t.AllMethods) == 0 }
+func (t *TCInterface) Underlying() (tv Type) { return t }
 func (t *TCInterface) String() (s string) {
 	if t.IsEmpty() {
 		return "interface{}"
 	}
 	var sb bytes.Buffer
 	sb.WriteString("interface{")
-	for i, m := range t.allMethods {
+	for i, m := range t.AllMethods {
 		if i > 0 {
 			sb.WriteString("; ")
 		}
-		sb.WriteString(m.name)
-		// write sig without "func" prefix
-		sig := m.sig
-		if sig.params != nil {
-			writeParams(&sb, sig.params, sig.variadic)
+		sb.WriteString(m.Name)
+		sig := m.Sig
+		if sig.Params != nil {
+			writeParams(&sb, sig.Params, sig.Variadic)
 		} else {
 			sb.WriteString("()")
 		}
-		if sig.results != nil && sig.results.Len() > 0 {
+		if sig.Results != nil && sig.Results.Len() > 0 {
 			sb.WriteByte(' ')
-			if sig.results.Len() == 1 {
-				sb.WriteString(sig.results.At(0).typ.String())
+			if sig.Results.Len() == 1 {
+				sb.WriteString(sig.Results.At(0).Typ.String())
 			} else {
-				writeParams(&sb, sig.results, false)
+				writeParams(&sb, sig.Results, false)
 			}
 		}
 	}
@@ -413,17 +393,17 @@ func (t *TCInterface) String() (s string) {
 	return sb.String()
 }
 
-// complete fills allMethods from methods + embeds (called once after all types are resolved).
+// Complete fills AllMethods from XMethods + Embeds (called once after all types are resolved).
 func (t *TCInterface) Complete() {
-	if t.complete {
+	if t.Completed {
 		return
 	}
 	seen := map[string]bool{}
-	t.allMethods = append(t.allMethods, t.methods...)
-	for _, m := range t.methods {
-		seen[m.name] = true
+	t.AllMethods = append(t.AllMethods, t.XMethods...)
+	for _, m := range t.XMethods {
+		seen[m.Name] = true
 	}
-	for _, embed := range t.embeds {
+	for _, embed := range t.Embeds {
 		if embed == nil {
 			continue
 		}
@@ -433,79 +413,72 @@ func (t *TCInterface) Complete() {
 		}
 		if iface, ok := u.(*TCInterface); ok {
 			iface.Complete()
-			for _, m := range iface.allMethods {
-				if !seen[m.name] {
-					t.allMethods = append(t.allMethods, m)
-					seen[m.name] = true
+			for _, m := range iface.AllMethods {
+				if !seen[m.Name] {
+					t.AllMethods = append(t.AllMethods, m)
+					seen[m.Name] = true
 				}
 			}
 		}
 	}
-	t.complete = true
+	t.Completed = true
 }
 
 // ----------------------------------------------------------------------------
 // TypeParam (generics)
 
 type TypeParam struct {
-	id         int32
-	obj        *TypeName
-	constraint syntax.Type
+	Id         int32
+	Obj        *TypeName
+	Constraint Type
 }
 
-func NewTypeParam(obj *TypeName, constraint syntax.Type) (t *TypeParam) {
-	return &TypeParam{obj: obj, constraint: constraint}
+func NewTypeParam(obj *TypeName, constraint Type) (t *TypeParam) {
+	return &TypeParam{Obj: obj, Constraint: constraint}
 }
-func (t *TypeParam) Obj() (tv *TypeName) { return t.obj }
-func (t *TypeParam) Constraint() (tv syntax.Type) { return t.constraint }
-func (t *TypeParam) Underlying() (tv syntax.Type) { return t }
+func (t *TypeParam) Underlying() (tv Type) { return t }
 func (t *TypeParam) String() (s string) {
-	if t.obj != nil {
-		return t.obj.name
+	if t.Obj != nil {
+		return t.Obj.Name
 	}
-	return "T" | simpleItoa(t.id)
+	return "T" | token.Itoa(t.Id)
 }
 
 // ----------------------------------------------------------------------------
 // Named (named types: type Foo struct{...})
 
 type Named struct {
-	obj        *TypeName  // the type name declaration
-	underlying syntax.Type       // the underlying type
-	methods    []*TCFunc  // methods with this type as receiver
-	tparams    []*TypeParam
-	targs      []syntax.Type // set when instantiated
+	Obj     *TypeName  // the type name declaration
+	Under   Type       // the underlying type
+	Methods []*TCFunc  // methods with this type as receiver
+	TParams []*TypeParam
+	TArgs   []Type // set when instantiated
 }
 
-func NewNamed(obj *TypeName, underlying syntax.Type) (n *Named) {
-	n = &Named{obj: obj, underlying: underlying}
+func NewNamed(obj *TypeName, underlying Type) (n *Named) {
+	n := &Named{Obj: obj, Under: underlying}
 	if obj != nil {
-		obj.typ = n
+		obj.Typ = n
 	}
 	return n
 }
-func (t *Named) Obj() (tv *TypeName)       { return t.obj }
-func (t *Named) RawUnderlying() (tv syntax.Type)  { return t.underlying }
-func (t *Named) NumMethods() (n int32)     { return len(t.methods) }
-func (t *Named) Method(i int32) (tv *TCFunc) { return t.methods[i] }
-func (t *Named) AddMethod(m *TCFunc)    { t.methods = append(t.methods, m) }
-func (t *Named) Methods() (ts []*TCFunc)  { return t.methods }
-func (t *Named) TypeParams() (ts []*TypeParam) { return t.tparams }
-func (t *Named) TypeArgs() (ts []syntax.Type) { return t.targs }
-func (t *Named) Underlying() (tv syntax.Type) {
+func (t *Named) NumMethods() (n int32)     { return len(t.Methods) }
+func (t *Named) Method(i int32) (tv *TCFunc) { return t.Methods[i] }
+func (t *Named) AddMethod(m *TCFunc)    { t.Methods = append(t.Methods, m) }
+func (t *Named) Underlying() (tv Type) {
 	if t == nil {
 		return nil
 	}
-	cur := syntax.Type(t)
+	cur := Type(t)
 	for depth := 0; depth < 20; depth++ {
 		n, ok := cur.(*Named)
 		if !ok || n == nil {
 			return cur
 		}
-		if n.underlying == nil || n.underlying == n {
+		if n.Under == nil || n.Under == n {
 			return n
 		}
-		cur = n.underlying
+		cur = n.Under
 	}
 	return cur
 }
@@ -513,19 +486,16 @@ func (t *Named) String() (s string) {
 	if t == nil {
 		return "<nil Named>"
 	}
-	if t.obj != nil {
-		if t.obj.pkg != nil {
-			return t.obj.pkg.path | "." | t.obj.name
+	if t.Obj != nil {
+		if t.Obj.Pkg != nil {
+			return t.Obj.Pkg.Path | "." | t.Obj.Name
 		}
-		return t.obj.name
+		return t.Obj.Name
 	}
 	return "<unnamed>"
 }
 
-// SetUnderlying sets the underlying type (used during type resolution).
-func (t *Named) SetUnderlying(u syntax.Type) { t.underlying = u }
-
-func SafeUnderlying(t syntax.Type) (tv syntax.Type) {
+func SafeUnderlying(t Type) (tv Type) {
 	if t == nil {
 		return nil
 	}
@@ -533,51 +503,24 @@ func SafeUnderlying(t syntax.Type) (tv syntax.Type) {
 		if n == nil {
 			return nil
 		}
-		return n.Underlying()
+		u := n.Underlying()
+		if u != nil && u != Type(n) {
+			return u
+		}
+		if n.Obj != nil && n.Obj.Pkg != nil {
+			EnsureImportRegistry()
+			pkg := ImportRegistry[n.Obj.Pkg.Path]
+			if pkg != nil && pkg.Scope != nil {
+				obj := pkg.Scope.Lookup(n.Obj.Name)
+				if obj != nil {
+					ot := ObjectType(obj)
+					if ot != nil && ot != Type(n) {
+						return SafeUnderlying(ot)
+					}
+				}
+			}
+		}
+		return n
 	}
 	return t.Underlying()
-}
-
-func simpleItoa(n int32) (s string) {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	buf := []byte{:0:12}
-	for n > 0 {
-		buf = append(buf, byte('0'+n%10))
-		n /= 10
-	}
-	if neg {
-		buf = append(buf, '-')
-	}
-	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
-		buf[i], buf[j] = buf[j], buf[i]
-	}
-	return string(buf)
-}
-
-func simpleItoa64(n int64) (s string) {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	buf := []byte{:0:20}
-	for n > 0 {
-		buf = append(buf, byte('0'+n%10))
-		n /= 10
-	}
-	if neg {
-		buf = append(buf, '-')
-	}
-	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
-		buf[i], buf[j] = buf[j], buf[i]
-	}
-	return string(buf)
 }

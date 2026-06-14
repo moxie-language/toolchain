@@ -7,7 +7,7 @@ import (
 
 // checkExpr type-checks an expression and returns its type.
 // It also records the type info in c.info if non-nil.
-func (c *Checker) checkExpr(e syntax.Expr, scope *Scope) (t syntax.Type) {
+func (c *Checker) checkExpr(e syntax.Expr, scope *Scope) (t Type) {
 	if e == nil {
 		return nil
 	}
@@ -78,13 +78,13 @@ func (c *Checker) typeIdent(e *syntax.Name, scope *Scope) (t TCTypeAndValue) {
 	}
 	switch obj := obj.(type) {
 	case *TCVar:
-		return TCTypeAndValue{Type: obj.typ, mode: modeVar}
+		return TCTypeAndValue{Type: obj.Typ, mode: modeVar}
 	case *TCConst:
-		return TCTypeAndValue{Type: obj.typ, Value: obj.val, mode: modeConst}
+		return TCTypeAndValue{Type: obj.Typ, Value: obj.Val, mode: modeConst}
 	case *TypeName:
-		return TCTypeAndValue{Type: obj.typ, mode: modeType}
+		return TCTypeAndValue{Type: obj.Typ, mode: modeType}
 	case *TCFunc:
-		return TCTypeAndValue{Type: obj.typ, mode: modeValue}
+		return TCTypeAndValue{Type: obj.Typ, mode: modeValue}
 	case *Builtin:
 		return TCTypeAndValue{mode: modeBuiltin}
 	case *PkgName:
@@ -117,13 +117,13 @@ func (c *Checker) typeOperation(e *syntax.Operation, scope *Scope) (t TCTypeAndV
 		switch e.Op {
 		case token.Recv: // <-ch
 			if ch, ok := SafeUnderlying(xt).(*TCChan); ok {
-				return TCTypeAndValue{Type: ch.elem, mode: modeValue}
+				return TCTypeAndValue{Type: ch.Elem, mode: modeValue}
 			}
 		case token.And: // &x
 			return TCTypeAndValue{Type: NewPointer(xt), mode: modeValue}
 		case token.Mul: // *x (dereference)
 			if pt, ok := SafeUnderlying(xt).(*Pointer); ok {
-				return TCTypeAndValue{Type: pt.base, mode: modeVar}
+				return TCTypeAndValue{Type: pt.Base, mode: modeVar}
 			}
 		default:
 			return TCTypeAndValue{Type: xt, mode: modeValue}
@@ -138,7 +138,7 @@ func (c *Checker) typeOperation(e *syntax.Operation, scope *Scope) (t TCTypeAndV
 		token.AndAnd, token.OrOr:
 		return TCTypeAndValue{Type: Typ[Bool], mode: modeValue}
 	case token.Or, token.Add:
-		if isRuneKind(xt) && isStringKind(yt) || isStringKind(xt) && isRuneKind(yt) {
+		if IsRuneKind(xt) && IsStringKind(yt) || IsStringKind(xt) && IsRuneKind(yt) {
 			c.errorf(e.Pos(), "cannot concatenate rune with string - convert to UTF-8 first")
 		}
 		if xt != nil {
@@ -181,14 +181,14 @@ func (c *Checker) typeCall(e *syntax.CallExpr, scope *Scope) (t TCTypeAndValue) 
 	if !ok {
 		return TCTypeAndValue{}
 	}
-	if sig.results == nil || sig.results.Len() == 0 {
+	if sig.Results == nil || sig.Results.Len() == 0 {
 		return TCTypeAndValue{mode: modeVoid}
 	}
-	if sig.results.Len() == 1 {
-		return TCTypeAndValue{Type: sig.results.At(0).typ, mode: modeValue}
+	if sig.Results.Len() == 1 {
+		return TCTypeAndValue{Type: sig.Results.At(0).Typ, mode: modeValue}
 	}
 	// multi-return: return a Tuple type
-	return TCTypeAndValue{Type: sig.results, mode: modeValue}
+	return TCTypeAndValue{Type: sig.Results, mode: modeValue}
 }
 
 func (c *Checker) typeBuiltinCall(e *syntax.CallExpr, scope *Scope) (t TCTypeAndValue) {
@@ -202,7 +202,7 @@ func (c *Checker) typeBuiltinCall(e *syntax.CallExpr, scope *Scope) (t TCTypeAnd
 	if !ok {
 		return TCTypeAndValue{}
 	}
-	switch b.id {
+	switch b.Id {
 	case BuiltinLen, BuiltinCap:
 		return TCTypeAndValue{Type: Typ[Int32], mode: modeValue}
 	case BuiltinAppend:
@@ -220,13 +220,14 @@ func (c *Checker) typeBuiltinCall(e *syntax.CallExpr, scope *Scope) (t TCTypeAnd
 	case BuiltinPanic, BuiltinPrint, BuiltinPrintln:
 		return TCTypeAndValue{mode: modeVoid}
 	case BuiltinRecover:
-		return TCTypeAndValue{Type: universeError.typ, mode: modeValue}
+		return TCTypeAndValue{Type: universeError.Typ, mode: modeValue}
 	case BuiltinClose, BuiltinDelete, BuiltinClear:
 		return TCTypeAndValue{mode: modeVoid}
 	case BuiltinCopy:
 		return TCTypeAndValue{Type: Typ[Int32], mode: modeValue}
 	case BuiltinSpawn:
-		return TCTypeAndValue{mode: modeVoid}
+		// spawn returns <-chan string: lifecycle channel that delivers exit status
+		return TCTypeAndValue{Type: NewTCChan(TCRecvOnly, Typ[TCString]), mode: modeValue}
 	case BuiltinFree:
 		return TCTypeAndValue{mode: modeVoid}
 	}
@@ -242,13 +243,13 @@ func (c *Checker) typeSelector(e *syntax.SelectorExpr, scope *Scope) (t TCTypeAn
 		// package.Name
 		if pkgName, ok := e.X.(*syntax.Name); ok {
 			_, pkgObj := c.lookup(pkgName.Value, scope)
-			if pn, ok := pkgObj.(*PkgName); ok && pn.imported != nil {
-				obj := pn.imported.scope.Lookup(e.Sel.Value)
+			if pn, ok := pkgObj.(*PkgName); ok && pn.Imported != nil {
+				obj := pn.Imported.Scope.Lookup(e.Sel.Value)
 				if obj != nil {
 					if c.info != nil {
 						c.info.Uses[e.Sel] = obj
 					}
-					return TCTypeAndValue{Type: obj.Type(), mode: modeValue}
+					return TCTypeAndValue{Type: ObjectType(obj), mode: modeValue}
 				}
 			}
 		}
@@ -264,11 +265,11 @@ func (c *Checker) typeSelector(e *syntax.SelectorExpr, scope *Scope) (t TCTypeAn
 	if sel != nil {
 		if c.info != nil {
 			c.info.Selections[e] = sel
-			if sel.obj != nil {
-				c.info.Uses[e.Sel] = sel.obj
+			if sel.Obj != nil {
+				c.info.Uses[e.Sel] = sel.Obj
 			}
 		}
-		return TCTypeAndValue{Type: sel.Type(), mode: modeValue}
+		return TCTypeAndValue{Type: sel.SelType(), mode: modeValue}
 	}
 	return TCTypeAndValue{}
 }
@@ -281,11 +282,11 @@ func (c *Checker) typeIndex(e *syntax.IndexExpr, scope *Scope) (t TCTypeAndValue
 	}
 	switch t := SafeUnderlying(xt).(type) {
 	case *Array:
-		return TCTypeAndValue{Type: t.elem, mode: modeVar}
+		return TCTypeAndValue{Type: t.Elem, mode: modeVar}
 	case *Slice:
-		return TCTypeAndValue{Type: t.elem, mode: modeVar}
+		return TCTypeAndValue{Type: t.Elem, mode: modeVar}
 	case *TCMap:
-		return TCTypeAndValue{Type: t.elem, mode: modeValue}
+		return TCTypeAndValue{Type: t.Elem, mode: modeValue}
 	}
 	return TCTypeAndValue{}
 }
@@ -302,15 +303,15 @@ func (c *Checker) typeSlice(e *syntax.SliceExpr, scope *Scope) (t TCTypeAndValue
 	}
 	switch t := SafeUnderlying(xt).(type) {
 	case *Array:
-		if b, ok := t.elem.(*Basic); ok && b.kind == Uint8 {
+		if b, ok := t.Elem.(*Basic); ok && b.Kind == Uint8 {
 			return TCTypeAndValue{Type: Typ[TCString], mode: modeValue}
 		}
-		return TCTypeAndValue{Type: NewSlice(t.elem), mode: modeValue}
+		return TCTypeAndValue{Type: NewSlice(t.Elem), mode: modeValue}
 	case *Slice:
 		return TCTypeAndValue{Type: xt, mode: modeValue}
 	}
 	// string[:] -> string
-	if b, ok := SafeUnderlying(xt).(*Basic); ok && b.info&IsString != 0 {
+	if b, ok := SafeUnderlying(xt).(*Basic); ok && b.Info&IsString != 0 {
 		return TCTypeAndValue{Type: xt, mode: modeValue}
 	}
 	return TCTypeAndValue{}
@@ -323,7 +324,7 @@ func (c *Checker) typeAssert(e *syntax.AssertExpr, scope *Scope) (t TCTypeAndVal
 }
 
 func (c *Checker) typeCompositeLit(e *syntax.CompositeLit, scope *Scope) (t TCTypeAndValue) {
-	var typ syntax.Type
+	var typ Type
 	if e.Type != nil {
 		typ = c.resolveTypeExpr(e.Type)
 	}
@@ -361,7 +362,7 @@ func (c *Checker) typeCompositeLit(e *syntax.CompositeLit, scope *Scope) (t TCTy
 // because composite literals with key:value syntax on a Named type are
 // always struct literals in Moxie code - map literals use an explicit
 // map[K]V type, never a Named alias at this level.
-func isStructType(t syntax.Type) (ok bool) {
+func isStructType(t Type) (ok bool) {
 	if t == nil {
 		return false
 	}
@@ -369,10 +370,10 @@ func isStructType(t syntax.Type) (ok bool) {
 	case *TCStruct:
 		return true
 	case *Named:
-		if t.underlying == nil {
+		if t.Under == nil {
 			return true // optimistic: Named with key:value syntax = struct
 		}
-		return isStructType(t.underlying)
+		return isStructType(t.Under)
 	}
 	return false
 }
@@ -381,18 +382,18 @@ func (c *Checker) typeFuncLit(e *syntax.FuncLit, scope *Scope) (t TCTypeAndValue
 	sig := c.resolveFuncType(e.Type, nil)
 	inner := c.openScope(e.Body, scope)
 	if sig != nil {
-		if sig.params != nil {
-			for i := 0; i < sig.params.Len(); i++ {
-				p := sig.params.At(i)
-				if p.name != "" {
+		if sig.Params != nil {
+			for i := 0; i < sig.Params.Len(); i++ {
+				p := sig.Params.At(i)
+				if p.Name != "" {
 					inner.Insert(p)
 				}
 			}
 		}
-		if sig.results != nil {
-			for i := 0; i < sig.results.Len(); i++ {
-				r := sig.results.At(i)
-				if r.name != "" {
+		if sig.Results != nil {
+			for i := 0; i < sig.Results.Len(); i++ {
+				r := sig.Results.At(i)
+				if r.Name != "" {
 					inner.Insert(r)
 				}
 			}
@@ -403,31 +404,31 @@ func (c *Checker) typeFuncLit(e *syntax.FuncLit, scope *Scope) (t TCTypeAndValue
 }
 
 // lookupFieldOrMethod finds a field or method named name on type t.
-func (c *Checker) lookupFieldOrMethod(t syntax.Type, name string) (s *Selection) {
+func (c *Checker) lookupFieldOrMethod(t Type, name string) (s *Selection) {
 	if t == nil {
 		return nil
 	}
 	// dereference pointer
 	indirect := false
 	if pt, ok := SafeUnderlying(t).(*Pointer); ok {
-		t = pt.base
+		t = pt.Base
 		indirect = true
 	}
 
 	// check Named methods before unwrapping to underlying
 	if n, ok := t.(*Named); ok {
-		for _, m := range n.methods {
-			if m.name == name {
-				return &Selection{kind: MethodVal, recv: n, obj: m, indir: indirect}
+		for _, m := range n.Methods {
+			if m.Name == name {
+				return &Selection{Kind: MethodVal, Recv: n, Obj: m, Indir: indirect}
 			}
 		}
 	}
 
 	switch t := SafeUnderlying(t).(type) {
 	case *Basic:
-		for _, m := range t.methods {
-			if m.name == name {
-				return &Selection{kind: MethodVal, recv: t, obj: m, indir: indirect}
+		for _, m := range t.Methods {
+			if m.Name == name {
+				return &Selection{Kind: MethodVal, Recv: t, Obj: m, Indir: indirect}
 			}
 		}
 		typed := UntypedToTyped(t)
@@ -435,47 +436,47 @@ func (c *Checker) lookupFieldOrMethod(t syntax.Type, name string) (s *Selection)
 			return c.lookupFieldOrMethod(typed, name)
 		}
 	case *TCStruct:
-		for i, f := range t.fields {
-			if f.name == name {
+		for i, f := range t.Fields {
+			if f.Name == name {
 				return &Selection{
-					kind:  FieldVal,
-					recv:  t,
-					obj:   f,
-					index: []int32{i},
-					indir: indirect,
+					Kind:  FieldVal,
+					Recv:  t,
+					Obj:   f,
+					Index: []int32{i},
+					Indir: indirect,
 				}
 			}
 		}
 	case *TCInterface:
-		for _, m := range t.allMethods {
-			if m.name == name {
-				fn := NewTCFunc(nil, name, m.sig)
-				return &Selection{kind: MethodVal, recv: t, obj: fn, indir: indirect}
+		for _, m := range t.AllMethods {
+			if m.Name == name {
+				fn := NewTCFunc(nil, name, m.Sig)
+				return &Selection{Kind: MethodVal, Recv: t, Obj: fn, Indir: indirect}
 			}
 		}
 	}
 	return nil
 }
 
-func isRuneKind(t syntax.Type) (ok bool) {
+func IsRuneKind(t Type) (ok bool) {
 	if t == nil {
 		return false
 	}
 	if n, ok := t.(*Named); ok {
-		return n.obj != nil && n.obj.name == "rune"
+		return n.Obj != nil && n.Obj.Name == "rune"
 	}
 	if b, ok := t.(*Basic); ok {
-		return b.kind == UntypedRune
+		return b.Kind == UntypedRune
 	}
 	return false
 }
 
-func isStringKind(t syntax.Type) (ok bool) {
+func IsStringKind(t Type) (ok bool) {
 	if t == nil {
 		return false
 	}
 	if b, ok := SafeUnderlying(t).(*Basic); ok {
-		return b.info&IsString != 0
+		return b.Info&IsString != 0
 	}
 	return false
 }

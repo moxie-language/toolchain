@@ -1,13 +1,9 @@
 package types
 
-import (
-	"git.smesh.lol/moxie/pkg/syntax"
-)
-
 // Identical reports whether T and U are identical types under Moxie rules:
 // - string = []byte (Moxie text unification)
 // - int32 = int32, uint32 = uint32 (enforced via universe scope, but checked here too)
-func Identical(T, U syntax.Type) (ok bool) {
+func Identical(T, U Type) (ok bool) {
 	if T == U {
 		return true
 	}
@@ -18,60 +14,60 @@ func Identical(T, U syntax.Type) (ok bool) {
 	case *Basic:
 		u, ok := U.(*Basic)
 		if !ok {
-			if t.info&IsString != 0 {
+			if t.Info&IsString != 0 {
 				if sl, ok2 := U.(*Slice); ok2 {
-					if eb, ok3 := sl.elem.(*Basic); ok3 && eb.kind == Uint8 {
+					if eb, ok3 := sl.Elem.(*Basic); ok3 && eb.Kind == Uint8 {
 						return true
 					}
 				}
 			}
 			return false
 		}
-		tk := normaliseKind(t.kind)
-		uk := normaliseKind(u.kind)
+		tk := normaliseKind(t.Kind)
+		uk := normaliseKind(u.Kind)
 		if tk == uk {
 			return true
 		}
-		if t.info&IsString != 0 && u.info&IsString != 0 {
+		if t.Info&IsString != 0 && u.Info&IsString != 0 {
 			return true
 		}
 		return false
 	case *Pointer:
 		u, ok := U.(*Pointer)
-		return ok && Identical(t.base, u.base)
+		return ok && Identical(t.Base, u.Base)
 	case *Array:
 		u, ok := U.(*Array)
-		return ok && t.len == u.len && Identical(t.elem, u.elem)
+		return ok && t.Len == u.Len && Identical(t.Elem, u.Elem)
 	case *Slice:
 		u, ok := U.(*Slice)
 		if !ok {
 			// []byte = string in Moxie (including untyped string)
-			if b, ok2 := U.(*Basic); ok2 && b.info&IsString != 0 {
-				if eb, ok3 := t.elem.(*Basic); ok3 && eb.kind == Uint8 {
+			if b, ok2 := U.(*Basic); ok2 && b.Info&IsString != 0 {
+				if eb, ok3 := t.Elem.(*Basic); ok3 && eb.Kind == Uint8 {
 					return true
 				}
 			}
 			return false
 		}
-		return Identical(t.elem, u.elem)
+		return Identical(t.Elem, u.Elem)
 	case *TCMap:
 		u, ok := U.(*TCMap)
-		return ok && Identical(t.key, u.key) && Identical(t.elem, u.elem)
+		return ok && Identical(t.Key, u.Key) && Identical(t.Elem, u.Elem)
 	case *TCChan:
 		u, ok := U.(*TCChan)
-		return ok && t.dir == u.dir && Identical(t.elem, u.elem)
+		return ok && t.Dir == u.Dir && Identical(t.Elem, u.Elem)
 	case *TCStruct:
 		u, ok := U.(*TCStruct)
 		if !ok || t.NumFields() != u.NumFields() {
 			return false
 		}
-		for i := range t.fields {
-			tf := t.fields[i]
-			uf := u.fields[i]
-			if tf.name != uf.name || tf.anonymous != uf.anonymous {
+		for i := range t.Fields {
+			tf := t.Fields[i]
+			uf := u.Fields[i]
+			if tf.Name != uf.Name || tf.Anonymous != uf.Anonymous {
 				return false
 			}
-			if !Identical(tf.typ, uf.typ) {
+			if !Identical(tf.Typ, uf.Typ) {
 				return false
 			}
 		}
@@ -84,9 +80,9 @@ func Identical(T, U syntax.Type) (ok bool) {
 		if t.NumMethods() != u.NumMethods() {
 			return false
 		}
-		for i, tm := range t.allMethods {
-			um := u.allMethods[i]
-			if tm.name != um.name || !Identical(tm.sig, um.sig) {
+		for i, tm := range t.AllMethods {
+			um := u.AllMethods[i]
+			if tm.Name != um.Name || !Identical(tm.Sig, um.Sig) {
 				return false
 			}
 		}
@@ -96,19 +92,19 @@ func Identical(T, U syntax.Type) (ok bool) {
 		if !ok {
 			return false
 		}
-		if t.variadic != u.variadic {
+		if t.Variadic != u.Variadic {
 			return false
 		}
-		if !identicalTuples(t.params, u.params) || !identicalTuples(t.results, u.results) {
+		if !identicalTuples(t.Params, u.Params) || !identicalTuples(t.Results, u.Results) {
 			return false
 		}
 		return true
 	case *Named:
 		u, ok := U.(*Named)
-		return ok && t.obj == u.obj
+		return ok && t.Obj == u.Obj
 	case *TypeParam:
 		u, ok := U.(*TypeParam)
-		return ok && t.id == u.id
+		return ok && t.Id == u.Id
 	case *Tuple:
 		u, ok := U.(*Tuple)
 		return ok && identicalTuples(t, u)
@@ -122,7 +118,7 @@ func identicalTuples(a, b *Tuple) (ok bool) {
 		return false
 	}
 	for i := 0; i < la; i++ {
-		if !Identical(a.vars[i].typ, b.vars[i].typ) {
+		if !Identical(a.Vars[i].Typ, b.Vars[i].Typ) {
 			return false
 		}
 	}
@@ -143,7 +139,7 @@ func normaliseKind(k BasicKind) (b BasicKind) {
 
 // Assignable reports whether a value of type V is assignable to type T
 // under Moxie's type rules (spec Assignability, plus Moxie extensions).
-func Assignable(V, T syntax.Type) (ok bool) {
+func Assignable(V, T Type) (ok bool) {
 	if V == nil || T == nil {
 		return V == T
 	}
@@ -156,7 +152,7 @@ func Assignable(V, T syntax.Type) (ok bool) {
 		return true
 	}
 	// Untyped constants are assignable to any numeric/bool/string type they fit in.
-	if bv, ok := V.(*Basic); ok && bv.info&IsUntyped != 0 {
+	if bv, ok := V.(*Basic); ok && bv.Info&IsUntyped != 0 {
 		return untypedAssignable(bv, T)
 	}
 	// nil is assignable to pointer, slice, map, chan, func, interface.
@@ -179,15 +175,15 @@ func Assignable(V, T syntax.Type) (ok bool) {
 	// Directional channel: bidirectional chan is assignable to directed chan.
 	if tc, ok := T.(*TCChan); ok {
 		if vc, ok2 := V.(*TCChan); ok2 {
-			if Identical(tc.elem, vc.elem) {
-				return vc.dir == TCSendRecv || vc.dir == tc.dir
+			if Identical(tc.Elem, vc.Elem) {
+				return vc.Dir == TCSendRecv || vc.Dir == tc.Dir
 			}
 		}
 	}
 	return false
 }
 
-func isNilable(T syntax.Type) (ok bool) {
+func isNilable(T Type) (ok bool) {
 	switch SafeUnderlying(T).(type) {
 	case *Pointer, *Slice, *TCMap, *TCChan, *Signature, *TCInterface:
 		return true
@@ -195,31 +191,31 @@ func isNilable(T syntax.Type) (ok bool) {
 	return false
 }
 
-func untypedAssignable(V *Basic, T syntax.Type) (ok bool) {
+func untypedAssignable(V *Basic, T Type) (ok bool) {
 	b, ok := SafeUnderlying(T).(*Basic)
 	if !ok {
 		return false
 	}
-	switch V.kind {
+	switch V.Kind {
 	case UntypedBool:
-		return b.info&IsBoolean != 0
+		return b.Info&IsBoolean != 0
 	case UntypedInt, UntypedRune:
-		return b.info&IsInteger != 0 || b.info&IsFloat != 0
+		return b.Info&IsInteger != 0 || b.Info&IsFloat != 0
 	case UntypedFloat:
-		return b.info&IsFloat != 0
+		return b.Info&IsFloat != 0
 	case UntypedString:
-		return b.info&IsString != 0
+		return b.Info&IsString != 0
 	}
 	return false
 }
 
 // isTextType returns true if T is string or []byte under Moxie's unified model.
-func isTextType(T syntax.Type) (ok bool) {
-	if b, ok := SafeUnderlying(T).(*Basic); ok && b.info&IsString != 0 {
+func isTextType(T Type) (ok bool) {
+	if b, ok := SafeUnderlying(T).(*Basic); ok && b.Info&IsString != 0 {
 		return true
 	}
 	if sl, ok := SafeUnderlying(T).(*Slice); ok {
-		if b, ok2 := SafeUnderlying(sl.elem).(*Basic); ok2 && b.kind == Uint8 {
+		if b, ok2 := SafeUnderlying(sl.Elem).(*Basic); ok2 && b.Kind == Uint8 {
 			return true
 		}
 	}
@@ -227,18 +223,18 @@ func isTextType(T syntax.Type) (ok bool) {
 }
 
 // Implements reports whether type T implements interface I.
-func Implements(T syntax.Type, I *TCInterface) (ok bool) {
+func Implements(T Type, I *TCInterface) (ok bool) {
 	if I.IsEmpty() {
 		return true
 	}
 	// Collect T's method set.
 	ms := methodSet(T)
-	for _, im := range I.allMethods {
-		m, ok := ms[im.name]
+	for _, im := range I.AllMethods {
+		m, ok := ms[im.Name]
 		if !ok {
 			return false
 		}
-		if !Identical(m.Signature(), im.sig) {
+		if !Identical(m.Signature(), im.Sig) {
 			return false
 		}
 	}
@@ -247,37 +243,37 @@ func Implements(T syntax.Type, I *TCInterface) (ok bool) {
 
 // methodSet returns the named method set of T as a name->Func map.
 // Includes methods from *T if T is a named type (pointer receiver methods).
-func methodSet(T syntax.Type) (m map[string]*TCFunc) {
+func methodSet(T Type) (m map[string]*TCFunc) {
 	ms := map[string]*TCFunc{}
 	collectMethods(T, ms, false)
 	return ms
 }
 
-func collectMethods(T syntax.Type, ms map[string]*TCFunc, ptrOk bool) {
+func collectMethods(T Type, ms map[string]*TCFunc, ptrOk bool) {
 	switch t := T.(type) {
 	case *Named:
-		for _, m := range t.methods {
-			if _, dup := ms[m.name]; !dup {
-				ms[m.name] = m
+		for _, m := range t.Methods {
+			if _, dup := ms[m.Name]; !dup {
+				ms[m.Name] = m
 			}
 		}
 		// Also collect pointer receiver methods if T is addressable.
 		if ptrOk {
 			collectMethods(NewPointer(T), ms, false)
 		}
-		collectMethods(t.underlying, ms, ptrOk)
+		collectMethods(t.Under, ms, ptrOk)
 	case *Pointer:
-		if named, ok := t.base.(*Named); ok {
-			for _, m := range named.methods {
-				if _, dup := ms[m.name]; !dup {
-					ms[m.name] = m
+		if named, ok := t.Base.(*Named); ok {
+			for _, m := range named.Methods {
+				if _, dup := ms[m.Name]; !dup {
+					ms[m.Name] = m
 				}
 			}
 		}
 	case *TCInterface:
-		for _, m := range t.allMethods {
-			if _, dup := ms[m.name]; !dup {
-				ms[m.name] = NewTCFunc(nil, m.name, m.sig)
+		for _, m := range t.AllMethods {
+			if _, dup := ms[m.Name]; !dup {
+				ms[m.Name] = NewTCFunc(nil, m.Name, m.Sig)
 			}
 		}
 	}
