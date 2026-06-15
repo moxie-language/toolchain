@@ -225,10 +225,10 @@ s |= " suffix"
 combined := sliceA | sliceB
 ```
 
-The `...` token is **only valid in variadic parameter declarations**
-(`func f(args ...T)`). It is not a spread/unpack operator. `append(a, b...)`
-and `f(slice...)` are compile errors. For slice-to-slice concatenation, use
-`a | b`.
+The `...` token is valid in variadic parameter declarations
+(`func f(args ...T)`) and in variadic call sites (`f(slice...)`).
+`append(a, b...)` is a compile error - use `a | b` for slice concatenation.
+One way to concatenate slices: the `|` operator.
 
 ### Integer Literals
 
