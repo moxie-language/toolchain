@@ -94,9 +94,34 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 
 	size = align(size)
 	totalSize := size + uintptr(headerSize)
-	_ = sizeClass(size)
+	class := sizeClass(size)
 
-	// Bump allocate only - free lists disabled.
+	// Check segregated free list for reuse.
+	if class < 9 {
+		if node := freeLists[class]; node != nil {
+			freeLists[class] = node.next
+			hdr := (*blockHeader)(unsafe.Pointer(node))
+			hdr.size = size
+			hdr.next = nil
+			ptr := unsafe.Pointer(uintptr(unsafe.Pointer(hdr)) + uintptr(headerSize))
+			memzero(ptr, size)
+			gcMallocs++
+			gcTotalAlloc += uint64(size)
+			return ptr
+		}
+	} else if node := freeLists[9]; node != nil && node.size >= totalSize {
+		freeLists[9] = node.next
+		hdr := (*blockHeader)(unsafe.Pointer(node))
+		hdr.size = size
+		hdr.next = nil
+		ptr := unsafe.Pointer(uintptr(unsafe.Pointer(hdr)) + uintptr(headerSize))
+		memzero(ptr, size)
+		gcMallocs++
+		gcTotalAlloc += uint64(size)
+		return ptr
+	}
+
+	// Bump allocate.
 	addr := heapptr
 	heapptr += totalSize
 	for heapptr >= heapEnd {
@@ -116,7 +141,6 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 }
 
 func free(ptr unsafe.Pointer) {
-	return
 	if ptr == nil {
 		return
 	}
