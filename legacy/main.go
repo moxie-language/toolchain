@@ -17,7 +17,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/shlex"
@@ -443,7 +442,6 @@ func main() {
 	command := os.Args[1]
 
 	opt := flag.String("opt", "0", "optimization level: 0, 1, 2, s, z (Moxie default: 0 — LLVM optimization is forbidden; Moxie's source-to-codegen mapping is 1:1, the optimizer assumes semantics Moxie does not have)")
-	gc := flag.String("gc", "", "garbage collector to use (none, leaking, conservative, dealloc)")
 	panicStrategy := flag.String("panic", "print", "panic strategy (print, trap)")
 	scheduler := flag.String("scheduler", "", "which scheduler to use (none, tasks)")
 	work := flag.Bool("work", false, "print the name of the temporary build directory and do not delete this directory on exit")
@@ -529,7 +527,7 @@ func main() {
 		BuildMode:     *buildMode,
 		StackSize:     *stackSize,
 		Opt:           *opt,
-		GC:            *gc,
+		GC:            "dealloc",
 		PanicStrategy: *panicStrategy,
 		Scheduler:     *scheduler,
 		Work:          *work,
@@ -639,28 +637,26 @@ func main() {
 		}
 
 		fail := make(chan struct{}, 1)
-		var wg sync.WaitGroup
 		bufs := make([]testOutputBuf, len(explicitPkgNames))
 		for i := range bufs {
-			bufs[i].done = make(chan struct{})
+			bufs[i].entries = make(chan outputEntry, 64)
 		}
-		wg.Add(1)
+		flusherDone := make(chan struct{})
 		go func() {
-			defer wg.Done()
+			defer close(flusherDone)
 			for i := range bufs {
 				bufs[i].flush(os.Stdout, os.Stderr)
 			}
 		}()
 		testSema := make(chan struct{}, cap(options.Semaphore))
+		testsDone := make(chan struct{}, len(explicitPkgNames))
 		for i, pkgName := range explicitPkgNames {
 			pkgName := pkgName
 			buf := &bufs[i]
 			testSema <- struct{}{}
-			wg.Add(1)
 			go func() {
-				defer wg.Done()
 				defer func() { <-testSema }()
-				defer close(buf.done)
+				defer func() { close(buf.entries); testsDone <- struct{}{} }()
 				stdout := (*testStdout)(buf)
 				stderr := (*testStderr)(buf)
 				passed, err := Test(pkgName, stdout, stderr, options, outpath)
@@ -677,7 +673,10 @@ func main() {
 				}
 			}()
 		}
-		wg.Wait()
+		for range explicitPkgNames {
+			<-testsDone
+		}
+		<-flusherDone
 		close(fail)
 		if _, fail := <-fail; fail {
 			os.Exit(1)
@@ -862,73 +861,37 @@ func main() {
 }
 
 // testOutputBuf buffers the output of concurrent tests.
+// Output entries are sent through a channel; the flusher goroutine is the
+// sole consumer, so no mutex is needed.
 type testOutputBuf struct {
-	mu             sync.Mutex
-	output         []outputEntry
-	stdout, stderr io.Writer
-	outerr, errerr error
-	done           chan struct{}
+	entries chan outputEntry
 }
 
-func (b *testOutputBuf) flush(stdout, stderr io.Writer) error {
-	b.mu.Lock()
-	b.stdout = stdout
-	b.stderr = stderr
-	for _, e := range b.output {
-		var w io.Writer
+func (b *testOutputBuf) flush(stdout, stderr io.Writer) {
+	for e := range b.entries {
 		if e.stderr {
-			w = stderr
+			stderr.Write(e.data)
 		} else {
-			w = stdout
+			stdout.Write(e.data)
 		}
-		w.Write(e.data)
 	}
-	b.mu.Unlock()
-	<-b.done
-	return nil
 }
 
 type testStdout testOutputBuf
 
 func (out *testStdout) Write(data []byte) (int, error) {
-	buf := (*testOutputBuf)(out)
-	buf.mu.Lock()
-	if buf.stdout != nil {
-		err := out.outerr
-		buf.mu.Unlock()
-		if err != nil {
-			return 0, err
-		}
-		return buf.stdout.Write(data)
-	}
-	defer buf.mu.Unlock()
-	if len(buf.output) == 0 || buf.output[len(buf.output)-1].stderr {
-		buf.output = append(buf.output, outputEntry{stderr: false})
-	}
-	last := &buf.output[len(buf.output)-1]
-	last.data = append(last.data, data...)
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	out.entries <- outputEntry{stderr: false, data: cp}
 	return len(data), nil
 }
 
 type testStderr testOutputBuf
 
 func (out *testStderr) Write(data []byte) (int, error) {
-	buf := (*testOutputBuf)(out)
-	buf.mu.Lock()
-	if buf.stderr != nil {
-		err := out.errerr
-		buf.mu.Unlock()
-		if err != nil {
-			return 0, err
-		}
-		return buf.stderr.Write(data)
-	}
-	defer buf.mu.Unlock()
-	if len(buf.output) == 0 || !buf.output[len(buf.output)-1].stderr {
-		buf.output = append(buf.output, outputEntry{stderr: true})
-	}
-	last := &buf.output[len(buf.output)-1]
-	last.data = append(last.data, data...)
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	out.entries <- outputEntry{stderr: true, data: cp}
 	return len(data), nil
 }
 

@@ -25,13 +25,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"sync"
 
 	"moxie/compileopts"
 	"moxie/goenv"
 )
 
-var gorootCreateMutex sync.Mutex
+// gorootCreateMutex removed: serialized by caller, no concurrent creation.
 
 // GetCachedGoroot creates a new GOROOT by merging both the standard GOROOT and
 // the GOROOT from Moxie using lots of symbolic links.
@@ -68,15 +67,6 @@ func GetCachedGoroot(config *compileopts.Config) (string, error) {
 		return "", err
 	}
 	hash := sha512.Sum512_256(data)
-
-	// Do not try to create the cached GOROOT in parallel, that's only a waste
-	// of I/O bandwidth and thus speed. Instead, use a mutex to make sure only
-	// one goroutine does it at a time.
-	// This is not a way to ensure atomicity (a different Moxie invocation
-	// could be creating the same directory), but instead a way to avoid
-	// creating it many times in parallel when running tests in parallel.
-	gorootCreateMutex.Lock()
-	defer gorootCreateMutex.Unlock()
 
 	// Check if the goroot already exists.
 	cachedGorootName := "goroot-" + hex.EncodeToString(hash[:])

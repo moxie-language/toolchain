@@ -1,0 +1,47 @@
+package main
+
+type Pair struct {
+	A int32
+	B int32
+}
+
+// allocAndReturn heap-allocates a Pair and returns it (escape path).
+// The dealloc sweep at function return must NOT free this allocation.
+func allocAndReturn(a int32, b int32) (result *Pair) {
+	result = &Pair{A: a, B: b}
+	return result
+}
+
+// allocAndDiscard heap-allocates a Pair but does not return it.
+// The dealloc sweep at function return frees this allocation.
+// Calling this repeatedly exercises free-list reuse.
+func allocAndDiscard(a int32, b int32) (sum int32) {
+	p := &Pair{A: a, B: b}
+	sum = p.A + p.B
+	return sum
+}
+
+func main() {
+	// Test escape path: returned pointers survive dealloc.
+	p1 := allocAndReturn(10, 20)
+	p2 := allocAndReturn(30, 40)
+	if p1.A == 10 && p1.B == 20 && p2.A == 30 && p2.B == 40 {
+		println("PASS: escaped allocs survive dealloc")
+	} else {
+		println("FAIL: escaped allocs corrupted")
+	}
+
+	// Test free path: discarded allocs freed, free-list reuse works.
+	ok := true
+	for i := int32(0); i < 100; i++ {
+		s := allocAndDiscard(i, i+1)
+		if s != i+i+1 {
+			ok = false
+		}
+	}
+	if ok {
+		println("PASS: 100 alloc+free cycles without crash")
+	} else {
+		println("FAIL: alloc+free cycle produced wrong value")
+	}
+}

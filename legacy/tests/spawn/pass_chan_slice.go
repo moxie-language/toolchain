@@ -5,7 +5,7 @@ import "io"
 // B.0.4 test: chan element type with []byte slice field.
 // Before Codec invocation, raw memcpy across the spawn boundary sent
 // only the slice header (ptr/len/cap), causing the receiver to
-// dereference a parent-only address — SIGSEGV.
+// dereference a parent-only address - SIGSEGV.
 //
 // With Codec, EncodeTo writes the byte payload as length-prefixed
 // data; DecodeFrom allocates a fresh slice in the receiver's heap.
@@ -15,28 +15,30 @@ type Blob struct {
 	Data []byte
 }
 
-func (b Blob) EncodeTo(w io.Writer) error {
+func (b *Blob) EncodeTo(w io.Writer) (encErr error) {
 	var sz [4]byte
 	sz[0] = byte(b.Size)
 	sz[1] = byte(b.Size >> 8)
 	sz[2] = byte(b.Size >> 16)
 	sz[3] = byte(b.Size >> 24)
-	if _, err := w.Write(sz[:]); err != nil {
-		return err
+	_, encErr = w.Write(sz[:])
+	if encErr != nil {
+		return encErr
 	}
-	_, err := w.Write(b.Data)
-	return err
+	_, encErr = w.Write(b.Data)
+	return encErr
 }
 
-func (b *Blob) DecodeFrom(r io.Reader) error {
+func (b *Blob) DecodeFrom(r io.Reader) (decErr error) {
 	var sz [4]byte
-	if _, err := io.ReadFull(r, sz[:]); err != nil {
-		return err
+	_, decErr = io.ReadFull(r, sz[:])
+	if decErr != nil {
+		return decErr
 	}
 	b.Size = int32(sz[0]) | int32(sz[1])<<8 | int32(sz[2])<<16 | int32(sz[3])<<24
 	b.Data = make([]byte, b.Size)
-	_, err := io.ReadFull(r, b.Data)
-	return err
+	_, decErr = io.ReadFull(r, b.Data)
+	return decErr
 }
 
 func echo(in chan Blob, out chan Blob) {
@@ -56,7 +58,7 @@ func echo(in chan Blob, out chan Blob) {
 }
 
 func main() {
-	const N = int32(100000) // 100 KB — exceeds kernel pipe buffer to exercise partial syscalls
+	const N = int32(100000) // 100 KB - exceeds kernel pipe buffer to exercise partial syscalls
 	in := make(chan Blob)
 	out := make(chan Blob)
 	spawn(echo, in, out)

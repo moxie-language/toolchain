@@ -87,7 +87,14 @@ func Header(pkgName, outdir, prevPath string, options *compileopts.Options) erro
 	io.WriteString(h, body.String())
 	hash := fmt.Sprintf("%016x", h.Sum64())
 
-	full := "// mxh v1 " + hash + "\n" + body.String()
+	// Include module version in .mxh header if available.
+	wd, _ := os.Getwd()
+	modVersion := loader.ParseMoxieModVersion(wd)
+	headerLine := "// mxh v1 " + hash
+	if modVersion != "" {
+		headerLine += " " + modVersion
+	}
+	full := headerLine + "\n" + body.String()
 
 	// Compat check against previous version.
 	if prevPath != "" {

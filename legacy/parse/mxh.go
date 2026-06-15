@@ -11,6 +11,7 @@ import (
 // MXH is the parsed content of a .mxh file.
 type MXH struct {
 	Hash    string // FNV-1a hex hash of the body (from header line)
+	Version string // module version from moxie.mod (e.g. "1.2.0"), may be empty
 	Library string // shared library path (e.g. "libfoo.so") for FFI packages
 	Types   []ExternalTypeDef
 	Funcs   []ExternalFuncDef
@@ -53,12 +54,12 @@ func ParseMXH(r io.Reader) (*MXH, error) {
 		return nil, fmt.Errorf("mxh: empty file")
 	}
 	header := sc.Text()
-	hash, err := parseHashLine(header)
+	hash, version, err := parseHashLine(header)
 	if err != nil {
 		return nil, err
 	}
 
-	mxh := &MXH{Hash: hash}
+	mxh := &MXH{Hash: hash, Version: version}
 	var cur *ExternalTypeDef
 
 	for sc.Scan() {
@@ -113,17 +114,22 @@ func ParseMXH(r io.Reader) (*MXH, error) {
 	return mxh, nil
 }
 
-func parseHashLine(line string) (string, error) {
-	// Expected: "// mxh v1 <hex>"
+func parseHashLine(line string) (hash, version string, err error) {
+	// Expected: "// mxh v1 <hex>" or "// mxh v1 <hex> <version>"
 	const prefix = "// mxh v1 "
 	if !strings.HasPrefix(line, prefix) {
-		return "", fmt.Errorf("mxh: invalid header line %q (expected %q...)", line, prefix)
+		return "", "", fmt.Errorf("mxh: invalid header line %q (expected %q...)", line, prefix)
 	}
-	hash := strings.TrimSpace(line[len(prefix):])
-	if hash == "" {
-		return "", fmt.Errorf("mxh: empty hash in header line")
+	rest := strings.TrimSpace(line[len(prefix):])
+	if rest == "" {
+		return "", "", fmt.Errorf("mxh: empty hash in header line")
 	}
-	return hash, nil
+	parts := strings.Fields(rest)
+	hash = parts[0]
+	if len(parts) > 1 {
+		version = parts[1]
+	}
+	return hash, version, nil
 }
 
 // findTypeBySig extracts the receiver type name from a value-receiver

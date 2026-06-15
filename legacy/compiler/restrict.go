@@ -13,6 +13,8 @@ import (
 	"go/types"
 	"strings"
 
+	"moxie/loader"
+
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -38,6 +40,8 @@ var restrictedBuiltins = map[string]string{
 // the types are interchangeable. The + operator restriction on strings
 // still enforces Moxie's | concatenation syntax.
 var restrictedTypes = map[string]string{
+	"int":        "use explicit width: int8, int16, int32, int64",
+	"uint":       "use explicit width: uint8, uint16, uint32, uint64",
 	"complex64":  "complex numbers not supported in moxie",
 	"complex128": "complex numbers not supported in moxie",
 	"uintptr":    "use explicit pointer types",
@@ -105,6 +109,8 @@ func (b *builder) checkMoxieRestrictions() {
 	b.checkSpawnMoveRestriction()
 	// Check that every channel has both a sender and a listener.
 	b.checkChannelCompleteness()
+	// Check for use-after-free (explicit free() tracking).
+	b.checkUseAfterFree()
 }
 
 func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
@@ -203,6 +209,18 @@ func (b *builder) checkASTRestrictions() {
 				}
 				b.addError(node.Pos(), "moxie: type '"+node.Name+"' is not allowed: "+reason)
 			}
+			// Step 4: reject bare "any" keyword (alias for interface{}).
+			if node.Name == "any" {
+				b.addError(node.Pos(), "moxie: 'any' (empty interface) is not allowed: use a concrete type or named interface")
+			}
+		case *ast.GoStmt:
+			// Step 3: reject go keyword at AST level (redundant with SSA check, fires earlier).
+			b.addError(node.Pos(), "moxie: 'go' keyword is not allowed: use channels+select or spawn")
+		case *ast.InterfaceType:
+			// Step 4: reject empty interface literals.
+			if node.Methods == nil || len(node.Methods.List) == 0 {
+				b.addError(node.Pos(), "moxie: empty interface (interface{}) is not allowed: use a concrete type or named interface")
+			}
 		case *ast.CallExpr:
 			// Ban parenthesized call targets: (f)(args) is not valid Moxie.
 			// Exempt: type conversions like (*byte)(expr) where the paren wraps a type.
@@ -219,6 +237,30 @@ func (b *builder) checkASTRestrictions() {
 						}
 					}
 					b.addError(ident.Pos(), "moxie: '"+ident.Name+"' is not allowed: "+reason)
+				}
+				// Reject append(a, b...) — use | for slice concatenation.
+				if ident.Name == "append" && node.Ellipsis.IsValid() {
+					b.addError(node.Ellipsis, "moxie: append(a, b...) is not allowed: use | operator for slice concatenation")
+				}
+			}
+		case *ast.FuncDecl:
+			// Exempt compiler-generated builtins (__moxie_*).
+			if node.Name != nil && strings.HasPrefix(node.Name.Name, "__moxie_") {
+				return true
+			}
+			// Step 6: reject value receivers (must use pointer receiver).
+			if node.Recv != nil && len(node.Recv.List) > 0 {
+				recvType := node.Recv.List[0].Type
+				if _, isStar := recvType.(*ast.StarExpr); !isStar {
+					b.addError(node.Recv.Pos(), "moxie: value receiver is not allowed: use pointer receiver (*T)")
+				}
+			}
+			// Step 7: reject unnamed return values.
+			if node.Type.Results != nil {
+				for _, field := range node.Type.Results.List {
+					if len(field.Names) == 0 {
+						b.addError(field.Pos(), "moxie: unnamed return values are not allowed: name all return values")
+					}
 				}
 			}
 		}
@@ -468,5 +510,122 @@ func (b *builder) checkChannelCompleteness() {
 			}
 		}
 	}
+}
+
+// isUserPackageByPath returns true if the import path looks like a user
+// package (contains a dot, or is "main"/"command-line-arguments").
+func isUserPackageByPath(path string) bool {
+	if path == "main" || path == "command-line-arguments" {
+		return true
+	}
+	if strings.HasPrefix(path, "golang.org/x/") {
+		return false
+	}
+	return strings.Contains(path, ".")
+}
+
+// checkPackageRestrictions runs package-scope checks that aren't per-function:
+// - reject var X = expr at package scope (step 8)
+// - reject named slice/map types (step 9)
+// - reject scope shadowing including builtins (step 10)
+// - enforce init() rules: main pkg can't have init, library max one, no select/spawn
+func (c *compilerContext) checkPackageRestrictions(pkg *loader.Package) {
+	if !isUserPackageByPath(pkg.Pkg.Path()) {
+		return
+	}
+	isMainPkg := pkg.Pkg.Name() == "main"
+	initCount := 0
+	for _, f := range pkg.Files {
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Name.Name == "init" && d.Recv == nil {
+					initCount++
+					if isMainPkg {
+						c.addError(d.Pos(), "moxie: init() is not allowed in main package: use main() for program entry")
+					}
+					if initCount > 1 {
+						c.addError(d.Pos(), "moxie: at most one init() per package")
+					}
+					// Body restrictions: no select or spawn.
+					if d.Body != nil {
+						checkInitBodyRestrictions(c, d.Body)
+					}
+				}
+			case *ast.GenDecl:
+				switch d.Tok {
+				case token.VAR:
+					for _, spec := range d.Specs {
+						vs := spec.(*ast.ValueSpec)
+						if len(vs.Values) > 0 {
+							c.addError(vs.Pos(), "moxie: package-level var with initializer is not allowed: use zero-value declaration and init()")
+						}
+					}
+				case token.TYPE:
+					for _, spec := range d.Specs {
+						ts := spec.(*ast.TypeSpec)
+						switch ts.Type.(type) {
+						case *ast.ArrayType:
+							at := ts.Type.(*ast.ArrayType)
+							if at.Len == nil {
+								c.addError(ts.Pos(), "moxie: named slice type '"+ts.Name.Name+"' is not allowed: use []T directly")
+							}
+						case *ast.MapType:
+							c.addError(ts.Pos(), "moxie: named map type '"+ts.Name.Name+"' is not allowed: use map[K]V directly")
+						}
+					}
+				}
+			}
+		}
+	}
+	// Step 10: reject scope shadowing (including builtins from Universe).
+	c.checkScopeShadowing(pkg)
+}
+
+// checkScopeShadowing walks all scopes in the package and rejects any
+// declaration that shadows a name in an enclosing scope, including Universe.
+func (c *compilerContext) checkScopeShadowing(pkg *loader.Package) {
+	info := pkg.TypeInfo()
+	if info == nil || info.Scopes == nil {
+		return
+	}
+	pkgScope := pkg.Pkg.Scope()
+	for _, scope := range info.Scopes {
+		if scope == nil || scope == pkgScope {
+			continue
+		}
+		for _, name := range scope.Names() {
+			if name == "_" {
+				continue
+			}
+			obj := scope.Lookup(name)
+			if obj == nil {
+				continue
+			}
+			// Walk parent scopes up to (and including) Universe.
+			for parent := scope.Parent(); parent != nil; parent = parent.Parent() {
+				if shadowedObj := parent.Lookup(name); shadowedObj != nil {
+					c.addError(obj.Pos(), "moxie: '"+name+"' shadows declaration in enclosing scope")
+					break
+				}
+			}
+		}
+	}
+}
+
+// checkInitBodyRestrictions walks an init() function body for banned constructs:
+// select statements and spawn() calls.
+func checkInitBodyRestrictions(c *compilerContext, body *ast.BlockStmt) {
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.SelectStmt:
+			c.addError(node.Pos(), "moxie: select is not allowed in init(): event dispatch begins in main()")
+		case *ast.CallExpr:
+			if ident, ok := node.Fun.(*ast.Ident); ok && ident.Name == "spawn" {
+				c.addError(ident.Pos(), "moxie: spawn is not allowed in init(): domains can only be created after main() starts")
+			}
+		}
+		return true
+	})
 }
 

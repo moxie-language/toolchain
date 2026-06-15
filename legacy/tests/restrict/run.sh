@@ -6,6 +6,8 @@ set -euo pipefail
 
 MOXIE="${MOXIE:-./moxie}"
 MOXIE="$(cd "$(dirname "$MOXIE")" && pwd)/$(basename "$MOXIE")"
+# MOXIEROOT must point to the legacy-spec source tree (two levels up from tests/restrict/).
+export MOXIEROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
@@ -34,7 +36,7 @@ run_pass_test() {
     moddir=$(setup_module "$src")
     local bin="$moddir/$name"
 
-    if ! (cd "$moddir" && "$MOXIE" build -o "$bin" . 2>"$moddir/err.log"); then
+    if ! (cd "$moddir" && "$MOXIE" build -no-debug -o "$bin" . 2>"$moddir/err.log"); then
         echo "FAIL $name: compilation failed"
         cat "$moddir/err.log"
         fail=$((fail + 1))
@@ -70,7 +72,7 @@ run_fail_test() {
     local bin="$moddir/$name"
 
     local errout
-    if errout=$(cd "$moddir" && "$MOXIE" build -o "$bin" . 2>&1); then
+    if errout=$(cd "$moddir" && "$MOXIE" build -no-debug -o "$bin" . 2>&1); then
         echo "FAIL $name: compilation should have failed"
         fail=$((fail + 1))
         return
@@ -101,6 +103,25 @@ run_fail_test "$TESTDIR/fail_complex64.mx"         "complex64"
 run_fail_test "$TESTDIR/fail_complex128.mx"        "complex128"
 run_fail_test "$TESTDIR/fail_uintptr.mx"           "uintptr"
 run_fail_test "$TESTDIR/fail_fallthrough.mx"       "fallthrough"
+run_fail_test "$TESTDIR/fail_int.mx"               "int.*not allowed"
+run_fail_test "$TESTDIR/fail_uint.mx"              "uint.*not allowed"
+run_fail_test "$TESTDIR/fail_go_keyword.mx"        "go.*not allowed"
+run_fail_test "$TESTDIR/fail_empty_interface.mx"   "empty interface.*not allowed"
+run_fail_test "$TESTDIR/fail_any.mx"               "any.*not allowed"
+run_fail_test "$TESTDIR/fail_append_spread.mx"     "append.*not allowed"
+run_fail_test "$TESTDIR/fail_value_recv.mx"        "value receiver.*not allowed"
+run_fail_test "$TESTDIR/fail_unnamed_return.mx"    "unnamed return.*not allowed"
+run_fail_test "$TESTDIR/fail_pkg_var_init.mx"      "package-level var.*not allowed"
+run_fail_test "$TESTDIR/fail_named_slice.mx"       "named slice.*not allowed"
+run_fail_test "$TESTDIR/fail_named_map.mx"         "named map.*not allowed"
+run_fail_test "$TESTDIR/fail_shadow.mx"            "shadows"
+run_fail_test "$TESTDIR/fail_shadow_builtin.mx"    "shadows"
+run_fail_test "$TESTDIR/fail_hash_nonident.mx"     "# must be followed"
+run_fail_test "$TESTDIR/fail_hash_redecl.mx"       "redeclared"
+run_fail_test "$TESTDIR/fail_use_after_free.mx"    "use after free"
+run_fail_test "$TESTDIR/fail_init_in_main.mx"      "init.*not allowed.*main"
+run_fail_test "$TESTDIR/fail_init_select.mx"        "select.*not allowed.*init"
+run_fail_test "$TESTDIR/fail_init_spawn.mx"         "spawn.*not allowed.*init"
 
 echo ""
 echo "=== Results: $pass passed, $fail failed ==="

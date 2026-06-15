@@ -33,8 +33,10 @@ func wrune(x rune) {
 }
 
 func main() {
-	spawn(wbool, true)
-	spawn(wstring, "hello moxie")
+	b := bool(true)
+	s := string("hello moxie")
+	spawn(wbool, b)
+	spawn(wstring, s)
 	spawn(wbyte, byte(0xFF))
 	spawn(wrune, rune(0x1F600))
 	for i := int32(0); i < 50000000; i++ {

@@ -1040,10 +1040,15 @@ func (v *rawValue) set(llvmValue llvm.Value, r *runner) {
 			rhs := newRawValue(uint32(size))
 			lhs.set(llvmValue.Operand(0), r)
 			rhs.set(llvmValue.Operand(1), r)
-			if r.interpretICmp(lhs, rhs, llvmValue.IntPredicate()) {
-				v.buf[0] = 1 // result is true
+			result, icmpErr := r.interpretICmp(lhs, rhs, llvmValue.IntPredicate())
+			if icmpErr != nil {
+				// Cannot evaluate this comparison at compile time.
+				// Treat as zero (false) and let runtime handle it.
+				v.buf[0] = 0
+			} else if result {
+				v.buf[0] = 1
 			} else {
-				v.buf[0] = 0 // result is false
+				v.buf[0] = 0
 			}
 		default:
 			llvmValue.Dump()

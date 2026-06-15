@@ -333,6 +333,11 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 	// Convert AST to SSA.
 	ssaPkg.Build()
 
+	// Package-level Moxie restrictions (steps 8, 9, 10).
+	c.checkPackageRestrictions(pkg)
+	// API stability enforcement (step 11b).
+	c.checkAPIStability(pkg)
+
 	// Pre-scan for wasm spawn targets before any function compilation.
 	c.scanWasmSpawnTargets(ssaPkg)
 	// Pre-scan for native spawn targets so child-side prologue can wire ChildPipeFd.

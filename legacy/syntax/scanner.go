@@ -348,6 +348,20 @@ redo:
 		s.Op, s.Prec = Tilde, 0
 		s.Tok = OperatorType
 
+	case '#':
+		// Moxie: # export prefix for non-Latin identifiers.
+		// #foo is the same identifier as foo, but marks it as stable API.
+		s.nextch()
+		if IsLetter(s.ch) || s.ch >= utf8.RuneSelf && s.AtIdentChar(true) {
+			s.nextch()
+			s.Ident()
+			// Prefix the scanned identifier with #.
+			s.Lit = "#" + s.Lit
+			return
+		}
+		s.Errorf("# must be followed by an identifier")
+		goto redo
+
 	default:
 		s.Errorf("invalid character %#U", s.ch)
 		s.nextch()

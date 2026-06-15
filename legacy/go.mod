@@ -2,7 +2,11 @@ module moxie
 
 go 1.25.0
 
-require golang.org/x/tools v0.43.0
+require (
+	git.smesh.lol/actor v0.0.0
+	golang.org/x/tools v0.43.0
+)
+
 
 require (
 	github.com/aykevl/go-wasm v0.0.2-0.20250317121156-42b86c494139 // indirect

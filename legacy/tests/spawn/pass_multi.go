@@ -9,7 +9,8 @@ func wmulti(a int32, b float64, c bool, d uint8) {
 }
 
 func main() {
-	spawn(wmulti, int32(42), float64(3.14), true, uint8(7))
+	c := bool(true)
+	spawn(wmulti, int32(42), float64(3.14), c, uint8(7))
 	for i := int32(0); i < 50000000; i++ {
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 
 	"moxie/compileopts"
 	"moxie/goenv"
@@ -186,7 +185,13 @@ func (l *Library) load(config *compileopts.Config, tmpdir string) (job *compileJ
 		args = append(args, config.LibcCFlags()...)
 	}
 
-	var once sync.Once
+	unlocked := false
+	doUnlock := func() {
+		if !unlocked {
+			unlocked = true
+			unlock()
+		}
+	}
 
 	// Create job to put all the object files in a single archive. This archive
 	// file is the (static) library file.
@@ -195,7 +200,7 @@ func (l *Library) load(config *compileopts.Config, tmpdir string) (job *compileJ
 		description: "ar " + l.name + "/lib.a",
 		result:      filepath.Join(goenv.Get("GOCACHE"), outname, "lib.a"),
 		run: func(*compileJob) error {
-			defer once.Do(unlock)
+			defer doUnlock()
 
 			// Create an archive of all object files.
 			f, err := os.CreateTemp(outdir, "libc.a.tmp*")
@@ -291,7 +296,5 @@ func (l *Library) load(config *compileopts.Config, tmpdir string) (job *compileJ
 	}
 
 	ok = true
-	return job, func() {
-		once.Do(unlock)
-	}, nil
+	return job, doUnlock, nil
 }

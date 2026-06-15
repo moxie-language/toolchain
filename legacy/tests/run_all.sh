@@ -3,7 +3,8 @@
 set -euo pipefail
 
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
-MOXIE="${MOXIE:-./moxie}"
+export MOXIEROOT="$(cd "$TESTDIR/.." && pwd)"
+MOXIE="${MOXIE:-$MOXIEROOT/moxie}"
 export MOXIE PATH="/usr/lib/llvm19/bin:$PATH"
 
 total_pass=0
@@ -23,9 +24,14 @@ run_suite() {
 
 # Cross-compilation smoke test: verify binaries are produced for each target.
 cross_compile_check() {
-    local src="$TESTDIR/restrict/pass_valid_patterns.go"
     local tmpdir=$(mktemp -d)
     trap "rm -rf $tmpdir" RETURN
+
+    # Set up a proper module directory for the cross-compile test.
+    local moddir="$tmpdir/crossmod"
+    mkdir -p "$moddir"
+    cp "$TESTDIR/restrict/pass_valid_patterns.mx" "$moddir/main.mx"
+    printf 'module crossmod\n\nmoxie 0.1.0\n' > "$moddir/moxie.mod"
 
     echo "╔══ Cross-compilation ══╗"
     local pass=0
@@ -35,7 +41,7 @@ cross_compile_check() {
         local goos="${target%/*}"
         local goarch="${target#*/}"
         local bin="$tmpdir/${goos}_${goarch}"
-        if GOOS="$goos" GOARCH="$goarch" "$MOXIE" build -o "$bin" "$src" 2>/dev/null; then
+        if (cd "$moddir" && GOOS="$goos" GOARCH="$goarch" "$MOXIE" build -no-debug -o "$bin" .) 2>/dev/null; then
             local fmt=$(file "$bin" | grep -oP '(ELF|Mach-O)[^,]*' | head -1)
             echo "OK   $target ($fmt)"
             pass=$((pass + 1))

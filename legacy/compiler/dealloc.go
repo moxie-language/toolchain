@@ -19,6 +19,7 @@ func (b *builder) usesDealloc() bool {
 	name := b.fn.RelString(nil)
 	switch name {
 	case "runtime.deallocFree", "runtime.deallocPush", "runtime.deallocEscape",
+		"runtime.scopePush", "runtime.scopeFreeTo", "runtime.scopeRelocate",
 		"runtime.Free", "runtime.free", "runtime.alloc":
 		return false
 	}

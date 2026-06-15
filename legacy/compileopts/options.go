@@ -9,7 +9,7 @@ import (
 
 var (
 	validBuildModeOptions     = []string{"default", "c-shared"}
-	validGCOptions            = []string{"none", "leaking", "conservative", "dealloc"}
+	validGCOptions            = []string{"dealloc"}
 	validSchedulerOptions     = []string{"none", "tasks"}
 	validPanicStrategyOptions = []string{"print", "trap"}
 	validOptOptions           = []string{"none", "0", "1", "2", "s", "z"}

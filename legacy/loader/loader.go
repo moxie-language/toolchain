@@ -331,6 +331,11 @@ func (p *Package) OriginalDir() string {
 	return strings.TrimSuffix(p.program.getOriginalPath(p.Dir+string(os.PathSeparator)), string(os.PathSeparator))
 }
 
+// TypeInfo returns the go/types type-checking info for this package.
+func (p *Package) TypeInfo() *types.Info {
+	return &p.info
+}
+
 // parseFile parses a source file using the bootstrap parser (syntax package)
 // and converts the result to go/ast.File for downstream compatibility.
 // The *syntax.File is stored in p.SyntaxFiles for the native type checker (B1).

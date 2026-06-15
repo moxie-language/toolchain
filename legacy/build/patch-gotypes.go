@@ -71,6 +71,8 @@ func main() {
 	patchTypeTerm(dstDir)
 	patchSpawnBuiltin(dstDir)
 	patchErrorString(dstDir)
+	patchExportAccess(dstDir)
+	patchScopeHashPrefix(dstDir)
 
 	fmt.Fprintf(os.Stderr, "patched go/types in %s\n", dstDir)
 }
@@ -337,6 +339,42 @@ func mustReplace(file, src, old, new string) string {
 		fatal("patch target appears %d times in %s (expected 1)", count, file)
 	}
 	return strings.Replace(src, old, new, 1)
+}
+
+func patchScopeHashPrefix(dir string) {
+	f := filepath.Join(dir, "scope.go")
+	src := mustRead(f)
+
+	// Add stripHash helper before Lookup.
+	src = mustReplace(f, src,
+		"func (s *Scope) Lookup(name string) Object {\n\tobj := resolve(name, s.elems[name])",
+		"// stripHash removes a leading # from a Moxie export-annotated name.\n// #foo and foo are the same identifier; # is an annotation, not part of the name.\nfunc stripHash(name string) string {\n\tif len(name) > 0 && name[0] == '#' {\n\t\treturn name[1:]\n\t}\n\treturn name\n}\n\nfunc (s *Scope) Lookup(name string) Object {\n\tname = stripHash(name)\n\tobj := resolve(name, s.elems[name])")
+
+	// Patch insert to strip # from key.
+	src = mustReplace(f, src,
+		"func (s *Scope) insert(name string, obj Object) {\n\tif s.elems == nil {\n\t\ts.elems = make(map[string]Object)\n\t}\n\ts.elems[name] = obj\n}",
+		"func (s *Scope) insert(name string, obj Object) {\n\tname = stripHash(name)\n\tif s.elems == nil {\n\t\ts.elems = make(map[string]Object)\n\t}\n\ts.elems[name] = obj\n}")
+
+	// Patch Insert to strip # from name for lookup.
+	src = mustReplace(f, src,
+		"func (s *Scope) Insert(obj Object) Object {\n\tname := obj.Name()\n\tif alt := s.Lookup(name); alt != nil {",
+		"func (s *Scope) Insert(obj Object) Object {\n\tname := stripHash(obj.Name())\n\tif alt := s.Lookup(name); alt != nil {")
+
+	mustWrite(f, src)
+}
+
+func patchExportAccess(dir string) {
+	f := filepath.Join(dir, "call.go")
+	src := mustRead(f)
+
+	// Moxie: all identifiers are accessible cross-package.
+	// Capital/# prefix marks stable API, not access control.
+	// Remove the unexported name error so pkg.lowercaseName compiles.
+	src = mustReplace(f, src,
+		"\t\t\t\tif !exp.Exported() {\n\t\t\t\t\tcheck.errorf(e.Sel, UnexportedName, \"name %s not exported by package %s\", sel, pkg.name)\n\t\t\t\t\t// ok to continue\n\t\t\t\t}",
+		"\t\t\t\t// Moxie: all identifiers accessible cross-package.\n\t\t\t\t// Capital/# prefix marks stable API contract, not access control.\n\t\t\t\t_ = exp.Exported()")
+
+	mustWrite(f, src)
 }
 
 func fatal(format string, args ...any) {

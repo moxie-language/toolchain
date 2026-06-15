@@ -81,14 +81,17 @@ func main() {
 	os.Stdout.Write([]byte("LOCKDOWN_SURVIVED\n"))
 }
 
-func bytesEqual(a, b []byte) bool {
+func bytesEqual(a, b []byte) (eq bool) {
 	if len(a) != len(b) {
-		return false
+		eq = false
+		return eq
 	}
-	for i := 0; i < len(a); i++ {
+	for i := int32(0); i < int32(len(a)); i++ {
 		if a[i] != b[i] {
-			return false
+			eq = false
+			return eq
 		}
 	}
-	return true
+	eq = true
+	return eq
 }

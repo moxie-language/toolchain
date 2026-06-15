@@ -131,7 +131,7 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"src/runtime/futex_linux.c",
 			"src/runtime/ffi_linux.c")
 	case "js":
-		spec.GC = "leaking"
+		spec.GC = "dealloc"
 		spec.Scheduler = "none" // moxie: no goroutines
 		spec.Linker = "wasm-ld"
 		spec.BuildTags = append(spec.BuildTags, "moxie.wasm", "moxie.unicore")

@@ -748,7 +748,10 @@ func (r *runner) run(fn *function, params []value, parentMem *memoryView, indent
 			predicate := llvm.IntPredicate(operands[2].(literalValue).value.(uint8))
 			lhs := operands[0]
 			rhs := operands[1]
-			result := r.interpretICmp(lhs, rhs, predicate)
+			result, icmpErr := r.interpretICmp(lhs, rhs, predicate)
+			if icmpErr != nil {
+				return nil, mem, r.errorAt(inst, icmpErr)
+			}
 			if result {
 				locals[inst.localIndex] = literalValue{uint8(1)}
 			} else {
@@ -919,8 +922,10 @@ func (r *runner) run(fn *function, params []value, parentMem *memoryView, indent
 }
 
 // Interpret an icmp instruction. Doesn't have side effects, only returns the
-// output of the comparison.
-func (r *runner) interpretICmp(lhs, rhs value, predicate llvm.IntPredicate) bool {
+// output of the comparison. Returns an error when the comparison involves
+// pointer values in ordering predicates (ULT, SGT, etc.) that the interp
+// cannot evaluate symbolically.
+func (r *runner) interpretICmp(lhs, rhs value, predicate llvm.IntPredicate) (bool, error) {
 	switch predicate {
 	case llvm.IntEQ, llvm.IntNE:
 		var result bool
@@ -940,27 +945,66 @@ func (r *runner) interpretICmp(lhs, rhs value, predicate llvm.IntPredicate) bool
 		if predicate == llvm.IntNE {
 			result = !result
 		}
-		return result
+		return result, nil
 	case llvm.IntUGT:
-		return lhs.Uint(r) > rhs.Uint(r)
+		return r.safeUintCmp(lhs, rhs, func(a, b uint64) bool { return a > b })
 	case llvm.IntUGE:
-		return lhs.Uint(r) >= rhs.Uint(r)
+		return r.safeUintCmp(lhs, rhs, func(a, b uint64) bool { return a >= b })
 	case llvm.IntULT:
-		return lhs.Uint(r) < rhs.Uint(r)
+		return r.safeUintCmp(lhs, rhs, func(a, b uint64) bool { return a < b })
 	case llvm.IntULE:
-		return lhs.Uint(r) <= rhs.Uint(r)
+		return r.safeUintCmp(lhs, rhs, func(a, b uint64) bool { return a <= b })
 	case llvm.IntSGT:
-		return lhs.Int(r) > rhs.Int(r)
+		return r.safeIntCmp(lhs, rhs, func(a, b int64) bool { return a > b })
 	case llvm.IntSGE:
-		return lhs.Int(r) >= rhs.Int(r)
+		return r.safeIntCmp(lhs, rhs, func(a, b int64) bool { return a >= b })
 	case llvm.IntSLT:
-		return lhs.Int(r) < rhs.Int(r)
+		return r.safeIntCmp(lhs, rhs, func(a, b int64) bool { return a < b })
 	case llvm.IntSLE:
-		return lhs.Int(r) <= rhs.Int(r)
+		return r.safeIntCmp(lhs, rhs, func(a, b int64) bool { return a <= b })
 	default:
-		// _should_ be unreachable, until LLVM adds new icmp operands (unlikely)
-		panic("interp: unsupported icmp")
+		return false, errUnsupportedInst
 	}
+}
+
+// safeUintCmp compares two values as unsigned integers, returning an error
+// if either is a pointer that cannot be converted to an integer.
+func (r *runner) safeUintCmp(lhs, rhs value, cmp func(uint64, uint64) bool) (bool, error) {
+	lv, lok := r.tryUint(lhs)
+	rv, rok := r.tryUint(rhs)
+	if !lok || !rok {
+		return false, errUnsupportedInst
+	}
+	return cmp(lv, rv), nil
+}
+
+// safeIntCmp compares two values as signed integers, returning an error
+// if either is a pointer that cannot be converted to an integer.
+func (r *runner) safeIntCmp(lhs, rhs value, cmp func(int64, int64) bool) (bool, error) {
+	lv, lok := r.tryInt(lhs)
+	rv, rok := r.tryInt(rhs)
+	if !lok || !rok {
+		return false, errUnsupportedInst
+	}
+	return cmp(lv, rv), nil
+}
+
+// tryUint attempts to extract a uint64 from a value, returning false
+// if the value is a pointer that cannot be converted.
+func (r *runner) tryUint(v value) (uint64, bool) {
+	if _, err := v.asPointer(r); err == nil {
+		return 0, false // is a pointer, can't convert
+	}
+	return v.Uint(r), true
+}
+
+// tryInt attempts to extract an int64 from a value, returning false
+// if the value is a pointer that cannot be converted.
+func (r *runner) tryInt(v value) (int64, bool) {
+	if _, err := v.asPointer(r); err == nil {
+		return 0, false // is a pointer, can't convert
+	}
+	return v.Int(r), true
 }
 
 func (r *runner) runAtRuntime(fn *function, inst instruction, locals []value, mem *memoryView, indent string) *Error {

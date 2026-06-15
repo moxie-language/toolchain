@@ -72,13 +72,7 @@ func (c *Config) BuildTags() []string {
 }
 
 func (c *Config) GC() string {
-	if c.Options.GC != "" {
-		return c.Options.GC
-	}
-	if c.Target.GC != "" {
-		return c.Target.GC
-	}
-	return "conservative"
+	return "dealloc"
 }
 
 func (c *Config) NeedsStackObjects() bool {

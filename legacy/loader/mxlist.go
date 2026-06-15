@@ -455,7 +455,8 @@ func readModInfo(startDir string) (modPath, modDir, goVersion string, err error)
 	}
 }
 
-// parseGoMod extracts the module path and go version from go.mod content.
+// parseGoMod extracts the module path, go version, and moxie version from
+// go.mod or moxie.mod content.
 func parseGoMod(content string) (modPath, goVersion string) {
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
@@ -465,8 +466,29 @@ func parseGoMod(content string) (modPath, goVersion string) {
 		if strings.HasPrefix(line, "go ") {
 			goVersion = strings.TrimSpace(strings.TrimPrefix(line, "go"))
 		}
+		if strings.HasPrefix(line, "moxie ") {
+			goVersion = strings.TrimSpace(strings.TrimPrefix(line, "moxie"))
+		}
 	}
 	return
+}
+
+// ParseMoxieModVersion reads a moxie.mod file and returns the moxie version
+// string (e.g. "1.2.0"). Returns empty string if not found.
+func ParseMoxieModVersion(dir string) string {
+	for _, name := range []string{"moxie.mod", "go.mod"} {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "moxie ") {
+				return strings.TrimSpace(strings.TrimPrefix(line, "moxie"))
+			}
+		}
+	}
+	return ""
 }
 
 // readModRequires parses require directives from go.mod.

@@ -158,7 +158,14 @@ func parseTypeString(s string) (types.Type, error) {
 	return nil, fmt.Errorf("unsupported type %q in .mxh (only fixed-width scalar and array types are allowed)", s)
 }
 
-// mxhHashForImport returns the hash from the cached .mxh for importPath,
+// SynthMXHPackageForCheck loads the cached .mxh for importPath and returns
+// a synthetic *types.Package. Used by the API stability checker.
+func SynthMXHPackageForCheck(importPath string) (*types.Package, error) {
+	mxhPath := filepath.Join(MXHProtocolsDir(), importPath+".mxh")
+	return synthMXHPackage(importPath, mxhPath)
+}
+
+// MXHHashForImport returns the hash from the cached .mxh for importPath,
 // or an empty string if no .mxh is cached.
 func MXHHashForImport(importPath string) string {
 	mxhPath := filepath.Join(MXHProtocolsDir(), importPath+".mxh")
@@ -172,4 +179,20 @@ func MXHHashForImport(importPath string) string {
 		return ""
 	}
 	return mxh.Hash
+}
+
+// MXHVersionForImport returns the module version from the cached .mxh for
+// importPath, or an empty string if unavailable.
+func MXHVersionForImport(importPath string) string {
+	mxhPath := filepath.Join(MXHProtocolsDir(), importPath+".mxh")
+	f, err := os.Open(mxhPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	mxh, err := parse.ParseMXH(f)
+	if err != nil {
+		return ""
+	}
+	return mxh.Version
 }
