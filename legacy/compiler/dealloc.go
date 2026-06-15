@@ -12,18 +12,15 @@ import (
 // usesDealloc returns true when the dealloc GC is active and this function
 // should be instrumented. The dealloc runtime functions themselves are excluded
 // to prevent infinite recursion (deallocFree calling deallocFree at its return).
+// usesDealloc is disabled for bootstrap. The escape-enumeration model is
+// architecturally unsound - it requires special-casing every SSA node that
+// moves pointers (append, map stores, slice ops, etc). The correct model
+// is scope-based ownership promotion (implemented in stage4's scopePush/
+// scopeFreeTo). For bootstrap, we use the leaking allocator: alloc works,
+// automatic free is disabled. Gen1 will use stage4's scope-based dealloc
+// to produce correct gen2/gen3 binaries.
 func (b *builder) usesDealloc() bool {
-	if b.GC != "dealloc" {
-		return false
-	}
-	name := b.fn.RelString(nil)
-	switch name {
-	case "runtime.deallocFree", "runtime.deallocPush", "runtime.deallocEscape",
-		"runtime.scopePush", "runtime.scopeFreeTo", "runtime.scopeRelocate",
-		"runtime.Free", "runtime.free", "runtime.alloc":
-		return false
-	}
-	return true
+	return false
 }
 
 // deallocPushAlloc emits a runtime.deallocPush call to register a heap
