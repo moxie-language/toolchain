@@ -6,7 +6,7 @@ import (
 	"git.smesh.lol/moxie/pkg/types"
 )
 
-func mangleGenericName(baseName string, typeArgs []syntax.Type) (s string) {
+func mangleGenericName(baseName string, typeArgs []types.Type) (s string) {
 	s = baseName | "__"
 	for i, t := range typeArgs {
 		if i > 0 {
@@ -31,7 +31,7 @@ func mangleGenericName(baseName string, typeArgs []syntax.Type) (s string) {
 	return s
 }
 
-func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]syntax.Type, pkgScope *types.Scope) (t syntax.Type) {
+func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]types.Type, pkgScope *types.Scope) (t types.Type) {
 	if e == nil {
 		return nil
 	}
@@ -147,7 +147,7 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]syntax.Type, p
 	return nil
 }
 
-func resolveSignatureWithSubst(ft *syntax.FuncType, typeSubst map[string]syntax.Type, pkgScope *types.Scope) (s *types.Signature) {
+func resolveSignatureWithSubst(ft *syntax.FuncType, typeSubst map[string]types.Type, pkgScope *types.Scope) (s *types.Signature) {
 	if ft == nil {
 		return nil
 	}
@@ -193,7 +193,7 @@ func resolveSignatureWithSubst(ft *syntax.FuncType, typeSubst map[string]syntax.
 	return types.NewSignature(nil, paramTuple, resultTuple, variadic)
 }
 
-func matchTypeParam(paramType syntax.Expr, argType syntax.Type, tparams []*syntax.Field, typeMap map[string]syntax.Type) {
+func matchTypeParam(paramType syntax.Expr, argType types.Type, tparams []*syntax.Field, typeMap map[string]types.Type) {
 	if paramType == nil || argType == nil {
 		return
 	}
@@ -229,7 +229,7 @@ func matchTypeParam(paramType syntax.Expr, argType syntax.Type, tparams []*synta
 	}
 }
 
-func inferFromConstraints(tparams []*syntax.Field, typeMap map[string]syntax.Type) {
+func inferFromConstraints(tparams []*syntax.Field, typeMap map[string]types.Type) {
 	for _, tp := range tparams {
 		if tp.Name == nil || tp.Type == nil {
 			continue
@@ -242,7 +242,7 @@ func inferFromConstraints(tparams []*syntax.Field, typeMap map[string]syntax.Typ
 	}
 }
 
-func extractConstraintTypeParams(constraint syntax.Expr, concreteType syntax.Type, tparams []*syntax.Field, typeMap map[string]syntax.Type) {
+func extractConstraintTypeParams(constraint syntax.Expr, concreteType types.Type, tparams []*syntax.Field, typeMap map[string]types.Type) {
 	if constraint == nil || concreteType == nil {
 		return
 	}
@@ -266,8 +266,8 @@ func extractConstraintTypeParams(constraint syntax.Expr, concreteType syntax.Typ
 	}
 }
 
-func inferTypeArgsFromFunc(fd *syntax.FuncDecl, args []SSAValue) (ts []syntax.Type) {
-	typeMap := map[string]syntax.Type{}
+func inferTypeArgsFromFunc(fd *syntax.FuncDecl, args []SSAValue) (ts []types.Type) {
+	typeMap := map[string]types.Type{}
 	if fd.Type != nil {
 		for i, param := range fd.Type.ParamList {
 			if i >= len(args) || args[i] == nil || args[i].SSAType() == nil {
@@ -277,7 +277,7 @@ func inferTypeArgsFromFunc(fd *syntax.FuncDecl, args []SSAValue) (ts []syntax.Ty
 		}
 	}
 	inferFromConstraints(fd.TParamList, typeMap)
-	var result []syntax.Type
+	var result []types.Type
 	for _, tp := range fd.TParamList {
 		if tp.Name != nil {
 			result = append(result, typeMap[tp.Name.Value])
@@ -286,7 +286,7 @@ func inferTypeArgsFromFunc(fd *syntax.FuncDecl, args []SSAValue) (ts []syntax.Ty
 	return result
 }
 
-func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, baseName string, typeArgs []syntax.Type, args []SSAValue, targetPkg *SSAPackage, srcPkgPath string, hasDots bool) (s SSAValue) {
+func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, baseName string, typeArgs []types.Type, args []SSAValue, targetPkg *SSAPackage, srcPkgPath string, hasDots bool) (s SSAValue) {
 	for _, ta := range typeArgs {
 		if ta == nil {
 			return nil
@@ -296,7 +296,7 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, baseName stri
 	if fn, ok := targetPkg.Members[mangledName].(*SSAFunction); ok {
 		return fb.emitCallToSSAFunc(fn, args, hasDots)
 	}
-	typeSubst := map[string]syntax.Type{}
+	typeSubst := map[string]types.Type{}
 	for i, tp := range fd.TParamList {
 		if tp.Name != nil && i < len(typeArgs) && typeArgs[i] != nil {
 			typeSubst[tp.Name.Value] = typeArgs[i]
@@ -333,7 +333,7 @@ func (fb *ssaFuncBuilder) emitCallToSSAFunc(fn *SSAFunction, args []SSAValue, ha
 		}
 		args = fb.coerceArgsToInterface(args, fn.Signature)
 	}
-	var retType syntax.Type
+	var retType types.Type
 	if fn.Signature != nil && fn.Signature.Results() != nil {
 		if fn.Signature.Results().Len() == 1 {
 			retType = fn.Signature.Results().At(0).Type()
@@ -353,12 +353,12 @@ func (fb *ssaFuncBuilder) emitCallToSSAFunc(fn *SSAFunction, args []SSAValue, ha
 
 func (fb *ssaFuncBuilder) tryGenericLocalCall(funcName string, argList []syntax.Expr, hasDots bool) (s SSAValue) {
 	pkgPath := fb.fn.Pkg.Pkg.Path()
-	key := pkgPath + "." + funcName
+	key := pkgPath | "." | funcName
 	fd, ok := genericFuncDecls[key]
 	if !ok && fb.srcScope != nil {
 		for gPkg, gScope := range genericPkgScopes {
 			if gScope == fb.srcScope {
-				key = gPkg + "." + funcName
+				key = gPkg | "." | funcName
 				fd, ok = genericFuncDecls[key]
 				if ok {
 					pkgPath = gPkg
@@ -380,7 +380,7 @@ func (fb *ssaFuncBuilder) tryGenericPkgCall(pn *types.PkgName, funcName string, 
 	if imported == nil {
 		return nil
 	}
-	key := imported.Path() + "." + funcName
+	key := imported.Path() | "." | funcName
 	fd, ok := genericFuncDecls[key]
 	if !ok {
 		return nil
@@ -394,12 +394,12 @@ func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList 
 	switch x := ie.X.(type) {
 	case *syntax.Name:
 		pkgPath := fb.fn.Pkg.Pkg.Path()
-		key := pkgPath + "." + x.Value
+		key := pkgPath | "." | x.Value
 		fd, ok := genericFuncDecls[key]
 		if !ok && fb.srcScope != nil {
 			for gPkg, gScope := range genericPkgScopes {
 				if gScope == fb.srcScope {
-					key = gPkg + "." + x.Value
+					key = gPkg | "." | x.Value
 					fd, ok = genericFuncDecls[key]
 					if ok {
 						pkgPath = gPkg
@@ -418,7 +418,7 @@ func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList 
 		if pkgName, ok2 := x.X.(*syntax.Name); ok2 {
 			obj := fb.lookupObject(pkgName.Value)
 			if pn, ok3 := obj.(*types.PkgName); ok3 && pn.Imported() != nil {
-				key := pn.Imported().Path() + "." + x.Sel.Value
+				key := pn.Imported().Path() | "." | x.Sel.Value
 				fd, ok4 := genericFuncDecls[key]
 				if !ok4 {
 					return nil
@@ -432,20 +432,20 @@ func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList 
 	return nil
 }
 
-func (fb *ssaFuncBuilder) resolveExplicitTypeArgs(indexExpr syntax.Expr, fd *syntax.FuncDecl) (ts []syntax.Type) {
+func (fb *ssaFuncBuilder) resolveExplicitTypeArgs(indexExpr syntax.Expr, fd *syntax.FuncDecl) (ts []types.Type) {
 	var typeExprs []syntax.Expr
 	if le, ok := indexExpr.(*syntax.ListExpr); ok {
 		typeExprs = le.ElemList
 	} else {
 		typeExprs = []syntax.Expr{indexExpr}
 	}
-	var result []syntax.Type
+	var result []types.Type
 	for _, te := range typeExprs {
 		t := fb.resolveTypeAST(te)
 		result = append(result, t)
 	}
 	if len(result) < len(fd.TParamList) {
-		typeMap := map[string]syntax.Type{}
+		typeMap := map[string]types.Type{}
 		for i, tp := range fd.TParamList {
 			if tp.Name != nil && i < len(result) && result[i] != nil {
 				typeMap[tp.Name.Value] = result[i]

@@ -257,7 +257,7 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 		fb.currentBlock = rhsBlock
 		y := fb.buildExpr(e.Y)
 		if y == nil {
-			y = &SSAConst{typ: types.Typ[types.Bool], val: types.ConstBool{false}}
+			y = &SSAConst{typ: types.Typ[types.Bool], val: &types.ConstBool{V:false}}
 		}
 		fb.emit(&SSAJump{Comment: "sc.merge"})
 		fb.currentBlock.Succs = append(fb.currentBlock.Succs, mergeBlock)
@@ -265,9 +265,9 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 		fb.currentBlock = mergeBlock
 		var shortVal SSAValue
 		if op == OpLand {
-			shortVal = &SSAConst{typ: types.Typ[types.Bool], val: types.ConstBool{false}}
+			shortVal = &SSAConst{typ: types.Typ[types.Bool], val: &types.ConstBool{V:false}}
 		} else {
-			shortVal = &SSAConst{typ: types.Typ[types.Bool], val: types.ConstBool{true}}
+			shortVal = &SSAConst{typ: types.Typ[types.Bool], val: &types.ConstBool{V:true}}
 		}
 		phi := &SSAPhi{Edges: []SSAValue{shortVal, y}, Comment: "sc"}
 		phi.typ = types.Typ[types.Bool]
@@ -295,7 +295,7 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 					if ct == nil {
 						ct = yc.typ
 					}
-					if _, isBool := folded.(types.ConstBool); isBool {
+					if _, isBool := folded.(*types.ConstBool); isBool {
 						ct = types.Typ[types.Bool]
 					}
 					return &SSAConst{typ: ct, val: folded}
@@ -385,7 +385,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 				for _, ma := range args {
 					allArgs = append(allArgs, ma)
 				}
-				var retType syntax.Type
+				var retType types.Type
 				if fn.Signature != nil {
 					if fn.Signature.Results() != nil && fn.Signature.Results().Len() == 1 {
 						retType = fn.Signature.Results().At(0).Type()
@@ -417,7 +417,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 		return fb.buildBuiltinCall(e, bi, args)
 	}
 
-	var retType syntax.Type
+	var retType types.Type
 	if fn.SSAType() != nil {
 		if sig, ok := types.SafeUnderlying(fn.SSAType()).(*types.Signature); ok {
 			if sig.Results() != nil && sig.Results().Len() == 1 {
@@ -494,13 +494,13 @@ func (fb *ssaFuncBuilder) wrapVariadicArgs(args []SSAValue, sig *types.Signature
 	}
 	nVariadic := len(args) - nFixed
 	if nVariadic <= 0 {
-		nilSlice := NewSSAConst(types.ConstNil{}, sig.Params().At(sig.Params().Len()-1).Type())
+		nilSlice := NewSSAConst(&types.ConstNil{}, sig.Params().At(sig.Params().Len()-1).Type())
 		result := []SSAValue{:nFixed:nFixed}
 		copy(result, args[:nFixed])
 		return append(result, nilSlice)
 	}
 	sliceType := sig.Params().At(sig.Params().Len() - 1).Type()
-	var elemType syntax.Type
+	var elemType types.Type
 	if sl, ok := types.SafeUnderlying(sliceType).(*types.Slice); ok {
 		elemType = sl.Elem()
 	}
@@ -514,13 +514,13 @@ func (fb *ssaFuncBuilder) wrapVariadicArgs(args []SSAValue, sig *types.Signature
 			return args
 		}
 	}
-	lenVal := NewSSAConst(types.ConstInt{int64(nVariadic)}, types.Typ[types.Int32])
+	lenVal := NewSSAConst(&types.ConstInt{V:int64(nVariadic)}, types.Typ[types.Int32])
 	ms := &SSAMakeSlice{Len: lenVal, Cap: lenVal}
 	ms.typ = sliceType
 	ms.name = fb.nextName()
 	fb.emit(ms)
 	for i := 0; i < nVariadic; i++ {
-		idx := NewSSAConst(types.ConstInt{int64(i)}, types.Typ[types.Int32])
+		idx := NewSSAConst(&types.ConstInt{V:int64(i)}, types.Typ[types.Int32])
 		ia := &SSAIndexAddr{X: ms, Index: idx}
 		ia.typ = types.NewPointer(elemType)
 		ia.name = fb.nextName()
@@ -565,8 +565,8 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 	case types.BuiltinLen, types.BuiltinCap:
 		if b.id == types.BuiltinLen && len(args) == 1 {
 			if c, ok := args[0].(*SSAConst); ok {
-				if cs, ok2 := c.val.(types.ConstStr); ok2 {
-					return &SSAConst{typ: types.Typ[types.Int32], val: types.ConstInt{int64(len(cs.s))}}
+				if cs, ok2 := c.val.(*types.ConstStr); ok2 {
+					return &SSAConst{typ: types.Typ[types.Int32], val: &types.ConstInt{V:int64(len(cs.S))}}
 				}
 			}
 		}
@@ -661,7 +661,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 	return call
 }
 
-func (fb *ssaFuncBuilder) emitMake(typ syntax.Type, sizeArgs []SSAValue) (s SSAValue) {
+func (fb *ssaFuncBuilder) emitMake(typ types.Type, sizeArgs []SSAValue) (s SSAValue) {
 	if typ == nil {
 		return nil
 	}
@@ -776,7 +776,7 @@ func (fb *ssaFuncBuilder) buildMethodValue(sel *syntax.SelectorExpr, recv SSAVal
 	for _, p := range wrapper.Params {
 		args = append(args, p)
 	}
-	var retType syntax.Type
+	var retType types.Type
 	if methodSig.Results() != nil && methodSig.Results().Len() == 1 {
 		retType = methodSig.Results().At(0).Type()
 	} else if methodSig.Results() != nil && methodSig.Results().Len() > 1 {
@@ -851,7 +851,7 @@ func (fb *ssaFuncBuilder) buildPkgMember(pn *types.PkgName, memberName string) (
 
 func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue) {
 	var addr SSAValue
-	var structType syntax.Type
+	var structType types.Type
 	if inner, ok := e.X.(*syntax.SelectorExpr); ok {
 		addr = fb.buildSelectorAddr(inner)
 		if addr == nil {
@@ -1045,7 +1045,7 @@ func (fb *ssaFuncBuilder) buildAssert(e *syntax.AssertExpr) (s SSAValue) {
 }
 
 func (fb *ssaFuncBuilder) buildCompositeLit(e *syntax.CompositeLit) (s SSAValue) {
-	var typ syntax.Type
+	var typ types.Type
 	if e.Type != nil {
 		typ = fb.resolveType(e.Type)
 	}
@@ -1118,7 +1118,7 @@ func (fb *ssaFuncBuilder) buildCompositeLit(e *syntax.CompositeLit) (s SSAValue)
 	return fb.emitLoad(alloc, typ)
 }
 
-func (fb *ssaFuncBuilder) buildArrayLit(e *syntax.CompositeLit, typ syntax.Type, ar *types.Array) (s SSAValue) {
+func (fb *ssaFuncBuilder) buildArrayLit(e *syntax.CompositeLit, typ types.Type, ar *types.Array) (s SSAValue) {
 	if ar.Len() < 0 {
 		ar = types.NewArray(ar.Elem(), int64(len(e.ElemList)))
 		typ = ar
@@ -1141,7 +1141,7 @@ func (fb *ssaFuncBuilder) buildArrayLit(e *syntax.CompositeLit, typ syntax.Type,
 		if v == nil {
 			continue
 		}
-		idx := &SSAConst{typ: types.Typ[types.Int32], val: types.ConstInt{int64(i)}}
+		idx := &SSAConst{typ: types.Typ[types.Int32], val: &types.ConstInt{V:int64(i)}}
 		ia := &SSAIndexAddr{X: alloc, Index: idx}
 		ia.typ = types.NewPointer(elemTyp)
 		ia.name = fb.nextName()
@@ -1152,7 +1152,7 @@ func (fb *ssaFuncBuilder) buildArrayLit(e *syntax.CompositeLit, typ syntax.Type,
 	return fb.emitLoad(alloc, typ)
 }
 
-func (fb *ssaFuncBuilder) buildCompositeLitWithType(e *syntax.CompositeLit, typ syntax.Type) (s SSAValue) {
+func (fb *ssaFuncBuilder) buildCompositeLitWithType(e *syntax.CompositeLit, typ types.Type) (s SSAValue) {
 	if sl, ok := types.SafeUnderlying(typ).(*types.Slice); ok {
 		return fb.buildSliceLit(e, typ, sl)
 	}
@@ -1197,9 +1197,9 @@ func (fb *ssaFuncBuilder) buildCompositeLitWithType(e *syntax.CompositeLit, typ 
 	return fb.emitLoad(alloc, typ)
 }
 
-func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ syntax.Type, sl *types.Slice) (s SSAValue) {
+func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ types.Type, sl *types.Slice) (s SSAValue) {
 	n := len(e.ElemList)
-	nVal := &SSAConst{typ: types.Typ[types.Int32], val: types.ConstInt{int64(n)}}
+	nVal := &SSAConst{typ: types.Typ[types.Int32], val: &types.ConstInt{V:int64(n)}}
 	ms := &SSAMakeSlice{}
 	ms.typ = typ
 	ms.name = fb.nextName()
@@ -1224,7 +1224,7 @@ func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ syntax.Type,
 		if v == nil {
 			continue
 		}
-		idx := &SSAConst{typ: types.Typ[types.Int32], val: types.ConstInt{int64(i)}}
+		idx := &SSAConst{typ: types.Typ[types.Int32], val: &types.ConstInt{V:int64(i)}}
 		ia := &SSAIndexAddr{X: ms, Index: idx}
 		ia.typ = types.NewPointer(elemTyp)
 		ia.name = fb.nextName()
@@ -1383,7 +1383,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *types.PkgName, funcName string, argLi
 		impPkg.Members[funcName] = ssaFn
 	}
 	args := fb.buildArgs(argList)
-	var retType syntax.Type
+	var retType types.Type
 	if ssaFn.Signature != nil {
 		if ssaFn.Signature.Variadic() && !hasDots {
 			args = fb.wrapVariadicArgs(args, ssaFn.Signature)
@@ -1414,7 +1414,7 @@ func (fb *ssaFuncBuilder) buildUnsafeSlice(argList []syntax.Expr) (s SSAValue) {
 	if ptrVal == nil || lenVal == nil {
 		return nil
 	}
-	var elemType syntax.Type
+	var elemType types.Type
 	if pt, ok := types.SafeUnderlying(ptrVal.SSAType()).(*types.Pointer); ok {
 		elemType = pt.Elem()
 	}
@@ -1463,7 +1463,7 @@ func (fb *ssaFuncBuilder) lookupObject(name string) (o Object) {
 	return nil
 }
 
-func (fb *ssaFuncBuilder) getOrCreateFreeVar(name string, typ syntax.Type) (s SSAValue) {
+func (fb *ssaFuncBuilder) getOrCreateFreeVar(name string, typ types.Type) (s SSAValue) {
 	for _, fv := range fb.fn.FreeVars {
 		if fv.name == name {
 			return fv

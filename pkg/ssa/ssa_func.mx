@@ -11,7 +11,7 @@ func newSSAFuncBuilder(fn *SSAFunction, info *types.Info) (p *ssaFuncBuilder) {
 		fn:         fn,
 		info:       info,
 		vars:       map[types.Object]*SSAAlloc{},
-		localTypes: map[string]syntax.Type{},
+		localTypes: map[string]types.Type{},
 	}
 }
 
@@ -39,7 +39,7 @@ func (fb *ssaFuncBuilder) labelBlock(name string) (s *SSABasicBlock) {
 	if b := fb.labels[name]; b != nil {
 		return b
 	}
-	b := fb.newBlock("label." + name)
+	b := fb.newBlock("label." | name)
 	fb.labels[name] = b
 	return b
 }
@@ -152,7 +152,7 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 	fb.fn.NamedResults = fb.namedResults
 }
 
-func (fb *ssaFuncBuilder) emitAlloc(typ syntax.Type, pos int32) (s *SSAAlloc) {
+func (fb *ssaFuncBuilder) emitAlloc(typ types.Type, pos int32) (s *SSAAlloc) {
 	a := &SSAAlloc{Heap: false}
 	a.typ = types.NewPointer(typ)
 	a.pos = pos
@@ -166,7 +166,7 @@ func (fb *ssaFuncBuilder) emitStore(addr SSAValue, val SSAValue) {
 	fb.emit(&SSAStore{Addr: addr, Val: val})
 }
 
-func (fb *ssaFuncBuilder) emitLoad(addr SSAValue, typ syntax.Type) (s SSAValue) {
+func (fb *ssaFuncBuilder) emitLoad(addr SSAValue, typ types.Type) (s SSAValue) {
 	u := &SSAUnOp{Op: OpMul, X: addr}
 	u.typ = typ
 	u.name = fb.nextName()
@@ -210,7 +210,7 @@ func (fb *ssaFuncBuilder) buildStmt(s syntax.Stmt) {
 			fb.pendingLabel = ls.Label.Value
 			lblBlock := fb.labelBlock(ls.Label.Value)
 			if fb.currentBlock != nil {
-				fb.emit(&SSAJump{Comment: "goto.label." + ls.Label.Value})
+				fb.emit(&SSAJump{Comment: "goto.label." | ls.Label.Value})
 				fb.currentBlock.Succs = append(fb.currentBlock.Succs, lblBlock)
 				lblBlock.Preds = append(lblBlock.Preds, fb.currentBlock)
 			}
@@ -277,7 +277,7 @@ func (fb *ssaFuncBuilder) buildAssign(s *syntax.AssignStmt) {
 		if lv == nil {
 			return
 		}
-		one := &SSAConst{typ: lv.SSAType(), val: types.ConstInt{1}}
+		one := &SSAConst{typ: lv.SSAType(), val: &types.ConstInt{V:1}}
 		op := OpAdd
 		if s.Op == token.Sub {
 			op = OpSub
@@ -381,7 +381,7 @@ func (fb *ssaFuncBuilder) buildAssign(s *syntax.AssignStmt) {
 	fb.buildStore(s.Lhs, rhs)
 }
 
-func (fb *ssaFuncBuilder) coerceToInterface(val SSAValue, targetType syntax.Type) (s SSAValue) {
+func (fb *ssaFuncBuilder) coerceToInterface(val SSAValue, targetType types.Type) (s SSAValue) {
 	if targetType == nil || val == nil || val.SSAType() == nil {
 		return val
 	}
@@ -584,7 +584,7 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *syntax.AssignStmt) {
 			if name.Value == "_" {
 				continue
 			}
-			var typ syntax.Type
+			var typ types.Type
 			if vals[i] != nil {
 				typ = vals[i].SSAType()
 			}
@@ -616,7 +616,7 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *syntax.AssignStmt) {
 		if name.Value == "_" {
 			continue
 		}
-		var typ syntax.Type
+		var typ types.Type
 		if rhs != nil {
 			if isTuple && i < tup.Len() {
 				typ = tup.At(i).Type()
@@ -675,7 +675,7 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *syntax.AssignStmt) {
 func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 	switch d := d.(type) {
 	case *syntax.VarDecl:
-		var typ syntax.Type
+		var typ types.Type
 		if fb.info != nil && len(d.NameList) > 0 {
 			if obj := fb.info.Defs[d.NameList[0]]; obj != nil {
 				typ = obj.Type()
@@ -730,7 +730,7 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 				}
 			}
 		}
-	case *syntax.TypeDecl:
+	case *types.TypeDecl:
 		if d.Name != nil {
 			resolved := fb.resolveTypeAST(d.Type)
 			if resolved != nil {
