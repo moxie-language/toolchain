@@ -987,8 +987,18 @@ func (e *irEmitter) releaseAfterEmit() {
 }
 
 func (e *irEmitter) pkgMembers() (ss []SSAMember) {
+	var keys []string
+	for k := range e.pkg.Members {
+		keys = append(keys, k)
+	}
+	for i := 1; i < len(keys); i++ {
+		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
+			keys[j], keys[j-1] = keys[j-1], keys[j]
+		}
+	}
 	var members []SSAMember
-	for _, m := range e.pkg.Members {
+	for _, k := range keys {
+		m := e.pkg.Members[k]
 		if m != nil {
 			members = append(members, m)
 		}
@@ -1471,9 +1481,13 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		}
 	}
 	var hoistList []*SSAAlloc
-	for v := range hoistAllocs {
-		if a, ok := v.(*SSAAlloc); ok {
-			hoistList = append(hoistList, a)
+	// Collect allocas deterministically: iterate blocks/instructions in order
+	// (both are slices). Using hoistAllocs map only as a set membership check.
+	for _, hb := range f.Blocks {
+		for _, hinstr := range hb.Instrs {
+			if a, ok := hinstr.(*SSAAlloc); ok && hoistAllocs[a] {
+				hoistList = append(hoistList, a)
+			}
 		}
 	}
 	for i := 1; i < len(hoistList); i++ {
@@ -6040,7 +6054,18 @@ func (e *irEmitter) reflectTypeName(t Type) (s string) {
 func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 	var impls []ifaceImpl
 	hasType := map[string]bool{}
-	for mname, m := range e.pkg.Members {
+	var mkeys []string
+	for k := range e.pkg.Members {
+		mkeys = append(mkeys, k)
+	}
+	for i := 1; i < len(mkeys); i++ {
+		for j := i; j > 0 && mkeys[j] < mkeys[j-1]; j-- {
+			mkeys[j], mkeys[j-1] = mkeys[j-1], mkeys[j]
+		}
+	}
+	for mki := 0; mki < len(mkeys); mki++ {
+		mname := mkeys[mki]
+		m := e.pkg.Members[mname]
 		fn, ok := m.(*SSAFunction)
 		if !ok {
 			continue
@@ -6134,7 +6159,18 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 	// produce the matching type-ID without the defining package linked.
 	// moxie/runtime/unsafe are runtime-provided (legacy symbol mangling,
 	// local linkage) and never linkable.
-	for rPath, rPkg := range ImportRegistry {
+	var regPaths []string
+	for rPath := range ImportRegistry {
+		regPaths = append(regPaths, rPath)
+	}
+	for i := 1; i < len(regPaths); i++ {
+		for j := i; j > 0 && regPaths[j] < regPaths[j-1]; j-- {
+			regPaths[j], regPaths[j-1] = regPaths[j-1], regPaths[j]
+		}
+	}
+	for rpi := 0; rpi < len(regPaths); rpi++ {
+		rPath := regPaths[rpi]
+		rPkg := ImportRegistry[rPath]
 		if rPkg == nil || seenPkg[rPath] {
 			continue
 		}
@@ -6168,6 +6204,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 			if len(named3.TParams) > 0 {
 				continue
 			}
+			found := false
 			for mi := 0; mi < named3.NumMethods(); mi++ {
 				m := named3.Method(mi)
 				if m.Name != methodName {
@@ -6189,6 +6226,23 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 					extTypeID: tid,
 					extSig:    msig,
 				})
+				found = true
+			}
+			if !found {
+				chain, embedSym, embedSig, embedT := findExtEmbedMethod(named3, pkgPath, tname, methodName, 0)
+				if embedSym != "" {
+					tid := "reflect/types.type:pointer:named:" | pkgPath | "." | tname
+					impls = append(impls, ifaceImpl{
+						recvType:   NewPointer(tn3.Typ),
+						ptrRecv:    true,
+						extSymbol:  embedSym,
+						extTypeID:  tid,
+						extSig:     embedSig,
+						embedField: chain[0],
+						embedType:  embedT,
+						embedChain: chain,
+					})
+				}
 			}
 		}
 	}
@@ -6231,6 +6285,55 @@ func (e *irEmitter) findEmbedMethod(t Type, methodName string, depth int32) ([]i
 		}
 	}
 	return nil, nil, nil
+}
+
+// findExtEmbedMethod searches embedded fields of a cross-package Named type
+// for a method with the given name. Returns the field index chain, the
+// external symbol for the method, the method signature, and the embed type.
+func findExtEmbedMethod(named *Named, pkgPath string, outerName string, methodName string, depth int32) ([]int32, string, *Signature, Type) {
+	if depth > 5 {
+		return nil, "", nil, nil
+	}
+	st, ok := SafeUnderlying(named).(*TCStruct)
+	if !ok {
+		return nil, "", nil, nil
+	}
+	for fi := 0; fi < st.NumFields(); fi++ {
+		f := st.Field(fi)
+		if !f.Anonymous {
+			continue
+		}
+		embedType := f.Typ
+		var embedNamed *Named
+		if en, ok2 := embedType.(*Named); ok2 {
+			embedNamed = en
+		} else if p, ok2 := embedType.(*Pointer); ok2 {
+			if en, ok3 := p.Base.(*Named); ok3 {
+				embedNamed = en
+			}
+		}
+		if embedNamed == nil || embedNamed.Obj == nil {
+			continue
+		}
+		embedName := embedNamed.Obj.Name
+		embedPkg := pkgPath
+		if embedNamed.Obj.Pkg != nil {
+			embedPkg = embedNamed.Obj.Pkg.Path
+		}
+		for mi := 0; mi < embedNamed.NumMethods(); mi++ {
+			m := embedNamed.Method(mi)
+			if m.Name != methodName {
+				continue
+			}
+			sym := embedPkg | "." | embedName | "." | methodName
+			return []int32{fi}, sym, m.Signature(), embedType
+		}
+		sub, sym, sig, eT := findExtEmbedMethod(embedNamed, embedPkg, embedName, methodName, depth+1)
+		if sym != "" {
+			return append([]int32{fi}, sub...), sym, sig, eT
+		}
+	}
+	return nil, "", nil, nil
 }
 
 type ifaceImpl struct {
@@ -8881,7 +8984,17 @@ func tcResolveFuncReturn(e syntax.Expr, scope *Scope) (t Type) {
 			}
 		}
 		if obj == nil {
-			for _, pkg := range ImportRegistry {
+			var irk2 []string
+			for k := range ImportRegistry {
+				irk2 = append(irk2, k)
+			}
+			for i := 1; i < len(irk2); i++ {
+				for j := i; j > 0 && irk2[j] < irk2[j-1]; j-- {
+					irk2[j], irk2[j-1] = irk2[j-1], irk2[j]
+				}
+			}
+			for _, k := range irk2 {
+				pkg := ImportRegistry[k]
 				if pkg.Name == pkgName.Value {
 					obj = pkg.Scope.Lookup(e.Sel.Value)
 					break

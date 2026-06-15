@@ -99,32 +99,42 @@ switch   type     var
 Letter or underscore followed by letters, digits, or underscores. Unicode
 letters are allowed.
 
-An identifier is exported if its first character is a UTF-8 uppercase letter
-(Lu category). This includes ASCII A-Z and uppercase letters from any script
-that has case distinction.
+All identifiers are accessible cross-package. There is no access control
+based on case - any package can reference any identifier in any other package.
+
+An identifier is part of the **stable API contract** if its first character is
+a UTF-8 uppercase letter (Lu category) or if it carries the `#` prefix. This
+includes ASCII A-Z and uppercase letters from any script with case distinction.
 
 For scripts without case distinction (CJK, Arabic, Hebrew, Thai, etc.), the
-`#` prefix marks an identifier as exported:
+`#` prefix marks an identifier as part of the stable API:
 
 ```moxie
-func #计算(x, y int32) (sum int32) {    // exported
-    return x + y
+func #计算(x, y int32) (sum int32) {    // stable API
+    sum = x + y
+    return
 }
 
-func 内部处理() {                   // unexported
+func 内部处理() (r int32) {              // accessible, but no stability guarantee
+    r = 0
+    return
 }
 ```
 
-The `#` is part of the export mechanism, not part of the identifier name. It
-does not appear in references to the symbol after import - callers use the
-bare name:
+The `#` is an annotation, not part of the identifier name. `#foo` and `foo`
+are the same identifier - declaring both in the same scope is a redeclaration
+error. The `#` only appears at the declaration site. Cross-package references
+use the bare name:
 
 ```moxie
 import "example/math"
 result := math.计算(1, 2)
 ```
 
-Unexported identifiers are visible only within the declaring package.
+Removing or changing the signature of a stable API symbol (Capital or `#`)
+without bumping the major version in `moxie.mod` is a compile error when
+building against a cached `.mxh`. Lowercase symbols carry no stability
+guarantee and may change freely between versions.
 
 #### Predeclared Identifiers
 
@@ -1535,7 +1545,7 @@ moxie install git.example.com/somepkg  # install a single package
 
 ### Protocol Headers (.mxh)
 
-A `.mxh` file describes a package's codec types - exported types that implement
+A `.mxh` file describes a package's codec types - types that implement
 `moxie.Codec`, their wire layout, and method signatures. No implementation, no
 unexported types.
 
