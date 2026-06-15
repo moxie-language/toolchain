@@ -86,6 +86,16 @@ func (b *builder) deallocEscapeValue(val ssa.Value) {
 		b.deallocEscapeValue(v.X)
 	case *ssa.IndexAddr:
 		b.deallocEscapeValue(v.X)
+	case *ssa.Slice:
+		b.deallocEscapeValue(v.X)
+	case *ssa.Convert:
+		b.deallocEscapeValue(v.X)
+	case *ssa.ChangeType:
+		b.deallocEscapeValue(v.X)
+	case *ssa.MultiConvert:
+		b.deallocEscapeValue(v.X)
+	case *ssa.Extract:
+		b.deallocEscapeValue(v.Tuple)
 	case *ssa.Phi:
 		for _, edge := range v.Edges {
 			if alloc, ok := edge.(*ssa.Alloc); ok && b.deallocAllocs[alloc] {
@@ -118,6 +128,12 @@ func (b *builder) deallocAddrIsHeapSeen(addr ssa.Value, seen map[ssa.Value]bool)
 		return b.deallocAddrIsHeapSeen(a.X, seen)
 	case *ssa.IndexAddr:
 		return b.deallocAddrIsHeapSeen(a.X, seen)
+	case *ssa.Slice:
+		return b.deallocAddrIsHeapSeen(a.X, seen)
+	case *ssa.Convert:
+		return b.deallocAddrIsHeapSeen(a.X, seen)
+	case *ssa.ChangeType:
+		return b.deallocAddrIsHeapSeen(a.X, seen)
 	case *ssa.Phi:
 		for _, edge := range a.Edges {
 			if b.deallocAddrIsHeapSeen(edge, seen) {
@@ -126,6 +142,24 @@ func (b *builder) deallocAddrIsHeapSeen(addr ssa.Value, seen map[ssa.Value]bool)
 		}
 	}
 	return false
+}
+
+// deallocCheckCall emits deallocEscape for any tracked heap allocations
+// passed as arguments to a function call. Since we cannot know whether the
+// callee stores the pointer, we must conservatively assume it escapes.
+func (b *builder) deallocCheckCall(instr *ssa.CallCommon) {
+	if b.deallocHead.IsNil() {
+		return
+	}
+	for _, arg := range instr.Args {
+		b.deallocEscapeValue(arg)
+	}
+	// The receiver of a method call (instr.Value) can also carry a tracked
+	// allocation (e.g. scope.Insert where scope is derived from a tracked
+	// alloc via FieldAddr).
+	if instr.Value != nil && !instr.IsInvoke() {
+		b.deallocEscapeValue(instr.Value)
+	}
 }
 
 // deallocCheckStore emits deallocEscape when a heap-allocated value is
@@ -142,6 +176,16 @@ func (b *builder) deallocCheckStore(instr *ssa.Store) {
 	if b.deallocAddrIsHeap(instr.Addr) {
 		b.deallocEscapeValue(instr.Val)
 	}
+}
+
+// deallocCheckMapUpdate emits deallocEscape when a tracked heap allocation
+// is stored as a map key or value. The map outlives the function scope.
+func (b *builder) deallocCheckMapUpdate(instr *ssa.MapUpdate) {
+	if b.deallocHead.IsNil() {
+		return
+	}
+	b.deallocEscapeValue(instr.Key)
+	b.deallocEscapeValue(instr.Value)
 }
 
 // createFreeBuiltin handles the free(x) builtin. Rejects freeing

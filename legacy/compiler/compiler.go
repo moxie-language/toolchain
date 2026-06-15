@@ -1610,12 +1610,14 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 	case *ssa.DebugRef:
 		// ignore
 	case *ssa.Defer:
+		b.deallocCheckCall(&instr.Call)
 		b.createDefer(instr)
 	case *ssa.Go:
 		// Moxie: go keyword banned in user code. Runtime/internal exempt.
 		if isUserPackage(b.fn.Pkg) {
 			b.addError(instr.Pos(), "moxie: the go keyword is not supported (there are no goroutines)")
 		} else {
+			b.deallocCheckCall(&instr.Call)
 			b.createGo(instr)
 		}
 	case *ssa.If:
@@ -1628,6 +1630,7 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		blockJump := b.blockInfo[instr.Block().Succs[0].Index].entry
 		b.CreateBr(blockJump)
 	case *ssa.MapUpdate:
+		b.deallocCheckMapUpdate(instr)
 		m := b.getValue(instr.Map, getPos(instr))
 		key := b.getValue(instr.Key, getPos(instr))
 		value := b.getValue(instr.Value, getPos(instr))
@@ -2264,6 +2267,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		y := b.getValue(expr.Y, getPos(expr))
 		return b.createBinOp(expr.Op, expr.X.Type(), expr.Y.Type(), x, y, expr.Pos())
 	case *ssa.Call:
+		b.deallocCheckCall(expr.Common())
 		return b.createFunctionCall(expr.Common())
 	case *ssa.ChangeInterface:
 		// Do not change between interface types: always use the underlying
