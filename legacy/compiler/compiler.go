@@ -205,17 +205,21 @@ type builder struct {
 	// setupNativeSpawnTargetChannels (child).
 	pipeChannels map[ssa.Value]bool
 
-	// scopeFreeEntries tracks each heap allocation's entry-block alloca and
-	// compile-time scope assignment. Populated by scopeTrackAlloc.
-	scopeFreeEntries map[ssa.Value]*scopeFreeEntry
+	// scopeEntries tracks each heap allocation's entry-block alloca and
+	// compile-time scope ownership. Populated by scopeTrackAlloc.
+	scopeEntries map[ssa.Value]*scopeEntry
 
-	// scopeFreeLoopBlocks is the set of basic block indices that are loop
-	// back-edge sources, used to identify loop-body allocations.
-	scopeFreeLoopBlocks map[int]bool
+	// scopeLoops maps loop header block index to the set of block indices
+	// in that natural loop. Used for loop-exit free emission.
+	scopeLoops map[int]map[int]bool
 
-	// scopeFreeAssignments is the pre-computed scope assignment for each
-	// heap allocation (scopeLocal, scopePromoted, scopeEscaped).
-	scopeFreeAssignments map[ssa.Value]int
+	// scopeAssignments is the pre-computed scope ownership for each
+	// heap allocation (block index + escaped flag).
+	scopeAssignments map[ssa.Value]*scopeOwnership
+
+	// scopeEdgeSplits maps (src block, dst block) index pairs to LLVM
+	// cleanup blocks inserted for scope-exit frees on If edges.
+	scopeEdgeSplits map[[2]int]llvm.BasicBlock
 }
 
 func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *builder {
@@ -1488,7 +1492,11 @@ func (b *builder) createFunction() {
 		block := phi.ssa.Block()
 		for i, edge := range phi.ssa.Edges {
 			llvmVal := b.getValue(edge, getPos(phi.ssa))
-			llvmBlock := b.blockInfo[block.Preds[i].Index].exit
+			predIdx := block.Preds[i].Index
+			llvmBlock := b.blockInfo[predIdx].exit
+			if split, ok := b.scopeEdgeSplits[[2]int{predIdx, block.Index}]; ok {
+				llvmBlock = split
+			}
 			phi.llvm.AddIncoming([]llvm.Value{llvmVal}, []llvm.BasicBlock{llvmBlock})
 		}
 	}
@@ -1590,13 +1598,10 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		}
 	case *ssa.If:
 		cond := b.getValue(instr.Cond, getPos(instr))
-		b.scopeEmitBlockFree(instr.Block())
-		block := instr.Block()
-		blockThen := b.blockInfo[block.Succs[0].Index].entry
-		blockElse := b.blockInfo[block.Succs[1].Index].entry
+		blockThen, blockElse := b.scopeEmitIfFree(instr.Block())
 		b.CreateCondBr(cond, blockThen, blockElse)
 	case *ssa.Jump:
-		b.scopeEmitBlockFree(instr.Block())
+		b.scopeEmitJumpFree(instr.Block())
 		blockJump := b.blockInfo[instr.Block().Succs[0].Index].entry
 		b.CreateBr(blockJump)
 	case *ssa.MapUpdate:
@@ -1613,19 +1618,23 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		if b.hasDeferFrame() {
 			b.createRuntimeCall("destroyDeferFrame", []llvm.Value{b.deferFrame}, "")
 		}
-		b.scopeEmitBlockFree(instr.Block())
-		b.scopeEmitReturnFree()
-		if len(instr.Results) == 0 {
-			b.CreateRetVoid()
-		} else if len(instr.Results) == 1 {
-			b.CreateRet(b.getValue(instr.Results[0], getPos(instr)))
-		} else {
-			// Multiple return values. Put them all in a struct.
-			retVal := llvm.ConstNull(b.llvmFn.GlobalValueType().ReturnType())
+		// Load return values BEFORE freeing scope allocations.
+		// A non-escaped alloc that IS returned would be freed
+		// before the ret instruction reads it.
+		var retVal llvm.Value
+		if len(instr.Results) == 1 {
+			retVal = b.getValue(instr.Results[0], getPos(instr))
+		} else if len(instr.Results) > 1 {
+			retVal = llvm.ConstNull(b.llvmFn.GlobalValueType().ReturnType())
 			for i, result := range instr.Results {
 				val := b.getValue(result, getPos(instr))
 				retVal = b.CreateInsertValue(retVal, val, i, "")
 			}
+		}
+		b.scopeEmitReturnFree()
+		if len(instr.Results) == 0 {
+			b.CreateRetVoid()
+		} else {
 			b.CreateRet(retVal)
 		}
 	case *ssa.RunDefers:

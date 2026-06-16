@@ -76,6 +76,60 @@ func packageImportsUnsafe(pkg *ssa.Package) bool {
 	return false
 }
 
+// isInitFunc returns true if fn is an init function (package init, synthetic
+// init, or the init$N variants created by the Go SSA builder).
+func isInitFunc(fn *ssa.Function) bool {
+	name := fn.Name()
+	if name == "init" {
+		return true
+	}
+	// Synthetic init functions: init$guard, init$N, etc.
+	if len(name) > 4 && name[:4] == "init" && (name[4] == '$' || name[4] == '#') {
+		return true
+	}
+	// Package-level var initializer (synthetic).
+	if fn.Synthetic != "" && fn.Name() == "init" {
+		return true
+	}
+	return false
+}
+
+// isGlobalStore returns true if addr is a global variable or a field/index
+// of a global. Stores to these are banned outside init().
+func isGlobalStore(addr ssa.Value) bool {
+	switch v := addr.(type) {
+	case *ssa.Global:
+		return true
+	case *ssa.FieldAddr:
+		return isGlobalStore(v.X)
+	case *ssa.IndexAddr:
+		return isGlobalStore(v.X)
+	case *ssa.UnOp:
+		// *globalPtr - deref of a global pointer
+		if v.Op == token.MUL {
+			return isGlobalStore(v.X)
+		}
+	}
+	return false
+}
+
+// globalName extracts the global variable name from an address, if any.
+func globalName(addr ssa.Value) string {
+	switch v := addr.(type) {
+	case *ssa.Global:
+		return v.Name()
+	case *ssa.FieldAddr:
+		return globalName(v.X)
+	case *ssa.IndexAddr:
+		return globalName(v.X)
+	case *ssa.UnOp:
+		if v.Op == token.MUL {
+			return globalName(v.X)
+		}
+	}
+	return ""
+}
+
 // checkMoxieRestrictions scans a function for uses of restricted features.
 // Only applies to user code — runtime packages are exempt.
 func (b *builder) checkMoxieRestrictions() {
@@ -132,6 +186,19 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 			if basic, ok := v.X.Type().Underlying().(*types.Basic); ok {
 				if basic.Info()&types.IsString != 0 {
 					b.addError(v.Pos(), "moxie: '+' is not allowed for text concatenation: use | operator")
+				}
+			}
+		}
+
+	case *ssa.Store:
+		// Package globals are immutable after init(). Reject any Store
+		// to a global (or into a global's fields) outside init functions.
+		if isUserPackage(b.fn.Pkg) && !isInitFunc(b.fn) {
+			if isGlobalStore(v.Addr) {
+				if g := globalName(v.Addr); g != "" {
+					b.addError(v.Pos(), "moxie: assignment to package-level var '"+g+"' outside init() is not allowed")
+				} else {
+					b.addError(v.Pos(), "moxie: assignment to package-level var outside init() is not allowed")
 				}
 			}
 		}

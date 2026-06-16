@@ -330,11 +330,27 @@ func typeCheckPkg(src []byte, name string) (pkg *TCPackage, file *syntax.File) {
 }
 
 func releasePerPkgState() {
+	free(parseErrors)
 	parseErrors = nil
+	free(compileErrors)
 	compileErrors = nil
+	free(constValMap)
 	constValMap = nil
 	syntax.CompileExportMap = nil
+	free(tcPkgSrc)
 	tcPkgSrc = nil
+	free(embedVars)
+	embedVars = nil
+	free(linknameMap)
+	linknameMap = nil
+	free(wasmImportMap)
+	wasmImportMap = nil
+	free(concatSourceMap)
+	concatSourceMap = nil
+	free(genericPkgLocalDecls)
+	genericPkgLocalDecls = nil
+	free(genericPkgScopes)
+	genericPkgScopes = nil
 }
 
 func ScanGenericDecls(src []byte, name string) {
@@ -1230,8 +1246,11 @@ func tcResolveFuncInlineWithRecv(ft *syntax.FuncType, recv *syntax.Field, scope 
 	results := tcResolveFieldList(ft.ResultList, scope)
 	variadic := false
 	if len(ft.ParamList) > 0 {
-		if _, ok := ft.ParamList[len(ft.ParamList)-1].Type.(*syntax.DotsType); ok {
-			variadic = true
+		lastP := ft.ParamList[len(ft.ParamList)-1]
+		if lastP.Type != nil {
+			if _, ok := lastP.Type.(*syntax.DotsType); ok {
+				variadic = true
+			}
 		}
 	}
 	return NewSignature(recvVar, params, results, variadic)
@@ -1254,11 +1273,14 @@ func tcResolveFieldList(fields []*syntax.Field, scope *Scope) (t *Tuple) {
 }
 
 func tcResolveFuncInline(ft *syntax.FuncType, scope *Scope) (s *Signature) {
-	if ft == nil {
+	if ft == nil || scope == nil {
 		return nil
 	}
 	var params []*TCVar
 	for _, p := range ft.ParamList {
+		if p == nil {
+			continue
+		}
 		typ := tcResolveNameInline(p.Type, scope)
 		pname := ""
 		if p.Name != nil {
@@ -1268,9 +1290,11 @@ func tcResolveFuncInline(ft *syntax.FuncType, scope *Scope) (s *Signature) {
 	}
 	var results []*TCVar
 	for _, r := range ft.ResultList {
+		if r == nil {
+			continue
+		}
 		typ := tcResolveNameInline(r.Type, scope)
-		if typ == nil {
-			_ = "?"
+		if typ == nil && r.Type != nil {
 			if _, ok1 := r.Type.(*syntax.Name); ok1 {
 			} else if op, ok2 := r.Type.(*syntax.Operation); ok2 && op.Op == token.Mul && op.Y == nil {
 				if _, ok3 := op.X.(*syntax.Name); ok3 {
@@ -1288,8 +1312,11 @@ func tcResolveFuncInline(ft *syntax.FuncType, scope *Scope) (s *Signature) {
 	}
 	variadic := false
 	if len(ft.ParamList) > 0 {
-		if _, ok := ft.ParamList[len(ft.ParamList)-1].Type.(*syntax.DotsType); ok {
-			variadic = true
+		lastP := ft.ParamList[len(ft.ParamList)-1]
+		if lastP.Type != nil {
+			if _, ok := lastP.Type.(*syntax.DotsType); ok {
+				variadic = true
+			}
 		}
 	}
 	var pTuple *Tuple

@@ -107,7 +107,8 @@ var (
 
 	// Constant scalars
 	symConstInt          uintptr
-	symConstFloat        uintptr
+	symConstFloat        uintptr // broken: purego can't pass double in XMM
+	symConstFloatOfStr   uintptr
 	symConstNull         uintptr
 	symConstAllOnes      uintptr
 	symGetUndef          uintptr
@@ -525,7 +526,8 @@ func registerAll() {
 
 	// Constant scalars
 	symConstInt = mustSym(libLLVM, "LLVMConstInt")
-	symConstFloat = mustSym(libLLVM, "LLVMConstReal")
+	symConstFloat = mustSym(libLLVM, "LLVMConstReal") // broken
+	symConstFloatOfStr = mustSym(libLLVM, "LLVMConstRealOfStringAndSize")
 	symConstNull = mustSym(libLLVM, "LLVMConstNull")
 	symConstAllOnes = mustSym(libLLVM, "LLVMConstAllOnes")
 	symGetUndef = mustSym(libLLVM, "LLVMGetUndef")
@@ -1274,7 +1276,16 @@ func ConstInt(t Type, n uint64, signExtend bool) Value {
 }
 
 func ConstFloat(t Type, n float64) Value {
-	r, _, _ := purego.SyscallN(symConstFloat, t.C, *(*uintptr)(unsafe.Pointer(&n)))
+	// LLVMConstReal expects double in XMM0 (System V ABI), but
+	// purego.SyscallN maps a2->f2 (XMM1), not a2->f1 (XMM0).
+	// Use LLVMConstRealOfStringAndSize (all-integer args) with a
+	// full-precision decimal string that LLVM parses correctly.
+	s := fmt.Sprintf("%.17e", n)
+	var buf [32]byte
+	copy(buf[:], s)
+	buf[len(s)] = 0
+	r, _, _ := purego.SyscallN(symConstFloatOfStr, t.C,
+		uintptr(unsafe.Pointer(&buf[0])), uintptr(len(s)))
 	return Value{r}
 }
 

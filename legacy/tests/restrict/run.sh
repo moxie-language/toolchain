@@ -122,6 +122,7 @@ run_fail_test "$TESTDIR/fail_use_after_free.mx"    "use after free"
 run_fail_test "$TESTDIR/fail_init_in_main.mx"      "init.*not allowed.*main"
 run_fail_test "$TESTDIR/fail_init_select.mx"        "select.*not allowed.*init"
 run_fail_test "$TESTDIR/fail_init_spawn.mx"         "spawn.*not allowed.*init"
+run_fail_test "$TESTDIR/fail_global_mutate.mx"      "package-level var.*outside init"
 
 echo ""
 echo "=== Results: $pass passed, $fail failed ==="
