@@ -57,12 +57,10 @@ type Config struct {
 	MXHPackages map[string]bool
 
 	// Various compiler options that determine how code is generated.
-	GC                 string
 	Scheduler          string
 	AutomaticStackSize bool
 	DefaultStackSize   uint64
 	MaxStackAlloc      uint64
-	NeedsStackObjects  bool
 	Debug              bool // Whether to emit debug information in the LLVM module.
 	Nobounds           bool // Whether to skip bounds checks
 	PanicStrategy      string
@@ -178,7 +176,6 @@ type builder struct {
 	phis              []phiNode
 	deferPtr          llvm.Value
 	deferFrame        llvm.Value
-	stackChainAlloca  llvm.Value
 	landingpad        llvm.BasicBlock
 	difunc            llvm.Metadata
 	dilocals          map[*types.Var]llvm.Metadata
@@ -208,14 +205,17 @@ type builder struct {
 	// setupNativeSpawnTargetChannels (child).
 	pipeChannels map[ssa.Value]bool
 
-	// deallocHead is the stack-allocated **deallocEntry for this function's
-	// shadow list. Non-nil only when the dealloc GC is active and the
-	// function has heap allocations.
-	deallocHead llvm.Value
+	// deallocEntries tracks each heap allocation's entry-block alloca and
+	// compile-time scope assignment. Populated by scopePushAlloc.
+	deallocEntries map[ssa.Value]*deallocEntry
 
-	// deallocAllocs tracks SSA Alloc values that were pushed onto the shadow
-	// list, so we can emit deallocEscape before returning them.
-	deallocAllocs map[ssa.Value]bool
+	// deallocLoopBlocks is the set of basic block indices that are loop
+	// back-edge sources, used to identify loop-body allocations.
+	deallocLoopBlocks map[int]bool
+
+	// deallocAssignments is the pre-computed scope assignment for each
+	// heap allocation (scopeLocal, scopePromoted, scopeEscaped).
+	deallocAssignments map[ssa.Value]int
 }
 
 func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *builder {
@@ -360,10 +360,6 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 	// Predeclare the runtime.alloc function, which is used by the wordpack
 	// functionality.
 	c.getFunction(c.program.ImportedPackage("runtime").Members["alloc"].(*ssa.Function))
-	if c.NeedsStackObjects {
-		// Predeclare trackPointer, which is used everywhere we use runtime.alloc.
-		c.getFunction(c.program.ImportedPackage("runtime").Members["trackPointer"].(*ssa.Function))
-	}
 
 	// Compile all functions, methods, and global variables in this package.
 	irbuilder := c.ctx.NewBuilder()
@@ -1413,17 +1409,8 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		b.deferInitFunc()
 	}
 
-	if b.NeedsStackObjects {
-		// Create a dummy alloca that will be used in runtime.trackPointer.
-		// It is necessary to pass a dummy alloca to runtime.trackPointer
-		// because runtime.trackPointer is replaced by an alloca store.
-		b.stackChainAlloca = b.CreateAlloca(b.ctx.Int8Type(), "stackalloc")
-	}
-
 	if b.usesDealloc() {
-		b.deallocAllocs = make(map[ssa.Value]bool)
-		b.deallocHead = llvmutil.CreateEntryBlockAlloca(b.Builder, b.dataPtrType, "dealloc.head")
-		b.CreateStore(llvm.ConstNull(b.dataPtrType), b.deallocHead)
+		b.scopeInit()
 	}
 }
 
@@ -1444,6 +1431,7 @@ func (b *builder) createFunction() {
 		b.currentBlock = block
 		b.currentBlockInfo = &b.blockInfo[block.Index]
 		b.SetInsertPointAtEnd(b.currentBlockInfo.entry)
+		scopeSaved := false
 		for _, instr := range block.Instrs {
 			if instr, ok := instr.(*ssa.DebugRef); ok {
 				if !b.Debug {
@@ -1469,6 +1457,14 @@ func (b *builder) createFunction() {
 				}, b.GetInsertBlock())
 				continue
 			}
+			// Emit scope save after all phi nodes (LLVM requires
+			// phis grouped at block top, no intervening instructions).
+			if !scopeSaved {
+				if _, isPhi := instr.(*ssa.Phi); !isPhi {
+					b.scopeEmitBlockSave(block)
+					scopeSaved = true
+				}
+			}
 			if b.DumpSSA {
 				if val, ok := instr.(ssa.Value); ok && val.Name() != "" {
 					fmt.Printf("\t%s = %s\n", val.Name(), val.String())
@@ -1477,6 +1473,9 @@ func (b *builder) createFunction() {
 				}
 			}
 			b.createInstruction(instr)
+		}
+		if !scopeSaved {
+			b.scopeEmitBlockSave(block)
 		}
 		if b.fn.Name() == "init" && len(block.Instrs) == 0 {
 			b.CreateRetVoid()
@@ -1505,18 +1504,6 @@ func (b *builder) createFunction() {
 			llvmVal := b.getValue(edge, getPos(phi.ssa))
 			llvmBlock := b.blockInfo[block.Preds[i].Index].exit
 			phi.llvm.AddIncoming([]llvm.Value{llvmVal}, []llvm.BasicBlock{llvmBlock})
-		}
-	}
-
-	if b.NeedsStackObjects {
-		// Track phi nodes.
-		for _, phi := range b.phis {
-			insertPoint := llvm.NextInstruction(phi.llvm)
-			for !insertPoint.IsAPHINode().IsNil() {
-				insertPoint = llvm.NextInstruction(insertPoint)
-			}
-			b.SetInsertPointBefore(insertPoint)
-			b.trackValue(phi.llvm)
 		}
 	}
 
@@ -1603,34 +1590,30 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 			b.locals[instr] = llvm.Undef(b.getLLVMType(instr.Type()))
 		} else {
 			b.locals[instr] = value
-			if len(*instr.Referrers()) != 0 && b.NeedsStackObjects {
-				b.trackExpr(instr, value)
-			}
 		}
 	case *ssa.DebugRef:
 		// ignore
 	case *ssa.Defer:
-		b.deallocCheckCall(&instr.Call)
 		b.createDefer(instr)
 	case *ssa.Go:
 		// Moxie: go keyword banned in user code. Runtime/internal exempt.
 		if isUserPackage(b.fn.Pkg) {
 			b.addError(instr.Pos(), "moxie: the go keyword is not supported (there are no goroutines)")
 		} else {
-			b.deallocCheckCall(&instr.Call)
 			b.createGo(instr)
 		}
 	case *ssa.If:
 		cond := b.getValue(instr.Cond, getPos(instr))
+		b.scopeEmitBlockFree(instr.Block())
 		block := instr.Block()
 		blockThen := b.blockInfo[block.Succs[0].Index].entry
 		blockElse := b.blockInfo[block.Succs[1].Index].entry
 		b.CreateCondBr(cond, blockThen, blockElse)
 	case *ssa.Jump:
+		b.scopeEmitBlockFree(instr.Block())
 		blockJump := b.blockInfo[instr.Block().Succs[0].Index].entry
 		b.CreateBr(blockJump)
 	case *ssa.MapUpdate:
-		b.deallocCheckMapUpdate(instr)
 		m := b.getValue(instr.Map, getPos(instr))
 		key := b.getValue(instr.Key, getPos(instr))
 		value := b.getValue(instr.Value, getPos(instr))
@@ -1644,8 +1627,8 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		if b.hasDeferFrame() {
 			b.createRuntimeCall("destroyDeferFrame", []llvm.Value{b.deferFrame}, "")
 		}
-		b.deallocCheckReturn(instr)
-		b.deallocEmitFree()
+		b.scopeEmitBlockFree(instr.Block())
+		b.scopeEmitFreeAll()
 		if len(instr.Results) == 0 {
 			b.CreateRetVoid()
 		} else if len(instr.Results) == 1 {
@@ -1679,7 +1662,6 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 			return
 		}
 		b.CreateStore(llvmVal, llvmAddr)
-		b.deallocCheckStore(instr)
 	default:
 		b.addError(instr.Pos(), "unknown instruction: "+instr.String())
 	}
@@ -2253,7 +2235,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			if b.PrintAllocs != nil {
 				b.emitLogAlloc(expr.Pos())
 			}
-			b.deallocPushAlloc(buf, expr)
+			b.scopePushAlloc(buf, expr)
 			return buf, nil
 		} else {
 			buf := llvmutil.CreateEntryBlockAlloca(b.Builder, typ, expr.Comment)
@@ -2267,8 +2249,11 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		y := b.getValue(expr.Y, getPos(expr))
 		return b.createBinOp(expr.Op, expr.X.Type(), expr.Y.Type(), x, y, expr.Pos())
 	case *ssa.Call:
-		b.deallocCheckCall(expr.Common())
-		return b.createFunctionCall(expr.Common())
+		val, err := b.createFunctionCall(expr.Common())
+		if err == nil && b.usesDealloc() {
+			b.scopePushCallResult(val, expr)
+		}
+		return val, err
 	case *ssa.ChangeInterface:
 		// Do not change between interface types: always use the underlying
 		// (concrete) type in the type number of the interface. Every method
@@ -2506,6 +2491,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		if b.PrintAllocs != nil {
 			b.emitLogAlloc(expr.Pos())
 		}
+		b.scopePushAlloc(slicePtr, expr)
 
 		// Extend or truncate if necessary. This is safe as we've already done
 		// the bounds check.

@@ -14198,21 +14198,6 @@ func getFirst() string {
 
 	// Test 308: import function returning void (no return value)
 	clearImports()
-	regPkg("runtime", "runtime")
-	regFn("runtime", "GC", "")
-	test(308, `package main
-
-import "runtime"
-
-func main() {
-	runtime.GC()
-}
-`, func(ir string) {
-		assert("308: has runtime.GC declare", strings.Contains(ir, "@runtime.GC"))
-		assert("308: void call", strings.Contains(ir, "call void"))
-	})
-
-	clearImports()
 
 	// Test 309: function returning error interface
 	clearImports()

@@ -9,7 +9,6 @@ import (
 
 var (
 	validBuildModeOptions     = []string{"default", "c-shared"}
-	validGCOptions            = []string{"dealloc"}
 	validSchedulerOptions     = []string{"none", "tasks"}
 	validPanicStrategyOptions = []string{"print", "trap"}
 	validOptOptions           = []string{"none", "0", "1", "2", "s", "z"}
@@ -23,7 +22,6 @@ type Options struct {
 	Target        string
 	BuildMode     string
 	Opt           string
-	GC            string
 	PanicStrategy string
 	Scheduler     string
 	StackSize     uint64
@@ -52,10 +50,6 @@ func (o *Options) Verify() error {
 	if o.BuildMode != "" && !isInArray(validBuildModeOptions, o.BuildMode) {
 		return fmt.Errorf(`invalid buildmode option '%s': valid values are %s`,
 			o.BuildMode, strings.Join(validBuildModeOptions, ", "))
-	}
-	if o.GC != "" && !isInArray(validGCOptions, o.GC) {
-		return fmt.Errorf(`invalid gc option '%s': valid values are %s`,
-			o.GC, strings.Join(validGCOptions, ", "))
 	}
 	if o.Scheduler != "" && !isInArray(validSchedulerOptions, o.Scheduler) {
 		return fmt.Errorf(`invalid scheduler option '%s': valid values are %s`,

@@ -117,7 +117,6 @@ func compilePackageIR(wrapDir, targetPkg string) ([]byte, error) {
 		Scheduler:        config.Scheduler(),
 		DefaultStackSize: config.StackSize(),
 		MaxStackAlloc:    config.MaxStackAlloc(),
-		NeedsStackObjects: config.NeedsStackObjects(),
 		Debug:            true,
 		PanicStrategy:    config.PanicStrategy(),
 	}

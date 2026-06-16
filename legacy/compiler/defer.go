@@ -490,9 +490,6 @@ func (b *builder) createDefer(instr *ssa.Defer) {
 		nilPtr := llvm.ConstNull(b.dataPtrType)
 		alloca = b.createRuntimeCall("alloc", []llvm.Value{sizeValue, nilPtr}, "defer.alloc.call")
 	}
-	if b.NeedsStackObjects {
-		b.trackPointer(alloca)
-	}
 	b.CreateStore(deferredCall, alloca)
 
 	// Push it on top of the linked list by replacing deferPtr.

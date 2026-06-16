@@ -185,12 +185,10 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		SizeLevel:       sizeLevel,
 		MoxieVersion:   goenv.Version(),
 
-		GC:                 config.GC(),
 		Scheduler:          config.Scheduler(),
 		AutomaticStackSize: false,
 		DefaultStackSize:   config.StackSize(),
 		MaxStackAlloc:      config.MaxStackAlloc(),
-		NeedsStackObjects:  config.NeedsStackObjects(),
 		Debug:              !config.Options.SkipDWARF, // emit DWARF except when -internal-nodwarf is passed
 		Nobounds:           config.Options.Nobounds,
 		PanicStrategy:      config.PanicStrategy(),

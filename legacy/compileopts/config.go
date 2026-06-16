@@ -60,7 +60,7 @@ func (c *Config) BuildTags() []string {
 		"purego",
 		"osusergo",
 		"math_big_pure_go",
-		"gc."+c.GC(),
+		"gc.dealloc",
 		"scheduler."+c.Scheduler(),
 		"moxie.unicore", // always single-core cooperative
 	)
@@ -69,14 +69,6 @@ func (c *Config) BuildTags() []string {
 	}
 	tags = append(tags, c.Options.Tags...)
 	return tags
-}
-
-func (c *Config) GC() string {
-	return "dealloc"
-}
-
-func (c *Config) NeedsStackObjects() bool {
-	return false
 }
 
 // Scheduler returns the scheduler implementation. Moxie uses "none" (no goroutines).

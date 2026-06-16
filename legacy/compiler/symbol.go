@@ -197,11 +197,6 @@ func (c *compilerContext) getFunction(fn *ssa.Function) (llvm.Type, llvm.Value) 
 			llvmFn.AddAttributeAtIndex(1, c.ctx.CreateEnumAttribute(nocaptureKind, 0))
 		}
 		llvmFn.AddAttributeAtIndex(1, c.ctx.CreateEnumAttribute(llvm.AttributeKindID("readonly"), 0))
-	case "runtime.trackPointer":
-		if nocaptureKind != 0 {
-			llvmFn.AddAttributeAtIndex(1, c.ctx.CreateEnumAttribute(nocaptureKind, 0))
-		}
-		llvmFn.AddAttributeAtIndex(1, c.ctx.CreateEnumAttribute(llvm.AttributeKindID("readonly"), 0))
 	case "__mulsi3", "__divmodsi4", "__udivmodsi4":
 		if strings.Split(c.Triple, "-")[0] == "avr" {
 			// These functions are compiler-rt/libgcc functions that are

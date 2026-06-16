@@ -233,13 +233,6 @@ func (r *runner) run(fn *function, params []value, parentMem *memoryView, indent
 			}
 			callFn := r.getFunction(fnPtr.llvmValue(&mem))
 			switch {
-			case callFn.name == "runtime.trackPointer":
-				// Allocas and such are created as globals, so don't need a
-				// runtime.trackPointer.
-				// Unless the object is allocated at runtime for example, in
-				// which case this call won't even get to this point but will
-				// already be emitted in initAll.
-				continue
 			case strings.HasPrefix(callFn.name, "runtime.print") || callFn.name == "runtime._panic" || callFn.name == "runtime.hashmapGet" || callFn.name == "runtime.hashmapInterfaceHash" ||
 				callFn.name == "os.runtime_args" || callFn.name == "internal/task.start" || callFn.name == "internal/task.Current" ||
 				callFn.name == "time.startTimer" || callFn.name == "time.stopTimer" || callFn.name == "time.resetTimer":

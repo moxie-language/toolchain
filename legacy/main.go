@@ -527,7 +527,6 @@ func main() {
 		BuildMode:     *buildMode,
 		StackSize:     *stackSize,
 		Opt:           *opt,
-		GC:            "dealloc",
 		PanicStrategy: *panicStrategy,
 		Scheduler:     *scheduler,
 		Work:          *work,
@@ -704,7 +703,6 @@ func main() {
 				GOOS       string                  `json:"goos"`
 				GOARCH     string                  `json:"goarch"`
 				BuildTags  []string                `json:"build_tags"`
-				GC         string                  `json:"garbage_collector"`
 				Scheduler  string                  `json:"scheduler"`
 				LLVMTriple string                  `json:"llvm_triple"`
 			}{
@@ -712,7 +710,6 @@ func main() {
 				GOOS:       config.GOOS(),
 				GOARCH:     config.GOARCH(),
 				BuildTags:  config.BuildTags(),
-				GC:         config.GC(),
 				Scheduler:  config.Scheduler(),
 				LLVMTriple: config.Triple(),
 			}, "", "  ")
@@ -722,7 +719,6 @@ func main() {
 			fmt.Printf("GOOS:              %s\n", config.GOOS())
 			fmt.Printf("GOARCH:            %s\n", config.GOARCH())
 			fmt.Printf("build tags:        %s\n", strings.Join(config.BuildTags(), " "))
-			fmt.Printf("garbage collector: %s\n", config.GC())
 			fmt.Printf("scheduler:         %s\n", config.Scheduler())
 		}
 	case "list":

@@ -16,7 +16,6 @@ type TargetSpec struct {
 	GOARCH           string   `json:"goarch,omitempty"`
 	BuildTags        []string `json:"build-tags,omitempty"`
 	BuildMode        string   `json:"buildmode,omitempty"`
-	GC               string   `json:"gc,omitempty"`
 	Scheduler        string   `json:"scheduler,omitempty"`
 	Linker           string   `json:"linker,omitempty"`
 	RTLib            string   `json:"rtlib,omitempty"`
@@ -90,7 +89,6 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 	llvmvendor := "unknown"
 	switch options.GOOS {
 	case "darwin":
-		spec.GC = "dealloc"
 		platformVersion := "10.12.0"
 		if options.GOARCH == "arm64" {
 			platformVersion = "11.0.0"
@@ -114,7 +112,6 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"src/runtime/spawn_unix.c",
 			"src/runtime/futex_darwin.c")
 	case "linux":
-		spec.GC = "dealloc"
 		spec.Scheduler = "none" // moxie: no goroutines
 		spec.Linker = "ld.lld"
 		spec.RTLib = "compiler-rt"
@@ -131,7 +128,6 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"src/runtime/futex_linux.c",
 			"src/runtime/ffi_linux.c")
 	case "js":
-		spec.GC = "dealloc"
 		spec.Scheduler = "none" // moxie: no goroutines
 		spec.Linker = "wasm-ld"
 		spec.BuildTags = append(spec.BuildTags, "moxie.wasm", "moxie.unicore")
@@ -142,11 +138,6 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 		)
 	default:
 		return nil, fmt.Errorf("unsupported GOOS=%s (moxie supports linux, darwin, js)", options.GOOS)
-	}
-
-	// CLI -gc flag overrides target default before we add GC-specific files.
-	if options.GC != "" {
-		spec.GC = options.GC
 	}
 
 	// Target triple: arch-vendor-os[-environment]

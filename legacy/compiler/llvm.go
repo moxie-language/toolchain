@@ -136,10 +136,6 @@ func (b *builder) emitPointerPack(values []llvm.Value) llvm.Value {
 			llvm.Undef(b.dataPtrType), // unused context parameter
 		}, "")
 		packedAlloc.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(align)))
-		if b.NeedsStackObjects {
-			b.trackPointer(packedAlloc)
-		}
-
 		// Store all values in the heap pointer.
 		for i, value := range values {
 			indices := []llvm.Value{

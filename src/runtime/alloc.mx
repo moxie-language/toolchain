@@ -1,5 +1,5 @@
-// Free-list allocator with block-scoped deallocation. No garbage collector.
-// Freed blocks are reused. Scope tracking via blockHeader.next chain.
+// Free-list allocator with block-scoped deallocation.
+// Freed blocks are reused.
 
 package runtime
 
@@ -10,9 +10,9 @@ import (
 const needsStaticHeap = true
 
 var heapptr uintptr
-var gcTotalAlloc uint64
-var gcMallocs uint64
-var gcFrees uint64
+var totalAlloc uint64
+var mallocs uint64
+var frees uint64
 
 // Free-list node. Stored in-place in freed blocks (minimum block size = 16 bytes).
 type freeNode struct {
@@ -26,11 +26,10 @@ const nSizeClasses = 10
 
 var freeLists [nSizeClasses]*freeNode
 
-// Block header prepended to every allocation. 16 bytes to maintain
-// alignment. The next field doubles as the scope chain link.
+// Block header prepended to every allocation. 16 bytes to maintain alignment.
 type blockHeader struct {
-	size uintptr           // allocation size; high bit = escaped flag
-	next unsafe.Pointer    // next allocation in scope chain
+	size uintptr
+	next unsafe.Pointer
 }
 
 const headerSize = 16
@@ -87,7 +86,7 @@ func classSize(class int32) uintptr {
 }
 
 //:noinline
-func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
+func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 	if size == 0 {
 		size = 1
 	}
@@ -105,8 +104,8 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 			hdr.next = nil
 			ptr := unsafe.Pointer(uintptr(unsafe.Pointer(hdr)) + uintptr(headerSize))
 			memzero(ptr, size)
-			gcMallocs++
-			gcTotalAlloc += uint64(size)
+			mallocs++
+			totalAlloc += uint64(size)
 			return ptr
 		}
 	} else if node := freeLists[9]; node != nil && node.size >= totalSize {
@@ -116,22 +115,27 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 		hdr.next = nil
 		ptr := unsafe.Pointer(uintptr(unsafe.Pointer(hdr)) + uintptr(headerSize))
 		memzero(ptr, size)
-		gcMallocs++
-		gcTotalAlloc += uint64(size)
+		mallocs++
+		totalAlloc += uint64(size)
 		return ptr
 	}
 
-	// Bump allocate.
+	// Bump allocate. Round up to class size so freed blocks can serve
+	// any allocation within their size class without overflow.
+	bumpSize := totalSize
+	if class < 9 {
+		bumpSize = classSize(class) + uintptr(headerSize)
+	}
 	addr := heapptr
-	heapptr += totalSize
+	heapptr += bumpSize
 	for heapptr >= heapEnd {
 		if growHeap() {
 			continue
 		}
 		runtimePanic("out of memory")
 	}
-	gcMallocs++
-	gcTotalAlloc += uint64(size)
+	mallocs++
+	totalAlloc += uint64(size)
 
 	hdr := (*blockHeader)(unsafe.Pointer(addr))
 	hdr.size = size
@@ -142,6 +146,10 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 
 func free(ptr unsafe.Pointer) {
 	if ptr == nil {
+		return
+	}
+	p := uintptr(ptr)
+	if p < heapStart || p >= heapptr {
 		return
 	}
 	hdr := (*blockHeader)(unsafe.Add(ptr, -int32(headerSize)))
@@ -161,7 +169,7 @@ func free(ptr unsafe.Pointer) {
 		node.next = freeLists[9]
 		freeLists[9] = node
 	}
-	gcFrees++
+	frees++
 }
 
 func realloc(ptr unsafe.Pointer, size uintptr) unsafe.Pointer {
@@ -176,36 +184,21 @@ func realloc(ptr unsafe.Pointer, size uintptr) unsafe.Pointer {
 		copySize = size
 	}
 	memcpy(newAlloc, ptr, copySize)
-	// old array not freed: scope system handles it when the slice
-	// variable's scope exits. freeing here causes UAF when other
-	// references to the old backing array still exist.
 	return newAlloc
-}
-
-func markRoots(start, end uintptr) {
-	// No GC scanning.
 }
 
 func ReadMemStats(m *MemStats) {
 	m.HeapIdle = 0
-	m.HeapInuse = gcTotalAlloc
+	m.HeapInuse = totalAlloc
 	m.HeapReleased = 0
 	m.HeapSys = m.HeapInuse + m.HeapIdle
 	m.GCSys = 0
-	m.TotalAlloc = gcTotalAlloc
-	m.Mallocs = gcMallocs
-	m.Frees = gcFrees
+	m.TotalAlloc = totalAlloc
+	m.Mallocs = mallocs
+	m.Frees = frees
 	m.Sys = uint64(heapEnd - heapStart)
-	m.HeapAlloc = gcTotalAlloc
+	m.HeapAlloc = totalAlloc
 	m.Alloc = m.HeapAlloc
-}
-
-func GC() {
-	// No-op: deterministic deallocation, no collector.
-}
-
-func SetFinalizer(obj interface{}, finalizer interface{}) {
-	// No-op.
 }
 
 func initHeap() {
@@ -217,6 +210,4 @@ func setHeapEnd(newHeapEnd uintptr) {
 }
 
 //:export moxie_scanstack
-func scanstack(sp uintptr) {
-	// No-op: no GC scanning.
-}
+func scanstack(sp uintptr) {}

@@ -39,9 +39,6 @@ func main() {
 	var targetFeatures func(int32, uintptr, int32) int32
 	purego.RegisterLibFunc(&targetFeatures, lib, "moxie_target_features")
 
-	var targetGC func(int32, uintptr, int32) int32
-	purego.RegisterLibFunc(&targetGC, lib, "moxie_target_gc")
-
 	var targetLinker func(int32, uintptr, int32) int32
 	purego.RegisterLibFunc(&targetLinker, lib, "moxie_target_linker")
 
@@ -82,7 +79,7 @@ func main() {
 	h := loadTarget(targetLoad, "linux", "amd64", 0)
 	expectS(targetTriple, h, "x86_64-unknown-linux-musleabihf", "linux/amd64 triple")
 	expectS(targetCPU, h, "x86-64", "linux/amd64 cpu")
-	expectS(targetGC, h, "dealloc", "linux/amd64 gc")
+
 	expectS(targetLinker, h, "ld.lld", "linux/amd64 linker")
 	expectS(targetLibc, h, "musl", "linux/amd64 libc")
 	expectI64(targetStackSize(h), 65536, "linux/amd64 stack_size")
@@ -93,7 +90,6 @@ func main() {
 	h = loadTarget(targetLoad, "darwin", "arm64", 0)
 	expectS(targetTriple, h, "arm64-apple-macosx11.0.0", "darwin/arm64 triple")
 	expectS(targetCPU, h, "generic", "darwin/arm64 cpu")
-	expectS(targetGC, h, "dealloc", "darwin/arm64 gc")
 	expectS(targetLibc, h, "darwin-libSystem", "darwin/arm64 libc")
 	targetFree(h)
 
@@ -101,7 +97,6 @@ func main() {
 	h = loadTarget(targetLoad, "js", "wasm", 0)
 	expectS(targetTriple, h, "wasm32-unknown-js", "js/wasm triple")
 	expectS(targetCPU, h, "generic", "js/wasm cpu")
-	expectS(targetGC, h, "leaking", "js/wasm gc")
 	expectS(targetLinker, h, "wasm-ld", "js/wasm linker")
 	targetFree(h)
 
