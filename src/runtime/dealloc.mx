@@ -2,87 +2,8 @@ package runtime
 
 import "unsafe"
 
-// scopePush links a heap allocation into the current scope chain.
-//
-//:noinline
-func scopePush(ptr unsafe.Pointer, head *unsafe.Pointer) {
-	if ptr == nil {
-		return
-	}
-	p := uintptr(ptr)
-	if p < heapStart || p >= heapptr {
-		return
-	}
-	hdr := (*blockHeader)(unsafe.Add(ptr, -int32(headerSize)))
-	hdr.next = *head
-	*head = ptr
-}
-
-// scopeFreeTo walks the scope chain from current back to saved,
-// freeing non-escaped allocations and relinking escaped ones into
-// the outer scope. Returns the new outer head.
-//
-// Uses origSaved for the termination check because escaped-relink
-// mutates saved, which would overshoot the save point and free
-// allocations from the outer scope.
-//
-//:noinline
-func scopeFreeTo(current unsafe.Pointer, saved unsafe.Pointer) unsafe.Pointer {
-	origSaved := saved
-	for current != origSaved && current != nil {
-		hdr := (*blockHeader)(unsafe.Add(current, -int32(headerSize)))
-		next := hdr.next
-		if hdr.size&escapedBit != 0 {
-			hdr.size = hdr.size & ^escapedBit
-			hdr.next = saved
-			saved = current
-		} else {
-			free(current)
-		}
-		current = next
-	}
-	return saved
-}
-
-// scopeRelocate marks an allocation as escaped from its current scope.
-//
-//:noinline
-func scopeRelocate(ptr unsafe.Pointer, head *unsafe.Pointer, savedHead *unsafe.Pointer) {
-	if ptr == nil {
-		return
-	}
-	p := uintptr(ptr)
-	if p < heapStart || p >= heapptr {
-		return
-	}
-	hdr := (*blockHeader)(unsafe.Add(ptr, -int32(headerSize)))
-	hdr.size = hdr.size | escapedBit
-}
-
-// Free explicitly deallocates a heap-allocated value.
+// Free explicitly frees a heap-allocated value.
+// The compiler emits calls to runtime.free at scope exit points.
 func Free(ptr unsafe.Pointer) {
 	free(ptr)
-}
-
-//:noinline
-func deallocPush(ptr unsafe.Pointer, head *unsafe.Pointer, entry *unsafe.Pointer) {
-	scopePush(ptr, head)
-}
-
-//:noinline
-func deallocFree(head unsafe.Pointer) {
-	scopeFreeTo(head, nil)
-}
-
-//:noinline
-func deallocEscape(ptr unsafe.Pointer, head unsafe.Pointer) {
-	if ptr == nil {
-		return
-	}
-	p := uintptr(ptr)
-	if p < heapStart || p >= heapptr {
-		return
-	}
-	hdr := (*blockHeader)(unsafe.Add(ptr, -int32(headerSize)))
-	hdr.size = hdr.size | escapedBit
 }
