@@ -6,7 +6,7 @@ package compiler
 // For each free() call, find all subsequent uses of the freed value
 // via dominator analysis and referrer walking.
 //
-// Phase 2: Implicit scope-exit tracking (dealloc mode).
+// Phase 2: Implicit scope-exit tracking.
 // Variables allocated in a scope are freed at scope exit unless escaped.
 // Uses after scope exit are flagged.
 
@@ -20,11 +20,9 @@ import (
 // checkUseAfterFree scans the function for uses of freed values.
 //
 // Phase 1: explicit free() tracking - implemented.
-// Phase 2: implicit scope-exit tracking - not applicable in the legacy
-// compiler because dealloc is function-granular (one shadow list per
-// function, freed at return). Inner-scope allocations survive until
-// function return. Per-scope dealloc tracking is implemented in the
-// stage4 compiler which has proper scopePush/scopeFreeTo per block.
+// Phase 2: implicit scope-exit tracking - legacy compiler is function-granular
+// (free at return). Inner-scope allocations survive until function return.
+// Stage4 compiler has per-block scope tracking.
 func (b *builder) checkUseAfterFree() {
 	if !isUserPackage(b.fn.Pkg) {
 		return

@@ -41,7 +41,7 @@ func patchIntTypes() {
 	*kindPtr = types.Uint32
 
 	// Add Moxie builtins to the universe scope.
-	// free(x) deallocates heap memory. Accepts any type in Moxie.
+	// free(x) frees heap memory. Accepts any type in Moxie.
 	anyIface := types.NewInterfaceType(nil, nil)
 	anyIface.Complete()
 	freeSig := types.NewSignatureType(nil, nil, nil,

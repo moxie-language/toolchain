@@ -112,7 +112,7 @@ const (
 	BuiltinReal   // not valid in Moxie
 	BuiltinRecover
 	BuiltinSpawn // Moxie-specific
-	BuiltinFree  // Moxie-specific: deterministic deallocation
+	BuiltinFree  // Moxie-specific: explicit free()
 	BuiltinMin   // Go 1.21
 	BuiltinMax   // Go 1.21
 )

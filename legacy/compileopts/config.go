@@ -60,7 +60,6 @@ func (c *Config) BuildTags() []string {
 		"purego",
 		"osusergo",
 		"math_big_pure_go",
-		"gc.dealloc",
 		"scheduler."+c.Scheduler(),
 		"moxie.unicore", // always single-core cooperative
 	)

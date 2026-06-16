@@ -205,17 +205,17 @@ type builder struct {
 	// setupNativeSpawnTargetChannels (child).
 	pipeChannels map[ssa.Value]bool
 
-	// deallocEntries tracks each heap allocation's entry-block alloca and
-	// compile-time scope assignment. Populated by scopePushAlloc.
-	deallocEntries map[ssa.Value]*deallocEntry
+	// scopeFreeEntries tracks each heap allocation's entry-block alloca and
+	// compile-time scope assignment. Populated by scopeTrackAlloc.
+	scopeFreeEntries map[ssa.Value]*scopeFreeEntry
 
-	// deallocLoopBlocks is the set of basic block indices that are loop
+	// scopeFreeLoopBlocks is the set of basic block indices that are loop
 	// back-edge sources, used to identify loop-body allocations.
-	deallocLoopBlocks map[int]bool
+	scopeFreeLoopBlocks map[int]bool
 
-	// deallocAssignments is the pre-computed scope assignment for each
+	// scopeFreeAssignments is the pre-computed scope assignment for each
 	// heap allocation (scopeLocal, scopePromoted, scopeEscaped).
-	deallocAssignments map[ssa.Value]int
+	scopeFreeAssignments map[ssa.Value]int
 }
 
 func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *builder {
@@ -1409,9 +1409,7 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		b.deferInitFunc()
 	}
 
-	if b.usesDealloc() {
-		b.scopeInit()
-	}
+	b.scopeFreeInit()
 }
 
 // createFunction builds the LLVM IR implementation for this function. The
@@ -1431,7 +1429,6 @@ func (b *builder) createFunction() {
 		b.currentBlock = block
 		b.currentBlockInfo = &b.blockInfo[block.Index]
 		b.SetInsertPointAtEnd(b.currentBlockInfo.entry)
-		scopeSaved := false
 		for _, instr := range block.Instrs {
 			if instr, ok := instr.(*ssa.DebugRef); ok {
 				if !b.Debug {
@@ -1457,14 +1454,6 @@ func (b *builder) createFunction() {
 				}, b.GetInsertBlock())
 				continue
 			}
-			// Emit scope save after all phi nodes (LLVM requires
-			// phis grouped at block top, no intervening instructions).
-			if !scopeSaved {
-				if _, isPhi := instr.(*ssa.Phi); !isPhi {
-					b.scopeEmitBlockSave(block)
-					scopeSaved = true
-				}
-			}
 			if b.DumpSSA {
 				if val, ok := instr.(ssa.Value); ok && val.Name() != "" {
 					fmt.Printf("\t%s = %s\n", val.Name(), val.String())
@@ -1473,9 +1462,6 @@ func (b *builder) createFunction() {
 				}
 			}
 			b.createInstruction(instr)
-		}
-		if !scopeSaved {
-			b.scopeEmitBlockSave(block)
 		}
 		if b.fn.Name() == "init" && len(block.Instrs) == 0 {
 			b.CreateRetVoid()
@@ -1628,7 +1614,7 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 			b.createRuntimeCall("destroyDeferFrame", []llvm.Value{b.deferFrame}, "")
 		}
 		b.scopeEmitBlockFree(instr.Block())
-		b.scopeEmitFreeAll()
+		b.scopeEmitReturnFree()
 		if len(instr.Results) == 0 {
 			b.CreateRetVoid()
 		} else if len(instr.Results) == 1 {
@@ -2235,7 +2221,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			if b.PrintAllocs != nil {
 				b.emitLogAlloc(expr.Pos())
 			}
-			b.scopePushAlloc(buf, expr)
+			b.scopeTrackAlloc(buf, expr)
 			return buf, nil
 		} else {
 			buf := llvmutil.CreateEntryBlockAlloca(b.Builder, typ, expr.Comment)
@@ -2249,11 +2235,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		y := b.getValue(expr.Y, getPos(expr))
 		return b.createBinOp(expr.Op, expr.X.Type(), expr.Y.Type(), x, y, expr.Pos())
 	case *ssa.Call:
-		val, err := b.createFunctionCall(expr.Common())
-		if err == nil && b.usesDealloc() {
-			b.scopePushCallResult(val, expr)
-		}
-		return val, err
+		return b.createFunctionCall(expr.Common())
 	case *ssa.ChangeInterface:
 		// Do not change between interface types: always use the underlying
 		// (concrete) type in the type number of the interface. Every method
@@ -2491,7 +2473,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		if b.PrintAllocs != nil {
 			b.emitLogAlloc(expr.Pos())
 		}
-		b.scopePushAlloc(slicePtr, expr)
+		b.scopeTrackAlloc(slicePtr, expr)
 
 		// Extend or truncate if necessary. This is safe as we've already done
 		// the bounds check.

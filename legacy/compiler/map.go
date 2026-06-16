@@ -51,6 +51,7 @@ func (b *builder) createMakeMap(expr *ssa.MakeMap) (llvm.Value, error) {
 	if b.PrintAllocs != nil {
 		b.emitLogAlloc(expr.Pos())
 	}
+	b.scopeTrackAlloc(hashmap, expr)
 	return hashmap, nil
 }
 
