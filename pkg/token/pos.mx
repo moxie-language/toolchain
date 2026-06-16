@@ -11,13 +11,13 @@ type Pos struct {
 
 func MakePos(base *PosBase, line, col uint32) (p Pos) { return Pos{base, sat32(line), sat32(col)} }
 
-func (pos Pos) Pos() (p Pos) { return pos }
-func (pos Pos) IsKnown() (ok bool) { return pos.line > 0 }
-func (pos Pos) Base() (p *PosBase) { return pos.base }
-func (pos Pos) Line() (n uint32) { return pos.line }
-func (pos Pos) Col() (n uint32) { return pos.col }
+func (pos *Pos) Pos() (p Pos) { return *pos }
+func (pos *Pos) IsKnown() (ok bool) { return pos.line > 0 }
+func (pos *Pos) Base() (p *PosBase) { return pos.base }
+func (pos *Pos) Line() (n uint32) { return pos.line }
+func (pos *Pos) Col() (n uint32) { return pos.col }
 
-func (pos Pos) FileBase() (p *PosBase) {
+func (pos *Pos) FileBase() (p *PosBase) {
 	b := pos.base
 	for b != nil && b != b.pos.base {
 		b = b.pos.base
@@ -25,30 +25,32 @@ func (pos Pos) FileBase() (p *PosBase) {
 	return b
 }
 
-func (pos Pos) RelFilename() (s string) { return pos.base.Filename() }
+func (pos *Pos) RelFilename() (s string) { return pos.base.Filename() }
 
-func (pos Pos) RelLine() (n uint32) {
+func (pos *Pos) RelLine() (n uint32) {
 	b := pos.base
 	if b.Line() == 0 {
 		return 0
 	}
-	return b.Line() + (pos.Line() - b.Pos().Line())
+	bp := b.Pos()
+	return b.Line() + (pos.Line() - bp.Line())
 }
 
-func (pos Pos) RelCol() (n uint32) {
+func (pos *Pos) RelCol() (n uint32) {
 	b := pos.base
 	if b.Col() == 0 {
 		return 0
 	}
-	if pos.Line() == b.Pos().Line() {
-		return b.Col() + (pos.Col() - b.Pos().Col())
+	bp := b.Pos()
+	if pos.Line() == bp.Line() {
+		return b.Col() + (pos.Col() - bp.Col())
 	}
 	return pos.Col()
 }
 
-func (p Pos) Cmp(q Pos) (n int32) {
+func (p *Pos) Cmp(q Pos) (n int32) {
 	pname := p.RelFilename()
-	qname := q.RelFilename()
+	qname := q.base.Filename()
 	switch {
 	case pname < qname:
 		return -1
@@ -57,7 +59,7 @@ func (p Pos) Cmp(q Pos) (n int32) {
 	}
 
 	pline := p.Line()
-	qline := q.Line()
+	qline := q.line
 	switch {
 	case pline < qline:
 		return -1
@@ -66,7 +68,7 @@ func (p Pos) Cmp(q Pos) (n int32) {
 	}
 
 	pcol := p.Col()
-	qcol := q.Col()
+	qcol := q.col
 	switch {
 	case pcol < qcol:
 		return -1
@@ -77,9 +79,10 @@ func (p Pos) Cmp(q Pos) (n int32) {
 	return 0
 }
 
-func (pos Pos) String() (s string) {
+func (pos *Pos) String() (s string) {
 	rel := position_{pos.RelFilename(), pos.RelLine(), pos.RelCol()}
-	abs := position_{pos.Base().Pos().RelFilename(), pos.Line(), pos.Col()}
+	bp := pos.Base().Pos()
+	abs := position_{bp.RelFilename(), pos.Line(), pos.Col()}
 	s = rel.String()
 	if string(rel.filename) != string(abs.filename) || rel.line != abs.line || rel.col != abs.col {
 		s = s | "[" | abs.String() | "]"
@@ -92,7 +95,7 @@ type position_ struct {
 	line, col uint32
 }
 
-func (p position_) String() (s string) {
+func (p *position_) String() (s string) {
 	if p.line == 0 {
 		if p.filename == "" {
 			return "<unknown position>"

@@ -102,8 +102,7 @@ func hashmapClear(m *hashmap) {
 			// Clear the tophash, to mark these keys/values as removed.
 			bucket.tophash = [8]uint8{}
 
-			// Clear the keys and values in the bucket so that the GC won't pin
-			// these allocations.
+			// Clear the keys and values in the bucket.
 			memzero(unsafe.Add(unsafe.Pointer(bucket), unsafe.Sizeof(hashmapBucket{})), bucketSize-unsafe.Sizeof(hashmapBucket{}))
 
 			// Move on to the next bucket in the chain.
@@ -325,8 +324,32 @@ func hashmapInsertIntoNewBucket(m *hashmap, key, value unsafe.Pointer, tophash u
 func hashmapGrow(m *hashmap) {
 	oldBuckets := m.buckets
 	oldBits := m.bucketBits
-	n := hashmapCopy(m, m.bucketBits+1)
-	*m = n
+	bucketSize := hashmapBucketSize(m)
+
+	// Update m in place to point to a new, larger bucket array.
+	// No by-value struct return - avoids SRET aliasing with the input.
+	m.bucketBits = oldBits + 1
+	m.count = 0
+	m.seed = uintptr(fastrand())
+	m.buckets = alloc(bucketSize*(uintptr(1)<<m.bucketBits), nil)
+
+	// Re-insert all entries from old buckets into the new array.
+	numOldBuckets := uintptr(1) << oldBits
+	for bi := uintptr(0); bi < numOldBuckets; bi++ {
+		bucket := (*hashmapBucket)(unsafe.Add(oldBuckets, bucketSize*bi))
+		for bucket != nil {
+			for i := uint8(0); i < 8; i++ {
+				if bucket.tophash[i] != 0 {
+					kp := hashmapSlotKey(m, bucket, i)
+					vp := hashmapSlotValue(m, bucket, i)
+					hash := m.keyHash(kp, m.keySize, m.seed)
+					hashmapSet(m, kp, vp, hash)
+				}
+			}
+			bucket = bucket.next
+		}
+	}
+
 	hashmapFreeBuckets(oldBuckets, oldBits, m)
 }
 
@@ -360,35 +383,39 @@ func hashmapFreeBuckets(buckets unsafe.Pointer, bits uint8, m *hashmap) {
 func hashmapClone(intf _interface) _interface {
 	typ, val := decomposeInterface(intf)
 	m := (*hashmap)(val)
-	n := hashmapCopy(m, m.bucketBits)
-	return composeInterface(typ, unsafe.Pointer(&n))
+	// Heap-allocate destination so the interface value doesn't point to stack.
+	dst := (*hashmap)(alloc(unsafe.Sizeof(hashmap{}), nil))
+	hashmapCopyTo(m, dst, m.bucketBits)
+	return composeInterface(typ, unsafe.Pointer(dst))
 }
 
-func hashmapCopy(m *hashmap, sizeBits uint8) hashmap {
-	// clone map as empty
-	n := *m
-	n.count = 0
-	n.seed = uintptr(fastrand())
+// hashmapCopyTo copies all entries from src into dst. dst is written through
+// a pointer - no by-value struct return, no SRET aliasing. Fields are
+// assigned individually so dst.buckets never transiently shares src.buckets.
+func hashmapCopyTo(src, dst *hashmap, sizeBits uint8) {
+	dst.keySize = src.keySize
+	dst.valueSize = src.valueSize
+	dst.keyEqual = src.keyEqual
+	dst.keyHash = src.keyHash
+	dst.keyLess = src.keyLess
+	dst.bucketBits = sizeBits
+	dst.count = 0
+	dst.seed = uintptr(fastrand())
 
-	n.bucketBits = sizeBits
-	numBuckets := uintptr(1) << n.bucketBits
-	bucketBufSize := hashmapBucketSize(m)
-	n.buckets = alloc(bucketBufSize*numBuckets, nil)
+	numBuckets := uintptr(1) << sizeBits
+	bucketBufSize := hashmapBucketSize(src)
+	dst.buckets = alloc(bucketBufSize*numBuckets, nil)
 
-	// use a hashmap iterator to go through the old map
 	var it hashmapIterator
+	var key = alloc(src.keySize, nil)
+	var value = alloc(src.valueSize, nil)
 
-	var key = alloc(m.keySize, nil)
-	var value = alloc(m.valueSize, nil)
-
-	for hashmapNext(m, &it, key, value) {
-		h := n.keyHash(key, uintptr(n.keySize), n.seed)
-		hashmapSet(&n, key, value, h)
+	for hashmapNext(src, &it, key, value) {
+		h := dst.keyHash(key, uintptr(dst.keySize), dst.seed)
+		hashmapSet(dst, key, value, h)
 	}
 	free(key)
 	free(value)
-
-	return n
 }
 
 // Get the value of a specified key, or zero the value if not found.
@@ -450,7 +477,7 @@ func hashmapDelete(m *hashmap, key unsafe.Pointer, hash uint32) {
 				if m.keyEqual(key, slotKey, m.keySize) {
 					// Found the key, delete it.
 					bucket.tophash[i] = 0
-					// Zero out the key and value so garbage collector doesn't pin the allocations.
+					// Zero out the key and value.
 					memzero(slotKey, m.keySize)
 					slotValue := hashmapSlotValue(m, bucket, i)
 					memzero(slotValue, m.valueSize)

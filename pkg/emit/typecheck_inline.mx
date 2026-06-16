@@ -168,7 +168,7 @@ func typeCheckPkg(src []byte, name string) (*types.TCPackage, *syntax.File) {
 			}
 			for _, n := range cd.NameList {
 				if val != nil {
-					if ci, ok2 := val.(types.ConstInt); ok2 {
+					if ci, ok2 := val.(*types.ConstInt); ok2 {
 						if constValMap == nil {
 							constValMap = map[string]int64{}
 						}
@@ -550,7 +550,7 @@ func tcEvalConstExpr(e syntax.Expr, scope *types.Scope, iotaVal int64) types.Con
 		return types.EvalBasicLitLocal(e)
 	case *syntax.Name:
 		if e.Value == "iota" && iotaVal >= 0 {
-			return types.ConstInt{iotaVal}
+			return &types.ConstInt{V:iotaVal}
 		}
 		if scope != nil {
 			_, obj := scope.LookupParent(e.Value)
@@ -560,7 +560,7 @@ func tcEvalConstExpr(e syntax.Expr, scope *types.Scope, iotaVal int64) types.Con
 		}
 		if constValMap != nil {
 			if v, ok := constValMap[e.Value]; ok {
-				return types.ConstInt{v}
+				return &types.ConstInt{V:v}
 			}
 		}
 	case *syntax.Operation:
@@ -583,20 +583,20 @@ func tcEvalConstExpr(e syntax.Expr, scope *types.Scope, iotaVal int64) types.Con
 		if id, ok := e.Fun.(*syntax.Name); ok && id.Value == "len" && len(e.ArgList) == 1 {
 			if lit, ok2 := e.ArgList[0].(*syntax.BasicLit); ok2 && lit.Kind == token.StringLit {
 				lv := types.EvalBasicLitLocal(lit)
-				if cs, ok3 := lv.(types.ConstStr); ok3 {
-					return types.ConstInt{int64(len(cs.S))}
+				if cs, ok3 := lv.(*types.ConstStr); ok3 {
+					return &types.ConstInt{V:int64(len(cs.S))}
 				}
 			}
 			inner := tcEvalConstExpr(e.ArgList[0], scope, iotaVal)
-			if cs, ok2 := inner.(types.ConstStr); ok2 {
-				return types.ConstInt{int64(len(cs.S))}
+			if cs, ok2 := inner.(*types.ConstStr); ok2 {
+				return &types.ConstInt{V:int64(len(cs.S))}
 			}
 		}
 		if sel, ok := e.Fun.(*syntax.SelectorExpr); ok {
 			if pkg, ok2 := sel.X.(*syntax.Name); ok2 && pkg.Value == "unsafe" {
 				switch sel.Sel.Value {
 				case "Sizeof", "Alignof", "Offsetof":
-					return types.ConstInt{8}
+					return &types.ConstInt{V:8}
 				}
 			}
 		}
@@ -732,7 +732,7 @@ func tcResolveNameInline(e syntax.Expr, scope *types.Scope) syntax.Type {
 			} else if e.Len != nil {
 				cv := tcEvalConstExpr(e.Len, scope, -1)
 				if cv != nil {
-					if ci, ok := cv.(types.ConstInt); ok {
+					if ci, ok := cv.(*types.ConstInt); ok {
 						n = ci.V
 					}
 				}

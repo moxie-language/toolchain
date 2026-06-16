@@ -1,0 +1,168 @@
+package main
+
+import (
+	. "git.smesh.lol/moxie/pkg/types"
+)
+
+func (e *irEmitter) emitMakeMap(m *SSAMakeMap) {
+	reg := e.regName(m)
+	ipt := e.intptrType()
+	mt, _ := SafeUnderlying(m.SSAType()).(*TCMap)
+	keyType := "i32"
+	valType := "i32"
+	alg := "0"
+	if mt != nil {
+		keyType = e.llvmType(mt.Key)
+		valType = e.llvmType(mt.Elem)
+		if e.isStringLike(mt.Key) {
+			alg = "1"
+		}
+	}
+	keySz := e.nextReg2("mm")
+	e.w("  ") ; e.w(keySz) ; e.w(" = ptrtoint ptr getelementptr (")
+	e.w(keyType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+	valSz := e.nextReg2("mm")
+	e.w("  ") ; e.w(valSz) ; e.w(" = ptrtoint ptr getelementptr (")
+	e.w(valType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+	hint := "8"
+	if m.Reserve != nil {
+		hint = e.operand(m.Reserve)
+	}
+	e.w("  ") ; e.w(reg) ; e.w(" = call ptr @runtime.hashmapMake(")
+	e.w(ipt) ; e.w(" ") ; e.w(keySz) ; e.w(", ")
+	e.w(ipt) ; e.w(" ") ; e.w(valSz) ; e.w(", ")
+	e.w(ipt) ; e.w(" ") ; e.w(hint) ; e.w(", i8 ") ; e.w(alg) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.hashmapMake", "ptr", ipt | ", " | ipt | ", " | ipt | ", i8")
+	e.scopeTrackAlloc(reg)
+}
+
+func (e *irEmitter) emitMapUpdate(m *SSAMapUpdate) {
+	ipt := e.intptrType()
+	mapVal := e.operand(m.Map)
+	keyVal := e.operand(m.Key)
+	valVal := e.operand(m.Value)
+	mapType := m.Map.SSAType()
+	if pt, ok := SafeUnderlying(mapType).(*Pointer); ok {
+		mapType = pt.Base
+	}
+	mt, _ := SafeUnderlying(mapType).(*TCMap)
+	keyType := "i32"
+	valType := "i32"
+	if mt != nil {
+		keyType = e.llvmType(mt.Key)
+		valType = e.llvmType(mt.Elem)
+	} else {
+		if m.Key.SSAType() != nil {
+			keyType = e.llvmType(m.Key.SSAType())
+		}
+		if m.Value.SSAType() != nil {
+			valType = e.llvmType(m.Value.SSAType())
+		}
+	}
+	if keyVal == "null" && keyType != "ptr" { keyVal = "zeroinitializer" }
+	if valVal == "null" && valType != "ptr" { valVal = "zeroinitializer" }
+	keyAlloca := e.nextReg2("mu")
+	e.w("  ") ; e.w(keyAlloca) ; e.w(" = alloca ") ; e.w(keyType) ; e.w("\n")
+	e.w("  store ") ; e.w(keyType) ; e.w(" ") ; e.w(keyVal) ; e.w(", ptr ") ; e.w(keyAlloca) ; e.w("\n")
+	valAlloca := e.nextReg2("mu")
+	e.w("  ") ; e.w(valAlloca) ; e.w(" = alloca ") ; e.w(valType) ; e.w("\n")
+	e.w("  store ") ; e.w(valType) ; e.w(" ") ; e.w(valVal) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+	if mt != nil && e.isStringLike(mt.Key) {
+		kd := e.nextReg2("mu")
+		kl := e.nextReg2("mu")
+		kc := e.nextReg2("mu")
+		e.w("  ") ; e.w(kd) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 0\n")
+		e.w("  ") ; e.w(kl) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 1\n")
+		e.w("  ") ; e.w(kc) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 2\n")
+		e.w("  call void @runtime.hashmapContentSet(ptr ") ; e.w(mapVal)
+		e.w(", ptr ") ; e.w(kd)
+		e.w(", " | ipt | " ") ; e.w(kl)
+		e.w(", " | ipt | " ") ; e.w(kc)
+		e.w(", ptr ") ; e.w(valAlloca) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.hashmapContentSet", "void", "ptr, ptr, " | ipt | ", " | ipt | ", ptr")
+	} else {
+		e.w("  call void @runtime.hashmapBinarySet(ptr ") ; e.w(mapVal)
+		e.w(", ptr ") ; e.w(keyAlloca)
+		e.w(", ptr ") ; e.w(valAlloca) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.hashmapBinarySet", "void", "ptr, ptr, ptr")
+	}
+}
+
+func (e *irEmitter) emitLookup(l *SSALookup) {
+	reg := e.regName(l)
+	ipt := e.intptrType()
+	mapVal := e.operand(l.X)
+	keyVal := e.operand(l.Index)
+	mt, _ := SafeUnderlying(l.X.SSAType()).(*TCMap)
+	keyType := "i32"
+	valType := "i32"
+	if mt != nil {
+		keyType = e.llvmType(mt.Key)
+		valType = e.llvmType(mt.Elem)
+	} else {
+		if l.Index.SSAType() != nil {
+			keyType = e.llvmType(l.Index.SSAType())
+		}
+	}
+	valAlloca := e.nextReg2("ml")
+	e.w("  ") ; e.w(valAlloca) ; e.w(" = alloca ") ; e.w(valType) ; e.w("\n")
+	valSz := e.nextReg2("ml")
+	e.w("  ") ; e.w(valSz) ; e.w(" = ptrtoint ptr getelementptr (")
+	e.w(valType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+	if mt != nil && e.isStringLike(mt.Key) {
+		kd := e.nextReg2("ml")
+		kl := e.nextReg2("ml")
+		kc := e.nextReg2("ml")
+		e.w("  ") ; e.w(kd) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 0\n")
+		e.w("  ") ; e.w(kl) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 1\n")
+		e.w("  ") ; e.w(kc) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 2\n")
+		okReg := e.nextReg2("ml")
+		e.w("  ") ; e.w(okReg) ; e.w(" = call i1 @runtime.hashmapContentGet(ptr ") ; e.w(mapVal)
+		e.w(", ptr ") ; e.w(kd)
+		e.w(", " | ipt | " ") ; e.w(kl)
+		e.w(", " | ipt | " ") ; e.w(kc)
+		e.w(", ptr ") ; e.w(valAlloca)
+		e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(valSz) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.hashmapContentGet", "i1", "ptr, ptr, " | ipt | ", " | ipt | ", ptr, " | ipt)
+		if l.CommaOk {
+			loaded := e.nextReg2("ml")
+			e.w("  ") ; e.w(loaded) ; e.w(" = load ") ; e.w(valType) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+			tupType := "{" | valType | ", i1}"
+			t1 := e.nextReg2("ml")
+			e.w("  ") ; e.w(t1) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" undef, ") ; e.w(valType) ; e.w(" ") ; e.w(loaded) ; e.w(", 0\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" ") ; e.w(t1) ; e.w(", i1 ") ; e.w(okReg) ; e.w(", 1\n")
+		} else {
+			e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(valType) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+		}
+	} else {
+		keyAlloca := e.nextReg2("ml")
+		e.w("  ") ; e.w(keyAlloca) ; e.w(" = alloca ") ; e.w(keyType) ; e.w("\n")
+		e.w("  store ") ; e.w(keyType) ; e.w(" ") ; e.w(keyVal) ; e.w(", ptr ") ; e.w(keyAlloca) ; e.w("\n")
+		okReg := e.nextReg2("ml")
+		e.w("  ") ; e.w(okReg) ; e.w(" = call i1 @runtime.hashmapBinaryGet(ptr ") ; e.w(mapVal)
+		e.w(", ptr ") ; e.w(keyAlloca)
+		e.w(", ptr ") ; e.w(valAlloca)
+		e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(valSz) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.hashmapBinaryGet", "i1", "ptr, ptr, ptr, " | ipt)
+		if l.CommaOk {
+			loaded := e.nextReg2("ml")
+			e.w("  ") ; e.w(loaded) ; e.w(" = load ") ; e.w(valType) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+			tupType := "{" | valType | ", i1}"
+			t1 := e.nextReg2("ml")
+			e.w("  ") ; e.w(t1) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" undef, ") ; e.w(valType) ; e.w(" ") ; e.w(loaded) ; e.w(", 0\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" ") ; e.w(t1) ; e.w(", i1 ") ; e.w(okReg) ; e.w(", 1\n")
+		} else {
+			e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(valType) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+		}
+	}
+}
+
+func (e *irEmitter) isStringLike(t Type) (ok bool) {
+	if t == nil {
+		return false
+	}
+	if b, ok2 := SafeUnderlying(t).(*Basic); ok2 {
+		return b.Info&IsString != 0
+	}
+	return false
+}

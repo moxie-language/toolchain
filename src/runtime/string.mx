@@ -3,7 +3,6 @@ package runtime
 // This file implements functions related to Go strings.
 
 import (
-	"internal/gclayout"
 	"unsafe"
 )
 
@@ -93,19 +92,20 @@ func stringLess(x, y string) bool {
 	return len(x) < len(y)
 }
 
-// Concatenate two strings.
+// Concatenate two strings. Always allocates a fresh buffer - no shared backing.
 func stringConcat(x, y _string) _string {
-	if x.length == 0 {
-		return y
-	} else if y.length == 0 {
-		return x
+	if x.length == 0 && y.length == 0 {
+		return _string{}
 	}
 	length := x.length + y.length
-	buf := alloc(length, gclayout.NoPtrs.AsPtr())
-	memcpy(buf, unsafe.Pointer(x.ptr), x.length)
-	memcpy(unsafe.Add(buf, x.length), unsafe.Pointer(y.ptr), y.length)
-	result := _string{ptr: (*byte)(buf), length: length, cap: length}
-	return result
+	buf := alloc(length, nil)
+	if x.length > 0 {
+		memcpy(buf, unsafe.Pointer(x.ptr), x.length)
+	}
+	if y.length > 0 {
+		memcpy(unsafe.Add(buf, x.length), unsafe.Pointer(y.ptr), y.length)
+	}
+	return _string{ptr: (*byte)(buf), length: length, cap: length}
 }
 
 // Concatenate two byte slices. Used for | pipe concat.
@@ -115,17 +115,25 @@ func stringConcat(x, y _string) _string {
 // inherits guard-page + wipe protection and its pointer lives inside a
 // registered arena (so subsequent comparisons promote to constant-time).
 func bytesConcat(x, y []byte) []byte {
-	if len(x) == 0 {
-		return y
-	} else if len(y) == 0 {
-		return x
+	if len(x) == 0 && len(y) == 0 {
+		return nil
 	}
 	length := len(x) + len(y)
-	secure := isSecurePtr(unsafe.Pointer(&x[0])) || isSecurePtr(unsafe.Pointer(&y[0]))
+	secure := false
+	if len(x) > 0 {
+		secure = isSecurePtr(unsafe.Pointer(&x[0]))
+	}
+	if !secure && len(y) > 0 {
+		secure = isSecurePtr(unsafe.Pointer(&y[0]))
+	}
 	result := secureAwareByteAlloc(uintptr(length), secure)
 	buf := unsafe.Pointer(&result[0])
-	memcpy(buf, unsafe.Pointer(&x[0]), uintptr(len(x)))
-	memcpy(unsafe.Add(buf, uintptr(len(x))), unsafe.Pointer(&y[0]), uintptr(len(y)))
+	if len(x) > 0 {
+		memcpy(buf, unsafe.Pointer(&x[0]), uintptr(len(x)))
+	}
+	if len(y) > 0 {
+		memcpy(unsafe.Add(buf, uintptr(len(x))), unsafe.Pointer(&y[0]), uintptr(len(y)))
+	}
 	return result
 }
 
@@ -140,7 +148,7 @@ func stringFromRunes(runeSlice []rune) (s _string) {
 	s.cap = s.length
 
 	// Allocate memory for the string.
-	s.ptr = (*byte)(alloc(s.length, gclayout.NoPtrs.AsPtr()))
+	s.ptr = (*byte)(alloc(s.length, nil))
 
 	// Encode runes to UTF-8 and store the resulting bytes in the string.
 	index := uintptr(0)
@@ -173,10 +181,11 @@ func stringToRunes(s string) []int32 {
 // Create a string from a Unicode code point.
 func stringFromUnicode(x rune) _string {
 	array, length := encodeUTF8(x)
-	// Array will be heap allocated.
-	// The heap most likely doesn't work with blocks below 4 bytes, so there's
-	// no point in allocating a smaller buffer for the string here.
-	return _string{ptr: (*byte)(unsafe.Pointer(&array)), length: length, cap: length}
+	// Copy stack-local array to heap. Returning &array would be a stack escape -
+	// the _string.ptr would point into a dead stack frame after return.
+	buf := alloc(length, nil)
+	memcpy(buf, unsafe.Pointer(&array), length)
+	return _string{ptr: (*byte)(buf), length: length, cap: length}
 }
 
 // Iterate over a string.

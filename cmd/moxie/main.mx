@@ -2,10 +2,11 @@ package main
 
 import (
 	"os"
-	"pkg/emit"
-	"pkg/syntax"
-	"pkg/types"
 	"unsafe"
+
+	"git.smesh.lol/moxie/pkg/emit"
+	"git.smesh.lol/moxie/pkg/syntax"
+	"git.smesh.lol/moxie/pkg/types"
 )
 
 //export mxc_run
@@ -1850,16 +1851,16 @@ func loadMxh(path string) (ok bool) {
 					}
 					if isNum {
 						n := parseInt64(rest)
-						val = types.ConstInt{V: n}
+						val = &types.ConstInt{V: n}
 					} else {
 						if b, ok := typ.(*types.Basic); ok && (b.Kind() == types.TCString || b.Kind() == types.UntypedString) {
-							val = types.ConstStr{S: rest}
+							val = &types.ConstStr{S: rest}
 						} else {
-							val = types.ConstInt{V: 0}
+							val = &types.ConstInt{V: 0}
 						}
 					}
 				} else {
-					val = types.ConstInt{V: 0}
+					val = &types.ConstInt{V: 0}
 				}
 				pkg.Scope().Insert(types.NewTCConst(pkg, parts[0], typ, val))
 			}
@@ -2482,7 +2483,9 @@ func cmdTest(args []string) {
 	}
 	shimsBc := joinPath(sysroot, "hashmap_shims.bc")
 	shimsObj := joinPath(tmpdir, "hashmap_shims.o")
-	compileBc(clang, triple, shimsBc, shimsObj)
+	if _, shok := readFile(shimsBc); shok {
+		compileBc(clang, triple, shimsBc, shimsObj)
+	}
 	stringerBc := joinPath(sysroot, "stringer.bc")
 	stringerObj := joinPath(tmpdir, "stringer.o")
 	if _, sok := readFile(stringerBc); sok {
@@ -2518,12 +2521,13 @@ func cmdTest(args []string) {
 
 	outpath := joinPath(tmpdir, "test.bin")
 	writeStr(2, "  link\n")
+	objDir := joinPath(sysroot, "obj")
 	objFiles := getenv("OBJ_FILES")
 	if objFiles == "" {
-		objEntries := listFiles(joinPath(sysroot, "obj"), ".bc")
-		if objEntries != nil {
-			for _, e := range objEntries {
-				objFiles = objFiles | joinPath(joinPath(sysroot, "obj"), e) | " "
+		objBcEntries := listFiles(objDir, ".bc")
+		if objBcEntries != nil {
+			for _, e := range objBcEntries {
+				objFiles = objFiles | joinPath(objDir, e) | " "
 			}
 		}
 	}
@@ -2552,7 +2556,9 @@ func cmdTest(args []string) {
 	if _, slok2 := readFile(stdlibBc); slok2 {
 		ldArgs = append(ldArgs, stdlibObj)
 	}
-	ldArgs = append(ldArgs, shimsObj)
+	if _, shok2 := readFile(shimsBc); shok2 {
+		ldArgs = append(ldArgs, shimsObj)
+	}
 	if _, sok4 := readFile(stringerBc); sok4 {
 		ldArgs = append(ldArgs, stringerObj)
 	}
@@ -2562,6 +2568,13 @@ func cmdTest(args []string) {
 	for _, f := range splitBySpace(objFiles) {
 		if f != "" {
 			ldArgs = append(ldArgs, f)
+		}
+	}
+	// Pick up pre-compiled .o files (assembly, stacksave, etc.)
+	oEntries := listFiles(objDir, ".o")
+	if oEntries != nil {
+		for _, e := range oEntries {
+			ldArgs = append(ldArgs, joinPath(objDir, e))
 		}
 	}
 	ldArgs = append(ldArgs, comprtLib, muslLib, "-z", "stack-size=67108864")
@@ -3047,7 +3060,9 @@ func main() {
 	}
 	shimsBc := joinPath(sysroot, "hashmap_shims.bc")
 	shimsObj := joinPath(tmpdir, "hashmap_shims.o")
-	compileBc(clang, triple, shimsBc, shimsObj)
+	if _, shok := readFile(shimsBc); shok {
+		compileBc(clang, triple, shimsBc, shimsObj)
+	}
 	stringerBc := joinPath(sysroot, "stringer.bc")
 	stringerObj := joinPath(tmpdir, "stringer.o")
 	if _, sok := readFile(stringerBc); sok {
@@ -3082,12 +3097,13 @@ func main() {
 	}
 
 	writeStr(2, "  link\n")
+	objDir := joinPath(sysroot, "obj")
 	objFiles := getenv("OBJ_FILES")
 	if objFiles == "" {
-		objEntries := listFiles(joinPath(sysroot, "obj"), ".bc")
-		if objEntries != nil {
-			for _, e := range objEntries {
-				objFiles = objFiles | joinPath(joinPath(sysroot, "obj"), e) | " "
+		objBcEntries := listFiles(objDir, ".bc")
+		if objBcEntries != nil {
+			for _, e := range objBcEntries {
+				objFiles = objFiles | joinPath(objDir, e) | " "
 			}
 		}
 	}
@@ -3116,7 +3132,9 @@ func main() {
 	if _, slok2 := readFile(stdlibBc); slok2 {
 		ldArgs = append(ldArgs, stdlibObj)
 	}
-	ldArgs = append(ldArgs, shimsObj)
+	if _, shok2 := readFile(shimsBc); shok2 {
+		ldArgs = append(ldArgs, shimsObj)
+	}
 	if _, sok4 := readFile(stringerBc); sok4 {
 		ldArgs = append(ldArgs, stringerObj)
 	}
@@ -3126,6 +3144,13 @@ func main() {
 	for _, f := range splitBySpace(objFiles) {
 		if f != "" {
 			ldArgs = append(ldArgs, f)
+		}
+	}
+	// Pick up pre-compiled .o files (assembly, stacksave, etc.)
+	oEntries := listFiles(objDir, ".o")
+	if oEntries != nil {
+		for _, e := range oEntries {
+			ldArgs = append(ldArgs, joinPath(objDir, e))
 		}
 	}
 	ldArgs = append(ldArgs, comprtLib, muslLib, "-z", "stack-size=67108864")

@@ -2662,26 +2662,19 @@ func wrapIntBuiltin(expr ast.Expr, builtins map[string]bool) ast.Expr {
 // 3. Pipe concatenation rewrite (AST-level, after first typecheck pass)
 // ---------------------------------------------------------------------------
 
-// RewriteConstPipes changes | to + inside const declarations where operands
-// are string literals. Go's compiler folds "a" + "b" at compile time, but
-// __moxie_concat is a runtime call and cannot appear in a const.
+// RewriteConstPipes changes | to + in all expressions where operands are
+// string literals. Go's type checker panics on | applied to untyped strings
+// (it's bitwise OR), so this must run before typecheck. The constPipeToAdd
+// helper only rewrites when all leaves are literals, so mixed chains
+// (containing vars/calls) are left for the post-typecheck FindPipeConcat pass.
 func RewriteConstPipes(files []*ast.File) {
 	for _, file := range files {
-		for _, decl := range file.Decls {
-			gd, ok := decl.(*ast.GenDecl)
-			if !ok || gd.Tok != token.CONST {
-				continue
+		ast.Inspect(file, func(n ast.Node) bool {
+			if bin, ok := n.(*ast.BinaryExpr); ok {
+				constPipeToAdd(bin)
 			}
-			for _, spec := range gd.Specs {
-				vs, ok := spec.(*ast.ValueSpec)
-				if !ok {
-					continue
-				}
-				for _, val := range vs.Values {
-					constPipeToAdd(val)
-				}
-			}
-		}
+			return true
+		})
 	}
 }
 

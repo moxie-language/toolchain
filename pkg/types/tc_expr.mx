@@ -18,39 +18,39 @@ func (c *Checker) checkExpr(e syntax.Expr, scope *Scope) (t Type) {
 
 // typeExpr computes the TCTypeAndValue for expression e.
 func (c *Checker) typeExpr(e syntax.Expr, scope *Scope) (t TCTypeAndValue) {
-	switch e := e.(type) {
+	switch ev := e.(type) {
 	case *syntax.Name:
-		return c.typeIdent(e, scope)
+		return c.typeIdent(ev, scope)
 	case *syntax.BasicLit:
-		return c.typeBasicLit(e)
+		return c.typeBasicLit(ev)
 	case *syntax.Operation:
-		return c.typeOperation(e, scope)
+		return c.typeOperation(ev, scope)
 	case *syntax.CallExpr:
-		return c.typeCall(e, scope)
+		return c.typeCall(ev, scope)
 	case *syntax.SelectorExpr:
-		return c.typeSelector(e, scope)
+		return c.typeSelector(ev, scope)
 	case *syntax.IndexExpr:
-		return c.typeIndex(e, scope)
+		return c.typeIndex(ev, scope)
 	case *syntax.SliceExpr:
-		return c.typeSlice(e, scope)
+		return c.typeSlice(ev, scope)
 	case *syntax.AssertExpr:
-		return c.typeAssert(e, scope)
+		return c.typeAssert(ev, scope)
 	case *syntax.TypeSwitchGuard:
-		return TCTypeAndValue{Type: c.checkExpr(e.X, scope), mode: modeValue}
+		return TCTypeAndValue{Type: c.checkExpr(ev.X, scope), mode: modeValue}
 	case *syntax.CompositeLit:
-		return c.typeCompositeLit(e, scope)
+		return c.typeCompositeLit(ev, scope)
 	case *syntax.FuncLit:
-		return c.typeFuncLit(e, scope)
+		return c.typeFuncLit(ev, scope)
 	case *syntax.KeyValueExpr:
 		// key:value - type is the value's type
-		c.checkExpr(e.Key, scope)
-		return c.typeExpr(e.Value, scope)
+		c.checkExpr(ev.Key, scope)
+		return c.typeExpr(ev.Value, scope)
 	case *syntax.ParenExpr:
-		return c.typeExpr(e.X, scope)
+		return c.typeExpr(ev.X, scope)
 	case *syntax.ListExpr:
 		// multi-value list (tuple unpacking context)
 		var last TCTypeAndValue
-		for _, el := range e.ElemList {
+		for _, el := range ev.ElemList {
 			last = c.typeExpr(el, scope)
 		}
 		return last
@@ -58,7 +58,7 @@ func (c *Checker) typeExpr(e syntax.Expr, scope *Scope) (t TCTypeAndValue) {
 	case *syntax.SliceType, *syntax.ArrayType, *syntax.MapType,
 		*syntax.ChanType, *syntax.StructType, *syntax.InterfaceType,
 		*syntax.FuncType, *syntax.DotsType:
-		typ := c.resolveTypeExpr(e)
+		typ := c.resolveTypeExpr(ev)
 		return TCTypeAndValue{Type: typ, mode: modeType}
 	}
 	return TCTypeAndValue{}
@@ -76,15 +76,15 @@ func (c *Checker) typeIdent(e *syntax.Name, scope *Scope) (t TCTypeAndValue) {
 	if c.info != nil {
 		c.info.Uses[e] = obj
 	}
-	switch obj := obj.(type) {
+	switch ob := obj.(type) {
 	case *TCVar:
-		return TCTypeAndValue{Type: obj.Typ, mode: modeVar}
+		return TCTypeAndValue{Type: ob.Typ, mode: modeVar}
 	case *TCConst:
-		return TCTypeAndValue{Type: obj.Typ, Value: obj.Val, mode: modeConst}
+		return TCTypeAndValue{Type: ob.Typ, Value: ob.Val, mode: modeConst}
 	case *TypeName:
-		return TCTypeAndValue{Type: obj.Typ, mode: modeType}
+		return TCTypeAndValue{Type: ob.Typ, mode: modeType}
 	case *TCFunc:
-		return TCTypeAndValue{Type: obj.Typ, mode: modeValue}
+		return TCTypeAndValue{Type: ob.Typ, mode: modeValue}
 	case *Builtin:
 		return TCTypeAndValue{mode: modeBuiltin}
 	case *PkgName:
@@ -110,23 +110,23 @@ func (c *Checker) typeBasicLit(e *syntax.BasicLit) (t TCTypeAndValue) {
 func (c *Checker) typeOperation(e *syntax.Operation, scope *Scope) (t TCTypeAndValue) {
 	if e.Y == nil {
 		// unary
-		xt := c.checkExpr(e.X, scope)
-		if xt == nil {
+		xu := c.checkExpr(e.X, scope)
+		if xu == nil {
 			return TCTypeAndValue{mode: modeValue}
 		}
 		switch e.Op {
 		case token.Recv: // <-ch
-			if ch, ok := SafeUnderlying(xt).(*TCChan); ok {
+			if ch, ok := SafeUnderlying(xu).(*TCChan); ok {
 				return TCTypeAndValue{Type: ch.Elem, mode: modeValue}
 			}
 		case token.And: // &x
-			return TCTypeAndValue{Type: NewPointer(xt), mode: modeValue}
+			return TCTypeAndValue{Type: NewPointer(xu), mode: modeValue}
 		case token.Mul: // *x (dereference)
-			if pt, ok := SafeUnderlying(xt).(*Pointer); ok {
+			if pt, ok := SafeUnderlying(xu).(*Pointer); ok {
 				return TCTypeAndValue{Type: pt.Base, mode: modeVar}
 			}
 		default:
-			return TCTypeAndValue{Type: xt, mode: modeValue}
+			return TCTypeAndValue{Type: xu, mode: modeValue}
 		}
 		return TCTypeAndValue{mode: modeValue}
 	}
@@ -243,7 +243,7 @@ func (c *Checker) typeSelector(e *syntax.SelectorExpr, scope *Scope) (t TCTypeAn
 		// package.Name
 		if pkgName, ok := e.X.(*syntax.Name); ok {
 			_, pkgObj := c.lookup(pkgName.Value, scope)
-			if pn, ok := pkgObj.(*PkgName); ok && pn.Imported != nil {
+			if pn, ok2 := pkgObj.(*PkgName); ok2 && pn.Imported != nil {
 				obj := pn.Imported.Scope.Lookup(e.Sel.Value)
 				if obj != nil {
 					if c.info != nil {
@@ -280,13 +280,13 @@ func (c *Checker) typeIndex(e *syntax.IndexExpr, scope *Scope) (t TCTypeAndValue
 	if xt == nil {
 		return TCTypeAndValue{}
 	}
-	switch t := SafeUnderlying(xt).(type) {
+	switch ut := SafeUnderlying(xt).(type) {
 	case *Array:
-		return TCTypeAndValue{Type: t.Elem, mode: modeVar}
+		return TCTypeAndValue{Type: ut.Elem, mode: modeVar}
 	case *Slice:
-		return TCTypeAndValue{Type: t.Elem, mode: modeVar}
+		return TCTypeAndValue{Type: ut.Elem, mode: modeVar}
 	case *TCMap:
-		return TCTypeAndValue{Type: t.Elem, mode: modeValue}
+		return TCTypeAndValue{Type: ut.Elem, mode: modeValue}
 	}
 	return TCTypeAndValue{}
 }
@@ -301,12 +301,12 @@ func (c *Checker) typeSlice(e *syntax.SliceExpr, scope *Scope) (t TCTypeAndValue
 	if xt == nil {
 		return TCTypeAndValue{}
 	}
-	switch t := SafeUnderlying(xt).(type) {
+	switch ut := SafeUnderlying(xt).(type) {
 	case *Array:
-		if b, ok := t.Elem.(*Basic); ok && b.Kind == Uint8 {
+		if b, ok := ut.Elem.(*Basic); ok && b.Kind == Uint8 {
 			return TCTypeAndValue{Type: Typ[TCString], mode: modeValue}
 		}
-		return TCTypeAndValue{Type: NewSlice(t.Elem), mode: modeValue}
+		return TCTypeAndValue{Type: NewSlice(ut.Elem), mode: modeValue}
 	case *Slice:
 		return TCTypeAndValue{Type: xt, mode: modeValue}
 	}
@@ -366,14 +366,14 @@ func isStructType(t Type) (ok bool) {
 	if t == nil {
 		return false
 	}
-	switch t := t.(type) {
+	switch tt := t.(type) {
 	case *TCStruct:
 		return true
 	case *Named:
-		if t.Under == nil {
+		if tt.Under == nil {
 			return true // optimistic: Named with key:value syntax = struct
 		}
-		return isStructType(t.Under)
+		return isStructType(tt.Under)
 	}
 	return false
 }
@@ -424,23 +424,23 @@ func (c *Checker) lookupFieldOrMethod(t Type, name string) (s *Selection) {
 		}
 	}
 
-	switch t := SafeUnderlying(t).(type) {
+	switch ut := SafeUnderlying(t).(type) {
 	case *Basic:
-		for _, m := range t.Methods {
+		for _, m := range ut.Methods {
 			if m.Name == name {
-				return &Selection{Kind: MethodVal, Recv: t, Obj: m, Indir: indirect}
+				return &Selection{Kind: MethodVal, Recv: ut, Obj: m, Indir: indirect}
 			}
 		}
-		typed := UntypedToTyped(t)
+		typed := UntypedToTyped(ut)
 		if typed != nil {
 			return c.lookupFieldOrMethod(typed, name)
 		}
 	case *TCStruct:
-		for i, f := range t.Fields {
+		for i, f := range ut.Fields {
 			if f.Name == name {
 				return &Selection{
 					Kind:  FieldVal,
-					Recv:  t,
+					Recv:  ut,
 					Obj:   f,
 					Index: []int32{i},
 					Indir: indirect,
@@ -448,10 +448,10 @@ func (c *Checker) lookupFieldOrMethod(t Type, name string) (s *Selection) {
 			}
 		}
 	case *TCInterface:
-		for _, m := range t.AllMethods {
+		for _, m := range ut.AllMethods {
 			if m.Name == name {
 				fn := NewTCFunc(nil, name, m.Sig)
-				return &Selection{Kind: MethodVal, Recv: t, Obj: fn, Indir: indirect}
+				return &Selection{Kind: MethodVal, Recv: ut, Obj: fn, Indir: indirect}
 			}
 		}
 	}
@@ -462,10 +462,10 @@ func IsRuneKind(t Type) (ok bool) {
 	if t == nil {
 		return false
 	}
-	if n, ok := t.(*Named); ok {
+	if n, ok2 := t.(*Named); ok2 {
 		return n.Obj != nil && n.Obj.Name == "rune"
 	}
-	if b, ok := t.(*Basic); ok {
+	if b, ok2 := t.(*Basic); ok2 {
 		return b.Kind == UntypedRune
 	}
 	return false
@@ -475,7 +475,7 @@ func IsStringKind(t Type) (ok bool) {
 	if t == nil {
 		return false
 	}
-	if b, ok := SafeUnderlying(t).(*Basic); ok {
+	if b, ok2 := SafeUnderlying(t).(*Basic); ok2 {
 		return b.Info&IsString != 0
 	}
 	return false

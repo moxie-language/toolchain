@@ -26,64 +26,64 @@ func (c *Checker) checkStmt(s syntax.Stmt, scope *Scope) {
 	if s == nil {
 		return
 	}
-	switch s := s.(type) {
+	switch ss := s.(type) {
 	case *syntax.EmptyStmt:
 		// nothing
 	case *syntax.ExprStmt:
-		c.checkExpr(s.X, scope)
+		c.checkExpr(ss.X, scope)
 	case *syntax.SendStmt:
-		c.checkExpr(s.Chan, scope)
-		c.checkExpr(s.Value, scope)
+		c.checkExpr(ss.Chan, scope)
+		c.checkExpr(ss.Value, scope)
 	case *syntax.AssignStmt:
-		c.checkAssign(s, scope)
+		c.checkAssign(ss, scope)
 	case *syntax.BlockStmt:
-		inner := c.openScope(s, scope)
-		c.checkBlock(s, inner)
+		inner := c.openScope(ss, scope)
+		c.checkBlock(ss, inner)
 	case *syntax.DeclStmt:
-		for _, d := range s.DeclList {
+		for _, d := range ss.DeclList {
 			c.checkLocalDecl(d, scope)
 		}
 	case *syntax.IfStmt:
-		inner := c.openScope(s, scope)
-		if s.Init != nil {
-			c.checkStmt(s.Init, inner)
+		inner := c.openScope(ss, scope)
+		if ss.Init != nil {
+			c.checkStmt(ss.Init, inner)
 		}
-		c.checkExpr(s.Cond, inner)
-		c.checkBlock(s.Then, inner)
-		if s.Else != nil {
-			c.checkStmt(s.Else, inner)
+		c.checkExpr(ss.Cond, inner)
+		c.checkBlock(ss.Then, inner)
+		if ss.Else != nil {
+			c.checkStmt(ss.Else, inner)
 		}
 	case *syntax.ForStmt:
-		inner := c.openScope(s, scope)
-		if rc, ok := s.Init.(*syntax.RangeClause); ok {
+		inner := c.openScope(ss, scope)
+		if rc, ok := ss.Init.(*syntax.RangeClause); ok {
 			c.checkRange(rc, inner)
 		} else {
-			if s.Init != nil {
-				c.checkStmt(s.Init, inner)
+			if ss.Init != nil {
+				c.checkStmt(ss.Init, inner)
 			}
 		}
-		if s.Cond != nil {
-			c.checkExpr(s.Cond, inner)
+		if ss.Cond != nil {
+			c.checkExpr(ss.Cond, inner)
 		}
-		if s.Post != nil {
-			c.checkStmt(s.Post, inner)
+		if ss.Post != nil {
+			c.checkStmt(ss.Post, inner)
 		}
-		c.checkBlock(s.Body, inner)
+		c.checkBlock(ss.Body, inner)
 	case *syntax.SwitchStmt:
-		c.checkSwitch(s, scope)
+		c.checkSwitch(ss, scope)
 	case *syntax.SelectStmt:
-		c.checkSelect(s, scope)
+		c.checkSelect(ss, scope)
 	case *syntax.ReturnStmt:
-		if s.Results != nil {
-			c.checkExpr(s.Results, scope)
+		if ss.Results != nil {
+			c.checkExpr(ss.Results, scope)
 		}
 	case *syntax.BranchStmt:
 		// break/continue/goto/fallthrough - label checking deferred
 	case *syntax.LabeledStmt:
-		c.checkStmt(s.Stmt, scope)
+		c.checkStmt(ss.Stmt, scope)
 	case *syntax.CallStmt:
 		// go/defer
-		c.checkExpr(s.Call, scope)
+		c.checkExpr(ss.Call, scope)
 	}
 }
 
@@ -141,46 +141,46 @@ func (c *Checker) checkShortVarDecl(s *syntax.AssignStmt, scope *Scope) {
 }
 
 func (c *Checker) checkLocalDecl(d syntax.Decl, scope *Scope) {
-	switch d := d.(type) {
+	switch dd := d.(type) {
 	case *syntax.VarDecl:
 		var typ Type
-		if d.Type != nil {
-			typ = c.resolveTypeExpr(d.Type)
+		if dd.Type != nil {
+			typ = c.resolveTypeExpr(dd.Type)
 		}
-		if d.Values != nil && typ == nil {
-			typ = c.checkExpr(d.Values, scope)
+		if dd.Values != nil && typ == nil {
+			typ = c.checkExpr(dd.Values, scope)
 		}
-		for _, name := range d.NameList {
+		for _, name := range dd.NameList {
 			obj := NewTCVar(c.pkg, name.Value, typ)
 			c.declare(scope, name, obj)
 		}
 	case *syntax.TypeDecl:
-		underlying := c.resolveTypeExpr(d.Type)
-		obj := NewTypeName(c.pkg, d.Name.Value, nil)
+		underlying := c.resolveTypeExpr(dd.Type)
+		obj := NewTypeName(c.pkg, dd.Name.Value, nil)
 		named := NewNamed(obj, underlying)
 		obj.Typ = named
-		c.declare(scope, d.Name, obj)
+		c.declare(scope, dd.Name, obj)
 	case *syntax.ConstDecl:
 		var vals []ConstVal
-		if d.Values != nil {
-			vals = c.evalConstExprList(d.Values, 0)
+		if dd.Values != nil {
+			vals = c.evalConstExprList(dd.Values, 0)
 		}
 		var typ Type
-		if d.Type != nil {
-			typ = c.resolveTypeExpr(d.Type)
+		if dd.Type != nil {
+			typ = c.resolveTypeExpr(dd.Type)
 		}
-		for i, name := range d.NameList {
+		for i, name := range dd.NameList {
 			var cv ConstVal
 			if i < len(vals) {
 				cv = vals[i]
 			}
-			var t Type
+			var ct Type
 			if typ != nil {
-				t = typ
+				ct = typ
 			} else if cv != nil {
-				t = UntypedTypeOfCV(cv)
+				ct = UntypedTypeOfCV(cv)
 			}
-			obj := NewTCConst(c.pkg, name.Value, t, cv)
+			obj := NewTCConst(c.pkg, name.Value, ct, cv)
 			c.declare(scope, name, obj)
 		}
 	}
@@ -284,8 +284,8 @@ func exprNames(e syntax.Expr) (ns []*syntax.Name) {
 	if l, ok := e.(*syntax.ListExpr); ok {
 		var names []*syntax.Name
 		for _, el := range l.ElemList {
-			if n, ok := el.(*syntax.Name); ok {
-				names = append(names, n)
+			if n2, ok2 := el.(*syntax.Name); ok2 {
+				names = append(names, n2)
 			}
 		}
 		return names
@@ -298,17 +298,17 @@ func rangeKeyVal(t Type) (key, val Type) {
 	if t == nil {
 		return nil, nil
 	}
-	switch t := SafeUnderlying(t).(type) {
+	switch ut := SafeUnderlying(t).(type) {
 	case *Array:
-		return Typ[Int32], t.Elem
+		return Typ[Int32], ut.Elem
 	case *Slice:
-		return Typ[Int32], t.Elem
+		return Typ[Int32], ut.Elem
 	case *TCMap:
-		return t.Key, t.Elem
+		return ut.Key, ut.Elem
 	case *TCChan:
-		return t.Elem, nil
+		return ut.Elem, nil
 	case *Basic:
-		if t.Info&IsString != 0 {
+		if ut.Info&IsString != 0 {
 			return Typ[Int32], Typ[Uint8]
 		}
 	}

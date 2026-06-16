@@ -1,0 +1,398 @@
+package main
+
+import (
+	. "git.smesh.lol/moxie/pkg/types"
+)
+
+func (e *irEmitter) emitAlloc(a *SSAAlloc) {
+	reg := e.regName(a)
+	if at, ok := e.allocTypes[a]; ok && len(at) > 0 && at[0] == '[' {
+		if a.Heap {
+			ipt := e.intptrType()
+			e.nextReg++
+			sz := "%ha" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(sz)
+			e.w(" = ptrtoint ptr getelementptr (") ; e.w(at)
+			e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+			e.w("  ") ; e.w(reg)
+			e.w(" = call ptr @runtime.alloc(") ; e.w(ipt)
+			e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
+			e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
+			e.scopeTrackAlloc(reg)
+		} else {
+			e.w("  ") ; e.w(reg) ; e.w(" = alloca ") ; e.w(at) ; e.w("\n")
+			e.w("  store ") ; e.w(at) ; e.w(" zeroinitializer, ptr ") ; e.w(reg) ; e.w("\n")
+		}
+		return
+	}
+	elemType := e.llvmType(a.SSAType())
+	nilElem := false
+	if p, ok := SafeUnderlying(a.SSAType()).(*Pointer); ok {
+		if p.Base != nil {
+			elemType = e.llvmType(p.Base)
+		} else {
+			nilElem = true
+		}
+	}
+	isDoublePtr := false
+	if p, ok := SafeUnderlying(a.SSAType()).(*Pointer); ok && p.Base != nil {
+		if _, ok2 := SafeUnderlying(p.Base).(*Pointer); ok2 {
+			isDoublePtr = true
+		}
+	}
+	if isDoublePtr && elemType == "ptr" {
+		e.allocTypes[a] = elemType
+	} else if elemType == "void" {
+		inferred := e.inferAllocTypeFromStores(a)
+		elemType = inferred
+		e.allocTypes[a] = elemType
+	} else if elemType == "ptr" && nilElem {
+		inferred := e.inferAllocTypeFromStores(a)
+		if inferred != "ptr" && (len(inferred) == 0 || inferred[0] != '{') {
+			elemType = inferred
+		}
+		e.allocTypes[a] = elemType
+	} else {
+		isSimple := elemType == "i1" || elemType == "i8" || elemType == "i16" || elemType == "i32" || elemType == "i64" || elemType == "float" || elemType == "double" || elemType == "ptr"
+		if !isSimple {
+			override := e.inferAllocTypeFromStores(a)
+			if override != "ptr" && override != elemType {
+				bothScalar := len(elemType) > 0 && elemType[0] == 'i' && len(override) > 0 && override[0] == 'i'
+				isFloatToInt := (elemType == "double" || elemType == "float") && len(override) > 0 && override[0] == 'i'
+				isScalarToAgg := len(elemType) > 0 && (elemType[0] == 'i' || elemType == "double" || elemType == "float") && len(override) > 0 && override[0] == '{'
+				isAggToScalar := len(elemType) > 0 && elemType[0] == '{' && len(override) > 0 && (override[0] == 'i' || override == "double" || override == "float")
+				if !bothScalar && !isFloatToInt && !isScalarToAgg && !isAggToScalar {
+					elemType = override
+					e.allocTypes[a] = elemType
+				}
+			}
+		}
+	}
+	isSimple2 := elemType == "i1" || elemType == "i8" || elemType == "i16" || elemType == "i32" || elemType == "i64" || elemType == "float" || elemType == "double" || elemType == "ptr"
+	if !isDoublePtr && !isSimple2 {
+		if faType := e.inferAllocTypeFromFieldAddrs(a, elemType); faType != "" {
+			retType := e.inferAllocTypeFromReturn(a)
+			callType := e.inferAllocTypeFromCallArgs(a)
+			appendType := e.inferAllocTypeFromAppendUsage(a)
+			best := faType
+			if retType != "" && len(retType) > len(best) {
+				best = retType
+			}
+			if callType != "" && len(callType) > len(best) {
+				best = callType
+			}
+			if appendType != "" && len(appendType) > len(best) {
+				best = appendType
+			}
+			if elemType != best {
+				elemType = best
+				e.allocTypes[a] = elemType
+			}
+		}
+	}
+	if a.Heap {
+		ipt := e.intptrType()
+		e.nextReg++
+		sz := "%ha" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(sz)
+		e.w(" = ptrtoint ptr getelementptr (") ; e.w(elemType)
+		e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+		e.w("  ") ; e.w(reg)
+		e.w(" = call ptr @runtime.alloc(") ; e.w(ipt)
+		e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
+		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
+		e.scopeTrackAlloc(reg)
+	} else {
+		e.w("  ")
+		e.w(reg)
+		e.w(" = alloca ")
+		e.w(elemType)
+		e.w("\n")
+		e.w("  store ") ; e.w(elemType) ; e.w(" zeroinitializer, ptr ") ; e.w(reg) ; e.w("\n")
+	}
+}
+
+func (e *irEmitter) inferAllocTypeFromStores(a *SSAAlloc) (s string) {
+	allocName := a.SSAName()
+	for _, b := range e.curFunc.Blocks {
+		for _, instr := range b.Instrs {
+			if sv, okSv := instr.(*SSAStore); okSv && sv.Addr != nil && sv.Addr.SSAName() == allocName {
+				if at, ok2 := e.allocTypes[sv.Val]; ok2 && at != "ptr" && at != "void" {
+					return at
+				}
+				vt := e.llvmType(sv.Val.SSAType())
+				if vt != "void" && vt != "" {
+					return vt
+				}
+				if call, ok3 := sv.Val.(*SSACall); ok3 {
+					if b2, ok4 := call.Call.Value.(*SSABuiltin); ok4 && b2.SSAName() == "append" {
+						return e.sliceType()
+					}
+				}
+				if _, ok4 := sv.Val.(*SSASlice); ok4 {
+					return e.sliceType()
+				}
+				if _, ok5 := sv.Val.(*SSAMakeSlice); ok5 {
+					return e.sliceType()
+				}
+				}
+		}
+	}
+	return "ptr"
+}
+
+func (e *irEmitter) inferAllocTypeFromReturn(a *SSAAlloc) (s string) {
+	allocName := a.SSAName()
+	for _, b := range e.curFunc.Blocks {
+		for _, instr := range b.Instrs {
+			ret, ok := instr.(*SSAReturn)
+			if !ok {
+				continue
+			}
+			for i, rv := range ret.Results {
+				if rv == nil {
+					continue
+				}
+				if uop, ok2 := rv.(*SSAUnOp); ok2 && uop.Op == OpMul && uop.X != nil && uop.X.SSAName() == allocName {
+					sig := e.curFunc.Signature
+					if sig != nil && sig.Results != nil && i < sig.Results.Len() {
+						rt := e.llvmType(sig.Results.At(i).Typ)
+						if rt != "void" && rt != "ptr" && rt != "" {
+							return rt
+						}
+					}
+					return ""
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (e *irEmitter) inferAllocTypeFromCallArgs(a *SSAAlloc) (s string) {
+	allocName := a.SSAName()
+	loadNames := map[string]bool{}
+	for _, b := range e.curFunc.Blocks {
+		for _, instr := range b.Instrs {
+			if uop, ok := instr.(*SSAUnOp); ok && uop.Op == OpMul && uop.X != nil && uop.X.SSAName() == allocName {
+				loadNames[uop.SSAName()] = true
+			}
+		}
+	}
+	for _, b := range e.curFunc.Blocks {
+		for _, instr := range b.Instrs {
+			call, ok := instr.(*SSACall)
+			if !ok { continue }
+			callee := call.Call.Value
+			if callee == nil { continue }
+			var sig *Signature
+			if cfn, ok2 := callee.(*SSAFunction); ok2 && cfn.Signature != nil {
+				sig = cfn.Signature
+			} else {
+				sig, _ = SafeUnderlying(callee.SSAType()).(*Signature)
+			}
+			if sig == nil || sig.Params == nil { continue }
+			recvOff := 0
+			if sig.Recv != nil { recvOff = 1 }
+			for i, arg := range call.Call.Args {
+				if arg == nil { continue }
+				if !loadNames[arg.SSAName()] { continue }
+				sigIdx := i - recvOff
+				if sigIdx < 0 || sigIdx >= sig.Params.Len() { continue }
+				pt := e.llvmType(sig.Params.At(sigIdx).Typ)
+				if pt != "void" && pt != "ptr" && pt != "" && len(pt) > 0 && pt[0] == '{' {
+					return pt
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (e *irEmitter) inferAllocTypeFromAppendUsage(a *SSAAlloc) (s string) {
+	allocName := a.SSAName()
+	loadNames := map[string]bool{}
+	for _, b := range e.curFunc.Blocks {
+		for _, instr := range b.Instrs {
+			if uop, ok := instr.(*SSAUnOp); ok && uop.Op == OpMul && uop.X != nil && uop.X.SSAName() == allocName {
+				loadNames[uop.SSAName()] = true
+			}
+		}
+	}
+	if len(loadNames) == 0 {
+		return ""
+	}
+	for _, b := range e.curFunc.Blocks {
+		for _, instr := range b.Instrs {
+			call, ok := instr.(*SSACall)
+			if !ok {
+				continue
+			}
+			bi, ok2 := call.Call.Value.(*SSABuiltin)
+			if !ok2 || bi.SSAName() != "append" {
+				continue
+			}
+			if len(call.Call.Args) < 2 {
+				continue
+			}
+			for j := 1; j < len(call.Call.Args); j++ {
+				arg := call.Call.Args[j]
+				if arg == nil {
+					continue
+				}
+				if !loadNames[arg.SSAName()] {
+					continue
+				}
+				sliceArg := call.Call.Args[0]
+				if sl, ok3 := SafeUnderlying(sliceArg.SSAType()).(*Slice); ok3 {
+					et := e.llvmType(sl.Elem)
+					if et != "" && et != "void" && et != "ptr" && len(et) > 0 && et[0] == '{' {
+						return et
+					}
+				}
+				if sl, ok3 := sliceArg.SSAType().(*Slice); ok3 {
+					et := e.llvmType(sl.Elem)
+					if et != "" && et != "void" && et != "ptr" && len(et) > 0 && et[0] == '{' {
+						return et
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (e *irEmitter) inferAllocTypeFromFieldAddrs(a *SSAAlloc, baseType string) (s string) {
+	allocName := a.SSAName()
+	names := map[string]bool{allocName: true}
+	for _, b := range e.curFunc.Blocks {
+		for _, instr := range b.Instrs {
+			if uop, ok := instr.(*SSAUnOp); ok && uop.Op == OpMul && uop.X != nil && uop.X.SSAName() == allocName {
+				names[uop.SSAName()] = true
+			}
+		}
+	}
+	maxField := -1
+	fieldTypes := map[int32]string{}
+	for _, b := range e.curFunc.Blocks {
+		for _, instr := range b.Instrs {
+			fa, ok := instr.(*SSAFieldAddr)
+			if !ok || fa.X == nil || !names[fa.X.SSAName()] {
+				continue
+			}
+			if fa.Field > maxField {
+				maxField = fa.Field
+			}
+			faName := fa.SSAName()
+			for _, b2 := range e.curFunc.Blocks {
+				for _, i2 := range b2.Instrs {
+					if sv, ok2 := i2.(*SSAStore); ok2 && sv.Addr != nil && sv.Addr.SSAName() == faName {
+						ft := e.llvmType(sv.Val.SSAType())
+						if ft != "void" && ft != "" {
+							fieldTypes[fa.Field] = ft
+						}
+					}
+					if ld, ok2 := i2.(*SSAUnOp); ok2 && ld.Op == OpMul && ld.X != nil && ld.X.SSAName() == faName {
+						ft := e.llvmType(ld.SSAType())
+						if ft != "void" && ft != "" && ft != "ptr" {
+							if _, exists := fieldTypes[fa.Field]; !exists {
+								fieldTypes[fa.Field] = ft
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if maxField < 0 {
+		return ""
+	}
+	baseFields := parseStructFields(baseType)
+	top := maxField
+	if len(baseFields)-1 > top {
+		top = len(baseFields) - 1
+	}
+	s := "{"
+	for i := 0; i <= top; i++ {
+		if i > 0 {
+			s = s | ", "
+		}
+		ft, ok := fieldTypes[i]
+		if !ok {
+			if i < len(baseFields) && baseFields[i] != "" {
+				ft = baseFields[i]
+			} else {
+				ft = "ptr"
+			}
+		} else if i < len(baseFields) && baseFields[i] != "" {
+			bw := irParseIntWidth(baseFields[i])
+			fw := irParseIntWidth(ft)
+			if bw > 0 && fw > 0 && bw > fw {
+				ft = baseFields[i]
+			}
+		}
+		s = s | ft
+	}
+	return s | "}"
+}
+
+func (e *irEmitter) inferAllocTypeFromUsage(a *SSAAlloc) (s string) {
+	allocName := a.SSAName()
+	loadNames := map[string]bool{}
+	for _, b := range e.curFunc.Blocks {
+		for _, instr := range b.Instrs {
+			load, ok := instr.(*SSAUnOp)
+			if !ok || load.Op != OpMul {
+				continue
+			}
+			if load.X != nil && load.X.SSAName() == allocName {
+				loadNames[load.SSAName()] = true
+			}
+		}
+	}
+	if len(loadNames) == 0 {
+		return "ptr"
+	}
+	for _, b := range e.curFunc.Blocks {
+		for _, instr := range b.Instrs {
+			switch u := instr.(type) {
+			case *SSASlice:
+				if u.X != nil && loadNames[u.X.SSAName()] {
+					return e.sliceType()
+				}
+			case *SSAIndexAddr:
+				if u.X != nil && loadNames[u.X.SSAName()] {
+					return e.sliceType()
+				}
+			case *SSACall:
+				for _, arg := range u.Call.Args {
+					if arg != nil && loadNames[arg.SSAName()] {
+						if bi, ok2 := u.Call.Value.(*SSABuiltin); ok2 {
+							nm := bi.SSAName()
+							if nm == "append" || nm == "copy" || nm == "len" || nm == "cap" {
+								return e.sliceType()
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return "ptr"
+}
+
+func (e *irEmitter) emitZeroReg(reg string, typ Type) {
+	rt := e.llvmType(typ)
+	if rt == "void" || rt == "" {
+		rt = "i32"
+	}
+	if rt == "ptr" {
+		e.w("  ") ; e.w(reg) ; e.w(" = inttoptr " | e.intptrType() | " 0 to ptr\n")
+	} else if rt == "i1" {
+		e.w("  ") ; e.w(reg) ; e.w(" = add i1 false, false\n")
+	} else if e.intBits(rt) > 0 {
+		e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(rt) ; e.w(" 0, 0\n")
+	} else {
+		e.w("  ") ; e.w(reg) ; e.w(" = add i32 0, 0\n")
+	}
+}

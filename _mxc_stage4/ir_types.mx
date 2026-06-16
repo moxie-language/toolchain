@@ -1,0 +1,564 @@
+package main
+
+import (
+	"git.smesh.lol/moxie/pkg/mxutil"
+	. "git.smesh.lol/moxie/pkg/types"
+)
+
+func (e *irEmitter) dataLayout() (s string) {
+	if len(e.triple) >= 6 && e.triple[:6] == "x86_64" {
+		return "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+	}
+	if len(e.triple) >= 7 && e.triple[:7] == "aarch64" {
+		return "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128"
+	}
+	if len(e.triple) >= 6 && e.triple[:6] == "wasm32" {
+		return "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20"
+	}
+	if len(e.triple) >= 3 && e.triple[:3] == "arm" {
+		return "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"
+	}
+	return ""
+}
+
+func (e *irEmitter) resolvedType(v SSAValue, fallback string) (s string) {
+	if _, isIA := v.(*SSAIndexAddr); !isIA {
+		if at, ok := e.allocTypes[v]; ok {
+			return at
+		}
+	}
+	if n, ok := e.valName[v]; ok {
+		if rt, ok2 := e.regTypes[n]; ok2 {
+			return rt
+		}
+	}
+	op := e.operandNoSideEffect(v)
+	if len(op) > 0 && op[0] == '%' {
+		if rt, ok := e.regTypes[op]; ok {
+			return rt
+		}
+	}
+	return fallback
+}
+
+func (e *irEmitter) llvmType(t Type) (s string) {
+	if t == nil {
+		return "void"
+	}
+	u := SafeUnderlying(t)
+	if u == nil {
+		if _, ok := t.(*Slice); ok {
+			return e.sliceType()
+		}
+		if n, ok := t.(*Named); ok {
+			if n.Under != nil {
+				return e.llvmType(n.Under)
+			}
+			if n.Obj != nil && n.Obj.Pkg != nil {
+				pkgPath := n.Obj.Pkg.Path
+				nm := n.Obj.Name
+				pkg := ImportRegistry[pkgPath]
+				if pkg == nil && e.pkg != nil && e.pkg.Pkg != nil && e.pkg.Pkg.Path == pkgPath {
+					pkg = e.pkg.Pkg
+				}
+				if pkg != nil && pkg.Scope != nil {
+					obj := pkg.Scope.Lookup(nm)
+					if obj != nil {
+						if nt, ok2 := ObjectType(obj).(*Named); ok2 && nt.Under != nil {
+							return e.llvmType(nt.Under)
+						}
+					}
+				}
+			}
+			return "ptr"
+		}
+		return "ptr"
+	}
+	t = u
+	switch tt := t.(type) {
+	case *Basic:
+		return e.llvmBasicType(tt)
+	case *Pointer:
+		return "ptr"
+	case *Slice:
+		return e.sliceType()
+	case *Array:
+		n := tt.Len
+		if n < 0 {
+			return e.sliceType()
+		}
+		elem := e.llvmType(tt.Elem)
+		return "[" | irItoa(int32(n)) | " x " | elem | "]"
+	case *TCStruct:
+		return e.llvmStructType(tt)
+	case *Signature:
+		return "{ptr, ptr}"
+	case *TCMap:
+		return "ptr"
+	case *TCChan:
+		return "ptr"
+	case *TCInterface:
+		return e.ifaceType()
+	case *Named:
+		if tt.Obj != nil && tt.Obj.Name == "error" {
+			return e.ifaceType()
+		}
+		if tt.Under != nil {
+			if _, isIface := tt.Under.(*TCInterface); isIface {
+				return e.ifaceType()
+			}
+			return e.llvmType(tt.Under)
+		}
+		if tt.Obj != nil && tt.Obj.Pkg != nil {
+			pkgPath := tt.Obj.Pkg.Path
+			nm := tt.Obj.Name
+			pkg := ImportRegistry[pkgPath]
+			if pkg == nil && e.pkg != nil && e.pkg.Pkg != nil && e.pkg.Pkg.Path == pkgPath {
+				pkg = e.pkg.Pkg
+			}
+			if pkg != nil && pkg.Scope != nil {
+				obj := pkg.Scope.Lookup(nm)
+				if obj != nil {
+					ot := ObjectType(obj)
+					if ot != nil && ot != Type(tt) {
+						return e.llvmType(ot)
+					}
+				}
+			}
+		}
+		if tt.NumMethods() > 0 {
+			return e.ifaceType()
+		}
+		return "ptr"
+	case *Tuple:
+		if tt == nil || tt.Len() == 0 {
+			return "void"
+		}
+		if tt.Len() == 1 {
+			return e.llvmType(tt.At(0).Typ)
+		}
+		sv := "{"
+		for i := 0; i < tt.Len(); i++ {
+			if i > 0 {
+				sv = sv | ", "
+			}
+			ft := e.llvmType(tt.At(i).Typ)
+			if ft == "void" {
+				ft = "ptr"
+			}
+			sv = sv | ft
+		}
+		return sv | "}"
+	}
+	return "i8"
+}
+
+func (e *irEmitter) llvmBasicType(t *Basic) (s string) {
+	switch t.Kind {
+	case Bool:
+		return "i1"
+	case Int8, Uint8:
+		return "i8"
+	case Int16, Uint16:
+		return "i16"
+	case Int32, Uint32:
+		return "i32"
+	case Int64, Uint64:
+		return "i64"
+	case Float32:
+		return "float"
+	case Float64:
+		return "double"
+	case TCString:
+		return e.sliceType()
+	case UnsafePointer:
+		return "ptr"
+	case UntypedBool:
+		return "i1"
+	case UntypedInt, UntypedRune:
+		return "i32"
+	case UntypedFloat:
+		return "double"
+	case UntypedString:
+		return e.sliceType()
+	}
+	return "i32"
+}
+
+func (e *irEmitter) ptrType() (s string) {
+	return "ptr"
+}
+
+func (e *irEmitter) intptrType() (s string) {
+	if e.ptrBits == 32 {
+		return "i32"
+	}
+	return "i64"
+}
+
+// truncToI32 emits a trunc from intptr to i32, or returns val unchanged
+// if intptr is already i32 (wasm32 target).
+func (e *irEmitter) truncToI32(dst, val string) {
+	ipt := e.intptrType()
+	if ipt == "i32" {
+		e.w("  ") ; e.w(dst) ; e.w(" = add i32 ") ; e.w(val) ; e.w(", 0\n")
+		return
+	}
+	e.w("  ") ; e.w(dst) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(val) ; e.w(" to i32\n")
+}
+
+func (e *irEmitter) sliceType() (s string) {
+	ipt := e.intptrType()
+	return "{ptr, " | ipt | ", " | ipt | "}"
+}
+
+func (e *irEmitter) ifaceType() (s string) {
+	return "{" | e.intptrType() | ", ptr}"
+}
+
+func (e *irEmitter) llvmStructType(t *TCStruct) (s string) {
+	if t == nil {
+		fn := ""
+		if e.curFunc != nil {
+			fn = e.curFunc.name
+		}
+		mxutil.WriteStr(2, "BUG: llvmStructType nil in " | fn | "\n")
+		return "{}"
+	}
+	s := "{"
+	for i := 0; i < t.NumFields(); i++ {
+		if i > 0 {
+			s = s | ", "
+		}
+		ft := e.llvmType(t.Field(i).Typ)
+		if ft == "void" {
+			ft = "ptr"
+		}
+		s = s | ft
+	}
+	return s | "}"
+}
+
+func (e *irEmitter) inferGlobalTypeFromLoads(g *SSAGlobal) (s string) {
+	gname := g.SSAName()
+	for _, member := range e.pkgMembers() {
+		fn, ok := member.(*SSAFunction)
+		if !ok { continue }
+		for _, b := range fn.Blocks {
+			for _, instr := range b.Instrs {
+				if load, ok2 := instr.(*SSAUnOp); ok2 && load.Op == OpMul {
+					if lg, ok3 := load.X.(*SSAGlobal); ok3 && lg.SSAName() == gname {
+						lt := e.llvmType(load.SSAType())
+						if lt != "void" && lt != "i8" && lt != "ptr" {
+							return lt
+						}
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (e *irEmitter) resolveGlobalDeclType(g *SSAGlobal) (s string) {
+	name := e.globalName(g)
+	if dt, ok := e.globalDeclTypes[name]; ok {
+		return dt
+	}
+	typ := e.llvmType(g.typ)
+	gtu := SafeUnderlying(g.typ)
+	elemNil := false
+	if p, ok := gtu.(*Pointer); ok {
+		pElem := p.Base
+		if pElem == nil {
+			elemNil = true
+			typ = e.ifaceType()
+		} else {
+			typ = e.llvmType(pElem)
+		}
+	}
+	if !elemNil && (typ == "ptr" || typ == "i8") {
+		if gt, ok := e.globalTypes[name]; ok && gt != "ptr" && gt != "void" && gt != "" {
+			typ = gt
+		}
+	}
+	if typ == "void" {
+		typ = "i1"
+	}
+	e.globalDeclTypes[name] = typ
+	return typ
+}
+
+func (e *irEmitter) tlsPrefix() (s string) {
+	if len(e.triple) >= 4 && e.triple[:4] == "wasm" {
+		return "global "
+	}
+	return "thread_local global "
+}
+
+func (e *irEmitter) tlsExternalPrefix() (s string) {
+	if len(e.triple) >= 4 && e.triple[:4] == "wasm" {
+		return "external global "
+	}
+	return "external thread_local global "
+}
+
+func (e *irEmitter) resolveResultType(t Type) (s string) {
+	rt := e.llvmType(t)
+	if rt != "void" { return rt }
+	if t == nil { return "ptr" }
+	u := SafeUnderlying(t)
+	if u == nil { return "ptr" }
+	switch u.(type) {
+	case *TCInterface:
+		return e.ifaceType()
+	case *Signature:
+		return "{ptr, ptr}"
+	case *TCStruct:
+		return e.llvmStructType(u.(*TCStruct))
+	case *Slice:
+		return e.sliceType()
+	}
+	return "ptr"
+}
+
+func (e *irEmitter) funcRetType(f *SSAFunction) (s string) {
+	if f.Signature == nil || f.Signature.Results == nil || f.Signature.Results.Len() == 0 {
+		return "void"
+	}
+	if f.Signature.Results.Len() == 1 {
+		return e.resolveResultType(f.Signature.Results.At(0).Typ)
+	}
+	s := "{"
+	for i := 0; i < f.Signature.Results.Len(); i++ {
+		if i > 0 {
+			s = s | ", "
+		}
+		s = s | e.resolveResultType(f.Signature.Results.At(i).Typ)
+	}
+	return s | "}"
+}
+
+func (e *irEmitter) coerceInt(valReg string, fromType string, toType string) (s string) {
+	if fromType == toType {
+		return valReg
+	}
+	fromBits := e.intBits(fromType)
+	toBits := e.intBits(toType)
+	if fromBits == 0 || toBits == 0 {
+		return valReg
+	}
+	if isNumericLiteral(valReg) {
+		return valReg
+	}
+	e.nextReg++
+	r := "%rc" | irItoa(e.nextReg)
+	if fromBits > toBits {
+		e.w("  ") ; e.w(r) ; e.w(" = trunc ") ; e.w(fromType) ; e.w(" ") ; e.w(valReg) ; e.w(" to ") ; e.w(toType) ; e.w("\n")
+	} else {
+		e.w("  ") ; e.w(r) ; e.w(" = sext ") ; e.w(fromType) ; e.w(" ") ; e.w(valReg) ; e.w(" to ") ; e.w(toType) ; e.w("\n")
+	}
+	return r
+}
+
+func (e *irEmitter) intBits(ty string) (n int32) {
+	switch ty {
+	case "i1":
+		return 1
+	case "i8":
+		return 8
+	case "i16":
+		return 16
+	case "i32":
+		return 32
+	case "i64":
+		return 64
+	}
+	return 0
+}
+
+func (e *irEmitter) intToFloat(valReg string, fromType string, toType string) (s string) {
+	if rt, ok := e.regTypes[valReg]; ok && (rt == "double" || rt == "float") {
+		return valReg
+	}
+	e.nextReg++
+	r := "%itf" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(r) ; e.w(" = sitofp ") ; e.w(fromType) ; e.w(" ") ; e.w(valReg) ; e.w(" to ") ; e.w(toType) ; e.w("\n")
+	return r
+}
+
+func (e *irEmitter) floatBinOp(op SSAOp) (s string) {
+	switch op {
+	case OpAdd: return "fadd"
+	case OpSub: return "fsub"
+	case OpMul: return "fmul"
+	case OpQuo: return "fdiv"
+	case OpEql: return "fcmp oeq"
+	case OpNeq: return "fcmp une"
+	case OpLss: return "fcmp olt"
+	case OpGtr: return "fcmp ogt"
+	case OpLeq: return "fcmp ole"
+	case OpGeq: return "fcmp oge"
+	}
+	return "fadd"
+}
+
+func (e *irEmitter) arrayElemType(arrType string) (s string) {
+	// "[6 x double]" -> "double"
+	xPos := -1
+	for i := 0; i < len(arrType); i++ {
+		if arrType[i] == 'x' && i > 0 && arrType[i-1] == ' ' {
+			xPos = i
+			break
+		}
+	}
+	if xPos < 0 || xPos+2 >= len(arrType) {
+		return arrType
+	}
+	end := len(arrType)
+	if arrType[end-1] == ']' {
+		end = end - 1
+	}
+	return arrType[xPos+2 : end]
+}
+
+func (e *irEmitter) namedResultType(nr *SSAAlloc) (s string) {
+	if p, ok := SafeUnderlying(nr.SSAType()).(*Pointer); ok && p.Base != nil {
+		return e.llvmType(p.Base)
+	}
+	return e.llvmType(nr.SSAType())
+}
+
+func (e *irEmitter) conversionOp(from, to Type) (s string) {
+	fromBits := e.typeBits(from)
+	toBits := e.typeBits(to)
+
+	fromFloat := false
+	toFloat := false
+	fromSigned := true
+	if b, ok := SafeUnderlying(from).(*Basic); ok {
+		fromFloat = b.Info&IsFloat != 0
+		if b.Info&IsUnsigned != 0 {
+			fromSigned = false
+		}
+	}
+	if b, ok := SafeUnderlying(to).(*Basic); ok {
+		toFloat = b.Info&IsFloat != 0
+	}
+
+	if fromFloat && toFloat {
+		if fromBits < toBits {
+			return "fpext"
+		}
+		return "fptrunc"
+	}
+	if fromFloat && !toFloat {
+		if fromSigned {
+			return "fptosi"
+		}
+		return "fptoui"
+	}
+	if !fromFloat && toFloat {
+		if fromSigned {
+			return "sitofp"
+		}
+		return "uitofp"
+	}
+
+	_, fromPtr := SafeUnderlying(from).(*Pointer)
+	_, toPtr := SafeUnderlying(to).(*Pointer)
+	if !fromPtr && e.llvmType(from) == "ptr" {
+		fromPtr = true
+	}
+	if !toPtr && e.llvmType(to) == "ptr" {
+		toPtr = true
+	}
+	if fromPtr && !toPtr {
+		return "ptrtoint"
+	}
+	if !fromPtr && toPtr {
+		return "inttoptr"
+	}
+
+	if fromBits < toBits {
+		// Go semantics: the SOURCE signedness decides the extension.
+		// int32(-1) -> uint64 must sign-extend to 0xFFFFFFFFFFFFFFFF.
+		if fromSigned {
+			return "sext"
+		}
+		return "zext"
+	}
+	if fromBits > toBits {
+		return "trunc"
+	}
+	return "bitcast"
+}
+
+func (e *irEmitter) typeBits(t Type) (n int32) {
+	if t == nil {
+		return 0
+	}
+	switch tt := SafeUnderlying(t).(type) {
+	case *Basic:
+		switch tt.Kind {
+		case Bool:
+			return 1
+		case Int8, Uint8:
+			return 8
+		case Int16, Uint16:
+			return 16
+		case Int32, Uint32:
+			return 32
+		case Int64, Uint64:
+			return 64
+		case Float32:
+			return 32
+		case Float64:
+			return 64
+		case UntypedInt, UntypedRune:
+			return 32
+		case UntypedFloat:
+			return 64
+		case UnsafePointer:
+			return e.ptrBits
+		}
+	case *Pointer:
+		return e.ptrBits
+	}
+	return 0
+}
+
+func (e *irEmitter) isScalarType(t string) (ok bool) {
+	return t == "i1" || t == "i8" || t == "i16" || t == "i32" || t == "i64" || t == "float" || t == "double"
+}
+
+func (e *irEmitter) structField0Type(t string) (s string) {
+	if len(t) < 2 || t[0] != '{' {
+		return t
+	}
+	depth := 0
+	start := -1
+	for i := 0; i < len(t); i++ {
+		if t[i] == '{' {
+			depth++
+			if depth == 1 {
+				start = i + 1
+				for start < len(t) && t[start] == ' ' {
+					start++
+				}
+			}
+		} else if t[i] == '}' {
+			depth--
+			if depth == 0 {
+				break
+			}
+		} else if t[i] == ',' && depth == 1 {
+			end := i
+			for end > start && t[end-1] == ' ' {
+				end--
+			}
+			return t[start:end]
+		}
+	}
+	return "ptr"
+}

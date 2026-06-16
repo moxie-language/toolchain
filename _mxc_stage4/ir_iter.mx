@@ -1,0 +1,196 @@
+package main
+
+import (
+	. "git.smesh.lol/moxie/pkg/types"
+)
+
+func (e *irEmitter) emitRange(r *SSARange) {
+	reg := e.regName(r)
+	ipt := e.intptrType()
+	if _, ok := SafeUnderlying(r.X.SSAType()).(*TCMap); ok {
+		e.w("  ") ; e.w(reg) ; e.w(" = alloca [48 x i8]\n")
+		e.w("  call void @llvm.memset.p0." | ipt | "(ptr ") ; e.w(reg) ; e.w(", i8 0, " | ipt | " 48, i1 false)\n")
+		e.declareRuntime("llvm.memset.p0." | ipt, "void", "ptr, i8, " | ipt | ", i1")
+		return
+	}
+	ipt := e.intptrType()
+	e.w("  ") ; e.w(reg) ; e.w(" = alloca ") ; e.w(ipt) ; e.w("\n")
+	e.w("  store ") ; e.w(ipt) ; e.w(" 0, ptr ") ; e.w(reg) ; e.w("\n")
+}
+
+func (e *irEmitter) emitNext(n *SSANext) {
+	reg := e.regName(n)
+	rangeInstr := n.Iter.(*SSARange)
+	iterPtr := e.regName(rangeInstr)
+	collVal := e.operand(rangeInstr.X)
+	if mt, ok := SafeUnderlying(rangeInstr.X.SSAType()).(*TCMap); ok {
+		e.emitNextMap(reg, iterPtr, collVal, mt, n)
+		return
+	}
+	if arr, ok := SafeUnderlying(rangeInstr.X.SSAType()).(*Array); ok && arr.Len >= 0 {
+		e.emitNextArray(reg, iterPtr, collVal, arr, n)
+		return
+	}
+	if p, ok := SafeUnderlying(rangeInstr.X.SSAType()).(*Pointer); ok {
+		if ar, ok2 := SafeUnderlying(p.Base).(*Array); ok2 && ar.Len >= 0 {
+			e.emitNextPtrArray(reg, iterPtr, collVal, ar, n)
+			return
+		}
+	}
+	collLLVM := e.llvmType(rangeInstr.X.SSAType())
+	if len(collLLVM) > 0 && collLLVM[0] == 'i' {
+		tupType := e.llvmType(n.SSAType())
+		if at, ok := e.allocTypes[n]; ok {
+			tupType = at
+		}
+		e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" zeroinitializer, i1 false, 0\n")
+		return
+	}
+	e.emitNextSlice(reg, iterPtr, collVal, rangeInstr, n)
+}
+
+func (e *irEmitter) emitNextSlice(reg, iterPtr, collVal string, rangeInstr *SSARange, n *SSANext) {
+	ipt := e.intptrType()
+	sty := e.sliceType()
+	idx := e.nextReg2("rn")
+	e.w("  ") ; e.w(idx) ; e.w(" = load ") ; e.w(ipt) ; e.w(", ptr ") ; e.w(iterPtr) ; e.w("\n")
+	slLen := e.nextReg2("rn")
+	e.w("  ") ; e.w(slLen) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(collVal) ; e.w(", 1\n")
+	ok := e.nextReg2("rn")
+	e.w("  ") ; e.w(ok) ; e.w(" = icmp ult ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(", ") ; e.w(slLen) ; e.w("\n")
+	key := e.nextReg2("rn")
+	e.truncToI32(key, idx)
+	dataPtr := e.nextReg2("rn")
+	e.w("  ") ; e.w(dataPtr) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(collVal) ; e.w(", 0\n")
+	elemType := "i32"
+	if sl, ok2 := SafeUnderlying(rangeInstr.X.SSAType()).(*Slice); ok2 {
+		elemType = e.llvmType(sl.Elem)
+	}
+	eptr := e.nextReg2("rn")
+	e.w("  ") ; e.w(eptr) ; e.w(" = getelementptr ") ; e.w(elemType)
+	e.w(", ptr ") ; e.w(dataPtr) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w("\n")
+	fallback := e.nextReg2("rn")
+	e.w("  ") ; e.w(fallback) ; e.w(" = alloca ") ; e.w(elemType) ; e.w("\n")
+	e.w("  store ") ; e.w(elemType) ; e.w(" zeroinitializer, ptr ") ; e.w(fallback) ; e.w("\n")
+	safePtr := e.nextReg2("rn")
+	e.w("  ") ; e.w(safePtr) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ptr ") ; e.w(eptr)
+	e.w(", ptr ") ; e.w(fallback) ; e.w("\n")
+	elem := e.nextReg2("rn")
+	e.w("  ") ; e.w(elem) ; e.w(" = load ") ; e.w(elemType) ; e.w(", ptr ") ; e.w(safePtr) ; e.w("\n")
+	inc := e.nextReg2("rn")
+	e.w("  ") ; e.w(inc) ; e.w(" = add ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(", 1\n")
+	newCnt := e.nextReg2("rn")
+	e.w("  ") ; e.w(newCnt) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(inc)
+	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w("\n")
+	e.w("  store ") ; e.w(ipt) ; e.w(" ") ; e.w(newCnt) ; e.w(", ptr ") ; e.w(iterPtr) ; e.w("\n")
+	tupType := "{i1, i32, " | elemType | "}"
+	e.allocTypes[n] = tupType
+	t1 := e.nextReg2("rn")
+	e.w("  ") ; e.w(t1) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" undef, i1 ") ; e.w(ok) ; e.w(", 0\n")
+	t2 := e.nextReg2("rn")
+	e.w("  ") ; e.w(t2) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" ") ; e.w(t1) ; e.w(", i32 ") ; e.w(key) ; e.w(", 1\n")
+	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" ") ; e.w(t2) ; e.w(", ") ; e.w(elemType) ; e.w(" ") ; e.w(elem) ; e.w(", 2\n")
+}
+
+func (e *irEmitter) emitNextArray(reg, iterPtr, collVal string, arr *Array, n *SSANext) {
+	ipt := e.intptrType()
+	arrLen := arr.Len
+	elemType := e.llvmType(arr.Elem)
+	arrType := "[" | irItoa(int32(arrLen)) | " x " | elemType | "]"
+	idx := e.nextReg2("rn")
+	e.w("  ") ; e.w(idx) ; e.w(" = load ") ; e.w(ipt) ; e.w(", ptr ") ; e.w(iterPtr) ; e.w("\n")
+	ok := e.nextReg2("rn")
+	e.w("  ") ; e.w(ok) ; e.w(" = icmp ult ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(", ") ; e.w(irItoa(int32(arrLen))) ; e.w("\n")
+	key := e.nextReg2("rn")
+	e.truncToI32(key, idx)
+	// Store array to memory to get element pointer via GEP
+	arrAlloca := e.nextReg2("rn")
+	e.w("  ") ; e.w(arrAlloca) ; e.w(" = alloca ") ; e.w(arrType) ; e.w("\n")
+	e.w("  store ") ; e.w(arrType) ; e.w(" ") ; e.w(collVal) ; e.w(", ptr ") ; e.w(arrAlloca) ; e.w("\n")
+	eptr := e.nextReg2("rn")
+	e.w("  ") ; e.w(eptr) ; e.w(" = getelementptr inbounds ") ; e.w(arrType)
+	e.w(", ptr ") ; e.w(arrAlloca) ; e.w(", i32 0, ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w("\n")
+	fallback := e.nextReg2("rn")
+	e.w("  ") ; e.w(fallback) ; e.w(" = alloca ") ; e.w(elemType) ; e.w("\n")
+	e.w("  store ") ; e.w(elemType) ; e.w(" zeroinitializer, ptr ") ; e.w(fallback) ; e.w("\n")
+	safePtr := e.nextReg2("rn")
+	e.w("  ") ; e.w(safePtr) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ptr ") ; e.w(eptr)
+	e.w(", ptr ") ; e.w(fallback) ; e.w("\n")
+	elem := e.nextReg2("rn")
+	e.w("  ") ; e.w(elem) ; e.w(" = load ") ; e.w(elemType) ; e.w(", ptr ") ; e.w(safePtr) ; e.w("\n")
+	inc := e.nextReg2("rn")
+	e.w("  ") ; e.w(inc) ; e.w(" = add ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(", 1\n")
+	newCnt := e.nextReg2("rn")
+	e.w("  ") ; e.w(newCnt) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(inc)
+	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w("\n")
+	e.w("  store ") ; e.w(ipt) ; e.w(" ") ; e.w(newCnt) ; e.w(", ptr ") ; e.w(iterPtr) ; e.w("\n")
+	tupType := "{i1, i32, " | elemType | "}"
+	e.allocTypes[n] = tupType
+	t1 := e.nextReg2("rn")
+	e.w("  ") ; e.w(t1) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" undef, i1 ") ; e.w(ok) ; e.w(", 0\n")
+	t2 := e.nextReg2("rn")
+	e.w("  ") ; e.w(t2) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" ") ; e.w(t1) ; e.w(", i32 ") ; e.w(key) ; e.w(", 1\n")
+	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" ") ; e.w(t2) ; e.w(", ") ; e.w(elemType) ; e.w(" ") ; e.w(elem) ; e.w(", 2\n")
+}
+
+func (e *irEmitter) emitNextPtrArray(reg, iterPtr, collVal string, arr *Array, n *SSANext) {
+	ipt := e.intptrType()
+	arrLen := arr.Len
+	elemType := e.llvmType(arr.Elem)
+	arrType := "[" | irItoa(int32(arrLen)) | " x " | elemType | "]"
+	idx := e.nextReg2("rn")
+	e.w("  ") ; e.w(idx) ; e.w(" = load ") ; e.w(ipt) ; e.w(", ptr ") ; e.w(iterPtr) ; e.w("\n")
+	ok := e.nextReg2("rn")
+	e.w("  ") ; e.w(ok) ; e.w(" = icmp ult ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(", ") ; e.w(irItoa(int32(arrLen))) ; e.w("\n")
+	key := e.nextReg2("rn")
+	e.truncToI32(key, idx)
+	eptr := e.nextReg2("rn")
+	e.w("  ") ; e.w(eptr) ; e.w(" = getelementptr inbounds ") ; e.w(arrType)
+	e.w(", ptr ") ; e.w(collVal) ; e.w(", i32 0, ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w("\n")
+	fallback := e.nextReg2("rn")
+	e.w("  ") ; e.w(fallback) ; e.w(" = alloca ") ; e.w(elemType) ; e.w("\n")
+	e.w("  store ") ; e.w(elemType) ; e.w(" zeroinitializer, ptr ") ; e.w(fallback) ; e.w("\n")
+	safePtr := e.nextReg2("rn")
+	e.w("  ") ; e.w(safePtr) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ptr ") ; e.w(eptr)
+	e.w(", ptr ") ; e.w(fallback) ; e.w("\n")
+	elem := e.nextReg2("rn")
+	e.w("  ") ; e.w(elem) ; e.w(" = load ") ; e.w(elemType) ; e.w(", ptr ") ; e.w(safePtr) ; e.w("\n")
+	inc := e.nextReg2("rn")
+	e.w("  ") ; e.w(inc) ; e.w(" = add ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(", 1\n")
+	newCnt := e.nextReg2("rn")
+	e.w("  ") ; e.w(newCnt) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(inc)
+	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w("\n")
+	e.w("  store ") ; e.w(ipt) ; e.w(" ") ; e.w(newCnt) ; e.w(", ptr ") ; e.w(iterPtr) ; e.w("\n")
+	tupType := "{i1, i32, " | elemType | "}"
+	e.allocTypes[n] = tupType
+	t1 := e.nextReg2("rn")
+	e.w("  ") ; e.w(t1) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" undef, i1 ") ; e.w(ok) ; e.w(", 0\n")
+	t2 := e.nextReg2("rn")
+	e.w("  ") ; e.w(t2) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" ") ; e.w(t1) ; e.w(", i32 ") ; e.w(key) ; e.w(", 1\n")
+	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" ") ; e.w(t2) ; e.w(", ") ; e.w(elemType) ; e.w(" ") ; e.w(elem) ; e.w(", 2\n")
+}
+
+func (e *irEmitter) emitNextMap(reg, iterPtr, collVal string, mt *TCMap, n *SSANext) {
+	keyType := e.llvmType(mt.Key)
+	valType := e.llvmType(mt.Elem)
+	keyAlloca := e.nextReg2("mn")
+	e.w("  ") ; e.w(keyAlloca) ; e.w(" = alloca ") ; e.w(keyType) ; e.w("\n")
+	valAlloca := e.nextReg2("mn")
+	e.w("  ") ; e.w(valAlloca) ; e.w(" = alloca ") ; e.w(valType) ; e.w("\n")
+	ok := e.nextReg2("mn")
+	e.w("  ") ; e.w(ok) ; e.w(" = call i1 @runtime.hashmapNext(ptr ") ; e.w(collVal)
+	e.w(", ptr ") ; e.w(iterPtr)
+	e.w(", ptr ") ; e.w(keyAlloca)
+	e.w(", ptr ") ; e.w(valAlloca) ; e.w(", ptr null)\n")
+	key := e.nextReg2("mn")
+	e.w("  ") ; e.w(key) ; e.w(" = load ") ; e.w(keyType) ; e.w(", ptr ") ; e.w(keyAlloca) ; e.w("\n")
+	val := e.nextReg2("mn")
+	e.w("  ") ; e.w(val) ; e.w(" = load ") ; e.w(valType) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+	tupType := e.llvmType(n.SSAType())
+	t1 := e.nextReg2("mn")
+	e.w("  ") ; e.w(t1) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" undef, i1 ") ; e.w(ok) ; e.w(", 0\n")
+	t2 := e.nextReg2("mn")
+	e.w("  ") ; e.w(t2) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" ") ; e.w(t1) ; e.w(", ") ; e.w(keyType) ; e.w(" ") ; e.w(key) ; e.w(", 1\n")
+	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" ") ; e.w(t2) ; e.w(", ") ; e.w(valType) ; e.w(" ") ; e.w(val) ; e.w(", 2\n")
+	e.declareRuntime("runtime.hashmapNext", "i1", "ptr, ptr, ptr, ptr")
+}

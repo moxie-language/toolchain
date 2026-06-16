@@ -1,0 +1,308 @@
+package main
+
+import (
+	. "git.smesh.lol/moxie/pkg/types"
+)
+
+func (e *irEmitter) deferRetType(d *SSADefer) (s string) {
+	if fn, ok := d.Call.Value.(*SSAFunction); ok {
+		if fn.Signature == nil {
+			return "void"
+		}
+		r := fn.Signature.Results
+		if r == nil {
+			return "void"
+		}
+		return e.llvmType(r)
+	}
+	t := d.Call.Value.SSAType()
+	if t == nil {
+		return "void"
+	}
+	u := SafeUnderlying(t)
+	if sig, ok := u.(*Signature); ok {
+		r := sig.Results
+		if r == nil || r.Len() == 0 {
+			return "void"
+		}
+		return e.llvmType(r)
+	}
+	return "void"
+}
+
+func (e *irEmitter) deferArgType(arg SSAValue) (s string) {
+	t := e.llvmType(arg.SSAType())
+	if t == "void" {
+		return "ptr"
+	}
+	return t
+}
+
+func (e *irEmitter) deferIsDirectCall(d *SSADefer) (ok bool) {
+	if _, ok2 := d.Call.Value.(*SSAFunction); ok2 {
+		return true
+	}
+	if _, ok3 := d.Call.Value.(*SSABuiltin); ok3 {
+		return true
+	}
+	return false
+}
+
+func (e *irEmitter) deferStructType(d *SSADefer) (s string) {
+	ipt := e.intptrType()
+	s := "{" | ipt | ", ptr"
+	if !e.deferIsDirectCall(d) {
+		s = s | ", {ptr, ptr}"
+	}
+	for _, arg := range d.Call.Args {
+		s = s | ", " | e.deferArgType(arg)
+	}
+	return s | "}"
+}
+
+func (e *irEmitter) emitDefer(d *SSADefer) {
+	idx := -1
+	for i, dd := range e.deferList {
+		if dd == d {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		e.w("  ; defer: not found in list\n")
+		return
+	}
+	ipt := e.intptrType()
+	id := e.deferID
+	e.deferID++
+	pfx := "%df" | irItoa(id) | "."
+	sty := e.deferStructType(d)
+
+	e.w("  ") ; e.w(pfx) ; e.w("a = alloca ") ; e.w(sty) ; e.w("\n")
+
+	cbGep := pfx | "cb"
+	e.w("  ") ; e.w(cbGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
+	e.w(", ptr ") ; e.w(pfx) ; e.w("a, i32 0, i32 0\n")
+	e.w("  store ") ; e.w(ipt) ; e.w(" ") ; e.w(irItoa(idx))
+	e.w(", ptr ") ; e.w(cbGep) ; e.w("\n")
+
+	nxGep := pfx | "nx"
+	e.w("  ") ; e.w(nxGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
+	e.w(", ptr ") ; e.w(pfx) ; e.w("a, i32 0, i32 1\n")
+	prev := pfx | "prev"
+	e.w("  ") ; e.w(prev) ; e.w(" = load ptr, ptr %deferPtr\n")
+	e.w("  store ptr ") ; e.w(prev) ; e.w(", ptr ") ; e.w(nxGep) ; e.w("\n")
+
+	fieldIdx := int32(2)
+	if !e.deferIsDirectCall(d) {
+		fvGep := pfx | "fv"
+		e.w("  ") ; e.w(fvGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
+		e.w(", ptr ") ; e.w(pfx) ; e.w("a, i32 0, i32 ") ; e.w(irItoa(int32(fieldIdx))) ; e.w("\n")
+		fvOp := e.operand(d.Call.Value)
+		e.w("  store {ptr, ptr} ") ; e.w(fvOp)
+		e.w(", ptr ") ; e.w(fvGep) ; e.w("\n")
+		fieldIdx++
+	}
+
+	for i, arg := range d.Call.Args {
+		_ = i
+		aGep := pfx | "a" | irItoa(int32(fieldIdx))
+		e.w("  ") ; e.w(aGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
+		e.w(", ptr ") ; e.w(pfx) ; e.w("a, i32 0, i32 ") ; e.w(irItoa(int32(fieldIdx))) ; e.w("\n")
+		at := e.deferArgType(arg)
+		av := e.operand(arg)
+		e.w("  store ") ; e.w(at) ; e.w(" ") ; e.w(av)
+		e.w(", ptr ") ; e.w(aGep) ; e.w("\n")
+		fieldIdx++
+	}
+
+	e.w("  store ptr ") ; e.w(pfx) ; e.w("a, ptr %deferPtr\n")
+}
+
+func (e *irEmitter) emitRunDefers() {
+	if len(e.deferList) == 0 {
+		return
+	}
+	ipt := e.intptrType()
+	id := e.deferID
+	e.deferID++
+	pfx := "rundefers" | irItoa(id)
+
+	e.w("  br label %") ; e.w(pfx) ; e.w(".head\n")
+	e.w(pfx) ; e.w(".head:\n")
+	e.w("  %") ; e.w(pfx) ; e.w(".cur = load ptr, ptr %deferPtr\n")
+	e.w("  %") ; e.w(pfx) ; e.w(".nil = icmp eq ptr %") ; e.w(pfx) ; e.w(".cur, null\n")
+	e.w("  br i1 %") ; e.w(pfx) ; e.w(".nil, label %") ; e.w(pfx) ; e.w(".end, label %")
+	e.w(pfx) ; e.w(".body\n")
+
+	e.w(pfx) ; e.w(".body:\n")
+	e.w("  %") ; e.w(pfx) ; e.w(".cb = load ") ; e.w(ipt) ; e.w(", ptr %") ; e.w(pfx) ; e.w(".cur\n")
+	nxGep := "%" | pfx | ".nxp"
+	e.w("  ") ; e.w(nxGep) ; e.w(" = getelementptr inbounds {") ; e.w(ipt) ; e.w(", ptr}, ptr %")
+	e.w(pfx) ; e.w(".cur, i32 0, i32 1\n")
+	e.w("  %") ; e.w(pfx) ; e.w(".nx = load ptr, ptr ") ; e.w(nxGep) ; e.w("\n")
+	e.w("  store ptr %") ; e.w(pfx) ; e.w(".nx, ptr %deferPtr\n")
+
+	for i, d := range e.deferList {
+		checkLabel := pfx | ".c" | irItoa(i)
+		callLabel := pfx | ".k" | irItoa(i)
+		var nextLabel string
+		if i+1 < len(e.deferList) {
+			nextLabel = pfx | ".c" | irItoa(i+1)
+		} else {
+			nextLabel = pfx | ".head"
+		}
+		if i == 0 {
+			e.w("  %") ; e.w(checkLabel) ; e.w(".eq = icmp eq ") ; e.w(ipt) ; e.w(" %")
+			e.w(pfx) ; e.w(".cb, 0\n")
+			e.w("  br i1 %") ; e.w(checkLabel) ; e.w(".eq, label %") ; e.w(callLabel)
+			e.w(", label %") ; e.w(nextLabel) ; e.w("\n")
+		} else {
+			e.w(checkLabel) ; e.w(":\n")
+			e.w("  %") ; e.w(checkLabel) ; e.w(".eq = icmp eq ") ; e.w(ipt) ; e.w(" %")
+			e.w(pfx) ; e.w(".cb, ") ; e.w(irItoa(i)) ; e.w("\n")
+			e.w("  br i1 %") ; e.w(checkLabel) ; e.w(".eq, label %") ; e.w(callLabel)
+			e.w(", label %") ; e.w(nextLabel) ; e.w("\n")
+		}
+
+		e.w(callLabel) ; e.w(":\n")
+		e.emitDeferDispatch(d, pfx, i)
+		e.w("  br label %") ; e.w(pfx) ; e.w(".head\n")
+	}
+
+	e.w(pfx) ; e.w(".end:\n")
+}
+
+func (e *irEmitter) emitDeferBuiltin(d *SSADefer, bi *SSABuiltin, pfx string, idx int32, sty string, dp string) {
+	fieldIdx := int32(2)
+	var args []string
+	var argTypes []string
+	for i, arg := range d.Call.Args {
+		aGep := "%" | pfx | ".da" | irItoa(idx) | "f" | irItoa(i)
+		e.w("  ") ; e.w(aGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
+		e.w(", ptr ") ; e.w(dp) ; e.w(", i32 0, i32 ") ; e.w(irItoa(int32(fieldIdx))) ; e.w("\n")
+		at := e.deferArgType(arg)
+		aVal := "%" | pfx | ".dv" | irItoa(idx) | "f" | irItoa(i)
+		e.w("  ") ; e.w(aVal) ; e.w(" = load ") ; e.w(at) ; e.w(", ptr ") ; e.w(aGep) ; e.w("\n")
+		args = append(args, aVal)
+		argTypes = append(argTypes, at)
+		fieldIdx++
+	}
+	name := bi.SSAName()
+	if name == "close" && len(args) == 1 {
+		e.declareRuntime("runtime.chanClose", "void", "ptr")
+		e.w("  call void @runtime.chanClose(") ; e.w(argTypes[0]) ; e.w(" ") ; e.w(args[0]) ; e.w(", ptr null)\n")
+	} else if name == "panic" && len(args) == 1 {
+		e.declareRuntime("runtime._panicstr", "void", argTypes[0])
+		e.w("  call void @runtime._panicstr(") ; e.w(argTypes[0]) ; e.w(" ") ; e.w(args[0]) ; e.w(", ptr null)\n")
+	} else if name == "println" || name == "print" {
+		e.declareRuntime("runtime.printlock", "void", "")
+		e.declareRuntime("runtime.printunlock", "void", "")
+		e.declareRuntime("runtime.printnl", "void", "")
+		e.w("  call void @runtime.printlock(ptr null)\n")
+		for ai, av := range args {
+			if ai > 0 {
+				e.declareRuntime("runtime.printspace", "void", "")
+				e.w("  call void @runtime.printspace(ptr null)\n")
+			}
+			at := argTypes[ai]
+			if at == e.sliceType() {
+				e.declareRuntime("runtime.printstring", "void", e.sliceType())
+				e.w("  call void @runtime.printstring(") ; e.w(at) ; e.w(" ") ; e.w(av) ; e.w(", ptr null)\n")
+			} else if at == "i1" {
+				e.declareRuntime("runtime.printbool", "void", "i1")
+				e.w("  call void @runtime.printbool(i1 ") ; e.w(av) ; e.w(", ptr null)\n")
+			} else if at == "i32" || at == "i64" || at == "i16" || at == "i8" {
+				fname := "runtime.printint" | at[1:]
+				e.declareRuntime(fname, "void", at)
+				e.w("  call void @") ; e.w(fname) ; e.w("(") ; e.w(at) ; e.w(" ") ; e.w(av) ; e.w(", ptr null)\n")
+			} else if at == "ptr" {
+				ipt := e.intptrType()
+				e.declareRuntime("runtime.printptr", "void", ipt)
+				tmp := "%" | pfx | ".ptmp" | irItoa(ai)
+				e.w("  ") ; e.w(tmp) ; e.w(" = ptrtoint ptr ") ; e.w(av) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+				e.w("  call void @runtime.printptr(") ; e.w(ipt) ; e.w(" ") ; e.w(tmp) ; e.w(", ptr null)\n")
+			}
+		}
+		if name == "println" {
+			e.w("  call void @runtime.printnl(ptr null)\n")
+		}
+		e.w("  call void @runtime.printunlock(ptr null)\n")
+	} else if name == "delete" && len(args) == 2 {
+		e.declareRuntime("runtime.hashmapBinaryDelete", "void", "ptr, ptr, i32")
+		e.w("  ; defer delete - not fully implemented\n")
+	} else if name == "recover" {
+		e.w("  ; defer recover() is a no-op\n")
+	} else {
+		e.w("  ; defer builtin ") ; e.w(name) ; e.w(" - not implemented\n")
+	}
+}
+
+func (e *irEmitter) emitDeferDispatch(d *SSADefer, pfx string, idx int32) {
+	sty := e.deferStructType(d)
+	dp := "%" | pfx | ".cur"
+
+	fieldIdx := int32(2)
+	if bi, isBi := d.Call.Value.(*SSABuiltin); isBi {
+		e.emitDeferBuiltin(d, bi, pfx, idx, sty, dp)
+		return
+	}
+	if fn, isFn := d.Call.Value.(*SSAFunction); isFn {
+		var args []string
+		var argTypes []string
+		for i, arg := range d.Call.Args {
+			aGep := "%" | pfx | ".da" | irItoa(idx) | "f" | irItoa(i)
+			e.w("  ") ; e.w(aGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
+			e.w(", ptr ") ; e.w(dp) ; e.w(", i32 0, i32 ") ; e.w(irItoa(int32(fieldIdx))) ; e.w("\n")
+			at := e.deferArgType(arg)
+			aVal := "%" | pfx | ".dv" | irItoa(idx) | "f" | irItoa(i)
+			e.w("  ") ; e.w(aVal) ; e.w(" = load ") ; e.w(at) ; e.w(", ptr ") ; e.w(aGep) ; e.w("\n")
+			args = append(args, aVal)
+			argTypes = append(argTypes, at)
+			fieldIdx++
+		}
+		if !e.isPkgFunc(fn) {
+			e.declareExternalFunc(fn)
+		}
+		rt := e.deferRetType(d)
+		e.w("  call ") ; e.w(rt) ; e.w(" ") ; e.w(e.funcSymbol(fn)) ; e.w("(")
+		for i, av := range args {
+			if i > 0 { e.w(", ") }
+			e.w(argTypes[i]) ; e.w(" ") ; e.w(av)
+		}
+		e.w(")\n")
+	} else {
+		fvGep := "%" | pfx | ".dfv" | irItoa(idx)
+		e.w("  ") ; e.w(fvGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
+		e.w(", ptr ") ; e.w(dp) ; e.w(", i32 0, i32 2\n")
+		fvVal := "%" | pfx | ".fvv" | irItoa(idx)
+		e.w("  ") ; e.w(fvVal) ; e.w(" = load {ptr, ptr}, ptr ") ; e.w(fvGep) ; e.w("\n")
+		fpReg := "%" | pfx | ".fp" | irItoa(idx)
+		ctxReg := "%" | pfx | ".ctx" | irItoa(idx)
+		e.w("  ") ; e.w(fpReg) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(fvVal) ; e.w(", 1\n")
+		e.w("  ") ; e.w(ctxReg) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(fvVal) ; e.w(", 0\n")
+		fieldIdx = 3
+		var args []string
+		var argTypes []string
+		for i, arg := range d.Call.Args {
+			aGep := "%" | pfx | ".da" | irItoa(idx) | "f" | irItoa(i)
+			e.w("  ") ; e.w(aGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
+			e.w(", ptr ") ; e.w(dp) ; e.w(", i32 0, i32 ") ; e.w(irItoa(int32(fieldIdx))) ; e.w("\n")
+			at := e.deferArgType(arg)
+			aVal := "%" | pfx | ".dv" | irItoa(idx) | "f" | irItoa(i)
+			e.w("  ") ; e.w(aVal) ; e.w(" = load ") ; e.w(at) ; e.w(", ptr ") ; e.w(aGep) ; e.w("\n")
+			args = append(args, aVal)
+			argTypes = append(argTypes, at)
+			fieldIdx++
+		}
+		rt := e.deferRetType(d)
+		e.w("  call ") ; e.w(rt) ; e.w(" ") ; e.w(fpReg) ; e.w("(")
+		for i, av := range args {
+			if i > 0 { e.w(", ") }
+			e.w(argTypes[i]) ; e.w(" ") ; e.w(av)
+		}
+		if len(args) > 0 { e.w(", ") }
+		e.w("ptr ") ; e.w(ctxReg)
+		e.w(")\n")
+	}
+}

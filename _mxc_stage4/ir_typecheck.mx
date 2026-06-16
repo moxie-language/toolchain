@@ -1,0 +1,1304 @@
+package main
+
+import (
+	"git.smesh.lol/moxie/pkg/syntax"
+	"git.smesh.lol/moxie/pkg/mxutil"
+	"git.smesh.lol/moxie/pkg/token"
+	. "git.smesh.lol/moxie/pkg/types"
+)
+
+var parseErrors []string
+var compileErrors []string
+var genericFuncDecls map[string]*syntax.FuncDecl
+
+// Non-generic top-level funcs of generic-bearing packages: a monomorphized
+// body may call package-local helpers that exist only in that package's
+// compiled object as unexported symbols, so they must be instantiated into
+// the calling module too.
+var genericPkgLocalDecls map[string]*syntax.FuncDecl
+var genericPkgScopes map[string]*Scope
+var compilePkgDir string
+
+type embedInfo struct {
+	path     string
+	elemType string
+}
+var embedVars map[string]*embedInfo
+
+func typeCheckPkg(src []byte, name string) (pkg *TCPackage, file *syntax.File) {
+	InitUniverse()
+	shortName := name
+	for i := len(name) - 1; i >= 0; i-- {
+		if name[i] == '/' {
+			shortName = name[i+1:]
+			break
+		}
+	}
+	pkg := newTCPackageWithUniverse(name, shortName)
+	scope := pkg.Scope
+	rw := rewriteSliceMakeLiterals(src)
+	src = rewriteChanMakeLiterals(rw)
+	src = stripDuplicatePackageClauses2(src)
+
+	if len(src) == 0 {
+		return nil, nil
+	}
+
+	parseErrors = nil
+	constValMap = nil
+	errh := func(err error) {
+		parseErrors = append(parseErrors, err.Error())
+	}
+	tcPkgSrc = src
+	syntax.CompileExportMap = scanExportPragmas(src)
+	file, _ := syntax.ParseBytes(token.NewFileBase(name|".mx"), src, errh, nil, 0)
+	if file == nil {
+		for ei := int32(0); ei < int32(len(parseErrors)) && ei < 5; ei++ {
+		}
+		return nil, nil
+	}
+	// The package name is the clause name from the source, not the import
+	// path tail - they differ for packages like crypto/ec (package btcec).
+	// The name flows into the mxh and importer PkgName registration.
+	if file.PkgName != nil && file.PkgName.Value != "" {
+		pkg.Name = file.PkgName.Value
+	}
+	for _, d := range file.DeclList {
+		switch dd := d.(type) {
+		case *syntax.ImportDecl:
+			if dd.Path == nil {
+				continue
+			}
+			path := dd.Path.Value
+			if len(path) >= 2 && path[0] == '"' {
+				path = path[1 : len(path)-1]
+			}
+			EnsureImportRegistry()
+			imported := ImportRegistry[path]
+			if imported == nil {
+				continue
+			}
+			if path == "unsafe" && imported.Scope.Lookup("Pointer") == nil {
+				imported.Scope.Insert(NewTypeName(imported, "Pointer", Typ[UnsafePointer]))
+			}
+			localName := imported.Name
+			if dd.LocalPkgName != nil {
+				localName = dd.LocalPkgName.Value
+			}
+			if localName == "." {
+				if imported.Scope != nil {
+					for _, n := range imported.Scope.Names() {
+						obj := imported.Scope.Lookup(n)
+						if obj != nil {
+							scope.Insert(obj)
+						}
+					}
+				}
+				continue
+			}
+			scope.Insert(NewPkgName(pkg, localName, imported))
+		case *syntax.VarDecl:
+			for _, n := range dd.NameList {
+				scope.Insert(NewTCVar(pkg, n.Value, nil))
+			}
+		case *syntax.FuncDecl:
+			if dd.Recv == nil && dd.Name.Value != "init" {
+				scope.Insert(NewTCFunc(pkg, dd.Name.Value, nil))
+			}
+		case *syntax.TypeDecl:
+			tn := NewTypeName(pkg, dd.Name.Value, nil)
+			scope.Insert(tn)
+			NewNamed(tn, nil)
+		case *syntax.ConstDecl:
+			for _, n := range dd.NameList {
+				scope.Insert(NewTCConst(pkg, n.Value, nil, nil))
+			}
+		}
+	}
+	for _, d := range file.DeclList {
+		if td, ok := d.(*syntax.TypeDecl); ok {
+			obj := scope.Lookup(td.Name.Value)
+			if tn, ok2 := obj.(*TypeName); ok2 && tn != nil {
+				if n, ok3 := tn.Typ.(*Named); ok3 && n != nil && n.Under == nil {
+					if td.Type != nil {
+						under := resolveTypeExprWithSubst(td.Type, nil, scope)
+						if under != nil {
+							n.Under = under
+						}
+					}
+				}
+			}
+		}
+	}
+
+	var curConstGroup *syntax.Group
+	var prevConstValues syntax.Expr
+	var prevConstType syntax.Expr
+	iotaVal := int64(-1)
+	for constPass := int32(0); constPass < 2; constPass++ {
+		curConstGroup = nil
+		prevConstValues = nil
+		prevConstType = nil
+		iotaVal = int64(-1)
+		for _, d := range file.DeclList {
+			if cd, ok := d.(*syntax.ConstDecl); ok {
+				if cd.Group == nil || cd.Group != curConstGroup {
+					curConstGroup = cd.Group
+					iotaVal = int64(0)
+					prevConstValues = nil
+					prevConstType = nil
+				} else {
+					iotaVal++
+				}
+				valExpr := cd.Values
+				typeExpr := cd.Type
+				if valExpr == nil {
+					valExpr = prevConstValues
+					if typeExpr == nil {
+						typeExpr = prevConstType
+					}
+				}
+				if cd.Values != nil {
+					prevConstValues = cd.Values
+				}
+				if cd.Type != nil {
+					prevConstType = cd.Type
+				}
+				typ := tcResolveNameInline(typeExpr, scope)
+				if typ == nil && valExpr != nil {
+					typ = tcInferTypeFromExpr(valExpr, scope)
+				}
+				var val ConstVal
+				if valExpr != nil {
+					val = tcEvalConstExpr(valExpr, scope, iotaVal)
+				}
+				if typ == nil && val != nil {
+					typ = UntypedTypeOfCV(val)
+				}
+				for _, n := range cd.NameList {
+					if val != nil {
+						if ci, ok2 := val.(*ConstInt); ok2 {
+							if constValMap == nil {
+								constValMap = map[string]int64{}
+							}
+							constValMap[n.Value] = ci.V
+						}
+					}
+					obj := scope.Lookup(n.Value)
+					if obj != nil {
+						if c, ok3 := obj.(*TCConst); ok3 {
+							if constPass == 0 || c.Val == nil {
+								c.Typ = typ
+								c.Val = val
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	for _, d := range file.DeclList {
+		if td, ok := d.(*syntax.TypeDecl); ok {
+			// Generic type decls resolve in a child scope holding their type
+			// params, so fields like newPoint func() P keep a TypeParam that
+			// monomorphized bodies substitute via fb.typeSubst.
+			tScope := scope
+			obj := scope.Lookup(td.Name.Value)
+			if obj != nil {
+				if tn, ok2 := obj.(*TypeName); ok2 {
+					named, ok3 := tn.Typ.(*Named)
+					if ok3 {
+						if len(td.TParamList) > 0 {
+							tScope = NewScope(scope)
+							for _, tp := range td.TParamList {
+								if tp.Name != nil && tp.Name.Value != "" {
+									tpv := NewTypeParam(NewTypeName(pkg, tp.Name.Value, nil), nil)
+									tScope.Insert(NewTypeName(pkg, tp.Name.Value, tpv))
+									if len(named.TParams) < len(td.TParamList) {
+										named.TParams = append(named.TParams, tpv)
+									}
+								}
+							}
+						}
+						typ := tcResolveNameInline(td.Type, tScope)
+						if typ != nil {
+							named.Under = typ
+						}
+					}
+				}
+			}
+		}
+	}
+	for _, d := range file.DeclList {
+		if td, ok := d.(*syntax.TypeDecl); ok {
+			obj := scope.Lookup(td.Name.Value)
+			if obj != nil {
+				if tn, ok2 := obj.(*TypeName); ok2 {
+					if named, ok3 := tn.Typ.(*Named); ok3 {
+						if iface, ok4 := named.Underlying().(*TCInterface); ok4 && len(iface.Embeds) > 0 {
+							iface.Completed = false
+							iface.AllMethods = nil
+							iface.Complete()
+						}
+					}
+				}
+			}
+		}
+	}
+	for _, d := range file.DeclList {
+		switch dd := d.(type) {
+		case *syntax.VarDecl:
+			typ := tcResolveNameInline(dd.Type, scope)
+			if arr, ok := typ.(*Array); ok && arr.Len < 0 && dd.Values != nil {
+				if cl, ok2 := dd.Values.(*syntax.CompositeLit); ok2 {
+					typ = NewArray(arr.Elem, int64(len(cl.ElemList)))
+				}
+			}
+			if typ == nil && dd.Values != nil {
+				typ = tcInferTypeFromExpr(dd.Values, scope)
+			}
+			for _, n := range dd.NameList {
+				obj := scope.Lookup(n.Value)
+				if obj != nil {
+					if v, ok := obj.(*TCVar); ok {
+						v.Typ = typ
+					}
+				}
+			}
+		case *syntax.FuncDecl:
+			if dd.Recv == nil && dd.Name.Value != "init" {
+				if len(dd.TParamList) > 0 {
+					if genericFuncDecls == nil {
+						genericFuncDecls = map[string]*syntax.FuncDecl{}
+					}
+					genericFuncDecls[name+"."+dd.Name.Value] = dd
+					continue
+				}
+				sig := tcResolveFuncInline(dd.Type, scope)
+				obj := scope.Lookup(dd.Name.Value)
+				if obj != nil {
+					if fn, ok := obj.(*TCFunc); ok && sig != nil {
+						fn.Typ = sig
+					}
+				}
+			}
+		}
+	}
+	for _, d := range file.DeclList {
+		if fd, ok := d.(*syntax.FuncDecl); ok && fd.Recv != nil {
+			recvType := tcResolveRecvType(fd.Recv, scope)
+			if recvType == nil {
+				continue
+			}
+			sig := tcResolveFuncInlineWithRecv(fd.Type, fd.Recv, scope)
+			fn := NewTCFunc(pkg, fd.Name.Value, sig)
+			isPtr := false
+			var named *Named
+			if pt, ok2 := recvType.(*Pointer); ok2 {
+				named, _ = pt.Base.(*Named)
+				isPtr = true
+			} else {
+				named, _ = recvType.(*Named)
+			}
+			if named != nil {
+				if isPtr {
+					fn.PtrRecv = true
+				}
+				named.AddMethod(fn)
+			}
+		}
+	}
+	for _, d := range file.DeclList {
+		if vd, ok := d.(*syntax.VarDecl); ok {
+			for _, n := range vd.NameList {
+				obj := scope.Lookup(n.Value)
+				if obj == nil {
+					continue
+				}
+				v, ok2 := obj.(*TCVar)
+				if !ok2 || v.Typ != nil {
+					continue
+				}
+				if vd.Values != nil {
+					v.Typ = tcInferTypeFromExpr(vd.Values, scope)
+				}
+			}
+		}
+	}
+
+	return pkg, file
+}
+
+func releasePerPkgState() {
+	parseErrors = nil
+	compileErrors = nil
+	constValMap = nil
+	syntax.CompileExportMap = nil
+	tcPkgSrc = nil
+}
+
+func ScanGenericDecls(src []byte, name string) {
+	rw := rewriteSliceMakeLiterals(src)
+	src = rewriteChanMakeLiterals(rw)
+	src = stripDuplicatePackageClauses2(src)
+	if len(src) == 0 {
+		return
+	}
+	errh := func(err error) {}
+	file, _ := syntax.ParseBytes(token.NewFileBase(name|".mx"), src, errh, nil, 0)
+	if file == nil {
+		return
+	}
+	hasGeneric := false
+	for _, d := range file.DeclList {
+		if fd, ok := d.(*syntax.FuncDecl); ok {
+			if fd.Recv == nil && fd.Name != nil && fd.Name.Value != "init" && len(fd.TParamList) > 0 {
+				hasGeneric = true
+				break
+			}
+		}
+	}
+	if !hasGeneric {
+		return
+	}
+	EnsureImportRegistry()
+	shortName := name
+	for i := len(name) - 1; i >= 0; i-- {
+		if name[i] == '/' {
+			shortName = name[i+1:]
+			break
+		}
+	}
+	thePkg := newTCPackageWithUniverse(name, shortName)
+	scope := thePkg.Scope
+	for _, d := range file.DeclList {
+		if id, ok := d.(*syntax.ImportDecl); ok {
+			if id.Path == nil {
+				continue
+			}
+			path := id.Path.Value
+			if len(path) >= 2 && path[0] == '"' {
+				path = path[1 : len(path)-1]
+			}
+			imported := ImportRegistry[path]
+			if imported == nil {
+				continue
+			}
+			localName := imported.Name
+			if id.LocalPkgName != nil {
+				localName = id.LocalPkgName.Value
+			}
+			if localName == "." {
+				if imported.Scope != nil {
+					for _, n := range imported.Scope.Names() {
+						obj := imported.Scope.Lookup(n)
+						if obj != nil && scope.Lookup(n) == nil {
+							scope.Insert(obj)
+						}
+					}
+				}
+				continue
+			}
+			if scope.Lookup(localName) == nil {
+				scope.Insert(NewPkgName(thePkg, localName, imported))
+			}
+		}
+	}
+	// The package's own registered scope (mxh-loaded or freshly compiled)
+	// carries real types with method sets and real signatures; synthetic
+	// nil-typed stand-ins are only a fallback for unexported decls. Without
+	// this, method calls on package types inside monomorphized bodies
+	// silently resolve to nothing.
+	regPkg := ImportRegistry[name]
+	regLookup := func(n string) (o Object) {
+		if regPkg == nil {
+			return nil
+		}
+		return regPkg.Scope.Lookup(n)
+	}
+	for _, d := range file.DeclList {
+		switch dd := d.(type) {
+		case *syntax.FuncDecl:
+			if dd.Recv == nil && dd.Name != nil && dd.Name.Value != "init" {
+				if len(dd.TParamList) > 0 {
+					if genericFuncDecls == nil {
+						genericFuncDecls = map[string]*syntax.FuncDecl{}
+					}
+					genericFuncDecls[name+"."+dd.Name.Value] = dd
+				} else {
+					if genericPkgLocalDecls == nil {
+						genericPkgLocalDecls = map[string]*syntax.FuncDecl{}
+					}
+					genericPkgLocalDecls[name+"."+dd.Name.Value] = dd
+				}
+			}
+			if dd.Recv == nil && dd.Name != nil {
+				if scope.Lookup(dd.Name.Value) == nil {
+					if ro := regLookup(dd.Name.Value); ro != nil {
+						scope.Insert(ro)
+					} else {
+						scope.Insert(NewTCFunc(thePkg, dd.Name.Value, nil))
+					}
+				}
+			}
+		case *syntax.TypeDecl:
+			existing := scope.Lookup(dd.Name.Value)
+			if existing == nil {
+				if ro := regLookup(dd.Name.Value); ro != nil {
+					scope.Insert(ro)
+					continue
+				}
+				tn := NewTypeName(thePkg, dd.Name.Value, nil)
+				named := NewNamed(tn, nil)
+				if dd.Type != nil {
+					under := resolveTypeExprWithSubst(dd.Type, nil, scope)
+					if under != nil {
+						named.Under = under
+					}
+				}
+				scope.Insert(tn)
+			} else if tn, ok := existing.(*TypeName); ok {
+				if n, ok2 := tn.Typ.(*Named); ok2 && n.Under == nil {
+					if dd.Type != nil {
+						under := resolveTypeExprWithSubst(dd.Type, nil, scope)
+						if under != nil {
+							n.Under = under
+						}
+					}
+				}
+			}
+		case *syntax.ConstDecl:
+			for _, cn := range dd.NameList {
+				if scope.Lookup(cn.Value) == nil {
+					if ro := regLookup(cn.Value); ro != nil {
+						scope.Insert(ro)
+					} else {
+						scope.Insert(NewTCConst(thePkg, cn.Value, nil, nil))
+					}
+				}
+			}
+		case *syntax.VarDecl:
+			for _, vn := range dd.NameList {
+				if scope.Lookup(vn.Value) == nil {
+					if ro := regLookup(vn.Value); ro != nil {
+						scope.Insert(ro)
+					} else {
+						scope.Insert(NewTCVar(thePkg, vn.Value, nil))
+					}
+				}
+			}
+		}
+	}
+	if genericPkgScopes == nil {
+		genericPkgScopes = map[string]*Scope{}
+	}
+	genericPkgScopes[name] = scope
+}
+
+func TypeCheckOnly(src []byte, name string) {
+	pkg, file := typeCheckPkg(src, name)
+	if pkg != nil && file != nil {
+		registerCompiledExports(pkg)
+	}
+	ScanGenericDecls(src, name)
+	if pkg != nil {
+		pkg.Release()
+	}
+	releaseFileDeep(file)
+	releasePerPkgState()
+}
+
+func releaseFileDeep(f *syntax.File) {
+}
+
+func CompileToIR(src []byte, name string, triple string) (s string) {
+	compileTargetTriple = triple
+	scanEmbedPragmas(src, compilePkgDir)
+	linknameMap = scanLinknameMap(src)
+	wasmImportMap = scanWasmImportMap(src, name)
+	pkg, file := typeCheckPkg(src, name)
+	ScanGenericDecls(src, name)
+	if file == nil {
+		out := "; parse error parseErrs=" | simpleItoa(len(parseErrors)) | "\n"
+		for _, pe := range parseErrors {
+			out = out | "; " | pe | "\n"
+		}
+		releasePerPkgState()
+		return out
+	}
+	prog := NewSSAProgram()
+	ssaPkg := prog.CreatePackage(pkg, []*syntax.File{file}, nil)
+	emitter := newIREmitter(ssaPkg, triple)
+	ir := emitter.emit()
+
+	if len(compileErrors) > 0 {
+		out := "; compile error\n"
+		for _, ce := range compileErrors {
+			out = out | "; " | ce | "\n"
+		}
+		free(ir)
+		emitter.releaseAfterEmit()
+		ssaPkg.release()
+		prog.release()
+		if pkg != nil {
+			pkg.Release()
+		}
+		releaseFileDeep(file)
+		releasePerPkgState()
+		return out
+	}
+
+	if len(ir) > 0 && ir[0] != ';' {
+		registerCompiledExports(pkg)
+	}
+
+	emitter.releaseAfterEmit()
+	ssaPkg.release()
+	prog.release()
+	if pkg != nil {
+		pkg.Release()
+	}
+	releaseFileDeep(file)
+	releasePerPkgState()
+	return ir
+}
+
+func registerCompiledExports(pkg *TCPackage) {
+	EnsureImportRegistry()
+	path := pkg.Path
+	DirectImportPaths(pkg)
+	regPkg := NewTCPackage(path, pkg.Name)
+	names := pkg.Scope.Names()
+	for _, name := range names {
+		if len(name) == 0 {
+			continue
+		}
+		obj := pkg.Scope.Lookup(name)
+		if obj == nil {
+			continue
+		}
+		exported := name[0] >= 'A' && name[0] <= 'Z'
+		if !exported {
+			if tn, ok := obj.(*TypeName); ok {
+				if named, ok2 := tn.Typ.(*Named); ok2 && named.NumMethods() > 0 {
+					// include unexported types with methods for interface dispatch
+				} else {
+					continue
+				}
+			} else {
+				continue
+			}
+		}
+		regPkg.Scope.Insert(obj)
+	}
+	ImportRegistry[path] = regPkg
+}
+
+func tcInferTypeFromExpr(e syntax.Expr, scope *Scope) (t Type) {
+	switch ex := e.(type) {
+	case *syntax.BasicLit:
+		switch ex.Kind {
+		case token.StringLit:
+			return Typ[TCString]
+		case token.IntLit:
+			return Typ[Int32]
+		case token.FloatLit:
+			return Typ[Float64]
+		}
+	case *syntax.Name:
+		if ex.Value == "true" || ex.Value == "false" {
+			return Typ[Bool]
+		}
+		return tcResolveNameInline(ex, scope)
+	case *syntax.CallExpr:
+		resolved := tcResolveNameInline(ex.Fun, scope)
+		if resolved != nil {
+			return resolved
+		}
+		return tcResolveFuncReturn(ex.Fun, scope)
+	case *syntax.CompositeLit:
+		tt := tcResolveNameInline(ex.Type, scope)
+		if arr, ok := tt.(*Array); ok && arr.Len < 0 {
+			return NewArray(arr.Elem, int64(len(ex.ElemList)))
+		}
+		return tt
+	case *syntax.Operation:
+		if ex.Y == nil && ex.Op == token.And {
+			return NewPointer(tcInferTypeFromExpr(ex.X, scope))
+		}
+	}
+	return nil
+}
+
+func tcResolveFuncReturn(e syntax.Expr, scope *Scope) (t Type) {
+	var obj Object
+	switch ex := e.(type) {
+	case *syntax.Name:
+		if scope != nil {
+			_, obj = scope.LookupParent(ex.Value)
+		}
+	case *syntax.SelectorExpr:
+		pkgName, ok1 := ex.X.(*syntax.Name)
+		if !ok1 {
+			return nil
+		}
+		if scope != nil {
+			_, pkgObj := scope.LookupParent(pkgName.Value)
+			if pn, ok2 := pkgObj.(*PkgName); ok2 && pn.Imported != nil {
+				obj = pn.Imported.Scope.Lookup(ex.Sel.Value)
+			}
+		}
+		if obj == nil {
+			var irk2 []string
+			for k := range ImportRegistry {
+				irk2 = append(irk2, k)
+			}
+			for i := 1; i < len(irk2); i++ {
+				for j := i; j > 0 && irk2[j] < irk2[j-1]; j-- {
+					irk2[j], irk2[j-1] = irk2[j-1], irk2[j]
+				}
+			}
+			for _, k := range irk2 {
+				pkg := ImportRegistry[k]
+				if pkg.Name == pkgName.Value {
+					obj = pkg.Scope.Lookup(ex.Sel.Value)
+					break
+				}
+			}
+		}
+	}
+	if obj == nil {
+		return nil
+	}
+	fn, ok := obj.(*TCFunc)
+	if !ok {
+		return nil
+	}
+	sig, ok := fn.Typ.(*Signature)
+	if !ok || sig.Results == nil || sig.Results.Len() == 0 {
+		return nil
+	}
+	if sig.Results.Len() == 1 {
+		return sig.Results.At(0).Typ
+	}
+	return NewTuple(sig.Results.Vars...)
+}
+
+var constValMap map[string]int64
+var tcPkgSrc []byte
+var compileTargetTriple string
+
+func compileTargetArch() (s string) {
+	if mxutil.HasPrefix(compileTargetTriple, "x86_64") {
+		return "amd64"
+	}
+	if mxutil.HasPrefix(compileTargetTriple, "aarch64") {
+		return "arm64"
+	}
+	if mxutil.HasPrefix(compileTargetTriple, "wasm32") {
+		return "wasm"
+	}
+	return "amd64"
+}
+
+func compileTargetOS() (s string) {
+	if lIndexByte(compileTargetTriple, '-') >= 0 {
+		rest := compileTargetTriple[lIndexByte(compileTargetTriple, '-')+1:]
+		if lIndexByte(rest, '-') >= 0 {
+			os := rest[lIndexByte(rest, '-')+1:]
+			if mxutil.HasPrefix(os, "linux") {
+				return "linux"
+			}
+			if mxutil.HasPrefix(os, "darwin") {
+				return "darwin"
+			}
+			if mxutil.HasPrefix(os, "js") || mxutil.HasPrefix(os, "wasi") {
+				return "js"
+			}
+		}
+	}
+	return "linux"
+}
+
+func resolveArrayLenFromSrc(p token.Pos, cmap map[string]int64) (n int64) {
+	line := p.Line()
+	col := p.Col()
+	if line == 0 || col == 0 || tcPkgSrc == nil {
+		return -1
+	}
+	off := 0
+	curLine := uint32(1)
+	for off < len(tcPkgSrc) && curLine < line {
+		if tcPkgSrc[off] == '\n' {
+			curLine++
+		}
+		off++
+	}
+	off += int32(col) - 1
+	if off >= len(tcPkgSrc) || tcPkgSrc[off] != '[' {
+		return -1
+	}
+	off++
+	for off < len(tcPkgSrc) && tcPkgSrc[off] == ' ' {
+		off++
+	}
+	start := off
+	for off < len(tcPkgSrc) {
+		c := tcPkgSrc[off]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+			off++
+		} else {
+			break
+		}
+	}
+	if off == start {
+		return -1
+	}
+	name := string(tcPkgSrc[start:off])
+	if v, ok := cmap[name]; ok {
+		if off < len(tcPkgSrc) && tcPkgSrc[off] == '+' {
+			off++
+			for off < len(tcPkgSrc) && tcPkgSrc[off] == ' ' {
+				off++
+			}
+			numStart := off
+			for off < len(tcPkgSrc) && tcPkgSrc[off] >= '0' && tcPkgSrc[off] <= '9' {
+				off++
+			}
+			if off > numStart {
+				addend := int64(0)
+				for i := numStart; i < off; i++ {
+					addend = addend*10 + int64(tcPkgSrc[i]-'0')
+				}
+				return v + addend
+			}
+		}
+		return v
+	}
+	n := int64(0)
+	isNum := true
+	for i := start; i < off; i++ {
+		c := tcPkgSrc[i]
+		if c >= '0' && c <= '9' {
+			n = n*10 + int64(c-'0')
+		} else {
+			isNum = false
+			break
+		}
+	}
+	if isNum && off > start {
+		for off < len(tcPkgSrc) && (tcPkgSrc[off] == ' ' || tcPkgSrc[off] == '\t') {
+			off++
+		}
+		if off+2 < len(tcPkgSrc) && tcPkgSrc[off] == '<' && tcPkgSrc[off+1] == '<' {
+			off += 2
+			for off < len(tcPkgSrc) && (tcPkgSrc[off] == ' ' || tcPkgSrc[off] == '\t') {
+				off++
+			}
+			shiftVal := resolveLocalConst(tcPkgSrc, off, cmap)
+			if shiftVal >= 0 {
+				return n << uint32(shiftVal)
+			}
+		}
+		return n
+	}
+	return -1
+}
+
+func resolveLocalConst(src []byte, off int32, cmap map[string]int64) (n int64) {
+	start := off
+	for off < len(src) && ((src[off] >= 'a' && src[off] <= 'z') || (src[off] >= 'A' && src[off] <= 'Z') || (src[off] >= '0' && src[off] <= '9') || src[off] == '_') {
+		off++
+	}
+	if off == start {
+		return -1
+	}
+	name := string(src[start:off])
+	if v, ok := cmap[name]; ok {
+		return v
+	}
+	n := int64(0)
+	isNum := true
+	for i := start; i < off; i++ {
+		if src[i] >= '0' && src[i] <= '9' {
+			n = n*10 + int64(src[i]-'0')
+		} else {
+			isNum = false
+			break
+		}
+	}
+	if isNum {
+		return n
+	}
+	cname := "const " | name | " = "
+	cb := []byte(cname)
+	for i := int32(0); i <= int32(len(src))-int32(len(cb)); i++ {
+		if string(src[i:i+int32(len(cb))]) == cname {
+			valOff := i + int32(len(cb))
+			val := int64(0)
+			found := false
+			for valOff < int32(len(src)) && src[valOff] >= '0' && src[valOff] <= '9' {
+				val = val*10 + int64(src[valOff]-'0')
+				valOff++
+				found = true
+			}
+			if found {
+				return val
+			}
+		}
+	}
+	return -1
+}
+
+func resolveArrayLenFromConstMap(e syntax.Expr, cmap map[string]int64) (n int64) {
+	ep := e.Pos()
+	line := ep.Line()
+	col := ep.Col()
+	if line == 0 || col == 0 || tcPkgSrc == nil {
+		return -1
+	}
+	curLine := uint32(1)
+	off := 0
+	for off < len(tcPkgSrc) && curLine < line {
+		if tcPkgSrc[off] == '\n' {
+			curLine++
+		}
+		off++
+	}
+	off += int32(col) - 1
+	if off >= len(tcPkgSrc) {
+		return -1
+	}
+	start := off
+	for off < len(tcPkgSrc) {
+		c := tcPkgSrc[off]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+			off++
+		} else {
+			break
+		}
+	}
+	if off == start {
+		return -1
+	}
+	name := string(tcPkgSrc[start:off])
+	if v, ok := cmap[name]; ok {
+		return v
+	}
+	return -1
+}
+
+// tcConstExprBasic resolves the basic type of a constant expression in the
+// emitter's scope-based evaluator, mirroring Checker.constExprBasic.
+func tcConstExprBasic(e syntax.Expr, scope *Scope) (b *Basic) {
+	switch ex := e.(type) {
+	case *syntax.Name:
+		if scope != nil {
+			_, obj := scope.LookupParent(ex.Value)
+			if k, ok := obj.(*TCConst); ok && k.Typ != nil {
+				if bb, ok2 := SafeUnderlying(k.Typ).(*Basic); ok2 {
+					return bb
+				}
+			}
+		}
+	case *syntax.ParenExpr:
+		return tcConstExprBasic(ex.X, scope)
+	case *syntax.CallExpr:
+		if t := tcResolveNameInline(ex.Fun, scope); t != nil {
+			if bb, ok := SafeUnderlying(t).(*Basic); ok {
+				return bb
+			}
+		}
+	case *syntax.Operation:
+		if bb := tcConstExprBasic(ex.X, scope); bb != nil && bb.Info&IsUntyped == 0 {
+			return bb
+		}
+		if ex.Y != nil {
+			return tcConstExprBasic(ex.Y, scope)
+		}
+	}
+	return nil
+}
+
+func tcEvalConstExpr(e syntax.Expr, scope *Scope, iotaVal int64) (c ConstVal) {
+	if e == nil {
+		return nil
+	}
+	switch ex := e.(type) {
+	case *syntax.BasicLit:
+		return EvalBasicLitLocal(ex)
+	case *syntax.Name:
+		if ex.Value == "iota" && iotaVal >= 0 {
+			return &ConstInt{V:iotaVal}
+		}
+		if scope != nil {
+			_, obj := scope.LookupParent(ex.Value)
+			if k, ok := obj.(*TCConst); ok && k.Val != nil {
+				return k.Val
+			}
+		}
+		if constValMap != nil {
+			if v, ok := constValMap[ex.Value]; ok {
+				return &ConstInt{V:v}
+			}
+		}
+	case *syntax.Operation:
+		if ex.Y == nil {
+			xr := tcEvalConstExpr(ex.X, scope, iotaVal)
+			if xr == nil {
+				return nil
+			}
+			r := EvalUnaryLocal(ex.Op, xr)
+			// Mask ^x to the typed operand's width (see evalConstOp).
+			if r != nil && ex.Op == token.Xor {
+				if b := tcConstExprBasic(ex.X, scope); b != nil {
+					r = MaskConstToBasic(r, b)
+				}
+			}
+			return r
+		}
+		xr2 := tcEvalConstExpr(ex.X, scope, iotaVal)
+		yr := tcEvalConstExpr(ex.Y, scope, iotaVal)
+		if xr2 == nil || yr == nil {
+			return nil
+		}
+		return EvalBinaryLocal(ex.Op, xr2, yr)
+	case *syntax.ParenExpr:
+		return tcEvalConstExpr(ex.X, scope, iotaVal)
+	case *syntax.CallExpr:
+		if id, ok := ex.Fun.(*syntax.Name); ok && id.Value == "len" && len(ex.ArgList) == 1 {
+			if lit, ok2 := ex.ArgList[0].(*syntax.BasicLit); ok2 && lit.Kind == token.StringLit {
+				lv := EvalBasicLitLocal(lit)
+				if cs, ok3 := lv.(*ConstStr); ok3 {
+					return &ConstInt{V:int64(len(cs.S))}
+				}
+			}
+			inner := tcEvalConstExpr(ex.ArgList[0], scope, iotaVal)
+			if cs, ok2 := inner.(*ConstStr); ok2 {
+				return &ConstInt{V:int64(len(cs.S))}
+			}
+		}
+		if sel, ok := ex.Fun.(*syntax.SelectorExpr); ok {
+			if pg, ok2 := sel.X.(*syntax.Name); ok2 && pg.Value == "unsafe" {
+				switch sel.Sel.Value {
+				case "Sizeof", "Alignof", "Offsetof":
+					return &ConstInt{V:8}
+				}
+			}
+		}
+		if len(ex.ArgList) != 1 {
+			return nil
+		}
+		inner2 := tcEvalConstExpr(ex.ArgList[0], scope, iotaVal)
+		if inner2 == nil {
+			return nil
+		}
+		targetType := tcResolveNameInline(ex.Fun, scope)
+		if targetType == nil {
+			return inner2
+		}
+		return ConvertConstLocal(inner2, targetType)
+	case *syntax.SelectorExpr:
+		pkgName, ok := ex.X.(*syntax.Name)
+		if !ok {
+			return nil
+		}
+		if pkgName.Value == "runtime" {
+			if ex.Sel.Value == "GOARCH" {
+				return &ConstStr{S:compileTargetArch()}
+			}
+			if ex.Sel.Value == "GOOS" {
+				return &ConstStr{S:compileTargetOS()}
+			}
+		}
+		var imported *TCPackage
+		if scope != nil {
+			_, obj := scope.LookupParent(pkgName.Value)
+			if pn, ok2 := obj.(*PkgName); ok2 && pn.Imported != nil {
+				imported = pn.Imported
+			}
+		}
+		if imported == nil {
+			EnsureImportRegistry()
+			imported = ImportRegistry[pkgName.Value]
+		}
+		if imported == nil {
+			return nil
+		}
+		member := imported.Scope.Lookup(ex.Sel.Value)
+		if member == nil {
+			return nil
+		}
+		if k, ok2 := member.(*TCConst); ok2 && k.Val != nil {
+			return k.Val
+		}
+		return nil
+	}
+	return nil
+}
+
+func tcResolveNameInline(e syntax.Expr, scope *Scope) (t Type) {
+	if e == nil {
+		return nil
+	}
+	switch ex := e.(type) {
+	case *syntax.Name:
+		var obj Object
+		if scope != nil {
+			_, obj = scope.LookupParent(ex.Value)
+		} else {
+			_, obj = Universe.LookupParent(ex.Value)
+		}
+		if obj != nil {
+			if tn, ok := obj.(*TypeName); ok {
+				return tn.Typ
+			}
+		}
+	case *syntax.SelectorExpr:
+		pkgName, ok := ex.X.(*syntax.Name)
+		if ok && scope != nil {
+			_, pkgObj := scope.LookupParent(pkgName.Value)
+			if pn, ok2 := pkgObj.(*PkgName); ok2 && pn.Imported != nil {
+				typeObj := pn.Imported.Scope.Lookup(ex.Sel.Value)
+				if typeObj != nil {
+					if tn, ok3 := typeObj.(*TypeName); ok3 {
+						return tn.Typ
+					}
+				}
+			}
+		}
+		// Fallback: check ImportRegistry directly for external package types
+		if pkgName2, ok2 := ex.X.(*syntax.Name); ok2 {
+			var irKeys []string
+			for k := range ImportRegistry {
+				irKeys = append(irKeys, k)
+			}
+			for i := 1; i < len(irKeys); i++ {
+				for j := i; j > 0 && irKeys[j] < irKeys[j-1]; j-- {
+					irKeys[j], irKeys[j-1] = irKeys[j-1], irKeys[j]
+				}
+			}
+			for _, k := range irKeys {
+				pkg := ImportRegistry[k]
+				if pkg.Name == pkgName2.Value {
+					typeObj := pkg.Scope.Lookup(ex.Sel.Value)
+					if typeObj != nil {
+						if tn, ok3 := typeObj.(*TypeName); ok3 {
+							return tn.Typ
+						}
+					}
+					break
+				}
+			}
+		}
+	case *syntax.IndexExpr:
+		return tcResolveNameInline(ex.X, scope)
+	case *syntax.Operation:
+		if ex.Y == nil && ex.Op == token.Mul {
+			base := tcResolveNameInline(ex.X, scope)
+			if base == nil {
+				return nil
+			}
+			return NewPointer(base)
+		}
+	case *syntax.SliceType:
+		elem := tcResolveNameInline(ex.Elem, scope)
+		if elem != nil {
+			if b, ok := elem.(*Basic); ok && b.Kind == Uint8 {
+				return Typ[TCString]
+			}
+			return NewSlice(elem)
+		}
+	case *syntax.ArrayType:
+		elem := tcResolveNameInline(ex.Elem, scope)
+		if elem != nil {
+			n := int64(-1)
+			if lit, ok := ex.Len.(*syntax.BasicLit); ok {
+				n = irParseInt64(lit.Value)
+			} else if ex.Len != nil {
+				cv := tcEvalConstExpr(ex.Len, scope, -1)
+				if cv != nil {
+					if ci, ok4 := cv.(*ConstInt); ok4 {
+						n = ci.V
+					}
+				}
+				if n == -1 && constValMap != nil {
+					epos := ex.Pos()
+					n = resolveArrayLenFromSrc(epos, constValMap)
+				}
+			}
+			return NewArray(elem, n)
+		}
+	case *syntax.MapType:
+		key := tcResolveNameInline(ex.Key, scope)
+		val := tcResolveNameInline(ex.Value, scope)
+		if key != nil && val != nil {
+			return NewTCMap(key, val)
+		}
+	case *syntax.StructType:
+		var fields []*TCVar
+		var tags []string
+		for i, field := range ex.FieldList {
+			typ := tcResolveNameInline(field.Type, scope)
+			fname := ""
+			if field.Name != nil {
+				fname = field.Name.Value
+			} else {
+				fname = TypeBaseName(typ)
+			}
+			fields = append(fields, NewTCField(nil, fname, typ, field.Name == nil))
+			tag := ""
+			if i < len(ex.TagList) && ex.TagList[i] != nil {
+				tag = ex.TagList[i].Value
+			}
+			tags = append(tags, tag)
+		}
+		return NewTCStruct(fields, tags)
+	case *syntax.FuncType:
+		return tcResolveFuncInline(ex, scope)
+	case *syntax.InterfaceType:
+		return tcResolveInterfaceInline(ex, scope)
+	case *syntax.ChanType:
+		elem := tcResolveNameInline(ex.Elem, scope)
+		if elem != nil {
+			dir := TCSendRecv
+			if ex.Dir == syntax.SendOnly {
+				dir = TCSendOnly
+			} else if ex.Dir == syntax.RecvOnly {
+				dir = TCRecvOnly
+			}
+			return NewTCChan(dir, elem)
+		}
+	case *syntax.DotsType:
+		elem := tcResolveNameInline(ex.Elem, scope)
+		if elem != nil {
+			if b, ok := elem.(*Basic); ok && b.Kind == Uint8 {
+				return Typ[TCString]
+			}
+			return NewSlice(elem)
+		}
+	}
+	return nil
+}
+
+func tcResolveInterfaceInline(e *syntax.InterfaceType, scope *Scope) (t *TCInterface) {
+	var methods []*IfaceMethod
+	var embeds []Type
+	for _, f := range e.MethodList {
+		if f.Name == nil {
+			typ := tcResolveNameInline(f.Type, scope)
+			if typ != nil {
+				embeds = append(embeds, typ)
+			}
+			continue
+		}
+		ft, ok := f.Type.(*syntax.FuncType)
+		if !ok {
+			continue
+		}
+		sig := tcResolveFuncInline(ft, scope)
+		if sig != nil {
+			methods = append(methods, NewTCIfaceMethod(f.Name.Value, sig))
+		}
+	}
+	iface := NewTCInterface(methods, embeds)
+	iface.Complete()
+	return iface
+}
+
+func tcResolveRecvType(recv *syntax.Field, scope *Scope) (t Type) {
+	if recv == nil {
+		return nil
+	}
+	return tcResolveNameInline(recv.Type, scope)
+}
+
+func tcResolveFuncInlineWithRecv(ft *syntax.FuncType, recv *syntax.Field, scope *Scope) (s *Signature) {
+	if ft == nil {
+		return nil
+	}
+	var recvVar *TCVar
+	if recv != nil {
+		recvTyp := tcResolveNameInline(recv.Type, scope)
+		recvName := ""
+		if recv.Name != nil {
+			recvName = recv.Name.Value
+		}
+		recvVar = NewTCVar(nil, recvName, recvTyp)
+	}
+	params := tcResolveFieldList(ft.ParamList, scope)
+	results := tcResolveFieldList(ft.ResultList, scope)
+	variadic := false
+	if len(ft.ParamList) > 0 {
+		if _, ok := ft.ParamList[len(ft.ParamList)-1].Type.(*syntax.DotsType); ok {
+			variadic = true
+		}
+	}
+	return NewSignature(recvVar, params, results, variadic)
+}
+
+func tcResolveFieldList(fields []*syntax.Field, scope *Scope) (t *Tuple) {
+	if len(fields) == 0 {
+		return nil
+	}
+	var vars []*TCVar
+	for _, f := range fields {
+		typ := tcResolveNameInline(f.Type, scope)
+		pname := ""
+		if f.Name != nil {
+			pname = f.Name.Value
+		}
+		vars = append(vars, NewTCVar(nil, pname, typ))
+	}
+	return NewTuple(vars...)
+}
+
+func tcResolveFuncInline(ft *syntax.FuncType, scope *Scope) (s *Signature) {
+	if ft == nil {
+		return nil
+	}
+	var params []*TCVar
+	for _, p := range ft.ParamList {
+		typ := tcResolveNameInline(p.Type, scope)
+		pname := ""
+		if p.Name != nil {
+			pname = p.Name.Value
+		}
+		params = append(params, NewTCVar(nil, pname, typ))
+	}
+	var results []*TCVar
+	for _, r := range ft.ResultList {
+		typ := tcResolveNameInline(r.Type, scope)
+		if typ == nil {
+			_ = "?"
+			if _, ok1 := r.Type.(*syntax.Name); ok1 {
+			} else if op, ok2 := r.Type.(*syntax.Operation); ok2 && op.Op == token.Mul && op.Y == nil {
+				if _, ok3 := op.X.(*syntax.Name); ok3 {
+				} else if _, ok4 := op.X.(*syntax.SelectorExpr); ok4 {
+				}
+			} else if _, ok5 := r.Type.(*syntax.SelectorExpr); ok5 {
+				_ = ok5
+			}
+		}
+		rname := ""
+		if r.Name != nil {
+			rname = r.Name.Value
+		}
+		results = append(results, NewTCVar(nil, rname, typ))
+	}
+	variadic := false
+	if len(ft.ParamList) > 0 {
+		if _, ok := ft.ParamList[len(ft.ParamList)-1].Type.(*syntax.DotsType); ok {
+			variadic = true
+		}
+	}
+	var pTuple *Tuple
+	if len(params) > 0 {
+		pTuple = NewTuple(params...)
+	}
+	var rTuple *Tuple
+	if len(results) > 0 {
+		rTuple = NewTuple(results...)
+	}
+	return NewSignature(nil, pTuple, rTuple, variadic)
+}

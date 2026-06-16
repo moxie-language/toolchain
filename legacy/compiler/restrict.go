@@ -557,7 +557,7 @@ func (c *compilerContext) checkPackageRestrictions(pkg *loader.Package) {
 				case token.VAR:
 					for _, spec := range d.Specs {
 						vs := spec.(*ast.ValueSpec)
-						if len(vs.Values) > 0 {
+						if len(vs.Values) > 0 && !isDemotedStringConst(vs) {
 							c.addError(vs.Pos(), "moxie: package-level var with initializer is not allowed: use zero-value declaration and init()")
 						}
 					}
@@ -615,6 +615,30 @@ func (c *compilerContext) checkScopeShadowing(pkg *loader.Package) {
 
 // checkInitBodyRestrictions walks an init() function body for banned constructs:
 // select statements and spawn() calls.
+// isDemotedStringConst returns true if a var spec was originally a string
+// constant that was demoted to var by splitConstBlocks (string->[]byte).
+// These have initializers like []byte("literal") and should not be flagged
+// as "package-level var with initializer".
+func isDemotedStringConst(vs *ast.ValueSpec) bool {
+	for _, val := range vs.Values {
+		call, ok := val.(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		// Check for []byte(...) call
+		if _, ok := call.Fun.(*ast.ArrayType); !ok {
+			return false
+		}
+		if len(call.Args) != 1 {
+			return false
+		}
+		if lit, ok := call.Args[0].(*ast.BasicLit); !ok || lit.Kind != token.STRING {
+			return false
+		}
+	}
+	return true
+}
+
 func checkInitBodyRestrictions(c *compilerContext, body *ast.BlockStmt) {
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch node := n.(type) {

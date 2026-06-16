@@ -4,7 +4,7 @@ import (
 	"git.smesh.lol/moxie/pkg/token"
 )
 
-func (p *Parser) expr() Expr {
+func (p *Parser) expr() (ex Expr) {
 	if trace {
 		defer p.trace("expr")()
 	}
@@ -13,7 +13,7 @@ func (p *Parser) expr() Expr {
 }
 
 // Expression = UnaryExpr | Expression binary_op Expression .
-func (p *Parser) binaryExpr(x Expr, prec int32) Expr {
+func (p *Parser) binaryExpr(x Expr, prec int32) (ex Expr) {
 	// don't trace binaryExpr - only leads to overly nested trace output
 
 	if x == nil {
@@ -33,7 +33,7 @@ func (p *Parser) binaryExpr(x Expr, prec int32) Expr {
 }
 
 // UnaryExpr = PrimaryExpr | unary_op UnaryExpr .
-func (p *Parser) unaryExpr() Expr {
+func (p *Parser) unaryExpr() (ex Expr) {
 	if trace {
 		defer p.trace("unaryExpr")()
 	}
@@ -87,8 +87,8 @@ func (p *Parser) unaryExpr() Expr {
 			dir := SendOnly
 			t := x
 			for dir == SendOnly {
-				c, ok := t.(*ChanType)
-				if !ok {
+				c, ok2 := t.(*ChanType)
+				if !ok2 {
 					break
 				}
 				dir = c.Dir
@@ -150,7 +150,7 @@ func (p *Parser) callStmt() (c *CallStmt) {
 // Literal     = BasicLit | CompositeLit | FunctionLit .
 // BasicLit    = int_lit | float_lit | imaginary_lit | rune_lit | string_lit .
 // OperandName = identifier | QualifiedIdent.
-func (p *Parser) operand(keep_parens bool) Expr {
+func (p *Parser) operand(keep_parens bool) (ex Expr) {
 	if trace {
 		defer p.trace("operand " | p.Tok.String())()
 	}
@@ -244,7 +244,7 @@ func (p *Parser) operand(keep_parens bool) Expr {
 //	                 "]" .
 //	TypeAssertion  = "." "(" Type ")" .
 //	Arguments      = "(" [ ( ExpressionList | Type [ "," ExpressionList ] ) [ "..." ] [ "," ] ] ")" .
-func (p *Parser) pexpr(x Expr, keep_parens bool) Expr {
+func (p *Parser) pexpr(x Expr, keep_parens bool) (ex Expr) {
 	if trace {
 		defer p.trace("pexpr")()
 	}
@@ -306,11 +306,11 @@ loop:
 				if comma || p.Tok == token.Rbrack {
 					p.want(token.Rbrack)
 					// x[], x[i,] or x[i, j, ...]
-					t := &IndexExpr{}
-					t.pos = pos
-					t.X = x
-					t.Index = i
-					x = t
+					ie := &IndexExpr{}
+					ie.pos = pos
+					ie.X = x
+					ie.Index = i
+					x = ie
 					break
 				}
 			}
@@ -400,21 +400,21 @@ loop:
 
 // isValue reports whether x syntactically must be a value (and not a type) expression.
 func isValue(x Expr) (ok bool) {
-	switch x := x.(type) {
+	switch v := x.(type) {
 	case *BasicLit, *CompositeLit, *FuncLit, *SliceExpr, *AssertExpr, *TypeSwitchGuard, *CallExpr:
 		return true
 	case *Operation:
-		return x.Op != token.Mul || x.Y != nil // *T may be a type
+		return v.Op != token.Mul || v.Y != nil // *T may be a type
 	case *ParenExpr:
-		return isValue(x.X)
+		return isValue(v.X)
 	case *IndexExpr:
-		return isValue(x.X) || isValue(x.Index)
+		return isValue(v.X) || isValue(v.Index)
 	}
 	return false
 }
 
 // Element = Expression | LiteralValue .
-func (p *Parser) bare_complitexpr() Expr {
+func (p *Parser) bare_complitexpr() (ex Expr) {
 	if trace {
 		defer p.trace("bare_complitexpr")()
 	}
@@ -518,7 +518,7 @@ func (p *Parser) nameList(First *Name) (ns []*Name) {
 }
 
 // The first name may be provided, or nil.
-func (p *Parser) qualifiedName(name *Name) Expr {
+func (p *Parser) qualifiedName(name *Name) (ex Expr) {
 	if trace {
 		defer p.trace("qualifiedName")()
 	}
@@ -552,7 +552,7 @@ func (p *Parser) qualifiedName(name *Name) Expr {
 }
 
 // ExpressionList = Expression { "," Expression } .
-func (p *Parser) exprList() Expr {
+func (p *Parser) exprList() (ex Expr) {
 	if trace {
 		defer p.trace("exprList")()
 	}
@@ -611,7 +611,7 @@ func (p *Parser) typeList(strict bool) (x Expr, comma bool) {
 }
 
 // Unparen returns e with any enclosing parentheses stripped.
-func Unparen(x Expr) Expr {
+func Unparen(x Expr) (ex Expr) {
 	for {
 		p, ok := x.(*ParenExpr)
 		if !ok {
@@ -624,11 +624,11 @@ func Unparen(x Expr) Expr {
 
 // UnpackListExpr unpacks a *ListExpr into a []Expr.
 func UnpackListExpr(x Expr) (es []Expr) {
-	switch x := x.(type) {
+	switch v := x.(type) {
 	case nil:
 		return nil
 	case *ListExpr:
-		return x.ElemList
+		return v.ElemList
 	default:
 		return []Expr{x}
 	}

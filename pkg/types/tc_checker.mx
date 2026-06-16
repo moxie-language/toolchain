@@ -37,12 +37,12 @@ func NewChecker(conf *Config, pkg *TCPackage, info *Info) (c *Checker) {
 
 // Check type-checks the given files as package pkg.
 // It returns an error if type checking fails.
-func Check(path string, files []*syntax.File, importer Importer) (*TCPackage, *Info, error) {
-	pkg := NewTCPackage(path, packageName(files))
-	info := newInfo()
+func Check(path string, files []*syntax.File, importer Importer) (pkg *TCPackage, info *Info, err error) {
+	pkg = NewTCPackage(path, packageName(files))
+	info = newInfo()
 	conf := &Config{Importer: importer}
 	c := NewChecker(conf, pkg, info)
-	if err := c.Files(files); err != nil {
+	if err = c.Files(files); err != nil {
 		return pkg, info, err
 	}
 	return pkg, info, nil
@@ -133,6 +133,10 @@ func (e *TypeError) Error() (s string) {
 	return e.Pos.String() | ": " | e.Msg
 }
 
+func (e *TypeError) String() (s string) {
+	return e.Error()
+}
+
 // record stores type info for an expression.
 func (c *Checker) record(e syntax.Expr, tv TCTypeAndValue) {
 	if c.info != nil {
@@ -151,7 +155,7 @@ func (c *Checker) record(e syntax.Expr, tv TCTypeAndValue) {
 
 // openScope creates a child scope of s and records it for node n.
 func (c *Checker) openScope(n syntax.Node, parent *Scope) (s *Scope) {
-	s := NewScope(parent)
+	s = NewScope(parent)
 	if c.info != nil {
 		c.info.Scopes[n] = s
 	}
@@ -159,11 +163,13 @@ func (c *Checker) openScope(n syntax.Node, parent *Scope) (s *Scope) {
 }
 
 // lookup finds a named object starting from s, then universe.
-func (c *Checker) lookup(name string, s *Scope) (*Scope, Object) {
-	if found, obj := s.LookupParent(name); obj != nil {
-		return found, obj
+func (c *Checker) lookup(name string, s *Scope) (sc *Scope, obj Object) {
+	sc, obj = s.LookupParent(name)
+	if obj != nil {
+		return sc, obj
 	}
-	if obj := Universe.Lookup(name); obj != nil {
+	obj = Universe.Lookup(name)
+	if obj != nil {
 		return Universe, obj
 	}
 	return nil, nil
@@ -172,14 +178,16 @@ func (c *Checker) lookup(name string, s *Scope) (*Scope, Object) {
 // lookupType finds a type name in localScope (if set), then the current
 // file scope (imports), then package scope, then universe.
 // Used by resolveTypeName to find locally-defined types (e.g. inside function bodies).
-func (c *Checker) lookupType(name string) (*Scope, Object) {
+func (c *Checker) lookupType(name string) (sc *Scope, obj Object) {
 	if c.localScope != nil {
-		if sc, obj := c.localScope.LookupParent(name); obj != nil {
+		sc, obj = c.localScope.LookupParent(name)
+		if obj != nil {
 			return sc, obj
 		}
 	}
 	if c.fileScope != nil {
-		if sc, obj := c.fileScope.LookupParent(name); obj != nil {
+		sc, obj = c.fileScope.LookupParent(name)
+		if obj != nil {
 			return sc, obj
 		}
 	}

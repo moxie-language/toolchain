@@ -1,0 +1,88 @@
+package main
+
+func (e *irEmitter) emitMakeClosure(m *SSAMakeClosure) {
+	reg := e.regName(m)
+	fn, _ := m.Fn.(*SSAFunction)
+	ipt := e.intptrType()
+
+	if len(m.Bindings) == 0 {
+		t1a := e.nextReg2("mc")
+		e.w("  ") ; e.w(t1a) ; e.w(" = insertvalue {ptr, ptr} undef, ptr null, 0\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = insertvalue {ptr, ptr} ") ; e.w(t1a)
+		e.w(", ptr ") ; e.w(e.funcSymbol(fn)) ; e.w(", 1\n")
+		return
+	}
+
+	ctxType := e.closureContextType(m.Bindings)
+	ctxSz := e.nextReg2("mc")
+	e.w("  ") ; e.w(ctxSz) ; e.w(" = ptrtoint ptr getelementptr (")
+	e.w(ctxType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+	ctxPtr := e.nextReg2("mc")
+	e.w("  ") ; e.w(ctxPtr) ; e.w(" = call ptr @runtime.alloc(")
+	e.w(ipt) ; e.w(" ") ; e.w(ctxSz) ; e.w(", ptr null, ptr null)\n")
+	e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
+	e.scopeTrackAlloc(ctxPtr)
+
+	for i, b := range m.Bindings {
+		bval := e.operand(b)
+		_, isFreeVar := b.(*SSAFreeVar)
+		actualType := e.llvmType(b.SSAType())
+		if !isFreeVar && actualType != "ptr" && actualType != "" && actualType != "void" {
+			boxAlloc := e.nextReg2("mc")
+			e.w("  ") ; e.w(boxAlloc) ; e.w(" = call ptr @runtime.alloc(")
+			e.w(ipt) ; e.w(" ptrtoint (ptr getelementptr (") ; e.w(actualType)
+			e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("), ptr null, ptr null)\n")
+			e.w("  store ") ; e.w(actualType) ; e.w(" ") ; e.w(bval) ; e.w(", ptr ") ; e.w(boxAlloc) ; e.w("\n")
+			bval = boxAlloc
+		}
+		gep := e.nextReg2("mc")
+		e.w("  ") ; e.w(gep) ; e.w(" = getelementptr ") ; e.w(ctxType) ; e.w(", ptr ")
+		e.w(ctxPtr) ; e.w(", i32 0, i32 ") ; e.w(irItoa(i)) ; e.w("\n")
+		e.w("  store ptr ") ; e.w(bval) ; e.w(", ptr ") ; e.w(gep) ; e.w("\n")
+	}
+
+	t1 := e.nextReg2("mc")
+	e.w("  ") ; e.w(t1) ; e.w(" = insertvalue {ptr, ptr} undef, ptr ") ; e.w(ctxPtr) ; e.w(", 0\n")
+	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue {ptr, ptr} ") ; e.w(t1)
+	e.w(", ptr ") ; e.w(e.funcSymbol(fn)) ; e.w(", 1\n")
+}
+
+func (e *irEmitter) closureBindingType(b SSAValue) (s string) {
+	return "ptr"
+}
+
+func (e *irEmitter) closureContextType(bindings []SSAValue) (s string) {
+	s := "{"
+	for i, b := range bindings {
+		if i > 0 {
+			s = s | ", "
+		}
+		s = s | e.closureBindingType(b)
+	}
+	return s | "}"
+}
+
+func (e *irEmitter) freeVarType(fv *SSAFreeVar) (s string) {
+	return "ptr"
+}
+
+func (e *irEmitter) emitFreeVarUnpack(f *SSAFunction) {
+	ctxName := "_ctx"
+	ctxType := "{"
+	for i, fv := range f.FreeVars {
+		if i > 0 {
+			ctxType = ctxType | ", "
+		}
+		ctxType = ctxType | e.freeVarType(fv)
+	}
+	ctxType = ctxType | "}"
+
+	for i, fv := range f.FreeVars {
+		fvName := e.regName(fv)
+		e.nextReg++
+		gep := "%fv" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(gep) ; e.w(" = getelementptr ") ; e.w(ctxType)
+		e.w(", ptr %") ; e.w(ctxName) ; e.w(", i32 0, i32 ") ; e.w(irItoa(i)) ; e.w("\n")
+		e.w("  ") ; e.w(fvName) ; e.w(" = load ptr, ptr ") ; e.w(gep) ; e.w("\n")
+	}
+}

@@ -40,8 +40,8 @@ const (
 	OpGeq
 )
 
-func (op SSAOp) String() (s string) {
-	switch op {
+func (op *SSAOp) String() (s string) {
+	switch *op {
 	case OpAdd:
 		return "+"
 	case OpSub:
@@ -98,28 +98,28 @@ func ssaConstString(val ConstVal) (s string) {
 
 // SSA Value interface.
 type SSAValue interface {
-	SSAName() string
-	String() string
-	SSAType() Type
-	SSAParent() *SSAFunction
-	SSAPos() int32
+	SSAName() (s string)
+	String() (s string)
+	SSAType() (t Type)
+	SSAParent() (f *SSAFunction)
+	SSAPos() (n int32)
 }
 
 // SSA Instruction interface.
 type SSAInstruction interface {
-	InstrBlock() *SSABasicBlock
-	InstrParent() *SSAFunction
-	InstrPos() int32
-	InstrString() string
+	InstrBlock() (b *SSABasicBlock)
+	InstrParent() (f *SSAFunction)
+	InstrPos() (n int32)
+	InstrString() (s string)
 	setBlock(*SSABasicBlock)
 }
 
 // SSA Member interface (package-level declaration).
 type SSAMember interface {
-	MemberName() string
-	MemberString() string
-	MemberType() Type
-	MemberPkg() *SSAPackage
+	MemberName() (s string)
+	MemberString() (s string)
+	MemberType() (t Type)
+	MemberPkg() (p *SSAPackage)
 }
 
 // SSA Program - top-level container.
@@ -165,8 +165,8 @@ func (p *SSAPackage) Func(name string) (s *SSAFunction) {
 }
 
 func (p *SSAPackage) ExternalFunc(name string, sig *Signature) (s *SSAFunction) {
-	if fn := p.Func(name); fn != nil {
-		return fn
+	if existing := p.Func(name); existing != nil {
+		return existing
 	}
 	fn := &SSAFunction{
 		name:      name,
@@ -818,7 +818,7 @@ func compoundOp(op token.Operator) (s SSAOp) {
 	return OpIllegal
 }
 
-func ssaBuiltinID(name string) (BuiltinID, bool) {
+func ssaBuiltinID(name string) (id BuiltinID, found bool) {
 	switch name {
 	case "append":
 		return BuiltinAppend, true
@@ -885,17 +885,17 @@ func ssaElemType(t Type) (tv Type) {
 	if t == nil {
 		return nil
 	}
-	switch t := SafeUnderlying(t).(type) {
+	switch u := SafeUnderlying(t).(type) {
 	case *Slice:
-		return t.Elem
+		return u.Elem
 	case *Array:
-		return t.Elem
+		return u.Elem
 	case *TCMap:
-		return t.Elem
+		return u.Elem
 	case *Pointer:
-		return t.Base
+		return u.Base
 	case *Basic:
-		if t.Info&IsString != 0 {
+		if u.Info&IsString != 0 {
 			return Typ[Uint8]
 		}
 	}
@@ -916,7 +916,7 @@ func ssaIsStringType(t Type) (ok bool) {
 	if t == nil {
 		return false
 	}
-	if b, ok := SafeUnderlying(t).(*Basic); ok {
+	if b, _ := SafeUnderlying(t).(*Basic); b != nil {
 		return b.Info&IsString != 0
 	}
 	return false
@@ -929,17 +929,17 @@ func ssaSliceOf(t Type) (tv Type) {
 	if b, ok := SafeUnderlying(t).(*Basic); ok && b.Info&IsString != 0 {
 		return t
 	}
-	switch t := SafeUnderlying(t).(type) {
+	switch u := SafeUnderlying(t).(type) {
 	case *Slice:
-		return t
+		return u
 	case *Array:
-		if b, ok := t.Elem.(*Basic); ok && b.Kind == Uint8 {
+		if b, _ := u.Elem.(*Basic); b != nil && b.Kind == Uint8 {
 			return Typ[TCString]
 		}
-		return NewSlice(t.Elem)
+		return NewSlice(u.Elem)
 	case *Pointer:
-		if t.Base != nil {
-			return ssaSliceOf(t.Base)
+		if u.Base != nil {
+			return ssaSliceOf(u.Base)
 		}
 	}
 	return Typ[TCString]

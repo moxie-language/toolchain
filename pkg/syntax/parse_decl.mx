@@ -106,19 +106,19 @@ func isEmptyFuncDecl(dcl Decl) (ok bool) {
 // elements are accepted. list returns the position of the closing token.
 //
 // list = [ f { sep f } [sep] ] close .
-func (p *Parser) list(context string, sep, close token.Token, f func() bool) (pv token.Pos) {
-	if debug && (sep != token.Comma && sep != token.Semi || close != token.Rparen && close != token.Rbrace && close != token.Rbrack) {
+func (p *Parser) list(context string, sep, closeTok token.Token, f func() bool) (pv token.Pos) {
+	if debug && (sep != token.Comma && sep != token.Semi || closeTok != token.Rparen && closeTok != token.Rbrace && closeTok != token.Rbrack) {
 		panic("invalid sep or close argument for list")
 	}
 
 	done := false
-	for p.Tok != token.EOF && p.Tok != close && !done {
+	for p.Tok != token.EOF && p.Tok != closeTok && !done {
 		done = f()
-		// sep is optional before close
-		if !p.got(sep) && p.Tok != close {
-			p.syntaxError("in " | context | "; possibly missing " | tokstring(sep) | " or " | tokstring(close))
+		// sep is optional before closeTok
+		if !p.got(sep) && p.Tok != closeTok {
+			p.syntaxError("in " | context | "; possibly missing " | tokstring(sep) | " or " | tokstring(closeTok))
 			p.advance(token.Rparen, token.Rbrack, token.Rbrace)
-			if p.Tok != close {
+			if p.Tok != closeTok {
 				// position could be better but we had an error so we don't care
 				return p.pos()
 			}
@@ -126,7 +126,7 @@ func (p *Parser) list(context string, sep, close token.Token, f func() bool) (pv
 	}
 
 	pos := p.pos()
-	p.want(close)
+	p.want(closeTok)
 	return pos
 }
 
@@ -152,7 +152,7 @@ func (p *Parser) appendGroup(list []Decl, f func(*Group) Decl) (ds []Decl) {
 
 // ImportSpec = [ "." + PackageName ] ImportPath .
 // ImportPath = string_lit .
-func (p *Parser) importDecl(group *Group) Decl {
+func (p *Parser) importDecl(group *Group) (ret Decl) {
 	if trace {
 		defer p.trace("importDecl")()
 	}
@@ -189,7 +189,7 @@ func (p *Parser) importDecl(group *Group) Decl {
 }
 
 // ConstSpec = IdentifierList [ [ Type ] "=" ExpressionList ] .
-func (p *Parser) constDecl(group *Group) Decl {
+func (p *Parser) constDecl(group *Group) (ret Decl) {
 	if trace {
 		defer p.trace("constDecl")()
 	}
@@ -211,7 +211,7 @@ func (p *Parser) constDecl(group *Group) Decl {
 }
 
 // TypeSpec = identifier [ TypeParams ] [ "=" ] Type .
-func (p *Parser) typeDecl(group *Group) Decl {
+func (p *Parser) typeDecl(group *Group) (ret Decl) {
 	if trace {
 		defer p.trace("typeDecl")()
 	}
@@ -299,46 +299,46 @@ func (p *Parser) typeDecl(group *Group) Decl {
 // element (per the isTypeElem predicate) or if force is set.
 // If x is just a name, the result is (name, nil). If the split succeeds,
 // the result is (name, expr). Otherwise the result is (nil, x).
-func extractName(x Expr, force bool) (*Name, Expr) {
-	switch x := x.(type) {
+func extractName(x Expr, force bool) (nm *Name, ex Expr) {
+	switch xn := x.(type) {
 	case *Name:
-		return x, nil
+		return xn, nil
 	case *Operation:
-		if x.Y == nil {
+		if xn.Y == nil {
 			break // unary expr
 		}
-		switch x.Op {
+		switch xn.Op {
 		case token.Mul:
-			if name, _ := x.X.(*Name); name != nil && (force || isTypeElem(x.Y)) {
-				// x = name *x.Y
-				op := *x
+			if name, _ := xn.X.(*Name); name != nil && (force || isTypeElem(xn.Y)) {
+				// xn = name *xn.Y
+				op := *xn
 				op.X, op.Y = op.Y, nil // change op into unary *op.Y
 				return name, &op
 			}
 		case token.Or:
-			if name, lhs := extractName(x.X, force || isTypeElem(x.Y)); name != nil && lhs != nil {
-				// x = name lhs|x.Y
-				op := *x
+			if name, lhs := extractName(xn.X, force || isTypeElem(xn.Y)); name != nil && lhs != nil {
+				// xn = name lhs|xn.Y
+				op := *xn
 				op.X = lhs
 				return name, &op
 			}
 		}
 	case *CallExpr:
-		if name, _ := x.Fun.(*Name); name != nil {
-			if len(x.ArgList) == 1 && !x.HasDots && (force || isTypeElem(x.ArgList[0])) {
+		if name, _ := xn.Fun.(*Name); name != nil {
+			if len(xn.ArgList) == 1 && !xn.HasDots && (force || isTypeElem(xn.ArgList[0])) {
 				// The parser doesn't keep unnecessary parentheses.
 				// Set the flag below to keep them, for testing
 				// (see go.dev/issues/69206).
 				const keep_parens = false
 				if keep_parens {
-					// x = name (x.ArgList[0])
+					// xn = name (xn.ArgList[0])
 					px := &ParenExpr{}
-					px.pos = x.pos // position of "(" in call
-					px.X = x.ArgList[0]
+					px.pos = xn.pos // position of "(" in call
+					px.X = xn.ArgList[0]
 					return name, px
 				} else {
-					// x = name x.ArgList[0]
-					return name, Unparen(x.ArgList[0])
+					// xn = name xn.ArgList[0]
+					return name, Unparen(xn.ArgList[0])
 				}
 			}
 		}
@@ -349,19 +349,19 @@ func extractName(x Expr, force bool) (*Name, Expr) {
 // isTypeElem reports whether x is a (possibly parenthesized) type element expression.
 // The result is false if x could be a type element OR an ordinary (value) expression.
 func isTypeElem(x Expr) (ok bool) {
-	switch x := x.(type) {
+	switch xn := x.(type) {
 	case *ArrayType, *StructType, *FuncType, *InterfaceType, *SliceType, *MapType, *ChanType:
 		return true
 	case *Operation:
-		return isTypeElem(x.X) || (x.Y != nil && isTypeElem(x.Y)) || x.Op == token.Tilde
+		return isTypeElem(xn.X) || (xn.Y != nil && isTypeElem(xn.Y)) || xn.Op == token.Tilde
 	case *ParenExpr:
-		return isTypeElem(x.X)
+		return isTypeElem(xn.X)
 	}
 	return false
 }
 
 // VarSpec = IdentifierList ( Type [ "=" ExpressionList ] + "=" ExpressionList ) .
-func (p *Parser) varDecl(group *Group) Decl {
+func (p *Parser) varDecl(group *Group) (ret Decl) {
 	if trace {
 		defer p.trace("varDecl")()
 	}

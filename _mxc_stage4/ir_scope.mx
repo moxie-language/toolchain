@@ -1,0 +1,423 @@
+package main
+
+import (
+	. "git.smesh.lol/moxie/pkg/types"
+)
+
+func checkUseAfterFree(f *SSAFunction) {
+	if f.Blocks == nil {
+		return
+	}
+	fname := f.name
+	for _, blk := range f.Blocks {
+		freed := map[string]bool{}
+		for _, instr := range blk.Instrs {
+			call, isCall := instr.(*SSACall)
+			if isCall {
+				b, isBuiltin := call.Call.Value.(*SSABuiltin)
+				if isBuiltin && b.id == BuiltinFree && len(call.Call.Args) == 1 {
+					arg := call.Call.Args[0]
+					if uop, ok := arg.(*SSAUnOp); ok && uop.Op == OpMul && uop.X != nil {
+						freed[uop.X.SSAName()] = true
+					}
+					continue
+				}
+				for _, arg := range call.Call.Args {
+					if arg == nil {
+						continue
+					}
+					if uop, ok := arg.(*SSAUnOp); ok && uop.Op == OpMul && uop.X != nil {
+						if freed[uop.X.SSAName()] {
+							compileErrors = append(compileErrors,
+								fname|": use of freed variable '"|uop.X.SSAName()|"'")
+						}
+					}
+				}
+				continue
+			}
+			st, isStore := instr.(*SSAStore)
+			if isStore && st.Addr != nil {
+				if freed[st.Addr.SSAName()] {
+					freed[st.Addr.SSAName()] = false
+				}
+				continue
+			}
+			load, isLoad := instr.(*SSAUnOp)
+			if isLoad && load.Op == OpMul && load.X != nil {
+				if freed[load.X.SSAName()] {
+					compileErrors = append(compileErrors,
+						fname|": use of freed variable '"|load.X.SSAName()|"'")
+				}
+			}
+		}
+	}
+}
+
+// markReturnEscapes promotes stack allocas to heap when their address can
+// reach a return value. Returning r[:] over a local array (or &local routed
+// through a named-result variable) otherwise hands the caller a pointer into
+// a dead frame. Tracks which allocas each SSA value may point into
+// (derived), and which allocas each alloca's contents may point into
+// (stored), to a fixpoint; any alloca reachable from a return result is
+// marked Heap. Over-marking is safe (heap-allocates more), under-marking
+// dangles.
+func markReturnEscapes(f *SSAFunction) {
+	derived := map[SSAValue][]*SSAAlloc{}
+	stored := map[*SSAAlloc][]*SSAAlloc{}
+	mergeInto := func(dst []*SSAAlloc, srcs []*SSAAlloc) ([]*SSAAlloc, bool) {
+		didMerge := false
+		for _, s := range srcs {
+			if s == nil {
+				continue // legacy compiler hashmap codegen can produce nil entries
+			}
+			found := false
+			for _, c := range dst {
+				if c == s {
+					found = true
+					break
+				}
+			}
+			if !found {
+				dst = append(dst, s)
+				didMerge = true
+			}
+		}
+		return dst, didMerge
+	}
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			if a, ok := instr.(*SSAAlloc); ok {
+				derived[SSAValue(a)] = []*SSAAlloc{a}
+			}
+		}
+	}
+	changed := true
+	for changed {
+		changed = false
+		for _, b := range f.Blocks {
+			for _, instr := range b.Instrs {
+				var dst SSAValue
+				var srcs []*SSAAlloc
+				switch i := instr.(type) {
+				case *SSASlice:
+					dst = i
+					srcs = derived[i.X]
+				case *SSAFieldAddr:
+					dst = i
+					srcs = derived[i.X]
+				case *SSAIndexAddr:
+					dst = i
+					srcs = derived[i.X]
+				case *SSAChangeType:
+					dst = i
+					srcs = derived[i.X]
+				case *SSAConvert:
+					dst = i
+					srcs = derived[i.X]
+				case *SSAMakeInterface:
+					dst = i
+					srcs = derived[i.X]
+				case *SSAPhi:
+					dst = i
+					for _, edge := range i.Edges {
+						srcs = srcs | derived[edge]
+					}
+				case *SSAUnOp:
+					// Load: the result carries whatever pointers were
+					// stored into the loaded alloca(s).
+					if i.Op == OpMul {
+						dst = i
+						for _, a := range derived[i.X] {
+							srcs = srcs | stored[a]
+						}
+					}
+				case *SSAStore:
+					if d := derived[i.Val]; len(d) > 0 {
+						for _, a := range derived[i.Addr] {
+							ns, ch := mergeInto(stored[a], d)
+							if ch {
+								stored[a] = ns
+								changed = true
+							}
+						}
+					}
+				}
+				if dst != nil && len(srcs) > 0 {
+					nd, ch := mergeInto(derived[dst], srcs)
+					if ch {
+						derived[dst] = nd
+						changed = true
+					}
+				}
+			}
+		}
+	}
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			r, ok := instr.(*SSAReturn)
+			if !ok {
+				continue
+			}
+			for _, res := range r.Results {
+				// An escaping alloca may itself hold pointers into other
+				// allocas (struct with slice field), recursively.
+				work := derived[res]
+				seen := map[*SSAAlloc]bool{}
+				for wi := 0; wi < len(work); wi++ {
+					a := work[wi]
+					if a == nil {
+						continue // legacy compiler hashmap codegen guard
+					}
+					if seen[a] {
+						continue
+					}
+					seen[a] = true
+					a.Heap = true
+					work = work | stored[a]
+				}
+			}
+		}
+	}
+}
+
+func allocEscapesViaCall(a *SSAAlloc, f *SSAFunction) (ok bool) {
+	escaped := map[SSAValue]bool{}
+	escaped[SSAValue(a)] = true
+	changed := true
+	for changed {
+		changed = false
+		for _, b := range f.Blocks {
+			for _, instr := range b.Instrs {
+				switch i := instr.(type) {
+				case *SSAFieldAddr:
+					if escaped[i.X] {
+						if v, ok2 := instr.(SSAValue); ok2 && !escaped[v] {
+							escaped[v] = true
+							changed = true
+						}
+					}
+				case *SSAMakeInterface:
+					if escaped[i.X] {
+						if v, ok2 := instr.(SSAValue); ok2 && !escaped[v] {
+							escaped[v] = true
+							changed = true
+						}
+					}
+				case *SSAStore:
+					if escaped[i.Val] || escaped[i.Addr] {
+						if escaped[i.Val] && !escaped[i.Addr] {
+							escaped[i.Addr] = true
+							changed = true
+						}
+					}
+				case *SSAPhi:
+					for _, edge := range i.Edges {
+						if escaped[edge] {
+							if v, ok2 := instr.(SSAValue); ok2 && !escaped[v] {
+								escaped[v] = true
+								changed = true
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			switch i := instr.(type) {
+			case *SSACall:
+				for _, arg := range i.Call.Args {
+					if escaped[arg] {
+						return true
+					}
+				}
+			case *SSAMapUpdate:
+				if escaped[i.Key] || escaped[i.Value] || escaped[i.Map] {
+					return true
+				}
+			case *SSASend:
+				if escaped[i.X] {
+					return true
+				}
+			case *SSAInvoke:
+				if escaped[i.X] {
+					return true
+				}
+				for _, arg := range i.Args {
+					if escaped[arg] {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// Compile-time scope dealloc system.
+//
+// Every heap allocation gets a slot alloca (%scope.slot.N) in the entry
+// block. The pointer is stored into the slot at the allocation site. The
+// slot name is tagged with the current scope ID in scopeAllocs[scopeID].
+//
+// At scope exit (jump crossing scope boundary), the compiler emits
+// load+free for each slot tagged with that scope. At function return,
+// free is emitted for scope-0 slots, excluding return values.
+//
+// When a store assigns a pointer to an outer-scope variable, the slot
+// tag moves from the current scope to the outer scope (compile-time map
+// mutation). No runtime scope chains, no escaped bits.
+
+// scopeTrackAlloc stores a heap pointer into a new slot alloca and tags
+// the slot with the current scope ID.
+func (e *irEmitter) scopeTrackAlloc(ptrReg string) {
+	if !e.scopeActive {
+		return
+	}
+	slot := "%scope.slot." | irItoa(e.scopeSlotCount)
+	e.scopeSlotCount++
+	// The alloca will be hoisted to _entry by hoistAllocaText.
+	e.w("  ") ; e.w(slot) ; e.w(" = alloca ptr\n")
+	e.w("  store ptr ") ; e.w(ptrReg) ; e.w(", ptr ") ; e.w(slot) ; e.w("\n")
+	e.valToSlot[ptrReg] = slot
+	blk := e.currentEmitBlock
+	sid := int32(0)
+	if blk != nil {
+		sid = blk.ScopeID
+	}
+	e.scopeAllocs[sid] = append(e.scopeAllocs[sid], slot)
+}
+
+// scopeBeforeReturn emits free() for all scope-0 allocations that are
+// not being returned. Return values are the caller's responsibility -
+// the compiler simply omits the free for those slots.
+func (e *irEmitter) scopeBeforeReturn(r *SSAReturn) {
+	if !e.scopeActive {
+		return
+	}
+	// Collect return-value source slots to exclude from freeing.
+	retSlots := map[string]bool{}
+	for _, res := range r.Results {
+		e.collectReturnSlots(res, retSlots)
+	}
+	for _, nr := range e.curFunc.NamedResults {
+		e.collectReturnSlots(nr, retSlots)
+	}
+	// Free all scope-0 slots not in the return set.
+	for _, slot := range e.scopeAllocs[0] {
+		if retSlots[slot] {
+			continue
+		}
+		e.emitFreeSlot(slot)
+	}
+}
+
+// collectReturnSlots traces an SSA value back to its allocation and marks
+// the corresponding slot so it won't be freed before return.
+func (e *irEmitter) collectReturnSlots(v SSAValue, out map[string]bool) {
+	if v == nil {
+		return
+	}
+	reg := e.regName(v)
+	// Check all scopes for a slot that was stored from this register.
+	// The slot stores ptrReg at allocation time; we need to match the
+	// original ptrReg. Since we track slots (not registers) in
+	// scopeAllocs, and each slot was created by scopeTrackAlloc for a
+	// specific ptrReg, we use the valToSlot map.
+	if slot, ok := e.valToSlot[reg]; ok {
+		out[slot] = true
+	}
+	// Also trace through phi edges.
+	if phi, ok := v.(*SSAPhi); ok {
+		for _, edge := range phi.Edges {
+			e.collectReturnSlots(edge, out)
+		}
+	}
+}
+
+// emitScopeFreesAt emits free() for all allocations tagged with the given
+// scope ID. Each slot is loaded and freed.
+func (e *irEmitter) emitScopeFreesAt(scopeID int32) {
+	allocs := e.scopeAllocs[scopeID]
+	if len(allocs) == 0 {
+		return
+	}
+	for _, slot := range allocs {
+		e.emitFreeSlot(slot)
+	}
+}
+
+// emitFreeSlot loads a pointer from a scope slot and frees it.
+func (e *irEmitter) emitFreeSlot(slot string) {
+	e.nextReg++
+	tmp := "%sf.ld" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(tmp) ; e.w(" = load ptr, ptr ") ; e.w(slot) ; e.w("\n")
+	e.w("  call void @runtime.free(ptr ") ; e.w(tmp) ; e.w(", ptr null)\n")
+	// Null the slot so double-free on multiple scope exits is safe.
+	e.w("  store ptr null, ptr ") ; e.w(slot) ; e.w("\n")
+	e.declareRuntime("runtime.free", "void", "ptr")
+}
+
+// emitScopeRelocateOnStore detects when a pointer is stored into an
+// outer-scope variable and moves the slot tag from the current scope to
+// the outer scope at compile time. This is ownership promotion.
+func (e *irEmitter) emitScopeRelocateOnStore(s *SSAStore, val, valType string) {
+	if !e.scopeActive {
+		return
+	}
+	blk := s.InstrBlock()
+	if blk == nil {
+		return
+	}
+	curScope := blk.ScopeID
+	addrScope := int32(0)
+	if ai, ok2 := s.Addr.(SSAInstruction); ok2 {
+		if aid, ok := e.instrScope[ai]; ok {
+			addrScope = aid
+		}
+	}
+	if addrScope >= curScope {
+		return
+	}
+	if val == "null" || val == "zeroinitializer" || val == "0" {
+		return
+	}
+	// Find the slot for this value in the current scope.
+	slot := e.findSlotForReg(val, curScope)
+	if slot == "" {
+		return
+	}
+	// Move slot tag from current scope to outer scope.
+	e.scopeRemoveSlot(curScope, slot)
+	e.scopeAllocs[addrScope] = append(e.scopeAllocs[addrScope], slot)
+}
+
+// findSlotForReg finds the slot in the given scope that was created for
+// the given register. Uses the valToSlot mapping.
+func (e *irEmitter) findSlotForReg(reg string, scopeID int32) (s string) {
+	slot, ok := e.valToSlot[reg]
+	if !ok {
+		return ""
+	}
+	// Verify the slot is actually in this scope.
+	for _, r := range e.scopeAllocs[scopeID] {
+		if r == slot {
+			return slot
+		}
+	}
+	return ""
+}
+
+// scopeRemoveSlot removes a slot from a scope's allocation list.
+func (e *irEmitter) scopeRemoveSlot(scopeID int32, slot string) {
+	allocs := e.scopeAllocs[scopeID]
+	for i, r := range allocs {
+		if r == slot {
+			allocs[i] = allocs[len(allocs)-1]
+			e.scopeAllocs[scopeID] = allocs[:len(allocs)-1]
+			return
+		}
+	}
+}

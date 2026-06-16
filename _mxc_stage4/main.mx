@@ -302,7 +302,7 @@ var globalModPrefix string
 var globalModDir string
 var globalReplaces map[string]string
 
-func parseReplaceLine(line string, baseDir string) (string, string, bool) {
+func parseReplaceLine(line string, baseDir string) (from string, to string, ok bool) {
 	arrow := int32(-1)
 	for k := int32(0); k < int32(len(line))-1; k++ {
 		if line[k] == '=' && line[k+1] == '>' {
@@ -327,12 +327,12 @@ func parseReplaceLine(line string, baseDir string) (string, string, bool) {
 	return from, to, true
 }
 
-func findModuleRoot(startDir string) (string, string) {
-	dir := startDir
+func findModuleRoot(startDir string) (modName string, dir string) {
+	dir = startDir
 	for {
 		data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, "moxie.mod"))
 		if ok {
-			modName := ""
+			modName = ""
 			globalReplaces = map[string]string{}
 			lines := mxutil.SplitLines(string(data))
 			inReplace := false
@@ -421,14 +421,13 @@ type modRequire struct {
 	version string
 }
 
-func parseModRequires(dir string) (string, []modRequire, map[string]string) {
+func parseModRequires(dir string) (modName string, reqs []modRequire, repls map[string]string) {
 	data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, "moxie.mod"))
 	if !ok {
 		return "", nil, nil
 	}
-	modName := ""
-	var reqs []modRequire
-	repls := map[string]string{}
+	modName = ""
+	repls = map[string]string{}
 	inRequire := false
 	inReplace := false
 	for _, line := range mxutil.SplitLines(string(data)) {
@@ -531,10 +530,10 @@ func autoFetchRepo(pkgPath, version string) (s string) {
 	mpath := getMoxiePath()
 	repoPath := pkgPath
 	for {
-		dest := mxutil.JoinPath(mpath, repoPath)
-		gitHead := mxutil.JoinPath(dest, ".git/HEAD")
-		_, exists := mxutil.ReadFile(gitHead)
-		if exists {
+		d := mxutil.JoinPath(mpath, repoPath)
+		gh := mxutil.JoinPath(d, ".git/HEAD")
+		_, ex := mxutil.ReadFile(gh)
+		if ex {
 			break
 		}
 		parent := pathDir(repoPath)
@@ -776,16 +775,16 @@ func joinStrings(ss []string, sep string) (s string) {
 		return ""
 	}
 	n := int32(0)
-	for _, s := range ss {
-		n += int32(len(s))
+	for _, v := range ss {
+		n += int32(len(v))
 	}
 	n += int32(len(sep)) * (int32(len(ss)) - 1)
 	buf := []byte{:0:n}
-	for i, s := range ss {
+	for i, v := range ss {
 		if i > 0 {
-			buf = append(buf, sep...)
+			buf = buf | sep
 		}
-		buf = append(buf, s...)
+		buf = buf | v
 	}
 	return string(buf)
 }
@@ -838,7 +837,7 @@ func pkgCacheKey(dir string, files []string) (s string) {
 		if !ok {
 			continue
 		}
-		all = append(all, data...)
+		all = all | data
 		all = append(all, 0)
 	}
 	return fnvHash(all)
@@ -871,7 +870,7 @@ func pkgHash(p *pkgInfo) (s string) {
 	for _, imp := range sorted {
 		if dh, ok := pkgKeyMemo[imp]; ok {
 			acc = append(acc, '|')
-			acc = append(acc, dh...)
+			acc = acc | dh
 		}
 	}
 	hv := fnvHash(acc)
@@ -1041,7 +1040,7 @@ type srcSpan struct {
 
 var concatSourceMap []srcSpan
 
-func concatLineToFile(concatLine int32) (string, int32) {
+func concatLineToFile(concatLine int32) (file string, srcLine int32) {
 	if len(concatSourceMap) == 0 {
 		return "", concatLine
 	}
@@ -1115,7 +1114,7 @@ func concatSources(dir string, files []string) (buf []byte) {
 		bodyImports = append(bodyImports, fimps)
 	}
 	var out []byte
-	out = append(out, ("package " | pkgName | "\n")...)
+	out = out | ("package " | pkgName | "\n")
 	if len(imports) > 0 {
 		var impKeys []string
 		for imp := range imports {
@@ -1126,13 +1125,13 @@ func concatSources(dir string, files []string) (buf []byte) {
 				impKeys[j], impKeys[j-1] = impKeys[j-1], impKeys[j]
 			}
 		}
-		out = append(out, "import (\n"...)
+		out = out | "import (\n"
 		for _, imp := range impKeys {
 			out = append(out, '\t')
-			out = append(out, imp...)
+			out = out | imp
 			out = append(out, '\n')
 		}
-		out = append(out, ")\n"...)
+		out = out | ")\n"
 	}
 	concatSourceMap = nil
 	mxutil.ConcatImportSegs = nil
@@ -1158,7 +1157,7 @@ func concatSources(dir string, files []string) (buf []byte) {
 			}
 		}
 		outLine++
-		out = append(out, b...)
+		out = out | b
 		out = append(out, '\n')
 		bodies[i] = nil
 	}
@@ -1213,7 +1212,7 @@ func shouldSkipFile(name string) (ok bool) {
 	return false
 }
 
-func isTagChar(c byte) bool {
+func isTagChar(c byte) (ok bool) {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.'
 }
 
@@ -1245,7 +1244,7 @@ func constraintContainsPositive(line string, word string) (ok bool) {
 	return false
 }
 
-func isInsideNegatedGroup(line string, pos int32) bool {
+func isInsideNegatedGroup(line string, pos int32) (result bool) {
 	// scan backwards from pos for !(, counting parens
 	for j := pos - 1; j >= 1; j-- {
 		if line[j] == '(' && line[j-1] == '!' {
@@ -1396,26 +1395,14 @@ var quietDiscover bool
 
 // buildJobs is the max number of concurrent child processes (workers and
 // clang) used by build/test. Set by the -j flag; 1 forces the serial path.
-var buildJobs = int32(4)
+var buildJobs int32
 
 // Packages baked into sysroot/wasm/runtime.bc (compiled by the old
 // TinyGo-based compiler). Stage4 type-checks these but does not compile
 // them - the prebuilt versions are used instead. This avoids ABI
 // mismatches between old-compiler and stage4-compiled code (different
 // context-pointer conventions).
-var wasmRtPkgs = map[string]bool{
-	"runtime": true, "runtime/interrupt": true,
-	"internal/task": true, "internal/itoa": true,
-	"math": true, "math/bits": true,
-	"unicode/utf8": true, "strconv": true,
-	"errors": true, "io": true, "io/fs": true,
-	"os": true, "syscall": true, "time": true,
-	"fmt": true, "path": true,
-	"internal/bytealg": true, "internal/byteorder": true,
-	"internal/goarch": true, "internal/binary": true,
-	"internal/gclayout": true, "internal/oserror": true,
-	"internal/stringslite": true, "internal/testlog": true,
-}
+var wasmRtPkgs map[string]bool
 
 type pkgInfo struct {
 	path    string
@@ -1461,17 +1448,17 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		}
 	}
 	if dir == "" && isRemotePath(pkgPath) {
-		version := ""
+		ver := ""
 		if globalModDir != "" {
 			_, reqs, _ := parseModRequires(globalModDir)
 			for _, r := range reqs {
 				if r.path == pkgPath {
-					version = r.version
+					ver = r.version
 					break
 				}
 			}
 		}
-		fetched := autoFetchRepo(pkgPath, version)
+		fetched := autoFetchRepo(pkgPath, ver)
 		if fetched != "" {
 			mxF := listFiles(fetched, ".mx")
 			if len(mxF) > 0 {
@@ -1484,8 +1471,8 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 	}
 	if dir == "" {
 		dir = mxutil.JoinPath(root, mxutil.JoinPath("src", pkgPath))
-		mxFiles := listFiles(dir, ".mx")
-		if len(mxFiles) == 0 {
+		mxf := listFiles(dir, ".mx")
+		if len(mxf) == 0 {
 			dir = mxutil.JoinPath(root, mxutil.JoinPath("src/vendor", pkgPath))
 		}
 	}
@@ -1672,7 +1659,6 @@ func registerBuiltins() {
 	rtPkg.Scope.Insert(NewTCFunc(rtPkg, "UnlockOSThread", parseSignatureDesc("")))
 	rtPkg.Scope.Insert(NewTCFunc(rtPkg, "KeepAlive", parseSignatureDesc("interface{}")))
 	rtPkg.Scope.Insert(NewTCFunc(rtPkg, "GOROOT", parseSignatureDesc("->string")))
-	rtPkg.Scope.Insert(NewTCFunc(rtPkg, "SetFinalizer", parseSignatureDesc("interface{},interface{}")))
 	rtPkg.Scope.Insert(NewTCFunc(rtPkg, "Gosched", parseSignatureDesc("")))
 	rtPkg.Scope.Insert(NewTCFunc(rtPkg, "Version", parseSignatureDesc("->string")))
 	rtPkg.Scope.Insert(NewTCVar(rtPkg, "GOOS", Typ[TCString]))
@@ -1805,15 +1791,15 @@ func typeDescStr(t Type) (s string) {
 	case *Pointer:
 		return "*" | typeDescStr(v.Base)
 	case *TCStruct:
-		s := "struct{"
+		sv := "struct{"
 		for i := int32(0); i < v.NumFields(); i++ {
 			if i > 0 {
-				s = s | ","
+				sv = sv | ","
 			}
 			f := v.Field(i)
-			s = s | f.Name | ":" | typeDescStr(f.Typ)
+			sv = sv | f.Name | ":" | typeDescStr(f.Typ)
 		}
-		return s | "}"
+		return sv | "}"
 	case *TCInterface:
 		if v.IsEmpty() {
 			return "interface{}"
@@ -2011,7 +1997,7 @@ func generateMxh(pkg *TCPackage) (s string) {
 						}
 					}
 				}
-			} else if iface, ok := typ.(*TCInterface); ok {
+			} else if iface, ok3 := typ.(*TCInterface); ok3 {
 				var methods string
 				complete := true
 				for mi := int32(0); mi < iface.NumMethods(); mi++ {
@@ -2139,16 +2125,16 @@ func loadMxh(path string) (ok bool) {
 				actualName, _ := parseMxhTParams(parts[0])
 				underlying := parseTypeDesc(parts[1])
 				obj := pkg.Scope.Lookup(actualName)
-				if tn, ok := obj.(*TypeName); ok {
-					if named, ok2 := tn.Typ.(*Named); ok2 {
+				if tn, istn := obj.(*TypeName); istn {
+					if named, isn := tn.Typ.(*Named); isn {
 						named.Under = underlying
 					}
 				}
 			} else if len(parts) == 1 {
 				actualName, _ := parseMxhTParams(parts[0])
 				obj := pkg.Scope.Lookup(actualName)
-				if tn, ok := obj.(*TypeName); ok {
-					if named, ok2 := tn.Typ.(*Named); ok2 {
+				if tn, istn := obj.(*TypeName); istn {
+					if named, isn := tn.Typ.(*Named); isn {
 						named.Under = NewTCStruct(nil, nil)
 					}
 				}
@@ -2184,8 +2170,8 @@ func loadMxh(path string) (ok bool) {
 				iface := NewTCInterface(methods, nil)
 				iface.Complete()
 				obj := pkg.Scope.Lookup(ifaceName)
-				if tn, ok := obj.(*TypeName); ok {
-					if named, ok2 := tn.Typ.(*Named); ok2 {
+				if tn, istn := obj.(*TypeName); istn {
+					if named, isn := tn.Typ.(*Named); isn {
 						named.Under = iface
 					} else {
 						tn.Typ = iface
@@ -2219,30 +2205,30 @@ func loadMxh(path string) (ok bool) {
 				typ := parseTypeDesc(parts[1])
 				var val ConstVal
 				if len(parts) >= 3 {
-					rest := parts[2]
+					cval := parts[2]
 					for k := int32(3); k < int32(len(parts)); k++ {
-						rest = rest | " " | parts[k]
+						cval = cval | " " | parts[k]
 					}
 					isNum := true
-					for ci := int32(0); ci < int32(len(rest)); ci++ {
-						ch := rest[ci]
+					for ci := int32(0); ci < int32(len(cval)); ci++ {
+						ch := cval[ci]
 						if !((ch >= '0' && ch <= '9') || ch == '-' || ch == '+' || ch == 'x' || ch == 'X' || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
 							isNum = false
 							break
 						}
 					}
 					if isNum {
-						n := ssaParseInt64(rest)
-						val = ConstInt{n}
+						n := ssaParseInt64(cval)
+						val = &ConstInt{V:n}
 					} else {
-						if b, ok := typ.(*Basic); ok && (b.Kind == TCString || b.Kind == UntypedString) {
-							val = ConstStr{rest}
+						if b, isb := typ.(*Basic); isb && (b.Kind == TCString || b.Kind == UntypedString) {
+							val = &ConstStr{S:cval}
 						} else {
-							val = ConstInt{0}
+							val = &ConstInt{V:0}
 						}
 					}
 				} else {
-					val = ConstInt{0}
+					val = &ConstInt{V:0}
 				}
 				pkg.Scope.Insert(NewTCConst(pkg, parts[0], typ, val))
 			}
@@ -2265,8 +2251,8 @@ func loadMxh(path string) (ok bool) {
 				}
 				obj := pkg.Scope.Lookup(typeName)
 				if obj != nil {
-					if tn, ok := obj.(*TypeName); ok {
-						if named, ok := tn.Typ.(*Named); ok {
+					if tn, istn := obj.(*TypeName); istn {
+						if named, isn := tn.Typ.(*Named); isn {
 							sig := parseSignatureDesc(sigDesc)
 							var recvType Type = named
 							if ptrRecv {
@@ -2305,7 +2291,7 @@ func removeAll(path string) {
 	os.Remove(path)
 }
 
-func walkStdlibPkgs(srcDir, prefix string, out []string) []string {
+func walkStdlibPkgs(srcDir, prefix string, out []string) (result []string) {
 	entries := listFiles(srcDir, "")
 	if entries == nil {
 		return out
@@ -2559,11 +2545,11 @@ func scanTestFuncs(data []byte) (ss []string) {
 
 func generateTestMain(pkgName string, testFuncs []string) (buf []byte) {
 	var out []byte
-	out = append(out, ("package " | pkgName | "\n\nimport \"testing\"\n\nfunc main() {\n\ttests := []testing.InternalTest{\n")...)
+	out = out | ("package " | pkgName | "\n\nimport \"testing\"\n\nfunc main() {\n\ttests := []testing.InternalTest{\n")
 	for _, name := range testFuncs {
-		out = append(out, ("\t\t{Name: \"" | name | "\", F: " | name | "},\n")...)
+		out = out | ("\t\t{Name: \"" | name | "\", F: " | name | "},\n")
 	}
-	out = append(out, "\t}\n\ttesting.Main(tests)\n}\n"...)
+	out = out | "\t}\n\ttesting.Main(tests)\n}\n"
 	return out
 }
 
@@ -2734,8 +2720,8 @@ func cmdTest(args []string) {
 				for _, cf := range dp.cfiles {
 					cPath := mxutil.JoinPath(dp.dir, cf)
 					cbcFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | "_" | cf | ".bc")
-					rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
-					if rc == 0 {
+					crc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+					if crc == 0 {
 						allBcFiles = append(allBcFiles, cbcFile)
 					}
 				}
@@ -2747,14 +2733,14 @@ func cmdTest(args []string) {
 
 			if isStdlib(dp.path) && bcOk && !forceRebuild {
 				mxutil.WriteStr(2, "  cached " | dp.path | "\n")
-				src := concatSources(dp.dir, dp.files)
-				TypeCheckOnly(src, compilePath)
-				src = nil
-				regPkg := ImportRegistry[compilePath]
-				if regPkg != nil {
-					cacheDir := mxutil.JoinPath(cacheBase, safeName(dp.path))
-					mkdirAll(cacheDir, 0755)
-					mxhData := generateMxh(regPkg)
+				csrc := concatSources(dp.dir, dp.files)
+				TypeCheckOnly(csrc, compilePath)
+				csrc = nil
+				creg := ImportRegistry[compilePath]
+				if creg != nil {
+					cdir := mxutil.JoinPath(cacheBase, safeName(dp.path))
+					mkdirAll(cdir, 0755)
+					mxhData := generateMxh(creg)
 					writeFile(cachedMxh, []byte(mxhData), 0644)
 				}
 				allBcFiles = append(allBcFiles, cached)
@@ -2775,8 +2761,8 @@ func cmdTest(args []string) {
 		writeFile(llFile, []byte(ir), 0644)
 		ir = ""
 		bcFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | ".bc")
-		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
-		if rc != 0 {
+		drc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
+		if drc != 0 {
 			fatal("clang failed for " | dp.path)
 		}
 		if dp != pkg {
@@ -2797,8 +2783,8 @@ func cmdTest(args []string) {
 		for _, cf := range dp.cfiles {
 			cPath := mxutil.JoinPath(dp.dir, cf)
 			cbcFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | "_" | cf | ".bc")
-			rc = run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
-			if rc != 0 {
+			drc = run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+			if drc != 0 {
 				fatal("clang failed for " | cf)
 			}
 			allBcFiles = append(allBcFiles, cbcFile)
@@ -3093,7 +3079,7 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 	}
 
 	var out []byte
-	out = append(out, ("package " | pkgName | "\n")...)
+	out = out | ("package " | pkgName | "\n")
 	if len(imports) > 0 {
 		var impKeys []string
 		for imp := range imports {
@@ -3104,13 +3090,13 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 				impKeys[j], impKeys[j-1] = impKeys[j-1], impKeys[j]
 			}
 		}
-		out = append(out, "import (\n"...)
+		out = out | "import (\n"
 		for _, imp := range impKeys {
 			out = append(out, '\t')
-			out = append(out, imp...)
+			out = out | imp
 			out = append(out, '\n')
 		}
-		out = append(out, ")\n"...)
+		out = out | ")\n"
 	}
 	concatSourceMap = nil
 	mxutil.ConcatImportSegs = nil
@@ -3136,7 +3122,7 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 			}
 		}
 		outLine++
-		out = append(out, b...)
+		out = out | b
 		out = append(out, '\n')
 		bodies[i] = nil
 	}
@@ -3146,6 +3132,20 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 }
 
 func main() {
+	buildJobs = int32(4)
+	wasmRtPkgs = map[string]bool{
+		"runtime": true, "runtime/interrupt": true,
+		"internal/task": true, "internal/itoa": true,
+		"math": true, "math/bits": true,
+		"unicode/utf8": true, "strconv": true,
+		"errors": true, "io": true, "io/fs": true,
+		"os": true, "syscall": true, "time": true,
+		"fmt": true, "path": true,
+		"internal/bytealg": true, "internal/byteorder": true,
+		"internal/goarch": true, "internal/binary": true,
+		"internal/gclayout": true, "internal/oserror": true,
+		"internal/stringslite": true, "internal/testlog": true,
+	}
 	builtinOnly = []string{"unsafe"}
 	args := os.Args
 	if len(args) < 2 {
@@ -3607,8 +3607,8 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			for _, cf := range pkg.cfiles {
 				cPath := mxutil.JoinPath(pkg.dir, cf)
 				cbcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
-				rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
-				if rc == 0 {
+				crc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+				if crc == 0 {
 					bcs = append(bcs, cbcFile)
 				}
 			}
@@ -3620,14 +3620,14 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 
 		if isStdlib(pkg.path) && bcOk && !forceRebuild {
 			mxutil.WriteStr(2, "  cached " | pkg.path | "\n")
-			src := concatSources(pkg.dir, pkg.files)
-			TypeCheckOnly(src, compilePath)
-			src = nil
-			regPkg := ImportRegistry[compilePath]
-			if regPkg != nil {
-				cacheDir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
-				mkdirAll(cacheDir, 0755)
-				mxhData := generateMxh(regPkg)
+			csrc := concatSources(pkg.dir, pkg.files)
+			TypeCheckOnly(csrc, compilePath)
+			csrc = nil
+			creg := ImportRegistry[compilePath]
+			if creg != nil {
+				cdir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
+				mkdirAll(cdir, 0755)
+				mxhData := generateMxh(creg)
 				writeFile(cachedMxh, []byte(mxhData), 0644)
 			}
 			bcs = append(bcs, cached)
@@ -3768,53 +3768,53 @@ func ringRecvInt32(ring unsafe.Pointer) (v int32, ok bool) {
 
 func serializePkgMeta(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase, root, modPrefix, modDir string) (data []byte) {
 	var b []byte
-	b = append(b, simpleItoa(len(pkgs))...)
+	b = b | simpleItoa(len(pkgs))
 	b = append(b, '\n')
-	b = append(b, triple...)
+	b = b | triple
 	b = append(b, '\n')
-	b = append(b, clang...)
+	b = b | clang
 	b = append(b, '\n')
-	b = append(b, tmpdir...)
+	b = b | tmpdir
 	b = append(b, '\n')
-	b = append(b, cacheBase...)
+	b = b | cacheBase
 	b = append(b, '\n')
-	b = append(b, root...)
+	b = b | root
 	b = append(b, '\n')
-	b = append(b, modPrefix...)
+	b = b | modPrefix
 	b = append(b, '\n')
-	b = append(b, modDir...)
+	b = b | modDir
 	b = append(b, '\n')
 	for _, p := range pkgs {
-		b = append(b, p.path...)
+		b = b | p.path
 		b = append(b, '\n')
-		b = append(b, p.name...)
+		b = b | p.name
 		b = append(b, '\n')
-		b = append(b, p.dir...)
+		b = b | p.dir
 		b = append(b, '\n')
-		b = append(b, p.version...)
+		b = b | p.version
 		b = append(b, '\n')
-		b = append(b, simpleItoa(len(p.files))...)
+		b = b | simpleItoa(len(p.files))
 		b = append(b, '\n')
 		for _, f := range p.files {
-			b = append(b, f...)
+			b = b | f
 			b = append(b, '\n')
 		}
-		b = append(b, simpleItoa(len(p.cfiles))...)
+		b = b | simpleItoa(len(p.cfiles))
 		b = append(b, '\n')
 		for _, f := range p.cfiles {
-			b = append(b, f...)
+			b = b | f
 			b = append(b, '\n')
 		}
-		b = append(b, simpleItoa(len(p.bcfiles))...)
+		b = b | simpleItoa(len(p.bcfiles))
 		b = append(b, '\n')
 		for _, f := range p.bcfiles {
-			b = append(b, f...)
+			b = b | f
 			b = append(b, '\n')
 		}
-		b = append(b, simpleItoa(len(p.imports))...)
+		b = b | simpleItoa(len(p.imports))
 		b = append(b, '\n')
 		for _, im := range p.imports {
-			b = append(b, im...)
+			b = b | im
 			b = append(b, '\n')
 		}
 	}
@@ -4015,8 +4015,8 @@ func workerLoadDeps(pkg *pkgInfo, meta *workerMeta, idxByPath map[string]int32, 
 			continue
 		}
 		// Recursively load this dep's deps first
-		if errMsg := workerLoadDeps(dep, meta, idxByPath, hashes); errMsg != "" {
-			return errMsg
+		if depErr := workerLoadDeps(dep, meta, idxByPath, hashes); depErr != "" {
+			return depErr
 		}
 		depHash := hashes[di]
 		cachedMxh := cachedMxhPath(meta.cacheBase, dep.path, depHash, dep.version)
@@ -4034,8 +4034,8 @@ func workerLoadDeps(pkg *pkgInfo, meta *workerMeta, idxByPath map[string]int32, 
 // already have .mxh in cache. Returns empty string on success, error text on failure.
 func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map[string]int32, hashes []string) (errMsg string) {
 	// Load all dependency .mxh from cache (recursively, transitive deps first)
-	if errMsg := workerLoadDeps(pkg, meta, idxByPath, hashes); errMsg != "" {
-		return errMsg
+	if loadErr := workerLoadDeps(pkg, meta, idxByPath, hashes); loadErr != "" {
+		return loadErr
 	}
 
 	compilePath := pkg.path

@@ -13,14 +13,14 @@ const (
 
 const maxRune = 0x10FFFF
 
-func isLetter(ch rune) bool {
+func isLetter(ch rune) (ok bool) {
 	if ch < 0x80 {
 		return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_'
 	}
 	return ch >= 0xC0
 }
 
-func isDigit(ch rune) bool {
+func isDigit(ch rune) (ok bool) {
 	if ch < 0x80 {
 		return ch >= '0' && ch <= '9'
 	}
@@ -451,12 +451,12 @@ func IsHex(ch rune) (ok bool) { return '0' <= ch && ch <= '9' || 'a' <= Lower(ch
 
 func (s *Scanner) Digits(base int32, invalid *int32) (digsep int32) {
 	if base <= 10 {
-		max := rune('0' + base)
+		hi := rune('0' + base)
 		for IsDecimal(s.ch) || s.ch == '_' {
 			ds := int32(1)
 			if s.ch == '_' {
 				ds = 2
-			} else if s.ch >= max && *invalid < 0 {
+			} else if s.ch >= hi && *invalid < 0 {
 				_, col := s.pos()
 				*invalid = int32(col - s.col)
 			}
@@ -806,23 +806,23 @@ func (s *Scanner) fullComment() {
 
 func (s *Scanner) escape(quote rune) (ok bool) {
 	var n int32
-	var base, max uint32
+	var base, maxVal uint32
 
 	switch s.ch {
 	case quote, 'a', 'b', 'f', 'n', 'r', 't', 'v', '\\':
 		s.nextch()
 		return true
 	case '0', '1', '2', '3', '4', '5', '6', '7':
-		n, base, max = 3, 8, 255
+		n, base, maxVal = 3, 8, 255
 	case 'x':
 		s.nextch()
-		n, base, max = 2, 16, 255
+		n, base, maxVal = 2, 16, 255
 	case 'u':
 		s.nextch()
-		n, base, max = 4, 16, maxRune
+		n, base, maxVal = 4, 16, maxRune
 	case 'U':
 		s.nextch()
-		n, base, max = 8, 16, maxRune
+		n, base, maxVal = 8, 16, maxRune
 	default:
 		if s.ch < 0 {
 			return true
@@ -850,12 +850,12 @@ func (s *Scanner) escape(quote rune) (ok bool) {
 		s.nextch()
 	}
 
-	if x > max && base == 8 {
+	if x > maxVal && base == 8 {
 		s.Errorf("octal escape value " | token.SimpleItoaU32(x) | " > 255")
 		return false
 	}
 
-	if x > max || 0xD800 <= x && x < 0xE000 {
+	if x > maxVal || 0xD800 <= x && x < 0xE000 {
 		s.Errorf("escape is invalid Unicode code point " | fmtRuneU(rune(x)))
 		return false
 	}

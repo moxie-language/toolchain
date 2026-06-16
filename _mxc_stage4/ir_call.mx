@@ -1,0 +1,960 @@
+package main
+
+import (
+	"git.smesh.lol/moxie/pkg/mxutil"
+	. "git.smesh.lol/moxie/pkg/types"
+)
+
+func (e *irEmitter) emitUnOp(u *SSAUnOp) {
+	reg := e.regName(u)
+	if u.Op == OpMul {
+		loadType := e.llvmType(u.SSAType())
+		if loadType == "void" {
+			if at, ok := e.allocTypes[u.X]; ok {
+				loadType = at
+			} else if a, ok2 := u.X.(*SSAAlloc); ok2 {
+				loadType = e.inferAllocTypeFromStores(a)
+			} else {
+				loadType = "ptr"
+			}
+			e.allocTypes[u] = loadType
+		}
+		if loadType == "ptr" {
+			if ia, ok := u.X.(*SSAIndexAddr); ok {
+				baseU := SafeUnderlying(ia.X.SSAType())
+				if sl, ok3 := baseU.(*Slice); ok3 && sl.Elem != nil {
+					et := e.llvmType(sl.Elem)
+					if et != "void" && et != "ptr" {
+						loadType = et
+					}
+				} else if b, ok4 := baseU.(*Basic); ok4 && b.Info&IsString != 0 {
+					loadType = "i8"
+				} else {
+					et := e.llvmType(ia.SSAType())
+					if p2, ok5 := SafeUnderlying(ia.SSAType()).(*Pointer); ok5 && p2.Base != nil {
+						et = e.llvmType(p2.Base)
+					}
+					if et == "void" {
+						et = "i8"
+					}
+					if et != "ptr" {
+						loadType = et
+					}
+				}
+			}
+			if fa, ok := u.X.(*SSAFieldAddr); ok {
+				baseType := e.resolveFieldAddrBase(fa)
+				ft := extractTupleField(baseType, fa.Field)
+				if ft != "" && ft != "ptr" && ft != "void" {
+					loadType = ft
+				}
+			}
+		}
+		if _, isIA := u.X.(*SSAIndexAddr); isIA && len(loadType) > 0 && loadType[0] == '[' {
+			if at, ok2 := e.allocTypes[u.X]; ok2 && at != loadType {
+				loadType = at
+				e.allocTypes[u] = loadType
+			}
+		}
+		isGlobalLoad := false
+		if g, ok := u.X.(*SSAGlobal); ok {
+			loadType = e.resolveGlobalDeclType(g)
+			isGlobalLoad = true
+		}
+		if !isGlobalLoad {
+			if at, ok := e.allocTypes[u.X]; ok && at != "ptr" && at != "void" && at != loadType {
+				bothScalar := len(loadType) > 0 && loadType[0] == 'i' && len(at) > 0 && at[0] == 'i'
+				isArrayElem := len(at) > 0 && at[0] == '[' && len(loadType) > 0 && loadType[0] != '{' && loadType != at
+				bothAgg := len(loadType) > 0 && loadType[0] == '{' && len(at) > 0 && at[0] == '{'
+				isAggToScalar := len(loadType) > 0 && loadType[0] == '{' && len(at) > 0 && (at[0] == 'i' || at == "double" || at == "float")
+				if !bothScalar && !isArrayElem && !bothAgg && !isAggToScalar {
+					loadType = at
+					e.allocTypes[u] = loadType
+				}
+			}
+		}
+		addr := e.operand(u.X)
+		e.w("  ")
+		e.w(reg)
+		e.w(" = load ")
+		e.w(loadType)
+		e.w(", ptr ")
+		e.w(addr)
+		e.w("\n")
+		e.setRegType(u, reg, loadType)
+		return
+	}
+	valType := e.llvmType(u.X.SSAType())
+	resolved := e.resolvedType(u.X, valType)
+	if resolved != valType {
+		valType = resolved
+	}
+	if valType == "void" || valType == "" {
+		resType := e.llvmType(u.SSAType())
+		if resType != "void" && resType != "" {
+			valType = resType
+		} else {
+			valType = "i32"
+		}
+	}
+	val := e.operand(u.X)
+	if u.Op == OpSub {
+		isFloat := false
+		if b, ok := SafeUnderlying(u.X.SSAType()).(*Basic); ok {
+			isFloat = b.Info&IsFloat != 0
+		}
+		if !isFloat && (valType == "double" || valType == "float") {
+			isFloat = true
+		}
+		if !isFloat && isConstOperand(val) && looksLikeFloat(val) {
+			isFloat = true
+			resType := e.llvmType(u.SSAType())
+			if resType == "float" || resType == "double" {
+				valType = resType
+			} else {
+				valType = "double"
+			}
+		}
+		e.w("  ")
+		e.w(reg)
+		if isFloat {
+			e.w(" = fneg ")
+			e.w(valType)
+			e.w(" ")
+			e.w(val)
+			e.w("\n")
+			e.setRegType(u, reg, valType)
+		} else {
+			e.w(" = sub ")
+			e.w(valType)
+			e.w(" 0, ")
+			e.w(val)
+			e.w("\n")
+		}
+		return
+	}
+	if u.Op == OpNot || u.Op == OpXor {
+		e.w("  ")
+		e.w(reg)
+		e.w(" = xor ")
+		e.w(valType)
+		e.w(" ")
+		e.w(val)
+		e.w(", -1\n")
+		return
+	}
+	if u.Op == OpArrow {
+		e.emitChanRecv(u)
+		return
+	}
+	e.w("  ; unsupported unop op=")
+	e.w(u.Op.String())
+	e.w("\n")
+}
+
+func (e *irEmitter) callArgType(arg SSAValue, sig *Signature, i int32) (s string) {
+	if _, isFreeVar := arg.(*SSAFreeVar); isFreeVar {
+		return "ptr"
+	}
+	if _, isIA := arg.(*SSAIndexAddr); isIA {
+		return "ptr"
+	}
+	t := e.llvmType(arg.SSAType())
+	if _, isAlloc := arg.(*SSAAlloc); !isAlloc {
+		resolved := e.resolvedType(arg, t)
+		if resolved != t {
+			t = resolved
+		}
+	}
+	// Integer constants take the signature's param width: an untyped const
+	// defaults to i32, and passing "i32 -1" to an i64 param silently zeroes
+	// the high half at the ABI boundary.
+	if k, isConst := arg.(*SSAConst); isConst && sig != nil && sig.Params != nil {
+		if _, isInt := k.val.(*ConstInt); isInt {
+			sigIdx := i
+			if sig.Recv != nil {
+				sigIdx = i - 1
+			}
+			if sigIdx >= 0 && sigIdx < sig.Params.Len() {
+				sigT := e.llvmType(sig.Params.At(sigIdx).Typ)
+				if e.intBits(sigT) > 0 {
+					return sigT
+				}
+			}
+		}
+	}
+	if (t == "ptr" || t == "i1") && sig != nil && sig.Params != nil {
+		_, isCall := arg.(*SSACall)
+		_, isAlloc := arg.(*SSAAlloc)
+		if !isCall && !isAlloc {
+			sigIdx := i
+			if sig.Recv != nil {
+				sigIdx = i - 1
+			}
+			if sigIdx >= 0 && sigIdx < sig.Params.Len() {
+				sigT := e.llvmType(sig.Params.At(sigIdx).Typ)
+				if sigT != "ptr" && sigT != "void" && sigT != "i1" && sigT != "" {
+					return sigT
+				}
+			}
+		}
+	}
+	if t == "ptr" || t == "i1" {
+		if load, ok := arg.(*SSAUnOp); ok && load.Op == OpMul {
+			if g, ok2 := load.X.(*SSAGlobal); ok2 {
+				if gt, ok3 := e.globalTypes[e.globalName(g)]; ok3 {
+					return gt
+				}
+			}
+		}
+	}
+	if t != "void" {
+		return t
+	}
+	if sig != nil && sig.Params != nil {
+		sigIdx := i
+		if sig.Recv != nil {
+			sigIdx = i - 1
+		}
+		if sigIdx >= 0 && sigIdx < sig.Params.Len() {
+			return e.llvmType(sig.Params.At(sigIdx).Typ)
+		}
+	}
+	return "ptr"
+}
+
+func (e *irEmitter) callSig(c *SSACall) (s *Signature) {
+	if fn, ok := c.Call.Value.(*SSAFunction); ok && fn.Signature != nil {
+		return fn.Signature
+	}
+	if sig, ok := SafeUnderlying(c.Call.Value.SSAType()).(*Signature); ok {
+		return sig
+	}
+	return nil
+}
+
+func (e *irEmitter) emitCall(c *SSACall) {
+	if b, ok := c.Call.Value.(*SSABuiltin); ok {
+		e.emitBuiltinCall(c, b)
+		return
+	}
+	reg := e.regName(c)
+	retType := e.llvmType(c.SSAType())
+	isVoid := retType == "void"
+	sig := e.callSig(c)
+
+	if fn, ok := c.Call.Value.(*SSAFunction); ok {
+		if !e.isPkgFunc(fn) {
+			e.declareExternalFunc(fn)
+		}
+		useSret2 := needsSret(retType)
+		sretTmp2 := ""
+		if useSret2 {
+			e.nextReg++
+			sretTmp2 = "%sret." | irItoa(e.nextReg)
+			e.w("  ") ; e.w(sretTmp2) ; e.w(" = alloca ") ; e.w(retType) ; e.w("\n")
+			e.w("  call void ")
+		} else {
+			e.w("  ")
+			if !isVoid {
+				e.w(reg) ; e.w(" = ")
+			}
+			e.w("call ") ; e.w(retType) ; e.w(" ")
+		}
+		e.w(e.funcSymbol(fn))
+		e.w("(")
+		np := 0
+		if useSret2 {
+			e.w("ptr sret(") ; e.w(retType) ; e.w(") ") ; e.w(sretTmp2)
+			np++
+		}
+		sym := e.funcSymbol(fn)
+		isIntrinsic := mxutil.HasPrefix(sym, "@llvm.") || mxutil.HasPrefix(sym, "@\"llvm.")
+		isExport := fn.externalSymbol != ""
+		for i, arg := range c.Call.Args {
+			if np > 0 { e.w(", ") }
+			if arg == nil {
+				e.w("ptr null")
+				np++
+				continue
+			}
+			at := e.callArgType(arg, sig, int32(i))
+			av := e.operand(arg)
+			if av == "null" && at != "ptr" {
+				av = "zeroinitializer"
+			}
+			e.w(at) ; e.w(" ") ; e.w(av)
+			np++
+		}
+		skipCtx := isIntrinsic || isExport
+		if !skipCtx && len(wasmImportMap) > 0 {
+			wsym := sym
+			if len(wsym) > 0 && wsym[0] == '@' { wsym = wsym[1:] }
+			if len(wsym) >= 2 && wsym[0] == '"' && wsym[len(wsym)-1] == '"' { wsym = wsym[1 : len(wsym)-1] }
+			if _, wok := wasmImportMap[wsym]; wok {
+				skipCtx = true
+			}
+		}
+		if !skipCtx {
+			if np > 0 { e.w(", ") }
+			e.w("ptr null")
+		}
+		e.w(")\n")
+		if useSret2 {
+			e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(retType) ; e.w(", ptr ") ; e.w(sretTmp2) ; e.w("\n")
+		}
+		return
+	}
+
+	funcVal := e.operand(c.Call.Value)
+	funcPtr := e.nextReg2("fp")
+	ctxPtr := e.nextReg2("fp")
+	e.w("  ") ; e.w(funcPtr) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(funcVal) ; e.w(", 1\n")
+	e.w("  ") ; e.w(ctxPtr) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(funcVal) ; e.w(", 0\n")
+	useSret := needsSret(retType)
+	sretTmp := ""
+	if useSret {
+		e.nextReg++
+		sretTmp = "%sret." | irItoa(e.nextReg)
+		e.w("  ") ; e.w(sretTmp) ; e.w(" = alloca ") ; e.w(retType) ; e.w("\n")
+		e.w("  call void ") ; e.w(funcPtr) ; e.w("(ptr sret(") ; e.w(retType) ; e.w(") ") ; e.w(sretTmp)
+	} else {
+		e.w("  ")
+		if !isVoid {
+			e.w(reg) ; e.w(" = ")
+		}
+		e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(funcPtr) ; e.w("(")
+	}
+	np2 := 0
+	if useSret { np2++ }
+	for i, arg := range c.Call.Args {
+		if np2 > 0 { e.w(", ") }
+		at := e.callArgType(arg, sig, int32(i))
+		av := e.operand(arg)
+		if av == "null" && at != "ptr" {
+			av = "zeroinitializer"
+		}
+		e.w(at) ; e.w(" ") ; e.w(av)
+		np2++
+	}
+	if np2 > 0 { e.w(", ") }
+	e.w("ptr ") ; e.w(ctxPtr)
+	e.w(")\n")
+	if useSret {
+		e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(retType) ; e.w(", ptr ") ; e.w(sretTmp) ; e.w("\n")
+	}
+}
+
+func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
+	reg := e.regName(c)
+	name := b.SSAName()
+	if name == "recover" {
+		e.w("  ; unhandled builtin: recover\n")
+		recRT := e.ifaceType()
+		e.nextReg++
+		tmp := "%ub" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(tmp) ; e.w(" = alloca ") ; e.w(recRT) ; e.w("\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(recRT) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
+		e.allocTypes[c] = recRT
+		return
+	}
+	ipt := e.intptrType()
+	sty := e.sliceType()
+	if name == "len" {
+		if len(c.Call.Args) == 1 {
+			arg := e.operand(c.Call.Args[0])
+			u := SafeUnderlying(c.Call.Args[0].SSAType())
+			if u == nil { u = c.Call.Args[0].SSAType() }
+			if arr, ok := u.(*Array); ok {
+				rt1 := e.llvmType(c.SSAType())
+				e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(rt1) ; e.w(" ") ; e.w(irItoa(int32(arr.Len))) ; e.w(", 0\n")
+				_ = arg
+				return
+			}
+			if p, ok := u.(*Pointer); ok && p.Base != nil {
+				if arr, ok2 := SafeUnderlying(p.Base).(*Array); ok2 {
+					rt2 := e.llvmType(c.SSAType())
+					e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(rt2) ; e.w(" ") ; e.w(irItoa(int32(arr.Len))) ; e.w(", 0\n")
+					_ = arg
+					return
+				}
+			}
+			_, isSlice := u.(*Slice)
+			_, isMap := u.(*TCMap)
+			isStr := e.isStringLike(c.Call.Args[0].SSAType())
+			if !isSlice && !isMap && !isStr {
+				isSlice = true
+			}
+			if isMap {
+				rt3 := e.llvmType(c.SSAType())
+				e.nextReg++
+				tmp := "%bl" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(tmp) ; e.w(" = call ") ; e.w(ipt) ; e.w(" @runtime.hashmapLen(ptr ") ; e.w(arg) ; e.w(", ptr null)\n")
+				if rt3 != ipt {
+					e.w("  ") ; e.w(reg) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(tmp) ; e.w(" to ") ; e.w(rt3) ; e.w("\n")
+				} else {
+					e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(ipt) ; e.w(" ") ; e.w(tmp) ; e.w(", 0\n")
+				}
+				e.declareRuntime("runtime.hashmapLen", ipt, "ptr")
+				return
+			}
+			if isSlice || isStr {
+				rt4 := e.llvmType(c.SSAType())
+				if rt4 != ipt {
+					e.nextReg++
+					tmp := "%bl" | irItoa(e.nextReg)
+					e.w("  ") ; e.w(tmp) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(", 1\n")
+					e.w("  ") ; e.w(reg) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(tmp) ; e.w(" to ") ; e.w(rt4) ; e.w("\n")
+				} else {
+					e.w("  ") ; e.w(reg) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(", 1\n")
+				}
+				return
+			}
+		}
+	} else if name == "cap" {
+		if len(c.Call.Args) == 1 {
+			arg := e.operand(c.Call.Args[0])
+			uc := SafeUnderlying(c.Call.Args[0].SSAType())
+			if uc == nil { uc = c.Call.Args[0].SSAType() }
+			if arr, ok := uc.(*Array); ok {
+				rt5 := e.llvmType(c.SSAType())
+				e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(rt5) ; e.w(" ") ; e.w(irItoa(int32(arr.Len))) ; e.w(", 0\n")
+				_ = arg
+				return
+			}
+			if p, ok := uc.(*Pointer); ok && p.Base != nil {
+				if arr, ok2 := SafeUnderlying(p.Base).(*Array); ok2 {
+					rt6 := e.llvmType(c.SSAType())
+					e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(rt6) ; e.w(" ") ; e.w(irItoa(int32(arr.Len))) ; e.w(", 0\n")
+					_ = arg
+					return
+				}
+			}
+			_, isSlice := uc.(*Slice)
+			isStr := e.isStringLike(c.Call.Args[0].SSAType())
+			if isSlice || isStr {
+				rt7 := e.llvmType(c.SSAType())
+				if rt7 != ipt {
+					e.nextReg++
+					tmp := "%bl" | irItoa(e.nextReg)
+					e.w("  ") ; e.w(tmp) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(", 2\n")
+					e.w("  ") ; e.w(reg) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(tmp) ; e.w(" to ") ; e.w(rt7) ; e.w("\n")
+				} else {
+					e.w("  ") ; e.w(reg) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(", 2\n")
+				}
+				return
+			}
+		}
+	} else if name == "append" {
+		if len(c.Call.Args) == 1 {
+			src := e.operand(c.Call.Args[0])
+			p := e.nextReg2("ap")
+			e.w("  ") ; e.w(p) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 0\n")
+			l := e.nextReg2("ap")
+			e.w("  ") ; e.w(l) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 1\n")
+			ca := e.nextReg2("ap")
+			e.w("  ") ; e.w(ca) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 2\n")
+			s1 := e.nextReg2("ap")
+			e.w("  ") ; e.w(s1) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" undef, ptr ") ; e.w(p) ; e.w(", 0\n")
+			s2 := e.nextReg2("ap")
+			e.w("  ") ; e.w(s2) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s1) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(l) ; e.w(", 1\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s2) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(ca) ; e.w(", 2\n")
+			return
+		}
+		if len(c.Call.Args) > 2 {
+			src := e.operand(c.Call.Args[0])
+			elemType := ""
+			if sl, ok := SafeUnderlying(c.Call.Args[0].SSAType()).(*Slice); ok {
+				elemType = e.llvmType(sl.Elem)
+			}
+			if sl, ok := c.Call.Args[0].SSAType().(*Slice); ok && (elemType == "" || elemType == "void") {
+				elemType = e.llvmType(sl.Elem)
+			}
+			if elemType == "" || elemType == "void" {
+				et := e.llvmType(c.Call.Args[1].SSAType())
+				if et != "" && et != "void" {
+					elemType = et
+				} else {
+					elemType = "i8"
+				}
+			}
+			nElems := len(c.Call.Args) - 1
+			arrAlloca := e.nextReg2("ap")
+			arrTy := "[" | irItoa(nElems) | " x " | elemType | "]"
+			e.w("  ") ; e.w(arrAlloca) ; e.w(" = alloca ") ; e.w(arrTy) ; e.w("\n")
+			for j := 1; j < len(c.Call.Args); j++ {
+				elemVal := e.operand(c.Call.Args[j])
+				argLLT := e.llvmType(c.Call.Args[j].SSAType())
+				if len(argLLT) > 1 && argLLT[0] == 'i' && len(elemType) > 1 && elemType[0] == 'i' && argLLT != elemType {
+					aw := irParseIntWidth(argLLT)
+					ew := irParseIntWidth(elemType)
+					if ew > 0 && aw > ew {
+						tr := e.nextReg2("ap")
+						e.w("  ") ; e.w(tr) ; e.w(" = trunc ") ; e.w(argLLT) ; e.w(" ") ; e.w(elemVal) ; e.w(" to ") ; e.w(elemType) ; e.w("\n")
+						elemVal = tr
+					}
+				}
+				gep := e.nextReg2("ap")
+				e.w("  ") ; e.w(gep) ; e.w(" = getelementptr inbounds ") ; e.w(arrTy)
+				e.w(", ptr ") ; e.w(arrAlloca) ; e.w(", i32 0, i32 ") ; e.w(irItoa(j-1)) ; e.w("\n")
+				e.w("  store ") ; e.w(elemType) ; e.w(" ") ; e.w(elemVal) ; e.w(", ptr ") ; e.w(gep) ; e.w("\n")
+			}
+			srcBuf := e.nextReg2("ap")
+			e.w("  ") ; e.w(srcBuf) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 0\n")
+			srcLen := e.nextReg2("ap")
+			e.w("  ") ; e.w(srcLen) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 1\n")
+			srcCap := e.nextReg2("ap")
+			e.w("  ") ; e.w(srcCap) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 2\n")
+			elemSz := e.nextReg2("ap")
+			e.w("  ") ; e.w(elemSz)
+			e.w(" = ptrtoint ptr getelementptr (") ; e.w(elemType)
+			e.w(", ptr null, i32 1) to ") ; e.w(e.intptrType()) ; e.w("\n")
+			retTy := e.sliceType()
+			result := e.nextReg2("ap")
+			e.w("  ") ; e.w(result)
+			e.w(" = call ") ; e.w(retTy) ; e.w(" @runtime.sliceAppend(ptr ")
+			e.w(srcBuf) ; e.w(", ptr ") ; e.w(arrAlloca)
+			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(srcLen)
+			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(srcCap)
+			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(irItoa(nElems))
+			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(elemSz)
+			e.w(", ptr null)\n")
+			newPtr := e.nextReg2("ap")
+			e.w("  ") ; e.w(newPtr) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 0\n")
+			e.scopeTrackAlloc(newPtr)
+			newLen := e.nextReg2("ap")
+			e.w("  ") ; e.w(newLen) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 1\n")
+			newCap := e.nextReg2("ap")
+			e.w("  ") ; e.w(newCap) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 2\n")
+			s1 := e.nextReg2("ap")
+			e.w("  ") ; e.w(s1) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" undef, ptr ") ; e.w(newPtr) ; e.w(", 0\n")
+			s2 := e.nextReg2("ap")
+			e.w("  ") ; e.w(s2) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s1) ; e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(newLen) ; e.w(", 1\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s2) ; e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(newCap) ; e.w(", 2\n")
+			e.declareRuntime("runtime.sliceAppend", retTy, "ptr, ptr, " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType())
+			return
+		}
+		if len(c.Call.Args) == 2 {
+			src := e.operand(c.Call.Args[0])
+			elems := e.operand(c.Call.Args[1])
+			elemType := ""
+			arg0t := c.Call.Args[0].SSAType()
+			if sl, ok := SafeUnderlying(arg0t).(*Slice); ok {
+				elemType = e.llvmType(sl.Elem)
+			}
+			if sl, ok := arg0t.(*Slice); ok && (elemType == "" || elemType == "void") {
+				elemType = e.llvmType(sl.Elem)
+			}
+			if elemType == "" || elemType == "void" {
+				et := e.llvmType(c.Call.Args[1].SSAType())
+				if et != "" && et != "void" {
+					elemType = et
+				} else {
+					elemType = "i8"
+				}
+			}
+			srcBuf := e.nextReg2("ap")
+			e.w("  ") ; e.w(srcBuf) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 0\n")
+			srcLen := e.nextReg2("ap")
+			e.w("  ") ; e.w(srcLen) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 1\n")
+			srcCap := e.nextReg2("ap")
+			e.w("  ") ; e.w(srcCap) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 2\n")
+			var elemsBuf, elemsLen string
+			arg1IsSlice := c.Call.HasDots
+			if !arg1IsSlice && c.Call.Args[1] != nil {
+				arg1t := c.Call.Args[1].SSAType()
+				if arg1t != nil {
+					arg1LT := e.llvmType(arg1t)
+					if arg1LT == e.sliceType() && elemType != e.sliceType() {
+						arg1IsSlice = true
+					}
+				}
+				if !arg1IsSlice {
+					arg0t2 := c.Call.Args[0].SSAType()
+					if arg0t2 != nil && arg1t != nil {
+						if Identical(arg0t2, arg1t) {
+							if _, ok := SafeUnderlying(arg0t2).(*Slice); ok {
+								arg1IsSlice = true
+							}
+						}
+					}
+				}
+			}
+			if arg1IsSlice {
+				elemsBuf = e.nextReg2("ap")
+				e.w("  ") ; e.w(elemsBuf) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(elems) ; e.w(", 0\n")
+				elemsLen = e.nextReg2("ap")
+				e.w("  ") ; e.w(elemsLen) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(elems) ; e.w(", 1\n")
+			} else {
+				alloca := e.nextReg2("ap")
+				e.w("  ") ; e.w(alloca) ; e.w(" = alloca ") ; e.w(elemType) ; e.w("\n")
+				e.w("  store ") ; e.w(elemType) ; e.w(" ") ; e.w(elems) ; e.w(", ptr ") ; e.w(alloca) ; e.w("\n")
+				elemsBuf = alloca
+				elemsLen = "1"
+			}
+			elemSz := e.nextReg2("ap")
+			e.w("  ") ; e.w(elemSz)
+			e.w(" = ptrtoint ptr getelementptr (") ; e.w(elemType)
+			e.w(", ptr null, i32 1) to ") ; e.w(e.intptrType()) ; e.w("\n")
+			retTy := e.sliceType()
+			result := e.nextReg2("ap")
+			e.w("  ") ; e.w(result)
+			e.w(" = call ") ; e.w(retTy) ; e.w(" @runtime.sliceAppend(ptr ")
+			e.w(srcBuf) ; e.w(", ptr ") ; e.w(elemsBuf)
+			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(srcLen)
+			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(srcCap)
+			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(elemsLen)
+			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(elemSz)
+			e.w(", ptr null)\n")
+			newPtr := e.nextReg2("ap")
+			e.w("  ") ; e.w(newPtr) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 0\n")
+			e.scopeTrackAlloc(newPtr)
+			newLen := e.nextReg2("ap")
+			e.w("  ") ; e.w(newLen) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 1\n")
+			newCap := e.nextReg2("ap")
+			e.w("  ") ; e.w(newCap) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 2\n")
+			s1 := e.nextReg2("ap")
+			e.w("  ") ; e.w(s1) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" undef, ptr ") ; e.w(newPtr) ; e.w(", 0\n")
+			s2 := e.nextReg2("ap")
+			e.w("  ") ; e.w(s2) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s1) ; e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(newLen) ; e.w(", 1\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s2) ; e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(newCap) ; e.w(", 2\n")
+			e.declareRuntime("runtime.sliceAppend", retTy, "ptr, ptr, " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType())
+			return
+		}
+	} else if name == "copy" {
+		if len(c.Call.Args) == 2 {
+			dst := e.operand(c.Call.Args[0])
+			src := e.operand(c.Call.Args[1])
+			elemType := "i8"
+			if sl, ok := SafeUnderlying(c.Call.Args[0].SSAType()).(*Slice); ok {
+				elemType = e.llvmType(sl.Elem)
+			}
+			dstBuf := e.nextReg2("cp")
+			e.w("  ") ; e.w(dstBuf) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(dst) ; e.w(", 0\n")
+			dstLen := e.nextReg2("cp")
+			e.w("  ") ; e.w(dstLen) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(dst) ; e.w(", 1\n")
+			srcBuf := e.nextReg2("cp")
+			e.w("  ") ; e.w(srcBuf) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 0\n")
+			srcLen := e.nextReg2("cp")
+			e.w("  ") ; e.w(srcLen) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 1\n")
+			elemSz := e.nextReg2("cp")
+			e.w("  ") ; e.w(elemSz)
+			e.w(" = ptrtoint ptr getelementptr (") ; e.w(elemType)
+			e.w(", ptr null, i32 1) to ") ; e.w(e.intptrType()) ; e.w("\n")
+			callReg := e.nextReg2("cp")
+			e.w("  ") ; e.w(callReg)
+			e.w(" = call ") ; e.w(e.intptrType()) ; e.w(" @runtime.sliceCopy(ptr ")
+			e.w(dstBuf) ; e.w(", ptr ") ; e.w(srcBuf)
+			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(dstLen)
+			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(srcLen)
+			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(elemSz)
+			e.w(", ptr null)\n")
+			rt8 := e.llvmType(c.SSAType())
+			if rt8 != e.intptrType() {
+				e.w("  ") ; e.w(reg) ; e.w(" = trunc ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(callReg) ; e.w(" to ") ; e.w(rt8) ; e.w("\n")
+			} else {
+				e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(callReg) ; e.w(", 0\n")
+			}
+			e.declareRuntime("runtime.sliceCopy", e.intptrType(), "ptr, ptr, " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType())
+			return
+		}
+	} else if name == "print" || name == "println" {
+		e.w("  call void @runtime.printlock(ptr null)\n")
+		for i, arg := range c.Call.Args {
+			if i > 0 && b.id == BuiltinPrintln {
+				e.w("  call void @runtime.printspace(ptr null)\n")
+			}
+			av := e.operand(arg)
+			at := arg.SSAType()
+			e.emitPrintArg(av, at)
+		}
+		if b.id == BuiltinPrintln {
+			e.w("  call void @runtime.printnl(ptr null)\n")
+			e.declareRuntime("runtime.printnl", "void", "")
+		}
+		e.w("  call void @runtime.printunlock(ptr null)\n")
+		e.declareRuntime("runtime.printlock", "void", "")
+		e.declareRuntime("runtime.printunlock", "void", "")
+		if b.id == BuiltinPrintln && len(c.Call.Args) > 1 {
+			e.declareRuntime("runtime.printspace", "void", "")
+		}
+		return
+	} else if name == "delete" {
+		if len(c.Call.Args) == 2 {
+			mapVal := e.operand(c.Call.Args[0])
+			keyVal := e.operand(c.Call.Args[1])
+			mt, _ := SafeUnderlying(c.Call.Args[0].SSAType()).(*TCMap)
+			keyType := "i32"
+			if mt != nil {
+				keyType = e.llvmType(mt.Key)
+			} else if c.Call.Args[1].SSAType() != nil {
+				keyType = e.llvmType(c.Call.Args[1].SSAType())
+			}
+			if mt != nil && e.isStringLike(mt.Key) {
+				kd := e.nextReg2("dl")
+				kl := e.nextReg2("dl")
+				kc := e.nextReg2("dl")
+				e.w("  ") ; e.w(kd) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 0\n")
+				e.w("  ") ; e.w(kl) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 1\n")
+				e.w("  ") ; e.w(kc) ; e.w(" = extractvalue " | e.sliceType() | " ") ; e.w(keyVal) ; e.w(", 2\n")
+				ipt2 := e.intptrType()
+				e.w("  call void @runtime.hashmapContentDelete(ptr ") ; e.w(mapVal)
+				e.w(", ptr ") ; e.w(kd)
+				e.w(", " | ipt2 | " ") ; e.w(kl)
+				e.w(", " | ipt2 | " ") ; e.w(kc)
+				e.w(", ptr null)\n")
+				e.declareRuntime("runtime.hashmapContentDelete", "void", "ptr, ptr, " | ipt | ", " | ipt)
+			} else {
+				keyAlloca := e.nextReg2("dl")
+				e.w("  ") ; e.w(keyAlloca) ; e.w(" = alloca ") ; e.w(keyType) ; e.w("\n")
+				e.w("  store ") ; e.w(keyType) ; e.w(" ") ; e.w(keyVal) ; e.w(", ptr ") ; e.w(keyAlloca) ; e.w("\n")
+				e.w("  call void @runtime.hashmapBinaryDelete(ptr ") ; e.w(mapVal)
+				e.w(", ptr ") ; e.w(keyAlloca) ; e.w(", ptr null)\n")
+				e.declareRuntime("runtime.hashmapBinaryDelete", "void", "ptr, ptr")
+			}
+			return
+		}
+	} else if name == "close" {
+		if len(c.Call.Args) == 1 {
+			e.w("  call void @runtime.chanClose(ptr ")
+			e.w(e.operand(c.Call.Args[0]))
+			e.w(", ptr null)\n")
+			e.declareRuntime("runtime.chanClose", "void", "ptr")
+			return
+		}
+	} else if name == "free" {
+		if len(c.Call.Args) == 1 {
+			arg := c.Call.Args[0]
+			argOp := e.operand(arg)
+			u := SafeUnderlying(arg.SSAType())
+			_, isSlice := u.(*Slice)
+			isStr := e.isStringLike(arg.SSAType())
+			_, isPtr := u.(*Pointer)
+			isMap := false
+			if _, mp := u.(*TCMap); mp { isMap = true }
+			if st, ok := u.(*TCStruct); ok {
+				var baseAddr string
+				if uop, ok2 := arg.(*SSAUnOp); ok2 && uop.Op == OpMul {
+					baseAddr = e.operand(uop.X)
+				} else {
+					e.nextReg++
+					baseAddr = "%free.tmp" | irItoa(e.nextReg)
+					stTy := e.llvmStructType(st)
+					e.w("  ") ; e.w(baseAddr) ; e.w(" = alloca ") ; e.w(stTy) ; e.w("\n")
+					e.w("  store ") ; e.w(stTy) ; e.w(" ") ; e.w(argOp) ; e.w(", ptr ") ; e.w(baseAddr) ; e.w("\n")
+				}
+				e.emitStructFree(st, baseAddr)
+				return
+			}
+			if _, isIface := u.(*TCInterface); isIface {
+				e.nextReg++
+				tmp := "%free.idata" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(tmp) ; e.w(" = extractvalue { ptr, ptr } ") ; e.w(argOp) ; e.w(", 1\n")
+				e.w("  call void @runtime.free(ptr ") ; e.w(tmp) ; e.w(", ptr null)\n")
+				e.declareRuntime("runtime.free", "void", "ptr")
+				return
+			}
+			if isSlice || isStr {
+				e.nextReg++
+				tmp := "%free.data" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(tmp) ; e.w(" = extractvalue ") ; e.w(e.sliceType()) ; e.w(" ") ; e.w(argOp) ; e.w(", 0\n")
+				argOp = tmp
+			}
+			if isMap {
+				e.w("  call void @runtime.hashmapDestroy(ptr ") ; e.w(argOp) ; e.w(", ptr null)\n")
+				e.declareRuntime("runtime.hashmapDestroy", "void", "ptr")
+			} else {
+				e.w("  call void @runtime.free(ptr ") ; e.w(argOp) ; e.w(", ptr null)\n")
+				e.declareRuntime("runtime.free", "void", "ptr")
+			}
+			if uop, ok := arg.(*SSAUnOp); ok && uop.Op == OpMul {
+				addrOp := e.operand(uop.X)
+				if isSlice || isStr {
+					e.w("  store ") ; e.w(e.sliceType()) ; e.w(" zeroinitializer, ptr ") ; e.w(addrOp) ; e.w("\n")
+				} else if isPtr || isMap {
+					e.w("  store ptr null, ptr ") ; e.w(addrOp) ; e.w("\n")
+				}
+			}
+			return
+		}
+	} else if name == "min" || name == "max" {
+		if len(c.Call.Args) >= 2 {
+			rt9 := e.llvmType(c.SSAType())
+			if rt9 == "" || rt9 == "void" {
+				rt9 = "i32"
+			}
+			a := e.operand(c.Call.Args[0])
+			b2 := e.operand(c.Call.Args[1])
+			cmpOp := "slt"
+			if b.id == BuiltinMax {
+				cmpOp = "sgt"
+			}
+			u := SafeUnderlying(c.SSAType())
+			if bb, ok := u.(*Basic); ok && bb.Info&IsUnsigned != 0 {
+				cmpOp = "ult"
+				if b.id == BuiltinMax {
+					cmpOp = "ugt"
+				}
+			}
+			e.nextReg++
+			cmpReg := "%mm" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(cmpReg) ; e.w(" = icmp ") ; e.w(cmpOp) ; e.w(" ") ; e.w(rt9) ; e.w(" ") ; e.w(a) ; e.w(", ") ; e.w(b2) ; e.w("\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = select i1 ") ; e.w(cmpReg) ; e.w(", ") ; e.w(rt9) ; e.w(" ") ; e.w(a) ; e.w(", ") ; e.w(rt9) ; e.w(" ") ; e.w(b2) ; e.w("\n")
+			return
+		}
+	} else if name == "spawn" {
+		ipt3 := e.intptrType()
+		if len(c.Call.Args) >= 1 {
+			// For spawn, we need the raw function pointer, not the fat pointer.
+			// operand() wraps SSAFunction in { ptr null, ptr @fn } but ptrtoint
+			// needs a plain pointer.
+			var rawFnSym string
+			if fn, ok := c.Call.Args[0].(*SSAFunction); ok {
+				if !e.isPkgFunc(fn) {
+					e.declareExternalFunc(fn)
+				}
+				rawFnSym = e.funcSymbol(fn)
+			} else {
+				// Closure or indirect - extract funcptr from fat pointer via alloca
+				fnVal := e.operand(c.Call.Args[0])
+				fpTmp := e.nextReg2("sp")
+				e.w("  ") ; e.w(fpTmp) ; e.w(" = alloca {ptr, ptr}\n")
+				e.w("  store {ptr, ptr} ") ; e.w(fnVal) ; e.w(", ptr ") ; e.w(fpTmp) ; e.w("\n")
+				fpGep := e.nextReg2("sp")
+				e.w("  ") ; e.w(fpGep) ; e.w(" = getelementptr inbounds {ptr, ptr}, ptr ") ; e.w(fpTmp) ; e.w(", i32 0, i32 1\n")
+				rawFnSym = e.nextReg2("sp")
+				e.w("  ") ; e.w(rawFnSym) ; e.w(" = load ptr, ptr ") ; e.w(fpGep) ; e.w("\n")
+			}
+			fnPtr := e.nextReg2("sp")
+			e.w("  ") ; e.w(fnPtr) ; e.w(" = ptrtoint ptr ") ; e.w(rawFnSym) ; e.w(" to ") ; e.w(ipt3) ; e.w("\n")
+			// Count channel args
+			nChans := int32(0)
+			for i := 1; i < len(c.Call.Args); i++ {
+				if _, ok := SafeUnderlying(c.Call.Args[i].SSAType()).(*TCChan); ok {
+					nChans++
+				}
+			}
+			// TODO: serialize args for Codec boundary, set up ring buffers per channel
+			e.w("  call void @runtime.spawnDomain(") ; e.w(ipt3) ; e.w(" ") ; e.w(fnPtr)
+			e.w(", ptr null, i32 ") ; e.w(irItoa(nChans)) ; e.w(", ptr null)\n")
+			// Get lifecycle channel - returns ptr to channel struct
+			e.w("  ") ; e.w(reg) ; e.w(" = call ptr @runtime.SpawnLifecycleChannel(ptr null)\n")
+			e.declareRuntime("runtime.spawnDomain", "void", ipt3 | ", ptr, i32")
+			e.declareRuntime("runtime.SpawnLifecycleChannel", "ptr", "")
+		}
+		return
+	}
+	e.w("  ; unhandled builtin: ")
+	e.w(name)
+	e.w("\n")
+	rt10 := e.llvmType(c.SSAType())
+	if rt10 != "void" && rt10 != "" {
+		if rt10 == "ptr" || e.intBits(rt10) > 0 || rt10 == "i1" {
+			e.emitZeroReg(reg, c.SSAType())
+		} else {
+			e.nextReg++
+			tmp := "%ub" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(tmp) ; e.w(" = alloca ") ; e.w(rt10) ; e.w("\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(rt10) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
+			e.allocTypes[c] = rt10
+		}
+	}
+}
+
+func (e *irEmitter) emitStructFree(st *TCStruct, baseAddr string) {
+	if st == nil {
+		return
+	}
+	stTy := e.llvmStructType(st)
+	sty := e.sliceType()
+	for i := int32(0); i < st.NumFields(); i++ {
+		ft := st.Field(i).Typ
+		fu := SafeUnderlying(ft)
+		e.nextReg++
+		fieldAddr := "%free.f" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(fieldAddr) ; e.w(" = getelementptr inbounds ") ; e.w(stTy) ; e.w(", ptr ") ; e.w(baseAddr) ; e.w(", i32 0, i32 ") ; e.w(irItoa(i)) ; e.w("\n")
+		_, isSlice := fu.(*Slice)
+		isStr := e.isStringLike(ft)
+		_, isPtr := fu.(*Pointer)
+		_, isMap := fu.(*TCMap)
+		if subSt, ok := fu.(*TCStruct); ok {
+			e.emitStructFree(subSt, fieldAddr)
+		} else if isSlice || isStr {
+			e.nextReg++
+			sliceVal := "%free.sv" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(sliceVal) ; e.w(" = load ") ; e.w(sty) ; e.w(", ptr ") ; e.w(fieldAddr) ; e.w("\n")
+			e.nextReg++
+			dataPtr := "%free.dp" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(dataPtr) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(sliceVal) ; e.w(", 0\n")
+			e.w("  call void @runtime.free(ptr ") ; e.w(dataPtr) ; e.w(", ptr null)\n")
+			e.w("  store ") ; e.w(sty) ; e.w(" zeroinitializer, ptr ") ; e.w(fieldAddr) ; e.w("\n")
+			e.declareRuntime("runtime.free", "void", "ptr")
+		} else if isMap {
+			e.nextReg++
+			ptrVal := "%free.pv" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(ptrVal) ; e.w(" = load ptr, ptr ") ; e.w(fieldAddr) ; e.w("\n")
+			e.w("  call void @runtime.hashmapDestroy(ptr ") ; e.w(ptrVal) ; e.w(", ptr null)\n")
+			e.w("  store ptr null, ptr ") ; e.w(fieldAddr) ; e.w("\n")
+			e.declareRuntime("runtime.hashmapDestroy", "void", "ptr")
+		} else if isPtr {
+			e.nextReg++
+			ptrVal := "%free.pv" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(ptrVal) ; e.w(" = load ptr, ptr ") ; e.w(fieldAddr) ; e.w("\n")
+			e.w("  call void @runtime.free(ptr ") ; e.w(ptrVal) ; e.w(", ptr null)\n")
+			e.w("  store ptr null, ptr ") ; e.w(fieldAddr) ; e.w("\n")
+			e.declareRuntime("runtime.free", "void", "ptr")
+		}
+	}
+}
+
+func (e *irEmitter) emitPrintArg(val string, t Type) {
+	if t == nil {
+		return
+	}
+	sty := e.sliceType()
+	switch u := SafeUnderlying(t).(type) {
+	case *Basic:
+		switch {
+		case u.Info&IsString != 0:
+			e.w("  call void @runtime.printstring(") ; e.w(sty) ; e.w(" ") ; e.w(val) ; e.w(", ptr null)\n")
+			e.declareRuntime("runtime.printstring", "void", sty)
+		case u.Kind == Bool || u.Kind == UntypedBool:
+			e.w("  call void @runtime.printbool(i1 ") ; e.w(val) ; e.w(", ptr null)\n")
+			e.declareRuntime("runtime.printbool", "void", "i1")
+		case u.Kind == Float32:
+			e.w("  call void @runtime.printfloat32(float ") ; e.w(val) ; e.w(", ptr null)\n")
+			e.declareRuntime("runtime.printfloat32", "void", "float")
+		case u.Kind == Float64 || u.Kind == UntypedFloat:
+			e.w("  call void @runtime.printfloat64(double ") ; e.w(val) ; e.w(", ptr null)\n")
+			e.declareRuntime("runtime.printfloat64", "void", "double")
+		case u.Info&IsUnsigned != 0:
+			lt := e.llvmType(t)
+			fname := "runtime.printuint" | lt[1:]
+			e.w("  call void @") ; e.w(fname) ; e.w("(") ; e.w(lt) ; e.w(" ") ; e.w(val) ; e.w(", ptr null)\n")
+			e.declareRuntime(fname, "void", lt)
+		case u.Info&IsInteger != 0:
+			lt := e.llvmType(t)
+			fname := "runtime.printint" | lt[1:]
+			e.w("  call void @") ; e.w(fname) ; e.w("(") ; e.w(lt) ; e.w(" ") ; e.w(val) ; e.w(", ptr null)\n")
+			e.declareRuntime(fname, "void", lt)
+		}
+	case *Pointer:
+		ipt := e.intptrType()
+		e.nextReg++
+		tmp := "%pr" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(tmp) ; e.w(" = ptrtoint ptr ") ; e.w(val) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+		e.w("  call void @runtime.printptr(") ; e.w(ipt) ; e.w(" ") ; e.w(tmp) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.printptr", "void", ipt)
+	case *Slice:
+		if b, ok := u.Elem.(*Basic); ok && (b.Kind == Uint8 || b.Kind == Int8) {
+			e.w("  call void @runtime.printbytes(") ; e.w(sty) ; e.w(" ") ; e.w(val) ; e.w(", ptr null)\n")
+			e.declareRuntime("runtime.printbytes", "void", sty)
+		} else {
+			e.w("  call void @runtime.printstring(") ; e.w(sty) ; e.w(" ") ; e.w(val) ; e.w(", ptr null)\n")
+			e.declareRuntime("runtime.printstring", "void", sty)
+		}
+	case *TCMap:
+		e.w("  call void @runtime.printmap(ptr ") ; e.w(val) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.printmap", "void", "ptr")
+	}
+}

@@ -1,0 +1,541 @@
+package main
+
+import (
+	"git.smesh.lol/moxie/pkg/mxutil"
+)
+
+func scanEmbedPragmas(src []byte, pkgDir string) {
+	embedVars = map[string]*embedInfo{}
+	// Two accepted forms: //:embed (canonical, see src/embed) and
+	// //moxie:embed_le (explicit little-endian element interpretation).
+	embedPrefix := []byte("//moxie:embed_le ")
+	embedPrefix2 := []byte("//:embed ")
+	varPrefix := []byte("var ")
+	commentPrefix := []byte("//")
+	pendingPath := ""
+	i := 0
+	for i < len(src) {
+		nlIdx := lIndexByte(src[i:], '\n')
+		var line []byte
+		var lineEnd int32
+		if nlIdx < 0 {
+			line = src[i:]
+			lineEnd = len(src)
+		} else {
+			line = src[i : i+nlIdx]
+			lineEnd = i + nlIdx + 1
+		}
+		trimmed := lTrimSpace(line)
+		if len(pendingPath) > 0 {
+			if len(trimmed) == 0 || lHasPrefix(trimmed, commentPrefix) {
+				i = lineEnd
+				continue
+			}
+			if lHasPrefix(trimmed, varPrefix) {
+				rest := trimmed[4:]
+				spIdx := lIndexByte(rest, ' ')
+				if spIdx > 0 {
+					varName := string(rest[:spIdx])
+					typeStr := string(lTrimSpace(rest[spIdx+1:]))
+					embedVars[varName] = &embedInfo{path: pendingPath, elemType: typeStr}
+				}
+			}
+			pendingPath = ""
+		} else if lHasPrefix(trimmed, embedPrefix) {
+			pendingPath = string(lTrimSpace(trimmed[len(embedPrefix):]))
+			if len(pendingPath) > 0 && pkgDir != "" {
+				pendingPath = mxutil.JoinPath(pkgDir, pendingPath)
+			}
+		} else if lHasPrefix(trimmed, embedPrefix2) {
+			pendingPath = string(lTrimSpace(trimmed[len(embedPrefix2):]))
+			if len(pendingPath) > 0 && pkgDir != "" {
+				pendingPath = mxutil.JoinPath(pkgDir, pendingPath)
+			}
+		}
+		i = lineEnd
+	}
+}
+
+func scanExportPragmas(src []byte) (m map[string]string) {
+	result := map[string]string{}
+	exportPrefix := []byte("//export ")
+	funcPrefix := []byte("func ")
+	commentPrefix := []byte("//")
+	pendingExport := ""
+	i := 0
+	for i < len(src) {
+		nlIdx := lIndexByte(src[i:], '\n')
+		var line []byte
+		var lineEnd int32
+		if nlIdx < 0 {
+			line = src[i:]
+			lineEnd = len(src)
+		} else {
+			line = src[i : i+nlIdx]
+			lineEnd = i + nlIdx + 1
+		}
+		trimmed := lTrimSpace(line)
+		if len(pendingExport) > 0 {
+			if len(trimmed) == 0 || lHasPrefix(trimmed, commentPrefix) {
+				i = lineEnd
+				continue
+			}
+			if lHasPrefix(trimmed, funcPrefix) {
+				rest := trimmed[5:]
+				paren := lIndexByte(rest, '(')
+				if paren > 0 {
+					funcName := string(lTrimSpace(rest[:paren]))
+					result[funcName] = pendingExport
+				}
+			}
+			pendingExport = ""
+		} else if lHasPrefix(trimmed, exportPrefix) {
+			pendingExport = string(lTrimSpace(trimmed[9:]))
+		}
+		i = lineEnd
+	}
+	return result
+}
+
+func scanLinknameMap(src []byte) (m map[string]string) {
+	result := map[string]string{}
+	prefix := []byte("//:linkname ")
+	i := 0
+	for i < len(src) {
+		nlIdx := lIndexByte(src[i:], '\n')
+		var line []byte
+		var lineEnd int32
+		if nlIdx < 0 {
+			line = src[i:]
+			lineEnd = len(src)
+		} else {
+			line = src[i : i+nlIdx]
+			lineEnd = i + nlIdx + 1
+		}
+		trimmed := lTrimSpace(line)
+		if lHasPrefix(trimmed, prefix) {
+			rest := string(lTrimSpace(trimmed[12:]))
+			sp := 0
+			for sp < len(rest) && rest[sp] != ' ' && rest[sp] != '\t' {
+				sp++
+			}
+			if sp < len(rest) {
+				localName := rest[:sp]
+				targetName := ""
+				for j := sp + 1; j < len(rest); j++ {
+					if rest[j] != ' ' && rest[j] != '\t' {
+						targetName = rest[j:]
+						break
+					}
+				}
+				if targetName != "" {
+					result[localName] = targetName
+				}
+			}
+		}
+		i = lineEnd
+	}
+	return result
+}
+
+var linknameMap map[string]string
+
+// wasmImportMap maps IR symbol (e.g. "time.timezoneOffsetMinutes") -> [module, import_name].
+// Populated from //:wasmimport pragmas.
+var wasmImportMap map[string][2]string
+
+// scanWasmImportMap scans source for //:wasmimport <module> <name> pragmas.
+// The pragma applies to the next function declaration (body-less).
+// pkgPath is the package import path used to construct full IR symbols.
+func scanWasmImportMap(src []byte, pkgPath string) (m map[string][2]string) {
+	if !mxutil.HasPrefix(compileTargetTriple, "wasm32") {
+		return nil
+	}
+	m := map[string][2]string{}
+	lines := mxutil.SplitLines(string(src))
+	for i := int32(0); i < int32(len(lines)); i++ {
+		ln := mxutil.TrimSpace(lines[i])
+		if !mxutil.HasPrefix(ln, "//:wasmimport ") {
+			continue
+		}
+		parts := ln[len("//:wasmimport "):]
+		sp := int32(-1)
+		for j := int32(0); j < int32(len(parts)); j++ {
+			if parts[j] == ' ' || parts[j] == '\t' {
+				sp = j
+				break
+			}
+		}
+		if sp < 0 {
+			continue
+		}
+		mod := mxutil.TrimSpace(string(parts[:sp]))
+		impName := mxutil.TrimSpace(string(parts[sp+1:]))
+		// Find next func declaration
+		for j := i + 1; j < int32(len(lines)); j++ {
+			fl := mxutil.TrimSpace(lines[j])
+			if !mxutil.HasPrefix(fl, "func ") {
+				continue
+			}
+			// extract function name from "func NAME(" or "func (recv) NAME("
+			rest := fl[5:]
+			// skip receiver if present
+			if len(rest) > 0 && rest[0] == '(' {
+				depth := int32(1)
+				k := int32(1)
+				for k < int32(len(rest)) && depth > 0 {
+					if rest[k] == '(' { depth++ }
+					if rest[k] == ')' { depth-- }
+					k++
+				}
+				rest = mxutil.TrimSpace(string(rest[k:]))
+			}
+			// now rest starts with funcName(
+			paren := int32(-1)
+			for k := int32(0); k < int32(len(rest)); k++ {
+				if rest[k] == '(' {
+					paren = k
+					break
+				}
+			}
+			if paren < 0 {
+				break
+			}
+			funcName := mxutil.TrimSpace(string(rest[:paren]))
+			sym := pkgPath | "." | funcName
+			m[sym] = [2]string{mod, impName}
+			break
+		}
+	}
+	if len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
+func stripDuplicatePackageClauses(src []byte) (buf []byte) {
+	found := false
+	var out []byte
+	i := 0
+	for i < len(src) {
+		nlIdx := lIndexByte(src[i:], '\n')
+		var line []byte
+		var lineEnd int32
+		if nlIdx < 0 {
+			line = src[i:]
+			lineEnd = len(src)
+		} else {
+			line = src[i : i+nlIdx]
+			lineEnd = i + nlIdx + 1
+		}
+		trimmed := lTrimSpace(line)
+		if lHasPrefix(trimmed, "package ") {
+			if found {
+				if out == nil {
+					out = []byte{:0:len(src)}
+					out = out | src[:i]
+				}
+				for k := 0; k < len(line); k++ {
+					out = append(out, ' ')
+				}
+				if nlIdx >= 0 {
+					out = append(out, '\n')
+				}
+				i = lineEnd
+				continue
+			}
+			found = true
+		}
+		if out != nil {
+			out = out | src[i:lineEnd]
+		}
+		i = lineEnd
+	}
+	if out == nil {
+		return src
+	}
+	return out
+}
+
+func stripDuplicatePackageClauses2(src []byte) (buf []byte) {
+	found := false
+	var out []byte
+	i := int32(0)
+	for i < len(src) {
+		lineStart := i
+		for i < len(src) && src[i] != '\n' {
+			i++
+		}
+		lineEnd := i
+		if i < int32(len(src)) {
+			i++
+		}
+		ls := lineStart
+		for ls < lineEnd && (src[ls] == ' ' || src[ls] == '\t') {
+			ls++
+		}
+		isPkg := false
+		if lineEnd-ls >= 8 && src[ls] == 'p' && src[ls+1] == 'a' && src[ls+2] == 'c' && src[ls+3] == 'k' && src[ls+4] == 'a' && src[ls+5] == 'g' && src[ls+6] == 'e' && src[ls+7] == ' ' {
+			isPkg = true
+		}
+		if isPkg {
+			if found {
+				if out == nil {
+					out = []byte{:0:len(src)}
+					out = out | src[:lineStart]
+				}
+				for k := lineStart; k < lineEnd; k++ {
+					out = append(out, ' ')
+				}
+				if lineEnd < int32(len(src)) {
+					out = append(out, '\n')
+				}
+				continue
+			}
+			found = true
+		}
+		if out != nil {
+			out = out | src[lineStart:i]
+		}
+	}
+	if out == nil {
+		return src
+	}
+	return out
+}
+
+func rewriteSliceMakeLiterals(src []byte) (buf []byte) {
+	var out []byte
+	i := 0
+	for i < len(src) {
+		start := lIndex(src[i:], []byte("{:"))
+		if start < 0 {
+			out = out | src[i:]
+			break
+		}
+		start = start + i
+		lbrack := findSliceTypeStart(src, start)
+		if lbrack < 0 {
+			out = out | src[i:start+2]
+			i = start + 2
+			continue
+		}
+		closeIdx := findMatchingBrace(src, start)
+		if closeIdx < 0 {
+			out = out | src[i:start+2]
+			i = start + 2
+			continue
+		}
+		inner := src[start+2 : closeIdx]
+		colonIdx := lIndexByte(inner, ':')
+		typeText := src[lbrack:start]
+		out = out | src[i:lbrack]
+		if colonIdx < 0 {
+			out = out | "__slicealloc("
+			out = out | typeText
+			out = out | ", "
+			out = out | lTrimSpace(inner)
+			out = append(out, ')')
+		} else {
+			lenExpr := lTrimSpace(inner[:colonIdx])
+			capExpr := lTrimSpace(inner[colonIdx+1:])
+			out = out | "__slicealloc("
+			out = out | typeText
+			out = out | ", "
+			out = out | lenExpr
+			out = out | ", "
+			out = out | capExpr
+			out = append(out, ')')
+		}
+		i = closeIdx + 1
+	}
+	if out == nil {
+		return src
+	}
+	return out
+}
+
+func findSliceTypeStart(src []byte, braceIdx int32) (n int32) {
+	j := braceIdx - 1
+	for j >= 0 && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n') {
+		j--
+	}
+	if j < 0 {
+		return -1
+	}
+	depth := 0
+	parenDepth := 0
+	candidate := -1
+	for j >= 0 {
+		ch := src[j]
+		if ch == ')' {
+			parenDepth++
+		} else if ch == '(' {
+			if parenDepth > 0 {
+				parenDepth--
+			} else {
+				if candidate >= 0 {
+					return candidate
+				}
+				return -1
+			}
+		} else if parenDepth > 0 {
+			j--
+			continue
+		}
+		if ch == ']' {
+			depth++
+		} else if ch == '[' {
+			depth--
+			if depth == 0 {
+				candidate = j
+			}
+		} else if depth == 0 && parenDepth == 0 {
+			if candidate >= 0 {
+				return candidate
+			}
+			if ch == ' ' || ch == '\t' || ch == '\n' || ch == '*' || ch == '(' || ch == ')' {
+				j--
+				continue
+			}
+			if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '.' {
+				j--
+				continue
+			}
+			return -1
+		}
+		j--
+	}
+	if candidate >= 0 {
+		return candidate
+	}
+	return -1
+}
+
+func findMatchingBrace(src []byte, openIdx int32) (n int32) {
+	depth := 1
+	for i := openIdx + 1; i < len(src); i++ {
+		if src[i] == '{' {
+			depth++
+		} else if src[i] == '}' {
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func rewriteChanMakeLiterals(src []byte) (buf []byte) {
+	chanKw := []byte("chan ")
+	var out []byte
+	i := 0
+	for i < len(src) {
+		idx := lIndex(src[i:], chanKw)
+		if idx < 0 {
+			if out != nil {
+				out = out | src[i:]
+			}
+			break
+		}
+		idx = idx + i
+		j := idx + 5
+		for j < len(src) && (src[j] == ' ' || src[j] == '\t') {
+			j++
+		}
+		if j >= len(src) {
+			if out != nil {
+				out = out | src[i:]
+			}
+			break
+		}
+		if src[j] == '<' && j+1 < len(src) && src[j+1] == '-' {
+			if out != nil {
+				out = out | src[i:j+2]
+			}
+			i = j + 2
+			continue
+		}
+		for j < len(src) && (src[j] != '{' && src[j] != '\n' && src[j] != ';' && src[j] != '(' && src[j] != ')') {
+			if src[j] == ' ' || src[j] == '\t' {
+				break
+			}
+			j++
+		}
+		if j >= len(src) || src[j] != '{' {
+			if out == nil {
+				i = idx + 4
+			} else {
+				out = out | src[i:idx+4]
+				i = idx + 4
+			}
+			continue
+		}
+		braceOpen := j
+		endsStruct := braceOpen >= 6 && string(src[braceOpen-6:braceOpen]) == "struct"
+		endsIface := braceOpen >= 9 && string(src[braceOpen-9:braceOpen]) == "interface"
+		if endsStruct || endsIface {
+			typeClose := findMatchingBrace(src, braceOpen)
+			if typeClose < 0 {
+				if out == nil {
+					i = idx + 4
+				} else {
+					out = out | src[i:idx+4]
+					i = idx + 4
+				}
+				continue
+			}
+			k := typeClose + 1
+			// Channel literal requires '{' immediately after struct{}/interface{} closing '}'.
+			// Any whitespace means it's NOT a literal (e.g. return type before function body).
+			if k >= len(src) || src[k] != '{' {
+				if out == nil {
+					i = typeClose + 1
+				} else {
+					out = out | src[i:typeClose+1]
+					i = typeClose + 1
+				}
+				continue
+			}
+			braceOpen = k
+		}
+		closeIdx := findMatchingBrace(src, braceOpen)
+		if closeIdx < 0 {
+			if out == nil {
+				i = idx + 4
+			} else {
+				out = out | src[i:idx+4]
+				i = idx + 4
+			}
+			continue
+		}
+		inner := lTrimSpace(src[braceOpen+1 : closeIdx])
+		chanType := src[idx : braceOpen]
+		for len(chanType) > 0 && (chanType[len(chanType)-1] == ' ' || chanType[len(chanType)-1] == '\t') {
+			chanType = chanType[:len(chanType)-1]
+		}
+		if out == nil {
+			out = []byte{:0:len(src)}
+			out = out | src[:idx]
+		} else {
+			out = out | src[i:idx]
+		}
+		if len(inner) == 0 {
+			out = out | "__slicealloc("
+			out = out | chanType
+			out = append(out, ')')
+		} else {
+			out = out | "__slicealloc("
+			out = out | chanType
+			out = out | ", "
+			out = out | inner
+			out = append(out, ')')
+		}
+		i = closeIdx + 1
+	}
+	if out == nil {
+		return src
+	}
+	return out
+}

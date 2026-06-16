@@ -1,0 +1,1251 @@
+package main
+
+import (
+	"git.smesh.lol/moxie/pkg/mxutil"
+	. "git.smesh.lol/moxie/pkg/types"
+)
+
+func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
+	reg := e.regName(m)
+	val := e.operand(m.X)
+	valType := e.llvmType(m.X.SSAType())
+	ity := e.ifaceType()
+	if valType == "void" {
+		ipt := e.intptrType()
+		e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(ity) ; e.w(" zeroinitializer, " | ipt | " 0, 0\n")
+		return
+	}
+	if _, isAlloc := m.X.(*SSAAlloc); !isAlloc {
+		if _, isIA := m.X.(*SSAIndexAddr); !isIA {
+			if at, ok := e.allocTypes[m.X]; ok && at != "ptr" && at != "void" {
+				valType = at
+			}
+		}
+	}
+	if valType == ity {
+		tp := e.nextReg2("mi")
+		e.w("  ") ; e.w(tp) ; e.w(" = extractvalue ") ; e.w(ity) ; e.w(" ") ; e.w(val) ; e.w(", 0\n")
+		dp := e.nextReg2("mi")
+		e.w("  ") ; e.w(dp) ; e.w(" = extractvalue ") ; e.w(ity) ; e.w(" ") ; e.w(val) ; e.w(", 1\n")
+		t1a := e.nextReg2("mi")
+		ipt := e.intptrType()
+		e.w("  ") ; e.w(t1a) ; e.w(" = insertvalue ") ; e.w(ity) ; e.w(" undef, " | ipt | " ") ; e.w(tp) ; e.w(", 0\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(ity) ; e.w(" ") ; e.w(t1a) ; e.w(", ptr ") ; e.w(dp) ; e.w(", 1\n")
+		return
+	}
+	var valPtr string
+	if valType == "ptr" {
+		valPtr = val
+	} else if e.isScalarType(valType) {
+		// Always heap-allocate scalar values for interface boxing.
+		// The invoke dispatch passes the value pointer to methods that
+		// dereference it; inlining via inttoptr produces an invalid address.
+		ipt := e.intptrType()
+		sz := e.nextReg2("mi")
+		e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(valType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+		valPtr = e.nextReg2("mi")
+		e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
+		e.w("  store ") ; e.w(valType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
+		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
+		e.scopeTrackAlloc(valPtr)
+	} else {
+		ipt := e.intptrType()
+		sz := e.nextReg2("ha")
+		e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(valType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+		valPtr = e.nextReg2("mi")
+		e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
+		e.w("  store ") ; e.w(valType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
+		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
+		e.scopeTrackAlloc(valPtr)
+	}
+	typeid := e.typeIDHash(m.X.SSAType())
+	t1 := e.nextReg2("mi")
+	e.w("  ") ; e.w(t1) ; e.w(" = insertvalue " | e.ifaceType() | " undef, " | e.intptrType() | " ") ; e.w(typeid) ; e.w(", 0\n")
+	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue " | e.ifaceType() | " ") ; e.w(t1) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
+}
+
+// hashToIntptr folds a 64-bit FNV-1a hash to intptr width (32-bit on wasm32).
+func (e *irEmitter) hashToIntptr(h uint64) (s string) {
+	if e.intptrType() == "i32" {
+		return irUitoa64((h >> 32) ^ (h & 0xFFFFFFFF))
+	}
+	return irUitoa64(h)
+}
+
+func (e *irEmitter) typeIDHash(t Type) (s string) {
+	name := e.reflectTypeName(t)
+	if e.typeIDs == nil {
+		e.typeIDs = map[string]int32{}
+	}
+	if _, ok := e.typeIDs[name]; !ok {
+		e.typeIDNext++
+		e.typeIDs[name] = e.typeIDNext
+	}
+	return e.hashToIntptr(fnv1a64(name))
+}
+
+func (e *irEmitter) typeIDHashI64(t Type) (s string) {
+	name := e.reflectTypeName(t)
+	return e.intptrType() | " " | e.hashToIntptr(fnv1a64(name))
+}
+
+func (e *irEmitter) reflectTypeName(t Type) (s string) {
+	if b, ok := t.(*Basic); ok {
+		switch b.Kind {
+		case Bool, UntypedBool:
+			return "reflect/types.type:basic:bool"
+		case Int8:
+			return "reflect/types.type:basic:int8"
+		case Int16:
+			return "reflect/types.type:basic:int16"
+		case Int32, UntypedInt, UntypedRune:
+			return "reflect/types.type:basic:int32"
+		case Int64:
+			return "reflect/types.type:basic:int64"
+		case Uint8:
+			return "reflect/types.type:basic:uint8"
+		case Uint16:
+			return "reflect/types.type:basic:uint16"
+		case Uint32:
+			return "reflect/types.type:basic:uint32"
+		case Uint64:
+			return "reflect/types.type:basic:uint64"
+		case Float32:
+			return "reflect/types.type:basic:float32"
+		case Float64, UntypedFloat:
+			return "reflect/types.type:basic:float64"
+		case TCString, UntypedString:
+			return "reflect/types.type:basic:bytes"
+		case UnsafePointer:
+			return "reflect/types.type:basic:uintptr"
+		}
+	}
+	if named, ok := t.(*Named); ok && named.Obj != nil {
+		pkgPath := ""
+		if named.Obj.Pkg != nil {
+			pkgPath = named.Obj.Pkg.Path
+		}
+		if pkgPath == "" {
+			pkgPath = e.pkg.Pkg.Path
+		}
+		result := "reflect/types.type:named:" | pkgPath | "." | named.Obj.Name
+		if pkgPath == e.pkg.Pkg.Path {
+			if e.localTypeIDs == nil {
+				e.localTypeIDs = map[string]bool{}
+			}
+			e.localTypeIDs["\"" | result | "\""] = true
+		}
+		return result
+	}
+	if p, ok := t.(*Pointer); ok {
+		inner := e.reflectTypeName(p.Base)
+		if mxutil.HasPrefix(inner, "reflect/types.type:") {
+			result := "reflect/types.type:pointer:" | inner[len("reflect/types.type:"):]
+			quoted := "\"" | result | "\""
+			if e.localTypeIDs != nil && e.localTypeIDs["\"" | inner | "\""] {
+				e.localTypeIDs[quoted] = true
+			}
+			return result
+		}
+		return inner | ".ptr"
+	}
+	if _, ok := t.(*TCInterface); ok {
+		result := "reflect/types.type:interface:{}"
+		if e.localTypeIDs == nil {
+			e.localTypeIDs = map[string]bool{}
+		}
+		e.localTypeIDs["\"" | result | "\""] = true
+		return result
+	}
+	if sl, ok := t.(*Slice); ok {
+		elem := sl.Elem
+		if b, ok2 := SafeUnderlying(elem).(*Basic); ok2 && b.Kind == Uint8 {
+			return "reflect/types.type:basic:bytes"
+		}
+		inner := e.reflectTypeName(elem)
+		if mxutil.HasPrefix(inner, "reflect/types.type:") {
+			result := "reflect/types.type:slice:" | inner[len("reflect/types.type:"):]
+			if e.localTypeIDs == nil {
+				e.localTypeIDs = map[string]bool{}
+			}
+			e.localTypeIDs["\"" | result | "\""] = true
+			return result
+		}
+		return inner | ".slice"
+	}
+	pkg := e.pkg.Pkg.Path
+	return pkg | ".typeid.unknown"
+}
+
+func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
+	var impls []ifaceImpl
+	hasType := map[string]bool{}
+	var mkeys []string
+	for k := range e.pkg.Members {
+		mkeys = append(mkeys, k)
+	}
+	for i := 1; i < len(mkeys); i++ {
+		for j := i; j > 0 && mkeys[j] < mkeys[j-1]; j-- {
+			mkeys[j], mkeys[j-1] = mkeys[j-1], mkeys[j]
+		}
+	}
+	for mki := 0; mki < len(mkeys); mki++ {
+		mname := mkeys[mki]
+		m := e.pkg.Members[mname]
+		fn, ok := m.(*SSAFunction)
+		if !ok {
+			continue
+		}
+		dotIdx := -1
+		for i := 0; i < len(mname); i++ {
+			if mname[i] == '.' {
+				dotIdx = i
+				break
+			}
+		}
+		if dotIdx < 0 {
+			continue
+		}
+		mpart := mname[dotIdx+1:]
+		if mpart != methodName {
+			continue
+		}
+		tname := mname[:dotIdx]
+		looked := e.pkg.Pkg.Scope.Lookup(tname)
+		if looked == nil {
+			continue
+		}
+		tn, ok2 := looked.(*TypeName)
+		if !ok2 || tn.Typ == nil {
+			continue
+		}
+		isPtrRecv := fn.object != nil && fn.object.PtrRecv
+		recvT := tn.Typ
+		if isPtrRecv {
+			recvT = NewPointer(recvT)
+		}
+		impls = append(impls, ifaceImpl{fn: fn, recvType: recvT, ptrRecv: isPtrRecv})
+		hasType[tname] = true
+	}
+	scopeNames := e.pkg.Pkg.Scope.Names()
+	for sni := 0; sni < len(scopeNames); sni++ {
+		sname := scopeNames[sni]
+		tn2, ok4 := e.pkg.Pkg.Scope.Lookup(sname).(*TypeName)
+		if !ok4 || tn2.Typ == nil {
+			continue
+		}
+		if hasType[sname] {
+			continue
+		}
+		chain, fn, embedT := e.findEmbedMethod(tn2.Typ, methodName, 0)
+		if fn != nil {
+			isPtrRecv := fn.object != nil && fn.object.PtrRecv
+			impls = append(impls, ifaceImpl{
+				fn:         fn,
+				recvType:   NewPointer(tn2.Typ),
+				ptrRecv:    isPtrRecv,
+				embedField: chain[0],
+				embedType:  embedT,
+				embedChain: chain,
+			})
+			hasType[sname] = true
+		}
+	}
+	selfPath := e.pkg.Pkg.Path
+	var importedPkgs []*TCPackage
+	seenPkg := map[string]bool{}
+	// Explicit import list first: scope scanning misses imports that lost
+	// a local-name collision (imports are file-scoped).
+	for _, ip := range e.pkg.Pkg.Imports {
+		if seenPkg[ip.Path] {
+			continue
+		}
+		importedPkgs = append(importedPkgs, ip)
+		seenPkg[ip.Path] = true
+	}
+	scopeNames2 := e.pkg.Pkg.Scope.Names()
+	for sni2 := 0; sni2 < len(scopeNames2); sni2++ {
+		obj := e.pkg.Pkg.Scope.Lookup(scopeNames2[sni2])
+		pn, ok := obj.(*PkgName)
+		if !ok || pn.Imported == nil || seenPkg[pn.Imported.Path] {
+			continue
+		}
+		importedPkgs = append(importedPkgs, pn.Imported)
+		seenPkg[pn.Imported.Path] = true
+	}
+	// The build is two-phase: every package in the link set is type-checked
+	// (TypeCheckOnly/loadMxh) before any package is emitted, so the registry
+	// holds the whole link set here. Scan it all: an interface parameter can
+	// receive values of any type in the link, including types from packages
+	// downstream of this one (io.ReadFull dispatching Read on a
+	// crypto/rand.reader). Cross-package impl symbols are declared
+	// extern_weak (see declareExtInvoke): a link reusing this package's
+	// cached .bc without some impl's package resolves the weak ref to null,
+	// and that dispatch arm is dead there because no make-interface site can
+	// produce the matching type-ID without the defining package linked.
+	// moxie/runtime/unsafe are runtime-provided (legacy symbol mangling,
+	// local linkage) and never linkable.
+	var regPaths []string
+	for rPath := range ImportRegistry {
+		regPaths = append(regPaths, rPath)
+	}
+	for i := 1; i < len(regPaths); i++ {
+		for j := i; j > 0 && regPaths[j] < regPaths[j-1]; j-- {
+			regPaths[j], regPaths[j-1] = regPaths[j-1], regPaths[j]
+		}
+	}
+	for rpi := 0; rpi < len(regPaths); rpi++ {
+		rPath := regPaths[rpi]
+		rPkg := ImportRegistry[rPath]
+		if rPkg == nil || seenPkg[rPath] {
+			continue
+		}
+		if rPath == "moxie" || rPath == "runtime" || rPath == "unsafe" {
+			continue
+		}
+		importedPkgs = append(importedPkgs, rPkg)
+	}
+	for ipi := 0; ipi < len(importedPkgs); ipi++ {
+		ipkg := importedPkgs[ipi]
+		pkgPath := ipkg.Path
+		if pkgPath == selfPath {
+			continue
+		}
+		if ipkg.Scope == nil {
+			continue
+		}
+		names := ipkg.Scope.Names()
+		for ni := 0; ni < len(names); ni++ {
+			tname := names[ni]
+			tn3, ok7 := ipkg.Scope.Lookup(tname).(*TypeName)
+			if !ok7 || tn3.Typ == nil {
+				continue
+			}
+			named3, ok8 := tn3.Typ.(*Named)
+			if !ok8 {
+				continue
+			}
+			// Generic types' methods are never emitted as standalone symbols
+			// (monomorphization only); a direct extern call would be undefined.
+			if len(named3.TParams) > 0 {
+				continue
+			}
+			found := false
+			for mi := 0; mi < named3.NumMethods(); mi++ {
+				m := named3.Method(mi)
+				if m.Name != methodName {
+					continue
+				}
+				isPR := m.PtrRecv
+				sym := pkgPath | "." | tname | "." | methodName
+				tid := ""
+				if isPR {
+					tid = "reflect/types.type:pointer:named:" | pkgPath | "." | tname
+				} else {
+					tid = "reflect/types.type:named:" | pkgPath | "." | tname
+				}
+				msig := m.Signature()
+				impls = append(impls, ifaceImpl{
+					recvType:  tn3.Typ,
+					ptrRecv:   isPR,
+					extSymbol: sym,
+					extTypeID: tid,
+					extSig:    msig,
+				})
+				found = true
+			}
+			if !found {
+				chain, embedSym, embedSig, embedT := findExtEmbedMethod(named3, pkgPath, tname, methodName, 0)
+				if embedSym != "" {
+					tid := "reflect/types.type:pointer:named:" | pkgPath | "." | tname
+					impls = append(impls, ifaceImpl{
+						recvType:   NewPointer(tn3.Typ),
+						ptrRecv:    true,
+						extSymbol:  embedSym,
+						extTypeID:  tid,
+						extSig:     embedSig,
+						embedField: chain[0],
+						embedType:  embedT,
+						embedChain: chain,
+					})
+				}
+			}
+		}
+	}
+	for i := 1; i < len(impls); i++ {
+		for j := i; j > 0 && impls[j].recvType.String() < impls[j-1].recvType.String(); j-- {
+			impls[j], impls[j-1] = impls[j-1], impls[j]
+		}
+	}
+	return impls
+}
+
+func (e *irEmitter) findEmbedMethod(t Type, methodName string, depth int32) (chain []int32, fn *SSAFunction, embedT Type) {
+	if depth > 5 {
+		return nil, nil, nil
+	}
+	st, ok := SafeUnderlying(t).(*TCStruct)
+	if !ok {
+		return nil, nil, nil
+	}
+	for fi := 0; fi < st.NumFields(); fi++ {
+		f := st.Field(fi)
+		if !f.Anonymous {
+			continue
+		}
+		embedType := f.Typ
+		embedName := ""
+		if en, ok2 := embedType.(*Named); ok2 && en.Obj != nil {
+			embedName = en.Obj.Name
+		}
+		if embedName == "" {
+			continue
+		}
+		embedMName := embedName | "." | methodName
+		if fn2, ok2 := e.pkg.Members[embedMName].(*SSAFunction); ok2 {
+			return []int32{fi}, fn2, embedType
+		}
+		sub, fn3, embedT2 := e.findEmbedMethod(embedType, methodName, depth+1)
+		if fn3 != nil {
+			return []int32{fi} | sub, fn3, embedT2
+		}
+	}
+	return nil, nil, nil
+}
+
+// findExtEmbedMethod searches embedded fields of a cross-package Named type
+// for a method with the given name. Returns the field index chain, the
+// external symbol for the method, the method signature, and the embed type.
+func findExtEmbedMethod(named *Named, pkgPath string, outerName string, methodName string, depth int32) (chain []int32, sym string, sig *Signature, embedT Type) {
+	if depth > 5 {
+		return nil, "", nil, nil
+	}
+	st, ok := SafeUnderlying(named).(*TCStruct)
+	if !ok {
+		return nil, "", nil, nil
+	}
+	for fi := 0; fi < st.NumFields(); fi++ {
+		f := st.Field(fi)
+		if !f.Anonymous {
+			continue
+		}
+		embedType := f.Typ
+		var embedNamed *Named
+		if en, ok2 := embedType.(*Named); ok2 {
+			embedNamed = en
+		} else if p, ok3 := embedType.(*Pointer); ok3 {
+			if en2, ok4 := p.Base.(*Named); ok4 {
+				embedNamed = en2
+			}
+		}
+		if embedNamed == nil || embedNamed.Obj == nil {
+			continue
+		}
+		embedName := embedNamed.Obj.Name
+		embedPkg := pkgPath
+		if embedNamed.Obj.Pkg != nil {
+			embedPkg = embedNamed.Obj.Pkg.Path
+		}
+		for mi := 0; mi < embedNamed.NumMethods(); mi++ {
+			m := embedNamed.Method(mi)
+			if m.Name != methodName {
+				continue
+			}
+			sym2 := embedPkg | "." | embedName | "." | methodName
+			return []int32{fi}, sym2, m.Signature(), embedType
+		}
+		sub, sym3, sig2, eT := findExtEmbedMethod(embedNamed, embedPkg, embedName, methodName, depth+1)
+		if sym3 != "" {
+			return []int32{fi} | sub, sym3, sig2, eT
+		}
+	}
+	return nil, "", nil, nil
+}
+
+type ifaceImpl struct {
+	fn         *SSAFunction
+	recvType   Type
+	ptrRecv    bool
+	embedField int32
+	embedType  Type
+	embedChain []int32
+	extSymbol  string
+	extTypeID  string
+	extSig     *Signature
+}
+
+func (e *irEmitter) implFuncSym(impl ifaceImpl) (s string) {
+	if impl.extSymbol != "" {
+		if irNeedsQuote(impl.extSymbol) {
+			return "@\"" | impl.extSymbol | "\""
+		}
+		return "@" | impl.extSymbol
+	}
+	return e.funcSymbol(impl.fn)
+}
+
+func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
+	if impl.extSymbol == "" {
+		return
+	}
+	sym := e.implFuncSym(impl)
+	if _, ok := e.extDecls[sym]; ok {
+		return
+	}
+	// Use the impl's actual return type (not the caller's expected type)
+	// so the declaration matches the definition in the defining package.
+	retType := e.llvmType(inv.SSAType())
+	if impl.fn != nil && impl.fn.Signature != nil && impl.fn.Signature.Results != nil {
+		implRet := e.llvmType(impl.fn.Signature.Results)
+		if implRet != "" && implRet != "void" {
+			retType = implRet
+		}
+	} else if impl.extSig != nil && impl.extSig.Results != nil {
+		implRet := e.llvmType(impl.extSig.Results)
+		if implRet != "" && implRet != "void" {
+			retType = implRet
+		}
+	}
+	useSret := needsSret(retType)
+	// All receivers are ptr in Moxie (no value receivers).
+	recvLLVM := "ptr"
+	params := ""
+	if useSret {
+		params = "ptr, "
+	}
+	params = params | recvLLVM
+	var sig *Signature
+	if impl.fn != nil && impl.fn.Signature != nil {
+		sig = impl.fn.Signature
+	} else if impl.extSig != nil {
+		sig = impl.extSig
+	}
+	if sig != nil && sig.Params != nil {
+		for i := 0; i < sig.Params.Len(); i++ {
+			pt := e.llvmType(sig.Params.At(i).Typ)
+			if pt == "void" {
+				pt = "ptr"
+			}
+			params = params | ", " | pt
+		}
+	} else {
+		for _, arg := range inv.Args {
+			argT := e.llvmType(arg.SSAType())
+			if argT == "void" {
+				argT = "ptr"
+			}
+			params = params | ", " | argT
+		}
+	}
+	params = params | ", ptr"
+	// extern_weak: dispatch lists enumerate impls from the whole link set;
+	// a link reusing this module's cached .bc without an impl's package
+	// resolves the ref to null instead of failing, and the guarded call arm
+	// is dead there (no make-interface site can produce the type-ID).
+	declRet := retType
+	if useSret {
+		declRet = "void"
+	}
+	e.extDecls[sym] = "extern_weak " | declRet | " " | sym | "(" | params | ")"
+}
+
+func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv string, inv *SSAInvoke, isVoid bool, impl ifaceImpl) {
+	callArgs := recvLLVM | " " | recv
+	var sig *Signature
+	if impl.fn != nil {
+		sig = impl.fn.Signature
+	} else if impl.extSig != nil {
+		sig = impl.extSig
+	}
+	for i, arg := range inv.Args {
+		argT := e.llvmType(arg.SSAType())
+		if argT == "void" {
+			argT = "ptr"
+		}
+		argVal := e.operand(arg)
+		if sig != nil && sig.Params != nil && i < sig.Params.Len() {
+			pt := e.llvmType(sig.Params.At(i).Typ)
+			if pt == "void" {
+				pt = "ptr"
+			}
+			if pt != argT && pt != "" {
+				e.nextReg++
+				tmp := "%eicast" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(tmp) ; e.w(" = alloca ") ; e.w(pt) ; e.w("\n")
+				e.w("  store ") ; e.w(pt) ; e.w(" zeroinitializer, ptr ") ; e.w(tmp) ; e.w("\n")
+				e.w("  store ") ; e.w(argT) ; e.w(" ") ; e.w(argVal) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
+				e.nextReg++
+				loaded := "%eild" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(loaded) ; e.w(" = load ") ; e.w(pt) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
+				argT = pt
+				argVal = loaded
+			}
+		}
+		// Aggregates pass as-is: method definitions keep slice/struct params
+		// as single aggregate values, and flattening them here splits the
+		// SysV ABI classes (registers vs stack) - garbage in the callee.
+		callArgs = callArgs | ", " | argT | " " | argVal
+	}
+	callArgs = callArgs | ", ptr null"
+	e.w("  ")
+	if !isVoid {
+		e.w(reg) ; e.w(" = ")
+	}
+	e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(funcSym) ; e.w("(")
+	e.w(callArgs)
+	e.w(")\n")
+}
+
+func (e *irEmitter) implTypeID(impl ifaceImpl) (s string) {
+	if impl.extTypeID != "" {
+		return e.hashToIntptr(fnv1a64(impl.extTypeID))
+	}
+	return e.typeIDHash(impl.recvType)
+}
+
+// emitIfaceAssertOK emits an i1 that is true when the dynamic type-ID in
+// typeID belongs to a type whose method set covers every method of the
+// asserted interface. Candidates come from the same whole-link-set scan
+// invoke dispatch uses (findIfaceImpls), so assert and invoke agree on
+// what implements what. Pointer types carry the full method set; value
+// types only value-receiver methods (Go method-set rules).
+func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s string) {
+	mnames, msigs := collectIfaceMethodInfo(ifaceT, 0)
+	// The universe error interface carries an implicit String() string so fmt
+	// can print errors; concrete error types are not required to declare it.
+	// Drop it from the required set whenever Error is present, or no type
+	// would ever cover the full set.
+	hasError := false
+	for mi := 0; mi < len(mnames); mi++ {
+		if mnames[mi] == "Error" {
+			hasError = true
+		}
+	}
+	if hasError {
+		var keepN []string
+		var keepS []*Signature
+		for mi := 0; mi < len(mnames); mi++ {
+			if mnames[mi] != "String" {
+				keepN = append(keepN, mnames[mi])
+				keepS = append(keepS, msigs[mi])
+			}
+		}
+		mnames = keepN
+		msigs = keepS
+	}
+	n := int32(len(mnames))
+	allCount := map[string]int32{}
+	valCount := map[string]int32{}
+	var order []string
+	for mi := int32(0); mi < n; mi++ {
+		impls := e.findIfaceImpls(mnames[mi])
+		seen := map[string]bool{}
+		for ii := 0; ii < len(impls); ii++ {
+			// Check return type and parameter count compatibility.
+			if msigs[mi] != nil && impls[ii].fn != nil && impls[ii].fn.Signature != nil {
+				ifaceRet := e.llvmType(msigs[mi].Results)
+				implRet := e.llvmType(impls[ii].fn.Signature.Results)
+				if ifaceRet != implRet {
+					continue
+				}
+				ifaceParams := int32(0)
+				if msigs[mi].Params != nil {
+					ifaceParams = int32(msigs[mi].Params.Len())
+				}
+				implParams := int32(0)
+				if impls[ii].fn.Signature.Params != nil {
+					implParams = int32(impls[ii].fn.Signature.Params.Len())
+				}
+				if ifaceParams != implParams {
+					continue
+				}
+			}
+			base := e.implBaseTypeName(impls[ii])
+			if base == "" || seen[base] {
+				continue
+			}
+			seen[base] = true
+			if _, have := allCount[base]; !have {
+				order = append(order, base)
+			}
+			allCount[base] = allCount[base] + 1
+			if !impls[ii].ptrRecv {
+				valCount[base] = valCount[base] + 1
+			}
+		}
+	}
+	pfx := "reflect/types.type:"
+	var tids []string
+	for oi := 0; oi < len(order); oi++ {
+		base := order[oi]
+		if allCount[base] == n {
+			tids = append(tids, e.hashToIntptr(fnv1a64(pfx|"pointer:"|base[len(pfx):])))
+		}
+		if valCount[base] == n {
+			tids = append(tids, e.hashToIntptr(fnv1a64(base)))
+		}
+	}
+	ok := ""
+	for ti := 0; ti < len(tids); ti++ {
+		cmp := e.nextReg2("ta")
+		e.w("  ") ; e.w(cmp) ; e.w(" = icmp eq " | e.intptrType() | " ") ; e.w(typeID) ; e.w(", ") ; e.w(tids[ti]) ; e.w("\n")
+		if ok == "" {
+			ok = cmp
+		} else {
+			acc := e.nextReg2("ta")
+			e.w("  ") ; e.w(acc) ; e.w(" = or i1 ") ; e.w(ok) ; e.w(", ") ; e.w(cmp) ; e.w("\n")
+			ok = acc
+		}
+	}
+	if ok == "" {
+		// no implementer in the link set: the assertion can never succeed
+		ok = e.nextReg2("ta")
+		e.w("  ") ; e.w(ok) ; e.w(" = icmp eq " | e.intptrType() | " ") ; e.w(typeID) ; e.w(", -1\n")
+	}
+	return ok
+}
+
+// collectIfaceMethodNames returns the deduplicated method names of an
+// interface, walking embedded interfaces when the completed allMethods
+// list is unavailable.
+func collectIfaceMethodNames(ifaceT *TCInterface, depth int32) (ss []string) {
+	names, _ := collectIfaceMethodInfo(ifaceT, depth)
+	return names
+}
+
+func collectIfaceMethodInfo(ifaceT *TCInterface, depth int32) (ss []string, sigs []*Signature) {
+	if ifaceT == nil || depth > 4 {
+		return nil, nil
+	}
+	var names []string
+	var sigList []*Signature
+	if ifaceT.NumMethods() > 0 {
+		for i := int32(0); i < ifaceT.NumMethods(); i++ {
+			names = append(names, ifaceT.Method(i).Name)
+			sigList = append(sigList, ifaceT.Method(i).Sig)
+		}
+	} else {
+		for i := int32(0); i < ifaceT.NumExplicitMethods(); i++ {
+			names = append(names, ifaceT.ExplicitMethod(i).Name)
+			sigList = append(sigList, ifaceT.ExplicitMethod(i).Sig)
+		}
+		for i := int32(0); i < ifaceT.NumEmbeddeds(); i++ {
+			if em, ok := SafeUnderlying(ifaceT.EmbeddedType(i)).(*TCInterface); ok {
+				en, es := collectIfaceMethodInfo(em, depth+1)
+				names = names | en
+				sigList = sigList | es
+			}
+		}
+	}
+	seen := map[string]bool{}
+	var outN []string
+	var outS []*Signature
+	for i := 0; i < len(names); i++ {
+		if seen[names[i]] {
+			continue
+		}
+		seen[names[i]] = true
+		outN = append(outN, names[i])
+		if i < len(sigList) {
+			outS = append(outS, sigList[i])
+		} else {
+			outS = append(outS, nil)
+		}
+	}
+	return outN, outS
+}
+
+// implBaseTypeName returns the reflect name of the impl's receiver base
+// (non-pointer) type, used to intersect method coverage across impls.
+func (e *irEmitter) implBaseTypeName(impl ifaceImpl) (s string) {
+	if impl.extTypeID != "" {
+		name := impl.extTypeID
+		if mxutil.HasPrefix(name, "reflect/types.type:pointer:") {
+			name = "reflect/types.type:" | name[len("reflect/types.type:pointer:"):]
+		}
+		return name
+	}
+	rt := impl.recvType
+	if pt, isP := rt.(*Pointer); isP {
+		rt = pt.Base
+	}
+	if rt == nil {
+		return ""
+	}
+	return e.reflectTypeName(rt)
+}
+
+func (e *irEmitter) emitEmbedChainGEP(impl ifaceImpl, valPtr string) (s string) {
+	chain := impl.embedChain
+	if len(chain) == 0 {
+		chain = []int32{impl.embedField}
+	}
+	outerType := impl.recvType
+	if pt, ok := outerType.(*Pointer); ok {
+		outerType = pt.Base
+	}
+	cur := valPtr
+	curType := outerType
+	for _, idx := range chain {
+		outerLLVM := e.llvmType(curType)
+		gep := e.nextReg2("eg")
+		e.w("  ") ; e.w(gep) ; e.w(" = getelementptr inbounds ") ; e.w(outerLLVM)
+		e.w(", ptr ") ; e.w(cur) ; e.w(", i32 0, i32 ") ; e.w(irItoa(idx)) ; e.w("\n")
+		cur = gep
+		st, ok := SafeUnderlying(curType).(*TCStruct)
+		if ok && idx < st.NumFields() {
+			curType = st.Field(idx).Typ
+		}
+	}
+	return cur
+}
+
+type invokeArg struct {
+	typ string
+	val string
+}
+
+func (e *irEmitter) prepareInvokeArgs(inv *SSAInvoke, impl ifaceImpl) (ss []invokeArg) {
+	var sig *Signature
+	if impl.fn != nil {
+		sig = impl.fn.Signature
+	} else if impl.extSig != nil {
+		sig = impl.extSig
+	}
+	var result []invokeArg
+	for i, arg := range inv.Args {
+		argT := e.llvmType(arg.SSAType())
+		if at, ok := e.allocTypes[arg]; ok && at != "ptr" && at != "void" {
+			argT = at
+		}
+		if argT == "void" {
+			argT = "ptr"
+		}
+		argV := e.operand(arg)
+		if sig != nil && sig.Params != nil && i < sig.Params.Len() {
+			pt := e.llvmType(sig.Params.At(i).Typ)
+			if pt != "void" && pt != "ptr" && pt != "" && pt != argT && len(pt) > len(argT) {
+				e.nextReg++
+				tmp := "%icast" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(tmp) ; e.w(" = alloca ") ; e.w(pt) ; e.w("\n")
+				e.w("  store ") ; e.w(pt) ; e.w(" zeroinitializer, ptr ") ; e.w(tmp) ; e.w("\n")
+				e.w("  store ") ; e.w(argT) ; e.w(" ") ; e.w(argV) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
+				e.nextReg++
+				loaded := "%icld" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(loaded) ; e.w(" = load ") ; e.w(pt) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
+				argT = pt
+				argV = loaded
+			}
+		}
+		if argT == "void" {
+			argT = "ptr"
+		}
+		result = append(result, invokeArg{typ: argT, val: argV})
+	}
+	return result
+}
+
+func (e *irEmitter) emitInvokeArgs(args []invokeArg) {
+	for _, a := range args {
+		e.w(", ") ; e.w(a.typ) ; e.w(" ") ; e.w(a.val)
+	}
+}
+
+func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
+	reg := e.regName(inv)
+	ifaceVal := e.operand(inv.X)
+	retSSAType := inv.SSAType()
+	if retSSAType == nil && inv.IfaceType != nil {
+		for i := 0; i < inv.IfaceType.NumMethods(); i++ {
+			m := inv.IfaceType.Method(i)
+			if m != nil && m.Name == inv.MethodName && m.Sig != nil {
+				if m.Sig.Results != nil && m.Sig.Results.Len() == 1 {
+					retSSAType = m.Sig.Results.At(0).Typ
+				} else if m.Sig.Results != nil && m.Sig.Results.Len() > 1 {
+					retSSAType = m.Sig.Results
+				}
+				break
+			}
+		}
+	}
+	retType := e.llvmType(retSSAType)
+	isVoid := retType == "void"
+
+	xtype := inv.X.SSAType()
+	concretePtr := false
+	if xtype != nil {
+		u := SafeUnderlying(xtype)
+		if u != nil {
+			_, isP := u.(*Pointer)
+			_, isI := u.(*TCInterface)
+			if isP && !isI {
+				concretePtr = true
+			}
+		}
+		}
+
+	tidPtr := e.nextReg2("tid")
+	valPtr := e.nextReg2("vp")
+	if concretePtr {
+		e.w("  ") ; e.w(valPtr) ; e.w(" = bitcast ptr ") ; e.w(ifaceVal) ; e.w(" to ptr\n")
+	} else {
+		e.w("  ") ; e.w(tidPtr) ; e.w(" = extractvalue " | e.ifaceType() | " ") ; e.w(ifaceVal) ; e.w(", 0\n")
+		e.w("  ") ; e.w(valPtr) ; e.w(" = extractvalue " | e.ifaceType() | " ") ; e.w(ifaceVal) ; e.w(", 1\n")
+	}
+
+	allImpls := e.findIfaceImpls(inv.MethodName)
+	// Filter impls by return type and parameter count compatibility.
+	nInvokeArgs := int32(len(inv.Args))
+	var impls []ifaceImpl
+	for _, impl := range allImpls {
+		if impl.fn != nil && impl.fn.Signature != nil {
+			implRet := e.llvmType(impl.fn.Signature.Results)
+			if retType != implRet && retType != "void" && implRet != "void" {
+				continue
+			}
+			// Parameter count must match the invoke arg count.
+			implParams := int32(0)
+			if impl.fn.Signature.Params != nil {
+				implParams = int32(impl.fn.Signature.Params.Len())
+			}
+			if implParams != nInvokeArgs {
+				continue
+			}
+		} else if impl.extSig != nil {
+			implParams := int32(0)
+			if impl.extSig.Params != nil {
+				implParams = int32(impl.extSig.Params.Len())
+			}
+			if implParams != nInvokeArgs {
+				continue
+			}
+		}
+		impls = append(impls, impl)
+	}
+	for _, impl := range impls {
+		e.declareExtInvoke(impl, inv)
+	}
+
+	if len(impls) == 0 {
+		e.w("  ; invoke: no implementations for ") ; e.w(inv.MethodName) ; e.w("\n")
+		if !isVoid {
+			e.nextReg++
+			zp := "%zp" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(zp) ; e.w(" = alloca ") ; e.w(retType) ; e.w("\n")
+			e.w("  store ") ; e.w(retType) ; e.w(" zeroinitializer, ptr ") ; e.w(zp) ; e.w("\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(retType) ; e.w(", ptr ") ; e.w(zp) ; e.w("\n")
+		}
+		return
+	}
+
+	if len(impls) == 1 {
+		impl := impls[0]
+		callRecv := valPtr
+		if impl.embedType != nil {
+			callRecv = e.emitEmbedChainGEP(impl, valPtr)
+		}
+		// All receivers are ptr in Moxie.
+		recvLLVM := "ptr"
+		recv := callRecv
+		if impl.extSymbol != "" {
+			e.emitExtInvokeCall(reg, retType, e.implFuncSym(impl), recvLLVM, recv, inv, isVoid, impl)
+		} else {
+			e.w("  ")
+			prepArgs := e.prepareInvokeArgs(inv, impl)
+			if !isVoid {
+				e.w(reg) ; e.w(" = ")
+			}
+			e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(e.implFuncSym(impl)) ; e.w("(")
+			e.w(recvLLVM) ; e.w(" ") ; e.w(recv)
+			e.emitInvokeArgs(prepArgs)
+			e.w(", ptr null)\n")
+		}
+		return
+	}
+
+	baseID := e.nextReg
+	mergeLabel := "invoke.merge" | irItoa(baseID)
+	var checkLabels []string
+	var caseLabels []string
+	var callRegs []string
+	for i := range impls {
+		checkLabels = append(checkLabels, "invoke.check" | irItoa(baseID) | "." | irItoa(i))
+		caseLabels = append(caseLabels, "invoke.case" | irItoa(baseID) | "." | irItoa(i))
+		if !isVoid {
+			callRegs = append(callRegs, e.nextReg2("cr"))
+		}
+	}
+	defaultLabel := "invoke.default" | irItoa(baseID)
+
+	e.w("  br label %") ; e.w(checkLabels[0]) ; e.w("\n")
+
+	for i, impl := range impls {
+		nextCheck := defaultLabel
+		if i < len(impls)-1 {
+			nextCheck = checkLabels[i+1]
+		}
+		e.w(checkLabels[i]) ; e.w(":\n")
+		tidGlobal := e.implTypeID(impl)
+		cmpReg := e.nextReg2("cmp")
+		e.w("  ") ; e.w(cmpReg) ; e.w(" = icmp eq " | e.intptrType() | " ") ; e.w(tidPtr) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
+		e.w("  br i1 ") ; e.w(cmpReg) ; e.w(", label %") ; e.w(caseLabels[i]) ; e.w(", label %") ; e.w(nextCheck) ; e.w("\n")
+
+		e.w(caseLabels[i]) ; e.w(":\n")
+		// All receivers are ptr in Moxie.
+		callRecv := valPtr
+		if impl.embedType != nil {
+			callRecv = e.emitEmbedChainGEP(impl, valPtr)
+		}
+		recvLLVM := "ptr"
+		recv := callRecv
+		if impl.extSymbol != "" {
+			creg := ""
+			if !isVoid {
+				creg = callRegs[i]
+			}
+			e.emitExtInvokeCall(creg, retType, e.implFuncSym(impl), recvLLVM, recv, inv, isVoid, impl)
+		} else {
+			prepArgs := e.prepareInvokeArgs(inv, impl)
+			e.w("  ")
+			if !isVoid {
+				e.w(callRegs[i]) ; e.w(" = ")
+			}
+			e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(e.implFuncSym(impl)) ; e.w("(")
+			e.w(recvLLVM) ; e.w(" ") ; e.w(recv)
+			e.emitInvokeArgs(prepArgs)
+			e.w(", ptr null)\n")
+		}
+		e.w("  br label %") ; e.w(mergeLabel) ; e.w("\n")
+	}
+
+	e.w(defaultLabel) ; e.w(":\n")
+	// A typeID that matches no impl means the dispatch list is incomplete -
+	// fail loud instead of executing unreachable-UB with a garbage method.
+	{
+		sty := e.sliceType()
+		msg := "interface dispatch: no impl for " | inv.MethodName
+		idx := e.addStringConst(msg)
+		ipt := e.intptrType()
+		slen := irItoa64(int64(len(msg)))
+		e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" { ptr ") ; e.w(e.strConstGlobal(idx)) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(" }, ptr null)\n")
+		e.declareRuntime("runtime._panicstr", "void", sty)
+	}
+	e.w("  unreachable\n")
+
+	e.w(mergeLabel) ; e.w(":\n")
+	if blk := inv.InstrBlock(); blk != nil {
+		e.blockExitLabel[blk.Index] = "%" | mergeLabel
+	}
+	if !isVoid {
+		e.w("  ") ; e.w(reg) ; e.w(" = phi ") ; e.w(retType) ; e.w(" ")
+		for i := range impls {
+			if i > 0 { e.w(", ") }
+			e.w("[ ") ; e.w(callRegs[i]) ; e.w(", %") ; e.w(caseLabels[i]) ; e.w(" ]")
+		}
+		e.w("\n")
+	}
+}
+
+func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
+	reg := e.regName(t)
+	val := e.operand(t.X)
+	assertedType := e.llvmType(t.AssertedType)
+	voidAssert := assertedType == "void"
+	if voidAssert {
+		assertedType = "ptr"
+	}
+	// Check if input is already a concrete ptr (not an interface {ptr, ptr})
+	inputType := e.llvmType(t.X.SSAType())
+	if at, ok := e.allocTypes[t.X]; ok {
+		inputType = at
+	}
+	var valPtr, typePtr string
+	if inputType == "ptr" {
+		valPtr = val
+		typePtr = "null"
+	} else {
+		valPtr = e.nextReg2("ta")
+		e.w("  ") ; e.w(valPtr) ; e.w(" = extractvalue " | e.ifaceType() | " ") ; e.w(val) ; e.w(", 1\n")
+		typePtr = e.nextReg2("ta")
+		e.w("  ") ; e.w(typePtr) ; e.w(" = extractvalue " | e.ifaceType() | " ") ; e.w(val) ; e.w(", 0\n")
+	}
+	// Asserting to an interface type: no concrete value ever carries the
+	// interface type's own hash, so the check must instead admit the
+	// type-ID of any type in the link set whose method set covers the
+	// interface (same scan invoke dispatch uses).
+	var ifaceT *TCInterface
+	if it, okI := SafeUnderlying(t.AssertedType).(*TCInterface); okI && assertedType == e.ifaceType() {
+		ifaceT = it
+	}
+	isIfaceAssert := ifaceT != nil
+	if t.CommaOk {
+		var ok string
+		if isIfaceAssert && typePtr != "null" {
+			ok = e.emitIfaceAssertOK(ifaceT, typePtr)
+		} else if isIfaceAssert {
+			// degenerate concrete-ptr input: statically typed, non-nil check
+			ok = e.nextReg2("ta")
+			e.w("  ") ; e.w(ok) ; e.w(" = icmp ne ptr ") ; e.w(valPtr) ; e.w(", null\n")
+		} else {
+			tidGlobal := e.typeIDHash(t.AssertedType)
+			ok = e.nextReg2("ta")
+			tp := typePtr
+			if tp == "null" { tp = "0" }
+			e.w("  ") ; e.w(ok) ; e.w(" = icmp eq " | e.intptrType() | " ") ; e.w(tp) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
+		}
+		// A failed comma-ok assertion must yield the zero value, never the
+		// raw interface data reinterpreted as the asserted type.
+		var loaded string
+		if isIfaceAssert {
+			// result keeps the {i64, ptr} interface representation
+			tidOut := typePtr
+			if typePtr == "null" {
+				tidOut = "0"
+				if t.X.SSAType() != nil {
+					tidOut = e.typeIDHash(t.X.SSAType())
+				}
+			}
+			selTid := e.nextReg2("ta")
+			ipt := e.intptrType()
+			e.w("  ") ; e.w(selTid) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", " | ipt | " ") ; e.w(tidOut) ; e.w(", " | ipt | " 0\n")
+			selPtr := e.nextReg2("ta")
+			e.w("  ") ; e.w(selPtr) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", ptr null\n")
+			agg0 := e.nextReg2("ta")
+			e.w("  ") ; e.w(agg0) ; e.w(" = insertvalue " | e.ifaceType() | " undef, " | e.intptrType() | " ") ; e.w(selTid) ; e.w(", 0\n")
+			loaded = e.nextReg2("ta")
+			e.w("  ") ; e.w(loaded) ; e.w(" = insertvalue " | e.ifaceType() | " ") ; e.w(agg0) ; e.w(", ptr ") ; e.w(selPtr) ; e.w(", 1\n")
+		} else if assertedType == "ptr" {
+			loaded = e.nextReg2("ta")
+			e.w("  ") ; e.w(loaded) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", ptr null\n")
+		} else if e.isScalarType(assertedType) {
+			extracted := e.extractScalarFromIface(valPtr, assertedType)
+			zero := "0"
+			if assertedType == "float" || assertedType == "double" {
+				zero = "0.000000e+00"
+			}
+			loaded = e.nextReg2("ta")
+			e.w("  ") ; e.w(loaded) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ") ; e.w(assertedType) ; e.w(" ") ; e.w(extracted) ; e.w(", ") ; e.w(assertedType) ; e.w(" ") ; e.w(zero) ; e.w("\n")
+		} else {
+			nonnull0 := e.nextReg2("ta")
+			e.w("  ") ; e.w(nonnull0) ; e.w(" = icmp ne ptr ") ; e.w(valPtr) ; e.w(", null\n")
+			nonnull := e.nextReg2("ta")
+			e.w("  ") ; e.w(nonnull) ; e.w(" = and i1 ") ; e.w(ok) ; e.w(", ") ; e.w(nonnull0) ; e.w("\n")
+			e.nextReg++
+			safeLabel := "ta.safe" | irItoa(e.nextReg)
+			e.nextReg++
+			zeroLabel := "ta.zero" | irItoa(e.nextReg)
+			e.nextReg++
+			mergeLabel := "ta.merge" | irItoa(e.nextReg)
+			e.w("  br i1 ") ; e.w(nonnull) ; e.w(", label %") ; e.w(safeLabel) ; e.w(", label %") ; e.w(zeroLabel) ; e.w("\n")
+			e.w(safeLabel) ; e.w(":\n")
+			realLoad := e.nextReg2("ta")
+			e.w("  ") ; e.w(realLoad) ; e.w(" = load ") ; e.w(assertedType) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
+			e.w("  br label %") ; e.w(mergeLabel) ; e.w("\n")
+			e.w(zeroLabel) ; e.w(":\n")
+			e.w("  br label %") ; e.w(mergeLabel) ; e.w("\n")
+			e.w(mergeLabel) ; e.w(":\n")
+			loaded = e.nextReg2("ta")
+			e.w("  ") ; e.w(loaded) ; e.w(" = phi ") ; e.w(assertedType) ; e.w(" [ ") ; e.w(realLoad) ; e.w(", %") ; e.w(safeLabel) ; e.w(" ], [ zeroinitializer, %") ; e.w(zeroLabel) ; e.w(" ]\n")
+			if blk := t.InstrBlock(); blk != nil {
+				e.blockExitLabel[blk.Index] = "%" | mergeLabel
+			}
+		}
+		tupType := "{" | assertedType | ", i1}"
+		t1 := e.nextReg2("ta")
+		e.w("  ") ; e.w(t1) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" undef, ") ; e.w(assertedType) ; e.w(" ") ; e.w(loaded) ; e.w(", 0\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" ") ; e.w(t1) ; e.w(", i1 ") ; e.w(ok) ; e.w(", 1\n")
+		if voidAssert {
+			e.allocTypes[t] = tupType
+		}
+	} else {
+		// Single-result assertion: panic on type-ID mismatch (Go semantics).
+		// typePtr == "null" means the input was already a concrete pointer,
+		// so there is no runtime type information to check.
+		if typePtr != "null" {
+			var ok string
+			if isIfaceAssert {
+				ok = e.emitIfaceAssertOK(ifaceT, typePtr)
+			} else {
+				tidGlobal := e.typeIDHash(t.AssertedType)
+				ok = e.nextReg2("ta")
+				e.w("  ") ; e.w(ok) ; e.w(" = icmp eq " | e.intptrType() | " ") ; e.w(typePtr) ; e.w(", ") ; e.w(tidGlobal) ; e.w("\n")
+			}
+			e.nextReg++
+			goodLabel := "ta.good" | irItoa(e.nextReg)
+			e.nextReg++
+			badLabel := "ta.bad" | irItoa(e.nextReg)
+			e.w("  br i1 ") ; e.w(ok) ; e.w(", label %") ; e.w(goodLabel) ; e.w(", label %") ; e.w(badLabel) ; e.w("\n")
+			e.w(badLabel) ; e.w(":\n")
+			sty := e.sliceType()
+			msg := "type assertion failed"
+			idx := e.addStringConst(msg)
+			ipt := e.intptrType()
+			slen := irItoa64(int64(len(msg)))
+			e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" { ptr ") ; e.w(e.strConstGlobal(idx)) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(slen) ; e.w(" }, ptr null)\n")
+			e.declareRuntime("runtime._panicstr", "void", sty)
+			e.w("  unreachable\n")
+			e.w(goodLabel) ; e.w(":\n")
+			if blk := t.InstrBlock(); blk != nil {
+				e.blockExitLabel[blk.Index] = "%" | goodLabel
+			}
+		}
+		if isIfaceAssert {
+			tidOut := typePtr
+			if typePtr == "null" {
+				tidOut = "0"
+				if t.X.SSAType() != nil {
+					tidOut = e.typeIDHash(t.X.SSAType())
+				}
+			}
+			agg0 := e.nextReg2("ta")
+			e.w("  ") ; e.w(agg0) ; e.w(" = insertvalue " | e.ifaceType() | " undef, " | e.intptrType() | " ") ; e.w(tidOut) ; e.w(", 0\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue " | e.ifaceType() | " ") ; e.w(agg0) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
+		} else if assertedType == "ptr" {
+			e.w("  ") ; e.w(reg) ; e.w(" = select i1 true, ptr ") ; e.w(valPtr) ; e.w(", ptr null\n")
+		} else if e.isScalarType(assertedType) {
+			extracted := e.extractScalarFromIface(valPtr, assertedType)
+			e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(assertedType) ; e.w(" ") ; e.w(extracted) ; e.w(", 0\n")
+		} else {
+			e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(assertedType) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
+		}
+		if voidAssert {
+			e.allocTypes[t] = assertedType
+		}
+	}
+}
+
+func (e *irEmitter) extractScalarFromIface(valPtr string, assertedType string) (s string) {
+	ipt := e.intptrType()
+	srcBits := e.intBits(ipt)
+	dstBits := e.intBits(assertedType)
+	// On wasm32 (ipt=i32), values wider than intptr are heap-allocated;
+	// the interface data field holds a pointer to the value.
+	if dstBits > srcBits && dstBits > 0 {
+		loaded := e.nextReg2("ta")
+		e.w("  ") ; e.w(loaded) ; e.w(" = load ") ; e.w(assertedType) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
+		return loaded
+	}
+	raw := e.nextReg2("ta")
+	e.w("  ") ; e.w(raw) ; e.w(" = ptrtoint ptr ") ; e.w(valPtr) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+	if assertedType == ipt {
+		return raw
+	}
+	if assertedType == "i1" || assertedType == "i8" || assertedType == "i16" || assertedType == "i32" {
+		tr := e.nextReg2("ta")
+		e.w("  ") ; e.w(tr) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(raw) ; e.w(" to ") ; e.w(assertedType) ; e.w("\n")
+		return tr
+	}
+	if assertedType == "float" {
+		tr := e.nextReg2("ta")
+		e.truncToI32(tr, raw)
+		bc := e.nextReg2("ta")
+		e.w("  ") ; e.w(bc) ; e.w(" = bitcast i32 ") ; e.w(tr) ; e.w(" to float\n")
+		return bc
+	}
+	if assertedType == "double" {
+		loaded := e.nextReg2("ta")
+		e.w("  ") ; e.w(loaded) ; e.w(" = load double, ptr ") ; e.w(valPtr) ; e.w("\n")
+		return loaded
+	}
+	return raw
+}

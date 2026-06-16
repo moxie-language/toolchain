@@ -1,0 +1,290 @@
+package main
+
+import (
+	. "git.smesh.lol/moxie/pkg/types"
+)
+
+func (e *irEmitter) chanPanicStr() (s string) {
+	msg := "channels not implemented"
+	idx := e.addStringConst(msg)
+	ipt := e.intptrType()
+	slen := irItoa64(int64(len(msg)))
+	return "{ ptr " | e.strConstGlobal(idx) | ", " | ipt | " " | slen | ", " | ipt | " " | slen | " }"
+}
+
+func (e *irEmitter) emitChanPanic() {
+	sty := e.sliceType()
+	e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" ")
+	e.w(e.chanPanicStr()) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime._panicstr", "void", sty)
+	e.w("  unreachable\n")
+	e.blockDead = true
+}
+
+func (e *irEmitter) chanElemType(chanType Type) (elemT string) {
+	if ch, ok := SafeUnderlying(chanType).(*TCChan); ok && ch.Elem != nil {
+		et := e.llvmType(ch.Elem)
+		if et != "void" && et != "" {
+			return et
+		}
+	}
+	return "i8"
+}
+
+func (e *irEmitter) emitChanRecv(u *SSAUnOp) {
+	reg := e.regName(u)
+	elemType := e.chanElemType(u.X.SSAType())
+	ch := e.operand(u.X)
+	opType := "{ptr, ptr, i32, ptr}"
+
+	e.nextReg++
+	valAlloca := "%chanrv" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(valAlloca) ; e.w(" = alloca ") ; e.w(elemType) ; e.w("\n")
+	e.w("  store ") ; e.w(elemType) ; e.w(" zeroinitializer, ptr ") ; e.w(valAlloca) ; e.w("\n")
+
+	e.nextReg++
+	opAlloca := "%chanrop" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(opAlloca) ; e.w(" = alloca ") ; e.w(opType) ; e.w("\n")
+	e.w("  store ") ; e.w(opType) ; e.w(" zeroinitializer, ptr ") ; e.w(opAlloca) ; e.w("\n")
+
+	e.nextReg++
+	okReg := "%chanrok" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(okReg) ; e.w(" = call i1 @runtime.chanRecv(ptr ") ; e.w(ch) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w(", ptr ") ; e.w(opAlloca) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.chanRecv", "i1", "ptr, ptr, ptr")
+
+	if u.CommaOk {
+		e.nextReg++
+		loadedVal := "%chanrlv" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(loadedVal) ; e.w(" = load ") ; e.w(elemType) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+
+		tupleType := "{" | elemType | ", i1}"
+		e.nextReg++
+		t1 := "%chanrt1_" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(t1) ; e.w(" = insertvalue ") ; e.w(tupleType) ; e.w(" zeroinitializer, ") ; e.w(elemType) ; e.w(" ") ; e.w(loadedVal) ; e.w(", 0\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(tupleType) ; e.w(" ") ; e.w(t1) ; e.w(", i1 ") ; e.w(okReg) ; e.w(", 1\n")
+	} else {
+		e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(elemType) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+	}
+}
+
+func (e *irEmitter) emitChanSend(s *SSASend) {
+	elemType := e.chanElemType(s.Chan.SSAType())
+	ch := e.operand(s.Chan)
+	val := e.operand(s.X)
+	opType := "{ptr, ptr, i32, ptr}"
+
+	e.nextReg++
+	valAlloca := "%chansv" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(valAlloca) ; e.w(" = alloca ") ; e.w(elemType) ; e.w("\n")
+
+	valSrcType := e.llvmType(s.X.SSAType())
+	resolved := e.resolvedType(s.X, valSrcType)
+	if resolved != valSrcType {
+		valSrcType = resolved
+	}
+	if valSrcType == elemType {
+		e.w("  store ") ; e.w(elemType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+	} else {
+		e.w("  store ") ; e.w(valSrcType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+	}
+
+	e.nextReg++
+	opAlloca := "%chansop" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(opAlloca) ; e.w(" = alloca ") ; e.w(opType) ; e.w("\n")
+	e.w("  store ") ; e.w(opType) ; e.w(" zeroinitializer, ptr ") ; e.w(opAlloca) ; e.w("\n")
+
+	e.w("  call void @runtime.chanSend(ptr ") ; e.w(ch) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w(", ptr ") ; e.w(opAlloca) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.chanSend", "void", "ptr, ptr, ptr")
+}
+
+func (e *irEmitter) emitSelect(s *SSASelect) {
+	_ = e.regName(s)
+	ipt := e.intptrType()
+	sty := e.sliceType()
+	nStates := int32(len(s.States))
+	stateType := "{ptr, ptr}"  // chanSelectState: {ch, value}
+	opType := "{ptr, ptr, i32, ptr}" // channelOp
+
+	// Find largest recv element type for recvbuf.
+	maxElemType := "i8"
+	for _, st := range s.States {
+		if st.Dir == SelectDirRecv && st.Chan != nil {
+			et := e.chanElemType(st.Chan.SSAType())
+			if et != "i8" {
+				maxElemType = et
+			}
+		}
+	}
+
+	// Alloca recvbuf.
+	e.nextReg++
+	recvbuf := "%selrb" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(recvbuf) ; e.w(" = alloca ") ; e.w(maxElemType) ; e.w("\n")
+	e.w("  store ") ; e.w(maxElemType) ; e.w(" zeroinitializer, ptr ") ; e.w(recvbuf) ; e.w("\n")
+
+	// Alloca states array.
+	statesArrayType := "[" | irItoa(nStates) | " x " | stateType | "]"
+	e.nextReg++
+	statesArr := "%selst" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(statesArr) ; e.w(" = alloca ") ; e.w(statesArrayType) ; e.w("\n")
+	e.w("  store ") ; e.w(statesArrayType) ; e.w(" zeroinitializer, ptr ") ; e.w(statesArr) ; e.w("\n")
+
+	// Fill each state.
+	for i, st := range s.States {
+		ch := "null"
+		if st.Chan != nil {
+			ch = e.operand(st.Chan)
+		}
+		e.nextReg++
+		gep := "%selgep" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(gep) ; e.w(" = getelementptr inbounds ") ; e.w(stateType)
+		e.w(", ptr ") ; e.w(statesArr) ; e.w(", i32 ") ; e.w(irItoa(int32(i))) ; e.w("\n")
+
+		// Store ch at field 0.
+		e.nextReg++
+		chGep := "%selch" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(chGep) ; e.w(" = getelementptr inbounds ") ; e.w(stateType)
+		e.w(", ptr ") ; e.w(gep) ; e.w(", i32 0, i32 0\n")
+		e.w("  store ptr ") ; e.w(ch) ; e.w(", ptr ") ; e.w(chGep) ; e.w("\n")
+
+		// Store value at field 1 (nil for recv, ptr for send).
+		e.nextReg++
+		valGep := "%selval" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(valGep) ; e.w(" = getelementptr inbounds ") ; e.w(stateType)
+		e.w(", ptr ") ; e.w(gep) ; e.w(", i32 0, i32 1\n")
+		if st.Dir == SelectDirSend && st.Send != nil {
+			// Alloca for send value.
+			sendElemType := e.chanElemType(st.Chan.SSAType())
+			sendVal := e.operand(st.Send)
+			e.nextReg++
+			svAlloca := "%selsv" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(svAlloca) ; e.w(" = alloca ") ; e.w(sendElemType) ; e.w("\n")
+			e.w("  store ") ; e.w(sendElemType) ; e.w(" ") ; e.w(sendVal) ; e.w(", ptr ") ; e.w(svAlloca) ; e.w("\n")
+			e.w("  store ptr ") ; e.w(svAlloca) ; e.w(", ptr ") ; e.w(valGep) ; e.w("\n")
+		} else {
+			e.w("  store ptr null, ptr ") ; e.w(valGep) ; e.w("\n")
+		}
+	}
+
+	// Build states slice: {ptr, ipt len, ipt cap}.
+	e.nextReg++
+	statesSlice := "%selss" | irItoa(e.nextReg)
+	nStr := irItoa(nStates)
+	e.w("  ") ; e.w(statesSlice) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" zeroinitializer, ptr ") ; e.w(statesArr) ; e.w(", 0\n")
+	e.nextReg++
+	ss2 := "%selss" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(ss2) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(statesSlice) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(nStr) ; e.w(", 1\n")
+	e.nextReg++
+	ss3 := "%selss" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(ss3) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(ss2) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(nStr) ; e.w(", 2\n")
+
+	// Alloca ops array (only needed for blocking select).
+	opsArrayType := "[" | irItoa(nStates) | " x " | opType | "]"
+	e.nextReg++
+	opsArr := "%selops" | irItoa(e.nextReg)
+	if s.Blocking {
+		e.w("  ") ; e.w(opsArr) ; e.w(" = alloca ") ; e.w(opsArrayType) ; e.w("\n")
+		e.w("  store ") ; e.w(opsArrayType) ; e.w(" zeroinitializer, ptr ") ; e.w(opsArr) ; e.w("\n")
+	} else {
+		e.w("  ") ; e.w(opsArr) ; e.w(" = alloca ") ; e.w(opType) ; e.w(" ; unused\n")
+	}
+
+	// Build ops slice.
+	e.nextReg++
+	opsSlice := "%selos" | irItoa(e.nextReg)
+	if s.Blocking {
+		e.w("  ") ; e.w(opsSlice) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" zeroinitializer, ptr ") ; e.w(opsArr) ; e.w(", 0\n")
+		e.nextReg++
+		os2 := "%selos" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(os2) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(opsSlice) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(nStr) ; e.w(", 1\n")
+		e.nextReg++
+		os3 := "%selos" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(os3) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(os2) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(nStr) ; e.w(", 2\n")
+		opsSlice = os3
+	} else {
+		// Non-blocking: pass empty slice (len=0).
+		e.w("  ") ; e.w(opsSlice) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" zeroinitializer, ptr null, 0\n")
+	}
+
+	// Call runtime.chanSelect(recvbuf ptr, states slice, ops slice) -> {i32, i1}.
+	e.nextReg++
+	selResult := "%selres" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(selResult) ; e.w(" = call {i32, i1} @runtime.chanSelect(ptr ") ; e.w(recvbuf)
+	e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(ss3)
+	e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(opsSlice) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.chanSelect", "{i32, i1}", "ptr, " | sty | ", " | sty)
+
+	// Extract index and ok from runtime result.
+	e.nextReg++
+	selIdx := "%selidx" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(selIdx) ; e.w(" = extractvalue {i32, i1} ") ; e.w(selResult) ; e.w(", 0\n")
+	e.nextReg++
+	selOk := "%selok" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(selOk) ; e.w(" = extractvalue {i32, i1} ") ; e.w(selResult) ; e.w(", 1\n")
+
+	// Build the SSA result tuple: {i32, i1, recvElem0, recvElem1, ...}.
+	// Index 0 = selected index (i32), index 1 = recvOk (i1).
+	// Index 2+ = received value for each recv case (loaded from recvbuf).
+	tupType := "{i32, i1"
+	for _, st := range s.States {
+		if st.Dir == SelectDirRecv && st.Chan != nil {
+			et := e.chanElemType(st.Chan.SSAType())
+			tupType = tupType | ", " | et
+		}
+	}
+	tupType = tupType | "}"
+
+	// Start building tuple.
+	e.nextReg++
+	tup := "%selt" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(tup) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" zeroinitializer, i32 ") ; e.w(selIdx) ; e.w(", 0\n")
+
+	e.nextReg++
+	tup2 := "%selt" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(tup2) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" ") ; e.w(tup) ; e.w(", i1 ") ; e.w(selOk) ; e.w(", 1\n")
+	prev := tup2
+
+	// For each recv state, load from recvbuf and insert at tuple index 2+.
+	tupIdx := int32(2)
+	for _, st := range s.States {
+		if st.Dir == SelectDirRecv && st.Chan != nil {
+			et := e.chanElemType(st.Chan.SSAType())
+			e.nextReg++
+			rv := "%selrv" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(rv) ; e.w(" = load ") ; e.w(et) ; e.w(", ptr ") ; e.w(recvbuf) ; e.w("\n")
+			e.nextReg++
+			next := "%selt" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(next) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" ") ; e.w(prev) ; e.w(", ") ; e.w(et) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(irItoa(tupIdx)) ; e.w("\n")
+			prev = next
+			tupIdx++
+		}
+	}
+
+	// Map the select SSA value to the final tuple register.
+	e.allocTypes[s] = tupType
+	e.valName[s] = prev
+}
+
+func (e *irEmitter) emitMakeChan(m *SSAMakeChan) {
+	reg := e.regName(m)
+	ipt := e.intptrType()
+	elemType := "i8"
+	if ch, ok := SafeUnderlying(m.SSAType()).(*TCChan); ok && ch.Elem != nil {
+		et := e.llvmType(ch.Elem)
+		if et != "void" && et != "" {
+			elemType = et
+		}
+	}
+	e.nextReg++
+	elemSz := "%mc" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(elemSz) ; e.w(" = ptrtoint ptr getelementptr (")
+	e.w(elemType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+	bufSz := "0"
+	if m.Size != nil {
+		bufSz = e.sextToIpt(m.Size, e.operand(m.Size))
+	}
+	e.w("  ") ; e.w(reg) ; e.w(" = call ptr @runtime.chanMake(")
+	e.w(ipt) ; e.w(" ") ; e.w(elemSz) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(bufSz) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.chanMake", "ptr", ipt | ", " | ipt)
+	e.scopeTrackAlloc(reg)
+}

@@ -4,7 +4,7 @@ import (
 	"git.smesh.lol/moxie/pkg/token"
 )
 
-func (p *Parser) type_() Expr {
+func (p *Parser) type_() (e Expr) {
 	if trace {
 		defer p.trace("type_")()
 	}
@@ -19,7 +19,7 @@ func (p *Parser) type_() Expr {
 	return typ
 }
 
-func newIndirect(pos token.Pos, typ Expr) Expr {
+func newIndirect(pos token.Pos, typ Expr) (e Expr) {
 	oc := &Operation{}
 	oc.pos = pos
 	oc.Op = token.Mul
@@ -34,7 +34,7 @@ func newIndirect(pos token.Pos, typ Expr) Expr {
 //	TypeName = identifier | QualifiedIdent .
 //	TypeLit  = ArrayType | StructType | PointerType | FunctionType | InterfaceType |
 //		      SliceType | MapType | Channel_Type .
-func (p *Parser) typeOrNil() Expr {
+func (p *Parser) typeOrNil() (e Expr) {
 	if trace {
 		defer p.trace("typeOrNil")()
 	}
@@ -123,7 +123,7 @@ func (p *Parser) typeOrNil() Expr {
 	return nil
 }
 
-func (p *Parser) typeInstance(typ Expr) Expr {
+func (p *Parser) typeInstance(typ Expr) (e Expr) {
 	if trace {
 		defer p.trace("typeInstance")()
 	}
@@ -144,7 +144,7 @@ func (p *Parser) typeInstance(typ Expr) Expr {
 }
 
 // If context != "", type parameters are not permitted.
-func (p *Parser) funcType(context string) ([]*Field, *FuncType) {
+func (p *Parser) funcType(context string) (tparams []*Field, ft *FuncType) {
 	if trace {
 		defer p.trace("funcType")()
 	}
@@ -173,15 +173,15 @@ func (p *Parser) funcType(context string) ([]*Field, *FuncType) {
 }
 
 // "[" has already been consumed, and pos is its position.
-// If len != nil it is the already consumed array length.
-func (p *Parser) arrayType(pos token.Pos, len Expr) Expr {
+// If arrLen != nil it is the already consumed array length.
+func (p *Parser) arrayType(pos token.Pos, arrLen Expr) (e Expr) {
 	if trace {
 		defer p.trace("arrayType")()
 	}
 
-	if len == nil && !p.got(token.DotDotDot) {
+	if arrLen == nil && !p.got(token.DotDotDot) {
 		p.Xnest++
-		len = p.expr()
+		arrLen = p.expr()
 		p.Xnest--
 	}
 	if p.Tok == token.Comma {
@@ -192,22 +192,22 @@ func (p *Parser) arrayType(pos token.Pos, len Expr) Expr {
 		p.Next()
 	}
 	p.want(token.Rbrack)
-	t := &ArrayType{}
-	t.pos = pos
-	t.Len = len
-	t.Elem = p.type_()
-	return t
+	at := &ArrayType{}
+	at.pos = pos
+	at.Len = arrLen
+	at.Elem = p.type_()
+	return at
 }
 
 // "[" and "]" have already been consumed, and pos is the position of "[".
-func (p *Parser) sliceType(pos token.Pos) Expr {
+func (p *Parser) sliceType(pos token.Pos) (e Expr) {
 	tc := &SliceType{}
 	tc.pos = pos
 	tc.Elem = p.type_()
 	return tc
 }
 
-func (p *Parser) chanElem() Expr {
+func (p *Parser) chanElem() (e Expr) {
 	if trace {
 		defer p.trace("chanElem")()
 	}
@@ -321,9 +321,9 @@ func (p *Parser) fieldDecl(styp *StructType) {
 		name := p.name()
 		if p.Tok == token.Dot || p.Tok == token.Literal || p.Tok == token.Semi || p.Tok == token.Rbrace {
 			// embedded type
-			typ := p.qualifiedName(name)
-			tag := p.oliteral()
-			p.addField(styp, pos, nil, typ, tag)
+			embedTyp := p.qualifiedName(name)
+			embedTag := p.oliteral()
+			p.addField(styp, pos, nil, embedTyp, embedTag)
 			break
 		}
 
@@ -335,11 +335,11 @@ func (p *Parser) fieldDecl(styp *StructType) {
 		// type T[P1, P2, ...] or a field T of array/slice type [P]E or []E.
 		if len(names) == 1 && p.Tok == token.Lbrack {
 			typ = p.arrayOrTArgs()
-			if typ, ok := typ.(*IndexExpr); ok {
+			if idxTyp, ok := typ.(*IndexExpr); ok {
 				// embedded type T[P1, P2, ...]
-				typ.X = name // name == names[0]
-				tag := p.oliteral()
-				p.addField(styp, pos, nil, typ, tag)
+				idxTyp.X = name // name == names[0]
+				idxTag := p.oliteral()
+				p.addField(styp, pos, nil, idxTyp, idxTag)
 				break
 			}
 		} else {
@@ -349,8 +349,8 @@ func (p *Parser) fieldDecl(styp *StructType) {
 
 		tag := p.oliteral()
 
-		for _, name := range names {
-			p.addField(styp, name.Pos(), name, typ, tag)
+		for _, nm := range names {
+			p.addField(styp, nm.Pos(), nm, typ, tag)
 		}
 
 	case token.Star:
@@ -375,9 +375,9 @@ func (p *Parser) fieldDecl(styp *StructType) {
 		var typ Expr
 		if p.Tok == token.Star {
 			// (*T)
-			pos := p.pos()
+			starPos := p.pos()
 			p.Next()
-			typ = newIndirect(pos, p.qualifiedName(nil))
+			typ = newIndirect(starPos, p.qualifiedName(nil))
 		} else {
 			// (T)
 			typ = p.qualifiedName(nil)
@@ -392,7 +392,7 @@ func (p *Parser) fieldDecl(styp *StructType) {
 	}
 }
 
-func (p *Parser) arrayOrTArgs() Expr {
+func (p *Parser) arrayOrTArgs() (e Expr) {
 	if trace {
 		defer p.trace("arrayOrTArgs")()
 	}
@@ -409,20 +409,20 @@ func (p *Parser) arrayOrTArgs() Expr {
 	if !comma {
 		if elem := p.typeOrNil(); elem != nil {
 			// x [n]E
-			t := &ArrayType{}
-			t.pos = pos
-			t.Len = n
-			t.Elem = elem
-			return t
+			arrT := &ArrayType{}
+			arrT.pos = pos
+			arrT.Len = n
+			arrT.Elem = elem
+			return arrT
 		}
 	}
 
 	// x[n,], x[n1, n2], ...
-	t := &IndexExpr{}
-	t.pos = pos
-	// t.X will be filled in by caller
-	t.Index = n
-	return t
+	idxT := &IndexExpr{}
+	idxT.pos = pos
+	// idxT.X will be filled in by caller
+	idxT.Index = n
+	return idxT
 }
 
 func (p *Parser) oliteral() (b *BasicLit) {
@@ -469,15 +469,15 @@ func (p *Parser) methodDecl() (f *Field) {
 		// Treat as if [] were absent.
 		if p.Tok == token.Rbrack {
 			// name[]
-			pos := p.pos()
+			rbPos := p.pos()
 			p.Next()
 			if p.Tok == token.Lparen {
 				// name[](
-				p.errorAt(pos, "empty type parameter list")
+				p.errorAt(rbPos, "empty type parameter list")
 				f.Name = name
 				_, f.Type = p.funcType(context)
 			} else {
-				p.errorAt(pos, "empty type argument list")
+				p.errorAt(rbPos, "empty type argument list")
 				f.Type = name
 			}
 			break
@@ -560,28 +560,28 @@ func (p *Parser) embeddedElem(f *Field) (fv *Field) {
 }
 
 // EmbeddedTerm = [ "~" ] Type .
-func (p *Parser) embeddedTerm() Expr {
+func (p *Parser) embeddedTerm() (e Expr) {
 	if trace {
 		defer p.trace("embeddedTerm")()
 	}
 
 	if p.Tok == token.OperatorType && p.Op == token.Tilde {
-		t := &Operation{}
-		t.pos = p.pos()
-		t.Op = token.Tilde
+		op := &Operation{}
+		op.pos = p.pos()
+		op.Op = token.Tilde
 		p.Next()
-		t.X = p.type_()
-		return t
+		op.X = p.type_()
+		return op
 	}
 
-	t := p.typeOrNil()
-	if t == nil {
-		t = p.badExpr()
+	et := p.typeOrNil()
+	if et == nil {
+		et = p.badExpr()
 		p.syntaxError("expected ~ term or type")
 		p.advance(token.OperatorType, token.Semi, token.Rparen, token.Rbrack, token.Rbrace)
 	}
 
-	return t
+	return et
 }
 
 // ParameterDecl = [ IdentifierList ] [ "..." ] Type .
@@ -688,14 +688,14 @@ func (p *Parser) paramDeclOrNil(name *Name, follow token.Token) (f *Field) {
 // If name != nil, it is the first name after "(" or "[".
 // If typ != nil, name must be != nil, and (name, typ) is the first field in the list.
 // In the result list, either all fields have a name, or no field has a name.
-func (p *Parser) paramList(name *Name, typ Expr, close token.Token, requireNames, dddok bool) (list []*Field) {
+func (p *Parser) paramList(name *Name, typ Expr, closeTok token.Token, requireNames, dddok bool) (list []*Field) {
 	if trace {
 		defer p.trace("paramList")()
 	}
 
 	// p.list won't invoke its function argument if we're at the end of the
 	// parameter list. If we have a complete field, handle this case here.
-	if name != nil && typ != nil && p.Tok == close {
+	if name != nil && typ != nil && p.Tok == closeTok {
 		p.Next()
 		par := &Field{}
 		par.pos = name.pos
@@ -706,7 +706,7 @@ func (p *Parser) paramList(name *Name, typ Expr, close token.Token, requireNames
 
 	var named int32 // number of parameters that have an explicit name and type
 	var typed int32 // number of parameters that have an explicit type
-	end := p.list("parameter list", token.Comma, close, func() bool {
+	end := p.list("parameter list", token.Comma, closeTok, func() bool {
 		var par *Field
 		if typ != nil {
 			if debug && name == nil {
@@ -717,7 +717,7 @@ func (p *Parser) paramList(name *Name, typ Expr, close token.Token, requireNames
 			par.Name = name
 			par.Type = typ
 		} else {
-			par = p.paramDeclOrNil(name, close)
+			par = p.paramDeclOrNil(name, closeTok)
 		}
 		name = nil // 1st name was consumed if present
 		typ = nil  // 1st type was consumed if present
@@ -744,25 +744,25 @@ func (p *Parser) paramList(name *Name, typ Expr, close token.Token, requireNames
 	if named == 0 && !requireNames {
 		// all unnamed and we're not in a type parameter list => found names are named types
 		for _, par := range list {
-			if typ := par.Name; typ != nil {
-				par.Type = typ
+			if parTyp := par.Name; parTyp != nil {
+				par.Type = parTyp
 				par.Name = nil
 			}
 		}
 	} else if named != len(list) {
 		// some named or we're in a type parameter list => all must be named
 		var errPos token.Pos // left-most error position (or unknown)
-		var typ Expr   // current type (from right to left)
+		var curTyp Expr   // current type (from right to left)
 		for i := len(list) - 1; i >= 0; i-- {
 			par := list[i]
 			if par.Type != nil {
-				typ = par.Type
+				curTyp = par.Type
 				if par.Name == nil {
-					errPos = StartPos(typ)
+					errPos = StartPos(curTyp)
 					par.Name = NewName(errPos, "_")
 				}
-			} else if typ != nil {
-				par.Type = typ
+			} else if curTyp != nil {
+				par.Type = curTyp
 			} else {
 				// par.Type == nil && typ == nil => we only have a par.Name
 				errPos = par.Name.Pos()

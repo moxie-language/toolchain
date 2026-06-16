@@ -11,31 +11,31 @@ func (c *Checker) resolveTypeExpr(e syntax.Expr) (t Type) {
 	if e == nil {
 		return nil
 	}
-	switch e := e.(type) {
+	switch ev := e.(type) {
 	case *syntax.Name:
-		return c.resolveTypeName(e)
+		return c.resolveTypeName(ev)
 	case *syntax.SelectorExpr:
-		return c.resolveQualifiedTypeName(e)
+		return c.resolveQualifiedTypeName(ev)
 	case *syntax.Operation:
 		// *T (pointer)
-		if e.Y == nil && e.Op == token.Mul {
-			base := c.resolveTypeExpr(e.X)
+		if ev.Y == nil && ev.Op == token.Mul {
+			base := c.resolveTypeExpr(ev.X)
 			if base == nil {
 				return nil
 			}
 			return NewPointer(base)
 		}
 		// ~T (approximation element in type constraints) - treat as T for B1
-		if e.Y == nil && e.Op == token.Tilde {
-			return c.resolveTypeExpr(e.X)
+		if ev.Y == nil && ev.Op == token.Tilde {
+			return c.resolveTypeExpr(ev.X)
 		}
 		// T | U (union element in type constraints) - return first operand for B1
-		if e.Y != nil && e.Op == token.Or {
-			c.resolveTypeExpr(e.Y) // resolve both sides to catch undefined errors
-			return c.resolveTypeExpr(e.X)
+		if ev.Y != nil && ev.Op == token.Or {
+			c.resolveTypeExpr(ev.Y) // resolve both sides to catch undefined errors
+			return c.resolveTypeExpr(ev.X)
 		}
 	case *syntax.SliceType:
-		elem := c.resolveTypeExpr(e.Elem)
+		elem := c.resolveTypeExpr(ev.Elem)
 		if elem == nil {
 			return nil
 		}
@@ -44,29 +44,29 @@ func (c *Checker) resolveTypeExpr(e syntax.Expr) (t Type) {
 		}
 		return NewSlice(elem)
 	case *syntax.ArrayType:
-		elem := c.resolveTypeExpr(e.Elem)
+		elem := c.resolveTypeExpr(ev.Elem)
 		if elem == nil {
 			return nil
 		}
-		if e.Len == nil {
+		if ev.Len == nil {
 			return NewArray(elem, -1)
 		}
-		n := c.evalArrayLen(e.Len)
+		n := c.evalArrayLen(ev.Len)
 		return NewArray(elem, n)
 	case *syntax.MapType:
-		key := c.resolveTypeExpr(e.Key)
-		val := c.resolveTypeExpr(e.Value)
+		key := c.resolveTypeExpr(ev.Key)
+		val := c.resolveTypeExpr(ev.Value)
 		if key == nil || val == nil {
 			return nil
 		}
 		return NewTCMap(key, val)
 	case *syntax.ChanType:
-		elem := c.resolveTypeExpr(e.Elem)
+		elem := c.resolveTypeExpr(ev.Elem)
 		if elem == nil {
 			return nil
 		}
 		var dir TCChanDir
-		switch e.Dir {
+		switch ev.Dir {
 		case syntax.SendOnly:
 			dir = TCSendOnly
 		case syntax.RecvOnly:
@@ -76,16 +76,16 @@ func (c *Checker) resolveTypeExpr(e syntax.Expr) (t Type) {
 		}
 		return NewTCChan(dir, elem)
 	case *syntax.StructType:
-		return c.resolveStructType(e)
+		return c.resolveStructType(ev)
 	case *syntax.InterfaceType:
-		return c.resolveInterfaceType(e)
+		return c.resolveInterfaceType(ev)
 	case *syntax.FuncType:
-		return c.resolveFuncType(e, nil)
+		return c.resolveFuncType(ev, nil)
 	case *syntax.IndexExpr:
 		// generic instantiation T[A, B, ...]
-		return c.resolveGenericInst(e)
+		return c.resolveGenericInst(ev)
 	case *syntax.DotsType:
-		elem := c.resolveTypeExpr(e.Elem)
+		elem := c.resolveTypeExpr(ev.Elem)
 		if elem == nil {
 			return nil
 		}
@@ -127,8 +127,8 @@ func (c *Checker) resolveQualifiedTypeName(e *syntax.SelectorExpr) (t Type) {
 		c.errorf(e.Pos(), "undefined: " | pkgName.Value)
 		return nil
 	}
-	pkgObj, ok := obj.(*PkgName)
-	if !ok {
+	pkgObj, ok2 := obj.(*PkgName)
+	if !ok2 {
 		c.errorf(e.Pos(), pkgName.Value | " is not a package")
 		return nil
 	}
@@ -141,7 +141,7 @@ func (c *Checker) resolveQualifiedTypeName(e *syntax.SelectorExpr) (t Type) {
 		c.errorf(e.Sel.Pos(), "undefined: " | pkgName.Value | "." | e.Sel.Value)
 		return nil
 	}
-	if tn, ok := typeObj.(*TypeName); ok {
+	if tn, ok3 := typeObj.(*TypeName); ok3 {
 		return tn.Typ
 	}
 	c.errorf(e.Sel.Pos(), pkgName.Value | "." | e.Sel.Value | " is not a type")
@@ -252,15 +252,15 @@ func TypeBaseName(t Type) (s string) {
 	if t == nil {
 		return ""
 	}
-	switch t := t.(type) {
+	switch tt := t.(type) {
 	case *Named:
-		if t.Obj != nil {
-			return t.Obj.Name
+		if tt.Obj != nil {
+			return tt.Obj.Name
 		}
 	case *Pointer:
-		return TypeBaseName(t.Base)
+		return TypeBaseName(tt.Base)
 	case *Basic:
-		return t.Name
+		return tt.Name
 	}
 	return ""
 }

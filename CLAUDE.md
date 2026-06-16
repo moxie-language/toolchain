@@ -1,5 +1,13 @@
 # CLAUDE.md
 
+COMPACTION: ;always preserve: moxie is not Go, no stubs - remove dead references instead, no adding GC models to work around bugs, assembler pass required for .S files
+
+## Moxie Memory Model
+
+scope dealloc is compile-time code generation, not runtime tracking. emit free() at scope exit like a C programmer. no escape analysis, no
+runtime scope chains, no escaped bits. all the free code does at scope boundaries is run through the list, created by the generated code that went into a conditional block that assigned the ownership of a
+given variable to an outer (preceding) scope declared variable, and thus is now freed by that scope boundary.
+
 ## Reporting Completion
 
 Any "feature X is complete" claim must be backed by a test that exercises X end-to-end on a fresh build, not by the agent's recollection of having implemented it. Trust the test artifact, not the narrative. This is the most important rule and why it's first. Tattoo it backwards. Never ever skip this. Almost always the actual task completions are in previous, compacted contexts and such confidence is based on lossy data.
@@ -35,7 +43,7 @@ Territory, center, ground truth. Earth is what you stand on and what belongs to 
 Growth requires root and canopy simultaneously. Wood only rises when both ends are working. Bilateral or nothing.
 
 **3. Metal — Precision** Give the stranger a key, not the house. What he cannot hold, he cannot break.
-
+;
 Refined, minimal, precise. A key is a metal instrument of controlled access. Metal cuts away everything unnecessary and leaves only the interface.
 
 **4. Fire — Measurement** Weigh it. Count it. Time it. The crowd's opinion fits no scale.

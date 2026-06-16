@@ -12,11 +12,14 @@ func Identical(T, U Type) (ok bool) {
 	}
 	switch t := T.(type) {
 	case *Basic:
-		u, ok := U.(*Basic)
+		var u *Basic
+		u, ok = U.(*Basic)
 		if !ok {
 			if t.Info&IsString != 0 {
-				if sl, ok2 := U.(*Slice); ok2 {
-					if eb, ok3 := sl.Elem.(*Basic); ok3 && eb.Kind == Uint8 {
+				sl, slOk := U.(*Slice)
+				if slOk {
+					eb, ebOk := sl.Elem.(*Basic)
+					if ebOk && eb.Kind == Uint8 {
 						return true
 					}
 				}
@@ -33,17 +36,22 @@ func Identical(T, U Type) (ok bool) {
 		}
 		return false
 	case *Pointer:
-		u, ok := U.(*Pointer)
+		var u *Pointer
+		u, ok = U.(*Pointer)
 		return ok && Identical(t.Base, u.Base)
 	case *Array:
-		u, ok := U.(*Array)
+		var u *Array
+		u, ok = U.(*Array)
 		return ok && t.Len == u.Len && Identical(t.Elem, u.Elem)
 	case *Slice:
-		u, ok := U.(*Slice)
+		var u *Slice
+		u, ok = U.(*Slice)
 		if !ok {
 			// []byte = string in Moxie (including untyped string)
-			if b, ok2 := U.(*Basic); ok2 && b.Info&IsString != 0 {
-				if eb, ok3 := t.Elem.(*Basic); ok3 && eb.Kind == Uint8 {
+			b, bOk := U.(*Basic)
+			if bOk && b.Info&IsString != 0 {
+				eb, ebOk := t.Elem.(*Basic)
+				if ebOk && eb.Kind == Uint8 {
 					return true
 				}
 			}
@@ -51,13 +59,16 @@ func Identical(T, U Type) (ok bool) {
 		}
 		return Identical(t.Elem, u.Elem)
 	case *TCMap:
-		u, ok := U.(*TCMap)
+		var u *TCMap
+		u, ok = U.(*TCMap)
 		return ok && Identical(t.Key, u.Key) && Identical(t.Elem, u.Elem)
 	case *TCChan:
-		u, ok := U.(*TCChan)
+		var u *TCChan
+		u, ok = U.(*TCChan)
 		return ok && t.Dir == u.Dir && Identical(t.Elem, u.Elem)
 	case *TCStruct:
-		u, ok := U.(*TCStruct)
+		var u *TCStruct
+		u, ok = U.(*TCStruct)
 		if !ok || t.NumFields() != u.NumFields() {
 			return false
 		}
@@ -73,7 +84,8 @@ func Identical(T, U Type) (ok bool) {
 		}
 		return true
 	case *TCInterface:
-		u, ok := U.(*TCInterface)
+		var u *TCInterface
+		u, ok = U.(*TCInterface)
 		if !ok {
 			return false
 		}
@@ -88,7 +100,8 @@ func Identical(T, U Type) (ok bool) {
 		}
 		return true
 	case *Signature:
-		u, ok := U.(*Signature)
+		var u *Signature
+		u, ok = U.(*Signature)
 		if !ok {
 			return false
 		}
@@ -100,13 +113,16 @@ func Identical(T, U Type) (ok bool) {
 		}
 		return true
 	case *Named:
-		u, ok := U.(*Named)
+		var u *Named
+		u, ok = U.(*Named)
 		return ok && t.Obj == u.Obj
 	case *TypeParam:
-		u, ok := U.(*TypeParam)
+		var u *TypeParam
+		u, ok = U.(*TypeParam)
 		return ok && t.Id == u.Id
 	case *Tuple:
-		u, ok := U.(*Tuple)
+		var u *Tuple
+		u, ok = U.(*Tuple)
 		return ok && identicalTuples(t, u)
 	}
 	return false
@@ -152,7 +168,8 @@ func Assignable(V, T Type) (ok bool) {
 		return true
 	}
 	// Untyped constants are assignable to any numeric/bool/string type they fit in.
-	if bv, ok := V.(*Basic); ok && bv.Info&IsUntyped != 0 {
+	bv, bvOk := V.(*Basic)
+	if bvOk && bv.Info&IsUntyped != 0 {
 		return untypedAssignable(bv, T)
 	}
 	// nil is assignable to pointer, slice, map, chan, func, interface.
@@ -169,12 +186,15 @@ func Assignable(V, T Type) (ok bool) {
 		}
 	}
 	// T is an interface and V implements it.
-	if iface, ok := SafeUnderlying(T).(*TCInterface); ok {
+	iface, ifOk := SafeUnderlying(T).(*TCInterface)
+	if ifOk {
 		return Implements(V, iface)
 	}
 	// Directional channel: bidirectional chan is assignable to directed chan.
-	if tc, ok := T.(*TCChan); ok {
-		if vc, ok2 := V.(*TCChan); ok2 {
+	tc, tcOk := T.(*TCChan)
+	if tcOk {
+		vc, vcOk := V.(*TCChan)
+		if vcOk {
 			if Identical(tc.Elem, vc.Elem) {
 				return vc.Dir == TCSendRecv || vc.Dir == tc.Dir
 			}
@@ -192,7 +212,8 @@ func isNilable(T Type) (ok bool) {
 }
 
 func untypedAssignable(V *Basic, T Type) (ok bool) {
-	b, ok := SafeUnderlying(T).(*Basic)
+	var b *Basic
+	b, ok = SafeUnderlying(T).(*Basic)
 	if !ok {
 		return false
 	}
@@ -211,11 +232,14 @@ func untypedAssignable(V *Basic, T Type) (ok bool) {
 
 // isTextType returns true if T is string or []byte under Moxie's unified model.
 func isTextType(T Type) (ok bool) {
-	if b, ok := SafeUnderlying(T).(*Basic); ok && b.Info&IsString != 0 {
+	b, bOk := SafeUnderlying(T).(*Basic)
+	if bOk && b.Info&IsString != 0 {
 		return true
 	}
-	if sl, ok := SafeUnderlying(T).(*Slice); ok {
-		if b, ok2 := SafeUnderlying(sl.Elem).(*Basic); ok2 && b.Kind == Uint8 {
+	sl, slOk := SafeUnderlying(T).(*Slice)
+	if slOk {
+		eb, ebOk := SafeUnderlying(sl.Elem).(*Basic)
+		if ebOk && eb.Kind == Uint8 {
 			return true
 		}
 	}
@@ -230,7 +254,8 @@ func Implements(T Type, I *TCInterface) (ok bool) {
 	// Collect T's method set.
 	ms := methodSet(T)
 	for _, im := range I.AllMethods {
-		m, ok := ms[im.Name]
+		var m *TCFunc
+		m, ok = ms[im.Name]
 		if !ok {
 			return false
 		}
