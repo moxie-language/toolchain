@@ -389,7 +389,7 @@ func ScanGenericDecls(src []byte, name string) {
 		return
 	}
 	errh := func(err error) {}
-	file, _ := syntax.ParseBytesArena(token.NewFileBase(name|".mx"), src, errh, nil, 0, TypesArena)
+	file, _ := syntax.ParseBytes(token.NewFileBase(name|".mx"), src, errh, nil, 0)
 	if file == nil {
 		return
 	}
@@ -578,9 +578,9 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	arena := runtime.ArenaNew(uintptr(len(src)) * 20)
 	SetTypesArena(arena)
 	pkg, file := typeCheckPkg(src, name, arena)
-	ScanGenericDecls(src, name)
-	// Register exports on the HEAP (must survive arena).
+	// Exports and generics must survive the arena - allocate on heap.
 	SetTypesArena(nil)
+	ScanGenericDecls(src, name)
 	if pkg != nil && file != nil {
 		registerCompiledExports(pkg)
 	}
@@ -617,35 +617,16 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	return ir
 }
 
+// registerCompiledExports serializes the package's exports to mxh format
+// then deserializes to create fresh heap-allocated objects. This is the
+// arena boundary crossing: arena-allocated type objects are serialized,
+// the arena can then be freed, and ImportRegistry holds heap copies.
 func registerCompiledExports(pkg *TCPackage) {
 	EnsureImportRegistry()
-	path := pkg.Path
 	DirectImportPaths(pkg)
-	regPkg := NewTCPackage(path, pkg.Name)
-	names := pkg.Scope.Names()
-	for _, name := range names {
-		if len(name) == 0 {
-			continue
-		}
-		obj := pkg.Scope.Lookup(name)
-		if obj == nil {
-			continue
-		}
-		exported := name[0] >= 'A' && name[0] <= 'Z'
-		if !exported {
-			if tn, ok := obj.(*TypeName); ok {
-				if named, ok2 := tn.Typ.(*Named); ok2 && named.NumMethods() > 0 {
-					// include unexported types with methods for interface dispatch
-				} else {
-					continue
-				}
-			} else {
-				continue
-			}
-		}
-		regPkg.Scope.Insert(obj)
-	}
-	ImportRegistry[path] = regPkg
+	mxhData := generateMxh(pkg)
+	loadMxhData([]byte(mxhData))
+	free(mxhData)
 }
 
 func tcInferTypeFromExpr(e syntax.Expr, scope *Scope) (t Type) {
