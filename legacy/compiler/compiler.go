@@ -2595,18 +2595,25 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			}
 
 			sliceLen := b.CreateSub(high, low, "slice.len")
-			slicePtr := b.CreateInBoundsGEP(b.getLLVMType(arrayType), value, indices, "slice.ptr")
-			sliceCap := b.CreateSub(max, low, "slice.cap")
+			srcPtr := b.CreateInBoundsGEP(b.getLLVMType(arrayType), value, indices, "slice.ptr")
 
-			// Moxie: use getLLVMType for correct named type on []byte.
+			// Moxie: subslice copies to break aliasing.
+			ptrElemType := b.getLLVMType(arrayType.Elem())
+			elemSize := b.targetData.TypeAllocSize(ptrElemType)
+			elemSizeVal := llvm.ConstInt(b.uintptrType, elemSize, false)
+			copySize := b.CreateMul(sliceLen, elemSizeVal, "slice.copy.size")
+			layoutValue := b.createObjectLayout(ptrElemType, expr.Pos())
+			newPtr := b.createRuntimeCall("alloc", []llvm.Value{copySize, layoutValue}, "slice.copy.buf")
+			b.createRuntimeCall("memcpy", []llvm.Value{newPtr, srcPtr, copySize}, "")
+
 			slice := llvm.Undef(b.getLLVMType(expr.Type()))
-			slice = b.CreateInsertValue(slice, slicePtr, 0, "")
+			slice = b.CreateInsertValue(slice, newPtr, 0, "")
 			slice = b.CreateInsertValue(slice, sliceLen, 1, "")
-			slice = b.CreateInsertValue(slice, sliceCap, 2, "")
+			slice = b.CreateInsertValue(slice, sliceLen, 2, "") // cap = len for copies
 			return slice, nil
 
 		case *types.Slice:
-			// slice a slice
+			// slice a slice - Moxie: subslice always copies
 			oldPtr := b.CreateExtractValue(value, 0, "")
 			oldLen := b.CreateExtractValue(value, 1, "")
 			oldCap := b.CreateExtractValue(value, 2, "")
@@ -2619,8 +2626,6 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 
 			b.createSliceBoundsCheck(oldCap, low, high, max, lowType, highType, maxType)
 
-			// Truncate ints bigger than uintptr. This is after the bounds
-			// check so it's safe.
 			if b.targetData.TypeAllocSize(low.Type()) > b.targetData.TypeAllocSize(b.uintptrType) {
 				low = b.CreateTrunc(low, b.uintptrType, "")
 			}
@@ -2632,14 +2637,20 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			}
 
 			ptrElemType := b.getLLVMType(typ.Elem())
-			newPtr := b.CreateInBoundsGEP(ptrElemType, oldPtr, []llvm.Value{low}, "")
+			srcPtr := b.CreateInBoundsGEP(ptrElemType, oldPtr, []llvm.Value{low}, "")
 			newLen := b.CreateSub(high, low, "")
-			newCap := b.CreateSub(max, low, "")
-			// Moxie: use getLLVMType to get the correct type (named for []byte).
+			// Moxie: subslice copies to break aliasing.
+			// Allocate new backing array, memcpy from source.
+			elemSize := b.targetData.TypeAllocSize(ptrElemType)
+			elemSizeVal := llvm.ConstInt(b.uintptrType, elemSize, false)
+			copySize := b.CreateMul(newLen, elemSizeVal, "slice.copy.size")
+			layoutValue := b.createObjectLayout(ptrElemType, expr.Pos())
+			newPtr := b.createRuntimeCall("alloc", []llvm.Value{copySize, layoutValue}, "slice.copy.buf")
+			b.createRuntimeCall("memcpy", []llvm.Value{newPtr, srcPtr, copySize}, "")
 			slice := llvm.Undef(b.getLLVMType(typ))
 			slice = b.CreateInsertValue(slice, newPtr, 0, "")
 			slice = b.CreateInsertValue(slice, newLen, 1, "")
-			slice = b.CreateInsertValue(slice, newCap, 2, "")
+			slice = b.CreateInsertValue(slice, newLen, 2, "") // cap = len for copies
 			return slice, nil
 
 		case *types.Basic:
@@ -2669,12 +2680,16 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 				high = b.CreateTrunc(high, b.uintptrType, "")
 			}
 
-			newPtr := b.CreateInBoundsGEP(b.ctx.Int8Type(), oldPtr, []llvm.Value{low}, "")
+			srcPtr := b.CreateInBoundsGEP(b.ctx.Int8Type(), oldPtr, []llvm.Value{low}, "")
 			newLen := b.CreateSub(high, low, "")
+			// Moxie: subslice copies to break aliasing.
+			layoutValue := llvm.ConstNull(b.dataPtrType)
+			newPtr := b.createRuntimeCall("alloc", []llvm.Value{newLen, layoutValue}, "str.copy.buf")
+			b.createRuntimeCall("memcpy", []llvm.Value{newPtr, srcPtr, newLen}, "")
 			str := llvm.Undef(b.getLLVMRuntimeType("_string"))
 			str = b.CreateInsertValue(str, newPtr, 0, "")
 			str = b.CreateInsertValue(str, newLen, 1, "")
-			str = b.CreateInsertValue(str, newLen, 2, "") // cap = len for string slices
+			str = b.CreateInsertValue(str, newLen, 2, "") // cap = len for copies
 			return str, nil
 
 		default:

@@ -552,6 +552,16 @@ func TypeCheckOnly(src []byte, name string) {
 }
 
 func releaseFileDeep(f *syntax.File) {
+	if f == nil {
+		return
+	}
+	// Free the declaration list and its contents.
+	for i := range f.DeclList {
+		f.DeclList[i] = nil
+	}
+	free(f.DeclList)
+	f.DeclList = nil
+	free(f)
 }
 
 func CompileToIR(src []byte, name string, triple string) (s string) {
@@ -571,8 +581,16 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	}
 	prog := NewSSAProgram()
 	ssaPkg := prog.CreatePackage(pkg, []*syntax.File{file}, nil)
+	// Parse tree consumed by SSA builder - free it now.
+	releaseFileDeep(file)
+	file = nil
+
 	emitter := newIREmitter(ssaPkg, triple)
 	ir := emitter.emit()
+	// SSA graph consumed by IR emitter - free it now.
+	emitter.releaseAfterEmit()
+	ssaPkg.release()
+	prog.release()
 
 	if len(cctx.compileErrors) > 0 {
 		out := "; compile error\n"
@@ -580,13 +598,9 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 			out = out | "; " | ce | "\n"
 		}
 		free(ir)
-		emitter.releaseAfterEmit()
-		ssaPkg.release()
-		prog.release()
 		if pkg != nil {
 			pkg.Release()
 		}
-		releaseFileDeep(file)
 		releasePerPkgState()
 		return out
 	}
@@ -594,14 +608,10 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	if len(ir) > 0 && ir[0] != ';' {
 		registerCompiledExports(pkg)
 	}
-
-	emitter.releaseAfterEmit()
-	ssaPkg.release()
-	prog.release()
+	// Type package consumed by export registration - free it now.
 	if pkg != nil {
 		pkg.Release()
 	}
-	releaseFileDeep(file)
 	releasePerPkgState()
 	return ir
 }
