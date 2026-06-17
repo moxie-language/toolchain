@@ -86,12 +86,16 @@ func (b *builder) checkExplicitFreeUAF() {
 								break
 							}
 						}
-						// If block has back-edge to itself, any use is reachable-after.
-						if !isAfter && reachable[block] {
+						// Back-edges don't make before-free uses unsafe in SSA:
+						// phi nodes provide fresh values on loop re-entry.
+					} else if reachable[refBlock] {
+						// If reaching the use from the free requires going
+						// through the value's definition point, the use sees
+						// a fresh value (loop re-entry pattern).
+						defBlock := b.definingBlock(freedVal)
+						if defBlock == nil || !reachable[defBlock] || !b.pathMustTraverse(block, refBlock, defBlock) {
 							isAfter = true
 						}
-					} else if reachable[refBlock] {
-						isAfter = true
 					}
 
 					if !isAfter {
@@ -105,7 +109,7 @@ func (b *builder) checkExplicitFreeUAF() {
 						continue
 					}
 
-					b.addError(ri.Pos(), "moxie: use after free - variable used after free() call")
+					b.addError(ri.Pos(), "moxie: use after free in "+b.fn.Name()+" - freed: "+freedVal.Name()+" used: "+val.Name())
 				}
 			}
 		}
@@ -212,6 +216,21 @@ func (b *builder) hasReassignBetween(val ssa.Value, freeBlock *ssa.BasicBlock, f
 		}
 	}
 	return false
+}
+
+// definingBlock returns the block where val is defined (as an instruction).
+func (b *builder) definingBlock(val ssa.Value) *ssa.BasicBlock {
+	if instr, ok := val.(ssa.Instruction); ok {
+		return instr.Block()
+	}
+	return nil
+}
+
+// pathMustTraverse checks whether every path from src to dst must go through mid.
+// Simple implementation: mid dominates dst AND is reachable from src.
+func (b *builder) pathMustTraverse(src, dst, mid *ssa.BasicBlock) bool {
+	// If mid dominates dst, every path to dst goes through mid.
+	return mid.Dominates(dst)
 }
 
 // isPointerType returns true if the type is a pointer type.

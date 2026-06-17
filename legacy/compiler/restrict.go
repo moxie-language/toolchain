@@ -204,6 +204,19 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 			}
 		}
 
+	case *ssa.MakeClosure:
+		// Moxie closures cannot capture variables from enclosing scopes.
+		// All inputs must be explicit parameters. Package-level globals
+		// are accessed directly (not via FreeVars), so they're fine.
+		if len(v.Bindings) > 0 {
+			fn := v.Fn.(*ssa.Function)
+			var names []string
+			for _, fv := range fn.FreeVars {
+				names = append(names, fv.Name())
+			}
+			b.addError(v.Pos(), "moxie: closure captures outer variable(s) ["+strings.Join(names, ", ")+"]; pass as explicit parameter(s)")
+		}
+
 	// Note: new(T) and make() are caught by AST check (restrictedBuiltins),
 		// not SSA. Restricted types (uintptr, complex) are also AST-checked.
 	}

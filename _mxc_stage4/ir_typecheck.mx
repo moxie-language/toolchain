@@ -67,8 +67,8 @@ func typeCheckPkg(src []byte, name string) (pkg *TCPackage, file *syntax.File) {
 	errh := func(err error) {
 		cctx.parseErrors = append(cctx.parseErrors, err.Error())
 	}
-	cctx.tcPkgSrc = src
-	cctx.compileExportMap = scanExportPragmas(src)
+	cctx.tcPkgSrc = []byte{:len(src)}; copy(cctx.tcPkgSrc, src)
+	cctx.compileExportMap = scanExportPragmas(cctx.tcPkgSrc)
 	file, _ := syntax.ParseBytes(token.NewFileBase(name|".mx"), src, errh, nil, 0)
 	if file == nil {
 		for ei := int32(0); ei < int32(len(cctx.parseErrors)) && ei < 5; ei++ {
@@ -453,12 +453,6 @@ func ScanGenericDecls(src []byte, name string) {
 	// this, method calls on package types inside monomorphized bodies
 	// silently resolve to nothing.
 	regPkg := ImportRegistry[name]
-	regLookup := func(n string) (o Object) {
-		if regPkg == nil {
-			return nil
-		}
-		return regPkg.Scope.Lookup(n)
-	}
 	for _, d := range file.DeclList {
 		switch dd := d.(type) {
 		case *syntax.FuncDecl:
@@ -477,7 +471,7 @@ func ScanGenericDecls(src []byte, name string) {
 			}
 			if dd.Recv == nil && dd.Name != nil {
 				if scope.Lookup(dd.Name.Value) == nil {
-					if ro := regLookup(dd.Name.Value); ro != nil {
+					if ro := regScopeLookup(regPkg,dd.Name.Value); ro != nil {
 						scope.Insert(ro)
 					} else {
 						scope.Insert(NewTCFunc(thePkg, dd.Name.Value, nil))
@@ -487,7 +481,7 @@ func ScanGenericDecls(src []byte, name string) {
 		case *syntax.TypeDecl:
 			existing := scope.Lookup(dd.Name.Value)
 			if existing == nil {
-				if ro := regLookup(dd.Name.Value); ro != nil {
+				if ro := regScopeLookup(regPkg,dd.Name.Value); ro != nil {
 					scope.Insert(ro)
 					continue
 				}
@@ -513,7 +507,7 @@ func ScanGenericDecls(src []byte, name string) {
 		case *syntax.ConstDecl:
 			for _, cn := range dd.NameList {
 				if scope.Lookup(cn.Value) == nil {
-					if ro := regLookup(cn.Value); ro != nil {
+					if ro := regScopeLookup(regPkg,cn.Value); ro != nil {
 						scope.Insert(ro)
 					} else {
 						scope.Insert(NewTCConst(thePkg, cn.Value, nil, nil))
@@ -523,7 +517,7 @@ func ScanGenericDecls(src []byte, name string) {
 		case *syntax.VarDecl:
 			for _, vn := range dd.NameList {
 				if scope.Lookup(vn.Value) == nil {
-					if ro := regLookup(vn.Value); ro != nil {
+					if ro := regScopeLookup(regPkg,vn.Value); ro != nil {
 						scope.Insert(ro)
 					} else {
 						scope.Insert(NewTCVar(thePkg, vn.Value, nil))
@@ -536,6 +530,13 @@ func ScanGenericDecls(src []byte, name string) {
 		cctx.genericPkgScopes = map[string]*Scope{}
 	}
 	cctx.genericPkgScopes[name] = scope
+}
+
+func regScopeLookup(regPkg *TCPackage, n string) (o Object) {
+	if regPkg == nil || regPkg.Scope == nil {
+		return nil
+	}
+	return regPkg.Scope.Lookup(n)
 }
 
 func TypeCheckOnly(src []byte, name string) {

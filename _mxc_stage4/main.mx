@@ -121,6 +121,15 @@ func fatal(msg string) {
 	os.Exit(1)
 }
 
+func clangCompileToObj(clang, triple, bcFile string) (s string) {
+	oFile := bcFile | ".o"
+	rc := run([]string{clang, "--target=" | triple, "-c", bcFile, "-o", oFile})
+	if rc != 0 {
+		fatal("clang -c failed for " | bcFile)
+	}
+	return oFile
+}
+
 func getenv(name string) (s string) {
 	buf := []byte{:4096}
 	n := cGetenv(unsafe.Pointer(unsafe.SliceData([]byte(name))), int32(len(name)), unsafe.Pointer(unsafe.SliceData(buf)), int32(len(buf)))
@@ -1020,25 +1029,52 @@ func extractPkgName(data []byte) (s string) {
 
 func extractImports(data []byte) (ss []string) {
 	var imports []string
-	lines := mxutil.SplitLines(string(data))
-	inBlock := false
-	for _, line := range lines {
-		line = mxutil.TrimSpace(line)
+	off := int32(0)
+	for off < int32(len(data)) {
+		ls := off
+		for off < int32(len(data)) && data[off] != '\n' {
+			off++
+		}
+		le := off
+		if off < int32(len(data)) {
+			off++
+		}
+		// Trim
+		for ls < le && (data[ls] == ' ' || data[ls] == '\t') {
+			ls++
+		}
+		for le > ls && (data[le-1] == ' ' || data[le-1] == '\t' || data[le-1] == '\r') {
+			le--
+		}
+		line := string(data[ls:le])
 		if line == "import (" {
-			inBlock = true
-			continue
-		}
-		if inBlock && line == ")" {
-			inBlock = false
-			continue
-		}
-		if inBlock {
-			imp := mxutil.ExtractQuoted(line)
-			if imp != "" {
-				imports = appendUniq(imports, imp)
+			// Scan block
+			for off < int32(len(data)) {
+				bls := off
+				for off < int32(len(data)) && data[off] != '\n' {
+					off++
+				}
+				ble := off
+				if off < int32(len(data)) {
+					off++
+				}
+				for bls < ble && (data[bls] == ' ' || data[bls] == '\t') {
+					bls++
+				}
+				for ble > bls && (data[ble-1] == ' ' || data[ble-1] == '\t' || data[ble-1] == '\r') {
+					ble--
+				}
+				bt := string(data[bls:ble])
+				if bt == ")" {
+					break
+				}
+				imp := mxutil.ExtractQuoted(bt)
+				if imp != "" {
+					imports = appendUniq(imports, imp)
+				}
 			}
+			continue
 		}
-		// single-line import, plain or aliased: import "p" / import x "p"
 		if mxutil.HasPrefix(line, "import ") {
 			imp := mxutil.ExtractQuoted(line[7:])
 			if imp != "" {
@@ -1070,13 +1106,104 @@ func concatLineToFile(concatLine int32) (file string, srcLine int32) {
 	return sp.file, sp.srcLine + (concatLine - sp.outStart)
 }
 
+// scanFileRegions scans file bytes to find the body start offset and
+// extract import specs. No SplitLines, no per-line copies. Returns
+// bodyStart (byte offset of first non-package/import line) and the
+// source line number of that offset (1-based).
+func scanFileRegions(data []byte, imports map[string]bool) (bodyStart int32, bodyLine int32, fimps []string) {
+	off := int32(0)
+	lineNum := int32(1)
+	bodyStart = -1
+	for off < int32(len(data)) {
+		// Find line extent
+		lineStart := off
+		for off < int32(len(data)) && data[off] != '\n' {
+			off++
+		}
+		lineEnd := off
+		if off < int32(len(data)) {
+			off++ // skip \n
+		}
+		// Trim whitespace for classification
+		ls := lineStart
+		for ls < lineEnd && (data[ls] == ' ' || data[ls] == '\t') {
+			ls++
+		}
+		le := lineEnd
+		for le > ls && (data[le-1] == ' ' || data[le-1] == '\t' || data[le-1] == '\r') {
+			le--
+		}
+		trimmed := data[ls:le]
+		if len(trimmed) >= 8 && string(trimmed[:8]) == "package " {
+			lineNum++
+			continue
+		}
+		if string(trimmed) == "import (" {
+			lineNum++
+			// Scan import block
+			for off < int32(len(data)) {
+				bls := off
+				for off < int32(len(data)) && data[off] != '\n' {
+					off++
+				}
+				ble := off
+				if off < int32(len(data)) {
+					off++
+				}
+				// Trim
+				for bls < ble && (data[bls] == ' ' || data[bls] == '\t') {
+					bls++
+				}
+				for ble > bls && (data[ble-1] == ' ' || data[ble-1] == '\t' || data[ble-1] == '\r') {
+					ble--
+				}
+				bt := data[bls:ble]
+				lineNum++
+				if string(bt) == ")" {
+					break
+				}
+				if len(bt) > 0 {
+					spec := string(bt)
+					imports[spec] = true
+					fimps = append(fimps, spec)
+				}
+			}
+			continue
+		}
+		if len(trimmed) >= 7 && string(trimmed[:7]) == "import " && (len(trimmed) < 8 || trimmed[7] != '(') {
+			spec := string(trimmed[7:])
+			imports[spec] = true
+			fimps = append(fimps, spec)
+			lineNum++
+			continue
+		}
+		// First body line
+		if bodyStart < 0 {
+			bodyStart = lineStart
+			bodyLine = lineNum
+		}
+		lineNum++
+	}
+	if bodyStart < 0 {
+		bodyStart = int32(len(data))
+		bodyLine = lineNum
+	}
+	return bodyStart, bodyLine, fimps
+}
+
 func concatSources(dir string, files []string) (buf []byte) {
 	imports := map[string]bool{}
-	var bodies [][]byte
-	var bodyFiles []string
-	var bodyStartLines []int32
-	var bodyImports [][]string
 	pkgName := ""
+	// First pass: scan each file for imports and body boundaries.
+	// Store body as a byte slice reference into the file data.
+	type fileBody struct {
+		name      string
+		data      []byte // full file data (freed after copy into output)
+		bodyStart int32
+		bodyLine  int32
+		fimps     []string
+	}
+	var fb []fileBody
 	for _, f := range files {
 		data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, f))
 		if !ok {
@@ -1085,49 +1212,16 @@ func concatSources(dir string, files []string) (buf []byte) {
 		if pkgName == "" {
 			pkgName = extractPkgName(data)
 		}
-		lines := mxutil.SplitLines(string(data))
-		var body []string
-		var fimps []string
-		i := int32(0)
-		firstBodyLine := int32(0)
-		for i < int32(len(lines)) {
-			line := mxutil.TrimSpace(lines[i])
-			if mxutil.HasPrefix(line, "package ") {
-				i++
-				continue
-			}
-			if line == "import (" {
-				i++
-				for i < int32(len(lines)) {
-					imp := mxutil.TrimSpace(lines[i])
-					i++
-					if imp == ")" {
-						break
-					}
-					if imp != "" {
-						imports[imp] = true
-						fimps = append(fimps, imp)
-					}
-				}
-				continue
-			}
-			if mxutil.HasPrefix(line, "import ") && !mxutil.HasPrefix(line, "import (") {
-				imp := line[7:]
-				imports[imp] = true
-				fimps = append(fimps, imp)
-				i++
-				continue
-			}
-			if len(body) == 0 {
-				firstBodyLine = i + 1
-			}
-			body = append(body, lines[i])
-			i++
-		}
-		bodies = append(bodies, []byte(joinStrings(body, "\n")))
-		bodyFiles = append(bodyFiles, f)
-		bodyStartLines = append(bodyStartLines, firstBodyLine)
-		bodyImports = append(bodyImports, fimps)
+		bs, bl, fimps := scanFileRegions(data, imports)
+		fb = append(fb, fileBody{name: f, data: data, bodyStart: bs, bodyLine: bl, fimps: fimps})
+	}
+	// Estimate total size for pre-allocation
+	totalSize := int32(64) // header
+	for _, f := range fb {
+		totalSize += int32(len(f.data)) - f.bodyStart + 1
+	}
+	for imp := range imports {
+		totalSize += int32(len(imp)) + 2
 	}
 	var out []byte
 	out = out | ("package " | pkgName | "\n")
@@ -1157,28 +1251,29 @@ func concatSources(dir string, files []string) (buf []byte) {
 			outLine++
 		}
 	}
-	for i, b := range bodies {
+	for i := range fb {
+		body := fb[i].data[fb[i].bodyStart:]
 		cctx.concatSourceMap = append(cctx.concatSourceMap, srcSpan{
-			file:     bodyFiles[i],
+			file:     fb[i].name,
 			outStart: outLine,
-			srcLine:  bodyStartLines[i],
+			srcLine:  fb[i].bodyLine,
 		})
 		mxutil.AppendConcatImportSeg(mxutil.ImportSeg{
 			OutStart: outLine,
-			Specs:    bodyImports[i],
+			Specs:    fb[i].fimps,
 		})
-		for j := int32(0); j < int32(len(b)); j++ {
-			if b[j] == '\n' {
+		for j := int32(0); j < int32(len(body)); j++ {
+			if body[j] == '\n' {
 				outLine++
 			}
 		}
 		outLine++
-		out = out | b
+		out = out | body
 		out = append(out, '\n')
-		bodies[i] = nil
+		free(fb[i].data)
 	}
-	bodies = nil
-	imports = nil
+	free(fb)
+	free(imports)
 	return out
 }
 
@@ -1534,6 +1629,7 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		}
 		bc := hasBuildConstraint(data, forbidden)
 		if bc {
+			free(data)
 			if !bst.quietDiscover {
 				mxutil.WriteStr(2, "    skip-constraint: " | f | "\n")
 			}
@@ -2284,8 +2380,8 @@ func loadMxh(path string) (ok bool) {
 	}
 
 	cctx.parseTypePkgScope = oldScope
-	data = nil // replace with free()
-	lines = nil // replace with free()
+	free(data)
+	free(lines)
 	ImportRegistry[pkgPath] = pkg
 	return true
 }
@@ -2366,8 +2462,8 @@ func cmdCacheWarm() {
 		hash := pkgHash(pkg)
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
 		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
-		_, bcOk := mxutil.ReadFile(cached)
-		_, mxhOk := mxutil.ReadFile(cachedMxh)
+		bcOk := mxutil.FileExists(cached)
+		mxhOk := mxutil.FileExists(cachedMxh)
 		if bcOk && mxhOk {
 			skipped++
 			continue
@@ -2378,7 +2474,7 @@ func cmdCacheWarm() {
 		}
 		src := concatSources(pkg.dir, pkg.files)
 		ir := compileSource(src, compilePath, triple, pkg.dir)
-		src = nil
+		free(src)
 		llFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		free(ir)
@@ -2400,6 +2496,7 @@ func cmdCacheWarm() {
 		if regPkg != nil {
 			mxhData := generateMxh(regPkg)
 			writeFile(cachedMxh, []byte(mxhData), 0644)
+			free(mxhData)
 		}
 		compiled++
 		mxutil.WriteStr(2, "  " | pkg.path | "\n")
@@ -2495,7 +2592,7 @@ func cmdUpdate(rebuildAll bool) {
 		}
 		src := concatSources(pkg.dir, pkg.files)
 		ir := compileSource(src, compilePath, triple, pkg.dir)
-		src = nil
+		free(src)
 		llFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		free(ir)
@@ -2519,6 +2616,7 @@ func cmdUpdate(rebuildAll bool) {
 			cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
 			mxhData := generateMxh(regPkg)
 			writeFile(cachedMxh, []byte(mxhData), 0644)
+			free(mxhData)
 		}
 	}
 	mxutil.WriteStr(2, "rebuild done\n")
@@ -2687,12 +2785,11 @@ func cmdTest(args []string) {
 		}
 		hash := pkgHash(dp)
 		cachedMxh := cachedMxhPath(cacheBase, dp.path, hash, dp.version)
-		_, mxhOk := mxutil.ReadFile(cachedMxh)
-		if mxhOk && !forceRebuild && dp != pkg {
+		if mxhOk := mxutil.FileExists(cachedMxh); mxhOk && !forceRebuild && dp != pkg {
 			loadMxh(cachedMxh)
 			src := concatSources(dp.dir, dp.files)
 			ScanGenericDecls(src, compilePath)
-			src = nil
+			free(src)
 		} else {
 			var src []byte
 			if dp == pkg {
@@ -2701,7 +2798,7 @@ func cmdTest(args []string) {
 				src = concatSources(dp.dir, dp.files)
 			}
 			TypeCheckOnly(src, compilePath)
-			src = nil
+			free(src)
 		}
 	}
 
@@ -2725,8 +2822,8 @@ func cmdTest(args []string) {
 		cachedMxh := cachedMxhPath(cacheBase, dp.path, hash, dp.version)
 
 		if dp != pkg {
-			_, bcOk := mxutil.ReadFile(cached)
-			_, mxhOk := mxutil.ReadFile(cachedMxh)
+			bcOk := mxutil.FileExists(cached)
+			mxhOk := mxutil.FileExists(cachedMxh)
 			if bcOk && mxhOk && !forceRebuild {
 				mxutil.WriteStr(2, "  cached " | dp.path | "\n")
 				loadMxh(cachedMxh)
@@ -2749,13 +2846,14 @@ func cmdTest(args []string) {
 				mxutil.WriteStr(2, "  cached " | dp.path | "\n")
 				csrc := concatSources(dp.dir, dp.files)
 				TypeCheckOnly(csrc, compilePath)
-				csrc = nil
+				free(csrc)
 				creg := ImportRegistry[compilePath]
 				if creg != nil {
 					cdir := mxutil.JoinPath(cacheBase, safeName(dp.path))
 					mkdirAll(cdir, 0755)
 					mxhData := generateMxh(creg)
 					writeFile(cachedMxh, []byte(mxhData), 0644)
+					free(mxhData)
 				}
 				allBcFiles = append(allBcFiles, cached)
 				continue
@@ -2770,7 +2868,7 @@ func cmdTest(args []string) {
 			src = concatSources(dp.dir, dp.files)
 		}
 		ir := compileSource(src, compilePath, triple, dp.dir)
-		src = nil
+		free(src)
 		llFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		free(ir)
@@ -2786,11 +2884,12 @@ func cmdTest(args []string) {
 			if rok {
 				writeFile(cached, data, 0644)
 			}
-			data = nil
+			free(data)
 			regPkg := ImportRegistry[compilePath]
 			if regPkg != nil {
 				mxhData := generateMxh(regPkg)
 				writeFile(cachedMxh, []byte(mxhData), 0644)
+				free(mxhData)
 			}
 		}
 		allBcFiles = append(allBcFiles, bcFile)
@@ -2868,26 +2967,18 @@ func cmdTest(args []string) {
 
 	mxutil.WriteStr(2, "  compile objects\n")
 	var objList []string
-	compileToObj := func(bcFile string) string {
-		oFile := bcFile | ".o"
-		rc = run([]string{clang, "--target=" | triple, "-c", "-O0", bcFile, "-o", oFile})
-		if rc != 0 {
-			fatal("clang -c failed for " | bcFile)
-		}
-		return oFile
-	}
 	if !hasRuntimePkg {
 		runtimeGoBc := mxutil.JoinPath(sysroot, "runtime_go.bc")
 		if _, gok := mxutil.ReadFile(runtimeGoBc); gok {
-			objList = append(objList, compileToObj(runtimeGoBc))
+			objList = append(objList, clangCompileToObj(clang, triple,runtimeGoBc))
 		} else {
-			objList = append(objList, compileToObj(runtimeBc))
+			objList = append(objList, clangCompileToObj(clang, triple,runtimeBc))
 		}
 	}
 	if !hasRuntimePkg {
 		rtShims := mxutil.JoinPath(sysroot, "rt_shims.bc")
 		if _, rsk := mxutil.ReadFile(rtShims); rsk {
-			objList = append(objList, compileToObj(rtShims))
+			objList = append(objList, clangCompileToObj(clang, triple,rtShims))
 		}
 	}
 	if bst.buildJobs > 1 {
@@ -2904,10 +2995,10 @@ func cmdTest(args []string) {
 		}
 	} else {
 		for _, bf := range allBcFiles {
-			objList = append(objList, compileToObj(bf))
+			objList = append(objList, clangCompileToObj(clang, triple,bf))
 		}
 	}
-	objList = append(objList, compileToObj(initAllBc))
+	objList = append(objList, clangCompileToObj(clang, triple,initAllBc))
 	if !hasRuntimePkg {
 		cstubDir := mxutil.JoinPath(root, "src/runtime")
 		cstubFiles := listFiles(cstubDir, ".c")
@@ -2924,7 +3015,7 @@ func cmdTest(args []string) {
 	objEntries := listFiles(objDir, ".bc")
 	if objEntries != nil {
 		for _, e := range objEntries {
-			objList = append(objList, compileToObj(mxutil.JoinPath(objDir, e)))
+			objList = append(objList, clangCompileToObj(clang, triple,mxutil.JoinPath(objDir, e)))
 		}
 	}
 	oEntries := listFiles(objDir, ".o")
@@ -3409,14 +3500,6 @@ func main() {
 		mxutil.WriteStr(2, "  compile objects\n")
 		wasmTriple := "wasm32-unknown-wasi"
 		var objList []string
-		wasmCompileToObj := func(bcFile string) string {
-			oFile := bcFile | ".o"
-			rc = run([]string{clang, "--target=" | wasmTriple, "-c", bcFile, "-o", oFile})
-			if rc != 0 {
-				fatal("clang -c failed for " | bcFile)
-			}
-			return oFile
-		}
 		if bst.buildJobs > 1 {
 			var objCmds [][]string
 			for _, bf := range allBcFiles {
@@ -3431,10 +3514,10 @@ func main() {
 			}
 		} else {
 			for _, bf := range allBcFiles {
-				objList = append(objList, wasmCompileToObj(bf))
+				objList = append(objList, clangCompileToObj(clang, wasmTriple,bf))
 			}
 		}
-		objList = append(objList, wasmCompileToObj(initAllBc))
+		objList = append(objList, clangCompileToObj(clang, wasmTriple,initAllBc))
 		// Stubs for symbols not provided by stage4-compiled runtime
 		wasiStubs := mxutil.JoinPath(tmpdir, "wasi_stubs.ll")
 		writeFile(wasiStubs, []byte(
@@ -3473,7 +3556,7 @@ func main() {
 			"  ret i32 %i\n" |
 			"}\n" |
 			"declare void @llvm.trap()\n"), 0644)
-		objList = append(objList, wasmCompileToObj(wasiStubs))
+		objList = append(objList, clangCompileToObj(clang, wasmTriple,wasiStubs))
 		mxutil.WriteStr(2, "  link\n")
 		ldArgs := []string{"wasm-ld", "--export-dynamic", "--allow-undefined",
 			"--gc-sections", "-o", outpath}
@@ -3489,25 +3572,17 @@ func main() {
 		// native: compile each .bc to .o, then ld.lld
 		mxutil.WriteStr(2, "  compile objects\n")
 		var objList []string
-		compileToObj := func(bcFile string) string {
-			oFile := bcFile | ".o"
-			rc = run([]string{clang, "--target=" | triple, "-c", "-O0", bcFile, "-o", oFile})
-			if rc != 0 {
-				fatal("clang -c failed for " | bcFile)
-			}
-			return oFile
-		}
 		if !hasRuntimePkg {
 			runtimeGoBc := mxutil.JoinPath(sysroot, "runtime_go.bc")
 			if _, gok := mxutil.ReadFile(runtimeGoBc); gok {
-				objList = append(objList, compileToObj(runtimeGoBc))
+				objList = append(objList, clangCompileToObj(clang, triple,runtimeGoBc))
 			} else {
-				objList = append(objList, compileToObj(runtimeBc))
+				objList = append(objList, clangCompileToObj(clang, triple,runtimeBc))
 			}
 		}
 		rtShims := mxutil.JoinPath(sysroot, "rt_shims.bc")
 		if _, rsk := mxutil.ReadFile(rtShims); rsk {
-			objList = append(objList, compileToObj(rtShims))
+			objList = append(objList, clangCompileToObj(clang, triple,rtShims))
 		}
 		if bst.buildJobs > 1 {
 			var objCmds [][]string
@@ -3523,10 +3598,10 @@ func main() {
 			}
 		} else {
 			for _, bf := range allBcFiles {
-				objList = append(objList, compileToObj(bf))
+				objList = append(objList, clangCompileToObj(clang, triple,bf))
 			}
 		}
-		objList = append(objList, compileToObj(initAllBc))
+		objList = append(objList, clangCompileToObj(clang, triple,initAllBc))
 		if !hasRuntimePkg {
 			cstubDir := mxutil.JoinPath(root, "src/runtime")
 			cstubFiles := listFiles(cstubDir, ".c")
@@ -3543,7 +3618,7 @@ func main() {
 		objEntries := listFiles(objDir, ".bc")
 		if objEntries != nil {
 			for _, e := range objEntries {
-				objList = append(objList, compileToObj(mxutil.JoinPath(objDir, e)))
+				objList = append(objList, clangCompileToObj(clang, triple,mxutil.JoinPath(objDir, e)))
 			}
 		}
 		oEntries := listFiles(objDir, ".o")
@@ -3567,9 +3642,8 @@ func main() {
 	mxutil.WriteStr(2, "  -> " | outpath | "\n")
 }
 
-// buildPkgsSerial is the original in-process build path: typecheck/load all
-// packages in dependency order, then compile each uncached package in this
-// process. Used for -j 1 and -print-ir.
+// buildPkgsSerial type-checks and compiles each package in dependency order
+// in a single pass. Each package's working set dies before the next begins.
 func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, forceRebuild, printIR bool) (bcs []string, hasRT bool) {
 	isWasmTarget := mxutil.TargetArch == "wasm"
 	for _, pkg := range pkgs {
@@ -3582,33 +3656,14 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
-		hash := pkgHash(pkg)
-		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
-		_, mxhOk := mxutil.ReadFile(cachedMxh)
-		if mxhOk && !forceRebuild {
-			loadMxh(cachedMxh)
-			src := concatSources(pkg.dir, pkg.files)
-			ScanGenericDecls(src, compilePath)
-			src = nil
-		} else {
-			src := concatSources(pkg.dir, pkg.files)
-			TypeCheckOnly(src, compilePath)
-			src = nil
-		}
-	}
-
-	for _, pkg := range pkgs {
-		compilePath := pkg.path
-		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
-			compilePath = pkg.name
-		}
 
 		hash := pkgHash(pkg)
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
 		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
 
-		_, bcOk := mxutil.ReadFile(cached)
-		_, mxhOk := mxutil.ReadFile(cachedMxh)
+		bcOk := mxutil.FileExists(cached)
+		mxhOk := mxutil.FileExists(cachedMxh)
+
 		if bcOk && mxhOk && !forceRebuild {
 			mxutil.WriteStr(2, "  cached " | pkg.path)
 			if pkg.version != "" {
@@ -3616,6 +3671,9 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			}
 			mxutil.WriteStr(2, "\n")
 			loadMxh(cachedMxh)
+			src := concatSources(pkg.dir, pkg.files)
+			ScanGenericDecls(src, compilePath)
+			free(src)
 			bcs = append(bcs, cached)
 			for _, cf := range pkg.cfiles {
 				cPath := mxutil.JoinPath(pkg.dir, cf)
@@ -3635,13 +3693,14 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			mxutil.WriteStr(2, "  cached " | pkg.path | "\n")
 			csrc := concatSources(pkg.dir, pkg.files)
 			TypeCheckOnly(csrc, compilePath)
-			csrc = nil
+			free(csrc)
 			creg := ImportRegistry[compilePath]
 			if creg != nil {
 				cdir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
 				mkdirAll(cdir, 0755)
 				mxhData := generateMxh(creg)
 				writeFile(cachedMxh, []byte(mxhData), 0644)
+				free(mxhData)
 			}
 			bcs = append(bcs, cached)
 			continue
@@ -3650,7 +3709,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		mxutil.WriteStr(2, "  compile " | pkg.path | "\n")
 		src := concatSources(pkg.dir, pkg.files)
 		ir := compileSource(src, compilePath, triple, pkg.dir)
-		src = nil
+		free(src)
 		if printIR {
 			mxutil.WriteStr(1, ir)
 		}
@@ -3673,6 +3732,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		if regPkg != nil {
 			mxhData := generateMxh(regPkg)
 			writeFile(cachedMxh, []byte(mxhData), 0644)
+			free(mxhData)
 		}
 		bcs = append(bcs, bcFile)
 		for _, cf := range pkg.cfiles {
@@ -4038,7 +4098,7 @@ func workerLoadDeps(pkg *pkgInfo, meta *workerMeta, idxByPath map[string]int32, 
 		}
 		src := concatSources(dep.dir, dep.files)
 		ScanGenericDecls(src, compilePath)
-		src = nil
+		free(src)
 	}
 	return ""
 }
@@ -4060,7 +4120,7 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 	src := concatSources(pkg.dir, pkg.files)
 	cctx.compilePkgDir = pkg.dir
 	ir := CompileToIR(src, compilePath, meta.triple)
-	src = nil
+	free(src)
 	if len(ir) > 0 && ir[0] == ';' {
 		return remapErrorLines(ir)
 	}
@@ -4070,7 +4130,7 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 
 	llFile := mxutil.JoinPath(meta.tmpdir, safeName(pkg.path) | ".ll")
 	writeFile(llFile, []byte(ir), 0644)
-	ir = ""
+	free(ir)
 
 	bcFile := mxutil.JoinPath(meta.tmpdir, safeName(pkg.path) | ".bc")
 	rc := run([]string{meta.clang, "--target=" | meta.triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
@@ -4086,7 +4146,7 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 	if rok {
 		writeFile(cached, bcData, 0644)
 	}
-	bcData = nil
+	free(bcData)
 
 	// Cache .mxh
 	regPkg := ImportRegistry[compilePath]
@@ -4094,6 +4154,7 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 		cachedMxh := cachedMxhPath(meta.cacheBase, pkg.path, hash, pkg.version)
 		mxhData := generateMxh(regPkg)
 		writeFile(cachedMxh, []byte(mxhData), 0644)
+		free(mxhData)
 	}
 
 	// Compile C files
@@ -4139,8 +4200,8 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 		hash := pkgHash(pkg)
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
 		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
-		_, bcOk := mxutil.ReadFile(cached)
-		_, mxhOk := mxutil.ReadFile(cachedMxh)
+		bcOk := mxutil.FileExists(cached)
+		mxhOk := mxutil.FileExists(cachedMxh)
 		if bcOk && mxhOk && !forceRebuild {
 			done[i] = true
 			mxutil.WriteStr(2, "  cached " | pkg.path)
@@ -4444,7 +4505,7 @@ func cmdBuildRuntime() {
 		mxutil.WriteStr(2, "  compile " | pkg | "\n")
 		src := concatSources(dir, info.files)
 		ir := compileSource(src, pkg, triple, dir)
-		src = nil
+		free(src)
 		llFile := mxutil.JoinPath(tmpdir, safeName(pkg) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		free(ir)

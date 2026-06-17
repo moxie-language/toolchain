@@ -108,16 +108,29 @@ func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 			totalAlloc += uint64(size)
 			return ptr
 		}
-	} else if node := freeLists[9]; node != nil && node.size >= totalSize {
-		freeLists[9] = node.next
-		hdr := (*blockHeader)(unsafe.Pointer(node))
-		hdr.size = size
-		hdr.next = nil
-		ptr := unsafe.Pointer(uintptr(unsafe.Pointer(hdr)) + uintptr(headerSize))
-		memzero(ptr, size)
-		mallocs++
-		totalAlloc += uint64(size)
-		return ptr
+	} else {
+		// Scan large-object free list for a block >= totalSize.
+		prev := (*freeNode)(nil)
+		node := freeLists[9]
+		for node != nil {
+			if node.size >= totalSize {
+				if prev == nil {
+					freeLists[9] = node.next
+				} else {
+					prev.next = node.next
+				}
+				hdr := (*blockHeader)(unsafe.Pointer(node))
+				hdr.size = size
+				hdr.next = nil
+				ptr := unsafe.Pointer(uintptr(unsafe.Pointer(hdr)) + uintptr(headerSize))
+				memzero(ptr, size)
+				mallocs++
+				totalAlloc += uint64(size)
+				return ptr
+			}
+			prev = node
+			node = node.next
+		}
 	}
 
 	// Bump allocate. Round up to class size so freed blocks can serve
@@ -131,6 +144,37 @@ func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 	for heapptr >= heapEnd {
 		if growHeap() {
 			continue
+		}
+		// Bump space exhausted. Scavenge: try ANY free list class
+		// that has a block large enough.
+		heapptr = addr // undo failed bump
+		found := false
+		for sc := class; sc < nSizeClasses; sc++ {
+			prev := (*freeNode)(nil)
+			node := freeLists[sc]
+			for node != nil {
+				nsz := node.size
+				if sc < 9 {
+					nsz = classSize(sc) + uintptr(headerSize)
+				}
+				if nsz >= totalSize {
+					if prev == nil {
+						freeLists[sc] = node.next
+					} else {
+						prev.next = node.next
+					}
+					hdr := (*blockHeader)(unsafe.Pointer(node))
+					hdr.size = size
+					hdr.next = nil
+					ptr := unsafe.Pointer(uintptr(unsafe.Pointer(hdr)) + uintptr(headerSize))
+					memzero(ptr, size)
+					mallocs++
+					totalAlloc += uint64(size)
+					return ptr
+				}
+				prev = node
+				node = node.next
+			}
 		}
 		runtimePanic("out of memory")
 	}
@@ -204,6 +248,7 @@ func ReadMemStats(m *MemStats) {
 func initHeap() {
 	heapptr = heapStart
 }
+
 
 func setHeapEnd(newHeapEnd uintptr) {
 	heapEnd = newHeapEnd

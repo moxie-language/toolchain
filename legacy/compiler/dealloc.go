@@ -433,6 +433,8 @@ func allocEscapes(val ssa.Value, defBlock *ssa.BasicBlock, seen map[ssa.Value]bo
 		case *ssa.MakeInterface:
 			return true
 		case *ssa.MakeClosure:
+			// Moxie bans closure captures, so MakeClosure should have
+			// no bindings. If it does, treat as escape for safety.
 			return true
 		case *ssa.Phi:
 			return true // phi = cross-block flow
