@@ -40,6 +40,7 @@ type compileCtx struct {
 	genericFuncDecls     map[string]*syntax.FuncDecl
 	irResults            []string
 	compileExportMap     map[string]string
+	compileArena         *runtime.Arena
 }
 
 var cctx *compileCtx
@@ -543,6 +544,11 @@ func regScopeLookup(regPkg *TCPackage, n string) (o Object) {
 }
 
 func TypeCheckOnly(src []byte, name string) {
+	// Free previous arena if still alive.
+	if cctx.compileArena != nil {
+		runtime.ArenaFree(cctx.compileArena)
+		cctx.compileArena = nil
+	}
 	arena := runtime.ArenaNew(uintptr(len(src)) * 16)
 	SetTypesArena(arena)
 	pkg, file := typeCheckPkg(src, name, arena)
@@ -551,10 +557,8 @@ func TypeCheckOnly(src []byte, name string) {
 		registerCompiledExports(pkg)
 	}
 	ScanGenericDecls(src, name)
-	if pkg != nil {
-		pkg.Release()
-	}
-	runtime.ArenaFree(arena)
+	// Arena freed by caller after generateMxh, or by next TypeCheckOnly/CompileToIR.
+	cctx.compileArena = arena
 	releasePerPkgState()
 }
 
@@ -572,15 +576,23 @@ func releaseFileDeep(f *syntax.File) {
 }
 
 func CompileToIR(src []byte, name string, triple string) (s string) {
+	// Free previous arena if still alive.
+	if cctx.compileArena != nil {
+		runtime.ArenaFree(cctx.compileArena)
+		cctx.compileArena = nil
+	}
 	cctx.compileTargetTriple = triple
 	scanEmbedPragmas(src, cctx.compilePkgDir)
 	cctx.linknameMap = scanLinknameMap(src)
 	cctx.wasmImportMap = scanWasmImportMap(src, name)
-	// Single arena covers the full pipeline: parse -> typecheck -> SSA -> IR emit.
+	// Arena covers parse -> typecheck -> SSA -> IR emit.
+	// Arena is NOT freed here - it stays alive until the caller frees it
+	// after generateMxh, because registerCompiledExports inserts arena
+	// objects directly into ImportRegistry.
 	arena := runtime.ArenaNew(uintptr(len(src)) * 20)
 	SetTypesArena(arena)
+	cctx.compileArena = arena
 	pkg, file := typeCheckPkg(src, name, arena)
-	// Exports and generics must survive the arena - allocate on heap.
 	SetTypesArena(nil)
 	ScanGenericDecls(src, name)
 	if pkg != nil && file != nil {
@@ -593,7 +605,6 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 			out = out | "; " | pe | "\n"
 		}
 		SetTypesArena(nil)
-		runtime.ArenaFree(arena)
 		releasePerPkgState()
 		return out
 	}
@@ -601,9 +612,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	ssaPkg := prog.CreatePackage(pkg, []*syntax.File{file}, nil)
 	emitter := newIREmitter(ssaPkg, triple)
 	ir := emitter.emit()
-	// Everything consumed. Free arena, then cleanup.
 	SetTypesArena(nil)
-	runtime.ArenaFree(arena)
 
 	if len(cctx.compileErrors) > 0 {
 		out := "; compile error\n"

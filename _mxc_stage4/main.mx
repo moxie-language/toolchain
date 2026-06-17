@@ -2036,9 +2036,12 @@ func generateMxh(pkg *TCPackage) (s string) {
 				out = out | "func " | objName | " " | sigDescStr(sig) | "\n"
 			}
 		case *TCVar:
+			if v == nil || v.Typ == nil {
+				continue
+			}
 			out = out | "var " | objName | " " | typeDescStr(v.Typ) | "\n"
 		case *TCConst:
-			if v.Typ == nil {
+			if v == nil || v.Typ == nil {
 				continue
 			}
 			td := typeDescStr(v.Typ)
@@ -3709,6 +3712,10 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 				writeFile(cachedMxh, []byte(mxhData), 0644)
 				free(mxhData)
 			}
+			if cctx.compileArena != nil {
+				runtime.ArenaFree(cctx.compileArena)
+				cctx.compileArena = nil
+			}
 			bcs = append(bcs, cached)
 			continue
 		}
@@ -3740,6 +3747,12 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			mxhData := generateMxh(regPkg)
 			writeFile(cachedMxh, []byte(mxhData), 0644)
 			free(mxhData)
+		}
+		// Free the compile arena now that generateMxh has consumed
+		// the arena-allocated type objects in ImportRegistry.
+		if cctx.compileArena != nil {
+			runtime.ArenaFree(cctx.compileArena)
+			cctx.compileArena = nil
 		}
 		bcs = append(bcs, bcFile)
 		for _, cf := range pkg.cfiles {
