@@ -574,35 +574,34 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	scanEmbedPragmas(src, cctx.compilePkgDir)
 	cctx.linknameMap = scanLinknameMap(src)
 	cctx.wasmImportMap = scanWasmImportMap(src, name)
-	arena := runtime.ArenaNew(uintptr(len(src)) * 16)
+	// Single arena covers the full pipeline: parse -> typecheck -> SSA -> IR emit.
+	arena := runtime.ArenaNew(uintptr(len(src)) * 20)
 	TypesArena = arena
 	pkg, file := typeCheckPkg(src, name, arena)
 	ScanGenericDecls(src, name)
+	// Register exports on the HEAP (must survive arena).
 	TypesArena = nil
+	if pkg != nil && file != nil {
+		registerCompiledExports(pkg)
+	}
+	TypesArena = arena
 	if file == nil {
 		out := "; parse error parseErrs=" | simpleItoa(len(cctx.parseErrors)) | "\n"
 		for _, pe := range cctx.parseErrors {
 			out = out | "; " | pe | "\n"
 		}
+		TypesArena = nil
 		runtime.ArenaFree(arena)
 		releasePerPkgState()
 		return out
 	}
-	// Register exports BEFORE arena free - pkg is arena-allocated.
-	// TypesArena is nil so registry objects go to heap (survive the arena).
-	if pkg != nil {
-		registerCompiledExports(pkg)
-	}
 	prog := NewSSAProgram()
 	ssaPkg := prog.CreatePackage(pkg, []*syntax.File{file}, nil)
-	// Parse tree + type objects consumed by SSA builder - free arena now.
-	runtime.ArenaFree(arena)
-
 	emitter := newIREmitter(ssaPkg, triple)
 	ir := emitter.emit()
-	emitter.releaseAfterEmit()
-	ssaPkg.release()
-	prog.release()
+	// Everything consumed. Free arena, then cleanup.
+	TypesArena = nil
+	runtime.ArenaFree(arena)
 
 	if len(cctx.compileErrors) > 0 {
 		out := "; compile error\n"
