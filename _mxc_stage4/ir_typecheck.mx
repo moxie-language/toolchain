@@ -542,9 +542,9 @@ func regScopeLookup(regPkg *TCPackage, n string) (o Object) {
 
 func TypeCheckOnly(src []byte, name string) {
 	arena := runtime.ArenaNew(uintptr(len(src)) * 16)
-	TypesArena = arena
+	SetTypesArena(arena)
 	pkg, file := typeCheckPkg(src, name, arena)
-	TypesArena = nil
+	SetTypesArena(nil)
 	if pkg != nil && file != nil {
 		registerCompiledExports(pkg)
 	}
@@ -576,21 +576,21 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	cctx.wasmImportMap = scanWasmImportMap(src, name)
 	// Single arena covers the full pipeline: parse -> typecheck -> SSA -> IR emit.
 	arena := runtime.ArenaNew(uintptr(len(src)) * 20)
-	TypesArena = arena
+	SetTypesArena(arena)
 	pkg, file := typeCheckPkg(src, name, arena)
 	ScanGenericDecls(src, name)
 	// Register exports on the HEAP (must survive arena).
-	TypesArena = nil
+	SetTypesArena(nil)
 	if pkg != nil && file != nil {
 		registerCompiledExports(pkg)
 	}
-	TypesArena = arena
+	SetTypesArena(arena)
 	if file == nil {
 		out := "; parse error parseErrs=" | simpleItoa(len(cctx.parseErrors)) | "\n"
 		for _, pe := range cctx.parseErrors {
 			out = out | "; " | pe | "\n"
 		}
-		TypesArena = nil
+		SetTypesArena(nil)
 		runtime.ArenaFree(arena)
 		releasePerPkgState()
 		return out
@@ -600,7 +600,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	emitter := newIREmitter(ssaPkg, triple)
 	ir := emitter.emit()
 	// Everything consumed. Free arena, then cleanup.
-	TypesArena = nil
+	SetTypesArena(nil)
 	runtime.ArenaFree(arena)
 
 	if len(cctx.compileErrors) > 0 {

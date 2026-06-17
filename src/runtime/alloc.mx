@@ -250,25 +250,33 @@ func initHeap() {
 }
 
 
-// Arena is a bump-pointer allocator for short-lived bulk allocations.
-// All allocations within an arena are freed in a single call to ArenaFree.
+// Arena is a bump-pointer allocator backed by mmap. Address space is
+// returned to the kernel on ArenaFree via munmap - no heap fragmentation.
 type Arena struct {
 	base uintptr
 	off  uintptr
 	cap  uintptr
 }
 
-// ArenaNew creates an arena with the given capacity in bytes.
+// ArenaNew creates an arena with the given capacity via mmap.
 func ArenaNew(capacity uintptr) (a *Arena) {
+	// Round up to page boundary.
+	capacity = (capacity + 4095) &^ 4095
+	addr := mmap(nil, capacity, flag_PROT_READ|flag_PROT_WRITE,
+		flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
+	if addr == unsafe.Pointer(^uintptr(0)) {
+		runtimePanic("arena: mmap failed")
+	}
+	// Arena header on the heap (tiny, 24 bytes).
 	a = (*Arena)(alloc(unsafe.Sizeof(Arena{}), nil))
-	a.base = uintptr(alloc(capacity, nil))
+	a.base = uintptr(addr)
 	a.off = 0
 	a.cap = capacity
 	return a
 }
 
 // ArenaAlloc allocates size bytes from the arena, 16-byte aligned.
-// Falls back to the normal allocator if the arena is full.
+// Falls back to the normal heap if the arena is full.
 func ArenaAlloc(a *Arena, size uintptr) unsafe.Pointer {
 	if a == nil {
 		return alloc(size, nil)
@@ -279,20 +287,20 @@ func ArenaAlloc(a *Arena, size uintptr) unsafe.Pointer {
 	}
 	ptr := unsafe.Pointer(a.base + a.off)
 	a.off += size
-	memzero(ptr, size)
+	// mmap gives zeroed pages, no memzero needed for first use.
 	return ptr
 }
 
-// ArenaFree frees the entire arena and all allocations within it.
+// ArenaFree unmaps the entire arena. All pointers into it become invalid.
 func ArenaFree(a *Arena) {
 	if a == nil {
 		return
 	}
-	free(unsafe.Pointer(a.base))
+	munmap(unsafe.Pointer(a.base), a.cap)
 	free(unsafe.Pointer(a))
 }
 
-// ArenaReset resets the arena for reuse without freeing the backing memory.
+// ArenaReset resets the arena for reuse without unmapping.
 func ArenaReset(a *Arena) {
 	if a == nil {
 		return
