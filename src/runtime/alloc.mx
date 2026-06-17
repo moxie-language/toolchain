@@ -250,6 +250,56 @@ func initHeap() {
 }
 
 
+// Arena is a bump-pointer allocator for short-lived bulk allocations.
+// All allocations within an arena are freed in a single call to ArenaFree.
+type Arena struct {
+	base uintptr
+	off  uintptr
+	cap  uintptr
+}
+
+// ArenaNew creates an arena with the given capacity in bytes.
+func ArenaNew(capacity uintptr) (a *Arena) {
+	a = (*Arena)(alloc(unsafe.Sizeof(Arena{}), nil))
+	a.base = uintptr(alloc(capacity, nil))
+	a.off = 0
+	a.cap = capacity
+	return a
+}
+
+// ArenaAlloc allocates size bytes from the arena, 16-byte aligned.
+// Falls back to the normal allocator if the arena is full.
+func ArenaAlloc(a *Arena, size uintptr) unsafe.Pointer {
+	if a == nil {
+		return alloc(size, nil)
+	}
+	size = align(size)
+	if a.off+size > a.cap {
+		return alloc(size, nil)
+	}
+	ptr := unsafe.Pointer(a.base + a.off)
+	a.off += size
+	memzero(ptr, size)
+	return ptr
+}
+
+// ArenaFree frees the entire arena and all allocations within it.
+func ArenaFree(a *Arena) {
+	if a == nil {
+		return
+	}
+	free(unsafe.Pointer(a.base))
+	free(unsafe.Pointer(a))
+}
+
+// ArenaReset resets the arena for reuse without freeing the backing memory.
+func ArenaReset(a *Arena) {
+	if a == nil {
+		return
+	}
+	a.off = 0
+}
+
 func setHeapEnd(newHeapEnd uintptr) {
 	heapEnd = newHeapEnd
 }

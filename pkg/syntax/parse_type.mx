@@ -1,6 +1,7 @@
 package syntax
 
 import (
+	"unsafe"
 	"git.smesh.lol/moxie/pkg/token"
 )
 
@@ -20,7 +21,7 @@ func (p *Parser) type_() (e Expr) {
 }
 
 func newIndirect(pos token.Pos, typ Expr) (e Expr) {
-	oc := &Operation{}
+	oc := (*Operation)(p.nodeAlloc(unsafe.Sizeof(Operation{})))
 	oc.pos = pos
 	oc.Op = token.Mul
 	oc.X = typ
@@ -50,7 +51,7 @@ func (p *Parser) typeOrNil() (e Expr) {
 		// recvchantype
 		p.Next()
 		p.want(token.Chan)
-		t := &ChanType{}
+		t := (*ChanType)(p.nodeAlloc(unsafe.Sizeof(ChanType{})))
 		t.pos = pos
 		t.Dir = RecvOnly
 		t.Elem = p.chanElem()
@@ -75,7 +76,7 @@ func (p *Parser) typeOrNil() (e Expr) {
 		// _Chan non_recvchantype
 		// _Chan _Comm ntype
 		p.Next()
-		t := &ChanType{}
+		t := (*ChanType)(p.nodeAlloc(unsafe.Sizeof(ChanType{})))
 		t.pos = pos
 		if p.got(token.Arrow) {
 			t.Dir = SendOnly
@@ -87,7 +88,7 @@ func (p *Parser) typeOrNil() (e Expr) {
 		// _Map '[' ntype ']' ntype
 		p.Next()
 		p.want(token.Lbrack)
-		t := &MapType{}
+		t := (*MapType)(p.nodeAlloc(unsafe.Sizeof(MapType{})))
 		t.pos = pos
 		t.Key = p.type_()
 		p.want(token.Rbrack)
@@ -112,7 +113,7 @@ func (p *Parser) typeOrNil() (e Expr) {
 		// (see e.g. tests for go.dev/issue/68639).
 		const keep_parens = false
 		if keep_parens {
-			px := &ParenExpr{}
+			px := (*ParenExpr)(p.nodeAlloc(unsafe.Sizeof(ParenExpr{})))
 			px.pos = pos
 			px.X = t
 			t = px
@@ -130,7 +131,7 @@ func (p *Parser) typeInstance(typ Expr) (e Expr) {
 
 	pos := p.pos()
 	p.want(token.Lbrack)
-	x := &IndexExpr{}
+	x := (*IndexExpr)(p.nodeAlloc(unsafe.Sizeof(IndexExpr{})))
 	x.pos = pos
 	x.X = typ
 	if p.Tok == token.Rbrack {
@@ -148,7 +149,7 @@ func (p *Parser) funcType(context string) (tparams []*Field, ft *FuncType) {
 	if trace {
 		defer p.trace("funcType")()
 	}
-	typ := &FuncType{}
+	typ := (*FuncType)(p.nodeAlloc(unsafe.Sizeof(FuncType{})))
 	typ.pos = p.pos()
 
 	var tparamList []*Field
@@ -192,7 +193,7 @@ func (p *Parser) arrayType(pos token.Pos, arrLen Expr) (e Expr) {
 		p.Next()
 	}
 	p.want(token.Rbrack)
-	at := &ArrayType{}
+	at := (*ArrayType)(p.nodeAlloc(unsafe.Sizeof(ArrayType{})))
 	at.pos = pos
 	at.Len = arrLen
 	at.Elem = p.type_()
@@ -201,7 +202,7 @@ func (p *Parser) arrayType(pos token.Pos, arrLen Expr) (e Expr) {
 
 // "[" and "]" have already been consumed, and pos is the position of "[".
 func (p *Parser) sliceType(pos token.Pos) (e Expr) {
-	tc := &SliceType{}
+	tc := (*SliceType)(p.nodeAlloc(unsafe.Sizeof(SliceType{})))
 	tc.pos = pos
 	tc.Elem = p.type_()
 	return tc
@@ -228,7 +229,7 @@ func (p *Parser) structType() (s *StructType) {
 		defer p.trace("structType")()
 	}
 
-	typ := &StructType{}
+	typ := (*StructType)(p.nodeAlloc(unsafe.Sizeof(StructType{})))
 	typ.pos = p.pos()
 
 	p.want(token.Struct)
@@ -247,7 +248,7 @@ func (p *Parser) interfaceType() (i *InterfaceType) {
 		defer p.trace("interfaceType")()
 	}
 
-	typ := &InterfaceType{}
+	typ := (*InterfaceType)(p.nodeAlloc(unsafe.Sizeof(InterfaceType{})))
 	typ.pos = p.pos()
 
 	p.want(token.Interface)
@@ -279,7 +280,7 @@ func (p *Parser) funcResult() (fs []*Field) {
 
 	pos := p.pos()
 	if typ := p.typeOrNil(); typ != nil {
-		f := &Field{}
+		f := (*Field)(p.nodeAlloc(unsafe.Sizeof(Field{})))
 		f.pos = pos
 		f.Type = typ
 		return []*Field{f}
@@ -296,7 +297,7 @@ func (p *Parser) addField(styp *StructType, pos token.Pos, name *Name, typ Expr,
 		styp.TagList = append(styp.TagList, tag)
 	}
 
-	f := &Field{}
+	f := (*Field)(p.nodeAlloc(unsafe.Sizeof(Field{})))
 	f.pos = pos
 	f.Name = name
 	f.Type = typ
@@ -409,7 +410,7 @@ func (p *Parser) arrayOrTArgs() (e Expr) {
 	if !comma {
 		if elem := p.typeOrNil(); elem != nil {
 			// x [n]E
-			arrT := &ArrayType{}
+			arrT := (*ArrayType)(p.nodeAlloc(unsafe.Sizeof(ArrayType{})))
 			arrT.pos = pos
 			arrT.Len = n
 			arrT.Elem = elem
@@ -418,7 +419,7 @@ func (p *Parser) arrayOrTArgs() (e Expr) {
 	}
 
 	// x[n,], x[n1, n2], ...
-	idxT := &IndexExpr{}
+	idxT := (*IndexExpr)(p.nodeAlloc(unsafe.Sizeof(IndexExpr{})))
 	idxT.pos = pos
 	// idxT.X will be filled in by caller
 	idxT.Index = n
@@ -427,7 +428,7 @@ func (p *Parser) arrayOrTArgs() (e Expr) {
 
 func (p *Parser) oliteral() (b *BasicLit) {
 	if p.Tok == token.Literal {
-		b = &BasicLit{}
+		b = (*BasicLit)(p.nodeAlloc(unsafe.Sizeof(BasicLit{})))
 		b.pos = p.pos()
 		b.Value = p.Lit
 		b.Kind = p.Kind
@@ -446,7 +447,7 @@ func (p *Parser) methodDecl() (f *Field) {
 		defer p.trace("methodDecl")()
 	}
 
-	f := &Field{}
+	f := (*Field)(p.nodeAlloc(unsafe.Sizeof(Field{})))
 	f.pos = p.pos()
 	name := p.name()
 
@@ -509,14 +510,14 @@ func (p *Parser) methodDecl() (f *Field) {
 		}
 
 		// embedded instantiated type
-		t := &IndexExpr{}
+		t := (*IndexExpr)(p.nodeAlloc(unsafe.Sizeof(IndexExpr{})))
 		t.pos = pos
 		t.X = name
 		if len(list) == 1 {
 			t.Index = list[0].Type
 		} else {
 			// len(list) > 1
-			l := &ListExpr{}
+			l := (*ListExpr)(p.nodeAlloc(unsafe.Sizeof(ListExpr{})))
 			l.pos = list[0].Pos()
 			l.ElemList = []Expr{:len(list)}
 			for i := range list {
@@ -541,13 +542,13 @@ func (p *Parser) embeddedElem(f *Field) (fv *Field) {
 	}
 
 	if f == nil {
-		f = &Field{}
+		f = (*Field)(p.nodeAlloc(unsafe.Sizeof(Field{})))
 		f.pos = p.pos()
 		f.Type = p.embeddedTerm()
 	}
 
 	for p.Tok == token.OperatorType && p.Op == token.Or {
-		t := &Operation{}
+		t := (*Operation)(p.nodeAlloc(unsafe.Sizeof(Operation{})))
 		t.pos = p.pos()
 		t.Op = token.Or
 		p.Next()
@@ -566,7 +567,7 @@ func (p *Parser) embeddedTerm() (e Expr) {
 	}
 
 	if p.Tok == token.OperatorType && p.Op == token.Tilde {
-		op := &Operation{}
+		op := (*Operation)(p.nodeAlloc(unsafe.Sizeof(Operation{})))
 		op.pos = p.pos()
 		op.Op = token.Tilde
 		p.Next()
@@ -601,7 +602,7 @@ func (p *Parser) paramDeclOrNil(name *Name, follow token.Token) (f *Field) {
 		return p.embeddedElem(nil)
 	}
 
-	f := &Field{}
+	f := (*Field)(p.nodeAlloc(unsafe.Sizeof(Field{})))
 	f.pos = pos
 
 	if p.Tok == token.NameType || name != nil {
@@ -649,7 +650,7 @@ func (p *Parser) paramDeclOrNil(name *Name, follow token.Token) (f *Field) {
 
 	if p.Tok == token.DotDotDot {
 		// [name] "..." ...
-		t := &DotsType{}
+		t := (*DotsType)(p.nodeAlloc(unsafe.Sizeof(DotsType{})))
 		t.pos = p.pos()
 		p.Next()
 		t.Elem = p.typeOrNil()
@@ -697,7 +698,7 @@ func (p *Parser) paramList(name *Name, typ Expr, closeTok token.Token, requireNa
 	// parameter list. If we have a complete field, handle this case here.
 	if name != nil && typ != nil && p.Tok == closeTok {
 		p.Next()
-		par := &Field{}
+		par := (*Field)(p.nodeAlloc(unsafe.Sizeof(Field{})))
 		par.pos = name.pos
 		par.Name = name
 		par.Type = typ
@@ -712,7 +713,7 @@ func (p *Parser) paramList(name *Name, typ Expr, closeTok token.Token, requireNa
 			if debug && name == nil {
 				panic("initial type provided without name")
 			}
-			par = &Field{}
+			par = (*Field)(p.nodeAlloc(unsafe.Sizeof(Field{})))
 			par.pos = name.pos
 			par.Name = name
 			par.Type = typ
@@ -808,7 +809,7 @@ func (p *Parser) paramList(name *Name, typ Expr, closeTok token.Token, requireNa
 }
 
 func (p *Parser) badExpr() (b *BadExpr) {
-	b := &BadExpr{}
+	b := (*BadExpr)(p.nodeAlloc(unsafe.Sizeof(BadExpr{})))
 	b.pos = p.pos()
 	return b
 }

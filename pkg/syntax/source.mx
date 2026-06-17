@@ -2,6 +2,8 @@ package syntax
 
 import (
 	"io"
+	"runtime"
+	"unsafe"
 	"unicode/utf8"
 )
 
@@ -11,8 +13,9 @@ func (*srcDone) Error() (s string) { return "EOF" }
 func (*srcDone) String() (s string) { return "EOF" }
 
 type Source struct {
-	in   io.Reader
-	errh func(line, col uint32, msg string)
+	in    io.Reader
+	errh  func(line, col uint32, msg string)
+	arena *runtime.Arena
 
 	buf       []byte
 	ioerr     error
@@ -87,6 +90,12 @@ func (s *Source) segment() (buf []byte) { return s.buf[s.b : s.r-s.chw] }
 // NOT copy - the returned slice still aliases s.buf.
 func (s *Source) segmentCopy() (buf []byte) {
 	b := s.buf[s.b : s.r-s.chw]
+	if s.arena != nil {
+		ptr := runtime.ArenaAlloc(s.arena, uintptr(len(b)))
+		c := unsafe.Slice((*byte)(ptr), len(b))
+		copy(c, b)
+		return c
+	}
 	c := []byte{:len(b)}
 	copy(c, b)
 	return c

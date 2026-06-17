@@ -1,6 +1,7 @@
 package main
 
 import (
+	"runtime"
 	"git.smesh.lol/moxie/pkg/syntax"
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"git.smesh.lol/moxie/pkg/token"
@@ -43,7 +44,7 @@ func initCompileCtx() {
 	}
 }
 
-func typeCheckPkg(src []byte, name string) (pkg *TCPackage, file *syntax.File) {
+func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage, file *syntax.File) {
 	InitUniverse()
 	shortName := name
 	for i := len(name) - 1; i >= 0; i-- {
@@ -69,7 +70,7 @@ func typeCheckPkg(src []byte, name string) (pkg *TCPackage, file *syntax.File) {
 	}
 	cctx.tcPkgSrc = []byte{:len(src)}; copy(cctx.tcPkgSrc, src)
 	cctx.compileExportMap = scanExportPragmas(cctx.tcPkgSrc)
-	file, _ := syntax.ParseBytes(token.NewFileBase(name|".mx"), src, errh, nil, 0)
+	file, _ := syntax.ParseBytesArena(token.NewFileBase(name|".mx"), src, errh, nil, 0, arena)
 	if file == nil {
 		for ei := int32(0); ei < int32(len(cctx.parseErrors)) && ei < 5; ei++ {
 		}
@@ -540,7 +541,8 @@ func regScopeLookup(regPkg *TCPackage, n string) (o Object) {
 }
 
 func TypeCheckOnly(src []byte, name string) {
-	pkg, file := typeCheckPkg(src, name)
+	arena := runtime.ArenaNew(uintptr(len(src)) * 16)
+	pkg, file := typeCheckPkg(src, name, arena)
 	if pkg != nil && file != nil {
 		registerCompiledExports(pkg)
 	}
@@ -548,7 +550,7 @@ func TypeCheckOnly(src []byte, name string) {
 	if pkg != nil {
 		pkg.Release()
 	}
-	releaseFileDeep(file)
+	runtime.ArenaFree(arena)
 	releasePerPkgState()
 }
 
@@ -570,25 +572,25 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	scanEmbedPragmas(src, cctx.compilePkgDir)
 	cctx.linknameMap = scanLinknameMap(src)
 	cctx.wasmImportMap = scanWasmImportMap(src, name)
-	pkg, file := typeCheckPkg(src, name)
+	arena := runtime.ArenaNew(uintptr(len(src)) * 16)
+	pkg, file := typeCheckPkg(src, name, arena)
 	ScanGenericDecls(src, name)
 	if file == nil {
 		out := "; parse error parseErrs=" | simpleItoa(len(cctx.parseErrors)) | "\n"
 		for _, pe := range cctx.parseErrors {
 			out = out | "; " | pe | "\n"
 		}
+		runtime.ArenaFree(arena)
 		releasePerPkgState()
 		return out
 	}
 	prog := NewSSAProgram()
 	ssaPkg := prog.CreatePackage(pkg, []*syntax.File{file}, nil)
-	// Parse tree consumed by SSA builder - free it now.
-	releaseFileDeep(file)
-	file = nil
+	// Parse tree consumed by SSA builder - free arena now.
+	runtime.ArenaFree(arena)
 
 	emitter := newIREmitter(ssaPkg, triple)
 	ir := emitter.emit()
-	// SSA graph consumed by IR emitter - free it now.
 	emitter.releaseAfterEmit()
 	ssaPkg.release()
 	prog.release()
@@ -609,7 +611,6 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	if len(ir) > 0 && ir[0] != ';' {
 		registerCompiledExports(pkg)
 	}
-	// Type package consumed by export registration - free it now.
 	if pkg != nil {
 		pkg.Release()
 	}

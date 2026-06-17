@@ -1,6 +1,7 @@
 package syntax
 
 import (
+	"unsafe"
 	"git.smesh.lol/moxie/pkg/token"
 )
 
@@ -20,7 +21,7 @@ func (p *Parser) binaryExpr(x Expr, prec int32) (ex Expr) {
 		x = p.unaryExpr()
 	}
 	for (p.Tok == token.OperatorType || p.Tok == token.Star) && p.Prec > prec {
-		t := &Operation{}
+		t := (*Operation)(p.nodeAlloc(unsafe.Sizeof(Operation{})))
 		t.pos = p.pos()
 		t.Op = p.Op
 		tprec := p.Prec
@@ -42,7 +43,7 @@ func (p *Parser) unaryExpr() (ex Expr) {
 	case token.OperatorType, token.Star:
 		switch p.Op {
 		case token.Mul, token.Add, token.Sub, token.Not, token.Xor, token.Tilde:
-			x := &Operation{}
+			x := (*Operation)(p.nodeAlloc(unsafe.Sizeof(Operation{})))
 			x.pos = p.pos()
 			x.Op = p.Op
 			p.Next()
@@ -50,7 +51,7 @@ func (p *Parser) unaryExpr() (ex Expr) {
 			return x
 
 		case token.And:
-			x := &Operation{}
+			x := (*Operation)(p.nodeAlloc(unsafe.Sizeof(Operation{})))
 			x.pos = p.pos()
 			x.Op = token.And
 			p.Next()
@@ -111,7 +112,7 @@ func (p *Parser) unaryExpr() (ex Expr) {
 		}
 
 		// x is not a channel type => we have a receive op
-		o := &Operation{}
+		o := (*Operation)(p.nodeAlloc(unsafe.Sizeof(Operation{})))
 		o.pos = pos
 		o.Op = token.Recv
 		o.X = x
@@ -130,7 +131,7 @@ func (p *Parser) callStmt() (c *CallStmt) {
 		defer p.trace("callStmt")()
 	}
 
-	s := &CallStmt{}
+	s := (*CallStmt)(p.nodeAlloc(unsafe.Sizeof(CallStmt{})))
 	s.pos = p.pos()
 	s.Tok = p.Tok // _Defer or _Go
 	p.Next()
@@ -186,7 +187,7 @@ func (p *Parser) operand(keep_parens bool) (ex Expr) {
 		// in a go/defer statement. In that case, operand is called
 		// with keep_parens set.
 		if keep_parens {
-			px := &ParenExpr{}
+			px := (*ParenExpr)(p.nodeAlloc(unsafe.Sizeof(ParenExpr{})))
 			px.pos = pos
 			px.X = x
 			x = px
@@ -200,7 +201,7 @@ func (p *Parser) operand(keep_parens bool) (ex Expr) {
 		if p.Tok == token.Lbrace {
 			p.Xnest++
 
-			f := &FuncLit{}
+			f := (*FuncLit)(p.nodeAlloc(unsafe.Sizeof(FuncLit{})))
 			f.pos = pos
 			f.Type = ftyp
 			f.Body = p.funcBody()
@@ -262,7 +263,7 @@ loop:
 			switch p.Tok {
 			case token.NameType:
 				// pexpr '.' sym
-				t := &SelectorExpr{}
+				t := (*SelectorExpr)(p.nodeAlloc(unsafe.Sizeof(SelectorExpr{})))
 				t.pos = pos
 				t.X = x
 				t.Sel = p.name()
@@ -271,13 +272,13 @@ loop:
 			case token.Lparen:
 				p.Next()
 				if p.got(token.TypeType) {
-					t := &TypeSwitchGuard{}
+					t := (*TypeSwitchGuard)(p.nodeAlloc(unsafe.Sizeof(TypeSwitchGuard{})))
 					// t.Lhs is filled in by parser.simpleStmt
 					t.pos = pos
 					t.X = x
 					x = t
 				} else {
-					t := &AssertExpr{}
+					t := (*AssertExpr)(p.nodeAlloc(unsafe.Sizeof(AssertExpr{})))
 					t.pos = pos
 					t.X = x
 					t.Type = p.type_()
@@ -306,7 +307,7 @@ loop:
 				if comma || p.Tok == token.Rbrack {
 					p.want(token.Rbrack)
 					// x[], x[i,] or x[i, j, ...]
-					ie := &IndexExpr{}
+					ie := (*IndexExpr)(p.nodeAlloc(unsafe.Sizeof(IndexExpr{})))
 					ie.pos = pos
 					ie.X = x
 					ie.Index = i
@@ -322,7 +323,7 @@ loop:
 				p.advance(token.Comma, token.Colon, token.Rbrack)
 			}
 			p.Xnest++
-			t := &SliceExpr{}
+			t := (*SliceExpr)(p.nodeAlloc(unsafe.Sizeof(SliceExpr{})))
 			t.pos = pos
 			t.X = x
 			t.Index[0] = i
@@ -351,7 +352,7 @@ loop:
 			x = t
 
 		case token.Lparen:
-			t := &CallExpr{}
+			t := (*CallExpr)(p.nodeAlloc(unsafe.Sizeof(CallExpr{})))
 			t.pos = pos
 			p.Next()
 			t.Fun = x
@@ -433,7 +434,7 @@ func (p *Parser) complitexpr() (c *CompositeLit) {
 		defer p.trace("complitexpr")()
 	}
 
-	x := &CompositeLit{}
+	x := (*CompositeLit)(p.nodeAlloc(unsafe.Sizeof(CompositeLit{})))
 	x.pos = p.pos()
 
 	p.Xnest++
@@ -443,7 +444,7 @@ func (p *Parser) complitexpr() (c *CompositeLit) {
 		e := p.bare_complitexpr()
 		if p.Tok == token.Colon {
 			// key ':' value
-			l := &KeyValueExpr{}
+			l := (*KeyValueExpr)(p.nodeAlloc(unsafe.Sizeof(KeyValueExpr{})))
 			l.pos = p.pos()
 			p.Next()
 			l.Key = e
@@ -536,7 +537,7 @@ func (p *Parser) qualifiedName(name *Name) (ex Expr) {
 	}
 
 	if p.Tok == token.Dot {
-		s := &SelectorExpr{}
+		s := (*SelectorExpr)(p.nodeAlloc(unsafe.Sizeof(SelectorExpr{})))
 		s.pos = p.pos()
 		p.Next()
 		s.X = x
@@ -563,7 +564,7 @@ func (p *Parser) exprList() (ex Expr) {
 		for p.got(token.Comma) {
 			list = append(list, p.expr())
 		}
-		t := &ListExpr{}
+		t := (*ListExpr)(p.nodeAlloc(unsafe.Sizeof(ListExpr{})))
 		t.pos = x.Pos()
 		t.ElemList = list
 		x = t
@@ -600,7 +601,7 @@ func (p *Parser) typeList(strict bool) (x Expr, comma bool) {
 				}
 				list = append(list, t)
 			}
-			l := &ListExpr{}
+			l := (*ListExpr)(p.nodeAlloc(unsafe.Sizeof(ListExpr{})))
 			l.pos = x.Pos() // == list[0].Pos()
 			l.ElemList = list
 			x = l
