@@ -2216,7 +2216,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		typ := b.getLLVMType(expr.Type().Underlying().(*types.Pointer).Elem())
 		size := b.targetData.TypeAllocSize(typ)
 		// Move all "large" allocations to the heap.
-		if true { // Force all allocations to heap - Go's SSA escape analysis is wrong for Moxie
+		if expr.Heap || size > b.MaxStackAlloc {
 			// Calculate ^uintptr(0)
 			maxSize := llvm.ConstNot(llvm.ConstInt(b.uintptrType, 0, false)).ZExtValue()
 			if size > maxSize {
