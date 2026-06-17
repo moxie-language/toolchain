@@ -2973,6 +2973,34 @@ func maybeReplacePipe(expr ast.Expr, set map[*ast.BinaryExpr]bool) ast.Expr {
 	if !ok || !set[bin] {
 		return expr
 	}
+	// Check if inner X is also a pipe (chain). If so, the inner result
+	// is a fresh temp - subsequent pipes can use move semantics.
+	if inner, ok := bin.X.(*ast.BinaryExpr); ok && set[inner] {
+		// Chain: inner pipes produce fresh temps. First pipe is borrow,
+		// rest are moves extending the fresh intermediate in place.
+		lhs := replacePipeChainBorrow(inner, set)
+		return &ast.CallExpr{
+			Fun:  &ast.Ident{Name: "__moxie_concat_move"},
+			Args: []ast.Expr{lhs, wrapForMoxieConcat(bin.Y)},
+		}
+	}
+	return &ast.CallExpr{
+		Fun:  &ast.Ident{Name: "__moxie_concat"},
+		Args: []ast.Expr{wrapForMoxieConcat(bin.X), wrapForMoxieConcat(bin.Y)},
+	}
+}
+
+// replacePipeChainBorrow: first pipe in a borrow chain is borrow (fresh alloc),
+// subsequent pipes are moves (extend the fresh intermediate).
+func replacePipeChainBorrow(bin *ast.BinaryExpr, set map[*ast.BinaryExpr]bool) ast.Expr {
+	if inner, ok := bin.X.(*ast.BinaryExpr); ok && set[inner] {
+		lhs := replacePipeChainBorrow(inner, set)
+		return &ast.CallExpr{
+			Fun:  &ast.Ident{Name: "__moxie_concat_move"},
+			Args: []ast.Expr{lhs, wrapForMoxieConcat(bin.Y)},
+		}
+	}
+	// Leftmost pair: borrow (fresh allocation, original untouched)
 	return &ast.CallExpr{
 		Fun:  &ast.Ident{Name: "__moxie_concat"},
 		Args: []ast.Expr{wrapForMoxieConcat(bin.X), wrapForMoxieConcat(bin.Y)},

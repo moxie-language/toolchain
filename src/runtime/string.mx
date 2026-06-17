@@ -114,23 +114,27 @@ func stringConcat(x, y _string) _string {
 // destination is allocated via SecureAlloc so the concatenated result
 // inherits guard-page + wipe protection and its pointer lives inside a
 // registered arena (so subsequent comparisons promote to constant-time).
-// bytesConcat: borrow semantics (z := x | y). Allocates new buffer
-// sized to len(x)+len(y), copies both sides. x and y untouched.
-// z owns the new buffer in its declaring scope.
+// bytesConcat: borrow semantics (z := x | y). Allocates new buffer,
+// copies both sides. x and y untouched. Allocates with 2x capacity
+// so subsequent move-concats in a chain can extend in place.
 func bytesConcat(x, y []byte) []byte {
 	if len(x) == 0 && len(y) == 0 {
 		return nil
 	}
 	length := len(x) + len(y)
-	result := unsafe.Slice((*byte)(alloc(uintptr(length), nil)), int32(length))
+	bufCap := uintptr(length) * 2
+	if bufCap < 64 {
+		bufCap = 64
+	}
+	buf := alloc(bufCap, nil)
 	if len(x) > 0 {
-		memcpy(unsafe.Pointer(&result[0]), unsafe.Pointer(&x[0]), uintptr(len(x)))
+		memcpy(buf, unsafe.Pointer(&x[0]), uintptr(len(x)))
 	}
 	if len(y) > 0 {
-		memcpy(unsafe.Add(unsafe.Pointer(&result[0]), uintptr(len(x))),
+		memcpy(unsafe.Add(buf, uintptr(len(x))),
 			unsafe.Pointer(&y[0]), uintptr(len(y)))
 	}
-	return result
+	return unsafe.Slice((*byte)(buf), int32(bufCap))[:int32(length)]
 }
 
 // bytesConcatMove: move semantics (x = x | y / x |= y). Extends x
