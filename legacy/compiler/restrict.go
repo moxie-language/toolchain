@@ -451,9 +451,8 @@ func (b *builder) checkSpawnMoveRestriction() {
 					work = append(work, succ)
 				}
 			}
-			for len(work) > 0 {
-				bb := work[0]
-				work = work[1:]
+			for wi := 0; wi < len(work); wi++ {
+				bb := work[wi]
 				for _, succ := range bb.Succs {
 					if !reachableAfter[succ] {
 						reachableAfter[succ] = true
@@ -461,6 +460,7 @@ func (b *builder) checkSpawnMoveRestriction() {
 					}
 				}
 			}
+			work = work[:0]
 
 			for _, arg := range spawnArgs {
 				if _, isConst := arg.(*ssa.Const); isConst {

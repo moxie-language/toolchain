@@ -121,9 +121,8 @@ func (b *builder) checkExplicitFreeUAF() {
 func (b *builder) collectDerived(val ssa.Value) map[ssa.Value]bool {
 	result := map[ssa.Value]bool{val: true}
 	work := []ssa.Value{val}
-	for len(work) > 0 {
-		v := work[0]
-		work = work[1:]
+	for wi := 0; wi < len(work); wi++ {
+		v := work[wi]
 		refs := v.Referrers()
 		if refs == nil {
 			continue
@@ -163,9 +162,8 @@ func (b *builder) reachableAfter(block *ssa.BasicBlock) map[*ssa.BasicBlock]bool
 			work = append(work, succ)
 		}
 	}
-	for len(work) > 0 {
-		bb := work[0]
-		work = work[1:]
+	for wi := 0; wi < len(work); wi++ {
+		bb := work[wi]
 		for _, succ := range bb.Succs {
 			if !reached[succ] {
 				reached[succ] = true
