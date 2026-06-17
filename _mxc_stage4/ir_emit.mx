@@ -56,13 +56,20 @@ type phiTrunc struct {
 	to     string
 }
 
-func newIREmitter(pkg *SSAPackage, triple string) (p *irEmitter) {
+func newIREmitter(pkg *SSAPackage, triple string, srcLen int32) (p *irEmitter) {
 	ptrBits := 64
 	if len(triple) >= 4 && triple[:4] == "wasm" {
 		ptrBits = 32
 	}
+	// Pre-allocate IR buffer: IR is typically 15-20x source size.
+	// One large alloc avoids repeated sliceGrow doublings that
+	// fragment the heap (freed old buffers can't serve larger requests).
+	bufCap := int32(srcLen) * 20
+	if bufCap < 4096 {
+		bufCap = 4096
+	}
 	return &irEmitter{
-		buf:      []byte{:0:4096},
+		buf:      []byte{:0:bufCap},
 		triple:   triple,
 		ptrBits:  ptrBits,
 		pkg:      pkg,

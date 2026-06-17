@@ -5,6 +5,7 @@ import (
 	"go/types"
 	"os"
 	"sort"
+	"strings"
 
 	"moxie/compiler/llvmutil"
 
@@ -338,6 +339,17 @@ func computeScopeOwnership(fn *ssa.Function, loops map[int]map[int]bool) map[ssa
 				assignments[v] = &scopeOwnership{blockIdx: block.Index}
 			case *ssa.MakeMap:
 				assignments[v] = &scopeOwnership{blockIdx: block.Index}
+			case *ssa.Call:
+				// Track results of known allocating functions so their
+				// heap memory is freed at scope exit. Without this,
+				// bytesConcat (borrow pipe) results leak permanently.
+				if fn := v.Common().StaticCallee(); fn != nil {
+					name := fn.Name()
+					if strings.HasPrefix(name, "__moxie_concat") ||
+						name == "bytesConcat" || name == "stringConcat" {
+						assignments[v] = &scopeOwnership{blockIdx: block.Index}
+					}
+				}
 			}
 		}
 	}
