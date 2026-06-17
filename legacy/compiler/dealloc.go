@@ -424,9 +424,12 @@ func allocEscapes(val ssa.Value, defBlock *ssa.BasicBlock, seen map[ssa.Value]bo
 			// Stored somewhere - could be loaded from any block later.
 			// Exception: storing INTO the allocation (FieldAddr of this
 			// alloc as addr) is fine. But storing the alloc AS a value
-			// into something else means it escapes.
+			// into something else means it escapes - UNLESS the target
+			// is a local alloca in the same block (dies at scope exit).
 			if r.Val == val {
-				return true // this alloc stored as a value
+				if !isLocalAlloca(r.Addr, defBlock) {
+					return true
+				}
 			}
 			// r.Addr == val or derived from val: someone is writing INTO
 			// our alloc's fields. The alloc itself doesn't escape from this.
@@ -472,6 +475,25 @@ func allocEscapes(val ssa.Value, defBlock *ssa.BasicBlock, seen map[ssa.Value]bo
 			if allocEscapes(r, defBlock, seen) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// isLocalAlloca returns true if addr is a stack-local alloca (Alloc with
+// Heap=false) in the given block. Values stored into local allocas die at
+// scope exit, so they don't escape.
+func isLocalAlloca(addr ssa.Value, defBlock *ssa.BasicBlock) bool {
+	alloc, ok := addr.(*ssa.Alloc)
+	if !ok {
+		return false
+	}
+	if alloc.Heap {
+		return false // heap alloc outlives the scope
+	}
+	if instr, ok := addr.(ssa.Instruction); ok {
+		if instr.Block() == defBlock {
+			return true
 		}
 	}
 	return false
