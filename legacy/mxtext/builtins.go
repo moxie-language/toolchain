@@ -44,6 +44,10 @@ func __moxie_concat(a, b []byte) []byte {
 	panic("__moxie_concat: compiler failed to intercept")
 }
 
+func __moxie_concat_move(a, b []byte) []byte {
+	panic("__moxie_concat_move: compiler failed to intercept")
+}
+
 func __moxie_eq(a, b []byte) bool {
 	panic("__moxie_eq: compiler failed to intercept")
 }

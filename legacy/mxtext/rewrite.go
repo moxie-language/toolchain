@@ -2872,8 +2872,9 @@ func isTextLike(t types.Type) bool {
 }
 
 // RewriteAddAssign converts `s += expr` and `s |= expr` to
-// `s = __moxie_concat(s, expr)` for text types. Both forms compile, but
-// CheckPlusOnText rejects += for user packages.
+// `s = __moxie_concat_move(s, expr)` for text types. Move semantics:
+// old s buffer is owned and can be freed on growth. Both forms compile,
+// but CheckPlusOnText rejects += for user packages.
 func RewriteAddAssign(files []*ast.File, info *types.Info) int {
 	count := 0
 	for _, file := range files {
@@ -2890,11 +2891,8 @@ func RewriteAddAssign(files []*ast.File, info *types.Info) int {
 				return true
 			}
 			assign.Tok = token.ASSIGN
-			// Wrap non-text operands in []byte(...) so callable-returning
-			// strings (like itoa.Itoa(...)) match __moxie_concat's []byte
-			// signature under stock go/types.
 			assign.Rhs[0] = &ast.CallExpr{
-				Fun: &ast.Ident{Name: "__moxie_concat"},
+				Fun:  &ast.Ident{Name: "__moxie_concat_move"},
 				Args: []ast.Expr{
 					wrapForMoxieConcat(assign.Lhs[0]),
 					wrapForMoxieConcat(assign.Rhs[0]),
@@ -2932,7 +2930,11 @@ func replaceInNode(node ast.Node, set map[*ast.BinaryExpr]bool) {
 		switch parent := n.(type) {
 		case *ast.AssignStmt:
 			for i, rhs := range parent.Rhs {
-				parent.Rhs[i] = maybeReplacePipe(rhs, set)
+				if parent.Tok == token.ASSIGN && i < len(parent.Lhs) {
+					parent.Rhs[i] = maybeReplacePipeMove(rhs, set, parent.Lhs[i])
+				} else {
+					parent.Rhs[i] = maybeReplacePipe(rhs, set)
+				}
 			}
 		case *ast.ValueSpec:
 			for i, val := range parent.Values {
@@ -2971,13 +2973,47 @@ func maybeReplacePipe(expr ast.Expr, set map[*ast.BinaryExpr]bool) ast.Expr {
 	if !ok || !set[bin] {
 		return expr
 	}
-	// Replace: a | b → __moxie_concat([]byte(a), []byte(b))
-	// Wrap non-text operands so string-returning method calls (err.Error())
-	// and string-typed vars match __moxie_concat's []byte param type.
 	return &ast.CallExpr{
 		Fun:  &ast.Ident{Name: "__moxie_concat"},
 		Args: []ast.Expr{wrapForMoxieConcat(bin.X), wrapForMoxieConcat(bin.Y)},
 	}
+}
+
+// maybeReplacePipeMove: for `x = x | y` (= assignment, not :=).
+// If the pipe's LHS matches the assignment target, emit __moxie_concat_move
+// (move semantics: extend in place, free old on growth).
+func maybeReplacePipeMove(expr ast.Expr, set map[*ast.BinaryExpr]bool, assignTarget ast.Expr) ast.Expr {
+	bin, ok := expr.(*ast.BinaryExpr)
+	if !ok || !set[bin] {
+		return expr
+	}
+	if sameExprIdent(bin.X, assignTarget) {
+		return &ast.CallExpr{
+			Fun:  &ast.Ident{Name: "__moxie_concat_move"},
+			Args: []ast.Expr{wrapForMoxieConcat(bin.X), wrapForMoxieConcat(bin.Y)},
+		}
+	}
+	return &ast.CallExpr{
+		Fun:  &ast.Ident{Name: "__moxie_concat"},
+		Args: []ast.Expr{wrapForMoxieConcat(bin.X), wrapForMoxieConcat(bin.Y)},
+	}
+}
+
+// sameExprIdent returns true if two AST expressions refer to the same
+// identifier or selector (e.g., x and x, or e.buf and e.buf).
+func sameExprIdent(a, b ast.Expr) bool {
+	switch av := a.(type) {
+	case *ast.Ident:
+		bv, ok := b.(*ast.Ident)
+		return ok && av.Name == bv.Name
+	case *ast.SelectorExpr:
+		bv, ok := b.(*ast.SelectorExpr)
+		return ok && av.Sel.Name == bv.Sel.Name && sameExprIdent(av.X, bv.X)
+	case *ast.IndexExpr:
+		bv, ok := b.(*ast.IndexExpr)
+		return ok && sameExprIdent(av.X, bv.X) && sameExprIdent(av.Index, bv.Index)
+	}
+	return false
 }
 
 // FilterPipeErrors removes type errors about | and + on text types from the

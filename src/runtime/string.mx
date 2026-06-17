@@ -114,27 +114,50 @@ func stringConcat(x, y _string) _string {
 // destination is allocated via SecureAlloc so the concatenated result
 // inherits guard-page + wipe protection and its pointer lives inside a
 // registered arena (so subsequent comparisons promote to constant-time).
+// bytesConcat: borrow semantics (z := x | y). Allocates new buffer
+// sized to len(x)+len(y), copies both sides. x and y untouched.
+// z owns the new buffer in its declaring scope.
 func bytesConcat(x, y []byte) []byte {
 	if len(x) == 0 && len(y) == 0 {
 		return nil
 	}
 	length := len(x) + len(y)
-	secure := false
+	result := unsafe.Slice((*byte)(alloc(uintptr(length), nil)), int32(length))
 	if len(x) > 0 {
-		secure = isSecurePtr(unsafe.Pointer(&x[0]))
-	}
-	if !secure && len(y) > 0 {
-		secure = isSecurePtr(unsafe.Pointer(&y[0]))
-	}
-	result := secureAwareByteAlloc(uintptr(length), secure)
-	buf := unsafe.Pointer(&result[0])
-	if len(x) > 0 {
-		memcpy(buf, unsafe.Pointer(&x[0]), uintptr(len(x)))
+		memcpy(unsafe.Pointer(&result[0]), unsafe.Pointer(&x[0]), uintptr(len(x)))
 	}
 	if len(y) > 0 {
-		memcpy(unsafe.Add(buf, uintptr(len(x))), unsafe.Pointer(&y[0]), uintptr(len(y)))
+		memcpy(unsafe.Add(unsafe.Pointer(&result[0]), uintptr(len(x))),
+			unsafe.Pointer(&y[0]), uintptr(len(y)))
 	}
 	return result
+}
+
+// bytesConcatMove: move semantics (x = x | y / x |= y). Extends x
+// in place if capacity allows. Otherwise grows via sliceGrow which
+// frees the old buffer. x is consumed - caller must not use old x.
+func bytesConcatMove(x, y []byte) []byte {
+	if len(y) == 0 {
+		return x
+	}
+	if len(x) == 0 {
+		// Fresh copy so result owns its buffer.
+		result := unsafe.Slice((*byte)(alloc(uintptr(len(y)), nil)), int32(len(y)))
+		memcpy(unsafe.Pointer(&result[0]), unsafe.Pointer(&y[0]), uintptr(len(y)))
+		return result
+	}
+	needed := len(x) + len(y)
+	xBuf := unsafe.Pointer(&x[0])
+	yBuf := unsafe.Pointer(&y[0])
+	if cap(x) >= needed {
+		memmove(unsafe.Add(xBuf, uintptr(len(x))), yBuf, uintptr(len(y)))
+		return x[:needed]
+	}
+	// sliceGrow: alloc new with doubling, copy old, free old.
+	buf, _, newCap := sliceGrow(xBuf, uintptr(len(x)), uintptr(cap(x)),
+		uintptr(needed), 1)
+	memmove(unsafe.Add(buf, uintptr(len(x))), yBuf, uintptr(len(y)))
+	return unsafe.Slice((*byte)(buf), int32(newCap))[:int32(needed)]
 }
 
 

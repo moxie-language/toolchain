@@ -1998,7 +1998,7 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 // instruction.
 //
 // This is also where compiler intrinsics are implemented.
-func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) {
+func (b *builder) createFunctionCall(instr *ssa.CallCommon, callInstr *ssa.Call) (llvm.Value, error) {
 	// See if this is an intrinsic function that is handled specially.
 	if fn := instr.StaticCallee(); fn != nil {
 		// Direct function call, either to a named or anonymous (directly
@@ -2045,8 +2045,10 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 			if !retval.IsNil() {
 				return retval, nil
 			}
+		case strings.HasPrefix(fn.Name(), "__moxie_concat_move"):
+			return b.createMoxieConcatMove(instr), nil
 		case strings.HasPrefix(fn.Name(), "__moxie_concat"):
-			return b.createMoxieConcat(instr), nil
+			return b.createMoxieConcat(instr, callInstr), nil
 		case strings.HasPrefix(fn.Name(), "__moxie_eq"):
 			return b.createMoxieEq(instr), nil
 		case strings.HasPrefix(fn.Name(), "__moxie_lt"):
@@ -2245,7 +2247,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		y := b.getValue(expr.Y, getPos(expr))
 		return b.createBinOp(expr.Op, expr.X.Type(), expr.Y.Type(), x, y, expr.Pos())
 	case *ssa.Call:
-		return b.createFunctionCall(expr.Common())
+		return b.createFunctionCall(expr.Common(), expr)
 	case *ssa.ChangeInterface:
 		// Do not change between interface types: always use the underlying
 		// (concrete) type in the type number of the interface. Every method
