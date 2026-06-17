@@ -422,10 +422,12 @@ func handleChdirFlag() {
 			return
 		}
 		dir = os.Args[used+1]
-		os.Args = append(os.Args[:used], os.Args[used+2:]...)
+		copy(os.Args[used:], os.Args[used+2:])
+		os.Args = os.Args[:len(os.Args)-2]
 	case strings.HasPrefix(a, "-C="), strings.HasPrefix(a, "--C="):
 		_, dir, _ = strings.Cut(a, "=")
-		os.Args = append(os.Args[:used], os.Args[used+1:]...)
+		copy(os.Args[used:], os.Args[used+1:])
+		os.Args = os.Args[:len(os.Args)-1]
 	}
 	if err := os.Chdir(dir); err != nil {
 		fmt.Fprintln(os.Stderr, "cannot chdir:", err)

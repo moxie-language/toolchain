@@ -158,7 +158,8 @@ func rewriteMoxiePragmas(data []byte) []byte {
 	if !bytes.Contains(data, []byte("//:")) {
 		return data
 	}
-	var out []byte
+	var out bytes.Buffer
+	out.Grow(len(data))
 	rest := data
 	for len(rest) > 0 {
 		nl := bytes.IndexByte(rest, '\n')
@@ -176,14 +177,14 @@ func rewriteMoxiePragmas(data []byte) []byte {
 		if len(trimmed) > 3 && trimmed[0] == '/' && trimmed[1] == '/' && trimmed[2] == ':' &&
 			trimmed[3] >= 'a' && trimmed[3] <= 'z' && !bytes.HasPrefix(trimmed, []byte("//:build ")) {
 			idx := bytes.Index(line, []byte("//:"))
-			out = append(out, line[:idx]...)
-			out = append(out, "//go:"...)
-			out = append(out, line[idx+3:]...)
+			out.Write(line[:idx])
+			out.WriteString("//go:")
+			out.Write(line[idx+3:])
 		} else {
-			out = append(out, line...)
+			out.Write(line)
 		}
 	}
-	return out
+	return out.Bytes()
 }
 
 // rewriteBuildDirectives rewrites //:build lines to a single //go:build
@@ -229,21 +230,24 @@ func rewriteBuildDirectives(data []byte) []byte {
 	}
 
 	// Build output: emit single //go:build line, then non-directive lines.
-	var out []byte
+	var out bytes.Buffer
+	out.Grow(len(data))
 	if len(constraints) > 0 {
 		combined := constraints[0]
 		for _, c := range constraints[1:] {
 			combined = "(" + combined + ") && (" + c + ")"
 		}
-		out = append(out, []byte("//go:build "+combined+"\n")...)
+		out.WriteString("//go:build ")
+		out.WriteString(combined)
+		out.WriteByte('\n')
 	}
 	for _, li := range lines {
 		if !li.isDirective {
-			out = append(out, li.data...)
+			out.Write(li.data)
 		}
 	}
-	out = append(out, rest...)
-	return out
+	out.Write(rest)
+	return out.Bytes()
 }
 
 // renamedFileInfo wraps fs.FileInfo with an overridden Name().

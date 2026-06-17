@@ -600,8 +600,10 @@ func (b *builder) createRunDefers() {
 				forwardParams = append(forwardParams, context)
 			} else {
 				// Move typecode from the start to the end of the list of
-				// parameters.
-				forwardParams = append(forwardParams[1:], forwardParams[0])
+				// parameters. Use copy to avoid subslice aliasing.
+				typecode := forwardParams[0]
+				copy(forwardParams, forwardParams[1:])
+				forwardParams[len(forwardParams)-1] = typecode
 				fnPtr = b.getInvokeFunction(callback)
 				fnType = fnPtr.GlobalValueType()
 

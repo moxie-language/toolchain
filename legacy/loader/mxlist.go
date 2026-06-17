@@ -171,7 +171,8 @@ func (r *resolver) addTestMain(inputPkg string, wd string) ([]*PackageJSON, erro
 			break
 		}
 	}
-	r.sorted = append(r.sorted[:targetIdx], r.sorted[targetIdx+1:]...)
+	copy(r.sorted[targetIdx:], r.sorted[targetIdx+1:])
+	r.sorted = r.sorted[:len(r.sorted)-1]
 	delete(r.seen, targetPkg.ImportPath)
 
 	// Walk testing dependency (test files import "testing").
