@@ -66,4 +66,4 @@ export GOTOOLCHAIN=local
 export CGO_ENABLED=0
 export LLVM_LIB_PATH="${LLVM_PREFIX}/lib/libLLVM-${LLVM_VER}.so"
 
-exec "$MOXIE_GOROOT/bin/go" build -mod=vendor -tags purego -o moxie "$@" .
+exec "$MOXIE_GOROOT/bin/go" build -mod=vendor -tags purego -gcflags="-N -l" -o moxie "$@" .

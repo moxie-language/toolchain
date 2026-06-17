@@ -329,9 +329,11 @@ func computeScopeOwnership(fn *ssa.Function, loops map[int]map[int]bool) map[ssa
 		for _, instr := range block.Instrs {
 			switch v := instr.(type) {
 			case *ssa.Alloc:
-				if v.Heap {
-					assignments[v] = &scopeOwnership{blockIdx: block.Index}
-				}
+				// Track ALL allocs, not just v.Heap. Codegen forces all
+				// allocs to heap (compiler.go:2219). Without this, large
+				// allocs (size > MaxStackAlloc) bypass escape analysis but
+				// still get scope-freed via scopeTrackAlloc fallback.
+				assignments[v] = &scopeOwnership{blockIdx: block.Index}
 			case *ssa.MakeSlice:
 				assignments[v] = &scopeOwnership{blockIdx: block.Index}
 			case *ssa.MakeMap:
