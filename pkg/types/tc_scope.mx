@@ -1,6 +1,9 @@
 package types
 
-import "unsafe"
+import (
+	"runtime"
+	"unsafe"
+)
 
 type Scope struct {
 	parent *Scope
@@ -8,7 +11,9 @@ type Scope struct {
 }
 
 func NewScope(parent *Scope) (s *Scope) {
-	return &Scope{parent: parent, elems: map[string]Object{}}
+	s = (*Scope)(arenaAlloc(unsafe.Sizeof(Scope{})))
+	s.parent = parent; s.elems = map[string]Object{}
+	return s
 }
 
 func (s *Scope) Parent() (sv *Scope) { return s.parent }
@@ -48,8 +53,15 @@ func (s *Scope) Insert(obj Object) (o Object) {
 		return alt
 	}
 	// Copy name to avoid aliasing with parser's internal buffer.
-	// Moxie's string=[]byte means map keys can be mutated through shared backing.
-	key := string([]byte(nil) | []byte(name))
+	var key string
+	if TypesArena != nil {
+		ptr := runtime.ArenaAlloc(TypesArena, uintptr(len(name)))
+		dst := unsafe.Slice((*byte)(ptr), len(name))
+		copy(dst, []byte(name))
+		key = string(dst)
+	} else {
+		key = string([]byte(nil) | []byte(name))
+	}
 	s.elems[key] = obj
 	return nil
 }
