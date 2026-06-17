@@ -2979,23 +2979,45 @@ func maybeReplacePipe(expr ast.Expr, set map[*ast.BinaryExpr]bool) ast.Expr {
 	}
 }
 
-// maybeReplacePipeMove: for `x = x | y` (= assignment, not :=).
-// If the pipe's LHS matches the assignment target, emit __moxie_concat_move
-// (move semantics: extend in place, free old on growth).
+// maybeReplacePipeMove: for `x = x | a | b | c` (= assignment, not :=).
+// If the leftmost leaf of the pipe chain matches the assignment target,
+// ALL pipes in the chain become __moxie_concat_move. Each move extends
+// the buffer in place, passing the growing buffer through the chain.
 func maybeReplacePipeMove(expr ast.Expr, set map[*ast.BinaryExpr]bool, assignTarget ast.Expr) ast.Expr {
 	bin, ok := expr.(*ast.BinaryExpr)
 	if !ok || !set[bin] {
 		return expr
 	}
-	if sameExprIdent(bin.X, assignTarget) {
-		return &ast.CallExpr{
-			Fun:  &ast.Ident{Name: "__moxie_concat_move"},
-			Args: []ast.Expr{wrapForMoxieConcat(bin.X), wrapForMoxieConcat(bin.Y)},
-		}
+	// Check if the leftmost leaf of the chain matches the assign target.
+	if sameExprIdent(pipeChainLeftmost(bin, set), assignTarget) {
+		return replacePipeChainMove(bin, set)
 	}
 	return &ast.CallExpr{
 		Fun:  &ast.Ident{Name: "__moxie_concat"},
 		Args: []ast.Expr{wrapForMoxieConcat(bin.X), wrapForMoxieConcat(bin.Y)},
+	}
+}
+
+// pipeChainLeftmost returns the leftmost non-pipe operand of a chain.
+// For a | b | c (parsed as (a | b) | c), returns a.
+func pipeChainLeftmost(bin *ast.BinaryExpr, set map[*ast.BinaryExpr]bool) ast.Expr {
+	if inner, ok := bin.X.(*ast.BinaryExpr); ok && set[inner] {
+		return pipeChainLeftmost(inner, set)
+	}
+	return bin.X
+}
+
+// replacePipeChainMove recursively rewrites all pipes in a chain to move.
+func replacePipeChainMove(bin *ast.BinaryExpr, set map[*ast.BinaryExpr]bool) ast.Expr {
+	var lhs ast.Expr
+	if inner, ok := bin.X.(*ast.BinaryExpr); ok && set[inner] {
+		lhs = replacePipeChainMove(inner, set)
+	} else {
+		lhs = wrapForMoxieConcat(bin.X)
+	}
+	return &ast.CallExpr{
+		Fun:  &ast.Ident{Name: "__moxie_concat_move"},
+		Args: []ast.Expr{lhs, wrapForMoxieConcat(bin.Y)},
 	}
 }
 
