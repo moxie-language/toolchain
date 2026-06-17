@@ -551,14 +551,29 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				fmt.Println(mod.String())
 			}
 
-			logMem("before optimizeProgram")
-			// Run all optimization passes, which are much more effective now
-			// that the optimizer can see the whole program at once.
-			err := optimizeProgram(mod, config)
+			// Run interp for runtime.initAll, then LowerInterfaces +
+			// LowerInterrupts for dispatch stubs. Skip ALL LLVM optimization
+			// passes - they miscompile interface dispatch (proven: setBlock
+			// writes through wrong pointer after optimization).
+			logMem("before interp.Run")
+			err := interp.Run(mod, config.Options.InterpTimeout, config.DumpSSA())
 			if err != nil {
 				return err
 			}
-			logMem("after optimizeProgram")
+			logMem("after interp.Run")
+			err = transform.LowerInterfaces(mod, config)
+			if err != nil {
+				return err
+			}
+			errs := transform.LowerInterrupts(mod)
+			if len(errs) > 0 {
+				return errs[0]
+			}
+			// globaldce removes unreachable functions (assembly stubs etc.)
+			po := llvm.NewPassBuilderOptions()
+			mod.RunPasses("globaldce", llvm.TargetMachine{}, po)
+			po.Dispose()
+			logMem("after LowerInterfaces")
 
 			// Make sure stack sizes are loaded from a separate section so they can be
 			// modified after linking.
