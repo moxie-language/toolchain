@@ -544,11 +544,11 @@ func TypeCheckOnly(src []byte, name string) {
 	arena := runtime.ArenaNew(uintptr(len(src)) * 16)
 	TypesArena = arena
 	pkg, file := typeCheckPkg(src, name, arena)
+	TypesArena = nil
 	if pkg != nil && file != nil {
 		registerCompiledExports(pkg)
 	}
 	ScanGenericDecls(src, name)
-	TypesArena = nil
 	if pkg != nil {
 		pkg.Release()
 	}
@@ -588,9 +588,14 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 		releasePerPkgState()
 		return out
 	}
+	// Register exports BEFORE arena free - pkg is arena-allocated.
+	// TypesArena is nil so registry objects go to heap (survive the arena).
+	if pkg != nil {
+		registerCompiledExports(pkg)
+	}
 	prog := NewSSAProgram()
 	ssaPkg := prog.CreatePackage(pkg, []*syntax.File{file}, nil)
-	// Parse tree consumed by SSA builder - free arena now.
+	// Parse tree + type objects consumed by SSA builder - free arena now.
 	runtime.ArenaFree(arena)
 
 	emitter := newIREmitter(ssaPkg, triple)
@@ -605,19 +610,10 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 			out = out | "; " | ce | "\n"
 		}
 		free(ir)
-		if pkg != nil {
-			pkg.Release()
-		}
 		releasePerPkgState()
 		return out
 	}
 
-	if len(ir) > 0 && ir[0] != ';' {
-		registerCompiledExports(pkg)
-	}
-	if pkg != nil {
-		pkg.Release()
-	}
 	releasePerPkgState()
 	return ir
 }
