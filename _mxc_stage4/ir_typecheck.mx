@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"runtime"
 	"git.smesh.lol/moxie/pkg/syntax"
 	"git.smesh.lol/moxie/pkg/mxutil"
@@ -41,6 +42,7 @@ type compileCtx struct {
 	irResults            []string
 	compileExportMap     map[string]string
 	compileArena         *runtime.Arena
+	irOutputFile         string
 }
 
 var cctx *compileCtx
@@ -611,7 +613,18 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	prog := NewSSAProgram()
 	ssaPkg := prog.CreatePackage(pkg, []*syntax.File{file}, nil)
 	emitter := newIREmitter(ssaPkg, triple, int32(len(cctx.tcPkgSrc)))
+	// Stream IR to file if output path was set by caller.
+	if cctx.irOutputFile != "" {
+		f, ferr := os.Create(cctx.irOutputFile)
+		if ferr == nil {
+			emitter.outFile = f
+		}
+	}
 	ir := emitter.emit()
+	if emitter.outFile != nil {
+		emitter.outFile.Close()
+		emitter.outFile = nil
+	}
 	SetTypesArena(nil)
 	// Release SSA and emitter objects - no longer needed after IR text emitted.
 	emitter.releaseAfterEmit()
@@ -774,14 +787,14 @@ func compileTargetOS() (s string) {
 	if lIndexByte(cctx.compileTargetTriple, '-') >= 0 {
 		rest := cctx.compileTargetTriple[lIndexByte(cctx.compileTargetTriple, '-')+1:]
 		if lIndexByte(rest, '-') >= 0 {
-			os := rest[lIndexByte(rest, '-')+1:]
-			if mxutil.HasPrefix(os, "linux") {
+			osName := rest[lIndexByte(rest, '-')+1:]
+			if mxutil.HasPrefix(osName, "linux") {
 				return "linux"
 			}
-			if mxutil.HasPrefix(os, "darwin") {
+			if mxutil.HasPrefix(osName, "darwin") {
 				return "darwin"
 			}
-			if mxutil.HasPrefix(os, "js") || mxutil.HasPrefix(os, "wasi") {
+			if mxutil.HasPrefix(osName, "js") || mxutil.HasPrefix(osName, "wasi") {
 				return "js"
 			}
 		}

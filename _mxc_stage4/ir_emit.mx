@@ -2,12 +2,14 @@ package main
 
 import (
 	"math"
+	"os"
 	"git.smesh.lol/moxie/pkg/mxutil"
 	. "git.smesh.lol/moxie/pkg/types"
 )
 
 type irEmitter struct {
 	buf        []byte
+	outFile    *os.File // streaming output; nil = accumulate in buf
 	triple     string
 	ptrBits    int32
 	pkg        *SSAPackage
@@ -87,6 +89,15 @@ func newIREmitter(pkg *SSAPackage, triple string, srcLen int32) (p *irEmitter) {
 
 func (e *irEmitter) w(s string) {
 	e.buf |= s
+}
+
+// flush writes accumulated buf to the output file and resets.
+// Called after each function's IR is complete (post alloca-hoist).
+func (e *irEmitter) flush() {
+	if e.outFile != nil && len(e.buf) > 0 {
+		e.outFile.Write(e.buf)
+		e.buf = e.buf[:0]
+	}
 }
 
 // hoistAllocaText moves every alloca line emitted since start to the top of
@@ -478,6 +489,7 @@ func (e *irEmitter) emit() (s string) {
 		}
 	}
 
+	e.flush()
 	for _, member := range e.pkgMembers() {
 		switch m := member.(type) {
 		case *SSAGlobal:
@@ -486,11 +498,13 @@ func (e *irEmitter) emit() (s string) {
 			}
 		}
 	}
+	e.flush()
 	for _, member := range e.pkgMembers() {
 		if m, ok := member.(*SSAFunction); ok {
 			checkUseAfterFree(m)
 			e.emitFunction(m)
 			e.emitAnonFuncs(m)
+			e.flush()
 			m.Blocks = nil
 			m.Locals = nil
 			m.Params = nil
@@ -577,6 +591,7 @@ func (e *irEmitter) emit() (s string) {
 		e.w("attributes #" | wa[0] | " = { \"wasm-import-module\"=\"" | wa[1] | "\" \"wasm-import-name\"=\"" | wa[2] | "\" }\n")
 	}
 
+	e.flush()
 	return string(e.buf)
 }
 

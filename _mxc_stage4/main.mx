@@ -1855,7 +1855,9 @@ func compileSource(src []byte, pkgName, triple, pkgDir string) (s string) {
 		mxutil.WriteStr(2, remapErrorLines(ir))
 		fatal("compile error for " | pkgName)
 	}
-	if len(ir) == 0 {
+	// When streaming (irOutputFile set), IR is written to file directly.
+	// Empty ir string is expected - the file has the content.
+	if len(ir) == 0 && cctx.irOutputFile == "" {
 		fatal("empty IR for " | pkgName)
 	}
 	return ir
@@ -3722,13 +3724,20 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 
 		mxutil.WriteStr(2, "  compile " | pkg.path | "\n")
 		src := concatSources(pkg.dir, pkg.files)
+		llFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".ll")
+		// Stream IR directly to .ll file to avoid accumulating entire
+		// package IR in memory (unicode/tables.mx produces ~10MB IR).
+		cctx.irOutputFile = llFile
 		ir := compileSource(src, compilePath, triple, pkg.dir)
+		cctx.irOutputFile = ""
 		free(src)
-		if printIR {
+		if printIR && len(ir) > 0 {
 			mxutil.WriteStr(1, ir)
 		}
-		llFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".ll")
-		writeFile(llFile, []byte(ir), 0644)
+		if len(ir) > 0 {
+			// Non-streaming fallback (error messages start with ';')
+			writeFile(llFile, []byte(ir), 0644)
+		}
 		free(ir)
 		bcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc")
 		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
