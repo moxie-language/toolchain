@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"git.smesh.lol/moxie/pkg/mxutil"
 )
 
@@ -214,8 +213,7 @@ func scanWasmImportMap(src []byte, pkgPath string) (m map[string][2]string) {
 
 func stripDuplicatePackageClauses(src []byte) (buf []byte) {
 	found := false
-	var w bytes.Buffer
-	needsRewrite := false
+	var out []byte
 	i := 0
 	for i < len(src) {
 		nlIdx := lIndexByte(src[i:], '\n')
@@ -231,151 +229,128 @@ func stripDuplicatePackageClauses(src []byte) (buf []byte) {
 		trimmed := lTrimSpace(line)
 		if lHasPrefix(trimmed, "package ") {
 			if found {
-				if !needsRewrite {
-					needsRewrite = true
-					w.Grow(len(src))
-					w.Write(src[:i])
+				if out == nil {
+					out = []byte{:0:len(src)}
+					out = out | src[:i]
 				}
 				for k := 0; k < len(line); k++ {
-					w.WriteByte(' ')
+					out = append(out, ' ')
 				}
 				if nlIdx >= 0 {
-					w.WriteByte('\n')
+					out = append(out, '\n')
 				}
 				i = lineEnd
 				continue
 			}
 			found = true
 		}
-		if needsRewrite {
-			w.Write(src[i:lineEnd])
+		if out != nil {
+			out = out | src[i:lineEnd]
 		}
 		i = lineEnd
 	}
-	if !needsRewrite {
+	if out == nil {
 		return src
 	}
-	return w.Bytes()
+	return out
 }
 
 func stripDuplicatePackageClauses2(src []byte) (buf []byte) {
 	found := false
-	needsRewrite := false
-	// First pass: check if rewrite needed.
+	var out []byte
 	i := int32(0)
-	for i < len(src) {
-		ls := i
-		for ls < len(src) && (src[ls] == ' ' || src[ls] == '\t') {
-			ls++
-		}
-		lineEnd := ls
-		for lineEnd < len(src) && src[lineEnd] != '\n' {
-			lineEnd++
-		}
-		if lineEnd-ls >= 8 && src[ls] == 'p' && src[ls+1] == 'a' && src[ls+2] == 'c' && src[ls+3] == 'k' && src[ls+4] == 'a' && src[ls+5] == 'g' && src[ls+6] == 'e' && src[ls+7] == ' ' {
-			if found {
-				needsRewrite = true
-				break
-			}
-			found = true
-		}
-		i = lineEnd
-		if i < len(src) {
-			i++
-		}
-	}
-	if !needsRewrite {
-		return src
-	}
-	// Second pass: write to bytes.Buffer, replace duplicate package lines.
-	var w bytes.Buffer
-	w.Grow(len(src))
-	found = false
-	i = 0
 	for i < len(src) {
 		lineStart := i
 		for i < len(src) && src[i] != '\n' {
 			i++
 		}
 		lineEnd := i
-		if i < len(src) {
+		if i < int32(len(src)) {
 			i++
 		}
 		ls := lineStart
 		for ls < lineEnd && (src[ls] == ' ' || src[ls] == '\t') {
 			ls++
 		}
-		isPkg := lineEnd-ls >= 8 && src[ls] == 'p' && src[ls+1] == 'a' && src[ls+2] == 'c' && src[ls+3] == 'k' && src[ls+4] == 'a' && src[ls+5] == 'g' && src[ls+6] == 'e' && src[ls+7] == ' '
-		if isPkg && found {
-			for k := lineStart; k < lineEnd; k++ {
-				w.WriteByte(' ')
-			}
-			if lineEnd < len(src) {
-				w.WriteByte('\n')
-			}
-			continue
+		isPkg := false
+		if lineEnd-ls >= 8 && src[ls] == 'p' && src[ls+1] == 'a' && src[ls+2] == 'c' && src[ls+3] == 'k' && src[ls+4] == 'a' && src[ls+5] == 'g' && src[ls+6] == 'e' && src[ls+7] == ' ' {
+			isPkg = true
 		}
 		if isPkg {
+			if found {
+				if out == nil {
+					out = []byte{:0:len(src)}
+					out = out | src[:lineStart]
+				}
+				for k := lineStart; k < lineEnd; k++ {
+					out = append(out, ' ')
+				}
+				if lineEnd < int32(len(src)) {
+					out = append(out, '\n')
+				}
+				continue
+			}
 			found = true
 		}
-		w.Write(src[lineStart:i])
+		if out != nil {
+			out = out | src[lineStart:i]
+		}
 	}
-	return w.Bytes()
+	if out == nil {
+		return src
+	}
+	return out
 }
 
 func rewriteSliceMakeLiterals(src []byte) (buf []byte) {
-	// Fast path: no {:
-	if lIndex(src, []byte("{:")) < 0 {
-		return src
-	}
-	var w bytes.Buffer
-	if len(src) > 0 {
-		w.Grow(len(src))
-	}
+	var out []byte
 	i := 0
 	for i < len(src) {
 		start := lIndex(src[i:], []byte("{:"))
 		if start < 0 {
-			w.Write(src[i:])
+			out = out | src[i:]
 			break
 		}
 		start = start + i
 		lbrack := findSliceTypeStart(src, start)
 		if lbrack < 0 {
-			w.Write(src[i : start+2])
+			out = out | src[i:start+2]
 			i = start + 2
 			continue
 		}
 		closeIdx := findMatchingBrace(src, start)
 		if closeIdx < 0 {
-			w.Write(src[i : start+2])
+			out = out | src[i:start+2]
 			i = start + 2
 			continue
 		}
 		inner := src[start+2 : closeIdx]
 		colonIdx := lIndexByte(inner, ':')
 		typeText := src[lbrack:start]
-		w.Write(src[i:lbrack])
+		out = out | src[i:lbrack]
 		if colonIdx < 0 {
-			w.Write([]byte("__slicealloc("))
-			w.Write(typeText)
-			w.Write([]byte(", "))
-			w.Write(lTrimSpace(inner))
-			w.WriteByte(')')
+			out = out | "__slicealloc("
+			out = out | typeText
+			out = out | ", "
+			out = out | lTrimSpace(inner)
+			out = append(out, ')')
 		} else {
 			lenExpr := lTrimSpace(inner[:colonIdx])
 			capExpr := lTrimSpace(inner[colonIdx+1:])
-			w.Write([]byte("__slicealloc("))
-			w.Write(typeText)
-			w.Write([]byte(", "))
-			w.Write(lenExpr)
-			w.Write([]byte(", "))
-			w.Write(capExpr)
-			w.WriteByte(')')
+			out = out | "__slicealloc("
+			out = out | typeText
+			out = out | ", "
+			out = out | lenExpr
+			out = out | ", "
+			out = out | capExpr
+			out = append(out, ')')
 		}
 		i = closeIdx + 1
 	}
-	return w.Bytes()
+	if out == nil {
+		return src
+	}
+	return out
 }
 
 func findSliceTypeStart(src []byte, braceIdx int32) (n int32) {
@@ -452,17 +427,14 @@ func findMatchingBrace(src []byte, openIdx int32) (n int32) {
 
 func rewriteChanMakeLiterals(src []byte) (buf []byte) {
 	chanKw := []byte("chan ")
-	if lIndex(src, chanKw) < 0 {
-		return src
-	}
-	var w bytes.Buffer
-	w.Grow(len(src))
+	var out []byte
 	i := 0
-	written := false
 	for i < len(src) {
 		idx := lIndex(src[i:], chanKw)
 		if idx < 0 {
-			w.Write(src[i:])
+			if out != nil {
+				out = out | src[i:]
+			}
 			break
 		}
 		idx = idx + i
@@ -471,11 +443,15 @@ func rewriteChanMakeLiterals(src []byte) (buf []byte) {
 			j++
 		}
 		if j >= len(src) {
-			w.Write(src[i:])
+			if out != nil {
+				out = out | src[i:]
+			}
 			break
 		}
 		if src[j] == '<' && j+1 < len(src) && src[j+1] == '-' {
-			w.Write(src[i : j+2])
+			if out != nil {
+				out = out | src[i:j+2]
+			}
 			i = j + 2
 			continue
 		}
@@ -486,8 +462,12 @@ func rewriteChanMakeLiterals(src []byte) (buf []byte) {
 			j++
 		}
 		if j >= len(src) || src[j] != '{' {
-			w.Write(src[i : idx+4])
-			i = idx + 4
+			if out == nil {
+				i = idx + 4
+			} else {
+				out = out | src[i:idx+4]
+				i = idx + 4
+			}
 			continue
 		}
 		braceOpen := j
@@ -496,46 +476,64 @@ func rewriteChanMakeLiterals(src []byte) (buf []byte) {
 		if endsStruct || endsIface {
 			typeClose := findMatchingBrace(src, braceOpen)
 			if typeClose < 0 {
-				w.Write(src[i : idx+4])
-				i = idx + 4
+				if out == nil {
+					i = idx + 4
+				} else {
+					out = out | src[i:idx+4]
+					i = idx + 4
+				}
 				continue
 			}
 			k := typeClose + 1
+			// Channel literal requires '{' immediately after struct{}/interface{} closing '}'.
+			// Any whitespace means it's NOT a literal (e.g. return type before function body).
 			if k >= len(src) || src[k] != '{' {
-				w.Write(src[i : typeClose+1])
-				i = typeClose + 1
+				if out == nil {
+					i = typeClose + 1
+				} else {
+					out = out | src[i:typeClose+1]
+					i = typeClose + 1
+				}
 				continue
 			}
 			braceOpen = k
 		}
 		closeIdx := findMatchingBrace(src, braceOpen)
 		if closeIdx < 0 {
-			w.Write(src[i : idx+4])
-			i = idx + 4
+			if out == nil {
+				i = idx + 4
+			} else {
+				out = out | src[i:idx+4]
+				i = idx + 4
+			}
 			continue
 		}
 		inner := lTrimSpace(src[braceOpen+1 : closeIdx])
-		chanType := src[idx:braceOpen]
+		chanType := src[idx : braceOpen]
 		for len(chanType) > 0 && (chanType[len(chanType)-1] == ' ' || chanType[len(chanType)-1] == '\t') {
 			chanType = chanType[:len(chanType)-1]
 		}
-		written = true
-		w.Write(src[i:idx])
-		if len(inner) == 0 {
-			w.Write([]byte("__slicealloc("))
-			w.Write(chanType)
-			w.WriteByte(')')
+		if out == nil {
+			out = []byte{:0:len(src)}
+			out = out | src[:idx]
 		} else {
-			w.Write([]byte("__slicealloc("))
-			w.Write(chanType)
-			w.Write([]byte(", "))
-			w.Write(inner)
-			w.WriteByte(')')
+			out = out | src[i:idx]
+		}
+		if len(inner) == 0 {
+			out = out | "__slicealloc("
+			out = out | chanType
+			out = append(out, ')')
+		} else {
+			out = out | "__slicealloc("
+			out = out | chanType
+			out = out | ", "
+			out = out | inner
+			out = append(out, ')')
 		}
 		i = closeIdx + 1
 	}
-	if !written {
+	if out == nil {
 		return src
 	}
-	return w.Bytes()
+	return out
 }

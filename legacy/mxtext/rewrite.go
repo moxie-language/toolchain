@@ -2926,12 +2926,19 @@ func ApplyPipeRewrites(files []*ast.File, rewrites []PipeRewrite) {
 // replaceInNode walks a node and replaces any child expressions that are
 // in the rewrite set with __moxie_concat(left, right) calls.
 func replaceInNode(node ast.Node, set map[*ast.BinaryExpr]bool) {
+	// Collect parameter names for the enclosing function so we can
+	// distinguish owned locals (move OK) from borrowed params (move unsafe).
+	var paramNames map[string]bool
 	ast.Inspect(node, func(n ast.Node) bool {
 		switch parent := n.(type) {
+		case *ast.FuncDecl:
+			paramNames = collectParamNames(parent.Type)
+		case *ast.FuncLit:
+			paramNames = collectParamNames(parent.Type)
 		case *ast.AssignStmt:
 			for i, rhs := range parent.Rhs {
 				if parent.Tok == token.ASSIGN && i < len(parent.Lhs) {
-					parent.Rhs[i] = maybeReplacePipeMove(rhs, set, parent.Lhs[i])
+					parent.Rhs[i] = maybeReplacePipeMove(rhs, set, parent.Lhs[i], paramNames)
 				} else {
 					parent.Rhs[i] = maybeReplacePipe(rhs, set)
 				}
@@ -3008,22 +3015,51 @@ func replacePipeChainBorrow(bin *ast.BinaryExpr, set map[*ast.BinaryExpr]bool) a
 }
 
 // maybeReplacePipeMove: for `x = x | a | b | c` (= assignment, not :=).
-// If the leftmost leaf of the pipe chain matches the assignment target,
-// ALL pipes in the chain become __moxie_concat_move. Each move extends
-// the buffer in place, passing the growing buffer through the chain.
-func maybeReplacePipeMove(expr ast.Expr, set map[*ast.BinaryExpr]bool, assignTarget ast.Expr) ast.Expr {
+// If the leftmost leaf of the pipe chain matches the assignment target
+// AND the target is not a function parameter (borrowed from caller),
+// ALL pipes in the chain become __moxie_concat_move.
+func maybeReplacePipeMove(expr ast.Expr, set map[*ast.BinaryExpr]bool, assignTarget ast.Expr, params map[string]bool) ast.Expr {
 	bin, ok := expr.(*ast.BinaryExpr)
 	if !ok || !set[bin] {
 		return expr
 	}
-	// Check if the leftmost leaf of the chain matches the assign target.
-	if sameExprIdent(pipeChainLeftmost(bin, set), assignTarget) {
+	leftmost := pipeChainLeftmost(bin, set)
+	// Check: leftmost matches assign target AND target is not a parameter.
+	// Parameters are borrowed from the caller - freeing their buffer on
+	// growth is use-after-free. Only locals and struct fields are owned.
+	if sameExprIdent(leftmost, assignTarget) && !isParamIdent(assignTarget, params) {
 		return replacePipeChainMove(bin, set)
 	}
-	return &ast.CallExpr{
-		Fun:  &ast.Ident{Name: "__moxie_concat"},
-		Args: []ast.Expr{wrapForMoxieConcat(bin.X), wrapForMoxieConcat(bin.Y)},
+	// Fall back to borrow (with chain optimization for intermediates).
+	return maybeReplacePipe(expr, set)
+}
+
+// collectParamNames extracts parameter names from a function type.
+func collectParamNames(ft *ast.FuncType) map[string]bool {
+	if ft == nil || ft.Params == nil {
+		return nil
 	}
+	names := map[string]bool{}
+	for _, field := range ft.Params.List {
+		for _, name := range field.Names {
+			names[name.Name] = true
+		}
+	}
+	// Also collect receiver names from results (named returns are owned).
+	return names
+}
+
+// isParamIdent returns true if the expression is a simple identifier
+// that names a function parameter.
+func isParamIdent(expr ast.Expr, params map[string]bool) bool {
+	if params == nil {
+		return false
+	}
+	ident, ok := expr.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	return params[ident.Name]
 }
 
 // pipeChainLeftmost returns the leftmost non-pipe operand of a chain.
