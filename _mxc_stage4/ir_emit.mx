@@ -526,7 +526,7 @@ func (e *irEmitter) emit() (s string) {
 			e.w("declare ")
 			e.w(decl)
 			// Check for wasm import attributes
-			if len(wasmImportMap) > 0 {
+			if len(cctx.wasmImportMap) > 0 {
 				sym := k
 				if len(sym) > 0 && sym[0] == '@' {
 					sym = sym[1:]
@@ -534,7 +534,7 @@ func (e *irEmitter) emit() (s string) {
 				if len(sym) >= 2 && sym[0] == '"' && sym[len(sym)-1] == '"' {
 					sym = sym[1 : len(sym)-1]
 				}
-				if wi, ok := wasmImportMap[sym]; ok {
+				if wi, ok := cctx.wasmImportMap[sym]; ok {
 					e.wasmAttrID++
 					aid := e.wasmAttrID
 					e.w(" #" | simpleItoa(aid))
@@ -574,7 +574,14 @@ func (e *irEmitter) emit() (s string) {
 }
 
 func (e *irEmitter) releaseAfterEmit() {
-	// e.buf is returned as ir to the caller; caller frees it
+	// e.buf is returned as ir to the caller; caller frees it.
+	// NOTE: free(map) only frees the hashmap header (~32B), NOT the
+	// internal bucket array. Until the runtime has hashmapDeepFree,
+	// free(map) leaks bucket storage. For maps that won't be reused,
+	// clear() zeros the entry data but the buckets still leak.
+	// This is a known limitation - the OOM fix requires either:
+	// 1. Compiler-generated hashmapDeepFree calls for free(map)
+	// 2. Or reusing the emitter struct across functions
 	free(e.valName)
 	free(e.extDecls)
 	free(e.extGlobals)
@@ -598,6 +605,7 @@ func (e *irEmitter) releaseAfterEmit() {
 	free(e.scopeAllocs)
 	free(e.valToSlot)
 	free(e.instrScope)
+	free(e)
 }
 
 func (e *irEmitter) pkgMembers() (ss []SSAMember) {
@@ -622,7 +630,7 @@ func (e *irEmitter) pkgMembers() (ss []SSAMember) {
 
 func (e *irEmitter) emitGlobal(g *SSAGlobal) {
 	name := e.globalName(g)
-	if ei, ok := embedVars[g.name]; ok {
+	if ei, ok := cctx.embedVars[g.name]; ok {
 		e.emitEmbedGlobal(g, name, ei)
 		return
 	}
@@ -639,13 +647,13 @@ func (e *irEmitter) emitEmbedGlobal(g *SSAGlobal, name string, ei *embedInfo) {
 	if !ok {
 		// Fail loud: a zeroinitializer embed global is a nil slice at runtime
 		// and SIGSEGVs far from the cause.
-		compileErrors = append(compileErrors, "embed: file not found: "|ei.path)
+		cctx.compileErrors = append(cctx.compileErrors, "embed: file not found: "|ei.path)
 		e.w(name | " = " | e.tlsPrefix() | e.sliceType() | " zeroinitializer\n")
 		return
 	}
 	elemSize := e.embedElemSize(ei.elemType)
 	if elemSize <= 0 {
-		compileErrors = append(compileErrors, "embed: unknown element type: "|ei.elemType|" for "|ei.path)
+		cctx.compileErrors = append(cctx.compileErrors, "embed: unknown element type: "|ei.elemType|" for "|ei.path)
 		e.w(name | " = " | e.tlsPrefix() | e.sliceType() | " zeroinitializer\n")
 		return
 	}
@@ -742,8 +750,8 @@ func (e *irEmitter) funcSymbol(f *SSAFunction) (s string) {
 		}
 		return "@" | sym
 	}
-	if linknameMap != nil {
-		if target, ok := linknameMap[f.name]; ok {
+	if cctx.linknameMap != nil {
+		if target, ok := cctx.linknameMap[f.name]; ok {
 			if irNeedsQuote(target) {
 				return "@\"" | target | "\""
 			}
@@ -815,8 +823,8 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		// If function has a linkname, the declare uses the target symbol
 		// but consuming packages reference the original fully-qualified name.
 		// Emit a forwarding wrapper so the linker can resolve both.
-		if linknameMap != nil {
-			if target, ok := linknameMap[f.name]; ok {
+		if cctx.linknameMap != nil {
+			if target, ok := cctx.linknameMap[f.name]; ok {
 				_ = target
 				pkg := e.pkg.Pkg.Path
 				if f.Pkg != nil {
@@ -1123,11 +1131,11 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 	}
 	// Check for wasm import BEFORE deciding on context ptr
 	isWasmImport := false
-	if len(wasmImportMap) > 0 {
+	if len(cctx.wasmImportMap) > 0 {
 		wsym := sym
 		if len(wsym) > 0 && wsym[0] == '@' { wsym = wsym[1:] }
 		if len(wsym) >= 2 && wsym[0] == '"' && wsym[len(wsym)-1] == '"' { wsym = wsym[1 : len(wsym)-1] }
-		_, isWasmImport = wasmImportMap[wsym]
+		_, isWasmImport = cctx.wasmImportMap[wsym]
 	}
 	if !isIntrinsic && !isWasmImport {
 		if n > 0 { e.w(", ") }
@@ -1139,7 +1147,7 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 		wsym := sym
 		if len(wsym) > 0 && wsym[0] == '@' { wsym = wsym[1:] }
 		if len(wsym) >= 2 && wsym[0] == '"' && wsym[len(wsym)-1] == '"' { wsym = wsym[1 : len(wsym)-1] }
-		wi := wasmImportMap[wsym]
+		wi := cctx.wasmImportMap[wsym]
 		e.wasmAttrID++
 		aid := e.wasmAttrID
 		e.w(" #" | simpleItoa(aid))

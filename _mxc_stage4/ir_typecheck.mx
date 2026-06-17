@@ -7,23 +7,41 @@ import (
 	. "git.smesh.lol/moxie/pkg/types"
 )
 
-var parseErrors []string
-var compileErrors []string
-var genericFuncDecls map[string]*syntax.FuncDecl
-
-// Non-generic top-level funcs of generic-bearing packages: a monomorphized
-// body may call package-local helpers that exist only in that package's
-// compiled object as unexported symbols, so they must be instantiated into
-// the calling module too.
-var genericPkgLocalDecls map[string]*syntax.FuncDecl
-var genericPkgScopes map[string]*Scope
-var compilePkgDir string
-
 type embedInfo struct {
 	path     string
 	elemType string
 }
-var embedVars map[string]*embedInfo
+
+// compileCtx holds all per-package compilation state and cross-package
+// generic declaration state. Allocated once at init and never reassigned;
+// fields are mutated through the pointer.
+type compileCtx struct {
+	parseErrors          []string
+	compileErrors        []string
+	constValMap          map[string]int64
+	embedVars            map[string]*embedInfo
+	linknameMap          map[string]string
+	wasmImportMap        map[string][2]string
+	tcPkgSrc             []byte
+	compilePkgDir        string
+	compileTargetTriple  string
+	concatSourceMap      []srcSpan
+	genericPkgLocalDecls map[string]*syntax.FuncDecl
+	genericPkgScopes     map[string]*Scope
+	typeDescPkgPath      string
+	parseTypePkgScope    *Scope
+	genericFuncDecls     map[string]*syntax.FuncDecl
+	irResults            []string
+	compileExportMap     map[string]string
+}
+
+var cctx *compileCtx
+
+func initCompileCtx() {
+	if cctx == nil {
+		cctx = &compileCtx{}
+	}
+}
 
 func typeCheckPkg(src []byte, name string) (pkg *TCPackage, file *syntax.File) {
 	InitUniverse()
@@ -44,16 +62,16 @@ func typeCheckPkg(src []byte, name string) (pkg *TCPackage, file *syntax.File) {
 		return nil, nil
 	}
 
-	parseErrors = nil
-	constValMap = nil
+	cctx.parseErrors = nil
+	cctx.constValMap = nil
 	errh := func(err error) {
-		parseErrors = append(parseErrors, err.Error())
+		cctx.parseErrors = append(cctx.parseErrors, err.Error())
 	}
-	tcPkgSrc = src
-	syntax.CompileExportMap = scanExportPragmas(src)
+	cctx.tcPkgSrc = src
+	cctx.compileExportMap = scanExportPragmas(src)
 	file, _ := syntax.ParseBytes(token.NewFileBase(name|".mx"), src, errh, nil, 0)
 	if file == nil {
-		for ei := int32(0); ei < int32(len(parseErrors)) && ei < 5; ei++ {
+		for ei := int32(0); ei < int32(len(cctx.parseErrors)) && ei < 5; ei++ {
 		}
 		return nil, nil
 	}
@@ -178,10 +196,10 @@ func typeCheckPkg(src []byte, name string) (pkg *TCPackage, file *syntax.File) {
 				for _, n := range cd.NameList {
 					if val != nil {
 						if ci, ok2 := val.(*ConstInt); ok2 {
-							if constValMap == nil {
-								constValMap = map[string]int64{}
+							if cctx.constValMap == nil {
+								cctx.constValMap = map[string]int64{}
 							}
-							constValMap[n.Value] = ci.V
+							cctx.constValMap[n.Value] = ci.V
 						}
 					}
 					obj := scope.Lookup(n.Value)
@@ -268,10 +286,10 @@ func typeCheckPkg(src []byte, name string) (pkg *TCPackage, file *syntax.File) {
 		case *syntax.FuncDecl:
 			if dd.Recv == nil && dd.Name.Value != "init" {
 				if len(dd.TParamList) > 0 {
-					if genericFuncDecls == nil {
-						genericFuncDecls = map[string]*syntax.FuncDecl{}
+					if cctx.genericFuncDecls == nil {
+						cctx.genericFuncDecls = map[string]*syntax.FuncDecl{}
 					}
-					genericFuncDecls[name+"."+dd.Name.Value] = dd
+					cctx.genericFuncDecls[name+"."+dd.Name.Value] = dd
 					continue
 				}
 				sig := tcResolveFuncInline(dd.Type, scope)
@@ -330,27 +348,36 @@ func typeCheckPkg(src []byte, name string) (pkg *TCPackage, file *syntax.File) {
 }
 
 func releasePerPkgState() {
-	free(parseErrors)
-	parseErrors = nil
-	free(compileErrors)
-	compileErrors = nil
-	free(constValMap)
-	constValMap = nil
-	syntax.CompileExportMap = nil
-	free(tcPkgSrc)
-	tcPkgSrc = nil
-	free(embedVars)
-	embedVars = nil
-	free(linknameMap)
-	linknameMap = nil
-	free(wasmImportMap)
-	wasmImportMap = nil
-	free(concatSourceMap)
-	concatSourceMap = nil
-	free(genericPkgLocalDecls)
-	genericPkgLocalDecls = nil
-	free(genericPkgScopes)
-	genericPkgScopes = nil
+	// Clear slices by reslicing to zero - retains backing array for reuse.
+	cctx.parseErrors = cctx.parseErrors[:0]
+	cctx.compileErrors = cctx.compileErrors[:0]
+	cctx.concatSourceMap = cctx.concatSourceMap[:0]
+	// Free source bytes (large, not reusable).
+	free(cctx.tcPkgSrc)
+	cctx.tcPkgSrc = nil
+	// Clear maps for reuse - retains bucket storage, avoids reallocation.
+	// clear() zeros entries without freeing the underlying bucket array.
+	if cctx.constValMap != nil {
+		clear(cctx.constValMap)
+	}
+	if cctx.compileExportMap != nil {
+		clear(cctx.compileExportMap)
+	}
+	if cctx.embedVars != nil {
+		clear(cctx.embedVars)
+	}
+	if cctx.linknameMap != nil {
+		clear(cctx.linknameMap)
+	}
+	if cctx.wasmImportMap != nil {
+		clear(cctx.wasmImportMap)
+	}
+	if cctx.genericPkgLocalDecls != nil {
+		clear(cctx.genericPkgLocalDecls)
+	}
+	if cctx.genericPkgScopes != nil {
+		clear(cctx.genericPkgScopes)
+	}
 }
 
 func ScanGenericDecls(src []byte, name string) {
@@ -437,15 +464,15 @@ func ScanGenericDecls(src []byte, name string) {
 		case *syntax.FuncDecl:
 			if dd.Recv == nil && dd.Name != nil && dd.Name.Value != "init" {
 				if len(dd.TParamList) > 0 {
-					if genericFuncDecls == nil {
-						genericFuncDecls = map[string]*syntax.FuncDecl{}
+					if cctx.genericFuncDecls == nil {
+						cctx.genericFuncDecls = map[string]*syntax.FuncDecl{}
 					}
-					genericFuncDecls[name+"."+dd.Name.Value] = dd
+					cctx.genericFuncDecls[name+"."+dd.Name.Value] = dd
 				} else {
-					if genericPkgLocalDecls == nil {
-						genericPkgLocalDecls = map[string]*syntax.FuncDecl{}
+					if cctx.genericPkgLocalDecls == nil {
+						cctx.genericPkgLocalDecls = map[string]*syntax.FuncDecl{}
 					}
-					genericPkgLocalDecls[name+"."+dd.Name.Value] = dd
+					cctx.genericPkgLocalDecls[name+"."+dd.Name.Value] = dd
 				}
 			}
 			if dd.Recv == nil && dd.Name != nil {
@@ -505,10 +532,10 @@ func ScanGenericDecls(src []byte, name string) {
 			}
 		}
 	}
-	if genericPkgScopes == nil {
-		genericPkgScopes = map[string]*Scope{}
+	if cctx.genericPkgScopes == nil {
+		cctx.genericPkgScopes = map[string]*Scope{}
 	}
-	genericPkgScopes[name] = scope
+	cctx.genericPkgScopes[name] = scope
 }
 
 func TypeCheckOnly(src []byte, name string) {
@@ -528,15 +555,15 @@ func releaseFileDeep(f *syntax.File) {
 }
 
 func CompileToIR(src []byte, name string, triple string) (s string) {
-	compileTargetTriple = triple
-	scanEmbedPragmas(src, compilePkgDir)
-	linknameMap = scanLinknameMap(src)
-	wasmImportMap = scanWasmImportMap(src, name)
+	cctx.compileTargetTriple = triple
+	scanEmbedPragmas(src, cctx.compilePkgDir)
+	cctx.linknameMap = scanLinknameMap(src)
+	cctx.wasmImportMap = scanWasmImportMap(src, name)
 	pkg, file := typeCheckPkg(src, name)
 	ScanGenericDecls(src, name)
 	if file == nil {
-		out := "; parse error parseErrs=" | simpleItoa(len(parseErrors)) | "\n"
-		for _, pe := range parseErrors {
+		out := "; parse error parseErrs=" | simpleItoa(len(cctx.parseErrors)) | "\n"
+		for _, pe := range cctx.parseErrors {
 			out = out | "; " | pe | "\n"
 		}
 		releasePerPkgState()
@@ -547,9 +574,9 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	emitter := newIREmitter(ssaPkg, triple)
 	ir := emitter.emit()
 
-	if len(compileErrors) > 0 {
+	if len(cctx.compileErrors) > 0 {
 		out := "; compile error\n"
-		for _, ce := range compileErrors {
+		for _, ce := range cctx.compileErrors {
 			out = out | "; " | ce | "\n"
 		}
 		free(ir)
@@ -700,26 +727,22 @@ func tcResolveFuncReturn(e syntax.Expr, scope *Scope) (t Type) {
 	return NewTuple(sig.Results.Vars...)
 }
 
-var constValMap map[string]int64
-var tcPkgSrc []byte
-var compileTargetTriple string
-
 func compileTargetArch() (s string) {
-	if mxutil.HasPrefix(compileTargetTriple, "x86_64") {
+	if mxutil.HasPrefix(cctx.compileTargetTriple, "x86_64") {
 		return "amd64"
 	}
-	if mxutil.HasPrefix(compileTargetTriple, "aarch64") {
+	if mxutil.HasPrefix(cctx.compileTargetTriple, "aarch64") {
 		return "arm64"
 	}
-	if mxutil.HasPrefix(compileTargetTriple, "wasm32") {
+	if mxutil.HasPrefix(cctx.compileTargetTriple, "wasm32") {
 		return "wasm"
 	}
 	return "amd64"
 }
 
 func compileTargetOS() (s string) {
-	if lIndexByte(compileTargetTriple, '-') >= 0 {
-		rest := compileTargetTriple[lIndexByte(compileTargetTriple, '-')+1:]
+	if lIndexByte(cctx.compileTargetTriple, '-') >= 0 {
+		rest := cctx.compileTargetTriple[lIndexByte(cctx.compileTargetTriple, '-')+1:]
 		if lIndexByte(rest, '-') >= 0 {
 			os := rest[lIndexByte(rest, '-')+1:]
 			if mxutil.HasPrefix(os, "linux") {
@@ -739,28 +762,28 @@ func compileTargetOS() (s string) {
 func resolveArrayLenFromSrc(p token.Pos, cmap map[string]int64) (n int64) {
 	line := p.Line()
 	col := p.Col()
-	if line == 0 || col == 0 || tcPkgSrc == nil {
+	if line == 0 || col == 0 || cctx.tcPkgSrc == nil {
 		return -1
 	}
 	off := 0
 	curLine := uint32(1)
-	for off < len(tcPkgSrc) && curLine < line {
-		if tcPkgSrc[off] == '\n' {
+	for off < len(cctx.tcPkgSrc) && curLine < line {
+		if cctx.tcPkgSrc[off] == '\n' {
 			curLine++
 		}
 		off++
 	}
 	off += int32(col) - 1
-	if off >= len(tcPkgSrc) || tcPkgSrc[off] != '[' {
+	if off >= len(cctx.tcPkgSrc) || cctx.tcPkgSrc[off] != '[' {
 		return -1
 	}
 	off++
-	for off < len(tcPkgSrc) && tcPkgSrc[off] == ' ' {
+	for off < len(cctx.tcPkgSrc) && cctx.tcPkgSrc[off] == ' ' {
 		off++
 	}
 	start := off
-	for off < len(tcPkgSrc) {
-		c := tcPkgSrc[off]
+	for off < len(cctx.tcPkgSrc) {
+		c := cctx.tcPkgSrc[off]
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
 			off++
 		} else {
@@ -770,21 +793,21 @@ func resolveArrayLenFromSrc(p token.Pos, cmap map[string]int64) (n int64) {
 	if off == start {
 		return -1
 	}
-	name := string(tcPkgSrc[start:off])
+	name := string(cctx.tcPkgSrc[start:off])
 	if v, ok := cmap[name]; ok {
-		if off < len(tcPkgSrc) && tcPkgSrc[off] == '+' {
+		if off < len(cctx.tcPkgSrc) && cctx.tcPkgSrc[off] == '+' {
 			off++
-			for off < len(tcPkgSrc) && tcPkgSrc[off] == ' ' {
+			for off < len(cctx.tcPkgSrc) && cctx.tcPkgSrc[off] == ' ' {
 				off++
 			}
 			numStart := off
-			for off < len(tcPkgSrc) && tcPkgSrc[off] >= '0' && tcPkgSrc[off] <= '9' {
+			for off < len(cctx.tcPkgSrc) && cctx.tcPkgSrc[off] >= '0' && cctx.tcPkgSrc[off] <= '9' {
 				off++
 			}
 			if off > numStart {
 				addend := int64(0)
 				for i := numStart; i < off; i++ {
-					addend = addend*10 + int64(tcPkgSrc[i]-'0')
+					addend = addend*10 + int64(cctx.tcPkgSrc[i]-'0')
 				}
 				return v + addend
 			}
@@ -794,7 +817,7 @@ func resolveArrayLenFromSrc(p token.Pos, cmap map[string]int64) (n int64) {
 	n := int64(0)
 	isNum := true
 	for i := start; i < off; i++ {
-		c := tcPkgSrc[i]
+		c := cctx.tcPkgSrc[i]
 		if c >= '0' && c <= '9' {
 			n = n*10 + int64(c-'0')
 		} else {
@@ -803,15 +826,15 @@ func resolveArrayLenFromSrc(p token.Pos, cmap map[string]int64) (n int64) {
 		}
 	}
 	if isNum && off > start {
-		for off < len(tcPkgSrc) && (tcPkgSrc[off] == ' ' || tcPkgSrc[off] == '\t') {
+		for off < len(cctx.tcPkgSrc) && (cctx.tcPkgSrc[off] == ' ' || cctx.tcPkgSrc[off] == '\t') {
 			off++
 		}
-		if off+2 < len(tcPkgSrc) && tcPkgSrc[off] == '<' && tcPkgSrc[off+1] == '<' {
+		if off+2 < len(cctx.tcPkgSrc) && cctx.tcPkgSrc[off] == '<' && cctx.tcPkgSrc[off+1] == '<' {
 			off += 2
-			for off < len(tcPkgSrc) && (tcPkgSrc[off] == ' ' || tcPkgSrc[off] == '\t') {
+			for off < len(cctx.tcPkgSrc) && (cctx.tcPkgSrc[off] == ' ' || cctx.tcPkgSrc[off] == '\t') {
 				off++
 			}
-			shiftVal := resolveLocalConst(tcPkgSrc, off, cmap)
+			shiftVal := resolveLocalConst(cctx.tcPkgSrc, off, cmap)
 			if shiftVal >= 0 {
 				return n << uint32(shiftVal)
 			}
@@ -870,24 +893,24 @@ func resolveArrayLenFromConstMap(e syntax.Expr, cmap map[string]int64) (n int64)
 	ep := e.Pos()
 	line := ep.Line()
 	col := ep.Col()
-	if line == 0 || col == 0 || tcPkgSrc == nil {
+	if line == 0 || col == 0 || cctx.tcPkgSrc == nil {
 		return -1
 	}
 	curLine := uint32(1)
 	off := 0
-	for off < len(tcPkgSrc) && curLine < line {
-		if tcPkgSrc[off] == '\n' {
+	for off < len(cctx.tcPkgSrc) && curLine < line {
+		if cctx.tcPkgSrc[off] == '\n' {
 			curLine++
 		}
 		off++
 	}
 	off += int32(col) - 1
-	if off >= len(tcPkgSrc) {
+	if off >= len(cctx.tcPkgSrc) {
 		return -1
 	}
 	start := off
-	for off < len(tcPkgSrc) {
-		c := tcPkgSrc[off]
+	for off < len(cctx.tcPkgSrc) {
+		c := cctx.tcPkgSrc[off]
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
 			off++
 		} else {
@@ -897,7 +920,7 @@ func resolveArrayLenFromConstMap(e syntax.Expr, cmap map[string]int64) (n int64)
 	if off == start {
 		return -1
 	}
-	name := string(tcPkgSrc[start:off])
+	name := string(cctx.tcPkgSrc[start:off])
 	if v, ok := cmap[name]; ok {
 		return v
 	}
@@ -953,8 +976,8 @@ func tcEvalConstExpr(e syntax.Expr, scope *Scope, iotaVal int64) (c ConstVal) {
 				return k.Val
 			}
 		}
-		if constValMap != nil {
-			if v, ok := constValMap[ex.Value]; ok {
+		if cctx.constValMap != nil {
+			if v, ok := cctx.constValMap[ex.Value]; ok {
 				return &ConstInt{V:v}
 			}
 		}
@@ -1138,9 +1161,9 @@ func tcResolveNameInline(e syntax.Expr, scope *Scope) (t Type) {
 						n = ci.V
 					}
 				}
-				if n == -1 && constValMap != nil {
+				if n == -1 && cctx.constValMap != nil {
 					epos := ex.Pos()
-					n = resolveArrayLenFromSrc(epos, constValMap)
+					n = resolveArrayLenFromSrc(epos, cctx.constValMap)
 				}
 			}
 			return NewArray(elem, n)

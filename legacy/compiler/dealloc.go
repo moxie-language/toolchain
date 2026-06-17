@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"fmt"
+	"go/types"
 	"os"
 	"sort"
 
@@ -220,6 +221,8 @@ func (b *builder) scopeEmitFrees(dying map[int]bool) {
 }
 
 // createFreeBuiltin handles explicit free(x).
+// For map types, calls runtime.hashmapDeepFree to free both the hashmap
+// header and its internal bucket array. For other types, calls runtime.free.
 func (b *builder) createFreeBuiltin(instr *ssa.CallCommon) (llvm.Value, error) {
 	if len(instr.Args) != 1 {
 		b.addError(instr.Pos(), "free requires exactly one argument")
@@ -234,7 +237,12 @@ func (b *builder) createFreeBuiltin(instr *ssa.CallCommon) (llvm.Value, error) {
 		b.addError(instr.Pos(), fmt.Sprintf("free: argument must be a pointer or slice, got %s", arg.Type()))
 		return llvm.Value{}, nil
 	}
-	b.createRuntimeCall("free", []llvm.Value{ptr}, "")
+	// Use hashmapDeepFree for map types to free both header and buckets.
+	if _, isMap := arg.Type().Underlying().(*types.Map); isMap {
+		b.createRuntimeCall("hashmapDeepFree", []llvm.Value{ptr}, "")
+	} else {
+		b.createRuntimeCall("free", []llvm.Value{ptr}, "")
+	}
 	if entry, ok := b.scopeEntries[arg]; ok {
 		b.CreateStore(llvm.ConstNull(b.dataPtrType), entry.ptrAlloca)
 	}
@@ -344,6 +352,7 @@ func computeScopeOwnership(fn *ssa.Function, loops map[int]map[int]bool) map[ssa
 	// Conservative: if an alloc has ANY referrer outside its own block,
 	// or if it's stored anywhere, mark it escaped. This is safe
 	// (never frees too early) and can be refined later.
+	seen := make(map[ssa.Value]bool)
 	for val, own := range assignments {
 		if own.escaped {
 			continue
@@ -354,7 +363,10 @@ func computeScopeOwnership(fn *ssa.Function, loops map[int]map[int]bool) map[ssa
 			continue
 		}
 		defBlock := instr.Block()
-		if allocEscapes(val, defBlock, make(map[ssa.Value]bool)) {
+		for k := range seen {
+			delete(seen, k)
+		}
+		if allocEscapes(val, defBlock, seen) {
 			own.escaped = true
 		}
 	}

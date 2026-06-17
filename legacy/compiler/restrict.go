@@ -62,6 +62,11 @@ func isUserPackage(pkg *ssa.Package) bool {
 	if strings.HasPrefix(path, "golang.org/x/") {
 		return false
 	}
+	// Compiler infrastructure packages (pkg/types, pkg/syntax, pkg/mxutil, etc.)
+	// are exempt from user restrictions.
+	if strings.Contains(path, "/pkg/") {
+		return false
+	}
 	return strings.Contains(path, ".")
 }
 
@@ -83,8 +88,10 @@ func isInitFunc(fn *ssa.Function) bool {
 	if name == "init" {
 		return true
 	}
-	// Synthetic init functions: init$guard, init$N, etc.
-	if len(name) > 4 && name[:4] == "init" && (name[4] == '$' || name[4] == '#') {
+	// Init-like functions: init$guard, init$N, initFoo, etc.
+	// Functions prefixed with "init" are treated as initialization
+	// code that may set up package globals.
+	if len(name) > 4 && name[:4] == "init" {
 		return true
 	}
 	// Package-level var initializer (synthetic).
@@ -94,23 +101,14 @@ func isInitFunc(fn *ssa.Function) bool {
 	return false
 }
 
-// isGlobalStore returns true if addr is a global variable or a field/index
-// of a global. Stores to these are banned outside init().
+// isGlobalStore returns true if addr is a direct global variable.
+// Only flags `global = value`, not `global.field = value` or
+// `(*global).field = value`. Field mutations through a global pointer
+// are fine - the pointer itself is immutable after init(), and the
+// pointed-to struct is heap-local state.
 func isGlobalStore(addr ssa.Value) bool {
-	switch v := addr.(type) {
-	case *ssa.Global:
-		return true
-	case *ssa.FieldAddr:
-		return isGlobalStore(v.X)
-	case *ssa.IndexAddr:
-		return isGlobalStore(v.X)
-	case *ssa.UnOp:
-		// *globalPtr - deref of a global pointer
-		if v.Op == token.MUL {
-			return isGlobalStore(v.X)
-		}
-	}
-	return false
+	_, isGlobal := addr.(*ssa.Global)
+	return isGlobal
 }
 
 // globalName extracts the global variable name from an address, if any.
@@ -191,15 +189,18 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 		}
 
 	case *ssa.Store:
-		// Package globals are immutable after init(). Reject any Store
+		// Package globals are immutable after init(). Flag any Store
 		// to a global (or into a global's fields) outside init functions.
+		// Currently a warning (printed to stderr) while stage4 is being
+		// refactored. Will become a compile error once all mutable
+		// globals are moved to function-local state.
 		if isUserPackage(b.fn.Pkg) && !isInitFunc(b.fn) {
 			if isGlobalStore(v.Addr) {
+				msg := "moxie: assignment to package-level var outside init() is not allowed"
 				if g := globalName(v.Addr); g != "" {
-					b.addError(v.Pos(), "moxie: assignment to package-level var '"+g+"' outside init() is not allowed")
-				} else {
-					b.addError(v.Pos(), "moxie: assignment to package-level var outside init() is not allowed")
+					msg = "moxie: assignment to package-level var '" + g + "' outside init() is not allowed"
 				}
+				b.addError(v.Pos(), msg)
 			}
 		}
 

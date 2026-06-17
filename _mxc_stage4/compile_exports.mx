@@ -7,38 +7,38 @@ import (
 	. "git.smesh.lol/moxie/pkg/types"
 )
 
-var irResults []string
 
 //export moxie_compile_to_ir
 func moxie_compile_to_ir(srcPtr unsafe.Pointer, srcLen int32, namePtr unsafe.Pointer, nameLen int32, triplePtr unsafe.Pointer, tripleLen int32) (n int32) {
 	runtime.InitCShared()
+	initCompileCtx()
 	src := unsafe.Slice((*byte)(srcPtr), srcLen)
 	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
 	triple := string(unsafe.Slice((*byte)(triplePtr), tripleLen))
 
 	ir := CompileToIR(src, name, triple)
 
-	idx := int32(len(irResults))
-	irResults = append(irResults, ir)
+	idx := int32(len(cctx.irResults))
+	cctx.irResults = append(cctx.irResults, ir)
 	return idx
 }
 
 //export moxie_compile_ir_len
 func moxie_compile_ir_len(h int32) (n int32) {
 	runtime.InitCShared()
-	if h < 0 || int32(h) >= len(irResults) {
+	if h < 0 || int32(h) >= len(cctx.irResults) {
 		return 0
 	}
-	return int32(len(irResults[h]))
+	return int32(len(cctx.irResults[h]))
 }
 
 //export moxie_compile_ir_copy
 func moxie_compile_ir_copy(h int32, dst unsafe.Pointer, capVal int32) (n int32) {
 	runtime.InitCShared()
-	if h < 0 || int32(h) >= len(irResults) {
+	if h < 0 || int32(h) >= len(cctx.irResults) {
 		return 0
 	}
-	ir := irResults[h]
+	ir := cctx.irResults[h]
 	n = int32(len(ir))
 	if n > capVal {
 		n = capVal
@@ -53,8 +53,8 @@ func moxie_compile_ir_copy(h int32, dst unsafe.Pointer, capVal int32) (n int32) 
 //export moxie_compile_ir_free
 func moxie_compile_ir_free(h int32) {
 	runtime.InitCShared()
-	if h >= 0 && int32(h) < len(irResults) {
-		irResults[h] = ""
+	if h >= 0 && int32(h) < len(cctx.irResults) {
+		cctx.irResults[h] = ""
 	}
 }
 
@@ -78,10 +78,10 @@ func moxie_register_func(pkgPathPtr unsafe.Pointer, pkgPathLen int32, namePtr un
 	if pkg == nil {
 		return
 	}
-	old := parseTypePkgScope
-	parseTypePkgScope = pkg.Scope
+	old := cctx.parseTypePkgScope
+	cctx.parseTypePkgScope = pkg.Scope
 	sig := parseSignatureDesc(sigDesc)
-	parseTypePkgScope = old
+	cctx.parseTypePkgScope = old
 	pkg.Scope.Insert(NewTCFunc(pkg, name, sig))
 }
 
@@ -211,10 +211,10 @@ func moxie_register_method(pkgPathPtr unsafe.Pointer, pkgPathLen int32, typeName
 	if !ok {
 		return
 	}
-	old := parseTypePkgScope
-	parseTypePkgScope = pkg.Scope
+	old := cctx.parseTypePkgScope
+	cctx.parseTypePkgScope = pkg.Scope
 	sig := parseSignatureDesc(sigDesc)
-	parseTypePkgScope = old
+	cctx.parseTypePkgScope = old
 	var recvType Type = named
 	if ptrRecv != 0 {
 		recvType = NewPointer(named)
@@ -244,10 +244,11 @@ func splitSemicolon(s string) (ss []string) {
 func moxie_clear_imports() {
 	runtime.InitCShared()
 	EnsureImportRegistry()
-	ImportRegistry = map[string]*TCPackage{}
+	for k := range ImportRegistry {
+		delete(ImportRegistry, k)
+	}
 }
 
-var parseTypePkgScope *Scope
 
 func parseTypeDesc(desc string) (t Type) {
 	switch desc {
@@ -396,8 +397,8 @@ func parseTypeDesc(desc string) (t Type) {
 			}
 		}
 	}
-	if parseTypePkgScope != nil {
-		obj := parseTypePkgScope.Lookup(desc)
+	if cctx.parseTypePkgScope != nil {
+		obj := cctx.parseTypePkgScope.Lookup(desc)
 		if tn, ok := obj.(*TypeName); ok && tn.Typ != nil {
 			return tn.Typ
 		}

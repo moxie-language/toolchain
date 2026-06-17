@@ -102,6 +102,7 @@ type compilerContext struct {
 	// check to distinguish literal-syntax lowerings from user-written make().
 	makeExemptOffsets map[string][]int
 
+
 	// Wasm spawn dispatch table. Populated by scanWasmSpawnTargets before
 	// package compilation; consumed by emitWasmSpawnEntry after.
 	wasmSpawnTargets []*wasmSpawnTarget

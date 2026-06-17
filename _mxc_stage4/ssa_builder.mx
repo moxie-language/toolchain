@@ -407,8 +407,8 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 		Pkg:       pb.pkg,
 		Prog:      pb.prog,
 	}
-	if syntax.CompileExportMap != nil {
-		if ename, ok := syntax.CompileExportMap[d.Name.Value]; ok {
+	if cctx.compileExportMap != nil {
+		if ename, ok := cctx.compileExportMap[d.Name.Value]; ok {
 			fn.externalSymbol = ename
 			fn.isExternC = true
 		}
@@ -2886,7 +2886,7 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 	if (op == OpOr || op == OpAdd) && x.SSAType() != nil && y.SSAType() != nil {
 		if IsRuneKind(x.SSAType()) && IsStringKind(y.SSAType()) || IsStringKind(x.SSAType()) && IsRuneKind(y.SSAType()) {
 			mxutil.WriteStr(2, "compile error: cannot concatenate rune with string - convert to UTF-8 first\n")
-			compileErrors = append(compileErrors, "cannot concatenate rune with string")
+			cctx.compileErrors = append(cctx.compileErrors, "cannot concatenate rune with string")
 		}
 	}
 	if xc, ok := x.(*SSAConst); ok {
@@ -4227,7 +4227,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 	if obj == nil {
 		// Fail loud: a dropped call compiles the caller to garbage
 		// (zeroinitializer returns) and crashes far from the cause.
-		compileErrors = append(compileErrors,
+		cctx.compileErrors = append(cctx.compileErrors,
 			"undefined: "|imported.Path|"."|funcName|" (called from "|fb.fn.name|")")
 		return nil
 	}
@@ -5497,7 +5497,7 @@ func (fb *ssaFuncBuilder) declaredTypeAST(arg syntax.Expr) (e syntax.Expr, m map
 			path = fb.fn.Pkg.Pkg.Path
 			fname = fun.Value
 			if fb.srcScope != nil {
-				for gPkg, gScope := range genericPkgScopes {
+				for gPkg, gScope := range cctx.genericPkgScopes {
 					if gScope == fb.srcScope {
 						path = gPkg
 						break
@@ -5508,7 +5508,7 @@ func (fb *ssaFuncBuilder) declaredTypeAST(arg syntax.Expr) (e syntax.Expr, m map
 		if fname == "" {
 			return nil, nil, nil
 		}
-		callee, ok := genericPkgLocalDecls[path|"."|fname]
+		callee, ok := cctx.genericPkgLocalDecls[path|"."|fname]
 		if !ok {
 			return nil, nil, nil
 		}
@@ -5516,8 +5516,8 @@ func (fb *ssaFuncBuilder) declaredTypeAST(arg syntax.Expr) (e syntax.Expr, m map
 			return nil, nil, nil
 		}
 		var scope *Scope
-		if genericPkgScopes != nil {
-			scope = genericPkgScopes[path]
+		if cctx.genericPkgScopes != nil {
+			scope = cctx.genericPkgScopes[path]
 		}
 		return callee.Type.ResultList[0].Type, map[string]Type{}, scope
 	case *syntax.Name:
@@ -5624,8 +5624,8 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, baseName stri
 		}
 	}
 	var srcScope *Scope
-	if genericPkgScopes != nil {
-		if sc, ok := genericPkgScopes[srcPkgPath]; ok {
+	if cctx.genericPkgScopes != nil {
+		if sc, ok := cctx.genericPkgScopes[srcPkgPath]; ok {
 			srcScope = sc
 		}
 	}
@@ -5675,19 +5675,19 @@ func (fb *ssaFuncBuilder) emitCallToSSAFunc(fn *SSAFunction, args []SSAValue, ha
 func (fb *ssaFuncBuilder) tryGenericLocalCall(funcName string, argList []syntax.Expr, hasDots bool) (s SSAValue, handled bool) {
 	pkgPath := fb.fn.Pkg.Pkg.Path
 	key := pkgPath + "." + funcName
-	fd, ok := genericFuncDecls[key]
+	fd, ok := cctx.genericFuncDecls[key]
 	if !ok && fb.srcScope != nil {
-		for gPkg, gScope := range genericPkgScopes {
+		for gPkg, gScope := range cctx.genericPkgScopes {
 			if gScope == fb.srcScope {
 				key = gPkg + "." + funcName
-				fd, ok = genericFuncDecls[key]
+				fd, ok = cctx.genericFuncDecls[key]
 				if !ok && gPkg != fb.fn.Pkg.Pkg.Path {
 					// Package-local non-generic helper called from a
 					// monomorphized body in ANOTHER package: instantiate it
 					// here, its symbol is unexported in the source package's
 					// object. Within the source package itself the local
 					// function is directly available.
-					fd, ok = genericPkgLocalDecls[key]
+					fd, ok = cctx.genericPkgLocalDecls[key]
 				}
 				if ok {
 					pkgPath = gPkg
@@ -5711,7 +5711,7 @@ func (fb *ssaFuncBuilder) tryGenericPkgCall(pn *PkgName, funcName string, argLis
 		return nil, false
 	}
 	key := imported.Path + "." + funcName
-	fd, ok := genericFuncDecls[key]
+	fd, ok := cctx.genericFuncDecls[key]
 	if !ok {
 		return nil, false
 	}
@@ -5726,12 +5726,12 @@ func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList 
 	case *syntax.Name:
 		pkgPath := fb.fn.Pkg.Pkg.Path
 		key := pkgPath + "." + x.Value
-		fd, ok := genericFuncDecls[key]
+		fd, ok := cctx.genericFuncDecls[key]
 		if !ok && fb.srcScope != nil {
-			for gPkg, gScope := range genericPkgScopes {
+			for gPkg, gScope := range cctx.genericPkgScopes {
 				if gScope == fb.srcScope {
 					key = gPkg + "." + x.Value
-					fd, ok = genericFuncDecls[key]
+					fd, ok = cctx.genericFuncDecls[key]
 					if ok {
 						pkgPath = gPkg
 						break
@@ -5750,7 +5750,7 @@ func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList 
 			obj := fb.lookupObject(pkgName.Value)
 			if pn, ok3 := obj.(*PkgName); ok3 && pn.Imported != nil {
 				key := pn.Imported.Path + "." + x.Sel.Value
-				fd, ok4 := genericFuncDecls[key]
+				fd, ok4 := cctx.genericFuncDecls[key]
 				if !ok4 {
 					return nil, false
 				}

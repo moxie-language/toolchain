@@ -9,6 +9,30 @@ import (
 	. "git.smesh.lol/moxie/pkg/types"
 )
 
+// buildState holds all build-configuration and persistent state that
+// outlives individual package compilations. Allocated once at init and
+// never reassigned; fields are mutated through the pointer.
+type buildState struct {
+	selfHash        string
+	globalModPrefix string
+	globalModDir    string
+	globalReplaces  map[string]string
+	buildJobs       int32
+	quietDiscover   bool
+	wasmRtPkgs      map[string]bool
+	builtinOnly     []string
+	pkgKeyMemo      map[string]string
+	tlsProbeVar     int32
+}
+
+var bst *buildState
+
+func initBuildState() {
+	if bst == nil {
+		bst = &buildState{}
+	}
+}
+
 //export mxc_run
 func cRun(argv unsafe.Pointer, argc int32) (n int32)
 
@@ -66,16 +90,15 @@ func cDetectTLS() (n int32)
 // TLS probe: the C side spawns a thread that calls mxc_tls_probe_write,
 // then the parent calls mxc_tls_probe_read. If the global is TLS, the
 // child's write is invisible to the parent.
-var tlsProbeVar int32
 
 //export mxc_tls_probe_write
 func tlsProbeWrite() {
-	tlsProbeVar = 1
+	bst.tlsProbeVar = 1
 }
 
 //export mxc_tls_probe_read
 func tlsProbeRead() (n int32) {
-	return tlsProbeVar
+	return bst.tlsProbeVar
 }
 
 func writeFile(path string, data []byte, mode uint32) {
@@ -278,29 +301,25 @@ func getMoxiePath() (s string) {
 
 func mxcVersion() (s string) { return "1.9.10" }
 
-var selfHash string
 
 func compilerHash() (s string) {
-	if selfHash != "" {
-		return selfHash
+	if bst.selfHash != "" {
+		return bst.selfHash
 	}
 	bin, ok := mxutil.ReadFile("/proc/self/exe")
 	if !ok {
-		selfHash = "unknown"
-		return selfHash
+		bst.selfHash = "unknown"
+		return bst.selfHash
 	}
-	selfHash = fnvHash(bin)
+	bst.selfHash = fnvHash(bin)
 	free(bin)
-	return selfHash
+	return bst.selfHash
 }
 
 func moxieCacheDir() (s string) {
 	return mxutil.JoinPath(mxutil.JoinPath(getMoxiePath(), "cache"), "mxc-" | mxcVersion() | "-" | compilerHash())
 }
 
-var globalModPrefix string
-var globalModDir string
-var globalReplaces map[string]string
 
 func parseReplaceLine(line string, baseDir string) (from string, to string, ok bool) {
 	arrow := int32(-1)
@@ -333,7 +352,7 @@ func findModuleRoot(startDir string) (modName string, dir string) {
 		data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, "moxie.mod"))
 		if ok {
 			modName = ""
-			globalReplaces = map[string]string{}
+			bst.globalReplaces = map[string]string{}
 			lines := mxutil.SplitLines(string(data))
 			inReplace := false
 			for _, line := range lines {
@@ -353,14 +372,14 @@ func findModuleRoot(startDir string) (modName string, dir string) {
 					}
 					from, to, ok2 := parseReplaceLine(line, dir)
 					if ok2 {
-						globalReplaces[from] = to
+						bst.globalReplaces[from] = to
 					}
 					continue
 				}
 				if mxutil.HasPrefix(line, "replace ") {
 					from, to, ok2 := parseReplaceLine(line[8:], dir)
 					if ok2 {
-						globalReplaces[from] = to
+						bst.globalReplaces[from] = to
 					}
 				}
 			}
@@ -382,8 +401,8 @@ func mergeModReplaces(dir string) {
 	if !ok {
 		return
 	}
-	if globalReplaces == nil {
-		globalReplaces = map[string]string{}
+	if bst.globalReplaces == nil {
+		bst.globalReplaces = map[string]string{}
 	}
 	inReplace := false
 	for _, line := range mxutil.SplitLines(string(data)) {
@@ -399,8 +418,8 @@ func mergeModReplaces(dir string) {
 			}
 			from, to, ok2 := parseReplaceLine(line, dir)
 			if ok2 {
-				if _, exists := globalReplaces[from]; !exists {
-					globalReplaces[from] = to
+				if _, exists := bst.globalReplaces[from]; !exists {
+					bst.globalReplaces[from] = to
 				}
 			}
 			continue
@@ -408,8 +427,8 @@ func mergeModReplaces(dir string) {
 		if mxutil.HasPrefix(line, "replace ") {
 			from, to, ok2 := parseReplaceLine(line[8:], dir)
 			if ok2 {
-				if _, exists := globalReplaces[from]; !exists {
-					globalReplaces[from] = to
+				if _, exists := bst.globalReplaces[from]; !exists {
+					bst.globalReplaces[from] = to
 				}
 			}
 		}
@@ -848,13 +867,12 @@ func pkgCacheKey(dir string, files []string) (s string) {
 // dependent's key always sees its deps' final hashes. Without dep hashes in
 // the key, a dependency's layout change would leave a dependent's cached .bc
 // reusable with a stale ABI - silent struct-offset corruption at link time.
-var pkgKeyMemo map[string]string
 
 func pkgHash(p *pkgInfo) (s string) {
-	if pkgKeyMemo == nil {
-		pkgKeyMemo = map[string]string{}
+	if bst.pkgKeyMemo == nil {
+		bst.pkgKeyMemo = map[string]string{}
 	}
-	if h, ok := pkgKeyMemo[p.path]; ok {
+	if h, ok := bst.pkgKeyMemo[p.path]; ok {
 		return h
 	}
 	var sorted []string
@@ -868,13 +886,13 @@ func pkgHash(p *pkgInfo) (s string) {
 	}
 	acc := []byte(pkgCacheKey(p.dir, p.files))
 	for _, imp := range sorted {
-		if dh, ok := pkgKeyMemo[imp]; ok {
+		if dh, ok := bst.pkgKeyMemo[imp]; ok {
 			acc = append(acc, '|')
 			acc = acc | dh
 		}
 	}
 	hv := fnvHash(acc)
-	pkgKeyMemo[p.path] = hv
+	bst.pkgKeyMemo[p.path] = hv
 	return hv
 }
 
@@ -893,10 +911,9 @@ func isStdlib(path string) (ok bool) {
 	return !mxutil.HasPrefix(path, "/") && !mxutil.HasPrefix(path, "./") && !mxutil.HasPrefix(path, "../")
 }
 
-var builtinOnly []string
 
 func isBuiltinOnly(path string) (ok bool) {
-	for _, b := range builtinOnly {
+	for _, b := range bst.builtinOnly {
 		if path == b {
 			return true
 		}
@@ -1038,19 +1055,18 @@ type srcSpan struct {
 	srcLine   int32
 }
 
-var concatSourceMap []srcSpan
 
 func concatLineToFile(concatLine int32) (file string, srcLine int32) {
-	if len(concatSourceMap) == 0 {
+	if len(cctx.concatSourceMap) == 0 {
 		return "", concatLine
 	}
 	best := int32(0)
-	for i, s := range concatSourceMap {
+	for i, s := range cctx.concatSourceMap {
 		if s.outStart <= concatLine {
 			best = int32(i)
 		}
 	}
-	sp := concatSourceMap[best]
+	sp := cctx.concatSourceMap[best]
 	return sp.file, sp.srcLine + (concatLine - sp.outStart)
 }
 
@@ -1133,8 +1149,8 @@ func concatSources(dir string, files []string) (buf []byte) {
 		}
 		out = out | ")\n"
 	}
-	concatSourceMap = nil
-	mxutil.ConcatImportSegs = nil
+	cctx.concatSourceMap = nil
+	mxutil.ResetConcatImportSegs()
 	outLine := int32(1)
 	for j := int32(0); j < int32(len(out)); j++ {
 		if out[j] == '\n' {
@@ -1142,12 +1158,12 @@ func concatSources(dir string, files []string) (buf []byte) {
 		}
 	}
 	for i, b := range bodies {
-		concatSourceMap = append(concatSourceMap, srcSpan{
+		cctx.concatSourceMap = append(cctx.concatSourceMap, srcSpan{
 			file:     bodyFiles[i],
 			outStart: outLine,
 			srcLine:  bodyStartLines[i],
 		})
-		mxutil.ConcatImportSegs = append(mxutil.ConcatImportSegs, mxutil.ImportSeg{
+		mxutil.AppendConcatImportSeg(mxutil.ImportSeg{
 			OutStart: outLine,
 			Specs:    bodyImports[i],
 		})
@@ -1391,18 +1407,15 @@ func hasImport(data []byte, pkg string) (ok bool) {
 
 // quietDiscover suppresses per-file discovery chatter. Set by build-pkg
 // workers, which re-run discovery the orchestrator already printed.
-var quietDiscover bool
 
 // buildJobs is the max number of concurrent child processes (workers and
 // clang) used by build/test. Set by the -j flag; 1 forces the serial path.
-var buildJobs int32
 
 // Packages baked into sysroot/wasm/runtime.bc (compiled by the old
 // TinyGo-based compiler). Stage4 type-checks these but does not compile
 // them - the prebuilt versions are used instead. This avoids ABI
 // mismatches between old-compiler and stage4-compiled code (different
 // context-pointer conventions).
-var wasmRtPkgs map[string]bool
 
 type pkgInfo struct {
 	path    string
@@ -1419,12 +1432,12 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 	var dir string
 	if pkgPath == "." || pkgPath == ".." || mxutil.HasPrefix(pkgPath, "/") || mxutil.HasPrefix(pkgPath, "./") || mxutil.HasPrefix(pkgPath, "../") {
 		dir = pkgPath
-	} else if globalReplaces != nil {
-		if rdir, ok := globalReplaces[pkgPath]; ok {
+	} else if bst.globalReplaces != nil {
+		if rdir, ok := bst.globalReplaces[pkgPath]; ok {
 			dir = rdir
 		}
 		if dir == "" {
-			for from, to := range globalReplaces {
+			for from, to := range bst.globalReplaces {
 				if mxutil.HasPrefix(pkgPath, from|"/") {
 					rel := pkgPath[len(from)+1:]
 					dir = mxutil.JoinPath(to, rel)
@@ -1433,12 +1446,12 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 			}
 		}
 	}
-	if dir == "" && globalModPrefix != "" && pkgPath == globalModPrefix {
-		dir = globalModDir
+	if dir == "" && bst.globalModPrefix != "" && pkgPath == bst.globalModPrefix {
+		dir = bst.globalModDir
 	}
-	if dir == "" && globalModPrefix != "" && mxutil.HasPrefix(pkgPath, globalModPrefix|"/") {
-		rel := pkgPath[len(globalModPrefix)+1:]
-		dir = mxutil.JoinPath(globalModDir, rel)
+	if dir == "" && bst.globalModPrefix != "" && mxutil.HasPrefix(pkgPath, bst.globalModPrefix|"/") {
+		rel := pkgPath[len(bst.globalModPrefix)+1:]
+		dir = mxutil.JoinPath(bst.globalModDir, rel)
 	}
 	if dir == "" {
 		candidate := mxutil.JoinPath(getMoxiePath(), pkgPath)
@@ -1449,8 +1462,8 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 	}
 	if dir == "" && isRemotePath(pkgPath) {
 		ver := ""
-		if globalModDir != "" {
-			_, reqs, _ := parseModRequires(globalModDir)
+		if bst.globalModDir != "" {
+			_, reqs, _ := parseModRequires(bst.globalModDir)
 			for _, r := range reqs {
 				if r.path == pkgPath {
 					ver = r.version
@@ -1519,7 +1532,7 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		}
 		bc := hasBuildConstraint(data, forbidden)
 		if bc {
-			if !quietDiscover {
+			if !bst.quietDiscover {
 				mxutil.WriteStr(2, "    skip-constraint: " | f | "\n")
 			}
 			continue
@@ -1533,12 +1546,12 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 			}
 		}
 		if skipFile != "" {
-			if !quietDiscover {
+			if !bst.quietDiscover {
 				mxutil.WriteStr(2, "    skip-import(" | skipFile | "): " | f | "\n")
 			}
 			continue
 		}
-		if !quietDiscover {
+		if !bst.quietDiscover {
 			mxutil.WriteStr(2, "    include: " | f | "\n")
 		}
 		files = append(files, f)
@@ -1560,7 +1573,7 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 			allImports = appendUniq(allImports, imp)
 		}
 	}
-	if !quietDiscover {
+	if !bst.quietDiscover {
 		mxutil.WriteStr(2, "  discover " | pkgPath | " [")
 		for fi, ff := range files {
 			if fi > 0 {
@@ -1571,8 +1584,8 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		mxutil.WriteStr(2, "]\n")
 	}
 	version := ""
-	if isRemotePath(pkgPath) && globalModDir != "" {
-		_, reqs, _ := parseModRequires(globalModDir)
+	if isRemotePath(pkgPath) && bst.globalModDir != "" {
+		_, reqs, _ := parseModRequires(bst.globalModDir)
 		for _, r := range reqs {
 			if r.path == pkgPath || mxutil.HasPrefix(pkgPath, r.path|"/") {
 				version = r.version
@@ -1628,7 +1641,9 @@ func resolveAll(rootPkg string, root string) (ss []*pkgInfo) {
 func registerBuiltins() {
 	InitUniverse()
 	EnsureImportRegistry()
-	ImportRegistry = map[string]*TCPackage{}
+	for k := range ImportRegistry {
+		delete(ImportRegistry, k)
+	}
 
 	// unsafe - compiler builtin, no source
 	unsafePkg := NewTCPackage("unsafe", "unsafe")
@@ -1682,7 +1697,7 @@ func addPtrMethod(pkg *TCPackage, named *Named, name, sigDesc string) {
 }
 
 func remapErrorLines(msg string) (s string) {
-	if len(concatSourceMap) == 0 {
+	if len(cctx.concatSourceMap) == 0 {
 		return msg
 	}
 	lines := mxutil.SplitLines(msg)
@@ -1694,7 +1709,7 @@ func remapErrorLines(msg string) (s string) {
 }
 
 func remapOneLine(line string) (s string) {
-	if len(concatSourceMap) == 0 {
+	if len(cctx.concatSourceMap) == 0 {
 		return line
 	}
 	colonCount := int32(0)
@@ -1735,7 +1750,7 @@ func remapOneLine(line string) (s string) {
 }
 
 func compileSource(src []byte, pkgName, triple, pkgDir string) (s string) {
-	compilePkgDir = pkgDir
+	cctx.compilePkgDir = pkgDir
 	ir := CompileToIR(src, pkgName, triple)
 	if len(ir) > 0 && ir[0] == ';' {
 		mxutil.WriteStr(2, remapErrorLines(ir))
@@ -1747,7 +1762,6 @@ func compileSource(src []byte, pkgName, triple, pkgDir string) (s string) {
 	return ir
 }
 
-var typeDescPkgPath string
 
 func typeDescStr(t Type) (s string) {
 	if t == nil {
@@ -1836,7 +1850,7 @@ func typeDescStr(t Type) (s string) {
 		return "$" | v.String()
 	case *Named:
 		if v.Obj != nil {
-			if typeDescPkgPath != "" && v.Obj.Pkg != nil && v.Obj.Pkg.Path != typeDescPkgPath {
+			if cctx.typeDescPkgPath != "" && v.Obj.Pkg != nil && v.Obj.Pkg.Path != cctx.typeDescPkgPath {
 				return v.Obj.Pkg.Path | "." | v.Obj.Name
 			}
 			return v.Obj.Name
@@ -1880,7 +1894,7 @@ func sigDescStr(sig *Signature) (s string) {
 func generateMxh(pkg *TCPackage) (s string) {
 	path := pkg.Path
 	name := pkg.Name
-	typeDescPkgPath = path
+	cctx.typeDescPkgPath = path
 	var out string
 	out = "package " | path | " " | name | "\n"
 	// Direct imports must round-trip through the mxh: dispatch lists for
@@ -2082,13 +2096,10 @@ func loadMxh(path string) (ok bool) {
 			dimps = append(dimps, lines[li][7:])
 		}
 	}
-	if PkgDirectImports == nil {
-		PkgDirectImports = map[string][]string{}
-	}
 	PkgDirectImports[pkgPath] = dimps
 
-	oldScope := parseTypePkgScope
-	parseTypePkgScope = pkg.Scope
+	oldScope := cctx.parseTypePkgScope
+	cctx.parseTypePkgScope = pkg.Scope
 
 	// Pass 1a: register all type and interface names with placeholder types
 	for li := 1; li < len(lines); li++ {
@@ -2269,7 +2280,7 @@ func loadMxh(path string) (ok bool) {
 		}
 	}
 
-	parseTypePkgScope = oldScope
+	cctx.parseTypePkgScope = oldScope
 	data = nil // replace with free()
 	lines = nil // replace with free()
 	ImportRegistry[pkgPath] = pkg
@@ -2587,7 +2598,7 @@ func cmdTest(args []string) {
 		if absDir == "." {
 			absDir = ""
 		}
-		globalModPrefix, globalModDir = findModuleRoot(absDir)
+		bst.globalModPrefix, bst.globalModDir = findModuleRoot(absDir)
 	}
 
 	registerBuiltins()
@@ -2876,13 +2887,13 @@ func cmdTest(args []string) {
 			objList = append(objList, compileToObj(rtShims))
 		}
 	}
-	if buildJobs > 1 {
+	if bst.buildJobs > 1 {
 		var objCmds [][]string
 		for _, bf := range allBcFiles {
 			objCmds = append(objCmds, []string{clang, "--target=" | triple,
 				"-c", "-O0", bf, "-o", bf | ".o"})
 		}
-		if !runPool(objCmds, buildJobs) {
+		if !runPool(objCmds, bst.buildJobs) {
 			fatal("clang -c failed")
 		}
 		for _, bf := range allBcFiles {
@@ -3098,8 +3109,8 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 		}
 		out = out | ")\n"
 	}
-	concatSourceMap = nil
-	mxutil.ConcatImportSegs = nil
+	cctx.concatSourceMap = nil
+	mxutil.ResetConcatImportSegs()
 	outLine := int32(1)
 	for j := int32(0); j < int32(len(out)); j++ {
 		if out[j] == '\n' {
@@ -3107,12 +3118,12 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 		}
 	}
 	for i, b := range bodies {
-		concatSourceMap = append(concatSourceMap, srcSpan{
+		cctx.concatSourceMap = append(cctx.concatSourceMap, srcSpan{
 			file:     bodyFiles[i],
 			outStart: outLine,
 			srcLine:  bodyStartLines[i],
 		})
-		mxutil.ConcatImportSegs = append(mxutil.ConcatImportSegs, mxutil.ImportSeg{
+		mxutil.AppendConcatImportSeg(mxutil.ImportSeg{
 			OutStart: outLine,
 			Specs:    bodyImports[i],
 		})
@@ -3132,8 +3143,10 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 }
 
 func main() {
-	buildJobs = int32(4)
-	wasmRtPkgs = map[string]bool{
+	initBuildState()
+	initCompileCtx()
+	bst.buildJobs = int32(4)
+	bst.wasmRtPkgs = map[string]bool{
 		"runtime": true, "runtime/interrupt": true,
 		"internal/task": true, "internal/itoa": true,
 		"math": true, "math/bits": true,
@@ -3146,7 +3159,7 @@ func main() {
 		"internal/gclayout": true, "internal/oserror": true,
 		"internal/stringslite": true, "internal/testlog": true,
 	}
-	builtinOnly = []string{"unsafe"}
+	bst.builtinOnly = []string{"unsafe"}
 	args := os.Args
 	if len(args) < 2 {
 		mxutil.WriteStr(2, "usage: mxc <build|test|version|cache|fetch|update> ...\n")
@@ -3221,9 +3234,9 @@ func main() {
 			forceRebuild = true
 			i++
 		} else if args[i] == "-j" && i+1 < int32(len(args)) {
-			buildJobs = parseInt32(args[i+1])
-			if buildJobs < 1 {
-				buildJobs = 1
+			bst.buildJobs = parseInt32(args[i+1])
+			if bst.buildJobs < 1 {
+				bst.buildJobs = 1
 			}
 			i += 2
 		} else if args[i] == "-gc=dealloc" || args[i] == "-buildmode=c-shared" || args[i] == "-x" || args[i] == "-work" {
@@ -3235,7 +3248,7 @@ func main() {
 	}
 	if printIR {
 		// -print-ir needs the in-process compile path.
-		buildJobs = 1
+		bst.buildJobs = 1
 	}
 	if pkgPath == "" {
 		fatal("no package specified")
@@ -3248,16 +3261,13 @@ func main() {
 	if root == "" {
 		root = "."
 	}
-	mxutil.TargetOS = "linux"
-	mxutil.TargetArch = "amd64"
+	mxutil.SetTarget("linux", "amd64")
 	triple := "x86_64-unknown-linux-musleabihf"
 	if targetFlag == "js/wasm" || targetFlag == "wasm" {
-		mxutil.TargetOS = "js"
-		mxutil.TargetArch = "wasm"
+		mxutil.SetTarget("js", "wasm")
 		triple = "wasm32-unknown-wasi"
 	} else if targetFlag == "wasi/wasm" {
-		mxutil.TargetOS = "wasi"
-		mxutil.TargetArch = "wasm"
+		mxutil.SetTarget("wasi", "wasm")
 		triple = "wasm32-unknown-wasi"
 	}
 	isWasm := mxutil.TargetArch == "wasm"
@@ -3268,7 +3278,7 @@ func main() {
 		if absDir == "." {
 			absDir = ""
 		}
-		globalModPrefix, globalModDir = findModuleRoot(absDir)
+		bst.globalModPrefix, bst.globalModDir = findModuleRoot(absDir)
 	}
 
 	registerBuiltins()
@@ -3312,14 +3322,14 @@ func main() {
 	cacheBase := pkgCacheDir()
 	// TLS probe: if this binary's globals aren't thread_local, the parallel
 	// path would corrupt shared state. Fall back to serial.
-	if buildJobs > 1 && cDetectTLS() == 0 {
+	if bst.buildJobs > 1 && cDetectTLS() == 0 {
 		mxutil.WriteStr(2, "  note: globals not TLS-isolated, forcing -j 1 (rebuild with self-compiled mxc for parallel)\n")
-		buildJobs = 1
+		bst.buildJobs = 1
 	}
 	var allBcFiles []string
 	var hasRuntimePkg bool
-	if buildJobs > 1 {
-		a, h := buildPkgsParallel(pkgs, triple, clang, tmpdir, cacheBase, forceRebuild, buildJobs)
+	if bst.buildJobs > 1 {
+		a, h := buildPkgsParallel(pkgs, triple, clang, tmpdir, cacheBase, forceRebuild, bst.buildJobs)
 		allBcFiles = a
 		hasRuntimePkg = h
 	} else {
@@ -3404,13 +3414,13 @@ func main() {
 			}
 			return oFile
 		}
-		if buildJobs > 1 {
+		if bst.buildJobs > 1 {
 			var objCmds [][]string
 			for _, bf := range allBcFiles {
 				objCmds = append(objCmds, []string{clang, "--target=" | wasmTriple,
 					"-c", bf, "-o", bf | ".o"})
 			}
-			if !runPool(objCmds, buildJobs) {
+			if !runPool(objCmds, bst.buildJobs) {
 				fatal("clang -c failed")
 			}
 			for _, bf := range allBcFiles {
@@ -3496,13 +3506,13 @@ func main() {
 		if _, rsk := mxutil.ReadFile(rtShims); rsk {
 			objList = append(objList, compileToObj(rtShims))
 		}
-		if buildJobs > 1 {
+		if bst.buildJobs > 1 {
 			var objCmds [][]string
 			for _, bf := range allBcFiles {
 				objCmds = append(objCmds, []string{clang, "--target=" | triple,
 					"-c", "-O0", bf, "-o", bf | ".o"})
 			}
-			if !runPool(objCmds, buildJobs) {
+			if !runPool(objCmds, bst.buildJobs) {
 				fatal("clang -c failed")
 			}
 			for _, bf := range allBcFiles {
@@ -3921,6 +3931,8 @@ func workerEntryExport(arg unsafe.Pointer) {
 	// Must happen before any Moxie allocation. allocateHeap() mmaps a fresh
 	// region, initHeap() sets the bump pointer, initAll() runs package inits.
 	runtime.InitCShared()
+	initBuildState()
+	initCompileCtx()
 
 	wr := (*workerRings)(arg)
 	ringA := wr.ringA
@@ -3934,17 +3946,15 @@ func workerEntryExport(arg unsafe.Pointer) {
 	metaData = nil
 
 	// Set up module context from metadata
-	globalModPrefix = meta.modPrefix
-	globalModDir = meta.modDir
-	quietDiscover = true
+	bst.globalModPrefix = meta.modPrefix
+	bst.globalModDir = meta.modDir
+	bst.quietDiscover = true
 
 	// Set target globals from triple (needed by registerBuiltins for uintptr sizing)
 	if len(meta.triple) >= 4 && meta.triple[:4] == "wasm" {
-		mxutil.TargetArch = "wasm"
-		mxutil.TargetOS = "js"
+		mxutil.SetTarget("js", "wasm")
 	} else {
-		mxutil.TargetArch = "amd64"
-		mxutil.TargetOS = "linux"
+		mxutil.SetTarget("linux", "amd64")
 	}
 
 	// Initialize this thread's compiler state (TLS globals are zeroed)
@@ -3956,7 +3966,7 @@ func workerEntryExport(arg unsafe.Pointer) {
 		idxByPath[meta.pkgs[i].path] = i
 	}
 
-	// Compute hashes for all packages (worker's own pkgKeyMemo)
+	// Compute hashes for all packages (worker's own bst.pkgKeyMemo)
 	hashes := []string{:len(meta.pkgs)}
 	for i := int32(0); i < int32(len(meta.pkgs)); i++ {
 		hashes[i] = pkgHash(meta.pkgs[i])
@@ -4045,7 +4055,7 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 
 	mxutil.WriteStr(2, "  compile " | pkg.path | "\n")
 	src := concatSources(pkg.dir, pkg.files)
-	compilePkgDir = pkg.dir
+	cctx.compilePkgDir = pkg.dir
 	ir := CompileToIR(src, compilePath, meta.triple)
 	src = nil
 	if len(ir) > 0 && ir[0] == ';' {
@@ -4177,7 +4187,7 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 		root = "."
 	}
 	meta := serializePkgMeta(pkgs, triple, clang, tmpdir, cacheBase, root,
-		globalModPrefix, globalModDir)
+		bst.globalModPrefix, bst.globalModDir)
 
 	workers := []*workerInfo{:jobs}
 	for wi := int32(0); wi < jobs; wi++ {
