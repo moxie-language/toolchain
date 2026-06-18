@@ -2,27 +2,55 @@ package types
 
 import "git.smesh.lol/moxie/pkg/mxutil"
 
-// Universe is the outermost scope containing all predeclared identifiers.
-// All package scopes have Universe as their ultimate ancestor.
+// UniverseState holds all predeclared type system state.
+// Returned by InitUniverse, owned by the caller.
+type UniverseState struct {
+	Scope          *Scope
+	Typ            [UntypedNil + 1]*Basic
+	Error          *TypeName
+	Registry       map[string]*TCPackage
+	DirectImports  map[string][]string
+}
+
+// Global accessors - these will be removed as call sites are updated.
+// For now they bridge old code that reads the globals.
 var Universe *Scope
-
-// Predeclared types. Indices match BasicKind values.
 var Typ [UntypedNil + 1]*Basic
-
 var universeError *TypeName
 
 func init() {
 }
 
 // InitUniverse creates the universe scope with predeclared types.
-// Must be called from main() after the root arena is set up.
-func InitUniverse() {
+// Returns all products. Caller owns the returned state.
+// Also sets globals for backward compat during migration.
+func InitUniverse() (u *UniverseState) {
 	if Universe != nil {
-		return
+		return &UniverseState{
+			Scope:         Universe,
+			Typ:           Typ,
+			Error:         universeError,
+			Registry:      ImportRegistry,
+			DirectImports: PkgDirectImports,
+		}
 	}
-	ImportRegistry = map[string]*TCPackage{}
-	PkgDirectImports = map[string][]string{}
-	Universe = NewScope(nil)
+	u = buildUniverse()
+	// Set globals for backward compat.
+	Universe = u.Scope
+	Typ = u.Typ
+	universeError = u.Error
+	ImportRegistry = u.Registry
+	PkgDirectImports = u.DirectImports
+	return u
+}
+
+// buildUniverse constructs the universe scope. No globals touched.
+// All products returned by value.
+func buildUniverse() (u *UniverseState) {
+	u = &UniverseState{}
+	u.Registry = map[string]*TCPackage{}
+	u.DirectImports = map[string][]string{}
+	u.Scope = NewScope(nil)
 
 	// Initialize Basic types in Typ table.
 	infos := [...]struct {
@@ -59,89 +87,78 @@ func InitUniverse() {
 		{UntypedNil, IsUntyped, "untyped nil"},
 	}
 	for i, info := range infos {
-		Typ[i] = &Basic{Kind: info.kind, Info: info.info, Name: info.name}
+		u.Typ[i] = &Basic{Kind: info.kind, Info: info.info, Name: info.name}
 	}
 
-	defTypeName("bool", Typ[Bool])
-	defTypeName("int8", Typ[Int8])
-	defTypeName("int16", Typ[Int16])
-	defTypeName("int32", Typ[Int32])
-	defTypeName("int64", Typ[Int64])
-	defTypeName("uint8", Typ[Uint8])
-	defTypeName("uint16", Typ[Uint16])
-	defTypeName("uint32", Typ[Uint32])
-	defTypeName("uint64", Typ[Uint64])
-	defTypeName("float32", Typ[Float32])
-	defTypeName("float64", Typ[Float64])
-	defTypeName("string", Typ[TCString])
+	s := u.Scope
+	s.Insert(NewTypeName(nil, "bool", u.Typ[Bool]))
+	s.Insert(NewTypeName(nil, "int8", u.Typ[Int8]))
+	s.Insert(NewTypeName(nil, "int16", u.Typ[Int16]))
+	s.Insert(NewTypeName(nil, "int32", u.Typ[Int32]))
+	s.Insert(NewTypeName(nil, "int64", u.Typ[Int64]))
+	s.Insert(NewTypeName(nil, "uint8", u.Typ[Uint8]))
+	s.Insert(NewTypeName(nil, "uint16", u.Typ[Uint16]))
+	s.Insert(NewTypeName(nil, "uint32", u.Typ[Uint32]))
+	s.Insert(NewTypeName(nil, "uint64", u.Typ[Uint64]))
+	s.Insert(NewTypeName(nil, "float32", u.Typ[Float32]))
+	s.Insert(NewTypeName(nil, "float64", u.Typ[Float64]))
+	s.Insert(NewTypeName(nil, "string", u.Typ[TCString]))
 
-	// add String() method to all builtins
 	for _, b := range []*Basic{
-		Typ[Bool],
-		Typ[Int8], Typ[Int16], Typ[Int32], Typ[Int64],
-		Typ[Uint8], Typ[Uint16], Typ[Uint32], Typ[Uint64],
-		Typ[Float32], Typ[Float64],
-		Typ[TCString],
+		u.Typ[Bool],
+		u.Typ[Int8], u.Typ[Int16], u.Typ[Int32], u.Typ[Int64],
+		u.Typ[Uint8], u.Typ[Uint16], u.Typ[Uint32], u.Typ[Uint64],
+		u.Typ[Float32], u.Typ[Float64],
+		u.Typ[TCString],
 	} {
-		addBasicStringMethod(b)
+		addBasicStringMethod(b, u.Typ[TCString])
 	}
 
-	// byte = uint8
-	byteType := NewNamed(NewTypeName(nil, "byte", nil), Typ[Uint8])
-	defObj(byteType.Obj)
+	byteType := NewNamed(NewTypeName(nil, "byte", nil), u.Typ[Uint8])
+	s.Insert(byteType.Obj)
 	byteType.Obj.Typ = byteType
-	addStringMethod(byteType)
+	addStringMethod(byteType, u.Typ[TCString])
 
-	// rune = int32
-	runeType := NewNamed(NewTypeName(nil, "rune", nil), Typ[Int32])
-	defObj(runeType.Obj)
+	runeType := NewNamed(NewTypeName(nil, "rune", nil), u.Typ[Int32])
+	s.Insert(runeType.Obj)
 	runeType.Obj.Typ = runeType
-	addStringMethod(runeType)
+	addStringMethod(runeType, u.Typ[TCString])
 
-	// uintptr (allowed only with import "unsafe")
-	// wasm32: uintptr is 32-bit; native: 64-bit
-	uintptrUnderlying := Typ[Uint64]
+	uintptrUnderlying := u.Typ[Uint64]
 	if mxutil.TargetArch == "wasm" {
-		uintptrUnderlying = Typ[Uint32]
+		uintptrUnderlying = u.Typ[Uint32]
 	}
 	uintptrType := NewNamed(NewTypeName(nil, "uintptr", nil), uintptrUnderlying)
-	defObj(uintptrType.Obj)
+	s.Insert(uintptrType.Obj)
 	uintptrType.Obj.Typ = uintptrType
-	addStringMethod(uintptrType)
+	addStringMethod(uintptrType, u.Typ[TCString])
 
-	// error = interface{ Error() string; String() string }
-	errSig := NewSignature(nil, nil, NewTuple(NewTCVar(nil, "", Typ[TCString])), false)
+	errSig := NewSignature(nil, nil, NewTuple(NewTCVar(nil, "", u.Typ[TCString])), false)
 	strMeth := &IfaceMethod{Name: "String", Sig: errSig}
 	errMeth := &IfaceMethod{Name: "Error", Sig: errSig}
 	errIface := NewTCInterface([]*IfaceMethod{errMeth, strMeth}, nil)
 	errIface.Complete()
-	universeError = NewTypeName(nil, "error", errIface)
-	defObj(universeError)
+	u.Error = NewTypeName(nil, "error", errIface)
+	s.Insert(u.Error)
 
-	// complex64/128 are not valid in Moxie programs but appear in stdlib source.
-	// Register them as invalid basic types so the checker doesn't report "undefined".
-	complex64Type := NewNamed(NewTypeName(nil, "complex64", nil), Typ[Invalid])
-	defObj(complex64Type.Obj)
-	complex128Type := NewNamed(NewTypeName(nil, "complex128", nil), Typ[Invalid])
-	defObj(complex128Type.Obj)
+	complex64Type := NewNamed(NewTypeName(nil, "complex64", nil), u.Typ[Invalid])
+	s.Insert(complex64Type.Obj)
+	complex128Type := NewNamed(NewTypeName(nil, "complex128", nil), u.Typ[Invalid])
+	s.Insert(complex128Type.Obj)
 
 	anyIface := NewTCInterface(nil, nil)
 	anyIface.Complete()
-	anyObj := NewTypeName(nil, "any", anyIface)
-	defObj(anyObj)
+	s.Insert(NewTypeName(nil, "any", anyIface))
 
 	comparableIface := NewTCInterface(nil, nil)
 	comparableIface.Complete()
-	comparableObj := NewTypeName(nil, "comparable", comparableIface)
-	defObj(comparableObj)
+	s.Insert(NewTypeName(nil, "comparable", comparableIface))
 
-	// predeclared constants
-	defConst("true", Typ[UntypedBool], untypedBool(true))
-	defConst("false", Typ[UntypedBool], untypedBool(false))
-	defConst("iota", Typ[UntypedInt], untypedInt(0))
-	defNil()
+	s.Insert(NewTCConst(nil, "true", u.Typ[UntypedBool], untypedBool(true)))
+	s.Insert(NewTCConst(nil, "false", u.Typ[UntypedBool], untypedBool(false)))
+	s.Insert(NewTCConst(nil, "iota", u.Typ[UntypedInt], untypedInt(0)))
+	s.Insert(NewTCConst(nil, "nil", u.Typ[UntypedNil], untypedNil()))
 
-	// predeclared builtins
 	builtinNames := [18]string{
 		BuiltinAppend:  "append",
 		BuiltinCap:     "cap",
@@ -163,12 +180,11 @@ func InitUniverse() {
 		BuiltinFree:    "free",
 	}
 	for id, name := range builtinNames {
-		Universe.Insert(newBuiltin(name, BuiltinID(id)))
+		s.Insert(newBuiltin(name, BuiltinID(id)))
 	}
-
-	// Go 1.21 builtins.
-	Universe.Insert(newBuiltin("min", BuiltinMin))
-	Universe.Insert(newBuiltin("max", BuiltinMax))
+	s.Insert(newBuiltin("min", BuiltinMin))
+	s.Insert(newBuiltin("max", BuiltinMax))
+	return u
 }
 
 
@@ -177,22 +193,22 @@ func defTypeName(name string, typ Type) {
 	Universe.Insert(tn)
 }
 
-func addStringMethod(named *Named) {
+func addStringMethod(named *Named, strType *Basic) {
 	stringSig := NewSignature(
 		NewTCVar(nil, "", named),
 		nil,
-		NewTuple(NewTCVar(nil, "", Typ[TCString])),
+		NewTuple(NewTCVar(nil, "", strType)),
 		false,
 	)
 	stringFn := NewTCFunc(nil, "String", stringSig)
 	named.AddMethod(stringFn)
 }
 
-func addBasicStringMethod(b *Basic) {
+func addBasicStringMethod(b *Basic, strType *Basic) {
 	stringSig := NewSignature(
 		NewTCVar(nil, "", b),
 		nil,
-		NewTuple(NewTCVar(nil, "", Typ[TCString])),
+		NewTuple(NewTCVar(nil, "", strType)),
 		false,
 	)
 	stringFn := NewTCFunc(nil, "String", stringSig)

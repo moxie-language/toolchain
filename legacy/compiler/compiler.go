@@ -3717,6 +3717,76 @@ func (b *builder) emitArenaCopySlice(val llvm.Value) llvm.Value {
 	return b.CreateLoad(val.Type(), tmp, "dc.cast")
 }
 
+// getOrCreatePtrCopyFn returns a module-level function that deep-copies
+// *T. Generated once per type, called at every return site that needs it.
+func (c *compilerContext) getOrCreatePtrCopyFn(typ *types.Pointer) llvm.Value {
+	name := "arenaCopy." + typ.String()
+	if fn := c.mod.NamedFunction(name); !fn.IsNil() {
+		return fn
+	}
+	elemType := c.getLLVMType(typ.Elem())
+	fnType := llvm.FunctionType(c.dataPtrType, []llvm.Type{c.dataPtrType}, false)
+	fn := llvm.AddFunction(c.mod, name, fnType)
+	fn.SetLinkage(llvm.InternalLinkage)
+
+	entry := c.ctx.AddBasicBlock(fn, "entry")
+	copyBB := c.ctx.AddBasicBlock(fn, "copy")
+	retNull := c.ctx.AddBasicBlock(fn, "retnull")
+
+	savedBlock := c.builder.GetInsertBlock()
+	c.builder.SetInsertPointAtEnd(entry)
+	src := fn.Param(0)
+	isNull := c.builder.CreateICmp(llvm.IntEQ, src, llvm.ConstNull(c.dataPtrType), "")
+	c.builder.CreateCondBr(isNull, retNull, copyBB)
+
+	c.builder.SetInsertPointAtEnd(retNull)
+	c.builder.CreateRet(llvm.ConstNull(c.dataPtrType))
+
+	c.builder.SetInsertPointAtEnd(copyBB)
+	size := c.targetData.TypeAllocSize(elemType)
+	sizeVal := llvm.ConstInt(c.uintptrType, size, false)
+	layoutVal := llvm.ConstNull(c.dataPtrType)
+	allocFnType, allocFn := c.getFunction(c.program.ImportedPackage("runtime").Members["alloc"].(*ssa.Function))
+	dst := c.builder.CreateCall(allocFnType, allocFn, []llvm.Value{sizeVal, layoutVal, llvm.Undef(c.dataPtrType)}, "dst")
+	memcpyFnType, memcpyFn := c.getFunction(c.program.ImportedPackage("runtime").Members["memcpy"].(*ssa.Function))
+	c.builder.CreateCall(memcpyFnType, memcpyFn, []llvm.Value{dst, src, sizeVal, llvm.Undef(c.dataPtrType)}, "")
+
+	// Recurse into pointer-containing fields of the element type.
+	if st, ok := typ.Elem().Underlying().(*types.Struct); ok {
+		for i := 0; i < st.NumFields(); i++ {
+			ft := st.Field(i).Type()
+			if !typeContainsPointers(ft) {
+				continue
+			}
+			fieldLLVM := c.getLLVMType(ft)
+			gep := c.builder.CreateStructGEP(elemType, dst, i, "dc.gep")
+			oldVal := c.builder.CreateLoad(fieldLLVM, gep, "dc.fld")
+			var newVal llvm.Value
+			switch ftu := ft.Underlying().(type) {
+			case *types.Map:
+				hmCopyType, hmCopyFn := c.getFunction(c.program.ImportedPackage("runtime").Members["hashmapCopy"].(*ssa.Function))
+				newVal = c.builder.CreateCall(hmCopyType, hmCopyFn, []llvm.Value{oldVal, llvm.Undef(c.dataPtrType)}, "dc.map")
+			case *types.Slice:
+				slCopyType, slCopyFn := c.getFunction(c.program.ImportedPackage("runtime").Members["arenaCopySliceIfLocal"].(*ssa.Function))
+				markVal := llvm.ConstInt(c.uintptrType, 0, false) // mark=0: copy unconditionally in copy fn
+				newVal = c.builder.CreateCall(slCopyType, slCopyFn, []llvm.Value{oldVal, markVal, llvm.Undef(c.dataPtrType)}, "dc.sl")
+			case *types.Pointer:
+				subCopyFn := c.getOrCreatePtrCopyFn(ftu)
+				subCopyFnType := llvm.FunctionType(c.dataPtrType, []llvm.Type{c.dataPtrType}, false)
+				newVal = c.builder.CreateCall(subCopyFnType, subCopyFn, []llvm.Value{oldVal}, "dc.sub")
+			default:
+				continue
+			}
+			c.builder.CreateStore(newVal, gep)
+		}
+	}
+
+	c.builder.CreateRet(dst)
+
+	c.builder.SetInsertPointAtEnd(savedBlock)
+	return fn
+}
+
 // emitDeepCopy emits a single runtime call to deep-copy a value.
 // For slices/strings: runtime.arenaCopySlice.
 // For pointers: runtime.arenaCopyPtr with element size.
@@ -3731,10 +3801,11 @@ func (b *builder) emitDeepCopy(val llvm.Value, goType types.Type) llvm.Value {
 	case *types.Slice:
 		return b.emitArenaCopySlice(val)
 	case *types.Pointer:
-		elemType := b.getLLVMType(typ.Elem())
-		size := b.targetData.TypeAllocSize(elemType)
-		sizeVal := llvm.ConstInt(b.uintptrType, size, false)
-		return b.createRuntimeCall("arenaCopyPtrIfLocal", []llvm.Value{val, b.arenaMarkVal, sizeVal}, "dc.p")
+		copyFn := b.getOrCreatePtrCopyFn(typ)
+		copyFnType := llvm.FunctionType(b.dataPtrType, []llvm.Type{b.dataPtrType}, false)
+		return b.CreateCall(copyFnType, copyFn, []llvm.Value{val}, "dc.p")
+	case *types.Map:
+		return b.createRuntimeCall("hashmapCopy", []llvm.Value{val}, "dc.m")
 	case *types.Struct:
 		result := val
 		for i := 0; i < typ.NumFields(); i++ {
