@@ -559,8 +559,9 @@ func TypeCheckOnly(src []byte, name string) {
 		registerCompiledExports(pkg)
 	}
 	ScanGenericDecls(src, name)
-	// Arena freed by caller after generateMxh, or by next TypeCheckOnly/CompileToIR.
-	cctx.compileArena = arena
+	// Arena freed now. registerCompiledExports round-tripped through mxh -
+	// ImportRegistry holds heap objects, not arena pointers.
+	runtime.ArenaFree(arena)
 	releasePerPkgState()
 }
 
@@ -630,6 +631,13 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	emitter.releaseAfterEmit()
 	ssaPkg.release()
 	prog.release()
+	// Free the arena now. registerCompiledExports already round-tripped
+	// type objects through mxh serialization - ImportRegistry holds only
+	// heap-allocated objects, not arena pointers.
+	if cctx.compileArena != nil {
+		runtime.ArenaFree(cctx.compileArena)
+		cctx.compileArena = nil
+	}
 
 	if len(cctx.compileErrors) > 0 {
 		out := "; compile error\n"
@@ -645,15 +653,16 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	return ir
 }
 
-// registerCompiledExports creates a registry entry with pointer-shared
-// objects from the compilation scope. The registry entry outlives the
-// arena because SetTypesArena(nil) is called before this function,
-// so NewTCPackage/NewScope allocate on the heap.
+// registerCompiledExports serializes the compilation scope to mxh text,
+// then parses it back to heap-allocated objects. This breaks the pointer
+// dependency on the arena - the registry holds only heap objects.
+// The arena can then be freed without dangling the registry.
 func registerCompiledExports(pkg *TCPackage) {
 	EnsureImportRegistry()
-	path := pkg.Path
 	DirectImportPaths(pkg)
-	regPkg := NewTCPackage(path, pkg.Name)
+	// Build a temporary registry package with arena objects just for
+	// serialization. This is the same filtering as before.
+	tmpPkg := NewTCPackage(pkg.Path, pkg.Name)
 	names := pkg.Scope.Names()
 	for _, name := range names {
 		if len(name) == 0 {
@@ -675,9 +684,15 @@ func registerCompiledExports(pkg *TCPackage) {
 				continue
 			}
 		}
-		regPkg.Scope.Insert(obj)
+		tmpPkg.Scope.Insert(obj)
 	}
-	ImportRegistry[path] = regPkg
+	// Serialize to mxh text (reads from arena objects).
+	mxhText := generateMxh(tmpPkg)
+	// Parse mxh text back into heap-allocated objects.
+	// loadMxhData creates fresh heap objects via NewTCPackage/NewTypeName etc.
+	// The arena is not referenced by the resulting ImportRegistry entry.
+	loadMxhData([]byte(mxhText))
+	free(mxhText)
 }
 
 func tcInferTypeFromExpr(e syntax.Expr, scope *Scope) (t Type) {
