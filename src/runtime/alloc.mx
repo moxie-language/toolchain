@@ -110,9 +110,12 @@ func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 		}
 	} else {
 		// Scan large-object free list for a block >= totalSize.
+		// Limit scan to 32 entries to avoid O(n) degeneracy when
+		// hashmapDeepFree fills the list with many small entries.
 		prev := (*freeNode)(nil)
 		node := freeLists[9]
-		for node != nil {
+		scanned := 0
+		for node != nil && scanned < 32 {
 			if node.size >= totalSize {
 				if prev == nil {
 					freeLists[9] = node.next
@@ -130,6 +133,7 @@ func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 			}
 			prev = node
 			node = node.next
+			scanned++
 		}
 	}
 
@@ -152,7 +156,8 @@ func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 		for sc := class; sc < nSizeClasses; sc++ {
 			prev := (*freeNode)(nil)
 			node := freeLists[sc]
-			for node != nil {
+			scanned := 0
+			for node != nil && scanned < 64 {
 				nsz := node.size
 				if sc < 9 {
 					nsz = classSize(sc) + uintptr(headerSize)
@@ -173,6 +178,7 @@ func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 					return ptr
 				}
 				prev = node
+				scanned++
 				node = node.next
 			}
 		}
