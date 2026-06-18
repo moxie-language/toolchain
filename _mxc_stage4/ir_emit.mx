@@ -88,9 +88,12 @@ func newIREmitter(pkg *SSAPackage, triple string, srcLen int32) (p *irEmitter) {
 		ptrBits:  ptrBits,
 		pkg:      pkg,
 		valName:  map[SSAValue]string{},
-		extDecls:   map[string]string{},
-		extGlobals: map[string]string{},
-		strMap:     map[string]int32{},
+		extDecls:     map[string]string{},
+		extGlobals:   map[string]string{},
+		strMap:       map[string]int32{},
+		typeIDs:      map[string]int32{},
+		localTypeIDs: map[string]bool{},
+		globalDeclTypes: map[string]string{},
 		allocTypes: map[SSAValue]string{},
 		regTypes:   map[string]string{},
 		blockExitLabel: map[int32]string{},
@@ -543,6 +546,10 @@ func (e *irEmitter) emit() (s string) {
 			e.hoisted = nil
 			e.pendingPhiTruncs = nil
 			e.deferList = nil
+			e.allocBlock = nil
+			e.storedTo = nil
+			e.usedAs = nil
+			e.missingStores = nil
 			m.Blocks = nil
 			m.Locals = nil
 			m.Params = nil
@@ -638,44 +645,55 @@ func (e *irEmitter) emit() (s string) {
 
 func (e *irEmitter) releaseAfterEmit() {}
 
-// mergeAccumulators copies per-function cross-function products into the
-// real maps. Called on the compile arena after function emit + flush.
-// Accumulator slices die with the function arena at reset.
+// copyStr deep-copies a string's backing bytes into the current arena.
+// Without this, string headers in compile-arena maps would point to
+// fn-arena bytes that die at ArenaReset.
+func copyStr(s string) (r string) {
+	if len(s) == 0 {
+		return ""
+	}
+	buf := []byte{:len(s)}
+	copy(buf, s)
+	return string(buf)
+}
+
+// mergeAccumulators deep-copies per-function products into compile-arena maps.
+// Called on the compile arena after function emit + flush.
+// All accumulator string bytes are in the fn arena and must be copied.
 func (e *irEmitter) mergeAccumulators() {
 	for _, p := range e.pendExtDecls {
-		e.extDecls[p.k] = p.v
+		e.extDecls[copyStr(p.k)] = copyStr(p.v)
 	}
 	e.pendExtDecls = nil
 	for _, p := range e.pendExtGlobals {
-		e.extGlobals[p.k] = p.v
+		e.extGlobals[copyStr(p.k)] = copyStr(p.v)
 	}
 	e.pendExtGlobals = nil
 	for _, s := range e.pendStrConsts {
-		if _, ok := e.strMap[s]; !ok {
-			e.strMap[s] = len(e.strConst)
-			e.strConst = append(e.strConst, s)
+		cs := copyStr(s)
+		if _, ok := e.strMap[cs]; !ok {
+			e.strMap[cs] = len(e.strConst)
+			e.strConst = append(e.strConst, cs)
 		}
 	}
 	e.pendStrConsts = nil
 	for _, p := range e.pendTypeIDs {
-		if _, ok := e.typeIDs[p.k]; !ok {
-			e.typeIDs[p.k] = p.v
+		ck := copyStr(p.k)
+		if _, ok := e.typeIDs[ck]; !ok {
+			e.typeIDs[ck] = p.v
 		}
 	}
 	e.pendTypeIDs = nil
 	for _, k := range e.pendLocalTypeIDs {
-		if e.localTypeIDs == nil {
-			e.localTypeIDs = map[string]bool{}
-		}
-		e.localTypeIDs[k] = true
+		e.localTypeIDs[copyStr(k)] = true
 	}
 	e.pendLocalTypeIDs = nil
 	for _, p := range e.pendGlobalDeclTypes {
-		e.globalDeclTypes[p.k] = p.v
+		e.globalDeclTypes[copyStr(p.k)] = copyStr(p.v)
 	}
 	e.pendGlobalDeclTypes = nil
 	for _, wa := range e.pendWasmAttrs {
-		e.wasmAttrs = append(e.wasmAttrs, wa)
+		e.wasmAttrs = append(e.wasmAttrs, [3]string{copyStr(wa[0]), copyStr(wa[1]), copyStr(wa[2])})
 	}
 	e.pendWasmAttrs = nil
 }
@@ -885,7 +903,6 @@ func (e *irEmitter) emitLibMain() {
 }
 
 func (e *irEmitter) emitFunction(f *SSAFunction) {
-	mxutil.WriteStr(2, "    fn: " | f.name | "\n")
 	e.w("; [emit] " | f.name | "\n")
 	sym := e.funcSymbol(f)
 	if len(sym) > 5 && (mxutil.HasPrefix(sym, "@llvm.") || mxutil.HasPrefix(sym, "@\"llvm.")) {
@@ -930,51 +947,30 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		e.emitFuncDecl(f)
 		return
 	}
-	mxutil.WriteStr(2, "      A\n")
 	e.curFunc = f
-	mxutil.WriteStr(2, "      B\n")
-	// markReturnEscapes(f) // disabled for arena debugging
+	markReturnEscapes(f)
 	e.nextReg = 0
 	e.deferList = nil
 	e.deferID = 0
-	mxutil.WriteStr(2, "      C-maps\n")
 	e.valName = map[SSAValue]string{}
 	e.nameUsed = map[string]bool{}
-	mxutil.WriteStr(2, "      C-maps-ok\n")
 	e.allocTypes = map[SSAValue]string{}
 	e.regTypes = map[string]string{}
 	e.blockExitLabel = map[int32]string{}
-	print("      D-params n=")
-	print(len(f.Params))
-	print("\n")
 	usedNames := map[string]int32{}
 	for i, p := range f.Params {
-		print("        p")
-		print(int32(i))
-		if p == nil {
-			print(" NIL\n")
-			continue
-		}
-		print(" ok\n")
-		print("          ssaname\n")
 		pname := p.SSAName()
-		print("          got-name\n")
 		if pname == "" {
 			pname = "p" | irItoa(i)
 		}
-		print("          check-used\n")
 		if cnt, ok := usedNames[pname]; ok {
 			pname = pname | "." | irItoa(cnt)
 		}
-		print("          inc-used\n")
 		usedNames[p.SSAName()]++
-		print("          set-valname\n")
 		e.valName[p] = "%" | pname
-		print("          set-nameused\n")
 		e.nameUsed["%" | pname] = true
-		print("          param-done\n")
 	}
-	mxutil.WriteStr(2, "      E-define\n")
+
 	e.w("\ndefine ")
 	if f.parent != nil {
 		e.w("hidden ")
