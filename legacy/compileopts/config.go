@@ -31,6 +31,7 @@ func (c *Config) DumpSSA() bool     { return c.Options.DumpSSA }
 func (c *Config) VerifyIR() bool    { return c.Options.VerifyIR }
 func (c *Config) Debug() bool       { return c.Options.Debug }
 func (c *Config) ExtraFiles() []string { return c.Target.ExtraFiles }
+func (c *Config) IsStandaloneRuntime() bool { return c.Options.StandaloneRuntime }
 
 func (c *Config) BuildMode() string {
 	if c.Options.BuildMode != "" {

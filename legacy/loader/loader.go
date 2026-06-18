@@ -459,7 +459,9 @@ func (p *Package) Check() error {
 				},
 			}}
 		}
-		packageName = "main"
+		if !p.program.SkipMainNameCheck {
+			packageName = "main"
+		}
 	}
 	typesPkg, err := checker.Check(packageName, p.program.fset, p.Files, &p.info)
 

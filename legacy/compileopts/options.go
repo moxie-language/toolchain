@@ -41,8 +41,9 @@ type Options struct {
 	Tags          []string
 	GlobalValues  map[string]map[string]string
 	TestConfig    TestConfig
-	LLVMFeatures  string
-	ExtLDFlags    []string
+	LLVMFeatures       string
+	ExtLDFlags         []string
+	StandaloneRuntime  bool // skip internalization, keep runtime symbols external
 }
 
 // Verify performs validation on the given options.

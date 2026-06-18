@@ -40,7 +40,20 @@ const (
 // createRuntimeCallCommon creates a runtime call. Use createRuntimeCall or
 // createRuntimeInvoke instead.
 func (b *builder) createRuntimeCallCommon(fnName string, args []llvm.Value, name string, isInvoke bool) llvm.Value {
-	member := b.program.ImportedPackage("runtime").Members[fnName]
+	rtPkg := b.program.ImportedPackage("runtime")
+	if rtPkg == nil && b.runtimePkg != nil {
+		// Compiling the runtime itself or a dep of it.
+		for _, pkg := range b.program.AllPackages() {
+			if pkg.Pkg == b.runtimePkg {
+				rtPkg = pkg
+				break
+			}
+		}
+	}
+	if rtPkg == nil {
+		panic("runtime package not found for call: " + fnName)
+	}
+	member := rtPkg.Members[fnName]
 	if member == nil {
 		panic("unknown runtime call: " + fnName)
 	}

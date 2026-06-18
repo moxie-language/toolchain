@@ -192,6 +192,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		Debug:              !config.Options.SkipDWARF, // emit DWARF except when -internal-nodwarf is passed
 		Nobounds:           config.Options.Nobounds,
 		PanicStrategy:      config.PanicStrategy(),
+		StandaloneRuntime:  config.IsStandaloneRuntime(),
 	}
 
 	// Load the target machine, which is the LLVM object that contains all
@@ -210,6 +211,9 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	})
 	if err != nil {
 		return BuildResult{}, err
+	}
+	if config.IsStandaloneRuntime() {
+		lprogram.SkipMainNameCheck = true
 	}
 	logMem("after loader.Load")
 	result := BuildResult{
@@ -492,46 +496,52 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 
 			// Create runtime.initAll function that calls the runtime
 			// initializer of each package.
-			llvmInitFn := mod.NamedFunction("runtime.initAll")
-			llvmInitFn.SetLinkage(llvm.InternalLinkage)
-			llvmInitFn.SetUnnamedAddr(true)
-			transform.AddStandardAttributes(llvmInitFn, config)
-			llvmInitFn.Param(0).SetName("context")
-			block := mod.Context().AddBasicBlock(llvmInitFn, "entry")
-			irbuilder := mod.Context().NewBuilder()
-			defer irbuilder.Dispose()
-			irbuilder.SetInsertPointAtEnd(block)
-			ptrType := llvm.PointerType(mod.Context().Int8Type(), 0)
-			for _, pkg := range lprogram.Sorted() {
-				pkgInit := mod.NamedFunction(pkg.Pkg.Path() + ".init")
-				if pkgInit.IsNil() {
-					panic("init not found for " + pkg.Pkg.Path())
+			// Standalone runtime: skip initAll - stage4 generates its own.
+			if !config.IsStandaloneRuntime() {
+				llvmInitFn := mod.NamedFunction("runtime.initAll")
+				llvmInitFn.SetLinkage(llvm.InternalLinkage)
+				llvmInitFn.SetUnnamedAddr(true)
+				transform.AddStandardAttributes(llvmInitFn, config)
+				llvmInitFn.Param(0).SetName("context")
+				block := mod.Context().AddBasicBlock(llvmInitFn, "entry")
+				irbuilder := mod.Context().NewBuilder()
+				defer irbuilder.Dispose()
+				irbuilder.SetInsertPointAtEnd(block)
+				ptrType := llvm.PointerType(mod.Context().Int8Type(), 0)
+				for _, pkg := range lprogram.Sorted() {
+					pkgInit := mod.NamedFunction(pkg.Pkg.Path() + ".init")
+					if pkgInit.IsNil() {
+						panic("init not found for " + pkg.Pkg.Path())
+					}
+					irbuilder.CreateCall(pkgInit.GlobalValueType(), pkgInit, []llvm.Value{llvm.Undef(ptrType)}, "")
 				}
-				irbuilder.CreateCall(pkgInit.GlobalValueType(), pkgInit, []llvm.Value{llvm.Undef(ptrType)}, "")
+				irbuilder.CreateRetVoid()
 			}
-			irbuilder.CreateRetVoid()
 
 			// After linking, functions should (as far as possible) be set to
 			// private linkage or internal linkage. The compiler package marks
 			// non-exported functions by setting the visibility to hidden or
 			// (for thunks) to linkonce_odr linkage. Change the linkage here to
 			// internal to benefit much more from interprocedural optimizations.
-			for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
-				if fn.Visibility() == llvm.HiddenVisibility {
-					fn.SetVisibility(llvm.DefaultVisibility)
-					fn.SetLinkage(llvm.InternalLinkage)
-				} else if fn.Linkage() == llvm.LinkOnceODRLinkage {
-					fn.SetLinkage(llvm.InternalLinkage)
+			// Skip when building standalone runtime - symbols must stay external.
+			if !config.IsStandaloneRuntime() {
+				for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
+					if fn.Visibility() == llvm.HiddenVisibility {
+						fn.SetVisibility(llvm.DefaultVisibility)
+						fn.SetLinkage(llvm.InternalLinkage)
+					} else if fn.Linkage() == llvm.LinkOnceODRLinkage {
+						fn.SetLinkage(llvm.InternalLinkage)
+					}
 				}
-			}
 
-			// Do the same for globals.
-			for global := mod.FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
-				if global.Visibility() == llvm.HiddenVisibility {
-					global.SetVisibility(llvm.DefaultVisibility)
-					global.SetLinkage(llvm.InternalLinkage)
-				} else if global.Linkage() == llvm.LinkOnceODRLinkage {
-					global.SetLinkage(llvm.InternalLinkage)
+				// Do the same for globals.
+				for global := mod.FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
+					if global.Visibility() == llvm.HiddenVisibility {
+						global.SetVisibility(llvm.DefaultVisibility)
+						global.SetLinkage(llvm.InternalLinkage)
+					} else if global.Linkage() == llvm.LinkOnceODRLinkage {
+						global.SetLinkage(llvm.InternalLinkage)
+					}
 				}
 			}
 
@@ -551,29 +561,40 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				fmt.Println(mod.String())
 			}
 
-			// Run interp for runtime.initAll, then LowerInterfaces +
-			// LowerInterrupts for dispatch stubs. Skip ALL LLVM optimization
-			// passes - they miscompile interface dispatch (proven: setBlock
-			// writes through wrong pointer after optimization).
-			logMem("before interp.Run")
-			err := interp.Run(mod, config.Options.InterpTimeout, config.DumpSSA())
-			if err != nil {
-				return err
+			if config.IsStandaloneRuntime() {
+				// Standalone runtime: run interface lowering (generates
+				// dispatch stubs) but skip interp and globaldce.
+				err := transform.LowerInterfaces(mod, config)
+				if err != nil {
+					return err
+				}
+				errs := transform.LowerInterrupts(mod)
+				if len(errs) > 0 {
+					return errs[0]
+				}
+			} else {
+				// Run interp for runtime.initAll, then LowerInterfaces +
+				// LowerInterrupts for dispatch stubs.
+				logMem("before interp.Run")
+				err := interp.Run(mod, config.Options.InterpTimeout, config.DumpSSA())
+				if err != nil {
+					return err
+				}
+				logMem("after interp.Run")
+				err = transform.LowerInterfaces(mod, config)
+				if err != nil {
+					return err
+				}
+				errs := transform.LowerInterrupts(mod)
+				if len(errs) > 0 {
+					return errs[0]
+				}
+				// globaldce removes unreachable functions (assembly stubs etc.)
+				po := llvm.NewPassBuilderOptions()
+				mod.RunPasses("globaldce", llvm.TargetMachine{}, po)
+				po.Dispose()
+				logMem("after LowerInterfaces")
 			}
-			logMem("after interp.Run")
-			err = transform.LowerInterfaces(mod, config)
-			if err != nil {
-				return err
-			}
-			errs := transform.LowerInterrupts(mod)
-			if len(errs) > 0 {
-				return errs[0]
-			}
-			// globaldce removes unreachable functions (assembly stubs etc.)
-			po := llvm.NewPassBuilderOptions()
-			mod.RunPasses("globaldce", llvm.TargetMachine{}, po)
-			po.Dispose()
-			logMem("after LowerInterfaces")
 
 			// Make sure stack sizes are loaded from a separate section so they can be
 			// modified after linking.

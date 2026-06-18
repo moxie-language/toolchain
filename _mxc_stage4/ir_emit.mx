@@ -61,6 +61,11 @@ type irEmitter struct {
 	pendLocalTypeIDs  []string
 	pendGlobalDeclTypes []emitKV
 	pendWasmAttrs     [][3]string
+	pendDeepCopyEntries []deepCopyEntry
+	// Arena deep-copy state (compileArena lifetime)
+	arenaActive   bool
+	deepCopyFns   map[string]string
+	deepCopyQueue []deepCopyEntry
 }
 
 type phiTrunc struct {
@@ -526,6 +531,9 @@ func (e *irEmitter) emit() (s string) {
 	}
 	e.flush()
 	compileArena := runtime.CurrentArena()
+	// Deep copy state lives in compileArena, survives per-function resets.
+	e.deepCopyFns = map[string]string{}
+	e.deepCopyQueue = nil
 	fnArena := runtime.ArenaNew(512 * 1024 * 1024)
 	for _, member := range e.pkgMembers() {
 		if m, ok := member.(*SSAFunction); ok {
@@ -562,6 +570,8 @@ func (e *irEmitter) emit() (s string) {
 	runtime.ArenaFree(fnArena)
 	// Fresh buf for trailing declarations (libMain, string constants, extern decls).
 	e.buf = []byte{:0:4096}
+	// Emit per-type deep copy helper functions for arena return copy.
+	e.emitDeepCopyFunctions()
 	e.emitLibMain()
 	for i, sc := range e.strConst {
 		e.w(e.strConstGlobal(i))
@@ -696,6 +706,13 @@ func (e *irEmitter) mergeAccumulators() {
 		e.wasmAttrs = append(e.wasmAttrs, [3]string{copyStr(wa[0]), copyStr(wa[1]), copyStr(wa[2])})
 	}
 	e.pendWasmAttrs = nil
+	for _, dc := range e.pendDeepCopyEntries {
+		key := copyStr(typeKeyForDeepCopy(dc.typ))
+		sym := copyStr(dc.sym)
+		e.deepCopyFns[key] = sym
+		e.deepCopyQueue = append(e.deepCopyQueue, deepCopyEntry{sym, dc.typ})
+	}
+	e.pendDeepCopyEntries = nil
 }
 
 func (e *irEmitter) pkgMembers() (ss []SSAMember) {
@@ -948,6 +965,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		return
 	}
 	e.curFunc = f
+	e.arenaActive = false
 	markReturnEscapes(f)
 	e.nextReg = 0
 	e.deferList = nil
@@ -1150,6 +1168,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 			if len(e.curFunc.FreeVars) > 0 {
 				e.emitFreeVarUnpack(e.curFunc)
 			}
+			e.emitArenaPrologue()
 			for _, instr := range b.Instrs {
 				e.emitInstr(instr)
 			}
@@ -1677,7 +1696,7 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 					e.w("  store ") ; e.w(nrt) ; e.w(" ") ; e.w(tmp) ; e.w(", ptr %retval\n")
 					e.w("  ret void\n")
 				} else {
-					e.w("  ret ") ; e.w(nrt) ; e.w(" ") ; e.w(tmp) ; e.w("\n")
+					e.emitRetWithArenaCopy(nrt, tmp)
 				}
 			} else {
 				aggRT := rt
@@ -1702,7 +1721,7 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 					e.w("  store ") ; e.w(aggRT) ; e.w(" ") ; e.w(rv) ; e.w(", ptr %retval\n")
 					e.w("  ret void\n")
 				} else {
-					e.w("  ret ") ; e.w(aggRT) ; e.w(" ") ; e.w(rv) ; e.w("\n")
+					e.emitRetWithArenaCopy(aggRT, rv)
 				}
 			}
 		} else {
@@ -1752,7 +1771,7 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 			e.w("  store ") ; e.w(expectType) ; e.w(" ") ; e.w(val) ; e.w(", ptr %retval\n")
 			e.w("  ret void\n")
 		} else {
-			e.w("  ret ") ; e.w(expectType) ; e.w(" ") ; e.w(val) ; e.w("\n")
+			e.emitRetWithArenaCopy(expectType, val)
 		}
 		return
 	}
@@ -1839,7 +1858,7 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 		e.w("  store ") ; e.w(retType) ; e.w(" ") ; e.w(prev) ; e.w(", ptr %retval\n")
 		e.w("  ret void\n")
 	} else {
-		e.w("  ret ") ; e.w(retType) ; e.w(" ") ; e.w(prev) ; e.w("\n")
+		e.emitRetWithArenaCopy(retType, prev)
 	}
 }
 

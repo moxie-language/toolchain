@@ -65,6 +65,7 @@ type Config struct {
 	Debug              bool // Whether to emit debug information in the LLVM module.
 	Nobounds           bool // Whether to skip bounds checks
 	PanicStrategy      string
+	StandaloneRuntime  bool // keep symbols external for cross-module linking
 }
 
 // compilerContext contains function-independent data that should still be
@@ -320,7 +321,28 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 	c.embedGlobals = pkg.EmbedGlobals
 	c.makeExemptOffsets = pkg.MakeExemptOffsets
 	c.pkg = pkg.Pkg
-	c.runtimePkg = ssaPkg.Prog.ImportedPackage("runtime").Pkg
+	rtSSAPkg := ssaPkg.Prog.ImportedPackage("runtime")
+	if rtSSAPkg != nil {
+		c.runtimePkg = rtSSAPkg.Pkg
+	} else {
+		// Standalone runtime compilation: runtime isn't "imported" but IS
+		// in the program's package set.
+		for _, p := range ssaPkg.Prog.AllPackages() {
+			if p.Pkg != nil && p.Pkg.Path() == "runtime" {
+				c.runtimePkg = p.Pkg
+				rtSSAPkg = p
+				break
+			}
+		}
+		if c.runtimePkg == nil {
+			fmt.Fprintf(os.Stderr, "[debug] runtimePkg not found. compiling=%s allPkgs=%d\n", pkg.Pkg.Path(), len(ssaPkg.Prog.AllPackages()))
+			for _, p := range ssaPkg.Prog.AllPackages() {
+				if p.Pkg != nil {
+					fmt.Fprintf(os.Stderr, "  pkg: %s\n", p.Pkg.Path())
+				}
+			}
+		}
+	}
 	c.program = ssaPkg.Prog
 
 	// Convert AST to SSA.
@@ -352,7 +374,19 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 
 	// Predeclare the runtime.alloc function, which is used by the wordpack
 	// functionality.
-	c.getFunction(c.program.ImportedPackage("runtime").Members["alloc"].(*ssa.Function))
+	var allocPkg *ssa.Package
+	if rtSSAPkg != nil {
+		allocPkg = rtSSAPkg
+	} else if pkg.Pkg.Path() == "runtime" {
+		allocPkg = ssaPkg
+	}
+	if allocPkg != nil {
+		if allocMember, ok := allocPkg.Members["alloc"]; ok {
+			if allocFn, ok2 := allocMember.(*ssa.Function); ok2 {
+				c.getFunction(allocFn)
+			}
+		}
+	}
 
 	// Compile all functions, methods, and global variables in this package.
 	irbuilder := c.ctx.NewBuilder()
@@ -406,7 +440,11 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 }
 
 func (c *compilerContext) getRuntimeType(name string) types.Type {
-	return c.runtimePkg.Scope().Lookup(name).(*types.TypeName).Type()
+	obj := c.runtimePkg.Scope().Lookup(name)
+	if obj == nil {
+		panic(fmt.Sprintf("runtime type %q not found in scope (pkg=%s, scope has %d names)", name, c.runtimePkg.Path(), c.runtimePkg.Scope().Len()))
+	}
+	return obj.(*types.TypeName).Type()
 }
 
 // emitLogAlloc emits runtime.logAlloc(siteID) at a heap allocation site
@@ -1225,7 +1263,7 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 	}
 
 	b.addStandardDefinedAttributes(b.llvmFn)
-	if !b.info.exported {
+	if !b.info.exported && !b.StandaloneRuntime {
 		// Do not set visibility for local linkage (internal or private).
 		// Otherwise a "local linkage requires default visibility"
 		// assertion error in llvm-project/llvm/include/llvm/IR/GlobalValue.h:236
@@ -1404,7 +1442,9 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 
 	// Arena prologue: save the current arena offset.
 	// Runtime package is exempt - its functions ARE the arena implementation.
-	if b.fn.Pkg == nil || b.fn.Pkg.Pkg.Path() != "runtime" {
+	// Skip if runtimePkg unavailable (e.g. internal/task compiled standalone).
+	isRuntime := b.fn.Pkg != nil && b.fn.Pkg.Pkg.Path() == "runtime"
+	if !isRuntime && b.runtimePkg != nil {
 		b.arenaMarkVal = b.createRuntimeCall("ArenaMark", nil, "arena.mark")
 	}
 }

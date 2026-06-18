@@ -76,6 +76,40 @@ func printCommand(cmd string, args ...string) {
 	fmt.Fprintln(os.Stderr, strings.Join(command, " "))
 }
 
+// BuildRuntime compiles the runtime packages into a standalone .bc file
+// with external linkage on all symbols.
+func BuildRuntime(outpath string, config *compileopts.Config) error {
+	if outpath == "" {
+		root := goenv.Get("MOXIEROOT")
+		if root == "" {
+			root = "."
+		}
+		outpath = filepath.Join(root, "sysroot", "runtime_go.bc")
+	}
+	if !strings.HasSuffix(outpath, ".bc") {
+		outpath = outpath + ".bc"
+	}
+
+	tmpdir, err := os.MkdirTemp("", "moxie-rt-build")
+	if err != nil {
+		return err
+	}
+	if !config.Options.Work {
+		defer os.RemoveAll(tmpdir)
+	}
+
+	// Compile runtime as the "main" package - the loader resolves all
+	// runtime dependencies. SkipMainNameCheck + StandaloneRuntime flags
+	// bypass the main-package requirement and skip internalization.
+	_, err = builder.Build("runtime", outpath, tmpdir, config)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "  -> %s\n", outpath)
+	return nil
+}
+
 // Build compiles and links the given package and writes it to outpath.
 func Build(pkgName, outpath string, config *compileopts.Config) error {
 	tmpdir, err := os.MkdirTemp("", "moxie")
@@ -471,6 +505,7 @@ func main() {
 	dumpSSA := flag.Bool("internal-dumpssa", false, "dump internal Moxie SSA")
 	verifyIR := flag.Bool("internal-verifyir", false, "run extra verification steps on LLVM IR")
 	skipDwarf := flag.Bool("internal-nodwarf", false, "internal flag, use -no-debug instead")
+	standaloneRuntime := flag.Bool("standalone-runtime", false, "keep runtime symbols external (for build-runtime)")
 
 	var flagDeps, flagTest bool
 	if command == "help" || command == "list" {
@@ -546,7 +581,8 @@ func main() {
 		Tags:          []string(tags),
 		TestConfig:    testConfig,
 		GlobalValues:  globalVarValues,
-		LLVMFeatures:  *llvmFeatures,
+		LLVMFeatures:       *llvmFeatures,
+		StandaloneRuntime:  *standaloneRuntime,
 	}
 	if *printCommands {
 		options.PrintCommands = printCommand
@@ -833,6 +869,12 @@ func main() {
 			fmt.Fprintln(os.Stderr, "cache subcommand must be 'list' or 'clean'")
 			os.Exit(1)
 		}
+	case "build-runtime":
+		options.StandaloneRuntime = true
+		config, err := builder.NewConfig(options)
+		handleCompilerError(err)
+		err = BuildRuntime(outpath, config)
+		printBuildOutput(err, *flagJSON)
 	case "help":
 		usage("")
 	case "version":

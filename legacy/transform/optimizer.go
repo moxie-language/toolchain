@@ -133,6 +133,12 @@ func Optimize(mod llvm.Module, config *compileopts.Config) []error {
 		return []error{errors.New("optimizations caused a verification failure")}
 	}
 
+	if config.IsStandaloneRuntime() {
+		// Standalone runtime: keep all symbols external for cross-module linking.
+		// Skip internalization and globaldce entirely.
+		return nil
+	}
+
 	// After Moxie-specific transforms have finished, undo exporting these functions.
 	for _, name := range functionsUsedInTransforms {
 		fn := mod.NamedFunction(name)

@@ -18,8 +18,19 @@ Moxie descends from [TinyGo](https://tinygo.org/). All embedded targets and thre
 
 ## Quick Start
 
+### Prerequisites
+
+- **LLVM 22** - clang, lld, llvm-link (versioned as `clang-22`, `ld.lld-22`, `llvm-link-22`)
+- On Arch Linux: `pacman -S llvm clang lld`
+- If your distro installs unversioned binaries, create symlinks:
+  ```sh
+  sudo ln -sf /bin/clang /usr/local/bin/clang-22
+  sudo ln -sf /bin/ld.lld /usr/local/bin/ld.lld-22
+  sudo ln -sf /bin/llvm-link /usr/local/bin/llvm-link-22
+  ```
+
 ```sh
-# Build the compiler (requires LLVM 21)
+# Build the compiler
 ./build.sh
 
 # Build a program
@@ -111,13 +122,13 @@ chanID 0 = control (close signals), chanID 1 = first spawn channel arg, chanID 2
 
 ## Targets
 
-| Target | Output | GC |
-|--------|--------|-----|
-| linux/amd64 | Static ELF | Boehm |
-| linux/arm64 | Static ELF | Boehm |
-| darwin/amd64 | Mach-O | Boehm |
-| darwin/arm64 | Mach-O | Boehm |
-| js/wasm | JavaScript + runtime | Leaking (no GC) |
+| Target | Output | Memory |
+|--------|--------|--------|
+| linux/amd64 | Static ELF | Arena allocator |
+| linux/arm64 | Static ELF | Arena allocator |
+| darwin/amd64 | Mach-O | Arena allocator |
+| darwin/arm64 | Mach-O | Arena allocator |
+| js/wasm | JavaScript + runtime | Bump allocator |
 
 All native binaries are fully statically linked.
 
