@@ -359,8 +359,6 @@ func releasePerPkgState() {
 	cctx.parseErrors = cctx.parseErrors[:0]
 	cctx.compileErrors = cctx.compileErrors[:0]
 	cctx.concatSourceMap = cctx.concatSourceMap[:0]
-	// Free source bytes (large, not reusable).
-	free(cctx.tcPkgSrc)
 	cctx.tcPkgSrc = nil
 	// Clear maps for reuse - retains bucket storage, avoids reallocation.
 	// clear() zeros entries without freeing the underlying bucket array.
@@ -573,9 +571,7 @@ func releaseFileDeep(f *syntax.File) {
 	for i := range f.DeclList {
 		f.DeclList[i] = nil
 	}
-	free(f.DeclList)
 	f.DeclList = nil
-	free(f)
 }
 
 func CompileToIR(src []byte, name string, triple string) (s string) {
@@ -588,8 +584,9 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	// Single arena for the entire compilation unit.
 	// All allocations (parse, typecheck, SSA, IR) go here.
 	// Arena is bulk-freed at the end - no free lists, no fragmentation.
-	// 2GB virtual arena per compilation unit. Pages committed on touch.
-	arenaSize := uintptr(2 * 1024 * 1024 * 1024)
+	// Per-compilation arena. Virtual pages committed on touch by MMU.
+	// 4GB handles the largest packages (runtime: 245KB source, ~3GB allocs).
+	arenaSize := uintptr(4) * 1024 * 1024 * 1024
 	// Save caller's arena, nest a compilation-unit arena inside it.
 	outerArena := runtime.CurrentArena()
 	arena := runtime.ArenaNew(arenaSize)
@@ -695,7 +692,6 @@ func registerCompiledExports(pkg *TCPackage) {
 	// loadMxhData creates fresh heap objects via NewTCPackage/NewTypeName etc.
 	// The arena is not referenced by the resulting ImportRegistry entry.
 	loadMxhData([]byte(mxhText))
-	free(mxhText)
 }
 
 func tcInferTypeFromExpr(e syntax.Expr, scope *Scope) (t Type) {

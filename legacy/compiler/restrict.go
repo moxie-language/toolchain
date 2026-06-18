@@ -161,8 +161,6 @@ func (b *builder) checkMoxieRestrictions() {
 	b.checkSpawnMoveRestriction()
 	// Check that every channel has both a sender and a listener.
 	b.checkChannelCompleteness()
-	// Check for use-after-free (explicit free() tracking).
-	b.checkUseAfterFree()
 }
 
 func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {

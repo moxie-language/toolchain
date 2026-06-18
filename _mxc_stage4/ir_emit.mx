@@ -42,12 +42,7 @@ type irEmitter struct {
 	deferList  []*SSADefer
 	deferID    int32
 	blockDead  bool
-	scopeAllocs      map[int32][]string // scope ID -> list of slot names (%scope.slot.N)
-	valToSlot        map[string]string  // ptrReg -> slot name
-	instrScope       map[SSAInstruction]int32
-	scopeActive      bool
 	currentEmitBlock *SSABasicBlock
-	scopeSlotCount   int32
 	sretType    string
 	pendingPhiTruncs []phiTrunc
 }
@@ -367,7 +362,6 @@ func (e *irEmitter) emit() (s string) {
 				}
 			}
 		}
-		free(e.loadToGlobal)
 		e.loadToGlobal = map[string]*SSAGlobal{}
 		for _, b := range fn.Blocks {
 			for _, instr := range b.Instrs {
@@ -514,8 +508,9 @@ func (e *irEmitter) emit() (s string) {
 			m.vars = nil
 		}
 	}
+	// Fresh buf for trailing declarations (libMain, string constants, extern decls).
+	e.buf = []byte{:0:4096}
 	e.emitLibMain()
-
 	for i, sc := range e.strConst {
 		e.w(e.strConstGlobal(i))
 		e.w(" = private constant [")
@@ -597,38 +592,9 @@ func (e *irEmitter) emit() (s string) {
 }
 
 func (e *irEmitter) releaseAfterEmit() {
-	// e.buf is returned as ir to the caller; caller frees it.
-	// NOTE: free(map) only frees the hashmap header (~32B), NOT the
-	// internal bucket array. Until the runtime has hashmapDeepFree,
-	// free(map) leaks bucket storage. For maps that won't be reused,
-	// clear() zeros the entry data but the buckets still leak.
-	// This is a known limitation - the OOM fix requires either:
-	// 1. Compiler-generated hashmapDeepFree calls for free(map)
-	// 2. Or reusing the emitter struct across functions
-	free(e.valName)
-	free(e.extDecls)
-	free(e.extGlobals)
-	free(e.strMap)
-	free(e.strConst)
-	free(e.typeIDs)
-	free(e.extTypeIDs)
-	free(e.localTypeIDs)
-	free(e.allocTypes)
-	free(e.regTypes)
-	free(e.hoisted)
-	free(e.blockExitLabel)
-	free(e.nameUsed)
-	free(e.missingStores)
-	free(e.globalTypes)
-	free(e.globalDeclTypes)
-	free(e.loadToGlobal)
-	free(e.allocBlock)
-	free(e.storedTo)
-	free(e.usedAs)
-	free(e.scopeAllocs)
-	free(e.valToSlot)
-	free(e.instrScope)
-	free(e)
+	// Arena-per-function model: no individual free.
+	// All emitter allocations live in the compilation arena
+	// and are bulk-freed at ArenaFree.
 }
 
 func (e *irEmitter) pkgMembers() (ss []SSAMember) {
@@ -885,11 +851,6 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 	e.nextReg = 0
 	e.deferList = nil
 	e.deferID = 0
-	e.scopeActive = false
-	e.scopeAllocs = map[int32][]string{}
-	e.valToSlot = map[string]string{}
-	e.instrScope = map[SSAInstruction]int32{}
-	e.scopeSlotCount = 0
 	e.valName = map[SSAValue]string{}
 	e.nameUsed = map[string]bool{}
 	e.allocTypes = map[SSAValue]string{}
@@ -1036,11 +997,6 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 			}
 		}
 	}
-	for _, b := range f.Blocks {
-		for _, instr := range b.Instrs {
-			e.instrScope[instr] = b.ScopeID
-		}
-	}
 	var hoistList []*SSAAlloc
 	// Collect allocas deterministically: iterate blocks/instructions in order
 	// (both are slices). Using hoistAllocs map only as a set membership check.
@@ -1090,9 +1046,6 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 			if len(e.deferList) > 0 {
 				e.w("  %deferPtr = alloca ptr\n")
 				e.w("  store ptr null, ptr %deferPtr\n")
-			}
-			if len(scopeIDs) > 0 || hasHeapAllocs {
-				e.scopeActive = true
 			}
 			if len(e.curFunc.FreeVars) > 0 {
 				e.emitFreeVarUnpack(e.curFunc)

@@ -1,5 +1,5 @@
-// Free-list allocator with block-scoped deallocation.
-// Freed blocks are reused.
+// Bump allocator with arena support.
+// No free lists. No individual free. Arena bulk-frees at munmap.
 
 package runtime
 
@@ -12,83 +12,8 @@ const needsStaticHeap = true
 var heapptr uintptr
 var totalAlloc uint64
 var mallocs uint64
-var frees uint64
-
-// Free-list node. Stored in-place in freed blocks (minimum block size = 16 bytes).
-type freeNode struct {
-	size uintptr
-	next *freeNode
-}
-
-// Segregated free lists by size class.
-// Classes: 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, >4096
-const nSizeClasses = 10
-
-var freeLists [nSizeClasses]*freeNode
-
-// Block header prepended to every allocation. 16 bytes to maintain alignment.
-type blockHeader struct {
-	size uintptr
-	next unsafe.Pointer
-}
-
-const headerSize = 16
-const escapedBit = uintptr(1) << (unsafe.Sizeof(uintptr(0))*8 - 1)
-
-func sizeClass(size uintptr) int32 {
-	switch {
-	case size <= 16:
-		return 0
-	case size <= 32:
-		return 1
-	case size <= 64:
-		return 2
-	case size <= 128:
-		return 3
-	case size <= 256:
-		return 4
-	case size <= 512:
-		return 5
-	case size <= 1024:
-		return 6
-	case size <= 2048:
-		return 7
-	case size <= 4096:
-		return 8
-	default:
-		return 9
-	}
-}
-
-func classSize(class int32) uintptr {
-	switch class {
-	case 0:
-		return 16
-	case 1:
-		return 32
-	case 2:
-		return 64
-	case 3:
-		return 128
-	case 4:
-		return 256
-	case 5:
-		return 512
-	case 6:
-		return 1024
-	case 7:
-		return 2048
-	case 8:
-		return 4096
-	default:
-		return 0 // large: exact size
-	}
-}
 
 // currentArena: when set, alloc() bump-allocates from this arena.
-// Set at compilation unit entry, cleared at exit. All allocations
-// during a compilation unit live in the arena and are bulk-freed
-// by ArenaFree. No free lists, no fragmentation, no use-after-free.
 var currentArena *Arena
 
 //:noinline
@@ -96,154 +21,28 @@ func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 	if size == 0 {
 		size = 1
 	}
-	// Arena mode: all allocations bump-allocate from current arena.
 	if currentArena != nil {
 		return ArenaAlloc(currentArena, align(size))
 	}
-	// Heap fallback: only during startup before any arena is created.
+	// Startup bump allocator: used before any arena is created.
 	size = align(size)
-	totalSize := size + uintptr(headerSize)
-	class := sizeClass(size)
-
-	// Check segregated free list for reuse.
-	if class < 9 {
-		if node := freeLists[class]; node != nil {
-			freeLists[class] = node.next
-			hdr := (*blockHeader)(unsafe.Pointer(node))
-			hdr.size = size
-			hdr.next = nil
-			ptr := unsafe.Pointer(uintptr(unsafe.Pointer(hdr)) + uintptr(headerSize))
-			memzero(ptr, size)
-			mallocs++
-			totalAlloc += uint64(size)
-			return ptr
-		}
-	} else {
-		// Scan large-object free list for a block >= totalSize.
-		// Limit scan to 32 entries to avoid O(n) degeneracy when
-		// hashmapDeepFree fills the list with many small entries.
-		prev := (*freeNode)(nil)
-		node := freeLists[9]
-		scanned := 0
-		for node != nil && scanned < 32 {
-			if node.size >= totalSize {
-				if prev == nil {
-					freeLists[9] = node.next
-				} else {
-					prev.next = node.next
-				}
-				hdr := (*blockHeader)(unsafe.Pointer(node))
-				hdr.size = size
-				hdr.next = nil
-				ptr := unsafe.Pointer(uintptr(unsafe.Pointer(hdr)) + uintptr(headerSize))
-				memzero(ptr, size)
-				mallocs++
-				totalAlloc += uint64(size)
-				return ptr
-			}
-			prev = node
-			node = node.next
-			scanned++
-		}
-	}
-
-	// Bump allocate. Round up to class size so freed blocks can serve
-	// any allocation within their size class without overflow.
-	bumpSize := totalSize
-	if class < 9 {
-		bumpSize = classSize(class) + uintptr(headerSize)
-	}
 	addr := heapptr
-	heapptr += bumpSize
+	heapptr += size
 	for heapptr >= heapEnd {
 		if growHeap() {
 			continue
-		}
-		// Bump space exhausted. Scavenge: try ANY free list class
-		// that has a block large enough.
-		heapptr = addr // undo failed bump
-		found := false
-		for sc := class; sc < nSizeClasses; sc++ {
-			prev := (*freeNode)(nil)
-			node := freeLists[sc]
-			scanned := 0
-			for node != nil && scanned < 64 {
-				nsz := node.size
-				if sc < 9 {
-					nsz = classSize(sc) + uintptr(headerSize)
-				}
-				if nsz >= totalSize {
-					if prev == nil {
-						freeLists[sc] = node.next
-					} else {
-						prev.next = node.next
-					}
-					hdr := (*blockHeader)(unsafe.Pointer(node))
-					hdr.size = size
-					hdr.next = nil
-					ptr := unsafe.Pointer(uintptr(unsafe.Pointer(hdr)) + uintptr(headerSize))
-					memzero(ptr, size)
-					mallocs++
-					totalAlloc += uint64(size)
-					return ptr
-				}
-				prev = node
-				scanned++
-				node = node.next
-			}
 		}
 		runtimePanic("out of memory")
 	}
 	mallocs++
 	totalAlloc += uint64(size)
-
-	hdr := (*blockHeader)(unsafe.Pointer(addr))
-	hdr.size = size
-	ptr := unsafe.Pointer(addr + uintptr(headerSize))
+	ptr := unsafe.Pointer(addr)
 	memzero(ptr, size)
 	return ptr
 }
 
-func free(ptr unsafe.Pointer) {
-	return // arena-per-function: no individual free. arena bulk-frees at return.
-	p := uintptr(ptr)
-	if p < heapStart || p >= heapptr {
-		return
-	}
-	hdr := (*blockHeader)(unsafe.Add(ptr, -int32(headerSize)))
-	size := hdr.size & ^escapedBit
-	if size == 0 {
-		return
-	}
-	totalSize := size + uintptr(headerSize)
-	class := sizeClass(size)
-	node := (*freeNode)(unsafe.Pointer(hdr))
-	if class < 9 {
-		node.size = classSize(class)
-		node.next = freeLists[class]
-		freeLists[class] = node
-	} else {
-		node.size = totalSize
-		node.next = freeLists[9]
-		freeLists[9] = node
-	}
-	frees++
-}
-
-func realloc(ptr unsafe.Pointer, size uintptr) unsafe.Pointer {
-	newAlloc := alloc(size, nil)
-	if ptr == nil {
-		return newAlloc
-	}
-	hdr := (*blockHeader)(unsafe.Add(ptr, -int32(headerSize)))
-	oldSize := hdr.size & ^escapedBit
-	copySize := oldSize
-	if size < copySize {
-		copySize = size
-	}
-	memcpy(newAlloc, ptr, copySize)
-	return newAlloc
-}
+// free is a no-op. Arena bulk-frees at munmap.
+func free(_ unsafe.Pointer) {}
 
 func ReadMemStats(m *MemStats) {
 	m.HeapIdle = 0
@@ -253,7 +52,7 @@ func ReadMemStats(m *MemStats) {
 	m.GCSys = 0
 	m.TotalAlloc = totalAlloc
 	m.Mallocs = mallocs
-	m.Frees = frees
+	m.Frees = 0
 	m.Sys = uint64(heapEnd - heapStart)
 	m.HeapAlloc = totalAlloc
 	m.Alloc = m.HeapAlloc
@@ -279,7 +78,7 @@ func CurrentArena() (a *Arena) {
 
 // SetCurrentArena sets the global arena for alloc(). When set, all
 // allocations go through the arena's bump allocator. Set nil to
-// revert to the heap allocator.
+// revert to the startup bump allocator.
 func SetCurrentArena(a *Arena) {
 	currentArena = a
 }
@@ -293,7 +92,7 @@ func ArenaNew(capacity uintptr) (a *Arena) {
 	if addr == unsafe.Pointer(^uintptr(0)) {
 		runtimePanic("arena: mmap failed")
 	}
-	// Arena header on the heap (tiny, 24 bytes). Must bypass currentArena.
+	// Arena header from startup bump allocator (tiny, 24 bytes).
 	a = (*Arena)(heapAlloc(unsafe.Sizeof(Arena{})))
 	a.base = uintptr(addr)
 	a.off = 0
@@ -302,8 +101,6 @@ func ArenaNew(capacity uintptr) (a *Arena) {
 }
 
 // ArenaAlloc allocates size bytes from the arena, 16-byte aligned.
-// Arena virtual pages are committed on first touch by the kernel.
-// With GB-sized arenas on 256TB address space, overflow shouldn't happen.
 func ArenaAlloc(a *Arena, size uintptr) unsafe.Pointer {
 	if a == nil {
 		runtimePanic("ArenaAlloc: nil arena")
@@ -317,7 +114,7 @@ func ArenaAlloc(a *Arena, size uintptr) unsafe.Pointer {
 	return ptr
 }
 
-// heapAlloc: direct heap allocation bypassing currentArena.
+// heapAlloc: direct startup bump allocation bypassing currentArena.
 func heapAlloc(size uintptr) unsafe.Pointer {
 	saved := currentArena
 	currentArena = nil
@@ -327,12 +124,12 @@ func heapAlloc(size uintptr) unsafe.Pointer {
 }
 
 // ArenaFree unmaps the entire arena. All pointers into it become invalid.
+// The arena header (24 bytes) leaks into the startup bump region - acceptable.
 func ArenaFree(a *Arena) {
 	if a == nil {
 		return
 	}
 	munmap(unsafe.Pointer(a.base), a.cap)
-	free(unsafe.Pointer(a))
 }
 
 // ArenaReset resets the arena for reuse without unmapping.
