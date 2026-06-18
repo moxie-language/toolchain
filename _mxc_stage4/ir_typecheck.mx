@@ -394,7 +394,7 @@ func ScanGenericDecls(src []byte, name string) {
 	if len(src) == 0 {
 		return
 	}
-	file, _ := syntax.ParseBytes(token.NewFileBase(name|".mx"), src, silentErrh, nil, 0)
+	file, _ := syntax.ParseBytesArena(token.NewFileBase(name|".mx"), src, silentErrh, nil, 0, runtime.CurrentArena())
 	if file == nil {
 		return
 	}
@@ -550,17 +550,18 @@ func TypeCheckOnly(src []byte, name string) {
 	if arenaSize < 4*1024*1024 {
 		arenaSize = 4 * 1024 * 1024
 	}
+	outerArena := runtime.CurrentArena()
 	arena := runtime.ArenaNew(arenaSize)
 	runtime.SetCurrentArena(arena)
 	SetTypesArena(arena)
 	pkg, file := typeCheckPkg(src, name, arena)
-	SetTypesArena(nil)
-	runtime.SetCurrentArena(nil)
+	// Restore caller's arena for exports and generic scanning.
+	SetTypesArena(outerArena)
+	runtime.SetCurrentArena(outerArena)
 	if pkg != nil && file != nil {
 		registerCompiledExports(pkg)
 	}
 	ScanGenericDecls(src, name)
-	// Arena dies here. All typecheck objects freed at once.
 	runtime.ArenaFree(arena)
 }
 
@@ -587,39 +588,36 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	// Single arena for the entire compilation unit.
 	// All allocations (parse, typecheck, SSA, IR) go here.
 	// Arena is bulk-freed at the end - no free lists, no fragmentation.
-	arenaSize := uintptr(len(src)) * 200
-	if arenaSize < 64*1024*1024 {
-		arenaSize = 64 * 1024 * 1024 // 64MB virtual (pages committed on touch)
-	}
+	// 2GB virtual arena per compilation unit. Pages committed on touch.
+	arenaSize := uintptr(2 * 1024 * 1024 * 1024)
+	// Save caller's arena, nest a compilation-unit arena inside it.
+	outerArena := runtime.CurrentArena()
 	arena := runtime.ArenaNew(arenaSize)
 	runtime.SetCurrentArena(arena)
 	SetTypesArena(arena)
 
 	pkg, file := typeCheckPkg(src, name, arena)
 
-	// Exit arena for export registration (mxh round-trip to heap).
-	SetTypesArena(nil)
-	runtime.SetCurrentArena(nil)
+	// Restore caller's arena for export registration and generic scanning.
+	// These allocations survive in the caller's arena scope.
+	SetTypesArena(outerArena)
+	runtime.SetCurrentArena(outerArena)
 	ScanGenericDecls(src, name)
 	if pkg != nil && file != nil {
 		registerCompiledExports(pkg)
 	}
 
 	if file == nil {
-		// Error message built on heap (arena about to die).
+		// Build error on outer arena (survives inner arena free).
 		out := "; parse error parseErrs=" | simpleItoa(len(cctx.parseErrors)) | "\n"
 		for _, pe := range cctx.parseErrors {
 			out = out | "; " | pe | "\n"
 		}
 		runtime.ArenaFree(arena)
-		// Nil arena-allocated cctx fields.
-		cctx.parseErrors = nil
-		cctx.tcPkgSrc = nil
-		cctx.constValMap = nil
 		return out
 	}
 
-	// Re-enter arena for SSA + IR emit.
+	// Re-enter compilation arena for SSA + IR emit.
 	runtime.SetCurrentArena(arena)
 	SetTypesArena(arena)
 
@@ -628,8 +626,8 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	emitter := newIREmitter(ssaPkg, triple, int32(len(cctx.tcPkgSrc)))
 
 	if cctx.irOutputFile != "" {
-		// Create file on heap (os.File must outlive arena for Close).
-		runtime.SetCurrentArena(nil)
+		// Create file on outer arena (os.File must outlive inner arena).
+		runtime.SetCurrentArena(outerArena)
 		f, ferr := os.Create(cctx.irOutputFile)
 		runtime.SetCurrentArena(arena)
 		if ferr == nil {
@@ -643,9 +641,9 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	}
 
 	SetTypesArena(nil)
-	runtime.SetCurrentArena(nil)
 
-	// Copy IR to heap before arena free (non-streaming mode only).
+	// Copy IR to outer arena before inner arena dies.
+	runtime.SetCurrentArena(outerArena)
 	var result string
 	if len(ir) > 0 {
 		heapIR := []byte{:len(ir)}
@@ -655,16 +653,6 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 
 	// Bulk free: all parse, typecheck, SSA, emitter objects die at once.
 	runtime.ArenaFree(arena)
-	// Nil cctx fields that pointed into the arena.
-	cctx.parseErrors = nil
-	cctx.compileErrors = nil
-	cctx.constValMap = nil
-	cctx.compileExportMap = nil
-	cctx.embedVars = nil
-	cctx.linknameMap = nil
-	cctx.wasmImportMap = nil
-	cctx.tcPkgSrc = nil
-	cctx.concatSourceMap = nil
 	return result
 }
 

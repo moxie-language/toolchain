@@ -96,11 +96,11 @@ func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 	if size == 0 {
 		size = 1
 	}
-	// Arena fast path: bump-allocate from current arena.
+	// Arena mode: all allocations bump-allocate from current arena.
 	if currentArena != nil {
 		return ArenaAlloc(currentArena, align(size))
 	}
-
+	// Heap fallback: only during startup before any arena is created.
 	size = align(size)
 	totalSize := size + uintptr(headerSize)
 	class := sizeClass(size)
@@ -205,9 +205,7 @@ func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 }
 
 func free(ptr unsafe.Pointer) {
-	if ptr == nil || currentArena != nil {
-		return // arena mode: bulk free at arena exit
-	}
+	return // arena-per-function: no individual free. arena bulk-frees at return.
 	p := uintptr(ptr)
 	if p < heapStart || p >= heapptr {
 		return
@@ -274,6 +272,11 @@ type Arena struct {
 	cap  uintptr
 }
 
+// CurrentArena returns the active arena (for save/restore on nesting).
+func CurrentArena() (a *Arena) {
+	return currentArena
+}
+
 // SetCurrentArena sets the global arena for alloc(). When set, all
 // allocations go through the arena's bump allocator. Set nil to
 // revert to the heap allocator.
@@ -299,16 +302,15 @@ func ArenaNew(capacity uintptr) (a *Arena) {
 }
 
 // ArenaAlloc allocates size bytes from the arena, 16-byte aligned.
-// Falls back to heap if the arena is full (shouldn't happen with
-// generous initial sizing).
+// Arena virtual pages are committed on first touch by the kernel.
+// With GB-sized arenas on 256TB address space, overflow shouldn't happen.
 func ArenaAlloc(a *Arena, size uintptr) unsafe.Pointer {
 	if a == nil {
-		return heapAlloc(size)
+		runtimePanic("ArenaAlloc: nil arena")
 	}
 	size = align(size)
 	if a.off+size > a.cap {
-		// Arena full - fall back to heap (bypassing currentArena).
-		return heapAlloc(size)
+		runtimePanic("arena overflow")
 	}
 	ptr := unsafe.Pointer(a.base + a.off)
 	a.off += size
