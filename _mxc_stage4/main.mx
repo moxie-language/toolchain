@@ -3657,6 +3657,7 @@ func main() {
 // buildPkgsSerial type-checks and compiles each package in dependency order
 // in a single pass. Each package's working set dies before the next begins.
 func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, forceRebuild, printIR bool) (bcs []string, hasRT bool) {
+	var deferredClang [][]string
 	isWasmTarget := mxutil.TargetArch == "wasm"
 	for _, pkg := range pkgs {
 		if pkg.path == "runtime" {
@@ -3740,38 +3741,58 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		}
 		free(ir)
 		bcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc")
-		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
-		if rc != 0 {
-			fatal("clang failed for " | pkg.path)
-		}
-		cacheDir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
-		mkdirAll(cacheDir, 0755)
-		data, rok := mxutil.ReadFile(bcFile)
-		if rok {
-			writeFile(cached, data, 0644)
-		}
-		free(data)
+		// Defer clang call - collect for parallel execution after all IR emitted.
+		deferredClang = append(deferredClang, []string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
+		// generateMxh must happen now (next package's typecheck needs the exports).
 		regPkg := ImportRegistry[compilePath]
 		if regPkg != nil {
 			mxhData := generateMxh(regPkg)
 			writeFile(cachedMxh, []byte(mxhData), 0644)
 			free(mxhData)
 		}
-		// Arena already freed inside CompileToIR after SSA/IR emit.
-		// registerCompiledExports round-trips through mxh so the
-		// registry holds heap objects, not arena pointers.
 		bcs = append(bcs, bcFile)
 		for _, cf := range pkg.cfiles {
 			cPath := mxutil.JoinPath(pkg.dir, cf)
 			cbcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
-			rc = run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
-			if rc != 0 {
+			deferredClang = append(deferredClang, []string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
+			// rc = run(...)  -- deferred
+			if false {
 				fatal("clang failed for " | cf)
 			}
 			bcs = append(bcs, cbcFile)
 		}
 		for _, bf := range pkg.bcfiles {
 			bcs = append(bcs, mxutil.JoinPath(pkg.dir, bf))
+		}
+	}
+	// Run all deferred clang calls in parallel.
+	if len(deferredClang) > 0 {
+		nproc := int32(8)
+		if int32(len(deferredClang)) < nproc {
+			nproc = int32(len(deferredClang))
+		}
+		mxutil.WriteStr(2, "  clang: " | simpleItoa(len(deferredClang)) | " files, " | simpleItoa(nproc) | " parallel\n")
+		if !runPool(deferredClang, nproc) {
+			fatal("clang failed")
+		}
+		// Cache the .bc files
+		for _, pkg := range pkgs {
+			compilePath := pkg.path
+			if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
+				compilePath = pkg.name
+			}
+			hash := pkgHash(pkg)
+			cached := cachedBcPath(cacheBase, compilePath, hash, pkg.version)
+			bcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc")
+			if mxutil.FileExists(bcFile) {
+				cacheDir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
+				mkdirAll(cacheDir, 0755)
+				data, rok := mxutil.ReadFile(bcFile)
+				if rok {
+					writeFile(cached, data, 0644)
+				}
+				free(data)
+			}
 		}
 	}
 	return bcs, hasRT
