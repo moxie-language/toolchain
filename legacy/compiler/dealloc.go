@@ -186,7 +186,7 @@ func (b *builder) scopeEmitReturnFree() {
 			continue
 		}
 		ptr := b.CreateLoad(b.dataPtrType, entry.ptrAlloca, "scope.ret.free")
-		b.createRuntimeCall("free", []llvm.Value{ptr}, "")
+		b.emitTypedFree(ptr, key)
 	}
 }
 
@@ -215,9 +215,19 @@ func (b *builder) scopeEmitFrees(dying map[int]bool) {
 		}
 		if dying[entry.ownership.blockIdx] {
 			ptr := b.CreateLoad(b.dataPtrType, entry.ptrAlloca, "scope.exit.free")
-			b.createRuntimeCall("free", []llvm.Value{ptr}, "")
+			b.emitTypedFree(ptr, key)
 			b.CreateStore(llvm.ConstNull(b.dataPtrType), entry.ptrAlloca)
 		}
+	}
+}
+
+// emitTypedFree emits the correct free call based on the allocation type.
+// Maps need hashmapDeepFree to free buckets; everything else uses free.
+func (b *builder) emitTypedFree(ptr llvm.Value, val ssa.Value) {
+	if _, isMap := val.Type().Underlying().(*types.Map); isMap {
+		b.createRuntimeCall("hashmapDeepFree", []llvm.Value{ptr}, "")
+	} else {
+		b.createRuntimeCall("free", []llvm.Value{ptr}, "")
 	}
 }
 

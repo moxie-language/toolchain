@@ -1906,6 +1906,9 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		if len(argValues) != 1 {
 			return llvm.Value{}, b.makeError(pos, "free requires exactly one argument")
 		}
+		// Delegate to createFreeBuiltin for map-aware deep free.
+		// This path shouldn't normally be reached (SSA dispatches free
+		// through createFunctionCall), but handle it for safety.
 		b.createRuntimeCall("free", []llvm.Value{argValues[0]}, "")
 		return llvm.Value{}, nil
 	case "recover":

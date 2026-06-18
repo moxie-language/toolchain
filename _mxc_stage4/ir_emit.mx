@@ -10,6 +10,7 @@ import (
 type irEmitter struct {
 	buf        []byte
 	outFile    *os.File // streaming output; nil = accumulate in buf
+	operandBuf []SSAValue // scratch buffer for instrOperands
 	triple     string
 	ptrBits    int32
 	pkg        *SSAPackage
@@ -2768,65 +2769,63 @@ func (e *irEmitter) constOperand(c *SSAConst) (s string) {
 }
 
 func (e *irEmitter) instrOperands(instr SSAInstruction) (ss []SSAValue) {
+	// Reuse scratch slice to avoid per-instruction allocation.
+	e.operandBuf = e.operandBuf[:0]
 	switch i := instr.(type) {
 	case *SSAStore:
-		return []SSAValue{i.Addr, i.Val}
+		e.operandBuf = append(e.operandBuf, i.Addr, i.Val)
 	case *SSAUnOp:
-		return []SSAValue{i.X}
+		e.operandBuf = append(e.operandBuf, i.X)
 	case *SSABinOp:
-		return []SSAValue{i.X, i.Y}
+		e.operandBuf = append(e.operandBuf, i.X, i.Y)
 	case *SSACall:
-		out := []SSAValue{i.Call.Value}
+		e.operandBuf = append(e.operandBuf, i.Call.Value)
 		for _, a := range i.Call.Args {
-			out = append(out, a)
+			e.operandBuf = append(e.operandBuf, a)
 		}
-		return out
 	case *SSAFieldAddr:
-		return []SSAValue{i.X}
+		e.operandBuf = append(e.operandBuf, i.X)
 	case *SSAIndexAddr:
-		return []SSAValue{i.X, i.Index}
+		e.operandBuf = append(e.operandBuf, i.X, i.Index)
 	case *SSAExtract:
-		return []SSAValue{i.Tuple}
+		e.operandBuf = append(e.operandBuf, i.Tuple)
 	case *SSAPhi:
 		return i.Edges
 	case *SSAReturn:
-		var out []SSAValue
 		for _, r := range i.Results {
-			out = append(out, r)
+			e.operandBuf = append(e.operandBuf, r)
 		}
-		return out
 	case *SSAIf:
-		return []SSAValue{i.Cond}
+		e.operandBuf = append(e.operandBuf, i.Cond)
 	case *SSAConvert:
-		return []SSAValue{i.X}
+		e.operandBuf = append(e.operandBuf, i.X)
 	case *SSAChangeType:
-		return []SSAValue{i.X}
+		e.operandBuf = append(e.operandBuf, i.X)
 	case *SSAMakeInterface:
-		return []SSAValue{i.X}
+		e.operandBuf = append(e.operandBuf, i.X)
 	case *SSATypeAssert:
-		return []SSAValue{i.X}
+		e.operandBuf = append(e.operandBuf, i.X)
 	case *SSASlice:
-		out := []SSAValue{i.X}
-		if i.Low != nil { out = append(out, i.Low) }
-		if i.High != nil { out = append(out, i.High) }
-		if i.Max != nil { out = append(out, i.Max) }
-		return out
+		e.operandBuf = append(e.operandBuf, i.X)
+		if i.Low != nil { e.operandBuf = append(e.operandBuf, i.Low) }
+		if i.High != nil { e.operandBuf = append(e.operandBuf, i.High) }
+		if i.Max != nil { e.operandBuf = append(e.operandBuf, i.Max) }
 	case *SSAMapUpdate:
-		return []SSAValue{i.Map, i.Key, i.Value}
+		e.operandBuf = append(e.operandBuf, i.Map, i.Key, i.Value)
 	case *SSALookup:
-		return []SSAValue{i.X, i.Index}
+		e.operandBuf = append(e.operandBuf, i.X, i.Index)
 	case *SSARange:
-		return []SSAValue{i.X}
+		e.operandBuf = append(e.operandBuf, i.X)
 	case *SSANext:
-		return []SSAValue{i.Iter}
+		e.operandBuf = append(e.operandBuf, i.Iter)
 	case *SSASend:
-		return []SSAValue{i.Chan, i.X}
+		e.operandBuf = append(e.operandBuf, i.Chan, i.X)
 	case *SSAMakeSlice:
-		out := []SSAValue{i.Len}
-		if i.Cap != nil { out = append(out, i.Cap) }
-		if i.Data != nil { out = append(out, i.Data) }
-		return out
+		e.operandBuf = append(e.operandBuf, i.Len)
+		if i.Cap != nil { e.operandBuf = append(e.operandBuf, i.Cap) }
+		if i.Data != nil { e.operandBuf = append(e.operandBuf, i.Data) }
 	}
+	return e.operandBuf
 	return nil
 }
 
