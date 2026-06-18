@@ -3816,13 +3816,25 @@ func (c *compilerContext) getOrCreatePtrCopyFn(typ *types.Pointer) llvm.Value {
 	c.builder.SetInsertPointAtEnd(copyBB)
 	size := c.targetData.TypeAllocSize(elemType)
 	sizeVal := llvm.ConstInt(c.uintptrType, size, false)
+
+	// Load entire source struct to stack BEFORE alloc.
+	// After ArenaRestore, source and destination may overlap at the same
+	// arena offset. ArenaAlloc's memzero would wipe source data.
+	// Stack locals survive because they're not in the arena.
+	srcStack := c.builder.CreateAlloca(elemType, "dc.src")
+	srcLoaded := c.builder.CreateLoad(elemType, src, "dc.srcld")
+	c.builder.CreateStore(srcLoaded, srcStack)
+
+	// Alloc destination in current arena region (caller's region after restore).
 	layoutVal := llvm.ConstNull(c.dataPtrType)
 	allocFnType, allocFn := c.getFunction(c.program.ImportedPackage("runtime").Members["alloc"].(*ssa.Function))
 	dst := c.builder.CreateCall(allocFnType, allocFn, []llvm.Value{sizeVal, layoutVal, llvm.Undef(c.dataPtrType)}, "dst")
-	memcpyFnType, memcpyFn := c.getFunction(c.program.ImportedPackage("runtime").Members["memcpy"].(*ssa.Function))
-	c.builder.CreateCall(memcpyFnType, memcpyFn, []llvm.Value{dst, src, sizeVal, llvm.Undef(c.dataPtrType)}, "")
 
-	// Recurse into pointer-containing fields of the element type.
+	// Memcpy from stack to destination.
+	memcpyFnType, memcpyFn := c.getFunction(c.program.ImportedPackage("runtime").Members["memcpy"].(*ssa.Function))
+	c.builder.CreateCall(memcpyFnType, memcpyFn, []llvm.Value{dst, srcStack, sizeVal, llvm.Undef(c.dataPtrType)}, "")
+
+	// Recurse into pointer-containing fields.
 	if st, ok := typ.Elem().Underlying().(*types.Struct); ok {
 		for i := 0; i < st.NumFields(); i++ {
 			ft := st.Field(i).Type()
@@ -3830,8 +3842,9 @@ func (c *compilerContext) getOrCreatePtrCopyFn(typ *types.Pointer) llvm.Value {
 				continue
 			}
 			fieldLLVM := c.getLLVMType(ft)
-			gep := c.builder.CreateStructGEP(elemType, dst, i, "dc.gep")
-			oldVal := c.builder.CreateLoad(fieldLLVM, gep, "dc.fld")
+			// Read field from STACK copy (safe from overlap).
+			srcGep := c.builder.CreateStructGEP(elemType, srcStack, i, "dc.sgep")
+			oldVal := c.builder.CreateLoad(fieldLLVM, srcGep, "dc.fld")
 			var newVal llvm.Value
 			switch ftu := ft.Underlying().(type) {
 			case *types.Basic:
@@ -3852,7 +3865,9 @@ func (c *compilerContext) getOrCreatePtrCopyFn(typ *types.Pointer) llvm.Value {
 			default:
 				continue
 			}
-			c.builder.CreateStore(newVal, gep)
+			// Write to destination
+			dstGep := c.builder.CreateStructGEP(elemType, dst, i, "dc.dgep")
+			c.builder.CreateStore(newVal, dstGep)
 		}
 	}
 
