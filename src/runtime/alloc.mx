@@ -89,6 +89,25 @@ func SetCurrentArena(a *Arena) {
 	currentArena = a
 }
 
+// ArenaMark returns the current offset of the active arena.
+// Used by function prologues to save the allocation point.
+func ArenaMark() (mark uintptr) {
+	if currentArena == nil {
+		return 0
+	}
+	return currentArena.off
+}
+
+// ArenaRestore resets the active arena to a previously saved offset.
+// All allocations after the mark are reclaimed. Used by function
+// epilogues after deep-copying return values to the caller's region.
+func ArenaRestore(mark uintptr) {
+	if currentArena == nil {
+		return
+	}
+	currentArena.off = mark
+}
+
 // ArenaNew creates an arena with the given capacity via mmap.
 func ArenaNew(capacity uintptr) (a *Arena) {
 	// Round up to page boundary.
@@ -145,6 +164,38 @@ func ArenaReset(a *Arena) {
 		return
 	}
 	a.off = 0
+}
+
+// arenaCopySliceIfLocal copies a slice's backing array to the current arena
+// position only if its data pointer is above mark (i.e. was allocated by this
+// function). Data below the mark belongs to the caller and passes through.
+func arenaCopySliceIfLocal(s string, mark uintptr) (r string) {
+	if len(s) == 0 || currentArena == nil {
+		return s
+	}
+	p := uintptr(unsafe.Pointer(unsafe.SliceData([]byte(s))))
+	base := currentArena.base
+	if p < base+mark || p >= base+currentArena.cap {
+		return s // not in this function's region
+	}
+	buf := []byte{:len(s)}
+	copy(buf, s)
+	return string(buf)
+}
+
+// arenaCopyPtrIfLocal copies size bytes at ptr only if ptr is above mark.
+func arenaCopyPtrIfLocal(ptr unsafe.Pointer, mark uintptr, size uintptr) unsafe.Pointer {
+	if ptr == nil || currentArena == nil {
+		return ptr
+	}
+	p := uintptr(ptr)
+	base := currentArena.base
+	if p < base+mark || p >= base+currentArena.cap {
+		return ptr
+	}
+	dst := alloc(size, nil)
+	memcpy(dst, ptr, size)
+	return dst
 }
 
 func setHeapEnd(newHeapEnd uintptr) {

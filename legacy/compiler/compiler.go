@@ -4,6 +4,7 @@ import (
 	"debug/dwarf"
 	"errors"
 	"fmt"
+	"os"
 	"go/ast"
 	"go/constant"
 	"go/token"
@@ -206,6 +207,8 @@ type builder struct {
 	// setupNativeSpawnTargetChannels (child).
 	pipeChannels map[ssa.Value]bool
 
+	// Arena prologue/epilogue state.
+	arenaMarkVal llvm.Value // saved arena offset at function entry
 }
 
 func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *builder {
@@ -1399,6 +1402,11 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		b.deferInitFunc()
 	}
 
+	// Arena prologue: save the current arena offset.
+	// Runtime package is exempt - its functions ARE the arena implementation.
+	if b.fn.Pkg == nil || b.fn.Pkg.Pkg.Path() != "runtime" {
+		b.arenaMarkVal = b.createRuntimeCall("ArenaMark", nil, "arena.mark")
+	}
 }
 
 // createFunction builds the LLVM IR implementation for this function. The
@@ -1600,15 +1608,34 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		if b.hasDeferFrame() {
 			b.createRuntimeCall("destroyDeferFrame", []llvm.Value{b.deferFrame}, "")
 		}
+		isRuntime := b.fn.Pkg != nil && b.fn.Pkg.Pkg.Path() == "runtime"
 		if len(instr.Results) == 0 {
+			if !isRuntime && !b.arenaMarkVal.IsNil() {
+				b.createRuntimeCall("ArenaRestore", []llvm.Value{b.arenaMarkVal}, "")
+			}
 			b.CreateRetVoid()
 		} else if len(instr.Results) == 1 {
-			b.CreateRet(b.getValue(instr.Results[0], getPos(instr)))
+			val := b.getValue(instr.Results[0], getPos(instr))
+			if !isRuntime && !b.arenaMarkVal.IsNil() {
+				b.createRuntimeCall("ArenaRestore", []llvm.Value{b.arenaMarkVal}, "")
+				val = b.emitReturnDeepCopy(val, instr.Results[0])
+			}
+			b.CreateRet(val)
 		} else {
 			retVal := llvm.ConstNull(b.llvmFn.GlobalValueType().ReturnType())
 			for i, result := range instr.Results {
 				val := b.getValue(result, getPos(instr))
 				retVal = b.CreateInsertValue(retVal, val, i, "")
+			}
+			if !isRuntime && !b.arenaMarkVal.IsNil() {
+				b.createRuntimeCall("ArenaRestore", []llvm.Value{b.arenaMarkVal}, "")
+				for i, result := range instr.Results {
+					if typeContainsPointers(result.Type()) && b.valueIsLocal(result) {
+						field := b.CreateExtractValue(retVal, i, "ret.f")
+						copied := b.emitDeepCopy(field, result.Type())
+						retVal = b.CreateInsertValue(retVal, copied, i, "ret.f")
+					}
+				}
 			}
 			b.CreateRet(retVal)
 		}
@@ -3569,4 +3596,168 @@ func (b *builder) createUnOp(unop *ssa.UnOp) (llvm.Value, error) {
 	default:
 		return llvm.Value{}, b.makeError(unop.Pos(), "todo: unknown unop")
 	}
+}
+
+// typeContainsPointers returns true if the Go type contains any pointers,
+// slices, maps, channels, interfaces, strings, or function values that
+// would need deep copying when crossing an arena boundary.
+func typeContainsPointers(t types.Type) bool {
+	switch typ := t.Underlying().(type) {
+	case *types.Basic:
+		return typ.Info()&types.IsString != 0 // string = []byte, has pointer
+	case *types.Pointer, *types.Map, *types.Chan, *types.Interface,
+		*types.Signature, *types.Slice:
+		return true
+	case *types.Array:
+		return typeContainsPointers(typ.Elem())
+	case *types.Struct:
+		for i := 0; i < typ.NumFields(); i++ {
+			if typeContainsPointers(typ.Field(i).Type()) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+var dcCount int
+
+// emitReturnDeepCopy emits a deep copy of val if its type contains pointers
+// AND the value was allocated by this function. Parameters and globals are
+// borrows - they pass through without copying.
+func (b *builder) emitReturnDeepCopy(val llvm.Value, ssaVal ssa.Value) llvm.Value {
+	goType := ssaVal.Type()
+	if !typeContainsPointers(goType) {
+		return val
+	}
+	if !b.valueIsLocal(ssaVal) {
+		return val
+	}
+	dcCount++
+	if dcCount%100 == 0 {
+		fmt.Fprintf(os.Stderr, "[dc] %d copies emitted, fn=%s type=%s\n", dcCount, b.fn.Name(), goType)
+	}
+	return b.emitDeepCopy(val, goType)
+}
+
+// valueIsLocal returns true if the SSA value was allocated by this function
+// (not a parameter, global, or free variable). Only locally allocated values
+// need deep copying at return - everything else is a borrow from the caller.
+func (b *builder) valueIsLocal(v ssa.Value) bool {
+	return valueIsLocalRec(v, make(map[ssa.Value]bool))
+}
+
+func valueIsLocalRec(v ssa.Value, seen map[ssa.Value]bool) bool {
+	if seen[v] {
+		return false
+	}
+	seen[v] = true
+	switch v.(type) {
+	case *ssa.Parameter, *ssa.FreeVar, *ssa.Global, *ssa.Const, *ssa.Builtin:
+		return false // borrows from caller or constants
+	case *ssa.Alloc, *ssa.MakeSlice, *ssa.MakeMap, *ssa.MakeChan, *ssa.MakeClosure:
+		return true // this function allocated it
+	case *ssa.Call:
+		return false // callee already deep-copied its return to our arena
+	}
+	// For derived values (FieldAddr, IndexAddr, Slice, Phi, etc.),
+	// trace through operands.
+	switch vv := v.(type) {
+	case *ssa.FieldAddr:
+		return valueIsLocalRec(vv.X, seen)
+	case *ssa.IndexAddr:
+		return valueIsLocalRec(vv.X, seen)
+	case *ssa.Slice:
+		return valueIsLocalRec(vv.X, seen)
+	case *ssa.UnOp:
+		return valueIsLocalRec(vv.X, seen)
+	case *ssa.MakeInterface:
+		return valueIsLocalRec(vv.X, seen)
+	case *ssa.ChangeInterface:
+		return valueIsLocalRec(vv.X, seen)
+	case *ssa.ChangeType:
+		return valueIsLocalRec(vv.X, seen)
+	case *ssa.Convert:
+		return valueIsLocalRec(vv.X, seen)
+	case *ssa.TypeAssert:
+		return valueIsLocalRec(vv.X, seen)
+	case *ssa.Extract:
+		return valueIsLocalRec(vv.Tuple, seen)
+	case *ssa.Phi:
+		// Phi: local if ANY edge is local (conservative - might copy unnecessarily)
+		for _, edge := range vv.Edges {
+			if valueIsLocalRec(edge, seen) {
+				return true
+			}
+		}
+		return false
+	case *ssa.BinOp:
+		// String/slice concat via | produces a new allocation
+		if b, ok := vv.Type().Underlying().(*types.Basic); ok && b.Info()&types.IsString != 0 {
+			return true
+		}
+		if _, ok := vv.Type().Underlying().(*types.Slice); ok {
+			return true // slice concat
+		}
+		return false
+	}
+	return true // conservative: assume local if unknown
+}
+
+// emitArenaCopySlice calls runtime.arenaCopySliceIfLocal with the saved
+// arena mark. Only copies if the backing data is above the mark.
+func (b *builder) emitArenaCopySlice(val llvm.Value) llvm.Value {
+	result := b.createRuntimeCall("arenaCopySliceIfLocal", []llvm.Value{val, b.arenaMarkVal}, "dc.s")
+	if result.Type() == val.Type() {
+		return result
+	}
+	tmp := llvmutil.CreateEntryBlockAlloca(b.Builder, val.Type(), "dc.cast")
+	b.CreateStore(result, tmp)
+	return b.CreateLoad(val.Type(), tmp, "dc.cast")
+}
+
+// emitDeepCopy emits a single runtime call to deep-copy a value.
+// For slices/strings: runtime.arenaCopySlice.
+// For pointers: runtime.arenaCopyPtr with element size.
+// For structs with pointer fields: recurse per field.
+func (b *builder) emitDeepCopy(val llvm.Value, goType types.Type) llvm.Value {
+	switch typ := goType.Underlying().(type) {
+	case *types.Basic:
+		if typ.Info()&types.IsString != 0 {
+			return b.emitArenaCopySlice(val)
+		}
+		return val
+	case *types.Slice:
+		return b.emitArenaCopySlice(val)
+	case *types.Pointer:
+		elemType := b.getLLVMType(typ.Elem())
+		size := b.targetData.TypeAllocSize(elemType)
+		sizeVal := llvm.ConstInt(b.uintptrType, size, false)
+		return b.createRuntimeCall("arenaCopyPtrIfLocal", []llvm.Value{val, b.arenaMarkVal, sizeVal}, "dc.p")
+	case *types.Struct:
+		result := val
+		for i := 0; i < typ.NumFields(); i++ {
+			ft := typ.Field(i).Type()
+			if !typeContainsPointers(ft) {
+				continue
+			}
+			field := b.CreateExtractValue(val, i, "dc.sf")
+			copied := b.emitDeepCopy(field, ft)
+			result = b.CreateInsertValue(result, copied, i, "dc.sf")
+		}
+		return result
+	case *types.Array:
+		if !typeContainsPointers(typ.Elem()) {
+			return val
+		}
+		result := val
+		for i := int64(0); i < typ.Len(); i++ {
+			elem := b.CreateExtractValue(val, int(i), "dc.ae")
+			copied := b.emitDeepCopy(elem, typ.Elem())
+			result = b.CreateInsertValue(result, copied, int(i), "dc.ae")
+		}
+		return result
+	}
+	return val
 }
