@@ -1617,8 +1617,7 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		} else if len(instr.Results) == 1 {
 			val := b.getValue(instr.Results[0], getPos(instr))
 			if !isRuntime && !b.arenaMarkVal.IsNil() {
-				b.createRuntimeCall("ArenaRestore", []llvm.Value{b.arenaMarkVal}, "")
-				val = b.emitReturnDeepCopy(val, instr.Results[0])
+				val = b.emitReturnCopy(val, instr.Results[0])
 			}
 			b.CreateRet(val)
 		} else {
@@ -1628,14 +1627,14 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 				retVal = b.CreateInsertValue(retVal, val, i, "")
 			}
 			if !isRuntime && !b.arenaMarkVal.IsNil() {
-				b.createRuntimeCall("ArenaRestore", []llvm.Value{b.arenaMarkVal}, "")
 				for i, result := range instr.Results {
 					if typeContainsPointers(result.Type()) && b.valueIsLocal(result) {
 						field := b.CreateExtractValue(retVal, i, "ret.f")
-						copied := b.emitDeepCopy(field, result.Type())
+						copied := b.emitReturnCopyValue(field, result.Type())
 						retVal = b.CreateInsertValue(retVal, copied, i, "ret.f")
 					}
 				}
+				b.createRuntimeCall("ArenaRestore", []llvm.Value{b.arenaMarkVal}, "")
 			}
 			b.CreateRet(retVal)
 		}
@@ -3623,6 +3622,37 @@ func typeContainsPointers(t types.Type) bool {
 
 var dcCount int
 
+// emitReturnCopy handles the full return-copy sequence for a single value:
+// 1. If not local, just restore and return as-is
+// 2. If local: save to stack alloca, ArenaRestore, alloc in caller region,
+//    memcpy from stack to caller region, return caller-region pointer.
+func (b *builder) emitReturnCopy(val llvm.Value, ssaVal ssa.Value) llvm.Value {
+	goType := ssaVal.Type()
+	if !typeContainsPointers(goType) || !b.valueIsLocal(ssaVal) {
+		b.createRuntimeCall("ArenaRestore", []llvm.Value{b.arenaMarkVal}, "")
+		return val
+	}
+	return b.emitReturnCopyValue(val, goType)
+}
+
+// emitReturnCopyValue does the stack-intermediary deep copy:
+// save to stack, restore arena, alloc in caller region, copy from stack.
+func (b *builder) emitReturnCopyValue(val llvm.Value, goType types.Type) llvm.Value {
+	llvmType := val.Type()
+	// Step 1: save to stack alloca (survives ArenaRestore)
+	stackTmp := llvmutil.CreateEntryBlockAlloca(b.Builder, llvmType, "rc.stk")
+	b.CreateStore(val, stackTmp)
+	// Step 2: ArenaRestore (function's arena region freed)
+	b.createRuntimeCall("ArenaRestore", []llvm.Value{b.arenaMarkVal}, "")
+	// Step 3: alloc in caller's region + copy from stack
+	// For pointer types, use the per-type copy function which handles
+	// recursive struct fields. The copy function reads from the pointer
+	// (which is in the now-freed region but still physically mapped),
+	// allocs in the caller's region, and copies.
+	stackVal := b.CreateLoad(llvmType, stackTmp, "rc.ld")
+	return b.emitDeepCopy(stackVal, goType)
+}
+
 // emitReturnDeepCopy emits a deep copy of val if its type contains pointers
 // AND the value was allocated by this function. Parameters and globals are
 // borrows - they pass through without copying.
@@ -3659,7 +3689,14 @@ func valueIsLocalRec(v ssa.Value, seen map[ssa.Value]bool) bool {
 	case *ssa.Alloc, *ssa.MakeSlice, *ssa.MakeMap, *ssa.MakeChan, *ssa.MakeClosure:
 		return true // this function allocated it
 	case *ssa.Call:
-		return false // callee already deep-copied its return to our arena
+		// Runtime functions are exempt from arena discipline - their
+		// returns are NOT deep-copied by the callee. Treat as local.
+		if fn := v.(*ssa.Call).Common().StaticCallee(); fn != nil {
+			if fn.Pkg != nil && fn.Pkg.Pkg.Path() == "runtime" {
+				return true
+			}
+		}
+		return false // non-runtime callee already deep-copied its return
 	}
 	// For derived values (FieldAddr, IndexAddr, Slice, Phi, etc.),
 	// trace through operands.
@@ -3703,6 +3740,40 @@ func valueIsLocalRec(v ssa.Value, seen map[ssa.Value]bool) bool {
 		return false
 	}
 	return true // conservative: assume local if unknown
+}
+
+// emitCopySliceField copies a slice/string field inside a generated copy
+// function using alloc+memcpy directly (no runtime helper call, avoids
+// LLVM named-vs-anonymous struct type mismatch).
+func (c *compilerContext) emitCopySliceField(oldVal llvm.Value, fieldLLVM llvm.Type) llvm.Value {
+	// Extract ptr and len from the slice struct
+	slicePtr := c.builder.CreateExtractValue(oldVal, 0, "dc.sp")
+	sliceLen := c.builder.CreateExtractValue(oldVal, 1, "dc.sl")
+
+	// Null check
+	isNull := c.builder.CreateICmp(llvm.IntEQ, slicePtr, llvm.ConstNull(c.dataPtrType), "dc.sn")
+	fn := c.builder.GetInsertBlock().Parent()
+	copyBB := c.ctx.AddBasicBlock(fn, "dc.scopy")
+	mergeBB := c.ctx.AddBasicBlock(fn, "dc.smerge")
+	origBB := c.builder.GetInsertBlock()
+	c.builder.CreateCondBr(isNull, mergeBB, copyBB)
+
+	c.builder.SetInsertPointAtEnd(copyBB)
+	allocFnType, allocFn := c.getFunction(c.program.ImportedPackage("runtime").Members["alloc"].(*ssa.Function))
+	newPtr := c.builder.CreateCall(allocFnType, allocFn, []llvm.Value{sliceLen, llvm.ConstNull(c.dataPtrType), llvm.Undef(c.dataPtrType)}, "dc.sb")
+	memcpyFnType, memcpyFn := c.getFunction(c.program.ImportedPackage("runtime").Members["memcpy"].(*ssa.Function))
+	c.builder.CreateCall(memcpyFnType, memcpyFn, []llvm.Value{newPtr, slicePtr, sliceLen, llvm.Undef(c.dataPtrType)}, "")
+	// Build new slice {newPtr, len, len}
+	s1 := c.builder.CreateInsertValue(llvm.Undef(fieldLLVM), newPtr, 0, "")
+	s2 := c.builder.CreateInsertValue(s1, sliceLen, 1, "")
+	s3 := c.builder.CreateInsertValue(s2, sliceLen, 2, "")
+	c.builder.CreateBr(mergeBB)
+	copyEnd := c.builder.GetInsertBlock()
+
+	c.builder.SetInsertPointAtEnd(mergeBB)
+	phi := c.builder.CreatePHI(fieldLLVM, "dc.sphi")
+	phi.AddIncoming([]llvm.Value{oldVal, s3}, []llvm.BasicBlock{origBB, copyEnd})
+	return phi
 }
 
 // emitArenaCopySlice calls runtime.arenaCopySliceIfLocal with the saved
@@ -3763,13 +3834,17 @@ func (c *compilerContext) getOrCreatePtrCopyFn(typ *types.Pointer) llvm.Value {
 			oldVal := c.builder.CreateLoad(fieldLLVM, gep, "dc.fld")
 			var newVal llvm.Value
 			switch ftu := ft.Underlying().(type) {
+			case *types.Basic:
+				if ftu.Info()&types.IsString != 0 {
+					newVal = c.emitCopySliceField(oldVal, fieldLLVM)
+				} else {
+					continue
+				}
 			case *types.Map:
 				hmCopyType, hmCopyFn := c.getFunction(c.program.ImportedPackage("runtime").Members["hashmapCopy"].(*ssa.Function))
 				newVal = c.builder.CreateCall(hmCopyType, hmCopyFn, []llvm.Value{oldVal, llvm.Undef(c.dataPtrType)}, "dc.map")
 			case *types.Slice:
-				slCopyType, slCopyFn := c.getFunction(c.program.ImportedPackage("runtime").Members["arenaCopySliceIfLocal"].(*ssa.Function))
-				markVal := llvm.ConstInt(c.uintptrType, 0, false) // mark=0: copy unconditionally in copy fn
-				newVal = c.builder.CreateCall(slCopyType, slCopyFn, []llvm.Value{oldVal, markVal, llvm.Undef(c.dataPtrType)}, "dc.sl")
+				newVal = c.emitCopySliceField(oldVal, fieldLLVM)
 			case *types.Pointer:
 				subCopyFn := c.getOrCreatePtrCopyFn(ftu)
 				subCopyFnType := llvm.FunctionType(c.dataPtrType, []llvm.Type{c.dataPtrType}, false)
