@@ -546,23 +546,22 @@ func regScopeLookup(regPkg *TCPackage, n string) (o Object) {
 }
 
 func TypeCheckOnly(src []byte, name string) {
-	// Free previous arena if still alive.
-	if cctx.compileArena != nil {
-		runtime.ArenaFree(cctx.compileArena)
-		cctx.compileArena = nil
+	arenaSize := uintptr(len(src)) * 50
+	if arenaSize < 4*1024*1024 {
+		arenaSize = 4 * 1024 * 1024
 	}
-	arena := runtime.ArenaNew(uintptr(len(src)) * 16)
+	arena := runtime.ArenaNew(arenaSize)
+	runtime.SetCurrentArena(arena)
 	SetTypesArena(arena)
 	pkg, file := typeCheckPkg(src, name, arena)
 	SetTypesArena(nil)
+	runtime.SetCurrentArena(nil)
 	if pkg != nil && file != nil {
 		registerCompiledExports(pkg)
 	}
 	ScanGenericDecls(src, name)
-	// Arena freed now. registerCompiledExports round-tripped through mxh -
-	// ImportRegistry holds heap objects, not arena pointers.
+	// Arena dies here. All typecheck objects freed at once.
 	runtime.ArenaFree(arena)
-	releasePerPkgState()
 }
 
 func releaseFileDeep(f *syntax.File) {
@@ -579,44 +578,60 @@ func releaseFileDeep(f *syntax.File) {
 }
 
 func CompileToIR(src []byte, name string, triple string) (s string) {
-	// Free previous arena if still alive.
-	if cctx.compileArena != nil {
-		runtime.ArenaFree(cctx.compileArena)
-		cctx.compileArena = nil
-	}
 	cctx.compileTargetTriple = triple
+	// Scan pragmas on heap (before arena).
 	scanEmbedPragmas(src, cctx.compilePkgDir)
 	cctx.linknameMap = scanLinknameMap(src)
 	cctx.wasmImportMap = scanWasmImportMap(src, name)
-	// Arena covers parse -> typecheck -> SSA -> IR emit.
-	// Arena is NOT freed here - it stays alive until the caller frees it
-	// after generateMxh, because registerCompiledExports inserts arena
-	// objects directly into ImportRegistry.
-	arena := runtime.ArenaNew(uintptr(len(src)) * 20)
+
+	// Single arena for the entire compilation unit.
+	// All allocations (parse, typecheck, SSA, IR) go here.
+	// Arena is bulk-freed at the end - no free lists, no fragmentation.
+	arenaSize := uintptr(len(src)) * 200
+	if arenaSize < 64*1024*1024 {
+		arenaSize = 64 * 1024 * 1024 // 64MB virtual (pages committed on touch)
+	}
+	arena := runtime.ArenaNew(arenaSize)
+	runtime.SetCurrentArena(arena)
 	SetTypesArena(arena)
-	cctx.compileArena = arena
+
 	pkg, file := typeCheckPkg(src, name, arena)
+
+	// Exit arena for export registration (mxh round-trip to heap).
 	SetTypesArena(nil)
+	runtime.SetCurrentArena(nil)
 	ScanGenericDecls(src, name)
 	if pkg != nil && file != nil {
 		registerCompiledExports(pkg)
 	}
-	SetTypesArena(arena)
+
 	if file == nil {
+		// Error message built on heap (arena about to die).
 		out := "; parse error parseErrs=" | simpleItoa(len(cctx.parseErrors)) | "\n"
 		for _, pe := range cctx.parseErrors {
 			out = out | "; " | pe | "\n"
 		}
-		SetTypesArena(nil)
-		releasePerPkgState()
+		runtime.ArenaFree(arena)
+		// Nil arena-allocated cctx fields.
+		cctx.parseErrors = nil
+		cctx.tcPkgSrc = nil
+		cctx.constValMap = nil
 		return out
 	}
+
+	// Re-enter arena for SSA + IR emit.
+	runtime.SetCurrentArena(arena)
+	SetTypesArena(arena)
+
 	prog := NewSSAProgram()
 	ssaPkg := prog.CreatePackage(pkg, []*syntax.File{file}, nil)
 	emitter := newIREmitter(ssaPkg, triple, int32(len(cctx.tcPkgSrc)))
-	// Stream IR to file if output path was set by caller.
+
 	if cctx.irOutputFile != "" {
+		// Create file on heap (os.File must outlive arena for Close).
+		runtime.SetCurrentArena(nil)
 		f, ferr := os.Create(cctx.irOutputFile)
+		runtime.SetCurrentArena(arena)
 		if ferr == nil {
 			emitter.outFile = f
 		}
@@ -626,31 +641,31 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 		emitter.outFile.Close()
 		emitter.outFile = nil
 	}
+
 	SetTypesArena(nil)
-	// Release SSA and emitter objects - no longer needed after IR text emitted.
-	emitter.releaseAfterEmit()
-	ssaPkg.release()
-	prog.release()
-	// Free the arena now. registerCompiledExports already round-tripped
-	// type objects through mxh serialization - ImportRegistry holds only
-	// heap-allocated objects, not arena pointers.
-	if cctx.compileArena != nil {
-		runtime.ArenaFree(cctx.compileArena)
-		cctx.compileArena = nil
+	runtime.SetCurrentArena(nil)
+
+	// Copy IR to heap before arena free (non-streaming mode only).
+	var result string
+	if len(ir) > 0 {
+		heapIR := []byte{:len(ir)}
+		copy(heapIR, ir)
+		result = string(heapIR)
 	}
 
-	if len(cctx.compileErrors) > 0 {
-		out := "; compile error\n"
-		for _, ce := range cctx.compileErrors {
-			out = out | "; " | ce | "\n"
-		}
-		free(ir)
-		releasePerPkgState()
-		return out
-	}
-
-	releasePerPkgState()
-	return ir
+	// Bulk free: all parse, typecheck, SSA, emitter objects die at once.
+	runtime.ArenaFree(arena)
+	// Nil cctx fields that pointed into the arena.
+	cctx.parseErrors = nil
+	cctx.compileErrors = nil
+	cctx.constValMap = nil
+	cctx.compileExportMap = nil
+	cctx.embedVars = nil
+	cctx.linknameMap = nil
+	cctx.wasmImportMap = nil
+	cctx.tcPkgSrc = nil
+	cctx.concatSourceMap = nil
+	return result
 }
 
 // registerCompiledExports serializes the compilation scope to mxh text,
