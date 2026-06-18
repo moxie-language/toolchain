@@ -3,9 +3,15 @@ package main
 import (
 	"math"
 	"os"
+	"runtime"
 	"git.smesh.lol/moxie/pkg/mxutil"
 	. "git.smesh.lol/moxie/pkg/types"
 )
+
+// kv is a key-value pair for accumulating cross-function map products.
+type emitKV struct{ k, v string }
+// emitKVI is a key-int32 pair for accumulating type ID products.
+type emitKVI struct{ k string; v int32 }
 
 type irEmitter struct {
 	buf        []byte
@@ -45,6 +51,16 @@ type irEmitter struct {
 	currentEmitBlock *SSABasicBlock
 	sretType    string
 	pendingPhiTruncs []phiTrunc
+	// Per-function accumulators for cross-function state.
+	// Written during function emission, merged by caller after flush.
+	// All accumulator contents die with the function arena.
+	pendExtDecls      []emitKV
+	pendExtGlobals    []emitKV
+	pendStrConsts     []string
+	pendTypeIDs       []emitKVI
+	pendLocalTypeIDs  []string
+	pendGlobalDeclTypes []emitKV
+	pendWasmAttrs     [][3]string
 }
 
 type phiTrunc struct {
@@ -206,11 +222,11 @@ func (e *irEmitter) declareRuntime(name, retType, params string) {
 	} else {
 		params = "ptr"
 	}
-	e.extDecls[name] = retType | " @" | name | "(" | params | ")"
+	e.pendExtDecls = append(e.pendExtDecls, emitKV{name, retType | " @" | name | "(" | params | ")"})
 }
 
 func (e *irEmitter) declareRuntimeNoCtx(name, retType, params string) {
-	e.extDecls[name] = retType | " @" | name | "(" | params | ")"
+	e.pendExtDecls = append(e.pendExtDecls, emitKV{name, retType | " @" | name | "(" | params | ")"})
 }
 
 
@@ -221,6 +237,9 @@ func (e *irEmitter) declareExternalGlobal(g *SSAGlobal) {
 	name := e.globalName(g)
 	if _, ok := e.extGlobals[name]; ok {
 		return
+	}
+	for _, p := range e.pendExtGlobals {
+		if p.k == name { return }
 	}
 	typ := e.llvmType(g.typ)
 	if p, ok := SafeUnderlying(g.typ).(*Pointer); ok {
@@ -233,7 +252,7 @@ func (e *irEmitter) declareExternalGlobal(g *SSAGlobal) {
 	if typ == "void" {
 		typ = "i1"
 	}
-	e.extGlobals[name] = typ
+	e.pendExtGlobals = append(e.pendExtGlobals, emitKV{name, typ})
 }
 
 func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
@@ -243,6 +262,9 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 	sym := e.funcSymbol(fn)
 	if _, ok := e.extDecls[sym]; ok {
 		return
+	}
+	for _, p := range e.pendExtDecls {
+		if p.k == sym { return }
 	}
 	retType := e.funcRetType(fn)
 	useSret := needsSret(retType)
@@ -276,9 +298,9 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 		params = params | "ptr"
 	}
 	if useSret {
-		e.extDecls[sym] = "void " | sym | "(" | params | ")"
+		e.pendExtDecls = append(e.pendExtDecls, emitKV{sym, "void " | sym | "(" | params | ")"})
 	} else {
-		e.extDecls[sym] = retType | " " | sym | "(" | params | ")"
+		e.pendExtDecls = append(e.pendExtDecls, emitKV{sym, retType | " " | sym | "(" | params | ")"})
 	}
 }
 
@@ -286,9 +308,15 @@ func (e *irEmitter) addStringConst(s string) (n int32) {
 	if existing, ok := e.strMap[s]; ok {
 		return existing
 	}
-	idx := len(e.strConst)
-	e.strConst = append(e.strConst, s)
-	e.strMap[s] = idx
+	// Check pending list (not yet merged).
+	base := len(e.strConst)
+	for i, ps := range e.pendStrConsts {
+		if ps == s {
+			return int32(base + i)
+		}
+	}
+	idx := int32(base + len(e.pendStrConsts))
+	e.pendStrConsts = append(e.pendStrConsts, s)
 	return idx
 }
 
@@ -494,20 +522,37 @@ func (e *irEmitter) emit() (s string) {
 		}
 	}
 	e.flush()
+	compileArena := runtime.CurrentArena()
+	fnArena := runtime.ArenaNew(512 * 1024 * 1024)
 	for _, member := range e.pkgMembers() {
 		if m, ok := member.(*SSAFunction); ok {
 			checkUseAfterFree(m)
+			runtime.SetCurrentArena(fnArena)
 			e.emitFunction(m)
 			e.emitAnonFuncs(m)
 			e.flush()
+			runtime.SetCurrentArena(compileArena)
+			e.mergeAccumulators()
+			e.buf = nil
+			e.operandBuf = nil
+			e.valName = nil
+			e.nameUsed = nil
+			e.allocTypes = nil
+			e.regTypes = nil
+			e.blockExitLabel = nil
+			e.hoisted = nil
+			e.pendingPhiTruncs = nil
+			e.deferList = nil
 			m.Blocks = nil
 			m.Locals = nil
 			m.Params = nil
 			m.FreeVars = nil
 			m.NamedResults = nil
 			m.vars = nil
+			runtime.ArenaReset(fnArena)
 		}
 	}
+	runtime.ArenaFree(fnArena)
 	// Fresh buf for trailing declarations (libMain, string constants, extern decls).
 	e.buf = []byte{:0:4096}
 	e.emitLibMain()
@@ -591,10 +636,48 @@ func (e *irEmitter) emit() (s string) {
 	return string(e.buf)
 }
 
-func (e *irEmitter) releaseAfterEmit() {
-	// Arena-per-function model: no individual free.
-	// All emitter allocations live in the compilation arena
-	// and are bulk-freed at ArenaFree.
+func (e *irEmitter) releaseAfterEmit() {}
+
+// mergeAccumulators copies per-function cross-function products into the
+// real maps. Called on the compile arena after function emit + flush.
+// Accumulator slices die with the function arena at reset.
+func (e *irEmitter) mergeAccumulators() {
+	for _, p := range e.pendExtDecls {
+		e.extDecls[p.k] = p.v
+	}
+	e.pendExtDecls = nil
+	for _, p := range e.pendExtGlobals {
+		e.extGlobals[p.k] = p.v
+	}
+	e.pendExtGlobals = nil
+	for _, s := range e.pendStrConsts {
+		if _, ok := e.strMap[s]; !ok {
+			e.strMap[s] = len(e.strConst)
+			e.strConst = append(e.strConst, s)
+		}
+	}
+	e.pendStrConsts = nil
+	for _, p := range e.pendTypeIDs {
+		if _, ok := e.typeIDs[p.k]; !ok {
+			e.typeIDs[p.k] = p.v
+		}
+	}
+	e.pendTypeIDs = nil
+	for _, k := range e.pendLocalTypeIDs {
+		if e.localTypeIDs == nil {
+			e.localTypeIDs = map[string]bool{}
+		}
+		e.localTypeIDs[k] = true
+	}
+	e.pendLocalTypeIDs = nil
+	for _, p := range e.pendGlobalDeclTypes {
+		e.globalDeclTypes[p.k] = p.v
+	}
+	e.pendGlobalDeclTypes = nil
+	for _, wa := range e.pendWasmAttrs {
+		e.wasmAttrs = append(e.wasmAttrs, wa)
+	}
+	e.pendWasmAttrs = nil
 }
 
 func (e *irEmitter) pkgMembers() (ss []SSAMember) {
@@ -802,6 +885,7 @@ func (e *irEmitter) emitLibMain() {
 }
 
 func (e *irEmitter) emitFunction(f *SSAFunction) {
+	mxutil.WriteStr(2, "    fn: " | f.name | "\n")
 	e.w("; [emit] " | f.name | "\n")
 	sym := e.funcSymbol(f)
 	if len(sym) > 5 && (mxutil.HasPrefix(sym, "@llvm.") || mxutil.HasPrefix(sym, "@\"llvm.")) {
@@ -846,31 +930,51 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		e.emitFuncDecl(f)
 		return
 	}
+	mxutil.WriteStr(2, "      A\n")
 	e.curFunc = f
-	markReturnEscapes(f)
+	mxutil.WriteStr(2, "      B\n")
+	// markReturnEscapes(f) // disabled for arena debugging
 	e.nextReg = 0
 	e.deferList = nil
 	e.deferID = 0
+	mxutil.WriteStr(2, "      C-maps\n")
 	e.valName = map[SSAValue]string{}
 	e.nameUsed = map[string]bool{}
+	mxutil.WriteStr(2, "      C-maps-ok\n")
 	e.allocTypes = map[SSAValue]string{}
 	e.regTypes = map[string]string{}
 	e.blockExitLabel = map[int32]string{}
-
+	print("      D-params n=")
+	print(len(f.Params))
+	print("\n")
 	usedNames := map[string]int32{}
 	for i, p := range f.Params {
+		print("        p")
+		print(int32(i))
+		if p == nil {
+			print(" NIL\n")
+			continue
+		}
+		print(" ok\n")
+		print("          ssaname\n")
 		pname := p.SSAName()
+		print("          got-name\n")
 		if pname == "" {
 			pname = "p" | irItoa(i)
 		}
+		print("          check-used\n")
 		if cnt, ok := usedNames[pname]; ok {
 			pname = pname | "." | irItoa(cnt)
 		}
+		print("          inc-used\n")
 		usedNames[p.SSAName()]++
+		print("          set-valname\n")
 		e.valName[p] = "%" | pname
+		print("          set-nameused\n")
 		e.nameUsed["%" | pname] = true
+		print("          param-done\n")
 	}
-
+	mxutil.WriteStr(2, "      E-define\n")
 	e.w("\ndefine ")
 	if f.parent != nil {
 		e.w("hidden ")
@@ -1069,6 +1173,9 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 	if _, ok := e.extDecls[sym]; ok {
 		return
 	}
+	for _, p := range e.pendExtDecls {
+		if p.k == sym { return }
+	}
 	retType := e.funcRetType(f)
 	useSret := needsSret(retType)
 	e.w("\ndeclare ")
@@ -1127,10 +1234,10 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 		e.wasmAttrID++
 		aid := e.wasmAttrID
 		e.w(" #" | simpleItoa(aid))
-		e.wasmAttrs = append(e.wasmAttrs, [3]string{simpleItoa(aid), wi[0], wi[1]})
+		e.pendWasmAttrs = append(e.pendWasmAttrs, [3]string{simpleItoa(aid), wi[0], wi[1]})
 	}
 	e.w("\n")
-	e.extDecls[sym] = ""
+	e.pendExtDecls = append(e.pendExtDecls, emitKV{sym, ""})
 }
 
 // emitLinknameForwarder emits a thin wrapper definition with origSym that

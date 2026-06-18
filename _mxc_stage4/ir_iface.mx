@@ -78,8 +78,14 @@ func (e *irEmitter) typeIDHash(t Type) (s string) {
 		e.typeIDs = map[string]int32{}
 	}
 	if _, ok := e.typeIDs[name]; !ok {
-		e.typeIDNext++
-		e.typeIDs[name] = e.typeIDNext
+		found := false
+		for _, p := range e.pendTypeIDs {
+			if p.k == name { found = true; break }
+		}
+		if !found {
+			e.typeIDNext++
+			e.pendTypeIDs = append(e.pendTypeIDs, emitKVI{name, e.typeIDNext})
+		}
 	}
 	return e.hashToIntptr(fnv1a64(name))
 }
@@ -130,10 +136,7 @@ func (e *irEmitter) reflectTypeName(t Type) (s string) {
 		}
 		result := "reflect/types.type:named:" | pkgPath | "." | named.Obj.Name
 		if pkgPath == e.pkg.Pkg.Path {
-			if e.localTypeIDs == nil {
-				e.localTypeIDs = map[string]bool{}
-			}
-			e.localTypeIDs["\"" | result | "\""] = true
+			e.pendLocalTypeIDs = append(e.pendLocalTypeIDs, "\"" | result | "\"")
 		}
 		return result
 	}
@@ -142,8 +145,15 @@ func (e *irEmitter) reflectTypeName(t Type) (s string) {
 		if mxutil.HasPrefix(inner, "reflect/types.type:") {
 			result := "reflect/types.type:pointer:" | inner[len("reflect/types.type:"):]
 			quoted := "\"" | result | "\""
-			if e.localTypeIDs != nil && e.localTypeIDs["\"" | inner | "\""] {
-				e.localTypeIDs[quoted] = true
+			innerQ := "\"" | inner | "\""
+			inLocal := e.localTypeIDs != nil && e.localTypeIDs[innerQ]
+			if !inLocal {
+				for _, pk := range e.pendLocalTypeIDs {
+					if pk == innerQ { inLocal = true; break }
+				}
+			}
+			if inLocal {
+				e.pendLocalTypeIDs = append(e.pendLocalTypeIDs, quoted)
 			}
 			return result
 		}
@@ -165,10 +175,7 @@ func (e *irEmitter) reflectTypeName(t Type) (s string) {
 		inner := e.reflectTypeName(elem)
 		if mxutil.HasPrefix(inner, "reflect/types.type:") {
 			result := "reflect/types.type:slice:" | inner[len("reflect/types.type:"):]
-			if e.localTypeIDs == nil {
-				e.localTypeIDs = map[string]bool{}
-			}
-			e.localTypeIDs["\"" | result | "\""] = true
+			e.pendLocalTypeIDs = append(e.pendLocalTypeIDs, "\"" | result | "\"")
 			return result
 		}
 		return inner | ".slice"
@@ -492,6 +499,9 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 	if _, ok := e.extDecls[sym]; ok {
 		return
 	}
+	for _, p := range e.pendExtDecls {
+		if p.k == sym { return }
+	}
 	// Use the impl's actual return type (not the caller's expected type)
 	// so the declaration matches the definition in the defining package.
 	retType := e.llvmType(inv.SSAType())
@@ -546,7 +556,7 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 	if useSret {
 		declRet = "void"
 	}
-	e.extDecls[sym] = "extern_weak " | declRet | " " | sym | "(" | params | ")"
+	e.pendExtDecls = append(e.pendExtDecls, emitKV{sym, "extern_weak " | declRet | " " | sym | "(" | params | ")"})
 }
 
 func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv string, inv *SSAInvoke, isVoid bool, impl ifaceImpl) {
