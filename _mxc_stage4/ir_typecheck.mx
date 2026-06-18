@@ -296,10 +296,9 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 		case *syntax.FuncDecl:
 			if dd.Recv == nil && dd.Name.Value != "init" {
 				if len(dd.TParamList) > 0 {
-					if cctx.genericFuncDecls == nil {
-						cctx.genericFuncDecls = map[string]*syntax.FuncDecl{}
-					}
-					cctx.genericFuncDecls[name+"."+dd.Name.Value] = dd
+					// Generic functions are registered by ScanGenericDecls
+					// in the outer arena. Do not register here - this runs
+					// in the per-compilation arena which gets freed.
 					continue
 				}
 				sig := tcResolveFuncInline(dd.Type, scope)
@@ -586,8 +585,10 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	// All allocations (parse, typecheck, SSA, IR) go here.
 	// Arena is bulk-freed at the end - no free lists, no fragmentation.
 	// Per-compilation arena. Virtual pages committed on touch by MMU.
-	// 4GB handles the largest packages (runtime: 245KB source, ~3GB allocs).
-	arenaSize := uintptr(4) * 1024 * 1024 * 1024
+	// 16GB per compilation unit. Pages committed on touch by MMU -
+	// virtual cost is address space only. Large packages like syscall
+	// (440KB source, hundreds of struct types) need this.
+	arenaSize := uintptr(16) * 1024 * 1024 * 1024
 	// Save caller's arena, nest a compilation-unit arena inside it.
 	outerArena := runtime.CurrentArena()
 	arena := runtime.ArenaNew(arenaSize)
@@ -616,9 +617,11 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	// Re-enter compilation arena for SSA + IR emit.
 	runtime.SetCurrentArena(arena)
 
+	mxutil.WriteStr(2, "    SSA build\n")
 	prog := NewSSAProgram()
 	ssaPkg := prog.CreatePackage(pkg, []*syntax.File{file}, nil)
 	emitter := newIREmitter(ssaPkg, triple, int32(len(cctx.tcPkgSrc)))
+	mxutil.WriteStr(2, "    IR emit\n")
 
 	if cctx.irOutputFile != "" {
 		// Create file on outer arena (os.File must outlive inner arena).
