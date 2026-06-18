@@ -491,22 +491,36 @@ func allocEscapes(val ssa.Value, defBlock *ssa.BasicBlock, seen map[ssa.Value]bo
 }
 
 // isLocalAlloca returns true if addr is a stack-local alloca (Alloc with
-// Heap=false) in the given block. Values stored into local allocas die at
-// scope exit, so they don't escape.
+// Heap=false) in the given block, AND the alloca is not loaded outside
+// the defining block. If the alloca is loaded in another block, the stored
+// value survives past block exit and cannot be freed.
 func isLocalAlloca(addr ssa.Value, defBlock *ssa.BasicBlock) bool {
 	alloc, ok := addr.(*ssa.Alloc)
 	if !ok {
 		return false
 	}
 	if alloc.Heap {
-		return false // heap alloc outlives the scope
+		return false
 	}
-	if instr, ok := addr.(ssa.Instruction); ok {
-		if instr.Block() == defBlock {
-			return true
+	allocInstr, ok := addr.(ssa.Instruction)
+	if !ok || allocInstr.Block() != defBlock {
+		return false
+	}
+	// Check that no load of this alloca escapes the defining block.
+	refs := alloc.Referrers()
+	if refs == nil {
+		return true
+	}
+	for _, ref := range *refs {
+		ri, ok := ref.(ssa.Instruction)
+		if !ok {
+			return false
+		}
+		if ri.Block() != defBlock {
+			return false // used outside defining block
 		}
 	}
-	return false
+	return true
 }
 
 // markEscaped traces backward through the SSA def chain from an escape
