@@ -57,8 +57,6 @@ func initCompileCtx() {
 }
 
 func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage, file *syntax.File) {
-	cctx.universe = InitUniverse()
-	SetUniverseGlobals(cctx.universe)
 	shortName := name
 	for i := len(name) - 1; i >= 0; i-- {
 		if name[i] == '/' {
@@ -102,8 +100,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 			if len(path) >= 2 && path[0] == '"' {
 				path = path[1 : len(path)-1]
 			}
-			EnsureImportRegistry()
-			imported := ImportRegistry[path]
+			imported := cctx.universe.Registry[path]
 			if imported == nil {
 				continue
 			}
@@ -411,7 +408,6 @@ func ScanGenericDecls(src []byte, name string) {
 	if !hasGeneric {
 		return
 	}
-	EnsureImportRegistry()
 	shortName := name
 	for i := len(name) - 1; i >= 0; i-- {
 		if name[i] == '/' {
@@ -430,7 +426,7 @@ func ScanGenericDecls(src []byte, name string) {
 			if len(path) >= 2 && path[0] == '"' {
 				path = path[1 : len(path)-1]
 			}
-			imported := ImportRegistry[path]
+			imported := cctx.universe.Registry[path]
 			if imported == nil {
 				continue
 			}
@@ -459,7 +455,7 @@ func ScanGenericDecls(src []byte, name string) {
 	// nil-typed stand-ins are only a fallback for unexported decls. Without
 	// this, method calls on package types inside monomorphized bodies
 	// silently resolve to nothing.
-	regPkg := ImportRegistry[name]
+	regPkg := cctx.universe.Registry[name]
 	for _, d := range file.DeclList {
 		switch dd := d.(type) {
 		case *syntax.FuncDecl:
@@ -659,16 +655,15 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 // dependency on the arena - the registry holds only heap objects.
 // The arena can then be freed without dangling the registry.
 func registerCompiledExports(pkg *TCPackage) {
-	EnsureImportRegistry()
 
 	// Work arena: all intermediates (visited map, string copies, type
-	// objects) allocated here. Only the final ImportRegistry entry
+	// objects) allocated here. Only the final cctx.universe.Registry entry
 	// survives via the root arena allocations below.
 	outerArena := runtime.CurrentArena()
 	workArena := runtime.ArenaNew(256 * 1024 * 1024) // 256MB
 	runtime.SetCurrentArena(workArena)
 
-	dimps := DirectImportPaths(pkg)
+	dimps := cctx.universe.DirectImportPaths(pkg)
 	// Switch to root arena for persistent allocations.
 	runtime.SetCurrentArena(outerArena)
 	copiedPath := tcCopyStr(pkg.Path)
@@ -676,7 +671,7 @@ func registerCompiledExports(pkg *TCPackage) {
 	for _, d := range dimps {
 		copiedDimps = append(copiedDimps, tcCopyStr(d))
 	}
-	PkgDirectImports[copiedPath] = copiedDimps
+	cctx.universe.DirectImports[copiedPath] = copiedDimps
 	newPkg := NewTCPackage(copiedPath, tcCopyStr(pkg.Name))
 
 	// Back to work arena for the type graph copy.
@@ -710,7 +705,7 @@ func registerCompiledExports(pkg *TCPackage) {
 			newPkg.Scope.Insert(newObj)
 		}
 	}
-	ImportRegistry[tcCopyStr(pkg.Path)] = newPkg
+	cctx.universe.Registry[tcCopyStr(pkg.Path)] = newPkg
 }
 
 // tcCopyStr copies a string's backing array into the current arena.
@@ -790,9 +785,9 @@ func copyType(pkg *TCPackage, visited map[uintptr]Type, t Type) (r Type) {
 	switch tt := t.(type) {
 	case *Named:
 		// If this Named type belongs to an imported package (already in
-		// ImportRegistry), return it as-is. It's already in the outer arena.
+		// cctx.universe.Registry), return it as-is. It's already in the outer arena.
 		if tt.Obj != nil && tt.Obj.Pkg != nil && tt.Obj.Pkg.Path != pkg.Path {
-			if regPkg, ok := ImportRegistry[tt.Obj.Pkg.Path]; ok {
+			if regPkg, ok := cctx.universe.Registry[tt.Obj.Pkg.Path]; ok {
 				// Return the registered copy's type, not the arena original.
 				regObj := regPkg.Scope.Lookup(tt.Obj.Name)
 				if regObj != nil {
@@ -968,7 +963,7 @@ func tcResolveFuncReturn(e syntax.Expr, scope *Scope) (t Type) {
 			}
 		}
 		if obj == nil {
-			if imp := LookupImportByName(pkgName.Value); imp != nil {
+			if imp := cctx.universe.LookupByName(pkgName.Value); imp != nil {
 				obj = imp.Scope.Lookup(ex.Sel.Value)
 			}
 		}
@@ -1321,8 +1316,7 @@ func tcEvalConstExpr(e syntax.Expr, scope *Scope, iotaVal int64) (c ConstVal) {
 			}
 		}
 		if imported == nil {
-			EnsureImportRegistry()
-			imported = ImportRegistry[pkgName.Value]
+			imported = cctx.universe.Registry[pkgName.Value]
 		}
 		if imported == nil {
 			return nil
@@ -1371,7 +1365,7 @@ func tcResolveNameInline(e syntax.Expr, scope *Scope) (t Type) {
 		}
 		// Fallback: look up by short package name via index.
 		if pkgName2, ok2 := ex.X.(*syntax.Name); ok2 {
-			if imp := LookupImportByName(pkgName2.Value); imp != nil {
+			if imp := cctx.universe.LookupByName(pkgName2.Value); imp != nil {
 				typeObj := imp.Scope.Lookup(ex.Sel.Value)
 				if typeObj != nil {
 					if tn, ok3 := typeObj.(*TypeName); ok3 {

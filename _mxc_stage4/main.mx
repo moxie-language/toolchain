@@ -1730,11 +1730,8 @@ func resolveAll(rootPkg string, root string) (ss []*pkgInfo) {
 }
 
 func registerBuiltins() {
-	cctx.universe = InitUniverse()
-	SetUniverseGlobals(cctx.universe)
-	EnsureImportRegistry()
-	for k := range ImportRegistry {
-		delete(ImportRegistry, k)
+	for k := range cctx.universe.Registry {
+		delete(cctx.universe.Registry, k)
 	}
 
 	// unsafe - compiler builtin, no source
@@ -1745,7 +1742,7 @@ func registerBuiltins() {
 	unsafePkg.Scope.Insert(NewTCFunc(unsafePkg, "Alignof", parseSignatureDesc("interface{}->int32")))
 	unsafePkg.Scope.Insert(NewTCFunc(unsafePkg, "Slice", parseSignatureDesc("ptr,int32->[]uint8")))
 	unsafePkg.Scope.Insert(NewTCFunc(unsafePkg, "SliceData", parseSignatureDesc("[]uint8->ptr")))
-	ImportRegistry["unsafe"] = unsafePkg
+	cctx.universe.Registry["unsafe"] = unsafePkg
 
 	// moxie - spawn/codec runtime, types and constants from protocol header
 	mroot := getenv("MOXIEROOT")
@@ -1771,7 +1768,7 @@ func registerBuiltins() {
 	rtPkg.Scope.Insert(NewTCVar(rtPkg, "GOOS", Typ[TCString]))
 	rtPkg.Scope.Insert(NewTCVar(rtPkg, "GOARCH", Typ[TCString]))
 	rtPkg.Scope.Insert(NewTCVar(rtPkg, "ChildPipeFd", Typ[Int32]))
-	ImportRegistry["runtime"] = rtPkg
+	cctx.universe.Registry["runtime"] = rtPkg
 }
 
 func addPtrMethod(pkg *TCPackage, named *Named, name, sigDesc string) {
@@ -1994,7 +1991,7 @@ func generateMxh(pkg *TCPackage) (s string) {
 	// Direct imports must round-trip through the mxh: dispatch lists for
 	// cached packages are built from the transitive import closure, and a
 	// warm-cache load has no source to derive it from.
-	for _, ip := range DirectImportPaths(pkg) {
+	for _, ip := range cctx.universe.DirectImportPaths(pkg) {
 	chunks = append(chunks, []byte("import "))
 	chunks = append(chunks, []byte(ip))
 	chunks = append(chunks, []byte("\n"))
@@ -2206,7 +2203,6 @@ func loadMxh(path string) (ok bool) {
 }
 
 func loadMxhData(data []byte) (ok bool) {
-	EnsureImportRegistry()
 	lines := mxutil.SplitLines(string(data))
 	if len(lines) == 0 {
 		return false
@@ -2238,7 +2234,7 @@ func loadMxhData(data []byte) (ok bool) {
 			dimps = append(dimps, lines[li][7:])
 		}
 	}
-	PkgDirectImports[pkgPath] = dimps
+	cctx.universe.DirectImports[pkgPath] = dimps
 
 	oldScope := cctx.parseTypePkgScope
 	cctx.parseTypePkgScope = pkg.Scope
@@ -2423,7 +2419,7 @@ func loadMxhData(data []byte) (ok bool) {
 	}
 
 	cctx.parseTypePkgScope = oldScope
-	ImportRegistry[pkgPath] = pkg
+	cctx.universe.Registry[pkgPath] = pkg
 	return true
 }
 
@@ -2530,7 +2526,7 @@ func cmdCacheWarm() {
 		if rok {
 			writeFile(cached, data, 0644)
 		}
-		regPkg := ImportRegistry[compilePath]
+		regPkg := cctx.universe.Registry[compilePath]
 		if regPkg != nil {
 			mxhData := generateMxh(regPkg)
 			writeFile(cachedMxh, []byte(mxhData), 0644)
@@ -2645,7 +2641,7 @@ func cmdUpdate(rebuildAll bool) {
 		if rok {
 			writeFile(cached, data, 0644)
 		}
-		regPkg := ImportRegistry[compilePath]
+		regPkg := cctx.universe.Registry[compilePath]
 		if regPkg != nil {
 			cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
 			mxhData := generateMxh(regPkg)
@@ -2877,7 +2873,7 @@ func cmdTest(args []string) {
 				mxutil.WriteStr(2, "  cached " | dp.path | "\n")
 				csrc := concatSources(dp.dir, dp.files)
 				TypeCheckOnly(csrc, compilePath)
-				creg := ImportRegistry[compilePath]
+				creg := cctx.universe.Registry[compilePath]
 				if creg != nil {
 					cdir := mxutil.JoinPath(cacheBase, safeName(dp.path))
 					mkdirAll(cdir, 0755)
@@ -2911,7 +2907,7 @@ func cmdTest(args []string) {
 			if rok {
 				writeFile(cached, data, 0644)
 			}
-			regPkg := ImportRegistry[compilePath]
+			regPkg := cctx.universe.Registry[compilePath]
 			if regPkg != nil {
 				mxhData := generateMxh(regPkg)
 				writeFile(cachedMxh, []byte(mxhData), 0644)
@@ -3725,7 +3721,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			mxutil.WriteStr(2, "  cached " | pkg.path | "\n")
 			csrc := concatSources(pkg.dir, pkg.files)
 			TypeCheckOnly(csrc, compilePath)
-			creg := ImportRegistry[compilePath]
+			creg := cctx.universe.Registry[compilePath]
 			if creg != nil {
 				cdir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
 				mkdirAll(cdir, 0755)
@@ -4142,7 +4138,7 @@ func workerLoadDeps(pkg *pkgInfo, meta *workerMeta, idxByPath map[string]int32, 
 		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 			compilePath = dep.name
 		}
-		if ImportRegistry[compilePath] != nil {
+		if cctx.universe.Registry[compilePath] != nil {
 			continue
 		}
 		// Recursively load this dep's deps first
@@ -4203,7 +4199,7 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 	}
 
 	// Cache .mxh
-	regPkg := ImportRegistry[compilePath]
+	regPkg := cctx.universe.Registry[compilePath]
 	if regPkg != nil {
 		cachedMxh := cachedMxhPath(meta.cacheBase, pkg.path, hash, pkg.version)
 		mxhData := generateMxh(regPkg)

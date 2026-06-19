@@ -3,17 +3,33 @@ package types
 import "git.smesh.lol/moxie/pkg/mxutil"
 
 // UniverseState holds all predeclared type system state.
-// Returned by InitUniverse, owned by the caller.
+// Owned by the caller. No globals - all access through this struct.
 type UniverseState struct {
-	Scope          *Scope
-	Typ            [UntypedNil + 1]*Basic
-	Error          *TypeName
-	Registry       map[string]*TCPackage
-	DirectImports  map[string][]string
+	Scope         *Scope
+	Typ           [UntypedNil + 1]*Basic
+	Error         *TypeName
+	Registry      map[string]*TCPackage
+	DirectImports map[string][]string
+	ByName        map[string]*TCPackage // name -> package cache
+	byNameSeq     int32
 }
 
-// Global accessors - these will be removed as call sites are updated.
-// For now they bridge old code that reads the globals.
+// LookupByName returns the package with the given short name, or nil.
+func (u *UniverseState) LookupByName(name string) (pkg *TCPackage) {
+	if u.ByName == nil || u.byNameSeq != int32(len(u.Registry)) {
+		u.ByName = map[string]*TCPackage{}
+		for _, p := range u.Registry {
+			if p != nil {
+				u.ByName[p.Name] = p
+			}
+		}
+		u.byNameSeq = int32(len(u.Registry))
+	}
+	return u.ByName[name]
+}
+
+// Global bridge - DEPRECATED. Will be removed once all call sites
+// thread UniverseState as a parameter. Do not add new reads.
 var Universe *Scope
 var Typ [UntypedNil + 1]*Basic
 var universeError *TypeName

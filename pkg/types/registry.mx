@@ -1,39 +1,56 @@
 package types
 
-
-// ImportRegistry maps package paths to their type-checked packages for the
-// current compile.
+// Global bridge variables - DEPRECATED. These exist only for the legacy
+// compiler's codegen which reads them directly. Stage4 code accesses
+// these through cctx.universe.Registry / cctx.universe.DirectImports.
 var ImportRegistry map[string]*TCPackage
+var PkgDirectImports map[string][]string
 
-// ImportByName maps short package names to their TCPackage.
-// Rebuilt on demand when ImportRegistry changes.
+// ImportByName / LookupImportByName - DEPRECATED. Use UniverseState.LookupByName.
 var ImportByName map[string]*TCPackage
-var importByNameSeq int32 // incremented on ImportRegistry mutation
 
-// LookupImportByName returns the package with the given short name, or nil.
 func LookupImportByName(name string) (pkg *TCPackage) {
-	if ImportByName == nil || importByNameSeq != int32(len(ImportRegistry)) {
+	if ImportByName == nil {
 		ImportByName = map[string]*TCPackage{}
 		for _, p := range ImportRegistry {
 			if p != nil {
 				ImportByName[p.Name] = p
 			}
 		}
-		importByNameSeq = int32(len(ImportRegistry))
 	}
 	return ImportByName[name]
 }
 
-// PkgDirectImports records each package's direct import paths. Source-compiled
-// packages derive it from their scope's PkgName entries; mxh-loaded packages
-// get it from "import" lines. findIfaceImpls needs it to walk the transitive
-// import closure when building dispatch lists for cached packages.
-var PkgDirectImports map[string][]string
+func EnsureImportRegistry() {}
 
-func EnsureImportRegistry() {
-	// ImportRegistry is initialized in init() in tc_universe.mx.
+// DirectImportPaths on UniverseState - the correct path.
+func (u *UniverseState) DirectImportPaths(pkg *TCPackage) (paths []string) {
+	if pkg == nil || u == nil {
+		return nil
+	}
+	if ps, ok := u.DirectImports[pkg.Path]; ok {
+		return ps
+	}
+	var out []string
+	for _, ip := range pkg.Imports {
+		out = append(out, ip.Path)
+	}
+	if len(out) == 0 {
+		sc := pkg.Scope
+		if sc == nil {
+			return nil
+		}
+		for _, n := range sc.Names() {
+			if pn, ok := sc.Lookup(n).(*PkgName); ok && pn.Imported != nil {
+				out = append(out, pn.Imported.Path)
+			}
+		}
+	}
+	u.DirectImports[pkg.Path] = out
+	return out
 }
 
+// DirectImportPaths - DEPRECATED global version. Use UniverseState method.
 func DirectImportPaths(pkg *TCPackage) (paths []string) {
 	if pkg == nil {
 		return nil
@@ -42,8 +59,6 @@ func DirectImportPaths(pkg *TCPackage) (paths []string) {
 		return ps
 	}
 	var out []string
-	// Prefer the explicit import list: scope scanning misses imports that
-	// lost a local-name collision (imports are file-scoped).
 	for _, ip := range pkg.Imports {
 		out = append(out, ip.Path)
 	}
