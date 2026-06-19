@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"runtime"
+	"unsafe"
 	"git.smesh.lol/moxie/pkg/syntax"
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"git.smesh.lol/moxie/pkg/token"
@@ -659,10 +660,18 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 // The arena can then be freed without dangling the registry.
 func registerCompiledExports(pkg *TCPackage) {
 	EnsureImportRegistry()
-	DirectImportPaths(pkg)
-	// Build a temporary registry package with arena objects just for
-	// serialization. This is the same filtering as before.
-	tmpPkg := NewTCPackage(pkg.Path, pkg.Name)
+	// Copy import paths before arena dies.
+	dimps := DirectImportPaths(pkg)
+	copiedPath := tcCopyStr(pkg.Path)
+	var copiedDimps []string
+	for _, d := range dimps {
+		copiedDimps = append(copiedDimps, tcCopyStr(d))
+	}
+	PkgDirectImports[copiedPath] = copiedDimps
+
+	newPkg := NewTCPackage(copiedPath, tcCopyStr(pkg.Name))
+	visited := map[uintptr]Type{}
+
 	names := pkg.Scope.Names()
 	for _, name := range names {
 		if len(name) == 0 {
@@ -684,14 +693,179 @@ func registerCompiledExports(pkg *TCPackage) {
 				continue
 			}
 		}
-		tmpPkg.Scope.Insert(obj)
+		newObj := copyObject(obj, newPkg, visited)
+		if newObj != nil {
+			newPkg.Scope.Insert(newObj)
+		}
 	}
-	// Serialize to mxh text (reads from arena objects).
-	mxhText := generateMxh(tmpPkg)
-	// Parse mxh text back into heap-allocated objects.
-	// loadMxhData creates fresh heap objects via NewTCPackage/NewTypeName etc.
-	// The arena is not referenced by the resulting ImportRegistry entry.
-	loadMxhData([]byte(mxhText))
+	ImportRegistry[tcCopyStr(pkg.Path)] = newPkg
+}
+
+// tcCopyStr copies a string's backing array into the current arena.
+func tcCopyStr(s string) (r string) {
+	if len(s) == 0 {
+		return ""
+	}
+	b := []byte{:len(s)}
+	copy(b, s)
+	return string(b)
+}
+
+func copyObject(obj Object, pkg *TCPackage, visited map[uintptr]Type) (r Object) {
+	if obj == nil {
+		return nil
+	}
+	switch o := obj.(type) {
+	case *TypeName:
+		tn := NewTypeName(pkg, tcCopyStr(o.Name), nil)
+		tn.Typ = copyType(o.Typ, pkg, visited)
+		return tn
+	case *TCFunc:
+		sig, _ := copyType(o.Typ, pkg, visited).(*Signature)
+		fn := NewTCFunc(pkg, tcCopyStr(o.Name), sig)
+		fn.PtrRecv = o.PtrRecv
+		return fn
+	case *TCVar:
+		v := NewTCVar(pkg, tcCopyStr(o.Name), copyType(o.Typ, pkg, visited))
+		v.Anonymous = o.Anonymous
+		return v
+	case *TCConst:
+		return NewTCConst(pkg, tcCopyStr(o.Name), copyType(o.Typ, pkg, visited), o.Val)
+	}
+	return nil
+}
+
+func typeIdentity(t Type) (p uintptr) {
+	// Extract the data pointer from a Type interface for use as map key.
+	// Type is {typeid, ptr} - we want the ptr for identity comparison.
+	type iface struct { typ uintptr; data uintptr }
+	return (*iface)(unsafe.Pointer(&t)).data
+}
+
+func copyType(t Type, pkg *TCPackage, visited map[uintptr]Type) (r Type) {
+	if t == nil {
+		return nil
+	}
+	if _, ok := t.(*Basic); ok {
+		return t
+	}
+	key := typeIdentity(t)
+	if key == 0 {
+		return nil // typed nil
+	}
+	if cached, ok := visited[key]; ok {
+		return cached
+	}
+	switch tt := t.(type) {
+	case *Named:
+		tn := NewTypeName(pkg, "", nil)
+		if tt.Obj != nil {
+			tn.Pkg = pkg
+			tn.Name = tcCopyStr(tt.Obj.Name)
+		}
+		n := NewNamed(tn, nil)
+		visited[key] = n
+		if tt.Under != nil {
+			n.Under = copyType(tt.Under, pkg, visited)
+		}
+		for _, tp := range tt.TParams {
+			n.TParams = append(n.TParams, tp)
+		}
+		for i := int32(0); i < tt.NumMethods(); i++ {
+			m := tt.Method(i)
+			if m == nil {
+				continue
+			}
+			sig, _ := copyType(m.Typ, pkg, visited).(*Signature)
+			fn := NewTCFunc(pkg, tcCopyStr(m.Name), sig)
+			fn.PtrRecv = m.PtrRecv
+			n.AddMethod(fn)
+		}
+		return n
+	case *Pointer:
+		p := NewPointer(copyType(tt.Base, pkg, visited))
+		visited[key] = p
+		return p
+	case *Slice:
+		s := NewSlice(copyType(tt.Elem, pkg, visited))
+		visited[key] = s
+		return s
+	case *Array:
+		a := NewArray(copyType(tt.Elem, pkg, visited), tt.Len)
+		visited[key] = a
+		return a
+	case *TCStruct:
+		st := NewTCStruct(nil, nil)
+		visited[key] = st
+		for i := int32(0); i < tt.NumFields(); i++ {
+			f := tt.Field(i)
+			nf := NewTCVar(pkg, tcCopyStr(f.Name), copyType(f.Typ, pkg, visited))
+			nf.Anonymous = f.Anonymous
+			st.Fields = append(st.Fields, nf)
+		}
+		if len(tt.Tags) > 0 {
+			for _, tag := range tt.Tags {
+				st.Tags = append(st.Tags, tcCopyStr(tag))
+			}
+		}
+		return st
+	case *Signature:
+		sig := &Signature{Variadic: tt.Variadic}
+		visited[key] = sig
+		if tt.Recv != nil {
+			sig.Recv = NewTCVar(pkg, tcCopyStr(tt.Recv.Name), copyType(tt.Recv.Typ, pkg, visited))
+		}
+		if tt.Params != nil {
+			tup := &Tuple{}
+			for i := int32(0); i < int32(tt.Params.Len()); i++ {
+				p := tt.Params.At(i)
+				tup.Vars = append(tup.Vars, NewTCVar(pkg, tcCopyStr(p.Name), copyType(p.Typ, pkg, visited)))
+			}
+			sig.Params = tup
+		}
+		if tt.Results != nil {
+			tup := &Tuple{}
+			for i := int32(0); i < int32(tt.Results.Len()); i++ {
+				rv := tt.Results.At(i)
+				tup.Vars = append(tup.Vars, NewTCVar(pkg, tcCopyStr(rv.Name), copyType(rv.Typ, pkg, visited)))
+			}
+			sig.Results = tup
+		}
+		return sig
+	case *TCMap:
+		m := NewTCMap(copyType(tt.Key, pkg, visited), copyType(tt.Elem, pkg, visited))
+		visited[key] = m
+		return m
+	case *TCChan:
+		c := NewTCChan(tt.Dir, copyType(tt.Elem, pkg, visited))
+		visited[key] = c
+		return c
+	case *TCInterface:
+		iface := &TCInterface{}
+		visited[key] = iface
+		for _, m := range tt.XMethods {
+			sig, _ := copyType(m.Sig, pkg, visited).(*Signature)
+			iface.XMethods = append(iface.XMethods, &IfaceMethod{Name: tcCopyStr(m.Name), Sig: sig})
+		}
+		for _, e := range tt.Embeds {
+			iface.Embeds = append(iface.Embeds, copyType(e, pkg, visited))
+		}
+		if tt.Completed {
+			iface.Complete()
+		}
+		return iface
+	case *Tuple:
+		tup := &Tuple{}
+		visited[key] = tup
+		for i := int32(0); i < int32(tt.Len()); i++ {
+			v := tt.At(i)
+			tup.Vars = append(tup.Vars, NewTCVar(pkg, tcCopyStr(v.Name), copyType(v.Typ, pkg, visited)))
+		}
+		return tup
+	case *TypeParam:
+		return tt
+	}
+	return t
 }
 
 func tcInferTypeFromExpr(e syntax.Expr, scope *Scope) (t Type) {
