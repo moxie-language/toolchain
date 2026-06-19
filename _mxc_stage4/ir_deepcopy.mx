@@ -136,6 +136,7 @@ func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 
 	// ---- Pass 1: Mark ----
 	// Walk return value roots, call RelocMark for each reachable object.
+	e.relocMarkVisited = map[string]bool{}
 	results := e.curFunc.Signature.Results
 	for i := int32(0); i < int32(results.Len()); i++ {
 		rt := results.At(i).Typ
@@ -176,7 +177,7 @@ func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 
 	// Fixup: rewrite pointer fields in copied objects.
 	// Also rewrite the return value's own pointer/slice fields.
-	e.relocDepth = 0 // reset for fixup pass
+	e.relocFixupVisited = map[string]bool{}
 	cur := val
 	for i := int32(0); i < int32(results.Len()); i++ {
 		rt := results.At(i).Typ
@@ -299,11 +300,12 @@ func (e *irEmitter) emitRelocMarkFields(ptrReg string, t Type, rs string) {
 }
 
 func (e *irEmitter) emitRelocMarkStructFields(ptrReg string, st *TCStruct, rs string) {
-	if e.relocDepth > 20 {
+	key := e.llvmStructType(st)
+	if e.relocMarkVisited[key] {
 		return
 	}
-	e.relocDepth++
-	lt := e.llvmStructType(st)
+	e.relocMarkVisited[key] = true
+	lt := key
 	for i := int32(0); i < st.NumFields(); i++ {
 		ft := st.Field(i).Typ
 		if !typeNeedsCopy(ft) {
@@ -312,8 +314,6 @@ func (e *irEmitter) emitRelocMarkStructFields(ptrReg string, st *TCStruct, rs st
 		e.nextReg++
 		gep := "%m1f" | irItoa(e.nextReg)
 		e.w("  " | gep | " = getelementptr " | lt | ", ptr " | ptrReg | ", i32 0, i32 " | irItoa(i) | "\n")
-		// For nested structs, pass GEP pointer directly (emitRelocMark expects ptr).
-		// For pointer/slice/etc, load the value first.
 		u := SafeUnderlying(ft)
 		if _, isSt := u.(*TCStruct); isSt {
 			e.emitRelocMark(gep, ft, rs)
@@ -325,7 +325,7 @@ func (e *irEmitter) emitRelocMarkStructFields(ptrReg string, st *TCStruct, rs st
 			e.emitRelocMark(fval, ft, rs)
 		}
 	}
-	e.relocDepth--
+	e.relocMarkVisited[key] = false
 }
 
 // --- Pass 3 codegen: Fixup ---
@@ -379,11 +379,12 @@ func (e *irEmitter) emitRelocFixupFields(ptrReg string, t Type, rs string) {
 	if !ok {
 		return
 	}
-	if e.relocDepth > 20 {
+	key := e.llvmStructType(st)
+	if e.relocFixupVisited[key] {
 		return
 	}
-	e.relocDepth++
-	lt := e.llvmStructType(st)
+	e.relocFixupVisited[key] = true
+	lt := key
 	for i := int32(0); i < st.NumFields(); i++ {
 		ft := st.Field(i).Typ
 		if !typeNeedsCopy(ft) {
@@ -413,15 +414,16 @@ func (e *irEmitter) emitRelocFixupFields(ptrReg string, t Type, rs string) {
 			e.emitRelocFixupFields(gep, ft, rs)
 		}
 	}
-	e.relocDepth--
+	e.relocFixupVisited[key] = false
 }
 
 func (e *irEmitter) emitRelocFixupStruct(reg string, st *TCStruct, rs string) (newReg string) {
-	if e.relocDepth > 20 {
+	key := e.llvmStructType(st)
+	if e.relocFixupVisited[key] {
 		return reg
 	}
-	e.relocDepth++
-	lt := e.llvmStructType(st)
+	e.relocFixupVisited[key] = true
+	lt := key
 	e.nextReg++
 	tmp := "%p3st" | irItoa(e.nextReg)
 	e.w("  " | tmp | " = alloca " | lt | "\n")
@@ -459,7 +461,7 @@ func (e *irEmitter) emitRelocFixupStruct(reg string, st *TCStruct, rs string) (n
 	e.nextReg++
 	result := "%p3st" | irItoa(e.nextReg)
 	e.w("  " | result | " = load " | lt | ", ptr " | tmp | "\n")
-	e.relocDepth--
+	e.relocFixupVisited[key] = false
 	return result
 }
 
