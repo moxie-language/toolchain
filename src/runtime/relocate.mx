@@ -1,0 +1,145 @@
+// Mark-compact arena relocator. Three passes:
+//
+//   Pass 1 - Mark: walk from roots, bump-allocate one RelocEntry per
+//            reachable object in fn_arena.
+//   Pass 2 - Forward: walk entries, allocate destinations in caller's arena.
+//   Pass 3 - Compact + Fixup: copy objects, rewrite pointer fields.
+//
+// RelocState is 4 words on the stack. Entries are bump-allocated from
+// fn_arena - contiguous because no other allocations happen during the
+// mark pass.
+
+package runtime
+
+import "unsafe"
+
+// RelocEntry: one forwarding record. Linked list (arena chaining breaks contiguity).
+type RelocEntry struct {
+	old  uintptr
+	new  uintptr
+	size uintptr
+	next *RelocEntry
+}
+
+// RelocState: header on the stack.
+type RelocState struct {
+	arena *Arena       // fn_arena - source arena with chain
+	mark  uintptr      // arena offset at function entry (head region)
+	first *RelocEntry  // linked list head
+	count int32        // number of entries
+}
+
+// RelocInit captures the source arena and entry point.
+func RelocInit(rs *RelocState, fnArena *Arena, mark uintptr) {
+	rs.arena = fnArena
+	rs.mark = mark
+	rs.first = nil
+	rs.count = 0
+}
+
+// relocIsLocal checks if p was allocated by this function in any arena region.
+func relocIsLocal(rs *RelocState, p uintptr) (ok bool) {
+	a := rs.arena
+	// Head region: above mark.
+	if p >= a.base+rs.mark && p < a.base+a.off {
+		return true
+	}
+	// Chained regions: entirely function-local.
+	prev := a.prev
+	for prev != nil {
+		if p >= prev.base && p < prev.base+prev.off {
+			return true
+		}
+		prev = prev.prev
+	}
+	return false
+}
+
+// --- Pass 1: Mark ---
+
+// RelocMark records a reachable object. Allocates entry from fn_arena as linked list.
+func RelocMark(rs *RelocState, ptr unsafe.Pointer, size uintptr) (isNew bool) {
+	if ptr == nil {
+		return false
+	}
+	p := uintptr(ptr)
+	if !relocIsLocal(rs, p) {
+		return false
+	}
+	// Already marked?
+	e := rs.first
+	for e != nil {
+		if e.old == p {
+			return false
+		}
+		e = e.next
+	}
+	// Allocate entry from fn_arena. Linked list handles non-contiguous regions.
+	ne := (*RelocEntry)(ArenaAlloc(rs.arena, unsafe.Sizeof(RelocEntry{})))
+	ne.old = p
+	ne.new = 0
+	ne.size = size
+	ne.next = rs.first
+	rs.first = ne
+	rs.count++
+	return true
+}
+
+// --- Pass 2: Forward ---
+
+// RelocForward assigns destinations in the current (caller's) arena.
+func RelocForward(rs *RelocState) {
+	e := rs.first
+	for e != nil {
+		e.new = uintptr(alloc(e.size, nil))
+		e = e.next
+	}
+}
+
+// --- Pass 3: Compact + Fixup ---
+
+// RelocCompact copies all marked objects to their destinations.
+func RelocCompact(rs *RelocState) {
+	e := rs.first
+	for e != nil {
+		memcpy(unsafe.Pointer(e.new), unsafe.Pointer(e.old), e.size)
+		e = e.next
+	}
+}
+
+// RelocLookup translates a pointer through the forwarding table.
+func RelocLookup(rs *RelocState, old unsafe.Pointer) (new unsafe.Pointer) {
+	if old == nil {
+		return nil
+	}
+	p := uintptr(old)
+	if !relocIsLocal(rs, p) {
+		return old
+	}
+	e := rs.first
+	for e != nil {
+		if p >= e.old && p < e.old+e.size {
+			return unsafe.Pointer(e.new + (p - e.old))
+		}
+		e = e.next
+	}
+	return old
+}
+
+// RelocFixupPtr rewrites a pointer field at fieldAddr.
+func RelocFixupPtr(rs *RelocState, fieldAddr unsafe.Pointer) {
+	old := *(*unsafe.Pointer)(fieldAddr)
+	if old == nil {
+		return
+	}
+	*(*unsafe.Pointer)(fieldAddr) = RelocLookup(rs, old)
+}
+
+// RelocFixupSlice rewrites a slice/string data pointer at sliceAddr.
+func RelocFixupSlice(rs *RelocState, sliceAddr unsafe.Pointer) {
+	old := *(*unsafe.Pointer)(sliceAddr)
+	if old == nil {
+		return
+	}
+	*(*unsafe.Pointer)(sliceAddr) = RelocLookup(rs, old)
+}
