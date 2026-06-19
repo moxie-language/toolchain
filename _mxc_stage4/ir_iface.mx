@@ -417,6 +417,13 @@ func (e *irEmitter) findEmbedMethod(t Type, methodName string, depth int32) (cha
 // findExtEmbedMethod searches embedded fields of a cross-package Named type
 // for a method with the given name. Returns the field index chain, the
 // external symbol for the method, the method signature, and the embed type.
+func namedObjName(n *Named) (s string) {
+	if n != nil && n.Obj != nil {
+		return n.Obj.Name
+	}
+	return ""
+}
+
 func findExtEmbedMethod(named *Named, pkgPath string, outerName string, methodName string, depth int32) (chain []int32, sym string, sig *Signature, embedT Type) {
 	if depth > 5 {
 		return nil, "", nil, nil
@@ -442,8 +449,8 @@ func findExtEmbedMethod(named *Named, pkgPath string, outerName string, methodNa
 		if embedNamed == nil || embedNamed.Obj == nil {
 			continue
 		}
-		embedName := embedNamed.Obj.Name
 		embedPkg := pkgPath
+		embedName := namedObjName(embedNamed)
 		if embedNamed.Obj.Pkg != nil {
 			embedPkg = embedNamed.Obj.Pkg.Path
 		}
@@ -517,7 +524,11 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 	if useSret {
 		params = "ptr, "
 	}
-	params = params | recvLLVM
+	var psegs []string
+	if params != "" {
+		psegs = append(psegs, params)
+	}
+	psegs = append(psegs, recvLLVM)
 	var sig *Signature
 	if impl.fn != nil && impl.fn.Signature != nil {
 		sig = impl.fn.Signature
@@ -530,7 +541,7 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 			if pt == "void" {
 				pt = "ptr"
 			}
-			params = params | ", " | pt
+			psegs = append(psegs, pt)
 		}
 	} else {
 		for _, arg := range inv.Args {
@@ -538,10 +549,11 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 			if argT == "void" {
 				argT = "ptr"
 			}
-			params = params | ", " | argT
+			psegs = append(psegs, argT)
 		}
 	}
-	params = params | ", ptr"
+	psegs = append(psegs, "ptr")
+	params = joinStrs(commaSep(psegs))
 	// extern_weak: dispatch lists enumerate impls from the whole link set;
 	// a link reusing this module's cached .bc without an impl's package
 	// resolves the ref to null instead of failing, and the guarded call arm
@@ -554,7 +566,8 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 }
 
 func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv string, inv *SSAInvoke, isVoid bool, impl ifaceImpl) {
-	callArgs := recvLLVM | " " | recv
+	var casegs []string
+	casegs = append(casegs, recvLLVM | " " | recv)
 	var sig *Signature
 	if impl.fn != nil {
 		sig = impl.fn.Signature
@@ -585,12 +598,10 @@ func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv stri
 				argVal = loaded
 			}
 		}
-		// Aggregates pass as-is: method definitions keep slice/struct params
-		// as single aggregate values, and flattening them here splits the
-		// SysV ABI classes (registers vs stack) - garbage in the callee.
-		callArgs = callArgs | ", " | argT | " " | argVal
+		casegs = append(casegs, argT | " " | argVal)
 	}
-	callArgs = callArgs | ", ptr null"
+	casegs = append(casegs, "ptr null")
+	callArgs := joinStrs(commaSep(casegs))
 	e.w("  ")
 	if !isVoid {
 		e.w(reg) ; e.w(" = ")
@@ -1053,13 +1064,25 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 	reg := e.regName(t)
 	val := e.operand(t.X)
+	if t.AssertedType == nil {
+		e.w("  ; skipped nil type assertion\n")
+		return
+	}
 	assertedType := e.llvmType(t.AssertedType)
 	voidAssert := assertedType == "void"
 	if voidAssert {
 		assertedType = "ptr"
 	}
 	// Check if input is already a concrete ptr (not an interface {ptr, ptr})
-	inputType := e.llvmType(t.X.SSAType())
+	var xType Type
+	if t.X != nil {
+		xType = t.X.SSAType()
+	}
+	if xType == nil {
+		e.w("  ; skipped nil X type\n")
+		return
+	}
+	inputType := e.llvmType(xType)
 	if at, ok := e.allocTypes[t.X]; ok {
 		inputType = at
 	}

@@ -1,4 +1,4 @@
-// Bump allocator with arena support.
+// Bump allocator with chainable arena support.
 // No free lists. No individual free. Arena bulk-frees at munmap.
 
 package runtime
@@ -64,13 +64,14 @@ func initHeap() {
 // rootArena is the process-lifetime arena created at init.
 var rootArena *Arena
 
-
-// Arena is a bump-pointer allocator backed by mmap. Address space is
-// returned to the kernel on ArenaFree via munmap - no heap fragmentation.
+// Arena is a chainable bump-pointer allocator backed by mmap.
+// When the current region fills, a new region is chained via prev.
+// ArenaFree walks the chain and munmaps all regions.
 type Arena struct {
 	base uintptr
 	off  uintptr
 	cap  uintptr
+	prev *Arena // previous region in chain (nil for first)
 }
 
 // CurrentArena returns the active arena (for save/restore on nesting).
@@ -78,15 +79,12 @@ func CurrentArena() (a *Arena) {
 	return currentArena
 }
 
-// SetCurrentArena sets the global arena for alloc(). When set, all
-// allocations go through the arena's bump allocator. Set nil to
-// revert to the startup bump allocator.
+// SetCurrentArena sets the global arena for alloc().
 func SetCurrentArena(a *Arena) {
 	currentArena = a
 }
 
 // ArenaMark returns the current offset of the active arena.
-// Used by function prologues to save the allocation point.
 func ArenaMark() (mark uintptr) {
 	if currentArena == nil {
 		return 0
@@ -95,8 +93,6 @@ func ArenaMark() (mark uintptr) {
 }
 
 // ArenaRestore resets the active arena to a previously saved offset.
-// All allocations after the mark are reclaimed. Used by function
-// epilogues after deep-copying return values to the caller's region.
 func ArenaRestore(mark uintptr) {
 	if currentArena == nil {
 		return
@@ -104,45 +100,52 @@ func ArenaRestore(mark uintptr) {
 	currentArena.off = mark
 }
 
-// ArenaNew creates an arena with the given capacity via mmap.
+const arenaDefaultRegion = uintptr(64) * 1024 // 64KB per chain link
+
+// ArenaNew creates an arena with the given initial capacity via mmap.
 func ArenaNew(capacity uintptr) (a *Arena) {
-	// Round up to page boundary.
 	capacity = (capacity + 4095) &^ 4095
 	addr := mmap(nil, capacity, flag_PROT_READ|flag_PROT_WRITE,
 		flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
 	if addr == unsafe.Pointer(^uintptr(0)) {
 		runtimePanic("arena: mmap failed")
 	}
-	// Arena header from startup bump allocator (tiny, 24 bytes).
 	a = (*Arena)(heapAlloc(unsafe.Sizeof(Arena{})))
 	a.base = uintptr(addr)
 	a.off = 0
 	a.cap = capacity
+	a.prev = nil
 	return a
 }
 
 // ArenaAlloc allocates size bytes from the arena, 16-byte aligned, zeroed.
+// If the current region is full, chains a new region.
 func ArenaAlloc(a *Arena, size uintptr) unsafe.Pointer {
 	if a == nil {
 		runtimePanic("ArenaAlloc: nil arena")
 	}
 	size = align(size)
 	if a.off+size > a.cap {
-		printstring("OOM off=")
-		printuintptr(a.off)
-		printstring(" sz=")
-		printuintptr(size)
-		printstring(" cap=")
-		printuintptr(a.cap)
-		printstring("\n")
-		runtimePanic("arena overflow")
-	}
-	if size > 1024*1024 {
-		printstring("HUGE alloc sz=")
-		printuintptr(size)
-		printstring(" off=")
-		printuintptr(a.off)
-		printstring("\n")
+		// Chain a new region. New region becomes the head.
+		newCap := arenaDefaultRegion
+		if size > newCap {
+			newCap = (size + 4095) &^ 4095
+		}
+		addr := mmap(nil, newCap, flag_PROT_READ|flag_PROT_WRITE,
+			flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
+		if addr == unsafe.Pointer(^uintptr(0)) {
+			runtimePanic("arena: chain mmap failed")
+		}
+		// Save current region as prev, repoint arena to new region.
+		old := (*Arena)(heapAlloc(unsafe.Sizeof(Arena{})))
+		old.base = a.base
+		old.off = a.off
+		old.cap = a.cap
+		old.prev = a.prev
+		a.base = uintptr(addr)
+		a.off = 0
+		a.cap = newCap
+		a.prev = old
 	}
 	ptr := unsafe.Pointer(a.base + a.off)
 	a.off += size
@@ -159,53 +162,96 @@ func heapAlloc(size uintptr) unsafe.Pointer {
 	return p
 }
 
-// ArenaFree unmaps the entire arena. All pointers into it become invalid.
-// The arena header (24 bytes) leaks into the startup bump region - acceptable.
+// ArenaFree unmaps all regions in the chain.
 func ArenaFree(a *Arena) {
 	if a == nil {
 		return
 	}
+	// Free chained previous regions.
+	p := a.prev
+	for p != nil {
+		next := p.prev
+		munmap(unsafe.Pointer(p.base), p.cap)
+		p = next
+	}
+	// Free the head region.
 	munmap(unsafe.Pointer(a.base), a.cap)
 }
 
-// ArenaReset resets the arena for reuse without unmapping.
+// ArenaReset resets the arena for reuse. Frees chained regions,
+// keeps only the head region.
 func ArenaReset(a *Arena) {
 	if a == nil {
 		return
+	}
+	// If chained, free all prev regions and keep just the current base.
+	// But the current head might be a chained region. We need to find the
+	// original (oldest) region. Walk to the end of the chain.
+	if a.prev != nil {
+		// The original region is at the end of the chain.
+		// Free all regions including the current head, then restore original.
+		var original *Arena
+		p := a.prev
+		for p.prev != nil {
+			next := p.prev
+			munmap(unsafe.Pointer(p.base), p.cap)
+			p = next
+		}
+		original = p
+		// Free current head.
+		munmap(unsafe.Pointer(a.base), a.cap)
+		// Restore original as head.
+		a.base = original.base
+		a.cap = original.cap
+		a.prev = nil
 	}
 	a.off = 0
 }
 
 // arenaCopySliceIfLocal copies a slice's backing array to the current arena
-// position only if its data pointer is above mark (i.e. was allocated by this
-// function). Data below the mark belongs to the caller and passes through.
+// position only if its data pointer is in the source arena region.
 func arenaCopySliceIfLocal(s string, mark uintptr) (r string) {
 	if len(s) == 0 || currentArena == nil {
 		return s
 	}
 	p := uintptr(unsafe.Pointer(unsafe.SliceData([]byte(s))))
-	base := currentArena.base
-	if p < base+mark || p >= base+currentArena.cap {
-		return s // not in this function's region
+	if !arenaContains(currentArena, p, mark) {
+		return s
 	}
 	buf := []byte{:len(s)}
 	copy(buf, s)
 	return string(buf)
 }
 
-// arenaCopyPtrIfLocal copies size bytes at ptr only if ptr is above mark.
+// arenaCopyPtrIfLocal copies size bytes at ptr only if in source region.
 func arenaCopyPtrIfLocal(ptr unsafe.Pointer, mark uintptr, size uintptr) unsafe.Pointer {
 	if ptr == nil || currentArena == nil {
 		return ptr
 	}
 	p := uintptr(ptr)
-	base := currentArena.base
-	if p < base+mark || p >= base+currentArena.cap {
+	if !arenaContains(currentArena, p, mark) {
 		return ptr
 	}
 	dst := alloc(size, nil)
 	memcpy(dst, ptr, size)
 	return dst
+}
+
+// arenaContains checks if ptr is in any region of the arena chain above mark.
+func arenaContains(a *Arena, ptr uintptr, mark uintptr) (ok bool) {
+	// Check head region.
+	if ptr >= a.base+mark && ptr < a.base+a.cap {
+		return true
+	}
+	// Check chained regions (all of these are fully above mark).
+	p := a.prev
+	for p != nil {
+		if ptr >= p.base && ptr < p.base+p.cap {
+			return true
+		}
+		p = p.prev
+	}
+	return false
 }
 
 func setHeapEnd(newHeapEnd uintptr) {

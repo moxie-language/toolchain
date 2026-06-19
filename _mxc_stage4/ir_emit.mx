@@ -14,7 +14,8 @@ type emitKV struct{ k, v string }
 type emitKVI struct{ k string; v int32 }
 
 type irEmitter struct {
-	buf        []byte
+	segs       []string // accumulated segments; joined in flush()
+	buf        []byte   // assembled output (only during flush/return)
 	outFile    *os.File // streaming output; nil = accumulate in buf
 	operandBuf []SSAValue // scratch buffer for instrOperands
 	triple     string
@@ -62,10 +63,12 @@ type irEmitter struct {
 	pendGlobalDeclTypes []emitKV
 	pendWasmAttrs     [][3]string
 	pendDeepCopyEntries []deepCopyEntry
+	definedSyms   []string // symbols that got `define` in this package
 	// Arena deep-copy state (compileArena lifetime)
 	arenaActive   bool
 	deepCopyFns   map[string]string
 	deepCopyQueue []deepCopyEntry
+	relocDepth    int32
 }
 
 type phiTrunc struct {
@@ -80,15 +83,8 @@ func newIREmitter(pkg *SSAPackage, triple string, srcLen int32) (p *irEmitter) {
 	if len(triple) >= 4 && triple[:4] == "wasm" {
 		ptrBits = 32
 	}
-	// Pre-allocate IR buffer: IR is typically 15-20x source size.
-	// One large alloc avoids repeated sliceGrow doublings that
-	// fragment the heap (freed old buffers can't serve larger requests).
-	bufCap := int32(srcLen) * 20
-	if bufCap < 4096 {
-		bufCap = 4096
-	}
 	return &irEmitter{
-		buf:      []byte{:0:bufCap},
+		segs:     []string{:0:1024},
 		triple:   triple,
 		ptrBits:  ptrBits,
 		pkg:      pkg,
@@ -108,85 +104,186 @@ func newIREmitter(pkg *SSAPackage, triple string, srcLen int32) (p *irEmitter) {
 }
 
 func (e *irEmitter) w(s string) {
-	e.buf |= s
+	e.segs = append(e.segs, s)
 }
 
-// flush writes accumulated buf to the output file and resets.
-// Called after each function's IR is complete (post alloca-hoist).
+// assembleSegs joins all segments into e.buf in one allocation.
+// After this, e.segs is reset and e.buf holds the assembled output.
+func (e *irEmitter) assembleSegs() {
+	n := int32(0)
+	for _, s := range e.segs {
+		n += len(s)
+	}
+	e.buf = []byte{:n}
+	off := int32(0)
+	for _, s := range e.segs {
+		for j := int32(0); j < len(s); j++ {
+			e.buf[off+j] = s[j]
+		}
+		off += len(s)
+	}
+	e.segs = e.segs[:0]
+}
+
+// flush assembles segments, writes to output file, resets.
 func (e *irEmitter) flush() {
+	e.assembleSegs()
 	if e.outFile != nil && len(e.buf) > 0 {
 		e.outFile.Write(e.buf)
-		e.buf = e.buf[:0]
 	}
+	e.buf = nil
 }
 
-// hoistAllocaText moves every alloca line emitted since start to the top of
-// the _entry block. LLVM allocas outside the entry block grow the stack on
-// every execution with no implicit stackrestore; in long-running loops this
-// overflows the stack (observed: 256MB of stack drift in the parallel build
-// dispatch loop). All emitted allocas are static-size, so hoisting to entry
-// is always legal: entry dominates every block and names are unique.
-func (e *irEmitter) hoistAllocaText(start int32) {
-	body := e.buf[start:]
-	marker := "_entry:\n"
-	mlen := int32(len(marker))
-	insert := int32(-1)
-	for i := int32(0); i+mlen <= int32(len(body)); i++ {
-		if (i == 0 || body[i-1] == '\n') && body[i:i+mlen] == marker {
-			insert = i + mlen
-			break
-		}
-	}
-	if insert < 0 {
+// flushDedup assembles segments, deduplicates declare lines, writes to file.
+func (e *irEmitter) flushDedup() {
+	e.assembleSegs()
+	if e.outFile == nil || len(e.buf) == 0 {
+		e.buf = nil
 		return
 	}
-	seg := body[insert:]
-	n := int32(len(seg))
-	var allocas []byte
-	var rest []byte
-	moved := false
+	// Scan for declare lines and remove duplicates.
+	var seen []string
+	out := []byte{:0:len(e.buf)}
 	ls := int32(0)
+	n := int32(len(e.buf))
 	for ls < n {
 		le := ls
-		for le < n && seg[le] != '\n' {
+		for le < n && e.buf[le] != '\n' {
 			le++
 		}
 		if le < n {
 			le++
 		}
-		line := seg[ls:le]
+		line := string(e.buf[ls:le])
+		isDeclare := len(line) > 8 && line[0] == 'd' && line[1] == 'e' && line[2] == 'c' && line[3] == 'l' && line[4] == 'a' && line[5] == 'r' && line[6] == 'e' && line[7] == ' '
+		if isDeclare {
+			dup := false
+			for si := int32(0); si < len(seen); si++ {
+				s := seen[si]
+				if len(s) == len(line) {
+					match := true
+					for bi := int32(0); bi < len(s); bi++ {
+						if s[bi] != line[bi] {
+							match = false
+							break
+						}
+					}
+					if match {
+						dup = true
+						break
+					}
+				}
+			}
+			if dup {
+				ls = le
+				continue
+			}
+			seen = append(seen, line)
+		}
+		for j := ls; j < le; j++ {
+			out = append(out, e.buf[j])
+		}
+		ls = le
+	}
+	e.outFile.Write(out)
+	e.buf = nil
+}
+
+// hoistAllocaText assembles segments from start onward, moves alloca lines
+// to _entry top, stores result as single segment. Segments before start
+// are left intact (parent function already processed).
+func (e *irEmitter) hoistAllocaText(start int32) {
+	// Assemble only segments from start to end.
+	n := int32(0)
+	for i := start; i < int32(len(e.segs)); i++ {
+		n += len(e.segs[i])
+	}
+	body := []byte{:n}
+	off := int32(0)
+	for i := start; i < int32(len(e.segs)); i++ {
+		s := e.segs[i]
+		for j := int32(0); j < len(s); j++ {
+			body[off+j] = s[j]
+		}
+		off += len(s)
+	}
+	// Truncate segs to keep only prefix (segments before start).
+	e.segs = e.segs[:start]
+	marker := "_entry:\n"
+	mlen := int32(len(marker))
+	insert := int32(-1)
+	for i := int32(0); i+mlen <= int32(len(body)); i++ {
+		match := true
+		for k := int32(0); k < mlen; k++ {
+			if body[i+k] != marker[k] {
+				match = false
+				break
+			}
+		}
+		if match && (i == 0 || body[i-1] == '\n') {
+			insert = i + mlen
+			break
+		}
+	}
+	if insert < 0 {
+		// No _entry block found; put assembled buf back as one segment.
+		e.segs = append(e.segs, string(body))
+		return
+	}
+	// Scan lines after insert point, partition into allocas and rest.
+	blen := int32(len(body))
+	var allocaSegs []string
+	var restSegs []string
+	moved := false
+	ls := insert
+	for ls < blen {
+		le := ls
+		for le < blen && body[le] != '\n' {
+			le++
+		}
+		if le < blen {
+			le++
+		}
+		lineLen := le - ls
 		isAlloca := false
-		if int32(len(line)) > 13 && line[0] == ' ' && line[1] == ' ' && line[2] == '%' {
-			for k := int32(3); k+10 <= int32(len(line)); k++ {
-				if line[k:k+10] == " = alloca " {
+		if lineLen > 13 && body[ls] == ' ' && body[ls+1] == ' ' && body[ls+2] == '%' {
+			for k := ls + 3; k+10 <= le; k++ {
+				if body[k] == ' ' && body[k+1] == '=' && body[k+2] == ' ' &&
+					body[k+3] == 'a' && body[k+4] == 'l' && body[k+5] == 'l' &&
+					body[k+6] == 'o' && body[k+7] == 'c' && body[k+8] == 'a' &&
+					body[k+9] == ' ' {
 					isAlloca = true
 					break
 				}
 			}
 		}
-		if isAlloca && !moved {
-			// Lines before the first alloca are copied lazily so functions
-			// without movable allocas cost only the line scan.
-			allocas = []byte{:0:1024}
-			rest = []byte{:0:n}
-			rest = rest | seg[:ls]
+		if isAlloca {
 			moved = true
 		}
-		if moved {
-			if isAlloca {
-				allocas = allocas | line
-			} else {
-				rest = rest | line
-			}
+		// Extract line as string (points into body, no copy needed
+		// since body lives until we're done building output).
+		line := string(body[ls:le])
+		if isAlloca {
+			allocaSegs = append(allocaSegs, line)
+		} else {
+			restSegs = append(restSegs, line)
 		}
 		ls = le
 	}
 	if !moved {
+		e.segs = append(e.segs, string(body))
 		return
 	}
-	e.buf = e.buf[:start+insert]
-	e.buf = e.buf | allocas
-	e.buf = e.buf | rest
+	// Rebuild: prefix + allocas + rest
+	var out []string
+	out = append(out, string(body[:insert]))
+	for _, s := range allocaSegs {
+		out = append(out, s)
+	}
+	for _, s := range restSegs {
+		out = append(out, s)
+	}
+	e.segs = append(e.segs, joinStrs(out))
 }
 
 func (e *irEmitter) regName(v SSAValue) (s string) {
@@ -283,28 +380,28 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 	if useSret {
 		params = "ptr"
 	}
+	var psegs []string
+	if params != "" {
+		psegs = append(psegs, params)
+	}
 	hasRecv := fn.Signature != nil && fn.Signature.Recv != nil
 	if hasRecv {
-		if params != "" { params = params | ", " }
-		params = params | "ptr"
+		psegs = append(psegs, "ptr")
 	}
 	if fn.Signature != nil && fn.Signature.Params != nil {
 		for i := 0; i < fn.Signature.Params.Len(); i++ {
-			if params != "" {
-				params = params | ", "
-			}
 			pt := e.llvmType(fn.Signature.Params.At(i).Typ)
 			if pt == "" || pt == "void" {
 				mxutil.WriteStr(2, "BUG-DECL: empty param type in " | sym | " param " | irItoa(int32(i)) | "\n")
 				pt = "ptr"
 			}
-			params = params | pt
+			psegs = append(psegs, pt)
 		}
 	}
 	if !skipCtx {
-		if params != "" { params = params | ", " }
-		params = params | "ptr"
+		psegs = append(psegs, "ptr")
 	}
+	params = joinStrs(commaSep(psegs))
 	if useSret {
 		e.pendExtDecls = append(e.pendExtDecls, emitKV{sym, "void " | sym | "(" | params | ")"})
 	} else {
@@ -534,7 +631,18 @@ func (e *irEmitter) emit() (s string) {
 	// Deep copy state lives in compileArena, survives per-function resets.
 	e.deepCopyFns = map[string]string{}
 	e.deepCopyQueue = nil
-	fnArena := runtime.ArenaNew(512 * 1024 * 1024)
+	// Pre-collect symbols that will get `define` (functions with bodies).
+	// Done in compile arena so the slice survives fn arena resets.
+	for _, member := range e.pkgMembers() {
+		if f, ok := member.(*SSAFunction); ok && f.Blocks != nil {
+			defSym := e.funcSymbol(f)
+			if len(defSym) > 0 && defSym[0] == '@' {
+				defSym = defSym[1:]
+			}
+			e.definedSyms = append(e.definedSyms, defSym)
+		}
+	}
+	fnArena := runtime.ArenaNew(64 * 1024)
 	for _, member := range e.pkgMembers() {
 		if m, ok := member.(*SSAFunction); ok {
 			checkUseAfterFree(m)
@@ -544,10 +652,11 @@ func (e *irEmitter) emit() (s string) {
 			e.flush()
 			runtime.SetCurrentArena(compileArena)
 			e.mergeAccumulators()
+			e.segs = nil
 			e.buf = nil
 			e.operandBuf = nil
 			e.valName = nil
-			e.nameUsed = nil
+			e.nameUsed = map[string]bool{}
 			e.allocTypes = nil
 			e.regTypes = nil
 			e.blockExitLabel = nil
@@ -568,8 +677,8 @@ func (e *irEmitter) emit() (s string) {
 		}
 	}
 	runtime.ArenaFree(fnArena)
-	// Fresh buf for trailing declarations (libMain, string constants, extern decls).
-	e.buf = []byte{:0:4096}
+	// Fresh segs for trailing declarations.
+	e.segs = []string{:0:256}
 	// Emit per-type deep copy helper functions for arena return copy.
 	e.emitDeepCopyFunctions()
 	// Merge any declares/globals generated by deep copy functions.
@@ -601,7 +710,7 @@ func (e *irEmitter) emit() (s string) {
 			if decl == "" {
 				continue
 			}
-			if e.isPkgFunc2(k) {
+			if e.isPkgFuncDefined(k) {
 				continue
 			}
 			e.w("declare ")
@@ -651,8 +760,14 @@ func (e *irEmitter) emit() (s string) {
 		e.w("attributes #" | wa[0] | " = { \"wasm-import-module\"=\"" | wa[1] | "\" \"wasm-import-name\"=\"" | wa[2] | "\" }\n")
 	}
 
-	e.flush()
-	return string(e.buf)
+	if e.outFile != nil {
+		e.flushDedup()
+		return ""
+	}
+	e.assembleSegs()
+	result := string(e.buf)
+	e.buf = nil
+	return result
 }
 
 func (e *irEmitter) releaseAfterEmit() {}
@@ -774,21 +889,14 @@ func (e *irEmitter) emitEmbedGlobal(g *SSAGlobal, name string, ei *embedInfo) {
 		constName = name[:len(name)-1] | ".data\""
 	}
 	e.w(constName | " = private constant [" | irItoa(int32(len(data))) | " x i8] c\"")
+	hexDigit := "0123456789ABCDEF"
 	for i := 0; i < len(data); i++ {
 		b := data[i]
-		e.w("\\")
-		hi := b >> 4
-		lo := b & 0x0f
-		if hi < 10 {
-			e.buf = append(e.buf, '0'+hi)
-		} else {
-			e.buf = append(e.buf, 'A'+hi-10)
-		}
-		if lo < 10 {
-			e.buf = append(e.buf, '0'+lo)
-		} else {
-			e.buf = append(e.buf, 'A'+lo-10)
-		}
+		hex := []byte{:3}
+		hex[0] = '\\'
+		hex[1] = hexDigit[b>>4]
+		hex[2] = hexDigit[b&0x0f]
+		e.w(string(hex))
 	}
 	e.w("\"\n")
 	ipt := e.intptrType()
@@ -829,6 +937,26 @@ func (e *irEmitter) globalName(g *SSAGlobal) (s string) {
 		pkg = g.pkg.Pkg.Path
 	}
 	return irGlobalSymbol(pkg, g.name)
+}
+
+func (e *irEmitter) isPkgFuncDefined(name string) (ok bool) {
+	// Check if we emitted a define for this symbol during this package's emit.
+	for di := int32(0); di < len(e.definedSyms); di++ {
+		ds := e.definedSyms[di]
+		if len(ds) == len(name) {
+			match := true
+			for bi := int32(0); bi < len(ds); bi++ {
+				if ds[bi] != name[bi] {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (e *irEmitter) isPkgFunc2(name string) (ok bool) {
@@ -1029,7 +1157,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		e.w("ptr %_ctx")
 	}
 	e.w(") {\n")
-	fnBodyStart := int32(len(e.buf))
+	fnBodyStart := int32(len(e.segs)) // segment index where this function's body starts
 
 	// Pre-scan: set allocTypes, detect cross-block alloca references
 	e.allocBlock = map[SSAValue]int32{}
@@ -1187,74 +1315,60 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 
 func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 	sym := e.funcSymbol(f)
-	if _, ok := e.extDecls[sym]; ok {
+	bareKey := sym
+	if len(bareKey) > 0 && bareKey[0] == '@' {
+		bareKey = bareKey[1:]
+	}
+	if _, ok := e.extDecls[bareKey]; ok {
 		return
 	}
 	for _, p := range e.pendExtDecls {
-		if p.k == sym { return }
+		if p.k == bareKey { return }
 	}
 	retType := e.funcRetType(f)
 	useSret := needsSret(retType)
-	e.w("\ndeclare ")
+	decl := ""
 	if useSret {
-		e.w("void ")
+		decl = "void "
 	} else {
-		e.w(retType) ; e.w(" ")
+		decl = retType | " "
 	}
-	e.w(sym)
-	e.w("(")
+	decl = decl | sym | "("
 	n := 0
 	if useSret {
-		e.w("ptr")
+		decl = decl | "ptr"
 		n++
 	}
 	isIntrinsic := mxutil.HasPrefix(sym, "@llvm.") || mxutil.HasPrefix(sym, "@\"llvm.")
 	hasRecv := f.Signature != nil && f.Signature.Recv != nil
 	if hasRecv {
-		if n > 0 { e.w(", ") }
-		e.w("ptr")
+		if n > 0 { decl = decl | ", " }
+		decl = decl | "ptr"
 		n++
 	}
 	if f.Signature != nil && f.Signature.Params != nil {
 		for i := 0; i < f.Signature.Params.Len(); i++ {
 			if n > 0 {
-				e.w(", ")
+				decl = decl | ", "
 			}
 			pt := e.llvmType(f.Signature.Params.At(i).Typ)
 			if pt == "" || pt == "void" {
-				mxutil.WriteStr(2, "BUG: empty param type in decl " | sym | " param " | irItoa(int32(i)) | "\n")
 				pt = "ptr"
 			}
-			e.w(pt)
+			decl = decl | pt
 			n++
 		}
 	}
-	// Check for wasm import BEFORE deciding on context ptr
-	isWasmImport := false
-	if len(cctx.wasmImportMap) > 0 {
-		wsym := sym
-		if len(wsym) > 0 && wsym[0] == '@' { wsym = wsym[1:] }
-		if len(wsym) >= 2 && wsym[0] == '"' && wsym[len(wsym)-1] == '"' { wsym = wsym[1 : len(wsym)-1] }
-		_, isWasmImport = cctx.wasmImportMap[wsym]
+	if !isIntrinsic {
+		if n > 0 { decl = decl | ", " }
+		decl = decl | "ptr"
 	}
-	if !isIntrinsic && !isWasmImport {
-		if n > 0 { e.w(", ") }
-		e.w("ptr")
+	decl = decl | ")"
+	bareKey := sym
+	if len(bareKey) > 0 && bareKey[0] == '@' {
+		bareKey = bareKey[1:]
 	}
-	e.w(")")
-	// Add wasm import attributes
-	if isWasmImport {
-		wsym := sym
-		if len(wsym) > 0 && wsym[0] == '@' { wsym = wsym[1:] }
-		if len(wsym) >= 2 && wsym[0] == '"' && wsym[len(wsym)-1] == '"' { wsym = wsym[1 : len(wsym)-1] }
-		wi := cctx.wasmImportMap[wsym]
-		e.wasmAttrID++
-		aid := e.wasmAttrID
-		e.w(" #" | simpleItoa(aid))
-		e.pendWasmAttrs = append(e.pendWasmAttrs, [3]string{simpleItoa(aid), wi[0], wi[1]})
-	}
-	e.w("\n")
-	e.pendExtDecls = append(e.pendExtDecls, emitKV{sym, ""})
+	e.pendExtDecls = append(e.pendExtDecls, emitKV{bareKey, decl})
 }
 
 // emitLinknameForwarder emits a thin wrapper definition with origSym that
@@ -1783,19 +1897,20 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 			expectTypes = append(expectTypes, e.resolveResultType(sig.Results.At(i).Typ))
 		}
 	}
-	retType := "{"
+	rtSegs := []string{"{"}
 	for i := 0; i < len(r.Results); i++ {
 		res := r.Results[i]
 		if i > 0 {
-			retType = retType | ", "
+			rtSegs = append(rtSegs, ", ")
 		}
 		if i < len(expectTypes) {
-			retType = retType | expectTypes[i]
+			rtSegs = append(rtSegs, expectTypes[i])
 		} else {
-			retType = retType | e.llvmType(res.SSAType())
+			rtSegs = append(rtSegs, e.llvmType(res.SSAType()))
 		}
 	}
-	retType = retType | "}"
+	rtSegs = append(rtSegs, "}")
+	retType := joinStrs(rtSegs)
 	prev := "undef"
 	for i := 0; i < len(r.Results); i++ {
 		res := r.Results[i]

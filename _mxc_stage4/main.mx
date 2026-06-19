@@ -1250,6 +1250,8 @@ func concatSources(dir string, files []string) (buf []byte) {
 			outLine++
 		}
 	}
+	var bodyChunks [][]byte
+	bodyChunks = append(bodyChunks, out)
 	for i := range fb {
 		body := fb[i].data[fb[i].bodyStart:]
 		cctx.concatSourceMap = append(cctx.concatSourceMap, srcSpan{
@@ -1267,10 +1269,10 @@ func concatSources(dir string, files []string) (buf []byte) {
 			}
 		}
 		outLine++
-		out = out | body
-		out = append(out, '\n')
+		bodyChunks = append(bodyChunks, body)
+		bodyChunks = append(bodyChunks, []byte("\n"))
 	}
-	return out
+	return joinChunks(bodyChunks)
 }
 
 func fileContainsPart(base string, part string) (ok bool) {
@@ -1854,63 +1856,99 @@ func compileSource(src []byte, pkgName, triple, pkgDir string) (s string) {
 }
 
 
+// mxhBuf accumulates mxh output. Uses append per byte - amortized O(1),
+// no subslice copies, no intermediate string allocation.
+type mxhBuf struct {
+	data []byte
+}
+
+func (b *mxhBuf) w(s string) {
+	for i := int32(0); i < len(s); i++ {
+		b.data = append(b.data, s[i])
+	}
+}
+
+func (b *mxhBuf) nl() {
+	b.data = append(b.data, '\n')
+}
+
+// typeDescStr returns the type descriptor for simple/leaf types.
+// For compound types that recurse, use typeDescWrite.
 func typeDescStr(t Type) (s string) {
+	var b mxhBuf
+	b.data = []byte{:0:64}
+	typeDescWrite(&b, t)
+	return string(b.data)
+}
+
+func typeDescWrite(b *mxhBuf, t Type) {
 	if t == nil {
-		return "interface{}"
+		b.w("interface{}")
+		return
 	}
 	switch v := t.(type) {
 	case *Basic:
 		switch v.Kind {
 		case Bool:
-			return "bool"
+			b.w("bool")
 		case Int8:
-			return "int8"
+			b.w("int8")
 		case Int16:
-			return "int16"
+			b.w("int16")
 		case Int32:
-			return "int32"
+			b.w("int32")
 		case Int64:
-			return "int64"
+			b.w("int64")
 		case Uint8:
-			return "uint8"
+			b.w("uint8")
 		case Uint16:
-			return "uint16"
+			b.w("uint16")
 		case Uint32:
-			return "uint32"
+			b.w("uint32")
 		case Uint64:
-			return "uint64"
+			b.w("uint64")
 		case Float32:
-			return "float32"
+			b.w("float32")
 		case Float64:
-			return "float64"
+			b.w("float64")
 		case TCString:
-			return "string"
+			b.w("string")
 		case UnsafePointer:
-			return "ptr"
+			b.w("ptr")
+		default:
+			b.w("int32")
 		}
-		return "int32"
 	case *Slice:
-		return "[]" | typeDescStr(v.Elem)
+		b.w("[]")
+		typeDescWrite(b, v.Elem)
 	case *Array:
-		return "[" | simpleItoa64(v.Len) | "]" | typeDescStr(v.Elem)
+		b.w("[")
+		b.w(simpleItoa64(v.Len))
+		b.w("]")
+		typeDescWrite(b, v.Elem)
 	case *Pointer:
-		return "*" | typeDescStr(v.Base)
+		b.w("*")
+		typeDescWrite(b, v.Base)
 	case *TCStruct:
-		sv := "struct{"
+		b.w("struct{")
 		for i := int32(0); i < v.NumFields(); i++ {
 			if i > 0 {
-				sv = sv | ","
+				b.w(",")
 			}
 			f := v.Field(i)
-			sv = sv | f.Name | ":" | typeDescStr(f.Typ)
+			if f.Anonymous {
+				b.w("@")
+			}
+			b.w(f.Name)
+			b.w(":")
+			typeDescWrite(b, f.Typ)
 		}
-		return sv | "}"
+		b.w("}")
 	case *TCInterface:
 		if v.IsEmpty() {
-			return "interface{}"
+			b.w("interface{}")
+			return
 		}
-		// The universe error type has Error() and String() methods.
-		// Match any interface that has an Error() method returning string.
 		hasError := false
 		for mi := int32(0); mi < v.NumMethods(); mi++ {
 			if v.Method(mi).Name == "Error" {
@@ -1919,82 +1957,92 @@ func typeDescStr(t Type) (s string) {
 			}
 		}
 		if hasError {
-			return "error"
+			b.w("error")
+		} else {
+			b.w("interface{}")
 		}
-		return "interface{}"
 	case *TCChan:
 		switch v.Dir {
 		case TCSendOnly:
-			return "chan<-:" | typeDescStr(v.Elem)
+			b.w("chan<-:")
 		case TCRecvOnly:
-			return "<-chan:" | typeDescStr(v.Elem)
+			b.w("<-chan:")
+		default:
+			b.w("chan:")
 		}
-		return "chan:" | typeDescStr(v.Elem)
+		typeDescWrite(b, v.Elem)
 	case *TCMap:
-		return "map[" | typeDescStr(v.Key) | "]" | typeDescStr(v.Elem)
+		b.w("map[")
+		typeDescWrite(b, v.Key)
+		b.w("]")
+		typeDescWrite(b, v.Elem)
 	case *Signature:
-		// Func types must round-trip through the mxh: degrading them to
-		// interface{} makes the importer box func values while the owning
-		// package reads a raw {ctx, fn} pair - calls then jump to the box.
-		return "func(" | sigDescStr(v) | ")"
+		b.w("func(")
+		sigDescWrite(b, v)
+		b.w(")")
 	case *TypeParam:
-		return "$" | v.String()
+		b.w("$")
+		b.w(v.String())
 	case *Named:
 		if v.Obj != nil {
 			if cctx.typeDescPkgPath != "" && v.Obj.Pkg != nil && v.Obj.Pkg.Path != cctx.typeDescPkgPath {
-				return v.Obj.Pkg.Path | "." | v.Obj.Name
+				b.w(v.Obj.Pkg.Path)
+				b.w(".")
 			}
-			return v.Obj.Name
+			b.w(v.Obj.Name)
+			return
 		}
-		return typeDescStr(v.Under)
+		typeDescWrite(b, v.Under)
+	default:
+		b.w("interface{}")
 	}
-	return "interface{}"
 }
 
-func sigDescStr(sig *Signature) (s string) {
-	var out string
+func sigDescWrite(b *mxhBuf, sig *Signature) {
 	if sig.Params != nil {
 		for i := int32(0); i < sig.Params.Len(); i++ {
 			if i > 0 {
-				out = out | ","
+				b.w(",")
 			}
 			pt := sig.Params.At(i).Typ
-			// Variadic must round-trip: a flattened []T loses the flag and
-			// importers then pass raw args where the callee reads a slice.
 			if sig.Variadic && i == sig.Params.Len()-1 {
 				if sl, ok := pt.(*Slice); ok {
-					out = out | "..." | typeDescStr(sl.Elem)
+					b.w("...")
+					typeDescWrite(b, sl.Elem)
 					continue
 				}
 			}
-			out = out | typeDescStr(pt)
+			typeDescWrite(b, pt)
 		}
 	}
 	if sig.Results != nil && sig.Results.Len() > 0 {
-		out = out | "->"
+		b.w("->")
 		for i := int32(0); i < sig.Results.Len(); i++ {
 			if i > 0 {
-				out = out | ","
+				b.w(",")
 			}
-			out = out | typeDescStr(sig.Results.At(i).Typ)
+			typeDescWrite(b, sig.Results.At(i).Typ)
 		}
 	}
-	return out
+}
+
+// sigDescStr kept for callers that need a string.
+func sigDescStr(sig *Signature) (s string) {
+	var b mxhBuf
+	b.data = []byte{:0:64}
+	sigDescWrite(&b, sig)
+	return string(b.data)
 }
 
 func generateMxh(pkg *TCPackage) (s string) {
 	path := pkg.Path
 	name := pkg.Name
 	cctx.typeDescPkgPath = path
-	var chunks [][]byte
-	chunks = append(chunks, []byte("package " | path | " " | name | "\n"))
-	// Direct imports must round-trip through the mxh: dispatch lists for
-	// cached packages are built from the transitive import closure, and a
-	// warm-cache load has no source to derive it from.
+	var b mxhBuf
+	b.data = []byte{:0:4096}
+	b.w("package ") ; b.w(path) ; b.w(" ") ; b.w(name) ; b.nl()
 	for _, ip := range cctx.universe.DirectImportPaths(pkg) {
-	chunks = append(chunks, []byte("import "))
-	chunks = append(chunks, []byte(ip))
-	chunks = append(chunks, []byte("\n"))
+		b.w("import ") ; b.w(ip) ; b.nl()
 	}
 	for _, objName := range pkg.Scope.Names() {
 		if len(objName) == 0 {
@@ -2006,10 +2054,6 @@ func generateMxh(pkg *TCPackage) (s string) {
 			continue
 		}
 		if !exported {
-			// Unexported types must be emitted when they carry layout
-			// information that dependents need: struct types (for embedding
-			// chains and GEP offsets) and types with methods (for interface
-			// dispatch). Everything else is internal.
 			if tn, ok := obj.(*TypeName); ok {
 				if named, ok2 := tn.Typ.(*Named); ok2 {
 					_, isStruct := named.Under.(*TCStruct)
@@ -2023,150 +2067,121 @@ func generateMxh(pkg *TCPackage) (s string) {
 				continue
 			}
 		}
-		switch v := obj.(type) {
-		case *TCFunc:
-			sig := v.Signature()
+		if fn, ok := obj.(*TCFunc); ok {
+			sig := fn.Signature()
 			if sig != nil {
-	chunks = append(chunks, []byte("func "))
-	chunks = append(chunks, []byte(objName))
-	chunks = append(chunks, []byte(" "))
-	chunks = append(chunks, []byte(sigDescStr(sig)))
-	chunks = append(chunks, []byte("\n"))
+				b.w("func ") ; b.w(objName) ; b.w(" ")
+				sigDescWrite(&b, sig) ; b.nl()
 			}
-		case *TCVar:
-			if v == nil || v.Typ == nil {
+		} else if vr, ok2 := obj.(*TCVar); ok2 {
+			if vr == nil || vr.Typ == nil {
 				continue
 			}
-	chunks = append(chunks, []byte("var "))
-	chunks = append(chunks, []byte(objName))
-	chunks = append(chunks, []byte(" "))
-	chunks = append(chunks, []byte(typeDescStr(v.Typ)))
-	chunks = append(chunks, []byte("\n"))
-		case *TCConst:
-			if v == nil || v.Typ == nil {
+			b.w("var ") ; b.w(objName) ; b.w(" ")
+			typeDescWrite(&b, vr.Typ) ; b.nl()
+		} else if cn, ok3 := obj.(*TCConst); ok3 {
+			if cn == nil || cn.Typ == nil {
 				continue
 			}
-			td := typeDescStr(v.Typ)
-			vs := ""
-			if v.Val != nil {
-				vs = v.Val.String()
+			b.w("const ") ; b.w(objName) ; b.w(" ")
+			typeDescWrite(&b, cn.Typ) ; b.w(" ")
+			if cn.Val != nil {
+				b.w(cn.Val.String())
 			}
-	chunks = append(chunks, []byte("const "))
-	chunks = append(chunks, []byte(objName))
-	chunks = append(chunks, []byte(" "))
-	chunks = append(chunks, []byte(td))
-	chunks = append(chunks, []byte(" "))
-	chunks = append(chunks, []byte(vs))
-	chunks = append(chunks, []byte("\n"))
-		case *TypeName:
-			typ := v.Typ
-			if named, ok := typ.(*Named); ok {
-				if ui, ok2 := named.Under.(*TCInterface); ok2 && !ui.IsEmpty() {
-					// Generic constraint interfaces (type sets) record
-					// method names with nil sigs; they are compile-time
-					// only and cannot round-trip - skip them.
-					var methods string
-					complete := true
-					for mi := int32(0); mi < ui.NumMethods(); mi++ {
-						m := ui.Method(mi)
-						if m.Sig == nil {
-							complete = false
-							break
-						}
-						if mi > 0 {
-							methods = methods | ";"
-						}
-						methods = methods | m.Name | "=" | sigDescStr(m.Sig)
-					}
-					if complete {
-						ifTpStr := ""
-						if len(named.TParams) > 0 {
-							ifTpStr = "["
-							for tpi, tp := range named.TParams {
-								if tpi > 0 {
-									ifTpStr = ifTpStr | ","
-								}
-								ifTpStr = ifTpStr | "$" | tp.String()
-							}
-							ifTpStr = ifTpStr | "]"
-						}
-	chunks = append(chunks, []byte("iface "))
-	chunks = append(chunks, []byte(objName))
-	chunks = append(chunks, []byte(ifTpStr))
-	chunks = append(chunks, []byte(" "))
-	chunks = append(chunks, []byte(methods))
-	chunks = append(chunks, []byte("\n"))
-					}
-				} else {
-					ud := ""
-					if named.Under != nil {
-						ud = typeDescStr(named.Under)
-					}
-					tpStr := ""
-					if len(named.TParams) > 0 {
-						tpStr = "["
-						for tpi, tp := range named.TParams {
-							if tpi > 0 {
-								tpStr = tpStr | ","
-							}
-							tpStr = tpStr | "$" | tp.String()
-						}
-						tpStr = tpStr | "]"
-					}
-	chunks = append(chunks, []byte("type "))
-	chunks = append(chunks, []byte(objName))
-	chunks = append(chunks, []byte(tpStr))
-	chunks = append(chunks, []byte(" "))
-	chunks = append(chunks, []byte(ud))
-	chunks = append(chunks, []byte("\n"))
-					// Generic types' methods are never emitted; importers must
-					// not see them or dispatch will reference undefined symbols.
-					if len(named.TParams) == 0 {
-						for _, m := range named.Methods {
-							ptrRecv := "0"
-							if m.PtrRecv {
-								ptrRecv = "1"
-							}
-							msig := m.Signature()
-							if msig != nil {
-	chunks = append(chunks, []byte("method "))
-	chunks = append(chunks, []byte(objName))
-	chunks = append(chunks, []byte(" "))
-	chunks = append(chunks, []byte(m.Name))
-	chunks = append(chunks, []byte(" "))
-	chunks = append(chunks, []byte(sigDescStr(msig)))
-	chunks = append(chunks, []byte(" "))
-	chunks = append(chunks, []byte(ptrRecv))
-	chunks = append(chunks, []byte("\n"))
-							}
-						}
-					}
+			b.nl()
+		} else if tn2, ok4 := obj.(*TypeName); ok4 {
+			mxhWriteTypeName(&b, objName, tn2)
+		}
+	}
+	return string(b.data)
+}
+
+func mxhWriteTypeName(b *mxhBuf, objName string, v *TypeName) {
+	if v == nil {
+		return
+	}
+	typ := v.Typ
+	if named, ok := typ.(*Named); ok {
+		if ui, ok2 := named.Under.(*TCInterface); ok2 && !ui.IsEmpty() {
+			complete := true
+			for mi := int32(0); mi < ui.NumMethods(); mi++ {
+				if ui.Method(mi).Sig == nil {
+					complete = false
+					break
 				}
-			} else if iface, ok3 := typ.(*TCInterface); ok3 {
-				var methods string
-				complete := true
-				for mi := int32(0); mi < iface.NumMethods(); mi++ {
-					m := iface.Method(mi)
-					if m.Sig == nil {
-						complete = false
-						break
+			}
+			if complete {
+				b.w("iface ") ; b.w(objName)
+				mxhWriteTParams(b, named.TParams)
+				b.w(" ")
+				mxhWriteIfaceMethods(b, ui)
+				b.nl()
+			}
+		} else {
+			b.w("type ") ; b.w(objName)
+			mxhWriteTParams(b, named.TParams)
+			b.w(" ")
+			if named.Under != nil {
+				typeDescWrite(b, named.Under)
+			}
+			b.nl()
+			if len(named.TParams) == 0 {
+				for _, m := range named.Methods {
+					msig := m.Signature()
+					if msig != nil {
+						ptrRecv := "0"
+						if m.PtrRecv {
+							ptrRecv = "1"
+						}
+						b.w("method ") ; b.w(objName) ; b.w(" ")
+						b.w(m.Name) ; b.w(" ")
+						sigDescWrite(b, msig) ; b.w(" ")
+						b.w(ptrRecv) ; b.nl()
 					}
-					if mi > 0 {
-						methods = methods | ";"
-					}
-					methods = methods | m.Name | "=" | sigDescStr(m.Sig)
-				}
-				if complete {
-	chunks = append(chunks, []byte("iface "))
-	chunks = append(chunks, []byte(objName))
-	chunks = append(chunks, []byte(" "))
-	chunks = append(chunks, []byte(methods))
-	chunks = append(chunks, []byte("\n"))
 				}
 			}
 		}
+	} else if iface, ok3 := typ.(*TCInterface); ok3 {
+		complete := true
+		for mi := int32(0); mi < iface.NumMethods(); mi++ {
+			if iface.Method(mi).Sig == nil {
+				complete = false
+				break
+			}
+		}
+		if complete {
+			b.w("iface ") ; b.w(objName) ; b.w(" ")
+			mxhWriteIfaceMethods(b, iface)
+			b.nl()
+		}
 	}
-	return string(joinChunks(chunks))
+}
+
+func mxhWriteTParams(b *mxhBuf, tparams []*TypeParam) {
+	if len(tparams) == 0 {
+		return
+	}
+	b.w("[")
+	for i, tp := range tparams {
+		if i > 0 {
+			b.w(",")
+		}
+		b.w("$")
+		b.w(tp.String())
+	}
+	b.w("]")
+}
+
+func mxhWriteIfaceMethods(b *mxhBuf, ui *TCInterface) {
+	for mi := int32(0); mi < ui.NumMethods(); mi++ {
+		m := ui.Method(mi)
+		if mi > 0 {
+			b.w(";")
+		}
+		b.w(m.Name)
+		b.w("=")
+		sigDescWrite(b, m.Sig)
+	}
 }
 
 // parseMxhTParams splits "Curve[$P,$Q]" into ("Curve", [TypeParam P, TypeParam Q]).
@@ -2202,59 +2217,170 @@ func loadMxh(path string) (ok bool) {
 	return loadMxhData(data)
 }
 
-func loadMxhData(data []byte) (ok bool) {
-	lines := mxutil.SplitLines(string(data))
-	if len(lines) == 0 {
+// mxh index-walking primitives. All return index pairs into the original
+// buffer d. No intermediate string/slice allocations.
+
+// mxhNextLine returns the start and end of the next line at or after pos,
+// and the position after the newline. end == start when no content remains.
+func mxhNextLine(d string, pos int32) (ls int32, le int32, next int32) {
+	ls = pos
+	i := pos
+	for i < int32(len(d)) && d[i] != '\n' {
+		i++
+	}
+	le = i
+	next = i
+	if next < int32(len(d)) {
+		next++
+	}
+	return ls, le, next
+}
+
+// mxhNextWord returns the start and end of the next whitespace-delimited
+// word within d[from:limit]. Returns (limit, limit) when no word found.
+func mxhNextWord(d string, from, limit int32) (ws, we int32) {
+	i := from
+	for i < limit && (d[i] == ' ' || d[i] == '\t') {
+		i++
+	}
+	ws = i
+	for i < limit && d[i] != ' ' && d[i] != '\t' {
+		i++
+	}
+	we = i
+	return ws, we
+}
+
+// mxhHasPrefix checks whether d[start:end] begins with prefix.
+func mxhHasPrefix(d string, start, end int32, prefix string) (ok bool) {
+	plen := int32(len(prefix))
+	if end-start < plen {
 		return false
 	}
-	first := lines[0]
-	if !mxutil.HasPrefix(first, "package ") {
+	for i := int32(0); i < plen; i++ {
+		if d[start+i] != prefix[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// mxhEq checks whether d[start:end] equals s.
+func mxhEq(d string, start, end int32, s string) (eq bool) {
+	if end-start != int32(len(s)) {
 		return false
 	}
-	rest := first[8:]
-	spaceIdx := int32(-1)
-	for i := int32(0); i < int32(len(rest)); i++ {
-		if rest[i] == ' ' {
-			spaceIdx = i
+	for i := int32(0); i < end-start; i++ {
+		if d[start+i] != s[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// mxhParseIfaceMethods parses "name1=sig1;name2=sig2" from d[start:end]
+// without allocating a []string for the semicolon split.
+func mxhParseIfaceMethods(d string, start, end int32) (methods []*IfaceMethod) {
+	if start >= end {
+		return nil
+	}
+	seg := start
+	for i := start; i <= end; i++ {
+		if i == end || d[i] == ';' {
+			// seg..i is one method descriptor
+			eqIdx := int32(-1)
+			for k := seg; k < i; k++ {
+				if d[k] == '=' {
+					eqIdx = k
+					break
+				}
+			}
+			if eqIdx > seg {
+				mname := string(d[seg:eqIdx])
+				msig := parseSignatureDesc(string(d[eqIdx+1 : i]))
+				methods = append(methods, NewTCIfaceMethod(mname, msig))
+			}
+			seg = i + 1
+		}
+	}
+	return methods
+}
+
+// mxhCountWords counts space-delimited words in d[from:limit].
+func mxhCountWords(d string, from, limit int32) (n int32) {
+	i := from
+	for i < limit {
+		for i < limit && (d[i] == ' ' || d[i] == '\t') {
+			i++
+		}
+		if i >= limit {
 			break
 		}
+		n++
+		for i < limit && d[i] != ' ' && d[i] != '\t' {
+			i++
+		}
 	}
-	if spaceIdx < 0 {
+	return n
+}
+
+func loadMxhData(data []byte) (ok bool) {
+	d := string(data)
+	dlen := int32(len(d))
+	if dlen == 0 {
 		return false
 	}
-	pkgPath := rest[:spaceIdx]
-	pkgName := rest[spaceIdx+1:]
+
+	// Parse header: "package <path> <name>"
+	ls, le, pos := mxhNextLine(d, 0)
+	if !mxhHasPrefix(d, ls, le, "package ") {
+		return false
+	}
+	ws, we := mxhNextWord(d, ls+8, le)
+	if ws == we {
+		return false
+	}
+	pkgPath := string(d[ws:we])
+	ns, ne := mxhNextWord(d, we, le)
+	if ns == ne {
+		return false
+	}
+	pkgName := string(d[ns:ne])
 	pkg := NewTCPackage(pkgPath, pkgName)
 
-	// Record direct imports so transitive-closure dispatch lists work on
-	// warm-cache builds where no source scope exists.
+	// Collect direct imports.
 	var dimps []string
-	for li := 1; li < len(lines); li++ {
-		if mxutil.HasPrefix(lines[li], "import ") {
-			dimps = append(dimps, lines[li][7:])
+	scanPos := pos
+	for scanPos < dlen {
+		ls2, le2, next2 := mxhNextLine(d, scanPos)
+		if mxhHasPrefix(d, ls2, le2, "import ") {
+			dimps = append(dimps, string(d[ls2+7:le2]))
 		}
+		scanPos = next2
 	}
 	cctx.universe.DirectImports[pkgPath] = dimps
 
 	oldScope := cctx.parseTypePkgScope
 	cctx.parseTypePkgScope = pkg.Scope
 
-	// Pass 1a: register all type and interface names with placeholder types
-	for li := 1; li < len(lines); li++ {
-		line := lines[li]
-		if mxutil.HasPrefix(line, "type ") {
-			parts := splitBySpace(line[5:])
-			if len(parts) >= 1 {
-				actualName, tparams := parseMxhTParams(parts[0])
+	// Pass 1a: register all type and interface names with placeholder types.
+	scanPos = pos
+	for scanPos < dlen {
+		ls2, le2, next2 := mxhNextLine(d, scanPos)
+		scanPos = next2
+		if mxhHasPrefix(d, ls2, le2, "type ") {
+			ws2, we2 := mxhNextWord(d, ls2+5, le2)
+			if ws2 < we2 {
+				actualName, tparams := parseMxhTParams(string(d[ws2:we2]))
 				tn := NewTypeName(pkg, actualName, nil)
 				named := NewNamed(tn, nil)
 				named.TParams = tparams
 				pkg.Scope.Insert(tn)
 			}
-		} else if mxutil.HasPrefix(line, "iface ") {
-			parts := splitBySpace(line[6:])
-			if len(parts) >= 1 {
-				actualName, tparams := parseMxhTParams(parts[0])
+		} else if mxhHasPrefix(d, ls2, le2, "iface ") {
+			ws2, we2 := mxhNextWord(d, ls2+6, le2)
+			if ws2 < we2 {
+				actualName, tparams := parseMxhTParams(string(d[ws2:we2]))
 				placeholder := NewTCInterface(nil, nil)
 				placeholder.Complete()
 				tn := NewTypeName(pkg, actualName, nil)
@@ -2265,156 +2391,181 @@ func loadMxhData(data []byte) (ok bool) {
 		}
 	}
 
-	// Pass 1b: resolve underlying types and interface methods (all names exist now)
-	for li := 1; li < len(lines); li++ {
-		line := lines[li]
-		if mxutil.HasPrefix(line, "type ") {
-			parts := splitBySpace(line[5:])
-			if len(parts) >= 2 {
-				actualName, _ := parseMxhTParams(parts[0])
-				underlying := parseTypeDesc(parts[1])
-				obj := pkg.Scope.Lookup(actualName)
-				if tn, istn := obj.(*TypeName); istn {
-					if named, isn := tn.Typ.(*Named); isn {
-						named.Under = underlying
-					}
-				}
-			} else if len(parts) == 1 {
-				actualName, _ := parseMxhTParams(parts[0])
-				obj := pkg.Scope.Lookup(actualName)
-				if tn, istn := obj.(*TypeName); istn {
-					if named, isn := tn.Typ.(*Named); isn {
-						named.Under = NewTCStruct(nil, nil)
-					}
-				}
+	// Pass 1b: resolve underlying types and interface methods.
+	scanPos = pos
+	for scanPos < dlen {
+		ls2, le2, next2 := mxhNextLine(d, scanPos)
+		scanPos = next2
+		if mxhHasPrefix(d, ls2, le2, "type ") {
+			ws2, we2 := mxhNextWord(d, ls2+5, le2)
+			if ws2 >= we2 {
+				continue
 			}
-		} else if mxutil.HasPrefix(line, "iface ") {
-			parts := splitBySpace(line[6:])
-			if len(parts) >= 1 {
-				ifaceName0, _ := parseMxhTParams(parts[0])
-				ifaceName := ifaceName0
-				methodsDesc := ""
-				if len(parts) >= 2 {
-					methodsDesc = parts[1]
-				}
-				var methods []*IfaceMethod
-				if methodsDesc != "" {
-					mparts := splitSemicolon(methodsDesc)
-					for _, p := range mparts {
-						eqIdx := -1
-						for i := 0; i < len(p); i++ {
-							if p[i] == '=' {
-								eqIdx = i
-								break
-							}
-						}
-						if eqIdx < 0 {
-							continue
-						}
-						mname := p[:eqIdx]
-						msig := parseSignatureDesc(p[eqIdx+1:])
-						methods = append(methods, NewTCIfaceMethod(mname, msig))
-					}
-				}
-				iface := NewTCInterface(methods, nil)
-				iface.Complete()
-				obj := pkg.Scope.Lookup(ifaceName)
-				if tn, istn := obj.(*TypeName); istn {
-					if named, isn := tn.Typ.(*Named); isn {
-						named.Under = iface
-					} else {
-						tn.Typ = iface
-					}
+			ts, te := mxhNextWord(d, we2, le2)
+			actualName, _ := parseMxhTParams(string(d[ws2:we2]))
+			obj := pkg.Scope.Lookup(actualName)
+			if obj == nil {
+				continue
+			}
+			tn, istn := obj.(*TypeName)
+			if !istn {
+				continue
+			}
+			named, isn := tn.Typ.(*Named)
+			if !isn {
+				continue
+			}
+			if ts >= te {
+				named.Under = NewTCStruct(nil, nil)
+			} else {
+				named.Under = parseTypeDesc(string(d[ts:te]))
+			}
+		} else if mxhHasPrefix(d, ls2, le2, "iface ") {
+			ws2, we2 := mxhNextWord(d, ls2+6, le2)
+			if ws2 >= we2 {
+				continue
+			}
+			ifaceName, _ := parseMxhTParams(string(d[ws2:we2]))
+			// Methods descriptor is the second word (may contain semicolons).
+			ms, me := mxhNextWord(d, we2, le2)
+			methods := mxhParseIfaceMethods(d, ms, me)
+			iface := NewTCInterface(methods, nil)
+			iface.Complete()
+			obj := pkg.Scope.Lookup(ifaceName)
+			if obj == nil {
+				continue
+			}
+			if tn, istn := obj.(*TypeName); istn {
+				if named, isn := tn.Typ.(*Named); isn {
+					named.Under = iface
+				} else {
+					tn.Typ = iface
 				}
 			}
 		}
 	}
 
-	// Pass 2: funcs, methods, vars, consts can now resolve types from pass 1
-	for li := 1; li < len(lines); li++ {
-		line := lines[li]
-		if mxutil.HasPrefix(line, "func ") {
-			parts := splitBySpace(line[5:])
-			if len(parts) >= 2 {
-				sig := parseSignatureDesc(parts[1])
-				pkg.Scope.Insert(NewTCFunc(pkg, parts[0], sig))
-			} else if len(parts) == 1 {
+	// Pass 2: funcs, methods, vars, consts.
+	scanPos = pos
+	for scanPos < dlen {
+		ls2, le2, next2 := mxhNextLine(d, scanPos)
+		scanPos = next2
+		if mxhHasPrefix(d, ls2, le2, "func ") {
+			ws2, we2 := mxhNextWord(d, ls2+5, le2)
+			if ws2 >= we2 {
+				continue
+			}
+			fname := string(d[ws2:we2])
+			ss, se := mxhNextWord(d, we2, le2)
+			if ss < se {
+				sig := parseSignatureDesc(string(d[ss:se]))
+				pkg.Scope.Insert(NewTCFunc(pkg, fname, sig))
+			} else {
 				sig := parseSignatureDesc("")
-				pkg.Scope.Insert(NewTCFunc(pkg, parts[0], sig))
+				pkg.Scope.Insert(NewTCFunc(pkg, fname, sig))
 			}
-		} else if mxutil.HasPrefix(line, "var ") {
-			parts := splitBySpace(line[4:])
-			if len(parts) >= 2 {
-				typ := parseTypeDesc(parts[1])
-				pkg.Scope.Insert(NewTCVar(pkg, parts[0], typ))
+		} else if mxhHasPrefix(d, ls2, le2, "var ") {
+			ws2, we2 := mxhNextWord(d, ls2+4, le2)
+			if ws2 >= we2 {
+				continue
 			}
-		} else if mxutil.HasPrefix(line, "const ") {
-			parts := splitBySpace(line[6:])
-			if len(parts) >= 2 {
-				typ := parseTypeDesc(parts[1])
-				var val ConstVal
-				if len(parts) >= 3 {
-					cval := parts[2]
-					for k := int32(3); k < int32(len(parts)); k++ {
-						cval = cval | " " | parts[k]
-					}
-					isNum := true
-					for ci := int32(0); ci < int32(len(cval)); ci++ {
-						ch := cval[ci]
-						if !((ch >= '0' && ch <= '9') || ch == '-' || ch == '+' || ch == 'x' || ch == 'X' || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
-							isNum = false
-							break
-						}
-					}
-					if isNum {
-						n := ssaParseInt64(cval)
-						val = &ConstInt{V:n}
-					} else {
-						if b, isb := typ.(*Basic); isb && (b.Kind == TCString || b.Kind == UntypedString) {
-							val = &ConstStr{S:cval}
-						} else {
-							val = &ConstInt{V:0}
-						}
-					}
-				} else {
-					val = &ConstInt{V:0}
+			vname := string(d[ws2:we2])
+			ts, te := mxhNextWord(d, we2, le2)
+			if ts < te {
+				typ := parseTypeDesc(string(d[ts:te]))
+				pkg.Scope.Insert(NewTCVar(pkg, vname, typ))
+			}
+		} else if mxhHasPrefix(d, ls2, le2, "const ") {
+			ws2, we2 := mxhNextWord(d, ls2+6, le2)
+			if ws2 >= we2 {
+				continue
+			}
+			cname := string(d[ws2:we2])
+			ts, te := mxhNextWord(d, we2, le2)
+			if ts >= te {
+				continue
+			}
+			typ := parseTypeDesc(string(d[ts:te]))
+			// Remaining words after type are the const value.
+			vs, ve := mxhNextWord(d, te, le2)
+			var val ConstVal
+			if vs < ve {
+				// Reassemble value from remaining words. Const values
+				// may contain spaces (string literals). Walk remaining
+				// words and join with space - but use index range to
+				// avoid per-word | concat.
+				valStart := vs
+				valEnd := le2
+				// trim trailing whitespace
+				for valEnd > valStart && (d[valEnd-1] == ' ' || d[valEnd-1] == '\t') {
+					valEnd--
 				}
-				pkg.Scope.Insert(NewTCConst(pkg, parts[0], typ, val))
+				cval := string(d[valStart:valEnd])
+				isNum := true
+				for ci := int32(0); ci < int32(len(cval)); ci++ {
+					ch := cval[ci]
+					if !((ch >= '0' && ch <= '9') || ch == '-' || ch == '+' || ch == 'x' || ch == 'X' || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') || ch == ' ') {
+						isNum = false
+						break
+					}
+				}
+				if isNum {
+					n := ssaParseInt64(cval)
+					val = &ConstInt{V: n}
+				} else {
+					if b, isb := typ.(*Basic); isb && (b.Kind == TCString || b.Kind == UntypedString) {
+						val = &ConstStr{S: cval}
+					} else {
+						val = &ConstInt{V: 0}
+					}
+				}
+			} else {
+				val = &ConstInt{V: 0}
 			}
-		} else if mxutil.HasPrefix(line, "method ") {
-			parts := splitBySpace(line[7:])
-			if len(parts) >= 3 {
-				typeName := parts[0]
-				methodName := parts[1]
-				sigDesc := parts[2]
-				ptrRecv := false
-				if len(parts) >= 4 && parts[3] == "1" {
+			pkg.Scope.Insert(NewTCConst(pkg, cname, typ, val))
+		} else if mxhHasPrefix(d, ls2, le2, "method ") {
+			nwords := mxhCountWords(d, ls2+7, le2)
+			if nwords < 3 {
+				continue
+			}
+			w1s, w1e := mxhNextWord(d, ls2+7, le2)
+			w2s, w2e := mxhNextWord(d, w1e, le2)
+			w3s, w3e := mxhNextWord(d, w2e, le2)
+			typeName := string(d[w1s:w1e])
+			methodName := string(d[w2s:w2e])
+			sigDesc := string(d[w3s:w3e])
+			ptrRecv := false
+			if nwords >= 4 {
+				w4s, w4e := mxhNextWord(d, w3e, le2)
+				if mxhEq(d, w4s, w4e, "1") {
 					ptrRecv = true
 				}
-				if len(parts) == 3 && (sigDesc == "0" || sigDesc == "1") {
-					// Nullary void method: the sig field is empty in the mxh
-					// and splitBySpace collapses it away, shifting the
-					// ptrRecv flag into the sig slot ("method T Reset  1").
-					ptrRecv = sigDesc == "1"
-					sigDesc = ""
-				}
-				obj := pkg.Scope.Lookup(typeName)
-				if obj != nil {
-					if tn, istn := obj.(*TypeName); istn {
-						if named, isn := tn.Typ.(*Named); isn {
-							sig := parseSignatureDesc(sigDesc)
-							var recvType Type = named
-							if ptrRecv {
-								recvType = NewPointer(named)
-							}
-							sig = NewSignature(NewTCVar(pkg, "", recvType), sig.Params, sig.Results, sig.Variadic)
-							fn := NewTCFunc(pkg, methodName, sig)
-							fn.PtrRecv = ptrRecv
-							named.AddMethod(fn)
-						}
-					}
-				}
 			}
+			if nwords == 3 && (sigDesc == "0" || sigDesc == "1") {
+				ptrRecv = sigDesc == "1"
+				sigDesc = ""
+			}
+			obj := pkg.Scope.Lookup(typeName)
+			if obj == nil {
+				continue
+			}
+			tn, istn := obj.(*TypeName)
+			if !istn {
+				continue
+			}
+			named, isn := tn.Typ.(*Named)
+			if !isn {
+				continue
+			}
+			sig := parseSignatureDesc(sigDesc)
+			var recvType Type = named
+			if ptrRecv {
+				recvType = NewPointer(named)
+			}
+			sig = NewSignature(NewTCVar(pkg, "", recvType), sig.Params, sig.Results, sig.Variadic)
+			fn := NewTCFunc(pkg, methodName, sig)
+			fn.PtrRecv = ptrRecv
+			named.AddMethod(fn)
 		}
 	}
 
@@ -2526,10 +2677,9 @@ func cmdCacheWarm() {
 		if rok {
 			writeFile(cached, data, 0644)
 		}
-		regPkg := cctx.universe.Registry[compilePath]
-		if regPkg != nil {
-			mxhData := generateMxh(regPkg)
-			writeFile(cachedMxh, []byte(mxhData), 0644)
+		if len(cctx.lastMxhData) > 0 {
+			writeFile(cachedMxh, []byte(cctx.lastMxhData), 0644)
+			cctx.lastMxhData = ""
 		}
 		compiled++
 		mxutil.WriteStr(2, "  " | pkg.path | "\n")
@@ -2641,11 +2791,10 @@ func cmdUpdate(rebuildAll bool) {
 		if rok {
 			writeFile(cached, data, 0644)
 		}
-		regPkg := cctx.universe.Registry[compilePath]
-		if regPkg != nil {
+		if len(cctx.lastMxhData) > 0 {
 			cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
-			mxhData := generateMxh(regPkg)
-			writeFile(cachedMxh, []byte(mxhData), 0644)
+			writeFile(cachedMxh, []byte(cctx.lastMxhData), 0644)
+			cctx.lastMxhData = ""
 		}
 	}
 	mxutil.WriteStr(2, "rebuild done\n")
@@ -2825,7 +2974,7 @@ func cmdTest(args []string) {
 			} else {
 				src = concatSources(dp.dir, dp.files)
 			}
-			TypeCheckOnly(src, compilePath)
+			TypeCheckOnly(src, compilePath, "")
 		}
 	}
 
@@ -2872,14 +3021,9 @@ func cmdTest(args []string) {
 			if isStdlib(dp.path) && bcOk && !forceRebuild {
 				mxutil.WriteStr(2, "  cached " | dp.path | "\n")
 				csrc := concatSources(dp.dir, dp.files)
-				TypeCheckOnly(csrc, compilePath)
-				creg := cctx.universe.Registry[compilePath]
-				if creg != nil {
-					cdir := mxutil.JoinPath(cacheBase, safeName(dp.path))
-					mkdirAll(cdir, 0755)
-					mxhData := generateMxh(creg)
-					writeFile(cachedMxh, []byte(mxhData), 0644)
-				}
+				cdir := mxutil.JoinPath(cacheBase, safeName(dp.path))
+				mkdirAll(cdir, 0755)
+				TypeCheckOnly(csrc, compilePath, cachedMxh)
 				allBcFiles = append(allBcFiles, cached)
 				continue
 			}
@@ -2907,10 +3051,9 @@ func cmdTest(args []string) {
 			if rok {
 				writeFile(cached, data, 0644)
 			}
-			regPkg := cctx.universe.Registry[compilePath]
-			if regPkg != nil {
-				mxhData := generateMxh(regPkg)
-				writeFile(cachedMxh, []byte(mxhData), 0644)
+			if len(cctx.lastMxhData) > 0 {
+				writeFile(cachedMxh, []byte(cctx.lastMxhData), 0644)
+				cctx.lastMxhData = ""
 			}
 		}
 		allBcFiles = append(allBcFiles, bcFile)
@@ -2961,7 +3104,12 @@ func cmdTest(args []string) {
 		initSym := irGlobalSymbol(compilePath, "main")
 		initCalls = initCalls | "  call void " | initSym | "(ptr null)\n"
 	}
-	initAllIR := "\ndefine dso_local void @runtime.initAll(ptr %_ctx) {\nentry:\n" | initCalls | "  ret void\n}\n"
+	initAllIR := "\ndefine dso_local void @runtime.initAll(ptr %_ctx) {\nentry:\n" | initCalls | "  ret void\n}\n" |
+		"declare ptr @llvm.stacksave.p0()\n" |
+		"define ptr @runtime.stacksave(ptr %_ctx) {\n" |
+		"  %1 = call ptr @llvm.stacksave.p0()\n" |
+		"  ret ptr %1\n" |
+		"}\n"
 	declared := map[string]bool{}
 	for _, dp := range pkgs {
 		compilePath := dp.path
@@ -3261,7 +3409,7 @@ func main() {
 	// Root arena: main's scope. Lives for the program's lifetime.
 	// Universe types, import registry, build state all live here.
 	// 2GB virtual - pages committed on touch by the MMU.
-	rootArena := runtime.ArenaNew(2 * 1024 * 1024 * 1024)
+	rootArena := runtime.ArenaNew(64 * 1024)
 	runtime.SetCurrentArena(rootArena)
 	initCompileCtx()
 	cctx.universe = InitUniverse()
@@ -3498,7 +3646,12 @@ func main() {
 		initSym := irGlobalSymbol(compilePath, "main")
 		initCalls = initCalls | "  call void " | initSym | "(ptr null)\n"
 	}
-	initAllIR := "\ndefine dso_local void @runtime.initAll(ptr %_ctx) {\nentry:\n" | initCalls | "  ret void\n}\n"
+	initAllIR := "\ndefine dso_local void @runtime.initAll(ptr %_ctx) {\nentry:\n" | initCalls | "  ret void\n}\n" |
+		"declare ptr @llvm.stacksave.p0()\n" |
+		"define ptr @runtime.stacksave(ptr %_ctx) {\n" |
+		"  %1 = call ptr @llvm.stacksave.p0()\n" |
+		"  ret ptr %1\n" |
+		"}\n"
 	declared := map[string]bool{}
 	for _, pkg := range pkgs {
 		compilePath := pkg.path
@@ -3720,14 +3873,9 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		if isStdlib(pkg.path) && bcOk && !forceRebuild {
 			mxutil.WriteStr(2, "  cached " | pkg.path | "\n")
 			csrc := concatSources(pkg.dir, pkg.files)
-			TypeCheckOnly(csrc, compilePath)
-			creg := cctx.universe.Registry[compilePath]
-			if creg != nil {
-				cdir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
-				mkdirAll(cdir, 0755)
-				mxhData := generateMxh(creg)
-				writeFile(cachedMxh, []byte(mxhData), 0644)
-			}
+			cdir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
+			mkdirAll(cdir, 0755)
+			TypeCheckOnly(csrc, compilePath, cachedMxh)
 			if cctx.compileArena != nil {
 				runtime.ArenaFree(cctx.compileArena)
 				cctx.compileArena = nil
@@ -3754,10 +3902,13 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		bcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc")
 		// Defer clang call - collect for parallel execution after all IR emitted.
 		deferredClang = append(deferredClang, []string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
-		// mxh cache: registerCompiledExports handles the in-memory registry.
-		// Cache file write deferred until generateMxh can serialize without
-		// following references into freed per-compilation arenas.
-		// TODO: make generateMxh stop at import boundaries.
+		// mxh written inside CompileToIR's arena before it dies.
+		if len(cctx.lastMxhData) > 0 {
+			cdir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
+			mkdirAll(cdir, 0755)
+			writeFile(cachedMxh, []byte(cctx.lastMxhData), 0644)
+			cctx.lastMxhData = ""
+		}
 		bcs = append(bcs, bcFile)
 		for _, cf := range pkg.cfiles {
 			cPath := mxutil.JoinPath(pkg.dir, cf)
@@ -4198,12 +4349,11 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 		writeFile(cached, bcData, 0644)
 	}
 
-	// Cache .mxh
-	regPkg := cctx.universe.Registry[compilePath]
-	if regPkg != nil {
+	// Cache .mxh (already generated inside CompileToIR's arena)
+	if len(cctx.lastMxhData) > 0 {
 		cachedMxh := cachedMxhPath(meta.cacheBase, pkg.path, hash, pkg.version)
-		mxhData := generateMxh(regPkg)
-		writeFile(cachedMxh, []byte(mxhData), 0644)
+		writeFile(cachedMxh, []byte(cctx.lastMxhData), 0644)
+		cctx.lastMxhData = ""
 	}
 
 	// Compile C files

@@ -51,26 +51,7 @@ func (e *irEmitter) llvmType(t Type) (s string) {
 			return e.sliceType()
 		}
 		if n, ok := t.(*Named); ok {
-			if n.Under != nil {
-				return e.llvmType(n.Under)
-			}
-			if n.Obj != nil && n.Obj.Pkg != nil {
-				pkgPath := n.Obj.Pkg.Path
-				nm := n.Obj.Name
-				pkg := cctx.universe.Registry[pkgPath]
-				if pkg == nil && e.pkg != nil && e.pkg.Pkg != nil && e.pkg.Pkg.Path == pkgPath {
-					pkg = e.pkg.Pkg
-				}
-				if pkg != nil && pkg.Scope != nil {
-					obj := pkg.Scope.Lookup(nm)
-					if obj != nil {
-						if nt, ok2 := ObjectType(obj).(*Named); ok2 && nt.Under != nil {
-							return e.llvmType(nt.Under)
-						}
-					}
-				}
-			}
-			return "ptr"
+			return e.llvmNamedFallback(n)
 		}
 		return "ptr"
 	}
@@ -100,36 +81,7 @@ func (e *irEmitter) llvmType(t Type) (s string) {
 	case *TCInterface:
 		return e.ifaceType()
 	case *Named:
-		if tt.Obj != nil && tt.Obj.Name == "error" {
-			return e.ifaceType()
-		}
-		if tt.Under != nil {
-			if _, isIface := tt.Under.(*TCInterface); isIface {
-				return e.ifaceType()
-			}
-			return e.llvmType(tt.Under)
-		}
-		if tt.Obj != nil && tt.Obj.Pkg != nil {
-			pkgPath := tt.Obj.Pkg.Path
-			nm := tt.Obj.Name
-			pkg := cctx.universe.Registry[pkgPath]
-			if pkg == nil && e.pkg != nil && e.pkg.Pkg != nil && e.pkg.Pkg.Path == pkgPath {
-				pkg = e.pkg.Pkg
-			}
-			if pkg != nil && pkg.Scope != nil {
-				obj := pkg.Scope.Lookup(nm)
-				if obj != nil {
-					ot := ObjectType(obj)
-					if ot != nil && ot != Type(tt) {
-						return e.llvmType(ot)
-					}
-				}
-			}
-		}
-		if tt.NumMethods() > 0 {
-			return e.ifaceType()
-		}
-		return "ptr"
+		return e.llvmNamedType(tt)
 	case *Tuple:
 		if tt == nil || tt.Len() == 0 {
 			return "void"
@@ -151,6 +103,62 @@ func (e *irEmitter) llvmType(t Type) (s string) {
 		return sv | "}"
 	}
 	return "i8"
+}
+
+func (e *irEmitter) llvmNamedFallback(n *Named) (s string) {
+	if n.Under != nil {
+		return e.llvmType(n.Under)
+	}
+	if n.Obj != nil && n.Obj.Pkg != nil {
+		pkgPath := n.Obj.Pkg.Path
+		nm := n.Obj.Name
+		pkg := cctx.universe.Registry[pkgPath]
+		if pkg == nil && e.pkg != nil && e.pkg.Pkg != nil && e.pkg.Pkg.Path == pkgPath {
+			pkg = e.pkg.Pkg
+		}
+		if pkg != nil && pkg.Scope != nil {
+			obj := pkg.Scope.Lookup(nm)
+			if obj != nil {
+				if nt, ok2 := ObjectType(obj).(*Named); ok2 && nt.Under != nil {
+					return e.llvmType(nt.Under)
+				}
+			}
+		}
+	}
+	return "ptr"
+}
+
+func (e *irEmitter) llvmNamedType(tt *Named) (s string) {
+	if tt.Obj != nil && tt.Obj.Name == "error" {
+		return e.ifaceType()
+	}
+	if tt.Under != nil {
+		if _, isIface := tt.Under.(*TCInterface); isIface {
+			return e.ifaceType()
+		}
+		return e.llvmType(tt.Under)
+	}
+	if tt.Obj != nil && tt.Obj.Pkg != nil {
+		pkgPath := tt.Obj.Pkg.Path
+		nm := tt.Obj.Name
+		pkg := cctx.universe.Registry[pkgPath]
+		if pkg == nil && e.pkg != nil && e.pkg.Pkg != nil && e.pkg.Pkg.Path == pkgPath {
+			pkg = e.pkg.Pkg
+		}
+		if pkg != nil && pkg.Scope != nil {
+			obj := pkg.Scope.Lookup(nm)
+			if obj != nil {
+				ot := ObjectType(obj)
+				if ot != nil && ot != Type(tt) {
+					return e.llvmType(ot)
+				}
+			}
+		}
+	}
+	if tt.NumMethods() > 0 {
+		return e.ifaceType()
+	}
+	return "ptr"
 }
 
 func (e *irEmitter) llvmBasicType(t *Basic) (s string) {

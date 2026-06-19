@@ -5,7 +5,7 @@ import (
 )
 
 // typeNeedsCopy reports whether a value of type t may contain pointers to
-// arena-allocated data that would need deep-copying across an arena boundary.
+// arena-allocated data that would need relocation across an arena boundary.
 func typeNeedsCopy(t Type) (ok bool) {
 	return typeNeedsCopyDepth(t, 0)
 }
@@ -39,23 +39,16 @@ func typeNeedsCopyDepth(t Type, depth int32) (ok bool) {
 				return true
 			}
 		}
-		return false
 	case *Array:
 		return typeNeedsCopyDepth(tt.Elem, depth+1)
-	case *Tuple:
-		for i := int32(0); i < tt.Len(); i++ {
-			if typeNeedsCopyDepth(tt.At(i).Typ, depth+1) {
-				return true
-			}
-		}
-		return false
 	}
 	return false
 }
 
-// funcNeedsArenaCopy reports whether function f needs arena mark/restore
-// discipline with deep-copy of return values.
 func (e *irEmitter) funcNeedsArenaCopy(f *SSAFunction) (ok bool) {
+	if f == nil || f.Blocks == nil {
+		return false
+	}
 	if f.Pkg != nil && f.Pkg.Pkg != nil {
 		path := f.Pkg.Pkg.Path
 		if path == "runtime" || path == "unsafe" {
@@ -73,29 +66,27 @@ func (e *irEmitter) funcNeedsArenaCopy(f *SSAFunction) (ok bool) {
 	return false
 }
 
-func (e *irEmitter) visitedType() (s string) {
-	return "{i32, [256 x [2 x ptr]]}"
-}
+// --- Arena prologue ---
 
 func (e *irEmitter) emitArenaPrologue() (ok bool) {
 	if !e.funcNeedsArenaCopy(e.curFunc) {
 		return false
 	}
-	// Save caller's arena, create per-function arena.
-	// Deep copy reads from fn_arena (source), allocates in outer_arena (dest).
-	// No overlap - different mmap regions.
+	ipt := e.intptrType()
 	e.w("  %outer_arena = call ptr @runtime.CurrentArena(ptr null)\n")
-	e.w("  %fn_arena = call ptr @runtime.ArenaNew(i64 4194304, ptr null)\n")  // 4MB per function, pages on touch
+	e.w("  %fn_arena = call ptr @runtime.ArenaNew(" | ipt | " 65536, ptr null)\n")
 	e.w("  call void @runtime.SetCurrentArena(ptr %fn_arena, ptr null)\n")
+	e.w("  %fn_mark = call " | ipt | " @runtime.ArenaMark(ptr null)\n")
 	e.declareRuntime("runtime.CurrentArena", "ptr", "")
-	e.declareRuntime("runtime.ArenaNew", "ptr", "i64")
+	e.declareRuntime("runtime.ArenaNew", "ptr", ipt)
 	e.declareRuntime("runtime.SetCurrentArena", "void", "ptr")
+	e.declareRuntime("runtime.ArenaMark", ipt, "")
 	e.arenaActive = true
 	return true
 }
 
-// emitRetWithArenaCopy wraps a ret instruction. If arena discipline is active,
-// inserts ArenaRestore + deep copy before the ret.
+// --- Return with three-pass mark-compact ---
+
 func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 	if !e.arenaActive {
 		if llvmType == "void" {
@@ -105,7 +96,7 @@ func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 		}
 		return
 	}
-	// Arena is active. Determine if return value needs deep copy.
+
 	needsCopy := false
 	if val != "zeroinitializer" && llvmType != "void" {
 		sig := e.curFunc.Signature
@@ -119,7 +110,6 @@ func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 		}
 	}
 	if !needsCopy {
-		// No deep copy needed but still must free fn_arena and restore outer arena.
 		e.w("  call void @runtime.SetCurrentArena(ptr %outer_arena, ptr null)\n")
 		e.w("  call void @runtime.ArenaFree(ptr %fn_arena, ptr null)\n")
 		e.declareRuntime("runtime.ArenaFree", "void", "ptr")
@@ -131,54 +121,216 @@ func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 		return
 	}
 
-	vt := e.visitedType()
+	ipt := e.intptrType()
+	rsType := e.relocStateType()
 
+	// RelocState is 5 words - stack alloca is fine.
 	e.nextReg++
-	visited := "%dcv" | irItoa(e.nextReg)
-	e.w("  " | visited | " = alloca " | vt | "\n")
-	e.w("  store " | vt | " zeroinitializer, ptr " | visited | "\n")
+	rs := "%rs" | irItoa(e.nextReg)
+	e.w("  " | rs | " = alloca " | rsType | "\n")
+	e.w("  store " | rsType | " zeroinitializer, ptr " | rs | "\n")
 
-	// Switch to caller's arena. Source data in fn_arena stays intact.
-	// Deep copy reads from fn_arena, allocates in outer_arena. No overlap.
-	e.w("  call void @runtime.SetCurrentArena(ptr %outer_arena, ptr null)\n")
+	// Init: captures source region, bump-allocates entry array from fn_arena.
+	e.w("  call void @runtime.RelocInit(ptr " | rs | ", ptr %fn_arena, " | ipt | " %fn_mark, ptr null)\n")
+	e.declareRuntime("runtime.RelocInit", "void", "ptr, ptr, " | ipt)
 
+	// ---- Pass 1: Mark ----
+	// Walk return value roots, call RelocMark for each reachable object.
 	results := e.curFunc.Signature.Results
-	var copied string
-	if results.Len() == 1 {
-		copied = e.emitDeepCopyValue(val, results.At(0).Typ, visited)
-	} else {
-		copied = e.emitDeepCopyTupleValue(val, llvmType, results, visited)
-	}
-
-	// Free function's arena. All source data released.
-	e.w("  call void @runtime.ArenaFree(ptr %fn_arena, ptr null)\n")
-	e.declareRuntime("runtime.ArenaFree", "void", "ptr")
-	e.w("  ret " | llvmType | " " | copied | "\n")
-}
-
-func (e *irEmitter) emitDeepCopyTupleValue(reg string, llvmType string, results *Tuple, visited string) (newReg string) {
-	cur := reg
 	for i := int32(0); i < int32(results.Len()); i++ {
 		rt := results.At(i).Typ
 		if !typeNeedsCopy(rt) {
 			continue
 		}
-		elt := e.llvmType(rt)
-		e.nextReg++
-		ext := "%dct" | irItoa(e.nextReg)
-		e.w("  " | ext | " = extractvalue " | llvmType | " " | cur | ", " | irItoa(i) | "\n")
-		copied := e.emitDeepCopyValue(ext, rt, visited)
-		if copied != ext {
+		var rootReg string
+		if results.Len() == 1 {
+			rootReg = val
+		} else {
 			e.nextReg++
-			ins := "%dct" | irItoa(e.nextReg)
-			e.w("  " | ins | " = insertvalue " | llvmType | " " | cur | ", " | elt | " " | copied | ", " | irItoa(i) | "\n")
+			rootReg = "%p1ext" | irItoa(e.nextReg)
+			e.w("  " | rootReg | " = extractvalue " | llvmType | " " | val | ", " | irItoa(i) | "\n")
+		}
+		// If root is a struct, store to temp so emitRelocMark gets a pointer.
+		u := SafeUnderlying(rt)
+		if _, isSt := u.(*TCStruct); isSt {
+			slt := e.llvmType(rt)
+			e.nextReg++
+			tmp := "%m1rt" | irItoa(e.nextReg)
+			e.w("  " | tmp | " = alloca " | slt | "\n")
+			e.w("  store " | slt | " " | rootReg | ", ptr " | tmp | "\n")
+			rootReg = tmp
+		}
+		e.emitRelocMark(rootReg, rt, rs)
+	}
+
+	// ---- Pass 2: Forward ----
+	// Switch to caller's arena. Allocate destinations for all marked objects.
+	e.w("  call void @runtime.SetCurrentArena(ptr %outer_arena, ptr null)\n")
+	e.w("  call void @runtime.RelocForward(ptr " | rs | ", ptr null)\n")
+	e.declareRuntime("runtime.RelocForward", "void", "ptr")
+
+	// ---- Pass 3: Compact + Fixup ----
+	// Copy all objects to destinations.
+	e.w("  call void @runtime.RelocCompact(ptr " | rs | ", ptr null)\n")
+	e.declareRuntime("runtime.RelocCompact", "void", "ptr")
+
+	// Fixup: rewrite pointer fields in copied objects.
+	// Also rewrite the return value's own pointer/slice fields.
+	e.relocDepth = 0 // reset for fixup pass
+	cur := val
+	for i := int32(0); i < int32(results.Len()); i++ {
+		rt := results.At(i).Typ
+		if !typeNeedsCopy(rt) {
+			continue
+		}
+		var fixReg string
+		if results.Len() == 1 {
+			fixReg = val
+		} else {
+			e.nextReg++
+			fixReg = "%p3ext" | irItoa(e.nextReg)
+			e.w("  " | fixReg | " = extractvalue " | llvmType | " " | cur | ", " | irItoa(i) | "\n")
+		}
+		newReg := e.emitRelocFixup(fixReg, rt, rs)
+		if results.Len() == 1 {
+			cur = newReg
+		} else if newReg != fixReg {
+			elt := e.llvmType(rt)
+			e.nextReg++
+			ins := "%p3ins" | irItoa(e.nextReg)
+			e.w("  " | ins | " = insertvalue " | llvmType | " " | cur | ", " | elt | " " | newReg | ", " | irItoa(i) | "\n")
 			cur = ins
 		}
 	}
-	return cur
+
+	// Fixup internal pointers of each forwarded object.
+	// Walk the forwarding table; for each entry, apply type-specific fixup.
+	// This is done by the per-result fixup above which walks recursively.
+
+	// Free source arena.
+	e.w("  call void @runtime.ArenaFree(ptr %fn_arena, ptr null)\n")
+	e.declareRuntime("runtime.ArenaFree", "void", "ptr")
+	e.w("  ret " | llvmType | " " | cur | "\n")
 }
 
-func (e *irEmitter) emitDeepCopyValue(reg string, t Type, visited string) (newReg string) {
+func (e *irEmitter) relocStateType() (s string) {
+	ipt := e.intptrType()
+	// Matches runtime.RelocState: {arena ptr, mark uintptr, first ptr, count i32}
+	return "{ptr, " | ipt | ", ptr, i32}"
+}
+
+// --- Pass 1 codegen: Mark ---
+
+func (e *irEmitter) emitRelocMark(reg string, t Type, rs string) {
+	if t == nil || !typeNeedsCopy(t) {
+		return
+	}
+	u := SafeUnderlying(t)
+	if u == nil {
+		return
+	}
+	ipt := e.intptrType()
+	switch tt := u.(type) {
+	case *Pointer:
+		lt := e.llvmType(tt.Base)
+		if lt == "void" || lt == "" {
+			lt = "i8"
+		}
+		e.nextReg++
+		sz := "%m1sz" | irItoa(e.nextReg)
+		e.w("  " | sz | " = ptrtoint ptr getelementptr (" | lt | ", ptr null, i32 1) to " | ipt | "\n")
+		e.nextReg++
+		isNew := "%m1n" | irItoa(e.nextReg)
+		e.w("  " | isNew | " = call i1 @runtime.RelocMark(ptr " | rs | ", ptr " | reg | ", " | ipt | " " | sz | ", ptr null)\n")
+		e.declareRuntime("runtime.RelocMark", "i1", "ptr, ptr, " | ipt)
+		if typeNeedsCopy(tt.Base) {
+			e.nextReg++
+			lNew := "m1r" | irItoa(e.nextReg)
+			e.nextReg++
+			lSkip := "m1s" | irItoa(e.nextReg)
+			e.w("  br i1 " | isNew | ", label %" | lNew | ", label %" | lSkip | "\n")
+			e.w(lNew | ":\n")
+			e.emitRelocMarkFields(reg, tt.Base, rs)
+			e.w("  br label %" | lSkip | "\n")
+			e.w(lSkip | ":\n")
+		}
+	case *Slice, *Basic:
+		st := e.sliceType()
+		e.nextReg++
+		dp := "%m1d" | irItoa(e.nextReg)
+		e.w("  " | dp | " = extractvalue " | st | " " | reg | ", 0\n")
+		e.nextReg++
+		ln := "%m1l" | irItoa(e.nextReg)
+		e.w("  " | ln | " = extractvalue " | st | " " | reg | ", 1\n")
+		elemType := "i8"
+		if sl, ok := u.(*Slice); ok && sl.Elem != nil {
+			elemType = e.llvmType(sl.Elem)
+		}
+		e.nextReg++
+		esz := "%m1e" | irItoa(e.nextReg)
+		e.w("  " | esz | " = ptrtoint ptr getelementptr (" | elemType | ", ptr null, i32 1) to " | ipt | "\n")
+		e.nextReg++
+		blen := "%m1b" | irItoa(e.nextReg)
+		e.w("  " | blen | " = mul " | ipt | " " | ln | ", " | esz | "\n")
+		e.w("  call i1 @runtime.RelocMark(ptr " | rs | ", ptr " | dp | ", " | ipt | " " | blen | ", ptr null)\n")
+		e.declareRuntime("runtime.RelocMark", "i1", "ptr, ptr, " | ipt)
+	case *TCMap:
+		e.nextReg++
+		sz := "%m1m" | irItoa(e.nextReg)
+		e.w("  " | sz | " = ptrtoint ptr getelementptr ({ptr}, ptr null, i32 1) to " | ipt | "\n")
+		e.w("  call i1 @runtime.RelocMark(ptr " | rs | ", ptr " | reg | ", " | ipt | " " | sz | ", ptr null)\n")
+		e.declareRuntime("runtime.RelocMark", "i1", "ptr, ptr, " | ipt)
+	case *TCStruct:
+		// reg must be a pointer to the struct (GEP result or alloca'd temp).
+		e.emitRelocMarkStructFields(reg, tt, rs)
+	}
+}
+
+func (e *irEmitter) emitRelocMarkFields(ptrReg string, t Type, rs string) {
+	u := SafeUnderlying(t)
+	if u == nil {
+		return
+	}
+	st, ok := u.(*TCStruct)
+	if !ok {
+		return
+	}
+	e.emitRelocMarkStructFields(ptrReg, st, rs)
+}
+
+func (e *irEmitter) emitRelocMarkStructFields(ptrReg string, st *TCStruct, rs string) {
+	if e.relocDepth > 20 {
+		return
+	}
+	e.relocDepth++
+	lt := e.llvmStructType(st)
+	for i := int32(0); i < st.NumFields(); i++ {
+		ft := st.Field(i).Typ
+		if !typeNeedsCopy(ft) {
+			continue
+		}
+		e.nextReg++
+		gep := "%m1f" | irItoa(e.nextReg)
+		e.w("  " | gep | " = getelementptr " | lt | ", ptr " | ptrReg | ", i32 0, i32 " | irItoa(i) | "\n")
+		// For nested structs, pass GEP pointer directly (emitRelocMark expects ptr).
+		// For pointer/slice/etc, load the value first.
+		u := SafeUnderlying(ft)
+		if _, isSt := u.(*TCStruct); isSt {
+			e.emitRelocMark(gep, ft, rs)
+		} else {
+			flt := e.llvmType(ft)
+			e.nextReg++
+			fval := "%m1f" | irItoa(e.nextReg)
+			e.w("  " | fval | " = load " | flt | ", ptr " | gep | "\n")
+			e.emitRelocMark(fval, ft, rs)
+		}
+	}
+	e.relocDepth--
+}
+
+// --- Pass 3 codegen: Fixup ---
+
+func (e *irEmitter) emitRelocFixup(reg string, t Type, rs string) (newReg string) {
 	if t == nil || !typeNeedsCopy(t) {
 		return reg
 	}
@@ -188,101 +340,90 @@ func (e *irEmitter) emitDeepCopyValue(reg string, t Type, visited string) (newRe
 	}
 	switch tt := u.(type) {
 	case *Pointer:
-		sym := e.getOrCreateDeepCopyFn(tt.Base)
 		e.nextReg++
-		r := "%dc" | irItoa(e.nextReg)
-		e.w("  " | r | " = call ptr " | sym | "(ptr " | reg | ", ptr " | visited | ", ptr null)\n")
+		r := "%p3p" | irItoa(e.nextReg)
+		e.w("  " | r | " = call ptr @runtime.RelocLookup(ptr " | rs | ", ptr " | reg | ", ptr null)\n")
+		e.declareRuntime("runtime.RelocLookup", "ptr", "ptr, ptr")
+		if typeNeedsCopy(tt.Base) {
+			e.emitRelocFixupFields(r, tt.Base, rs)
+		}
 		return r
 	case *Slice, *Basic:
-		return e.emitDeepCopySlice(reg, t, visited)
+		st := e.sliceType()
+		e.nextReg++
+		dp := "%p3s" | irItoa(e.nextReg)
+		e.w("  " | dp | " = extractvalue " | st | " " | reg | ", 0\n")
+		e.nextReg++
+		ndp := "%p3s" | irItoa(e.nextReg)
+		e.w("  " | ndp | " = call ptr @runtime.RelocLookup(ptr " | rs | ", ptr " | dp | ", ptr null)\n")
+		e.declareRuntime("runtime.RelocLookup", "ptr", "ptr, ptr")
+		e.nextReg++
+		result := "%p3s" | irItoa(e.nextReg)
+		e.w("  " | result | " = insertvalue " | st | " " | reg | ", ptr " | ndp | ", 0\n")
+		return result
 	case *TCMap:
-		return e.emitDeepCopyMap(reg, tt, visited)
+		e.nextReg++
+		r := "%p3m" | irItoa(e.nextReg)
+		e.w("  " | r | " = call ptr @runtime.hashmapCopy(ptr " | reg | ", ptr null)\n")
+		e.declareRuntime("runtime.hashmapCopy", "ptr", "ptr")
+		return r
 	case *TCStruct:
-		return e.emitDeepCopyStructValue(reg, tt, visited)
-	case *TCInterface:
-		return reg
-	case *Signature:
-		return reg
-	case *TCChan:
-		return reg
+		return e.emitRelocFixupStruct(reg, tt, rs)
 	}
 	return reg
 }
 
-func (e *irEmitter) emitDeepCopySlice(reg string, t Type, visited string) (newReg string) {
-	_ = visited
-	ipt := e.intptrType()
-	st := e.sliceType()
-
-	e.nextReg++
-	tmp := "%dcs" | irItoa(e.nextReg)
-	e.w("  " | tmp | " = alloca " | st | "\n")
-	e.w("  store " | st | " " | reg | ", ptr " | tmp | "\n")
-
-	e.nextReg++
-	dataPtr := "%dcs" | irItoa(e.nextReg)
-	e.w("  " | dataPtr | " = load ptr, ptr " | tmp | "\n")
-
-	e.nextReg++
-	lenGep := "%dcs" | irItoa(e.nextReg)
-	e.w("  " | lenGep | " = getelementptr " | st | ", ptr " | tmp | ", i32 0, i32 1\n")
-	e.nextReg++
-	lenVal := "%dcs" | irItoa(e.nextReg)
-	e.w("  " | lenVal | " = load " | ipt | ", ptr " | lenGep | "\n")
-
-	e.nextReg++
-	isNull := "%dcs" | irItoa(e.nextReg)
-	e.w("  " | isNull | " = icmp eq ptr " | dataPtr | ", null\n")
-
-	e.nextReg++
-	lCopy := "dcs_copy" | irItoa(e.nextReg)
-	e.nextReg++
-	lDone := "dcs_done" | irItoa(e.nextReg)
-
-	e.w("  br i1 " | isNull | ", label %" | lDone | ", label %" | lCopy | "\n")
-	e.w(lCopy | ":\n")
-
-	elemType := "i8"
-	if sl, ok := SafeUnderlying(t).(*Slice); ok && sl.Elem != nil {
-		elemType = e.llvmType(sl.Elem)
+func (e *irEmitter) emitRelocFixupFields(ptrReg string, t Type, rs string) {
+	u := SafeUnderlying(t)
+	st, ok := u.(*TCStruct)
+	if !ok {
+		return
 	}
-
-	e.nextReg++
-	elemSz := "%dcs" | irItoa(e.nextReg)
-	e.w("  " | elemSz | " = ptrtoint ptr getelementptr (" | elemType | ", ptr null, i32 1) to " | ipt | "\n")
-	e.nextReg++
-	byteLen := "%dcs" | irItoa(e.nextReg)
-	e.w("  " | byteLen | " = mul " | ipt | " " | lenVal | ", " | elemSz | "\n")
-	e.nextReg++
-	newData := "%dcs" | irItoa(e.nextReg)
-	e.w("  " | newData | " = call ptr @runtime.alloc(" | ipt | " " | byteLen | ", ptr null, ptr null)\n")
-	e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
-	e.w("  call void @llvm.memcpy.p0.p0." | ipt | "(ptr " | newData | ", ptr " | dataPtr | ", " | ipt | " " | byteLen | ", i1 false)\n")
-	e.declareRuntimeNoCtx("llvm.memcpy.p0.p0." | ipt, "void", "ptr, ptr, " | ipt | ", i1")
-	e.w("  store ptr " | newData | ", ptr " | tmp | "\n")
-	e.w("  br label %" | lDone | "\n")
-
-	e.w(lDone | ":\n")
-	e.nextReg++
-	result := "%dcs" | irItoa(e.nextReg)
-	e.w("  " | result | " = load " | st | ", ptr " | tmp | "\n")
-	return result
+	if e.relocDepth > 20 {
+		return
+	}
+	e.relocDepth++
+	lt := e.llvmStructType(st)
+	for i := int32(0); i < st.NumFields(); i++ {
+		ft := st.Field(i).Typ
+		if !typeNeedsCopy(ft) {
+			continue
+		}
+		e.nextReg++
+		gep := "%p3ff" | irItoa(e.nextReg)
+		e.w("  " | gep | " = getelementptr " | lt | ", ptr " | ptrReg | ", i32 0, i32 " | irItoa(i) | "\n")
+		fu := SafeUnderlying(ft)
+		switch fu.(type) {
+		case *Pointer:
+			e.w("  call void @runtime.RelocFixupPtr(ptr " | rs | ", ptr " | gep | ", ptr null)\n")
+			e.declareRuntime("runtime.RelocFixupPtr", "void", "ptr, ptr")
+		case *Slice, *Basic:
+			e.w("  call void @runtime.RelocFixupSlice(ptr " | rs | ", ptr " | gep | ", ptr null)\n")
+			e.declareRuntime("runtime.RelocFixupSlice", "void", "ptr, ptr")
+		case *TCMap:
+			e.nextReg++
+			old := "%p3ff" | irItoa(e.nextReg)
+			e.w("  " | old | " = load ptr, ptr " | gep | "\n")
+			e.nextReg++
+			nw := "%p3ff" | irItoa(e.nextReg)
+			e.w("  " | nw | " = call ptr @runtime.hashmapCopy(ptr " | old | ", ptr null)\n")
+			e.declareRuntime("runtime.hashmapCopy", "ptr", "ptr")
+			e.w("  store ptr " | nw | ", ptr " | gep | "\n")
+		case *TCStruct:
+			e.emitRelocFixupFields(gep, ft, rs)
+		}
+	}
+	e.relocDepth--
 }
 
-func (e *irEmitter) emitDeepCopyMap(reg string, t *TCMap, visited string) (newReg string) {
-	_ = t
-	_ = visited
-	e.nextReg++
-	r := "%dcm" | irItoa(e.nextReg)
-	e.w("  " | r | " = call ptr @runtime.hashmapCopy(ptr " | reg | ", ptr null)\n")
-	e.declareRuntime("runtime.hashmapCopy", "ptr", "ptr")
-	return r
-}
-
-func (e *irEmitter) emitDeepCopyStructValue(reg string, st *TCStruct, visited string) (newReg string) {
+func (e *irEmitter) emitRelocFixupStruct(reg string, st *TCStruct, rs string) (newReg string) {
+	if e.relocDepth > 20 {
+		return reg
+	}
+	e.relocDepth++
 	lt := e.llvmStructType(st)
 	e.nextReg++
-	tmp := "%dcst" | irItoa(e.nextReg)
+	tmp := "%p3st" | irItoa(e.nextReg)
 	e.w("  " | tmp | " = alloca " | lt | "\n")
 	e.w("  store " | lt | " " | reg | ", ptr " | tmp | "\n")
 
@@ -291,26 +432,38 @@ func (e *irEmitter) emitDeepCopyStructValue(reg string, st *TCStruct, visited st
 		if !typeNeedsCopy(ft) {
 			continue
 		}
-		flt := e.llvmType(ft)
 		e.nextReg++
-		gep := "%dcst" | irItoa(e.nextReg)
+		gep := "%p3st" | irItoa(e.nextReg)
 		e.w("  " | gep | " = getelementptr " | lt | ", ptr " | tmp | ", i32 0, i32 " | irItoa(i) | "\n")
-		e.nextReg++
-		fval := "%dcst" | irItoa(e.nextReg)
-		e.w("  " | fval | " = load " | flt | ", ptr " | gep | "\n")
-		newFval := e.emitDeepCopyValue(fval, ft, visited)
-		if newFval != fval {
-			e.w("  store " | flt | " " | newFval | ", ptr " | gep | "\n")
+		fu := SafeUnderlying(ft)
+		switch fu.(type) {
+		case *Pointer:
+			e.w("  call void @runtime.RelocFixupPtr(ptr " | rs | ", ptr " | gep | ", ptr null)\n")
+			e.declareRuntime("runtime.RelocFixupPtr", "void", "ptr, ptr")
+		case *Slice, *Basic:
+			e.w("  call void @runtime.RelocFixupSlice(ptr " | rs | ", ptr " | gep | ", ptr null)\n")
+			e.declareRuntime("runtime.RelocFixupSlice", "void", "ptr, ptr")
+		case *TCMap:
+			e.nextReg++
+			old := "%p3st" | irItoa(e.nextReg)
+			e.w("  " | old | " = load ptr, ptr " | gep | "\n")
+			e.nextReg++
+			nw := "%p3st" | irItoa(e.nextReg)
+			e.w("  " | nw | " = call ptr @runtime.hashmapCopy(ptr " | old | ", ptr null)\n")
+			e.declareRuntime("runtime.hashmapCopy", "ptr", "ptr")
+			e.w("  store ptr " | nw | ", ptr " | gep | "\n")
+		case *TCStruct:
+			e.emitRelocFixupFields(gep, ft, rs)
 		}
 	}
-
 	e.nextReg++
-	result := "%dcst" | irItoa(e.nextReg)
+	result := "%p3st" | irItoa(e.nextReg)
 	e.w("  " | result | " = load " | lt | ", ptr " | tmp | "\n")
+	e.relocDepth--
 	return result
 }
 
-// --- Per-type deep copy functions ---
+// --- Legacy compat (emit loop calls these) ---
 
 type deepCopyEntry struct {
 	sym string
@@ -318,22 +471,7 @@ type deepCopyEntry struct {
 }
 
 func (e *irEmitter) getOrCreateDeepCopyFn(t Type) (sym string) {
-	if t == nil {
-		return "@__dcopy_opaque"
-	}
-	key := typeKeyForDeepCopy(t)
-	if existing, ok := e.deepCopyFns[key]; ok {
-		return existing
-	}
-	for _, p := range e.pendDeepCopyEntries {
-		if typeKeyForDeepCopy(p.typ) == key {
-			return p.sym
-		}
-	}
-	id := int32(len(e.deepCopyFns)) + int32(len(e.pendDeepCopyEntries))
-	sym = "@__dcopy_" | irItoa(id)
-	e.pendDeepCopyEntries = append(e.pendDeepCopyEntries, deepCopyEntry{sym, t})
-	return sym
+	return "@__dcopy_opaque"
 }
 
 func typeKeyForDeepCopy(t Type) (s string) {
@@ -344,198 +482,13 @@ func typeKeyForDeepCopy(t Type) (s string) {
 }
 
 func (e *irEmitter) emitDeepCopyFunctions() {
-	for len(e.deepCopyQueue) > 0 || len(e.pendDeepCopyEntries) > 0 {
-		for _, dc := range e.pendDeepCopyEntries {
-			e.deepCopyFns[typeKeyForDeepCopy(dc.typ)] = dc.sym
-			e.deepCopyQueue = append(e.deepCopyQueue, dc)
-		}
-		e.pendDeepCopyEntries = nil
-		if len(e.deepCopyQueue) == 0 {
-			break
-		}
-		entry := e.deepCopyQueue[0]
-		e.deepCopyQueue = e.deepCopyQueue[1:]
-		e.emitOneDeepCopyFn(entry.sym, entry.typ)
-	}
-	if e.deepCopyFns != nil {
-		if _, ok := e.deepCopyFns["<nil>"]; ok {
-			e.emitOpaqueDeepCopyFn()
-		}
-	}
+	// Mark-compact handles relocation inline. No per-type functions needed.
 }
 
-func (e *irEmitter) emitOpaqueDeepCopyFn() {
-	e.w("\ndefine hidden ptr @__dcopy_opaque(ptr %old, ptr %visited, ptr %_ctx) {\n")
-	e.w("_entry:\n")
-	e.w("  ret ptr %old\n")
-	e.w("}\n")
+func (e *irEmitter) visitedType() (s string) {
+	return "{i32, [256 x [2 x ptr]]}"
 }
 
-func (e *irEmitter) emitOneDeepCopyFn(sym string, t Type) {
-	lt := e.llvmType(t)
-	if lt == "void" || lt == "" {
-		lt = "i8"
-	}
-	ipt := e.intptrType()
-	vt := e.visitedType()
-
-	e.w("\n; deep copy: " | typeKeyForDeepCopy(t) | "\n")
-	e.w("define hidden ptr " | sym | "(ptr %old, ptr %visited, ptr %_ctx) {\n")
-	e.w("_entry:\n")
-
-	e.w("  %isnull = icmp eq ptr %old, null\n")
-	e.w("  br i1 %isnull, label %ret_null, label %check_visited\n")
-
-	e.w("check_visited:\n")
-	e.w("  %vc = load i32, ptr %visited\n")
-	e.w("  br label %scan\n")
-
-	e.w("scan:\n")
-	e.w("  %si = phi i32 [0, %check_visited], [%si_next, %scan_next]\n")
-	e.w("  %sdone = icmp eq i32 %si, %vc\n")
-	e.w("  br i1 %sdone, label %not_found, label %scan_check\n")
-
-	e.w("scan_check:\n")
-	e.w("  %ep_old = getelementptr " | vt | ", ptr %visited, i32 0, i32 1, i32 %si, i32 0\n")
-	e.w("  %cached_old = load ptr, ptr %ep_old\n")
-	e.w("  %match = icmp eq ptr %cached_old, %old\n")
-	e.w("  br i1 %match, label %found, label %scan_next\n")
-
-	e.w("found:\n")
-	e.w("  %ep_new = getelementptr " | vt | ", ptr %visited, i32 0, i32 1, i32 %si, i32 1\n")
-	e.w("  %cached_new = load ptr, ptr %ep_new\n")
-	e.w("  ret ptr %cached_new\n")
-
-	e.w("scan_next:\n")
-	e.w("  %si_next = add i32 %si, 1\n")
-	e.w("  br label %scan\n")
-
-	e.w("not_found:\n")
-	e.w("  %sz = ptrtoint ptr getelementptr (" | lt | ", ptr null, i32 1) to " | ipt | "\n")
-	e.w("  %stack = alloca " | lt | "\n")
-	e.w("  call void @llvm.memcpy.p0.p0." | ipt | "(ptr %stack, ptr %old, " | ipt | " %sz, i1 false)\n")
-	e.w("  %new = call ptr @runtime.alloc(" | ipt | " %sz, ptr null, ptr null)\n")
-
-	e.w("  %vc2 = load i32, ptr %visited\n")
-	e.w("  %ins_old = getelementptr " | vt | ", ptr %visited, i32 0, i32 1, i32 %vc2, i32 0\n")
-	e.w("  store ptr %old, ptr %ins_old\n")
-	e.w("  %ins_new = getelementptr " | vt | ", ptr %visited, i32 0, i32 1, i32 %vc2, i32 1\n")
-	e.w("  store ptr %new, ptr %ins_new\n")
-	e.w("  %vc3 = add i32 %vc2, 1\n")
-	e.w("  store i32 %vc3, ptr %visited\n")
-
-	e.w("  call void @llvm.memcpy.p0.p0." | ipt | "(ptr %new, ptr %stack, " | ipt | " %sz, i1 false)\n")
-
-	e.emitDeepCopyFields(t, lt, ipt, vt)
-
-	e.w("  ret ptr %new\n")
-	e.w("ret_null:\n")
-	e.w("  ret ptr null\n")
-	e.w("}\n")
-}
-
-func (e *irEmitter) emitDeepCopyFields(t Type, lt string, ipt string, vt string) {
-	u := SafeUnderlying(t)
-	if u == nil {
-		return
-	}
-	switch tt := u.(type) {
-	case *TCStruct:
-		for i := int32(0); i < tt.NumFields(); i++ {
-			ft := tt.Field(i).Typ
-			if !typeNeedsCopy(ft) {
-				continue
-			}
-			e.emitDeepCopyOneField(i, ft, lt, ipt, vt)
-		}
-	case *Slice, *Basic:
-		e.emitDeepCopySliceBacking(lt, ipt)
-	case *Pointer:
-		if tt.Base != nil {
-			innerSym := e.getOrCreateDeepCopyFn(tt.Base)
-			e.w("  %inner_old = load ptr, ptr %stack\n")
-			e.w("  %inner_null = icmp eq ptr %inner_old, null\n")
-			e.w("  br i1 %inner_null, label %inner_skip, label %inner_copy\n")
-			e.w("inner_copy:\n")
-			e.w("  %inner_new = call ptr " | innerSym | "(ptr %inner_old, ptr %visited, ptr null)\n")
-			e.w("  store ptr %inner_new, ptr %new\n")
-			e.w("  br label %inner_skip\n")
-			e.w("inner_skip:\n")
-		}
-	}
-}
-
-func (e *irEmitter) emitDeepCopyOneField(idx int32, ft Type, structLT string, ipt string, vt string) {
-	idxStr := irItoa(idx)
-	prefix := "f" | idxStr | "_"
-
-	fu := SafeUnderlying(ft)
-	switch fu.(type) {
-	case *Pointer:
-		ptr := fu.(*Pointer)
-		innerSym := e.getOrCreateDeepCopyFn(ptr.Base)
-		e.w("  %" | prefix | "gep_old = getelementptr " | structLT | ", ptr %stack, i32 0, i32 " | idxStr | "\n")
-		e.w("  %" | prefix | "old = load ptr, ptr %" | prefix | "gep_old\n")
-		e.w("  %" | prefix | "null = icmp eq ptr %" | prefix | "old, null\n")
-		e.w("  br i1 %" | prefix | "null, label %" | prefix | "skip, label %" | prefix | "copy\n")
-		e.w(prefix | "copy:\n")
-		e.w("  %" | prefix | "new = call ptr " | innerSym | "(ptr %" | prefix | "old, ptr %visited, ptr null)\n")
-		e.w("  %" | prefix | "gep_dst = getelementptr " | structLT | ", ptr %new, i32 0, i32 " | idxStr | "\n")
-		e.w("  store ptr %" | prefix | "new, ptr %" | prefix | "gep_dst\n")
-		e.w("  br label %" | prefix | "skip\n")
-		e.w(prefix | "skip:\n")
-
-	case *Slice, *Basic:
-		st := e.sliceType()
-		e.w("  %" | prefix | "gep = getelementptr " | structLT | ", ptr %stack, i32 0, i32 " | idxStr | "\n")
-		e.w("  %" | prefix | "val = load " | st | ", ptr %" | prefix | "gep\n")
-		e.w("  %" | prefix | "data = extractvalue " | st | " %" | prefix | "val, 0\n")
-		e.w("  %" | prefix | "null = icmp eq ptr %" | prefix | "data, null\n")
-		e.w("  br i1 %" | prefix | "null, label %" | prefix | "skip, label %" | prefix | "copy\n")
-		e.w(prefix | "copy:\n")
-		e.w("  %" | prefix | "len = extractvalue " | st | " %" | prefix | "val, 1\n")
-		elemType := "i8"
-		if sl, ok := SafeUnderlying(ft).(*Slice); ok && sl.Elem != nil {
-			elemType = e.llvmType(sl.Elem)
-		}
-		e.w("  %" | prefix | "esz = ptrtoint ptr getelementptr (" | elemType | ", ptr null, i32 1) to " | ipt | "\n")
-		e.w("  %" | prefix | "blen = mul " | ipt | " %" | prefix | "len, %" | prefix | "esz\n")
-		e.w("  %" | prefix | "newdata = call ptr @runtime.alloc(" | ipt | " %" | prefix | "blen, ptr null, ptr null)\n")
-		e.w("  call void @llvm.memcpy.p0.p0." | ipt | "(ptr %" | prefix | "newdata, ptr %" | prefix | "data, " | ipt | " %" | prefix | "blen, i1 false)\n")
-		e.w("  %" | prefix | "s1 = insertvalue " | st | " %" | prefix | "val, ptr %" | prefix | "newdata, 0\n")
-		e.w("  %" | prefix | "gep_dst = getelementptr " | structLT | ", ptr %new, i32 0, i32 " | idxStr | "\n")
-		e.w("  store " | st | " %" | prefix | "s1, ptr %" | prefix | "gep_dst\n")
-		e.w("  br label %" | prefix | "skip\n")
-		e.w(prefix | "skip:\n")
-
-	case *TCMap:
-		e.w("  %" | prefix | "gep_old = getelementptr " | structLT | ", ptr %stack, i32 0, i32 " | idxStr | "\n")
-		e.w("  %" | prefix | "old = load ptr, ptr %" | prefix | "gep_old\n")
-		e.w("  %" | prefix | "null = icmp eq ptr %" | prefix | "old, null\n")
-		e.w("  br i1 %" | prefix | "null, label %" | prefix | "skip, label %" | prefix | "copy\n")
-		e.w(prefix | "copy:\n")
-		e.w("  %" | prefix | "new = call ptr @runtime.hashmapCopy(ptr %" | prefix | "old, ptr null)\n")
-		e.declareRuntime("runtime.hashmapCopy", "ptr", "ptr")
-		e.w("  %" | prefix | "gep_dst = getelementptr " | structLT | ", ptr %new, i32 0, i32 " | idxStr | "\n")
-		e.w("  store ptr %" | prefix | "new, ptr %" | prefix | "gep_dst\n")
-		e.w("  br label %" | prefix | "skip\n")
-		e.w(prefix | "skip:\n")
-	}
-}
-
-func (e *irEmitter) emitDeepCopySliceBacking(lt string, ipt string) {
-	st := e.sliceType()
-	e.w("  %sl_data = getelementptr " | st | ", ptr %stack, i32 0, i32 0\n")
-	e.w("  %sl_dp = load ptr, ptr %sl_data\n")
-	e.w("  %sl_null = icmp eq ptr %sl_dp, null\n")
-	e.w("  br i1 %sl_null, label %sl_skip, label %sl_copy\n")
-	e.w("sl_copy:\n")
-	e.w("  %sl_lenp = getelementptr " | st | ", ptr %stack, i32 0, i32 1\n")
-	e.w("  %sl_len = load " | ipt | ", ptr %sl_lenp\n")
-	e.w("  %sl_newdata = call ptr @runtime.alloc(" | ipt | " %sl_len, ptr null, ptr null)\n")
-	e.w("  call void @llvm.memcpy.p0.p0." | ipt | "(ptr %sl_newdata, ptr %sl_dp, " | ipt | " %sl_len, i1 false)\n")
-	e.w("  %sl_dst = getelementptr " | st | ", ptr %new, i32 0, i32 0\n")
-	e.w("  store ptr %sl_newdata, ptr %sl_dst\n")
-	e.w("  br label %sl_skip\n")
-	e.w("sl_skip:\n")
+func (e *irEmitter) emitDeepCopyTupleValue(reg string, llvmType string, results *Tuple, visited string) (newReg string) {
+	return reg
 }
