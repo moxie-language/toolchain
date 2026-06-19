@@ -81,9 +81,15 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 	if !e.funcNeedsArenaCopy(e.curFunc) {
 		return false
 	}
-	ipt := e.intptrType()
-	e.w("  %arena_mark = call " | ipt | " @runtime.ArenaMark(ptr null)\n")
-	e.declareRuntime("runtime.ArenaMark", ipt, "")
+	// Save caller's arena, create per-function arena.
+	// Deep copy reads from fn_arena (source), allocates in outer_arena (dest).
+	// No overlap - different mmap regions.
+	e.w("  %outer_arena = call ptr @runtime.CurrentArena(ptr null)\n")
+	e.w("  %fn_arena = call ptr @runtime.ArenaNew(i64 4194304, ptr null)\n")  // 4MB per function, pages on touch
+	e.w("  call void @runtime.SetCurrentArena(ptr %fn_arena, ptr null)\n")
+	e.declareRuntime("runtime.CurrentArena", "ptr", "")
+	e.declareRuntime("runtime.ArenaNew", "ptr", "i64")
+	e.declareRuntime("runtime.SetCurrentArena", "void", "ptr")
 	e.arenaActive = true
 	return true
 }
@@ -91,7 +97,7 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 // emitRetWithArenaCopy wraps a ret instruction. If arena discipline is active,
 // inserts ArenaRestore + deep copy before the ret.
 func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
-	if !e.arenaActive || val == "zeroinitializer" || llvmType == "void" {
+	if !e.arenaActive {
 		if llvmType == "void" {
 			e.w("  ret void\n")
 		} else {
@@ -99,24 +105,32 @@ func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 		}
 		return
 	}
-	sig := e.curFunc.Signature
-	if sig == nil || sig.Results == nil || sig.Results.Len() == 0 {
-		e.w("  ret " | llvmType | " " | val | "\n")
-		return
-	}
+	// Arena is active. Determine if return value needs deep copy.
 	needsCopy := false
-	for i := int32(0); i < int32(sig.Results.Len()); i++ {
-		if typeNeedsCopy(sig.Results.At(i).Typ) {
-			needsCopy = true
-			break
+	if val != "zeroinitializer" && llvmType != "void" {
+		sig := e.curFunc.Signature
+		if sig != nil && sig.Results != nil {
+			for i := int32(0); i < int32(sig.Results.Len()); i++ {
+				if typeNeedsCopy(sig.Results.At(i).Typ) {
+					needsCopy = true
+					break
+				}
+			}
 		}
 	}
 	if !needsCopy {
-		e.w("  ret " | llvmType | " " | val | "\n")
+		// No deep copy needed but still must free fn_arena and restore outer arena.
+		e.w("  call void @runtime.SetCurrentArena(ptr %outer_arena, ptr null)\n")
+		e.w("  call void @runtime.ArenaFree(ptr %fn_arena, ptr null)\n")
+		e.declareRuntime("runtime.ArenaFree", "void", "ptr")
+		if llvmType == "void" {
+			e.w("  ret void\n")
+		} else {
+			e.w("  ret " | llvmType | " " | val | "\n")
+		}
 		return
 	}
 
-	ipt := e.intptrType()
 	vt := e.visitedType()
 
 	e.nextReg++
@@ -124,15 +138,21 @@ func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 	e.w("  " | visited | " = alloca " | vt | "\n")
 	e.w("  store " | vt | " zeroinitializer, ptr " | visited | "\n")
 
-	e.w("  call void @runtime.ArenaRestore(" | ipt | " %arena_mark, ptr null)\n")
-	e.declareRuntime("runtime.ArenaRestore", "void", ipt)
+	// Switch to caller's arena. Source data in fn_arena stays intact.
+	// Deep copy reads from fn_arena, allocates in outer_arena. No overlap.
+	e.w("  call void @runtime.SetCurrentArena(ptr %outer_arena, ptr null)\n")
 
+	results := e.curFunc.Signature.Results
 	var copied string
-	if sig.Results.Len() == 1 {
-		copied = e.emitDeepCopyValue(val, sig.Results.At(0).Typ, visited)
+	if results.Len() == 1 {
+		copied = e.emitDeepCopyValue(val, results.At(0).Typ, visited)
 	} else {
-		copied = e.emitDeepCopyTupleValue(val, llvmType, sig.Results, visited)
+		copied = e.emitDeepCopyTupleValue(val, llvmType, results, visited)
 	}
+
+	// Free function's arena. All source data released.
+	e.w("  call void @runtime.ArenaFree(ptr %fn_arena, ptr null)\n")
+	e.declareRuntime("runtime.ArenaFree", "void", "ptr")
 	e.w("  ret " | llvmType | " " | copied | "\n")
 }
 
