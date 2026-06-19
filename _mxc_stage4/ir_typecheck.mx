@@ -693,7 +693,7 @@ func registerCompiledExports(pkg *TCPackage) {
 				continue
 			}
 		}
-		newObj := copyObject(obj, newPkg, visited)
+		newObj := copyObject(newPkg, visited, obj)
 		if newObj != nil {
 			newPkg.Scope.Insert(newObj)
 		}
@@ -711,26 +711,45 @@ func tcCopyStr(s string) (r string) {
 	return string(b)
 }
 
-func copyObject(obj Object, pkg *TCPackage, visited map[uintptr]Type) (r Object) {
+func copyConstVal(v ConstVal) (r ConstVal) {
+	if v == nil {
+		return nil
+	}
+	switch cv := v.(type) {
+	case *ConstBool:
+		return &ConstBool{V: cv.V}
+	case *ConstInt:
+		return &ConstInt{V: cv.V}
+	case *ConstFloat:
+		return &ConstFloat{V: cv.V, Lit: tcCopyStr(cv.Lit)}
+	case *ConstStr:
+		return &ConstStr{S: tcCopyStr(cv.S)}
+	case *ConstNil:
+		return &ConstNil{}
+	}
+	return v
+}
+
+func copyObject(pkg *TCPackage, visited map[uintptr]Type, obj Object) (r Object) {
 	if obj == nil {
 		return nil
 	}
 	switch o := obj.(type) {
 	case *TypeName:
 		tn := NewTypeName(pkg, tcCopyStr(o.Name), nil)
-		tn.Typ = copyType(o.Typ, pkg, visited)
+		tn.Typ = copyType(pkg, visited, o.Typ)
 		return tn
 	case *TCFunc:
-		sig, _ := copyType(o.Typ, pkg, visited).(*Signature)
+		sig, _ := copyType(pkg, visited, o.Typ).(*Signature)
 		fn := NewTCFunc(pkg, tcCopyStr(o.Name), sig)
 		fn.PtrRecv = o.PtrRecv
 		return fn
 	case *TCVar:
-		v := NewTCVar(pkg, tcCopyStr(o.Name), copyType(o.Typ, pkg, visited))
+		v := NewTCVar(pkg, tcCopyStr(o.Name), copyType(pkg, visited, o.Typ))
 		v.Anonymous = o.Anonymous
 		return v
 	case *TCConst:
-		return NewTCConst(pkg, tcCopyStr(o.Name), copyType(o.Typ, pkg, visited), o.Val)
+		return NewTCConst(pkg, tcCopyStr(o.Name), copyType(pkg, visited, o.Typ), copyConstVal(o.Val))
 	}
 	return nil
 }
@@ -742,7 +761,7 @@ func typeIdentity(t Type) (p uintptr) {
 	return (*iface)(unsafe.Pointer(&t)).data
 }
 
-func copyType(t Type, pkg *TCPackage, visited map[uintptr]Type) (r Type) {
+func copyType(pkg *TCPackage, visited map[uintptr]Type, t Type) (r Type) {
 	if t == nil {
 		return nil
 	}
@@ -758,6 +777,13 @@ func copyType(t Type, pkg *TCPackage, visited map[uintptr]Type) (r Type) {
 	}
 	switch tt := t.(type) {
 	case *Named:
+		// If this Named type belongs to an imported package (already in
+		// ImportRegistry), return it as-is. It's already in the outer arena.
+		if tt.Obj != nil && tt.Obj.Pkg != nil && tt.Obj.Pkg != pkg {
+			if _, ok := ImportRegistry[tt.Obj.Pkg.Path]; ok {
+				return t
+			}
+		}
 		tn := NewTypeName(pkg, "", nil)
 		if tt.Obj != nil {
 			tn.Pkg = pkg
@@ -766,7 +792,7 @@ func copyType(t Type, pkg *TCPackage, visited map[uintptr]Type) (r Type) {
 		n := NewNamed(tn, nil)
 		visited[key] = n
 		if tt.Under != nil {
-			n.Under = copyType(tt.Under, pkg, visited)
+			n.Under = copyType(pkg, visited, tt.Under)
 		}
 		for _, tp := range tt.TParams {
 			n.TParams = append(n.TParams, tp)
@@ -776,22 +802,22 @@ func copyType(t Type, pkg *TCPackage, visited map[uintptr]Type) (r Type) {
 			if m == nil {
 				continue
 			}
-			sig, _ := copyType(m.Typ, pkg, visited).(*Signature)
+			sig, _ := copyType(pkg, visited, m.Typ).(*Signature)
 			fn := NewTCFunc(pkg, tcCopyStr(m.Name), sig)
 			fn.PtrRecv = m.PtrRecv
 			n.AddMethod(fn)
 		}
 		return n
 	case *Pointer:
-		p := NewPointer(copyType(tt.Base, pkg, visited))
+		p := NewPointer(copyType(pkg, visited, tt.Base))
 		visited[key] = p
 		return p
 	case *Slice:
-		s := NewSlice(copyType(tt.Elem, pkg, visited))
+		s := NewSlice(copyType(pkg, visited, tt.Elem))
 		visited[key] = s
 		return s
 	case *Array:
-		a := NewArray(copyType(tt.Elem, pkg, visited), tt.Len)
+		a := NewArray(copyType(pkg, visited, tt.Elem), tt.Len)
 		visited[key] = a
 		return a
 	case *TCStruct:
@@ -799,7 +825,7 @@ func copyType(t Type, pkg *TCPackage, visited map[uintptr]Type) (r Type) {
 		visited[key] = st
 		for i := int32(0); i < tt.NumFields(); i++ {
 			f := tt.Field(i)
-			nf := NewTCVar(pkg, tcCopyStr(f.Name), copyType(f.Typ, pkg, visited))
+			nf := NewTCVar(pkg, tcCopyStr(f.Name), copyType(pkg, visited, f.Typ))
 			nf.Anonymous = f.Anonymous
 			st.Fields = append(st.Fields, nf)
 		}
@@ -813,13 +839,13 @@ func copyType(t Type, pkg *TCPackage, visited map[uintptr]Type) (r Type) {
 		sig := &Signature{Variadic: tt.Variadic}
 		visited[key] = sig
 		if tt.Recv != nil {
-			sig.Recv = NewTCVar(pkg, tcCopyStr(tt.Recv.Name), copyType(tt.Recv.Typ, pkg, visited))
+			sig.Recv = NewTCVar(pkg, tcCopyStr(tt.Recv.Name), copyType(pkg, visited, tt.Recv.Typ))
 		}
 		if tt.Params != nil {
 			tup := &Tuple{}
 			for i := int32(0); i < int32(tt.Params.Len()); i++ {
 				p := tt.Params.At(i)
-				tup.Vars = append(tup.Vars, NewTCVar(pkg, tcCopyStr(p.Name), copyType(p.Typ, pkg, visited)))
+				tup.Vars = append(tup.Vars, NewTCVar(pkg, tcCopyStr(p.Name), copyType(pkg, visited, p.Typ)))
 			}
 			sig.Params = tup
 		}
@@ -827,28 +853,28 @@ func copyType(t Type, pkg *TCPackage, visited map[uintptr]Type) (r Type) {
 			tup := &Tuple{}
 			for i := int32(0); i < int32(tt.Results.Len()); i++ {
 				rv := tt.Results.At(i)
-				tup.Vars = append(tup.Vars, NewTCVar(pkg, tcCopyStr(rv.Name), copyType(rv.Typ, pkg, visited)))
+				tup.Vars = append(tup.Vars, NewTCVar(pkg, tcCopyStr(rv.Name), copyType(pkg, visited, rv.Typ)))
 			}
 			sig.Results = tup
 		}
 		return sig
 	case *TCMap:
-		m := NewTCMap(copyType(tt.Key, pkg, visited), copyType(tt.Elem, pkg, visited))
+		m := NewTCMap(copyType(pkg, visited, tt.Key), copyType(pkg, visited, tt.Elem))
 		visited[key] = m
 		return m
 	case *TCChan:
-		c := NewTCChan(tt.Dir, copyType(tt.Elem, pkg, visited))
+		c := NewTCChan(tt.Dir, copyType(pkg, visited, tt.Elem))
 		visited[key] = c
 		return c
 	case *TCInterface:
 		iface := &TCInterface{}
 		visited[key] = iface
 		for _, m := range tt.XMethods {
-			sig, _ := copyType(m.Sig, pkg, visited).(*Signature)
+			sig, _ := copyType(pkg, visited, m.Sig).(*Signature)
 			iface.XMethods = append(iface.XMethods, &IfaceMethod{Name: tcCopyStr(m.Name), Sig: sig})
 		}
 		for _, e := range tt.Embeds {
-			iface.Embeds = append(iface.Embeds, copyType(e, pkg, visited))
+			iface.Embeds = append(iface.Embeds, copyType(pkg, visited, e))
 		}
 		if tt.Completed {
 			iface.Complete()
@@ -859,7 +885,7 @@ func copyType(t Type, pkg *TCPackage, visited map[uintptr]Type) (r Type) {
 		visited[key] = tup
 		for i := int32(0); i < int32(tt.Len()); i++ {
 			v := tt.At(i)
-			tup.Vars = append(tup.Vars, NewTCVar(pkg, tcCopyStr(v.Name), copyType(v.Typ, pkg, visited)))
+			tup.Vars = append(tup.Vars, NewTCVar(pkg, tcCopyStr(v.Name), copyType(pkg, visited, v.Typ)))
 		}
 		return tup
 	case *TypeParam:

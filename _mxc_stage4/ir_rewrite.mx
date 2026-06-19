@@ -4,6 +4,21 @@ import (
 	"git.smesh.lol/moxie/pkg/mxutil"
 )
 
+// joinChunks concatenates a slice of byte slices in one allocation.
+func joinChunks(chunks [][]byte) (r []byte) {
+	n := int32(0)
+	for _, c := range chunks {
+		n += len(c)
+	}
+	out := []byte{:0:n}
+	for _, c := range chunks {
+		off := len(out)
+		out = out[:off+len(c)]
+		copy(out[off:], c)
+	}
+	return out
+}
+
 func scanEmbedPragmas(src []byte, pkgDir string) {
 	cctx.embedVars = map[string]*embedInfo{}
 	// Two accepted forms: //:embed (canonical, see src/embed) and
@@ -230,22 +245,16 @@ func stripDuplicatePackageClauses(src []byte) (buf []byte) {
 		if lHasPrefix(trimmed, "package ") {
 			if found {
 				if out == nil {
-					out = []byte{:0:len(src)}
-					out = out | src[:i]
+					out = []byte{:len(src)}
+					copy(out, src)
 				}
-				for k := 0; k < len(line); k++ {
-					out = append(out, ' ')
-				}
-				if nlIdx >= 0 {
-					out = append(out, '\n')
+				for k := i; k < i+len(line); k++ {
+					out[k] = ' '
 				}
 				i = lineEnd
 				continue
 			}
 			found = true
-		}
-		if out != nil {
-			out = out | src[i:lineEnd]
 		}
 		i = lineEnd
 	}
@@ -256,101 +265,95 @@ func stripDuplicatePackageClauses(src []byte) (buf []byte) {
 }
 
 func stripDuplicatePackageClauses2(src []byte) (buf []byte) {
-	found := false
-	var out []byte
-	i := int32(0)
-	for i < len(src) {
-		lineStart := i
-		for i < len(src) && src[i] != '\n' {
-			i++
-		}
-		lineEnd := i
-		if i < int32(len(src)) {
-			i++
-		}
-		ls := lineStart
-		for ls < lineEnd && (src[ls] == ' ' || src[ls] == '\t') {
-			ls++
-		}
-		isPkg := false
-		if lineEnd-ls >= 8 && src[ls] == 'p' && src[ls+1] == 'a' && src[ls+2] == 'c' && src[ls+3] == 'k' && src[ls+4] == 'a' && src[ls+5] == 'g' && src[ls+6] == 'e' && src[ls+7] == ' ' {
-			isPkg = true
-		}
-		if isPkg {
-			if found {
-				if out == nil {
-					out = []byte{:0:len(src)}
-					out = out | src[:lineStart]
-				}
-				for k := lineStart; k < lineEnd; k++ {
-					out = append(out, ' ')
-				}
-				if lineEnd < int32(len(src)) {
-					out = append(out, '\n')
-				}
-				continue
+	// Fast path: count package clauses. If only one, return src unchanged.
+	count := int32(0)
+	for i := int32(0); i < len(src); i++ {
+		if i == 0 || src[i-1] == '\n' {
+			j := i
+			for j < len(src) && (src[j] == ' ' || src[j] == '\t') {
+				j++
 			}
-			found = true
-		}
-		if out != nil {
-			out = out | src[lineStart:i]
+			if len(src)-j >= 8 && src[j] == 'p' && src[j+1] == 'a' && src[j+2] == 'c' && src[j+3] == 'k' && src[j+4] == 'a' && src[j+5] == 'g' && src[j+6] == 'e' && src[j+7] == ' ' {
+				count++
+			}
 		}
 	}
-	if out == nil {
+	if count <= 1 {
 		return src
+	}
+	// Multiple package clauses: copy src, blank out duplicates in-place.
+	out := []byte{:len(src)}
+	copy(out, src)
+	found := false
+	for i := int32(0); i < len(out); i++ {
+		if i == 0 || out[i-1] == '\n' {
+			ls := i
+			for ls < len(out) && (out[ls] == ' ' || out[ls] == '\t') {
+				ls++
+			}
+			if len(out)-ls >= 8 && out[ls] == 'p' && out[ls+1] == 'a' && out[ls+2] == 'c' && out[ls+3] == 'k' && out[ls+4] == 'a' && out[ls+5] == 'g' && out[ls+6] == 'e' && out[ls+7] == ' ' {
+				if found {
+					// Blank out this line.
+					for k := i; k < len(out) && out[k] != '\n'; k++ {
+						out[k] = ' '
+					}
+				}
+				found = true
+			}
+		}
 	}
 	return out
 }
 
 func rewriteSliceMakeLiterals(src []byte) (buf []byte) {
-	var out []byte
+	var chunks [][]byte
 	i := 0
 	for i < len(src) {
 		start := lIndex(src[i:], []byte("{:"))
 		if start < 0 {
-			out = out | src[i:]
+			chunks = append(chunks, src[i:])
 			break
 		}
 		start = start + i
 		lbrack := findSliceTypeStart(src, start)
 		if lbrack < 0 {
-			out = out | src[i:start+2]
+			chunks = append(chunks, src[i:start+2])
 			i = start + 2
 			continue
 		}
 		closeIdx := findMatchingBrace(src, start)
 		if closeIdx < 0 {
-			out = out | src[i:start+2]
+			chunks = append(chunks, src[i:start+2])
 			i = start + 2
 			continue
 		}
 		inner := src[start+2 : closeIdx]
 		colonIdx := lIndexByte(inner, ':')
 		typeText := src[lbrack:start]
-		out = out | src[i:lbrack]
+		chunks = append(chunks, src[i:lbrack])
 		if colonIdx < 0 {
-			out = out | "__slicealloc("
-			out = out | typeText
-			out = out | ", "
-			out = out | lTrimSpace(inner)
-			out = append(out, ')')
+			chunks = append(chunks, []byte("__slicealloc("))
+			chunks = append(chunks, typeText)
+			chunks = append(chunks, []byte(", "))
+			chunks = append(chunks, lTrimSpace(inner))
+			chunks = append(chunks, []byte(")"))
 		} else {
 			lenExpr := lTrimSpace(inner[:colonIdx])
 			capExpr := lTrimSpace(inner[colonIdx+1:])
-			out = out | "__slicealloc("
-			out = out | typeText
-			out = out | ", "
-			out = out | lenExpr
-			out = out | ", "
-			out = out | capExpr
-			out = append(out, ')')
+			chunks = append(chunks, []byte("__slicealloc("))
+			chunks = append(chunks, typeText)
+			chunks = append(chunks, []byte(", "))
+			chunks = append(chunks, lenExpr)
+			chunks = append(chunks, []byte(", "))
+			chunks = append(chunks, capExpr)
+			chunks = append(chunks, []byte(")"))
 		}
 		i = closeIdx + 1
 	}
-	if out == nil {
+	if len(chunks) == 0 {
 		return src
 	}
-	return out
+	return joinChunks(chunks)
 }
 
 func findSliceTypeStart(src []byte, braceIdx int32) (n int32) {
@@ -427,13 +430,14 @@ func findMatchingBrace(src []byte, openIdx int32) (n int32) {
 
 func rewriteChanMakeLiterals(src []byte) (buf []byte) {
 	chanKw := []byte("chan ")
-	var out []byte
+	var chunks [][]byte
+	started := false
 	i := 0
 	for i < len(src) {
 		idx := lIndex(src[i:], chanKw)
 		if idx < 0 {
-			if out != nil {
-				out = out | src[i:]
+			if started {
+				chunks = append(chunks, src[i:])
 			}
 			break
 		}
@@ -443,14 +447,14 @@ func rewriteChanMakeLiterals(src []byte) (buf []byte) {
 			j++
 		}
 		if j >= len(src) {
-			if out != nil {
-				out = out | src[i:]
+			if started {
+				chunks = append(chunks, src[i:])
 			}
 			break
 		}
 		if src[j] == '<' && j+1 < len(src) && src[j+1] == '-' {
-			if out != nil {
-				out = out | src[i:j+2]
+			if started {
+				chunks = append(chunks, src[i:j+2])
 			}
 			i = j + 2
 			continue
@@ -462,10 +466,10 @@ func rewriteChanMakeLiterals(src []byte) (buf []byte) {
 			j++
 		}
 		if j >= len(src) || src[j] != '{' {
-			if out == nil {
+			if !started {
 				i = idx + 4
 			} else {
-				out = out | src[i:idx+4]
+				chunks = append(chunks, src[i:idx+4])
 				i = idx + 4
 			}
 			continue
@@ -476,22 +480,20 @@ func rewriteChanMakeLiterals(src []byte) (buf []byte) {
 		if endsStruct || endsIface {
 			typeClose := findMatchingBrace(src, braceOpen)
 			if typeClose < 0 {
-				if out == nil {
+				if !started {
 					i = idx + 4
 				} else {
-					out = out | src[i:idx+4]
+					chunks = append(chunks, src[i:idx+4])
 					i = idx + 4
 				}
 				continue
 			}
 			k := typeClose + 1
-			// Channel literal requires '{' immediately after struct{}/interface{} closing '}'.
-			// Any whitespace means it's NOT a literal (e.g. return type before function body).
 			if k >= len(src) || src[k] != '{' {
-				if out == nil {
+				if !started {
 					i = typeClose + 1
 				} else {
-					out = out | src[i:typeClose+1]
+					chunks = append(chunks, src[i:typeClose+1])
 					i = typeClose + 1
 				}
 				continue
@@ -500,10 +502,10 @@ func rewriteChanMakeLiterals(src []byte) (buf []byte) {
 		}
 		closeIdx := findMatchingBrace(src, braceOpen)
 		if closeIdx < 0 {
-			if out == nil {
+			if !started {
 				i = idx + 4
 			} else {
-				out = out | src[i:idx+4]
+				chunks = append(chunks, src[i:idx+4])
 				i = idx + 4
 			}
 			continue
@@ -513,27 +515,27 @@ func rewriteChanMakeLiterals(src []byte) (buf []byte) {
 		for len(chanType) > 0 && (chanType[len(chanType)-1] == ' ' || chanType[len(chanType)-1] == '\t') {
 			chanType = chanType[:len(chanType)-1]
 		}
-		if out == nil {
-			out = []byte{:0:len(src)}
-			out = out | src[:idx]
+		if !started {
+			chunks = append(chunks, src[:idx])
+			started = true
 		} else {
-			out = out | src[i:idx]
+			chunks = append(chunks, src[i:idx])
 		}
 		if len(inner) == 0 {
-			out = out | "__slicealloc("
-			out = out | chanType
-			out = append(out, ')')
+			chunks = append(chunks, []byte("__slicealloc("))
+			chunks = append(chunks, chanType)
+			chunks = append(chunks, []byte(")"))
 		} else {
-			out = out | "__slicealloc("
-			out = out | chanType
-			out = out | ", "
-			out = out | inner
-			out = append(out, ')')
+			chunks = append(chunks, []byte("__slicealloc("))
+			chunks = append(chunks, chanType)
+			chunks = append(chunks, []byte(", "))
+			chunks = append(chunks, inner)
+			chunks = append(chunks, []byte(")"))
 		}
 		i = closeIdx + 1
 	}
-	if out == nil {
+	if !started {
 		return src
 	}
-	return out
+	return joinChunks(chunks)
 }
