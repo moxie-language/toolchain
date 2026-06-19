@@ -660,16 +660,28 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 // The arena can then be freed without dangling the registry.
 func registerCompiledExports(pkg *TCPackage) {
 	EnsureImportRegistry()
-	// Copy import paths before arena dies.
+
+	// Work arena: all intermediates (visited map, string copies, type
+	// objects) allocated here. Only the final ImportRegistry entry
+	// survives via the root arena allocations below.
+	outerArena := runtime.CurrentArena()
+	workArena := runtime.ArenaNew(256 * 1024 * 1024) // 256MB
+	runtime.SetCurrentArena(workArena)
+
 	dimps := DirectImportPaths(pkg)
+	// Switch to root arena for persistent allocations.
+	runtime.SetCurrentArena(outerArena)
 	copiedPath := tcCopyStr(pkg.Path)
 	var copiedDimps []string
 	for _, d := range dimps {
 		copiedDimps = append(copiedDimps, tcCopyStr(d))
 	}
 	PkgDirectImports[copiedPath] = copiedDimps
-
 	newPkg := NewTCPackage(copiedPath, tcCopyStr(pkg.Name))
+
+	// Back to work arena for the type graph copy.
+	// copyType allocates new type objects - these go to workArena.
+	runtime.SetCurrentArena(workArena)
 	visited := map[uintptr]Type{}
 
 	names := pkg.Scope.Names()

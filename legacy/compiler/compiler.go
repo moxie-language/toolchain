@@ -209,7 +209,9 @@ type builder struct {
 	pipeChannels map[ssa.Value]bool
 
 	// Arena prologue/epilogue state.
-	arenaMarkVal llvm.Value // saved arena offset at function entry
+	arenaMarkVal  llvm.Value // legacy: saved arena offset (unused in per-fn model)
+	outerArenaVal llvm.Value // caller's arena (restored before return)
+	fnArenaVal    llvm.Value // per-function arena (freed on return)
 }
 
 func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *builder {
@@ -1440,12 +1442,27 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		b.deferInitFunc()
 	}
 
-	// Arena prologue: save the current arena offset.
+	// Arena prologue: create per-function arena for functions that return
+	// pointer-containing types. Other functions allocate in the caller's arena.
 	// Runtime package is exempt - its functions ARE the arena implementation.
-	// Skip if runtimePkg unavailable (e.g. internal/task compiled standalone).
 	isRuntime := b.fn.Pkg != nil && b.fn.Pkg.Pkg.Path() == "runtime"
+	needsArena := false
 	if !isRuntime && b.runtimePkg != nil {
-		b.arenaMarkVal = b.createRuntimeCall("ArenaMark", nil, "arena.mark")
+		sig := b.fn.Signature
+		if sig.Results() != nil {
+			for i := 0; i < sig.Results().Len(); i++ {
+				if typeContainsPointers(sig.Results().At(i).Type()) {
+					needsArena = true
+					break
+				}
+			}
+		}
+	}
+	if needsArena {
+		b.outerArenaVal = b.createRuntimeCall("CurrentArena", nil, "outer.arena")
+		arenaSize := llvm.ConstInt(b.uintptrType, 4*1024*1024, false) // 4MB per function
+		b.fnArenaVal = b.createRuntimeCall("ArenaNew", []llvm.Value{arenaSize}, "fn.arena")
+		b.createRuntimeCall("SetCurrentArena", []llvm.Value{b.fnArenaVal}, "")
 	}
 }
 
@@ -1649,15 +1666,20 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 			b.createRuntimeCall("destroyDeferFrame", []llvm.Value{b.deferFrame}, "")
 		}
 		isRuntime := b.fn.Pkg != nil && b.fn.Pkg.Pkg.Path() == "runtime"
+		hasArena := !isRuntime && !b.fnArenaVal.IsNil()
 		if len(instr.Results) == 0 {
-			if !isRuntime && !b.arenaMarkVal.IsNil() {
-				b.createRuntimeCall("ArenaRestore", []llvm.Value{b.arenaMarkVal}, "")
+			if hasArena {
+				b.createRuntimeCall("SetCurrentArena", []llvm.Value{b.outerArenaVal}, "")
+				b.createRuntimeCall("ArenaFree", []llvm.Value{b.fnArenaVal}, "")
 			}
 			b.CreateRetVoid()
 		} else if len(instr.Results) == 1 {
 			val := b.getValue(instr.Results[0], getPos(instr))
-			if !isRuntime && !b.arenaMarkVal.IsNil() {
+			if hasArena {
+				// Switch to caller's arena. Source data in fn_arena stays intact.
+				b.createRuntimeCall("SetCurrentArena", []llvm.Value{b.outerArenaVal}, "")
 				val = b.emitReturnCopy(val, instr.Results[0])
+				b.createRuntimeCall("ArenaFree", []llvm.Value{b.fnArenaVal}, "")
 			}
 			b.CreateRet(val)
 		} else {
@@ -1666,7 +1688,8 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 				val := b.getValue(result, getPos(instr))
 				retVal = b.CreateInsertValue(retVal, val, i, "")
 			}
-			if !isRuntime && !b.arenaMarkVal.IsNil() {
+			if hasArena {
+				b.createRuntimeCall("SetCurrentArena", []llvm.Value{b.outerArenaVal}, "")
 				for i, result := range instr.Results {
 					if typeContainsPointers(result.Type()) && b.valueIsLocal(result) {
 						field := b.CreateExtractValue(retVal, i, "ret.f")
@@ -1674,7 +1697,7 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 						retVal = b.CreateInsertValue(retVal, copied, i, "ret.f")
 					}
 				}
-				b.createRuntimeCall("ArenaRestore", []llvm.Value{b.arenaMarkVal}, "")
+				b.createRuntimeCall("ArenaFree", []llvm.Value{b.fnArenaVal}, "")
 			}
 			b.CreateRet(retVal)
 		}
@@ -3669,28 +3692,19 @@ var dcCount int
 func (b *builder) emitReturnCopy(val llvm.Value, ssaVal ssa.Value) llvm.Value {
 	goType := ssaVal.Type()
 	if !typeContainsPointers(goType) || !b.valueIsLocal(ssaVal) {
-		b.createRuntimeCall("ArenaRestore", []llvm.Value{b.arenaMarkVal}, "")
+		// No copy needed. Caller handles arena switch + free.
 		return val
 	}
 	return b.emitReturnCopyValue(val, goType)
 }
 
-// emitReturnCopyValue does the stack-intermediary deep copy:
-// save to stack, restore arena, alloc in caller region, copy from stack.
+// emitReturnCopyValue deep-copies a return value from fn_arena to outer_arena.
+// No stack intermediary needed - source (fn_arena) and destination (outer_arena)
+// are in different mmap regions, no overlap.
 func (b *builder) emitReturnCopyValue(val llvm.Value, goType types.Type) llvm.Value {
-	llvmType := val.Type()
-	// Step 1: save to stack alloca (survives ArenaRestore)
-	stackTmp := llvmutil.CreateEntryBlockAlloca(b.Builder, llvmType, "rc.stk")
-	b.CreateStore(val, stackTmp)
-	// Step 2: ArenaRestore (function's arena region freed)
-	b.createRuntimeCall("ArenaRestore", []llvm.Value{b.arenaMarkVal}, "")
-	// Step 3: alloc in caller's region + copy from stack
-	// For pointer types, use the per-type copy function which handles
-	// recursive struct fields. The copy function reads from the pointer
-	// (which is in the now-freed region but still physically mapped),
-	// allocs in the caller's region, and copies.
-	stackVal := b.CreateLoad(llvmType, stackTmp, "rc.ld")
-	return b.emitDeepCopy(stackVal, goType)
+	// Caller already switched to outer arena. Deep copy reads from fn_arena
+	// (still alive), allocates in outer arena.
+	return b.emitDeepCopy(val, goType)
 }
 
 // emitReturnDeepCopy emits a deep copy of val if its type contains pointers
