@@ -1989,13 +1989,15 @@ func generateMxh(pkg *TCPackage) (s string) {
 	path := pkg.Path
 	name := pkg.Name
 	cctx.typeDescPkgPath = path
-	var out string
-	out = "package " | path | " " | name | "\n"
+	var chunks [][]byte
+	chunks = append(chunks, []byte("package " | path | " " | name | "\n"))
 	// Direct imports must round-trip through the mxh: dispatch lists for
 	// cached packages are built from the transitive import closure, and a
 	// warm-cache load has no source to derive it from.
 	for _, ip := range DirectImportPaths(pkg) {
-		out = out | "import " | ip | "\n"
+	chunks = append(chunks, []byte("import "))
+	chunks = append(chunks, []byte(ip))
+	chunks = append(chunks, []byte("\n"))
 	}
 	for _, objName := range pkg.Scope.Names() {
 		if len(objName) == 0 {
@@ -2028,13 +2030,21 @@ func generateMxh(pkg *TCPackage) (s string) {
 		case *TCFunc:
 			sig := v.Signature()
 			if sig != nil {
-				out = out | "func " | objName | " " | sigDescStr(sig) | "\n"
+	chunks = append(chunks, []byte("func "))
+	chunks = append(chunks, []byte(objName))
+	chunks = append(chunks, []byte(" "))
+	chunks = append(chunks, []byte(sigDescStr(sig)))
+	chunks = append(chunks, []byte("\n"))
 			}
 		case *TCVar:
 			if v == nil || v.Typ == nil {
 				continue
 			}
-			out = out | "var " | objName | " " | typeDescStr(v.Typ) | "\n"
+	chunks = append(chunks, []byte("var "))
+	chunks = append(chunks, []byte(objName))
+	chunks = append(chunks, []byte(" "))
+	chunks = append(chunks, []byte(typeDescStr(v.Typ)))
+	chunks = append(chunks, []byte("\n"))
 		case *TCConst:
 			if v == nil || v.Typ == nil {
 				continue
@@ -2044,7 +2054,13 @@ func generateMxh(pkg *TCPackage) (s string) {
 			if v.Val != nil {
 				vs = v.Val.String()
 			}
-			out = out | "const " | objName | " " | td | " " | vs | "\n"
+	chunks = append(chunks, []byte("const "))
+	chunks = append(chunks, []byte(objName))
+	chunks = append(chunks, []byte(" "))
+	chunks = append(chunks, []byte(td))
+	chunks = append(chunks, []byte(" "))
+	chunks = append(chunks, []byte(vs))
+	chunks = append(chunks, []byte("\n"))
 		case *TypeName:
 			typ := v.Typ
 			if named, ok := typ.(*Named); ok {
@@ -2077,7 +2093,12 @@ func generateMxh(pkg *TCPackage) (s string) {
 							}
 							ifTpStr = ifTpStr | "]"
 						}
-						out = out | "iface " | objName | ifTpStr | " " | methods | "\n"
+	chunks = append(chunks, []byte("iface "))
+	chunks = append(chunks, []byte(objName))
+	chunks = append(chunks, []byte(ifTpStr))
+	chunks = append(chunks, []byte(" "))
+	chunks = append(chunks, []byte(methods))
+	chunks = append(chunks, []byte("\n"))
 					}
 				} else {
 					ud := ""
@@ -2095,7 +2116,12 @@ func generateMxh(pkg *TCPackage) (s string) {
 						}
 						tpStr = tpStr | "]"
 					}
-					out = out | "type " | objName | tpStr | " " | ud | "\n"
+	chunks = append(chunks, []byte("type "))
+	chunks = append(chunks, []byte(objName))
+	chunks = append(chunks, []byte(tpStr))
+	chunks = append(chunks, []byte(" "))
+	chunks = append(chunks, []byte(ud))
+	chunks = append(chunks, []byte("\n"))
 					// Generic types' methods are never emitted; importers must
 					// not see them or dispatch will reference undefined symbols.
 					if len(named.TParams) == 0 {
@@ -2106,7 +2132,15 @@ func generateMxh(pkg *TCPackage) (s string) {
 							}
 							msig := m.Signature()
 							if msig != nil {
-								out = out | "method " | objName | " " | m.Name | " " | sigDescStr(msig) | " " | ptrRecv | "\n"
+	chunks = append(chunks, []byte("method "))
+	chunks = append(chunks, []byte(objName))
+	chunks = append(chunks, []byte(" "))
+	chunks = append(chunks, []byte(m.Name))
+	chunks = append(chunks, []byte(" "))
+	chunks = append(chunks, []byte(sigDescStr(msig)))
+	chunks = append(chunks, []byte(" "))
+	chunks = append(chunks, []byte(ptrRecv))
+	chunks = append(chunks, []byte("\n"))
 							}
 						}
 					}
@@ -2126,12 +2160,16 @@ func generateMxh(pkg *TCPackage) (s string) {
 					methods = methods | m.Name | "=" | sigDescStr(m.Sig)
 				}
 				if complete {
-					out = out | "iface " | objName | " " | methods | "\n"
+	chunks = append(chunks, []byte("iface "))
+	chunks = append(chunks, []byte(objName))
+	chunks = append(chunks, []byte(" "))
+	chunks = append(chunks, []byte(methods))
+	chunks = append(chunks, []byte("\n"))
 				}
 			}
 		}
 	}
-	return out
+	return string(joinChunks(chunks))
 }
 
 // parseMxhTParams splits "Curve[$P,$Q]" into ("Curve", [TypeParam P, TypeParam Q]).
@@ -3720,12 +3758,10 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		bcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc")
 		// Defer clang call - collect for parallel execution after all IR emitted.
 		deferredClang = append(deferredClang, []string{clang, "--target=" | triple, "-emit-llvm", "-c", llFile, "-o", bcFile})
-		// generateMxh must happen now (next package's typecheck needs the exports).
-		regPkg := ImportRegistry[compilePath]
-		if regPkg != nil {
-			mxhData := generateMxh(regPkg)
-			writeFile(cachedMxh, []byte(mxhData), 0644)
-		}
+		// mxh cache: registerCompiledExports handles the in-memory registry.
+		// Cache file write deferred until generateMxh can serialize without
+		// following references into freed per-compilation arenas.
+		// TODO: make generateMxh stop at import boundaries.
 		bcs = append(bcs, bcFile)
 		for _, cf := range pkg.cfiles {
 			cPath := mxutil.JoinPath(pkg.dir, cf)
