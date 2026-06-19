@@ -147,7 +147,7 @@ moxie/
   sysroot/            precompiled runtime + C libs
     runtime.bc        runtime bitcode
     musl/             musl libc (static)
-    bdwgc/            Boehm GC (static)
+    runtime_go.bc     runtime (arena allocator, channels, spawn)
     compiler-rt/      LLVM builtins (static)
     obj/              precompiled object files
   llvm-glue/          LLVM C++ shim library
@@ -231,8 +231,8 @@ Type descriptors use the same compact format as the compiler's internal
 
 ## Output Binaries
 
-Moxie produces fully static binaries linked against musl, Boehm GC, and
-compiler-rt. No glibc, no dynamic libraries, no threads.
+Moxie produces fully static binaries linked against musl and compiler-rt.
+No glibc, no dynamic libraries, no threads, no GC.
 
 Typical sizes:
 - Hello world: ~400KB

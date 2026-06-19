@@ -167,6 +167,5 @@ func Optimize(mod llvm.Module, config *compileopts.Config) []error {
 // linkage until all Moxie passes have finished.
 var functionsUsedInTransforms = []string{
 	"runtime.alloc",
-	"runtime.free",
 	"runtime.nilPanic",
 }

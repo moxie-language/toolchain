@@ -20,7 +20,7 @@ moxie/
   references/
     type-system.md               # numeric types, string=[]byte, builtin stringers, interfaces
     execution-model.md           # domains, spawn, IPC channels, Codec, fan-out pattern
-    memory-management.md         # block-scoped dealloc, free(), scope promotion, WASM memory
+    memory-management.md         # per-function arena ownership, mark/restore, deep-copy on return
     syntax-quick-ref.md          # operators, literals, keywords, removed constructs
     build-and-modules.md         # build commands, targets, moxie.mod, cache, .mxh headers
     wasm-target.md               # string pragma, JS bridge packages, crypto

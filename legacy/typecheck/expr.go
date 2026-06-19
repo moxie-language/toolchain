@@ -222,8 +222,6 @@ func (c *Checker) typeBuiltinCall(e *syntax.CallExpr, scope *Scope) TypeAndValue
 		return TypeAndValue{Type: Typ[Int32], mode: modeValue}
 	case BuiltinSpawn:
 		return TypeAndValue{mode: modeVoid}
-	case BuiltinFree:
-		return TypeAndValue{mode: modeVoid}
 	}
 	return TypeAndValue{}
 }

@@ -1442,28 +1442,13 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		b.deferInitFunc()
 	}
 
-	// Arena prologue: create per-function arena for functions that return
-	// pointer-containing types. Other functions allocate in the caller's arena.
-	// Runtime package is exempt - its functions ARE the arena implementation.
-	isRuntime := b.fn.Pkg != nil && b.fn.Pkg.Pkg.Path() == "runtime"
-	needsArena := false
-	if !isRuntime && b.runtimePkg != nil {
-		sig := b.fn.Signature
-		if sig.Results() != nil {
-			for i := 0; i < sig.Results().Len(); i++ {
-				if typeContainsPointers(sig.Results().At(i).Type()) {
-					needsArena = true
-					break
-				}
-			}
-		}
-	}
-	if needsArena {
-		b.outerArenaVal = b.createRuntimeCall("CurrentArena", nil, "outer.arena")
-		arenaSize := llvm.ConstInt(b.uintptrType, 4*1024*1024, false) // 4MB per function
-		b.fnArenaVal = b.createRuntimeCall("ArenaNew", []llvm.Value{arenaSize}, "fn.arena")
-		b.createRuntimeCall("SetCurrentArena", []llvm.Value{b.fnArenaVal}, "")
-	}
+	// Per-function arena DISABLED for bootstrap.
+	// The type universe is a graph, not a tree. Deep-copy-on-return cannot
+	// preserve shared references (TypeName <-> Named, Scope.elems -> Object).
+	// Per-function arena + incomplete deep copy causes SIGSEGV in hashmapGet
+	// when Scope.Insert's arena frees string key data still referenced by
+	// the map. All allocations go to the global arena (freed at process exit).
+	// Stage4 will implement per-phase arenas with correct lifecycle.
 }
 
 // createFunction builds the LLVM IR implementation for this function. The
@@ -1965,15 +1950,6 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 	case "real":
 		cplx := argValues[0]
 		return b.CreateExtractValue(cplx, 0, "real"), nil
-	case "free":
-		if len(argValues) != 1 {
-			return llvm.Value{}, b.makeError(pos, "free requires exactly one argument")
-		}
-		// Delegate to createFreeBuiltin for map-aware deep free.
-		// This path shouldn't normally be reached (SSA dispatches free
-		// through createFunctionCall), but handle it for safety.
-		b.createRuntimeCall("free", []llvm.Value{argValues[0]}, "")
-		return llvm.Value{}, nil
 	case "recover":
 		useParentFrame := uint64(0)
 		if b.hasDeferFrame() {
@@ -2129,9 +2105,6 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon, callInstr *ssa.Call)
 		switch call.Name() {
 		case "spawn":
 			return b.createSpawn(instr)
-		case "free":
-			// free() is a no-op in the arena model.
-			return llvm.Value{}, nil
 		}
 	}
 
@@ -2682,7 +2655,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			return slice, nil
 
 		case *types.Slice:
-			// slice a slice - Moxie: subslice always copies
+			// slice a slice
 			oldPtr := b.CreateExtractValue(value, 0, "")
 			oldLen := b.CreateExtractValue(value, 1, "")
 			oldCap := b.CreateExtractValue(value, 2, "")
@@ -2706,10 +2679,21 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			}
 
 			ptrElemType := b.getLLVMType(typ.Elem())
-			srcPtr := b.CreateInBoundsGEP(ptrElemType, oldPtr, []llvm.Value{low}, "")
 			newLen := b.CreateSub(high, low, "")
-			// Moxie: subslice copies to break aliasing.
-			// Allocate new backing array, memcpy from source.
+
+			if expr.Low == nil {
+				// s[:high] - reslice with implicit low=0.
+				// Same base pointer, no aliasing, preserve cap.
+				newCap := b.CreateSub(max, low, "")
+				slice := llvm.Undef(b.getLLVMType(typ))
+				slice = b.CreateInsertValue(slice, oldPtr, 0, "")
+				slice = b.CreateInsertValue(slice, newLen, 1, "")
+				slice = b.CreateInsertValue(slice, newCap, 2, "")
+				return slice, nil
+			}
+
+			// s[low:high] - Moxie: copy to break aliasing.
+			srcPtr := b.CreateInBoundsGEP(ptrElemType, oldPtr, []llvm.Value{low}, "")
 			elemSize := b.targetData.TypeAllocSize(ptrElemType)
 			elemSizeVal := llvm.ConstInt(b.uintptrType, elemSize, false)
 			copySize := b.CreateMul(newLen, elemSizeVal, "slice.copy.size")

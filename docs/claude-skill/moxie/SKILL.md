@@ -69,10 +69,10 @@ map[K]V{}         // empty map
 
 ## Memory Management
 
-No GC. Block-scoped ownership. Every allocation freed at block exit.
-- `free(v)` explicitly ends lifetime early. Using `v` after free without reassign = compile error.
-- Pointer assignment promotes scope (inner var lives as long as outer pointer).
-- Function params/returns owned by caller.
+No GC. Per-function arena ownership. All allocations bump within the current arena.
+- Function entry marks the arena offset; return deep-copies results to caller's region, then restores.
+- No individual free. Reclamation is bulk: arena restore per function, munmap per domain.
+- Function params are borrowed references into caller's region.
 - `spawn` moves non-constant values (use-after-spawn = compile error).
 
 ## spawn Boundary
@@ -127,7 +127,7 @@ For detailed information, consult:
 
 - **references/type-system.md** - Numeric types, string=[]byte, builtin stringers, slice equality, comparable, named type restrictions
 - **references/execution-model.md** - Domains, spawn, IPC channels, Codec types, move semantics, cooperative scheduler
-- **references/memory-management.md** - Block-scoped dealloc, free(), scope promotion, no GC, WASM memory rules
+- **references/memory-management.md** - Per-function arena ownership, mark/restore, deep-copy on return, domain isolation
 - **references/syntax-quick-ref.md** - Operators, literals, statements, keywords, control flow, all removed constructs
 - **references/build-and-modules.md** - Build commands, module file, targets, cache, dependencies, .mxh headers
 - **references/wasm-target.md** - String pragma, JS bridge packages, jsruntime shims, crypto

@@ -31,8 +31,8 @@ Constants: `true`, `false`, `nil`, `iota`
 Functions:
 ```
 append  cap     clear   close   copy    delete
-free    len     max     min     panic   print
-println recover spawn
+len     max     min     panic   print   println
+recover spawn
 ```
 
 Shadowing any predeclared identifier is a compile error.

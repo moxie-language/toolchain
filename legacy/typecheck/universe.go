@@ -158,7 +158,6 @@ var builtinNames = [...]string{
 	BuiltinReal:    "real",
 	BuiltinRecover: "recover",
 	BuiltinSpawn:   "spawn",
-	BuiltinFree:    "free",
 }
 
 func defTypeName(name string, typ Type) {

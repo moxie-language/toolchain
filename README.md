@@ -142,6 +142,7 @@ All native binaries are fully statically linked.
 - **[TUTORIAL.md](TUTORIAL.md)** - Learn Moxie from scratch
 - **[EXAMPLE_CLAUDE.md](EXAMPLE_CLAUDE.md)** - AI coding assistant configuration
 - **[Architecture Patterns](docs/MOXIE_ARCHITECTURE_PATTERNS.md)** - CSP/Actor/DDD design patterns and worked examples
+- **[Ownership](docs/OWNERSHIP.md)** - Memory ownership model and design principles
 - [docs/spawn.md](docs/spawn.md) - Spawn quick reference
 - [docs/architecture.md](docs/architecture.md) - Compiler pipeline and runtime internals
 - [docs/restrictions.md](docs/restrictions.md) - Active restrictions and exemptions
@@ -168,9 +169,9 @@ moxie/
 ├── release.sh               # Release tarball builder
 ├── install.sh               # Remote install script
 ├── jsruntime/               # JS host shims for WASM target
-├── sysroot/                 # Precompiled runtime bitcode, musl, bdwgc, compiler-rt
+├── sysroot/                 # Precompiled runtime bitcode, musl, compiler-rt
 ├── src/                     # Target-side sources (compiled INTO programs)
-│   ├── runtime/             # Runtime: scheduler, channels, GC, spawn, stringers
+│   ├── runtime/             # Runtime: scheduler, channels, arena, spawn, stringers
 │   ├── internal/task/       # Cooperative task system, context switching
 │   ├── moxie/               # Codec interface, built-in codec types
 │   └── ...                  # Stdlib (.mx files)

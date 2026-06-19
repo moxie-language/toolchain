@@ -4,7 +4,7 @@
 
 The server is dumb. The client is smart. Each domain is sovereign.
 
-Moxie enforces isolation at the language level. Domains are OS processes. There is no shared memory. Communication is serialized over IPC. Within each domain, goroutines cooperate on a single thread.
+Moxie enforces isolation at the language level. Domains are OS processes. There is no shared memory. Communication is serialized over IPC. Each domain runs a single thread with channels and select for event dispatch.
 
 ## Compilation Pipeline
 
@@ -24,7 +24,7 @@ SSA construction (via golang.org/x/tools/go/ssa)
 compiler (Moxie SSA → LLVM IR)
     ├── spawn builtin → runtime.spawnDomain (Codec validation)
     ├── restriction checking: reject new, complex, etc.
-    ├── goroutine lowering: go → task.start
+    ├── channel/select lowering
     └── syscall intrinsics: inline assembly
     │
     ▼
@@ -35,7 +35,7 @@ interp (compile-time partial evaluation)
     │
     ▼
 builder (orchestration)
-    ├── compile musl, bdwgc, compiler-rt
+    ├── compile musl, compiler-rt
     ├── compile extra .c files (signal.c, spawn_unix.c)
     └── link with ld.lld
     │
@@ -104,7 +104,9 @@ src/runtime/spawn.go
 
 - **Within a domain**: single-threaded, no races possible. No mutexes needed. Channels are the synchronization primitive.
 - **Between domains**: complete isolation. No shared pointers. Channel data is serialized over IPC.
-- **GC**: Boehm conservative GC per domain. Each forked process has its own heap.
+- **Allocation**: bump-pointer arena per domain. `alloc()` bumps within the current arena. No GC, no free lists, no individual free.
+- **Per-function ownership**: compiler emits mark/restore around each function. Return values deep-copied to caller's region before restore reclaims the function's allocations.
+- **Domain exit**: `munmap` releases all arena pages in one operation.
 
 ## Build Tags
 
@@ -113,7 +115,7 @@ Moxie uses `moxie` and `moxie.unicore` build tags:
 ```
 //go:build moxie.unicore    → cooperative single-core (always true)
 //go:build moxie            → moxie compiler (always true)
-//go:build gc.boehm         → Boehm GC (default on linux/darwin)
+//go:build gc.dealloc       → arena allocator, no GC (always true)
 //go:build scheduler.tasks  → cooperative scheduler (always true)
 ```
 
@@ -121,12 +123,12 @@ Moxie uses `moxie` and `moxie.unicore` build tags:
 
 Moxie supports exactly 4 native targets plus JS:
 
-| GOOS/GOARCH | Scheduler | GC | Libc | Linker |
-|-------------|-----------|-----|------|--------|
-| linux/amd64 | tasks | boehm | musl | ld.lld |
-| linux/arm64 | tasks | boehm | musl | ld.lld |
-| darwin/amd64 | tasks | boehm | darwin-libSystem | ld.lld |
-| darwin/arm64 | tasks | boehm | darwin-libSystem | ld.lld |
-| js | tasks | - | - | - |
+| GOOS/GOARCH | Scheduler | Memory | Libc | Linker |
+|-------------|-----------|--------|------|--------|
+| linux/amd64 | tasks | arena | musl | ld.lld |
+| linux/arm64 | tasks | arena | musl | ld.lld |
+| darwin/amd64 | tasks | arena | darwin-libSystem | ld.lld |
+| darwin/arm64 | tasks | arena | darwin-libSystem | ld.lld |
+| js | tasks | bump | - | - |
 
 No embedded targets. No WASI. No Windows.

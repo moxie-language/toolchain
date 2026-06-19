@@ -81,7 +81,7 @@ All spawn channel operations are non-blocking with cooperative yield. The runtim
 
 ## Native Implementation
 
-`socketpair()` + `fork()`. Child gets COW copy of parent memory. Each domain has its own Boehm GC heap, run queue, and goroutine stacks.
+`socketpair()` + `fork()`. Child gets COW copy of parent memory. Each domain has its own arena (bump allocator), run queue, and task stacks. No GC - arena released via `munmap` on domain exit.
 
 ## JS Implementation
 

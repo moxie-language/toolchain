@@ -4,9 +4,7 @@ COMPACTION: ;always preserve: moxie is not Go, no stubs - remove dead references
 
 ## Moxie Memory Model
 
-scope dealloc is compile-time code generation, not runtime tracking. emit free() at scope exit like a C programmer. no escape analysis, no
-runtime scope chains, no escaped bits. all the free code does at scope boundaries is run through the list, created by the generated code that went into a conditional block that assigned the ownership of a
-given variable to an outer (preceding) scope declared variable, and thus is now freed by that scope boundary.
+per-function arena mark/restore. compiler emits ArenaMark() at function entry, deep-copies return values to caller's region, then ArenaRestore(mark) at function exit. no escape analysis, no scope chains, no individual free. all reclamation is bulk: arena restore per function return, munmap per domain exit. there is no free() builtin.
 
 ## Reporting Completion
 

@@ -410,7 +410,7 @@ func (b *builder) builtin(fn *Function, obj *types.Builtin, args []ast.Expr, typ
 		fn.currentBlock = fn.newBasicBlock("unreachable")
 		return vTrue // any non-nil Value will do
 
-	case "spawn", "free":
+	case "spawn":
 		// Moxie builtins without Go-standard signatures.
 		// Emit as a Call with Builtin callee; the backend handles dispatch.
 		bi := &Builtin{name: obj.Name()}
