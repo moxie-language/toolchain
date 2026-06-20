@@ -1950,10 +1950,20 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		newLen := b.CreateExtractValue(result, 1, "push.newlen")
 		newCap := b.CreateExtractValue(result, 2, "push.newcap")
 		// Store each element at ptr[oldLen + i].
+		// If the slice element is an interface and the value is a concrete
+		// type, emit MakeInterface to create the proper {typecode, data} pair.
+		var sliceElemGoType types.Type
+		if sl, ok := argTypes[0].Underlying().(*types.Slice); ok {
+			sliceElemGoType = sl.Elem()
+		}
 		for i := 1; i < len(argValues); i++ {
+			val := argValues[i]
+			if sliceElemGoType != nil && types.IsInterface(sliceElemGoType) && !types.IsInterface(argTypes[i]) {
+				val = b.createMakeInterface(val, argTypes[i], pos)
+			}
 			idx := b.CreateAdd(srcLen, llvm.ConstInt(srcLen.Type(), uint64(i-1), false), "")
 			ep := b.CreateGEP(elemType, newPtr, []llvm.Value{idx}, "push.ep")
-			b.CreateStore(argValues[i], ep)
+			b.CreateStore(val, ep)
 		}
 		newSlice := llvm.Undef(src.Type())
 		newSlice = b.CreateInsertValue(newSlice, newPtr, 0, "")
