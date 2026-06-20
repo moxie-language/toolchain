@@ -111,9 +111,12 @@ const (
 	BuiltinPrintln
 	BuiltinReal   // not valid in Moxie
 	BuiltinRecover
-	BuiltinSpawn // Moxie-specific
-	BuiltinMin   // Go 1.21
-	BuiltinMax   // Go 1.21
+	BuiltinSpawn  // Moxie-specific
+	BuiltinMin    // Go 1.21
+	BuiltinMax    // Go 1.21
+	BuiltinPush   // Moxie: push(slice, elem) - append without alloc
+	BuiltinPop    // Moxie: pop(slice) - remove+return last elem
+	BuiltinResize // Moxie: resize(slice, n) - set len, bounded by cap
 )
 
 type Builtin struct {

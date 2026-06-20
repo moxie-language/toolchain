@@ -72,7 +72,7 @@ func (c *Checker) inferConstTypeList(e syntax.Expr) (ts []Type) {
 	if l, ok := e.(*syntax.ListExpr); ok {
 		var out []Type
 		for _, el := range l.ElemList {
-			out = append(out, c.inferConstType(el))
+			push(out, c.inferConstType(el))
 		}
 		return out
 	}
@@ -98,7 +98,7 @@ func (c *Checker) evalConstExprList(e syntax.Expr, iotaVal int64) (cs []ConstVal
 		var out []ConstVal
 		for _, el := range l.ElemList {
 			cv := c.evalConst(el, iotaVal)
-			out = append(out, cv)
+			push(out, cv)
 		}
 		return out
 	}
@@ -365,7 +365,7 @@ func interpStringLocal(s string) (sv string) {
 	var buf []byte
 	for i := 0; i < len(s); i++ {
 		if s[i] != '\\' {
-			buf = append(buf, s[i])
+			push(buf, s[i])
 			continue
 		}
 		i++
@@ -374,31 +374,31 @@ func interpStringLocal(s string) (sv string) {
 		}
 		switch s[i] {
 		case 'n':
-			buf = append(buf, '\n')
+			push(buf, '\n')
 		case 't':
-			buf = append(buf, '\t')
+			push(buf, '\t')
 		case 'r':
-			buf = append(buf, '\r')
+			push(buf, '\r')
 		case '\\':
-			buf = append(buf, '\\')
+			push(buf, '\\')
 		case '\'':
-			buf = append(buf, '\'')
+			push(buf, '\'')
 		case '"':
-			buf = append(buf, '"')
+			push(buf, '"')
 		case '0':
-			buf = append(buf, 0)
+			push(buf, 0)
 		case 'a':
-			buf = append(buf, '\a')
+			push(buf, '\a')
 		case 'b':
-			buf = append(buf, '\b')
+			push(buf, '\b')
 		case 'f':
-			buf = append(buf, '\f')
+			push(buf, '\f')
 		case 'v':
-			buf = append(buf, '\v')
+			push(buf, '\v')
 		case 'x':
 			if i+2 < len(s) {
 				h := hexDigit(s[i+1])*16 + hexDigit(s[i+2])
-				buf = append(buf, byte(h))
+				push(buf, byte(h))
 				i += 2
 			}
 		case 'u':
@@ -427,9 +427,9 @@ func interpStringLocal(s string) (sv string) {
 						i++
 					}
 				}
-				buf = append(buf, byte(v))
+				push(buf, byte(v))
 			} else {
-				buf = append(buf, s[i])
+				push(buf, s[i])
 			}
 		}
 	}
@@ -451,21 +451,19 @@ func hexDigit(c byte) (n int32) {
 
 func appendRuneUTF8(buf []byte, r rune) (buf2 []byte) {
 	if r < 0x80 {
-		return append(buf, byte(r))
+		push(buf, byte(r))
+		return buf
 	}
 	if r < 0x800 {
-		buf = append(buf, byte(0xC0|(r>>6)))
-		return append(buf, byte(0x80|(r&0x3F)))
+		push(buf, byte(0xC0|(r>>6)), byte(0x80|(r&0x3F)))
+		return buf
 	}
 	if r < 0x10000 {
-		buf = append(buf, byte(0xE0|(r>>12)))
-		buf = append(buf, byte(0x80|((r>>6)&0x3F)))
-		return append(buf, byte(0x80|(r&0x3F)))
+		push(buf, byte(0xE0|(r>>12)), byte(0x80|((r>>6)&0x3F)), byte(0x80|(r&0x3F)))
+		return buf
 	}
-	buf = append(buf, byte(0xF0|(r>>18)))
-	buf = append(buf, byte(0x80|((r>>12)&0x3F)))
-	buf = append(buf, byte(0x80|((r>>6)&0x3F)))
-	return append(buf, byte(0x80|(r&0x3F)))
+	push(buf, byte(0xF0|(r>>18)), byte(0x80|((r>>12)&0x3F)), byte(0x80|((r>>6)&0x3F)), byte(0x80|(r&0x3F)))
+	return buf
 }
 
 func (c *Checker) evalConstOp(e *syntax.Operation, iotaVal int64) (cv ConstVal) {
@@ -874,13 +872,13 @@ func runeToStr(r rune) (s string) {
 	}
 	var out []byte
 	if r <= 0x7F {
-		out = append(out, byte(r))
+		push(out, byte(r))
 	} else if r <= 0x7FF {
-		out = append(out, byte(0xC0|(r>>6)), byte(0x80|(r&0x3F)))
+		push(out, byte(0xC0|(r>>6)), byte(0x80|(r&0x3F)))
 	} else if r <= 0xFFFF {
-		out = append(out, byte(0xE0|(r>>12)), byte(0x80|((r>>6)&0x3F)), byte(0x80|(r&0x3F)))
+		push(out, byte(0xE0|(r>>12)), byte(0x80|((r>>6)&0x3F)), byte(0x80|(r&0x3F)))
 	} else {
-		out = append(out, byte(0xF0|(r>>18)), byte(0x80|((r>>12)&0x3F)), byte(0x80|((r>>6)&0x3F)), byte(0x80|(r&0x3F)))
+		push(out, byte(0xF0|(r>>18)), byte(0x80|((r>>12)&0x3F)), byte(0x80|((r>>6)&0x3F)), byte(0x80|(r&0x3F)))
 	}
 	return string(out)
 }

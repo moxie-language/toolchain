@@ -1711,6 +1711,26 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 	}
 }
 
+// sliceAllocType returns the slice/string underlying type for an Alloc,
+// or nil if the alloc is not for a slice/string.
+func (b *builder) sliceAllocType(expr *ssa.Alloc) types.Type {
+	pt, ok := expr.Type().(*types.Pointer)
+	if !ok {
+		return nil
+	}
+	u := pt.Elem().Underlying()
+	switch u.(type) {
+	case *types.Slice:
+		return u
+	case *types.Basic:
+		bb := u.(*types.Basic)
+		if bb.Kind() == types.String || bb.Kind() == types.UntypedString {
+			return u
+		}
+	}
+	return nil
+}
+
 // createBuiltin lowers a builtin Go function (append, close, delete, etc.) to
 // LLVM IR. It uses runtime calls for some builtins.
 func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, callName string, pos token.Pos) (llvm.Value, error) {
@@ -1873,6 +1893,70 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 			}
 			result = b.CreateSelect(cmp, result, arg, "")
 		}
+		return result, nil
+	case "push":
+		// push(s, v1, v2, ...) - append elements without allocation.
+		// Panics if len + N > cap. Returns modified slice (new len).
+		src := argValues[0]
+		srcPtr := b.CreateExtractValue(src, 0, "push.ptr")
+		srcLen := b.CreateExtractValue(src, 1, "push.len")
+		srcCap := b.CreateExtractValue(src, 2, "push.cap")
+		numElems := llvm.ConstInt(srcLen.Type(), uint64(len(argValues)-1), false)
+		newLen := b.CreateAdd(srcLen, numElems, "push.newlen")
+		// Bounds check: newLen <= cap.
+		overflow := b.CreateICmp(llvm.IntUGT, newLen, srcCap, "push.overflow")
+		b.createRuntimeAssert(overflow, "push", "slicePanic")
+		// Store each element.
+		var elemType llvm.Type
+		switch ut := argTypes[0].Underlying().(type) {
+		case *types.Slice:
+			elemType = b.getLLVMType(ut.Elem())
+		case *types.Basic:
+			elemType = b.ctx.Int8Type()
+		default:
+			return llvm.Value{}, b.makeError(pos, "push on non-slice type")
+		}
+		for i := 1; i < len(argValues); i++ {
+			idx := b.CreateAdd(srcLen, llvm.ConstInt(srcLen.Type(), uint64(i-1), false), "")
+			ep := b.CreateGEP(elemType, srcPtr, []llvm.Value{idx}, "push.ep")
+			b.CreateStore(argValues[i], ep)
+		}
+		// Return slice with updated len.
+		result := b.CreateInsertValue(src, newLen, 1, "push.result")
+		return result, nil
+	case "pop":
+		// pop(s) - return last element. Panics if len == 0.
+		// The store-back of the modified slice (len-1) is handled by
+		// the SSA builder's ExprStmt desugaring using resize.
+		src := argValues[0]
+		srcPtr := b.CreateExtractValue(src, 0, "pop.ptr")
+		srcLen := b.CreateExtractValue(src, 1, "pop.len")
+		zero := llvm.ConstInt(srcLen.Type(), 0, false)
+		empty := b.CreateICmp(llvm.IntEQ, srcLen, zero, "pop.empty")
+		b.createRuntimeAssert(empty, "pop", "slicePanic")
+		one := llvm.ConstInt(srcLen.Type(), 1, false)
+		lastIdx := b.CreateSub(srcLen, one, "pop.lastidx")
+		var elemType llvm.Type
+		switch ut := argTypes[0].Underlying().(type) {
+		case *types.Slice:
+			elemType = b.getLLVMType(ut.Elem())
+		case *types.Basic:
+			elemType = b.ctx.Int8Type()
+		default:
+			return llvm.Value{}, b.makeError(pos, "pop on non-slice type")
+		}
+		ep := b.CreateGEP(elemType, srcPtr, []llvm.Value{lastIdx}, "pop.ep")
+		elem := b.CreateLoad(elemType, ep, "pop.elem")
+		return elem, nil
+	case "resize":
+		// resize(s, n) - set len to n. Panics if n > cap or n < 0.
+		src := argValues[0]
+		srcCap := b.CreateExtractValue(src, 2, "resize.cap")
+		newLen := argValues[1]
+		// Bounds check: newLen <= cap (unsigned comparison catches n < 0).
+		overflow := b.CreateICmp(llvm.IntUGT, newLen, srcCap, "resize.overflow")
+		b.createRuntimeAssert(overflow, "resize", "slicePanic")
+		result := b.CreateInsertValue(src, newLen, 1, "resize.result")
 		return result, nil
 	case "panic":
 		// This is rare, but happens in "defer panic()".

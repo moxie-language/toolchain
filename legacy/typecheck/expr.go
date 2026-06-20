@@ -222,6 +222,21 @@ func (c *Checker) typeBuiltinCall(e *syntax.CallExpr, scope *Scope) TypeAndValue
 		return TypeAndValue{Type: Typ[Int32], mode: modeValue}
 	case BuiltinSpawn:
 		return TypeAndValue{mode: modeVoid}
+	case BuiltinPush, BuiltinResize:
+		// push(s, v) and resize(s, n) mutate s in place, return void
+		return TypeAndValue{mode: modeVoid}
+	case BuiltinPop:
+		// pop(s) returns the element type of the slice
+		if len(e.ArgList) > 0 {
+			st := c.checkExpr(e.ArgList[0], scope)
+			if sl, ok := st.Underlying().(*Slice); ok {
+				return TypeAndValue{Type: sl.Elem(), mode: modeValue}
+			}
+			// string = []byte, pop returns byte
+			if b2, ok := st.Underlying().(*Basic); ok && (b2.Kind() == String || b2.Kind() == UntypedString) {
+				return TypeAndValue{Type: Typ[Uint8], mode: modeValue}
+			}
+		}
 	}
 	return TypeAndValue{}
 }

@@ -81,7 +81,7 @@ func hashmapMake(keySize, valueSize uintptr, sizeHint uintptr, alg uint8) *hashm
 		keyEqual:   keyEqual,
 		keyHash:    keyHash,
 		keyLess:    keyLess,
-		owner:      currentArena,
+		owner:      CurrentArena(),
 	}
 }
 
@@ -310,12 +310,12 @@ func hashmapSet(m *hashmap, key unsafe.Pointer, value unsafe.Pointer, hash uint3
 // value into the bucket, and returns a pointer to this bucket.
 func hashmapInsertIntoNewBucket(m *hashmap, key, value unsafe.Pointer, tophash uint8) *hashmapBucket {
 	bucketBufSize := hashmapBucketSize(m)
-	saved := currentArena
+	saved := CurrentArena()
 	if m.owner != nil {
-		currentArena = m.owner
+		SetCurrentArena(m.owner)
 	}
 	bucketBuf := alloc(bucketBufSize, nil)
-	currentArena = saved
+	SetCurrentArena(saved)
 	bucket := (*hashmapBucket)(bucketBuf)
 
 	// Insert into the first slot, which is empty as it has just been allocated.
@@ -333,12 +333,10 @@ func hashmapGrow(m *hashmap) {
 	oldBits := m.bucketBits
 	bucketSize := hashmapBucketSize(m)
 
-	// Allocate new buckets in the map's owning arena, not currentArena.
-	// Prevents bucket arrays from landing in nested function arenas
-	// that get freed before the map's lifetime ends.
-	saved := currentArena
+	// Allocate new buckets in the map's owning arena.
+	saved := CurrentArena()
 	if m.owner != nil {
-		currentArena = m.owner
+		SetCurrentArena(m.owner)
 	}
 
 	m.bucketBits = oldBits + 1
@@ -363,8 +361,7 @@ func hashmapGrow(m *hashmap) {
 		}
 	}
 
-	// Old buckets left to arena. No individual free.
-	currentArena = saved
+	SetCurrentArena(saved)
 }
 
 // hashmapDestroy, hashmapFreeBuckets, hashmapDeepFree removed:
@@ -401,7 +398,7 @@ func hashmapCopyTo(src, dst *hashmap, sizeBits uint8) {
 	dst.keyEqual = src.keyEqual
 	dst.keyHash = src.keyHash
 	dst.keyLess = src.keyLess
-	dst.owner = currentArena
+	dst.owner = CurrentArena()
 	dst.bucketBits = sizeBits
 	dst.count = 0
 	dst.seed = uintptr(fastrand())

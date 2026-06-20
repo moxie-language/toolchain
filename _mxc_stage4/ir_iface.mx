@@ -81,7 +81,7 @@ func (e *irEmitter) typeIDHash(t Type) (s string) {
 		}
 		if !found {
 			e.typeIDNext++
-			e.pendTypeIDs = append(e.pendTypeIDs, emitKVI{name, e.typeIDNext})
+			push(e.pendTypeIDs, emitKVI{name, e.typeIDNext})
 		}
 	}
 	return e.hashToIntptr(fnv1a64(name))
@@ -133,7 +133,7 @@ func (e *irEmitter) reflectTypeName(t Type) (s string) {
 		}
 		result := "reflect/types.type:named:" | pkgPath | "." | named.Obj.Name
 		if pkgPath == e.pkg.Pkg.Path {
-			e.pendLocalTypeIDs = append(e.pendLocalTypeIDs, "\"" | result | "\"")
+			push(e.pendLocalTypeIDs, "\"" | result | "\"")
 		}
 		return result
 	}
@@ -150,7 +150,7 @@ func (e *irEmitter) reflectTypeName(t Type) (s string) {
 				}
 			}
 			if inLocal {
-				e.pendLocalTypeIDs = append(e.pendLocalTypeIDs, quoted)
+				push(e.pendLocalTypeIDs, quoted)
 			}
 			return result
 		}
@@ -158,7 +158,7 @@ func (e *irEmitter) reflectTypeName(t Type) (s string) {
 	}
 	if _, ok := t.(*TCInterface); ok {
 		result := "reflect/types.type:interface:{}"
-		e.pendLocalTypeIDs = append(e.pendLocalTypeIDs, "\"" | result | "\"")
+		push(e.pendLocalTypeIDs, "\"" | result | "\"")
 		return result
 	}
 	if sl, ok := t.(*Slice); ok {
@@ -169,7 +169,7 @@ func (e *irEmitter) reflectTypeName(t Type) (s string) {
 		inner := e.reflectTypeName(elem)
 		if mxutil.HasPrefix(inner, "reflect/types.type:") {
 			result := "reflect/types.type:slice:" | inner[len("reflect/types.type:"):]
-			e.pendLocalTypeIDs = append(e.pendLocalTypeIDs, "\"" | result | "\"")
+			push(e.pendLocalTypeIDs, "\"" | result | "\"")
 			return result
 		}
 		return inner | ".slice"
@@ -183,7 +183,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 	hasType := map[string]bool{}
 	var mkeys []string
 	for k := range e.pkg.Members {
-		mkeys = append(mkeys, k)
+		push(mkeys, k)
 	}
 	for i := 1; i < len(mkeys); i++ {
 		for j := i; j > 0 && mkeys[j] < mkeys[j-1]; j-- {
@@ -225,7 +225,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 		if isPtrRecv {
 			recvT = NewPointer(recvT)
 		}
-		impls = append(impls, ifaceImpl{fn: fn, recvType: recvT, ptrRecv: isPtrRecv})
+		push(impls, ifaceImpl{fn: fn, recvType: recvT, ptrRecv: isPtrRecv})
 		hasType[tname] = true
 	}
 	scopeNames := e.pkg.Pkg.Scope.Names()
@@ -241,7 +241,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 		chain, fn, embedT := e.findEmbedMethod(tn2.Typ, methodName, 0)
 		if fn != nil {
 			isPtrRecv := fn.object != nil && fn.object.PtrRecv
-			impls = append(impls, ifaceImpl{
+			push(impls, ifaceImpl{
 				fn:         fn,
 				recvType:   NewPointer(tn2.Typ),
 				ptrRecv:    isPtrRecv,
@@ -261,7 +261,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 		if seenPkg[ip.Path] {
 			continue
 		}
-		importedPkgs = append(importedPkgs, ip)
+		push(importedPkgs, ip)
 		seenPkg[ip.Path] = true
 	}
 	scopeNames2 := e.pkg.Pkg.Scope.Names()
@@ -271,7 +271,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 		if !ok || pn.Imported == nil || seenPkg[pn.Imported.Path] {
 			continue
 		}
-		importedPkgs = append(importedPkgs, pn.Imported)
+		push(importedPkgs, pn.Imported)
 		seenPkg[pn.Imported.Path] = true
 	}
 	// The build is two-phase: every package in the link set is type-checked
@@ -288,7 +288,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 	// local linkage) and never linkable.
 	var regPaths []string
 	for rPath := range cctx.universe.Registry {
-		regPaths = append(regPaths, rPath)
+		push(regPaths, rPath)
 	}
 	for i := 1; i < len(regPaths); i++ {
 		for j := i; j > 0 && regPaths[j] < regPaths[j-1]; j-- {
@@ -304,7 +304,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 		if rPath == "moxie" || rPath == "runtime" || rPath == "unsafe" {
 			continue
 		}
-		importedPkgs = append(importedPkgs, rPkg)
+		push(importedPkgs, rPkg)
 	}
 	for ipi := 0; ipi < len(importedPkgs); ipi++ {
 		ipkg := importedPkgs[ipi]
@@ -346,7 +346,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 					tid = "reflect/types.type:named:" | pkgPath | "." | tname
 				}
 				msig := m.Signature()
-				impls = append(impls, ifaceImpl{
+				push(impls, ifaceImpl{
 					recvType:  tn3.Typ,
 					ptrRecv:   isPR,
 					extSymbol: sym,
@@ -359,7 +359,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 				chain, embedSym, embedSig, embedT := findExtEmbedMethod(named3, pkgPath, tname, methodName, 0)
 				if embedSym != "" {
 					tid := "reflect/types.type:pointer:named:" | pkgPath | "." | tname
-					impls = append(impls, ifaceImpl{
+					push(impls, ifaceImpl{
 						recvType:   NewPointer(tn3.Typ),
 						ptrRecv:    true,
 						extSymbol:  embedSym,
@@ -526,9 +526,9 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 	}
 	var psegs []string
 	if params != "" {
-		psegs = append(psegs, params)
+		push(psegs, params)
 	}
-	psegs = append(psegs, recvLLVM)
+	push(psegs, recvLLVM)
 	var sig *Signature
 	if impl.fn != nil && impl.fn.Signature != nil {
 		sig = impl.fn.Signature
@@ -541,7 +541,7 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 			if pt == "void" {
 				pt = "ptr"
 			}
-			psegs = append(psegs, pt)
+			push(psegs, pt)
 		}
 	} else {
 		for _, arg := range inv.Args {
@@ -549,10 +549,10 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 			if argT == "void" {
 				argT = "ptr"
 			}
-			psegs = append(psegs, argT)
+			push(psegs, argT)
 		}
 	}
-	psegs = append(psegs, "ptr")
+	push(psegs, "ptr")
 	params = joinStrs(commaSep(psegs))
 	// extern_weak: dispatch lists enumerate impls from the whole link set;
 	// a link reusing this module's cached .bc without an impl's package
@@ -562,12 +562,12 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 	if useSret {
 		declRet = "void"
 	}
-	e.pendExtDecls = append(e.pendExtDecls, emitKV{sym, "extern_weak " | declRet | " " | sym | "(" | params | ")"})
+	push(e.pendExtDecls, emitKV{sym, "extern_weak " | declRet | " " | sym | "(" | params | ")"})
 }
 
 func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv string, inv *SSAInvoke, isVoid bool, impl ifaceImpl) {
 	var casegs []string
-	casegs = append(casegs, recvLLVM | " " | recv)
+	push(casegs, recvLLVM | " " | recv)
 	var sig *Signature
 	if impl.fn != nil {
 		sig = impl.fn.Signature
@@ -598,9 +598,9 @@ func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv stri
 				argVal = loaded
 			}
 		}
-		casegs = append(casegs, argT | " " | argVal)
+		push(casegs, argT | " " | argVal)
 	}
-	casegs = append(casegs, "ptr null")
+	push(casegs, "ptr null")
 	callArgs := joinStrs(commaSep(casegs))
 	e.w("  ")
 	if !isVoid {
@@ -641,8 +641,8 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 		var keepS []*Signature
 		for mi := 0; mi < len(mnames); mi++ {
 			if mnames[mi] != "String" {
-				keepN = append(keepN, mnames[mi])
-				keepS = append(keepS, msigs[mi])
+				push(keepN, mnames[mi])
+				push(keepS, msigs[mi])
 			}
 		}
 		mnames = keepN
@@ -681,7 +681,7 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 			}
 			seen[base] = true
 			if _, have := allCount[base]; !have {
-				order = append(order, base)
+				push(order, base)
 			}
 			allCount[base] = allCount[base] + 1
 			if !impls[ii].ptrRecv {
@@ -694,10 +694,10 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 	for oi := 0; oi < len(order); oi++ {
 		base := order[oi]
 		if allCount[base] == n {
-			tids = append(tids, e.hashToIntptr(fnv1a64(pfx|"pointer:"|base[len(pfx):])))
+			push(tids, e.hashToIntptr(fnv1a64(pfx|"pointer:"|base[len(pfx):])))
 		}
 		if valCount[base] == n {
-			tids = append(tids, e.hashToIntptr(fnv1a64(base)))
+			push(tids, e.hashToIntptr(fnv1a64(base)))
 		}
 	}
 	ok := ""
@@ -736,13 +736,13 @@ func collectIfaceMethodInfo(ifaceT *TCInterface, depth int32) (ss []string, sigs
 	var sigList []*Signature
 	if ifaceT.NumMethods() > 0 {
 		for i := int32(0); i < ifaceT.NumMethods(); i++ {
-			names = append(names, ifaceT.Method(i).Name)
-			sigList = append(sigList, ifaceT.Method(i).Sig)
+			push(names, ifaceT.Method(i).Name)
+			push(sigList, ifaceT.Method(i).Sig)
 		}
 	} else {
 		for i := int32(0); i < ifaceT.NumExplicitMethods(); i++ {
-			names = append(names, ifaceT.ExplicitMethod(i).Name)
-			sigList = append(sigList, ifaceT.ExplicitMethod(i).Sig)
+			push(names, ifaceT.ExplicitMethod(i).Name)
+			push(sigList, ifaceT.ExplicitMethod(i).Sig)
 		}
 		for i := int32(0); i < ifaceT.NumEmbeddeds(); i++ {
 			if em, ok := SafeUnderlying(ifaceT.EmbeddedType(i)).(*TCInterface); ok {
@@ -760,11 +760,11 @@ func collectIfaceMethodInfo(ifaceT *TCInterface, depth int32) (ss []string, sigs
 			continue
 		}
 		seen[names[i]] = true
-		outN = append(outN, names[i])
+		push(outN, names[i])
 		if i < len(sigList) {
-			outS = append(outS, sigList[i])
+			push(outS, sigList[i])
 		} else {
-			outS = append(outS, nil)
+			push(outS, nil)
 		}
 	}
 	return outN, outS
@@ -855,7 +855,7 @@ func (e *irEmitter) prepareInvokeArgs(inv *SSAInvoke, impl ifaceImpl) (ss []invo
 		if argT == "void" {
 			argT = "ptr"
 		}
-		result = append(result, invokeArg{typ: argT, val: argV})
+		push(result, invokeArg{typ: argT, val: argV})
 	}
 	return result
 }
@@ -935,7 +935,7 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 				continue
 			}
 		}
-		impls = append(impls, impl)
+		push(impls, impl)
 	}
 	for _, impl := range impls {
 		e.declareExtInvoke(impl, inv)
@@ -984,10 +984,10 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 	var caseLabels []string
 	var callRegs []string
 	for i := range impls {
-		checkLabels = append(checkLabels, "invoke.check" | irItoa(baseID) | "." | irItoa(i))
-		caseLabels = append(caseLabels, "invoke.case" | irItoa(baseID) | "." | irItoa(i))
+		push(checkLabels, "invoke.check" | irItoa(baseID) | "." | irItoa(i))
+		push(caseLabels, "invoke.case" | irItoa(baseID) | "." | irItoa(i))
 		if !isVoid {
-			callRegs = append(callRegs, e.nextReg2("cr"))
+			push(callRegs, e.nextReg2("cr"))
 		}
 	}
 	defaultLabel := "invoke.default" | irItoa(baseID)

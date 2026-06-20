@@ -1,5 +1,12 @@
-// Bump allocator with chainable arena support.
-// No free lists. No individual free. Arena bulk-frees at munmap.
+// Arena allocator with domain root and function arena stack.
+//
+// One TLS slot: domainRoot. Written once at domain creation, never mutated.
+// Current arena = domainRoot.fnStack[domainRoot.fnTop].
+// Function entry pushes, function return pops. LIFO matches lifetime.
+//
+// Arena structs are self-contained in their own mmap region (offset 0).
+// No linked lists. No heap allocation for metadata. Region ownership
+// is a bounded table scan of the arena's flat region registry.
 
 package runtime
 
@@ -13,18 +20,59 @@ var heapptr uintptr
 var totalAlloc uint64
 var mallocs uint64
 
-// currentArena: when set, alloc() bump-allocates from this arena.
-var currentArena *Arena
+// domainRoot: one TLS slot per domain. Written once, never mutated.
+var domainRoot *DomainRoot
+
+// fnStackMax is the maximum function arena nesting depth.
+// 512 entries = 4096 bytes = one page. More call depth than any
+// compiler pass will hit.
+const fnStackMax = int32(512)
+
+// domStackMax is the maximum child domain count per parent.
+const domStackMax = int32(64)
+
+// DomainRoot lives at offset 0 of the domain's root mmap region.
+// Contains the function arena stack and child domain stack.
+// The root arena is embedded inline - fnStack[0] points to it.
+type DomainRoot struct {
+	fnStack  [512]*Arena
+	fnTop    int32
+	_pad1    int32
+	domStack [64]uintptr // child domain root addresses
+	domTop   int32
+	_pad2    int32
+	root     Arena // inline root arena, fnStack[0] = &root
+}
+
+// ArenaRegion is one mmap'd region owned by an Arena.
+type ArenaRegion struct {
+	base uintptr
+	off  uintptr // bytes allocated
+	cap  uintptr
+}
+
+// arenaMaxRegions is the maximum number of regions per arena.
+const arenaMaxRegions = int32(256)
+
+// Arena is a bump-pointer allocator with a flat region registry.
+// For function arenas, the Arena struct lives at offset 0 of its
+// primary mmap region. No external allocation needed.
+type Arena struct {
+	nregions int32
+	_pad     int32
+	regions  [256]ArenaRegion
+}
 
 //:noinline
 func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 	if size == 0 {
 		size = 1
 	}
-	if currentArena != nil {
-		return ArenaAlloc(currentArena, align(size))
+	if domainRoot != nil {
+		a := domainRoot.fnStack[domainRoot.fnTop]
+		return ArenaAlloc(a, align(size))
 	}
-	// Startup bump allocator: used before any arena is created.
+	// Startup bump allocator: used before domain root exists.
 	size = align(size)
 	addr := heapptr
 	heapptr += size
@@ -56,77 +104,174 @@ func ReadMemStats(m *MemStats) {
 
 func initHeap() {
 	heapptr = heapStart
-	// initRootArena is platform-specific: unix creates an mmap-backed
-	// arena, wasm leaves currentArena nil (bump allocator is the arena).
 	initRootArena()
 }
 
-// rootArena is the process-lifetime arena created at init.
-var rootArena *Arena
+// --- Domain lifecycle ---
 
-// Arena is a chainable bump-pointer allocator backed by mmap.
-// When the current region fills, a new region is chained via prev.
-// ArenaFree walks the chain and munmaps all regions.
-type Arena struct {
-	base uintptr
-	off  uintptr
-	cap  uintptr
-	prev *Arena // previous region in chain (nil for first)
-}
-
-// CurrentArena returns the active arena (for save/restore on nesting).
-func CurrentArena() (a *Arena) {
-	return currentArena
-}
-
-// SetCurrentArena sets the global arena for alloc().
-func SetCurrentArena(a *Arena) {
-	currentArena = a
-}
-
-// ArenaMark returns the current offset of the active arena.
-func ArenaMark() (mark uintptr) {
-	if currentArena == nil {
-		return 0
+// initDomain creates the domain root in a new mmap region.
+// Sets the one TLS slot. Called once per domain lifetime.
+func initDomain(capacity uintptr) {
+	capacity = (capacity + 4095) &^ 4095
+	headerSz := align(unsafe.Sizeof(DomainRoot{}))
+	if capacity < headerSz+4096 {
+		capacity = (headerSz + 4096 + 4095) &^ 4095
 	}
-	return currentArena.off
+	printstring("DOMAIN_INIT cap=")
+	printuint64(uint64(capacity))
+	printstring(" hdr=")
+	printuint64(uint64(headerSz))
+	printstring("\n")
+	addr := mmap(nil, capacity, flag_PROT_READ|flag_PROT_WRITE,
+		flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
+	if addr == unsafe.Pointer(^uintptr(0)) {
+		runtimePanic("domain: mmap failed")
+	}
+	memzero(addr, unsafe.Sizeof(DomainRoot{}))
+	dr := (*DomainRoot)(addr)
+	dr.root.nregions = 1
+	dr.root.regions[0].base = uintptr(addr)
+	dr.root.regions[0].off = headerSz
+	dr.root.regions[0].cap = capacity
+	dr.fnStack[0] = &dr.root
+	dr.fnTop = 0
+	dr.domTop = 0
+	domainRoot = dr // write TLS slot once
 }
 
-// ArenaRestore resets the active arena to a previously saved offset.
-func ArenaRestore(mark uintptr) {
-	if currentArena == nil {
+// --- Function arena stack ---
+
+// FnArenaPush creates a new function arena and pushes it onto the stack.
+// Returns the arena pointer (used by codegen for RelocInit).
+func FnArenaPush(capacity uintptr) (a *Arena) {
+	domainRoot.fnTop++
+	if domainRoot.fnTop >= fnStackMax {
+		runtimePanic("function arena stack overflow")
+	}
+	a = ArenaNew(capacity)
+	domainRoot.fnStack[domainRoot.fnTop] = a
+	return a
+}
+
+// FnArenaPop removes the top function arena from the stack and returns it.
+// The caller is responsible for calling ArenaFree on the returned arena.
+func FnArenaPop() (a *Arena) {
+	a = domainRoot.fnStack[domainRoot.fnTop]
+	domainRoot.fnStack[domainRoot.fnTop] = nil
+	domainRoot.fnTop--
+	return a
+}
+
+// FnArenaPopFree pops the top function arena and frees it.
+// Used by the no-copy return path.
+func FnArenaPopFree() {
+	a := FnArenaPop()
+	ArenaFree(a)
+}
+
+// --- Backward-compatible arena API ---
+
+// CurrentArena returns the active arena (top of function stack).
+func CurrentArena() (a *Arena) {
+	if domainRoot == nil {
+		return nil
+	}
+	return domainRoot.fnStack[domainRoot.fnTop]
+}
+
+// SetCurrentArena overwrites the top of the function arena stack.
+// Used by hashmap owner-arena switching. Caller must save/restore.
+func SetCurrentArena(a *Arena) {
+	if domainRoot == nil {
 		return
 	}
-	currentArena.off = mark
+	domainRoot.fnStack[domainRoot.fnTop] = a
 }
 
-const arenaDefaultRegion = uintptr(64) * 1024 // 64KB per chain link
+// ArenaMark returns an opaque mark encoding the current allocation point.
+// High 32 bits: active region index. Low 32 bits: offset in that region.
+func ArenaMark() (mark uintptr) {
+	if domainRoot == nil {
+		return 0
+	}
+	a := domainRoot.fnStack[domainRoot.fnTop]
+	if a == nil {
+		return 0
+	}
+	idx := a.nregions - 1
+	return uintptr(idx)<<32 | a.regions[idx].off
+}
+
+// ArenaRestore resets the current arena to a previously saved mark.
+func ArenaRestore(mark uintptr) {
+	if domainRoot == nil {
+		return
+	}
+	a := domainRoot.fnStack[domainRoot.fnTop]
+	if a == nil {
+		return
+	}
+	regionIdx := int32(mark >> 32)
+	off := mark & 0xFFFFFFFF
+	for i := a.nregions - 1; i > regionIdx; i-- {
+		munmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
+	}
+	a.nregions = regionIdx + 1
+	a.regions[regionIdx].off = off
+}
+
+// --- Arena lifecycle ---
+
+const arenaDefaultRegion = uintptr(64) * 1024
 
 // ArenaNew creates an arena with the given initial capacity via mmap.
+// The Arena struct is embedded at offset 0 of the mmap'd region.
+// No external allocation needed.
 func ArenaNew(capacity uintptr) (a *Arena) {
 	capacity = (capacity + 4095) &^ 4095
+	headerSz := align(unsafe.Sizeof(Arena{}))
+	if capacity < headerSz+4096 {
+		capacity = (headerSz + 4096 + 4095) &^ 4095
+	}
 	addr := mmap(nil, capacity, flag_PROT_READ|flag_PROT_WRITE,
 		flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
 	if addr == unsafe.Pointer(^uintptr(0)) {
 		runtimePanic("arena: mmap failed")
 	}
-	a = (*Arena)(heapAlloc(unsafe.Sizeof(Arena{})))
-	a.base = uintptr(addr)
-	a.off = 0
-	a.cap = capacity
-	a.prev = nil
+	a = (*Arena)(addr)
+	a.nregions = 1
+	a.regions[0].base = uintptr(addr)
+	a.regions[0].off = headerSz // skip Arena header
+	a.regions[0].cap = capacity
 	return a
 }
 
 // ArenaAlloc allocates size bytes from the arena, 16-byte aligned, zeroed.
-// If the current region is full, chains a new region.
 func ArenaAlloc(a *Arena, size uintptr) unsafe.Pointer {
 	if a == nil {
 		runtimePanic("ArenaAlloc: nil arena")
 	}
 	size = align(size)
-	if a.off+size > a.cap {
-		// Chain a new region. New region becomes the head.
+	active := a.nregions - 1
+	if a.regions[active].off+size > a.regions[active].cap {
+		if a.nregions >= arenaMaxRegions {
+			printstring("OVERFLOW nregions=")
+			printuint64(uint64(a.nregions))
+			printstring(" size=")
+			printuint64(uint64(size))
+			printstring(" r0.cap=")
+			printuint64(uint64(a.regions[0].cap))
+			printstring(" r0.off=")
+			printuint64(uint64(a.regions[0].off))
+			printstring(" active.cap=")
+			printuint64(uint64(a.regions[active].cap))
+			printstring(" active.off=")
+			printuint64(uint64(a.regions[active].off))
+			printstring(" arena=")
+			printuint64(uint64(uintptr(unsafe.Pointer(a))))
+			printstring("\n")
+			runtimePanic("arena: region table full")
+		}
 		newCap := arenaDefaultRegion
 		if size > newCap {
 			newCap = (size + 4095) &^ 4095
@@ -134,88 +279,93 @@ func ArenaAlloc(a *Arena, size uintptr) unsafe.Pointer {
 		addr := mmap(nil, newCap, flag_PROT_READ|flag_PROT_WRITE,
 			flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
 		if addr == unsafe.Pointer(^uintptr(0)) {
-			runtimePanic("arena: chain mmap failed")
+			runtimePanic("arena: region mmap failed")
 		}
-		// Save current region as prev, repoint arena to new region.
-		old := (*Arena)(heapAlloc(unsafe.Sizeof(Arena{})))
-		old.base = a.base
-		old.off = a.off
-		old.cap = a.cap
-		old.prev = a.prev
-		a.base = uintptr(addr)
-		a.off = 0
-		a.cap = newCap
-		a.prev = old
+		a.regions[a.nregions].base = uintptr(addr)
+		a.regions[a.nregions].off = 0
+		a.regions[a.nregions].cap = newCap
+		a.nregions++
+		active = a.nregions - 1
 	}
-	ptr := unsafe.Pointer(a.base + a.off)
-	a.off += size
+	ptr := unsafe.Pointer(a.regions[active].base + a.regions[active].off)
+	a.regions[active].off += size
 	memzero(ptr, size)
 	return ptr
 }
 
-// heapAlloc: direct startup bump allocation bypassing currentArena.
-func heapAlloc(size uintptr) unsafe.Pointer {
-	saved := currentArena
-	currentArena = nil
-	p := alloc(size, nil)
-	currentArena = saved
-	return p
-}
-
-// ArenaFree unmaps all regions in the chain.
+// ArenaFree unmaps all regions in the arena.
+// The primary region contains the Arena struct itself, so read
+// base/cap into locals before the final munmap.
 func ArenaFree(a *Arena) {
 	if a == nil {
 		return
 	}
-	// Free chained previous regions.
-	p := a.prev
-	for p != nil {
-		next := p.prev
-		munmap(unsafe.Pointer(p.base), p.cap)
-		p = next
+	for i := a.nregions - 1; i > 0; i-- {
+		munmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
 	}
-	// Free the head region.
-	munmap(unsafe.Pointer(a.base), a.cap)
+	b := a.regions[0].base
+	c := a.regions[0].cap
+	munmap(unsafe.Pointer(b), c)
 }
 
-// ArenaReset resets the arena for reuse. Frees chained regions,
-// keeps only the head region.
+// ArenaReset resets the arena for reuse. Frees all regions except
+// the first, resets the first region's offset.
 func ArenaReset(a *Arena) {
 	if a == nil {
 		return
 	}
-	// If chained, free all prev regions and keep just the current base.
-	// But the current head might be a chained region. We need to find the
-	// original (oldest) region. Walk to the end of the chain.
-	if a.prev != nil {
-		// The original region is at the end of the chain.
-		// Free all regions including the current head, then restore original.
-		var original *Arena
-		p := a.prev
-		for p.prev != nil {
-			next := p.prev
-			munmap(unsafe.Pointer(p.base), p.cap)
-			p = next
-		}
-		original = p
-		// Free current head.
-		munmap(unsafe.Pointer(a.base), a.cap)
-		// Restore original as head.
-		a.base = original.base
-		a.cap = original.cap
-		a.prev = nil
+	for i := a.nregions - 1; i > 0; i-- {
+		munmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
 	}
-	a.off = 0
+	a.nregions = 1
+	a.regions[0].off = align(unsafe.Sizeof(Arena{}))
+}
+
+// heapAlloc: direct startup bump allocation. Only used before
+// domain root exists. Does not touch any TLS or arena state.
+func heapAlloc(size uintptr) unsafe.Pointer {
+	size = align(size)
+	addr := heapptr
+	heapptr += size
+	for heapptr >= heapEnd {
+		if growHeap() {
+			continue
+		}
+		runtimePanic("out of memory")
+	}
+	ptr := unsafe.Pointer(addr)
+	memzero(ptr, size)
+	return ptr
+}
+
+// --- Region locality queries ---
+
+// arenaContains checks if ptr is in any region of the arena above mark.
+func arenaContains(a *Arena, ptr uintptr, mark uintptr) (ok bool) {
+	regionIdx := int32(mark >> 32)
+	regionOff := mark & 0xFFFFFFFF
+	for i := regionIdx; i < a.nregions; i++ {
+		r := a.regions[i]
+		start := r.base
+		if i == regionIdx {
+			start += regionOff
+		}
+		if ptr >= start && ptr < r.base+r.off {
+			return true
+		}
+	}
+	return false
 }
 
 // arenaCopySliceIfLocal copies a slice's backing array to the current arena
 // position only if its data pointer is in the source arena region.
 func arenaCopySliceIfLocal(s string, mark uintptr) (r string) {
-	if len(s) == 0 || currentArena == nil {
+	if len(s) == 0 || domainRoot == nil {
 		return s
 	}
+	a := domainRoot.fnStack[domainRoot.fnTop]
 	p := uintptr(unsafe.Pointer(unsafe.SliceData([]byte(s))))
-	if !arenaContains(currentArena, p, mark) {
+	if !arenaContains(a, p, mark) {
 		return s
 	}
 	buf := []byte{:len(s)}
@@ -225,33 +375,17 @@ func arenaCopySliceIfLocal(s string, mark uintptr) (r string) {
 
 // arenaCopyPtrIfLocal copies size bytes at ptr only if in source region.
 func arenaCopyPtrIfLocal(ptr unsafe.Pointer, mark uintptr, size uintptr) unsafe.Pointer {
-	if ptr == nil || currentArena == nil {
+	if ptr == nil || domainRoot == nil {
 		return ptr
 	}
+	a := domainRoot.fnStack[domainRoot.fnTop]
 	p := uintptr(ptr)
-	if !arenaContains(currentArena, p, mark) {
+	if !arenaContains(a, p, mark) {
 		return ptr
 	}
 	dst := alloc(size, nil)
 	memcpy(dst, ptr, size)
 	return dst
-}
-
-// arenaContains checks if ptr is in any region of the arena chain above mark.
-func arenaContains(a *Arena, ptr uintptr, mark uintptr) (ok bool) {
-	// Check head region.
-	if ptr >= a.base+mark && ptr < a.base+a.cap {
-		return true
-	}
-	// Check chained regions (all of these are fully above mark).
-	p := a.prev
-	for p != nil {
-		if ptr >= p.base && ptr < p.base+p.cap {
-			return true
-		}
-		p = p.prev
-	}
-	return false
 }
 
 func setHeapEnd(newHeapEnd uintptr) {

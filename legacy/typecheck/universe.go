@@ -138,6 +138,10 @@ func init() {
 	// Go 1.21 builtins.
 	Universe.Insert(newBuiltin("min", BuiltinMin))
 	Universe.Insert(newBuiltin("max", BuiltinMax))
+	// Moxie arena-stack builtins.
+	Universe.Insert(newBuiltin("push", BuiltinPush))
+	Universe.Insert(newBuiltin("pop", BuiltinPop))
+	Universe.Insert(newBuiltin("resize", BuiltinResize))
 }
 
 var builtinNames = [...]string{

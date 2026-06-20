@@ -19,7 +19,7 @@ func moxie_compile_to_ir(srcPtr unsafe.Pointer, srcLen int32, namePtr unsafe.Poi
 	ir := CompileToIR(src, name, triple)
 
 	idx := int32(len(cctx.irResults))
-	cctx.irResults = append(cctx.irResults, ir)
+	push(cctx.irResults, ir)
 	return idx
 }
 
@@ -150,7 +150,7 @@ func moxie_register_iface(pkgPathPtr unsafe.Pointer, pkgPathLen int32, namePtr u
 			}
 			mname := p[:eqIdx]
 			msig := parseSignatureDesc(p[eqIdx+1:])
-			methods = append(methods, NewTCIfaceMethod(mname, msig))
+			push(methods, NewTCIfaceMethod(mname, msig))
 		}
 	}
 	iface := NewTCInterface(methods, nil)
@@ -224,11 +224,11 @@ func splitSemicolon(s string) (ss []string) {
 	start := 0
 	for i := 0; i < len(s); i++ {
 		if s[i] == ';' {
-			parts = append(parts, s[start:i])
+			push(parts, s[start:i])
 			start = i + 1
 		}
 	}
-	parts = append(parts, s[start:])
+	push(parts, s[start:])
 	return parts
 }
 
@@ -316,8 +316,8 @@ func parseTypeDesc(desc string) (t Type) {
 			ftype := parseTypeDesc(f[ci+1:])
 			v := NewTCVar(nil, fname, ftype)
 			v.Anonymous = anon
-			vars = append(vars, v)
-			tags = append(tags, "")
+			push(vars, v)
+			push(tags, "")
 		}
 		return NewTCStruct(vars, tags)
 	}
@@ -447,17 +447,17 @@ func parseSignatureDesc(desc string) (s *Signature) {
 		for pi, p := range parts {
 			if pi == len(parts)-1 && len(p) > 3 && p[:3] == "..." {
 				variadic = true
-				params = append(params, NewTCVar(nil, "", NewSlice(parseTypeDesc(p[3:]))))
+				push(params, NewTCVar(nil, "", NewSlice(parseTypeDesc(p[3:]))))
 				continue
 			}
-			params = append(params, NewTCVar(nil, "", parseTypeDesc(p)))
+			push(params, NewTCVar(nil, "", parseTypeDesc(p)))
 		}
 	}
 	var results []*TCVar
 	if resultStr != "" {
 		parts := splitCommaBalanced(resultStr)
 		for _, r := range parts {
-			results = append(results, NewTCVar(nil, "", parseTypeDesc(r)))
+			push(results, NewTCVar(nil, "", parseTypeDesc(r)))
 		}
 	}
 	var pTuple, rTuple *Tuple
@@ -471,10 +471,10 @@ func parseSignatureDesc(desc string) (s *Signature) {
 }
 
 func splitCommaBalanced(s string) (ss []string) {
-	var parts []string
-	start := 0
-	depth := 0
-	for i := 0; i < len(s); i++ {
+	// Count commas at depth 0.
+	n := int32(1)
+	depth := int32(0)
+	for i := int32(0); i < len(s); i++ {
 		switch s[i] {
 		case '{', '[', '(':
 			depth++
@@ -482,25 +482,46 @@ func splitCommaBalanced(s string) (ss []string) {
 			depth--
 		case ',':
 			if depth == 0 {
-				parts = append(parts, s[start:i])
+				n++
+			}
+		}
+	}
+	parts := []string{:0:n}
+	start := int32(0)
+	depth = 0
+	for i := int32(0); i < len(s); i++ {
+		switch s[i] {
+		case '{', '[', '(':
+			depth++
+		case '}', ']', ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				push(parts, s[start:i])
 				start = i + 1
 			}
 		}
 	}
-	parts = append(parts, s[start:])
+	push(parts, s[start:])
 	return parts
 }
 
 func splitComma(s string) (ss []string) {
-	var parts []string
-	start := 0
-	for i := 0; i < len(s); i++ {
+	n := int32(1)
+	for i := int32(0); i < len(s); i++ {
 		if s[i] == ',' {
-			parts = append(parts, s[start:i])
+			n++
+		}
+	}
+	parts := []string{:0:n}
+	start := int32(0)
+	for i := int32(0); i < len(s); i++ {
+		if s[i] == ',' {
+			push(parts, s[start:i])
 			start = i + 1
 		}
 	}
-	parts = append(parts, s[start:])
+	push(parts, s[start:])
 	return parts
 }
 

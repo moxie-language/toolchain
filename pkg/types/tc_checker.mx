@@ -78,6 +78,10 @@ func (c *Checker) Files(files []*syntax.File) (err error) {
 		c.collectDecls(f)
 	}
 
+	// Count methods per receiver type name, then pre-allocate
+	// Methods slices with exact capacity. Two-pass: count before cut.
+	c.preallocMethods(files)
+
 	for _, f := range files {
 		c.fileScope = c.fileScopes[f]
 		for _, decl := range f.DeclList {
@@ -120,7 +124,7 @@ func (c *Checker) errorf(pos token.Pos, msg string) {
 	if c.conf.Error != nil {
 		c.conf.Error(err)
 	}
-	c.errors = append(c.errors, err)
+	push(c.errors, err)
 }
 
 // TypeError is a type-checking error with position info.
@@ -135,6 +139,69 @@ func (e *TypeError) Error() (s string) {
 
 func (e *TypeError) String() (s string) {
 	return e.Error()
+}
+
+// recvTypeName extracts the receiver type name from a FuncDecl's
+// receiver field without resolving types. Returns "" if not extractable.
+func recvTypeName(d *syntax.FuncDecl) (name string) {
+	if d.Recv == nil {
+		return ""
+	}
+	t := d.Recv.Type
+	// Unwrap pointer: *T -> T
+	if op, ok := t.(*syntax.Operation); ok && op.Y == nil {
+		t = op.X
+	}
+	// Unwrap index: T[X] -> T (generic receiver)
+	if idx, ok := t.(*syntax.IndexExpr); ok {
+		t = idx.X
+	}
+	if n, ok := t.(*syntax.Name); ok {
+		return n.Value
+	}
+	return ""
+}
+
+// preallocMethods counts methods per receiver type name across all files,
+// then pre-allocates the Methods slice on each type with exact capacity.
+// Two-pass: count before cut. push() fills what was already measured.
+func (c *Checker) preallocMethods(files []*syntax.File) {
+	// Pass 1: count methods per receiver type name.
+	counts := map[string]int32{}
+	for _, f := range files {
+		for _, decl := range f.DeclList {
+			if fd, ok := decl.(*syntax.FuncDecl); ok && fd.Recv != nil {
+				name := recvTypeName(fd)
+				if name != "" {
+					counts[name] = counts[name] + 1
+				}
+			}
+		}
+	}
+	// Pass 2: pre-allocate Methods slices on declared types.
+	for name, count := range counts {
+		obj := c.pkg.Scope.Lookup(name)
+		if obj == nil {
+			continue
+		}
+		tn, ok := obj.(*TypeName)
+		if !ok {
+			continue
+		}
+		if tn.Typ == nil {
+			continue
+		}
+		switch t := tn.Typ.(type) {
+		case *Named:
+			if t.Methods == nil {
+				t.Methods = []*TCFunc{:0:count}
+			}
+		case *Basic:
+			if t.Methods == nil {
+				t.Methods = []*TCFunc{:0:count}
+			}
+		}
+	}
 }
 
 // record stores type info for an expression.

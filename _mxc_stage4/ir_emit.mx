@@ -106,7 +106,7 @@ func newIREmitter(pkg *SSAPackage, triple string, srcLen int32) (p *irEmitter) {
 }
 
 func (e *irEmitter) w(s string) {
-	e.segs = append(e.segs, s)
+	push(e.segs, s)
 }
 
 // assembleSegs joins all segments into e.buf in one allocation.
@@ -197,10 +197,10 @@ func (e *irEmitter) flushDedup() {
 				}
 				continue
 			}
-			seen = append(seen, line)
+			push(seen, line)
 		}
 		for j := ls; j < le; j++ {
-			out = append(out, e.buf[j])
+			push(out, e.buf[j])
 		}
 		ls = le
 	}
@@ -246,7 +246,7 @@ func (e *irEmitter) hoistAllocaText(start int32) {
 	}
 	if insert < 0 {
 		// No _entry block found; put assembled buf back as one segment.
-		e.segs = append(e.segs, string(body))
+		push(e.segs, string(body))
 		return
 	}
 	// Scan lines after insert point, partition into allocas and rest.
@@ -283,26 +283,26 @@ func (e *irEmitter) hoistAllocaText(start int32) {
 		// since body lives until we're done building output).
 		line := string(body[ls:le])
 		if isAlloca {
-			allocaSegs = append(allocaSegs, line)
+			push(allocaSegs, line)
 		} else {
-			restSegs = append(restSegs, line)
+			push(restSegs, line)
 		}
 		ls = le
 	}
 	if !moved {
-		e.segs = append(e.segs, string(body))
+		push(e.segs, string(body))
 		return
 	}
 	// Rebuild: prefix + allocas + rest
 	var out []string
-	out = append(out, string(body[:insert]))
+	push(out, string(body[:insert]))
 	for _, s := range allocaSegs {
-		out = append(out, s)
+		push(out, s)
 	}
 	for _, s := range restSegs {
-		out = append(out, s)
+		push(out, s)
 	}
-	e.segs = append(e.segs, joinStrs(out))
+	push(e.segs, joinStrs(out))
 }
 
 func (e *irEmitter) regName(v SSAValue) (s string) {
@@ -346,11 +346,11 @@ func (e *irEmitter) declareRuntime(name, retType, params string) {
 	} else {
 		params = "ptr"
 	}
-	e.pendExtDecls = append(e.pendExtDecls, emitKV{name, retType | " @" | name | "(" | params | ")"})
+	push(e.pendExtDecls, emitKV{name, retType | " @" | name | "(" | params | ")"})
 }
 
 func (e *irEmitter) declareRuntimeNoCtx(name, retType, params string) {
-	e.pendExtDecls = append(e.pendExtDecls, emitKV{name, retType | " @" | name | "(" | params | ")"})
+	push(e.pendExtDecls, emitKV{name, retType | " @" | name | "(" | params | ")"})
 }
 
 
@@ -376,7 +376,7 @@ func (e *irEmitter) declareExternalGlobal(g *SSAGlobal) {
 	if typ == "void" {
 		typ = "i1"
 	}
-	e.pendExtGlobals = append(e.pendExtGlobals, emitKV{name, typ})
+	push(e.pendExtGlobals, emitKV{name, typ})
 }
 
 func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
@@ -401,11 +401,11 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 	}
 	var psegs []string
 	if params != "" {
-		psegs = append(psegs, params)
+		push(psegs, params)
 	}
 	hasRecv := fn.Signature != nil && fn.Signature.Recv != nil
 	if hasRecv {
-		psegs = append(psegs, "ptr")
+		push(psegs, "ptr")
 	}
 	if fn.Signature != nil && fn.Signature.Params != nil {
 		for i := 0; i < fn.Signature.Params.Len(); i++ {
@@ -414,17 +414,17 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 				mxutil.WriteStr(2, "BUG-DECL: empty param type in " | sym | " param " | irItoa(int32(i)) | "\n")
 				pt = "ptr"
 			}
-			psegs = append(psegs, pt)
+			push(psegs, pt)
 		}
 	}
 	if !skipCtx {
-		psegs = append(psegs, "ptr")
+		push(psegs, "ptr")
 	}
 	params = joinStrs(commaSep(psegs))
 	if useSret {
-		e.pendExtDecls = append(e.pendExtDecls, emitKV{sym, "void " | sym | "(" | params | ")"})
+		push(e.pendExtDecls, emitKV{sym, "void " | sym | "(" | params | ")"})
 	} else {
-		e.pendExtDecls = append(e.pendExtDecls, emitKV{sym, retType | " " | sym | "(" | params | ")"})
+		push(e.pendExtDecls, emitKV{sym, retType | " " | sym | "(" | params | ")"})
 	}
 }
 
@@ -440,7 +440,7 @@ func (e *irEmitter) addStringConst(s string) (n int32) {
 		}
 	}
 	idx := int32(base + len(e.pendStrConsts))
-	e.pendStrConsts = append(e.pendStrConsts, s)
+	push(e.pendStrConsts, s)
 	return idx
 }
 
@@ -658,10 +658,10 @@ func (e *irEmitter) emit() (s string) {
 			if len(defSym) > 0 && defSym[0] == '@' {
 				defSym = defSym[1:]
 			}
-			e.definedSyms = append(e.definedSyms, defSym)
+			push(e.definedSyms, defSym)
 		}
 	}
-	fnArena := runtime.ArenaNew(64 * 1024)
+	fnArena := runtime.ArenaNew(64 * 1024 * 1024)
 	for _, member := range e.pkgMembers() {
 		if m, ok := member.(*SSAFunction); ok {
 			checkUseAfterFree(m)
@@ -717,7 +717,7 @@ func (e *irEmitter) emit() (s string) {
 		e.w("\n")
 		var edKeys []string
 		for k := range e.extDecls {
-			edKeys = append(edKeys, k)
+			push(edKeys, k)
 		}
 		for i := 1; i < len(edKeys); i++ {
 			for j := i; j > 0 && edKeys[j] < edKeys[j-1]; j-- {
@@ -747,7 +747,7 @@ func (e *irEmitter) emit() (s string) {
 					e.wasmAttrID++
 					aid := e.wasmAttrID
 					e.w(" #" | simpleItoa(aid))
-					e.wasmAttrs = append(e.wasmAttrs, [3]string{simpleItoa(aid), wi[0], wi[1]})
+					push(e.wasmAttrs, [3]string{simpleItoa(aid), wi[0], wi[1]})
 				}
 			}
 			e.w("\n")
@@ -758,7 +758,7 @@ func (e *irEmitter) emit() (s string) {
 		e.w("\n")
 		var egKeys []string
 		for name := range e.extGlobals {
-			egKeys = append(egKeys, name)
+			push(egKeys, name)
 		}
 		for i := 1; i < len(egKeys); i++ {
 			for j := i; j > 0 && egKeys[j] < egKeys[j-1]; j-- {
@@ -819,7 +819,7 @@ func (e *irEmitter) mergeAccumulators() {
 		cs := copyStr(s)
 		if _, ok := e.strMap[cs]; !ok {
 			e.strMap[cs] = len(e.strConst)
-			e.strConst = append(e.strConst, cs)
+			push(e.strConst, cs)
 		}
 	}
 	e.pendStrConsts = nil
@@ -839,18 +839,18 @@ func (e *irEmitter) mergeAccumulators() {
 	}
 	e.pendGlobalDeclTypes = nil
 	for _, wa := range e.pendWasmAttrs {
-		e.wasmAttrs = append(e.wasmAttrs, [3]string{copyStr(wa[0]), copyStr(wa[1]), copyStr(wa[2])})
+		push(e.wasmAttrs, [3]string{copyStr(wa[0]), copyStr(wa[1]), copyStr(wa[2])})
 	}
 	e.pendWasmAttrs = nil
 	for _, dc := range e.pendDeepCopyEntries {
 		key := copyStr(typeKeyForDeepCopy(dc.typ))
 		sym := copyStr(dc.sym)
 		e.deepCopyFns[key] = sym
-		e.deepCopyQueue = append(e.deepCopyQueue, deepCopyEntry{sym, dc.typ})
+		push(e.deepCopyQueue, deepCopyEntry{sym, dc.typ})
 	}
 	e.pendDeepCopyEntries = nil
 	for _, sym := range e.pendRelocFixupDefs {
-		e.definedSyms = append(e.definedSyms, copyStr(sym))
+		push(e.definedSyms, copyStr(sym))
 	}
 	e.pendRelocFixupDefs = nil
 }
@@ -858,7 +858,7 @@ func (e *irEmitter) mergeAccumulators() {
 func (e *irEmitter) pkgMembers() (ss []SSAMember) {
 	var keys []string
 	for k := range e.pkg.Members {
-		keys = append(keys, k)
+		push(keys, k)
 	}
 	for i := 1; i < len(keys); i++ {
 		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
@@ -869,7 +869,7 @@ func (e *irEmitter) pkgMembers() (ss []SSAMember) {
 	for _, k := range keys {
 		m := e.pkg.Members[k]
 		if m != nil {
-			members = append(members, m)
+			push(members, m)
 		}
 	}
 	return members
@@ -894,13 +894,13 @@ func (e *irEmitter) emitEmbedGlobal(g *SSAGlobal, name string, ei *embedInfo) {
 	if !ok {
 		// Fail loud: a zeroinitializer embed global is a nil slice at runtime
 		// and SIGSEGVs far from the cause.
-		cctx.compileErrors = append(cctx.compileErrors, "embed: file not found: "|ei.path)
+		push(cctx.compileErrors, "embed: file not found: "|ei.path)
 		e.w(name | " = " | e.tlsPrefix() | e.sliceType() | " zeroinitializer\n")
 		return
 	}
 	elemSize := e.embedElemSize(ei.elemType)
 	if elemSize <= 0 {
-		cctx.compileErrors = append(cctx.compileErrors, "embed: unknown element type: "|ei.elemType|" for "|ei.path)
+		push(cctx.compileErrors, "embed: unknown element type: "|ei.elemType|" for "|ei.path)
 		e.w(name | " = " | e.tlsPrefix() | e.sliceType() | " zeroinitializer\n")
 		return
 	}
@@ -1274,7 +1274,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 	for _, hb := range f.Blocks {
 		for _, hinstr := range hb.Instrs {
 			if a, ok := hinstr.(*SSAAlloc); ok && hoistAllocs[a] {
-				hoistList = append(hoistList, a)
+				push(hoistList, a)
 			}
 		}
 	}
@@ -1286,7 +1286,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 	for _, b := range f.Blocks {
 		for _, instr := range b.Instrs {
 			if d, ok := instr.(*SSADefer); ok {
-				e.deferList = append(e.deferList, d)
+				push(e.deferList, d)
 			}
 		}
 	}
@@ -1391,7 +1391,7 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 	if len(bareKey) > 0 && bareKey[0] == '@' {
 		bareKey = bareKey[1:]
 	}
-	e.pendExtDecls = append(e.pendExtDecls, emitKV{bareKey, decl})
+	push(e.pendExtDecls, emitKV{bareKey, decl})
 }
 
 // emitLinknameForwarder emits a thin wrapper definition with origSym that
@@ -1406,15 +1406,15 @@ func (e *irEmitter) emitLinknameForwarder(f *SSAFunction, origSym, tgtSym string
 	idx := int32(0)
 	if useSret {
 		pn := "%sret"
-		paramTypes = append(paramTypes, "ptr " | pn)
-		paramArgs = append(paramArgs, "ptr " | pn)
+		push(paramTypes, "ptr " | pn)
+		push(paramArgs, "ptr " | pn)
 		idx++
 	}
 	hasRecv := f.Signature != nil && f.Signature.Recv != nil
 	if hasRecv {
 		pn := "%p" | irItoa(idx)
-		paramTypes = append(paramTypes, "ptr " | pn)
-		paramArgs = append(paramArgs, "ptr " | pn)
+		push(paramTypes, "ptr " | pn)
+		push(paramArgs, "ptr " | pn)
 		idx++
 	}
 	if f.Signature != nil && f.Signature.Params != nil {
@@ -1422,15 +1422,15 @@ func (e *irEmitter) emitLinknameForwarder(f *SSAFunction, origSym, tgtSym string
 			pt := e.llvmType(f.Signature.Params.At(i).Typ)
 			if pt == "" || pt == "void" { pt = "ptr" }
 			pn := "%p" | irItoa(idx)
-			paramTypes = append(paramTypes, pt | " " | pn)
-			paramArgs = append(paramArgs, pt | " " | pn)
+			push(paramTypes, pt | " " | pn)
+			push(paramArgs, pt | " " | pn)
 			idx++
 		}
 	}
 	// context pointer
 	ctxPN := "%p" | irItoa(idx)
-	paramTypes = append(paramTypes, "ptr " | ctxPN)
-	paramArgs = append(paramArgs, "ptr " | ctxPN)
+	push(paramTypes, "ptr " | ctxPN)
+	push(paramArgs, "ptr " | ctxPN)
 	// Emit define
 	e.w("\ndefine ")
 	if useSret {
@@ -1789,7 +1789,7 @@ func (e *irEmitter) emitPhi(p *SSAPhi) {
 		e.w("]")
 	}
 	e.w("\n")
-	e.pendingPhiTruncs = append(e.pendingPhiTruncs, phiTrunc{rawReg, reg, "i32", "i1"})
+	push(e.pendingPhiTruncs, phiTrunc{rawReg, reg, "i32", "i1"})
 }
 
 func (e *irEmitter) emitPhiPred(blk *SSABasicBlock, i int32) {
@@ -1917,22 +1917,22 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 	var expectTypes []string
 	if sig != nil && sig.Results != nil {
 		for i := 0; i < sig.Results.Len(); i++ {
-			expectTypes = append(expectTypes, e.resolveResultType(sig.Results.At(i).Typ))
+			push(expectTypes, e.resolveResultType(sig.Results.At(i).Typ))
 		}
 	}
 	rtSegs := []string{"{"}
 	for i := 0; i < len(r.Results); i++ {
 		res := r.Results[i]
 		if i > 0 {
-			rtSegs = append(rtSegs, ", ")
+			push(rtSegs, ", ")
 		}
 		if i < len(expectTypes) {
-			rtSegs = append(rtSegs, expectTypes[i])
+			push(rtSegs, expectTypes[i])
 		} else {
-			rtSegs = append(rtSegs, e.llvmType(res.SSAType()))
+			push(rtSegs, e.llvmType(res.SSAType()))
 		}
 	}
-	rtSegs = append(rtSegs, "}")
+	push(rtSegs, "}")
 	retType := joinStrs(rtSegs)
 	prev := "undef"
 	for i := 0; i < len(r.Results); i++ {
@@ -2988,57 +2988,57 @@ func (e *irEmitter) instrOperands(instr SSAInstruction) (ss []SSAValue) {
 	e.operandBuf = e.operandBuf[:0]
 	switch i := instr.(type) {
 	case *SSAStore:
-		e.operandBuf = append(e.operandBuf, i.Addr, i.Val)
+		push(e.operandBuf, i.Addr, i.Val)
 	case *SSAUnOp:
-		e.operandBuf = append(e.operandBuf, i.X)
+		push(e.operandBuf, i.X)
 	case *SSABinOp:
-		e.operandBuf = append(e.operandBuf, i.X, i.Y)
+		push(e.operandBuf, i.X, i.Y)
 	case *SSACall:
-		e.operandBuf = append(e.operandBuf, i.Call.Value)
+		push(e.operandBuf, i.Call.Value)
 		for _, a := range i.Call.Args {
-			e.operandBuf = append(e.operandBuf, a)
+			push(e.operandBuf, a)
 		}
 	case *SSAFieldAddr:
-		e.operandBuf = append(e.operandBuf, i.X)
+		push(e.operandBuf, i.X)
 	case *SSAIndexAddr:
-		e.operandBuf = append(e.operandBuf, i.X, i.Index)
+		push(e.operandBuf, i.X, i.Index)
 	case *SSAExtract:
-		e.operandBuf = append(e.operandBuf, i.Tuple)
+		push(e.operandBuf, i.Tuple)
 	case *SSAPhi:
 		return i.Edges
 	case *SSAReturn:
 		for _, r := range i.Results {
-			e.operandBuf = append(e.operandBuf, r)
+			push(e.operandBuf, r)
 		}
 	case *SSAIf:
-		e.operandBuf = append(e.operandBuf, i.Cond)
+		push(e.operandBuf, i.Cond)
 	case *SSAConvert:
-		e.operandBuf = append(e.operandBuf, i.X)
+		push(e.operandBuf, i.X)
 	case *SSAChangeType:
-		e.operandBuf = append(e.operandBuf, i.X)
+		push(e.operandBuf, i.X)
 	case *SSAMakeInterface:
-		e.operandBuf = append(e.operandBuf, i.X)
+		push(e.operandBuf, i.X)
 	case *SSATypeAssert:
-		e.operandBuf = append(e.operandBuf, i.X)
+		push(e.operandBuf, i.X)
 	case *SSASlice:
-		e.operandBuf = append(e.operandBuf, i.X)
-		if i.Low != nil { e.operandBuf = append(e.operandBuf, i.Low) }
-		if i.High != nil { e.operandBuf = append(e.operandBuf, i.High) }
-		if i.Max != nil { e.operandBuf = append(e.operandBuf, i.Max) }
+		push(e.operandBuf, i.X)
+		if i.Low != nil { push(e.operandBuf, i.Low) }
+		if i.High != nil { push(e.operandBuf, i.High) }
+		if i.Max != nil { push(e.operandBuf, i.Max) }
 	case *SSAMapUpdate:
-		e.operandBuf = append(e.operandBuf, i.Map, i.Key, i.Value)
+		push(e.operandBuf, i.Map, i.Key, i.Value)
 	case *SSALookup:
-		e.operandBuf = append(e.operandBuf, i.X, i.Index)
+		push(e.operandBuf, i.X, i.Index)
 	case *SSARange:
-		e.operandBuf = append(e.operandBuf, i.X)
+		push(e.operandBuf, i.X)
 	case *SSANext:
-		e.operandBuf = append(e.operandBuf, i.Iter)
+		push(e.operandBuf, i.Iter)
 	case *SSASend:
-		e.operandBuf = append(e.operandBuf, i.Chan, i.X)
+		push(e.operandBuf, i.Chan, i.X)
 	case *SSAMakeSlice:
-		e.operandBuf = append(e.operandBuf, i.Len)
-		if i.Cap != nil { e.operandBuf = append(e.operandBuf, i.Cap) }
-		if i.Data != nil { e.operandBuf = append(e.operandBuf, i.Data) }
+		push(e.operandBuf, i.Len)
+		if i.Cap != nil { push(e.operandBuf, i.Cap) }
+		if i.Data != nil { push(e.operandBuf, i.Data) }
 	}
 	return e.operandBuf
 	return nil

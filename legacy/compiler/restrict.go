@@ -33,6 +33,7 @@ var restrictedBuiltins = map[string]string{
 	"complex": "complex numbers not supported in moxie",
 	"real":    "complex numbers not supported in moxie",
 	"imag":    "complex numbers not supported in moxie",
+	"append":  "use push(s, v...) instead: no allocation, panics on capacity overflow",
 }
 
 // restrictedTypes maps type names to rejection reasons.
@@ -316,10 +317,6 @@ func (b *builder) checkASTRestrictions() {
 						}
 					}
 					b.addError(ident.Pos(), "moxie: '"+ident.Name+"' is not allowed: "+reason)
-				}
-				// Reject append(a, b...) — use | for slice concatenation.
-				if ident.Name == "append" && node.Ellipsis.IsValid() {
-					b.addError(node.Ellipsis, "moxie: append(a, b...) is not allowed: use | operator for slice concatenation")
 				}
 			}
 		case *ast.FuncDecl:

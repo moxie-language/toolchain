@@ -5,15 +5,14 @@
 //   Pass 2 - Forward: walk entries, allocate destinations in caller's arena.
 //   Pass 3 - Compact + Fixup: copy objects, rewrite pointer fields.
 //
-// RelocState is 4 words on the stack. Entries are bump-allocated from
-// fn_arena - contiguous because no other allocations happen during the
-// mark pass.
+// Region locality is determined by scanning the arena's flat region
+// table - no linked-list traversal, no single-point-of-failure chains.
 
 package runtime
 
 import "unsafe"
 
-// RelocEntry: one forwarding record. Linked list (arena chaining breaks contiguity).
+// RelocEntry: one forwarding record. Linked list for traversal order.
 type RelocEntry struct {
 	old   uintptr
 	new   uintptr
@@ -24,8 +23,8 @@ type RelocEntry struct {
 
 // RelocState: header on the stack.
 type RelocState struct {
-	arena *Arena       // fn_arena - source arena with chain
-	mark  uintptr      // arena offset at function entry (head region)
+	arena *Arena       // fn_arena - source arena with region table
+	mark  uintptr      // opaque mark from ArenaMark at function entry
 	first *RelocEntry  // linked list head
 	count int32        // number of entries
 }
@@ -39,63 +38,33 @@ func RelocInit(rs *RelocState, fnArena *Arena, mark uintptr) {
 }
 
 // relocIsLocal checks if p was allocated by this function in any arena region.
+// Scans the flat region table - bounded by arenaMaxRegions.
 func relocIsLocal(rs *RelocState, p uintptr) (ok bool) {
 	a := rs.arena
-	// Head region: above mark.
-	if p >= a.base+rs.mark && p < a.base+a.off {
-		return true
-	}
-	// Chained regions: entirely function-local.
-	prev := a.prev
-	for prev != nil {
-		if p >= prev.base && p < prev.base+prev.off {
+	markRegion := int32(rs.mark >> 32)
+	markOff := rs.mark & 0xFFFFFFFF
+	for i := markRegion; i < a.nregions; i++ {
+		r := a.regions[i]
+		start := r.base
+		if i == markRegion {
+			start += markOff
+		}
+		if p >= start && p < r.base+r.off {
 			return true
 		}
-		prev = prev.prev
 	}
 	return false
 }
 
 // --- Pass 1: Mark ---
 
-// RelocMark records a reachable object. Allocates entry from fn_arena as linked list.
+// RelocMark records a reachable object. Allocates entry from fn_arena.
 func RelocMark(rs *RelocState, ptr unsafe.Pointer, size uintptr, fixup uintptr) (isNew bool) {
 	if ptr == nil {
 		return false
 	}
 	p := uintptr(ptr)
 	if !relocIsLocal(rs, p) {
-		if size > 40 {
-			printstring("SKIP size=")
-			printuint64(uint64(size))
-			printstring(" ptr=")
-			printuint64(uint64(p))
-			printstring(" arena.base=")
-			printuint64(uint64(rs.arena.base))
-			printstring(" arena.off=")
-			printuint64(uint64(rs.arena.off))
-			printstring(" prev=")
-			if rs.arena.prev != nil {
-				printstring("Y base=")
-				printuint64(uint64(rs.arena.prev.base))
-				printstring(" off=")
-				printuint64(uint64(rs.arena.prev.off))
-			} else {
-				printstring("NIL")
-			}
-			printstring("\n")
-			printstring("SKIP size=")
-			printuint64(uint64(size))
-			printstring(" ptr=")
-			printuint64(uint64(p))
-			printstring(" arena.base=")
-			printuint64(uint64(rs.arena.base))
-			printstring(" arena.off=")
-			printuint64(uint64(rs.arena.off))
-			printstring(" mark=")
-			printuint64(uint64(rs.mark))
-			printstring("\n")
-		}
 		return false
 	}
 	// Already marked?
@@ -106,7 +75,7 @@ func RelocMark(rs *RelocState, ptr unsafe.Pointer, size uintptr, fixup uintptr) 
 		}
 		e = e.next
 	}
-	// Allocate entry from fn_arena. Linked list handles non-contiguous regions.
+	// Allocate entry from fn_arena.
 	ne := (*RelocEntry)(ArenaAlloc(rs.arena, unsafe.Sizeof(RelocEntry{})))
 	ne.old = p
 	ne.new = 0

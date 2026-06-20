@@ -73,13 +73,9 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 		return false
 	}
 	ipt := e.intptrType()
-	e.w("  %outer_arena = call ptr @runtime.CurrentArena(ptr null)\n")
-	e.w("  %fn_arena = call ptr @runtime.ArenaNew(" | ipt | " 65536, ptr null)\n")
-	e.w("  call void @runtime.SetCurrentArena(ptr %fn_arena, ptr null)\n")
+	e.w("  %fn_arena = call ptr @runtime.FnArenaPush(" | ipt | " 65536, ptr null)\n")
 	e.w("  %fn_mark = call " | ipt | " @runtime.ArenaMark(ptr null)\n")
-	e.declareRuntime("runtime.CurrentArena", "ptr", "")
-	e.declareRuntime("runtime.ArenaNew", "ptr", ipt)
-	e.declareRuntime("runtime.SetCurrentArena", "void", "ptr")
+	e.declareRuntime("runtime.FnArenaPush", "ptr", ipt)
 	e.declareRuntime("runtime.ArenaMark", ipt, "")
 	e.arenaActive = true
 	return true
@@ -110,9 +106,8 @@ func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 		}
 	}
 	if !needsCopy {
-		e.w("  call void @runtime.SetCurrentArena(ptr %outer_arena, ptr null)\n")
-		e.w("  call void @runtime.ArenaFree(ptr %fn_arena, ptr null)\n")
-		e.declareRuntime("runtime.ArenaFree", "void", "ptr")
+		e.w("  call void @runtime.FnArenaPopFree(ptr null)\n")
+		e.declareRuntime("runtime.FnArenaPopFree", "void", "")
 		if llvmType == "void" {
 			e.w("  ret void\n")
 		} else {
@@ -165,8 +160,12 @@ func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 	}
 
 	// ---- Pass 2: Forward ----
-	// Switch to caller's arena. Allocate destinations for all marked objects.
-	e.w("  call void @runtime.SetCurrentArena(ptr %outer_arena, ptr null)\n")
+	// Pop fn_arena from stack. Caller's arena is now top-of-stack.
+	// fn_arena stays mapped - compact needs the source data.
+	e.nextReg++
+	popIgn := "%popign" | irItoa(e.nextReg)
+	e.w("  " | popIgn | " = call ptr @runtime.FnArenaPop(ptr null)\n")
+	e.declareRuntime("runtime.FnArenaPop", "ptr", "")
 	e.w("  call void @runtime.RelocForward(ptr " | rs | ", ptr null)\n")
 	e.declareRuntime("runtime.RelocForward", "void", "ptr")
 
@@ -530,13 +529,13 @@ func (e *irEmitter) getOrEmitRelocFixupFn(st *TCStruct) (sym string) {
 			}
 		}
 	}
-	e.pendRelocFixupDefs = append(e.pendRelocFixupDefs, bareSym)
+	push(e.pendRelocFixupDefs, bareSym)
 	// Ensure runtime functions used by fixup are declared.
 	e.declareRuntime("runtime.RelocFixupPtr", "void", "ptr, ptr")
 	e.declareRuntime("runtime.RelocFixupSlice", "void", "ptr, ptr")
 	e.declareRuntime("runtime.hashmapCopy", "ptr", "ptr")
 	var fb []string
-	fb = append(fb, "\ndefine linkonce_odr void " | sym | "(ptr %obj, ptr %rs, ptr %ctx) {\nentry:\n")
+	push(fb, "\ndefine linkonce_odr void " | sym | "(ptr %obj, ptr %rs, ptr %ctx) {\nentry:\n")
 	regN := int32(0)
 	for i := int32(0); i < st.NumFields(); i++ {
 		ft := st.Field(i).Typ
@@ -545,32 +544,32 @@ func (e *irEmitter) getOrEmitRelocFixupFn(st *TCStruct) (sym string) {
 		}
 		regN++
 		gep := "%fg" | irItoa(regN)
-		fb = append(fb, "  " | gep | " = getelementptr " | lt | ", ptr %obj, i32 0, i32 " | irItoa(i) | "\n")
+		push(fb, "  " | gep | " = getelementptr " | lt | ", ptr %obj, i32 0, i32 " | irItoa(i) | "\n")
 		fu := SafeUnderlying(ft)
 		switch fu.(type) {
 		case *Pointer:
-			fb = append(fb, "  call void @runtime.RelocFixupPtr(ptr %rs, ptr " | gep | ", ptr null)\n")
+			push(fb, "  call void @runtime.RelocFixupPtr(ptr %rs, ptr " | gep | ", ptr null)\n")
 		case *Slice, *Basic:
-			fb = append(fb, "  call void @runtime.RelocFixupSlice(ptr %rs, ptr " | gep | ", ptr null)\n")
+			push(fb, "  call void @runtime.RelocFixupSlice(ptr %rs, ptr " | gep | ", ptr null)\n")
 		case *TCMap:
 			regN++
 			old := "%fg" | irItoa(regN)
-			fb = append(fb, "  " | old | " = load ptr, ptr " | gep | "\n")
+			push(fb, "  " | old | " = load ptr, ptr " | gep | "\n")
 			regN++
 			chk := "%fg" | irItoa(regN)
 			regN++
 			ldo := "fgdo" | irItoa(regN)
 			regN++
 			lsk := "fgsk" | irItoa(regN)
-			fb = append(fb, "  " | chk | " = icmp ne ptr " | old | ", null\n")
-			fb = append(fb, "  br i1 " | chk | ", label %" | ldo | ", label %" | lsk | "\n")
-			fb = append(fb, ldo | ":\n")
+			push(fb, "  " | chk | " = icmp ne ptr " | old | ", null\n")
+			push(fb, "  br i1 " | chk | ", label %" | ldo | ", label %" | lsk | "\n")
+			push(fb, ldo | ":\n")
 			regN++
 			nw := "%fg" | irItoa(regN)
-			fb = append(fb, "  " | nw | " = call ptr @runtime.hashmapCopy(ptr " | old | ", ptr null)\n")
-			fb = append(fb, "  store ptr " | nw | ", ptr " | gep | "\n")
-			fb = append(fb, "  br label %" | lsk | "\n")
-			fb = append(fb, lsk | ":\n")
+			push(fb, "  " | nw | " = call ptr @runtime.hashmapCopy(ptr " | old | ", ptr null)\n")
+			push(fb, "  store ptr " | nw | ", ptr " | gep | "\n")
+			push(fb, "  br label %" | lsk | "\n")
+			push(fb, lsk | ":\n")
 		case *TCStruct:
 			// Nested struct: inline its field fixups (one level only).
 			if innerSt, ok2 := fu.(*TCStruct); ok2 {
@@ -582,38 +581,38 @@ func (e *irEmitter) getOrEmitRelocFixupFn(st *TCStruct) (sym string) {
 					}
 					regN++
 					igep := "%fg" | irItoa(regN)
-					fb = append(fb, "  " | igep | " = getelementptr " | innerLt | ", ptr " | gep | ", i32 0, i32 " | irItoa(j) | "\n")
+					push(fb, "  " | igep | " = getelementptr " | innerLt | ", ptr " | gep | ", i32 0, i32 " | irItoa(j) | "\n")
 					jfu := SafeUnderlying(jft)
 					switch jfu.(type) {
 					case *Pointer:
-						fb = append(fb, "  call void @runtime.RelocFixupPtr(ptr %rs, ptr " | igep | ", ptr null)\n")
+						push(fb, "  call void @runtime.RelocFixupPtr(ptr %rs, ptr " | igep | ", ptr null)\n")
 					case *Slice, *Basic:
-						fb = append(fb, "  call void @runtime.RelocFixupSlice(ptr %rs, ptr " | igep | ", ptr null)\n")
+						push(fb, "  call void @runtime.RelocFixupSlice(ptr %rs, ptr " | igep | ", ptr null)\n")
 					case *TCMap:
 						regN++
 						io := "%fg" | irItoa(regN)
-						fb = append(fb, "  " | io | " = load ptr, ptr " | igep | "\n")
+						push(fb, "  " | io | " = load ptr, ptr " | igep | "\n")
 						regN++
 						ichk := "%fg" | irItoa(regN)
 						regN++
 						ildo := "fgdo" | irItoa(regN)
 						regN++
 						ilsk := "fgsk" | irItoa(regN)
-						fb = append(fb, "  " | ichk | " = icmp ne ptr " | io | ", null\n")
-						fb = append(fb, "  br i1 " | ichk | ", label %" | ildo | ", label %" | ilsk | "\n")
-						fb = append(fb, ildo | ":\n")
+						push(fb, "  " | ichk | " = icmp ne ptr " | io | ", null\n")
+						push(fb, "  br i1 " | ichk | ", label %" | ildo | ", label %" | ilsk | "\n")
+						push(fb, ildo | ":\n")
 						regN++
 						inw := "%fg" | irItoa(regN)
-						fb = append(fb, "  " | inw | " = call ptr @runtime.hashmapCopy(ptr " | io | ", ptr null)\n")
-						fb = append(fb, "  store ptr " | inw | ", ptr " | igep | "\n")
-						fb = append(fb, "  br label %" | ilsk | "\n")
-						fb = append(fb, ilsk | ":\n")
+						push(fb, "  " | inw | " = call ptr @runtime.hashmapCopy(ptr " | io | ", ptr null)\n")
+						push(fb, "  store ptr " | inw | ", ptr " | igep | "\n")
+						push(fb, "  br label %" | ilsk | "\n")
+						push(fb, ilsk | ":\n")
 					}
 				}
 			}
 		}
 	}
-	fb = append(fb, "  ret void\n}\n")
+	push(fb, "  ret void\n}\n")
 	// Write directly to output file (bypasses segment/arena lifetime issues).
 	if e.outFile != nil {
 		for _, s := range fb {

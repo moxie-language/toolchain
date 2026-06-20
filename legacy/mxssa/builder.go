@@ -275,7 +275,6 @@ func (fb *funcBuilder) buildBody(d *syntax.FuncDecl) {
 				alloc := fb.emitAlloc(r.Type(), fb.fn.pos)
 				fb.namedResults = append(fb.namedResults, alloc)
 				fb.fn.Locals = append(fb.fn.Locals, alloc)
-				// store zero value implicitly
 			}
 		}
 	}
@@ -351,7 +350,52 @@ func (fb *funcBuilder) buildStmt(s syntax.Stmt) {
 	case *syntax.EmptyStmt:
 		// nothing
 	case *syntax.ExprStmt:
-		fb.buildExpr(s.X)
+		// push/resize are statement-level mutating builtins.
+		// Desugar push(s, v) to: tmp = push_internal(s, v); s = tmp
+		// pop(s) as statement: discard element, decrement len.
+		if call, ok := s.X.(*syntax.CallExpr); ok {
+			if name, ok2 := call.Fun.(*syntax.Name); ok2 {
+				if name.Value == "push" || name.Value == "resize" {
+					result := fb.buildExpr(s.X)
+					if result != nil && len(call.ArgList) > 0 {
+						fb.buildStore(call.ArgList[0], result)
+					}
+				} else if name.Value == "pop" {
+					// pop as statement: build the pop (discards element),
+					// then build a resize(s, len(s)-1) for the store-back.
+					fb.buildExpr(s.X) // discard element
+					if len(call.ArgList) > 0 {
+						sv := fb.buildExpr(call.ArgList[0])
+						if sv != nil {
+							// Build len(s) - 1
+							lenB := &Builtin{name: "len", id: BuiltinLen}
+							lenCall := &Call{Call: CallCommon{Value: lenB, Args: []Value{sv}}}
+							lenCall.typ = typecheck.Typ[typecheck.Int32]
+							lenCall.name = fb.nextName()
+							fb.emit(lenCall)
+							one := &Const{typ: typecheck.Typ[typecheck.Int32], val: constant.MakeInt64(1)}
+							sub := &BinOp{Op: token.SUB, X: lenCall, Y: one}
+							sub.typ = typecheck.Typ[typecheck.Int32]
+							sub.name = fb.nextName()
+							fb.emit(sub)
+							// Build resize(s, newLen)
+							resizeB := &Builtin{name: "resize", id: BuiltinResize}
+							resizeCall := &Call{Call: CallCommon{Value: resizeB, Args: []Value{sv, sub}}}
+							resizeCall.typ = sv.Type()
+							resizeCall.name = fb.nextName()
+							fb.emit(resizeCall)
+							fb.buildStore(call.ArgList[0], resizeCall)
+						}
+					}
+				} else {
+					fb.buildExpr(s.X)
+				}
+			} else {
+				fb.buildExpr(s.X)
+			}
+		} else {
+			fb.buildExpr(s.X)
+		}
 	case *syntax.AssignStmt:
 		fb.buildAssign(s)
 	case *syntax.BlockStmt:
@@ -1349,6 +1393,32 @@ func (fb *funcBuilder) buildBuiltinCall(e *syntax.CallExpr, b *Builtin, args []V
 		call.name = fb.nextName()
 		fb.emit(call)
 		return call
+	case BuiltinPush, BuiltinResize:
+		// push(s, v...) and resize(s, n) return modified slice for store-back.
+		// The ExprStmt handler desugars push(s,v) to s = push(s,v).
+		call := &Call{Call: CallCommon{Value: b, Args: args}}
+		if len(args) > 0 {
+			call.typ = args[0].Type()
+		}
+		call.name = fb.nextName()
+		fb.emit(call)
+		return call
+	case BuiltinPop:
+		// pop(s) returns the element. The modified slice store-back is
+		// handled by the ExprStmt desugaring (which calls resize(s, len-1)
+		// semantics via the store-back path).
+		call := &Call{Call: CallCommon{Value: b, Args: args}}
+		if len(args) > 0 {
+			st := args[0].Type()
+			if sl, ok := st.Underlying().(*typecheck.Slice); ok {
+				call.typ = sl.Elem()
+			} else {
+				call.typ = typecheck.Typ[typecheck.Uint8]
+			}
+		}
+		call.name = fb.nextName()
+		fb.emit(call)
+		return call
 	}
 	call := &Call{Call: CallCommon{Value: b, Args: args}}
 	call.name = fb.nextName()
@@ -1787,6 +1857,21 @@ func syntaxOpToToken(op syntax.Operator, unary bool) token.Token {
 	return token.ILLEGAL
 }
 
+// isSliceType reports whether t is a slice or string (string = []byte in Moxie).
+func isSliceType(t typecheck.Type) bool {
+	if t == nil {
+		return false
+	}
+	switch t.Underlying().(type) {
+	case *typecheck.Slice:
+		return true
+	case *typecheck.Basic:
+		b := t.Underlying().(*typecheck.Basic)
+		return b.Kind() == typecheck.String || b.Kind() == typecheck.UntypedString
+	}
+	return false
+}
+
 // ─── Builtin ID lookup ────────────────────────────────────────────────────────
 
 func builtinID(name string) (BuiltinID, bool) {
@@ -1821,6 +1906,12 @@ func builtinID(name string) (BuiltinID, bool) {
 		return BuiltinPrintln, true
 	case "recover":
 		return BuiltinRecover, true
+	case "push":
+		return BuiltinPush, true
+	case "pop":
+		return BuiltinPop, true
+	case "resize":
+		return BuiltinResize, true
 	}
 	return 0, false
 }
