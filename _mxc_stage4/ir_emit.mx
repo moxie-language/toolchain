@@ -226,7 +226,6 @@ func (e *irEmitter) hoistAllocaText(start int32) {
 		}
 		off += len(s)
 	}
-	// Truncate segs to keep only prefix (segments before start).
 	e.segs = e.segs[:start]
 	marker := "_entry:\n"
 	mlen := int32(len(marker))
@@ -245,16 +244,49 @@ func (e *irEmitter) hoistAllocaText(start int32) {
 		}
 	}
 	if insert < 0 {
-		// No _entry block found; put assembled buf back as one segment.
 		push(e.segs, string(body))
 		return
 	}
-	// Scan lines after insert point, partition into allocas and rest.
+	// Pass 1: count alloca bytes vs rest bytes.
 	blen := int32(len(body))
-	var allocaSegs []string
-	var restSegs []string
+	allocaBytes := int32(0)
 	moved := false
 	ls := insert
+	for ls < blen {
+		le := ls
+		for le < blen && body[le] != '\n' {
+			le++
+		}
+		if le < blen {
+			le++
+		}
+		lineLen := le - ls
+		if lineLen > 13 && body[ls] == ' ' && body[ls+1] == ' ' && body[ls+2] == '%' {
+			for k := ls + 3; k+10 <= le; k++ {
+				if body[k] == ' ' && body[k+1] == '=' && body[k+2] == ' ' &&
+					body[k+3] == 'a' && body[k+4] == 'l' && body[k+5] == 'l' &&
+					body[k+6] == 'o' && body[k+7] == 'c' && body[k+8] == 'a' &&
+					body[k+9] == ' ' {
+					allocaBytes += lineLen
+					moved = true
+					break
+				}
+			}
+		}
+		ls = le
+	}
+	if !moved {
+		push(e.segs, string(body))
+		return
+	}
+	// Pass 2: build output - prefix, then allocas, then rest.
+	out := []byte{:int32(len(body))}
+	for i := int32(0); i < insert; i++ {
+		out[i] = body[i]
+	}
+	wp := insert                      // write pointer for allocas
+	wr := insert + allocaBytes        // write pointer for rest
+	ls = insert
 	for ls < blen {
 		le := ls
 		for le < blen && body[le] != '\n' {
@@ -277,32 +309,19 @@ func (e *irEmitter) hoistAllocaText(start int32) {
 			}
 		}
 		if isAlloca {
-			moved = true
-		}
-		// Extract line as string (points into body, no copy needed
-		// since body lives until we're done building output).
-		line := string(body[ls:le])
-		if isAlloca {
-			push(allocaSegs, line)
+			for j := int32(0); j < lineLen; j++ {
+				out[wp+j] = body[ls+j]
+			}
+			wp += lineLen
 		} else {
-			push(restSegs, line)
+			for j := int32(0); j < lineLen; j++ {
+				out[wr+j] = body[ls+j]
+			}
+			wr += lineLen
 		}
 		ls = le
 	}
-	if !moved {
-		push(e.segs, string(body))
-		return
-	}
-	// Rebuild: prefix + allocas + rest
-	var out []string
-	push(out, string(body[:insert]))
-	for _, s := range allocaSegs {
-		push(out, s)
-	}
-	for _, s := range restSegs {
-		push(out, s)
-	}
-	push(e.segs, joinStrs(out))
+	push(e.segs, string(out))
 }
 
 func (e *irEmitter) regName(v SSAValue) (s string) {
@@ -913,14 +932,14 @@ func (e *irEmitter) emitEmbedGlobal(g *SSAGlobal, name string, ei *embedInfo) {
 	}
 	e.w(constName | " = private constant [" | irItoa(int32(len(data))) | " x i8] c\"")
 	hexDigit := "0123456789ABCDEF"
-	for i := 0; i < len(data); i++ {
+	hexBuf := []byte{:int32(len(data)) * 3}
+	for i := int32(0); i < int32(len(data)); i++ {
 		b := data[i]
-		hex := []byte{:3}
-		hex[0] = '\\'
-		hex[1] = hexDigit[b>>4]
-		hex[2] = hexDigit[b&0x0f]
-		e.w(string(hex))
+		hexBuf[i*3] = '\\'
+		hexBuf[i*3+1] = hexDigit[b>>4]
+		hexBuf[i*3+2] = hexDigit[b&0x0f]
 	}
+	e.w(string(hexBuf))
 	e.w("\"\n")
 	ipt := e.intptrType()
 	e.w(name | " = " | e.tlsPrefix() | "{ptr, " | ipt | ", " | ipt | "} {ptr " | constName | ", " | ipt | " " | irItoa(count) | ", " | ipt | " " | irItoa(count) | "}\n")

@@ -63,6 +63,13 @@ type Arena struct {
 	regions  [256]ArenaRegion
 }
 
+// Arena pool: bounded freelist of reset arenas for reuse.
+// Eliminates mmap/munmap syscalls for short-lived function arenas.
+const arenaPoolMax = int32(8)
+
+var arenaPool [8]*Arena
+var arenaPoolN int32
+
 //:noinline
 func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 	if size == 0 {
@@ -148,7 +155,7 @@ func FnArenaPush(capacity uintptr) (a *Arena) {
 	if domainRoot.fnTop >= fnStackMax {
 		runtimePanic("function arena stack overflow")
 	}
-	a = ArenaNew(capacity)
+	a = ArenaAcquire(capacity)
 	domainRoot.fnStack[domainRoot.fnTop] = a
 	return a
 }
@@ -166,7 +173,7 @@ func FnArenaPop() (a *Arena) {
 // Used by the no-copy return path.
 func FnArenaPopFree() {
 	a := FnArenaPop()
-	ArenaFree(a)
+	ArenaRelease(a)
 }
 
 // --- Backward-compatible arena API ---
@@ -319,6 +326,41 @@ func ArenaReset(a *Arena) {
 	}
 	a.nregions = 1
 	a.regions[0].off = align(unsafe.Sizeof(Arena{}))
+}
+
+// ArenaAcquire returns a pooled arena with cap >= capacity, or
+// creates a new one via ArenaNew. First-fit scan of bounded pool.
+func ArenaAcquire(capacity uintptr) (a *Arena) {
+	capacity = (capacity + 4095) &^ 4095
+	headerSz := align(unsafe.Sizeof(Arena{}))
+	if capacity < headerSz+4096 {
+		capacity = (headerSz + 4096 + 4095) &^ 4095
+	}
+	for i := int32(0); i < arenaPoolN; i++ {
+		if arenaPool[i].regions[0].cap >= capacity {
+			a = arenaPool[i]
+			arenaPoolN--
+			arenaPool[i] = arenaPool[arenaPoolN]
+			arenaPool[arenaPoolN] = nil
+			return a
+		}
+	}
+	return ArenaNew(capacity)
+}
+
+// ArenaRelease resets an arena and returns it to the pool.
+// If the pool is full, frees the arena entirely via munmap.
+func ArenaRelease(a *Arena) {
+	if a == nil {
+		return
+	}
+	if arenaPoolN >= arenaPoolMax {
+		ArenaFree(a)
+		return
+	}
+	ArenaReset(a)
+	arenaPool[arenaPoolN] = a
+	arenaPoolN++
 }
 
 // heapAlloc: direct startup bump allocation. Only used before

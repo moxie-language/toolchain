@@ -1872,29 +1872,32 @@ func compileSource(src []byte, pkgName, triple, pkgDir string) (s string) {
 }
 
 
-// mxhBuf accumulates mxh output. Uses append per byte - amortized O(1),
-// no subslice copies, no intermediate string allocation.
+// mxhBuf accumulates mxh output. Pre-sized buffer with offset write.
+// No growth, no abandoned arrays under arena allocation.
 type mxhBuf struct {
 	data []byte
+	off  int32
 }
 
 func (b *mxhBuf) w(s string) {
-	for i := int32(0); i < len(s); i++ {
-		push(b.data, s[i])
+	for j := int32(0); j < len(s); j++ {
+		b.data[b.off+j] = s[j]
 	}
+	b.off += len(s)
 }
 
 func (b *mxhBuf) nl() {
-	push(b.data, '\n')
+	b.data[b.off] = '\n'
+	b.off++
 }
 
 // typeDescStr returns the type descriptor for simple/leaf types.
 // For compound types that recurse, use typeDescWrite.
 func typeDescStr(t Type) (s string) {
 	var b mxhBuf
-	b.data = []byte{:0:64}
+	b.data = []byte{:256}
 	typeDescWrite(&b, t)
-	return string(b.data)
+	return string(b.data[:b.off])
 }
 
 func typeDescWrite(b *mxhBuf, t Type) {
@@ -2045,9 +2048,9 @@ func sigDescWrite(b *mxhBuf, sig *Signature) {
 // sigDescStr kept for callers that need a string.
 func sigDescStr(sig *Signature) (s string) {
 	var b mxhBuf
-	b.data = []byte{:0:64}
+	b.data = []byte{:256}
 	sigDescWrite(&b, sig)
-	return string(b.data)
+	return string(b.data[:b.off])
 }
 
 func generateMxh(pkg *TCPackage) (s string) {
@@ -2055,7 +2058,7 @@ func generateMxh(pkg *TCPackage) (s string) {
 	name := pkg.Name
 	cctx.typeDescPkgPath = path
 	var b mxhBuf
-	b.data = []byte{:0:4096}
+	b.data = []byte{:int32(len(pkg.Scope.Names())) * 80 + 4096}
 	b.w("package ") ; b.w(path) ; b.w(" ") ; b.w(name) ; b.nl()
 	for _, ip := range cctx.universe.DirectImportPaths(pkg) {
 		b.w("import ") ; b.w(ip) ; b.nl()
@@ -2109,7 +2112,7 @@ func generateMxh(pkg *TCPackage) (s string) {
 			mxhWriteTypeName(&b, objName, tn2)
 		}
 	}
-	return string(b.data)
+	return string(b.data[:b.off])
 }
 
 func mxhWriteTypeName(b *mxhBuf, objName string, v *TypeName) {
