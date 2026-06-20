@@ -142,12 +142,11 @@ func (p *lowerInterfacesPass) run() error {
 		})
 	}
 
-	// Collect all type codes.
+	// Collect all type codes. Kind byte is always field 0 (no method set
+	// in the type descriptor struct). Method sets are separate globals
+	// with naming convention reflect/types.methodset:TYPE_NAME.
 	for global := p.mod.FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
 		if strings.HasPrefix(global.Name(), "reflect/types.type:") {
-			// Retrieve Go type information based on an opaque global variable.
-			// Only the name of the global is relevant, the object itself is
-			// discarded afterwards.
 			name := strings.TrimPrefix(global.Name(), "reflect/types.type:")
 			if _, ok := p.types[name]; !ok {
 				t := &typeInfo{
@@ -155,26 +154,15 @@ func (p *lowerInterfacesPass) run() error {
 					typecode: global,
 				}
 				p.types[name] = t
-				initializer := global.Initializer()
-				firstField := p.builder.CreateExtractValue(initializer, 0, "")
-				if firstField.Type() != p.ctx.Int8Type() {
-					// This type has a method set at index 0. Change the GEP to
-					// point to index 1 (the meta byte).
-					t.typecodeGEP = llvm.ConstGEP(global.GlobalValueType(), global, []llvm.Value{
-						llvm.ConstInt(p.ctx.Int32Type(), 0, false),
-						llvm.ConstInt(p.ctx.Int32Type(), 1, false),
-					})
-					methodSet := stripPointerCasts(firstField)
-					if !strings.HasSuffix(methodSet.Name(), "$methodset") {
-						panic("expected method set")
-					}
-					p.addTypeMethods(t, methodSet)
-				} else {
-					// This type has no method set.
-					t.typecodeGEP = llvm.ConstGEP(global.GlobalValueType(), global, []llvm.Value{
-						llvm.ConstInt(p.ctx.Int32Type(), 0, false),
-						llvm.ConstInt(p.ctx.Int32Type(), 0, false),
-					})
+				// Kind byte is always field 0. GEP is always [0,0].
+				t.typecodeGEP = llvm.ConstGEP(global.GlobalValueType(), global, []llvm.Value{
+					llvm.ConstInt(p.ctx.Int32Type(), 0, false),
+					llvm.ConstInt(p.ctx.Int32Type(), 0, false),
+				})
+				// Look up separate method set global.
+				msGlobal := p.mod.NamedGlobal("reflect/types.methodset:" + name)
+				if !msGlobal.IsNil() {
+					p.addTypeMethods(t, msGlobal)
 				}
 			}
 		}
@@ -309,10 +297,7 @@ func (p *lowerInterfacesPass) run() error {
 			use.ReplaceAllUsesWith(commaOk)
 		} else {
 			// The type does not exist in the program, so lower to a constant
-			// false. This is trivially further optimized.
-			// TODO: eventually it'll be necessary to handle reflect.PtrTo and
-			// reflect.New calls which create new types not present in the
-			// original program.
+			// false.
 			use.ReplaceAllUsesWith(llvmFalse)
 		}
 		use.EraseFromParentAsInstruction()
@@ -325,44 +310,12 @@ func (p *lowerInterfacesPass) run() error {
 	}
 	sort.Strings(typeNames)
 
-	// Remove all method sets, which are now unnecessary and inhibit later
-	// optimizations if they are left in place.
-	zero := llvm.ConstInt(p.ctx.Int32Type(), 0, false)
+	// Method sets are separate globals - no struct rewriting needed.
+	// Remove method set globals that are no longer referenced.
 	for _, name := range typeNames {
 		t := p.types[name]
-		if !t.methodSet.IsNil() {
-			initializer := t.typecode.Initializer()
-			var newInitializerFields []llvm.Value
-			for i := 1; i < initializer.Type().StructElementTypesCount(); i++ {
-				newInitializerFields = append(newInitializerFields, p.builder.CreateExtractValue(initializer, i, ""))
-			}
-			newInitializer := p.ctx.ConstStruct(newInitializerFields, false)
-			typecodeName := t.typecode.Name()
-			newGlobal := llvm.AddGlobal(p.mod, newInitializer.Type(), typecodeName+".tmp")
-			newGlobal.SetInitializer(newInitializer)
-			newGlobal.SetLinkage(t.typecode.Linkage())
-			newGlobal.SetGlobalConstant(true)
-			newGlobal.SetAlignment(t.typecode.Alignment())
-			for _, use := range getUses(t.typecode) {
-				if !use.IsAConstantExpr().IsNil() {
-					opcode := use.Opcode()
-					if opcode == llvm.GetElementPtr && use.OperandsCount() == 3 {
-						if use.Operand(1).ZExtValue() == 0 && use.Operand(2).ZExtValue() == 1 {
-							gep := p.builder.CreateInBoundsGEP(newGlobal.GlobalValueType(), newGlobal, []llvm.Value{zero, zero}, "")
-							use.ReplaceAllUsesWith(gep)
-						}
-					}
-				}
-			}
-			// Fallback.
-			if hasUses(t.typecode) {
-				negativeOffset := -int64(p.targetData.TypeAllocSize(p.ptrType))
-				gep := p.builder.CreateInBoundsGEP(p.ctx.Int8Type(), newGlobal, []llvm.Value{llvm.ConstInt(p.ctx.Int32Type(), uint64(negativeOffset), true)}, "")
-				t.typecode.ReplaceAllUsesWith(gep)
-			}
-			t.typecode.EraseFromParentAsGlobal()
-			newGlobal.SetName(typecodeName)
-			t.typecode = newGlobal
+		if !t.methodSet.IsNil() && !hasUses(t.methodSet) {
+			t.methodSet.EraseFromParentAsGlobal()
 		}
 	}
 

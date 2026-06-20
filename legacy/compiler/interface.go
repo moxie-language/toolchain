@@ -253,17 +253,6 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 			)
 			// TODO: signature params and return values
 		}
-		if hasMethodSet {
-			// This method set is appended at the start of the struct. It is
-			// removed in the interface lowering pass.
-			// TODO: don't remove these and instead do what upstream Go is doing
-			// instead. See: https://research.swtch.com/interfaces. This can
-			// likely be optimized in LLVM using
-			// https://llvm.org/docs/TypeMetadata.html.
-			typeFieldTypes = append([]*types.Var{
-				types.NewVar(token.NoPos, nil, "methodSet", types.Typ[types.UnsafePointer]),
-			}, typeFieldTypes...)
-		}
 		globalType := types.NewStruct(typeFieldTypes, nil)
 		global = llvm.AddGlobal(c.mod, c.getLLVMType(globalType), globalName)
 		if isLocal {
@@ -419,9 +408,9 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 			llvm.ConstInt(c.ctx.Int8Type(), uint64(metabyte), false),
 		}, typeFields...)
 		if hasMethodSet {
-			typeFields = append([]llvm.Value{
-				c.getTypeMethodSet(typ),
-			}, typeFields...)
+			// Emit method set as a separate global (not part of the type
+			// descriptor). LowerInterfaces finds it by naming convention.
+			c.getTypeMethodSet(typ, typeCodeName)
 		}
 		alignment := c.targetData.TypeAllocSize(c.dataPtrType)
 		if alignment < 4 {
@@ -450,16 +439,10 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 			global.AddMetadata(0, diglobal)
 		}
 	}
-	offset := uint64(0)
-	if hasMethodSet {
-		// The pointer to the method set is always the first element of the
-		// global (if there is a method set). However, the pointer we return
-		// should point to the 'kind' field not the method set.
-		offset = 1
-	}
+	// Kind byte is always field 0. No method set in the struct.
 	return llvm.ConstGEP(global.GlobalValueType(), global, []llvm.Value{
 		llvm.ConstInt(c.ctx.Int32Type(), 0, false),
-		llvm.ConstInt(c.ctx.Int32Type(), offset, false),
+		llvm.ConstInt(c.ctx.Int32Type(), 0, false),
 	})
 }
 
@@ -616,8 +599,8 @@ func getTypeCodeName(t types.Type) (string, bool) {
 
 // getTypeMethodSet returns a reference (GEP) to a global method set. This
 // method set should be unreferenced after the interface lowering pass.
-func (c *compilerContext) getTypeMethodSet(typ types.Type) llvm.Value {
-	globalName := typ.String() + "$methodset"
+func (c *compilerContext) getTypeMethodSet(typ types.Type, typeCodeName string) llvm.Value {
+	globalName := "reflect/types.methodset:" + typeCodeName
 	global := c.mod.NamedGlobal(globalName)
 	if global.IsNil() {
 		ms := c.program.MethodSets.MethodSet(typ)
