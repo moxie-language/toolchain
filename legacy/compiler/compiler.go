@@ -1924,8 +1924,9 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		}
 		return result, nil
 	case "push":
-		// push(s, v1, v2, ...) - lazy-init cap 4096 on nil, then store elements.
-		// Uses runtime.slicePush for nil-check + alloc. Pure stores for elements.
+		// push(s, v1, v2, ...) - lazy-init + bounds check via slicePush,
+		// then individual element stores via GEP. No sliceAppend (elements
+		// are passed individually, not as a slice).
 		src := argValues[0]
 		var elemType llvm.Type
 		switch ut := argTypes[0].Underlying().(type) {
@@ -1941,7 +1942,7 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		srcPtr := b.CreateExtractValue(src, 0, "push.ptr")
 		srcLen := b.CreateExtractValue(src, 1, "push.len")
 		srcCap := b.CreateExtractValue(src, 2, "push.cap")
-		// Runtime call: returns {ptr, len, cap} with nil-init + bounds check.
+		// slicePush: nil-init cap 4096 + bounds check. Returns {ptr, newLen, cap}.
 		result := b.createRuntimeCall("slicePush", []llvm.Value{
 			srcPtr, srcLen, srcCap, numElems, elemSize,
 		}, "push.hdr")
