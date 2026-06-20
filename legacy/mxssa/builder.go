@@ -351,14 +351,15 @@ func (fb *funcBuilder) buildStmt(s syntax.Stmt) {
 		// nothing
 	case *syntax.ExprStmt:
 		// push/resize are statement-level mutating builtins.
-		// Desugar push(s, v) to: tmp = push_internal(s, v); s = tmp
-		// pop(s) as statement: discard element, decrement len.
 		if call, ok := s.X.(*syntax.CallExpr); ok {
+			fmt.Fprintf(os.Stderr, "EXPRSTMT: call fun type=%T\n", call.Fun)
 			if name, ok2 := call.Fun.(*syntax.Name); ok2 {
+				fmt.Fprintf(os.Stderr, "EXPRSTMT: name=%s\n", name.Value)
 				if name.Value == "push" || name.Value == "resize" {
 					result := fb.buildExpr(s.X)
 					if result != nil && len(call.ArgList) > 0 {
 						fb.buildStore(call.ArgList[0], result)
+						fmt.Fprintf(os.Stderr, "PUSH STORE-BACK: fn=%s argType=%T\n", fb.fn.Name(), call.ArgList[0])
 					}
 				} else if name.Value == "pop" {
 					// pop as statement: build the pop (discards element),

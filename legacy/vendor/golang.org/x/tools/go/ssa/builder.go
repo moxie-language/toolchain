@@ -2780,6 +2780,21 @@ start:
 		goto start // effectively: tailcall stmt(fn, s.Stmt, label)
 
 	case *ast.ExprStmt:
+		// push/resize: statement-level mutating builtins.
+		// Evaluate the call, then store the modified slice back to
+		// the first argument's lvalue.
+		if call, ok := s.X.(*ast.CallExpr); ok {
+			if ident, ok2 := call.Fun.(*ast.Ident); ok2 && (ident.Name == "push" || ident.Name == "resize") && len(call.Args) > 0 {
+				result := b.expr(fn, s.X)
+				if result != nil {
+					addr := b.addr(fn, call.Args[0], false)
+					if addr != nil {
+						addr.store(fn, result)
+					}
+				}
+				break
+			}
+		}
 		b.expr(fn, s.X)
 
 	case *ast.SendStmt:
