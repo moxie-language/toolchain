@@ -154,11 +154,10 @@ func (p *lowerInterfacesPass) run() error {
 					typecode: global,
 				}
 				p.types[name] = t
-				// Kind byte is always field 0. GEP is always [0,0].
-				t.typecodeGEP = llvm.ConstGEP(global.GlobalValueType(), global, []llvm.Value{
-					llvm.ConstInt(p.ctx.Int32Type(), 0, false),
-					llvm.ConstInt(p.ctx.Int32Type(), 0, false),
-				})
+				// Type code is the global pointer itself (no GEP).
+				// getTypeCode returns the global directly, so the
+				// assertion comparison must also use the global directly.
+				t.typecodeGEP = global
 				// Look up separate method set global.
 				msGlobal := p.mod.NamedGlobal("reflect/types.methodset:" + name)
 				if !msGlobal.IsNil() {

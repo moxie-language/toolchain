@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"moxie/compiler/llvmutil"
 	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
@@ -439,11 +440,12 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 			global.AddMetadata(0, diglobal)
 		}
 	}
-	// Kind byte is always field 0. No method set in the struct.
-	return llvm.ConstGEP(global.GlobalValueType(), global, []llvm.Value{
-		llvm.ConstInt(c.ctx.Int32Type(), 0, false),
-		llvm.ConstInt(c.ctx.Int32Type(), 0, false),
-	})
+	// Return the global pointer directly. Kind byte is field 0, so the
+	// global base address == the kind byte address. No GEP needed.
+	// This avoids the interp-vs-LowerInterfaces mismatch where interp
+	// evaluates ConstGEP to a concrete integer but LowerInterfaces
+	// creates a symbolic ConstGEP - the icmp never matches.
+	return global
 }
 
 // getTypeKind returns the type kind for the given type, as defined by
@@ -632,6 +634,9 @@ func (c *compilerContext) getTypeMethodSet(typ types.Type, typeCodeName string) 
 		global.SetGlobalConstant(true)
 		global.SetUnnamedAddr(true)
 		global.SetLinkage(llvm.LinkOnceODRLinkage)
+		// Prevent LTO from stripping this unreferenced global.
+		// LowerInterfaces finds it by name to build dispatch tables.
+		llvmutil.AppendToGlobal(c.mod, "llvm.used", global)
 	}
 	return global
 }
