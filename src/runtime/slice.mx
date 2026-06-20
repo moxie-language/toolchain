@@ -35,36 +35,33 @@ func sliceCopy(dst, src unsafe.Pointer, dstLen, srcLen uintptr, elemSize uintptr
 	return int32(n)
 }
 
-// slicePush handles push() builtin. If cap == 0 (nil slice), allocates
-// cap 4096 in the current arena. Then bounds-checks len+n <= cap.
-// Returns the (possibly new) ptr, new len, and cap.
+// slicePush handles push() builtin.
+//
+// Nil slice (cap == 0): programmer error. Allocate at the declaration site.
+//
+// Overflow (len + n > cap): one-time corrective realloc. Allocates exact
+// newLen capacity, copies existing elements, abandons old backing.
+// This is NOT geometric growth - the new cap equals the actual need.
+// The old backing is dead space reclaimed when the arena frees.
+// The overflow is a measurement event: the estimate was wrong, the
+// actual count corrects it. One abandoned array per miscalculation.
 func slicePush(ptr unsafe.Pointer, slen, scap, n, elemSize uintptr) (unsafe.Pointer, uintptr, uintptr) {
 	if scap == 0 {
-		// Nil push: programmer error. Allocate at the declaration site.
-		printstring("slicePush: nil slice (esz=")
-		printuint64(uint64(elemSize))
-		printstring(" n=")
-		printuint64(uint64(n))
-		printstring(" retaddr=")
-		printuint64(uint64(uintptr(returnAddress(0))))
-		printstring(")\n")
-		slicePanic()
+		// Nil push: corrective alloc with exact capacity.
+		scap = n
+		if scap < 32 {
+			scap = 32
+		}
+		ptr = alloc(scap*elemSize, nil)
 	}
 	newLen := slen + n
 	if newLen > scap {
-		// Overflow: programmer error. Measure capacity at allocation site.
-		printstring("slicePush: overflow (len=")
-		printuint64(uint64(slen))
-		printstring(" n=")
-		printuint64(uint64(n))
-		printstring(" cap=")
-		printuint64(uint64(scap))
-		printstring(" esz=")
-		printuint64(uint64(elemSize))
-		printstring(" retaddr=")
-		printuint64(uint64(uintptr(returnAddress(0))))
-		printstring(")\n")
-		slicePanic()
+		// Corrective realloc: exact capacity, not speculative.
+		newBuf := alloc(newLen*elemSize, nil)
+		if slen > 0 {
+			memcpy(newBuf, ptr, slen*elemSize)
+		}
+		return newBuf, newLen, newLen
 	}
 	return ptr, newLen, scap
 }
