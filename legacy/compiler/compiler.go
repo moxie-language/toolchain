@@ -1731,6 +1731,35 @@ func (b *builder) sliceAllocType(expr *ssa.Alloc) types.Type {
 	return nil
 }
 
+// makeDefaultSlice creates a {alloc(4096*elemSize), 0, 4096} slice value.
+func (b *builder) makeDefaultSlice(sl *types.Slice, pos token.Pos) llvm.Value {
+	capVal := uint64(4096)
+	et := b.getLLVMType(sl.Elem())
+	elemSize := b.targetData.TypeAllocSize(et)
+	sizeVal := llvm.ConstInt(b.uintptrType, capVal*elemSize, false)
+	layoutVal := b.createObjectLayout(et, pos)
+	dataBuf := b.createRuntimeCall("alloc", []llvm.Value{sizeVal, layoutVal}, "slice.cap4k")
+	typ := b.getLLVMType(sl)
+	sliceVal := llvm.Undef(typ)
+	sliceVal = b.CreateInsertValue(sliceVal, dataBuf, 0, "")
+	sliceVal = b.CreateInsertValue(sliceVal, llvm.ConstInt(b.uintptrType, 0, false), 1, "")
+	sliceVal = b.CreateInsertValue(sliceVal, llvm.ConstInt(b.uintptrType, capVal, false), 2, "")
+	return sliceVal
+}
+
+func (b *builder) makeDefaultStringSlice(pos token.Pos) llvm.Value {
+	capVal := uint64(4096)
+	sizeVal := llvm.ConstInt(b.uintptrType, capVal, false)
+	layoutVal := llvm.ConstNull(b.dataPtrType)
+	dataBuf := b.createRuntimeCall("alloc", []llvm.Value{sizeVal, layoutVal}, "str.cap4k")
+	typ := b.getLLVMRuntimeType("_string")
+	sliceVal := llvm.Undef(typ)
+	sliceVal = b.CreateInsertValue(sliceVal, dataBuf, 0, "")
+	sliceVal = b.CreateInsertValue(sliceVal, llvm.ConstInt(b.uintptrType, 0, false), 1, "")
+	sliceVal = b.CreateInsertValue(sliceVal, llvm.ConstInt(b.uintptrType, capVal, false), 2, "")
+	return sliceVal
+}
+
 // createBuiltin lowers a builtin Go function (append, close, delete, etc.) to
 // LLVM IR. It uses runtime calls for some builtins.
 func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, callName string, pos token.Pos) (llvm.Value, error) {
@@ -1895,18 +1924,9 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		}
 		return result, nil
 	case "push":
-		// push(s, v1, v2, ...) - append elements without allocation.
-		// Panics if len + N > cap. Returns modified slice (new len).
+		// push(s, v1, v2, ...) - lazy-init cap 4096 on nil, then store elements.
+		// Uses runtime.slicePush for nil-check + alloc. Pure stores for elements.
 		src := argValues[0]
-		srcPtr := b.CreateExtractValue(src, 0, "push.ptr")
-		srcLen := b.CreateExtractValue(src, 1, "push.len")
-		srcCap := b.CreateExtractValue(src, 2, "push.cap")
-		numElems := llvm.ConstInt(srcLen.Type(), uint64(len(argValues)-1), false)
-		newLen := b.CreateAdd(srcLen, numElems, "push.newlen")
-		// Bounds check: newLen <= cap.
-		overflow := b.CreateICmp(llvm.IntUGT, newLen, srcCap, "push.overflow")
-		b.createRuntimeAssert(overflow, "push", "slicePanic")
-		// Store each element.
 		var elemType llvm.Type
 		switch ut := argTypes[0].Underlying().(type) {
 		case *types.Slice:
@@ -1916,14 +1936,29 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		default:
 			return llvm.Value{}, b.makeError(pos, "push on non-slice type")
 		}
+		elemSize := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(elemType), false)
+		numElems := llvm.ConstInt(b.uintptrType, uint64(len(argValues)-1), false)
+		srcPtr := b.CreateExtractValue(src, 0, "push.ptr")
+		srcLen := b.CreateExtractValue(src, 1, "push.len")
+		srcCap := b.CreateExtractValue(src, 2, "push.cap")
+		// Runtime call: returns {ptr, len, cap} with nil-init + bounds check.
+		result := b.createRuntimeCall("slicePush", []llvm.Value{
+			srcPtr, srcLen, srcCap, numElems, elemSize,
+		}, "push.hdr")
+		newPtr := b.CreateExtractValue(result, 0, "push.newptr")
+		newLen := b.CreateExtractValue(result, 1, "push.newlen")
+		newCap := b.CreateExtractValue(result, 2, "push.newcap")
+		// Store each element at ptr[oldLen + i].
 		for i := 1; i < len(argValues); i++ {
 			idx := b.CreateAdd(srcLen, llvm.ConstInt(srcLen.Type(), uint64(i-1), false), "")
-			ep := b.CreateGEP(elemType, srcPtr, []llvm.Value{idx}, "push.ep")
+			ep := b.CreateGEP(elemType, newPtr, []llvm.Value{idx}, "push.ep")
 			b.CreateStore(argValues[i], ep)
 		}
-		// Return slice with updated len.
-		result := b.CreateInsertValue(src, newLen, 1, "push.result")
-		return result, nil
+		newSlice := llvm.Undef(src.Type())
+		newSlice = b.CreateInsertValue(newSlice, newPtr, 0, "")
+		newSlice = b.CreateInsertValue(newSlice, newLen, 1, "")
+		newSlice = b.CreateInsertValue(newSlice, newCap, 2, "")
+		return newSlice, nil
 	case "pop":
 		// pop(s) - return last element. Panics if len == 0.
 		// The store-back of the modified slice (len-1) is handled by
@@ -2270,8 +2305,6 @@ func (b *builder) getValue(expr ssa.Value, pos token.Pos) llvm.Value {
 	switch expr := expr.(type) {
 	case *ssa.Const:
 		if pos == token.NoPos {
-			// If the position isn't known, at least try to find in which file
-			// it is defined.
 			file := b.program.Fset.File(b.fn.Pos())
 			if file != nil {
 				pos = file.Pos(0)
@@ -2362,7 +2395,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		} else {
 			buf := llvmutil.CreateEntryBlockAlloca(b.Builder, typ, expr.Comment)
 			if b.targetData.TypeAllocSize(typ) != 0 {
-				b.CreateStore(llvm.ConstNull(typ), buf) // zero-initialize var
+				b.CreateStore(llvm.ConstNull(typ), buf)
 			}
 			return buf, nil
 		}
