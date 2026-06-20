@@ -15,10 +15,11 @@ import "unsafe"
 
 // RelocEntry: one forwarding record. Linked list (arena chaining breaks contiguity).
 type RelocEntry struct {
-	old  uintptr
-	new  uintptr
-	size uintptr
-	next *RelocEntry
+	old   uintptr
+	new   uintptr
+	size  uintptr
+	next  *RelocEntry
+	fixup uintptr // function pointer for per-instance field fixup (0 = none)
 }
 
 // RelocState: header on the stack.
@@ -58,7 +59,7 @@ func relocIsLocal(rs *RelocState, p uintptr) (ok bool) {
 // --- Pass 1: Mark ---
 
 // RelocMark records a reachable object. Allocates entry from fn_arena as linked list.
-func RelocMark(rs *RelocState, ptr unsafe.Pointer, size uintptr) (isNew bool) {
+func RelocMark(rs *RelocState, ptr unsafe.Pointer, size uintptr, fixup uintptr) (isNew bool) {
 	if ptr == nil {
 		return false
 	}
@@ -80,6 +81,7 @@ func RelocMark(rs *RelocState, ptr unsafe.Pointer, size uintptr) (isNew bool) {
 	ne.new = 0
 	ne.size = size
 	ne.next = rs.first
+	ne.fixup = fixup
 	rs.first = ne
 	rs.count++
 	return true
@@ -106,6 +108,23 @@ func RelocCompact(rs *RelocState) {
 		e = e.next
 	}
 }
+
+// RelocFixupAll iterates forwarding entries and calls each entry's fixup
+// function on the copied object. Per-instance execution of per-type codegen.
+func RelocFixupAll(rs *RelocState) {
+	e := rs.first
+	for e != nil {
+		if e.fixup != 0 {
+			relocCallFixup(e.fixup, unsafe.Pointer(e.new), unsafe.Pointer(rs))
+		}
+		e = e.next
+	}
+}
+
+// relocCallFixup: indirect call trampoline. Implemented in initall.ll.
+//
+//:linkname relocCallFixup runtime.relocCallFixup
+func relocCallFixup(fn uintptr, obj unsafe.Pointer, rs unsafe.Pointer)
 
 // RelocLookup translates a pointer through the forwarding table.
 func RelocLookup(rs *RelocState, old unsafe.Pointer) (new unsafe.Pointer) {

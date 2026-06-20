@@ -174,8 +174,10 @@ func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 	// Copy all objects to destinations.
 	e.w("  call void @runtime.RelocCompact(ptr " | rs | ", ptr null)\n")
 	e.declareRuntime("runtime.RelocCompact", "void", "ptr")
+	e.w("  call void @runtime.RelocFixupAll(ptr " | rs | ", ptr null)\n")
+	e.declareRuntime("runtime.RelocFixupAll", "void", "ptr")
 
-	// Fixup: rewrite pointer fields in copied objects.
+	// Fixup: rewrite return value's own pointer/slice fields.
 	// Also rewrite the return value's own pointer/slice fields.
 	e.relocFixupVisited = map[string]bool{}
 	cur := val
@@ -240,10 +242,17 @@ func (e *irEmitter) emitRelocMark(reg string, t Type, rs string) {
 		e.nextReg++
 		sz := "%m1sz" | irItoa(e.nextReg)
 		e.w("  " | sz | " = ptrtoint ptr getelementptr (" | lt | ", ptr null, i32 1) to " | ipt | "\n")
+		fixupArg := ipt | " 0"
+		if st, isSt := SafeUnderlying(tt.Base).(*TCStruct); isSt {
+			fixupSym := e.getOrEmitRelocFixupFn(st)
+			if fixupSym != "" {
+				fixupArg = ipt | " ptrtoint (ptr " | fixupSym | " to " | ipt | ")"
+			}
+		}
 		e.nextReg++
 		isNew := "%m1n" | irItoa(e.nextReg)
-		e.w("  " | isNew | " = call i1 @runtime.RelocMark(ptr " | rs | ", ptr " | reg | ", " | ipt | " " | sz | ", ptr null)\n")
-		e.declareRuntime("runtime.RelocMark", "i1", "ptr, ptr, " | ipt)
+		e.w("  " | isNew | " = call i1 @runtime.RelocMark(ptr " | rs | ", ptr " | reg | ", " | ipt | " " | sz | ", " | fixupArg | ", ptr null)\n")
+		e.declareRuntime("runtime.RelocMark", "i1", "ptr, ptr, " | ipt | ", " | ipt)
 		if typeNeedsCopy(tt.Base) {
 			e.nextReg++
 			lNew := "m1r" | irItoa(e.nextReg)
@@ -273,14 +282,14 @@ func (e *irEmitter) emitRelocMark(reg string, t Type, rs string) {
 		e.nextReg++
 		blen := "%m1b" | irItoa(e.nextReg)
 		e.w("  " | blen | " = mul " | ipt | " " | ln | ", " | esz | "\n")
-		e.w("  call i1 @runtime.RelocMark(ptr " | rs | ", ptr " | dp | ", " | ipt | " " | blen | ", ptr null)\n")
-		e.declareRuntime("runtime.RelocMark", "i1", "ptr, ptr, " | ipt)
+		e.w("  call i1 @runtime.RelocMark(ptr " | rs | ", ptr " | dp | ", " | ipt | " " | blen | ", " | ipt | " 0, ptr null)\n")
+		e.declareRuntime("runtime.RelocMark", "i1", "ptr, ptr, " | ipt | ", " | ipt)
 	case *TCMap:
 		e.nextReg++
 		sz := "%m1m" | irItoa(e.nextReg)
 		e.w("  " | sz | " = ptrtoint ptr getelementptr ({ptr}, ptr null, i32 1) to " | ipt | "\n")
-		e.w("  call i1 @runtime.RelocMark(ptr " | rs | ", ptr " | reg | ", " | ipt | " " | sz | ", ptr null)\n")
-		e.declareRuntime("runtime.RelocMark", "i1", "ptr, ptr, " | ipt)
+		e.w("  call i1 @runtime.RelocMark(ptr " | rs | ", ptr " | reg | ", " | ipt | " " | sz | ", " | ipt | " 0, ptr null)\n")
+		e.declareRuntime("runtime.RelocMark", "i1", "ptr, ptr, " | ipt | ", " | ipt)
 	case *TCStruct:
 		// reg must be a pointer to the struct (GEP result or alloca'd temp).
 		e.emitRelocMarkStructFields(reg, tt, rs)
@@ -463,6 +472,133 @@ func (e *irEmitter) emitRelocFixupStruct(reg string, st *TCStruct, rs string) (n
 	e.w("  " | result | " = load " | lt | ", ptr " | tmp | "\n")
 	e.relocFixupVisited[key] = false
 	return result
+}
+
+// --- Per-type fixup functions ---
+
+func relocFixupSymbol(lt string) (sym string) {
+	h := uint32(0x811c9dc5)
+	for i := int32(0); i < len(lt); i++ {
+		h = h ^ uint32(lt[i])
+		h = h * 0x01000193
+	}
+	return "@__reloc_fixup_" | irItoa(int32(h & 0x7fffffff))
+}
+
+// getOrEmitRelocFixupFn returns the symbol for a per-type fixup function.
+// One function per struct type. Fixes pointer/slice/map fields in ONE instance.
+// No recursion - each marked object has its own forwarding entry and fixup.
+func (e *irEmitter) getOrEmitRelocFixupFn(st *TCStruct) (sym string) {
+	lt := e.llvmStructType(st)
+	if lt == "" {
+		return ""
+	}
+	sym = relocFixupSymbol(lt)
+	// Check if already emitted (definedSyms is compile-arena resident).
+	bareSym := sym
+	if len(bareSym) > 0 && bareSym[0] == '@' {
+		bareSym = bareSym[1:]
+	}
+	for di := int32(0); di < len(e.definedSyms); di++ {
+		ds := e.definedSyms[di]
+		if len(ds) == len(bareSym) {
+			match := true
+			for bi := int32(0); bi < len(ds); bi++ {
+				if ds[bi] != bareSym[bi] {
+					match = false
+					break
+				}
+			}
+			if match {
+				return sym
+			}
+		}
+	}
+	// Also check pending (not yet merged to definedSyms).
+	for pi := int32(0); pi < len(e.pendRelocFixupDefs); pi++ {
+		ps := e.pendRelocFixupDefs[pi]
+		if len(ps) == len(bareSym) {
+			match := true
+			for bi := int32(0); bi < len(ps); bi++ {
+				if ps[bi] != bareSym[bi] {
+					match = false
+					break
+				}
+			}
+			if match {
+				return sym
+			}
+		}
+	}
+	e.pendRelocFixupDefs = append(e.pendRelocFixupDefs, bareSym)
+	// Ensure runtime functions used by fixup are declared.
+	e.declareRuntime("runtime.RelocFixupPtr", "void", "ptr, ptr")
+	e.declareRuntime("runtime.RelocFixupSlice", "void", "ptr, ptr")
+	e.declareRuntime("runtime.hashmapCopy", "ptr", "ptr")
+	var fb []string
+	fb = append(fb, "\ndefine linkonce_odr void " | sym | "(ptr %obj, ptr %rs, ptr %ctx) {\nentry:\n")
+	regN := int32(0)
+	for i := int32(0); i < st.NumFields(); i++ {
+		ft := st.Field(i).Typ
+		if !typeNeedsCopy(ft) {
+			continue
+		}
+		regN++
+		gep := "%fg" | irItoa(regN)
+		fb = append(fb, "  " | gep | " = getelementptr " | lt | ", ptr %obj, i32 0, i32 " | irItoa(i) | "\n")
+		fu := SafeUnderlying(ft)
+		switch fu.(type) {
+		case *Pointer:
+			fb = append(fb, "  call void @runtime.RelocFixupPtr(ptr %rs, ptr " | gep | ", ptr null)\n")
+		case *Slice, *Basic:
+			fb = append(fb, "  call void @runtime.RelocFixupSlice(ptr %rs, ptr " | gep | ", ptr null)\n")
+		case *TCMap:
+			regN++
+			old := "%fg" | irItoa(regN)
+			fb = append(fb, "  " | old | " = load ptr, ptr " | gep | "\n")
+			regN++
+			nw := "%fg" | irItoa(regN)
+			fb = append(fb, "  " | nw | " = call ptr @runtime.hashmapCopy(ptr " | old | ", ptr null)\n")
+			fb = append(fb, "  store ptr " | nw | ", ptr " | gep | "\n")
+		case *TCStruct:
+			// Nested struct: inline its field fixups (one level only).
+			if innerSt, ok2 := fu.(*TCStruct); ok2 {
+				innerLt := e.llvmStructType(innerSt)
+				for j := int32(0); j < innerSt.NumFields(); j++ {
+					jft := innerSt.Field(j).Typ
+					if !typeNeedsCopy(jft) {
+						continue
+					}
+					regN++
+					igep := "%fg" | irItoa(regN)
+					fb = append(fb, "  " | igep | " = getelementptr " | innerLt | ", ptr " | gep | ", i32 0, i32 " | irItoa(j) | "\n")
+					jfu := SafeUnderlying(jft)
+					switch jfu.(type) {
+					case *Pointer:
+						fb = append(fb, "  call void @runtime.RelocFixupPtr(ptr %rs, ptr " | igep | ", ptr null)\n")
+					case *Slice, *Basic:
+						fb = append(fb, "  call void @runtime.RelocFixupSlice(ptr %rs, ptr " | igep | ", ptr null)\n")
+					case *TCMap:
+						regN++
+						io := "%fg" | irItoa(regN)
+						fb = append(fb, "  " | io | " = load ptr, ptr " | igep | "\n")
+						regN++
+						inw := "%fg" | irItoa(regN)
+						fb = append(fb, "  " | inw | " = call ptr @runtime.hashmapCopy(ptr " | io | ", ptr null)\n")
+						fb = append(fb, "  store ptr " | inw | ", ptr " | igep | "\n")
+					}
+				}
+			}
+		}
+	}
+	fb = append(fb, "  ret void\n}\n")
+	// Write directly to output file (bypasses segment/arena lifetime issues).
+	if e.outFile != nil {
+		for _, s := range fb {
+			e.outFile.Write([]byte(s))
+		}
+	}
+	return sym
 }
 
 // --- Legacy compat (emit loop calls these) ---

@@ -68,8 +68,9 @@ type irEmitter struct {
 	arenaActive   bool
 	deepCopyFns   map[string]string
 	deepCopyQueue []deepCopyEntry
-	relocMarkVisited  map[string]bool
-	relocFixupVisited map[string]bool
+	relocMarkVisited    map[string]bool
+	relocFixupVisited   map[string]bool
+	pendRelocFixupDefs  []string
 }
 
 type phiTrunc struct {
@@ -95,7 +96,7 @@ func newIREmitter(pkg *SSAPackage, triple string, srcLen int32) (p *irEmitter) {
 		strMap:       map[string]int32{},
 		typeIDs:      map[string]int32{},
 		localTypeIDs: map[string]bool{},
-		globalDeclTypes: map[string]string{},
+		globalDeclTypes:   map[string]string{},
 		allocTypes: map[SSAValue]string{},
 		regTypes:   map[string]string{},
 		blockExitLabel: map[int32]string{},
@@ -156,8 +157,11 @@ func (e *irEmitter) flushDedup() {
 			le++
 		}
 		line := string(e.buf[ls:le])
+		// Dedup declare lines.
 		isDeclare := len(line) > 8 && line[0] == 'd' && line[1] == 'e' && line[2] == 'c' && line[3] == 'l' && line[4] == 'a' && line[5] == 'r' && line[6] == 'e' && line[7] == ' '
-		if isDeclare {
+		// Dedup define lines (for per-type fixup functions).
+		isDefine := len(line) > 7 && line[0] == 'd' && line[1] == 'e' && line[2] == 'f' && line[3] == 'i' && line[4] == 'n' && line[5] == 'e' && line[6] == ' '
+		if isDeclare || isDefine {
 			dup := false
 			for si := int32(0); si < len(seen); si++ {
 				s := seen[si]
@@ -176,7 +180,21 @@ func (e *irEmitter) flushDedup() {
 				}
 			}
 			if dup {
-				ls = le
+				if isDefine {
+					// Skip entire function body until closing }.
+					for ls < n {
+						if e.buf[ls] == '}' {
+							ls++
+							if ls < n && e.buf[ls] == '\n' {
+								ls++
+							}
+							break
+						}
+						ls++
+					}
+				} else {
+					ls = le
+				}
 				continue
 			}
 			seen = append(seen, line)
@@ -831,6 +849,10 @@ func (e *irEmitter) mergeAccumulators() {
 		e.deepCopyQueue = append(e.deepCopyQueue, deepCopyEntry{sym, dc.typ})
 	}
 	e.pendDeepCopyEntries = nil
+	for _, sym := range e.pendRelocFixupDefs {
+		e.definedSyms = append(e.definedSyms, copyStr(sym))
+	}
+	e.pendRelocFixupDefs = nil
 }
 
 func (e *irEmitter) pkgMembers() (ss []SSAMember) {
