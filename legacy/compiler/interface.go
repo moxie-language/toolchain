@@ -440,11 +440,12 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 			global.AddMetadata(0, diglobal)
 		}
 	}
-	// Return the global pointer directly. Kind byte is field 0, so the
-	// global base address == the kind byte address. No GEP needed.
-	// This avoids the interp-vs-LowerInterfaces mismatch where interp
-	// evaluates ConstGEP to a concrete integer but LowerInterfaces
-	// creates a symbolic ConstGEP - the icmp never matches.
+	// Ensure the type code global survives LTO dead-global elimination.
+	// The interp pass resolves MakeInterface type codes to concrete
+	// integers, removing the symbolic reference to this global. Without
+	// llvm.used, the linker strips it and LowerInterfaces can't find it
+	// for type assertion matching.
+	llvmutil.AppendToGlobal(c.mod, "llvm.used", global)
 	return global
 }
 
@@ -713,6 +714,11 @@ func (b *builder) createTypeAssert(expr *ssa.TypeAssert) llvm.Value {
 			assertedTypeCodeGlobal = llvm.AddGlobal(b.mod, b.ctx.Int8Type(), globalName)
 			assertedTypeCodeGlobal.SetGlobalConstant(true)
 		}
+		// Ensure the type descriptor exists so LowerInterfaces can
+		// find it. Without this, cross-module type assertions (where
+		// MakeInterface happens in one package and typeAssert in another)
+		// would be folded to false because the type code global is missing.
+		b.getTypeCode(expr.AssertedType)
 		// Type assert on concrete type.
 		// Call runtime.typeAssert, which will be lowered to a simple icmp or
 		// const false in the interface lowering pass.
