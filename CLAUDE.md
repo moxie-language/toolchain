@@ -162,40 +162,6 @@ Spawn channels are non-blocking on both sides. The runtime uses `moxie_peek` + r
 
 **Timeout behavior**: after 100ms of retries with no progress, send/recv returns false. Callers should handle this as "peer busy or dead" - check `PipeClosed(fd)` to distinguish.
 
-## Memory Management in WASM (Critical)
-
-The Moxie WASM target uses the Boehm conservative GC inherited from TinyGo. Its mark phase is a **recursive depth-first scan** of the live heap graph. The WASM call stack is fixed (typically ~1MB = ~10k-20k frames). When the live heap graph grows large, the mark-phase recursion overflows the stack and the WASM module dies with `InternalError: too much recursion`. This is a GC stack overflow, not an infinite loop.
-
-**Do not write Go-style "allocate freely, GC will clean up" code in long-lived WASM workers.** The GC is not fast enough or deep enough for that pattern. Every allocation in a long-lived worker must have an explicit free path.
-
-### Mandatory Rules
-
-1. **`delete(map, key)` is mandatory when an entry is done.** `map[k] = nil` keeps the slot reachable; only `delete` removes the reference. Apply at the exact lifecycle boundary where the entry is no longer needed - same timeout, same close handler.
-
-2. **Every add path needs a corresponding remove path.** Subscriptions, callbacks, routing table entries, buffered messages - each one added must be explicitly deleted when its scope ends. "Works for 10 connections, dies at 100" is the symptom of a missing remove path.
-
-3. **Clean ALL containers at the same boundary.** If a subscription is tracked in three maps, delete from all three in the same cleanup function. Missing one keeps the object graph reachable, defeating the cleanup.
-
-4. **Use `AllConns()` for cleanup, not `URLs()` + `Get()`.** `Get()` returns nil for non-open (reconnecting) conns. Their internal `subs` maps still hold entries the GC traverses. Cleanup must reach all conns regardless of state.
-
-5. **Slice semantics: `slice = nil` releases backing array.** `slice = slice[:0]` retains the allocation. Use nil assignment for cleanup, not re-slicing.
-
-6. **Long-lived workers need rotation or explicit caps.** Any map that grows monotonically over a session (caches, relay tables, event metadata) must either have a delete path or a two-generation rotation scheme that bounds its size. App-level caches use `rotateEventCaches()`/`rotateAuthorCaches()` - add new maps to the right rotation function.
-
-### Pattern: subscription cleanup
-
-```moxie
-// When a subscription ends, clean every map that references it.
-for rSubID := range info.remoteIDs {
-    delete(remoteToProxy, rSubID)      // routing map
-    for _, c := range rpool.AllConns() { // ALL conns, not just open
-        c.CloseSubscription(rSubID)    // cleans c.subs unconditionally
-    }
-}
-delete(proxySubs, proxyID)   // primary map
-delete(clientSubs, proxyID)  // secondary map
-```
-
 ## Complexity of Tasks Estimation
 
 Complexity estimates from general web-stack priors do not apply; measure against the Moxie baseline, not the npm baseline. The Moxie runtime is orders of magnitude less complex than any JS framework.

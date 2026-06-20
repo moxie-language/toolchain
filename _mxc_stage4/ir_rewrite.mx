@@ -5,69 +5,160 @@ import (
 )
 
 // joinChunks concatenates a slice of byte slices in one allocation.
+// Uses byte-by-byte copy because s[off:] creates a copy under
+// subslice-copies semantics, so copy(s[off:], src) writes to a
+// temporary instead of s.
 func joinChunks(chunks [][]byte) (r []byte) {
 	n := int32(0)
 	for _, c := range chunks {
 		n += len(c)
 	}
-	out := []byte{:0:n}
+	out := []byte{:n}
+	off := int32(0)
 	for _, c := range chunks {
-		off := len(out)
-		out = out[:off+len(c)]
-		copy(out[off:], c)
+		for j := int32(0); j < len(c); j++ {
+			out[off+j] = c[j]
+		}
+		off += len(c)
 	}
 	return out
 }
 
+// commaSep interleaves ", " between segments.
+func commaSep(segs []string) (r []string) {
+	var out []string
+	for i, s := range segs {
+		if i > 0 {
+			out = append(out, ", ")
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// joinStrs concatenates string segments in one allocation.
+// Replaces Schlemiel x = x | y loops.
+func joinStrs(segs []string) (r string) {
+	n := int32(0)
+	for _, s := range segs {
+		n += len(s)
+	}
+	out := []byte{:n}
+	off := int32(0)
+	for _, s := range segs {
+		for j := int32(0); j < len(s); j++ {
+			out[off+j] = s[j]
+		}
+		off += len(s)
+	}
+	return string(out)
+}
+
+// srcTrimStart returns index of first non-whitespace byte in src[from:to].
+func srcTrimStart(src []byte, from, to int32) (s int32) {
+	s = from
+	for s < to && (src[s] == ' ' || src[s] == '\t' || src[s] == '\r') {
+		s++
+	}
+	return s
+}
+
+// srcTrimEnd returns index one past last non-whitespace byte in src[from:to].
+func srcTrimEnd(src []byte, from, to int32) (e int32) {
+	e = to
+	for e > from && (src[e-1] == ' ' || src[e-1] == '\t' || src[e-1] == '\r') {
+		e--
+	}
+	return e
+}
+
+// srcHasPrefix checks whether src[start:end] begins with prefix.
+func srcHasPrefix(src []byte, start, end int32, prefix []byte) (ok bool) {
+	plen := int32(len(prefix))
+	if end-start < plen {
+		return false
+	}
+	for i := int32(0); i < plen; i++ {
+		if src[start+i] != prefix[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// srcFindByte finds byte c in src[from:to], returns index or -1.
+func srcFindByte(src []byte, from, to int32, c byte) (idx int32) {
+	for i := from; i < to; i++ {
+		if src[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
 func scanEmbedPragmas(src []byte, pkgDir string) {
 	cctx.embedVars = map[string]*embedInfo{}
-	// Two accepted forms: //:embed (canonical, see src/embed) and
-	// //moxie:embed_le (explicit little-endian element interpretation).
 	embedPrefix := []byte("//moxie:embed_le ")
 	embedPrefix2 := []byte("//:embed ")
 	varPrefix := []byte("var ")
 	commentPrefix := []byte("//")
 	pendingPath := ""
-	i := 0
-	for i < len(src) {
-		nlIdx := lIndexByte(src[i:], '\n')
-		var line []byte
-		var lineEnd int32
-		if nlIdx < 0 {
-			line = src[i:]
-			lineEnd = len(src)
-		} else {
-			line = src[i : i+nlIdx]
-			lineEnd = i + nlIdx + 1
+	slen := int32(len(src))
+	i := int32(0)
+	for i < slen {
+		// Find line boundaries without subslicing.
+		le := srcFindByte(src, i, slen, '\n')
+		if le < 0 {
+			le = slen
 		}
-		trimmed := lTrimSpace(line)
+		ts := srcTrimStart(src, i, le)
+		te := srcTrimEnd(src, i, le)
+		tlen := te - ts
 		if len(pendingPath) > 0 {
-			if len(trimmed) == 0 || lHasPrefix(trimmed, commentPrefix) {
-				i = lineEnd
+			if tlen == 0 || srcHasPrefix(src, ts, te, commentPrefix) {
+				if le < slen {
+					i = le + 1
+				} else {
+					i = slen
+				}
 				continue
 			}
-			if lHasPrefix(trimmed, varPrefix) {
-				rest := trimmed[4:]
-				spIdx := lIndexByte(rest, ' ')
-				if spIdx > 0 {
-					varName := string(rest[:spIdx])
-					typeStr := string(lTrimSpace(rest[spIdx+1:]))
+			if srcHasPrefix(src, ts, te, varPrefix) {
+				rs := ts + 4
+				sp := srcFindByte(src, rs, te, ' ')
+				if sp > rs {
+					varName := string(src[rs:sp])
+					vs := srcTrimStart(src, sp+1, te)
+					ve := srcTrimEnd(src, vs, te)
+					typeStr := string(src[vs:ve])
 					cctx.embedVars[varName] = &embedInfo{path: pendingPath, elemType: typeStr}
 				}
 			}
 			pendingPath = ""
-		} else if lHasPrefix(trimmed, embedPrefix) {
-			pendingPath = string(lTrimSpace(trimmed[len(embedPrefix):]))
-			if len(pendingPath) > 0 && pkgDir != "" {
-				pendingPath = mxutil.JoinPath(pkgDir, pendingPath)
+		} else if srcHasPrefix(src, ts, te, embedPrefix) {
+			ps := srcTrimStart(src, ts+int32(len(embedPrefix)), te)
+			pe := srcTrimEnd(src, ps, te)
+			if pe > ps {
+				pendingPath = string(src[ps:pe])
+				if pkgDir != "" {
+					pendingPath = mxutil.JoinPath(pkgDir, pendingPath)
+				}
 			}
-		} else if lHasPrefix(trimmed, embedPrefix2) {
-			pendingPath = string(lTrimSpace(trimmed[len(embedPrefix2):]))
-			if len(pendingPath) > 0 && pkgDir != "" {
-				pendingPath = mxutil.JoinPath(pkgDir, pendingPath)
+		} else if srcHasPrefix(src, ts, te, embedPrefix2) {
+			ps := srcTrimStart(src, ts+int32(len(embedPrefix2)), te)
+			pe := srcTrimEnd(src, ps, te)
+			if pe > ps {
+				pendingPath = string(src[ps:pe])
+				if pkgDir != "" {
+					pendingPath = mxutil.JoinPath(pkgDir, pendingPath)
+				}
 			}
 		}
-		i = lineEnd
+		if le < slen {
+			i = le + 1
+		} else {
+			i = slen
+		}
 	}
 }
 
@@ -77,37 +168,41 @@ func scanExportPragmas(src []byte) (m map[string]string) {
 	funcPrefix := []byte("func ")
 	commentPrefix := []byte("//")
 	pendingExport := ""
-	i := 0
-	for i < len(src) {
-		nlIdx := lIndexByte(src[i:], '\n')
-		var line []byte
-		var lineEnd int32
-		if nlIdx < 0 {
-			line = src[i:]
-			lineEnd = len(src)
-		} else {
-			line = src[i : i+nlIdx]
-			lineEnd = i + nlIdx + 1
+	slen := int32(len(src))
+	i := int32(0)
+	for i < slen {
+		le := srcFindByte(src, i, slen, '\n')
+		if le < 0 {
+			le = slen
 		}
-		trimmed := lTrimSpace(line)
+		ts := srcTrimStart(src, i, le)
+		te := srcTrimEnd(src, i, le)
+		tlen := te - ts
 		if len(pendingExport) > 0 {
-			if len(trimmed) == 0 || lHasPrefix(trimmed, commentPrefix) {
-				i = lineEnd
+			if tlen == 0 || srcHasPrefix(src, ts, te, commentPrefix) {
+				if le < slen { i = le + 1 } else { i = slen }
 				continue
 			}
-			if lHasPrefix(trimmed, funcPrefix) {
-				rest := trimmed[5:]
-				paren := lIndexByte(rest, '(')
-				if paren > 0 {
-					funcName := string(lTrimSpace(rest[:paren]))
-					result[funcName] = pendingExport
+			if srcHasPrefix(src, ts, te, funcPrefix) {
+				rs := ts + 5
+				paren := srcFindByte(src, rs, te, '(')
+				if paren > rs {
+					ns := srcTrimStart(src, rs, paren)
+					ne := srcTrimEnd(src, ns, paren)
+					if ne > ns {
+						result[string(src[ns:ne])] = pendingExport
+					}
 				}
 			}
 			pendingExport = ""
-		} else if lHasPrefix(trimmed, exportPrefix) {
-			pendingExport = string(lTrimSpace(trimmed[9:]))
+		} else if srcHasPrefix(src, ts, te, exportPrefix) {
+			ps := srcTrimStart(src, ts+9, te)
+			pe := srcTrimEnd(src, ps, te)
+			if pe > ps {
+				pendingExport = string(src[ps:pe])
+			}
 		}
-		i = lineEnd
+		if le < slen { i = le + 1 } else { i = slen }
 	}
 	return result
 }
@@ -115,40 +210,35 @@ func scanExportPragmas(src []byte) (m map[string]string) {
 func scanLinknameMap(src []byte) (m map[string]string) {
 	result := map[string]string{}
 	prefix := []byte("//:linkname ")
-	i := 0
-	for i < len(src) {
-		nlIdx := lIndexByte(src[i:], '\n')
-		var line []byte
-		var lineEnd int32
-		if nlIdx < 0 {
-			line = src[i:]
-			lineEnd = len(src)
-		} else {
-			line = src[i : i+nlIdx]
-			lineEnd = i + nlIdx + 1
+	slen := int32(len(src))
+	i := int32(0)
+	for i < slen {
+		le := srcFindByte(src, i, slen, '\n')
+		if le < 0 {
+			le = slen
 		}
-		trimmed := lTrimSpace(line)
-		if lHasPrefix(trimmed, prefix) {
-			rest := string(lTrimSpace(trimmed[12:]))
-			sp := 0
-			for sp < len(rest) && rest[sp] != ' ' && rest[sp] != '\t' {
-				sp++
-			}
-			if sp < len(rest) {
-				localName := rest[:sp]
-				targetName := ""
-				for j := sp + 1; j < len(rest); j++ {
-					if rest[j] != ' ' && rest[j] != '\t' {
-						targetName = rest[j:]
-						break
+		ts := srcTrimStart(src, i, le)
+		te := srcTrimEnd(src, i, le)
+		if srcHasPrefix(src, ts, te, prefix) {
+			rs := srcTrimStart(src, ts+12, te)
+			re := srcTrimEnd(src, rs, te)
+			if re > rs {
+				// Find space between localName and targetName.
+				sp := srcFindByte(src, rs, re, ' ')
+				if sp < 0 {
+					sp = srcFindByte(src, rs, re, '\t')
+				}
+				if sp > rs {
+					localName := string(src[rs:sp])
+					ts2 := srcTrimStart(src, sp+1, re)
+					if ts2 < re {
+						targetName := string(src[ts2:re])
+						result[localName] = targetName
 					}
 				}
-				if targetName != "" {
-					result[localName] = targetName
-				}
 			}
 		}
-		i = lineEnd
+		if le < slen { i = le + 1 } else { i = slen }
 	}
 	return result
 }
@@ -164,66 +254,81 @@ func scanWasmImportMap(src []byte, pkgPath string) (m map[string][2]string) {
 	if !mxutil.HasPrefix(cctx.compileTargetTriple, "wasm32") {
 		return nil
 	}
-	m := map[string][2]string{}
-	lines := mxutil.SplitLines(string(src))
-	for i := int32(0); i < int32(len(lines)); i++ {
-		ln := mxutil.TrimSpace(lines[i])
-		if !mxutil.HasPrefix(ln, "//:wasmimport ") {
+	result := map[string][2]string{}
+	wasmPrefix := []byte("//:wasmimport ")
+	funcPrefix := []byte("func ")
+	slen := int32(len(src))
+	i := int32(0)
+	for i < slen {
+		le := srcFindByte(src, i, slen, '\n')
+		if le < 0 {
+			le = slen
+		}
+		ts := srcTrimStart(src, i, le)
+		te := srcTrimEnd(src, i, le)
+		if !srcHasPrefix(src, ts, te, wasmPrefix) {
+			if le < slen { i = le + 1 } else { i = slen }
 			continue
 		}
-		parts := ln[len("//:wasmimport "):]
-		sp := int32(-1)
-		for j := int32(0); j < int32(len(parts)); j++ {
-			if parts[j] == ' ' || parts[j] == '\t' {
-				sp = j
-				break
-			}
+		// Parse module and import name from pragma line.
+		rs := ts + int32(len(wasmPrefix))
+		sp := srcFindByte(src, rs, te, ' ')
+		if sp < 0 {
+			sp = srcFindByte(src, rs, te, '\t')
 		}
 		if sp < 0 {
+			if le < slen { i = le + 1 } else { i = slen }
 			continue
 		}
-		mod := mxutil.TrimSpace(string(parts[:sp]))
-		impName := mxutil.TrimSpace(string(parts[sp+1:]))
-		// Find next func declaration
-		for j := i + 1; j < int32(len(lines)); j++ {
-			fl := mxutil.TrimSpace(lines[j])
-			if !mxutil.HasPrefix(fl, "func ") {
+		mod := string(src[rs:sp])
+		ns := srcTrimStart(src, sp+1, te)
+		ne := srcTrimEnd(src, ns, te)
+		impName := string(src[ns:ne])
+		// Find next func declaration.
+		j := le
+		if j < slen { j++ }
+		for j < slen {
+			fle := srcFindByte(src, j, slen, '\n')
+			if fle < 0 {
+				fle = slen
+			}
+			fts := srcTrimStart(src, j, fle)
+			fte := srcTrimEnd(src, j, fle)
+			if !srcHasPrefix(src, fts, fte, funcPrefix) {
+				if fle < slen { j = fle + 1 } else { j = slen }
 				continue
 			}
-			// extract function name from "func NAME(" or "func (recv) NAME("
-			rest := fl[5:]
-			// skip receiver if present
-			if len(rest) > 0 && rest[0] == '(' {
+			// Extract function name from "func NAME(" or "func (recv) NAME("
+			rs2 := fts + 5
+			if rs2 < fte && src[rs2] == '(' {
 				depth := int32(1)
-				k := int32(1)
-				for k < int32(len(rest)) && depth > 0 {
-					if rest[k] == '(' { depth++ }
-					if rest[k] == ')' { depth-- }
+				k := rs2 + 1
+				for k < fte && depth > 0 {
+					if src[k] == '(' { depth++ }
+					if src[k] == ')' { depth-- }
 					k++
 				}
-				rest = mxutil.TrimSpace(string(rest[k:]))
+				rs2 = srcTrimStart(src, k, fte)
 			}
-			// now rest starts with funcName(
-			paren := int32(-1)
-			for k := int32(0); k < int32(len(rest)); k++ {
-				if rest[k] == '(' {
-					paren = k
-					break
-				}
-			}
+			paren := srcFindByte(src, rs2, fte, '(')
 			if paren < 0 {
 				break
 			}
-			funcName := mxutil.TrimSpace(string(rest[:paren]))
-			sym := pkgPath | "." | funcName
-			m[sym] = [2]string{mod, impName}
+			fns := srcTrimStart(src, rs2, paren)
+			fne := srcTrimEnd(src, fns, paren)
+			if fne > fns {
+				funcName := string(src[fns:fne])
+				sym := pkgPath | "." | funcName
+				result[sym] = [2]string{mod, impName}
+			}
 			break
 		}
+		if le < slen { i = le + 1 } else { i = slen }
 	}
-	if len(m) == 0 {
+	if len(result) == 0 {
 		return nil
 	}
-	return m
+	return result
 }
 
 func stripDuplicatePackageClauses(src []byte) (buf []byte) {

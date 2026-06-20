@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"runtime"
-	"unsafe"
 	"git.smesh.lol/moxie/pkg/syntax"
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"git.smesh.lol/moxie/pkg/token"
@@ -46,6 +45,7 @@ type compileCtx struct {
 	parseArena           *runtime.Arena
 	universe             *UniverseState
 	irOutputFile         string
+	lastMxhData          string
 }
 
 var cctx *compileCtx
@@ -103,9 +103,6 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 			imported := cctx.universe.Registry[path]
 			if imported == nil {
 				continue
-			}
-			if path == "unsafe" && imported.Scope.Lookup("Pointer") == nil {
-				imported.Scope.Insert(NewTypeName(imported, "Pointer", Typ[UnsafePointer]))
 			}
 			localName := imported.Name
 			if dd.LocalPkgName != nil {
@@ -542,7 +539,10 @@ func regScopeLookup(regPkg *TCPackage, n string) (o Object) {
 	return regPkg.Scope.Lookup(n)
 }
 
-func TypeCheckOnly(src []byte, name string) {
+// TypeCheckOnly typechecks src, serializes exports to mxhPath (if non-empty),
+// and populates the registry via loadMxh. The type graph never leaves the
+// typecheck arena - only the refined mxh text touches disk.
+func TypeCheckOnly(src []byte, name string, mxhPath string) {
 	arenaSize := uintptr(len(src)) * 50
 	if arenaSize < 4*1024*1024 {
 		arenaSize = 4 * 1024 * 1024
@@ -551,10 +551,15 @@ func TypeCheckOnly(src []byte, name string) {
 	arena := runtime.ArenaNew(arenaSize)
 	runtime.SetCurrentArena(arena)
 	pkg, file := typeCheckPkg(src, name, arena)
-	// Restore caller's arena for exports and generic scanning.
-	runtime.SetCurrentArena(outerArena)
 	if pkg != nil && file != nil {
-		registerCompiledExports(pkg)
+		mxhData := generateMxh(pkg)
+		runtime.SetCurrentArena(outerArena)
+		if mxhPath != "" {
+			writeFile(mxhPath, []byte(mxhData), 0644)
+		}
+		loadMxhData([]byte(mxhData))
+	} else {
+		runtime.SetCurrentArena(outerArena)
 	}
 	ScanGenericDecls(src, name)
 	runtime.ArenaFree(arena)
@@ -573,42 +578,45 @@ func releaseFileDeep(f *syntax.File) {
 
 func CompileToIR(src []byte, name string, triple string) (s string) {
 	cctx.compileTargetTriple = triple
-	// Scan pragmas on heap (before arena).
 	scanEmbedPragmas(src, cctx.compilePkgDir)
 	cctx.linknameMap = scanLinknameMap(src)
 	cctx.wasmImportMap = scanWasmImportMap(src, name)
 
-	// Single arena for the entire compilation unit.
-	// All allocations (parse, typecheck, SSA, IR) go here.
-	// Arena is bulk-freed at the end - no free lists, no fragmentation.
-	// Per-compilation arena. Virtual pages committed on touch by MMU.
-	// 16GB per compilation unit. Pages committed on touch by MMU -
-	// virtual cost is address space only. Large packages like syscall
-	// (440KB source, hundreds of struct types) need this.
-	arenaSize := uintptr(16) * 1024 * 1024 * 1024
-	// Save caller's arena, nest a compilation-unit arena inside it.
 	outerArena := runtime.CurrentArena()
-	arena := runtime.ArenaNew(arenaSize)
+	arena := runtime.ArenaNew(64 * 1024)
 	runtime.SetCurrentArena(arena)
 
 	pkg, file := typeCheckPkg(src, name, arena)
 
-	// Restore caller's arena for export registration and generic scanning.
-	// These allocations survive in the caller's arena scope.
-	runtime.SetCurrentArena(outerArena)
-	ScanGenericDecls(src, name)
+	// Generate mxh inside compile arena - type graph is alive.
+	// Serialize exports before any arena switch. Then load the
+	// serialized text on the root arena. No cross-arena graph copy.
 	if pkg != nil && file != nil {
-		registerCompiledExports(pkg)
+		mxhData := generateMxh(pkg)
+		runtime.SetCurrentArena(outerArena)
+		loadMxhData([]byte(mxhData))
+		// Copy mxh text to root arena so it survives ArenaFree.
+		mxhCopy := []byte{:len(mxhData)}
+		copy(mxhCopy, mxhData)
+		cctx.lastMxhData = string(mxhCopy)
+		runtime.SetCurrentArena(arena)
 	}
 
+	runtime.SetCurrentArena(outerArena)
+	ScanGenericDecls(src, name)
+
 	if file == nil {
-		// Build error on outer arena (survives inner arena free).
-		out := "; parse error parseErrs=" | simpleItoa(len(cctx.parseErrors)) | "\n"
+		var errSegs []string
+		errSegs = append(errSegs, "; parse error parseErrs=")
+		errSegs = append(errSegs, simpleItoa(len(cctx.parseErrors)))
+		errSegs = append(errSegs, "\n")
 		for _, pe := range cctx.parseErrors {
-			out = out | "; " | pe | "\n"
+			errSegs = append(errSegs, "; ")
+			errSegs = append(errSegs, pe)
+			errSegs = append(errSegs, "\n")
 		}
 		runtime.ArenaFree(arena)
-		return out
+		return joinStrs(errSegs)
 	}
 
 	// Re-enter compilation arena for SSA + IR emit.
@@ -645,267 +653,10 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 		result = string(heapIR)
 	}
 
-	// Bulk free: all parse, typecheck, SSA, emitter objects die at once.
+	// Bulk reclaim: reset arena for next compilation.
 	runtime.ArenaFree(arena)
+	cctx.compileArena = nil
 	return result
-}
-
-// registerCompiledExports serializes the compilation scope to mxh text,
-// then parses it back to heap-allocated objects. This breaks the pointer
-// dependency on the arena - the registry holds only heap objects.
-// The arena can then be freed without dangling the registry.
-func registerCompiledExports(pkg *TCPackage) {
-
-	// Work arena: all intermediates (visited map, string copies, type
-	// objects) allocated here. Only the final cctx.universe.Registry entry
-	// survives via the root arena allocations below.
-	outerArena := runtime.CurrentArena()
-	workArena := runtime.ArenaNew(256 * 1024 * 1024) // 256MB
-	runtime.SetCurrentArena(workArena)
-
-	dimps := cctx.universe.DirectImportPaths(pkg)
-	// Switch to root arena for persistent allocations.
-	runtime.SetCurrentArena(outerArena)
-	copiedPath := tcCopyStr(pkg.Path)
-	var copiedDimps []string
-	for _, d := range dimps {
-		copiedDimps = append(copiedDimps, tcCopyStr(d))
-	}
-	cctx.universe.DirectImports[copiedPath] = copiedDimps
-	newPkg := NewTCPackage(copiedPath, tcCopyStr(pkg.Name))
-
-	// Back to work arena for the type graph copy.
-	// copyType allocates new type objects - these go to workArena.
-	runtime.SetCurrentArena(workArena)
-	visited := map[uintptr]Type{}
-
-	names := pkg.Scope.Names()
-	for _, name := range names {
-		if len(name) == 0 {
-			continue
-		}
-		obj := pkg.Scope.Lookup(name)
-		if obj == nil {
-			continue
-		}
-		exported := name[0] >= 'A' && name[0] <= 'Z'
-		if !exported {
-			if tn, ok := obj.(*TypeName); ok {
-				if named, ok2 := tn.Typ.(*Named); ok2 && named.NumMethods() > 0 {
-					// include unexported types with methods for interface dispatch
-				} else {
-					continue
-				}
-			} else {
-				continue
-			}
-		}
-		newObj := copyObject(newPkg, visited, obj)
-		if newObj != nil {
-			newPkg.Scope.Insert(newObj)
-		}
-	}
-	cctx.universe.Registry[tcCopyStr(pkg.Path)] = newPkg
-}
-
-// tcCopyStr copies a string's backing array into the current arena.
-func tcCopyStr(s string) (r string) {
-	if len(s) == 0 {
-		return ""
-	}
-	b := []byte{:len(s)}
-	copy(b, s)
-	return string(b)
-}
-
-func copyConstVal(v ConstVal) (r ConstVal) {
-	if v == nil {
-		return nil
-	}
-	switch cv := v.(type) {
-	case *ConstBool:
-		return &ConstBool{V: cv.V}
-	case *ConstInt:
-		return &ConstInt{V: cv.V}
-	case *ConstFloat:
-		return &ConstFloat{V: cv.V, Lit: tcCopyStr(cv.Lit)}
-	case *ConstStr:
-		return &ConstStr{S: tcCopyStr(cv.S)}
-	case *ConstNil:
-		return &ConstNil{}
-	}
-	return v
-}
-
-func copyObject(pkg *TCPackage, visited map[uintptr]Type, obj Object) (r Object) {
-	if obj == nil {
-		return nil
-	}
-	switch o := obj.(type) {
-	case *TypeName:
-		tn := NewTypeName(pkg, tcCopyStr(o.Name), nil)
-		tn.Typ = copyType(pkg, visited, o.Typ)
-		return tn
-	case *TCFunc:
-		sig, _ := copyType(pkg, visited, o.Typ).(*Signature)
-		fn := NewTCFunc(pkg, tcCopyStr(o.Name), sig)
-		fn.PtrRecv = o.PtrRecv
-		return fn
-	case *TCVar:
-		v := NewTCVar(pkg, tcCopyStr(o.Name), copyType(pkg, visited, o.Typ))
-		v.Anonymous = o.Anonymous
-		return v
-	case *TCConst:
-		return NewTCConst(pkg, tcCopyStr(o.Name), copyType(pkg, visited, o.Typ), copyConstVal(o.Val))
-	}
-	return nil
-}
-
-func typeIdentity(t Type) (p uintptr) {
-	// Extract the data pointer from a Type interface for use as map key.
-	// Type is {typeid, ptr} - we want the ptr for identity comparison.
-	type iface struct { typ uintptr; data uintptr }
-	return (*iface)(unsafe.Pointer(&t)).data
-}
-
-func copyType(pkg *TCPackage, visited map[uintptr]Type, t Type) (r Type) {
-	if t == nil {
-		return nil
-	}
-	if _, ok := t.(*Basic); ok {
-		return t
-	}
-	key := typeIdentity(t)
-	if key == 0 {
-		return nil // typed nil
-	}
-	if cached, ok := visited[key]; ok {
-		return cached
-	}
-	switch tt := t.(type) {
-	case *Named:
-		// If this Named type belongs to an imported package (already in
-		// cctx.universe.Registry), return it as-is. It's already in the outer arena.
-		if tt.Obj != nil && tt.Obj.Pkg != nil && tt.Obj.Pkg.Path != pkg.Path {
-			if regPkg, ok := cctx.universe.Registry[tt.Obj.Pkg.Path]; ok {
-				// Return the registered copy's type, not the arena original.
-				regObj := regPkg.Scope.Lookup(tt.Obj.Name)
-				if regObj != nil {
-					if regTN, ok2 := regObj.(*TypeName); ok2 {
-						return regTN.Typ
-					}
-				}
-				return t
-			}
-		}
-		tn := NewTypeName(pkg, "", nil)
-		if tt.Obj != nil {
-			tn.Pkg = pkg
-			tn.Name = tcCopyStr(tt.Obj.Name)
-		}
-		n := NewNamed(tn, nil)
-		visited[key] = n
-		if tt.Under != nil {
-			n.Under = copyType(pkg, visited, tt.Under)
-		}
-		for _, tp := range tt.TParams {
-			n.TParams = append(n.TParams, tp)
-		}
-		for i := int32(0); i < tt.NumMethods(); i++ {
-			m := tt.Method(i)
-			if m == nil {
-				continue
-			}
-			sig, _ := copyType(pkg, visited, m.Typ).(*Signature)
-			fn := NewTCFunc(pkg, tcCopyStr(m.Name), sig)
-			fn.PtrRecv = m.PtrRecv
-			n.AddMethod(fn)
-		}
-		return n
-	case *Pointer:
-		p := NewPointer(copyType(pkg, visited, tt.Base))
-		visited[key] = p
-		return p
-	case *Slice:
-		s := NewSlice(copyType(pkg, visited, tt.Elem))
-		visited[key] = s
-		return s
-	case *Array:
-		a := NewArray(copyType(pkg, visited, tt.Elem), tt.Len)
-		visited[key] = a
-		return a
-	case *TCStruct:
-		st := NewTCStruct(nil, nil)
-		visited[key] = st
-		for i := int32(0); i < tt.NumFields(); i++ {
-			f := tt.Field(i)
-			nf := NewTCVar(pkg, tcCopyStr(f.Name), copyType(pkg, visited, f.Typ))
-			nf.Anonymous = f.Anonymous
-			st.Fields = append(st.Fields, nf)
-		}
-		if len(tt.Tags) > 0 {
-			for _, tag := range tt.Tags {
-				st.Tags = append(st.Tags, tcCopyStr(tag))
-			}
-		}
-		return st
-	case *Signature:
-		sig := &Signature{Variadic: tt.Variadic}
-		visited[key] = sig
-		if tt.Recv != nil {
-			sig.Recv = NewTCVar(pkg, tcCopyStr(tt.Recv.Name), copyType(pkg, visited, tt.Recv.Typ))
-		}
-		if tt.Params != nil {
-			tup := &Tuple{}
-			for i := int32(0); i < int32(tt.Params.Len()); i++ {
-				p := tt.Params.At(i)
-				tup.Vars = append(tup.Vars, NewTCVar(pkg, tcCopyStr(p.Name), copyType(pkg, visited, p.Typ)))
-			}
-			sig.Params = tup
-		}
-		if tt.Results != nil {
-			tup := &Tuple{}
-			for i := int32(0); i < int32(tt.Results.Len()); i++ {
-				rv := tt.Results.At(i)
-				tup.Vars = append(tup.Vars, NewTCVar(pkg, tcCopyStr(rv.Name), copyType(pkg, visited, rv.Typ)))
-			}
-			sig.Results = tup
-		}
-		return sig
-	case *TCMap:
-		m := NewTCMap(copyType(pkg, visited, tt.Key), copyType(pkg, visited, tt.Elem))
-		visited[key] = m
-		return m
-	case *TCChan:
-		c := NewTCChan(tt.Dir, copyType(pkg, visited, tt.Elem))
-		visited[key] = c
-		return c
-	case *TCInterface:
-		iface := &TCInterface{}
-		visited[key] = iface
-		for _, m := range tt.XMethods {
-			sig, _ := copyType(pkg, visited, m.Sig).(*Signature)
-			iface.XMethods = append(iface.XMethods, &IfaceMethod{Name: tcCopyStr(m.Name), Sig: sig})
-		}
-		for _, e := range tt.Embeds {
-			iface.Embeds = append(iface.Embeds, copyType(pkg, visited, e))
-		}
-		if tt.Completed {
-			iface.Complete()
-		}
-		return iface
-	case *Tuple:
-		tup := &Tuple{}
-		visited[key] = tup
-		for i := int32(0); i < int32(tt.Len()); i++ {
-			v := tt.At(i)
-			tup.Vars = append(tup.Vars, NewTCVar(pkg, tcCopyStr(v.Name), copyType(pkg, visited, v.Typ)))
-		}
-		return tup
-	case *TypeParam:
-		return tt
-	}
-	return t
 }
 
 func tcInferTypeFromExpr(e syntax.Expr, scope *Scope) (t Type) {
