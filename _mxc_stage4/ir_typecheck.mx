@@ -56,6 +56,126 @@ func initCompileCtx() {
 	}
 }
 
+// stripUnusedConsts removes const declarations from source whose names
+// don't appear anywhere else in the source. Pre-parse dead constant
+// elimination - avoids parsing/type-checking thousands of unreferenced
+// constants (e.g., syscall error tables).
+func stripUnusedConsts(src []byte) (out []byte) {
+	// Pass 1: collect all identifier-like tokens from the source.
+	// Simple byte scan - not a real tokenizer, just word boundaries.
+	refs := map[string]bool{}
+	i := int32(0)
+	for i < len(src) {
+		if isIdentStart(src[i]) {
+			j := i + 1
+			for j < len(src) && isIdentCont(src[j]) {
+				j++
+			}
+			refs[string(src[i:j])] = true
+			i = j
+		} else {
+			i++
+		}
+	}
+	// Pass 2: scan for const blocks. If a const name appears only in its
+	// own declaration (count == 1 in refs - the declaration itself), skip it.
+	// But refs counts ALL occurrences including the declaration. A truly
+	// unused const appears exactly once (its declaration). Since our refs
+	// map is boolean (present/absent), we can't count. Instead: collect
+	// const names, remove them from refs, then check if they're still in refs.
+	// Actually simpler: scan function bodies for references. Constants
+	// only in const blocks but not in func bodies are dead.
+	funcRefs := map[string]bool{}
+	inFunc := false
+	depth := int32(0)
+	i = 0
+	for i < len(src) {
+		if !inFunc && i+4 < len(src) && src[i] == 'f' && src[i+1] == 'u' && src[i+2] == 'n' && src[i+3] == 'c' && !isIdentCont(src[i+4]) {
+			inFunc = true
+			i += 4
+			continue
+		}
+		if src[i] == '{' {
+			depth++
+			i++
+			continue
+		}
+		if src[i] == '}' {
+			depth--
+			if depth == 0 {
+				inFunc = false
+			}
+			i++
+			continue
+		}
+		if inFunc && depth > 0 && isIdentStart(src[i]) {
+			j := i + 1
+			for j < len(src) && isIdentCont(src[j]) {
+				j++
+			}
+			funcRefs[string(src[i:j])] = true
+			i = j
+			continue
+		}
+		i++
+	}
+	// Pass 3: filter const declarations. Keep only those whose names
+	// appear in funcRefs. Scan for "const " or "const(" patterns.
+	// For simplicity, only strip individual const lines (not grouped).
+	// This handles the bulk of zerrors/zsysnum generated constants.
+	out = []byte{:0:len(src)}
+	i = 0
+	for i < len(src) {
+		// Look for "const " at line start (after optional whitespace/tab).
+		ls := i
+		for ls < len(src) && (src[ls] == ' ' || src[ls] == '\t') {
+			ls++
+		}
+		if ls+6 < len(src) && src[ls] == 'c' && src[ls+1] == 'o' && src[ls+2] == 'n' && src[ls+3] == 's' && src[ls+4] == 't' && src[ls+5] == ' ' {
+			// Found "const ". Extract the const name.
+			ns := ls + 6
+			for ns < len(src) && (src[ns] == ' ' || src[ns] == '\t') {
+				ns++
+			}
+			ne := ns
+			for ne < len(src) && isIdentCont(src[ne]) {
+				ne++
+			}
+			if ne > ns {
+				cname := string(src[ns:ne])
+				if !funcRefs[cname] {
+					// Skip this line - const not referenced in any function body.
+					for i < len(src) && src[i] != '\n' {
+						i++
+					}
+					if i < len(src) {
+						i++ // skip newline
+					}
+					continue
+				}
+			}
+		}
+		// Copy line through.
+		for i < len(src) && src[i] != '\n' {
+			push(out, src[i])
+			i++
+		}
+		if i < len(src) {
+			push(out, '\n')
+			i++
+		}
+	}
+	return out
+}
+
+func isIdentStart(c byte) (ok bool) {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+}
+
+func isIdentCont(c byte) (ok bool) {
+	return isIdentStart(c) || (c >= '0' && c <= '9')
+}
+
 func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage, file *syntax.File) {
 	shortName := name
 	for i := len(name) - 1; i >= 0; i-- {
@@ -66,6 +186,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 	}
 	pkg := newTCPackageWithUniverse(name, shortName)
 	scope := pkg.Scope
+	src = stripUnusedConsts(src)
 	rw := rewriteSliceMakeLiterals(src)
 	src = rewriteChanMakeLiterals(rw)
 	src = stripDuplicatePackageClauses2(src)
@@ -582,8 +703,10 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	cctx.linknameMap = scanLinknameMap(src)
 	cctx.wasmImportMap = scanWasmImportMap(src, name)
 
-	// Arena sized from source. Virtual address space is free.
-	compileArenaSize := uintptr(len(src)) * 500
+	// Arena sized from source. Virtual address space is free - pages
+	// commit on touch. 1000x covers generated-table-heavy packages
+	// like syscall and unicode.
+	compileArenaSize := uintptr(len(src)) * 1000
 	if compileArenaSize < 64*1024*1024 {
 		compileArenaSize = 64 * 1024 * 1024
 	}
