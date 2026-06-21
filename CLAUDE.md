@@ -4,7 +4,7 @@ COMPACTION: ;always preserve: moxie is not Go, no stubs - remove dead references
 
 ## Moxie Memory Model
 
-per-function arena mark/restore. compiler emits ArenaMark() at function entry, deep-copies return values to caller's region, then ArenaRestore(mark) at function exit. no escape analysis, no scope chains, no individual free. all reclamation is bulk: arena restore per function return, munmap per domain exit. there is no free() builtin.
+per-function arena stack. compiler emits FnArenaPush() at function entry, relocates return values into caller's arena via three-pass mark-compact, then FnArenaPop + ArenaRelease at function exit. no escape analysis, no scope chains, no individual free. all reclamation is bulk: arena release per function return (pooled), munmap per domain exit. there is no free() builtin. DomainRoot holds fnStack[512]*Arena with fnTop index.
 
 ## Reporting Completion
 

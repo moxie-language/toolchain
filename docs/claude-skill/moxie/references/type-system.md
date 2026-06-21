@@ -88,7 +88,7 @@ type Events struct {
     items []*Event
 }
 
-func (e *Events) Add(ev *Event) { e.items = append(e.items, ev) }
+func (e *Events) Add(ev *Event) { push(e.items, ev) }
 func (e *Events) Len() (n int32) { return len(e.items) }
 ```
 

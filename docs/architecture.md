@@ -69,7 +69,7 @@ Each domain runs `scheduler = "tasks"` - a cooperative FIFO scheduler.
 
 ## Spawn: Domain Creation
 
-`spawn` is a language builtin (like `copy`, `append`). The type checker validates
+`spawn` is a language builtin (like `copy`, `push`). The type checker validates
 argument count and types. The SSA validator enforces `moxie.Codec` on all data
 arguments and channel element types.
 
@@ -105,7 +105,7 @@ src/runtime/spawn.go
 - **Within a domain**: single-threaded, no races possible. No mutexes needed. Channels are the synchronization primitive.
 - **Between domains**: complete isolation. No shared pointers. Channel data is serialized over IPC.
 - **Allocation**: bump-pointer arena per domain. `alloc()` bumps within the current arena. No GC, no free lists, no individual free.
-- **Per-function ownership**: compiler emits mark/restore around each function. Return values deep-copied to caller's region before restore reclaims the function's allocations.
+- **Per-function ownership**: compiler emits FnArenaPush/Pop around each function. Return values relocated to caller's arena before the function's arena is released.
 - **Domain exit**: `munmap` releases all arena pages in one operation.
 
 ## Build Tags

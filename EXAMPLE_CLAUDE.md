@@ -26,6 +26,7 @@ These are compile errors. Violating them wastes a build cycle.
 | Construct | Compile Error | Use Instead |
 |-----------|---------------|-------------|
 | `go f()` | No goroutines | Channels + `select` for dispatch, `spawn` for isolation |
+| `append(...)` | Removed | `push(s, v...)` for element insertion, `a \| b` for concat |
 | `make(T, ...)` | Removed | Literal syntax: `[]T{:n}`, `chan T{}`, `map[K]V{}` |
 | `new(T)` | Removed | `&T{}` or `var x T; p := &x` |
 | `"a" + "b"` | No `+` on text | `"a" \| "b"` (pipe operator) |
@@ -181,6 +182,7 @@ Do not assume project structure from convention. Read the actual code.
 - Never assume the tech stack — read the project first
 - Never optimize before it works
 - Never use `go` keyword (it's a compile error)
+- Never use `append()` (use `push(s, v...)`)
 - Never use `+` for text concatenation (use `|`)
 - Never use `make()` (use literal syntax)
 - Never use `new(T)` (use `&T{}`)

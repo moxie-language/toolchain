@@ -2,7 +2,7 @@
 
 See [REFERENCE.md](../REFERENCE.md) for the complete language reference.
 
-`spawn` is a language builtin (like `make`, `append`). No import required. Patched into Go's type universe via `build/patch-gotypes.go`.
+`spawn` is a language builtin (like `push`, `copy`). No import required. Registered in the type universe alongside other Moxie builtins.
 
 ```go
 done := spawn(funcName, arg1, arg2, ...)

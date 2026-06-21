@@ -4,15 +4,16 @@ import "moxie"
 
 // Example Moxie file exercising syntax highlighting.
 //
-// Moxie is a TinyGo-derived systems language. Key differences from Go:
+// Moxie is a systems language for domain-isolated programs. Key differences from Go:
 //   - string and []byte are the same type
-//   - int32 and uint32 are always 32-bit
+//   - int32 and uint32 are always 32-bit (int/uint are illegal)
 //   - no goroutines; spawn() creates isolated domains over IPC
 //   - no new(), complex, uintptr; use &T{}, literal syntax, explicit pointers
 //   - text concat uses |, not +
+//   - push/pop/resize replace append
 //   - fallthrough and go are compile errors
 
-const MaxWorkers = 4
+const MaxWorkers = int32(4)
 
 type Job struct {
 	id   int32
@@ -28,7 +29,7 @@ func main() {
 	buf := []byte{:1024}
 	queue := []int32{:0:100}
 
-	// Channel and map literals replace make().
+	// Channel and map literals (no make).
 	results := chan moxie.Int32{}
 	config := map[string]int32{
 		"timeout":    30,
@@ -44,7 +45,7 @@ func main() {
 	}
 
 	// Event loop.
-	for n := 0; n < MaxWorkers; n++ {
+	for n := int32(0); n < MaxWorkers; n++ {
 		select {
 		case r := <-results:
 			println(int32(r))
@@ -62,24 +63,29 @@ func main() {
 		}
 	}
 
-	queue = append(queue, 1, 2, 3)
+	// push replaces append: explicit growth, store-back implicit.
+	push(queue, 1, 2, 3)
+	last := pop(queue)
+	resize(queue, 0)
 	_ = config
+	_ = last
 }
 
-// Multiple return values, generics.
-func divide(a, b float64) (float64, error) {
+// Multiple return values must be named.
+func divide(a, b float64) (result float64, err error) {
 	if b == 0 {
 		return 0, nil
 	}
 	return a / b, nil
 }
 
-func filter[T any](items []T, pred func(T) bool) []T {
-	result := []T{:0:len(items)}
+// Generics with comparable constraint (no any/interface{}).
+func filter[T comparable](items []T, pred func(T) bool) (result []T) {
+	result = []T{:0:len(items)}
 	for _, item := range items {
 		if pred(item) {
-			result = append(result, item)
+			push(result, item)
 		}
 	}
-	return result
+	return
 }

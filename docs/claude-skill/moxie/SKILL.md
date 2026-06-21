@@ -24,7 +24,7 @@ Activate when:
 | `make(T, ...)` | removed | `[]T{:n}`, `chan T{}`, `map[K]V{}` |
 | `new(T)` | removed | `&T{}` |
 | `interface{}` / `any` | banned | named interface with methods |
-| `append(a, b...)` | no spread | `a \| b` |
+| `append(...)` | removed | `push(s, v...)` or `a \| b` for concat |
 | `import "strings"` | removed | `import "bytes"` (string=[]byte) |
 | `fallthrough` | removed | `case A, B:` comma-separated |
 | value receiver | banned | pointer receivers only |
@@ -69,10 +69,11 @@ map[K]V{}         // empty map
 
 ## Memory Management
 
-No GC. Per-function arena ownership. All allocations bump within the current arena.
-- Function entry marks the arena offset; return deep-copies results to caller's region, then restores.
-- No individual free. Reclamation is bulk: arena restore per function, munmap per domain.
-- Function params are borrowed references into caller's region.
+No GC. Per-function arena stack. Each function gets its own arena via `FnArenaPush`.
+- Function entry pushes a fresh arena; return relocates results to caller's arena, then pops+releases.
+- No individual free. Reclamation is bulk: arena release per function, munmap per domain.
+- Arena pool (8 entries) recycles arenas without syscalls.
+- Function params are borrowed references into caller's arena.
 - `spawn` moves non-constant values (use-after-spawn = compile error).
 
 ## spawn Boundary
@@ -127,7 +128,7 @@ For detailed information, consult:
 
 - **references/type-system.md** - Numeric types, string=[]byte, builtin stringers, slice equality, comparable, named type restrictions
 - **references/execution-model.md** - Domains, spawn, IPC channels, Codec types, move semantics, cooperative scheduler
-- **references/memory-management.md** - Per-function arena ownership, mark/restore, deep-copy on return, domain isolation
+- **references/memory-management.md** - Per-function arena stack, FnArenaPush/Pop, relocate on return, domain isolation
 - **references/syntax-quick-ref.md** - Operators, literals, statements, keywords, control flow, all removed constructs
 - **references/build-and-modules.md** - Build commands, module file, targets, cache, dependencies, .mxh headers
 - **references/wasm-target.md** - String pragma, JS bridge packages, jsruntime shims, crypto

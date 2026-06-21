@@ -179,9 +179,9 @@ package main
 
 func main() {
     s := []int32{1, 2, 3}
-    s = append(s, 4, 5)
+    push(s, 4, 5)                  // s is now [1, 2, 3, 4, 5]
 
-    // size literals (alternative to make)
+    // size literals (no make)
     buf := []byte{:1024}           // 1024 zero bytes
     table := []int32{:0:100}       // len=0, cap=100
 

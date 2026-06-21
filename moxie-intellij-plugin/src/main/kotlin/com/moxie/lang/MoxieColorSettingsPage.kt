@@ -89,8 +89,11 @@ func main() {
         }
     }
 
-    queue = append(queue, 1, 2, 3)
+    push(queue, 1, 2, 3)
+    last := pop(queue)
+    resize(queue, 0)
     _ = config
+    _ = last
 }
 """.trimIndent()
     }

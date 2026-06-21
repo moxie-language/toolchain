@@ -49,9 +49,9 @@ Helper modules used as WASM host shims. Not importable from Moxie source; wired 
 
 ## WASM Memory
 
-The WASM target uses the same arena model as native - per-function mark/restore with deep-copy on return. No GC. The memory model described in `memory-management.md` applies uniformly across all targets.
+The WASM target uses the same arena model as native - per-function arena push/pop with relocation on return. No GC. The memory model described in `memory-management.md` applies uniformly across all targets.
 
-Long-lived WASM workers must still be disciplined about cleanup: `delete(map, key)` when entries are done, factor allocation-heavy work into helper functions (their mark/restore reclaims per-call), and explicit remove paths for every add path. The WASM call stack is fixed (~1MB), so deeply recursive algorithms can overflow it independently of memory management.
+Long-lived WASM workers must still be disciplined about cleanup: `delete(map, key)` when entries are done, factor allocation-heavy work into helper functions (their arena is released per-call), and explicit remove paths for every add path. The WASM call stack is fixed (~1MB), so deeply recursive algorithms can overflow it independently of memory management.
 
 ## spawn in WASM
 

@@ -124,19 +124,20 @@ class MoxieSyntaxHighlighter : SyntaxHighlighterBase() {
             MoxieTokenTypes.TYPE, MoxieTokenTypes.VAR -> KEYWORD_KEYS
 
             // Built-in functions
-            MoxieTokenTypes.APPEND, MoxieTokenTypes.CAP, MoxieTokenTypes.CLEAR,
+            MoxieTokenTypes.PUSH, MoxieTokenTypes.POP, MoxieTokenTypes.RESIZE,
+            MoxieTokenTypes.CAP, MoxieTokenTypes.CLEAR,
             MoxieTokenTypes.CLOSE, MoxieTokenTypes.COPY, MoxieTokenTypes.DELETE,
-            MoxieTokenTypes.LEN, MoxieTokenTypes.MAKE, MoxieTokenTypes.PANIC,
-            MoxieTokenTypes.PRINT, MoxieTokenTypes.PRINTLN, MoxieTokenTypes.RECOVER,
-            MoxieTokenTypes.SPAWN -> BUILTIN_FUNCTION_KEYS
+            MoxieTokenTypes.LEN, MoxieTokenTypes.MAX, MoxieTokenTypes.MIN,
+            MoxieTokenTypes.PANIC, MoxieTokenTypes.PRINT, MoxieTokenTypes.PRINTLN,
+            MoxieTokenTypes.RECOVER, MoxieTokenTypes.SPAWN -> BUILTIN_FUNCTION_KEYS
 
             // Built-in types
             MoxieTokenTypes.BOOL, MoxieTokenTypes.BYTE, MoxieTokenTypes.ERROR,
-            MoxieTokenTypes.FLOAT32, MoxieTokenTypes.FLOAT64, MoxieTokenTypes.INT,
+            MoxieTokenTypes.FLOAT32, MoxieTokenTypes.FLOAT64,
             MoxieTokenTypes.INT8, MoxieTokenTypes.INT16, MoxieTokenTypes.INT32,
             MoxieTokenTypes.INT64, MoxieTokenTypes.RUNE, MoxieTokenTypes.STRING,
-            MoxieTokenTypes.UINT, MoxieTokenTypes.UINT8, MoxieTokenTypes.UINT16,
-            MoxieTokenTypes.UINT32, MoxieTokenTypes.UINT64, MoxieTokenTypes.ANY,
+            MoxieTokenTypes.UINT8, MoxieTokenTypes.UINT16,
+            MoxieTokenTypes.UINT32, MoxieTokenTypes.UINT64,
             MoxieTokenTypes.COMPARABLE, MoxieTokenTypes.TRUE, MoxieTokenTypes.FALSE,
             MoxieTokenTypes.NIL, MoxieTokenTypes.IOTA -> BUILTIN_TYPE_KEYS
 

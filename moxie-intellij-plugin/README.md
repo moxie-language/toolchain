@@ -6,8 +6,8 @@ IntelliJ IDEA plugin for Moxie language support (.mx files).
 
 - **Syntax Highlighting**: Full syntax highlighting for Moxie language
   - Keywords (func, var, const, etc.)
-  - Built-in functions (append, cap, clear, close, copy, delete, len, make, panic, print, println, recover, spawn)
-  - Built-in types (int, string, bool, etc.)
+  - Built-in functions (push, pop, resize, cap, clear, close, copy, delete, len, max, min, panic, print, println, recover, spawn)
+  - Built-in types (int32, int64, uint32, uint64, string, bool, float32, float64, etc.)
   - Comments (line and block)
   - String literals (including raw strings)
   - Numbers (integers, floats)
@@ -86,8 +86,8 @@ This will launch a new IntelliJ IDEA instance with the plugin loaded.
 - Slice, channel, and map literal syntax: `[]T{:n}`, `chan T{}`, `map[K]V{}`
 - Removed from Go (not highlighted as keywords/builtins, so misuse stands out):
   - `go`, `fallthrough`
-  - `new`, `complex`, `real`, `imag`
-  - `complex64`, `complex128`, `uintptr`
+  - `append`, `make`, `new`, `complex`, `real`, `imag`
+  - `int`, `uint`, `any`, `complex64`, `complex128`, `uintptr`
 
 ## License
 

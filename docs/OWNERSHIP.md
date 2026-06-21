@@ -27,46 +27,50 @@ everything it owned, in one operation, with no survivors.
 
 ## Function-Scoped Arenas
 
-Every function that allocates gets a region within the current arena. The
-compiler emits a mark at entry and a restore at exit. Between mark and
-restore, all allocations are the function's private property.
+Every function that allocates gets its **own arena**, pushed onto the domain's
+function arena stack. The compiler emits `FnArenaPush` at entry and
+`FnArenaPop` + `ArenaRelease` at exit. Between push and pop, all allocations
+are the function's private property in its own mmap'd region.
 
 ```
-Arena state during nested calls:
+Function arena stack during nested calls:
 
-    [root arena ─────────────────────────────────────────────────]
-    [main's region][f's region][g's region]
-                   ^mark_f     ^mark_g     ^current offset
+    fnStack[0] = root arena     (domain lifetime)
+    fnStack[1] = main's arena
+    fnStack[2] = f's arena      <-- fnTop during f()
+    fnStack[3] = g's arena      <-- fnTop during g()
 
     When g returns:
-    [main's region][f's region][g's return values copied here]
-                   ^mark_f     ^restored to mark_g
+    - return values relocated into fnStack[2] (f's arena)
+    - fnStack[3] released to pool (or munmap'd)
+    - fnTop decremented to 2
 ```
 
 ### Return = Transfer
 
 A function cannot hold onto its allocations past its return. Anything it
-wants the caller to have must be returned, and the compiler deep-copies
-returned data into the caller's region before restoring the function's mark.
+wants the caller to have must be returned, and the compiler relocates
+returned data into the caller's arena before releasing the function's arena.
 
-This is not overhead - it is the ownership transfer mechanism. The copy is
-the proof that ownership moved. Without the copy, the data would die with
-the function's region.
+This is not overhead - it is the ownership transfer mechanism. The relocation
+is the proof that ownership moved. Without it, the data would die with
+the function's arena.
 
 ### Parameters = Borrowed References
 
-Function parameters point into the caller's region. The callee borrows them
+Function parameters point into the caller's arena. The callee borrows them
 for the duration of the call. The callee can read and write through them
 (mutation is fine - the caller owns the storage), but must not store their
-addresses into structures that outlive the call. The deep-copy-on-return
-handles the case where a return value contains a parameter address - it gets
-copied into the caller's region alongside everything else.
+addresses into structures that outlive the call. The relocation pass on
+return handles the case where a return value contains a parameter address -
+it gets relocated into the caller's arena alongside everything else.
 
 ### Local Variables = Private
 
 Anything allocated inside a function that is NOT returned is private. It
-ceases to exist when the function returns. No other code can name it, reach
-it, or be affected by its death. This is sovereignty at the function scale.
+ceases to exist when the function's arena is released. No other code can
+name it, reach it, or be affected by its death. This is sovereignty at the
+function scale.
 
 ---
 
@@ -104,7 +108,7 @@ death means.
 ## Globals Are Heaps
 
 A mutable global is a heap in disguise. It accumulates allocations across
-function calls with no mark/restore cycle to reclaim them. In Moxie:
+function calls with no arena-release cycle to reclaim them. In Moxie:
 
 - Package-scope `var` declarations must be zero-value only
 - Non-zero initialization happens in `init()`
@@ -132,18 +136,18 @@ not a handle into the parent's memory.
 
 **Water (resolution)**: what two claim, no one owns. The arena model makes
 double-ownership inexpressible. Every pointer is inside exactly one arena at
-all times. When a function returns, its data is either copied upward (owned
+all times. When a function returns, its data is either relocated upward (owned
 by caller) or destroyed (owned by nobody). Contested claims cannot form.
 
-**Wood (bilateralism)**: no contract signed by one hand. The deep-copy-on-return
-is a bilateral exchange - the callee provides the data, the compiler copies it
-into the caller's region, both sides participate. Move semantics at spawn are
+**Wood (bilateralism)**: no contract signed by one hand. The relocation on return
+is a bilateral exchange - the callee provides the data, the compiler relocates it
+into the caller's arena, both sides participate. Move semantics at spawn are
 bilateral - the parent gives up the value, the child receives it.
 
-**Fire (measurement)**: weigh it, count it, time it. Arena offsets are
-measurable (`ArenaMark` returns a byte offset). Memory consumption is a
-linear function of the arena offset - no hidden fragmentation, no GC
-metadata, no free-list overhead. What you allocated is what you used.
+**Fire (measurement)**: weigh it, count it, time it. Arena region offsets are
+measurable. Memory consumption is a linear function of the region offsets - no
+hidden fragmentation, no GC metadata, no free-list overhead. What you allocated
+is what you used.
 
 ---
 
@@ -151,30 +155,30 @@ metadata, no free-list overhead. What you allocated is what you used.
 
 ### No Use-After-Free
 
-A pointer into a function's region cannot escape that function except through
-return (which copies it). A pointer into a domain cannot escape that domain
+A pointer into a function's arena cannot escape that function except through
+return (which relocates it). A pointer into a domain cannot escape that domain
 (spawn serializes). The temporal relationship between pointer validity and
 owner lifetime is structural, not checked at runtime.
 
 ### No Memory Leaks (Within a Domain Lifetime)
 
-Every function's allocations are reclaimed on return. The only accumulation
-point is the root arena (globals) and the current function's stack frame in a
-long-running loop. Both are bounded by design - globals are initialized once,
-and loop bodies should delegate allocation to helper functions whose
-mark/restore reclaims per-iteration.
+Every function's allocations are reclaimed when its arena is released. The
+only accumulation point is the root arena (globals) and the current function's
+arena in a long-running loop. Both are bounded by design - globals are
+initialized once, and loop bodies should delegate allocation to helper
+functions whose arenas are released per-call.
 
 ### No GC Pauses
 
-There is no GC. Arena restore is O(1) - a single pointer write. Arena free
-is one syscall (munmap). Allocation is O(1) - a pointer bump and memzero.
-Latency is deterministic and bounded.
+There is no GC. Arena release is pool-return (O(1)) or munmap (one syscall).
+Allocation is O(1) - a pointer bump and memzero. Latency is deterministic
+and bounded.
 
 ### No Fragmentation
 
 Bump allocation within a contiguous mmap'd region produces zero
-fragmentation. When the arena is restored, the freed region is a single
-contiguous block at the top. No compaction needed.
+fragmentation. When an arena is released, its entire address space returns
+to the kernel or is reset for reuse. No compaction needed.
 
 ---
 
@@ -182,19 +186,19 @@ contiguous block at the top. No compaction needed.
 
 The arena model imposes real constraints:
 
-1. **Return values are copied.** Deep functions returning large graphs pay
-   a copy cost on every return. This is the price of ownership clarity.
+1. **Return values are relocated.** Deep functions returning large graphs pay
+   a relocation cost on every return. This is the price of ownership clarity.
    If profiling shows it matters, flatten the call chain.
 
 2. **Long-running loops must delegate.** An infinite event loop that
    allocates without calling helper functions will grow the arena forever.
    The fix is structural: extract allocation into functions whose
-   mark/restore reclaims per-iteration.
+   arenas are released per-call.
 
-3. **No arena-to-arena references.** A pointer into one function's region
-   must not be stored in another function's region without going through
-   return (which copies). The compiler enforces this through the
-   deep-copy-on-return mechanism.
+3. **No cross-arena references.** A pointer into one function's arena
+   must not be stored in another function's arena without going through
+   return (which relocates). The compiler enforces this through the
+   relocation mechanism.
 
 4. **Globals are expensive.** Every byte written to a global lives until
    domain death. Use globals only for truly long-lived infrastructure.

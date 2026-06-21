@@ -18,11 +18,34 @@ See [REFERENCE.md](../REFERENCE.md) for the complete language reference.
 
 | Builtin | Alternative |
 |---------|------------|
+| `append(s, v...)` | `push(s, v...)` - explicit allocation semantics, geometric growth on overflow |
 | `make(T, ...)` | Literal syntax: `[]T{:n}`, `chan T{}`, `map[K]V{}` |
 | `new(T)` | `&T{}` or `var x T; p := &x` |
 | `complex(r, i)` | Not supported. Use separate float fields. |
 | `real(z)` | Not supported. |
 | `imag(z)` | Not supported. |
+
+### Added Builtins (Moxie-specific)
+
+| Builtin | Signature | Semantics |
+|---------|-----------|-----------|
+| `push` | `push(s []T, v1, v2, ...T)` | Appends elements to slice. Allocates on nil (cap 32 min) or overflow (power-of-two growth). Store-back to `s` is implicit. |
+| `pop` | `pop(s []T) T` | Removes and returns last element. Panics if len == 0. Store-back implicit. |
+| `resize` | `resize(s []T, n int32)` | Sets len to n. Panics if n > cap or n < 0 (unsigned check). Store-back implicit. |
+| `spawn` | `spawn(fn, args...) chan struct{}` | Creates new domain. See spawn boundary rules. |
+
+#### Why append was removed
+
+`append` conflates allocation and insertion into one call with unpredictable copy
+semantics. It sometimes returns the same backing array, sometimes a new one - the
+caller cannot know which without comparing pointers. Code that holds an alias into
+a slice prefix and then appends to the original may or may not corrupt the alias,
+depending on whether capacity was sufficient. This makes reasoning about ownership
+impossible in an arena system where dead backing arrays are never freed individually.
+
+`push` separates concerns: declare capacity explicitly with `[]T{:0:cap}`, or let
+push allocate on first use. Growth is geometric and predictable. The old backing
+array is dead arena space, reclaimed in bulk.
 
 ### Removed Types
 
@@ -45,7 +68,7 @@ See [REFERENCE.md](../REFERENCE.md) for the complete language reference.
 |----|-------|
 | `a + b` (strings) | `a \| b` (pipe operator) |
 | `s += "suffix"` | `s \|= "suffix"` |
-| `append(a, b...)` | `a \| b` (for same-type slices) |
+| two slices concatenated | `a \| b` (always allocates fresh backing) |
 
 The `+` operator on text types is a compile error. Use `|` instead.
 

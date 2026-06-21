@@ -160,9 +160,9 @@ true    false   nil     iota
 Functions:
 
 ```
-append  cap     clear   close   copy    delete
-len     max     min     panic   print   println
-recover spawn
+cap     clear   close   copy    delete  len
+max     min     panic   pop     print   println
+push    recover resize  spawn
 ```
 
 #### No Scope Shadowing
@@ -227,8 +227,8 @@ combined := sliceA | sliceB
 
 The `...` token is valid in variadic parameter declarations
 (`func f(args ...T)`) and in variadic call sites (`f(slice...)`).
-`append(a, b...)` is a compile error - use `a | b` for slice concatenation.
-One way to concatenate slices: the `|` operator.
+`append` does not exist - use `push(s, v...)` for element insertion and
+`a | b` for slice concatenation.
 
 ### Integer Literals
 
@@ -1135,7 +1135,9 @@ cleanup:
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `append` | `append(s []T, elems ...T) []T` | Appends individual elements to a slice. `append(a, b...)` is illegal - use `a \| b` for slice concatenation. |
+| `push` | `push(s []T, elems ...T)` | Appends elements to a slice in place. Allocates on nil or overflow (geometric growth). Store-back is implicit. |
+| `pop` | `pop(s []T) T` | Removes and returns the last element. Panics if len == 0. Store-back is implicit. |
+| `resize` | `resize(s []T, n int32)` | Sets the slice length to n. Panics if n > cap or n < 0. Store-back is implicit. |
 | `cap` | `cap(v) int32` | Capacity of a slice, channel, or array |
 | `clear` | `clear(m)` | Clears a map or zeroes a slice |
 | `close` | `close(ch)` | Closes a channel |
@@ -1152,6 +1154,40 @@ cleanup:
 
 `len` and `cap` return `int32`, not a platform-dependent integer.
 
+### push/pop/resize vs append
+
+`append` is a **compile error** in Moxie. It was removed because its semantics
+conflate two operations - allocation and element insertion - into one call with
+unpredictable behavior:
+
+- `append` sometimes returns the same backing array, sometimes a new one.
+  The caller cannot know which without comparing pointers.
+- `append` sometimes copies, sometimes doesn't. Code that aliases a slice
+  prefix and then appends to the original may or may not corrupt the alias,
+  depending on whether capacity happened to be sufficient.
+- `append` hides capacity decisions from the programmer. Growth strategy is
+  runtime-internal; the programmer never declares intent about expected size.
+
+`push` resolves this by separating concerns:
+
+- **Allocation** is explicit: declare capacity with `[]T{:0:cap}`, or let `push`
+  allocate on first use (nil slice gets cap 32 with geometric growth thereafter).
+- **Insertion** is `push(s, v1, v2, ...)` - always stores elements, allocates
+  only when capacity is exhausted. The compiler emits the store-back to `s`
+  implicitly (like `i++` modifies `i`).
+- **Growth** is geometric (power-of-two doubling). Old backing arrays are dead
+  arena space, reclaimed in bulk when the arena frees.
+
+`pop` and `resize` complete the set: `pop` is the inverse of a single-element
+push, and `resize` gives direct control over length without touching capacity.
+
+```moxie
+items := []int32{:0:100}      // explicit capacity
+push(items, 1, 2, 3)         // items is now [1, 2, 3], len=3, cap=100
+last := pop(items)            // last=3, items is now [1, 2], len=2
+resize(items, 0)              // items is now [], len=0, cap still 100
+```
+
 ---
 
 ## Memory Management
@@ -1160,82 +1196,118 @@ Moxie has no garbage collector. Memory management is deterministic and
 structural: every allocation belongs to an arena, and arenas are released in
 bulk. There is no individual free, no mark/sweep, no reference counting.
 
-### Arena Allocator
+### Domain Root
 
-All allocations go through a bump-pointer arena backed by `mmap`. The
-runtime maintains a current arena pointer. `alloc(size)` bumps the arena
-offset and returns zeroed memory. There is no free list - memory is reclaimed
-only when an entire arena is reset or unmapped.
+Each domain has a single `DomainRoot` structure, created once at domain init
+via `mmap`. It contains:
 
-A root arena is created at process init. It persists for the lifetime of the
-domain. Package-level zero-value `var` declarations are allocated here.
+- A **function arena stack** (`fnStack[512]*Arena`, `fnTop` counter) - the
+  active arena is always `fnStack[fnTop]`.
+- A **child domain stack** for tracking spawned children.
+- An inline **root arena** at `fnStack[0]` that persists for the domain lifetime.
 
-### Per-Function Arena Ownership
+The root arena holds package-level zero-value `var` declarations and any
+allocations made by the program's top-level functions (main, event loops).
 
-Every function that allocates owns a region within the current arena. The
-compiler emits:
+### Arena Structure
 
-1. **Prologue**: saves the current arena offset (mark)
-2. **Body**: all allocations bump the arena normally
-3. **Epilogue**: deep-copies return values to the caller's region, then
-   restores the arena to the saved mark - reclaiming everything the function
-   allocated
+Each arena is a bump-pointer allocator backed by one or more `mmap` regions.
+The `Arena` struct is embedded at offset 0 of its primary mmap region - no
+external allocation needed for metadata.
+
+```
+Arena layout:
+
+    [Arena header | region 0 data ...............]
+                   ^off                    ^cap
+
+    If region 0 fills, a new region is mmap'd:
+    regions[0]: [header | data...]
+    regions[1]: [data................]
+    regions[2]: [data....]
+```
+
+Each arena has a flat registry of up to 256 regions. No linked lists. When a
+region fills, a new 1MB region is mmap'd and added to the table. `alloc(size)`
+bumps the active region's offset and returns zeroed memory.
+
+### Per-Function Arena Lifecycle
+
+Every function that allocates gets its **own arena**, pushed onto the domain's
+function arena stack. The compiler emits:
+
+1. **Prologue**: `FnArenaPush(capacity)` - acquires an arena from the pool
+   (or creates a new one via mmap) and pushes it onto `fnStack`.
+2. **Body**: all allocations go into this function's private arena.
+3. **Epilogue**: return values are relocated into the caller's arena via a
+   three-pass mark-compact algorithm, then the function's arena is popped
+   and released back to the pool.
 
 ```moxie
 func buildPair(x, y int32) (result *Pair) {
-    // compiler-emitted: mark := ArenaMark()
+    // compiler-emitted: FnArenaPush(65536)
     result = &Pair{X: x, Y: y}
-    // compiler-emitted: result = deepcopy(result); ArenaRestore(mark)
+    // compiler-emitted: relocate result into caller's arena
+    // compiler-emitted: FnArenaPop + ArenaRelease
     return
 }
 ```
 
-After restore, all memory between mark and the previous offset is reclaimed.
-The return value survives because it was deep-copied above the mark before
-the restore executes.
+The relocation pass walks the return value's type graph, identifies pointers
+into the function's arena, allocates fresh copies in the caller's arena, and
+patches all internal pointers. After relocation, the function's entire arena
+is released - either returned to the pool for reuse, or munmap'd if the pool
+is full.
+
+### Arena Pool
+
+A bounded freelist (8 entries) of reset arenas eliminates mmap/munmap syscalls
+for short-lived function arenas. `ArenaAcquire` checks the pool first;
+`ArenaRelease` resets and returns the arena to the pool if there's room.
 
 ### Ownership Boundaries
 
 Function boundaries are ownership boundaries. A function's allocations are
 invisible outside that function. Data escapes only through return values,
-which are explicitly deep-copied. This means:
+which are explicitly relocated. This means:
 
 - No escape analysis needed
 - No pointer tracking across call boundaries
 - No use-after-free possible (returned data is always a fresh copy)
-- No dangling references into a called function's arena region
+- No dangling references into a called function's arena
 
 Three boundaries exist where memory changes hands:
 
 | Boundary | Mechanism | Direction |
 |----------|-----------|-----------|
-| Function return | Deep copy to caller's region | Callee -> Caller |
+| Function return | Relocate into caller's arena | Callee -> Caller |
 | Spawn | Codec serialization over IPC | Parent -> Child |
 | Domain exit | munmap (bulk release) | Domain -> Kernel |
 
 ### Parameters
 
 Function parameters are owned by the caller. The callee receives them by
-reference into the caller's arena region. The compiler's deep-copy-on-return
-handles any case where a parameter address would otherwise leak upward.
+reference into the caller's arena. The relocation pass on return handles any
+case where a return value contains a pointer to a parameter - it gets
+relocated alongside everything else.
 
 ### Between Domains
 
-Each domain has its own arena. There is no shared memory between domains.
+Each domain has its own arena tree. There is no shared memory between domains.
 Values crossing the spawn boundary are serialized via `moxie.Codec` - the
 child receives an independent copy in its own arena. When a domain exits,
 `munmap` releases all its address space to the kernel in one operation.
 
 ### Long-Running Event Loops
 
-The per-function mark/restore model means the outermost function of an
-infinite event loop (`for { select { ... } }`) never returns and never
-restores. Allocations inside the loop body accumulate unless managed:
+The per-function arena model means the outermost function of an infinite event
+loop (`for { select { ... } }`) never returns and never frees its arena.
+Allocations inside the loop body accumulate unless managed:
 
-1. Factor allocation-heavy work into helper functions - their mark/restore
-   will reclaim on return.
+1. Factor allocation-heavy work into helper functions - their arena is
+   released on return.
 2. `delete(map, key)` when entries are done.
-3. `slice = nil` releases the backing array.
+3. `slice = nil` releases the backing array reference.
 4. Monotonically growing maps need rotation or bounded-size policies.
 
 ```moxie
@@ -1243,7 +1315,7 @@ func eventLoop(ch chan Request) {
     for {
         select {
         case req := <-ch:
-            handleRequest(req)  // allocations reclaimed on return
+            handleRequest(req)  // allocations in own arena, freed on return
         }
     }
 }
@@ -1626,7 +1698,7 @@ and are mutually assignable. The spelling is a hint to the code generator only.
 | Concurrency | Channels + `select` within a domain, `spawn` for new domains |
 | Process isolation | `spawn(fn, args...)` via `fork()` + socketpair |
 | Serialization | `moxie.Codec` interface at spawn boundary |
-| Memory model | Per-function arena mark/restore, deep-copy on return, bulk release at domain exit |
+| Memory model | Per-function arena (push/pop stack), relocate on return, bulk release at domain exit |
 | Domain memory | No shared memory between domains |
 | Slice equality | `==` for any comparable element type |
 | Slice literals | `[]T{:n}`, `[]T{:n:c}` |

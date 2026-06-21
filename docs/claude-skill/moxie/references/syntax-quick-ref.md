@@ -30,9 +30,9 @@ Constants: `true`, `false`, `nil`, `iota`
 
 Functions:
 ```
-append  cap     clear   close   copy    delete
-len     max     min     panic   print   println
-recover spawn
+cap     clear   close   copy    delete  len
+max     min     panic   pop     print   println
+push    recover resize  spawn
 ```
 
 Shadowing any predeclared identifier is a compile error.
@@ -58,7 +58,7 @@ Shadowing any predeclared identifier is a compile error.
 | `new(T)` | `&T{}` |
 | `"a" + "b"` | `"a" \| "b"` |
 | `fallthrough` | `case A, B:` |
-| `append(a, b...)` | `a \| b` |
+| `append(...)` | `push(s, v...)` or `a \| b` for concat |
 | `interface{}` / `any` | named interface with methods |
 | `int` / `uint` | explicit widths: `int32`, `int64`, etc. |
 | `complex64/128` | not supported |

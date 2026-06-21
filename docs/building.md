@@ -4,20 +4,20 @@
 
 | Component | Version | Notes |
 |-----------|---------|-------|
-| LLVM | 21 | llvm-link, llvm-extract |
-| clang | 21 | .ll to .bc compilation |
-| lld | 21 | Final binary linking |
+| LLVM | 22 | llvm-link, llvm-extract |
+| clang | 22 | .ll to .bc compilation |
+| lld | 22 | Final binary linking |
 
 ### Arch Linux
 
 ```sh
-pacman -S llvm21 clang21 lld21
+pacman -S llvm clang lld
 ```
 
 ### Ubuntu/Debian
 
 ```sh
-apt install llvm-21 clang-21 lld-21
+apt install llvm-22 clang-22 lld-22
 ```
 
 ## Building from Source
