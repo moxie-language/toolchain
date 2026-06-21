@@ -2086,9 +2086,6 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 				push(caseBlock.Preds, fb.currentBlock)
 				push(nextBlock.Preds, fb.currentBlock)
 			}
-			push(fb.currentBlock.Succs, caseBlock, nextBlock)
-			push(caseBlock.Preds, fb.currentBlock)
-			push(nextBlock.Preds, fb.currentBlock)
 		} else if clause.Cases != nil && tag == nil {
 			// Tagless switch: comma-separated cases are OR'd.
 			caseExprs := []syntax.Expr{clause.Cases}
@@ -3437,6 +3434,17 @@ func (fb *ssaFuncBuilder) buildSelector(e *syntax.SelectorExpr) (s SSAValue) {
 		}
 		if pn, ok2 := obj.(*PkgName); ok2 {
 			return fb.buildPkgMember(pn, e.Sel.Value)
+		}
+		// Fallback: resolve imported const directly from the type
+		// checker's selection info when PkgName lookup fails.
+		if obj == nil && fb.info != nil && fb.info.Selections != nil {
+			if sel, ok3 := fb.info.Selections[e]; ok3 {
+				if sel.Obj != nil {
+					if tc, ok4 := sel.Obj.(*TCConst); ok4 {
+						return &SSAConst{typ: tc.Typ, val: localizeConstVal(tc.Val, tc.Typ)}
+					}
+				}
+			}
 		}
 	}
 	fa := fb.buildSelectorAddr(e)
