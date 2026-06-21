@@ -73,8 +73,12 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 		return false
 	}
 	ipt := e.intptrType()
-	e.w("  %fn_arena = call ptr @runtime.FnArenaPush(" | ipt | " 65536, ptr null)\n")
-	e.w("  %fn_mark = call " | ipt | " @runtime.ArenaMark(ptr null)\n")
+	e.w("  %fn_arena = call ptr @runtime.FnArenaPush(")
+	e.w(ipt)
+	e.w(" 65536, ptr null)\n")
+	e.w("  %fn_mark = call ")
+	e.w(ipt)
+	e.w(" @runtime.ArenaMark(ptr null)\n")
 	e.declareRuntime("runtime.FnArenaPush", "ptr", ipt)
 	e.declareRuntime("runtime.ArenaMark", ipt, "")
 	e.arenaActive = true
@@ -88,7 +92,7 @@ func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 		if llvmType == "void" {
 			e.w("  ret void\n")
 		} else {
-			e.w("  ret " | llvmType | " " | val | "\n")
+			e.w("  ret ") ; e.w(llvmType) ; e.w(" ") ; e.w(val) ; e.w("\n")
 		}
 		return
 	}
@@ -111,7 +115,7 @@ func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 		if llvmType == "void" {
 			e.w("  ret void\n")
 		} else {
-			e.w("  ret " | llvmType | " " | val | "\n")
+			e.w("  ret ") ; e.w(llvmType) ; e.w(" ") ; e.w(val) ; e.w("\n")
 		}
 		return
 	}
@@ -119,18 +123,15 @@ func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 	ipt := e.intptrType()
 	rsType := e.relocStateType()
 
-	// RelocState is 5 words - stack alloca is fine.
 	e.nextReg++
-	rs := "%rs" | irItoa(e.nextReg)
-	e.w("  " | rs | " = alloca " | rsType | "\n")
-	e.w("  store " | rsType | " zeroinitializer, ptr " | rs | "\n")
+	rs := "%rs" ; rs = rs | irItoa(e.nextReg)
+	e.w("  ") ; e.w(rs) ; e.w(" = alloca ") ; e.w(rsType) ; e.w("\n")
+	e.w("  store ") ; e.w(rsType) ; e.w(" zeroinitializer, ptr ") ; e.w(rs) ; e.w("\n")
 
-	// Init: captures source region, bump-allocates entry array from fn_arena.
-	e.w("  call void @runtime.RelocInit(ptr " | rs | ", ptr %fn_arena, " | ipt | " %fn_mark, ptr null)\n")
+	e.w("  call void @runtime.RelocInit(ptr ") ; e.w(rs) ; e.w(", ptr %fn_arena, ") ; e.w(ipt) ; e.w(" %fn_mark, ptr null)\n")
 	e.declareRuntime("runtime.RelocInit", "void", "ptr, ptr, " | ipt)
 
 	// ---- Pass 1: Mark ----
-	// Walk return value roots, call RelocMark for each reachable object.
 	e.relocMarkVisited = map[string]bool{}
 	results := e.curFunc.Signature.Results
 	for i := int32(0); i < int32(results.Len()); i++ {
@@ -143,41 +144,35 @@ func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 			rootReg = val
 		} else {
 			e.nextReg++
-			rootReg = "%p1ext" | irItoa(e.nextReg)
-			e.w("  " | rootReg | " = extractvalue " | llvmType | " " | val | ", " | irItoa(i) | "\n")
+			rootReg = "%p1ext" ; rootReg = rootReg | irItoa(e.nextReg)
+			e.w("  ") ; e.w(rootReg) ; e.w(" = extractvalue ") ; e.w(llvmType) ; e.w(" ") ; e.w(val) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
 		}
-		// If root is a struct, store to temp so emitRelocMark gets a pointer.
 		u := SafeUnderlying(rt)
 		if _, isSt := u.(*TCStruct); isSt {
 			slt := e.llvmType(rt)
 			e.nextReg++
-			tmp := "%m1rt" | irItoa(e.nextReg)
-			e.w("  " | tmp | " = alloca " | slt | "\n")
-			e.w("  store " | slt | " " | rootReg | ", ptr " | tmp | "\n")
+			tmp := "%m1rt" ; tmp = tmp | irItoa(e.nextReg)
+			e.w("  ") ; e.w(tmp) ; e.w(" = alloca ") ; e.w(slt) ; e.w("\n")
+			e.w("  store ") ; e.w(slt) ; e.w(" ") ; e.w(rootReg) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
 			rootReg = tmp
 		}
 		e.emitRelocMark(rootReg, rt, rs)
 	}
 
 	// ---- Pass 2: Forward ----
-	// Pop fn_arena from stack. Caller's arena is now top-of-stack.
-	// fn_arena stays mapped - compact needs the source data.
 	e.nextReg++
-	popIgn := "%popign" | irItoa(e.nextReg)
-	e.w("  " | popIgn | " = call ptr @runtime.FnArenaPop(ptr null)\n")
+	popIgn := "%popign" ; popIgn = popIgn | irItoa(e.nextReg)
+	e.w("  ") ; e.w(popIgn) ; e.w(" = call ptr @runtime.FnArenaPop(ptr null)\n")
 	e.declareRuntime("runtime.FnArenaPop", "ptr", "")
-	e.w("  call void @runtime.RelocForward(ptr " | rs | ", ptr null)\n")
+	e.w("  call void @runtime.RelocForward(ptr ") ; e.w(rs) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.RelocForward", "void", "ptr")
 
 	// ---- Pass 3: Compact + Fixup ----
-	// Copy all objects to destinations.
-	e.w("  call void @runtime.RelocCompact(ptr " | rs | ", ptr null)\n")
+	e.w("  call void @runtime.RelocCompact(ptr ") ; e.w(rs) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.RelocCompact", "void", "ptr")
-	e.w("  call void @runtime.RelocFixupAll(ptr " | rs | ", ptr null)\n")
+	e.w("  call void @runtime.RelocFixupAll(ptr ") ; e.w(rs) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.RelocFixupAll", "void", "ptr")
 
-	// Fixup: rewrite return value's own pointer/slice fields.
-	// Also rewrite the return value's own pointer/slice fields.
 	e.relocFixupVisited = map[string]bool{}
 	cur := val
 	for i := int32(0); i < int32(results.Len()); i++ {
@@ -190,8 +185,8 @@ func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 			fixReg = val
 		} else {
 			e.nextReg++
-			fixReg = "%p3ext" | irItoa(e.nextReg)
-			e.w("  " | fixReg | " = extractvalue " | llvmType | " " | cur | ", " | irItoa(i) | "\n")
+			fixReg = "%p3ext" ; fixReg = fixReg | irItoa(e.nextReg)
+			e.w("  ") ; e.w(fixReg) ; e.w(" = extractvalue ") ; e.w(llvmType) ; e.w(" ") ; e.w(cur) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
 		}
 		newReg := e.emitRelocFixup(fixReg, rt, rs)
 		if results.Len() == 1 {
@@ -199,25 +194,19 @@ func (e *irEmitter) emitRetWithArenaCopy(llvmType string, val string) {
 		} else if newReg != fixReg {
 			elt := e.llvmType(rt)
 			e.nextReg++
-			ins := "%p3ins" | irItoa(e.nextReg)
-			e.w("  " | ins | " = insertvalue " | llvmType | " " | cur | ", " | elt | " " | newReg | ", " | irItoa(i) | "\n")
+			ins := "%p3ins" ; ins = ins | irItoa(e.nextReg)
+			e.w("  ") ; e.w(ins) ; e.w(" = insertvalue ") ; e.w(llvmType) ; e.w(" ") ; e.w(cur) ; e.w(", ") ; e.w(elt) ; e.w(" ") ; e.w(newReg) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
 			cur = ins
 		}
 	}
 
-	// Fixup internal pointers of each forwarded object.
-	// Walk the forwarding table; for each entry, apply type-specific fixup.
-	// This is done by the per-result fixup above which walks recursively.
-
-	// Free source arena.
 	e.w("  call void @runtime.ArenaRelease(ptr %fn_arena, ptr null)\n")
 	e.declareRuntime("runtime.ArenaRelease", "void", "ptr")
-	e.w("  ret " | llvmType | " " | cur | "\n")
+	e.w("  ret ") ; e.w(llvmType) ; e.w(" ") ; e.w(cur) ; e.w("\n")
 }
 
 func (e *irEmitter) relocStateType() (s string) {
 	ipt := e.intptrType()
-	// Matches runtime.RelocState: {arena ptr, mark uintptr, first ptr, count i32}
 	return "{ptr, " | ipt | ", ptr, i32}"
 }
 
@@ -239,8 +228,8 @@ func (e *irEmitter) emitRelocMark(reg string, t Type, rs string) {
 			lt = "i8"
 		}
 		e.nextReg++
-		sz := "%m1sz" | irItoa(e.nextReg)
-		e.w("  " | sz | " = ptrtoint ptr getelementptr (" | lt | ", ptr null, i32 1) to " | ipt | "\n")
+		sz := "%m1sz" ; sz = sz | irItoa(e.nextReg)
+		e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(lt) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 		fixupArg := ipt | " 0"
 		if st, isSt := SafeUnderlying(tt.Base).(*TCStruct); isSt {
 			fixupSym := e.getOrEmitRelocFixupFn(st)
@@ -249,48 +238,47 @@ func (e *irEmitter) emitRelocMark(reg string, t Type, rs string) {
 			}
 		}
 		e.nextReg++
-		isNew := "%m1n" | irItoa(e.nextReg)
-		e.w("  " | isNew | " = call i1 @runtime.RelocMark(ptr " | rs | ", ptr " | reg | ", " | ipt | " " | sz | ", " | fixupArg | ", ptr null)\n")
+		isNew := "%m1n" ; isNew = isNew | irItoa(e.nextReg)
+		e.w("  ") ; e.w(isNew) ; e.w(" = call i1 @runtime.RelocMark(ptr ") ; e.w(rs) ; e.w(", ptr ") ; e.w(reg) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ") ; e.w(fixupArg) ; e.w(", ptr null)\n")
 		e.declareRuntime("runtime.RelocMark", "i1", "ptr, ptr, " | ipt | ", " | ipt)
 		if typeNeedsCopy(tt.Base) {
 			e.nextReg++
-			lNew := "m1r" | irItoa(e.nextReg)
+			lNew := "m1r" ; lNew = lNew | irItoa(e.nextReg)
 			e.nextReg++
-			lSkip := "m1s" | irItoa(e.nextReg)
-			e.w("  br i1 " | isNew | ", label %" | lNew | ", label %" | lSkip | "\n")
-			e.w(lNew | ":\n")
+			lSkip := "m1s" ; lSkip = lSkip | irItoa(e.nextReg)
+			e.w("  br i1 ") ; e.w(isNew) ; e.w(", label %") ; e.w(lNew) ; e.w(", label %") ; e.w(lSkip) ; e.w("\n")
+			e.w(lNew) ; e.w(":\n")
 			e.emitRelocMarkFields(reg, tt.Base, rs)
-			e.w("  br label %" | lSkip | "\n")
-			e.w(lSkip | ":\n")
+			e.w("  br label %") ; e.w(lSkip) ; e.w("\n")
+			e.w(lSkip) ; e.w(":\n")
 		}
 	case *Slice, *Basic:
 		st := e.sliceType()
 		e.nextReg++
-		dp := "%m1d" | irItoa(e.nextReg)
-		e.w("  " | dp | " = extractvalue " | st | " " | reg | ", 0\n")
+		dp := "%m1d" ; dp = dp | irItoa(e.nextReg)
+		e.w("  ") ; e.w(dp) ; e.w(" = extractvalue ") ; e.w(st) ; e.w(" ") ; e.w(reg) ; e.w(", 0\n")
 		e.nextReg++
-		ln := "%m1l" | irItoa(e.nextReg)
-		e.w("  " | ln | " = extractvalue " | st | " " | reg | ", 1\n")
+		ln := "%m1l" ; ln = ln | irItoa(e.nextReg)
+		e.w("  ") ; e.w(ln) ; e.w(" = extractvalue ") ; e.w(st) ; e.w(" ") ; e.w(reg) ; e.w(", 1\n")
 		elemType := "i8"
 		if sl, ok := u.(*Slice); ok && sl.Elem != nil {
 			elemType = e.llvmType(sl.Elem)
 		}
 		e.nextReg++
-		esz := "%m1e" | irItoa(e.nextReg)
-		e.w("  " | esz | " = ptrtoint ptr getelementptr (" | elemType | ", ptr null, i32 1) to " | ipt | "\n")
+		esz := "%m1e" ; esz = esz | irItoa(e.nextReg)
+		e.w("  ") ; e.w(esz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(elemType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 		e.nextReg++
-		blen := "%m1b" | irItoa(e.nextReg)
-		e.w("  " | blen | " = mul " | ipt | " " | ln | ", " | esz | "\n")
-		e.w("  call i1 @runtime.RelocMark(ptr " | rs | ", ptr " | dp | ", " | ipt | " " | blen | ", " | ipt | " 0, ptr null)\n")
+		blen := "%m1b" ; blen = blen | irItoa(e.nextReg)
+		e.w("  ") ; e.w(blen) ; e.w(" = mul ") ; e.w(ipt) ; e.w(" ") ; e.w(ln) ; e.w(", ") ; e.w(esz) ; e.w("\n")
+		e.w("  call i1 @runtime.RelocMark(ptr ") ; e.w(rs) ; e.w(", ptr ") ; e.w(dp) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(blen) ; e.w(", ") ; e.w(ipt) ; e.w(" 0, ptr null)\n")
 		e.declareRuntime("runtime.RelocMark", "i1", "ptr, ptr, " | ipt | ", " | ipt)
 	case *TCMap:
 		e.nextReg++
-		sz := "%m1m" | irItoa(e.nextReg)
-		e.w("  " | sz | " = ptrtoint ptr getelementptr ({ptr}, ptr null, i32 1) to " | ipt | "\n")
-		e.w("  call i1 @runtime.RelocMark(ptr " | rs | ", ptr " | reg | ", " | ipt | " " | sz | ", " | ipt | " 0, ptr null)\n")
+		sz := "%m1m" ; sz = sz | irItoa(e.nextReg)
+		e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr ({ptr}, ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+		e.w("  call i1 @runtime.RelocMark(ptr ") ; e.w(rs) ; e.w(", ptr ") ; e.w(reg) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ") ; e.w(ipt) ; e.w(" 0, ptr null)\n")
 		e.declareRuntime("runtime.RelocMark", "i1", "ptr, ptr, " | ipt | ", " | ipt)
 	case *TCStruct:
-		// reg must be a pointer to the struct (GEP result or alloca'd temp).
 		e.emitRelocMarkStructFields(reg, tt, rs)
 	}
 }
@@ -320,16 +308,16 @@ func (e *irEmitter) emitRelocMarkStructFields(ptrReg string, st *TCStruct, rs st
 			continue
 		}
 		e.nextReg++
-		gep := "%m1f" | irItoa(e.nextReg)
-		e.w("  " | gep | " = getelementptr " | lt | ", ptr " | ptrReg | ", i32 0, i32 " | irItoa(i) | "\n")
+		gep := "%m1f" ; gep = gep | irItoa(e.nextReg)
+		e.w("  ") ; e.w(gep) ; e.w(" = getelementptr ") ; e.w(lt) ; e.w(", ptr ") ; e.w(ptrReg) ; e.w(", i32 0, i32 ") ; e.w(irItoa(i)) ; e.w("\n")
 		u := SafeUnderlying(ft)
 		if _, isSt := u.(*TCStruct); isSt {
 			e.emitRelocMark(gep, ft, rs)
 		} else {
 			flt := e.llvmType(ft)
 			e.nextReg++
-			fval := "%m1f" | irItoa(e.nextReg)
-			e.w("  " | fval | " = load " | flt | ", ptr " | gep | "\n")
+			fval := "%m1f" ; fval = fval | irItoa(e.nextReg)
+			e.w("  ") ; e.w(fval) ; e.w(" = load ") ; e.w(flt) ; e.w(", ptr ") ; e.w(gep) ; e.w("\n")
 			e.emitRelocMark(fval, ft, rs)
 		}
 	}
@@ -349,28 +337,27 @@ func (e *irEmitter) emitRelocFixup(reg string, t Type, rs string) (newReg string
 	switch tt := u.(type) {
 	case *Pointer:
 		e.nextReg++
-		r := "%p3p" | irItoa(e.nextReg)
-		e.w("  " | r | " = call ptr @runtime.RelocLookup(ptr " | rs | ", ptr " | reg | ", ptr null)\n")
+		r := "%p3p" ; r = r | irItoa(e.nextReg)
+		e.w("  ") ; e.w(r) ; e.w(" = call ptr @runtime.RelocLookup(ptr ") ; e.w(rs) ; e.w(", ptr ") ; e.w(reg) ; e.w(", ptr null)\n")
 		e.declareRuntime("runtime.RelocLookup", "ptr", "ptr, ptr")
-		// Per-type fixup (RelocFixupAll) handles internal field fixup.
 		return r
 	case *Slice, *Basic:
 		st := e.sliceType()
 		e.nextReg++
-		dp := "%p3s" | irItoa(e.nextReg)
-		e.w("  " | dp | " = extractvalue " | st | " " | reg | ", 0\n")
+		dp := "%p3s" ; dp = dp | irItoa(e.nextReg)
+		e.w("  ") ; e.w(dp) ; e.w(" = extractvalue ") ; e.w(st) ; e.w(" ") ; e.w(reg) ; e.w(", 0\n")
 		e.nextReg++
-		ndp := "%p3s" | irItoa(e.nextReg)
-		e.w("  " | ndp | " = call ptr @runtime.RelocLookup(ptr " | rs | ", ptr " | dp | ", ptr null)\n")
+		ndp := "%p3s" ; ndp = ndp | irItoa(e.nextReg)
+		e.w("  ") ; e.w(ndp) ; e.w(" = call ptr @runtime.RelocLookup(ptr ") ; e.w(rs) ; e.w(", ptr ") ; e.w(dp) ; e.w(", ptr null)\n")
 		e.declareRuntime("runtime.RelocLookup", "ptr", "ptr, ptr")
 		e.nextReg++
-		result := "%p3s" | irItoa(e.nextReg)
-		e.w("  " | result | " = insertvalue " | st | " " | reg | ", ptr " | ndp | ", 0\n")
+		result := "%p3s" ; result = result | irItoa(e.nextReg)
+		e.w("  ") ; e.w(result) ; e.w(" = insertvalue ") ; e.w(st) ; e.w(" ") ; e.w(reg) ; e.w(", ptr ") ; e.w(ndp) ; e.w(", 0\n")
 		return result
 	case *TCMap:
 		e.nextReg++
-		r := "%p3m" | irItoa(e.nextReg)
-		e.w("  " | r | " = call ptr @runtime.hashmapCopy(ptr " | reg | ", ptr null)\n")
+		r := "%p3m" ; r = r | irItoa(e.nextReg)
+		e.w("  ") ; e.w(r) ; e.w(" = call ptr @runtime.hashmapCopy(ptr ") ; e.w(reg) ; e.w(", ptr null)\n")
 		e.declareRuntime("runtime.hashmapCopy", "ptr", "ptr")
 		return r
 	case *TCStruct:
@@ -397,25 +384,25 @@ func (e *irEmitter) emitRelocFixupFields(ptrReg string, t Type, rs string) {
 			continue
 		}
 		e.nextReg++
-		gep := "%p3ff" | irItoa(e.nextReg)
-		e.w("  " | gep | " = getelementptr " | lt | ", ptr " | ptrReg | ", i32 0, i32 " | irItoa(i) | "\n")
+		gep := "%p3ff" ; gep = gep | irItoa(e.nextReg)
+		e.w("  ") ; e.w(gep) ; e.w(" = getelementptr ") ; e.w(lt) ; e.w(", ptr ") ; e.w(ptrReg) ; e.w(", i32 0, i32 ") ; e.w(irItoa(i)) ; e.w("\n")
 		fu := SafeUnderlying(ft)
 		switch fu.(type) {
 		case *Pointer:
-			e.w("  call void @runtime.RelocFixupPtr(ptr " | rs | ", ptr " | gep | ", ptr null)\n")
+			e.w("  call void @runtime.RelocFixupPtr(ptr ") ; e.w(rs) ; e.w(", ptr ") ; e.w(gep) ; e.w(", ptr null)\n")
 			e.declareRuntime("runtime.RelocFixupPtr", "void", "ptr, ptr")
 		case *Slice, *Basic:
-			e.w("  call void @runtime.RelocFixupSlice(ptr " | rs | ", ptr " | gep | ", ptr null)\n")
+			e.w("  call void @runtime.RelocFixupSlice(ptr ") ; e.w(rs) ; e.w(", ptr ") ; e.w(gep) ; e.w(", ptr null)\n")
 			e.declareRuntime("runtime.RelocFixupSlice", "void", "ptr, ptr")
 		case *TCMap:
 			e.nextReg++
-			old := "%p3ff" | irItoa(e.nextReg)
-			e.w("  " | old | " = load ptr, ptr " | gep | "\n")
+			old := "%p3ff" ; old = old | irItoa(e.nextReg)
+			e.w("  ") ; e.w(old) ; e.w(" = load ptr, ptr ") ; e.w(gep) ; e.w("\n")
 			e.nextReg++
-			nw := "%p3ff" | irItoa(e.nextReg)
-			e.w("  " | nw | " = call ptr @runtime.hashmapCopy(ptr " | old | ", ptr null)\n")
+			nw := "%p3ff" ; nw = nw | irItoa(e.nextReg)
+			e.w("  ") ; e.w(nw) ; e.w(" = call ptr @runtime.hashmapCopy(ptr ") ; e.w(old) ; e.w(", ptr null)\n")
 			e.declareRuntime("runtime.hashmapCopy", "ptr", "ptr")
-			e.w("  store ptr " | nw | ", ptr " | gep | "\n")
+			e.w("  store ptr ") ; e.w(nw) ; e.w(", ptr ") ; e.w(gep) ; e.w("\n")
 		case *TCStruct:
 			e.emitRelocFixupFields(gep, ft, rs)
 		}
@@ -431,9 +418,9 @@ func (e *irEmitter) emitRelocFixupStruct(reg string, st *TCStruct, rs string) (n
 	e.relocFixupVisited[key] = true
 	lt := key
 	e.nextReg++
-	tmp := "%p3st" | irItoa(e.nextReg)
-	e.w("  " | tmp | " = alloca " | lt | "\n")
-	e.w("  store " | lt | " " | reg | ", ptr " | tmp | "\n")
+	tmp := "%p3st" ; tmp = tmp | irItoa(e.nextReg)
+	e.w("  ") ; e.w(tmp) ; e.w(" = alloca ") ; e.w(lt) ; e.w("\n")
+	e.w("  store ") ; e.w(lt) ; e.w(" ") ; e.w(reg) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
 
 	for i := int32(0); i < st.NumFields(); i++ {
 		ft := st.Field(i).Typ
@@ -441,32 +428,32 @@ func (e *irEmitter) emitRelocFixupStruct(reg string, st *TCStruct, rs string) (n
 			continue
 		}
 		e.nextReg++
-		gep := "%p3st" | irItoa(e.nextReg)
-		e.w("  " | gep | " = getelementptr " | lt | ", ptr " | tmp | ", i32 0, i32 " | irItoa(i) | "\n")
+		gep := "%p3st" ; gep = gep | irItoa(e.nextReg)
+		e.w("  ") ; e.w(gep) ; e.w(" = getelementptr ") ; e.w(lt) ; e.w(", ptr ") ; e.w(tmp) ; e.w(", i32 0, i32 ") ; e.w(irItoa(i)) ; e.w("\n")
 		fu := SafeUnderlying(ft)
 		switch fu.(type) {
 		case *Pointer:
-			e.w("  call void @runtime.RelocFixupPtr(ptr " | rs | ", ptr " | gep | ", ptr null)\n")
+			e.w("  call void @runtime.RelocFixupPtr(ptr ") ; e.w(rs) ; e.w(", ptr ") ; e.w(gep) ; e.w(", ptr null)\n")
 			e.declareRuntime("runtime.RelocFixupPtr", "void", "ptr, ptr")
 		case *Slice, *Basic:
-			e.w("  call void @runtime.RelocFixupSlice(ptr " | rs | ", ptr " | gep | ", ptr null)\n")
+			e.w("  call void @runtime.RelocFixupSlice(ptr ") ; e.w(rs) ; e.w(", ptr ") ; e.w(gep) ; e.w(", ptr null)\n")
 			e.declareRuntime("runtime.RelocFixupSlice", "void", "ptr, ptr")
 		case *TCMap:
 			e.nextReg++
-			old := "%p3st" | irItoa(e.nextReg)
-			e.w("  " | old | " = load ptr, ptr " | gep | "\n")
+			old := "%p3st" ; old = old | irItoa(e.nextReg)
+			e.w("  ") ; e.w(old) ; e.w(" = load ptr, ptr ") ; e.w(gep) ; e.w("\n")
 			e.nextReg++
-			nw := "%p3st" | irItoa(e.nextReg)
-			e.w("  " | nw | " = call ptr @runtime.hashmapCopy(ptr " | old | ", ptr null)\n")
+			nw := "%p3st" ; nw = nw | irItoa(e.nextReg)
+			e.w("  ") ; e.w(nw) ; e.w(" = call ptr @runtime.hashmapCopy(ptr ") ; e.w(old) ; e.w(", ptr null)\n")
 			e.declareRuntime("runtime.hashmapCopy", "ptr", "ptr")
-			e.w("  store ptr " | nw | ", ptr " | gep | "\n")
+			e.w("  store ptr ") ; e.w(nw) ; e.w(", ptr ") ; e.w(gep) ; e.w("\n")
 		case *TCStruct:
 			e.emitRelocFixupFields(gep, ft, rs)
 		}
 	}
 	e.nextReg++
-	result := "%p3st" | irItoa(e.nextReg)
-	e.w("  " | result | " = load " | lt | ", ptr " | tmp | "\n")
+	result := "%p3st" ; result = result | irItoa(e.nextReg)
+	e.w("  ") ; e.w(result) ; e.w(" = load ") ; e.w(lt) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
 	e.relocFixupVisited[key] = false
 	return result
 }
@@ -483,17 +470,12 @@ func relocFixupSymbol(lt string) (sym string) {
 }
 
 // getOrEmitRelocFixupFn returns the symbol for a per-type fixup function.
-// One function per struct type. Fixes pointer/slice/map fields in ONE instance.
-// No recursion - each marked object has its own forwarding entry and fixup.
 func (e *irEmitter) getOrEmitRelocFixupFn(st *TCStruct) (sym string) {
 	lt := e.llvmStructType(st)
 	if lt == "" {
 		return ""
 	}
-	// Key by Moxie type (not LLVM type) - different Moxie types can share
-	// the same LLVM layout ({ptr, ptr}) but need different fixup logic.
 	sym = relocFixupSymbol(st.String())
-	// Check if already emitted (definedSyms is compile-arena resident).
 	bareSym := sym
 	if len(bareSym) > 0 && bareSym[0] == '@' {
 		bareSym = bareSym[1:]
@@ -513,7 +495,6 @@ func (e *irEmitter) getOrEmitRelocFixupFn(st *TCStruct) (sym string) {
 			}
 		}
 	}
-	// Also check pending (not yet merged to definedSyms).
 	for pi := int32(0); pi < len(e.pendRelocFixupDefs); pi++ {
 		ps := e.pendRelocFixupDefs[pi]
 		if len(ps) == len(bareSym) {
@@ -530,94 +511,164 @@ func (e *irEmitter) getOrEmitRelocFixupFn(st *TCStruct) (sym string) {
 		}
 	}
 	push(e.pendRelocFixupDefs, bareSym)
-	// Ensure runtime functions used by fixup are declared.
 	e.declareRuntime("runtime.RelocFixupPtr", "void", "ptr, ptr")
 	e.declareRuntime("runtime.RelocFixupSlice", "void", "ptr, ptr")
 	e.declareRuntime("runtime.hashmapCopy", "ptr", "ptr")
-	var fb []string
-	push(fb, "\ndefine linkonce_odr void " | sym | "(ptr %obj, ptr %rs, ptr %ctx) {\nentry:\n")
-	regN := int32(0)
-	for i := int32(0); i < st.NumFields(); i++ {
-		ft := st.Field(i).Typ
-		if !typeNeedsCopy(ft) {
-			continue
-		}
-		regN++
-		gep := "%fg" | irItoa(regN)
-		push(fb, "  " | gep | " = getelementptr " | lt | ", ptr %obj, i32 0, i32 " | irItoa(i) | "\n")
-		fu := SafeUnderlying(ft)
-		switch fu.(type) {
-		case *Pointer:
-			push(fb, "  call void @runtime.RelocFixupPtr(ptr %rs, ptr " | gep | ", ptr null)\n")
-		case *Slice, *Basic:
-			push(fb, "  call void @runtime.RelocFixupSlice(ptr %rs, ptr " | gep | ", ptr null)\n")
-		case *TCMap:
+	// Write fixup function directly to output file using per-segment writes.
+	if e.outFile != nil {
+		e.outFile.Write([]byte("\ndefine linkonce_odr void "))
+		e.outFile.Write([]byte(sym))
+		e.outFile.Write([]byte("(ptr %obj, ptr %rs, ptr %ctx) {\nentry:\n"))
+		regN := int32(0)
+		for i := int32(0); i < st.NumFields(); i++ {
+			ft := st.Field(i).Typ
+			if !typeNeedsCopy(ft) {
+				continue
+			}
 			regN++
-			old := "%fg" | irItoa(regN)
-			push(fb, "  " | old | " = load ptr, ptr " | gep | "\n")
-			regN++
-			chk := "%fg" | irItoa(regN)
-			regN++
-			ldo := "fgdo" | irItoa(regN)
-			regN++
-			lsk := "fgsk" | irItoa(regN)
-			push(fb, "  " | chk | " = icmp ne ptr " | old | ", null\n")
-			push(fb, "  br i1 " | chk | ", label %" | ldo | ", label %" | lsk | "\n")
-			push(fb, ldo | ":\n")
-			regN++
-			nw := "%fg" | irItoa(regN)
-			push(fb, "  " | nw | " = call ptr @runtime.hashmapCopy(ptr " | old | ", ptr null)\n")
-			push(fb, "  store ptr " | nw | ", ptr " | gep | "\n")
-			push(fb, "  br label %" | lsk | "\n")
-			push(fb, lsk | ":\n")
-		case *TCStruct:
-			// Nested struct: inline its field fixups (one level only).
-			if innerSt, ok2 := fu.(*TCStruct); ok2 {
-				innerLt := e.llvmStructType(innerSt)
-				for j := int32(0); j < innerSt.NumFields(); j++ {
-					jft := innerSt.Field(j).Typ
-					if !typeNeedsCopy(jft) {
-						continue
-					}
-					regN++
-					igep := "%fg" | irItoa(regN)
-					push(fb, "  " | igep | " = getelementptr " | innerLt | ", ptr " | gep | ", i32 0, i32 " | irItoa(j) | "\n")
-					jfu := SafeUnderlying(jft)
-					switch jfu.(type) {
-					case *Pointer:
-						push(fb, "  call void @runtime.RelocFixupPtr(ptr %rs, ptr " | igep | ", ptr null)\n")
-					case *Slice, *Basic:
-						push(fb, "  call void @runtime.RelocFixupSlice(ptr %rs, ptr " | igep | ", ptr null)\n")
-					case *TCMap:
+			gep := "%fg" | irItoa(regN)
+			e.outFile.Write([]byte("  "))
+			e.outFile.Write([]byte(gep))
+			e.outFile.Write([]byte(" = getelementptr "))
+			e.outFile.Write([]byte(lt))
+			e.outFile.Write([]byte(", ptr %obj, i32 0, i32 "))
+			e.outFile.Write([]byte(irItoa(i)))
+			e.outFile.Write([]byte("\n"))
+			fu := SafeUnderlying(ft)
+			switch fu.(type) {
+			case *Pointer:
+				e.outFile.Write([]byte("  call void @runtime.RelocFixupPtr(ptr %rs, ptr "))
+				e.outFile.Write([]byte(gep))
+				e.outFile.Write([]byte(", ptr null)\n"))
+			case *Slice, *Basic:
+				e.outFile.Write([]byte("  call void @runtime.RelocFixupSlice(ptr %rs, ptr "))
+				e.outFile.Write([]byte(gep))
+				e.outFile.Write([]byte(", ptr null)\n"))
+			case *TCMap:
+				regN++
+				old := "%fg" | irItoa(regN)
+				e.outFile.Write([]byte("  "))
+				e.outFile.Write([]byte(old))
+				e.outFile.Write([]byte(" = load ptr, ptr "))
+				e.outFile.Write([]byte(gep))
+				e.outFile.Write([]byte("\n"))
+				regN++
+				chk := "%fg" | irItoa(regN)
+				regN++
+				ldo := "fgdo" | irItoa(regN)
+				regN++
+				lsk := "fgsk" | irItoa(regN)
+				e.outFile.Write([]byte("  "))
+				e.outFile.Write([]byte(chk))
+				e.outFile.Write([]byte(" = icmp ne ptr "))
+				e.outFile.Write([]byte(old))
+				e.outFile.Write([]byte(", null\n"))
+				e.outFile.Write([]byte("  br i1 "))
+				e.outFile.Write([]byte(chk))
+				e.outFile.Write([]byte(", label %"))
+				e.outFile.Write([]byte(ldo))
+				e.outFile.Write([]byte(", label %"))
+				e.outFile.Write([]byte(lsk))
+				e.outFile.Write([]byte("\n"))
+				e.outFile.Write([]byte(ldo))
+				e.outFile.Write([]byte(":\n"))
+				regN++
+				nw := "%fg" | irItoa(regN)
+				e.outFile.Write([]byte("  "))
+				e.outFile.Write([]byte(nw))
+				e.outFile.Write([]byte(" = call ptr @runtime.hashmapCopy(ptr "))
+				e.outFile.Write([]byte(old))
+				e.outFile.Write([]byte(", ptr null)\n"))
+				e.outFile.Write([]byte("  store ptr "))
+				e.outFile.Write([]byte(nw))
+				e.outFile.Write([]byte(", ptr "))
+				e.outFile.Write([]byte(gep))
+				e.outFile.Write([]byte("\n"))
+				e.outFile.Write([]byte("  br label %"))
+				e.outFile.Write([]byte(lsk))
+				e.outFile.Write([]byte("\n"))
+				e.outFile.Write([]byte(lsk))
+				e.outFile.Write([]byte(":\n"))
+			case *TCStruct:
+				if innerSt, ok2 := fu.(*TCStruct); ok2 {
+					innerLt := e.llvmStructType(innerSt)
+					for j := int32(0); j < innerSt.NumFields(); j++ {
+						jft := innerSt.Field(j).Typ
+						if !typeNeedsCopy(jft) {
+							continue
+						}
 						regN++
-						io := "%fg" | irItoa(regN)
-						push(fb, "  " | io | " = load ptr, ptr " | igep | "\n")
-						regN++
-						ichk := "%fg" | irItoa(regN)
-						regN++
-						ildo := "fgdo" | irItoa(regN)
-						regN++
-						ilsk := "fgsk" | irItoa(regN)
-						push(fb, "  " | ichk | " = icmp ne ptr " | io | ", null\n")
-						push(fb, "  br i1 " | ichk | ", label %" | ildo | ", label %" | ilsk | "\n")
-						push(fb, ildo | ":\n")
-						regN++
-						inw := "%fg" | irItoa(regN)
-						push(fb, "  " | inw | " = call ptr @runtime.hashmapCopy(ptr " | io | ", ptr null)\n")
-						push(fb, "  store ptr " | inw | ", ptr " | igep | "\n")
-						push(fb, "  br label %" | ilsk | "\n")
-						push(fb, ilsk | ":\n")
+						igep := "%fg" | irItoa(regN)
+						e.outFile.Write([]byte("  "))
+						e.outFile.Write([]byte(igep))
+						e.outFile.Write([]byte(" = getelementptr "))
+						e.outFile.Write([]byte(innerLt))
+						e.outFile.Write([]byte(", ptr "))
+						e.outFile.Write([]byte(gep))
+						e.outFile.Write([]byte(", i32 0, i32 "))
+						e.outFile.Write([]byte(irItoa(j)))
+						e.outFile.Write([]byte("\n"))
+						jfu := SafeUnderlying(jft)
+						switch jfu.(type) {
+						case *Pointer:
+							e.outFile.Write([]byte("  call void @runtime.RelocFixupPtr(ptr %rs, ptr "))
+							e.outFile.Write([]byte(igep))
+							e.outFile.Write([]byte(", ptr null)\n"))
+						case *Slice, *Basic:
+							e.outFile.Write([]byte("  call void @runtime.RelocFixupSlice(ptr %rs, ptr "))
+							e.outFile.Write([]byte(igep))
+							e.outFile.Write([]byte(", ptr null)\n"))
+						case *TCMap:
+							regN++
+							io := "%fg" | irItoa(regN)
+							e.outFile.Write([]byte("  "))
+							e.outFile.Write([]byte(io))
+							e.outFile.Write([]byte(" = load ptr, ptr "))
+							e.outFile.Write([]byte(igep))
+							e.outFile.Write([]byte("\n"))
+							regN++
+							ichk := "%fg" | irItoa(regN)
+							regN++
+							ildo := "fgdo" | irItoa(regN)
+							regN++
+							ilsk := "fgsk" | irItoa(regN)
+							e.outFile.Write([]byte("  "))
+							e.outFile.Write([]byte(ichk))
+							e.outFile.Write([]byte(" = icmp ne ptr "))
+							e.outFile.Write([]byte(io))
+							e.outFile.Write([]byte(", null\n"))
+							e.outFile.Write([]byte("  br i1 "))
+							e.outFile.Write([]byte(ichk))
+							e.outFile.Write([]byte(", label %"))
+							e.outFile.Write([]byte(ildo))
+							e.outFile.Write([]byte(", label %"))
+							e.outFile.Write([]byte(ilsk))
+							e.outFile.Write([]byte("\n"))
+							e.outFile.Write([]byte(ildo))
+							e.outFile.Write([]byte(":\n"))
+							regN++
+							inw := "%fg" | irItoa(regN)
+							e.outFile.Write([]byte("  "))
+							e.outFile.Write([]byte(inw))
+							e.outFile.Write([]byte(" = call ptr @runtime.hashmapCopy(ptr "))
+							e.outFile.Write([]byte(io))
+							e.outFile.Write([]byte(", ptr null)\n"))
+							e.outFile.Write([]byte("  store ptr "))
+							e.outFile.Write([]byte(inw))
+							e.outFile.Write([]byte(", ptr "))
+							e.outFile.Write([]byte(igep))
+							e.outFile.Write([]byte("\n"))
+							e.outFile.Write([]byte("  br label %"))
+							e.outFile.Write([]byte(ilsk))
+							e.outFile.Write([]byte("\n"))
+							e.outFile.Write([]byte(ilsk))
+							e.outFile.Write([]byte(":\n"))
+						}
 					}
 				}
 			}
 		}
-	}
-	push(fb, "  ret void\n}\n")
-	// Write directly to output file (bypasses segment/arena lifetime issues).
-	if e.outFile != nil {
-		for _, s := range fb {
-			e.outFile.Write([]byte(s))
-		}
+		e.outFile.Write([]byte("  ret void\n}\n"))
 	}
 	return sym
 }
