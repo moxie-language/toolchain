@@ -109,7 +109,31 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 			return
 		}
 	}
-	if lt == e.sliceType() {
+	isStringOp := lt == e.sliceType()
+	// Fallback: if RV looks like a string aggregate but LV has a
+	// mismatched type (interface, void), bitcast LV to string type.
+	if !isStringOp && (b.Op == OpEql || b.Op == OpNeq) {
+		rvIsStr := len(rv) > 6 && rv[0] == '{' && rv[2] == 'p' && rv[3] == 't' && rv[4] == 'r'
+		if rvIsStr {
+			sty := e.sliceType()
+			if lt != sty && lt != "void" && len(lt) > 0 && lt[0] == '{' {
+				e.nextReg++
+				cast := "%sbc" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(cast) ; e.w(" = alloca ") ; e.w(sty) ; e.w("\n")
+				e.nextReg++
+				tmp := "%sbc" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(tmp) ; e.w(" = alloca ") ; e.w(lt) ; e.w("\n")
+				e.w("  store ") ; e.w(lt) ; e.w(" ") ; e.w(lv) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
+				e.nextReg++
+				reloaded := "%sbc" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(reloaded) ; e.w(" = load ") ; e.w(sty) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
+				lv = reloaded
+			}
+			lt = sty
+			isStringOp = true
+		}
+	}
+	if isStringOp {
 		rvOK2 := true
 		if b.Y != nil {
 			if load, ok := b.Y.(*SSAUnOp); ok && load.Op == OpMul {
@@ -700,7 +724,13 @@ func (e *irEmitter) emitStringCompare(reg string, op SSAOp, lv, rv string) {
 		e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(tmp) ; e.w(", -1\n")
 		e.declareRuntime("runtime.stringLess", "i1", sty | ", " | sty)
 	default:
-		e.w("  ; unsupported string binop\n")
+		e.w("  ; unsupported string binop op=")
+		e.w(irItoa(int32(op)))
+		e.w(" lv=")
+		e.w(lv)
+		e.w(" rv=")
+		e.w(rv)
+		e.w("\n")
 	}
 }
 

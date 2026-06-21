@@ -9,6 +9,40 @@ import (
 
 func asType(t Type) (tv Type) { return t }
 
+// ssaConstEqual compares two SSAConst values for equality.
+// Used to fold constant switch cases at SSA build time.
+func ssaConstEqual(a, b *SSAConst) (eq bool) {
+	if a.val == nil && b.val == nil {
+		return true
+	}
+	if a.val == nil || b.val == nil {
+		return false
+	}
+	switch av := a.val.(type) {
+	case *ConstStr:
+		if bv, ok := b.val.(*ConstStr); ok {
+			if len(av.S) != len(bv.S) {
+				return false
+			}
+			for i := int32(0); i < len(av.S); i++ {
+				if av.S[i] != bv.S[i] {
+					return false
+				}
+			}
+			return true
+		}
+	case *ConstInt:
+		if bv, ok := b.val.(*ConstInt); ok {
+			return av.V == bv.V
+		}
+	case *ConstBool:
+		if bv, ok := b.val.(*ConstBool); ok {
+			return av.V == bv.V
+		}
+	}
+	return false
+}
+
 // CreatePackage builds the SSA Package from type-checked syntax files.
 func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info *Info) (s *SSAPackage) {
 	p := &SSAPackage{
@@ -1984,6 +2018,36 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 			}
 			for _, ce := range caseExprs {
 				caseVal := fb.buildExpr(ce)
+				// Fold constant string comparisons at SSA build time.
+				if tc, ok1 := tag.(*SSAConst); ok1 {
+					if cc, ok2 := caseVal.(*SSAConst); ok2 {
+						eq := ssaConstEqual(tc, cc)
+						boolConst := &SSAConst{typ: Typ[Bool], val: &ConstBool{V: eq}}
+						if cond == nil {
+							cond = boolConst
+						} else {
+							// OR with previous: true || x = true, false || x = x
+							if pc, ok3 := cond.(*SSAConst); ok3 {
+								if pb, ok4 := pc.val.(*ConstBool); ok4 {
+									if pb.V {
+										cond = pc // already true
+									} else {
+										cond = boolConst
+									}
+								} else {
+									cond = boolConst
+								}
+							} else {
+								orOp := &SSABinOp{Op: OpLor, X: cond, Y: boolConst}
+								orOp.typ = Typ[Bool]
+								orOp.name = fb.nextName()
+								fb.emit(orOp)
+								cond = orOp
+							}
+						}
+						continue
+					}
+				}
 				cmp := &SSABinOp{Op: OpEql, X: tag, Y: caseVal}
 				cmp.typ = Typ[Bool]
 				cmp.name = fb.nextName()
@@ -1998,7 +2062,30 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 					cond = orOp
 				}
 			}
-			fb.emit(&SSAIf{Cond: cond})
+			// If cond folded to a constant, emit unconditional branch.
+			if cc, ok := cond.(*SSAConst); ok {
+				if cb, ok2 := cc.val.(*ConstBool); ok2 {
+					if cb.V {
+						fb.emit(&SSAJump{Comment: "switch.const.true"})
+						push(fb.currentBlock.Succs, caseBlock)
+						push(caseBlock.Preds, fb.currentBlock)
+					} else {
+						fb.emit(&SSAJump{Comment: "switch.const.false"})
+						push(fb.currentBlock.Succs, nextBlock)
+						push(nextBlock.Preds, fb.currentBlock)
+					}
+				} else {
+					fb.emit(&SSAIf{Cond: cond})
+					push(fb.currentBlock.Succs, caseBlock, nextBlock)
+					push(caseBlock.Preds, fb.currentBlock)
+					push(nextBlock.Preds, fb.currentBlock)
+				}
+			} else {
+				fb.emit(&SSAIf{Cond: cond})
+				push(fb.currentBlock.Succs, caseBlock, nextBlock)
+				push(caseBlock.Preds, fb.currentBlock)
+				push(nextBlock.Preds, fb.currentBlock)
+			}
 			push(fb.currentBlock.Succs, caseBlock, nextBlock)
 			push(caseBlock.Preds, fb.currentBlock)
 			push(nextBlock.Preds, fb.currentBlock)
@@ -3345,6 +3432,9 @@ func (fb *ssaFuncBuilder) emitMake(typ Type, sizeArgs []SSAValue) (s SSAValue) {
 func (fb *ssaFuncBuilder) buildSelector(e *syntax.SelectorExpr) (s SSAValue) {
 	if name, ok := e.X.(*syntax.Name); ok {
 		obj := fb.lookupObject(name.Value)
+		if obj == nil && fb.info != nil {
+			obj = fb.info.Uses[name]
+		}
 		if pn, ok2 := obj.(*PkgName); ok2 {
 			return fb.buildPkgMember(pn, e.Sel.Value)
 		}
@@ -3451,10 +3541,9 @@ func (fb *ssaFuncBuilder) buildPkgMember(pn *PkgName, memberName string) (s SSAV
 	if obj == nil {
 		return nil
 	}
-	// runtime.GOOS and runtime.GOARCH are declared as TCVar in the
-	// skeleton but are target-dependent consts. Return them as SSAConst
-	// so the SSA builder sees string values, not global loads.
-	if imported.Path == "runtime" {
+	// runtime.GOOS/GOARCH and internal/goarch.GOARCH are target-dependent
+	// consts. Return as SSAConst so switch folding and string compare work.
+	if imported.Path == "runtime" || imported.Path == "internal/goarch" {
 		if memberName == "GOOS" {
 			return &SSAConst{typ: Typ[TCString], val: &ConstStr{S:compileTargetOS()}}
 		}
