@@ -2003,7 +2003,24 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 			push(caseBlock.Preds, fb.currentBlock)
 			push(nextBlock.Preds, fb.currentBlock)
 		} else if clause.Cases != nil && tag == nil {
-			cond := fb.buildExpr(clause.Cases)
+			// Tagless switch: comma-separated cases are OR'd.
+			caseExprs := []syntax.Expr{clause.Cases}
+			if list, ok := clause.Cases.(*syntax.ListExpr); ok {
+				caseExprs = list.ElemList
+			}
+			var cond SSAValue
+			for _, ce := range caseExprs {
+				cv := fb.buildExpr(ce)
+				if cond == nil {
+					cond = cv
+				} else {
+					orOp := &SSABinOp{Op: OpLor, X: cond, Y: cv}
+					orOp.typ = Typ[Bool]
+					orOp.name = fb.nextName()
+					fb.emit(orOp)
+					cond = orOp
+				}
+			}
 			fb.emit(&SSAIf{Cond: cond})
 			push(fb.currentBlock.Succs, caseBlock, nextBlock)
 			push(caseBlock.Preds, fb.currentBlock)
