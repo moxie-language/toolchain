@@ -4242,93 +4242,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		if len(argList) == 1 {
 			arg := fb.buildExpr(argList[0])
 			if arg != nil && arg.SSAType() != nil {
-				u := SafeUnderlying(arg.SSAType())
-				if b2, ok29 := u.(*Basic); ok29 {
-					switch b2.Kind {
-					case Bool, Int8, Uint8:
-						sz = 1
-					case Int16, Uint16:
-						sz = 2
-					case Int32, Uint32, Float32:
-						sz = 4
-					case Int64, Uint64, Float64, UnsafePointer:
-						sz = 8
-					}
-				}
-				if _, ok30 := u.(*Pointer); ok30 {
-					sz = 8
-				}
-				if st2, ok31 := u.(*TCStruct); ok31 {
-					total := int64(0)
-					for i := 0; i < st2.NumFields(); i++ {
-						f := st2.Field(i)
-						fsz := int64(8)
-						fu := SafeUnderlying(f.Typ)
-						if fb2, ok32 := fu.(*Basic); ok32 {
-							switch fb2.Kind {
-							case Bool, Int8, Uint8:
-								fsz = 1
-							case Int16, Uint16:
-								fsz = 2
-							case Int32, Uint32, Float32:
-								fsz = 4
-							case Int64, Uint64, Float64, UnsafePointer:
-								fsz = 8
-							}
-						}
-						if _, ok2 := fu.(*Pointer); ok2 {
-							fsz = 8
-						}
-						if ar, ok2 := fu.(*Array); ok2 {
-							elemSz := int64(8)
-							if eb, ok3 := SafeUnderlying(ar.Elem).(*Basic); ok3 {
-								switch eb.Kind {
-								case Bool, Int8, Uint8:
-									elemSz = 1
-								case Int16, Uint16:
-									elemSz = 2
-								case Int32, Uint32, Float32:
-									elemSz = 4
-								case Int64, Uint64, Float64, UnsafePointer:
-									elemSz = 8
-								}
-							}
-							fsz = elemSz * ar.Len
-						}
-						if fsz < 8 {
-							total = total + fsz
-						} else {
-							if total%8 != 0 {
-								total = (total + 7) & ^int64(7)
-							}
-							total = total + fsz
-						}
-					}
-					if total%8 != 0 {
-						total = (total + 7) & ^int64(7)
-					}
-					sz = total
-				}
-				if sl2, ok33 := u.(*Slice); ok33 {
-					_ = sl2
-					sz = 24
-				}
-				if ar2, ok34 := u.(*Array); ok34 {
-					elemSz := int64(8)
-					if eb, ok2 := SafeUnderlying(ar2.Elem).(*Basic); ok2 {
-						switch eb.Kind {
-						case Bool, Int8, Uint8:
-							elemSz = 1
-						case Int16, Uint16:
-							elemSz = 2
-						case Int32, Uint32, Float32:
-							elemSz = 4
-						case Int64, Uint64, Float64, UnsafePointer:
-							elemSz = 8
-						}
-					}
-					sz = elemSz * ar2.Len
-				}
+				sz = ssaSizeofType(arg.SSAType())
 			}
 		}
 		return NewSSAConst(&ConstInt{V:sz}, Typ[Int64])
@@ -5220,6 +5134,59 @@ func ssaExprNames(e syntax.Expr) (ns []*syntax.Name) {
 		return names
 	}
 	return nil
+}
+
+// ssaSizeofType computes byte size for a type, used by unsafe.Sizeof.
+func ssaSizeofType(t Type) (sz int64) {
+	if t == nil {
+		return 8
+	}
+	u := SafeUnderlying(t)
+	if u == nil {
+		return 8
+	}
+	switch v := u.(type) {
+	case *Basic:
+		switch v.Kind {
+		case Bool, Int8, Uint8:
+			return 1
+		case Int16, Uint16:
+			return 2
+		case Int32, Uint32, Float32:
+			return 4
+		case Int64, Uint64, Float64, UnsafePointer:
+			return 8
+		case TCString, UntypedString:
+			return 24
+		}
+		return 8
+	case *Pointer:
+		return 8
+	case *Slice:
+		return 24
+	case *Signature:
+		return 16
+	case *TCInterface:
+		return 16
+	case *TCMap, *TCChan:
+		return 8
+	case *Array:
+		return ssaSizeofType(v.Elem) * v.Len
+	case *TCStruct:
+		total := int64(0)
+		for i := 0; i < v.NumFields(); i++ {
+			fsz := ssaSizeofType(v.Field(i).Typ)
+			if fsz >= 8 && total%8 != 0 {
+				total = (total + 7) & ^int64(7)
+			}
+			total = total + fsz
+		}
+		if total%8 != 0 {
+			total = (total + 7) & ^int64(7)
+		}
+		return total
+	}
+	return 8
 }
 
 func localizeConstVal(val ConstVal, typ Type) (c ConstVal) {
