@@ -1,16 +1,130 @@
 package main
 
+import (
+	. "git.smesh.lol/moxie/pkg/types"
+)
+
 // checkUseAfterFree: no-op in arena model.
 func checkUseAfterFree(f *SSAFunction) {}
 
+// checkParamMutation rejects stores through function parameters.
+// Parameters are borrowed references into the caller's arena. Writing
+// through them places callee-arena data in caller-owned storage,
+// which dangles when the callee's arena dies. Return values are the
+// only way to pass data out.
+func checkParamMutation(f *SSAFunction) {
+	if f == nil || f.Blocks == nil {
+		return
+	}
+	// Skip runtime - it manages arenas directly.
+	if f.Pkg != nil && f.Pkg.Pkg != nil {
+		path := f.Pkg.Pkg.Path
+		if path == "runtime" || path == "unsafe" {
+			return
+		}
+	}
+	// Pass 1: find allocs that hold parameter values.
+	// The SSA builder stores each param into an alloc:
+	//   %alloc = alloca T
+	//   store T %param, ptr %alloc
+	paramAllocs := map[SSAValue]bool{}
+	for _, p := range f.Params {
+		paramAllocs[SSAValue(p)] = true
+	}
+	paramHolders := map[SSAValue]bool{}
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			s, ok := instr.(*SSAStore)
+			if !ok {
+				continue
+			}
+			if paramAllocs[s.Val] {
+				paramHolders[s.Addr] = true
+			}
+		}
+	}
+	// Pass 2: check all stores.
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			s, ok := instr.(*SSAStore)
+			if !ok {
+				continue
+			}
+			if paramAllocs[s.Val] {
+				continue
+			}
+			if isParamDerivedEx(s.Addr, paramHolders, 0) {
+				name := paramRootName(s.Addr, paramHolders, 0)
+				push(cctx.compileErrors, f.name | ": store through borrowed parameter '" | name | "'")
+			}
+		}
+	}
+}
+
+func isParamDerivedEx(v SSAValue, holders map[SSAValue]bool, depth int32) (ok bool) {
+	if v == nil || depth > 20 {
+		return false
+	}
+	switch x := v.(type) {
+	case *SSAParameter:
+		return true
+	case *SSAFieldAddr:
+		return isParamDerivedEx(x.X, holders, depth+1)
+	case *SSAIndexAddr:
+		return isParamDerivedEx(x.X, holders, depth+1)
+	case *SSAUnOp:
+		if x.Op == OpMul {
+			if holders[x.X] {
+				return true
+			}
+			return isParamDerivedEx(x.X, holders, depth+1)
+		}
+	case *SSAChangeType:
+		return isParamDerivedEx(x.X, holders, depth+1)
+	case *SSAConvert:
+		return isParamDerivedEx(x.X, holders, depth+1)
+	case *SSAPhi:
+		for _, edge := range x.Edges {
+			if isParamDerivedEx(edge, holders, depth+1) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func paramRootName(v SSAValue, holders map[SSAValue]bool, depth int32) (name string) {
+	if v == nil || depth > 20 {
+		return "?"
+	}
+	switch x := v.(type) {
+	case *SSAParameter:
+		return x.SSAName()
+	case *SSAFieldAddr:
+		return paramRootName(x.X, holders, depth+1)
+	case *SSAIndexAddr:
+		return paramRootName(x.X, holders, depth+1)
+	case *SSAUnOp:
+		if x.Op == OpMul {
+			return paramRootName(x.X, holders, depth+1)
+		}
+	case *SSAChangeType:
+		return paramRootName(x.X, holders, depth+1)
+	case *SSAConvert:
+		return paramRootName(x.X, holders, depth+1)
+	case *SSAPhi:
+		for _, edge := range x.Edges {
+			n := paramRootName(edge, holders, depth+1)
+			if n != "?" {
+				return n
+			}
+		}
+	}
+	return "?"
+}
+
 // markReturnEscapes promotes stack allocas to heap when their address can
-// reach a return value. Returning r[:] over a local array (or &local routed
-// through a named-result variable) otherwise hands the caller a pointer into
-// a dead frame. Tracks which allocas each SSA value may point into
-// (derived), and which allocas each alloca's contents may point into
-// (stored), to a fixpoint; any alloca reachable from a return result is
-// marked Heap. Over-marking is safe (heap-allocates more), under-marking
-// dangles.
+// reach a return value.
 func markReturnEscapes(f *SSAFunction) {
 	derived := map[SSAValue][]*SSAAlloc{}
 	stored := map[*SSAAlloc][]*SSAAlloc{}
