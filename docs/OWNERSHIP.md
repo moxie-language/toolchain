@@ -56,14 +56,39 @@ This is not overhead - it is the ownership transfer mechanism. The relocation
 is the proof that ownership moved. Without it, the data would die with
 the function's arena.
 
-### Parameters = Borrowed References
+### Parameters = Immutable Borrows
 
 Function parameters point into the caller's arena. The callee borrows them
-for the duration of the call. The callee can read and write through them
-(mutation is fine - the caller owns the storage), but must not store their
-addresses into structures that outlive the call. The relocation pass on
-return handles the case where a return value contains a parameter address -
-it gets relocated into the caller's arena alongside everything else.
+**read-only** for the duration of the call. Writing through a parameter
+pointer is a compile error.
+
+This prohibition exists because parameter mutation is structurally unsound
+in a per-function arena model. When a callee writes through a parameter
+pointer, it places arena-local allocations (which die on return) into
+caller-owned structures (which outlive the call). The result is dangling
+pointers in the caller's data - silent corruption that manifests as a crash
+in unrelated code later.
+
+The Go pattern of pointer receivers that mutate fields (`func (t *T) Add(v V)`)
+is the canonical source of this bug class. In Moxie, methods that need to
+produce modified state return it:
+
+```moxie
+// illegal: writes arena-local allocation into caller's struct
+func (t *Table) Add(entry Entry) {
+    push(t.entries, entry)    // compile error: mutation through parameter
+}
+
+// legal: return the new state, caller assigns
+func (t *Table) WithEntry(entry Entry) (result *Table) {
+    result = &Table{entries: t.entries | []Entry{entry}}
+    return
+}
+```
+
+The caller decides where the result lives - in its own arena, as a return
+value that gets relocated upward, or assigned to a local that dies with the
+function. Sovereignty stays with the longer-lived party.
 
 ### Local Variables = Private
 

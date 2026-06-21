@@ -1286,10 +1286,10 @@ Three boundaries exist where memory changes hands:
 
 ### Parameters
 
-Function parameters are owned by the caller. The callee receives them by
-reference into the caller's arena. The relocation pass on return handles any
-case where a return value contains a pointer to a parameter - it gets
-relocated alongside everything else.
+Function parameters are owned by the caller. The callee receives them as
+**immutable borrows** - read-only references into the caller's arena.
+Writing through a parameter pointer is a compile error. Methods that need
+to produce modified state return it; the caller assigns the result.
 
 ### Between Domains
 

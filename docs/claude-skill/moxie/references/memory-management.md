@@ -91,7 +91,7 @@ A function's allocations are invisible outside that function. The only way data 
 
 ### Parameters
 
-Function parameters are owned by the caller. The callee receives them by reference (pointer into the caller's arena). The relocation pass handles the case where a return value contains a parameter address - it gets relocated alongside everything else.
+Function parameters are owned by the caller. The callee receives them as **immutable borrows** - read-only references into the caller's arena. Writing through a parameter pointer is a compile error. Methods that need to produce modified state return it; the caller assigns the result.
 
 ### Globals
 
