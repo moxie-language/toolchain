@@ -37,17 +37,10 @@ func sliceCopy(dst, src unsafe.Pointer, dstLen, srcLen uintptr, elemSize uintptr
 
 // slicePush handles push() builtin.
 //
-// Nil slice (cap == 0): programmer error. Allocate at the declaration site.
-//
-// Overflow (len + n > cap): one-time corrective realloc. Allocates exact
-// newLen capacity, copies existing elements, abandons old backing.
-// This is NOT geometric growth - the new cap equals the actual need.
-// The old backing is dead space reclaimed when the arena frees.
-// The overflow is a measurement event: the estimate was wrong, the
-// actual count corrects it. One abandoned array per miscalculation.
+// Geometric growth: doubles capacity on overflow, same as sliceGrow.
+// Old backing is dead space reclaimed when the arena frees.
 func slicePush(ptr unsafe.Pointer, slen, scap, n, elemSize uintptr) (unsafe.Pointer, uintptr, uintptr) {
 	if scap == 0 {
-		// Nil push: corrective alloc with exact capacity.
 		scap = n
 		if scap < 32 {
 			scap = 32
@@ -56,12 +49,12 @@ func slicePush(ptr unsafe.Pointer, slen, scap, n, elemSize uintptr) (unsafe.Poin
 	}
 	newLen := slen + n
 	if newLen > scap {
-		// Corrective realloc: exact capacity, not speculative.
-		newBuf := alloc(newLen*elemSize, nil)
+		newCap := uintptr(1) << bits.Len(uint32(newLen))
+		newBuf := alloc(newCap*elemSize, nil)
 		if slen > 0 {
 			memcpy(newBuf, ptr, slen*elemSize)
 		}
-		return newBuf, newLen, newLen
+		return newBuf, newLen, newCap
 	}
 	return ptr, newLen, scap
 }
