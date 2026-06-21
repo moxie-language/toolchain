@@ -1135,7 +1135,7 @@ cleanup:
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `push` | `push(s []T, elems ...T)` | Appends elements to a slice in place. Allocates on nil or overflow (geometric growth). Store-back is implicit. |
+| `push` | `push(s []T, elems ...T)` | Appends elements to a slice in place. Panics if len+n exceeds cap. Lazy-inits nil slices. Store-back is implicit. |
 | `pop` | `pop(s []T) T` | Removes and returns the last element. Panics if len == 0. Store-back is implicit. |
 | `resize` | `resize(s []T, n int32)` | Sets the slice length to n. Panics if n > cap or n < 0. Store-back is implicit. |
 | `cap` | `cap(v) int32` | Capacity of a slice, channel, or array |
@@ -1170,13 +1170,16 @@ unpredictable behavior:
 
 `push` resolves this by separating concerns:
 
-- **Allocation** is explicit: declare capacity with `[]T{:0:cap}`, or let `push`
-  allocate on first use (nil slice gets cap 32 with geometric growth thereafter).
-- **Insertion** is `push(s, v1, v2, ...)` - always stores elements, allocates
-  only when capacity is exhausted. The compiler emits the store-back to `s`
-  implicitly (like `i++` modifies `i`).
-- **Growth** is geometric (power-of-two doubling). Old backing arrays are dead
-  arena space, reclaimed in bulk when the arena frees.
+- **Allocation** is explicit: declare capacity with `[]T{:0:cap}`. If you push
+  to a nil slice, it lazy-inits with a reasonable capacity (min 32). But once
+  a slice has a capacity, exceeding it is a panic - the programmer must know
+  the bounds.
+- **Insertion** is `push(s, v1, v2, ...)` - stores elements into existing
+  capacity. The compiler emits the store-back to `s` implicitly (like `i++`
+  modifies `i`).
+- **No hidden reallocation.** Push never silently copies the backing array.
+  If you hit the cap, you miscalculated - fix the allocation site, don't hide
+  the error behind growth.
 
 `pop` and `resize` complete the set: `pop` is the inverse of a single-element
 push, and `resize` gives direct control over length without touching capacity.

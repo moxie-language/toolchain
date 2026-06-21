@@ -37,8 +37,9 @@ func sliceCopy(dst, src unsafe.Pointer, dstLen, srcLen uintptr, elemSize uintptr
 
 // slicePush handles push() builtin.
 //
-// Geometric growth: doubles capacity on overflow, same as sliceGrow.
-// Old backing is dead space reclaimed when the arena frees.
+// Nil slice: lazy-init with geometric capacity (min 32).
+// Non-nil overflow (len+n > cap): panic. The programmer must declare
+// capacity upfront. push does not allocate on an existing slice.
 func slicePush(ptr unsafe.Pointer, slen, scap, n, elemSize uintptr) (unsafe.Pointer, uintptr, uintptr) {
 	if scap == 0 {
 		scap = n
@@ -49,12 +50,7 @@ func slicePush(ptr unsafe.Pointer, slen, scap, n, elemSize uintptr) (unsafe.Poin
 	}
 	newLen := slen + n
 	if newLen > scap {
-		newCap := uintptr(1) << bits.Len(uint32(newLen))
-		newBuf := alloc(newCap*elemSize, nil)
-		if slen > 0 {
-			memcpy(newBuf, ptr, slen*elemSize)
-		}
-		return newBuf, newLen, newCap
+		runtimePanic("push: capacity overflow")
 	}
 	return ptr, newLen, scap
 }

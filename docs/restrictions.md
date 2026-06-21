@@ -29,7 +29,7 @@ See [REFERENCE.md](../REFERENCE.md) for the complete language reference.
 
 | Builtin | Signature | Semantics |
 |---------|-----------|-----------|
-| `push` | `push(s []T, v1, v2, ...T)` | Appends elements to slice. Allocates on nil (cap 32 min) or overflow (power-of-two growth). Store-back to `s` is implicit. |
+| `push` | `push(s []T, v1, v2, ...T)` | Appends elements to slice. Panics if len+n > cap. Lazy-inits nil slices (cap 32 min). Store-back to `s` is implicit. |
 | `pop` | `pop(s []T) T` | Removes and returns last element. Panics if len == 0. Store-back implicit. |
 | `resize` | `resize(s []T, n int32)` | Sets len to n. Panics if n > cap or n < 0 (unsigned check). Store-back implicit. |
 | `spawn` | `spawn(fn, args...) chan struct{}` | Creates new domain. See spawn boundary rules. |
@@ -43,9 +43,9 @@ a slice prefix and then appends to the original may or may not corrupt the alias
 depending on whether capacity was sufficient. This makes reasoning about ownership
 impossible in an arena system where dead backing arrays are never freed individually.
 
-`push` separates concerns: declare capacity explicitly with `[]T{:0:cap}`, or let
-push allocate on first use. Growth is geometric and predictable. The old backing
-array is dead arena space, reclaimed in bulk.
+`push` separates concerns: declare capacity explicitly with `[]T{:0:cap}`. Push
+into existing capacity or panic. No hidden reallocation, no silent copying. If
+you hit the cap, the allocation site is wrong - fix it there, not at the push.
 
 ### Removed Types
 
