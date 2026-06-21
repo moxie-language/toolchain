@@ -544,7 +544,8 @@ func (pb *ssaPkgBuilder) registerMethod(d *syntax.FuncDecl) {
 	if recvTypeName == "" {
 		return
 	}
-	mangledName := recvTypeName | "." | d.Name.Value
+	// All methods use (*Type).Method naming regardless of receiver type.
+	mangledName := "(*" | recvTypeName | ")." | d.Name.Value
 	var obj *TCFunc
 	obj = pb.findMethod(recvTypeName, d.Name.Value)
 	var sig *Signature
@@ -583,6 +584,16 @@ func ssaRecvTypeName(recv *syntax.Field) (s string) {
 		}
 	}
 	return ""
+}
+
+func ssaRecvIsPtr(recv *syntax.Field) (ok bool) {
+	if recv == nil {
+		return false
+	}
+	if op, ok2 := recv.Type.(*syntax.Operation); ok2 {
+		return op.Y == nil && op.Op == token.Mul
+	}
+	return false
 }
 
 func (pb *ssaPkgBuilder) findMethod(typeName string, methodName string) (t *TCFunc) {
@@ -786,7 +797,7 @@ func (pb *ssaPkgBuilder) buildFunc(d *syntax.FuncDecl) {
 	if d.Recv != nil {
 		rtn := ssaRecvTypeName(d.Recv)
 		if rtn != "" {
-			name = rtn | "." | d.Name.Value
+			name = "(*" | rtn | ")." | d.Name.Value
 		}
 	}
 	member := pb.pkg.Members[name]
@@ -4436,7 +4447,7 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 	}
 	// Handle Basic types (builtin stringers in runtime package)
 	if basic, ok38 := typ.(*Basic); ok38 {
-		typeName2 := basic.Name
+		typeName2 := "(*" | basic.Name | ")"
 		mangledName2 := typeName2 | "." | sel.Sel.Value
 		extSym := "runtime." | mangledName2
 		for i := int32(0); i < basic.NumMethods(); i++ {
@@ -4453,7 +4464,7 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 		}
 		switch rt := resolved.(type) {
 		case *Basic:
-			typeName2 = rt.Name
+			typeName2 = "(*" | rt.Name | ")"
 			mangledName2 = typeName2 | "." | sel.Sel.Value
 			extSym = "runtime." | mangledName2
 			for i := int32(0); i < rt.NumMethods(); i++ {
@@ -4523,10 +4534,12 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 	if resolveNamed.Obj != nil && resolveNamed.Obj.Pkg != nil {
 		namedPkgPath = resolveNamed.Obj.Pkg.Path
 	}
+	// All methods use (*Type).Method naming regardless of receiver type.
+	recvName := "(*" | typeName | ")"
 	samePackage := namedPkgPath != "" && namedPkgPath == fb.fn.Pkg.Pkg.Path
-	mangledName := typeName | "." | sel.Sel.Value
+	mangledName := recvName | "." | sel.Sel.Value
 	if !samePackage && namedPkgPath != "" {
-		mangledName = namedPkgPath | "." | typeName | "." | sel.Sel.Value
+		mangledName = namedPkgPath | "." | recvName | "." | sel.Sel.Value
 	}
 	var fn *SSAFunction
 	if samePackage {
@@ -4542,7 +4555,7 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 					// by value, trailing ctx param). The externalSymbol path is
 					// C-export ABI and drops the ctx argument.
 					impPkg := fb.ensureImportedSSAPackage(resolveNamed.Obj.Pkg)
-					fn = impPkg.ExternalFunc(typeName|"."|sel.Sel.Value, m.Signature())
+					fn = impPkg.ExternalFunc(recvName|"."|sel.Sel.Value, m.Signature())
 				} else {
 					fn = fb.fn.Pkg.ExternalFunc(mangledName, m.Signature())
 					if resolveNamed.Obj != nil && resolveNamed.Obj.Pkg == nil {
@@ -4624,7 +4637,7 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 		if !ok3 || embedNamed.Obj == nil {
 			continue
 		}
-		embedName := embedNamed.Obj.Name
+		embedName := "(*" | embedNamed.Obj.Name | ")"
 		embedSamePkg := embedNamed.Obj.Pkg != nil && embedNamed.Obj.Pkg.Path == fb.fn.Pkg.Pkg.Path
 		embedMangledName := embedName | "." | sel.Sel.Value
 		if !embedSamePkg && embedNamed.Obj.Pkg != nil {
@@ -4685,7 +4698,7 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 			if !ok6 || embed2Named.Obj == nil {
 				continue
 			}
-			embed2Name := embed2Named.Obj.Name
+			embed2Name := "(*" | embed2Named.Obj.Name | ")"
 			embed2SamePkg := embed2Named.Obj.Pkg != nil && embed2Named.Obj.Pkg.Path == fb.fn.Pkg.Pkg.Path
 			embed2Mangled := embed2Name | "." | sel.Sel.Value
 			if !embed2SamePkg && embed2Named.Obj.Pkg != nil {
