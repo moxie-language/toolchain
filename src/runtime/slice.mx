@@ -38,8 +38,7 @@ func sliceCopy(dst, src unsafe.Pointer, dstLen, srcLen uintptr, elemSize uintptr
 // slicePush handles push() builtin.
 //
 // Nil slice: lazy-init with geometric capacity (min 32).
-// Non-nil overflow (len+n > cap): panic. The programmer must declare
-// capacity upfront. push does not allocate on an existing slice.
+// Non-nil overflow (len+n > cap): reallocate with geometric growth.
 func slicePush(ptr unsafe.Pointer, slen, scap, n, elemSize uintptr) (unsafe.Pointer, uintptr, uintptr) {
 	if scap == 0 {
 		scap = n
@@ -49,10 +48,19 @@ func slicePush(ptr unsafe.Pointer, slen, scap, n, elemSize uintptr) (unsafe.Poin
 		ptr = alloc(scap*elemSize, nil)
 	}
 	newLen := slen + n
-	if newLen > scap {
-		runtimePanic("push: capacity overflow")
+	if newLen <= scap {
+		return ptr, newLen, scap
 	}
-	return ptr, newLen, scap
+	for newLen > scap {
+		newCap := scap * 2
+		if newCap < 32 {
+			newCap = 32
+		}
+		scap = newCap
+	}
+	newPtr := alloc(scap*elemSize, nil)
+	memmove(newPtr, ptr, slen*elemSize)
+	return newPtr, newLen, scap
 }
 
 // sliceGrow returns a new slice with space for at least newCap elements
