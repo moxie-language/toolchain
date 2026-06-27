@@ -1,0 +1,123 @@
+package main
+
+// Protocol: pipe-delimited, newline-terminated messages.
+// REQ|<seq>|<op>|<arg0>|<arg1>|...
+// OK|<seq>|<result>
+// ERR|<seq>|<errmsg>
+
+func tsItoa(n int32) (s string) {
+	if n == 0 {
+		return "0"
+	}
+	buf := []byte{:0:20}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	for n > 0 {
+		push(buf, byte('0'+n%10))
+		n /= 10
+	}
+	if neg {
+		push(buf, '-')
+	}
+	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
+
+func tsAtoi(s string) (n int32) {
+	if len(s) == 0 {
+		return 0
+	}
+	neg := false
+	pos := int32(0)
+	if s[0] == '-' {
+		neg = true
+		pos = 1
+	} else if s[0] == '+' {
+		pos = 1
+	}
+	for pos < int32(len(s)) {
+		c := s[pos]
+		if c < '0' || c > '9' {
+			break
+		}
+		n = n*10 + int32(c-'0')
+		pos++
+	}
+	if neg {
+		n = -n
+	}
+	return n
+}
+
+func parseMsg(msg string) (seq int32, op string, args []string) {
+	parts := splitMsg(msg)
+	if len(parts) < 3 {
+		return 0, "", nil
+	}
+	seq = tsAtoi(parts[1])
+	op = parts[2]
+	if len(parts) > 3 {
+		args = parts[3:]
+	}
+	return seq, op, args
+}
+
+func formatOK(seq int32, result string) (s string) {
+	return "OK|" | tsItoa(seq) | "|" | result | "\n"
+}
+
+func formatERR(seq int32, errmsg string) (s string) {
+	return "ERR|" | tsItoa(seq) | "|" | errmsg | "\n"
+}
+
+func parseOK(line string) (result string) {
+	parts := splitMsg(line)
+	if len(parts) >= 3 {
+		return parts[2]
+	}
+	return ""
+}
+
+func parseOKMulti(line string) (results []string) {
+	return splitMsg(line)
+}
+
+func parseERR(line string) (errmsg string) {
+	parts := splitMsg(line)
+	if len(parts) >= 3 {
+		return parts[2]
+	}
+	return ""
+}
+
+func splitMsg(d string) (parts []string) {
+	if len(d) == 0 {
+		return nil
+	}
+	n := int32(1)
+	for i := int32(0); i < int32(len(d)); i++ {
+		if d[i] == '|' {
+			n++
+		}
+	}
+	parts = []string{:0:n}
+	start := int32(0)
+	for i := int32(0); i <= int32(len(d)); i++ {
+		isDelim := false
+		if i < int32(len(d)) {
+			isDelim = d[i] == '|' || d[i] == '\n'
+		}
+		if i == int32(len(d)) || isDelim {
+			push(parts, string(d[start:i]))
+			start = i + 1
+			if i < int32(len(d)) && d[i] == '\n' {
+				break
+			}
+		}
+	}
+	return parts
+}

@@ -1,0 +1,557 @@
+package main
+
+func transformAll(f *File) {
+	for i := int32(0); i < int32(len(f.DeclList)); i++ {
+		f.DeclList[i] = transformDecl(f.DeclList[i])
+	}
+	transformStringsImport(f)
+	transformInit(f)
+}
+
+func transformDecl(d Decl) Decl {
+	switch d := d.(type) {
+	case *ConstDecl:
+		if d.Type != nil {
+			d.Type = transformTypeExpr(d.Type)
+		}
+		if d.Values != nil {
+			d.Values = transformExpr(d.Values)
+		}
+	case *TypeDecl:
+		d.Type = transformTypeExpr(d.Type)
+	case *VarDecl:
+		if d.Type != nil {
+			d.Type = transformTypeExpr(d.Type)
+		}
+		if d.Values != nil {
+			d.Values = transformExpr(d.Values)
+		}
+	case *FuncDecl:
+		if d.Recv != nil {
+			transformField(d.Recv)
+		}
+		transformFuncType(d.Type)
+		if d.Body != nil {
+			transformBlock(d.Body)
+		}
+	}
+	return d
+}
+
+func transformField(f *Field) {
+	if f.Type != nil {
+		f.Type = transformTypeExpr(f.Type)
+	}
+}
+
+func transformFields(fields []*Field) {
+	for _, f := range fields {
+		transformField(f)
+	}
+}
+
+func transformFuncType(t *FuncType) {
+	if t == nil {
+		return
+	}
+	transformFields(t.ParamList)
+	transformFields(t.ResultList)
+}
+
+func transformBlock(b *BlockStmt) {
+	for i := int32(0); i < int32(len(b.List)); i++ {
+		b.List[i] = transformStmt(b.List[i])
+	}
+}
+
+func transformTypeExpr(e Expr) Expr {
+	if e == nil {
+		return nil
+	}
+	switch e := e.(type) {
+	case *Name:
+		if e.Value == "int" {
+			e.Value = "int64"
+		} else if e.Value == "uint" {
+			e.Value = "uint64"
+		}
+		return e
+
+	case *ArrayType:
+		if e.Len != nil {
+			e.Len = transformExpr(e.Len)
+		}
+		e.Elem = transformTypeExpr(e.Elem)
+		return e
+
+	case *SliceType:
+		e.Elem = transformTypeExpr(e.Elem)
+		return e
+
+	case *DotsType:
+		e.Elem = transformTypeExpr(e.Elem)
+		return e
+
+	case *MapType:
+		e.Key = transformTypeExpr(e.Key)
+		e.Value = transformTypeExpr(e.Value)
+		return e
+
+	case *ChanType:
+		e.Elem = transformTypeExpr(e.Elem)
+		return e
+
+	case *StructType:
+		transformFields(e.FieldList)
+		return e
+
+	case *InterfaceType:
+		transformFields(e.MethodList)
+		return e
+
+	case *FuncType:
+		transformFuncType(e)
+		return e
+
+	case *Operation:
+		if e.Y == nil {
+			e.X = transformTypeExpr(e.X)
+		}
+		return e
+
+	case *ParenExpr:
+		e.X = transformTypeExpr(e.X)
+		return e
+
+	case *SelectorExpr:
+		return e
+
+	case *IndexExpr:
+		e.X = transformTypeExpr(e.X)
+		e.Index = transformTypeExpr(e.Index)
+		return e
+	}
+	return e
+}
+
+func transformExpr(e Expr) Expr {
+	if e == nil {
+		return nil
+	}
+	switch e := e.(type) {
+	case *Name:
+		if e.Value == "int" {
+			e.Value = "int64"
+		} else if e.Value == "uint" {
+			e.Value = "uint64"
+		}
+		return e
+
+	case *Operation:
+		e.X = transformExpr(e.X)
+		if e.Y != nil {
+			e.Y = transformExpr(e.Y)
+			if e.Op == Add && isStringExpr(e.X, e.Y) {
+				e.Op = Or
+			}
+		}
+		return e
+
+	case *CallExpr:
+		return transformCall(e)
+
+	case *CompositeLit:
+		if e.Type != nil {
+			e.Type = transformTypeExpr(e.Type)
+		}
+		for i := int32(0); i < int32(len(e.ElemList)); i++ {
+			e.ElemList[i] = transformExpr(e.ElemList[i])
+		}
+		return e
+
+	case *KeyValueExpr:
+		e.Key = transformExpr(e.Key)
+		e.Value = transformExpr(e.Value)
+		return e
+
+	case *FuncLit:
+		transformFuncType(e.Type)
+		if e.Body != nil {
+			transformBlock(e.Body)
+		}
+		return e
+
+	case *ParenExpr:
+		e.X = transformExpr(e.X)
+		return e
+
+	case *SelectorExpr:
+		e.X = transformExpr(e.X)
+		if n, ok := e.X.(*Name); ok && n.Value == "strings" {
+			n.Value = "bytes"
+		}
+		return e
+
+	case *IndexExpr:
+		e.X = transformExpr(e.X)
+		e.Index = transformExpr(e.Index)
+		return e
+
+	case *SliceExpr:
+		e.X = transformExpr(e.X)
+		for i := 0; i < 3; i++ {
+			if e.Index[i] != nil {
+				e.Index[i] = transformExpr(e.Index[i])
+			}
+		}
+		return e
+
+	case *AssertExpr:
+		e.X = transformExpr(e.X)
+		if e.Type != nil {
+			e.Type = transformTypeExpr(e.Type)
+		}
+		return e
+
+	case *TypeSwitchGuard:
+		e.X = transformExpr(e.X)
+		return e
+
+	case *ListExpr:
+		for i := int32(0); i < int32(len(e.ElemList)); i++ {
+			e.ElemList[i] = transformExpr(e.ElemList[i])
+		}
+		return e
+
+	case *BasicLit:
+		return e
+	}
+	return e
+}
+
+func transformCall(e *CallExpr) Expr {
+	name, ok := e.Fun.(*Name)
+	if !ok {
+		e.Fun = transformExpr(e.Fun)
+		for i := int32(0); i < int32(len(e.ArgList)); i++ {
+			e.ArgList[i] = transformExpr(e.ArgList[i])
+		}
+		return e
+	}
+
+	switch name.Value {
+	case "make":
+		return transformMake(e)
+	case "new":
+		return transformNew(e)
+	case "int":
+		name.Value = "int64"
+	case "uint":
+		name.Value = "uint64"
+	}
+
+	for i := int32(0); i < int32(len(e.ArgList)); i++ {
+		e.ArgList[i] = transformExpr(e.ArgList[i])
+	}
+	return e
+}
+
+func transformMake(e *CallExpr) Expr {
+	nargs := int32(len(e.ArgList))
+	if nargs < 1 {
+		return e
+	}
+	typeArg := e.ArgList[0]
+
+	switch t := typeArg.(type) {
+	case *ChanType:
+		t.Elem = transformTypeExpr(t.Elem)
+		lit := &CompositeLit{Type: t}
+		if nargs >= 2 {
+			lit.ElemList = []Expr{transformExpr(e.ArgList[1])}
+		}
+		return lit
+
+	case *MapType:
+		t.Key = transformTypeExpr(t.Key)
+		t.Value = transformTypeExpr(t.Value)
+		return &CompositeLit{Type: t}
+
+	case *SliceType:
+		t.Elem = transformTypeExpr(t.Elem)
+		lit := &CompositeLit{Type: t}
+		bad := &BadExpr{}
+		if nargs == 2 {
+			kv := &KeyValueExpr{Key: bad, Value: transformExpr(e.ArgList[1])}
+			lit.ElemList = []Expr{kv}
+			lit.NKeys = 1
+		} else if nargs == 3 {
+			val := &ListExpr{ElemList: []Expr{
+				transformExpr(e.ArgList[1]),
+				transformExpr(e.ArgList[2]),
+			}}
+			kv := &KeyValueExpr{Key: bad, Value: val}
+			lit.ElemList = []Expr{kv}
+			lit.NKeys = 1
+		}
+		return lit
+
+	case *ArrayType:
+		if t.Len != nil {
+			return e
+		}
+		st := &SliceType{Elem: t.Elem}
+		newArgs := []Expr{st}
+		newArgs = append(newArgs, e.ArgList[1:]...)
+		return transformMake(&CallExpr{Fun: e.Fun, ArgList: newArgs})
+	}
+
+	return e
+}
+
+func transformNew(e *CallExpr) Expr {
+	if int32(len(e.ArgList)) != 1 {
+		return e
+	}
+	typeArg := transformTypeExpr(e.ArgList[0])
+	return &Operation{
+		Op: And,
+		X:  &CompositeLit{Type: typeArg},
+	}
+}
+
+func isStringExpr(x, y Expr) bool {
+	return isStringLit(x) || isStringLit(y)
+}
+
+func isStringLit(e Expr) bool {
+	lit, ok := e.(*BasicLit)
+	if !ok {
+		return false
+	}
+	return lit.Kind == StringLit
+}
+
+func transformStmt(s Stmt) Stmt {
+	if s == nil {
+		return nil
+	}
+	switch s := s.(type) {
+	case *ExprStmt:
+		s.X = transformExpr(s.X)
+
+	case *SendStmt:
+		s.Chan = transformExpr(s.Chan)
+		s.Value = transformExpr(s.Value)
+
+	case *AssignStmt:
+		if s.Lhs != nil {
+			s.Lhs = transformExpr(s.Lhs)
+		}
+		if s.Rhs != nil {
+			s.Rhs = transformExpr(s.Rhs)
+		}
+
+	case *ReturnStmt:
+		if s.Results != nil {
+			s.Results = transformExpr(s.Results)
+		}
+
+	case *IfStmt:
+		if s.Init != nil {
+			s.Init = transformSimpleStmt(s.Init)
+		}
+		s.Cond = transformExpr(s.Cond)
+		transformBlock(s.Then)
+		if s.Else != nil {
+			s.Else = transformStmt(s.Else)
+		}
+
+	case *ForStmt:
+		if s.Init != nil {
+			s.Init = transformSimpleStmt(s.Init)
+		}
+		if s.Cond != nil {
+			s.Cond = transformExpr(s.Cond)
+		}
+		if s.Post != nil {
+			s.Post = transformSimpleStmt(s.Post)
+		}
+		transformBlock(s.Body)
+
+	case *SwitchStmt:
+		if s.Init != nil {
+			s.Init = transformSimpleStmt(s.Init)
+		}
+		if s.Tag != nil {
+			s.Tag = transformExpr(s.Tag)
+		}
+		for _, cc := range s.Body {
+			if cc.Cases != nil {
+				cc.Cases = transformExpr(cc.Cases)
+			}
+			for i := int32(0); i < int32(len(cc.Body)); i++ {
+				cc.Body[i] = transformStmt(cc.Body[i])
+			}
+		}
+		mergeFallthrough(s)
+
+	case *SelectStmt:
+		for _, cc := range s.Body {
+			if cc.Comm != nil {
+				cc.Comm = transformSimpleStmt(cc.Comm)
+			}
+			for i := int32(0); i < int32(len(cc.Body)); i++ {
+				cc.Body[i] = transformStmt(cc.Body[i])
+			}
+		}
+
+	case *BlockStmt:
+		transformBlock(s)
+
+	case *DeclStmt:
+		for i := int32(0); i < int32(len(s.DeclList)); i++ {
+			s.DeclList[i] = transformDecl(s.DeclList[i])
+		}
+
+	case *CallStmt:
+		s.Call = transformExpr(s.Call)
+
+	case *LabeledStmt:
+		s.Stmt = transformStmt(s.Stmt)
+	}
+	return s
+}
+
+func transformSimpleStmt(s SimpleStmt) SimpleStmt {
+	if s == nil {
+		return nil
+	}
+	switch s := s.(type) {
+	case *RangeClause:
+		if s.Lhs != nil {
+			s.Lhs = transformExpr(s.Lhs)
+		}
+		s.X = transformExpr(s.X)
+	case *ExprStmt:
+		s.X = transformExpr(s.X)
+	case *SendStmt:
+		s.Chan = transformExpr(s.Chan)
+		s.Value = transformExpr(s.Value)
+	case *AssignStmt:
+		if s.Lhs != nil {
+			s.Lhs = transformExpr(s.Lhs)
+		}
+		if s.Rhs != nil {
+			s.Rhs = transformExpr(s.Rhs)
+		}
+	}
+	return s
+}
+
+func mergeFallthrough(s *SwitchStmt) {
+	for i := int32(len(s.Body)) - 2; i >= 0; i-- {
+		cc := s.Body[i]
+		n := int32(len(cc.Body))
+		if n == 0 {
+			continue
+		}
+		br, ok := cc.Body[n-1].(*BranchStmt)
+		if !ok || br.Tok != Fallthrough {
+			continue
+		}
+		next := s.Body[i+1]
+		if n == 1 {
+			next.Cases = mergeCases(cc.Cases, next.Cases)
+			s.Body = append(s.Body[:i], s.Body[i+1:]...)
+		} else {
+			cc.Body = cc.Body[:n-1]
+		}
+	}
+}
+
+func mergeCases(a, b Expr) Expr {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	var elems []Expr
+	if list, ok := a.(*ListExpr); ok {
+		elems = append(elems, list.ElemList...)
+	} else {
+		elems = append(elems, a)
+	}
+	if list, ok := b.(*ListExpr); ok {
+		elems = append(elems, list.ElemList...)
+	} else {
+		elems = append(elems, b)
+	}
+	return &ListExpr{ElemList: elems}
+}
+
+func transformStringsImport(f *File) {
+	for _, d := range f.DeclList {
+		imp, ok := d.(*ImportDecl)
+		if !ok {
+			continue
+		}
+		if imp.Path != nil && imp.Path.Value == "\"strings\"" {
+			imp.Path.Value = "\"bytes\""
+		}
+	}
+}
+
+func transformInit(f *File) {
+	initCount := int32(0)
+	var mainDecl *FuncDecl
+	var initCalls []Expr
+
+	for i := int32(0); i < int32(len(f.DeclList)); i++ {
+		fd, ok := f.DeclList[i].(*FuncDecl)
+		if !ok {
+			continue
+		}
+		if fd.Recv != nil {
+			continue
+		}
+		if fd.Name.Value == "main" {
+			mainDecl = fd
+		}
+		if fd.Name.Value == "init" {
+			newName := "init_0"
+			if initCount > 0 {
+				newName = "init_" | intToStr(initCount)
+			}
+			fd.Name.Value = newName
+			initCalls = append(initCalls, &CallExpr{
+				Fun: &Name{Value: newName},
+			})
+			initCount++
+		}
+	}
+
+	if initCount > 0 && mainDecl != nil && mainDecl.Body != nil {
+		var stmts []Stmt
+		for _, call := range initCalls {
+			stmts = append(stmts, &ExprStmt{X: call})
+		}
+		stmts = append(stmts, mainDecl.Body.List...)
+		mainDecl.Body.List = stmts
+	}
+}
+
+func intToStr(n int32) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [10]byte
+	i := int32(len(buf))
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}

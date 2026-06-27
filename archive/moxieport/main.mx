@@ -1,0 +1,78 @@
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"os"
+)
+
+func getArgs() []string {
+	data, err := os.ReadFile("/proc/self/cmdline")
+	if err != nil || int32(len(data)) == 0 {
+		return nil
+	}
+	if data[int32(len(data))-1] == 0 {
+		data = data[:int32(len(data))-1]
+	}
+	parts := bytes.Split(data, "\x00")
+	args := []string{:0:int32(len(parts))}
+	for _, p := range parts {
+		args = append(args, string(p))
+	}
+	return args
+}
+
+func main() {
+	args := getArgs()
+	if int32(len(args)) < 2 {
+		fmt.Fprintln(os.Stderr(), "usage: moxieport <file.go> [file2.go ...]")
+		os.Exit(1)
+	}
+
+	errs := int32(0)
+	for i := int32(1); i < int32(len(args)); i++ {
+		if !processFile(args[i]) {
+			errs++
+		}
+	}
+	if errs > 0 {
+		os.Exit(1)
+	}
+}
+
+func processFile(path string) bool {
+	f, err := ParseFile(path, func(e error) {
+		fmt.Fprintf(os.Stderr(), "%s: %v\n", path, e)
+	}, nil, 0)
+	if err != nil {
+		return false
+	}
+	if f == nil {
+		fmt.Fprintf(os.Stderr(), "%s: parse returned nil\n", path)
+		return false
+	}
+
+	transformAll(f)
+
+	outPath := outputPath(path)
+	out, err := os.Create(outPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr(), "%s: %v\n", outPath, err)
+		return false
+	}
+
+	printFile(out, f)
+	out.Close()
+
+	report(os.Stderr(), outPath, f)
+
+	fmt.Fprintf(os.Stderr(), "%s -> %s\n", path, outPath)
+	return true
+}
+
+func outputPath(path string) string {
+	if bytes.HasSuffix(path, ".go") {
+		return path[:int32(len(path))-3] | ".mx"
+	}
+	return path | ".mx"
+}

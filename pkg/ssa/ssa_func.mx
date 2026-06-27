@@ -771,3 +771,67 @@ func (fb *ssaFuncBuilder) evalLocalConstExpr(e syntax.Expr) (c types.ConstVal) {
 	}
 	return nil
 }
+func ResolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope *Scope, prog *SSAProgram) (t Type) {
+	if e == nil {
+		return nil
+	}
+	switch ev := e.(type) {
+	case *syntax.Name:
+		if typeSubst != nil {
+			if t5, ok51 := typeSubst[ev.Value]; ok51 {
+				return t5
+			}
+		}
+		_, obj := Universe.LookupParent(ev.Value)
+		if obj != nil {
+			if tn, ok := obj.(*TypeName); ok {
+				return tn.Typ
+			}
+		}
+		if pkgScope != nil {
+			tobj := pkgScope.Lookup(ev.Value)
+			if tobj != nil {
+				if tn, ok := tobj.(*TypeName); ok {
+					return tn.Typ
+				}
+			}
+		}
+		if ImportRegistry != nil {
+			for _, pkg := range ImportRegistry {
+				if pkg == nil || pkg.Scope == nil {
+					continue
+				}
+				tobj := pkg.Scope.Lookup(ev.Value)
+				if tobj != nil {
+					if tn, ok := tobj.(*TypeName); ok {
+						return tn.Typ
+					}
+				}
+			}
+		}
+		return nil
+	case *syntax.DotsType:
+		elem := ResolveTypeExprWithSubst(ev.Elem, typeSubst, pkgScope, prog)
+		if elem != nil {
+			if b, ok := elem.(*Basic); ok && b.Kind == Uint8 {
+				return Typ[TCString]
+			}
+			return NewSlice(elem)
+		}
+	case *syntax.SliceType:
+		elem := ResolveTypeExprWithSubst(ev.Elem, typeSubst, pkgScope, prog)
+		if elem != nil {
+			if b, ok := elem.(*Basic); ok && b.Kind == Uint8 {
+				return Typ[TCString]
+			}
+			return NewSlice(elem)
+		}
+	case *syntax.ArrayType:
+		elem := ResolveTypeExprWithSubst(ev.Elem, typeSubst, pkgScope, prog)
+		if elem != nil {
+			n := int64(-1)
+			if lit, ok := ev.Len.(*syntax.BasicLit); ok {
+				n = SSAParseInt64(lit.Value)
+			} else if ev.Len != nil && pkgScope != nil && prog != nil && prog.EvalConstExpr != nil {
+				cv := prog.EvalConstExpr(ev.Len, pkgScope, -1)
+				if ci3, ok52 := cv.(*ConstInt); ok52 {

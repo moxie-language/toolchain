@@ -1,0 +1,704 @@
+package main
+
+import "io"
+
+type printer struct {
+	buf   []byte
+	depth int32
+}
+
+func printFile(w io.Writer, f *File) {
+	var p printer
+	p.file(f)
+	w.Write(p.buf)
+}
+
+func (p *printer) w(s string) {
+	p.buf = append(p.buf, s...)
+}
+
+func (p *printer) ch(c byte) {
+	p.buf = append(p.buf, c)
+}
+
+func (p *printer) nl() {
+	p.ch('\n')
+}
+
+func (p *printer) tab() {
+	for i := int32(0); i < p.depth; i++ {
+		p.ch('\t')
+	}
+}
+
+func (p *printer) space() {
+	p.ch(' ')
+}
+
+func declGroup(d Decl) *Group {
+	switch d := d.(type) {
+	case *ImportDecl:
+		return d.Group
+	case *ConstDecl:
+		return d.Group
+	case *TypeDecl:
+		return d.Group
+	case *VarDecl:
+		return d.Group
+	}
+	return nil
+}
+
+func declKeyword(d Decl) string {
+	switch d.(type) {
+	case *ImportDecl:
+		return "import"
+	case *ConstDecl:
+		return "const"
+	case *TypeDecl:
+		return "type"
+	case *VarDecl:
+		return "var"
+	case *FuncDecl:
+		return "func"
+	}
+	return ""
+}
+
+func (p *printer) file(f *File) {
+	p.w("package ")
+	p.w(f.PkgName.Value)
+	p.nl()
+
+	var prevGroup *Group
+	prevWasGrouped := false
+
+	for i := int32(0); i < int32(len(f.DeclList)); i++ {
+		d := f.DeclList[i]
+		g := declGroup(d)
+
+		if g != prevGroup {
+			if prevGroup != nil {
+				p.depth--
+				p.w(")")
+				p.nl()
+			}
+			if g != nil {
+				p.nl()
+				p.w(declKeyword(d))
+				p.w(" (")
+				p.nl()
+				p.depth++
+			}
+		}
+
+		if g != nil {
+			p.tab()
+			p.declBody(d)
+			p.nl()
+			prevWasGrouped = true
+		} else {
+			if prevWasGrouped || i > 0 {
+				p.nl()
+			}
+			p.decl(d)
+			p.nl()
+			prevWasGrouped = false
+		}
+
+		prevGroup = g
+	}
+
+	if prevGroup != nil {
+		p.depth--
+		p.w(")")
+		p.nl()
+	}
+}
+
+func (p *printer) decl(d Decl) {
+	p.w(declKeyword(d))
+	p.space()
+	p.declBody(d)
+}
+
+func (p *printer) declBody(d Decl) {
+	switch d := d.(type) {
+	case *ImportDecl:
+		if d.LocalPkgName != nil {
+			p.w(d.LocalPkgName.Value)
+			p.space()
+		}
+		p.expr(d.Path)
+
+	case *ConstDecl:
+		p.nameList(d.NameList)
+		if d.Type != nil {
+			p.space()
+			p.expr(d.Type)
+		}
+		if d.Values != nil {
+			p.w(" = ")
+			p.expr(d.Values)
+		}
+
+	case *TypeDecl:
+		p.w(d.Name.Value)
+		if len(d.TParamList) > 0 {
+			p.typeParams(d.TParamList)
+		}
+		if d.Alias {
+			p.w(" = ")
+		} else {
+			p.space()
+		}
+		p.expr(d.Type)
+
+	case *VarDecl:
+		p.nameList(d.NameList)
+		if d.Type != nil {
+			p.space()
+			p.expr(d.Type)
+		}
+		if d.Values != nil {
+			p.w(" = ")
+			p.expr(d.Values)
+		}
+
+	case *FuncDecl:
+		p.funcDecl(d)
+	}
+}
+
+func (p *printer) funcDecl(d *FuncDecl) {
+	if d.Recv != nil {
+		p.ch('(')
+		p.field(d.Recv)
+		p.w(") ")
+	}
+	p.w(d.Name.Value)
+	if len(d.TParamList) > 0 {
+		p.typeParams(d.TParamList)
+	}
+	p.funcType(d.Type)
+	if d.Body != nil {
+		p.space()
+		p.blockStmt(d.Body)
+	}
+}
+
+func (p *printer) nameList(names []*Name) {
+	for i, n := range names {
+		if i > 0 {
+			p.w(", ")
+		}
+		p.w(n.Value)
+	}
+}
+
+func (p *printer) typeParams(fields []*Field) {
+	p.ch('[')
+	for i, f := range fields {
+		if i > 0 {
+			p.w(", ")
+		}
+		p.field(f)
+	}
+	p.ch(']')
+}
+
+func (p *printer) field(f *Field) {
+	if f.Name != nil {
+		p.w(f.Name.Value)
+		if f.Type != nil {
+			p.space()
+		}
+	}
+	if f.Type != nil {
+		p.expr(f.Type)
+	}
+}
+
+func (p *printer) fieldList(fields []*Field, sep string) {
+	for i, f := range fields {
+		if i > 0 {
+			p.w(sep)
+		}
+		p.field(f)
+	}
+}
+
+func (p *printer) funcType(t *FuncType) {
+	p.ch('(')
+	p.fieldList(t.ParamList, ", ")
+	p.ch(')')
+	if len(t.ResultList) == 1 && t.ResultList[0].Name == nil {
+		p.space()
+		p.expr(t.ResultList[0].Type)
+	} else if len(t.ResultList) > 0 {
+		p.w(" (")
+		p.fieldList(t.ResultList, ", ")
+		p.ch(')')
+	}
+}
+
+func opPrec(op Operator) int32 {
+	switch {
+	case op == OrOr:
+		return 1
+	case op == AndAnd:
+		return 2
+	case op >= Eql && op <= Geq:
+		return 3
+	case op >= Add && op <= Xor:
+		return 4
+	case op >= Mul && op <= Shr:
+		return 5
+	}
+	return 6
+}
+
+func (p *printer) expr(e Expr) {
+	p.exprPrec(e, 0)
+}
+
+func (p *printer) exprPrec(e Expr, outerPrec int32) {
+	if e == nil {
+		return
+	}
+	switch e := e.(type) {
+	case *BadExpr:
+		p.w("/*BadExpr*/")
+
+	case *Name:
+		p.w(e.Value)
+
+	case *BasicLit:
+		p.w(e.Value)
+
+	case *CompositeLit:
+		if e.Type != nil {
+			p.expr(e.Type)
+		}
+		p.ch('{')
+		for i, elem := range e.ElemList {
+			if i > 0 {
+				p.w(", ")
+			}
+			if kv, ok := elem.(*KeyValueExpr); ok {
+				if _, bad := kv.Key.(*BadExpr); bad {
+					p.ch(':')
+					if list, ok := kv.Value.(*ListExpr); ok && int32(len(list.ElemList)) == 2 {
+						p.expr(list.ElemList[0])
+						p.ch(':')
+						p.expr(list.ElemList[1])
+					} else {
+						p.expr(kv.Value)
+					}
+				} else {
+					p.expr(kv.Key)
+					p.w(": ")
+					p.expr(kv.Value)
+				}
+			} else {
+				p.expr(elem)
+			}
+		}
+		p.ch('}')
+
+	case *KeyValueExpr:
+		p.expr(e.Key)
+		p.w(": ")
+		p.expr(e.Value)
+
+	case *FuncLit:
+		p.w("func")
+		p.funcType(e.Type)
+		p.space()
+		p.blockStmt(e.Body)
+
+	case *ParenExpr:
+		p.ch('(')
+		p.expr(e.X)
+		p.ch(')')
+
+	case *SelectorExpr:
+		p.expr(e.X)
+		p.ch('.')
+		p.w(e.Sel.Value)
+
+	case *IndexExpr:
+		p.expr(e.X)
+		p.ch('[')
+		p.expr(e.Index)
+		p.ch(']')
+
+	case *SliceExpr:
+		p.expr(e.X)
+		p.ch('[')
+		if e.Index[0] != nil {
+			p.expr(e.Index[0])
+		}
+		p.ch(':')
+		if e.Index[1] != nil {
+			p.expr(e.Index[1])
+		}
+		if e.Full {
+			p.ch(':')
+			if e.Index[2] != nil {
+				p.expr(e.Index[2])
+			}
+		}
+		p.ch(']')
+
+	case *AssertExpr:
+		p.expr(e.X)
+		p.w(".(")
+		if e.Type != nil {
+			p.expr(e.Type)
+		} else {
+			p.w("type")
+		}
+		p.ch(')')
+
+	case *TypeSwitchGuard:
+		if e.Lhs != nil {
+			p.w(e.Lhs.Value)
+			p.w(" := ")
+		}
+		p.expr(e.X)
+		p.w(".(type)")
+
+	case *Operation:
+		if e.Y == nil {
+			prec := int32(6)
+			needParen := prec < outerPrec
+			if needParen {
+				p.ch('(')
+			}
+			p.w(e.Op.String())
+			p.exprPrec(e.X, prec)
+			if needParen {
+				p.ch(')')
+			}
+		} else {
+			prec := opPrec(e.Op)
+			needParen := prec < outerPrec
+			if needParen {
+				p.ch('(')
+			}
+			p.exprPrec(e.X, prec)
+			p.space()
+			p.w(e.Op.String())
+			p.space()
+			p.exprPrec(e.Y, prec+1)
+			if needParen {
+				p.ch(')')
+			}
+		}
+
+	case *CallExpr:
+		p.expr(e.Fun)
+		p.ch('(')
+		for i, arg := range e.ArgList {
+			if i > 0 {
+				p.w(", ")
+			}
+			p.expr(arg)
+		}
+		if e.HasDots {
+			p.w("...")
+		}
+		p.ch(')')
+
+	case *ListExpr:
+		for i, elem := range e.ElemList {
+			if i > 0 {
+				p.w(", ")
+			}
+			p.expr(elem)
+		}
+
+	case *ArrayType:
+		p.ch('[')
+		if e.Len != nil {
+			p.expr(e.Len)
+		}
+		p.ch(']')
+		p.expr(e.Elem)
+
+	case *SliceType:
+		p.w("[]")
+		p.expr(e.Elem)
+
+	case *DotsType:
+		p.w("...")
+		p.expr(e.Elem)
+
+	case *StructType:
+		p.w("struct {")
+		if len(e.FieldList) > 0 {
+			p.nl()
+			p.depth++
+			for i, f := range e.FieldList {
+				p.tab()
+				p.field(f)
+				if e.TagList != nil && i < int32(len(e.TagList)) && e.TagList[i] != nil {
+					p.space()
+					p.w(e.TagList[i].Value)
+				}
+				p.nl()
+			}
+			p.depth--
+			p.tab()
+		}
+		p.ch('}')
+
+	case *InterfaceType:
+		p.w("interface{")
+		if len(e.MethodList) > 0 {
+			p.nl()
+			p.depth++
+			for _, f := range e.MethodList {
+				p.tab()
+				p.field(f)
+				p.nl()
+			}
+			p.depth--
+			p.tab()
+		}
+		p.ch('}')
+
+	case *FuncType:
+		p.w("func")
+		p.funcType(e)
+
+	case *MapType:
+		p.w("map[")
+		p.expr(e.Key)
+		p.ch(']')
+		p.expr(e.Value)
+
+	case *ChanType:
+		switch e.Dir {
+		case SendOnly:
+			p.w("chan<- ")
+		case RecvOnly:
+			p.w("<-chan ")
+		default:
+			p.w("chan ")
+		}
+		p.expr(e.Elem)
+	}
+}
+
+func (p *printer) stmt(s Stmt) {
+	if s == nil {
+		return
+	}
+	switch s := s.(type) {
+	case *EmptyStmt:
+
+	case *LabeledStmt:
+		oldDepth := p.depth
+		p.depth = 0
+		p.tab()
+		p.w(s.Label.Value)
+		p.ch(':')
+		p.depth = oldDepth
+		p.nl()
+		p.tab()
+		p.stmt(s.Stmt)
+
+	case *BlockStmt:
+		p.blockStmt(s)
+
+	case *ExprStmt:
+		p.expr(s.X)
+
+	case *SendStmt:
+		p.expr(s.Chan)
+		p.w(" <- ")
+		p.expr(s.Value)
+
+	case *DeclStmt:
+		for i, d := range s.DeclList {
+			if i > 0 {
+				p.nl()
+				p.tab()
+			}
+			p.decl(d)
+		}
+
+	case *AssignStmt:
+		if s.Rhs == nil {
+			p.expr(s.Lhs)
+			if s.Op == Add {
+				p.w("++")
+			} else if s.Op == Sub {
+				p.w("--")
+			}
+		} else {
+			p.expr(s.Lhs)
+			if s.Op == 0 {
+				p.w(" = ")
+			} else if s.Op == Def {
+				p.w(" := ")
+			} else {
+				p.w(" ")
+				p.w(s.Op.String())
+				p.w("= ")
+			}
+			p.expr(s.Rhs)
+		}
+
+	case *BranchStmt:
+		switch s.Tok {
+		case Break:
+			p.w("break")
+		case Continue:
+			p.w("continue")
+		case Goto:
+			p.w("goto")
+		case Fallthrough:
+			p.w("fallthrough")
+		}
+		if s.Label != nil {
+			p.space()
+			p.w(s.Label.Value)
+		}
+
+	case *CallStmt:
+		if s.Tok == Go {
+			p.w("go ")
+		} else if s.Tok == Defer {
+			p.w("defer ")
+		}
+		p.expr(s.Call)
+
+	case *ReturnStmt:
+		p.w("return")
+		if s.Results != nil {
+			p.space()
+			p.expr(s.Results)
+		}
+
+	case *IfStmt:
+		p.w("if ")
+		if s.Init != nil {
+			p.stmt(s.Init)
+			p.w("; ")
+		}
+		p.expr(s.Cond)
+		p.space()
+		p.blockStmt(s.Then)
+		if s.Else != nil {
+			p.w(" else ")
+			p.stmt(s.Else)
+		}
+
+	case *ForStmt:
+		p.w("for ")
+		if rc, ok := s.Init.(*RangeClause); ok {
+			if rc.Lhs != nil {
+				p.expr(rc.Lhs)
+				if rc.Def {
+					p.w(" := ")
+				} else {
+					p.w(" = ")
+				}
+			}
+			p.w("range ")
+			p.expr(rc.X)
+		} else {
+			if s.Init != nil {
+				p.stmt(s.Init)
+			}
+			if s.Init != nil || s.Post != nil {
+				p.w("; ")
+			}
+			if s.Cond != nil {
+				p.expr(s.Cond)
+			}
+			if s.Init != nil || s.Post != nil {
+				p.w("; ")
+			}
+			if s.Post != nil {
+				p.stmt(s.Post)
+			}
+		}
+		p.space()
+		p.blockStmt(s.Body)
+
+	case *SwitchStmt:
+		p.w("switch ")
+		if s.Init != nil {
+			p.stmt(s.Init)
+			p.w("; ")
+		}
+		if s.Tag != nil {
+			p.expr(s.Tag)
+			p.space()
+		}
+		p.ch('{')
+		p.nl()
+		for _, cc := range s.Body {
+			p.tab()
+			if cc.Cases != nil {
+				p.w("case ")
+				p.expr(cc.Cases)
+			} else {
+				p.w("default")
+			}
+			p.ch(':')
+			p.nl()
+			p.depth++
+			for _, st := range cc.Body {
+				p.tab()
+				p.stmt(st)
+				p.nl()
+			}
+			p.depth--
+		}
+		p.tab()
+		p.ch('}')
+
+	case *SelectStmt:
+		p.w("select {")
+		p.nl()
+		for _, cc := range s.Body {
+			p.tab()
+			if cc.Comm != nil {
+				p.w("case ")
+				p.stmt(cc.Comm)
+			} else {
+				p.w("default")
+			}
+			p.ch(':')
+			p.nl()
+			p.depth++
+			for _, st := range cc.Body {
+				p.tab()
+				p.stmt(st)
+				p.nl()
+			}
+			p.depth--
+		}
+		p.tab()
+		p.ch('}')
+	}
+}
+
+func (p *printer) blockStmt(b *BlockStmt) {
+	p.ch('{')
+	p.nl()
+	p.depth++
+	for _, s := range b.List {
+		p.tab()
+		p.stmt(s)
+		p.nl()
+	}
+	p.depth--
+	p.tab()
+	p.ch('}')
+}

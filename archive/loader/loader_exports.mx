@@ -1,0 +1,159 @@
+package main
+
+import (
+	"runtime"
+	"unsafe"
+)
+
+var loaderHandles []*LoaderProgram
+
+func allocLoaderHandle(p *LoaderProgram) int32 {
+	for i, h := range loaderHandles {
+		if h == nil {
+			loaderHandles[i] = p
+			return int32(i)
+		}
+	}
+	loaderHandles = append(loaderHandles, p)
+	return int32(len(loaderHandles) - 1)
+}
+
+func getLoader(h int32) *LoaderProgram {
+	if h < 0 || int32(h) >= len(loaderHandles) {
+		return nil
+	}
+	return loaderHandles[h]
+}
+
+func loaderCopyOut(dst unsafe.Pointer, cap int32, src string) int32 {
+	n := int32(len(src))
+	if n > cap {
+		n = cap
+	}
+	if n > 0 {
+		buf := unsafe.Slice((*byte)(dst), n)
+		copy(buf, src[:n])
+	}
+	return n
+}
+
+//export moxie_loader_load
+func moxie_loader_load(rootDirPtr unsafe.Pointer, rootDirLen int32, inputPkgPtr unsafe.Pointer, inputPkgLen int32, gorootPtr unsafe.Pointer, gorootLen int32) int32 {
+	runtime.InitCShared()
+	rootDir := string(unsafe.Slice((*byte)(rootDirPtr), rootDirLen))
+	inputPkg := string(unsafe.Slice((*byte)(inputPkgPtr), inputPkgLen))
+	goroot := string(unsafe.Slice((*byte)(gorootPtr), gorootLen))
+
+	prog, err := LoadPackages(rootDir, inputPkg, goroot)
+	if err != nil || prog == nil {
+		return -1
+	}
+	return allocLoaderHandle(prog)
+}
+
+//export moxie_loader_pkg_count
+func moxie_loader_pkg_count(h int32) int32 {
+	runtime.InitCShared()
+	p := getLoader(h)
+	if p == nil {
+		return 0
+	}
+	return int32(len(p.Packages))
+}
+
+//export moxie_loader_mod_path
+func moxie_loader_mod_path(h int32, out unsafe.Pointer, cap int32) int32 {
+	runtime.InitCShared()
+	p := getLoader(h)
+	if p == nil {
+		return 0
+	}
+	return loaderCopyOut(out, cap, p.ModPath)
+}
+
+//export moxie_loader_pkg_path
+func moxie_loader_pkg_path(h int32, idx int32, out unsafe.Pointer, cap int32) int32 {
+	runtime.InitCShared()
+	p := getLoader(h)
+	if p == nil || idx < 0 || int32(idx) >= len(p.Packages) {
+		return 0
+	}
+	return loaderCopyOut(out, cap, p.Packages[idx].ImportPath)
+}
+
+//export moxie_loader_pkg_dir
+func moxie_loader_pkg_dir(h int32, idx int32, out unsafe.Pointer, cap int32) int32 {
+	runtime.InitCShared()
+	p := getLoader(h)
+	if p == nil || idx < 0 || int32(idx) >= len(p.Packages) {
+		return 0
+	}
+	return loaderCopyOut(out, cap, p.Packages[idx].Dir)
+}
+
+//export moxie_loader_pkg_name
+func moxie_loader_pkg_name(h int32, idx int32, out unsafe.Pointer, cap int32) int32 {
+	runtime.InitCShared()
+	p := getLoader(h)
+	if p == nil || idx < 0 || int32(idx) >= len(p.Packages) {
+		return 0
+	}
+	return loaderCopyOut(out, cap, p.Packages[idx].PkgName)
+}
+
+//export moxie_loader_pkg_file_count
+func moxie_loader_pkg_file_count(h int32, idx int32) int32 {
+	runtime.InitCShared()
+	p := getLoader(h)
+	if p == nil || idx < 0 || int32(idx) >= len(p.Packages) {
+		return 0
+	}
+	return int32(len(p.Packages[idx].Files))
+}
+
+//export moxie_loader_pkg_import_count
+func moxie_loader_pkg_import_count(h int32, idx int32) int32 {
+	runtime.InitCShared()
+	p := getLoader(h)
+	if p == nil || idx < 0 || int32(idx) >= len(p.Packages) {
+		return 0
+	}
+	return int32(len(p.Packages[idx].Imports))
+}
+
+//export moxie_loader_pkg_import
+func moxie_loader_pkg_import(h int32, idx int32, impIdx int32, out unsafe.Pointer, cap int32) int32 {
+	runtime.InitCShared()
+	p := getLoader(h)
+	if p == nil || idx < 0 || int32(idx) >= len(p.Packages) {
+		return 0
+	}
+	pkg := p.Packages[idx]
+	if impIdx < 0 || int32(impIdx) >= len(pkg.Imports) {
+		return 0
+	}
+	return loaderCopyOut(out, cap, pkg.Imports[impIdx])
+}
+
+//export moxie_loader_pkg_is_mxh
+func moxie_loader_pkg_is_mxh(h int32, idx int32) int32 {
+	runtime.InitCShared()
+	p := getLoader(h)
+	if p == nil || idx < 0 || int32(idx) >= len(p.Packages) {
+		return 0
+	}
+	if p.Packages[idx].IsMXH {
+		return 1
+	}
+	return 0
+}
+
+//export moxie_loader_free
+func moxie_loader_free(h int32) {
+	runtime.InitCShared()
+	if h >= 0 && int32(h) < len(loaderHandles) {
+		loaderHandles[h] = nil
+	}
+}
+
+func main() {}

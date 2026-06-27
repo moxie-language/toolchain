@@ -1,0 +1,461 @@
+package main
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+)
+
+// LoaderPackage holds metadata for a discovered package.
+type LoaderPackage struct {
+	Dir        string
+	ImportPath string
+	PkgName    string
+	Files      []string
+	Imports    []string
+	IsMXH      bool
+}
+
+// LoaderProgram holds the result of loading a package and its dependencies.
+type LoaderProgram struct {
+	ModPath  string
+	ModDir   string
+	Packages []*LoaderPackage
+}
+
+type loaderResolver struct {
+	modPath  string
+	modDir   string
+	goroot   string
+	modCache string
+	requires map[string]string
+	replaces map[string]string
+	mxhDir   string
+	seen     map[string]*LoaderPackage
+	sorted   []*LoaderPackage
+}
+
+// LoadPackages discovers a package and its transitive dependencies,
+// returning them in dependency order. rootDir is the working directory,
+// inputPkg is the import path or "." for the package in rootDir.
+// goroot is the path to the Moxie GOROOT (or synthetic merged GOROOT).
+func LoadPackages(rootDir string, inputPkg string, goroot string) (*LoaderProgram, error) {
+	InitKeywords()
+	modPath, modDir, err := loaderReadModInfo(rootDir)
+	if err != nil {
+		return nil, err
+	}
+
+	modFile := loaderFindModFile(modDir)
+	requires := loaderReadModRequires(modFile)
+	replaces := loaderReadModReplaces(modFile, modDir)
+
+	r := &loaderResolver{
+		modPath:  modPath,
+		modDir:   modDir,
+		goroot:   goroot,
+		modCache: loaderModCache(),
+		requires: requires,
+		replaces: replaces,
+		mxhDir:   loaderMXHDir(),
+		seen:     map[string]*LoaderPackage{},
+	}
+
+	// Walk runtime as implicit dependency.
+	r.walk("runtime", "")
+	r.walk("moxie", "")
+
+	// Resolve input package.
+	if inputPkg == "." {
+		inputPkg = modPath
+	} else if bytes.HasPrefix(inputPkg, "./") {
+		rel := inputPkg[2:]
+		inputPkg = modPath | "/" | rel
+	}
+
+	r.walk(inputPkg, rootDir)
+
+	return &LoaderProgram{
+		ModPath:  modPath,
+		ModDir:   modDir,
+		Packages: r.sorted,
+	}, nil
+}
+
+func (r *loaderResolver) walk(importPath string, srcDir string) {
+	if r.seen[importPath] != nil {
+		return
+	}
+	if importPath == "C" {
+		return
+	}
+	if importPath == "unsafe" {
+		pj := &LoaderPackage{
+			ImportPath: "unsafe",
+			PkgName:    "unsafe",
+		}
+		r.seen[importPath] = pj
+		r.sorted = append(r.sorted, pj)
+		return
+	}
+
+	// Mark to break cycles.
+	r.seen[importPath] = &LoaderPackage{}
+
+	dir := r.resolveDir(importPath, srcDir)
+	if dir == "" {
+		// Check .mxh cache.
+		if r.mxhDir != "" {
+			mxhPath := filepath.Join(r.mxhDir, importPath|".mxh")
+			if loaderFileExists(mxhPath) {
+				idx := bytes.LastIndex(importPath, "/")
+				name := importPath
+				if idx >= 0 {
+					name = importPath[idx+1:]
+				}
+				pj := &LoaderPackage{
+					ImportPath: importPath,
+					PkgName:    name,
+					IsMXH:      true,
+				}
+				r.seen[importPath] = pj
+				r.sorted = append(r.sorted, pj)
+				return
+			}
+		}
+		// Package not found - create stub.
+		pj := &LoaderPackage{
+			ImportPath: importPath,
+			PkgName:    importPath,
+		}
+		r.seen[importPath] = pj
+		r.sorted = append(r.sorted, pj)
+		return
+	}
+
+	// Discover .mx files and extract imports.
+	files, imports, pkgName := loaderScanDir(dir)
+
+	// Walk dependencies first (depth-first).
+	for _, imp := range imports {
+		r.walk(imp, dir)
+	}
+
+	pj := &LoaderPackage{
+		Dir:        dir,
+		ImportPath: importPath,
+		PkgName:    pkgName,
+		Files:      files,
+		Imports:    imports,
+	}
+	r.seen[importPath] = pj
+	r.sorted = append(r.sorted, pj)
+}
+
+func (r *loaderResolver) resolveDir(importPath string, srcDir string) string {
+	// Local/relative.
+	if importPath == "." || bytes.HasPrefix(importPath, "./") || bytes.HasPrefix(importPath, "../") {
+		return filepath.Join(srcDir, importPath)
+	}
+
+	// Stdlib.
+	if r.goroot != "" {
+		stdDir := filepath.Join(r.goroot, "src", importPath)
+		if loaderIsDir(stdDir) {
+			return stdDir
+		}
+		stdVendorDir := filepath.Join(r.goroot, "src", "vendor", importPath)
+		if loaderIsDir(stdVendorDir) {
+			return stdVendorDir
+		}
+	}
+
+	// Module-local.
+	if r.modPath != "" && (bytes.HasPrefix(importPath, r.modPath|"/") || importPath == r.modPath) {
+		rel := bytes.TrimPrefix(importPath, r.modPath)
+		rel = bytes.TrimPrefix(rel, "/")
+		dir := filepath.Join(r.modDir, rel)
+		if loaderIsDir(dir) {
+			return dir
+		}
+	}
+
+	// Replace directives.
+	for mod, localDir := range r.replaces {
+		if importPath == mod || bytes.HasPrefix(importPath, mod|"/") {
+			rel := bytes.TrimPrefix(importPath, mod)
+			rel = bytes.TrimPrefix(rel, "/")
+			dir := filepath.Join(localDir, rel)
+			if loaderIsDir(dir) {
+				return dir
+			}
+		}
+	}
+
+	// Vendor.
+	if r.modDir != "" {
+		vendorDir := filepath.Join(r.modDir, "vendor", importPath)
+		if loaderIsDir(vendorDir) {
+			return vendorDir
+		}
+	}
+
+	// Module cache.
+	bestMod := ""
+	bestVer := ""
+	for mod, ver := range r.requires {
+		if (importPath == mod || bytes.HasPrefix(importPath, mod|"/")) && len(mod) > len(bestMod) {
+			bestMod = mod
+			bestVer = ver
+		}
+	}
+	if bestMod != "" {
+		modCacheDir := filepath.Join(r.modCache, bestMod|"@"|bestVer)
+		rel := bytes.TrimPrefix(importPath, bestMod)
+		rel = bytes.TrimPrefix(rel, "/")
+		dir := filepath.Join(modCacheDir, rel)
+		if loaderIsDir(dir) {
+			return dir
+		}
+	}
+
+	return ""
+}
+
+// loaderScanDir reads all .mx files in dir, parses them to extract
+// the package name and unique imports. Returns (files, imports, pkgName).
+func loaderScanDir(dir string) ([]string, []string, string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil, ""
+	}
+
+	var files []string
+	var pkgName string
+	importSet := map[string]bool{}
+
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() {
+			continue
+		}
+		if !bytes.HasSuffix(name, ".mx") && !bytes.HasSuffix(name, ".go") {
+			continue
+		}
+		// Skip test files.
+		if bytes.HasSuffix(name, "_test.mx") || bytes.HasSuffix(name, "_test.go") {
+			continue
+		}
+
+		files = append(files, name)
+
+		// Parse to get package name and imports.
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		pn, imps := loaderExtractImports(data, name)
+		if pn != "" && pkgName == "" {
+			pkgName = pn
+		}
+		for _, imp := range imps {
+			importSet[imp] = true
+		}
+	}
+
+	var imports []string
+	for imp := range importSet {
+		imports = append(imports, imp)
+	}
+
+	return files, imports, pkgName
+}
+
+// loaderExtractImports parses Moxie source to extract the package name and
+// import paths. Uses our built-in parser.
+func loaderExtractImports(src []byte, name string) (string, []string) {
+	r := bytes.NewReader(src)
+	f, err := Parse(NewFileBase(name), r, nil, nil, 0)
+	if err != nil || f == nil {
+		return "", nil
+	}
+
+	pkgName := ""
+	if f.PkgName != nil {
+		pkgName = f.PkgName.Value
+	}
+
+	var imports []string
+	for _, d := range f.DeclList {
+		imp, ok := d.(*ImportDecl)
+		if !ok {
+			continue
+		}
+		if imp.Path == nil {
+			continue
+		}
+		path := imp.Path.Value
+		// Strip quotes.
+		if len(path) >= 2 && path[0] == '"' {
+			path = path[1 : len(path)-1]
+		}
+		if path != "" {
+			imports = append(imports, path)
+		}
+	}
+	return pkgName, imports
+}
+
+// Module file helpers.
+
+func loaderFindModFile(dir string) string {
+	mxmod := filepath.Join(dir, "moxie.mod")
+	if loaderFileExists(mxmod) {
+		return mxmod
+	}
+	return filepath.Join(dir, "go.mod")
+}
+
+func loaderReadModInfo(startDir string) (string, string, error) {
+	dir := startDir
+	for {
+		modFile := loaderFindModFile(dir)
+		data, err := os.ReadFile(modFile)
+		if err == nil {
+			modPath := loaderParseModPath(string(data))
+			return modPath, dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", startDir, nil
+		}
+		dir = parent
+	}
+}
+
+func loaderParseModPath(content string) string {
+	for _, line := range bytes.Split(content, "\n") {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, "module ") {
+			return bytes.TrimSpace(line[7:])
+		}
+	}
+	return ""
+}
+
+func loaderReadModRequires(modFile string) map[string]string {
+	data, err := os.ReadFile(modFile)
+	if err != nil {
+		return map[string]string{}
+	}
+	requires := map[string]string{}
+	inRequire := false
+	for _, line := range bytes.Split(string(data), "\n") {
+		line = bytes.TrimSpace(line)
+		if line == ")" {
+			inRequire = false
+			continue
+		}
+		if bytes.HasPrefix(line, "require (") {
+			inRequire = true
+			continue
+		}
+		if bytes.HasPrefix(line, "require ") && !bytes.Contains(line, "(") {
+			parts := bytes.Fields(line)
+			if len(parts) >= 3 {
+				requires[parts[1]] = parts[2]
+			}
+			continue
+		}
+		if inRequire {
+			parts := bytes.Fields(line)
+			if len(parts) >= 2 && !bytes.HasPrefix(parts[0], "//") {
+				requires[parts[0]] = parts[1]
+			}
+		}
+	}
+	return requires
+}
+
+func loaderReadModReplaces(modFile string, modDir string) map[string]string {
+	data, err := os.ReadFile(modFile)
+	if err != nil {
+		return map[string]string{}
+	}
+	replaces := map[string]string{}
+	inReplace := false
+	for _, line := range bytes.Split(string(data), "\n") {
+		line = bytes.TrimSpace(line)
+		if line == ")" {
+			inReplace = false
+			continue
+		}
+		if bytes.HasPrefix(line, "replace (") {
+			inReplace = true
+			continue
+		}
+		parseLine := ""
+		if bytes.HasPrefix(line, "replace ") && !bytes.Contains(line, "(") {
+			parseLine = line[8:]
+		} else if inReplace && !bytes.HasPrefix(line, "//") && line != "" {
+			parseLine = line
+		}
+		if parseLine == "" {
+			continue
+		}
+		parts := bytes.Split(parseLine, "=>")
+		if len(parts) != 2 {
+			continue
+		}
+		lhsParts := bytes.Fields(bytes.TrimSpace(parts[0]))
+		rhsParts := bytes.Fields(bytes.TrimSpace(parts[1]))
+		if len(lhsParts) < 1 || len(rhsParts) < 1 {
+			continue
+		}
+		replacePath := rhsParts[0]
+		if bytes.HasPrefix(replacePath, ".") || bytes.HasPrefix(replacePath, "/") {
+			if !filepath.IsAbs(replacePath) {
+				replacePath = filepath.Join(modDir, replacePath)
+			}
+			replaces[lhsParts[0]] = filepath.Clean(replacePath)
+		}
+	}
+	return replaces
+}
+
+func loaderModCache() string {
+	home := os.Getenv("HOME")
+	if home == "" {
+		return ""
+	}
+	gopath := os.Getenv("GOPATH")
+	if gopath == "" {
+		gopath = filepath.Join(home, "go")
+	}
+	return filepath.Join(gopath, "pkg", "mod")
+}
+
+func loaderMXHDir() string {
+	cacheDir := os.Getenv("GOCACHE")
+	if cacheDir == "" {
+		home := os.Getenv("HOME")
+		if home != "" {
+			cacheDir = filepath.Join(home, ".cache", "go-build")
+		}
+	}
+	if cacheDir != "" {
+		return filepath.Join(cacheDir, "mxinstall", "protocols")
+	}
+	return ""
+}
+
+func loaderIsDir(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
+}
+
+func loaderFileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}

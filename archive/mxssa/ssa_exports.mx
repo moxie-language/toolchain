@@ -1,0 +1,430 @@
+package main
+
+import (
+	"bytes"
+	"runtime"
+	"unsafe"
+)
+
+var ssaProgHandles []*SSAProgram
+var ssaPkgHandles []*SSAPackage
+
+func allocSSAProgHandle(p *SSAProgram) int32 {
+	for i, h := range ssaProgHandles {
+		if h == nil {
+			ssaProgHandles[i] = p
+			return int32(i)
+		}
+	}
+	ssaProgHandles = append(ssaProgHandles, p)
+	return int32(len(ssaProgHandles) - 1)
+}
+
+func getSSAProg(h int32) *SSAProgram {
+	if h < 0 || int32(h) >= len(ssaProgHandles) {
+		return nil
+	}
+	return ssaProgHandles[h]
+}
+
+func allocSSAPkgHandle(p *SSAPackage) int32 {
+	for i, h := range ssaPkgHandles {
+		if h == nil {
+			ssaPkgHandles[i] = p
+			return int32(i)
+		}
+	}
+	ssaPkgHandles = append(ssaPkgHandles, p)
+	return int32(len(ssaPkgHandles) - 1)
+}
+
+func getSSAPkg(h int32) *SSAPackage {
+	if h < 0 || int32(h) >= len(ssaPkgHandles) {
+		return nil
+	}
+	return ssaPkgHandles[h]
+}
+
+func ssaCopyOut(dst unsafe.Pointer, cap int32, src string) int32 {
+	n := int32(len(src))
+	if n > cap {
+		n = cap
+	}
+	if n > 0 {
+		buf := unsafe.Slice((*byte)(dst), n)
+		copy(buf, src[:n])
+	}
+	return n
+}
+
+//export moxie_ssa_new_program
+func moxie_ssa_new_program() int32 {
+	runtime.InitCShared()
+	prog := NewSSAProgram()
+	return allocSSAProgHandle(prog)
+}
+
+//export moxie_ssa_build_package
+func moxie_ssa_build_package(progH int32, srcPtr unsafe.Pointer, srcLen int32, namePtr unsafe.Pointer, nameLen int32) int32 {
+	runtime.InitCShared()
+	initUniverse()
+	InitKeywords()
+	prog := getSSAProg(progH)
+	if prog == nil {
+		return -1
+	}
+	src := unsafe.Slice((*byte)(srcPtr), srcLen)
+	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
+	r := bytes.NewReader(src)
+	f, err := Parse(NewFileBase(name), r, nil, nil, 0)
+	if err != nil || f == nil {
+		return -2
+	}
+
+	pkg := NewTCPackage(name, packageName([]*File{f}))
+	scope := pkg.Scope()
+	for _, d := range f.DeclList {
+		switch d := d.(type) {
+		case *VarDecl:
+			for _, n := range d.NameList {
+				scope.Insert(NewTCVar(pkg, n.Value, nil))
+			}
+		case *FuncDecl:
+			if d.Recv == nil && d.Name.Value != "init" {
+				scope.Insert(NewTCFunc(pkg, d.Name.Value, nil))
+			}
+		case *TypeDecl:
+			scope.Insert(NewTypeName(pkg, d.Name.Value, nil))
+		case *ConstDecl:
+			for _, n := range d.NameList {
+				scope.Insert(NewTCConst(pkg, n.Value, nil, nil))
+			}
+		}
+	}
+
+	for _, d := range f.DeclList {
+		switch d := d.(type) {
+		case *VarDecl:
+			typ := tcResolveNameInline(d.Type)
+			for _, n := range d.NameList {
+				obj := scope.Lookup(n.Value)
+				if obj != nil {
+					if v, ok := obj.(*TCVar); ok {
+						v.typ = typ
+					}
+				}
+			}
+		case *FuncDecl:
+			if d.Recv == nil && d.Name.Value != "init" {
+				sig := tcResolveFuncInline(d.Type)
+				obj := scope.Lookup(d.Name.Value)
+				if obj != nil {
+					if fn, ok := obj.(*TCFunc); ok && sig != nil {
+						fn.typ = sig
+					}
+				}
+			}
+		case *TypeDecl:
+			typ := tcResolveNameInline(d.Type)
+			obj := scope.Lookup(d.Name.Value)
+			if obj != nil {
+				if tn, ok := obj.(*TypeName); ok {
+					tn.typ = typ
+				}
+			}
+		}
+	}
+
+	ssaPkg := prog.CreatePackage(pkg, []*File{f}, nil)
+	return allocSSAPkgHandle(ssaPkg)
+}
+
+//export moxie_ssa_pkg_member_count
+func moxie_ssa_pkg_member_count(h int32) int32 {
+	runtime.InitCShared()
+	p := getSSAPkg(h)
+	if p == nil {
+		return 0
+	}
+	return int32(len(p.Members))
+}
+
+var cachedSSAMemberNames [][]string
+
+func getSSAMemberNames(h int32) []string {
+	for int32(h) >= len(cachedSSAMemberNames) {
+		cachedSSAMemberNames = append(cachedSSAMemberNames, nil)
+	}
+	if cachedSSAMemberNames[h] == nil {
+		p := getSSAPkg(h)
+		if p == nil {
+			return nil
+		}
+		var names []string
+		for name := range p.Members {
+			names = append(names, name)
+		}
+		cachedSSAMemberNames[h] = names
+	}
+	return cachedSSAMemberNames[h]
+}
+
+//export moxie_ssa_pkg_member_name
+func moxie_ssa_pkg_member_name(h int32, idx int32, out unsafe.Pointer, cap int32) int32 {
+	runtime.InitCShared()
+	names := getSSAMemberNames(h)
+	if idx < 0 || int32(idx) >= len(names) {
+		return 0
+	}
+	return ssaCopyOut(out, cap, names[idx])
+}
+
+//export moxie_ssa_member_kind
+func moxie_ssa_member_kind(pkgH int32, namePtr unsafe.Pointer, nameLen int32) int32 {
+	runtime.InitCShared()
+	p := getSSAPkg(pkgH)
+	if p == nil {
+		return 0
+	}
+	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
+	m := p.Members[name]
+	if m == nil {
+		return 0
+	}
+	switch m.(type) {
+	case *SSAFunction:
+		return 1
+	case *SSAGlobal:
+		return 2
+	case *SSAType_:
+		return 3
+	case *SSANamedConst:
+		return 4
+	}
+	return 0
+}
+
+//export moxie_ssa_func_block_count
+func moxie_ssa_func_block_count(pkgH int32, namePtr unsafe.Pointer, nameLen int32) int32 {
+	runtime.InitCShared()
+	p := getSSAPkg(pkgH)
+	if p == nil {
+		return -1
+	}
+	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
+	fn := p.Func(name)
+	if fn == nil {
+		return -1
+	}
+	return int32(len(fn.Blocks))
+}
+
+//export moxie_ssa_func_param_count
+func moxie_ssa_func_param_count(pkgH int32, namePtr unsafe.Pointer, nameLen int32) int32 {
+	runtime.InitCShared()
+	p := getSSAPkg(pkgH)
+	if p == nil {
+		return -1
+	}
+	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
+	fn := p.Func(name)
+	if fn == nil {
+		return -1
+	}
+	return int32(len(fn.Params))
+}
+
+//export moxie_ssa_func_local_count
+func moxie_ssa_func_local_count(pkgH int32, namePtr unsafe.Pointer, nameLen int32) int32 {
+	runtime.InitCShared()
+	p := getSSAPkg(pkgH)
+	if p == nil {
+		return -1
+	}
+	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
+	fn := p.Func(name)
+	if fn == nil {
+		return -1
+	}
+	return int32(len(fn.Locals))
+}
+
+//export moxie_ssa_block_instr_count
+func moxie_ssa_block_instr_count(pkgH int32, namePtr unsafe.Pointer, nameLen int32, blockIdx int32) int32 {
+	runtime.InitCShared()
+	p := getSSAPkg(pkgH)
+	if p == nil {
+		return -1
+	}
+	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
+	fn := p.Func(name)
+	if fn == nil || blockIdx < 0 || int32(blockIdx) >= len(fn.Blocks) {
+		return -1
+	}
+	return int32(len(fn.Blocks[blockIdx].Instrs))
+}
+
+//export moxie_ssa_instr_string
+func moxie_ssa_instr_string(pkgH int32, namePtr unsafe.Pointer, nameLen int32, blockIdx int32, instrIdx int32, out unsafe.Pointer, cap int32) int32 {
+	runtime.InitCShared()
+	p := getSSAPkg(pkgH)
+	if p == nil {
+		return 0
+	}
+	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
+	fn := p.Func(name)
+	if fn == nil || blockIdx < 0 || int32(blockIdx) >= len(fn.Blocks) {
+		return 0
+	}
+	blk := fn.Blocks[blockIdx]
+	if instrIdx < 0 || int32(instrIdx) >= len(blk.Instrs) {
+		return 0
+	}
+	return ssaCopyOut(out, cap, blk.Instrs[instrIdx].InstrString())
+}
+
+//export moxie_ssa_func_type
+func moxie_ssa_func_type(pkgH int32, namePtr unsafe.Pointer, nameLen int32, out unsafe.Pointer, cap int32) int32 {
+	runtime.InitCShared()
+	p := getSSAPkg(pkgH)
+	if p == nil {
+		return 0
+	}
+	name := string(unsafe.Slice((*byte)(namePtr), nameLen))
+	fn := p.Func(name)
+	if fn == nil || fn.Signature == nil {
+		return 0
+	}
+	return ssaCopyOut(out, cap, fn.Signature.String())
+}
+
+//export moxie_ssa_free_pkg
+func moxie_ssa_free_pkg(h int32) {
+	runtime.InitCShared()
+	if h >= 0 && int32(h) < len(ssaPkgHandles) {
+		ssaPkgHandles[h] = nil
+	}
+	if h >= 0 && int32(h) < len(cachedSSAMemberNames) {
+		cachedSSAMemberNames[h] = nil
+	}
+}
+
+//export moxie_ssa_free_prog
+func moxie_ssa_free_prog(h int32) {
+	runtime.InitCShared()
+	if h >= 0 && int32(h) < len(ssaProgHandles) {
+		ssaProgHandles[h] = nil
+	}
+}
+
+func tcResolveNameInline(e Expr) Type {
+	if e == nil {
+		return nil
+	}
+	switch e := e.(type) {
+	case *Name:
+		_, obj := Universe.LookupParent(e.Value)
+		if obj != nil {
+			if tn, ok := obj.(*TypeName); ok {
+				return tn.typ
+			}
+		}
+	case *Operation:
+		if e.Y == nil && e.Op == Mul {
+			base := tcResolveNameInline(e.X)
+			if base != nil {
+				return NewPointer(base)
+			}
+		}
+	case *SliceType:
+		elem := tcResolveNameInline(e.Elem)
+		if elem != nil {
+			if b, ok := elem.(*Basic); ok && b.kind == Uint8 {
+				return Typ[TCString]
+			}
+			return NewSlice(elem)
+		}
+	case *ArrayType:
+		elem := tcResolveNameInline(e.Elem)
+		if elem != nil {
+			return NewArray(elem, -1)
+		}
+	case *MapType:
+		key := tcResolveNameInline(e.Key)
+		val := tcResolveNameInline(e.Value)
+		if key != nil && val != nil {
+			return NewTCMap(key, val)
+		}
+	case *StructType:
+		var fields []*TCVar
+		var tags []string
+		for i, field := range e.FieldList {
+			typ := tcResolveNameInline(field.Type)
+			fname := ""
+			if field.Name != nil {
+				fname = field.Name.Value
+			} else {
+				fname = typeBaseName(typ)
+			}
+			fields = append(fields, NewTCField(nil, fname, typ, field.Name == nil))
+			tag := ""
+			if i < len(e.TagList) && e.TagList[i] != nil {
+				tag = e.TagList[i].Value
+			}
+			tags = append(tags, tag)
+		}
+		return NewTCStruct(fields, tags)
+	case *FuncType:
+		return tcResolveFuncInline(e)
+	case *DotsType:
+		elem := tcResolveNameInline(e.Elem)
+		if elem != nil {
+			if b, ok := elem.(*Basic); ok && b.kind == Uint8 {
+				return Typ[TCString]
+			}
+			return NewSlice(elem)
+		}
+	}
+	return nil
+}
+
+func tcResolveFuncInline(ft *FuncType) *Signature {
+	if ft == nil {
+		return nil
+	}
+	var params []*TCVar
+	for _, p := range ft.ParamList {
+		typ := tcResolveNameInline(p.Type)
+		pname := ""
+		if p.Name != nil {
+			pname = p.Name.Value
+		}
+		params = append(params, NewTCVar(nil, pname, typ))
+	}
+	var results []*TCVar
+	for _, r := range ft.ResultList {
+		typ := tcResolveNameInline(r.Type)
+		rname := ""
+		if r.Name != nil {
+			rname = r.Name.Value
+		}
+		results = append(results, NewTCVar(nil, rname, typ))
+	}
+	variadic := false
+	if len(ft.ParamList) > 0 {
+		if _, ok := ft.ParamList[len(ft.ParamList)-1].Type.(*DotsType); ok {
+			variadic = true
+		}
+	}
+	var pTuple *Tuple
+	if len(params) > 0 {
+		pTuple = NewTuple(params...)
+	}
+	var rTuple *Tuple
+	if len(results) > 0 {
+		rTuple = NewTuple(results...)
+	}
+	return NewSignature(nil, pTuple, rTuple, variadic)
+}
+
+func main() {}
