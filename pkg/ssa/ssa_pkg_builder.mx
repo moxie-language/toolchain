@@ -16,7 +16,7 @@ func (prog *SSAProgram) CreatePackage(pkg *types.TCPackage, files []*syntax.File
 		Members: map[string]SSAMember{},
 	}
 	prog.packages[pkg] = p
-	prog.imported[pkg.Path()] = p
+	prog.imported[pkg.Path] = p
 
 	pb := &ssaPkgBuilder{pkg: p, info: info, prog: prog}
 
@@ -119,13 +119,13 @@ func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t types.Type) {
 	case *syntax.Name:
 		if _, obj := types.Universe.LookupParent(e.Value); obj != nil {
 			if tn, ok := obj.(*types.TypeName); ok {
-				return tn.Type()
+				return tn.Typ
 			}
 		}
 		if pkg != nil {
 			obj := pkg.Pkg.Scope().Lookup(e.Value)
 			if tn, ok := obj.(*types.TypeName); ok {
-				return tn.Type()
+				return tn.Typ
 			}
 		}
 	case *syntax.Operation:
@@ -166,7 +166,7 @@ func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t types.Type) {
 			if pn != nil && pn.Imported() != nil {
 				sel := pn.Imported().Scope().Lookup(e.Sel.Value)
 				if tn, ok2 := sel.(*types.TypeName); ok2 {
-					return tn.Type()
+					return tn.Typ
 				}
 			}
 		}
@@ -240,7 +240,7 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 	}
 	var sig *types.Signature
 	if obj != nil {
-		sig, _ = obj.Type().(*types.Signature)
+		sig, _ = obj.Typ.(*types.Signature)
 	}
 	if sig == nil && d.Type != nil {
 		sig = pkgResolveSigAST(pb.pkg, d.Type)
@@ -259,7 +259,7 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 			fn.isExternC = true
 		}
 	}
-	if d.Body == nil && isNoContextExtern(pb.pkg.Pkg.Path(), d.Name.Value) {
+	if d.Body == nil && isNoContextExtern(pb.pkg.Pkg.Path, d.Name.Value) {
 		fn.isExternC = true
 	}
 	pb.pkg.Members[fn.name] = fn
@@ -361,7 +361,7 @@ func (pb *ssaPkgBuilder) registerMethod(d *syntax.FuncDecl) {
 	obj = pb.findMethod(recvTypeName, d.Name.Value)
 	var sig *types.Signature
 	if obj != nil {
-		sig, _ = obj.Type().(*types.Signature)
+		sig, _ = obj.Typ.(*types.Signature)
 	}
 	if sig == nil && d.Type != nil {
 		sig = pkgResolveSigAST(pb.pkg, d.Type)
@@ -406,18 +406,18 @@ func (pb *ssaPkgBuilder) findMethod(typeName string, methodName string) (t *type
 	if !ok {
 		return nil
 	}
-	switch t := tn.Type().(type) {
+	switch t := tn.Typ.(type) {
 	case *types.Named:
 		for i := int32(0); i < t.NumMethods(); i++ {
 			m := t.Method(i)
-			if m.Name() == methodName {
+			if m.Name == methodName {
 				return m
 			}
 		}
 	case *types.Basic:
 		for i := int32(0); i < t.NumMethods(); i++ {
 			m := t.Method(i)
-			if m.Name() == methodName {
+			if m.Name == methodName {
 				return m
 			}
 		}
@@ -433,7 +433,7 @@ func (pb *ssaPkgBuilder) registerVar(d *syntax.VarDecl) {
 		}
 		var typ types.Type
 		if obj != nil {
-			typ = obj.Type()
+			typ = obj.Typ
 		}
 		if typ == nil && d.Type != nil {
 			typ = pkgResolveTypeAST(pb.pkg, d.Type)
@@ -485,7 +485,7 @@ func (pb *ssaPkgBuilder) registerConst(d *syntax.ConstDecl) {
 		}
 		c := &SSANamedConst{
 			object: obj,
-			Value:  &SSAConst{typ: obj.Type(), val: localizeConstVal(obj.Val(), obj.Type())},
+			Value:  &SSAConst{typ: obj.Typ, val: localizeConstVal(obj.Val(), obj.Typ)},
 			pkg:    pb.pkg,
 		}
 		pb.pkg.Members[name.Value] = c

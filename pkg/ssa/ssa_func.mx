@@ -69,21 +69,21 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 	if d.Recv != nil {
 		recv := sig.Recv()
 		if recv != nil {
-			recvName := recv.Name()
+			recvName := recv.Name
 			if recvName == "" && d.Recv.Name != nil {
 				recvName = d.Recv.Name.Value
 			}
 			p := &SSAParameter{
 				name:   recvName,
-				typ:    recv.Type(),
+				typ:    recv.Typ,
 				pos:    0,
 				parent: fb.fn,
 			}
 			fb.fn.Params = append(fb.fn.Params, p)
 			if recvName != "" && recvName != "_" {
-				recvObj := types.NewTCVar(fb.fn.Pkg.Pkg, recvName, recv.Type())
+				recvObj := types.NewTCVar(fb.fn.Pkg.Pkg, recvName, recv.Typ)
 				p.object = recvObj
-				alloc := fb.emitAlloc(recv.Type(), 0)
+				alloc := fb.emitAlloc(recv.Typ, 0)
 				fb.vars[recvObj] = alloc
 				fb.paramAllocas = append(fb.paramAllocas, alloc)
 				fb.emitStore(alloc, p)
@@ -94,15 +94,15 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 		for i := 0; i < params.Len(); i++ {
 			pvar := params.At(i)
 			p := &SSAParameter{
-				name:   pvar.Name(),
-				typ:    pvar.Type(),
+				name:   pvar.Name,
+				typ:    pvar.Typ,
 				pos:    fb.fn.pos,
 				parent: fb.fn,
 			}
 			fb.fn.Params = append(fb.fn.Params, p)
-			if pvar.Name() != "" && pvar.Name() != "_" {
-				obj := types.NewTCVar(fb.fn.Pkg.Pkg, pvar.Name(), pvar.Type())
-				alloc := fb.emitAlloc(pvar.Type(), p.pos)
+			if pvar.Name != "" && pvar.Name != "_" {
+				obj := types.NewTCVar(fb.fn.Pkg.Pkg, pvar.Name, pvar.Typ)
+				alloc := fb.emitAlloc(pvar.Typ, p.pos)
 				fb.vars[obj] = alloc
 				fb.paramAllocas = append(fb.paramAllocas, alloc)
 				fb.emitStore(alloc, p)
@@ -113,8 +113,8 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 	if sig.Results() != nil {
 		for i := 0; i < sig.Results().Len(); i++ {
 			r := sig.Results().At(i)
-			if r.Name() != "" && r.Name() != "_" {
-				alloc := fb.emitAlloc(r.Type(), fb.fn.pos)
+			if r.Name != "" && r.Name != "_" {
+				alloc := fb.emitAlloc(r.Typ, fb.fn.pos)
 				fb.namedResults = append(fb.namedResults, alloc)
 				fb.fn.Locals = append(fb.fn.Locals, alloc)
 				fb.vars[r] = alloc
@@ -414,10 +414,10 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 			return
 		}
 		if alloc, ok := fb.vars[obj]; ok {
-			val = fb.coerceToInterface(val, obj.Type())
+			val = fb.coerceToInterface(val, obj.Typ)
 			fb.emitStore(alloc, val)
 		} else if fv, ok := fb.freeVarPtrs[lhs.Value]; ok {
-			val = fb.coerceToInterface(val, obj.Type())
+			val = fb.coerceToInterface(val, obj.Typ)
 			fb.emitStore(fv, val)
 		} else if g, ok := fb.fn.Pkg.Members[lhs.Value].(*SSAGlobal); ok {
 			if p, ok2 := g.SSAType().(*types.Pointer); ok2 && p.Elem() != nil {
@@ -619,7 +619,7 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *syntax.AssignStmt) {
 		var typ types.Type
 		if rhs != nil {
 			if isTuple && i < tup.Len() {
-				typ = tup.At(i).Type()
+				typ = tup.At(i).Typ
 			} else if i == 0 {
 				typ = rhs.SSAType()
 			}
@@ -632,7 +632,7 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *syntax.AssignStmt) {
 				} else if tup2, ok2 := rhs.SSAType().(*types.Tuple); ok2 {
 					rhsInfo = "tuple[" | simpleItoa(tup2.Len()) | "] i=" | simpleItoa(i)
 					if i < tup2.Len() {
-						if tup2.At(i).Type() == nil {
+						if tup2.At(i).Typ == nil {
 							rhsInfo = rhsInfo | " At.Type=nil"
 						} else {
 							rhsInfo = rhsInfo | " At.Type=set"
@@ -678,7 +678,7 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 		var typ types.Type
 		if fb.info != nil && len(d.NameList) > 0 {
 			if obj := fb.info.Defs[d.NameList[0]]; obj != nil {
-				typ = obj.Type()
+				typ = obj.Typ
 			}
 		}
 		if typ == nil && d.Type != nil {
@@ -697,14 +697,14 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			if obj == nil {
 				obj = types.NewTCVar(fb.fn.Pkg.Pkg, name.Value, typ)
 			}
-			alloc := fb.emitAlloc(obj.Type(), 0)
+			alloc := fb.emitAlloc(obj.Typ, 0)
 			fb.vars[obj] = alloc
 			fb.fn.Locals = append(fb.fn.Locals, alloc)
 			if initVal != nil {
-				initVal = fb.coerceToInterface(initVal, obj.Type())
+				initVal = fb.coerceToInterface(initVal, obj.Typ)
 				fb.emitStore(alloc, initVal)
 			} else {
-				fb.emitStore(alloc, &SSAConst{typ: obj.Type(), val: nil})
+				fb.emitStore(alloc, &SSAConst{typ: obj.Typ, val: nil})
 			}
 		}
 	case *syntax.ConstDecl:

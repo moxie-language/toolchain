@@ -98,7 +98,7 @@ func typeCheckPkg(src []byte, name string) (*types.TCPackage, *syntax.File) {
 			if path == "unsafe" && imported.Scope().Lookup("Pointer") == nil {
 				imported.Scope().Insert(types.NewTypeName(imported, "Pointer", types.Typ[types.UnsafePointer]))
 			}
-			localName := imported.Name()
+			localName := imported.Name
 			if d.LocalPkgName != nil {
 				localName = d.LocalPkgName.Value
 			}
@@ -203,7 +203,7 @@ func typeCheckPkg(src []byte, name string) (*types.TCPackage, *syntax.File) {
 				val := tcEvalConstExpr(valExpr, scope, int64(0))
 				if val != nil {
 					c.SetVal(val)
-					if c.Type() == nil {
+					if c.Typ == nil {
 						c.SetType(types.UntypedTypeOfCV(val))
 					}
 				}
@@ -215,7 +215,7 @@ func typeCheckPkg(src []byte, name string) (*types.TCPackage, *syntax.File) {
 			obj := scope.Lookup(td.Name.Value)
 			if obj != nil {
 				if tn, ok2 := obj.(*types.TypeName); ok2 {
-					named, ok3 := tn.Type().(*types.Named)
+					named, ok3 := tn.Typ.(*types.Named)
 					if ok3 {
 						typ := tcResolveNameInline(td.Type, scope)
 						named.SetUnderlying(typ)
@@ -313,7 +313,7 @@ func TypeCheckOnly(src []byte, name string) {
 	if pkg != nil && file != nil {
 		registerCompiledExports(pkg)
 	}
-	hasGenerics := pkg != nil && genericPkgScopes != nil && genericPkgScopes[pkg.Path()] != nil
+	hasGenerics := pkg != nil && genericPkgScopes != nil && genericPkgScopes[pkg.Path] != nil
 	if pkg != nil && !hasGenerics {
 		pkg.Release()
 	}
@@ -362,7 +362,7 @@ func CompileToIR(src []byte, name string, triple string) string {
 	emitter.releaseAfterEmit()
 	ssaPkg.release()
 	prog.release()
-	hasGenerics := genericPkgScopes != nil && genericPkgScopes[pkg.Path()] != nil
+	hasGenerics := genericPkgScopes != nil && genericPkgScopes[pkg.Path] != nil
 	if pkg != nil && !hasGenerics {
 		pkg.Release()
 	}
@@ -373,8 +373,8 @@ func CompileToIR(src []byte, name string, triple string) string {
 
 func registerCompiledExports(pkg *types.TCPackage) {
 	EnsureImportRegistry()
-	path := pkg.Path()
-	regPkg := types.NewTCPackage(path, pkg.Name())
+	path := pkg.Path
+	regPkg := types.NewTCPackage(path, pkg.Name)
 	for _, name := range pkg.Scope().Names() {
 		if len(name) == 0 || name[0] < 'A' || name[0] > 'Z' {
 			continue
@@ -408,7 +408,7 @@ func tcInferTypeFromExpr(e syntax.Expr, scope *types.Scope) syntax.Type {
 		if sig, ok := ft.(*types.Signature); ok && sig != nil {
 			res := sig.Results()
 			if res != nil && res.Len() == 1 {
-				return res.At(0).Type()
+				return res.At(0).Typ
 			}
 			if res != nil && res.Len() > 1 {
 				return res
@@ -657,7 +657,7 @@ func tcResolveNameInline(e syntax.Expr, scope *types.Scope) syntax.Type {
 		}
 		if obj != nil {
 			if tn, ok := obj.(*types.TypeName); ok {
-				return tn.Type()
+				return tn.Typ
 			}
 			if fn, ok := obj.(*types.TCFunc); ok {
 				if sig := fn.Signature(); sig != nil {
@@ -673,7 +673,7 @@ func tcResolveNameInline(e syntax.Expr, scope *types.Scope) syntax.Type {
 				typeObj := pn.Imported().Scope().Lookup(e.Sel.Value)
 				if typeObj != nil {
 					if tn, ok3 := typeObj.(*types.TypeName); ok3 {
-						return tn.Type()
+						return tn.Typ
 					}
 					if fn, ok3 := typeObj.(*types.TCFunc); ok3 {
 						if sig := fn.Signature(); sig != nil {
@@ -696,11 +696,11 @@ func tcResolveNameInline(e syntax.Expr, scope *types.Scope) syntax.Type {
 			}
 			for _, k := range irKeys {
 				pkg := ImportRegistry[k]
-				if pkg.Name() == pkgName.Value {
+				if pkg.Name == pkgName.Value {
 					typeObj := pkg.Scope().Lookup(e.Sel.Value)
 					if typeObj != nil {
 						if tn, ok2 := typeObj.(*types.TypeName); ok2 {
-							return tn.Type()
+							return tn.Typ
 						}
 					}
 					break

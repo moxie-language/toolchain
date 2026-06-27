@@ -131,7 +131,7 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]types.Type, pk
 				}
 				for _, k := range regKeys {
 					pkg := importRegistry[k]
-					if pkg.Name() == pkgName.Value {
+					if pkg.Name == pkgName.Value {
 						typeObj := pkg.Scope().Lookup(e.Sel.Value)
 						if typeObj != nil {
 							if tn, ok2 := typeObj.(*types.TypeName); ok2 {
@@ -218,12 +218,12 @@ func matchTypeParam(paramType syntax.Expr, argType types.Type, tparams []*syntax
 		}
 		for i, p := range pt.ParamList {
 			if sig.Params() != nil && i < int32(sig.Params().Len()) {
-				matchTypeParam(p.Type, sig.Params().At(int32(i)).Type(), tparams, typeMap)
+				matchTypeParam(p.Type, sig.Params().At(int32(i)).Typ, tparams, typeMap)
 			}
 		}
 		for i, r := range pt.ResultList {
 			if sig.Results() != nil && i < int32(sig.Results().Len()) {
-				matchTypeParam(r.Type, sig.Results().At(int32(i)).Type(), tparams, typeMap)
+				matchTypeParam(r.Type, sig.Results().At(int32(i)).Typ, tparams, typeMap)
 			}
 		}
 	}
@@ -336,7 +336,7 @@ func (fb *ssaFuncBuilder) emitCallToSSAFunc(fn *SSAFunction, args []SSAValue, ha
 	var retType types.Type
 	if fn.Signature != nil && fn.Signature.Results() != nil {
 		if fn.Signature.Results().Len() == 1 {
-			retType = fn.Signature.Results().At(0).Type()
+			retType = fn.Signature.Results().At(0).Typ
 		} else if fn.Signature.Results().Len() > 1 {
 			retType = fn.Signature.Results()
 		}
@@ -352,7 +352,7 @@ func (fb *ssaFuncBuilder) emitCallToSSAFunc(fn *SSAFunction, args []SSAValue, ha
 }
 
 func (fb *ssaFuncBuilder) tryGenericLocalCall(funcName string, argList []syntax.Expr, hasDots bool) (s SSAValue) {
-	pkgPath := fb.fn.Pkg.Pkg.Path()
+	pkgPath := fb.fn.Pkg.Pkg.Path
 	key := pkgPath | "." | funcName
 	fd, ok := genericFuncDecls[key]
 	if !ok && fb.srcScope != nil {
@@ -380,20 +380,20 @@ func (fb *ssaFuncBuilder) tryGenericPkgCall(pn *types.PkgName, funcName string, 
 	if imported == nil {
 		return nil
 	}
-	key := imported.Path() | "." | funcName
+	key := imported.Path | "." | funcName
 	fd, ok := genericFuncDecls[key]
 	if !ok {
 		return nil
 	}
 	args := fb.buildArgs(argList)
 	typeArgs := inferTypeArgsFromFunc(fd, args)
-	return fb.monomorphizeAndCall(fd, funcName, typeArgs, args, fb.fn.Pkg, imported.Path(), hasDots)
+	return fb.monomorphizeAndCall(fd, funcName, typeArgs, args, fb.fn.Pkg, imported.Path, hasDots)
 }
 
 func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList []syntax.Expr, hasDots bool) (s SSAValue) {
 	switch x := ie.X.(type) {
 	case *syntax.Name:
-		pkgPath := fb.fn.Pkg.Pkg.Path()
+		pkgPath := fb.fn.Pkg.Pkg.Path
 		key := pkgPath | "." | x.Value
 		fd, ok := genericFuncDecls[key]
 		if !ok && fb.srcScope != nil {
@@ -418,14 +418,14 @@ func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList 
 		if pkgName, ok2 := x.X.(*syntax.Name); ok2 {
 			obj := fb.lookupObject(pkgName.Value)
 			if pn, ok3 := obj.(*types.PkgName); ok3 && pn.Imported() != nil {
-				key := pn.Imported().Path() | "." | x.Sel.Value
+				key := pn.Imported().Path | "." | x.Sel.Value
 				fd, ok4 := genericFuncDecls[key]
 				if !ok4 {
 					return nil
 				}
 				typeArgs := fb.resolveExplicitTypeArgs(ie.Index, fd)
 				args := fb.buildArgs(argList)
-				return fb.monomorphizeAndCall(fd, x.Sel.Value, typeArgs, args, fb.fn.Pkg, pn.Imported().Path(), hasDots)
+				return fb.monomorphizeAndCall(fd, x.Sel.Value, typeArgs, args, fb.fn.Pkg, pn.Imported().Path, hasDots)
 			}
 		}
 	}
