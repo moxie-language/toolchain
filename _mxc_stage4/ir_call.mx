@@ -307,10 +307,25 @@ func (e *irEmitter) emitCall(c *SSACall) {
 	}
 
 	funcVal := e.operand(c.Call.Value)
-	funcPtr := e.nextReg2("fp")
-	ctxPtr := e.nextReg2("fp")
-	e.w("  ") ; e.w(funcPtr) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(funcVal) ; e.w(", 1\n")
-	e.w("  ") ; e.w(ctxPtr) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(funcVal) ; e.w(", 0\n")
+	_, isClosure := c.Call.Value.(*SSAMakeClosure)
+	needsExtract := isClosure
+	if !needsExtract {
+		if st := c.Call.Value.SSAType(); st != nil {
+			if _, isSig := SafeUnderlying(st).(*Signature); isSig {
+				needsExtract = true
+			}
+		}
+	}
+	var funcPtr, ctxReg string
+	if needsExtract {
+		funcPtr = e.nextReg2("fp")
+		ctxReg = e.nextReg2("fp")
+		e.w("  ") ; e.w(funcPtr) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(funcVal) ; e.w(", 1\n")
+		e.w("  ") ; e.w(ctxReg) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(funcVal) ; e.w(", 0\n")
+	} else {
+		funcPtr = funcVal
+		ctxReg = "null"
+	}
 	useSret := needsSret(retType)
 	sretTmp := ""
 	if useSret {
@@ -338,7 +353,7 @@ func (e *irEmitter) emitCall(c *SSACall) {
 		np2++
 	}
 	if np2 > 0 { e.w(", ") }
-	e.w("ptr ") ; e.w(ctxPtr)
+	e.w("ptr ") ; e.w(ctxReg)
 	e.w(")\n")
 	if useSret {
 		e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(retType) ; e.w(", ptr ") ; e.w(sretTmp) ; e.w("\n")
