@@ -78,7 +78,7 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]types.Type, pk
 	case *syntax.DotsType:
 		elem := resolveTypeExprWithSubst(e.Elem, typeSubst, pkgScope)
 		if elem != nil {
-			if b, ok := elem.(*types.Basic); ok && b.Kind() == types.Uint8 {
+			if b, ok := elem.(*types.Basic); ok && b.Kind == types.Uint8 {
 				return types.Typ[types.TCString]
 			}
 			return types.NewSlice(elem)
@@ -86,7 +86,7 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]types.Type, pk
 	case *syntax.SliceType:
 		elem := resolveTypeExprWithSubst(e.Elem, typeSubst, pkgScope)
 		if elem != nil {
-			if b, ok := elem.(*types.Basic); ok && b.Kind() == types.Uint8 {
+			if b, ok := elem.(*types.Basic); ok && b.Kind == types.Uint8 {
 				return types.Typ[types.TCString]
 			}
 			return types.NewSlice(elem)
@@ -209,7 +209,7 @@ func matchTypeParam(paramType syntax.Expr, argType types.Type, tparams []*syntax
 		matchTypeParam(pt.Elem, argType, tparams, typeMap)
 	case *syntax.SliceType:
 		if sl, ok := types.SafeUnderlying(argType).(*types.Slice); ok {
-			matchTypeParam(pt.Elem, sl.Elem(), tparams, typeMap)
+			matchTypeParam(pt.Elem, sl.Elem, tparams, typeMap)
 		}
 	case *syntax.FuncType:
 		sig, ok := types.SafeUnderlying(argType).(*types.Signature)
@@ -257,7 +257,7 @@ func extractConstraintTypeParams(constraint syntax.Expr, concreteType types.Type
 				for _, tp := range tparams {
 					if tp.Name != nil && tp.Name.Value == name.Value {
 						if _, already := typeMap[name.Value]; !already {
-							typeMap[name.Value] = sl.Elem()
+							typeMap[name.Value] = sl.Elem
 						}
 					}
 				}
@@ -376,7 +376,7 @@ func (fb *ssaFuncBuilder) tryGenericLocalCall(funcName string, argList []syntax.
 }
 
 func (fb *ssaFuncBuilder) tryGenericPkgCall(pn *types.PkgName, funcName string, argList []syntax.Expr, hasDots bool) (s SSAValue) {
-	imported := pn.Imported()
+	imported := pn.Imported
 	if imported == nil {
 		return nil
 	}
@@ -417,15 +417,15 @@ func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList 
 	case *syntax.SelectorExpr:
 		if pkgName, ok2 := x.X.(*syntax.Name); ok2 {
 			obj := fb.lookupObject(pkgName.Value)
-			if pn, ok3 := obj.(*types.PkgName); ok3 && pn.Imported() != nil {
-				key := pn.Imported().Path | "." | x.Sel.Value
+			if pn, ok3 := obj.(*types.PkgName); ok3 && pn.Imported != nil {
+				key := pn.Imported.Path | "." | x.Sel.Value
 				fd, ok4 := genericFuncDecls[key]
 				if !ok4 {
 					return nil
 				}
 				typeArgs := fb.resolveExplicitTypeArgs(ie.Index, fd)
 				args := fb.buildArgs(argList)
-				return fb.monomorphizeAndCall(fd, x.Sel.Value, typeArgs, args, fb.fn.Pkg, pn.Imported().Path, hasDots)
+				return fb.monomorphizeAndCall(fd, x.Sel.Value, typeArgs, args, fb.fn.Pkg, pn.Imported.Path, hasDots)
 			}
 		}
 	}
