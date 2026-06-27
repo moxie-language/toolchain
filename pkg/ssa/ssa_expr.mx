@@ -375,7 +375,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 			if fn, fixedRecv := fb.resolveMethodCallWithRecv(sel, recv); fn != nil {
 				args := fb.buildArgs(e.ArgList)
 				if fn.Signature != nil {
-					if fn.Signature.Variadic() && !e.HasDots {
+					if fn.Signature.Variadic && !e.HasDots {
 						args = fb.wrapVariadicArgs(args, fn.Signature)
 					}
 					args = fb.coerceArgsToInterface(args, fn.Signature)
@@ -387,10 +387,10 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 				}
 				var retType types.Type
 				if fn.Signature != nil {
-					if fn.Signature.Results() != nil && fn.Signature.Results().Len() == 1 {
-						retType = fn.Signature.Results().At(0).Typ
-					} else if fn.Signature.Results() != nil && fn.Signature.Results().Len() > 1 {
-						retType = fn.Signature.Results()
+					if fn.Signature.Results != nil && fn.Signature.Results.Len() == 1 {
+						retType = fn.Signature.Results.At(0).Typ
+					} else if fn.Signature.Results != nil && fn.Signature.Results.Len() > 1 {
+						retType = fn.Signature.Results
 					}
 				}
 				call := &SSACall{Call: SSACallCommon{Value: fn, Args: allArgs}}
@@ -420,24 +420,24 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 	var retType types.Type
 	if fn.SSAType() != nil {
 		if sig, ok := types.SafeUnderlying(fn.SSAType()).(*types.Signature); ok {
-			if sig.Results() != nil && sig.Results().Len() == 1 {
-				retType = sig.Results().At(0).Typ
-			} else if sig.Results() != nil && sig.Results().Len() > 1 {
-				retType = sig.Results()
+			if sig.Results != nil && sig.Results.Len() == 1 {
+				retType = sig.Results.At(0).Typ
+			} else if sig.Results != nil && sig.Results.Len() > 1 {
+				retType = sig.Results
 			}
 		}
 	} else if ssaFn, ok := fn.(*SSAFunction); ok && ssaFn.Signature != nil {
 		sig := ssaFn.Signature
-		if sig.Results() != nil && sig.Results().Len() == 1 {
-			retType = sig.Results().At(0).Typ
-		} else if sig.Results() != nil && sig.Results().Len() > 1 {
-			retType = sig.Results()
+		if sig.Results != nil && sig.Results.Len() == 1 {
+			retType = sig.Results.At(0).Typ
+		} else if sig.Results != nil && sig.Results.Len() > 1 {
+			retType = sig.Results
 		}
 	}
 
 	if fn.SSAType() != nil {
 		if sig, ok := types.SafeUnderlying(fn.SSAType()).(*types.Signature); ok {
-			if sig.Variadic() && !e.HasDots {
+			if sig.Variadic && !e.HasDots {
 				args = fb.wrapVariadicArgs(args, sig)
 			}
 			args = fb.coerceArgsToInterface(args, sig)
@@ -456,11 +456,11 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 }
 
 func (fb *ssaFuncBuilder) coerceArgsToInterface(args []SSAValue, sig *types.Signature) (ss []SSAValue) {
-	if sig.Params() == nil {
+	if sig.Params == nil {
 		return args
 	}
-	for i := 0; i < len(args) && i < sig.Params().Len(); i++ {
-		paramType := sig.Params().At(i).Typ
+	for i := 0; i < len(args) && i < sig.Params.Len(); i++ {
+		paramType := sig.Params.At(i).Typ
 		if paramType == nil || args[i] == nil || args[i].SSAType() == nil {
 			continue
 		}
@@ -482,10 +482,10 @@ func (fb *ssaFuncBuilder) coerceArgsToInterface(args []SSAValue, sig *types.Sign
 }
 
 func (fb *ssaFuncBuilder) wrapVariadicArgs(args []SSAValue, sig *types.Signature) (ss []SSAValue) {
-	if sig.Params() == nil {
+	if sig.Params == nil {
 		return args
 	}
-	nFixed := sig.Params().Len() - 1
+	nFixed := sig.Params.Len() - 1
 	if nFixed < 0 {
 		nFixed = 0
 	}
@@ -494,12 +494,12 @@ func (fb *ssaFuncBuilder) wrapVariadicArgs(args []SSAValue, sig *types.Signature
 	}
 	nVariadic := len(args) - nFixed
 	if nVariadic <= 0 {
-		nilSlice := NewSSAConst(&types.ConstNil{}, sig.Params().At(sig.Params().Len()-1).Typ)
+		nilSlice := NewSSAConst(&types.ConstNil{}, sig.Params.At(sig.Params.Len()-1).Typ)
 		result := []SSAValue{:nFixed:nFixed}
 		copy(result, args[:nFixed])
 		return append(result, nilSlice)
 	}
-	sliceType := sig.Params().At(sig.Params().Len() - 1).Typ
+	sliceType := sig.Params.At(sig.Params.Len() - 1).Typ
 	var elemType types.Type
 	if sl, ok := types.SafeUnderlying(sliceType).(*types.Slice); ok {
 		elemType = sl.Elem()
@@ -743,14 +743,14 @@ func (fb *ssaFuncBuilder) buildMethodValue(sel *syntax.SelectorExpr, recv SSAVal
 	}
 	methodSig := fn.Signature
 	var wrapperParams *types.Tuple
-	if methodSig.Params() != nil && methodSig.Params().Len() > 0 {
-		vars := []*types.TCVar{:0:methodSig.Params().Len()}
-		for i := 0; i < methodSig.Params().Len(); i++ {
-			vars = append(vars, methodSig.Params().At(i))
+	if methodSig.Params != nil && methodSig.Params.Len() > 0 {
+		vars := []*types.TCVar{:0:methodSig.Params.Len()}
+		for i := 0; i < methodSig.Params.Len(); i++ {
+			vars = append(vars, methodSig.Params.At(i))
 		}
 		wrapperParams = types.NewTuple(vars...)
 	}
-	wrapperSig := types.NewSignature(nil, wrapperParams, methodSig.Results(), methodSig.Variadic())
+	wrapperSig := types.NewSignature(nil, wrapperParams, methodSig.Results, methodSig.Variadic)
 	name := fb.fn.name | "__mval" | ssaItoa(len(fb.fn.AnonFuncs)+1)
 	wrapper := &SSAFunction{
 		name:      name,
@@ -777,10 +777,10 @@ func (fb *ssaFuncBuilder) buildMethodValue(sel *syntax.SelectorExpr, recv SSAVal
 		args = append(args, p)
 	}
 	var retType types.Type
-	if methodSig.Results() != nil && methodSig.Results().Len() == 1 {
-		retType = methodSig.Results().At(0).Typ
-	} else if methodSig.Results() != nil && methodSig.Results().Len() > 1 {
-		retType = methodSig.Results()
+	if methodSig.Results != nil && methodSig.Results.Len() == 1 {
+		retType = methodSig.Results.At(0).Typ
+	} else if methodSig.Results != nil && methodSig.Results.Len() > 1 {
+		retType = methodSig.Results
 	}
 	call := &SSACall{Call: SSACallCommon{Value: fn, Args: args}}
 	call.typ = retType
@@ -819,7 +819,7 @@ func (fb *ssaFuncBuilder) buildPkgMember(pn *types.PkgName, memberName string) (
 	if imported == nil {
 		return nil
 	}
-	obj := imported.Scope().Lookup(memberName)
+	obj := imported.Scope.Lookup(memberName)
 	if obj == nil {
 		return nil
 	}
@@ -1243,7 +1243,7 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *syntax.FuncLit) (s SSAValue) {
 		}
 	}
 	if sig == nil && e.Type != nil {
-		sig = tcResolveFuncInline(e.Type, fb.fn.Pkg.Pkg.Scope())
+		sig = tcResolveFuncInline(e.Type, fb.fn.Pkg.Pkg.Scope)
 	}
 	name := fb.fn.name | "__anon" | ssaItoa(len(fb.fn.AnonFuncs)+1)
 	anon := &SSAFunction{
@@ -1316,7 +1316,7 @@ func (fb *ssaFuncBuilder) buildPkgMemberAddr(pn *types.PkgName, memberName strin
 	if imported == nil {
 		return nil
 	}
-	obj := imported.Scope().Lookup(memberName)
+	obj := imported.Scope.Lookup(memberName)
 	if obj == nil {
 		return nil
 	}
@@ -1359,7 +1359,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *types.PkgName, funcName string, argLi
 	if result := fb.tryGenericPkgCall(pn, funcName, argList, hasDots); result != nil {
 		return result
 	}
-	obj := imported.Scope().Lookup(funcName)
+	obj := imported.Scope.Lookup(funcName)
 	if obj == nil {
 		return nil
 	}
@@ -1385,14 +1385,14 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *types.PkgName, funcName string, argLi
 	args := fb.buildArgs(argList)
 	var retType types.Type
 	if ssaFn.Signature != nil {
-		if ssaFn.Signature.Variadic() && !hasDots {
+		if ssaFn.Signature.Variadic && !hasDots {
 			args = fb.wrapVariadicArgs(args, ssaFn.Signature)
 		}
 		args = fb.coerceArgsToInterface(args, ssaFn.Signature)
-		if ssaFn.Signature.Results() != nil && ssaFn.Signature.Results().Len() == 1 {
-			retType = ssaFn.Signature.Results().At(0).Typ
-		} else if ssaFn.Signature.Results() != nil && ssaFn.Signature.Results().Len() > 1 {
-			retType = ssaFn.Signature.Results()
+		if ssaFn.Signature.Results != nil && ssaFn.Signature.Results.Len() == 1 {
+			retType = ssaFn.Signature.Results.At(0).Typ
+		} else if ssaFn.Signature.Results != nil && ssaFn.Signature.Results.Len() > 1 {
+			retType = ssaFn.Signature.Results
 		}
 	}
 	call := &SSACall{Call: SSACallCommon{Value: ssaFn, Args: args}}
@@ -1453,7 +1453,7 @@ func (fb *ssaFuncBuilder) lookupObject(name string) (o Object) {
 		}
 	}
 	if fb.fn.Pkg != nil {
-		if _, obj := fb.fn.Pkg.Pkg.Scope().LookupParent(name); obj != nil {
+		if _, obj := fb.fn.Pkg.Pkg.Scope.LookupParent(name); obj != nil {
 			return obj
 		}
 	}
