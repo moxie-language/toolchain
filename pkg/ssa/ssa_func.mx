@@ -770,7 +770,6 @@ func (fb *ssaFuncBuilder) evalLocalConstExpr(e syntax.Expr) (c types.ConstVal) {
 		return fb.evalLocalConstExpr(e.X)
 	}
 	return nil
-}
 func ResolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope *Scope, prog *SSAProgram) (t Type) {
 	if e == nil {
 		return nil
@@ -835,3 +834,57 @@ func ResolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope
 			} else if ev.Len != nil && pkgScope != nil && prog != nil && prog.EvalConstExpr != nil {
 				cv := prog.EvalConstExpr(ev.Len, pkgScope, -1)
 				if ci3, ok52 := cv.(*ConstInt); ok52 {
+					n = ci3.V
+				}
+			}
+			return NewArray(elem, n)
+		}
+	case *syntax.Operation:
+		if ev.Y == nil && ev.Op == token.Mul {
+			base := ResolveTypeExprWithSubst(ev.X, typeSubst, pkgScope, prog)
+			if base != nil {
+				return NewPointer(base)
+			}
+		}
+	case *syntax.MapType:
+		key := ResolveTypeExprWithSubst(ev.Key, typeSubst, pkgScope, prog)
+		val := ResolveTypeExprWithSubst(ev.Value, typeSubst, pkgScope, prog)
+		if key != nil && val != nil {
+			return NewTCMap(key, val)
+		}
+	case *syntax.ChanType:
+		elem := ResolveTypeExprWithSubst(ev.Elem, typeSubst, pkgScope, prog)
+		if elem != nil {
+			dir := TCSendRecv
+			if ev.Dir == syntax.SendOnly {
+				dir = TCSendOnly
+			} else if ev.Dir == syntax.RecvOnly {
+				dir = TCRecvOnly
+			}
+			return NewTCChan(dir, elem)
+		}
+	case *syntax.InterfaceType:
+		return resolveInterfaceFromAST(ev)
+	case *syntax.FuncType:
+		return resolveSignatureWithSubst(ev, typeSubst, pkgScope, prog)
+	case *syntax.IndexExpr:
+		// Generic instantiation Curve[P]: erase to the base named type.
+		// Fields typed by the type param are substituted at use sites via
+		// fb.typeSubst.
+		return ResolveTypeExprWithSubst(ev.X, typeSubst, pkgScope, prog)
+	case *syntax.SelectorExpr:
+		if pkgName, ok := ev.X.(*syntax.Name); ok {
+			if imp := importPkgByName(pkgName.Value); imp != nil {
+				typeObj := imp.Scope.Lookup(ev.Sel.Value)
+				if typeObj != nil {
+					if tn, ok2 := typeObj.(*TypeName); ok2 {
+						return tn.Typ
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func resolveSignatureWithSubst(ft *syntax.FuncType, typeSubst map[string]Type, pkgScope *Scope, prog *SSAProgram) (s *Signature) {
