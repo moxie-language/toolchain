@@ -4486,6 +4486,29 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 		return nil, nil
 	}
 	resolveNamed := named
+	// Try registry for types imported from other packages,
+	// since local named copies may only have interface methods (Underlying/String)
+	// and lack the actual declared methods (Len, Elem, etc).
+	samePackage := false
+	if resolveNamed.Obj != nil && resolveNamed.Obj.Pkg != nil {
+		samePackage = resolveNamed.Obj.Pkg.Path == fb.fn.Pkg.Pkg.Path
+	}
+	if !samePackage && resolveNamed.Obj != nil && resolveNamed.Obj.Pkg != nil {
+		pkgPath := resolveNamed.Obj.Pkg.Path
+		nm := resolveNamed.Obj.Name
+		if cctx.universe.Registry != nil {
+			if pkg := cctx.universe.Registry[pkgPath]; pkg != nil && pkg.Scope != nil {
+				if obj := pkg.Scope.Lookup(nm); obj != nil {
+					if regType := ObjectType(obj); regType != nil {
+						if regNamed, ok39 := regType.(*Named); ok39 {
+							resolveNamed = regNamed
+							typeName = nm
+						}
+					}
+				}
+			}
+		}
+	}
 	if resolveNamed.NumMethods() == 0 {
 		// The Named type from typeSubst may be a bare copy without methods.
 		// Look up the canonical type in cctx.universe.Registry which has methods
