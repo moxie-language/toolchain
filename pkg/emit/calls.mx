@@ -209,35 +209,57 @@ func (e *irEmitter) emitCall(c *ssa.SSACall) {
 	}
 
 	funcVal := e.operand(c.Call.Value)
-	funcPtr := e.nextReg2("fp")
-	ctx := e.nextReg2("ctx")
-	e.w("  ") ; e.w(funcPtr) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(funcVal) ; e.w(", 1\n")
-	e.w("  ") ; e.w(ctx) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(funcVal) ; e.w(", 0\n")
-	e.w("  ")
-	if !isVoid {
-		e.w(reg) ; e.w(" = ")
-	}
-	e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(funcPtr) ; e.w("(")
-	for i, arg := range c.Call.Args {
-		if i > 0 { e.w(", ") }
-		at := e.callArgType(arg, sig, i)
-		av := e.operand(arg)
-		if av == "null" && at != "ptr" {
-			if at == "void" {
-				at = "ptr"
-			} else {
-				av = "zeroinitializer"
+	needsExtract := false
+	if cv := c.Call.Value; cv != nil {
+		if st := cv.SSAType(); st != nil {
+			if _, isSig := types.SafeUnderlying(st).(*types.Signature); isSig {
+				needsExtract = true
 			}
 		}
-		if (at == "float" || at == "double") && isConstOperand(av) {
-			av = ensureTokenFloatLit(av)
-		}
-		e.w(at) ; e.w(" ") ; e.w(av)
 	}
-	if len(c.Call.Args) > 0 { e.w(", ") }
-	e.w("ptr ") ; e.w(ctx)
-	e.w(")\n")
-}
+	if needsExtract {
+		funcPtr := e.nextReg2("fp")
+		ctx := e.nextReg2("ctx")
+		e.w("  ") ; e.w(funcPtr) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(funcVal) ; e.w(", 1\n")
+		e.w("  ") ; e.w(ctx) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(funcVal) ; e.w(", 0\n")
+		e.w("  ")
+		if !isVoid { e.w(reg) ; e.w(" = ") }
+		e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(funcPtr) ; e.w("(")
+		for i, arg := range c.Call.Args {
+			if i > 0 { e.w(", ") }
+			at := e.callArgType(arg, sig, i)
+			av := e.operand(arg)
+			if av == "null" && at != "ptr" {
+				if at == "void" { at = "ptr" } else { av = "zeroinitializer" }
+			}
+			if (at == "float" || at == "double") && isConstOperand(av) {
+				av = ensureTokenFloatLit(av)
+			}
+			e.w(at) ; e.w(" ") ; e.w(av)
+		}
+		if len(c.Call.Args) > 0 { e.w(", ") }
+		e.w("ptr ") ; e.w(ctx)
+		e.w(")\n")
+	} else {
+		e.w("  ")
+		if !isVoid { e.w(reg) ; e.w(" = ") }
+		e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(funcVal) ; e.w("(")
+		for i, arg := range c.Call.Args {
+			if i > 0 { e.w(", ") }
+			at := e.callArgType(arg, sig, i)
+			av := e.operand(arg)
+			if av == "null" && at != "ptr" {
+				if at == "void" { at = "ptr" } else { av = "zeroinitializer" }
+			}
+			if (at == "float" || at == "double") && isConstOperand(av) {
+				av = ensureTokenFloatLit(av)
+			}
+			e.w(at) ; e.w(" ") ; e.w(av)
+		}
+		if len(c.Call.Args) > 0 { e.w(", ") }
+		e.w("ptr null")
+		e.w(")\n")
+	}
 
 func (e *irEmitter) emitBuiltinCall(c *ssa.SSACall, b *ssa.SSABuiltin) {
 	reg := e.regName(c)

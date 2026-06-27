@@ -21,7 +21,7 @@ LLVMMetadataRef MoxieCreateCompileUnit(
         "", 0,           /* flags */
         runtimeVer,
         "", 0,           /* splitName */
-        LLVMDWARFEmissionFull,
+        LLVMDWARFEmissionNone,
         0,               /* DWOId */
         1,               /* splitDebugInlining */
         0,               /* debugInfoForProfiling */

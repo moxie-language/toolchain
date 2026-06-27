@@ -15,6 +15,7 @@ fi
 MOXIEROOT="$(pwd)"
 export MOXIEROOT
 export LLVM_GLUE_PATH="$MOXIEROOT/llvm-glue/libmoxie-llvm-glue.so"
+export PATH="/usr/local/bin:$PATH"
 
 # build llvm glue if missing
 if [ ! -f "$LLVM_GLUE_PATH" ]; then
@@ -25,7 +26,7 @@ fi
 # find a moxie binary to bootstrap with
 MOXIE="${MOXIE:-}"
 if [ -z "$MOXIE" ]; then
-    for m in "$MOXIEROOT/moxie" "$MOXIEROOT/legacy/moxie" "$(command -v moxie 2>/dev/null || true)"; do
+    for m in "$MOXIEROOT/moxie-new" "$MOXIEROOT/moxie" "$MOXIEROOT/legacy/moxie" "$(command -v moxie 2>/dev/null || true)"; do
         if [ -x "$m" ]; then
             MOXIE="$m"
             break
@@ -34,7 +35,7 @@ if [ -z "$MOXIE" ]; then
 fi
 if [ -z "$MOXIE" ]; then
     echo "error: no moxie binary found" >&2
-    echo "  place a bootstrap binary at ./moxie or ./legacy/moxie" >&2
+    echo "  place a bootstrap binary at ./moxie-new, ./moxie, or ./legacy/moxie" >&2
     exit 1
 fi
 
@@ -44,19 +45,19 @@ echo "Bootstrap: $MOXIE"
 
 # find compiler source directory
 COMPILER_SRC=""
-for d in "$MOXIEROOT/_mxc_stage4" "$MOXIEROOT/compiler"; do
+for d in "$MOXIEROOT/_mxc_stage4" "$MOXIEROOT/cmd/moxie"; do
     if [ -d "$d" ] && [ -f "$d/main.mx" ]; then
         COMPILER_SRC="$d"
         break
     fi
 done
 if [ -z "$COMPILER_SRC" ]; then
-    echo "error: compiler source not found in _mxc_stage4/ or compiler/" >&2
+    echo "error: compiler source not found in _mxc_stage4/ or cmd/moxie/" >&2
     exit 1
 fi
 echo "Source: $COMPILER_SRC"
 
-$MOXIE build -o "$MOXIEROOT/moxie-new" "$COMPILER_SRC/"
+$MOXIE build -internal-nodwarf -o "$MOXIEROOT/moxie-new" "$COMPILER_SRC/"
 
 # verify the new binary works
 "$MOXIEROOT/moxie-new" version
@@ -65,5 +66,12 @@ mv "$MOXIEROOT/moxie-new" "$MOXIEROOT/moxie"
 
 # rebuild all cached packages with the new compiler and remove old version caches
 "$MOXIEROOT/moxie" update --all
+
+# run regression validation
+echo "=== Regression Check ==="
+if ! bash "$MOXIEROOT/tests/regressions/run.sh"; then
+    echo "REGRESSION DETECTED: bootstrap build suspect" >&2
+    exit 1
+fi
 
 echo "=== Done: ./moxie ==="

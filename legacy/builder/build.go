@@ -35,8 +35,12 @@ import (
 func logMem(label string) {
 	var m goruntime.MemStats
 	goruntime.ReadMemStats(&m)
-	fmt.Fprintf(os.Stderr, "[mem] %-40s alloc=%6dMB sys=%6dMB heapInuse=%6dMB heapObjects=%d\n",
-		label, m.Alloc/1024/1024, m.Sys/1024/1024, m.HeapInuse/1024/1024, m.HeapObjects)
+	fmt.Fprintf(
+		os.Stderr,
+		"[mem] %-40s alloc=%6dMB sys=%6dMB heapInuse=%6dMB heapObjects=%d\n",
+		label, m.Alloc/1024/1024, m.Sys/1024/1024, m.HeapInuse/1024/1024,
+		m.HeapObjects,
+	)
 }
 
 // BuildResult is the output of a build. This includes the binary itself and
@@ -84,7 +88,7 @@ type BuildResult struct {
 type packageAction struct {
 	ImportPath       string
 	CompilerBuildID  string
-	MoxieVersion    string
+	MoxieVersion     string
 	LLVMVersion      string
 	Config           *compiler.Config
 	CFlags           []string
@@ -101,7 +105,9 @@ type packageAction struct {
 //
 // The error value may be of type *MultiError. Callers will likely want to check
 // for this case and print such errors individually.
-func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildResult, error) {
+func Build(
+	pkgName, outpath, tmpdir string, config *compileopts.Config,
+) (BuildResult, error) {
 	if config.Options.PrintAllocs != nil {
 		compiler.ResetAllocSites()
 	}
@@ -163,7 +169,13 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			return BuildResult{}, err
 		}
 		defer unlock()
-		libcDependencies = append(libcDependencies, dummyCompileJob(filepath.Join(filepath.Dir(libcJob.result), "crt1.o")))
+		libcDependencies = append(
+			libcDependencies, dummyCompileJob(
+				filepath.Join(
+					filepath.Dir(libcJob.result), "crt1.o",
+				),
+			),
+		)
 		libcDependencies = append(libcDependencies, libcJob)
 	case "":
 		// no library specified, so nothing to do
@@ -183,13 +195,13 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		CodeModel:       config.CodeModel(),
 		RelocationModel: config.RelocationModel(),
 		SizeLevel:       sizeLevel,
-		MoxieVersion:   goenv.Version(),
+		MoxieVersion:    goenv.Version(),
 
 		Scheduler:          config.Scheduler(),
 		AutomaticStackSize: false,
 		DefaultStackSize:   config.StackSize(),
 		MaxStackAlloc:      config.MaxStackAlloc(),
-		Debug:              !config.Options.SkipDWARF, // emit DWARF except when -internal-nodwarf is passed
+		Debug:              config.Options.Debug,
 		Nobounds:           config.Options.Nobounds,
 		PanicStrategy:      config.PanicStrategy(),
 		StandaloneRuntime:  config.IsStandaloneRuntime(),
@@ -206,9 +218,11 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 
 	logMem("before loader.Load")
 	// Load entire program AST into memory.
-	lprogram, err := loader.Load(config, pkgName, types.Config{
-		Sizes: compiler.Sizes(machine),
-	})
+	lprogram, err := loader.Load(
+		config, pkgName, types.Config{
+			Sizes: compiler.Sizes(machine),
+		},
+	)
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -225,8 +239,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		// If there is no module root, just the regular root.
 		result.ModuleRoot = lprogram.MainPkg().Root
 	}
-	err = lprogram.Parse()
-	if err != nil {
+	if err = lprogram.Parse(); err != nil {
 		return result, err
 	}
 	logMem("after lprogram.Parse")
@@ -291,7 +304,10 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 						}
 					}
 
-					job.result, err = createEmbedObjectFile(string(data), hexSum, name, pkg.OriginalDir(), tmpdir, compilerConfig)
+					job.result, err = createEmbedObjectFile(
+						string(data), hexSum, name, pkg.OriginalDir(), tmpdir,
+						compilerConfig,
+					)
 					return err
 				},
 			}
@@ -305,7 +321,10 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		for _, imported := range pkg.Pkg.Imports() {
 			job, ok := packageActionIDJobs[imported.Path()]
 			if !ok {
-				return result, fmt.Errorf("package %s imports %s but couldn't find dependency", pkg.ImportPath, imported.Path())
+				return result, fmt.Errorf(
+					"package %s imports %s but couldn't find dependency",
+					pkg.ImportPath, imported.Path(),
+				)
 			}
 			importedPackages = append(importedPackages, job)
 			actionIDDependencies = append(actionIDDependencies, job)
@@ -321,14 +340,18 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				// Create a cache key: a hash from the action ID below that contains all
 				// the parameters for the build.
 				actionID := packageAction{
-					ImportPath:       pkg.ImportPath,
-					CompilerBuildID:  string(compilerBuildID),
-					LLVMVersion:      llvm.Version,
-					Config:           compilerConfig,
-					CFlags:           pkg.CFlags,
-					FileHashes:       make(map[string]string, len(pkg.FileHashes)),
-					EmbeddedFiles:    make(map[string]string, len(allFiles)),
-					Imports:          make(map[string]string, len(pkg.Pkg.Imports())),
+					ImportPath:      pkg.ImportPath,
+					CompilerBuildID: string(compilerBuildID),
+					LLVMVersion:     llvm.Version,
+					Config:          compilerConfig,
+					CFlags:          pkg.CFlags,
+					FileHashes: make(
+						map[string]string, len(pkg.FileHashes),
+					),
+					EmbeddedFiles: make(map[string]string, len(allFiles)),
+					Imports: make(
+						map[string]string, len(pkg.Pkg.Imports()),
+					),
 					OptLevel:         optLevel,
 					UndefinedGlobals: undefinedGlobals,
 				}
@@ -358,7 +381,9 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			description:  "compile package " + pkg.ImportPath,
 			dependencies: []*compileJob{packageActionIDJob},
 			run: func(job *compileJob) error {
-				job.result = filepath.Join(cacheDir, "pkg-"+packageActionIDJob.result+".bc")
+				job.result = filepath.Join(
+					cacheDir, "pkg-"+packageActionIDJob.result+".bc",
+				)
 				// Acquire a lock (if supported).
 				unlock := lock(job.result + ".lock")
 				defer unlock()
@@ -370,13 +395,19 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 
 				// Compile AST to IR.
 				var errs []error
-				mod, errs := compiler.CompilePackage(pkg.ImportPath, pkg, program.Package(pkg.Pkg), machine, compilerConfig, config.DumpSSA(), config.Options.PrintAllocs)
+				mod, errs := compiler.CompilePackage(
+					pkg.ImportPath, pkg, program.Package(pkg.Pkg), machine,
+					compilerConfig, config.DumpSSA(),
+					config.Options.PrintAllocs,
+				)
 				if errs != nil {
 					return newMultiError(errs, pkg.ImportPath)
 				}
 				defer mod.Context().Dispose()
 				defer mod.Dispose()
-				if err := llvm.VerifyModule(mod, llvm.PrintMessageAction); err != nil {
+				if err := llvm.VerifyModule(
+					mod, llvm.PrintMessageAction,
+				); err != nil {
 					return errors.New("verification error after compiling package " + pkg.ImportPath)
 				}
 
@@ -410,11 +441,15 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				if pkgInit.IsNil() {
 					panic("init not found for " + pkg.Pkg.Path())
 				}
-				err := interp.RunFunc(pkgInit, config.Options.InterpTimeout, config.DumpSSA())
+				err := interp.RunFunc(
+					pkgInit, config.Options.InterpTimeout, config.DumpSSA(),
+				)
 				if err != nil {
 					return err
 				}
-				if err := llvm.VerifyModule(mod, llvm.PrintMessageAction); err != nil {
+				if err := llvm.VerifyModule(
+					mod, llvm.PrintMessageAction,
+				); err != nil {
 					return errors.New("verification error after interpreting " + pkgInit.Name())
 				}
 
@@ -424,7 +459,9 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				// Write to a temporary path that is renamed to the destination
 				// file to avoid race conditions with other Moxie invocatiosn
 				// that might also be compiling this package at the same time.
-				f, err := os.CreateTemp(filepath.Dir(job.result), filepath.Base(job.result))
+				f, err := os.CreateTemp(
+					filepath.Dir(job.result), filepath.Base(job.result),
+				)
 				if err != nil {
 					return err
 				}
@@ -444,7 +481,10 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				if err != nil {
 					// WriteBitcodeToFile doesn't produce a useful error on its
 					// own, so create a somewhat useful error message here.
-					return fmt.Errorf("failed to write bitcode for package %s to file %s", pkg.ImportPath, job.result)
+					return fmt.Errorf(
+						"failed to write bitcode for package %s to file %s",
+						pkg.ImportPath, job.result,
+					)
 				}
 				err = f.Close()
 				if err != nil {
@@ -513,7 +553,10 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 					if pkgInit.IsNil() {
 						panic("init not found for " + pkg.Pkg.Path())
 					}
-					irbuilder.CreateCall(pkgInit.GlobalValueType(), pkgInit, []llvm.Value{llvm.Undef(ptrType)}, "")
+					irbuilder.CreateCall(
+						pkgInit.GlobalValueType(), pkgInit,
+						[]llvm.Value{llvm.Undef(ptrType)}, "",
+					)
 				}
 				irbuilder.CreateRetVoid()
 			}
@@ -576,7 +619,9 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				// Run interp for runtime.initAll, then LowerInterfaces +
 				// LowerInterrupts for dispatch stubs.
 				logMem("before interp.Run")
-				err := interp.Run(mod, config.Options.InterpTimeout, config.DumpSSA())
+				err := interp.Run(
+					mod, config.Options.InterpTimeout, config.DumpSSA(),
+				)
 				if err != nil {
 					return err
 				}
@@ -698,7 +743,6 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		linkerDependencies = append(linkerDependencies, job)
 	}
 
-
 	// Add jobs to compile extra files. These files are in C or assembly and
 	// contain things like the interrupt vector table and low level operations
 	// such as stack switching.
@@ -707,7 +751,10 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		job := &compileJob{
 			description: "compile extra file " + path,
 			run: func(job *compileJob) error {
-				result, err := compileAndCacheCFile(abspath, tmpdir, config.CFlags(), config.Options.PrintCommands)
+				result, err := compileAndCacheCFile(
+					abspath, tmpdir, config.CFlags(),
+					config.Options.PrintCommands,
+				)
 				job.result = result
 				return err
 			},
@@ -722,7 +769,10 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			job := &compileJob{
 				description: "compile C file " + abspath,
 				run: func(job *compileJob) error {
-					result, err := compileAndCacheCFile(abspath, tmpdir, pkg.CFlags, config.Options.PrintCommands)
+					result, err := compileAndCacheCFile(
+						abspath, tmpdir, pkg.CFlags,
+						config.Options.PrintCommands,
+					)
 					job.result = result
 					return err
 				},
@@ -778,7 +828,8 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			// Native object linking - no LTO flags. Matches stage4 approach:
 			// compile .bc -> .o with clang, link .o files with ld.lld.
 			if !strings.HasPrefix(config.Triple(), "wasm32-") {
-				ldflags = append(ldflags,
+				ldflags = append(
+					ldflags,
 					"--gc-sections",
 					"-z", "stack-size=67108864",
 				)
@@ -797,7 +848,9 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				// Try to determine stack sizes at compile time.
 				// Don't do this by default as it usually doesn't work on
 				// unsupported architectures.
-				calculatedStacks, stackSizes, err = determineStackSizes(mod, result.Executable)
+				calculatedStacks, stackSizes, err = determineStackSizes(
+					mod, result.Executable,
+				)
 				if err != nil {
 					return err
 				}
@@ -806,7 +859,9 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			// Boot patches and RP2040 boot CRC removed (moxie doesn't target embedded).
 
 			// Run wasm-opt for wasm binaries
-			if arch := strings.Split(config.Triple(), "-")[0]; arch == "wasm32" {
+			if arch := strings.Split(
+				config.Triple(), "-",
+			)[0]; arch == "wasm32" {
 				optLevel, _, _ := config.OptLevel()
 				opt := "-" + optLevel
 
@@ -818,7 +873,8 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 
 				inputFile := result.Binary
 				result.Binary = result.Executable + ".wasmopt"
-				args = append(args,
+				args = append(
+					args,
 					opt,
 					"-g",
 					inputFile,
@@ -841,14 +897,19 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 
 			// Print code size if requested.
 			if config.Options.PrintSizes != "" {
-				sizes, err := loadProgramSize(result.Executable, result.PackagePathMap)
+				sizes, err := loadProgramSize(
+					result.Executable, result.PackagePathMap,
+				)
 				if err != nil {
 					return err
 				}
 				switch config.Options.PrintSizes {
 				case "short":
 					fmt.Printf("   code    data     bss |   flash     ram\n")
-					fmt.Printf("%7d %7d %7d | %7d %7d\n", sizes.Code+sizes.ROData, sizes.Data, sizes.BSS, sizes.Flash(), sizes.RAM())
+					fmt.Printf(
+						"%7d %7d %7d | %7d %7d\n", sizes.Code+sizes.ROData,
+						sizes.Data, sizes.BSS, sizes.Flash(), sizes.RAM(),
+					)
 				case "full":
 					if !config.Debug() {
 						fmt.Println("warning: data incomplete, remove the -no-debug flag for more detail")
@@ -857,10 +918,19 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 					fmt.Printf("------------------------------- | --------------- | -------\n")
 					for _, name := range sizes.sortedPackageNames() {
 						pkgSize := sizes.Packages[name]
-						fmt.Printf("%7d %7d %7d %7d | %7d %7d | %s\n", pkgSize.Code, pkgSize.ROData, pkgSize.Data, pkgSize.BSS, pkgSize.Flash(), pkgSize.RAM(), name)
+						fmt.Printf(
+							"%7d %7d %7d %7d | %7d %7d | %s\n", pkgSize.Code,
+							pkgSize.ROData, pkgSize.Data, pkgSize.BSS,
+							pkgSize.Flash(), pkgSize.RAM(), name,
+						)
 					}
 					fmt.Printf("------------------------------- | --------------- | -------\n")
-					fmt.Printf("%7d %7d %7d %7d | %7d %7d | total\n", sizes.Code, sizes.ROData, sizes.Data, sizes.BSS, sizes.Code+sizes.ROData+sizes.Data, sizes.Data+sizes.BSS)
+					fmt.Printf(
+						"%7d %7d %7d %7d | %7d %7d | total\n", sizes.Code,
+						sizes.ROData, sizes.Data, sizes.BSS,
+						sizes.Code+sizes.ROData+sizes.Data,
+						sizes.Data+sizes.BSS,
+					)
 				case "html":
 					const filename = "size-report.html"
 					err := writeSizeReport(sizes, filename, pkgName)
@@ -913,7 +983,10 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 
 // createEmbedObjectFile creates a new object file with the given contents, for
 // the embed package.
-func createEmbedObjectFile(data, hexSum, sourceFile, sourceDir, tmpdir string, compilerConfig *compiler.Config) (string, error) {
+func createEmbedObjectFile(
+	data, hexSum, sourceFile, sourceDir, tmpdir string,
+	compilerConfig *compiler.Config,
+) (string, error) {
 	// TODO: this works for small files, but can be a problem for larger files.
 	// For larger files, it seems more appropriate to generate the object file
 	// manually without going through LLVM.
@@ -945,51 +1018,69 @@ func createEmbedObjectFile(data, hexSum, sourceFile, sourceDir, tmpdir string, c
 	// Add DWARF debug information to this global, so that it is
 	// correctly counted when compiling with the -size= flag.
 	dibuilder := llvm.NewDIBuilder(mod)
-	dibuilder.CreateCompileUnit(llvm.DICompileUnit{
-		Language:  0xb, // DW_LANG_C99 (0xc, off-by-one?)
-		File:      sourceFile,
-		Dir:       sourceDir,
-		Producer:  "Moxie",
-		Optimized: false,
-	})
-	ditype := dibuilder.CreateArrayType(llvm.DIArrayType{
-		SizeInBits:  uint64(len(data)) * 8,
-		AlignInBits: 8,
-		ElementType: dibuilder.CreateBasicType(llvm.DIBasicType{
-			Name:       "byte",
-			SizeInBits: 8,
-			Encoding:   llvm.DW_ATE_unsigned_char,
-		}),
-		Subscripts: []llvm.DISubrange{
-			{
-				Lo:    0,
-				Count: int64(len(data)),
+	dibuilder.CreateCompileUnit(
+		llvm.DICompileUnit{
+			Language:  0xb, // DW_LANG_C99 (0xc, off-by-one?)
+			File:      sourceFile,
+			Dir:       sourceDir,
+			Producer:  "Moxie",
+			Optimized: false,
+		},
+	)
+	ditype := dibuilder.CreateArrayType(
+		llvm.DIArrayType{
+			SizeInBits:  uint64(len(data)) * 8,
+			AlignInBits: 8,
+			ElementType: dibuilder.CreateBasicType(
+				llvm.DIBasicType{
+					Name:       "byte",
+					SizeInBits: 8,
+					Encoding:   llvm.DW_ATE_unsigned_char,
+				},
+			),
+			Subscripts: []llvm.DISubrange{
+				{
+					Lo:    0,
+					Count: int64(len(data)),
+				},
 			},
 		},
-	})
-	difile := dibuilder.CreateFile(sourceFile, sourceDir)
-	diglobalexpr := dibuilder.CreateGlobalVariableExpression(difile, llvm.DIGlobalVariableExpression{
-		Name:        globalName,
-		File:        difile,
-		Line:        1,
-		Type:        ditype,
-		Expr:        dibuilder.CreateExpression(nil),
-		AlignInBits: 8,
-	})
-	global.AddMetadata(0, diglobalexpr)
-	mod.AddNamedMetadataOperand("llvm.module.flags",
-		ctx.MDNode([]llvm.Metadata{
-			llvm.ConstInt(ctx.Int32Type(), 2, false).ConstantAsMetadata(), // Warning on mismatch
-			ctx.MDString("Debug Info Version"),
-			llvm.ConstInt(ctx.Int32Type(), 3, false).ConstantAsMetadata(),
-		}),
 	)
-	mod.AddNamedMetadataOperand("llvm.module.flags",
-		ctx.MDNode([]llvm.Metadata{
-			llvm.ConstInt(ctx.Int32Type(), 7, false).ConstantAsMetadata(), // Max on mismatch
-			ctx.MDString("Dwarf Version"),
-			llvm.ConstInt(ctx.Int32Type(), 4, false).ConstantAsMetadata(),
-		}),
+	difile := dibuilder.CreateFile(sourceFile, sourceDir)
+	diglobalexpr := dibuilder.CreateGlobalVariableExpression(
+		difile, llvm.DIGlobalVariableExpression{
+			Name:        globalName,
+			File:        difile,
+			Line:        1,
+			Type:        ditype,
+			Expr:        dibuilder.CreateExpression(nil),
+			AlignInBits: 8,
+		},
+	)
+	global.AddMetadata(0, diglobalexpr)
+	mod.AddNamedMetadataOperand(
+		"llvm.module.flags",
+		ctx.MDNode(
+			[]llvm.Metadata{
+				llvm.ConstInt(
+					ctx.Int32Type(), 2, false,
+				).ConstantAsMetadata(), // Warning on mismatch
+				ctx.MDString("Debug Info Version"),
+				llvm.ConstInt(ctx.Int32Type(), 3, false).ConstantAsMetadata(),
+			},
+		),
+	)
+	mod.AddNamedMetadataOperand(
+		"llvm.module.flags",
+		ctx.MDNode(
+			[]llvm.Metadata{
+				llvm.ConstInt(
+					ctx.Int32Type(), 7, false,
+				).ConstantAsMetadata(), // Max on mismatch
+				ctx.MDString("Dwarf Version"),
+				llvm.ConstInt(ctx.Int32Type(), 4, false).ConstantAsMetadata(),
+			},
+		),
 	)
 	dibuilder.Finalize()
 	dibuilder.Destroy()
@@ -1055,7 +1146,10 @@ func optimizeProgram(mod llvm.Module, config *compileopts.Config) error {
 	return nil
 }
 
-func makeGlobalsModule(ctx llvm.Context, globals map[string]map[string]string, machine llvm.TargetMachine) llvm.Module {
+func makeGlobalsModule(
+	ctx llvm.Context, globals map[string]map[string]string,
+	machine llvm.TargetMachine,
+) llvm.Module {
 	mod := ctx.NewModule("cmdline-globals")
 	targetData := machine.CreateTargetData()
 	defer targetData.Dispose()
@@ -1063,11 +1157,13 @@ func makeGlobalsModule(ctx llvm.Context, globals map[string]map[string]string, m
 
 	stringType := ctx.StructCreateNamed("runtime._string")
 	uintptrType := ctx.IntType(targetData.PointerSize() * 8)
-	stringType.StructSetBody([]llvm.Type{
-		llvm.PointerType(ctx.Int8Type(), 0),
-		uintptrType,
-		uintptrType,
-	}, false)
+	stringType.StructSetBody(
+		[]llvm.Type{
+			llvm.PointerType(ctx.Int8Type(), 0),
+			uintptrType,
+			uintptrType,
+		}, false,
+	)
 
 	var pkgPaths []string
 	for pkgPath := range globals {
@@ -1095,11 +1191,13 @@ func makeGlobalsModule(ctx llvm.Context, globals map[string]map[string]string, m
 
 			// Create the string value: {ptr, len, cap}.
 			length := llvm.ConstInt(uintptrType, uint64(len(value)), false)
-			initializer := llvm.ConstNamedStruct(stringType, []llvm.Value{
-				buf,
-				length,
-				length,
-			})
+			initializer := llvm.ConstNamedStruct(
+				stringType, []llvm.Value{
+					buf,
+					length,
+					length,
+				},
+			)
 
 			// Create the string global.
 			global := llvm.AddGlobal(mod, stringType, globalName)
@@ -1123,7 +1221,9 @@ type functionStackSize struct {
 // determineStackSizes tries to determine the stack sizes of all started
 // goroutines and of the reset vector. The LLVM module is necessary to find
 // functions that call a function pointer.
-func determineStackSizes(mod llvm.Module, executable string) ([]string, map[string]functionStackSize, error) {
+func determineStackSizes(mod llvm.Module, executable string) (
+	[]string, map[string]functionStackSize, error,
+) {
 	var callsIndirectFunction []string
 	gowrappers := []string{}
 	gowrapperNames := make(map[string]string)
@@ -1135,7 +1235,9 @@ func determineStackSizes(mod llvm.Module, executable string) ([]string, map[stri
 					continue
 				}
 				if callee := inst.CalledValue(); callee.IsAFunction().IsNil() && callee.IsAInlineAsm().IsNil() {
-					callsIndirectFunction = append(callsIndirectFunction, fn.Name())
+					callsIndirectFunction = append(
+						callsIndirectFunction, fn.Name(),
+					)
 				}
 			}
 		}
@@ -1153,21 +1255,28 @@ func determineStackSizes(mod llvm.Module, executable string) ([]string, map[stri
 	// Load the ELF binary.
 	f, err := elf.Open(executable)
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not load executable for stack size analysis: %w", err)
+		return nil, nil, fmt.Errorf(
+			"could not load executable for stack size analysis: %w", err,
+		)
 	}
 	defer f.Close()
 
 	// Determine the frame size of each function (if available) and the callgraph.
 	functions, err := stacksize.CallGraph(f, callsIndirectFunction)
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not parse executable for stack size analysis: %w", err)
+		return nil, nil, fmt.Errorf(
+			"could not parse executable for stack size analysis: %w", err,
+		)
 	}
 
 	// Goroutines need to be started and finished and take up some stack space
 	// that way. This can be measured by measuring the stack size of
 	// moxie_startTask.
 	if numFuncs := len(functions["moxie_startTask"]); numFuncs != 1 {
-		return nil, nil, fmt.Errorf("expected exactly one definition of moxie_startTask, got %d", numFuncs)
+		return nil, nil, fmt.Errorf(
+			"expected exactly one definition of moxie_startTask, got %d",
+			numFuncs,
+		)
 	}
 	baseStackSize, baseStackSizeType, baseStackSizeFailedAt := functions["moxie_startTask"][0].StackSize()
 
@@ -1185,7 +1294,10 @@ func determineStackSizes(mod llvm.Module, executable string) ([]string, map[stri
 	if resetFunction != "" {
 		funcs := functions[resetFunction]
 		if len(funcs) != 1 {
-			return nil, nil, fmt.Errorf("expected exactly one definition of %s in the callgraph, found %d", resetFunction, len(funcs))
+			return nil, nil, fmt.Errorf(
+				"expected exactly one definition of %s in the callgraph, found %d",
+				resetFunction, len(funcs),
+			)
 		}
 		stackSize, stackSizeType, missingStackSize := funcs[0].StackSize()
 		sizes[resetFunction] = functionStackSize{
@@ -1200,7 +1312,10 @@ func determineStackSizes(mod llvm.Module, executable string) ([]string, map[stri
 	for _, name := range gowrappers {
 		funcs := functions[name]
 		if len(funcs) != 1 {
-			return nil, nil, fmt.Errorf("expected exactly one definition of %s in the callgraph, found %d", name, len(funcs))
+			return nil, nil, fmt.Errorf(
+				"expected exactly one definition of %s in the callgraph, found %d",
+				name, len(funcs),
+			)
 		}
 		humanName := gowrapperNames[name]
 		if humanName == "" {
@@ -1236,7 +1351,10 @@ func determineStackSizes(mod llvm.Module, executable string) ([]string, map[stri
 // modifyStackSizes modifies the .moxie_stacksizes section with the updated
 // stack size information. Before this modification, all stack sizes in the
 // section assume the default stack size (which is relatively big).
-func modifyStackSizes(executable string, stackSizeLoads []string, stackSizes map[string]functionStackSize) error {
+func modifyStackSizes(
+	executable string, stackSizeLoads []string,
+	stackSizes map[string]functionStackSize,
+) error {
 	data, fileHeader, err := getElfSectionData(executable, ".moxie_stacksizes")
 	if err != nil {
 		return err
@@ -1286,7 +1404,9 @@ func modifyStackSizes(executable string, stackSizeLoads []string, stackSizes map
 				// stack size cannot be determined for all goroutines.
 				stackSize += 8
 			default:
-				return fmt.Errorf("unknown architecture: %s", fileHeader.Machine.String())
+				return fmt.Errorf(
+					"unknown architecture: %s", fileHeader.Machine.String(),
+				)
 			}
 
 			// Finally write the stack size to the binary.
@@ -1309,7 +1429,9 @@ func modifyStackSizes(executable string, stackSizeLoads []string, stackSizes map
 //	Reset_Handler                    316
 //	examples/blinky2.led1            92
 //	runtime.run$1                    300
-func printStacks(calculatedStacks []string, stackSizes map[string]functionStackSize) {
+func printStacks(
+	calculatedStacks []string, stackSizes map[string]functionStackSize,
+) {
 	// Print the sizes of all stacks.
 	fmt.Printf("%-32s %s\n", "function", "stack usage (in bytes)")
 	for _, name := range calculatedStacks {
@@ -1318,11 +1440,20 @@ func printStacks(calculatedStacks []string, stackSizes map[string]functionStackS
 		case stacksize.Bounded:
 			fmt.Printf("%-32s %d\n", fn.humanName, fn.stackSize)
 		case stacksize.Unknown:
-			fmt.Printf("%-32s unknown, %s does not have stack frame information\n", fn.humanName, fn.missingStackSize)
+			fmt.Printf(
+				"%-32s unknown, %s does not have stack frame information\n",
+				fn.humanName, fn.missingStackSize,
+			)
 		case stacksize.Recursive:
-			fmt.Printf("%-32s recursive, %s may call itself\n", fn.humanName, fn.missingStackSize)
+			fmt.Printf(
+				"%-32s recursive, %s may call itself\n", fn.humanName,
+				fn.missingStackSize,
+			)
 		case stacksize.IndirectCall:
-			fmt.Printf("%-32s unknown, %s calls a function pointer\n", fn.humanName, fn.missingStackSize)
+			fmt.Printf(
+				"%-32s unknown, %s calls a function pointer\n", fn.humanName,
+				fn.missingStackSize,
+			)
 		}
 	}
 }

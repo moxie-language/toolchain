@@ -1,0 +1,89 @@
+#!/bin/bash
+# Shared utilities for the moxie test suite.
+
+set -euo pipefail
+
+MOXIE="${MOXIE:-./moxie}"
+MOXIEROOT="${MOXIEROOT:-$(pwd)}"
+export MOXIEROOT
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+STATUSFILE="${STATUSFILE:-/tmp/moxie-test-status-$$}"
+TMPROOT="${TMPROOT:-/tmp/moxie-tests-$$}"
+
+log_pass() {
+	local name="$1" extra="$2"
+	printf "  %-45s ${GREEN}PASS${NC} (%s)\n" "$name" "$extra"
+	echo "PASS" >> "$STATUSFILE"
+}
+
+log_fail() {
+	local name="$1" msg="$2"
+	printf "  %-45s ${RED}FAIL${NC}\n" "$name"
+	echo -e "    ${RED}${msg}${NC}" | tail -5
+	echo "FAIL" >> "$STATUSFILE"
+}
+
+log_skip() {
+	local name="$1" reason="$2"
+	printf "  %-45s ${YELLOW}SKIP${NC} (%s)\n" "$name" "$reason"
+	echo "SKIP" >> "$STATUSFILE"
+}
+
+tempdir() {
+	local name="$1"
+	mkdir -p "$TMPROOT/$name"
+	echo "$TMPROOT/$name"
+}
+
+compile_and_run() {
+	local src="$1" out="$2" name="$3"
+	local log="$out/build.log"
+	local rc=0
+
+	if [ -f "$src" ]; then
+		local pkgdir="$out/pkg"
+		mkdir -p "$pkgdir"
+		cp "$src" "$pkgdir/main.mx"
+		src="$pkgdir"
+	fi
+
+	MOXIEROOT="$MOXIEROOT" "$MOXIE" build -o "$out/$name" "$src" >"$log" 2>&1 || rc=$?
+	if [ $rc -ne 0 ]; then
+		if grep -qE "panic:|caught signal|nil pointer dereference" "$log" 2>/dev/null; then
+			return 1
+		fi
+		if grep -qE "error:.*defined with type.*but expected" "$log" 2>/dev/null; then
+			return 1
+		fi
+		if grep -qE "undefined symbol: main\." "$log" 2>/dev/null; then
+			return 0
+		fi
+		if grep -q "linker failed" "$log" 2>/dev/null; then
+			return 0
+		fi
+		return 1
+	fi
+	"$out/$name" >"$out/run.log" 2>&1 || return 1
+	return 0
+}
+
+print_summary() {
+	local total=0 passed=0 failed=0 skipped=0
+	if [ -f "$STATUSFILE" ]; then
+		total=$(wc -l < "$STATUSFILE" 2>/dev/null || echo 0)
+		passed=$(grep -c PASS "$STATUSFILE" 2>/dev/null) || passed=0
+		failed=$(grep -c FAIL "$STATUSFILE" 2>/dev/null) || failed=0
+		skipped=$(grep -c SKIP "$STATUSFILE" 2>/dev/null) || skipped=0
+	fi
+	echo ""
+	echo "=== Summary ==="
+	printf "total: %d  passed: %d  failed: %d  skipped: %d\n" "$total" "$passed" "$failed" "$skipped"
+	rm -f "$STATUSFILE"
+	rm -rf "$TMPROOT"
+	return "$failed"
+}

@@ -304,6 +304,10 @@ func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t Type) {
 	}
 	switch ev := e.(type) {
 	case *syntax.Name:
+		if ev.Value == "int" || ev.Value == "uint" {
+			mxutil.WriteStr(2, "compile error: " | ev.Value | " is not a valid type (use int32, int64, uint32, uint64 etc.)\n")
+			return nil
+		}
 		if _, obj := Universe.LookupParent(ev.Value); obj != nil {
 			if tn, ok := obj.(*TypeName); ok {
 				return tn.Typ
@@ -2638,17 +2642,13 @@ func (fb *ssaFuncBuilder) buildBranch(s *syntax.BranchStmt) {
 		}
 	case token.Return:
 		fb.emitReturn(nil, 0)
+	case token.Fallthrough:
+		mxutil.WriteStr(2, "compile error: fallthrough not allowed\n")
 	}
 }
 
 func (fb *ssaFuncBuilder) buildGoStmt(call *syntax.CallExpr) {
-	fn := fb.buildExpr(call.Fun)
-	if fn == nil {
-		return
-	}
-	args := fb.buildArgs(call.ArgList)
-	g := &SSAGo{Call: SSACallCommon{Value: fn, Args: args}}
-	fb.emit(g)
+	mxutil.WriteStr(2, "compile error: go statements not allowed (use spawn)\n")
 }
 
 func (fb *ssaFuncBuilder) buildDeferStmt(call *syntax.CallExpr) {
@@ -3329,15 +3329,8 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		typ := fb.resolveType(e.ArgList[0])
 		return fb.emitMake(typ, args)
 	case BuiltinNew:
-		if len(e.ArgList) == 0 {
-			return nil
-		}
-		typ := fb.resolveType(e.ArgList[0])
-		a := &SSAAlloc{Heap: true}
-		a.typ = NewPointer(typ)
-		a.name = fb.nextName()
-		fb.emit(a)
-		return a
+		mxutil.WriteStr(2, "compile error: new() is not supported (use &T{})\n")
+		return nil
 	case BuiltinPanic:
 		if len(args) > 0 {
 			fb.emit(&SSAPanic{X: args[0]})
@@ -4803,13 +4796,11 @@ func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *syntax.SelectorExpr, recv SS
 }
 
 func (fb *ssaFuncBuilder) resolveType(e syntax.Expr) (t Type) {
-	if fb.info != nil {
-		if tv, ok := fb.info.Types[e]; ok && tv.Type != nil {
-			return tv.Type
-		}
+	if ev, ok := e.(*syntax.Name); ok && (ev.Value == "int" || ev.Value == "uint") {
+		mxutil.WriteStr(2, "compile error: " | ev.Value | " is not a valid type (use int32, int64, uint32, uint64 etc.)\n")
+		return nil
 	}
-	t = fb.resolveTypeAST(e)
-	return t
+	return fb.resolveTypeAST(e)
 }
 
 func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
@@ -4818,6 +4809,10 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
 	}
 	switch ev := e.(type) {
 	case *syntax.Name:
+		if ev.Value == "int" || ev.Value == "uint" {
+			mxutil.WriteStr(2, "compile error: " | ev.Value | " is not a valid type (use int32, int64, uint32, uint64 etc.)\n")
+			return nil
+		}
 		if fb.typeSubst != nil {
 			if t2, ok44 := fb.typeSubst[ev.Value]; ok44 {
 				return t2

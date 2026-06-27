@@ -12,6 +12,7 @@ package types
 
 import (
 	"bytes"
+	"runtime"
 	"git.smesh.lol/moxie/pkg/token"
 )
 
@@ -108,7 +109,14 @@ func (t *Named) AddMethod(m *TCFunc) {
 	n := len(t.Methods)
 	if n >= cap(t.Methods) {
 		oldBuf := t.Methods
+		// Allocate Methods backing array on the root arena so the slice
+		// header survives beyond AddMethod's function-arena lifetime.
+		// The Named receiver lives on the root arena; transient function-
+		// arena makeslice results would dangle after the return.
+		saved := runtime.CurrentArena()
+		runtime.SetCurrentArena(runtime.RootArena())
 		t.Methods = []*TCFunc{:n:n + 4}
+		runtime.SetCurrentArena(saved)
 		for j := int32(0); j < n; j++ {
 			t.Methods[j] = oldBuf[j]
 		}

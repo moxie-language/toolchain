@@ -45,18 +45,6 @@ func cFork() (n int32)
 //export mxc_wait_any
 func cWaitAny() (n int32)
 
-//export mxc_getenv
-func cGetenv(name unsafe.Pointer, nameLen int32, buf unsafe.Pointer, bufCap int32) (n int32)
-
-//export mxc_listdir
-func cListdir(dir unsafe.Pointer, dirLen int32, buf unsafe.Pointer, bufCap int32) (n int32)
-
-//export mxc_writefile
-func cWritefile(path unsafe.Pointer, pathLen int32, data unsafe.Pointer, dataLen int32, mode uint32) (n int32)
-
-//export mxc_mkdir
-func cMkdir(path unsafe.Pointer, pathLen int32, mode uint32) (n int32)
-
 // Ring buffer FFI
 //export mxc_ring_create
 func cRingCreate(dataSize int32) (p unsafe.Pointer)
@@ -102,18 +90,11 @@ func tlsProbeRead() (n int32) {
 }
 
 func writeFile(path string, data []byte, mode uint32) {
-	if len(path) == 0 {
-		return
-	}
-	cWritefile(unsafe.Pointer(unsafe.SliceData([]byte(path))), int32(len(path)),
-		unsafe.Pointer(unsafe.SliceData([]byte(data))), int32(len(data)), mode)
+	mxutil.WriteFile(path, data, mode)
 }
 
 func mkdirAll(path string, mode uint32) {
-	if len(path) == 0 {
-		return
-	}
-	cMkdir(unsafe.Pointer(unsafe.SliceData([]byte(path))), int32(len(path)), mode)
+	mxutil.MkdirAll(path, mode)
 }
 
 func fatal(msg string) {
@@ -131,48 +112,12 @@ func clangCompileToObj(clang, triple, bcFile string) (s string) {
 }
 
 func getenv(name string) (s string) {
-	buf := []byte{:4096}
-	n := cGetenv(unsafe.Pointer(unsafe.SliceData([]byte(name))), int32(len(name)), unsafe.Pointer(unsafe.SliceData(buf)), int32(len(buf)))
-	if n <= 0 {
-		return ""
-	}
-	return string(buf[:n])
+	return mxutil.Getenv(name)
 }
 
 
 func listFiles(dir, ext string) (ss []string) {
-	buf := []byte{:65536}
-	n := cListdir(unsafe.Pointer(unsafe.SliceData([]byte(dir))), int32(len(dir)),
-		unsafe.Pointer(unsafe.SliceData(buf)), int32(len(buf)))
-	if n <= 0 {
-		return nil
-	}
-	// Count null-separated entries matching ext.
-	nc := int32(0)
-	start := int32(0)
-	for i := int32(0); i < n; i++ {
-		if buf[i] == 0 {
-			if mxutil.HasSuffix(string(buf[start:i]), ext) {
-				nc++
-			}
-			start = i + 1
-		}
-	}
-	if nc == 0 {
-		return nil
-	}
-	result := []string{:0:nc}
-	start = 0
-	for i := int32(0); i < n; i++ {
-		if buf[i] == 0 {
-			name := string(buf[start:i])
-			if mxutil.HasSuffix(name, ext) {
-				push(result, name)
-			}
-			start = i + 1
-		}
-	}
-	return result
+	return mxutil.ListFiles(dir, ext)
 }
 
 func run(args []string) (n int32) {
@@ -2681,7 +2626,7 @@ func cmdCacheWarm() {
 	}
 	triple := "x86_64-unknown-linux-musleabihf"
 	clang := "clang-22"
-	tmpdir := "/tmp/mxc-build"
+	tmpdir := "./tmp/mxc-build"
 	mkdirAll(tmpdir, 0755)
 	cacheBase := pkgCacheDir()
 	registerBuiltins()
@@ -2791,7 +2736,7 @@ func cmdUpdate(rebuildAll bool) {
 	}
 	triple := "x86_64-unknown-linux-musleabihf"
 	clang := "clang-22"
-	tmpdir := "/tmp/mxc-build"
+	tmpdir := "./tmp/mxc-build"
 	mkdirAll(tmpdir, 0755)
 	registerBuiltins()
 	for _, pkgDir := range pkgDirs {
@@ -2977,7 +2922,7 @@ func cmdTest(args []string) {
 		pkgName = "main"
 	}
 
-	tmpdir := "/tmp/mxc-testbuild"
+	tmpdir := "./tmp/mxc-testbuild"
 	mkdirAll(tmpdir, 0755)
 
 	testMainSrc := generateTestMain(pkgName, allTestFuncs)
@@ -3638,7 +3583,7 @@ func main() {
 		fatal("no packages to compile")
 	}
 
-	tmpdir := "/tmp/mxc-build"
+	tmpdir := "./tmp/mxc-build"
 	mkdirAll(tmpdir, 0755)
 
 	cacheBase := pkgCacheDir()
