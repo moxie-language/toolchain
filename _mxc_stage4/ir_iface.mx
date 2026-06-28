@@ -58,7 +58,14 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 		e.scopeTrackAlloc(valPtr)
 	}
-	typeid := e.typeIDHash(m.X.SSAType())
+	boxType := m.X.SSAType()
+	// The dispatch chain keys on the underlying named type for value-receiver
+	// methods, not the pointer wrapper that Moxie's all-ptr ABI uses internally.
+	// Strip the pointer so the type ID matches the dispatch chain's extTypeID.
+	if p, ok := boxType.(*Pointer); ok && p.Base != nil {
+		boxType = p.Base
+	}
+	typeid := e.typeIDHash(boxType)
 	t1 := e.nextReg2("mi")
 	e.w("  ") ; e.w(t1) ; e.w(" = insertvalue " | e.ifaceType() | " undef, " | e.intptrType() | " ") ; e.w(typeid) ; e.w(", 0\n")
 	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue " | e.ifaceType() | " ") ; e.w(t1) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
@@ -370,6 +377,11 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 		} else {
 			tid = "reflect/types.type:named:" | normPath | "." | tname
 		}
+		if tname == "unixFileHandle" && methodName == "Write" {
+			prStr := "0"
+			if isPR { prStr = "1" }
+			mxutil.WriteStr(2, "DBG extScan unixFileHandle.Write isPR=" | prStr | " tid=" | tid | " normPath=" | normPath | "\n")
+		}
 				msig := m.Signature()
 				push(impls, ifaceImpl{
 					recvType:  tn3.Typ,
@@ -642,9 +654,18 @@ func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv stri
 
 func (e *irEmitter) implTypeID(impl ifaceImpl) (s string) {
 	if impl.extTypeID != "" {
-		return e.hashToIntptr(fnv1a64(impl.extTypeID))
+		hash := e.hashToIntptr(fnv1a64(impl.extTypeID))
+		if impl.extTypeID == "reflect/types.type:named:os.unixFileHandle" || impl.extTypeID == "reflect/types.type:named:io.discard" {
+			mxutil.WriteStr(2, "DBG implTypeID extTypeID=" | impl.extTypeID | " hash=" | hash | "\n")
+		}
+		return hash
 	}
-	return e.typeIDHash(impl.recvType)
+	h := e.typeIDHash(impl.recvType)
+	name := e.reflectTypeName(impl.recvType)
+	if mxutil.HasSuffix(name, ".unixFileHandle") || mxutil.HasSuffix(name, ".discard") {
+		mxutil.WriteStr(2, "DBG implTypeID local name=" | name | " hash=" | h | "\n")
+	}
+	return h
 }
 
 // emitIfaceAssertOK emits an i1 that is true when the dynamic type-ID in
