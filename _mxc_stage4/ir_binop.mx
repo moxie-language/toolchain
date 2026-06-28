@@ -5,6 +5,46 @@ import (
 	. "git.smesh.lol/moxie/pkg/types"
 )
 
+func structPtrFieldIdx(t string) (idx int32, ftype string) {
+	if len(t) < 2 || t[0] != '{' {
+		return 0, t
+	}
+	depth := 0
+	fields := []string{:0:4}
+	start := int32(-1)
+	for i := int32(0); i < int32(len(t)); i++ {
+		if t[i] == '{' {
+			depth++
+			if depth == 1 {
+				start = i + 1
+				for start < int32(len(t)) && t[start] == ' ' {
+					start++
+				}
+			}
+		} else if t[i] == '}' {
+			depth--
+			if depth == 0 {
+				field := mxutil.TrimSpace(t[start:i])
+				push(fields, field)
+				break
+			}
+		} else if t[i] == ',' && depth == 1 {
+			field := mxutil.TrimSpace(t[start:i])
+			push(fields, field)
+			start = i + 1
+			for start < int32(len(t)) && t[start] == ' ' {
+				start++
+			}
+		}
+	}
+	for fi, ft := range fields {
+		if ft == "ptr" {
+			return int32(fi), ft
+		}
+	}
+	return 0, fields[0]
+}
+
 func (e *irEmitter) emitBinOp(b *SSABinOp) {
 	if b.X == nil || b.X.SSAType() == nil {
 		recov := false
@@ -31,27 +71,23 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 				if isNullRecov && len(rt2) > 0 && rt2[0] == '{' {
 					aggVal := lv2
 					if lv2 == "null" || lv2 == "zeroinitializer" { aggVal = rv2 }
-					curType := rt2
-					curVal := aggVal
-					for len(curType) > 0 && curType[0] == '{' {
-						e.nextReg++
-						extReg := "%ne" | irItoa(e.nextReg)
-						e.w("  ") ; e.w(extReg) ; e.w(" = extractvalue ") ; e.w(curType) ; e.w(" ") ; e.w(curVal) ; e.w(", 0\n")
-						curVal = extReg
-						curType = e.structField0Type(curType)
+					fi, ft := structPtrFieldIdx(rt2)
+					e.nextReg++
+					extReg := "%ne" | irItoa(e.nextReg)
+					e.w("  ") ; e.w(extReg) ; e.w(" = extractvalue ") ; e.w(rt2) ; e.w(" ") ; e.w(aggVal) ; e.w(", ") ; e.w(fi) ; e.w("\n")
+					curVal := extReg
+					if ft != "ptr" {
+						if e.intBits(ft) > 0 {
+							e.nextReg++
+							castReg := "%ne" | irItoa(e.nextReg)
+							e.w("  ") ; e.w(castReg) ; e.w(" = inttoptr ") ; e.w(ft) ; e.w(" ") ; e.w(curVal) ; e.w(" to ptr\n")
+							curVal = castReg
+						}
+						ft = "ptr"
 					}
-					if curType != "ptr" {
-					if e.intBits(curType) > 0 {
-						e.nextReg++
-						castReg := "%ne" | irItoa(e.nextReg)
-						e.w("  ") ; e.w(castReg) ; e.w(" = inttoptr ") ; e.w(curType) ; e.w(" ") ; e.w(curVal) ; e.w(" to ptr\n")
-						curVal = castReg
-					}
-					curType = "ptr"
-				}
-				cmpOp2 := "icmp eq"
-				if b.Op == OpNeq { cmpOp2 = "icmp ne" }
-				e.w("  ") ; e.w(reg2) ; e.w(" = ") ; e.w(cmpOp2) ; e.w(" ") ; e.w(curType) ; e.w(" ") ; e.w(curVal) ; e.w(", null\n")
+					cmpOp := "icmp eq"
+					if b.Op == OpNeq { cmpOp = "icmp ne" }
+					e.w("  ") ; e.w(reg2) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ") ; e.w(ft) ; e.w(" ") ; e.w(curVal) ; e.w(", null\n")
 					e.setRegType(b, reg2, "i1")
 					return
 				}
