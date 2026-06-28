@@ -92,6 +92,17 @@ func (e *irEmitter) typeIDHashI64(t Type) (s string) {
 	return e.intptrType() | " " | e.hashToIntptr(fnv1a64(name))
 }
 
+func normalizePkgPath(pkgPath string) (s string) {
+	// Strip module prefix for consistent type IDs.
+	// The module root is git.smesh.lol/moxie/ - strip it so paths
+	// like "git.smesh.lol/moxie/pkg/types" become "pkg/types".
+	prefix := "git.smesh.lol/moxie/"
+	if mxutil.HasPrefix(pkgPath, prefix) {
+		return pkgPath[len(prefix):]
+	}
+	return pkgPath
+}
+
 func (e *irEmitter) reflectTypeName(t Type) (s string) {
 	if b, ok := t.(*Basic); ok {
 		switch b.Kind {
@@ -126,10 +137,10 @@ func (e *irEmitter) reflectTypeName(t Type) (s string) {
 	if named, ok := t.(*Named); ok && named.Obj != nil {
 		pkgPath := ""
 		if named.Obj.Pkg != nil {
-			pkgPath = named.Obj.Pkg.Path
+			pkgPath = normalizePkgPath(named.Obj.Pkg.Path)
 		}
 		if pkgPath == "" {
-			pkgPath = e.pkg.Pkg.Path
+			pkgPath = normalizePkgPath(e.pkg.Pkg.Path)
 		}
 		result := "reflect/types.type:named:" | pkgPath | "." | named.Obj.Name
 		if pkgPath == e.pkg.Pkg.Path {
@@ -252,7 +263,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 			hasType[sname] = true
 		}
 	}
-	selfPath := e.pkg.Pkg.Path
+	selfPath := normalizePkgPath(e.pkg.Pkg.Path)
 	var importedPkgs []*TCPackage
 	seenPkg := map[string]bool{}
 	// Explicit import list first: scope scanning misses imports that lost
@@ -308,7 +319,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 	}
 	for ipi := 0; ipi < len(importedPkgs); ipi++ {
 		ipkg := importedPkgs[ipi]
-		pkgPath := ipkg.Path
+		pkgPath := normalizePkgPath(ipkg.Path)
 		if pkgPath == selfPath {
 			continue
 		}
@@ -340,10 +351,11 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 				isPR := m.PtrRecv
 				sym := pkgPath | "." | tname | "." | methodName
 				tid := ""
+				normPath := normalizePkgPath(pkgPath)
 				if isPR {
-					tid = "reflect/types.type:pointer:named:" | pkgPath | "." | tname
+					tid = "reflect/types.type:pointer:named:" | normPath | "." | tname
 				} else {
-					tid = "reflect/types.type:named:" | pkgPath | "." | tname
+					tid = "reflect/types.type:named:" | normPath | "." | tname
 				}
 				msig := m.Signature()
 				push(impls, ifaceImpl{
@@ -983,9 +995,11 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 	var checkLabels []string
 	var caseLabels []string
 	var callRegs []string
+	var phiLabels []string
 	for i := range impls {
 		push(checkLabels, "invoke.check" | irItoa(baseID) | "." | irItoa(i))
 		push(caseLabels, "invoke.case" | irItoa(baseID) | "." | irItoa(i))
+		push(phiLabels, caseLabels[len(caseLabels)-1])
 		if !isVoid {
 			push(callRegs, e.nextReg2("cr"))
 		}
@@ -1014,6 +1028,19 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 		recvLLVM := "ptr"
 		recv := callRecv
 		if impl.extSymbol != "" {
+			// For extern_weak symbols, check the function pointer is
+			// non-null before calling. An unresolved weak symbol resolves
+			// to null, which would crash at the call site.
+			nullCheck := e.nextReg2("nc")
+			e.w("  ") ; e.w(nullCheck) ; e.w(" = icmp ne ptr ") ; e.w(e.implFuncSym(impl)) ; e.w(", null\n")
+			callLabel := "invoke.call" | irItoa(baseID) | "." | irItoa(i)
+			nextCheck2 := defaultLabel
+			if i < len(impls)-1 {
+				nextCheck2 = checkLabels[i+1]
+			}
+			e.w("  br i1 ") ; e.w(nullCheck) ; e.w(", label %") ; e.w(callLabel) ; e.w(", label %") ; e.w(nextCheck2) ; e.w("\n")
+			e.w(callLabel) ; e.w(":\n")
+			phiLabels[i] = callLabel
 			creg := ""
 			if !isVoid {
 				creg = callRegs[i]
@@ -1055,7 +1082,7 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 		e.w("  ") ; e.w(reg) ; e.w(" = phi ") ; e.w(retType) ; e.w(" ")
 		for i := range impls {
 			if i > 0 { e.w(", ") }
-			e.w("[ ") ; e.w(callRegs[i]) ; e.w(", %") ; e.w(caseLabels[i]) ; e.w(" ]")
+			e.w("[ ") ; e.w(callRegs[i]) ; e.w(", %") ; e.w(phiLabels[i]) ; e.w(" ]")
 		}
 		e.w("\n")
 	}
