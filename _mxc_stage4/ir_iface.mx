@@ -209,7 +209,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 			continue
 		}
 		dotIdx := -1
-		for i := 0; i < len(mname); i++ {
+		for i := len(mname) - 1; i >= 0; i-- {
 			if mname[i] == '.' {
 				dotIdx = i
 				break
@@ -223,6 +223,15 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 			continue
 		}
 		tname := mname[:dotIdx]
+		// Handle SSA naming like (*File).Write: extract File from (*File)
+		if len(tname) >= 3 && tname[0] == '(' && tname[len(tname)-1] == ')' {
+			inner := tname[1 : len(tname)-1]
+			if len(inner) >= 1 && inner[0] == '*' {
+				tname = inner[1:]
+			} else {
+				tname = inner
+			}
+		}
 		looked := e.pkg.Pkg.Scope.Lookup(tname)
 		if looked == nil {
 			continue
@@ -414,8 +423,12 @@ func (e *irEmitter) findEmbedMethod(t Type, methodName string, depth int32) (cha
 		if embedName == "" {
 			continue
 		}
-		embedMName := embedName | "." | methodName
-		if fn2, ok2 := e.pkg.Members[embedMName].(*SSAFunction); ok2 {
+		embedMName := "(*" | embedName | ")." | methodName
+		fn2, fok := e.pkg.Members[embedMName].(*SSAFunction)
+		if !fok {
+			fn2, fok = e.pkg.Members[embedName | "." | methodName].(*SSAFunction)
+		}
+		if fok {
 			return []int32{fi}, fn2, embedType
 		}
 		sub, fn3, embedT2 := e.findEmbedMethod(embedType, methodName, depth+1)
