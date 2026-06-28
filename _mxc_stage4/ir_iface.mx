@@ -6,6 +6,13 @@ import (
 )
 
 func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
+	if e.curFunc != nil && e.curFunc.name == "NewFile" && m.X != nil && m.X.SSAType() != nil {
+		if nm, ok := m.X.SSAType().(*Named); ok && nm.Obj != nil && nm.Obj.Name == "unixFileHandle" {
+			mxutil.WriteStr(2, "DBG emitMakeInterface IN NewFile for unixFileHandle\n")
+		}
+		rt := e.reflectTypeName(m.X.SSAType())
+		mxutil.WriteStr(2, "DBG emitMakeInterface NewFile type=" | rt | "\n")
+	}
 	reg := e.regName(m)
 	val := e.operand(m.X)
 	valType := e.llvmType(m.X.SSAType())
@@ -58,14 +65,7 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 		e.scopeTrackAlloc(valPtr)
 	}
-	boxType := m.X.SSAType()
-	// The dispatch chain keys on the underlying named type for value-receiver
-	// methods, not the pointer wrapper that Moxie's all-ptr ABI uses internally.
-	// Strip the pointer so the type ID matches the dispatch chain's extTypeID.
-	if p, ok := boxType.(*Pointer); ok && p.Base != nil {
-		boxType = p.Base
-	}
-	typeid := e.typeIDHash(boxType)
+	typeid := e.typeIDHash(m.X.SSAType())
 	t1 := e.nextReg2("mi")
 	e.w("  ") ; e.w(t1) ; e.w(" = insertvalue " | e.ifaceType() | " undef, " | e.intptrType() | " ") ; e.w(typeid) ; e.w(", 0\n")
 	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue " | e.ifaceType() | " ") ; e.w(t1) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
@@ -81,6 +81,11 @@ func (e *irEmitter) hashToIntptr(h uint64) (s string) {
 
 func (e *irEmitter) typeIDHash(t Type) (s string) {
 	name := e.reflectTypeName(t)
+	if mxutil.HasSuffix(name, "unixFileHandle") || mxutil.HasSuffix(name, ".discard") {
+		pt := "value"
+		if _, ok := t.(*Pointer); ok { pt = "ptr" }
+		mxutil.WriteStr(2, "DBG typeIDHash type=" | pt | " name=" | name | "\n")
+	}
 	if _, ok := e.typeIDs[name]; !ok {
 		found := false
 		for _, p := range e.pendTypeIDs {
@@ -365,7 +370,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 					continue
 				}
 				isPR := m.PtrRecv
-				sym := pkgPath | "." | tname | "." | methodName
+				sym := pkgPath | ".(*" | tname | ")." | methodName
 				tid := ""
 				normPath := normalizePkgPath(pkgPath)
 		// Moxie's all-ptr-receiver ABI: all methods receive a pointer.
@@ -500,7 +505,7 @@ func findExtEmbedMethod(named *Named, pkgPath string, outerName string, methodNa
 			if m.Name != methodName {
 				continue
 			}
-			sym2 := embedPkg | "." | embedName | "." | methodName
+			sym2 := embedPkg | ".(*" | embedName | ")." | methodName
 			return []int32{fi}, sym2, m.Signature(), embedType
 		}
 		sub, sym3, sig2, eT := findExtEmbedMethod(embedNamed, embedPkg, embedName, methodName, depth+1)
