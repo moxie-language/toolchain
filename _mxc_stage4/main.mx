@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"runtime"
+	"syscall"
 	"unsafe"
 
 	"git.smesh.lol/moxie/pkg/mxutil"
@@ -117,7 +118,46 @@ func getenv(name string) (s string) {
 
 
 func listFiles(dir, ext string) (ss []string) {
-	return mxutil.ListFiles(dir, ext)
+	fd, err := syscall.Open(dir, syscall.O_RDONLY, 0)
+	if err != nil {
+		return nil
+	}
+	var names [256]string
+	var raw [8192]byte
+	ni := int32(0)
+	_ = ni
+	for {
+		n, err := syscall.ReadDirent(fd, raw[:])
+		if n <= 0 {
+			break
+		}
+		off := int32(0)
+		for off < n {
+			ino := uint64(raw[off]) | uint64(raw[1+off])<<8 | uint64(raw[2+off])<<16 | uint64(raw[3+off])<<24 |
+				uint64(raw[4+off])<<32 | uint64(raw[5+off])<<40 | uint64(raw[6+off])<<48 | uint64(raw[7+off])<<56
+			rcl := uint64(raw[16+off]) | uint64(raw[17+off])<<8
+			if ino != 0 && rcl > 19 {
+				namEnd := int32(19)
+				for namEnd < int32(rcl) && off+namEnd < n && raw[off+namEnd] != 0 {
+					namEnd += 1
+				}
+				name := string(raw[off+19 : off+namEnd])
+				if name != "." && name != ".." && mxutil.HasSuffix(name, ext) {
+					names[ni] = name
+					ni += 1
+				}
+			}
+			off += int32(rcl)
+		}
+		_ = err
+	}
+	syscall.Close(fd)
+	if ni == 0 {
+		return nil
+	}
+	out := make([]string, ni)
+	copy(out, names[:ni])
+	return out
 }
 
 func run(args []string) (n int32) {
