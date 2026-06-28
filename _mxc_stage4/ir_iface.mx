@@ -1065,7 +1065,16 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 	reg := e.regName(t)
 	val := e.operand(t.X)
 	if t.AssertedType == nil {
-		e.w("  ; skipped nil type assertion\n")
+		if t.CommaOk {
+			tupType := "{ptr, i1}"
+			e.nextReg++
+			tmp := "%tas" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(tmp) ; e.w(" = alloca ") ; e.w(tupType) ; e.w("\n")
+			e.w("  store ") ; e.w(tupType) ; e.w(" zeroinitializer, ptr ") ; e.w(tmp) ; e.w("\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(tupType) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
+		} else {
+			e.w("  ") ; e.w(reg) ; e.w(" = inttoptr " | e.intptrType() | " 0 to ptr\n")
+		}
 		return
 	}
 	assertedType := e.llvmType(t.AssertedType)
@@ -1073,13 +1082,23 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 	if voidAssert {
 		assertedType = "ptr"
 	}
-	// Check if input is already a concrete ptr (not an interface {ptr, ptr})
 	var xType Type
 	if t.X != nil {
 		xType = t.X.SSAType()
 	}
 	if xType == nil {
-		e.w("  ; skipped nil X type\n")
+		if t.CommaOk && len(assertedType) > 0 {
+			tupType := "{" | assertedType | ", i1}"
+			e.nextReg++
+			tmp := "%tas" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(tmp) ; e.w(" = alloca ") ; e.w(tupType) ; e.w("\n")
+			e.w("  store ") ; e.w(tupType) ; e.w(" zeroinitializer, ptr ") ; e.w(tmp) ; e.w("\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(tupType) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
+		} else if !t.CommaOk {
+			e.w("  ") ; e.w(reg) ; e.w(" = inttoptr " | e.intptrType() | " 0 to ptr\n")
+		} else {
+			e.w("  ; skipped nil X type (commaok)\n")
+		}
 		return
 	}
 	inputType := e.llvmType(xType)

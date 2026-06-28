@@ -25,11 +25,19 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 		}
 		return
 	}
+	if at, ok := e.allocTypes[a]; ok && !a.Heap && len(at) > 0 && at[0] == '{' {
+		e.w("  ") ; e.w(reg) ; e.w(" = alloca ") ; e.w(at) ; e.w("\n")
+		e.w("  store ") ; e.w(at) ; e.w(" zeroinitializer, ptr ") ; e.w(reg) ; e.w("\n")
+		return
+	}
 	elemType := e.llvmType(a.SSAType())
 	nilElem := false
 	if p, ok := SafeUnderlying(a.SSAType()).(*Pointer); ok {
 		if p.Base != nil {
 			elemType = e.llvmType(p.Base)
+			if b, okB := SafeUnderlying(p.Base).(*Basic); okB && (b.Kind == Invalid || b.Kind == UntypedNil) {
+				elemType = "ptr"
+			}
 		} else {
 			nilElem = true
 		}
@@ -392,6 +400,12 @@ func (e *irEmitter) emitZeroReg(reg string, typ Type) {
 		e.w("  ") ; e.w(reg) ; e.w(" = add i1 false, false\n")
 	} else if e.intBits(rt) > 0 {
 		e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(rt) ; e.w(" 0, 0\n")
+	} else if len(rt) > 0 && (rt[0] == '{' || rt[0] == '[') {
+		e.nextReg++
+		tmp := "%zr" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(tmp) ; e.w(" = alloca ") ; e.w(rt) ; e.w("\n")
+		e.w("  store ") ; e.w(rt) ; e.w(" zeroinitializer, ptr ") ; e.w(tmp) ; e.w("\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(rt) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
 	} else {
 		e.w("  ") ; e.w(reg) ; e.w(" = add i32 0, 0\n")
 	}
