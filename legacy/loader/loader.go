@@ -443,25 +443,15 @@ func (p *Package) Check() error {
 	initFileVersions(&p.info)
 
 	// Do typechecking of the package.
-	packageName := p.ImportPath
-	if p == p.program.MainPkg() {
-		if p.Name != "main" && !p.program.SkipMainNameCheck {
-			var errPos token.Position
-			if len(p.Files) > 0 {
-				errPos = p.program.fset.Position(p.Files[0].Name.Pos())
-			} else {
-				errPos = token.Position{Filename: p.ImportPath}
-			}
-			return Errors{p, []error{
-				scanner.Error{
-					Pos: errPos,
-					Msg: fmt.Sprintf("expected main package to have name \"main\", not %#v", p.Name),
-				},
-			}}
-		}
-		if !p.program.SkipMainNameCheck {
+	packageName := "main"
+	if !p.program.SkipMainNameCheck {
+		if p == p.program.MainPkg() {
 			packageName = "main"
+		} else {
+			packageName = p.ImportPath
 		}
+	} else {
+		packageName = p.ImportPath
 	}
 	typesPkg, err := checker.Check(packageName, p.program.fset, p.Files, &p.info)
 

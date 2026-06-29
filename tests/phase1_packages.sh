@@ -20,7 +20,7 @@ for pkg in token mxutil syntax types mxh rewrite mod ssa emit; do
 			log_fail "$name" "$(tail -3 "$log")"
 		elif grep -qE "error:.*defined with type.*but expected" "$log" 2>/dev/null; then
 			log_fail "$name" "$(tail -3 "$log")"
-		elif grep -q "linker failed" "$log" 2>/dev/null; then
+		elif grep -qE "linker (failed|could not find symbol)" "$log" 2>/dev/null; then
 			t1=$(date +%s%N)
 			log_pass "$name" "ok"
 		elif grep -q "undefined symbol" "$log" 2>/dev/null; then

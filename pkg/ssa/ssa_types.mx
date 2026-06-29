@@ -873,17 +873,18 @@ func ssaElemType(t types.Type) (tv types.Type) {
 	if t == nil {
 		return nil
 	}
-	switch t := types.SafeUnderlying(t).(type) {
+	u := types.SafeUnderlying(t)
+	switch u.(type) {
 	case *types.Slice:
-		return t.Elem()
+		return u.(*types.Slice).Elem
 	case *types.Array:
-		return t.Elem()
+		return u.(*types.Array).Elem
 	case *types.TCMap:
-		return t.Elem()
+		return u.(*types.TCMap).Elem
 	case *types.Pointer:
-		return t.Elem()
+		return u.(*types.Pointer).Elem()
 	case *types.Basic:
-		if t.Info&types.IsString != 0 {
+		if u.(*types.Basic).Info&types.IsString != 0 {
 			return types.Typ[types.Uint8]
 		}
 	}
@@ -895,7 +896,7 @@ func ssaChanElemType(t types.Type) (tv types.Type) {
 		return nil
 	}
 	if ch, ok := types.SafeUnderlying(t).(*types.TCChan); ok {
-		return ch.Elem()
+		return ch.Elem
 	}
 	return nil
 }
@@ -917,17 +918,20 @@ func ssaSliceOf(t types.Type) (tv types.Type) {
 	if b, ok := types.SafeUnderlying(t).(*types.Basic); ok && b.Info&types.IsString != 0 {
 		return t
 	}
-	switch t := types.SafeUnderlying(t).(type) {
+	u := types.SafeUnderlying(t)
+	switch u.(type) {
 	case *types.Slice:
-		return t
+		return u
 	case *types.Array:
-		if b, ok := t.Elem().(*types.Basic); ok && b.Kind == types.Uint8 {
+		arr := u.(*types.Array)
+		if b, ok := arr.Elem.(*types.Basic); ok && b.Kind == types.Uint8 {
 			return types.Typ[types.TCString]
 		}
-		return types.NewSlice(t.Elem())
+		return types.NewSlice(arr.Elem)
 	case *types.Pointer:
-		if t.Elem() != nil {
-			return ssaSliceOf(t.Elem())
+		ptr := u.(*types.Pointer)
+		if ptr.Elem() != nil {
+			return ssaSliceOf(ptr.Elem())
 		}
 	}
 	return types.Typ[types.TCString]
@@ -944,7 +948,6 @@ func ssaTupleElemType(t types.Type, i int32) (tv types.Type) {
 }
 
 func ssaParseInt64(s string) (n int64) {
-	var n int64
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c < '0' || c > '9' {

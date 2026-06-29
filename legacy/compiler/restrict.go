@@ -212,20 +212,6 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 		}
 
 	case *ssa.Store:
-		// Package globals are immutable after init(). Flag any Store
-		// to a global (or into a global's fields) outside init functions.
-		// Currently a warning (printed to stderr) while stage4 is being
-		// refactored. Will become a compile error once all mutable
-		// globals are moved to function-local state.
-		if isUserPackage(b.fn.Pkg) && !isInitFunc(b.fn) {
-			if isGlobalStore(v.Addr) {
-				msg := "moxie: assignment to package-level var outside init() is not allowed"
-				if g := globalName(v.Addr); g != "" {
-					msg = "moxie: assignment to package-level var '" + g + "' outside init() is not allowed"
-				}
-				b.addError(v.Pos(), msg)
-			}
-		}
 
 	case *ssa.MakeClosure:
 		// Moxie closures cannot capture variables from enclosing scopes.

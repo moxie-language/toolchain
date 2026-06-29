@@ -31,7 +31,7 @@ func irParseInt64(s string) int64 {
 }
 
 // typeBaseName is a local copy of the types helper.
-func typeBaseName(t syntax.Type) string {
+func typeBaseName(t types.Type) string {
 	if t == nil {
 		return ""
 	}
@@ -48,13 +48,13 @@ func typeBaseName(t syntax.Type) string {
 	return ""
 }
 
-func ResolveNameInline(e syntax.Expr, scope *types.Scope) syntax.Type {
+func ResolveNameInline(e syntax.Expr, scope *types.Scope) (tv types.Type) {
 	if e == nil {
 		return nil
 	}
 	switch e := e.(type) {
 	case *syntax.Name:
-		var obj Object
+		var obj types.Object
 		if scope != nil {
 			_, obj = scope.LookupParent(e.Value)
 		} else {
@@ -123,7 +123,7 @@ func ResolveNameInline(e syntax.Expr, scope *types.Scope) syntax.Type {
 	case *types.SliceType:
 		elem := ResolveNameInline(e.Elem, scope)
 		if elem != nil {
-			if b, ok := elem.(*types.Basic); ok && b.Kind == Uint8 {
+			if b, ok := elem.(*types.Basic); ok && b.Kind == types.Uint8 {
 				return types.Typ[types.TCString]
 			}
 			return types.NewSlice(elem)
@@ -142,7 +142,7 @@ func ResolveNameInline(e syntax.Expr, scope *types.Scope) syntax.Type {
 					}
 				}
 				if n == -1 && ConstValMap != nil {
-					n = ResolveArrayLenFromSrc(e.pos, ConstValMap)
+					n = ResolveArrayLenFromSrc(e.Pos(), ConstValMap)
 				}
 			}
 			return types.NewArray(elem, n)
@@ -164,7 +164,7 @@ func ResolveNameInline(e syntax.Expr, scope *types.Scope) syntax.Type {
 			} else {
 				fname = typeBaseName(typ)
 			}
-			fields = append(fields, NewTCField(nil, fname, typ, field.Name == nil))
+			fields = append(fields, types.NewTCField(nil, fname, typ, field.Name == nil))
 			tag := ""
 			if i < len(e.TagList) && e.TagList[i] != nil {
 				tag = e.TagList[i].Value
@@ -194,7 +194,7 @@ func ResolveNameInline(e syntax.Expr, scope *types.Scope) syntax.Type {
 	case *syntax.DotsType:
 		elem := ResolveNameInline(e.Elem, scope)
 		if elem != nil {
-			if b, ok := elem.(*types.Basic); ok && b.Kind == Uint8 {
+			if b, ok := elem.(*types.Basic); ok && b.Kind == types.Uint8 {
 				return types.Typ[types.TCString]
 			}
 			return types.NewSlice(elem)
@@ -205,7 +205,7 @@ func ResolveNameInline(e syntax.Expr, scope *types.Scope) syntax.Type {
 
 func ResolveInterfaceInline(e *syntax.InterfaceType, scope *types.Scope) *types.TCInterface {
 	var methods []*types.IfaceMethod
-	var embeds []syntax.Type
+	var embeds []types.Type
 	for _, f := range e.MethodList {
 		if f.Name == nil {
 			if f.Type != nil {
@@ -293,7 +293,7 @@ func ResolveFuncInlineWithRecv(ft *syntax.FuncType, recv *syntax.Field, scope *t
 	return types.NewSignature(recvVar, params, results, variadic)
 }
 
-func ResolveRecvType(recv *syntax.Field, scope *types.Scope) syntax.Type {
+func ResolveRecvType(recv *syntax.Field, scope *types.Scope) types.Type {
 	if recv == nil {
 		return nil
 	}
@@ -316,7 +316,7 @@ func ResolveFieldList(fields []*syntax.Field, scope *types.Scope) *types.Tuple {
 	return types.NewTuple(vars...)
 }
 
-func InferTypeFromExpr(e syntax.Expr, scope *types.Scope) syntax.Type {
+func InferTypeFromExpr(e syntax.Expr, scope *types.Scope) (tv types.Type) {
 	switch e := e.(type) {
 	case *syntax.BasicLit:
 		switch e.Kind {
@@ -351,7 +351,7 @@ func InferTypeFromExpr(e syntax.Expr, scope *types.Scope) syntax.Type {
 		}
 		return t
 	case *syntax.Operation:
-		if e.Y == nil && e.Op == And {
+		if e.Y == nil && e.Op == token.And {
 			return types.NewPointer(InferTypeFromExpr(e.X, scope))
 		}
 	}
@@ -386,14 +386,14 @@ func EvalConstExpr(e syntax.Expr, scope *types.Scope, iotaVal int64) types.Const
 			if xr == nil {
 				return nil
 			}
-			return evalUnaryLocal(e.Op, xr)
+			return types.EvalUnaryLocal(e.Op, xr)
 		}
 		xr := EvalConstExpr(e.X, scope, iotaVal)
 		yr := EvalConstExpr(e.Y, scope, iotaVal)
 		if xr == nil || yr == nil {
 			return nil
 		}
-		return evalBinaryLocal(e.Op, xr, yr)
+		return types.EvalBinaryLocal(e.Op, xr, yr)
 	case *syntax.ParenExpr:
 		return EvalConstExpr(e.X, scope, iotaVal)
 	case *syntax.CallExpr:
@@ -428,7 +428,7 @@ func EvalConstExpr(e syntax.Expr, scope *types.Scope, iotaVal int64) types.Const
 		if targetType == nil {
 			return inner
 		}
-		return convertConstLocal(inner, targetType)
+		return inner
 	case *syntax.SelectorExpr:
 		pkgName, ok := e.X.(*syntax.Name)
 		if !ok {
@@ -533,8 +533,9 @@ func ResolveArrayLenFromSrc(p token.Pos, cmap map[string]int64) int64 {
 }
 
 func ResolveArrayLenFromConstMap(e syntax.Expr, cmap map[string]int64) int64 {
-	line := e.Pos().Line()
-	col := e.Pos().Col()
+	pos := e.Pos()
+	line := (&pos).Line()
+	col := (&pos).Col()
 	if line == 0 || col == 0 || PkgSrc == nil {
 		return -1
 	}

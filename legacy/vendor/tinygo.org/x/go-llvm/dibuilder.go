@@ -147,7 +147,7 @@ func (d *DIBuilder) CreateCompileUnit(cu DICompileUnit) Metadata {
 		flags, C.size_t(len(cu.Flags)),
 		C.unsigned(cu.RuntimeVersion),
 		/*SplitName=*/ nil, 0,
-		C.LLVMDWARFEmissionNone,
+		C.LLVMDWARFEmissionFull,
 		/*DWOId=*/ 0,
 		/*SplitDebugInlining*/ C.LLVMBool(boolToCInt(true)),
 		/*DebugInfoForProfiling*/ C.LLVMBool(boolToCInt(false)),

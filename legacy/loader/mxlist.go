@@ -379,6 +379,18 @@ func (r *resolver) resolveDir(importPath string, srcDir string) (string, error) 
 		return candidate, nil
 	}
 
+	// 1c. Module-relative path (without module prefix).
+	if r.modDir != "" {
+		candidate = filepath.Join(r.modDir, importPath)
+		if isDir(candidate) {
+			return candidate, nil
+		}
+		candidate = filepath.Join(r.modDir, importPath+"/")
+		if isDir(candidate) {
+			return candidate, nil
+		}
+	}
+
 	// 2. Standard library (in synthetic GOROOT).
 	stdDir := filepath.Join(r.goroot, "src", importPath)
 	if isDir(stdDir) {
