@@ -36,15 +36,15 @@ func typeBaseName(t typeapi.Type) string {
 	if t == nil {
 		return ""
 	}
-	switch t := t.(type) {
+	switch tv := t.(type) {
 	case *types.Named:
-		if tn := t.Obj; tn != nil {
+		if tn := tv.Obj; tn != nil {
 			return tn.Name
 		}
 	case *types.Pointer:
-		return typeBaseName(t.Elem())
+		return typeBaseName(tv.Elem())
 	case *types.Basic:
-		return t.Name
+		return tv.Name
 	}
 	return ""
 }
@@ -53,13 +53,13 @@ func ResolveNameInline(e syntax.Expr, scope *types.Scope) (tv typeapi.Type) {
 	if e == nil {
 		return nil
 	}
-	switch e := e.(type) {
+	switch ev := e.(type) {
 	case *syntax.Name:
 		var obj types.Object
 		if scope != nil {
-			_, obj = scope.LookupParent(e.Value)
+			_, obj = scope.LookupParent(ev.Value)
 		} else {
-			_, obj = types.Universe.LookupParent(e.Value)
+			_, obj = types.Universe.LookupParent(ev.Value)
 		}
 		if obj != nil {
 			if tn, ok := obj.(*types.TypeName); ok {
@@ -72,11 +72,11 @@ func ResolveNameInline(e syntax.Expr, scope *types.Scope) (tv typeapi.Type) {
 			}
 		}
 	case *syntax.SelectorExpr:
-		pkgName, ok := e.X.(*syntax.Name)
+		pkgName, ok := ev.X.(*syntax.Name)
 		if ok && scope != nil {
 			_, pkgObj := scope.LookupParent(pkgName.Value)
 			if pn, ok2 := pkgObj.(*types.PkgName); ok2 && pn.Imported != nil {
-				typeObj := pn.Imported.Scope.Lookup(e.Sel.Value)
+				typeObj := pn.Imported.Scope.Lookup(ev.Sel.Value)
 				if typeObj != nil {
 					if tn, ok3 := typeObj.(*types.TypeName); ok3 {
 						return tn.Typ
@@ -90,7 +90,7 @@ func ResolveNameInline(e syntax.Expr, scope *types.Scope) (tv typeapi.Type) {
 			}
 		}
 		// Fallback: check ImportRegistry directly for external package types
-		if pkgName, ok := e.X.(*syntax.Name); ok {
+		if pkgName2, ok3 := ev.X.(*syntax.Name); ok3 {
 			var irKeys []string
 			for k := range ImportRegistry {
 				irKeys = append(irKeys, k)
@@ -103,7 +103,7 @@ func ResolveNameInline(e syntax.Expr, scope *types.Scope) (tv typeapi.Type) {
 			for _, k := range irKeys {
 				pkg := ImportRegistry[k]
 				if pkg.Name == pkgName.Value {
-					typeObj := pkg.Scope.Lookup(e.Sel.Value)
+					typeObj := pkg.Scope.Lookup(ev.Sel.Value)
 					if typeObj != nil {
 						if tn, ok2 := typeObj.(*types.TypeName); ok2 {
 							return tn.Typ
@@ -114,15 +114,15 @@ func ResolveNameInline(e syntax.Expr, scope *types.Scope) (tv typeapi.Type) {
 			}
 		}
 	case *syntax.Operation:
-		if e.Y == nil && e.Op == token.Mul {
-			base := ResolveNameInline(e.X, scope)
+		if ev.Y == nil && ev.Op == token.Mul {
+			base := ResolveNameInline(ev.X, scope)
 			if base == nil {
 				base = types.Typ[types.Int8]
 			}
 			return types.NewPointer(base)
 		}
 	case *syntax.SliceType:
-		elem := ResolveNameInline(e.Elem, scope)
+		elem := ResolveNameInline(ev.Elem, scope)
 		if elem != nil {
 			if b, ok := elem.(*types.Basic); ok && b.Kind == types.Uint8 {
 				return types.Typ[types.TCString]
@@ -130,34 +130,34 @@ func ResolveNameInline(e syntax.Expr, scope *types.Scope) (tv typeapi.Type) {
 			return types.NewSlice(elem)
 		}
 	case *syntax.ArrayType:
-		elem := ResolveNameInline(e.Elem, scope)
+		elem := ResolveNameInline(ev.Elem, scope)
 		if elem != nil {
 			n := int64(-1)
-			if lit, ok := e.Len.(*syntax.BasicLit); ok {
+			if lit, ok := ev.Len.(*syntax.BasicLit); ok {
 				n = irParseInt64(lit.Value)
-			} else if e.Len != nil {
-				cv := EvalConstExpr(e.Len, scope, -1)
+			} else if ev.Len != nil {
+				cv := EvalConstExpr(ev.Len, scope, -1)
 				if cv != nil {
-					if ci, ok := cv.(*types.ConstInt); ok {
+					if ci, ok2 := cv.(*types.ConstInt); ok2 {
 						n = ci.V
 					}
 				}
-				if n == -1 && ConstValMap != nil {
-					n = ResolveArrayLenFromSrc(e.Pos(), ConstValMap)
-				}
+			if n == -1 && ConstValMap != nil {
+				n = ResolveArrayLenFromSrc(ev.Pos(), ConstValMap)
 			}
-			return types.NewArray(elem, n)
+		}
+		return types.NewArray(elem, n)
 		}
 	case *syntax.MapType:
-		key := ResolveNameInline(e.Key, scope)
-		val := ResolveNameInline(e.Value, scope)
+		key := ResolveNameInline(ev.Key, scope)
+		val := ResolveNameInline(ev.Value, scope)
 		if key != nil && val != nil {
 			return types.NewTCMap(key, val)
 		}
 	case *syntax.StructType:
 		var fields []*types.TCVar
 		var tags []string
-		for i, field := range e.FieldList {
+		for i, field := range ev.FieldList {
 			typ := ResolveNameInline(field.Type, scope)
 			fname := ""
 			if field.Name != nil {
@@ -167,23 +167,23 @@ func ResolveNameInline(e syntax.Expr, scope *types.Scope) (tv typeapi.Type) {
 			}
 			fields = append(fields, types.NewTCField(nil, fname, typ, field.Name == nil))
 			tag := ""
-			if i < len(e.TagList) && e.TagList[i] != nil {
-				tag = e.TagList[i].Value
+			if i < len(ev.TagList) && ev.TagList[i] != nil {
+				tag = ev.TagList[i].Value
 			}
 			tags = append(tags, tag)
 		}
 		return types.NewTCStruct(fields, tags)
 	case *syntax.FuncType:
-		return ResolveFuncInline(e, scope)
+		return ResolveFuncInline(ev, scope)
 	case *syntax.InterfaceType:
-		return ResolveInterfaceInline(e, scope)
+		return ResolveInterfaceInline(ev, scope)
 	case *syntax.ChanType:
-		elem := ResolveNameInline(e.Elem, scope)
+		elem := ResolveNameInline(ev.Elem, scope)
 		if elem == nil {
 			elem = types.NewTCStruct(nil, nil)
 		}
 		var dir types.TCChanDir
-		switch e.Dir {
+		switch ev.Dir {
 		case syntax.SendOnly:
 			dir = types.TCSendOnly
 		case syntax.RecvOnly:
@@ -193,7 +193,7 @@ func ResolveNameInline(e syntax.Expr, scope *types.Scope) (tv typeapi.Type) {
 		}
 		return types.NewTCChan(dir, elem)
 	case *syntax.DotsType:
-		elem := ResolveNameInline(e.Elem, scope)
+		elem := ResolveNameInline(ev.Elem, scope)
 		if elem != nil {
 			if b, ok := elem.(*types.Basic); ok && b.Kind == types.Uint8 {
 				return types.Typ[types.TCString]
@@ -318,9 +318,9 @@ func ResolveFieldList(fields []*syntax.Field, scope *types.Scope) *types.Tuple {
 }
 
 func InferTypeFromExpr(e syntax.Expr, scope *types.Scope) (tv typeapi.Type) {
-	switch e := e.(type) {
+	switch ev := e.(type) {
 	case *syntax.BasicLit:
-		switch e.Kind {
+		switch ev.Kind {
 		case token.StringLit:
 			return types.Typ[types.TCString]
 		case token.IntLit:
@@ -329,12 +329,12 @@ func InferTypeFromExpr(e syntax.Expr, scope *types.Scope) (tv typeapi.Type) {
 			return types.Typ[types.Float64]
 		}
 	case *syntax.Name:
-		if e.Value == "true" || e.Value == "false" {
+		if ev.Value == "true" || ev.Value == "false" {
 			return types.Typ[types.Bool]
 		}
-		return ResolveNameInline(e, scope)
+		return ResolveNameInline(ev, scope)
 	case *syntax.CallExpr:
-		ft := ResolveNameInline(e.Fun, scope)
+		ft := ResolveNameInline(ev.Fun, scope)
 		if sig, ok := ft.(*types.Signature); ok && sig != nil {
 			res := sig.Results
 			if res != nil && res.Len() == 1 {
@@ -346,14 +346,14 @@ func InferTypeFromExpr(e syntax.Expr, scope *types.Scope) (tv typeapi.Type) {
 		}
 		return ft
 	case *syntax.CompositeLit:
-		t := ResolveNameInline(e.Type, scope)
+		t := ResolveNameInline(ev.Type, scope)
 		if arr, ok := t.(*types.Array); ok && arr.Len < 0 {
-			return types.NewArray(arr.Elem, int64(len(e.ElemList)))
+			return types.NewArray(arr.Elem, int64(len(ev.ElemList)))
 		}
 		return t
 	case *syntax.Operation:
-		if e.Y == nil && e.Op == token.And {
-			return types.NewPointer(InferTypeFromExpr(e.X, scope))
+		if ev.Y == nil && ev.Op == token.And {
+			return types.NewPointer(InferTypeFromExpr(ev.X, scope))
 		}
 	}
 	return nil
@@ -363,54 +363,54 @@ func EvalConstExpr(e syntax.Expr, scope *types.Scope, iotaVal int64) types.Const
 	if e == nil {
 		return nil
 	}
-	switch e := e.(type) {
+	switch ev := e.(type) {
 	case *syntax.BasicLit:
-		return types.EvalBasicLitLocal(e)
+		return types.EvalBasicLitLocal(ev)
 	case *syntax.Name:
-		if e.Value == "iota" && iotaVal >= 0 {
+		if ev.Value == "iota" && iotaVal >= 0 {
 			return &types.ConstInt{V:iotaVal}
 		}
 		if scope != nil {
-			_, obj := scope.LookupParent(e.Value)
+			_, obj := scope.LookupParent(ev.Value)
 			if c, ok := obj.(*types.TCConst); ok && c.Val != nil {
 				return c.Val
 			}
 		}
 		if ConstValMap != nil {
-			if v, ok := ConstValMap[e.Value]; ok {
+			if v, ok := ConstValMap[ev.Value]; ok {
 				return &types.ConstInt{V:v}
 			}
 		}
 	case *syntax.Operation:
-		if e.Y == nil {
-			xr2 := EvalConstExpr(e.X, scope, iotaVal)
+		if ev.Y == nil {
+			xr2 := EvalConstExpr(ev.X, scope, iotaVal)
 			if xr2 == nil {
 				return nil
 			}
-			return types.EvalUnaryLocal(e.Op, xr2)
+			return types.EvalUnaryLocal(ev.Op, xr2)
 		}
-		xr := EvalConstExpr(e.X, scope, iotaVal)
-		yr := EvalConstExpr(e.Y, scope, iotaVal)
+		xr := EvalConstExpr(ev.X, scope, iotaVal)
+		yr := EvalConstExpr(ev.Y, scope, iotaVal)
 		if xr == nil || yr == nil {
 			return nil
 		}
-		return types.EvalBinaryLocal(e.Op, xr, yr)
+		return types.EvalBinaryLocal(ev.Op, xr, yr)
 	case *syntax.ParenExpr:
-		return EvalConstExpr(e.X, scope, iotaVal)
+		return EvalConstExpr(ev.X, scope, iotaVal)
 	case *syntax.CallExpr:
-		if id, ok := e.Fun.(*syntax.Name); ok && id.Value == "len" && len(e.ArgList) == 1 {
-			if lit, ok2 := e.ArgList[0].(*syntax.BasicLit); ok2 && lit.Kind == token.StringLit {
+		if id, ok := ev.Fun.(*syntax.Name); ok && id.Value == "len" && len(ev.ArgList) == 1 {
+			if lit, ok2 := ev.ArgList[0].(*syntax.BasicLit); ok2 && lit.Kind == token.StringLit {
 				lv := types.EvalBasicLitLocal(lit)
 				if cs, ok3 := lv.(*types.ConstStr); ok3 {
 					return &types.ConstInt{V:int64(len(cs.S))}
 				}
 			}
-			inner2 := EvalConstExpr(e.ArgList[0], scope, iotaVal)
+			inner2 := EvalConstExpr(ev.ArgList[0], scope, iotaVal)
 			if cs, ok2 := inner2.(*types.ConstStr); ok2 {
 				return &types.ConstInt{V:int64(len(cs.S))}
 			}
 		}
-		if sel, ok := e.Fun.(*syntax.SelectorExpr); ok {
+		if sel, ok := ev.Fun.(*syntax.SelectorExpr); ok {
 			if pkg, ok2 := sel.X.(*syntax.Name); ok2 && pkg.Value == "unsafe" {
 				switch sel.Sel.Value {
 				case "Sizeof", "Alignof", "Offsetof":
@@ -418,20 +418,20 @@ func EvalConstExpr(e syntax.Expr, scope *types.Scope, iotaVal int64) types.Const
 				}
 			}
 		}
-		if len(e.ArgList) != 1 {
+		if len(ev.ArgList) != 1 {
 			return nil
 		}
-		inner := EvalConstExpr(e.ArgList[0], scope, iotaVal)
+		inner := EvalConstExpr(ev.ArgList[0], scope, iotaVal)
 		if inner == nil {
 			return nil
 		}
-		targetType := ResolveNameInline(e.Fun, scope)
+		targetType := ResolveNameInline(ev.Fun, scope)
 		if targetType == nil {
 			return inner
 		}
 		return inner
 	case *syntax.SelectorExpr:
-		pkgName, ok := e.X.(*syntax.Name)
+		pkgName, ok := ev.X.(*syntax.Name)
 		if !ok {
 			return nil
 		}
@@ -449,7 +449,7 @@ func EvalConstExpr(e syntax.Expr, scope *types.Scope, iotaVal int64) types.Const
 		if imported == nil {
 			return nil
 		}
-		member := imported.Scope.Lookup(e.Sel.Value)
+		member := imported.Scope.Lookup(ev.Sel.Value)
 		if member == nil {
 			return nil
 		}
