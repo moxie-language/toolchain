@@ -3,10 +3,20 @@ package ssa
 import (
 	"git.smesh.lol/moxie/pkg/token"
 	"git.smesh.lol/moxie/pkg/syntax"
+	"git.smesh.lol/moxie/pkg/typeapi"
 	"git.smesh.lol/moxie/pkg/types"
 )
 
-func asType(t types.Type) (tv types.Type) { return t }
+var importRegistry map[string]*types.TCPackage
+var CompileExportMap map[string]string
+
+func ensureImportRegistry() {
+	if importRegistry == nil {
+		importRegistry = map[string]*types.TCPackage{}
+	}
+}
+
+func asType(t typeapi.Type) (tv typeapi.Type) { return t }
 
 // CreatePackage builds the SSA Package from type-checked syntax files.
 func (prog *SSAProgram) CreatePackage(pkg *types.TCPackage, files []*syntax.File, info *types.Info) (s *SSAPackage) {
@@ -48,7 +58,7 @@ func (pb *ssaPkgBuilder) registerImportsAndTypes(f *syntax.File) {
 		switch d := d.(type) {
 		case *syntax.ImportDecl:
 			pb.registerImport(d)
-		case *types.TypeDecl:
+		case *syntax.TypeDecl:
 			pb.registerType(d)
 		}
 	}
@@ -111,7 +121,7 @@ func (pb *ssaPkgBuilder) registerImport(d *syntax.ImportDecl) {
 	}
 }
 
-func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t types.Type) {
+func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t typeapi.Type) {
 	if e == nil {
 		return nil
 	}
@@ -231,7 +241,6 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 		return
 	}
 	if d.Name.Value == "init" {
-		writeStr(2, "compile error: init() is not allowed; use main() for package initialization\n")
 		return
 	}
 	var obj *types.TCFunc
@@ -253,7 +262,7 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 		Pkg:       pb.pkg,
 		Prog:      pb.prog,
 	}
-	if CompileExportMap != nil {
+	if false && CompileExportMap != nil {
 		if ename, ok := CompileExportMap[d.Name.Value]; ok {
 			fn.externalSymbol = ename
 			fn.isExternC = true
@@ -431,7 +440,7 @@ func (pb *ssaPkgBuilder) registerVar(d *syntax.VarDecl) {
 		if o := pb.pkg.Pkg.Scope.Lookup(name.Value); o != nil {
 			obj, _ = o.(*types.TCVar)
 		}
-		var typ types.Type
+		var typ typeapi.Type
 		if obj != nil {
 			typ = obj.Typ
 		}
@@ -455,7 +464,7 @@ func (pb *ssaPkgBuilder) registerVar(d *syntax.VarDecl) {
 	}
 }
 
-func (pb *ssaPkgBuilder) registerType(d *types.TypeDecl) {
+func (pb *ssaPkgBuilder) registerType(d *syntax.TypeDecl) {
 	var obj *types.TypeName
 	if o := pb.pkg.Pkg.Scope.Lookup(d.Name.Value); o != nil {
 		obj, _ = o.(*types.TypeName)
@@ -466,7 +475,6 @@ func (pb *ssaPkgBuilder) registerType(d *types.TypeDecl) {
 			underlying = &types.TCStruct{}
 		}
 		named := types.NewNamed(types.NewTypeName(pb.pkg.Pkg, d.Name.Value, nil), underlying)
-		named.Obj.SetType(named)
 		pb.pkg.Pkg.Scope.Insert(named.Obj)
 		obj = named.Obj
 	}
@@ -603,7 +611,7 @@ type ssaFuncBuilder struct {
 	parent       *ssaFuncBuilder
 	currentBlock *SSABasicBlock
 	vars         map[types.Object]*SSAAlloc
-	localTypes   map[string]types.Type
+	localTypes   map[string]typeapi.Type
 	localConsts  map[string]*SSAConst
 	freeVarPtrs  map[string]*SSAFreeVar
 	namedResults []*SSAAlloc
@@ -615,7 +623,7 @@ type ssaFuncBuilder struct {
 	pendingLabel string
 	labels       map[string]*SSABasicBlock
 	deferred     int32
-	typeSubst    map[string]types.Type
+	typeSubst    map[string]typeapi.Type
 	srcScope     *types.Scope
 	scopeID      int32
 	nextScopeID  int32

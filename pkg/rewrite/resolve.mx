@@ -3,6 +3,7 @@ package rewrite
 import (
 	"git.smesh.lol/moxie/pkg/syntax"
 	"git.smesh.lol/moxie/pkg/token"
+	"git.smesh.lol/moxie/pkg/typeapi"
 	"git.smesh.lol/moxie/pkg/types"
 )
 
@@ -31,7 +32,7 @@ func irParseInt64(s string) int64 {
 }
 
 // typeBaseName is a local copy of the types helper.
-func typeBaseName(t types.Type) string {
+func typeBaseName(t typeapi.Type) string {
 	if t == nil {
 		return ""
 	}
@@ -48,7 +49,7 @@ func typeBaseName(t types.Type) string {
 	return ""
 }
 
-func ResolveNameInline(e syntax.Expr, scope *types.Scope) (tv types.Type) {
+func ResolveNameInline(e syntax.Expr, scope *types.Scope) (tv typeapi.Type) {
 	if e == nil {
 		return nil
 	}
@@ -113,14 +114,14 @@ func ResolveNameInline(e syntax.Expr, scope *types.Scope) (tv types.Type) {
 			}
 		}
 	case *syntax.Operation:
-		if e.Y == nil && e.Op == Mul {
+		if e.Y == nil && e.Op == token.Mul {
 			base := ResolveNameInline(e.X, scope)
 			if base == nil {
 				base = types.Typ[types.Int8]
 			}
 			return types.NewPointer(base)
 		}
-	case *types.SliceType:
+	case *syntax.SliceType:
 		elem := ResolveNameInline(e.Elem, scope)
 		if elem != nil {
 			if b, ok := elem.(*types.Basic); ok && b.Kind == types.Uint8 {
@@ -205,7 +206,7 @@ func ResolveNameInline(e syntax.Expr, scope *types.Scope) (tv types.Type) {
 
 func ResolveInterfaceInline(e *syntax.InterfaceType, scope *types.Scope) *types.TCInterface {
 	var methods []*types.IfaceMethod
-	var embeds []types.Type
+	var embeds []typeapi.Type
 	for _, f := range e.MethodList {
 		if f.Name == nil {
 			if f.Type != nil {
@@ -293,7 +294,7 @@ func ResolveFuncInlineWithRecv(ft *syntax.FuncType, recv *syntax.Field, scope *t
 	return types.NewSignature(recvVar, params, results, variadic)
 }
 
-func ResolveRecvType(recv *syntax.Field, scope *types.Scope) types.Type {
+func ResolveRecvType(recv *syntax.Field, scope *types.Scope) typeapi.Type {
 	if recv == nil {
 		return nil
 	}
@@ -316,7 +317,7 @@ func ResolveFieldList(fields []*syntax.Field, scope *types.Scope) *types.Tuple {
 	return types.NewTuple(vars...)
 }
 
-func InferTypeFromExpr(e syntax.Expr, scope *types.Scope) (tv types.Type) {
+func InferTypeFromExpr(e syntax.Expr, scope *types.Scope) (tv typeapi.Type) {
 	switch e := e.(type) {
 	case *syntax.BasicLit:
 		switch e.Kind {
@@ -382,11 +383,11 @@ func EvalConstExpr(e syntax.Expr, scope *types.Scope, iotaVal int64) types.Const
 		}
 	case *syntax.Operation:
 		if e.Y == nil {
-			xr := EvalConstExpr(e.X, scope, iotaVal)
-			if xr == nil {
+			xr2 := EvalConstExpr(e.X, scope, iotaVal)
+			if xr2 == nil {
 				return nil
 			}
-			return types.EvalUnaryLocal(e.Op, xr)
+			return types.EvalUnaryLocal(e.Op, xr2)
 		}
 		xr := EvalConstExpr(e.X, scope, iotaVal)
 		yr := EvalConstExpr(e.Y, scope, iotaVal)
@@ -404,8 +405,8 @@ func EvalConstExpr(e syntax.Expr, scope *types.Scope, iotaVal int64) types.Const
 					return &types.ConstInt{V:int64(len(cs.S))}
 				}
 			}
-			inner := EvalConstExpr(e.ArgList[0], scope, iotaVal)
-			if cs, ok2 := inner.(*types.ConstStr); ok2 {
+			inner2 := EvalConstExpr(e.ArgList[0], scope, iotaVal)
+			if cs, ok2 := inner2.(*types.ConstStr); ok2 {
 				return &types.ConstInt{V:int64(len(cs.S))}
 			}
 		}
@@ -452,8 +453,8 @@ func EvalConstExpr(e syntax.Expr, scope *types.Scope, iotaVal int64) types.Const
 		if member == nil {
 			return nil
 		}
-		if k, ok := member.(*types.TCConst); ok && k.Val != nil {
-			return k.Val
+		if k2, ok2 := member.(*types.TCConst); ok2 && k2.Val != nil {
+			return k2.Val
 		}
 		return nil
 	}

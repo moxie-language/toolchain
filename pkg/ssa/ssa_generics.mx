@@ -3,10 +3,14 @@ package ssa
 import (
 	"git.smesh.lol/moxie/pkg/token"
 	"git.smesh.lol/moxie/pkg/syntax"
+	"git.smesh.lol/moxie/pkg/typeapi"
 	"git.smesh.lol/moxie/pkg/types"
 )
 
-func mangleGenericName(baseName string, typeArgs []types.Type) (s string) {
+var genericFuncDecls map[string]*syntax.FuncDecl
+var genericPkgScopes map[string]*types.Scope
+
+func mangleGenericName(baseName string, typeArgs []typeapi.Type) (s string) {
 	s = baseName | "__"
 	for i, t := range typeArgs {
 		if i > 0 {
@@ -31,7 +35,7 @@ func mangleGenericName(baseName string, typeArgs []types.Type) (s string) {
 	return s
 }
 
-func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]types.Type, pkgScope *types.Scope) (t types.Type) {
+func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]typeapi.Type, pkgScope *types.Scope) (t typeapi.Type) {
 	if e == nil {
 		return nil
 	}
@@ -43,14 +47,14 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]types.Type, pk
 		_, obj := types.Universe.LookupParent(e.Value)
 		if obj != nil {
 			if tn, ok := obj.(*types.TypeName); ok {
-				return tn.typ
+				return tn.Typ
 			}
 		}
 		if pkgScope != nil {
 			tobj := pkgScope.Lookup(e.Value)
 			if tobj != nil {
 				if tn, ok := tobj.(*types.TypeName); ok {
-					return tn.typ
+					return tn.Typ
 				}
 			}
 		}
@@ -69,7 +73,7 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]types.Type, pk
 				tobj := pkg.Scope.Lookup(e.Value)
 				if tobj != nil {
 					if tn, ok := tobj.(*types.TypeName); ok {
-						return tn.typ
+						return tn.Typ
 					}
 				}
 			}
@@ -135,7 +139,7 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]types.Type, pk
 						typeObj := pkg.Scope.Lookup(e.Sel.Value)
 						if typeObj != nil {
 							if tn, ok2 := typeObj.(*types.TypeName); ok2 {
-								return tn.typ
+								return tn.Typ
 							}
 						}
 						break
@@ -147,7 +151,7 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]types.Type, pk
 	return nil
 }
 
-func resolveSignatureWithSubst(ft *syntax.FuncType, typeSubst map[string]types.Type, pkgScope *types.Scope) (s *types.Signature) {
+func resolveSignatureWithSubst(ft *syntax.FuncType, typeSubst map[string]typeapi.Type, pkgScope *types.Scope) (s *types.Signature) {
 	if ft == nil {
 		return nil
 	}
@@ -193,7 +197,7 @@ func resolveSignatureWithSubst(ft *syntax.FuncType, typeSubst map[string]types.T
 	return types.NewSignature(nil, paramTuple, resultTuple, variadic)
 }
 
-func matchTypeParam(paramType syntax.Expr, argType types.Type, tparams []*syntax.Field, typeMap map[string]types.Type) {
+func matchTypeParam(paramType syntax.Expr, argType typeapi.Type, tparams []*syntax.Field, typeMap map[string]typeapi.Type) {
 	if paramType == nil || argType == nil {
 		return
 	}
@@ -229,7 +233,7 @@ func matchTypeParam(paramType syntax.Expr, argType types.Type, tparams []*syntax
 	}
 }
 
-func inferFromConstraints(tparams []*syntax.Field, typeMap map[string]types.Type) {
+func inferFromConstraints(tparams []*syntax.Field, typeMap map[string]typeapi.Type) {
 	for _, tp := range tparams {
 		if tp.Name == nil || tp.Type == nil {
 			continue
@@ -242,7 +246,7 @@ func inferFromConstraints(tparams []*syntax.Field, typeMap map[string]types.Type
 	}
 }
 
-func extractConstraintTypeParams(constraint syntax.Expr, concreteType types.Type, tparams []*syntax.Field, typeMap map[string]types.Type) {
+func extractConstraintTypeParams(constraint syntax.Expr, concreteType typeapi.Type, tparams []*syntax.Field, typeMap map[string]typeapi.Type) {
 	if constraint == nil || concreteType == nil {
 		return
 	}
@@ -266,8 +270,8 @@ func extractConstraintTypeParams(constraint syntax.Expr, concreteType types.Type
 	}
 }
 
-func inferTypeArgsFromFunc(fd *syntax.FuncDecl, args []SSAValue) (ts []types.Type) {
-	typeMap := map[string]types.Type{}
+func inferTypeArgsFromFunc(fd *syntax.FuncDecl, args []SSAValue) (ts []typeapi.Type) {
+	typeMap := map[string]typeapi.Type{}
 	if fd.Type != nil {
 		for i, param := range fd.Type.ParamList {
 			if i >= len(args) || args[i] == nil || args[i].SSAType() == nil {
@@ -277,7 +281,7 @@ func inferTypeArgsFromFunc(fd *syntax.FuncDecl, args []SSAValue) (ts []types.Typ
 		}
 	}
 	inferFromConstraints(fd.TParamList, typeMap)
-	var result []types.Type
+	var result []typeapi.Type
 	for _, tp := range fd.TParamList {
 		if tp.Name != nil {
 			result = append(result, typeMap[tp.Name.Value])
@@ -286,7 +290,7 @@ func inferTypeArgsFromFunc(fd *syntax.FuncDecl, args []SSAValue) (ts []types.Typ
 	return result
 }
 
-func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, baseName string, typeArgs []types.Type, args []SSAValue, targetPkg *SSAPackage, srcPkgPath string, hasDots bool) (s SSAValue) {
+func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, baseName string, typeArgs []typeapi.Type, args []SSAValue, targetPkg *SSAPackage, srcPkgPath string, hasDots bool) (s SSAValue) {
 	for _, ta := range typeArgs {
 		if ta == nil {
 			return nil
@@ -296,7 +300,7 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, baseName stri
 	if fn, ok := targetPkg.Members[mangledName].(*SSAFunction); ok {
 		return fb.emitCallToSSAFunc(fn, args, hasDots)
 	}
-	typeSubst := map[string]types.Type{}
+	typeSubst := map[string]typeapi.Type{}
 	for i, tp := range fd.TParamList {
 		if tp.Name != nil && i < len(typeArgs) && typeArgs[i] != nil {
 			typeSubst[tp.Name.Value] = typeArgs[i]
@@ -333,7 +337,7 @@ func (fb *ssaFuncBuilder) emitCallToSSAFunc(fn *SSAFunction, args []SSAValue, ha
 		}
 		args = fb.coerceArgsToInterface(args, fn.Signature)
 	}
-	var retType types.Type
+	var retType typeapi.Type
 	if fn.Signature != nil && fn.Signature.Results != nil {
 		if fn.Signature.Results.Len() == 1 {
 			retType = fn.Signature.Results.At(0).Typ
@@ -432,20 +436,20 @@ func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList 
 	return nil
 }
 
-func (fb *ssaFuncBuilder) resolveExplicitTypeArgs(indexExpr syntax.Expr, fd *syntax.FuncDecl) (ts []types.Type) {
+func (fb *ssaFuncBuilder) resolveExplicitTypeArgs(indexExpr syntax.Expr, fd *syntax.FuncDecl) (ts []typeapi.Type) {
 	var typeExprs []syntax.Expr
 	if le, ok := indexExpr.(*syntax.ListExpr); ok {
 		typeExprs = le.ElemList
 	} else {
 		typeExprs = []syntax.Expr{indexExpr}
 	}
-	var result []types.Type
+	var result []typeapi.Type
 	for _, te := range typeExprs {
 		t := fb.resolveTypeAST(te)
 		result = append(result, t)
 	}
 	if len(result) < len(fd.TParamList) {
-		typeMap := map[string]types.Type{}
+		typeMap := map[string]typeapi.Type{}
 		for i, tp := range fd.TParamList {
 			if tp.Name != nil && i < len(result) && result[i] != nil {
 				typeMap[tp.Name.Value] = result[i]

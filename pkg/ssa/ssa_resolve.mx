@@ -3,6 +3,7 @@ package ssa
 import (
 	"git.smesh.lol/moxie/pkg/token"
 	"git.smesh.lol/moxie/pkg/syntax"
+	"git.smesh.lol/moxie/pkg/typeapi"
 	"git.smesh.lol/moxie/pkg/types"
 )
 
@@ -71,7 +72,7 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 	}
 	resolveNamed := named
 	if resolveNamed.NumMethods() == 0 {
-		cur := types.Type(resolveNamed)
+		cur := typeapi.Type(resolveNamed)
 		for depth := 0; depth < 10; depth++ {
 			n, ok2 := cur.(*types.Named)
 			if !ok2 || n == nil { break }
@@ -322,7 +323,7 @@ func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *syntax.SelectorExpr, recv SS
 			break
 		}
 	}
-	var retType types.Type
+	var retType typeapi.Type
 	if methodSig != nil && methodSig.Results != nil {
 		if methodSig.Results.Len() == 1 {
 			retType = methodSig.Results.At(0).Typ
@@ -346,7 +347,7 @@ func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *syntax.SelectorExpr, recv SS
 	return inv
 }
 
-func (fb *ssaFuncBuilder) resolveType(e syntax.Expr) (t types.Type) {
+func (fb *ssaFuncBuilder) resolveType(e syntax.Expr) (t typeapi.Type) {
 	if fb.info != nil {
 		if tv, ok := fb.info.Types[e]; ok && tv.Type != nil {
 			return tv.Type
@@ -356,7 +357,7 @@ func (fb *ssaFuncBuilder) resolveType(e syntax.Expr) (t types.Type) {
 	return t
 }
 
-func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t types.Type) {
+func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t typeapi.Type) {
 	if e == nil {
 		return nil
 	}
@@ -401,12 +402,12 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t types.Type) {
 			if lit, ok := e.Len.(*syntax.BasicLit); ok {
 				n = ssaParseInt64(lit.Value)
 			} else if e.Len != nil {
-				cv := tcEvalConstExpr(e.Len, fb.fn.Pkg.Pkg.Scope, -1)
-				if cv == nil && fb.localConsts != nil {
+				var cv types.ConstVal
+				if fb.localConsts != nil {
 					cv = fb.evalLocalConstExpr(e.Len)
 				}
 				if ci, ok := cv.(*types.ConstInt); ok {
-					n = ci.v
+					n = ci.V
 				}
 			}
 			return types.NewArray(elem, n)
@@ -524,7 +525,7 @@ func (fb *ssaFuncBuilder) resolveFuncTypeAST(ft *syntax.FuncType) (s *types.Sign
 	return types.NewSignature(nil, pTuple, rTuple, false)
 }
 
-func (fb *ssaFuncBuilder) fieldIndex(t types.Type, name string) (n int32) {
+func (fb *ssaFuncBuilder) fieldIndex(t typeapi.Type, name string) (n int32) {
 	if t == nil {
 		return -1
 	}
@@ -541,7 +542,7 @@ func (fb *ssaFuncBuilder) fieldIndex(t types.Type, name string) (n int32) {
 	return -1
 }
 
-func (fb *ssaFuncBuilder) findEmbeddedField(t types.Type, name string) (embedIdx int32, innerIdx int32) {
+func (fb *ssaFuncBuilder) findEmbeddedField(t typeapi.Type, name string) (embedIdx int32, innerIdx int32) {
 	path := fb.findEmbeddedFieldPath(t, name)
 	if len(path) < 2 {
 		return -1, -1
@@ -549,7 +550,7 @@ func (fb *ssaFuncBuilder) findEmbeddedField(t types.Type, name string) (embedIdx
 	return path[0], path[1]
 }
 
-func (fb *ssaFuncBuilder) findEmbeddedFieldPath(t types.Type, name string) (ss []int32) {
+func (fb *ssaFuncBuilder) findEmbeddedFieldPath(t typeapi.Type, name string) (ss []int32) {
 	if t == nil {
 		return nil
 	}
@@ -581,7 +582,7 @@ func (fb *ssaFuncBuilder) findEmbeddedFieldPath(t types.Type, name string) (ss [
 	return nil
 }
 
-func (fb *ssaFuncBuilder) fieldType(t Type, idx int32) (tv types.Type) {
+func (fb *ssaFuncBuilder) fieldType(t typeapi.Type, idx int32) (tv typeapi.Type) {
 	if t == nil {
 		return nil
 	}
@@ -627,7 +628,7 @@ func ssaExprNames(e syntax.Expr) (ns []*syntax.Name) {
 	return nil
 }
 
-func localizeConstVal(val ConstVal, typ types.Type) (c types.ConstVal) {
+func localizeConstVal(val types.ConstVal, typ typeapi.Type) (c types.ConstVal) {
 	if val == nil {
 		return nil
 	}

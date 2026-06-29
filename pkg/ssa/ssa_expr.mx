@@ -3,6 +3,7 @@ package ssa
 import (
 	"git.smesh.lol/moxie/pkg/token"
 	"git.smesh.lol/moxie/pkg/syntax"
+	"git.smesh.lol/moxie/pkg/typeapi"
 	"git.smesh.lol/moxie/pkg/types"
 )
 
@@ -385,7 +386,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 				for _, ma := range args {
 					allArgs = append(allArgs, ma)
 				}
-				var retType types.Type
+				var retType typeapi.Type
 				if fn.Signature != nil {
 					if fn.Signature.Results != nil && fn.Signature.Results.Len() == 1 {
 						retType = fn.Signature.Results.At(0).Typ
@@ -417,7 +418,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 		return fb.buildBuiltinCall(e, bi, args)
 	}
 
-	var retType types.Type
+	var retType typeapi.Type
 	if fn.SSAType() != nil {
 		if sig, ok := types.SafeUnderlying(fn.SSAType()).(*types.Signature); ok {
 			if sig.Results != nil && sig.Results.Len() == 1 {
@@ -500,7 +501,7 @@ func (fb *ssaFuncBuilder) wrapVariadicArgs(args []SSAValue, sig *types.Signature
 		return append(result, nilSlice)
 	}
 	sliceType := sig.Params.At(sig.Params.Len() - 1).Typ
-	var elemType types.Type
+	var elemType typeapi.Type
 	if sl, ok := types.SafeUnderlying(sliceType).(*types.Slice); ok {
 		elemType = sl.Elem
 	}
@@ -661,7 +662,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 	return call
 }
 
-func (fb *ssaFuncBuilder) emitMake(typ types.Type, sizeArgs []SSAValue) (s SSAValue) {
+func (fb *ssaFuncBuilder) emitMake(typ typeapi.Type, sizeArgs []SSAValue) (s SSAValue) {
 	if typ == nil {
 		return nil
 	}
@@ -776,7 +777,7 @@ func (fb *ssaFuncBuilder) buildMethodValue(sel *syntax.SelectorExpr, recv SSAVal
 	for _, p := range wrapper.Params {
 		args = append(args, p)
 	}
-	var retType types.Type
+	var retType typeapi.Type
 	if methodSig.Results != nil && methodSig.Results.Len() == 1 {
 		retType = methodSig.Results.At(0).Typ
 	} else if methodSig.Results != nil && methodSig.Results.Len() > 1 {
@@ -851,7 +852,7 @@ func (fb *ssaFuncBuilder) buildPkgMember(pn *types.PkgName, memberName string) (
 
 func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue) {
 	var addr SSAValue
-	var structType types.Type
+	var structType typeapi.Type
 	if inner, ok := e.X.(*syntax.SelectorExpr); ok {
 		addr = fb.buildSelectorAddr(inner)
 		if addr == nil {
@@ -1045,7 +1046,7 @@ func (fb *ssaFuncBuilder) buildAssert(e *syntax.AssertExpr) (s SSAValue) {
 }
 
 func (fb *ssaFuncBuilder) buildCompositeLit(e *syntax.CompositeLit) (s SSAValue) {
-	var typ types.Type
+	var typ typeapi.Type
 	if e.Type != nil {
 		typ = fb.resolveType(e.Type)
 	}
@@ -1118,7 +1119,7 @@ func (fb *ssaFuncBuilder) buildCompositeLit(e *syntax.CompositeLit) (s SSAValue)
 	return fb.emitLoad(alloc, typ)
 }
 
-func (fb *ssaFuncBuilder) buildArrayLit(e *syntax.CompositeLit, typ types.Type, ar *types.Array) (s SSAValue) {
+func (fb *ssaFuncBuilder) buildArrayLit(e *syntax.CompositeLit, typ typeapi.Type, ar *types.Array) (s SSAValue) {
 	if ar.Len < 0 {
 		ar = types.NewArray(ar.Elem, int64(len(e.ElemList)))
 		typ = ar
@@ -1152,7 +1153,7 @@ func (fb *ssaFuncBuilder) buildArrayLit(e *syntax.CompositeLit, typ types.Type, 
 	return fb.emitLoad(alloc, typ)
 }
 
-func (fb *ssaFuncBuilder) buildCompositeLitWithType(e *syntax.CompositeLit, typ types.Type) (s SSAValue) {
+func (fb *ssaFuncBuilder) buildCompositeLitWithType(e *syntax.CompositeLit, typ typeapi.Type) (s SSAValue) {
 	if sl, ok := types.SafeUnderlying(typ).(*types.Slice); ok {
 		return fb.buildSliceLit(e, typ, sl)
 	}
@@ -1197,7 +1198,7 @@ func (fb *ssaFuncBuilder) buildCompositeLitWithType(e *syntax.CompositeLit, typ 
 	return fb.emitLoad(alloc, typ)
 }
 
-func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ types.Type, sl *types.Slice) (s SSAValue) {
+func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ typeapi.Type, sl *types.Slice) (s SSAValue) {
 	n := len(e.ElemList)
 	nVal := &SSAConst{typ: types.Typ[types.Int32], val: &types.ConstInt{V:int64(n)}}
 	ms := &SSAMakeSlice{}
@@ -1383,7 +1384,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *types.PkgName, funcName string, argLi
 		impPkg.Members[funcName] = ssaFn
 	}
 	args := fb.buildArgs(argList)
-	var retType types.Type
+	var retType typeapi.Type
 	if ssaFn.Signature != nil {
 		if ssaFn.Signature.Variadic && !hasDots {
 			args = fb.wrapVariadicArgs(args, ssaFn.Signature)
@@ -1414,7 +1415,7 @@ func (fb *ssaFuncBuilder) buildUnsafeSlice(argList []syntax.Expr) (s SSAValue) {
 	if ptrVal == nil || lenVal == nil {
 		return nil
 	}
-	var elemType types.Type
+	var elemType typeapi.Type
 	if pt, ok := types.SafeUnderlying(ptrVal.SSAType()).(*types.Pointer); ok {
 		elemType = pt.Elem()
 	}
@@ -1463,7 +1464,7 @@ func (fb *ssaFuncBuilder) lookupObject(name string) (o Object) {
 	return nil
 }
 
-func (fb *ssaFuncBuilder) getOrCreateFreeVar(name string, typ types.Type) (s SSAValue) {
+func (fb *ssaFuncBuilder) getOrCreateFreeVar(name string, typ typeapi.Type) (s SSAValue) {
 	for _, fv := range fb.fn.FreeVars {
 		if fv.name == name {
 			return fv
