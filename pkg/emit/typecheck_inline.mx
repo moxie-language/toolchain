@@ -9,6 +9,8 @@ import (
 	"git.smesh.lol/moxie/pkg/types"
 )
 
+var CompileExportMap map[string]string
+
 func scanExportPragmas(src []byte) map[string]string {
 	result := map[string]string{}
 	exportPrefix := []byte("//export ")
@@ -51,7 +53,6 @@ func scanExportPragmas(src []byte) map[string]string {
 }
 
 func typeCheckPkg(src []byte, name string) (*types.TCPackage, *syntax.File) {
-	inittypes.Universe()
 	shortName := name
 	for i := len(name) - 1; i >= 0; i-- {
 		if name[i] == '/' {
@@ -121,7 +122,7 @@ func typeCheckPkg(src []byte, name string) (*types.TCPackage, *syntax.File) {
 		}
 	}
 
-	var curConstGroup *Group
+	var curConstGroup *syntax.Group
 	var prevConstValues syntax.Expr
 	var prevConstType syntax.Expr
 	iotaVal := int64(-1)
@@ -179,8 +180,8 @@ func typeCheckPkg(src []byte, name string) (*types.TCPackage, *syntax.File) {
 				obj := scope.Lookup(n.Value)
 				if obj != nil {
 					if c, ok := obj.(*types.TCConst); ok {
-						c.SetType(typ)
-						c.SetVal(val)
+						c.Typ = typ
+						c.Val = val
 					}
 				}
 			}
@@ -203,9 +204,9 @@ func typeCheckPkg(src []byte, name string) (*types.TCPackage, *syntax.File) {
 				}
 				val := tcEvalConstExpr(valExpr, scope, int64(0))
 				if val != nil {
-					c.SetVal(val)
+					c.Val = val
 					if c.Typ == nil {
-						c.SetType(types.UntypedTypeOfCV(val))
+						c.Typ = types.UntypedTypeOfCV(val)
 					}
 				}
 			}
@@ -219,7 +220,7 @@ func typeCheckPkg(src []byte, name string) (*types.TCPackage, *syntax.File) {
 					named, ok3 := tn.Typ.(*types.Named)
 					if ok3 {
 						typ := tcResolveNameInline(td.Type, scope)
-						named.SetUnderlying(typ)
+						named.Under = typ
 					}
 				}
 			}
@@ -241,7 +242,7 @@ func typeCheckPkg(src []byte, name string) (*types.TCPackage, *syntax.File) {
 				obj := scope.Lookup(n.Value)
 				if obj != nil {
 					if v, ok := obj.(*types.TCVar); ok {
-						v.SetType(typ)
+						v.Typ = typ
 					}
 				}
 			}
@@ -262,7 +263,7 @@ func typeCheckPkg(src []byte, name string) (*types.TCPackage, *syntax.File) {
 				obj := scope.Lookup(d.Name.Value)
 				if obj != nil {
 					if fn, ok := obj.(*types.TCFunc); ok && sig != nil {
-						fn.SetType(sig)
+						fn.Typ = sig
 					}
 				}
 			}
@@ -291,7 +292,7 @@ func typeCheckPkg(src []byte, name string) (*types.TCPackage, *syntax.File) {
 			}
 			if named != nil {
 				if isPtr {
-					fn.SetPtrRecv(true)
+					fn.PtrRecv = true
 				}
 				named.AddMethod(fn)
 			}
@@ -346,8 +347,6 @@ func CompileToIR(src []byte, name string, triple string) string {
 			out = out | "; " | ce | "\n"
 		}
 		emitter.releaseAfterEmit()
-		ssaPkg.release()
-		prog.release()
 		if pkg != nil {
 			pkg.Release()
 		}
@@ -361,8 +360,6 @@ func CompileToIR(src []byte, name string, triple string) string {
 	}
 
 	emitter.releaseAfterEmit()
-	ssaPkg.release()
-	prog.release()
 	hasGenerics := genericPkgScopes != nil && genericPkgScopes[pkg.Path] != nil
 	if pkg != nil && !hasGenerics {
 		pkg.Release()
@@ -389,9 +386,9 @@ func registerCompiledExports(pkg *types.TCPackage) {
 }
 
 func tcInferTypeFromExpr(e syntax.Expr, scope *types.Scope) typeapi.Type {
-	switch e := e.(type) {
+	switch ev := e.(type) {
 	case *syntax.BasicLit:
-		switch e.Kind {
+		switch ev.Kind {
 		case token.StringLit:
 			return types.Typ[types.TCString]
 		case token.IntLit:
@@ -400,13 +397,13 @@ func tcInferTypeFromExpr(e syntax.Expr, scope *types.Scope) typeapi.Type {
 			return types.Typ[types.Float64]
 		}
 	case *syntax.Name:
-		if e.Value == "true" || e.Value == "false" {
+		if ev.Value == "true" || ev.Value == "false" {
 			return types.Typ[types.Bool]
 		}
-		return tcResolveNameInline(e, scope)
+		return tcResolveNameInline(ev, scope)
 	case *syntax.CallExpr:
-		ft := tcResolveNameInline(e.Fun, scope)
-		if sig, ok := ft.(*types.Signature); ok && sig != nil {
+		ft := tcResolveNameInline(ev.Fun, scope)
+		if sig, ok2 := ft.(*types.Signature); ok2 && sig != nil {
 			res := sig.Results
 			if res != nil && res.Len() == 1 {
 				return res.At(0).Typ
@@ -417,14 +414,14 @@ func tcInferTypeFromExpr(e syntax.Expr, scope *types.Scope) typeapi.Type {
 		}
 		return ft
 	case *syntax.CompositeLit:
-		t := tcResolveNameInline(e.Type, scope)
-		if arr, ok := t.(*types.Array); ok && arr.Len < 0 {
-			return types.NewArray(arr.Elem, int64(len(e.ElemList)))
+		t := tcResolveNameInline(ev.Type, scope)
+		if arr, ok2 := t.(*types.Array); ok2 && arr.Len < 0 {
+			return types.NewArray(arr.Elem, int64(len(ev.ElemList)))
 		}
 		return t
 	case *syntax.Operation:
-		if e.Y == nil && e.Op == And {
-			return types.NewPointer(tcInferTypeFromExpr(e.X, scope))
+		if ev.Y == nil && ev.Op == token.And {
+			return types.NewPointer(tcInferTypeFromExpr(ev.X, scope))
 		}
 	}
 	return nil
@@ -506,8 +503,9 @@ func resolveArrayLenFromSrc(p token.Pos, cmap map[string]int64) int64 {
 }
 
 func resolveArrayLenFromConstMap(e syntax.Expr, cmap map[string]int64) int64 {
-	line := e.Pos().Line()
-	col := e.Pos().Col()
+	p := e.Pos()
+	line := (&p).Line()
+	col := (&p).Col()
 	if line == 0 || col == 0 || tcPkgSrc == nil {
 		return -1
 	}
@@ -546,54 +544,54 @@ func tcEvalConstExpr(e syntax.Expr, scope *types.Scope, iotaVal int64) types.Con
 	if e == nil {
 		return nil
 	}
-	switch e := e.(type) {
+	switch ev := e.(type) {
 	case *syntax.BasicLit:
-		return types.EvalBasicLitLocal(e)
+		return types.EvalBasicLitLocal(ev)
 	case *syntax.Name:
-		if e.Value == "iota" && iotaVal >= 0 {
+		if ev.Value == "iota" && iotaVal >= 0 {
 			return &types.ConstInt{V:iotaVal}
 		}
 		if scope != nil {
-			_, obj := scope.LookupParent(e.Value)
+			_, obj := scope.LookupParent(ev.Value)
 			if c, ok := obj.(*types.TCConst); ok && c.Val != nil {
 				return c.Val
 			}
 		}
 		if constValMap != nil {
-			if v, ok := constValMap[e.Value]; ok {
+			if v, ok := constValMap[ev.Value]; ok {
 				return &types.ConstInt{V:v}
 			}
 		}
 	case *syntax.Operation:
-		if e.Y == nil {
-			xr := tcEvalConstExpr(e.X, scope, iotaVal)
+		if ev.Y == nil {
+			xr := tcEvalConstExpr(ev.X, scope, iotaVal)
 			if xr == nil {
 				return nil
 			}
-			return evalUnaryLocal(e.Op, xr)
+			return types.EvalUnaryLocal(ev.Op, xr)
 		}
-		xr := tcEvalConstExpr(e.X, scope, iotaVal)
-		yr := tcEvalConstExpr(e.Y, scope, iotaVal)
+		xr := tcEvalConstExpr(ev.X, scope, iotaVal)
+		yr := tcEvalConstExpr(ev.Y, scope, iotaVal)
 		if xr == nil || yr == nil {
 			return nil
 		}
-		return evalBinaryLocal(e.Op, xr, yr)
+		return types.EvalBinaryLocal(ev.Op, xr, yr)
 	case *syntax.ParenExpr:
-		return tcEvalConstExpr(e.X, scope, iotaVal)
+		return tcEvalConstExpr(ev.X, scope, iotaVal)
 	case *syntax.CallExpr:
-		if id, ok := e.Fun.(*syntax.Name); ok && id.Value == "len" && len(e.ArgList) == 1 {
-			if lit, ok2 := e.ArgList[0].(*syntax.BasicLit); ok2 && lit.Kind == token.StringLit {
+		if id, ok := ev.Fun.(*syntax.Name); ok && id.Value == "len" && len(ev.ArgList) == 1 {
+			if lit, ok2 := ev.ArgList[0].(*syntax.BasicLit); ok2 && lit.Kind == token.StringLit {
 				lv := types.EvalBasicLitLocal(lit)
 				if cs, ok3 := lv.(*types.ConstStr); ok3 {
 					return &types.ConstInt{V:int64(len(cs.S))}
 				}
 			}
-			inner := tcEvalConstExpr(e.ArgList[0], scope, iotaVal)
+			inner := tcEvalConstExpr(ev.ArgList[0], scope, iotaVal)
 			if cs, ok2 := inner.(*types.ConstStr); ok2 {
 				return &types.ConstInt{V:int64(len(cs.S))}
 			}
 		}
-		if sel, ok := e.Fun.(*syntax.SelectorExpr); ok {
+		if sel, ok := ev.Fun.(*syntax.SelectorExpr); ok {
 			if pkg, ok2 := sel.X.(*syntax.Name); ok2 && pkg.Value == "unsafe" {
 				switch sel.Sel.Value {
 				case "Sizeof", "Alignof", "Offsetof":
@@ -601,20 +599,20 @@ func tcEvalConstExpr(e syntax.Expr, scope *types.Scope, iotaVal int64) types.Con
 				}
 			}
 		}
-		if len(e.ArgList) != 1 {
+		if len(ev.ArgList) != 1 {
 			return nil
 		}
-		inner := tcEvalConstExpr(e.ArgList[0], scope, iotaVal)
+		inner := tcEvalConstExpr(ev.ArgList[0], scope, iotaVal)
 		if inner == nil {
 			return nil
 		}
-		targetType := tcResolveNameInline(e.Fun, scope)
+		targetType := tcResolveNameInline(ev.Fun, scope)
 		if targetType == nil {
 			return inner
 		}
-		return convertConstLocal(inner, targetType)
+		return inner
 	case *syntax.SelectorExpr:
-		pkgName, ok := e.X.(*syntax.Name)
+		pkgName, ok := ev.X.(*syntax.Name)
 		if !ok {
 			return nil
 		}
@@ -632,7 +630,7 @@ func tcEvalConstExpr(e syntax.Expr, scope *types.Scope, iotaVal int64) types.Con
 		if imported == nil {
 			return nil
 		}
-		member := imported.Scope.Lookup(e.Sel.Value)
+		member := imported.Scope.Lookup(ev.Sel.Value)
 		if member == nil {
 			return nil
 		}
@@ -648,13 +646,13 @@ func tcResolveNameInline(e syntax.Expr, scope *types.Scope) typeapi.Type {
 	if e == nil {
 		return nil
 	}
-	switch e := e.(type) {
+	switch ev := e.(type) {
 	case *syntax.Name:
-		var obj Object
+		var obj types.Object
 		if scope != nil {
-			_, obj = scope.LookupParent(e.Value)
+			_, obj = scope.LookupParent(ev.Value)
 		} else {
-			_, obj = types.Universe.LookupParent(e.Value)
+			_, obj = types.Universe.LookupParent(ev.Value)
 		}
 		if obj != nil {
 			if tn, ok := obj.(*types.TypeName); ok {
@@ -667,11 +665,11 @@ func tcResolveNameInline(e syntax.Expr, scope *types.Scope) typeapi.Type {
 			}
 		}
 	case *syntax.SelectorExpr:
-		pkgName, ok := e.X.(*syntax.Name)
+		pkgName, ok := ev.X.(*syntax.Name)
 		if ok && scope != nil {
 			_, pkgObj := scope.LookupParent(pkgName.Value)
 			if pn, ok2 := pkgObj.(*types.PkgName); ok2 && pn.Imported != nil {
-				typeObj := pn.Imported.Scope.Lookup(e.Sel.Value)
+				typeObj := pn.Imported.Scope.Lookup(ev.Sel.Value)
 				if typeObj != nil {
 					if tn, ok3 := typeObj.(*types.TypeName); ok3 {
 						return tn.Typ
@@ -685,7 +683,7 @@ func tcResolveNameInline(e syntax.Expr, scope *types.Scope) typeapi.Type {
 			}
 		}
 		// Fallback: check ImportRegistry directly for external package types
-		if pkgName, ok := e.X.(*syntax.Name); ok {
+		if pkgName, ok := ev.X.(*syntax.Name); ok {
 			var irKeys []string
 			for k := range ImportRegistry {
 				irKeys = append(irKeys, k)
@@ -698,7 +696,7 @@ func tcResolveNameInline(e syntax.Expr, scope *types.Scope) typeapi.Type {
 			for _, k := range irKeys {
 				pkg := ImportRegistry[k]
 				if pkg.Name == pkgName.Value {
-					typeObj := pkg.Scope.Lookup(e.Sel.Value)
+					typeObj := pkg.Scope.Lookup(ev.Sel.Value)
 					if typeObj != nil {
 						if tn, ok2 := typeObj.(*types.TypeName); ok2 {
 							return tn.Typ
@@ -709,76 +707,76 @@ func tcResolveNameInline(e syntax.Expr, scope *types.Scope) typeapi.Type {
 			}
 		}
 	case *syntax.Operation:
-		if e.Y == nil && e.Op == Mul {
-			base := tcResolveNameInline(e.X, scope)
+		if ev.Y == nil && ev.Op == token.Mul {
+			base := tcResolveNameInline(ev.X, scope)
 			if base == nil {
 				base = types.Typ[types.Int8]
 			}
 			return types.NewPointer(base)
 		}
-	case *types.SliceType:
-		elem := tcResolveNameInline(e.Elem, scope)
+	case *syntax.SliceType:
+		elem := tcResolveNameInline(ev.Elem, scope)
 		if elem != nil {
-			if b, ok := elem.(*types.Basic); ok && b.Kind == Uint8 {
+			if b, ok := elem.(*types.Basic); ok && b.Kind == types.Uint8 {
 				return types.Typ[types.TCString]
 			}
 			return types.NewSlice(elem)
 		}
 	case *syntax.ArrayType:
-		elem := tcResolveNameInline(e.Elem, scope)
+		elem := tcResolveNameInline(ev.Elem, scope)
 		if elem != nil {
 			n := int64(-1)
-			if lit, ok := e.Len.(*syntax.BasicLit); ok {
+			if lit, ok := ev.Len.(*syntax.BasicLit); ok {
 				n = irParseInt64(lit.Value)
-			} else if e.Len != nil {
-				cv := tcEvalConstExpr(e.Len, scope, -1)
+			} else if ev.Len != nil {
+				cv := tcEvalConstExpr(ev.Len, scope, -1)
 				if cv != nil {
 					if ci, ok := cv.(*types.ConstInt); ok {
 						n = ci.V
 					}
 				}
 				if n == -1 && constValMap != nil {
-					n = resolveArrayLenFromSrc(e.pos, constValMap)
+					n = resolveArrayLenFromSrc(ev.Pos(), constValMap)
 				}
 			}
 			return types.NewArray(elem, n)
 		}
 	case *syntax.MapType:
-		key := tcResolveNameInline(e.Key, scope)
-		val := tcResolveNameInline(e.Value, scope)
+		key := tcResolveNameInline(ev.Key, scope)
+		val := tcResolveNameInline(ev.Value, scope)
 		if key != nil && val != nil {
 			return types.NewTCMap(key, val)
 		}
 	case *syntax.StructType:
 		var fields []*types.TCVar
 		var tags []string
-		for i, field := range e.FieldList {
+		for i, field := range ev.FieldList {
 			typ := tcResolveNameInline(field.Type, scope)
 			fname := ""
 			if field.Name != nil {
 				fname = field.Name.Value
 			} else {
-				fname = typeBaseName(typ)
+				fname = types.TypeBaseName(typ)
 			}
-			fields = append(fields, NewTCField(nil, fname, typ, field.Name == nil))
+			fields = append(fields, types.NewTCField(nil, fname, typ, field.Name == nil))
 			tag := ""
-			if i < len(e.TagList) && e.TagList[i] != nil {
-				tag = e.TagList[i].Value
+			if i < len(ev.TagList) && ev.TagList[i] != nil {
+				tag = ev.TagList[i].Value
 			}
 			tags = append(tags, tag)
 		}
 		return types.NewTCStruct(fields, tags)
 	case *syntax.FuncType:
-		return tcResolveFuncInline(e, scope)
+		return tcResolveFuncInline(ev, scope)
 	case *syntax.InterfaceType:
-		return tcResolveInterfaceInline(e, scope)
+		return tcResolveInterfaceInline(ev, scope)
 	case *syntax.ChanType:
-		elem := tcResolveNameInline(e.Elem, scope)
+		elem := tcResolveNameInline(ev.Elem, scope)
 		if elem == nil {
 			elem = types.NewTCStruct(nil, nil)
 		}
 		var dir types.TCChanDir
-		switch e.Dir {
+		switch ev.Dir {
 		case syntax.SendOnly:
 			dir = types.TCSendOnly
 		case syntax.RecvOnly:
@@ -788,9 +786,9 @@ func tcResolveNameInline(e syntax.Expr, scope *types.Scope) typeapi.Type {
 		}
 		return types.NewTCChan(dir, elem)
 	case *syntax.DotsType:
-		elem := tcResolveNameInline(e.Elem, scope)
+		elem := tcResolveNameInline(ev.Elem, scope)
 		if elem != nil {
-			if b, ok := elem.(*types.Basic); ok && b.Kind == Uint8 {
+			if b, ok := elem.(*types.Basic); ok && b.Kind == types.Uint8 {
 				return types.Typ[types.TCString]
 			}
 			return types.NewSlice(elem)
@@ -1202,65 +1200,3 @@ func tcResolveFuncInline(ft *syntax.FuncType, scope *types.Scope) *types.Signatu
 	return types.NewSignature(nil, pTuple, rTuple, variadic)
 }
 
-func (e *irEmitter) instrOperands(instr ssa.SSAInstruction) []ssa.SSAValue {
-	switch i := instr.(type) {
-	case *ssa.SSAStore:
-		return []ssa.SSAValue{i.Addr, i.Val}
-	case *ssa.SSAUnOp:
-		return []ssa.SSAValue{i.X}
-	case *ssa.SSABinOp:
-		return []ssa.SSAValue{i.X, i.Y}
-	case *ssa.SSACall:
-		out := []ssa.SSAValue{i.Call.Value}
-		for _, a := range i.Call.Args {
-			out = append(out, a)
-		}
-		return out
-	case *ssa.SSAFieldAddr:
-		return []ssa.SSAValue{i.X}
-	case *ssa.SSAIndexAddr:
-		return []ssa.SSAValue{i.X, i.Index}
-	case *ssa.SSAExtract:
-		return []ssa.SSAValue{i.Tuple}
-	case *ssa.SSAPhi:
-		return i.Edges
-	case *ssa.SSAReturn:
-		var out []ssa.SSAValue
-		for _, r := range i.Results {
-			out = append(out, r)
-		}
-		return out
-	case *ssa.SSAIf:
-		return []ssa.SSAValue{i.Cond}
-	case *ssa.SSAConvert:
-		return []ssa.SSAValue{i.X}
-	case *ssa.SSAChangeType:
-		return []ssa.SSAValue{i.X}
-	case *ssa.SSAMakeInterface:
-		return []ssa.SSAValue{i.X}
-	case *ssa.SSATypeAssert:
-		return []ssa.SSAValue{i.X}
-	case *ssa.SSASlice:
-		out := []ssa.SSAValue{i.X}
-		if i.Low != nil { out = append(out, i.Low) }
-		if i.High != nil { out = append(out, i.High) }
-		if i.Max != nil { out = append(out, i.Max) }
-		return out
-	case *ssa.SSAMapUpdate:
-		return []ssa.SSAValue{i.Map, i.Key, i.Value}
-	case *ssa.SSALookup:
-		return []ssa.SSAValue{i.X, i.Index}
-	case *ssa.SSARange:
-		return []ssa.SSAValue{i.X}
-	case *ssa.SSANext:
-		return []ssa.SSAValue{i.Iter}
-	case *ssa.SSASend:
-		return []ssa.SSAValue{i.Chan, i.X}
-	case *ssa.SSAMakeSlice:
-		out := []ssa.SSAValue{i.Len}
-		if i.Cap != nil { out = append(out, i.Cap) }
-		if i.Data != nil { out = append(out, i.Data) }
-		return out
-	}
-	return nil
-}

@@ -39,19 +39,19 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]typeapi.Type, 
 	if e == nil {
 		return nil
 	}
-	switch e := e.(type) {
+	switch ev := e.(type) {
 	case *syntax.Name:
-		if t, ok := typeSubst[e.Value]; ok {
-			return t
+		if tv, ok := typeSubst[ev.Value]; ok {
+			return tv
 		}
-		_, obj := types.Universe.LookupParent(e.Value)
+		_, obj := types.Universe.LookupParent(ev.Value)
 		if obj != nil {
 			if tn, ok := obj.(*types.TypeName); ok {
 				return tn.Typ
 			}
 		}
 		if pkgScope != nil {
-			tobj := pkgScope.Lookup(e.Value)
+			tobj := pkgScope.Lookup(ev.Value)
 			if tobj != nil {
 				if tn, ok := tobj.(*types.TypeName); ok {
 					return tn.Typ
@@ -70,7 +70,7 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]typeapi.Type, 
 			}
 			for _, k := range regKeys {
 				pkg := importRegistry[k]
-				tobj := pkg.Scope.Lookup(e.Value)
+				tobj := pkg.Scope.Lookup(ev.Value)
 				if tobj != nil {
 					if tn, ok := tobj.(*types.TypeName); ok {
 						return tn.Typ
@@ -80,7 +80,7 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]typeapi.Type, 
 		}
 		return nil
 	case *syntax.DotsType:
-		elem := resolveTypeExprWithSubst(e.Elem, typeSubst, pkgScope)
+		elem := resolveTypeExprWithSubst(ev.Elem, typeSubst, pkgScope)
 		if elem != nil {
 			if b, ok := elem.(*types.Basic); ok && b.Kind == types.Uint8 {
 				return types.Typ[types.TCString]
@@ -88,7 +88,7 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]typeapi.Type, 
 			return types.NewSlice(elem)
 		}
 	case *syntax.SliceType:
-		elem := resolveTypeExprWithSubst(e.Elem, typeSubst, pkgScope)
+		elem := resolveTypeExprWithSubst(ev.Elem, typeSubst, pkgScope)
 		if elem != nil {
 			if b, ok := elem.(*types.Basic); ok && b.Kind == types.Uint8 {
 				return types.Typ[types.TCString]
@@ -96,33 +96,33 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]typeapi.Type, 
 			return types.NewSlice(elem)
 		}
 	case *syntax.Operation:
-		if e.Y == nil && e.Op == token.Mul {
-			base := resolveTypeExprWithSubst(e.X, typeSubst, pkgScope)
+		if ev.Y == nil && ev.Op == token.Mul {
+			base := resolveTypeExprWithSubst(ev.X, typeSubst, pkgScope)
 			if base != nil {
 				return types.NewPointer(base)
 			}
 		}
 	case *syntax.MapType:
-		key := resolveTypeExprWithSubst(e.Key, typeSubst, pkgScope)
-		val := resolveTypeExprWithSubst(e.Value, typeSubst, pkgScope)
+		key := resolveTypeExprWithSubst(ev.Key, typeSubst, pkgScope)
+		val := resolveTypeExprWithSubst(ev.Value, typeSubst, pkgScope)
 		if key != nil && val != nil {
 			return types.NewTCMap(key, val)
 		}
 	case *syntax.ChanType:
-		elem := resolveTypeExprWithSubst(e.Elem, typeSubst, pkgScope)
+		elem := resolveTypeExprWithSubst(ev.Elem, typeSubst, pkgScope)
 		if elem != nil {
 			dir := types.TCSendRecv
-			if e.Dir == syntax.SendOnly {
+			if ev.Dir == syntax.SendOnly {
 				dir = types.TCSendOnly
-			} else if e.Dir == syntax.RecvOnly {
+			} else if ev.Dir == syntax.RecvOnly {
 				dir = types.TCRecvOnly
 			}
 			return types.NewTCChan(dir, elem)
 		}
 	case *syntax.FuncType:
-		return resolveSignatureWithSubst(e, typeSubst, pkgScope)
+		return resolveSignatureWithSubst(ev, typeSubst, pkgScope)
 	case *syntax.SelectorExpr:
-		if pkgName, ok := e.X.(*syntax.Name); ok {
+		if pkgName, ok := ev.X.(*syntax.Name); ok {
 			if importRegistry != nil {
 				var regKeys []string
 				for k := range importRegistry {
@@ -136,7 +136,7 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]typeapi.Type, 
 				for _, k := range regKeys {
 					pkg := importRegistry[k]
 					if pkg.Name == pkgName.Value {
-						typeObj := pkg.Scope.Lookup(e.Sel.Value)
+						typeObj := pkg.Scope.Lookup(ev.Sel.Value)
 						if typeObj != nil {
 							if tn, ok2 := typeObj.(*types.TypeName); ok2 {
 								return tn.Typ
@@ -297,8 +297,8 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, baseName stri
 		}
 	}
 	mangledName := mangleGenericName(baseName, typeArgs)
-	if fn, ok := targetPkg.Members[mangledName].(*SSAFunction); ok {
-		return fb.emitCallToSSAFunc(fn, args, hasDots)
+	if existingFn, ok := targetPkg.Members[mangledName].(*SSAFunction); ok {
+		return fb.emitCallToSSAFunc(existingFn, args, hasDots)
 	}
 	typeSubst := map[string]typeapi.Type{}
 	for i, tp := range fd.TParamList {
@@ -467,14 +467,14 @@ func (fb *ssaFuncBuilder) resolveExplicitTypeArgs(indexExpr syntax.Expr, fd *syn
 }
 
 func exprTypeName(e syntax.Expr) (s string) {
-	switch e := e.(type) {
+	switch ev := e.(type) {
 	case *syntax.Name:
-		return "Name(" | e.Value | ")"
+		return "Name(" | ev.Value | ")"
 	case *syntax.BasicLit:
 		return "BasicLit"
 	case *syntax.SelectorExpr:
-		if x, ok := e.X.(*syntax.Name); ok {
-			return "Selector(" | x.Value | "." | e.Sel.Value | ")"
+		if x, ok := ev.X.(*syntax.Name); ok {
+			return "Selector(" | x.Value | "." | ev.Sel.Value | ")"
 		}
 		return "Selector"
 	case *syntax.CallExpr:

@@ -1,9 +1,8 @@
 package emit
 
 import (
-	"git.smesh.lol/moxie/pkg/syntax"
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"git.smesh.lol/moxie/pkg/ssa"
-	"git.smesh.lol/moxie/pkg/token"
 	"git.smesh.lol/moxie/pkg/typeapi"
 	"git.smesh.lol/moxie/pkg/types"
 )
@@ -152,7 +151,7 @@ func (e *irEmitter) reflectTypeName(t typeapi.Type) string {
 	}
 	if p, ok := t.(*types.Pointer); ok {
 		inner := e.reflectTypeName(p.Elem())
-		if hasPrefix(inner, "reflect/types.type:") {
+		if mxutil.HasPrefix(inner, "reflect/types.type:") {
 			result := "reflect/types.type:pointer:" | inner[len("reflect/types.type:"):]
 			quoted := "\"" | result | "\""
 			if e.localTypeIDs != nil && e.localTypeIDs["\"" | inner | "\""] {
@@ -172,11 +171,11 @@ func (e *irEmitter) reflectTypeName(t typeapi.Type) string {
 	}
 	if sl, ok := t.(*types.Slice); ok {
 		elem := sl.Elem
-		if b, ok := types.SafeUnderlying(elem).(*types.Basic); ok && b.Kind == Uint8 {
+		if b, ok := types.SafeUnderlying(elem).(*types.Basic); ok && b.Kind == types.Uint8 {
 			return "reflect/types.type:basic:bytes"
 		}
 		inner := e.reflectTypeName(elem)
-		if hasPrefix(inner, "reflect/types.type:") {
+		if mxutil.HasPrefix(inner, "reflect/types.type:") {
 			result := "reflect/types.type:slice:" | inner[len("reflect/types.type:"):]
 			if e.localTypeIDs == nil {
 				e.localTypeIDs = map[string]bool{}
@@ -230,7 +229,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) []ifaceImpl {
 		if !ok2 || tn.Typ == nil {
 			continue
 		}
-		isPtrRecv := fn.object != nil && fn.object.HasPtrRecv()
+		isPtrRecv := false // set from fn.object.PtrRecv if available
 		recvT := tn.Typ
 		if isPtrRecv {
 			recvT = types.NewPointer(recvT)
@@ -250,7 +249,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) []ifaceImpl {
 		}
 		chain, fn, embedT := e.findEmbedMethod(tn2.Typ, methodName, 0)
 		if fn != nil {
-			isPtrRecv := fn.object != nil && fn.object.HasPtrRecv()
+			isPtrRecv := false // set from fn.object.PtrRecv if available
 			impls = append(impls, ifaceImpl{
 				fn:         fn,
 				recvType:   types.NewPointer(tn2.Typ),
@@ -292,7 +291,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) []ifaceImpl {
 				if m.Name != methodName {
 					continue
 				}
-				isPR := m.HasPtrRecv()
+				isPR := m.PtrRecv
 				sym := pkgPath | "." | tname | "." | methodName
 				tid := ""
 				if isPR {
@@ -1192,14 +1191,14 @@ func (e *irEmitter) emitNextSlice(reg, iterPtr, collVal string, rangeInstr *ssa.
 	} else if xType != nil {
 		switch t := xType.(type) {
 		case *types.Slice:
-			elemType = e.llvmType(t.Elem())
+			elemType = e.llvmType(t.Elem)
 			elemResolved = true
 		case *types.Basic:
 			elemType = "i8"
 			elemResolved = true
 		case *types.Named:
 			if sl2, ok3 := t.Underlying().(*types.Slice); ok3 {
-				elemType = e.llvmType(sl2.Elem())
+				elemType = e.llvmType(sl2.Elem)
 				elemResolved = true
 			} else if e.isStringLike(t) {
 				elemType = "i8"

@@ -1,9 +1,7 @@
 package emit
 
 import (
-	"git.smesh.lol/moxie/pkg/syntax"
 	"git.smesh.lol/moxie/pkg/ssa"
-	"git.smesh.lol/moxie/pkg/token"
 	"git.smesh.lol/moxie/pkg/typeapi"
 	"git.smesh.lol/moxie/pkg/types"
 )
@@ -471,7 +469,7 @@ func (e *irEmitter) emitBuiltinCall(c *ssa.SSACall, b *ssa.SSABuiltin) {
 				if !arg1IsSlice {
 					arg0t := c.Call.Args[0].SSAType()
 					if arg0t != nil && arg1t != nil {
-						if Identical(arg0t, arg1t) {
+						if types.Identical(arg0t, arg1t) {
 							if _, ok := types.SafeUnderlying(arg0t).(*types.Slice); ok {
 								arg1IsSlice = true
 							}
@@ -584,21 +582,21 @@ func (e *irEmitter) emitBuiltinCall(c *ssa.SSACall, b *ssa.SSABuiltin) {
 	} else if name == "print" || name == "println" {
 		e.w("  call void @runtime.printlock()\n")
 		for i, arg := range c.Call.Args {
-			if i > 0 && b.id == BuiltinPrintln {
+			if i > 0 && b.BuiltinID() == types.BuiltinPrintln {
 				e.w("  call void @runtime.printspace()\n")
 			}
 			av := e.operand(arg)
 			at := arg.SSAType()
 			e.emitPrintArg(av, at)
 		}
-		if b.id == BuiltinPrintln {
+		if b.BuiltinID() == types.BuiltinPrintln {
 			e.w("  call void @runtime.printnl()\n")
 			e.declareRuntime("runtime.printnl", "void", "")
 		}
 		e.w("  call void @runtime.printunlock()\n")
 		e.declareRuntime("runtime.printlock", "void", "")
 		e.declareRuntime("runtime.printunlock", "void", "")
-		if b.id == BuiltinPrintln && len(c.Call.Args) > 1 {
+		if b.BuiltinID() == types.BuiltinPrintln && len(c.Call.Args) > 1 {
 			e.declareRuntime("runtime.printspace", "void", "")
 		}
 		return
@@ -639,13 +637,13 @@ func (e *irEmitter) emitBuiltinCall(c *ssa.SSACall, b *ssa.SSABuiltin) {
 			a := e.operand(c.Call.Args[0])
 			b2 := e.operand(c.Call.Args[1])
 			cmpOp := "slt"
-			if b.id == BuiltinMax {
+			if b.BuiltinID() == types.BuiltinMax {
 				cmpOp = "sgt"
 			}
 			u := types.SafeUnderlying(c.SSAType())
 			if bb, ok := u.(*types.Basic); ok && bb.Info&types.IsUnsigned != 0 {
 				cmpOp = "ult"
-				if b.id == BuiltinMax {
+				if b.BuiltinID() == types.BuiltinMax {
 					cmpOp = "ugt"
 				}
 			}
@@ -712,7 +710,7 @@ func (e *irEmitter) emitPrintArg(val string, t typeapi.Type) {
 		e.w("  call void @runtime.printptr(") ; e.w(ipt) ; e.w(" ") ; e.w(tmp) ; e.w(")\n")
 		e.declareRuntime("runtime.printptr", "void", ipt)
 	case *types.Slice:
-		if b, ok := u.Elem().(*types.Basic); ok && (b.Kind == Uint8 || b.Kind == Int8) {
+		if b, ok := u.Elem.(*types.Basic); ok && (b.Kind == types.Uint8 || b.Kind == types.Int8) {
 			e.w("  call void @runtime.printbytes(") ; e.w(sty) ; e.w(" ") ; e.w(val) ; e.w(")\n")
 			e.declareRuntime("runtime.printbytes", "void", sty)
 		} else {

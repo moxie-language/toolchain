@@ -55,24 +55,24 @@ type ssaPkgBuilder struct {
 
 func (pb *ssaPkgBuilder) registerImportsAndTypes(f *syntax.File) {
 	for _, d := range f.DeclList {
-		switch d := d.(type) {
+		switch dv := d.(type) {
 		case *syntax.ImportDecl:
-			pb.registerImport(d)
+			pb.registerImport(dv)
 		case *syntax.TypeDecl:
-			pb.registerType(d)
+			pb.registerType(dv)
 		}
 	}
 }
 
 func (pb *ssaPkgBuilder) registerFile(f *syntax.File) {
 	for _, d := range f.DeclList {
-		switch d := d.(type) {
+		switch dv := d.(type) {
 		case *syntax.FuncDecl:
-			pb.registerFunc(d)
+			pb.registerFunc(dv)
 		case *syntax.VarDecl:
-			pb.registerVar(d)
+			pb.registerVar(dv)
 		case *syntax.ConstDecl:
-			pb.registerConst(d)
+			pb.registerConst(dv)
 		}
 	}
 }
@@ -125,37 +125,37 @@ func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t typeapi.Type) {
 	if e == nil {
 		return nil
 	}
-	switch e := e.(type) {
+	switch ev := e.(type) {
 	case *syntax.Name:
-		if _, obj := types.Universe.LookupParent(e.Value); obj != nil {
+		if _, obj := types.Universe.LookupParent(ev.Value); obj != nil {
 			if tn, ok := obj.(*types.TypeName); ok {
 				return tn.Typ
 			}
 		}
 		if pkg != nil {
-			obj := pkg.Pkg.Scope.Lookup(e.Value)
+			obj := pkg.Pkg.Scope.Lookup(ev.Value)
 			if tn, ok := obj.(*types.TypeName); ok {
 				return tn.Typ
 			}
 		}
 	case *syntax.Operation:
-		if e.Y == nil && e.Op == token.Mul {
-			base := pkgResolveTypeAST(pkg, e.X)
+		if ev.Y == nil && ev.Op == token.Mul {
+			base := pkgResolveTypeAST(pkg, ev.X)
 			if base != nil {
 				return types.NewPointer(base)
 			}
 		}
 	case *syntax.ArrayType:
-		elem := pkgResolveTypeAST(pkg, e.Elem)
+		elem := pkgResolveTypeAST(pkg, ev.Elem)
 		if elem != nil {
 			n := int64(-1)
-			if lit, ok := e.Len.(*syntax.BasicLit); ok {
+			if lit, ok := ev.Len.(*syntax.BasicLit); ok {
 				n = ssaParseInt64(lit.Value)
 			}
 			return types.NewArray(elem, n)
 		}
 	case *syntax.SliceType:
-		elem := pkgResolveTypeAST(pkg, e.Elem)
+		elem := pkgResolveTypeAST(pkg, ev.Elem)
 		if elem != nil {
 			if b, ok := elem.(*types.Basic); ok && b.Kind == types.Uint8 {
 				return types.Typ[types.TCString]
@@ -163,18 +163,18 @@ func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t typeapi.Type) {
 			return types.NewSlice(elem)
 		}
 	case *syntax.MapType:
-		key := pkgResolveTypeAST(pkg, e.Key)
-		val := pkgResolveTypeAST(pkg, e.Value)
+		key := pkgResolveTypeAST(pkg, ev.Key)
+		val := pkgResolveTypeAST(pkg, ev.Value)
 		if key != nil && val != nil {
 			return types.NewTCMap(key, val)
 		}
 	case *syntax.FuncType:
-		return pkgResolveSigAST(pkg, e)
+		return pkgResolveSigAST(pkg, ev)
 	case *syntax.SelectorExpr:
-		if x, ok := e.X.(*syntax.Name); ok {
+		if x, ok := ev.X.(*syntax.Name); ok {
 			pn, _ := pkg.Pkg.Scope.Lookup(x.Value).(*types.PkgName)
 			if pn != nil && pn.Imported != nil {
-				sel := pn.Imported.Scope.Lookup(e.Sel.Value)
+				sel := pn.Imported.Scope.Lookup(ev.Sel.Value)
 				if tn, ok2 := sel.(*types.TypeName); ok2 {
 					return tn.Typ
 				}
@@ -183,7 +183,7 @@ func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t typeapi.Type) {
 	case *syntax.InterfaceType:
 		return types.NewTCInterface(nil, nil)
 	case *syntax.DotsType:
-		elem := pkgResolveTypeAST(pkg, e.Elem)
+		elem := pkgResolveTypeAST(pkg, ev.Elem)
 		if elem != nil {
 			if b, ok := elem.(*types.Basic); ok && b.Kind == types.Uint8 {
 				return types.Typ[types.TCString]
@@ -275,8 +275,8 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 }
 
 func checkInitBody(body *syntax.BlockStmt) (s string) {
-	for _, s := range body.List {
-		if err := checkInitStmt(s); err != "" {
+	for _, s2 := range body.List {
+		if err := checkInitStmt(s2); err != "" {
 			return err
 		}
 	}
@@ -284,34 +284,34 @@ func checkInitBody(body *syntax.BlockStmt) (s string) {
 }
 
 func checkInitStmt(s syntax.Stmt) (sv string) {
-	switch s := s.(type) {
+	switch s2 := s.(type) {
 	case *syntax.SelectStmt:
 		return "select{} not allowed in init()"
 	case *syntax.BlockStmt:
-		for _, sub := range s.List {
+		for _, sub := range s2.List {
 			if err := checkInitStmt(sub); err != "" {
 				return err
 			}
 		}
 	case *syntax.IfStmt:
-		if s.Then != nil {
-			if err := checkInitStmt(s.Then); err != "" {
+		if s2.Then != nil {
+			if err := checkInitStmt(s2.Then); err != "" {
 				return err
 			}
 		}
-		if s.Else != nil {
-			if err := checkInitStmt(s.Else); err != "" {
+		if s2.Else != nil {
+			if err := checkInitStmt(s2.Else); err != "" {
 				return err
 			}
 		}
 	case *syntax.ForStmt:
-		if s.Body != nil {
-			if err := checkInitStmt(s.Body); err != "" {
+		if s2.Body != nil {
+			if err := checkInitStmt(s2.Body); err != "" {
 				return err
 			}
 		}
 	case *syntax.SwitchStmt:
-		for _, cc := range s.Body {
+		for _, cc := range s2.Body {
 			for _, sub := range cc.Body {
 				if err := checkInitStmt(sub); err != "" {
 					return err
@@ -319,7 +319,7 @@ func checkInitStmt(s syntax.Stmt) (sv string) {
 			}
 		}
 	case *syntax.ExprStmt:
-		if err := checkInitExpr(s.X); err != "" {
+		if err := checkInitExpr(s2.X); err != "" {
 			return err
 		}
 	}
@@ -415,17 +415,17 @@ func (pb *ssaPkgBuilder) findMethod(typeName string, methodName string) (t *type
 	if !ok {
 		return nil
 	}
-	switch t := tn.Typ.(type) {
+	switch t2 := tn.Typ.(type) {
 	case *types.Named:
-		for i := int32(0); i < t.NumMethods(); i++ {
-			m := t.Method(i)
+		for i := int32(0); i < t2.NumMethods(); i++ {
+			m := t2.Method(i)
 			if m.Name == methodName {
 				return m
 			}
 		}
 	case *types.Basic:
-		for i := int32(0); i < t.NumMethods(); i++ {
-			m := t.Method(i)
+		for i := int32(0); i < t2.NumMethods(); i++ {
+			m := t2.Method(i)
 			if m.Name == methodName {
 				return m
 			}
@@ -529,14 +529,14 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 			Prog:      pb.prog,
 		}
 		pb.pkg.Members["__varinit"] = initFn
-		fb := newSSAFuncBuilder(initFn, pb.info)
-		entry := fb.newBlock("entry")
-		fb.currentBlock = entry
+		fb2 := newSSAFuncBuilder(initFn, pb.info)
+		entry2 := fb2.newBlock("entry")
+		fb2.currentBlock = entry2
 		for _, d := range pb.varInits {
 			if d.Values == nil {
 				continue
 			}
-			rhs := fb.buildExpr(d.Values)
+			rhs := fb2.buildExpr(d.Values)
 			if rhs == nil {
 				continue
 			}
@@ -544,10 +544,10 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 				if name.Value == "_" {
 					continue
 				}
-				fb.buildStore(name, rhs)
+				fb2.buildStore(name, rhs)
 			}
 		}
-		fb.emit(&SSAReturn{})
+		fb2.emit(&SSAReturn{})
 		// Inject call to __varinit at start of main
 		callInstr := &SSACall{Call: SSACallCommon{Value: initFn}}
 		callInstr.name = "vinit"
