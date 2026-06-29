@@ -25,23 +25,23 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 		if !recov && b.X != nil {
 			rt := e.resolvedType(b.X, "i32")
 			if rt != "i32" && rt != "" {
-				reg := e.regName(b)
-				lv := e.operand(b.X)
+				reg2 := e.regName(b)
+				lv2 := e.operand(b.X)
 				rv2 := e.operand(b.Y)
 				isCmp := b.Op == ssa.OpEql || b.Op == ssa.OpNeq || b.Op == ssa.OpLss || b.Op == ssa.OpGtr || b.Op == ssa.OpLeq || b.Op == ssa.OpGeq
 				if isCmp && len(rt) > 0 && rt[0] == '{' && rt != "{ptr, ptr}" && rt != e.sliceType() && rt != e.ifaceType() {
-					e.emitStructCompareByLLVM(reg, b.Op, rt, lv, rv2)
+					e.emitStructCompareByLLVM(reg2, b.Op, rt, lv2, rv2)
 					return
 				}
-				op4 := e.llvmBinOp(b.Op, nil)
+				op5 := e.llvmBinOp(b.Op, nil)
 				if rt == "float" || rt == "double" {
-					op4 = e.floatBinOp(b.Op)
-					lv = ensureTokenFloatLit(lv)
+					op5 = e.floatBinOp(b.Op)
+					lv2 = ensureTokenFloatLit(lv2)
 					rv2 = ensureTokenFloatLit(rv2)
 				}
-				e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(op4) ; e.w(" ") ; e.w(rt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(rv2) ; e.w("\n")
+				e.w("  ") ; e.w(reg2) ; e.w(" = ") ; e.w(op5) ; e.w(" ") ; e.w(rt) ; e.w(" ") ; e.w(lv2) ; e.w(", ") ; e.w(rv2) ; e.w("\n")
 				if !isCmp {
-					e.setRegType(b, reg, rt)
+					e.setRegType(b, reg2, rt)
 				}
 				return
 			}
@@ -63,15 +63,15 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 			lt = at
 		}
 	}
-	lv := e.operand(b.X)
+	lv2 := e.operand(b.X)
 	rv := e.operand(b.Y)
 	if (b.Op == ssa.OpAdd || b.Op == ssa.OpOr) && b.X.SSAType() != nil {
 		if sl, ok := types.SafeUnderlying(b.X.SSAType()).(*types.Slice); ok {
-			e.emitSliceConcat(reg, sl, lv, rv)
+			e.emitSliceConcat(reg, sl, lv2, rv)
 			return
 		}
 		if e.isStringLike(b.X.SSAType()) {
-			e.emitSliceConcat(reg, types.NewSlice(types.Typ[types.Uint8]), lv, rv)
+			e.emitSliceConcat(reg, types.NewSlice(types.Typ[types.Uint8]), lv2, rv)
 			return
 		}
 	}
@@ -96,7 +96,7 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 			}
 		}
 		if !isActuallyIface && rvOK {
-			e.emitStringCompare(reg, b.Op, lv, rv)
+			e.emitStringCompare(reg, b.Op, lv2, rv)
 			return
 		}
 	}
@@ -117,11 +117,11 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 			}
 		}
 		if rvOK2 {
-			e.emitStringCompare(reg, b.Op, lv, rv)
+			e.emitStringCompare(reg, b.Op, lv2, rv)
 			return
 		}
 	}
-	if (b.Op == ssa.OpEql || b.Op == ssa.OpNeq) && (rv == "null" || rv == "zeroinitializer" || lv == "null" || lv == "zeroinitializer") && b.X.SSAType() != nil {
+	if (b.Op == ssa.OpEql || b.Op == ssa.OpNeq) && (rv == "null" || rv == "zeroinitializer" || lv2 == "null" || lv2 == "zeroinitializer") && b.X.SSAType() != nil {
 		u := types.SafeUnderlying(b.X.SSAType())
 		_, isIface := u.(*types.TCInterface)
 		_, isSlice := u.(*types.Slice)
@@ -138,8 +138,8 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 		if isSig {
 			e.nextReg++
 			extReg := "%ne" | irItoa(e.nextReg)
-			aggVal := lv
-			if lv == "null" || lv == "zeroinitializer" {
+			aggVal := lv2
+			if lv2 == "null" || lv2 == "zeroinitializer" {
 				aggVal = rv
 			}
 			e.w("  ") ; e.w(extReg) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(aggVal) ; e.w(", 1\n")
@@ -153,8 +153,8 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 		if isIface || isSlice || e.isStringLike(b.X.SSAType()) {
 			e.nextReg++
 			extReg := "%ne" | irItoa(e.nextReg)
-			aggVal := lv
-			if lv == "null" || lv == "zeroinitializer" {
+			aggVal := lv2
+			if lv2 == "null" || lv2 == "zeroinitializer" {
 				aggVal = rv
 			}
 			e.w("  ") ; e.w(extReg) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(aggVal) ; e.w(", 0\n")
@@ -170,8 +170,8 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 			if b.Op == ssa.OpNeq {
 				cmpOp3 = "icmp ne"
 			}
-			ptrVal := lv
-			if lv == "null" || lv == "zeroinitializer" {
+			ptrVal := lv2
+			if lv2 == "null" || lv2 == "zeroinitializer" {
 				ptrVal = rv
 			}
 			e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp3) ; e.w(" ptr ") ; e.w(ptrVal) ; e.w(", null\n")
@@ -182,23 +182,23 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 		if b.X.SSAType() != nil {
 			if st, ok := types.SafeUnderlying(b.X.SSAType()).(*types.TCStruct); ok {
 				slt := e.llvmStructType(st)
-				e.emitStructCompare(reg, b.Op, st, slt, lv, rv)
+				e.emitStructCompare(reg, b.Op, st, slt, lv2, rv)
 				return
 			}
 		}
-		e.emitStructCompareByLLVM(reg, b.Op, lt, lv, rv)
+		e.emitStructCompareByLLVM(reg, b.Op, lt, lv2, rv)
 		return
 	}
 	if (b.Op == ssa.OpEql || b.Op == ssa.OpNeq) && b.X.SSAType() != nil {
 		if st, okta := types.SafeUnderlying(b.X.SSAType()).(*types.TCStruct); okta && (st != nil && len(lt) > 0 && lt[0] == '{') {
 			slt := e.llvmStructType(st)
 			if slt == lt || (lt != e.ifaceType() && lt != e.sliceType()) {
-				e.emitStructCompare(reg, b.Op, st, slt, lv, rv)
+				e.emitStructCompare(reg, b.Op, st, slt, lv2, rv)
 				return
 			}
 		}
 		if ar, ok := types.SafeUnderlying(b.X.SSAType()).(*types.Array); ok && len(lt) > 0 && lt[0] == '[' {
-			e.emitArrayCompare(reg, b.Op, ar, lt, lv, rv)
+			e.emitArrayCompare(reg, b.Op, ar, lt, lv2, rv)
 			return
 		}
 		u2 := types.SafeUnderlying(b.X.SSAType())
@@ -219,7 +219,7 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 			if lt == "{ptr, ptr}" && rt2 == "ptr" {
 				e.nextReg++
 				extReg := "%fc" | irItoa(e.nextReg)
-				e.w("  ") ; e.w(extReg) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(lv) ; e.w(", ") ; e.w(nilField) ; e.w("\n")
+				e.w("  ") ; e.w(extReg) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(lv2) ; e.w(", ") ; e.w(nilField) ; e.w("\n")
 				cmpOp5 := "icmp eq"
 				if b.Op == ssa.OpNeq { cmpOp5 = "icmp ne" }
 				e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp5) ; e.w(" ptr ") ; e.w(extReg) ; e.w(", ") ; e.w(rv) ; e.w("\n")
@@ -231,7 +231,7 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 				e.w("  ") ; e.w(extReg) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(rv) ; e.w(", ") ; e.w(nilField) ; e.w("\n")
 				cmpOp5 := "icmp eq"
 				if b.Op == ssa.OpNeq { cmpOp5 = "icmp ne" }
-				e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp5) ; e.w(" ptr ") ; e.w(lv) ; e.w(", ") ; e.w(extReg) ; e.w("\n")
+				e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp5) ; e.w(" ptr ") ; e.w(lv2) ; e.w(", ") ; e.w(extReg) ; e.w("\n")
 				return
 			}
 			if lt == "{ptr, ptr}" && rt2 != "{ptr, ptr}" && rt2 != "ptr" {
@@ -242,7 +242,7 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 				e.w("  store ") ; e.w(rt2) ; e.w(" ") ; e.w(rv) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
 				e.nextReg++
 				dp := "%fc" | irItoa(e.nextReg)
-				e.w("  ") ; e.w(dp) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(lv) ; e.w(", 1\n")
+				e.w("  ") ; e.w(dp) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(lv2) ; e.w(", 1\n")
 				if rt2 == sty {
 					e.nextReg++
 					ldp := "%fc" | irItoa(e.nextReg)
@@ -291,9 +291,9 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 			cA := "%fc" | irItoa(e.nextReg)
 			e.nextReg++
 			cB := "%fc" | irItoa(e.nextReg)
-			e.w("  ") ; e.w(pA) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(lv) ; e.w(", 0\n")
+			e.w("  ") ; e.w(pA) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(lv2) ; e.w(", 0\n")
 			e.w("  ") ; e.w(pB) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(rv) ; e.w(", 0\n")
-			e.w("  ") ; e.w(qA) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(lv) ; e.w(", 1\n")
+			e.w("  ") ; e.w(qA) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(lv2) ; e.w(", 1\n")
 			e.w("  ") ; e.w(qB) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(rv) ; e.w(", 1\n")
 			cmpOp3 := "icmp eq"
 			combOp := "and"
@@ -318,13 +318,13 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 			e.w("  ") ; e.w(extReg) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(rv) ; e.w(", 1\n")
 			cmpOp3 := "icmp eq"
 			if b.Op == ssa.OpNeq { cmpOp3 = "icmp ne" }
-			e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp3) ; e.w(" ptr ") ; e.w(lv) ; e.w(", ") ; e.w(extReg) ; e.w("\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp3) ; e.w(" ptr ") ; e.w(lv2) ; e.w(", ") ; e.w(extReg) ; e.w("\n")
 			return
 		}
 		if lt == "{ptr, ptr}" && rvt == "ptr" {
 			e.nextReg++
 			extReg := "%pi" | irItoa(e.nextReg)
-			e.w("  ") ; e.w(extReg) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(lv) ; e.w(", 1\n")
+			e.w("  ") ; e.w(extReg) ; e.w(" = extractvalue {ptr, ptr} ") ; e.w(lv2) ; e.w(", 1\n")
 			cmpOp3 := "icmp eq"
 			if b.Op == ssa.OpNeq { cmpOp3 = "icmp ne" }
 			e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp3) ; e.w(" ptr ") ; e.w(extReg) ; e.w(", ") ; e.w(rv) ; e.w("\n")
@@ -345,7 +345,7 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 		notReg := "%an" | irItoa(e.nextReg)
 		allOnes := "-1"
 		e.w("  ") ; e.w(notReg) ; e.w(" = xor ") ; e.w(lt) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(allOnes) ; e.w("\n")
-		e.w("  ") ; e.w(reg) ; e.w(" = and ") ; e.w(lt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(notReg) ; e.w("\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = and ") ; e.w(lt) ; e.w(" ") ; e.w(lv2) ; e.w(", ") ; e.w(notReg) ; e.w("\n")
 		e.setRegType(b, reg, lt)
 		return
 	}
@@ -368,7 +368,7 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 		resType := e.llvmType(b.SSAType())
 		if !isCmp && e.intBits(resType) > 0 {
 			if lt != resType {
-				lv = e.coerceInt(lv, lt, resType)
+				lv2 = e.coerceInt(lv2, lt, resType)
 				lt = resType
 			}
 			if rt != resType {
@@ -377,7 +377,7 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 		} else if e.intBits(lt) > e.intBits(rt) {
 			rv = e.coerceInt(rv, rt, lt)
 		} else {
-			lv = e.coerceInt(lv, lt, rt)
+			lv2 = e.coerceInt(lv2, lt, rt)
 			lt = rt
 		}
 		coerced = true
@@ -398,7 +398,7 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 				rv = e.coerceInt(rv, rt, lt)
 				rt = lt
 			} else if e.intBits(rt) > e.intBits(lt) {
-				lv = e.coerceInt(lv, lt, rt)
+				lv2 = e.coerceInt(lv2, lt, rt)
 				lt = rt
 			}
 		}
@@ -416,10 +416,10 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 			rt = "double"
 		}
 	}
-	if !isLF && isConstOperand(lv) && looksLikeFloat(lv) {
+	if !isLF && isConstOperand(lv2) && looksLikeFloat(lv2) {
 		if resultIsInt {
-			if iv, ok := floatLitToInt(lv); ok {
-				lv = irItoa64(iv)
+			if iv, ok := floatLitToInt(lv2); ok {
+				lv2 = irItoa64(iv)
 			}
 		} else {
 			isLF = true
@@ -432,10 +432,10 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 		if b.Y != nil && b.Y.SSAType() != nil {
 			ssaRT = e.llvmType(b.Y.SSAType())
 		}
-		if !isConstOperand(lv) && e.intBits(ssaLT) > 0 {
-			_, hasRT := e.regTypes[lv]
+		if !isConstOperand(lv2) && e.intBits(ssaLT) > 0 {
+			_, hasRT := e.regTypes[lv2]
 			if !hasRT {
-				lv = e.intToFloat(lv, ssaLT, lt)
+				lv2 = e.intToFloat(lv2, ssaLT, lt)
 			}
 		}
 		if !isConstOperand(rv) && e.intBits(ssaRT) > 0 {
@@ -462,18 +462,18 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 				}
 			}
 			if !demoted {
-				if isConstOperand(lv) {
-					lv = ensureTokenFloatLit(lv)
+				if isConstOperand(lv2) {
+					lv2 = ensureTokenFloatLit(lv2)
 				} else {
-					lv = e.intToFloat(lv, lt, rt)
+					lv2 = e.intToFloat(lv2, lt, rt)
 				}
 				lt = rt
 			}
 		} else {
-			if isConstOperand(lv) {
-				lv = ensureTokenFloatLit(lv)
+			if isConstOperand(lv2) {
+				lv2 = ensureTokenFloatLit(lv2)
 			} else {
-				lv = e.intToFloat(lv, lt, rt)
+				lv2 = e.intToFloat(lv2, lt, rt)
 			}
 			lt = rt
 		}
@@ -486,7 +486,7 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 						lit = cf.String()
 					}
 					if iv, ok3 := floatLitToInt(lit); ok3 {
-						lv = irItoa64(iv)
+						lv2 = irItoa64(iv)
 						lt = rt
 						isLF = false
 					}
@@ -512,8 +512,8 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 	if lt == "float" && rt == "double" {
 		e.nextReg++
 		tmp := "%fext" | irItoa(e.nextReg)
-		e.w("  ") ; e.w(tmp) ; e.w(" = fpext float ") ; e.w(lv) ; e.w(" to double\n")
-		lv = tmp
+		e.w("  ") ; e.w(tmp) ; e.w(" = fpext float ") ; e.w(lv2) ; e.w(" to double\n")
+		lv2 = tmp
 		lt = "double"
 	} else if lt == "double" && rt == "float" {
 		e.nextReg++
@@ -522,16 +522,16 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 		rv = tmp
 		rt = "double"
 	}
-	op4 := e.llvmBinOp(b.Op, b.X.SSAType())
-	if op4 == "" {
+	op5 := e.llvmBinOp(b.Op, b.X.SSAType())
+	if op5 == "" {
 		e.w("  ; unsupported binop\n")
 		return
 	}
 	isCmpOp := b.Op == ssa.OpEql || b.Op == ssa.OpNeq || b.Op == ssa.OpLss || b.Op == ssa.OpGtr || b.Op == ssa.OpLeq || b.Op == ssa.OpGeq
 	if lt == "double" || lt == "float" {
 		rv = ensureTokenFloatLit(rv)
-		lv = ensureTokenFloatLit(lv)
-		op4 = e.floatBinOp(b.Op)
+		lv2 = ensureTokenFloatLit(lv2)
+		op5 = e.floatBinOp(b.Op)
 		if !isCmpOp {
 			e.setRegType(b, reg, lt)
 		}
@@ -542,13 +542,13 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 		}
 	}
 	if len(lt) > 0 && lt[0] == '[' && (b.Op == ssa.OpEql || b.Op == ssa.OpNeq) {
-		e.emitArrayCompareByLLVM(reg, b.Op, lt, lv, rv)
+		e.emitArrayCompareByLLVM(reg, b.Op, lt, lv2, rv)
 		return
 	}
 	if lt == "ptr" && !isCmpOp {
 		e.nextReg++
 		pi := "%pi" | irItoa(e.nextReg)
-		e.w("  ") ; e.w(pi) ; e.w(" = ptrtoint ptr ") ; e.w(lv) ; e.w(" to ") ; e.w(e.intptrType()) ; e.w("\n")
+		e.w("  ") ; e.w(pi) ; e.w(" = ptrtoint ptr ") ; e.w(lv2) ; e.w(" to ") ; e.w(e.intptrType()) ; e.w("\n")
 		e.nextReg++
 		ri := "%pi" | irItoa(e.nextReg)
 		rvCoerced := rv
@@ -558,7 +558,7 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 		}
 		e.nextReg++
 		ai := "%pi" | irItoa(e.nextReg)
-		e.w("  ") ; e.w(ai) ; e.w(" = ") ; e.w(op4) ; e.w(" ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(pi) ; e.w(", ") ; e.w(rvCoerced) ; e.w("\n")
+		e.w("  ") ; e.w(ai) ; e.w(" = ") ; e.w(op5) ; e.w(" ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(pi) ; e.w(", ") ; e.w(rvCoerced) ; e.w("\n")
 		e.w("  ") ; e.w(reg) ; e.w(" = inttoptr ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(ai) ; e.w(" to ptr\n")
 		return
 	}
@@ -592,22 +592,22 @@ func (e *irEmitter) emitBinOp(b *ssa.SSABinOp) {
 			}
 		}
 		if !rvIsInt && !lvIsInt {
-			e.emitStringCompare(reg, b.Op, lv, rv)
+			e.emitStringCompare(reg, b.Op, lv2, rv)
 			return
 		}
 	}
 	if isCmpOp && len(lt) > 0 && lt[0] == '{' {
-		e.emitStructCompareByLLVM(reg, b.Op, lt, lv, rv)
+		e.emitStructCompareByLLVM(reg, b.Op, lt, lv2, rv)
 		return
 	}
 	e.w("  ")
 	e.w(reg)
 	e.w(" = ")
-	e.w(op4)
+	e.w(op5)
 	e.w(" ")
 	e.w(lt)
 	e.w(" ")
-	e.w(lv)
+	e.w(lv2)
 	e.w(", ")
 	e.w(rv)
 	e.w("\n")
@@ -745,16 +745,16 @@ func ensureTokenFloatLit(s string) string {
 	return s
 }
 
-func (e *irEmitter) emitSliceConcat(reg string, sl *types.Slice, lv, rv string) {
+func (e *irEmitter) emitSliceConcat(reg string, sl *types.Slice, lv2, rv string) {
 	ipt := e.intptrType()
 	sty := "{ptr, " | ipt | ", " | ipt | "}"
-	if isBareLiteral(lv) { lv = "zeroinitializer" }
+	if isBareLiteral(lv2) { lv2 = "zeroinitializer" }
 	if isBareLiteral(rv) { rv = "zeroinitializer" }
 	elemType := e.llvmType(sl.Elem)
 	xPtr := e.nextReg2("cc")
-	e.w("  ") ; e.w(xPtr) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", 0\n")
+	e.w("  ") ; e.w(xPtr) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(lv2) ; e.w(", 0\n")
 	xLen := e.nextReg2("cc")
-	e.w("  ") ; e.w(xLen) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", 1\n")
+	e.w("  ") ; e.w(xLen) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(lv2) ; e.w(", 1\n")
 	yPtr := e.nextReg2("cc")
 	e.w("  ") ; e.w(yPtr) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(", 0\n")
 	yLen := e.nextReg2("cc")
@@ -793,42 +793,42 @@ func isBareLiteral(s string) bool {
 	return s[0] >= '0' && s[0] <= '9'
 }
 
-func (e *irEmitter) emitStringCompare(reg string, op4 ssa.SSAOp, lv, rv string) {
+func (e *irEmitter) emitStringCompare(reg string, op5 ssa.SSAOp, lv2, rv string) {
 	ipt := e.intptrType()
 	sty := "{ptr, " | ipt | ", " | ipt | "}"
-	if lv == "null" { lv = "zeroinitializer" }
+	if lv2 == "null" { lv2 = "zeroinitializer" }
 	if rv == "null" { rv = "zeroinitializer" }
-	if isBareLiteral(lv) { lv = "zeroinitializer" }
+	if isBareLiteral(lv2) { lv2 = "zeroinitializer" }
 	if isBareLiteral(rv) { rv = "zeroinitializer" }
-	switch op4 {
+	switch op5 {
 	case ssa.OpEql:
 		e.w("  ") ; e.w(reg) ; e.w(" = call i1 @runtime.stringEqual(")
-		e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(")\n")
+		e.w(sty) ; e.w(" ") ; e.w(lv2) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(")\n")
 		e.declareRuntime("runtime.stringEqual", "i1", sty | ", " | sty)
 	case ssa.OpNeq:
 		tmp := e.nextReg2("sc")
 		e.w("  ") ; e.w(tmp) ; e.w(" = call i1 @runtime.stringEqual(")
-		e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(")\n")
+		e.w(sty) ; e.w(" ") ; e.w(lv2) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(")\n")
 		e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(tmp) ; e.w(", -1\n")
 		e.declareRuntime("runtime.stringEqual", "i1", sty | ", " | sty)
 	case ssa.OpLss:
 		e.w("  ") ; e.w(reg) ; e.w(" = call i1 @runtime.stringLess(")
-		e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(")\n")
+		e.w(sty) ; e.w(" ") ; e.w(lv2) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(")\n")
 		e.declareRuntime("runtime.stringLess", "i1", sty | ", " | sty)
 	case ssa.OpGtr:
 		e.w("  ") ; e.w(reg) ; e.w(" = call i1 @runtime.stringLess(")
-		e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(")\n")
+		e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(lv2) ; e.w(")\n")
 		e.declareRuntime("runtime.stringLess", "i1", sty | ", " | sty)
 	case ssa.OpLeq:
 		tmp := e.nextReg2("sc")
 		e.w("  ") ; e.w(tmp) ; e.w(" = call i1 @runtime.stringLess(")
-		e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(")\n")
+		e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(lv2) ; e.w(")\n")
 		e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(tmp) ; e.w(", -1\n")
 		e.declareRuntime("runtime.stringLess", "i1", sty | ", " | sty)
 	case ssa.OpGeq:
 		tmp := e.nextReg2("sc")
 		e.w("  ") ; e.w(tmp) ; e.w(" = call i1 @runtime.stringLess(")
-		e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(")\n")
+		e.w(sty) ; e.w(" ") ; e.w(lv2) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(")\n")
 		e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(tmp) ; e.w(", -1\n")
 		e.declareRuntime("runtime.stringLess", "i1", sty | ", " | sty)
 	default:
@@ -836,14 +836,14 @@ func (e *irEmitter) emitStringCompare(reg string, op4 ssa.SSAOp, lv, rv string) 
 	}
 }
 
-func (e *irEmitter) emitStructCompare(reg string, op4 ssa.SSAOp, st *types.TCStruct, lt, lv, rv string) {
+func (e *irEmitter) emitStructCompare(reg string, op5 ssa.SSAOp, st *types.TCStruct, lt, lv2, rv string) {
 	if st == nil {
 		e.w("  ") ; e.w(reg) ; e.w(" = icmp eq i32 0, 0\n")
 		return
 	}
 	n := st.NumFields()
 	if n == 0 {
-		if op4 == ssa.OpEql {
+		if op5 == ssa.OpEql {
 			e.valName[nil] = "true"
 			e.w("  ") ; e.w(reg) ; e.w(" = icmp eq i32 0, 0\n")
 		} else {
@@ -856,7 +856,7 @@ func (e *irEmitter) emitStructCompare(reg string, op4 ssa.SSAOp, st *types.TCStr
 		ft := e.llvmType(st.Field(i).Typ)
 		lf := e.nextReg2("sf")
 		rf := e.nextReg2("sf")
-		e.w("  ") ; e.w(lf) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
+		e.w("  ") ; e.w(lf) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(lv2) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
 		e.w("  ") ; e.w(rf) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
 		cmp := e.nextReg2("sf")
 		if e.isStringLike(st.Field(i).Typ) {
@@ -887,7 +887,7 @@ func (e *irEmitter) emitStructCompare(reg string, op4 ssa.SSAOp, st *types.TCStr
 			lastCmp = acc
 		}
 	}
-	if op4 == ssa.OpNeq {
+	if op5 == ssa.OpNeq {
 		e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(lastCmp) ; e.w(", -1\n")
 	} else if n == 1 {
 		e.w("  ") ; e.w(reg) ; e.w(" = and i1 ") ; e.w(lastCmp) ; e.w(", true\n")
@@ -896,10 +896,10 @@ func (e *irEmitter) emitStructCompare(reg string, op4 ssa.SSAOp, st *types.TCStr
 	}
 }
 
-func (e *irEmitter) emitArrayCompare(reg string, op4 ssa.SSAOp, ar *types.Array, lt, lv, rv string) {
+func (e *irEmitter) emitArrayCompare(reg string, op5 ssa.SSAOp, ar *types.Array, lt, lv2, rv string) {
 	n := int32(ar.Len)
 	if n == 0 {
-		if op4 == ssa.OpEql {
+		if op5 == ssa.OpEql {
 			e.w("  ") ; e.w(reg) ; e.w(" = icmp eq i32 0, 0\n")
 		} else {
 			e.w("  ") ; e.w(reg) ; e.w(" = icmp ne i32 0, 0\n")
@@ -907,7 +907,7 @@ func (e *irEmitter) emitArrayCompare(reg string, op4 ssa.SSAOp, ar *types.Array,
 		return
 	}
 	et := e.llvmType(ar.Elem)
-	isZeroL := lv == "0" || lv == "zeroinitializer"
+	isZeroL := lv2 == "0" || lv2 == "zeroinitializer"
 	isZeroR := rv == "0" || rv == "zeroinitializer"
 	var lastCmp string
 	for i := 0; i < n; i++ {
@@ -916,7 +916,7 @@ func (e *irEmitter) emitArrayCompare(reg string, op4 ssa.SSAOp, ar *types.Array,
 			lfr = "0"
 		} else {
 			lfr = e.nextReg2("ae")
-			e.w("  ") ; e.w(lfr) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
+			e.w("  ") ; e.w(lfr) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(lv2) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
 		}
 		if isZeroR {
 			rfr = "0"
@@ -938,7 +938,7 @@ func (e *irEmitter) emitArrayCompare(reg string, op4 ssa.SSAOp, ar *types.Array,
 			lastCmp = acc
 		}
 	}
-	if op4 == ssa.OpNeq {
+	if op5 == ssa.OpNeq {
 		e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(lastCmp) ; e.w(", -1\n")
 	} else {
 		e.w("  ") ; e.w(reg) ; e.w(" = and i1 ") ; e.w(lastCmp) ; e.w(", true\n")
@@ -964,13 +964,13 @@ func parseArrayType(lt string) (int32, string) {
 	return n, et
 }
 
-func (e *irEmitter) emitArrayCompareByLLVM(reg string, op4 ssa.SSAOp, lt, lv, rv string) {
+func (e *irEmitter) emitArrayCompareByLLVM(reg string, op5 ssa.SSAOp, lt, lv2, rv string) {
 	n, et := parseArrayType(lt)
 	if n == 0 {
 		e.w("  ") ; e.w(reg) ; e.w(" = icmp eq i32 0, 0\n")
 		return
 	}
-	isZeroL := lv == "0" || lv == "zeroinitializer"
+	isZeroL := lv2 == "0" || lv2 == "zeroinitializer"
 	isZeroR := rv == "0" || rv == "zeroinitializer"
 	var lastCmp string
 	for i := 0; i < n; i++ {
@@ -979,7 +979,7 @@ func (e *irEmitter) emitArrayCompareByLLVM(reg string, op4 ssa.SSAOp, lt, lv, rv
 			lfr = "0"
 		} else {
 			lfr = e.nextReg2("ae")
-			e.w("  ") ; e.w(lfr) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
+			e.w("  ") ; e.w(lfr) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(lv2) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
 		}
 		if isZeroR {
 			rfr = "0"
@@ -1001,14 +1001,14 @@ func (e *irEmitter) emitArrayCompareByLLVM(reg string, op4 ssa.SSAOp, lt, lv, rv
 			lastCmp = acc
 		}
 	}
-	if op4 == ssa.OpNeq {
+	if op5 == ssa.OpNeq {
 		e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(lastCmp) ; e.w(", -1\n")
 	} else {
 		e.w("  ") ; e.w(reg) ; e.w(" = and i1 ") ; e.w(lastCmp) ; e.w(", true\n")
 	}
 }
 
-func (e *irEmitter) emitStructCompareByLLVM(reg string, op4 ssa.SSAOp, lt, lv, rv string) {
+func (e *irEmitter) emitStructCompareByLLVM(reg string, op5 ssa.SSAOp, lt, lv2, rv string) {
 	fields := parseStructFields(lt)
 	if len(fields) == 0 {
 		e.w("  ") ; e.w(reg) ; e.w(" = icmp eq i32 0, 0\n")
@@ -1018,7 +1018,7 @@ func (e *irEmitter) emitStructCompareByLLVM(reg string, op4 ssa.SSAOp, lt, lv, r
 	for i, ft := range fields {
 		lf := e.nextReg2("sf")
 		rf := e.nextReg2("sf")
-		e.w("  ") ; e.w(lf) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
+		e.w("  ") ; e.w(lf) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(lv2) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
 		e.w("  ") ; e.w(rf) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
 		cmp := e.nextReg2("sf")
 		if len(ft) > 0 && ft[0] == '{' {
@@ -1040,14 +1040,14 @@ func (e *irEmitter) emitStructCompareByLLVM(reg string, op4 ssa.SSAOp, lt, lv, r
 			lastCmp = acc
 		}
 	}
-	if op4 == ssa.OpNeq {
+	if op5 == ssa.OpNeq {
 		e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(lastCmp) ; e.w(", -1\n")
 	} else {
 		e.w("  ") ; e.w(reg) ; e.w(" = and i1 ") ; e.w(lastCmp) ; e.w(", true\n")
 	}
 }
 
-func (e *irEmitter) llvmBinOp(op4 ssa.SSAOp, typ typeapi.Type) string {
+func (e *irEmitter) llvmBinOp(op5 ssa.SSAOp, typ typeapi.Type) string {
 	isFloat := false
 	isSigned := true
 	if typ != nil {
@@ -1061,7 +1061,7 @@ func (e *irEmitter) llvmBinOp(op4 ssa.SSAOp, typ typeapi.Type) string {
 		}
 	}
 	if isFloat {
-		switch op4 {
+		switch op5 {
 		case ssa.OpAdd:
 			return "fadd"
 		case ssa.OpSub:
@@ -1085,7 +1085,7 @@ func (e *irEmitter) llvmBinOp(op4 ssa.SSAOp, typ typeapi.Type) string {
 		}
 		return ""
 	}
-	switch op4 {
+	switch op5 {
 	case ssa.OpAdd:
 		return "add"
 	case ssa.OpSub:
@@ -1344,7 +1344,7 @@ func (e *irEmitter) emitUnOp(u *ssa.SSAUnOp) {
 		e.emitChanRecv(u)
 		return
 	}
-	e.w("  ; unsupported unop op4=")
+	e.w("  ; unsupported unop op5=")
 	e.w(u.Op.String())
 	e.w("\n")
 }
