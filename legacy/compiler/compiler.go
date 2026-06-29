@@ -1455,14 +1455,13 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 
 	// Arena prologue: emit FnArenaPush + ArenaMark for functions that return
 	// pointer-containing types. Matches stage4 ir_deepcopy emitArenaPrologue.
-	// Arena prologue DISABLED - works in generated binaries but the
-	// interp.Run step in the build pipeline executes init() functions and
-	// the interpreter does not model the arena runtime. Functions that
-	// return pointer-containing types need FnArenaPush/FnArenaPop/Reloc*
-	// lifecycle which the interpreter can't execute.
-	// Enable when interp correctly models FnArenaPush.
-	_ = b.fnArenaVal
-	_ = b.arenaMarkVal
+	if b.runtimePkg != nil && funcNeedsArenaCopy(b.fn) {
+		b.fnArenaVal = b.createRuntimeCall("FnArenaPush", []llvm.Value{
+			llvm.ConstInt(b.uintptrType, 65536, false),
+		}, "fn_arena")
+		b.arenaMarkVal = b.createRuntimeCall("ArenaMark", nil, "fn_mark")
+		b.arenaActive = true
+	}
 }
 
 // createFunction builds the LLVM IR implementation for this function. The
