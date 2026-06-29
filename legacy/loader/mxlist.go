@@ -362,6 +362,23 @@ func (r *resolver) resolveDir(importPath string, srcDir string) (string, error) 
 		return filepath.Join(srcDir, importPath), nil
 	}
 
+	// 1b. Absolute paths and bare directory names (e.g. _mxc_stage4/).
+	if filepath.IsAbs(importPath) {
+		if isDir(importPath) {
+			return importPath, nil
+		}
+		return "", fmt.Errorf("package directory %q not found", importPath)
+	}
+	// Bare directory in working directory (e.g. "_mxc_stage4/").
+	candidate := filepath.Join(srcDir, importPath)
+	if isDir(candidate) {
+		return candidate, nil
+	}
+	candidate = filepath.Join(srcDir, importPath+"/")
+	if isDir(candidate) {
+		return candidate, nil
+	}
+
 	// 2. Standard library (in synthetic GOROOT).
 	stdDir := filepath.Join(r.goroot, "src", importPath)
 	if isDir(stdDir) {

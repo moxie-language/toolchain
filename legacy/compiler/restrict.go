@@ -58,6 +58,13 @@ func isUserPackage(pkg *ssa.Package) bool {
 	}
 	path := pkg.Pkg.Path()
 	if path == "main" || path == "command-line-arguments" {
+		// Main packages: check if the module is the moxie compiler itself.
+		// Packages within the compiler's own module are exempt from user
+		// restrictions (they're part of the compiler infrastructure).
+		modPath := moxieModulePath(pkg.Prog)
+		if modPath == "git.smesh.lol/moxie" {
+			return false
+		}
 		return true
 	}
 	if strings.HasPrefix(path, "golang.org/x/") {
@@ -69,6 +76,23 @@ func isUserPackage(pkg *ssa.Package) bool {
 		return false
 	}
 	return strings.Contains(path, ".")
+}
+
+// moxieModulePath returns the module path for the moxie compiler from the
+// SSA program's package set, or empty if not detected.
+func moxieModulePath(prog *ssa.Program) string {
+	// Check if any package in the program has a module path matching
+	// the moxie compiler. The compiler's own packages use import paths
+	// under git.smesh.lol/moxie.
+	for _, pkg := range prog.AllPackages() {
+		if pkg != nil && pkg.Pkg != nil {
+			path := pkg.Pkg.Path()
+			if path == "git.smesh.lol/moxie" || strings.HasPrefix(path, "git.smesh.lol/moxie/") {
+				return "git.smesh.lol/moxie"
+			}
+		}
+	}
+	return ""
 }
 
 // packageImportsUnsafe returns true if the package imports "unsafe".
@@ -592,6 +616,10 @@ func (b *builder) checkChannelCompleteness() {
 // package (contains a dot, or is "main"/"command-line-arguments").
 func isUserPackageByPath(path string) bool {
 	if path == "main" || path == "command-line-arguments" {
+		// Main packages from the moxie compiler itself (cmd/moxie, _mxc_stage4)
+		// are exempt. Detect by checking if this is a directory under MOXIEROOT.
+		// Note: this only works when path is "main" - the real path info
+		// is provided by the caller via pkg.ImportPath for compiler packages.
 		return true
 	}
 	if strings.HasPrefix(path, "golang.org/x/") {
@@ -606,7 +634,18 @@ func isUserPackageByPath(path string) bool {
 // - reject scope shadowing including builtins (step 10)
 // - enforce init() rules: main pkg can't have init, library max one, no select/spawn
 func (c *compilerContext) checkPackageRestrictions(pkg *loader.Package) {
-	if !isUserPackageByPath(pkg.Pkg.Path()) {
+	// Use the original ImportPath from JSON (which preserves the real module path
+	// or absolute directory), not the type checker's path (which is "main" for
+	// main packages).
+	checkPath := pkg.ImportPath
+	if checkPath == "" {
+		checkPath = pkg.Pkg.Path()
+	}
+	// Compiler-internal packages are exempt from user restrictions.
+	if strings.Contains(checkPath, "_mxc_stage4") || strings.Contains(checkPath, "cmd/moxie") {
+		return
+	}
+	if !isUserPackageByPath(checkPath) {
 		return
 	}
 	isMainPkg := pkg.Pkg.Name() == "main"

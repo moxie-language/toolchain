@@ -4,6 +4,7 @@ import (
 	"debug/dwarf"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"go/ast"
 	"go/constant"
@@ -209,9 +210,16 @@ type builder struct {
 	pipeChannels map[ssa.Value]bool
 
 	// Arena prologue/epilogue state.
-	arenaMarkVal  llvm.Value // legacy: saved arena offset (unused in per-fn model)
-	outerArenaVal llvm.Value // caller's arena (restored before return)
 	fnArenaVal    llvm.Value // per-function arena (freed on return)
+	arenaMarkVal  llvm.Value // opaque mark from ArenaMark at function entry
+	outerArenaVal llvm.Value // saved for fixup pass
+
+	// Relocation state tracking (per-function, matches stage4 ir_deepcopy).
+	arenaActive   bool                   // true after emitArenaPrologue
+	relocMarkVisited    map[string]bool  // type name -> visited during mark
+	relocFixupVisited   map[string]bool  // type name -> visited during fixup
+	relocStateVal llvm.Value             // alloca'd RelocState struct
+	relocFixupFns       map[string]string // struct type key -> fixup function symbol
 }
 
 func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *builder {
@@ -225,6 +233,9 @@ func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *bu
 		info:            c.getFunctionInfo(f),
 		locals:          make(map[ssa.Value]llvm.Value),
 		dilocals:        make(map[*types.Var]llvm.Metadata),
+		relocMarkVisited:  make(map[string]bool),
+		relocFixupVisited: make(map[string]bool),
+		relocFixupFns:     make(map[string]string),
 	}
 }
 
@@ -1442,13 +1453,16 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		b.deferInitFunc()
 	}
 
-	// Per-function arena DISABLED for bootstrap.
-	// The type universe is a graph, not a tree. Deep-copy-on-return cannot
-	// preserve shared references (TypeName <-> Named, Scope.elems -> Object).
-	// Per-function arena + incomplete deep copy causes SIGSEGV in hashmapGet
-	// when Scope.Insert's arena frees string key data still referenced by
-	// the map. All allocations go to the global arena (freed at process exit).
-	// Stage4 will implement per-phase arenas with correct lifecycle.
+	// Arena prologue: emit FnArenaPush + ArenaMark for functions that return
+	// pointer-containing types. Matches stage4 ir_deepcopy emitArenaPrologue.
+	// Arena prologue DISABLED - works in generated binaries but the
+	// interp.Run step in the build pipeline executes init() functions and
+	// the interpreter does not model the arena runtime. Functions that
+	// return pointer-containing types need FnArenaPush/FnArenaPop/Reloc*
+	// lifecycle which the interpreter can't execute.
+	// Enable when interp correctly models FnArenaPush.
+	_ = b.fnArenaVal
+	_ = b.arenaMarkVal
 }
 
 // createFunction builds the LLVM IR implementation for this function. The
@@ -1650,42 +1664,11 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		if b.hasDeferFrame() {
 			b.createRuntimeCall("destroyDeferFrame", []llvm.Value{b.deferFrame}, "")
 		}
-		isRuntime := b.fn.Pkg != nil && b.fn.Pkg.Pkg.Path() == "runtime"
-		hasArena := !isRuntime && !b.fnArenaVal.IsNil()
-		if len(instr.Results) == 0 {
-			if hasArena {
-				b.createRuntimeCall("SetCurrentArena", []llvm.Value{b.outerArenaVal}, "")
-				b.createRuntimeCall("ArenaFree", []llvm.Value{b.fnArenaVal}, "")
-			}
-			b.CreateRetVoid()
-		} else if len(instr.Results) == 1 {
-			val := b.getValue(instr.Results[0], getPos(instr))
-			if hasArena {
-				// Switch to caller's arena. Source data in fn_arena stays intact.
-				b.createRuntimeCall("SetCurrentArena", []llvm.Value{b.outerArenaVal}, "")
-				val = b.emitReturnCopy(val, instr.Results[0])
-				b.createRuntimeCall("ArenaFree", []llvm.Value{b.fnArenaVal}, "")
-			}
-			b.CreateRet(val)
-		} else {
-			retVal := llvm.ConstNull(b.llvmFn.GlobalValueType().ReturnType())
-			for i, result := range instr.Results {
-				val := b.getValue(result, getPos(instr))
-				retVal = b.CreateInsertValue(retVal, val, i, "")
-			}
-			if hasArena {
-				b.createRuntimeCall("SetCurrentArena", []llvm.Value{b.outerArenaVal}, "")
-				for i, result := range instr.Results {
-					if typeContainsPointers(result.Type()) && b.valueIsLocal(result) {
-						field := b.CreateExtractValue(retVal, i, "ret.f")
-						copied := b.emitReturnCopyValue(field, result.Type())
-						retVal = b.CreateInsertValue(retVal, copied, i, "ret.f")
-					}
-				}
-				b.createRuntimeCall("ArenaFree", []llvm.Value{b.fnArenaVal}, "")
-			}
-			b.CreateRet(retVal)
-		}
+	if !b.arenaActive {
+		b.emitPlainReturn(instr)
+		break
+	}
+	b.emitArenaEpilogue(instr)
 	case *ssa.RunDefers:
 		// Note where we're going to put the rundefers block
 		run := b.insertBasicBlock("rundefers.block")
@@ -3772,6 +3755,69 @@ func (b *builder) createUnOp(unop *ssa.UnOp) (llvm.Value, error) {
 	}
 }
 
+// typeNeedsCopy reports whether a value of type t may contain pointers to
+// arena-allocated data that would need relocation across an arena boundary.
+// Matches stage4 ir_deepcopy.mx typeNeedsCopy exactly.
+func typeNeedsCopy(t types.Type) bool {
+	return typeNeedsCopyDepth(t, 0)
+}
+
+func typeNeedsCopyDepth(t types.Type, depth int) bool {
+	if t == nil || depth > 20 {
+		return false
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Pointer:
+		return true
+	case *types.Slice:
+		return true
+	case *types.Basic:
+		return u.Info()&types.IsString != 0
+	case *types.Map:
+		return true
+	case *types.Chan:
+		return true
+	case *types.Signature:
+		return true
+	case *types.Interface:
+		return true
+	case *types.Struct:
+		for i := 0; i < u.NumFields(); i++ {
+			if typeNeedsCopyDepth(u.Field(i).Type(), depth+1) {
+				return true
+			}
+		}
+	case *types.Array:
+		return typeNeedsCopyDepth(u.Elem(), depth+1)
+	}
+	return false
+}
+
+// funcNeedsArenaCopy returns true if the function returns pointer-containing
+// types and should get per-function arena FnArenaPush/FnArenaPop lifecycle.
+// Matches stage4 ir_deepcopy.mx funcNeedsArenaCopy.
+func funcNeedsArenaCopy(fn *ssa.Function) bool {
+	if fn == nil || fn.Blocks == nil {
+		return false
+	}
+	if fn.Pkg != nil && fn.Pkg.Pkg != nil {
+		path := fn.Pkg.Pkg.Path()
+		if path == "runtime" || path == "unsafe" {
+			return false
+		}
+	}
+	sig := fn.Signature
+	if sig == nil || sig.Results() == nil || sig.Results().Len() == 0 {
+		return false
+	}
+	for i := 0; i < sig.Results().Len(); i++ {
+		if typeNeedsCopy(sig.Results().At(i).Type()) {
+			return true
+		}
+	}
+	return false
+}
+
 // typeContainsPointers returns true if the Go type contains any pointers,
 // slices, maps, channels, interfaces, strings, or function values that
 // would need deep copying when crossing an arena boundary.
@@ -4087,4 +4133,453 @@ func (b *builder) emitDeepCopy(val llvm.Value, goType types.Type) llvm.Value {
 		return result
 	}
 	return val
+}
+
+// --- Arena epilogue (stage4 Reloc* lifecycle) ---
+
+// emitPlainReturn emits a simple ret void/val without arena cleanup.
+func (b *builder) emitPlainReturn(instr *ssa.Return) {
+	if len(instr.Results) == 0 {
+		b.CreateRetVoid()
+		return
+	}
+	llvmType := b.llvmFn.GlobalValueType().ReturnType()
+	if len(instr.Results) == 1 {
+		val := b.getValue(instr.Results[0], getPos(instr))
+		b.CreateRet(val)
+		return
+	}
+	retVal := llvm.ConstNull(llvmType)
+	for i, result := range instr.Results {
+		val := b.getValue(result, getPos(instr))
+		retVal = b.CreateInsertValue(retVal, val, i, "")
+	}
+	b.CreateRet(retVal)
+}
+
+// emitArenaEpilogue emits the arena epilogue matching stage4
+// ir_deepcopy.mx emitRetWithArenaCopy.
+func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
+	llvmType := b.llvmFn.GlobalValueType().ReturnType()
+
+	var retVal llvm.Value
+	if len(instr.Results) == 1 {
+		retVal = b.getValue(instr.Results[0], getPos(instr))
+	} else if len(instr.Results) > 1 {
+		retVal = llvm.ConstNull(llvmType)
+		for i, result := range instr.Results {
+			retVal = b.CreateInsertValue(retVal, b.getValue(result, getPos(instr)), i, "")
+		}
+	}
+
+	sig := b.fn.Signature
+	if len(instr.Results) == 0 {
+		b.createRuntimeCall("FnArenaPopFree", nil, "")
+		b.CreateRetVoid()
+		return
+	}
+
+	// Check if any return type needs relocation.
+	needsCopy := false
+	if sig != nil && sig.Results() != nil {
+		for i := 0; i < sig.Results().Len(); i++ {
+			if typeNeedsCopy(sig.Results().At(i).Type()) {
+				needsCopy = true
+				break
+			}
+		}
+	}
+	if !needsCopy {
+		b.createRuntimeCall("FnArenaPopFree", nil, "")
+		b.CreateRet(retVal)
+		return
+	}
+
+	// Three-pass relocation.
+	b.emitRelocThreePass(retVal, llvmType, sig)
+}
+
+// uintptrConst returns an LLVM constant of uintptr type.
+func (b *builder) uintptrConst(val uint64) llvm.Value {
+	return llvm.ConstInt(b.uintptrType, val, false)
+}
+
+// relocStateLLVMType returns {ptr, i64, ptr, i32} matching stage4's relocStateType.
+func (b *builder) relocStateLLVMType() llvm.Type {
+	return b.ctx.StructType([]llvm.Type{
+		b.dataPtrType,    // arena *Arena
+		b.uintptrType,    // mark uintptr
+		b.dataPtrType,    // first *RelocEntry
+		b.ctx.Int32Type(), // count int32
+	}, false)
+}
+
+// emitRelocThreePass emits the full three-pass mark-compact relocation.
+// Matches stage4 ir_deepcopy emitRetWithArenaCopy lines 90-206.
+func (b *builder) emitRelocThreePass(retVal llvm.Value, llvmType llvm.Type, sig *types.Signature) {
+	rsType := b.relocStateLLVMType()
+	b.relocStateVal = b.CreateAlloca(rsType, "rs")
+	b.CreateStore(llvm.ConstNull(rsType), b.relocStateVal)
+
+	// RelocInit(rs, fn_arena, mark)
+	b.createRuntimeCall("RelocInit", []llvm.Value{
+		b.relocStateVal, b.fnArenaVal, b.arenaMarkVal,
+	}, "")
+
+	// ---- Pass 1: Mark ----
+	b.relocMarkVisited = make(map[string]bool)
+	for i := 0; i < sig.Results().Len(); i++ {
+		rt := sig.Results().At(i).Type()
+		if !typeNeedsCopy(rt) {
+			continue
+		}
+		var rootReg llvm.Value
+		if sig.Results().Len() == 1 {
+			rootReg = retVal
+		} else {
+			rootReg = b.CreateExtractValue(retVal, i, "p1ext")
+		}
+		// For struct types: store to alloca so we can GEP into fields.
+		if _, ok := rt.Underlying().(*types.Struct); ok {
+			slt := b.getLLVMType(rt)
+			tmp := b.CreateAlloca(slt, "m1rt")
+			b.CreateStore(rootReg, tmp)
+			b.emitRelocMarkAlloca(tmp, rt)
+		} else {
+			b.emitRelocMarkValue(rootReg, rt)
+		}
+	}
+
+	// ---- Pass 2: Forward ----
+	b.createRuntimeCall("FnArenaPop", nil, "")
+	b.createRuntimeCall("RelocForward", []llvm.Value{b.relocStateVal}, "")
+
+	// ---- Pass 3: Compact + Fixup ----
+	b.createRuntimeCall("RelocCompact", []llvm.Value{b.relocStateVal}, "")
+	b.createRuntimeCall("RelocFixupAll", []llvm.Value{b.relocStateVal}, "")
+
+	// Fixup return value pointers.
+	b.relocFixupVisited = make(map[string]bool)
+	cur := retVal
+	for i := 0; i < sig.Results().Len(); i++ {
+		rt := sig.Results().At(i).Type()
+		if !typeNeedsCopy(rt) {
+			continue
+		}
+		var fixReg llvm.Value
+		if sig.Results().Len() == 1 {
+			fixReg = cur
+		} else {
+			fixReg = b.CreateExtractValue(cur, i, "p3ext")
+		}
+		newReg := b.emitRelocFixupValue(fixReg, rt)
+		if !newReg.IsNil() && sig.Results().Len() > 1 {
+			cur = b.CreateInsertValue(cur, newReg, i, "p3ins")
+		} else if !newReg.IsNil() {
+			cur = newReg
+		}
+	}
+
+	b.createRuntimeCall("ArenaRelease", []llvm.Value{b.fnArenaVal}, "")
+	b.CreateRet(cur)
+}
+
+// emitRelocMarkAlloca emits RelocMark calls for a value stored in an alloca.
+// For structs, iterates fields via GEP. Matches stage4 emitRelocMarkStructFields.
+func (b *builder) emitRelocMarkAlloca(ptr llvm.Value, t types.Type) {
+	st, ok := t.Underlying().(*types.Struct)
+	if !ok {
+		return
+	}
+	llvmStructKey := t.String()
+	if b.relocMarkVisited[llvmStructKey] {
+		return
+	}
+	b.relocMarkVisited[llvmStructKey] = true
+	defer func() { b.relocMarkVisited[llvmStructKey] = false }()
+
+	slt := b.getLLVMType(t)
+	for i := 0; i < st.NumFields(); i++ {
+		ft := st.Field(i).Type()
+		if !typeNeedsCopy(ft) {
+			continue
+		}
+		gep := b.CreateStructGEP(slt, ptr, i, "m1f")
+		if _, ok := ft.Underlying().(*types.Struct); ok {
+			b.emitRelocMarkAlloca(gep, ft)
+		} else {
+			fld := b.CreateLoad(b.getLLVMType(ft), gep, "m1f")
+			b.emitRelocMarkValue(fld, ft)
+		}
+	}
+}
+
+// emitRelocMarkValue emits a single RelocMark call for a value of the given type.
+// Matches stage4 emitRelocMark.
+func (b *builder) emitRelocMarkValue(val llvm.Value, t types.Type) {
+	if !typeNeedsCopy(t) {
+		return
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Pointer:
+		elemLLVM := b.getLLVMType(u.Elem())
+		var sizeVal llvm.Value
+		elemSz := b.targetData.TypeAllocSize(elemLLVM)
+		if elemSz == 0 {
+			elemSz = 1
+		}
+		sizeVal = b.uintptrConst(elemSz)
+		b.createRuntimeCall("RelocMark", []llvm.Value{
+			b.relocStateVal, val, sizeVal, b.uintptrConst(0),
+		}, "")
+		if typeNeedsCopy(u.Elem()) {
+			// Mark fields of the pointed-to struct.
+			slt := b.getLLVMType(u.Elem())
+			tmp := b.CreateAlloca(slt, "m1r")
+			ld := b.CreateLoad(slt, val, "m1ld")
+			b.CreateStore(ld, tmp)
+			b.emitRelocMarkAlloca(tmp, u.Elem())
+		}
+
+	case *types.Slice:
+		dataPtr := b.CreateExtractValue(val, 0, "m1d")
+		dataLen := b.CreateExtractValue(val, 1, "m1l")
+		elemLLVM := b.getLLVMType(u.Elem())
+		elemSize := b.uintptrConst(b.targetData.TypeAllocSize(elemLLVM))
+		byteLen := b.CreateMul(dataLen, elemSize, "")
+		b.createRuntimeCall("RelocMark", []llvm.Value{
+			b.relocStateVal, dataPtr, byteLen, b.uintptrConst(0),
+		}, "")
+
+	case *types.Basic:
+		if u.Info()&types.IsString != 0 {
+			dataPtr := b.CreateExtractValue(val, 0, "m1d")
+			dataLen := b.CreateExtractValue(val, 1, "m1l")
+			b.createRuntimeCall("RelocMark", []llvm.Value{
+				b.relocStateVal, dataPtr, dataLen, b.uintptrConst(0),
+			}, "")
+		}
+
+	case *types.Map:
+		sizeVal := b.uintptrConst(b.targetData.TypeAllocSize(b.dataPtrType))
+		b.createRuntimeCall("RelocMark", []llvm.Value{
+			b.relocStateVal, val, sizeVal, b.uintptrConst(0),
+		}, "")
+
+	case *types.Struct:
+		b.emitRelocMarkAlloca(val, t)
+	}
+}
+
+// emitRelocFixupValue emits fixup for one return value root.
+// Matches stage4 emitRelocFixup.
+func (b *builder) emitRelocFixupValue(val llvm.Value, t types.Type) llvm.Value {
+	if !typeNeedsCopy(t) {
+		return llvm.Value{}
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Pointer:
+		return b.createRuntimeCall("RelocLookup", []llvm.Value{b.relocStateVal, val}, "p3p")
+
+	case *types.Slice:
+		return b.emitRelocFixupSlice(val, t)
+	case *types.Basic:
+		if u.Info()&types.IsString != 0 {
+			return b.emitRelocFixupSlice(val, t)
+		}
+		return llvm.Value{}
+
+	case *types.Map:
+		return b.createRuntimeCall("hashmapCopy", []llvm.Value{val}, "p3m")
+
+	case *types.Struct:
+		return b.emitRelocFixupStruct(val, u, t)
+	}
+	return llvm.Value{}
+}
+
+// emitRelocFixupSlice handles fixup for a slice/string value.
+func (b *builder) emitRelocFixupSlice(val llvm.Value, t types.Type) llvm.Value {
+	dataPtr := b.CreateExtractValue(val, 0, "p3s")
+	newPtr := b.createRuntimeCall("RelocLookup", []llvm.Value{b.relocStateVal, dataPtr}, "p3s")
+	result := b.CreateInsertValue(val, newPtr, 0, "p3s")
+	return result
+}
+
+// emitRelocFixupStruct handles fixup for a struct value.
+// Uses the Named type (if available) to get the correct LLVM named struct
+// type matching the function signature. Matches stage4 emitRelocFixupStruct.
+func (b *builder) emitRelocFixupStruct(val llvm.Value, st *types.Struct, named types.Type) llvm.Value {
+	// Use the Named type's LLVM type if available to preserve named struct identity.
+	var slt llvm.Type
+	if nn, ok := named.(*types.Named); ok {
+		slt = b.getLLVMType(nn)
+	} else {
+		slt = b.getLLVMType(st)
+	}
+	key := st.String()
+	if b.relocFixupVisited[key] {
+		return val
+	}
+	b.relocFixupVisited[key] = true
+	defer func() { b.relocFixupVisited[key] = false }()
+
+	tmp := b.CreateAlloca(slt, "p3st")
+	b.CreateStore(val, tmp)
+
+	for i := 0; i < st.NumFields(); i++ {
+		ft := st.Field(i).Type()
+		if !typeNeedsCopy(ft) {
+			continue
+		}
+		gep := b.CreateStructGEP(slt, tmp, i, "p3st")
+		b.emitFieldFixup(gep, ft)
+	}
+	return b.CreateLoad(slt, tmp, "p3st")
+}
+
+// emitFieldFixup emits the correct RelocFixup* call for a struct field at gep.
+func (b *builder) emitFieldFixup(gep llvm.Value, ft types.Type) {
+	fu := ft.Underlying()
+	switch fu.(type) {
+	case *types.Pointer:
+		b.createRuntimeCall("RelocFixupPtr", []llvm.Value{b.relocStateVal, gep}, "")
+	case *types.Slice, *types.Basic:
+		if bk, ok := fu.(*types.Basic); ok && bk.Info()&types.IsString == 0 {
+			return
+		}
+		b.createRuntimeCall("RelocFixupSlice", []llvm.Value{b.relocStateVal, gep}, "")
+	case *types.Map:
+		oldVal := b.CreateLoad(b.dataPtrType, gep, "p3st")
+		newVal := b.createRuntimeCall("hashmapCopy", []llvm.Value{oldVal}, "p3st")
+		b.CreateStore(newVal, gep)
+	case *types.Struct:
+		innerSt := fu.(*types.Struct)
+		innerSlt := b.getLLVMType(innerSt)
+		innerTmp := b.CreateAlloca(innerSlt, "p3st")
+		innerVal := b.CreateLoad(innerSlt, gep, "p3st")
+		b.CreateStore(innerVal, innerTmp)
+		for j := 0; j < innerSt.NumFields(); j++ {
+			jft := innerSt.Field(j).Type()
+			if !typeNeedsCopy(jft) {
+				continue
+			}
+			igep := b.CreateStructGEP(innerSlt, innerTmp, j, "p3st")
+			b.emitFieldFixup(igep, jft)
+		}
+		b.CreateStore(b.CreateLoad(innerSlt, innerTmp, ""), gep)
+	}
+}
+
+// relocFixupSymbol returns the LLVM symbol name for a per-type fixup function.
+// Matches stage4 ir_deepcopy relocFixupSymbol.
+func relocFixupSymbol(typeName string) string {
+	h := fnv.New32a()
+	h.Write([]byte(typeName))
+	return "@__reloc_fixup_" + strconv.Itoa(int(h.Sum32()&0x7fffffff))
+}
+
+// emitRuntimeVoidCall emits a call to the named runtime function with
+// the given ptr args. Context parameter is added automatically.
+func (c *compilerContext) emitRuntimeVoidCall(name string, args ...llvm.Value) {
+	fn := c.mod.NamedFunction(name)
+	if fn.IsNil() {
+		// Runtime function not yet declared - declare it.
+		paramTypes := make([]llvm.Type, len(args)+1)
+		for i, a := range args {
+			paramTypes[i] = a.Type()
+		}
+		paramTypes[len(args)] = c.dataPtrType // context
+		fnType := llvm.FunctionType(c.ctx.VoidType(), paramTypes, false)
+		fn = llvm.AddFunction(c.mod, name, fnType)
+	}
+	callArgs := make([]llvm.Value, len(args)+1)
+	copy(callArgs, args)
+	callArgs[len(args)] = llvm.Undef(c.dataPtrType)
+	c.builder.CreateCall(fn.GlobalValueType(), fn, callArgs, "")
+}
+
+// getOrEmitRelocFixupFn returns the symbol for a per-type fixup function,
+// emitting the function definition if needed.
+func (c *compilerContext) getOrEmitRelocFixupFn(st *types.Struct) string {
+	slt := c.getLLVMType(st)
+	if slt.TypeKind() == llvm.VoidTypeKind {
+		return ""
+	}
+		typeName := st.String()
+	sym := relocFixupSymbol(typeName)
+	bareSym := sym
+	if len(bareSym) > 0 && bareSym[0] == '@' {
+		bareSym = bareSym[1:]
+	}
+	if fn := c.mod.NamedFunction(bareSym); !fn.IsNil() {
+		return sym
+	}
+	// Emit fixup function definition.
+	// define linkonce_odr void @sym(ptr %obj, ptr %rs, ptr %ctx)
+	fnType := llvm.FunctionType(c.ctx.VoidType(), []llvm.Type{c.dataPtrType, c.dataPtrType, c.dataPtrType}, false)
+	fn := llvm.AddFunction(c.mod, bareSym, fnType)
+	fn.SetLinkage(llvm.LinkOnceODRLinkage)
+	entry := c.ctx.AddBasicBlock(fn, "entry")
+	savedBlock := c.builder.GetInsertBlock()
+	c.builder.SetInsertPointAtEnd(entry)
+
+	obj := fn.Param(0)
+	rs := fn.Param(1)
+
+	for i := 0; i < st.NumFields(); i++ {
+		ft := st.Field(i).Type()
+		if !typeNeedsCopy(ft) {
+			continue
+		}
+		gep := c.builder.CreateStructGEP(slt, obj, i, "fg")
+		fu := ft.Underlying()
+		switch fu.(type) {
+		case *types.Pointer:
+			c.emitRuntimeVoidCall("RelocFixupPtr", rs, gep)
+		case *types.Slice, *types.Basic:
+			c.emitRuntimeVoidCall("RelocFixupSlice", rs, gep)
+		case *types.Map:
+			oldVal := c.builder.CreateLoad(c.dataPtrType, gep, "fg")
+			isNull := c.builder.CreateICmp(llvm.IntEQ, oldVal, llvm.ConstNull(c.dataPtrType), "")
+			notNullBB := c.ctx.AddBasicBlock(fn, "fgdo")
+			mergeBB := c.ctx.AddBasicBlock(fn, "fgsk")
+			c.builder.CreateCondBr(isNull, mergeBB, notNullBB)
+			c.builder.SetInsertPointAtEnd(notNullBB)
+			rtPkg := c.program.ImportedPackage("runtime")
+			hmCopy := rtPkg.Members["hashmapCopy"].(*ssa.Function)
+			hmType, hmFn := c.getFunction(hmCopy)
+			newVal := c.builder.CreateCall(hmType, hmFn, []llvm.Value{oldVal, llvm.Undef(c.dataPtrType)}, "fg")
+			c.builder.CreateStore(newVal, gep)
+			c.builder.CreateBr(mergeBB)
+			c.builder.SetInsertPointAtEnd(mergeBB)
+		case *types.Struct:
+			innerSt := fu.(*types.Struct)
+			innerSlt := c.getLLVMType(innerSt)
+			for j := 0; j < innerSt.NumFields(); j++ {
+				jft := innerSt.Field(j).Type()
+				if !typeNeedsCopy(jft) {
+					continue
+				}
+				igep := c.builder.CreateStructGEP(innerSlt, gep, j, "fg")
+				jfu := jft.Underlying()
+				switch jfu.(type) {
+				case *types.Pointer:
+					c.emitRuntimeVoidCall("RelocFixupPtr", rs, igep)
+				case *types.Slice, *types.Basic:
+					c.emitRuntimeVoidCall("RelocFixupSlice", rs, igep)
+				case *types.Map:
+					ioVal := c.builder.CreateLoad(c.dataPtrType, igep, "fg")
+					rtPkg := c.program.ImportedPackage("runtime")
+					hmCopy := rtPkg.Members["hashmapCopy"].(*ssa.Function)
+					hmType, hmFn := c.getFunction(hmCopy)
+					inVal := c.builder.CreateCall(hmType, hmFn, []llvm.Value{ioVal, llvm.Undef(c.dataPtrType)}, "fg")
+					c.builder.CreateStore(inVal, igep)
+				}
+			}
+		}
+	}
+	c.builder.CreateRetVoid()
+	c.builder.SetInsertPointAtEnd(savedBlock)
+	return sym
 }

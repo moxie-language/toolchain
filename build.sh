@@ -2,9 +2,9 @@
 set -e
 
 FAIL=""
-command -v llvm-extract-21 >/dev/null 2>&1 || FAIL="$FAIL llvm-extract-21"
-command -v ld.lld-21 >/dev/null 2>&1 || FAIL="$FAIL ld.lld-21"
-command -v clang-21 >/dev/null 2>&1 || FAIL="$FAIL clang-21"
+command -v llvm-extract-22 >/dev/null 2>&1 || command -v llvm-extract-21 >/dev/null 2>&1 || FAIL="$FAIL llvm-extract-21"
+command -v ld.lld-22 >/dev/null 2>&1 || command -v ld.lld-21 >/dev/null 2>&1 || FAIL="$FAIL ld.lld-21"
+command -v clang-22 >/dev/null 2>&1 || command -v clang-21 >/dev/null 2>&1 || FAIL="$FAIL clang-21"
 if [ -n "$FAIL" ]; then
     echo "error: LLVM 21 required. missing:$FAIL" >&2
     echo "  arch:   pacman -S llvm21 clang21 lld21" >&2

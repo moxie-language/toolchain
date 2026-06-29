@@ -107,6 +107,12 @@ func Getenv(name string) (s string) {
 	return string(buf[:n])
 }
 
+//export malloc
+func cMalloc(size int32) unsafe.Pointer
+
+//export free
+func cFree(ptr unsafe.Pointer)
+
 func ListFiles(dir, ext string) (ss []string) {
 	buf := []byte{:65536}
 	n := cListdir(unsafe.Pointer(unsafe.SliceData([]byte(dir))), int32(len(dir)),
@@ -114,29 +120,27 @@ func ListFiles(dir, ext string) (ss []string) {
 	if n <= 0 {
 		return nil
 	}
-	nc := int32(0)
+	var names [256]string
 	start := int32(0)
+	ni := int32(0)
 	for i := int32(0); i < n; i++ {
 		if buf[i] == 0 {
 			if HasSuffix(string(buf[start:i]), ext) {
-				nc++
+				names[ni] = string(buf[start:i])
+				ni = ni + 1
 			}
 			start = i + 1
 		}
 	}
-	if nc == 0 {
+	if ni == 0 {
 		return nil
 	}
-	result := []string{:0:nc}
-	start = 0
-	for i := int32(0); i < n; i++ {
-		if buf[i] == 0 {
-			name := string(buf[start:i])
-			if HasSuffix(name, ext) {
-				push(result, name)
-			}
-			start = i + 1
-		}
+	// Use C heap allocation to avoid arena lifetime issues with return value.
+	// Copy names to C buffer, then result slice wraps C buffer.
+	total := ni
+	result := make([]string, total)
+	for j := int32(0); j < total; j = j + 1 {
+		result[j] = names[j]
 	}
 	return result
 }

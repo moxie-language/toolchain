@@ -8,17 +8,27 @@ MOXIE_GOROOT="${MOXIE_GOROOT_CACHE:-/tmp/moxie-goroot}"
 
 LLVM_PREFIX=""
 LLVM_VER=""
-for v in 21 19; do
-    for p in /usr/lib/llvm-$v /usr/lib/llvm$v /usr/lib/llvm/$v; do
-        if [ -d "$p" ]; then
-            LLVM_PREFIX="$p"
-            LLVM_VER="$v"
-            break 2
-        fi
-    done
+# Prefer llvm-config to determine paths.
+for c in llvm-config llvm-config-22 llvm-config-21 llvm-config-20; do
+    if command -v "$c" >/dev/null 2>&1; then
+        LLVM_PREFIX="$($c --prefix)"
+        LLVM_VER="$($c --version | cut -d. -f1)"
+        break
+    fi
 done
 if [ -z "$LLVM_PREFIX" ]; then
-    echo "error: LLVM (21 or 19) not found" >&2
+    for v in 22 21 20; do
+        for p in /usr/lib/llvm-$v /usr/lib/llvm$v /usr/lib/llvm/$v; do
+            if [ -d "$p" ]; then
+                LLVM_PREFIX="$p"
+                LLVM_VER="$v"
+                break 2
+            fi
+        done
+    done
+fi
+if [ -z "$LLVM_PREFIX" ] || [ -z "$LLVM_VER" ]; then
+    echo "error: LLVM not found (tried 22, 21, 20)" >&2
     exit 1
 fi
 
@@ -64,6 +74,13 @@ export GOROOT="$MOXIE_GOROOT"
 export GOWORK=off
 export GOTOOLCHAIN=local
 export CGO_ENABLED=0
-export LLVM_LIB_PATH="${LLVM_PREFIX}/lib/libLLVM-${LLVM_VER}.so"
+# Determine LLVM library path.
+if [ -f "${LLVM_PREFIX}/lib/libLLVM-${LLVM_VER}.so" ]; then
+    export LLVM_LIB_PATH="${LLVM_PREFIX}/lib/libLLVM-${LLVM_VER}.so"
+elif [ -f "/usr/lib/libLLVM-${LLVM_VER}.so" ]; then
+    export LLVM_LIB_PATH="/usr/lib/libLLVM-${LLVM_VER}.so"
+else
+    export LLVM_LIB_PATH="${LLVM_PREFIX}/lib/libLLVM-${LLVM_VER}.so"
+fi
 
 exec "$MOXIE_GOROOT/bin/go" build -mod=vendor -tags purego -gcflags="-N -l" -o moxie "$@" .

@@ -74,11 +74,11 @@ int moxie_socketpair(int domain, int type, int protocol, int fds[2]) {
 // Pipe I/O — wraps read/write for the IPC channel bridge.
 // Uses libc on all platforms since these are standard POSIX.
 
-int moxie_write(int fd, const void *buf, int count) {
+int MoxieWrite(int fd, const void *buf, int count) {
     return (int)write(fd, buf, (size_t)count);
 }
 
-int moxie_read(int fd, void *buf, int count) {
+int MoxieRead(int fd, void *buf, int count) {
     return (int)read(fd, buf, (size_t)count);
 }
 

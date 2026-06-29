@@ -4,7 +4,26 @@ COMPACTION: ;always preserve: moxie is not Go, no stubs - remove dead references
 
 ## Moxie Memory Model
 
-per-function arena stack. compiler emits FnArenaPush() at function entry, relocates return values into caller's arena via three-pass mark-compact, then FnArenaPop + ArenaRelease at function exit. no escape analysis, no scope chains, no individual free. all reclamation is bulk: arena release per function return (pooled), munmap per domain exit. there is no free() builtin. DomainRoot holds fnStack[512]*Arena with fnTop index. parameters are immutable borrows - writing through a parameter pointer is a compile error. methods that need to produce modified state return it.
+per-function arena stack. compiler emits FnArenaPush() at function entry, relocates return values and receiver writes into caller's arena via three-pass mark-compact (RelocInit/RelocMark/RelocForward/RelocCompact/RelocFixupAll), then FnArenaPop + ArenaRelease at function exit. no escape analysis, no scope chains, no individual free. all reclamation is bulk: arena release per function return (pooled), munmap per domain exit. there is no free() builtin. DomainRoot holds fnStack[512]*Arena with fnTop index.
+
+## Parameter and Receiver Rules
+
+Function parameters are IMMUTABLE BORROWS - writing through a parameter pointer is a compile-time error enforced by the compiler, not by MMU page protection. This is a type-system-level guarantee that is "expensive now" (compile-time enforcement) but "free at runtime" (no runtime checks). Because parameters cannot be mutated, they never need deep copying across arena boundaries.
+
+Only METHOD RECEIVERS can be written to. Changes to receiver fields are tracked and serialized at return along with return values. The serialization format includes pointer-to-previously-serialized references to enable full closure of cyclic graph data structures.
+
+Return values are serialized at return along with values written into the receiver, then decoded into the caller's arena with pointers rewritten, and the function arena can then be fully released.
+
+## Arena Relocation Rules (Stage4 correct, Legacy must match)
+
+- Every function that returns pointer-containing types gets FnArenaPush at entry and full three-pass relocation at exit.
+- Runtime and unsafe packages are exempt (they implement the arena system).
+- Mark pass: RelocInit then RelocMark for each reachable pointer root from return values.
+- Forward pass: FnArenaPop then RelocForward (reclaims fn arena position for next callee's push).
+- Compact+Fixup pass: RelocCompact then RelocFixupAll, then ArenaRelease.
+- Hashmap operations respect m.owner arena (hashmap arena ownership fix ed83d882) - bucket data stays in the owner arena even after grow/overflow, so hashmap access is safe across arena boundaries.
+- Per-type fixup functions (linkonce_odr) handle struct field pointer relocation without generating fixup IR inline in every caller.
+- NO exceptions in the legacy compiler - it must generate LLVM IR functionally identical to what stage4 emits for the Reloc* lifecycle. Legacy must not use SetCurrentArena, ArenaFree, ArenaRestore, ArenaMark, arenaCopySliceIfLocal, or any other non-Reloc* mechanism.
 
 ## Reporting Completion
 
