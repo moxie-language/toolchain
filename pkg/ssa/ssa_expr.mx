@@ -93,10 +93,10 @@ func (fb *ssaFuncBuilder) buildIdent(e *syntax.Name) (s SSAValue) {
 	switch obj2 := obj.(type) {
 	case *types.TCVar:
 		if alloc, ok := fb.vars[obj]; ok {
-			return fb.emitLoad(alloc, obj.Typ)
+			return fb.emitLoad(alloc, types.ObjectType(obj))
 		}
 		if fv, ok := fb.freeVarPtrs[e.Value]; ok {
-			return fb.emitLoad(fv, obj.Typ)
+			return fb.emitLoad(fv, types.ObjectType(obj))
 		}
 		for p := fb.parent; p != nil; p = p.parent {
 			found := false
@@ -117,22 +117,22 @@ func (fb *ssaFuncBuilder) buildIdent(e *syntax.Name) (s SSAValue) {
 				}
 			}
 			if found {
-				fv := fb.getOrCreateFreeVar(e.Value, obj.Typ)
-				return fb.emitLoad(fv, obj.Typ)
+				fv := fb.getOrCreateFreeVar(e.Value, types.ObjectType(obj))
+				return fb.emitLoad(fv, types.ObjectType(obj))
 			}
 		}
 		if g, ok := fb.fn.Pkg.Members[e.Value].(*SSAGlobal); ok {
-			return fb.emitLoad(g, obj.Typ)
+		return fb.emitLoad(g, types.ObjectType(obj))
 		}
-		return &SSAConst{typ: obj.Typ, val: nil}
+		return &SSAConst{typ: types.ObjectType(obj), val: nil}
 	case *types.TCConst:
-		return &SSAConst{typ: obj.Typ, val: localizeConstVal(obj.Val, obj.Typ)}
+		return &SSAConst{typ: types.ObjectType(obj), val: localizeConstVal(types.ObjectVal(obj), types.ObjectType(obj))}
 	case *types.TCFunc:
 		fn, _ := fb.fn.Pkg.Members[e.Value].(*SSAFunction)
 		if fn != nil {
 			return fn
 		}
-		return &SSAConst{typ: obj.Typ, val: nil}
+		return &SSAConst{typ: types.ObjectType(obj), val: nil}
 	case *types.TypeName:
 		return nil
 	case *types.Builtin:
@@ -824,7 +824,7 @@ func (fb *ssaFuncBuilder) buildPkgMember(pn *types.PkgName, memberName string) (
 	}
 	switch obj2 := obj.(type) {
 	case *types.TCConst:
-		return &SSAConst{typ: obj.Typ, val: localizeConstVal(obj.Val, obj.Typ)}
+		return &SSAConst{typ: types.ObjectType(obj), val: localizeConstVal(types.ObjectVal(obj), types.ObjectType(obj))}
 	case *types.TCVar:
 		impPkg := fb.ensureImportedSSAPackage(imported)
 		g, ok := impPkg.Members[memberName].(*SSAGlobal)
@@ -836,7 +836,7 @@ func (fb *ssaFuncBuilder) buildPkgMember(pn *types.PkgName, memberName string) (
 			}
 			impPkg.Members[memberName] = g
 		}
-		return fb.emitLoad(g, obj.Typ)
+		return fb.emitLoad(g, types.ObjectType(obj))
 	case *types.TCFunc:
 		impPkg := fb.ensureImportedSSAPackage(imported)
 		fn := impPkg.Func(memberName)
@@ -1274,12 +1274,12 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *syntax.FuncLit) (s SSAValue) {
 			if alloc, ok := fb.vars[obj]; ok {
 				alloc.Heap = true
 				bindings = append(bindings, alloc)
-			} else if pfv, ok2 := fb.freeVarPtrs[fv2.name]; ok2 {
+			} else if pfv, ok2 := fb.freeVarPtrs[fv.name]; ok2 {
 				bindings = append(bindings, pfv)
 			} else {
 				bindings = append(bindings, &SSAConst{typ: types.NewPointer(fv.typ), val: nil})
 			}
-		} else if pfv, ok2 := fb.freeVarPtrs[fv2.name]; ok2 {
+		} else if pfv, ok2 := fb.freeVarPtrs[fv.name]; ok2 {
 			bindings = append(bindings, pfv)
 		} else {
 			bindings = append(bindings, &SSAConst{typ: types.NewPointer(fv.typ), val: nil})
