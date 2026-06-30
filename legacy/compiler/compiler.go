@@ -4414,7 +4414,20 @@ func (b *builder) emitRelocFixupValue(val llvm.Value, t types.Type) llvm.Value {
 	}
 	switch u := t.Underlying().(type) {
 	case *types.Pointer:
-		return b.createRuntimeCall("RelocLookup", []llvm.Value{b.relocStateVal, val}, "p3p")
+		newPtr := b.createRuntimeCall("RelocLookup", []llvm.Value{b.relocStateVal, val}, "p3p")
+		// For struct pointers (like *Scope), process fields inline via
+		// emitRelocFixupStruct. This handles map fields with hashmapCopy,
+		// copying the hashmap to the caller's arena.
+		if st, ok := u.Elem().Underlying().(*types.Struct); ok && st.NumFields() > 0 {
+			slt := b.getLLVMType(u.Elem())
+			if slt.TypeKind() != llvm.VoidTypeKind {
+				// Load struct from forwarded pointer, fix up fields, store back.
+				ld := b.CreateLoad(slt, newPtr, "p3ld")
+				fixed := b.emitRelocFixupStruct(ld, st, u.Elem())
+				b.CreateStore(fixed, newPtr)
+			}
+		}
+		return newPtr
 
 	case *types.Slice:
 		return b.emitRelocFixupSlice(val, t)
