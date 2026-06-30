@@ -4328,34 +4328,16 @@ func (b *builder) emitRelocMarkValue(val llvm.Value, t types.Type) {
 			elemSz = 1
 		}
 		sizeVal = b.uintptrConst(elemSz)
-		fixupArg := b.uintptrConst(0)
-		if st, ok := u.Elem().Underlying().(*types.Struct); ok {
-			if sym := b.getOrEmitRelocFixupFn(st); sym != "" {
-				bareSym := sym
-				if len(bareSym) > 0 && bareSym[0] == '@' {
-					bareSym = bareSym[1:]
-				}
-				if fn := b.mod.NamedFunction(bareSym); !fn.IsNil() {
-					fixupArg = b.CreatePtrToInt(fn, b.uintptrType, "m1fup")
-				}
-			}
-		}
-		isNew := b.createRuntimeCall("RelocMark", []llvm.Value{
-			b.relocStateVal, val, sizeVal, fixupArg,
-		}, "m1n")
+		b.createRuntimeCall("RelocMark", []llvm.Value{
+			b.relocStateVal, val, sizeVal, b.uintptrConst(0),
+		}, "")
 		if typeNeedsCopy(u.Elem()) {
-			fn := b.GetInsertBlock().Parent()
-			markBB := b.ctx.AddBasicBlock(fn, "m1r")
-			skipBB := b.ctx.AddBasicBlock(fn, "m1s")
-			b.CreateCondBr(isNew, markBB, skipBB)
-			b.SetInsertPointAtEnd(markBB)
+			// Mark fields of the pointed-to struct.
 			slt := b.getLLVMType(u.Elem())
 			tmp := b.CreateAlloca(slt, "m1r")
 			ld := b.CreateLoad(slt, val, "m1ld")
 			b.CreateStore(ld, tmp)
 			b.emitRelocMarkAlloca(tmp, u.Elem())
-			b.CreateBr(skipBB)
-			b.SetInsertPointAtEnd(skipBB)
 		}
 
 	case *types.Slice:
@@ -4381,10 +4363,6 @@ func (b *builder) emitRelocMarkValue(val llvm.Value, t types.Type) {
 		sizeVal := b.uintptrConst(b.targetData.TypeAllocSize(b.dataPtrType))
 		b.createRuntimeCall("RelocMark", []llvm.Value{
 			b.relocStateVal, val, sizeVal, b.uintptrConst(0),
-		}, "")
-		// Mark map entry value data so it gets relocated by forward+compact
-		b.createRuntimeCall("RelocMarkMapValues", []llvm.Value{
-			b.relocStateVal, val,
 		}, "")
 
 	case *types.Struct:
@@ -4492,25 +4470,6 @@ func (b *builder) emitFieldFixup(gep llvm.Value, ft types.Type) {
 	}
 }
 
-// mapEntryFixupFlags returns fixup flags for RelocFixupMapValues.
-// bit1=fix value ptr, bit2=fix value as interface (ptr at offset 8).
-// Key fixup (bit0) is skipped - string data pointers for constant strings
-// are in the data section and don't need relocation. Heap-allocated strings
-// are covered by the mark pass which marks the bucket array.
-func mapEntryFixupFlags(mapType types.Type) (flags uint8) {
-	mt := mapType.Underlying().(*types.Map)
-	vt := mt.Elem()
-	if vt != nil {
-		switch vt.Underlying().(type) {
-		case *types.Pointer:
-			flags |= 2
-		case *types.Interface:
-			flags |= 4
-		}
-	}
-	return flags
-}
-
 // relocFixupSymbol returns the LLVM symbol name for a per-type fixup function.
 // Matches stage4 ir_deepcopy relocFixupSymbol.
 func relocFixupSymbol(typeName string) string {
@@ -4519,49 +4478,24 @@ func relocFixupSymbol(typeName string) string {
 	return "@__reloc_fixup_" + strconv.Itoa(int(h.Sum32()&0x7fffffff))
 }
 
-func (c *compilerContext) emitRelocCallFixupTrampoline() {
-	const sym = "runtime.relocCallFixup"
-	i64 := c.ctx.Int64Type()
-	ptr := c.dataPtrType
-	tp := llvm.FunctionType(c.ctx.VoidType(), []llvm.Type{i64, ptr, ptr, ptr}, false)
-	existing := c.mod.NamedFunction(sym)
-	if !existing.IsNil() {
-		existing.EraseFromParentAsFunction()
-	}
-	fn := llvm.AddFunction(c.mod, sym, tp)
-	fn.SetLinkage(llvm.LinkOnceODRLinkage)
-	entry := c.ctx.AddBasicBlock(fn, "entry")
-	saved := c.builder.GetInsertBlock()
-	c.builder.SetInsertPointAtEnd(entry)
-	fnArg := fn.Param(0)
-	obj := fn.Param(1)
-	rs := fn.Param(2)
-	fixupFnType := llvm.FunctionType(c.ctx.VoidType(), []llvm.Type{ptr, ptr, ptr}, false)
-	fp := c.builder.CreateIntToPtr(fnArg, llvm.PointerType(fixupFnType, 0), "fp")
-	nullCtx := llvm.ConstNull(ptr)
-	c.builder.CreateCall(fixupFnType, fp, []llvm.Value{obj, rs, nullCtx}, "")
-	c.builder.CreateRetVoid()
-	c.builder.SetInsertPointAtEnd(saved)
-}
-
 // emitRuntimeVoidCall emits a call to the named runtime function with
 // the given ptr args. Context parameter is added automatically.
 func (c *compilerContext) emitRuntimeVoidCall(name string, args ...llvm.Value) {
-	linkName := "runtime." + name
-	paramTypes := make([]llvm.Type, len(args)+1)
-	for i, a := range args {
-		paramTypes[i] = a.Type()
-	}
-	paramTypes[len(args)] = c.dataPtrType
-	fnType := llvm.FunctionType(c.ctx.VoidType(), paramTypes, false)
-	fn := c.mod.NamedFunction(linkName)
+	fn := c.mod.NamedFunction(name)
 	if fn.IsNil() {
-		fn = llvm.AddFunction(c.mod, linkName, fnType)
+		// Runtime function not yet declared - declare it.
+		paramTypes := make([]llvm.Type, len(args)+1)
+		for i, a := range args {
+			paramTypes[i] = a.Type()
+		}
+		paramTypes[len(args)] = c.dataPtrType // context
+		fnType := llvm.FunctionType(c.ctx.VoidType(), paramTypes, false)
+		fn = llvm.AddFunction(c.mod, name, fnType)
 	}
 	callArgs := make([]llvm.Value, len(args)+1)
 	copy(callArgs, args)
 	callArgs[len(args)] = llvm.Undef(c.dataPtrType)
-	c.builder.CreateCall(fnType, fn, callArgs, "")
+	c.builder.CreateCall(fn.GlobalValueType(), fn, callArgs, "")
 }
 
 // getOrEmitRelocFixupFn returns the symbol for a per-type fixup function,
@@ -4580,7 +4514,6 @@ func (c *compilerContext) getOrEmitRelocFixupFn(st *types.Struct) string {
 	if fn := c.mod.NamedFunction(bareSym); !fn.IsNil() {
 		return sym
 	}
-	c.emitRelocCallFixupTrampoline()
 	// Emit fixup function definition.
 	// define linkonce_odr void @sym(ptr %obj, ptr %rs, ptr %ctx)
 	fnType := llvm.FunctionType(c.ctx.VoidType(), []llvm.Type{c.dataPtrType, c.dataPtrType, c.dataPtrType}, false)
@@ -4617,13 +4550,6 @@ func (c *compilerContext) getOrEmitRelocFixupFn(st *types.Struct) string {
 			hmType, hmFn := c.getFunction(hmCopy)
 			newVal := c.builder.CreateCall(hmType, hmFn, []llvm.Value{oldVal, llvm.Undef(c.dataPtrType)}, "fg")
 			c.builder.CreateStore(newVal, gep)
-			flags := llvm.ConstInt(c.ctx.Int8Type(), uint64(mapEntryFixupFlags(ft)), false)
-			rtPkg2 := c.program.ImportedPackage("runtime")
-			fixMap := rtPkg2.Members["RelocFixupMapValues"].(*ssa.Function)
-			fixType, fixFn := c.getFunction(fixMap)
-			c.builder.CreateCall(fixType, fixFn, []llvm.Value{
-				rs, newVal, flags, llvm.Undef(c.dataPtrType),
-			}, "")
 			c.builder.CreateBr(mergeBB)
 			c.builder.SetInsertPointAtEnd(mergeBB)
 		case *types.Struct:
@@ -4648,13 +4574,6 @@ func (c *compilerContext) getOrEmitRelocFixupFn(st *types.Struct) string {
 					hmType, hmFn := c.getFunction(hmCopy)
 					inVal := c.builder.CreateCall(hmType, hmFn, []llvm.Value{ioVal, llvm.Undef(c.dataPtrType)}, "fg")
 					c.builder.CreateStore(inVal, igep)
-					iflags := llvm.ConstInt(c.ctx.Int8Type(), uint64(mapEntryFixupFlags(jft)), false)
-					irtPkg := c.program.ImportedPackage("runtime")
-					ifixMap := irtPkg.Members["RelocFixupMapValues"].(*ssa.Function)
-					ifixType, ifixFn := c.getFunction(ifixMap)
-					c.builder.CreateCall(ifixType, ifixFn, []llvm.Value{
-						rs, inVal, iflags, llvm.Undef(c.dataPtrType),
-					}, "")
 				}
 			}
 		}
