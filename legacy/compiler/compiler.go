@@ -4328,16 +4328,34 @@ func (b *builder) emitRelocMarkValue(val llvm.Value, t types.Type) {
 			elemSz = 1
 		}
 		sizeVal = b.uintptrConst(elemSz)
-		b.createRuntimeCall("RelocMark", []llvm.Value{
-			b.relocStateVal, val, sizeVal, b.uintptrConst(0),
-		}, "")
+		fixupArg := b.uintptrConst(0)
+		if st, ok := u.Elem().Underlying().(*types.Struct); ok {
+			if sym := b.getOrEmitRelocFixupFn(st); sym != "" {
+				bareSym := sym
+				if len(bareSym) > 0 && bareSym[0] == '@' {
+					bareSym = bareSym[1:]
+				}
+				if fn := b.mod.NamedFunction(bareSym); !fn.IsNil() {
+					fixupArg = b.CreatePtrToInt(fn, b.uintptrType, "m1fup")
+				}
+			}
+		}
+		isNew := b.createRuntimeCall("RelocMark", []llvm.Value{
+			b.relocStateVal, val, sizeVal, fixupArg,
+		}, "m1n")
 		if typeNeedsCopy(u.Elem()) {
-			// Mark fields of the pointed-to struct.
+			fn := b.GetInsertBlock().Parent()
+			markBB := b.ctx.AddBasicBlock(fn, "m1r")
+			skipBB := b.ctx.AddBasicBlock(fn, "m1s")
+			b.CreateCondBr(isNew, markBB, skipBB)
+			b.SetInsertPointAtEnd(markBB)
 			slt := b.getLLVMType(u.Elem())
 			tmp := b.CreateAlloca(slt, "m1r")
 			ld := b.CreateLoad(slt, val, "m1ld")
 			b.CreateStore(ld, tmp)
 			b.emitRelocMarkAlloca(tmp, u.Elem())
+			b.CreateBr(skipBB)
+			b.SetInsertPointAtEnd(skipBB)
 		}
 
 	case *types.Slice:
@@ -4501,24 +4519,49 @@ func relocFixupSymbol(typeName string) string {
 	return "@__reloc_fixup_" + strconv.Itoa(int(h.Sum32()&0x7fffffff))
 }
 
+func (c *compilerContext) emitRelocCallFixupTrampoline() {
+	const sym = "runtime.relocCallFixup"
+	i64 := c.ctx.Int64Type()
+	ptr := c.dataPtrType
+	tp := llvm.FunctionType(c.ctx.VoidType(), []llvm.Type{i64, ptr, ptr, ptr}, false)
+	existing := c.mod.NamedFunction(sym)
+	if !existing.IsNil() {
+		existing.EraseFromParentAsFunction()
+	}
+	fn := llvm.AddFunction(c.mod, sym, tp)
+	fn.SetLinkage(llvm.LinkOnceODRLinkage)
+	entry := c.ctx.AddBasicBlock(fn, "entry")
+	saved := c.builder.GetInsertBlock()
+	c.builder.SetInsertPointAtEnd(entry)
+	fnArg := fn.Param(0)
+	obj := fn.Param(1)
+	rs := fn.Param(2)
+	fixupFnType := llvm.FunctionType(c.ctx.VoidType(), []llvm.Type{ptr, ptr, ptr}, false)
+	fp := c.builder.CreateIntToPtr(fnArg, llvm.PointerType(fixupFnType, 0), "fp")
+	nullCtx := llvm.ConstNull(ptr)
+	c.builder.CreateCall(fixupFnType, fp, []llvm.Value{obj, rs, nullCtx}, "")
+	c.builder.CreateRetVoid()
+	c.builder.SetInsertPointAtEnd(saved)
+}
+
 // emitRuntimeVoidCall emits a call to the named runtime function with
 // the given ptr args. Context parameter is added automatically.
 func (c *compilerContext) emitRuntimeVoidCall(name string, args ...llvm.Value) {
-	fn := c.mod.NamedFunction(name)
+	linkName := "runtime." + name
+	paramTypes := make([]llvm.Type, len(args)+1)
+	for i, a := range args {
+		paramTypes[i] = a.Type()
+	}
+	paramTypes[len(args)] = c.dataPtrType
+	fnType := llvm.FunctionType(c.ctx.VoidType(), paramTypes, false)
+	fn := c.mod.NamedFunction(linkName)
 	if fn.IsNil() {
-		// Runtime function not yet declared - declare it.
-		paramTypes := make([]llvm.Type, len(args)+1)
-		for i, a := range args {
-			paramTypes[i] = a.Type()
-		}
-		paramTypes[len(args)] = c.dataPtrType // context
-		fnType := llvm.FunctionType(c.ctx.VoidType(), paramTypes, false)
-		fn = llvm.AddFunction(c.mod, name, fnType)
+		fn = llvm.AddFunction(c.mod, linkName, fnType)
 	}
 	callArgs := make([]llvm.Value, len(args)+1)
 	copy(callArgs, args)
 	callArgs[len(args)] = llvm.Undef(c.dataPtrType)
-	c.builder.CreateCall(fn.GlobalValueType(), fn, callArgs, "")
+	c.builder.CreateCall(fnType, fn, callArgs, "")
 }
 
 // getOrEmitRelocFixupFn returns the symbol for a per-type fixup function,
@@ -4537,6 +4580,7 @@ func (c *compilerContext) getOrEmitRelocFixupFn(st *types.Struct) string {
 	if fn := c.mod.NamedFunction(bareSym); !fn.IsNil() {
 		return sym
 	}
+	c.emitRelocCallFixupTrampoline()
 	// Emit fixup function definition.
 	// define linkonce_odr void @sym(ptr %obj, ptr %rs, ptr %ctx)
 	fnType := llvm.FunctionType(c.ctx.VoidType(), []llvm.Type{c.dataPtrType, c.dataPtrType, c.dataPtrType}, false)
