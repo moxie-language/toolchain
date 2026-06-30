@@ -4327,12 +4327,16 @@ func (b *builder) emitRelocMarkValue(val llvm.Value, t types.Type) {
 		// 0 or a pointer size (8). Use the Go types.StdSizes to get the
 		// correct struct size.
 		if elemSz < 16 {
+			var st *types.Struct
 			if named, ok := u.Elem().(*types.Named); ok {
-				if st, ok := named.Underlying().(*types.Struct); ok {
-					sizes := types.StdSizes{WordSize: 8, MaxAlign: 8}
-					if sz := uint64(sizes.Sizeof(st)); sz > elemSz {
-						elemSz = sz
-					}
+				st, _ = named.Underlying().(*types.Struct)
+			} else {
+				st, _ = u.Elem().Underlying().(*types.Struct)
+			}
+			if st != nil && st.NumFields() > 0 {
+				sizes := types.StdSizes{WordSize: 8, MaxAlign: 8}
+				if sz := uint64(sizes.Sizeof(st)); sz > elemSz {
+					elemSz = sz
 				}
 			}
 		}
@@ -4392,23 +4396,7 @@ func (b *builder) emitRelocMarkValue(val llvm.Value, t types.Type) {
 		}
 
 	case *types.Map:
-		// Use sizeof(hashmap) = 104 to forward the full hashmap struct.
-		// TypeAllocSize returns 0 or 8 for the opaque hashmap type, so
-		// compute the correct size from the Go type system.
-		hmSz := uint64(104)
-		if rtPkg := b.runtimePkg; rtPkg != nil {
-			if hmObj := rtPkg.Scope().Lookup("hashmap"); hmObj != nil {
-				if hmT, ok := hmObj.(*types.TypeName); ok {
-					if named, ok := hmT.Type().(*types.Named); ok {
-						if st, ok := named.Underlying().(*types.Struct); ok {
-							sizes := types.StdSizes{WordSize: 8, MaxAlign: 8}
-							hmSz = uint64(sizes.Sizeof(st))
-						}
-					}
-				}
-			}
-		}
-		sizeVal := b.uintptrConst(hmSz)
+		sizeVal := b.uintptrConst(104)
 		b.createRuntimeCall("RelocMark", []llvm.Value{
 			b.relocStateVal, val, sizeVal, b.uintptrConst(0),
 		}, "")
@@ -4608,58 +4596,7 @@ func (c *compilerContext) getOrEmitRelocFixupFn(st *types.Struct) string {
 		case *types.Slice, *types.Basic:
 			c.emitRuntimeVoidCall("RelocFixupSlice", rs, gep)
 		case *types.Map:
-			oldVal := c.builder.CreateLoad(c.dataPtrType, gep, "fg")
-			isNull := c.builder.CreateICmp(llvm.IntEQ, oldVal, llvm.ConstNull(c.dataPtrType), "")
-			nullBB := c.ctx.AddBasicBlock(fn, "fgnull")
-			notNullBB := c.ctx.AddBasicBlock(fn, "fgdo")
-			mergeBB := c.ctx.AddBasicBlock(fn, "fgsk")
-			c.builder.CreateCondBr(isNull, nullBB, notNullBB)
-			c.builder.SetInsertPointAtEnd(nullBB)
-			c.builder.CreateStore(llvm.ConstNull(c.dataPtrType), gep)
-			c.builder.CreateBr(mergeBB)
-			c.builder.SetInsertPointAtEnd(notNullBB)
-			rtPkg := c.program.ImportedPackage("runtime")
-
-			cbType := c.getLLVMRuntimeType("CodecBuf")
-			cb := c.builder.CreateAlloca(cbType, "cb")
-			c.builder.CreateStore(llvm.ConstNull(cbType), cb)
-			bufInit := rtPkg.Members["codecBufInit"].(*ssa.Function)
-			bufInitType, bufInitFn := c.getFunction(bufInit)
-			c.builder.CreateCall(bufInitType, bufInitFn, []llvm.Value{cb, llvm.Undef(c.dataPtrType)}, "")
-
-			ssType := c.getLLVMRuntimeType("codecSeenSet")
-			ss := c.builder.CreateAlloca(ssType, "ss")
-			ssInit := rtPkg.Members["codecSeenInit"].(*ssa.Function)
-			ssInitType, ssInitFn := c.getFunction(ssInit)
-			c.builder.CreateCall(ssInitType, ssInitFn, []llvm.Value{ss, llvm.Undef(c.dataPtrType)}, "")
-
-			encMap := rtPkg.Members["codecEncodeMap"].(*ssa.Function)
-			encType, encFn := c.getFunction(encMap)
-			c.builder.CreateCall(encType, encFn, []llvm.Value{oldVal, cb, ss, llvm.ConstInt(c.ctx.Int8Type(), 0, false), llvm.Undef(c.dataPtrType)}, "")
-
-			dsType := c.getLLVMRuntimeType("codecDecodeSeen")
-			ds := c.builder.CreateAlloca(dsType, "ds")
-			dsInit := rtPkg.Members["codecDecodeSeenInit"].(*ssa.Function)
-			dsInitType, dsInitFn := c.getFunction(dsInit)
-			c.builder.CreateCall(dsInitType, dsInitFn, []llvm.Value{ds, llvm.Undef(c.dataPtrType)}, "")
-
-			mt := ft.Underlying().(*types.Map)
-			llvmKeyType := c.getLLVMType(mt.Key())
-			llvmValType := c.getLLVMType(mt.Elem())
-			keySize := llvm.ConstInt(c.uintptrType, c.targetData.TypeAllocSize(llvmKeyType), false)
-			valSize := llvm.ConstInt(c.uintptrType, c.targetData.TypeAllocSize(llvmValType), false)
-			var algVal uint64
-			if isStringLike(mt.Key()) { algVal = 1
-			} else if hashmapIsBinaryKey(mt.Key()) { algVal = 0
-			} else { algVal = 2 }
-			alg := llvm.ConstInt(c.ctx.Int8Type(), algVal, false)
-			decMap := rtPkg.Members["codecDecodeMapFlagged"].(*ssa.Function)
-			decType, decFn := c.getFunction(decMap)
-			newVal := c.builder.CreateCall(decType, decFn, []llvm.Value{
-				cb, ds, keySize, valSize, alg, llvm.ConstInt(c.ctx.Int8Type(), 0, false), llvm.Undef(c.dataPtrType)}, "fg")
-			c.builder.CreateStore(newVal, gep)
-			c.builder.CreateBr(mergeBB)
-			c.builder.SetInsertPointAtEnd(mergeBB)
+			c.emitRuntimeVoidCall("RelocFixupPtr", rs, gep)
 		case *types.Struct:
 			innerSt := fu.(*types.Struct)
 			innerSlt := c.getLLVMType(innerSt)
