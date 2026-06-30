@@ -4609,7 +4609,12 @@ func (c *compilerContext) getOrEmitRelocFixupFn(st *types.Struct) string {
 		case *types.Slice, *types.Basic:
 			c.emitRuntimeVoidCall("RelocFixupSlice", rs, gep)
 		case *types.Map:
-			c.emitRuntimeVoidCall("RelocFixupPtr", rs, gep)
+			ioVal := c.builder.CreateLoad(c.dataPtrType, gep, "fg")
+			rtPkg := c.program.ImportedPackage("runtime")
+			hmCopy := rtPkg.Members["hashmapCopy"].(*ssa.Function)
+			hmType, hmFn := c.getFunction(hmCopy)
+			inVal := c.builder.CreateCall(hmType, hmFn, []llvm.Value{ioVal, llvm.Undef(c.dataPtrType)}, "fg")
+			c.builder.CreateStore(inVal, gep)
 		case *types.Struct:
 			innerSt := fu.(*types.Struct)
 			innerSlt := c.getLLVMType(innerSt)
