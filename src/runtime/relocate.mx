@@ -165,6 +165,27 @@ func RelocFixupSlice(rs *RelocState, sliceAddr unsafe.Pointer) {
 	*(*unsafe.Pointer)(sliceAddr) = RelocLookup(rs, old)
 }
 
+// RelocMarkIface marks the concrete data reachable through an interface value.
+// Called from emitRelocMarkValue for *types.Interface to ensure the concrete
+// struct data is forwarded to the caller's arena during three-pass relocation.
+func RelocMarkIface(rs *RelocState, ifaceAddr unsafe.Pointer) {
+	iface := *(*_interface)(ifaceAddr)
+	if iface.typecode == nil {
+		return
+	}
+	t := (*rawType)(iface.typecode)
+	if t.kind() == kindPointer {
+		// Pointer-typed concrete value: iface.value IS the pointer to data.
+		// Mark the pointed-to struct so it gets forwarded.
+		RelocMark(rs, iface.value, t.elem().size(), 0)
+		return
+	}
+	if t.size() > unsafe.Sizeof(uintptr(0)) {
+		// Large struct: value slot IS a pointer to the struct.
+		RelocMark(rs, iface.value, t.size(), 0)
+	}
+}
+
 // RelocFixupIface rewrites an interface value's data pointer at ifaceAddr.
 // For pointer-typed concrete values the interface VALUE slot IS the pointer.
 // For large structs the value slot IS a pointer to data. Both need translation.

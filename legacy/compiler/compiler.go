@@ -4401,6 +4401,13 @@ func (b *builder) emitRelocMarkValue(val llvm.Value, t types.Type) {
 			b.relocStateVal, val, sizeVal, b.uintptrConst(0),
 		}, "")
 
+	case *types.Interface:
+		ifaceType := b.getLLVMRuntimeType("_interface")
+		tmp := b.CreateAlloca(ifaceType, "m1if")
+		b.CreateStore(val, tmp)
+		b.createRuntimeCall("RelocMarkIface", []llvm.Value{
+			b.relocStateVal, tmp,
+		}, "")
 	case *types.Struct:
 		b.emitRelocMarkAlloca(val, t)
 	}
