@@ -4492,6 +4492,39 @@ func (b *builder) emitFieldFixup(gep llvm.Value, ft types.Type) {
 	switch fu.(type) {
 	case *types.Pointer:
 		b.createRuntimeCall("RelocFixupPtr", []llvm.Value{b.relocStateVal, gep}, "")
+		// Only fix up map fields for Scope and UniverseState structs.
+		if ptr, ok := fu.(*types.Pointer); ok && ptr.Elem() != nil {
+			if named, ok2 := ptr.Elem().(*types.Named); ok2 {
+				if st, ok3 := named.Underlying().(*types.Struct); ok3 {
+					n := named.Obj().Name()
+					if n == "Scope" || n == "UniverseState" {
+						slt := b.getLLVMType(named)
+						if slt.TypeKind() != llvm.VoidTypeKind {
+							ptrVal := b.CreateLoad(b.dataPtrType, gep, "p3pt")
+							fn := b.GetInsertBlock().Parent()
+							doBB := b.ctx.AddBasicBlock(fn, "p3rd")
+							skBB := b.ctx.AddBasicBlock(fn, "p3rs")
+							notNil := b.CreateICmp(llvm.IntNE, ptrVal, llvm.ConstNull(b.dataPtrType), "")
+							b.CreateCondBr(notNil, doBB, skBB)
+							b.SetInsertPointAtEnd(doBB)
+							for fi := 0; fi < st.NumFields(); fi++ {
+								fft := st.Field(fi).Type()
+								if ffu := fft.Underlying(); ffu != nil {
+									if _, isMap := ffu.(*types.Map); isMap {
+										fgep := b.CreateStructGEP(slt, ptrVal, fi, "p3pf")
+										oldVal := b.CreateLoad(b.dataPtrType, fgep, "p3pf")
+										newVal := b.createRuntimeCall("hashmapCopy", []llvm.Value{oldVal}, "p3pf")
+										b.CreateStore(newVal, fgep)
+									}
+								}
+							}
+							b.CreateBr(skBB)
+							b.SetInsertPointAtEnd(skBB)
+						}
+					}
+				}
+			}
+		}
 	case *types.Slice, *types.Basic:
 		if bk, ok := fu.(*types.Basic); ok && bk.Info()&types.IsString == 0 {
 			return
