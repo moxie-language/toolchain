@@ -4328,16 +4328,34 @@ func (b *builder) emitRelocMarkValue(val llvm.Value, t types.Type) {
 			elemSz = 1
 		}
 		sizeVal = b.uintptrConst(elemSz)
-		b.createRuntimeCall("RelocMark", []llvm.Value{
-			b.relocStateVal, val, sizeVal, b.uintptrConst(0),
-		}, "")
+		fixupArg := b.uintptrConst(0)
+		if st, ok := u.Elem().Underlying().(*types.Struct); ok {
+			if sym := b.getOrEmitRelocFixupFn(st); sym != "" {
+				bareSym := sym
+				if len(bareSym) > 0 && bareSym[0] == '@' {
+					bareSym = bareSym[1:]
+				}
+				if fn := b.mod.NamedFunction(bareSym); !fn.IsNil() {
+					fixupArg = b.CreatePtrToInt(fn, b.uintptrType, "m1fup")
+				}
+			}
+		}
+		isNew := b.createRuntimeCall("RelocMark", []llvm.Value{
+			b.relocStateVal, val, sizeVal, fixupArg,
+		}, "m1n")
 		if typeNeedsCopy(u.Elem()) {
-			// Mark fields of the pointed-to struct.
+			fn := b.GetInsertBlock().Parent()
+			markBB := b.ctx.AddBasicBlock(fn, "m1r")
+			skipBB := b.ctx.AddBasicBlock(fn, "m1s")
+			b.CreateCondBr(isNew, markBB, skipBB)
+			b.SetInsertPointAtEnd(markBB)
 			slt := b.getLLVMType(u.Elem())
 			tmp := b.CreateAlloca(slt, "m1r")
 			ld := b.CreateLoad(slt, val, "m1ld")
 			b.CreateStore(ld, tmp)
 			b.emitRelocMarkAlloca(tmp, u.Elem())
+			b.CreateBr(skipBB)
+			b.SetInsertPointAtEnd(skipBB)
 		}
 
 	case *types.Slice:
@@ -4472,6 +4490,26 @@ func (b *builder) emitFieldFixup(gep llvm.Value, ft types.Type) {
 
 // relocFixupSymbol returns the LLVM symbol name for a per-type fixup function.
 // Matches stage4 ir_deepcopy relocFixupSymbol.
+func (c *compilerContext) emitRelocCallFixupTrampoline() {
+	const sym = "runtime.relocCallFixup"
+	i64 := c.ctx.Int64Type()
+	ptr := c.dataPtrType
+	tp := llvm.FunctionType(c.ctx.VoidType(), []llvm.Type{i64, ptr, ptr, ptr}, false)
+	existing := c.mod.NamedFunction(sym)
+	if !existing.IsNil() { existing.EraseFromParentAsFunction() }
+	fn := llvm.AddFunction(c.mod, sym, tp)
+	fn.SetLinkage(llvm.LinkOnceODRLinkage)
+	entry := c.ctx.AddBasicBlock(fn, "entry")
+	saved := c.builder.GetInsertBlock()
+	c.builder.SetInsertPointAtEnd(entry)
+	fnArg, obj, rs := fn.Param(0), fn.Param(1), fn.Param(2)
+	fixupFnType := llvm.FunctionType(c.ctx.VoidType(), []llvm.Type{ptr, ptr, ptr}, false)
+	fp := c.builder.CreateIntToPtr(fnArg, llvm.PointerType(fixupFnType, 0), "fp")
+	c.builder.CreateCall(fixupFnType, fp, []llvm.Value{obj, rs, llvm.ConstNull(ptr)}, "")
+	c.builder.CreateRetVoid()
+	c.builder.SetInsertPointAtEnd(saved)
+}
+
 func relocFixupSymbol(typeName string) string {
 	h := fnv.New32a()
 	h.Write([]byte(typeName))
@@ -4481,16 +4519,16 @@ func relocFixupSymbol(typeName string) string {
 // emitRuntimeVoidCall emits a call to the named runtime function with
 // the given ptr args. Context parameter is added automatically.
 func (c *compilerContext) emitRuntimeVoidCall(name string, args ...llvm.Value) {
-	fn := c.mod.NamedFunction(name)
+	linkName := "runtime." + name
+	fn := c.mod.NamedFunction(linkName)
 	if fn.IsNil() {
-		// Runtime function not yet declared - declare it.
 		paramTypes := make([]llvm.Type, len(args)+1)
 		for i, a := range args {
 			paramTypes[i] = a.Type()
 		}
-		paramTypes[len(args)] = c.dataPtrType // context
+		paramTypes[len(args)] = c.dataPtrType
 		fnType := llvm.FunctionType(c.ctx.VoidType(), paramTypes, false)
-		fn = llvm.AddFunction(c.mod, name, fnType)
+		fn = llvm.AddFunction(c.mod, linkName, fnType)
 	}
 	callArgs := make([]llvm.Value, len(args)+1)
 	copy(callArgs, args)
@@ -4514,6 +4552,7 @@ func (c *compilerContext) getOrEmitRelocFixupFn(st *types.Struct) string {
 	if fn := c.mod.NamedFunction(bareSym); !fn.IsNil() {
 		return sym
 	}
+	c.emitRelocCallFixupTrampoline()
 	// Emit fixup function definition.
 	// define linkonce_odr void @sym(ptr %obj, ptr %rs, ptr %ctx)
 	fnType := llvm.FunctionType(c.ctx.VoidType(), []llvm.Type{c.dataPtrType, c.dataPtrType, c.dataPtrType}, false)
@@ -4541,14 +4580,53 @@ func (c *compilerContext) getOrEmitRelocFixupFn(st *types.Struct) string {
 		case *types.Map:
 			oldVal := c.builder.CreateLoad(c.dataPtrType, gep, "fg")
 			isNull := c.builder.CreateICmp(llvm.IntEQ, oldVal, llvm.ConstNull(c.dataPtrType), "")
+			nullBB := c.ctx.AddBasicBlock(fn, "fgnull")
 			notNullBB := c.ctx.AddBasicBlock(fn, "fgdo")
 			mergeBB := c.ctx.AddBasicBlock(fn, "fgsk")
-			c.builder.CreateCondBr(isNull, mergeBB, notNullBB)
+			c.builder.CreateCondBr(isNull, nullBB, notNullBB)
+			c.builder.SetInsertPointAtEnd(nullBB)
+			c.builder.CreateStore(llvm.ConstNull(c.dataPtrType), gep)
+			c.builder.CreateBr(mergeBB)
 			c.builder.SetInsertPointAtEnd(notNullBB)
 			rtPkg := c.program.ImportedPackage("runtime")
-			hmCopy := rtPkg.Members["hashmapCopy"].(*ssa.Function)
-			hmType, hmFn := c.getFunction(hmCopy)
-			newVal := c.builder.CreateCall(hmType, hmFn, []llvm.Value{oldVal, llvm.Undef(c.dataPtrType)}, "fg")
+
+			cbType := c.getLLVMRuntimeType("CodecBuf")
+			cb := c.builder.CreateAlloca(cbType, "cb")
+			c.builder.CreateStore(llvm.ConstNull(cbType), cb)
+			bufInit := rtPkg.Members["codecBufInit"].(*ssa.Function)
+			bufInitType, bufInitFn := c.getFunction(bufInit)
+			c.builder.CreateCall(bufInitType, bufInitFn, []llvm.Value{cb, llvm.Undef(c.dataPtrType)}, "")
+
+			ssType := c.getLLVMRuntimeType("codecSeenSet")
+			ss := c.builder.CreateAlloca(ssType, "ss")
+			ssInit := rtPkg.Members["codecSeenInit"].(*ssa.Function)
+			ssInitType, ssInitFn := c.getFunction(ssInit)
+			c.builder.CreateCall(ssInitType, ssInitFn, []llvm.Value{ss, llvm.Undef(c.dataPtrType)}, "")
+
+			encMap := rtPkg.Members["codecEncodeMap"].(*ssa.Function)
+			encType, encFn := c.getFunction(encMap)
+			c.builder.CreateCall(encType, encFn, []llvm.Value{oldVal, cb, ss, llvm.ConstInt(c.ctx.Int8Type(), 0, false), llvm.Undef(c.dataPtrType)}, "")
+
+			dsType := c.getLLVMRuntimeType("codecDecodeSeen")
+			ds := c.builder.CreateAlloca(dsType, "ds")
+			dsInit := rtPkg.Members["codecDecodeSeenInit"].(*ssa.Function)
+			dsInitType, dsInitFn := c.getFunction(dsInit)
+			c.builder.CreateCall(dsInitType, dsInitFn, []llvm.Value{ds, llvm.Undef(c.dataPtrType)}, "")
+
+			mt := ft.Underlying().(*types.Map)
+			llvmKeyType := c.getLLVMType(mt.Key())
+			llvmValType := c.getLLVMType(mt.Elem())
+			keySize := llvm.ConstInt(c.uintptrType, c.targetData.TypeAllocSize(llvmKeyType), false)
+			valSize := llvm.ConstInt(c.uintptrType, c.targetData.TypeAllocSize(llvmValType), false)
+			var algVal uint64
+			if isStringLike(mt.Key()) { algVal = 1
+			} else if hashmapIsBinaryKey(mt.Key()) { algVal = 0
+			} else { algVal = 2 }
+			alg := llvm.ConstInt(c.ctx.Int8Type(), algVal, false)
+			decMap := rtPkg.Members["codecDecodeMapFlagged"].(*ssa.Function)
+			decType, decFn := c.getFunction(decMap)
+			newVal := c.builder.CreateCall(decType, decFn, []llvm.Value{
+				cb, ds, keySize, valSize, alg, llvm.ConstInt(c.ctx.Int8Type(), 0, false), llvm.Undef(c.dataPtrType)}, "fg")
 			c.builder.CreateStore(newVal, gep)
 			c.builder.CreateBr(mergeBB)
 			c.builder.SetInsertPointAtEnd(mergeBB)

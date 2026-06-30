@@ -1,0 +1,105 @@
+package runtime
+
+import "unsafe"
+
+type CodecBuf struct {
+	data    []byte
+	pos     int32
+}
+
+func codecBufInit(cb *CodecBuf) {
+	cb.data = make([]byte, 0, 256)
+	cb.pos = 0
+}
+
+func codecWriteU32(cb *CodecBuf, v uint32) {
+	cb.data = append(cb.data, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+}
+
+func codecReadU32(cb *CodecBuf) (v uint32) {
+	if int32(len(cb.data)) < cb.pos+4 { runtimePanic("codec underflow") }
+	v = uint32(cb.data[cb.pos]) | uint32(cb.data[cb.pos+1])<<8 |
+		uint32(cb.data[cb.pos+2])<<16 | uint32(cb.data[cb.pos+3])<<24
+	cb.pos += 4; return
+}
+
+func codecWriteBytes(cb *CodecBuf, v []byte) {
+	codecWriteU32(cb, uint32(len(v)))
+	cb.data = append(cb.data, v...)
+}
+
+func codecReadBytes(cb *CodecBuf) (v []byte) {
+	n := int32(codecReadU32(cb))
+	if n == 0 { return nil }
+	if int32(len(cb.data)) < cb.pos+n { runtimePanic("codec underflow") }
+	v = make([]byte, n)
+	memcpy(unsafe.Pointer(&v[0]), unsafe.Pointer(&cb.data[cb.pos]), uintptr(n))
+	cb.pos += n; return
+}
+
+type codecSeenSet struct {
+	ptrs  [64]unsafe.Pointer
+	count int32
+}
+
+func codecSeenInit(ss *codecSeenSet) { ss.count = 0 }
+
+type codecDecodeSeen struct {
+	ptrs  [64]unsafe.Pointer
+	count int32
+}
+
+func codecDecodeSeenInit(ds *codecDecodeSeen) { ds.count = 0 }
+
+func codecEncodeMap(m *hashmap, cb *CodecBuf, ss *codecSeenSet, fixupFlags uint8) {
+	if m == nil || m.bucketBits == 0 {
+		codecWriteU32(cb, 0); return
+	}
+	keySz := m.keySize; valSz := m.valueSize
+	bucketSz := unsafe.Sizeof(hashmapBucket{}) + keySz*8 + valSz*8
+	fixVal := fixupFlags&2 != 0; fixIface := fixupFlags&4 != 0
+
+	cnt := int32(0)
+	nb := uintptr(1) << m.bucketBits
+	for bi := uintptr(0); bi < nb; bi++ {
+		for b := (*hashmapBucket)(unsafe.Add(m.buckets, bucketSz*bi)); b != nil; b = b.next {
+			for i := uint8(0); i < 8; i++ { if b.tophash[i] != 0 { cnt++ } }
+		}
+	}
+	codecWriteU32(cb, uint32(cnt))
+	if cnt == 0 { return }
+
+	for bi := uintptr(0); bi < nb; bi++ {
+		for b := (*hashmapBucket)(unsafe.Add(m.buckets, bucketSz*bi)); b != nil; b = b.next {
+			for i := uint8(0); i < 8; i++ {
+				if b.tophash[i] != 0 {
+					kp := hashmapSlotKey(m, b, i)
+					vp := hashmapSlotValue(m, b, i)
+					codecWriteBytes(cb, unsafe.Slice((*byte)(kp), keySz))
+					if fixVal {
+						codecWriteBytes(cb, unsafe.Slice((*byte)(vp), valSz))
+					} else if fixIface {
+						codecWriteBytes(cb, unsafe.Slice((*byte)(vp), valSz))
+					} else {
+						codecWriteBytes(cb, unsafe.Slice((*byte)(vp), valSz))
+					}
+				}
+			}
+		}
+	}
+}
+
+func codecDecodeMapFlagged(cb *CodecBuf, ds *codecDecodeSeen, keySz, valSz uintptr, alg uint8, fixupFlags uint8) (m *hashmap) {
+	cnt := int32(codecReadU32(cb))
+	m = hashmapMake(keySz, valSz, uintptr(cnt), alg)
+	if cnt == 0 { return }
+	for i := int32(0); i < cnt; i++ {
+		key := codecReadBytes(cb)
+		val := codecReadBytes(cb)
+		if uintptr(len(key)) == keySz && uintptr(len(val)) == valSz {
+			h := m.keyHash(unsafe.Pointer(&key[0]), keySz, m.seed)
+			hashmapSet(m, unsafe.Pointer(&key[0]), unsafe.Pointer(&val[0]), h)
+		}
+	}
+	return
+}
