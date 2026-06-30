@@ -4719,10 +4719,53 @@ func (c *compilerContext) getOrEmitRelocFixupFn(st *types.Struct) string {
 				case *types.Map:
 					ioVal := c.builder.CreateLoad(c.dataPtrType, igep, "fg")
 					rtPkg := c.program.ImportedPackage("runtime")
-					hmCopy := rtPkg.Members["hashmapCopy"].(*ssa.Function)
-					hmType, hmFn := c.getFunction(hmCopy)
-					inVal := c.builder.CreateCall(hmType, hmFn, []llvm.Value{ioVal, llvm.Undef(c.dataPtrType)}, "fg")
-					c.builder.CreateStore(inVal, igep)
+					mt2 := jft.Underlying().(*types.Map)
+					fixupFlags2 := uint8(0)
+					if isStringLike(mt2.Key()) { fixupFlags2 |= 8 }
+					if isStringLike(mt2.Elem()) { fixupFlags2 |= 8 }
+					if _, ok := mt2.Elem().Underlying().(*types.Interface); ok {
+						fixupFlags2 |= 4
+					}
+					// codec buffer
+					cbType := c.getLLVMRuntimeType("CodecBuf")
+					cb := c.builder.CreateAlloca(cbType, "cb")
+					c.builder.CreateStore(llvm.ConstNull(cbType), cb)
+					bufInit := rtPkg.Members["codecBufInit"].(*ssa.Function)
+					bufInitType, bufInitFn := c.getFunction(bufInit)
+					c.builder.CreateCall(bufInitType, bufInitFn, []llvm.Value{cb, llvm.Undef(c.dataPtrType)}, "")
+					// seen set for encode
+					ssType := c.getLLVMRuntimeType("codecSeenSet")
+					ss := c.builder.CreateAlloca(ssType, "ss")
+					ssInit := rtPkg.Members["codecSeenInit"].(*ssa.Function)
+					ssInitType, ssInitFn := c.getFunction(ssInit)
+					c.builder.CreateCall(ssInitType, ssInitFn, []llvm.Value{ss, llvm.Undef(c.dataPtrType)}, "")
+					// Encode map
+					encMap := rtPkg.Members["codecEncodeMap"].(*ssa.Function)
+					encType, encFn := c.getFunction(encMap)
+					fixupConst2 := llvm.ConstInt(c.ctx.Int8Type(), uint64(fixupFlags2), false)
+					c.builder.CreateCall(encType, encFn, []llvm.Value{ioVal, cb, ss, fixupConst2, llvm.Undef(c.dataPtrType)}, "")
+					// seen set for decode
+					dsType := c.getLLVMRuntimeType("codecDecodeSeen")
+					ds := c.builder.CreateAlloca(dsType, "ds")
+					dsInit := rtPkg.Members["codecDecodeSeenInit"].(*ssa.Function)
+					dsInitType, dsInitFn := c.getFunction(dsInit)
+					c.builder.CreateCall(dsInitType, dsInitFn, []llvm.Value{ds, llvm.Undef(c.dataPtrType)}, "")
+					// Key/value sizes and algorithm
+					llvmKeyType2 := c.getLLVMType(mt2.Key())
+					llvmValType2 := c.getLLVMType(mt2.Elem())
+					keySize2 := llvm.ConstInt(c.uintptrType, c.targetData.TypeAllocSize(llvmKeyType2), false)
+					valSize2 := llvm.ConstInt(c.uintptrType, c.targetData.TypeAllocSize(llvmValType2), false)
+					var algVal2 uint64
+					if isStringLike(mt2.Key()) { algVal2 = 1
+					} else if hashmapIsBinaryKey(mt2.Key()) { algVal2 = 0
+					} else { algVal2 = 2 }
+					alg2 := llvm.ConstInt(c.ctx.Int8Type(), algVal2, false)
+					// Decode map
+					decMap := rtPkg.Members["codecDecodeMapFlagged"].(*ssa.Function)
+					decType, decFn := c.getFunction(decMap)
+					newVal2 := c.builder.CreateCall(decType, decFn, []llvm.Value{
+						cb, ds, keySize2, valSize2, alg2, fixupConst2, llvm.Undef(c.dataPtrType)}, "fg")
+					c.builder.CreateStore(newVal2, igep)
 				}
 			}
 		}
