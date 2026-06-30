@@ -4322,12 +4322,24 @@ func (b *builder) emitRelocMarkValue(val llvm.Value, t types.Type) {
 	switch u := t.Underlying().(type) {
 	case *types.Pointer:
 		elemLLVM := b.getLLVMType(u.Elem())
-		var sizeVal llvm.Value
 		elemSz := b.targetData.TypeAllocSize(elemLLVM)
+		// For opaque runtime types (like hashmap), TypeAllocSize returns
+		// 0 or a pointer size (8). Use the Go types.StdSizes to get the
+		// correct struct size.
+		if elemSz < 16 {
+			if named, ok := u.Elem().(*types.Named); ok {
+				if st, ok := named.Underlying().(*types.Struct); ok {
+					sizes := types.StdSizes{WordSize: 8, MaxAlign: 8}
+					if sz := uint64(sizes.Sizeof(st)); sz > elemSz {
+						elemSz = sz
+					}
+				}
+			}
+		}
 		if elemSz == 0 {
 			elemSz = 1
 		}
-		sizeVal = b.uintptrConst(elemSz)
+		sizeVal := b.uintptrConst(elemSz)
 		fixupArg := b.uintptrConst(0)
 		if st, ok := u.Elem().Underlying().(*types.Struct); ok {
 			if sym := b.getOrEmitRelocFixupFn(st); sym != "" {
@@ -4345,10 +4357,12 @@ func (b *builder) emitRelocMarkValue(val llvm.Value, t types.Type) {
 		}, "m1n")
 		if typeNeedsCopy(u.Elem()) {
 			fn := b.GetInsertBlock().Parent()
-			markBB := b.ctx.AddBasicBlock(fn, "m1r")
+			notNilBB := b.ctx.AddBasicBlock(fn, "m1n")
 			skipBB := b.ctx.AddBasicBlock(fn, "m1s")
-			b.CreateCondBr(isNew, markBB, skipBB)
-			b.SetInsertPointAtEnd(markBB)
+			notNil := b.CreateICmp(llvm.IntNE, val, llvm.ConstNull(b.dataPtrType), "")
+			canMark := b.CreateAnd(isNew, notNil, "")
+			b.CreateCondBr(canMark, notNilBB, skipBB)
+			b.SetInsertPointAtEnd(notNilBB)
 			slt := b.getLLVMType(u.Elem())
 			tmp := b.CreateAlloca(slt, "m1r")
 			ld := b.CreateLoad(slt, val, "m1ld")
@@ -4378,7 +4392,23 @@ func (b *builder) emitRelocMarkValue(val llvm.Value, t types.Type) {
 		}
 
 	case *types.Map:
-		sizeVal := b.uintptrConst(b.targetData.TypeAllocSize(b.dataPtrType))
+		// Use sizeof(hashmap) = 104 to forward the full hashmap struct.
+		// TypeAllocSize returns 0 or 8 for the opaque hashmap type, so
+		// compute the correct size from the Go type system.
+		hmSz := uint64(104)
+		if rtPkg := b.runtimePkg; rtPkg != nil {
+			if hmObj := rtPkg.Scope().Lookup("hashmap"); hmObj != nil {
+				if hmT, ok := hmObj.(*types.TypeName); ok {
+					if named, ok := hmT.Type().(*types.Named); ok {
+						if st, ok := named.Underlying().(*types.Struct); ok {
+							sizes := types.StdSizes{WordSize: 8, MaxAlign: 8}
+							hmSz = uint64(sizes.Sizeof(st))
+						}
+					}
+				}
+			}
+		}
+		sizeVal := b.uintptrConst(hmSz)
 		b.createRuntimeCall("RelocMark", []llvm.Value{
 			b.relocStateVal, val, sizeVal, b.uintptrConst(0),
 		}, "")
