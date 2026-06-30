@@ -4364,6 +4364,10 @@ func (b *builder) emitRelocMarkValue(val llvm.Value, t types.Type) {
 		b.createRuntimeCall("RelocMark", []llvm.Value{
 			b.relocStateVal, val, sizeVal, b.uintptrConst(0),
 		}, "")
+		// Mark map entry value data so it gets relocated by forward+compact
+		b.createRuntimeCall("RelocMarkMapValues", []llvm.Value{
+			b.relocStateVal, val,
+		}, "")
 
 	case *types.Struct:
 		b.emitRelocMarkAlloca(val, t)
@@ -4470,6 +4474,25 @@ func (b *builder) emitFieldFixup(gep llvm.Value, ft types.Type) {
 	}
 }
 
+// mapEntryFixupFlags returns fixup flags for RelocFixupMapValues.
+// bit1=fix value ptr, bit2=fix value as interface (ptr at offset 8).
+// Key fixup (bit0) is skipped - string data pointers for constant strings
+// are in the data section and don't need relocation. Heap-allocated strings
+// are covered by the mark pass which marks the bucket array.
+func mapEntryFixupFlags(mapType types.Type) (flags uint8) {
+	mt := mapType.Underlying().(*types.Map)
+	vt := mt.Elem()
+	if vt != nil {
+		switch vt.Underlying().(type) {
+		case *types.Pointer:
+			flags |= 2
+		case *types.Interface:
+			flags |= 4
+		}
+	}
+	return flags
+}
+
 // relocFixupSymbol returns the LLVM symbol name for a per-type fixup function.
 // Matches stage4 ir_deepcopy relocFixupSymbol.
 func relocFixupSymbol(typeName string) string {
@@ -4550,6 +4573,13 @@ func (c *compilerContext) getOrEmitRelocFixupFn(st *types.Struct) string {
 			hmType, hmFn := c.getFunction(hmCopy)
 			newVal := c.builder.CreateCall(hmType, hmFn, []llvm.Value{oldVal, llvm.Undef(c.dataPtrType)}, "fg")
 			c.builder.CreateStore(newVal, gep)
+			flags := llvm.ConstInt(c.ctx.Int8Type(), uint64(mapEntryFixupFlags(ft)), false)
+			rtPkg2 := c.program.ImportedPackage("runtime")
+			fixMap := rtPkg2.Members["RelocFixupMapValues"].(*ssa.Function)
+			fixType, fixFn := c.getFunction(fixMap)
+			c.builder.CreateCall(fixType, fixFn, []llvm.Value{
+				rs, newVal, flags, llvm.Undef(c.dataPtrType),
+			}, "")
 			c.builder.CreateBr(mergeBB)
 			c.builder.SetInsertPointAtEnd(mergeBB)
 		case *types.Struct:
@@ -4574,6 +4604,13 @@ func (c *compilerContext) getOrEmitRelocFixupFn(st *types.Struct) string {
 					hmType, hmFn := c.getFunction(hmCopy)
 					inVal := c.builder.CreateCall(hmType, hmFn, []llvm.Value{ioVal, llvm.Undef(c.dataPtrType)}, "fg")
 					c.builder.CreateStore(inVal, igep)
+					iflags := llvm.ConstInt(c.ctx.Int8Type(), uint64(mapEntryFixupFlags(jft)), false)
+					irtPkg := c.program.ImportedPackage("runtime")
+					ifixMap := irtPkg.Members["RelocFixupMapValues"].(*ssa.Function)
+					ifixType, ifixFn := c.getFunction(ifixMap)
+					c.builder.CreateCall(ifixType, ifixFn, []llvm.Value{
+						rs, inVal, iflags, llvm.Undef(c.dataPtrType),
+					}, "")
 				}
 			}
 		}

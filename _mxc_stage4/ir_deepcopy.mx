@@ -210,6 +210,28 @@ func (e *irEmitter) relocStateType() (s string) {
 	return "{ptr, " | ipt | ", ptr, i32}"
 }
 
+// mapValueFixupFlags returns RelocFixupMapValues fixupFlags for a map type.
+// Matches legacy mapEntryFixupFlags exactly.
+func mapValueFixupFlags(t Type) (flags uint8) {
+	u := SafeUnderlying(t)
+	mt, ok := u.(*TCMap)
+	if !ok || mt == nil {
+		return 0
+	}
+	vt := mt.Elem
+	if vt == nil {
+		return 0
+	}
+	vu := SafeUnderlying(vt)
+	switch vu.(type) {
+	case *Pointer:
+		flags = 2
+	case *TCInterface:
+		flags = 4
+	}
+	return flags
+}
+
 // --- Pass 1 codegen: Mark ---
 
 func (e *irEmitter) emitRelocMark(reg string, t Type, rs string) {
@@ -278,6 +300,8 @@ func (e *irEmitter) emitRelocMark(reg string, t Type, rs string) {
 		e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr ({ptr}, ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 		e.w("  call i1 @runtime.RelocMark(ptr ") ; e.w(rs) ; e.w(", ptr ") ; e.w(reg) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ") ; e.w(ipt) ; e.w(" 0, ptr null)\n")
 		e.declareRuntime("runtime.RelocMark", "i1", "ptr, ptr, " | ipt | ", " | ipt)
+		e.w("  call void @runtime.RelocMarkMapValues(ptr ") ; e.w(rs) ; e.w(", ptr ") ; e.w(reg) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.RelocMarkMapValues", "void", "ptr, ptr")
 	case *TCStruct:
 		e.emitRelocMarkStructFields(reg, tt, rs)
 	}
@@ -359,6 +383,8 @@ func (e *irEmitter) emitRelocFixup(reg string, t Type, rs string) (newReg string
 		r := "%p3m" ; r = r | irItoa(e.nextReg)
 		e.w("  ") ; e.w(r) ; e.w(" = call ptr @runtime.hashmapCopy(ptr ") ; e.w(reg) ; e.w(", ptr null)\n")
 		e.declareRuntime("runtime.hashmapCopy", "ptr", "ptr")
+		e.w("  call void @runtime.RelocFixupMapValues(ptr ") ; e.w(rs) ; e.w(", ptr ") ; e.w(r) ; e.w(", i8 ") ; e.w(irItoa(int32(mapValueFixupFlags(t)))) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.RelocFixupMapValues", "void", "ptr, ptr, i8")
 		return r
 	case *TCStruct:
 		return e.emitRelocFixupStruct(reg, tt, rs)
@@ -402,6 +428,8 @@ func (e *irEmitter) emitRelocFixupFields(ptrReg string, t Type, rs string) {
 			nw := "%p3ff" ; nw = nw | irItoa(e.nextReg)
 			e.w("  ") ; e.w(nw) ; e.w(" = call ptr @runtime.hashmapCopy(ptr ") ; e.w(old) ; e.w(", ptr null)\n")
 			e.declareRuntime("runtime.hashmapCopy", "ptr", "ptr")
+			e.w("  call void @runtime.RelocFixupMapValues(ptr ") ; e.w(rs) ; e.w(", ptr ") ; e.w(nw) ; e.w(", i8 ") ; e.w(irItoa(int32(mapValueFixupFlags(ft)))) ; e.w(", ptr null)\n")
+			e.declareRuntime("runtime.RelocFixupMapValues", "void", "ptr, ptr, i8")
 			e.w("  store volatile ptr ") ; e.w(nw) ; e.w(", ptr ") ; e.w(gep) ; e.w("\n")
 		case *TCStruct:
 			e.emitRelocFixupFields(gep, ft, rs)
@@ -446,6 +474,8 @@ func (e *irEmitter) emitRelocFixupStruct(reg string, st *TCStruct, rs string) (n
 			nw := "%p3st" ; nw = nw | irItoa(e.nextReg)
 			e.w("  ") ; e.w(nw) ; e.w(" = call ptr @runtime.hashmapCopy(ptr ") ; e.w(old) ; e.w(", ptr null)\n")
 			e.declareRuntime("runtime.hashmapCopy", "ptr", "ptr")
+			e.w("  call void @runtime.RelocFixupMapValues(ptr ") ; e.w(rs) ; e.w(", ptr ") ; e.w(nw) ; e.w(", i8 ") ; e.w(irItoa(int32(mapValueFixupFlags(ft)))) ; e.w(", ptr null)\n")
+			e.declareRuntime("runtime.RelocFixupMapValues", "void", "ptr, ptr, i8")
 			e.w("  store volatile ptr ") ; e.w(nw) ; e.w(", ptr ") ; e.w(gep) ; e.w("\n")
 		case *TCStruct:
 			e.emitRelocFixupFields(gep, ft, rs)
@@ -514,6 +544,7 @@ func (e *irEmitter) getOrEmitRelocFixupFn(st *TCStruct) (sym string) {
 	e.declareRuntime("runtime.RelocFixupPtr", "void", "ptr, ptr")
 	e.declareRuntime("runtime.RelocFixupSlice", "void", "ptr, ptr")
 	e.declareRuntime("runtime.hashmapCopy", "ptr", "ptr")
+	e.declareRuntime("runtime.RelocFixupMapValues", "void", "ptr, ptr, i8")
 	// Write fixup function directly to output file using per-segment writes.
 	if e.outFile != nil {
 		e.outFile.Write([]byte("\ndefine linkonce_odr void "))
@@ -578,6 +609,11 @@ func (e *irEmitter) getOrEmitRelocFixupFn(st *TCStruct) (sym string) {
 				e.outFile.Write([]byte(nw))
 				e.outFile.Write([]byte(" = call ptr @runtime.hashmapCopy(ptr "))
 				e.outFile.Write([]byte(old))
+				e.outFile.Write([]byte(", ptr null)\n"))
+				e.outFile.Write([]byte("  call void @runtime.RelocFixupMapValues(ptr %rs, ptr "))
+				e.outFile.Write([]byte(nw))
+				e.outFile.Write([]byte(", i8 "))
+				e.outFile.Write([]byte(irItoa(int32(mapValueFixupFlags(ft)))))
 				e.outFile.Write([]byte(", ptr null)\n"))
 				e.outFile.Write([]byte("  store ptr "))
 				e.outFile.Write([]byte(nw))
@@ -652,6 +688,11 @@ func (e *irEmitter) getOrEmitRelocFixupFn(st *TCStruct) (sym string) {
 							e.outFile.Write([]byte(inw))
 							e.outFile.Write([]byte(" = call ptr @runtime.hashmapCopy(ptr "))
 							e.outFile.Write([]byte(io))
+							e.outFile.Write([]byte(", ptr null)\n"))
+							e.outFile.Write([]byte("  call void @runtime.RelocFixupMapValues(ptr %rs, ptr "))
+							e.outFile.Write([]byte(inw))
+							e.outFile.Write([]byte(", i8 "))
+							e.outFile.Write([]byte(irItoa(int32(mapValueFixupFlags(jft)))))
 							e.outFile.Write([]byte(", ptr null)\n"))
 							e.outFile.Write([]byte("  store ptr "))
 							e.outFile.Write([]byte(inw))
