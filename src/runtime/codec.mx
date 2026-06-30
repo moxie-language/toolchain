@@ -92,15 +92,17 @@ func codecEncodeMap(m *hashmap, cb *CodecBuf, ss *codecSeenSet, fixupFlags uint8
 							codecWriteBytes(cb, unsafe.Slice((*byte)(p), valSz))
 						}
 					} else if fixIface {
-						// Value is an interface - encode type+data
+						// Deep-encode interface value: follow value pointer, serialize concrete data.
 						iface := *(*_interface)(vp)
 						if iface.typecode == nil {
 							codecWriteU32(cb, 0)
 							codecWriteU32(cb, 0)
 						} else {
+							tc := (*rawType)(iface.typecode)
+							dataSz := tc.elem().size()  // size of the pointed-to concrete type
 							codecWriteBytes(cb, unsafe.Slice((*byte)(unsafe.Pointer(&iface.typecode)), 8))
-							codecWriteU32(cb, uint32(valSz))
-							codecWriteBytes(cb, unsafe.Slice((*byte)(iface.value), valSz))
+							codecWriteU32(cb, uint32(dataSz))
+							codecWriteBytes(cb, unsafe.Slice((*byte)(iface.value), dataSz))
 						}
 					} else {
 						codecWriteBytes(cb, unsafe.Slice((*byte)(vp), valSz))
@@ -151,7 +153,10 @@ func codecDecodeMapFlagged(cb *CodecBuf, ds *codecDecodeSeen, keySz, valSz uintp
 				raw := codecReadBytes(cb)
 				buf := make([]byte, valSz)
 				*(*unsafe.Pointer)(unsafe.Pointer(&buf[0])) = *(*unsafe.Pointer)(unsafe.Pointer(&typRaw[0]))
-				*(*unsafe.Pointer)(unsafe.Pointer(&buf[8])) = unsafe.Pointer(&raw[0])
+				// Allocate new memory for the concrete data and copy
+				dataAlloc := alloc(uintptr(n), nil)
+				memcpy(dataAlloc, unsafe.Pointer(&raw[0]), uintptr(n))
+				*(*unsafe.Pointer)(unsafe.Pointer(&buf[8])) = dataAlloc
 				val = buf
 			}
 		} else {
