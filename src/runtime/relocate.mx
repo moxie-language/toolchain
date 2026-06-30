@@ -186,22 +186,78 @@ func RelocMarkIface(rs *RelocState, ifaceAddr unsafe.Pointer) {
 	}
 }
 
-// RelocFixupIface rewrites an interface value's data pointer at ifaceAddr.
-// For pointer-typed concrete values the interface VALUE slot IS the pointer.
-// For large structs the value slot IS a pointer to data. Both need translation.
-func RelocFixupIface(rs *RelocState, ifaceAddr unsafe.Pointer) {
-	iface := *(*_interface)(ifaceAddr)
-	if iface.typecode == nil {
+// relocFixupSeen prevents infinite recursion through the type graph.
+type relocFixupSeen struct {
+	ptrs  [64]unsafe.Pointer
+	count int32
+}
+func relocFixupSeenCheck(seen *relocFixupSeen, p unsafe.Pointer) bool {
+	for i := int32(0); i < seen.count; i++ {
+		if seen.ptrs[i] == p { return true }
+	}
+	if seen.count >= 64 { return true }
+	seen.ptrs[seen.count] = p
+	seen.count++
+	return false
+}
+
+// relocFixupStructFields recursively fixes up pointer/slice/interface fields
+// in an already-forwarded struct using rawType descriptor field info.
+func relocFixupStructFields(rs *RelocState, t *rawType, ptr unsafe.Pointer, seen *relocFixupSeen) {
+	if ptr == nil { return }
+	k := t.kind()
+	if k == kindPointer {
+		relocFixupStructFields(rs, t.elem(), *(*unsafe.Pointer)(ptr), seen)
 		return
 	}
-	t := (*rawType)(iface.typecode)
-	// Pointer-typed values store the pointer directly in value slot.
-	// Large values (structs > sizeof(uintptr)) store a pointer to data.
-	// Both need translation if the target is in the function's arena.
-	if t.kind() == kindPointer || t.size() > unsafe.Sizeof(uintptr(0)) {
-		newPtr := RelocLookup(rs, iface.value)
-		if newPtr != iface.value {
-			*(*unsafe.Pointer)(unsafe.Add(ifaceAddr, 8)) = newPtr
+	if k != kindStruct { return }
+	if relocFixupSeenCheck(seen, ptr) { return }
+	nf := t.numField()
+	for i := int32(0); i < nf; i++ {
+		ft := t.structFieldType(i)
+		off := t.structFieldOffset(i)
+		fp := unsafe.Add(ptr, off)
+		fk := ft.kind()
+		switch {
+		case fk == kindPointer:
+			RelocFixupPtr(rs, fp)
+			p := *(*unsafe.Pointer)(fp)
+			if p != nil {
+				relocFixupStructFields(rs, ft.elem(), p, seen)
+			}
+		case fk == kindSlice || fk == kindBytes:
+			RelocFixupSlice(rs, fp)
+		case fk == kindInterface:
+			relocFixupInterfaceValue(rs, fp, seen)
 		}
 	}
+}
+
+// relocFixupInterfaceValue translates an interface's value pointer and
+// recursively fixes up the concrete struct's fields.
+func relocFixupInterfaceValue(rs *RelocState, ifaceAddr unsafe.Pointer, seen *relocFixupSeen) {
+	iface := *(*_interface)(ifaceAddr)
+	if iface.typecode == nil { return }
+	t := (*rawType)(iface.typecode)
+	if t.kind() != kindPointer && t.size() <= unsafe.Sizeof(uintptr(0)) {
+		return
+	}
+	// Translate pointer through relocation table
+	newPtr := RelocLookup(rs, iface.value)
+	if newPtr == iface.value || newPtr == nil { return }
+	*(*unsafe.Pointer)(unsafe.Add(ifaceAddr, 8)) = newPtr
+	// Recursively fix up the concrete struct's internal fields
+	if t.kind() == kindPointer {
+		relocFixupStructFields(rs, t.elem(), newPtr, seen)
+	} else {
+		relocFixupStructFields(rs, t, newPtr, seen)
+	}
+}
+
+// RelocFixupIface is the public entry point called from compiler-generated
+// per-type fixup functions, wrapping relocFixupInterfaceValue with a fresh
+// seen set to prevent cycles.
+func RelocFixupIface(rs *RelocState, ifaceAddr unsafe.Pointer) {
+	var seen relocFixupSeen
+	relocFixupInterfaceValue(rs, ifaceAddr, &seen)
 }

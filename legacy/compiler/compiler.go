@@ -4648,8 +4648,10 @@ func (c *compilerContext) getOrEmitRelocFixupFn(st *types.Struct) string {
 			c.emitRuntimeVoidCall("RelocFixupPtr", rs, gep)
 		case *types.Slice, *types.Basic:
 			c.emitRuntimeVoidCall("RelocFixupSlice", rs, gep)
+		case *types.Interface:
+					c.emitRuntimeVoidCall("RelocFixupIface", rs, gep)
 		case *types.Map:
-			ioVal := c.builder.CreateLoad(c.dataPtrType, gep, "fg")
+					ioVal := c.builder.CreateLoad(c.dataPtrType, gep, "fg")
 			rtPkg := c.program.ImportedPackage("runtime")
 
 			// Compute fixup flags from key/value types.
@@ -4723,8 +4725,6 @@ func (c *compilerContext) getOrEmitRelocFixupFn(st *types.Struct) string {
 					c.emitRuntimeVoidCall("RelocFixupPtr", rs, igep)
 				case *types.Slice, *types.Basic:
 					c.emitRuntimeVoidCall("RelocFixupSlice", rs, igep)
-		case *types.Interface:
-					c.emitRuntimeVoidCall("RelocFixupIface", rs, igep)
 		case *types.Map:
 					ioVal := c.builder.CreateLoad(c.dataPtrType, igep, "fg")
 					rtPkg := c.program.ImportedPackage("runtime")
