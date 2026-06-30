@@ -4644,10 +4644,63 @@ func (c *compilerContext) getOrEmitRelocFixupFn(st *types.Struct) string {
 		case *types.Map:
 			ioVal := c.builder.CreateLoad(c.dataPtrType, gep, "fg")
 			rtPkg := c.program.ImportedPackage("runtime")
-			hmCopy := rtPkg.Members["hashmapCopy"].(*ssa.Function)
-			hmType, hmFn := c.getFunction(hmCopy)
-			inVal := c.builder.CreateCall(hmType, hmFn, []llvm.Value{ioVal, llvm.Undef(c.dataPtrType)}, "fg")
-			c.builder.CreateStore(inVal, gep)
+
+			// Compute fixup flags from key/value types.
+			mt := ft.Underlying().(*types.Map)
+			fixupFlags := uint8(0)
+			if isStringLike(mt.Key()) { fixupFlags |= 8 }
+			if isStringLike(mt.Elem()) { fixupFlags |= 8 }
+			if hashmapIsBinaryKey(mt.Elem()) {
+				// value is a pointer type - do NOT set fixVal for binary
+			}
+			if _, ok := mt.Elem().Underlying().(*types.Interface); ok {
+				fixupFlags |= 4
+			}
+			// codec buffer
+			cbType := c.getLLVMRuntimeType("CodecBuf")
+			cb := c.builder.CreateAlloca(cbType, "cb")
+			c.builder.CreateStore(llvm.ConstNull(cbType), cb)
+			bufInit := rtPkg.Members["codecBufInit"].(*ssa.Function)
+			bufInitType, bufInitFn := c.getFunction(bufInit)
+			c.builder.CreateCall(bufInitType, bufInitFn, []llvm.Value{cb, llvm.Undef(c.dataPtrType)}, "")
+
+			// seen set for encode
+			ssType := c.getLLVMRuntimeType("codecSeenSet")
+			ss := c.builder.CreateAlloca(ssType, "ss")
+			ssInit := rtPkg.Members["codecSeenInit"].(*ssa.Function)
+			ssInitType, ssInitFn := c.getFunction(ssInit)
+			c.builder.CreateCall(ssInitType, ssInitFn, []llvm.Value{ss, llvm.Undef(c.dataPtrType)}, "")
+
+			// Encode map
+			encMap := rtPkg.Members["codecEncodeMap"].(*ssa.Function)
+			encType, encFn := c.getFunction(encMap)
+			fixupConst := llvm.ConstInt(c.ctx.Int8Type(), uint64(fixupFlags), false)
+			c.builder.CreateCall(encType, encFn, []llvm.Value{ioVal, cb, ss, fixupConst, llvm.Undef(c.dataPtrType)}, "")
+
+			// seen set for decode
+			dsType := c.getLLVMRuntimeType("codecDecodeSeen")
+			ds := c.builder.CreateAlloca(dsType, "ds")
+			dsInit := rtPkg.Members["codecDecodeSeenInit"].(*ssa.Function)
+			dsInitType, dsInitFn := c.getFunction(dsInit)
+			c.builder.CreateCall(dsInitType, dsInitFn, []llvm.Value{ds, llvm.Undef(c.dataPtrType)}, "")
+
+			// Key/value sizes and algorithm
+			llvmKeyType := c.getLLVMType(mt.Key())
+			llvmValType := c.getLLVMType(mt.Elem())
+			keySize := llvm.ConstInt(c.uintptrType, c.targetData.TypeAllocSize(llvmKeyType), false)
+			valSize := llvm.ConstInt(c.uintptrType, c.targetData.TypeAllocSize(llvmValType), false)
+			var algVal uint64
+			if isStringLike(mt.Key()) { algVal = 1
+			} else if hashmapIsBinaryKey(mt.Key()) { algVal = 0
+			} else { algVal = 2 }
+			alg := llvm.ConstInt(c.ctx.Int8Type(), algVal, false)
+
+			// Decode map
+			decMap := rtPkg.Members["codecDecodeMapFlagged"].(*ssa.Function)
+			decType, decFn := c.getFunction(decMap)
+			newVal := c.builder.CreateCall(decType, decFn, []llvm.Value{
+				cb, ds, keySize, valSize, alg, fixupConst, llvm.Undef(c.dataPtrType)}, "fg")
+			c.builder.CreateStore(newVal, gep)
 		case *types.Struct:
 			innerSt := fu.(*types.Struct)
 			innerSlt := c.getLLVMType(innerSt)
