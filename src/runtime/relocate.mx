@@ -164,3 +164,23 @@ func RelocFixupSlice(rs *RelocState, sliceAddr unsafe.Pointer) {
 	}
 	*(*unsafe.Pointer)(sliceAddr) = RelocLookup(rs, old)
 }
+
+// RelocFixupIface rewrites an interface value's data pointer at ifaceAddr.
+// For pointer-typed concrete values the interface VALUE slot IS the pointer.
+// For large structs the value slot IS a pointer to data. Both need translation.
+func RelocFixupIface(rs *RelocState, ifaceAddr unsafe.Pointer) {
+	iface := *(*_interface)(ifaceAddr)
+	if iface.typecode == nil {
+		return
+	}
+	t := (*rawType)(iface.typecode)
+	// Pointer-typed values store the pointer directly in value slot.
+	// Large values (structs > sizeof(uintptr)) store a pointer to data.
+	// Both need translation if the target is in the function's arena.
+	if t.kind() == kindPointer || t.size() > unsafe.Sizeof(uintptr(0)) {
+		newPtr := RelocLookup(rs, iface.value)
+		if newPtr != iface.value {
+			*(*unsafe.Pointer)(unsafe.Add(ifaceAddr, 8)) = newPtr
+		}
+	}
+}

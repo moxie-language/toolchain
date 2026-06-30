@@ -4716,7 +4716,9 @@ func (c *compilerContext) getOrEmitRelocFixupFn(st *types.Struct) string {
 					c.emitRuntimeVoidCall("RelocFixupPtr", rs, igep)
 				case *types.Slice, *types.Basic:
 					c.emitRuntimeVoidCall("RelocFixupSlice", rs, igep)
-				case *types.Map:
+		case *types.Interface:
+					c.emitRuntimeVoidCall("RelocFixupIface", rs, igep)
+		case *types.Map:
 					ioVal := c.builder.CreateLoad(c.dataPtrType, igep, "fg")
 					rtPkg := c.program.ImportedPackage("runtime")
 					mt2 := jft.Underlying().(*types.Map)
