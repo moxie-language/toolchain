@@ -29,7 +29,6 @@ func codecWriteU32(cb *CodecBuf, v uint32) {
 }
 
 func codecReadU32(cb *CodecBuf) (v uint32) {
-	if int32(len(cb.data)) < cb.pos+4 { runtimePanic("codec underflow") }
 	v = uint32(cb.data[cb.pos]) | uint32(cb.data[cb.pos+1])<<8 |
 		uint32(cb.data[cb.pos+2])<<16 | uint32(cb.data[cb.pos+3])<<24
 	cb.pos += 4; return
@@ -64,7 +63,7 @@ func codecSeenLookup(ss *codecSeenSet, p unsafe.Pointer) int32 {
 }
 
 func codecSeenAdd(ss *codecSeenSet, p unsafe.Pointer) int32 {
-	if ss.count >= 64 { runtimePanic("codec seen set full") }
+	if ss.count >= 64 { return -1 }
 	ss.ptrs[ss.count] = p
 	n := ss.count
 	ss.count++
@@ -79,7 +78,7 @@ type codecDecodeSeen struct {
 func codecDecodeSeenInit(ds *codecDecodeSeen) { ds.count = 0 }
 
 func codecDecodeSeenAdd(ds *codecDecodeSeen, p unsafe.Pointer) int32 {
-	if ds.count >= 64 { runtimePanic("codec decode seen set full") }
+	if ds.count >= 64 { return -1 }
 	ds.ptrs[ds.count] = p
 	n := ds.count
 	ds.count++
@@ -87,7 +86,7 @@ func codecDecodeSeenAdd(ds *codecDecodeSeen, p unsafe.Pointer) int32 {
 }
 
 func codecDecodeSeenLookup(ds *codecDecodeSeen, idx int32) unsafe.Pointer {
-	if idx >= ds.count { runtimePanic("codec decode seen lookup oob") }
+	if idx >= ds.count { return nil }
 	return ds.ptrs[idx]
 }
 
@@ -150,8 +149,20 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *r
 			}
 		}
 	case kindMap:
-		// Maps are handled by the compiler-level emitCodecEncodeReturn which
-		// calls codecEncodeMap directly. The fallback here encodes raw bytes.
+		m := *(*unsafe.Pointer)(ptr)
+		if m == nil {
+			cb.data = append(cb.data, byte(codecTagNil))
+			return
+		}
+		cb.data = append(cb.data, byte(codecTagPtr))
+		hm := (*hashmap)(m)
+		fixupFlags := uint8(0)
+		kt := hashmapKeyType(typ)
+		vt := typ.elem()
+		if kt != nil && (kt.kind() == kindBytes) { fixupFlags |= 8 }
+		if vt != nil && (vt.kind() == kindBytes) { fixupFlags |= 8 }
+		if vt != nil && (vt.kind() == kindInterface) { fixupFlags |= 4 }
+		codecEncodeMap(hm, cb, ss, fixupFlags)
 	case kindStruct:
 		nf := typ.numField()
 		cb.data = append(cb.data, byte(codecTagStruct))
@@ -310,12 +321,18 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *rawType) unsafe.Po
 		return buf
 	case kindMap:
 		buf := alloc(typ.size(), nil)
-		// Decode map pointer via raw bytes, then hashmapCopy creates new buckets.
-		// (kindMap encode writes entries, but compiler bounds-check bugs prevent
-		// entry-based decode; the compiler-level emitFixupMaps calls hashmapCopy.)
-		sz := typ.size()
-		memcpy(buf, unsafe.Pointer(&cb.data[cb.pos]), sz)
-		cb.pos += int32(sz)
+		kt := hashmapKeyType(typ)
+		vt := typ.elem()
+		keySz := kt.size()
+		valSz := vt.size()
+		alg := uint8(0)
+		if kt.kind() == kindBytes { alg = 1 }
+		flags := uint8(0)
+		if kt.kind() == kindBytes { flags |= 8 }
+		if vt.kind() == kindBytes { flags |= 8 }
+		if vt.kind() == kindInterface { flags |= 4 }
+		decoded := codecDecodeMapValue(cb, ds, keySz, valSz, alg, flags, kt, vt)
+		*(*unsafe.Pointer)(buf) = unsafe.Pointer(decoded)
 		return buf
 	default:
 		sz := typ.size()

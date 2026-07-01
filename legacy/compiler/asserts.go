@@ -17,21 +17,9 @@ import (
 // cause a panic.
 // The caller should make sure that index is at least as big as arrayLen.
 func (b *builder) createLookupBoundsCheck(arrayLen, index llvm.Value) {
-	if b.info.nobounds {
-		// The //go:nobounds pragma was added to the function to avoid bounds
-		// checking.
-		return
-	}
-
-	// Extend arrayLen if it's too small.
-	if index.Type().IntTypeWidth() > arrayLen.Type().IntTypeWidth() {
-		// The index is bigger than the array length type, so extend it.
-		arrayLen = b.CreateZExt(arrayLen, index.Type(), "")
-	}
-
-	// Now do the bounds check: index >= arrayLen
-	outOfBounds := b.CreateICmp(llvm.IntUGE, index, arrayLen, "")
-	b.createRuntimeAssert(outOfBounds, "lookup", "lookupPanic")
+	// Moxie: no bounds checks. The programmer is responsible for ensuring
+	// indices are within bounds. This function is kept as a no-op to avoid
+	// changing all the call sites.
 }
 
 // createSliceBoundsCheck emits a bounds check before a slicing operation to make
@@ -42,39 +30,9 @@ func (b *builder) createLookupBoundsCheck(arrayLen, index llvm.Value) {
 // biggest possible slice capacity, 'low' means len and 'high' means cap. The
 // logic is the same in both cases.
 func (b *builder) createSliceBoundsCheck(capacity, low, high, max llvm.Value, lowType, highType, maxType *types.Basic) {
-	if b.info.nobounds {
-		// The //go:nobounds pragma was added to the function to avoid bounds
-		// checking.
-		return
-	}
-
-	// Extend the capacity integer to be at least as wide as low and high.
-	capacityType := capacity.Type()
-	if low.Type().IntTypeWidth() > capacityType.IntTypeWidth() {
-		capacityType = low.Type()
-	}
-	if high.Type().IntTypeWidth() > capacityType.IntTypeWidth() {
-		capacityType = high.Type()
-	}
-	if max.Type().IntTypeWidth() > capacityType.IntTypeWidth() {
-		capacityType = max.Type()
-	}
-	if capacityType != capacity.Type() {
-		capacity = b.CreateZExt(capacity, capacityType, "")
-	}
-
-	// Extend low and high to be the same size as capacity.
-	low = b.extendInteger(low, lowType, capacityType)
-	high = b.extendInteger(high, highType, capacityType)
-	max = b.extendInteger(max, maxType, capacityType)
-
-	// Now do the bounds check: low > high || high > capacity
-	outOfBounds1 := b.CreateICmp(llvm.IntUGT, low, high, "slice.lowhigh")
-	outOfBounds2 := b.CreateICmp(llvm.IntUGT, high, max, "slice.highmax")
-	outOfBounds3 := b.CreateICmp(llvm.IntUGT, max, capacity, "slice.maxcap")
-	outOfBounds := b.CreateOr(outOfBounds1, outOfBounds2, "slice.lowmax")
-	outOfBounds = b.CreateOr(outOfBounds, outOfBounds3, "slice.lowcap")
-	b.createRuntimeAssert(outOfBounds, "slice", "slicePanic")
+	// Moxie: no slice bounds checks. The programmer is responsible for
+	// ensuring slice indices are within bounds. This function is kept as
+	// a no-op to avoid changing all the call sites.
 }
 
 // createSliceToArrayPointerCheck adds a check for slice-to-array pointer
