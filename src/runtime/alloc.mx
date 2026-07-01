@@ -149,7 +149,7 @@ func initDomain(capacity uintptr) {
 // --- Function arena stack ---
 
 // FnArenaPush creates a new function arena and pushes it onto the stack.
-// Returns the arena pointer (used by codegen for RelocInit).
+// Returns the arena pointer.
 func FnArenaPush(capacity uintptr) (a *Arena) {
 	domainRoot.fnTop++
 	if domainRoot.fnTop >= fnStackMax {
@@ -388,55 +388,7 @@ func heapAlloc(size uintptr) unsafe.Pointer {
 	return ptr
 }
 
-// --- Region locality queries ---
 
-// arenaContains checks if ptr is in any region of the arena above mark.
-func arenaContains(a *Arena, ptr uintptr, mark uintptr) (ok bool) {
-	regionIdx := int32(mark >> 32)
-	regionOff := mark & 0xFFFFFFFF
-	for i := regionIdx; i < a.nregions; i++ {
-		r := a.regions[i]
-		start := r.base
-		if i == regionIdx {
-			start += regionOff
-		}
-		if ptr >= start && ptr < r.base+r.off {
-			return true
-		}
-	}
-	return false
-}
-
-// arenaCopySliceIfLocal copies a slice's backing array to the current arena
-// position only if its data pointer is in the source arena region.
-func arenaCopySliceIfLocal(s string, mark uintptr) (r string) {
-	if len(s) == 0 || domainRoot == nil {
-		return s
-	}
-	a := domainRoot.fnStack[domainRoot.fnTop]
-	p := uintptr(unsafe.Pointer(unsafe.SliceData([]byte(s))))
-	if !arenaContains(a, p, mark) {
-		return s
-	}
-	buf := []byte{:len(s)}
-	copy(buf, s)
-	return string(buf)
-}
-
-// arenaCopyPtrIfLocal copies size bytes at ptr only if in source region.
-func arenaCopyPtrIfLocal(ptr unsafe.Pointer, mark uintptr, size uintptr) unsafe.Pointer {
-	if ptr == nil || domainRoot == nil {
-		return ptr
-	}
-	a := domainRoot.fnStack[domainRoot.fnTop]
-	p := uintptr(ptr)
-	if !arenaContains(a, p, mark) {
-		return ptr
-	}
-	dst := alloc(size, nil)
-	memcpy(dst, ptr, size)
-	return dst
-}
 
 func setHeapEnd(newHeapEnd uintptr) {
 	heapEnd = newHeapEnd

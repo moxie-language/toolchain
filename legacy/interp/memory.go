@@ -336,7 +336,8 @@ func (mv *memoryView) store(v value, p pointerValue) bool {
 		return false
 	}
 	if checks && p.offset()+v.len(mv.r) > obj.size {
-		panic("interp: store out of bounds")
+		// Store is out of bounds; defer to runtime instead of panicking.
+		return false
 	}
 	if p.offset() == 0 && v.len(mv.r) == obj.buffer.len(mv.r) {
 		obj.buffer = v

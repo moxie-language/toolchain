@@ -376,6 +376,139 @@ func codecEncodeMap(m *hashmap, cb *CodecBuf, ss *codecSeenSet, fixupFlags uint8
 	}
 }
 
+// --- Compiler-generated return value encode/decode primitives ---
+// Called from compiler-emitted code to serialize return values across
+// arena boundaries. These replace the old 3-pass Reloc* system.
+
+func codecWriteU8(cb *CodecBuf, v uint8) {
+	cb.data = append(cb.data, v)
+}
+
+func codecWriteRaw(cb *CodecBuf, ptr unsafe.Pointer, sz uintptr) {
+	if sz > 0 {
+		cb.data = append(cb.data, unsafe.Slice((*byte)(ptr), sz)...)
+	}
+}
+
+func codecReadU8(cb *CodecBuf) (v uint8) {
+	v = cb.data[cb.pos]; cb.pos++
+	return
+}
+
+func codecReadRaw(cb *CodecBuf, ptr unsafe.Pointer, sz uintptr) {
+	if sz > 0 {
+		memcpy(ptr, unsafe.Pointer(&cb.data[cb.pos]), sz)
+		cb.pos += int32(sz)
+	}
+}
+
+// codecDecodeString decodes a string from the buffer.
+// Returns pointer to a _string header allocated in the current arena.
+func codecDecodeString(cb *CodecBuf, ds *codecDecodeSeen) (hdr unsafe.Pointer) {
+	tag := codecReadU8(cb)
+	if tag != codecTagStr { runtimePanic("codec: expected string tag") }
+	ln := int32(codecReadU32(cb))
+	hdr = alloc(unsafe.Sizeof(_string{}), nil)
+	if ln == 0 {
+		return
+	}
+	ptr := alloc(uintptr(ln), nil)
+	codecReadRaw(cb, ptr, uintptr(ln))
+	sh := (*_string)(hdr)
+	sh.ptr = (*byte)(ptr)
+	sh.length = uintptr(ln)
+	sh.cap = uintptr(ln)
+	return
+}
+
+// codecDecodePtr reads a pointer from the buffer.
+// The resulting pointer value may be nil, a backreference, or fresh allocation.
+func codecDecodePtr(cb *CodecBuf, ds *codecDecodeSeen) (ptr unsafe.Pointer) {
+	tag := codecReadU8(cb)
+	switch tag {
+	case codecTagNil:
+		return nil
+	case codecTagBackref:
+		idx := int32(codecReadU32(cb))
+		return codecDecodeSeenLookup(ds, idx)
+	case codecTagPtr:
+		var buf [8]byte
+		codecReadRaw(cb, unsafe.Pointer(&buf[0]), unsafe.Sizeof(uintptr(0)))
+		return *(*unsafe.Pointer)(unsafe.Pointer(&buf[0]))
+	}
+	runtimePanic("codecDecodePtr: bad tag")
+	return nil
+}
+
+// codecDecodeSlice decodes a slice from the buffer.
+// Returns pointer to a slice header allocated in the current arena.
+func codecDecodeSlice(cb *CodecBuf, ds *codecDecodeSeen) (hdr unsafe.Pointer) {
+	tag := codecReadU8(cb)
+	if tag != codecTagSlice { runtimePanic("codec: expected slice tag") }
+	ln := int32(codecReadU32(cb))
+	cp := int32(codecReadU32(cb))
+	hdr = alloc(unsafe.Sizeof(_string{}), nil)
+	if ln == 0 {
+		return
+	}
+	ptr := alloc(uintptr(cp), nil)
+	codecReadRaw(cb, ptr, uintptr(ln))
+	sh := (*_string)(hdr)
+	sh.ptr = (*byte)(ptr)
+	sh.length = uintptr(ln)
+	sh.cap = uintptr(cp)
+	return
+}
+
+// codecDecodeInterface decodes an interface value from the buffer.
+// Returns pointer to an _interface header in the current arena.
+func codecDecodeInterface(cb *CodecBuf, ds *codecDecodeSeen) (ifacePtr unsafe.Pointer) {
+	tag := codecReadU8(cb)
+	if tag != codecTagIface { runtimePanic("codec: expected iface tag") }
+	ifacePtr = alloc(unsafe.Sizeof(_interface{}), nil)
+	iface := (*_interface)(ifacePtr)
+	// Read typecode (8 raw bytes)
+	var tcBuf [8]byte
+	codecReadRaw(cb, unsafe.Pointer(&tcBuf[0]), 8)
+	iface.typecode = *(*unsafe.Pointer)(unsafe.Pointer(&tcBuf[0]))
+	if iface.typecode != nil {
+		ct := (*rawType)(iface.typecode)
+		// Decode concrete value using runtime type info from typecode
+		inner := codecDecodeValue(cb, ds, ct)
+		iface.value = inner
+	}
+	return
+}
+
+// codecEncodeIfacePayload encodes the concrete value behind an interface.
+// Uses the interface's own typecode (*rawType) for recursive type info.
+func codecEncodeIfacePayload(cb *CodecBuf, ss *codecSeenSet, ifaceAddr unsafe.Pointer) {
+	iface := *(*_interface)(ifaceAddr)
+	if iface.typecode == nil {
+		return
+	}
+	t := (*rawType)(iface.typecode)
+	if t.kind() == kindPointer || t.size() > unsafe.Sizeof(uintptr(0)) {
+		// Large value: iface.value is a pointer to the data
+		codecEncodeValue(cb, ss, iface.value, t)
+	} else {
+		// Small value: iface.value IS the data
+		codecEncodeValue(cb, ss, unsafe.Pointer(&iface.value), t)
+	}
+}
+
+// codecReadStructTag validates a struct header (tag + field count).
+func codecReadStructTag(cb *CodecBuf, expectedFields int32) {
+	tag := codecReadU8(cb)
+	if tag != codecTagStruct {
+		runtimePanic("codec: expected struct tag")
+	}
+	nf := int32(codecReadU32(cb))
+	if nf != expectedFields {
+		runtimePanic("codec: struct field count mismatch")
+	}
+}
+
 func codecDecodeMapFlagged(cb *CodecBuf, ds *codecDecodeSeen, keySz, valSz uintptr, alg uint8, fixupFlags uint8) (m *hashmap) {
 	cnt := int32(codecReadU32(cb))
 	m = hashmapMake(keySz, valSz, uintptr(cnt), alg)
