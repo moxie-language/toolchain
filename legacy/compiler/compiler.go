@@ -3991,8 +3991,6 @@ func (b *builder) emitCodecEncodeReturn(val llvm.Value, t types.Type, cb, ss llv
 func (b *builder) emitCodecDecodeReturn(val llvm.Value, t types.Type, cb, ds llvm.Value) llvm.Value {
 	switch u := t.Underlying().(type) {
 	case *types.Map:
-		// Decode map pointer, then deep-copy via hashmapCopy so new
-		// buckets are allocated in caller's arena.
 		slt := b.getLLVMType(t)
 		tmp := b.CreateAlloca(slt, "cdmaptmp")
 		typeDesc := b.getTypeCode(t)
@@ -4003,9 +4001,7 @@ func (b *builder) emitCodecDecodeReturn(val llvm.Value, t types.Type, cb, ds llv
 				cb, ds, typeDesc, llvm.Undef(b.dataPtrType),
 			}, "cdmap")
 			decoded := b.CreateLoad(b.dataPtrType, decodedPtr, "cdmapv")
-			// Replace decoded map with a deep copy
-			newMap := b.createRuntimeCall("hashmapCopy", []llvm.Value{decoded}, "cdhmc")
-			b.CreateStore(newMap, tmp)
+			b.CreateStore(decoded, tmp)
 			return b.CreateLoad(b.dataPtrType, tmp, "cdmapl")
 		}
 		return val
@@ -4021,10 +4017,7 @@ func (b *builder) emitCodecDecodeReturn(val llvm.Value, t types.Type, cb, ds llv
 			}
 			gep := b.CreateStructGEP(slt, tmp, i, "cdfg")
 			if _, ok := ft.Underlying().(*types.Map); ok {
-				// Decode map pointer via default (raw bytes), then deep-copy
-				// via hashmapCopy to create new buckets in caller's arena.
 				decoded := b.emitCodecDecodeReturn(val, ft, cb, ds)
-				decoded = b.createRuntimeCall("hashmapCopy", []llvm.Value{decoded}, "cdhmc")
 				b.CreateStore(decoded, gep)
 			} else if _, ok := ft.Underlying().(*types.Struct); ok {
 				decoded := b.emitCodecDecodeReturn(val, ft, cb, ds)
@@ -4055,9 +4048,6 @@ func (b *builder) emitCodecDecodeReturn(val llvm.Value, t types.Type, cb, ds llv
 				cb, ds, typeDesc, llvm.Undef(b.dataPtrType),
 			}, "cdres")
 			decoded := b.CreateLoad(b.getLLVMType(t), decodedPtr, "cdval")
-			if ptr, ok := t.Underlying().(*types.Pointer); ok {
-				decoded = b.emitFixupMaps(decoded, ptr.Elem())
-			}
 			return decoded
 		}
 		return val
