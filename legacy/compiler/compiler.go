@@ -3885,16 +3885,7 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 		} else {
 			rootReg = b.CreateExtractValue(retVal, i, "cext")
 		}
-		slt := b.getLLVMType(rt)
-		tmp := b.CreateAlloca(slt, "cetmp")
-		b.CreateStore(rootReg, tmp)
-		typeDesc := b.getTypeCode(rt)
-		if encFn, ok := rtPkg.Members["codecEncodeValue"].(*ssa.Function); ok {
-			encType, encFnVal := b.getFunction(encFn)
-			b.CreateCall(encType, encFnVal, []llvm.Value{
-				cb, ss, tmp, typeDesc, llvm.Undef(b.dataPtrType),
-			}, "")
-		}
+		b.emitCodecEncodeReturn(rootReg, rt, cb, ss)
 	}
 
 	// Save CodecBuf data pointer and length (scalars survive FnArenaPop)
@@ -3929,18 +3920,11 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 		if !typeNeedsCopy(rt) {
 			continue
 		}
-		typeDesc := b.getTypeCode(rt)
-		if decFn, ok := rtPkg.Members["codecDecodeValue"].(*ssa.Function); ok {
-			decType, decFnVal := b.getFunction(decFn)
-			decodedPtr := b.CreateCall(decType, decFnVal, []llvm.Value{
-				cb2, ds, typeDesc, llvm.Undef(b.dataPtrType),
-			}, "cdres")
-			decodedVal := b.CreateLoad(b.getLLVMType(rt), decodedPtr, "cdval")
-			if sig.Results().Len() > 1 {
-				cur = b.CreateInsertValue(cur, decodedVal, i, "cdins")
-			} else {
-				cur = decodedVal
-			}
+		decodedVal := b.emitCodecDecodeReturn(retVal, rt, cb2, ds)
+		if sig.Results().Len() > 1 {
+			cur = b.CreateInsertValue(cur, decodedVal, i, "cdins")
+		} else {
+			cur = decodedVal
 		}
 	}
 
@@ -3953,3 +3937,128 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 func (b *builder) uintptrConst(val uint64) llvm.Value {
 	return llvm.ConstInt(b.uintptrType, val, false)
 }
+
+// emitCodecEncodeReturn encodes one return value, walking structs to handle
+// maps via codecEncodeMap (avoiding raw-byte copy of hashmap.buckets pointer).
+func (b *builder) emitCodecEncodeReturn(val llvm.Value, t types.Type, cb, ss llvm.Value) {
+	switch u := t.Underlying().(type) {
+	case *types.Struct:
+		// Store struct to alloca, walk fields, encode each with recursive call
+		slt := b.getLLVMType(t)
+		tmp := b.CreateAlloca(slt, "cestmp")
+		b.CreateStore(val, tmp)
+		for i := 0; i < u.NumFields(); i++ {
+			ft := u.Field(i).Type()
+			if !typeNeedsCopy(ft) {
+				continue
+			}
+			gep := b.CreateStructGEP(slt, tmp, i, "cefg")
+			if _, ok := ft.Underlying().(*types.Struct); ok {
+				// Nested struct: load and recurse
+				flt := b.getLLVMType(ft)
+				fld := b.CreateLoad(flt, gep, "cefs")
+				b.emitCodecEncodeReturn(fld, ft, cb, ss)
+			} else {
+				// Non-map, non-struct: encode via codecEncodeValue
+				rtPkg := b.program.ImportedPackage("runtime")
+				typeDesc := b.getTypeCode(ft)
+				if encFn, ok := rtPkg.Members["codecEncodeValue"].(*ssa.Function); ok {
+					encType, encFnVal := b.getFunction(encFn)
+					b.CreateCall(encType, encFnVal, []llvm.Value{
+						cb, ss, gep, typeDesc, llvm.Undef(b.dataPtrType),
+					}, "")
+				}
+			}
+		}
+
+	default:
+		// Non-map, non-struct: encode via codecEncodeValue
+		rtPkg := b.program.ImportedPackage("runtime")
+		slt := b.getLLVMType(t)
+		tmp := b.CreateAlloca(slt, "cetmp")
+		b.CreateStore(val, tmp)
+		typeDesc := b.getTypeCode(t)
+		if encFn, ok := rtPkg.Members["codecEncodeValue"].(*ssa.Function); ok {
+			encType, encFnVal := b.getFunction(encFn)
+			b.CreateCall(encType, encFnVal, []llvm.Value{
+				cb, ss, tmp, typeDesc, llvm.Undef(b.dataPtrType),
+			}, "")
+		}
+	}
+}
+
+// emitCodecDecodeReturn decodes one return value from the buffer.
+func (b *builder) emitCodecDecodeReturn(val llvm.Value, t types.Type, cb, ds llvm.Value) llvm.Value {
+	switch u := t.Underlying().(type) {
+	case *types.Map:
+		// Decode map pointer, then deep-copy via hashmapCopy so new
+		// buckets are allocated in caller's arena.
+		slt := b.getLLVMType(t)
+		tmp := b.CreateAlloca(slt, "cdmaptmp")
+		typeDesc := b.getTypeCode(t)
+		rtPkg := b.program.ImportedPackage("runtime")
+		if decFn, ok := rtPkg.Members["codecDecodeValue"].(*ssa.Function); ok {
+			decType, decFnVal := b.getFunction(decFn)
+			decodedPtr := b.CreateCall(decType, decFnVal, []llvm.Value{
+				cb, ds, typeDesc, llvm.Undef(b.dataPtrType),
+			}, "cdmap")
+			decoded := b.CreateLoad(b.dataPtrType, decodedPtr, "cdmapv")
+			// Replace decoded map with a deep copy
+			newMap := b.createRuntimeCall("hashmapCopy", []llvm.Value{decoded}, "cdhmc")
+			b.CreateStore(newMap, tmp)
+			return b.CreateLoad(b.dataPtrType, tmp, "cdmapl")
+		}
+		return val
+
+	case *types.Struct:
+		slt := b.getLLVMType(t)
+		tmp := b.CreateAlloca(slt, "cdstmp")
+		b.CreateStore(llvm.ConstNull(slt), tmp)
+		for i := 0; i < u.NumFields(); i++ {
+			ft := u.Field(i).Type()
+			if !typeNeedsCopy(ft) {
+				continue
+			}
+			gep := b.CreateStructGEP(slt, tmp, i, "cdfg")
+			if _, ok := ft.Underlying().(*types.Map); ok {
+				// Decode map pointer via default (raw bytes), then deep-copy
+				// via hashmapCopy to create new buckets in caller's arena.
+				decoded := b.emitCodecDecodeReturn(val, ft, cb, ds)
+				decoded = b.createRuntimeCall("hashmapCopy", []llvm.Value{decoded}, "cdhmc")
+				b.CreateStore(decoded, gep)
+			} else if _, ok := ft.Underlying().(*types.Struct); ok {
+				decoded := b.emitCodecDecodeReturn(val, ft, cb, ds)
+				b.CreateStore(decoded, gep)
+			} else {
+				// Non-map, non-struct: decode via codecDecodeValue
+				typeDesc := b.getTypeCode(ft)
+				rtPkg := b.program.ImportedPackage("runtime")
+				if decFn, ok := rtPkg.Members["codecDecodeValue"].(*ssa.Function); ok {
+					decType, decFnVal := b.getFunction(decFn)
+					decodedPtr := b.CreateCall(decType, decFnVal, []llvm.Value{
+						cb, ds, typeDesc, llvm.Undef(b.dataPtrType),
+					}, "cdres")
+					decodedVal := b.CreateLoad(b.getLLVMType(ft), decodedPtr, "cdval")
+					b.CreateStore(decodedVal, gep)
+				}
+			}
+		}
+		return b.CreateLoad(slt, tmp, "cdst")
+
+	default:
+		// Non-map, non-struct: decode via codecDecodeValue
+		rtPkg := b.program.ImportedPackage("runtime")
+		typeDesc := b.getTypeCode(t)
+		if decFn, ok := rtPkg.Members["codecDecodeValue"].(*ssa.Function); ok {
+			decType, decFnVal := b.getFunction(decFn)
+			decodedPtr := b.CreateCall(decType, decFnVal, []llvm.Value{
+				cb, ds, typeDesc, llvm.Undef(b.dataPtrType),
+			}, "cdres")
+			decoded := b.CreateLoad(b.getLLVMType(t), decodedPtr, "cdval")
+			return decoded
+		}
+		return val
+	}
+}
+
+
