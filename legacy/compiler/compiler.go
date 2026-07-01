@@ -4055,9 +4055,104 @@ func (b *builder) emitCodecDecodeReturn(val llvm.Value, t types.Type, cb, ds llv
 				cb, ds, typeDesc, llvm.Undef(b.dataPtrType),
 			}, "cdres")
 			decoded := b.CreateLoad(b.getLLVMType(t), decodedPtr, "cdval")
+			if ptr, ok := t.Underlying().(*types.Pointer); ok {
+				decoded = b.emitFixupMaps(decoded, ptr.Elem())
+			}
 			return decoded
 		}
 		return val
+	}
+}
+
+func (b *builder) emitFixupMaps(ptr llvm.Value, t types.Type) llvm.Value {
+	return b.emitFixupMapsDepth(ptr, t, 0)
+}
+
+func (b *builder) emitFixupMapsDepth(ptr llvm.Value, t types.Type, depth int32) llvm.Value {
+	st, ok := t.Underlying().(*types.Struct)
+	if !ok || st == nil || depth > 10 {
+		return ptr
+	}
+	slt := b.getLLVMType(t)
+	ld := b.CreateLoad(slt, ptr, "fxld")
+	tmp := b.CreateAlloca(slt, "fxtmp")
+	b.CreateStore(ld, tmp)
+	for i := 0; i < st.NumFields(); i++ {
+		ft := st.Field(i).Type()
+		if !typeNeedsCopy(ft) {
+			continue
+		}
+		gep := b.CreateStructGEP(slt, tmp, i, "fxfg")
+		switch fu := ft.Underlying().(type) {
+		case *types.Map:
+			oldMap := b.CreateLoad(b.dataPtrType, gep, "fxmap")
+			newMap := b.createRuntimeCall("hashmapCopy", []llvm.Value{oldMap}, "fxhmc")
+			b.CreateStore(newMap, gep)
+		case *types.Struct:
+			innerSlt := b.getLLVMType(ft)
+			innerTmp := b.CreateAlloca(innerSlt, "fxit")
+			innerVal := b.CreateLoad(innerSlt, gep, "fxst")
+			b.CreateStore(innerVal, innerTmp)
+			b.emitFixupMapsInlineDepth(innerTmp, ft, depth+1)
+			b.CreateStore(b.CreateLoad(innerSlt, innerTmp, "fxis"), gep)
+		case *types.Pointer:
+			if innerSt, ok := fu.Elem().Underlying().(*types.Struct); ok && innerSt.NumFields() > 0 {
+				ptrVal := b.CreateLoad(b.dataPtrType, gep, "fxpp")
+				isNil := b.CreateICmp(llvm.IntEQ, ptrVal, llvm.ConstNull(b.dataPtrType), "fxnil")
+				fn := b.GetInsertBlock().Parent()
+				doBB := b.ctx.AddBasicBlock(fn, "fxdo")
+				skBB := b.ctx.AddBasicBlock(fn, "fxsk")
+				b.CreateCondBr(isNil, skBB, doBB)
+				b.SetInsertPointAtEnd(doBB)
+				b.emitFixupMapsDepth(ptrVal, fu.Elem(), depth+1)
+				b.CreateBr(skBB)
+				b.SetInsertPointAtEnd(skBB)
+			}
+		}
+	}
+	fixed := b.CreateLoad(slt, tmp, "fxld")
+	b.CreateStore(fixed, ptr)
+	return ptr
+}
+
+// emitFixupMapsInline fixes map fields in a struct stored at an alloca.
+func (b *builder) emitFixupMapsInline(gep llvm.Value, t types.Type) {
+	b.emitFixupMapsInlineDepth(gep, t, 0)
+}
+
+func (b *builder) emitFixupMapsInlineDepth(gep llvm.Value, t types.Type, depth int32) {
+	st, ok := t.Underlying().(*types.Struct)
+	if !ok || st == nil || depth > 10 {
+		return
+	}
+	slt := b.getLLVMType(t)
+	for i := 0; i < st.NumFields(); i++ {
+		ft := st.Field(i).Type()
+		if !typeNeedsCopy(ft) {
+			continue
+		}
+		fgep := b.CreateStructGEP(slt, gep, i, "fxig")
+		switch fu := ft.Underlying().(type) {
+		case *types.Map:
+			oldMap := b.CreateLoad(b.dataPtrType, fgep, "fxim")
+			newMap := b.createRuntimeCall("hashmapCopy", []llvm.Value{oldMap}, "fxihc")
+			b.CreateStore(newMap, fgep)
+		case *types.Struct:
+			b.emitFixupMapsInlineDepth(fgep, ft, depth+1)
+		case *types.Pointer:
+			if innerSt, ok := fu.Elem().Underlying().(*types.Struct); ok && innerSt.NumFields() > 0 {
+				ptrVal := b.CreateLoad(b.dataPtrType, fgep, "fxip")
+				isNil := b.CreateICmp(llvm.IntEQ, ptrVal, llvm.ConstNull(b.dataPtrType), "fxin")
+				fn := b.GetInsertBlock().Parent()
+				doBB := b.ctx.AddBasicBlock(fn, "fxid")
+				skBB := b.ctx.AddBasicBlock(fn, "fxik")
+				b.CreateCondBr(isNil, skBB, doBB)
+				b.SetInsertPointAtEnd(doBB)
+				b.emitFixupMapsDepth(ptrVal, fu.Elem(), depth+1)
+				b.CreateBr(skBB)
+				b.SetInsertPointAtEnd(skBB)
+			}
+		}
 	}
 }
 
