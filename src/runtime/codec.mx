@@ -160,7 +160,8 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *r
 		kt := hashmapKeyType(typ)
 		vt := typ.elem()
 		if kt != nil && (kt.kind() == kindBytes) { fixupFlags |= 8 }
-		if vt != nil && (vt.kind() == kindBytes) { fixupFlags |= 8 }
+		if vt != nil && (vt.kind() == kindBytes) { fixupFlags |= 1 }
+		if vt != nil && (vt.kind() == kindPointer) { fixupFlags |= 2 }
 		if vt != nil && (vt.kind() == kindInterface) { fixupFlags |= 4 }
 		codecEncodeMap(hm, cb, ss, fixupFlags)
 	case kindStruct:
@@ -355,7 +356,7 @@ func codecDecodeMapValue(cb *CodecBuf, ds *codecDecodeSeen, keySz, valSz uintptr
 	cnt := int32(codecReadU32(cb))
 	m = hashmapMake(keySz, valSz, uintptr(cnt), alg)
 	if cnt == 0 { return }
-	fixKey := flags&8 != 0; fixVal := flags&2 != 0; fixIface := flags&4 != 0
+	fixKey := flags&8 != 0; fixStrVal := flags&1 != 0; fixVal := flags&2 != 0; fixIface := flags&4 != 0
 	for i := int32(0); i < cnt; i++ {
 		var key, val []byte
 		if fixKey { raw := codecReadBytes(cb)
@@ -367,7 +368,14 @@ func codecDecodeMapValue(cb *CodecBuf, ds *codecDecodeSeen, keySz, valSz uintptr
 		} else { key = make([]byte, keySz)
 			memcpy(unsafe.Pointer(&key[0]), unsafe.Pointer(&cb.data[cb.pos]), keySz)
 			cb.pos += int32(keySz) }
-		if fixVal {
+		if fixStrVal {
+			raw := codecReadBytes(cb)
+			hdr := make([]byte, valSz)
+			*(*unsafe.Pointer)(unsafe.Pointer(&hdr[0])) = unsafe.Pointer(&raw[0])
+			*(*uintptr)(unsafe.Pointer(&hdr[8])) = uintptr(len(raw))
+			if valSz > 16 { *(*uintptr)(unsafe.Pointer(&hdr[16])) = uintptr(len(raw)) }
+			val = hdr
+		} else if fixVal {
 			tag := cb.data[cb.pos]; cb.pos++
 			if tag == codecTagNil { val = make([]byte, valSz) } else
 			if tag == codecTagPtr {
@@ -418,7 +426,7 @@ func codecEncodeMap(m *hashmap, cb *CodecBuf, ss *codecSeenSet, fixupFlags uint8
 	codecWriteU32(cb, uint32(cnt))
 	if cnt == 0 { return }
 
-	fixKey := fixupFlags&8 != 0; fixVal := fixupFlags&2 != 0; fixIface := fixupFlags&4 != 0
+	fixKey := fixupFlags&8 != 0; fixStrVal := fixupFlags&1 != 0; fixVal := fixupFlags&2 != 0; fixIface := fixupFlags&4 != 0
 	keySz := m.keySize; valSz := m.valueSize
 	bucketSz := unsafe.Sizeof(hashmapBucket{}) + keySz*8 + valSz*8
 	nb := uintptr(1) << m.bucketBits
@@ -435,7 +443,10 @@ func codecEncodeMap(m *hashmap, cb *CodecBuf, ss *codecSeenSet, fixupFlags uint8
 					} else {
 						cb.data = append(cb.data, unsafe.Slice((*byte)(kp), keySz)...)
 					}
-					if fixVal {
+					if fixStrVal {
+						sv := *(*_string)(vp)
+						codecWriteBytes(cb, unsafe.Slice((*byte)(sv.ptr), sv.length))
+					} else if fixVal {
 						p := *(*unsafe.Pointer)(vp)
 						if p == nil {
 							cb.data = append(cb.data, byte(codecTagNil))
@@ -488,6 +499,77 @@ func codecReadRaw(cb *CodecBuf, ptr unsafe.Pointer, sz uintptr) {
 		memcpy(ptr, unsafe.Pointer(&cb.data[cb.pos]), sz)
 		cb.pos += int32(sz)
 	}
+}
+
+// codecEncodeStringValue encodes a string from its component fields,
+// avoiding the alloca-pointer pattern that LLVM may optimize incorrectly.
+func codecEncodeStringValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, ln uintptr) {
+	cb.data = append(cb.data, byte(codecTagStr))
+	codecWriteU32(cb, uint32(ln))
+	if ln > 0 {
+		codecWriteRaw(cb, ptr, ln)
+	}
+}
+
+// codecEncodeSliceValue encodes a slice from its component fields.
+func codecEncodeSliceValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, ln, cp uintptr, elemType *rawType) {
+	cb.data = append(cb.data, byte(codecTagSlice))
+	codecWriteU32(cb, uint32(ln))
+	codecWriteU32(cb, uint32(cp))
+	elemSize := elemType.size()
+	for i := int32(0); i < int32(ln); i++ {
+		ep := unsafe.Add(ptr, uintptr(i)*elemSize)
+		codecEncodeValue(cb, ss, ep, elemType)
+	}
+}
+
+// codecEncodePtrValue encodes a pointer from its value.
+func codecEncodePtrValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, elemType *rawType) {
+	if ptr == nil {
+		cb.data = append(cb.data, byte(codecTagNil))
+		return
+	}
+	idx := codecSeenLookup(ss, ptr)
+	if idx >= 0 {
+		cb.data = append(cb.data, byte(codecTagBackref))
+		codecWriteU32(cb, uint32(idx))
+		return
+	}
+	codecSeenAdd(ss, ptr)
+	cb.data = append(cb.data, byte(codecTagPtr))
+	codecEncodeValue(cb, ss, ptr, elemType)
+}
+
+// codecEncodeIfaceValue encodes an interface from its typecode and value fields.
+func codecEncodeIfaceValue(cb *CodecBuf, ss *codecSeenSet, typecode, value unsafe.Pointer, typ *rawType) {
+	cb.data = append(cb.data, byte(codecTagIface))
+	codecWriteBytes(cb, unsafe.Slice((*byte)(unsafe.Pointer(&typecode)), 8))
+	if typecode != nil {
+		ct := (*rawType)(typecode)
+		if ct.size() <= unsafe.Sizeof(uintptr(0)) {
+			codecEncodeValue(cb, ss, unsafe.Pointer(&value), ct)
+		} else {
+			codecEncodeValue(cb, ss, value, ct)
+		}
+	}
+}
+
+// codecEncodeMapValue encodes a map from its pointer value.
+func codecEncodeMapValue(cb *CodecBuf, ss *codecSeenSet, mptr unsafe.Pointer, typ *rawType) {
+	if mptr == nil {
+		cb.data = append(cb.data, byte(codecTagNil))
+		return
+	}
+	cb.data = append(cb.data, byte(codecTagPtr))
+	hm := (*hashmap)(mptr)
+	fixupFlags := uint8(0)
+	kt := hashmapKeyType(typ)
+	vt := typ.elem()
+	if kt != nil && (kt.kind() == kindBytes) { fixupFlags |= 8 }
+	if vt != nil && (vt.kind() == kindBytes) { fixupFlags |= 1 }
+	if vt != nil && (vt.kind() == kindPointer) { fixupFlags |= 2 }
+	if vt != nil && (vt.kind() == kindInterface) { fixupFlags |= 4 }
+	codecEncodeMap(hm, cb, ss, fixupFlags)
 }
 
 // codecDecodeString decodes a string from the buffer.
@@ -609,7 +691,7 @@ func codecDecodeMapFlagged(cb *CodecBuf, ds *codecDecodeSeen, keySz, valSz uintp
 	cnt := int32(codecReadU32(cb))
 	m = hashmapMake(keySz, valSz, uintptr(cnt), alg)
 	if cnt == 0 { return }
-	fixKey := fixupFlags&8 != 0; fixVal := fixupFlags&2 != 0; fixIface := fixupFlags&4 != 0
+	fixKey := fixupFlags&8 != 0; fixStrVal := fixupFlags&1 != 0; fixVal := fixupFlags&2 != 0; fixIface := fixupFlags&4 != 0
 	for i := int32(0); i < cnt; i++ {
 		var key, val []byte
 		if fixKey {
@@ -626,7 +708,14 @@ func codecDecodeMapFlagged(cb *CodecBuf, ds *codecDecodeSeen, keySz, valSz uintp
 			memcpy(unsafe.Pointer(&key[0]), unsafe.Pointer(&cb.data[cb.pos]), keySz)
 			cb.pos += int32(keySz)
 		}
-		if fixVal {
+		if fixStrVal {
+			raw := codecReadBytes(cb)
+			hdr := make([]byte, valSz)
+			*(*unsafe.Pointer)(unsafe.Pointer(&hdr[0])) = unsafe.Pointer(&raw[0])
+			*(*uintptr)(unsafe.Pointer(&hdr[8])) = uintptr(len(raw))
+			if valSz > 16 { *(*uintptr)(unsafe.Pointer(&hdr[16])) = uintptr(len(raw)) }
+			val = hdr
+		} else if fixVal {
 			tag := cb.data[cb.pos]; cb.pos++
 			if tag == codecTagNil {
 				val = make([]byte, valSz)

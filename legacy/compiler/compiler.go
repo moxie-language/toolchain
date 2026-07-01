@@ -3941,9 +3941,9 @@ func (b *builder) uintptrConst(val uint64) llvm.Value {
 // emitCodecEncodeReturn encodes one return value, walking structs to handle
 // maps via codecEncodeMap (avoiding raw-byte copy of hashmap.buckets pointer).
 func (b *builder) emitCodecEncodeReturn(val llvm.Value, t types.Type, cb, ss llvm.Value) {
+	rtPkg := b.program.ImportedPackage("runtime")
 	switch u := t.Underlying().(type) {
 	case *types.Struct:
-		// Store struct to alloca, walk fields, encode each with recursive call
 		slt := b.getLLVMType(t)
 		tmp := b.CreateAlloca(slt, "cestmp")
 		b.CreateStore(val, tmp)
@@ -3954,13 +3954,10 @@ func (b *builder) emitCodecEncodeReturn(val llvm.Value, t types.Type, cb, ss llv
 			}
 			gep := b.CreateStructGEP(slt, tmp, i, "cefg")
 			if _, ok := ft.Underlying().(*types.Struct); ok {
-				// Nested struct: load and recurse
 				flt := b.getLLVMType(ft)
 				fld := b.CreateLoad(flt, gep, "cefs")
 				b.emitCodecEncodeReturn(fld, ft, cb, ss)
 			} else {
-				// Non-map, non-struct: encode via codecEncodeValue
-				rtPkg := b.program.ImportedPackage("runtime")
 				typeDesc := b.getTypeCode(ft)
 				if encFn, ok := rtPkg.Members["codecEncodeValue"].(*ssa.Function); ok {
 					encType, encFnVal := b.getFunction(encFn)
@@ -3971,9 +3968,101 @@ func (b *builder) emitCodecEncodeReturn(val llvm.Value, t types.Type, cb, ss llv
 			}
 		}
 
+	case *types.Basic:
+		if u.Kind() == types.String {
+			ptr := b.CreateExtractValue(val, 0, "")
+			ln := b.CreateExtractValue(val, 1, "")
+			if encFn, ok := rtPkg.Members["codecEncodeStringValue"].(*ssa.Function); ok {
+				encType, encFnVal := b.getFunction(encFn)
+				b.CreateCall(encType, encFnVal, []llvm.Value{
+					cb, ss, ptr, ln, llvm.Undef(b.dataPtrType),
+				}, "")
+			}
+		} else {
+			slt := b.getLLVMType(t)
+			tmp := b.CreateAlloca(slt, "cetmp")
+			b.CreateStore(val, tmp)
+			typeDesc := b.getTypeCode(t)
+			if encFn, ok := rtPkg.Members["codecEncodeValue"].(*ssa.Function); ok {
+				encType, encFnVal := b.getFunction(encFn)
+				b.CreateCall(encType, encFnVal, []llvm.Value{
+					cb, ss, tmp, typeDesc, llvm.Undef(b.dataPtrType),
+				}, "")
+			}
+		}
+
+	case *types.Slice:
+		if basic, ok := u.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {
+			ptr := b.CreateExtractValue(val, 0, "")
+			ln := b.CreateExtractValue(val, 1, "")
+			if encFn, ok := rtPkg.Members["codecEncodeStringValue"].(*ssa.Function); ok {
+				encType, encFnVal := b.getFunction(encFn)
+				b.CreateCall(encType, encFnVal, []llvm.Value{
+					cb, ss, ptr, ln, llvm.Undef(b.dataPtrType),
+				}, "")
+			}
+		} else {
+			ptr := b.CreateExtractValue(val, 0, "")
+			ln := b.CreateExtractValue(val, 1, "")
+			cp := b.CreateExtractValue(val, 2, "")
+			typeDesc := b.getTypeCode(t)
+			if encFn, ok := rtPkg.Members["codecEncodeSliceValue"].(*ssa.Function); ok {
+				encType, encFnVal := b.getFunction(encFn)
+				b.CreateCall(encType, encFnVal, []llvm.Value{
+					cb, ss, ptr, ln, cp, typeDesc, llvm.Undef(b.dataPtrType),
+				}, "")
+			}
+		}
+
+	case *types.Pointer:
+		pointeeType := b.getTypeCode(u.Elem())
+		if encFn, ok := rtPkg.Members["codecEncodePtrValue"].(*ssa.Function); ok {
+			encType, encFnVal := b.getFunction(encFn)
+			b.CreateCall(encType, encFnVal, []llvm.Value{
+				cb, ss, val, pointeeType, llvm.Undef(b.dataPtrType),
+			}, "")
+		}
+
+	case *types.Interface:
+		typecode := b.CreateExtractValue(val, 0, "")
+		ifaceVal := b.CreateExtractValue(val, 1, "")
+		typeDesc := b.getTypeCode(t)
+		if encFn, ok := rtPkg.Members["codecEncodeIfaceValue"].(*ssa.Function); ok {
+			encType, encFnVal := b.getFunction(encFn)
+			b.CreateCall(encType, encFnVal, []llvm.Value{
+				cb, ss, typecode, ifaceVal, typeDesc, llvm.Undef(b.dataPtrType),
+			}, "")
+		}
+
+	case *types.Array:
+		length := u.Len()
+		for i := int64(0); i < length; i++ {
+			el := b.CreateExtractValue(val, int(i), "")
+			b.emitCodecEncodeReturn(el, u.Elem(), cb, ss)
+		}
+
+	case *types.Map:
+		typeDesc := b.getTypeCode(t)
+		if encFn, ok := rtPkg.Members["codecEncodeMapValue"].(*ssa.Function); ok {
+			encType, encFnVal := b.getFunction(encFn)
+			b.CreateCall(encType, encFnVal, []llvm.Value{
+				cb, ss, val, typeDesc, llvm.Undef(b.dataPtrType),
+			}, "")
+		}
+
+	case *types.Signature, *types.Chan:
+		slt := b.getLLVMType(t)
+		tmp := b.CreateAlloca(slt, "cetmp")
+		b.CreateStore(val, tmp)
+		typeDesc := b.getTypeCode(t)
+		if encFn, ok := rtPkg.Members["codecEncodeValue"].(*ssa.Function); ok {
+			encType, encFnVal := b.getFunction(encFn)
+			b.CreateCall(encType, encFnVal, []llvm.Value{
+				cb, ss, tmp, typeDesc, llvm.Undef(b.dataPtrType),
+			}, "")
+		}
+
 	default:
-		// Non-map, non-struct: encode via codecEncodeValue
-		rtPkg := b.program.ImportedPackage("runtime")
 		slt := b.getLLVMType(t)
 		tmp := b.CreateAlloca(slt, "cetmp")
 		b.CreateStore(val, tmp)
