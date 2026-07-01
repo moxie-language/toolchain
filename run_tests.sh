@@ -45,8 +45,10 @@ for dir in $DIRS; do
     for f in "$dir"/*.mx; do
         [ -f "$f" ] || continue
         base=$(basename "$f")
+        # Rename _test.mx to _testdata.mx because the compiler skips *_test.*
+        outname=$(echo "$base" | sed 's/_test\.mx$/_testdata.mx/')
         # Rewrite package declaration to main
-        sed "s/^package $pkgname$/package main/" "$f" > "$testdir/$base"
+        sed "s/^package $pkgname$/package main/" "$f" > "$testdir/$outname"
     done
 
     # Generate test main

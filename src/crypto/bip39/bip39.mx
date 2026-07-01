@@ -13,9 +13,9 @@ import (
 
 // EntropyToMnemonic converts 16 bytes (128 bits) of entropy into a 12-word
 // English BIP-39 mnemonic. Returns "" on bad input length.
-func EntropyToMnemonic(entropy []byte) string {
+func EntropyToMnemonic(entropy []byte) (out string) {
 	if len(entropy) != 16 {
-		return ""
+		return
 	}
 	hash := sha256.Sum(entropy)
 	all := []byte{:17}
@@ -36,19 +36,20 @@ func EntropyToMnemonic(entropy []byte) string {
 			val |= uint32(all[byteIdx+2])
 		}
 		idx := (val << bitOff >> 13) & 0x7FF
-		if i > 0 {
-			buf = append(buf, ' ')
-		}
-		buf = append(buf, eng[idx]...)
+	if i > 0 {
+		push(buf, ' ')
 	}
-	return string(buf)
+	push(buf, eng[idx]...)
+	}
+	out = string(buf)
+	return
 }
 
 // ValidateMnemonic returns true if phrase is a valid 12-word BIP-39 English
 // mnemonic with a correct checksum.
-func ValidateMnemonic(phrase string) bool {
+func ValidateMnemonic(phrase string) (valid bool) {
 	if phrase == "" {
-		return false
+		return
 	}
 	var words [13]string
 	n := 0
@@ -57,7 +58,7 @@ func ValidateMnemonic(phrase string) bool {
 		if i == len(phrase) || phrase[i] == ' ' {
 			if i > start {
 				if n >= 13 {
-					return false
+					return
 				}
 				words[n] = phrase[start:i]
 				n++
@@ -66,7 +67,7 @@ func ValidateMnemonic(phrase string) bool {
 		}
 	}
 	if n != 12 {
-		return false
+		return
 	}
 	eng := English()
 	var indices [12]uint32
@@ -80,7 +81,7 @@ func ValidateMnemonic(phrase string) bool {
 			}
 		}
 		if !found {
-			return false
+			return
 		}
 	}
 	// Reconstruct 132-bit stream into all[17]: 128 entropy + 4 checksum.
@@ -97,19 +98,21 @@ func ValidateMnemonic(phrase string) bool {
 	entropy := all[:16]
 	cs := all[16] >> 4
 	hash := sha256.Sum(entropy)
-	return (hash[0] >> 4) == cs
+	valid = (hash[0] >> 4) == cs
+	return
 }
 
 // MnemonicToSeed derives a 64-byte seed from a mnemonic + optional passphrase
 // per BIP-39 ("mnemonic" || passphrase as salt, 2048 PBKDF2-HMAC-SHA512 rounds).
 // Returns nil on PBKDF2 failure (should never happen with valid params).
-func MnemonicToSeed(phrase, passphrase string) []byte {
+func MnemonicToSeed(phrase, passphrase string) (seed []byte) {
 	salt := []byte{:0:8+len(passphrase)}
-	salt = append(salt, 'm', 'n', 'e', 'm', 'o', 'n', 'i', 'c')
-	salt = append(salt, passphrase...)
+	push(salt, 'm', 'n', 'e', 'm', 'o', 'n', 'i', 'c')
+	push(salt, passphrase...)
 	dk, err := pbkdf2.Key(sha512.New, []byte(phrase), salt, 2048, 64)
 	if err != nil {
-		return nil
+		return
 	}
-	return dk
+	seed = dk
+	return
 }

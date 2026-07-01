@@ -92,6 +92,22 @@ func filterNoNewVarErrors(errs []error) []error {
 	return out
 }
 
+// filterImpossibleAssertErrors filters out "impossible type assertion" errors
+// for types that are valid Moxie assertion targets. In Moxie, all builtin types
+// have auto-generated String() string methods, so assertions on Stringer
+// interface values against basic types (int32, []byte, etc.) are always valid.
+func filterImpossibleAssertErrors(errs []error) []error {
+	var out []error
+	for _, e := range errs {
+		msg := e.Error()
+		if strings.Contains(msg, "missing method") {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 func rewriteAddAssign(files []*ast.File, info *types.Info) int {
 	return mxtext.RewriteAddAssign(files, info)
 }

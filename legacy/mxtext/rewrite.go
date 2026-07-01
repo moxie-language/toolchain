@@ -325,20 +325,25 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int
 	cumDelta := 0
 
 	for i := 0; i < len(toks); i++ {
-		// Look for LBRACK RBRACK ... LBRACE COLON pattern.
-		if toks[i].tok != token.LBRACK {
-			continue
-		}
-		if i+1 >= len(toks) || toks[i+1].tok != token.RBRACK {
-			continue
+		// Look for slice literal with size: []Type{:expr} or Type{:expr}.
+		if !(toks[i].tok == token.LBRACK && i+2 < len(toks) && toks[i+1].tok == token.RBRACK) {
+			// Also match named-type slice like nat{:expr} (IDENT LBRACE COLON).
+			if !(toks[i].tok == token.IDENT && i+2 < len(toks) && toks[i+1].tok == token.LBRACE && toks[i+2].tok == token.COLON) {
+				continue
+			}
 		}
 
 		lbrackIdx := i
 
 		// Scan forward past the element type to find LBRACE.
 		braceIdx := -1
-		depth := 0
-		for j := i + 2; j < len(toks); j++ {
+		isNamed := toks[lbrackIdx].tok == token.IDENT
+		if isNamed {
+			// For Type{:expr}, the LBRACE is immediately after the IDENT.
+			braceIdx = lbrackIdx + 1
+		} else {
+			depth := 0
+			for j := i + 2; j < len(toks); j++ {
 			switch toks[j].tok {
 			case token.LBRACK:
 				depth++
@@ -364,9 +369,16 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int
 				break
 			}
 		}
+	}
 
-		if braceIdx < 0 || braceIdx <= lbrackIdx+2 {
-			continue // no brace, or nothing between [] and {
+		if braceIdx < 0 {
+			continue
+		}
+		if isNamed && braceIdx != lbrackIdx+1 {
+			continue // Type{:expr} must have { immediately after type name
+		}
+		if !isNamed && braceIdx <= lbrackIdx+2 {
+			continue // nothing between [] and {
 		}
 
 		// Check that the token after { is COLON — this is the discriminator.
@@ -379,7 +391,7 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int
 		// aren't mistaken for the len:cap separator.
 		closeIdx := -1
 		colonPositions := []int{braceIdx + 1} // first colon already found
-		depth = 1
+		depth := 1
 		bracketDepth := 0
 		parenDepth := 0
 		for j := braceIdx + 2; j < len(toks); j++ {
