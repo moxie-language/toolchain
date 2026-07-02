@@ -21,15 +21,17 @@ const (
 	argon2id
 )
 
-func Key(password, salt []byte, time, memory uint32, threads uint8, keyLen uint32) []byte {
-	return deriveKey(argon2i, password, salt, nil, nil, time, memory, threads, keyLen)
+func Key(password, salt []byte, time, memory uint32, threads uint8, keyLen uint32) (out []byte) {
+	out = deriveKey(argon2i, password, salt, nil, nil, time, memory, threads, keyLen)
+	return
 }
 
-func IDKey(password, salt []byte, time, memory uint32, threads uint8, keyLen uint32) []byte {
-	return deriveKey(argon2id, password, salt, nil, nil, time, memory, threads, keyLen)
+func IDKey(password, salt []byte, time, memory uint32, threads uint8, keyLen uint32) (out []byte) {
+	out = deriveKey(argon2id, password, salt, nil, nil, time, memory, threads, keyLen)
+	return
 }
 
-func deriveKey(mode int32, password, salt, secret, data []byte, time, memory uint32, threads uint8, keyLen uint32) []byte {
+func deriveKey(mode int32, password, salt, secret, data []byte, time, memory uint32, threads uint8, keyLen uint32) (out []byte) {
 	if time < 1 {
 		panic("argon2: number of rounds too small")
 	}
@@ -44,7 +46,8 @@ func deriveKey(mode int32, password, salt, secret, data []byte, time, memory uin
 	}
 	B := initBlocks(&h0, memory, uint32(threads))
 	processBlocks(B, time, memory, uint32(threads), mode)
-	return extractKey(B, memory, uint32(threads), keyLen)
+	out = extractKey(B, memory, uint32(threads), keyLen)
+	return
 }
 
 const (
@@ -54,9 +57,8 @@ const (
 
 type block [blockLength]uint64
 
-func initHash(password, salt, key, data []byte, time, memory, threads, keyLen uint32, mode int32) [blake2b.Size + 8]byte {
+func initHash(password, salt, key, data []byte, time, memory, threads, keyLen uint32, mode int32) (h0 [blake2b.Size + 8]byte) {
 	var (
-		h0     [blake2b.Size + 8]byte
 		params [24]byte
 		tmp    [4]byte
 	)
@@ -82,12 +84,12 @@ func initHash(password, salt, key, data []byte, time, memory, threads, keyLen ui
 	b2.Write(tmp[:])
 	b2.Write(data)
 	b2.Sum(h0[:0])
-	return h0
+	return
 }
 
-func initBlocks(h0 *[blake2b.Size + 8]byte, memory, threads uint32) []block {
+func initBlocks(h0 *[blake2b.Size + 8]byte, memory, threads uint32) (B []block) {
 	var block0 [1024]byte
-	B := []block{:int32(memory)}
+	B = []block{:int32(memory)}
 	for lane := uint32(0); lane < threads; lane++ {
 		j := lane * (memory / threads)
 		binary.LittleEndian().PutUint32(h0[blake2b.Size+4:], lane)
@@ -104,7 +106,7 @@ func initBlocks(h0 *[blake2b.Size + 8]byte, memory, threads uint32) []block {
 			B[j+1][i] = binary.LittleEndian().Uint64(block0[i*8:])
 		}
 	}
-	return B
+	return
 }
 
 func processBlocks(B []block, time, memory, threads uint32, mode int32) {
@@ -164,7 +166,7 @@ func processSegment(B []block, n, slice, lane, memory, time, threads, segments, 
 	}
 }
 
-func extractKey(B []block, memory, threads, keyLen uint32) []byte {
+func extractKey(B []block, memory, threads, keyLen uint32) (key []byte) {
 	lanes := memory / threads
 	for lane := uint32(0); lane < threads-1; lane++ {
 		for i, v := range B[(lane*lanes)+lanes-1] {
@@ -172,16 +174,16 @@ func extractKey(B []block, memory, threads, keyLen uint32) []byte {
 		}
 	}
 
-	var block [1024]byte
+	var buf [1024]byte
 	for i, v := range B[memory-1] {
-		binary.LittleEndian().PutUint64(block[i*8:], v)
+		binary.LittleEndian().PutUint64(buf[i*8:], v)
 	}
-	key := []byte{:int32(keyLen)}
-	blake2bHash(key, block[:])
-	return key
+	key = []byte{:int32(keyLen)}
+	blake2bHash(key, buf[:])
+	return
 }
 
-func indexAlpha(rand uint64, lanes, segments, threads, n, slice, lane, index uint32) uint32 {
+func indexAlpha(rand uint64, lanes, segments, threads, n, slice, lane, index uint32) (ref uint32) {
 	refLane := uint32(rand>>32) % threads
 	if n == 0 && slice == 0 {
 		refLane = lane
@@ -199,12 +201,14 @@ func indexAlpha(rand uint64, lanes, segments, threads, n, slice, lane, index uin
 	if index == 0 || lane == refLane {
 		m--
 	}
-	return phi(rand, uint64(m), uint64(s), refLane, lanes)
+	ref = phi(rand, uint64(m), uint64(s), refLane, lanes)
+	return
 }
 
-func phi(rand, m, s uint64, lane, lanes uint32) uint32 {
+func phi(rand, m, s uint64, lane, lanes uint32) (ref uint32) {
 	p := rand & 0xFFFFFFFF
 	p = (p * p) >> 32
 	p = (p * m) >> 32
-	return lane*lanes + uint32((s+m-(p+1))%uint64(lanes))
+	ref = lane*lanes + uint32((s+m-(p+1))%uint64(lanes))
+	return
 }

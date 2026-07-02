@@ -111,10 +111,7 @@ func SignSchnorrBytes(seckey [32]byte, msg []byte, auxRand [32]byte) (sig [64]by
 	}
 
 	// k' = tagged_hash("BIP0340/nonce", t || pkBytes || msg) mod n
-	nonceInput := []byte{:0:64+len(msg)}
-	nonceInput = append(nonceInput, t[:]...)
-	nonceInput = append(nonceInput, pkBytes[:]...)
-	nonceInput = append(nonceInput, msg...)
+	nonceInput := t[:] | pkBytes[:] | msg
 	kHash := taggedHash("BIP0340/nonce", nonceInput)
 	k := scalarFromBytes(kHash[:])
 
@@ -157,26 +154,28 @@ func PubKeyFromSecKey(seckey [32]byte) (pubkey [32]byte, ok bool) {
 // ECDH computes the shared secret x-coordinate: seckey * pubkey.
 // pubkey is a 32-byte x-only public key.
 // Returns the 32-byte x-coordinate and true on success.
-func ECDH(seckey, pubkey [32]byte) ([32]byte, bool) {
+func ECDH(seckey, pubkey [32]byte) (x [32]byte, ok bool) {
 	sk := scalarFromBytes(seckey[:])
 	if scalarIsZero(sk) {
-		return [32]byte{}, false
+		return
 	}
 	px := feFromBytes(pubkey[:])
-	P, ok := LiftX(px)
-	if !ok {
-		return [32]byte{}, false
+	P, err := LiftX(px)
+	if !err {
+		return
 	}
 	R := ScalarMult(pointFromAffine(P), sk).toAffine()
 	if feIsZero(R.X) && feIsZero(R.Y) {
-		return [32]byte{}, false
+		return
 	}
-	return feToBytes(R.X), true
+	x = feToBytes(R.X)
+	ok = true
+	return
 }
 
 // ScalarAddModN returns (a + b) mod n where n is the secp256k1 group order.
 // a and b are 32-byte big-endian scalars.
-func ScalarAddModN(a, b [32]byte) ([32]byte, bool) {
+func ScalarAddModN(a, b [32]byte) (out [32]byte, ok bool) {
 	sa := scalarFromBytes(a[:])
 	sb := scalarFromBytes(b[:])
 	r := scalarAdd(sa, sb)
@@ -184,48 +183,44 @@ func ScalarAddModN(a, b [32]byte) ([32]byte, bool) {
 		r = scalarSub(r, curveN())
 	}
 	if scalarIsZero(r) {
-		return [32]byte{}, false
+		return
 	}
-	return feToBytes(r), true
+	out = feToBytes(r)
+	ok = true
+	return
 }
 
 // CompressedPubKey returns the 33-byte SEC1 compressed public key for a secret key.
 // Format: 0x02 or 0x03 prefix (even/odd Y) followed by 32-byte X coordinate.
-func CompressedPubKey(seckey [32]byte) ([33]byte, bool) {
+func CompressedPubKey(seckey [32]byte) (out [33]byte, ok bool) {
 	sk := scalarFromBytes(seckey[:])
 	if scalarIsZero(sk) {
-		return [33]byte{}, false
+		return
 	}
 	P := ScalarBaseMult(sk)
 	xb := feToBytes(P.X)
 	yb := feToBytes(P.Y)
-	var out [33]byte
 	if yb[31]&1 == 0 {
 		out[0] = 0x02
 	} else {
 		out[0] = 0x03
 	}
 	copy(out[1:], xb[:])
-	return out, true
+	return
 }
 
 // tagged_hash(tag, msg) = SHA256(SHA256(tag) || SHA256(tag) || msg)
-func taggedHash(tag string, msg []byte) [32]byte {
+func taggedHash(tag string, msg []byte) (h [32]byte) {
 	tagHash := sha256.Sum([]byte(tag))
-	data := []byte{:0:64+len(msg)}
-	data = append(data, tagHash[:]...)
-	data = append(data, tagHash[:]...)
-	data = append(data, msg...)
-	return sha256.Sum(data)
+	data := tagHash[:] | tagHash[:] | msg
+	h = sha256.Sum(data)
+	return
 }
 
-func computeChallenge(rx, px, msg []byte) Fe {
-	input := []byte{:0:96}
-	input = append(input, rx...)
-	input = append(input, px...)
-	input = append(input, msg...)
+func computeChallenge(rx, px, msg []byte) (e Fe) {
+	input := rx | px | msg
 	hash := taggedHash("BIP0340/challenge", input)
-	e := scalarFromBytes(hash[:])
+	e = scalarFromBytes(hash[:])
 	// Reduce mod n.
 	if feCmp(e, curveN()) >= 0 {
 		e = scalarSub(e, curveN())
