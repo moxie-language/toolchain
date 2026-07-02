@@ -71,11 +71,11 @@ for dir in $DIRS; do
     shortname=$(echo "$dir" | sed 's|^\./src/||')
     printf "%-50s" "TEST $shortname"
 
-    if $MOXIE build -o "$testdir/test.bin" "$testdir" >"$testdir/build.log" 2>&1; then
+    if $MOXIE build -o "$testdir/test" "$testdir" >"$testdir/build.log" 2>&1; then
         # Ensure binary is executable
-        chmod +x "$testdir/test.bin"
+        chmod +x "$testdir/test"
         # Run
-        if output=$("$testdir/test.bin" 2>&1); then
+        if output=$("$testdir/test" 2>&1); then
             echo "PASS"
             PASSED=$((PASSED + 1))
         else
