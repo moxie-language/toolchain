@@ -269,9 +269,11 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *rawType) unsafe.Po
 			orig := codecDecodeSeenLookup(ds, idx)
 			buf := alloc(typ.size(), nil)
 			*(*unsafe.Pointer)(buf) = orig
+			codecDecodeSeenAdd(ds, orig)
 			return buf
 		case codecTagPtr:
 			inner := codecDecodeValue(cb, ds, typ.elem())
+			codecDecodeSeenAdd(ds, inner)
 			buf := alloc(typ.size(), nil)
 			*(*unsafe.Pointer)(buf) = inner
 			return buf
@@ -305,6 +307,15 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *rawType) unsafe.Po
 		}
 		nf := int32(codecReadU32(cb))
 		buf := alloc(typ.size(), nil)
+		// Register decoded struct and all its field addresses in the
+		// decode seen-set, matching the encode side's registration order
+		// so that back-references are resolved correctly.
+		codecDecodeSeenAdd(ds, buf)
+		for i := int32(0); i < nf; i++ {
+			off := typ.structFieldOffset(i)
+			fp := unsafe.Add(buf, off)
+			codecDecodeSeenAdd(ds, fp)
+		}
 		// Decode fields in order using type descriptors
 		expectedNf := typ.numField()
 		if nf != expectedNf {
