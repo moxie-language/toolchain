@@ -3949,9 +3949,6 @@ func (b *builder) emitCodecEncodeReturn(val llvm.Value, t types.Type, cb, ss llv
 		b.CreateStore(val, tmp)
 		for i := 0; i < u.NumFields(); i++ {
 			ft := u.Field(i).Type()
-			if !typeNeedsCopy(ft) {
-				continue
-			}
 			gep := b.CreateStructGEP(slt, tmp, i, "cefg")
 			if _, ok := ft.Underlying().(*types.Struct); ok {
 				flt := b.getLLVMType(ft)
@@ -4101,9 +4098,6 @@ func (b *builder) emitCodecDecodeReturn(val llvm.Value, t types.Type, cb, ds llv
 		b.CreateStore(llvm.ConstNull(slt), tmp)
 		for i := 0; i < u.NumFields(); i++ {
 			ft := u.Field(i).Type()
-			if !typeNeedsCopy(ft) {
-				continue
-			}
 			gep := b.CreateStructGEP(slt, tmp, i, "cdfg")
 			if _, ok := ft.Underlying().(*types.Map); ok {
 				decoded := b.emitCodecDecodeReturn(val, ft, cb, ds)
