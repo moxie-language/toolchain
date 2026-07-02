@@ -3776,7 +3776,7 @@ func typeNeedsCopyDepth(t types.Type, depth int) bool {
 	case *types.Chan:
 		return true
 	case *types.Signature:
-		return true
+		return false
 	case *types.Interface:
 		return true
 	case *types.Struct:
