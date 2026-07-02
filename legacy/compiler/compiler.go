@@ -3843,7 +3843,15 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 		return
 	}
 
-	needsCodec := sig != nil && sig.Results() != nil && sig.Results().Len() > 0
+	needsCodec := false
+	if sig != nil && sig.Results() != nil {
+		for i := 0; i < sig.Results().Len(); i++ {
+			if typeNeedsCopy(sig.Results().At(i).Type()) {
+				needsCodec = true
+				break
+			}
+		}
+	}
 	if !needsCodec {
 		b.createRuntimeCall("FnArenaPopFree", nil, "")
 		b.CreateRet(retVal)
