@@ -11,7 +11,7 @@ import (
 
 // maxPadBytes is the maximum allowed bytes to be padded in a rom extraction
 // this value is currently defined by Nintendo Switch Page Alignment (4096 bytes)
-const maxPadBytes = 4095
+const maxPadBytes = 65536
 
 // objcopyError is an error returned by functions that act like objcopy.
 type objcopyError struct {

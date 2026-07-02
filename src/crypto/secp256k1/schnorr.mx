@@ -13,73 +13,70 @@ const (
 // from their preferred source until ValidateSecretKey returns true; this
 // package intentionally does not import crypto/rand so WASM consumers that
 // only need verification do not link unused entropy machinery.
-func ValidateSecretKey(sk []byte) bool {
+func ValidateSecretKey(sk []byte) (valid bool) {
 	if len(sk) != 32 {
-		return false
+		return
 	}
 	k := scalarFromBytes(sk)
-	return !scalarIsZero(k) && feCmp(k, curveN()) < 0
+	valid = !scalarIsZero(k) && feCmp(k, curveN()) < 0
+	return
 }
 
-// ValidatePubKey returns true if pubkey is a valid 32-byte BIP-340 x-only
-// public key: correct length, x < p, and the x-coordinate lifts to a point on
-// the curve.
-func ValidatePubKey(pubkey []byte) bool {
+func ValidatePubKey(pubkey []byte) (valid bool) {
 	if len(pubkey) != PubKeyBytesLen {
-		return false
+		return
 	}
 	x := feFromBytes(pubkey)
 	if feCmp(x, _feP()) >= 0 {
-		return false
+		return
 	}
-	_, ok := LiftX(x)
-	return ok
+	_, valid = LiftX(x)
+	return
 }
 
-// VerifySchnorr verifies a BIP-340 Schnorr signature over a 32-byte message hash.
-func VerifySchnorr(pubkey, msg [32]byte, sig [64]byte) bool {
-	return VerifySchnorrBytes(pubkey, msg[:], sig)
+func VerifySchnorr(pubkey, msg [32]byte, sig [64]byte) (valid bool) {
+	valid = VerifySchnorrBytes(pubkey, msg[:], sig)
+	return
 }
 
-// VerifySchnorrBytes verifies a BIP-340 Schnorr signature over a variable-length
-// message. BIP-340 (post-2022) defines signing/verification over arbitrary-length
-// input; Nostr always passes a 32-byte sha256 hash but the spec is general.
-func VerifySchnorrBytes(pubkey [32]byte, msg []byte, sig [64]byte) bool {
+func VerifySchnorrBytes(pubkey [32]byte, msg []byte, sig [64]byte) (valid bool) {
 	px := feFromBytes(pubkey[:])
 	P, ok := LiftX(px)
 	if !ok {
-		return false
+		return
 	}
 
 	rx := feFromBytes(sig[:32])
 	s := scalarFromBytes(sig[32:])
 
-	// BIP-340 explicit reject: sig[0:32] >= p or sig[32:64] >= n.
 	if feCmp(rx, _feP()) >= 0 {
-		return false
+		return
 	}
 	if feCmp(s, curveN()) >= 0 {
-		return false
+		return
 	}
 
 	e := computeChallenge(sig[:32], pubkey[:], msg)
 
 	sG := ScalarBaseMult(s)
-	eP := ScalarMult(pointFromAffine(P), e).toAffine()
+	ePPt := ScalarMult(pointFromAffine(P), e)
+	eP := ePPt.toAffine()
 
 	negEP := AffinePoint{eP.X, feNeg(eP.Y)}
-	R := pointAdd(pointFromAffine(sG), pointFromAffine(negEP)).toAffine()
+	RPt := pointAdd(pointFromAffine(sG), pointFromAffine(negEP))
+	R := RPt.toAffine()
 
 	if feIsZero(R.X) && feIsZero(R.Y) {
-		return false
+		return
 	}
 	if R.X != rx {
-		return false
+		return
 	}
 	if !feIsEven(R.Y) {
-		return false
+		return
 	}
-	return true
+	valid = true
+	return
 }
 
 // SignSchnorr creates a BIP-340 Schnorr signature over a 32-byte message hash.
@@ -164,7 +161,8 @@ func ECDH(seckey, pubkey [32]byte) (x [32]byte, ok bool) {
 	if !err {
 		return
 	}
-	R := ScalarMult(pointFromAffine(P), sk).toAffine()
+	RPt := ScalarMult(pointFromAffine(P), sk)
+	R := RPt.toAffine()
 	if feIsZero(R.X) && feIsZero(R.Y) {
 		return
 	}

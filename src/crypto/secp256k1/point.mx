@@ -12,8 +12,8 @@ type AffinePoint struct {
 }
 
 // G returns the generator point.
-func G() AffinePoint {
-	return AffinePoint{
+func G() (p AffinePoint) {
+	p = AffinePoint{
 		X: Fe{
 			0x59F2815B16F81798,
 			0x029BFCDB2DCE28D9,
@@ -27,169 +27,171 @@ func G() AffinePoint {
 			0x483ADA7726A3C465,
 		},
 	}
+	return
 }
 
 // curveN returns the curve order n.
-func curveN() Fe {
-	return Fe{
+func curveN() (n Fe) {
+	n = Fe{
 		0xBFD25E8CD0364141,
 		0xBAAEDCE6AF48A03B,
 		0xFFFFFFFFFFFFFFFE,
 		0xFFFFFFFFFFFFFFFF,
 	}
+	return
 }
 
 // Infinity returns the point at infinity.
-func Infinity() Point { return Point{_feZero(), _feOne(), _feZero()} }
+func Infinity() (p Point) {
+	p = Point{_feZero(), _feOne(), _feZero()}
+	return
+}
 
 // pointFromAffine converts an affine point to Jacobian.
-func pointFromAffine(p AffinePoint) Point {
-	return Point{p.X, p.Y, _feOne()}
+func pointFromAffine(p AffinePoint) (r Point) {
+	r = Point{p.X, p.Y, _feOne()}
+	return
 }
 
 // toAffine converts a Jacobian point to affine.
-func (p Point) toAffine() AffinePoint {
+func (p *Point) toAffine() (r AffinePoint) {
 	if feIsZero(p.Z) {
-		return AffinePoint{_feZero(), _feZero()}
+		return
 	}
 	zInv := feInv(p.Z)
 	z2 := feSqr(zInv)
 	z3 := feMul(z2, zInv)
-	return AffinePoint{
+	r = AffinePoint{
 		X: feMul(p.X, z2),
 		Y: feMul(p.Y, z3),
 	}
+	return
 }
 
 // isInfinity returns true if the point is at infinity.
-func (p Point) isInfinity() bool {
-	return feIsZero(p.Z)
+func (p *Point) isInfinity() (z bool) {
+	z = feIsZero(p.Z)
+	return
 }
 
 // pointDouble computes 2*P in Jacobian coordinates.
-func pointDouble(p Point) Point {
+func pointDouble(p Point) (r Point) {
 	if feIsZero(p.Z) {
-		return p
+		r = p
+		return
 	}
 
-	// http://hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-0.html#doubling-dbl-2009-l
 	a := feSqr(p.X)
 	b := feSqr(p.Y)
 	c := feSqr(b)
 
-	// d = 2*((X1+B)^2-A-C)
 	xb := feAdd(p.X, b)
 	xb2 := feSqr(xb)
 	d := feSub(feSub(xb2, a), c)
 	d = feAdd(d, d)
 
-	// e = 3*A
 	e := feAdd(feAdd(a, a), a)
 
 	f := feSqr(e)
 
-	// X3 = F - 2*D
-	x3 := feSub(f, feAdd(d, d))
+	r.X = feSub(f, feAdd(d, d))
 
-	// Y3 = E*(D-X3) - 8*C
-	y3 := feMul(e, feSub(d, x3))
+	r.Y = feMul(e, feSub(d, r.X))
 	c8 := feAdd(c, c)
 	c8 = feAdd(c8, c8)
 	c8 = feAdd(c8, c8)
-	y3 = feSub(y3, c8)
+	r.Y = feSub(r.Y, c8)
 
-	// Z3 = 2*Y1*Z1
-	z3 := feMul(p.Y, p.Z)
-	z3 = feAdd(z3, z3)
+	r.Z = feMul(p.Y, p.Z)
+	r.Z = feAdd(r.Z, r.Z)
 
-	return Point{x3, y3, z3}
+	return
 }
 
 // pointAdd computes P + Q in Jacobian coordinates.
-func pointAdd(p, q Point) Point {
-	if p.isInfinity() {
-		return q
+func pointAdd(p, q Point) (r Point) {
+	if feIsZero(p.Z) {
+		r = q
+		return
 	}
-	if q.isInfinity() {
-		return p
+	if feIsZero(q.Z) {
+		r = p
+		return
 	}
 
-	// U1 = X1*Z2^2, U2 = X2*Z1^2
 	z1sq := feSqr(p.Z)
 	z2sq := feSqr(q.Z)
 	u1 := feMul(p.X, z2sq)
 	u2 := feMul(q.X, z1sq)
 
-	// S1 = Y1*Z2^3, S2 = Y2*Z1^3
 	s1 := feMul(p.Y, feMul(z2sq, q.Z))
 	s2 := feMul(q.Y, feMul(z1sq, p.Z))
 
 	if u1 == u2 {
 		if s1 == s2 {
-			return pointDouble(p)
+			r = pointDouble(p)
+			return
 		}
-		return Infinity()
+		r = Infinity()
+		return
 	}
 
-	// H = U2 - U1
 	h := feSub(u2, u1)
-	// R = S2 - S1
-	r := feSub(s2, s1)
+	rv := feSub(s2, s1)
 
 	h2 := feSqr(h)
 	h3 := feMul(h2, h)
 
-	// X3 = R^2 - H^3 - 2*U1*H^2
-	x3 := feSub(feSub(feSqr(r), h3), feAdd(feMul(u1, h2), feMul(u1, h2)))
+	r.X = feSub(feSub(feSqr(rv), h3), feAdd(feMul(u1, h2), feMul(u1, h2)))
 
-	// Y3 = R*(U1*H^2 - X3) - S1*H^3
-	y3 := feSub(feMul(r, feSub(feMul(u1, h2), x3)), feMul(s1, h3))
+	r.Y = feSub(feMul(rv, feSub(feMul(u1, h2), r.X)), feMul(s1, h3))
 
-	// Z3 = Z1*Z2*H
-	z3 := feMul(feMul(p.Z, q.Z), h)
+	r.Z = feMul(feMul(p.Z, q.Z), h)
 
-	return Point{x3, y3, z3}
+	return
 }
 
 // varTimeScalarMult computes k*P using variable-time double-and-add.
-// Safe only for public inputs (e.g. verification). Do NOT use with secret scalars.
-func varTimeScalarMult(p Point, k Fe) Point {
-	result := Infinity()
+func varTimeScalarMult(p Point, k Fe) (r Point) {
+	r = Infinity()
 	current := p
 	for i := 0; i < 4; i++ {
 		w := k[i]
 		for bit := 0; bit < 64; bit++ {
 			if w&1 == 1 {
-				result = pointAdd(result, current)
+				r = pointAdd(r, current)
 			}
 			current = pointDouble(current)
 			w >>= 1
 		}
 	}
-	return result
+	return
 }
 
 // constantTimeByteEq returns 1 if a == b, 0 otherwise. Constant-time.
-func constantTimeByteEq(a, b uint8) int32 {
+func constantTimeByteEq(a, b uint8) (eq int32) {
 	x := uint32(a ^ b)
 	x |= x >> 4
 	x |= x >> 2
 	x |= x >> 1
-	return int32(1 ^ (x & 1))
+	eq = int32(1 ^ (x & 1))
+	return
 }
 
 // pointCondSelect returns b if cond==1, a if cond==0. Constant-time.
-func pointCondSelect(a, b Point, cond int32) Point {
-	return Point{
+func pointCondSelect(a, b Point, cond int32) (r Point) {
+	r = Point{
 		feCondSelect(a.X, b.X, cond),
 		feCondSelect(a.Y, b.Y, cond),
 		feCondSelect(a.Z, b.Z, cond),
 	}
+	return
 }
 
 // pointCondNeg returns Point{X, -Y, Z} if cond==1, p unchanged if cond==0. Constant-time.
-func pointCondNeg(p Point, cond int32) Point {
-	return Point{p.X, feCondNeg(p.Y, cond), p.Z}
+func pointCondNeg(p Point, cond int32) (r Point) {
+	r = Point{p.X, feCondNeg(p.Y, cond), p.Z}
+	return
 }
 
 // projLookupTable holds [1*Q, 2*Q, ..., 8*Q] for constant-time selection.
@@ -219,7 +221,7 @@ func (t *projLookupTable) selectInto(dest *Point, x int8) {
 
 // pointAddCT adds p and q in constant time, handling identity (Z==0) via
 // conditional select. Does NOT handle p == q (use pointDouble for that case).
-func pointAddCT(p, q Point) Point {
+func pointAddCT(p, q Point) (r Point) {
 	pIsInf := ctIsZeroFe(p.Z)
 	qIsInf := ctIsZeroFe(q.Z)
 
@@ -230,23 +232,21 @@ func pointAddCT(p, q Point) Point {
 	s1 := feMul(p.Y, feMul(z2sq, q.Z))
 	s2 := feMul(q.Y, feMul(z1sq, p.Z))
 	h := feSub(u2, u1)
-	r := feSub(s2, s1)
+	rv := feSub(s2, s1)
 	h2 := feSqr(h)
 	h3 := feMul(h2, h)
-	x3 := feSub(feSub(feSqr(r), h3), feAdd(feMul(u1, h2), feMul(u1, h2)))
-	y3 := feSub(feMul(r, feSub(feMul(u1, h2), x3)), feMul(s1, h3))
-	z3 := feMul(feMul(p.Z, q.Z), h)
-	result := Point{x3, y3, z3}
+	r.X = feSub(feSub(feSqr(rv), h3), feAdd(feMul(u1, h2), feMul(u1, h2)))
+	r.Y = feSub(feMul(rv, feSub(feMul(u1, h2), r.X)), feMul(s1, h3))
+	r.Z = feMul(feMul(p.Z, q.Z), h)
 
-	// Identity propagation: if either input is infinity, use the other.
-	result = pointCondSelect(result, q, pIsInf)
-	result = pointCondSelect(result, p, qIsInf)
-	return result
+	r = pointCondSelect(r, q, pIsInf)
+	r = pointCondSelect(r, p, qIsInf)
+	return
 }
 
 // pointDoubleCT doubles p in constant time, handling identity (Z==0) via
 // conditional select.
-func pointDoubleCT(p Point) Point {
+func pointDoubleCT(p Point) (r Point) {
 	isInf := ctIsZeroFe(p.Z)
 
 	a := feSqr(p.X)
@@ -258,61 +258,61 @@ func pointDoubleCT(p Point) Point {
 	d = feAdd(d, d)
 	e := feAdd(feAdd(a, a), a)
 	f := feSqr(e)
-	x3 := feSub(f, feAdd(d, d))
-	y3 := feMul(e, feSub(d, x3))
+	r.X = feSub(f, feAdd(d, d))
+	r.Y = feMul(e, feSub(d, r.X))
 	c8 := feAdd(c, c)
 	c8 = feAdd(c8, c8)
 	c8 = feAdd(c8, c8)
-	y3 = feSub(y3, c8)
-	z3 := feMul(p.Y, p.Z)
-	z3 = feAdd(z3, z3)
+	r.Y = feSub(r.Y, c8)
+	r.Z = feMul(p.Y, p.Z)
+	r.Z = feAdd(r.Z, r.Z)
 
-	result := Point{x3, y3, z3}
-	result = pointCondSelect(result, p, isInf)
-	return result
+	r = pointCondSelect(r, p, isInf)
+	return
 }
 
 // ScalarMult computes k*P in constant time using signed radix-16.
-func ScalarMult(p Point, k Fe) Point {
+func ScalarMult(p Point, k Fe) (r Point) {
 	var table projLookupTable
 	table.fromPoint(p)
 
 	digits := scalarToSignedRadix16(k)
 
-	var result Point
-	table.selectInto(&result, digits[64])
+	table.selectInto(&r, digits[64])
 
 	for i := 63; i >= 0; i-- {
-		result = pointDoubleCT(result)
-		result = pointDoubleCT(result)
-		result = pointDoubleCT(result)
-		result = pointDoubleCT(result)
+		r = pointDoubleCT(r)
+		r = pointDoubleCT(r)
+		r = pointDoubleCT(r)
+		r = pointDoubleCT(r)
 
 		var multiple Point
 		table.selectInto(&multiple, digits[i])
-		result = pointAddCT(result, multiple)
+		r = pointAddCT(r, multiple)
 	}
-	return result
+	return
 }
 
 // ScalarBaseMult computes k*G in constant time.
-func ScalarBaseMult(k Fe) AffinePoint {
-	return ScalarMult(pointFromAffine(G()), k).toAffine()
+func ScalarBaseMult(k Fe) (p AffinePoint) {
+	pt := ScalarMult(pointFromAffine(G()), k)
+	p = pt.toAffine()
+	return
 }
 
 // LiftX recovers a point from x-coordinate only (BIP-340).
 // Returns the point with even y.
-func LiftX(x Fe) (AffinePoint, bool) {
-	// y^2 = x^3 + 7
+func LiftX(x Fe) (p AffinePoint, ok bool) {
 	x3 := feMul(feSqr(x), x)
 	y2 := feAdd(x3, Fe{7, 0, 0, 0})
 	y, ok := feSqrt(y2)
 	if !ok {
-		return AffinePoint{}, false
+		return
 	}
-	// BIP-340: choose even y.
 	if !feIsEven(y) {
 		y = feNeg(y)
 	}
-	return AffinePoint{x, y}, true
+	p = AffinePoint{x, y}
+	ok = true
+	return
 }
