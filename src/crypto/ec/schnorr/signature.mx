@@ -342,7 +342,14 @@ func schnorrSign(
 
 // SignOption is a functional option argument that allows callers to modify the
 // way we generate BIP-340 schnorr signatures.
-type SignOption func(*signOptions)
+type SignOption interface {
+	apply(o *signOptions)
+}
+
+// signOptionFunc wraps a function as a SignOption.
+type signOptionFunc func(*signOptions)
+
+func (f *signOptionFunc) apply(o *signOptions) { (*f)(o) }
 
 // signOptions houses the set of functional options that can be used to modify
 // the method used to generate the BIP-340 signature.
@@ -365,8 +372,18 @@ func defaultSignOptions() (o *signOptions) {
 // Peformance sensitive applications may opt to use this option to speed up the
 // signing operation.
 func FastSign() (option SignOption) {
-	option = func(o *signOptions) { o.fastSign = true }
+	var sf signOptionFunc = func(o *signOptions) { o.fastSign = true }
+	option = &sf
 	return
+}
+
+// customNonceOption holds auxData for CustomNonce.
+type customNonceOption struct {
+	auxData [32]byte
+}
+
+func (o *customNonceOption) apply(sigOpts *signOptions) {
+	sigOpts.authNonce = &o.auxData
 }
 
 // CustomNonce allows users to pass in a custom set of auxData that's used as
@@ -375,7 +392,7 @@ func FastSign() (option SignOption) {
 // Mu-Sig2. If this option isn't set, then rfc6979 will be used to generate the
 // nonce material.
 func CustomNonce(auxData [32]byte) (option SignOption) {
-	option = func(o *signOptions) { o.authNonce = &auxData }
+	option = &customNonceOption{auxData: auxData}
 	return
 }
 
@@ -396,7 +413,7 @@ func Sign(
 	// First, parse the set of optional signing options.
 	opts := defaultSignOptions()
 	for _, option := range signOpts {
-		option(opts)
+		option.apply(opts)
 	}
 	// The algorithm for producing a BIP-340 signature is described in README.md
 	// and is reproduced here for reference:
