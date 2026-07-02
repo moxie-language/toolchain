@@ -72,6 +72,8 @@ for dir in $DIRS; do
     printf "%-50s" "TEST $shortname"
 
     if $MOXIE build -o "$testdir/test.bin" "$testdir" >"$testdir/build.log" 2>&1; then
+        # Ensure binary is executable
+        chmod +x "$testdir/test.bin"
         # Run
         if output=$("$testdir/test.bin" 2>&1); then
             echo "PASS"

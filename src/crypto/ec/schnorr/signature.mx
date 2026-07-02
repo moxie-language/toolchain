@@ -17,13 +17,14 @@ const (
 	scalarSize = 32
 )
 
-func _rfc6979ExtraDataV0() [32]uint8 {
-	return [32]uint8{
+func _rfc6979ExtraDataV0() (data [32]uint8) {
+	data = [32]uint8{
 		0xa3, 0xeb, 0x4c, 0x18, 0x2f, 0xae, 0x7e, 0xf4,
 		0xe8, 0x10, 0xc6, 0xee, 0x13, 0xb0, 0xe9, 0x26,
 		0x68, 0x6d, 0x71, 0xe8, 0x7f, 0x39, 0x4f, 0x79,
 		0x9c, 0x00, 0xa5, 0x21, 0x03, 0xcb, 0x4e, 0x17,
 	}
+	return
 }
 
 // Signature is a type representing a Schnorr signature.
@@ -33,11 +34,12 @@ type Signature struct {
 }
 
 // NewSignature instantiates a new signature given some r and s values.
-func NewSignature(r *btcec.FieldVal, s *btcec.ModNScalar) *Signature {
-	var sig Signature
-	sig.r.Set(r).Normalize()
-	sig.s.Set(s)
-	return &sig
+func NewSignature(r *btcec.FieldVal, s *btcec.ModNScalar) (sig *Signature) {
+	var sval Signature
+	sval.r.Set(r).Normalize()
+	sval.s.Set(s)
+	sig = &sval
+	return
 }
 
 // Serialize returns the Schnorr signature in a stricter format.
@@ -48,12 +50,13 @@ func NewSignature(r *btcec.FieldVal, s *btcec.ModNScalar) *Signature {
 //	 	x coordinate of the point R, encoded as a big-endian uint256
 //		sig[32:64]
 //			s, encoded also as big-endian uint256
-func (sig Signature) Serialize() []byte {
+func (sig Signature) Serialize() (serialized []byte) {
 	// Total length of returned signature is the length of r and s.
 	var b [SignatureSize]byte
 	sig.r.PutBytesUnchecked(b[0:32])
 	sig.s.PutBytesUnchecked(b[32:64])
-	return b[:]
+	serialized = b[:]
+	return
 }
 
 // ParseSignature parses a signature according to the BIP-340 specification and
@@ -62,7 +65,7 @@ func (sig Signature) Serialize() []byte {
 // - The r component must be in the valid range for secp256k1 field elements
 //
 // - The s component must be in the valid range for secp256k1 scalars
-func ParseSignature(sig []byte) (*Signature, error) {
+func ParseSignature(sig []byte) (parsed *Signature, err error) {
 	// The signature must be the correct length.
 	sigLen := len(sig)
 	if sigLen < SignatureSize {
@@ -70,14 +73,16 @@ func ParseSignature(sig []byte) (*Signature, error) {
 			"malformed signature: too short: %d < %d", sigLen,
 			SignatureSize,
 		)
-		return nil, signatureError(ErrSigTooShort, str)
+		err = signatureError(ErrSigTooShort, str)
+		return
 	}
 	if sigLen > SignatureSize {
 		str := fmt.Sprintf(
 			"malformed signature: too long: %d > %d", sigLen,
 			SignatureSize,
 		)
-		return nil, signatureError(ErrSigTooLong, str)
+		err = signatureError(ErrSigTooLong, str)
+		return
 	}
 	// The signature is validly encoded at this point, however, enforce
 	// additional restrictions to ensure r is in the range [0, p-1], and s is in
@@ -86,19 +91,22 @@ func ParseSignature(sig []byte) (*Signature, error) {
 	var r btcec.FieldVal
 	if overflow := r.SetByteSlice(sig[0:32]); overflow {
 		str := "invalid signature: r >= field prime"
-		return nil, signatureError(ErrSigRTooBig, str)
+		err = signatureError(ErrSigRTooBig, str)
+		return
 	}
 	var s btcec.ModNScalar
 	s.SetByteSlice(sig[32:64])
 	// Return the signature.
-	return NewSignature(&r, &s), nil
+	parsed = NewSignature(&r, &s)
+	return
 }
 
 // IsEqual compares this Signature instance to the one passed, returning true if
 // both Signatures are equivalent. A signature is equivalent to another if they
 // both have the same scalar value for R and S.
-func (sig Signature) IsEqual(otherSig *Signature) bool {
-	return sig.r.Equals(&otherSig.r) && sig.s.Equals(&otherSig.s)
+func (sig Signature) IsEqual(otherSig *Signature) (equal bool) {
+	equal = sig.r.Equals(&otherSig.r) && sig.s.Equals(&otherSig.s)
+	return
 }
 
 // schnorrVerify attempt to verify the signature for the provided hash and
@@ -108,7 +116,7 @@ func (sig Signature) IsEqual(otherSig *Signature) bool {
 // This differs from the exported Verify method in that it returns a specific
 // error to support better testing, while the exported method simply returns a
 // bool indicating success or failure.
-func schnorrVerify(sig *Signature, hash []byte, pubKeyBytes []byte) error {
+func schnorrVerify(sig *Signature, hash []byte, pubKeyBytes []byte) (err error) {
 	// The algorithm for producing a BIP-340 signature is described in
 	// README.md and is reproduced here for reference:
 	//
@@ -138,13 +146,15 @@ func schnorrVerify(sig *Signature, hash []byte, pubKeyBytes []byte) error {
 	// P = lift_x(int32(pk))
 	//
 	// Fail if P is not a point on the curve
-	pubKey, err := ParsePubKey(pubKeyBytes)
+	var pubKey *btcec.PublicKey
+	pubKey, err = ParsePubKey(pubKeyBytes)
 	if err != nil {
-		return err
+		return
 	}
 	if !pubKey.IsOnCurve() {
 		str := "pubkey point is not on curve"
-		return signatureError(ErrPubKeyNotOnCurve, str)
+		err = signatureError(ErrPubKeyNotOnCurve, str)
+		return
 	}
 	// Step 3.
 	//
@@ -185,7 +195,8 @@ func schnorrVerify(sig *Signature, hash []byte, pubKeyBytes []byte) error {
 	// Fail if R is the point at infinity
 	if (R.X.IsZero() && R.Y.IsZero()) || R.Z.IsZero() {
 		str := "calculated R point is the point at infinity"
-		return signatureError(ErrSigRNotOnCurve, str)
+		err = signatureError(ErrSigRNotOnCurve, str)
+		return
 	}
 	// Step 8.
 	//
@@ -195,7 +206,8 @@ func schnorrVerify(sig *Signature, hash []byte, pubKeyBytes []byte) error {
 	R.ToAffine()
 	if R.Y.IsOdd() {
 		str := "calculated R y-value is odd"
-		return signatureError(ErrSigRYIsOdd, str)
+		err = signatureError(ErrSigRYIsOdd, str)
+		return
 	}
 	// Step 9.
 	//
@@ -204,19 +216,21 @@ func schnorrVerify(sig *Signature, hash []byte, pubKeyBytes []byte) error {
 	// Note that R must be in affine coordinates for this check.
 	if !sig.r.Equals(&R.X) {
 		str := "calculated R point was not given R"
-		return signatureError(ErrUnequalRValues, str)
+		err = signatureError(ErrUnequalRValues, str)
+		return
 	}
 	// Step 10.
 	//
 	// Return success iff not failure occured before reachign this
-	return nil
+	return
 }
 
 // Verify returns whether or not the signature is valid for the provided hash
 // and secp256k1 public key.
-func (sig *Signature) Verify(hash []byte, pubKey *btcec.PublicKey) bool {
+func (sig *Signature) Verify(hash []byte, pubKey *btcec.PublicKey) (valid bool) {
 	pubkeyBytes := SerializePubKey(pubKey)
-	return schnorrVerify(sig, hash, pubkeyBytes) == nil
+	valid = schnorrVerify(sig, hash, pubkeyBytes) == nil
+	return
 }
 
 // zeroArray zeroes the memory of a scalar array.
@@ -237,7 +251,7 @@ func zeroArray(a *[scalarSize]byte) {
 func schnorrSign(
 	privKey, nonce *btcec.ModNScalar, pubKey *btcec.PublicKey,
 	hash []byte, opts *signOptions,
-) (*Signature, error) {
+) (sigResult *Signature, err error) {
 
 	// The algorithm for producing a BIP-340 signature is described in
 	// README.md and is reproduced here for reference:
@@ -302,7 +316,8 @@ func schnorrSign(
 	if overflow := e.SetBytes((*[32]byte)(commitment)); overflow != 0 {
 		k.Zero()
 		str := "hash of (r || P || m) too big"
-		return nil, signatureError(ErrSchnorrHashValue, str)
+		err = signatureError(ErrSchnorrHashValue, str)
+		return
 	}
 	// Step 13.
 	//
@@ -310,19 +325,19 @@ func schnorrSign(
 	var sVal btcec.ModNScalar
 	s := sVal.Mul2(&e, privKey).Add(&k)
 	k.Zero()
-	sig := NewSignature(r, s)
+	sigResult = NewSignature(r, s)
 	// Step 14.
 	//
 	// If Verify(bytes(P), m, sig) fails, abort.
 	if !opts.fastSign {
-		if err := schnorrVerify(sig, hash, pBytes); err != nil {
-			return nil, err
+		if err = schnorrVerify(sigResult, hash, pBytes); err != nil {
+			return
 		}
 	}
 	// Step 15.
 	//
 	// Return (r, s)
-	return sig, nil
+	return
 }
 
 // SignOption is a functional option argument that allows callers to modify the
@@ -341,13 +356,17 @@ type signOptions struct {
 }
 
 // defaultSignOptions returns the default set of signing operations.
-func defaultSignOptions() *signOptions { return &signOptions{} }
+func defaultSignOptions() (o *signOptions) {
+	o = &signOptions{}
+	return
+}
 
 // FastSign forces signing to skip the extra verification step at the end.
 // Peformance sensitive applications may opt to use this option to speed up the
 // signing operation.
-func FastSign() SignOption {
-	return func(o *signOptions) { o.fastSign = true }
+func FastSign() (option SignOption) {
+	option = func(o *signOptions) { o.fastSign = true }
+	return
 }
 
 // CustomNonce allows users to pass in a custom set of auxData that's used as
@@ -355,8 +374,9 @@ func FastSign() SignOption {
 // to specify this custom value when using multi-signatures schemes such as
 // Mu-Sig2. If this option isn't set, then rfc6979 will be used to generate the
 // nonce material.
-func CustomNonce(auxData [32]byte) SignOption {
-	return func(o *signOptions) { o.authNonce = &auxData }
+func CustomNonce(auxData [32]byte) (option SignOption) {
+	option = func(o *signOptions) { o.authNonce = &auxData }
+	return
 }
 
 // Sign generates an BIP-340 signature over the secp256k1 curve for the provided
@@ -372,7 +392,7 @@ func CustomNonce(auxData [32]byte) SignOption {
 func Sign(
 	privKey *btcec.SecretKey, hash []byte,
 	signOpts ...SignOption,
-) (*Signature, error) {
+) (sig *Signature, err error) {
 	// First, parse the set of optional signing options.
 	opts := defaultSignOptions()
 	for _, option := range signOpts {
@@ -429,7 +449,8 @@ func Sign(
 	// Fail if d = 0 or d >= n
 	if privKeyScalar.IsZero() {
 		str := "secret key is zero"
-		return nil, signatureError(ErrSecretKeyIsZero, str)
+		err = signatureError(ErrSecretKeyIsZero, str)
+		return
 	}
 	// Step 4.
 	//
@@ -475,14 +496,15 @@ func Sign(
 		// Fail if k' = 0
 		if kPrime.IsZero() {
 			str := fmt.Sprintf("generated nonce is zero")
-			return nil, signatureError(ErrSchnorrHashValue, str)
+			err = signatureError(ErrSchnorrHashValue, str)
+			return
 		}
-		sig, err := schnorrSign(&privKeyScalar, &kPrime, pub, hash, opts)
+		sig, err = schnorrSign(&privKeyScalar, &kPrime, pub, hash, opts)
 		kPrime.Zero()
 		if err != nil {
-			return nil, err
+			return
 		}
-		return sig, nil
+		return
 	}
 	var privKeyBytes [scalarSize]byte
 	privKeyScalar.PutBytes(&privKeyBytes)
@@ -499,12 +521,12 @@ func Sign(
 			privKeyBytes[:], hash, extraData[:], nil, iteration,
 		)
 		// Steps 10-15.
-		sig, err := schnorrSign(&privKeyScalar, k, pub, hash, opts)
+		sig, err = schnorrSign(&privKeyScalar, k, pub, hash, opts)
 		k.Zero()
 		if err != nil {
 			// Try again with a new nonce.
 			continue
 		}
-		return sig, nil
+		return
 	}
 }
