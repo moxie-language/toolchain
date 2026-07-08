@@ -105,15 +105,24 @@ func isBasicKind(k Kind) bool {
 }
 
 func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *rawType) {
+	if typ == nil {
+		runtimePanic("codecEncodeValue nil typ")
+	}
 	k := typ.kind()
 	if isBasicKind(k) {
 		sz := typ.size()
+		if sz > 65536 {
+			runtimePanic("codec basic bad size")
+		}
 		cb.data = append(cb.data, unsafe.Slice((*byte)(ptr), sz)...)
 		return
 	}
 	switch k {
 	case kindBytes:
 		s := *(*_string)(ptr)
+		if s.length > 2*1024*1024*1024 {
+			runtimePanic("codec string huge len")
+		}
 		cb.data = append(cb.data, byte(codecTagStr))
 		codecWriteU32(cb, uint32(s.length))
 		if s.length > 0 {
@@ -200,10 +209,10 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *r
 			codecEncodeValue(cb, ss, ep, elemType)
 		}
 	default:
-		if k > 26 {
-			runtimePanic("codec unknown kind")
-		}
 		sz := typ.size()
+		if sz <= 0 || sz > 65536 {
+			runtimePanic("codec default bad size")
+		}
 		cb.data = append(cb.data, unsafe.Slice((*byte)(ptr), sz)...)
 	}
 }
