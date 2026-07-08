@@ -104,6 +104,23 @@ func isBasicKind(k Kind) bool {
 		k == Float32 || k == Float64 || k == kindUnsafePointer || k == kindChan || k == kindFunc
 }
 
+func fieldOffsetFromData(data unsafe.Pointer) uintptr {
+	p := (*uint8)(data)
+	p = (*uint8)(unsafe.Add(unsafe.Pointer(p), 1))
+	var offset uintptr
+	var shift uint32
+	for {
+		b := *p
+		offset |= uintptr(b&0x7f) << shift
+		if b&0x80 == 0 {
+			break
+		}
+		shift += 7
+		p = (*uint8)(unsafe.Add(unsafe.Pointer(p), 1))
+	}
+	return offset
+}
+
 func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *rawType) {
 	if typ == nil {
 		runtimePanic("codecEncodeValue nil typ")
@@ -182,32 +199,42 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *r
 		if vt != nil && (vt.kind() == kindInterface) { fixupFlags |= 4 }
 		codecEncodeMap(hm, cb, ss, fixupFlags)
 	case kindStruct:
-		nf := typ.numField()
+		// Inline struct field access to diagnose underlying() issue.
+		// For named struct types, typ.kind() returns kindStruct but the
+		// named descriptor is NOT an rtStructType - we must follow
+		// the elem/underlying pointer at offset 16 to the raw struct.
+		var sd *rawType
+		if typ.isNamed() {
+			sd = (*rtElemType)(unsafe.Pointer(typ)).elem
+		} else {
+			sd = typ
+		}
+		nf := int32((*(*uint16)(unsafe.Add(unsafe.Pointer(sd), 28))))
+		_ = int32((*(*uint32)(unsafe.Add(unsafe.Pointer(sd), 24))))
 		if nf < 1 || nf > 256 {
 			runtimePanic("codec struct nf bad")
 		}
 		cb.data = append(cb.data, byte(codecTagStruct))
 		codecWriteU32(cb, uint32(nf))
-		// Register all field addresses in the seen-set so that pointer
-		// fields referencing other fields within the same struct (e.g.,
-		// fmt.buf *buffer pointing to pp.buf) are handled as back-references
-		// instead of serializing duplicate copies.
+		fdSize := uintptr(16)
+		fdBase := unsafe.Add(unsafe.Pointer(sd), 24)
 		for i := int32(0); i < nf; i++ {
-			off := typ.structFieldOffset(i)
+			fd := (*rtStructFieldDesc)(unsafe.Add(fdBase, uintptr(i)*fdSize))
+			off := fieldOffsetFromData(fd.data)
 			fp := unsafe.Add(ptr, off)
 			codecSeenAdd(ss, fp)
 		}
 		for i := int32(0); i < nf; i++ {
-			ft := typ.structFieldType(i)
-			off := typ.structFieldOffset(i)
+			fd := (*rtStructFieldDesc)(unsafe.Add(fdBase, uintptr(i)*fdSize))
+			off := fieldOffsetFromData(fd.data)
 			if off > 65536 {
 				runtimePanic("codec struct field offset too large")
 			}
 			fp := unsafe.Add(ptr, off)
-			if ft == nil {
+			if fd.fieldType == nil {
 				runtimePanic("codec struct field nil type")
 			}
-			codecEncodeValue(cb, ss, fp, ft)
+			codecEncodeValue(cb, ss, fp, fd.fieldType)
 		}
 	case kindArray:
 		elemType := typ.elem()
