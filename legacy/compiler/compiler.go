@@ -4008,18 +4008,12 @@ func (b *builder) emitCodecEncodeReturn(val llvm.Value, t types.Type, cb, ss llv
 		}
 
 	case *types.Pointer:
-		if _, isStruct := u.Elem().Underlying().(*types.Struct); isStruct {
-			slt := b.getLLVMType(u.Elem())
-			fld := b.CreateLoad(slt, val, "cpts")
-			b.emitCodecEncodeReturn(fld, u.Elem(), cb, ss)
-		} else {
-			pointeeType := b.getTypeCode(u.Elem())
-			if encFn, ok := rtPkg.Members["codecEncodePtrValue"].(*ssa.Function); ok {
-				encType, encFnVal := b.getFunction(encFn)
-				b.CreateCall(encType, encFnVal, []llvm.Value{
-					cb, ss, val, pointeeType, llvm.Undef(b.dataPtrType),
-				}, "")
-			}
+		pointeeType := b.getTypeCode(u.Elem())
+		if encFn, ok := rtPkg.Members["codecEncodePtrValue"].(*ssa.Function); ok {
+			encType, encFnVal := b.getFunction(encFn)
+			b.CreateCall(encType, encFnVal, []llvm.Value{
+				cb, ss, val, pointeeType, llvm.Undef(b.dataPtrType),
+			}, "")
 		}
 
 	case *types.Interface:
