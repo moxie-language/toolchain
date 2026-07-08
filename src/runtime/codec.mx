@@ -183,6 +183,9 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *r
 		codecEncodeMap(hm, cb, ss, fixupFlags)
 	case kindStruct:
 		nf := typ.numField()
+		if nf < 1 || nf > 256 {
+			runtimePanic("codec struct nf bad")
+		}
 		cb.data = append(cb.data, byte(codecTagStruct))
 		codecWriteU32(cb, uint32(nf))
 		// Register all field addresses in the seen-set so that pointer
@@ -197,7 +200,13 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *r
 		for i := int32(0); i < nf; i++ {
 			ft := typ.structFieldType(i)
 			off := typ.structFieldOffset(i)
+			if off > 65536 {
+				runtimePanic("codec struct field offset too large")
+			}
 			fp := unsafe.Add(ptr, off)
+			if ft == nil {
+				runtimePanic("codec struct field nil type")
+			}
 			codecEncodeValue(cb, ss, fp, ft)
 		}
 	case kindArray:
