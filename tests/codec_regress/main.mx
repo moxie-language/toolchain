@@ -1,0 +1,128 @@
+package main
+
+import "os"
+
+func check(cond bool, name string) {
+	if cond {
+		os.Stdout.Write([]byte("OK "))
+		os.Stdout.Write([]byte(name))
+		os.Stdout.Write([]byte("\n"))
+	} else {
+		os.Stdout.Write([]byte("FAIL "))
+		os.Stdout.Write([]byte(name))
+		os.Stdout.Write([]byte("\n"))
+	}
+}
+
+// --- t1: return string in struct ---
+type S1 struct{ V string }
+
+func f1() (r S1) { r.V = "hello"; return r }
+
+// --- t2: return pointer to struct ---
+type S2 struct{ V string }
+
+func f2() (r *S2) { r = &S2{V: "ptr"}; return r }
+
+// --- t3: return int32 ---
+func f3() (n int32) { return 42 }
+
+// --- t4: return bool ---
+func f4() (b bool) { return true }
+
+// --- t5: return struct with slice ---
+type S5 struct{ D []int32 }
+
+func f5() (r S5) { r.D = []int32{1, 2, 3, 4, 5}; return r }
+
+// --- t6: map insert on receiver ---
+type S6 struct{ M map[string]string }
+
+func (s *S6) put(k, v string) { s.M[k] = v }
+
+// --- t7: append-like on receiver ---
+type S7 struct{ D []int32 }
+
+func (s *S7) grow() { s.D = appendOne(s.D, 99) }
+
+func appendOne(s []int32, v int32) (r []int32) {
+	n := len(s); r = []int32{:n + 1}
+	for i := int32(0); i < n; i++ { r[i] = s[i] }
+	r[n] = v; return r
+}
+
+// --- t8: pointer assign on receiver ---
+type S8 struct{ X int32 }
+type S8w struct{ P *S8 }
+
+func (s *S8w) create() { s.P = &S8{X: 42} }
+
+// --- t9: two-level receiver ---
+type S9a struct{ D []int32 }
+type S9b struct{ L *S9a }
+
+func (s *S9a) grow() { s.D = appendOne(s.D, 10) }
+func (s *S9b) init() { s.L = &S9a{D: []int32{0}} }
+func (s *S9b) add() { s.L.grow() }
+
+// --- t10: multi-value return ---
+func f10() (a int32, b string) { return 7, "seven" }
+
+// --- t11: return nested pointer ---
+type S11 struct{ X int32 }
+type S11w struct{ P *S11 }
+
+func f11() (r S11w) { r.P = &S11{X: 99}; return r }
+
+// --- t12: return map struct ---
+type S12 struct{ M map[string]int32 }
+
+func f12() (r S12) { r.M = map[string]int32{}; r.M["one"] = 1; return r }
+
+// --- Main ---
+
+func main() {
+	// Build the test name from args (simplest: run all)
+	all := true
+
+	if all {
+		r1 := f1(); check(r1.V == "hello", "t1_string_ret")
+	}
+	if all {
+		r2 := f2(); check(r2.V == "ptr", "t2_ptr_ret")
+	}
+	if all {
+		r3 := f3(); check(r3 == 42, "t3_int32_ret")
+	}
+	if all {
+		r4 := f4(); check(r4, "t4_bool_ret")
+	}
+	if all {
+		r5 := f5(); check(len(r5.D) == 5 && r5.D[0] == 1, "t5_slice_ret")
+	}
+	if all {
+		r6 := &S6{M: map[string]string{}}; r6.put("k", "v")
+		check(r6.M["k"] == "v", "t6_recv_map")
+	}
+	if all {
+		r7 := &S7{D: []int32{1, 2, 3}}; r7.grow()
+		check(len(r7.D) == 4 && r7.D[0] == 1 && r7.D[3] == 99, "t7_recv_slice")
+	}
+	if all {
+		r8 := &S8w{}; r8.create()
+		check(r8.P != nil && r8.P.X == 42, "t8_recv_ptr")
+	}
+	if all {
+		r9 := &S9b{}; r9.init(); r9.add()
+		check(len(r9.L.D) == 2 && r9.L.D[0] == 0, "t9_nested_recv")
+	}
+	if all {
+		a, b := f10(); check(a == 7 && b == "seven", "t10_multi_ret")
+	}
+	if all {
+		r11 := f11(); check(r11.P != nil && r11.P.X == 99, "t11_nested_ptr_ret")
+	}
+	if all {
+		r12 := f12(); check(r12.M["one"] == 1, "t12_map_ret")
+	}
+}
