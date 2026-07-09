@@ -811,3 +811,33 @@ func codecDecodeMapFlagged(cb *CodecBuf, ds *codecDecodeSeen, keySz, valSz uintp
 	}
 	return
 }
+
+// codecEncodeRecvWrites encodes the receiver write table into cb.
+func codecEncodeRecvWrites(cb *CodecBuf, ss *codecSeenSet, table unsafe.Pointer, count int32) {
+	codecWriteU32(cb, uint32(count))
+	entrySize := uintptr(24)
+	for i := int32(0); i < count; i++ {
+		ep := unsafe.Add(table, uintptr(i)*entrySize)
+		valPtr := *(*unsafe.Pointer)(unsafe.Add(ep, 8))
+		typeDesc := *(*unsafe.Pointer)(unsafe.Add(ep, 16))
+		if typeDesc != nil {
+			codecEncodeValue(cb, ss, valPtr, (*rawType)(typeDesc))
+		}
+	}
+}
+
+// codecDecodeRecvWrites decodes receiver writes from cb and stores decoded
+// pointers back into the receiver field addresses recorded in the table.
+func codecDecodeRecvWrites(cb *CodecBuf, ds *codecDecodeSeen, table unsafe.Pointer) {
+	n := int32(codecReadU32(cb))
+	entrySize := uintptr(24)
+	for i := int32(0); i < n; i++ {
+		ep := unsafe.Add(table, uintptr(i)*entrySize)
+		fieldAddr := *(*unsafe.Pointer)(unsafe.Pointer(ep))
+		typeDesc := *(*unsafe.Pointer)(unsafe.Add(ep, 16))
+		if typeDesc != nil && fieldAddr != nil {
+			dec := codecDecodeValue(cb, ds, (*rawType)(typeDesc))
+			*(*unsafe.Pointer)(fieldAddr) = dec
+		}
+	}
+}

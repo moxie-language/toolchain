@@ -211,6 +211,13 @@ type builder struct {
 	// Arena prologue/epilogue state.
 	fnArenaVal    llvm.Value // per-function arena (freed on return)
 	arenaActive   bool       // true after emitArenaPrologue
+
+	// Receiver write tracking: for methods that allocate receiver-bound data
+	// in the method arena, the table records (fieldAddr, valuePtr, typeDesc)
+	// so the epilogue can relocate those values to the caller arena.
+	recvWriteTable   llvm.Value // alloca for []recvWriteEntry slice
+	recvWriteCount   llvm.Value // alloca for int32 counter
+	recvWriteMax     int32      // max entries (constant, e.g. 16)
 }
 
 func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *builder {
@@ -1450,6 +1457,22 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		}, "fn_arena")
 		b.arenaActive = true
 	}
+
+	// Receiver write table: for methods with a pointer-containing receiver.
+	// The table records stores of method-allocated values into receiver fields
+	// so the arena epilogue can relocate them to the caller's arena.
+	if b.hasReceiver() && b.arenaActive {
+		recvType := b.fn.Signature.Recv().Type()
+		if typeNeedsCopy(recvType) {
+			b.recvWriteMax = 16
+			tableBytes := b.recvWriteMax * 24 // 3 pointers per entry
+			tableType := llvm.ArrayType(b.ctx.Int8Type(), int(tableBytes))
+			b.recvWriteTable = b.CreateAlloca(tableType, "rwt")
+			b.CreateStore(llvm.ConstNull(tableType), b.recvWriteTable)
+			b.recvWriteCount = b.CreateAlloca(b.ctx.Int32Type(), "rwt.cnt")
+			b.CreateStore(llvm.ConstInt(b.ctx.Int32Type(), 0, false), b.recvWriteCount)
+		}
+	}
 }
 
 // createFunction builds the LLVM IR implementation for this function. The
@@ -1597,6 +1620,126 @@ func getPos(val posser) token.Pos {
 	}
 }
 
+// hasReceiver returns true if this function is a method (has a receiver).
+func (b *builder) hasReceiver() bool {
+	sig := b.fn.Signature
+	return sig != nil && sig.Recv() != nil
+}
+
+// isReceiverAddr walks a FieldAddr/IndexAddr chain to determine whether
+// the base is the receiver parameter (fn.Params[0]).
+func (b *builder) isReceiverAddr(addr ssa.Value) bool {
+	if !b.hasReceiver() {
+		return false
+	}
+	// Walk through FieldAddr/IndexAddr to the base.
+	seen := make(map[ssa.Value]bool)
+	var walk func(v ssa.Value) ssa.Value
+	walk = func(v ssa.Value) ssa.Value {
+		if seen[v] {
+			return nil
+		}
+		seen[v] = true
+		switch vv := v.(type) {
+		case *ssa.FieldAddr:
+			return walk(vv.X)
+		case *ssa.IndexAddr:
+			return walk(vv.X)
+		default:
+			return v
+		}
+	}
+	base := walk(addr)
+	return base != nil && base == b.fn.Params[0]
+}
+
+// valueIsMethodAllocated returns true if v was allocated by this function
+// (MakeSlice, MakeMap, Alloc) and is not a parameter, global, or call result
+// from another non-runtime function.
+func (b *builder) valueIsMethodAllocated(v ssa.Value) bool {
+	seen := make(map[ssa.Value]bool)
+	var walk func(v ssa.Value) bool
+	walk = func(v ssa.Value) bool {
+		if seen[v] {
+			return false
+		}
+		seen[v] = true
+		switch vv := v.(type) {
+		case *ssa.Parameter, *ssa.Global, *ssa.Const, *ssa.Builtin, *ssa.FreeVar:
+			return false
+		case *ssa.Alloc, *ssa.MakeSlice, *ssa.MakeMap, *ssa.MakeChan, *ssa.MakeClosure:
+			return true
+		case *ssa.Call:
+			if fn := vv.Common().StaticCallee(); fn != nil {
+				if fn.Pkg != nil && fn.Pkg.Pkg != nil {
+					path := fn.Pkg.Pkg.Path()
+					if path == "runtime" || path == "unsafe" {
+						return true // runtime allocations are method-local
+					}
+				}
+			}
+			return false
+		case *ssa.FieldAddr:
+			return walk(vv.X)
+		case *ssa.IndexAddr:
+			return walk(vv.X)
+		case *ssa.Slice:
+			return walk(vv.X)
+		case *ssa.UnOp:
+			return walk(vv.X)
+		case *ssa.MakeInterface:
+			return walk(vv.X)
+		case *ssa.ChangeInterface:
+			return walk(vv.X)
+		case *ssa.Phi:
+			for _, pred := range vv.Edges {
+				if walk(pred) {
+					return true
+				}
+			}
+			return false
+		}
+		return false
+	}
+	return walk(v)
+}
+
+// emitRecvWriteAppend emits code to append a (fieldAddr, valuePtr, typeDesc) entry
+// to the receiver write table. Emits straight-line IR with no branches.
+func (b *builder) emitRecvWriteAppend(fieldAddr llvm.Value, val llvm.Value, ft types.Type) {
+	if b.recvWriteTable.IsNil() {
+		return
+	}
+	countPtr := b.CreateLoad(b.ctx.Int32Type(), b.recvWriteCount, "rwt.cnt")
+	maxVal := llvm.ConstInt(b.ctx.Int32Type(), uint64(b.recvWriteMax), false)
+	isFull := b.CreateICmp(llvm.IntSGE, countPtr, maxVal, "rwt.full")
+	// Select: if full, use old count (no-op); else use count.
+	// GEP into table at count * 24.
+	index := b.CreateSExt(countPtr, b.uintptrType, "")
+	stride := llvm.ConstInt(b.uintptrType, 24, false)
+	offset := b.CreateBinOp(llvm.Mul, index, stride, "rwt.off")
+	tablePtr := b.CreateBitCast(b.recvWriteTable, b.dataPtrType, "rwt.tbl")
+	entryPtr := b.CreateGEP(b.ctx.Int8Type(), tablePtr, []llvm.Value{offset}, "rwt.ent")
+	// Store fieldAddr at [0:8] unconditionally (safe: table has extra space for overflow write)
+	fdPtr := b.CreateBitCast(entryPtr, llvm.PointerType(b.dataPtrType, 0), "rwt.fa")
+	b.CreateStore(fieldAddr, fdPtr)
+	// Store valuePtr at [8:16]
+	valOff := llvm.ConstInt(b.uintptrType, 8, false)
+	valPtr := b.CreateGEP(b.ctx.Int8Type(), entryPtr, []llvm.Value{valOff}, "rwt.vp")
+	vpPtr := b.CreateBitCast(valPtr, llvm.PointerType(b.dataPtrType, 0), "")
+	b.CreateStore(val, vpPtr)
+	// Store typeDesc at [16:24]
+	typeOff := llvm.ConstInt(b.uintptrType, 16, false)
+	typePtr := b.CreateGEP(b.ctx.Int8Type(), entryPtr, []llvm.Value{typeOff}, "rwt.tp")
+	typeDesc := b.getTypeCode(ft)
+	tdPtr := b.CreateBitCast(typePtr, llvm.PointerType(b.dataPtrType, 0), "")
+	b.CreateStore(typeDesc, tdPtr)
+	// Conditionally increment: if not full, count = count + 1
+	newCount := b.CreateBinOp(llvm.Add, countPtr, llvm.ConstInt(b.ctx.Int32Type(), 1, false), "rwt.inc")
+	gatedCount := b.CreateSelect(isFull, countPtr, newCount, "rwt.gate")
+	b.CreateStore(gatedCount, b.recvWriteCount)
+}
+
 // createInstruction builds the LLVM IR equivalent instructions for the
 // particular Go SSA instruction.
 func (b *builder) createInstruction(instr ssa.Instruction) {
@@ -1683,10 +1826,16 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		llvmVal := b.getValue(instr.Val, getPos(instr))
 		b.createNilCheck(instr.Addr, llvmAddr, "store")
 		if b.targetData.TypeAllocSize(llvmVal.Type()) == 0 {
-			// nothing to store
 			return
 		}
 		b.CreateStore(llvmVal, llvmAddr)
+		// Receiver write tracking: append (fieldAddr, val, type) to table.
+		if b.recvWriteTable.IsNil() == false {
+			if b.isReceiverAddr(instr.Addr) && b.valueIsMethodAllocated(instr.Val) {
+				ft := instr.Val.Type()
+				b.emitRecvWriteAppend(llvmAddr, llvmVal, ft)
+			}
+		}
 	default:
 		b.addError(instr.Pos(), "unknown instruction: "+instr.String())
 	}
@@ -3888,6 +4037,17 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 		b.emitCodecEncodeReturn(rootReg, rt, cb, ss)
 	}
 
+	// Encode receiver writes before arena pop.
+	if b.recvWriteTable.IsNil() == false && b.recvWriteCount.IsNil() == false {
+		countLoad := b.CreateLoad(b.ctx.Int32Type(), b.recvWriteCount, "rwt.ecnt")
+		if encRW, ok := rtPkg.Members["codecEncodeRecvWrites"].(*ssa.Function); ok {
+			rwType, rwFn := b.getFunction(encRW)
+			b.CreateCall(rwType, rwFn, []llvm.Value{
+				cb, ss, b.recvWriteTable, countLoad, llvm.Undef(b.dataPtrType),
+			}, "")
+		}
+	}
+
 	// Save CodecBuf data pointer and length (scalars survive FnArenaPop)
 	cbLoad := b.CreateLoad(cbType, cb, "")
 	cbData := b.CreateExtractValue(cbLoad, 0, "csd")        // data: _string
@@ -3925,6 +4085,16 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 			cur = b.CreateInsertValue(cur, decodedVal, i, "cdins")
 		} else {
 			cur = decodedVal
+		}
+	}
+
+	// Decode receiver writes from the codec buffer.
+	if b.recvWriteTable.IsNil() == false && b.recvWriteCount.IsNil() == false {
+		if decRW, ok := rtPkg.Members["codecDecodeRecvWrites"].(*ssa.Function); ok {
+			drType, drFn := b.getFunction(decRW)
+			b.CreateCall(drType, drFn, []llvm.Value{
+				cb2, ds, b.recvWriteTable, llvm.Undef(b.dataPtrType),
+			}, "")
 		}
 	}
 
