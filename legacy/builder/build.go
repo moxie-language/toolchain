@@ -131,6 +131,17 @@ func Build(
 		// build cache.
 		cacheDir = tmpdir
 	}
+	if config.Options.RebuildAll {
+		// Force rebuild: clear all cached .bc files.
+		// Bootstrap requires this to prevent stale objects from previous
+		// compiler builds from being reused with incompatible runtimes.
+		entries, _ := os.ReadDir(cacheDir)
+		for _, e := range entries {
+			if !e.IsDir() && (strings.HasSuffix(e.Name(), ".bc") || strings.HasSuffix(e.Name(), ".bc.lock")) {
+				os.Remove(filepath.Join(cacheDir, e.Name()))
+			}
+		}
+	}
 
 	// Create default global values.
 	globalValues := map[string]map[string]string{
@@ -549,9 +560,12 @@ func Build(
 				irbuilder.SetInsertPointAtEnd(block)
 				ptrType := llvm.PointerType(mod.Context().Int8Type(), 0)
 				for _, pkg := range lprogram.Sorted() {
+					if pkg.Pkg == nil {
+						continue
+					}
 					pkgInit := mod.NamedFunction(pkg.Pkg.Path() + ".init")
 					if pkgInit.IsNil() {
-						panic("init not found for " + pkg.Pkg.Path())
+						continue
 					}
 					irbuilder.CreateCall(
 						pkgInit.GlobalValueType(), pkgInit,

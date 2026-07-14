@@ -4,7 +4,11 @@ COMPACTION: ;always preserve: moxie is not Go, no stubs - remove dead references
 
 ## Moxie Memory Model
 
+NO HEAP. Heap is shared memory, moxie has no shared memory. Stack and arena only.
+
 per-function arena stack. compiler emits FnArenaPush() at function entry, relocates return values and receiver writes into caller's arena via three-pass mark-compact (RelocInit/RelocMark/RelocForward/RelocCompact/RelocFixupAll), then FnArenaPop + ArenaRelease at function exit. no escape analysis, no scope chains, no individual free. all reclamation is bulk: arena release per function return (pooled), munmap per domain exit. there is no free() builtin. DomainRoot holds fnStack[512]*Arena with fnTop index.
+
+No global heap allocator, no startup bump allocator, no growHeap. Every allocation goes through FnArenaPush or the root arena's ArenaAlloc. domainRoot MUST be initialized before any allocation - there is no fallback path. The root arena is mmap'd once in initDomain; further regions are added via ArenaAlloc when a region fills. NEVER use a "heap" or "startup allocator" that bypasses the arena system.
 
 ## Parameter and Receiver Rules
 
@@ -110,7 +114,8 @@ Five laws. Five elements. One generative cycle. One destructive cycle. Every arc
 - Small commits, one feature at a time
 - Verify compile AND run before moving on
 - Re-read modified files after changes to catch drift
-- If a session produces 1000+ line changes, the scope was too broad — stop and reassess
+- Every change made to the Moxie source (_mxc_stage4/, src/runtime/, pkg/) must be implemented FIRST in the legacy Go compiler (legacy/), then mirrored to stage4. The legacy compiler IS the bootstrap path - it produces the first working binary in every cycle. Changing stage4 without the legacy mirror means the next bootstrap from legacy will lose the change. A fix to stage4 without the legacy side is not complete. This is wood law: bilateral in time - legacy first, stage4 second, always.
+- If a session produces 1000+ line changes, the scope was too narrow and the actual work should be in fewer bigger changes—stop and reassess, but dont be afraid to refactor broadly when coherence demands it
 - When fixing a bug, understand the root cause before writing code
 - Do not refactor adjacent code while fixing a bug
 - Do not create test files unless explicitly asked
@@ -160,7 +165,7 @@ Generic Web APIs that belong upstream in `jsruntime/`: DOM, IndexedDB, WebSocket
 - If the needed code is in another language, prefer to reimplement it from specification/RFC/NIP/BIP/etc
 - Prefer one file over many files when the logic is related
 - When writing utility scripts, tooling, or standalone programs, always use Moxieunless there is a specific technical reason requiring another language. This means: no reflection, no cgo, no full runtime features. If a task seems like it needs Python, reconsider whether it can be done in Moxie. It can always be done in Moxie.
-- Remember that Moxie has no parallelism (no goroutines), no reflection, no arbitrary string/bytes distinction (remember to treat these as encodings and preserve UTF-8 byte sequences instead of breaking them up), spawn() boundary channels are always unbuffered (the network connection is a buffer) and use buffered channels as a convenient notation for FIFO queues. There is no concurrency primitives because there is only one thread of execution.
+- Remember that Moxie has no goroutines - it uses kernel threads for spawn(). Spawn channels are carried across lock-free SPSC ring buffers (shared memory, no pipe syscall). Senders never block on a full buffer - backpressure is expressed by buffer state, and the sender retries with yield. Receivers peek the ring buffer and retry with yield. Chans default to unbuffered (0-capacity = rendezvous through the ring, which always has data or waits for the partner to produce). blockRecv/blockSend use a futex on the ring's write/read index so the kernel puts the thread to sleep instead of spinning. There is no concurrency primitives because there is only one thread of execution per domain - spawn creates a new domain with its own thread.
 - For browser/frontend moxie code, compile to WASM (`GOOS=js GOARCH=wasm`). JS shims and host-bridging live in `jsruntime/`. Native targets (linux/amd64, darwin/arm64, etc.) remain first-class - relays, servers, and CLI tools compile via `moxie build`.
 
 ## Architecture Reading
@@ -200,6 +205,16 @@ Mleku's axiom (apply to code evaluation):
 Obstraction: obstruction + abstraction. Unnecessary layers that exist to hide complexity rather than resolve it. Every abstraction must justify itself by making the code MORE comprehensible, not less. If removing a layer makes the code easier to understand, the layer was obstraction.
 
 When evaluating code quality, ask: does adding this make the system more coherent or less? Does this layer reveal or conceal? Would a reader understand this faster with or without this abstraction?
+
+## Bootstrap Build Protocol
+
+Every step of the self-hosting bootstrap MUST use `moxie build -a` to force rebuild all packages from scratch. The `-a` flag clears the `.bc` build cache before compilation, preventing stale linker objects from a compiler built with a different runtime from being reused. This is critical because the runtime (`src/runtime/codec.mx`, `src/runtime/alloc.mx`, etc.) may change between bootstrap cycles, and cached `.bc` files from a previous compiler build are incompatible.
+
+Bootstrap cycle:
+  1. Build legacy Go compiler: `cd legacy && go build -o moxie .`
+  2. Compile stage4 with legacy: `cd .. && MOXIEROOT=$PWD legacy/moxie build -a -o mxc-stage4 ./_mxc_stage4`
+  3. Compile stage4 with new binary: `MOXIEROOT=$PWD ./mxc-stage4 build -a -o mxc-stage4-2 ./_mxc_stage4`
+  4. Verify fixpoint: `sha256sum mxc-stage4 mxc-stage4-2` (should match)
 
 ## What NOT To Do
 

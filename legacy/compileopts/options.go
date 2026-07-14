@@ -44,6 +44,7 @@ type Options struct {
 	LLVMFeatures       string
 	ExtLDFlags         []string
 	StandaloneRuntime  bool // skip internalization, keep runtime symbols external
+	RebuildAll         bool // if true, rebuild all packages from scratch (ignore cache)
 }
 
 // Verify performs validation on the given options.

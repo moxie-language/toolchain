@@ -506,6 +506,7 @@ func main() {
 	verifyIR := flag.Bool("internal-verifyir", false, "run extra verification steps on LLVM IR")
 	skipDwarf := flag.Bool("internal-nodwarf", false, "internal flag, use -no-debug instead")
 	standaloneRuntime := flag.Bool("standalone-runtime", false, "keep runtime symbols external (for build-runtime)")
+	rebuildAll := flag.Bool("a", false, "rebuild all packages from scratch (ignore build cache; required for bootstrap)")
 
 	var flagDeps, flagTest bool
 	if command == "help" || command == "list" {
@@ -583,6 +584,7 @@ func main() {
 		GlobalValues:  globalVarValues,
 		LLVMFeatures:       *llvmFeatures,
 		StandaloneRuntime:  *standaloneRuntime,
+		RebuildAll:         *rebuildAll,
 	}
 	if *printCommands {
 		options.PrintCommands = printCommand

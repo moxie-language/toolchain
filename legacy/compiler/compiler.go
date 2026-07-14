@@ -3949,7 +3949,13 @@ func funcNeedsArenaCopy(fn *ssa.Function) bool {
 	}
 	if fn.Pkg != nil && fn.Pkg.Pkg != nil {
 		path := fn.Pkg.Pkg.Path()
-		if path == "runtime" || path == "unsafe" {
+		if path == "runtime" || path == "unsafe" ||
+			path == "main" ||
+			path == "git.smesh.lol/moxie/pkg/types" ||
+			path == "git.smesh.lol/moxie/pkg/syntax" ||
+			path == "git.smesh.lol/moxie/pkg/token" ||
+			path == "git.smesh.lol/moxie/pkg/typeapi" ||
+			path == "git.smesh.lol/moxie/pkg/mxutil" {
 			return false
 		}
 	}
@@ -3992,13 +3998,17 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 		return
 	}
 
-	needsCodec := false
-	if sig != nil && sig.Results() != nil {
+	needsCodec := funcNeedsArenaCopy(b.fn)
+	if needsCodec && sig != nil && sig.Results() != nil {
+		hasPtrReturn := false
 		for i := 0; i < sig.Results().Len(); i++ {
 			if typeNeedsCopy(sig.Results().At(i).Type()) {
-				needsCodec = true
+				hasPtrReturn = true
 				break
 			}
+		}
+		if !hasPtrReturn {
+			needsCodec = false
 		}
 	}
 	if !needsCodec {
@@ -4178,11 +4188,15 @@ func (b *builder) emitCodecEncodeReturn(val llvm.Value, t types.Type, cb, ss llv
 		}
 
 	case *types.Pointer:
-		pointeeType := b.getTypeCode(u.Elem())
-		if encFn, ok := rtPkg.Members["codecEncodePtrValue"].(*ssa.Function); ok {
+		// Match stage4: alloca+store then codecEncodeValue with full pointer type.
+		slp := b.getLLVMType(t)
+		tp := b.CreateAlloca(slp, "ceptmp")
+		b.CreateStore(val, tp)
+		typeDesc := b.getTypeCode(t)
+		if encFn, ok := rtPkg.Members["codecEncodeValue"].(*ssa.Function); ok {
 			encType, encFnVal := b.getFunction(encFn)
 			b.CreateCall(encType, encFnVal, []llvm.Value{
-				cb, ss, val, pointeeType, llvm.Undef(b.dataPtrType),
+				cb, ss, tp, typeDesc, llvm.Undef(b.dataPtrType),
 			}, "")
 		}
 
