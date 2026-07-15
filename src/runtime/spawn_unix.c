@@ -82,6 +82,21 @@ int MoxieRead(int fd, void *buf, int count) {
     return (int)read(fd, buf, (size_t)count);
 }
 
+// The _mxc_stage4 compiler emits @runtime.MoxieWrite for cross-package
+// calls to the exported MoxieWrite/Read functions. Provide the runtime.
+// prefixed symbol as a strong alias so LTO resolves it.
+int MoxieWrite_runtime(int fd, const void *buf, int count)
+    __asm__("runtime.MoxieWrite");
+int MoxieWrite_runtime(int fd, const void *buf, int count) {
+    return MoxieWrite(fd, buf, count);
+}
+
+int MoxieRead_runtime(int fd, void *buf, int count)
+    __asm__("runtime.MoxieRead");
+int MoxieRead_runtime(int fd, void *buf, int count) {
+    return MoxieRead(fd, buf, count);
+}
+
 int moxie_waitpid(int pid, int *status, int options) {
     return (int)waitpid((pid_t)pid, status, options);
 }

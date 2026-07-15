@@ -1,0 +1,202 @@
+package main
+
+import "os"
+
+var ok int32
+
+func check(cond bool, name string) {
+	if cond {
+		ok++
+	} else {
+		os.Stdout.Write([]byte("FAIL "))
+		os.Stdout.Write([]byte(name))
+		os.Stdout.Write([]byte("\n"))
+	}
+}
+
+// --- Return value tests ---
+
+type StrRet struct {
+	V string
+}
+
+func testReturnString() (r StrRet) {
+	r.V = "hello"
+	return r
+}
+
+func testReturnPtr() (r *StrRet) {
+	r = &StrRet{V: "ptr"}
+	return r
+}
+
+func testReturnInt32() (n int32) {
+	return int32(42)
+}
+
+func testReturnBool() (b bool) {
+	return true
+}
+
+type SliceRet struct {
+	Data []int32
+}
+
+func testReturnSliceStruct() (r SliceRet) {
+	r.Data = []int32{1, 2, 3, 4, 5}
+	return r
+}
+
+type MapRet struct {
+	M map[string]int32
+}
+
+func testReturnMapStruct() (r MapRet) {
+	r.M = map[string]int32{}
+	r.M["one"] = 1
+	r.M["two"] = 2
+	return r
+}
+
+type Inner struct {
+	X int32
+}
+
+type Outer1 struct {
+	P *Inner
+}
+
+func testReturnNestedPtr() (r Outer1) {
+	r.P = &Inner{X: 99}
+	return r
+}
+
+func testReturnMulti() (a int32, b string) {
+	return int32(7), "seven"
+}
+
+// --- Receiver write tests ---
+
+type RecvS struct {
+	D []int32
+}
+
+func (s *RecvS) grow() {
+	s.D = appendOne(s.D, 99)
+}
+
+type RecvM struct {
+	M map[string]string
+}
+
+func (m *RecvM) put(k string, v string) {
+	m.M[k] = v
+}
+
+type RecvP struct {
+	P *Inner
+}
+
+func (p *RecvP) create() {
+	p.P = &Inner{X: 42}
+}
+
+type Level1 struct {
+	L2 *RecvS
+}
+
+func (l1 *Level1) setup() {
+	l1.L2 = &RecvS{D: []int32{0}}
+}
+
+func (l1 *Level1) more(v int32) {
+	l1.L2.grow()
+}
+
+// --- Helpers ---
+
+func appendOne(s []int32, v int32) (r []int32) {
+	n := len(s)
+	r = []int32{:n + 1}
+	for i := int32(0); i < n; i++ {
+		r[i] = s[i]
+	}
+	r[n] = v
+	return r
+}
+
+func itoa(n int32) (s string) {
+	if n == 0 {
+		return "0"
+	}
+	buf := []byte{:0:10}
+	for n > 0 {
+		push(buf, '0'+n%10)
+		n /= 10
+	}
+	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
+
+// --- Main ---
+
+func main() {
+	// Test 1
+	r1 := testReturnString()
+	check(r1.V == "hello", "returnString")
+
+	// Test 2
+	r2 := testReturnPtr()
+	check(r2.V == "ptr", "returnPtr")
+
+	// Test 3
+	r3 := testReturnInt32()
+	check(r3 == 42, "returnInt32")
+
+	// Test 4
+	r4 := testReturnBool()
+	check(r4, "returnBool")
+
+	// Test 5
+	r5 := testReturnSliceStruct()
+	check(len(r5.Data) == 5 && r5.Data[0] == 1, "returnSliceStruct")
+
+	// Test 6
+	r6 := testReturnMapStruct()
+	check(r6.M["one"] == 1 && r6.M["two"] == 2, "returnMapStruct")
+
+	// Test 7
+	r7 := testReturnNestedPtr()
+	check(r7.P != nil && r7.P.X == 99, "returnNestedPtr")
+
+	// Test 8
+	r8a, r8b := testReturnMulti()
+	check(r8a == 7 && r8b == "seven", "returnMulti")
+
+	// Test 9
+	rs := &RecvS{D: []int32{1, 2, 3}}
+	rs.grow()
+	check(len(rs.D) == 4 && rs.D[0] == 1 && rs.D[3] == 99, "recvSliceGrow")
+
+	// Test 10
+	rm := &RecvM{M: map[string]string{}}
+	rm.put("key", "val")
+	check(rm.M["key"] == "val", "recvMapSet")
+
+	// Test 11
+	rp := &RecvP{}
+	rp.create()
+	check(rp.P != nil && rp.P.X == 42, "recvPtrCreate")
+
+	// Test 12
+	l1 := &Level1{}
+	l1.setup()
+	l1.more(10)
+	check(len(l1.L2.D) == 2 && l1.L2.D[0] == 0, "nestedRecv")
+
+	os.Stdout.Write([]byte("ALL "))
+	os.Stdout.Write([]byte(itoa(ok)))
+	os.Stdout.Write([]byte("/12 OK\n"))
+}

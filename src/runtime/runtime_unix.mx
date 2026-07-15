@@ -129,10 +129,8 @@ func InitCShared() {
 	ChildPipeFd = -1
 	epfd = -1
 	secLockdownFd = 2
-	if needsStaticHeap {
-		allocateHeap()
-	}
-	initHeap()
+	allocateHeap()
+	initDomain(256 * 1024 * 1024)
 	initRand()
 	initAll()
 }
@@ -146,10 +144,8 @@ func main(argc int32, argv *unsafe.Pointer) int32 {
 	epfd = -1
 	secLockdownFd = 2
 
-	if needsStaticHeap {
-		allocateHeap()
-	}
-	initHeap()
+	allocateHeap()
+	initDomain(256 * 1024 * 1024)
 
 	var rl [2]uint64
 	libc_getrlimit(3, &rl)
@@ -368,58 +364,8 @@ func syscall_Exit(code int32) {
 
 // procPin/procUnpin: no-ops, defined directly in sync/atomic.
 
-var heapSize uintptr
-var heapMaxSize uintptr
-
-var heapStart, heapEnd uintptr
-
 func allocateHeap() {
-	heapSize = 256 * 1024 * 1024 // 256MB to start
-	// Allocate a large chunk of virtual memory. Because it is virtual, it won't
-	// really be allocated in RAM. Memory will only be allocated when it is
-	// first touched.
-	heapMaxSize = 16 * 1024 * 1024 * 1024 // 16GB bootstrap (borrow concat temps leak)
-	for {
-		addr := mmap(nil, heapMaxSize, flag_PROT_READ|flag_PROT_WRITE, flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
-		if addr == unsafe.Pointer(^uintptr(0)) {
-			// Heap was too big to be mapped by mmap. Reduce the maximum size.
-			// We might want to make this a bit smarter than simply halving the
-			// heap size.
-			// This can happen on 32-bit systems.
-			heapMaxSize /= 2
-			if heapMaxSize < 4096 {
-				runtimePanic("cannot allocate heap memory")
-			}
-			continue
-		}
-		heapStart = uintptr(addr)
-		heapEnd = heapStart + heapSize
-		break
-	}
-}
-
-// growHeap tries to grow the heap size. It returns true if it succeeds, false
-// otherwise.
-func growHeap() bool {
-	if heapSize == heapMaxSize {
-		// Already at the max. If we run out of memory, we should consider
-		// increasing heapMaxSize on 64-bit systems.
-		return false
-	}
-	// Grow the heap size used by the program.
-	heapSize = (heapSize * 4 / 3) &^ 4095 // grow by around 33%
-	if heapSize > heapMaxSize {
-		heapSize = heapMaxSize
-	}
-	setHeapEnd(heapStart + heapSize)
-	return true
-}
-
-// initRootArena creates the domain root with the process-lifetime arena.
-// One TLS write: domainRoot. Never mutated after.
-// 2GB virtual - pages committed on touch, not at mmap time.
-func initRootArena() {
-	initDomain(2 * 1024 * 1024 * 1024)
+	// No-op: heap is removed. Arena only.
 }
 
 // Indicate whether signals have been registered.

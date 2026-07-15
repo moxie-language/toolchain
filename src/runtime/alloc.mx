@@ -14,9 +14,6 @@ import (
 	"unsafe"
 )
 
-const needsStaticHeap = true
-
-var heapptr uintptr
 var totalAlloc uint64
 var mallocs uint64
 
@@ -75,32 +72,19 @@ func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 	if size == 0 {
 		size = 1
 	}
-	if domainRoot != nil {
-		fnTop := domainRoot.fnTop
-		if fnTop < 0 || fnTop >= fnStackMax {
-			runtimePanic("alloc: fnTop out of range")
-		}
-		a := domainRoot.fnStack[fnTop]
-		if a == nil {
-			runtimePanic("alloc: nil arena")
-		}
-		return ArenaAlloc(a, align(size))
+	// domainRoot MUST be initialized before any allocation.
+	if domainRoot == nil {
+		runtimePanic("alloc: domainRoot not initialized")
 	}
-	// Startup bump allocator: used before domain root exists.
-	size = align(size)
-	addr := heapptr
-	heapptr += size
-	for heapptr >= heapEnd {
-		if growHeap() {
-			continue
-		}
-		runtimePanic("out of memory")
+	fnTop := domainRoot.fnTop
+	if fnTop < 0 || fnTop >= fnStackMax {
+		runtimePanic("alloc: fnTop out of range")
 	}
-	mallocs++
-	totalAlloc += uint64(size)
-	ptr := unsafe.Pointer(addr)
-	memzero(ptr, size)
-	return ptr
+	a := domainRoot.fnStack[fnTop]
+	if a == nil {
+		runtimePanic("alloc: nil arena")
+	}
+	return ArenaAlloc(a, align(size))
 }
 
 func ReadMemStats(m *MemStats) {
@@ -111,14 +95,9 @@ func ReadMemStats(m *MemStats) {
 	m.TotalAlloc = totalAlloc
 	m.Allocs = mallocs
 	m.Frees = 0
-	m.Sys = uint64(heapEnd - heapStart)
+	m.Sys = totalAlloc
 	m.ArenaAlloc = totalAlloc
 	m.Alloc = m.ArenaAlloc
-}
-
-func initHeap() {
-	heapptr = heapStart
-	initRootArena()
 }
 
 // --- Domain lifecycle ---
@@ -378,28 +357,7 @@ func ArenaRelease(a *Arena) {
 	arenaPoolN++
 }
 
-// heapAlloc: direct startup bump allocation. Only used before
-// domain root exists. Does not touch any TLS or arena state.
-func heapAlloc(size uintptr) unsafe.Pointer {
-	size = align(size)
-	addr := heapptr
-	heapptr += size
-	for heapptr >= heapEnd {
-		if growHeap() {
-			continue
-		}
-		runtimePanic("out of memory")
-	}
-	ptr := unsafe.Pointer(addr)
-	memzero(ptr, size)
-	return ptr
-}
-
-
-
-func setHeapEnd(newHeapEnd uintptr) {
-	heapEnd = newHeapEnd
-}
+// heapAlloc removed: no heap in moxie. Use arena allocator.
 
 //:export moxie_scanstack
 func scanstack(sp uintptr) {}

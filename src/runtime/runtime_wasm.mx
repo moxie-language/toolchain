@@ -38,9 +38,6 @@ func hardwareRand() (n uint64, ok bool) {
 	return randState * 0x2545F4914F6CDD1D, true
 }
 
-// Heap management for WASM linear memory.
-var heapStart, heapEnd uintptr
-
 // wasm_memory_size returns the current memory size in pages (64KB each).
 //
 //:linkname wasm_memory_size llvm.wasm.memory.size.i32
@@ -53,30 +50,13 @@ func wasm_memory_grow(index int32, delta int32) int32
 
 const wasmPageSize = 64 * 1024
 
-// allocateHeap initializes the WASM heap from linear memory.
+// allocateHeap initializes the domain root arena backed by WASM linear memory.
+// Replaces the old heap startup allocator.
 func allocateHeap() {
-	pages := wasm_memory_size(0)
-	heapStart = uintptr(pages) * wasmPageSize
-	// Start with 8 pages (512KB)
-	if wasm_memory_grow(0, 8) == -1 {
-		runtimePanic("cannot allocate heap memory")
-	}
-	heapEnd = heapStart + 8*wasmPageSize
-}
-
-func growHeap() bool {
-	oldPages := wasm_memory_grow(0, 8)
-	if oldPages == -1 {
-		return false
-	}
-	heapEnd = uintptr(oldPages+8) * wasmPageSize
-	return true
-}
-
-// initRootArena: WASM has no mmap. The startup bump allocator serves
-// as the arena backing - linear memory grows via memory.grow.
-func initRootArena() {
-	// domainRoot stays nil; alloc() uses the bump path.
+	// WASM: reserve 8 pages (512KB) for initial domain root arena.
+	// The domain root embeds the root arena inline; further regions
+	// are added via grow + ArenaAlloc when the region fills.
+	initDomain(8 * wasmPageSize)
 }
 
 // Timing functions for WASM.
@@ -154,7 +134,6 @@ func _start() {
 
 	allocateHeap()
 	initRand()
-	initHeap()
 	initAll()
 	wasmExportsReady = true
 	callMain()

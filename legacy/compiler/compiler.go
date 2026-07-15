@@ -3947,17 +3947,14 @@ func funcNeedsArenaCopy(fn *ssa.Function) bool {
 	if fn == nil || fn.Blocks == nil {
 		return false
 	}
-	if fn.Pkg != nil && fn.Pkg.Pkg != nil {
-		path := fn.Pkg.Pkg.Path()
-		if path == "runtime" || path == "unsafe" ||
-			path == "main" ||
-			path == "git.smesh.lol/moxie/pkg/types" ||
-			path == "git.smesh.lol/moxie/pkg/syntax" ||
-			path == "git.smesh.lol/moxie/pkg/token" ||
-			path == "git.smesh.lol/moxie/pkg/typeapi" ||
-			path == "git.smesh.lol/moxie/pkg/mxutil" {
-			return false
-		}
+	if fn.Pkg == nil || fn.Pkg.Pkg == nil {
+		return false
+	}
+	path := fn.Pkg.Pkg.Path()
+	if path == "runtime" || path == "unsafe" ||
+		path == "main" ||
+		strings.HasPrefix(path, "git.smesh.lol/moxie/pkg/") {
+		return false
 	}
 	sig := fn.Signature
 	if sig == nil || sig.Results() == nil || sig.Results().Len() == 0 {
