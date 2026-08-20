@@ -1,6 +1,9 @@
 package json
 
-import "unsafe"
+import (
+	"array"
+	"unsafe"
+)
 
 type jKind uint8
 
@@ -88,7 +91,7 @@ type _sliceHeader struct {
 	cap  int32
 }
 
-func (t *_rawType) kind() jKind {
+func (t *_rawType) kind() (r0 jKind) {
 	if t == nil {
 		return jkInvalid
 	}
@@ -98,21 +101,21 @@ func (t *_rawType) kind() jKind {
 	return jKind(t.meta & _kindMask)
 }
 
-func (t *_rawType) isNamed() bool {
+func (t *_rawType) isNamed() (r0 bool) {
 	if uintptr(unsafe.Pointer(t))&0b11 != 0 {
 		return false
 	}
 	return t.meta&_flagNamed != 0
 }
 
-func (t *_rawType) underlying() *_rawType {
+func (t *_rawType) underlying() (r0 *_rawType) {
 	if t.isNamed() {
 		return (*_elemType)(unsafe.Pointer(t)).elem
 	}
 	return t
 }
 
-func (t *_rawType) size() uintptr {
+func (t *_rawType) size() (r0 uintptr) {
 	switch t.kind() {
 	case jkBool, jkInt8, jkUint8:
 		return 1
@@ -141,7 +144,7 @@ func (t *_rawType) size() uintptr {
 	}
 }
 
-func (t *_rawType) elem() *_rawType {
+func (t *_rawType) elem() (r0 *_rawType) {
 	if tag := uintptr(unsafe.Pointer(t)) & 0b11; tag != 0 {
 		return (*_rawType)(unsafe.Pointer(uintptr(unsafe.Pointer(t)) - 1))
 	}
@@ -152,19 +155,17 @@ func (t *_rawType) elem() *_rawType {
 	return (*_elemType)(unsafe.Pointer(u)).elem
 }
 
-func (t *_rawType) numField() int32 {
+func (t *_rawType) numField() (r0 int32) {
 	return int32((*_structType)(unsafe.Pointer(t.underlying())).numField)
 }
 
-func (t *_rawType) fieldDesc(i int32) *_structFieldDesc {
+func (t *_rawType) fieldDesc(i int32) (r0 *_structFieldDesc) {
 	st := (*_structType)(unsafe.Pointer(t.underlying()))
-	return (*_structFieldDesc)(unsafe.Add(
-		unsafe.Pointer(&st.fields[0]),
-		uintptr(i)*unsafe.Sizeof(_structFieldDesc{}),
-	))
+	fields := array.At[_structFieldDesc](unsafe.Pointer(&st.fields[0]), int32(st.numField))
+	return fields.Index(i)
 }
 
-func (t *_rawType) fieldType(i int32) *_rawType {
+func (t *_rawType) fieldType(i int32) (r0 *_rawType) {
 	return t.fieldDesc(i).fieldType
 }
 
@@ -204,27 +205,27 @@ func (t *_rawType) fieldData(i int32) (flags uint8, offset uintptr, name []byte,
 	return
 }
 
-func (t *_rawType) fieldOffset(i int32) uintptr {
+func (t *_rawType) fieldOffset(i int32) (r0 uintptr) {
 	_, off, _, _ := t.fieldData(i)
 	return off
 }
 
-func (t *_rawType) fieldTag(i int32) []byte {
+func (t *_rawType) fieldTag(i int32) (r0 []byte) {
 	_, _, _, tag := t.fieldData(i)
 	return tag
 }
 
-func (t *_rawType) fieldExported(i int32) bool {
+func (t *_rawType) fieldExported(i int32) (r0 bool) {
 	flags, _, _, _ := t.fieldData(i)
 	return flags&_sfExported != 0
 }
 
-func (t *_rawType) fieldName(i int32) []byte {
+func (t *_rawType) fieldName(i int32) (r0 []byte) {
 	_, _, name, _ := t.fieldData(i)
 	return name
 }
 
-func (t *_rawType) typeName() []byte {
+func (t *_rawType) typeName() (r0 []byte) {
 	if !t.isNamed() {
 		return nil
 	}
@@ -237,19 +238,19 @@ func (t *_rawType) typeName() []byte {
 		name      [1]byte
 	}
 	nt := (*_namedType)(unsafe.Pointer(t))
-	p := &nt.name[0]
+	nameArr := array.At[byte](unsafe.Pointer(&nt.name[0]), 0)
 	n := 0
-	for *(*byte)(unsafe.Add(unsafe.Pointer(p), uintptr(n))) != 0 {
+	for *nameArr.Index(n) != 0 {
 		n++
 	}
-	return unsafe.Slice(p, n)
+	return unsafe.Slice(nameArr.Index(0), n)
 }
 
-func typeCodeOf(val any) *_rawType {
+func typeCodeOf(val any) (r0 *_rawType) {
 	return (*_rawType)((*_ifacePair)(unsafe.Pointer(&val)).typecode)
 }
 
-func dataOf(val any) unsafe.Pointer {
+func dataOf(val any) (r0 unsafe.Pointer) {
 	iface := (*_ifacePair)(unsafe.Pointer(&val))
 	t := (*_rawType)(iface.typecode)
 	if t.size() <= unsafe.Sizeof(uintptr(0)) {
@@ -258,7 +259,7 @@ func dataOf(val any) unsafe.Pointer {
 	return iface.value
 }
 
-func derefPtr(val any) (*_rawType, unsafe.Pointer) {
+func derefPtr(val any) (r0 *_rawType, r1 unsafe.Pointer) {
 	iface := (*_ifacePair)(unsafe.Pointer(&val))
 	t := (*_rawType)(iface.typecode)
 	if t.kind() != jkPointer {
@@ -269,7 +270,7 @@ func derefPtr(val any) (*_rawType, unsafe.Pointer) {
 	return elemType, dataPtr
 }
 
-func ptrToIface(t *_rawType, ptr unsafe.Pointer) any {
+func ptrToIface(t *_rawType, ptr unsafe.Pointer) (r0 any) {
 	var ptrType *_rawType
 	if t.isNamed() {
 		ptrType = (*_elemType)(unsafe.Pointer(t)).ptrTo
@@ -288,7 +289,7 @@ func ptrToIface(t *_rawType, ptr unsafe.Pointer) any {
 	return *(*any)(unsafe.Pointer(&iface))
 }
 
-func valToIface(t *_rawType, ptr unsafe.Pointer) any {
+func valToIface(t *_rawType, ptr unsafe.Pointer) (r0 any) {
 	iface := _ifacePair{typecode: unsafe.Pointer(t), value: ptr}
 	if t.size() <= unsafe.Sizeof(uintptr(0)) {
 		iface.value = *(*unsafe.Pointer)(ptr)
@@ -296,7 +297,7 @@ func valToIface(t *_rawType, ptr unsafe.Pointer) any {
 	return *(*any)(unsafe.Pointer(&iface))
 }
 
-func isZeroValue(typ *_rawType, ptr unsafe.Pointer) bool {
+func isZeroValue(typ *_rawType, ptr unsafe.Pointer) (r0 bool) {
 	sz := typ.size()
 	for i := uintptr(0); i < sz; i++ {
 		if *(*byte)(unsafe.Add(ptr, i)) != 0 {
@@ -306,7 +307,7 @@ func isZeroValue(typ *_rawType, ptr unsafe.Pointer) bool {
 	return true
 }
 
-func makeSliceOf(elemType *_rawType, length, capacity int32) unsafe.Pointer {
+func makeSliceOf(elemType *_rawType, length, capacity int32) (r0 unsafe.Pointer) {
 	elemSize := elemType.size()
 	buf := []byte{:int32(elemSize)*capacity}
 	var dataPtr unsafe.Pointer
@@ -317,7 +318,7 @@ func makeSliceOf(elemType *_rawType, length, capacity int32) unsafe.Pointer {
 	return unsafe.Pointer(p)
 }
 
-func sliceAppend(slicePtr unsafe.Pointer, elemType *_rawType) unsafe.Pointer {
+func sliceAppend(slicePtr unsafe.Pointer, elemType *_rawType) (r0 unsafe.Pointer) {
 	hdr := (*_sliceHeader)(slicePtr)
 	elemSize := elemType.size()
 	if hdr.len >= hdr.cap {
@@ -341,7 +342,7 @@ func sliceAppend(slicePtr unsafe.Pointer, elemType *_rawType) unsafe.Pointer {
 	return slicePtr
 }
 
-func sliceIndex(slicePtr unsafe.Pointer, elemType *_rawType, i int32) unsafe.Pointer {
+func sliceIndex(slicePtr unsafe.Pointer, elemType *_rawType, i int32) (r0 unsafe.Pointer) {
 	hdr := (*_sliceHeader)(slicePtr)
 	return unsafe.Add(hdr.data, elemType.size()*uintptr(i))
 }

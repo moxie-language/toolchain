@@ -3,6 +3,7 @@
 package runtime
 
 import (
+	"array"
 	"internal/task"
 	"math/bits"
 	"moxie"
@@ -13,7 +14,7 @@ type futex struct {
 	v uint32
 }
 
-func (f *futex) Swap(new uint32) uint32 {
+func (f *futex) Swap(new uint32) (r0 uint32) {
 	old := f.v
 	f.v = new
 	return old
@@ -41,19 +42,19 @@ func moxie_futex_wait_timeout(addr *uint32, cmp uint32, timeout uint64)
 func moxie_futex_wake_all(addr *uint32)
 
 //export write
-func libc_write(fd int32, buf unsafe.Pointer, count uint32) int32
+func libc_write(fd int32, buf unsafe.Pointer, count uint32) (r0 int32)
 
 //export getrlimit
-func libc_getrlimit(resource int32, rlim *[2]uint64) int32
+func libc_getrlimit(resource int32, rlim *[2]uint64) (r0 int32)
 
 //export setrlimit
-func libc_setrlimit(resource int32, rlim *[2]uint64) int32
+func libc_setrlimit(resource int32, rlim *[2]uint64) (r0 int32)
 
 //export usleep
-func usleep(usec uint32) int32
+func usleep(usec uint32) (r0 int32)
 
 //export pause
-func pause() int32
+func pause() (r0 int32)
 
 // void *mmap(void *addr, size_t length, int32 prot, int32 flags, int32 fd, off_t offset);
 // Note: off_t is defined as int64 because:
@@ -61,27 +62,27 @@ func pause() int32
 //   - darwin is practically always 64-bit anyway
 //
 //export mmap
-func mmap(addr unsafe.Pointer, length uintptr, prot, flags, fd int32, offset int64) unsafe.Pointer
+func mmap(addr unsafe.Pointer, length uintptr, prot, flags, fd int32, offset int64) (r0 unsafe.Pointer)
 
 // int32 mprotect(void *addr, size_t len, int32 prot);
 //
 //export mprotect
-func mprotect(addr unsafe.Pointer, length uintptr, prot int32) int32
+func mprotect(addr unsafe.Pointer, length uintptr, prot int32) (r0 int32)
 
 // int32 munmap(void *addr, size_t length);
 //
 //export munmap
-func munmap(addr unsafe.Pointer, length uintptr) int32
+func munmap(addr unsafe.Pointer, length uintptr) (r0 int32)
 
 // int32 mlock(const void *addr, size_t len);
 //
 //export mlock
-func mlock(addr unsafe.Pointer, length uintptr) int32
+func mlock(addr unsafe.Pointer, length uintptr) (r0 int32)
 
 // int32 madvise(void *addr, size_t length, int32 advice);
 //
 //export madvise
-func madvise(addr unsafe.Pointer, length uintptr, advice int32) int32
+func madvise(addr unsafe.Pointer, length uintptr, advice int32) (r0 int32)
 
 //export abort
 func abort()
@@ -138,7 +139,7 @@ func InitCShared() {
 // Entry point for Go. Initialize all packages and call main.main().
 //
 //export main
-func main(argc int32, argv *unsafe.Pointer) int32 {
+func main(argc int32, argv *unsafe.Pointer) (r0 int32) {
 	// Initialize sentinel values that must differ from zero.
 	ChildPipeFd = -1
 	epfd = -1
@@ -182,11 +183,12 @@ var (
 )
 
 //:linkname os_runtime_args os.runtime_args
-func os_runtime_args() []string {
+func os_runtime_args() (r0 []string) {
 	if len(args) == 0 {
 		args = []string{:main_argc}
+		argv := array.At[unsafe.Pointer](unsafe.Pointer(main_argv), main_argc)
 		for i := int32(0); i < main_argc; i++ {
-			cstr := *(*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(main_argv), uintptr(i)*8))
+			cstr := *argv.Index(i)
 			n := strlen(cstr)
 			s := []byte{:n}
 			memmove(unsafe.Pointer(unsafe.SliceData(s)), cstr, uintptr(n))
@@ -251,21 +253,18 @@ func moxie_handle_fatal_signal(sig int32, addr uintptr) {
 var environ *unsafe.Pointer
 
 //:linkname syscall_runtime_envs syscall.runtime_envs
-func syscall_runtime_envs() []string {
+func syscall_runtime_envs() (r0 []string) {
 	// Count how many environment variables there are.
-	env := environ
+	envArr := array.At[unsafe.Pointer](unsafe.Pointer(environ), 0)
 	numEnvs := 0
-	for *env != nil {
+	for *envArr.Index(numEnvs) != nil {
 		numEnvs++
-		env = (*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(env), unsafe.Sizeof(environ)))
 	}
 
 	// Create a string slice of all environment variables.
-	// This requires just a single heap allocation.
-	env = environ
 	envs := []string{:0:numEnvs}
-	for *env != nil {
-		ptr := *env
+	for i := 0; i < numEnvs; i++ {
+		ptr := *envArr.Index(i)
 		length := strlen(ptr)
 		s := _string{
 			ptr:    (*byte)(ptr),
@@ -273,7 +272,6 @@ func syscall_runtime_envs() []string {
 			cap:    length,
 		}
 		push(envs, *(*string)(unsafe.Pointer(&s)))
-		env = (*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(env), unsafe.Sizeof(environ)))
 	}
 
 	return envs
@@ -286,12 +284,12 @@ func putchar(c byte) {
 	libc_write(1, unsafe.Pointer(&putcharBuf[0]), 1)
 }
 
-func ticksToNanoseconds(ticks timeUnit) int64 {
+func ticksToNanoseconds(ticks timeUnit) (r0 int64) {
 	// The OS API works in nanoseconds so no conversion necessary.
 	return int64(ticks)
 }
 
-func nanosecondsToTicks(ns int64) timeUnit {
+func nanosecondsToTicks(ns int64) (r0 timeUnit) {
 	// The OS API works in nanoseconds so no conversion necessary.
 	return timeUnit(ns)
 }
@@ -332,18 +330,18 @@ func sleepTicks(d timeUnit) {
 	}
 }
 
-func getTime(clock int32) uint64 {
+func getTime(clock int32) (r0 uint64) {
 	ts := timespec{}
 	clock_gettime(clock, &ts)
 	return uint64(ts.tv_sec)*1000*1000*1000 + uint64(ts.tv_nsec)
 }
 
 // Return monotonic time in nanoseconds.
-func monotime() uint64 {
+func monotime() (r0 uint64) {
 	return getTime(clock_MONOTONIC_RAW)
 }
 
-func ticks() timeUnit {
+func ticks() (r0 timeUnit) {
 	return timeUnit(monotime())
 }
 
@@ -462,7 +460,7 @@ func moxie_signal_handler(s int32) {
 var signalRecvWaiter *task.Task
 
 //:linkname signal_recv os/signal.signal_recv
-func signal_recv() uint32 {
+func signal_recv() (r0 uint32) {
 	// Function called from os/signal to get the next received signal.
 	for {
 		if receivedSignals == 0 {
@@ -485,7 +483,7 @@ func signal_recv() uint32 {
 // Reactivate the goroutine waiting for signals, if there are any.
 // Return true if it was reactivated (and therefore the scheduler should run
 // again), and false otherwise.
-func checkSignals() bool {
+func checkSignals() (r0 bool) {
 	if receivedSignals != 0 {
 		waiter := signalRecvWaiter
 		signalRecvWaiter = nil

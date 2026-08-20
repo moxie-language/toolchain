@@ -6,6 +6,7 @@ package runtime
 // to be Linux, like baremetal systems).
 
 import (
+	"array"
 	"unsafe"
 )
 
@@ -97,49 +98,44 @@ var ehdr_start elfHeader
 // int32 *__errno_location(void);
 //
 //export __errno_location
-func libc_errno_location() *int32
+func libc_errno_location() (r0 *int32)
 
 // findGlobals finds globals in the .data/.bss sections.
 // It parses the ELF program header to find writable segments.
 func findGlobals(found func(start, end uintptr)) {
-	// Relevant constants from the ELF specification.
-	// See: https://refspecs.linuxfoundation.org/elf/elf.pdf
 	const (
 		PT_LOAD = 1
-		PF_W    = 0x2 // program flag: write access
+		PF_W    = 0x2
 	)
 
-	headerPtr := unsafe.Pointer(uintptr(unsafe.Pointer(&ehdr_start)) + ehdr_start.phoff)
-	for i := 0; i < int32(ehdr_start.phnum); i++ {
-		// Look for a writable segment and scan its contents.
-		// There is a little bit of duplication here, which is unfortunate. But
-		// the alternative would be to put elfProgramHeader in separate files
-		// which is IMHO a lot uglier. If only the ELF spec was consistent
-		// between 32-bit and 64-bit...
-		if TargetBits == 64 {
-			header := (*elfProgramHeader64)(headerPtr)
-			if header._type == PT_LOAD && header.flags&PF_W != 0 {
-				start := header.vaddr
-				end := start + header.memsz
-				found(start, end)
+	base := unsafe.Pointer(uintptr(unsafe.Pointer(&ehdr_start)) + ehdr_start.phoff)
+	n := int32(ehdr_start.phnum)
+	if TargetBits == 64 {
+		hdrs := array.At[elfProgramHeader64](base, n)
+		for hdrs.More() {
+			h := hdrs.Current()
+			if h._type == PT_LOAD && h.flags&PF_W != 0 {
+				found(h.vaddr, h.vaddr+h.memsz)
 			}
-		} else {
-			header := (*elfProgramHeader32)(headerPtr)
-			if header._type == PT_LOAD && header.flags&PF_W != 0 {
-				start := header.vaddr
-				end := start + header.memsz
-				found(start, end)
-			}
+			hdrs.Next()
 		}
-		headerPtr = unsafe.Add(headerPtr, ehdr_start.phentsize)
+	} else {
+		hdrs := array.At[elfProgramHeader32](base, n)
+		for hdrs.More() {
+			h := hdrs.Current()
+			if h._type == PT_LOAD && h.flags&PF_W != 0 {
+				found(h.vaddr, h.vaddr+h.memsz)
+			}
+			hdrs.Next()
+		}
 	}
 }
 
 //export getpagesize
-func libc_getpagesize() int32
+func libc_getpagesize() (r0 int32)
 
 //:linkname syscall_Getpagesize syscall.Getpagesize
-func syscall_Getpagesize() int32 {
+func syscall_Getpagesize() (r0 int32) {
 	return libc_getpagesize()
 }
 
@@ -154,7 +150,7 @@ func hardwareRand() (n uint64, ok bool) {
 // ssize_t getrandom(void buf[.buflen], size_t buflen, unsigned int32 flags);
 //
 //export getrandom
-func libc_getrandom(buf unsafe.Pointer, buflen uintptr, flags uint32) uint32
+func libc_getrandom(buf unsafe.Pointer, buflen uintptr, flags uint32) (r0 uint32)
 
 // int32 fcntl(int32 fd, int32 cmd, int32 arg);
 //

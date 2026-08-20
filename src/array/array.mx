@@ -1,0 +1,80 @@
+// Package array provides typed access to raw memory laid out as a contiguous
+// array of elements by C code, the kernel, mmap, or the compiler's own type
+// descriptors. It is an extension of unsafe: no slice header, no arena
+// ownership, no bounds checking, no allocation. The caller supplies the base
+// pointer and element count; Array does the offset/stride math.
+package array
+
+import "unsafe"
+
+// Array is a fixed-length inline block of n elements of type T at a raw
+// address, with an iteration cursor. It never allocates: the caller supplies
+// the base pointer (typically the start of an mmap'd region).
+type Array[T any] struct {
+	ptr    unsafe.Pointer
+	elemSz uintptr
+	n      int32
+	cur    int32
+}
+
+// At returns an Array of n elements of type T at base, cursor at element 0.
+func At[T any](base unsafe.Pointer, n int32) (a Array[T]) {
+	var z T
+	a.ptr = base
+	a.elemSz = unsafe.Sizeof(z)
+	a.n = n
+	a.cur = 0
+	return
+}
+
+// Len returns the number of elements.
+func (a *Array[T]) Len() (n int32) { return a.n }
+
+// Current returns a pointer to the element at the cursor. Call only when
+// More() is true, or immediately after a Seek that returned nil.
+func (a *Array[T]) Current() (p *T) {
+	return (*T)(unsafe.Add(a.ptr, uintptr(a.cur)*a.elemSz))
+}
+
+// Index returns a pointer to element i. No bounds check.
+func (a *Array[T]) Index(i int32) (p *T) {
+	return (*T)(unsafe.Add(a.ptr, uintptr(i)*a.elemSz))
+}
+
+// More reports whether the cursor is at a valid element (0 <= cur < n).
+func (a *Array[T]) More() (ok bool) { return a.cur >= 0 && a.cur < a.n }
+
+// Next advances the cursor forward.
+func (a *Array[T]) Next() { a.cur++ }
+
+// Prev retreats the cursor backward.
+func (a *Array[T]) Prev() { a.cur-- }
+
+// Seek moves the cursor to i. No bounds check - caller is responsible.
+func (a *Array[T]) Seek(i int32) { a.cur = i }
+
+// First moves the cursor to the first element.
+func (a *Array[T]) First() { a.cur = 0 }
+
+// Last moves the cursor to the last element.
+func (a *Array[T]) Last() { a.cur = a.n - 1 }
+
+// Zero sets every element to the zero value.
+func (a *Array[T]) Zero() {
+	var z T
+	for i := int32(0); i < a.n; i++ {
+		*(*T)(unsafe.Add(a.ptr, uintptr(i)*a.elemSz)) = z
+	}
+}
+
+// SizeOf returns the byte size of n inline elements of type T.
+func SizeOf[T any](n int32) (sz uintptr) {
+	var z T
+	return uintptr(n) * unsafe.Sizeof(z)
+}
+
+// Alignof returns the byte alignment of type T.
+func Alignof[T any]() (al uintptr) {
+	var z T
+	return unsafe.Alignof(z)
+}

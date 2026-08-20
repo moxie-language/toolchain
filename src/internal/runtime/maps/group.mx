@@ -5,6 +5,7 @@
 package maps
 
 import (
+	"array"
 	"internal/abi"
 	"internal/goarch"
 	"internal/runtime/sys"
@@ -46,7 +47,7 @@ type bitset uint64
 // is in the set.
 //
 // Preconditions: b is not 0 (empty).
-func (b bitset) first() uintptr {
+func (b bitset) first() (r0 uintptr) {
 	return bitsetFirst(b)
 }
 
@@ -54,25 +55,25 @@ func (b bitset) first() uintptr {
 //
 // On AMD64, this is replaced with an intrisic that simply does
 // TrailingZeros64. There is no need to shift as the bitset is packed.
-func bitsetFirst(b bitset) uintptr {
+func bitsetFirst(b bitset) (r0 uintptr) {
 	return uintptr(sys.TrailingZeros64(uint64(b))) >> 3
 }
 
 // removeFirst clears the first set bit (that is, resets the least significant
 // set bit to 0).
-func (b bitset) removeFirst() bitset {
+func (b bitset) removeFirst() (r0 bitset) {
 	return b & (b - 1)
 }
 
 // removeBelow clears all set bits below slot i (non-inclusive).
-func (b bitset) removeBelow(i uintptr) bitset {
+func (b bitset) removeBelow(i uintptr) (r0 bitset) {
 	return bitsetRemoveBelow(b, i)
 }
 
 // Portable implementation of removeBelow.
 //
 // On AMD64, this is replaced with an intrisic that clears the lower i bits.
-func bitsetRemoveBelow(b bitset, i uintptr) bitset {
+func bitsetRemoveBelow(b bitset, i uintptr) (r0 bitset) {
 	// Clear all bits below slot i's byte.
 	mask := (uint64(1) << (8 * uint64(i))) - 1
 	return b &^ bitset(mask)
@@ -82,32 +83,32 @@ func bitsetRemoveBelow(b bitset, i uintptr) bitset {
 //
 // This is intended for use with shiftOutLowest to loop over all entries in the
 // bitset regardless of whether they are set.
-func (b bitset) lowestSet() bool {
+func (b bitset) lowestSet() (r0 bool) {
 	return bitsetLowestSet(b)
 }
 
 // Portable implementation of lowestSet.
 //
 // On AMD64, this is replaced with an intrisic that checks the lowest bit.
-func bitsetLowestSet(b bitset) bool {
+func bitsetLowestSet(b bitset) (r0 bool) {
 	return b&(1<<7) != 0
 }
 
 // shiftOutLowest shifts the lowest entry out of the bitset. Afterwards, the
 // lowest entry in the bitset corresponds to the next slot.
-func (b bitset) shiftOutLowest() bitset {
+func (b bitset) shiftOutLowest() (r0 bitset) {
 	return bitsetShiftOutLowest(b)
 }
 
 // Portable implementation of shiftOutLowest.
 //
 // On AMD64, this is replaced with an intrisic that shifts a single bit.
-func bitsetShiftOutLowest(b bitset) bitset {
+func bitsetShiftOutLowest(b bitset) (r0 bitset) {
 	return b >> 8
 }
 
 // count returns the number of bits set in b.
-func (b bitset) count() int32 {
+func (b bitset) count() (r0 int32) {
 	// Note: works for both bitset representations (AMD64 and generic)
 	return sys.OnesCount64(uint64(b))
 }
@@ -127,20 +128,22 @@ type ctrl uint8
 type ctrlGroup uint64
 
 // get returns the i-th control byte.
-func (g *ctrlGroup) get(i uintptr) ctrl {
+func (g *ctrlGroup) get(i uintptr) (r0 ctrl) {
+	bytes := array.At[ctrl](unsafe.Pointer(g), 8)
 	if goarch.BigEndian {
-		return *(*ctrl)(unsafe.Add(unsafe.Pointer(g), 7-i))
+		return *bytes.Index(int32(7 - i))
 	}
-	return *(*ctrl)(unsafe.Add(unsafe.Pointer(g), i))
+	return *bytes.Index(int32(i))
 }
 
 // set sets the i-th control byte.
 func (g *ctrlGroup) set(i uintptr, c ctrl) {
+	bytes := array.At[ctrl](unsafe.Pointer(g), 8)
 	if goarch.BigEndian {
-		*(*ctrl)(unsafe.Add(unsafe.Pointer(g), 7-i)) = c
+		*bytes.Index(int32(7 - i)) = c
 		return
 	}
-	*(*ctrl)(unsafe.Add(unsafe.Pointer(g), i)) = c
+	*bytes.Index(int32(i)) = c
 }
 
 // setEmpty sets all the control bytes to empty.
@@ -150,7 +153,7 @@ func (g *ctrlGroup) setEmpty() {
 
 // matchH2 returns the set of slots which are full and for which the 7-bit hash
 // matches the given value. May return false positives.
-func (g ctrlGroup) matchH2(h uintptr) bitset {
+func (g ctrlGroup) matchH2(h uintptr) (r0 bitset) {
 	return ctrlGroupMatchH2(g, h)
 }
 
@@ -158,7 +161,7 @@ func (g ctrlGroup) matchH2(h uintptr) bitset {
 //
 // Note: On AMD64, this is an intrinsic implemented with SIMD instructions. See
 // note on bitset about the packed intrinsified return value.
-func ctrlGroupMatchH2(g ctrlGroup, h uintptr) bitset {
+func ctrlGroupMatchH2(g ctrlGroup, h uintptr) (r0 bitset) {
 	// NB: This generic matching routine produces false positive matches when
 	// h is 2^N and the control bytes have a seq of 2^N followed by 2^N+1. For
 	// example: if ctrls==0x0302 and h=02, we'll compute v as 0x0100. When we
@@ -172,7 +175,7 @@ func ctrlGroupMatchH2(g ctrlGroup, h uintptr) bitset {
 }
 
 // matchEmpty returns the set of slots in the group that are empty.
-func (g ctrlGroup) matchEmpty() bitset {
+func (g ctrlGroup) matchEmpty() (r0 bitset) {
 	return ctrlGroupMatchEmpty(g)
 }
 
@@ -180,7 +183,7 @@ func (g ctrlGroup) matchEmpty() bitset {
 //
 // Note: On AMD64, this is an intrinsic implemented with SIMD instructions. See
 // note on bitset about the packed intrinsified return value.
-func ctrlGroupMatchEmpty(g ctrlGroup) bitset {
+func ctrlGroupMatchEmpty(g ctrlGroup) (r0 bitset) {
 	// An empty slot is   1000 0000
 	// A deleted slot is  1111 1110
 	// A full slot is     0??? ????
@@ -193,7 +196,7 @@ func ctrlGroupMatchEmpty(g ctrlGroup) bitset {
 
 // matchEmptyOrDeleted returns the set of slots in the group that are empty or
 // deleted.
-func (g ctrlGroup) matchEmptyOrDeleted() bitset {
+func (g ctrlGroup) matchEmptyOrDeleted() (r0 bitset) {
 	return ctrlGroupMatchEmptyOrDeleted(g)
 }
 
@@ -201,7 +204,7 @@ func (g ctrlGroup) matchEmptyOrDeleted() bitset {
 //
 // Note: On AMD64, this is an intrinsic implemented with SIMD instructions. See
 // note on bitset about the packed intrinsified return value.
-func ctrlGroupMatchEmptyOrDeleted(g ctrlGroup) bitset {
+func ctrlGroupMatchEmptyOrDeleted(g ctrlGroup) (r0 bitset) {
 	// An empty slot is  1000 0000
 	// A deleted slot is 1111 1110
 	// A full slot is    0??? ????
@@ -212,7 +215,7 @@ func ctrlGroupMatchEmptyOrDeleted(g ctrlGroup) bitset {
 }
 
 // matchFull returns the set of slots in the group that are full.
-func (g ctrlGroup) matchFull() bitset {
+func (g ctrlGroup) matchFull() (r0 bitset) {
 	return ctrlGroupMatchFull(g)
 }
 
@@ -220,7 +223,7 @@ func (g ctrlGroup) matchFull() bitset {
 //
 // Note: On AMD64, this is an intrinsic implemented with SIMD instructions. See
 // note on bitset about the packed intrinsified return value.
-func ctrlGroupMatchFull(g ctrlGroup) bitset {
+func ctrlGroupMatchFull(g ctrlGroup) (r0 bitset) {
 	// An empty slot is  1000 0000
 	// A deleted slot is 1111 1110
 	// A full slot is    0??? ????
@@ -257,14 +260,14 @@ const (
 )
 
 // alignUp rounds n up to a multiple of a. a must be a power of 2.
-func alignUp(n, a uintptr) uintptr {
+func alignUp(n, a uintptr) (r0 uintptr) {
 	return (n + a - 1) &^ (a - 1)
 }
 
 // alignUpPow2 rounds n up to the next power of 2.
 //
 // Returns true if round up causes overflow.
-func alignUpPow2(n uint64) (uint64, bool) {
+func alignUpPow2(n uint64) (r0 uint64, r1 bool) {
 	if n == 0 {
 		return 0, false
 	}
@@ -276,19 +279,19 @@ func alignUpPow2(n uint64) (uint64, bool) {
 }
 
 // ctrls returns the group control word.
-func (g *groupReference) ctrls() *ctrlGroup {
+func (g *groupReference) ctrls() (r0 *ctrlGroup) {
 	return (*ctrlGroup)(g.data)
 }
 
 // key returns a pointer to the key at index i.
-func (g *groupReference) key(typ *abi.SwissMapType, i uintptr) unsafe.Pointer {
+func (g *groupReference) key(typ *abi.SwissMapType, i uintptr) (r0 unsafe.Pointer) {
 	offset := groupSlotsOffset + i*typ.SlotSize
 
 	return unsafe.Pointer(uintptr(g.data) + offset)
 }
 
 // elem returns a pointer to the element at index i.
-func (g *groupReference) elem(typ *abi.SwissMapType, i uintptr) unsafe.Pointer {
+func (g *groupReference) elem(typ *abi.SwissMapType, i uintptr) (r0 unsafe.Pointer) {
 	offset := groupSlotsOffset + i*typ.SlotSize + typ.ElemOff
 
 	return unsafe.Pointer(uintptr(g.data) + offset)
@@ -310,7 +313,7 @@ type groupsReference struct {
 // newGroups allocates a new array of length groups.
 //
 // Length must be a power of two.
-func newGroups(typ *abi.SwissMapType, length uint64) groupsReference {
+func newGroups(typ *abi.SwissMapType, length uint64) (r0 groupsReference) {
 	return groupsReference{
 		// TODO: make the length type the same throughout.
 		data:       newarray(typ.Group, int32(length)),
@@ -319,7 +322,7 @@ func newGroups(typ *abi.SwissMapType, length uint64) groupsReference {
 }
 
 // group returns the group at index i.
-func (g *groupsReference) group(typ *abi.SwissMapType, i uint64) groupReference {
+func (g *groupsReference) group(typ *abi.SwissMapType, i uint64) (r0 groupReference) {
 	// TODO(prattmic): Do something here about truncation on cast to
 	// uintptr on 32-bit systems?
 	offset := uintptr(i) * typ.GroupSize

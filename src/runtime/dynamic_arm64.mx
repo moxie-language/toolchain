@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"array"
 	"unsafe"
 )
 
@@ -35,17 +36,18 @@ func dynamicLoader(base uintptr, dyn *dyn64) {
 		println("ASLR Base: ", base)
 	}
 
-	for dyn.Tag != dtNULL {
-		switch dyn.Tag {
-		case dtRELA:
-			rela = (*rela64)(unsafe.Pointer(base + uintptr(dyn.Val)))
-		case dtRELASZ:
-			relasz = uint64(dyn.Val) / uint64(unsafe.Sizeof(rela64{}))
+	entries := array.At[dyn64](unsafe.Pointer(dyn), 0)
+	for i := int32(0); ; i++ {
+		e := entries.Index(i)
+		if e.Tag == dtNULL {
+			break
 		}
-
-		ptr := unsafe.Pointer(dyn)
-		ptr = unsafe.Add(ptr, unsafe.Sizeof(dyn64{}))
-		dyn = (*dyn64)(ptr)
+		switch e.Tag {
+		case dtRELA:
+			rela = (*rela64)(unsafe.Pointer(base + uintptr(e.Val)))
+		case dtRELASZ:
+			relasz = uint64(e.Val) / uint64(unsafe.Sizeof(rela64{}))
+		}
 	}
 
 	if rela == nil {
@@ -56,23 +58,21 @@ func dynamicLoader(base uintptr, dyn *dyn64) {
 		println("Sections to load: ", relasz)
 	}
 
-	for relasz > 0 && rela != nil {
-		switch rela.Info {
+	relas := array.At[rela64](unsafe.Pointer(rela), int32(relasz))
+	for relas.More() {
+		r := relas.Current()
+		switch r.Info {
 		case rAARCH64_RELATIVE:
 			if debugLoader {
-				println("relocating ", uintptr(rela.Addend), " to ", base+uintptr(rela.Addend))
+				println("relocating ", uintptr(r.Addend), " to ", base+uintptr(r.Addend))
 			}
-			ptr := (*uint64)(unsafe.Pointer(base + uintptr(rela.Off)))
-			*ptr = uint64(base + uintptr(rela.Addend))
+			ptr := (*uint64)(unsafe.Pointer(base + uintptr(r.Off)))
+			*ptr = uint64(base + uintptr(r.Addend))
 		default:
 			if debugLoader {
-				println("unknown section to load:", rela.Info)
+				println("unknown section to load:", r.Info)
 			}
 		}
-
-		rptr := unsafe.Pointer(rela)
-		rptr = unsafe.Add(rptr, unsafe.Sizeof(rela64{}))
-		rela = (*rela64)(rptr)
-		relasz--
+		relas.Next()
 	}
 }
