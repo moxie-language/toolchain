@@ -40,23 +40,23 @@ func HasMoxieSecallocRefs(files []*ast.File) bool {
 func InjectMoxieByteBuiltins(fset *token.FileSet, pkgName string) *ast.File {
 	src := fmt.Sprintf(`package %s
 
-func __moxie_concat(a, b []byte) []byte {
+func __moxie_concat(a, b []byte) (out []byte) {
 	panic("__moxie_concat: compiler failed to intercept")
 }
 
-func __moxie_concat_move(a, b []byte) []byte {
+func __moxie_concat_move(a, b []byte) (out []byte) {
 	panic("__moxie_concat_move: compiler failed to intercept")
 }
 
-func __moxie_eq(a, b []byte) bool {
+func __moxie_eq(a, b []byte) (eq bool) {
 	panic("__moxie_eq: compiler failed to intercept")
 }
 
-func __moxie_lt(a, b []byte) bool {
+func __moxie_lt(a, b []byte) (lt bool) {
 	panic("__moxie_lt: compiler failed to intercept")
 }
 
-func __moxie_secalloc(n int32) []byte {
+func __moxie_secalloc(n int32) (out []byte) {
 	panic("__moxie_secalloc: compiler failed to intercept")
 }
 `, pkgName)

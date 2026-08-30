@@ -187,23 +187,31 @@ func (c *compilerContext) flattenAggregateType(t llvm.Type, name string, goType 
 			if goType != nil {
 				// Try to come up with a good suffix for this struct field,
 				// depending on which Go type it's based on.
-				switch goType := goType.Underlying().(type) {
-				case *types.Interface:
-					suffix = []string{"typecode", "value"}[i]
-				case *types.Slice:
-					suffix = []string{"data", "len", "cap"}[i]
-				case *types.Struct:
-					suffix = goType.Field(i).Name()
-				case *types.Basic:
-					switch goType.Kind() {
-					case types.Complex64, types.Complex128:
-						suffix = []string{"r", "i"}[i]
-					case types.String:
-						suffix = []string{"data", "len", "cap"}[i]
-						// Moxie: don't mark string data as readonly (string=[]byte, mutable).
+				// Sovereign types have a trailing _arena pointer field with
+				// no corresponding Go field.
+				if st, ok := goType.Underlying().(*types.Struct); ok {
+					if i < st.NumFields() {
+						suffix = st.Field(i).Name()
+					} else {
+						suffix = "_arena"
 					}
-				case *types.Signature:
-					suffix = []string{"context", "funcptr"}[i]
+				} else {
+					switch goType := goType.Underlying().(type) {
+					case *types.Interface:
+						suffix = []string{"typecode", "value"}[i]
+					case *types.Slice:
+						suffix = []string{"data", "len", "cap"}[i]
+					case *types.Basic:
+						switch goType.Kind() {
+						case types.Complex64, types.Complex128:
+							suffix = []string{"r", "i"}[i]
+						case types.String:
+							suffix = []string{"data", "len", "cap"}[i]
+							// Moxie: don't mark string data as readonly (string=[]byte, mutable).
+						}
+					case *types.Signature:
+						suffix = []string{"context", "funcptr"}[i]
+					}
 				}
 			}
 			subInfos := c.flattenAggregateType(subfield, name+"."+suffix, extractSubfield(goType, i))
@@ -252,6 +260,10 @@ func extractSubfield(t types.Type, field int) types.Type {
 	}
 	switch t := t.Underlying().(type) {
 	case *types.Struct:
+		// Sovereign types have a trailing _arena field with no Go field.
+		if field >= t.NumFields() {
+			return nil
+		}
 		return t.Field(field).Type()
 	case *types.Interface, *types.Slice, *types.Basic, *types.Signature:
 		// These Go types are (sometimes) implemented as LLVM structs but can't

@@ -18,6 +18,9 @@ type irEmitter struct {
 	buf        []byte   // assembled output (only during flush/return)
 	outFile    *os.File // streaming output; nil = accumulate in buf
 	operandBuf []SSAValue // scratch buffer for instrOperands
+	spawnWrappers map[string]bool // dedup of emitted spawn $gowrapper functions
+	spawnWrapperTexts []string    // compiled spawn wrapper IR, emitted at package tail
+	pendSpawnWrappers []string    // per-function accumulator for wrapper IR
 	triple     string
 	ptrBits    int32
 	pkg        *SSAPackage
@@ -36,7 +39,7 @@ type irEmitter struct {
 	regTypes    map[string]string
 	hoisted     map[SSAValue]bool
 	wasmAttrID  int32
-	wasmAttrs   [][3]string
+	wasmAttrs   [][]string
 	blockExitLabel map[int32]string
 	nameUsed   map[string]bool
 	missingStores map[SSAValue]SSAValue
@@ -48,6 +51,9 @@ type irEmitter struct {
 	usedAs          map[string]bool
 	deferList  []*SSADefer
 	deferID    int32
+	deferFrame string    // deferFrame alloca reg for functions with defers
+	deferLanding string  // landing pad label
+	deferCheckpointOn bool
 	blockDead  bool
 	currentEmitBlock *SSABasicBlock
 	sretType    string
@@ -61,14 +67,26 @@ type irEmitter struct {
 	pendTypeIDs       []emitKVI
 	pendLocalTypeIDs  []string
 	pendGlobalDeclTypes []emitKV
-	pendWasmAttrs     [][3]string
+	pendWasmAttrs     [][]string
 	definedSyms   []string // symbols that got `define` in this package
+	// accOut accumulates flushed buffers when outFile is nil (non-streaming
+	// mode). Lives in the compile arena - survives per-function resets.
+	accOut []byte
 	// Arena codec state (compileArena lifetime)
 	arenaActive   bool
 	arenaBorrowed bool       // true when method borrows receiver's sovereign arena
+	stableReg     bool       // true when this frame registered the receiver's arena as stable
 	parentArenaReg string    // LLVM register holding parent arena for epilogue restore
 	sovereignTypes map[string]bool // lazy-init: which named types are sovereign
 	typeCache     map[Type]string
+	pendTypeDescs     map[string]Type
+	emittedTypeDescs  map[string]bool
+	emittedPkgpaths   map[string]bool
+	emittedTails      []string
+	compileArena      *runtime.Arena
+	tailRecursive    bool
+	tailReturnBlocks map[int32]*SSACall
+	tailCalls        map[*SSACall]bool
 }
 
 type phiTrunc struct {
@@ -99,14 +117,93 @@ func newIREmitter(pkg *SSAPackage, triple string, srcLen int32) (p *irEmitter) {
 		regTypes:   map[string]string{},
 		blockExitLabel: map[int32]string{},
 		nameUsed:   map[string]bool{},
+		compileArena: runtime.CurrentArena(),
 		sovereignTypes: map[string]bool{},
 		typeCache:      map[Type]string{},
+		spawnWrappers: map[string]bool{},
 		wasmAttrID: 99,
 	}
 }
 
 func (e *irEmitter) w(s string) {
+	if e.deferCheckpointOn && e.deferFrame != "" && (mxutil.HasPrefix(s, "  call ") || (len(s) >= 8 && mxutil.HasPrefix(s, "  %") && segHasCall(s))) {
+		e.emitCallCheckpoint()
+	}
+	if len(e.segs) >= cap(e.segs) {
+		nb := []string{:len(e.segs):cap(e.segs) * 2}
+		copy(nb, e.segs)
+		e.segs = nb
+	}
+	if len(e.segs) >= cap(e.segs) { e.segs = mxutil.GrowCap(e.segs) }
 	push(e.segs, s)
+}
+
+// appendEmitKV grows the pending-extern-decl accumulator explicitly
+// (no auto-grow) and pushes one entry.
+func (e *irEmitter) appendEmitKV(kv emitKV) {
+	if len(e.pendExtDecls) >= cap(e.pendExtDecls) {
+		nc := cap(e.pendExtDecls) * 2
+		if nc < 32 {
+			nc = 32
+		}
+		nb := []emitKV{:len(e.pendExtDecls):nc}
+		copy(nb, e.pendExtDecls)
+		e.pendExtDecls = nb
+	}
+	if len(e.pendExtDecls) >= cap(e.pendExtDecls) { e.pendExtDecls = mxutil.GrowCap(e.pendExtDecls) }
+	push(e.pendExtDecls, kv)
+}
+
+// appendEmitKVPend grows the pending-extern-global accumulator explicitly.
+func (e *irEmitter) appendEmitKVPend(kv emitKV) {
+	if len(e.pendExtGlobals) >= cap(e.pendExtGlobals) {
+		nc := cap(e.pendExtGlobals) * 2
+		if nc < 32 {
+			nc = 32
+		}
+		nb := []emitKV{:len(e.pendExtGlobals):nc}
+		copy(nb, e.pendExtGlobals)
+		e.pendExtGlobals = nb
+	}
+	if len(e.pendExtGlobals) >= cap(e.pendExtGlobals) { e.pendExtGlobals = mxutil.GrowCap(e.pendExtGlobals) }
+	push(e.pendExtGlobals, kv)
+}
+
+// segHasCall reports whether an IR segment contains " = call ".
+func segHasCall(s string) (ok bool) {
+	for i := 0; i+7 <= len(s); i++ {
+		if s[i] == ' ' && s[i+1] == '=' && s[i+2] == ' ' && s[i+3] == 'c' && s[i+4] == 'a' && s[i+5] == 'l' && s[i+6] == 'l' && s[i+7] == ' ' {
+			return true
+		}
+	}
+	return false
+}
+
+// emitCallCheckpoint emits the setjmp-like checkpoint before a call in a
+// function with a defer frame. Mirrors legacy createCheckpoint (x86_64):
+// stores the PC just past the asm into the frame's JumpPC slot. Returns 0 on
+// normal flow; after a longjmp the return value is non-zero and control
+// branches to the landing pad.
+func (e *irEmitter) emitCallCheckpoint() {
+	if !e.deferCheckpointOn || e.deferFrame == "" {
+		return
+	}
+	e.deferCheckpointOn = false
+	e.nextReg++
+	ck := "%ckpt" | irItoa(e.nextReg)
+	e.nextReg++
+	eq := "%ckp" | irItoa(e.nextReg)
+	cont := "ck.cont" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(ck) ; e.w(` = call i64 asm sideeffect "leaq 1f(%rip), %rax\0Amovq %rax, 8($1)\0Axorq %rax, %rax\0A1:", "={rax},{rbx},~{rbx},~{rcx},~{rdx},~{rsi},~{rdi},~{rbp},~{r8},~{r9},~{r10},~{r11},~{r12},~{r13},~{r14},~{r15},~{xmm0},~{xmm1},~{xmm2},~{xmm3},~{xmm4},~{xmm5},~{xmm6},~{xmm7},~{xmm8},~{xmm9},~{xmm10},~{xmm11},~{xmm12},~{xmm13},~{xmm14},~{xmm15},~{fpsr},~{fpcr},~{flags},~{dirflag},~{memory}"(ptr `) ; e.w(e.deferFrame) ; e.w(")\n")
+	e.w("  ") ; e.w(eq) ; e.w(" = icmp eq i64 ") ; e.w(ck) ; e.w(", 0\n")
+	e.w("  br i1 ") ; e.w(eq) ; e.w(", label %") ; e.w(cont) ; e.w(", label %") ; e.w(e.deferLanding) ; e.w("\n")
+	e.w(cont) ; e.w(":\n")
+	// The block's exit is now the continuation, not its header: PHI nodes in
+	// successor blocks must reference the continuation label.
+	if e.currentEmitBlock != nil {
+		e.blockExitLabel[e.currentEmitBlock.Index] = "%" | cont
+	}
+	e.deferCheckpointOn = true
 }
 
 // assembleSegs joins all segments into e.buf in one allocation.
@@ -131,7 +228,32 @@ func (e *irEmitter) assembleSegs() {
 func (e *irEmitter) flush() {
 	e.assembleSegs()
 	if e.outFile != nil && len(e.buf) > 0 {
-		e.outFile.Write(e.buf)
+		n, werr := e.outFile.Write(e.buf)
+		if werr != nil || n != len(e.buf) {
+			mxutil.WriteStr(2, "DBG flush write n=" | ssaItoa(n) | " want=" | ssaItoa(len(e.buf)) | " err=" | werr.Error() | "\n")
+		}
+	} else if e.outFile == nil && len(e.buf) > 0 {
+		cur := len(e.accOut)
+		need := cur + len(e.buf)
+		if need > cap(e.accOut) {
+			nc := cap(e.accOut) * 2
+			if nc < need {
+				nc = need
+			}
+			if nc < 4096 {
+				nc = 4096
+			}
+			// accOut must outlive the per-function arena resets:
+			// allocate the new backing array in the compile arena.
+			fnArena := runtime.CurrentArena()
+			runtime.SetCurrentArena(e.compileArena)
+			nb := []byte{:cur:nc}
+			copy(nb, e.accOut)
+			runtime.SetCurrentArena(fnArena)
+			e.accOut = nb
+		}
+		e.accOut = e.accOut[:need]
+		copy(e.accOut[cur:need], e.buf)
 	}
 	e.buf = nil
 }
@@ -161,14 +283,29 @@ func (e *irEmitter) flushDedup() {
 		isDeclare := len(line) > 8 && line[0] == 'd' && line[1] == 'e' && line[2] == 'c' && line[3] == 'l' && line[4] == 'a' && line[5] == 'r' && line[6] == 'e' && line[7] == ' '
 		// Dedup define lines (for per-type fixup functions).
 		isDefine := len(line) > 7 && line[0] == 'd' && line[1] == 'e' && line[2] == 'f' && line[3] == 'i' && line[4] == 'n' && line[5] == 'e' && line[6] == ' '
-		if isDeclare || isDefine {
+		// Dedup type descriptor globals (linkonce_odr constants).
+		isDesc := len(line) > 22 && line[0] == '@' && line[1] == '"' && line[2] == 'r' && line[3] == 'e' && line[4] == 'f' && line[5] == 'l' && line[6] == 'e' && line[7] == 'c' && line[8] == 't' && line[9] == '/' && line[10] == 't' && line[11] == 'y' && line[12] == 'p' && line[13] == 'e' && line[14] == 's' && line[15] == '.'
+		if isDeclare || isDefine || isDesc {
 			dup := false
+			lineName := line
+			if isDesc {
+				nameEnd := int32(0)
+				for bi := int32(0); bi < len(line); bi++ {
+					if line[bi] == ' ' {
+						nameEnd = bi
+						break
+					}
+				}
+				if nameEnd > 0 {
+					lineName = string(line[:nameEnd])
+				}
+			}
 			for si := int32(0); si < len(seen); si++ {
 				s := seen[si]
-				if len(s) == len(line) {
+				if len(s) == len(lineName) {
 					match := true
 					for bi := int32(0); bi < len(s); bi++ {
-						if s[bi] != line[bi] {
+						if s[bi] != lineName[bi] {
 							match = false
 							break
 						}
@@ -197,9 +334,11 @@ func (e *irEmitter) flushDedup() {
 				}
 				continue
 			}
-			push(seen, line)
+			if len(seen) >= cap(seen) { seen = mxutil.GrowCap(seen) }
+			push(seen, lineName)
 		}
 		for j := ls; j < le; j++ {
+			if len(out) >= cap(out) { out = mxutil.GrowCap(out) }
 			push(out, e.buf[j])
 		}
 		ls = le
@@ -244,6 +383,7 @@ func (e *irEmitter) hoistAllocaText(start int32) {
 		}
 	}
 	if insert < 0 {
+		if len(e.segs) >= cap(e.segs) { e.segs = mxutil.GrowCap(e.segs) }
 		push(e.segs, string(body))
 		return
 	}
@@ -276,6 +416,7 @@ func (e *irEmitter) hoistAllocaText(start int32) {
 		ls = le
 	}
 	if !moved {
+		if len(e.segs) >= cap(e.segs) { e.segs = mxutil.GrowCap(e.segs) }
 		push(e.segs, string(body))
 		return
 	}
@@ -321,6 +462,7 @@ func (e *irEmitter) hoistAllocaText(start int32) {
 		}
 		ls = le
 	}
+	if len(e.segs) >= cap(e.segs) { e.segs = mxutil.GrowCap(e.segs) }
 	push(e.segs, string(out))
 }
 
@@ -365,11 +507,11 @@ func (e *irEmitter) declareRuntime(name, retType, params string) {
 	} else {
 		params = "ptr"
 	}
-	push(e.pendExtDecls, emitKV{name, retType | " @" | name | "(" | params | ")"})
+	e.appendEmitKV(emitKV{name, retType | " @" | name | "(" | params | ")"})
 }
 
 func (e *irEmitter) declareRuntimeNoCtx(name, retType, params string) {
-	push(e.pendExtDecls, emitKV{name, retType | " @" | name | "(" | params | ")"})
+	e.appendEmitKV(emitKV{name, retType | " @" | name | "(" | params | ")"})
 }
 
 
@@ -395,7 +537,7 @@ func (e *irEmitter) declareExternalGlobal(g *SSAGlobal) {
 	if typ == "void" {
 		typ = "i1"
 	}
-	push(e.pendExtGlobals, emitKV{name, typ})
+	e.appendEmitKVPend(emitKV{name, typ})
 }
 
 func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
@@ -420,10 +562,12 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 	}
 	var psegs []string
 	if params != "" {
+		if len(psegs) >= cap(psegs) { psegs = mxutil.GrowCap(psegs) }
 		push(psegs, params)
 	}
 	hasRecv := fn.Signature != nil && fn.Signature.Recv != nil
 	if hasRecv {
+		if len(psegs) >= cap(psegs) { psegs = mxutil.GrowCap(psegs) }
 		push(psegs, "ptr")
 	}
 	if fn.Signature != nil && fn.Signature.Params != nil {
@@ -433,17 +577,19 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 				mxutil.WriteStr(2, "BUG-DECL: empty param type in " | sym | " param " | irItoa(int32(i)) | "\n")
 				pt = "ptr"
 			}
+			if len(psegs) >= cap(psegs) { psegs = mxutil.GrowCap(psegs) }
 			push(psegs, pt)
 		}
 	}
 	if !skipCtx {
+		if len(psegs) >= cap(psegs) { psegs = mxutil.GrowCap(psegs) }
 		push(psegs, "ptr")
 	}
 	params = joinStrs(commaSep(psegs))
 	if useSret {
-		push(e.pendExtDecls, emitKV{sym, "void " | sym | "(" | params | ")"})
+		e.appendEmitKV(emitKV{sym, "void " | sym | "(" | params | ")"})
 	} else {
-		push(e.pendExtDecls, emitKV{sym, retType | " " | sym | "(" | params | ")"})
+		e.appendEmitKV(emitKV{sym, retType | " " | sym | "(" | params | ")"})
 	}
 }
 
@@ -459,6 +605,7 @@ func (e *irEmitter) addStringConst(s string) (n int32) {
 		}
 	}
 	idx := int32(base + len(e.pendStrConsts))
+	if len(e.pendStrConsts) >= cap(e.pendStrConsts) { e.pendStrConsts = mxutil.GrowCap(e.pendStrConsts) }
 	push(e.pendStrConsts, s)
 	return idx
 }
@@ -507,6 +654,74 @@ func (e *irEmitter) emit() (s string) {
 	e.w("\"\n\n")
 
 	e.resolveAllNamedTypes()
+
+	e.pendTypeDescs = map[string]Type{}
+	for _, m := range e.pkgMembers() {
+		fn, ok := m.(*SSAFunction)
+		if ok && fn.Blocks != nil && fn.Signature != nil {
+			if fn.Signature.Results != nil {
+				for i := int32(0); i < int32(fn.Signature.Results.Len()); i++ {
+					e.collectAllTypeDescs(fn.Signature.Results.At(i).Typ, map[string]bool{})
+				}
+			}
+			if fn.Signature.Recv != nil {
+				e.collectAllTypeDescs(fn.Signature.Recv.Typ, map[string]bool{})
+			}
+		}
+		g, ok2 := m.(*SSAGlobal)
+		if ok2 && g.typ != nil {
+			e.collectAllTypeDescs(g.typ, map[string]bool{})
+		}
+	}
+	// Also declare type descriptors for this package's own named types,
+	// since interface dispatch may reference them. Deterministic per
+	// package: parallel workers compile packages in arbitrary order with
+	// per-thread registries, so the descriptor set must not depend on
+	// which packages happen to be loaded. Every package emits its own
+	// types; linkonce_odr dedups at link time.
+	if e.pkg != nil && e.pkg.Pkg != nil && e.pkg.Pkg.Scope != nil {
+		scope := e.pkg.Pkg.Scope
+		names := scope.Names()
+		for _, name := range names {
+			obj := scope.Lookup(name)
+			if obj == nil {
+				continue
+			}
+			tn, ok := obj.(*TypeName)
+			if !ok || tn.Typ == nil {
+				continue
+			}
+			path := normalizePkgPath(e.pkg.Pkg.Path)
+			tail := "named:" | path | "." | name
+			if _, exists := e.pendTypeDescs[tail]; !exists {
+				e.pendTypeDescs[tail] = Typ[Invalid]
+			}
+			tailPtr := "pointer:" | tail
+			if _, exists := e.pendTypeDescs[tailPtr]; !exists {
+				e.pendTypeDescs[tailPtr] = Typ[Invalid]
+			}
+		}
+	}
+	// Also declare basic type descriptors from the universe scope.
+	if cctx.universe != nil && cctx.universe.Scope != nil {
+		for _, name := range cctx.universe.Scope.Names() {
+			if mxutil.HasPrefix(name, "int") || mxutil.HasPrefix(name, "uint") ||
+				name == "bool" || name == "byte" || name == "rune" ||
+				mxutil.HasPrefix(name, "float") || name == "string" {
+				tail := "basic:" | name
+				if _, exists := e.pendTypeDescs[tail]; !exists {
+					e.pendTypeDescs[tail] = Typ[Invalid]
+				}
+				ptail := "pointer:" | tail
+				if _, exists := e.pendTypeDescs[ptail]; !exists {
+					e.pendTypeDescs[ptail] = Typ[Invalid]
+				}
+			}
+		}
+	}
+
+	e.emitBasicIdentities()
+
 	e.globalTypes = map[string]string{}
 	e.globalDeclTypes = map[string]string{}
 	sortedM := e.pkgMembers()
@@ -675,10 +890,11 @@ func (e *irEmitter) emit() (s string) {
 			if len(defSym) > 0 && defSym[0] == '@' {
 				defSym = defSym[1:]
 			}
+			if len(e.definedSyms) >= cap(e.definedSyms) { e.definedSyms = mxutil.GrowCap(e.definedSyms) }
 			push(e.definedSyms, defSym)
 		}
 	}
-	fnArena := runtime.ArenaNew(64 * 1024)
+	fnArena := runtime.ArenaNew(8 * 1024 * 1024)
 	for _, member := range e.pkgMembers() {
 		if m, ok := member.(*SSAFunction); ok {
 			checkUseAfterFree(m)
@@ -722,7 +938,9 @@ func (e *irEmitter) emit() (s string) {
 	e.emitLibMain()
 	for i, sc := range e.strConst {
 		e.w(e.strConstGlobal(i))
-		e.w(" = private constant [")
+		// Moxie: string=[]byte means string literals are mutable; keep
+		// them in .data, not .rodata, so slice writes work.
+		e.w(" = private global [")
 		e.w(irItoa(len(sc)))
 		e.w(" x i8] c\"")
 		e.w(irEscapeString(sc))
@@ -734,6 +952,7 @@ func (e *irEmitter) emit() (s string) {
 		e.w("\n")
 		var edKeys []string
 		for k := range e.extDecls {
+			if len(edKeys) >= cap(edKeys) { edKeys = mxutil.GrowCap(edKeys) }
 			push(edKeys, k)
 		}
 		for i := 1; i < len(edKeys); i++ {
@@ -764,7 +983,8 @@ func (e *irEmitter) emit() (s string) {
 					e.wasmAttrID++
 					aid := e.wasmAttrID
 					e.w(" #" | simpleItoa(aid))
-					push(e.wasmAttrs, [3]string{simpleItoa(aid), wi[0], wi[1]})
+					if len(e.wasmAttrs) >= cap(e.wasmAttrs) { e.wasmAttrs = mxutil.GrowCap(e.wasmAttrs) }
+					push(e.wasmAttrs, []string{simpleItoa(aid), wi[0], wi[1]})
 				}
 			}
 			e.w("\n")
@@ -775,6 +995,7 @@ func (e *irEmitter) emit() (s string) {
 		e.w("\n")
 		var egKeys []string
 		for name := range e.extGlobals {
+			if len(egKeys) >= cap(egKeys) { egKeys = mxutil.GrowCap(egKeys) }
 			push(egKeys, name)
 		}
 		for i := 1; i < len(egKeys); i++ {
@@ -790,7 +1011,8 @@ func (e *irEmitter) emit() (s string) {
 			e.w("\n")
 		}
 	}
-
+	e.emitTypeDescs()
+	e.emitSpawnWrappers()
 	// Emit wasm import attribute groups
 	for _, wa := range e.wasmAttrs {
 		e.w("attributes #" | wa[0] | " = { \"wasm-import-module\"=\"" | wa[1] | "\" \"wasm-import-name\"=\"" | wa[2] | "\" }\n")
@@ -801,9 +1023,87 @@ func (e *irEmitter) emit() (s string) {
 		return ""
 	}
 	e.assembleSegs()
+	if len(e.accOut) > 0 {
+		need := len(e.accOut) + len(e.buf)
+		full := []byte{:need}
+		copy(full, e.accOut)
+		if len(e.buf) > 0 {
+			copy(full[len(e.accOut):need], e.buf)
+		}
+		e.buf = full
+	}
+	e.dedupBuf()
 	result := string(e.buf)
 	e.buf = nil
 	return result
+}
+
+// dedupBuf removes duplicate declare/define/descriptor lines from e.buf.
+func (e *irEmitter) dedupBuf() {
+	if len(e.buf) == 0 {
+		return
+	}
+	var seen []string
+	out := []byte{:0:len(e.buf)}
+	ls := int32(0)
+	n := int32(len(e.buf))
+	for ls < n {
+		le := ls
+		for le < n && e.buf[le] != '\n' {
+			le++
+		}
+		if le < n {
+			le++
+		}
+		line := string(e.buf[ls:le])
+		isDeclare := len(line) > 8 && line[0] == 'd' && line[1] == 'e' && line[2] == 'c' && line[3] == 'l' && line[4] == 'a' && line[5] == 'r' && line[6] == 'e' && line[7] == ' '
+		isDefine := len(line) > 7 && line[0] == 'd' && line[1] == 'e' && line[2] == 'f' && line[3] == 'i' && line[4] == 'n' && line[5] == 'e' && line[6] == ' '
+		isDesc := len(line) > 22 && line[0] == '@' && line[1] == '"' && line[2] == 'r' && line[3] == 'e' && line[4] == 'f' && line[5] == 'l' && line[6] == 'e' && line[7] == 'c' && line[8] == 't' && line[9] == '/' && line[10] == 't' && line[11] == 'y' && line[12] == 'p' && line[13] == 'e' && line[14] == 's' && line[15] == '.'
+		dup := false
+		lineName := line
+		if isDeclare || isDefine || isDesc {
+			if isDesc {
+				nameEnd := int32(0)
+				for bi := int32(0); bi < len(line); bi++ {
+					if line[bi] == ' ' {
+						nameEnd = bi
+						break
+					}
+				}
+				if nameEnd > 0 {
+					lineName = string(line[:nameEnd])
+				}
+			}
+			for si := int32(0); si < len(seen); si++ {
+				s := seen[si]
+				if len(s) == len(lineName) {
+					match := true
+					for bi := int32(0); bi < len(s); bi++ {
+						if s[bi] != lineName[bi] {
+							match = false
+							break
+						}
+					}
+					if match {
+						dup = true
+						break
+					}
+				}
+			}
+		}
+		if dup {
+			ls = le
+			continue
+		}
+		if isDeclare || isDefine || isDesc {
+			if len(seen) >= cap(seen) { seen = mxutil.GrowCap(seen) }
+			seen = push(seen, lineName)
+		}
+		if len(out) >= cap(out) { out = mxutil.GrowCap(out) }
+		out = push(out, line...)
+		ls = le
+	}
+	e.buf = out
 }
 
 func (e *irEmitter) releaseAfterEmit() {}
@@ -836,6 +1136,7 @@ func (e *irEmitter) mergeAccumulators() {
 		cs := copyStr(s)
 		if _, ok := e.strMap[cs]; !ok {
 			e.strMap[cs] = len(e.strConst)
+			if len(e.strConst) >= cap(e.strConst) { e.strConst = mxutil.GrowCap(e.strConst) }
 			push(e.strConst, cs)
 		}
 	}
@@ -856,15 +1157,22 @@ func (e *irEmitter) mergeAccumulators() {
 	}
 	e.pendGlobalDeclTypes = nil
 	for _, wa := range e.pendWasmAttrs {
-		push(e.wasmAttrs, [3]string{copyStr(wa[0]), copyStr(wa[1]), copyStr(wa[2])})
+		if len(e.wasmAttrs) >= cap(e.wasmAttrs) { e.wasmAttrs = mxutil.GrowCap(e.wasmAttrs) }
+		push(e.wasmAttrs, []string{copyStr(wa[0]), copyStr(wa[1]), copyStr(wa[2])})
 	}
 	e.pendWasmAttrs = nil
+	for _, s := range e.pendSpawnWrappers {
+		if len(e.spawnWrapperTexts) >= cap(e.spawnWrapperTexts) { e.spawnWrapperTexts = mxutil.GrowCap(e.spawnWrapperTexts) }
+		push(e.spawnWrapperTexts, copyStr(s))
+	}
+	e.pendSpawnWrappers = nil
 
 }
 
 func (e *irEmitter) pkgMembers() (ss []SSAMember) {
 	var keys []string
 	for k := range e.pkg.Members {
+		if len(keys) >= cap(keys) { keys = mxutil.GrowCap(keys) }
 		push(keys, k)
 	}
 	for i := 1; i < len(keys); i++ {
@@ -876,6 +1184,7 @@ func (e *irEmitter) pkgMembers() (ss []SSAMember) {
 	for _, k := range keys {
 		m := e.pkg.Members[k]
 		if m != nil {
+			if len(members) >= cap(members) { members = mxutil.GrowCap(members) }
 			push(members, m)
 		}
 	}
@@ -890,7 +1199,7 @@ func (e *irEmitter) emitGlobal(g *SSAGlobal) {
 	}
 	typ := e.resolveGlobalDeclType(g)
 	e.w(name)
-	e.w(" = ")
+	e.w(" = hidden ")
 	e.w(e.tlsPrefix())
 	e.w(typ)
 	e.w(" zeroinitializer\n")
@@ -901,14 +1210,16 @@ func (e *irEmitter) emitEmbedGlobal(g *SSAGlobal, name string, ei *embedInfo) {
 	if !ok {
 		// Fail loud: a zeroinitializer embed global is a nil slice at runtime
 		// and SIGSEGVs far from the cause.
+		if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
 		push(cctx.compileErrors, "embed: file not found: "|ei.path)
-		e.w(name | " = " | e.tlsPrefix() | e.sliceType() | " zeroinitializer\n")
+		e.w(name | " = hidden " | e.tlsPrefix() | e.sliceType() | " zeroinitializer\n")
 		return
 	}
 	elemSize := e.embedElemSize(ei.elemType)
 	if elemSize <= 0 {
+		if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
 		push(cctx.compileErrors, "embed: unknown element type: "|ei.elemType|" for "|ei.path)
-		e.w(name | " = " | e.tlsPrefix() | e.sliceType() | " zeroinitializer\n")
+		e.w(name | " = hidden " | e.tlsPrefix() | e.sliceType() | " zeroinitializer\n")
 		return
 	}
 	count := int32(len(data)) / elemSize
@@ -930,7 +1241,7 @@ func (e *irEmitter) emitEmbedGlobal(g *SSAGlobal, name string, ei *embedInfo) {
 	e.w(string(hexBuf))
 	e.w("\"\n")
 	ipt := e.intptrType()
-	e.w(name | " = " | e.tlsPrefix() | "{ptr, " | ipt | ", " | ipt | "} {ptr " | constName | ", " | ipt | " " | irItoa(count) | ", " | ipt | " " | irItoa(count) | "}\n")
+	e.w(name | " = hidden " | e.tlsPrefix() | "{ptr, " | ipt | ", " | ipt | "} {ptr " | constName | ", " | ipt | " " | irItoa(count) | ", " | ipt | " " | irItoa(count) | "}\n")
 }
 
 func (e *irEmitter) embedElemSize(elemType string) (sz int32) {
@@ -1126,10 +1437,17 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 	}
 	e.curFunc = f
 	e.arenaActive = false
+	e.arenaBorrowed = false
+	e.parentArenaReg = ""
+	e.arenaBorrowed = false
+	e.parentArenaReg = ""
 	markReturnEscapes(f)
 	e.nextReg = 0
 	e.deferList = nil
 	e.deferID = 0
+	e.deferFrame = ""
+	e.deferLanding = ""
+	e.deferCheckpointOn = false
 	e.valName = map[SSAValue]string{}
 	e.nameUsed = map[string]bool{}
 	e.allocTypes = map[SSAValue]string{}
@@ -1282,6 +1600,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 	for _, hb := range f.Blocks {
 		for _, hinstr := range hb.Instrs {
 			if a, ok := hinstr.(*SSAAlloc); ok && hoistAllocs[a] {
+				if len(hoistList) >= cap(hoistList) { hoistList = mxutil.GrowCap(hoistList) }
 				push(hoistList, a)
 			}
 		}
@@ -1294,6 +1613,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 	for _, b := range f.Blocks {
 		for _, instr := range b.Instrs {
 			if d, ok := instr.(*SSADefer); ok {
+				if len(e.deferList) >= cap(e.deferList) { e.deferList = mxutil.GrowCap(e.deferList) }
 				push(e.deferList, d)
 			}
 		}
@@ -1325,14 +1645,17 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 			if len(e.deferList) > 0 {
 				e.w("  %deferPtr = alloca ptr\n")
 				e.w("  store volatile ptr null, ptr %deferPtr\n")
+				e.emitDeferFrameSetup()
 			}
 			if len(e.curFunc.FreeVars) > 0 {
 				e.emitFreeVarUnpack(e.curFunc)
 			}
 			e.emitArenaPrologue()
+			e.deferCheckpointOn = e.deferFrame != ""
 			for _, instr := range b.Instrs {
 				e.emitInstr(instr)
 			}
+			e.deferCheckpointOn = false
 			e.flushPhiTruncs()
 		} else {
 			e.emitBlock(b)
@@ -1340,6 +1663,18 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 	}
 	e.hoisted = nil
 	e.hoistAllocaText(fnBodyStart)
+
+	if e.deferFrame != "" && e.curFunc.Recover != nil {
+		// Landing pad: runs the defers after a panic, then returns the
+		// named results through the recover block.
+		e.deferCheckpointOn = false
+		e.w(e.deferLanding)
+		e.w(":\n")
+		e.emitRunDefers()
+		e.w("  br label ")
+		e.w(e.blockLabel(e.curFunc.Recover))
+		e.w("\n")
+	}
 
 	e.w("}\n")
 }
@@ -1399,7 +1734,7 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 	if len(bareKey) > 0 && bareKey[0] == '@' {
 		bareKey = bareKey[1:]
 	}
-	push(e.pendExtDecls, emitKV{bareKey, decl})
+	e.appendEmitKV(emitKV{bareKey, decl})
 }
 
 // emitLinknameForwarder emits a thin wrapper definition with origSym that
@@ -1414,14 +1749,18 @@ func (e *irEmitter) emitLinknameForwarder(f *SSAFunction, origSym, tgtSym string
 	idx := int32(0)
 	if useSret {
 		pn := "%sret"
+		if len(paramTypes) >= cap(paramTypes) { paramTypes = mxutil.GrowCap(paramTypes) }
 		push(paramTypes, "ptr " | pn)
+		if len(paramArgs) >= cap(paramArgs) { paramArgs = mxutil.GrowCap(paramArgs) }
 		push(paramArgs, "ptr " | pn)
 		idx++
 	}
 	hasRecv := f.Signature != nil && f.Signature.Recv != nil
 	if hasRecv {
 		pn := "%p" | irItoa(idx)
+		if len(paramTypes) >= cap(paramTypes) { paramTypes = mxutil.GrowCap(paramTypes) }
 		push(paramTypes, "ptr " | pn)
+		if len(paramArgs) >= cap(paramArgs) { paramArgs = mxutil.GrowCap(paramArgs) }
 		push(paramArgs, "ptr " | pn)
 		idx++
 	}
@@ -1430,14 +1769,18 @@ func (e *irEmitter) emitLinknameForwarder(f *SSAFunction, origSym, tgtSym string
 			pt := e.llvmType(f.Signature.Params.At(i).Typ)
 			if pt == "" || pt == "void" { pt = "ptr" }
 			pn := "%p" | irItoa(idx)
+			if len(paramTypes) >= cap(paramTypes) { paramTypes = mxutil.GrowCap(paramTypes) }
 			push(paramTypes, pt | " " | pn)
+			if len(paramArgs) >= cap(paramArgs) { paramArgs = mxutil.GrowCap(paramArgs) }
 			push(paramArgs, pt | " " | pn)
 			idx++
 		}
 	}
 	// context pointer
 	ctxPN := "%p" | irItoa(idx)
+	if len(paramTypes) >= cap(paramTypes) { paramTypes = mxutil.GrowCap(paramTypes) }
 	push(paramTypes, "ptr " | ctxPN)
+	if len(paramArgs) >= cap(paramArgs) { paramArgs = mxutil.GrowCap(paramArgs) }
 	push(paramArgs, "ptr " | ctxPN)
 	// Emit define
 	e.w("\ndefine ")
@@ -1485,6 +1828,7 @@ func (e *irEmitter) emitBlock(b *SSABasicBlock) {
 	}
 
 	e.blockDead = false
+	e.deferCheckpointOn = e.deferFrame != "" && (e.curFunc.Recover == nil || b != e.curFunc.Recover)
 	phiFlushed := false
 	for _, instr := range b.Instrs {
 		if e.blockDead { break }
@@ -1506,6 +1850,7 @@ func (e *irEmitter) emitBlock(b *SSABasicBlock) {
 			}
 		}
 	}
+	e.deferCheckpointOn = false
 
 	e.flushPhiTruncs()
 	hasTerminator := e.blockDead
@@ -1605,12 +1950,6 @@ func (e *irEmitter) emitStore(s *SSAStore) {
 	if s.Val == nil || s.Addr == nil {
 		e.w("  ; store with nil val/addr\n")
 		return
-	}
-	if e.curFunc != nil && e.curFunc.name == "NewFile" && s.Val != nil && s.Val.SSAType() != nil {
-		rt := e.reflectTypeName(s.Val.SSAType())
-		if mxutil.HasPrefix(rt, "reflect/types.type:") {
-			mxutil.WriteStr(2, "DBG emitStore NewFile valType=" | rt | "\n")
-		}
 	}
 	valType := e.llvmType(s.Val.SSAType())
 	val := e.operand(s.Val)
@@ -1732,7 +2071,7 @@ func (e *irEmitter) emitStore(s *SSAStore) {
 					e.w(ext)
 					e.w(" = ") ; e.w(extOp) ; e.w(" ")
 					e.w(valType)
-					e.w(" ")
+				e.w("  ")
 					e.w(val)
 					e.w(" to ")
 					e.w(elemT)
@@ -1744,7 +2083,7 @@ func (e *irEmitter) emitStore(s *SSAStore) {
 		}
 	}
 	e.emitScopeRelocateOnStore(s, val, valType)
-	e.w("  store volatile volatile ")
+	e.w("  store volatile ")
 	e.w(valType)
 	e.w(" ")
 	e.w(val)
@@ -1803,6 +2142,7 @@ func (e *irEmitter) emitPhi(p *SSAPhi) {
 		e.w("]")
 	}
 	e.w("\n")
+	if len(e.pendingPhiTruncs) >= cap(e.pendingPhiTruncs) { e.pendingPhiTruncs = mxutil.GrowCap(e.pendingPhiTruncs) }
 	push(e.pendingPhiTruncs, phiTrunc{rawReg, reg, "i32", "i1"})
 }
 
@@ -1829,8 +2169,16 @@ func (e *irEmitter) flushPhiTruncs() {
 }
 
 func (e *irEmitter) emitReturn(r *SSAReturn) {
-	if len(e.deferList) > 0 {
+	isRecoverBlock := e.curFunc.Recover != nil && e.currentEmitBlock == e.curFunc.Recover
+	e.deferCheckpointOn = false
+	if len(e.deferList) > 0 && !isRecoverBlock {
 		e.emitRunDefers()
+	}
+	if e.deferFrame != "" {
+		e.w("  call void @runtime.destroyDeferFrame(ptr ")
+		e.w(e.deferFrame)
+		e.w(", ptr null)\n")
+		e.declareRuntime("runtime.destroyDeferFrame", "void", "ptr")
 	}
 	e.scopeBeforeReturn(r)
 	frt := e.funcRetType(e.curFunc)
@@ -1838,7 +2186,7 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 		rt := e.funcRetType(e.curFunc)
 		if rt == "void" {
 			e.w("  ret void\n")
-		} else if len(e.curFunc.NamedResults) > 0 {
+		} else if len(e.curFunc.NamedResults) > 0 && !isRecoverBlock {
 			if len(e.curFunc.NamedResults) == 1 {
 				nr := e.curFunc.NamedResults[0]
 				nrt := e.namedResultType(nr)
@@ -1900,7 +2248,7 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 		if val == "null" && expectType != "ptr" {
 			val = "zeroinitializer"
 		} else {
-			val = e.coerceInt(val, typ, expectType)
+			val = e.coerceInt(val, typ, expectType, e.isUnsignedType(r.Results[0].SSAType()))
 		}
 		if typ != expectType && val != "zeroinitializer" {
 			if expectType == "ptr" && e.intBits(typ) > 0 {
@@ -1916,7 +2264,10 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 				val = rc
 				typ = expectType
 			}
-			if typ != expectType {
+			// coerceInt already handled int-width mismatches (a numeric
+			// literal is type-flexible in LLVM, and a register gets a
+			// sext/trunc). Only zero for genuinely incompatible types.
+			if typ != expectType && !(e.intBits(typ) > 0 && e.intBits(expectType) > 0) {
 				val = "zeroinitializer"
 			}
 		}
@@ -1931,6 +2282,7 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 	var expectTypes []string
 	if sig != nil && sig.Results != nil {
 		for i := 0; i < sig.Results.Len(); i++ {
+			if len(expectTypes) >= cap(expectTypes) { expectTypes = mxutil.GrowCap(expectTypes) }
 			push(expectTypes, e.resolveResultType(sig.Results.At(i).Typ))
 		}
 	}
@@ -1938,14 +2290,18 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 	for i := 0; i < len(r.Results); i++ {
 		res := r.Results[i]
 		if i > 0 {
+			if len(rtSegs) >= cap(rtSegs) { rtSegs = mxutil.GrowCap(rtSegs) }
 			push(rtSegs, ", ")
 		}
 		if i < len(expectTypes) {
+			if len(rtSegs) >= cap(rtSegs) { rtSegs = mxutil.GrowCap(rtSegs) }
 			push(rtSegs, expectTypes[i])
 		} else {
+			if len(rtSegs) >= cap(rtSegs) { rtSegs = mxutil.GrowCap(rtSegs) }
 			push(rtSegs, e.llvmType(res.SSAType()))
 		}
 	}
+	if len(rtSegs) >= cap(rtSegs) { rtSegs = mxutil.GrowCap(rtSegs) }
 	push(rtSegs, "}")
 	retType := joinStrs(rtSegs)
 	prev := "undef"
@@ -1977,7 +2333,7 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 			} else if (elemType == "double" || elemType == "float") && e.intBits(valType) > 0 {
 				valOp = e.intToFloat(valOp, valType, elemType)
 			} else {
-				valOp = e.coerceInt(valOp, valType, elemType)
+				valOp = e.coerceInt(valOp, valType, elemType, e.isUnsignedType(res.SSAType()))
 			}
 			if valType == "double" && elemType == "float" {
 				e.nextReg++
@@ -2401,6 +2757,12 @@ func (e *irEmitter) emitIndexAddr(idx *SSAIndexAddr) {
 		baseU := SafeUnderlying(idx.X.SSAType())
 		if sl, ok2 := baseU.(*Slice); ok2 && sl.Elem != nil {
 			elemType = e.llvmType(sl.Elem)
+			if b, ok3 := SafeUnderlying(sl.Elem).(*Basic); ok3 && b.Info&IsString != 0 {
+				elemType = e.sliceType()
+			}
+			if elemType == "void" || elemType == "" {
+				elemType = e.sliceType()
+			}
 		} else if b, ok3 := baseU.(*Basic); ok3 && b.Info&IsString != 0 {
 			elemType = "i8"
 		}
@@ -2551,6 +2913,16 @@ func (e *irEmitter) emitIndexAddr(idx *SSAIndexAddr) {
 		return
 	}
 	e.w("  ")
+	if elemType == "void" || elemType == "" {
+		elemType = "i8"
+	}
+	baseLLT := e.llvmType(idx.X.SSAType())
+	if baseLLT != "ptr" && baseLLT != "void" && len(baseLLT) > 0 && (baseLLT[0] == 'i' || baseLLT == "float" || baseLLT == "double") {
+		e.nextReg++
+		casted := "%itp" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(casted) ; e.w(" = inttoptr ") ; e.w(baseLLT) ; e.w(" ") ; e.w(base) ; e.w(" to ptr\n")
+		base = casted
+	}
 	e.w(reg)
 	e.w(" = getelementptr inbounds ")
 	e.w(elemType)
@@ -2735,19 +3107,16 @@ func (e *irEmitter) emitSliceOp(s *SSASlice) {
 	src := e.operand(s.X)
 	var oldPtr, oldLen, oldCap string
 	srcType := SafeUnderlying(s.X.SSAType())
-	ptrToArr := false
 	if p, ok := srcType.(*Pointer); ok && p.Base != nil {
 		if arr, ok2 := SafeUnderlying(p.Base).(*Array); ok2 {
 			oldPtr = src
 			oldLen = irItoa64(arr.Len)
-			oldCap = oldLen
-			ptrToArr = true
+			oldCap = irItoa64(arr.Len)
 		}
 	}
-	if !ptrToArr {
+	if oldPtr == "" {
 		if arr, ok := srcType.(*Array); ok {
-			// Heap-allocate the array copy: the resulting slice can escape
-			// (e.g. returned), so a stack alloca would dangle.
+			// Array value: materialize to a heap copy to obtain its address.
 			arrType := e.llvmType(s.X.SSAType())
 			e.nextReg++
 			sz := "%sl" | irItoa(e.nextReg)
@@ -2759,35 +3128,18 @@ func (e *irEmitter) emitSliceOp(s *SSASlice) {
 			e.w("  store volatile ") ; e.w(arrType) ; e.w(" ") ; e.w(src) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
 			oldPtr = tmp
 			oldLen = irItoa64(arr.Len)
-			oldCap = oldLen
+			oldCap = irItoa64(arr.Len)
 		} else {
+			// Slice value: extract its base pointer and length.
 			e.nextReg++
 			oldPtr = "%sl" | irItoa(e.nextReg)
-			e.w("  ")
-			e.w(oldPtr)
-			e.w(" = extractvalue ")
-			e.w(sty)
-			e.w(" ")
-			e.w(src)
-			e.w(", 0\n")
+			e.w("  ") ; e.w(oldPtr) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 0\n")
 			e.nextReg++
 			oldLen = "%sl" | irItoa(e.nextReg)
-			e.w("  ")
-			e.w(oldLen)
-			e.w(" = extractvalue ")
-			e.w(sty)
-			e.w(" ")
-			e.w(src)
-			e.w(", 1\n")
+			e.w("  ") ; e.w(oldLen) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 1\n")
 			e.nextReg++
-			oldCap = "%sl" | irItoa(e.nextReg)
-			e.w("  ")
-			e.w(oldCap)
-			e.w(" = extractvalue ")
-			e.w(sty)
-			e.w(" ")
-			e.w(src)
-			e.w(", 2\n")
+			oldCap = "%" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(oldCap) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 2\n")
 		}
 	}
 	low := "0"
@@ -2798,29 +3150,36 @@ func (e *irEmitter) emitSliceOp(s *SSASlice) {
 	if s.High != nil {
 		high = e.sliceIdxToIpt(s.High, ipt)
 	}
-	_ = oldCap
 	if s.Max != nil {
 		_ = e.sliceIdxToIpt(s.Max, ipt)
 	}
 	elemType := "i8"
 	if sl, ok := SafeUnderlying(s.X.SSAType()).(*Slice); ok {
 		elemType = e.llvmType(sl.Elem)
+		if elemType == "void" { elemType = "i8" }
 	} else if ar, ok2 := SafeUnderlying(s.X.SSAType()).(*Array); ok2 {
 		elemType = e.llvmType(ar.Elem)
+		if elemType == "void" { elemType = "i8" }
 	} else if p, ok3 := SafeUnderlying(s.X.SSAType()).(*Pointer); ok3 && p.Base != nil {
 		if ar2, ok4 := SafeUnderlying(p.Base).(*Array); ok4 {
 			elemType = e.llvmType(ar2.Elem)
+			if elemType == "void" { elemType = "i8" }
 		}
 	}
-	newPtr := e.nextReg2("sl")
-	e.w("  ") ; e.w(newPtr) ; e.w(" = getelementptr inbounds ") ; e.w(elemType)
-	e.w(", ptr ") ; e.w(oldPtr) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(low) ; e.w("\n")
+	// View: sub-slice aliases the parent (no shared memory, so no
+	// aliasing hazard; the runtime codec copies on return).
 	newLen := e.nextReg2("sl")
 	e.w("  ") ; e.w(newLen) ; e.w(" = sub ") ; e.w(ipt) ; e.w(" ") ; e.w(high) ; e.w(", ") ; e.w(low) ; e.w("\n")
+	elemSz := e.nextReg2("sl")
+	e.w("  ") ; e.w(elemSz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(elemType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+	srcOff := e.nextReg2("sl")
+	e.w("  ") ; e.w(srcOff) ; e.w(" = mul ") ; e.w(ipt) ; e.w(" ") ; e.w(low) ; e.w(", ") ; e.w(elemSz) ; e.w("\n")
+	srcPtr := e.nextReg2("sl")
+	e.w("  ") ; e.w(srcPtr) ; e.w(" = getelementptr inbounds i8, ptr ") ; e.w(oldPtr) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(srcOff) ; e.w("\n")
 	newCap := e.nextReg2("sl")
 	e.w("  ") ; e.w(newCap) ; e.w(" = sub ") ; e.w(ipt) ; e.w(" ") ; e.w(oldCap) ; e.w(", ") ; e.w(low) ; e.w("\n")
 	s1 := e.nextReg2("sl")
-	e.w("  ") ; e.w(s1) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" undef, ptr ") ; e.w(newPtr) ; e.w(", 0\n")
+	e.w("  ") ; e.w(s1) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" undef, ptr ") ; e.w(srcPtr) ; e.w(", 0\n")
 	s2 := e.nextReg2("sl")
 	e.w("  ") ; e.w(s2) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s1) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(newLen) ; e.w(", 1\n")
 	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s2) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(newCap) ; e.w(", 2\n")
@@ -2860,8 +3219,15 @@ func (e *irEmitter) emitPanic(p *SSAPanic) {
 		e.w("  unreachable\n")
 		return
 	}
-	ity := e.ifaceType()
-	e.w("  call void @runtime._panic(" | ity | " zeroinitializer, ptr null)\n")
+	ity := e.sliceType()
+	arg := "zeroinitializer"
+	if p.X != nil && p.X.SSAType() != nil {
+		arg = e.operand(p.X)
+		if arg == "" {
+			arg = "zeroinitializer"
+		}
+	}
+	e.w("  call void @runtime._panic(" | ity | " ") ; e.w(arg) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime._panic", "void", ity)
 	e.w("  unreachable\n")
 }
@@ -3013,57 +3379,78 @@ func (e *irEmitter) instrOperands(instr SSAInstruction) (ss []SSAValue) {
 	e.operandBuf = e.operandBuf[:0]
 	switch i := instr.(type) {
 	case *SSAStore:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.Addr, i.Val)
 	case *SSAUnOp:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.X)
 	case *SSABinOp:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.X, i.Y)
 	case *SSACall:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.Call.Value)
 		for _, a := range i.Call.Args {
+			if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 			push(e.operandBuf, a)
 		}
 	case *SSAFieldAddr:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.X)
 	case *SSAIndexAddr:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.X, i.Index)
 	case *SSAExtract:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.Tuple)
 	case *SSAPhi:
 		return i.Edges
 	case *SSAReturn:
 		for _, r := range i.Results {
+			if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 			push(e.operandBuf, r)
 		}
 	case *SSAIf:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.Cond)
 	case *SSAConvert:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.X)
 	case *SSAChangeType:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.X)
 	case *SSAMakeInterface:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.X)
 	case *SSATypeAssert:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.X)
 	case *SSASlice:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.X)
-		if i.Low != nil { push(e.operandBuf, i.Low) }
-		if i.High != nil { push(e.operandBuf, i.High) }
-		if i.Max != nil { push(e.operandBuf, i.Max) }
+		if i.Low != nil { if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }; push(e.operandBuf, i.Low) }
+		if i.High != nil { if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }; push(e.operandBuf, i.High) }
+		if i.Max != nil { if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }; push(e.operandBuf, i.Max) }
 	case *SSAMapUpdate:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.Map, i.Key, i.Value)
 	case *SSALookup:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.X, i.Index)
 	case *SSARange:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.X)
 	case *SSANext:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.Iter)
 	case *SSASend:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.Chan, i.X)
 	case *SSAMakeSlice:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.Len)
-		if i.Cap != nil { push(e.operandBuf, i.Cap) }
-		if i.Data != nil { push(e.operandBuf, i.Data) }
+		if i.Cap != nil { if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }; push(e.operandBuf, i.Cap) }
+		if i.Data != nil { if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }; push(e.operandBuf, i.Data) }
 	}
 	return e.operandBuf
 	return nil

@@ -5,6 +5,7 @@
 package net
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"context"
 	"errors"
 	"internal/nettrace"
@@ -255,7 +256,8 @@ func (r *Resolver) LookupIP(ctx context.Context, network, host string) ([]IP, er
 
 	ips := []IP{:0:len(addrs)}
 	for _, addr := range addrs {
-		ips = append(ips, addr.(*IPAddr).IP)
+		if len(ips) >= cap(ips) { ips = mxutil.GrowCap(ips) }
+		ips = push(ips, addr.(*IPAddr).IP)
 	}
 	return ips, nil
 }
@@ -276,7 +278,8 @@ func (r *Resolver) LookupNetIP(ctx context.Context, network, host string) ([]net
 	ret := []netip.Addr{:0:len(ips)}
 	for _, ip := range ips {
 		if a, ok := netip.AddrFromSlice(ip); ok {
-			ret = append(ret, a)
+			if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
+			ret = push(ret, a)
 		}
 	}
 	return ret, nil
@@ -525,7 +528,8 @@ func (r *Resolver) LookupSRV(ctx context.Context, service, proto, name string) (
 		if !isDomainName(addr.Target) {
 			continue
 		}
-		filteredAddrs = append(filteredAddrs, addr)
+		if len(filteredAddrs) >= cap(filteredAddrs) { filteredAddrs = mxutil.GrowCap(filteredAddrs) }
+		filteredAddrs = push(filteredAddrs, addr)
 	}
 	if len(addrs) != len(filteredAddrs) {
 		return cname, filteredAddrs, &DNSError{Err: errMalformedDNSRecordsDetail, Name: name}
@@ -570,7 +574,8 @@ func (r *Resolver) LookupMX(ctx context.Context, name string) ([]*MX, error) {
 				continue
 			}
 		}
-		filteredMX = append(filteredMX, mx)
+		if len(filteredMX) >= cap(filteredMX) { filteredMX = mxutil.GrowCap(filteredMX) }
+		filteredMX = push(filteredMX, mx)
 	}
 	if len(records) != len(filteredMX) {
 		return filteredMX, &DNSError{Err: errMalformedDNSRecordsDetail, Name: name}
@@ -610,7 +615,8 @@ func (r *Resolver) LookupNS(ctx context.Context, name string) ([]*NS, error) {
 		if !isDomainName(ns.Host) {
 			continue
 		}
-		filteredNS = append(filteredNS, ns)
+		if len(filteredNS) >= cap(filteredNS) { filteredNS = mxutil.GrowCap(filteredNS) }
+		filteredNS = push(filteredNS, ns)
 	}
 	if len(records) != len(filteredNS) {
 		return filteredNS, &DNSError{Err: errMalformedDNSRecordsDetail, Name: name}
@@ -667,7 +673,8 @@ func (r *Resolver) LookupAddr(ctx context.Context, addr string) ([][]byte, error
 	filteredNames := [][]byte{:0:len(names)}
 	for _, name := range names {
 		if isDomainName(name) {
-			filteredNames = append(filteredNames, name)
+			if len(filteredNames) >= cap(filteredNames) { filteredNames = mxutil.GrowCap(filteredNames) }
+			filteredNames = push(filteredNames, name)
 		}
 	}
 	if len(names) != len(filteredNames) {
@@ -757,7 +764,8 @@ func (r *Resolver) goLookupSRV(ctx context.Context, service, proto, name string)
 				Server: server,
 			}
 		}
-		srvs = append(srvs, &SRV{Target: srv.Target.String(), Port: srv.Port, Priority: srv.Priority, Weight: srv.Weight})
+		if len(srvs) >= cap(srvs) { srvs = mxutil.GrowCap(srvs) }
+		srvs = push(srvs, &SRV{Target: srv.Target.String(), Port: srv.Port, Priority: srv.Priority, Weight: srv.Weight})
 	}
 	byPriorityWeight(srvs).sort()
 	return cname.String(), srvs, nil
@@ -800,7 +808,8 @@ func (r *Resolver) goLookupMX(ctx context.Context, name string) ([]*MX, error) {
 				Server: server,
 			}
 		}
-		mxs = append(mxs, &MX{Host: mx.MX.String(), Pref: mx.Pref})
+		if len(mxs) >= cap(mxs) { mxs = mxutil.GrowCap(mxs) }
+		mxs = push(mxs, &MX{Host: mx.MX.String(), Pref: mx.Pref})
 
 	}
 	byPref(mxs).sort()
@@ -844,7 +853,8 @@ func (r *Resolver) goLookupNS(ctx context.Context, name string) ([]*NS, error) {
 				Server: server,
 			}
 		}
-		nss = append(nss, &NS{Host: ns.NS.String()})
+		if len(nss) >= cap(nss) { nss = mxutil.GrowCap(nss) }
+		nss = push(nss, &NS{Host: ns.NS.String()})
 	}
 	return nss, nil
 }
@@ -895,12 +905,14 @@ func (r *Resolver) goLookupTXT(ctx context.Context, name string) ([][]byte, erro
 		}
 		txtJoin := []byte{:0:n}
 		for _, s := range txt.TXT {
-			txtJoin = append(txtJoin, s...)
+			if len(txtJoin) >= cap(txtJoin) { txtJoin = mxutil.GrowCap(txtJoin) }
+			txtJoin = push(txtJoin, s...)
 		}
 		if len(txts) == 0 {
 			txts = [][]byte{:0:1}
 		}
-		txts = append(txts, string(txtJoin))
+		if len(txts) >= cap(txts) { txts = mxutil.GrowCap(txts) }
+		txts = push(txts, string(txtJoin))
 	}
 	return txts, nil
 }

@@ -2,14 +2,16 @@
 
 package runtime
 
-// Pipe channel IPC - bridges Go channels across spawn domain boundaries
-// using the socketpair created by spawnDomain.
+// Spawn channel IPC - bridges channels across spawn domain boundaries
+// over shared SPSC ring buffers (mmap MAP_SHARED). No socketpair, no
+// pipe: both arm and amd targets have threads and shared memory, so the
+// ring is the one true transport. This file is the ring-routing layer
+// the compiler-emitted chan ops dispatch through.
 //
-// Protocol: length-prefixed messages over the Unix socketpair.
-//   Header: chanID(2) | len(4) | payload(len)
-// Each channel passed to spawn gets a chanID assigned at spawn time.
-// The parent and child each run a bridge goroutine that multiplexes
-// all IPC channels over the single socketpair fd.
+// Control signals ride the same shared memory:
+//   - channel close  -> ringClose (the ring header's closed flag)
+//   - child-ready    -> a shared spawnCtl.ready atomic
+//   - child death    -> waitpid on the parent, getppid on the child
 
 import (
 	"internal/task"
@@ -17,567 +19,176 @@ import (
 	"unsafe"
 )
 
-const (
-	pipeMsgHdrLen = 6 // 2 (chanID) + 4 (length)
-	// pipeMaxMsg caps the size of a single chan-IPC frame. Set high
-	// enough to accommodate the largest valid event (smesh: 20 MiB).
-	// Frames over this limit are rejected fail-loud at the sender so
-	// the protocol never silently truncates.
-	pipeMaxMsg = 32 << 20
-)
+// ringMaxMsg caps the size of a single chan-IPC frame. The ring is sized
+// to carry it (32MB ring, lazily faulted, so the virtual reservation is
+// cheap). Frames over this limit are rejected fail-loud so the protocol
+// never silently truncates.
+const ringMaxMsg = 32 << 20
 
-// pipeChanEntry maps a channel ID to a runtime channel pointer.
-type pipeChanEntry struct {
-	id   uint16
-	ch   *channel
-	dir  uint8 // 0=send (parent writes, child reads), 1=recv (child writes, parent reads)
-	next *pipeChanEntry
+// channelIsPipeBound reports whether the channel is on a spawn boundary.
+// A spawn-bound channel always has ringSend/ringRecv bound; the compiler
+// and chan.mx dispatch on spawnBound to route off the in-runtime queue.
+func channelIsPipeBound(ch *channel) bool {
+	return ch != nil && ch.spawnBound
 }
 
-// pipeBridge is the multiplexer state for one socketpair fd.
-type pipeBridge struct {
-	fd       int32
-	channels *pipeChanEntry
-	nextID   uint16
-}
-
-// pipeBridgeRegister adds a channel to the bridge and returns its ID.
-func pipeBridgeRegister(br *pipeBridge, ch *channel, dir uint8) uint16 {
-	id := br.nextID
-	br.nextID++
-	br.channels = &pipeChanEntry{
-		id:   id,
-		ch:   ch,
-		dir:  dir,
-		next: br.channels,
-	}
-	return id
-}
-
-// pipeBridgeLookup finds a channel by ID.
-func pipeBridgeLookup(br *pipeBridge, id uint16) *pipeChanEntry {
-	for e := br.channels; e != nil; e = e.next {
-		if e.id == id {
-			return e
-		}
-	}
-	return nil
-}
-
-// pipeWrite writes a length-prefixed message to fd.
-// Format: chanID(2) | len(4) | data(len)
-//
-// Fail-loud on oversize: panics if data exceeds pipeMaxMsg. Silent
-// truncation would corrupt the wire protocol on the receiving side.
-//
-// Loops on short writes - write(2) may return fewer bytes than requested
-// for large frames or when the socketpair buffer is partially full.
-func pipeWrite(fd int32, chanID uint16, data []byte) bool {
-	if uint32(len(data)) > pipeMaxMsg {
-		runtimePanic("pipeWrite: frame exceeds pipeMaxMsg")
-	}
-	var hdr [pipeMsgHdrLen]byte
-	hdr[0] = byte(chanID >> 8)
-	hdr[1] = byte(chanID)
-	l := uint32(len(data))
-	hdr[2] = byte(l >> 24)
-	hdr[3] = byte(l >> 16)
-	hdr[4] = byte(l >> 8)
-	hdr[5] = byte(l)
-	if !writeAll(fd, unsafe.Pointer(&hdr[0]), pipeMsgHdrLen) {
-		return false
-	}
-	if len(data) > 0 {
-		if !writeAll(fd, unsafe.Pointer(&data[0]), int32(len(data))) {
-			return false
-		}
-	}
-	return true
-}
-
-// writeAll loops moxie_write until count bytes are written or an error
-// occurs. Returns false on any write returning <= 0 (partial-progress
-// is folded into the loop).
-func writeAll(fd int32, buf unsafe.Pointer, count int32) bool {
-	written := int32(0)
-	for written < count {
-		n := MoxieWrite(fd, unsafe.Pointer(uintptr(buf)+uintptr(written)), count-written)
-		if n <= 0 {
-			return false
-		}
-		written += n
-	}
-	return true
-}
-
-// readAll loops moxie_read until count bytes are read or EOF/error.
-// Returns false on EOF or read error before count is reached.
-func readAll(fd int32, buf unsafe.Pointer, count int32) bool {
-	got := int32(0)
-	for got < count {
-		n := MoxieRead(fd, unsafe.Pointer(uintptr(buf)+uintptr(got)), count-got)
-		if n <= 0 {
-			return false
-		}
-		got += n
-	}
-	return true
-}
-
-// pipeRead reads one length-prefixed message from fd.
-// Returns chanID, data, ok. Loops on short reads - read(2) may split
-// frames across multiple syscalls for large payloads.
-func pipeRead(fd int32) (uint16, []byte, bool) {
-	var hdr [pipeMsgHdrLen]byte
-	if !readAll(fd, unsafe.Pointer(&hdr[0]), pipeMsgHdrLen) {
-		return 0, nil, false
-	}
-	chanID := uint16(hdr[0])<<8 | uint16(hdr[1])
-	l := uint32(hdr[2])<<24 | uint32(hdr[3])<<16 | uint32(hdr[4])<<8 | uint32(hdr[5])
-	if l > pipeMaxMsg {
-		return 0, nil, false
-	}
-	if l == 0 {
-		return chanID, nil, true
-	}
-	data := []byte{:l}
-	if !readAll(fd, unsafe.Pointer(&data[0]), int32(l)) {
-		return 0, nil, false
-	}
-	return chanID, data, true
-}
-
-// C functions for pipe I/O (defined in spawn_unix.c).
-
-//export MoxieWrite
-func MoxieWrite(fd int32, buf unsafe.Pointer, count int32) int32
-
-//export MoxieRead
-func MoxieRead(fd int32, buf unsafe.Pointer, count int32) int32
-
-// PipeClosed reports whether a previous pipeRead/pipeWrite failure on this
-// fd was due to the remote end closing the connection (EOF on read, EPIPE
-// on write). Distinct from transient errors so a parent domain can
-// terminate its outstanding work cleanly when a child dies or shuts down
-// the socketpair.
-//
-// The check is "closed if a recent operation returned a final-state
-// failure"; we encode this by returning true whenever the fd is no
-// longer in any live domain entry's parentFd slot (pipeBridgeOnClose
-// removes it on detection).
-func PipeClosed(fd int32) bool {
-	for e := domainList; e != nil; e = e.next {
-		if e.parentFd == fd {
-			return !e.alive
-		}
-	}
-	return true
-}
-
-// PipeRecv blocks until a message arrives on fd or the remote end
-// closes the pipe. Returns (chanID, data, ok). ok=false means the pipe
-// was closed; the parent's bookkeeping has already been updated via
-// pipeBridgeOnClose, so callers can distinguish "remote terminated"
-// from "transient read failure" by re-checking PipeClosed(fd).
-//
-// Use this in parent loops that monitor a spawned child's output.
-// Callers must register their fd with domainRegister at spawn time
-// so PipeClosed() can find the entry to mark dead.
-func PipeRecv(fd int32) (uint16, []byte, bool) {
-	chanID, data, ok := pipeRead(fd)
-	if !ok {
-		pipeBridgeOnClose(fd)
-	}
-	return chanID, data, ok
-}
-
-// pipeBridgeOnClose marks the domain entry for fd dead and closes the
-// fd. Called when a read returns 0 (EOF) or write returns EPIPE,
-// indicating the spawned child has terminated or shut down the socket.
-// Idempotent: subsequent reads on the same fd are no-ops.
-func pipeBridgeOnClose(fd int32) {
-	for e := domainList; e != nil; e = e.next {
-		if e.parentFd == fd && e.alive {
-			e.alive = false
-			moxie_close(fd)
-			// The child may not have been reaped yet; defer that to
-			// domainReapChildren on the next scheduler tick.
-			return
-		}
-	}
-}
-
-// PipeSend writes a length-prefixed message to fd. Returns true on
-// success. On failure (typically EPIPE because the remote end closed
-// the pipe), pipeBridgeOnClose is invoked and the domain entry is
-// marked dead; subsequent PipeClosed(fd) returns true.
-func PipeSend(fd int32, chanID uint16, data []byte) bool {
-	ok := pipeWrite(fd, chanID, data)
-	if !ok {
-		pipeBridgeOnClose(fd)
-	}
-	return ok
-}
-
-// pipeBoundChannels indexes pipe-bound channels by (fd, chanID) so the
-// multiplexer in PipeChanRecv can dispatch incoming messages to the
-// right channel's pending-receive slot. Key: uint64(fd)<<16 | chanID.
-// Single-threaded scheduler so no lock needed.
-var pipeBoundChannels map[uint64]*channel
-var _pipeBoundChannelsDone bool
-
-func _pipeBoundChannels() map[uint64]*channel {
-	if !_pipeBoundChannelsDone {
-		_pipeBoundChannelsDone = true
-		pipeBoundChannels = map[uint64]*channel{}
-	}
-	return pipeBoundChannels
-}
-
-func pipeBoundKey(fd int32, chanID uint16) uint64 {
-	return uint64(uint32(fd))<<16 | uint64(chanID)
-}
-
-// MarkChannelPipeBound is the runtime entry point the compiler-emitted
-// spawn-site code calls after creating the socketpair. It tags ch as
-// belonging to fd at chanID and registers it in the dispatch table.
-// Both the parent's and the child's view of the same logical channel
-// call this with their respective fd and the same chanID.
-func MarkChannelPipeBound(ch *channel, fd int32, chanID uint16) {
+// MarkChannelPipeBound tags ch as spawn-bound at chanID. Both the
+// parent's and the child's view of the same logical channel call this
+// with the same chanID; each then binds its own ring halves.
+func MarkChannelPipeBound(ch *channel, chanID uint16) {
 	if ch == nil {
 		return
 	}
-	ch.pipeBoundFd = fd
-	ch.pipeChanID = chanID
-	_pipeBoundChannels()[pipeBoundKey(fd, chanID)] = ch
+	ch.spawnBound = true
+	ch.spawnChanID = chanID
 }
 
 // MarkChildPipeChannel is the child-side variant emitted by
-// setupNativeSpawnTargetChannels: it binds ch to ChildPipeFd if and
-// only if the function is running as a spawn target (ChildPipeFd >= 0).
+// setupNativeSpawnTargetChannels: it binds ch to the shared rings if and
+// only if the function is running as a spawn target (childSpawnTarget).
 // Calling the function as a regular local invocation leaves the
 // parameter as a plain local channel.
 func MarkChildPipeChannel(ch *channel, chanID uint16) {
-	if ChildPipeFd < 0 {
+	if !childSpawnTarget {
 		return
 	}
-	MarkChannelPipeBound(ch, ChildPipeFd, chanID)
+	MarkChannelPipeBound(ch, chanID)
 	// Bind ring buffers (child reverses send/recv vs parent).
 	idx := int32(chanID) - 1
 	if idx >= 0 && idx < spawnRingCount {
 		ch.ringRecv = spawnRingSet[idx][0] // parent→child = child receives
 		ch.ringSend = spawnRingSet[idx][1] // child→parent = child sends
 	}
+	ch.spawnPid = childParentPid // peer is the parent
 }
 
 // MarkParentPipeChannel binds ch to the most recently spawned child's
-// parent fd at chanID. Emitted by createSpawn after spawnDomain returns.
+// ring pair at chanID. Emitted by createSpawn after spawnDomain returns.
 // No-op if no spawn has occurred (defensive - should not happen).
 func MarkParentPipeChannel(ch *channel, chanID uint16) {
-	fd := LastSpawnedParentFd()
-	if fd < 0 {
+	if lastSpawnPid <= 0 {
 		return
 	}
-	MarkChannelPipeBound(ch, fd, chanID)
+	MarkChannelPipeBound(ch, chanID)
 	// Bind ring buffers (parent perspective).
 	idx := int32(chanID) - 1
 	if idx >= 0 && idx < spawnRingCount {
 		ch.ringSend = spawnRingSet[idx][0] // parent→child = parent sends
 		ch.ringRecv = spawnRingSet[idx][1] // child→parent = parent receives
 	}
+	ch.spawnPid = lastSpawnPid // peer is the child
 }
 
-// channelIsPipeBound reports whether the channel is on a spawn-boundary
-// pipe. The compiler-emitted send/recv path checks this before routing
-// to the in-runtime queue.
-func channelIsPipeBound(ch *channel) bool {
-	return ch != nil && ch.pipeBoundFd != 0
-}
-
-// pipeIncomingBuf holds messages received on a pipe whose chanID does
-// not match the channel currently being awaited. The PipeChanRecv loop
-// drains the pipe until it sees its own chanID; messages for siblings
-// are buffered here for those siblings to claim later.
-type pipeIncomingBuf struct {
-	data []byte
-	next *pipeIncomingBuf
-}
-
-var pipeIncomingByChan map[uint64]*pipeIncomingBuf
-var _pipeIncomingByChanDone bool
-
-func _pipeIncomingByChan() map[uint64]*pipeIncomingBuf {
-	if !_pipeIncomingByChanDone {
-		_pipeIncomingByChanDone = true
-		pipeIncomingByChan = map[uint64]*pipeIncomingBuf{}
+// childAlive reports whether a child pid is still alive (parent side).
+// Reaps via waitpid(WNOHANG) first so the domain entry reflects death.
+func childAlive(pid int32) bool {
+	if pid <= 0 {
+		return true
 	}
-	return pipeIncomingByChan
+	domainReapChildren()
+	e := domainLookupByPid(pid)
+	return e == nil || e.alive
 }
 
-func pipeIncomingPush(fd int32, chanID uint16, data []byte) {
-	key := pipeBoundKey(fd, chanID)
-	m := _pipeIncomingByChan()
-	m[key] = &pipeIncomingBuf{
-		data: data,
-		next: m[key],
-	}
+// parentAlive reports whether our original spawn parent is still alive
+// (child side). Detects orphaning: getppid() stops returning the pid we
+// captured at spawn once the parent dies and we are reparented.
+func parentAlive() bool {
+	return !childSpawnTarget || moxie_getppid() == childParentPid
 }
 
-func pipeIncomingPop(fd int32, chanID uint16) ([]byte, bool) {
-	key := pipeBoundKey(fd, chanID)
-	m := _pipeIncomingByChan()
-	head := m[key]
-	if head == nil {
-		return nil, false
+// peerAlive reports whether the channel's remote peer is still alive.
+func peerAlive(ch *channel) bool {
+	if ch.spawnPid <= 0 {
+		return true
 	}
-	m[key] = head.next
-	return head.data, true
+	if childSpawnTarget {
+		return parentAlive()
+	}
+	return childAlive(ch.spawnPid)
 }
 
 // PipeChanSend is the runtime entry the compiler emits in place of the
-// in-runtime queue send for pipe-bound channels. Uses ring buffer when
-// available, falling back to socketpair pipe. Retries indefinitely
-// with 1ms yield on buffer-full/backpressure. Returns false on closed.
+// in-runtime queue send for spawn-bound channels. Writes the encoded
+// bytes to the send ring. Retries with 1ms yield on backpressure.
+// Returns false on close or peer death. Fail-loud on frames that can
+// never fit the ring.
 func PipeChanSend(ch *channel, encoded []byte) bool {
-	if ch == nil || ch.pipeBoundFd == 0 {
+	if ch == nil || !ch.spawnBound {
 		return false
 	}
-	useRing := ch.ringSend != 0 && ringFits(ch.ringSend, len(encoded))
-	ticks := int32(0)
+	if ch.ringSend == 0 {
+		return false
+	}
+	if !ringFits(ch.ringSend, int32(len(encoded))) {
+		runtimePanic("PipeChanSend: frame exceeds ring size")
+	}
 	for {
-		if useRing {
-			if ringIsClosed(ch.ringSend) {
-				return false
-			}
-			if ringSend(ch.ringSend, encoded) {
-				return true
-			}
-		} else {
-			if pipeSendNB(ch.pipeBoundFd, ch.pipeChanID, encoded) {
-				return true
-			}
-		}
-		if PipeClosed(ch.pipeBoundFd) {
-			pipeBridgeOnClose(ch.pipeBoundFd)
+		if ringIsClosed(ch.ringSend) {
 			return false
 		}
-		ticks++
-		if ticks == 3000 {
-			println("pipe: send stalled 3s fd=", ch.pipeBoundFd, "chan=", ch.pipeChanID)
+		if ringSend(ch.ringSend, encoded) {
+			return true
+		}
+		if !peerAlive(ch) {
+			ringClose(ch.ringSend)
+			return false
 		}
 		sleepTicks(nanosecondsToTicks(1_000_000))
 	}
 }
 
 // PipeChanRecv is the runtime entry the compiler emits in place of the
-// in-runtime queue recv for pipe-bound channels. Uses ring buffer when
-// available, falling back to socketpair pipe. Retries with 1ms yield
-// until data arrives or the channel closes.
-// Returns (encoded_bytes, ok). ok=false means closed.
+// in-runtime queue recv for spawn-bound channels. Polls the recv ring
+// with 1ms yield until data arrives, the channel closes, or the peer
+// dies. Returns (encoded_bytes, ok). ok=false means closed/dead.
 func PipeChanRecv(ch *channel) ([]byte, bool) {
-	if ch == nil || ch.pipeBoundFd == 0 {
+	if ch == nil || !ch.spawnBound {
 		return nil, false
 	}
-	// Ring buffer path: poll ring first, then check pipe for both
-	// data (oversized messages that didn't fit the ring) and control.
-	if ch.ringRecv != 0 {
-		ticks := int32(0)
-		for {
-			data, ok := ringRecv(ch.ringRecv)
-			if ok {
-				return data, true
-			}
-			if ringIsClosed(ch.ringRecv) {
-				return nil, false
-			}
-			// Check pipe for data and control messages.
-			if pdata, pok := pipeIncomingPop(ch.pipeBoundFd, ch.pipeChanID); pok {
-				return pdata, true
-			}
-			var probe [1]byte
-			n := moxie_peek(ch.pipeBoundFd, unsafe.Pointer(&probe[0]), 1)
-			if n == 0 {
-				ringClose(ch.ringRecv)
-				pipeBridgeOnClose(ch.pipeBoundFd)
-				if ChildPipeFd >= 0 {
-					exit(0)
-				}
-				return nil, false
-			}
-			if n > 0 {
-				chanID, pdata, pok := pipeRead(ch.pipeBoundFd)
-				if !pok {
-					ringClose(ch.ringRecv)
-					pipeBridgeOnClose(ch.pipeBoundFd)
-					if ChildPipeFd >= 0 {
-						exit(0)
-					}
-					return nil, false
-				}
-				if chanID == 0 && len(pdata) >= 3 && pdata[0] == pipeCtrlClose {
-					closedID := uint16(pdata[1])<<8 | uint16(pdata[2])
-					if closedID == ch.pipeChanID {
-						ringClose(ch.ringRecv)
-						return nil, false
-					}
-					_pipeChanClosed()[pipeBoundKey(ch.pipeBoundFd, closedID)] = true
-				} else if chanID == ch.pipeChanID {
-					return pdata, true
-				} else {
-					pipeIncomingPush(ch.pipeBoundFd, chanID, pdata)
-				}
-			}
-			ticks++
-			if ticks == 3000 {
-				println("ring: recv stalled 3s chan=", ch.pipeChanID)
-			}
-			sleepTicks(nanosecondsToTicks(1_000_000))
-		}
-	}
-	// Pipe fallback path.
-	if data, ok := pipeIncomingPop(ch.pipeBoundFd, ch.pipeChanID); ok {
-		return data, true
-	}
-	if _pipeChanClosed()[pipeBoundKey(ch.pipeBoundFd, ch.pipeChanID)] {
+	if ch.ringRecv == 0 {
 		return nil, false
 	}
-	ticks := int32(0)
 	for {
-		var probe [1]byte
-		n := moxie_peek(ch.pipeBoundFd, unsafe.Pointer(&probe[0]), 1)
-		if n == 0 {
-			pipeBridgeOnClose(ch.pipeBoundFd)
-			if ChildPipeFd >= 0 {
-				exit(0)
-			}
-			return nil, false
-		}
-		if n < 0 {
-			ticks++
-			if ticks == 3000 {
-				println("pipe: recv stalled 3s fd=", ch.pipeBoundFd, "chan=", ch.pipeChanID)
-			}
-			sleepTicks(nanosecondsToTicks(1_000_000))
-			continue
-		}
-		chanID, data, ok := pipeRead(ch.pipeBoundFd)
-		if !ok {
-			pipeBridgeOnClose(ch.pipeBoundFd)
-			if ChildPipeFd >= 0 {
-				exit(0)
-			}
-			return nil, false
-		}
-		if chanID == 0 {
-			if len(data) >= 3 && data[0] == pipeCtrlClose {
-				closedID := uint16(data[1])<<8 | uint16(data[2])
-				if closedID == ch.pipeChanID {
-					return nil, false
-				}
-				_pipeChanClosed()[pipeBoundKey(ch.pipeBoundFd, closedID)] = true
-			}
-			continue
-		}
-		if chanID == ch.pipeChanID {
+		data, ok := ringRecv(ch.ringRecv)
+		if ok {
 			return data, true
 		}
-		pipeIncomingPush(ch.pipeBoundFd, chanID, data)
-	}
-	return nil, false
-}
-
-// pipeCtrlClose is the opcode for a "remote closed channel" control
-// message. Sent on chanID 0 with payload = closedChanID (uint16 BE).
-const pipeCtrlClose = 0x01
-
-// pipeCtrlReady is the opcode for the child-ready handshake.
-// The child sends this on chanID 0 after channel setup completes.
-// The parent blocks on spawn until this arrives.
-const pipeCtrlReady = 0x02
-
-// PipeChildReady sends the ready signal to the parent. Called by
-// compiler-emitted code in the child's prologue after all
-// MarkChildPipeChannel calls complete, before user code runs.
-func PipeChildReady() {
-	if ChildPipeFd < 0 {
-		return
-	}
-	var buf [1]byte
-	buf[0] = pipeCtrlReady
-	pipeWrite(ChildPipeFd, 0, buf[:])
-}
-
-// PipeWaitChildReady blocks until the child sends the ready signal.
-// Called by compiler-emitted code in the parent after all
-// MarkParentPipeChannel calls complete, before spawn returns.
-// Uses non-blocking peek + yield for consistency with duplex model.
-// Returns false if the child dies before sending ready.
-func PipeWaitChildReady() bool {
-	fd := LastSpawnedParentFd()
-	if fd < 0 {
-		return false
-	}
-	for i := 0; i < 500; i++ {
-		var probe [1]byte
-		n := moxie_peek(fd, unsafe.Pointer(&probe[0]), 1)
-		if n == 0 {
-			return false
+		if ringIsClosed(ch.ringRecv) {
+			return nil, false
 		}
-		if n > 0 {
-			chanID, data, ok := pipeRead(fd)
-			if !ok {
-				return false
+		if !peerAlive(ch) {
+			ringClose(ch.ringRecv)
+			if childSpawnTarget {
+				exit(0)
 			}
-			if chanID == 0 && len(data) >= 1 && data[0] == pipeCtrlReady {
-				return true
-			}
-			if chanID == 0 && len(data) >= 3 && data[0] == pipeCtrlClose {
-				closedID := uint16(data[1])<<8 | uint16(data[2])
-				_pipeChanClosed()[pipeBoundKey(fd, closedID)] = true
-			} else if chanID != 0 {
-				pipeIncomingPush(fd, chanID, data)
-			}
-			continue
+			return nil, false
 		}
 		sleepTicks(nanosecondsToTicks(1_000_000))
 	}
-	return false
 }
 
-// pipeChanClosed records remote-closed chanIDs once observed. Keyed
-// by (fd<<16 | chanID). Single-threaded scheduler - no lock needed.
-var pipeChanClosed map[uint64]bool
-var _pipeChanClosedDone bool
-
-func _pipeChanClosed() map[uint64]bool {
-	if !_pipeChanClosedDone {
-		_pipeChanClosedDone = true
-		pipeChanClosed = map[uint64]bool{}
-	}
-	return pipeChanClosed
-}
-
-// PipeChanCloseSignal writes a close marker to the remote indicating
-// that the local end of chanID has been closed. Called from chanClose
-// when a pipe-bound channel is closed by user code. Idempotent on the
-// pipe layer (closing a closed channel panics earlier in chanClose).
+// PipeChanCloseSignal notifies the remote end that the local end of ch
+// has been closed. Ring-only: closes both rings so the peer's recv
+// observes ringIsClosed and its send observes ringIsClosed.
 func PipeChanCloseSignal(ch *channel) {
-	if ch == nil || ch.pipeBoundFd == 0 {
+	if ch == nil || !ch.spawnBound {
 		return
 	}
-	var buf [3]byte
-	buf[0] = pipeCtrlClose
-	buf[1] = byte(ch.pipeChanID >> 8)
-	buf[2] = byte(ch.pipeChanID)
-	pipeWrite(ch.pipeBoundFd, 0, buf[:])
+	if ch.ringSend != 0 {
+		ringClose(ch.ringSend)
+	}
+	if ch.ringRecv != 0 {
+		ringClose(ch.ringRecv)
+	}
 }
 
-// PipeChanSendRaw routes a raw memory-layout chan send through the
-// socketpair pipe. Non-blocking with retry-and-yield, same as
-// PipeChanSend. Native-only - both endpoints share the same
-// architecture (fork inherits the binary), so raw layout is portable.
+// PipeChanSendRaw routes a raw memory-layout chan send through the send
+// ring. Non-blocking with retry-and-yield, same as PipeChanSend.
+// Native-only - both endpoints share the same architecture (fork
+// inherits the binary), so raw layout is portable.
 func PipeChanSendRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
-	if ch == nil || ch.pipeBoundFd == 0 {
+	if ch == nil || !ch.spawnBound {
 		return false
 	}
 	var data []byte
@@ -587,13 +198,13 @@ func PipeChanSendRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
 	return PipeChanSend(ch, data)
 }
 
-// PipeChanRecvRaw routes a raw chan recv through the socketpair pipe
-// into ptr (which must point to a buffer of size bytes). Returns ok
-// (true on receive, false on closed/EOF). On size mismatch it also
-// returns false - the protocol invariant that both ends know the
-// element layout has been violated.
+// PipeChanRecvRaw routes a raw chan recv through the recv ring into ptr
+// (which must point to a buffer of size bytes). Returns ok (true on
+// receive, false on closed/dead). On size mismatch it also returns
+// false - the protocol invariant that both ends know the element
+// layout has been violated.
 func PipeChanRecvRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
-	if ch == nil || ch.pipeBoundFd == 0 {
+	if ch == nil || !ch.spawnBound {
 		return false
 	}
 	data, ok := PipeChanRecv(ch)
@@ -610,20 +221,10 @@ func PipeChanRecvRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
 	return true
 }
 
-// tryPipeSend attempts a NON-blocking send on a pipe-bound channel.
-// Used by trySend / chanSelect on pipe channels - must not block, or
+// tryPipeSend attempts a NON-blocking send on a spawn-bound channel.
+// Used by trySend / chanSelect on spawn channels - must not block, or
 // the cooperative event loop deadlocks (the parent can't pivot to recv
 // from the worker that would unblock this send).
-//
-// Strategy: write the 6-byte header non-blocking. If it would block,
-// return false (select will retry later). If header fits in kernel
-// buffer, write the payload (which is guaranteed to fit because the
-// buffer always has at least header-sized headroom or none at all).
-//
-// Returns true on completed send, false on EAGAIN (would block), and
-// true on EPIPE (treated as a successful send to a closed pipe - the
-// receiver will observe close and stop waiting; same semantic the
-// chan-runtime uses for closed-during-send).
 func (ch *channel) tryPipeSend(value unsafe.Pointer) bool {
 	sz := int32(ch.elementSize)
 	var data []byte
@@ -633,70 +234,15 @@ func (ch *channel) tryPipeSend(value unsafe.Pointer) bool {
 	if ch.ringSend != 0 {
 		return ringSend(ch.ringSend, data)
 	}
-	return pipeSendNB(ch.pipeBoundFd, ch.pipeChanID, data)
+	return false
 }
 
-// pipeSendNB is a non-blocking variant of pipeWrite. Returns true if
-// the entire frame was sent; false if the kernel buffer was full
-// (caller retries). Aborts and returns false also on hard write error.
-//
-// Once the header has been accepted by the kernel, we MUST complete
-// the payload write or the receiver sees a corrupt frame. So after
-// header succeeds we fall back to blocking writeAll for the payload -
-// in practice this rarely blocks because if the header fit, room
-// usually remains for the payload. For very large frames (multi-MB)
-// this can block; spawn-boundary channels carrying large payloads
-// should use a relief-valve buffer (B.0.5).
-func pipeSendNB(fd int32, chanID uint16, data []byte) bool {
-	if uint32(len(data)) > pipeMaxMsg {
-		runtimePanic("pipeSendNB: frame exceeds pipeMaxMsg")
-	}
-	var hdr [pipeMsgHdrLen]byte
-	hdr[0] = byte(chanID >> 8)
-	hdr[1] = byte(chanID)
-	l := uint32(len(data))
-	hdr[2] = byte(l >> 24)
-	hdr[3] = byte(l >> 16)
-	hdr[4] = byte(l >> 8)
-	hdr[5] = byte(l)
-	n := moxie_send_nb(fd, unsafe.Pointer(&hdr[0]), pipeMsgHdrLen)
-	if n == 0 {
-		// Would block. Try again later.
-		return false
-	}
-	if n < 0 {
-		// Hard error.
-		return false
-	}
-	if n < pipeMsgHdrLen {
-		// Partial header. Complete with blocking write.
-		if !writeAll(fd, unsafe.Pointer(uintptr(unsafe.Pointer(&hdr[0]))+uintptr(n)), pipeMsgHdrLen-n) {
-			return false
-		}
-	}
-	if len(data) > 0 {
-		if !writeAll(fd, unsafe.Pointer(&data[0]), int32(len(data))) {
-			return false
-		}
-	}
-	return true
-}
-
-//export moxie_send_nb
-func moxie_send_nb(fd int32, buf unsafe.Pointer, count int32) int32
-
-// tryPipeRecv attempts a non-blocking receive on a pipe-bound channel.
-// The pipe is multiplexed by chanID, so a peek tells us "any data on the
-// fd," but a frame for a sibling chanID still needs to be drained and
-// buffered. We return (false, false) when no data for our chanID is ready
-// - chanSelect's polling loop will retry.
-//
+// tryPipeRecv attempts a non-blocking receive on a spawn-bound channel.
 // Returns:
 //   (true, true)  : data received into value
-//   (true, false) : channel closed (EOF or close marker for our chanID)
+//   (true, false) : channel closed
 //   (false, _)    : no data right now, would block; caller should retry
 func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
-	// Ring buffer path.
 	if ch.ringRecv != 0 {
 		data, rok := ringRecv(ch.ringRecv)
 		if rok {
@@ -713,66 +259,11 @@ func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
 		}
 		return false, false
 	}
-	// Pipe fallback path.
-	if data, hit := pipeIncomingPop(ch.pipeBoundFd, ch.pipeChanID); hit {
-		if uintptr(len(data)) == ch.elementSize {
-			memcpy(value, unsafe.Pointer(&data[0]), ch.elementSize)
-		} else {
-			memzero(value, ch.elementSize)
-		}
-		return true, true
-	}
-	if _pipeChanClosed()[pipeBoundKey(ch.pipeBoundFd, ch.pipeChanID)] {
-		memzero(value, ch.elementSize)
-		return true, false
-	}
-	var probe [1]byte
-	n := moxie_peek(ch.pipeBoundFd, unsafe.Pointer(&probe[0]), 1)
-	if n == 0 {
-		pipeBridgeOnClose(ch.pipeBoundFd)
-		if ChildPipeFd >= 0 {
-			exit(0)
-		}
-		memzero(value, ch.elementSize)
-		return true, false
-	}
-	if n < 0 {
-		return false, false
-	}
-	chanID, data, frameOk := pipeRead(ch.pipeBoundFd)
-	if !frameOk {
-		pipeBridgeOnClose(ch.pipeBoundFd)
-		if ChildPipeFd >= 0 {
-			exit(0)
-		}
-		memzero(value, ch.elementSize)
-		return true, false
-	}
-	if chanID == 0 {
-		if len(data) >= 3 && data[0] == pipeCtrlClose {
-			closedID := uint16(data[1])<<8 | uint16(data[2])
-			if closedID == ch.pipeChanID {
-				memzero(value, ch.elementSize)
-				return true, false
-			}
-			_pipeChanClosed()[pipeBoundKey(ch.pipeBoundFd, closedID)] = true
-		}
-		return false, false
-	}
-	if chanID == ch.pipeChanID {
-		if uintptr(len(data)) == ch.elementSize {
-			memcpy(value, unsafe.Pointer(&data[0]), ch.elementSize)
-		} else {
-			memzero(value, ch.elementSize)
-		}
-		return true, true
-	}
-	pipeIncomingPush(ch.pipeBoundFd, chanID, data)
 	return false, false
 }
 
 // pipeSelectRecheck is called from chanSelect's blocking poll loop to
-// detect readiness on pipe-bound channels (which have no in-runtime
+// detect readiness on spawn-bound channels (which have no in-runtime
 // waker mechanism). It returns true if any state proceeded, with t.Data
 // updated to encode the case index + completion status.
 //
@@ -780,7 +271,7 @@ func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
 // correctness if/when this is ported to a multi-thread scheduler.
 func pipeSelectRecheck(t *task.Task, states []chanSelectState, recvbuf unsafe.Pointer) bool {
 	for i, state := range states {
-		if state.ch == nil || state.ch.pipeBoundFd == 0 {
+		if state.ch == nil || !state.ch.spawnBound {
 			continue
 		}
 		var newDataValue uint32
@@ -810,17 +301,17 @@ func pipeSelectRecheck(t *task.Task, states []chanSelectState, recvbuf unsafe.Po
 
 // ChanSendDual is the runtime dispatch the compiler emits for any
 // chan-send whose element type implements moxie.Codec. It branches
-// on ch.pipeBoundFd to pick the path:
-//   pipeBoundFd != 0 → PipeChanSendCodec (codec encode + pipe write)
-//   pipeBoundFd == 0 → chanSend (in-runtime queue, the existing path)
+// on ch.spawnBound to pick the path:
+//   spawnBound -> PipeChanSendCodec (codec encode + ring write)
+//   otherwise  -> chanSend (in-runtime queue, the existing path)
 //
 // Runtime dispatch instead of compile-time SSA tracking so chans
 // stored in arrays / slices / struct fields still route correctly:
 // the compiler can't always tell from the SSA value whether a given
-// chan-op site refers to a pipe-bound chan, but the channel struct
+// chan-op site refers to a spawn-bound chan, but the channel struct
 // itself always knows.
 func ChanSendDual(ch *channel, c moxie.Codec, value unsafe.Pointer, op *channelOp) {
-	if ch != nil && ch.pipeBoundFd != 0 {
+	if ch != nil && ch.spawnBound {
 		PipeChanSendCodec(ch, c)
 		return
 	}
@@ -829,23 +320,18 @@ func ChanSendDual(ch *channel, c moxie.Codec, value unsafe.Pointer, op *channelO
 
 // ChanRecvDual is the recv counterpart of ChanSendDual.
 func ChanRecvDual(ch *channel, c moxie.Codec, value unsafe.Pointer, op *channelOp) bool {
-	if ch != nil && ch.pipeBoundFd != 0 {
+	if ch != nil && ch.spawnBound {
 		return PipeChanRecvCodec(ch, c)
 	}
 	return chanRecv(ch, value, op)
 }
 
 // PipeChanSendCodec is the runtime entry the compiler emits for chan
-// sends on pipe-bound channels. Encodes c via Codec.EncodeTo into a
-// PipeWriter, then writes the bytes to the pipe. Returns false on
-// EncodeTo error or pipe write failure (EPIPE).
-//
-// Codec-based send replaces the earlier raw-memcpy path, which only
-// worked for value-flat types. With Codec, types containing slices,
-// maps, or other indirect data serialize correctly across the spawn
-// boundary because the user-defined EncodeTo emits the byte payload.
+// sends on spawn-bound channels. Encodes c via Codec.EncodeTo into a
+// PipeWriter, then writes the bytes to the send ring. Returns false on
+// EncodeTo error or ring write failure.
 func PipeChanSendCodec(ch *channel, c moxie.Codec) bool {
-	if ch == nil || ch.pipeBoundFd == 0 {
+	if ch == nil || !ch.spawnBound {
 		return false
 	}
 	var w moxie.PipeWriter
@@ -855,14 +341,14 @@ func PipeChanSendCodec(ch *channel, c moxie.Codec) bool {
 	return PipeChanSend(ch, w.Buf)
 }
 
-// PipeChanRecvCodec drains a frame from the pipe and decodes into c
+// PipeChanRecvCodec drains a frame from the recv ring and decodes into c
 // (which must be a Codec interface wrapping a *T pointer so DecodeFrom
 // can mutate the underlying value).
 //
-// Returns ok (true on successful receive+decode, false on EOF/decode
+// Returns ok (true on successful receive+decode, false on closed/decode
 // error).
 func PipeChanRecvCodec(ch *channel, c moxie.Codec) bool {
-	if ch == nil || ch.pipeBoundFd == 0 {
+	if ch == nil || !ch.spawnBound {
 		return false
 	}
 	data, ok := PipeChanRecv(ch)
@@ -877,76 +363,48 @@ func PipeChanRecvCodec(ch *channel, c moxie.Codec) bool {
 	return true
 }
 
-// PipeFDHasData returns true if there's a frame waiting to be read on
-// the given pipe fd. Used by user code that wants to multiplex multiple
-// spawn-boundary channels via polling instead of select (select-on-
-// pipe-bound channels currently uses raw memcpy and is incompatible
-// with Codec-based chan ops).
-//
-// Wraps moxie_peek (non-blocking MSG_PEEK | MSG_DONTWAIT). Does not
-// consume the data - the caller follows up with a regular blocking
-// recv on the channel to drain the frame via the Codec path.
-func PipeFDHasData(fd int32) bool {
-	if fd < 0 {
+// PipeChildReady sets the shared ready flag so the parent's
+// PipeWaitChildReady unblocks. Called by compiler-emitted code in the
+// child's prologue after all MarkChildPipeChannel calls complete.
+func PipeChildReady() {
+	if !childSpawnTarget || spawnCtlPtr == 0 {
+		return
+	}
+	ctl := (*spawnCtl)(unsafe.Pointer(spawnCtlPtr))
+	atomicStoreU32(&ctl.ready, 1)
+}
+
+// PipeWaitChildReady blocks until the child sets the shared ready flag
+// (i.e. its channels are marked and it is running), or the child dies
+// first. Uses non-blocking yield + waitpid for the liveness check.
+func PipeWaitChildReady() bool {
+	if lastSpawnPid <= 0 {
 		return false
 	}
-	var probe [1]byte
-	n := moxie_peek(fd, unsafe.Pointer(&probe[0]), 1)
-	return n > 0
-}
-
-// PipeFDCanSend returns true if the fd's send buffer has room for more data
-// (i.e., a blocking Codec channel send would not stall). Uses poll(POLLOUT)
-// with a zero timeout - returns immediately. Callers use this to implement
-// non-blocking Codec channel sends: if PipeFDCanSend is true the buffer has
-// space and the subsequent blocking send is guaranteed not to stall.
-// Single-threaded guarantee: no other code runs between the poll check and
-// the send, so the result is always fresh.
-func PipeFDCanSend(fd int32) bool {
-	if fd < 0 {
+	if spawnCtlPtr == 0 {
 		return false
 	}
-	return moxie_fd_can_send(fd) != 0
-}
-
-//export moxie_fd_can_send
-func moxie_fd_can_send(fd int32) int32
-
-// LastSpawnedParentFd returns the parent's end of the socketpair for
-// the most recently spawned child. The compiler emits a call to this
-// immediately after spawnDomain so it can MarkChannelPipeBound the
-// channel args. Returns -1 if no spawn has run.
-func LastSpawnedParentFd() int32 {
-	if domainList == nil {
-		return -1
+	ctl := (*spawnCtl)(unsafe.Pointer(spawnCtlPtr))
+	for i := 0; i < 500; i++ {
+		if atomicLoadU32(&ctl.ready) != 0 {
+			return true
+		}
+		if !childAlive(lastSpawnPid) {
+			return false
+		}
+		sleepTicks(nanosecondsToTicks(1_000_000))
 	}
-	return domainList.parentFd
+	return false
 }
 
-// ChildPipeFd is the child-side socketpair fd, set by spawn machinery
-// when the child process starts. Initialized to -1 at runtime startup;
-// remains -1 in the parent. Read by user code in the spawned function
-// to talk to the parent.
-var ChildPipeFd int32
-
-// ChildPipeClosed returns true once the parent has closed its end of
-// the socketpair, signaling that the child should terminate. The child's
+// ChildPipeClosed returns true once the parent has died (the child is
+// orphaned), signaling that the child should terminate. The child's
 // event loop should poll this and exit cleanly when it returns true,
-// rather than blocking forever on a read that will never come.
+// rather than blocking forever on a recv that will never come.
 //
-// Implementation: a non-blocking peek read. EOF from read(2) on a
-// socketpair whose remote end was closed yields 0 bytes; a transient
-// "would block" yields -1 with EAGAIN/EWOULDBLOCK. We rely on the kernel
-// returning 0 on remote close even in non-blocking mode.
+// Implementation: getppid() comparison. Once the original parent dies,
+// the child is reparented (to init or a subreaper) and getppid() stops
+// returning the pid captured at spawn time.
 func ChildPipeClosed() bool {
-	if ChildPipeFd < 0 {
-		return false
-	}
-	var b [1]byte
-	n := moxie_peek(ChildPipeFd, unsafe.Pointer(&b[0]), 1)
-	// peek returns: -1 transient (EAGAIN), 0 EOF, >0 data available
-	return n == 0
+	return !parentAlive()
 }
-
-//export moxie_peek
-func moxie_peek(fd int32, buf unsafe.Pointer, count int32) int32

@@ -1,5 +1,7 @@
 package syntax
 
+import "git.smesh.lol/moxie/pkg/mxutil"
+
 import (
 	"unsafe"
 	"git.smesh.lol/moxie/pkg/token"
@@ -20,8 +22,8 @@ func (p *Parser) type_() (e Expr) {
 	return typ
 }
 
-func newIndirect(pos token.Pos, typ Expr) (e Expr) {
-	oc := &Operation{}
+func (p *Parser) newIndirect(pos token.Pos, typ Expr) (e Expr) {
+	oc := (*Operation)(p.nodeAlloc(unsafe.Sizeof(Operation{})))
 	oc.pos = pos
 	oc.Op = token.Mul
 	oc.X = typ
@@ -45,7 +47,7 @@ func (p *Parser) typeOrNil() (e Expr) {
 	case token.Star:
 		// ptrtype
 		p.Next()
-		return newIndirect(pos, p.type_())
+		return p.newIndirect(pos, p.type_())
 
 	case token.Arrow:
 		// recvchantype
@@ -261,6 +263,7 @@ func (p *Parser) interfaceType() (i *InterfaceType) {
 		if f == nil || f.Name == nil {
 			f = p.embeddedElem(f)
 		}
+		if len(typ.MethodList) >= cap(typ.MethodList) { typ.MethodList = mxutil.GrowCap(typ.MethodList) }
 		push(typ.MethodList, f)
 		return false
 	})
@@ -292,8 +295,10 @@ func (p *Parser) funcResult() (fs []*Field) {
 func (p *Parser) addField(styp *StructType, pos token.Pos, name *Name, typ Expr, tag *BasicLit) {
 	if tag != nil {
 		for i := len(styp.FieldList) - len(styp.TagList); i > 0; i-- {
+			if len(styp.TagList) >= cap(styp.TagList) { styp.TagList = mxutil.GrowCap(styp.TagList) }
 			push(styp.TagList, nil)
 		}
+		if len(styp.TagList) >= cap(styp.TagList) { styp.TagList = mxutil.GrowCap(styp.TagList) }
 		push(styp.TagList, tag)
 	}
 
@@ -301,6 +306,7 @@ func (p *Parser) addField(styp *StructType, pos token.Pos, name *Name, typ Expr,
 	f.pos = pos
 	f.Name = name
 	f.Type = typ
+	if len(styp.FieldList) >= cap(styp.FieldList) { styp.FieldList = mxutil.GrowCap(styp.FieldList) }
 	push(styp.FieldList, f)
 
 	if debug && tag != nil && len(styp.FieldList) != len(styp.TagList) {
@@ -368,7 +374,7 @@ func (p *Parser) fieldDecl(styp *StructType) {
 			typ = p.qualifiedName(nil)
 		}
 		tag := p.oliteral()
-		p.addField(styp, pos, nil, newIndirect(pos, typ), tag)
+		p.addField(styp, pos, nil, p.newIndirect(pos, typ), tag)
 
 	case token.Lparen:
 		p.syntaxError("cannot parenthesize embedded type")
@@ -378,7 +384,7 @@ func (p *Parser) fieldDecl(styp *StructType) {
 			// (*T)
 			starPos := p.pos()
 			p.Next()
-			typ = newIndirect(starPos, p.qualifiedName(nil))
+			typ = p.newIndirect(starPos, p.qualifiedName(nil))
 		} else {
 			// (T)
 			typ = p.qualifiedName(nil)
@@ -732,6 +738,8 @@ func (p *Parser) paramList(name *Name, typ Expr, closeTok token.Token, requireNa
 			if par.Type != nil {
 				typed++
 			}
+			if len(list) >= cap(list) { list = mxutil.GrowCap(list) }
+			if len(list) >= cap(list) { list = mxutil.GrowCap(list) }
 			push(list, par)
 		}
 		return false
@@ -760,7 +768,7 @@ func (p *Parser) paramList(name *Name, typ Expr, closeTok token.Token, requireNa
 				curTyp = par.Type
 				if par.Name == nil {
 					errPos = StartPos(curTyp)
-					par.Name = NewName(errPos, "_")
+					par.Name = p.NewName(errPos, "_")
 				}
 			} else if curTyp != nil {
 				par.Type = curTyp

@@ -15,7 +15,7 @@ type Point struct {
 	Y int32
 }
 
-func (p Point) EncodeTo(w io.Writer) error {
+func (p *Point) EncodeTo(w io.Writer) (err error) {
 	var b [8]byte
 	b[0] = byte(p.X)
 	b[1] = byte(p.X >> 8)
@@ -25,13 +25,13 @@ func (p Point) EncodeTo(w io.Writer) error {
 	b[5] = byte(p.Y >> 8)
 	b[6] = byte(p.Y >> 16)
 	b[7] = byte(p.Y >> 24)
-	_, err := w.Write(b[:])
-	return err
+	_, err = w.Write(b[:])
+	return
 }
 
-func (p *Point) DecodeFrom(r io.Reader) error {
+func (p *Point) DecodeFrom(r io.Reader) (err error) {
 	var b [8]byte
-	_, err := io.ReadFull(r, b[:])
+	_, err = io.ReadFull(r, b[:])
 	p.X = int32(b[0]) | int32(b[1])<<8 | int32(b[2])<<16 | int32(b[3])<<24
 	p.Y = int32(b[4]) | int32(b[5])<<8 | int32(b[6])<<16 | int32(b[7])<<24
 	return err

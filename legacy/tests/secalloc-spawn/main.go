@@ -68,7 +68,7 @@ func main() {
 	// Read up to 64 bytes from the lockdown pipe. The marker is
 	// "MOXIE_SECALLOC_LOCKDOWN\n" (24 bytes).
 	rf := os.NewFile(uintptr(read), "lockdown")
-	buf := make([]byte, 64)
+	buf := []byte{:64}
 	n, _ := rf.Read(buf)
 
 	status := runtime.Waitpid(pid)

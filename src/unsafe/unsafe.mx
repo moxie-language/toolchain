@@ -137,48 +137,29 @@ type IntegerType int32
 //	u := uintptr(unsafe.Pointer(p))
 //	syscall.Syscall(SYS_READ, uintptr(fd), u, uintptr(n))
 //
-// (5) Conversion of the result of [reflect.Value.Pointer] or [reflect.Value.UnsafeAddr]
-// from uintptr to Pointer.
+// (5) Conversion of a slice or string header Data field to or from Pointer.
 //
-// Package reflect's Value methods named Pointer and UnsafeAddr return type uintptr
-// instead of unsafe.Pointer to keep callers from changing the result to an arbitrary
-// type without first importing "unsafe". However, this means that the result is
-// fragile and must be converted to Pointer immediately after making the call,
-// in the same expression:
-//
-//	p := (*int32)(unsafe.Pointer(reflect.ValueOf(new(int32)).Pointer()))
-//
-// As in the cases above, it is invalid to store the result before the conversion:
-//
-//	// INVALID: uintptr cannot be stored in variable
-//	// before conversion back to Pointer.
-//	u := reflect.ValueOf(new(int32)).Pointer()
-//	p := (*int32)(unsafe.Pointer(u))
-//
-// (6) Conversion of a [reflect.SliceHeader] or [reflect.StringHeader] Data field to or from Pointer.
-//
-// As in the previous case, the reflect data structures SliceHeader and StringHeader
-// declare the field Data as a uintptr to keep callers from changing the result to
-// an arbitrary type without first importing "unsafe". However, this means that
-// SliceHeader and StringHeader are only valid when interpreting the content
-// of an actual slice or string value.
+// The header types in internal/unsafeheader (Slice, String) declare the field
+// Data as a Pointer to keep callers from changing the result to an arbitrary
+// type without first importing "unsafe". They are only valid when interpreting
+// the content of an actual slice or string value.
 //
 //	var s string
-//	hdr := (*reflect.StringHeader)(unsafe.Pointer(&s)) // case 1
-//	hdr.Data = uintptr(unsafe.Pointer(p))              // case 6 (this case)
+//	hdr := (*unsafeheader.String)(unsafe.Pointer(&s)) // case 1
+//	hdr.Data = p                                       // case 6 (this case)
 //	hdr.Len = n
 //
 // In this usage hdr.Data is really an alternate way to refer to the underlying
 // pointer in the string header, not a uintptr variable itself.
 //
-// In general, [reflect.SliceHeader] and [reflect.StringHeader] should be used
-// only as *reflect.SliceHeader and *reflect.StringHeader pointing at actual
-// slices or strings, never as plain structs.
-// A program should not declare or allocate variables of these struct types.
+// In general, internal/unsafeheader.Slice and String should be used only as
+// *unsafeheader.Slice and *unsafeheader.String pointing at actual slices or
+// strings, never as plain structs. A program should not declare or allocate
+// variables of these struct types.
 //
 //	// INVALID: a directly-declared header will not hold Data as a reference.
-//	var hdr reflect.StringHeader
-//	hdr.Data = uintptr(unsafe.Pointer(p))
+//	var hdr unsafeheader.String
+//	hdr.Data = p
 //	hdr.Len = n
 //	s := *(*string)(unsafe.Pointer(&hdr)) // p possibly already lost
 type Pointer *ArbitraryType
@@ -208,11 +189,9 @@ func Offsetof(x ArbitraryType) uintptr
 // Alignof takes an expression x of any type and returns the required alignment
 // of a hypothetical variable v as if v was declared via var v = x.
 // It is the largest value m such that the address of v is always zero mod m.
-// It is the same as the value returned by [reflect.TypeOf](x).Align().
 // As a special case, if a variable s is of struct type and f is a field
 // within that struct, then Alignof(s.f) will return the required alignment
-// of a field of that type within a struct. This case is the same as the
-// value returned by [reflect.TypeOf](s.f).FieldAlign().
+// of a field of that type within a struct.
 // The return value of Alignof is a Go constant if the type of the argument
 // does not have variable size.
 // (See the description of [Sizeof] for a definition of variable sized types.)

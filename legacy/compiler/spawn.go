@@ -79,11 +79,6 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		return llvm.Value{}, nil
 	}
 
-	// Cross-binary spawn: target is in a .mxh package (loaded from cache).
-	if b.isExternalMXHSpawn(targetFn) {
-		return b.createCrossBinarySpawn(targetFn, instr)
-	}
-
 	// Data args are everything after the function.
 	concreteArgs := instr.Args[argStart+1:]
 

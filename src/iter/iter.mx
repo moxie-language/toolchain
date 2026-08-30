@@ -218,13 +218,13 @@ import (
 // When called as seq(yield), seq calls yield(v) for each value v in the sequence,
 // stopping early if yield returns false.
 // See the [iter] package documentation for more details.
-type Seq[V any] func(yield func(V) bool)
+type Seq[V comparable] func(yield func(V) bool)
 
 // Seq2 is an iterator over sequences of pairs of values, most commonly key-value pairs.
 // When called as seq(yield), seq calls yield(k, v) for each pair (k, v) in the sequence,
 // stopping early if yield returns false.
 // See the [iter] package documentation for more details.
-type Seq2[K, V any] func(yield func(K, V) bool)
+type Seq2[K, V comparable] func(yield func(K, V) bool)
 
 type coro struct{}
 
@@ -256,7 +256,7 @@ func coroswitch(*coro)
 //
 // If the iterator panics during a call to next (or stop),
 // then next (or stop) itself panics with the same value.
-func Pull[V any](seq Seq[V]) (next func() (V, bool), stop func()) {
+func Pull[V comparable](seq Seq[V]) (next func() (V, bool), stop func()) {
 	var pull struct {
 		v          V
 		ok         bool
@@ -264,7 +264,7 @@ func Pull[V any](seq Seq[V]) (next func() (V, bool), stop func()) {
 		yieldNext  bool
 		seqDone    bool // to detect Goexit
 		racer      int32
-		panicValue any
+		panicValue string
 	}
 	c := newcoro(func(c *coro) {
 		race.Acquire(unsafe.Pointer(&pull.racer))
@@ -288,10 +288,10 @@ func Pull[V any](seq Seq[V]) (next func() (V, bool), stop func()) {
 		}
 		// Recover and propagate panics from seq.
 		defer func() {
-			if p := recover(); p != nil {
+			if p := recover(); p != "" {
 				pull.panicValue = p
 			} else if !pull.seqDone {
-				pull.panicValue = ensureGoexitPanicValue()
+				pull.panicValue = goexitPanicValue
 			}
 			pull.done = true // Invalidate iterator
 			race.Release(unsafe.Pointer(&pull.racer))
@@ -316,8 +316,8 @@ func Pull[V any](seq Seq[V]) (next func() (V, bool), stop func()) {
 		race.Acquire(unsafe.Pointer(&pull.racer))
 
 		// Propagate panics and goexits from seq.
-		if pull.panicValue != nil {
-			if pull.panicValue == ensureGoexitPanicValue() {
+		if pull.panicValue != "" {
+			if pull.panicValue == goexitPanicValue {
 				// Propagate runtime.Goexit from seq.
 				runtime.Goexit()
 			} else {
@@ -336,8 +336,8 @@ func Pull[V any](seq Seq[V]) (next func() (V, bool), stop func()) {
 			race.Acquire(unsafe.Pointer(&pull.racer))
 
 			// Propagate panics and goexits from seq.
-			if pull.panicValue != nil {
-				if pull.panicValue == ensureGoexitPanicValue() {
+			if pull.panicValue != "" {
+				if pull.panicValue == goexitPanicValue {
 					// Propagate runtime.Goexit from seq.
 					runtime.Goexit()
 				} else {
@@ -371,7 +371,7 @@ func Pull[V any](seq Seq[V]) (next func() (V, bool), stop func()) {
 //
 // If the iterator panics during a call to next (or stop),
 // then next (or stop) itself panics with the same value.
-func Pull2[K, V any](seq Seq2[K, V]) (next func() (K, V, bool), stop func()) {
+func Pull2[K, V comparable](seq Seq2[K, V]) (next func() (K, V, bool), stop func()) {
 	var pull struct {
 		k          K
 		v          V
@@ -380,7 +380,7 @@ func Pull2[K, V any](seq Seq2[K, V]) (next func() (K, V, bool), stop func()) {
 		yieldNext  bool
 		seqDone    bool
 		racer      int32
-		panicValue any
+		panicValue string
 	}
 	c := newcoro(func(c *coro) {
 		race.Acquire(unsafe.Pointer(&pull.racer))
@@ -404,10 +404,10 @@ func Pull2[K, V any](seq Seq2[K, V]) (next func() (K, V, bool), stop func()) {
 		}
 		// Recover and propagate panics from seq.
 		defer func() {
-			if p := recover(); p != nil {
+			if p := recover(); p != "" {
 				pull.panicValue = p
 			} else if !pull.seqDone {
-				pull.panicValue = ensureGoexitPanicValue()
+				pull.panicValue = goexitPanicValue
 			}
 			pull.done = true // Invalidate iterator.
 			race.Release(unsafe.Pointer(&pull.racer))
@@ -433,8 +433,8 @@ func Pull2[K, V any](seq Seq2[K, V]) (next func() (K, V, bool), stop func()) {
 		race.Acquire(unsafe.Pointer(&pull.racer))
 
 		// Propagate panics and goexits from seq.
-		if pull.panicValue != nil {
-			if pull.panicValue == ensureGoexitPanicValue() {
+		if pull.panicValue != "" {
+			if pull.panicValue == goexitPanicValue {
 				// Propagate runtime.Goexit from seq.
 				runtime.Goexit()
 			} else {
@@ -453,8 +453,8 @@ func Pull2[K, V any](seq Seq2[K, V]) (next func() (K, V, bool), stop func()) {
 			race.Acquire(unsafe.Pointer(&pull.racer))
 
 			// Propagate panics and goexits from seq.
-			if pull.panicValue != nil {
-				if pull.panicValue == ensureGoexitPanicValue() {
+			if pull.panicValue != "" {
+				if pull.panicValue == goexitPanicValue {
 					// Propagate runtime.Goexit from seq.
 					runtime.Goexit()
 				} else {
@@ -467,13 +467,6 @@ func Pull2[K, V any](seq Seq2[K, V]) (next func() (K, V, bool), stop func()) {
 }
 
 // goexitPanicValue is a sentinel value indicating that an iterator
-// exited via runtime.Goexit.
-var _goexitSentinel int32
-var goexitPanicValue any
-
-func ensureGoexitPanicValue() any {
-	if goexitPanicValue == nil {
-		goexitPanicValue = &_goexitSentinel
-	}
-	return goexitPanicValue
-}
+// exited via runtime.Goexit. Panic values are strings in Moxie, so the
+// sentinel is a unique string that no user panic can collide with.
+const goexitPanicValue = "\x00iter.Goexit"

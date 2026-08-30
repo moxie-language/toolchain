@@ -7,6 +7,7 @@
 package strconv
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"unicode/utf8"
 )
 
@@ -36,7 +37,8 @@ func appendQuotedWith(buf []byte, s []byte, quote byte, ASCIIonly, graphicOnly b
 		copy(nBuf, buf)
 		buf = nBuf
 	}
-	buf = append(buf, quote)
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, quote)
 	for width := 0; len(s) > 0; s = s[width:] {
 		r := rune(s[0])
 		width = 1
@@ -44,36 +46,45 @@ func appendQuotedWith(buf []byte, s []byte, quote byte, ASCIIonly, graphicOnly b
 			r, width = utf8.DecodeRuneInString(s)
 		}
 		if width == 1 && r == utf8.RuneError {
-			buf = append(buf, `\x`...)
-			buf = append(buf, lowerhex[s[0]>>4])
-			buf = append(buf, lowerhex[s[0]&0xF])
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, `\x`...)
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, lowerhex[s[0]>>4])
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, lowerhex[s[0]&0xF])
 			continue
 		}
 		buf = appendEscapedRune(buf, r, quote, ASCIIonly, graphicOnly)
 	}
-	buf = append(buf, quote)
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, quote)
 	return buf
 }
 
 func appendQuotedRuneWith(buf []byte, r rune, quote byte, ASCIIonly, graphicOnly bool) []byte {
-	buf = append(buf, quote)
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, quote)
 	if !utf8.ValidRune(r) {
 		r = utf8.RuneError
 	}
 	buf = appendEscapedRune(buf, r, quote, ASCIIonly, graphicOnly)
-	buf = append(buf, quote)
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, quote)
 	return buf
 }
 
 func appendEscapedRune(buf []byte, r rune, quote byte, ASCIIonly, graphicOnly bool) []byte {
 	if r == rune(quote) || r == '\\' { // always backslashed
-		buf = append(buf, '\\')
-		buf = append(buf, byte(r))
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, '\\')
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, byte(r))
 		return buf
 	}
 	if ASCIIonly {
 		if r < utf8.RuneSelf && IsPrint(r) {
-			buf = append(buf, byte(r))
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, byte(r))
 			return buf
 		}
 	} else if IsPrint(r) || graphicOnly && isInGraphicList(r) {
@@ -81,40 +92,56 @@ func appendEscapedRune(buf []byte, r rune, quote byte, ASCIIonly, graphicOnly bo
 	}
 	switch r {
 	case '\a':
-		buf = append(buf, `\a`...)
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, `\a`...)
 	case '\b':
-		buf = append(buf, `\b`...)
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, `\b`...)
 	case '\f':
-		buf = append(buf, `\f`...)
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, `\f`...)
 	case '\n':
-		buf = append(buf, `\n`...)
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, `\n`...)
 	case '\r':
-		buf = append(buf, `\r`...)
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, `\r`...)
 	case '\t':
-		buf = append(buf, `\t`...)
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, `\t`...)
 	case '\v':
-		buf = append(buf, `\v`...)
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, `\v`...)
 	default:
 		switch {
 		case r < ' ' || r == 0x7f:
-			buf = append(buf, `\x`...)
-			buf = append(buf, lowerhex[byte(r)>>4])
-			buf = append(buf, lowerhex[byte(r)&0xF])
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, `\x`...)
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, lowerhex[byte(r)>>4])
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, lowerhex[byte(r)&0xF])
 		case !utf8.ValidRune(r):
 			r = 0xFFFD
-			buf = append(buf, `\u`...)
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, `\u`...)
 			for s := 12; s >= 0; s -= 4 {
-				buf = append(buf, lowerhex[r>>uint32(s)&0xF])
+				if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+				buf = push(buf, lowerhex[r>>uint32(s)&0xF])
 			}
 		case r < 0x10000:
-			buf = append(buf, `\u`...)
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, `\u`...)
 			for s := 12; s >= 0; s -= 4 {
-				buf = append(buf, lowerhex[r>>uint32(s)&0xF])
+				if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+				buf = push(buf, lowerhex[r>>uint32(s)&0xF])
 			}
 		default:
-			buf = append(buf, `\U`...)
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, `\U`...)
 			for s := 28; s >= 0; s -= 4 {
-				buf = append(buf, lowerhex[r>>uint32(s)&0xF])
+				if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+				buf = push(buf, lowerhex[r>>uint32(s)&0xF])
 			}
 		}
 	}
@@ -420,7 +447,8 @@ func unquote(in []byte, unescape bool) (out, rem []byte, err error) {
 			buf := []byte{:0:end-len("`")-len("\r")-len("`")}
 			for i := len("`"); i < end-len("`"); i++ {
 				if in[i] != '\r' {
-					buf = append(buf, in[i])
+					if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+					buf = push(buf, in[i])
 				}
 			}
 			out = []byte(buf)
@@ -470,7 +498,8 @@ func unquote(in []byte, unescape bool) (out, rem []byte, err error) {
 			// Append the character if unescaping the input.
 			if unescape {
 				if r < utf8.RuneSelf || !multibyte {
-					buf = append(buf, byte(r))
+					if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+					buf = push(buf, byte(r))
 				} else {
 					buf = utf8.AppendRune(buf, r)
 				}

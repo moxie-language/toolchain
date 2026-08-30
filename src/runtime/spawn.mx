@@ -6,20 +6,21 @@ import "unsafe"
 
 // spawnDomain creates a new isolated domain by forking the current process.
 // The child process executes fn(args) with its own cooperative scheduler.
-// Communication between parent and child happens over a Unix socketpair,
-// plus a one-shot lockdown pipe used by the secure allocator.
 //
-// The lockdown pipe is always created. The child auto-routes its
-// secalloc fault notifications to the write end via SetSecureLockdownFd
-// before user code runs, so any guard-page fault inside the child wipes
-// the arena synchronously and notifies the parent on the read end. The
-// parent retrieves the read fd via runtime.LastSpawnedLockdownFd().
+// Inter-domain channel communication is carried exclusively over shared
+// SPSC ring buffers (mmap MAP_SHARED). No socketpair, no pipe - both arm
+// and amd targets have threads and shared memory, so the ring is the one
+// true transport. Control signals (channel close, child-ready handshake)
+// ride the same shared memory: the ring header's closed flag and a small
+// shared spawn-control block. Lifecycle (child death) is detected via
+// waitpid on the parent side and getppid on the child side.
 //
-// If pipe creation fails (e.g. RLIMIT_NOFILE) the child still spawns
-// with the default fd-2 (stderr) lockdown sink and the parent gets -1
-// for the lockdown fd. Spawn does not fail just because the lockdown
-// channel could not be created - the program is still functional, only
-// observability is degraded.
+// The secalloc lockdown pipe is still created: the child auto-routes its
+// guard-page fault notifications to the write end via SetSecureLockdownFd
+// before user code runs. The parent retrieves the read fd via
+// runtime.LastSpawnedLockdownFd(). If pipe creation fails the child
+// falls back to the stderr sink and the parent gets -1; spawn does not
+// fail on a lockdown-pipe failure, only observability degrades.
 func spawnDomain(fn uintptr, args unsafe.Pointer, nChans int32) {
 	// Create ring buffer pairs for each channel before fork.
 	// mmap(MAP_SHARED) so both processes share the same physical memory.
@@ -29,13 +30,8 @@ func spawnDomain(fn uintptr, args unsafe.Pointer, nChans int32) {
 		spawnRingSet[i][1] = ringCreate(ringDefaultSize) // child→parent
 	}
 
-	// Create a socketpair for control messages and lifecycle detection.
-	var fds [2]int32
-	r := moxie_socketpair(1, 1, 0, unsafe.Pointer(&fds[0])) // AF_UNIX=1, SOCK_STREAM=1
-	if r < 0 {
-		runtimePanic("spawn: socketpair failed")
-	}
-	moxie_set_spawn_bufs(fds[0], fds[1])
+	// Shared control block for the child-ready handshake (MAP_SHARED).
+	spawnCtlPtr = spawnCtlCreate()
 
 	// Create the lockdown pipe (parent reads, child writes). Best
 	// effort: a failure here just leaves the child pointed at stderr.
@@ -54,8 +50,8 @@ func spawnDomain(fn uintptr, args unsafe.Pointer, nChans int32) {
 
 	if pid == 0 {
 		// Child process - run the spawned function directly.
-		moxie_close(fds[0])  // close parent's end of socketpair
-		ChildPipeFd = fds[1] // child-side pipe fd, read by setupNativeSpawnTargetChannels-emitted prologue
+		childSpawnTarget = true
+		childParentPid = moxie_getppid()
 
 		// Wire the lockdown channel: close the read end (parent's side),
 		// route fault notifications to the write end. Done before
@@ -74,12 +70,47 @@ func spawnDomain(fn uintptr, args unsafe.Pointer, nChans int32) {
 	}
 
 	// Parent process.
-	moxie_close(fds[1]) // close child's end of socketpair
+	lastSpawnPid = pid
 	if lockdownFds[1] >= 0 {
 		moxie_close(lockdownFds[1]) // close child's write end
 	}
 
-	domainRegister(pid, fds[0], lockdownFds[0])
+	domainRegister(pid, lockdownFds[0])
+}
+
+// spawnCtl is the shared spawn-control block: one per spawn, mmap'd
+// MAP_SHARED before fork so parent and child both see the same memory.
+// The child sets ready=1 after its channels are marked; the parent spins
+// on it for the synchronous spawn rendezvous.
+type spawnCtl struct {
+	ready uint32
+}
+
+var spawnCtlPtr uintptr // most recent spawn's control block (0 = none)
+
+// lastSpawnPid is the parent's most recently spawned child pid. Read by
+// MarkParentPipeChannel to tag the channel with its peer pid for death
+// detection, and by PipeWaitChildReady to check child liveness.
+var lastSpawnPid int32
+
+// childSpawnTarget is true iff this process is running as a spawn child.
+// Replaces the old ChildPipeFd sentinel: a child has no fd to check, it
+// has a flag set in the child branch of spawnDomain.
+var childSpawnTarget bool
+
+// childParentPid is the child's parent pid (via getppid at spawn time),
+// used to detect parent death (orphaning) on the child side.
+var childParentPid int32
+
+func spawnCtlCreate() uintptr {
+	p := mmap(nil, unsafe.Sizeof(spawnCtl{}), flag_PROT_READ|flag_PROT_WRITE,
+		flag_MAP_SHARED|flag_MAP_ANONYMOUS, -1, 0)
+	if uintptr(p) == 0 || uintptr(p) == ^uintptr(0) {
+		return 0
+	}
+	ctl := (*spawnCtl)(p)
+	ctl.ready = 0
+	return uintptr(p)
 }
 
 // spawnCall invokes fn(args) directly via a C trampoline. The C side
@@ -140,13 +171,20 @@ func moxie_fork() int32
 //export moxie_close
 func moxie_close(fd int32) int32
 
-//export moxie_socketpair
-func moxie_socketpair(domain, typ, protocol int32, fds unsafe.Pointer) int32
-
-//export moxie_set_spawn_bufs
-func moxie_set_spawn_bufs(fd0, fd1 int32)
+//export moxie_getppid
+func moxie_getppid() int32
 
 //export moxie_pipe
 func moxie_pipe(fds unsafe.Pointer) int32
 
 // moxie_waitpid is declared in domain.mx.
+
+// MoxieWrite / MoxieRead are the generic fd read/write wrappers (defined in
+// spawn_unix.c). Used by spawnhandshake and the cross-binary type-server;
+// not part of the spawn channel transport (which is rings-only).
+
+//export MoxieWrite
+func MoxieWrite(fd int32, buf unsafe.Pointer, count int32) int32
+
+//export MoxieRead
+func MoxieRead(fd int32, buf unsafe.Pointer, count int32) int32

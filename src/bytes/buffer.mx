@@ -7,6 +7,7 @@ package bytes
 // Simple byte buffer for marshaling data.
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"errors"
 	"io"
 	"unicode/utf8"
@@ -115,50 +116,37 @@ func (b *Buffer) Reset() {
 	b.lastRead = opInvalid
 }
 
-// tryGrowByReslice is an inlineable version of grow for the fast-case where the
-// internal buffer only needs to be resliced.
-// It returns the index where bytes should be written and whether it succeeded.
-func (b *Buffer) tryGrowByReslice(n int32) (int32, bool) {
-	if l := len(b.buf); n <= cap(b.buf)-l {
-		b.buf = b.buf[:l+n]
-		return l, true
-	}
-	return 0, false
-}
-
 // grow grows the buffer to guarantee space for n more bytes.
 // It returns the index where bytes should be written.
 // If the buffer can't grow it will panic with ErrTooLarge.
-func (b *Buffer) grow(n int32) int32 {
+// Growth is always explicit: allocate a new backing array of the
+// required size, copy the unread bytes, and adopt it. There is no
+// automatic grow-slice; the old backing array is left to the arena.
+func (b *Buffer) grow(n int32) (r0 int32) {
 	m := b.Len()
 	// If buffer is empty, reset to recover space.
 	if m == 0 && b.off != 0 {
 		b.Reset()
 	}
-	// Try to grow by means of a reslice.
-	if i, ok := b.tryGrowByReslice(n); ok {
-		return i
+	// Try to grow by means of a reslice (capacity already available).
+	if l := len(b.buf); n <= cap(b.buf)-l {
+		b.buf = b.buf[:l+n]
+		return l
 	}
 	if b.buf == nil && n <= smallBufferSize {
 		b.buf = []byte{:n:smallBufferSize}
 		return 0
 	}
-	c := cap(b.buf)
-	if n <= c/2-m {
-		// We can slide things down instead of allocating a new
-		// slice. We only need m+n <= c to slide, but
-		// we instead let capacity get twice as large so we
-		// don't spend all our time copying.
-		copy(b.buf, b.buf[b.off:])
-	} else if c > maxInt-c-n {
-		panic(ErrTooLarge)
-	} else {
-		// Add b.off to account for b.buf[:b.off] being sliced off the front.
-		b.buf = growSlice(b.buf[b.off:], b.off+n)
+	// Allocate a fresh backing array for the unread bytes plus the
+	// requested growth, copying the unread portion.
+	needed := m + n
+	if needed < smallBufferSize {
+		needed = smallBufferSize
 	}
-	// Restore b.off and len(b.buf).
+	nb := []byte{:needed}
+	copy(nb, b.buf[b.off:])
+	b.buf = nb
 	b.off = 0
-	b.buf = b.buf[:m+n]
 	return m
 }
 
@@ -180,10 +168,7 @@ func (b *Buffer) Grow(n int32) {
 // buffer becomes too large, Write will panic with [ErrTooLarge].
 func (b *Buffer) Write(p []byte) (n int32, err error) {
 	b.lastRead = opInvalid
-	m, ok := b.tryGrowByReslice(len(p))
-	if !ok {
-		m = b.grow(len(p))
-	}
+	m := b.grow(len(p))
 	return copy(b.buf[m:], p), nil
 }
 
@@ -192,10 +177,7 @@ func (b *Buffer) Write(p []byte) (n int32, err error) {
 // buffer becomes too large, WriteString will panic with [ErrTooLarge].
 func (b *Buffer) WriteString(s []byte) (n int32, err error) {
 	b.lastRead = opInvalid
-	m, ok := b.tryGrowByReslice(len(s))
-	if !ok {
-		m = b.grow(len(s))
-	}
+	m := b.grow(len(s))
 	return copy(b.buf[m:], s), nil
 }
 
@@ -216,7 +198,7 @@ func (b *Buffer) ReadFrom(r io.Reader) (n int64, err error) {
 		b.buf = b.buf[:i]
 		m, e := r.Read(b.buf[i:cap(b.buf)])
 		if m < 0 {
-			panic(errNegativeRead)
+			panic(errNegativeRead.Error())
 		}
 
 		b.buf = b.buf[:i+m]
@@ -228,19 +210,6 @@ func (b *Buffer) ReadFrom(r io.Reader) (n int64, err error) {
 			return n, e
 		}
 	}
-}
-
-func growSlice(b []byte, n int32) []byte {
-	c := len(b) + n
-	if c < 0 {
-		panic(ErrTooLarge)
-	}
-	if c < 2*cap(b) {
-		c = 2 * cap(b)
-	}
-	b2 := append([]byte(nil), []byte{:c}...)
-	i := copy(b2, b)
-	return b2[:i]
 }
 
 // WriteTo writes data to w until the buffer is drained or an error occurs.
@@ -276,10 +245,7 @@ func (b *Buffer) WriteTo(w io.Writer) (n int64, err error) {
 // [ErrTooLarge].
 func (b *Buffer) WriteByte(c byte) error {
 	b.lastRead = opInvalid
-	m, ok := b.tryGrowByReslice(1)
-	if !ok {
-		m = b.grow(1)
-	}
+	m := b.grow(1)
 	b.buf[m] = c
 	return nil
 }
@@ -295,10 +261,7 @@ func (b *Buffer) WriteRune(r rune) (n int32, err error) {
 		return 1, nil
 	}
 	b.lastRead = opInvalid
-	m, ok := b.tryGrowByReslice(utf8.UTFMax)
-	if !ok {
-		m = b.grow(utf8.UTFMax)
-	}
+	m := b.grow(utf8.UTFMax)
 	b.buf = utf8.AppendRune(b.buf[:m], r)
 	return len(b.buf) - m, nil
 }
@@ -423,7 +386,8 @@ func (b *Buffer) ReadBytes(delim byte) (line []byte, err error) {
 	slice, err := b.readSlice(delim)
 	// return a copy of slice. The buffer's backing array may
 	// be overwritten by later calls.
-	line = append(line, slice...)
+	if len(line) >= cap(line) { line = mxutil.GrowCap(line) }
+	line = push(line, slice...)
 	return line, err
 }
 

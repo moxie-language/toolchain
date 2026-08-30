@@ -5,6 +5,7 @@
 package cryptobyte
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"errors"
 	"fmt"
 )
@@ -32,7 +33,7 @@ type Builder struct {
 }
 
 // NewBuilder creates a Builder that appends its output to the given buffer.
-// Like append(), the slice will be reallocated if its capacity is exceeded.
+// Like push(), the slice will be reallocated if its capacity is exceeded.
 // Use Bytes to get the final buffer.
 func NewBuilder(buffer []byte) *Builder {
 	return &Builder{
@@ -69,7 +70,7 @@ func (b *Builder) Bytes() ([]byte, error) {
 // has occurred during building.
 func (b *Builder) BytesOrPanic() []byte {
 	if b.err != nil {
-		panic(b.err)
+		panic(b.err.Error())
 	}
 	return b.result[b.offset:]
 }
@@ -169,15 +170,10 @@ func (b *Builder) callContinuation(f BuilderContinuation, arg *Builder) {
 			*b.inContinuation = false
 
 			r := recover()
-			if r == nil {
+			if r == "" {
 				return
 			}
-
-			if buildError, ok := r.(BuildError); ok {
-				b.err = buildError.Err
-			} else {
-				panic(r)
-			}
+			b.err = errors.New(r)
 		}()
 	}
 
@@ -306,7 +302,8 @@ func (b *Builder) add(bytes ...byte) {
 		b.err = errors.New("cryptobyte: Builder is exceeding its fixed-size buffer")
 		return
 	}
-	b.result = append(b.result, bytes...)
+	if len(b.result) >= cap(b.result) { b.result = mxutil.GrowCap(b.result) }
+	b.result = push(b.result, bytes...)
 }
 
 // Unwrite rolls back non-negative n bytes written directly to the Builder.

@@ -5,6 +5,7 @@
 package x509
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"crypto/dsa"
 	"crypto/ecdh"
@@ -115,7 +116,8 @@ func parseASN1String(tag cryptobyte_asn1.Tag, value []byte) (string, error) {
 				(point >= 0xd800 && point <= 0xdfff) {
 				return "", errors.New("invalid BMPString")
 			}
-			s = append(s, point)
+			if len(s) >= cap(s) { s = mxutil.GrowCap(s) }
+			s = push(s, point)
 			value = value[2:]
 		}
 
@@ -170,10 +172,12 @@ func parseName(raw cryptobyte.String) (*pkix.RDNSequence, error) {
 			if err != nil {
 				return nil, fmt.Errorf("x509: invalid RDNSequence: invalid attribute value: %s", err)
 			}
-			rdnSet = append(rdnSet, attr)
+			if len(rdnSet) >= cap(rdnSet) { rdnSet = mxutil.GrowCap(rdnSet) }
+			rdnSet = push(rdnSet, attr)
 		}
 
-		rdnSeq = append(rdnSeq, rdnSet)
+		if len(rdnSeq) >= cap(rdnSeq) { rdnSeq = mxutil.GrowCap(rdnSeq) }
+		rdnSeq = push(rdnSeq, rdnSet)
 	}
 
 	return &rdnSeq, nil
@@ -411,13 +415,15 @@ func parseSANExtension(der cryptobyte.String) (dnsNames, emailAddresses [][]byte
 			if err := isIA5String(email); err != nil {
 				return errors.New("x509: SAN rfc822Name is malformed")
 			}
-			emailAddresses = append(emailAddresses, email)
+			if len(emailAddresses) >= cap(emailAddresses) { emailAddresses = mxutil.GrowCap(emailAddresses) }
+			emailAddresses = push(emailAddresses, email)
 		case nameTypeDNS:
 			name := string(data)
 			if err := isIA5String(name); err != nil {
 				return errors.New("x509: SAN dNSName is malformed")
 			}
-			dnsNames = append(dnsNames, string(name))
+			if len(dnsNames) >= cap(dnsNames) { dnsNames = mxutil.GrowCap(dnsNames) }
+			dnsNames = push(dnsNames, string(name))
 		case nameTypeURI:
 			uriStr := string(data)
 			if err := isIA5String(uriStr); err != nil {
@@ -430,11 +436,13 @@ func parseSANExtension(der cryptobyte.String) (dnsNames, emailAddresses [][]byte
 			if len(uri.Host) > 0 && !domainNameValid(uri.Host, false) {
 				return fmt.Errorf("x509: cannot parse URI %q: invalid domain", uriStr)
 			}
-			uris = append(uris, uri)
+			if len(uris) >= cap(uris) { uris = mxutil.GrowCap(uris) }
+			uris = push(uris, uri)
 		case nameTypeIP:
 			switch len(data) {
 			case net.IPv4len, net.IPv6len:
-				ipAddresses = append(ipAddresses, data)
+				if len(ipAddresses) >= cap(ipAddresses) { ipAddresses = mxutil.GrowCap(ipAddresses) }
+				ipAddresses = push(ipAddresses, data)
 			default:
 				return errors.New("x509: cannot parse IP address of length " | strconv.Itoa(len(data)))
 			}
@@ -478,9 +486,11 @@ func parseExtKeyUsageExtension(der cryptobyte.String) ([]ExtKeyUsage, []asn1.Obj
 			return nil, nil, errors.New("x509: invalid extended key usages")
 		}
 		if extKeyUsage, ok := extKeyUsageFromOID(eku); ok {
-			extKeyUsages = append(extKeyUsages, extKeyUsage)
+			if len(extKeyUsages) >= cap(extKeyUsages) { extKeyUsages = mxutil.GrowCap(extKeyUsages) }
+			extKeyUsages = push(extKeyUsages, extKeyUsage)
 		} else {
-			unknownUsages = append(unknownUsages, eku)
+			if len(unknownUsages) >= cap(unknownUsages) { unknownUsages = mxutil.GrowCap(unknownUsages) }
+			unknownUsages = push(unknownUsages, eku)
 		}
 	}
 	return extKeyUsages, unknownUsages, nil
@@ -506,7 +516,8 @@ func parseCertificatePoliciesExtension(der cryptobyte.String) ([]OID, error) {
 		if !ok {
 			return nil, errors.New("x509: invalid certificate policies")
 		}
-		oids = append(oids, oid)
+		if len(oids) >= cap(oids) { oids = mxutil.GrowCap(oids) }
+		oids = push(oids, oid)
 	}
 	return oids, nil
 }
@@ -597,7 +608,8 @@ func parseNameConstraintsExtension(out *Certificate, e pkix.Extension) (unhandle
 				if !domainNameValid(domain, true) {
 					return nil, nil, nil, nil, fmt.Errorf("x509: failed to parse dnsName constraint %q", domain)
 				}
-				dnsNames = append(dnsNames, domain)
+				if len(dnsNames) >= cap(dnsNames) { dnsNames = mxutil.GrowCap(dnsNames) }
+				dnsNames = push(dnsNames, domain)
 
 			case ipTag:
 				l := len(value)
@@ -620,7 +632,8 @@ func parseNameConstraintsExtension(out *Certificate, e pkix.Extension) (unhandle
 					return nil, nil, nil, nil, fmt.Errorf("x509: IP constraint contained invalid mask %x", mask)
 				}
 
-				ips = append(ips, &net.IPNet{IP: net.IP(ip), Mask: net.IPMask(mask)})
+				if len(ips) >= cap(ips) { ips = mxutil.GrowCap(ips) }
+				ips = push(ips, &net.IPNet{IP: net.IP(ip), Mask: net.IPMask(mask)})
 
 			case emailTag:
 				constraint := string(value)
@@ -639,7 +652,8 @@ func parseNameConstraintsExtension(out *Certificate, e pkix.Extension) (unhandle
 						return nil, nil, nil, nil, fmt.Errorf("x509: failed to parse rfc822Name constraint %q", constraint)
 					}
 				}
-				emails = append(emails, constraint)
+				if len(emails) >= cap(emails) { emails = mxutil.GrowCap(emails) }
+				emails = push(emails, constraint)
 
 			case uriTag:
 				domain := string(value)
@@ -654,7 +668,8 @@ func parseNameConstraintsExtension(out *Certificate, e pkix.Extension) (unhandle
 				if !domainNameValid(domain, true) {
 					return nil, nil, nil, nil, fmt.Errorf("x509: failed to parse URI constraint %q", domain)
 				}
-				uriDomains = append(uriDomains, domain)
+				if len(uriDomains) >= cap(uriDomains) { uriDomains = mxutil.GrowCap(uriDomains) }
+				uriDomains = push(uriDomains, domain)
 
 			default:
 				unhandled = true
@@ -752,7 +767,8 @@ func processExtensions(out *Certificate) error {
 						if !dpNameDER.ReadASN1(&uri, cryptobyte_asn1.Tag(6).ContextSpecific()) {
 							return errors.New("x509: invalid CRL distribution point")
 						}
-						out.CRLDistributionPoints = append(out.CRLDistributionPoints, string(uri))
+						if len(out.CRLDistributionPoints) >= cap(out.CRLDistributionPoints) { out.CRLDistributionPoints = mxutil.GrowCap(out.CRLDistributionPoints) }
+						out.CRLDistributionPoints = push(out.CRLDistributionPoints, string(uri))
 					}
 				}
 
@@ -814,7 +830,8 @@ func processExtensions(out *Certificate) error {
 				out.PolicyIdentifiers = []asn1.ObjectIdentifier{:0:len(out.Policies)}
 				for _, oid := range out.Policies {
 					if oid, ok := oid.toASN1OID(); ok {
-						out.PolicyIdentifiers = append(out.PolicyIdentifiers, oid)
+						if len(out.PolicyIdentifiers) >= cap(out.PolicyIdentifiers) { out.PolicyIdentifiers = mxutil.GrowCap(out.PolicyIdentifiers) }
+						out.PolicyIdentifiers = push(out.PolicyIdentifiers, oid)
 					}
 				}
 			case 33:
@@ -830,7 +847,8 @@ func processExtensions(out *Certificate) error {
 						!s.ReadASN1(&subject, cryptobyte_asn1.OBJECT_IDENTIFIER) {
 						return errors.New("x509: invalid policy mappings extension")
 					}
-					out.PolicyMappings = append(out.PolicyMappings, PolicyMapping{OID{issuer}, OID{subject}})
+					if len(out.PolicyMappings) >= cap(out.PolicyMappings) { out.PolicyMappings = mxutil.GrowCap(out.PolicyMappings) }
+					out.PolicyMappings = push(out.PolicyMappings, PolicyMapping{OID{issuer}, OID{subject}})
 				}
 			case 54:
 				val := cryptobyte.String(e.Value)
@@ -869,9 +887,11 @@ func processExtensions(out *Certificate) error {
 				}
 				switch {
 				case method.Equal(_oidAuthorityInfoAccessOcsp()):
-					out.OCSPServer = append(out.OCSPServer, string(aiaDER))
+					if len(out.OCSPServer) >= cap(out.OCSPServer) { out.OCSPServer = mxutil.GrowCap(out.OCSPServer) }
+					out.OCSPServer = push(out.OCSPServer, string(aiaDER))
 				case method.Equal(_oidAuthorityInfoAccessIssuers()):
-					out.IssuingCertificateURL = append(out.IssuingCertificateURL, string(aiaDER))
+					if len(out.IssuingCertificateURL) >= cap(out.IssuingCertificateURL) { out.IssuingCertificateURL = mxutil.GrowCap(out.IssuingCertificateURL) }
+					out.IssuingCertificateURL = push(out.IssuingCertificateURL, string(aiaDER))
 				}
 			}
 		} else {
@@ -880,7 +900,8 @@ func processExtensions(out *Certificate) error {
 		}
 
 		if e.Critical && unhandled {
-			out.UnhandledCriticalExtensions = append(out.UnhandledCriticalExtensions, e.Id)
+			if len(out.UnhandledCriticalExtensions) >= cap(out.UnhandledCriticalExtensions) { out.UnhandledCriticalExtensions = mxutil.GrowCap(out.UnhandledCriticalExtensions) }
+			out.UnhandledCriticalExtensions = push(out.UnhandledCriticalExtensions, e.Id)
 		}
 	}
 
@@ -1049,7 +1070,8 @@ func parseCertificate(der []byte) (*Certificate, error) {
 						return nil, fmt.Errorf("x509: certificate contains duplicate extension with OID %q", oidStr)
 					}
 					seenExts[oidStr] = true
-					cert.Extensions = append(cert.Extensions, ext)
+					if len(cert.Extensions) >= cap(cert.Extensions) { cert.Extensions = mxutil.GrowCap(cert.Extensions) }
+					cert.Extensions = push(cert.Extensions, ext)
 				}
 				err = processExtensions(cert)
 				if err != nil {
@@ -1093,7 +1115,8 @@ func ParseCertificates(der []byte) ([]*Certificate, error) {
 		if err != nil {
 			return nil, err
 		}
-		certs = append(certs, cert)
+		if len(certs) >= cap(certs) { certs = mxutil.GrowCap(certs) }
+		certs = push(certs, cert)
 		der = der[len(cert.Raw):]
 	}
 	return certs, nil
@@ -1236,17 +1259,20 @@ func ParseRevocationList(der []byte) (*RevocationList, error) {
 							return nil, fmt.Errorf("x509: malformed reasonCode extension")
 						}
 					}
-					rce.Extensions = append(rce.Extensions, ext)
+					if len(rce.Extensions) >= cap(rce.Extensions) { rce.Extensions = mxutil.GrowCap(rce.Extensions) }
+					rce.Extensions = push(rce.Extensions, ext)
 				}
 			}
 
-			rl.RevokedCertificateEntries = append(rl.RevokedCertificateEntries, rce)
+			if len(rl.RevokedCertificateEntries) >= cap(rl.RevokedCertificateEntries) { rl.RevokedCertificateEntries = mxutil.GrowCap(rl.RevokedCertificateEntries) }
+			rl.RevokedCertificateEntries = push(rl.RevokedCertificateEntries, rce)
 			rcDeprecated := pkix.RevokedCertificate{
 				SerialNumber:   rce.SerialNumber,
 				RevocationTime: rce.RevocationTime,
 				Extensions:     rce.Extensions,
 			}
-			rl.RevokedCertificates = append(rl.RevokedCertificates, rcDeprecated)
+			if len(rl.RevokedCertificates) >= cap(rl.RevokedCertificates) { rl.RevokedCertificates = mxutil.GrowCap(rl.RevokedCertificates) }
+			rl.RevokedCertificates = push(rl.RevokedCertificates, rcDeprecated)
 		}
 	}
 
@@ -1280,7 +1306,8 @@ func ParseRevocationList(der []byte) (*RevocationList, error) {
 					return nil, errors.New("x509: malformed crl number")
 				}
 			}
-			rl.Extensions = append(rl.Extensions, ext)
+			if len(rl.Extensions) >= cap(rl.Extensions) { rl.Extensions = mxutil.GrowCap(rl.Extensions) }
+			rl.Extensions = push(rl.Extensions, ext)
 		}
 	}
 

@@ -25,11 +25,13 @@ func structPtrFieldIdx(t string) (idx int32, ftype string) {
 			depth--
 			if depth == 0 {
 				field := mxutil.TrimSpace(t[start:i])
+				if len(fields) >= cap(fields) { fields = mxutil.GrowCap(fields) }
 				push(fields, field)
 				break
 			}
 		} else if t[i] == ',' && depth == 1 {
 			field := mxutil.TrimSpace(t[start:i])
+			if len(fields) >= cap(fields) { fields = mxutil.GrowCap(fields) }
 			push(fields, field)
 			start = i + 1
 			for start < int32(len(t)) && t[start] == ' ' {
@@ -63,7 +65,7 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 		}
 		if !recov && b.X != nil {
 			rt2 := e.resolvedType(b.X, "i32")
-			if rt2 != "i32" && rt2 != "" {
+			if rt2 != "i32" && rt2 != "" && !(len(rt2) > 0 && rt2[0] == '{') {
 				reg2 := e.regName(b)
 				lv2 := e.operand(b.X)
 				rv2 := e.operand(b.Y)
@@ -450,7 +452,7 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 		}
 		lt = e.resolvedType(b.X, lt)
 		if rt3 != "" && rt3 != lt && e.intBits(lt) > 0 && e.intBits(rt3) > 0 {
-			rv = e.coerceInt(rv, rt3, lt)
+			rv = e.coerceInt(rv, rt3, lt, e.isUnsignedType(b.Y.SSAType()))
 		}
 		e.nextReg++
 		notReg := "%an" | irItoa(e.nextReg)
@@ -479,16 +481,16 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 		resType := e.llvmType(b.SSAType())
 		if !isCmp && e.intBits(resType) > 0 {
 			if lt != resType {
-				lv = e.coerceInt(lv, lt, resType)
+				lv = e.coerceInt(lv, lt, resType, e.isUnsignedType(b.X.SSAType()))
 				lt = resType
 			}
 			if rt != resType {
-				rv = e.coerceInt(rv, rt, resType)
+				rv = e.coerceInt(rv, rt, resType, e.isUnsignedType(b.Y.SSAType()))
 			}
 		} else if e.intBits(lt) > e.intBits(rt) {
-			rv = e.coerceInt(rv, rt, lt)
+			rv = e.coerceInt(rv, rt, lt, e.isUnsignedType(b.Y.SSAType()))
 		} else {
-			lv = e.coerceInt(lv, lt, rt)
+			lv = e.coerceInt(lv, lt, rt, e.isUnsignedType(b.X.SSAType()))
 			lt = rt
 		}
 		coerced = true
@@ -506,10 +508,10 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 		}
 		if lt != rt && e.intBits(lt) > 0 && e.intBits(rt) > 0 {
 			if e.intBits(lt) > e.intBits(rt) {
-				rv = e.coerceInt(rv, rt, lt)
+				rv = e.coerceInt(rv, rt, lt, e.isUnsignedType(b.Y.SSAType()))
 				rt = lt
 			} else if e.intBits(rt) > e.intBits(lt) {
-				lv = e.coerceInt(lv, lt, rt)
+				lv = e.coerceInt(lv, lt, rt, e.isUnsignedType(b.X.SSAType()))
 				lt = rt
 			}
 		}
@@ -673,6 +675,10 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 		e.w("  ") ; e.w(reg) ; e.w(" = inttoptr ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(ai) ; e.w(" to ptr\n")
 		return
 	}
+	if len(lt) > 0 && lt[0] == '{' && !isCmpOp {
+		e.emitZeroReg(reg, b.SSAType())
+		return
+	}
 	e.w("  ")
 	e.w(reg)
 	e.w(" = ")
@@ -707,9 +713,8 @@ func (e *irEmitter) emitSliceConcat(reg string, sl *Slice, lv, rv string) {
 	retTy := "{ptr, " | ipt | ", " | ipt | "}"
 	result := e.nextReg2("cc")
 	e.w("  ") ; e.w(result)
-	e.w(" = call ") ; e.w(retTy) ; e.w(" @runtime.sliceAppend(ptr ")
+	e.w(" = call ") ; e.w(retTy) ; e.w(" @runtime.sliceConcat(ptr ")
 	e.w(xPtr) ; e.w(", ptr ") ; e.w(yPtr)
-	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(xLen)
 	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(xLen)
 	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(yLen)
 	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(elemSz)
@@ -726,7 +731,7 @@ func (e *irEmitter) emitSliceConcat(reg string, sl *Slice, lv, rv string) {
 	s2 := e.nextReg2("cc")
 	e.w("  ") ; e.w(s2) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s1) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(newLen) ; e.w(", 1\n")
 	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s2) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(newCap) ; e.w(", 2\n")
-	e.declareRuntime("runtime.sliceAppend", retTy, "ptr, ptr, " | ipt | ", " | ipt | ", " | ipt | ", " | ipt)
+	e.declareRuntime("runtime.sliceConcat", retTy, "ptr, ptr, " | ipt | ", " | ipt | ", " | ipt | ", " | ipt)
 }
 
 func (e *irEmitter) emitStringCompare(reg string, op SSAOp, lv, rv string) {

@@ -180,11 +180,6 @@ func (c *compilerContext) getFunction(fn *ssa.Function) (llvm.Type, llvm.Value) 
 		// > In order to do this, we need to reserve one value of the second (optional)
 		// > allocsize argument to signify "not present."
 		llvmFn.AddFunctionAttr(c.ctx.CreateEnumAttribute(llvm.AttributeKindID("allocsize"), 0x0000_0000_ffff_ffff))
-	case "runtime.sliceAppend":
-		if nocaptureKind != 0 {
-			llvmFn.AddAttributeAtIndex(2, c.ctx.CreateEnumAttribute(nocaptureKind, 0))
-		}
-		llvmFn.AddAttributeAtIndex(2, c.ctx.CreateEnumAttribute(llvm.AttributeKindID("readonly"), 0))
 	case "runtime.sliceCopy":
 		llvmFn.AddAttributeAtIndex(1, c.ctx.CreateEnumAttribute(llvm.AttributeKindID("writeonly"), 0))
 		if nocaptureKind != 0 {

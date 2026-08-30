@@ -10,6 +10,7 @@
 package http
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -723,7 +724,8 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 			}
 		}
 
-		reqs = append(reqs, req)
+		if len(reqs) >= cap(reqs) { reqs = mxutil.GrowCap(reqs) }
+		reqs = push(reqs, req)
 		var err error
 		var didTimeout func() bool
 		if resp, didTimeout, err = c.send(req, deadline); err != nil {
@@ -763,7 +765,7 @@ func (c *Client) makeHeadersCopier(ireq *Request) func(req *Request, stripSensit
 	if c.Jar != nil && ireq.Header.Get("Cookie") != "" {
 		icookies = map[string][]*Cookie{}
 		for _, c := range ireq.Cookies() {
-			icookies[c.Name] = append(icookies[c.Name], c)
+			icookies[c.Name] = push(icookies[c.Name], c)
 		}
 	}
 
@@ -793,7 +795,8 @@ func (c *Client) makeHeadersCopier(ireq *Request) func(req *Request, stripSensit
 				var ss [][]byte
 				for _, cs := range icookies {
 					for _, c := range cs {
-						ss = append(ss, c.Name+"="+c.Value)
+						if len(ss) >= cap(ss) { ss = mxutil.GrowCap(ss) }
+						ss = push(ss, c.Name+"="+c.Value)
 					}
 				}
 				slices.Sort(ss) // Ensure deterministic headers

@@ -9,7 +9,7 @@
 #   - the raw secret pattern does NOT appear anywhere in stdout/stderr
 set -euo pipefail
 
-MOXIEROOT="${MOXIEROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+MOXIEROOT="${MOXIEROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 MOXIE="${MOXIE:-$MOXIEROOT/moxie}"
 TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
@@ -23,7 +23,7 @@ BIN="$TMPDIR/secalloc_test"
 # `./...` path from the current directory. Build from MOXIEROOT.
 cd "$MOXIEROOT"
 
-if ! "$MOXIE" build -o "$BIN" ./tests/secalloc 2>"$TMPDIR/build.err"; then
+if ! "$MOXIE" build -o "$BIN" ./legacy/tests/secalloc 2>"$TMPDIR/build.err"; then
     echo "FAIL secalloc: compilation failed"
     cat "$TMPDIR/build.err"
     exit 1

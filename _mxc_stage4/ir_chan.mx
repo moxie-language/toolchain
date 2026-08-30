@@ -31,7 +31,77 @@ func (e *irEmitter) chanElemType(chanType Type) (elemT string) {
 	return "i8"
 }
 
+// chanElemTType returns the element Type of a chan type (not its LLVM string).
+func (e *irEmitter) chanElemTType(chanType Type) (t Type) {
+	if ch, ok := SafeUnderlying(chanType).(*TCChan); ok {
+		return ch.Elem
+	}
+	return nil
+}
+
+// codecIface returns the moxie.Codec interface type, or nil if the moxie
+// package is not loaded. Found by scanning the universe registry for a
+// package-scope "Codec" object whose underlying type is an interface, so
+// the module path does not matter. A named interface type is *Named{Under:
+// *TCInterface}, so unwrap through SafeUnderlying.
+func (e *irEmitter) codecIface() *TCInterface {
+	for _, pkg := range cctx.universe.Registry {
+		if pkg == nil || pkg.Scope == nil {
+			continue
+		}
+		obj := pkg.Scope.Lookup("Codec")
+		if obj == nil {
+			continue
+		}
+		ot := ObjectType(obj)
+		if iface, ok := ot.(*TCInterface); ok {
+			return iface
+		}
+		if named, ok := ot.(*Named); ok {
+			if iface, ok2 := SafeUnderlying(named).(*TCInterface); ok2 {
+				return iface
+			}
+		}
+	}
+	return nil
+}
+
+// elemImplementsCodec reports whether the chan element type (or *T) satisfies
+// moxie.Codec. Mirrors the legacy elemTypeImplementsCodec: value- and
+// pointer-receiver method sets both count.
+func (e *irEmitter) elemImplementsCodec(t Type) bool {
+	if ch, ok := SafeUnderlying(t).(*TCChan); ok {
+		t = ch.Elem
+	}
+	codec := e.codecIface()
+	if codec == nil {
+		return false
+	}
+	if Implements(t, codec) {
+		return true
+	}
+	return Implements(NewPointer(t), codec)
+}
+
+// emitCodecIface builds a moxie.Codec interface value {*T typecode, &v} and
+// returns the LLVM register holding it. valPtr must already be a T* alloca.
+func (e *irEmitter) emitCodecIface(elemType Type, valPtr string) (reg string) {
+	ity := e.ifaceType()
+	typeid := e.typeIDHash(NewPointer(elemType))
+	e.nextReg++
+	t1 := "%codec" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(t1) ; e.w(" = insertvalue ") ; e.w(ity) ; e.w(" undef, ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(typeid) ; e.w(", 0\n")
+	e.nextReg++
+	reg = "%codec" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(ity) ; e.w(" ") ; e.w(t1) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
+	return reg
+}
+
 func (e *irEmitter) emitChanRecv(u *SSAUnOp) {
+	if e.elemImplementsCodec(u.X.SSAType()) {
+		e.emitCodecChanRecv(u)
+		return
+	}
 	reg := e.regName(u)
 	elemType := e.chanElemType(u.X.SSAType())
 	ch := e.operand(u.X)
@@ -68,6 +138,10 @@ func (e *irEmitter) emitChanRecv(u *SSAUnOp) {
 }
 
 func (e *irEmitter) emitChanSend(s *SSASend) {
+	if e.elemImplementsCodec(s.Chan.SSAType()) {
+		e.emitCodecChanSend(s)
+		return
+	}
 	elemType := e.chanElemType(s.Chan.SSAType())
 	ch := e.operand(s.Chan)
 	val := e.operand(s.X)
@@ -95,6 +169,84 @@ func (e *irEmitter) emitChanSend(s *SSASend) {
 
 	e.w("  call void @runtime.chanSend(ptr ") ; e.w(ch) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w(", ptr ") ; e.w(opAlloca) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.chanSend", "void", "ptr, ptr, ptr")
+}
+
+// emitCodecChanRecv emits the dual-path chan recv for a chan whose element
+// type implements moxie.Codec. Calls runtime.ChanRecvDual with a Codec
+// interface wrapping *T; the runtime dispatches on ch.spawnBound to either
+// the ring-codec path or the in-runtime queue.
+func (e *irEmitter) emitCodecChanRecv(u *SSAUnOp) {
+	reg := e.regName(u)
+	elemType := e.chanElemType(u.X.SSAType())
+	ch := e.operand(u.X)
+	opType := "{ptr, ptr, i32, ptr}"
+	ity := e.ifaceType()
+
+	e.nextReg++
+	valAlloca := "%chanrv" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(valAlloca) ; e.w(" = alloca ") ; e.w(elemType) ; e.w("\n")
+	e.w("  store volatile ") ; e.w(elemType) ; e.w(" zeroinitializer, ptr ") ; e.w(valAlloca) ; e.w("\n")
+
+	codecReg := e.emitCodecIface(e.chanElemTType(u.X.SSAType()), valAlloca)
+
+	e.nextReg++
+	opAlloca := "%chanrop" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(opAlloca) ; e.w(" = alloca ") ; e.w(opType) ; e.w("\n")
+	e.w("  store volatile ") ; e.w(opType) ; e.w(" zeroinitializer, ptr ") ; e.w(opAlloca) ; e.w("\n")
+
+	e.nextReg++
+	okReg := "%chanrok" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(okReg) ; e.w(" = call i1 @runtime.ChanRecvDual(ptr ") ; e.w(ch) ; e.w(", ") ; e.w(ity) ; e.w(" ") ; e.w(codecReg) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w(", ptr ") ; e.w(opAlloca) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.ChanRecvDual", "i1", "ptr, " | ity | ", ptr, ptr")
+
+	if u.CommaOk {
+		e.nextReg++
+		loadedVal := "%chanrlv" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(loadedVal) ; e.w(" = load ") ; e.w(elemType) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+
+		tupleType := "{" | elemType | ", i1}"
+		e.nextReg++
+		t1 := "%chanrt1_" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(t1) ; e.w(" = insertvalue ") ; e.w(tupleType) ; e.w(" zeroinitializer, ") ; e.w(elemType) ; e.w(" ") ; e.w(loadedVal) ; e.w(", 0\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(tupleType) ; e.w(" ") ; e.w(t1) ; e.w(", i1 ") ; e.w(okReg) ; e.w(", 1\n")
+	} else {
+		e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(elemType) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+	}
+}
+
+// emitCodecChanSend emits the dual-path chan send for a chan whose element
+// type implements moxie.Codec.
+func (e *irEmitter) emitCodecChanSend(s *SSASend) {
+	elemType := e.chanElemType(s.Chan.SSAType())
+	ch := e.operand(s.Chan)
+	val := e.operand(s.X)
+	opType := "{ptr, ptr, i32, ptr}"
+	ity := e.ifaceType()
+
+	e.nextReg++
+	valAlloca := "%chansv" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(valAlloca) ; e.w(" = alloca ") ; e.w(elemType) ; e.w("\n")
+
+	valSrcType := e.llvmType(s.X.SSAType())
+	resolved := e.resolvedType(s.X, valSrcType)
+	if resolved != valSrcType {
+		valSrcType = resolved
+	}
+	if valSrcType == elemType {
+		e.w("  store volatile ") ; e.w(elemType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+	} else {
+		e.w("  store volatile ") ; e.w(valSrcType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+	}
+
+	codecReg := e.emitCodecIface(e.chanElemTType(s.Chan.SSAType()), valAlloca)
+
+	e.nextReg++
+	opAlloca := "%chansop" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(opAlloca) ; e.w(" = alloca ") ; e.w(opType) ; e.w("\n")
+	e.w("  store volatile ") ; e.w(opType) ; e.w(" zeroinitializer, ptr ") ; e.w(opAlloca) ; e.w("\n")
+
+	e.w("  call void @runtime.ChanSendDual(ptr ") ; e.w(ch) ; e.w(", ") ; e.w(ity) ; e.w(" ") ; e.w(codecReg) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w(", ptr ") ; e.w(opAlloca) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.ChanSendDual", "void", "ptr, " | ity | ", ptr, ptr")
 }
 
 func (e *irEmitter) emitSelect(s *SSASelect) {

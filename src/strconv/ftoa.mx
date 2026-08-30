@@ -10,7 +10,10 @@
 
 package strconv
 
-import "math"
+import (
+	"math"
+	"git.smesh.lol/moxie/pkg/mxutil"
+)
 
 // TODO: move elsewhere?
 type floatInfo struct {
@@ -85,7 +88,7 @@ func genericFtoa(dst []byte, val float64, fmt byte, prec, bitSize int32) []byte 
 		default:
 			s = "+Inf"
 		}
-		return append(dst, s...)
+		return push(dst, s...)
 
 	case 0:
 		// denormalized
@@ -227,7 +230,7 @@ func formatDigits(dst []byte, shortest bool, neg bool, digs decimalSlice, prec i
 	}
 
 	// unknown format
-	return append(dst, '%', fmt)
+	return push(dst, '%', fmt)
 }
 
 // roundShortest rounds d (= mant * 2^exp) to the shortest number of digits
@@ -378,7 +381,8 @@ type decimalSlice struct {
 func fmtE(dst []byte, neg bool, d decimalSlice, prec int32, fmt byte) []byte {
 	// sign
 	if neg {
-		dst = append(dst, '-')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, '-')
 	}
 
 	// first digit
@@ -386,24 +390,29 @@ func fmtE(dst []byte, neg bool, d decimalSlice, prec int32, fmt byte) []byte {
 	if d.nd != 0 {
 		ch = d.d[0]
 	}
-	dst = append(dst, ch)
+	if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+	dst = push(dst, ch)
 
 	// .moredigits
 	if prec > 0 {
-		dst = append(dst, '.')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, '.')
 		i := 1
 		m := min(d.nd, prec+1)
 		if i < m {
-			dst = append(dst, d.d[i:m]...)
+			if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+			dst = push(dst, d.d[i:m]...)
 			i = m
 		}
 		for ; i <= prec; i++ {
-			dst = append(dst, '0')
+			if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+			dst = push(dst, '0')
 		}
 	}
 
 	// e±
-	dst = append(dst, fmt)
+	if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+	dst = push(dst, fmt)
 	exp := d.dp - 1
 	if d.nd == 0 { // special case: 0 has exponent 0
 		exp = 0
@@ -414,16 +423,20 @@ func fmtE(dst []byte, neg bool, d decimalSlice, prec int32, fmt byte) []byte {
 	} else {
 		ch = '+'
 	}
-	dst = append(dst, ch)
+	if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+	dst = push(dst, ch)
 
 	// dd or ddd
 	switch {
 	case exp < 10:
-		dst = append(dst, '0', byte(exp)+'0')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, '0', byte(exp)+'0')
 	case exp < 100:
-		dst = append(dst, byte(exp/10)+'0', byte(exp%10)+'0')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, byte(exp/10)+'0', byte(exp%10)+'0')
 	default:
-		dst = append(dst, byte(exp/100)+'0', byte(exp/10)%10+'0', byte(exp%10)+'0')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, byte(exp/100)+'0', byte(exp/10)%10+'0', byte(exp%10)+'0')
 	}
 
 	return dst
@@ -433,29 +446,35 @@ func fmtE(dst []byte, neg bool, d decimalSlice, prec int32, fmt byte) []byte {
 func fmtF(dst []byte, neg bool, d decimalSlice, prec int32) []byte {
 	// sign
 	if neg {
-		dst = append(dst, '-')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, '-')
 	}
 
 	// integer, padded with zeros as needed.
 	if d.dp > 0 {
 		m := min(d.nd, d.dp)
-		dst = append(dst, d.d[:m]...)
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, d.d[:m]...)
 		for ; m < d.dp; m++ {
-			dst = append(dst, '0')
+			if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+			dst = push(dst, '0')
 		}
 	} else {
-		dst = append(dst, '0')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, '0')
 	}
 
 	// fraction
 	if prec > 0 {
-		dst = append(dst, '.')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, '.')
 		for i := 0; i < prec; i++ {
 			ch := byte('0')
 			if j := d.dp + i; 0 <= j && j < d.nd {
 				ch = d.d[j]
 			}
-			dst = append(dst, ch)
+			if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+			dst = push(dst, ch)
 		}
 	}
 
@@ -466,19 +485,22 @@ func fmtF(dst []byte, neg bool, d decimalSlice, prec int32) []byte {
 func fmtB(dst []byte, neg bool, mant uint64, exp int32, flt *floatInfo) []byte {
 	// sign
 	if neg {
-		dst = append(dst, '-')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, '-')
 	}
 
 	// mantissa
 	dst, _ = formatBits(dst, mant, 10, false, true)
 
 	// p
-	dst = append(dst, 'p')
+	if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+	dst = push(dst, 'p')
 
 	// ±exponent
 	exp -= int32(flt.mantbits)
 	if exp >= 0 {
-		dst = append(dst, '+')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, '+')
 	}
 	dst, _ = formatBits(dst, uint64(exp), 10, exp < 0, true)
 
@@ -521,22 +543,28 @@ func fmtX(dst []byte, prec int32, fmt byte, neg bool, mant uint64, exp int32, fl
 
 	// sign, 0x, leading digit
 	if neg {
-		dst = append(dst, '-')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, '-')
 	}
-	dst = append(dst, '0', fmt, '0'+byte((mant>>60)&1))
+	if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+	dst = push(dst, '0', fmt, '0'+byte((mant>>60)&1))
 
 	// .fraction
 	mant <<= 4 // remove leading 0 or 1
 	if prec < 0 && mant != 0 {
-		dst = append(dst, '.')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, '.')
 		for mant != 0 {
-			dst = append(dst, hex[(mant>>60)&15])
+			if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+			dst = push(dst, hex[(mant>>60)&15])
 			mant <<= 4
 		}
 	} else if prec > 0 {
-		dst = append(dst, '.')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, '.')
 		for i := 0; i < prec; i++ {
-			dst = append(dst, hex[(mant>>60)&15])
+			if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+			dst = push(dst, hex[(mant>>60)&15])
 			mant <<= 4
 		}
 	}
@@ -546,23 +574,28 @@ func fmtX(dst []byte, prec int32, fmt byte, neg bool, mant uint64, exp int32, fl
 	if fmt == lower(fmt) {
 		ch = 'p'
 	}
-	dst = append(dst, ch)
+	if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+	dst = push(dst, ch)
 	if exp < 0 {
 		ch = '-'
 		exp = -exp
 	} else {
 		ch = '+'
 	}
-	dst = append(dst, ch)
+	if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+	dst = push(dst, ch)
 
 	// dd or ddd or dddd
 	switch {
 	case exp < 100:
-		dst = append(dst, byte(exp/10)+'0', byte(exp%10)+'0')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, byte(exp/10)+'0', byte(exp%10)+'0')
 	case exp < 1000:
-		dst = append(dst, byte(exp/100)+'0', byte((exp/10)%10)+'0', byte(exp%10)+'0')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, byte(exp/100)+'0', byte((exp/10)%10)+'0', byte(exp%10)+'0')
 	default:
-		dst = append(dst, byte(exp/1000)+'0', byte(exp/100)%10+'0', byte((exp/10)%10)+'0', byte(exp%10)+'0')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, byte(exp/1000)+'0', byte(exp/100)%10+'0', byte((exp/10)%10)+'0', byte(exp%10)+'0')
 	}
 
 	return dst

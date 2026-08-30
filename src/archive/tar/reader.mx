@@ -5,6 +5,7 @@
 package tar
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"io"
 	"strconv"
@@ -325,7 +326,8 @@ func parsePAX(r io.Reader) (map[string][]byte, error) {
 				bytes.Contains(value, ",") {
 				return nil, ErrHeader
 			}
-			sparseMap = append(sparseMap, value)
+			if len(sparseMap) >= cap(sparseMap) { sparseMap = mxutil.GrowCap(sparseMap) }
+			sparseMap = push(sparseMap, value)
 		default:
 			paxHdrs[key] = value
 		}
@@ -481,7 +483,7 @@ func (tr *Reader) readOldGNUSparseMap(hdr *Header, blk *block) (sparseDatas, err
 		return nil, p.err
 	}
 	s := blk.toGNU().sparse()
-	spd := (make)(sparseDatas, 0, s.maxEntries())
+	spd := sparseDatas{:0:s.maxEntries()}
 	for {
 		for i := 0; i < s.maxEntries(); i++ {
 			// This termination condition is identical to GNU and BSD tar.
@@ -493,7 +495,8 @@ func (tr *Reader) readOldGNUSparseMap(hdr *Header, blk *block) (sparseDatas, err
 			if p.err != nil {
 				return nil, p.err
 			}
-			spd = append(spd, sparseEntry{Offset: offset, Length: length})
+			if len(spd) >= cap(spd) { spd = mxutil.GrowCap(spd) }
+			spd = push(spd, sparseEntry{Offset: offset, Length: length})
 		}
 
 		if s.isExtended()[0] > 0 {
@@ -571,14 +574,15 @@ func readGNUSparseMap1x0(r io.Reader) (sparseDatas, error) {
 	if err := feedTokens(2 * numEntries); err != nil {
 		return nil, err
 	}
-	spd := (make)(sparseDatas, 0, numEntries)
+	spd := sparseDatas{:0:numEntries}
 	for i := int64(0); i < numEntries; i++ {
 		offset, err1 := strconv.ParseInt(nextToken(), 10, 64)
 		length, err2 := strconv.ParseInt(nextToken(), 10, 64)
 		if err1 != nil || err2 != nil {
 			return nil, ErrHeader
 		}
-		spd = append(spd, sparseEntry{Offset: offset, Length: length})
+		if len(spd) >= cap(spd) { spd = mxutil.GrowCap(spd) }
+		spd = push(spd, sparseEntry{Offset: offset, Length: length})
 	}
 	return spd, nil
 }
@@ -605,14 +609,15 @@ func readGNUSparseMap0x1(paxHdrs map[string][]byte) (sparseDatas, error) {
 
 	// Loop through the entries in the sparse map.
 	// numEntries is trusted now.
-	spd := (make)(sparseDatas, 0, numEntries)
+	spd := sparseDatas{:0:numEntries}
 	for len(sparseMap) >= 2 {
 		offset, err1 := strconv.ParseInt(sparseMap[0], 10, 64)
 		length, err2 := strconv.ParseInt(sparseMap[1], 10, 64)
 		if err1 != nil || err2 != nil {
 			return nil, ErrHeader
 		}
-		spd = append(spd, sparseEntry{Offset: offset, Length: length})
+		if len(spd) >= cap(spd) { spd = mxutil.GrowCap(spd) }
+		spd = push(spd, sparseEntry{Offset: offset, Length: length})
 		sparseMap = sparseMap[2:]
 	}
 	return spd, nil

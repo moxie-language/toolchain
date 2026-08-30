@@ -13,6 +13,7 @@
 package dnsmessage
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"errors"
 )
 
@@ -178,12 +179,14 @@ func printPaddedUint8(i uint8) string {
 func printUint8Bytes(buf []byte, i uint8) []byte {
 	b := byte(i)
 	if i >= 100 {
-		buf = append(buf, b/100+'0')
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, b/100+'0')
 	}
 	if i >= 10 {
-		buf = append(buf, b/10%10+'0')
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, b/10%10+'0')
 	}
-	return append(buf, b%10+'0')
+	return push(buf, b%10+'0')
 }
 
 func printByteSlice(b []byte) string {
@@ -193,7 +196,8 @@ func printByteSlice(b []byte) string {
 	buf := []byte{:0:5*len(b)}
 	buf = printUint8Bytes(buf, uint8(b[0]))
 	for _, n := range b[1:] {
-		buf = append(buf, ',', ' ')
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, ',', ' ')
 		buf = printUint8Bytes(buf, uint8(n))
 	}
 	return string(buf)
@@ -209,13 +213,14 @@ func printString(str []byte) string {
 			'A' <= c && c <= 'Z' ||
 			'a' <= c && c <= 'z' ||
 			'0' <= c && c <= '9' {
-			buf = append(buf, c)
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, c)
 			continue
 		}
 
 		upper := c >> 4
 		lower := (c << 4) >> 4
-		buf = append(
+		buf = push(
 			buf,
 			'\\',
 			'x',
@@ -690,7 +695,8 @@ func (p *Parser) AllQuestions() ([]Question, error) {
 		if err != nil {
 			return nil, err
 		}
-		qs = append(qs, q)
+		if len(qs) >= cap(qs) { qs = mxutil.GrowCap(qs) }
+		qs = push(qs, q)
 	}
 }
 
@@ -755,7 +761,8 @@ func (p *Parser) AllAnswers() ([]Resource, error) {
 		if err != nil {
 			return nil, err
 		}
-		as = append(as, a)
+		if len(as) >= cap(as) { as = mxutil.GrowCap(as) }
+		as = push(as, a)
 	}
 }
 
@@ -808,7 +815,8 @@ func (p *Parser) AllAuthorities() ([]Resource, error) {
 		if err != nil {
 			return nil, err
 		}
-		as = append(as, a)
+		if len(as) >= cap(as) { as = mxutil.GrowCap(as) }
+		as = push(as, a)
 	}
 }
 
@@ -861,7 +869,8 @@ func (p *Parser) AllAdditionals() ([]Resource, error) {
 		if err != nil {
 			return nil, err
 		}
-		as = append(as, a)
+		if len(as) >= cap(as) { as = mxutil.GrowCap(as) }
+		as = push(as, a)
 	}
 }
 
@@ -1258,7 +1267,8 @@ func NewBuilder(buf []byte, h Header) Builder {
 	b := Builder{msg: buf, start: len(buf)}
 	b.header.id, b.header.bits = h.pack()
 	var hb [headerLen]byte
-	b.msg = append(b.msg, hb[:]...)
+	if len(b.msg) >= cap(b.msg) { b.msg = mxutil.GrowCap(b.msg) }
+	b.msg = push(b.msg, hb[:]...)
 	b.section = sectionHeader
 	return b
 }
@@ -1808,7 +1818,7 @@ func skipResource(msg []byte, off int32) (int32, error) {
 
 // packUint16 appends the wire format of field to msg.
 func packUint16(msg []byte, field uint16) []byte {
-	return append(msg, byte(field>>8), byte(field))
+	return push(msg, byte(field>>8), byte(field))
 }
 
 func unpackUint16(msg []byte, off int32) (uint16, int32, error) {
@@ -1855,7 +1865,7 @@ func skipClass(msg []byte, off int32) (int32, error) {
 
 // packUint32 appends the wire format of field to msg.
 func packUint32(msg []byte, field uint32) []byte {
-	return append(
+	return push(
 		msg,
 		byte(field>>24),
 		byte(field>>16),
@@ -1885,8 +1895,10 @@ func packText(msg []byte, field string) ([]byte, error) {
 	if l > 255 {
 		return nil, errStringTooLong
 	}
-	msg = append(msg, byte(l))
-	msg = append(msg, field...)
+	if len(msg) >= cap(msg) { msg = mxutil.GrowCap(msg) }
+	msg = push(msg, byte(l))
+	if len(msg) >= cap(msg) { msg = mxutil.GrowCap(msg) }
+	msg = push(msg, field...)
 
 	return msg, nil
 }
@@ -1905,7 +1917,7 @@ func unpackText(msg []byte, off int32) (string, int32, error) {
 
 // packBytes appends the wire format of field to msg.
 func packBytes(msg []byte, field []byte) []byte {
-	return append(msg, field...)
+	return push(msg, field...)
 }
 
 func unpackBytes(msg []byte, off int32, field []byte) (int32, error) {
@@ -1978,7 +1990,7 @@ func (n *Name) pack(msg []byte, compression map[string]uint16, compressionOff in
 
 	// Allow root domain.
 	if n.Data[0] == '.' && n.Length == 1 {
-		return append(msg, 0), nil
+		return push(msg, 0), nil
 	}
 
 	var nameAsStr string
@@ -1999,10 +2011,12 @@ func (n *Name) pack(msg []byte, compression map[string]uint16, compressionOff in
 				return oldMsg, errZeroSegLen
 			}
 
-			msg = append(msg, byte(i-begin))
+			if len(msg) >= cap(msg) { msg = mxutil.GrowCap(msg) }
+			msg = push(msg, byte(i-begin))
 
 			for j := begin; j < i; j++ {
-				msg = append(msg, n.Data[j])
+				if len(msg) >= cap(msg) { msg = mxutil.GrowCap(msg) }
+				msg = push(msg, n.Data[j])
 			}
 
 			begin = i + 1
@@ -2016,7 +2030,7 @@ func (n *Name) pack(msg []byte, compression map[string]uint16, compressionOff in
 			if ptr, ok := compression[string(n.Data[i:n.Length])]; ok {
 				// Hit. Emit a pointer instead of the rest of
 				// the domain.
-				return append(msg, byte(ptr>>8|0xC0), byte(ptr)), nil
+				return push(msg, byte(ptr>>8|0xC0), byte(ptr)), nil
 			}
 
 			// Miss. Add the suffix to the compression table if the
@@ -2032,7 +2046,7 @@ func (n *Name) pack(msg []byte, compression map[string]uint16, compressionOff in
 			}
 		}
 	}
-	return append(msg, 0), nil
+	return push(msg, 0), nil
 }
 
 // unpack unpacks a domain name.
@@ -2077,8 +2091,10 @@ Loop:
 				}
 			}
 
-			name = append(name, msg[currOff:endOff]...)
-			name = append(name, '.')
+			if len(name) >= cap(name) { name = mxutil.GrowCap(name) }
+			name = push(name, msg[currOff:endOff]...)
+			if len(name) >= cap(name) { name = mxutil.GrowCap(name) }
+			name = push(name, '.')
 			currOff = endOff
 		case 0xC0: // Pointer
 			if currOff >= len(msg) {
@@ -2100,7 +2116,8 @@ Loop:
 		}
 	}
 	if len(name) == 0 {
-		name = append(name, '.')
+		if len(name) >= cap(name) { name = mxutil.GrowCap(name) }
+		name = push(name, '.')
 	}
 	if len(name) > nonEncodedNameMax {
 		return off, errNameTooLong
@@ -2498,7 +2515,8 @@ func unpackTXTResource(msg []byte, off int32, length uint16) (TXTResource, error
 			return TXTResource{}, errCalcLen
 		}
 		n += uint16(len(t)) + 1
-		txts = append(txts, t)
+		if len(txts) >= cap(txts) { txts = mxutil.GrowCap(txts) }
+		txts = push(txts, t)
 	}
 	return TXTResource{txts}, nil
 }
@@ -2683,7 +2701,8 @@ func unpackOPTResource(msg []byte, off int32, length uint16) (OPTResource, error
 			return OPTResource{}, &nestedError{"Data", errCalcLen}
 		}
 		off += int32(l)
-		opts = append(opts, o)
+		if len(opts) >= cap(opts) { opts = mxutil.GrowCap(opts) }
+		opts = push(opts, o)
 	}
 	return OPTResource{opts}, nil
 }

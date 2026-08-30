@@ -352,14 +352,11 @@ func (fb *funcBuilder) buildStmt(s syntax.Stmt) {
 	case *syntax.ExprStmt:
 		// push/resize are statement-level mutating builtins.
 		if call, ok := s.X.(*syntax.CallExpr); ok {
-			fmt.Fprintf(os.Stderr, "EXPRSTMT: call fun type=%T\n", call.Fun)
 			if name, ok2 := call.Fun.(*syntax.Name); ok2 {
-				fmt.Fprintf(os.Stderr, "EXPRSTMT: name=%s\n", name.Value)
 				if name.Value == "push" || name.Value == "resize" {
 					result := fb.buildExpr(s.X)
 					if result != nil && len(call.ArgList) > 0 {
 						fb.buildStore(call.ArgList[0], result)
-						fmt.Fprintf(os.Stderr, "PUSH STORE-BACK: fn=%s argType=%T\n", fb.fn.Name(), call.ArgList[0])
 					}
 				} else if name.Value == "pop" {
 					// pop as statement: build the pop (discards element),
@@ -1345,14 +1342,6 @@ func (fb *funcBuilder) buildBuiltinCall(e *syntax.CallExpr, b *Builtin, args []V
 		call.name = fb.nextName()
 		fb.emit(call)
 		return call
-	case BuiltinAppend:
-		call := &Call{Call: CallCommon{Value: b, Args: args}}
-		if len(args) > 0 {
-			call.typ = args[0].Type()
-		}
-		call.name = fb.nextName()
-		fb.emit(call)
-		return call
 	case BuiltinMake:
 		if len(e.ArgList) == 0 {
 			return nil
@@ -1877,8 +1866,6 @@ func isSliceType(t typecheck.Type) bool {
 
 func builtinID(name string) (BuiltinID, bool) {
 	switch name {
-	case "append":
-		return BuiltinAppend, true
 	case "cap":
 		return BuiltinCap, true
 	case "clear":
@@ -1891,13 +1878,13 @@ func builtinID(name string) (BuiltinID, bool) {
 		return BuiltinDelete, true
 	case "len":
 		return BuiltinLen, true
-	case "make":
+	case "__slicealloc":
 		return BuiltinMake, true
 	case "max":
 		return BuiltinMax, true
 	case "min":
 		return BuiltinMin, true
-	case "new":
+	case "__ptralloc":
 		return BuiltinNew, true
 	case "panic":
 		return BuiltinPanic, true
@@ -1907,6 +1894,8 @@ func builtinID(name string) (BuiltinID, bool) {
 		return BuiltinPrintln, true
 	case "recover":
 		return BuiltinRecover, true
+	case "spawn":
+		return BuiltinSpawn, true
 	case "push":
 		return BuiltinPush, true
 	case "pop":

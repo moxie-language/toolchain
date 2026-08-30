@@ -14,10 +14,11 @@ import (
 	"moxie/goenv"
 )
 
-// Install fetches (if remote), compiles, and caches a package binary + .mxh.
+// Install fetches (if remote) and caches a package's source + .mxh header.
 // pkgName is either a local directory path or a remote import path (e.g.
 // "git.smesh.lol/iskradb"). The URL is passed as-is to git; protocol
-// detection is left to git itself.
+// detection is left to git itself. Builds compile the cached source like any
+// other package - there is no precompiled-binary exception path.
 func Install(pkgName string, options *compileopts.Options) error {
 	config, err := builder.NewConfig(options)
 	if err != nil {
@@ -61,23 +62,6 @@ func Install(pkgName string, options *compileopts.Options) error {
 			fmt.Printf("install: %s is up to date\n", importPath)
 			return nil
 		}
-	}
-
-	// Build the binary.
-	binName := filepath.Base(importPath)
-	binPath := cache.BinPath(triple, importPath, binName)
-	if err := os.MkdirAll(filepath.Dir(binPath), 0755); err != nil {
-		return err
-	}
-	tmpdir, err := os.MkdirTemp("", "moxie-install-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmpdir)
-
-	_, err = builder.Build(localDir, binPath, tmpdir, config)
-	if err != nil {
-		return fmt.Errorf("install: build: %w", err)
 	}
 
 	// Extract .mxh (target-independent).

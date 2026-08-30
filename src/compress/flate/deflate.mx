@@ -5,6 +5,7 @@
 package flate
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"errors"
 	"fmt"
 	"io"
@@ -386,7 +387,8 @@ Loop:
 				// Flush current output block if any.
 				if d.byteAvailable {
 					// There is still one pending token that needs to be flushed
-					d.tokens = append(d.tokens, literalToken(uint32(d.window[d.index-1])))
+					if len(d.tokens) >= cap(d.tokens) { d.tokens = mxutil.GrowCap(d.tokens) }
+					d.tokens = push(d.tokens, literalToken(uint32(d.window[d.index-1])))
 					d.byteAvailable = false
 				}
 				if len(d.tokens) > 0 {
@@ -428,9 +430,11 @@ Loop:
 			// There was a match at the previous step, and the current match is
 			// not better. Output the previous match.
 			if d.fastSkipHashing != skipNever {
-				d.tokens = append(d.tokens, matchToken(uint32(d.length-baseMatchLength), uint32(d.offset-baseMatchOffset)))
+				if len(d.tokens) >= cap(d.tokens) { d.tokens = mxutil.GrowCap(d.tokens) }
+				d.tokens = push(d.tokens, matchToken(uint32(d.length-baseMatchLength), uint32(d.offset-baseMatchOffset)))
 			} else {
-				d.tokens = append(d.tokens, matchToken(uint32(prevLength-baseMatchLength), uint32(prevOffset-baseMatchOffset)))
+				if len(d.tokens) >= cap(d.tokens) { d.tokens = mxutil.GrowCap(d.tokens) }
+				d.tokens = push(d.tokens, matchToken(uint32(prevLength-baseMatchLength), uint32(prevOffset-baseMatchOffset)))
 			}
 			// Insert in the hash table all strings up to the end of the match.
 			// index and index-1 are already inserted. If there is not enough
@@ -479,7 +483,8 @@ Loop:
 				if d.fastSkipHashing != skipNever {
 					i = d.index
 				}
-				d.tokens = append(d.tokens, literalToken(uint32(d.window[i])))
+				if len(d.tokens) >= cap(d.tokens) { d.tokens = mxutil.GrowCap(d.tokens) }
+				d.tokens = push(d.tokens, literalToken(uint32(d.window[i])))
 				if len(d.tokens) == maxFlateBlockTokens {
 					if d.err = d.writeBlock(d.tokens, i+1); d.err != nil {
 						return
@@ -683,7 +688,8 @@ func NewWriterDict(w io.Writer, level int32, dict []byte) (*Writer, error) {
 		return nil, err
 	}
 	zw.d.fillWindow(dict)
-	zw.dict = append(zw.dict, dict...) // duplicate dictionary for Reset method.
+	if len(zw.dict) >= cap(zw.dict) { zw.dict = mxutil.GrowCap(zw.dict) }
+	zw.dict = push(zw.dict, dict...) // duplicate dictionary for Reset method.
 	return zw, nil
 }
 

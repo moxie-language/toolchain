@@ -2,6 +2,63 @@
 
 COMPACTION: ;always preserve: moxie is not Go, no stubs - remove dead references instead, no adding GC models to work around bugs, assembler pass required for .S files
 
+## WOOD LAW: Bilateral Compiler Sync
+
+The legacy Go compiler (`legacy/`) and the stage4 compiler (`_mxc_stage4/`) are the SAME compiler in two languages. They must remain feature-identical at all times. Both sides or neither.
+
+Every compiler feature change — arena relocation, type system, code generation, parameter rules, sovereign model — must be implemented in BOTH compilers, in the same commit or immediately adjacent commits. Legacy first, stage4 second, always. This is wood law: bilateral in time.
+
+A feature implemented in only one compiler is a lie waiting to surface at bootstrap. The legacy compiler IS the bootstrap path — it produces every first binary. Changing stage4 without the legacy mirror means the next bootstrap from legacy will lose the change, silently corrupting the binary.
+
+Never merge a stage4 change without checking: "does legacy/compiler/compiler.go implement this same behavior?" If not, the merge is incomplete.
+
+### Runtime Codec is Part of the Stack
+
+`src/runtime/codec.mx` is consumed by both compilers. The legacy compiler interprets runtime functions via `interp.Run` during compilation; the stage4 binary links them at runtime. Both compilers must generate correct codec calls such that the runtime codec functions (`codecEncodeValue`, `codecDecodeValue`, etc.) produce identical output for identical input, regardless of which compiler built the binary. A codec bug that corrupts decode output in one compiler but not the other violates the bilateral invariant. Fixes to codec.mx apply to both sides automatically (single source file), but codec behavior must be verified with both compilers before any change is considered complete.
+
+### Sovereign Arena
+
+A self-mutating type (a named struct with at least one method that stores into
+a receiver field, directly or through a method called on a receiver field) owns
+a **sovereign arena**, held in a root-arena hashmap keyed by receiver address
+(no struct layout change). Only methods that actually mutate the receiver
+borrow it: the prologue lazily acquires the arena if needed, pushes it as the
+current arena (marked borrowed, so the codec treats pointers into it as
+stable/identity), and the epilogue pops it. The arena is NEVER freed - it
+lives as long as the receiver.
+
+**Non-mutating (read-only) methods of a sovereign type do NOT borrow.** They
+get a regular per-function arena so their scratch is cleared at return; they
+register the receiver's arena as "stable" so slices/pointers they return are
+views into receiver data, not deep copies.
+
+**Authoring rule: helper functions for scratch.** A mutating method's direct
+allocations land in the sovereign arena and persist. When a mutating method
+needs scratch, push the heavy work into a regular helper function (which gets
+its own freed-at-return fn arena), and only write the product back into the
+receiver (or return it to the method so it lands in the caller arena). This
+keeps the sovereign arena bounded to actual object state, not per-call
+garbage.
+
+Runtime entries: `codecSovereignArena(recv)` lazily acquires/registers,
+`SovereignSetArena`/`SovereignRestoreArena` push/pop the borrow,
+`codecRegStable(recv)` registers a read-only frame's stable arena,
+`SovereignRegStable`/`SovereignRegRestore` manage the stable-arena LIFO.
+
+### Codec Dispatch Policy
+
+The structural codec is used in two places, with this rule:
+
+- **Spawn channels always use the builtin structural codec.** Cross-domain
+  boundaries serialize values structurally (the full `codecEncodeValue` /
+  `codecDecodeValue` graph walk with back-references). No exceptions - the
+  wire format between domains is fixed.
+- **Direct codec calls check for a custom encode/decode method first.** When
+  serialization is invoked directly on a type (e.g. to a buffer), dispatch to
+  the type's own `MarshalBinary`/`UnmarshalBinary`-style method if one is
+  defined (`encoding.BinaryMarshaler` / `encoding.BinaryUnmarshaler`); only
+  fall back to the structural codec when no custom method exists.
+
 ## Moxie Memory Model
 
 NO HEAP. Heap is shared memory, moxie has no shared memory. Stack and arena only.
@@ -130,9 +187,18 @@ files. There are no Go stdlib imports (`fmt`, `strconv`, `go/*`, `strings`,
 
 ## Type System: No int/uint, Builtin Stringers
 
-`int` and `uint` are **illegal types** - they do not exist in Moxie. Always use
-explicit widths (`int32`, `int64`, `uint32`, `uint64`). Slice/array indexes and
-`len()`/`cap()` return `int32`.
+`int` and `uint` are **undefined**, not restricted - they are not predeclared
+in Moxie, so `var x int` resolves as `undefined: int` and a user may declare
+their own `int` type. Always use explicit widths (`int32`, `int64`, `uint32`,
+`uint64`). Slice/array indexes and `len()`/`cap()` return `int32`.
+
+The same model applies to other removed Go names: `make`, `new`, `append`,
+`complex`, `real`, `imag` and the types `complex64`/`complex128` are undefined
+(not restricted) - the loader lowers `[]T{:n}` / `chan T{}` to the internal
+`__slicealloc`/`__ptralloc` builtins, and `push` replaces `append`. `uintptr`
+is a normal predeclared type (the pointer-sized integer for `unsafe.Pointer`
+arithmetic). The `strings` package is dropped - `bytes` covers it under the
+string=[]byte unification.
 
 All builtin types (`int32`, `int64`, `uint32`, `uint64`, `int8`, `int16`,
 `uint8`, `uint16`, `float32`, `float64`, `bool`) have `String() string` methods,
@@ -144,6 +210,42 @@ Each argument's `.String()` method is called directly:
 n := int32(42)
 msg := "count: " | n.String() | " items"
 ```
+
+## No Reflect, No Empty Interface (any)
+
+`reflect` and the empty interface (`any` / `interface{}`) are **removed** from
+Moxie. They are not merely unimplemented - they are forbidden. The empty
+interface leads to bad code; its absence is tied to the same design decision
+that removed `reflect`. In Moxie everything you can print has a `Stringer`
+(builtin stringers exist for every builtin type), and everything that crosses
+a boundary has a builtin codec (required for function returns and spawn
+channels). The empty interface is the seam where that machinery would be
+needed and is deliberately absent.
+
+**Generic type constraints must be concrete and non-empty.** A type parameter
+may be constrained by:
+- a type-set constraint, e.g. `cmp.Ordered` (`~int32 | ~int8 | ~int16 | ~int64 | ~uint32 | ~uint8 | ~uint16 | ~uint64 | ~uintptr | ~float32 | ~float64 | ~string`), or
+- a method interface with at least one method.
+
+Never `any` / `interface{}` as a constraint. Never `any` / `interface{}` as a
+field, parameter, or return type.
+
+**Open work (not yet done):** the stdlib still contains `any` in generic
+signatures and must be refactored to concrete constraints. Known offenders:
+`iter` (`Seq[V any]`, `Seq2[K,V any]`, `Pull`/`Pull2`, plus plain `any`
+panic-value storage), `weak` (`Pointer[T any]`, `Make[T any]`),
+`crypto/internal/fips140cache` (`Cache[K,V any]`), and generic functions across
+`maps`/`slices`/`bytes`/`strings`/`internal/trace` (`maps.Clone[V any]`,
+`maps.Keys[V any]`, etc.). Iteration element types take `ordered` (`cmp.Ordered`),
+same as slices/sort. Reuse or expand an existing stdlib interface where one
+fits; otherwise define the minimal concrete constraint the use case demands.
+
+The compiler currently papers over this with a **workaround, not a fix**: in
+`_mxc_stage4/main.mx` (discoverPkg, ~line 1722) any file importing `iter`,
+`weak`, or `crypto/internal/fips140cache` is skipped wholesale. This silently
+drops those files (and their symbols) from the build. The real fix is the
+refactor above; removing that skip-list is the completion condition, not the
+starting point.
 
 ## Browser Target: WASM Only
 
@@ -185,6 +287,54 @@ Spawn channels are non-blocking on both sides. The runtime uses `moxie_peek` + r
 **ChanID convention**: chanID 0 = control (close signals), chanID 1 = first spawn channel arg, chanID 2 = second, etc.
 
 **Timeout behavior**: after 100ms of retries with no progress, send/recv returns false. Callers should handle this as "peer busy or dead" - check `PipeClosed(fd)` to distinguish.
+
+## Spawn Architecture: Managers and Workers
+
+Spawn is heavyweight (fork + socketpair + ring pairs). Goroutine conventions do
+not apply. Every domain in a spawn tree takes exactly ONE role:
+
+- **Manager**: owns an event loop. It spawns workers, owns the channels, and
+  multiplexes signals. The loop is tight - poll, identify the channel that
+  fired (and whether it was a close or a signal), dispatch - for low latency.
+- **Worker**: a long-lived server. Spawned once, then serves messages
+  (queries, commands) over its inbox channel and watches its role breakers
+  (cancel, deadline, timeout). It never spawns on demand and never manages
+  other domains.
+
+A domain is never both at the same time. The spawn tree therefore has
+distinct element types: manager nodes and worker nodes.
+
+**Channel handles are fixed at spawn time.** Spawn does not allow passing
+channel handles to a domain after it has started. Everything the spawned
+domain will ever receive must be among the channels passed in the spawn
+call. Everything it will ever send goes over those same bound channels.
+Post-spawn communication is messages over already-bound channels, never new
+handles.
+
+Therefore the timer pattern: the function that needs timer-driven signals
+creates the signal channels **in its own function scope** and keeps them.
+It spawns the timer service, passing those channels in at spawn. When a
+timer fires, the service multiplexes the event back over the spawn channel
+(a message identifying which channel and close-vs-signal); the caller's
+event loop consults its channel list and does the processing - closing the
+matching channel in its own scope and forwarding the signal to the workers
+it spawned to listen. The service is a worker; the caller is a manager.
+Timer registrations are messages; timeouts are never per-wait spawns.
+
+**Workers are servers.** Per-job spawns are invalid. A worker runs a select
+loop over {inbox, role breakers} and replies over the pipe-bound ring pair
+correlated by id. Queries and commands are the only inbound traffic.
+
+**Share by communicating, not communicate by sharing.** There is no shared
+memory between domains; channels (ring buffers in MAP_SHARED memory) are the
+only inter-domain state. Function values and closure captures cannot transit
+a spawn boundary - only code pointers, codec-serialized values, and channels.
+A closure lives in its function arena and may only receive data read-only
+via parameters; if mutation is required, use a sovereign self-mutating type.
+
+**Breakers.** Cancellation is a `chan struct{}` breaker: `close(breaker)`
+propagates to every domain holding it (pipe-bound close signal fan-out).
+A nil breaker means never canceled.
 
 ## Complexity of Tasks Estimation
 

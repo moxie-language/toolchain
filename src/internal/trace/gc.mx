@@ -5,6 +5,7 @@
 package trace
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"container/heap"
 	"math"
 	"sort"
@@ -118,12 +119,15 @@ func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
 				series := 0
 				if flags&UtilPerProc != 0 || len(out) == 0 {
 					series = len(out)
-					out = append(out, []MutatorUtil{{int64(ev.Time()), 1}})
+					if len(out) >= cap(out) { out = mxutil.GrowCap(out) }
+					out = push(out, []MutatorUtil{{int64(ev.Time()), 1}})
 				}
-				ps = append(ps, perP{series: series})
+				if len(ps) >= cap(ps) { ps = mxutil.GrowCap(ps) }
+				ps = push(ps, perP{series: series})
 			}
 			if len(procs) == 0 || gomaxprocs != procs[len(procs)-1].n {
-				procs = append(procs, procsCount{time: int64(ev.Time()), n: gomaxprocs})
+				if len(procs) >= cap(procs) { procs = mxutil.GrowCap(procs) }
+				procs = push(procs, procsCount{time: int64(ev.Time()), n: gomaxprocs})
 			}
 		}
 		if len(ps) == 0 {
@@ -328,7 +332,7 @@ func addUtil(util []MutatorUtil, mu MutatorUtil) []MutatorUtil {
 			return util
 		}
 	}
-	return append(util, mu)
+	return push(util, mu)
 }
 
 // totalUtil is total utilization, measured in nanoseconds. This is a
@@ -465,7 +469,7 @@ func (h bandUtilHeap) Swap(i, j int32) {
 }
 
 func (h *bandUtilHeap) Push(x any) {
-	*h = append(*h, x.(bandUtil))
+	*h = push(*h, x.(bandUtil))
 }
 
 func (h *bandUtilHeap) Pop() any {
@@ -499,7 +503,7 @@ func (h utilHeap) Swap(i, j int32) {
 }
 
 func (h *utilHeap) Push(x any) {
-	*h = append(*h, x.(UtilWindow))
+	*h = push(*h, x.(UtilWindow))
 }
 
 func (h *utilHeap) Pop() any {
@@ -736,7 +740,8 @@ func (c *MMUCurve) mmu(window time.Duration, acc *accumulator) {
 		if bandU == nil {
 			bandU = bandU1
 		} else {
-			bandU = append(bandU, bandU1...)
+			if len(bandU) >= cap(bandU) { bandU = mxutil.GrowCap(bandU) }
+			bandU = push(bandU, bandU1...)
 		}
 	}
 

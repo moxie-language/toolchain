@@ -12,6 +12,7 @@
 package netip
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"cmp"
 	"errors"
 	"internal/bytealg"
@@ -141,7 +142,7 @@ func ParseAddr(s string) (Addr, error) {
 func MustParseAddr(s string) Addr {
 	ip, err := ParseAddr(s)
 	if err != nil {
-		panic(err)
+		panic(err.Error())
 	}
 	return ip
 }
@@ -832,12 +833,14 @@ func appendDecimal(b []byte, x uint8) []byte {
 	// string building 2x faster.
 
 	if x >= 100 {
-		b = append(b, digits[x/100])
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, digits[x/100])
 	}
 	if x >= 10 {
-		b = append(b, digits[x/10%10])
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, digits[x/10%10])
 	}
-	return append(b, digits[x%10])
+	return push(b, digits[x%10])
 }
 
 // appendHex appends the hex string representation of x to b.
@@ -846,20 +849,23 @@ func appendHex(b []byte, x uint16) []byte {
 	// string building 2x faster.
 
 	if x >= 0x1000 {
-		b = append(b, digits[x>>12])
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, digits[x>>12])
 	}
 	if x >= 0x100 {
-		b = append(b, digits[x>>8&0xf])
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, digits[x>>8&0xf])
 	}
 	if x >= 0x10 {
-		b = append(b, digits[x>>4&0xf])
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, digits[x>>4&0xf])
 	}
-	return append(b, digits[x&0xf])
+	return push(b, digits[x&0xf])
 }
 
 // appendHexPad appends the fully padded hex string representation of x to b.
 func appendHexPad(b []byte, x uint16) []byte {
-	return append(b, digits[x>>12], digits[x>>8&0xf], digits[x>>4&0xf], digits[x&0xf])
+	return push(b, digits[x>>12], digits[x>>8&0xf], digits[x>>4&0xf], digits[x&0xf])
 }
 
 func (ip Addr) string4() string {
@@ -871,11 +877,14 @@ func (ip Addr) string4() string {
 
 func (ip Addr) appendTo4(ret []byte) []byte {
 	ret = appendDecimal(ret, ip.v4(0))
-	ret = append(ret, '.')
+	if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
+	ret = push(ret, '.')
 	ret = appendDecimal(ret, ip.v4(1))
-	ret = append(ret, '.')
+	if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
+	ret = push(ret, '.')
 	ret = appendDecimal(ret, ip.v4(2))
-	ret = append(ret, '.')
+	if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
+	ret = push(ret, '.')
 	ret = appendDecimal(ret, ip.v4(3))
 	return ret
 }
@@ -888,11 +897,14 @@ func (ip Addr) string4In6() string {
 }
 
 func (ip Addr) appendTo4In6(ret []byte) []byte {
-	ret = append(ret, "::ffff:"...)
+	if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
+	ret = push(ret, "::ffff:"...)
 	ret = ip.Unmap().appendTo4(ret)
 	if ip.z != z6noz {
-		ret = append(ret, '%')
-		ret = append(ret, ip.Zone()...)
+		if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
+		ret = push(ret, '%')
+		if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
+		ret = push(ret, ip.Zone()...)
 	}
 	return ret
 }
@@ -930,21 +942,25 @@ func (ip Addr) appendTo6(ret []byte) []byte {
 
 	for i := uint8(0); i < 8; i++ {
 		if i == zeroStart {
-			ret = append(ret, ':', ':')
+			if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
+			ret = push(ret, ':', ':')
 			i = zeroEnd
 			if i >= 8 {
 				break
 			}
 		} else if i > 0 {
-			ret = append(ret, ':')
+			if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
+			ret = push(ret, ':')
 		}
 
 		ret = appendHex(ret, ip.v6u16(i))
 	}
 
 	if ip.z != z6noz {
-		ret = append(ret, '%')
-		ret = append(ret, ip.Zone()...)
+		if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
+		ret = push(ret, '%')
+		if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
+		ret = push(ret, ip.Zone()...)
 	}
 	return ret
 }
@@ -962,7 +978,8 @@ func (ip Addr) StringExpanded() string {
 	ret := []byte{:0:size}
 	for i := uint8(0); i < 8; i++ {
 		if i > 0 {
-			ret = append(ret, ':')
+			if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
+			ret = push(ret, ':')
 		}
 
 		ret = appendHexPad(ret, ip.v6u16(i))
@@ -971,8 +988,10 @@ func (ip Addr) StringExpanded() string {
 	if ip.z != z6noz {
 		// The addition of a zone will cause a second allocation, but when there
 		// is no zone the ret slice will be stack allocated.
-		ret = append(ret, '%')
-		ret = append(ret, ip.Zone()...)
+		if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
+		ret = push(ret, '%')
+		if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
+		ret = push(ret, ip.Zone()...)
 	}
 	return string(ret)
 }
@@ -1029,7 +1048,8 @@ func (ip Addr) AppendBinary(b []byte) ([]byte, error) {
 	default:
 		b = byteorder.BEAppendUint64(b, ip.addr.hi)
 		b = byteorder.BEAppendUint64(b, ip.addr.lo)
-		b = append(b, ip.Zone()...)
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, ip.Zone()...)
 	}
 	return b, nil
 }
@@ -1151,7 +1171,7 @@ func ParseAddrPort(s string) (AddrPort, error) {
 func MustParseAddrPort(s string) AddrPort {
 	ip, err := ParseAddrPort(s)
 	if err != nil {
-		panic(err)
+		panic(err.Error())
 	}
 	return ip
 }
@@ -1183,17 +1203,21 @@ func (p AddrPort) String() string {
 		if p.ip.Is4In6() {
 			const max = len("[::ffff:255.255.255.255%enp5s0]:65535")
 			b = []byte{:0:max}
-			b = append(b, '[')
+			if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+			b = push(b, '[')
 			b = p.ip.appendTo4In6(b)
 		} else {
 			const max = len("[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%enp5s0]:65535")
 			b = []byte{:0:max}
-			b = append(b, '[')
+			if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+			b = push(b, '[')
 			b = p.ip.appendTo6(b)
 		}
-		b = append(b, ']')
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, ']')
 	}
-	b = append(b, ':')
+	if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+	b = push(b, ':')
 	b = strconv.AppendUint(b, uint64(p.port), 10)
 	return string(b)
 }
@@ -1208,15 +1232,18 @@ func (p AddrPort) AppendTo(b []byte) []byte {
 	case z4:
 		b = p.ip.appendTo4(b)
 	default:
-		b = append(b, '[')
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, '[')
 		if p.ip.Is4In6() {
 			b = p.ip.appendTo4In6(b)
 		} else {
 			b = p.ip.appendTo6(b)
 		}
-		b = append(b, ']')
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, ']')
 	}
-	b = append(b, ':')
+	if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+	b = push(b, ':')
 	b = strconv.AppendUint(b, uint64(p.port), 10)
 	return b
 }
@@ -1415,7 +1442,7 @@ func ParsePrefix(s string) (Prefix, error) {
 func MustParsePrefix(s string) Prefix {
 	ip, err := ParsePrefix(s)
 	if err != nil {
-		panic(err)
+		panic(err.Error())
 	}
 	return ip
 }
@@ -1507,7 +1534,7 @@ func (p Prefix) AppendTo(b []byte) []byte {
 		return b
 	}
 	if !p.IsValid() {
-		return append(b, "invalid Prefix"...)
+		return push(b, "invalid Prefix"...)
 	}
 
 	// p.ip is non-nil, because p is valid.
@@ -1515,14 +1542,16 @@ func (p Prefix) AppendTo(b []byte) []byte {
 		b = p.ip.appendTo4(b)
 	} else {
 		if p.ip.Is4In6() {
-			b = append(b, "::ffff:"...)
+			if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+			b = push(b, "::ffff:"...)
 			b = p.ip.Unmap().appendTo4(b)
 		} else {
 			b = p.ip.appendTo6(b)
 		}
 	}
 
-	b = append(b, '/')
+	if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+	b = push(b, '/')
 	b = appendDecimal(b, uint8(p.Bits()))
 	return b
 }
@@ -1571,7 +1600,7 @@ func (p Prefix) AppendBinary(b []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(b, uint8(p.Bits())), nil
+	return push(b, uint8(p.Bits())), nil
 }
 
 // MarshalBinary implements the [encoding.BinaryMarshaler] interface.

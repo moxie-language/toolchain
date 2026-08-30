@@ -1,6 +1,7 @@
 package syntax
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"unsafe"
 	"git.smesh.lol/moxie/pkg/token"
 )
@@ -59,6 +60,7 @@ func (p *Parser) fileOrNil() (f *File) {
 		case token.Func:
 			p.Next()
 			if d := p.funcDeclOrNil(); d != nil {
+				if len(f.DeclList) >= cap(f.DeclList) { f.DeclList = mxutil.GrowCap(f.DeclList) }
 				push(f.DeclList, d)
 			}
 
@@ -131,6 +133,22 @@ func (p *Parser) list(context string, sep, closeTok token.Token, f func() bool) 
 	return pos
 }
 
+// pushDecl grows the decl accumulator explicitly (no auto-grow).
+func pushDecl(list []Decl, x Decl) (r0 []Decl) {
+	if len(list) >= cap(list) {
+		nc := cap(list) * 2
+		if nc < 16 {
+			nc = 16
+		}
+		nb := []Decl{:len(list):nc}
+		copy(nb, list)
+		list = nb
+	}
+	if len(list) >= cap(list) { list = mxutil.GrowCap(list) }
+	push(list, x)
+	return list
+}
+
 // appendGroup(f) = f + "(" { f ";" } ")" . // ";" is optional before ")"
 func (p *Parser) appendGroup(list []Decl, f func(*Group) Decl) (ds []Decl) {
 	if p.Tok == token.Lparen {
@@ -139,13 +157,13 @@ func (p *Parser) appendGroup(list []Decl, f func(*Group) Decl) (ds []Decl) {
 		p.Next() // must consume "(" after calling clearPragma!
 		p.list("grouped declaration", token.Semi, token.Rparen, func() bool {
 			if x := f(g); x != nil {
-				push(list, x)
+				list = pushDecl(list, x)
 			}
 			return false
 		})
 	} else {
 		if x := f(nil); x != nil {
-			push(list, x)
+			list = pushDecl(list, x)
 		}
 	}
 	return list
@@ -171,7 +189,7 @@ func (p *Parser) importDecl(group *Group) (ret Decl) {
 		}
 		d.LocalPkgName = n
 	case token.Dot:
-		d.LocalPkgName = NewName(p.pos(), ".")
+		d.LocalPkgName = p.NewName(p.pos(), ".")
 		p.Next()
 	}
 	d.Path = p.oliteral()
@@ -418,7 +436,7 @@ func (p *Parser) funcDeclOrNil() (f *FuncDecl) {
 		f.Name = p.name()
 		f.TParamList, f.Type = p.funcType(context)
 	} else {
-		f.Name = NewName(p.pos(), "_")
+		f.Name = p.NewName(p.pos(), "_")
 		f.Type = (*FuncType)(p.nodeAlloc(unsafe.Sizeof(FuncType{})))
 		f.Type.pos = p.pos()
 		msg := "expected name or ("

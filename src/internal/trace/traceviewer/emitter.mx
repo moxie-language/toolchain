@@ -5,6 +5,7 @@
 package traceviewer
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"encoding/json"
 	"fmt"
 	"internal/trace"
@@ -102,7 +103,8 @@ func SplittingTraceConsumer(max int32) (*splitter, TraceConsumer) {
 				// Store required events inside data so flush
 				// can include them in the required part of the
 				// trace.
-				data.Events = append(data.Events, v)
+				if len(data.Events) >= cap(data.Events) { data.Events = mxutil.GrowCap(data.Events) }
+				data.Events = push(data.Events, v)
 				WalkStackFrames(allFrames, v.Stack, func(id int32) {
 					s := strconv.Itoa(id)
 					data.Frames[s] = allFrames[s]
@@ -119,12 +121,15 @@ func SplittingTraceConsumer(max int32) (*splitter, TraceConsumer) {
 			// Add referenced stack frames. Their size is computed
 			// in flush, where we can dedup across events.
 			WalkStackFrames(allFrames, v.Stack, func(id int32) {
-				size.Frames = append(size.Frames, id)
+				if len(size.Frames) >= cap(size.Frames) { size.Frames = mxutil.GrowCap(size.Frames) }
+				size.Frames = push(size.Frames, id)
 			})
 			WalkStackFrames(allFrames, v.EndStack, func(id int32) {
-				size.Frames = append(size.Frames, id) // This may add duplicates. We'll dedup later.
+				if len(size.Frames) >= cap(size.Frames) { size.Frames = mxutil.GrowCap(size.Frames) }
+				size.Frames = push(size.Frames, id) // This may add duplicates. We'll dedup later.
 			})
-			sizes = append(sizes, size)
+			if len(sizes) >= cap(sizes) { sizes = mxutil.GrowCap(sizes) }
+			sizes = push(sizes, size)
 			cw.size = 0
 		},
 		ConsumeViewerFrame: func(k []byte, v format.Frame) {
@@ -177,7 +182,8 @@ func SplittingTraceConsumer(max int32) (*splitter, TraceConsumer) {
 				// start a new range.
 				startTime := time.Duration(sizes[start].Time * 1000)
 				endTime := time.Duration(ev.Time * 1000)
-				s.Ranges = append(s.Ranges, Range{
+				if len(s.Ranges) >= cap(s.Ranges) { s.Ranges = mxutil.GrowCap(s.Ranges) }
+				s.Ranges = push(s.Ranges, Range{
 					Name:      fmt.Sprintf("%v-%v", startTime, endTime),
 					Start:     start,
 					End:       i + 1,
@@ -195,7 +201,8 @@ func SplittingTraceConsumer(max int32) (*splitter, TraceConsumer) {
 			}
 
 			if end := len(sizes) - 1; start < end {
-				s.Ranges = append(s.Ranges, Range{
+				if len(s.Ranges) >= cap(s.Ranges) { s.Ranges = mxutil.GrowCap(s.Ranges) }
+				s.Ranges = push(s.Ranges, Range{
 					Name:      fmt.Sprintf("%v-%v", time.Duration(sizes[start].Time*1000), time.Duration(sizes[end].Time*1000)),
 					Start:     start,
 					End:       end,

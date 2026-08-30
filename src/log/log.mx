@@ -105,7 +105,7 @@ func itoa(buf *[]byte, i int32, wid int32) {
 	}
 	// i < 10
 	b[bp] = byte('0' + i)
-	*buf = append(*buf, b[bp:]...)
+	*buf = push(*buf, b[bp:]...)
 }
 
 // formatHeader writes log header to buf in following order:
@@ -115,7 +115,7 @@ func itoa(buf *[]byte, i int32, wid int32) {
 //   - l.prefix (if it's not blank and Lmsgprefix is set).
 func formatHeader(buf *[]byte, t time.Time, prefix []byte, flag int32, file []byte, line int32) {
 	if flag&Lmsgprefix == 0 {
-		*buf = append(*buf, prefix...)
+		*buf = push(*buf, prefix...)
 	}
 	if flag&(Ldate|Ltime|Lmicroseconds) != 0 {
 		if flag&LUTC != 0 {
@@ -124,24 +124,24 @@ func formatHeader(buf *[]byte, t time.Time, prefix []byte, flag int32, file []by
 		if flag&Ldate != 0 {
 			year, month, day := t.Date()
 			itoa(buf, year, 4)
-			*buf = append(*buf, '/')
+			*buf = push(*buf, '/')
 			itoa(buf, int32(month), 2)
-			*buf = append(*buf, '/')
+			*buf = push(*buf, '/')
 			itoa(buf, day, 2)
-			*buf = append(*buf, ' ')
+			*buf = push(*buf, ' ')
 		}
 		if flag&(Ltime|Lmicroseconds) != 0 {
 			hour, min, sec := t.Clock()
 			itoa(buf, hour, 2)
-			*buf = append(*buf, ':')
+			*buf = push(*buf, ':')
 			itoa(buf, min, 2)
-			*buf = append(*buf, ':')
+			*buf = push(*buf, ':')
 			itoa(buf, sec, 2)
 			if flag&Lmicroseconds != 0 {
-				*buf = append(*buf, '.')
+				*buf = push(*buf, '.')
 				itoa(buf, t.Nanosecond()/1e3, 6)
 			}
-			*buf = append(*buf, ' ')
+			*buf = push(*buf, ' ')
 		}
 	}
 	if flag&(Lshortfile|Llongfile) != 0 {
@@ -155,13 +155,13 @@ func formatHeader(buf *[]byte, t time.Time, prefix []byte, flag int32, file []by
 			}
 			file = short
 		}
-		*buf = append(*buf, file...)
-		*buf = append(*buf, ':')
+		*buf = push(*buf, file...)
+		*buf = push(*buf, ':')
 		itoa(buf, line, -1)
-		*buf = append(*buf, ": "...)
+		*buf = push(*buf, ": "...)
 	}
 	if flag&Lmsgprefix != 0 {
-		*buf = append(*buf, prefix...)
+		*buf = push(*buf, prefix...)
 	}
 }
 
@@ -181,7 +181,7 @@ func putBuffer(p *[]byte) {
 // paths it will be 2.
 func (l *Logger) Output(calldepth int32, s []byte) error {
 	return l.output(0, calldepth+1, func(b []byte) []byte { // +1 for this frame.
-		return append(b, s...)
+		return push(b, s...)
 	})
 }
 
@@ -226,7 +226,7 @@ func (l *Logger) output(pc uintptr, calldepth int32, appendOutput func([]byte) [
 	formatHeader(buf, now, prefix, flag, file, line)
 	*buf = appendOutput(*buf)
 	if len(*buf) == 0 || (*buf)[len(*buf)-1] != '\n' {
-		*buf = append(*buf, '\n')
+		*buf = push(*buf, '\n')
 	}
 
 	_, err := l.out.Write(*buf)
@@ -242,14 +242,14 @@ func ensureLog() {
 	logInited = true
 	internal.DefaultOutput = func(pc uintptr, data []byte) error {
 		return _std().output(pc, 0, func(buf []byte) []byte {
-			return append(buf, data...)
+			return push(buf, data...)
 		})
 	}
 }
 
 // Print calls l.Output to print to the logger.
 // Arguments are handled in the manner of [fmt.Print].
-func (l *Logger) Print(v ...any) {
+func (l *Logger) Print(v ...fmt.Stringer) {
 	l.output(0, 2, func(b []byte) []byte {
 		return fmt.Append(b, v...)
 	})
@@ -257,7 +257,7 @@ func (l *Logger) Print(v ...any) {
 
 // Printf calls l.Output to print to the logger.
 // Arguments are handled in the manner of [fmt.Printf].
-func (l *Logger) Printf(format []byte, v ...any) {
+func (l *Logger) Printf(format []byte, v ...fmt.Stringer) {
 	l.output(0, 2, func(b []byte) []byte {
 		return fmt.Appendf(b, format, v...)
 	})
@@ -265,14 +265,14 @@ func (l *Logger) Printf(format []byte, v ...any) {
 
 // Println calls l.Output to print to the logger.
 // Arguments are handled in the manner of [fmt.Println].
-func (l *Logger) Println(v ...any) {
+func (l *Logger) Println(v ...fmt.Stringer) {
 	l.output(0, 2, func(b []byte) []byte {
 		return fmt.Appendln(b, v...)
 	})
 }
 
 // Fatal is equivalent to l.Print() followed by a call to [os.Exit](1).
-func (l *Logger) Fatal(v ...any) {
+func (l *Logger) Fatal(v ...fmt.Stringer) {
 	l.output(0, 2, func(b []byte) []byte {
 		return fmt.Append(b, v...)
 	})
@@ -280,7 +280,7 @@ func (l *Logger) Fatal(v ...any) {
 }
 
 // Fatalf is equivalent to l.Printf() followed by a call to [os.Exit](1).
-func (l *Logger) Fatalf(format []byte, v ...any) {
+func (l *Logger) Fatalf(format []byte, v ...fmt.Stringer) {
 	l.output(0, 2, func(b []byte) []byte {
 		return fmt.Appendf(b, format, v...)
 	})
@@ -288,7 +288,7 @@ func (l *Logger) Fatalf(format []byte, v ...any) {
 }
 
 // Fatalln is equivalent to l.Println() followed by a call to [os.Exit](1).
-func (l *Logger) Fatalln(v ...any) {
+func (l *Logger) Fatalln(v ...fmt.Stringer) {
 	l.output(0, 2, func(b []byte) []byte {
 		return fmt.Appendln(b, v...)
 	})
@@ -296,28 +296,28 @@ func (l *Logger) Fatalln(v ...any) {
 }
 
 // Panic is equivalent to l.Print() followed by a call to panic().
-func (l *Logger) Panic(v ...any) {
+func (l *Logger) Panic(v ...fmt.Stringer) {
 	s := fmt.Sprint(v...)
 	l.output(0, 2, func(b []byte) []byte {
-		return append(b, s...)
+		return push(b, s...)
 	})
 	panic(s)
 }
 
 // Panicf is equivalent to l.Printf() followed by a call to panic().
-func (l *Logger) Panicf(format []byte, v ...any) {
+func (l *Logger) Panicf(format []byte, v ...fmt.Stringer) {
 	s := fmt.Sprintf(format, v...)
 	l.output(0, 2, func(b []byte) []byte {
-		return append(b, s...)
+		return push(b, s...)
 	})
 	panic(s)
 }
 
 // Panicln is equivalent to l.Println() followed by a call to panic().
-func (l *Logger) Panicln(v ...any) {
+func (l *Logger) Panicln(v ...fmt.Stringer) {
 	s := fmt.Sprintln(v...)
 	l.output(0, 2, func(b []byte) []byte {
-		return append(b, s...)
+		return push(b, s...)
 	})
 	panic(s)
 }
@@ -389,7 +389,7 @@ func Writer() io.Writer {
 
 // Print calls Output to print to the standard logger.
 // Arguments are handled in the manner of [fmt.Print].
-func Print(v ...any) {
+func Print(v ...fmt.Stringer) {
 	_std().output(0, 2, func(b []byte) []byte {
 		return fmt.Append(b, v...)
 	})
@@ -397,7 +397,7 @@ func Print(v ...any) {
 
 // Printf calls Output to print to the standard logger.
 // Arguments are handled in the manner of [fmt.Printf].
-func Printf(format []byte, v ...any) {
+func Printf(format []byte, v ...fmt.Stringer) {
 	_std().output(0, 2, func(b []byte) []byte {
 		return fmt.Appendf(b, format, v...)
 	})
@@ -405,14 +405,14 @@ func Printf(format []byte, v ...any) {
 
 // Println calls Output to print to the standard logger.
 // Arguments are handled in the manner of [fmt.Println].
-func Println(v ...any) {
+func Println(v ...fmt.Stringer) {
 	_std().output(0, 2, func(b []byte) []byte {
 		return fmt.Appendln(b, v...)
 	})
 }
 
 // Fatal is equivalent to [Print] followed by a call to [os.Exit](1).
-func Fatal(v ...any) {
+func Fatal(v ...fmt.Stringer) {
 	_std().output(0, 2, func(b []byte) []byte {
 		return fmt.Append(b, v...)
 	})
@@ -420,7 +420,7 @@ func Fatal(v ...any) {
 }
 
 // Fatalf is equivalent to [Printf] followed by a call to [os.Exit](1).
-func Fatalf(format []byte, v ...any) {
+func Fatalf(format []byte, v ...fmt.Stringer) {
 	_std().output(0, 2, func(b []byte) []byte {
 		return fmt.Appendf(b, format, v...)
 	})
@@ -428,7 +428,7 @@ func Fatalf(format []byte, v ...any) {
 }
 
 // Fatalln is equivalent to [Println] followed by a call to [os.Exit](1).
-func Fatalln(v ...any) {
+func Fatalln(v ...fmt.Stringer) {
 	_std().output(0, 2, func(b []byte) []byte {
 		return fmt.Appendln(b, v...)
 	})
@@ -436,28 +436,28 @@ func Fatalln(v ...any) {
 }
 
 // Panic is equivalent to [Print] followed by a call to panic().
-func Panic(v ...any) {
+func Panic(v ...fmt.Stringer) {
 	s := fmt.Sprint(v...)
 	_std().output(0, 2, func(b []byte) []byte {
-		return append(b, s...)
+		return push(b, s...)
 	})
 	panic(s)
 }
 
 // Panicf is equivalent to [Printf] followed by a call to panic().
-func Panicf(format []byte, v ...any) {
+func Panicf(format []byte, v ...fmt.Stringer) {
 	s := fmt.Sprintf(format, v...)
 	_std().output(0, 2, func(b []byte) []byte {
-		return append(b, s...)
+		return push(b, s...)
 	})
 	panic(s)
 }
 
 // Panicln is equivalent to [Println] followed by a call to panic().
-func Panicln(v ...any) {
+func Panicln(v ...fmt.Stringer) {
 	s := fmt.Sprintln(v...)
 	_std().output(0, 2, func(b []byte) []byte {
-		return append(b, s...)
+		return push(b, s...)
 	})
 	panic(s)
 }
@@ -471,6 +471,6 @@ func Panicln(v ...any) {
 // for the caller of Output.
 func Output(calldepth int32, s []byte) error {
 	return _std().output(0, calldepth+1, func(b []byte) []byte { // +1 for this frame.
-		return append(b, s...)
+		return push(b, s...)
 	})
 }

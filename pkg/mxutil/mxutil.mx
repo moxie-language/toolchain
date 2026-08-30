@@ -42,6 +42,7 @@ func ResetConcatImportSegs() {
 }
 
 func AppendConcatImportSeg(seg ImportSeg) {
+	if len(ConcatImportSegs) >= cap(ConcatImportSegs) { ConcatImportSegs = GrowCap(ConcatImportSegs) }
 	push(ConcatImportSegs, seg)
 }
 
@@ -107,7 +108,7 @@ func Getenv(name string) (s string) {
 }
 
 //export malloc
-func cMalloc(size int32) unsafe.Pointer
+func cMalloc(size int32) (r0 unsafe.Pointer)
 
 //export free
 func cFree(ptr unsafe.Pointer)
@@ -119,7 +120,7 @@ func ListFiles(dir, ext string) (ss []string) {
 	if n <= 0 {
 		return nil
 	}
-	var names [256]string
+	names := []string{:256}
 	start := int32(0)
 	ni := int32(0)
 	for i := int32(0); i < n; i++ {
@@ -134,8 +135,6 @@ func ListFiles(dir, ext string) (ss []string) {
 	if ni == 0 {
 		return nil
 	}
-	// Use C heap allocation to avoid arena lifetime issues with return value.
-	// Copy names to C buffer, then result slice wraps C buffer.
 	total := ni
 	result := []string{:total}
 	for j := int32(0); j < total; j = j + 1 {
@@ -150,12 +149,14 @@ func SplitLines(s string) (ss []string) {
 	for i := int32(0); i < int32(len(s)); i++ {
 		if s[i] == '\n' {
 			if i > start {
+				if len(result) >= cap(result) { result = GrowCap(result) }
 				push(result, s[start:i])
 			}
 			start = i + 1
 		}
 	}
 	if start < int32(len(s)) {
+		if len(result) >= cap(result) { result = GrowCap(result) }
 		push(result, s[start:])
 	}
 	return result
@@ -217,10 +218,12 @@ func SplitSlash(s string) (ss []string) {
 	start := int32(0)
 	for i := int32(0); i < int32(len(s)); i++ {
 		if s[i] == '/' {
+			if len(parts) >= cap(parts) { parts = GrowCap(parts) }
 			push(parts, s[start:i])
 			start = i + 1
 		}
 	}
+	if len(parts) >= cap(parts) { parts = GrowCap(parts) }
 	push(parts, s[start:])
 	return parts
 }
@@ -235,6 +238,7 @@ func CleanPath(path string) (s string) {
 		if p == ".." && len(out) > 0 && out[len(out)-1] != ".." {
 			out = out[:len(out)-1]
 		} else {
+			if len(out) >= cap(out) { out = GrowCap(out) }
 			push(out, p)
 		}
 	}
@@ -263,8 +267,10 @@ func JoinStrings(ss []string, sep string) (s string) {
 	buf := []byte{:0:n}
 	for i, sv := range ss {
 		if i > 0 {
+			if len(buf) >= cap(buf) { buf = GrowCap(buf) }
 			push(buf, sep...)
 		}
+		if len(buf) >= cap(buf) { buf = GrowCap(buf) }
 		push(buf, sv...)
 	}
 	return string(buf)
@@ -276,6 +282,7 @@ func AppendUniq(ss []string, s string) (ss2 []string) {
 			return ss
 		}
 	}
+	if len(ss) >= cap(ss) { ss = GrowCap(ss) }
 	push(ss, s)
 	return ss
 }
@@ -287,6 +294,7 @@ func SplitBySpace(s string) (ss []string) {
 	for i := int32(0); i < int32(len(s)); i++ {
 		if s[i] == ' ' || s[i] == '\t' {
 			if inWord {
+				if len(result) >= cap(result) { result = GrowCap(result) }
 				push(result, s[start:i])
 				inWord = false
 			}
@@ -298,6 +306,7 @@ func SplitBySpace(s string) (ss []string) {
 		}
 	}
 	if inWord {
+		if len(result) >= cap(result) { result = GrowCap(result) }
 		push(result, s[start:])
 	}
 	return result
@@ -433,4 +442,20 @@ func IsRemotePath(path string) (ok bool) {
 		}
 	}
 	return false
+}
+
+// GrowCap returns s with capacity at least len(s)+1, doubling (min 16)
+// when full. Explicit growth only - no automatic grow. Old backing
+// arrays are left to the arena.
+func GrowCap[T any](s []T) (r0 []T) {
+	if len(s) < cap(s) {
+		return s
+	}
+	nc := cap(s) * 2
+	if nc < 16 {
+		nc = 16
+	}
+	nb := []T{:0:nc}
+	copy(nb[:len(s)], s)
+	return nb[:len(s)]
 }

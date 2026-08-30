@@ -45,8 +45,8 @@ func translate(in chan Point, out chan Point) {
 }
 
 func main() {
-	in := make(chan Point)
-	out := make(chan Point)
+	in := chan Point{}
+	out := chan Point{}
 	spawn(translate, in, out)
 
 	for i := int32(0); i < 3; i++ {

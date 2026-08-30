@@ -69,11 +69,30 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 				isFloatToInt := (elemType == "double" || elemType == "float") && len(override) > 0 && override[0] == 'i'
 				isScalarToAgg := len(elemType) > 0 && (elemType[0] == 'i' || elemType == "double" || elemType == "float") && len(override) > 0 && override[0] == '{'
 				isAggToScalar := len(elemType) > 0 && elemType[0] == '{' && len(override) > 0 && (override[0] == 'i' || override == "double" || override == "float")
-				if !bothScalar && !isFloatToInt && !isScalarToAgg && !isAggToScalar {
+				if !bothScalar && !isFloatToInt && !isAggToScalar {
 					elemType = override
 					e.allocTypes[a] = elemType
 				}
 			}
+		}
+	}
+	// If SSAType indicates an aggregate but inference says scalar,
+	// use SSAType to avoid type mismatch cascades.
+	sst := e.llvmType(a.SSAType())
+	if (sst != "void" && sst != "ptr" && len(sst) > 0 && sst[0] == '{') || sst == "ptr" {
+		ei := elemType
+		if sst == "ptr" {
+			// SSAType is pointer: prefer an aggregate call-arg type
+			// over a scalar type from zero-init stores.
+			inf := e.inferAllocTypeFromCallArgs(a)
+			ei2 := ei == "i1" || ei == "i8" || ei == "i16" || ei == "i32" || ei == "i64" || ei == "float" || ei == "double"
+			if inf != "" && inf[0] == '{' && ei2 {
+				elemType = inf
+				e.allocTypes[a] = inf
+			}
+		} else if ei == "i1" || ei == "i8" || ei == "i16" || ei == "i32" || ei == "i64" || ei == "float" || ei == "double" || ei == "ptr" {
+			elemType = sst
+			e.allocTypes[a] = sst
 		}
 	}
 	isSimple2 := elemType == "i1" || elemType == "i8" || elemType == "i16" || elemType == "i32" || elemType == "i64" || elemType == "float" || elemType == "double" || elemType == "ptr"
@@ -81,7 +100,6 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 		if faType := e.inferAllocTypeFromFieldAddrs(a, elemType); faType != "" {
 			retType := e.inferAllocTypeFromReturn(a)
 			callType := e.inferAllocTypeFromCallArgs(a)
-			appendType := e.inferAllocTypeFromAppendUsage(a)
 			best := faType
 			if retType != "" && len(retType) > len(best) {
 				best = retType
@@ -89,13 +107,20 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 			if callType != "" && len(callType) > len(best) {
 				best = callType
 			}
-			if appendType != "" && len(appendType) > len(best) {
-				best = appendType
-			}
 			if elemType != best {
 				elemType = best
 				e.allocTypes[a] = elemType
 			}
+		}
+	}
+	// Final: if SSAType is aggregate but inference produced scalar,
+	// SSAType wins to prevent cascading type mismatches.
+	sst2 := e.llvmType(a.SSAType())
+	if sst2 != "void" && sst2 != "ptr" && len(sst2) > 0 && sst2[0] == '{' {
+		ei2 := elemType
+		if ei2 == "i1" || ei2 == "i8" || ei2 == "i16" || ei2 == "i32" || ei2 == "i64" || ei2 == "float" || ei2 == "double" || ei2 == "ptr" {
+			elemType = sst2
+			e.allocTypes[a] = sst2
 		}
 	}
 	if a.Heap {
@@ -116,7 +141,7 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 		e.w(" = alloca ")
 		e.w(elemType)
 		e.w("\n")
-		e.w("  store volatile volatile ") ; e.w(elemType) ; e.w(" zeroinitializer, ptr ") ; e.w(reg) ; e.w("\n")
+		e.w("  store volatile ") ; e.w(elemType) ; e.w(" zeroinitializer, ptr ") ; e.w(reg) ; e.w("\n")
 	}
 }
 
@@ -133,7 +158,7 @@ func (e *irEmitter) inferAllocTypeFromStores(a *SSAAlloc) (s string) {
 					return vt
 				}
 				if call, ok3 := sv.Val.(*SSACall); ok3 {
-					if b2, ok4 := call.Call.Value.(*SSABuiltin); ok4 && b2.SSAName() == "append" {
+					if b2, ok4 := call.Call.Value.(*SSABuiltin); ok4 && b2.SSAName() == "push" {
 						return e.sliceType()
 					}
 				}
@@ -217,7 +242,7 @@ func (e *irEmitter) inferAllocTypeFromCallArgs(a *SSAAlloc) (s string) {
 	return ""
 }
 
-func (e *irEmitter) inferAllocTypeFromAppendUsage(a *SSAAlloc) (s string) {
+func (e *irEmitter) inferAllocTypeFromPushUsage(a *SSAAlloc) (s string) {
 	allocName := a.SSAName()
 	loadNames := map[string]bool{}
 	for _, b := range e.curFunc.Blocks {
@@ -237,7 +262,7 @@ func (e *irEmitter) inferAllocTypeFromAppendUsage(a *SSAAlloc) (s string) {
 				continue
 			}
 			bi, ok2 := call.Call.Value.(*SSABuiltin)
-			if !ok2 || bi.SSAName() != "append" {
+			if !ok2 || bi.SSAName() != "push" {
 				continue
 			}
 			if len(call.Call.Args) < 2 {
@@ -307,6 +332,18 @@ func (e *irEmitter) inferAllocTypeFromFieldAddrs(a *SSAAlloc, baseType string) (
 								fieldTypes[fa.Field] = ft
 							}
 						}
+					}
+				}
+			}
+			// The field address carries the authoritative field type. A store
+			// value may be an untyped int constant (i32) truncated to a narrow
+			// field (u8/i8); using the store's type here would widen the struct
+			// layout and corrupt every field offset after it.
+			if fa.typ != nil {
+				if p, ok := SafeUnderlying(fa.typ).(*Pointer); ok && p.Base != nil {
+					ft := e.llvmType(p.Base)
+					if ft != "void" && ft != "" && ft != "ptr" {
+						fieldTypes[fa.Field] = ft
 					}
 				}
 			}

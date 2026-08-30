@@ -16,7 +16,7 @@
 #   - Darwin: ANONYMOUS_FALLBACK. Pass.
 set -euo pipefail
 
-MOXIEROOT="${MOXIEROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+MOXIEROOT="${MOXIEROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 MOXIE="${MOXIE:-$MOXIEROOT/moxie}"
 TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
@@ -28,7 +28,7 @@ BIN="$TMPDIR/secalloc_memfd_test"
 
 cd "$MOXIEROOT"
 
-if ! "$MOXIE" build -o "$BIN" ./tests/secalloc-memfd 2>"$TMPDIR/build.err"; then
+if ! "$MOXIE" build -o "$BIN" ./legacy/tests/secalloc-memfd 2>"$TMPDIR/build.err"; then
     echo "FAIL secalloc-memfd: compilation failed"
     cat "$TMPDIR/build.err"
     exit 1

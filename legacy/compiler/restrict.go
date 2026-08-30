@@ -18,53 +18,37 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// restrictedImports maps package paths that should not be used in Moxie code.
-var restrictedImports = map[string]string{
-	"strings": `use "bytes" instead of "strings" (string=[]byte)`,
-}
-
-// restrictedBuiltins maps Go builtins to the Moxie alternative.
-// The loader rewrites Moxie literal syntax to (make)(...) — parenthesized
-// form that the AST check skips. User-written make(...) has a bare Ident
-// which this check catches.
-var restrictedBuiltins = map[string]string{
-	"make":    "use literal syntax: []T{:n}, chan T{}, chan T{n}",
-	"new":     "use composite literal with & or var declaration",
-	"complex": "complex numbers not supported in moxie",
-	"real":    "complex numbers not supported in moxie",
-	"imag":    "complex numbers not supported in moxie",
-	"append":  "use push(s, v...) instead: no allocation, panics on capacity overflow",
-}
-
-// restrictedTypes maps type names to rejection reasons.
-// Note: string is NOT restricted — with string=[]byte type unification,
-// the types are interchangeable. The + operator restriction on strings
-// still enforces Moxie's | concatenation syntax.
-var restrictedTypes = map[string]string{
-	"int":        "use explicit width: int8, int16, int32, int64",
-	"uint":       "use explicit width: uint8, uint16, uint32, uint64",
-	"complex64":  "complex numbers not supported in moxie",
-	"complex128": "complex numbers not supported in moxie",
-	"uintptr":    "use explicit pointer types",
-}
-
 // isUserPackage returns true if a package should be subject to Moxie
 // language restrictions. Stdlib and stdlib-vendored packages are exempt.
 // User packages (identified by dots in the import path from the module
 // path) get full restrictions. "internal/" has no special semantics.
-func isUserPackage(pkg *ssa.Package) bool {
+// The discriminator for main packages is the main package's OWN module
+// path: only when the build root IS the moxie compiler module is the main
+// package exempt. Merely importing mxutil (which the runtime does) does not
+// exempt a program.
+func (b *builder) isUserPackage(pkg *ssa.Package) bool {
 	if pkg == nil {
 		return false
 	}
 	path := pkg.Pkg.Path()
-	if path == "main" || path == "command-line-arguments" {
-		// Main packages: check if the module is the moxie compiler itself.
-		// Packages within the compiler's own module are exempt from user
-		// restrictions (they're part of the compiler infrastructure).
-		modPath := moxieModulePath(pkg.Prog)
-		if modPath == "git.smesh.lol/moxie" {
+	// The moxie compiler's own packages are exempt from user restrictions.
+	// The main package is the compiler when it DIRECTLY imports the moxie
+	// compiler infrastructure (git.smesh.lol/moxie/pkg/...). Test programs
+	// staged inside the moxie tree import only stdlib/runtime, so they stay
+	// subject to the rules even though their module path is the moxie module.
+	if b.pkgModulePath == "git.smesh.lol/moxie" {
+		importsMoxiePkg := false
+		for _, imp := range pkg.Pkg.Imports() {
+			if strings.HasPrefix(imp.Path(), "git.smesh.lol/moxie/pkg/") {
+				importsMoxiePkg = true
+				break
+			}
+		}
+		if importsMoxiePkg {
 			return false
 		}
+	}
+	if path == "main" || path == "command-line-arguments" {
 		return true
 	}
 	if strings.HasPrefix(path, "golang.org/x/") {
@@ -76,34 +60,6 @@ func isUserPackage(pkg *ssa.Package) bool {
 		return false
 	}
 	return strings.Contains(path, ".")
-}
-
-// moxieModulePath returns the module path for the moxie compiler from the
-// SSA program's package set, or empty if not detected.
-func moxieModulePath(prog *ssa.Program) string {
-	// Check if any package in the program has a module path matching
-	// the moxie compiler. The compiler's own packages use import paths
-	// under git.smesh.lol/moxie.
-	for _, pkg := range prog.AllPackages() {
-		if pkg != nil && pkg.Pkg != nil {
-			path := pkg.Pkg.Path()
-			if path == "git.smesh.lol/moxie" || strings.HasPrefix(path, "git.smesh.lol/moxie/") {
-				return "git.smesh.lol/moxie"
-			}
-		}
-	}
-	return ""
-}
-
-// packageImportsUnsafe returns true if the package imports "unsafe".
-// Packages using unsafe.Pointer legitimately need uintptr for pointer arithmetic.
-func packageImportsUnsafe(pkg *ssa.Package) bool {
-	for _, imp := range pkg.Pkg.Imports() {
-		if imp.Path() == "unsafe" {
-			return true
-		}
-	}
-	return false
 }
 
 // isInitFunc returns true if fn is an init function (package init, synthetic
@@ -126,6 +82,20 @@ func isInitFunc(fn *ssa.Function) bool {
 	return false
 }
 
+// checkGlobalStore rejects stores that mutate package-level globals in user
+// code. Globals are initialized by init() and immutable afterward.
+// Sovereign self-mutating types are mutated through their methods (which
+// borrow the receiver's arena); direct stores bypass that and are illegal
+// for every global, sovereign or not.
+func (b *builder) checkGlobalStore(addr ssa.Value, pos token.Pos) {
+	if !b.isUserPackage(b.fn.Pkg) || isInitFunc(b.fn) {
+		return
+	}
+	if gn := globalName(addr); gn != "" {
+		b.addError(pos, "moxie: package globals are immutable outside init(): mutate through the methods of a sovereign self-mutating type")
+	}
+}
+
 // isGlobalStore returns true if addr is a direct global variable.
 // Only flags `global = value`, not `global.field = value` or
 // `(*global).field = value`. Field mutations through a global pointer
@@ -137,70 +107,90 @@ func isGlobalStore(addr ssa.Value) bool {
 }
 
 // globalName extracts the global variable name from an address, if any.
+// Field/index/deref stores go THROUGH the root: a global whose type is a
+// pointer is not the storage itself - mutations through it land in the
+// pointed-to object, which is heap-local state. Whole-global stores
+// (addr is the global itself) are always reported.
 func globalName(addr ssa.Value) string {
 	switch v := addr.(type) {
 	case *ssa.Global:
 		return v.Name()
 	case *ssa.FieldAddr:
-		return globalName(v.X)
+		return globalNameThrough(v.X)
 	case *ssa.IndexAddr:
-		return globalName(v.X)
+		return globalNameThrough(v.X)
 	case *ssa.UnOp:
 		if v.Op == token.MUL {
-			return globalName(v.X)
+			return globalNameThrough(v.X)
 		}
 	}
 	return ""
 }
 
-// checkMoxieRestrictions scans a function for uses of restricted features.
-// Only applies to user code — runtime packages are exempt.
-func (b *builder) checkMoxieRestrictions() {
-	if !isUserPackage(b.fn.Pkg) {
+// globalNameThrough reports the global an access path goes through, or ""
+// if the path goes through a global pointer (mutations land in the
+// pointed-to object) or is local. go/ssa wraps every Global's Type() in a
+// pointer, so unwrap the Elem to recover the declared type before testing
+// whether the declared type is itself a pointer.
+func globalNameThrough(v ssa.Value) string {
+	if g, ok := v.(*ssa.Global); ok {
+		decl := g.Type()
+		if p, isPtr := decl.Underlying().(*types.Pointer); isPtr {
+			decl = p.Elem()
+		}
+		if _, isPtr := decl.Underlying().(*types.Pointer); isPtr {
+			return ""
+		}
+		return g.Name()
+	}
+	return globalName(v)
+}
+
+// checkNamedReturns enforces named return values on ALL packages, including
+// the stdlib. It is intentionally NOT gated by isUserPackage: the stdlib was
+// converted to named returns, so the rule holds everywhere.
+func (b *builder) checkNamedReturns() {
+	syntax := b.fn.Syntax()
+	if syntax == nil {
 		return
 	}
-	// Check for restricted imports (only on the init function to avoid per-function spam).
-	if b.fn.Name() == "init" || (b.fn.Name() == "main" && b.fn.Pkg.Pkg.Name() == "main") {
-		for _, imp := range b.fn.Pkg.Pkg.Imports() {
-			if reason, restricted := restrictedImports[imp.Path()]; restricted {
-				b.addError(b.fn.Pos(), "moxie: import \""+imp.Path()+"\" is not allowed: "+reason)
-			}
+	decl, ok := syntax.(*ast.FuncDecl)
+	if !ok || decl.Type.Results == nil {
+		return
+	}
+	for _, field := range decl.Type.Results.List {
+		if len(field.Names) == 0 {
+			b.addError(field.Pos(), "moxie: unnamed return values are not allowed: name all return values")
 		}
 	}
-	// Ban functions named after restricted builtins.
-	if _, restricted := restrictedBuiltins[b.fn.Name()]; restricted {
-		b.addError(b.fn.Pos(), "moxie: function name '"+b.fn.Name()+"' shadows a restricted builtin")
+}
+
+// checkMoxieRestrictions scans a function for uses of restricted features.
+// Model rules (channel completeness) apply to all code, stdlib included.
+// The remaining checks apply only to user code — runtime packages are exempt.
+func (b *builder) checkMoxieRestrictions() {
+	// Every channel must have both a sender and a listener — a domain-isolation
+	// invariant that holds for stdlib code too. No exemptions.
+	b.checkChannelCompleteness()
+
+	if !b.isUserPackage(b.fn.Pkg) {
+		return
 	}
 	for _, block := range b.fn.Blocks {
 		for _, instr := range block.Instrs {
 			b.checkInstrRestrictions(instr)
 		}
 	}
-	// Check function signature for restricted types.
-	b.checkSignatureRestrictions(b.fn)
-	// Check for fallthrough (lowered away by SSA, must check AST).
-	b.checkFallthroughRestriction()
 	// Check for restricted types and builtins in AST (SSA may optimize them away).
 	b.checkASTRestrictions()
+	// Check for fallthrough (lowered away by SSA, must check AST).
+	b.checkFallthroughRestriction()
 	// Check that non-constant spawn args aren't used after the spawn call.
 	b.checkSpawnMoveRestriction()
-	// Check that every channel has both a sender and a listener.
-	b.checkChannelCompleteness()
 }
 
 func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 	switch v := instr.(type) {
-	case *ssa.Call:
-		if builtin, ok := v.Call.Value.(*ssa.Builtin); ok {
-			if reason, restricted := restrictedBuiltins[builtin.Name()]; restricted {
-				b.addError(v.Pos(), "moxie: '"+builtin.Name()+"' is not allowed: "+reason)
-			}
-		}
-
-	// MakeChan, MakeMap, MakeSlice are NOT checked at SSA level — the loader
-	// rewrites Moxie literal syntax to (make)() calls. User-written make() is
-	// caught at AST level (restrictedBuiltins) where the bare Ident is visible.
-
 	case *ssa.BinOp:
 		// Reject + on non-numeric types (strings use | for concatenation).
 		if v.Op == token.ADD {
@@ -212,6 +202,10 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 		}
 
 	case *ssa.Store:
+		b.checkGlobalStore(v.Addr, v.Pos())
+
+	case *ssa.MapUpdate:
+		b.checkGlobalStore(v.Map, v.Pos())
 
 	case *ssa.MakeClosure:
 		// Moxie closures cannot capture variables from enclosing scopes.
@@ -224,43 +218,6 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 				names = append(names, fv.Name())
 			}
 			b.addError(v.Pos(), "moxie: closure captures outer variable(s) ["+strings.Join(names, ", ")+"]; pass as explicit parameter(s)")
-		}
-
-	// Note: new(T) and make() are caught by AST check (restrictedBuiltins),
-		// not SSA. Restricted types (uintptr, complex) are also AST-checked.
-	}
-}
-
-func (b *builder) checkTypeAtPos(t types.Type, pos token.Pos) {
-	if t == nil {
-		return
-	}
-	// Unwrap pointer types — SSA wraps local var types in pointers.
-	if ptr, ok := t.(*types.Pointer); ok {
-		t = ptr.Elem()
-	}
-	basic, ok := t.(*types.Basic)
-	if !ok {
-		return
-	}
-	if reason, restricted := restrictedTypes[basic.Name()]; restricted {
-		// uintptr is allowed in packages that import unsafe — needed for
-		// pointer arithmetic with unsafe.Pointer.
-		if basic.Name() == "uintptr" && packageImportsUnsafe(b.fn.Pkg) {
-			return
-		}
-		b.addError(pos, "moxie: type '"+basic.Name()+"' is not allowed: "+reason)
-	}
-}
-
-func (b *builder) checkSignatureRestrictions(fn *ssa.Function) {
-	sig := fn.Signature
-	for i := 0; i < sig.Params().Len(); i++ {
-		b.checkTypeAtPos(sig.Params().At(i).Type(), fn.Pos())
-	}
-	if sig.Results() != nil {
-		for i := 0; i < sig.Results().Len(); i++ {
-			b.checkTypeAtPos(sig.Results().At(i).Type(), fn.Pos())
 		}
 	}
 }
@@ -293,12 +250,6 @@ func (b *builder) checkASTRestrictions() {
 	ast.Inspect(syntax, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.Ident:
-			if reason, restricted := restrictedTypes[node.Name]; restricted {
-				if node.Name == "uintptr" && packageImportsUnsafe(b.fn.Pkg) {
-					return true
-				}
-				b.addError(node.Pos(), "moxie: type '"+node.Name+"' is not allowed: "+reason)
-			}
 			// Step 4: reject bare "any" keyword (alias for interface{}).
 			if node.Name == "any" {
 				b.addError(node.Pos(), "moxie: 'any' (empty interface) is not allowed: use a concrete type or named interface")
@@ -317,16 +268,6 @@ func (b *builder) checkASTRestrictions() {
 			if paren, ok := node.Fun.(*ast.ParenExpr); ok {
 				if !isTypeExpr(paren.X) {
 					b.addError(paren.Pos(), "moxie: parenthesized call target is not allowed: write f(x), not (f)(x)")
-				}
-			}
-			if ident, ok := node.Fun.(*ast.Ident); ok {
-				if reason, restricted := restrictedBuiltins[ident.Name]; restricted {
-					if ident.Name == "make" {
-						if b.isMakeExempt(ident.Pos()) {
-							return true
-						}
-					}
-					b.addError(ident.Pos(), "moxie: '"+ident.Name+"' is not allowed: "+reason)
 				}
 			}
 		case *ast.FuncDecl:
@@ -372,37 +313,6 @@ func isTypeExpr(expr ast.Expr) bool {
 		return true
 	case *ast.InterfaceType:
 		return true
-	}
-	return false
-}
-
-// isMakeExempt returns true if a make() call at the given position was
-// generated by the loader's literal-syntax rewriter. Also exempts .go
-// files (stdlib) and stdlib .mx overlays.
-func (b *builder) isMakeExempt(pos token.Pos) bool {
-	position := b.program.Fset.Position(pos)
-	if !strings.HasSuffix(position.Filename, ".mx") {
-		return true
-	}
-	path := b.fn.Pkg.Pkg.Path()
-	if path == "main" || path == "command-line-arguments" {
-		return b.isLoaderGeneratedMake(position)
-	}
-	if !strings.Contains(path, ".") {
-		return true
-	}
-	if strings.HasPrefix(path, "golang.org/x/") {
-		return true
-	}
-	return b.isLoaderGeneratedMake(position)
-}
-
-func (b *builder) isLoaderGeneratedMake(position token.Position) bool {
-	offsets := b.makeExemptOffsets[position.Filename]
-	for _, off := range offsets {
-		if position.Offset == off {
-			return true
-		}
 	}
 	return false
 }

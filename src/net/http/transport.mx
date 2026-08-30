@@ -10,6 +10,7 @@
 package http
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bufio"
 	"compress/gzip"
 	"container/list"
@@ -1092,7 +1093,7 @@ func (t *Transport) tryPutIdleConn(pconn *persistConn) error {
 			log.Fatalf("dup idle pconn %p in freelist", pconn)
 		}
 	}
-	t.idleConn[key] = append(idles, pconn)
+	t.idleConn[key] = push(idles, pconn)
 	t.idleLRU.add(pconn)
 	if t.MaxIdleConns != 0 && t.idleLRU.len() > t.MaxIdleConns {
 		oldest := t.idleLRU.removeOldest()
@@ -1352,7 +1353,8 @@ func (q *wantConnQueue) len() int32 {
 
 // pushBack adds w to the back of the queue.
 func (q *wantConnQueue) pushBack(w *wantConn) {
-	q.tail = append(q.tail, w)
+	if len(q.tail) >= cap(q.tail) { q.tail = mxutil.GrowCap(q.tail) }
+	q.tail = push(q.tail, w)
 }
 
 // popFront removes and returns the wantConn at the front of the queue.
@@ -2776,8 +2778,8 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 // a t.Logf func. See export_test.go's Request.WithT method.
 type tLogKey struct{}
 
-func (tr *transportRequest) logf(format string, args ...any) {
-	if logf, ok := tr.Request.Context().Value(tLogKey{}).(func(string, ...any)); ok {
+func (tr *transportRequest) logf(format string, args ...fmt.Stringer) {
+	if logf, ok := tr.Request.Context().Value(tLogKey{}).(func(string, ...fmt.Stringer)); ok {
 		logf(time.Now().Format(time.RFC3339Nano)+": "+format, args...)
 	}
 }

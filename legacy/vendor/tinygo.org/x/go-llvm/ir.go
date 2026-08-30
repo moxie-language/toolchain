@@ -958,6 +958,14 @@ func ConstExtractElement(vec, i Value) (rv Value) {
 	rv.C = C.LLVMConstExtractElement(vec.C, i.C)
 	return
 }
+func ConstExtractValue(agg Value, indices []uint32) (rv Value) {
+	cur := agg
+	for _, idx := range indices {
+		rv.C = C.LLVMGetOperand(cur.C, C.unsigned(idx))
+		cur = rv
+	}
+	return
+}
 func ConstInsertElement(vec, elem, i Value) (rv Value) {
 	rv.C = C.LLVMConstInsertElement(vec.C, elem.C, i.C)
 	return

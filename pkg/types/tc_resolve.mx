@@ -1,6 +1,7 @@
 package types
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"git.smesh.lol/moxie/pkg/syntax"
 	"git.smesh.lol/moxie/pkg/token"
 )
@@ -154,16 +155,19 @@ func (c *Checker) resolveStructType(e *syntax.StructType) (t *TCStruct) {
 	for i, f := range e.FieldList {
 		typ := c.resolveTypeExpr(f.Type)
 		if f.Name != nil {
+			if len(fields) >= cap(fields) { fields = mxutil.GrowCap(fields) }
 			push(fields, NewTCField(c.pkg, f.Name.Value, typ, false))
 		} else {
 			// anonymous/embedded
 			name := TypeBaseName(typ)
+			if len(fields) >= cap(fields) { fields = mxutil.GrowCap(fields) }
 			push(fields, NewTCField(c.pkg, name, typ, true))
 		}
 		tag := ""
 		if i < len(e.TagList) && e.TagList[i] != nil {
 			tag = e.TagList[i].Value
 		}
+		if len(tags) >= cap(tags) { tags = mxutil.GrowCap(tags) }
 		push(tags, tag)
 	}
 	return NewTCStruct(fields, tags)
@@ -177,6 +181,7 @@ func (c *Checker) resolveInterfaceType(e *syntax.InterfaceType) (t *TCInterface)
 			// embedded type
 			typ := c.resolveTypeExpr(f.Type)
 			if typ != nil {
+				if len(embeds) >= cap(embeds) { embeds = mxutil.GrowCap(embeds) }
 				push(embeds, typ)
 			}
 			continue
@@ -187,6 +192,7 @@ func (c *Checker) resolveInterfaceType(e *syntax.InterfaceType) (t *TCInterface)
 		}
 		sig := c.resolveFuncType(ft, nil)
 		if sig != nil {
+			if len(methods) >= cap(methods) { methods = mxutil.GrowCap(methods) }
 			push(methods, &IfaceMethod{Name: f.Name.Value, Sig: sig})
 		}
 	}
@@ -231,12 +237,23 @@ func (c *Checker) resolveFieldList(fields []*syntax.Field) (t *Tuple) {
 		return nil
 	}
 	var vars []*TCVar
-	for _, f := range fields {
+	for i, f := range fields {
 		typ := c.resolveTypeExpr(f.Type)
+		if typ == nil && f.Name != nil && i+1 < len(fields) {
+			// Grouped parameters: (a, b T) - the leading names carry no
+			// type; they inherit the type of the next field that has one.
+			for j := i + 1; j < len(fields); j++ {
+				if fields[j].Type != nil {
+					typ = c.resolveTypeExpr(fields[j].Type)
+					break
+				}
+			}
+		}
 		name := ""
 		if f.Name != nil {
 			name = f.Name.Value
 		}
+		if len(vars) >= cap(vars) { vars = mxutil.GrowCap(vars) }
 		push(vars, NewTCVar(c.pkg, name, typ))
 	}
 	return NewTuple(vars...)

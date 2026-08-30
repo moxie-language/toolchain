@@ -1,6 +1,9 @@
 package types
 
-import "git.smesh.lol/moxie/pkg/mxutil"
+import (
+	"git.smesh.lol/moxie/pkg/mxutil"
+	"runtime"
+)
 
 // UniverseState holds all predeclared type system state.
 // Owned by the caller. No globals - all access through this struct.
@@ -17,6 +20,10 @@ type UniverseState struct {
 // LookupByName returns the package with the given short name, or nil.
 func (u *UniverseState) LookupByName(name string) (pkg *TCPackage) {
 	if u.ByName == nil || u.byNameSeq != int32(len(u.Registry)) {
+		// The ByName cache must outlive any single package compile, so
+		// build it in the root arena (the caller's arena owns the state).
+		saved := runtime.CurrentArena()
+		runtime.SetCurrentArena(runtime.RootArena())
 		u.ByName = map[string]*TCPackage{}
 		for _, p := range u.Registry {
 			if p != nil {
@@ -24,6 +31,7 @@ func (u *UniverseState) LookupByName(name string) (pkg *TCPackage) {
 			}
 		}
 		u.byNameSeq = int32(len(u.Registry))
+		runtime.SetCurrentArena(saved)
 	}
 	return u.ByName[name]
 }
@@ -48,7 +56,14 @@ func InitUniverse() (u *UniverseState) {
 			DirectImports: PkgDirectImports,
 		}
 	}
-	return buildUniverse()
+	// The universe (scope, types, the error interface) is referenced by
+	// every package compile in this process. Build it in the root arena
+	// in manual-arena mode so the allocations below survive this
+	// function's own fn-arena pop.
+	runtime.SovereignSetArena(runtime.RootArena())
+	u = buildUniverse()
+	runtime.SovereignRestoreArena(runtime.RootArena())
+	return u
 }
 
 // SetUniverseGlobals sets the package-level globals from a UniverseState.
@@ -88,6 +103,7 @@ func buildUniverse() (u *UniverseState) {
 		{Uint16, IsInteger | IsUnsigned | IsOrdered | IsNumeric, "uint16"},
 		{Uint32, IsInteger | IsUnsigned | IsOrdered | IsNumeric, "uint32"},
 		{Uint64, IsInteger | IsUnsigned | IsOrdered | IsNumeric, "uint64"},
+		{Uintptr, IsInteger | IsUnsigned | IsOrdered, "uintptr"},
 
 		{Float32, IsFloat | IsOrdered | IsNumeric, "float32"},
 		{Float64, IsFloat | IsOrdered | IsNumeric, "float64"},
@@ -159,11 +175,6 @@ func buildUniverse() (u *UniverseState) {
 	u.Error = NewTypeName(nil, "error", errIface)
 	s.Insert(u.Error)
 
-	complex64Type := NewNamed(NewTypeName(nil, "complex64", nil), u.Typ[Invalid])
-	s.Insert(complex64Type.Obj)
-	complex128Type := NewNamed(NewTypeName(nil, "complex128", nil), u.Typ[Invalid])
-	s.Insert(complex128Type.Obj)
-
 	anyIface := NewTCInterface(nil, nil)
 	anyIface.Complete()
 	s.Insert(NewTypeName(nil, "any", anyIface))
@@ -177,7 +188,7 @@ func buildUniverse() (u *UniverseState) {
 	s.Insert(NewTCConst(nil, "iota", u.Typ[UntypedInt], untypedInt(0)))
 	s.Insert(NewTCConst(nil, "nil", u.Typ[UntypedNil], untypedNil()))
 
-	builtinNames := [18]string{
+	builtinNames := []string{
 		BuiltinAppend:  "append",
 		BuiltinCap:     "cap",
 		BuiltinClear:   "clear",
@@ -197,10 +208,19 @@ func buildUniverse() (u *UniverseState) {
 		BuiltinSpawn:   "spawn",
 	}
 	for id, name := range builtinNames {
+		// complex/real/imag are removed from Moxie: the names stay in the
+		// dense slice (so explicit indices are preserved) but are not
+		// registered, so they resolve as undefined.
+		if BuiltinID(id) == BuiltinComplex || BuiltinID(id) == BuiltinReal || BuiltinID(id) == BuiltinImag {
+			continue
+		}
 		s.Insert(newBuiltin(name, BuiltinID(id)))
 	}
 	s.Insert(newBuiltin("min", BuiltinMin))
 	s.Insert(newBuiltin("max", BuiltinMax))
+	s.Insert(newBuiltin("push", BuiltinPush))
+	s.Insert(newBuiltin("pop", BuiltinPop))
+	s.Insert(newBuiltin("resize", BuiltinResize))
 	return u
 }
 
@@ -282,10 +302,12 @@ func (c *ConstInt) String() (s string) {
 	}
 	buf := []byte{:0:20}
 	for n > 0 {
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
 		push(buf, byte('0'+n%10))
 		n /= 10
 	}
 	if neg {
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
 		push(buf, '-')
 	}
 	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {

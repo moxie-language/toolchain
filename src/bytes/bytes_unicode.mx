@@ -1,6 +1,7 @@
 package bytes
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"internal/bytealg"
 	"unicode"
 	"unicode/utf8"
@@ -87,7 +88,8 @@ func FieldsFunc(s []byte, f func(rune) bool) [][]byte {
 		}
 		if f(r) {
 			if start >= 0 {
-				spans = append(spans, span{start, i})
+				if len(spans) >= cap(spans) { spans = mxutil.GrowCap(spans) }
+				spans = push(spans, span{start, i})
 				start = -1
 			}
 		} else {
@@ -100,7 +102,8 @@ func FieldsFunc(s []byte, f func(rune) bool) [][]byte {
 
 	// Last field might end at EOF.
 	if start >= 0 {
-		spans = append(spans, span{start, len(s)})
+		if len(spans) >= cap(spans) { spans = mxutil.GrowCap(spans) }
+		spans = push(spans, span{start, len(s)})
 	}
 
 	// Create subslices from recorded field indices.
@@ -120,7 +123,7 @@ func Join(s [][]byte, sep []byte) []byte {
 	}
 	if len(s) == 1 {
 		// Just return a copy.
-		return append([]byte(nil), s[0]...)
+		return push([]byte(nil), s[0]...)
 	}
 
 	var n int32
@@ -208,7 +211,7 @@ func ToUpper(s []byte) []byte {
 	if isASCII { // optimize for ASCII-only byte slices.
 		if !hasLower {
 			// Just return a copy.
-			return append([]byte(""), s...)
+			return push([]byte(""), s...)
 		}
 		b := bytealg.MakeNoZero(len(s))[:len(s):len(s)]
 		for i := 0; i < len(s); i++ {
@@ -239,7 +242,7 @@ func ToLower(s []byte) []byte {
 
 	if isASCII { // optimize for ASCII-only byte slices.
 		if !hasUpper {
-			return append([]byte(""), s...)
+			return push([]byte(""), s...)
 		}
 		b := bytealg.MakeNoZero(len(s))[:len(s):len(s)]
 		for i := 0; i < len(s); i++ {
@@ -289,7 +292,8 @@ func ToValidUTF8(s, replacement []byte) []byte {
 		if c < utf8.RuneSelf {
 			i++
 			invalid = false
-			b = append(b, c)
+			if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+			b = push(b, c)
 			continue
 		}
 		_, wid := utf8.DecodeRune(s[i:])
@@ -297,12 +301,14 @@ func ToValidUTF8(s, replacement []byte) []byte {
 			i++
 			if !invalid {
 				invalid = true
-				b = append(b, replacement...)
+				if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+				b = push(b, replacement...)
 			}
 			continue
 		}
 		invalid = false
-		b = append(b, s[i:i+wid]...)
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, s[i:i+wid]...)
 		i += wid
 	}
 	return b
@@ -689,7 +695,7 @@ func Replace(s, old, new []byte, n int32) []byte {
 	}
 	if m == 0 {
 		// Just return a copy.
-		return append([]byte(nil), s...)
+		return push([]byte(nil), s...)
 	}
 	if n < 0 || m < n {
 		n = m
@@ -887,7 +893,7 @@ func Clone(b []byte) []byte {
 	if b == nil {
 		return nil
 	}
-	return append([]byte{}, b...)
+	return push([]byte{}, b...)
 }
 
 // CutPrefix returns s without the provided leading prefix byte slice

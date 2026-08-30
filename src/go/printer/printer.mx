@@ -6,6 +6,7 @@
 package printer
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"fmt"
 	"go/ast"
 	"go/build/constraint"
@@ -95,7 +96,7 @@ type printer struct {
 	cachedLine int32 // line corresponding to cachedPos
 }
 
-func (p *printer) internalError(msg ...any) {
+func (p *printer) internalError(msg ...fmt.Stringer) {
 	if debug {
 		fmt.Print(p.pos.String() + ": ")
 		fmt.Println(msg...)
@@ -203,9 +204,12 @@ func (p *printer) writeLineDirective(pos token.Position) {
 			return
 		}
 
-		p.output = append(p.output, tabwriter.Escape) // protect '\n' in //line from tabwriter interpretation
-		p.output = append(p.output, fmt.Sprintf("//line %s:%d\n", pos.Filename, pos.Line)...)
-		p.output = append(p.output, tabwriter.Escape)
+		if len(p.output) >= cap(p.output) { p.output = mxutil.GrowCap(p.output) }
+		p.output = push(p.output, tabwriter.Escape) // protect '\n' in //line from tabwriter interpretation
+		if len(p.output) >= cap(p.output) { p.output = mxutil.GrowCap(p.output) }
+		p.output = push(p.output, fmt.Sprintf("//line %s:%d\n", pos.Filename, pos.Line)...)
+		if len(p.output) >= cap(p.output) { p.output = mxutil.GrowCap(p.output) }
+		p.output = push(p.output, tabwriter.Escape)
 		// p.out must match the //line directive
 		p.out.Filename = pos.Filename
 		p.out.Line = pos.Line
@@ -218,7 +222,8 @@ func (p *printer) writeIndent() {
 	// must not be discarded by the tabwriter
 	n := p.Config.Indent + p.indent // include base indentation
 	for i := 0; i < n; i++ {
-		p.output = append(p.output, '\t')
+		if len(p.output) >= cap(p.output) { p.output = mxutil.GrowCap(p.output) }
+		p.output = push(p.output, '\t')
 	}
 
 	// update positions
@@ -250,7 +255,8 @@ func (p *printer) writeByte(ch byte, n int32) {
 	}
 
 	for i := 0; i < n; i++ {
-		p.output = append(p.output, ch)
+		if len(p.output) >= cap(p.output) { p.output = mxutil.GrowCap(p.output) }
+		p.output = push(p.output, ch)
 	}
 
 	// update positions
@@ -297,13 +303,16 @@ func (p *printer) writeString(pos token.Position, s string, isLit bool) {
 		// unchanged. Note that valid Go programs cannot contain
 		// tabwriter.Escape bytes since they do not appear in legal
 		// UTF-8 sequences.
-		p.output = append(p.output, tabwriter.Escape)
+		if len(p.output) >= cap(p.output) { p.output = mxutil.GrowCap(p.output) }
+		p.output = push(p.output, tabwriter.Escape)
 	}
 
 	if debug {
-		p.output = append(p.output, fmt.Sprintf("/*%s*/", pos)...) // do not update p.pos!
+		if len(p.output) >= cap(p.output) { p.output = mxutil.GrowCap(p.output) }
+		p.output = push(p.output, fmt.Sprintf("/*%s*/", pos)...) // do not update p.pos!
 	}
-	p.output = append(p.output, s...)
+	if len(p.output) >= cap(p.output) { p.output = mxutil.GrowCap(p.output) }
+	p.output = push(p.output, s...)
 
 	// update positions
 	nlines := 0
@@ -333,7 +342,8 @@ func (p *printer) writeString(pos token.Position, s string, isLit bool) {
 	}
 
 	if isLit {
-		p.output = append(p.output, tabwriter.Escape)
+		if len(p.output) >= cap(p.output) { p.output = mxutil.GrowCap(p.output) }
+		p.output = push(p.output, tabwriter.Escape)
 	}
 
 	p.last = p.pos
@@ -641,9 +651,11 @@ func (p *printer) writeComment(comment *ast.Comment) {
 	// shortcut common case of //-style comments
 	if text[1] == '/' {
 		if constraint.IsGoBuild(text) {
-			p.goBuild = append(p.goBuild, len(p.output))
+			if len(p.goBuild) >= cap(p.goBuild) { p.goBuild = mxutil.GrowCap(p.goBuild) }
+			p.goBuild = push(p.goBuild, len(p.output))
 		} else if constraint.IsPlusBuild(text) {
-			p.plusBuild = append(p.plusBuild, len(p.output))
+			if len(p.plusBuild) >= cap(p.plusBuild) { p.plusBuild = mxutil.GrowCap(p.plusBuild) }
+			p.plusBuild = push(p.plusBuild, len(p.output))
 		}
 		p.writeString(pos, trimRight(text), true)
 		return
@@ -898,7 +910,7 @@ func (p *printer) setPos(pos token.Pos) {
 // taking into account the amount and structure of any pending white-
 // space for best comment placement. Then, any leftover whitespace is
 // printed, followed by the actual token.
-func (p *printer) print(args ...any) {
+func (p *printer) print(args ...fmt.Stringer) {
 	for _, arg := range args {
 		// information about the current arg
 		var data string
@@ -1231,7 +1243,8 @@ func (p *trimmer) Write(data []byte) (n int32, err error) {
 		case inSpace:
 			switch b {
 			case '\t', ' ':
-				p.space = append(p.space, b)
+				if len(p.space) >= cap(p.space) { p.space = mxutil.GrowCap(p.space) }
+				p.space = push(p.space, b)
 			case '\n', '\f':
 				p.resetSpace() // discard trailing space
 				_, err = p.output.Write(aNewline)
@@ -1254,7 +1267,8 @@ func (p *trimmer) Write(data []byte) (n int32, err error) {
 			case '\t', ' ':
 				_, err = p.output.Write(data[m:n])
 				p.resetSpace()
-				p.space = append(p.space, b)
+				if len(p.space) >= cap(p.space) { p.space = mxutil.GrowCap(p.space) }
+				p.space = push(p.space, b)
 			case '\n', '\f':
 				_, err = p.output.Write(data[m:n])
 				p.resetSpace()

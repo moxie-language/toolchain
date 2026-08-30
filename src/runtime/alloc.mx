@@ -7,10 +7,16 @@
 // Arena structs are self-contained in their own mmap region (offset 0).
 // No linked lists. No heap allocation for metadata. Region ownership
 // is a bounded table scan of the arena's flat region registry.
+//
+// All fixed-size tables (fn stack, dom stack, borrow bitset, region
+// registries) are slices carved out of their owning mmap region after
+// the header struct. The arena's allocator offset starts PAST the
+// carved area, so allocation can never overwrite the tables.
 
 package runtime
 
 import (
+	"moxie"
 	"unsafe"
 )
 
@@ -29,15 +35,20 @@ const fnStackMax = int32(512)
 const domStackMax = int32(64)
 
 // DomainRoot lives at offset 0 of the domain's root mmap region.
-// Contains the function arena stack and child domain stack.
-// The root arena is embedded inline - fnStack[0] points to it.
+// Contains the function arena stack (as a slice carved from the same
+// region after the header) and child domain stack. The root arena is
+// embedded inline - fnStack[0] points to it.
 type DomainRoot struct {
-	fnStack  [512]*Arena
+	fnStack  []*Arena
 	fnTop    int32
-	_pad1    int32
-	domStack [64]uintptr // child domain root addresses
+	fnBorrow []uint64 // bit i set when fnStack[i] holds a sovereign borrow
+	sovScratch []uint64 // bit i set when fnStack[i] holds a sovereign scratch (transient)
+	stableArena *Arena // receiver sovereign arena of the current method (if any)
+	stableStack  []*Arena // stack of previous stable arenas for nested sovereign methods
+	stableTop    int32
+	sovereignRoot *hashmap // receiver -> sovereign arena, created lazily in root arena
+	domStack []uintptr // child domain root addresses
 	domTop   int32
-	_pad2    int32
 	root     Arena // inline root arena, fnStack[0] = &root
 }
 
@@ -51,24 +62,46 @@ type ArenaRegion struct {
 // arenaMaxRegions is the maximum number of regions per arena.
 const arenaMaxRegions = int32(1024)
 
+// arenaDefaultRegion is the capacity of chained (overflow) regions.
+const arenaDefaultRegion = uintptr(64) * 1024 * 1024 // 64MB chain regions
+
 // Arena is a bump-pointer allocator with a flat region registry.
-// For function arenas, the Arena struct lives at offset 0 of its
-// primary mmap region. No external allocation needed.
+// The Arena struct lives at offset 0 of its primary mmap region.
+// The region registry itself is a slice carved from the same region
+// immediately after the header struct; the allocator starts past it.
+//
+// Sovereign data arenas (sovereign != 0) belong to a sovGroup and record
+// every allocation in the group's allocation map so dead space can be
+// reclaimed by copy-compaction. They are never pooled.
 type Arena struct {
-	nregions int32
-	_pad     int32
-	regions  [1024]ArenaRegion
+	nregions  int32
+	sovereign int32 // nonzero: sovereign data arena (records allocations)
+	owner     *sovGroup
+	sovGroups int32 // live sovGroups whose receivers live in this arena
+	regions   []ArenaRegion
 }
 
 // Arena pool: bounded freelist of reset arenas for reuse.
 // Eliminates mmap/munmap syscalls for short-lived function arenas.
 const arenaPoolMax = int32(8)
 
-var arenaPool [8]*Arena
+var arenaPool []*Arena
 var arenaPoolN int32
 
+// sovDepth bounds the pointer-following recursion in the sovereign mark and
+// rebase walks when a pointer field targets an object outside the data arena
+// (compile-arena objects reached through receiver pointer fields).
+const sovMaxDepth = int32(2)
+var sovDepth int32
+
+// manualArena is the current manual compile arena (set by
+// SovereignSetArena). While active, FnArenaPush/FnArenaPop are no-ops so
+// the whole phase allocates into the manual arena directly, keeping the
+// manual arena current instead of burying it under scratch arenas.
+var manualArena *Arena
+
 //:noinline
-func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
+func alloc(size uintptr, td unsafe.Pointer) unsafe.Pointer {
 	if size == 0 {
 		size = 1
 	}
@@ -84,7 +117,7 @@ func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 	if a == nil {
 		runtimePanic("alloc: nil arena")
 	}
-	return ArenaAlloc(a, align(size))
+	return ArenaAllocTD(a, align(size), (*rawType)(td))
 }
 
 func ReadMemStats(m *MemStats) {
@@ -104,17 +137,14 @@ func ReadMemStats(m *MemStats) {
 
 // initDomain creates the domain root in a new mmap region.
 // Sets the one TLS slot. Called once per domain lifetime.
+// Carves fnStack/fnBorrow/domStack/root-region-registry out of the
+// region after the header; the root arena's allocator starts past them.
 func initDomain(capacity uintptr) {
 	capacity = (capacity + 4095) &^ 4095
-	headerSz := align(unsafe.Sizeof(DomainRoot{}))
+	headerSz := domainHeaderSize()
 	if capacity < headerSz+4096 {
 		capacity = (headerSz + 4096 + 4095) &^ 4095
 	}
-	printstring("DOMAIN_INIT cap=")
-	printuint64(uint64(capacity))
-	printstring(" hdr=")
-	printuint64(uint64(headerSz))
-	printstring("\n")
 	addr := mmap(nil, capacity, flag_PROT_READ|flag_PROT_WRITE,
 		flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
 	if addr == unsafe.Pointer(^uintptr(0)) {
@@ -122,9 +152,27 @@ func initDomain(capacity uintptr) {
 	}
 	memzero(addr, unsafe.Sizeof(DomainRoot{}))
 	dr := (*DomainRoot)(addr)
+	// carve backing tables after the header
+	p := uintptr(addr) + headerSz
+	dr.fnStack = rawSliceArena(p, fnStackMax)
+	p += uintptr(fnStackMax) * unsafe.Sizeof(&dr.root)
+	dr.fnBorrow = rawSliceU64(p, (fnStackMax+63)/64)
+	p += uintptr((fnStackMax+63)/64) * 8
+	dr.sovScratch = rawSliceU64(p, (fnStackMax+63)/64)
+	p += uintptr((fnStackMax+63)/64) * 8
+	dr.stableStack = rawSliceArena(p, fnStackMax)
+	p += uintptr(fnStackMax) * unsafe.Sizeof(&dr.root)
+	dr.domStack = rawSliceUptr(p, domStackMax)
+	p += uintptr(domStackMax) * unsafe.Sizeof(uintptr(0))
+	// arena pool: fixed slots carved from the domain region
+	arenaPool = rawSliceArena(p, arenaPoolMax)
+	p += uintptr(arenaPoolMax) * unsafe.Sizeof(&dr.root)
+	// root arena region registry
+	dr.root.regions = rawSliceRegion(p, arenaMaxRegions)
+	p += uintptr(arenaMaxRegions) * unsafe.Sizeof(ArenaRegion{})
 	dr.root.nregions = 1
 	dr.root.regions[0].base = uintptr(addr)
-	dr.root.regions[0].off = headerSz
+	dr.root.regions[0].off = p - uintptr(addr) // data starts past carved tables
 	dr.root.regions[0].cap = capacity
 	dr.fnStack[0] = &dr.root
 	dr.fnTop = 0
@@ -132,11 +180,21 @@ func initDomain(capacity uintptr) {
 	domainRoot = dr // write TLS slot once
 }
 
+// domainHeaderSize returns the aligned offset at which carved domain
+// backing tables begin: the padded header struct size.
+func domainHeaderSize() (sz uintptr) {
+	sz = align(unsafe.Sizeof(DomainRoot{}))
+	return sz
+}
+
 // --- Function arena stack ---
 
 // FnArenaPush creates a new function arena and pushes it onto the stack.
 // Returns the arena pointer.
 func FnArenaPush(capacity uintptr) (a *Arena) {
+	if manualArena != nil {
+		return manualArena
+	}
 	domainRoot.fnTop++
 	if domainRoot.fnTop >= fnStackMax {
 		runtimePanic("function arena stack overflow")
@@ -149,10 +207,27 @@ func FnArenaPush(capacity uintptr) (a *Arena) {
 // FnArenaPop removes the top function arena from the stack and returns it.
 // The caller is responsible for calling ArenaFree on the returned arena.
 func FnArenaPop() (a *Arena) {
+	if manualArena != nil {
+		return nil
+	}
 	a = domainRoot.fnStack[domainRoot.fnTop]
 	domainRoot.fnStack[domainRoot.fnTop] = nil
+	domainRoot.sovScratch[domainRoot.fnTop>>6] &^= 1 << (domainRoot.fnTop & 63)
 	domainRoot.fnTop--
 	return a
+}
+
+// SovereignMarkScratch marks the current fn arena as a sovereign method
+// scratch: during a store-back the codec treats it (and any ancestor
+// sovereign scratch) as transient, while regular fn arenas stay stable.
+func SovereignMarkScratch() {
+	if domainRoot == nil || manualArena != nil {
+		return
+	}
+	i := domainRoot.fnTop
+	if i > 0 {
+		domainRoot.sovScratch[i>>6] |= 1 << (i & 63)
+	}
 }
 
 // FnArenaPopFree pops the top function arena and frees it.
@@ -189,50 +264,947 @@ func SetCurrentArena(a *Arena) {
 	domainRoot.fnStack[domainRoot.fnTop] = a
 }
 
-// ArenaMark returns an opaque mark encoding the current allocation point.
-// High 32 bits: active region index. Low 32 bits: offset in that region.
-func ArenaMark() (mark uintptr) {
-	if domainRoot == nil {
-		return 0
-	}
-	a := domainRoot.fnStack[domainRoot.fnTop]
-	if a == nil {
-		return 0
-	}
-	idx := a.nregions - 1
-	return uintptr(idx)<<32 | a.regions[idx].off
+// --- Sovereign arena groups ---
+//
+// A sovereign type owns a group of three arenas: the data arena (the
+// type's live data structure), an allocation-map arena (one sovRecord per
+// data allocation), and a reference arena (stable sovSlot objects that
+// external holders point at - the slots are never moved, so compaction
+// only rewrites the slots and interior pointers).
+//
+// Mutating methods run with a scratch fn arena current. Allocations that
+// are stored into the receiver's data structure (identified statically by
+// the compiler) go directly to the data arena. At method end, everything
+// allocated during the call that did not end up reachable from the
+// receiver's fields is marked dead. Dead space is reclaimed lazily: when
+// the data arena would need a new region, the group is copy-compacted
+// into a fresh arena (live data shifted together at the front), and the
+// tail becomes free, zeroed on allocation.
+
+type sovRecord struct {
+	dataAddr uintptr
+	size     uintptr
+	typeDesc *rawType // walker descriptor; nil = opaque (walked by referrer)
+	batchID  int32
+	live     bool
+	newAddr  uintptr // set during copy-compact: the relocated address
 }
 
-// ArenaRestore resets the current arena to a previously saved mark.
-func ArenaRestore(mark uintptr) {
+// sovSlot is a stable external reference to sovereign-arena data.
+type sovSlot struct {
+	dataPtr unsafe.Pointer
+}
+
+// sovGroup is the per-receiver sovereign arena group.
+type sovGroup struct {
+	data     *Arena
+	allocTbl *Arena
+	refTbl   *Arena
+	recv     unsafe.Pointer
+	recvTypeDesc *rawType
+	curBatch int32
+	liveBytes  uintptr
+	allocBytes uintptr
+	batchMax   uintptr
+	escaped  bool
+	compacting bool // set during copy-compact: ArenaAlloc skips auto-record
+	recs  []*sovRecord // records in allocation order
+	recsSorted bool     // true when recs are sorted by dataAddr
+	batchStart []int32  // per-batch first-rec index stack (root lifetime)
+	slots []*sovSlot   // all slots ever allocated
+	ctxArena *Arena    // arena containing the receiver; group dies with it
+}
+
+// sovRootAlloc grows a root-lifetime slice without disturbing the current
+// arena.
+func sovRootAlloc(sz uintptr) unsafe.Pointer {
+	save := CurrentArena()
+	SetCurrentArena(domainRoot.fnStack[0])
+	p := alloc(sz, nil)
+	SetCurrentArena(save)
+	return p
+}
+
+// sovGrowRecs grows the record slice with root-lifetime backing.
+func sovGrowRecs(g *sovGroup) {
+	nc := cap(g.recs) * 2
+	if nc < 64 {
+		nc = 64
+	}
+	nb := unsafe.Slice((**sovRecord)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(&sovRecord{}))), nc)
+	copy(nb, g.recs)
+	g.recs = nb[:len(g.recs)]
+}
+
+// sovGrowSlots grows the slot slice with root-lifetime backing.
+func sovGrowSlots(g *sovGroup) {
+	nc := cap(g.slots) * 2
+	if nc < 16 {
+		nc = 16
+	}
+	nb := unsafe.Slice((**sovSlot)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(&sovSlot{}))), nc)
+	copy(nb, g.slots)
+	g.slots = nb[:len(g.slots)]
+}
+
+// sovNewArena creates a fresh non-pooled arena of the given capacity.
+func sovNewArena(capacity uintptr) (a *Arena) {
+	a = ArenaNew(capacity)
+	return a
+}
+
+// codecSovereignArena returns the receiver's sovereign group, lazily
+// creating it in the root arena and storing it in a root-arena hashmap
+// keyed by the receiver address.
+func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *rawType) (g *sovGroup) {
+	if recv == nil {
+		runtimePanic("sovereign: nil receiver")
+	}
+	m := domainRoot.sovereignRoot
+	if m == nil {
+		save := CurrentArena()
+		SetCurrentArena(domainRoot.fnStack[0])
+		m = hashmapMake(8, 8, 8, uint8(moxie.HashmapAlgorithmBinary))
+		domainRoot.sovereignRoot = m
+		SetCurrentArena(save)
+	}
+	keyv := recv
+	h := m.keyHash(unsafe.Pointer(&keyv), 8, m.seed)
+	var av unsafe.Pointer
+	if hashmapGet(m, unsafe.Pointer(&keyv), unsafe.Pointer(&av), 8, h) && av != nil {
+		return (*sovGroup)(av)
+	}
+	save := CurrentArena()
+	SetCurrentArena(domainRoot.fnStack[0])
+	g = (*sovGroup)(alloc(unsafe.Sizeof(sovGroup{}), nil))
+	g.data = sovNewArena(65536)
+	g.data.sovereign = 1
+	g.data.owner = g
+	g.allocTbl = sovNewArena(65536)
+	g.refTbl = sovNewArena(65536)
+	g.recv = recv
+	g.recvTypeDesc = recvTypeDesc
+	g.ctxArena = sovFindContainingArena(uintptr(recv))
+	if g.ctxArena != nil {
+		g.ctxArena.sovGroups++
+	}
+	av = unsafe.Pointer(g)
+	SetCurrentArena(save)
+	hashmapSet(m, unsafe.Pointer(&keyv), unsafe.Pointer(&av), h)
+	return g
+}
+
+// sovFindContainingArena returns the arena whose regions contain addr,
+// scanning the function arena stack (which covers the root arena, manual
+// arenas, and every pushed frame). nil when the receiver is not in any
+// live arena - the group is then untracked and dies with domain exit.
+func sovFindContainingArena(addr uintptr) (a *Arena) {
+	if domainRoot == nil {
+		return nil
+	}
+	for i := int32(0); i <= domainRoot.fnTop; i++ {
+		ca := domainRoot.fnStack[i]
+		if ca != nil && sovAddrInArena(ca, addr) {
+			return ca
+		}
+	}
+	return nil
+}
+
+// sovAddrInArena reports whether addr falls inside any of a's regions.
+func sovAddrInArena(a *Arena, addr uintptr) (ok bool) {
+	if a == nil {
+		return false
+	}
+	for i := int32(0); i < a.nregions; i++ {
+		r := a.regions[i]
+		if addr >= r.base && addr < r.base+r.cap {
+			return true
+		}
+	}
+	return false
+}
+
+// sovDataArena returns the group's data arena (for stable registration).
+func sovDataArena(g *sovGroup) (a *Arena) {
+	if g == nil {
+		return nil
+	}
+	return g.data
+}
+
+// codecRegStable registers the receiver's sovereign data arena (if the
+// group already exists) as the current frame's stable arena, without
+// acquiring one. Always calls SovereignRegStable (with nil when the group
+// does not exist) so the register/restore pair stays balanced.
+func codecRegStable(recv unsafe.Pointer) {
+	var a *Arena
+	if recv != nil {
+		m := domainRoot.sovereignRoot
+		if m != nil {
+			keyv := recv
+			h := m.keyHash(unsafe.Pointer(&keyv), 8, m.seed)
+			var av unsafe.Pointer
+			if hashmapGet(m, unsafe.Pointer(&keyv), unsafe.Pointer(&av), 8, h) {
+				g := (*sovGroup)(av)
+				a = g.data
+			}
+		}
+	}
+	SovereignRegStable(a)
+}
+
+// codecSovereignEnter starts a new allocation batch on the group. Called
+// by the compiler at the start of every mutating method on the receiver.
+func codecSovereignEnter(g *sovGroup) {
+	if len(g.batchStart) >= cap(g.batchStart) {
+		nc := cap(g.batchStart) * 2
+		if nc < 16 {
+			nc = 16
+		}
+		nb := unsafe.Slice((*int32)(sovRootAlloc(uintptr(nc)*4)), nc)
+		copy(nb, g.batchStart)
+		g.batchStart = nb[:len(g.batchStart)]
+	}
+	g.batchStart = push(g.batchStart, int32(len(g.recs)))
+	g.curBatch++
+}
+
+// sovAddRec appends an allocation-map record, keeping the recs slice's
+// sortedness flag up to date.
+func sovAddRec(g *sovGroup, dataAddr, size uintptr, typeDesc *rawType) {
+	if len(g.recs) >= cap(g.recs) {
+		sovGrowRecs(g)
+	}
+	rec := (*sovRecord)(ArenaAlloc(g.allocTbl, unsafe.Sizeof(sovRecord{})))
+	rec.dataAddr = dataAddr
+	rec.size = size
+	rec.typeDesc = typeDesc
+	rec.batchID = g.curBatch
+	rec.live = true
+	if n := len(g.recs); n > 0 && dataAddr < g.recs[n-1].dataAddr {
+		g.recsSorted = false
+	}
+	g.recs = push(g.recs, rec)
+	g.allocBytes += size
+	g.liveBytes += size
+}
+
+// codecSovereignAlloc allocates size bytes in the receiver's data arena
+// with an allocation-map record. typeDesc drives the mark/rebase walk;
+// pass nil for opaque blocks (e.g. slice element arrays walked by their
+// referrer). Used by the compiler for allocations stored into the
+// receiver's data structure.
+func codecSovereignAlloc(g *sovGroup, size uintptr, typeDesc *rawType) unsafe.Pointer {
+	p := arenaAllocRaw(g.data, align(size))
+	sovAddRec(g, uintptr(p), size, typeDesc)
+	return p
+}
+
+// sovInArena reports whether p lies in any allocated region of a.
+func sovInArena(a *Arena, p uintptr) (ok bool) {
+	if a == nil {
+		return false
+	}
+	for i := int32(0); i < a.nregions; i++ {
+		if p >= a.regions[i].base && p < a.regions[i].base+a.regions[i].cap {
+			return true
+		}
+	}
+	return false
+}
+
+// sovFind returns the allocation-map record containing address p, or nil
+// if p is not inside the data arena's allocated range.
+func sovFind(g *sovGroup, p uintptr) (r *sovRecord) {
+	n := int32(len(g.recs))
+	if n == 0 {
+		return nil
+	}
+	if !g.recsSorted {
+		sovSortRecs(g.recs)
+		g.recsSorted = true
+	}
+	lo := int32(0)
+	hi := n - 1
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		rec := g.recs[mid]
+		if p < rec.dataAddr {
+			hi = mid - 1
+		} else if p >= rec.dataAddr+rec.size {
+			lo = mid + 1
+		} else {
+			return rec
+		}
+	}
+	return nil
+}
+
+// sovSortRecs merge-sorts the record slice by dataAddr. Called only when
+// a fresh arena region landed below an earlier one, breaking the natural
+// allocation-order sorting.
+func sovSortRecs(recs []*sovRecord) {
+	n := int32(len(recs))
+	if n < 2 {
+		return
+	}
+	sovMergeSortRecs(recs, 0, n)
+}
+
+func sovMergeSortRecs(recs []*sovRecord, lo, hi int32) {
+	if hi-lo < 2 {
+		return
+	}
+	mid := (lo + hi) / 2
+	sovMergeSortRecs(recs, lo, mid)
+	sovMergeSortRecs(recs, mid, hi)
+	tmp := []*sovRecord{:hi-lo}
+	i, j, k := lo, mid, int32(0)
+	for i < mid && j < hi {
+		if recs[i].dataAddr <= recs[j].dataAddr {
+			tmp[k] = recs[i]
+			i++
+		} else {
+			tmp[k] = recs[j]
+			j++
+		}
+		k++
+	}
+	for i < mid {
+		tmp[k] = recs[i]
+		i++
+		k++
+	}
+	for j < hi {
+		tmp[k] = recs[j]
+		j++
+		k++
+	}
+	for k = 0; k < hi-lo; k++ {
+		recs[lo+k] = tmp[k]
+	}
+}
+
+// sovTypeHasPtrs reports whether walking a value of type td can reach
+// other blocks.
+func sovTypeHasPtrs(td *rawType) (ok bool) {
+	if td == nil {
+		return false
+	}
+	k := td.kind()
+	if k == kindBytes || k == kindPointer || k == kindSlice || k == kindInterface || k == kindMap || k == kindChan || k == kindFunc {
+		return true
+	}
+	if k == kindStruct || k == kindArray {
+		nf := td.numField()
+		if k == kindArray {
+			return sovTypeHasPtrs(td.elem())
+		}
+		for i := int32(0); i < nf; i++ {
+			if sovTypeHasPtrs(td.structFieldType(i)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sovMarkBlock marks the block at p live and walks its interior pointers.
+func sovMarkBlock(g *sovGroup, p unsafe.Pointer) {
+	if p == nil {
+		return
+	}
+	rec := sovFind(g, uintptr(p))
+	if rec == nil {
+		return
+	}
+	if rec.live {
+		return
+	}
+	rec.live = true
+	g.liveBytes += rec.size
+	if rec.typeDesc != nil {
+		sovWalkValue(g, p, rec.typeDesc)
+	}
+}
+
+// sovWalkValue marks every block reachable through the value at p.
+func sovWalkValue(g *sovGroup, p unsafe.Pointer, td *rawType) {
+	if td == nil || p == nil {
+		return
+	}
+	k := td.kind()
+	switch k {
+	case kindPointer:
+		v := *(*unsafe.Pointer)(p)
+		if v != nil {
+			if sovInArena(g.refTbl, uintptr(v)) {
+				v = (*sovSlot)(v).dataPtr
+			}
+			sovMarkBlock(g, v)
+			// A pointer may target an object outside the data arena
+			// (e.g. a receiver field that points into the compile arena).
+			// Its fields can still hold data-arena records (orphaned by
+			// store-backs through the pointer), so walk the pointee with
+			// the field's element type. Depth-bounded to keep compile-arena
+			// cycles (parent/prog chains) from unbounded traversal.
+			et := td.elem()
+			if et != nil && sovTypeHasPtrs(et) && !sovInArena(g.data, uintptr(v)) && sovDepth < sovMaxDepth {
+				sovDepth++
+				sovWalkValue(g, v, et)
+				sovDepth--
+			}
+		}
+	case kindBytes:
+		s := *(*_string)(p)
+		if s.ptr != nil && s.length > 0 {
+			sovMarkBlock(g, unsafe.Pointer(s.ptr))
+		}
+	case kindSlice:
+		s := *(*_string)(p)
+		if s.ptr != nil && s.length > 0 {
+			et := td.elem()
+			if et != nil {
+				sovMarkBlock(g, unsafe.Pointer(s.ptr))
+				if sovTypeHasPtrs(et) {
+					esz := et.size()
+					for i := int32(0); i < int32(s.length); i++ {
+						sovWalkValue(g, unsafe.Add(unsafe.Pointer(s.ptr), uintptr(i)*esz), et)
+					}
+				}
+			}
+		}
+	case kindInterface:
+		iface := *(*_interface)(p)
+		if iface.typecode != nil {
+			ct := (*rawType)(iface.typecode)
+			if ct.size() <= unsafe.Sizeof(uintptr(0)) {
+				sovWalkValue(g, unsafe.Pointer(&iface.value), ct)
+			} else {
+				sovMarkBlock(g, iface.value)
+			}
+		}
+	case kindMap:
+		m := *(*unsafe.Pointer)(p)
+		if m != nil {
+			sovMarkMap(g, (*hashmap)(m), td)
+		}
+	case kindStruct:
+		nf := td.numField()
+		for i := int32(0); i < nf; i++ {
+			ft := td.structFieldType(i)
+			if ft != nil && sovTypeHasPtrs(ft) {
+				sovWalkValue(g, unsafe.Add(p, td.structFieldOffset(i)), ft)
+			}
+		}
+	}
+}
+
+// sovMarkMap marks a map's bucket array and walks its keys and values.
+func sovMarkMap(g *sovGroup, m *hashmap, td *rawType) {
+	if m == nil {
+		return
+	}
+	// The hashmap header itself is a record (allocated by hashmapMake via
+	// the arena); it must be marked live too or compaction drops it and
+	// the referrer's map pointer dangles.
+	sovMarkBlock(g, unsafe.Pointer(m))
+	sovMarkBlock(g, m.buckets)
+	kt := hashmapKeyType(td)
+	vt := td.elem()
+	keySz := m.keySize
+	valSz := m.valueSize
+	bucketSz := unsafe.Sizeof(hashmapBucket{}) + keySz*8 + valSz*8
+	nb := uintptr(1) << m.bucketBits
+	for bi := uintptr(0); bi < nb; bi++ {
+		for b := (*hashmapBucket)(unsafe.Add(m.buckets, bucketSz*bi)); b != nil; b = b.next {
+			if b != (*hashmapBucket)(unsafe.Add(m.buckets, bucketSz*bi)) {
+				sovMarkBlock(g, unsafe.Pointer(b))
+			}
+			for i := uint8(0); i < 8; i++ {
+				if b.tophash[i] != 0 {
+					if kt != nil && sovTypeHasPtrs(kt) {
+						sovWalkValue(g, hashmapSlotKey(m, b, i), kt)
+					}
+					if vt != nil && sovTypeHasPtrs(vt) {
+						sovWalkValue(g, hashmapSlotValue(m, b, i), vt)
+					}
+				}
+			}
+		}
+	}
+}
+
+// codecSovereignEndCall dead-marks the batch belonging to the returning
+// method call and updates the batch statistics. The reachability walk is
+// deferred to sovFullMark at compaction time: walking the whole receiver
+// graph at every method return (e.g. every e.w() during IR emission) is
+// quadratic in the group size. Dead blocks sit untouched in the arena
+// until the next compaction, which is the only consumer of liveness.
+func codecSovereignEndCall(g *sovGroup) {
+	start := int32(0)
+	if len(g.batchStart) > 0 {
+		start = g.batchStart[len(g.batchStart)-1]
+		g.batchStart = g.batchStart[:len(g.batchStart)-1]
+	}
+	// The batch's records lie somewhere in [start, len(recs)); nested
+	// batches occupy holes in that range, so scan the tail and filter by
+	// batch id. Batches after a compaction have no start recorded and
+	// scan from the front.
+	batchBytes := uintptr(0)
+	for i := int32(len(g.recs)) - 1; i >= start; i-- {
+		rec := g.recs[i]
+		if rec.batchID != g.curBatch {
+			continue
+		}
+		if rec.live {
+			rec.live = false
+			if g.liveBytes >= rec.size {
+				g.liveBytes -= rec.size
+			} else {
+				g.liveBytes = 0
+			}
+		}
+		batchBytes += rec.size
+	}
+	if batchBytes > g.batchMax {
+		g.batchMax = batchBytes
+	}
+	// Ratchet: when dead space has accumulated and the next batch would
+	// overflow the data arena, copy-compact at this safe method boundary
+	// instead of growing regions. Never mid-allocation.
+	if !g.compacting && g.allocBytes > g.liveBytes {
+		da := g.data
+		act := da.nregions - 1
+		if da.regions[act].off+2*g.batchMax > da.regions[act].cap {
+			codecSovereignCompact(g, 0)
+		}
+	}
+}
+
+// sovFullMark recomputes liveness for the entire group: every record
+// starts dead and the walk from the receiver's root fields marks what is
+// actually reachable. Runs only at compaction.
+func sovFullMark(g *sovGroup) {
+	sovDepth = 0
+	for i := int32(0); i < int32(len(g.recs)); i++ {
+		g.recs[i].live = false
+	}
+	g.liveBytes = 0
+	// Roots: the receiver's fields (or the receiver value itself for
+	// non-struct receivers such as named slice types).
+	td := g.recvTypeDesc
+	if td == nil || g.recv == nil {
+		return
+	}
+	if td.kind() != kindStruct {
+		if sovTypeHasPtrs(td) {
+			sovWalkValue(g, g.recv, td)
+		}
+		return
+	}
+	nf := td.numField()
+	for i := int32(0); i < nf; i++ {
+		ft := td.structFieldType(i)
+		if ft == nil || !sovTypeHasPtrs(ft) {
+			continue
+		}
+		faddr := unsafe.Add(g.recv, td.structFieldOffset(i))
+		// A pointer field may hold a slot object; resolve it.
+		if ft.kind() == kindPointer {
+			v := *(*unsafe.Pointer)(faddr)
+			if v != nil && sovInArena(g.refTbl, uintptr(v)) {
+				v = (*sovSlot)(v).dataPtr
+				sovMarkBlock(g, v)
+				continue
+			}
+		}
+		sovWalkValue(g, faddr, ft)
+	}
+}
+
+// sovRebaseRoots rewrites the receiver's root fields after a compaction.
+func sovRebaseRoots(g *sovGroup, nd *Arena) {
+	td := g.recvTypeDesc
+	if td == nil || g.recv == nil {
+		return
+	}
+	if td.kind() != kindStruct {
+		if sovTypeHasPtrs(td) {
+			sovRebaseValue(g, g.recv, td, nd)
+		}
+		return
+	}
+	nf := td.numField()
+	for i := int32(0); i < nf; i++ {
+		ft := td.structFieldType(i)
+		if ft == nil || !sovTypeHasPtrs(ft) {
+			continue
+		}
+		sovRebaseValue(g, unsafe.Add(g.recv, td.structFieldOffset(i)), ft, nd)
+	}
+}
+
+// codecSovereignCompact copy-compacts the group's live data into a fresh
+// arena (live data shifted together at the front; tail becomes free),
+// rebuilding the allocation map and rewriting interior pointers.
+func codecSovereignCompact(g *sovGroup, needed uintptr) {
+	if g.escaped || g.compacting {
+		return
+	}
+	g.compacting = true
+	// Liveness was deferred by codecSovereignEndCall: recompute the full
+	// live set from the receiver's root fields now that no batch is in
+	// flight.
+	sovFullMark(g)
+	live := g.liveBytes
+	newCap := live + g.batchMax + needed + 65536
+	nd := sovNewArena(newCap)
+	nd.sovereign = 1
+	nd.owner = g
+	nt := sovNewArena(65536)
+
+	// Copy pass: relocate live blocks into nd, remember new addresses.
+	for i := int32(0); i < int32(len(g.recs)); i++ {
+		rec := g.recs[i]
+		if !rec.live {
+			rec.newAddr = 0
+			continue
+		}
+		np := arenaAllocRaw(nd, align(rec.size))
+		memmove(np, unsafe.Pointer(rec.dataAddr), rec.size)
+		rec.newAddr = uintptr(np)
+	}
+	// Rebase pass: rewrite interior pointers of live blocks (walking the
+	// new copies, translating old addresses via the record table).
+	sovDepth = 0
+	for i := int32(0); i < int32(len(g.recs)); i++ {
+		rec := g.recs[i]
+		if !rec.live {
+			continue
+		}
+		if rec.typeDesc != nil {
+			sovRebaseValue(g, unsafe.Pointer(rec.newAddr), rec.typeDesc, nd)
+		}
+	}
+	// Slots: rewrite external references.
+	for i := int32(0); i < int32(len(g.slots)); i++ {
+		sl := g.slots[i]
+		if sl.dataPtr != nil {
+			sl.dataPtr = sovRebasePtr(g, uintptr(sl.dataPtr), nd)
+		}
+	}
+	// Rewrite the receiver's root fields.
+	sovRebaseRoots(g, nd)
+	// Rebuild the record table in the fresh allocTbl arena. The recs
+	// backing array is root-lifetime: it must never live in g.data,
+	// which is munmapped below.
+	oldRecs := g.recs
+	oldTbl := g.allocTbl
+	g.allocTbl = nt
+	ncap := cap(oldRecs)
+	if ncap < 64 {
+		ncap = 64
+	}
+	nb := unsafe.Slice((**sovRecord)(sovRootAlloc(uintptr(ncap)*unsafe.Sizeof(&sovRecord{}))), ncap)
+	g.recs = nb[:0]
+	g.recsSorted = true
+	g.batchStart = g.batchStart[:0]
+	g.allocBytes = 0
+	g.liveBytes = 0
+	g.batchMax = 0
+	for i := int32(0); i < int32(len(oldRecs)); i++ {
+		rec := oldRecs[i]
+		if !rec.live {
+			continue
+		}
+		nrec := (*sovRecord)(ArenaAlloc(nt, unsafe.Sizeof(sovRecord{})))
+		*nrec = *rec
+		nrec.dataAddr = rec.newAddr
+		nrec.newAddr = 0
+		g.recs = push(g.recs, nrec)
+		g.allocBytes += rec.size
+		g.liveBytes += rec.size
+	}
+	oldData := g.data
+	ArenaFree(oldTbl)
+	ArenaFree(oldData)
+	g.data = nd
+	// The old data arena is unmapped; any frame that registered it as
+	// stable (the current method's prologue, or a nested same-receiver
+	// frame whose stableStack entry captured it) now must see the relocated
+	// arena instead.
+	if domainRoot.stableArena == oldData {
+		domainRoot.stableArena = nd
+	}
+	for i := int32(0); i < domainRoot.stableTop; i++ {
+		if domainRoot.stableStack[i] == oldData {
+			domainRoot.stableStack[i] = nd
+		}
+	}
+	if CurrentArena() == oldData {
+		SetCurrentArena(nd)
+	}
+	g.compacting = false
+}
+
+// sovRebasePtr rebases a pointer that targeted the old data arena into the
+// new arena, preserving pointers outside the arena unchanged.
+func sovRebasePtr(g *sovGroup, p uintptr, nd *Arena) unsafe.Pointer {
+	if p == 0 {
+		return nil
+	}
+	if sovInArena(nd, p) {
+		return unsafe.Pointer(p)
+	}
+	rec := sovFind(g, p)
+	if rec == nil || !rec.live || rec.newAddr == 0 {
+		return unsafe.Pointer(p)
+	}
+	return unsafe.Pointer(rec.newAddr + (p - rec.dataAddr))
+}
+
+// sovRebaseValue rewrites the interior pointers of the value at p after a
+// compaction.
+func sovRebaseValue(g *sovGroup, p unsafe.Pointer, td *rawType, nd *Arena) {
+	if td == nil || p == nil {
+		return
+	}
+	k := td.kind()
+	switch k {
+	case kindPointer:
+		v := *(*unsafe.Pointer)(p)
+		if v != nil && !sovInArena(nd, uintptr(v)) {
+			*(*unsafe.Pointer)(p) = sovRebasePtr(g, uintptr(v), nd)
+		}
+		// Walk a pointee that still lives outside the new arena (compile
+		// arena) so data-arena pointers nested in it get rebased too.
+		nv := *(*unsafe.Pointer)(p)
+		et := td.elem()
+		if nv != nil && et != nil && sovTypeHasPtrs(et) && !sovInArena(nd, uintptr(nv)) && sovDepth < sovMaxDepth {
+			sovDepth++
+			sovRebaseValue(g, nv, et, nd)
+			sovDepth--
+		}
+	case kindBytes:
+		s := *(*_string)(p)
+		if s.ptr != nil && !sovInArena(nd, uintptr(unsafe.Pointer(s.ptr))) {
+			s.ptr = (*byte)(sovRebasePtr(g, uintptr(unsafe.Pointer(s.ptr)), nd))
+			*(*_string)(p) = s
+		}
+	case kindSlice:
+		s := *(*_string)(p)
+		if s.ptr != nil && !sovInArena(nd, uintptr(unsafe.Pointer(s.ptr))) {
+			s.ptr = (*byte)(sovRebasePtr(g, uintptr(unsafe.Pointer(s.ptr)), nd))
+			*(*_string)(p) = s
+		}
+		et := td.elem()
+		if et != nil && sovTypeHasPtrs(et) {
+			esz := et.size()
+			for i := int32(0); i < int32(s.length); i++ {
+				sovRebaseValue(g, unsafe.Add(unsafe.Pointer(s.ptr), uintptr(i)*esz), et, nd)
+			}
+		}
+	case kindInterface:
+		iface := *(*_interface)(p)
+		if iface.typecode != nil {
+			ct := (*rawType)(iface.typecode)
+			if ct.size() <= unsafe.Sizeof(uintptr(0)) {
+				sovRebaseValue(g, unsafe.Pointer(&iface.value), ct, nd)
+				*(*_interface)(p) = iface
+			} else {
+				if iface.value != nil && !sovInArena(nd, uintptr(iface.value)) {
+					iface.value = sovRebasePtr(g, uintptr(iface.value), nd)
+					*(*_interface)(p) = iface
+				}
+			}
+		}
+	case kindMap:
+		m := *(*unsafe.Pointer)(p)
+		if m != nil && !sovInArena(nd, uintptr(m)) {
+			*(*unsafe.Pointer)(p) = sovRebasePtr(g, uintptr(m), nd)
+			sovRebaseMap(g, (*hashmap)(*(*unsafe.Pointer)(p)), td, nd)
+		} else if m != nil {
+			sovRebaseMap(g, (*hashmap)(m), td, nd)
+		}
+	case kindStruct:
+		nf := td.numField()
+		for i := int32(0); i < nf; i++ {
+			ft := td.structFieldType(i)
+			if ft != nil && sovTypeHasPtrs(ft) {
+				sovRebaseValue(g, unsafe.Add(p, td.structFieldOffset(i)), ft, nd)
+			}
+		}
+	}
+}
+
+// sovRebaseMap rebases a map's bucket array pointer and its keys/values.
+func sovRebaseMap(g *sovGroup, m *hashmap, td *rawType, nd *Arena) {
+	if m == nil {
+		return
+	}
+	if m.buckets != nil && !sovInArena(nd, uintptr(m.buckets)) {
+		m.buckets = sovRebasePtr(g, uintptr(m.buckets), nd)
+	}
+	kt := hashmapKeyType(td)
+	vt := td.elem()
+	keySz := m.keySize
+	valSz := m.valueSize
+	bucketSz := unsafe.Sizeof(hashmapBucket{}) + keySz*8 + valSz*8
+	nb := uintptr(1) << m.bucketBits
+	for bi := uintptr(0); bi < nb; bi++ {
+		for b := (*hashmapBucket)(unsafe.Add(m.buckets, bucketSz*bi)); b != nil; b = b.next {
+			for i := uint8(0); i < 8; i++ {
+				if b.tophash[i] != 0 {
+					if kt != nil && sovTypeHasPtrs(kt) {
+						sovRebaseValue(g, hashmapSlotKey(m, b, i), kt, nd)
+					}
+					if vt != nil && sovTypeHasPtrs(vt) {
+						sovRebaseValue(g, hashmapSlotValue(m, b, i), vt, nd)
+					}
+				}
+			}
+			if b.next != nil {
+				b.next = (*hashmapBucket)(sovRebasePtr(g, uintptr(unsafe.Pointer(b.next)), nd))
+			}
+		}
+	}
+}
+
+// codecSovereignFree releases the receiver's entire group.
+func codecSovereignFree(recv unsafe.Pointer) {
+	if recv == nil {
+		return
+	}
+	m := domainRoot.sovereignRoot
+	if m == nil {
+		return
+	}
+	keyv := recv
+	h := m.keyHash(unsafe.Pointer(&keyv), 8, m.seed)
+	var av unsafe.Pointer
+	if !hashmapGet(m, unsafe.Pointer(&keyv), unsafe.Pointer(&av), 8, h) || av == nil {
+		return
+	}
+	g := (*sovGroup)(av)
+	if g.ctxArena != nil && g.ctxArena.sovGroups > 0 {
+		g.ctxArena.sovGroups--
+	}
+	g.ctxArena = nil
+	if g.data != nil {
+		ArenaFree(g.data)
+	}
+	if g.allocTbl != nil {
+		ArenaFree(g.allocTbl)
+	}
+	if g.refTbl != nil {
+		ArenaFree(g.refTbl)
+	}
+	hashmapDelete(m, unsafe.Pointer(&keyv), h)
+}
+
+// sovInvalidateArena releases every sovereign group whose receiver lives
+// inside a's regions. The binding rule: a sovGroup lives exactly as long
+// as its receiver's arena. Called from ArenaFree and ArenaRelease (which
+// runs after the returns are processed in the epilogue). O(1) when no
+// group is tracked in this arena.
+func sovInvalidateArena(a *Arena) {
+	if a == nil || domainRoot == nil || a.sovGroups <= 0 {
+		return
+	}
+	m := domainRoot.sovereignRoot
+	if m == nil {
+		a.sovGroups = 0
+		return
+	}
+	var it hashmapIterator
+	var keyBuf [8]uint8
+	var valBuf [8]uint8
+	var dead []unsafe.Pointer
+	for hashmapNext(m, &it, unsafe.Pointer(&keyBuf[0]), unsafe.Pointer(&valBuf[0])) {
+		recv := *(*unsafe.Pointer)(unsafe.Pointer(&keyBuf[0]))
+		if recv != nil && sovAddrInArena(a, uintptr(recv)) {
+			dead = push(dead, recv)
+		}
+	}
+	for _, recv := range dead {
+		codecSovereignFree(recv)
+	}
+	if a.sovGroups != 0 {
+		a.sovGroups = 0
+	}
+}
+
+// SovereignSetArena borrows the receiver's sovereign arena by PUSHING a new
+// frame slot, never overwriting the current slot. The previous slot stays in
+// place so the caller's arena (possibly the root arena) is untouched.
+// It also enters manual-arena mode: while active, FnArenaPush/FnArenaPop
+// are no-ops so the whole phase allocates into this arena directly.
+func SovereignSetArena(a *Arena) {
 	if domainRoot == nil {
 		return
 	}
-	a := domainRoot.fnStack[domainRoot.fnTop]
-	if a == nil {
-		return
+	i := domainRoot.fnTop + 1
+	if i >= fnStackMax {
+		runtimePanic("sovereign: borrow stack overflow")
 	}
-	regionIdx := int32(mark >> 32)
-	off := mark & 0xFFFFFFFF
-	for i := a.nregions - 1; i > regionIdx; i-- {
-		munmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
-	}
-	a.nregions = regionIdx + 1
-	a.regions[regionIdx].off = off
+	domainRoot.fnTop = i
+	domainRoot.fnStack[i] = a
+	domainRoot.fnBorrow[i>>6] |= 1 << (i & 63)
+	manualArena = a
 }
 
-// --- Arena lifecycle ---
+// SovereignRestoreArena pops the borrowed sovereign slot, restoring the
+// caller's arena. The arena is NOT freed.
+func SovereignRestoreArena(a *Arena) {
+	if domainRoot == nil {
+		return
+	}
+	i := domainRoot.fnTop
+	if i == 0 {
+		runtimePanic("sovereign: restore underflow")
+	}
+	domainRoot.fnBorrow[i>>6] &^= 1 << (i & 63)
+	domainRoot.fnStack[i] = nil
+	domainRoot.fnTop = i - 1
+	manualArena = nil
+}
 
-const arenaDefaultRegion = uintptr(64) * 1024 * 1024 // 64MB chain regions
+// SovereignRegStable marks the receiver's sovereign arena as the current
+// frame's stable arena. Pushes onto a stack so nested sovereign methods
+// (a mutating method calling another on a different receiver) each restore
+// the correct outer arena on return. a may be nil (read-only method whose
+// receiver has no sovereign arena yet).
+func SovereignRegStable(a *Arena) {
+	if domainRoot == nil {
+		return
+	}
+	if domainRoot.stableTop >= int32(len(domainRoot.stableStack)) {
+		runtimePanic("stable stack overflow")
+	}
+	domainRoot.stableStack[domainRoot.stableTop] = domainRoot.stableArena
+	domainRoot.stableTop++
+	domainRoot.stableArena = a
+}
 
-// ArenaNew creates an arena with the given initial capacity via mmap.
-// The Arena struct is embedded at offset 0 of the mmap'd region.
-// No external allocation needed.
+// SovereignRegRestore pops the previous frame's stable arena registration.
+func SovereignRegRestore() {
+	if domainRoot == nil || domainRoot.stableTop == 0 {
+		return
+	}
+	domainRoot.stableTop--
+	domainRoot.stableArena = domainRoot.stableStack[domainRoot.stableTop]
+}
+
+// ArenaNew creates a new arena. The Arena struct is embedded at offset 0
+// of the mmap'd region, with its region registry carved after the header.
 func ArenaNew(capacity uintptr) (a *Arena) {
 	capacity = (capacity + 4095) &^ 4095
-	headerSz := align(unsafe.Sizeof(Arena{}))
-	if capacity < headerSz+4096 {
-		capacity = (headerSz + 4096 + 4095) &^ 4095
+	headerSz := arenaHeaderSize()
+	dataStart := arenaDataOffset()
+	if capacity < headerSz+dataStart+4096 {
+		capacity = (headerSz + dataStart + 4096 + 4095) &^ 4095
 	}
 	addr := mmap(nil, capacity, flag_PROT_READ|flag_PROT_WRITE,
 		flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
@@ -240,15 +1212,35 @@ func ArenaNew(capacity uintptr) (a *Arena) {
 		runtimePanic("arena: mmap failed")
 	}
 	a = (*Arena)(addr)
+	a.regions = rawSliceRegion(uintptr(addr)+headerSz, arenaMaxRegions)
 	a.nregions = 1
 	a.regions[0].base = uintptr(addr)
-	a.regions[0].off = headerSz // skip Arena header
+	a.regions[0].off = headerSz + dataStart
 	a.regions[0].cap = capacity
 	return a
 }
 
+// arenaHeaderSize returns the aligned header size (Arena struct).
+func arenaHeaderSize() (sz uintptr) {
+	sz = align(unsafe.Sizeof(Arena{}))
+	return sz
+}
+
+// arenaDataOffset returns the number of bytes after the region registry
+// (aligned up to 16) at which data allocations begin.
+func arenaDataOffset() (off uintptr) {
+	off = uintptr(arenaMaxRegions) * unsafe.Sizeof(ArenaRegion{})
+	off = (off + 15) &^ 15
+	return off
+}
+
 // ArenaAlloc allocates size bytes from the arena, 16-byte aligned, zeroed.
-func ArenaAlloc(a *Arena, size uintptr) unsafe.Pointer {
+// If the active region has no room, a fresh region is appended when the
+// registry allows; otherwise the arena is considered full.
+// arenaAllocRaw bumps size bytes in the arena without recording an
+// allocation-map entry. Used by the compaction copy pass and by
+// codecSovereignAlloc, which record their own entries.
+func arenaAllocRaw(a *Arena, size uintptr) unsafe.Pointer {
 	if a == nil {
 		runtimePanic("ArenaAlloc: nil arena")
 	}
@@ -294,13 +1286,59 @@ func ArenaAlloc(a *Arena, size uintptr) unsafe.Pointer {
 	return ptr
 }
 
+// ArenaAlloc allocates size bytes from the arena, 16-byte aligned, zeroed.
+// Sovereign data arenas: when the arena would need a new region and there
+// is fragmented (dead) space, the group is copy-compacted first and the
+// tail is reused - the arena ratchets instead of expanding. Every
+// allocation on a sovereign data arena is recorded in the group's
+// allocation map (opaque records; referrers walk their interiors).
+func ArenaAlloc(a *Arena, size uintptr) unsafe.Pointer {
+	return ArenaAllocTD(a, size, nil)
+}
+
+func ArenaAllocTD(a *Arena, size uintptr, td *rawType) unsafe.Pointer {
+	if a == nil {
+		runtimePanic("ArenaAlloc: nil arena")
+	}
+	size = align(size)
+	active := a.nregions - 1
+	if a.regions[active].off+size > a.regions[active].cap {
+		if a.nregions >= arenaMaxRegions {
+			runtimePanic("arena: region table full")
+		}
+		newCap := arenaDefaultRegion
+		if size > newCap {
+			newCap = (size + 4095) &^ 4095
+		}
+		addr := mmap(nil, newCap, flag_PROT_READ|flag_PROT_WRITE,
+			flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
+		if addr == unsafe.Pointer(^uintptr(0)) {
+			runtimePanic("arena: region mmap failed")
+		}
+		a.regions[a.nregions].base = uintptr(addr)
+		a.regions[a.nregions].off = 0
+		a.regions[a.nregions].cap = newCap
+		a.nregions++
+		active = a.nregions - 1
+	}
+	ptr := unsafe.Pointer(a.regions[active].base + a.regions[active].off)
+	a.regions[active].off += size
+	memzero(ptr, size)
+	if a.sovereign != 0 && a.owner != nil && !a.owner.compacting {
+		sovAddRec(a.owner, uintptr(ptr), size, td)
+	}
+	return ptr
+}
+
 // ArenaFree unmaps all regions in the arena.
-// The primary region contains the Arena struct itself, so read
-// base/cap into locals before the final munmap.
+// The primary region contains the Arena struct itself.
 func ArenaFree(a *Arena) {
 	if a == nil {
 		return
 	}
+	// Binding rule: sovereign groups whose receivers live in this arena
+	// die with it.
+	sovInvalidateArena(a)
 	for i := a.nregions - 1; i > 0; i-- {
 		munmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
 	}
@@ -319,19 +1357,19 @@ func ArenaReset(a *Arena) {
 		munmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
 	}
 	a.nregions = 1
-	a.regions[0].off = align(unsafe.Sizeof(Arena{}))
+	a.regions[0].off = arenaDataOffset()
 }
 
 // ArenaAcquire returns a pooled arena with cap >= capacity, or
 // creates a new one via ArenaNew. First-fit scan of bounded pool.
 func ArenaAcquire(capacity uintptr) (a *Arena) {
 	capacity = (capacity + 4095) &^ 4095
-	headerSz := align(unsafe.Sizeof(Arena{}))
-	if capacity < headerSz+4096 {
-		capacity = (headerSz + 4096 + 4095) &^ 4095
+	headerSz := arenaHeaderSize()
+	if capacity < headerSz+arenaDataOffset()+4096 {
+		capacity = (headerSz + arenaDataOffset() + 4096 + 4095) &^ 4095
 	}
 	for i := int32(0); i < arenaPoolN; i++ {
-		if arenaPool[i].regions[0].cap >= capacity {
+		if arenaPool[i].regions[0].cap >= capacity && arenaPool[i].sovereign == 0 {
 			a = arenaPool[i]
 			arenaPoolN--
 			arenaPool[i] = arenaPool[arenaPoolN]
@@ -343,18 +1381,54 @@ func ArenaAcquire(capacity uintptr) (a *Arena) {
 }
 
 // ArenaRelease resets an arena and returns it to the pool.
-// If the pool is full, frees the arena entirely via munmap.
+// If the pool is full, frees the arena entirely.
 func ArenaRelease(a *Arena) {
 	if a == nil {
 		return
 	}
-	if arenaPoolN >= arenaPoolMax {
+	// Binding rule: receivers inside this arena are dead once the function
+	// returns - release their groups after the returns were processed.
+	sovInvalidateArena(a)
+	if arenaPoolN >= arenaPoolMax || a.sovereign != 0 {
 		ArenaFree(a)
 		return
 	}
 	ArenaReset(a)
 	arenaPool[arenaPoolN] = a
 	arenaPoolN++
+}
+
+// assertLen ensures a table slice length stays within its fixed carved
+// capacity. Compiled out when assertions are disabled.
+func assertLen(n int32, max int32) {
+	if n > max {
+		runtimePanic("arena: table length overflow")
+	}
+}
+
+// --- raw slice table constructors ---
+//
+// These build slices over carved (already-mmap'd, never-freed) memory.
+// They are only used by initDomain and ArenaNew, which own the layout.
+
+func rawSliceArena(base uintptr, n int32) (s []*Arena) {
+	s = unsafe.Slice((**Arena)(unsafe.Pointer(base)), n)
+	return s
+}
+
+func rawSliceU64(base uintptr, n int32) (s []uint64) {
+	s = unsafe.Slice((*uint64)(unsafe.Pointer(base)), n)
+	return s
+}
+
+func rawSliceUptr(base uintptr, n int32) (s []uintptr) {
+	s = unsafe.Slice((*uintptr)(unsafe.Pointer(base)), n)
+	return s
+}
+
+func rawSliceRegion(base uintptr, n int32) (s []ArenaRegion) {
+	s = unsafe.Slice((*ArenaRegion)(unsafe.Pointer(base)), n)
+	return s
 }
 
 // heapAlloc removed: no heap in moxie. Use arena allocator.

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"moxie/cache"
 	"moxie/compileopts"
 	"moxie/goenv"
 )
@@ -69,7 +70,6 @@ func mxListPackagesImpl(config *compileopts.Config, goroot string, inputPkg stri
 		requires:     requires,
 		replaces:     replaces,
 		goroot:       goroot,
-		mxhDir:       MXHProtocolsDir(),
 		seen:         make(map[string]*PackageJSON),
 	}
 
@@ -91,6 +91,22 @@ func mxListPackagesImpl(config *compileopts.Config, goroot string, inputPkg stri
 	err = r.walk(inputPkg, wd)
 	if err != nil {
 		return nil, err
+	}
+
+	// The main package's module path is its OWN module (walking up from its
+	// directory), not the cwd's module. The restriction checker uses it to
+	// exempt the moxie compiler's own main package while keeping every
+	// other program subject to the rules.
+	if mp := r.seen[inputPkg]; mp != nil && mp.Module.Path == "" {
+		ownDir := mp.Dir
+		if ownDir == "" {
+			ownDir = wd
+		}
+		if ownMod, ownModDir, _, modErr := readModInfo(ownDir); modErr == nil && ownMod != "" {
+			mp.Module.Path = ownMod
+			mp.Module.Main = true
+			mp.Module.Dir = ownModDir
+		}
 	}
 
 	if testMode {
@@ -262,7 +278,6 @@ type resolver struct {
 	requires     map[string]string // module path → version
 	replaces     map[string]string // module path → absolute local dir
 	goroot       string
-	mxhDir       string // path to $GOCACHE/mxinstall/protocols/ for .mxh fallback
 	seen         map[string]*PackageJSON
 	sorted       []*PackageJSON
 }
@@ -292,20 +307,6 @@ func (r *resolver) walk(importPath string, srcDir string) error {
 
 	dir, err := r.resolveDir(importPath, srcDir)
 	if err != nil {
-		// Check for a cached .mxh before failing.
-		if r.mxhDir != "" {
-			mxhPath := filepath.Join(r.mxhDir, importPath+".mxh")
-			if _, statErr := os.Stat(mxhPath); statErr == nil {
-				pj := &PackageJSON{
-					ImportPath: importPath,
-					Name:       importPath[strings.LastIndex(importPath, "/")+1:],
-					IsMXH:      true,
-				}
-				r.seen[importPath] = pj
-				r.sorted = append(r.sorted, pj)
-				return nil
-			}
-		}
 		return fmt.Errorf("resolving %q: %w\n\thint: run `moxie install %s` to cache this package", importPath, err, importPath)
 	}
 
@@ -452,6 +453,27 @@ func (r *resolver) resolveDir(importPath string, srcDir string) (string, error) 
 			return dir, nil
 		}
 		return "", fmt.Errorf("package %q not found in module cache at %s", importPath, dir)
+	}
+
+	// 5. Installed source (mxinstall cache): `moxie install` clones the
+	// source here. Installed packages compile from source like every other
+	// package - no precompiled-binary exception path.
+	if srcDirInstalled := cache.SourcePath(importPath); isDir(srcDirInstalled) {
+		return srcDirInstalled, nil
+	}
+
+	// 6. The compiler's own infrastructure packages (git.smesh.lol/moxie/pkg/
+	// -> MOXIEROOT/pkg/). The runtime and converted stdlib import these
+	// (e.g. mxutil), so they must resolve for any module, not just the moxie
+	// module itself.
+	if strings.HasPrefix(importPath, "git.smesh.lol/moxie/pkg/") {
+		if root := goenv.Get("MOXIEROOT"); root != "" {
+			rel := strings.TrimPrefix(importPath, "git.smesh.lol/moxie/")
+			dir := filepath.Join(root, rel)
+			if isDir(dir) {
+				return dir, nil
+			}
+		}
 	}
 
 	return "", fmt.Errorf("package %q not found (not in stdlib, module, or cache)", importPath)

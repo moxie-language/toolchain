@@ -4,6 +4,8 @@
 
 package zstd
 
+import "git.smesh.lol/moxie/pkg/mxutil"
+
 // window stores up to size bytes of data.
 // It is implemented as a circular buffer:
 // sequential save calls append to the data slice until
@@ -44,7 +46,7 @@ func (w *window) save(buf []byte) {
 
 	if len(buf) >= w.size {
 		from := len(buf) - w.size
-		w.data = append(w.data[:0], buf[from:]...)
+		w.data = push(w.data[:0], buf[from:]...)
 		w.off = 0
 		return
 	}
@@ -60,9 +62,11 @@ func (w *window) save(buf []byte) {
 		}
 	} else {
 		if free >= len(buf) {
-			w.data = append(w.data, buf...)
+			if len(w.data) >= cap(w.data) { w.data = mxutil.GrowCap(w.data) }
+			w.data = push(w.data, buf...)
 		} else {
-			w.data = append(w.data, buf[:free]...)
+			if len(w.data) >= cap(w.data) { w.data = mxutil.GrowCap(w.data) }
+			w.data = push(w.data, buf[:free]...)
 			w.off = copy(w.data, buf[free:])
 		}
 	}
@@ -86,9 +90,10 @@ func (w *window) appendTo(buf []byte, from, to uint32) []byte {
 	}
 
 	if wrap {
-		buf = append(buf, w.data[from:]...)
-		return append(buf, w.data[:to]...)
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, w.data[from:]...)
+		return push(buf, w.data[:to]...)
 	} else {
-		return append(buf, w.data[from:to]...)
+		return push(buf, w.data[from:to]...)
 	}
 }

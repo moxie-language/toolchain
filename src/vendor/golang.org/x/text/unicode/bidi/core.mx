@@ -5,6 +5,7 @@
 package bidi
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"fmt"
 	"log"
 )
@@ -116,13 +117,13 @@ func newParagraph(types []Class, pairTypes []bracketType, pairValues []rune, lev
 	}
 
 	p := &paragraph{
-		initialTypes:   append([]Class(nil), types...),
+		initialTypes:   push([]Class(nil), types...),
 		embeddingLevel: levels,
 
 		pairTypes:  pairTypes,
 		pairValues: pairValues,
 
-		resultTypes: append([]Class(nil), types...),
+		resultTypes: push([]Class(nil), types...),
 	}
 	p.run()
 	return p, nil
@@ -756,18 +757,21 @@ func (p *paragraph) determineLevelRuns() [][]int32 {
 			if p.resultLevels[i] != currentLevel {
 				// we just encountered a new run; wrap up last run
 				if currentLevel >= 0 { // only wrap it up if there was a run
-					allRuns = append(allRuns, run)
+					if len(allRuns) >= cap(allRuns) { allRuns = mxutil.GrowCap(allRuns) }
+					allRuns = push(allRuns, run)
 					run = nil
 				}
 				// Start new run
 				currentLevel = p.resultLevels[i]
 			}
-			run = append(run, i)
+			if len(run) >= cap(run) { run = mxutil.GrowCap(run) }
+			run = push(run, i)
 		}
 	}
 	// Wrap up the final run, if any
 	if len(run) > 0 {
-		allRuns = append(allRuns, run)
+		if len(allRuns) >= cap(allRuns) { allRuns = mxutil.GrowCap(allRuns) }
+		allRuns = push(allRuns, run)
 	}
 	return allRuns
 }
@@ -795,7 +799,8 @@ func (p *paragraph) determineIsolatingRunSequences() []*isolatingRunSequence {
 			// int32 run = i;
 			for {
 				// Copy this level run into currentRunSequence
-				currentRunSequence = append(currentRunSequence, run...)
+				if len(currentRunSequence) >= cap(currentRunSequence) { currentRunSequence = mxutil.GrowCap(currentRunSequence) }
+				currentRunSequence = push(currentRunSequence, run...)
 
 				last := currentRunSequence[len(currentRunSequence)-1]
 				lastT := p.initialTypes[last]
@@ -805,7 +810,8 @@ func (p *paragraph) determineIsolatingRunSequences() []*isolatingRunSequence {
 					break
 				}
 			}
-			sequences = append(sequences, p.isolatingRunSequence(currentRunSequence))
+			if len(sequences) >= cap(sequences) { sequences = mxutil.GrowCap(sequences) }
+			sequences = push(sequences, p.isolatingRunSequence(currentRunSequence))
 		}
 	}
 	return sequences
@@ -862,7 +868,7 @@ func (p *paragraph) getLevels(linebreaks []int32) []level {
 
 	validateLineBreaks(linebreaks, p.Len())
 
-	result := append([]level(nil), p.resultLevels...)
+	result := push([]level(nil), p.resultLevels...)
 
 	// don't worry about linebreaks since if there is a break within
 	// a series of WS values preceding S, the linebreak itself

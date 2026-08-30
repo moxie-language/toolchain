@@ -53,6 +53,7 @@
 package csv
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bufio"
 	"bytes"
 	"errors"
@@ -246,7 +247,8 @@ func (r *Reader) ReadAll() (records [][][]byte, err error) {
 		if err != nil {
 			return nil, err
 		}
-		records = append(records, record)
+		if len(records) >= cap(records) { records = mxutil.GrowCap(records) }
+		records = push(records, record)
 	}
 }
 
@@ -257,10 +259,11 @@ func (r *Reader) ReadAll() (records [][][]byte, err error) {
 func (r *Reader) readLine() ([]byte, error) {
 	line, err := r.r.ReadSlice('\n')
 	if err == bufio.ErrBufferFull {
-		r.rawBuffer = append(r.rawBuffer[:0], line...)
+		r.rawBuffer = push(r.rawBuffer[:0], line...)
 		for err == bufio.ErrBufferFull {
 			line, err = r.r.ReadSlice('\n')
-			r.rawBuffer = append(r.rawBuffer, line...)
+			if len(r.rawBuffer) >= cap(r.rawBuffer) { r.rawBuffer = mxutil.GrowCap(r.rawBuffer) }
+			r.rawBuffer = push(r.rawBuffer, line...)
 		}
 		line = r.rawBuffer
 	}
@@ -360,9 +363,12 @@ parseField:
 					break parseField
 				}
 			}
-			r.recordBuffer = append(r.recordBuffer, field...)
-			r.fieldIndexes = append(r.fieldIndexes, len(r.recordBuffer))
-			r.fieldPositions = append(r.fieldPositions, pos)
+			if len(r.recordBuffer) >= cap(r.recordBuffer) { r.recordBuffer = mxutil.GrowCap(r.recordBuffer) }
+			r.recordBuffer = push(r.recordBuffer, field...)
+			if len(r.fieldIndexes) >= cap(r.fieldIndexes) { r.fieldIndexes = mxutil.GrowCap(r.fieldIndexes) }
+			r.fieldIndexes = push(r.fieldIndexes, len(r.recordBuffer))
+			if len(r.fieldPositions) >= cap(r.fieldPositions) { r.fieldPositions = mxutil.GrowCap(r.fieldPositions) }
+			r.fieldPositions = push(r.fieldPositions, pos)
 			if i >= 0 {
 				line = line[i+commaLen:]
 				pos.col += i + commaLen
@@ -378,30 +384,37 @@ parseField:
 				i := bytes.IndexByte(line, '"')
 				if i >= 0 {
 					// Hit next quote.
-					r.recordBuffer = append(r.recordBuffer, line[:i]...)
+					if len(r.recordBuffer) >= cap(r.recordBuffer) { r.recordBuffer = mxutil.GrowCap(r.recordBuffer) }
+					r.recordBuffer = push(r.recordBuffer, line[:i]...)
 					line = line[i+quoteLen:]
 					pos.col += i + quoteLen
 					switch rn := nextRune(line); {
 					case rn == '"':
 						// `""` sequence (append quote).
-						r.recordBuffer = append(r.recordBuffer, '"')
+						if len(r.recordBuffer) >= cap(r.recordBuffer) { r.recordBuffer = mxutil.GrowCap(r.recordBuffer) }
+						r.recordBuffer = push(r.recordBuffer, '"')
 						line = line[quoteLen:]
 						pos.col += quoteLen
 					case rn == r.Comma:
 						// `",` sequence (end of field).
 						line = line[commaLen:]
 						pos.col += commaLen
-						r.fieldIndexes = append(r.fieldIndexes, len(r.recordBuffer))
-						r.fieldPositions = append(r.fieldPositions, fieldPos)
+						if len(r.fieldIndexes) >= cap(r.fieldIndexes) { r.fieldIndexes = mxutil.GrowCap(r.fieldIndexes) }
+						r.fieldIndexes = push(r.fieldIndexes, len(r.recordBuffer))
+						if len(r.fieldPositions) >= cap(r.fieldPositions) { r.fieldPositions = mxutil.GrowCap(r.fieldPositions) }
+						r.fieldPositions = push(r.fieldPositions, fieldPos)
 						continue parseField
 					case lengthNL(line) == len(line):
 						// `"\n` sequence (end of line).
-						r.fieldIndexes = append(r.fieldIndexes, len(r.recordBuffer))
-						r.fieldPositions = append(r.fieldPositions, fieldPos)
+						if len(r.fieldIndexes) >= cap(r.fieldIndexes) { r.fieldIndexes = mxutil.GrowCap(r.fieldIndexes) }
+						r.fieldIndexes = push(r.fieldIndexes, len(r.recordBuffer))
+						if len(r.fieldPositions) >= cap(r.fieldPositions) { r.fieldPositions = mxutil.GrowCap(r.fieldPositions) }
+						r.fieldPositions = push(r.fieldPositions, fieldPos)
 						break parseField
 					case r.LazyQuotes:
 						// `"` sequence (bare quote).
-						r.recordBuffer = append(r.recordBuffer, '"')
+						if len(r.recordBuffer) >= cap(r.recordBuffer) { r.recordBuffer = mxutil.GrowCap(r.recordBuffer) }
+						r.recordBuffer = push(r.recordBuffer, '"')
 					default:
 						// `"*` sequence (invalid non-escaped quote).
 						err = &ParseError{StartLine: recLine, Line: r.numLine, Column: pos.col - quoteLen, Err: ErrQuote}
@@ -409,7 +422,8 @@ parseField:
 					}
 				} else if len(line) > 0 {
 					// Hit end of line (copy all data so far).
-					r.recordBuffer = append(r.recordBuffer, line...)
+					if len(r.recordBuffer) >= cap(r.recordBuffer) { r.recordBuffer = mxutil.GrowCap(r.recordBuffer) }
+					r.recordBuffer = push(r.recordBuffer, line...)
 					if errRead != nil {
 						break parseField
 					}
@@ -428,8 +442,10 @@ parseField:
 						err = &ParseError{StartLine: recLine, Line: pos.line, Column: pos.col, Err: ErrQuote}
 						break parseField
 					}
-					r.fieldIndexes = append(r.fieldIndexes, len(r.recordBuffer))
-					r.fieldPositions = append(r.fieldPositions, fieldPos)
+					if len(r.fieldIndexes) >= cap(r.fieldIndexes) { r.fieldIndexes = mxutil.GrowCap(r.fieldIndexes) }
+					r.fieldIndexes = push(r.fieldIndexes, len(r.recordBuffer))
+					if len(r.fieldPositions) >= cap(r.fieldPositions) { r.fieldPositions = mxutil.GrowCap(r.fieldPositions) }
+					r.fieldPositions = push(r.fieldPositions, fieldPos)
 					break parseField
 				}
 			}

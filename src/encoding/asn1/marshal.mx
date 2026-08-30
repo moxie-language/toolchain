@@ -5,6 +5,7 @@
 package asn1
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"errors"
 	"fmt"
@@ -184,7 +185,8 @@ func appendBase128Int(dst []byte, n int64) []byte {
 			o |= 0x80
 		}
 
-		dst = append(dst, o)
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, o)
 	}
 
 	return dst
@@ -228,7 +230,8 @@ func appendLength(dst []byte, i int32) []byte {
 	n := lengthLength(i)
 
 	for ; n > 0; n-- {
-		dst = append(dst, byte(i>>uint32((n-1)*8)))
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, byte(i>>uint32((n-1)*8)))
 	}
 
 	return dst
@@ -250,19 +253,23 @@ func appendTagAndLength(dst []byte, t tagAndLength) []byte {
 	}
 	if t.tag >= 31 {
 		b |= 0x1f
-		dst = append(dst, b)
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, b)
 		dst = appendBase128Int(dst, int64(t.tag))
 	} else {
 		b |= uint8(t.tag)
-		dst = append(dst, b)
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, b)
 	}
 
 	if t.length >= 128 {
 		l := lengthLength(t.length)
-		dst = append(dst, 0x80|byte(l))
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, 0x80|byte(l))
 		dst = appendLength(dst, t.length)
 	} else {
-		dst = append(dst, byte(t.length))
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, byte(t.length))
 	}
 
 	return dst
@@ -347,11 +354,11 @@ func makeUTF8String(s []byte) encoder {
 }
 
 func appendTwoDigits(dst []byte, v int32) []byte {
-	return append(dst, byte('0'+(v/10)%10), byte('0'+v%10))
+	return push(dst, byte('0'+(v/10)%10), byte('0'+v%10))
 }
 
 func appendFourDigits(dst []byte, v int32) []byte {
-	return append(dst,
+	return push(dst,
 		byte('0'+(v/1000)%10),
 		byte('0'+(v/100)%10),
 		byte('0'+(v/10)%10),
@@ -427,11 +434,13 @@ func appendTimeCommon(dst []byte, t time.Time) []byte {
 
 	switch {
 	case offset/60 == 0:
-		return append(dst, 'Z')
+		return push(dst, 'Z')
 	case offset > 0:
-		dst = append(dst, '+')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, '+')
 	case offset < 0:
-		dst = append(dst, '-')
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, '-')
 	}
 
 	offsetMinutes := offset / 60

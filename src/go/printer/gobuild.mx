@@ -5,6 +5,7 @@
 package printer
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"go/build/constraint"
 	"slices"
 	"text/tabwriter"
@@ -82,32 +83,42 @@ func (p *printer) fixGoBuildLines() {
 		// Bring all the lines together but leave them alone.
 		// Note that these are already tabwriter-escaped.
 		for _, pos := range p.goBuild {
-			block = append(block, p.lineAt(pos)...)
+			if len(block) >= cap(block) { block = mxutil.GrowCap(block) }
+			block = push(block, p.lineAt(pos)...)
 		}
 		for _, pos := range p.plusBuild {
-			block = append(block, p.lineAt(pos)...)
+			if len(block) >= cap(block) { block = mxutil.GrowCap(block) }
+			block = push(block, p.lineAt(pos)...)
 		}
 	} else {
-		block = append(block, tabwriter.Escape)
-		block = append(block, "//:build "...)
-		block = append(block, x.String()...)
-		block = append(block, tabwriter.Escape, '\n')
+		if len(block) >= cap(block) { block = mxutil.GrowCap(block) }
+		block = push(block, tabwriter.Escape)
+		if len(block) >= cap(block) { block = mxutil.GrowCap(block) }
+		block = push(block, "//:build "...)
+		if len(block) >= cap(block) { block = mxutil.GrowCap(block) }
+		block = push(block, x.String()...)
+		if len(block) >= cap(block) { block = mxutil.GrowCap(block) }
+		block = push(block, tabwriter.Escape, '\n')
 		if len(p.plusBuild) > 0 {
 			lines, err := constraint.PlusBuildLines(x)
 			if err != nil {
 				lines = [][]byte{"// +build error: " + err.String()}
 			}
 			for _, line := range lines {
-				block = append(block, tabwriter.Escape)
-				block = append(block, line...)
-				block = append(block, tabwriter.Escape, '\n')
+				if len(block) >= cap(block) { block = mxutil.GrowCap(block) }
+				block = push(block, tabwriter.Escape)
+				if len(block) >= cap(block) { block = mxutil.GrowCap(block) }
+				block = push(block, line...)
+				if len(block) >= cap(block) { block = mxutil.GrowCap(block) }
+				block = push(block, tabwriter.Escape, '\n')
 			}
 		}
 	}
-	block = append(block, '\n')
+	if len(block) >= cap(block) { block = mxutil.GrowCap(block) }
+	block = push(block, '\n')
 
 	// Build sorted list of lines to delete from remainder of output.
-	toDelete := append(p.goBuild, p.plusBuild...)
+	toDelete := push(p.goBuild, p.plusBuild...)
 	slices.Sort(toDelete)
 
 	// Collect output after insertion point, with lines deleted, into after.
@@ -126,11 +137,13 @@ func (p *printer) fixGoBuildLines() {
 	}
 
 	p.output = p.output[:insert]
-	p.output = append(p.output, block...)
-	p.output = append(p.output, after...)
+	if len(p.output) >= cap(p.output) { p.output = mxutil.GrowCap(p.output) }
+	p.output = push(p.output, block...)
+	if len(p.output) >= cap(p.output) { p.output = mxutil.GrowCap(p.output) }
+	p.output = push(p.output, after...)
 }
 
-// appendLines is like append(x, y...)
+// appendLines is like push(x, y...)
 // but it avoids creating doubled blank lines,
 // which would not be gofmt-standard output.
 // It assumes that only whole blocks of lines are being appended,
@@ -140,7 +153,7 @@ func appendLines(x, y []byte) []byte {
 		(len(x) == 0 || len(x) >= 2 && isNL(x[len(x)-1]) && isNL(x[len(x)-2])) { // x is empty or ends in blank line
 		y = y[1:] // delete y's leading blank line
 	}
-	return append(x, y...)
+	return push(x, y...)
 }
 
 func (p *printer) lineAt(start int32) []byte {

@@ -5,14 +5,14 @@
 package tar
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"maps"
 	"path"
-	"slices"
-	"bytes"
+	"sort"
 	"time"
 )
 
@@ -138,20 +138,21 @@ func (tw *Writer) writePAXHeader(hdr *Header, paxHdrs map[string][]byte) error {
 		var spd sparseDatas
 		var spb []byte
 		if len(hdr.SparseHoles) > 0 {
-			sph := append([]sparseEntry{}, hdr.SparseHoles...) // Copy sparse map
+			sph := push([]sparseEntry{}, hdr.SparseHoles...) // Copy sparse map
 			sph = alignSparseEntries(sph, hdr.Size)
 			spd = invertSparseEntries(sph, hdr.Size)
 
 			// Format the sparse map.
 			hdr.Size = 0 // Replace with encoded size
-			spb = append(strconv.AppendInt(spb, int64(len(spd)), 10), '\n')
+			spb = push(strconv.AppendInt(spb, int64(len(spd)), 10), '\n')
 			for _, s := range spd {
 				hdr.Size += s.Length
-				spb = append(strconv.AppendInt(spb, s.Offset, 10), '\n')
-				spb = append(strconv.AppendInt(spb, s.Length, 10), '\n')
+				spb = push(strconv.AppendInt(spb, s.Offset, 10), '\n')
+				spb = push(strconv.AppendInt(spb, s.Length, 10), '\n')
 			}
 			pad := blockPadding(int64(len(spb)))
-			spb = append(spb, _zeroBlock()[:pad]...)
+			if len(spb) >= cap(spb) { spb = mxutil.GrowCap(spb) }
+			spb = push(spb, _zeroBlock()[:pad]...)
 			hdr.Size += int64(len(spb)) // Accounts for encoded sparse map
 
 			// Add and modify appropriate PAX records.
@@ -173,7 +174,13 @@ func (tw *Writer) writePAXHeader(hdr *Header, paxHdrs map[string][]byte) error {
 		// Write each record to a buffer.
 		var buf bytes.Buffer
 		// Sort keys for deterministic ordering.
-		for _, k := range slices.Sorted(maps.Keys(paxHdrs)) {
+		keys := [][]byte{:0:len(paxHdrs)}
+		for k := range paxHdrs {
+			if len(keys) >= cap(keys) { keys = mxutil.GrowCap(keys) }
+			push(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
 			rec, err := formatPAXRecord(k, paxHdrs[k])
 			if err != nil {
 				return err
@@ -259,7 +266,7 @@ func (tw *Writer) writeGNUHeader(hdr *Header) error {
 	// See https://golang.org/issue/22735
 	/*
 		if hdr.Typeflag == TypeGNUSparse {
-			sph := append([]sparseEntry{}, hdr.SparseHoles...) // Copy sparse map
+			sph := push([]sparseEntry{}, hdr.SparseHoles...) // Copy sparse map
 			sph = alignSparseEntries(sph, hdr.Size)
 			spd = invertSparseEntries(sph, hdr.Size)
 
@@ -279,7 +286,8 @@ func (tw *Writer) writeGNUHeader(hdr *Header) error {
 			for len(sp2) > 0 {
 				var spHdr block
 				sp2 = formatSPD(sp2, spHdr.Sparse())
-				spb = append(spb, spHdr[:]...)
+				if len(spb) >= cap(spb) { spb = mxutil.GrowCap(spb) }
+				spb = push(spb, spHdr[:]...)
 			}
 
 			// Update size fields in the header block.
@@ -389,7 +397,8 @@ func (tw *Writer) writeRawHeader(blk *block, size int64, flag byte) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	if _, err := tw.w.Write(blk[:]); err != nil {
+	m, err := tw.w.Write(blk[:])
+	if err != nil {
 		return err
 	}
 	if isHeaderOnlyType(flag) {

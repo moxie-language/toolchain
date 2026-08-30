@@ -380,6 +380,10 @@ const (
 	BuiltinPrintln
 	BuiltinReal
 	BuiltinRecover
+	BuiltinSpawn  // Moxie-specific
+	BuiltinPush   // Moxie: push(slice, elem) - append without alloc
+	BuiltinPop    // Moxie: pop(slice) - remove+return last elem
+	BuiltinResize // Moxie: resize(slice, n) - set len, bounded by cap
 )
 
 // Builtin represents a use of a Go built-in as a function value.

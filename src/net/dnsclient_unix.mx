@@ -13,6 +13,7 @@
 package net
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"context"
 	"errors"
 	"internal/bytealg"
@@ -494,18 +495,21 @@ func (conf *dnsConfig) nameList(name string) [][]byte {
 	names := [][]byte{:0:1+len(conf.search)}
 	// If name has enough dots, try unsuffixed first.
 	if hasNdots && !avoidDNS(name) {
-		names = append(names, name)
+		if len(names) >= cap(names) { names = mxutil.GrowCap(names) }
+		names = push(names, name)
 	}
 	// Try suffixes that are not too long (see isDomainName).
 	for _, suffix := range conf.search {
 		fqdn := name + suffix
 		if !avoidDNS(fqdn) && len(fqdn) <= 254 {
-			names = append(names, fqdn)
+			if len(names) >= cap(names) { names = mxutil.GrowCap(names) }
+			names = push(names, fqdn)
 		}
 	}
 	// Try unsuffixed, if not tried first above.
 	if !hasNdots && !avoidDNS(name) {
-		names = append(names, name)
+		if len(names) >= cap(names) { names = mxutil.GrowCap(names) }
+		names = push(names, name)
 	}
 	return names
 }
@@ -564,7 +568,8 @@ func (r *Resolver) goLookupHostOrder(ctx context.Context, name string, order hos
 	}
 	addrs = [][]byte{:0:len(ips)}
 	for _, ip := range ips {
-		addrs = append(addrs, ip.String())
+		if len(addrs) >= cap(addrs) { addrs = mxutil.GrowCap(addrs) }
+		addrs = push(addrs, ip.String())
 	}
 	return
 }
@@ -576,7 +581,8 @@ func goLookupIPFiles(name string) (addrs []IPAddr, canonical string) {
 		haddr, zone := splitHostZone(haddr)
 		if ip := ParseIP(haddr); ip != nil {
 			addr := IPAddr{IP: ip, Zone: zone}
-			addrs = append(addrs, addr)
+			if len(addrs) >= cap(addrs) { addrs = mxutil.GrowCap(addrs) }
+			addrs = push(addrs, addr)
 		}
 	}
 	sortByRFC6724(addrs)
@@ -625,7 +631,8 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
 
 	qtypes := []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA}
 	if network == "CNAME" {
-		qtypes = append(qtypes, dnsmessage.TypeCNAME)
+		if len(qtypes) >= cap(qtypes) { qtypes = mxutil.GrowCap(qtypes) }
+		qtypes = push(qtypes, dnsmessage.TypeCNAME)
 	}
 	switch ipVersion(network) {
 	case '4':
@@ -699,7 +706,8 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
 						}
 						break loop
 					}
-					addrs = append(addrs, IPAddr{IP: IP(a.A[:])})
+					if len(addrs) >= cap(addrs) { addrs = mxutil.GrowCap(addrs) }
+					addrs = push(addrs, IPAddr{IP: IP(a.A[:])})
 					if cname.Length == 0 && h.Name.Length != 0 {
 						cname = h.Name
 					}
@@ -714,7 +722,8 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
 						}
 						break loop
 					}
-					addrs = append(addrs, IPAddr{IP: IP(aaaa.AAAA[:])})
+					if len(addrs) >= cap(addrs) { addrs = mxutil.GrowCap(addrs) }
+					addrs = push(addrs, IPAddr{IP: IP(aaaa.AAAA[:])})
 					if cname.Length == 0 && h.Name.Length != 0 {
 						cname = h.Name
 					}
@@ -851,7 +860,8 @@ func (r *Resolver) goLookupPTR(ctx context.Context, addr string, order hostLooku
 				Server: server,
 			}
 		}
-		ptrs = append(ptrs, ptr.PTR.String())
+		if len(ptrs) >= cap(ptrs) { ptrs = mxutil.GrowCap(ptrs) }
+		ptrs = push(ptrs, ptr.PTR.String())
 
 	}
 

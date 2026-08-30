@@ -331,7 +331,7 @@ func (b *builder) exprN(fn *Function, e ast.Expr) Value {
 func (b *builder) builtin(fn *Function, obj *types.Builtin, args []ast.Expr, typ types.Type, pos token.Pos) Value {
 	typ = fn.typ(typ)
 	switch obj.Name() {
-	case "make":
+	case "make", "__slicealloc": // __slicealloc: moxie internal name for make ([]T{:n} lowering)
 		switch ct := typeparams.CoreType(typ).(type) {
 		case *types.Slice:
 			n := b.expr(fn, args[1])
@@ -380,7 +380,7 @@ func (b *builder) builtin(fn *Function, obj *types.Builtin, args []ast.Expr, typ
 			return fn.emit(v)
 		}
 
-	case "new":
+	case "new", "__ptralloc": // __ptralloc: moxie internal name for new
 		alloc := emitNew(fn, typeparams.MustDeref(typ), pos, "new")
 		if !fn.info.Types[args[0]].IsType() {
 			// new(expr), requires go1.26
@@ -404,11 +404,32 @@ func (b *builder) builtin(fn *Function, obj *types.Builtin, args []ast.Expr, typ
 
 	case "panic":
 		fn.emit(&Panic{
-			X:   emitConv(fn, b.expr(fn, args[0]), tEface),
+			X:   emitConv(fn, b.expr(fn, args[0]), tString),
 			pos: pos,
 		})
 		fn.currentBlock = fn.newBasicBlock("unreachable")
 		return vTrue // any non-nil Value will do
+
+	case "push", "resize", "pop":
+		// Moxie slice builtins. push/resize return the modified slice
+		// (typed as the first argument); pop returns the element.
+		bi := &Builtin{name: obj.Name()}
+		var v Call
+		v.Call.Value = bi
+		v.Call.pos = pos
+		for _, arg := range args {
+			v.Call.Args = append(v.Call.Args, b.expr(fn, arg))
+		}
+		if len(v.Call.Args) > 0 {
+			if t0, ok := fn.typeOf(args[0]).Underlying().(*types.Slice); ok && obj.Name() == "pop" {
+				v.setType(t0.Elem())
+			} else {
+				v.setType(fn.typeOf(args[0]))
+			}
+		} else {
+			v.setType(typ)
+		}
+		return emitCall(fn, &v)
 
 	case "spawn":
 		// Moxie builtins without Go-standard signatures.
@@ -770,7 +791,20 @@ func (b *builder) expr0(fn *Function, e ast.Expr, tv types.TypeAndValue) Value {
 				for _, arg := range e.Args {
 					v.Call.Args = append(v.Call.Args, b.expr(fn, arg))
 				}
-				v.setType(fn.typ(tv.Type))
+				// push/pop/resize return the modified slice (or an element).
+				// go/types types them as void or any, so derive the result
+				// type from the first argument, matching the Moxie checker.
+				if (obj.Name() == "push" || obj.Name() == "resize") && len(v.Call.Args) > 0 {
+					v.setType(v.Call.Args[0].Type())
+				} else if obj.Name() == "pop" && len(v.Call.Args) > 0 {
+					if sl, ok := v.Call.Args[0].Type().Underlying().(*types.Slice); ok {
+						v.setType(sl.Elem())
+					} else {
+						v.setType(fn.typ(tv.Type))
+					}
+				} else {
+					v.setType(fn.typ(tv.Type))
+				}
 				return emitCall(fn, &v)
 			}
 		}
@@ -1870,7 +1904,7 @@ func (b *builder) selectStmt(fn *Function, s *ast.SelectStmt, label *lblock) {
 		// A blocking select must match some case.
 		// (This should really be a runtime.errorString, not a string.)
 		fn.emit(&Panic{
-			X: emitConv(fn, stringConst("blocking select matched no case"), tEface),
+			X: emitConv(fn, stringConst("blocking select matched no case"), tString),
 		})
 		fn.currentBlock = fn.newBasicBlock("unreachable")
 	}
@@ -2681,7 +2715,7 @@ func (b *builder) buildYieldResume(fn *Function, jump *types.Var, exits []*exit,
 	emitIf(fn, emitCompare(fn, token.EQL, v, jBusy, token.NoPos), isbusy, ifready)
 	fn.currentBlock = isbusy
 	fn.emit(&Panic{
-		X: emitConv(fn, stringConst("iterator call did not preserve panic"), tEface),
+		X: emitConv(fn, stringConst("iterator call did not preserve panic"), tString),
 	})
 	fn.currentBlock = ifready
 
@@ -3136,7 +3170,7 @@ func (b *builder) buildYieldFunc(fn *Function) {
 	emitIf(fn, emitCompare(fn, token.EQL, jumpVal, jReady, token.NoPos), yloop, invalid)
 	fn.currentBlock = invalid
 	fn.emit(&Panic{
-		X: emitConv(fn, stringConst("yield function called after range loop exit"), tEface),
+		X: emitConv(fn, stringConst("yield function called after range loop exit"), tString),
 	})
 
 	fn.currentBlock = yloop

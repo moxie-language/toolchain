@@ -272,8 +272,17 @@ func (b *builder) createSelect(expr *ssa.Select) llvm.Value {
 	}
 
 	// Create a receive buffer, where the received value will be stored.
+	// Always allocate at least one byte: the runtime memzeros the buffer on
+	// a closed-channel receive (memzero(value, elementSize)), and an undef
+	// pointer would write through garbage into whatever memory it aliases.
+	// Zero-size elements (struct{}) yield a nonsense alignment from
+	// ABITypeAlignment; clamp to a byte for the forced buffer.
 	recvbuf := llvm.Undef(b.dataPtrType)
-	if recvbufSize != 0 {
+	if recvbufSize == 0 {
+		recvbufSize = 1
+		recvbufAlign = 1
+	}
+	{
 		allocaType := llvm.ArrayType(b.ctx.Int8Type(), int(recvbufSize))
 		recvbufAlloca, _ := b.createTemporaryAlloca(allocaType, "select.recvbuf.alloca")
 		recvbufAlloca.SetAlignment(recvbufAlign)

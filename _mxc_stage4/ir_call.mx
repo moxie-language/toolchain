@@ -159,6 +159,10 @@ func (e *irEmitter) callArgType(arg SSAValue, sig *Signature, i int32) (s string
 	if _, isIA := arg.(*SSAIndexAddr); isIA {
 		return "ptr"
 	}
+	if _, isG := arg.(*SSAGlobal); isG {
+		// A global operand is emitted as its address (@pkg.name).
+		return "ptr"
+	}
 	t := e.llvmType(arg.SSAType())
 	if _, isAlloc := arg.(*SSAAlloc); !isAlloc {
 		resolved := e.resolvedType(arg, t)
@@ -234,6 +238,9 @@ func (e *irEmitter) callSig(c *SSACall) (s *Signature) {
 }
 
 func (e *irEmitter) emitCall(c *SSACall) {
+	if e.tailRecursive && e.tailCalls != nil && e.tailCalls[c] {
+		return
+	}
 	if b, ok := c.Call.Value.(*SSABuiltin); ok {
 		e.emitBuiltinCall(c, b)
 		return
@@ -242,6 +249,15 @@ func (e *irEmitter) emitCall(c *SSACall) {
 	retType := e.llvmType(c.SSAType())
 	isVoid := retType == "void"
 	sig := e.callSig(c)
+
+	// Mirror legacy: runtime.supportsRecover is a compile-time constant.
+	// The runtime source declares it as false for archs without recover
+	// support; the compiler substitutes true on supported archs.
+	if fn, ok := c.Call.Value.(*SSAFunction); ok && fn.Pkg != nil && fn.Pkg.Pkg != nil && fn.Pkg.Pkg.Path == "runtime" && fn.name == "supportsRecover" {
+		e.w("  ") ; e.w(reg) ; e.w(" = or i1 0, 1\n")
+		e.setRegType(c, reg, "i1")
+		return
+	}
 
 	if fn, ok := c.Call.Value.(*SSAFunction); ok {
 		if !e.isPkgFunc(fn) {
@@ -364,13 +380,15 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 	reg := e.regName(c)
 	name := b.SSAName()
 	if name == "recover" {
-		e.w("  ; unhandled builtin: recover\n")
-		recRT := e.ifaceType()
-		e.nextReg++
-		tmp := "%ub" | irItoa(e.nextReg)
-		e.w("  ") ; e.w(tmp) ; e.w(" = alloca ") ; e.w(recRT) ; e.w("\n")
-		e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(recRT) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
-		e.allocTypes[c] = recRT
+		// Mirror legacy: recover() reads the panic value from the current
+		// defer frame (one frame up if this function has its own frame).
+		upf := "0"
+		if len(e.deferList) > 0 {
+			upf = "1"
+		}
+		rt := e.ifaceType()
+		e.w("  ") ; e.w(reg) ; e.w(" = call ") ; e.w(rt) ; e.w(" @runtime._recover(i1 ") ; e.w(upf) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime._recover", rt, "i1")
 		return
 	}
 	ipt := e.intptrType()
@@ -398,7 +416,10 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			_, isMap := u.(*TCMap)
 			isStr := e.isStringLike(c.Call.Args[0].SSAType())
 			if !isSlice && !isMap && !isStr {
-				isSlice = true
+				argLT := e.llvmType(c.Call.Args[0].SSAType())
+				if argLT == sty || argLT == e.ifaceType() {
+					isSlice = true
+				}
 			}
 			if isMap {
 				rt3 := e.llvmType(c.SSAType())
@@ -425,6 +446,13 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 				}
 				return
 			}
+			// Not a slice, map, or string: return zero
+			rt4 := e.llvmType(c.SSAType())
+			if rt4 == "void" || rt4 == "" {
+				rt4 = "i32"
+			}
+			e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(rt4) ; e.w(" 0, 0\n")
+			return
 		}
 	} else if name == "cap" {
 		if len(c.Call.Args) == 1 {
@@ -460,7 +488,7 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 				return
 			}
 		}
-	} else if name == "append" {
+	} else if name == "push" {
 		if len(c.Call.Args) == 1 {
 			src := e.operand(c.Call.Args[0])
 			p := e.nextReg2("ap")
@@ -527,8 +555,8 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			retTy := e.sliceType()
 			result := e.nextReg2("ap")
 			e.w("  ") ; e.w(result)
-			e.w(" = call ") ; e.w(retTy) ; e.w(" @runtime.sliceAppend(ptr ")
-			e.w(srcBuf) ; e.w(", ptr ") ; e.w(arrAlloca)
+			e.w(" = call ") ; e.w(retTy) ; e.w(" @runtime.slicePush(ptr ")
+			e.w(srcBuf)
 			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(srcLen)
 			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(srcCap)
 			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(irItoa(nElems))
@@ -541,12 +569,18 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			e.w("  ") ; e.w(newLen) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 1\n")
 			newCap := e.nextReg2("ap")
 			e.w("  ") ; e.w(newCap) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 2\n")
+			dstPtr := e.nextReg2("ap")
+			e.w("  ") ; e.w(dstPtr) ; e.w(" = getelementptr inbounds ") ; e.w(elemType) ; e.w(", ptr ") ; e.w(newPtr) ; e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(srcLen) ; e.w("\n")
+			nBytes := e.nextReg2("ap")
+			e.w("  ") ; e.w(nBytes) ; e.w(" = mul ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(irItoa(nElems)) ; e.w(", ") ; e.w(elemSz) ; e.w("\n")
+			e.w("  call void @runtime.memmove(ptr ") ; e.w(dstPtr) ; e.w(", ptr ") ; e.w(arrAlloca) ; e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(nBytes) ; e.w(", ptr null)\n")
 			s1 := e.nextReg2("ap")
 			e.w("  ") ; e.w(s1) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" undef, ptr ") ; e.w(newPtr) ; e.w(", 0\n")
 			s2 := e.nextReg2("ap")
 			e.w("  ") ; e.w(s2) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s1) ; e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(newLen) ; e.w(", 1\n")
 			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s2) ; e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(newCap) ; e.w(", 2\n")
-			e.declareRuntime("runtime.sliceAppend", retTy, "ptr, ptr, " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType())
+			e.declareRuntime("runtime.slicePush", retTy, "ptr, " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType())
+			e.declareRuntime("runtime.memmove", "void", "ptr, ptr, " | e.intptrType())
 			return
 		}
 		if len(c.Call.Args) == 2 {
@@ -614,8 +648,8 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			retTy := e.sliceType()
 			result := e.nextReg2("ap")
 			e.w("  ") ; e.w(result)
-			e.w(" = call ") ; e.w(retTy) ; e.w(" @runtime.sliceAppend(ptr ")
-			e.w(srcBuf) ; e.w(", ptr ") ; e.w(elemsBuf)
+			e.w(" = call ") ; e.w(retTy) ; e.w(" @runtime.slicePush(ptr ")
+			e.w(srcBuf)
 			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(srcLen)
 			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(srcCap)
 			e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(elemsLen)
@@ -628,12 +662,18 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			e.w("  ") ; e.w(newLen) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 1\n")
 			newCap := e.nextReg2("ap")
 			e.w("  ") ; e.w(newCap) ; e.w(" = extractvalue ") ; e.w(retTy) ; e.w(" ") ; e.w(result) ; e.w(", 2\n")
+			dstPtr := e.nextReg2("ap")
+			e.w("  ") ; e.w(dstPtr) ; e.w(" = getelementptr inbounds ") ; e.w(elemType) ; e.w(", ptr ") ; e.w(newPtr) ; e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(srcLen) ; e.w("\n")
+			nBytes := e.nextReg2("ap")
+			e.w("  ") ; e.w(nBytes) ; e.w(" = mul ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(elemsLen) ; e.w(", ") ; e.w(elemSz) ; e.w("\n")
+			e.w("  call void @runtime.memmove(ptr ") ; e.w(dstPtr) ; e.w(", ptr ") ; e.w(elemsBuf) ; e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(nBytes) ; e.w(", ptr null)\n")
 			s1 := e.nextReg2("ap")
 			e.w("  ") ; e.w(s1) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" undef, ptr ") ; e.w(newPtr) ; e.w(", 0\n")
 			s2 := e.nextReg2("ap")
 			e.w("  ") ; e.w(s2) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s1) ; e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(newLen) ; e.w(", 1\n")
 			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s2) ; e.w(", ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(newCap) ; e.w(", 2\n")
-			e.declareRuntime("runtime.sliceAppend", retTy, "ptr, ptr, " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType())
+			e.declareRuntime("runtime.slicePush", retTy, "ptr, " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType())
+			e.declareRuntime("runtime.memmove", "void", "ptr, ptr, " | e.intptrType())
 			return
 		}
 	} else if name == "copy" {
@@ -763,44 +803,61 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			return
 		}
 	} else if name == "spawn" {
-		ipt3 := e.intptrType()
-		if len(c.Call.Args) >= 1 {
-			// For spawn, we need the raw function pointer, not the fat pointer.
-			// operand() wraps SSAFunction in { ptr null, ptr @fn } but ptrtoint
-			// needs a plain pointer.
-			var rawFnSym string
-			if fn, ok := c.Call.Args[0].(*SSAFunction); ok {
-				if !e.isPkgFunc(fn) {
-					e.declareExternalFunc(fn)
-				}
-				rawFnSym = e.funcSymbol(fn)
+		e.emitSpawnCall(c)
+		return
+	} else if name == "pop" {
+		if len(c.Call.Args) == 1 {
+			src := e.operand(c.Call.Args[0])
+			p := e.nextReg2("po")
+			e.w("  ") ; e.w(p) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 0\n")
+			l := e.nextReg2("po")
+			e.w("  ") ; e.w(l) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 1\n")
+			zero := e.nextReg2("po")
+			e.w("  ") ; e.w(zero) ; e.w(" = icmp eq ") ; e.w(ipt) ; e.w(" ") ; e.w(l) ; e.w(", 0\n")
+			one := e.nextReg2("po")
+			e.w("  ") ; e.w(one) ; e.w(" = icmp eq i1 ") ; e.w(zero) ; e.w(", 1\n")
+			e.w("  call void @runtime.slicePanic(i1 ") ; e.w(one) ; e.w(", ptr null)\n")
+			e.declareRuntime("runtime.slicePanic", "void", "i1")
+			li := e.nextReg2("po")
+			e.w("  ") ; e.w(li) ; e.w(" = sub ") ; e.w(ipt) ; e.w(" ") ; e.w(l) ; e.w(", 1\n")
+			var elemType string
+			if sl, ok := SafeUnderlying(c.Call.Args[0].SSAType()).(*Slice); ok {
+				elemType = e.llvmType(sl.Elem)
 			} else {
-				// Closure or indirect - extract funcptr from fat pointer via alloca
-				fnVal := e.operand(c.Call.Args[0])
-				fpTmp := e.nextReg2("sp")
-				e.w("  ") ; e.w(fpTmp) ; e.w(" = alloca {ptr, ptr}\n")
-				e.w("  store volatile {ptr, ptr} ") ; e.w(fnVal) ; e.w(", ptr ") ; e.w(fpTmp) ; e.w("\n")
-				fpGep := e.nextReg2("sp")
-				e.w("  ") ; e.w(fpGep) ; e.w(" = getelementptr inbounds {ptr, ptr}, ptr ") ; e.w(fpTmp) ; e.w(", i32 0, i32 1\n")
-				rawFnSym = e.nextReg2("sp")
-				e.w("  ") ; e.w(rawFnSym) ; e.w(" = load ptr, ptr ") ; e.w(fpGep) ; e.w("\n")
+				elemType = "i8"
 			}
-			fnPtr := e.nextReg2("sp")
-			e.w("  ") ; e.w(fnPtr) ; e.w(" = ptrtoint ptr ") ; e.w(rawFnSym) ; e.w(" to ") ; e.w(ipt3) ; e.w("\n")
-			// Count channel args
-			nChans := int32(0)
-			for i := 1; i < len(c.Call.Args); i++ {
-				if _, ok := SafeUnderlying(c.Call.Args[i].SSAType()).(*TCChan); ok {
-					nChans++
-				}
+			ep := e.nextReg2("po")
+			e.w("  ") ; e.w(ep) ; e.w(" = getelementptr inbounds ") ; e.w(elemType) ; e.w(", ptr ") ; e.w(p) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(li) ; e.w("\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(elemType) ; e.w(", ptr ") ; e.w(ep) ; e.w("\n")
+		}
+		return
+	} else if name == "resize" {
+		if len(c.Call.Args) == 2 {
+			src := e.operand(c.Call.Args[0])
+			sp := e.nextReg2("rs")
+			e.w("  ") ; e.w(sp) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 0\n")
+			ca := e.nextReg2("rs")
+			e.w("  ") ; e.w(ca) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(src) ; e.w(", 2\n")
+			newLen := e.operand(c.Call.Args[1])
+			lt := e.llvmType(c.Call.Args[1].SSAType())
+			var nlVal string
+			if lt != ipt {
+				nlVal = e.nextReg2("rs")
+				e.w("  ") ; e.w(nlVal) ; e.w(" = sext ") ; e.w(lt) ; e.w(" ") ; e.w(newLen) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+			} else {
+				nlVal = newLen
 			}
-			// TODO: serialize args for Codec boundary, set up ring buffers per channel
-			e.w("  call void @runtime.spawnDomain(") ; e.w(ipt3) ; e.w(" ") ; e.w(fnPtr)
-			e.w(", ptr null, i32 ") ; e.w(irItoa(nChans)) ; e.w(", ptr null)\n")
-			// Get lifecycle channel - returns ptr to channel struct
-			e.w("  ") ; e.w(reg) ; e.w(" = call ptr @runtime.SpawnLifecycleChannel(ptr null)\n")
-			e.declareRuntime("runtime.spawnDomain", "void", ipt3 | ", ptr, i32")
-			e.declareRuntime("runtime.SpawnLifecycleChannel", "ptr", "")
+			ov := e.nextReg2("rs")
+			e.w("  ") ; e.w(ov) ; e.w(" = icmp ugt ") ; e.w(ipt) ; e.w(" ") ; e.w(nlVal) ; e.w(", ") ; e.w(ca) ; e.w("\n")
+			ov2 := e.nextReg2("rs")
+			e.w("  ") ; e.w(ov2) ; e.w(" = icmp eq i1 ") ; e.w(ov) ; e.w(", 1\n")
+			e.w("  call void @runtime.slicePanic(i1 ") ; e.w(ov2) ; e.w(", ptr null)\n")
+			e.declareRuntime("runtime.slicePanic", "void", "i1")
+			s1 := e.nextReg2("rs")
+			e.w("  ") ; e.w(s1) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" undef, ptr ") ; e.w(sp) ; e.w(", 0\n")
+			s2 := e.nextReg2("rs")
+			e.w("  ") ; e.w(s2) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s1) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(nlVal) ; e.w(", 1\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s2) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(ca) ; e.w(", 2\n")
 		}
 		return
 	}
@@ -870,5 +927,158 @@ func (e *irEmitter) emitPrintArg(val string, t Type) {
 	case *TCMap:
 		e.w("  call void @runtime.printmap(ptr ") ; e.w(val) ; e.w(", ptr null)\n")
 		e.declareRuntime("runtime.printmap", "void", "ptr")
+	}
+}
+
+// emitSpawnCall emits the native spawn(fn, args...) builtin. Mirrors the
+// legacy compiler's createSpawn: pack the data args into a struct buffer,
+// emit a goroutine-start wrapper that unpacks them and calls the target,
+// call runtime.spawnDomain, mark each channel arg pipe-bound on the parent
+// side, wait for the child to be ready, and return the lifecycle channel.
+func (e *irEmitter) emitSpawnCall(c *SSACall) {
+	ipt := e.intptrType()
+	targetFn, ok := c.Call.Args[0].(*SSAFunction)
+	if !ok {
+		e.emitZeroReg(e.regName(c), c.SSAType())
+		return
+	}
+	if !e.isPkgFunc(targetFn) {
+		e.declareExternalFunc(targetFn)
+	}
+
+	var argTypes []string
+	var argVals []string
+	var chanIdxs []int32
+	nChans := int32(0)
+	for i := 1; i < len(c.Call.Args); i++ {
+		arg := c.Call.Args[i]
+		lt := e.llvmType(arg.SSAType())
+		if lt == "" || lt == "void" {
+			lt = "ptr"
+		}
+		if len(argTypes) >= cap(argTypes) { argTypes = mxutil.GrowCap(argTypes) }
+		push(argTypes, lt)
+		if len(argVals) >= cap(argVals) { argVals = mxutil.GrowCap(argVals) }
+		push(argVals, e.operand(arg))
+		if _, isChan := SafeUnderlying(arg.SSAType()).(*TCChan); isChan {
+			if len(chanIdxs) >= cap(chanIdxs) { chanIdxs = mxutil.GrowCap(chanIdxs) }
+			push(chanIdxs, int32(i-1))
+			nChans++
+		}
+	}
+
+	structTy := "{"
+	for i, lt := range argTypes {
+		if i > 0 {
+			structTy = structTy | ", "
+		}
+		structTy = structTy | lt
+	}
+	structTy = structTy | "}"
+
+	buf := e.nextReg2("sp")
+	e.w("  ") ; e.w(buf) ; e.w(" = alloca ") ; e.w(structTy) ; e.w("\n")
+	for i, av := range argVals {
+		g := e.nextReg2("sp")
+		e.w("  ") ; e.w(g) ; e.w(" = getelementptr inbounds ") ; e.w(structTy) ; e.w(", ptr ") ; e.w(buf) ; e.w(", i32 0, i32 ") ; e.w(irItoa(int32(i))) ; e.w("\n")
+		e.w("  store ") ; e.w(argTypes[i]) ; e.w(" ") ; e.w(av) ; e.w(", ptr ") ; e.w(g) ; e.w("\n")
+	}
+
+	wrapperSym := e.emitSpawnWrapper(targetFn, argTypes, structTy, chanIdxs)
+
+	fnPtr := e.nextReg2("sp")
+	e.w("  ") ; e.w(fnPtr) ; e.w(" = ptrtoint ptr ") ; e.w(wrapperSym) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+	e.w("  call void @runtime.spawnDomain(") ; e.w(ipt) ; e.w(" ") ; e.w(fnPtr)
+	e.w(", ptr ") ; e.w(buf) ; e.w(", i32 ") ; e.w(irItoa(nChans)) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.spawnDomain", "void", ipt | ", ptr, i32")
+
+	for ci, ai := range chanIdxs {
+		e.w("  call void @runtime.MarkParentPipeChannel(ptr ") ; e.w(argVals[ai]) ; e.w(", i16 ") ; e.w(irItoa(int32(ci)+1)) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.MarkParentPipeChannel", "void", "ptr, i16")
+	}
+
+	e.w("  call i1 @runtime.PipeWaitChildReady(ptr null)\n")
+	e.declareRuntime("runtime.PipeWaitChildReady", "i1", "")
+
+	reg := e.regName(c)
+	e.w("  ") ; e.w(reg) ; e.w(" = call ptr @runtime.SpawnLifecycleChannel(ptr null)\n")
+	e.declareRuntime("runtime.SpawnLifecycleChannel", "ptr", "")
+}
+
+// emitSpawnWrapper emits (once) the goroutine-start wrapper for a spawn
+// target: void @sym$gowrapper(ptr %args) that loads each packed arg, marks
+// each channel arg child-side (MarkChildPipeChannel), signals ready
+// (PipeChildReady), and calls the target with a null context. Returns the
+// wrapper symbol. chanIdxs are the indices (into the arg list) of channel
+// args in parameter order; chanID = position+1, matching the parent side.
+func (e *irEmitter) emitSpawnWrapper(targetFn *SSAFunction, argTypes []string, structTy string, chanIdxs []int32) (sym string) {
+	sym = e.funcSymbol(targetFn) | "$gowrapper"
+	if e.spawnWrappers[sym] {
+		return sym
+	}
+	e.spawnWrappers[sym] = true
+
+	// Generate the wrapper body into a scratch buffer and stash it for
+	// package-tail emission: a `define` must not nest inside the caller's
+	// body, and emitSpawnCall runs mid-function.
+	savedSegs := e.segs
+	savedBuf := e.buf
+	e.segs = nil
+	e.buf = nil
+
+	e.w("\ndefine linkonce_odr void ") ; e.w(sym) ; e.w("(ptr %args) {\nentry:\n")
+	var loaded []string
+	for i, lt := range argTypes {
+		g := e.nextReg2("gw")
+		e.w("  ") ; e.w(g) ; e.w(" = getelementptr inbounds ") ; e.w(structTy) ; e.w(", ptr %args, i32 0, i32 ") ; e.w(irItoa(int32(i))) ; e.w("\n")
+		ld := e.nextReg2("gw")
+		e.w("  ") ; e.w(ld) ; e.w(" = load ") ; e.w(lt) ; e.w(", ptr ") ; e.w(g) ; e.w("\n")
+		if len(loaded) >= cap(loaded) { loaded = mxutil.GrowCap(loaded) }
+		push(loaded, ld)
+	}
+
+	// Child-side marks: bind each channel arg to its shared ring pair, then
+	// signal the parent that the child is ready. These run in the child
+	// process (the wrapper is only ever invoked by spawnDomain's child
+	// branch); MarkChildPipeChannel no-ops when childSpawnTarget is false.
+	for ci, ai := range chanIdxs {
+		if ai < 0 || ai >= int32(len(loaded)) {
+			continue
+		}
+		e.w("  call void @runtime.MarkChildPipeChannel(ptr ") ; e.w(loaded[ai]) ; e.w(", i16 ") ; e.w(irItoa(int32(ci)+1)) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.MarkChildPipeChannel", "void", "ptr, i16")
+	}
+	e.w("  call void @runtime.PipeChildReady(ptr null)\n")
+	e.declareRuntime("runtime.PipeChildReady", "void", "")
+
+	retType := e.funcRetType(targetFn)
+	if retType == "" || retType == "void" {
+		e.w("  call void ") ; e.w(e.funcSymbol(targetFn)) ; e.w("(")
+	} else {
+		callReg := e.nextReg2("gw")
+		e.w("  ") ; e.w(callReg) ; e.w(" = call ") ; e.w(retType) ; e.w(" ") ; e.w(e.funcSymbol(targetFn)) ; e.w("(")
+	}
+	for i, ld := range loaded {
+		if i > 0 { e.w(", ") }
+		e.w(argTypes[i]) ; e.w(" ") ; e.w(ld)
+	}
+	if len(loaded) > 0 { e.w(", ") }
+	e.w("ptr null)\n")
+	e.w("  ret void\n}\n")
+
+	e.assembleSegs()
+	if len(e.pendSpawnWrappers) >= cap(e.pendSpawnWrappers) { e.pendSpawnWrappers = mxutil.GrowCap(e.pendSpawnWrappers) }
+	push(e.pendSpawnWrappers, string(e.buf))
+	e.buf = savedBuf
+	e.segs = savedSegs
+	return sym
+}
+
+// emitSpawnWrappers writes out all collected spawn wrapper IR. Called once
+// at the package tail after emitTypeDescs, so the linkonce_odr defines sit
+// outside every function body.
+func (e *irEmitter) emitSpawnWrappers() {
+	for _, text := range e.spawnWrapperTexts {
+		e.w(text)
 	}
 }

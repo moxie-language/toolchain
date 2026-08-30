@@ -5,6 +5,7 @@
 package trace
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"fmt"
 	"slices"
 	"bytes"
@@ -1198,7 +1199,8 @@ type gState struct {
 
 // beginRegion starts a user region on the goroutine.
 func (s *gState) beginRegion(r userRegion) error {
-	s.regions = append(s.regions, r)
+	if len(s.regions) >= cap(s.regions) { s.regions = mxutil.GrowCap(s.regions) }
+	s.regions = push(s.regions, r)
 	return nil
 }
 
@@ -1244,7 +1246,8 @@ func (s *rangeState) beginRange(typ rangeType) error {
 	if s.hasRange(typ) {
 		return fmt.Errorf("discovered event already in-flight for when starting event %v", tracev2.Specs()[typ.typ].Name)
 	}
-	s.inFlight = append(s.inFlight, typ)
+	if len(s.inFlight) >= cap(s.inFlight) { s.inFlight = mxutil.GrowCap(s.inFlight) }
+	s.inFlight = push(s.inFlight, typ)
 	return nil
 }
 
@@ -1255,7 +1258,8 @@ func (s *rangeState) activeRange(typ rangeType, isInitialGen bool) error {
 		if s.hasRange(typ) {
 			return fmt.Errorf("found named active range already in first gen: %v", typ)
 		}
-		s.inFlight = append(s.inFlight, typ)
+		if len(s.inFlight) >= cap(s.inFlight) { s.inFlight = mxutil.GrowCap(s.inFlight) }
+		s.inFlight = push(s.inFlight, typ)
 	} else if !s.hasRange(typ) {
 		return fmt.Errorf("resource is missing active range: %v %v", tracev2.Specs()[typ.typ].Name, s.inFlight)
 	}
@@ -1338,7 +1342,7 @@ type taskState struct {
 }
 
 // queue implements a growable ring buffer with a queue API.
-type queue[T any] struct {
+type queue[T comparable] struct {
 	start, end int32
 	buf        []T
 }

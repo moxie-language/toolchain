@@ -5,6 +5,7 @@
 package zstd
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"encoding/binary"
 )
 
@@ -62,7 +63,8 @@ func (r *Reader) readRawRLELiterals(data block, off int32, hdr byte, outbuf []by
 		if off+regeneratedSize > len(data) {
 			return 0, nil, r.makeError(off, "raw literal size too large")
 		}
-		outbuf = append(outbuf, data[off:off+regeneratedSize]...)
+		if len(outbuf) >= cap(outbuf) { outbuf = mxutil.GrowCap(outbuf) }
+		outbuf = push(outbuf, data[off:off+regeneratedSize]...)
 		off += regeneratedSize
 	} else {
 		// RFC 3.1.1.3.1.3.
@@ -72,7 +74,8 @@ func (r *Reader) readRawRLELiterals(data block, off int32, hdr byte, outbuf []by
 		rle := data[off]
 		off++
 		for i := 0; i < regeneratedSize; i++ {
-			outbuf = append(outbuf, rle)
+			if len(outbuf) >= cap(outbuf) { outbuf = mxutil.GrowCap(outbuf) }
+			outbuf = push(outbuf, rle)
 		}
 	}
 
@@ -196,7 +199,8 @@ func (r *Reader) readLiteralsOneStream(data block, off, compressedSize, regenera
 		var t uint16
 		idx := (rbr.bits >> (rbr.cnt - huffBits)) & huffMask
 		t = huffTable[idx]
-		outbuf = append(outbuf, byte(t>>8))
+		if len(outbuf) >= cap(outbuf) { outbuf = mxutil.GrowCap(outbuf) }
+		outbuf = push(outbuf, byte(t>>8))
 		rbr.cnt -= uint32(t & 0xff)
 	}
 
@@ -277,7 +281,8 @@ func (r *Reader) readLiteralsFourStreams(data block, off, totalStreamsSize, rege
 
 	regeneratedStreamSize4 := regeneratedSize - regeneratedStreamSize*3
 
-	outbuf = append(outbuf, []byte{:regeneratedSize}...)
+	if len(outbuf) >= cap(outbuf) { outbuf = mxutil.GrowCap(outbuf) }
+	outbuf = push(outbuf, []byte{:regeneratedSize}...)
 
 	huffTable := r.huffmanTable
 	huffBits := uint32(r.huffmanTableBits)

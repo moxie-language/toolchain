@@ -8,6 +8,7 @@
 package gif
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bufio"
 	"compress/lzw"
 	"errors"
@@ -271,7 +272,7 @@ func (d *decoder) readHeaderAndScreenDescriptor() error {
 	if err != nil {
 		return fmt.Errorf("gif: reading header: %v", err)
 	}
-	d.vers = append([]byte(nil), d.tmp[:6]...)
+	d.vers = push([]byte(nil), d.tmp[:6]...)
 	if d.vers != "GIF87a" && d.vers != "GIF89a" {
 		return fmt.Errorf("gif: can't recognize format %q", d.vers)
 	}
@@ -294,7 +295,7 @@ func (d *decoder) readColorTable(fields byte) (color.Palette, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gif: reading color table: %s", err)
 	}
-	j, p := 0, (make)(color.Palette, n)
+	j, p := 0, color.Palette{:n}
 	for i := range p {
 		p[i] = color.RGBA{d.tmp[j+0], d.tmp[j+1], d.tmp[j+2], 0xFF}
 		j += 3
@@ -396,7 +397,7 @@ func (d *decoder) readImageDescriptor(keepAllFrames bool) error {
 	if d.hasTransparentIndex {
 		if !useLocalColorTable {
 			// Clone the global color table.
-			m.Palette = append(color.Palette(nil), d.globalColorTable...)
+			m.Palette = push(color.Palette(nil), d.globalColorTable...)
 		}
 		if ti := int32(d.transparentIndex); ti < len(m.Palette) {
 			m.Palette[ti] = color.RGBA{}
@@ -405,7 +406,7 @@ func (d *decoder) readImageDescriptor(keepAllFrames bool) error {
 			// according to the spec, but Firefox and Google Chrome
 			// seem OK with this, so we enlarge the palette with
 			// transparent colors. See golang.org/issue/15059.
-			p := (make)(color.Palette, ti+1)
+			p := color.Palette{:ti+1}
 			copy(p, m.Palette)
 			for i := len(m.Palette); i < len(p); i++ {
 				p[i] = color.RGBA{}
@@ -471,9 +472,12 @@ func (d *decoder) readImageDescriptor(keepAllFrames bool) error {
 	}
 
 	if keepAllFrames || len(d.image) == 0 {
-		d.image = append(d.image, m)
-		d.delay = append(d.delay, d.delayTime)
-		d.disposal = append(d.disposal, d.disposalMethod)
+		if len(d.image) >= cap(d.image) { d.image = mxutil.GrowCap(d.image) }
+		d.image = push(d.image, m)
+		if len(d.delay) >= cap(d.delay) { d.delay = mxutil.GrowCap(d.delay) }
+		d.delay = push(d.delay, d.delayTime)
+		if len(d.disposal) >= cap(d.disposal) { d.disposal = mxutil.GrowCap(d.disposal) }
+		d.disposal = push(d.disposal, d.disposalMethod)
 	}
 	// The GIF89a spec, Section 23 (Graphic Control Extension) says:
 	// "The scope of this extension is the first graphic rendering block

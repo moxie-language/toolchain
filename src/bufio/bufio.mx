@@ -8,6 +8,7 @@
 package bufio
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"errors"
 	"io"
@@ -111,7 +112,7 @@ func (b *Reader) fill() {
 	for i := maxConsecutiveEmptyReads; i > 0; i-- {
 		n, err := b.rd.Read(b.buf[b.w:])
 		if n < 0 {
-			panic(errNegativeRead)
+			panic(errNegativeRead.Error())
 		}
 		b.w += n
 		if err != nil {
@@ -229,7 +230,7 @@ func (b *Reader) Read(p []byte) (n int32, err error) {
 			// Read directly into p to avoid copy.
 			n, b.err = b.rd.Read(p)
 			if n < 0 {
-				panic(errNegativeRead)
+				panic(errNegativeRead.Error())
 			}
 			if n > 0 {
 				b.lastByte = int32(p[n-1])
@@ -243,7 +244,7 @@ func (b *Reader) Read(p []byte) (n int32, err error) {
 		b.w = 0
 		n, b.err = b.rd.Read(b.buf)
 		if n < 0 {
-			panic(errNegativeRead)
+			panic(errNegativeRead.Error())
 		}
 		if n == 0 {
 			return 0, b.readErr()
@@ -443,7 +444,7 @@ func (b *Reader) ReadLine() (line []byte, isPrefix bool, err error) {
 // returns (slice of full buffers, remaining bytes before delim, total number
 // of bytes in the combined first two elements, error).
 // The complete result is equal to
-// `bytes.Join(append(fullBuffers, finalFragment), nil)`, which has a
+// `bytes.Join(push(fullBuffers, finalFragment), nil)`, which has a
 // length of `totalLen`. The result is structured in this way to allow callers
 // to minimize allocations and copies.
 func (b *Reader) collectFragments(delim byte) (fullBuffers [][]byte, finalFragment []byte, totalLen int32, err error) {
@@ -462,7 +463,8 @@ func (b *Reader) collectFragments(delim byte) (fullBuffers [][]byte, finalFragme
 
 		// Make a copy of the buffer.
 		buf := bytes.Clone(frag)
-		fullBuffers = append(fullBuffers, buf)
+		if len(fullBuffers) >= cap(fullBuffers) { fullBuffers = mxutil.GrowCap(fullBuffers) }
+		fullBuffers = push(fullBuffers, buf)
 		totalLen += len(buf)
 	}
 
@@ -564,7 +566,7 @@ const errNegativeWrite = errors.Const("bufio: writer returned negative count fro
 func (b *Reader) writeBuf(w io.Writer) (int64, error) {
 	n, err := w.Write(b.buf[b.r:b.w])
 	if n < 0 {
-		panic(errNegativeWrite)
+		panic(errNegativeWrite.Error())
 	}
 	b.r += n
 	return int64(n), err

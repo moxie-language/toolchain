@@ -14,8 +14,8 @@ func echoInc(in chan moxie.Int32, out chan moxie.Int32) {
 }
 
 func main() {
-	in := make(chan moxie.Int32)
-	out := make(chan moxie.Int32)
+	in := chan moxie.Int32{}
+	out := chan moxie.Int32{}
 	spawn(echoInc, in, out)
 
 	for i := int32(0); i < 4; i++ {

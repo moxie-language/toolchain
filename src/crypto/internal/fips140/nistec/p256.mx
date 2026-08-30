@@ -5,6 +5,7 @@
 package nistec
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"crypto/internal/fips140/nistec/fiat"
 	"crypto/internal/fips140/subtle"
 	"crypto/internal/fips140deps/byteorder"
@@ -156,16 +157,18 @@ func (p *P256Point) bytes(out *[p256UncompressedLength]byte) []byte {
 	// The SEC 1 representation of the point at infinity is a single zero byte,
 	// and only infinity has z = 0.
 	if p.z.IsZero() == 1 {
-		return append(out[:0], 0)
+		return push(out[:0], 0)
 	}
 
 	zinv := (&fiat.P256Element{}).Invert(&p.z)
 	x := (&fiat.P256Element{}).Mul(&p.x, zinv)
 	y := (&fiat.P256Element{}).Mul(&p.y, zinv)
 
-	buf := append(out[:0], 4)
-	buf = append(buf, x.Bytes()...)
-	buf = append(buf, y.Bytes()...)
+	buf := push(out[:0], 4)
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, x.Bytes()...)
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, y.Bytes()...)
 	return buf
 }
 
@@ -186,7 +189,7 @@ func (p *P256Point) bytesX(out *[p256ElementLength]byte) ([]byte, error) {
 	zinv := (&fiat.P256Element{}).Invert(&p.z)
 	x := (&fiat.P256Element{}).Mul(&p.x, zinv)
 
-	return append(out[:0], x.Bytes()...), nil
+	return push(out[:0], x.Bytes()...), nil
 }
 
 // BytesCompressed returns the compressed or infinity encoding of p, as
@@ -201,7 +204,7 @@ func (p *P256Point) BytesCompressed() []byte {
 
 func (p *P256Point) bytesCompressed(out *[p256CompressedLength]byte) []byte {
 	if p.z.IsZero() == 1 {
-		return append(out[:0], 0)
+		return push(out[:0], 0)
 	}
 
 	zinv := (&fiat.P256Element{}).Invert(&p.z)
@@ -210,9 +213,10 @@ func (p *P256Point) bytesCompressed(out *[p256CompressedLength]byte) []byte {
 
 	// Encode the sign of the y coordinate (indicated by the least significant
 	// bit) as the encoding type (2 or 3).
-	buf := append(out[:0], 2)
+	buf := push(out[:0], 2)
 	buf[0] |= y.Bytes()[p256ElementLength-1] & 1
-	buf = append(buf, x.Bytes()...)
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, x.Bytes()...)
 	return buf
 }
 

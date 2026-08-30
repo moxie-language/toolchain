@@ -5,6 +5,7 @@
 package tls
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -178,7 +179,8 @@ func (s *SessionState) Bytes() ([]byte, error) {
 func certificatesToBytesSlice(certs []*x509.Certificate) [][]byte {
 	s := [][]byte{:0:len(certs)}
 	for _, c := range certs {
-		s = append(s, c.Raw)
+		if len(s) >= cap(s) { s = mxutil.GrowCap(s) }
+		s = push(s, c.Raw)
 	}
 	return s
 }
@@ -207,7 +209,8 @@ func ParseSessionState(data []byte) (*SessionState, error) {
 		if !readUint24LengthPrefixed(&extra, &e) {
 			return nil, errors.New("tls: invalid session encoding")
 		}
-		ss.Extra = append(ss.Extra, e)
+		if len(ss.Extra) >= cap(ss.Extra) { ss.Extra = mxutil.GrowCap(ss.Extra) }
+		ss.Extra = push(ss.Extra, e)
 	}
 	switch typ {
 	case 1:
@@ -238,7 +241,8 @@ func ParseSessionState(data []byte) (*SessionState, error) {
 		if err != nil {
 			return nil, err
 		}
-		ss.peerCertificates = append(ss.peerCertificates, c)
+		if len(ss.peerCertificates) >= cap(ss.peerCertificates) { ss.peerCertificates = mxutil.GrowCap(ss.peerCertificates) }
+		ss.peerCertificates = push(ss.peerCertificates, c)
 	}
 	if ss.isClient && len(ss.peerCertificates) == 0 {
 		return nil, errors.New("tls: no server certificates in client session")
@@ -258,7 +262,8 @@ func ParseSessionState(data []byte) (*SessionState, error) {
 		if len(ss.peerCertificates) == 0 {
 			return nil, errors.New("tls: invalid session encoding")
 		}
-		chain = append(chain, ss.peerCertificates[0])
+		if len(chain) >= cap(chain) { chain = mxutil.GrowCap(chain) }
+		chain = push(chain, ss.peerCertificates[0])
 		for !certList.Empty() {
 			var cert []byte
 			if !readUint24LengthPrefixed(&certList, &cert) {
@@ -268,9 +273,11 @@ func ParseSessionState(data []byte) (*SessionState, error) {
 			if err != nil {
 				return nil, err
 			}
-			chain = append(chain, c)
+			if len(chain) >= cap(chain) { chain = mxutil.GrowCap(chain) }
+			chain = push(chain, c)
 		}
-		ss.verifiedChains = append(ss.verifiedChains, chain)
+		if len(ss.verifiedChains) >= cap(ss.verifiedChains) { ss.verifiedChains = mxutil.GrowCap(ss.verifiedChains) }
+		ss.verifiedChains = push(ss.verifiedChains, chain)
 	}
 	if ss.EarlyData {
 		var alpn []byte

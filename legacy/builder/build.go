@@ -27,6 +27,7 @@ import (
 	"moxie/goenv"
 	"moxie/interp"
 	"moxie/loader"
+	"moxie/compiler/llvmutil"
 	"moxie/stacksize"
 	"moxie/transform"
 	"tinygo.org/x/go-llvm"
@@ -254,7 +255,6 @@ func Build(
 		return result, err
 	}
 	logMem("after lprogram.Parse")
-	compilerConfig.MXHPackages = lprogram.MXHPackages
 
 	// Store which filesystem paths map to which package name.
 	result.PackagePathMap = make(map[string]string, len(lprogram.Packages))
@@ -535,6 +535,10 @@ func Build(
 					return fmt.Errorf("failed to link module: %w", err)
 				}
 			}
+			// Linking renames appending globals (llvm.used) with differing
+			// array types instead of merging them. The verifier rejects
+			// appending linkage under suffixed names, so fold them back in.
+			llvmutil.MergeAppendingGlobals(mod)
 			logMem("after LTO link")
 			// Insert values from -ldflags="-X ..." into the IR.
 			// This is a separate module, so that the "runtime._string" type

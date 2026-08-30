@@ -18,6 +18,7 @@
 package profile
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"fmt"
 	"sort"
 	"bytes"
@@ -124,21 +125,25 @@ func (i *NodeInfo) PrintableName() []byte {
 func (i *NodeInfo) NameComponents() [][]byte {
 	var name [][]byte
 	if i.Address != 0 {
-		name = append(name, fmt.Sprintf("%016x", i.Address))
+		if len(name) >= cap(name) { name = mxutil.GrowCap(name) }
+		name = push(name, fmt.Sprintf("%016x", i.Address))
 	}
 	if fun := i.Name; fun != "" {
-		name = append(name, fun)
+		if len(name) >= cap(name) { name = mxutil.GrowCap(name) }
+		name = push(name, fun)
 	}
 
 	switch {
 	case i.Lineno != 0:
 		// User requested line numbers, provide what we have.
-		name = append(name, fmt.Sprintf(":%d", i.Lineno))
+		if len(name) >= cap(name) { name = mxutil.GrowCap(name) }
+		name = push(name, fmt.Sprintf(":%d", i.Lineno))
 	case i.Name != "":
 		// User requested function name. It was already included.
 	default:
 		// Do not leave it empty if there is no information at all.
-		name = append(name, "<unknown>")
+		if len(name) >= cap(name) { name = mxutil.GrowCap(name) }
+		name = push(name, "<unknown>")
 	}
 	return name
 }
@@ -204,7 +209,7 @@ func (em EdgeMap) FindTo(n *Node) *Edge {
 }
 
 func (em *EdgeMap) Add(e *Edge) {
-	*em = append(*em, e)
+	*em = push(*em, e)
 }
 
 func (em *EdgeMap) Delete(e *Edge) {
@@ -306,7 +311,7 @@ func NewGraph(prof *Profile, o *Options) *Graph {
 
 func selectNodesForGraph(nodes Nodes, dropNegative bool) *Graph {
 	// Collect nodes into a graph.
-	gNodes := (make)(Nodes, 0, len(nodes))
+	gNodes := Nodes{:0:len(nodes})
 	for _, n := range nodes {
 		if n == nil {
 			continue
@@ -317,7 +322,8 @@ func selectNodesForGraph(nodes Nodes, dropNegative bool) *Graph {
 		if dropNegative && isNegative(n) {
 			continue
 		}
-		gNodes = append(gNodes, n)
+		if len(gNodes) >= cap(gNodes) { gNodes = mxutil.GrowCap(gNodes) }
+		gNodes = push(gNodes, n)
 	}
 	return &Graph{gNodes}
 }
@@ -371,7 +377,7 @@ func CreateNodes(prof *Profile, o *Options) (Nodes, locationMap) {
 		if len(lines) == 0 {
 			lines = []Line{{}} // Create empty line to include location info.
 		}
-		nodes := (make)(Nodes, len(lines))
+		nodes := Nodes{:len(lines})
 		for ln := range lines {
 			nodes[ln] = nm.findOrInsertLine(l, lines[ln], o)
 		}
@@ -381,9 +387,10 @@ func CreateNodes(prof *Profile, o *Options) (Nodes, locationMap) {
 }
 
 func (nm NodeMap) nodes() Nodes {
-	nodes := (make)(Nodes, 0, len(nm))
+	nodes := Nodes{:0:len(nm})
 	for _, n := range nm {
-		nodes = append(nodes, n)
+		if len(nodes) >= cap(nodes) { nodes = mxutil.GrowCap(nodes) }
+		nodes = push(nodes, n)
 	}
 	return nodes
 }
@@ -448,12 +455,15 @@ func (g *Graph) String() string {
 		var in, out []int32
 
 		for _, from := range n.In {
-			in = append(in, nodeIndex[from.Src])
+			if len(in) >= cap(in) { in = mxutil.GrowCap(in) }
+			in = push(in, nodeIndex[from.Src])
 		}
 		for _, to := range n.Out {
-			out = append(out, nodeIndex[to.Dest])
+			if len(out) >= cap(out) { out = mxutil.GrowCap(out) }
+			out = push(out, nodeIndex[to.Dest])
 		}
-		s = append(s, fmt.Sprintf("%d: %s[flat=%d cum=%d] %x -> %v ", i+1, name, n.Flat, n.Cum, in, out))
+		if len(s) >= cap(s) { s = mxutil.GrowCap(s) }
+		s = push(s, fmt.Sprintf("%d: %s[flat=%d cum=%d] %x -> %v ", i+1, name, n.Flat, n.Cum, in, out))
 	}
 	return bytes.Join(s, "\n")
 }
@@ -462,9 +472,10 @@ func (g *Graph) String() string {
 // order. The sort order is first based on the edge weight
 // (higher-to-lower) and then by the node names to avoid flakiness.
 func (em EdgeMap) Sort() []*Edge {
-	el := (make)(edgeList, 0, len(em))
+	el := edgeList{:0:len(em})
 	for _, w := range em {
-		el = append(el, w)
+		if len(el) >= cap(el) { el = mxutil.GrowCap(el) }
+		el = push(el, w)
 	}
 
 	sort.Sort(el)

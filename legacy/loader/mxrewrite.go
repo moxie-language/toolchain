@@ -92,6 +92,26 @@ func filterNoNewVarErrors(errs []error) []error {
 	return out
 }
 
+// filterUndefinedSliceAlloc drops go/types "undefined: __slicealloc" and
+// "undefined: __ptralloc" errors. The loader's literal-syntax rewriter emits
+// these internal names for []T{:n} / chan T{} lowerings; go/types has no
+// notion of them, but the moxie typechecker resolves them as BuiltinMake /
+// BuiltinNew. Real user code can never reference these names.
+func filterUndefinedSliceAlloc(errs []error) []error {
+	var out []error
+	for _, e := range errs {
+		msg := e.Error()
+		if strings.Contains(msg, "undefined: __slicealloc") {
+			continue
+		}
+		if strings.Contains(msg, "undefined: __ptralloc") {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 // filterImpossibleAssertErrors filters out "impossible type assertion" errors
 // for types that are valid Moxie assertion targets. In Moxie, all builtin types
 // have auto-generated String() string methods, so assertions on Stringer
@@ -131,3 +151,5 @@ func checkPlusOnText(files []*ast.File, info *types.Info, fset *token.FileSet) [
 func rewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int) mxtext.RewriteResult {
 	return mxtext.RewriteSliceLiterals(src, fset, priorOffsets...)
 }
+
+

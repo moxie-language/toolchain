@@ -5,6 +5,7 @@
 package x509
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"encoding/asn1"
 	"errors"
@@ -83,7 +84,8 @@ func appendBase128Int(dst []byte, n uint64) []byte {
 		if i != 0 {
 			o |= 0x80
 		}
-		dst = append(dst, o)
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, o)
 	}
 	return dst
 }
@@ -97,7 +99,7 @@ func base128BigIntLength(n *big.Int) int32 {
 
 func appendBase128BigInt(dst []byte, n *big.Int) []byte {
 	if n.Cmp(big.NewInt(0)) == 0 {
-		return append(dst, 0)
+		return push(dst, 0)
 	}
 
 	for i := base128BigIntLength(n) - 1; i >= 0; i-- {
@@ -106,14 +108,15 @@ func appendBase128BigInt(dst []byte, n *big.Int) []byte {
 		if i != 0 {
 			o |= 0x80
 		}
-		dst = append(dst, o)
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, o)
 	}
 	return dst
 }
 
 // AppendText implements [encoding.TextAppender]
 func (o OID) AppendText(b []byte) ([]byte, error) {
-	return append(b, o.String()...), nil
+	return push(b, o.String()...), nil
 }
 
 // MarshalText implements [encoding.TextMarshaler]
@@ -186,7 +189,7 @@ func (o *OID) unmarshalOIDText(oid string) error {
 
 // AppendBinary implements [encoding.BinaryAppender]
 func (o OID) AppendBinary(b []byte) ([]byte, error) {
-	return append(b, o.der...), nil
+	return push(b, o.der...), nil
 }
 
 // MarshalBinary implements [encoding.BinaryMarshaler]
@@ -376,16 +379,21 @@ func (oid OID) toASN1OID() (asn1.ObjectIdentifier, bool) {
 		if v&0x80 == 0 {
 			if len(out) == 0 {
 				if val < 80 {
-					out = append(out, val/40)
-					out = append(out, val%40)
+					if len(out) >= cap(out) { out = mxutil.GrowCap(out) }
+					out = push(out, val/40)
+					if len(out) >= cap(out) { out = mxutil.GrowCap(out) }
+					out = push(out, val%40)
 				} else {
-					out = append(out, 2)
-					out = append(out, val-80)
+					if len(out) >= cap(out) { out = mxutil.GrowCap(out) }
+					out = push(out, 2)
+					if len(out) >= cap(out) { out = mxutil.GrowCap(out) }
+					out = push(out, val-80)
 				}
 				val = 0
 				continue
 			}
-			out = append(out, val)
+			if len(out) >= cap(out) { out = mxutil.GrowCap(out) }
+			out = push(out, val)
 			val = 0
 		}
 	}

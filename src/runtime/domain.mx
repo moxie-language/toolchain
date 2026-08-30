@@ -9,7 +9,6 @@ import "unsafe"
 
 type domainEntry struct {
 	pid        int32
-	parentFd   int32    // parent's end of socketpair (IPC channel)
 	lockdownFd int32    // parent's read end of the secalloc lockdown pipe; -1 if none
 	doneCh     *channel // lifecycle channel - closed when child exits
 	alive      bool
@@ -18,10 +17,9 @@ type domainEntry struct {
 
 var domainList *domainEntry
 
-func domainRegister(pid, fd, lockdownFd int32) {
+func domainRegister(pid, lockdownFd int32) {
 	domainList = &domainEntry{
 		pid:        pid,
-		parentFd:   fd,
 		lockdownFd: lockdownFd,
 		alive:      true,
 		next:       domainList,
@@ -77,15 +75,6 @@ func domainLookupByPid(pid int32) *domainEntry {
 	return nil
 }
 
-func domainLookupByFd(fd int32) *domainEntry {
-	for e := domainList; e != nil; e = e.next {
-		if e.parentFd == fd {
-			return e
-		}
-	}
-	return nil
-}
-
 // domainReapChildren checks for exited children and marks them dead.
 // Non-blocking (WNOHANG). Call periodically from the scheduler.
 // Sends exit status string on the lifecycle channel before closing it.
@@ -98,7 +87,6 @@ func domainReapChildren() {
 		r := moxie_waitpid(e.pid, unsafe.Pointer(&status), 1) // WNOHANG=1
 		if r > 0 {
 			e.alive = false
-			moxie_close(e.parentFd)
 			if e.lockdownFd >= 0 {
 				moxie_close(e.lockdownFd)
 			}
@@ -141,7 +129,6 @@ func domainShutdownAll() {
 			r := moxie_waitpid(e.pid, unsafe.Pointer(&status), 1)
 			if r > 0 {
 				e.alive = false
-				moxie_close(e.parentFd)
 				if e.lockdownFd >= 0 {
 					moxie_close(e.lockdownFd)
 				}
@@ -162,7 +149,6 @@ func domainShutdownAll() {
 			var status int32
 			moxie_waitpid(e.pid, unsafe.Pointer(&status), 0)
 			e.alive = false
-			moxie_close(e.parentFd)
 			if e.lockdownFd >= 0 {
 				moxie_close(e.lockdownFd)
 			}

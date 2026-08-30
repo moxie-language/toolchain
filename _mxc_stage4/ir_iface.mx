@@ -6,13 +6,6 @@ import (
 )
 
 func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
-	if e.curFunc != nil && e.curFunc.name == "NewFile" && m.X != nil && m.X.SSAType() != nil {
-		if nm, ok := m.X.SSAType().(*Named); ok && nm.Obj != nil && nm.Obj.Name == "unixFileHandle" {
-			mxutil.WriteStr(2, "DBG emitMakeInterface IN NewFile for unixFileHandle\n")
-		}
-		rt := e.reflectTypeName(m.X.SSAType())
-		mxutil.WriteStr(2, "DBG emitMakeInterface NewFile type=" | rt | "\n")
-	}
 	reg := e.regName(m)
 	val := e.operand(m.X)
 	valType := e.llvmType(m.X.SSAType())
@@ -71,37 +64,24 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue " | e.ifaceType() | " ") ; e.w(t1) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
 }
 
-// hashToIntptr folds a 64-bit FNV-1a hash to intptr width (32-bit on wasm32).
-func (e *irEmitter) hashToIntptr(h uint64) (s string) {
-	if e.intptrType() == "i32" {
-		return irUitoa64((h >> 32) ^ (h & 0xFFFFFFFF))
-	}
-	return irUitoa64(h)
-}
-
+// typeIDHash returns the interface type-ID for t: the descriptor pointer
+// (as an integer constant) for the type's reflect/types.type: global. The
+// arena codec and interface dispatch both interpret the typecode as a
+// descriptor pointer, matching the legacy compiler's model.
 func (e *irEmitter) typeIDHash(t Type) (s string) {
-	name := e.reflectTypeName(t)
-	if mxutil.HasSuffix(name, "unixFileHandle") || mxutil.HasSuffix(name, ".discard") {
-		pt := "value"
-		if _, ok := t.(*Pointer); ok { pt = "ptr" }
-		mxutil.WriteStr(2, "DBG typeIDHash type=" | pt | " name=" | name | "\n")
+	if t == nil {
+		return e.intptrType() | " 0"
 	}
-	if _, ok := e.typeIDs[name]; !ok {
-		found := false
-		for _, p := range e.pendTypeIDs {
-			if p.k == name { found = true; break }
-		}
-		if !found {
-			e.typeIDNext++
-			push(e.pendTypeIDs, emitKVI{name, e.typeIDNext})
-		}
+	tail := e.typeDescName(t)
+	if _, isIface := t.(*TCInterface); !isIface {
+		e.collectTypeDesc(t)
 	}
-	return e.hashToIntptr(fnv1a64(name))
+	return "ptrtoint (ptr @\"" | "reflect/types.type:" | tail | "\" to " | e.intptrType() | ")"
 }
 
+// typeIDHashI64 returns the type-ID as an intptr-typed operand.
 func (e *irEmitter) typeIDHashI64(t Type) (s string) {
-	name := e.reflectTypeName(t)
-	return e.intptrType() | " " | e.hashToIntptr(fnv1a64(name))
+	return e.typeIDHash(t)
 }
 
 func normalizePkgPath(pkgPath string) (s string) {
@@ -116,89 +96,7 @@ func normalizePkgPath(pkgPath string) (s string) {
 }
 
 func (e *irEmitter) reflectTypeName(t Type) (s string) {
-	if b, ok := t.(*Basic); ok {
-		switch b.Kind {
-		case Bool, UntypedBool:
-			return "reflect/types.type:basic:bool"
-		case Int8:
-			return "reflect/types.type:basic:int8"
-		case Int16:
-			return "reflect/types.type:basic:int16"
-		case Int32, UntypedInt, UntypedRune:
-			return "reflect/types.type:basic:int32"
-		case Int64:
-			return "reflect/types.type:basic:int64"
-		case Uint8:
-			return "reflect/types.type:basic:uint8"
-		case Uint16:
-			return "reflect/types.type:basic:uint16"
-		case Uint32:
-			return "reflect/types.type:basic:uint32"
-		case Uint64:
-			return "reflect/types.type:basic:uint64"
-		case Float32:
-			return "reflect/types.type:basic:float32"
-		case Float64, UntypedFloat:
-			return "reflect/types.type:basic:float64"
-		case TCString, UntypedString:
-			return "reflect/types.type:basic:bytes"
-		case UnsafePointer:
-			return "reflect/types.type:basic:uintptr"
-		}
-	}
-	if named, ok := t.(*Named); ok && named.Obj != nil {
-		pkgPath := ""
-		if named.Obj.Pkg != nil {
-			pkgPath = normalizePkgPath(named.Obj.Pkg.Path)
-		}
-		if pkgPath == "" {
-			pkgPath = normalizePkgPath(e.pkg.Pkg.Path)
-		}
-		result := "reflect/types.type:named:" | pkgPath | "." | named.Obj.Name
-		if pkgPath == e.pkg.Pkg.Path {
-			push(e.pendLocalTypeIDs, "\"" | result | "\"")
-		}
-		return result
-	}
-	if p, ok := t.(*Pointer); ok {
-		inner := e.reflectTypeName(p.Base)
-		if mxutil.HasPrefix(inner, "reflect/types.type:") {
-			result := "reflect/types.type:pointer:" | inner[len("reflect/types.type:"):]
-			quoted := "\"" | result | "\""
-			innerQ := "\"" | inner | "\""
-			inLocal := e.localTypeIDs != nil && e.localTypeIDs[innerQ]
-			if !inLocal {
-				for _, pk := range e.pendLocalTypeIDs {
-					if pk == innerQ { inLocal = true; break }
-				}
-			}
-			if inLocal {
-				push(e.pendLocalTypeIDs, quoted)
-			}
-			return result
-		}
-		return inner | ".ptr"
-	}
-	if _, ok := t.(*TCInterface); ok {
-		result := "reflect/types.type:interface:{}"
-		push(e.pendLocalTypeIDs, "\"" | result | "\"")
-		return result
-	}
-	if sl, ok := t.(*Slice); ok {
-		elem := sl.Elem
-		if b, ok2 := SafeUnderlying(elem).(*Basic); ok2 && b.Kind == Uint8 {
-			return "reflect/types.type:basic:bytes"
-		}
-		inner := e.reflectTypeName(elem)
-		if mxutil.HasPrefix(inner, "reflect/types.type:") {
-			result := "reflect/types.type:slice:" | inner[len("reflect/types.type:"):]
-			push(e.pendLocalTypeIDs, "\"" | result | "\"")
-			return result
-		}
-		return inner | ".slice"
-	}
-	pkg := e.pkg.Pkg.Path
-	return pkg | ".typeid.unknown"
+	return "reflect/types.type:" | e.typeDescName(t)
 }
 
 func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
@@ -206,6 +104,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 	hasType := map[string]bool{}
 	var mkeys []string
 	for k := range e.pkg.Members {
+		if len(mkeys) >= cap(mkeys) { mkeys = mxutil.GrowCap(mkeys) }
 		push(mkeys, k)
 	}
 	for i := 1; i < len(mkeys); i++ {
@@ -257,6 +156,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 		if isPtrRecv {
 			recvT = NewPointer(recvT)
 		}
+		if len(impls) >= cap(impls) { impls = mxutil.GrowCap(impls) }
 		push(impls, ifaceImpl{fn: fn, recvType: recvT, ptrRecv: isPtrRecv})
 		hasType[tname] = true
 	}
@@ -273,6 +173,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 		chain, fn, embedT := e.findEmbedMethod(tn2.Typ, methodName, 0)
 		if fn != nil {
 			isPtrRecv := fn.object != nil && fn.object.PtrRecv
+			if len(impls) >= cap(impls) { impls = mxutil.GrowCap(impls) }
 			push(impls, ifaceImpl{
 				fn:         fn,
 				recvType:   NewPointer(tn2.Typ),
@@ -293,6 +194,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 		if seenPkg[ip.Path] {
 			continue
 		}
+		if len(importedPkgs) >= cap(importedPkgs) { importedPkgs = mxutil.GrowCap(importedPkgs) }
 		push(importedPkgs, ip)
 		seenPkg[ip.Path] = true
 	}
@@ -303,6 +205,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 		if !ok || pn.Imported == nil || seenPkg[pn.Imported.Path] {
 			continue
 		}
+		if len(importedPkgs) >= cap(importedPkgs) { importedPkgs = mxutil.GrowCap(importedPkgs) }
 		push(importedPkgs, pn.Imported)
 		seenPkg[pn.Imported.Path] = true
 	}
@@ -320,6 +223,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 	// local linkage) and never linkable.
 	var regPaths []string
 	for rPath := range cctx.universe.Registry {
+		if len(regPaths) >= cap(regPaths) { regPaths = mxutil.GrowCap(regPaths) }
 		push(regPaths, rPath)
 	}
 	for i := 1; i < len(regPaths); i++ {
@@ -333,14 +237,16 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 		if rPkg == nil || seenPkg[rPath] {
 			continue
 		}
-		if rPath == "moxie" || rPath == "runtime" || rPath == "unsafe" {
+		if rPath == "runtime" || rPath == "unsafe" {
 			continue
 		}
+		if len(importedPkgs) >= cap(importedPkgs) { importedPkgs = mxutil.GrowCap(importedPkgs) }
 		push(importedPkgs, rPkg)
 	}
 	for ipi := 0; ipi < len(importedPkgs); ipi++ {
 		ipkg := importedPkgs[ipi]
-		pkgPath := normalizePkgPath(ipkg.Path)
+		fullPath := ipkg.Path
+		pkgPath := normalizePkgPath(fullPath)
 		if pkgPath == selfPath {
 			continue
 		}
@@ -370,7 +276,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 					continue
 				}
 				isPR := m.PtrRecv
-				sym := pkgPath | ".(*" | tname | ")." | methodName
+				sym := fullPath | ".(*" | tname | ")." | methodName
 				tid := ""
 				normPath := normalizePkgPath(pkgPath)
 		// Moxie's all-ptr-receiver ABI: all methods receive a pointer.
@@ -382,12 +288,8 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 		} else {
 			tid = "reflect/types.type:named:" | normPath | "." | tname
 		}
-		if tname == "unixFileHandle" && methodName == "Write" {
-			prStr := "0"
-			if isPR { prStr = "1" }
-			mxutil.WriteStr(2, "DBG extScan unixFileHandle.Write isPR=" | prStr | " tid=" | tid | " normPath=" | normPath | "\n")
-		}
-				msig := m.Signature()
+			msig := m.Signature()
+				if len(impls) >= cap(impls) { impls = mxutil.GrowCap(impls) }
 				push(impls, ifaceImpl{
 					recvType:  tn3.Typ,
 					ptrRecv:   isPR,
@@ -395,12 +297,29 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 					extTypeID: tid,
 					extSig:    msig,
 				})
+				if !isPR {
+					// *T also carries the value-receiver method (Go method-set
+					// promotion). Emit the pointer variant too, so a boxed *T
+					// dispatches it. The Codec interface relies on this:
+					// EncodeTo is value-receiver, DecodeFrom is
+					// pointer-receiver, and the compiler boxes &v as *T.
+					ptid := "reflect/types.type:pointer:named:" | normPath | "." | tname
+					if len(impls) >= cap(impls) { impls = mxutil.GrowCap(impls) }
+					push(impls, ifaceImpl{
+						recvType:  NewPointer(tn3.Typ),
+						ptrRecv:   false,
+						extSymbol: sym,
+						extTypeID: ptid,
+						extSig:    msig,
+					})
+				}
 				found = true
 			}
 			if !found {
 				chain, embedSym, embedSig, embedT := findExtEmbedMethod(named3, pkgPath, tname, methodName, 0)
 				if embedSym != "" {
 					tid := "reflect/types.type:pointer:named:" | pkgPath | "." | tname
+					if len(impls) >= cap(impls) { impls = mxutil.GrowCap(impls) }
 					push(impls, ifaceImpl{
 						recvType:   NewPointer(tn3.Typ),
 						ptrRecv:    true,
@@ -413,6 +332,47 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 					})
 				}
 			}
+		}
+	}
+	// The basic types' String() methods (runtime/stringer.mx) are compiled
+	// into the runtime, not the package members. Register them as external
+	// impls so a boxed basic (e.g. fmt.Stringer wrapping a string) dispatches
+	// correctly. The identity thunks live in runtime.bc.
+	if methodName == "String" {
+		basicImpls := [][]string{
+			{"bool", "basic:bool.String$identity"},
+			{"int8", "basic:int8.String$identity"},
+			{"int16", "basic:int16.String$identity"},
+			{"int32", "basic:int32.String$identity"},
+			{"int64", "basic:int64.String$identity"},
+			{"uint8", "basic:uint8.String$identity"},
+			{"uint16", "basic:uint16.String$identity"},
+			{"uint32", "basic:uint32.String$identity"},
+			{"uint64", "basic:uint64.String$identity"},
+			{"uintptr", "basic:uintptr.String$identity"},
+			{"float32", "basic:float32.String$identity"},
+			{"float64", "basic:float64.String$identity"},
+			{"bytes", "basic:bytes.String$identity"},
+		}
+		for bi := 0; bi < len(basicImpls); bi++ {
+			bt := basicImpls[bi][0]
+			bsym := basicImpls[bi][1]
+			if bt == "uintptr" {
+				e.collectTypeDesc(Typ[Uintptr])
+			} else {
+				btBasic := basicFromTail(bt)
+				if btBasic != nil && btBasic != Typ[Invalid] {
+					e.collectTypeDesc(btBasic)
+				}
+			}
+			if len(impls) >= cap(impls) { impls = mxutil.GrowCap(impls) }
+			push(impls, ifaceImpl{
+				recvType:  Typ[TCString],
+				ptrRecv:   true,
+				extSymbol: bsym,
+				extTypeID: "reflect/types.type:basic:" | bt,
+				strong:    true,
+			})
 		}
 	}
 	for i := 1; i < len(impls); i++ {
@@ -526,6 +486,7 @@ type ifaceImpl struct {
 	extSymbol  string
 	extTypeID  string
 	extSig     *Signature
+	strong     bool // symbol always defined in the linked runtime; no null check
 }
 
 func (e *irEmitter) implFuncSym(impl ifaceImpl) (s string) {
@@ -540,6 +501,11 @@ func (e *irEmitter) implFuncSym(impl ifaceImpl) (s string) {
 
 func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 	if impl.extSymbol == "" {
+		return
+	}
+	// The basic String() identity wrappers are defined (internal) by
+	// emitBasicIdentities in every module; no extern declaration needed.
+	if impl.strong {
 		return
 	}
 	sym := e.implFuncSym(impl)
@@ -572,8 +538,10 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 	}
 	var psegs []string
 	if params != "" {
+		if len(psegs) >= cap(psegs) { psegs = mxutil.GrowCap(psegs) }
 		push(psegs, params)
 	}
+	if len(psegs) >= cap(psegs) { psegs = mxutil.GrowCap(psegs) }
 	push(psegs, recvLLVM)
 	var sig *Signature
 	if impl.fn != nil && impl.fn.Signature != nil {
@@ -587,6 +555,7 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 			if pt == "void" {
 				pt = "ptr"
 			}
+			if len(psegs) >= cap(psegs) { psegs = mxutil.GrowCap(psegs) }
 			push(psegs, pt)
 		}
 	} else {
@@ -595,9 +564,11 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 			if argT == "void" {
 				argT = "ptr"
 			}
+			if len(psegs) >= cap(psegs) { psegs = mxutil.GrowCap(psegs) }
 			push(psegs, argT)
 		}
 	}
+	if len(psegs) >= cap(psegs) { psegs = mxutil.GrowCap(psegs) }
 	push(psegs, "ptr")
 	params = joinStrs(commaSep(psegs))
 	// extern_weak: dispatch lists enumerate impls from the whole link set;
@@ -608,11 +579,17 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 	if useSret {
 		declRet = "void"
 	}
-	push(e.pendExtDecls, emitKV{sym, "extern_weak " | declRet | " " | sym | "(" | params | ")"})
+	linkage := "extern_weak "
+	if impl.strong {
+		linkage = ""
+	}
+	if len(e.pendExtDecls) >= cap(e.pendExtDecls) { e.pendExtDecls = mxutil.GrowCap(e.pendExtDecls) }
+	push(e.pendExtDecls, emitKV{sym, linkage | declRet | " " | sym | "(" | params | ")"})
 }
 
 func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv string, inv *SSAInvoke, isVoid bool, impl ifaceImpl) {
 	var casegs []string
+	if len(casegs) >= cap(casegs) { casegs = mxutil.GrowCap(casegs) }
 	push(casegs, recvLLVM | " " | recv)
 	var sig *Signature
 	if impl.fn != nil {
@@ -627,6 +604,7 @@ func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv stri
 		}
 		argVal := e.operand(arg)
 		if sig != nil && sig.Params != nil && i < sig.Params.Len() {
+			argT, argVal = e.boxConcreteToIfaceParam(sig.Params.At(i).Typ, arg, argT, argVal)
 			pt := e.llvmType(sig.Params.At(i).Typ)
 			if pt == "void" {
 				pt = "ptr"
@@ -644,8 +622,10 @@ func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv stri
 				argVal = loaded
 			}
 		}
+		if len(casegs) >= cap(casegs) { casegs = mxutil.GrowCap(casegs) }
 		push(casegs, argT | " " | argVal)
 	}
+	if len(casegs) >= cap(casegs) { casegs = mxutil.GrowCap(casegs) }
 	push(casegs, "ptr null")
 	callArgs := joinStrs(commaSep(casegs))
 	e.w("  ")
@@ -659,18 +639,14 @@ func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv stri
 
 func (e *irEmitter) implTypeID(impl ifaceImpl) (s string) {
 	if impl.extTypeID != "" {
-		hash := e.hashToIntptr(fnv1a64(impl.extTypeID))
-		if impl.extTypeID == "reflect/types.type:named:os.unixFileHandle" || impl.extTypeID == "reflect/types.type:named:io.discard" {
-			mxutil.WriteStr(2, "DBG implTypeID extTypeID=" | impl.extTypeID | " hash=" | hash | "\n")
+		if mxutil.HasPrefix(impl.extTypeID, "reflect/types.type:") {
+			tail := impl.extTypeID[len("reflect/types.type:"):]
+			e.collectTypeDescFromTail(tail)
+			return "ptrtoint (ptr @\"" | "reflect/types.type:" | tail | "\" to " | e.intptrType() | ")"
 		}
-		return hash
+		return e.intptrType() | " 0"
 	}
-	h := e.typeIDHash(impl.recvType)
-	name := e.reflectTypeName(impl.recvType)
-	if mxutil.HasSuffix(name, ".unixFileHandle") || mxutil.HasSuffix(name, ".discard") {
-		mxutil.WriteStr(2, "DBG implTypeID local name=" | name | " hash=" | h | "\n")
-	}
-	return h
+	return e.typeIDHash(impl.recvType)
 }
 
 // emitIfaceAssertOK emits an i1 that is true when the dynamic type-ID in
@@ -696,7 +672,9 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 		var keepS []*Signature
 		for mi := 0; mi < len(mnames); mi++ {
 			if mnames[mi] != "String" {
+				if len(keepN) >= cap(keepN) { keepN = mxutil.GrowCap(keepN) }
 				push(keepN, mnames[mi])
+				if len(keepS) >= cap(keepS) { keepS = mxutil.GrowCap(keepS) }
 				push(keepS, msigs[mi])
 			}
 		}
@@ -736,6 +714,7 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 			}
 			seen[base] = true
 			if _, have := allCount[base]; !have {
+				if len(order) >= cap(order) { order = mxutil.GrowCap(order) }
 				push(order, base)
 			}
 			allCount[base] = allCount[base] + 1
@@ -749,10 +728,12 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 	for oi := 0; oi < len(order); oi++ {
 		base := order[oi]
 		if allCount[base] == n {
-			push(tids, e.hashToIntptr(fnv1a64(pfx|"pointer:"|base[len(pfx):])))
+			if len(tids) >= cap(tids) { tids = mxutil.GrowCap(tids) }
+			push(tids, "ptrtoint (ptr @\"" | pfx | "pointer:" | base[len(pfx):] | "\" to " | e.intptrType() | ")")
 		}
 		if valCount[base] == n {
-			push(tids, e.hashToIntptr(fnv1a64(base)))
+			if len(tids) >= cap(tids) { tids = mxutil.GrowCap(tids) }
+			push(tids, "ptrtoint (ptr @\"" | base | "\" to " | e.intptrType() | ")")
 		}
 	}
 	ok := ""
@@ -791,12 +772,16 @@ func collectIfaceMethodInfo(ifaceT *TCInterface, depth int32) (ss []string, sigs
 	var sigList []*Signature
 	if ifaceT.NumMethods() > 0 {
 		for i := int32(0); i < ifaceT.NumMethods(); i++ {
+			if len(names) >= cap(names) { names = mxutil.GrowCap(names) }
 			push(names, ifaceT.Method(i).Name)
+			if len(sigList) >= cap(sigList) { sigList = mxutil.GrowCap(sigList) }
 			push(sigList, ifaceT.Method(i).Sig)
 		}
 	} else {
 		for i := int32(0); i < ifaceT.NumExplicitMethods(); i++ {
+			if len(names) >= cap(names) { names = mxutil.GrowCap(names) }
 			push(names, ifaceT.ExplicitMethod(i).Name)
+			if len(sigList) >= cap(sigList) { sigList = mxutil.GrowCap(sigList) }
 			push(sigList, ifaceT.ExplicitMethod(i).Sig)
 		}
 		for i := int32(0); i < ifaceT.NumEmbeddeds(); i++ {
@@ -815,10 +800,13 @@ func collectIfaceMethodInfo(ifaceT *TCInterface, depth int32) (ss []string, sigs
 			continue
 		}
 		seen[names[i]] = true
+		if len(outN) >= cap(outN) { outN = mxutil.GrowCap(outN) }
 		push(outN, names[i])
 		if i < len(sigList) {
+			if len(outS) >= cap(outS) { outS = mxutil.GrowCap(outS) }
 			push(outS, sigList[i])
 		} else {
+			if len(outS) >= cap(outS) { outS = mxutil.GrowCap(outS) }
 			push(outS, nil)
 		}
 	}
@@ -893,6 +881,7 @@ func (e *irEmitter) prepareInvokeArgs(inv *SSAInvoke, impl ifaceImpl) (ss []invo
 		}
 		argV := e.operand(arg)
 		if sig != nil && sig.Params != nil && i < sig.Params.Len() {
+			argT, argV = e.boxConcreteToIfaceParam(sig.Params.At(i).Typ, arg, argT, argV)
 			pt := e.llvmType(sig.Params.At(i).Typ)
 			if pt != "void" && pt != "ptr" && pt != "" && pt != argT && len(pt) > len(argT) {
 				e.nextReg++
@@ -910,6 +899,7 @@ func (e *irEmitter) prepareInvokeArgs(inv *SSAInvoke, impl ifaceImpl) (ss []invo
 		if argT == "void" {
 			argT = "ptr"
 		}
+		if len(result) >= cap(result) { result = mxutil.GrowCap(result) }
 		push(result, invokeArg{typ: argT, val: argV})
 	}
 	return result
@@ -919,6 +909,45 @@ func (e *irEmitter) emitInvokeArgs(args []invokeArg) {
 	for _, a := range args {
 		e.w(", ") ; e.w(a.typ) ; e.w(" ") ; e.w(a.val)
 	}
+}
+
+// boxConcreteToIfaceParam emits interface boxing when a concrete arg is
+// passed to an interface-typed method parameter. Without this, the raw
+// alloca+store+load cast leaves the typecode zero and the callee's own
+// interface dispatch fails ("no impl"). Returns the (type, value) to use
+// for the call. When the param is not an interface or the arg is already
+// an interface, returns the input unchanged.
+func (e *irEmitter) boxConcreteToIfaceParam(paramType Type, arg SSAValue, argT, argV string) (s string, v string) {
+	if paramType == nil || arg == nil || arg.SSAType() == nil {
+		return argT, argV
+	}
+	if _, isIface := SafeUnderlying(paramType).(*TCInterface); !isIface {
+		return argT, argV
+	}
+	if _, isIfaceArg := SafeUnderlying(arg.SSAType()).(*TCInterface); isIfaceArg {
+		return argT, argV
+	}
+	ity := e.ifaceType()
+	if argT != "ptr" {
+		// Non-pointer concrete value: heap-allocate a copy and box its address.
+		ipt := e.intptrType()
+		sz := e.nextReg2("boxsz")
+		e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(argT) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+		vp := e.nextReg2("boxvp")
+		e.w("  ") ; e.w(vp) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
+		e.w("  store volatile ") ; e.w(argT) ; e.w(" ") ; e.w(argV) ; e.w(", ptr ") ; e.w(vp) ; e.w("\n")
+		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
+		e.scopeTrackAlloc(vp)
+		argV = vp
+	}
+	typeid := e.typeIDHash(arg.SSAType())
+	e.nextReg++
+	t1 := "%boxc" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(t1) ; e.w(" = insertvalue ") ; e.w(ity) ; e.w(" undef, ") ; e.w(e.intptrType()) ; e.w(" ") ; e.w(typeid) ; e.w(", 0\n")
+	e.nextReg++
+	v = "%boxc" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(v) ; e.w(" = insertvalue ") ; e.w(ity) ; e.w(" ") ; e.w(t1) ; e.w(", ptr ") ; e.w(argV) ; e.w(", 1\n")
+	return ity, v
 }
 
 func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
@@ -990,6 +1019,7 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 				continue
 			}
 		}
+		if len(impls) >= cap(impls) { impls = mxutil.GrowCap(impls) }
 		push(impls, impl)
 	}
 	for _, impl := range impls {
@@ -1040,10 +1070,14 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 	var callRegs []string
 	var phiLabels []string
 	for i := range impls {
+		if len(checkLabels) >= cap(checkLabels) { checkLabels = mxutil.GrowCap(checkLabels) }
 		push(checkLabels, "invoke.check" | irItoa(baseID) | "." | irItoa(i))
+		if len(caseLabels) >= cap(caseLabels) { caseLabels = mxutil.GrowCap(caseLabels) }
 		push(caseLabels, "invoke.case" | irItoa(baseID) | "." | irItoa(i))
+		if len(phiLabels) >= cap(phiLabels) { phiLabels = mxutil.GrowCap(phiLabels) }
 		push(phiLabels, caseLabels[len(caseLabels)-1])
 		if !isVoid {
+			if len(callRegs) >= cap(callRegs) { callRegs = mxutil.GrowCap(callRegs) }
 			push(callRegs, e.nextReg2("cr"))
 		}
 	}
@@ -1070,7 +1104,7 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 		}
 		recvLLVM := "ptr"
 		recv := callRecv
-		if impl.extSymbol != "" {
+		if impl.extSymbol != "" && !impl.strong {
 			// For extern_weak symbols, check the function pointer is
 			// non-null before calling. An unresolved weak symbol resolves
 			// to null, which would crash at the call site.

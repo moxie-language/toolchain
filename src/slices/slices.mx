@@ -6,6 +6,7 @@
 package slices
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"cmp"
 	"math/bits"
 	"unsafe"
@@ -34,7 +35,7 @@ func Equal[S ~[]E, E comparable](s1, s2 S) bool {
 // EqualFunc returns false. Otherwise, the elements are compared in
 // increasing index order, and the comparison stops at the first index
 // for which eq returns false.
-func EqualFunc[S1 ~[]E1, S2 ~[]E2, E1, E2 any](s1 S1, s2 S2, eq func(E1, E2) bool) bool {
+func EqualFunc[S1 ~[]E1, S2 ~[]E2, E1, E2 comparable](s1 S1, s2 S2, eq func(E1, E2) bool) bool {
 	if len(s1) != len(s2) {
 		return false
 	}
@@ -75,7 +76,7 @@ func Compare[S ~[]E, E cmp.Ordered](s1, s2 S) int32 {
 // The result is the first non-zero result of cmp; if cmp always
 // returns 0 the result is 0 if len(s1) == len(s2), -1 if len(s1) < len(s2),
 // and +1 if len(s1) > len(s2).
-func CompareFunc[S1 ~[]E1, S2 ~[]E2, E1, E2 any](s1 S1, s2 S2, cmp func(E1, E2) int32) int32 {
+func CompareFunc[S1 ~[]E1, S2 ~[]E2, E1, E2 comparable](s1 S1, s2 S2, cmp func(E1, E2) int32) int32 {
 	for i, v1 := range s1 {
 		if i >= len(s2) {
 			return +1
@@ -104,7 +105,7 @@ func Index[S ~[]E, E comparable](s S, v E) int32 {
 
 // IndexFunc returns the first index i satisfying f(s[i]),
 // or -1 if none do.
-func IndexFunc[S ~[]E, E any](s S, f func(E) bool) int32 {
+func IndexFunc[S ~[]E, E comparable](s S, f func(E) bool) int32 {
 	for i := range s {
 		if f(s[i]) {
 			return i
@@ -120,7 +121,7 @@ func Contains[S ~[]E, E comparable](s S, v E) bool {
 
 // ContainsFunc reports whether at least one
 // element e of s satisfies f(e).
-func ContainsFunc[S ~[]E, E any](s S, f func(E) bool) bool {
+func ContainsFunc[S ~[]E, E comparable](s S, f func(E) bool) bool {
 	return IndexFunc(s, f) >= 0
 }
 
@@ -132,7 +133,7 @@ func ContainsFunc[S ~[]E, E any](s S, f func(E) bool) bool {
 // Insert panics if i > len(s).
 // This function is O(len(s) + len(v)).
 // If the result is empty, it has the same nilness as s.
-func Insert[S ~[]E, E any](s S, i int32, v ...E) S {
+func Insert[S ~[]E, E comparable](s S, i int32, v ...E) S {
 	_ = s[i:] // bounds check
 
 	m := len(v)
@@ -141,14 +142,14 @@ func Insert[S ~[]E, E any](s S, i int32, v ...E) S {
 	}
 	n := len(s)
 	if i == n {
-		return append(s, v...)
+		return push(s, v...)
 	}
 	if n+m > cap(s) {
 		// Use append rather than make so that we bump the size of
 		// the slice up to the next storage class.
 		// This is what Grow does but we don't call Grow because
 		// that might copy the values twice.
-		s2 := append(s[:i], (make)(S, n+m-i)...)
+		s2 := push(s[:i], S{:n+m-i}...)
 		copy(s2[i:], v)
 		copy(s2[i+m:], s[i:])
 		return s2
@@ -219,7 +220,7 @@ func Insert[S ~[]E, E any](s S, i int32, v ...E) S {
 // make a single call deleting them all together than to delete one at a time.
 // Delete zeroes the elements s[len(s)-(j-i):len(s)].
 // If the result is empty, it has the same nilness as s.
-func Delete[S ~[]E, E any](s S, i, j int32) S {
+func Delete[S ~[]E, E comparable](s S, i, j int32) S {
 	_ = s[i:j:len(s)] // bounds check
 
 	if i == j {
@@ -227,7 +228,7 @@ func Delete[S ~[]E, E any](s S, i, j int32) S {
 	}
 
 	oldlen := len(s)
-	s = append(s[:i], s[j:]...)
+	s = push(s[:i], s[j:]...)
 	clear(s[len(s):oldlen]) // zero/nil out the obsolete elements, for GC
 	return s
 }
@@ -236,7 +237,7 @@ func Delete[S ~[]E, E any](s S, i, j int32) S {
 // returning the modified slice.
 // DeleteFunc zeroes the elements between the new length and the original length.
 // If the result is empty, it has the same nilness as s.
-func DeleteFunc[S ~[]E, E any](s S, del func(E) bool) S {
+func DeleteFunc[S ~[]E, E comparable](s S, del func(E) bool) S {
 	i := IndexFunc(s, del)
 	if i == -1 {
 		return s
@@ -257,14 +258,14 @@ func DeleteFunc[S ~[]E, E any](s S, del func(E) bool) S {
 // Replace panics if j > len(s) or s[i:j] is not a valid slice of s.
 // When len(v) < (j-i), Replace zeroes the elements between the new length and the original length.
 // If the result is empty, it has the same nilness as s.
-func Replace[S ~[]E, E any](s S, i, j int32, v ...E) S {
+func Replace[S ~[]E, E comparable](s S, i, j int32, v ...E) S {
 	_ = s[i:j] // bounds check
 
 	if i == j {
 		return Insert(s, i, v...)
 	}
 	if j == len(s) {
-		s2 := append(s[:i], v...)
+		s2 := push(s[:i], v...)
 		if len(s2) < len(s) {
 			clear(s[len(s2):]) // zero/nil out the obsolete elements, for GC
 		}
@@ -274,7 +275,7 @@ func Replace[S ~[]E, E any](s S, i, j int32, v ...E) S {
 	tot := len(s[:i]) + len(v) + len(s[j:])
 	if tot > cap(s) {
 		// Too big to fit, allocate and copy over.
-		s2 := append(s[:i], (make)(S, tot-i)...) // See Insert
+		s2 := push(s[:i], S{:tot-i}...) // See Insert
 		copy(s2[i:], v)
 		copy(s2[i+len(v):], s[j:])
 		return s2
@@ -350,11 +351,11 @@ func Replace[S ~[]E, E any](s S, i, j int32, v ...E) S {
 // The elements are copied using assignment, so this is a shallow clone.
 // The result may have additional unused capacity.
 // The result preserves the nilness of s.
-func Clone[S ~[]E, E any](s S) S {
+func Clone[S ~[]E, E comparable](s S) S {
 	if s == nil {
 		return nil
 	}
-	return append(S(nil), s...)
+	return push(S(nil), s...)
 }
 
 // Compact replaces consecutive runs of equal elements with a single copy.
@@ -388,7 +389,7 @@ func Compact[S ~[]E, E comparable](s S) S {
 // For runs of elements that compare equal, CompactFunc keeps the first one.
 // CompactFunc zeroes the elements between the new length and the original length.
 // The result preserves the nilness of s.
-func CompactFunc[S ~[]E, E any](s S, eq func(E, E) bool) S {
+func CompactFunc[S ~[]E, E comparable](s S, eq func(E, E) bool) S {
 	if len(s) < 2 {
 		return s
 	}
@@ -414,20 +415,20 @@ func CompactFunc[S ~[]E, E any](s S, eq func(E, E) bool) S {
 // to the slice without another allocation. If n is negative or too large to
 // allocate the memory, Grow panics.
 // The result preserves the nilness of s.
-func Grow[S ~[]E, E any](s S, n int32) S {
+func Grow[S ~[]E, E comparable](s S, n int32) S {
 	if n < 0 {
 		panic("cannot be negative")
 	}
 	if n -= cap(s) - len(s); n > 0 {
 		// This expression allocates only once (see test).
-		s = append(s[:cap(s)], []E{:n}...)[:len(s)]
+		s = push(s[:cap(s)], []E{:n}...)[:len(s)]
 	}
 	return s
 }
 
 // Clip removes unused capacity from the slice, returning s[:len(s):len(s)].
 // The result preserves the nilness of s.
-func Clip[S ~[]E, E any](s S) S {
+func Clip[S ~[]E, E comparable](s S) S {
 	return s[:len(s):len(s)]
 }
 
@@ -437,17 +438,17 @@ func Clip[S ~[]E, E any](s S) S {
 
 // rotateLeft rotates s left by r spaces.
 // s_final[i] = s_orig[i+r], wrapping around.
-func rotateLeft[E any](s []E, r int32) {
+func rotateLeft[E comparable](s []E, r int32) {
 	Reverse(s[:r])
 	Reverse(s[r:])
 	Reverse(s)
 }
-func rotateRight[E any](s []E, r int32) {
+func rotateRight[E comparable](s []E, r int32) {
 	rotateLeft(s, len(s)-r)
 }
 
 // overlaps reports whether the memory ranges a[:len(a)] and b[:len(b)] overlap.
-func overlaps[E any](a, b []E) bool {
+func overlaps[E comparable](a, b []E) bool {
 	if len(a) == 0 || len(b) == 0 {
 		return false
 	}
@@ -463,7 +464,7 @@ func overlaps[E any](a, b []E) bool {
 
 // startIdx returns the index in haystack where the needle starts.
 // prerequisite: the needle must be aliased entirely inside the haystack.
-func startIdx[E any](haystack, needle []E) int32 {
+func startIdx[E comparable](haystack, needle []E) int32 {
 	p := &needle[0]
 	for i := range haystack {
 		if p == &haystack[i] {
@@ -475,7 +476,7 @@ func startIdx[E any](haystack, needle []E) int32 {
 }
 
 // Reverse reverses the elements of the slice in place.
-func Reverse[S ~[]E, E any](s S) {
+func Reverse[S ~[]E, E comparable](s S) {
 	for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
 		s[i], s[j] = s[j], s[i]
 	}
@@ -483,7 +484,7 @@ func Reverse[S ~[]E, E any](s S) {
 
 // Concat returns a new slice concatenating the passed in slices.
 // If the concatenation is empty, the result is nil.
-func Concat[S ~[]E, E any](slices ...S) S {
+func Concat[S ~[]E, E comparable](slices ...S) S {
 	size := 0
 	for _, s := range slices {
 		size += len(s)
@@ -496,7 +497,8 @@ func Concat[S ~[]E, E any](slices ...S) S {
 	// callers that append a few elements to the result.
 	newslice := Grow[S](nil, size)
 	for _, s := range slices {
-		newslice = append(newslice, s...)
+		if len(newslice) >= cap(newslice) { newslice = mxutil.GrowCap(newslice) }
+		newslice = push(newslice, s...)
 	}
 	return newslice
 }
@@ -506,7 +508,7 @@ func Concat[S ~[]E, E any](slices ...S) S {
 // The result is never nil.
 // Repeat panics if count is negative or if the result of (len(x) * count)
 // overflows.
-func Repeat[S ~[]E, E any](x S, count int32) S {
+func Repeat[S ~[]E, E comparable](x S, count int32) S {
 	if count < 0 {
 		panic("cannot be negative")
 	}
@@ -517,7 +519,7 @@ func Repeat[S ~[]E, E any](x S, count int32) S {
 		panic("the result of (len(x) * count) overflows")
 	}
 
-	newslice := (make)(S, int32(lo)) // lo = len(x) * count
+	newslice := S{:int32(lo}) // lo = len(x) * count
 	n := copy(newslice, x)
 	for n < len(newslice) {
 		n += copy(newslice[n:], newslice[:n])

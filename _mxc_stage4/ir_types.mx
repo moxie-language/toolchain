@@ -152,17 +152,6 @@ func (e *irEmitter) llvmNamedType(tt *Named) (s string) {
 	if tt.Obj != nil && tt.Obj.Name == "error" {
 		return e.ifaceType()
 	}
-	if tt.Obj != nil && tt.Obj.Name != "" {
-		if e.sovereignTypes[tt.Obj.Name] {
-			if st, ok := tt.Under.(*TCStruct); ok {
-				base := e.llvmStructType(st)
-				if base == "{}" {
-					return "{ptr}" // _arena only, no user fields
-				}
-				return base[:len(base)-1] | ", ptr}" // append _arena ptr
-			}
-		}
-	}
 	if tt.Under != nil {
 		if _, isIface := tt.Under.(*TCInterface); isIface {
 			return e.ifaceType()
@@ -327,22 +316,23 @@ func (e *irEmitter) resolveGlobalDeclType(g *SSAGlobal) (s string) {
 	if typ == "void" {
 		typ = "i1"
 	}
+	if len(e.pendGlobalDeclTypes) >= cap(e.pendGlobalDeclTypes) { e.pendGlobalDeclTypes = mxutil.GrowCap(e.pendGlobalDeclTypes) }
 	push(e.pendGlobalDeclTypes, emitKV{name, typ})
 	return typ
 }
 
 func (e *irEmitter) tlsPrefix() (s string) {
-	if len(e.triple) >= 4 && e.triple[:4] == "wasm" {
-		return "global "
-	}
-	return "thread_local global "
+	// thread_local(initialexec): every package var is per-thread. The
+	// compiler's pthread workers each get their own copy of bst/cctx and
+	// the runtime's domainRoot (the "one TLS slot per domain" model), so
+	// the TLS probe passes and parallel compilation engages. initialexec
+	// works in the static musl executables moxie links (TP-relative, no
+	// dynamic loader). Constants (descriptors, embed data) stay shared.
+	return "thread_local(initialexec) global "
 }
 
 func (e *irEmitter) tlsExternalPrefix() (s string) {
-	if len(e.triple) >= 4 && e.triple[:4] == "wasm" {
-		return "external global "
-	}
-	return "external thread_local global "
+	return "external thread_local(initialexec) global "
 }
 
 func (e *irEmitter) resolveResultType(t Type) (s string) {
@@ -381,7 +371,7 @@ func (e *irEmitter) funcRetType(f *SSAFunction) (s string) {
 	return s | "}"
 }
 
-func (e *irEmitter) coerceInt(valReg string, fromType string, toType string) (s string) {
+func (e *irEmitter) coerceInt(valReg string, fromType string, toType string, unsigned bool) (s string) {
 	if fromType == toType {
 		return valReg
 	}
@@ -397,10 +387,22 @@ func (e *irEmitter) coerceInt(valReg string, fromType string, toType string) (s 
 	r := "%rc" | irItoa(e.nextReg)
 	if fromBits > toBits {
 		e.w("  ") ; e.w(r) ; e.w(" = trunc ") ; e.w(fromType) ; e.w(" ") ; e.w(valReg) ; e.w(" to ") ; e.w(toType) ; e.w("\n")
+	} else if unsigned {
+		e.w("  ") ; e.w(r) ; e.w(" = zext ") ; e.w(fromType) ; e.w(" ") ; e.w(valReg) ; e.w(" to ") ; e.w(toType) ; e.w("\n")
 	} else {
 		e.w("  ") ; e.w(r) ; e.w(" = sext ") ; e.w(fromType) ; e.w(" ") ; e.w(valReg) ; e.w(" to ") ; e.w(toType) ; e.w("\n")
 	}
 	return r
+}
+
+func (e *irEmitter) isUnsignedType(t Type) (r0 bool) {
+	if t == nil {
+		return false
+	}
+	if b, ok := SafeUnderlying(t).(*Basic); ok {
+		return b.Info&IsUnsigned != 0
+	}
+	return false
 }
 
 func (e *irEmitter) intBits(ty string) (n int32) {

@@ -56,7 +56,7 @@ func (m *Msg) DecodeFrom(r io.Reader) (decErr error) {
 		return decErr
 	}
 	l := uint32(sz[0]) | uint32(sz[1])<<8 | uint32(sz[2])<<16 | uint32(sz[3])<<24
-	m.Body = make([]byte, l)
+	m.Body = []byte{:l}
 	_, decErr = io.ReadFull(r, m.Body)
 	return decErr
 }
@@ -80,16 +80,16 @@ func mirror(in chan Msg, out chan Msg, done chan moxie.Uint32) {
 }
 
 func main() {
-	in := make(chan Msg)
-	out := make(chan Msg)
-	done := make(chan moxie.Uint32)
+	in := chan Msg{}
+	out := chan Msg{}
+	done := chan moxie.Uint32{}
 	spawn(mirror, in, out, done)
 
 	const N = uint32(10000)
 	for i := uint32(0); i < N; i++ {
 		// Varying body size: 0, 1, 2, ..., 1023, 0, 1, ...
 		bodyLen := int32(i % 1024)
-		body := make([]byte, bodyLen)
+		body := []byte{:bodyLen}
 		expectedSum := uint32(0)
 		for j := int32(0); j < bodyLen; j++ {
 			body[j] = byte((i + uint32(j)) & 0xFF)

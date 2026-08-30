@@ -200,10 +200,6 @@ func (c *Checker) typeBuiltinCall(e *syntax.CallExpr, scope *Scope) TypeAndValue
 	switch b.id {
 	case BuiltinLen, BuiltinCap:
 		return TypeAndValue{Type: Typ[Int32], mode: modeValue}
-	case BuiltinAppend:
-		if len(e.ArgList) > 0 {
-			return TypeAndValue{Type: c.checkExpr(e.ArgList[0], scope), mode: modeValue}
-		}
 	case BuiltinMake:
 		if len(e.ArgList) > 0 {
 			return TypeAndValue{Type: c.resolveTypeExpr(e.ArgList[0]), mode: modeValue}
@@ -222,9 +218,16 @@ func (c *Checker) typeBuiltinCall(e *syntax.CallExpr, scope *Scope) TypeAndValue
 		return TypeAndValue{Type: Typ[Int32], mode: modeValue}
 	case BuiltinSpawn:
 		return TypeAndValue{mode: modeVoid}
-	case BuiltinPush, BuiltinResize:
-		// push(s, v) and resize(s, n) mutate s in place, return void
-		return TypeAndValue{mode: modeVoid}
+	case BuiltinPush:
+		// push(s, v...) returns the modified slice.
+		if len(e.ArgList) > 0 {
+			return TypeAndValue{Type: c.checkExpr(e.ArgList[0], scope), mode: modeValue}
+		}
+	case BuiltinResize:
+		// resize(s, n) returns the modified slice.
+		if len(e.ArgList) > 0 {
+			return TypeAndValue{Type: c.checkExpr(e.ArgList[0], scope), mode: modeValue}
+		}
 	case BuiltinPop:
 		// pop(s) returns the element type of the slice
 		if len(e.ArgList) > 0 {

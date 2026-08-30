@@ -5,6 +5,7 @@
 package x509
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"crypto/sha256"
 	"encoding/pem"
@@ -148,12 +149,15 @@ func (s *CertPool) findPotentialParents(cert *Certificate) []potentialParent {
 		kidMatch := bytes.Equal(candidate.SubjectKeyId, cert.AuthorityKeyId)
 		switch {
 		case kidMatch:
-			matchingKeyID = append(matchingKeyID, potentialParent{candidate, constraint})
+			if len(matchingKeyID) >= cap(matchingKeyID) { matchingKeyID = mxutil.GrowCap(matchingKeyID) }
+			matchingKeyID = push(matchingKeyID, potentialParent{candidate, constraint})
 		case (len(candidate.SubjectKeyId) == 0 && len(cert.AuthorityKeyId) > 0) ||
 			(len(candidate.SubjectKeyId) > 0 && len(cert.AuthorityKeyId) == 0):
-			oneKeyID = append(oneKeyID, potentialParent{candidate, constraint})
+			if len(oneKeyID) >= cap(oneKeyID) { oneKeyID = mxutil.GrowCap(oneKeyID) }
+			oneKeyID = push(oneKeyID, potentialParent{candidate, constraint})
 		default:
-			mismatchKeyID = append(mismatchKeyID, potentialParent{candidate, constraint})
+			if len(mismatchKeyID) >= cap(mismatchKeyID) { mismatchKeyID = mxutil.GrowCap(mismatchKeyID) }
+			mismatchKeyID = push(mismatchKeyID, potentialParent{candidate, constraint})
 		}
 	}
 
@@ -162,9 +166,12 @@ func (s *CertPool) findPotentialParents(cert *Certificate) []potentialParent {
 		return nil
 	}
 	candidates := []potentialParent{:0:found}
-	candidates = append(candidates, matchingKeyID...)
-	candidates = append(candidates, oneKeyID...)
-	candidates = append(candidates, mismatchKeyID...)
+	if len(candidates) >= cap(candidates) { candidates = mxutil.GrowCap(candidates) }
+	candidates = push(candidates, matchingKeyID...)
+	if len(candidates) >= cap(candidates) { candidates = mxutil.GrowCap(candidates) }
+	candidates = push(candidates, oneKeyID...)
+	if len(candidates) >= cap(candidates) { candidates = mxutil.GrowCap(candidates) }
+	candidates = push(candidates, mismatchKeyID...)
 	return candidates
 }
 
@@ -201,12 +208,13 @@ func (s *CertPool) addCertFunc(rawSum224 sum224, rawSubject string, getCert func
 	}
 
 	s.haveSum[rawSum224] = true
-	s.lazyCerts = append(s.lazyCerts, lazyCert{
+	if len(s.lazyCerts) >= cap(s.lazyCerts) { s.lazyCerts = mxutil.GrowCap(s.lazyCerts) }
+	s.lazyCerts = push(s.lazyCerts, lazyCert{
 		rawSubject: []byte(rawSubject),
 		getCert:    getCert,
 		constraint: constraint,
 	})
-	s.byName[rawSubject] = append(s.byName[rawSubject], len(s.lazyCerts)-1)
+	s.byName[rawSubject] = push(s.byName[rawSubject], len(s.lazyCerts)-1)
 }
 
 // AppendCertsFromPEM attempts to parse a series of PEM encoded certificates.

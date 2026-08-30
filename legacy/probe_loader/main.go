@@ -54,9 +54,6 @@ func main() {
 	var pkgImport func(int32, int32, int32, uintptr, int32) int32
 	purego.RegisterLibFunc(&pkgImport, lib, "moxie_loader_pkg_import")
 
-	var pkgIsMXH func(int32, int32) int32
-	purego.RegisterLibFunc(&pkgIsMXH, lib, "moxie_loader_pkg_is_mxh")
-
 	var loaderFree func(int32)
 	purego.RegisterLibFunc(&loaderFree, lib, "moxie_loader_free")
 
@@ -176,8 +173,7 @@ func Hello() string {
 		d := readPkgStr(pkgDir, h, i)
 		fc := pkgFileCount(h, i)
 		ic := pkgImportCount(h, i)
-		mxh := pkgIsMXH(h, i)
-		fmt.Printf("  [%d] path=%s name=%s dir=%s files=%d imports=%d mxh=%d\n", i, p, n, d, fc, ic, mxh)
+		fmt.Printf("  [%d] path=%s name=%s dir=%s files=%d imports=%d\n", i, p, n, d, fc, ic)
 
 		// Print imports.
 		for j := int32(0); j < ic; j++ {

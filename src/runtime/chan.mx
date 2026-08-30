@@ -60,15 +60,16 @@ type channel struct {
 	receivers    chanQueue
 	buf unsafe.Pointer
 
-	// Spawn-boundary metadata (native targets only). When pipeBoundFd != 0
-	// the channel is on a fork+socketpair pipe, not a local in-runtime
-	// queue. send/recv route through ring buffers (preferred) or
-	// pipeWrite/pipeRead with codec-encoded bytes. Zero values = local
-	// channel, existing behavior unchanged.
-	pipeBoundFd int32
-	pipeChanID  uint16
-	ringSend    uintptr // SPSC ring for sending (0 = use pipe fallback)
-	ringRecv    uintptr // SPSC ring for receiving (0 = use pipe fallback)
+	// Spawn-boundary metadata (native targets only). When spawnBound is
+	// true the channel is on a fork + shared-ring boundary, not a local
+	// in-runtime queue. send/recv route through the ring buffers with
+	// codec-encoded bytes. Zero values = local channel, existing
+	// behavior unchanged.
+	spawnBound  bool
+	spawnChanID uint16
+	spawnPid    int32    // peer pid for death detection (0 = local/none)
+	ringSend    uintptr  // SPSC ring for sending (0 = local channel)
+	ringRecv    uintptr  // SPSC ring for receiving (0 = local channel)
 }
 
 const (
@@ -208,7 +209,7 @@ func (ch *channel) bufferPop(value unsafe.Pointer) {
 // when calling this function.
 func (ch *channel) trySend(value unsafe.Pointer) bool {
 	// Spawn-boundary pipe channel: route through pipe instead of in-runtime queue.
-	if ch.pipeBoundFd != 0 {
+	if ch.spawnBound {
 		return ch.tryPipeSend(value)
 	}
 	// To make sure we send values in the correct order, we can only send
@@ -291,7 +292,7 @@ func chanSend(ch *channel, value unsafe.Pointer, op *channelOp) {
 // lock must be held when calling this function.
 func (ch *channel) tryRecv(value unsafe.Pointer) (received, ok bool) {
 	// Spawn-boundary pipe channel: route through pipe instead of in-runtime queue.
-	if ch.pipeBoundFd != 0 {
+	if ch.spawnBound {
 		return ch.tryPipeRecv(value)
 	}
 	// To make sure we keep the values in the channel in the correct order, we
@@ -418,7 +419,7 @@ func chanClose(ch *channel) {
 
 	// Spawn-boundary: if this is a pipe-bound channel, signal the remote
 	// end so its receiver-side bridge / chan recv observes the close.
-	if ch.pipeBoundFd != 0 {
+	if ch.spawnBound {
 		PipeChanCloseSignal(ch)
 	}
 }
@@ -511,7 +512,7 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 	// each poll iteration via pipeSelectRecheck.
 	hasPipeBound := false
 	for _, state := range states {
-		if state.ch != nil && state.ch.pipeBoundFd != 0 {
+		if state.ch != nil && state.ch.spawnBound {
 			hasPipeBound = true
 			break
 		}

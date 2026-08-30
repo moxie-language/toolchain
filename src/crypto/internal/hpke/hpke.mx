@@ -5,6 +5,7 @@
 package hpke
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
@@ -24,20 +25,28 @@ type hkdfKDF struct {
 
 func (kdf *hkdfKDF) LabeledExtract(sid []byte, salt []byte, label string, inputKey []byte) ([]byte, error) {
 	labeledIKM := []byte{:0:7+len(sid)+len(label)+len(inputKey)}
-	labeledIKM = append(labeledIKM, []byte("HPKE-v1")...)
-	labeledIKM = append(labeledIKM, sid...)
-	labeledIKM = append(labeledIKM, label...)
-	labeledIKM = append(labeledIKM, inputKey...)
+	if len(labeledIKM) >= cap(labeledIKM) { labeledIKM = mxutil.GrowCap(labeledIKM) }
+	labeledIKM = push(labeledIKM, []byte("HPKE-v1")...)
+	if len(labeledIKM) >= cap(labeledIKM) { labeledIKM = mxutil.GrowCap(labeledIKM) }
+	labeledIKM = push(labeledIKM, sid...)
+	if len(labeledIKM) >= cap(labeledIKM) { labeledIKM = mxutil.GrowCap(labeledIKM) }
+	labeledIKM = push(labeledIKM, label...)
+	if len(labeledIKM) >= cap(labeledIKM) { labeledIKM = mxutil.GrowCap(labeledIKM) }
+	labeledIKM = push(labeledIKM, inputKey...)
 	return hkdf.Extract(kdf.hash.New, labeledIKM, salt)
 }
 
 func (kdf *hkdfKDF) LabeledExpand(suiteID []byte, randomKey []byte, label string, info []byte, length uint16) ([]byte, error) {
 	labeledInfo := []byte{:0:2+7+len(suiteID)+len(label)+len(info)}
 	labeledInfo = byteorder.BEAppendUint16(labeledInfo, length)
-	labeledInfo = append(labeledInfo, []byte("HPKE-v1")...)
-	labeledInfo = append(labeledInfo, suiteID...)
-	labeledInfo = append(labeledInfo, label...)
-	labeledInfo = append(labeledInfo, info...)
+	if len(labeledInfo) >= cap(labeledInfo) { labeledInfo = mxutil.GrowCap(labeledInfo) }
+	labeledInfo = push(labeledInfo, []byte("HPKE-v1")...)
+	if len(labeledInfo) >= cap(labeledInfo) { labeledInfo = mxutil.GrowCap(labeledInfo) }
+	labeledInfo = push(labeledInfo, suiteID...)
+	if len(labeledInfo) >= cap(labeledInfo) { labeledInfo = mxutil.GrowCap(labeledInfo) }
+	labeledInfo = push(labeledInfo, label...)
+	if len(labeledInfo) >= cap(labeledInfo) { labeledInfo = mxutil.GrowCap(labeledInfo) }
+	labeledInfo = push(labeledInfo, info...)
 	return hkdf.Expand(kdf.hash.New, randomKey, labeledInfo, int32(length))
 }
 
@@ -102,7 +111,7 @@ func (dh *dhKEM) Encap(pubRecipient *ecdh.PublicKey) (sharedSecret []byte, encap
 	encPubEph := privEph.PublicKey().Bytes()
 
 	encPubRecip := pubRecipient.Bytes()
-	kemContext := append(encPubEph, encPubRecip...)
+	kemContext := push(encPubEph, encPubRecip...)
 	sharedSecret, err = dh.ExtractAndExpand(dhVal, kemContext)
 	if err != nil {
 		return nil, nil, err
@@ -119,7 +128,7 @@ func (dh *dhKEM) Decap(encPubEph []byte, secRecipient *ecdh.PrivateKey) ([]byte,
 	if err != nil {
 		return nil, err
 	}
-	kemContext := append(encPubEph, secRecipient.PublicKey().Bytes()...)
+	kemContext := push(encPubEph, secRecipient.PublicKey().Bytes()...)
 	return dh.ExtractAndExpand(dhVal, kemContext)
 }
 
@@ -211,8 +220,9 @@ func newContext(sharedSecret []byte, kemID, kdfID, aeadID uint16, info []byte) (
 	if err != nil {
 		return nil, err
 	}
-	ksContext := append([]byte{0}, pskIDHash...)
-	ksContext = append(ksContext, infoHash...)
+	ksContext := push([]byte{0}, pskIDHash...)
+	if len(ksContext) >= cap(ksContext) { ksContext = mxutil.GrowCap(ksContext) }
+	ksContext = push(ksContext, infoHash...)
 
 	secret, err := kdf.LabeledExtract(sid, sharedSecret, "secret", nil)
 	if err != nil {
@@ -316,7 +326,8 @@ func (r *Recipient) Open(aad, ciphertext []byte) ([]byte, error) {
 
 func suiteID(kemID, kdfID, aeadID uint16) []byte {
 	suiteID := []byte{:0:4+2+2+2}
-	suiteID = append(suiteID, []byte("HPKE")...)
+	if len(suiteID) >= cap(suiteID) { suiteID = mxutil.GrowCap(suiteID) }
+	suiteID = push(suiteID, []byte("HPKE")...)
 	suiteID = byteorder.BEAppendUint16(suiteID, kemID)
 	suiteID = byteorder.BEAppendUint16(suiteID, kdfID)
 	suiteID = byteorder.BEAppendUint16(suiteID, aeadID)

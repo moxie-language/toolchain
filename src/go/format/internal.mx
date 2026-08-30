@@ -10,6 +10,7 @@
 package format
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"go/ast"
 	"go/parser"
@@ -38,7 +39,7 @@ func parse(fset *token.FileSet, filename []byte, src []byte, fragmentOk bool) (
 	// by inserting a package clause.
 	// Insert using a ';', not a newline, so that the line numbers
 	// in psrc match the ones in src.
-	psrc := append([]byte("package p;"), src...)
+	psrc := push([]byte("package p;"), src...)
 	file, err = parser.ParseFile(fset, filename, psrc, parserMode)
 	if err == nil {
 		sourceAdj = func(src []byte, indent int32) []byte {
@@ -62,7 +63,7 @@ func parse(fset *token.FileSet, filename []byte, src []byte, fragmentOk bool) (
 	// Insert using a ';', not a newline, so that the line numbers
 	// in fsrc match the ones in src. Add an extra '\n' before the '}'
 	// to make sure comments are flushed before the '}'.
-	fsrc := append(append([]byte("package p; func _() {"), src...), '\n', '\n', '}')
+	fsrc := push(push([]byte("package p; func _() {"), src...), '\n', '\n', '}')
 	file, err = parser.ParseFile(fset, filename, fsrc, parserMode)
 	if err == nil {
 		sourceAdj = func(src []byte, indent int32) []byte {
@@ -118,7 +119,8 @@ func format(
 		j++
 	}
 	var res []byte
-	res = append(res, src[:i]...)
+	if len(res) >= cap(res) { res = mxutil.GrowCap(res) }
+	res = push(res, src[:i]...)
 
 	// Determine and prepend indentation of first code line.
 	// Spaces are ignored unless there are no tabs,
@@ -137,7 +139,8 @@ func format(
 		indent = 1
 	}
 	for i := 0; i < indent; i++ {
-		res = append(res, '\t')
+		if len(res) >= cap(res) { res = mxutil.GrowCap(res) }
+		res = push(res, '\t')
 	}
 
 	// Format the source.
@@ -158,14 +161,15 @@ func format(
 	}
 
 	// Otherwise, append output to leading space.
-	res = append(res, out...)
+	if len(res) >= cap(res) { res = mxutil.GrowCap(res) }
+	res = push(res, out...)
 
 	// Determine and append trailing space.
 	i = len(src)
 	for i > 0 && isSpace(src[i-1]) {
 		i--
 	}
-	return append(res, src[i:]...), nil
+	return push(res, src[i:]...), nil
 }
 
 // isSpace reports whether the byte is a space character.

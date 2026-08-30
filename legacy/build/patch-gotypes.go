@@ -70,7 +70,10 @@ func main() {
 	patchUnify(dstDir)
 	patchTypeTerm(dstDir)
 	patchSpawnBuiltin(dstDir)
+	patchMoxieSliceBuiltins(dstDir)
+	patchRemovePredeclaredTypes(dstDir)
 	patchErrorString(dstDir)
+	patchPanicRecoverString(dstDir)
 	patchExportAccess(dstDir)
 	patchScopeHashPrefix(dstDir)
 
@@ -303,6 +306,170 @@ func patchSpawnBuiltin(dir string) {
 	mustWrite(f, src)
 }
 
+func patchMoxieSliceBuiltins(dir string) {
+	// Patch universe.go: add _Push, _Pop, _Resize builtin IDs and
+	// predeclaredFuncs entries after _Spawn.
+	f := filepath.Join(dir, "universe.go")
+	src := mustRead(f)
+
+	src = mustReplace(f, src,
+		"\t_Recover\n\t_Spawn\n\n\t// package unsafe",
+		"\t_Recover\n\t_Spawn\n\t_Push\n\t_Pop\n\t_Resize\n\n\t// package unsafe")
+
+	src = mustReplace(f, src,
+		"\t_Spawn:   {\"spawn\", 1, true, statement},",
+		"\t_Spawn:   {\"spawn\", 1, true, statement},\n\t_Push:    {\"push\", 1, true, statement},\n\t_Pop:     {\"pop\", 1, false, statement},\n\t_Resize:  {\"resize\", 2, false, statement},")
+
+	// make/new are not predeclared in Moxie: the loader lowers literal
+	// []T{:n} / chan T{} syntax to the internal __slicealloc/__ptralloc
+	// names, which retain the make/new builtin semantics. User-written
+	// make(...)/new(...) therefore resolve as undefined.
+	src = mustReplace(f, src,
+		"\t_Make:    {\"make\", 1, true, expression},",
+		"\t_Make:    {\"__slicealloc\", 1, true, expression},")
+	src = mustReplace(f, src,
+		"\t_New:     {\"new\", 1, false, expression},",
+		"\t_New:     {\"__ptralloc\", 1, false, expression},")
+
+	// append is not predeclared: moxie uses push + explicit allocation.
+	src = mustReplace(f, src,
+		"\t_Append:  {\"append\", 1, true, expression},\n",
+		"")
+
+	// complex numbers are removed from Moxie: the complex/real/imag builtins
+	// resolve as undefined.
+	src = mustReplace(f, src,
+		"\t_Complex: {\"complex\", 2, false, expression},\n",
+		"")
+	src = mustReplace(f, src,
+		"\t_Imag:    {\"imag\", 1, false, expression},\n",
+		"")
+	src = mustReplace(f, src,
+		"\t_Real:    {\"real\", 1, false, expression},\n",
+		"")
+
+	mustWrite(f, src)
+
+	// Patch builtins.go: allow ... on push (like append) and add
+	// type-checking handlers for push/pop/resize.
+	f = filepath.Join(dir, "builtins.go")
+	src = mustRead(f)
+
+	src = mustReplace(f, src,
+		"\t// append is the only built-in that permits the use of ... for the last argument\n\tbin := predeclaredFuncs[id]\n\tif hasDots(call) && id != _Append {",
+		"\t// append and push are the only built-ins that permit the use of ... for the last argument\n\tbin := predeclaredFuncs[id]\n\tif hasDots(call) && id != _Append && id != _Push {")
+
+	src = mustReplace(f, src,
+		"\tcase _Recover:\n\t\t// recover() interface{}\n\t\tx.mode = value\n\t\tx.typ = &emptyInterface\n\t\tif check.recordTypes() {\n\t\t\tcheck.recordBuiltinType(call.Fun, makeSig(x.typ))\n\t\t}\n\n\tcase _Spawn:",
+		`	case _Recover:
+		// recover() interface{}
+		x.mode = value
+		x.typ = &emptyInterface
+		if check.recordTypes() {
+			check.recordBuiltinType(call.Fun, makeSig(x.typ))
+		}
+
+	case _Push:
+		// push(s S, elems ...E) S, where E is the element type of S.
+		// Mirrors _Append's element conversion: untyped constants are
+		// converted to E, and spread push(s, e...) with e assignable to
+		// S or []E is accepted. Type parameters (S ~[]E) are resolved
+		// via sliceElem, same as append.
+		if nargs < 1 {
+			return
+		}
+		E, err := sliceElem(x)
+		var sig *Signature
+		if err == nil {
+			sig = makeSig(x.typ, x.typ, NewSlice(E))
+			sig.variadic = true
+			check.arguments(call, sig, nil, nil, args, nil)
+			x.mode = value
+			x.typ = args[0].typ
+		} else if isString(args[0].typ) {
+			// string=[]byte: allow []byte via string
+			sig = makeSig(args[0].typ, args[0].typ, NewSlice(universeByte))
+			sig.variadic = true
+			check.arguments(call, sig, nil, nil, args, nil)
+			x.mode = value
+			x.typ = args[0].typ
+		} else {
+			check.errorf(x, InvalidCall, "invalid push: %s", err.format(check))
+			return
+		}
+		if check.recordTypes() {
+			check.recordBuiltinType(call.Fun, sig)
+		}
+
+	case _Pop:
+		// pop(s) returns the last element of s.
+		if nargs != 1 {
+			check.errorf(x, WrongArgCount, invalidOp+"pop requires exactly one argument")
+			return
+		}
+		switch t := under(args[0].typ).(type) {
+		case *Slice:
+			x.mode = value
+			x.typ = t.elem
+		default:
+			if isString(args[0].typ) {
+				x.mode = value
+				x.typ = Typ[Byte]
+			} else {
+				check.errorf(args[0], InvalidCall, invalidOp+"first argument to pop must be a slice, got %s", args[0])
+			}
+		}
+		if check.recordTypes() {
+			check.recordBuiltinType(call.Fun, makeSig(x.typ, args[0].typ))
+		}
+
+	case _Resize:
+		// resize(s, n) returns s with length n. The n argument is
+		// checked against int32 so untyped constants are converted.
+		if nargs < 2 {
+			return
+		}
+		switch under(args[0].typ).(type) {
+		case *Slice:
+			x.mode = value
+			x.typ = args[0].typ
+		default:
+			if isString(args[0].typ) {
+				x.mode = value
+				x.typ = args[0].typ
+			} else {
+				check.errorf(args[0], InvalidCall, invalidOp+"first argument to resize must be a slice, got %s", args[0])
+			}
+		}
+		sig := makeSig(x.typ, x.typ, Typ[Int32])
+		check.arguments(call, sig, nil, nil, args, nil)
+		if check.recordTypes() {
+			check.recordBuiltinType(call.Fun, sig)
+		}
+
+	case _Spawn:`)
+
+	mustWrite(f, src)
+}
+
+func patchRemovePredeclaredTypes(dir string) {
+	// int, uint, complex64, complex128 are not predeclared in Moxie: they
+	// resolve as undefined identifiers (a user may define their own). uintptr
+	// is kept - it is the pointer-sized integer for unsafe.Pointer arithmetic.
+	f := filepath.Join(dir, "universe.go")
+	src := mustRead(f)
+	src = mustReplace(f, src,
+		"func defPredeclaredTypes() {\n\tfor _, t := range Typ {\n\t\tdef(NewTypeName(nopos, nil, t.name, t))\n\t}",
+		"func defPredeclaredTypes() {\n\tfor _, t := range Typ {\n\t\tswitch t.name {\n\t\tcase \"int\", \"uint\", \"complex64\", \"complex128\":\n\t\t\tcontinue // Moxie: not predeclared - undefined\n\t\t}\n\t\tdef(NewTypeName(nopos, nil, t.name, t))\n\t}")
+
+	// Removed builtins (make/new renamed, append/complex/real/imag dropped)
+	// leave zero-value slots in predeclaredFuncs; skip empty names.
+	src = mustReplace(f, src,
+		"func defPredeclaredFuncs() {\n\tfor i := range predeclaredFuncs {\n\t\tid := builtinId(i)\n\t\tif id == _Assert || id == _Trace {\n\t\t\tcontinue // only define these in testing environment\n\t\t}\n\t\tdef(newBuiltin(id))\n\t}\n}",
+		"func defPredeclaredFuncs() {\n\tfor i := range predeclaredFuncs {\n\t\tid := builtinId(i)\n\t\tif id == _Assert || id == _Trace {\n\t\t\tcontinue // only define these in testing environment\n\t\t}\n\t\tif predeclaredFuncs[i].name == \"\" {\n\t\t\tcontinue // Moxie: removed builtin\n\t\t}\n\t\tdef(newBuiltin(id))\n\t}\n}")
+	mustWrite(f, src)
+}
+
 func patchErrorString(dir string) {
 	f := filepath.Join(dir, "universe.go")
 	src := mustRead(f)
@@ -312,6 +479,24 @@ func patchErrorString(dir string) {
 	src = mustReplace(f, src,
 		"\t\t// interface{ Error() string }\n\t\tityp := &Interface{methods: []*Func{err}, complete: true}",
 		"\t\t// Moxie: error also has String() so it satisfies stringer.\n\t\tstrFn := NewFunc(nopos, nil, \"String\", sig)\n\n\t\t// interface{ Error() string; String() string }\n\t\tityp := &Interface{methods: []*Func{err, strFn}, complete: true}")
+
+	mustWrite(f, src)
+}
+
+func patchPanicRecoverString(dir string) {
+	// Moxie: panic takes a string, recover returns a string. The empty
+	// interface is elided, so these builtins no longer box/unbox to
+	// interface{}. Callers pass a string (or an error's .Error()/.String()).
+	f := filepath.Join(dir, "builtins.go")
+	src := mustRead(f)
+
+	src = mustReplace(f, src,
+		"\t\tcheck.assignment(x, &emptyInterface, \"argument to panic\")",
+		"\t\tcheck.assignment(x, Typ[String], \"argument to panic\")")
+
+	src = mustReplace(f, src,
+		"\tcase _Recover:\n\t\t// recover() interface{}\n\t\tx.mode = value\n\t\tx.typ = &emptyInterface",
+		"\tcase _Recover:\n\t\t// recover() string\n\t\tx.mode = value\n\t\tx.typ = Typ[String]")
 
 	mustWrite(f, src)
 }

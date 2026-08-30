@@ -5,6 +5,7 @@
 package x509
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"crypto"
 	"crypto/x509/pkix"
@@ -295,7 +296,8 @@ func parseRFC2821Mailbox(in string) (mailbox rfc2821Mailbox, ok bool) {
 					in[0] == 12 ||
 					(1 <= in[0] && in[0] <= 9) ||
 					(14 <= in[0] && in[0] <= 127) {
-					localPartBytes = append(localPartBytes, in[0])
+					if len(localPartBytes) >= cap(localPartBytes) { localPartBytes = mxutil.GrowCap(localPartBytes) }
+					localPartBytes = push(localPartBytes, in[0])
 					in = in[1:]
 				} else {
 					return mailbox, false
@@ -316,7 +318,8 @@ func parseRFC2821Mailbox(in string) (mailbox rfc2821Mailbox, ok bool) {
 				(35 <= c && c <= 91) ||
 				(93 <= c && c <= 126):
 				// qtext
-				localPartBytes = append(localPartBytes, c)
+				if len(localPartBytes) >= cap(localPartBytes) { localPartBytes = mxutil.GrowCap(localPartBytes) }
+				localPartBytes = push(localPartBytes, c)
 
 			default:
 				return mailbox, false
@@ -340,7 +343,8 @@ func parseRFC2821Mailbox(in string) (mailbox rfc2821Mailbox, ok bool) {
 				if len(in) == 0 {
 					return mailbox, false
 				}
-				localPartBytes = append(localPartBytes, in[0])
+				if len(localPartBytes) >= cap(localPartBytes) { localPartBytes = mxutil.GrowCap(localPartBytes) }
+				localPartBytes = push(localPartBytes, in[0])
 				in = in[1:]
 
 			case ('0' <= c && c <= '9') ||
@@ -351,7 +355,8 @@ func parseRFC2821Mailbox(in string) (mailbox rfc2821Mailbox, ok bool) {
 				c == '-' || c == '/' || c == '=' || c == '?' ||
 				c == '^' || c == '_' || c == '`' || c == '{' ||
 				c == '|' || c == '}' || c == '~' || c == '.':
-				localPartBytes = append(localPartBytes, in[0])
+				if len(localPartBytes) >= cap(localPartBytes) { localPartBytes = mxutil.GrowCap(localPartBytes) }
+				localPartBytes = push(localPartBytes, in[0])
 				in = in[1:]
 
 			default:
@@ -398,15 +403,18 @@ func domainToReverseLabels(domain string) (reverseLabels [][]byte, ok bool) {
 	reverseLabels = [][]byte{:0:bytes.Count(domain, ".")+1}
 	for len(domain) > 0 {
 		if i := bytes.LastIndexByte(domain, '.'); i == -1 {
-			reverseLabels = append(reverseLabels, domain)
+			if len(reverseLabels) >= cap(reverseLabels) { reverseLabels = mxutil.GrowCap(reverseLabels) }
+			reverseLabels = push(reverseLabels, domain)
 			domain = ""
 		} else {
-			reverseLabels = append(reverseLabels, domain[i+1:])
+			if len(reverseLabels) >= cap(reverseLabels) { reverseLabels = mxutil.GrowCap(reverseLabels) }
+			reverseLabels = push(reverseLabels, domain[i+1:])
 			domain = domain[:i]
 			if i == 0 { // domain == ""
 				// domain is prefixed with an empty label, append an empty
 				// string to reverseLabels to indicate this.
-				reverseLabels = append(reverseLabels, "")
+				if len(reverseLabels) >= cap(reverseLabels) { reverseLabels = mxutil.GrowCap(reverseLabels) }
+				reverseLabels = push(reverseLabels, "")
 			}
 		}
 	}
@@ -691,7 +699,8 @@ func (c *Certificate) isValid(certType int32, currentChain []*Certificate, opts 
 		toCheck := []*Certificate{}
 		for _, c := range currentChain {
 			if c.hasSANExtension() {
-				toCheck = append(toCheck, c)
+				if len(toCheck) >= cap(toCheck) { toCheck = mxutil.GrowCap(toCheck) }
+				toCheck = push(toCheck, c)
 			}
 		}
 		for _, sanCert := range toCheck {
@@ -880,7 +889,8 @@ func (c *Certificate) Verify(opts VerifyOptions) (chains [][]*Certificate, err e
 			invalidPoliciesChains++
 			continue
 		}
-		chains = append(chains, candidate)
+		if len(chains) >= cap(chains) { chains = mxutil.GrowCap(chains) }
+		chains = push(chains, candidate)
 	}
 
 	if len(chains) == 0 {
@@ -908,7 +918,8 @@ func (c *Certificate) Verify(opts VerifyOptions) (chains [][]*Certificate, err e
 			incompatibleKeyUsageChains++
 			continue
 		}
-		chains = append(chains, candidate)
+		if len(chains) >= cap(chains) { chains = mxutil.GrowCap(chains) }
+		chains = push(chains, candidate)
 	}
 
 	if len(chains) == 0 {
@@ -917,10 +928,12 @@ func (c *Certificate) Verify(opts VerifyOptions) (chains [][]*Certificate, err e
 			if invalidPoliciesChains == 0 {
 				return nil, CertificateInvalidError{c, IncompatibleUsage, ""}
 			}
-			details = append(details, fmt.Sprintf("%d chains with incompatible key usage", incompatibleKeyUsageChains))
+			if len(details) >= cap(details) { details = mxutil.GrowCap(details) }
+			details = push(details, fmt.Sprintf("%d chains with incompatible key usage", incompatibleKeyUsageChains))
 		}
 		if invalidPoliciesChains > 0 {
-			details = append(details, fmt.Sprintf("%d chains with invalid policies", invalidPoliciesChains))
+			if len(details) >= cap(details) { details = mxutil.GrowCap(details) }
+			details = push(details, fmt.Sprintf("%d chains with invalid policies", invalidPoliciesChains))
 		}
 		err = CertificateInvalidError{c, NoValidChains, bytes.Join(details, ", ")}
 		return nil, err
@@ -1039,11 +1052,13 @@ func (c *Certificate) buildChains(currentChain []*Certificate, sigChecks *int32,
 
 		switch certType {
 		case rootCertificate:
-			chains = append(chains, appendToFreshChain(currentChain, candidate.cert))
+			if len(chains) >= cap(chains) { chains = mxutil.GrowCap(chains) }
+			chains = push(chains, appendToFreshChain(currentChain, candidate.cert))
 		case intermediateCertificate:
 			var childChains [][]*Certificate
 			childChains, err = candidate.cert.buildChains(appendToFreshChain(currentChain, candidate.cert), sigChecks, opts)
-			chains = append(chains, childChains...)
+			if len(chains) >= cap(chains) { chains = mxutil.GrowCap(chains) }
+			chains = push(chains, childChains...)
 		}
 	}
 
@@ -1365,7 +1380,8 @@ func (pg *policyGraph) parents() []*policyGraphNode {
 	}
 	var out []*policyGraphNode
 	for _, v := range pg.strata[pg.depth-1] {
-		out = append(out, v)
+		if len(out) >= cap(out) { out = mxutil.GrowCap(out) }
+		out = push(out, v)
 	}
 	return out
 }
@@ -1403,7 +1419,8 @@ func (pg *policyGraph) validPolicyNodes() []*policyGraphNode {
 			if len(n.parents) == 1 {
 				for p := range n.parents {
 					if p.validPolicy.Equal(anyPolicyOID()) {
-						validNodes = append(validNodes, n)
+						if len(validNodes) >= cap(validNodes) { validNodes = mxutil.GrowCap(validNodes) }
+						validNodes = push(validNodes, n)
 					}
 				}
 			}
@@ -1429,12 +1446,13 @@ func (pg *policyGraph) incrDepth() {
 	pg.parentIndex = map[string][]*policyGraphNode{}
 	for _, n := range pg.strata[pg.depth] {
 		for _, e := range n.expectedPolicySet {
-			pg.parentIndex[string(e.der)] = append(pg.parentIndex[string(e.der)], n)
+			pg.parentIndex[string(e.der)] = push(pg.parentIndex[string(e.der)], n)
 		}
 	}
 
 	pg.depth++
-	pg.strata = append(pg.strata, map[string]*policyGraphNode{})
+	if len(pg.strata) >= cap(pg.strata) { pg.strata = mxutil.GrowCap(pg.strata) }
+	pg.strata = push(pg.strata, map[string]*policyGraphNode{})
 }
 
 func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
@@ -1529,7 +1547,7 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 				for _, p := range pg.parents() {
 					for _, expected := range p.expectedPolicySet {
 						if leaves[string(expected.der)] == nil {
-							missing[string(expected.der)] = append(missing[string(expected.der)], p)
+							missing[string(expected.der)] = push(missing[string(expected.der)], p)
 						}
 					}
 				}
@@ -1554,7 +1572,7 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 								// Invalid mapping
 								return false
 							}
-							mappings[string(mapping.IssuerDomainPolicy.der)] = append(mappings[string(mapping.IssuerDomainPolicy.der)], mapping.SubjectDomainPolicy)
+							mappings[string(mapping.IssuerDomainPolicy.der)] = push(mappings[string(mapping.IssuerDomainPolicy.der)], mapping.SubjectDomainPolicy)
 						} else {
 							// 6.1.4 (b) (3) (i) -- as updated by RFC 9618
 							pg.deleteLeaf(mapping.IssuerDomainPolicy)
@@ -1624,7 +1642,8 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 		validPolicyNodeSet = pg.validPolicyNodes()
 		// 6.1.5 (g) (3) -- as updated by RFC 9618
 		if currentAny := pg.leafWithPolicy(anyPolicyOID()); currentAny != nil {
-			validPolicyNodeSet = append(validPolicyNodeSet, currentAny)
+			if len(validPolicyNodeSet) >= cap(validPolicyNodeSet) { validPolicyNodeSet = mxutil.GrowCap(validPolicyNodeSet) }
+			validPolicyNodeSet = push(validPolicyNodeSet, currentAny)
 		}
 	}
 

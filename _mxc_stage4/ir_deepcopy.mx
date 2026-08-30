@@ -50,7 +50,9 @@ func (e *irEmitter) funcNeedsCodec(f *SSAFunction) (ok bool) {
 	}
 	if f.Pkg != nil && f.Pkg.Pkg != nil {
 		path := f.Pkg.Pkg.Path
-		if path == "runtime" || path == "unsafe" {
+		if path == "runtime" || path == "unsafe" || path == "syscall" || path == "os" ||
+			path == "main" ||
+			mxutil.HasPrefix(path, "git.smesh.lol/moxie/pkg/") {
 			return false
 		}
 	}
@@ -67,6 +69,19 @@ func (e *irEmitter) funcNeedsCodec(f *SSAFunction) (ok bool) {
 
 func (e *irEmitter) isSovereignNamedType(named *Named) (ok bool) {
 	if named == nil || named.Obj == nil {
+		return false
+	}
+	// The syntax package's Scanner and Parser overwrite receiver fields as
+	// scratch; keep them out of the sovereign arena model (mirrors the
+	// legacy compiler's exclusion). Likewise the compiler's own main
+	// package (irEmitter, SSA builders) accumulates transient scratch.
+	// All other packages, including pkg/types, stay sovereign: the sovGroup
+	// lifecycle is bound to the receiver's arena (ArenaFree/ArenaRelease
+	// sweep), so per-package scratch receivers get fresh groups each
+	// package and dead groups die with their arena - no exemption needed.
+	if named.Obj.Pkg != nil &&
+		(named.Obj.Pkg.Path == "main" ||
+			named.Obj.Pkg.Path == "git.smesh.lol/moxie/pkg/syntax") {
 		return false
 	}
 	st, ok2 := SafeUnderlying(named).(*TCStruct)
@@ -101,11 +116,7 @@ func ssaFuncHasReceiverWrite(fn *SSAFunction) (ok bool) {
 			if !ok2 {
 				continue
 			}
-			fa, ok3 := store.Addr.(*SSAFieldAddr)
-			if !ok3 {
-				continue
-			}
-			if ssaValueRootedIn(fa.X, recvParam) {
+			if ssaValueRootedIn(store.Addr, recvParam) {
 				return true
 			}
 		}
@@ -126,6 +137,12 @@ func ssaValueRootedIn(v SSAValue, target SSAValue) (ok bool) {
 			return walk(vv.X)
 		case *SSAIndexAddr:
 			return walk(vv.X)
+		case *SSASlice:
+			return walk(vv.X)
+		case *SSAUnOp:
+			return walk(vv.X)
+		case *SSAMakeInterface:
+			return walk(vv.X)
 		default:
 			return x == target
 		}
@@ -138,42 +155,36 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 		return false
 	}
 	// Sovereign arena prologue: borrow receiver's arena instead of FnArenaPush.
-	if e.curFunc.Signature != nil && e.curFunc.Signature.Recv != nil && len(e.curFunc.Params) > 0 {
+	// Only methods that actually write to receiver fields borrow; read-only
+	// methods get a regular per-function arena so their scratch is cleared at
+	// return.
+	if e.curFunc.Signature != nil && e.curFunc.Signature.Recv != nil && len(e.curFunc.Params) > 0 &&
+		ssaFuncHasReceiverWrite(e.curFunc) {
 		recvTyp := e.curFunc.Signature.Recv.Typ
 		if ptr, ok2 := SafeUnderlying(recvTyp).(*Pointer); ok2 {
 			if named, ok3 := ptr.Base.(*Named); ok3 {
 				if e.isSovereignNamedType(named) {
-					e.sovereignTypes[named.Obj.Name] = true
 					recvName := e.curFunc.Params[0].SSAName()
-					recvLLVMType := e.llvmNamedType(named)
-					// receiver is a pointer; load the _arena field (last index)
-					e.nextReg++
-					arenaGEP := "%sov_arena_gep"
-					arenaGEP = arenaGEP | irItoa(e.nextReg)
-					nFieldsStr := ""
-					if st, ok4 := named.Under.(*TCStruct); ok4 {
-						nFieldsStr = irItoa(int32(st.NumFields()))
-					}
-					if nFieldsStr == "" {
-						nFieldsStr = "0"
-					}
-					e.w("  ") ; e.w(arenaGEP) ; e.w(" = getelementptr inbounds ")
-					e.w(recvLLVMType) ; e.w(", ptr ") ; e.w(recvName)
-					e.w(", i32 0, i32 ") ; e.w(nFieldsStr) ; e.w("\n")
+					// Sovereign arena is held in a root-arena hashmap keyed by
+					// receiver address (no struct layout change).
 					e.nextReg++
 					arenaVal := "%sov_arena"
 					arenaVal = arenaVal | irItoa(e.nextReg)
-					e.w("  ") ; e.w(arenaVal) ; e.w(" = load ptr, ptr ") ; e.w(arenaGEP) ; e.w("\n")
+					e.w("  ") ; e.w(arenaVal) ; e.w(" = call ptr @runtime.codecSovereignArena(ptr ") ; e.w(recvName) ; e.w(", ptr null)\n")
+					e.declareRuntime("runtime.codecSovereignArena", "ptr", "ptr, ptr")
 					e.nextReg++
 					parentArena := "%sov_parent"
 					parentArena = parentArena | irItoa(e.nextReg)
 					e.w("  ") ; e.w(parentArena) ; e.w(" = call ptr @runtime.CurrentArena(ptr null)\n")
 					e.declareRuntime("runtime.CurrentArena", "ptr", "")
-					e.w("  call void @runtime.SetCurrentArena(ptr ") ; e.w(arenaVal) ; e.w(", ptr null)\n")
-					e.declareRuntime("runtime.SetCurrentArena", "void", "ptr")
+					e.w("  call void @runtime.SovereignSetArena(ptr ") ; e.w(arenaVal) ; e.w(", ptr null)\n")
+					e.declareRuntime("runtime.SovereignSetArena", "void", "ptr")
+					e.w("  call void @runtime.SovereignRegStable(ptr ") ; e.w(arenaVal) ; e.w(", ptr null)\n")
+					e.declareRuntime("runtime.SovereignRegStable", "void", "ptr")
 					e.parentArenaReg = parentArena
 					e.arenaActive = true
 					e.arenaBorrowed = true
+					e.stableReg = true
 					return true
 				}
 			}
@@ -184,15 +195,31 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 	e.w(ipt)
 	e.w(" 65536, ptr null)\n")
 	e.declareRuntime("runtime.FnArenaPush", "ptr", ipt)
+	// Read-only method of a sovereign type: register the receiver's arena as
+	// stable so returned views into receiver data stay views, while the
+	// method's own scratch lives in this fn arena and is freed at return.
+	if e.curFunc.Signature != nil && e.curFunc.Signature.Recv != nil && len(e.curFunc.Params) > 0 {
+		recvTyp := e.curFunc.Signature.Recv.Typ
+		if ptr, ok2 := SafeUnderlying(recvTyp).(*Pointer); ok2 {
+			if named, ok3 := ptr.Base.(*Named); ok3 && e.isSovereignNamedType(named) && !ssaFuncHasReceiverWrite(e.curFunc) {
+				recvName := e.curFunc.Params[0].SSAName()
+				e.w("  call void @runtime.codecRegStable(ptr ") ; e.w(recvName) ; e.w(", ptr null)\n")
+				e.declareRuntime("runtime.codecRegStable", "void", "ptr, ptr")
+				e.stableReg = true
+			}
+		}
+	}
 	e.arenaActive = true
 	return true
 }
 
 func (e *irEmitter) emitSovereignEpilogue(llvmType string, val string) {
 	if llvmType == "void" || e.curFunc.Signature.Results == nil || int32(e.curFunc.Signature.Results.Len()) == 0 {
-		e.w("  call void @runtime.SetCurrentArena(ptr ") ; e.w(e.parentArenaReg)
+		e.w("  call void @runtime.SovereignRestoreArena(ptr ") ; e.w(e.parentArenaReg)
 		e.w(", ptr null)\n")
-		e.declareRuntime("runtime.SetCurrentArena", "void", "ptr")
+		e.declareRuntime("runtime.SovereignRestoreArena", "void", "ptr")
+		e.w("  call void @runtime.SovereignRegRestore(ptr null)\n")
+		e.declareRuntime("runtime.SovereignRegRestore", "void", "")
 		e.w("  ret void\n")
 		return
 	}
@@ -208,9 +235,11 @@ func (e *irEmitter) emitSovereignEpilogue(llvmType string, val string) {
 		}
 	}
 	if !needsCodec {
-		e.w("  call void @runtime.SetCurrentArena(ptr ") ; e.w(e.parentArenaReg)
+		e.w("  call void @runtime.SovereignRestoreArena(ptr ") ; e.w(e.parentArenaReg)
 		e.w(", ptr null)\n")
-		e.declareRuntime("runtime.SetCurrentArena", "void", "ptr")
+		e.declareRuntime("runtime.SovereignRestoreArena", "void", "ptr")
+		e.w("  call void @runtime.SovereignRegRestore(ptr null)\n")
+		e.declareRuntime("runtime.SovereignRegRestore", "void", "")
 		e.w("  ret ") ; e.w(llvmType) ; e.w(" ") ; e.w(val) ; e.w("\n")
 		return
 	}
@@ -220,8 +249,6 @@ func (e *irEmitter) emitSovereignEpilogue(llvmType string, val string) {
 	codecBufType := "{ " | st | ", i32 }"
 
 	// Encode with relocate mode.
-	e.w("  call void @runtime.codecSetMode(i8 0, ptr null)\n")
-	e.declareRuntime("runtime.codecSetMode", "void", "i8")
 
 	e.nextReg++
 	cb := "%cb" ; cb = cb | irItoa(e.nextReg)
@@ -235,6 +262,8 @@ func (e *irEmitter) emitSovereignEpilogue(llvmType string, val string) {
 
 	e.w("  call void @runtime.codecBufInit(ptr ") ; e.w(cb) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.codecBufInit", "void", "ptr")
+	e.w("  call void @runtime.codecSeenInit(ptr ") ; e.w(ss) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.codecSeenInit", "void", "ptr")
 
 	for i := int32(0); i < int32(e.curFunc.Signature.Results.Len()); i++ {
 		rt := e.curFunc.Signature.Results.At(i).Typ
@@ -254,49 +283,56 @@ func (e *irEmitter) emitSovereignEpilogue(llvmType string, val string) {
 
 	// Save CodecBuf data pointer and position.
 	e.nextReg++
+	cl := "%cbl" ; cl = cl | irItoa(e.nextReg)
+	e.w("  ") ; e.w(cl) ; e.w(" = load ") ; e.w(codecBufType) ; e.w(", ptr ") ; e.w(cb) ; e.w("\n")
+	e.nextReg++
 	sd := "%csd" ; sd = sd | irItoa(e.nextReg)
-	e.w("  ") ; e.w(sd) ; e.w(" = extractvalue ") ; e.w(codecBufType) ; e.w(" ") ; e.w(cb) ; e.w(", 0\n")
+	e.w("  ") ; e.w(sd) ; e.w(" = extractvalue ") ; e.w(codecBufType) ; e.w(" ") ; e.w(cl) ; e.w(", 0\n")
 	e.nextReg++
 	sp := "%csp" ; sp = sp | irItoa(e.nextReg)
-	e.w("  ") ; e.w(sp) ; e.w(" = extractvalue ") ; e.w(codecBufType) ; e.w(" ") ; e.w(cb) ; e.w(", 1\n")
+	e.w("  ") ; e.w(sp) ; e.w(" = extractvalue ") ; e.w(st) ; e.w(" ") ; e.w(sd) ; e.w(", 1\n")
 
-	// Switch to parent arena before decode.
-	e.w("  call void @runtime.SetCurrentArena(ptr ") ; e.w(e.parentArenaReg)
+	e.w("  call void @runtime.SovereignRestoreArena(ptr ") ; e.w(e.parentArenaReg)
 	e.w(", ptr null)\n")
-	e.declareRuntime("runtime.SetCurrentArena", "void", "ptr")
+	e.declareRuntime("runtime.SovereignRestoreArena", "void", "ptr")
+	e.w("  call void @runtime.SovereignRegRestore(ptr null)\n")
+	e.declareRuntime("runtime.SovereignRegRestore", "void", "")
 
-	// Decode phase.
 	e.nextReg++
-	cb2 := "%cb2" ; cb2 = cb2 | irItoa(e.nextReg)
+	cb2 := "%dcb" ; cb2 = cb2 | irItoa(e.nextReg)
 	e.w("  ") ; e.w(cb2) ; e.w(" = alloca ") ; e.w(codecBufType) ; e.w("\n")
 	e.w("  call void @runtime.codecBufInit(ptr ") ; e.w(cb2) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.codecBufInit", "void", "ptr")
 
-	// Override cb2.data and pos
 	e.nextReg++
-	cd := "%cd2" ; cd = cd | irItoa(e.nextReg)
-	e.w("  ") ; e.w(cd) ; e.w(" = insertvalue ") ; e.w(st) ; e.w(" zeroinitializer, ptr ") ; e.w(sd) ; e.w(", 0\n")
+	cd := "%dcd" ; cd = cd | irItoa(e.nextReg)
+	e.w("  ") ; e.w(cd) ; e.w(" = extractvalue ") ; e.w(st) ; e.w(" ") ; e.w(sd) ; e.w(", 0\n")
 	e.nextReg++
-	ce := "%ce2" ; ce = ce | irItoa(e.nextReg)
-	e.w("  ") ; e.w(ce) ; e.w(" = sext i32 ") ; e.w(sp) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+	cdp := "%dcp" ; cdp = cdp | irItoa(e.nextReg)
+	e.w("  ") ; e.w(cdp) ; e.w(" = insertvalue ") ; e.w(st) ; e.w(" zeroinitializer, ptr ") ; e.w(cd) ; e.w(", 0\n")
 	e.nextReg++
-	cf := "%cf2" ; cf = cf | irItoa(e.nextReg)
-	e.w("  ") ; e.w(cf) ; e.w(" = insertvalue ") ; e.w(st) ; e.w(" ") ; e.w(cd) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(ce) ; e.w(", 1\n")
+	cf := "%dcf" ; cf = cf | irItoa(e.nextReg)
+	e.w("  ") ; e.w(cf) ; e.w(" = insertvalue ") ; e.w(st) ; e.w(" ") ; e.w(cdp) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(sp) ; e.w(", 1\n")
 	e.nextReg++
-	cg := "%cg2" ; cg = cg | irItoa(e.nextReg)
-	e.w("  ") ; e.w(cg) ; e.w(" = insertvalue ") ; e.w(st) ; e.w(" ") ; e.w(cf) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(ce) ; e.w(", 2\n")
+	cg := "%dcg" ; cg = cg | irItoa(e.nextReg)
+	e.w("  ") ; e.w(cg) ; e.w(" = insertvalue ") ; e.w(st) ; e.w(" ") ; e.w(cf) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(sp) ; e.w(", 2\n")
 
 	e.nextReg++
-	ci := "%ci2" ; ci = ci | irItoa(e.nextReg)
-	e.w("  ") ; e.w(ci) ; e.w(" = insertvalue ") ; e.w(codecBufType) ; e.w(" ") ; e.w(cb2) ; e.w(", ") ; e.w(st) ; e.w(" ") ; e.w(cg) ; e.w(", 0\n")
+	cl2 := "%dbl" ; cl2 = cl2 | irItoa(e.nextReg)
+	e.w("  ") ; e.w(cl2) ; e.w(" = load ") ; e.w(codecBufType) ; e.w(", ptr ") ; e.w(cb2) ; e.w("\n")
 	e.nextReg++
-	cj := "%cj2" ; cj = cj | irItoa(e.nextReg)
-	e.w("  ") ; e.w(cj) ; e.w(" = insertvalue ") ; e.w(codecBufType) ; e.w(" ") ; e.w(ci) ; e.w(", i32 ") ; e.w(sp) ; e.w(", 1\n")
+	ci := "%dci" ; ci = ci | irItoa(e.nextReg)
+	e.w("  ") ; e.w(ci) ; e.w(" = insertvalue ") ; e.w(codecBufType) ; e.w(" ") ; e.w(cl2) ; e.w(", ") ; e.w(st) ; e.w(" ") ; e.w(cg) ; e.w(", 0\n")
+	e.nextReg++
+	cj := "%dcj" ; cj = cj | irItoa(e.nextReg)
+	e.w("  ") ; e.w(cj) ; e.w(" = insertvalue ") ; e.w(codecBufType) ; e.w(" ") ; e.w(ci) ; e.w(", i32 0, 1\n")
 	e.w("  store volatile ") ; e.w(codecBufType) ; e.w(" ") ; e.w(cj) ; e.w(", ptr ") ; e.w(cb2) ; e.w("\n")
 
-	ds := "%cds"
+	e.nextReg++
+	ds := "%cds" ; ds = ds | irItoa(e.nextReg)
 	e.w("  ") ; e.w(ds) ; e.w(" = alloca [64 x ptr]\n")
-	e.w("  store volatile [64 x ptr] zeroinitializer, ptr ") ; e.w(ds) ; e.w("\n")
+	e.w("  call void @runtime.codecDecodeSeenInit(ptr ") ; e.w(ds) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.codecDecodeSeenInit", "void", "ptr")
 
 	cur := val
 	for i := int32(0); i < int32(e.curFunc.Signature.Results.Len()); i++ {
@@ -354,6 +390,10 @@ func (e *irEmitter) emitRetWithCodec(llvmType string, val string) {
 		}
 	}
 	if !needsCodec {
+		if e.stableReg {
+			e.w("  call void @runtime.SovereignRegRestore(ptr null)\n")
+			e.declareRuntime("runtime.SovereignRegRestore", "void", "")
+		}
 		e.w("  call void @runtime.FnArenaPopFree(ptr null)\n")
 		e.declareRuntime("runtime.FnArenaPopFree", "void", "")
 		if llvmType == "void" {
@@ -381,6 +421,8 @@ func (e *irEmitter) emitRetWithCodec(llvmType string, val string) {
 
 	e.w("  call void @runtime.codecBufInit(ptr ") ; e.w(cb) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.codecBufInit", "void", "ptr")
+	e.w("  call void @runtime.codecSeenInit(ptr ") ; e.w(ss) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.codecSeenInit", "void", "ptr")
 
 	for i := int32(0); i < int32(e.curFunc.Signature.Results.Len()); i++ {
 		rt := e.curFunc.Signature.Results.At(i).Typ
@@ -400,11 +442,14 @@ func (e *irEmitter) emitRetWithCodec(llvmType string, val string) {
 
 	// Save CodecBuf data pointer and position (scalars survive FnArenaPop)
 	e.nextReg++
+	cl := "%cbl" ; cl = cl | irItoa(e.nextReg)
+	e.w("  ") ; e.w(cl) ; e.w(" = load ") ; e.w(codecBufType) ; e.w(", ptr ") ; e.w(cb) ; e.w("\n")
+	e.nextReg++
 	sd := "%csd" ; sd = sd | irItoa(e.nextReg)
-	e.w("  ") ; e.w(sd) ; e.w(" = extractvalue ") ; e.w(codecBufType) ; e.w(" ") ; e.w(cb) ; e.w(", 0\n")
+	e.w("  ") ; e.w(sd) ; e.w(" = extractvalue ") ; e.w(codecBufType) ; e.w(" ") ; e.w(cl) ; e.w(", 0\n")
 	e.nextReg++
 	sp := "%csp" ; sp = sp | irItoa(e.nextReg)
-	e.w("  ") ; e.w(sp) ; e.w(" = extractvalue ") ; e.w(codecBufType) ; e.w(" ") ; e.w(cb) ; e.w(", 1\n")
+	e.w("  ") ; e.w(sp) ; e.w(" = extractvalue ") ; e.w(st) ; e.w(" ") ; e.w(sd) ; e.w(", 1\n")
 
 	// Reclaim fn arena position
 	e.nextReg++
@@ -412,34 +457,35 @@ func (e *irEmitter) emitRetWithCodec(llvmType string, val string) {
 	e.w("  ") ; e.w(fn) ; e.w(" = call ptr @runtime.FnArenaPop(ptr null)\n")
 	e.declareRuntime("runtime.FnArenaPop", "ptr", "")
 
-	// Decode phase (allocations go to caller's arena)
-	// Rebuild CodecBuf from saved data ptr and pos
+	// Decode phase: build cb2 from saved data
 	e.nextReg++
-	cb2 := "%cb2" ; cb2 = cb2 | irItoa(e.nextReg)
+	cb2 := "%dcb" ; cb2 = cb2 | irItoa(e.nextReg)
 	e.w("  ") ; e.w(cb2) ; e.w(" = alloca ") ; e.w(codecBufType) ; e.w("\n")
 	e.w("  call void @runtime.codecBufInit(ptr ") ; e.w(cb2) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.codecBufInit", "void", "ptr")
 
-	// Override cb2.data = {saved_ptr, saved_pos, saved_pos}
 	e.nextReg++
-	cd := "%cd2" ; cd = cd | irItoa(e.nextReg)
-	e.w("  ") ; e.w(cd) ; e.w(" = insertvalue ") ; e.w(st) ; e.w(" zeroinitializer, ptr ") ; e.w(sd) ; e.w(", 0\n")
+	cd := "%dcd" ; cd = cd | irItoa(e.nextReg)
+	e.w("  ") ; e.w(cd) ; e.w(" = extractvalue ") ; e.w(st) ; e.w(" ") ; e.w(sd) ; e.w(", 0\n")
 	e.nextReg++
-	ce := "%ce2" ; ce = ce | irItoa(e.nextReg)
-	e.w("  ") ; e.w(ce) ; e.w(" = sext i32 ") ; e.w(sp) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+	cdp := "%dcp" ; cdp = cdp | irItoa(e.nextReg)
+	e.w("  ") ; e.w(cdp) ; e.w(" = insertvalue ") ; e.w(st) ; e.w(" zeroinitializer, ptr ") ; e.w(cd) ; e.w(", 0\n")
 	e.nextReg++
-	cf := "%cf2" ; cf = cf | irItoa(e.nextReg)
-	e.w("  ") ; e.w(cf) ; e.w(" = insertvalue ") ; e.w(st) ; e.w(" ") ; e.w(cd) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(ce) ; e.w(", 1\n")
+	cf := "%dcf" ; cf = cf | irItoa(e.nextReg)
+	e.w("  ") ; e.w(cf) ; e.w(" = insertvalue ") ; e.w(st) ; e.w(" ") ; e.w(cdp) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(sp) ; e.w(", 1\n")
 	e.nextReg++
-	cg := "%cg2" ; cg = cg | irItoa(e.nextReg)
-	e.w("  ") ; e.w(cg) ; e.w(" = insertvalue ") ; e.w(st) ; e.w(" ") ; e.w(cf) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(ce) ; e.w(", 2\n")
+	cg := "%dcg" ; cg = cg | irItoa(e.nextReg)
+	e.w("  ") ; e.w(cg) ; e.w(" = insertvalue ") ; e.w(st) ; e.w(" ") ; e.w(cf) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(sp) ; e.w(", 2\n")
 
 	e.nextReg++
-	ci := "%ci2" ; ci = ci | irItoa(e.nextReg)
-	e.w("  ") ; e.w(ci) ; e.w(" = insertvalue ") ; e.w(codecBufType) ; e.w(" ") ; e.w(cb2) ; e.w(", ") ; e.w(st) ; e.w(" ") ; e.w(cg) ; e.w(", 0\n")
+	cl2 := "%dbl" ; cl2 = cl2 | irItoa(e.nextReg)
+	e.w("  ") ; e.w(cl2) ; e.w(" = load ") ; e.w(codecBufType) ; e.w(", ptr ") ; e.w(cb2) ; e.w("\n")
 	e.nextReg++
-	cj := "%cj2" ; cj = cj | irItoa(e.nextReg)
-	e.w("  ") ; e.w(cj) ; e.w(" = insertvalue ") ; e.w(codecBufType) ; e.w(" ") ; e.w(ci) ; e.w(", i32 ") ; e.w(sp) ; e.w(", 1\n")
+	ci := "%dci" ; ci = ci | irItoa(e.nextReg)
+	e.w("  ") ; e.w(ci) ; e.w(" = insertvalue ") ; e.w(codecBufType) ; e.w(" ") ; e.w(cl2) ; e.w(", ") ; e.w(st) ; e.w(" ") ; e.w(cg) ; e.w(", 0\n")
+	e.nextReg++
+	cj := "%dcj" ; cj = cj | irItoa(e.nextReg)
+	e.w("  ") ; e.w(cj) ; e.w(" = insertvalue ") ; e.w(codecBufType) ; e.w(" ") ; e.w(ci) ; e.w(", i32 0, 1\n")
 	e.w("  store volatile ") ; e.w(codecBufType) ; e.w(" ") ; e.w(cj) ; e.w(", ptr ") ; e.w(cb2) ; e.w("\n")
 
 	e.nextReg++
@@ -476,10 +522,41 @@ func (e *irEmitter) emitRetWithCodec(llvmType string, val string) {
 
 	e.w("  call void @runtime.ArenaRelease(ptr ") ; e.w(fn) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.ArenaRelease", "void", "ptr")
+	if e.stableReg {
+		e.w("  call void @runtime.SovereignRegRestore(ptr null)\n")
+		e.declareRuntime("runtime.SovereignRegRestore", "void", "")
+	}
 	e.w("  ret ") ; e.w(llvmType) ; e.w(" ") ; e.w(cur) ; e.w("\n")
 }
 
 // emitCodecEncode generates code to encode a value into the CodecBuf.
+func (e *irEmitter) collectAllTypeDescs(t Type, seen map[string]bool) {
+	if t == nil { return }
+	u := SafeUnderlying(t)
+	if u == nil { return }
+	tail := e.typeDescName(t)
+	if seen[tail] { return }
+	seen[tail] = true
+	if e.pendTypeDescs == nil { e.pendTypeDescs = map[string]Type{} }
+	e.pendTypeDescs[tail] = t
+	switch tt := u.(type) {
+	case *Pointer:
+		e.collectAllTypeDescs(tt.Base, seen)
+	case *Slice:
+		e.collectAllTypeDescs(tt.Elem, seen)
+	case *TCMap:
+		e.collectAllTypeDescs(tt.Key, seen)
+		e.collectAllTypeDescs(tt.Elem, seen)
+	case *TCChan:
+		e.collectAllTypeDescs(tt.Elem, seen)
+	case *TCStruct:
+		for i := int32(0); i < tt.NumFields(); i++ {
+			e.collectAllTypeDescs(tt.Field(i).Typ, seen)
+		}
+	case *TCInterface:
+	}
+}
+
 func (e *irEmitter) emitCodecEncode(reg string, t Type, cb string, ss string) {
 	if t == nil || !typeNeedsCodec(t) {
 		return
@@ -489,6 +566,7 @@ func (e *irEmitter) emitCodecEncode(reg string, t Type, cb string, ss string) {
 	tmp := "%cet" ; tmp = tmp | irItoa(e.nextReg)
 	e.w("  ") ; e.w(tmp) ; e.w(" = alloca ") ; e.w(lt) ; e.w("\n")
 	e.w("  store volatile ") ; e.w(lt) ; e.w(" ") ; e.w(reg) ; e.w(", ptr ") ; e.w(tmp) ; e.w("\n")
+	e.collectTypeDesc(t)
 	tn := e.reflectTypeName(t)
 	e.w("  call void @runtime.codecEncodeValue(ptr ") ; e.w(cb) ; e.w(", ptr ") ; e.w(ss)
 	e.w(", ptr ") ; e.w(tmp) ; e.w(", ptr @\"") ; e.w(tn) ; e.w("\", ptr null)\n")

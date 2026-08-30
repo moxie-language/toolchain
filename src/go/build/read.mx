@@ -5,6 +5,7 @@
 package build
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bufio"
 	"bytes"
 	"errors"
@@ -72,7 +73,8 @@ func (r *importReader) syntaxError() {
 func (r *importReader) readByte() byte {
 	c, err := r.b.ReadByte()
 	if err == nil {
-		r.buf = append(r.buf, c)
+		if len(r.buf) >= cap(r.buf) { r.buf = mxutil.GrowCap(r.buf) }
+		r.buf = push(r.buf, c)
 		if c == 0 {
 			err = errNUL
 		}
@@ -485,7 +487,8 @@ func readGoInfo(f io.Reader, info *fileInfo) error {
 			if doc == nil && len(d.Specs) == 1 {
 				doc = d.Doc
 			}
-			info.imports = append(info.imports, fileImport{path, spec.Pos(), doc})
+			if len(info.imports) >= cap(info.imports) { info.imports = mxutil.GrowCap(info.imports) }
+			info.imports = push(info.imports, fileImport{path, spec.Pos(), doc})
 		}
 	}
 
@@ -496,7 +499,8 @@ func readGoInfo(f io.Reader, info *fileInfo) error {
 		}
 		for _, c := range group.List {
 			if bytes.HasPrefix(c.Text, "//:") {
-				info.directives = append(info.directives, Directive{c.Text, info.fset.Position(c.Slash)})
+				if len(info.directives) >= cap(info.directives) { info.directives = mxutil.GrowCap(info.directives) }
+				info.directives = push(info.directives, Directive{c.Text, info.fset.Position(c.Slash)})
 			}
 		}
 	}
@@ -519,14 +523,16 @@ func readGoInfo(f io.Reader, info *fileInfo) error {
 				if c == '\n' || r.err != nil || r.eof {
 					break
 				}
-				line = append(line, c)
+				if len(line) >= cap(line) { line = mxutil.GrowCap(line) }
+				line = push(line, c)
 			}
 			// Add args if line is well-formed.
 			// Ignore badly-formed lines - the compiler will report them when it finds them,
 			// and we can pretend they are not there to help go list succeed with what it knows.
 			embs, err := parseGoEmbed([]byte(line), pos)
 			if err == nil {
-				info.embeds = append(info.embeds, embs...)
+				if len(info.embeds) >= cap(info.embeds) { info.embeds = mxutil.GrowCap(info.embeds) }
+				info.embeds = push(info.embeds, embs...)
 			}
 		}
 	}
@@ -618,7 +624,8 @@ func parseGoEmbed(args []byte, pos token.Position) ([]fileEmbed, error) {
 				return nil, fmt.Errorf("invalid quoted string in //:embed: %s", args)
 			}
 		}
-		list = append(list, fileEmbed{path, pathPos})
+		if len(list) >= cap(list) { list = mxutil.GrowCap(list) }
+		list = push(list, fileEmbed{path, pathPos})
 	}
 	return list, nil
 }

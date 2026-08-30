@@ -23,6 +23,7 @@
 package http
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bufio"
 	"bytes"
 	"compress/gzip"
@@ -929,8 +930,8 @@ func (p *http2clientConnPool) addConnLocked(key string, cc *http2ClientConn) {
 	if p.keys == nil {
 		p.keys = map[*http2ClientConn][][]byte{}
 	}
-	p.conns[key] = append(p.conns[key], cc)
-	p.keys[cc] = append(p.keys[cc], key)
+	p.conns[key] = push(p.conns[key], cc)
+	p.keys[cc] = push(p.keys[cc], key)
 }
 
 func (p *http2clientConnPool) MarkDead(cc *http2ClientConn) {
@@ -967,7 +968,8 @@ func http2filterOutClientConn(in []*http2ClientConn, exclude *http2ClientConn) [
 	out := in[:0]
 	for _, v := range in {
 		if v != exclude {
-			out = append(out, v)
+			if len(out) >= cap(out) { out = mxutil.GrowCap(out) }
+			out = push(out, v)
 		}
 	}
 	// If we filtered it out, zero out the last item to prevent
@@ -1286,7 +1288,8 @@ func (b *http2dataBuffer) lastChunkOrAlloc(want int64) []byte {
 		}
 	}
 	chunk := http2getDataBufferChunk(want)
-	b.chunks = append(b.chunks, chunk)
+	if len(b.chunks) >= cap(b.chunks) { b.chunks = mxutil.GrowCap(b.chunks) }
+	b.chunks = push(b.chunks, chunk)
 	b.w = 0
 	return chunk
 }
@@ -1887,7 +1890,7 @@ func (fr *http2Framer) maxHeaderListSize() uint32 {
 
 func (f *http2Framer) startWrite(ftype http2FrameType, flags http2Flags, streamID uint32) {
 	// Write the FrameHeader.
-	f.wbuf = append(f.wbuf[:0],
+	f.wbuf = push(f.wbuf[:0],
 		0, // 3 bytes of length, filled in in endWrite
 		0,
 		0,
@@ -1906,7 +1909,7 @@ func (f *http2Framer) endWrite() error {
 	if length >= (1 << 24) {
 		return http2ErrFrameTooLarge
 	}
-	_ = append(f.wbuf[:0],
+	_ = push(f.wbuf[:0],
 		byte(length>>16),
 		byte(length>>8),
 		byte(length))
@@ -1939,14 +1942,15 @@ func (f *http2Framer) logWrite() {
 	f.debugWriteLoggerf("http2: Framer %p: wrote %v", f, http2summarizeFrame(fr))
 }
 
-func (f *http2Framer) writeByte(v byte) { f.wbuf = append(f.wbuf, v) }
+func (f *http2Framer) writeByte(v byte) { f.wbuf = push(f.wbuf, v) }
 
-func (f *http2Framer) writeBytes(v []byte) { f.wbuf = append(f.wbuf, v...) }
+func (f *http2Framer) writeBytes(v []byte) { f.wbuf = push(f.wbuf, v...) }
 
-func (f *http2Framer) writeUint16(v uint16) { f.wbuf = append(f.wbuf, byte(v>>8), byte(v)) }
+func (f *http2Framer) writeUint16(v uint16) { f.wbuf = push(f.wbuf, byte(v>>8), byte(v)) }
 
 func (f *http2Framer) writeUint32(v uint32) {
-	f.wbuf = append(f.wbuf, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+	if len(f.wbuf) >= cap(f.wbuf) { f.wbuf = mxutil.GrowCap(f.wbuf) }
+	f.wbuf = push(f.wbuf, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
 }
 
 const (
@@ -2254,10 +2258,13 @@ func (f *http2Framer) startWriteDataPadded(streamID uint32, endStream bool, data
 	}
 	f.startWrite(http2FrameData, flags, streamID)
 	if pad != nil {
-		f.wbuf = append(f.wbuf, byte(len(pad)))
+		if len(f.wbuf) >= cap(f.wbuf) { f.wbuf = mxutil.GrowCap(f.wbuf) }
+		f.wbuf = push(f.wbuf, byte(len(pad)))
 	}
-	f.wbuf = append(f.wbuf, data...)
-	f.wbuf = append(f.wbuf, pad...)
+	if len(f.wbuf) >= cap(f.wbuf) { f.wbuf = mxutil.GrowCap(f.wbuf) }
+	f.wbuf = push(f.wbuf, data...)
+	if len(f.wbuf) >= cap(f.wbuf) { f.wbuf = mxutil.GrowCap(f.wbuf) }
+	f.wbuf = push(f.wbuf, pad...)
 	return nil
 }
 
@@ -2684,9 +2691,11 @@ func (f *http2Framer) WriteHeaders(p http2HeadersFrameParam) error {
 		f.writeUint32(v)
 		f.writeByte(p.Priority.Weight)
 	}
-	f.wbuf = append(f.wbuf, p.BlockFragment...)
+	if len(f.wbuf) >= cap(f.wbuf) { f.wbuf = mxutil.GrowCap(f.wbuf) }
+	f.wbuf = push(f.wbuf, p.BlockFragment...)
 	http2padZeros := _http2padZeros()
-	f.wbuf = append(f.wbuf, http2padZeros[:p.PadLength]...)
+	if len(f.wbuf) >= cap(f.wbuf) { f.wbuf = mxutil.GrowCap(f.wbuf) }
+	f.wbuf = push(f.wbuf, http2padZeros[:p.PadLength]...)
 	return f.endWrite()
 }
 
@@ -2829,7 +2838,8 @@ func (f *http2Framer) WriteContinuation(streamID uint32, endHeaders bool, header
 		flags |= http2FlagContinuationEndHeaders
 	}
 	f.startWrite(http2FrameContinuation, flags, streamID)
-	f.wbuf = append(f.wbuf, headerBlockFragment...)
+	if len(f.wbuf) >= cap(f.wbuf) { f.wbuf = mxutil.GrowCap(f.wbuf) }
+	f.wbuf = push(f.wbuf, headerBlockFragment...)
 	return f.endWrite()
 }
 
@@ -2938,9 +2948,11 @@ func (f *http2Framer) WritePushPromise(p http2PushPromiseParam) error {
 		return http2errStreamID
 	}
 	f.writeUint32(p.PromiseID)
-	f.wbuf = append(f.wbuf, p.BlockFragment...)
+	if len(f.wbuf) >= cap(f.wbuf) { f.wbuf = mxutil.GrowCap(f.wbuf) }
+	f.wbuf = push(f.wbuf, p.BlockFragment...)
 	http2padZeros := _http2padZeros()
-	f.wbuf = append(f.wbuf, http2padZeros[:p.PadLength]...)
+	if len(f.wbuf) >= cap(f.wbuf) { f.wbuf = mxutil.GrowCap(f.wbuf) }
+	f.wbuf = push(f.wbuf, http2padZeros[:p.PadLength]...)
 	return f.endWrite()
 }
 
@@ -3129,7 +3141,8 @@ func (fr *http2Framer) readMetaFrame(hf *http2HeadersFrame) (http2Frame, error) 
 		}
 		remainSize -= size
 
-		mh.Fields = append(mh.Fields, hf)
+		if len(mh.Fields) >= cap(mh.Fields) { mh.Fields = mxutil.GrowCap(mh.Fields) }
+		mh.Fields = push(mh.Fields, hf)
 	})
 	// Lose reference to MetaHeadersFrame:
 	defer hdec.SetEmitFunc(func(hf hpack.HeaderField) {})
@@ -3744,7 +3757,8 @@ func (s *http2sorter) Less(i, j int32) bool { return s.v[i] < s.v[j] }
 func (s *http2sorter) Keys(h Header) [][]byte {
 	keys := s.v[:0]
 	for k := range h {
-		keys = append(keys, k)
+		if len(keys) >= cap(keys) { keys = mxutil.GrowCap(keys) }
+		keys = push(keys, k)
 	}
 	s.v = keys
 	sort.Sort(s)
@@ -4144,10 +4158,12 @@ func http2ConfigureServer(s *Server, conf *http2Server) error {
 	s.TLSConfig.PreferServerCipherSuites = true
 
 	if !http2strSliceContains(s.TLSConfig.NextProtos, http2NextProtoTLS) {
-		s.TLSConfig.NextProtos = append(s.TLSConfig.NextProtos, http2NextProtoTLS)
+		if len(s.TLSConfig.NextProtos) >= cap(s.TLSConfig.NextProtos) { s.TLSConfig.NextProtos = mxutil.GrowCap(s.TLSConfig.NextProtos) }
+		s.TLSConfig.NextProtos = push(s.TLSConfig.NextProtos, http2NextProtoTLS)
 	}
 	if !http2strSliceContains(s.TLSConfig.NextProtos, "http/1.1") {
-		s.TLSConfig.NextProtos = append(s.TLSConfig.NextProtos, "http/1.1")
+		if len(s.TLSConfig.NextProtos) >= cap(s.TLSConfig.NextProtos) { s.TLSConfig.NextProtos = mxutil.GrowCap(s.TLSConfig.NextProtos) }
+		s.TLSConfig.NextProtos = push(s.TLSConfig.NextProtos, "http/1.1")
 	}
 
 	if s.TLSNextProto == nil {
@@ -4756,7 +4772,8 @@ func (sc *http2serverConn) serve(conf http2http2Config) {
 		{http2SettingInitialWindowSize, uint32(sc.initialStreamRecvWindowSize)},
 	}
 	if !http2disableExtendedConnectProtocol {
-		settings = append(settings, http2Setting{http2SettingEnableConnectProtocol, 1})
+		if len(settings) >= cap(settings) { settings = mxutil.GrowCap(settings) }
+		settings = push(settings, http2Setting{http2SettingEnableConnectProtocol, 1})
 	}
 	sc.writeFrame(http2FrameWriteRequest{
 		write: settings,
@@ -5987,7 +6004,7 @@ func (st *http2stream) processTrailerHeaders(f *http2MetaHeadersFrame) error {
 				// HTTP folk.
 				return sc.countError("trailers_bogus", http2streamError(st.id, http2ErrCodeProtocol))
 			}
-			st.trailer[key] = append(st.trailer[key], hf.Value)
+			st.trailer[key] = push(st.trailer[key], hf.Value)
 		}
 	}
 	st.endStream()
@@ -6183,7 +6200,8 @@ func (sc *http2serverConn) scheduleHandler(streamID uint32, rw *http2responseWri
 	if len(sc.unstartedHandlers) > int32(4*sc.advMaxStreams) {
 		return sc.countError("too_many_early_resets", http2ConnectionError(http2ErrCodeEnhanceYourCalm))
 	}
-	sc.unstartedHandlers = append(sc.unstartedHandlers, http2unstartedHandler{
+	if len(sc.unstartedHandlers) >= cap(sc.unstartedHandlers) { sc.unstartedHandlers = mxutil.GrowCap(sc.unstartedHandlers) }
+	sc.unstartedHandlers = push(sc.unstartedHandlers, http2unstartedHandler{
 		streamID: streamID,
 		rw:       rw,
 		req:      req,
@@ -6233,7 +6251,7 @@ func (sc *http2serverConn) runHandler(rw *http2responseWriter, req *Request, han
 				stream: rw.rws.stream,
 			})
 			// Same as net/http:
-			if e != nil && e != ErrAbortHandler {
+			if e != "" && e != string(ErrAbortHandler) {
 				const size = 64 << 10
 				buf := []byte{:size}
 				buf = buf[:runtime.Stack(buf, false)]
@@ -6462,7 +6480,8 @@ func (rws *http2responseWriterState) declareTrailer(k string) {
 		return
 	}
 	if !http2strSliceContains(rws.trailers, k) {
-		rws.trailers = append(rws.trailers, k)
+		if len(rws.trailers) >= cap(rws.trailers) { rws.trailers = mxutil.GrowCap(rws.trailers) }
+		rws.trailers = push(rws.trailers, k)
 	}
 }
 
@@ -7420,10 +7439,11 @@ func http2configureTransports(t1 *Transport) (*http2Transport, error) {
 		t1.TLSClientConfig = &tls.Config{}
 	}
 	if !http2strSliceContains(t1.TLSClientConfig.NextProtos, "h2") {
-		t1.TLSClientConfig.NextProtos = append([][]byte{"h2"}, t1.TLSClientConfig.NextProtos...)
+		t1.TLSClientConfig.NextProtos = push([][]byte{"h2"}, t1.TLSClientConfig.NextProtos...)
 	}
 	if !http2strSliceContains(t1.TLSClientConfig.NextProtos, "http/1.1") {
-		t1.TLSClientConfig.NextProtos = append(t1.TLSClientConfig.NextProtos, "http/1.1")
+		if len(t1.TLSClientConfig.NextProtos) >= cap(t1.TLSClientConfig.NextProtos) { t1.TLSClientConfig.NextProtos = mxutil.GrowCap(t1.TLSClientConfig.NextProtos) }
+		t1.TLSClientConfig.NextProtos = push(t1.TLSClientConfig.NextProtos, "http/1.1")
 	}
 	upgradeFn := func(scheme, authority string, c net.Conn) RoundTripper {
 		addr := http2authorityAddr(scheme, authority)
@@ -7891,7 +7911,7 @@ func (t *http2Transport) newTLSConfig(host string) *tls.Config {
 		*cfg = *t.TLSClientConfig.Clone()
 	}
 	if !http2strSliceContains(cfg.NextProtos, http2NextProtoTLS) {
-		cfg.NextProtos = append([][]byte{http2NextProtoTLS}, cfg.NextProtos...)
+		cfg.NextProtos = push([][]byte{http2NextProtoTLS}, cfg.NextProtos...)
 	}
 	if cfg.ServerName == "" {
 		cfg.ServerName = host
@@ -8003,12 +8023,15 @@ func (t *http2Transport) newClientConn(c net.Conn, singleUse bool) (*http2Client
 		{ID: http2SettingEnablePush, Val: 0},
 		{ID: http2SettingInitialWindowSize, Val: uint32(cc.initialStreamRecvWindowSize)},
 	}
-	initialSettings = append(initialSettings, http2Setting{ID: http2SettingMaxFrameSize, Val: conf.MaxReadFrameSize})
+	if len(initialSettings) >= cap(initialSettings) { initialSettings = mxutil.GrowCap(initialSettings) }
+	initialSettings = push(initialSettings, http2Setting{ID: http2SettingMaxFrameSize, Val: conf.MaxReadFrameSize})
 	if max := t.maxHeaderListSize(); max != 0 {
-		initialSettings = append(initialSettings, http2Setting{ID: http2SettingMaxHeaderListSize, Val: max})
+		if len(initialSettings) >= cap(initialSettings) { initialSettings = mxutil.GrowCap(initialSettings) }
+		initialSettings = push(initialSettings, http2Setting{ID: http2SettingMaxHeaderListSize, Val: max})
 	}
 	if maxHeaderTableSize != http2initialHeaderTableSize {
-		initialSettings = append(initialSettings, http2Setting{ID: http2SettingHeaderTableSize, Val: maxHeaderTableSize})
+		if len(initialSettings) >= cap(initialSettings) { initialSettings = mxutil.GrowCap(initialSettings) }
+		initialSettings = push(initialSettings, http2Setting{ID: http2SettingHeaderTableSize, Val: maxHeaderTableSize})
 	}
 
 	cc.bw.Write(http2clientPreface)
@@ -9426,7 +9449,7 @@ func (rl *http2clientConnReadLoop) handleResponse(cs *http2clientStream, f *http
 				vv[0] = hf.Value
 				header[key] = vv
 			} else {
-				header[key] = append(vv, hf.Value)
+				header[key] = push(vv, hf.Value)
 			}
 		}
 	}
@@ -9538,7 +9561,7 @@ func (rl *http2clientConnReadLoop) processTrailers(cs *http2clientStream, f *htt
 	trailer := Header{}
 	for _, hf := range f.RegularFields() {
 		key := httpcommon.CanonicalHeader(hf.Name)
-		trailer[key] = append(trailer[key], hf.Value)
+		trailer[key] = push(trailer[key], hf.Value)
 	}
 	cs.trailer = trailer
 
@@ -10135,7 +10158,7 @@ func http2isConnectionCloseRequest(req *Request) bool {
 // converting panics into errors.
 func http2registerHTTPSProtocol(t *Transport, rt http2noDialH2RoundTripper) (err error) {
 	defer func() {
-		if e := recover(); e != nil {
+		if e := recover(); e != "" {
 			err = fmt.Errorf("%v", e)
 		}
 	}()
@@ -10816,7 +10839,8 @@ type http2writeQueue struct {
 func (q *http2writeQueue) empty() bool { return len(q.s) == 0 }
 
 func (q *http2writeQueue) push(wr http2FrameWriteRequest) {
-	q.s = append(q.s, wr)
+	if len(q.s) >= cap(q.s) { q.s = mxutil.GrowCap(q.s) }
+	q.s = push(q.s, wr)
 }
 
 func (q *http2writeQueue) shift() http2FrameWriteRequest {
@@ -10861,7 +10885,7 @@ func (p *http2writeQueuePool) put(q *http2writeQueue) {
 		q.s[i] = http2FrameWriteRequest{}
 	}
 	q.s = q.s[:0]
-	*p = append(*p, q)
+	*p = push(*p, q)
 }
 
 // get returns an empty writeQueue.
@@ -11059,7 +11083,7 @@ func (n *http2priorityNode) walkReadyInOrder(openParent bool, tmp *[]*http2prior
 	// then re-insert after sorting so we can reuse tmp for future sort calls.
 	*tmp = (*tmp)[:0]
 	for n.kids != nil {
-		*tmp = append(*tmp, n.kids)
+		*tmp = push(*tmp, n.kids)
 		n.kids.setParent(nil)
 	}
 	sort.Sort(http2sortPriorityNodeSiblings(*tmp))
@@ -11308,7 +11332,7 @@ func (ws *http2priorityWriteScheduler) addClosedOrIdleNode(list *[]*http2priorit
 		copy(*list, x)
 		*list = (*list)[:len(x)]
 	}
-	*list = append(*list, n)
+	*list = push(*list, n)
 }
 
 func (ws *http2priorityWriteScheduler) removeNode(n *http2priorityNode) {

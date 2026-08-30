@@ -1,6 +1,7 @@
 package main
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"git.smesh.lol/moxie/pkg/token"
 	. "git.smesh.lol/moxie/pkg/types"
 )
@@ -218,6 +219,7 @@ type SSAFunction struct {
 	Blocks       []*SSABasicBlock
 	AnonFuncs    []*SSAFunction
 	NamedResults []*SSAAlloc
+	Recover      *SSABasicBlock // optional; control transfers here after a recovered panic
 
 	parent *SSAFunction
 	vars   map[Object]SSAValue
@@ -257,6 +259,7 @@ func NewSSABasicBlock(parent *SSAFunction, comment string) (s *SSABasicBlock) {
 		Comment: comment,
 		parent:  parent,
 	}
+	if len(parent.Blocks) >= cap(parent.Blocks) { parent.Blocks = mxutil.GrowCap(parent.Blocks) }
 	push(parent.Blocks, b)
 	return b
 }
@@ -826,8 +829,6 @@ func compoundOp(op token.Operator) (s SSAOp) {
 
 func ssaBuiltinID(name string) (id BuiltinID, found bool) {
 	switch name {
-	case "append":
-		return BuiltinAppend, true
 	case "cap":
 		return BuiltinCap, true
 	case "clear":
@@ -840,13 +841,13 @@ func ssaBuiltinID(name string) (id BuiltinID, found bool) {
 		return BuiltinDelete, true
 	case "len":
 		return BuiltinLen, true
-	case "__slicealloc", "make":
+	case "__slicealloc":
 		return BuiltinMake, true
 	case "max":
 		return BuiltinMax, true
 	case "min":
 		return BuiltinMin, true
-	case "__ptralloc", "new":
+	case "__ptralloc":
 		return BuiltinNew, true
 	case "panic":
 		return BuiltinPanic, true
@@ -858,6 +859,12 @@ func ssaBuiltinID(name string) (id BuiltinID, found bool) {
 		return BuiltinRecover, true
 	case "spawn":
 		return BuiltinSpawn, true
+	case "push":
+		return BuiltinPush, true
+	case "pop":
+		return BuiltinPop, true
+	case "resize":
+		return BuiltinResize, true
 	}
 	return 0, false
 }
@@ -872,10 +879,12 @@ func ssaItoa(n int32) (s string) {
 	}
 	buf := []byte{:0:20}
 	for n > 0 {
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
 		push(buf, byte('0'+n%10))
 		n /= 10
 	}
 	if neg {
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
 		push(buf, '-')
 	}
 	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {

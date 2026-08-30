@@ -17,8 +17,8 @@ func producer(out chan moxie.Int32, ctrl chan moxie.Int32) {
 }
 
 func main() {
-	out := make(chan moxie.Int32)
-	ctrl := make(chan moxie.Int32)
+	out := chan moxie.Int32{}
+	ctrl := chan moxie.Int32{}
 	spawn(producer, out, ctrl)
 
 	count := int32(0)

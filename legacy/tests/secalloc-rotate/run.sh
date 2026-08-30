@@ -13,7 +13,7 @@
 #   - the raw secret pattern does NOT appear anywhere
 set -euo pipefail
 
-MOXIEROOT="${MOXIEROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+MOXIEROOT="${MOXIEROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 MOXIE="${MOXIE:-$MOXIEROOT/moxie}"
 TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
@@ -25,7 +25,7 @@ BIN="$TMPDIR/secalloc_rotate_test"
 
 cd "$MOXIEROOT"
 
-if ! "$MOXIE" build -o "$BIN" ./tests/secalloc-rotate 2>"$TMPDIR/build.err"; then
+if ! "$MOXIE" build -o "$BIN" ./legacy/tests/secalloc-rotate 2>"$TMPDIR/build.err"; then
     echo "FAIL secalloc-rotate: compilation failed"
     cat "$TMPDIR/build.err"
     exit 1

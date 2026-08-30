@@ -5,6 +5,7 @@
 package hpack
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"errors"
 	"io"
@@ -22,7 +23,8 @@ func bufPoolGet() *bytes.Buffer {
 }
 
 func bufPoolPut(b *bytes.Buffer) {
-	bufPoolItems = append(bufPoolItems, b)
+	if len(bufPoolItems) >= cap(bufPoolItems) { bufPoolItems = mxutil.GrowCap(bufPoolItems) }
+	bufPoolItems = push(bufPoolItems, b)
 }
 
 // HuffmanDecode decodes the string in v and writes the expanded
@@ -192,7 +194,8 @@ func AppendHuffmanString(dst []byte, s []byte) []byte {
 		if n >= 32 {
 			n %= 32             // Normally would be -= 32 but %= 32 informs compiler 0 <= n <= 31 for upcoming shift
 			y := uint32(x >> n) // Compiler doesn't combine memory writes if y isn't uint32
-			dst = append(dst, byte(y>>24), byte(y>>16), byte(y>>8), byte(y))
+			if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+			dst = push(dst, byte(y>>24), byte(y>>16), byte(y>>8), byte(y))
 		}
 	}
 	// Add padding bits if necessary
@@ -211,17 +214,17 @@ func AppendHuffmanString(dst []byte, s []byte) []byte {
 	case 0:
 		return dst
 	case 1:
-		return append(dst, byte(x))
+		return push(dst, byte(x))
 	case 2:
 		y := uint16(x)
-		return append(dst, byte(y>>8), byte(y))
+		return push(dst, byte(y>>8), byte(y))
 	case 3:
 		y := uint16(x >> 8)
-		return append(dst, byte(y>>8), byte(y), byte(x))
+		return push(dst, byte(y>>8), byte(y), byte(x))
 	}
 	//	case 4:
 	y := uint32(x)
-	return append(dst, byte(y>>24), byte(y>>16), byte(y>>8), byte(y))
+	return push(dst, byte(y>>24), byte(y>>16), byte(y>>8), byte(y))
 }
 
 // HuffmanEncodeLength returns the number of bytes required to encode

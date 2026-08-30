@@ -5,6 +5,7 @@
 package tls
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"crypto"
 	"crypto/ecdh"
 	"crypto/hmac"
@@ -182,9 +183,9 @@ func (ke *hybridKeyExchange) keyShares(rand io.Reader) (*keySharePrivateKeys, []
 	// For SecP256r1MLKEM768 and SecP384r1MLKEM1024, the ECDH share comes first.
 	// See draft-ietf-tls-ecdhe-mlkem-02, Section 4.1.
 	if ke.id == X25519MLKEM768 {
-		shareData = append(priv.mlkem.Encapsulator().Bytes(), ecdhShares[0].data...)
+		shareData = push(priv.mlkem.Encapsulator().Bytes(), ecdhShares[0].data...)
 	} else {
-		shareData = append(ecdhShares[0].data, priv.mlkem.Encapsulator().Bytes()...)
+		shareData = push(ecdhShares[0].data, priv.mlkem.Encapsulator().Bytes()...)
 	}
 	return priv, []keyShare{{ke.id, shareData}, ecdhShares[0]}, nil
 }
@@ -212,11 +213,12 @@ func (ke *hybridKeyExchange) serverSharedSecret(rand io.Reader, clientKeyShare [
 	mlkemSharedSecret, mlkemKeyShare := mlkemPeerKey.Encapsulate()
 	var sharedKey []byte
 	if ke.id == X25519MLKEM768 {
-		sharedKey = append(mlkemSharedSecret, ecdhSharedSecret...)
-		ks.data = append(mlkemKeyShare, ks.data...)
+		sharedKey = push(mlkemSharedSecret, ecdhSharedSecret...)
+		ks.data = push(mlkemKeyShare, ks.data...)
 	} else {
-		sharedKey = append(ecdhSharedSecret, mlkemSharedSecret...)
-		ks.data = append(ks.data, mlkemKeyShare...)
+		sharedKey = push(ecdhSharedSecret, mlkemSharedSecret...)
+		if len(ks.data) >= cap(ks.data) { ks.data = mxutil.GrowCap(ks.data) }
+		ks.data = push(ks.data, mlkemKeyShare...)
 	}
 	ks.group = ke.id
 	return sharedKey, ks, nil
@@ -244,9 +246,9 @@ func (ke *hybridKeyExchange) clientSharedSecret(priv *keySharePrivateKeys, serve
 	}
 	var sharedKey []byte
 	if ke.id == X25519MLKEM768 {
-		sharedKey = append(mlkemSharedSecret, ecdhSharedSecret...)
+		sharedKey = push(mlkemSharedSecret, ecdhSharedSecret...)
 	} else {
-		sharedKey = append(ecdhSharedSecret, mlkemSharedSecret...)
+		sharedKey = push(ecdhSharedSecret, mlkemSharedSecret...)
 	}
 	return sharedKey, nil
 }

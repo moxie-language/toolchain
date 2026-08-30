@@ -20,8 +20,8 @@ func worker(in chan moxie.Int32, out chan moxie.Int32) {
 }
 
 func main() {
-	in := make(chan moxie.Int32)
-	out := make(chan moxie.Int32)
+	in := chan moxie.Int32{}
+	out := chan moxie.Int32{}
 	spawn(worker, in, out)
 
 	const N = int32(200)

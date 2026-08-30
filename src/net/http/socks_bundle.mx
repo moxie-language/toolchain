@@ -11,6 +11,7 @@
 package http
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"context"
 	"errors"
 	"io"
@@ -52,17 +53,21 @@ func (d *socksDialer) connect(ctx context.Context, c net.Conn, address string) (
 	}
 
 	b := []byte{:0:6+len(host)} // the size here is just an estimate
-	b = append(b, socksVersion5)
+	if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+	b = push(b, socksVersion5)
 	if len(d.AuthMethods) == 0 || d.Authenticate == nil {
-		b = append(b, 1, byte(socksAuthMethodNotRequired))
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, 1, byte(socksAuthMethodNotRequired))
 	} else {
 		ams := d.AuthMethods
 		if len(ams) > 255 {
 			return nil, errors.New("too many authentication methods")
 		}
-		b = append(b, byte(len(ams)))
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, byte(len(ams)))
 		for _, am := range ams {
-			b = append(b, byte(am))
+			if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+			b = push(b, byte(am))
 		}
 	}
 	if _, ctxErr = c.Write(b); ctxErr != nil {
@@ -86,14 +91,19 @@ func (d *socksDialer) connect(ctx context.Context, c net.Conn, address string) (
 	}
 
 	b = b[:0]
-	b = append(b, socksVersion5, byte(d.cmd), 0)
+	if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+	b = push(b, socksVersion5, byte(d.cmd), 0)
 	if ip := net.ParseIP(host); ip != nil {
 		if ip4 := ip.To4(); ip4 != nil {
-			b = append(b, socksAddrTypeIPv4)
-			b = append(b, ip4...)
+			if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+			b = push(b, socksAddrTypeIPv4)
+			if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+			b = push(b, ip4...)
 		} else if ip6 := ip.To16(); ip6 != nil {
-			b = append(b, socksAddrTypeIPv6)
-			b = append(b, ip6...)
+			if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+			b = push(b, socksAddrTypeIPv6)
+			if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+			b = push(b, ip6...)
 		} else {
 			return nil, errors.New("unknown address type")
 		}
@@ -101,11 +111,15 @@ func (d *socksDialer) connect(ctx context.Context, c net.Conn, address string) (
 		if len(host) > 255 {
 			return nil, errors.New("FQDN too long")
 		}
-		b = append(b, socksAddrTypeFQDN)
-		b = append(b, byte(len(host)))
-		b = append(b, host...)
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, socksAddrTypeFQDN)
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, byte(len(host)))
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, host...)
 	}
-	b = append(b, byte(port>>8), byte(port))
+	if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+	b = push(b, byte(port>>8), byte(port))
 	if _, ctxErr = c.Write(b); ctxErr != nil {
 		return
 	}
@@ -127,10 +141,10 @@ func (d *socksDialer) connect(ctx context.Context, c net.Conn, address string) (
 	switch b[3] {
 	case socksAddrTypeIPv4:
 		l += net.IPv4len
-		a.IP = (make)(net.IP, net.IPv4len)
+		a.IP = net.IP{:net.IPv4len}
 	case socksAddrTypeIPv6:
 		l += net.IPv6len
-		a.IP = (make)(net.IP, net.IPv6len)
+		a.IP = net.IP{:net.IPv6len}
 	case socksAddrTypeFQDN:
 		if _, err := io.ReadFull(c, b[:1]); err != nil {
 			return nil, err
@@ -447,10 +461,14 @@ func (up *socksUsernamePassword) Authenticate(ctx context.Context, rw io.ReadWri
 			return errors.New("invalid username/password")
 		}
 		b := []byte{socksauthUsernamePasswordVersion}
-		b = append(b, byte(len(up.Username)))
-		b = append(b, up.Username...)
-		b = append(b, byte(len(up.Password)))
-		b = append(b, up.Password...)
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, byte(len(up.Username)))
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, up.Username...)
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, byte(len(up.Password)))
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = push(b, up.Password...)
 		// TODO(mikio): handle IO deadlines and cancelation if
 		// necessary
 		if _, err := rw.Write(b); err != nil {

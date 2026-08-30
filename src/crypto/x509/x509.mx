@@ -21,6 +21,7 @@
 package x509
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"crypto"
 	"crypto/ecdh"
@@ -1235,13 +1236,15 @@ func marshalSANs(dnsNames, emailAddresses [][]byte, ipAddresses []net.IP, uris [
 		if err := isIA5String(name); err != nil {
 			return nil, err
 		}
-		rawValues = append(rawValues, asn1.RawValue{Tag: nameTypeDNS, Class: 2, Bytes: []byte(name)})
+		if len(rawValues) >= cap(rawValues) { rawValues = mxutil.GrowCap(rawValues) }
+		rawValues = push(rawValues, asn1.RawValue{Tag: nameTypeDNS, Class: 2, Bytes: []byte(name)})
 	}
 	for _, email := range emailAddresses {
 		if err := isIA5String(email); err != nil {
 			return nil, err
 		}
-		rawValues = append(rawValues, asn1.RawValue{Tag: nameTypeEmail, Class: 2, Bytes: []byte(email)})
+		if len(rawValues) >= cap(rawValues) { rawValues = mxutil.GrowCap(rawValues) }
+		rawValues = push(rawValues, asn1.RawValue{Tag: nameTypeEmail, Class: 2, Bytes: []byte(email)})
 	}
 	for _, rawIP := range ipAddresses {
 		// If possible, we always want to encode IPv4 addresses in 4 bytes.
@@ -1249,14 +1252,16 @@ func marshalSANs(dnsNames, emailAddresses [][]byte, ipAddresses []net.IP, uris [
 		if ip == nil {
 			ip = rawIP
 		}
-		rawValues = append(rawValues, asn1.RawValue{Tag: nameTypeIP, Class: 2, Bytes: ip})
+		if len(rawValues) >= cap(rawValues) { rawValues = mxutil.GrowCap(rawValues) }
+		rawValues = push(rawValues, asn1.RawValue{Tag: nameTypeIP, Class: 2, Bytes: ip})
 	}
 	for _, uri := range uris {
 		uriStr := uri.String()
 		if err := isIA5String(uriStr); err != nil {
 			return nil, err
 		}
-		rawValues = append(rawValues, asn1.RawValue{Tag: nameTypeURI, Class: 2, Bytes: []byte(uriStr)})
+		if len(rawValues) >= cap(rawValues) { rawValues = mxutil.GrowCap(rawValues) }
+		rawValues = push(rawValues, asn1.RawValue{Tag: nameTypeURI, Class: 2, Bytes: []byte(uriStr)})
 	}
 	return asn1.Marshal(rawValues)
 }
@@ -1325,13 +1330,15 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 		ret[n].Id = _oidExtensionAuthorityInfoAccess()
 		var aiaValues []authorityInfoAccess
 		for _, name := range template.OCSPServer {
-			aiaValues = append(aiaValues, authorityInfoAccess{
+			if len(aiaValues) >= cap(aiaValues) { aiaValues = mxutil.GrowCap(aiaValues) }
+			aiaValues = push(aiaValues, authorityInfoAccess{
 				Method:   _oidAuthorityInfoAccessOcsp(),
 				Location: asn1.RawValue{Tag: 6, Class: 2, Bytes: []byte(name)},
 			})
 		}
 		for _, name := range template.IssuingCertificateURL {
-			aiaValues = append(aiaValues, authorityInfoAccess{
+			if len(aiaValues) >= cap(aiaValues) { aiaValues = mxutil.GrowCap(aiaValues) }
+			aiaValues = push(aiaValues, authorityInfoAccess{
 				Method:   _oidAuthorityInfoAccessIssuers(),
 				Location: asn1.RawValue{Tag: 6, Class: 2, Bytes: []byte(name)},
 			})
@@ -1377,8 +1384,10 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 		ipAndMask := func(ipNet *net.IPNet) []byte {
 			maskedIP := ipNet.IP.Mask(ipNet.Mask)
 			ipAndMask := []byte{:0:len(maskedIP)+len(ipNet.Mask)}
-			ipAndMask = append(ipAndMask, maskedIP...)
-			ipAndMask = append(ipAndMask, ipNet.Mask...)
+			if len(ipAndMask) >= cap(ipAndMask) { ipAndMask = mxutil.GrowCap(ipAndMask) }
+			ipAndMask = push(ipAndMask, maskedIP...)
+			if len(ipAndMask) >= cap(ipAndMask) { ipAndMask = mxutil.GrowCap(ipAndMask) }
+			ipAndMask = push(ipAndMask, ipNet.Mask...)
 			return ipAndMask
 		}
 
@@ -1477,7 +1486,8 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 					},
 				},
 			}
-			crlDp = append(crlDp, dp)
+			if len(crlDp) >= cap(crlDp) { crlDp = mxutil.GrowCap(crlDp) }
+			crlDp = push(crlDp, dp)
 		}
 
 		ret[n].Value, err = asn1.Marshal(crlDp)
@@ -1491,7 +1501,7 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 	// of elements in the make() at the top of the function and the list of
 	// template fields used in CreateCertificate documentation.
 
-	return append(ret[:n], template.ExtraExtensions...), nil
+	return push(ret[:n], template.ExtraExtensions...), nil
 }
 
 func marshalKeyUsage(ku KeyUsage) (pkix.Extension, error) {
@@ -1577,13 +1587,14 @@ func buildCSRExtensions(template *CertificateRequest) ([]pkix.Extension, error) 
 			return nil, err
 		}
 
-		ret = append(ret, pkix.Extension{
+		if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
+		ret = push(ret, pkix.Extension{
 			Id:    _oidExtensionSubjectAltName(),
 			Value: sanBytes,
 		})
 	}
 
-	return append(ret, template.ExtraExtensions...), nil
+	return push(ret, template.ExtraExtensions...), nil
 }
 
 func subjectBytes(cert *Certificate) ([]byte, error) {
@@ -1938,7 +1949,8 @@ func (c *Certificate) CreateCRL(rand io.Reader, priv any, revokedCerts []pkix.Re
 		if err != nil {
 			return nil, err
 		}
-		tbsCertList.Extensions = append(tbsCertList.Extensions, aki)
+		if len(tbsCertList.Extensions) >= cap(tbsCertList.Extensions) { tbsCertList.Extensions = mxutil.GrowCap(tbsCertList.Extensions) }
+		tbsCertList.Extensions = push(tbsCertList.Extensions, aki)
 	}
 
 	tbsCertListContents, err := asn1.Marshal(tbsCertList)
@@ -2054,7 +2066,8 @@ func parseRawAttributes(rawAttributes []asn1.RawValue) []pkix.AttributeTypeAndVa
 		// Ignore attributes that don't parse into pkix.AttributeTypeAndValueSET
 		// (i.e.: challengePassword or unstructuredName).
 		if err == nil && len(rest) == 0 {
-			attributes = append(attributes, attr)
+			if len(attributes) >= cap(attributes) { attributes = mxutil.GrowCap(attributes) }
+			attributes = push(attributes, attr)
 		}
 	}
 	return attributes
@@ -2093,7 +2106,8 @@ func parseCSRExtensions(rawAttributes []asn1.RawValue) ([]pkix.Extension, error)
 			}
 			requestedExts[oidStr] = true
 		}
-		ret = append(ret, extensions...)
+		if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
+		ret = push(ret, extensions...)
 	}
 
 	return ret, nil
@@ -2146,7 +2160,8 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 	for _, attr := range template.Attributes {
 		values := [][]pkix.AttributeTypeAndValue{:len(attr.Value)}
 		copy(values, attr.Value)
-		attributes = append(attributes, pkix.AttributeTypeAndValueSET{
+		if len(attributes) >= cap(attributes) { attributes = mxutil.GrowCap(attributes) }
+		attributes = push(attributes, pkix.AttributeTypeAndValueSET{
 			Type:  attr.Type,
 			Value: values,
 		})
@@ -2171,7 +2186,8 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 			}
 
 			newValue := []pkix.AttributeTypeAndValue{:0:len(atvSet.Value[0])+len(extensions)}
-			newValue = append(newValue, atvSet.Value[0]...)
+			if len(newValue) >= cap(newValue) { newValue = mxutil.GrowCap(newValue) }
+			newValue = push(newValue, atvSet.Value[0]...)
 
 			for _, e := range extensions {
 				if specifiedExtensions[e.Id.String()] {
@@ -2180,7 +2196,8 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 					continue
 				}
 
-				newValue = append(newValue, pkix.AttributeTypeAndValue{
+				if len(newValue) >= cap(newValue) { newValue = mxutil.GrowCap(newValue) }
+				newValue = push(newValue, pkix.AttributeTypeAndValue{
 					// There is no place for the critical
 					// flag in an AttributeTypeAndValue.
 					Type:  e.Id,
@@ -2220,7 +2237,8 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 			return nil, err
 		}
 
-		rawAttributes = append(rawAttributes, rawValue)
+		if len(rawAttributes) >= cap(rawAttributes) { rawAttributes = mxutil.GrowCap(rawAttributes) }
+		rawAttributes = push(rawAttributes, rawValue)
 	}
 
 	asn1Subject := template.RawSubject
@@ -2526,7 +2544,8 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 				if ext.Id.Equal(_oidExtensionReasonCode()) {
 					return nil, errors.New("x509: template contains entry with ReasonCode ExtraExtension; use ReasonCode field instead")
 				}
-				exts = append(exts, ext)
+				if len(exts) >= cap(exts) { exts = mxutil.GrowCap(exts) }
+				exts = push(exts, ext)
 			}
 
 			// Only add a reasonCode extension if the reason is non-zero, as per
@@ -2537,7 +2556,8 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 					return nil, err
 				}
 
-				exts = append(exts, pkix.Extension{
+				if len(exts) >= cap(exts) { exts = mxutil.GrowCap(exts) }
+				exts = push(exts, pkix.Extension{
 					Id:    _oidExtensionReasonCode(),
 					Value: reasonBytes,
 				})
@@ -2591,7 +2611,8 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 	}
 
 	if len(template.ExtraExtensions) > 0 {
-		tbsCertList.Extensions = append(tbsCertList.Extensions, template.ExtraExtensions...)
+		if len(tbsCertList.Extensions) >= cap(tbsCertList.Extensions) { tbsCertList.Extensions = mxutil.GrowCap(tbsCertList.Extensions) }
+		tbsCertList.Extensions = push(tbsCertList.Extensions, template.ExtraExtensions...)
 	}
 
 	tbsCertListContents, err := asn1.Marshal(tbsCertList)

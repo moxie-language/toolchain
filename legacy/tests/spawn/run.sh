@@ -4,7 +4,7 @@
 set -euo pipefail
 
 MOXIE="${MOXIE:-./moxie}"
-MOXIEROOT="${MOXIEROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+MOXIEROOT="${MOXIEROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 export MOXIEROOT
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 TMPDIR=$(mktemp -d)

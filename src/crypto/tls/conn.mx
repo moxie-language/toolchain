@@ -7,6 +7,7 @@
 package tls
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"context"
 	"crypto/cipher"
@@ -365,10 +366,12 @@ func (hc *halfConn) decrypt(record []byte) ([]byte, recordType, error) {
 			if hc.version == VersionTLS13 {
 				additionalData = record[:recordHeaderLen]
 			} else {
-				additionalData = append(hc.scratchBuf[:0], hc.seq[:]...)
-				additionalData = append(additionalData, record[:3]...)
+				additionalData = push(hc.scratchBuf[:0], hc.seq[:]...)
+				if len(additionalData) >= cap(additionalData) { additionalData = mxutil.GrowCap(additionalData) }
+				additionalData = push(additionalData, record[:3]...)
 				n := len(payload) - c.Overhead()
-				additionalData = append(additionalData, byte(n>>8), byte(n))
+				if len(additionalData) >= cap(additionalData) { additionalData = mxutil.GrowCap(additionalData) }
+				additionalData = push(additionalData, byte(n>>8), byte(n))
 			}
 
 			var err error
@@ -473,7 +476,7 @@ func sliceForAppend(in []byte, n int32) (head, tail []byte) {
 // appends it to record, which must already contain the record header.
 func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, error) {
 	if hc.cipher == nil {
-		return append(record, payload...), nil
+		return push(record, payload...), nil
 	}
 
 	var explicitNonce []byte
@@ -511,10 +514,12 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 		}
 
 		if hc.version == VersionTLS13 {
-			record = append(record, payload...)
+			if len(record) >= cap(record) { record = mxutil.GrowCap(record) }
+			record = push(record, payload...)
 
 			// Encrypt the actual ContentType and replace the plaintext one.
-			record = append(record, record[0])
+			if len(record) >= cap(record) { record = mxutil.GrowCap(record) }
+			record = push(record, record[0])
 			record[0] = byte(recordTypeApplicationData)
 
 			n := len(payload) + 1 + c.Overhead()
@@ -524,8 +529,9 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 			record = c.Seal(record[:recordHeaderLen],
 				nonce, record[recordHeaderLen:], record[:recordHeaderLen])
 		} else {
-			additionalData := append(hc.scratchBuf[:0], hc.seq[:]...)
-			additionalData = append(additionalData, record[:recordHeaderLen]...)
+			additionalData := push(hc.scratchBuf[:0], hc.seq[:]...)
+			if len(additionalData) >= cap(additionalData) { additionalData = mxutil.GrowCap(additionalData) }
+			additionalData = push(additionalData, record[:recordHeaderLen]...)
 			record = c.Seal(record, nonce, payload, additionalData)
 		}
 	case cbcMode:
@@ -941,7 +947,8 @@ func (c *Conn) maxPayloadSizeForWrite(typ recordType) int32 {
 
 func (c *Conn) write(data []byte) (int32, error) {
 	if c.buffering {
-		c.sendBuf = append(c.sendBuf, data...)
+		if len(c.sendBuf) >= cap(c.sendBuf) { c.sendBuf = mxutil.GrowCap(c.sendBuf) }
+		c.sendBuf = push(c.sendBuf, data...)
 		return len(data), nil
 	}
 
@@ -1148,7 +1155,7 @@ func (c *Conn) unmarshalHandshakeMessage(data []byte, transcript transcriptHash)
 	// The handshake message unmarshalers
 	// expect to be able to keep references to data,
 	// so pass in a fresh copy that won't be overwritten.
-	data = append([]byte(nil), data...)
+	data = push([]byte(nil), data...)
 
 	if !m.unmarshal(data) {
 		return nil, c.in.setErrorLocked(c.sendAlert(alertDecodeError))

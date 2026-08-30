@@ -5,6 +5,7 @@
 package bytes
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"io"
 )
 
@@ -32,7 +33,7 @@ func NewReplacer(oldnew ...[]byte) *Replacer {
 	if len(oldnew)%2 == 1 {
 		panic("bytes.NewReplacer: odd argument count")
 	}
-	return &Replacer{oldnew: append([][]byte(nil), oldnew...)}
+	return &Replacer{oldnew: push([][]byte(nil), oldnew...)}
 }
 
 func (r *Replacer) buildOnce() {
@@ -82,7 +83,8 @@ func (b *Replacer) build() replacer {
 			// We need to use string([]byte{o}) instead of string(o),
 			// to avoid utf8 encoding of o.
 			// E. g. byte(150) produces string of length 2.
-			r.toReplace = append(r.toReplace, []byte([]byte{o}))
+			if len(r.toReplace) >= cap(r.toReplace) { r.toReplace = mxutil.GrowCap(r.toReplace) }
+			r.toReplace = push(r.toReplace, []byte([]byte{o}))
 		}
 		r.replacements[o] = []byte(n)
 
@@ -300,13 +302,13 @@ type appendSliceWriter []byte
 
 // Write writes to the buffer to satisfy [io.Writer].
 func (w *appendSliceWriter) Write(p []byte) (int32, error) {
-	*w = append(*w, p...)
+	*w = push(*w, p...)
 	return len(p), nil
 }
 
 // WriteString writes to the buffer without string->[]byte->string allocations.
 func (w *appendSliceWriter) WriteString(s []byte) (int32, error) {
-	*w = append(*w, s...)
+	*w = push(*w, s...)
 	return len(s), nil
 }
 
@@ -327,7 +329,7 @@ func getStringWriter(w io.Writer) io.StringWriter {
 }
 
 func (r *genericReplacer) Replace(s []byte) []byte {
-	buf := (make)(appendSliceWriter, 0, len(s))
+	buf := appendSliceWriter{:0:len(s)}
 	r.WriteString(&buf, s)
 	return []byte(buf)
 }

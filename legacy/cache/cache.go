@@ -29,12 +29,6 @@ func Root() string {
 	return filepath.Join(goenv.Get("GOCACHE"), "mxinstall")
 }
 
-// BinPath returns the path for the installed binary.
-// triple is the LLVM target triple from compileopts.Config.Triple().
-func BinPath(triple, importPath, binaryName string) string {
-	return filepath.Join(Root(), triple, importPath, binaryName)
-}
-
 // MXHPath returns the path for the cached .mxh (target-independent).
 func MXHPath(importPath string) string {
 	return filepath.Join(Root(), "protocols", importPath+".mxh")

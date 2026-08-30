@@ -12,6 +12,7 @@ import (
 func silentErrh(err error) {}
 
 func collectParseError(err error) {
+	if len(cctx.parseErrors) >= cap(cctx.parseErrors) { cctx.parseErrors = mxutil.GrowCap(cctx.parseErrors) }
 	push(cctx.parseErrors, err.Error())
 }
 
@@ -29,7 +30,7 @@ type compileCtx struct {
 	constValMap          map[string]int64
 	embedVars            map[string]*embedInfo
 	linknameMap          map[string]string
-	wasmImportMap        map[string][2]string
+	wasmImportMap        map[string][]string
 	tcPkgSrc             []byte
 	compilePkgDir        string
 	compileTargetTriple  string
@@ -39,12 +40,15 @@ type compileCtx struct {
 	typeDescPkgPath      string
 	parseTypePkgScope    *Scope
 	genericFuncDecls     map[string]*syntax.FuncDecl
+	genericMethodDecls   map[string]*syntax.FuncDecl
 	irResults            []string
 	compileExportMap     map[string]string
 	compileArena         *runtime.Arena
 	parseArena           *runtime.Arena
+	genericArena         *runtime.Arena
 	universe             *UniverseState
 	irOutputFile         string
+	curPkgPath           string
 	lastMxhData          string
 }
 
@@ -157,10 +161,12 @@ func stripUnusedConsts(src []byte) (out []byte) {
 		}
 		// Copy line through.
 		for i < len(src) && src[i] != '\n' {
+			if len(out) >= cap(out) { out = mxutil.GrowCap(out) }
 			push(out, src[i])
 			i++
 		}
 		if i < len(src) {
+			if len(out) >= cap(out) { out = mxutil.GrowCap(out) }
 			push(out, '\n')
 			i++
 		}
@@ -199,6 +205,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 	cctx.constValMap = nil
 	cctx.tcPkgSrc = []byte{:len(src)}; copy(cctx.tcPkgSrc, src)
 	cctx.compileExportMap = scanExportPragmas(cctx.tcPkgSrc)
+	syntax.CompileExportMap = cctx.compileExportMap
 	file, _ := syntax.ParseBytesArena(token.NewFileBase(name|".mx"), src, collectParseError, nil, 0, arena)
 	if file == nil {
 		for ei := int32(0); ei < int32(len(cctx.parseErrors)) && ei < 5; ei++ {
@@ -246,7 +253,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 				scope.Insert(NewTCVar(pkg, n.Value, nil))
 			}
 		case *syntax.FuncDecl:
-			if dd.Recv == nil && dd.Name.Value != "init" {
+			if dd.Recv == nil && dd.Name != nil && dd.Name.Value != "init" {
 				scope.Insert(NewTCFunc(pkg, dd.Name.Value, nil))
 			}
 		case *syntax.TypeDecl:
@@ -359,6 +366,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 									tpv := NewTypeParam(NewTypeName(pkg, tp.Name.Value, nil), nil)
 									tScope.Insert(NewTypeName(pkg, tp.Name.Value, tpv))
 									if len(named.TParams) < len(td.TParamList) {
+										if len(named.TParams) >= cap(named.TParams) { named.TParams = mxutil.GrowCap(named.TParams) }
 										push(named.TParams, tpv)
 									}
 								}
@@ -509,6 +517,17 @@ func releasePerPkgState() {
 }
 
 func ScanGenericDecls(src []byte, name string) {
+	// The parse allocates slice backings in the current arena while AST
+	// nodes go to the arena passed to ParseBytesArena; both must outlive
+	// every package compile (generic decls are referenced by later
+	// packages). Run the scan in a persistent manual arena: with a manual
+	// arena active, FnArenaPush is a no-op so every allocation inside the
+	// parse lands here, and the arena is never released.
+	if cctx.genericArena == nil {
+		cctx.genericArena = runtime.ArenaNew(64 * 1024 * 1024)
+	}
+	runtime.SovereignSetArena(cctx.genericArena)
+	defer runtime.SovereignRestoreArena(cctx.genericArena)
 	rw := rewriteSliceMakeLiterals(src)
 	src = rewriteChanMakeLiterals(rw)
 	src = stripDuplicatePackageClauses2(src)
@@ -523,6 +542,10 @@ func ScanGenericDecls(src []byte, name string) {
 	for _, d := range file.DeclList {
 		if fd, ok := d.(*syntax.FuncDecl); ok {
 			if fd.Recv == nil && fd.Name != nil && fd.Name.Value != "init" && len(fd.TParamList) > 0 {
+				hasGeneric = true
+				break
+			}
+			if fd.Recv != nil && recvTypeHasIndex(fd.Recv.Type) {
 				hasGeneric = true
 				break
 			}
@@ -595,6 +618,15 @@ func ScanGenericDecls(src []byte, name string) {
 					cctx.genericPkgLocalDecls[name+"."+dd.Name.Value] = dd
 				}
 			}
+			if dd.Recv != nil && dd.Name != nil && recvTypeHasIndex(dd.Recv.Type) {
+				rn := genericRecvTypeName(dd.Recv.Type)
+				if rn != "" {
+					if cctx.genericMethodDecls == nil {
+						cctx.genericMethodDecls = map[string]*syntax.FuncDecl{}
+					}
+					cctx.genericMethodDecls[name+"."+rn+"."+dd.Name.Value] = dd
+				}
+			}
 			if dd.Recv == nil && dd.Name != nil {
 				if scope.Lookup(dd.Name.Value) == nil {
 					if ro := regScopeLookup(regPkg,dd.Name.Value); ro != nil {
@@ -658,6 +690,42 @@ func ScanGenericDecls(src []byte, name string) {
 	cctx.genericPkgScopes[name] = scope
 }
 
+// recvTypeHasIndex reports whether a receiver type expression contains an
+// IndexExpr (a generic receiver like Array[T]).
+func recvTypeHasIndex(t syntax.Expr) (ok bool) {
+	switch tt := t.(type) {
+	case *syntax.Operation:
+		if tt.Y == nil {
+			return recvTypeHasIndex(tt.X)
+		}
+	case *syntax.IndexExpr:
+		return true
+	case *syntax.ListExpr:
+		for _, e := range tt.ElemList {
+			if recvTypeHasIndex(e) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// genericRecvTypeName extracts the base type name from a receiver type
+// expression, unwrapping pointers and generic instantiations.
+func genericRecvTypeName(t syntax.Expr) (name string) {
+	switch tt := t.(type) {
+	case *syntax.Operation:
+		if tt.Y == nil {
+			return genericRecvTypeName(tt.X)
+		}
+	case *syntax.IndexExpr:
+		return genericRecvTypeName(tt.X)
+	case *syntax.Name:
+		return tt.Value
+	}
+	return ""
+}
+
 func regScopeLookup(regPkg *TCPackage, n string) (o Object) {
 	if regPkg == nil || regPkg.Scope == nil {
 		return nil
@@ -673,19 +741,25 @@ func TypeCheckOnly(src []byte, name string, mxhPath string) {
 	if arenaSize < 4*1024*1024 {
 		arenaSize = 4 * 1024 * 1024
 	}
-	outerArena := runtime.CurrentArena()
 	arena := runtime.ArenaNew(arenaSize)
-	runtime.SetCurrentArena(arena)
+	// Borrow semantics: push a new frame, never overwrite the caller's
+	// slot. fnStack[0] stays the root arena, so sovGroup bookkeeping lands
+	// in root-lifetime memory. The typecheck arena's contents - and any
+	// sovereign groups whose receivers live in it - die together at
+	// ArenaFree below (sovInvalidateArena sweep).
+	runtime.SovereignSetArena(arena)
 	pkg, file := typeCheckPkg(src, name, arena)
 	if pkg != nil && file != nil {
 		mxhData := generateMxh(pkg)
-		runtime.SetCurrentArena(outerArena)
+		runtime.SovereignRestoreArena(arena)
+		// mxh text must land in the caller's (persistent) arena so the
+		// registry survives ArenaFree.
 		if mxhPath != "" {
 			writeFile(mxhPath, []byte(mxhData), 0644)
 		}
 		loadMxhData([]byte(mxhData))
 	} else {
-		runtime.SetCurrentArena(outerArena)
+		runtime.SovereignRestoreArena(arena)
 	}
 	ScanGenericDecls(src, name)
 	runtime.ArenaFree(arena)
@@ -704,6 +778,7 @@ func releaseFileDeep(f *syntax.File) {
 
 func CompileToIR(src []byte, name string, triple string) (s string) {
 	cctx.compileTargetTriple = triple
+	cctx.curPkgPath = name
 	scanEmbedPragmas(src, cctx.compilePkgDir)
 	cctx.linknameMap = scanLinknameMap(src)
 	cctx.wasmImportMap = scanWasmImportMap(src, name)
@@ -711,13 +786,17 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	// Arena sized from source. Virtual address space is free - pages
 	// commit on touch. 1000x covers generated-table-heavy packages
 	// like syscall and unicode.
-	compileArenaSize := uintptr(len(src)) * 1000
+	compileArenaSize := uintptr(len(src)) * 4000
 	if compileArenaSize < 64*1024*1024 {
 		compileArenaSize = 64 * 1024 * 1024
 	}
-	outerArena := runtime.CurrentArena()
+	// Scan generic decls in the caller's arena: the resulting AST nodes
+	// and generic scopes are referenced by later package compiles and
+	// must outlive this package's compile arena.
+	ScanGenericDecls(src, name)
+
 	arena := runtime.ArenaNew(compileArenaSize)
-	runtime.SetCurrentArena(arena)
+	runtime.SovereignSetArena(arena)
 
 	pkg, file := typeCheckPkg(src, name, arena)
 
@@ -726,48 +805,74 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	// serialized text on the root arena. No cross-arena graph copy.
 	if pkg != nil && file != nil {
 		mxhData := generateMxh(pkg)
-		runtime.SetCurrentArena(outerArena)
+		runtime.SovereignRestoreArena(arena)
 		loadMxhData([]byte(mxhData))
 		// Copy mxh text to root arena so it survives ArenaFree.
 		mxhCopy := []byte{:len(mxhData)}
 		copy(mxhCopy, mxhData)
 		cctx.lastMxhData = string(mxhCopy)
-		runtime.SetCurrentArena(arena)
+		runtime.SovereignSetArena(arena)
 	}
 
-	runtime.SetCurrentArena(outerArena)
-	ScanGenericDecls(src, name)
+	runtime.SovereignRestoreArena(arena)
 
 	if file == nil {
 		var errSegs []string
+		if len(errSegs) >= cap(errSegs) { errSegs = mxutil.GrowCap(errSegs) }
 		push(errSegs, "; parse error parseErrs=")
+		if len(errSegs) >= cap(errSegs) { errSegs = mxutil.GrowCap(errSegs) }
 		push(errSegs, simpleItoa(len(cctx.parseErrors)))
+		if len(errSegs) >= cap(errSegs) { errSegs = mxutil.GrowCap(errSegs) }
 		push(errSegs, "\n")
 		for _, pe := range cctx.parseErrors {
+			if len(errSegs) >= cap(errSegs) { errSegs = mxutil.GrowCap(errSegs) }
 			push(errSegs, "; ")
+			if len(errSegs) >= cap(errSegs) { errSegs = mxutil.GrowCap(errSegs) }
 			push(errSegs, pe)
+			if len(errSegs) >= cap(errSegs) { errSegs = mxutil.GrowCap(errSegs) }
 			push(errSegs, "\n")
 		}
+		res := joinStrs(errSegs)
+		resCopy := []byte{:len(res)}
+		copy(resCopy, res)
 		runtime.ArenaFree(arena)
-		return joinStrs(errSegs)
+		cctx.compileArena = nil
+		return string(resCopy)
 	}
 
 	// Re-enter compilation arena for SSA + IR emit.
-	runtime.SetCurrentArena(arena)
+	runtime.SovereignSetArena(arena)
 
 	mxutil.WriteStr(2, "    SSA build\n")
 	prog := NewSSAProgram()
 	ssaPkg := prog.CreatePackage(pkg, []*syntax.File{file}, nil)
+	if len(cctx.compileErrors) > 0 {
+		// Restriction violations recorded during SSA build fail the package.
+		var errSegs []string
+		for _, ce := range cctx.compileErrors {
+			if len(errSegs) >= cap(errSegs) { errSegs = mxutil.GrowCap(errSegs) }
+			push(errSegs, "; " | ce | "\n")
+		}
+		cctx.compileErrors = cctx.compileErrors[:0]
+		res := joinStrs(errSegs)
+		runtime.SovereignRestoreArena(arena)
+		resCopy := []byte{:len(res)}
+		copy(resCopy, res)
+		runtime.ArenaFree(arena)
+		cctx.compileArena = nil
+		return string(resCopy)
+	}
 	emitter := newIREmitter(ssaPkg, triple, int32(len(cctx.tcPkgSrc)))
 	mxutil.WriteStr(2, "    IR emit\n")
-
 	if cctx.irOutputFile != "" {
 		// Create file on outer arena (os.File must outlive inner arena).
-		runtime.SetCurrentArena(outerArena)
+		runtime.SovereignRestoreArena(arena)
 		f, ferr := os.Create(cctx.irOutputFile)
-		runtime.SetCurrentArena(arena)
+		runtime.SovereignSetArena(arena)
 		if ferr == nil {
 			emitter.outFile = f
+		} else {
+			mxutil.WriteStr(2, "IR FILE CREATE FAILED: " | ferr.Error() | "\n")
 		}
 	}
 	ir := emitter.emit()
@@ -778,7 +883,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 
 
 	// Copy IR to outer arena before inner arena dies.
-	runtime.SetCurrentArena(outerArena)
+	runtime.SovereignRestoreArena(arena)
 	var result string
 	if len(ir) > 0 {
 		heapIR := []byte{:len(ir)}
@@ -1313,11 +1418,13 @@ func tcResolveNameInline(e syntax.Expr, scope *Scope) (t Type) {
 			} else {
 				fname = TypeBaseName(typ)
 			}
+			if len(fields) >= cap(fields) { fields = mxutil.GrowCap(fields) }
 			push(fields, NewTCField(nil, fname, typ, field.Name == nil))
 			tag := ""
 			if i < len(ex.TagList) && ex.TagList[i] != nil {
 				tag = ex.TagList[i].Value
 			}
+			if len(tags) >= cap(tags) { tags = mxutil.GrowCap(tags) }
 			push(tags, tag)
 		}
 		return NewTCStruct(fields, tags)
@@ -1355,6 +1462,7 @@ func tcResolveInterfaceInline(e *syntax.InterfaceType, scope *Scope) (t *TCInter
 		if f.Name == nil {
 			typ := tcResolveNameInline(f.Type, scope)
 			if typ != nil {
+				if len(embeds) >= cap(embeds) { embeds = mxutil.GrowCap(embeds) }
 				push(embeds, typ)
 			}
 			continue
@@ -1365,6 +1473,7 @@ func tcResolveInterfaceInline(e *syntax.InterfaceType, scope *Scope) (t *TCInter
 		}
 		sig := tcResolveFuncInline(ft, scope)
 		if sig != nil {
+			if len(methods) >= cap(methods) { methods = mxutil.GrowCap(methods) }
 			push(methods, NewTCIfaceMethod(f.Name.Value, sig))
 		}
 	}
@@ -1418,6 +1527,7 @@ func tcResolveFieldList(fields []*syntax.Field, scope *Scope) (t *Tuple) {
 		if f.Name != nil {
 			pname = f.Name.Value
 		}
+		if len(vars) >= cap(vars) { vars = mxutil.GrowCap(vars) }
 		push(vars, NewTCVar(nil, pname, typ))
 	}
 	return NewTuple(vars...)
@@ -1437,6 +1547,7 @@ func tcResolveFuncInline(ft *syntax.FuncType, scope *Scope) (s *Signature) {
 		if p.Name != nil {
 			pname = p.Name.Value
 		}
+		if len(params) >= cap(params) { params = mxutil.GrowCap(params) }
 		push(params, NewTCVar(nil, pname, typ))
 	}
 	var results []*TCVar
@@ -1459,6 +1570,7 @@ func tcResolveFuncInline(ft *syntax.FuncType, scope *Scope) (s *Signature) {
 		if r.Name != nil {
 			rname = r.Name.Value
 		}
+		if len(results) >= cap(results) { results = mxutil.GrowCap(results) }
 		push(results, NewTCVar(nil, rname, typ))
 	}
 	variadic := false

@@ -10,6 +10,7 @@
 package norm // import "golang.org/x/text/unicode/norm"
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"unicode/utf8"
 
 	"golang.org/x/text/transform"
@@ -28,7 +29,7 @@ import (
 // A position n in x is called a boundary if conversion to the form can
 // proceed independently on both sides:
 //
-//	f(x) == append(f(x[0:n]), f(x[n:])...)
+//	f(x) == push(f(x[0:n]), f(x[n:])...)
 //
 // References: https://unicode.org/reports/tr15/ and
 // https://unicode.org/notes/tn5/.
@@ -157,11 +158,13 @@ func patchTail(rb *reorderBuffer) bool {
 		// Potentially allocating memory. However, this only
 		// happens with ill-formed UTF-8.
 		x := []byte{:0}
-		x = append(x, rb.out[len(rb.out)-extra:]...)
+		if len(x) >= cap(x) { x = mxutil.GrowCap(x) }
+		x = push(x, rb.out[len(rb.out)-extra:]...)
 		rb.out = rb.out[:end]
 		decomposeToLastBoundary(rb)
 		rb.doFlush()
-		rb.out = append(rb.out, x...)
+		if len(rb.out) >= cap(rb.out) { rb.out = mxutil.GrowCap(rb.out) }
+		rb.out = push(rb.out, x...)
 		return false
 	}
 	buf := rb.out[p:]
@@ -188,7 +191,7 @@ func appendQuick(rb *reorderBuffer, i int32) int32 {
 	return end
 }
 
-// Append returns f(append(out, b...)).
+// Append returns f(push(out, b...)).
 // The buffer out must be nil, empty, or equal to f(out).
 func (f Form) Append(out []byte, src ...byte) []byte {
 	return f.doAppend(out, inputBytes(src), len(src))
@@ -256,7 +259,7 @@ func doAppendInner(rb *reorderBuffer, p int32) []byte {
 	return rb.out
 }
 
-// AppendString returns f(append(out, []byte(s))).
+// AppendString returns f(push(out, []byte(s))).
 // The buffer out must be nil, empty, or equal to f(out).
 func (f Form) AppendString(out []byte, src string) []byte {
 	return f.doAppend(out, inputString(src), len(src))

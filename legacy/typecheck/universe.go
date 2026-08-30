@@ -71,14 +71,6 @@ func init() {
 	defTypeName("float64", Typ[Float64])
 	defTypeName("string", Typ[String])
 
-	// int = int32, uint = uint32 (Moxie always 32-bit)
-	intType := NewNamed(NewTypeName(nil, "int", nil), Typ[Int32])
-	uintType := NewNamed(NewTypeName(nil, "uint", nil), Typ[Uint32])
-	defObj(intType.obj)
-	defObj(uintType.obj)
-	intType.obj.typ = intType
-	uintType.obj.typ = uintType
-
 	// byte = uint8
 	byteType := NewNamed(NewTypeName(nil, "byte", nil), Typ[Uint8])
 	defObj(byteType.obj)
@@ -105,13 +97,6 @@ func init() {
 	universeError = NewTypeName(nil, "error", errIface)
 	defObj(universeError)
 
-	// complex64/128 are not valid in Moxie programs but appear in stdlib source.
-	// Register them as invalid basic types so the checker doesn't report "undefined".
-	complex64Type := NewNamed(NewTypeName(nil, "complex64", nil), Typ[Invalid])
-	defObj(complex64Type.obj)
-	complex128Type := NewNamed(NewTypeName(nil, "complex128", nil), Typ[Invalid])
-	defObj(complex128Type.obj)
-
 	// any is an alias for interface{} (Go 1.18+)
 	anyIface := NewInterface(nil, nil)
 	anyIface.Complete()
@@ -132,6 +117,9 @@ func init() {
 
 	// predeclared builtins
 	for id, name := range builtinNames {
+		if BuiltinID(id) == BuiltinAppend {
+			continue // append removed: use push + explicit allocation
+		}
 		Universe.Insert(newBuiltin(name, BuiltinID(id)))
 	}
 
@@ -149,17 +137,14 @@ var builtinNames = [...]string{
 	BuiltinCap:     "cap",
 	BuiltinClear:   "clear",
 	BuiltinClose:   "close",
-	BuiltinComplex: "complex",
 	BuiltinCopy:    "copy",
 	BuiltinDelete:  "delete",
-	BuiltinImag:    "imag",
 	BuiltinLen:     "len",
-	BuiltinMake:    "make",
-	BuiltinNew:     "new",
+	BuiltinMake:    "__slicealloc",
+	BuiltinNew:     "__ptralloc",
 	BuiltinPanic:   "panic",
 	BuiltinPrint:   "print",
 	BuiltinPrintln: "println",
-	BuiltinReal:    "real",
 	BuiltinRecover: "recover",
 	BuiltinSpawn:   "spawn",
 }

@@ -5,6 +5,7 @@
 package hpack
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"io"
 )
 
@@ -159,7 +160,8 @@ func appendIndexed(dst []byte, i uint64) []byte {
 // f.Sensitive is false and indexing is true, "Incremental Indexing"
 // representation is used.
 func appendNewName(dst []byte, f HeaderField, indexing bool) []byte {
-	dst = append(dst, encodeTypeByte(indexing, f.Sensitive))
+	if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+	dst = push(dst, encodeTypeByte(indexing, f.Sensitive))
 	dst = appendHpackString(dst, f.Name)
 	return appendHpackString(dst, f.Value)
 }
@@ -201,14 +203,16 @@ func appendTableSize(dst []byte, v uint32) []byte {
 func appendVarInt(dst []byte, n byte, i uint64) []byte {
 	k := uint64((1 << n) - 1)
 	if i < k {
-		return append(dst, byte(i))
+		return push(dst, byte(i))
 	}
-	dst = append(dst, byte(k))
+	if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+	dst = push(dst, byte(k))
 	i -= k
 	for ; i >= 128; i >>= 7 {
-		dst = append(dst, byte(0x80|(i&0x7f)))
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, byte(0x80|(i&0x7f)))
 	}
-	return append(dst, byte(i))
+	return push(dst, byte(i))
 }
 
 // appendHpackString appends s, as encoded in "String Literal"
@@ -225,7 +229,8 @@ func appendHpackString(dst []byte, s []byte) []byte {
 		dst[first] |= 0x80
 	} else {
 		dst = appendVarInt(dst, 7, uint64(len(s)))
-		dst = append(dst, s...)
+		if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
+		dst = push(dst, s...)
 	}
 	return dst
 }

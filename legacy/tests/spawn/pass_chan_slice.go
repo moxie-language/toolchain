@@ -36,7 +36,7 @@ func (b *Blob) DecodeFrom(r io.Reader) (decErr error) {
 		return decErr
 	}
 	b.Size = int32(sz[0]) | int32(sz[1])<<8 | int32(sz[2])<<16 | int32(sz[3])<<24
-	b.Data = make([]byte, b.Size)
+	b.Data = []byte{:b.Size}
 	_, decErr = io.ReadFull(r, b.Data)
 	return decErr
 }
@@ -59,11 +59,11 @@ func echo(in chan Blob, out chan Blob) {
 
 func main() {
 	const N = int32(100000) // 100 KB - exceeds kernel pipe buffer to exercise partial syscalls
-	in := make(chan Blob)
-	out := make(chan Blob)
+	in := chan Blob{}
+	out := chan Blob{}
 	spawn(echo, in, out)
 
-	data := make([]byte, N)
+	data := []byte{:N}
 	for i := int32(0); i < N; i++ {
 		data[i] = byte(i)
 	}

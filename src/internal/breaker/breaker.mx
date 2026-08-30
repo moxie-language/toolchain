@@ -1,0 +1,58 @@
+package breaker
+
+import (
+	"git.smesh.lol/moxie/pkg/mxutil"
+	"time"
+)
+
+func Closed(done chan struct{}) (closed bool) {
+	if done == nil {
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
+type Deadline struct {
+	at   time.Time
+	done chan struct{}
+}
+
+func After(d time.Duration) (done chan struct{}, dl *Deadline) {
+	done = chan struct{}{}
+	dl = &Deadline{time.Now().Add(d), done}
+	return done, dl
+}
+
+func (dl *Deadline) Fire(now time.Time) (fired bool) {
+	if dl == nil || dl.done == nil || Closed(dl.done) {
+		return false
+	}
+	if now.Before(dl.at) {
+		return false
+	}
+	close(dl.done)
+	return true
+}
+
+func (g *Group) Add(done chan struct{}) {
+	if len(g.breakers) >= cap(g.breakers) { g.breakers = mxutil.GrowCap(g.breakers) }
+	push(g.breakers, done)
+}
+
+func (g *Group) Close() {
+	for _, b := range g.breakers {
+		if b != nil && !Closed(b) {
+			close(b)
+		}
+	}
+	g.breakers = g.breakers[:0]
+}
+
+type Group struct {
+	breakers []chan struct{}
+}

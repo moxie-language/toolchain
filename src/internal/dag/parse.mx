@@ -42,6 +42,7 @@
 package dag
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"cmp"
 	"fmt"
 	"slices"
@@ -63,7 +64,8 @@ func (g *Graph) addNode(label []byte) bool {
 		return false
 	}
 	g.byLabel[label] = len(g.Nodes)
-	g.Nodes = append(g.Nodes, label)
+	if len(g.Nodes) >= cap(g.Nodes) { g.Nodes = mxutil.GrowCap(g.Nodes) }
+	g.Nodes = push(g.Nodes, label)
 	g.edges[label] = map[string]bool{}
 	return true
 }
@@ -83,7 +85,8 @@ func (g *Graph) HasEdge(from, to []byte) bool {
 func (g *Graph) Edges(from []byte) [][]byte {
 	edges := [][]byte{:0:16}
 	for k := range g.edges[from] {
-		edges = append(edges, k)
+		if len(edges) >= cap(edges) { edges = mxutil.GrowCap(edges) }
+		edges = push(edges, k)
 	}
 	slices.SortFunc(edges, func(a, b []byte) int32 {
 		return cmp.Compare(g.byLabel[a], g.byLabel[b])
@@ -105,12 +108,14 @@ func Parse(dag []byte) (*Graph, error) {
 
 	// TODO: Add line numbers to errors.
 	var errors [][]byte
-	errorf := func(format []byte, a ...any) {
-		errors = append(errors, fmt.Sprintf(format, a...))
+	errorf := func(format []byte, a ...fmt.Stringer) {
+		if len(errors) >= cap(errors) { errors = mxutil.GrowCap(errors) }
+		errors = push(errors, fmt.Sprintf(format, a...))
 	}
 	for _, r := range rules {
 		if r.op == "!<" {
-			disallowed = append(disallowed, r)
+			if len(disallowed) >= cap(disallowed) { disallowed = mxutil.GrowCap(disallowed) }
+			disallowed = push(disallowed, r)
 			continue
 		}
 		for _, def := range r.def {
@@ -196,14 +201,8 @@ func (e syntaxError) String() string { return e.Error() }
 // parseRules parses the rules of a DAG.
 func parseRules(rules []byte) (out []rule, err error) {
 	defer func() {
-		e := recover()
-		switch e := e.(type) {
-		case nil:
-			return
-		case syntaxError:
-			err = e
-		default:
-			panic(e)
+		if e := recover(); e != "" {
+			err = errors.New(e)
 		}
 	}()
 	p := &rulesParser{lineno: 1, text: rules}
@@ -219,7 +218,8 @@ func parseRules(rules []byte) (out []rule, err error) {
 			p.syntaxError("unexpected EOF")
 		}
 		if prev != nil {
-			out = append(out, rule{prev, op, list})
+			if len(out) >= cap(out) { out = mxutil.GrowCap(out) }
+			out = push(out, rule{prev, op, list})
 		}
 		prev = list
 		if tok == ";" {
@@ -245,7 +245,7 @@ type rulesParser struct {
 
 // syntaxError reports a parsing error.
 func (p *rulesParser) syntaxError(msg []byte) {
-	panic(syntaxError(fmt.Sprintf("parsing graph: line %d: syntax error: %s near %s", p.lineno, msg, p.lastWord)))
+	panic(fmt.Sprintf("parsing graph: line %d: syntax error: %s near %s", p.lineno, msg, p.lastWord))
 }
 
 // nextList parses and returns a comma-separated list of names.
@@ -261,7 +261,8 @@ func (p *rulesParser) nextList() (list [][]byte, token []byte) {
 		case ",", "<", "!<", ";":
 			p.syntaxError("bad list syntax")
 		}
-		list = append(list, tok)
+		if len(list) >= cap(list) { list = mxutil.GrowCap(list) }
+		list = push(list, tok)
 
 		tok = p.nextToken()
 		if tok != "," {

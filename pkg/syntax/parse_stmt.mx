@@ -1,6 +1,7 @@
 package syntax
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"unsafe"
 	"git.smesh.lol/moxie/pkg/token"
 )
@@ -362,6 +363,7 @@ func (p *Parser) switchStmt() (s *SwitchStmt) {
 		p.advance(token.Case, token.Default, token.Rbrace)
 	}
 	for p.Tok != token.EOF && p.Tok != token.Rbrace {
+		if len(s.Body) >= cap(s.Body) { s.Body = mxutil.GrowCap(s.Body) }
 		push(s.Body, p.caseClause())
 	}
 	s.Rbrace = p.pos()
@@ -384,6 +386,7 @@ func (p *Parser) selectStmt() (s *SelectStmt) {
 		p.advance(token.Case, token.Default, token.Rbrace)
 	}
 	for p.Tok != token.EOF && p.Tok != token.Rbrace {
+		if len(s.Body) >= cap(s.Body) { s.Body = mxutil.GrowCap(s.Body) }
 		push(s.Body, p.commClause())
 	}
 	s.Rbrace = p.pos()
@@ -567,6 +570,22 @@ func (p *Parser) stmtOrNil() (st Stmt) {
 	return nil
 }
 
+// pushStmt grows the stmt accumulator explicitly (no auto-grow).
+func pushStmt(l []Stmt, s Stmt) (r0 []Stmt) {
+	if len(l) >= cap(l) {
+		nc := cap(l) * 2
+		if nc < 16 {
+			nc = 16
+		}
+		nb := []Stmt{:len(l):nc}
+		copy(nb, l)
+		l = nb
+	}
+	if len(l) >= cap(l) { l = mxutil.GrowCap(l) }
+	push(l, s)
+	return l
+}
+
 // StatementList = { Statement ";" } .
 func (p *Parser) stmtList() (l []Stmt) {
 	if trace {
@@ -579,7 +598,7 @@ func (p *Parser) stmtList() (l []Stmt) {
 		if s == nil {
 			break
 		}
-		push(l, s)
+		l = pushStmt(l, s)
 		// ";" is optional before "}"
 		if !p.got(token.Semi) && p.Tok != token.Rbrace {
 			p.syntaxError("at end of statement")

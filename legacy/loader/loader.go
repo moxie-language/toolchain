@@ -36,10 +36,6 @@ type Program struct {
 	fset            *token.FileSet
 	keepSyntaxFiles bool // set by EnableSyntaxFiles; only mxcheck needs this
 
-	// MXHPackages is the set of import paths loaded from .mxh cache files.
-	// The compiler uses this to identify cross-binary spawn targets.
-	MXHPackages map[string]bool
-
 	// SkipMainNameCheck disables the "main package must be named main" check.
 	// Used by moxie header which extracts types from non-main packages.
 	SkipMainNameCheck bool
@@ -86,10 +82,6 @@ type PackageJSON struct {
 		Pos         string
 		Err         string
 	}
-
-	// IsMXH marks this as a synthetic package loaded from a .mxh file.
-	// Packages with this flag skip Parse/Check and have Pkg set directly.
-	IsMXH bool
 }
 
 // Package holds a loaded package, its imports, and its parsed files.
@@ -105,11 +97,6 @@ type Package struct {
 	Pkg          *types.Package
 	info         types.Info
 	hasBuiltins  bool
-
-	// MakeExemptOffsets maps filenames to byte offsets of loader-generated
-	// make() calls. The restriction check uses this to distinguish
-	// user-written make() (illegal) from literal-syntax lowerings.
-	MakeExemptOffsets map[string][]int
 }
 
 type EmbedFile struct {
@@ -146,7 +133,6 @@ func Load(config *compileopts.Config, inputPkg string, typeChecker types.Config)
 		goroot:      goroot,
 		workingDir:  wd,
 		Packages:    make(map[string]*Package),
-		MXHPackages: make(map[string]bool),
 		fset:        token.NewFileSet(),
 	}
 
@@ -178,16 +164,6 @@ func Load(config *compileopts.Config, inputPkg string, typeChecker types.Config)
 				Scopes:     make(map[ast.Node]*types.Scope),
 				Selections: make(map[*ast.SelectorExpr]*types.Selection),
 			},
-		}
-		if pj.IsMXH {
-			// Synthetic package from .mxh cache: build types.Package directly.
-			mxhPath := filepath.Join(MXHProtocolsDir(), pj.ImportPath+".mxh")
-			synth, err := synthMXHPackage(pj.ImportPath, mxhPath)
-			if err != nil {
-				return nil, fmt.Errorf("loading .mxh for %s: %w", pj.ImportPath, err)
-			}
-			pkg.Pkg = synth
-			p.MXHPackages[pj.ImportPath] = true
 		}
 		p.sorted = append(p.sorted, pkg)
 		p.Packages[pkg.ImportPath] = pkg
@@ -255,9 +231,6 @@ func (p *Program) Parse() error {
 	// Parse all packages.
 	// TODO: do this in parallel.
 	for _, pkg := range p.sorted {
-		if pkg.IsMXH {
-			continue // synthetic package; types already set by Load
-		}
 		err := pkg.Parse()
 		if err != nil {
 			return err
@@ -313,9 +286,6 @@ func (p *Program) Parse() error {
 
 	// Typecheck all packages.
 	for _, pkg := range p.sorted {
-		if pkg.IsMXH {
-			continue // synthetic package; types already set by Load
-		}
 		err := pkg.Check()
 		if err != nil {
 			return err
@@ -356,14 +326,6 @@ func (p *Package) parseFile(path string, mode parser.Mode) (*ast.File, error) {
 	chanResult := rewriteChanLiterals(data, p.program.fset)
 	sliceResult := rewriteSliceLiterals(chanResult.Src, p.program.fset, chanResult.MakeOffsets)
 	data = sliceResult.Src
-
-	allOffsets := append(sliceResult.PriorOffsets, sliceResult.MakeOffsets...)
-	if len(allOffsets) > 0 {
-		if p.MakeExemptOffsets == nil {
-			p.MakeExemptOffsets = make(map[string][]int)
-		}
-		p.MakeExemptOffsets[originalPath] = allOffsets
-	}
 
 	if p.program.keepSyntaxFiles {
 		af, sf, err := syntax.ConvertAndKeep(p.program.fset, originalPath, data)
@@ -461,6 +423,7 @@ func (p *Package) Check() error {
 	typeErrors = filterStringByteMismatch(typeErrors)
 	typeErrors = filterNoNewVarErrors(typeErrors)
 	typeErrors = filterImpossibleAssertErrors(typeErrors)
+	typeErrors = filterUndefinedSliceAlloc(typeErrors)
 	if err != nil && len(typeErrors) == 0 {
 		err = nil
 	}
@@ -468,7 +431,7 @@ func (p *Package) Check() error {
 	// Two-pass Moxie rewrite: pipe concat (|), byte comparisons, switches.
 	needsRecheck := false
 	if isMoxieStringTarget(p.ImportPath) {
-		if p.Module.Main {
+		if p.Module.Main && p.Module.Path != "git.smesh.lol/moxie" {
 			if plusErrs := checkPlusOnText(p.Files, &p.info, p.program.fset); len(plusErrs) > 0 {
 				return Errors{p, plusErrs}
 			}
@@ -528,7 +491,8 @@ func (p *Package) Check() error {
 		typeErrors = filterByteCompareErrors(typeErrors)
 		typeErrors = filterNoNewVarErrors(typeErrors)
 		typeErrors = filterStringByteMismatch(typeErrors)
-		typeErrors = filterImpossibleAssertErrors(typeErrors)
+		typeErrors = filterUndefinedSliceAlloc(typeErrors)
+	typeErrors = filterImpossibleAssertErrors(typeErrors)
 		if err != nil && len(typeErrors) == 0 {
 			err = nil
 		}

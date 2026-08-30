@@ -88,6 +88,12 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 	if len(pb.varInits) > 0 {
 		pb.buildVarInits()
 	}
+	// Restriction checks run before the compileErrors gate in ir_typecheck.
+	for _, member := range p.Members {
+		if f, ok := member.(*SSAFunction); ok {
+			checkGlobalMutation(f)
+		}
+	}
 	return p
 }
 
@@ -147,6 +153,7 @@ func (pb *ssaPkgBuilder) buildImportSegScopes() {
 			}
 			sc.Insert(NewPkgName(nil, localName, target))
 		}
+		if len(pb.segScopes) >= cap(pb.segScopes) { pb.segScopes = mxutil.GrowCap(pb.segScopes) }
 		push(pb.segScopes, segScope{outStart: seg.OutStart, scope: sc})
 	}
 }
@@ -284,6 +291,7 @@ func (pb *ssaPkgBuilder) registerImport(d *syntax.ImportDecl) {
 		}
 	}
 	if !found {
+		if len(tcp.Imports) >= cap(tcp.Imports) { tcp.Imports = mxutil.GrowCap(tcp.Imports) }
 		push(tcp.Imports, target)
 	}
 	pn := NewPkgName(nil, localName, target)
@@ -304,10 +312,6 @@ func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t Type) {
 	}
 	switch ev := e.(type) {
 	case *syntax.Name:
-		if ev.Value == "int" || ev.Value == "uint" {
-			mxutil.WriteStr(2, "compile error: " | ev.Value | " is not a valid type (use int32, int64, uint32, uint64 etc.)\n")
-			return nil
-		}
 		if _, obj := Universe.LookupParent(ev.Value); obj != nil {
 			if tn, ok := obj.(*TypeName); ok {
 				return tn.Typ
@@ -386,6 +390,7 @@ func pkgResolveSigAST(pkg *SSAPackage, ft *syntax.FuncType) (s *Signature) {
 		if p.Name != nil {
 			pname = p.Name.Value
 		}
+		if len(params) >= cap(params) { params = mxutil.GrowCap(params) }
 		push(params, NewTCVar(nil, pname, typ))
 	}
 	var results []*TCVar
@@ -395,6 +400,7 @@ func pkgResolveSigAST(pkg *SSAPackage, ft *syntax.FuncType) (s *Signature) {
 		if r.Name != nil {
 			rname = r.Name.Value
 		}
+		if len(results) >= cap(results) { results = mxutil.GrowCap(results) }
 		push(results, NewTCVar(nil, rname, typ))
 	}
 	variadic := false
@@ -544,6 +550,11 @@ func isNoContextExtern(pkg, name string) (ok bool) {
 }
 
 func (pb *ssaPkgBuilder) registerMethod(d *syntax.FuncDecl) {
+	if !ssaRecvIsPtr(d.Recv) && isUserPackagePath(pb.pkg.Pkg.Path) {
+		if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
+		push(cctx.compileErrors, "value receiver is not allowed: use pointer receiver (*" | ssaRecvTypeName(d.Recv) | ")")
+		return
+	}
 	recvTypeName := ssaRecvTypeName(d.Recv)
 	if recvTypeName == "" {
 		return
@@ -657,6 +668,7 @@ func (pb *ssaPkgBuilder) registerVar(d *syntax.VarDecl) {
 		pb.pkg.SetMember(name.Value, g)
 	}
 	if d.Values != nil {
+		if len(pb.varInits) >= cap(pb.varInits) { pb.varInits = mxutil.GrowCap(pb.varInits) }
 		push(pb.varInits, d)
 		pb.varInitScopes[d] = pb.curFileScope
 	}
@@ -828,6 +840,9 @@ type ssaFuncBuilder struct {
 	vars         map[Object]*SSAAlloc
 	localTypes   map[string]Type
 	localConsts  map[string]*SSAConst
+	lastConstGroup *syntax.Group // iota tracking: the group of the last const decl
+	iotaVal      int64           // iota position within the current const group
+	quietTypeErr bool            // suppress "undefined" type errors (buildCall conversion probe)
 	freeVarPtrs  map[string]*SSAFreeVar
 	namedResults []*SSAAlloc
 	paramAllocas []*SSAAlloc
@@ -896,7 +911,21 @@ func (fb *ssaFuncBuilder) emit(instr SSAInstruction) {
 		return
 	}
 	instr.setBlock(fb.currentBlock)
+	if len(fb.currentBlock.Instrs) >= cap(fb.currentBlock.Instrs) { fb.currentBlock.Instrs = mxutil.GrowCap(fb.currentBlock.Instrs) }
 	push(fb.currentBlock.Instrs, instr)
+}
+
+// pushSucc records an edge b -> succ with explicit capacity growth
+// (push never reallocates).
+func (fb *ssaFuncBuilder) pushSucc(b, succ *SSABasicBlock) {
+	if len(b.Succs) >= cap(b.Succs) { b.Succs = mxutil.GrowCap(b.Succs) }
+	push(b.Succs, succ)
+}
+
+// pushPred records an edge pred -> b with explicit capacity growth.
+func (fb *ssaFuncBuilder) pushPred(b, pred *SSABasicBlock) {
+	if len(b.Preds) >= cap(b.Preds) { b.Preds = mxutil.GrowCap(b.Preds) }
+	push(b.Preds, pred)
 }
 
 func (fb *ssaFuncBuilder) nextName() (s string) {
@@ -935,17 +964,21 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 				pos:    0,
 				parent: fb.fn,
 			}
+			if len(fb.fn.Params) >= cap(fb.fn.Params) { fb.fn.Params = mxutil.GrowCap(fb.fn.Params) }
 			push(fb.fn.Params, p)
 			if recvName != "" && recvName != "_" {
 				recvObj := NewTCVar(fb.fn.Pkg.Pkg, recvName, recv.Typ)
 				p.object = recvObj
 				alloc := fb.emitAlloc(recv.Typ, 0)
 				fb.vars[recvObj] = alloc
+				if len(fb.paramAllocas) >= cap(fb.paramAllocas) { fb.paramAllocas = mxutil.GrowCap(fb.paramAllocas) }
 				push(fb.paramAllocas, alloc)
 				if isValRecv {
 					// p is *T; load the value T from the pointer, then store.
 					deref := &SSAUnOp{Op: OpMul, X: p}
 					deref.typ = recv.Typ
+					if len(fb.fn.Blocks) >= cap(fb.fn.Blocks) { fb.fn.Blocks = mxutil.GrowCap(fb.fn.Blocks) }
+					if len(fb.fn.Blocks[0].Instrs) >= cap(fb.fn.Blocks[0].Instrs) { fb.fn.Blocks[0].Instrs = mxutil.GrowCap(fb.fn.Blocks[0].Instrs) }
 					push(fb.fn.Blocks[0].Instrs, deref)
 					fb.emitStore(alloc, deref)
 				} else {
@@ -963,11 +996,13 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 				pos:    fb.fn.pos,
 				parent: fb.fn,
 			}
+			if len(fb.fn.Params) >= cap(fb.fn.Params) { fb.fn.Params = mxutil.GrowCap(fb.fn.Params) }
 			push(fb.fn.Params, p)
 			if pvar.Name != "" && pvar.Name != "_" {
 				obj := NewTCVar(fb.fn.Pkg.Pkg, pvar.Name, pvar.Typ)
 				alloc := fb.emitAlloc(pvar.Typ, p.pos)
 				fb.vars[obj] = alloc
+				if len(fb.paramAllocas) >= cap(fb.paramAllocas) { fb.paramAllocas = mxutil.GrowCap(fb.paramAllocas) }
 				push(fb.paramAllocas, alloc)
 				fb.emitStore(alloc, p)
 			}
@@ -979,7 +1014,9 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 			r := sig.Results.At(i)
 			if r.Name != "" && r.Name != "_" {
 				alloc := fb.emitAlloc(r.Typ, fb.fn.pos)
+				if len(fb.namedResults) >= cap(fb.namedResults) { fb.namedResults = mxutil.GrowCap(fb.namedResults) }
 				push(fb.namedResults, alloc)
+				if len(fb.fn.Locals) >= cap(fb.fn.Locals) { fb.fn.Locals = mxutil.GrowCap(fb.fn.Locals) }
 				push(fb.fn.Locals, alloc)
 				fb.vars[r] = alloc
 			}
@@ -989,8 +1026,8 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 	if len(fb.paramAllocas) > 0 {
 		fb.tailBlock = fb.newBlock("tailcall")
 		fb.emit(&SSAJump{Comment: "enter.body"})
-		push(fb.currentBlock.Succs, fb.tailBlock)
-		push(fb.tailBlock.Preds, fb.currentBlock)
+		fb.pushSucc(fb.currentBlock, fb.tailBlock)
+		fb.pushPred(fb.tailBlock, fb.currentBlock)
 		fb.currentBlock = fb.tailBlock
 	}
 
@@ -1006,12 +1043,25 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 				if p, ok := elemType.(*Pointer); ok {
 					elemType = p.Base
 				}
+				if len(vals) >= cap(vals) { vals = mxutil.GrowCap(vals) }
 				push(vals, fb.emitLoad(nr, elemType))
 			}
 			fb.emitReturn(vals, 0)
 		} else {
 			fb.emitReturn(nil, 0)
 		}
+	}
+	// Functions with defers need a recover block: the emitter's landing pad
+	// (defer_landingN) runs the defers after a panic and branches here to
+	// return; destroyDeferFrame re-raises if still panicking. Mirrors
+	// legacy, where x/tools/go/ssa creates fn.Recover for every function
+	// with deferred calls. Without it the landing pad label is never
+	// defined and clang rejects the module.
+	if fb.deferred > 0 && fb.fn.Recover == nil {
+		recBlock := fb.newBlock("recover")
+		fb.currentBlock = recBlock
+		fb.emitReturn(nil, 0)
+		fb.fn.Recover = recBlock
 	}
 	fb.fn.NamedResults = fb.namedResults
 }
@@ -1022,6 +1072,7 @@ func (fb *ssaFuncBuilder) emitAlloc(typ Type, pos int32) (s *SSAAlloc) {
 	a.pos = pos
 	a.name = fb.nextName()
 	fb.emit(a)
+	if len(fb.fn.Locals) >= cap(fb.fn.Locals) { fb.fn.Locals = mxutil.GrowCap(fb.fn.Locals) }
 	push(fb.fn.Locals, a)
 	return a
 }
@@ -1075,8 +1126,8 @@ func (fb *ssaFuncBuilder) buildStmt(s syntax.Stmt) {
 			lblBlock := fb.labelBlock(ls.Label.Value)
 			if fb.currentBlock != nil {
 				fb.emit(&SSAJump{Comment: "goto.label." + ls.Label.Value})
-				push(fb.currentBlock.Succs, lblBlock)
-				push(lblBlock.Preds, fb.currentBlock)
+				fb.pushSucc(fb.currentBlock, lblBlock)
+				fb.pushPred(lblBlock, fb.currentBlock)
 			}
 			fb.currentBlock = lblBlock
 		}
@@ -1546,6 +1597,7 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *syntax.AssignStmt) {
 
 	rhs := fb.buildExpr(s.Rhs)
 
+
 	isTuple := false
 	var tup *Tuple
 	if rhs != nil {
@@ -1564,22 +1616,23 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *syntax.AssignStmt) {
 			}
 		}
 		if typ == nil {
+			// Fail loud: a short var whose rhs type cannot be resolved
+			// would silently compile as Int32 and corrupt the IR.
+			// Every known class (generic methods, func-field calls, push,
+			// iota consts) is fixed in the builder - a nil here is a new
+			// builder bug, not a fallback case.
 			rhsInfo := "nil"
 			if rhs != nil {
 				if rhs.SSAType() == nil {
 					rhsInfo = "ssatype=nil"
-				} else if tup2, ok2 := rhs.SSAType().(*Tuple); ok2 {
-					rhsInfo = "tuple[" | token.Itoa(tup2.Len()) | "] i=" | token.Itoa(i)
-					if i < tup2.Len() {
-						if tup2.At(i).Typ == nil {
-							rhsInfo = rhsInfo | " At.Type=nil"
-						} else {
-							rhsInfo = rhsInfo | " At.Type=set"
-						}
-					}
 				} else {
 					rhsInfo = "non-tuple"
 				}
+			}
+			if fb.fn != nil {
+				mxutil.WriteStr(2, "compile error: cannot resolve type of short var " | name.Value | " in " | fb.fn.name | " (rhs=" | rhsInfo | ")\n")
+			} else {
+				mxutil.WriteStr(2, "compile error: cannot resolve type of short var " | name.Value | " (rhs=" | rhsInfo | ")\n")
 			}
 			typ = Typ[Int32]
 		}
@@ -1638,6 +1691,7 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			}
 			alloc := fb.emitAlloc(ObjectType(obj), 0)
 			fb.vars[obj] = alloc
+			if len(fb.fn.Locals) >= cap(fb.fn.Locals) { fb.fn.Locals = mxutil.GrowCap(fb.fn.Locals) }
 			push(fb.fn.Locals, alloc)
 			if initVal != nil {
 				initVal = fb.coerceToInterface(initVal, ObjectType(obj))
@@ -1647,25 +1701,34 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			}
 		}
 	case *syntax.ConstDecl:
-		if dd.Values != nil && len(dd.NameList) > 0 {
-			if fb.localConsts == nil {
-				fb.localConsts = map[string]*SSAConst{}
-			}
+		if fb.localConsts == nil {
+			fb.localConsts = map[string]*SSAConst{}
+		}
+		// iota: the parser emits one ConstDecl per line; bare lines have
+		// Values == nil. Track the position within the const group.
+		if dd.Group == nil {
+			fb.iotaVal = 0
+			fb.lastConstGroup = nil
+		} else if dd.Group == fb.lastConstGroup {
+			fb.iotaVal++
+		} else {
+			fb.lastConstGroup = dd.Group
+			fb.iotaVal = 0
+		}
+		if dd.Values == nil && len(dd.NameList) == 1 {
+			fb.localConsts[dd.NameList[0].Value] = &SSAConst{typ: Typ[UntypedInt], val: &ConstInt{V: fb.iotaVal}}
+		} else if dd.Values != nil {
 			if list, ok := dd.Values.(*syntax.ListExpr); ok {
 				for i, name := range dd.NameList {
 					if i < len(list.ElemList) {
-						if v := fb.buildExpr(list.ElemList[i]); v != nil {
-							if c := ssaExtractConst(v); c != nil {
-								fb.localConsts[name.Value] = c
-							}
+						if cv := fb.evalLocalConstExpr(list.ElemList[i], fb.iotaVal); cv != nil {
+							fb.localConsts[name.Value] = &SSAConst{typ: constValType(cv), val: cv}
 						}
 					}
 				}
 			} else if len(dd.NameList) == 1 {
-				if v := fb.buildExpr(dd.Values); v != nil {
-					if c := ssaExtractConst(v); c != nil {
-						fb.localConsts[dd.NameList[0].Value] = c
-					}
+				if cv := fb.evalLocalConstExpr(dd.Values, fb.iotaVal); cv != nil {
+					fb.localConsts[dd.NameList[0].Value] = &SSAConst{typ: constValType(cv), val: cv}
 				}
 			}
 		}
@@ -1679,7 +1742,7 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 	}
 }
 
-func (fb *ssaFuncBuilder) evalLocalConstExpr(e syntax.Expr) (c ConstVal) {
+func (fb *ssaFuncBuilder) evalLocalConstExpr(e syntax.Expr, iotaVal int64) (c ConstVal) {
 	if e == nil {
 		return nil
 	}
@@ -1687,26 +1750,48 @@ func (fb *ssaFuncBuilder) evalLocalConstExpr(e syntax.Expr) (c ConstVal) {
 	case *syntax.BasicLit:
 		return EvalBasicLitLocal(ev)
 	case *syntax.Name:
+		if ev.Value == "iota" {
+			return &ConstInt{V: iotaVal}
+		}
 		if lc, ok := fb.localConsts[ev.Value]; ok && lc != nil && lc.val != nil {
 			return lc.val
 		}
-		return tcEvalConstExpr(ev, fb.fn.Pkg.Pkg.Scope, -1)
+		return tcEvalConstExpr(ev, fb.fn.Pkg.Pkg.Scope, iotaVal)
 	case *syntax.Operation:
 		if ev.Y == nil {
-			xr2 := fb.evalLocalConstExpr(ev.X)
+			xr2 := fb.evalLocalConstExpr(ev.X, iotaVal)
 			if xr2 == nil {
 				return nil
 			}
 			return EvalUnaryLocal(ev.Op, xr2)
 		}
-		xr := fb.evalLocalConstExpr(ev.X)
-		yr := fb.evalLocalConstExpr(ev.Y)
+		xr := fb.evalLocalConstExpr(ev.X, iotaVal)
+		yr := fb.evalLocalConstExpr(ev.Y, iotaVal)
 		if xr == nil || yr == nil {
 			return nil
 		}
 		return EvalBinaryLocal(ev.Op, xr, yr)
 	case *syntax.ParenExpr:
-		return fb.evalLocalConstExpr(ev.X)
+		return fb.evalLocalConstExpr(ev.X, iotaVal)
+	case *syntax.CallExpr:
+		if name, ok := ev.Fun.(*syntax.Name); ok && name.Value == "len" && len(ev.ArgList) == 1 {
+			inner := fb.evalLocalConstExpr(ev.ArgList[0], iotaVal)
+			if cs, ok2 := inner.(*ConstStr); ok2 {
+				return &ConstInt{V: int64(len(cs.S))}
+			}
+		}
+		if len(ev.ArgList) != 1 {
+			return nil
+		}
+		inner := fb.evalLocalConstExpr(ev.ArgList[0], iotaVal)
+		if inner == nil {
+			return nil
+		}
+		targetType := tcResolveNameInline(ev.Fun, fb.fn.Pkg.Pkg.Scope)
+		if targetType == nil {
+			return inner
+		}
+		return ConvertConstLocal(inner, targetType)
 	}
 	return nil
 }
@@ -1742,9 +1827,10 @@ func (fb *ssaFuncBuilder) buildIf(s *syntax.IfStmt) {
 	}
 
 	fb.emit(&SSAIf{Cond: cond})
-	push(fb.currentBlock.Succs, thenBlock, elseBlock)
-	push(thenBlock.Preds, fb.currentBlock)
-	push(elseBlock.Preds, fb.currentBlock)
+	fb.pushSucc(fb.currentBlock, thenBlock)
+	fb.pushSucc(fb.currentBlock, elseBlock)
+	fb.pushPred(thenBlock, fb.currentBlock)
+	fb.pushPred(elseBlock, fb.currentBlock)
 
 	oldThen := fb.enterScope()
 	thenBlock.ScopeID = fb.scopeID
@@ -1752,8 +1838,8 @@ func (fb *ssaFuncBuilder) buildIf(s *syntax.IfStmt) {
 	fb.buildBlock(s.Then)
 	if fb.currentBlock != nil && !fb.blockTerminated(fb.currentBlock) {
 		fb.emit(&SSAJump{Comment: "if.done"})
-		push(fb.currentBlock.Succs, doneBlock)
-		push(doneBlock.Preds, fb.currentBlock)
+		fb.pushSucc(fb.currentBlock, doneBlock)
+		fb.pushPred(doneBlock, fb.currentBlock)
 	}
 	fb.exitScope(oldThen)
 
@@ -1764,8 +1850,8 @@ func (fb *ssaFuncBuilder) buildIf(s *syntax.IfStmt) {
 		fb.buildStmt(s.Else)
 		if fb.currentBlock != nil && !fb.blockTerminated(fb.currentBlock) {
 			fb.emit(&SSAJump{Comment: "if.done"})
-			push(fb.currentBlock.Succs, doneBlock)
-			push(doneBlock.Preds, fb.currentBlock)
+			fb.pushSucc(fb.currentBlock, doneBlock)
+			fb.pushPred(doneBlock, fb.currentBlock)
 		}
 		fb.exitScope(oldElse)
 	}
@@ -1793,9 +1879,10 @@ func (fb *ssaFuncBuilder) buildFor(s *syntax.ForStmt) {
 	doneBlock := fb.newBlock("for.done")
 
 	fb.emit(&SSAJump{Comment: "for.cond"})
-	push(fb.currentBlock.Succs, condBlock)
-	push(condBlock.Preds, fb.currentBlock)
+	fb.pushSucc(fb.currentBlock, condBlock)
+	fb.pushPred(condBlock, fb.currentBlock)
 
+	if len(fb.loops) >= cap(fb.loops) { fb.loops = mxutil.GrowCap(fb.loops) }
 	push(fb.loops, ssaLoopState{label: fb.pendingLabel, body: bodyBlock, post: postBlock, done: doneBlock})
 	fb.pendingLabel = ""
 
@@ -1804,14 +1891,15 @@ func (fb *ssaFuncBuilder) buildFor(s *syntax.ForStmt) {
 		cond := fb.buildExpr(s.Cond)
 		if cond != nil {
 			fb.emit(&SSAIf{Cond: cond})
-			push(fb.currentBlock.Succs, bodyBlock, doneBlock)
-			push(bodyBlock.Preds, condBlock)
-			push(doneBlock.Preds, condBlock)
+			fb.pushSucc(fb.currentBlock, bodyBlock)
+			fb.pushSucc(fb.currentBlock, doneBlock)
+			fb.pushPred(bodyBlock, condBlock)
+			fb.pushPred(doneBlock, condBlock)
 		}
 	} else {
 		fb.emit(&SSAJump{Comment: "for.body"})
-		push(fb.currentBlock.Succs, bodyBlock)
-		push(bodyBlock.Preds, condBlock)
+		fb.pushSucc(fb.currentBlock, bodyBlock)
+		fb.pushPred(bodyBlock, condBlock)
 	}
 
 	forScope := fb.enterScope()
@@ -1820,8 +1908,8 @@ func (fb *ssaFuncBuilder) buildFor(s *syntax.ForStmt) {
 	fb.buildBlock(s.Body)
 	if fb.currentBlock != nil && !fb.blockTerminated(fb.currentBlock) {
 		fb.emit(&SSAJump{Comment: "for.post"})
-		push(fb.currentBlock.Succs, postBlock)
-		push(postBlock.Preds, fb.currentBlock)
+		fb.pushSucc(fb.currentBlock, postBlock)
+		fb.pushPred(postBlock, fb.currentBlock)
 	}
 
 	postBlock.ScopeID = fb.scopeID
@@ -1831,8 +1919,8 @@ func (fb *ssaFuncBuilder) buildFor(s *syntax.ForStmt) {
 	}
 	if fb.currentBlock != nil {
 		fb.emit(&SSAJump{Comment: "for.cond"})
-		push(fb.currentBlock.Succs, condBlock)
-		push(condBlock.Preds, fb.currentBlock)
+		fb.pushSucc(fb.currentBlock, condBlock)
+		fb.pushPred(condBlock, fb.currentBlock)
 	}
 	fb.exitScope(forScope)
 
@@ -1860,11 +1948,12 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *syntax.ForStmt, rc *syntax.RangeClau
 
 	condBlock := fb.newBlock("range.cond")
 
+	if len(fb.loops) >= cap(fb.loops) { fb.loops = mxutil.GrowCap(fb.loops) }
 	push(fb.loops, ssaLoopState{label: fb.pendingLabel, body: bodyBlock, post: condBlock, done: doneBlock})
 	fb.pendingLabel = ""
 	fb.emit(&SSAJump{Comment: "range.cond"})
-	push(fb.currentBlock.Succs, condBlock)
-	push(condBlock.Preds, fb.currentBlock)
+	fb.pushSucc(fb.currentBlock, condBlock)
+	fb.pushPred(condBlock, fb.currentBlock)
 
 	fb.currentBlock = condBlock
 	iterSSAType := iterExpr.SSAType()
@@ -1931,9 +2020,10 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *syntax.ForStmt, rc *syntax.RangeClau
 	fb.emit(okExt)
 
 	fb.emit(&SSAIf{Cond: okExt})
-	push(fb.currentBlock.Succs, bodyBlock, doneBlock)
-	push(bodyBlock.Preds, condBlock)
-	push(doneBlock.Preds, condBlock)
+	fb.pushSucc(fb.currentBlock, bodyBlock)
+	fb.pushSucc(fb.currentBlock, doneBlock)
+	fb.pushPred(bodyBlock, condBlock)
+	fb.pushPred(doneBlock, condBlock)
 
 	rangeScope := fb.enterScope()
 	bodyBlock.ScopeID = fb.scopeID
@@ -1976,8 +2066,8 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *syntax.ForStmt, rc *syntax.RangeClau
 	fb.buildBlock(s.Body)
 	if fb.currentBlock != nil && !fb.blockTerminated(fb.currentBlock) {
 		fb.emit(&SSAJump{Comment: "range.cond"})
-		push(fb.currentBlock.Succs, condBlock)
-		push(condBlock.Preds, fb.currentBlock)
+		fb.pushSucc(fb.currentBlock, condBlock)
+		fb.pushPred(condBlock, fb.currentBlock)
 	}
 	fb.exitScope(rangeScope)
 
@@ -2001,6 +2091,7 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 
 	doneBlock := fb.newBlock("switch.done")
 	savedLoops := fb.loops
+	if len(fb.loops) >= cap(fb.loops) { fb.loops = mxutil.GrowCap(fb.loops) }
 	push(fb.loops, ssaLoopState{label: fb.pendingLabel, done: doneBlock})
 	fb.pendingLabel = ""
 
@@ -2082,24 +2173,26 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 				if cb, ok2 := cc.val.(*ConstBool); ok2 {
 					if cb.V {
 						fb.emit(&SSAJump{Comment: "switch.const.true"})
-						push(fb.currentBlock.Succs, caseBlock)
-						push(caseBlock.Preds, fb.currentBlock)
+						fb.pushSucc(fb.currentBlock, caseBlock)
+						fb.pushPred(caseBlock, fb.currentBlock)
 					} else {
 						fb.emit(&SSAJump{Comment: "switch.const.false"})
-						push(fb.currentBlock.Succs, nextBlock)
-						push(nextBlock.Preds, fb.currentBlock)
+						fb.pushSucc(fb.currentBlock, nextBlock)
+						fb.pushPred(nextBlock, fb.currentBlock)
 					}
 				} else {
 					fb.emit(&SSAIf{Cond: cond})
-					push(fb.currentBlock.Succs, caseBlock, nextBlock)
-					push(caseBlock.Preds, fb.currentBlock)
-					push(nextBlock.Preds, fb.currentBlock)
+					fb.pushSucc(fb.currentBlock, caseBlock)
+					fb.pushSucc(fb.currentBlock, nextBlock)
+					fb.pushPred(caseBlock, fb.currentBlock)
+					fb.pushPred(nextBlock, fb.currentBlock)
 				}
 			} else {
 				fb.emit(&SSAIf{Cond: cond})
-				push(fb.currentBlock.Succs, caseBlock, nextBlock)
-				push(caseBlock.Preds, fb.currentBlock)
-				push(nextBlock.Preds, fb.currentBlock)
+				fb.pushSucc(fb.currentBlock, caseBlock)
+				fb.pushSucc(fb.currentBlock, nextBlock)
+				fb.pushPred(caseBlock, fb.currentBlock)
+				fb.pushPred(nextBlock, fb.currentBlock)
 			}
 		} else if clause.Cases != nil && tag == nil {
 			// Tagless switch: comma-separated cases are OR'd.
@@ -2121,13 +2214,14 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 				}
 			}
 			fb.emit(&SSAIf{Cond: cond})
-			push(fb.currentBlock.Succs, caseBlock, nextBlock)
-			push(caseBlock.Preds, fb.currentBlock)
-			push(nextBlock.Preds, fb.currentBlock)
+			fb.pushSucc(fb.currentBlock, caseBlock)
+			fb.pushSucc(fb.currentBlock, nextBlock)
+			fb.pushPred(caseBlock, fb.currentBlock)
+			fb.pushPred(nextBlock, fb.currentBlock)
 		} else {
 			fb.emit(&SSAJump{Comment: "switch.case"})
-			push(fb.currentBlock.Succs, caseBlock)
-			push(caseBlock.Preds, fb.currentBlock)
+			fb.pushSucc(fb.currentBlock, caseBlock)
+			fb.pushPred(caseBlock, fb.currentBlock)
 		}
 
 		caseScope := fb.enterScope()
@@ -2142,8 +2236,8 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 		}
 		if fb.currentBlock != nil && !fb.blockTerminated(fb.currentBlock) {
 			fb.emit(&SSAJump{Comment: "switch.done"})
-			push(fb.currentBlock.Succs, doneBlock)
-			push(doneBlock.Preds, fb.currentBlock)
+			fb.pushSucc(fb.currentBlock, doneBlock)
+			fb.pushPred(doneBlock, fb.currentBlock)
 		}
 		fb.exitScope(caseScope)
 		fb.vars = caseSaved
@@ -2152,8 +2246,8 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 
 	if fb.currentBlock != nil {
 		fb.emit(&SSAJump{Comment: "switch.done"})
-		push(fb.currentBlock.Succs, doneBlock)
-		push(doneBlock.Preds, fb.currentBlock)
+		fb.pushSucc(fb.currentBlock, doneBlock)
+		fb.pushPred(doneBlock, fb.currentBlock)
 	}
 
 	fb.loops = savedLoops
@@ -2247,9 +2341,10 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.Type
 				}
 			}
 			fb.emit(&SSAIf{Cond: cond})
-			push(fb.currentBlock.Succs, caseBlock, nextBlock)
-			push(caseBlock.Preds, fb.currentBlock)
-			push(nextBlock.Preds, fb.currentBlock)
+			fb.pushSucc(fb.currentBlock, caseBlock)
+			fb.pushSucc(fb.currentBlock, nextBlock)
+			fb.pushPred(caseBlock, fb.currentBlock)
+			fb.pushPred(nextBlock, fb.currentBlock)
 
 			fb.currentBlock = caseBlock
 			if tsg.Lhs != nil {
@@ -2282,8 +2377,8 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.Type
 			}
 		} else {
 			fb.emit(&SSAJump{Comment: "typeswitch.case"})
-			push(fb.currentBlock.Succs, caseBlock)
-			push(caseBlock.Preds, fb.currentBlock)
+			fb.pushSucc(fb.currentBlock, caseBlock)
+			fb.pushPred(caseBlock, fb.currentBlock)
 			fb.currentBlock = caseBlock
 			if tsg.Lhs != nil {
 				guardType := x.SSAType()
@@ -2314,8 +2409,8 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.Type
 		}
 		if fb.currentBlock != nil && !fb.blockTerminated(fb.currentBlock) {
 			fb.emit(&SSAJump{Comment: "switch.done"})
-			push(fb.currentBlock.Succs, doneBlock)
-			push(doneBlock.Preds, fb.currentBlock)
+			fb.pushSucc(fb.currentBlock, doneBlock)
+			fb.pushPred(doneBlock, fb.currentBlock)
 		}
 		fb.exitScope(tsScope)
 		fb.vars = caseSaved
@@ -2332,8 +2427,8 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.Type
 	}
 	if fb.currentBlock != nil {
 		fb.emit(&SSAJump{Comment: "switch.done"})
-		push(fb.currentBlock.Succs, doneBlock)
-		push(doneBlock.Preds, fb.currentBlock)
+		fb.pushSucc(fb.currentBlock, doneBlock)
+		fb.pushPred(doneBlock, fb.currentBlock)
 	}
 }
 
@@ -2344,6 +2439,7 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 	caseBlocks := [](*SSABasicBlock){:0:len(s.Body)}
 	for i, clause := range s.Body {
 		cb := fb.newBlock("select.case")
+		if len(caseBlocks) >= cap(caseBlocks) { caseBlocks = mxutil.GrowCap(caseBlocks) }
 		push(caseBlocks, cb)
 		state := &SSASelectState{}
 		if clause.Comm != nil {
@@ -2368,6 +2464,7 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 				}
 			}
 		}
+		if len(states) >= cap(states) { states = mxutil.GrowCap(states) }
 		push(states, state)
 		_ = i
 	}
@@ -2381,6 +2478,7 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 	for _, st := range states {
 		if st.Dir == SelectDirRecv && st.Chan != nil {
 			elemType := ssaChanElemType(st.Chan.SSAType())
+			if len(tupleVars) >= cap(tupleVars) { tupleVars = mxutil.GrowCap(tupleVars) }
 			push(tupleVars, NewTCVar(nil, "recv", elemType))
 		}
 	}
@@ -2408,8 +2506,8 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 		if i == int32(len(s.Body))-1 {
 			// Last case: unconditional jump.
 			fb.emit(&SSAJump{Comment: "select.last"})
-			push(entryBlock.Succs, caseBlocks[i])
-			push(caseBlocks[i].Preds, entryBlock)
+			fb.pushSucc(entryBlock, caseBlocks[i])
+			fb.pushPred(caseBlocks[i], entryBlock)
 			break
 		}
 		nextCheck := fb.newBlock("select.check")
@@ -2419,10 +2517,10 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 		cmp.name = fb.nextName()
 		fb.emit(cmp)
 		fb.emit(&SSAIf{Cond: cmp})
-		push(entryBlock.Succs, caseBlocks[i])
-		push(caseBlocks[i].Preds, entryBlock)
-		push(entryBlock.Succs, nextCheck)
-		push(nextCheck.Preds, entryBlock)
+		fb.pushSucc(entryBlock, caseBlocks[i])
+		fb.pushPred(caseBlocks[i], entryBlock)
+		fb.pushSucc(entryBlock, nextCheck)
+		fb.pushPred(nextCheck, entryBlock)
 		fb.currentBlock = nextCheck
 		entryBlock = nextCheck
 	}
@@ -2472,8 +2570,8 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 		}
 		if fb.currentBlock != nil && !fb.blockTerminated(fb.currentBlock) {
 			fb.emit(&SSAJump{Comment: "select.done"})
-			push(fb.currentBlock.Succs, doneBlock)
-			push(doneBlock.Preds, fb.currentBlock)
+			fb.pushSucc(fb.currentBlock, doneBlock)
+			fb.pushPred(doneBlock, fb.currentBlock)
 		}
 		fb.exitScope(selScope)
 	}
@@ -2514,8 +2612,8 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 					fb.emitStore(fb.paramAllocas[i], arg)
 				}
 				fb.emit(&SSAJump{Comment: "tailcall"})
-				push(fb.currentBlock.Succs, fb.tailBlock)
-				push(fb.tailBlock.Preds, fb.currentBlock)
+				fb.pushSucc(fb.currentBlock, fb.tailBlock)
+				fb.pushPred(fb.tailBlock, fb.currentBlock)
 				fb.currentBlock = nil
 				return
 			}
@@ -2527,12 +2625,14 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 			for i, el := range list.ElemList {
 				v := fb.buildExpr(el)
 				if v != nil {
+					if len(vals) >= cap(vals) { vals = mxutil.GrowCap(vals) }
 					push(vals, v)
 				} else {
 					var zeroType Type
 					if fb.fn.Signature != nil && fb.fn.Signature.Results != nil && int32(i) < int32(fb.fn.Signature.Results.Len()) {
 						zeroType = fb.fn.Signature.Results.At(int32(i)).Typ
 					}
+					if len(vals) >= cap(vals) { vals = mxutil.GrowCap(vals) }
 					push(vals, &SSAConst{typ: zeroType, val: nil})
 				}
 			}
@@ -2540,6 +2640,7 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 			v := fb.buildExpr(s.Results)
 			if v != nil {
 				if v.SSAType() == nil {
+					if len(vals) >= cap(vals) { vals = mxutil.GrowCap(vals) }
 					push(vals, v)
 				} else if tup, ok2 := v.SSAType().(*Tuple); ok2 && tup.Len() > 1 {
 					for i := 0; i < tup.Len(); i++ {
@@ -2547,9 +2648,11 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 						ext.typ = tup.At(i).Typ
 						ext.name = fb.nextName()
 						fb.emit(ext)
+						if len(vals) >= cap(vals) { vals = mxutil.GrowCap(vals) }
 						push(vals, ext)
 					}
 				} else {
+					if len(vals) >= cap(vals) { vals = mxutil.GrowCap(vals) }
 					push(vals, v)
 				}
 			}
@@ -2560,6 +2663,7 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 			if p, ok := elemType.(*Pointer); ok {
 				elemType = p.Base
 			}
+			if len(vals) >= cap(vals) { vals = mxutil.GrowCap(vals) }
 			push(vals, fb.emitLoad(nr, elemType))
 		}
 	}
@@ -2610,8 +2714,8 @@ func (fb *ssaFuncBuilder) buildBranch(s *syntax.BranchStmt) {
 			}
 			if doneBlock != nil {
 				fb.emit(&SSAJump{Comment: "break"})
-				push(fb.currentBlock.Succs, doneBlock)
-				push(doneBlock.Preds, fb.currentBlock)
+				fb.pushSucc(fb.currentBlock, doneBlock)
+				fb.pushPred(doneBlock, fb.currentBlock)
 				fb.currentBlock = nil
 			}
 		}
@@ -2625,8 +2729,8 @@ func (fb *ssaFuncBuilder) buildBranch(s *syntax.BranchStmt) {
 				continue
 			}
 			fb.emit(&SSAJump{Comment: "continue"})
-			push(fb.currentBlock.Succs, postBlock)
-			push(postBlock.Preds, fb.currentBlock)
+			fb.pushSucc(fb.currentBlock, postBlock)
+			fb.pushPred(postBlock, fb.currentBlock)
 			fb.currentBlock = nil
 			break
 		}
@@ -2635,14 +2739,16 @@ func (fb *ssaFuncBuilder) buildBranch(s *syntax.BranchStmt) {
 			target := fb.labelBlock(s.Label.Value)
 			if target != nil {
 				fb.emit(&SSAJump{Comment: "goto"})
-				push(fb.currentBlock.Succs, target)
-				push(target.Preds, fb.currentBlock)
+				fb.pushSucc(fb.currentBlock, target)
+				fb.pushPred(target, fb.currentBlock)
 				fb.currentBlock = nil
 			}
 		}
 	case token.Return:
 		fb.emitReturn(nil, 0)
 	case token.Fallthrough:
+		if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
+		push(cctx.compileErrors, "'fallthrough' is not allowed: each case must be self-contained")
 	}
 }
 
@@ -2961,20 +3067,22 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 		entryBlock := fb.currentBlock
 		fb.emit(&SSAIf{Cond: xv4})
 		if op == OpLand {
-			push(fb.currentBlock.Succs, rhsBlock, mergeBlock)
+			fb.pushSucc(fb.currentBlock, rhsBlock)
+			fb.pushSucc(fb.currentBlock, mergeBlock)
 		} else {
-			push(fb.currentBlock.Succs, mergeBlock, rhsBlock)
+			fb.pushSucc(fb.currentBlock, mergeBlock)
+			fb.pushSucc(fb.currentBlock, rhsBlock)
 		}
-		push(rhsBlock.Preds, entryBlock)
-		push(mergeBlock.Preds, entryBlock)
+		fb.pushPred(rhsBlock, entryBlock)
+		fb.pushPred(mergeBlock, entryBlock)
 		fb.currentBlock = rhsBlock
 		yv := fb.buildExpr(e.Y)
 		if yv == nil {
 			yv = &SSAConst{typ: Typ[Bool], val: &ConstBool{V:false}}
 		}
 		fb.emit(&SSAJump{Comment: "sc.merge"})
-		push(fb.currentBlock.Succs, mergeBlock)
-		push(mergeBlock.Preds, fb.currentBlock)
+		fb.pushSucc(fb.currentBlock, mergeBlock)
+		fb.pushPred(mergeBlock, fb.currentBlock)
 		fb.currentBlock = mergeBlock
 		var shortVal SSAValue
 		if op == OpLand {
@@ -2996,6 +3104,7 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 	if (op == OpOr || op == OpAdd) && x.SSAType() != nil && y.SSAType() != nil {
 		if IsRuneKind(x.SSAType()) && IsStringKind(y.SSAType()) || IsStringKind(x.SSAType()) && IsRuneKind(y.SSAType()) {
 			mxutil.WriteStr(2, "compile error: cannot concatenate rune with string - convert to UTF-8 first\n")
+			if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
 			push(cctx.compileErrors, "cannot concatenate rune with string")
 		}
 	}
@@ -3065,7 +3174,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 			return result
 		}
 	}
-	if convType := fb.resolveTypeAST(e.Fun); convType != nil {
+	if convType := fb.resolveTypeProbe(e.Fun); convType != nil {
 		args3 := fb.buildArgs(e.ArgList)
 		if len(args3) == 1 && args3[0] != nil {
 			conv := &SSAConvert{X: args3[0]}
@@ -3119,6 +3228,12 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 			if inv := fb.buildIfaceMethodCall(sel, recv, e.ArgList); inv != nil {
 				return inv
 			}
+			if fv := fb.buildFuncFieldCall(sel, e.ArgList, e.HasDots); fv != nil {
+				return fv
+			}
+			if gm := fb.tryGenericMethodCall(sel, recv, e.ArgList, e.HasDots); gm != nil {
+				return gm
+			}
 			return nil
 		}
 	}
@@ -3126,6 +3241,14 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 	args := fb.buildArgs(e.ArgList)
 
 	if fn == nil {
+		// Undefined callee: report as undefined (make/new/complex etc are
+		// not predeclared in Moxie), not silently dropped.
+		if name, ok := e.Fun.(*syntax.Name); ok {
+			if fb.lookupObject(name.Value) == nil {
+				if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
+				push(cctx.compileErrors, "undefined: " | name.Value)
+			}
+		}
 		return nil
 	}
 	if bi, ok := fn.(*SSABuiltin); ok {
@@ -3210,7 +3333,7 @@ func (fb *ssaFuncBuilder) wrapVariadicArgs(args []SSAValue, sig *Signature) (ss 
 	nVariadic := len(args) - nFixed
 	if nVariadic <= 0 {
 		nilSlice := NewSSAConst(&ConstNil{}, sig.Params.At(sig.Params.Len()-1).Typ)
-		result2 := []SSAValue{:nFixed:nFixed}
+		result2 := []SSAValue{:nFixed:nFixed + 1}
 		copy(result2, args[:nFixed])
 		push(result2, nilSlice)
 		return result2
@@ -3247,7 +3370,7 @@ func (fb *ssaFuncBuilder) wrapVariadicArgs(args []SSAValue, sig *Signature) (ss 
 		}
 		fb.emitStore(ia, v)
 	}
-	result := []SSAValue{:nFixed:nFixed}
+	result := []SSAValue{:nFixed:nFixed + 1}
 	copy(result, args[:nFixed])
 	push(result, ms)
 	return result
@@ -3350,7 +3473,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		return call5
 	case BuiltinRecover:
 		call6 := &SSACall{Call: SSACallCommon{Value: b, Args: args}}
-		call6.typ = NewTCInterface(nil, nil)
+		call6.typ = Typ[TCString]
 		call6.name = fb.nextName()
 		fb.emit(call6)
 		return call6
@@ -3370,6 +3493,59 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		call8.name = fb.nextName()
 		fb.emit(call8)
 		return call8
+	case BuiltinPush, BuiltinResize:
+		if len(args) > 1 {
+			if sl, ok := SafeUnderlying(args[0].SSAType()).(*Slice); ok {
+				if _, isIface := SafeUnderlying(sl.Elem).(*TCInterface); isIface {
+					for i := 1; i < len(args); i++ {
+						if e.HasDots && i == 1 {
+							continue
+						}
+						if args[i] == nil || args[i].SSAType() == nil {
+							continue
+						}
+						if _, argIface := SafeUnderlying(args[i].SSAType()).(*TCInterface); argIface {
+							continue
+						}
+						mi := &SSAMakeInterface{X: args[i], IType: sl.Elem}
+						mi.typ = sl.Elem
+						mi.name = fb.nextName()
+						fb.emit(mi)
+						args[i] = mi
+					}
+				}
+			}
+		}
+		callP := &SSACall{Call: SSACallCommon{Value: b, Args: args, HasDots: e.HasDots}}
+		if len(args) > 0 && args[0] != nil {
+			callP.typ = args[0].SSAType()
+		}
+		callP.name = fb.nextName()
+		fb.emit(callP)
+		// push is an in-place mutation: store the new slice header back
+		// into the slice's storage. The emitter lowers push to slicePush +
+		// memmove and returns the new header as the call result; without
+		// this store, statement-form push (e.g. codecWriteU32's
+		// push(cb.data, ...)) silently drops the appended elements.
+		if len(e.ArgList) > 0 && callP.typ != nil {
+			if addr := fb.buildPushTargetAddr(e.ArgList[0]); addr != nil {
+				st := &SSAStore{Addr: addr, Val: callP}
+				fb.emit(st)
+			}
+		}
+		return callP
+	case BuiltinPop:
+		callPop := &SSACall{Call: SSACallCommon{Value: b, Args: args}}
+		if len(args) == 1 {
+			if sl, ok := SafeUnderlying(args[0].SSAType()).(*Slice); ok {
+				callPop.typ = sl.Elem
+			} else {
+				callPop.typ = Typ[Uint8]
+			}
+		}
+		callPop.name = fb.nextName()
+		fb.emit(callPop)
+		return callPop
 	}
 	call9 := &SSACall{Call: SSACallCommon{Value: b, Args: args}}
 	call9.name = fb.nextName()
@@ -3489,14 +3665,17 @@ func (fb *ssaFuncBuilder) buildMethodValue(sel *syntax.SelectorExpr, recv SSAVal
 		Prog:      fb.fn.Prog,
 		parent:    fb.fn,
 	}
+	if len(fb.fn.AnonFuncs) >= cap(fb.fn.AnonFuncs) { fb.fn.AnonFuncs = mxutil.GrowCap(fb.fn.AnonFuncs) }
 	push(fb.fn.AnonFuncs, wrapper)
 	recvType := fixedRecv.SSAType()
 	fv := &SSAFreeVar{name: "recv", typ: recvType, parent: wrapper}
+	if len(wrapper.FreeVars) >= cap(wrapper.FreeVars) { wrapper.FreeVars = mxutil.GrowCap(wrapper.FreeVars) }
 	push(wrapper.FreeVars, fv)
 	if wrapperParams != nil {
 		for i := 0; i < wrapperParams.Len(); i++ {
 			v := wrapperParams.At(i)
 			p := &SSAParameter{name: v.Name, typ: v.Typ, parent: wrapper}
+			if len(wrapper.Params) >= cap(wrapper.Params) { wrapper.Params = mxutil.GrowCap(wrapper.Params) }
 			push(wrapper.Params, p)
 		}
 	}
@@ -3516,18 +3695,262 @@ func (fb *ssaFuncBuilder) buildMethodValue(sel *syntax.SelectorExpr, recv SSAVal
 	call.typ = retType
 	call.name = "t1"
 	call.setBlock(entry)
+	if len(entry.Instrs) >= cap(entry.Instrs) { entry.Instrs = mxutil.GrowCap(entry.Instrs) }
 	push(entry.Instrs, call)
 	ret := &SSAReturn{}
 	if retType != nil {
 		ret.Results = []SSAValue{call}
 	}
 	ret.setBlock(entry)
+	if len(entry.Instrs) >= cap(entry.Instrs) { entry.Instrs = mxutil.GrowCap(entry.Instrs) }
 	push(entry.Instrs, ret)
 	mc := &SSAMakeClosure{Fn: wrapper, Bindings: []SSAValue{fixedRecv}}
 	mc.typ = wrapperSig
 	mc.name = fb.nextName()
 	fb.emit(mc)
 	return mc
+}
+
+// buildPushTargetAddr computes the storage address of a slice expression
+// for in-place push mutation. Mirrors the assign-LHS addressing in
+// buildStore: Name -> var/global alloc, *p -> p, x.f -> field addr,
+// a[i] -> index addr.
+func (fb *ssaFuncBuilder) buildPushTargetAddr(e syntax.Expr) (a SSAValue) {
+	switch lv := e.(type) {
+	case *syntax.Name:
+		obj := fb.lookupObject(lv.Value)
+		if obj == nil {
+			return nil
+		}
+		if alloc, ok := fb.vars[obj]; ok {
+			return alloc
+		}
+		if fv, ok := fb.freeVarPtrs[lv.Value]; ok {
+			return fv
+		}
+		if g, ok := fb.fn.Pkg.Members[lv.Value].(*SSAGlobal); ok {
+			return g
+		}
+	case *syntax.Operation:
+		if lv.Y == nil && lv.Op == token.Mul {
+			return fb.buildExpr(lv.X)
+		}
+	case *syntax.SelectorExpr:
+		return fb.buildSelectorAddr(lv)
+	case *syntax.IndexExpr:
+		base := fb.buildExpr(lv.X)
+		idx := fb.buildExpr(lv.Index)
+		if base == nil || idx == nil {
+			return nil
+		}
+		var baseAddr SSAValue
+		if n, ok := lv.X.(*syntax.Name); ok {
+			obj := fb.lookupObject(n.Value)
+			if obj != nil {
+				if alloc, ok2 := fb.vars[obj]; ok2 {
+					baseAddr = alloc
+				} else if g2, ok3 := fb.fn.Pkg.Members[n.Value].(*SSAGlobal); ok3 {
+					baseAddr = g2
+				}
+			}
+		} else if sel, ok2 := lv.X.(*syntax.SelectorExpr); ok2 {
+			baseAddr = fb.buildSelectorAddr(sel)
+		}
+		if baseAddr != nil {
+			ia := &SSAIndexAddr{X: baseAddr, Index: idx}
+			ia.typ = NewPointer(ssaElemType(base.SSAType()))
+			ia.name = fb.nextName()
+			fb.emit(ia)
+			return ia
+		}
+	}
+	return nil
+}
+
+// buildFuncFieldCall builds a call through a struct field of function type
+// (e.g. m.keyHash(...) where keyHash is a func field on hashmap).
+func (fb *ssaFuncBuilder) buildFuncFieldCall(sel *syntax.SelectorExpr, argList []syntax.Expr, hasDots bool) (s SSAValue) {
+	recv := fb.buildExpr(sel.X)
+	if recv == nil || recv.SSAType() == nil {
+		return nil
+	}
+	ft := fb.fieldType(recv.SSAType(), fb.fieldIndex(recv.SSAType(), sel.Sel.Value))
+	sig, ok := SafeUnderlying(ft).(*Signature)
+	if !ok {
+		return nil
+	}
+	addr := fb.buildSelectorAddr(sel)
+	if addr == nil {
+		return nil
+	}
+	fv := fb.emitLoad(addr, ft)
+	args := fb.buildArgs(argList)
+	if sig.Variadic && !hasDots {
+		args = fb.wrapVariadicArgs(args, sig)
+	}
+	args = fb.coerceArgsToInterface(args, sig)
+	var retType Type
+	if sig.Results != nil && sig.Results.Len() == 1 {
+		retType = sig.Results.At(0).Typ
+	} else if sig.Results != nil && sig.Results.Len() > 1 {
+		retType = sig.Results
+	}
+	call := &SSACall{Call: SSACallCommon{Value: fv, Args: args}}
+	call.typ = retType
+	call.name = fb.nextName()
+	fb.emit(call)
+	if retType == nil {
+		return nil
+	}
+	return call
+}
+
+// tryGenericMethodCall monomorphizes a method call on a generic receiver
+// (e.g. fields.Index(i) where fields is Array[rtStructFieldDesc]). The
+// receiver type must carry instantiation args (TArgs set by
+// resolveTypeExprWithSubst). Looks up the generic method decl collected by
+// ScanGenericDecls, substitutes the type params, builds the body, and emits
+// the call with the receiver as first argument.
+func (fb *ssaFuncBuilder) tryGenericMethodCall(sel *syntax.SelectorExpr, recv SSAValue, argList []syntax.Expr, hasDots bool) (s SSAValue) {
+	typ := recv.SSAType()
+	if typ == nil {
+		return nil
+	}
+	isPtr := false
+	if p, ok := SafeUnderlying(typ).(*Pointer); ok {
+		typ = p.Base
+		isPtr = true
+	}
+	named, ok := typ.(*Named)
+	if !ok || named.Obj == nil || len(named.TArgs) == 0 {
+		return nil
+	}
+	pkgPath := ""
+	if named.Obj.Pkg != nil {
+		pkgPath = named.Obj.Pkg.Path
+	}
+	key := pkgPath | "." | named.Obj.Name | "." | sel.Sel.Value
+	fd, ok2 := cctx.genericMethodDecls[key]
+	if !ok2 || fd == nil || fd.Recv == nil {
+		return nil
+	}
+	tparamNames := extractRecvTParamNames(fd.Recv.Type)
+	if len(tparamNames) == 0 || len(tparamNames) > len(named.TArgs) {
+		return nil
+	}
+	typeSubst := map[string]Type{}
+	for i, tn := range tparamNames {
+		typeSubst[tn] = named.TArgs[i]
+	}
+	var srcScope *Scope
+	if cctx.genericPkgScopes != nil {
+		srcScope = cctx.genericPkgScopes[pkgPath]
+	}
+	sig := resolveMethodSigWithSubst(fd, typeSubst, srcScope)
+	if sig == nil || sig.Recv == nil {
+		return nil
+	}
+	mangledName := mangleGenericName("(*"|named.Obj.Name|")."|sel.Sel.Value, named.TArgs)
+	if pkgPath != "" {
+		pfx := ""
+		for j := 0; j < len(pkgPath); j++ {
+			c := pkgPath[j]
+			if c == '/' {
+				pfx = pfx | "_"
+			} else {
+				pfx = pfx | string([]byte{c})
+			}
+		}
+		mangledName = pfx | "." | mangledName
+	}
+	fixed := recv
+	if !isPtr {
+		fixed2 := false
+		if nameExpr, ok3 := sel.X.(*syntax.Name); ok3 {
+			obj := fb.lookupObject(nameExpr.Value)
+			if obj != nil {
+				if alloc, ok4 := fb.vars[obj]; ok4 {
+					fixed = alloc
+					fixed2 = true
+				}
+			}
+		}
+		if !fixed2 {
+			alloc := &SSAAlloc{Comment: "gmethod.tmp"}
+			alloc.typ = NewPointer(recv.SSAType())
+			alloc.name = fb.nextName()
+			fb.emit(alloc)
+			storeOp := &SSAStore{Addr: alloc, Val: recv}
+			fb.emit(storeOp)
+			fixed = alloc
+		}
+	}
+	args := fb.buildArgs(argList)
+	allArgs := []SSAValue{:0:len(args) + 1}
+	push(allArgs, fixed)
+	for _, ma := range args {
+		push(allArgs, ma)
+	}
+	if fn5, ok5 := fb.fn.Pkg.Members[mangledName].(*SSAFunction); ok5 {
+		return fb.emitCallToSSAFunc(fn5, allArgs, hasDots)
+	}
+	fn := &SSAFunction{
+		name:      mangledName,
+		Signature: sig,
+		Pkg:       fb.fn.Pkg,
+		Prog:      fb.fn.Prog,
+	}
+	fb.fn.Pkg.SetMember(mangledName, fn)
+	subFb := newSSAFuncBuilder(fn, fb.info)
+	subFb.typeSubst = typeSubst
+	subFb.srcScope = srcScope
+	subFb.buildBody(fd)
+	return fb.emitCallToSSAFunc(fn, allArgs, hasDots)
+}
+
+// extractRecvTParamNames extracts the type parameter names declared on a
+// generic receiver type expression (e.g. Array[K, V] -> [K, V]).
+func extractRecvTParamNames(t syntax.Expr) (names []string) {
+	switch tt := t.(type) {
+	case *syntax.Operation:
+		if tt.Y == nil {
+			return extractRecvTParamNames(tt.X)
+		}
+	case *syntax.IndexExpr:
+		if le, ok := tt.Index.(*syntax.ListExpr); ok {
+			for _, e := range le.ElemList {
+				if n, ok2 := e.(*syntax.Name); ok2 {
+					if len(names) >= cap(names) { names = mxutil.GrowCap(names) }
+					push(names, n.Value)
+				}
+			}
+		} else if n, ok2 := tt.Index.(*syntax.Name); ok2 {
+			if len(names) >= cap(names) { names = mxutil.GrowCap(names) }
+			push(names, n.Value)
+		}
+	}
+	return names
+}
+
+// resolveMethodSigWithSubst resolves a method's full signature including
+// the receiver, substituting type params via typeSubst.
+func resolveMethodSigWithSubst(fd *syntax.FuncDecl, typeSubst map[string]Type, pkgScope *Scope) (s *Signature) {
+	if fd == nil || fd.Type == nil {
+		return nil
+	}
+	s = resolveSignatureWithSubst(fd.Type, typeSubst, pkgScope)
+	if s == nil {
+		return nil
+	}
+	if fd.Recv != nil {
+		rt := resolveTypeExprWithSubst(fd.Recv.Type, typeSubst, pkgScope)
+		rname := ""
+		if fd.Recv.Name != nil {
+			rname = fd.Recv.Name.Value
+		}
+		s.Recv = NewTCVar(nil, rname, rt)
+	}
+	return s
 }
 
 func (fb *ssaFuncBuilder) ensureImportedSSAPackage(imported *TCPackage) (s *SSAPackage) {
@@ -3656,22 +4079,26 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue)
 		addr = x
 		if _, ok24 := SafeUnderlying(baseType).(*Pointer); !ok24 {
 			found := false
-			if name3, ok25 := e.X.(*syntax.Name); ok25 {
-				obj := fb.lookupObject(name3.Value)
-				if obj != nil {
-					if alloc, ok2 := fb.vars[obj]; ok2 {
-						addr = alloc
-						baseType = NewPointer(baseType)
-						found = true
-					} else if fb.freeVarPtrs != nil {
-						if fv2, ok26 := fb.freeVarPtrs[name3.Value]; ok26 {
-							addr = fv2
+				if name3, ok25 := e.X.(*syntax.Name); ok25 {
+					obj := fb.lookupObject(name3.Value)
+					if obj != nil {
+						if alloc, ok2 := fb.vars[obj]; ok2 {
+							addr = alloc
 							baseType = NewPointer(baseType)
 							found = true
+						} else if g, okG := fb.fn.Pkg.Members[name3.Value].(*SSAGlobal); okG {
+							addr = g
+							baseType = NewPointer(baseType)
+							found = true
+						} else if fb.freeVarPtrs != nil {
+							if fv2, ok26 := fb.freeVarPtrs[name3.Value]; ok26 {
+								addr = fv2
+								baseType = NewPointer(baseType)
+								found = true
+							}
 						}
 					}
 				}
-			}
 			if !found {
 				alloc := &SSAAlloc{Comment: "fieldaddr.tmp"}
 				alloc.typ = NewPointer(baseType)
@@ -3912,6 +4339,12 @@ func (fb *ssaFuncBuilder) buildCompositeLit(e *syntax.CompositeLit) (s SSAValue)
 		return fb.buildSliceLit(e, typ, sl)
 	}
 
+	// Moxie string == []byte: []uint8{...} literals resolve to the string
+	// type. Build them as byte slices (e.g. token.String's idx table).
+	if b, ok := SafeUnderlying(typ).(*Basic); ok && b.Kind == TCString {
+		return fb.buildSliceLit(e, typ, NewSlice(Typ[Uint8]))
+	}
+
 	if mt, isMap := SafeUnderlying(typ).(*TCMap); isMap {
 		mm := &SSAMakeMap{}
 		mm.typ = typ
@@ -4109,6 +4542,7 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *syntax.FuncLit) (s SSAValue) {
 		Prog:      fb.fn.Prog,
 		parent:    fb.fn,
 	}
+	if len(fb.fn.AnonFuncs) >= cap(fb.fn.AnonFuncs) { fb.fn.AnonFuncs = mxutil.GrowCap(fb.fn.AnonFuncs) }
 	push(fb.fn.AnonFuncs, anon)
 
 	ab := newSSAFuncBuilder(anon, fb.info)
@@ -4172,6 +4606,7 @@ func (fb *ssaFuncBuilder) removeVar(name string) {
 	var matches []Object
 	for o := range fb.vars {
 		if ObjectName(o) == name {
+			if len(matches) >= cap(matches) { matches = mxutil.GrowCap(matches) }
 			push(matches, o)
 		}
 	}
@@ -4225,6 +4660,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		extract.typ = Typ[UnsafePointer]
 		extract.name = fb.nextName()
 		extract.setBlock(fb.currentBlock)
+		if len(fb.currentBlock.Instrs) >= cap(fb.currentBlock.Instrs) { fb.currentBlock.Instrs = mxutil.GrowCap(fb.currentBlock.Instrs) }
 		push(fb.currentBlock.Instrs, extract)
 		return extract
 	}
@@ -4238,6 +4674,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		idx.typ = NewPointer(Typ[Uint8])
 		idx.name = fb.nextName()
 		idx.setBlock(fb.currentBlock)
+		if len(fb.currentBlock.Instrs) >= cap(fb.currentBlock.Instrs) { fb.currentBlock.Instrs = mxutil.GrowCap(fb.currentBlock.Instrs) }
 		push(fb.currentBlock.Instrs, idx)
 		return idx
 	}
@@ -4264,6 +4701,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 	if obj == nil {
 		// Fail loud: a dropped call compiles the caller to garbage
 		// (zeroinitializer returns) and crashes far from the cause.
+		if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
 		push(cctx.compileErrors,
 			"undefined: "|imported.Path|"."|funcName|" (called from "|fb.fn.name|")")
 		return nil
@@ -4384,6 +4822,7 @@ func (fb *ssaFuncBuilder) getOrCreateFreeVar(name string, typ Type) (s SSAValue)
 		typ:    typ,
 		parent: fb.fn,
 	}
+	if len(fb.fn.FreeVars) >= cap(fb.fn.FreeVars) { fb.fn.FreeVars = mxutil.GrowCap(fb.fn.FreeVars) }
 	push(fb.fn.FreeVars, fv)
 	if fb.freeVarPtrs == nil {
 		fb.freeVarPtrs = map[string]*SSAFreeVar{}
@@ -4606,15 +5045,25 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 		if fn.Signature != nil && fn.Signature.Recv != nil {
 			recvParam := fn.Signature.Recv
 			_, recvIsPtr := SafeUnderlying(recvParam.Typ).(*Pointer)
-			if recvIsPtr && !isPtr {
-				if nameExpr, ok41 := sel.X.(*syntax.Name); ok41 {
-					obj := fb.lookupObject(nameExpr.Value)
-					if obj != nil {
-						if alloc, ok3 := fb.vars[obj]; ok3 {
-							recv = alloc
-						}
+		if recvIsPtr && !isPtr {
+			if nameExpr, ok41 := sel.X.(*syntax.Name); ok41 {
+				obj := fb.lookupObject(nameExpr.Value)
+				if obj != nil {
+					if alloc, ok3 := fb.vars[obj]; ok3 {
+						recv = alloc
 					}
-				} else if innerSel, ok42 := sel.X.(*syntax.SelectorExpr); ok42 {
+				}
+				// Receiver is a package-level global: pass its address.
+				// The global itself is emitted as its address (@pkg.global).
+				if g, okG := fb.fn.Pkg.Members[nameExpr.Value].(*SSAGlobal); okG {
+					recv = g
+				} else if tv, okT := obj.(*TCVar); okT && tv.Pkg != nil && tv.Pkg != fb.fn.Pkg.Pkg {
+					impPkg := fb.ensureImportedSSAPackage(tv.Pkg)
+					if g, okG := impPkg.Members[nameExpr.Value].(*SSAGlobal); okG {
+						recv = g
+					}
+				}
+			} else if innerSel, ok42 := sel.X.(*syntax.SelectorExpr); ok42 {
 					addr := fb.buildSelectorAddr(innerSel)
 					if addr != nil {
 						recv = addr
@@ -4839,11 +5288,18 @@ func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *syntax.SelectorExpr, recv SS
 }
 
 func (fb *ssaFuncBuilder) resolveType(e syntax.Expr) (t Type) {
-	if ev, ok := e.(*syntax.Name); ok && (ev.Value == "int" || ev.Value == "uint") {
-		mxutil.WriteStr(2, "compile error: " | ev.Value | " is not a valid type (use int32, int64, uint32, uint64 etc.)\n")
-		return nil
-	}
 	return fb.resolveTypeAST(e)
+}
+
+// resolveTypeProbe resolves e as a type without reporting "undefined" errors.
+// Used by buildCall to detect type-conversion calls (int32(x)); the callee of
+// a normal function call is not a type and must not produce a diagnostic.
+func (fb *ssaFuncBuilder) resolveTypeProbe(e syntax.Expr) (t Type) {
+	saved := fb.quietTypeErr
+	fb.quietTypeErr = true
+	t = fb.resolveTypeAST(e)
+	fb.quietTypeErr = saved
+	return t
 }
 
 func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
@@ -4852,10 +5308,6 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
 	}
 	switch ev := e.(type) {
 	case *syntax.Name:
-		if ev.Value == "int" || ev.Value == "uint" {
-			mxutil.WriteStr(2, "compile error: " | ev.Value | " is not a valid type (use int32, int64, uint32, uint64 etc.)\n")
-			return nil
-		}
 		if fb.typeSubst != nil {
 			if t2, ok44 := fb.typeSubst[ev.Value]; ok44 {
 				return t2
@@ -4873,6 +5325,15 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
 			}
 			return tn.Typ
 		}
+		if obj == nil {
+			if !fb.quietTypeErr {
+				// Not a predeclared or user-defined name: int/uint/make/new/
+				// complex64 etc are undefined in Moxie, not restricted.
+				if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
+				push(cctx.compileErrors, "undefined: " | ev.Value)
+			}
+		}
+		return nil
 	case *syntax.Operation:
 		if ev.Y == nil && ev.Op == token.Mul {
 			base := fb.resolveTypeAST(ev.X)
@@ -4897,7 +5358,7 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
 			} else if ev.Len != nil {
 				cv := tcEvalConstExpr(ev.Len, fb.fn.Pkg.Pkg.Scope, -1)
 				if cv == nil && fb.localConsts != nil {
-					cv = fb.evalLocalConstExpr(ev.Len)
+					cv = fb.evalLocalConstExpr(ev.Len, -1)
 				}
 				if ci2, ok47 := cv.(*ConstInt); ok47 {
 					n = ci2.V
@@ -4956,6 +5417,7 @@ func (fb *ssaFuncBuilder) resolveInterfaceTypeAST(e *syntax.InterfaceType) (t *T
 		}
 		sig := fb.resolveFuncTypeAST(ft)
 		if sig != nil {
+			if len(methods) >= cap(methods) { methods = mxutil.GrowCap(methods) }
 			push(methods, NewTCIfaceMethod(f.Name.Value, sig))
 		}
 	}
@@ -4976,11 +5438,13 @@ func (fb *ssaFuncBuilder) resolveStructTypeAST(e *syntax.StructType) (t *TCStruc
 		if f.Name != nil {
 			name = f.Name.Value
 		}
+		if len(fields) >= cap(fields) { fields = mxutil.GrowCap(fields) }
 		push(fields, NewTCField(fb.fn.Pkg.Pkg, name, typ, f.Name == nil))
 		tag := ""
 		if i < len(e.TagList) && e.TagList[i] != nil {
 			tag = e.TagList[i].Value
 		}
+		if len(tags) >= cap(tags) { tags = mxutil.GrowCap(tags) }
 		push(tags, tag)
 	}
 	return NewTCStruct(fields, tags)
@@ -4997,6 +5461,7 @@ func (fb *ssaFuncBuilder) resolveFuncTypeAST(ft *syntax.FuncType) (s *Signature)
 		if p.Name != nil {
 			pname = p.Name.Value
 		}
+		if len(params) >= cap(params) { params = mxutil.GrowCap(params) }
 		push(params, NewTCVar(nil, pname, typ))
 	}
 	var results []*TCVar
@@ -5006,6 +5471,7 @@ func (fb *ssaFuncBuilder) resolveFuncTypeAST(ft *syntax.FuncType) (s *Signature)
 		if r.Name != nil {
 			rname = r.Name.Value
 		}
+		if len(results) >= cap(results) { results = mxutil.GrowCap(results) }
 		push(results, NewTCVar(nil, rname, typ))
 	}
 	var pTuple, rTuple *Tuple
@@ -5122,8 +5588,10 @@ func (fb *ssaFuncBuilder) substTypeParams(t Type) (tv Type) {
 				nt := fb.substTypeParams(p.Typ)
 				if nt != p.Typ {
 					changed = true
+					if len(params) >= cap(params) { params = mxutil.GrowCap(params) }
 					push(params, NewTCVar(nil, p.Name, nt))
 				} else {
+					if len(params) >= cap(params) { params = mxutil.GrowCap(params) }
 					push(params, p)
 				}
 			}
@@ -5135,8 +5603,10 @@ func (fb *ssaFuncBuilder) substTypeParams(t Type) (tv Type) {
 				nt := fb.substTypeParams(r.Typ)
 				if nt != r.Typ {
 					changed = true
+					if len(results) >= cap(results) { results = mxutil.GrowCap(results) }
 					push(results, NewTCVar(nil, r.Name, nt))
 				} else {
+					if len(results) >= cap(results) { results = mxutil.GrowCap(results) }
 					push(results, r)
 				}
 			}
@@ -5168,6 +5638,21 @@ func ssaExtractConst(v SSAValue) (s *SSAConst) {
 	return nil
 }
 
+// constValType returns the untyped SSA type matching a constant value.
+func constValType(cv ConstVal) (t Type) {
+	switch cv.(type) {
+	case *ConstInt:
+		return Typ[UntypedInt]
+	case *ConstFloat:
+		return Typ[UntypedFloat]
+	case *ConstStr:
+		return Typ[UntypedString]
+	case *ConstBool:
+		return Typ[UntypedBool]
+	}
+	return nil
+}
+
 func ssaExprNames(e syntax.Expr) (ns []*syntax.Name) {
 	if e == nil {
 		return nil
@@ -5177,6 +5662,7 @@ func ssaExprNames(e syntax.Expr) (ns []*syntax.Name) {
 	}
 	if l, ok := e.(*syntax.ListExpr); ok {
 		var names []*syntax.Name
+		names = []*syntax.Name{:0:len(l.ElemList)}
 		for _, el := range l.ElemList {
 			if n2, ok50 := el.(*syntax.Name); ok50 {
 				push(names, n2)
@@ -5368,10 +5854,17 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope
 	case *syntax.FuncType:
 		return resolveSignatureWithSubst(ev, typeSubst, pkgScope)
 	case *syntax.IndexExpr:
-		// Generic instantiation Curve[P]: erase to the base named type.
-		// Fields typed by the type param are substituted at use sites via
-		// fb.typeSubst.
-		return resolveTypeExprWithSubst(ev.X, typeSubst, pkgScope)
+		// Generic instantiation Curve[P]: erase to the base named type for
+		// layout, but carry the instantiation args on a shallow Named copy
+		// so method resolution can substitute the type params. Fields typed
+		// by the type param are substituted at use sites via fb.typeSubst.
+		base := resolveTypeExprWithSubst(ev.X, typeSubst, pkgScope)
+		args := resolveTypeArgsExpr(ev.Index, typeSubst, pkgScope)
+		if named, ok := base.(*Named); ok && named.TArgs == nil && len(args) > 0 {
+			inst := &Named{Obj: named.Obj, Under: named.Under, Methods: named.Methods, TParams: named.TParams, TArgs: args}
+			return inst
+		}
+		return base
 	case *syntax.SelectorExpr:
 		if pkgName, ok := ev.X.(*syntax.Name); ok {
 			if imp := cctx.universe.LookupByName(pkgName.Value); imp != nil {
@@ -5387,6 +5880,24 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope
 	return nil
 }
 
+// resolveTypeArgsExpr resolves the type arguments of a generic
+// instantiation expression (single type or ListExpr of types).
+func resolveTypeArgsExpr(indexExpr syntax.Expr, typeSubst map[string]Type, pkgScope *Scope) (ts []Type) {
+	if indexExpr == nil {
+		return nil
+	}
+	if le, ok := indexExpr.(*syntax.ListExpr); ok {
+		for _, te := range le.ElemList {
+			if len(ts) >= cap(ts) { ts = mxutil.GrowCap(ts) }
+			push(ts, resolveTypeExprWithSubst(te, typeSubst, pkgScope))
+		}
+	} else {
+		if len(ts) >= cap(ts) { ts = mxutil.GrowCap(ts) }
+		push(ts, resolveTypeExprWithSubst(indexExpr, typeSubst, pkgScope))
+	}
+	return ts
+}
+
 func resolveSignatureWithSubst(ft *syntax.FuncType, typeSubst map[string]Type, pkgScope *Scope) (s *Signature) {
 	if ft == nil {
 		return nil
@@ -5399,6 +5910,7 @@ func resolveSignatureWithSubst(ft *syntax.FuncType, typeSubst map[string]Type, p
 		if p.Name != nil {
 			name = p.Name.Value
 		}
+		if len(params) >= cap(params) { params = mxutil.GrowCap(params) }
 		push(params, NewTCVar(nil, name, typ))
 	}
 	if len(ft.ParamList) > 0 {
@@ -5418,6 +5930,7 @@ func resolveSignatureWithSubst(ft *syntax.FuncType, typeSubst map[string]Type, p
 			if _, ok := r.Type.(*syntax.Name); ok {
 			}
 		}
+		if len(results) >= cap(results) { results = mxutil.GrowCap(results) }
 		push(results, NewTCVar(nil, name, typ))
 	}
 	var paramTuple *Tuple
@@ -5871,7 +6384,8 @@ func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList 
 				}
 				typeArgs := fb.resolveExplicitTypeArgs(ie.Index, fd)
 				args := fb.buildArgs(argList)
-				return fb.monomorphizeAndCall(fd, x.Sel.Value, typeArgs, args, fb.fn.Pkg, pn.Imported.Path, hasDots)
+				mono, handledMono := fb.monomorphizeAndCall(fd, x.Sel.Value, typeArgs, args, fb.fn.Pkg, pn.Imported.Path, hasDots)
+				return mono, handledMono
 			}
 		}
 	}
@@ -5888,6 +6402,7 @@ func (fb *ssaFuncBuilder) resolveExplicitTypeArgs(indexExpr syntax.Expr, fd *syn
 	var result []Type
 	for _, te := range typeExprs {
 		t := fb.resolveTypeAST(te)
+		if len(result) >= cap(result) { result = mxutil.GrowCap(result) }
 		push(result, t)
 	}
 	if len(result) < len(fd.TParamList) {
@@ -5933,6 +6448,7 @@ func resolveInterfaceFromAST(e *syntax.InterfaceType) (t *TCInterface) {
 		for _, f := range e.MethodList {
 			if f.Name != nil {
 				m := NewTCIfaceMethod(f.Name.Value, nil)
+				if len(methods) >= cap(methods) { methods = mxutil.GrowCap(methods) }
 				push(methods, m)
 			}
 		}

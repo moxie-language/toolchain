@@ -7,6 +7,7 @@
 package http
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bufio"
 	"bytes"
 	"context"
@@ -549,7 +550,8 @@ func (w *response) declareTrailer(k string) {
 		// Forbidden by RFC 7230, section 4.1.2
 		return
 	}
-	w.trailers = append(w.trailers, k)
+	if len(w.trailers) >= cap(w.trailers) { w.trailers = mxutil.GrowCap(w.trailers) }
+	w.trailers = push(w.trailers, k)
 }
 
 // requestTooLarge is called by maxBytesReader when too much input has
@@ -1859,7 +1861,7 @@ func (c *conn) serve(ctx context.Context) {
 	ctx = context.WithValue(ctx, LocalAddrContextKey, c.rwc.LocalAddr())
 	var inFlightResponse *response
 	defer func() {
-		if err := recover(); err != nil && err != ErrAbortHandler {
+		if err := recover(); err != "" && err != string(ErrAbortHandler) {
 			const size = 64 << 10
 			buf := []byte{:size}
 			buf = buf[:runtime.Stack(buf, false)]
@@ -2822,7 +2824,7 @@ func HandleFunc(pattern string, handler func(ResponseWriter, *Request)) {
 
 func (mux *ServeMux) register(pattern string, handler Handler) {
 	if err := mux.registerErr(pattern, handler); err != nil {
-		panic(err)
+		panic(err.Error())
 	}
 }
 
@@ -3116,7 +3118,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // This function should start protocol-specific graceful shutdown,
 // but should not wait for shutdown to complete.
 func (s *Server) RegisterOnShutdown(f func()) {
-	s.onShutdown = append(s.onShutdown, f)
+	if len(s.onShutdown) >= cap(s.onShutdown) { s.onShutdown = mxutil.GrowCap(s.onShutdown) }
+	s.onShutdown = push(s.onShutdown, f)
 }
 
 // closeIdleConns closes all idle connections and reports whether the
@@ -3471,10 +3474,12 @@ func adjustNextProtos(nextProtos [][]byte, protos Protocols) [][]byte {
 		return false
 	})
 	if protos.HTTP2() && !have.HTTP2() {
-		nextProtos = append(nextProtos, "h2")
+		if len(nextProtos) >= cap(nextProtos) { nextProtos = mxutil.GrowCap(nextProtos) }
+		nextProtos = push(nextProtos, "h2")
 	}
 	if protos.HTTP1() && !have.HTTP1() {
-		nextProtos = append(nextProtos, "http/1.1")
+		if len(nextProtos) >= cap(nextProtos) { nextProtos = mxutil.GrowCap(nextProtos) }
+		nextProtos = push(nextProtos, "http/1.1")
 	}
 	return nextProtos
 }
@@ -3554,7 +3559,7 @@ func (s *Server) SetKeepAlivesEnabled(v bool) {
 	// TODO: Issue 26303: close HTTP/2 conns as soon as they become idle.
 }
 
-func (s *Server) logf(format string, args ...any) {
+func (s *Server) logf(format string, args ...fmt.Stringer) {
 	if s.ErrorLog != nil {
 		s.ErrorLog.Printf(format, args...)
 	} else {
@@ -3565,7 +3570,7 @@ func (s *Server) logf(format string, args ...any) {
 // logf prints to the ErrorLog of the *Server associated with request r
 // via ServerContextKey. If there's no associated server, or if ErrorLog
 // is nil, logging is done via the log package's standard logger.
-func logf(r *Request, format string, args ...any) {
+func logf(r *Request, format string, args ...fmt.Stringer) {
 	serverInitOnce()
 	var s *Server
 	if okv, okok := r.Context().Value(ServerContextKey).(*Server); okok {
@@ -3736,10 +3741,10 @@ func (h *timeoutHandler) ServeHTTP(w ResponseWriter, r *Request) {
 		h:   Header{},
 		req: r,
 	}
-	panicChan := chan any{1}
+	panicChan := chan string{1}
 	func() {
 		defer func() {
-			if p := recover(); p != nil {
+			if p := recover(); p != "" {
 				panicChan <- p
 			}
 		}()

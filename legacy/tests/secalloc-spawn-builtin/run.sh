@@ -16,7 +16,7 @@
 #     (the byte must travel via the inherited pipe, not stderr)
 set -euo pipefail
 
-MOXIEROOT="${MOXIEROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+MOXIEROOT="${MOXIEROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 MOXIE="${MOXIE:-$MOXIEROOT/moxie}"
 TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
@@ -28,7 +28,7 @@ BIN="$TMPDIR/secalloc_spawn_builtin_test"
 
 cd "$MOXIEROOT"
 
-if ! "$MOXIE" build -o "$BIN" ./tests/secalloc-spawn-builtin 2>"$TMPDIR/build.err"; then
+if ! "$MOXIE" build -o "$BIN" ./legacy/tests/secalloc-spawn-builtin 2>"$TMPDIR/build.err"; then
     echo "FAIL secalloc-spawn-builtin: compilation failed"
     cat "$TMPDIR/build.err"
     exit 1

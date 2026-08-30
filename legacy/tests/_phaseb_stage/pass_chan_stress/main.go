@@ -14,7 +14,7 @@ type Msg struct {
 	Body []byte
 }
 
-func (m Msg) EncodeTo(w io.Writer) error {
+func (m *Msg) EncodeTo(w io.Writer) (err error) {
 	var hdr [8]byte
 	hdr[0] = byte(m.Seq)
 	hdr[1] = byte(m.Seq >> 8)
@@ -40,7 +40,7 @@ func (m Msg) EncodeTo(w io.Writer) error {
 	return err
 }
 
-func (m *Msg) DecodeFrom(r io.Reader) error {
+func (m *Msg) DecodeFrom(r io.Reader) (err error) {
 	var hdr [8]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return err
@@ -84,7 +84,7 @@ func main() {
 	const N = uint32(10000)
 	for i := uint32(0); i < N; i++ {
 		// Varying body size: 0, 1, 2, ..., 1023, 0, 1, ...
-		bodyLen := int(i % 1024)
+		bodyLen := int32(i % 1024)
 		body := make([]byte, bodyLen)
 		expectedSum := uint32(0)
 		for j := 0; j < bodyLen; j++ {

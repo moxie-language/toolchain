@@ -1,6 +1,7 @@
 package json
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"errors"
 	"math"
@@ -62,16 +63,16 @@ func appendValue(buf []byte, typ *_rawType, ptr unsafe.Pointer) ([]byte, error) 
 			if err != nil {
 				return nil, err
 			}
-			return append(buf, b...), nil
+			return push(buf, b...), nil
 		}
 	}
 
 	switch typ.kind() {
 	case jkBool:
 		if *(*bool)(ptr) {
-			return append(buf, "true"...), nil
+			return push(buf, "true"...), nil
 		}
-		return append(buf, "false"...), nil
+		return push(buf, "false"...), nil
 
 	case jkInt:
 		return strconv.AppendInt(buf, int64(*(*int32)(ptr)), 10), nil
@@ -116,7 +117,7 @@ func appendValue(buf []byte, typ *_rawType, ptr unsafe.Pointer) ([]byte, error) 
 		elemType := typ.elem()
 		elemPtr := *(*unsafe.Pointer)(ptr)
 		if elemPtr == nil {
-			return append(buf, "null"...), nil
+			return push(buf, "null"...), nil
 		}
 		return appendValue(buf, elemType, elemPtr)
 
@@ -141,7 +142,8 @@ func appendValue(buf []byte, typ *_rawType, ptr unsafe.Pointer) ([]byte, error) 
 
 func appendStruct(buf []byte, typ *_rawType, ptr unsafe.Pointer) ([]byte, error) {
 	sf := structFieldsFor(typ)
-	buf = append(buf, '{')
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, '{')
 	first := true
 	for i := 0; i < len(sf.params); i++ {
 		p := &sf.params[i]
@@ -154,31 +156,36 @@ func appendStruct(buf []byte, typ *_rawType, ptr unsafe.Pointer) ([]byte, error)
 			continue
 		}
 		if !first {
-			buf = append(buf, ',')
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, ',')
 		}
 		first = false
 		buf = appendString(buf, p.jsonName)
-		buf = append(buf, ':')
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, ':')
 		var err error
 		buf, err = appendValue(buf, ft, fp)
 		if err != nil {
 			return nil, err
 		}
 	}
-	buf = append(buf, '}')
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, '}')
 	return buf, nil
 }
 
 func appendSlice(buf []byte, typ *_rawType, ptr unsafe.Pointer) ([]byte, error) {
 	hdr := (*_sliceHeader)(ptr)
 	if hdr.data == nil {
-		return append(buf, "null"...), nil
+		return push(buf, "null"...), nil
 	}
 	elemType := typ.elem()
-	buf = append(buf, '[')
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, '[')
 	for i := 0; i < hdr.len; i++ {
 		if i > 0 {
-			buf = append(buf, ',')
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, ',')
 		}
 		elemPtr := unsafe.Add(hdr.data, elemType.size()*uintptr(i))
 		var err error
@@ -187,12 +194,14 @@ func appendSlice(buf []byte, typ *_rawType, ptr unsafe.Pointer) ([]byte, error) 
 			return nil, err
 		}
 	}
-	buf = append(buf, ']')
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, ']')
 	return buf, nil
 }
 
 func appendString(buf []byte, s []byte) []byte {
-	buf = append(buf, '"')
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, '"')
 	start := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -220,12 +229,16 @@ func appendString(buf []byte, s []byte) []byte {
 				continue
 			}
 		}
-		buf = append(buf, s[start:i]...)
-		buf = append(buf, esc...)
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, s[start:i]...)
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, esc...)
 		start = i + 1
 	}
-	buf = append(buf, s[start:]...)
-	buf = append(buf, '"')
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, s[start:]...)
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, '"')
 	return buf
 }
 
@@ -354,7 +367,8 @@ func SnakeCase(s []byte) []byte {
 		if runStart > wordStart {
 			// Flush lowercase word before the run.
 			if len(buf) > 0 {
-				buf = append(buf, '_')
+				if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+				buf = push(buf, '_')
 			}
 			buf = appendLower(buf, s[wordStart:runStart])
 		}
@@ -363,7 +377,8 @@ func SnakeCase(s []byte) []byte {
 			// Lookahead: last uppercase of run belongs to next word.
 			if runLen > 1 {
 				if len(buf) > 0 {
-					buf = append(buf, '_')
+					if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+					buf = push(buf, '_')
 				}
 				buf = appendLower(buf, s[runStart:i-1])
 			}
@@ -372,7 +387,8 @@ func SnakeCase(s []byte) []byte {
 		} else {
 			// End of string or next char is also uppercase - entire run is one word.
 			if len(buf) > 0 {
-				buf = append(buf, '_')
+				if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+				buf = push(buf, '_')
 			}
 			buf = appendLower(buf, s[runStart:i])
 			wordStart = i
@@ -380,7 +396,8 @@ func SnakeCase(s []byte) []byte {
 	}
 	if wordStart < len(s) {
 		if len(buf) > 0 {
-			buf = append(buf, '_')
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, '_')
 		}
 		buf = appendLower(buf, s[wordStart:])
 	}
@@ -393,9 +410,11 @@ func isLower(c byte) bool { return c >= 'a' && c <= 'z' }
 func appendLower(buf []byte, s []byte) []byte {
 	for _, c := range s {
 		if isUpper(c) {
-			buf = append(buf, c+32)
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, c+32)
 		} else {
-			buf = append(buf, c)
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, c)
 		}
 	}
 	return buf

@@ -33,6 +33,8 @@ func init() {
 	llvm.InitializeAllAsmPrinters()
 }
 
+// createBuiltinCall handles builtin function calls that are not handled
+
 // Config is the configuration for the compiler. Most settings should be copied
 // directly from compileopts.Config, it recreated here to decouple the compiler
 // package a bit and because it makes caching easier.
@@ -52,10 +54,6 @@ type Config struct {
 	RelocationModel string
 	SizeLevel       int
 	MoxieVersion    string // for llvm.ident
-
-	// MXHPackages is the set of import paths loaded from .mxh cache files.
-	// Used to detect cross-binary spawn targets.
-	MXHPackages map[string]bool
 
 	// Various compiler options that determine how code is generated.
 	Scheduler          string
@@ -98,12 +96,8 @@ type compilerContext struct {
 	embedGlobals     map[string][]*loader.EmbedFile
 	pkg              *types.Package
 	packageDir       string // directory for this package
+	pkgModulePath    string // module path of the package being compiled
 	runtimePkg       *types.Package
-
-	// Loader-generated make() byte offsets per file. Used by the restriction
-	// check to distinguish literal-syntax lowerings from user-written make().
-	makeExemptOffsets map[string][]int
-
 
 	// Wasm spawn dispatch table. Populated by scanWasmSpawnTargets before
 	// package compilation; consumed by emitWasmSpawnEntry after.
@@ -115,6 +109,11 @@ type compilerContext struct {
 	// to mark channel params pipe-bound to ChildPipeFd.
 	nativeSpawnTargets []*nativeSpawnTarget
 	nativeSpawnIndex   map[*ssa.Function]*nativeSpawnTarget
+
+	// Sovereign arena: named struct types whose methods mutate the receiver.
+	// Their LLVM struct type gets a trailing _arena pointer field, and their
+	// methods borrow the receiver's arena in the prologue. Lazily computed.
+	sovereignCache typeutil.Map // types.Type -> bool
 }
 
 // newCompilerContext returns a new compiler context ready for use, most
@@ -210,14 +209,13 @@ type builder struct {
 
 	// Arena prologue/epilogue state.
 	fnArenaVal    llvm.Value // per-function arena (freed on return)
+	parentArenaVal llvm.Value // caller's arena, saved by a sovereign borrow
 	arenaActive   bool       // true after emitArenaPrologue
-
-	// Receiver write tracking: for methods that allocate receiver-bound data
-	// in the method arena, the table records (fieldAddr, valuePtr, typeDesc)
-	// so the epilogue can relocate those values to the caller arena.
-	recvWriteTable   llvm.Value // alloca for []recvWriteEntry slice
-	recvWriteCount   llvm.Value // alloca for int32 counter
-	recvWriteMax     int32      // max entries (constant, e.g. 16)
+	arenaBorrowed bool       // true when the arena is the receiver's sovereign arena
+	stableRegistered bool   // true when the receiver's arena is registered as stable for this frame
+	sovereignActive  bool   // true inside a mutating sovereign method
+	sovereignGroupVal llvm.Value // the receiver's sovGroup (for alloc redirection)
+	sovereignEscapeAllocs map[ssa.Value]bool // allocs/makes that flow into receiver stores
 }
 
 func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *builder {
@@ -327,8 +325,8 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 	c := newCompilerContext(moduleName, machine, config, dumpSSA, printAllocs)
 	defer c.dispose()
 	c.packageDir = pkg.OriginalDir()
+	c.pkgModulePath = pkg.Module.Path
 	c.embedGlobals = pkg.EmbedGlobals
-	c.makeExemptOffsets = pkg.MakeExemptOffsets
 	c.pkg = pkg.Pkg
 	rtSSAPkg := ssaPkg.Prog.ImportedPackage("runtime")
 	if rtSSAPkg != nil {
@@ -538,7 +536,7 @@ func (c *compilerContext) makeLLVMType(goType types.Type) llvm.Type {
 		return c.dataPtrType // all pointers are the same
 	case *types.Interface:
 		return c.getLLVMRuntimeType("_interface")
-	case *types.Named:
+case *types.Named:
 		if st, ok := typ.Underlying().(*types.Struct); ok {
 			// Structs are a special case. While other named types are ignored
 			// in LLVM IR, named structs are implemented as named structs in
@@ -1449,30 +1447,91 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		b.deferInitFunc()
 	}
 
-	// Arena prologue: emit FnArenaPush + ArenaMark for functions that return
-	// pointer-containing types. Matches stage4 ir_deepcopy emitArenaPrologue.
-	if b.runtimePkg != nil && funcNeedsArenaCopy(b.fn) {
+	// Arena prologue. Only methods that actually write to receiver fields
+	// borrow the receiver's sovereign arena, so receiver writes land directly
+	// in the object's stable arena (no relocation table needed). Every other
+	// method - read-only methods included - uses a regular per-function arena
+	// so its scratch is cleared at return. Matches stage4 ir_deepcopy.
+	if b.hasReceiver() {
+		recvType := b.fn.Signature.Recv().Type()
+		if ptr, ok := recvType.(*types.Pointer); ok {
+			elem := ptr.Elem()
+			if named, ok := elem.(*types.Named); ok && b.runtimePkg != nil && b.isSovereignNamedType(named) {
+				if ssaFuncWritesReceiver(b.fn) {
+					b.emitSovereignPrologue(named)
+					return
+				}
+				// Read-only method: keep the regular fn arena for scratch, but
+				// register the receiver's arena as stable so returned views into
+				// receiver data stay views.
+				b.emitSovereignStableRegister()
+			}
+		}
+	}
+	needsArena := funcNeedsArenaCopy(b.fn)
+	if b.runtimePkg != nil && needsArena {
 		b.fnArenaVal = b.createRuntimeCall("FnArenaPush", []llvm.Value{
 			llvm.ConstInt(b.uintptrType, 65536, false),
 		}, "fn_arena")
 		b.arenaActive = true
 	}
+}
 
-	// Receiver write table: for methods with a pointer-containing receiver.
-	// The table records stores of method-allocated values into receiver fields
-	// so the arena epilogue can relocate them to the caller's arena.
-	if b.hasReceiver() && b.arenaActive {
-		recvType := b.fn.Signature.Recv().Type()
-		if typeNeedsCopy(recvType) {
-			b.recvWriteMax = 16
-			tableBytes := b.recvWriteMax * 24 // 3 pointers per entry
-			tableType := llvm.ArrayType(b.ctx.Int8Type(), int(tableBytes))
-			b.recvWriteTable = b.CreateAlloca(tableType, "rwt")
-			b.CreateStore(llvm.ConstNull(tableType), b.recvWriteTable)
-			b.recvWriteCount = b.CreateAlloca(b.ctx.Int32Type(), "rwt.cnt")
-			b.CreateStore(llvm.ConstInt(b.ctx.Int32Type(), 0, false), b.recvWriteCount)
-		}
+// emitSovereignPrologue sets up a mutating method on a sovereign receiver:
+// a scratch fn arena becomes the current arena, the receiver's group is
+// acquired (lazily created), its data arena is registered stable, and a
+// new allocation batch is started. Allocations that flow into receiver
+// stores are redirected to the data arena (see sovereignEscapeAllocs).
+func (b *builder) emitSovereignPrologue(named *types.Named) {
+	b.parentArenaVal = b.createRuntimeCall("CurrentArena", nil, "sov.parent")
+	recv := b.fn.Params[0]
+	recvVal := b.locals[recv]
+	recvPtr := b.CreateBitCast(recvVal, b.dataPtrType, "sov.recv")
+	recvType := b.fn.Signature.Recv().Type()
+	if ptr, ok := recvType.(*types.Pointer); ok {
+		recvType = ptr.Elem()
 	}
+	typeDesc := b.getTypeCode(recvType)
+	group := b.createRuntimeCall("codecSovereignArena", []llvm.Value{recvPtr, typeDesc}, "sov.group")
+	b.sovereignGroupVal = group
+	b.sovereignActive = true
+	b.collectReceiverEscapeAllocs()
+	dataArena := b.createRuntimeCall("sovDataArena", []llvm.Value{group}, "sov.data")
+	b.createRuntimeCall("SovereignRegStable", []llvm.Value{dataArena}, "")
+	b.createRuntimeCall("codecSovereignEnter", []llvm.Value{group}, "")
+	// Scratch fn arena: all non-receiver-escape allocations land here and
+	// are freed wholesale at return. Marked as a sovereign scratch so the
+	// codec treats it (and ancestor sovereign scratches) as transient
+	// during store-backs, even across recursive sovereign calls.
+	b.fnArenaVal = b.createRuntimeCall("FnArenaPush", []llvm.Value{
+		llvm.ConstInt(b.uintptrType, 65536, false),
+	}, "fn_arena")
+	b.createRuntimeCall("SovereignMarkScratch", nil, "")
+	b.arenaActive = true
+	b.arenaBorrowed = false
+	b.stableRegistered = true
+}
+
+// emitSovereignStableRegister registers the receiver's sovereign arena (if it
+// already exists) as the frame's stable arena - no allocation, no arena
+// switch. Used by read-only methods of sovereign types so returned views into
+// receiver data stay views while the method's own scratch lives in a regular
+// fn arena.
+func (b *builder) emitSovereignStableRegister() {
+	recv := b.fn.Params[0]
+	recvVal := b.locals[recv]
+	var recvPtr llvm.Value
+	if recvVal.Type().TypeKind() == llvm.PointerTypeKind {
+		recvPtr = recvVal
+	} else {
+		// Value receiver: copy into an alloca so we can take its address.
+		tmp := b.CreateAlloca(recvVal.Type(), "sov.recv.copy")
+		b.CreateStore(recvVal, tmp)
+		recvPtr = tmp
+	}
+	recvPtr = b.CreateBitCast(recvPtr, b.dataPtrType, "sov.stable.recv")
+	b.createRuntimeCall("codecRegStable", []llvm.Value{recvPtr}, "")
+	b.stableRegistered = true
 }
 
 // createFunction builds the LLVM IR implementation for this function. The
@@ -1626,120 +1685,6 @@ func (b *builder) hasReceiver() bool {
 	return sig != nil && sig.Recv() != nil
 }
 
-// isReceiverAddr walks a FieldAddr/IndexAddr chain to determine whether
-// the base is the receiver parameter (fn.Params[0]).
-func (b *builder) isReceiverAddr(addr ssa.Value) bool {
-	if !b.hasReceiver() {
-		return false
-	}
-	// Walk through FieldAddr/IndexAddr to the base.
-	seen := make(map[ssa.Value]bool)
-	var walk func(v ssa.Value) ssa.Value
-	walk = func(v ssa.Value) ssa.Value {
-		if seen[v] {
-			return nil
-		}
-		seen[v] = true
-		switch vv := v.(type) {
-		case *ssa.FieldAddr:
-			return walk(vv.X)
-		case *ssa.IndexAddr:
-			return walk(vv.X)
-		default:
-			return v
-		}
-	}
-	base := walk(addr)
-	return base != nil && base == b.fn.Params[0]
-}
-
-// valueIsMethodAllocated returns true if v was allocated by this function
-// (MakeSlice, MakeMap, Alloc) and is not a parameter, global, or call result
-// from another non-runtime function.
-func (b *builder) valueIsMethodAllocated(v ssa.Value) bool {
-	seen := make(map[ssa.Value]bool)
-	var walk func(v ssa.Value) bool
-	walk = func(v ssa.Value) bool {
-		if seen[v] {
-			return false
-		}
-		seen[v] = true
-		switch vv := v.(type) {
-		case *ssa.Parameter, *ssa.Global, *ssa.Const, *ssa.Builtin, *ssa.FreeVar:
-			return false
-		case *ssa.Alloc, *ssa.MakeSlice, *ssa.MakeMap, *ssa.MakeChan, *ssa.MakeClosure:
-			return true
-		case *ssa.Call:
-			if fn := vv.Common().StaticCallee(); fn != nil {
-				if fn.Pkg != nil && fn.Pkg.Pkg != nil {
-					path := fn.Pkg.Pkg.Path()
-					if path == "runtime" || path == "unsafe" {
-						return true // runtime allocations are method-local
-					}
-				}
-			}
-			return false
-		case *ssa.FieldAddr:
-			return walk(vv.X)
-		case *ssa.IndexAddr:
-			return walk(vv.X)
-		case *ssa.Slice:
-			return walk(vv.X)
-		case *ssa.UnOp:
-			return walk(vv.X)
-		case *ssa.MakeInterface:
-			return walk(vv.X)
-		case *ssa.ChangeInterface:
-			return walk(vv.X)
-		case *ssa.Phi:
-			for _, pred := range vv.Edges {
-				if walk(pred) {
-					return true
-				}
-			}
-			return false
-		}
-		return false
-	}
-	return walk(v)
-}
-
-// emitRecvWriteAppend emits code to append a (fieldAddr, valuePtr, typeDesc) entry
-// to the receiver write table. Emits straight-line IR with no branches.
-func (b *builder) emitRecvWriteAppend(fieldAddr llvm.Value, val llvm.Value, ft types.Type) {
-	if b.recvWriteTable.IsNil() {
-		return
-	}
-	countPtr := b.CreateLoad(b.ctx.Int32Type(), b.recvWriteCount, "rwt.cnt")
-	maxVal := llvm.ConstInt(b.ctx.Int32Type(), uint64(b.recvWriteMax), false)
-	isFull := b.CreateICmp(llvm.IntSGE, countPtr, maxVal, "rwt.full")
-	// Select: if full, use old count (no-op); else use count.
-	// GEP into table at count * 24.
-	index := b.CreateSExt(countPtr, b.uintptrType, "")
-	stride := llvm.ConstInt(b.uintptrType, 24, false)
-	offset := b.CreateBinOp(llvm.Mul, index, stride, "rwt.off")
-	tablePtr := b.CreateBitCast(b.recvWriteTable, b.dataPtrType, "rwt.tbl")
-	entryPtr := b.CreateGEP(b.ctx.Int8Type(), tablePtr, []llvm.Value{offset}, "rwt.ent")
-	// Store fieldAddr at [0:8] unconditionally (safe: table has extra space for overflow write)
-	fdPtr := b.CreateBitCast(entryPtr, llvm.PointerType(b.dataPtrType, 0), "rwt.fa")
-	b.CreateStore(fieldAddr, fdPtr)
-	// Store valuePtr at [8:16]
-	valOff := llvm.ConstInt(b.uintptrType, 8, false)
-	valPtr := b.CreateGEP(b.ctx.Int8Type(), entryPtr, []llvm.Value{valOff}, "rwt.vp")
-	vpPtr := b.CreateBitCast(valPtr, llvm.PointerType(b.dataPtrType, 0), "")
-	b.CreateStore(val, vpPtr)
-	// Store typeDesc at [16:24]
-	typeOff := llvm.ConstInt(b.uintptrType, 16, false)
-	typePtr := b.CreateGEP(b.ctx.Int8Type(), entryPtr, []llvm.Value{typeOff}, "rwt.tp")
-	typeDesc := b.getTypeCode(ft)
-	tdPtr := b.CreateBitCast(typePtr, llvm.PointerType(b.dataPtrType, 0), "")
-	b.CreateStore(typeDesc, tdPtr)
-	// Conditionally increment: if not full, count = count + 1
-	newCount := b.CreateBinOp(llvm.Add, countPtr, llvm.ConstInt(b.ctx.Int32Type(), 1, false), "rwt.inc")
-	gatedCount := b.CreateSelect(isFull, countPtr, newCount, "rwt.gate")
-	b.CreateStore(gatedCount, b.recvWriteCount)
-}
-
 // createInstruction builds the LLVM IR equivalent instructions for the
 // particular Go SSA instruction.
 func (b *builder) createInstruction(instr ssa.Instruction) {
@@ -1767,7 +1712,7 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		b.createDefer(instr)
 	case *ssa.Go:
 		// Moxie: go keyword banned in user code. Runtime/internal exempt.
-		if isUserPackage(b.fn.Pkg) {
+		if b.isUserPackage(b.fn.Pkg) {
 			b.addError(instr.Pos(), "moxie: the go keyword is not supported (there are no goroutines)")
 		} else {
 			b.createGo(instr)
@@ -1795,6 +1740,13 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 			b.createRuntimeCall("destroyDeferFrame", []llvm.Value{b.deferFrame}, "")
 		}
 	if !b.arenaActive {
+		// Read-only sovereign methods register the receiver's arena as
+		// stable without pushing an fn arena; restore that registration
+		// here since emitArenaEpilogue (which does the restore) is only
+		// reached when arenaActive.
+		if b.stableRegistered {
+			b.createRuntimeCall("SovereignRegRestore", nil, "")
+		}
 		if len(instr.Results) == 0 {
 			b.CreateRetVoid()
 		} else if len(instr.Results) == 1 {
@@ -1828,17 +1780,79 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		if b.targetData.TypeAllocSize(llvmVal.Type()) == 0 {
 			return
 		}
-		b.CreateStore(llvmVal, llvmAddr)
-		// Receiver write tracking: append (fieldAddr, val, type) to table.
-		if b.recvWriteTable.IsNil() == false {
-			if b.isReceiverAddr(instr.Addr) && b.valueIsMethodAllocated(instr.Val) {
-				ft := instr.Val.Type()
-				b.emitRecvWriteAppend(llvmAddr, llvmVal, ft)
+		// Sovereign receiver-field store: if the value is not a statically
+		// redirected allocation (it lives in the scratch fn arena), copy it
+		// into the receiver's data arena so it survives this call.
+		if b.sovereignActive && len(b.fn.Params) > 0 &&
+			ssaValueRootedIn(instr.Addr, b.fn.Params[0]) {
+			vt := instr.Val.Type()
+			if typeNeedsCopy(vt) {
+				base := baseAllocValue(instr.Val)
+				if base == nil || !b.sovereignEscapeAllocs[base] {
+					llvmVal = b.emitSovereignStoreBack(llvmVal, vt)
+				}
 			}
 		}
+		b.CreateStore(llvmVal, llvmAddr)
 	default:
 		b.addError(instr.Pos(), "unknown instruction: "+instr.String())
 	}
+}
+
+// emitSovereignStoreBack copies a value into the receiver's data arena via
+// the codec: encode in the scratch arena, decode with the data arena
+// current, so the copy (and its nested data) lands in receiver-owned
+// memory. The whole round-trip is one runtime call so it can skip the copy
+// during manual-arena mode (where the scratch arena is already stable) and
+// avoid splitting the current basic block mid-loop.
+func (b *builder) emitSovereignStoreBack(val llvm.Value, t types.Type) llvm.Value {
+	cbType := b.getLLVMRuntimeType("CodecBuf")
+	ssType := b.getLLVMRuntimeType("codecSeenSet")
+	dsType := b.getLLVMRuntimeType("codecDecodeSeen")
+	rtPkg := b.program.ImportedPackage("runtime")
+
+	cb := b.CreateAlloca(cbType, "ssb")
+	b.CreateStore(llvm.ConstNull(cbType), cb)
+	ss := b.CreateAlloca(ssType, "sss")
+	b.CreateStore(llvm.ConstNull(ssType), ss)
+	b.createRuntimeCall("codecBufInit", []llvm.Value{cb}, "")
+	if ssInit, ok := rtPkg.Members["codecSeenInit"].(*ssa.Function); ok {
+		ssInitType, ssInitFn := b.getFunction(ssInit)
+		b.CreateCall(ssInitType, ssInitFn, []llvm.Value{ss, llvm.Undef(b.dataPtrType)}, "")
+	}
+	b.createRuntimeCall("codecSetTopOnlyTransient", []llvm.Value{llvm.ConstInt(b.ctx.Int1Type(), 1, false)}, "")
+	b.emitCodecEncodeReturn(val, t, cb, ss)
+	b.createRuntimeCall("codecSetTopOnlyTransient", []llvm.Value{llvm.ConstInt(b.ctx.Int1Type(), 0, false)}, "")
+
+	cbLoad := b.CreateLoad(cbType, cb, "")
+	cbData := b.CreateExtractValue(cbLoad, 0, "ssd")
+	dataPtr := b.CreateExtractValue(cbData, 0, "ssd.ptr")
+	dataLen := b.CreateExtractValue(cbData, 1, "ssd.len")
+
+	dataArena := b.createRuntimeCall("sovDataArena", []llvm.Value{b.sovereignGroupVal}, "sov.data")
+	saveArena := b.createRuntimeCall("CurrentArena", nil, "ssave")
+	b.createRuntimeCall("SetCurrentArena", []llvm.Value{dataArena}, "")
+
+	sliceType := b.getLLVMRuntimeType("_string")
+	cb2 := b.CreateAlloca(cbType, "ssb2")
+	sliceVal := llvm.Undef(sliceType)
+	sliceVal = b.CreateInsertValue(sliceVal, dataPtr, 0, "")
+	sliceVal = b.CreateInsertValue(sliceVal, dataLen, 1, "")
+	sliceVal = b.CreateInsertValue(sliceVal, dataLen, 2, "")
+	cb2Val := llvm.Undef(cbType)
+	cb2Val = b.CreateInsertValue(cb2Val, sliceVal, 0, "")
+	cb2Val = b.CreateInsertValue(cb2Val, llvm.ConstInt(b.ctx.Int32Type(), 0, false), 1, "")
+	b.CreateStore(cb2Val, cb2)
+	ds := b.CreateAlloca(dsType, "ssds")
+	b.CreateStore(llvm.ConstNull(dsType), ds)
+	if dsInit, ok := rtPkg.Members["codecDecodeSeenInit"].(*ssa.Function); ok {
+		dsInitType, dsInitFn := b.getFunction(dsInit)
+		b.CreateCall(dsInitType, dsInitFn, []llvm.Value{ds, llvm.Undef(b.dataPtrType)}, "")
+	}
+	decoded := b.emitCodecDecodeReturn(val, t, cb2, ds)
+
+	b.createRuntimeCall("SetCurrentArena", []llvm.Value{saveArena}, "")
+	return decoded
 }
 
 // sliceAllocType returns the slice/string underlying type for an Alloc,
@@ -1890,38 +1904,10 @@ func (b *builder) makeDefaultStringSlice(pos token.Pos) llvm.Value {
 	return sliceVal
 }
 
-// createBuiltin lowers a builtin Go function (append, close, delete, etc.) to
+// createBuiltin lowers a builtin Go function (close, delete, etc.) to
 // LLVM IR. It uses runtime calls for some builtins.
 func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, callName string, pos token.Pos) (llvm.Value, error) {
 	switch callName {
-	case "append":
-		src := argValues[0]
-		elems := argValues[1]
-		srcBuf := b.CreateExtractValue(src, 0, "append.srcBuf")
-		srcLen := b.CreateExtractValue(src, 1, "append.srcLen")
-		srcCap := b.CreateExtractValue(src, 2, "append.srcCap")
-		elemsBuf := b.CreateExtractValue(elems, 0, "append.elemsBuf")
-		elemsLen := b.CreateExtractValue(elems, 1, "append.elemsLen")
-		// Moxie: argTypes[0] may be *types.Basic (string) due to string=[]byte.
-		var elemType llvm.Type
-		switch ut := argTypes[0].Underlying().(type) {
-		case *types.Slice:
-			elemType = b.getLLVMType(ut.Elem())
-		case *types.Basic: // string=[]byte: element is byte
-			elemType = b.ctx.Int8Type()
-		default:
-			panic("append on non-slice type: " + argTypes[0].String())
-		}
-		elemSize := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(elemType), false)
-		result := b.createRuntimeCall("sliceAppend", []llvm.Value{srcBuf, elemsBuf, srcLen, srcCap, elemsLen, elemSize}, "append.new")
-		newPtr := b.CreateExtractValue(result, 0, "append.newPtr")
-		newLen := b.CreateExtractValue(result, 1, "append.newLen")
-		newCap := b.CreateExtractValue(result, 2, "append.newCap")
-		newSlice := llvm.Undef(src.Type())
-		newSlice = b.CreateInsertValue(newSlice, newPtr, 0, "")
-		newSlice = b.CreateInsertValue(newSlice, newLen, 1, "")
-		newSlice = b.CreateInsertValue(newSlice, newCap, 2, "")
-		return newSlice, nil
 	case "cap":
 		value := argValues[0]
 		var llvmCap llvm.Value
@@ -2054,9 +2040,9 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		}
 		return result, nil
 	case "push":
-		// push(s, v1, v2, ...) - lazy-init + bounds check via slicePush,
-		// then individual element stores via GEP. No sliceAppend (elements
-		// are passed individually, not as a slice).
+		// then individual element stores via GEP. Elements are passed
+		// individually; push(s, e...) with a spread slice is recognized
+		// as a bulk copy of e's elements.
 		src := argValues[0]
 		var elemType llvm.Type
 		switch ut := argTypes[0].Underlying().(type) {
@@ -2069,10 +2055,56 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		}
 		elemSize := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(elemType), false)
 		numElems := llvm.ConstInt(b.uintptrType, uint64(len(argValues)-1), false)
+
+		var sliceElemGoType types.Type
+		if sl, ok := argTypes[0].Underlying().(*types.Slice); ok {
+			sliceElemGoType = sl.Elem()
+		}
+
+		// Spread form: push(s, elems...) where elems is a slice whose
+		// element type matches the destination slice's element type.
+		// string=[]byte unification: a string arg into a []byte also
+		// spreads (append semantics).
+		spread := false
+		if len(argValues) == 2 {
+			if s2, ok := argTypes[1].Underlying().(*types.Slice); ok && sliceElemGoType != nil &&
+				types.Identical(s2.Elem(), sliceElemGoType) {
+				spread = true
+			}
+			if b2, ok := argTypes[1].Underlying().(*types.Basic); ok &&
+				b2.Info()&types.IsString != 0 && sliceElemGoType != nil {
+				if eb, ok := sliceElemGoType.Underlying().(*types.Basic); ok && eb.Kind() == types.Byte {
+					spread = true
+				}
+			}
+		}
+
 		srcPtr := b.CreateExtractValue(src, 0, "push.ptr")
 		srcLen := b.CreateExtractValue(src, 1, "push.len")
 		srcCap := b.CreateExtractValue(src, 2, "push.cap")
-		// slicePush: nil-init cap 4096 + bounds check. Returns {ptr, newLen, cap}.
+		if spread {
+			// n = len(elems); slicePush grows/initializes to fit, then
+			// memmove the whole element block in.
+			elemSlice := argValues[1]
+			numElems = b.CreateExtractValue(elemSlice, 1, "push.spread.len")
+			result := b.createRuntimeCall("slicePush", []llvm.Value{
+				srcPtr, srcLen, srcCap, numElems, elemSize,
+			}, "push.hdr")
+			newPtr := b.CreateExtractValue(result, 0, "push.newptr")
+			newLen := b.CreateExtractValue(result, 1, "push.newlen")
+			newCap := b.CreateExtractValue(result, 2, "push.newcap")
+			srcElemArr := b.CreateExtractValue(elemSlice, 0, "push.spread.ptr")
+			if b.targetData.TypeAllocSize(b.getLLVMType(argTypes[0])) > 0 {
+				dst := b.CreateInBoundsGEP(elemType, newPtr, []llvm.Value{srcLen}, "push.spread.dst")
+				b.createRuntimeCall("memmove", []llvm.Value{dst, srcElemArr, b.CreateMul(numElems, elemSize, "push.bytes")}, "")
+			}
+			newSlice := llvm.Undef(src.Type())
+			newSlice = b.CreateInsertValue(newSlice, newPtr, 0, "")
+			newSlice = b.CreateInsertValue(newSlice, newLen, 1, "")
+			newSlice = b.CreateInsertValue(newSlice, newCap, 2, "")
+			return newSlice, nil
+		}
+		// slicePush: nil-init + bounds check. Returns {ptr, newLen, cap}.
 		result := b.createRuntimeCall("slicePush", []llvm.Value{
 			srcPtr, srcLen, srcCap, numElems, elemSize,
 		}, "push.hdr")
@@ -2082,10 +2114,6 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		// Store each element at ptr[oldLen + i].
 		// If the slice element is an interface and the value is a concrete
 		// type, emit MakeInterface to create the proper {typecode, data} pair.
-		var sliceElemGoType types.Type
-		if sl, ok := argTypes[0].Underlying().(*types.Slice); ok {
-			sliceElemGoType = sl.Elem()
-		}
 		for i := 1; i < len(argValues); i++ {
 			val := argValues[i]
 			if sliceElemGoType != nil && types.IsInterface(sliceElemGoType) && !types.IsInterface(argTypes[i]) {
@@ -2129,6 +2157,11 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		src := argValues[0]
 		srcCap := b.CreateExtractValue(src, 2, "resize.cap")
 		newLen := argValues[1]
+		// The slice length/cap fields are uintptr-width; widen the int32
+		// resize argument before comparing and inserting.
+		if newLen.Type().IntTypeWidth() < srcCap.Type().IntTypeWidth() {
+			newLen = b.CreateZExt(newLen, srcCap.Type(), "resize.widen")
+		}
 		// Bounds check: newLen <= cap (unsigned comparison catches n < 0).
 		overflow := b.CreateICmp(llvm.IntUGT, newLen, srcCap, "resize.overflow")
 		b.createRuntimeAssert(overflow, "resize", "slicePanic")
@@ -2524,8 +2557,16 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 				return llvm.Value{}, b.makeError(expr.Pos(), fmt.Sprintf("value is too big (%v bytes)", size))
 			}
 			sizeValue := llvm.ConstInt(b.uintptrType, size, false)
-			layoutValue := b.createObjectLayout(typ, expr.Pos())
-			buf := b.createRuntimeCall("alloc", []llvm.Value{sizeValue, layoutValue}, expr.Comment)
+			var buf llvm.Value
+			if b.sovereignActive && b.sovereignEscapeAllocs[expr] {
+				// Receiver-owned allocation: goes to the sovereign data
+				// arena so it survives the scratch fn arena.
+				typeDesc := b.getTypeCode(expr.Type().Underlying().(*types.Pointer).Elem())
+				buf = b.createRuntimeCall("codecSovereignAlloc", []llvm.Value{b.sovereignGroupVal, sizeValue, typeDesc}, expr.Comment)
+			} else {
+				layoutValue := b.createObjectLayout(typ, expr.Pos())
+				buf = b.createRuntimeCall("alloc", []llvm.Value{sizeValue, layoutValue}, expr.Comment)
+			}
 			align := b.targetData.ABITypeAlignment(typ)
 			buf.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(align)))
 			if b.PrintAllocs != nil {
@@ -2748,6 +2789,17 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		val := b.getValue(expr.X, getPos(expr))
 		return b.createMakeInterface(val, expr.X.Type(), expr.Pos()), nil
 	case *ssa.MakeMap:
+		if b.sovereignActive && b.sovereignEscapeAllocs[expr] {
+			// Receiver-owned map: create it with the data arena current so
+			// the map's internal allocations (hashmap struct, bucket
+			// arrays) land there and are recorded as opaque blocks.
+			dataArena := b.createRuntimeCall("sovDataArena", []llvm.Value{b.sovereignGroupVal}, "sov.data")
+			saveArena := b.createRuntimeCall("CurrentArena", nil, "sov.save")
+			b.createRuntimeCall("SetCurrentArena", []llvm.Value{dataArena}, "")
+			result, err := b.createMakeMap(expr)
+			b.createRuntimeCall("SetCurrentArena", []llvm.Value{saveArena}, "")
+			return result, err
+		}
 		return b.createMakeMap(expr)
 	case *ssa.MakeSlice:
 		sliceLen := b.getValue(expr.Len, getPos(expr))
@@ -2778,7 +2830,14 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		}
 		sliceSize := b.CreateBinOp(llvm.Mul, elemSizeValue, sliceCapCast, "makeslice.cap")
 		layoutValue := b.createObjectLayout(llvmElemType, expr.Pos())
-		slicePtr := b.createRuntimeCall("alloc", []llvm.Value{sliceSize, layoutValue}, "makeslice.buf")
+		var slicePtr llvm.Value
+		if b.sovereignActive && b.sovereignEscapeAllocs[expr] {
+			// Receiver-owned backing array: opaque record (the slice
+			// value's walker walks the elements).
+			slicePtr = b.createRuntimeCall("codecSovereignAlloc", []llvm.Value{b.sovereignGroupVal, sliceSize, llvm.ConstNull(b.dataPtrType)}, "makeslice.buf")
+		} else {
+			slicePtr = b.createRuntimeCall("alloc", []llvm.Value{sliceSize, layoutValue}, "makeslice.buf")
+		}
 		slicePtr.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(elemAlign)))
 		if b.PrintAllocs != nil {
 			b.emitLogAlloc(expr.Pos())
@@ -2897,19 +2956,12 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			sliceLen := b.CreateSub(high, low, "slice.len")
 			srcPtr := b.CreateInBoundsGEP(b.getLLVMType(arrayType), value, indices, "slice.ptr")
 
-			// Moxie: subslice copies to break aliasing.
-			ptrElemType := b.getLLVMType(arrayType.Elem())
-			elemSize := b.targetData.TypeAllocSize(ptrElemType)
-			elemSizeVal := llvm.ConstInt(b.uintptrType, elemSize, false)
-			copySize := b.CreateMul(sliceLen, elemSizeVal, "slice.copy.size")
-			layoutValue := b.createObjectLayout(ptrElemType, expr.Pos())
-			newPtr := b.createRuntimeCall("alloc", []llvm.Value{copySize, layoutValue}, "slice.copy.buf")
-			b.createRuntimeCall("memcpy", []llvm.Value{newPtr, srcPtr, copySize}, "")
-
+			// Moxie: subslice is a view (no aliasing hazard - no shared
+			// memory; the codec deep-copies slices crossing arena borders).
 			slice := llvm.Undef(b.getLLVMType(expr.Type()))
-			slice = b.CreateInsertValue(slice, newPtr, 0, "")
+			slice = b.CreateInsertValue(slice, srcPtr, 0, "")
 			slice = b.CreateInsertValue(slice, sliceLen, 1, "")
-			slice = b.CreateInsertValue(slice, sliceLen, 2, "") // cap = len for copies
+			slice = b.CreateInsertValue(slice, b.CreateSub(max, low, "slice.arrmax"), 2, "")
 			return slice, nil
 
 		case *types.Slice:
@@ -2950,18 +3002,14 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 				return slice, nil
 			}
 
-			// s[low:high] - Moxie: copy to break aliasing.
+			// s[low:high] - Moxie: view (no shared memory; codec copies at
+			// return, so aliasing is not a hazard).
 			srcPtr := b.CreateInBoundsGEP(ptrElemType, oldPtr, []llvm.Value{low}, "")
-			elemSize := b.targetData.TypeAllocSize(ptrElemType)
-			elemSizeVal := llvm.ConstInt(b.uintptrType, elemSize, false)
-			copySize := b.CreateMul(newLen, elemSizeVal, "slice.copy.size")
-			layoutValue := b.createObjectLayout(ptrElemType, expr.Pos())
-			newPtr := b.createRuntimeCall("alloc", []llvm.Value{copySize, layoutValue}, "slice.copy.buf")
-			b.createRuntimeCall("memcpy", []llvm.Value{newPtr, srcPtr, copySize}, "")
+			newCap := b.CreateSub(max, low, "slice.cap")
 			slice := llvm.Undef(b.getLLVMType(typ))
-			slice = b.CreateInsertValue(slice, newPtr, 0, "")
+			slice = b.CreateInsertValue(slice, srcPtr, 0, "")
 			slice = b.CreateInsertValue(slice, newLen, 1, "")
-			slice = b.CreateInsertValue(slice, newLen, 2, "") // cap = len for copies
+			slice = b.CreateInsertValue(slice, newCap, 2, "")
 			return slice, nil
 
 		case *types.Basic:
@@ -3401,7 +3449,7 @@ func (b *builder) createBinOp(op token.Token, typ, ytyp types.Type, x, y llvm.Va
 			}
 		}
 		// Moxie: | on any slice type is concatenation.
-		// Uses sliceAppend with cap=len to force fresh allocation.
+		// Allocates a fresh buffer of exactly len(x)+len(y), copies both.
 		if op == token.OR {
 			xPtr := b.CreateExtractValue(x, 0, "concat.xPtr")
 			xLen := b.CreateExtractValue(x, 1, "concat.xLen")
@@ -3409,7 +3457,7 @@ func (b *builder) createBinOp(op token.Token, typ, ytyp types.Type, x, y llvm.Va
 			yLen := b.CreateExtractValue(y, 1, "concat.yLen")
 			elemType := b.getLLVMType(typ.Elem())
 			elemSize := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(elemType), false)
-			result := b.createRuntimeCall("sliceAppend", []llvm.Value{xPtr, yPtr, xLen, xLen, yLen, elemSize}, "concat.new")
+			result := b.createRuntimeCall("sliceConcat", []llvm.Value{xPtr, yPtr, xLen, yLen, elemSize}, "concat.new")
 			newPtr := b.CreateExtractValue(result, 0, "concat.ptr")
 			newLen := b.CreateExtractValue(result, 1, "concat.len")
 			newCap := b.CreateExtractValue(result, 2, "concat.cap")
@@ -3511,17 +3559,19 @@ func (c *compilerContext) createConst(expr *ssa.Const, pos token.Pos) llvm.Value
 			return llvm.ConstInt(llvmType, n, false)
 		} else if typ.Info()&types.IsString != 0 {
 			str := constant.StringVal(expr.Value)
-			strLen := llvm.ConstInt(c.uintptrType, uint64(len(str)), false)
-			var strPtr llvm.Value
-			if str != "" {
-				objname := c.pkg.Path() + "$string"
-				globalType := llvm.ArrayType(c.ctx.Int8Type(), len(str))
-				global := llvm.AddGlobal(c.mod, globalType, objname)
-				global.SetInitializer(c.ctx.ConstString(str, false))
-				global.SetLinkage(llvm.InternalLinkage)
-				global.SetGlobalConstant(true)
-				global.SetUnnamedAddr(true)
-				global.SetAlignment(1)
+strLen := llvm.ConstInt(c.uintptrType, uint64(len(str)), false)
+				var strPtr llvm.Value
+				if str != "" {
+					objname := c.pkg.Path() + "$string"
+					globalType := llvm.ArrayType(c.ctx.Int8Type(), len(str))
+					global := llvm.AddGlobal(c.mod, globalType, objname)
+					global.SetInitializer(c.ctx.ConstString(str, false))
+					global.SetLinkage(llvm.InternalLinkage)
+					// Moxie: string=[]byte means string literals are mutable;
+					// keep them in .data, not .rodata, so slice writes work.
+					global.SetGlobalConstant(false)
+					global.SetUnnamedAddr(true)
+					global.SetAlignment(1)
 				if c.Debug {
 					// Unfortunately, expr.Pos() is always token.NoPos.
 					position := c.program.Fset.Position(pos)
@@ -3909,6 +3959,244 @@ func typeNeedsCopy(t types.Type) bool {
 	return typeNeedsCopyDepth(t, 0)
 }
 
+// isSovereignNamedType reports whether t is a named struct type with at
+// least one method that writes to receiver fields. Such types get a
+// trailing _arena pointer field and their methods borrow the receiver's
+// arena in the prologue. Matches stage4 ir_deepcopy.mx isSovereignNamedType.
+func (c *compilerContext) isSovereignNamedType(t types.Type) bool {
+	named, ok := t.(*types.Named)
+	if !ok {
+		return false
+	}
+	if !typeNeedsCopy(named) {
+		return false
+	}
+	// The syntax package's Scanner and Parser overwrite receiver fields
+	// (token literals, positions) as scratch rather than accumulating
+	// state. Treating them as sovereign store-backs each token string into
+	// a data arena whose compaction then drops the older strings that the
+	// AST still references. Keep them out of the sovereign arena model.
+	// Likewise the compiler's own main package (irEmitter, SSA builders)
+	// accumulates transient IR/SSA scratch that must live in the compile
+	// arena, not a per-receiver sovereign data arena.
+	// All other packages, including pkg/types, stay sovereign: the sovGroup
+	// lifecycle is bound to the receiver's arena (ArenaFree/ArenaRelease
+	// sweep), so per-package scratch receivers get fresh groups each
+	// package and dead groups die with their arena - no exemption needed.
+	if obj := named.Obj(); obj != nil && obj.Pkg() != nil {
+		p := obj.Pkg().Path()
+		if p == "main" || p == "git.smesh.lol/moxie/pkg/syntax" {
+			return false
+		}
+	}
+	if v := c.sovereignCache.At(named); v != nil {
+		return v.(bool)
+	}
+	// Scan all program methods for a receiver-rooted field store. This runs
+	// once per type and the cache holds the result.
+	// The cache put is deferred until the scan completes (recursion guard:
+	// method bodies reference their own type).
+	c.sovereignCache.Set(named, false) // provisional
+	found := false
+	if c.program != nil {
+		ms := c.program.MethodSets.MethodSet(types.NewPointer(named))
+		for i := 0; i < ms.Len() && !found; i++ {
+			obj := ms.At(i).Obj()
+			sel, ok2 := obj.(*types.Func)
+			if !ok2 || sel == nil {
+				continue
+			}
+			fn := c.program.FuncValue(sel)
+			if fn == nil || fn.Blocks == nil {
+				continue
+			}
+			if ssaFuncWritesReceiver(fn) {
+				found = true
+			}
+		}
+		// Also scan package members: methods may be defined only in the
+		// current package before MethodSets resolves them.
+		if !found {
+			for _, pkg := range c.program.AllPackages() {
+				for _, memb := range pkg.Members {
+					fn, ok3 := memb.(*ssa.Function)
+					if !ok3 || fn == nil || fn.Signature == nil || fn.Signature.Recv() == nil || fn.Blocks == nil {
+						continue
+					}
+					if fn.Signature.Recv().Type() != named &&
+						!c.receiverMatches(fn.Signature.Recv().Type(), named) {
+						continue
+					}
+					if ssaFuncWritesReceiver(fn) {
+						found = true
+						break
+					}
+				}
+				if found {
+					break
+				}
+			}
+		}
+	}
+	c.sovereignCache.Set(named, found)
+	return found
+}
+
+// receiverMatches reports whether the receiver type rt is *named or named.
+func (c *compilerContext) receiverMatches(rt types.Type, named *types.Named) bool {
+	if p, ok := rt.(*types.Pointer); ok {
+		rt = p.Elem()
+	}
+	return rt == types.Type(named)
+}
+
+// ssaFuncWritesReceiver reports whether fn stores into a field of its own
+// receiver parameter (through any pointer/field chain rooted at the receiver).
+func ssaFuncWritesReceiver(fn *ssa.Function) bool {
+	if fn.Signature == nil || fn.Signature.Recv() == nil || len(fn.Params) == 0 {
+		return false
+	}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			store, ok := instr.(*ssa.Store)
+			if !ok {
+				continue
+			}
+			if ssaValueRootedIn(store.Addr, fn.Params[0]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// collectReceiverEscapeAllocs computes the set of alloc/make instructions
+// whose values flow into receiver-rooted stores. These allocations are
+// redirected to the receiver's data arena so their data survives the
+// scratch fn arena. Transitive: values stored INTO an escape-rooted
+// alloc's memory also escape.
+func (b *builder) collectReceiverEscapeAllocs() {
+	b.sovereignEscapeAllocs = map[ssa.Value]bool{}
+	if len(b.fn.Params) == 0 {
+		return
+	}
+	recv := b.fn.Params[0]
+	escape := map[ssa.Value]bool{}
+	for _, block := range b.fn.Blocks {
+		for _, instr := range block.Instrs {
+			if st, ok := instr.(*ssa.Store); ok && ssaValueRootedIn(st.Addr, recv) {
+				escape[st.Val] = true
+			}
+		}
+	}
+	changed := true
+	for changed {
+		changed = false
+		for _, block := range b.fn.Blocks {
+			for _, instr := range block.Instrs {
+				st, ok := instr.(*ssa.Store)
+				if !ok {
+					continue
+				}
+				if addrRootsIntoValue(escape, st.Addr) && !escape[st.Val] {
+					escape[st.Val] = true
+					changed = true
+				}
+			}
+		}
+	}
+	for v := range escape {
+		if base := baseAllocValue(v); base != nil {
+			b.sovereignEscapeAllocs[base] = true
+		}
+	}
+}
+
+// addrRootsIntoValue reports whether the address derives (field/index
+// chains) from any marked value.
+func addrRootsIntoValue(marked map[ssa.Value]bool, addr ssa.Value) bool {
+	seen := map[ssa.Value]bool{}
+	var walk func(x ssa.Value) bool
+	walk = func(x ssa.Value) bool {
+		if seen[x] {
+			return false
+		}
+		seen[x] = true
+		switch xv := x.(type) {
+		case *ssa.FieldAddr:
+			return walk(xv.X)
+		case *ssa.IndexAddr:
+			return walk(xv.X)
+		case *ssa.Slice:
+			return walk(xv.X)
+		case *ssa.UnOp:
+			return walk(xv.X)
+		default:
+			return marked[x]
+		}
+	}
+	return walk(addr)
+}
+
+// baseAllocValue resolves a value down to its base allocation/make
+// instruction, or nil if it is not rooted in one.
+func baseAllocValue(v ssa.Value) ssa.Value {
+	for {
+		switch xv := v.(type) {
+		case *ssa.Alloc, *ssa.MakeSlice, *ssa.MakeMap, *ssa.MakeChan:
+			return xv
+		case *ssa.FieldAddr:
+			v = xv.X
+		case *ssa.IndexAddr:
+			v = xv.X
+		case *ssa.UnOp:
+			v = xv.X
+		case *ssa.Extract:
+			v = xv.Tuple
+		case *ssa.Convert:
+			v = xv.X
+		case *ssa.ChangeType:
+			v = xv.X
+		case *ssa.ChangeInterface:
+			v = xv.X
+		case *ssa.MakeInterface:
+			v = xv.X
+		case *ssa.Slice:
+			v = xv.X
+		default:
+			return nil
+		}
+	}
+}
+
+// ssaValueRootedIn reports whether the SSA value v derives from target
+// through field/index/slice operations.
+func ssaValueRootedIn(v, target ssa.Value) bool {
+	seen := map[ssa.Value]bool{}
+	var walk func(x ssa.Value) bool
+	walk = func(x ssa.Value) bool {
+		if seen[x] {
+			return false
+		}
+		seen[x] = true
+		switch xv := x.(type) {
+		case *ssa.FieldAddr:
+			return walk(xv.X)
+		case *ssa.IndexAddr:
+			return walk(xv.X)
+		case *ssa.Slice:
+			return walk(xv.X)
+		case *ssa.UnOp:
+			return walk(xv.X)
+		case *ssa.MakeInterface:
+			return walk(xv.X)
+		default:
+			return x == target
+		}
+	}
+	return walk(v)
+}
+
 func typeNeedsCopyDepth(t types.Type, depth int) bool {
 	if t == nil || depth > 20 {
 		return false
@@ -3973,8 +4261,10 @@ func funcNeedsArenaCopy(fn *ssa.Function) bool {
 // would need deep copying when crossing an arena boundary.
 
 
-// emitArenaEpilogue encodes return values to CodecBuf in fn_arena,
-// pops the arena, then decodes into the caller's arena.
+// emitArenaEpilogue encodes return values to CodecBuf in fn_arena, pops
+// the arena, then decodes into the caller's arena. For a sovereign (mutating)
+// method the arena is the borrowed receiver arena; restore the caller's
+// arena and relocate pointer returns out of it.
 func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 	llvmType := b.llvmFn.GlobalValueType().ReturnType()
 
@@ -3988,8 +4278,17 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 		}
 	}
 
+	if b.sovereignActive {
+		// Mark this call's allocations dead except what the receiver's
+		// fields still reference; update batch statistics.
+		b.createRuntimeCall("codecSovereignEndCall", []llvm.Value{b.sovereignGroupVal}, "")
+	}
+
 	sig := b.fn.Signature
 	if len(instr.Results) == 0 {
+		if b.stableRegistered {
+			b.createRuntimeCall("SovereignRegRestore", nil, "")
+		}
 		b.createRuntimeCall("FnArenaPopFree", nil, "")
 		b.CreateRetVoid()
 		return
@@ -4009,6 +4308,9 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 		}
 	}
 	if !needsCodec {
+		if b.stableRegistered {
+			b.createRuntimeCall("SovereignRegRestore", nil, "")
+		}
 		b.createRuntimeCall("FnArenaPopFree", nil, "")
 		b.CreateRet(retVal)
 		return
@@ -4042,17 +4344,6 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 			rootReg = b.CreateExtractValue(retVal, i, "cext")
 		}
 		b.emitCodecEncodeReturn(rootReg, rt, cb, ss)
-	}
-
-	// Encode receiver writes before arena pop.
-	if b.recvWriteTable.IsNil() == false && b.recvWriteCount.IsNil() == false {
-		countLoad := b.CreateLoad(b.ctx.Int32Type(), b.recvWriteCount, "rwt.ecnt")
-		if encRW, ok := rtPkg.Members["codecEncodeRecvWrites"].(*ssa.Function); ok {
-			rwType, rwFn := b.getFunction(encRW)
-			b.CreateCall(rwType, rwFn, []llvm.Value{
-				cb, ss, b.recvWriteTable, countLoad, llvm.Undef(b.dataPtrType),
-			}, "")
-		}
 	}
 
 	// Save CodecBuf data pointer and length (scalars survive FnArenaPop)
@@ -4095,20 +4386,30 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 		}
 	}
 
-	// Decode receiver writes from the codec buffer.
-	if b.recvWriteTable.IsNil() == false && b.recvWriteCount.IsNil() == false {
-		if decRW, ok := rtPkg.Members["codecDecodeRecvWrites"].(*ssa.Function); ok {
-			drType, drFn := b.getFunction(decRW)
-			b.CreateCall(drType, drFn, []llvm.Value{
-				cb2, ds, b.recvWriteTable, llvm.Undef(b.dataPtrType),
-			}, "")
-		}
-	}
-
+	// If a basic-typed pointer escaped into the fn arena, the pointee's
+	// memory must stay alive for the caller: leak the arena instead of
+	// releasing it to the pool.
+	escaped := b.createRuntimeCall("codecEscapeOccurred", nil, "cesc")
+	joinBlock := b.ctx.AddBasicBlock(b.llvmFn, "rel.join")
+	relBlock := b.ctx.AddBasicBlock(b.llvmFn, "rel.release")
+	leakBlock := b.ctx.AddBasicBlock(b.llvmFn, "rel.leak")
+	escCmp := b.CreateICmp(llvm.IntEQ, escaped, llvm.ConstInt(escaped.Type(), 0, false), "cesc.cmp")
+	b.CreateCondBr(escCmp, relBlock, leakBlock)
+	b.SetInsertPointAtEnd(relBlock)
 	b.createRuntimeCall("ArenaRelease", []llvm.Value{popped}, "")
+	b.CreateBr(joinBlock)
+	b.SetInsertPointAtEnd(leakBlock)
+	b.CreateBr(joinBlock)
+	b.SetInsertPointAtEnd(joinBlock)
+	if b.stableRegistered {
+		b.createRuntimeCall("SovereignRegRestore", nil, "")
+	}
+	if len(instr.Results) == 0 {
+		b.CreateRetVoid()
+		return
+	}
 	b.CreateRet(cur)
 }
-
 
 
 func (b *builder) uintptrConst(val uint64) llvm.Value {
@@ -4121,31 +4422,33 @@ func (b *builder) emitCodecEncodeReturn(val llvm.Value, t types.Type, cb, ss llv
 	rtPkg := b.program.ImportedPackage("runtime")
 	switch u := t.Underlying().(type) {
 	case *types.Struct:
+		// Encode the whole struct via the runtime codec (stage4-symmetric).
+		// The decode side allocates in the caller's arena; encoding the
+		// full struct keeps the wire format in lockstep with codecDecodeValue.
 		slt := b.getLLVMType(t)
 		tmp := b.CreateAlloca(slt, "cestmp")
 		b.CreateStore(val, tmp)
-		for i := 0; i < u.NumFields(); i++ {
-			ft := u.Field(i).Type()
-			gep := b.CreateStructGEP(slt, tmp, i, "cefg")
-			if _, ok := ft.Underlying().(*types.Struct); ok {
-				flt := b.getLLVMType(ft)
-				fld := b.CreateLoad(flt, gep, "cefs")
-				b.emitCodecEncodeReturn(fld, ft, cb, ss)
-			} else {
-				flt := b.getLLVMType(ft)
-				fld := b.CreateLoad(flt, gep, "cefl")
-				b.emitCodecEncodeReturn(fld, ft, cb, ss)
-			}
+		typeDesc := b.getTypeCode(t)
+		if encFn, ok := rtPkg.Members["codecEncodeValue"].(*ssa.Function); ok {
+			encType, encFnVal := b.getFunction(encFn)
+			b.CreateCall(encType, encFnVal, []llvm.Value{
+				cb, ss, tmp, typeDesc, llvm.Undef(b.dataPtrType),
+			}, "")
 		}
 
 	case *types.Basic:
 		if u.Kind() == types.String {
-			ptr := b.CreateExtractValue(val, 0, "")
-			ln := b.CreateExtractValue(val, 1, "")
-			if encFn, ok := rtPkg.Members["codecEncodeStringValue"].(*ssa.Function); ok {
+			// string=[]byte: encode structurally via the type
+			// descriptor so the decode side (also descriptor-keyed)
+			// reads a symmetric wire format.
+			slt := b.getLLVMType(t)
+			tmp := b.CreateAlloca(slt, "cetmp")
+			b.CreateStore(val, tmp)
+			typeDesc := b.getTypeCode(t)
+			if encFn, ok := rtPkg.Members["codecEncodeValue"].(*ssa.Function); ok {
 				encType, encFnVal := b.getFunction(encFn)
 				b.CreateCall(encType, encFnVal, []llvm.Value{
-					cb, ss, ptr, ln, llvm.Undef(b.dataPtrType),
+					cb, ss, tmp, typeDesc, llvm.Undef(b.dataPtrType),
 				}, "")
 			}
 		} else {
@@ -4162,26 +4465,17 @@ func (b *builder) emitCodecEncodeReturn(val llvm.Value, t types.Type, cb, ss llv
 		}
 
 	case *types.Slice:
-		if basic, ok := u.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {
-			ptr := b.CreateExtractValue(val, 0, "")
-			ln := b.CreateExtractValue(val, 1, "")
-			if encFn, ok := rtPkg.Members["codecEncodeStringValue"].(*ssa.Function); ok {
-				encType, encFnVal := b.getFunction(encFn)
-				b.CreateCall(encType, encFnVal, []llvm.Value{
-					cb, ss, ptr, ln, llvm.Undef(b.dataPtrType),
-				}, "")
-			}
-		} else {
-			ptr := b.CreateExtractValue(val, 0, "")
-			ln := b.CreateExtractValue(val, 1, "")
-			cp := b.CreateExtractValue(val, 2, "")
-			typeDesc := b.getTypeCode(t)
-			if encFn, ok := rtPkg.Members["codecEncodeSliceValue"].(*ssa.Function); ok {
-				encType, encFnVal := b.getFunction(encFn)
-				b.CreateCall(encType, encFnVal, []llvm.Value{
-					cb, ss, ptr, ln, cp, typeDesc, llvm.Undef(b.dataPtrType),
-				}, "")
-			}
+		// Encode structurally via the type descriptor (symmetric with
+		// codecDecodeValue on the decode side).
+		slt := b.getLLVMType(t)
+		tmp := b.CreateAlloca(slt, "cetmp")
+		b.CreateStore(val, tmp)
+		typeDesc := b.getTypeCode(t)
+		if encFn, ok := rtPkg.Members["codecEncodeValue"].(*ssa.Function); ok {
+			encType, encFnVal := b.getFunction(encFn)
+			b.CreateCall(encType, encFnVal, []llvm.Value{
+				cb, ss, tmp, typeDesc, llvm.Undef(b.dataPtrType),
+			}, "")
 		}
 
 	case *types.Pointer:
@@ -4252,7 +4546,7 @@ func (b *builder) emitCodecEncodeReturn(val llvm.Value, t types.Type, cb, ss llv
 
 // emitCodecDecodeReturn decodes one return value from the buffer.
 func (b *builder) emitCodecDecodeReturn(val llvm.Value, t types.Type, cb, ds llvm.Value) llvm.Value {
-	switch u := t.Underlying().(type) {
+	switch t.Underlying().(type) {
 	case *types.Map:
 		slt := b.getLLVMType(t)
 		tmp := b.CreateAlloca(slt, "cdmaptmp")
@@ -4270,33 +4564,22 @@ func (b *builder) emitCodecDecodeReturn(val llvm.Value, t types.Type, cb, ds llv
 		return val
 
 	case *types.Struct:
+		// Decode the whole struct via the runtime codec: codecDecodeValue
+		// allocates in the caller's CURRENT arena (decode runs after
+		// FnArenaPop), so the returned struct survives the callee's stack
+		// frame. Decoding into a stack alloca (the old behavior) pointed
+		// the caller at dead memory that the next call reclaimed.
 		slt := b.getLLVMType(t)
-		tmp := b.CreateAlloca(slt, "cdstmp")
-		b.CreateStore(llvm.ConstNull(slt), tmp)
-		for i := 0; i < u.NumFields(); i++ {
-			ft := u.Field(i).Type()
-			gep := b.CreateStructGEP(slt, tmp, i, "cdfg")
-			if _, ok := ft.Underlying().(*types.Map); ok {
-				decoded := b.emitCodecDecodeReturn(val, ft, cb, ds)
-				b.CreateStore(decoded, gep)
-			} else if _, ok := ft.Underlying().(*types.Struct); ok {
-				decoded := b.emitCodecDecodeReturn(val, ft, cb, ds)
-				b.CreateStore(decoded, gep)
-			} else {
-				// Non-map, non-struct: decode via codecDecodeValue
-				typeDesc := b.getTypeCode(ft)
-				rtPkg := b.program.ImportedPackage("runtime")
-				if decFn, ok := rtPkg.Members["codecDecodeValue"].(*ssa.Function); ok {
-					decType, decFnVal := b.getFunction(decFn)
-					decodedPtr := b.CreateCall(decType, decFnVal, []llvm.Value{
-						cb, ds, typeDesc, llvm.Undef(b.dataPtrType),
-					}, "cdres")
-					decodedVal := b.CreateLoad(b.getLLVMType(ft), decodedPtr, "cdval")
-					b.CreateStore(decodedVal, gep)
-				}
-			}
+		typeDesc := b.getTypeCode(t)
+		rtPkg := b.program.ImportedPackage("runtime")
+		if decFn, ok := rtPkg.Members["codecDecodeValue"].(*ssa.Function); ok {
+			decType, decFnVal := b.getFunction(decFn)
+			decodedPtr := b.CreateCall(decType, decFnVal, []llvm.Value{
+				cb, ds, typeDesc, llvm.Undef(b.dataPtrType),
+			}, "cdres")
+			return b.CreateLoad(slt, decodedPtr, "cdst")
 		}
-		return b.CreateLoad(slt, tmp, "cdst")
+		return val
 
 	default:
 		// Non-map, non-struct: decode via codecDecodeValue

@@ -5,6 +5,7 @@
 package tls
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"crypto/hpke"
 	"errors"
@@ -92,7 +93,8 @@ func parseECHConfig(enc []byte) (skip bool, ec echConfig, err error) {
 		if !cipherSuites.ReadUint16(&c.AEADID) {
 			return false, echConfig{}, &echConfigErr{"cipher_suites aead_id"}
 		}
-		ec.SymmetricCipherSuite = append(ec.SymmetricCipherSuite, c)
+		if len(ec.SymmetricCipherSuite) >= cap(ec.SymmetricCipherSuite) { ec.SymmetricCipherSuite = mxutil.GrowCap(ec.SymmetricCipherSuite) }
+		ec.SymmetricCipherSuite = push(ec.SymmetricCipherSuite, c)
 	}
 	if !s.ReadUint8(&ec.MaxNameLength) {
 		return false, echConfig{}, &echConfigErr{"maximum_name_length"}
@@ -114,7 +116,8 @@ func parseECHConfig(enc []byte) (skip bool, ec echConfig, err error) {
 		if !extensions.ReadUint16LengthPrefixed((*cryptobyte.String)(&e.Data)) {
 			return false, echConfig{}, &echConfigErr{"extensions data"}
 		}
-		ec.Extensions = append(ec.Extensions, e)
+		if len(ec.Extensions) >= cap(ec.Extensions) { ec.Extensions = mxutil.GrowCap(ec.Extensions) }
+		ec.Extensions = push(ec.Extensions, e)
 	}
 
 	return false, ec, nil
@@ -144,7 +147,8 @@ func parseECHConfigList(data []byte) ([]echConfig, error) {
 		}
 		s = s[configLen+4:]
 		if !skip {
-			configs = append(configs, ec)
+			if len(configs) >= cap(configs) { configs = mxutil.GrowCap(configs) }
+			configs = push(configs, ec)
 		}
 	}
 	return configs, nil
@@ -210,7 +214,7 @@ func encodeInnerClientHello(inner *clientHelloMsg, maxNameLength int32) ([]byte,
 	}
 	paddingLen = 31 - ((len(h) + paddingLen - 1) % 32)
 
-	return append(h, []byte{:paddingLen}...), nil
+	return push(h, []byte{:paddingLen}...), nil
 }
 
 func skipUint8LengthPrefixed(s *cryptobyte.String) bool {
@@ -255,7 +259,8 @@ func extractRawExtensions(hello *clientHelloMsg) ([]rawExtension, error) {
 			!extensions.ReadUint16LengthPrefixed(&extData) {
 			return nil, errors.New("tls: invalid inner client hello")
 		}
-		rawExtensions = append(rawExtensions, rawExtension{extension, extData})
+		if len(rawExtensions) >= cap(rawExtensions) { rawExtensions = mxutil.GrowCap(rawExtensions) }
+		rawExtensions = push(rawExtensions, rawExtension{extension, extData})
 	}
 	return rawExtensions, nil
 }
@@ -597,7 +602,7 @@ func (c *Conn) processECHClientHello(outer *clientHelloMsg, echKeys []EncryptedC
 			c.sendAlert(alertInternalError)
 			return nil, nil, fmt.Errorf("tls: invalid EncryptedClientHelloKey Config AEAD: %s", err)
 		}
-		info := append([]byte("tls ech\x00"), echKey.Config...)
+		info := push([]byte("tls ech\x00"), echKey.Config...)
 		hpkeContext, err := hpke.NewRecipient(encap, echPriv, kdf, aead, info)
 		if err != nil {
 			// attempt next trial decryption

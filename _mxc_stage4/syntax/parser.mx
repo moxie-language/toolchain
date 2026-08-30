@@ -220,7 +220,7 @@ func commentText(s string) (sv string) {
 	return s[2:i] // lop off //, and \r at end, if any
 }
 
-func trailingDigits(text string) (uint32, uint32, bool) {
+func trailingDigits(text string) (r0 uint32, r1 uint32, r2 bool) {
 	i := bytes.LastIndexByte(text, ':')
 	if i < 0 {
 		return 0, 0, false
@@ -290,7 +290,7 @@ func (p *Parser) errorAt(pos token.Pos, msg string) {
 	}
 	p.Errcnt++
 	if p.Errh == nil {
-		panic(p.First)
+		panic(p.First.Error())
 	}
 	p.Errh(err)
 }
@@ -423,10 +423,11 @@ func (p *Parser) advance(followlist ...token.Token) {
 func (p *Parser) trace(msg string) (fn func()) {
 	p.print(msg | " (")
 	const tab = ". "
-	p.Indent = append(p.Indent, tab...)
+	if len(p.Indent) >= cap(p.Indent) { p.Indent = mxutil.GrowCap(p.Indent) }
+	p.Indent = push(p.Indent, tab...)
 	return func() {
 		p.Indent = p.Indent[:len(p.Indent)-len(tab)]
-		if x := recover(); x != nil {
+		if x := recover(); x != "" {
 			panic(x) // skip print_trace
 		}
 		p.print(")")
@@ -502,7 +503,8 @@ func (p *Parser) fileOrNil() (f *File) {
 		case token.Func:
 			p.Next()
 			if d := p.funcDeclOrNil(); d != nil {
-				f.DeclList = append(f.DeclList, d)
+				if len(f.DeclList) >= cap(f.DeclList) { f.DeclList = mxutil.GrowCap(f.DeclList) }
+				f.DeclList = push(f.DeclList, d)
 			}
 
 		default:
@@ -582,13 +584,15 @@ func (p *Parser) appendGroup(list []Decl, f func(*Group) Decl) (ds []Decl) {
 		p.Next() // must consume "(" after calling clearPragma!
 		p.list("grouped declaration", token.Semi, token.Rparen, func() bool {
 			if x := f(g); x != nil {
-				list = append(list, x)
+				if len(list) >= cap(list) { list = mxutil.GrowCap(list) }
+				list = push(list, x)
 			}
 			return false
 		})
 	} else {
 		if x := f(nil); x != nil {
-			list = append(list, x)
+			if len(list) >= cap(list) { list = mxutil.GrowCap(list) }
+			list = push(list, x)
 		}
 	}
 	return list
@@ -756,7 +760,7 @@ func (p *Parser) typeDecl(group *Group) (d Decl) {
 //	P*E|F|~G    T/F      P       *E|F|~G
 //	P*E|F|G     T        P       *E|F|G
 //	P*E|F|G     F        nil     P*E|F|G
-func extractName(x Expr, force bool) (*Name, Expr) {
+func extractName(x Expr, force bool) (r0 *Name, r1 Expr) {
 	switch x := x.(type) {
 	case *Name:
 		return x, nil
@@ -1350,7 +1354,8 @@ func (p *Parser) complitexpr() (c *CompositeLit) {
 			e = l
 			x.NKeys++
 		}
-		x.ElemList = append(x.ElemList, e)
+		if len(x.ElemList) >= cap(x.ElemList) { x.ElemList = mxutil.GrowCap(x.ElemList) }
+		x.ElemList = push(x.ElemList, e)
 		return false
 	})
 	p.Xnest--
@@ -1501,7 +1506,7 @@ func (p *Parser) typeInstance(typ Expr) (e Expr) {
 }
 
 // If context != "", type parameters are not permitted.
-func (p *Parser) funcType(context string) ([]*Field, *FuncType) {
+func (p *Parser) funcType(context string) (r0 []*Field, r1 *FuncType) {
 	if trace {
 		defer p.trace("funcType")()
 	}
@@ -1618,7 +1623,8 @@ func (p *Parser) interfaceType() (i *InterfaceType) {
 		if f == nil || f.Name == nil {
 			f = p.embeddedElem(f)
 		}
-		typ.MethodList = append(typ.MethodList, f)
+		if len(typ.MethodList) >= cap(typ.MethodList) { typ.MethodList = mxutil.GrowCap(typ.MethodList) }
+		typ.MethodList = push(typ.MethodList, f)
 		return false
 	})
 
@@ -1649,16 +1655,19 @@ func (p *Parser) funcResult() (fs []*Field) {
 func (p *Parser) addField(styp *StructType, pos token.Pos, name *Name, typ Expr, tag *BasicLit) {
 	if tag != nil {
 		for i := len(styp.FieldList) - len(styp.TagList); i > 0; i-- {
-			styp.TagList = append(styp.TagList, nil)
+			if len(styp.TagList) >= cap(styp.TagList) { styp.TagList = mxutil.GrowCap(styp.TagList) }
+			styp.TagList = push(styp.TagList, nil)
 		}
-		styp.TagList = append(styp.TagList, tag)
+		if len(styp.TagList) >= cap(styp.TagList) { styp.TagList = mxutil.GrowCap(styp.TagList) }
+		styp.TagList = push(styp.TagList, tag)
 	}
 
 	f := &Field{}
 	f.pos = pos
 	f.Name = name
 	f.Type = typ
-	styp.FieldList = append(styp.FieldList, f)
+	if len(styp.FieldList) >= cap(styp.FieldList) { styp.FieldList = mxutil.GrowCap(styp.FieldList) }
+	styp.FieldList = push(styp.FieldList, f)
 
 	if debug && tag != nil && len(styp.FieldList) != len(styp.TagList) {
 		panic("inconsistent struct field list")
@@ -2089,7 +2098,8 @@ func (p *Parser) paramList(name *Name, typ Expr, close token.Token, requireNames
 			if par.Type != nil {
 				typed++
 			}
-			list = append(list, par)
+			if len(list) >= cap(list) { list = mxutil.GrowCap(list) }
+			list = push(list, par)
 		}
 		return false
 	})
@@ -2531,7 +2541,8 @@ func (p *Parser) switchStmt() (s *SwitchStmt) {
 		p.advance(token.Case, token.Default, token.Rbrace)
 	}
 	for p.Tok != token.EOF && p.Tok != token.Rbrace {
-		s.Body = append(s.Body, p.caseClause())
+		if len(s.Body) >= cap(s.Body) { s.Body = mxutil.GrowCap(s.Body) }
+		s.Body = push(s.Body, p.caseClause())
 	}
 	s.Rbrace = p.pos()
 	p.want(token.Rbrace)
@@ -2553,7 +2564,8 @@ func (p *Parser) selectStmt() (s *SelectStmt) {
 		p.advance(token.Case, token.Default, token.Rbrace)
 	}
 	for p.Tok != token.EOF && p.Tok != token.Rbrace {
-		s.Body = append(s.Body, p.commClause())
+		if len(s.Body) >= cap(s.Body) { s.Body = mxutil.GrowCap(s.Body) }
+		s.Body = push(s.Body, p.commClause())
 	}
 	s.Rbrace = p.pos()
 	p.want(token.Rbrace)
@@ -2748,7 +2760,8 @@ func (p *Parser) stmtList() (l []Stmt) {
 		if s == nil {
 			break
 		}
-		l = append(l, s)
+		if len(l) >= cap(l) { l = mxutil.GrowCap(l) }
+		l = push(l, s)
 		// ";" is optional before "}"
 		if !p.got(token.Semi) && p.Tok != token.Rbrace {
 			p.syntaxError("at end of statement")
@@ -2771,7 +2784,8 @@ func (p *Parser) argList() (list []Expr, hasDots bool) {
 
 	p.Xnest++
 	p.list("argument list", token.Comma, token.Rparen, func() bool {
-		list = append(list, p.expr())
+		if len(list) >= cap(list) { list = mxutil.GrowCap(list) }
+		list = push(list, p.expr())
 		hasDots = p.got(token.DotDotDot)
 		return hasDots
 	})
@@ -2811,7 +2825,8 @@ func (p *Parser) nameList(First *Name) (ns []*Name) {
 
 	l := []*Name{First}
 	for p.got(token.Comma) {
-		l = append(l, p.name())
+		if len(l) >= cap(l) { l = mxutil.GrowCap(l) }
+		l = push(l, p.name())
 	}
 
 	return l
@@ -2861,7 +2876,8 @@ func (p *Parser) exprList() (e Expr) {
 	if p.got(token.Comma) {
 		list := []Expr{x, p.expr()}
 		for p.got(token.Comma) {
-			list = append(list, p.expr())
+			if len(list) >= cap(list) { list = mxutil.GrowCap(list) }
+			list = push(list, p.expr())
 		}
 		t := &ListExpr{}
 		t.pos = x.Pos()
@@ -2898,7 +2914,8 @@ func (p *Parser) typeList(strict bool) (x Expr, comma bool) {
 				if t = p.typeOrNil(); t == nil {
 					break
 				}
-				list = append(list, t)
+				if len(list) >= cap(list) { list = mxutil.GrowCap(list) }
+				list = push(list, t)
 			}
 			l := &ListExpr{}
 			l.pos = x.Pos() // == list[0].Pos()

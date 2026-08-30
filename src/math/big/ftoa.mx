@@ -9,6 +9,7 @@
 package big
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"fmt"
 	"strconv"
@@ -63,15 +64,17 @@ func (x *Float) String() string {
 func (x *Float) Append(buf []byte, fmt byte, prec int32) []byte {
 	// sign
 	if x.neg {
-		buf = append(buf, '-')
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, '-')
 	}
 
 	// Inf
 	if x.form == inf {
 		if !x.neg {
-			buf = append(buf, '+')
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, '+')
 		}
-		return append(buf, "Inf"...)
+		return push(buf, "Inf"...)
 	}
 
 	// pick off easy formats
@@ -163,7 +166,7 @@ func (x *Float) Append(buf []byte, fmt byte, prec int32) []byte {
 	if x.neg {
 		buf = buf[:len(buf)-1] // sign was added prematurely - remove it again
 	}
-	return append(buf, '%', fmt)
+	return push(buf, '%', fmt)
 }
 
 func roundShortest(d *decimal, x *Float) {
@@ -247,24 +250,29 @@ func fmtE(buf []byte, fmt byte, prec int32, d decimal) []byte {
 	if len(d.mant) > 0 {
 		ch = d.mant[0]
 	}
-	buf = append(buf, ch)
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, ch)
 
 	// .moredigits
 	if prec > 0 {
-		buf = append(buf, '.')
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, '.')
 		i := 1
 		m := min(len(d.mant), prec+1)
 		if i < m {
-			buf = append(buf, d.mant[i:m]...)
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, d.mant[i:m]...)
 			i = m
 		}
 		for ; i <= prec; i++ {
-			buf = append(buf, '0')
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, '0')
 		}
 	}
 
 	// e±
-	buf = append(buf, fmt)
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, fmt)
 	var exp int64
 	if len(d.mant) > 0 {
 		exp = int64(d.exp) - 1 // -1 because first digit was printed before '.'
@@ -275,11 +283,13 @@ func fmtE(buf []byte, fmt byte, prec int32, d decimal) []byte {
 	} else {
 		ch = '+'
 	}
-	buf = append(buf, ch)
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, ch)
 
 	// dd...d
 	if exp < 10 {
-		buf = append(buf, '0') // at least 2 exponent digits
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, '0') // at least 2 exponent digits
 	}
 	return strconv.AppendInt(buf, exp, 10)
 }
@@ -289,19 +299,24 @@ func fmtF(buf []byte, prec int32, d decimal) []byte {
 	// integer, padded with zeros as needed
 	if d.exp > 0 {
 		m := min(len(d.mant), d.exp)
-		buf = append(buf, d.mant[:m]...)
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, d.mant[:m]...)
 		for ; m < d.exp; m++ {
-			buf = append(buf, '0')
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, '0')
 		}
 	} else {
-		buf = append(buf, '0')
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, '0')
 	}
 
 	// fraction
 	if prec > 0 {
-		buf = append(buf, '.')
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, '.')
 		for i := 0; i < prec; i++ {
-			buf = append(buf, d.at(d.exp+i))
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, d.at(d.exp+i))
 		}
 	}
 
@@ -317,7 +332,7 @@ func fmtF(buf []byte, prec int32, d decimal) []byte {
 // (The caller handles Inf before invoking fmtB.)
 func (x *Float) fmtB(buf []byte) []byte {
 	if x.form == zero {
-		return append(buf, '0')
+		return push(buf, '0')
 	}
 
 	if debugFloat && x.form != finite {
@@ -334,11 +349,14 @@ func (x *Float) fmtB(buf []byte) []byte {
 		m = nat(nil).rsh(m, uint32(w-x.prec))
 	}
 
-	buf = append(buf, m.utoa(10)...)
-	buf = append(buf, 'p')
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, m.utoa(10)...)
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, 'p')
 	e := int64(x.exp) - int64(x.prec)
 	if e >= 0 {
-		buf = append(buf, '+')
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, '+')
 	}
 	return strconv.AppendInt(buf, e, 10)
 }
@@ -351,14 +369,18 @@ func (x *Float) fmtB(buf []byte) []byte {
 // (The caller handles Inf before invoking fmtX.)
 func (x *Float) fmtX(buf []byte, prec int32) []byte {
 	if x.form == zero {
-		buf = append(buf, "0x0"...)
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, "0x0"...)
 		if prec > 0 {
-			buf = append(buf, '.')
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, '.')
 			for i := 0; i < prec; i++ {
-				buf = append(buf, '0')
+				if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+				buf = push(buf, '0')
 			}
 		}
-		buf = append(buf, "p+00"...)
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, "p+00"...)
 		return buf
 	}
 
@@ -390,22 +412,29 @@ func (x *Float) fmtX(buf []byte, prec int32) []byte {
 	if debugFloat && hm[0] != '1' {
 		panic("incorrect mantissa: " | []byte(hm))
 	}
-	buf = append(buf, "0x1"...)
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, "0x1"...)
 	if len(hm) > 1 {
-		buf = append(buf, '.')
-		buf = append(buf, hm[1:]...)
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, '.')
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, hm[1:]...)
 	}
 
-	buf = append(buf, 'p')
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, 'p')
 	if exp64 >= 0 {
-		buf = append(buf, '+')
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, '+')
 	} else {
 		exp64 = -exp64
-		buf = append(buf, '-')
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, '-')
 	}
 	// Force at least two exponent digits, to match fmt.
 	if exp64 < 10 {
-		buf = append(buf, '0')
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, '0')
 	}
 	return strconv.AppendInt(buf, exp64, 10)
 }
@@ -418,7 +447,7 @@ func (x *Float) fmtX(buf []byte, prec int32) []byte {
 // (The caller handles Inf before invoking fmtP.)
 func (x *Float) fmtP(buf []byte) []byte {
 	if x.form == zero {
-		return append(buf, '0')
+		return push(buf, '0')
 	}
 
 	if debugFloat && x.form != finite {
@@ -435,11 +464,15 @@ func (x *Float) fmtP(buf []byte) []byte {
 	}
 	m = m[i:]
 
-	buf = append(buf, "0x."...)
-	buf = append(buf, bytes.TrimRight(m.utoa(16), "0")...)
-	buf = append(buf, 'p')
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, "0x."...)
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, bytes.TrimRight(m.utoa(16), "0")...)
+	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = push(buf, 'p')
 	if x.exp >= 0 {
-		buf = append(buf, '+')
+		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, '+')
 	}
 	return strconv.AppendInt(buf, int64(x.exp), 10)
 }

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
-export MOXIEROOT="$(cd "$TESTDIR/.." && pwd)"
+export MOXIEROOT="$(cd "$TESTDIR/../.." && pwd)"
 MOXIE="${MOXIE:-$MOXIEROOT/moxie}"
 export MOXIE PATH="/usr/lib/llvm19/bin:$PATH"
 

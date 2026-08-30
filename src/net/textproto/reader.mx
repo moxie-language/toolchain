@@ -5,6 +5,7 @@
 package textproto
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bufio"
 	"bytes"
 	"errors"
@@ -69,7 +70,8 @@ func (r *Reader) readLineSlice(lim int64) ([]byte, error) {
 		if line == nil && !more {
 			return l, nil
 		}
-		line = append(line, l...)
+		if len(line) >= cap(line) { line = mxutil.GrowCap(line) }
+		line = push(line, l...)
 		if !more {
 			break
 		}
@@ -158,7 +160,7 @@ func (r *Reader) readContinuedLineSlice(lim int64, validateFirstLine func([]byte
 
 	// ReadByte or the next readLineSlice will flush the read buffer;
 	// copy the slice into buf.
-	r.buf = append(r.buf[:0], trim(line)...)
+	r.buf = push(r.buf[:0], trim(line)...)
 
 	if lim < 0 {
 		lim = math.MaxInt64
@@ -167,7 +169,8 @@ func (r *Reader) readContinuedLineSlice(lim int64, validateFirstLine func([]byte
 
 	// Read continuation lines.
 	for r.skipSpace() > 0 {
-		r.buf = append(r.buf, ' ')
+		if len(r.buf) >= cap(r.buf) { r.buf = mxutil.GrowCap(r.buf) }
+		r.buf = push(r.buf, ' ')
 		if int64(len(r.buf)) >= lim {
 			return nil, errMessageTooLarge
 		}
@@ -175,7 +178,8 @@ func (r *Reader) readContinuedLineSlice(lim int64, validateFirstLine func([]byte
 		if err != nil {
 			break
 		}
-		r.buf = append(r.buf, trim(line)...)
+		if len(r.buf) >= cap(r.buf) { r.buf = mxutil.GrowCap(r.buf) }
+		r.buf = push(r.buf, trim(line)...)
 	}
 	return r.buf, nil
 }
@@ -471,7 +475,8 @@ func (r *Reader) ReadDotLines() ([][]byte, error) {
 			}
 			line = line[1:]
 		}
-		v = append(v, line)
+		if len(v) >= cap(v) { v = mxutil.GrowCap(v) }
+		v = push(v, line)
 	}
 	return v, err
 }
@@ -577,7 +582,7 @@ func readMIMEHeader(r *Reader, maxMemory, maxHeaders int64) (MIMEHeader, error) 
 			vv[0] = value
 			m[key] = vv
 		} else {
-			m[key] = append(vv, value)
+			m[key] = push(vv, value)
 		}
 
 		if err != nil {

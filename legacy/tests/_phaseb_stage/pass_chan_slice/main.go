@@ -15,7 +15,7 @@ type Blob struct {
 	Data []byte
 }
 
-func (b Blob) EncodeTo(w io.Writer) error {
+func (b *Blob) EncodeTo(w io.Writer) (err error) {
 	var sz [4]byte
 	sz[0] = byte(b.Size)
 	sz[1] = byte(b.Size >> 8)
@@ -28,7 +28,7 @@ func (b Blob) EncodeTo(w io.Writer) error {
 	return err
 }
 
-func (b *Blob) DecodeFrom(r io.Reader) error {
+func (b *Blob) DecodeFrom(r io.Reader) (err error) {
 	var sz [4]byte
 	if _, err := io.ReadFull(r, sz[:]); err != nil {
 		return err

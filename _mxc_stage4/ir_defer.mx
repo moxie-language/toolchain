@@ -1,8 +1,33 @@
 package main
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	. "git.smesh.lol/moxie/pkg/types"
 )
+
+// deferFrameLLVMType matches the stage4 compiler's emission of the
+// runtime's deferFrame struct: JumpSP ptr, JumpPC ptr, ExtraRegs
+// ([0]unsafe.Pointer - stage4 emits the array field as {ptr, i64, i64}),
+// Previous ptr, Panicking i8, PanicValue interface{} ({i64, ptr}).
+// Must agree with the runtime's own GEP offsets in setupDeferFrame/
+// destroyDeferFrame, or frame writes clobber adjacent allocas.
+const deferFrameLLVMType = "{ ptr, ptr, { ptr, i64, i64 }, ptr, i8, { i64, ptr } }"
+
+// emitDeferFrameSetup allocates the defer frame and links it into the
+// task's frame chain via setupDeferFrame. Mirrors legacy deferInitFunc.
+func (e *irEmitter) emitDeferFrameSetup() {
+	e.nextReg++
+	fr := "%deferframe" | irItoa(e.nextReg)
+	e.deferFrame = fr
+	e.deferLanding = "defer_landing" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(fr) ; e.w(" = alloca ") ; e.w(deferFrameLLVMType) ; e.w("\n")
+	e.w("  store volatile ") ; e.w(deferFrameLLVMType) ; e.w(" zeroinitializer, ptr ") ; e.w(fr) ; e.w("\n")
+	e.nextReg++
+	sp := "%dfsp" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(sp) ; e.w(" = call ptr @llvm.stacksave.p0()\n")
+	e.w("  call void @runtime.setupDeferFrame(ptr ") ; e.w(fr) ; e.w(", ptr ") ; e.w(sp) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.setupDeferFrame", "void", "ptr, ptr")
+}
 
 func (e *irEmitter) deferRetType(d *SSADefer) (s string) {
 	if fn, ok := d.Call.Value.(*SSAFunction); ok {
@@ -184,7 +209,9 @@ func (e *irEmitter) emitDeferBuiltin(d *SSADefer, bi *SSABuiltin, pfx string, id
 		at := e.deferArgType(arg)
 		aVal := "%" | pfx | ".dv" | irItoa(idx) | "f" | irItoa(i)
 		e.w("  ") ; e.w(aVal) ; e.w(" = load ") ; e.w(at) ; e.w(", ptr ") ; e.w(aGep) ; e.w("\n")
+		if len(args) >= cap(args) { args = mxutil.GrowCap(args) }
 		push(args, aVal)
+		if len(argTypes) >= cap(argTypes) { argTypes = mxutil.GrowCap(argTypes) }
 		push(argTypes, at)
 		fieldIdx++
 	}
@@ -257,7 +284,9 @@ func (e *irEmitter) emitDeferDispatch(d *SSADefer, pfx string, idx int32) {
 			at := e.deferArgType(arg)
 			aVal := "%" | pfx | ".dv" | irItoa(idx) | "f" | irItoa(i)
 			e.w("  ") ; e.w(aVal) ; e.w(" = load ") ; e.w(at) ; e.w(", ptr ") ; e.w(aGep) ; e.w("\n")
+			if len(args) >= cap(args) { args = mxutil.GrowCap(args) }
 			push(args, aVal)
+			if len(argTypes) >= cap(argTypes) { argTypes = mxutil.GrowCap(argTypes) }
 			push(argTypes, at)
 			fieldIdx++
 		}
@@ -291,7 +320,9 @@ func (e *irEmitter) emitDeferDispatch(d *SSADefer, pfx string, idx int32) {
 			at := e.deferArgType(arg)
 			aVal := "%" | pfx | ".dv" | irItoa(idx) | "f" | irItoa(i)
 			e.w("  ") ; e.w(aVal) ; e.w(" = load ") ; e.w(at) ; e.w(", ptr ") ; e.w(aGep) ; e.w("\n")
+			if len(args) >= cap(args) { args = mxutil.GrowCap(args) }
 			push(args, aVal)
+			if len(argTypes) >= cap(argTypes) { argTypes = mxutil.GrowCap(argTypes) }
 			push(argTypes, at)
 			fieldIdx++
 		}

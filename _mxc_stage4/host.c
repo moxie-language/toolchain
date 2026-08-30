@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <sys/sysinfo.h>
 
 __attribute__((constructor))
 static void raise_stack_limit(void) {
@@ -116,12 +117,12 @@ int32_t mxc_run_async(const char** argv, int32_t argc) {
 /* Fork without exec. Returns 0 in child, pid in parent, -1 on error.
    Child inherits the full address space (COW) so all loaded compiler
    state (importRegistry, type info, etc.) is immediately available. */
-int32_t mxc_fork(void) {
+int32_t mxc_fork(void* ctx) {
     return (int32_t)fork();
 }
 
 /* Reap any child. Returns pid on exit 0, -pid on failure, -1 if no children. */
-int32_t mxc_wait_any(void) {
+int32_t mxc_wait_any(void* ctx) {
     int status;
     int pid = waitpid(-1, &status, 0);
     if (pid < 0) return -1;
@@ -469,4 +470,18 @@ int32_t mxc_detect_tls(void) {
     /* val==0 means child wrote to its own TLS copy (parent unaffected) */
     /* val==1 means globals are shared (no TLS) */
     return (val == 0) ? 1 : 0;
+}
+
+/* Online CPU count, for adaptive parallel build defaults. */
+int32_t mxc_nproc(void) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 1) n = 1;
+    return (int32_t)n;
+}
+
+/* Available physical memory in bytes (free RAM + reclaimable buffers). */
+int64_t mxc_free_mem(void) {
+    struct sysinfo si;
+    if (sysinfo(&si) != 0) return 0;
+    return (int64_t)(si.freeram + si.bufferram) * (int64_t)si.mem_unit;
 }

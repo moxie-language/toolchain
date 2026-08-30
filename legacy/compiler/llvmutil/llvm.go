@@ -205,6 +205,63 @@ func AppendToGlobal(mod llvm.Module, globalName string, values ...llvm.Value) {
 	used.SetLinkage(llvm.AppendingLinkage)
 }
 
+// MergeAppendingGlobals folds every appending-linkage global whose name was
+// auto-suffixed (e.g. "llvm.used.353") back into the base-named global
+// ("llvm.used"), then removes the stray. When per-package modules are linked,
+// LLVM renames appending globals whose array types differ instead of merging
+// them, and the LLVM verifier rejects appending linkage under any name other
+// than the exact "llvm.used" / "llvm.compiler.used". Call after all linking.
+func MergeAppendingGlobals(mod llvm.Module) {
+	seen := map[string]bool{}
+	// Collect stray suffixed appending globals per base name.
+	strays := map[string][]llvm.Value{}
+	for g := mod.FirstGlobal(); !g.IsNil(); g = llvm.NextGlobal(g) {
+		name := g.Name()
+		if g.Linkage() != llvm.AppendingLinkage {
+			continue
+		}
+		seen[name] = true
+		if name == "llvm.used" || name == "llvm.compiler.used" {
+			continue
+		}
+		base := name
+		if i := strings.LastIndexByte(name, '.'); i > 0 {
+			base = name[:i]
+		}
+		if seen[base] {
+			strays[base] = append(strays[base], g)
+		}
+	}
+	for base, gs := range strays {
+		main := mod.NamedGlobal(base)
+		if main.IsNil() {
+			continue
+		}
+		ptrType := llvm.PointerType(mod.Context().Int8Type(), 0)
+		var vals []llvm.Value
+		init := main.Initializer()
+		if !init.IsNil() {
+			for i := 0; i < init.Type().ArrayLength(); i++ {
+				vals = append(vals, llvm.ConstExtractValue(init, []uint32{uint32(i)}))
+			}
+		}
+		main.EraseFromParentAsGlobal()
+		for _, g := range gs {
+			gi := g.Initializer()
+			if !gi.IsNil() {
+				for i := 0; i < gi.Type().ArrayLength(); i++ {
+					vals = append(vals, llvm.ConstExtractValue(gi, []uint32{uint32(i)}))
+				}
+			}
+			g.EraseFromParentAsGlobal()
+		}
+		newInit := llvm.ConstArray(ptrType, vals)
+		used := llvm.AddGlobal(mod, newInit.Type(), base)
+		used.SetInitializer(newInit)
+		used.SetLinkage(llvm.AppendingLinkage)
+	}
+}
+
 // Version returns the LLVM major version.
 func Version() int {
 	majorStr := strings.Split(llvm.Version, ".")[0]

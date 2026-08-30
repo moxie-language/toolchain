@@ -248,7 +248,7 @@ func RewriteChanLiterals(src []byte, fset *token.FileSet) RewriteResult {
 		result.Write(src[lastEnd:toks[chanIdx].pos])
 
 		makeOffset := result.Len()
-		result.WriteString("make(chan ")
+		result.WriteString("__slicealloc(chan ")
 		result.WriteString(typeText)
 		if bufExpr != "" {
 			result.WriteString(", ")
@@ -470,7 +470,7 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int
 			}
 			result.Write(src[lastEnd:replInputStart])
 			makeOffset := result.Len()
-			result.WriteString("make(")
+			result.WriteString("__slicealloc(")
 			result.WriteString(typeText)
 			result.WriteString(", ")
 			result.WriteString(lenExpr)
@@ -488,7 +488,7 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int
 			}
 			result.Write(src[lastEnd:replInputStart])
 			makeOffset := result.Len()
-			result.WriteString("make(")
+			result.WriteString("__slicealloc(")
 			result.WriteString(typeText)
 			result.WriteString(", ")
 			result.WriteString(lenExpr)
@@ -3489,3 +3489,4 @@ func FilterStringByteMismatch(errs []error) []error {
 	}
 	return filtered
 }
+

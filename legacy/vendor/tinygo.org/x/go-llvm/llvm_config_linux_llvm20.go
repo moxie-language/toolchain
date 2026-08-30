@@ -1,4 +1,4 @@
-//go:build !purego && !byollvm && linux && !llvm14 && !llvm15 && !llvm16 && !llvm17 && !llvm18 && !llvm19
+//go:build !purego && !byollvm && linux && !llvm14 && !llvm15 && !llvm16 && !llvm17 && !llvm18 && !llvm19 && !llvm22
 
 package llvm
 

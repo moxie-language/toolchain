@@ -12,6 +12,7 @@
 package tabwriter
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"fmt"
 	"io"
 	"unicode/utf8"
@@ -116,7 +117,8 @@ func (b *Writer) addLine(flushed bool) {
 		b.lines = b.lines[:n]
 		b.lines[n-1] = b.lines[n-1][:0]
 	} else {
-		b.lines = append(b.lines, nil)
+		if len(b.lines) >= cap(b.lines) { b.lines = mxutil.GrowCap(b.lines) }
+		b.lines = push(b.lines, nil)
 	}
 
 	if !flushed {
@@ -254,7 +256,7 @@ func (b *Writer) write0(buf []byte) {
 		err = io.ErrShortWrite
 	}
 	if err != nil {
-		panic(osError{err})
+		panic(osError{err}.Error())
 	}
 }
 
@@ -394,7 +396,8 @@ func (b *Writer) format(pos0 int32, line0, line1 int32) (pos int32) {
 
 		// format and print all columns to the right of this column
 		// (we know the widths of this column and all columns to the left)
-		b.widths = append(b.widths, width) // push width
+		if len(b.widths) >= cap(b.widths) { b.widths = mxutil.GrowCap(b.widths) }
+		b.widths = push(b.widths, width) // push width
 		pos = b.format(pos, line0, this)
 		b.widths = b.widths[0 : len(b.widths)-1] // pop width
 		line0 = this
@@ -406,7 +409,8 @@ func (b *Writer) format(pos0 int32, line0, line1 int32) (pos int32) {
 
 // Append text to current cell.
 func (b *Writer) append(text []byte) {
-	b.buf = append(b.buf, text...)
+	if len(b.buf) >= cap(b.buf) { b.buf = mxutil.GrowCap(b.buf) }
+	b.buf = push(b.buf, text...)
 	b.cell.size += len(text)
 }
 
@@ -460,13 +464,13 @@ func (b *Writer) endEscape() {
 func (b *Writer) terminateCell(htab bool) int32 {
 	b.cell.htab = htab
 	line := &b.lines[len(b.lines)-1]
-	*line = append(*line, b.cell)
+	*line = push(*line, b.cell)
 	b.cell = cell{}
 	return len(*line)
 }
 
 func (b *Writer) handlePanic(err *error, op string) {
-	if e := recover(); e != nil {
+	if e := recover(); e != "" {
 		if op == "Flush" {
 			// If Flush ran into a panic, we still need to reset.
 			b.reset()

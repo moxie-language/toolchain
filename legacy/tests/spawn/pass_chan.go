@@ -7,7 +7,7 @@ func wchan(ch chan int32) {
 }
 
 func main() {
-	ch := make(chan int32)
+	ch := chan int32{}
 	spawn(wchan, ch)
 	for i := int32(0); i < 50000000; i++ {
 	}

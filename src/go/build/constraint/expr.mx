@@ -10,6 +10,7 @@
 package constraint
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"errors"
 	"bytes"
 	"unicode"
@@ -214,19 +215,16 @@ type exprParser struct {
 // parseExpr parses a boolean build tag expression.
 func parseExpr(text []byte) (x Expr, err error) {
 	defer func() {
-		if e := recover(); e != nil {
-			if e, ok := e.(*SyntaxError); ok {
-				err = e
-				return
-			}
-			panic(e) // unreachable unless parser has a bug
+		if e := recover(); e != "" {
+			err = &SyntaxError{Err: []byte(e)}
+			return
 		}
 	}()
 
 	p := &exprParser{s: text}
 	x = p.or()
 	if p.tok != "" {
-		panic(&SyntaxError{Offset: p.pos, Err: "unexpected token " + p.tok})
+		panic((&SyntaxError{Offset: p.pos, Err: "unexpected token " + p.tok}).Error())
 	}
 	return x, nil
 }
@@ -259,13 +257,13 @@ func (p *exprParser) and() Expr {
 func (p *exprParser) not() Expr {
 	p.size++
 	if p.size > maxSize {
-		panic(&SyntaxError{Offset: p.pos, Err: "build expression too large"})
+		panic((&SyntaxError{Offset: p.pos, Err: "build expression too large"}).Error())
 	}
 	p.lex()
 	if p.tok == "!" {
 		p.lex()
 		if p.tok == "!" {
-			panic(&SyntaxError{Offset: p.pos, Err: "double negation not allowed"})
+			panic((&SyntaxError{Offset: p.pos, Err: "double negation not allowed"}).Error())
 		}
 		return not(p.atom())
 	}
@@ -280,16 +278,16 @@ func (p *exprParser) atom() Expr {
 	if p.tok == "(" {
 		pos := p.pos
 		defer func() {
-			if e := recover(); e != nil {
-				if e, ok := e.(*SyntaxError); ok && e.Err == "unexpected end of expression" {
-					e.Err = "missing close paren"
+			if e := recover(); e != "" {
+				if e == "unexpected end of expression" {
+					e = "missing close paren"
 				}
 				panic(e)
 			}
 		}()
 		x := p.or()
 		if p.tok != ")" {
-			panic(&SyntaxError{Offset: pos, Err: "missing close paren"})
+			panic((&SyntaxError{Offset: pos, Err: "missing close paren"}).Error())
 		}
 		p.lex()
 		return x
@@ -297,9 +295,9 @@ func (p *exprParser) atom() Expr {
 
 	if !p.isTag {
 		if p.tok == "" {
-			panic(&SyntaxError{Offset: p.pos, Err: "unexpected end of expression"})
+			panic((&SyntaxError{Offset: p.pos, Err: "unexpected end of expression"}).Error())
 		}
-		panic(&SyntaxError{Offset: p.pos, Err: "unexpected token " + p.tok})
+		panic((&SyntaxError{Offset: p.pos, Err: "unexpected token " + p.tok}).Error())
 	}
 	tok := p.tok
 	p.lex()
@@ -331,7 +329,7 @@ func (p *exprParser) lex() {
 
 	case '&', '|':
 		if p.i+1 >= len(p.s) || p.s[p.i+1] != p.s[p.i] {
-			panic(&SyntaxError{Offset: p.i, Err: "invalid syntax at " + p.s[p.i:p.i+1]})
+			panic((&SyntaxError{Offset: p.i, Err: "invalid syntax at " + p.s[p.i:p.i+1]}).Error())
 		}
 		p.pos = p.i
 		p.i += 2
@@ -351,8 +349,8 @@ func (p *exprParser) lex() {
 	}
 	if tag == "" {
 		c, _ := utf8.DecodeRuneInString(p.s[p.i:])
-		panic(&SyntaxError{Offset: p.i,
-		    Err: "invalid syntax at " | utf8.RuneBytes(c)})
+		panic((&SyntaxError{Offset: p.i,
+		    Err: "invalid syntax at " | utf8.RuneBytes(c)}).Error())
 	}
 
 	p.pos = p.i
@@ -494,14 +492,17 @@ func PlusBuildLines(x Expr) ([][]byte, error) {
 			for _, lit := range appendSplitAnd(nil, and) {
 				switch lit.(type) {
 				case *TagExpr, *NotExpr:
-					lits = append(lits, lit)
+					if len(lits) >= cap(lits) { lits = mxutil.GrowCap(lits) }
+					lits = push(lits, lit)
 				default:
 					return nil, errComplex
 				}
 			}
-			ands = append(ands, lits)
+			if len(ands) >= cap(ands) { ands = mxutil.GrowCap(ands) }
+			ands = push(ands, lits)
 		}
-		split = append(split, ands)
+		if len(split) >= cap(split) { split = mxutil.GrowCap(split) }
+		split = push(split, ands)
 	}
 
 	// If all the ORs have length 1 (no actual OR'ing going on),
@@ -516,7 +517,8 @@ func PlusBuildLines(x Expr) ([][]byte, error) {
 	if maxOr == 1 {
 		var lits []Expr
 		for _, or := range split {
-			lits = append(lits, or[0]...)
+			if len(lits) >= cap(lits) { lits = mxutil.GrowCap(lits) }
+			lits = push(lits, or[0]...)
 		}
 		split = [][][]Expr{{lits}}
 	}
@@ -535,7 +537,8 @@ func PlusBuildLines(x Expr) ([][]byte, error) {
 			}
 			line += " " + clause
 		}
-		lines = append(lines, line)
+		if len(lines) >= cap(lines) { lines = mxutil.GrowCap(lines) }
+		lines = push(lines, line)
 	}
 
 	return lines, nil
@@ -590,7 +593,7 @@ func appendSplitAnd(list []Expr, x Expr) []Expr {
 		list = appendSplitAnd(list, x.Y)
 		return list
 	}
-	return append(list, x)
+	return push(list, x)
 }
 
 // appendSplitOr appends x to list while splitting apart any top-level || expressions.
@@ -601,5 +604,5 @@ func appendSplitOr(list []Expr, x Expr) []Expr {
 		list = appendSplitOr(list, x.Y)
 		return list
 	}
-	return append(list, x)
+	return push(list, x)
 }

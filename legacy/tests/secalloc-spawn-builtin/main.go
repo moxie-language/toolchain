@@ -53,7 +53,7 @@ func main() {
 	}
 
 	rf := os.NewFile(uintptr(fd), "lockdown")
-	buf := make([]byte, 64)
+	buf := []byte{:64}
 	n, _ := rf.Read(buf)
 
 	if n <= 0 {

@@ -12,6 +12,7 @@
 package tracev1
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"cmp"
 	"encoding/binary"
@@ -289,7 +290,8 @@ type Events struct {
 func (l *Events) grow() *Event {
 	a, b := l.index(l.n)
 	if a >= len(l.buckets) {
-		l.buckets = append(l.buckets, &[eventsBucketSize]Event{})
+		if len(l.buckets) >= cap(l.buckets) { l.buckets = mxutil.GrowCap(l.buckets) }
+		l.buckets = push(l.buckets, &[eventsBucketSize]Event{})
 	}
 	ptr := &l.buckets[a][b]
 	l.n++
@@ -383,9 +385,11 @@ func (p *parser) parseEventBatches() (Events, error) {
 
 	allProcs := []proc{:0:len(p.batchOffsets)}
 	for pid := range p.batchOffsets {
-		allProcs = append(allProcs, proc{pid: pid})
+		if len(allProcs) >= cap(allProcs) { allProcs = mxutil.GrowCap(allProcs) }
+		allProcs = push(allProcs, proc{pid: pid})
 	}
-	allProcs = append(allProcs, proc{pid: ProfileP, events: p.cpuSamples})
+	if len(allProcs) >= cap(allProcs) { allProcs = mxutil.GrowCap(allProcs) }
+	allProcs = push(allProcs, proc{pid: ProfileP, events: p.cpuSamples})
 
 	events := Events{}
 
@@ -485,7 +489,8 @@ func (p *parser) parseEventBatches() (Events, error) {
 		if err := transition(gs, g, init, next); err != nil {
 			return Events{}, err
 		}
-		availableProcs = append(availableProcs, f.proc)
+		if len(availableProcs) >= cap(availableProcs) { availableProcs = mxutil.GrowCap(availableProcs) }
+		availableProcs = push(availableProcs, f.proc)
 	}
 
 	// At this point we have a consistent stream of events. Make sure time
@@ -549,7 +554,7 @@ func (p *parser) collectBatchesAndCPUSamples() error {
 
 		if raw.typ == EvBatch {
 			bo := batchOffset{offset: raw.batchOffset}
-			p.batchOffsets[raw.batchPid] = append(p.batchOffsets[raw.batchPid], bo)
+			p.batchOffsets[raw.batchPid] = push(p.batchOffsets[raw.batchPid], bo)
 			curP = raw.batchPid
 		}
 
@@ -594,7 +599,8 @@ func (p *parser) collectBatchesAndCPUSamples() error {
 			// Note that we're not concerned about the memory usage of storing
 			// all CPU samples during the indexing phase. There are orders of
 			// magnitude fewer CPU samples than runtime events.
-			p.cpuSamples = append(p.cpuSamples, e)
+			if len(p.cpuSamples) >= cap(p.cpuSamples) { p.cpuSamples = mxutil.GrowCap(p.cpuSamples) }
+			p.cpuSamples = push(p.cpuSamples, e)
 		}
 	}
 
@@ -741,7 +747,8 @@ func (p *parser) readRawEvent(flags uint32, ev *rawEvent) error {
 			batchPid:    pid32,
 			batchOffset: off,
 		}
-		ev.args = append(ev.args, pid, v)
+		if len(ev.args) >= cap(ev.args) { ev.args = mxutil.GrowCap(ev.args) }
+		ev.args = push(ev.args, pid, v)
 		return nil
 	default:
 		*ev = rawEvent{typ: typ, args: p.args[:0]}
@@ -752,7 +759,8 @@ func (p *parser) readRawEvent(flags uint32, ev *rawEvent) error {
 					if err != nil {
 						return fmt.Errorf("failed to read event %d argument: %w", typ, err)
 					}
-					ev.args = append(ev.args, v)
+					if len(ev.args) >= cap(ev.args) { ev.args = mxutil.GrowCap(ev.args) }
+					ev.args = push(ev.args, v)
 				}
 			} else {
 				for i := 0; i < int32(narg); i++ {
@@ -786,7 +794,8 @@ func (p *parser) readRawEvent(flags uint32, ev *rawEvent) error {
 					if err != nil {
 						return err
 					}
-					ev.args = append(ev.args, v)
+					if len(ev.args) >= cap(ev.args) { ev.args = mxutil.GrowCap(ev.args) }
+					ev.args = push(ev.args, v)
 				}
 			} else {
 				// Skip over arguments
@@ -802,7 +811,8 @@ func (p *parser) readRawEvent(flags uint32, ev *rawEvent) error {
 					if err != nil {
 						return err
 					}
-					ev.sargs = append(ev.sargs, s)
+					if len(ev.sargs) >= cap(ev.sargs) { ev.sargs = mxutil.GrowCap(ev.sargs) }
+					ev.sargs = push(ev.sargs, s)
 				} else {
 					// Skip string
 					v, err := p.readVal()
@@ -865,7 +875,8 @@ func (p *parser) loadBatch(pid int32, events []Event) ([]Event, error) {
 			return nil, err
 		}
 		if ev.Type != EvNone {
-			events = append(events, ev)
+			if len(events) >= cap(events) { events = mxutil.GrowCap(events) }
+			events = push(events, ev)
 		}
 	}
 
@@ -991,7 +1002,8 @@ func (p *parser) parseEvent(raw *rawEvent, ev *Event) error {
 			} else {
 				id := len(p.inlineStrings)
 				p.inlineStringsMapping[raw.sargs[0]] = id
-				p.inlineStrings = append(p.inlineStrings, raw.sargs[0])
+				if len(p.inlineStrings) >= cap(p.inlineStrings) { p.inlineStrings = mxutil.GrowCap(p.inlineStrings) }
+				p.inlineStrings = push(p.inlineStrings, raw.sargs[0])
 				ev.Args[3] = uint64(id)
 			}
 		}
@@ -1293,7 +1305,7 @@ func (p *parser) postProcessTrace(events Events) error {
 			mode := ev.Args[1]
 			regions := activeRegions[ev.G]
 			if mode == 0 { // region start
-				activeRegions[ev.G] = append(regions, ev) // push
+				activeRegions[ev.G] = push(regions, ev) // push
 			} else if mode == 1 { // region end
 				n := len(regions)
 				if n > 0 { // matching region start event is in the trace.

@@ -5,6 +5,7 @@
 package zstd
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"io"
 )
 
@@ -21,7 +22,8 @@ func (r *Reader) compressedBlock(blockSize int32) error {
 		// We know that blockSize <= 128K,
 		// so this won't allocate an enormous amount.
 		need := blockSize - len(r.compressedBuf)
-		r.compressedBuf = append(r.compressedBuf, []byte{:need}...)
+		if len(r.compressedBuf) >= cap(r.compressedBuf) { r.compressedBuf = mxutil.GrowCap(r.compressedBuf) }
+		r.compressedBuf = push(r.compressedBuf, []byte{:need}...)
 	}
 
 	if _, err := io.ReadFull(r.r, r.compressedBuf); err != nil {
@@ -51,7 +53,8 @@ func (r *Reader) compressedBlock(blockSize int32) error {
 			return r.makeError(off, "extraneous data after no sequences")
 		}
 
-		r.buffer = append(r.buffer, litbuf...)
+		if len(r.buffer) >= cap(r.buffer) { r.buffer = mxutil.GrowCap(r.buffer) }
+		r.buffer = push(r.buffer, litbuf...)
 
 		return nil
 	}
@@ -367,7 +370,8 @@ func (r *Reader) execSeqs(data block, off int32, litbuf []byte, seqCount int32) 
 			return rbr.makeError("literal byte overflow")
 		}
 		if literal > 0 {
-			r.buffer = append(r.buffer, litbuf[:literal]...)
+			if len(r.buffer) >= cap(r.buffer) { r.buffer = mxutil.GrowCap(r.buffer) }
+			r.buffer = push(r.buffer, litbuf[:literal]...)
 			litbuf = litbuf[literal:]
 		}
 
@@ -378,7 +382,8 @@ func (r *Reader) execSeqs(data block, off int32, litbuf []byte, seqCount int32) 
 		}
 	}
 
-	r.buffer = append(r.buffer, litbuf...)
+	if len(r.buffer) >= cap(r.buffer) { r.buffer = mxutil.GrowCap(r.buffer) }
+	r.buffer = push(r.buffer, litbuf...)
 
 	if rbr.cnt != 0 {
 		return r.makeError(off, "extraneous data after sequences")
@@ -423,7 +428,8 @@ func (r *Reader) copyFromWindow(rbr *reverseBitReader, offset, match uint32) err
 		if copy > match {
 			copy = match
 		}
-		r.buffer = append(r.buffer, r.buffer[bufferOffset:bufferOffset+copy]...)
+		if len(r.buffer) >= cap(r.buffer) { r.buffer = mxutil.GrowCap(r.buffer) }
+		r.buffer = push(r.buffer, r.buffer[bufferOffset:bufferOffset+copy]...)
 		match -= copy
 	}
 	return nil

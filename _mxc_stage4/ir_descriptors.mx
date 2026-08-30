@@ -1,0 +1,1165 @@
+package main
+
+import (
+	"runtime"
+	"unsafe"
+	. "git.smesh.lol/moxie/pkg/types"
+	"git.smesh.lol/moxie/pkg/mxutil"
+	"git.smesh.lol/moxie/pkg/token"
+)
+
+// Runtime Kind values - must match src/runtime/typekind.mx exactly.
+const (
+	rtKindBool          = 1
+	rtKindInt           = 2
+	rtKindInt8          = 3
+	rtKindInt16         = 4
+	rtKindInt32         = 5
+	rtKindInt64         = 6
+	rtKindUint          = 7
+	rtKindUint8         = 8
+	rtKindUint16        = 9
+	rtKindUint32        = 10
+	rtKindUint64        = 11
+	rtKindUintptr       = 12
+	rtKindFloat32       = 13
+	rtKindFloat64       = 14
+	rtKindComplex64     = 15
+	rtKindComplex128    = 16
+	rtKindBytes         = 17
+	rtKindUnsafePointer = 18
+	rtKindChan          = 19
+	rtKindInterface     = 20
+	rtKindPointer       = 21
+	rtKindSlice         = 22
+	rtKindArray         = 23
+	rtKindFunc          = 24
+	rtKindMap           = 25
+	rtKindStruct        = 26
+)
+
+const (
+	rtFlagNamed      = 32
+	rtFlagComparable = 64
+	rtFlagIsBinary   = 128
+)
+
+const rtKindInvalid = 0
+
+// basicTypeDescName maps a Basic to its descriptor name tail, mirroring the
+// legacy compiler's basicTypeNames table.
+func basicTypeDescName(k BasicKind) (s string) {
+	switch k {
+	case Bool, UntypedBool:
+		return "bool"
+	case Int8:
+		return "int8"
+	case Int16:
+		return "int16"
+	case Int32, UntypedInt, UntypedRune:
+		return "int32"
+	case Int64:
+		return "int64"
+	case Uint8:
+		return "uint8"
+	case Uint16:
+		return "uint16"
+	case Uint32:
+		return "uint32"
+	case Uint64:
+		return "uint64"
+	case Uintptr:
+		return "uintptr"
+	case Float32:
+		return "float32"
+	case Float64, UntypedFloat:
+		return "float64"
+	case TCString, UntypedString:
+		return "bytes"
+	case UnsafePointer:
+		return "unsafe.Pointer"
+	}
+	return "invalid"
+}
+
+// typeDescName returns the descriptor name tail (without the
+// "reflect/types.type:" prefix), matching the legacy getTypeCodeName.
+func (e *irEmitter) typeDescName(t Type) (s string) {
+	return e.typeDescNameInner(t)
+}
+
+func (e *irEmitter) typeDescNameInner(t Type) (s string) {
+	if t == nil {
+		return "basic:invalid"
+	}
+	if b, ok := t.(*Basic); ok {
+		if b == nil {
+			mxutil.WriteStr(2, "DBG DESC typed-nil Basic\n")
+			return "basic:invalid"
+		}
+		return "basic:" | basicTypeDescName(b.Kind)
+	}
+	if named, ok := t.(*Named); ok {
+		if named == nil {
+			mxutil.WriteStr(2, "DBG DESC typed-nil Named\n")
+			return "named:unknown"
+		}
+		if named.Obj == nil {
+			return "named:unknown"
+		}
+		if named.Obj.Pkg == nil {
+			return "named:" | named.Obj.Name
+		}
+		pkgPath := normalizePkgPath(named.Obj.Pkg.Path)
+		return "named:" | pkgPath | "." | named.Obj.Name
+	}
+	if p, ok := t.(*Pointer); ok {
+		if p == nil {
+			mxutil.WriteStr(2, "DBG DESC typed-nil Pointer\n")
+			return "pointer:basic:invalid"
+		}
+		return "pointer:" | e.typeDescName(p.Base)
+	}
+	if sl, ok := t.(*Slice); ok {
+		if sl == nil {
+			mxutil.WriteStr(2, "DBG DESC typed-nil Slice\n")
+			return "slice:basic:invalid"
+		}
+		if b, ok2 := SafeUnderlying(sl.Elem).(*Basic); ok2 && b != nil && b.Kind == Uint8 {
+			return "basic:bytes"
+		}
+		return "slice:" | e.typeDescName(sl.Elem)
+	}
+	if arr, ok := t.(*Array); ok {
+		if arr == nil {
+			mxutil.WriteStr(2, "DBG DESC typed-nil Array\n")
+			return "array:0:basic:invalid"
+		}
+		al := arr.Len
+		if al < 0 {
+			al = 0
+		}
+		return "array:" | token.Itoa64(al) | ":" | e.typeDescName(arr.Elem)
+	}
+	if m, ok := t.(*TCMap); ok {
+		if m == nil {
+			mxutil.WriteStr(2, "DBG DESC typed-nil TCMap\n")
+			return "map:{basic:invalid,basic:invalid}"
+		}
+		return "map:{" | e.typeDescName(m.Key) | "," | e.typeDescName(m.Elem) | "}"
+	}
+	if ch, ok := t.(*TCChan); ok {
+		if ch == nil {
+			mxutil.WriteStr(2, "DBG DESC typed-nil TCChan\n")
+			return "chan:sr:basic:invalid"
+		}
+		dir := "sr:"
+		if ch.Dir == TCSendOnly {
+			dir = "s:"
+		} else if ch.Dir == TCRecvOnly {
+			dir = "r:"
+		}
+		return "chan:" | dir | e.typeDescName(ch.Elem)
+	}
+	if iface, ok := t.(*TCInterface); ok {
+		if iface == nil {
+			mxutil.WriteStr(2, "DBG DESC typed-nil TCInterface\n")
+			return "interface:{}"
+		}
+		out := "interface:{"
+		for i := int32(0); i < iface.NumMethods(); i++ {
+			if i > 0 {
+				out = out | ","
+			}
+			m := iface.Method(i)
+			if m == nil {
+				continue
+			}
+			nm := m.Name
+			if !(len(nm) > 0 && nm[0] >= 'A' && nm[0] <= 'Z') {
+				nm = "?" | "." | nm
+			}
+			out = out | nm | ":" | e.typeDescName(m.Sig)
+		}
+		return out | "}"
+	}
+	if st, ok := t.(*TCStruct); ok {
+		if st == nil {
+			mxutil.WriteStr(2, "DBG DESC typed-nil TCStruct\n")
+			return "struct:{}"
+		}
+		out := "struct:{"
+		for i := int32(0); i < st.NumFields(); i++ {
+			if i > 0 {
+				out = out | ","
+			}
+			f := st.Field(i)
+			if f == nil {
+				mxutil.WriteStr(2, "DBG DESC nil struct field\n")
+				continue
+			}
+			if f.Anonymous {
+				out = out | "#"
+			}
+			out = out | f.Name | ":" | e.typeDescName(f.Typ)
+			if tag := st.Tag(i); tag != "" {
+				out = out | "`" | tag | "`"
+			}
+		}
+		return out | "}"
+	}
+	if sig, ok := t.(*Signature); ok {
+		if sig == nil {
+			mxutil.WriteStr(2, "DBG DESC typed-nil Signature\n")
+			return "func:{}{}"
+		}
+		out := "func:{"
+		if sig.Params != nil {
+			for i := int32(0); i < sig.Params.Len(); i++ {
+				if i > 0 {
+					out = out | ","
+				}
+				pt := sig.Params.At(i)
+				if pt == nil || pt.Typ == nil {
+					continue
+				}
+				out = out | e.typeDescName(pt.Typ)
+			}
+		}
+		out = out | "}{"
+		if sig.Results != nil {
+			for i := int32(0); i < sig.Results.Len(); i++ {
+				if i > 0 {
+					out = out | ","
+				}
+				rt := sig.Results.At(i)
+				if rt == nil || rt.Typ == nil {
+					continue
+				}
+				out = out | e.typeDescName(rt.Typ)
+			}
+		}
+		return out | "}"
+	}
+	return "basic:invalid"
+}
+
+// runtimeKindOf returns the runtime Kind value for the type.
+func runtimeKindOf(t Type) (k int32) {
+	u := SafeUnderlying(t)
+	switch tt := u.(type) {
+	case *Basic:
+		switch tt.Kind {
+		case Bool, UntypedBool:
+			return rtKindBool
+		case Int8:
+			return rtKindInt8
+		case Int16:
+			return rtKindInt16
+		case Int32, UntypedInt, UntypedRune:
+			return rtKindInt32
+		case Int64:
+			return rtKindInt64
+		case Uint8:
+			return rtKindUint8
+		case Uint16:
+			return rtKindUint16
+		case Uint32:
+			return rtKindUint32
+		case Uint64:
+			return rtKindUint64
+		case Uintptr:
+			return rtKindUintptr
+		case Float32:
+			return rtKindFloat32
+		case Float64, UntypedFloat:
+			return rtKindFloat64
+		case TCString, UntypedString:
+			return rtKindBytes
+		case UnsafePointer:
+			return rtKindUnsafePointer
+		}
+	case *Pointer:
+		return rtKindPointer
+	case *Slice:
+		return rtKindSlice
+	case *Array:
+		return rtKindArray
+	case *TCMap:
+		return rtKindMap
+	case *TCChan:
+		return rtKindChan
+	case *TCInterface:
+		return rtKindInterface
+	case *Signature:
+		return rtKindFunc
+	case *TCStruct:
+		return rtKindStruct
+	}
+	return rtKindInvalid
+}
+
+// typeDescComparable mirrors the legacy types.Comparable for the moxie type
+// system.
+func typeDescComparable(t Type) (ok bool) {
+	if t == nil {
+		return false
+	}
+	u := SafeUnderlying(t)
+	switch tt := u.(type) {
+	case *Basic:
+		return tt.Kind != UnsafePointer
+	case *Pointer, *TCChan, *TCInterface:
+		return true
+	case *Slice, *TCMap, *Signature:
+		return false
+	case *Array:
+		return typeDescComparable(tt.Elem)
+	case *TCStruct:
+		for i := int32(0); i < tt.NumFields(); i++ {
+			if !typeDescComparable(tt.Field(i).Typ) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// typeDescSize returns the in-memory size of the type, matching the LLVM
+// struct layout (natural alignment).
+func typeDescSize(t Type) (sz int32) {
+	u := SafeUnderlying(t)
+	switch tt := u.(type) {
+	case *Basic:
+		switch tt.Kind {
+		case Bool, UntypedBool, Int8, Uint8:
+			return 1
+		case Int16, Uint16:
+			return 2
+		case Int32, Uint32, Float32, UntypedInt, UntypedRune:
+			return 4
+		case Int64, Uint64, Float64, UntypedFloat:
+			return 8
+		case TCString, UntypedString:
+			return 24
+		case UnsafePointer:
+			return 8
+		}
+	case *Pointer, *TCMap, *TCChan, *Signature:
+		return 8
+	case *Slice:
+		return 24
+	case *TCInterface:
+		return 16
+	case *Array:
+		es := typeDescSize(tt.Elem)
+		ea := typeDescAlign(tt.Elem)
+		n := int32(tt.Len)
+		if n <= 0 {
+			return 0
+		}
+		return (n-1)*ea + es
+	case *TCStruct:
+		off := int32(0)
+		maxal := int32(1)
+		for i := int32(0); i < tt.NumFields(); i++ {
+			fa := typeDescAlign(tt.Field(i).Typ)
+			if fa > maxal {
+				maxal = fa
+			}
+			off = (off + fa - 1) &^ (fa - 1)
+			off += typeDescSize(tt.Field(i).Typ)
+		}
+		return (off + maxal - 1) &^ (maxal - 1)
+	}
+	return 0
+}
+
+// typeDescAlign returns the natural alignment of the type.
+func typeDescAlign(t Type) (al int32) {
+	u := SafeUnderlying(t)
+	switch tt := u.(type) {
+	case *Basic:
+		s := typeDescSize(tt)
+		if s > 4 {
+			return 8
+		}
+		if s == 0 {
+			return 1
+		}
+		return s
+	case *Pointer, *TCMap, *TCChan, *Signature, *Slice, *TCInterface:
+		return 8
+	case *Array:
+		return typeDescAlign(tt.Elem)
+	case *TCStruct:
+		maxal := int32(1)
+		for i := int32(0); i < tt.NumFields(); i++ {
+			fa := typeDescAlign(tt.Field(i).Typ)
+			if fa > maxal {
+				maxal = fa
+			}
+		}
+		return maxal
+	}
+	return 8
+}
+
+// structFieldOffset returns the byte offset of field i in the struct.
+func structFieldOffset(t *TCStruct, i int32) (off int32) {
+	off = 0
+	for j := int32(0); j < i; j++ {
+		fa := typeDescAlign(t.Field(j).Typ)
+		off = (off + fa - 1) &^ (fa - 1)
+		off += typeDescSize(t.Field(j).Typ)
+	}
+	fa := typeDescAlign(t.Field(i).Typ)
+	return (off + fa - 1) &^ (fa - 1)
+}
+
+// uvarintBytes encodes n as an unsigned LEB128 varint (binary.PutUvarint).
+func uvarintBytes(n uint32) (b []byte) {
+	for n >= 0x80 {
+		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		push(b, byte(n)|0x80)
+		n >>= 7
+	}
+	if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+	push(b, byte(n))
+	return b
+}
+
+// descGlobalName returns the quoted global name for a descriptor tail.
+func descGlobalName(tail string) (s string) {
+	return "\"" | "reflect/types.type:" | tail | "\""
+}
+
+// emitPkgpath emits the pkgpath string global once per path.
+func (e *irEmitter) emitPkgpath(pkgpath string) (name string) {
+	ppName := "reflect/types.type.pkgpath.empty"
+	if pkgpath != "" {
+		ppName = "reflect/types.type.pkgpath:" | pkgpath
+	}
+	if e.emittedPkgpaths == nil {
+		e.emittedPkgpaths = map[string]bool{}
+	}
+	if e.emittedPkgpaths[ppName] {
+		return ppName
+	}
+	e.emittedPkgpaths[ppName] = true
+	e.w("@\"" | ppName | "\" = private constant [")
+	e.w(irItoa64(int64(len(pkgpath) + 1)))
+	e.w(" x i8] c\"")
+	e.w(irEscapeString(pkgpath))
+	e.w("\\00\", align 1\n")
+	return ppName
+}
+
+// emittedPkgpaths is declared on irEmitter in ir_emit.mx.
+
+// arenaString copies s into the compile arena so it survives per-function
+// fn-arena release.
+func (e *irEmitter) arenaString(s string) (out string) {
+	if len(s) == 0 {
+		return ""
+	}
+	ptr := runtime.ArenaAlloc(e.compileArena, uintptr(len(s)))
+	buf := unsafe.Slice((*byte)(ptr), len(s))
+	n := int32(len(s))
+	for i := int32(0); i < n; i++ {
+		buf[i] = s[i]
+	}
+		return buf
+}
+
+// collectTypeDesc records a type whose descriptor is referenced, so the
+// emitter can define the globals at the end of the module. Runs inside the
+// per-function fn arena; the map and its keys must survive into emit()'s
+// trailing section, so allocate them in the compile arena: the map root and
+// buckets pin to the arena current at creation, and the tail string is
+// copied because the original bytes sit in the caller's fn arena.
+func (e *irEmitter) collectTypeDesc(t Type) {
+	if t == nil {
+		return
+	}
+	saved := runtime.CurrentArena()
+	runtime.SetCurrentArena(e.compileArena)
+	if e.pendTypeDescs == nil {
+		e.pendTypeDescs = map[string]Type{}
+	}
+	tail := e.arenaString(e.typeDescName(t))
+	if _, ok := e.pendTypeDescs[tail]; !ok {
+		e.pendTypeDescs[tail] = t
+	}
+	runtime.SetCurrentArena(saved)
+}
+
+func (e *irEmitter) markTypeDescEmitted(tail string) {
+	saved := runtime.CurrentArena()
+	runtime.SetCurrentArena(e.compileArena)
+	if e.emittedTypeDescs == nil {
+		e.emittedTypeDescs = map[string]bool{}
+	}
+	cp := e.arenaString(tail)
+	e.emittedTypeDescs[cp] = true
+	ok := e.emittedTypeDescs[cp]
+	rc := int32(0)
+	if ok {
+		rc = 1
+	}
+	mxutil.WriteStr(2, "MARK len=" | simpleItoa(int32(len(e.emittedTypeDescs))) | " recheck=" | simpleItoa(rc) | " " | tail | "\n")
+	runtime.SetCurrentArena(saved)
+}
+
+func (e *irEmitter) typeDescEmitted(tail string) (ok bool) {
+	if e.emittedTypeDescs == nil {
+		return false
+	}
+	saved := runtime.CurrentArena()
+	runtime.SetCurrentArena(e.compileArena)
+	cp := e.arenaString(tail)
+	runtime.SetCurrentArena(saved)
+	ok = e.emittedTypeDescs[cp]
+	if !ok {
+		mxutil.WriteStr(2, "CHECK-MISS len=" | simpleItoa(int32(len(e.emittedTypeDescs))) | " " | tail | "\n")
+	}
+	return ok
+}
+
+// emitBasicIdentities defines the synthetic String() identity wrappers for
+// the basic types (runtime/stringer.mx calls basic:X.String$identity). The
+// legacy compiler generates these when building the runtime; stage4-built
+// packages reference them, so the stage4 must define them too.
+func (e *irEmitter) emitBasicIdentities() {
+	st := e.sliceType()
+	basicNames := []string{"bool", "int8", "int16", "int32", "int64",
+		"uint8", "uint16", "uint32", "uint64", "uintptr", "float32", "float64", "bytes"}
+	for _, bn := range basicNames {
+		sym := "basic:" | bn | ".String$identity"
+		e.w("define internal " | st | " @\"" | sym | "\"(ptr %idp, ptr %idc) {\n")
+		e.w("entry:\n")
+		e.w("  %idr = load " | st | ", ptr %idp\n")
+		e.w("  ret " | st | " %idr\n")
+		e.w("}\n")
+	}
+}
+
+// emitTypeDescs defines all pending descriptor globals.
+// collectTypeDescFromTail records a descriptor referenced by name tail,
+// without having a Type object. Used by the iface dispatch codegen when
+// implTypeID resolves an extTypeID string directly.
+func (e *irEmitter) collectTypeDescFromTail(tail string) {
+	if tail == "" || e.pendTypeDescs == nil {
+		return
+	}
+	saved := runtime.CurrentArena()
+	runtime.SetCurrentArena(e.compileArena)
+	if _, ok := e.pendTypeDescs[tail]; !ok {
+		e.pendTypeDescs[e.arenaString(tail)] = Typ[Invalid]
+	}
+	runtime.SetCurrentArena(saved)
+}
+
+func (e *irEmitter) emitTypeDescs() {
+	if e.pendTypeDescs == nil {
+		return
+	}
+	e.w("%runtime.structField = type { ptr, ptr }\n")
+	var tails []string
+	for t := range e.pendTypeDescs {
+		if len(tails) >= cap(tails) { tails = mxutil.GrowCap(tails) }
+		push(tails, t)
+	}
+	for i := 1; i < len(tails); i++ {
+		for j := i; j > 0 && tails[j] < tails[j-1]; j-- {
+			tails[j], tails[j-1] = tails[j-1], tails[j]
+		}
+	}
+	for _, tail := range tails {
+		e.emitTypeDesc(tail)
+	}
+}
+
+// emitTypeDesc emits the descriptor global for the given name tail,
+// recursively emitting referenced descriptors. The Type objects collected
+// in pendTypeDescs can point into transient fn-arena/stack memory, so the
+// emission reconstructs types from the tail text instead of dereferencing
+// them.
+func (e *irEmitter) emitTypeDesc(tail string) {
+	for _, t := range e.emittedTails {
+		if t == tail {
+			return
+		}
+	}
+	if len(e.emittedTails) >= cap(e.emittedTails) { e.emittedTails = mxutil.GrowCap(e.emittedTails) }
+	e.emittedTails = push(e.emittedTails, tail)
+	tt := e.typeFromTail(tail)
+	if tt == nil || tt == Typ[Invalid] {
+		e.w("@\"" | "reflect/types.type:" | tail | "\" = linkonce_odr constant { i8, ptr } { i8 0, ptr null }, align 8\n")
+		return
+	}
+	e.emitTypeDescValue(tt)
+}
+
+// tailAtoi64 parses a decimal integer from the tail text.
+func tailAtoi64(s string) (n int64) {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			break
+		}
+		n = n*10 + int64(c-'0')
+	}
+	return n
+}
+
+// tailSplitTop splits s at commas at brace depth 0.
+func tailSplitTop(s string) (parts []string) {
+	depth := int32(0)
+	start := int32(0)
+	for i := int32(0); i < int32(len(s)); i++ {
+		c := s[i]
+		if c == '{' {
+			depth++
+		} else if c == '}' {
+			depth--
+		} else if c == ',' && depth == 0 {
+			if len(parts) >= cap(parts) { parts = mxutil.GrowCap(parts) }
+			push(parts, s[start:i])
+			start = i + 1
+		}
+	}
+	if len(parts) >= cap(parts) { parts = mxutil.GrowCap(parts) }
+	push(parts, s[start:])
+	return parts
+}
+
+// takeBraceGroup extracts the brace-delimited group starting at s[from]
+// (which must be '{'), scanning nested braces, returning the inner content
+// and the index just past the closing brace.
+func takeBraceGroup(s string, from int32) (content string, next int32, ok bool) {
+	depth := int32(0)
+	start := from + 1
+	for i := from; i < int32(len(s)); i++ {
+		c := s[i]
+		if c == '{' {
+			depth++
+		} else if c == '}' {
+			depth--
+			if depth == 0 {
+				return s[start:i], i + 1, true
+			}
+		}
+	}
+	return "", from, false
+}
+
+// basicFromTail maps a basic type name tail to its Basic type.
+func basicFromTail(bn string) (t Type) {
+	switch bn {
+	case "bool":
+		return Typ[Bool]
+	case "int8":
+		return Typ[Int8]
+	case "int16":
+		return Typ[Int16]
+	case "int32":
+		return Typ[Int32]
+	case "int64":
+		return Typ[Int64]
+	case "uint8":
+		return Typ[Uint8]
+	case "uint16":
+		return Typ[Uint16]
+	case "uint32":
+		return Typ[Uint32]
+	case "uint64":
+		return Typ[Uint64]
+	case "uintptr":
+		return Typ[Uintptr]
+	case "float32":
+		return Typ[Float32]
+	case "float64":
+		return Typ[Float64]
+	case "bytes":
+		return Typ[TCString]
+	case "unsafe.Pointer":
+		return Typ[UnsafePointer]
+	}
+	return Typ[Invalid]
+}
+
+var fromTailDepth int32
+
+// typeFromTail reconstructs a Type from its descriptor name tail.
+func (e *irEmitter) typeFromTail(tail string) (t Type) {
+	fromTailDepth++
+	if fromTailDepth > 40 {
+		fromTailDepth--
+		return Typ[Invalid]
+	}
+	rv := e.typeFromTailInner(tail)
+	fromTailDepth--
+	return rv
+}
+
+func (e *irEmitter) typeFromTailInner(tail string) (t Type) {
+	if mxutil.HasPrefix(tail, "basic:") {
+		return basicFromTail(tail[len("basic:"):])
+	}
+	if mxutil.HasPrefix(tail, "pointer:") {
+		return NewPointer(e.typeFromTail(tail[len("pointer:"):]))
+	}
+	if mxutil.HasPrefix(tail, "slice:") {
+		return NewSlice(e.typeFromTail(tail[len("slice:"):]))
+	}
+	if mxutil.HasPrefix(tail, "array:") {
+		rest := tail[len("array:"):]
+		ci := -1
+		for i := 0; i < len(rest); i++ {
+			if rest[i] == ':' {
+				ci = i
+				break
+			}
+		}
+		if ci < 0 {
+			return Typ[Invalid]
+		}
+		return NewArray(e.typeFromTail(rest[ci+1:]), tailAtoi64(rest[:ci]))
+	}
+	if mxutil.HasPrefix(tail, "map:{") {
+		inner := tail[len("map:{"):len(tail)-1]
+		parts := tailSplitTop(inner)
+		if len(parts) != 2 {
+			return Typ[Invalid]
+		}
+		return NewTCMap(e.typeFromTail(parts[0]), e.typeFromTail(parts[1]))
+	}
+	if mxutil.HasPrefix(tail, "chan:") {
+		rest := tail[len("chan:"):]
+		dir := TCSendRecv
+		if mxutil.HasPrefix(rest, "s:") {
+			dir = TCSendOnly
+			rest = rest[2:]
+		} else if mxutil.HasPrefix(rest, "r:") {
+			dir = TCRecvOnly
+			rest = rest[2:]
+		} else if mxutil.HasPrefix(rest, "sr:") {
+			rest = rest[3:]
+		}
+		return NewTCChan(dir, e.typeFromTail(rest))
+	}
+	if mxutil.HasPrefix(tail, "interface:{") {
+		inner := tail[len("interface:{"):len(tail)-1]
+		var methods []*IfaceMethod
+		if inner != "" {
+			ms := tailSplitTop(inner)
+			for i := 0; i < len(ms); i++ {
+				m := ms[i]
+				if m == "" {
+					continue
+				}
+				ci := -1
+				for j := 0; j < len(m); j++ {
+					if m[j] == ':' {
+						ci = j
+						break
+					}
+				}
+				if ci < 0 {
+					continue
+				}
+				mname := m[:ci]
+				if mxutil.HasPrefix(mname, "?.") {
+					mname = mname[2:]
+				}
+				msig := e.typeFromTail(m[ci+1:])
+				ss, isSig := msig.(*Signature)
+				if isSig {
+					if len(methods) >= cap(methods) { methods = mxutil.GrowCap(methods) }
+					push(methods, NewTCIfaceMethod(mname, ss))
+				}
+			}
+		}
+		if len(methods) == 0 {
+			return NewTCInterface(nil, nil)
+		}
+		ifc := NewTCInterface(methods, nil)
+		ifc.AllMethods = methods
+		ifc.Completed = true
+		return ifc
+	}
+	if mxutil.HasPrefix(tail, "func:{") {
+		rest := tail[len("func:"):]
+		pContent, next, ok := takeBraceGroup(rest, 0)
+		if !ok {
+			return Typ[Invalid]
+		}
+		var params []*TCVar
+		if pContent != "" {
+			ps := tailSplitTop(pContent)
+			for i := 0; i < len(ps); i++ {
+				if ps[i] == "" {
+					continue
+				}
+				if len(params) >= cap(params) { params = mxutil.GrowCap(params) }
+				push(params, NewTCVar(nil, "", e.typeFromTail(ps[i])))
+			}
+		}
+		var results []*TCVar
+		if next < int32(len(rest)) && rest[next] == '{' {
+			rContent, _, ok2 := takeBraceGroup(rest, next)
+			if ok2 && rContent != "" {
+				rs := tailSplitTop(rContent)
+				for i := 0; i < len(rs); i++ {
+					if rs[i] == "" {
+						continue
+					}
+					if len(results) >= cap(results) { results = mxutil.GrowCap(results) }
+					push(results, NewTCVar(nil, "", e.typeFromTail(rs[i])))
+				}
+			}
+		}
+		return NewSignature(nil, NewTuple(params...), NewTuple(results...), false)
+	}
+	if mxutil.HasPrefix(tail, "struct:{") {
+		inner := tail[len("struct:{"):len(tail)-1]
+		fields := tailSplitTop(inner)
+		var flds []*TCVar
+		var tags []string
+		for i := 0; i < len(fields); i++ {
+			f := fields[i]
+			if f == "" {
+				continue
+			}
+			ci := -1
+			for j := 0; j < len(f); j++ {
+				if f[j] == ':' {
+					ci = j
+					break
+				}
+			}
+			if ci < 0 {
+				continue
+			}
+			fname := f[:ci]
+			ftail := f[ci+1:]
+			anon := false
+			if len(fname) > 0 && fname[0] == '#' {
+				anon = true
+				fname = fname[1:]
+			}
+			// strip the optional `tag` suffix
+			bt := -1
+			for j := 0; j < len(ftail); j++ {
+				if ftail[j] == '`' {
+					bt = j
+					break
+				}
+			}
+			tag := ""
+			if bt >= 0 {
+				tag = ftail[bt+1 : len(ftail)-1]
+				ftail = ftail[:bt]
+			}
+			ft := e.typeFromTail(ftail)
+			if len(flds) >= cap(flds) { flds = mxutil.GrowCap(flds) }
+			push(flds, NewTCField(nil, fname, ft, anon))
+			if len(tags) >= cap(tags) { tags = mxutil.GrowCap(tags) }
+			push(tags, tag)
+		}
+		return NewTCStruct(flds, tags)
+	}
+	if mxutil.HasPrefix(tail, "named:") {
+		rest := tail[len("named:"):]
+		pkgPath := ""
+		name := rest
+		dot := -1
+		for i := len(rest) - 1; i >= 0; i-- {
+			if rest[i] == '.' {
+				dot = i
+				break
+			}
+		}
+		if dot >= 0 {
+			pkgPath = rest[:dot]
+			name = rest[dot+1:]
+		}
+		lookupScopeParent := func(sc *Scope, n string) Object {
+			found, obj := sc.LookupParent(n)
+			_ = found
+			return obj
+		}
+		if e.pkg != nil && e.pkg.Pkg != nil && e.pkg.Pkg.Scope != nil {
+			if pkgPath == "" || normalizePkgPath(e.pkg.Pkg.Path) == pkgPath {
+				if obj := lookupScopeParent(e.pkg.Pkg.Scope, name); obj != nil {
+					if tn, ok := obj.(*TypeName); ok && tn.Typ != nil {
+						return tn.Typ
+					}
+				}
+			}
+		}
+		if ImportRegistry != nil {
+			for _, p := range ImportRegistry {
+				if p != nil && p.Scope != nil {
+					if pkgPath == "" || normalizePkgPath(p.Path) == pkgPath {
+						if obj := lookupScopeParent(p.Scope, name); obj != nil {
+							if tn, ok := obj.(*TypeName); ok && tn.Typ != nil {
+								return tn.Typ
+							}
+						}
+					}
+				}
+			}
+		}
+		if pkgPath == "" && Universe != nil {
+			if obj := lookupScopeParent(Universe, name); obj != nil {
+				if tn, ok := obj.(*TypeName); ok && tn.Typ != nil {
+					return tn.Typ
+				}
+			}
+		}
+	
+		return Typ[Invalid]
+	}
+	return Typ[Invalid]
+}
+
+// needTypeDesc recursively emits the descriptor for t. The type must
+// already be pending (collectTypeDesc ran at the reference site); the
+// pendTypeDescs map doubles as the emitted-set, so re-collecting here
+// would re-arm an already-emitted tail.
+func (e *irEmitter) needTypeDesc(t Type) {
+	if t == nil {
+		return
+	}
+	e.emitTypeDesc(e.typeDescName(t))
+}
+
+// emitTypeDescValue writes the descriptor global and its dependencies.
+func (e *irEmitter) emitTypeDescValue(t Type) {
+	if named, isNamed := t.(*Named); isNamed {
+		e.emitNamedDesc(t, named)
+		return
+	}
+	u := SafeUnderlying(t)
+	if u == nil {
+		return
+	}
+	if e.typeDescName(t) == "basic:bytes" {
+		// []byte and string unify to the bytes basic descriptor.
+		pt := NewPointer(t)
+		ptTail := e.typeDescName(pt)
+		e.needTypeDesc(pt)
+		e.w("@\"" | "reflect/types.type:basic:bytes" | "\" = linkonce_odr constant { i8, ptr } { i8 " | irItoa64(int64(rtKindBytes|rtFlagComparable)) | ", ptr @" | descGlobalName(ptTail) | " }, align 8\n")
+		return
+	}
+	gname := descGlobalName(e.typeDescName(t))
+	meta := runtimeKindOf(t)
+	if typeDescComparable(t) {
+		meta |= rtFlagComparable
+	}
+
+	switch tt := u.(type) {
+	case *Basic:
+		pt := NewPointer(t)
+		ptTail := e.typeDescName(pt)
+		e.needTypeDesc(pt)
+		e.w("@" | gname | " = linkonce_odr constant { i8, ptr } { i8 " | irItoa64(int64(meta)) | ", ptr @" | descGlobalName(ptTail) | " }, align 8\n")
+	case *Pointer:
+		elem := tt.Base
+		e.needTypeDesc(elem)
+		e.w("@" | gname | " = linkonce_odr constant { i8, i16, ptr } { i8 " | irItoa64(int64(meta)) | ", i16 0, ptr @" | descGlobalName(e.typeDescName(elem)) | " }, align 8\n")
+	case *Slice:
+		elem := tt.Elem
+		e.needTypeDesc(elem)
+		pt := NewPointer(t)
+		ptTail := e.typeDescName(pt)
+		e.needTypeDesc(pt)
+		e.w("@" | gname | " = linkonce_odr constant { i8, i16, ptr, ptr } { i8 " | irItoa64(int64(meta)) | ", i16 0, ptr @" | descGlobalName(ptTail) | ", ptr @" | descGlobalName(e.typeDescName(elem)) | " }, align 8\n")
+	case *Array:
+		elem := tt.Elem
+		e.needTypeDesc(elem)
+		pt := NewPointer(t)
+		ptTail := e.typeDescName(pt)
+		e.needTypeDesc(pt)
+		sliceOf := NewSlice(elem)
+		e.needTypeDesc(sliceOf)
+		e.w("@" | gname | " = linkonce_odr constant { i8, i16, ptr, ptr, i64, ptr } { i8 " | irItoa64(int64(meta)) | ", i16 0, ptr @" | descGlobalName(ptTail) | ", ptr @" | descGlobalName(e.typeDescName(elem)) | ", i64 " | token.Itoa64(tt.Len) | ", ptr @" | descGlobalName(e.typeDescName(sliceOf)) | " }, align 8\n")
+	case *TCMap:
+		e.needTypeDesc(tt.Key)
+		e.needTypeDesc(tt.Elem)
+		pt := NewPointer(t)
+		ptTail := e.typeDescName(pt)
+		e.needTypeDesc(pt)
+		e.w("@" | gname | " = linkonce_odr constant { i8, i16, ptr, ptr, ptr } { i8 " | irItoa64(int64(meta)) | ", i16 0, ptr @" | descGlobalName(ptTail) | ", ptr @" | descGlobalName(e.typeDescName(tt.Elem)) | ", ptr @" | descGlobalName(e.typeDescName(tt.Key)) | " }, align 8\n")
+	case *TCChan:
+		e.needTypeDesc(tt.Elem)
+		pt := NewPointer(t)
+		ptTail := e.typeDescName(pt)
+		e.needTypeDesc(pt)
+		dir := int64(0)
+		if tt.Dir == TCSendOnly {
+			dir = 1
+		} else if tt.Dir == TCRecvOnly {
+			dir = 2
+		}
+		e.w("@" | gname | " = linkonce_odr constant { i8, i16, ptr, ptr } { i8 " | irItoa64(int64(meta)) | ", i16 " | token.Itoa64(dir) | ", ptr @" | descGlobalName(ptTail) | ", ptr @" | descGlobalName(e.typeDescName(tt.Elem)) | " }, align 8\n")
+	case *TCInterface:
+		pt := NewPointer(t)
+		ptTail := e.typeDescName(pt)
+		e.needTypeDesc(pt)
+		e.w("@" | gname | " = linkonce_odr constant { i8, ptr } { i8 " | irItoa64(int64(meta)) | ", ptr @" | descGlobalName(ptTail) | " }, align 8\n")
+	case *Signature:
+		pt := NewPointer(t)
+		ptTail := e.typeDescName(pt)
+		e.needTypeDesc(pt)
+		e.w("@" | gname | " = linkonce_odr constant { i8, ptr } { i8 " | irItoa64(int64(meta)) | ", ptr @" | descGlobalName(ptTail) | " }, align 8\n")
+	case *TCStruct:
+		pt := NewPointer(t)
+		ptTail := e.typeDescName(pt)
+		e.needTypeDesc(pt)
+		e.emitStructDesc(t, tt, gname, meta, descGlobalName(ptTail))
+	}
+}
+
+// emitNamedDesc emits a named type descriptor:
+// {meta, numMethod, ptrTo, underlying, pkgpath, name}.
+func (e *irEmitter) emitNamedDesc(t Type, named *Named) {
+	gname := descGlobalName(e.typeDescName(t))
+	meta := rtKindOfNamed(named) | rtFlagNamed
+	if typeDescComparable(t) {
+		meta |= rtFlagComparable
+	}
+	pkgpath := ""
+	pkgname := ""
+	name := "unknown"
+	if named.Obj != nil {
+		name = named.Obj.Name
+		if named.Obj.Pkg != nil {
+			pkgpath = normalizePkgPath(named.Obj.Pkg.Path)
+			pkgname = named.Obj.Pkg.Name
+		}
+	}
+	ppName := e.emitPkgpath(pkgpath)
+
+	ptTail := e.typeDescName(NewPointer(t))
+	e.needTypeDesc(NewPointer(t))
+	e.needTypeDesc(named.Under)
+
+	nameStr := pkgname | "." | name
+	gnameRaw := "reflect/types.type:" | e.typeDescName(t)
+	e.w("@\"" | gnameRaw | "\" = linkonce_odr constant { i8, i16, ptr, ptr, ptr, [")
+	e.w(irItoa64(int64(len(nameStr) + 1)))
+	e.w(" x i8] } { i8 ")
+	e.w(irItoa64(int64(meta)))
+	e.w(", i16 0, ptr @")
+	e.w(descGlobalName(ptTail))
+	e.w(", ptr @")
+	e.w(descGlobalName(e.typeDescName(named.Under)))
+	e.w(", ptr @\"")
+	e.w(ppName)
+	e.w("\", [")
+	e.w(irItoa64(int64(len(nameStr) + 1)))
+	e.w(" x i8] c\"")
+	e.w(irEscapeString(nameStr))
+	e.w("\\00\" }, align 8\n")
+}
+
+// rtKindOfNamed returns the underlying runtime kind of a named type.
+func rtKindOfNamed(named *Named) (k int32) {
+	if named == nil || named.Under == nil {
+		return rtKindInvalid
+	}
+	return runtimeKindOf(named.Under)
+}
+
+// emitStructDesc emits a struct descriptor: the struct global plus field
+// data globals and the pkgpath string.
+func (e *irEmitter) emitStructDesc(t Type, st *TCStruct, gname string, meta int32, ptGlobal string) {
+	tail := e.typeDescName(t)
+	nf := st.NumFields()
+	size := typeDescSize(t)
+
+	pkgpath := ""
+	if nf > 0 {
+		if st.Field(0).Pkg != nil {
+			pkgpath = normalizePkgPath(st.Field(0).Pkg.Path)
+		}
+	}
+	ppName := e.emitPkgpath(pkgpath)
+
+	var fieldRefs []string
+	for i := int32(0); i < nf; i++ {
+		f := st.Field(i)
+		ft := f.Typ
+		e.needTypeDesc(ft)
+		ftGlobal := descGlobalName(e.typeDescName(ft))
+		off := structFieldOffset(st, i)
+		var flags uint8
+		if f.Anonymous {
+			flags |= 1
+		}
+		if st.Tag(i) != "" {
+			flags |= 2
+		}
+		if f.Exported() {
+			flags |= 4
+		}
+		var data []byte
+		if len(data) >= cap(data) { data = mxutil.GrowCap(data) }
+		push(data, flags)
+		vv := uvarintBytes(uint32(off))
+		for _, vb := range vv {
+			if len(data) >= cap(data) { data = mxutil.GrowCap(data) }
+			push(data, vb)
+		}
+		for j := int32(0); j < int32(len(f.Name)); j++ {
+			if len(data) >= cap(data) { data = mxutil.GrowCap(data) }
+			push(data, f.Name[j])
+		}
+		if len(data) >= cap(data) { data = mxutil.GrowCap(data) }
+		push(data, 0)
+		tag := st.Tag(i)
+		if tag != "" {
+			if len(data) >= cap(data) { data = mxutil.GrowCap(data) }
+			push(data, byte(len(tag)))
+			for j := int32(0); j < int32(len(tag)); j++ {
+				if len(data) >= cap(data) { data = mxutil.GrowCap(data) }
+				push(data, tag[j])
+			}
+		}
+		dgName := "reflect/types.type:" | tail | "." | f.Name
+		e.w("@\"" | dgName | "\" = private constant [")
+		e.w(irItoa64(int64(len(data))))
+		e.w(" x i8] c\"")
+		e.w(irEscapeString(string(data)))
+		e.w("\", align 1\n")
+		if len(fieldRefs) >= cap(fieldRefs) { fieldRefs = mxutil.GrowCap(fieldRefs) }
+		push(fieldRefs, "%runtime.structField { ptr @" | ftGlobal | ", ptr @\"" | dgName | "\" }")
+	}
+
+	e.w("@" | gname | " = linkonce_odr constant { i8, i16, ptr, ptr, i32, i16, [")
+	e.w(irItoa64(int64(nf)))
+	e.w(" x %runtime.structField] } { i8 ")
+	e.w(irItoa64(int64(meta)))
+	e.w(", i16 0, ptr @")
+	e.w(ptGlobal)
+	e.w(", ptr @\"")
+	e.w(ppName)
+	e.w("\", i32 ")
+	e.w(irItoa64(int64(size)))
+	e.w(", i16 ")
+	e.w(irItoa64(int64(nf)))
+	e.w(", [")
+	e.w(irItoa64(int64(nf)))
+	e.w(" x %runtime.structField] [")
+	for i, fr := range fieldRefs {
+		if i > 0 {
+			e.w(", ")
+		}
+		e.w(fr)
+	}
+	e.w("] }, align 8\n")
+}

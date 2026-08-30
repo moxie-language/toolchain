@@ -5,6 +5,7 @@
 package net
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"os"
 	"syscall"
 	"unsafe"
@@ -35,7 +36,8 @@ loop:
 				if err != nil {
 					return nil, os.NewSyscallError("parsenetlinkrouteattr", err)
 				}
-				ift = append(ift, *newLink(ifim, attrs))
+				if len(ift) >= cap(ift) { ift = mxutil.GrowCap(ift) }
+				ift = push(ift, *newLink(ifim, attrs))
 				if ifindex == int32(ifim.Index) {
 					break loop
 				}
@@ -152,7 +154,8 @@ loop:
 				}
 				ifa := newAddr(ifam, attrs)
 				if ifa != nil {
-					ifat = append(ifat, ifa)
+					if len(ifat) >= cap(ifat) { ifat = mxutil.GrowCap(ifat) }
+					ifat = push(ifat, ifa)
 				}
 			}
 		}
@@ -179,7 +182,7 @@ func newAddr(ifam *syscall.IfAddrmsg, attrs []syscall.NetlinkRouteAttr) Addr {
 		case syscall.AF_INET:
 			return &IPNet{IP: IPv4(a.Value[0], a.Value[1], a.Value[2], a.Value[3]), Mask: CIDRMask(int32(ifam.Prefixlen), 8*IPv4len)}
 		case syscall.AF_INET6:
-			ifa := &IPNet{IP: (make)(IP, IPv6len), Mask: CIDRMask(int32(ifam.Prefixlen), 8*IPv6len)}
+			ifa := &IPNet{IP: IP{:IPv6len}, Mask: CIDRMask(int32(ifam.Prefixlen), 8*IPv6len)}
 			copy(ifa.IP, a.Value[:])
 			return ifa
 		}
@@ -192,7 +195,7 @@ func newAddr(ifam *syscall.IfAddrmsg, attrs []syscall.NetlinkRouteAttr) Addr {
 func interfaceMulticastAddrTable(ifi *Interface) ([]Addr, error) {
 	ifmat4 := parseProcNetIGMP("/proc/net/igmp", ifi)
 	ifmat6 := parseProcNetIGMP6("/proc/net/igmp6", ifi)
-	return append(ifmat4, ifmat6...), nil
+	return push(ifmat4, ifmat6...), nil
 }
 
 func parseProcNetIGMP(path string, ifi *Interface) []Addr {
@@ -225,7 +228,8 @@ func parseProcNetIGMP(path string, ifi *Interface) []Addr {
 				}
 				i := *(*uint32)(unsafe.Pointer(&b[:4][0]))
 				ifma := &IPAddr{IP: IPv4(byte(i>>24), byte(i>>16), byte(i>>8), byte(i))}
-				ifmat = append(ifmat, ifma)
+				if len(ifmat) >= cap(ifmat) { ifmat = mxutil.GrowCap(ifmat) }
+				ifmat = push(ifmat, ifma)
 			}
 		}
 	}
@@ -250,7 +254,8 @@ func parseProcNetIGMP6(path string, ifi *Interface) []Addr {
 				b[i/2], _ = xtoi2(f[2][i:i+2], 0)
 			}
 			ifma := &IPAddr{IP: IP{b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]}}
-			ifmat = append(ifmat, ifma)
+			if len(ifmat) >= cap(ifmat) { ifmat = mxutil.GrowCap(ifmat) }
+			ifmat = push(ifmat, ifma)
 		}
 	}
 	return ifmat

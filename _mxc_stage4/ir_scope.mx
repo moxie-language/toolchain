@@ -1,7 +1,144 @@
 package main
 
+import (
+	"git.smesh.lol/moxie/pkg/mxutil"
+	. "git.smesh.lol/moxie/pkg/types"
+)
+
 // checkUseAfterFree: no-op in arena model.
 func checkUseAfterFree(f *SSAFunction) {}
+
+func strContains(s, sub string) bool {
+	if len(sub) == 0 {
+		return true
+	}
+	n := int32(len(sub))
+	for i := int32(0); i+n <= int32(len(s)); i++ {
+		if s[i:i+n] == sub {
+			return true
+		}
+	}
+	return false
+}
+
+// buildHasMoxieModule reports whether this build program includes the moxie
+// compiler module: the build root is the moxie module, or some package in
+// the program has a git.smesh.lol/moxie/ path (mirrors legacy
+// moxieModulePath). The registry fallback makes the exemption robust in
+// spawned workers regardless of modPrefix propagation timing.
+func buildHasMoxieModule() bool {
+	if bst != nil && bst.globalModPrefix == "git.smesh.lol/moxie" {
+		return true
+	}
+	if cctx != nil && cctx.universe != nil && cctx.universe.Registry != nil {
+		for p := range cctx.universe.Registry {
+			if mxutil.HasPrefix(p, "git.smesh.lol/moxie/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isUserPackagePath mirrors legacy restrict.go isUserPackage: a package is
+// subject to Moxie language restrictions if its import path contains a dot
+// (user module paths look like domain paths), except golang.org/x/ and the
+// compiler's own /pkg/ infrastructure. Main packages are user code unless
+// the build program is the moxie compiler module itself.
+func isUserPackagePath(path string) bool {
+	if path == "main" || path == "command-line-arguments" {
+		return !buildHasMoxieModule()
+	}
+	if mxutil.HasPrefix(path, "golang.org/x/") {
+		return false
+	}
+	if strContains(path, "/pkg/") {
+		return false
+	}
+	for i := int32(0); i < int32(len(path)); i++ {
+		if path[i] == '.' {
+			return true
+		}
+	}
+	return false
+}
+
+// ssaGlobalRoot returns the name of the package-level global an address is
+// rooted in, or "" if the address is local or goes THROUGH a global pointer.
+// Mirrors legacy restrict.go globalName: a global whose type is a pointer is
+// not the storage itself - mutations through it land in the pointed-to
+// object (heap-local state). Whole-global stores (depth 0) are always flagged.
+func ssaGlobalRoot(v SSAValue, depth int32) (s string) {
+	if v == nil || depth > 12 {
+		return ""
+	}
+	switch x := v.(type) {
+	case *SSAGlobal:
+		if depth > 0 {
+			// SSAGlobal.typ is always NewPointer(valueType); the real
+			// declared type is on the object. A global whose declared
+			// type is a pointer is not the storage itself - field/index
+			// mutations through it land in the pointed-to object.
+			declTyp := x.typ
+			if x.object != nil && x.object.Typ != nil {
+				declTyp = x.object.Typ
+			}
+			if _, isPtr := SafeUnderlying(declTyp).(*Pointer); isPtr {
+				return ""
+			}
+		}
+		return x.name
+	case *SSAFieldAddr:
+		return ssaGlobalRoot(x.X, depth+1)
+	case *SSAIndexAddr:
+		return ssaGlobalRoot(x.X, depth+1)
+	case *SSAUnOp:
+		return ssaGlobalRoot(x.X, depth+1)
+	case *SSAChangeType:
+		return ssaGlobalRoot(x.X, depth+1)
+	case *SSAConvert:
+		return ssaGlobalRoot(x.X, depth+1)
+	}
+	return ""
+}
+
+// checkGlobalMutation rejects stores that mutate package-level globals in
+// user code. Globals are initialized by __varinit (package var initializers)
+// and immutable afterward. Sovereign self-mutating types are mutated through
+// their methods (which borrow the receiver's arena); direct stores bypass
+// that and are illegal for every global, sovereign or not.
+func checkGlobalMutation(f *SSAFunction) {
+	if f == nil || f.Blocks == nil || f.Pkg == nil || f.Pkg.Pkg == nil {
+		return
+	}
+	if !isUserPackagePath(f.Pkg.Pkg.Path) {
+		return
+	}
+	if f.name == "__varinit" {
+		return
+	}
+	// Library packages without a real main get their package-var
+	// initializers injected into a synthetic main; exempt that case.
+	if f.name == "main" && f.Pkg.Pkg.Path != "main" {
+		return
+	}
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			switch i := instr.(type) {
+			case *SSAStore:
+				if ssaGlobalRoot(i.Addr, 0) != "" {
+					if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
+					push(cctx.compileErrors, f.name | ": package globals are immutable outside init: mutate through the methods of a sovereign self-mutating type")
+				}
+			case *SSAMapUpdate:
+				if ssaGlobalRoot(i.Map, 0) != "" {
+					if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
+					push(cctx.compileErrors, f.name | ": package globals are immutable outside init: mutate through the methods of a sovereign self-mutating type")
+				}
+			}
+		}
+	}
+}
 
 // checkParamMutation rejects stores through function parameters.
 // Parameters are borrowed references into the caller's arena. Writing
@@ -52,6 +189,7 @@ func checkParamMutation(f *SSAFunction) {
 			}
 			if isParamDerivedEx(s.Addr, paramHolders, 0) {
 				name := paramRootName(s.Addr, paramHolders, 0)
+				if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
 				push(cctx.compileErrors, f.name | ": store through borrowed parameter '" | name | "'")
 			}
 		}
@@ -139,6 +277,7 @@ func markReturnEscapes(f *SSAFunction) {
 				}
 			}
 			if !found {
+				if len(dst) >= cap(dst) { dst = mxutil.GrowCap(dst) }
 				push(dst, s)
 				didMerge = true
 			}

@@ -26,8 +26,8 @@ func drain(in chan moxie.Int32, done chan moxie.Int32) {
 }
 
 func main() {
-	in := make(chan moxie.Int32)
-	done := make(chan moxie.Int32)
+	in := chan moxie.Int32{}
+	done := chan moxie.Int32{}
 	spawn(drain, in, done)
 
 	const N = int32(5)
