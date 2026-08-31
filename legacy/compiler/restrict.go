@@ -249,19 +249,9 @@ func (b *builder) checkASTRestrictions() {
 	}
 	ast.Inspect(syntax, func(n ast.Node) bool {
 		switch node := n.(type) {
-		case *ast.Ident:
-			// Step 4: reject bare "any" keyword (alias for interface{}).
-			if node.Name == "any" {
-				b.addError(node.Pos(), "moxie: 'any' (empty interface) is not allowed: use a concrete type or named interface")
-			}
 		case *ast.GoStmt:
 			// Step 3: reject go keyword at AST level (redundant with SSA check, fires earlier).
 			b.addError(node.Pos(), "moxie: 'go' keyword is not allowed: use channels+select or spawn")
-		case *ast.InterfaceType:
-			// Step 4: reject empty interface literals.
-			if node.Methods == nil || len(node.Methods.List) == 0 {
-				b.addError(node.Pos(), "moxie: empty interface (interface{}) is not allowed: use a concrete type or named interface")
-			}
 		case *ast.CallExpr:
 			// Ban parenthesized call targets: (f)(args) is not valid Moxie.
 			// Exempt: type conversions like (*byte)(expr) where the paren wraps a type.

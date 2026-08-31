@@ -468,6 +468,13 @@ func patchRemovePredeclaredTypes(dir string) {
 	src = mustReplace(f, src,
 		"func defPredeclaredFuncs() {\n\tfor i := range predeclaredFuncs {\n\t\tid := builtinId(i)\n\t\tif id == _Assert || id == _Trace {\n\t\t\tcontinue // only define these in testing environment\n\t\t}\n\t\tdef(newBuiltin(id))\n\t}\n}",
 		"func defPredeclaredFuncs() {\n\tfor i := range predeclaredFuncs {\n\t\tid := builtinId(i)\n\t\tif id == _Assert || id == _Trace {\n\t\t\tcontinue // only define these in testing environment\n\t\t}\n\t\tif predeclaredFuncs[i].name == \"\" {\n\t\t\tcontinue // Moxie: removed builtin\n\t\t}\n\t\tdef(newBuiltin(id))\n\t}\n}")
+
+	// any (empty interface) is not predeclared in Moxie. The alias objects
+	// stay defined (go/types internals reference them for formatting) but are
+	// not inserted into the Universe scope, so "any" resolves as undefined.
+	src = mustReplace(f, src,
+		"\t\tuniverseAnyAlias.setColor(black)\n\t\t_ = NewAlias(universeAnyAlias, universeAnyNoAlias.Type().Underlying()) // Link TypeName and Alias\n\t\tdef(universeAnyAlias)",
+		"\t\tuniverseAnyAlias.setColor(black)\n\t\t_ = NewAlias(universeAnyAlias, universeAnyNoAlias.Type().Underlying()) // Link TypeName and Alias\n\t\t// Moxie: any is not predeclared - undefined")
 	mustWrite(f, src)
 }
 

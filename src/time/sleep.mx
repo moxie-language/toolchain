@@ -41,7 +41,7 @@ func when(d Duration) int64 {
 // compare linknamed symbol definitions happier.
 //
 //:linkname newTimer
-func newTimer(when, period int64, f func(any, uintptr, int64), arg any, cp unsafe.Pointer) *Timer
+func newTimer(when, period int64, f func(unsafe.Pointer, uintptr, int64), arg unsafe.Pointer, cp unsafe.Pointer) *Timer
 
 //:linkname stopTimer
 func stopTimer(*Timer) bool
@@ -114,7 +114,7 @@ func (t *Timer) Stop() bool {
 // in Go 1.27 or later.
 func NewTimer(d Duration) *Timer {
 	c := chan Time{1}
-	t := (*Timer)(newTimer(when(d), 0, sendTime, c, syncTimer(c)))
+	t := (*Timer)(newTimer(when(d), 0, sendTime, syncTimer(c), syncTimer(c)))
 	t.C = c
 	return t
 }
@@ -149,14 +149,14 @@ func (t *Timer) Reset(d Duration) bool {
 }
 
 // sendTime does a non-blocking send of the current time on c.
-func sendTime(c any, seq uintptr, delta int64) {
+func sendTime(c unsafe.Pointer, seq uintptr, delta int64) {
 	// delta is how long ago the channel send was supposed to happen.
 	// The current time can be arbitrarily far into the future, because the runtime
 	// can delay a sendTime call until a goroutine tries to receive from
 	// the channel. Subtract delta to go back to the old time that we
 	// used to send.
 	select {
-	case c.(chan Time) <- Now().Add(Duration(-delta)):
+	case (*(*chan Time)(unsafe.Pointer(&c))) <- Now().Add(Duration(-delta)):
 	default:
 	}
 }
@@ -180,9 +180,9 @@ func After(d Duration) <-chan Time {
 // be used to cancel the call using its Stop method.
 // The returned Timer's C field is not used and will be nil.
 func AfterFunc(d Duration, f func()) *Timer {
-	return (*Timer)(newTimer(when(d), 0, goFunc, f, nil))
+	return (*Timer)(newTimer(when(d), 0, goFunc, *(*unsafe.Pointer)(unsafe.Pointer(&f)), nil))
 }
 
-func goFunc(arg any, seq uintptr, delta int64) {
-	arg.(func())()
+func goFunc(arg unsafe.Pointer, seq uintptr, delta int64) {
+	(*(*func())(unsafe.Pointer(&arg)))()
 }
