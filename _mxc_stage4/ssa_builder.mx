@@ -1143,6 +1143,11 @@ func (fb *ssaFuncBuilder) buildStmt(s syntax.Stmt) {
 		_ = ss
 		// nothing
 	case *syntax.ExprStmt:
+		if name, ok := ss.X.(*syntax.Name); ok && name.Value != "_" {
+			if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
+			push(cctx.compileErrors, "evaluated but not used: " | name.Value)
+			break
+		}
 		fb.buildExpr(ss.X)
 	case *syntax.AssignStmt:
 		fb.buildAssign(ss)
@@ -1173,10 +1178,6 @@ func (fb *ssaFuncBuilder) buildStmt(s syntax.Stmt) {
 	case *syntax.CallStmt:
 		call, _ := ss.Call.(*syntax.CallExpr)
 		switch ss.Tok {
-		case token.Go:
-			if call != nil {
-				fb.buildGoStmt(call)
-			}
 		case token.Defer:
 			if call != nil {
 				fb.buildDeferStmt(call)
@@ -2746,14 +2747,7 @@ func (fb *ssaFuncBuilder) buildBranch(s *syntax.BranchStmt) {
 		}
 	case token.Return:
 		fb.emitReturn(nil, 0)
-	case token.Fallthrough:
-		if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
-		push(cctx.compileErrors, "'fallthrough' is not allowed: each case must be self-contained")
 	}
-}
-
-func (fb *ssaFuncBuilder) buildGoStmt(call *syntax.CallExpr) {
-	mxutil.WriteStr(2, "compile error: go statements not allowed (use spawn)\n")
 }
 
 func (fb *ssaFuncBuilder) buildDeferStmt(call *syntax.CallExpr) {

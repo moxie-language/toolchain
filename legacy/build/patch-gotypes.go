@@ -331,10 +331,11 @@ func patchMoxieSliceBuiltins(dir string) {
 		"\t_New:     {\"new\", 1, false, expression},",
 		"\t_New:     {\"__ptralloc\", 1, false, expression},")
 
-	// append is not predeclared: moxie uses push + explicit allocation.
+	// append is not predeclared for users: the compiler's own packages use
+	// the internal __moxie_append name, which retains append semantics.
 	src = mustReplace(f, src,
 		"\t_Append:  {\"append\", 1, true, expression},\n",
-		"")
+		"\t_Append:  {\"__moxie_append\", 1, true, expression},\n")
 
 	// complex numbers are removed from Moxie: the complex/real/imag builtins
 	// resolve as undefined.
