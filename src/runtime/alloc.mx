@@ -117,7 +117,7 @@ func alloc(size uintptr, td unsafe.Pointer) unsafe.Pointer {
 	if a == nil {
 		runtimePanic("alloc: nil arena")
 	}
-	return ArenaAllocTD(a, align(size), (*rawType)(td))
+	return ArenaAllocTD(a, align(size), (*RawType)(td))
 }
 
 func ReadMemStats(m *MemStats) {
@@ -284,7 +284,7 @@ func SetCurrentArena(a *Arena) {
 type sovRecord struct {
 	dataAddr uintptr
 	size     uintptr
-	typeDesc *rawType // walker descriptor; nil = opaque (walked by referrer)
+	typeDesc *RawType // walker descriptor; nil = opaque (walked by referrer)
 	batchID  int32
 	live     bool
 	newAddr  uintptr // set during copy-compact: the relocated address
@@ -301,7 +301,7 @@ type sovGroup struct {
 	allocTbl *Arena
 	refTbl   *Arena
 	recv     unsafe.Pointer
-	recvTypeDesc *rawType
+	recvTypeDesc *RawType
 	curBatch int32
 	liveBytes  uintptr
 	allocBytes uintptr
@@ -356,7 +356,7 @@ func sovNewArena(capacity uintptr) (a *Arena) {
 // codecSovereignArena returns the receiver's sovereign group, lazily
 // creating it in the root arena and storing it in a root-arena hashmap
 // keyed by the receiver address.
-func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *rawType) (g *sovGroup) {
+func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGroup) {
 	if recv == nil {
 		runtimePanic("sovereign: nil receiver")
 	}
@@ -472,7 +472,7 @@ func codecSovereignEnter(g *sovGroup) {
 
 // sovAddRec appends an allocation-map record, keeping the recs slice's
 // sortedness flag up to date.
-func sovAddRec(g *sovGroup, dataAddr, size uintptr, typeDesc *rawType) {
+func sovAddRec(g *sovGroup, dataAddr, size uintptr, typeDesc *RawType) {
 	if len(g.recs) >= cap(g.recs) {
 		sovGrowRecs(g)
 	}
@@ -495,7 +495,7 @@ func sovAddRec(g *sovGroup, dataAddr, size uintptr, typeDesc *rawType) {
 // pass nil for opaque blocks (e.g. slice element arrays walked by their
 // referrer). Used by the compiler for allocations stored into the
 // receiver's data structure.
-func codecSovereignAlloc(g *sovGroup, size uintptr, typeDesc *rawType) unsafe.Pointer {
+func codecSovereignAlloc(g *sovGroup, size uintptr, typeDesc *RawType) unsafe.Pointer {
 	p := arenaAllocRaw(g.data, align(size))
 	sovAddRec(g, uintptr(p), size, typeDesc)
 	return p
@@ -588,21 +588,21 @@ func sovMergeSortRecs(recs []*sovRecord, lo, hi int32) {
 
 // sovTypeHasPtrs reports whether walking a value of type td can reach
 // other blocks.
-func sovTypeHasPtrs(td *rawType) (ok bool) {
+func sovTypeHasPtrs(td *RawType) (ok bool) {
 	if td == nil {
 		return false
 	}
-	k := td.kind()
+	k := td.Kind()
 	if k == kindBytes || k == kindPointer || k == kindSlice || k == kindInterface || k == kindMap || k == kindChan || k == kindFunc {
 		return true
 	}
 	if k == kindStruct || k == kindArray {
-		nf := td.numField()
+		nf := td.NumField()
 		if k == kindArray {
-			return sovTypeHasPtrs(td.elem())
+			return sovTypeHasPtrs(td.Elem())
 		}
 		for i := int32(0); i < nf; i++ {
-			if sovTypeHasPtrs(td.structFieldType(i)) {
+			if sovTypeHasPtrs(td.StructFieldType(i)) {
 				return true
 			}
 		}
@@ -630,11 +630,11 @@ func sovMarkBlock(g *sovGroup, p unsafe.Pointer) {
 }
 
 // sovWalkValue marks every block reachable through the value at p.
-func sovWalkValue(g *sovGroup, p unsafe.Pointer, td *rawType) {
+func sovWalkValue(g *sovGroup, p unsafe.Pointer, td *RawType) {
 	if td == nil || p == nil {
 		return
 	}
-	k := td.kind()
+	k := td.Kind()
 	switch k {
 	case kindPointer:
 		v := *(*unsafe.Pointer)(p)
@@ -649,7 +649,7 @@ func sovWalkValue(g *sovGroup, p unsafe.Pointer, td *rawType) {
 			// store-backs through the pointer), so walk the pointee with
 			// the field's element type. Depth-bounded to keep compile-arena
 			// cycles (parent/prog chains) from unbounded traversal.
-			et := td.elem()
+			et := td.Elem()
 			if et != nil && sovTypeHasPtrs(et) && !sovInArena(g.data, uintptr(v)) && sovDepth < sovMaxDepth {
 				sovDepth++
 				sovWalkValue(g, v, et)
@@ -664,11 +664,11 @@ func sovWalkValue(g *sovGroup, p unsafe.Pointer, td *rawType) {
 	case kindSlice:
 		s := *(*_string)(p)
 		if s.ptr != nil && s.length > 0 {
-			et := td.elem()
+			et := td.Elem()
 			if et != nil {
 				sovMarkBlock(g, unsafe.Pointer(s.ptr))
 				if sovTypeHasPtrs(et) {
-					esz := et.size()
+					esz := et.Size()
 					for i := int32(0); i < int32(s.length); i++ {
 						sovWalkValue(g, unsafe.Add(unsafe.Pointer(s.ptr), uintptr(i)*esz), et)
 					}
@@ -678,8 +678,8 @@ func sovWalkValue(g *sovGroup, p unsafe.Pointer, td *rawType) {
 	case kindInterface:
 		iface := *(*_interface)(p)
 		if iface.typecode != nil {
-			ct := (*rawType)(iface.typecode)
-			if ct.size() <= unsafe.Sizeof(uintptr(0)) {
+			ct := (*RawType)(iface.typecode)
+			if ct.Size() <= unsafe.Sizeof(uintptr(0)) {
 				sovWalkValue(g, unsafe.Pointer(&iface.value), ct)
 			} else {
 				sovMarkBlock(g, iface.value)
@@ -691,18 +691,18 @@ func sovWalkValue(g *sovGroup, p unsafe.Pointer, td *rawType) {
 			sovMarkMap(g, (*hashmap)(m), td)
 		}
 	case kindStruct:
-		nf := td.numField()
+		nf := td.NumField()
 		for i := int32(0); i < nf; i++ {
-			ft := td.structFieldType(i)
+			ft := td.StructFieldType(i)
 			if ft != nil && sovTypeHasPtrs(ft) {
-				sovWalkValue(g, unsafe.Add(p, td.structFieldOffset(i)), ft)
+				sovWalkValue(g, unsafe.Add(p, td.StructFieldOffset(i)), ft)
 			}
 		}
 	}
 }
 
 // sovMarkMap marks a map's bucket array and walks its keys and values.
-func sovMarkMap(g *sovGroup, m *hashmap, td *rawType) {
+func sovMarkMap(g *sovGroup, m *hashmap, td *RawType) {
 	if m == nil {
 		return
 	}
@@ -712,7 +712,7 @@ func sovMarkMap(g *sovGroup, m *hashmap, td *rawType) {
 	sovMarkBlock(g, unsafe.Pointer(m))
 	sovMarkBlock(g, m.buckets)
 	kt := hashmapKeyType(td)
-	vt := td.elem()
+	vt := td.Elem()
 	keySz := m.keySize
 	valSz := m.valueSize
 	bucketSz := unsafe.Sizeof(hashmapBucket{}) + keySz*8 + valSz*8
@@ -798,21 +798,21 @@ func sovFullMark(g *sovGroup) {
 	if td == nil || g.recv == nil {
 		return
 	}
-	if td.kind() != kindStruct {
+	if td.Kind() != kindStruct {
 		if sovTypeHasPtrs(td) {
 			sovWalkValue(g, g.recv, td)
 		}
 		return
 	}
-	nf := td.numField()
+	nf := td.NumField()
 	for i := int32(0); i < nf; i++ {
-		ft := td.structFieldType(i)
+		ft := td.StructFieldType(i)
 		if ft == nil || !sovTypeHasPtrs(ft) {
 			continue
 		}
-		faddr := unsafe.Add(g.recv, td.structFieldOffset(i))
+		faddr := unsafe.Add(g.recv, td.StructFieldOffset(i))
 		// A pointer field may hold a slot object; resolve it.
-		if ft.kind() == kindPointer {
+		if ft.Kind() == kindPointer {
 			v := *(*unsafe.Pointer)(faddr)
 			if v != nil && sovInArena(g.refTbl, uintptr(v)) {
 				v = (*sovSlot)(v).dataPtr
@@ -830,19 +830,19 @@ func sovRebaseRoots(g *sovGroup, nd *Arena) {
 	if td == nil || g.recv == nil {
 		return
 	}
-	if td.kind() != kindStruct {
+	if td.Kind() != kindStruct {
 		if sovTypeHasPtrs(td) {
 			sovRebaseValue(g, g.recv, td, nd)
 		}
 		return
 	}
-	nf := td.numField()
+	nf := td.NumField()
 	for i := int32(0); i < nf; i++ {
-		ft := td.structFieldType(i)
+		ft := td.StructFieldType(i)
 		if ft == nil || !sovTypeHasPtrs(ft) {
 			continue
 		}
-		sovRebaseValue(g, unsafe.Add(g.recv, td.structFieldOffset(i)), ft, nd)
+		sovRebaseValue(g, unsafe.Add(g.recv, td.StructFieldOffset(i)), ft, nd)
 	}
 }
 
@@ -967,11 +967,11 @@ func sovRebasePtr(g *sovGroup, p uintptr, nd *Arena) unsafe.Pointer {
 
 // sovRebaseValue rewrites the interior pointers of the value at p after a
 // compaction.
-func sovRebaseValue(g *sovGroup, p unsafe.Pointer, td *rawType, nd *Arena) {
+func sovRebaseValue(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 	if td == nil || p == nil {
 		return
 	}
-	k := td.kind()
+	k := td.Kind()
 	switch k {
 	case kindPointer:
 		v := *(*unsafe.Pointer)(p)
@@ -981,7 +981,7 @@ func sovRebaseValue(g *sovGroup, p unsafe.Pointer, td *rawType, nd *Arena) {
 		// Walk a pointee that still lives outside the new arena (compile
 		// arena) so data-arena pointers nested in it get rebased too.
 		nv := *(*unsafe.Pointer)(p)
-		et := td.elem()
+		et := td.Elem()
 		if nv != nil && et != nil && sovTypeHasPtrs(et) && !sovInArena(nd, uintptr(nv)) && sovDepth < sovMaxDepth {
 			sovDepth++
 			sovRebaseValue(g, nv, et, nd)
@@ -999,9 +999,9 @@ func sovRebaseValue(g *sovGroup, p unsafe.Pointer, td *rawType, nd *Arena) {
 			s.ptr = (*byte)(sovRebasePtr(g, uintptr(unsafe.Pointer(s.ptr)), nd))
 			*(*_string)(p) = s
 		}
-		et := td.elem()
+		et := td.Elem()
 		if et != nil && sovTypeHasPtrs(et) {
-			esz := et.size()
+			esz := et.Size()
 			for i := int32(0); i < int32(s.length); i++ {
 				sovRebaseValue(g, unsafe.Add(unsafe.Pointer(s.ptr), uintptr(i)*esz), et, nd)
 			}
@@ -1009,8 +1009,8 @@ func sovRebaseValue(g *sovGroup, p unsafe.Pointer, td *rawType, nd *Arena) {
 	case kindInterface:
 		iface := *(*_interface)(p)
 		if iface.typecode != nil {
-			ct := (*rawType)(iface.typecode)
-			if ct.size() <= unsafe.Sizeof(uintptr(0)) {
+			ct := (*RawType)(iface.typecode)
+			if ct.Size() <= unsafe.Sizeof(uintptr(0)) {
 				sovRebaseValue(g, unsafe.Pointer(&iface.value), ct, nd)
 				*(*_interface)(p) = iface
 			} else {
@@ -1029,18 +1029,18 @@ func sovRebaseValue(g *sovGroup, p unsafe.Pointer, td *rawType, nd *Arena) {
 			sovRebaseMap(g, (*hashmap)(m), td, nd)
 		}
 	case kindStruct:
-		nf := td.numField()
+		nf := td.NumField()
 		for i := int32(0); i < nf; i++ {
-			ft := td.structFieldType(i)
+			ft := td.StructFieldType(i)
 			if ft != nil && sovTypeHasPtrs(ft) {
-				sovRebaseValue(g, unsafe.Add(p, td.structFieldOffset(i)), ft, nd)
+				sovRebaseValue(g, unsafe.Add(p, td.StructFieldOffset(i)), ft, nd)
 			}
 		}
 	}
 }
 
 // sovRebaseMap rebases a map's bucket array pointer and its keys/values.
-func sovRebaseMap(g *sovGroup, m *hashmap, td *rawType, nd *Arena) {
+func sovRebaseMap(g *sovGroup, m *hashmap, td *RawType, nd *Arena) {
 	if m == nil {
 		return
 	}
@@ -1048,7 +1048,7 @@ func sovRebaseMap(g *sovGroup, m *hashmap, td *rawType, nd *Arena) {
 		m.buckets = sovRebasePtr(g, uintptr(m.buckets), nd)
 	}
 	kt := hashmapKeyType(td)
-	vt := td.elem()
+	vt := td.Elem()
 	keySz := m.keySize
 	valSz := m.valueSize
 	bucketSz := unsafe.Sizeof(hashmapBucket{}) + keySz*8 + valSz*8
@@ -1296,7 +1296,7 @@ func ArenaAlloc(a *Arena, size uintptr) unsafe.Pointer {
 	return ArenaAllocTD(a, size, nil)
 }
 
-func ArenaAllocTD(a *Arena, size uintptr, td *rawType) unsafe.Pointer {
+func ArenaAllocTD(a *Arena, size uintptr, td *RawType) unsafe.Pointer {
 	if a == nil {
 		runtimePanic("ArenaAlloc: nil arena")
 	}

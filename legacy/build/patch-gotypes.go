@@ -71,6 +71,7 @@ func main() {
 	patchTypeTerm(dstDir)
 	patchSpawnBuiltin(dstDir)
 	patchMoxieSliceBuiltins(dstDir)
+	patchTypeOfBuiltin(dstDir)
 	patchRemovePredeclaredTypes(dstDir)
 	patchErrorString(dstDir)
 	patchPanicRecoverString(dstDir)
@@ -449,6 +450,48 @@ func patchMoxieSliceBuiltins(dir string) {
 		}
 
 	case _Spawn:`)
+
+	mustWrite(f, src)
+}
+
+func patchTypeOfBuiltin(dir string) {
+	// Patch universe.go: add _TypeOf builtin ID and predeclaredFuncs entry.
+	f := filepath.Join(dir, "universe.go")
+	src := mustRead(f)
+
+	src = mustReplace(f, src,
+		"\t_StringData\n\n\t// testing support",
+		"\t_StringData\n\t_TypeOf\n\n\t// testing support")
+
+	src = mustReplace(f, src,
+		"\t_StringData: {\"StringData\", 1, false, expression},",
+		"\t_StringData: {\"StringData\", 1, false, expression},\n\t_TypeOf:     {\"TypeOf\", 1, false, expression},")
+
+	mustWrite(f, src)
+
+	// Patch builtins.go: type-check handler for unsafe.TypeOf.
+	f = filepath.Join(dir, "builtins.go")
+	src = mustRead(f)
+
+	src = mustReplace(f, src,
+		`		x.typ = Typ[Uintptr]
+
+	case _Slice:`,
+		`		x.typ = Typ[Uintptr]
+
+	case _TypeOf:
+		// unsafe.TypeOf(x T) unsafe.Pointer
+		check.assignment(x, nil, "argument to unsafe.TypeOf")
+		if x.mode == invalid {
+			return
+		}
+		x.mode = value
+		if check.recordTypes() {
+			check.recordBuiltinType(call.Fun, makeSig(Typ[UnsafePointer], x.typ))
+		}
+		x.typ = Typ[UnsafePointer]
+
+	case _Slice:`)
 
 	mustWrite(f, src)
 }

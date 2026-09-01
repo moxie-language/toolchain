@@ -53,26 +53,26 @@ const (
 	flagIsBinary   = 128
 )
 
-// rawType is the base type descriptor. All type descriptors start with this.
-type rawType struct {
+// RawType is the base type descriptor. All type descriptors start with this.
+type RawType struct {
 	meta uint8
 }
 
 // rtElemType: named, chan, slice, array, map - types with elem pointer.
 // Layout: meta(1) pad(1) numMethod(2) pad(4) ptrTo(8) elem(8) = 24 bytes
 type rtElemType struct {
-	rawType
+	RawType
 	numMethod uint16
-	ptrTo     *rawType
-	elem      *rawType
+	ptrTo     *RawType
+	elem      *RawType
 }
 
 // rtPtrType: pointer types - no ptrTo field.
 // Layout: meta(1) pad(1) numMethod(2) pad(4) elem(8) = 16 bytes
 type rtPtrType struct {
-	rawType
+	RawType
 	numMethod uint16
-	elem      *rawType
+	elem      *RawType
 }
 
 // rtArrayType: array types.
@@ -80,15 +80,15 @@ type rtPtrType struct {
 type rtArrayType struct {
 	rtElemType
 	arrayLen uintptr
-	slicePtr *rawType
+	slicePtr *RawType
 }
 
 // rtStructType: struct types. Does NOT have elem field - has pkgpath instead.
 // Layout: meta(1) pad(1) numMethod(2) pad(4) ptrTo(8) pkgpath(8) size(4) numField(2) pad(2) fields(...)
 type rtStructType struct {
-	rawType
+	RawType
 	numMethod uint16
-	ptrTo     *rawType
+	ptrTo     *RawType
 	pkgpath   *byte
 	size      uint32
 	numField  uint16
@@ -97,18 +97,18 @@ type rtStructType struct {
 
 // rtStructFieldDesc is a struct field descriptor.
 type rtStructFieldDesc struct {
-	fieldType *rawType
+	fieldType *RawType
 	data      unsafe.Pointer
 }
 
-func (t *rawType) isNamed() (r0 bool) {
+func (t *RawType) IsNamed() (r0 bool) {
 	if uintptr(unsafe.Pointer(t))&0b11 != 0 {
 		return false
 	}
 	return t.meta&flagNamed != 0
 }
 
-func (t *rawType) kind() (r0 Kind) {
+func (t *RawType) Kind() (r0 Kind) {
 	if t == nil {
 		return Invalid
 	}
@@ -118,8 +118,8 @@ func (t *rawType) kind() (r0 Kind) {
 	return Kind(t.meta & kindMask)
 }
 
-func (t *rawType) size() (r0 uintptr) {
-	switch t.kind() {
+func (t *RawType) Size() (r0 uintptr) {
+	switch t.Kind() {
 	case Bool, Int8, Uint8:
 		return 1
 	case Int16, Uint16:
@@ -148,18 +148,95 @@ func (t *rawType) size() (r0 uintptr) {
 		var f func()
 		return unsafe.Sizeof(f)
 	case kindArray:
-		return t.elem().size() * uintptr(t.arrayLen())
+		return t.Elem().Size() * uintptr(t.ArrayLen())
 	case kindStruct:
-		return uintptr(t.structSize())
+		return uintptr(t.StructSize())
 	default:
 		return 0
 	}
 }
 
+// minLen returns the minimum encoded data length in bytes for values of t.
+// Variable-length kinds (string, slice, map, pointer, interface) contribute 0.
+// A type is fixed-width iff minLen() == maxLen(); that shared value is the
+// width. Encoders can then omit the length field (it is implied by the
+// schema/type descriptor).
+func (t *RawType) MinLen() (r0 uintptr) {
+	switch t.Kind() {
+	case Bool, Int8, Uint8:
+		return 1
+	case Int16, Uint16:
+		return 2
+	case Int32, Uint32, Float32:
+		return 4
+	case Int64, Uint64, Float64, Complex64:
+		return 8
+	case Complex128:
+		return 16
+	case Int, Uint:
+		return unsafe.Sizeof(int32(0))
+	case Uintptr:
+		return unsafe.Sizeof(uintptr(0))
+	case kindUnsafePointer, kindChan, kindFunc:
+		return unsafe.Sizeof(uintptr(0))
+	case kindArray:
+		return t.Elem().MinLen() * uintptr(t.ArrayLen())
+	case kindStruct:
+		var sum uintptr
+		for i := int32(0); i < t.NumField(); i++ {
+			sum += t.StructFieldType(i).MinLen()
+		}
+		return sum
+	default:
+		return 0
+	}
+}
+
+// maxLen returns the maximum encoded data length in bytes. Fixed-width types
+// return the same value as minLen; variable-length kinds return ^uintptr(0).
+func (t *RawType) MaxLen() (r0 uintptr) {
+	switch t.Kind() {
+	case Bool, Int8, Uint8:
+		return 1
+	case Int16, Uint16:
+		return 2
+	case Int32, Uint32, Float32:
+		return 4
+	case Int64, Uint64, Float64, Complex64:
+		return 8
+	case Complex128:
+		return 16
+	case Int, Uint:
+		return unsafe.Sizeof(int32(0))
+	case Uintptr:
+		return unsafe.Sizeof(uintptr(0))
+	case kindUnsafePointer, kindChan, kindFunc:
+		return unsafe.Sizeof(uintptr(0))
+	case kindArray:
+		m := t.Elem().MaxLen()
+		if m == ^uintptr(0) {
+			return ^uintptr(0)
+		}
+		return m * uintptr(t.ArrayLen())
+	case kindStruct:
+		var sum uintptr
+		for i := int32(0); i < t.NumField(); i++ {
+			m := t.StructFieldType(i).MaxLen()
+			if m == ^uintptr(0) {
+				return ^uintptr(0)
+			}
+			sum += m
+		}
+		return sum
+	default:
+		return ^uintptr(0)
+	}
+}
+
 // underlying returns the underlying type. For named types, follows the
 // elem pointer in the namedType/elemType layout to the underlying type.
-func (t *rawType) underlying() (r0 *rawType) {
-	if t.isNamed() {
+func (t *RawType) Underlying() (r0 *RawType) {
+	if t.IsNamed() {
 		// namedType has same layout as elemType: elem is at the same offset.
 		return (*rtElemType)(unsafe.Pointer(t)).elem
 	}
@@ -167,13 +244,13 @@ func (t *rawType) underlying() (r0 *rawType) {
 }
 
 // elem returns the element type for pointer, chan, slice, array, map types.
-func (t *rawType) elem() (r0 *rawType) {
+func (t *RawType) Elem() (r0 *RawType) {
 	if tag := uintptr(unsafe.Pointer(t)) & 0b11; tag != 0 {
 		// Tagged pointer: peel one pointer level.
-		return (*rawType)(unsafe.Pointer(uintptr(unsafe.Pointer(t)) - 1))
+		return (*RawType)(unsafe.Pointer(uintptr(unsafe.Pointer(t)) - 1))
 	}
-	u := t.underlying()
-	switch u.kind() {
+	u := t.Underlying()
+	switch u.Kind() {
 	case kindPointer:
 		return (*rtPtrType)(unsafe.Pointer(u)).elem
 	default:
@@ -181,24 +258,24 @@ func (t *rawType) elem() (r0 *rawType) {
 	}
 }
 
-func (t *rawType) arrayLen() (r0 int32) {
-	u := t.underlying()
+func (t *RawType) ArrayLen() (r0 int32) {
+	u := t.Underlying()
 	return int32((*rtArrayType)(unsafe.Pointer(u)).arrayLen)
 }
 
-func (t *rawType) structSize() (r0 uint32) {
-	u := t.underlying()
+func (t *RawType) StructSize() (r0 uint32) {
+	u := t.Underlying()
 	return (*rtStructType)(unsafe.Pointer(u)).size
 }
 
-func (t *rawType) numField() (r0 int32) {
-	u := t.underlying()
+func (t *RawType) NumField() (r0 int32) {
+	u := t.Underlying()
 	return int32((*rtStructType)(unsafe.Pointer(u)).numField)
 }
 
 // structFieldType returns the type of the i-th field of a struct.
-func (t *rawType) structFieldType(i int32) (r0 *rawType) {
-	u := t.underlying()
+func (t *RawType) StructFieldType(i int32) (r0 *RawType) {
+	u := t.Underlying()
 	st := (*rtStructType)(unsafe.Pointer(u))
 	fields := array.At[rtStructFieldDesc](unsafe.Pointer(&st.fields[0]), int32(st.numField))
 	return fields.Index(i).fieldType
@@ -207,8 +284,8 @@ func (t *rawType) structFieldType(i int32) (r0 *rawType) {
 // structFieldOffset returns the offset of the i-th field by reading the
 // varint-encoded offset from the field descriptor's data pointer.
 // Data format: flags(1 byte) + varint(offset) + name(null-term) + ...
-func (t *rawType) structFieldOffset(i int32) (r0 uintptr) {
-	u := t.underlying()
+func (t *RawType) StructFieldOffset(i int32) (r0 uintptr) {
+	u := t.Underlying()
 	st := (*rtStructType)(unsafe.Pointer(u))
 	fields := array.At[rtStructFieldDesc](unsafe.Pointer(&st.fields[0]), int32(st.numField))
 	p := (*uint8)(fields.Index(i).data)

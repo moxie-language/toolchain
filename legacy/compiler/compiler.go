@@ -2276,6 +2276,8 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 	case "Sizeof": // unsafe.Sizeof
 		size := b.targetData.TypeAllocSize(argValues[0].Type())
 		return llvm.ConstInt(b.uintptrType, size, false), nil
+	case "TypeOf": // unsafe.TypeOf - descriptor pointer for the arg's static type
+		return b.getTypeCode(argTypes[0]), nil
 	case "Slice", "String": // unsafe.Slice, unsafe.String
 		// This creates a slice or string from a pointer and a length.
 		// Note that the exception mentioned in the documentation (if the
