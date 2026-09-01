@@ -12,7 +12,9 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"unsafe"
 )
+
 
 const ecPrivKeyVersion = 1
 
@@ -59,22 +61,24 @@ func marshalECPrivateKeyWithOID(key *ecdsa.PrivateKey, oid asn1.ObjectIdentifier
 		return nil, errors.New("invalid elliptic key public key")
 	}
 	privateKey := []byte{:(key.Curve.Params().N.BitLen()+7)/8}
-	return asn1.Marshal(ecPrivateKey{
+	k := ecPrivateKey{
 		Version:       1,
 		PrivateKey:    key.D.FillBytes(privateKey),
 		NamedCurveOID: oid,
 		PublicKey:     asn1.BitString{Bytes: elliptic.Marshal(key.Curve, key.X, key.Y)},
-	})
+	}
+	return asn1.Marshal(unsafe.TypeOf(k), unsafe.Pointer(&k))
 }
 
 // marshalECDHPrivateKey marshals an EC private key into ASN.1, DER format
 // suitable for NIST curves.
 func marshalECDHPrivateKey(key *ecdh.PrivateKey) ([]byte, error) {
-	return asn1.Marshal(ecPrivateKey{
+	k := ecPrivateKey{
 		Version:    1,
 		PrivateKey: key.Bytes(),
 		PublicKey:  asn1.BitString{Bytes: key.PublicKey().Bytes()},
-	})
+	}
+	return asn1.Marshal(unsafe.TypeOf(k), unsafe.Pointer(&k))
 }
 
 // parseECPrivateKey parses an ASN.1 Elliptic Curve Private Key Structure.
@@ -83,11 +87,11 @@ func marshalECDHPrivateKey(key *ecdh.PrivateKey) ([]byte, error) {
 // that may exist in the EC private key structure.
 func parseECPrivateKey(namedCurveOID *asn1.ObjectIdentifier, der []byte) (key *ecdsa.PrivateKey, err error) {
 	var privKey ecPrivateKey
-	if _, err := asn1.Unmarshal(der, &privKey); err != nil {
-		if _, err := asn1.Unmarshal(der, &pkcs8{}); err == nil {
+	if _, err := asn1.Unmarshal(der, unsafe.TypeOf(privKey), unsafe.Pointer(&privKey)); err != nil {
+		if _, err := asn1.Unmarshal(der, unsafe.TypeOf(pkcs8{}), unsafe.Pointer(&pkcs8{})); err == nil {
 			return nil, errors.New("x509: failed to parse private key (use ParsePKCS8PrivateKey instead for this key format)")
 		}
-		if _, err := asn1.Unmarshal(der, &pkcs1PrivateKey{}); err == nil {
+		if _, err := asn1.Unmarshal(der, unsafe.TypeOf(pkcs1PrivateKey{}), unsafe.Pointer(&pkcs1PrivateKey{})); err == nil {
 			return nil, errors.New("x509: failed to parse private key (use ParsePKCS1PrivateKey instead for this key format)")
 		}
 		return nil, errors.New("x509: failed to parse EC private key: " | err.String())

@@ -606,20 +606,10 @@ func makeField(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enc
 	if typ == nil || ptr == nil {
 		return nil, fmt.Errorf("asn1: cannot marshal nil value")
 	}
-	// If the field is an interface{} then recurse into the concrete value.
+	// The empty interface is absent in Moxie; interface{} fields are not
+	// representable, so encoding one is a compile-time-unreachable error.
 	if typ.kind() == akInterface {
-		iface := (*_ifacePair)(ptr)
-		if iface.typecode == nil {
-			return nil, fmt.Errorf("asn1: cannot marshal nil value")
-		}
-		concreteType := (*_rawType)(iface.typecode)
-		var concretePtr unsafe.Pointer
-		if concreteType.size() <= unsafe.Sizeof(uintptr(0)) {
-			concretePtr = unsafe.Pointer(&iface.value)
-		} else {
-			concretePtr = iface.value
-		}
-		return makeField(concreteType, concretePtr, params)
+		return nil, fmt.Errorf("asn1: interface{} fields are not supported in Moxie")
 	}
 
 	if typ.kind() == akSlice && (*_sliceHeader)(ptr).len == 0 && params.omitEmpty {
@@ -752,26 +742,20 @@ func makeField(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enc
 	return t, nil
 }
 
-// Marshal returns the ASN.1 encoding of val.
-func Marshal(val any) ([]byte, error) {
-	return MarshalWithParams(val, "")
+// Marshal returns the ASN.1 encoding of the value at data, whose static type
+// is described by typ (the descriptor returned by unsafe.TypeOf of the value).
+func Marshal(typ, data unsafe.Pointer) ([]byte, error) {
+	return MarshalWithParams(typ, data, "")
 }
 
 // MarshalWithParams allows field parameters to be specified for the
 // top-level element. The form of the params is the same as the field tags.
-func MarshalWithParams(val any, params []byte) ([]byte, error) {
-	iface := (*_ifacePair)(unsafe.Pointer(&val))
-	tc := (*_rawType)(iface.typecode)
-	if tc == nil {
+func MarshalWithParams(typ, data unsafe.Pointer, params []byte) ([]byte, error) {
+	tc := (*_rawType)(typ)
+	if tc == nil || data == nil {
 		return nil, fmt.Errorf("asn1: cannot marshal nil value")
 	}
-	var dp unsafe.Pointer
-	if tc.size() <= unsafe.Sizeof(uintptr(0)) {
-		dp = unsafe.Pointer(&iface.value)
-	} else {
-		dp = iface.value
-	}
-	e, err := makeField(tc, dp, parseFieldParameters(params))
+	e, err := makeField(tc, data, parseFieldParameters(params))
 	if err != nil {
 		return nil, err
 	}

@@ -693,13 +693,13 @@ func parseSequenceOfUnsafe(data []byte, elemType *_rawType) (slicePtr unsafe.Poi
 
 // Type code pointers for known ASN.1 types. Obtained by decomposing
 // a nil pointer interface to extract the compiler's type descriptor.
-func _bitStringTC() *_rawType        { return typeCodeOf((*BitString)(nil)).elem() }
-func _objectIdentifierTC() *_rawType { return typeCodeOf((*ObjectIdentifier)(nil)).elem() }
-func _enumeratedTC() *_rawType       { return typeCodeOf((*Enumerated)(nil)).elem() }
-func _flagTC() *_rawType             { return typeCodeOf((*Flag)(nil)).elem() }
-func _timeTC() *_rawType             { return typeCodeOf((*time.Time)(nil)).elem() }
-func _rawValueTC() *_rawType         { return typeCodeOf((*RawValue)(nil)).elem() }
-func _rawContentsTC() *_rawType      { return typeCodeOf((*RawContent)(nil)).elem() }
+func _bitStringTC() *_rawType { return (*_rawType)(unsafe.TypeOf((*BitString)(nil))).elem() }
+func _objectIdentifierTC() *_rawType { return (*_rawType)(unsafe.TypeOf((*ObjectIdentifier)(nil))).elem() }
+func _enumeratedTC() *_rawType { return (*_rawType)(unsafe.TypeOf((*Enumerated)(nil))).elem() }
+func _flagTC() *_rawType { return (*_rawType)(unsafe.TypeOf((*Flag)(nil))).elem() }
+func _timeTC() *_rawType { return (*_rawType)(unsafe.TypeOf((*time.Time)(nil))).elem() }
+func _rawValueTC() *_rawType { return (*_rawType)(unsafe.TypeOf((*RawValue)(nil))).elem() }
+func _rawContentsTC() *_rawType { return (*_rawType)(unsafe.TypeOf((*RawContent)(nil))).elem() }
 func _bigIntPtrTC() *_rawType        { return typeCodeOf((**big.Int)(nil)).elem() }
 
 // invalidLength reports whether offset + length > sliceLength, or if the
@@ -736,56 +736,11 @@ func parseFieldUnsafe(typ *_rawType, ptr unsafe.Pointer, data []byte, initOffset
 		return
 	}
 
-	// Deal with the ANY type (interface{}).
+	// The empty interface is absent in Moxie; interface{} (ANY) fields are
+	// not representable, so decoding into one is a compile-time-unreachable
+	// error.
 	if typ.kind() == akInterface {
-		var t tagAndLength
-		t, offset, err = parseTagAndLength(data, offset)
-		if err != nil {
-			return
-		}
-		if invalidLength(offset, t.length, len(data)) {
-			err = SyntaxError{"data truncated"}
-			return
-		}
-		var result any
-		if !t.isCompound && t.class == ClassUniversal {
-			innerBytes := data[offset : offset+t.length]
-			switch t.tag {
-			case TagBoolean:
-				result, err = parseBool(innerBytes)
-			case TagPrintableString:
-				result, err = parsePrintableString(innerBytes)
-			case TagNumericString:
-				result, err = parseNumericString(innerBytes)
-			case TagIA5String:
-				result, err = parseIA5String(innerBytes)
-			case TagT61String:
-				result, err = parseT61String(innerBytes)
-			case TagUTF8String:
-				result, err = parseUTF8String(innerBytes)
-			case TagInteger:
-				result, err = parseInt64(innerBytes)
-			case TagBitString:
-				result, err = parseBitString(innerBytes)
-			case TagOID:
-				result, err = parseObjectIdentifier(innerBytes)
-			case TagUTCTime:
-				result, err = parseUTCTime(innerBytes)
-			case TagGeneralizedTime:
-				result, err = parseGeneralizedTime(innerBytes)
-			case TagOctetString:
-				result = innerBytes
-			case TagBMPString:
-				result, err = parseBMPString(innerBytes)
-			}
-		}
-		offset += t.length
-		if err != nil {
-			return
-		}
-		if result != nil {
-			*(*any)(ptr) = result
-		}
+		err = StructuralError{"asn1: interface{} fields are not supported in Moxie"}
 		return
 	}
 
@@ -1087,9 +1042,11 @@ func setDefaultValueUnsafe(typ *_rawType, ptr unsafe.Pointer, params fieldParame
 
 // Unmarshal parses the DER-encoded ASN.1 data structure b
 // and fills in an arbitrary value pointed at by val.
-// val must be a non-nil pointer.
-func Unmarshal(b []byte, val any) (rest []byte, err error) {
-	return UnmarshalWithParams(b, val, "")
+// Unmarshal parses b into the value at data, whose static type is described
+// by typ. typ must be the descriptor (unsafe.TypeOf) of the pointed-to type,
+// and data must be a non-nil pointer to the destination.
+func Unmarshal(b []byte, typ, data unsafe.Pointer) (rest []byte, err error) {
+	return UnmarshalWithParams(b, typ, data, "")
 }
 
 // invalidUnmarshalError describes an invalid argument passed to Unmarshal.
@@ -1113,26 +1070,18 @@ func (e *invalidUnmarshalError) String() string { return e.Error() }
 
 // UnmarshalWithParams allows field parameters to be specified for the
 // top-level element. The form of the params is the same as the field tags.
-func UnmarshalWithParams(b []byte, val any, params []byte) (rest []byte, err error) {
-	elemType, dataPtr := derefPtr(val)
-	if elemType == nil {
-		tc := typeCodeOf(val)
+func UnmarshalWithParams(b []byte, typ, data unsafe.Pointer, params []byte) (rest []byte, err error) {
+	elemType := (*_rawType)(typ)
+	if data == nil {
 		name := []byte("unknown")
-		if tc != nil {
-			if n := tc.typeName(); len(n) > 0 {
+		if elemType != nil {
+			if n := elemType.typeName(); len(n) > 0 {
 				name = n
 			}
 		}
-		return nil, &invalidUnmarshalError{typeName: name, isNonPtr: true}
-	}
-	if dataPtr == nil {
-		name := elemType.typeName()
-		if len(name) == 0 {
-			name = []byte("unknown")
-		}
 		return nil, &invalidUnmarshalError{typeName: name, isNil: true}
 	}
-	offset, err := parseFieldUnsafe(elemType, dataPtr, b, 0, parseFieldParameters(params))
+	offset, err := parseFieldUnsafe(elemType, data, b, 0, parseFieldParameters(params))
 	if err != nil {
 		return nil, err
 	}

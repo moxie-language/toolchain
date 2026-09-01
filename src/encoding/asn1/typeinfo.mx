@@ -54,12 +54,6 @@ const (
 	_sfExported
 )
 
-// _ifacePair is the interface{} memory layout.
-type _ifacePair struct {
-	typecode unsafe.Pointer
-	value    unsafe.Pointer
-}
-
 // _rawType is the base type descriptor.
 type _rawType struct {
 	meta uint8
@@ -266,72 +260,6 @@ func (t *_rawType) typeName() (r0 []byte) {
 		n++
 	}
 	return unsafe.Slice(nameArr.Index(0), n)
-}
-
-// typeCodeOf extracts the raw type code pointer from an interface value.
-func typeCodeOf(val any) (r0 *_rawType) {
-	return (*_rawType)((*_ifacePair)(unsafe.Pointer(&val)).typecode)
-}
-
-// dataOf extracts the data pointer from an interface value, dereferencing
-// the interface packing (small values are stored directly in the pointer slot).
-func dataOf(val any) (r0 unsafe.Pointer) {
-	iface := (*_ifacePair)(unsafe.Pointer(&val))
-	t := (*_rawType)(iface.typecode)
-	if t.size() <= unsafe.Sizeof(uintptr(0)) {
-		return unsafe.Pointer(&iface.value)
-	}
-	return iface.value
-}
-
-// derefPtr extracts the element type and data pointer from an interface
-// holding a pointer type. Returns the pointed-to type and data pointer.
-func derefPtr(val any) (r0 *_rawType, r1 unsafe.Pointer) {
-	iface := (*_ifacePair)(unsafe.Pointer(&val))
-	t := (*_rawType)(iface.typecode)
-	if t.kind() != akPointer {
-		return nil, nil
-	}
-	elemType := t.elem()
-	// Pointer is a small type (size == pointer size), so iface.value IS the pointer.
-	dataPtr := iface.value
-	return elemType, dataPtr
-}
-
-// ptrToIface constructs an interface{} from a pointer to data.
-// The resulting interface holds a *T where T has type code t.
-func ptrToIface(t *_rawType, ptr unsafe.Pointer) (r0 any) {
-	// Need the *T type code. For named types, ptrTo is in the elemType layout.
-	var ptrType *_rawType
-	if t.isNamed() {
-		ptrType = (*_elemType)(unsafe.Pointer(t)).ptrTo
-	} else {
-		switch t.kind() {
-		case akStruct:
-			ptrType = (*_structType)(unsafe.Pointer(t)).ptrTo
-		default:
-			// For other types, the ptrTo field is at the same offset as elemType.ptrTo
-			ptrType = (*_elemType)(unsafe.Pointer(t)).ptrTo
-		}
-	}
-	if ptrType == nil {
-		// Fallback: can't construct typed pointer interface.
-		return nil
-	}
-	// Construct _ifacePair with pointer type code and the pointer as value.
-	// Pointer is small (fits in pointer slot), so value IS the pointer.
-	iface := _ifacePair{typecode: unsafe.Pointer(ptrType), value: ptr}
-	return *(*any)(unsafe.Pointer(&iface))
-}
-
-// valToIface constructs an interface{} from a type and data pointer.
-func valToIface(t *_rawType, ptr unsafe.Pointer) (r0 any) {
-	iface := _ifacePair{typecode: unsafe.Pointer(t), value: ptr}
-	if t.size() <= unsafe.Sizeof(uintptr(0)) {
-		// Small value: copy the value into the pointer slot.
-		iface.value = *(*unsafe.Pointer)(ptr)
-	}
-	return *(*any)(unsafe.Pointer(&iface))
 }
 
 // makeZero allocates a zeroed value of the given type and returns a pointer to it.

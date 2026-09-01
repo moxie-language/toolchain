@@ -64,8 +64,8 @@ type pkixPublicKey struct {
 // This kind of key is commonly encoded in PEM blocks of type "PUBLIC KEY".
 func ParsePKIXPublicKey(derBytes []byte) (pub any, err error) {
 	var pki publicKeyInfo
-	if rest, err := asn1.Unmarshal(derBytes, &pki); err != nil {
-		if _, err := asn1.Unmarshal(derBytes, &pkcs1PublicKey{}); err == nil {
+	if rest, err := asn1.Unmarshal(derBytes, unsafe.TypeOf(pki), unsafe.Pointer(&pki)); err != nil {
+		if _, err := asn1.Unmarshal(derBytes, unsafe.TypeOf(pkcs1PublicKey{}), unsafe.Pointer(&pkcs1PublicKey{})); err == nil {
 			return nil, errors.New("x509: failed to parse public key (use ParsePKCS1PublicKey instead for this key format)")
 		}
 		return nil, err
@@ -78,10 +78,8 @@ func ParsePKIXPublicKey(derBytes []byte) (pub any, err error) {
 func marshalPublicKey(pub any) (publicKeyBytes []byte, publicKeyAlgorithm pkix.AlgorithmIdentifier, err error) {
 	switch pub := pub.(type) {
 	case *rsa.PublicKey:
-		publicKeyBytes, err = asn1.Marshal(pkcs1PublicKey{
-			N: pub.N,
-			E: pub.E,
-		})
+		pk := pkcs1PublicKey{N: pub.N, E: pub.E}
+		publicKeyBytes, err = asn1.Marshal(unsafe.TypeOf(pk), unsafe.Pointer(&pk))
 		if err != nil {
 			return nil, pkix.AlgorithmIdentifier{}, err
 		}
@@ -100,7 +98,7 @@ func marshalPublicKey(pub any) (publicKeyBytes []byte, publicKeyAlgorithm pkix.A
 		publicKeyBytes = elliptic.Marshal(pub.Curve, pub.X, pub.Y)
 		publicKeyAlgorithm.Algorithm = _oidPublicKeyECDSA()
 		var paramBytes []byte
-		paramBytes, err = asn1.Marshal(oid)
+		paramBytes, err = asn1.Marshal(unsafe.TypeOf(oid), unsafe.Pointer(&oid))
 		if err != nil {
 			return
 		}
@@ -119,7 +117,7 @@ func marshalPublicKey(pub any) (publicKeyBytes []byte, publicKeyAlgorithm pkix.A
 			}
 			publicKeyAlgorithm.Algorithm = _oidPublicKeyECDSA()
 			var paramBytes []byte
-			paramBytes, err = asn1.Marshal(oid)
+			paramBytes, err = asn1.Marshal(unsafe.TypeOf(oid), unsafe.Pointer(&oid))
 			if err != nil {
 				return
 			}
@@ -158,7 +156,7 @@ func MarshalPKIXPublicKey(pub any) ([]byte, error) {
 		},
 	}
 
-	ret, _ := asn1.Marshal(pkix)
+	ret, _ := asn1.Marshal(unsafe.TypeOf(pkix), unsafe.Pointer(&pkix))
 	return ret, nil
 }
 
@@ -477,12 +475,12 @@ func getSignatureAlgorithmFromAI(ai pkix.AlgorithmIdentifier) SignatureAlgorithm
 	// in the Parameters.
 
 	var params pssParameters
-	if _, err := asn1.Unmarshal(ai.Parameters.FullBytes, &params); err != nil {
+	if _, err := asn1.Unmarshal(ai.Parameters.FullBytes, unsafe.TypeOf(params), unsafe.Pointer(&params)); err != nil {
 		return UnknownSignatureAlgorithm
 	}
 
 	var mgf1HashFunc pkix.AlgorithmIdentifier
-	if _, err := asn1.Unmarshal(params.MGF.Parameters.FullBytes, &mgf1HashFunc); err != nil {
+	if _, err := asn1.Unmarshal(params.MGF.Parameters.FullBytes, unsafe.TypeOf(mgf1HashFunc), unsafe.Pointer(&mgf1HashFunc)); err != nil {
 		return UnknownSignatureAlgorithm
 	}
 
@@ -1263,7 +1261,7 @@ func marshalSANs(dnsNames, emailAddresses [][]byte, ipAddresses []net.IP, uris [
 		if len(rawValues) >= cap(rawValues) { rawValues = mxutil.GrowCap(rawValues) }
 		rawValues = push(rawValues, asn1.RawValue{Tag: nameTypeURI, Class: 2, Bytes: []byte(uriStr)})
 	}
-	return asn1.Marshal(rawValues)
+	return asn1.Marshal(unsafe.TypeOf(rawValues), unsafe.Pointer(&rawValues))
 }
 
 func isIA5String(s string) error {
@@ -1309,7 +1307,7 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 
 	if len(subjectKeyId) > 0 && !oidInExtensions(_oidExtensionSubjectKeyId(), template.ExtraExtensions) {
 		ret[n].Id = _oidExtensionSubjectKeyId()
-		ret[n].Value, err = asn1.Marshal(subjectKeyId)
+		ret[n].Value, err = asn1.Marshal(unsafe.TypeOf(subjectKeyId), unsafe.Pointer(&subjectKeyId))
 		if err != nil {
 			return
 		}
@@ -1318,7 +1316,8 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 
 	if len(authorityKeyId) > 0 && !oidInExtensions(_oidExtensionAuthorityKeyId(), template.ExtraExtensions) {
 		ret[n].Id = _oidExtensionAuthorityKeyId()
-		ret[n].Value, err = asn1.Marshal(authKeyId{authorityKeyId})
+		aki := authKeyId{authorityKeyId}
+		ret[n].Value, err = asn1.Marshal(unsafe.TypeOf(aki), unsafe.Pointer(&aki))
 		if err != nil {
 			return
 		}
@@ -1343,7 +1342,7 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 				Location: asn1.RawValue{Tag: 6, Class: 2, Bytes: []byte(name)},
 			})
 		}
-		ret[n].Value, err = asn1.Marshal(aiaValues)
+		ret[n].Value, err = asn1.Marshal(unsafe.TypeOf(aiaValues), unsafe.Pointer(&aiaValues))
 		if err != nil {
 			return
 		}
@@ -1490,7 +1489,7 @@ func buildCertExtensions(template *Certificate, subjectIsEmpty bool, authorityKe
 			crlDp = push(crlDp, dp)
 		}
 
-		ret[n].Value, err = asn1.Marshal(crlDp)
+		ret[n].Value, err = asn1.Marshal(unsafe.TypeOf(crlDp), unsafe.Pointer(&crlDp))
 		if err != nil {
 			return
 		}
@@ -1518,7 +1517,8 @@ func marshalKeyUsage(ku KeyUsage) (pkix.Extension, error) {
 
 	bitString := a[:l]
 	var err error
-	ext.Value, err = asn1.Marshal(asn1.BitString{Bytes: bitString, BitLength: asn1BitLength(bitString)})
+	bs := asn1.BitString{Bytes: bitString, BitLength: asn1BitLength(bitString)}
+	ext.Value, err = asn1.Marshal(unsafe.TypeOf(bs), unsafe.Pointer(&bs))
 	return ext, err
 }
 
@@ -1537,7 +1537,7 @@ func marshalExtKeyUsage(extUsages []ExtKeyUsage, unknownUsages []asn1.ObjectIden
 	copy(oids[len(extUsages):], unknownUsages)
 
 	var err error
-	ext.Value, err = asn1.Marshal(oids)
+	ext.Value, err = asn1.Marshal(unsafe.TypeOf(oids), unsafe.Pointer(&oids))
 	return ext, err
 }
 
@@ -1550,7 +1550,8 @@ func marshalBasicConstraints(isCA bool, maxPathLen int32, maxPathLenZero bool) (
 		maxPathLen = -1
 	}
 	var err error
-	ext.Value, err = asn1.Marshal(basicConstraints{isCA, maxPathLen})
+	bc := basicConstraints{isCA, maxPathLen}
+	ext.Value, err = asn1.Marshal(unsafe.TypeOf(bc), unsafe.Pointer(&bc))
 	return ext, err
 }
 
@@ -1602,7 +1603,8 @@ func subjectBytes(cert *Certificate) ([]byte, error) {
 		return cert.RawSubject, nil
 	}
 
-	return asn1.Marshal(cert.Subject.ToRDNSequence())
+	rdn := cert.Subject.ToRDNSequence()
+	return asn1.Marshal(unsafe.TypeOf(rdn), unsafe.Pointer(&rdn))
 }
 
 // signingParamsForKey returns the signature algorithm and its Algorithm
@@ -1855,7 +1857,7 @@ func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv 
 		Extensions:         extensions,
 	}
 
-	tbsCertContents, err := asn1.Marshal(c)
+	tbsCertContents, err := asn1.Marshal(unsafe.TypeOf(c), unsafe.Pointer(&c))
 	if err != nil {
 		return nil, err
 	}
@@ -1866,11 +1868,12 @@ func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv 
 		return nil, err
 	}
 
-	return asn1.Marshal(certificate{
+	certBody := certificate{
 		TBSCertificate:     c,
 		SignatureAlgorithm: algorithmIdentifier,
 		SignatureValue:     asn1.BitString{Bytes: signature, BitLength: len(signature) * 8},
-	})
+	}
+	return asn1.Marshal(unsafe.TypeOf(certBody), unsafe.Pointer(&certBody))
 }
 
 // pemCRLPrefix is the magic string that indicates that we have a PEM encoded
@@ -1901,7 +1904,7 @@ func ParseCRL(crlBytes []byte) (*pkix.CertificateList, error) {
 // Deprecated: Use [ParseRevocationList] instead.
 func ParseDERCRL(derBytes []byte) (*pkix.CertificateList, error) {
 	certList := &pkix.CertificateList{}
-	if rest, err := asn1.Unmarshal(derBytes, certList); err != nil {
+	if rest, err := asn1.Unmarshal(derBytes, unsafe.TypeOf(*certList), unsafe.Pointer(certList)); err != nil {
 		return nil, err
 	} else if len(rest) != 0 {
 		return nil, errors.New("x509: trailing data after CRL")
@@ -1945,7 +1948,8 @@ func (c *Certificate) CreateCRL(rand io.Reader, priv any, revokedCerts []pkix.Re
 	if len(c.SubjectKeyId) > 0 {
 		var aki pkix.Extension
 		aki.Id = _oidExtensionAuthorityKeyId()
-		aki.Value, err = asn1.Marshal(authKeyId{Id: c.SubjectKeyId})
+		aki2 := authKeyId{Id: c.SubjectKeyId}
+		aki.Value, err = asn1.Marshal(unsafe.TypeOf(aki2), unsafe.Pointer(&aki2))
 		if err != nil {
 			return nil, err
 		}
@@ -1953,7 +1957,7 @@ func (c *Certificate) CreateCRL(rand io.Reader, priv any, revokedCerts []pkix.Re
 		tbsCertList.Extensions = push(tbsCertList.Extensions, aki)
 	}
 
-	tbsCertListContents, err := asn1.Marshal(tbsCertList)
+	tbsCertListContents, err := asn1.Marshal(unsafe.TypeOf(tbsCertList), unsafe.Pointer(&tbsCertList))
 	if err != nil {
 		return nil, err
 	}
@@ -1964,11 +1968,12 @@ func (c *Certificate) CreateCRL(rand io.Reader, priv any, revokedCerts []pkix.Re
 		return nil, err
 	}
 
-	return asn1.Marshal(pkix.CertificateList{
+	cl := pkix.CertificateList{
 		TBSCertList:        tbsCertList,
 		SignatureAlgorithm: algorithmIdentifier,
 		SignatureValue:     asn1.BitString{Bytes: signature, BitLength: len(signature) * 8},
-	})
+	}
+	return asn1.Marshal(unsafe.TypeOf(cl), unsafe.Pointer(&cl))
 }
 
 // CertificateRequest represents a PKCS #10, certificate signature request.
@@ -2043,11 +2048,11 @@ func _oidExtensionRequest() asn1.ObjectIdentifier {
 // CertificateRequest's Attributes into tbsCertificateRequest RawAttributes.
 func newRawAttributes(attributes []pkix.AttributeTypeAndValueSET) ([]asn1.RawValue, error) {
 	var rawAttributes []asn1.RawValue
-	b, err := asn1.Marshal(attributes)
+	b, err := asn1.Marshal(unsafe.TypeOf(attributes), unsafe.Pointer(&attributes))
 	if err != nil {
 		return nil, err
 	}
-	rest, err := asn1.Unmarshal(b, &rawAttributes)
+	rest, err := asn1.Unmarshal(b, unsafe.TypeOf(rawAttributes), unsafe.Pointer(&rawAttributes))
 	if err != nil {
 		return nil, err
 	}
@@ -2062,7 +2067,7 @@ func parseRawAttributes(rawAttributes []asn1.RawValue) []pkix.AttributeTypeAndVa
 	var attributes []pkix.AttributeTypeAndValueSET
 	for _, rawAttr := range rawAttributes {
 		var attr pkix.AttributeTypeAndValueSET
-		rest, err := asn1.Unmarshal(rawAttr.FullBytes, &attr)
+		rest, err := asn1.Unmarshal(rawAttr.FullBytes, unsafe.TypeOf(attr), unsafe.Pointer(&attr))
 		// Ignore attributes that don't parse into pkix.AttributeTypeAndValueSET
 		// (i.e.: challengePassword or unstructuredName).
 		if err == nil && len(rest) == 0 {
@@ -2086,7 +2091,7 @@ func parseCSRExtensions(rawAttributes []asn1.RawValue) ([]pkix.Extension, error)
 	requestedExts := map[string]bool{}
 	for _, rawAttr := range rawAttributes {
 		var attr pkcs10Attribute
-		if rest, err := asn1.Unmarshal(rawAttr.FullBytes, &attr); err != nil || len(rest) != 0 || len(attr.Values) == 0 {
+		if rest, err := asn1.Unmarshal(rawAttr.FullBytes, unsafe.TypeOf(attr), unsafe.Pointer(&attr)); err != nil || len(rest) != 0 || len(attr.Values) == 0 {
 			// Ignore attributes that don't parse.
 			continue
 		}
@@ -2096,7 +2101,7 @@ func parseCSRExtensions(rawAttributes []asn1.RawValue) ([]pkix.Extension, error)
 		}
 
 		var extensions []pkix.Extension
-		if _, err := asn1.Unmarshal(attr.Values[0].FullBytes, &extensions); err != nil {
+		if _, err := asn1.Unmarshal(attr.Values[0].FullBytes, unsafe.TypeOf(extensions), unsafe.Pointer(&extensions)); err != nil {
 			return nil, err
 		}
 		for _, ext := range extensions {
@@ -2227,13 +2232,13 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 			Value: [][]pkix.Extension{extensions},
 		}
 
-		b, err := asn1.Marshal(attr)
+		b, err := asn1.Marshal(unsafe.TypeOf(attr), unsafe.Pointer(&attr))
 		if err != nil {
 			return nil, errors.New("x509: failed to serialise extensions attribute: " | err.String())
 		}
 
 		var rawValue asn1.RawValue
-		if _, err := asn1.Unmarshal(b, &rawValue); err != nil {
+		if _, err := asn1.Unmarshal(b, unsafe.TypeOf(rawValue), unsafe.Pointer(&rawValue)); err != nil {
 			return nil, err
 		}
 
@@ -2243,7 +2248,8 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 
 	asn1Subject := template.RawSubject
 	if len(asn1Subject) == 0 {
-		asn1Subject, err = asn1.Marshal(template.Subject.ToRDNSequence())
+		rdn := template.Subject.ToRDNSequence()
+		asn1Subject, err = asn1.Marshal(unsafe.TypeOf(rdn), unsafe.Pointer(&rdn))
 		if err != nil {
 			return nil, err
 		}
@@ -2262,7 +2268,7 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 		RawAttributes: rawAttributes,
 	}
 
-	tbsCSRContents, err := asn1.Marshal(tbsCSR)
+	tbsCSRContents, err := asn1.Marshal(unsafe.TypeOf(tbsCSR), unsafe.Pointer(&tbsCSR))
 	if err != nil {
 		return nil, err
 	}
@@ -2273,11 +2279,12 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 		return nil, err
 	}
 
-	return asn1.Marshal(certificateRequest{
+	csrBody := certificateRequest{
 		TBSCSR:             tbsCSR,
 		SignatureAlgorithm: algorithmIdentifier,
 		SignatureValue:     asn1.BitString{Bytes: signature, BitLength: len(signature) * 8},
-	})
+	}
+	return asn1.Marshal(unsafe.TypeOf(csrBody), unsafe.Pointer(&csrBody))
 }
 
 // ParseCertificateRequest parses a single certificate request from the
@@ -2285,7 +2292,7 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 func ParseCertificateRequest(asn1Data []byte) (*CertificateRequest, error) {
 	var csr certificateRequest
 
-	rest, err := asn1.Unmarshal(asn1Data, &csr)
+	rest, err := asn1.Unmarshal(asn1Data, unsafe.TypeOf(csr), unsafe.Pointer(&csr))
 	if err != nil {
 		return nil, err
 	} else if len(rest) != 0 {
@@ -2320,7 +2327,7 @@ func parseCertificateRequest(in *certificateRequest) (*CertificateRequest, error
 	}
 
 	var subject pkix.RDNSequence
-	if rest, err := asn1.Unmarshal(in.TBSCSR.Subject.FullBytes, &subject); err != nil {
+	if rest, err := asn1.Unmarshal(in.TBSCSR.Subject.FullBytes, unsafe.TypeOf(subject), unsafe.Pointer(&subject)); err != nil {
 		return nil, err
 	} else if len(rest) != 0 {
 		return nil, errors.New("x509: trailing data after X.509 Subject")
@@ -2551,7 +2558,8 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 			// Only add a reasonCode extension if the reason is non-zero, as per
 			// RFC 5280 Section 5.3.1.
 			if rce.ReasonCode != 0 {
-				reasonBytes, err := asn1.Marshal(asn1.Enumerated(rce.ReasonCode))
+				en := asn1.Enumerated(rce.ReasonCode)
+				reasonBytes, err := asn1.Marshal(unsafe.TypeOf(en), unsafe.Pointer(&en))
 				if err != nil {
 					return nil, err
 				}
@@ -2570,7 +2578,8 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 		}
 	}
 
-	aki, err := asn1.Marshal(authKeyId{Id: issuer.SubjectKeyId})
+	akiBody := authKeyId{Id: issuer.SubjectKeyId}
+	aki, err := asn1.Marshal(unsafe.TypeOf(akiBody), unsafe.Pointer(&akiBody))
 	if err != nil {
 		return nil, err
 	}
@@ -2578,7 +2587,7 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 	if numBytes := template.Number.Bytes(); len(numBytes) > 20 || (len(numBytes) == 20 && numBytes[0]&0x80 != 0) {
 		return nil, errors.New("x509: CRL number exceeds 20 octets")
 	}
-	crlNum, err := asn1.Marshal(template.Number)
+	crlNum, err := asn1.Marshal(unsafe.TypeOf(template.Number), unsafe.Pointer(&template.Number))
 	if err != nil {
 		return nil, err
 	}
@@ -2615,7 +2624,7 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 		tbsCertList.Extensions = push(tbsCertList.Extensions, template.ExtraExtensions...)
 	}
 
-	tbsCertListContents, err := asn1.Marshal(tbsCertList)
+	tbsCertListContents, err := asn1.Marshal(unsafe.TypeOf(tbsCertList), unsafe.Pointer(&tbsCertList))
 	if err != nil {
 		return nil, err
 	}
@@ -2629,11 +2638,12 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 		return nil, err
 	}
 
-	return asn1.Marshal(certificateList{
+	clBody := certificateList{
 		TBSCertList:        tbsCertList,
 		SignatureAlgorithm: algorithmIdentifier,
 		SignatureValue:     asn1.BitString{Bytes: signature, BitLength: len(signature) * 8},
-	})
+	}
+	return asn1.Marshal(unsafe.TypeOf(clBody), unsafe.Pointer(&clBody))
 }
 
 // CheckSignatureFrom verifies that the signature on rl is a valid signature

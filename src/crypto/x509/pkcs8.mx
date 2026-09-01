@@ -13,7 +13,9 @@ import (
 	"encoding/asn1"
 	"errors"
 	"fmt"
+	"unsafe"
 )
+
 
 // pkcs8 reflects an ASN.1, PKCS #8 PrivateKey. See
 // ftp://ftp.rsasecurity.com/pub/pkcs/pkcs-8/pkcs-8v1_2.asn
@@ -37,11 +39,11 @@ type pkcs8 struct {
 // To restore the old behavior, use the GODEBUG=x509rsacrt=0 environment variable.
 func ParsePKCS8PrivateKey(der []byte) (key any, err error) {
 	var privKey pkcs8
-	if _, err := asn1.Unmarshal(der, &privKey); err != nil {
-		if _, err := asn1.Unmarshal(der, &ecPrivateKey{}); err == nil {
+	if _, err := asn1.Unmarshal(der, unsafe.TypeOf(privKey), unsafe.Pointer(&privKey)); err != nil {
+		if _, err := asn1.Unmarshal(der, unsafe.TypeOf(ecPrivateKey{}), unsafe.Pointer(&ecPrivateKey{})); err == nil {
 			return nil, errors.New("x509: failed to parse private key (use ParseECPrivateKey instead for this key format)")
 		}
-		if _, err := asn1.Unmarshal(der, &pkcs1PrivateKey{}); err == nil {
+		if _, err := asn1.Unmarshal(der, unsafe.TypeOf(pkcs1PrivateKey{}), unsafe.Pointer(&pkcs1PrivateKey{})); err == nil {
 			return nil, errors.New("x509: failed to parse private key (use ParsePKCS1PrivateKey instead for this key format)")
 		}
 		return nil, err
@@ -57,7 +59,7 @@ func ParsePKCS8PrivateKey(der []byte) (key any, err error) {
 	case privKey.Algo.Algorithm.Equal(_oidPublicKeyECDSA()):
 		bytes := privKey.Algo.Parameters.FullBytes
 		namedCurveOID := &asn1.ObjectIdentifier{}
-		if _, err := asn1.Unmarshal(bytes, namedCurveOID); err != nil {
+		if _, err := asn1.Unmarshal(bytes, unsafe.TypeOf(*namedCurveOID), unsafe.Pointer(namedCurveOID)); err != nil {
 			namedCurveOID = nil
 		}
 		key, err = parseECPrivateKey(namedCurveOID, privKey.PrivateKey)
@@ -71,7 +73,7 @@ func ParsePKCS8PrivateKey(der []byte) (key any, err error) {
 			return nil, errors.New("x509: invalid Ed25519 private key parameters")
 		}
 		var curvePrivateKey []byte
-		if _, err := asn1.Unmarshal(privKey.PrivateKey, &curvePrivateKey); err != nil {
+		if _, err := asn1.Unmarshal(privKey.PrivateKey, unsafe.TypeOf(curvePrivateKey), unsafe.Pointer(&curvePrivateKey)); err != nil {
 			return nil, fmt.Errorf("x509: invalid Ed25519 private key: %v", err)
 		}
 		if l := len(curvePrivateKey); l != ed25519.SeedSize {
@@ -84,7 +86,7 @@ func ParsePKCS8PrivateKey(der []byte) (key any, err error) {
 			return nil, errors.New("x509: invalid X25519 private key parameters")
 		}
 		var curvePrivateKey []byte
-		if _, err := asn1.Unmarshal(privKey.PrivateKey, &curvePrivateKey); err != nil {
+		if _, err := asn1.Unmarshal(privKey.PrivateKey, unsafe.TypeOf(curvePrivateKey), unsafe.Pointer(&curvePrivateKey)); err != nil {
 			return nil, fmt.Errorf("x509: invalid X25519 private key: %v", err)
 		}
 		return ecdh.X25519().NewPrivateKey(curvePrivateKey)
@@ -123,7 +125,7 @@ func MarshalPKCS8PrivateKey(key any) ([]byte, error) {
 		if !ok {
 			return nil, errors.New("x509: unknown curve while marshaling to PKCS#8")
 		}
-		oidBytes, err := asn1.Marshal(oid)
+		oidBytes, err := asn1.Marshal(unsafe.TypeOf(oid), unsafe.Pointer(&oid))
 		if err != nil {
 			return nil, errors.New("x509: failed to marshal curve OID: " | err.String())
 		}
@@ -141,7 +143,8 @@ func MarshalPKCS8PrivateKey(key any) ([]byte, error) {
 		privKey.Algo = pkix.AlgorithmIdentifier{
 			Algorithm: _oidPublicKeyEd25519(),
 		}
-		curvePrivateKey, err := asn1.Marshal(k.Seed())
+		seed := k.Seed()
+		curvePrivateKey, err := asn1.Marshal(unsafe.TypeOf(seed), unsafe.Pointer(&seed))
 		if err != nil {
 			return nil, fmt.Errorf("x509: failed to marshal private key: %v", err)
 		}
@@ -153,7 +156,8 @@ func MarshalPKCS8PrivateKey(key any) ([]byte, error) {
 				Algorithm: _oidPublicKeyX25519(),
 			}
 			var err error
-			if privKey.PrivateKey, err = asn1.Marshal(k.Bytes()); err != nil {
+			kb := k.Bytes()
+			if privKey.PrivateKey, err = asn1.Marshal(unsafe.TypeOf(kb), unsafe.Pointer(&kb)); err != nil {
 				return nil, fmt.Errorf("x509: failed to marshal private key: %v", err)
 			}
 		} else {
@@ -161,7 +165,7 @@ func MarshalPKCS8PrivateKey(key any) ([]byte, error) {
 			if !ok {
 				return nil, errors.New("x509: unknown curve while marshaling to PKCS#8")
 			}
-			oidBytes, err := asn1.Marshal(oid)
+			oidBytes, err := asn1.Marshal(unsafe.TypeOf(oid), unsafe.Pointer(&oid))
 			if err != nil {
 				return nil, errors.New("x509: failed to marshal curve OID: " | err.String())
 			}
@@ -180,5 +184,5 @@ func MarshalPKCS8PrivateKey(key any) ([]byte, error) {
 		return nil, fmt.Errorf("x509: unknown key type while marshaling PKCS#8: %T", key)
 	}
 
-	return asn1.Marshal(privKey)
+	return asn1.Marshal(unsafe.TypeOf(privKey), unsafe.Pointer(&privKey))
 }
