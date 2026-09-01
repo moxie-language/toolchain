@@ -174,7 +174,7 @@ func RelocMarkIface(rs *RelocState, ifaceAddr unsafe.Pointer) {
 		return
 	}
 	t := (*RawType)(iface.typecode)
-	if t.Kind() == kindPointer {
+	if t.Kind() == KindPointer {
 		// Pointer-typed concrete value: iface.value IS the pointer to data.
 		// Mark the pointed-to struct so it gets forwarded.
 		RelocMark(rs, iface.value, t.Elem().Size(), 0)
@@ -206,11 +206,11 @@ func relocFixupSeenCheck(seen *relocFixupSeen, p unsafe.Pointer) bool {
 func relocFixupStructFields(rs *RelocState, t *RawType, ptr unsafe.Pointer, seen *relocFixupSeen) {
 	if ptr == nil { return }
 	k := t.Kind()
-	if k == kindPointer {
+	if k == KindPointer {
 		relocFixupStructFields(rs, t.Elem(), *(*unsafe.Pointer)(ptr), seen)
 		return
 	}
-	if k != kindStruct { return }
+	if k != KindStruct { return }
 	if relocFixupSeenCheck(seen, ptr) { return }
 	nf := t.NumField()
 	for i := int32(0); i < nf; i++ {
@@ -219,15 +219,15 @@ func relocFixupStructFields(rs *RelocState, t *RawType, ptr unsafe.Pointer, seen
 		fp := unsafe.Add(ptr, off)
 		fk := ft.Kind()
 		switch {
-		case fk == kindPointer:
+		case fk == KindPointer:
 			RelocFixupPtr(rs, fp)
 			p := *(*unsafe.Pointer)(fp)
 			if p != nil {
 				relocFixupStructFields(rs, ft.Elem(), p, seen)
 			}
-		case fk == kindSlice || fk == kindBytes:
+		case fk == KindSlice || fk == KindBytes:
 			RelocFixupSlice(rs, fp)
-		case fk == kindInterface:
+		case fk == KindInterface:
 			relocFixupInterfaceValue(rs, fp, seen)
 		}
 	}
@@ -239,7 +239,7 @@ func relocFixupInterfaceValue(rs *RelocState, ifaceAddr unsafe.Pointer, seen *re
 	iface := *(*_interface)(ifaceAddr)
 	if iface.typecode == nil { return }
 	t := (*RawType)(iface.typecode)
-	if t.Kind() != kindPointer && t.Size() <= unsafe.Sizeof(uintptr(0)) {
+	if t.Kind() != KindPointer && t.Size() <= unsafe.Sizeof(uintptr(0)) {
 		return
 	}
 	// Translate pointer through relocation table
@@ -247,7 +247,7 @@ func relocFixupInterfaceValue(rs *RelocState, ifaceAddr unsafe.Pointer, seen *re
 	if newPtr == iface.value || newPtr == nil { return }
 	*(*unsafe.Pointer)(unsafe.Add(ifaceAddr, 8)) = newPtr
 	// Recursively fix up the concrete struct's internal fields
-	if t.Kind() == kindPointer {
+	if t.Kind() == KindPointer {
 		relocFixupStructFields(rs, t.Elem(), newPtr, seen)
 	} else {
 		relocFixupStructFields(rs, t, newPtr, seen)

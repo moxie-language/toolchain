@@ -15,7 +15,9 @@ import (
 	"io"
 	"os"
 	"bytes"
+	"unsafe"
 )
+
 
 // SectionHeader holds information about an XCOFF section header.
 type SectionHeader struct {
@@ -159,7 +161,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 	sr := io.NewSectionReader(r, 0, 1<<63-1)
 	// Read XCOFF target machine
 	var magic uint16
-	if err := binary.Read(sr, binary.BigEndian(), &magic); err != nil {
+	if err := binary.Read(sr, binary.BigEndian(), unsafe.TypeOf(magic), unsafe.Pointer(&magic)); err != nil {
 		return nil, err
 	}
 	if magic != U802TOCMAGIC && magic != U64_TOCMAGIC {
@@ -181,7 +183,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 	switch f.TargetMachine {
 	case U802TOCMAGIC:
 		fhdr := &FileHeader32{}
-		if err := binary.Read(sr, binary.BigEndian(), fhdr); err != nil {
+		if err := binary.Read(sr, binary.BigEndian(), unsafe.TypeOf(*fhdr), unsafe.Pointer(fhdr)); err != nil {
 			return nil, err
 		}
 		nscns = fhdr.Fnscns
@@ -191,7 +193,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 		hdrsz = FILHSZ_32
 	case U64_TOCMAGIC:
 		fhdr := &FileHeader64{}
-		if err := binary.Read(sr, binary.BigEndian(), fhdr); err != nil {
+		if err := binary.Read(sr, binary.BigEndian(), unsafe.TypeOf(*fhdr), unsafe.Pointer(fhdr)); err != nil {
 			return nil, err
 		}
 		nscns = fhdr.Fnscns
@@ -212,7 +214,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 	}
 	// The first 4 bytes contain the length (in bytes).
 	var l uint32
-	if err := binary.Read(sr, binary.BigEndian(), &l); err != nil {
+	if err := binary.Read(sr, binary.BigEndian(), unsafe.TypeOf(l), unsafe.Pointer(&l)); err != nil {
 		return nil, err
 	}
 	if l > 4 {
@@ -238,7 +240,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 		switch f.TargetMachine {
 		case U802TOCMAGIC:
 			shdr := &SectionHeader32{}
-			if err := binary.Read(sr, binary.BigEndian(), shdr); err != nil {
+			if err := binary.Read(sr, binary.BigEndian(), unsafe.TypeOf(*shdr), unsafe.Pointer(shdr)); err != nil {
 				return nil, err
 			}
 			s.Name = cstring(shdr.Sname[:])
@@ -250,7 +252,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			s.Nreloc = uint32(shdr.Snreloc)
 		case U64_TOCMAGIC:
 			shdr := &SectionHeader64{}
-			if err := binary.Read(sr, binary.BigEndian(), shdr); err != nil {
+			if err := binary.Read(sr, binary.BigEndian(), unsafe.TypeOf(*shdr), unsafe.Pointer(shdr)); err != nil {
 				return nil, err
 			}
 			s.Name = cstring(shdr.Sname[:])
@@ -286,7 +288,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 		switch f.TargetMachine {
 		case U802TOCMAGIC:
 			se := &SymEnt32{}
-			if err := binary.Read(sr, binary.BigEndian(), se); err != nil {
+			if err := binary.Read(sr, binary.BigEndian(), unsafe.TypeOf(*se), unsafe.Pointer(se)); err != nil {
 				return nil, err
 			}
 			numaux = int32(se.Nnumaux)
@@ -306,7 +308,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			}
 		case U64_TOCMAGIC:
 			se := &SymEnt64{}
-			if err := binary.Read(sr, binary.BigEndian(), se); err != nil {
+			if err := binary.Read(sr, binary.BigEndian(), unsafe.TypeOf(*se), unsafe.Pointer(se)); err != nil {
 				return nil, err
 			}
 			numaux = int32(se.Nnumaux)
@@ -346,13 +348,13 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			switch f.TargetMachine {
 			case U802TOCMAGIC:
 				aux := &AuxFcn32{}
-				if err := binary.Read(sr, binary.BigEndian(), aux); err != nil {
+				if err := binary.Read(sr, binary.BigEndian(), unsafe.TypeOf(*aux), unsafe.Pointer(aux)); err != nil {
 					return nil, err
 				}
 				sym.AuxFcn.Size = int64(aux.Xfsize)
 			case U64_TOCMAGIC:
 				aux := &AuxFcn64{}
-				if err := binary.Read(sr, binary.BigEndian(), aux); err != nil {
+				if err := binary.Read(sr, binary.BigEndian(), unsafe.TypeOf(*aux), unsafe.Pointer(aux)); err != nil {
 					return nil, err
 				}
 				sym.AuxFcn.Size = int64(aux.Xfsize)
@@ -370,7 +372,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 		switch f.TargetMachine {
 		case U802TOCMAGIC:
 			aux := &AuxCSect32{}
-			if err := binary.Read(sr, binary.BigEndian(), aux); err != nil {
+			if err := binary.Read(sr, binary.BigEndian(), unsafe.TypeOf(*aux), unsafe.Pointer(aux)); err != nil {
 				return nil, err
 			}
 			sym.AuxCSect.SymbolType = int32(aux.Xsmtyp & 0x7)
@@ -378,7 +380,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			sym.AuxCSect.Length = int64(aux.Xscnlen)
 		case U64_TOCMAGIC:
 			aux := &AuxCSect64{}
-			if err := binary.Read(sr, binary.BigEndian(), aux); err != nil {
+			if err := binary.Read(sr, binary.BigEndian(), unsafe.TypeOf(*aux), unsafe.Pointer(aux)); err != nil {
 				return nil, err
 			}
 			sym.AuxCSect.SymbolType = int32(aux.Xsmtyp & 0x7)
@@ -416,7 +418,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			switch f.TargetMachine {
 			case U802TOCMAGIC:
 				rel := &Reloc32{}
-				if err := binary.Read(sr, binary.BigEndian(), rel); err != nil {
+				if err := binary.Read(sr, binary.BigEndian(), unsafe.TypeOf(*rel), unsafe.Pointer(rel)); err != nil {
 					return nil, err
 				}
 				reloc.VirtualAddress = uint64(rel.Rvaddr)
@@ -433,7 +435,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 
 			case U64_TOCMAGIC:
 				rel := &Reloc64{}
-				if err := binary.Read(sr, binary.BigEndian(), rel); err != nil {
+				if err := binary.Read(sr, binary.BigEndian(), unsafe.TypeOf(*rel), unsafe.Pointer(rel)); err != nil {
 					return nil, err
 				}
 				reloc.VirtualAddress = rel.Rvaddr
@@ -527,7 +529,7 @@ func (f *File) readImportIDs(s *Section) ([][]byte, error) {
 	switch f.TargetMachine {
 	case U802TOCMAGIC:
 		lhdr := &LoaderHeader32{}
-		if err := binary.Read(s.sr, binary.BigEndian(), lhdr); err != nil {
+		if err := binary.Read(s.sr, binary.BigEndian(), unsafe.TypeOf(*lhdr), unsafe.Pointer(lhdr)); err != nil {
 			return nil, err
 		}
 		istlen = lhdr.Listlen
@@ -535,7 +537,7 @@ func (f *File) readImportIDs(s *Section) ([][]byte, error) {
 		impoff = uint64(lhdr.Limpoff)
 	case U64_TOCMAGIC:
 		lhdr := &LoaderHeader64{}
-		if err := binary.Read(s.sr, binary.BigEndian(), lhdr); err != nil {
+		if err := binary.Read(s.sr, binary.BigEndian(), unsafe.TypeOf(*lhdr), unsafe.Pointer(lhdr)); err != nil {
 			return nil, err
 		}
 		istlen = lhdr.Listlen
@@ -598,7 +600,7 @@ func (f *File) ImportedSymbols() ([]ImportedSymbol, error) {
 	switch f.TargetMachine {
 	case U802TOCMAGIC:
 		lhdr := &LoaderHeader32{}
-		if err := binary.Read(s.sr, binary.BigEndian(), lhdr); err != nil {
+		if err := binary.Read(s.sr, binary.BigEndian(), unsafe.TypeOf(*lhdr), unsafe.Pointer(lhdr)); err != nil {
 			return nil, err
 		}
 		stlen = lhdr.Lstlen
@@ -607,7 +609,7 @@ func (f *File) ImportedSymbols() ([]ImportedSymbol, error) {
 		symoff = LDHDRSZ_32
 	case U64_TOCMAGIC:
 		lhdr := &LoaderHeader64{}
-		if err := binary.Read(s.sr, binary.BigEndian(), lhdr); err != nil {
+		if err := binary.Read(s.sr, binary.BigEndian(), unsafe.TypeOf(*lhdr), unsafe.Pointer(lhdr)); err != nil {
 			return nil, err
 		}
 		stlen = lhdr.Lstlen
@@ -643,7 +645,7 @@ func (f *File) ImportedSymbols() ([]ImportedSymbol, error) {
 		switch f.TargetMachine {
 		case U802TOCMAGIC:
 			ldsym := &LoaderSymbol32{}
-			if err := binary.Read(s.sr, binary.BigEndian(), ldsym); err != nil {
+			if err := binary.Read(s.sr, binary.BigEndian(), unsafe.TypeOf(*ldsym), unsafe.Pointer(ldsym)); err != nil {
 				return nil, err
 			}
 			if ldsym.Lsmtype&0x40 == 0 {
@@ -662,7 +664,7 @@ func (f *File) ImportedSymbols() ([]ImportedSymbol, error) {
 			ifile = ldsym.Lifile
 		case U64_TOCMAGIC:
 			ldsym := &LoaderSymbol64{}
-			if err := binary.Read(s.sr, binary.BigEndian(), ldsym); err != nil {
+			if err := binary.Read(s.sr, binary.BigEndian(), unsafe.TypeOf(*ldsym), unsafe.Pointer(ldsym)); err != nil {
 				return nil, err
 			}
 			if ldsym.Lsmtype&0x40 == 0 {

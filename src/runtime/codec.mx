@@ -244,7 +244,7 @@ func codecDecodeSeenLookup(ds *codecDecodeSeen, idx int32) unsafe.Pointer {
 func isBasicKind(k Kind) bool {
 	return k == Bool || k == Int || k == Int8 || k == Int16 || k == Int32 || k == Int64 ||
 		k == Uint || k == Uint8 || k == Uint16 || k == Uint32 || k == Uint64 || k == Uintptr ||
-		k == Float32 || k == Float64 || k == kindUnsafePointer || k == kindChan || k == kindFunc
+		k == Float32 || k == Float64 || k == KindUnsafePointer || k == KindChan || k == KindFunc
 }
 
 func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *RawType) {
@@ -253,29 +253,29 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 	}
 	badPtr := ptr == nil || uintptr(ptr) < 1048576
 	k := typ.Kind()
-	if badPtr && k != kindStruct {
+	if badPtr && k != KindStruct {
 		switch k {
-	case kindBytes:
+	case KindBytes:
 			codecWriteVarint(cb, codecTagStr)
 			codecWriteVarint(cb, uint64(0))
 			codecWriteVarint(cb, uint64(0))
 			return
-		case kindSlice:
+		case KindSlice:
 			codecWriteVarint(cb, codecTagSlice)
 			codecWriteVarint(cb, uint64(0))
 			codecWriteVarint(cb, uint64(0))
 			return
-		case kindPointer:
+		case KindPointer:
 			codecWriteVarint(cb, codecTagNil)
 			return
-		case kindStruct:
+		case KindStruct:
 			codecWriteVarint(cb, codecTagStruct)
 			codecWriteVarint(cb, uint64(0))
 			return
-		case kindMap:
+		case KindMap:
 			codecWriteVarint(cb, codecTagNil)
 			return
-		case kindInterface:
+		case KindInterface:
 			codecWriteVarint(cb, codecTagIface)
 			codecWriteVarint(cb, uint64(0))
 			return
@@ -293,7 +293,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		return
 	}
 	switch k {
-	case kindBytes:
+	case KindBytes:
 		s := *(*_string)(ptr)
 		if s.length > 0 && s.ptr != nil && codecIsStableAddr(uintptr(unsafe.Pointer(s.ptr))) {
 			codecNoteStable(uintptr(unsafe.Pointer(s.ptr)))
@@ -324,7 +324,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		if s.length > 0 {
 			codecWriteRaw(cb, unsafe.Pointer(s.ptr), uintptr(s.length))
 		}
-	case kindSlice:
+	case KindSlice:
 		sl := *(*_string)(ptr)
 		elemType := typ.Elem()
 		// A stable backing array is only a safe shortcut when the elements
@@ -347,7 +347,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 			ep := unsafe.Add(unsafe.Pointer(sl.ptr), uintptr(i)*elemType.Size())
 			codecEncodeValue(cb, ss, ep, elemType)
 		}
-	case kindPointer:
+	case KindPointer:
 		// Bad pointer check: if ptr looks invalid (low address, nil, etc.)
 		// emit nil instead of dereferencing.
 		if ptr == nil || uintptr(ptr) < 1048576 {
@@ -385,7 +385,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		}
 		codecWriteVarint(cb, codecTagPtr)
 		codecEncodeValue(cb, ss, p, typ.Elem())
-	case kindInterface:
+	case KindInterface:
 		iface := *(*_interface)(ptr)
 		codecWriteVarint(cb, codecTagIface)
 		codecWriteBytes(cb, unsafe.Slice((*byte)(unsafe.Pointer(&iface.typecode)), 8))
@@ -405,7 +405,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 				}
 			}
 		}
-	case kindMap:
+	case KindMap:
 		m := *(*unsafe.Pointer)(ptr)
 		if m == nil {
 			codecWriteVarint(cb, codecTagNil)
@@ -416,14 +416,14 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		fixupFlags := uint8(0)
 		kt := hashmapKeyType(typ)
 		vt := typ.Elem()
-		if kt != nil && (kt.Kind() == kindBytes) { fixupFlags |= 8 }
-		if vt != nil && (vt.Kind() == kindBytes) { fixupFlags |= 1 }
-		if vt != nil && (vt.Kind() == kindPointer) { fixupFlags |= 2 }
-		if vt != nil && (vt.Kind() == kindInterface) { fixupFlags |= 4 }
+		if kt != nil && (kt.Kind() == KindBytes) { fixupFlags |= 8 }
+		if vt != nil && (vt.Kind() == KindBytes) { fixupFlags |= 1 }
+		if vt != nil && (vt.Kind() == KindPointer) { fixupFlags |= 2 }
+		if vt != nil && (vt.Kind() == KindInterface) { fixupFlags |= 4 }
 		var valElemType *RawType
-		if vt != nil && vt.Kind() == kindPointer { valElemType = vt.Elem() }
+		if vt != nil && vt.Kind() == KindPointer { valElemType = vt.Elem() }
 		codecEncodeMap(hm, cb, ss, fixupFlags, valElemType)
-	case kindStruct:
+	case KindStruct:
 		if ptr == nil || uintptr(ptr) < 1048576 {
 			codecWriteVarint(cb, codecTagStruct)
 			codecWriteVarint(cb, uint64(0))
@@ -447,7 +447,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 			fp := unsafe.Add(ptr, off)
 			codecEncodeValue(cb, ss, fp, ft)
 		}
-	case kindArray:
+	case KindArray:
 		elemType := typ.Elem()
 		elemSize := elemType.Size()
 		length := typ.ArrayLen()
@@ -474,7 +474,7 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 		return buf
 	}
 	switch k {
-	case kindBytes:
+	case KindBytes:
 		startPos := cb.pos
 		tag := codecReadVarint(cb)
 		if tag == codecTagStableSlice {
@@ -507,7 +507,7 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 		memcpy(buf, unsafe.Pointer(&cb.data[cb.pos]), sz)
 		cb.pos += int32(sz)
 		return buf
-	case kindSlice:
+	case KindSlice:
 		startPos := cb.pos
 		tag := codecReadVarint(cb)
 		if tag == codecTagStableSlice {
@@ -541,7 +541,7 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 		memcpy(buf, unsafe.Pointer(&cb.data[cb.pos]), sz)
 		cb.pos += int32(sz)
 		return buf
-	case kindPointer:
+	case KindPointer:
 		tag := codecReadVarint(cb)
 		switch tag {
 		case codecTagNil:
@@ -577,7 +577,7 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 		}
 		runtimePanic("codec bad pointer tag")
 		return nil
-	case kindInterface:
+	case KindInterface:
 		tag := codecReadVarint(cb)
 		if tag != codecTagIface {
 			runtimePanic("codec expected iface tag")
@@ -601,7 +601,7 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 			*(*unsafe.Pointer)(unsafe.Add(buf, 8)) = inner
 		}
 		return buf
-	case kindStruct:
+	case KindStruct:
 		tag := codecReadVarint(cb)
 		if tag != codecTagStruct {
 			runtimePanic("codec expected struct tag")
@@ -630,7 +630,7 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 			memcpy(fp, dec, ft.Size())
 		}
 		return buf
-	case kindArray:
+	case KindArray:
 		elemType := typ.Elem()
 		elemSize := elemType.Size()
 		length := typ.ArrayLen()
@@ -641,20 +641,20 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 			memcpy(ep, dec, elemSize)
 		}
 		return buf
-	case kindMap:
+	case KindMap:
 		buf := alloc(typ.Size(), unsafe.Pointer(typ))
 		kt := hashmapKeyType(typ)
 		vt := typ.Elem()
 		keySz := kt.Size()
 		valSz := vt.Size()
 		alg := uint8(0)
-		if kt.Kind() == kindBytes { alg = 1 }
-		if kt.Kind() == kindInterface { alg = 2 }
+		if kt.Kind() == KindBytes { alg = 1 }
+		if kt.Kind() == KindInterface { alg = 2 }
 		flags := uint8(0)
-		if kt.Kind() == kindBytes { flags |= 8 }
-		if vt.Kind() == kindBytes { flags |= 1 }
-		if vt.Kind() == kindPointer { flags |= 2 }
-		if vt.Kind() == kindInterface { flags |= 4 }
+		if kt.Kind() == KindBytes { flags |= 8 }
+		if vt.Kind() == KindBytes { flags |= 1 }
+		if vt.Kind() == KindPointer { flags |= 2 }
+		if vt.Kind() == KindInterface { flags |= 4 }
 		decoded := codecDecodeMapValue(cb, ds, keySz, valSz, alg, flags, kt, vt)
 		*(*unsafe.Pointer)(buf) = unsafe.Pointer(decoded)
 		return buf
@@ -700,7 +700,7 @@ func codecDecodeMapValue(cb *CodecBuf, ds *codecDecodeSeen, keySz, valSz uintptr
 			if tag == codecTagNil { val = []byte{:valSz} } else
 			if tag == codecTagPtr {
 				var valElemType *RawType
-				if vt != nil && vt.Kind() == kindPointer { valElemType = vt.Elem() }
+				if vt != nil && vt.Kind() == KindPointer { valElemType = vt.Elem() }
 				inner := codecDecodeValue(cb, ds, valElemType)
 				buf := []byte{:valSz}
 				*(*unsafe.Pointer)(unsafe.Pointer(&buf[0])) = inner
@@ -871,12 +871,12 @@ func codecEncodeMapValue(cb *CodecBuf, ss *codecSeenSet, mptr unsafe.Pointer, ty
 	fixupFlags := uint8(0)
 	kt := hashmapKeyType(typ)
 	vt := typ.Elem()
-	if kt != nil && (kt.Kind() == kindBytes) { fixupFlags |= 8 }
-	if vt != nil && (vt.Kind() == kindBytes) { fixupFlags |= 1 }
-	if vt != nil && (vt.Kind() == kindPointer) { fixupFlags |= 2 }
-	if vt != nil && (vt.Kind() == kindInterface) { fixupFlags |= 4 }
+	if kt != nil && (kt.Kind() == KindBytes) { fixupFlags |= 8 }
+	if vt != nil && (vt.Kind() == KindBytes) { fixupFlags |= 1 }
+	if vt != nil && (vt.Kind() == KindPointer) { fixupFlags |= 2 }
+	if vt != nil && (vt.Kind() == KindInterface) { fixupFlags |= 4 }
 	var valElemType *RawType
-	if vt != nil && vt.Kind() == kindPointer { valElemType = vt.Elem() }
+	if vt != nil && vt.Kind() == KindPointer { valElemType = vt.Elem() }
 	codecEncodeMap(hm, cb, ss, fixupFlags, valElemType)
 }
 
@@ -966,7 +966,7 @@ func codecEncodeIfacePayload(cb *CodecBuf, ss *codecSeenSet, ifaceAddr unsafe.Po
 		return
 	}
 	t := (*RawType)(iface.typecode)
-	if t.Kind() == kindPointer || t.Size() > unsafe.Sizeof(uintptr(0)) {
+	if t.Kind() == KindPointer || t.Size() > unsafe.Sizeof(uintptr(0)) {
 		// Large value: iface.value is a pointer to the data
 		codecEncodeValue(cb, ss, iface.value, t)
 	} else {

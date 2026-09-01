@@ -593,12 +593,12 @@ func sovTypeHasPtrs(td *RawType) (ok bool) {
 		return false
 	}
 	k := td.Kind()
-	if k == kindBytes || k == kindPointer || k == kindSlice || k == kindInterface || k == kindMap || k == kindChan || k == kindFunc {
+	if k == KindBytes || k == KindPointer || k == KindSlice || k == KindInterface || k == KindMap || k == KindChan || k == KindFunc {
 		return true
 	}
-	if k == kindStruct || k == kindArray {
+	if k == KindStruct || k == KindArray {
 		nf := td.NumField()
-		if k == kindArray {
+		if k == KindArray {
 			return sovTypeHasPtrs(td.Elem())
 		}
 		for i := int32(0); i < nf; i++ {
@@ -636,7 +636,7 @@ func sovWalkValue(g *sovGroup, p unsafe.Pointer, td *RawType) {
 	}
 	k := td.Kind()
 	switch k {
-	case kindPointer:
+	case KindPointer:
 		v := *(*unsafe.Pointer)(p)
 		if v != nil {
 			if sovInArena(g.refTbl, uintptr(v)) {
@@ -656,12 +656,12 @@ func sovWalkValue(g *sovGroup, p unsafe.Pointer, td *RawType) {
 				sovDepth--
 			}
 		}
-	case kindBytes:
+	case KindBytes:
 		s := *(*_string)(p)
 		if s.ptr != nil && s.length > 0 {
 			sovMarkBlock(g, unsafe.Pointer(s.ptr))
 		}
-	case kindSlice:
+	case KindSlice:
 		s := *(*_string)(p)
 		if s.ptr != nil && s.length > 0 {
 			et := td.Elem()
@@ -675,7 +675,7 @@ func sovWalkValue(g *sovGroup, p unsafe.Pointer, td *RawType) {
 				}
 			}
 		}
-	case kindInterface:
+	case KindInterface:
 		iface := *(*_interface)(p)
 		if iface.typecode != nil {
 			ct := (*RawType)(iface.typecode)
@@ -685,12 +685,12 @@ func sovWalkValue(g *sovGroup, p unsafe.Pointer, td *RawType) {
 				sovMarkBlock(g, iface.value)
 			}
 		}
-	case kindMap:
+	case KindMap:
 		m := *(*unsafe.Pointer)(p)
 		if m != nil {
 			sovMarkMap(g, (*hashmap)(m), td)
 		}
-	case kindStruct:
+	case KindStruct:
 		nf := td.NumField()
 		for i := int32(0); i < nf; i++ {
 			ft := td.StructFieldType(i)
@@ -798,7 +798,7 @@ func sovFullMark(g *sovGroup) {
 	if td == nil || g.recv == nil {
 		return
 	}
-	if td.Kind() != kindStruct {
+	if td.Kind() != KindStruct {
 		if sovTypeHasPtrs(td) {
 			sovWalkValue(g, g.recv, td)
 		}
@@ -812,7 +812,7 @@ func sovFullMark(g *sovGroup) {
 		}
 		faddr := unsafe.Add(g.recv, td.StructFieldOffset(i))
 		// A pointer field may hold a slot object; resolve it.
-		if ft.Kind() == kindPointer {
+		if ft.Kind() == KindPointer {
 			v := *(*unsafe.Pointer)(faddr)
 			if v != nil && sovInArena(g.refTbl, uintptr(v)) {
 				v = (*sovSlot)(v).dataPtr
@@ -830,7 +830,7 @@ func sovRebaseRoots(g *sovGroup, nd *Arena) {
 	if td == nil || g.recv == nil {
 		return
 	}
-	if td.Kind() != kindStruct {
+	if td.Kind() != KindStruct {
 		if sovTypeHasPtrs(td) {
 			sovRebaseValue(g, g.recv, td, nd)
 		}
@@ -973,7 +973,7 @@ func sovRebaseValue(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 	}
 	k := td.Kind()
 	switch k {
-	case kindPointer:
+	case KindPointer:
 		v := *(*unsafe.Pointer)(p)
 		if v != nil && !sovInArena(nd, uintptr(v)) {
 			*(*unsafe.Pointer)(p) = sovRebasePtr(g, uintptr(v), nd)
@@ -987,13 +987,13 @@ func sovRebaseValue(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 			sovRebaseValue(g, nv, et, nd)
 			sovDepth--
 		}
-	case kindBytes:
+	case KindBytes:
 		s := *(*_string)(p)
 		if s.ptr != nil && !sovInArena(nd, uintptr(unsafe.Pointer(s.ptr))) {
 			s.ptr = (*byte)(sovRebasePtr(g, uintptr(unsafe.Pointer(s.ptr)), nd))
 			*(*_string)(p) = s
 		}
-	case kindSlice:
+	case KindSlice:
 		s := *(*_string)(p)
 		if s.ptr != nil && !sovInArena(nd, uintptr(unsafe.Pointer(s.ptr))) {
 			s.ptr = (*byte)(sovRebasePtr(g, uintptr(unsafe.Pointer(s.ptr)), nd))
@@ -1006,7 +1006,7 @@ func sovRebaseValue(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 				sovRebaseValue(g, unsafe.Add(unsafe.Pointer(s.ptr), uintptr(i)*esz), et, nd)
 			}
 		}
-	case kindInterface:
+	case KindInterface:
 		iface := *(*_interface)(p)
 		if iface.typecode != nil {
 			ct := (*RawType)(iface.typecode)
@@ -1020,7 +1020,7 @@ func sovRebaseValue(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 				}
 			}
 		}
-	case kindMap:
+	case KindMap:
 		m := *(*unsafe.Pointer)(p)
 		if m != nil && !sovInArena(nd, uintptr(m)) {
 			*(*unsafe.Pointer)(p) = sovRebasePtr(g, uintptr(m), nd)
@@ -1028,7 +1028,7 @@ func sovRebaseValue(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 		} else if m != nil {
 			sovRebaseMap(g, (*hashmap)(m), td, nd)
 		}
-	case kindStruct:
+	case KindStruct:
 		nf := td.NumField()
 		for i := int32(0); i < nf; i++ {
 			ft := td.StructFieldType(i)
