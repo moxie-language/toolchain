@@ -1875,8 +1875,8 @@ type http2Framer struct {
 
 	debugFramer       *http2Framer // only use for logging written writes
 	debugFramerBuf    *bytes.Buffer
-	debugReadLoggerf  func([]byte, ...interface{})
-	debugWriteLoggerf func([]byte, ...interface{})
+	debugReadLoggerf  func([]byte, ...fmt.Stringer)
+	debugWriteLoggerf func([]byte, ...fmt.Stringer)
 
 	frameCache *http2frameCache // nil if frames aren't reused (default)
 }
@@ -4303,7 +4303,7 @@ func (s *http2Server) serveConn(c net.Conn, opts *http2ServeConnOpts, newf func(
 		streams:                     map[uint32]*http2stream{},
 		readFrameCh:                 chan http2readFrameResult{},
 		wantWriteFrameCh:            chan http2FrameWriteRequest{8},
-		serveMsgCh:                  chan interface{}{8},
+		serveMsgCh:                  chan http2serveMsg{8},
 		wroteFrameCh:                chan http2frameWriteResult{1}, // buffered; one send in writeFrameAsync
 		bodyReadCh:                  chan http2bodyReadMsg{},       // buffering doesn't matter either way
 		doneServing:                 chan struct{}{},
@@ -4455,7 +4455,7 @@ type http2serverConn struct {
 	wantWriteFrameCh chan http2FrameWriteRequest // from handlers -> serve
 	wroteFrameCh     chan http2frameWriteResult  // from writeFrameAsync -> serve, tickles more frame writes
 	bodyReadCh       chan http2bodyReadMsg       // from handlers -> serve
-	serveMsgCh       chan interface{}            // misc messages & code to send to / run on the serve loop
+	serveMsgCh       chan http2serveMsg          // misc messages & code to send to / run on the serve loop
 	flow             http2outflow                // conn-wide (not stream-specific) outbound flow control
 	inflow           http2inflow                 // conn-wide inbound flow control
 	tlsState         *tls.ConnectionState        // shared by all handlers, like net/http
@@ -4598,13 +4598,13 @@ func (sc *http2serverConn) setConnState(state ConnState) {
 	}
 }
 
-func (sc *http2serverConn) vlogf(format string, args ...interface{}) {
+func (sc *http2serverConn) vlogf(format string, args ...fmt.Stringer) {
 	if http2VerboseLogs {
 		sc.logf(format, args...)
 	}
 }
 
-func (sc *http2serverConn) logf(format string, args ...interface{}) {
+func (sc *http2serverConn) logf(format string, args ...fmt.Stringer) {
 	if lg := sc.hs.ErrorLog; lg != nil {
 		lg.Printf(format, args...)
 	} else {
@@ -4634,7 +4634,7 @@ func http2isClosedConnError(err error) bool {
 	return false
 }
 
-func (sc *http2serverConn) condlogf(err error, format string, args ...interface{}) {
+func (sc *http2serverConn) condlogf(err error, format string, args ...fmt.Stringer) {
 	if err == nil {
 		return
 	}
@@ -4761,7 +4761,7 @@ func (sc *http2serverConn) serve(conf http2http2Config) {
 	defer close(sc.doneServing) // unblocks handlers trying to send
 
 	if http2VerboseLogs {
-		sc.vlogf("http2: server connection from %v on %p", sc.conn.RemoteAddr(), sc.hs)
+		sc.vlogf("http2: server connection from %v", sc.conn.RemoteAddr())
 	}
 
 	settings := http2writeSettings{
@@ -4849,8 +4849,6 @@ func (sc *http2serverConn) serve(conf http2http2Config) {
 			sc.noteBodyRead(m.st, m.n)
 		case msg := <-sc.serveMsgCh:
 			switch v := msg.(type) {
-			case func(int32):
-				v(loopNum) // for testing
 			case *http2serverMessage:
 				switch v {
 				case http2settingsTimerMsg:
@@ -4873,10 +4871,10 @@ func (sc *http2serverConn) serve(conf http2http2Config) {
 				}
 			case *http2startPushRequest:
 				sc.startPush(v)
-			case func(*http2serverConn):
+			case http2serveConnFunc:
 				v(sc)
 			default:
-				panic(fmt.Sprintf("unexpected type %T", v))
+				panic("unexpected serve msg")
 			}
 		}
 
@@ -4964,7 +4962,22 @@ func (sc *http2serverConn) onReadIdleTimer() { sc.sendServeMsg(http2readIdleTime
 
 func (sc *http2serverConn) onShutdownTimer() { sc.sendServeMsg(http2shutdownTimerMsg) }
 
-func (sc *http2serverConn) sendServeMsg(msg interface{}) {
+// http2serveMsg is implemented by every value carried on serveMsgCh: the
+// timer sentinels (*http2serverMessage), push requests, and serve-loop
+// closures (wrapped in http2serveConnFunc).
+type http2serveMsg interface {
+	isServeMsg()
+}
+
+func (*http2serverMessage) isServeMsg() {}
+
+type http2serveConnFunc func(*http2serverConn)
+
+func (http2serveConnFunc) isServeMsg() {}
+
+func (*http2startPushRequest) isServeMsg() {}
+
+func (sc *http2serverConn) sendServeMsg(msg http2serveMsg) {
 	sc.serveG.checkNotOn() // NOT
 	select {
 	case sc.serveMsgCh <- msg:
@@ -5783,9 +5796,9 @@ func (sc *http2serverConn) processData(f *http2DataFrame) error {
 func (sc *http2serverConn) processGoAway(f *http2GoAwayFrame) error {
 	sc.serveG.check()
 	if f.ErrCode != http2ErrCodeNo {
-		sc.logf("http2: received GOAWAY %+v, starting graceful shutdown", f)
+		sc.logf("http2: received GOAWAY %+v, starting graceful shutdown", http2summarizeFrame(f))
 	} else {
-		sc.vlogf("http2: received GOAWAY %+v, starting graceful shutdown", f)
+		sc.vlogf("http2: received GOAWAY %+v, starting graceful shutdown", http2summarizeFrame(f))
 	}
 	sc.startGracefulShutdownInternal()
 	// http://tools.ietf.org/html/rfc7540#section-6.8
@@ -6654,7 +6667,7 @@ func (w *http2responseWriter) SetReadDeadline(deadline time.Time) error {
 		st.onReadTimeout()
 		return nil
 	}
-	w.rws.conn.sendServeMsg(func(sc *http2serverConn) {
+	w.rws.conn.sendServeMsg(http2serveConnFunc(func(sc *http2serverConn) {
 		if st.readDeadline != nil {
 			if !st.readDeadline.Stop() {
 				// Deadline already exceeded, or stream has been closed.
@@ -6668,7 +6681,7 @@ func (w *http2responseWriter) SetReadDeadline(deadline time.Time) error {
 		} else {
 			st.readDeadline.Reset(deadline.Sub(sc.srv.now()))
 		}
-	})
+	}))
 	return nil
 }
 
@@ -6680,7 +6693,7 @@ func (w *http2responseWriter) SetWriteDeadline(deadline time.Time) error {
 		st.onWriteTimeout()
 		return nil
 	}
-	w.rws.conn.sendServeMsg(func(sc *http2serverConn) {
+	w.rws.conn.sendServeMsg(http2serveConnFunc(func(sc *http2serverConn) {
 		if st.writeDeadline != nil {
 			if !st.writeDeadline.Stop() {
 				// Deadline already exceeded, or stream has been closed.
@@ -6694,7 +6707,7 @@ func (w *http2responseWriter) SetWriteDeadline(deadline time.Time) error {
 		} else {
 			st.writeDeadline.Reset(deadline.Sub(sc.srv.now()))
 		}
-	})
+	}))
 	return nil
 }
 
@@ -7133,14 +7146,7 @@ func http2new400Handler(err error) HandlerFunc {
 // disabled. See comments on h1ServerShutdownChan above for why
 // the code is written this way.
 func http2h1ServerKeepAlivesDisabled(hs *Server) bool {
-	var x interface{} = hs
-	type I interface {
-		doKeepAlives() bool
-	}
-	if hs, ok := x.(I); ok {
-		return !hs.doKeepAlives()
-	}
-	return false
+	return !hs.doKeepAlives()
 }
 
 func (sc *http2serverConn) countError(name string, err error) error {
@@ -10066,21 +10072,21 @@ const (
 	http2errRequestHeaderListSize  = httpcommon.ErrRequestHeaderListSize
 )
 
-func (cc *http2ClientConn) logf(format string, args ...interface{}) {
+func (cc *http2ClientConn) logf(format string, args ...fmt.Stringer) {
 	cc.t.logf(format, args...)
 }
 
-func (cc *http2ClientConn) vlogf(format string, args ...interface{}) {
+func (cc *http2ClientConn) vlogf(format string, args ...fmt.Stringer) {
 	cc.t.vlogf(format, args...)
 }
 
-func (t *http2Transport) vlogf(format string, args ...interface{}) {
+func (t *http2Transport) vlogf(format string, args ...fmt.Stringer) {
 	if http2VerboseLogs {
 		t.logf(format, args...)
 	}
 }
 
-func (t *http2Transport) logf(format string, args ...interface{}) {
+func (t *http2Transport) logf(format string, args ...fmt.Stringer) {
 	log.Printf(format, args...)
 }
 
