@@ -62,7 +62,7 @@ type pkixPublicKey struct {
 // More types might be supported in the future.
 //
 // This kind of key is commonly encoded in PEM blocks of type "PUBLIC KEY".
-func ParsePKIXPublicKey(derBytes []byte) (pub any, err error) {
+func ParsePKIXPublicKey(derBytes []byte) (pub crypto.PublicKey, err error) {
 	var pki publicKeyInfo
 	if rest, err := asn1.Unmarshal(derBytes, unsafe.TypeOf(pki), unsafe.Pointer(&pki)); err != nil {
 		if _, err := asn1.Unmarshal(derBytes, unsafe.TypeOf(pkcs1PublicKey{}), unsafe.Pointer(&pkcs1PublicKey{})); err == nil {
@@ -75,7 +75,7 @@ func ParsePKIXPublicKey(derBytes []byte) (pub any, err error) {
 	return parsePublicKey(&pki)
 }
 
-func marshalPublicKey(pub any) (publicKeyBytes []byte, publicKeyAlgorithm pkix.AlgorithmIdentifier, err error) {
+func marshalPublicKey(pub crypto.PublicKey) (publicKeyBytes []byte, publicKeyAlgorithm pkix.AlgorithmIdentifier, err error) {
 	switch pub := pub.(type) {
 	case *rsa.PublicKey:
 		pk := pkcs1PublicKey{N: pub.N, E: pub.E}
@@ -139,7 +139,7 @@ func marshalPublicKey(pub any) (publicKeyBytes []byte, publicKeyAlgorithm pkix.A
 // Unsupported key types result in an error.
 //
 // This kind of key is commonly encoded in PEM blocks of type "PUBLIC KEY".
-func MarshalPKIXPublicKey(pub any) ([]byte, error) {
+func MarshalPKIXPublicKey(pub crypto.PublicKey) ([]byte, error) {
 	var publicKeyBytes []byte
 	var publicKeyAlgorithm pkix.AlgorithmIdentifier
 	var err error
@@ -776,7 +776,7 @@ type Certificate struct {
 	SignatureAlgorithm SignatureAlgorithm
 
 	PublicKeyAlgorithm PublicKeyAlgorithm
-	PublicKey          any
+	PublicKey          crypto.PublicKey
 
 	Version             int32
 	SerialNumber        *big.Int
@@ -1039,7 +1039,7 @@ func (c *Certificate) getSANExtension() []byte {
 	return nil
 }
 
-func signaturePublicKeyAlgoMismatchError(expectedPubKeyAlgo PublicKeyAlgorithm, pubKey any) error {
+func signaturePublicKeyAlgoMismatchError(expectedPubKeyAlgo PublicKeyAlgorithm, pubKey crypto.PublicKey) error {
 	return fmt.Errorf("x509: signature algorithm specifies an %s public key, but have public key of type %T", expectedPubKeyAlgo.String(), pubKey)
 }
 
@@ -1752,7 +1752,7 @@ const emptyASN1Subject = "\x30\x00"
 // Only the Policies field is marshaled for certificate policy OIDs. The Policies
 // field can be used to marshal policy OIDs which have components that are larger
 // than 31 bits.
-func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv any) ([]byte, error) {
+func CreateCertificate(rand io.Reader, template, parent *Certificate, pub crypto.PublicKey, priv crypto.PrivateKey) ([]byte, error) {
 	key, ok := priv.(crypto.Signer)
 	if !ok {
 		return nil, errors.New("x509: certificate private key does not implement crypto.Signer")
@@ -1917,7 +1917,7 @@ func ParseDERCRL(derBytes []byte) (*pkix.CertificateList, error) {
 //
 // Deprecated: this method does not generate an RFC 5280 conformant X.509 v2 CRL.
 // To generate a standards compliant CRL, use [CreateRevocationList] instead.
-func (c *Certificate) CreateCRL(rand io.Reader, priv any, revokedCerts []pkix.RevokedCertificate, now, expiry time.Time) (crlBytes []byte, err error) {
+func (c *Certificate) CreateCRL(rand io.Reader, priv crypto.PrivateKey, revokedCerts []pkix.RevokedCertificate, now, expiry time.Time) (crlBytes []byte, err error) {
 	key, ok := priv.(crypto.Signer)
 	if !ok {
 		return nil, errors.New("x509: certificate private key does not implement crypto.Signer")
@@ -1988,7 +1988,7 @@ type CertificateRequest struct {
 	SignatureAlgorithm SignatureAlgorithm
 
 	PublicKeyAlgorithm PublicKeyAlgorithm
-	PublicKey          any
+	PublicKey          crypto.PublicKey
 
 	Subject pkix.Name
 
@@ -2137,7 +2137,7 @@ func parseCSRExtensions(rawAttributes []asn1.RawValue) ([]pkix.Extension, error)
 // *ecdsa.PrivateKey or ed25519.PrivateKey satisfies this.)
 //
 // The returned slice is the certificate request in DER encoding.
-func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv any) (csr []byte, err error) {
+func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv crypto.PrivateKey) (csr []byte, err error) {
 	key, ok := priv.(crypto.Signer)
 	if !ok {
 		return nil, errors.New("x509: certificate private key does not implement crypto.Signer")

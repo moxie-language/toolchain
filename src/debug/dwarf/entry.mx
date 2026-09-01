@@ -63,11 +63,11 @@ func (d *Data) parseAbbrev(off uint64, vers int32) (abbrevTable, error) {
 		// Walk over attributes, counting.
 		n := 0
 		b1 := b // Read from copy of b.
-		b1.uint32()
+		b1.uintVar()
 		b1.uint8()
 		for {
-			tag := b1.uint32()
-			fmt := b1.uint32()
+			tag := b1.uintVar()
+			fmt := b1.uintVar()
 			if tag == 0 && fmt == 0 {
 				break
 			}
@@ -82,19 +82,19 @@ func (d *Data) parseAbbrev(off uint64, vers int32) (abbrevTable, error) {
 
 		// Walk over attributes again, this time writing them down.
 		var a abbrev
-		a.tag = Tag(b.uint32())
+		a.tag = Tag(b.uintVar())
 		a.children = b.uint8() != 0
 		a.field = []afield{:n}
 		for i := range a.field {
-			a.field[i].attr = Attr(b.uint32())
-			a.field[i].fmt = format(b.uint32())
+			a.field[i].attr = Attr(b.uintVar())
+			a.field[i].fmt = format(b.uintVar())
 			a.field[i].class = formToClass(a.field[i].fmt, a.field[i].attr, vers, &b)
 			if a.field[i].fmt == formImplicitConst {
 				a.field[i].val = b.int32()
 			}
 		}
-		b.uint32()
-		b.uint32()
+		b.uintVar()
+		b.uintVar()
 
 		m[id] = a
 	}
@@ -263,9 +263,40 @@ type Entry struct {
 //
 // For unrecognized or vendor-defined attributes, [Class] may be
 // [ClassUnknown].
+// fieldValue is a decoded DWARF attribute value: one of address, block,
+// constant, flag, reference, or string. The concrete types are enumerated as
+// named wrappers implementing the marker.
+type fieldValue interface {
+	isFieldValue()
+}
+
+type valUint64 uint64
+
+func (valUint64) isFieldValue() {}
+
+type valBytes []byte
+
+func (valBytes) isFieldValue() {}
+
+type valInt64 int64
+
+func (valInt64) isFieldValue() {}
+
+type valBool bool
+
+func (valBool) isFieldValue() {}
+
+type valOffset Offset
+
+func (valOffset) isFieldValue() {}
+
+type valStr []byte
+
+func (valStr) isFieldValue() {}
+
 type Field struct {
 	Attr  Attr
-	Val   any
+	Val   fieldValue
 	Class Class
 }
 
@@ -386,7 +417,7 @@ func (i Class) GoString() string {
 // the check that the value has the expected dynamic type, as in:
 //
 //	v, ok := e.Val(AttrSibling).(int64)
-func (e *Entry) Val(a Attr) any {
+func (e *Entry) Val(a Attr) fieldValue {
 	if f := e.AttrField(a); f != nil {
 		return f.Val
 	}
@@ -493,22 +524,22 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 		e.Field[i].Class = a.field[i].class
 		fmt := a.field[i].fmt
 		if fmt == formIndirect {
-			fmt = format(b.uint32())
+			fmt = format(b.uintVar())
 			e.Field[i].Class = formToClass(fmt, a.field[i].attr, vers, b)
 		}
-		var val any
+		var val fieldValue
 		switch fmt {
 		default:
 			b.error("unknown entry attr format 0x" + strconv.FormatInt(int64(fmt), 16))
 
 		// address
 		case formAddr:
-			val = b.addr()
+			val = valUint64(b.addr())
 		case formAddrx, formAddrx1, formAddrx2, formAddrx3, formAddrx4:
 			var off uint64
 			switch fmt {
 			case formAddrx:
-				off = b.uint32()
+				off = uint64(b.uint32())
 			case formAddrx1:
 				off = uint64(b.uint8())
 			case formAddrx2:
@@ -537,40 +568,40 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 
 		// block
 		case formDwarfBlock1:
-			val = b.bytes(int32(b.uint8()))
+			val = valBytes(b.bytes(int32(b.uint8())))
 		case formDwarfBlock2:
-			val = b.bytes(int32(b.uint16()))
+			val = valBytes(b.bytes(int32(b.uint16())))
 		case formDwarfBlock4:
-			val = b.bytes(int32(b.uint32()))
+			val = valBytes(b.bytes(int32(b.uint32())))
 		case formDwarfBlock:
-			val = b.bytes(int32(b.uint32()))
+			val = valBytes(b.bytes(int32(b.uint32())))
 
 		// constant
 		case formData1:
-			val = int64(b.uint8())
+			val = valInt64(int64(b.uint8()))
 		case formData2:
-			val = int64(b.uint16())
+			val = valInt64(int64(b.uint16()))
 		case formData4:
-			val = int64(b.uint32())
+			val = valInt64(int64(b.uint32()))
 		case formData8:
-			val = int64(b.uint64())
+			val = valInt64(int64(b.uint64()))
 		case formData16:
-			val = b.bytes(16)
+			val = valBytes(b.bytes(16))
 		case formSdata:
-			val = int64(b.int32())
+			val = valInt64(int64(b.int32()))
 		case formUdata:
-			val = int64(b.uint32())
+			val = valInt64(int64(b.uintVar()))
 		case formImplicitConst:
-			val = a.field[i].val
+			val = valInt64(a.field[i].val)
 
 		// flag
 		case formFlag:
-			val = b.uint8() == 1
+			val = valBool(b.uint8() == 1)
 		// New in DWARF 4.
 		case formFlagPresent:
 			// The attribute is implicitly indicated as present, and no value is
 			// encoded in the debugging information entry itself.
-			val = true
+			val = valBool(true)
 
 		// reference to other entry
 		case formRefAddr:
@@ -578,31 +609,31 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 			if vers == 0 {
 				b.error("unknown version for DW_FORM_ref_addr")
 			} else if vers == 2 {
-				val = Offset(b.addr())
+				val = valOffset(Offset(b.addr()))
 			} else {
 				is64, known := b.format.dwarf64()
 				if !known {
 					b.error("unknown size for DW_FORM_ref_addr")
 				} else if is64 {
-					val = Offset(b.uint64())
+					val = valOffset(Offset(b.uint64()))
 				} else {
-					val = Offset(b.uint32())
+					val = valOffset(Offset(b.uint32()))
 				}
 			}
 		case formRef1:
-			val = Offset(b.uint8()) + ubase
+			val = valOffset(Offset(b.uint8()) + ubase)
 		case formRef2:
-			val = Offset(b.uint16()) + ubase
+			val = valOffset(Offset(b.uint16()) + ubase)
 		case formRef4:
-			val = Offset(b.uint32()) + ubase
+			val = valOffset(Offset(b.uint32()) + ubase)
 		case formRef8:
-			val = Offset(b.uint64()) + ubase
+			val = valOffset(Offset(b.uint64()) + ubase)
 		case formRefUdata:
-			val = Offset(b.uint32()) + ubase
+			val = valOffset(Offset(b.uint32()) + ubase)
 
 		// string
 		case formString:
-			val = b.string()
+			val = valStr(b.string())
 		case formStrp, formLineStrp:
 			var off uint64 // offset into .debug_str
 			is64, known := b.format.dwarf64()
@@ -630,7 +661,7 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 				b1 = makeBuf(b.dwarf, b.format, "line_str", 0, b.dwarf.lineStr)
 			}
 			b1.skip(int32(off))
-			val = b1.string()
+			val = valStr(b1.string())
 			if b1.err != nil {
 				b.err = b1.err
 				return nil
@@ -639,7 +670,7 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 			var off uint64
 			switch fmt {
 			case formStrx:
-				off = b.uint32()
+				off = b.uintVar()
 			case formStrx1:
 				off = uint64(b.uint8())
 			case formStrx2:
@@ -666,16 +697,16 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 			}
 
 			strBase := int64(u.strOffsetsBase())
-			val = resolveStrx(uint64(strBase), off)
+			val = valStr(resolveStrx(uint64(strBase), off))
 
 		case formStrpSup:
 			is64, known := b.format.dwarf64()
 			if !known {
 				b.error("unknown size for DW_FORM_strp_sup")
 			} else if is64 {
-				val = b.uint64()
+				val = valInt64(int64(b.uint64()))
 			} else {
-				val = b.uint32()
+				val = valInt64(int64(b.uint32()))
 			}
 
 		// lineptr, loclistptr, macptr, rangelistptr
@@ -686,36 +717,36 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 			if !known {
 				b.error("unknown size for form 0x" + strconv.FormatInt(int64(fmt), 16))
 			} else if is64 {
-				val = int64(b.uint64())
+				val = valInt64(int64(b.uint64()))
 			} else {
-				val = int64(b.uint32())
+				val = valInt64(int64(b.uint32()))
 			}
 
 		// exprloc
 		// New in DWARF 4.
 		case formExprloc:
-			val = b.bytes(int32(b.uint32()))
+			val = valBytes(b.bytes(int32(b.uint32())))
 
 		// reference
 		// New in DWARF 4.
 		case formRefSig8:
 			// 64-bit type signature.
-			val = b.uint64()
+			val = valUint64(b.uint64())
 		case formRefSup4:
-			val = b.uint32()
+			val = valUint64(b.uint32())
 		case formRefSup8:
-			val = b.uint64()
+			val = valUint64(b.uint64())
 
 		// loclist
 		case formLoclistx:
-			val = b.uint32()
+			val = valInt64(int64(b.uintVar()))
 
 		// rnglist
 		case formRnglistx:
-			off := b.uint32()
+			off := b.uintVar()
 
 			rnglistsBase := int64(u.rngListsBase())
-			val = resolveRnglistx(uint64(rnglistsBase), off)
+			val = valUint64(resolveRnglistx(uint64(rnglistsBase), uint64(off)))
 		}
 
 		e.Field[i].Val = val
@@ -841,8 +872,8 @@ func (r *Reader) Next() (*Entry, error) {
 	if e != nil {
 		r.lastChildren = e.Children
 		if r.lastChildren {
-			if off, ok := e.Val(AttrSibling).(Offset); ok {
-				r.lastSibling = off
+			if off, ok := e.Val(AttrSibling).(valOffset); ok {
+				r.lastSibling = Offset(off)
 			}
 		}
 		if e.Tag == TagCompileUnit || e.Tag == TagPartialUnit {
@@ -952,7 +983,11 @@ func (r *Reader) SeekPC(pc uint64) (*Entry, error) {
 func (d *Data) Ranges(e *Entry) ([][2]uint64, error) {
 	var ret [][2]uint64
 
-	low, lowOK := e.Val(AttrLowpc).(uint64)
+	low, lowOK := e.Val(AttrLowpc).(valUint64)
+	var lowv uint64
+	if lowOK {
+		lowv = uint64(low)
+	}
 
 	var high uint64
 	var highOK bool
@@ -960,11 +995,15 @@ func (d *Data) Ranges(e *Entry) ([][2]uint64, error) {
 	if highField != nil {
 		switch highField.Class {
 		case ClassAddress:
-			high, highOK = highField.Val.(uint64)
+			hv, hvOK := highField.Val.(valUint64)
+			if hvOK {
+				high = uint64(hv)
+				highOK = true
+			}
 		case ClassConstant:
-			off, ok := highField.Val.(int64)
+			off, ok := highField.Val.(valInt64)
 			if ok {
-				high = low + uint64(off)
+				high = lowv + uint64(off)
 				highOK = true
 			}
 		}
@@ -972,7 +1011,7 @@ func (d *Data) Ranges(e *Entry) ([][2]uint64, error) {
 
 	if lowOK && highOK {
 		if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
-		ret = push(ret, [2]uint64{low, high})
+		ret = push(ret, [2]uint64{lowv, high})
 	}
 
 	var u *unit
@@ -1015,13 +1054,13 @@ func (d *Data) Ranges(e *Entry) ([][2]uint64, error) {
 	}
 
 	// DWARF version 2 through 4
-	ranges, rangesOK := e.Val(AttrRanges).(int64)
+	ranges, rangesOK := e.Val(AttrRanges).(valInt64)
 	if rangesOK && d.ranges != nil {
 		_, base, err := d.baseAddressForEntry(e)
 		if err != nil {
 			return nil, err
 		}
-		return d.dwarf2Ranges(u, base, ranges, ret)
+		return d.dwarf2Ranges(u, base, int64(ranges), ret)
 	}
 
 	return ret, nil
@@ -1049,10 +1088,10 @@ func (d *Data) baseAddressForEntry(e *Entry) (*Entry, uint64, error) {
 		}
 	}
 
-	if cuEntry, cuEntryOK := cu.Val(AttrEntrypc).(uint64); cuEntryOK {
-		return cu, cuEntry, nil
-	} else if cuLow, cuLowOK := cu.Val(AttrLowpc).(uint64); cuLowOK {
-		return cu, cuLow, nil
+	if cuEntry, cuEntryOK := cu.Val(AttrEntrypc).(valUint64); cuEntryOK {
+		return cu, uint64(cuEntry), nil
+	} else if cuLow, cuLowOK := cu.Val(AttrLowpc).(valUint64); cuLowOK {
+		return cu, uint64(cuLow), nil
 	}
 
 	return cu, 0, nil
@@ -1090,8 +1129,8 @@ func (d *Data) dwarf5Ranges(u *unit, cu *Entry, base uint64, ranges int64, ret [
 	}
 	var addrBase int64
 	if cu != nil {
-		if okv, okok := cu.Val(AttrAddrBase).(int64); okok {
-			addrBase = okv
+		if okv, okok := cu.Val(AttrAddrBase).(valInt64); okok {
+			addrBase = int64(okv)
 		}
 	}
 
@@ -1107,22 +1146,22 @@ func (d *Data) dwarf5Ranges(u *unit, cu *Entry, base uint64, ranges int64, ret [
 			return ret, nil
 
 		case rleBaseAddressx:
-			baseIdx := buf.uint32()
+			baseIdx := buf.uintVar()
 			var err error
-			base, err = d.debugAddr(u, uint64(addrBase), baseIdx)
+			base, err = d.debugAddr(u, uint64(addrBase), uint64(baseIdx))
 			if err != nil {
 				return nil, err
 			}
 
 		case rleStartxEndx:
-			startIdx := buf.uint32()
-			endIdx := buf.uint32()
+			startIdx := buf.uintVar()
+			endIdx := buf.uintVar()
 
-			start, err := d.debugAddr(u, uint64(addrBase), startIdx)
+			start, err := d.debugAddr(u, uint64(addrBase), uint64(startIdx))
 			if err != nil {
 				return nil, err
 			}
-			end, err := d.debugAddr(u, uint64(addrBase), endIdx)
+			end, err := d.debugAddr(u, uint64(addrBase), uint64(endIdx))
 			if err != nil {
 				return nil, err
 			}
@@ -1130,20 +1169,20 @@ func (d *Data) dwarf5Ranges(u *unit, cu *Entry, base uint64, ranges int64, ret [
 			ret = push(ret, [2]uint64{start, end})
 
 		case rleStartxLength:
-			startIdx := buf.uint32()
-			len := buf.uint32()
-			start, err := d.debugAddr(u, uint64(addrBase), startIdx)
+			startIdx := buf.uintVar()
+			ln := buf.uintVar()
+			start, err := d.debugAddr(u, uint64(addrBase), uint64(startIdx))
 			if err != nil {
 				return nil, err
 			}
 			if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
-			ret = push(ret, [2]uint64{start, start + len})
+			ret = push(ret, [2]uint64{start, start + uint64(ln)})
 
 		case rleOffsetPair:
-			off1 := buf.uint32()
-			off2 := buf.uint32()
+			off1 := buf.uintVar()
+			off2 := buf.uintVar()
 			if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
-			ret = push(ret, [2]uint64{base + off1, base + off2})
+			ret = push(ret, [2]uint64{base + uint64(off1), base + uint64(off2)})
 
 		case rleBaseAddress:
 			base = buf.addr()
@@ -1156,9 +1195,9 @@ func (d *Data) dwarf5Ranges(u *unit, cu *Entry, base uint64, ranges int64, ret [
 
 		case rleStartLength:
 			start := buf.addr()
-			len := buf.uint32()
+			ln := buf.uintVar()
 			if len(ret) >= cap(ret) { ret = mxutil.GrowCap(ret) }
-			ret = push(ret, [2]uint64{start, start + len})
+			ret = push(ret, [2]uint64{start, start + uint64(ln)})
 		}
 	}
 }

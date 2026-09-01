@@ -166,13 +166,13 @@ func (c *Conn) NetConn() net.Conn {
 type halfConn struct {
 	err     error  // first permanent error
 	version uint16 // protocol version
-	cipher  any    // cipher algorithm
+	cipher  recordCipher // cipher algorithm
 	mac     hash.Hash
 	seq     [8]byte // 64-bit sequence number
 
 	scratchBuf [13]byte // to avoid allocs; interface method args escape
 
-	nextCipher any       // next encryption state
+	nextCipher recordCipher // next encryption state
 	nextMac    hash.Hash // next MAC algorithm
 
 	level         QUICEncryptionLevel // current QUIC encryption level
@@ -200,7 +200,7 @@ func (hc *halfConn) setErrorLocked(err error) error {
 
 // prepareCipherSpec sets the encryption and MAC states
 // that a subsequent changeCipherSpec will use.
-func (hc *halfConn) prepareCipherSpec(version uint16, cipher any, mac hash.Hash) {
+func (hc *halfConn) prepareCipherSpec(version uint16, cipher recordCipher, mac hash.Hash) {
 	hc.version = version
 	hc.nextCipher = cipher
 	hc.nextMac = mac
@@ -255,11 +255,11 @@ func (hc *halfConn) explicitNonceLen() int32 {
 	}
 
 	switch c := hc.cipher.(type) {
-	case cipher.Stream:
+	case streamCipher:
 		return 0
-	case aead:
-		return c.explicitNonceLen()
-	case cbcMode:
+	case aeadCipher:
+		return c.a.explicitNonceLen()
+	case cbcCipher:
 		// TLS 1.1 introduced a per-record explicit IV to fix the BEAST attack.
 		if hc.version >= VersionTLS11 {
 			return c.BlockSize()
@@ -324,6 +324,31 @@ func roundUp(a, b int32) int32 {
 	return a + (b-a%b)%b
 }
 
+// recordCipher wraps a negotiated cipher primitive. The three TLS cipher
+// primitives (stream, AEAD, CBC) share no method, so each is wrapped in a
+// named type implementing the marker and the conn dispatches by type switch.
+type recordCipher interface {
+	isRecordCipher()
+}
+
+type streamCipher struct {
+	s cipher.Stream
+}
+
+func (streamCipher) isRecordCipher() {}
+
+type aeadCipher struct {
+	a aead
+}
+
+func (aeadCipher) isRecordCipher() {}
+
+type cbcCipher struct {
+	b cbcMode
+}
+
+func (cbcCipher) isRecordCipher() {}
+
 // cbcMode is an interface for block ciphers using cipher block chaining.
 type cbcMode interface {
 	cipher.BlockMode
@@ -350,9 +375,9 @@ func (hc *halfConn) decrypt(record []byte) ([]byte, recordType, error) {
 
 	if hc.cipher != nil {
 		switch c := hc.cipher.(type) {
-		case cipher.Stream:
-			c.XORKeyStream(payload, payload)
-		case aead:
+		case streamCipher:
+			c.s.XORKeyStream(payload, payload)
+		case aeadCipher:
 			if len(payload) < explicitNonceLen {
 				return nil, 0, alertBadRecordMAC
 			}
@@ -379,18 +404,18 @@ func (hc *halfConn) decrypt(record []byte) ([]byte, recordType, error) {
 			if err != nil {
 				return nil, 0, alertBadRecordMAC
 			}
-		case cbcMode:
-			blockSize := c.BlockSize()
+		case cbcCipher:
+			blockSize := c.b.BlockSize()
 			minPayload := explicitNonceLen + roundUp(hc.mac.Size()+1, blockSize)
 			if len(payload)%blockSize != 0 || len(payload) < minPayload {
 				return nil, 0, alertBadRecordMAC
 			}
 
 			if explicitNonceLen > 0 {
-				c.SetIV(payload[:explicitNonceLen])
+				c.b.SetIV(payload[:explicitNonceLen])
 				payload = payload[explicitNonceLen:]
 			}
-			c.CryptBlocks(payload, payload)
+			c.b.CryptBlocks(payload, payload)
 
 			// In a limited attempt to protect against CBC padding oracles like
 			// Lucky13, the data past paddingLen (which is secret) is passed to
@@ -482,7 +507,7 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 	var explicitNonce []byte
 	if explicitNonceLen := hc.explicitNonceLen(); explicitNonceLen > 0 {
 		record, explicitNonce = sliceForAppend(record, explicitNonceLen)
-		if _, isCBC := hc.cipher.(cbcMode); !isCBC && explicitNonceLen < 16 {
+		if _, isCBC := hc.cipher.(cbcCipher); !isCBC && explicitNonceLen < 16 {
 			// The AES-GCM construction in TLS has an explicit nonce so that the
 			// nonce can be random. However, the nonce is only 8 bytes which is
 			// too small for a secure, random nonce. Therefore we use the
@@ -502,12 +527,12 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 
 	var dst []byte
 	switch c := hc.cipher.(type) {
-	case cipher.Stream:
+	case streamCipher:
 		mac := tls10MAC(hc.mac, hc.scratchBuf[:0], hc.seq[:], record[:recordHeaderLen], payload, nil)
 		record, dst = sliceForAppend(record, len(payload)+len(mac))
-		c.XORKeyStream(dst[:len(payload)], payload)
-		c.XORKeyStream(dst[len(payload):], mac)
-	case aead:
+		c.s.XORKeyStream(dst[:len(payload)], payload)
+		c.s.XORKeyStream(dst[len(payload):], mac)
+	case aeadCipher:
 		nonce := explicitNonce
 		if len(nonce) == 0 {
 			nonce = hc.seq[:]
@@ -522,21 +547,21 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 			record = push(record, record[0])
 			record[0] = byte(recordTypeApplicationData)
 
-			n := len(payload) + 1 + c.Overhead()
+			n := len(payload) + 1 + c.a.Overhead()
 			record[3] = byte(n >> 8)
 			record[4] = byte(n)
 
-			record = c.Seal(record[:recordHeaderLen],
+			record = c.a.Seal(record[:recordHeaderLen],
 				nonce, record[recordHeaderLen:], record[:recordHeaderLen])
 		} else {
 			additionalData := push(hc.scratchBuf[:0], hc.seq[:]...)
 			if len(additionalData) >= cap(additionalData) { additionalData = mxutil.GrowCap(additionalData) }
 			additionalData = push(additionalData, record[:recordHeaderLen]...)
-			record = c.Seal(record, nonce, payload, additionalData)
+			record = c.a.Seal(record, nonce, payload, additionalData)
 		}
-	case cbcMode:
+	case cbcCipher:
 		mac := tls10MAC(hc.mac, hc.scratchBuf[:0], hc.seq[:], record[:recordHeaderLen], payload, nil)
-		blockSize := c.BlockSize()
+		blockSize := c.b.BlockSize()
 		plaintextLen := len(payload) + len(mac)
 		paddingLen := blockSize - plaintextLen%blockSize
 		record, dst = sliceForAppend(record, plaintextLen+paddingLen)
@@ -1070,7 +1095,7 @@ func (c *Conn) readHandshakeBytes(n int32) error {
 // readHandshake reads the next handshake message from
 // the record layer. If transcript is non-nil, the message
 // is written to the passed transcriptHash.
-func (c *Conn) readHandshake(transcript transcriptHash) (any, error) {
+func (c *Conn) readHandshake(transcript transcriptHash) (handshakeMessage, error) {
 	if err := c.readHandshakeBytes(4); err != nil {
 		return nil, err
 	}

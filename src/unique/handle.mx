@@ -8,10 +8,27 @@ import (
 	"unsafe"
 )
 
+// handleMapIface is implemented by every type-specific handle map wrapper.
+// The global map is keyed by the type descriptor (unsafe.TypeOf of the value),
+// so each instantiated type gets its own map - the find-or-create-map
+// operation keyed by type identity.
+type handleMapIface interface {
+	handleMapIface()
+}
+
+// handleMap wraps the per-type map so it can be stored behind the marker
+// interface. T is monomorphized per instantiation, so handleMap[T] is a
+// distinct type for every T.
+type handleMap[T comparable] struct {
+	m map[T]Handle[T]
+}
+
+func (handleMap[T]) handleMapIface() {}
+
 var (
 	// We use a two-level map because that way it's easier to store and retrieve
 	// values.
-	globalMap map[unsafe.Pointer]any // map value type is always map[T]Handle[T]
+	globalMap map[unsafe.Pointer]handleMapIface
 )
 
 // Unique handle for the given value. Comparing two handles is cheap.
@@ -37,31 +54,28 @@ func Make[T comparable](value T) Handle[T] {
 	// The map isn't initialized at program startup (and after a test run), so
 	// create it.
 	if globalMap == nil {
-		globalMap = map[unsafe.Pointer]any{}
+		globalMap = map[unsafe.Pointer]handleMapIface{}
 	}
 
-	// Retrieve the type-specific map, creating it if not yet present.
-	typeptr, _ := decomposeInterface(value)
-	var typeSpecificMap map[T]Handle[T]
-	if typeSpecificMapValue, ok := globalMap[typeptr]; !ok {
-		typeSpecificMap = map[T]Handle[T]{}
-		globalMap[typeptr] = typeSpecificMap
+	// Find or create the per-type map, keyed by the type descriptor.
+	typeptr := unsafe.TypeOf(value)
+	var hm handleMap[T]
+	if typeSpecificMapValue, ok := globalMap[typeptr]; ok {
+		hm = typeSpecificMapValue.(handleMap[T])
 	} else {
-		typeSpecificMap = typeSpecificMapValue.(map[T]Handle[T])
+		hm = handleMap[T]{m: map[T]Handle[T]{}}
+		globalMap[typeptr] = hm
 	}
 
 	// Retrieve the handle for the value, creating it if it isn't created yet.
 	var handle Handle[T]
-	if h, ok := typeSpecificMap[value]; !ok {
+	if h, ok := hm.m[value]; !ok {
 		var clone T = value
 		handle.value = &clone
-		typeSpecificMap[value] = handle
+		hm.m[value] = handle
 	} else {
 		handle = h
 	}
 
 	return handle
 }
-
-//:linkname decomposeInterface runtime.decomposeInterface
-func decomposeInterface(i interface{}) (unsafe.Pointer, unsafe.Pointer)

@@ -8,7 +8,6 @@ import (
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"context"
 	"errors"
-	"internal/nettrace"
 	"internal/singleflight"
 	"internal/stringslite"
 	"net/netip"
@@ -285,29 +284,11 @@ func (r *Resolver) LookupNetIP(ctx context.Context, network, host string) ([]net
 	return ret, nil
 }
 
-// onlyValuesCtx is a context that uses an underlying context
-// for value lookup if the underlying context hasn't yet expired.
-type onlyValuesCtx struct {
-	context.Context
-	lookupValues context.Context
-}
-
-// Value performs a lookup if the original context hasn't expired.
-func (ovc *onlyValuesCtx) Value(key any) any {
-	select {
-	case <-ovc.lookupValues.Done():
-		return nil
-	default:
-		return ovc.lookupValues.Value(key)
-	}
-}
-
-// withUnexpiredValuesPreserved returns a context.Context that only uses lookupCtx
-// for its values, otherwise it is never canceled and has no deadline.
-// If the lookup context expires, any looked up values will return nil.
-// See Issue 28600.
-func withUnexpiredValuesPreserved(lookupCtx context.Context) context.Context {
-	return &onlyValuesCtx{Context: context.Background(), lookupValues: lookupCtx}
+// withUnexpiredValuesPreserved returns a context.Context that is never
+// canceled and has no deadline, isolating the lookup group from the calling
+// context's cancellation. Context values are not supported in Moxie.
+func withUnexpiredValuesPreserved(ctx context.Context) context.Context {
+	return context.Background()
 }
 
 // lookupIPAddr looks up host using the local resolver and particular network.
@@ -320,20 +301,7 @@ func (r *Resolver) lookupIPAddr(ctx context.Context, network, host string) ([]IP
 	if ip, err := netip.ParseAddr(host); err == nil {
 		return []IPAddr{{IP: IP(ip.AsSlice()).To16(), Zone: ip.Zone()}}, nil
 	}
-	var trace *nettrace.Trace
-	if okv, okok := ctx.Value(nettrace.TraceKey{}).(*nettrace.Trace); okok {
-		trace = okv
-	}
-	if trace != nil && trace.DNSStart != nil {
-		trace.DNSStart(host)
-	}
-	// The underlying resolver func is lookupIP by default but it
-	// can be overridden by tests. This is needed by net/http, so it
-	// uses a context key instead of unexported variables.
 	resolverFunc := r.lookupIP
-	if alt, okta := ctx.Value(nettrace.LookupIPAltResolverKey{}).(func(context.Context, []byte, []byte) ([]IPAddr, error)); okta && (alt != nil) {
-		resolverFunc = alt
-	}
 
 	// We don't want a cancellation of ctx to affect the
 	// lookupGroup operation. Otherwise if our context gets
@@ -343,8 +311,12 @@ func (r *Resolver) lookupIPAddr(ctx context.Context, network, host string) ([]IP
 	lookupGroupCtx, lookupGroupCancel := context.WithCancel(withUnexpiredValuesPreserved(ctx))
 
 	lookupKey := network + "\000" + host
-	ch := r.getLookupGroup().DoChan(lookupKey, func() (any, error) {
-		return resolverFunc(lookupGroupCtx, network, host)
+	ch := r.getLookupGroup().DoChan(lookupKey, func() (unsafe.Pointer, error) {
+		addrs, err := resolverFunc(lookupGroupCtx, network, host)
+		if err != nil {
+			return nil, err
+		}
+		return unsafe.Pointer(&addrs), nil
 	})
 
 	select {
@@ -357,9 +329,6 @@ func (r *Resolver) lookupIPAddr(ctx context.Context, network, host string) ([]IP
 			lookupGroupCancel()
 		}
 		err := newDNSError(mapErr(ctx.Err()), host, "")
-		if trace != nil && trace.DNSDone != nil {
-			trace.DNSDone(nil, false, err)
-		}
 		return nil, err
 	case r := <-ch:
 		lookupGroupCancel()
@@ -369,39 +338,23 @@ func (r *Resolver) lookupIPAddr(ctx context.Context, network, host string) ([]IP
 				err = newDNSError(mapErr(err), host, "")
 			}
 		}
-		if trace != nil && trace.DNSDone != nil {
-			var addrs []IPAddr
-			if okv, okok := r.Val.([]IPAddr); okok {
-				addrs = okv
-			}
-			trace.DNSDone(ipAddrsEface(addrs), r.Shared, err)
-		}
 		return lookupIPReturn(r.Val, err, r.Shared)
 	}
 }
 
 // lookupIPReturn turns the return values from singleflight.Do into
 // the return values from LookupIP.
-func lookupIPReturn(addrsi any, err error, shared bool) ([]IPAddr, error) {
+func lookupIPReturn(val unsafe.Pointer, err error, shared bool) ([]IPAddr, error) {
 	if err != nil {
 		return nil, err
 	}
-	addrs := addrsi.([]IPAddr)
+	addrs := *(*[]IPAddr)(val)
 	if shared {
 		clone := []IPAddr{:len(addrs)}
 		copy(clone, addrs)
 		addrs = clone
 	}
 	return addrs, nil
-}
-
-// ipAddrsEface returns an empty interface slice of addrs.
-func ipAddrsEface(addrs []IPAddr) []any {
-	s := []any{:len(addrs)}
-	for i, v := range addrs {
-		s[i] = v
-	}
-	return s
 }
 
 // LookupPort looks up the port for the given network and service.

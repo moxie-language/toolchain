@@ -20,7 +20,9 @@ import (
 	"strconv"
 	"bytes"
 	"unicode/utf8"
+	"unsafe"
 )
+
 
 //:generate stringer -type Kind
 
@@ -572,23 +574,41 @@ func Float64Val(x Value) (float64, bool) {
 //	Int                int64 or *big.Int
 //	Float              *big.Float or *big.Rat
 //	everything else    nil
-func Val(x Value) any {
+// ValueResult holds the concrete representation of a [Value] as a tagged
+// union. Kind is 0 for nil/unknown, 1=bool, 2=string, 3=int64, 4=big.Int,
+// 5=big.Rat, 6=big.Float.
+type ValueResult struct {
+	kind uint8
+	b    bool
+	s    []byte
+	i    int64
+	bi   *big.Int
+	br   *big.Rat
+	bf   *big.Float
+}
+
+func Val(x Value) (r ValueResult) {
 	switch x := x.(type) {
 	case boolVal:
-		return bool(x)
+		r.kind = 1
+		r.b = bool(x)
 	case *stringVal:
-		return x.string()
+		r.kind = 2
+		r.s = x.string()
 	case int64Val:
-		return int64(x)
+		r.kind = 3
+		r.i = int64(x)
 	case intVal:
-		return x.val
+		r.kind = 4
+		r.bi = x.val
 	case ratVal:
-		return x.val
+		r.kind = 5
+		r.br = x.val
 	case floatVal:
-		return x.val
-	default:
-		return nil
+		r.kind = 6
+		r.bf = x.val
 	}
+	return
 }
 
 // Make returns the [Value] for x.
@@ -602,19 +622,19 @@ func Val(x Value) any {
 //	*big.Float       Float
 //	*big.Rat         Float
 //	anything else    Unknown
-func Make(x any) Value {
-	switch x := x.(type) {
-	case bool:
+func Make[T comparable](x T) Value {
+	switch unsafe.TypeOf(x) {
+	case unsafe.TypeOf(bool(false)):
 		return boolVal(x)
-	case string:
+	case unsafe.TypeOf(string("")):
 		return &stringVal{s: x}
-	case int64:
+	case unsafe.TypeOf(int64(0)):
 		return int64Val(x)
-	case *big.Int:
+	case unsafe.TypeOf((*big.Int)(nil)):
 		return makeInt(x)
-	case *big.Rat:
+	case unsafe.TypeOf((*big.Rat)(nil)):
 		return makeRat(x)
-	case *big.Float:
+	case unsafe.TypeOf((*big.Float)(nil)):
 		return makeFloat(x)
 	default:
 		return unknownVal{}

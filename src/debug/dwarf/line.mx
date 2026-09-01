@@ -148,18 +148,18 @@ func (d *Data) LineReader(cu *Entry) (*LineReader, error) {
 	}
 
 	// Get line table information from cu.
-	off, ok := cu.Val(AttrStmtList).(int64)
+	off, ok := cu.Val(AttrStmtList).(valInt64)
 	if !ok {
 		// cu has no line table.
 		return nil, nil
 	}
-	if off < 0 || off > int64(len(d.line)) {
+	if int64(off) < 0 || int64(off) > int64(len(d.line)) {
 		return nil, errors.New("AttrStmtList value out of range")
 	}
 	// AttrCompDir is optional if all file names are absolute. Use
 	// the empty string if it's not present.
 	var compDir string
-	if okv, okok := cu.Val(AttrCompDir).(string); okok {
+	if okv, okok := cu.Val(AttrCompDir).(valStr); okok {
 		compDir = okv
 	}
 
@@ -296,7 +296,7 @@ func (r *LineReader) readHeader(compDir string) error {
 		}
 	} else {
 		dirFormat := r.readLNCTFormat()
-		c := buf.uint32()
+		c := buf.uintVar()
 		r.directories = [][]byte{:c}
 		for i := range r.directories {
 			dir, _, _, err := r.readLNCT(dirFormat, dwarf64)
@@ -306,7 +306,7 @@ func (r *LineReader) readHeader(compDir string) error {
 			r.directories[i] = dir
 		}
 		fileFormat := r.readLNCTFormat()
-		c = buf.uint32()
+		c = buf.uintVar()
 		r.fileEntries = []*LineFile{:c}
 		for i := range r.fileEntries {
 			name, mtime, size, err := r.readLNCT(fileFormat, dwarf64)
@@ -335,8 +335,8 @@ func (r *LineReader) readLNCTFormat() []lnctForm {
 	c := r.buf.uint8()
 	ret := []lnctForm{:c}
 	for i := range ret {
-		ret[i].lnct = int32(r.buf.uint32())
-		ret[i].form = format(r.buf.uint32())
+		ret[i].lnct = int32(r.buf.uintVar())
+		ret[i].form = format(r.buf.uintVar())
 	}
 	return ret
 }
@@ -355,7 +355,7 @@ func (r *LineReader) readLNCT(s []lnctForm, dwarf64 bool) (path string, mtime ui
 			if dwarf64 {
 				off = r.buf.uint64()
 			} else {
-				off = uint64(r.buf.uint32())
+				off = r.buf.uintVar()
 			}
 			if uint64(int32(off)) != off {
 				return "", 0, 0, DecodeError{"line", r.buf.off, "strp/line_strp offset out of range"}
@@ -376,11 +376,11 @@ func (r *LineReader) readLNCT(s []lnctForm, dwarf64 bool) (path string, mtime ui
 			if dwarf64 {
 				r.buf.uint64()
 			} else {
-				r.buf.uint32()
+				r.buf.uintVar()
 			}
 		case formStrx:
 			// .debug_line.dwo sections not yet supported.
-			r.buf.uint32()
+			r.buf.uintVar()
 		case formStrx1:
 			r.buf.uint8()
 		case formStrx2:
@@ -388,13 +388,13 @@ func (r *LineReader) readLNCT(s []lnctForm, dwarf64 bool) (path string, mtime ui
 		case formStrx3:
 			r.buf.uint24()
 		case formStrx4:
-			r.buf.uint32()
+			r.buf.uintVar()
 		case formData1:
 			val = uint64(r.buf.uint8())
 		case formData2:
 			val = uint64(r.buf.uint16())
 		case formData4:
-			val = uint64(r.buf.uint32())
+			val = r.buf.uintVar()
 		case formData8:
 			val = r.buf.uint64()
 		case formData16:
@@ -402,7 +402,7 @@ func (r *LineReader) readLNCT(s []lnctForm, dwarf64 bool) (path string, mtime ui
 		case formDwarfBlock:
 			r.buf.bytes(int32(r.buf.uint32()))
 		case formUdata:
-			val = r.buf.uint32()
+			val = r.buf.uintVar()
 		}
 
 		switch lf.lnct {
@@ -448,7 +448,7 @@ func (r *LineReader) readFileEntry() (bool, error) {
 		}
 		name = pathJoin(r.directories[dirIndex], name)
 	}
-	mtime := r.buf.uint32()
+	mtime := uint64(r.buf.uint32())
 	length := int32(r.buf.uint32())
 
 	// If this is a dynamically added path and the cursor was
@@ -630,7 +630,7 @@ func (r *LineReader) step(entry *LineEntry) bool {
 		// Unhandled standard opcode. Skip the number of
 		// arguments that the prologue says this opcode has.
 		for i := 0; i < r.opcodeLengths[opcode]; i++ {
-			r.buf.uint32()
+			r.buf.uintVar()
 		}
 	}
 	return false
