@@ -207,14 +207,14 @@ func (b *Builder) AddASN1NULL() {
 
 // MarshalASN1 calls encoding_asn1.Marshal on its input and appends the result if
 // successful or records an error if one occurred.
-func (b *Builder) MarshalASN1(v interface{}) {
+func (b *Builder) MarshalASN1(typ, data unsafe.Pointer) {
 	// NOTE(martinkr): This is somewhat of a hack to allow propagation of
 	// encoding_asn1.Marshal errors into Builder.err. N.B. if you call MarshalASN1 with a
 	// value embedded into a struct, its tag information is lost.
 	if b.err != nil {
 		return
 	}
-	bytes, err := encoding_asn1.Marshal(unsafe.TypeOf(v), unsafe.Pointer(&v))
+	bytes, err := encoding_asn1.Marshal(typ, data)
 	if err != nil {
 		b.err = err
 		return
@@ -269,69 +269,71 @@ func (s *String) ReadASN1Boolean(out *bool) bool {
 // big-endian binary values that share memory with s. Positive values will have
 // no leading zeroes, and zero will be returned as a single zero byte.
 // ReadASN1Integer reports whether the read was successful.
-func (s *String) ReadASN1Integer(out interface{}) bool {
-	switch out := out.(type) {
-	case *int32:
+func (s *String) ReadASN1Integer(typ, out unsafe.Pointer) bool {
+	t := (*runtime.RawType)(typ)
+	switch t.Kind() {
+	case runtime.Int32:
 		var i int64
 		if !s.readASN1Int64(&i) || int64(int32(i)) != i {
 			return false
 		}
-		*out = int32(i)
+		*(*int32)(out) = int32(i)
 		return true
-	case *int8:
+	case runtime.Int8:
 		var i int64
 		if !s.readASN1Int64(&i) || int64(int8(i)) != i {
 			return false
 		}
-		*out = int8(i)
+		*(*int8)(out) = int8(i)
 		return true
-	case *int16:
+	case runtime.Int16:
 		var i int64
 		if !s.readASN1Int64(&i) || int64(int16(i)) != i {
 			return false
 		}
-		*out = int16(i)
+		*(*int16)(out) = int16(i)
 		return true
-	case *int64:
+	case runtime.Int64:
 		var i int64
 		if !s.readASN1Int64(&i) {
 			return false
 		}
-		*out = i
+		*(*int64)(out) = i
 		return true
-	case *uint32:
+	case runtime.Uint32:
 		var u uint64
 		if !s.readASN1Uint64(&u) || uint64(uint32(u)) != u {
 			return false
 		}
-		*out = uint32(u)
+		*(*uint32)(out) = uint32(u)
 		return true
-	case *uint8:
+	case runtime.Uint8:
 		var u uint64
 		if !s.readASN1Uint64(&u) || uint64(uint8(u)) != u {
 			return false
 		}
-		*out = uint8(u)
+		*(*uint8)(out) = uint8(u)
 		return true
-	case *uint16:
+	case runtime.Uint16:
 		var u uint64
 		if !s.readASN1Uint64(&u) || uint64(uint16(u)) != u {
 			return false
 		}
-		*out = uint16(u)
+		*(*uint16)(out) = uint16(u)
 		return true
-	case *uint64:
+	case runtime.Uint64:
 		var u uint64
 		if !s.readASN1Uint64(&u) {
 			return false
 		}
-		*out = u
+		*(*uint64)(out) = u
 		return true
-	case *big.Int:
-		return s.readASN1BigInt(out)
-	case *[]byte:
-		return s.readASN1Bytes(out)
+	case runtime.KindBytes:
+		return s.readASN1Bytes((*[]byte)(out))
 	default:
+		if t == (*runtime.RawType)(unsafe.TypeOf(big.Int{})) {
+			return s.readASN1BigInt((*big.Int)(out))
+		}
 		panic("out does not point to an integer type")
 	}
 }
@@ -721,44 +723,44 @@ func (s *String) SkipOptionalASN1(tag asn1.Tag) bool {
 // tagged with tag into out and advances. If no element with a matching tag is
 // present, it writes defaultValue into out instead. Otherwise, it behaves like
 // ReadASN1Integer.
-func (s *String) ReadOptionalASN1Integer(out interface{}, tag asn1.Tag, defaultValue interface{}) bool {
+func (s *String) ReadOptionalASN1Integer(typ, out unsafe.Pointer, tag asn1.Tag, defaultValue unsafe.Pointer) bool {
 	var present bool
 	var i String
 	if !s.ReadOptionalASN1(&i, &present, tag) {
 		return false
 	}
 	if !present {
-		switch o := out.(type) {
-		case *int32:
-			*o = defaultValue.(int32)
-		case *int8:
-			*o = defaultValue.(int8)
-		case *int16:
-			*o = defaultValue.(int16)
-		case *int64:
-			*o = defaultValue.(int64)
-		case *uint32:
-			*o = defaultValue.(uint32)
-		case *uint8:
-			*o = defaultValue.(uint8)
-		case *uint16:
-			*o = defaultValue.(uint16)
-		case *uint64:
-			*o = defaultValue.(uint64)
-		case *[]byte:
-			*o = defaultValue.([]byte)
-		case *big.Int:
-			if dv, ok := defaultValue.(*big.Int); ok {
-				o.Set(dv)
-			} else {
-				panic("out points to big.Int, but defaultValue does not")
-			}
+		t := (*runtime.RawType)(typ)
+		switch t.Kind() {
+		case runtime.Int32:
+			*(*int32)(out) = *(*int32)(defaultValue)
+		case runtime.Int8:
+			*(*int8)(out) = *(*int8)(defaultValue)
+		case runtime.Int16:
+			*(*int16)(out) = *(*int16)(defaultValue)
+		case runtime.Int64:
+			*(*int64)(out) = *(*int64)(defaultValue)
+		case runtime.Uint32:
+			*(*uint32)(out) = *(*uint32)(defaultValue)
+		case runtime.Uint8:
+			*(*uint8)(out) = *(*uint8)(defaultValue)
+		case runtime.Uint16:
+			*(*uint16)(out) = *(*uint16)(defaultValue)
+		case runtime.Uint64:
+			*(*uint64)(out) = *(*uint64)(defaultValue)
+		case runtime.KindBytes:
+			*(*[]byte)(out) = *(*[]byte)(defaultValue)
 		default:
-			panic("invalid integer type")
+			if t == (*runtime.RawType)(unsafe.TypeOf(big.Int{})) {
+				dv := (*big.Int)(defaultValue)
+				(*big.Int)(out).Set(dv)
+			} else {
+				panic("invalid integer type")
+			}
 		}
 		return true
 	}
-	if !i.ReadASN1Integer(out) || !i.Empty() {
+	if !i.ReadASN1Integer(typ, out) || !i.Empty() {
 		return false
 	}
 	return true

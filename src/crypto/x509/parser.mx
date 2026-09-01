@@ -265,10 +265,10 @@ func parsePublicKey(keyData *publicKeyInfo) (crypto.PublicKey, error) {
 		if !der.ReadASN1(&der, cryptobyte_asn1.SEQUENCE) {
 			return nil, errors.New("x509: invalid RSA public key")
 		}
-		if !der.ReadASN1Integer(p.N) {
+		if !der.ReadASN1Integer(unsafe.TypeOf(*p.N), unsafe.Pointer(p.N)) {
 			return nil, errors.New("x509: invalid RSA modulus")
 		}
-		if !der.ReadASN1Integer(&p.E) {
+		if !der.ReadASN1Integer(unsafe.TypeOf(p.E), unsafe.Pointer(&p.E)) {
 			return nil, errors.New("x509: invalid RSA public exponent")
 		}
 
@@ -323,7 +323,7 @@ func parsePublicKey(keyData *publicKeyInfo) (crypto.PublicKey, error) {
 		return ecdh.X25519().NewPublicKey(der)
 	case oid.Equal(_oidPublicKeyDSA()):
 		y := &big.Int{}
-		if !der.ReadASN1Integer(y) {
+		if !der.ReadASN1Integer(unsafe.TypeOf(*y), unsafe.Pointer(y)) {
 			return nil, errors.New("x509: invalid DSA public key")
 		}
 		pub := &dsa.PublicKey{
@@ -336,9 +336,9 @@ func parsePublicKey(keyData *publicKeyInfo) (crypto.PublicKey, error) {
 		}
 		paramsDer := cryptobyte.String(params.FullBytes)
 		if !paramsDer.ReadASN1(&paramsDer, cryptobyte_asn1.SEQUENCE) ||
-			!paramsDer.ReadASN1Integer(pub.Parameters.P) ||
-			!paramsDer.ReadASN1Integer(pub.Parameters.Q) ||
-			!paramsDer.ReadASN1Integer(pub.Parameters.G) {
+			!paramsDer.ReadASN1Integer(unsafe.TypeOf(*pub.Parameters.P), unsafe.Pointer(pub.Parameters.P)) ||
+			!paramsDer.ReadASN1Integer(unsafe.TypeOf(*pub.Parameters.Q), unsafe.Pointer(pub.Parameters.Q)) ||
+			!paramsDer.ReadASN1Integer(unsafe.TypeOf(*pub.Parameters.G), unsafe.Pointer(pub.Parameters.G)) {
 			return nil, errors.New("x509: invalid DSA parameters")
 		}
 		if pub.Y.Sign() <= 0 || pub.Parameters.P.Sign() <= 0 ||
@@ -380,7 +380,7 @@ func parseBasicConstraintsExtension(der cryptobyte.String) (bool, int32, error) 
 	maxPathLen := -1
 	if der.PeekASN1Tag(cryptobyte_asn1.INTEGER) {
 		var mpl uint32
-		if !der.ReadASN1Integer(&mpl) || mpl > math.MaxInt {
+		if !der.ReadASN1Integer(unsafe.TypeOf(mpl), unsafe.Pointer(&mpl)) || mpl > math.MaxInt {
 			return false, 0, errors.New("x509: invalid basic constraints")
 		}
 		maxPathLen = int32(mpl)
@@ -852,7 +852,7 @@ func processExtensions(out *Certificate) error {
 				}
 			case 54:
 				val := cryptobyte.String(e.Value)
-				if !val.ReadASN1Integer(&out.InhibitAnyPolicy) {
+				if !val.ReadASN1Integer(unsafe.TypeOf(out.InhibitAnyPolicy), unsafe.Pointer(&out.InhibitAnyPolicy)) {
 					return errors.New("x509: invalid inhibit any policy extension")
 				}
 				out.InhibitAnyPolicyZero = out.InhibitAnyPolicy == 0
@@ -934,7 +934,8 @@ func parseCertificate(der []byte) (*Certificate, error) {
 		return nil, errors.New("x509: malformed tbs certificate")
 	}
 
-	if !tbs.ReadOptionalASN1Integer(&cert.Version, cryptobyte_asn1.Tag(0).Constructed().ContextSpecific(), 0) {
+	defaultVersion := int32(0)
+	if !tbs.ReadOptionalASN1Integer(unsafe.TypeOf(cert.Version), unsafe.Pointer(&cert.Version), cryptobyte_asn1.Tag(0).Constructed().ContextSpecific(), unsafe.Pointer(&defaultVersion)) {
 		return nil, errors.New("x509: malformed version")
 	}
 	if cert.Version < 0 {
@@ -948,7 +949,7 @@ func parseCertificate(der []byte) (*Certificate, error) {
 	}
 
 	serial := &big.Int{}
-	if !tbs.ReadASN1Integer(serial) {
+	if !tbs.ReadASN1Integer(unsafe.TypeOf(*serial), unsafe.Pointer(serial)) {
 		return nil, errors.New("x509: malformed serial number")
 	}
 	if serial.Sign() == -1 {
@@ -1158,7 +1159,7 @@ func ParseRevocationList(der []byte) (*RevocationList, error) {
 	if !tbs.PeekASN1Tag(cryptobyte_asn1.INTEGER) {
 		return nil, errors.New("x509: unsupported crl version")
 	}
-	if !tbs.ReadASN1Integer(&version) {
+	if !tbs.ReadASN1Integer(unsafe.TypeOf(version), unsafe.Pointer(&version)) {
 		return nil, errors.New("x509: malformed crl")
 	}
 	if version != x509v2Version {
@@ -1231,7 +1232,7 @@ func ParseRevocationList(der []byte) (*RevocationList, error) {
 			}
 
 			rce.SerialNumber = &big.Int{}
-			if !certSeq.ReadASN1Integer(rce.SerialNumber) {
+			if !certSeq.ReadASN1Integer(unsafe.TypeOf(*rce.SerialNumber), unsafe.Pointer(rce.SerialNumber)) {
 				return nil, errors.New("x509: malformed serial number")
 			}
 			rce.RevocationTime, err = parseTime(&certSeq)
@@ -1302,7 +1303,7 @@ func ParseRevocationList(der []byte) (*RevocationList, error) {
 			} else if ext.Id.Equal(_oidExtensionCRLNumber()) {
 				value := cryptobyte.String(ext.Value)
 				rl.Number = &big.Int{}
-				if !value.ReadASN1Integer(rl.Number) {
+				if !value.ReadASN1Integer(unsafe.TypeOf(*rl.Number), unsafe.Pointer(rl.Number)) {
 					return nil, errors.New("x509: malformed crl number")
 				}
 			}
