@@ -755,13 +755,21 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 				continue
 			}
 			fb2.fileScope = pb.varInitScopes[d]
-			rhs := fb2.buildExpr(d.Values)
-			if rhs == nil {
-				continue
-			}
+			var rhs SSAValue
+			rhsBuilt := false
 			for _, name := range d.NameList {
 				if name.Value == "_" {
 					continue
+				}
+				if fb2.tryConstArrayMemcpy(name, d.Values) {
+					continue
+				}
+				if !rhsBuilt {
+					rhs = fb2.buildExpr(d.Values)
+					rhsBuilt = true
+				}
+				if rhs == nil {
+					break
 				}
 				fb2.buildStore(name, rhs)
 			}
@@ -788,13 +796,21 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 			continue
 		}
 		fb.fileScope = pb.varInitScopes[d]
-		rhs := fb.buildExpr(d.Values)
-		if rhs == nil {
-			continue
-		}
+		var rhs SSAValue
+		rhsBuilt := false
 		for _, name := range d.NameList {
 			if name.Value == "_" {
 				continue
+			}
+			if fb.tryConstArrayMemcpy(name, d.Values) {
+				continue
+			}
+			if !rhsBuilt {
+				rhs = fb.buildExpr(d.Values)
+				rhsBuilt = true
+			}
+			if rhs == nil {
+				break
 			}
 			fb.buildStore(name, rhs)
 		}
@@ -1314,6 +1330,9 @@ func (fb *ssaFuncBuilder) buildAssign(s *syntax.AssignStmt) {
 				return
 			}
 		}
+	}
+	if fb.tryConstArrayMemcpy(s.Lhs, s.Rhs) {
+		return
 	}
 	rhs := fb.buildExpr(s.Rhs)
 	if rhs == nil {
@@ -4437,6 +4456,182 @@ func (fb *ssaFuncBuilder) buildArrayLit(e *syntax.CompositeLit, typ Type, ar *Ar
 		fb.emitStore(ia, v)
 	}
 	return fb.emitLoad(alloc, typ)
+}
+
+// constArrayLitMinElems is the threshold above which an all-constant
+// array literal is lowered to a private constant global + one memcpy
+// instead of per-element stores. Below it the per-element path emits
+// better code ( immediates, no rodata indirection).
+const constArrayLitMinElems = int32(64)
+
+// constArrayLitText formats an all-constant positional array literal as
+// an LLVM constant global body "[N x iK] [iK v, ...]". ok is false when
+// the literal has keyed elements, non-constant elements, non-integer
+// element type, or is below the size threshold.
+func (fb *ssaFuncBuilder) constArrayLitText(e *syntax.CompositeLit, ar *Array) (text string, bytes int64, ok bool) {
+	n := int32(len(e.ElemList))
+	if n < constArrayLitMinElems {
+		return "", 0, false
+	}
+	b, isBasic := SafeUnderlying(ar.Elem).(*Basic)
+	if !isBasic {
+		return "", 0, false
+	}
+	var width int32
+	var llvmName string
+	var signed bool
+	switch b.Kind {
+	case Int8:
+		width, llvmName, signed = 1, "i8", true
+	case Uint8:
+		width, llvmName = 1, "i8"
+	case Int16:
+		width, llvmName, signed = 2, "i16", true
+	case Uint16:
+		width, llvmName = 2, "i16"
+	case Int32:
+		width, llvmName, signed = 4, "i32", true
+	case Uint32, Uintptr:
+		width, llvmName = 4, "i32"
+	case Int64:
+		width, llvmName, signed = 8, "i64", true
+	case Uint64:
+		width, llvmName = 8, "i64"
+	default:
+		return "", 0, false
+	}
+	buf := []byte{:0:n * 8}
+	buf = appendStrBytes(buf, "[" | irItoa(n) | " x " | llvmName | "] [")
+	for i, el := range e.ElemList {
+		var v int64
+		switch ex := el.(type) {
+		case *syntax.BasicLit:
+			if ex.Kind != token.IntLit && ex.Kind != token.RuneLit {
+				return "", 0, false
+			}
+			cv := EvalBasicLitLocal(ex)
+			ci, cok := cv.(*ConstInt)
+			if !cok {
+				return "", 0, false
+			}
+			v = ci.V
+		case *syntax.Operation:
+			if ex.Op != token.Sub || ex.Y != nil {
+				return "", 0, false
+			}
+			inner, iok := ex.X.(*syntax.BasicLit)
+			if !iok || inner.Kind != token.IntLit {
+				return "", 0, false
+			}
+			cv := EvalBasicLitLocal(inner)
+			ci, cok := cv.(*ConstInt)
+			if !cok {
+				return "", 0, false
+			}
+			v = -ci.V
+		default:
+			return "", 0, false
+		}
+		v = truncIntWidth(v, width, signed)
+		if i > 0 {
+			if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+			buf = push(buf, ',')
+		}
+		buf = appendStrBytes(buf, " " | llvmName | " ")
+		buf = appendStrBytes(buf, irItoa64(v))
+	}
+	buf = appendStrBytes(buf, "]")
+	return string(buf), int64(n) * int64(width), true
+}
+
+func truncIntWidth(v int64, width int32, signed bool) (r int64) {
+	switch width {
+	case 1:
+		if signed {
+			return int64(int8(v))
+		}
+		return int64(uint8(v))
+	case 2:
+		if signed {
+			return int64(int16(v))
+		}
+		return int64(uint16(v))
+	case 4:
+		if signed {
+			return int64(int32(v))
+		}
+		return int64(uint32(v))
+	}
+	return v
+}
+
+func appendStrBytes(b []byte, s string) (r []byte) {
+	r = b
+	for i := int32(0); i < int32(len(s)); i++ {
+		if len(r) >= cap(r) { r = mxutil.GrowCap(r) }
+		r = push(r, s[i])
+	}
+	return r
+}
+
+// tryConstArrayMemcpy lowers `lhs = <const array literal>` to a single
+// memcpy from a private constant global into lhs, when the literal
+// qualifies (see constArrayLitText). Returns false when not applicable
+// and the caller falls back to the normal value path.
+func (fb *ssaFuncBuilder) tryConstArrayMemcpy(lhs, rhs syntax.Expr) (handled bool) {
+	cl, ok := rhs.(*syntax.CompositeLit)
+	if !ok || cl.Type == nil {
+		return false
+	}
+	typ := fb.resolveType(cl.Type)
+	if typ == nil {
+		return false
+	}
+	ar, isArr := SafeUnderlying(typ).(*Array)
+	if !isArr {
+		return false
+	}
+	text, bytes, cok := fb.constArrayLitText(cl, ar)
+	if !cok {
+		return false
+	}
+	var dst SSAValue
+	switch lv := lhs.(type) {
+	case *syntax.Name:
+		if lv.Value == "_" {
+			return false
+		}
+		obj := fb.lookupObject(lv.Value)
+		if obj == nil {
+			return false
+		}
+		if alloc, ok2 := fb.vars[obj]; ok2 {
+			dst = alloc
+		} else if fv, ok3 := fb.freeVarPtrs[lv.Value]; ok3 {
+			dst = fv
+		} else if g2, ok4 := fb.fn.Pkg.Members[lv.Value].(*SSAGlobal); ok4 {
+			dst = g2
+		} else if v, ok6 := obj.(*TCVar); ok6 && v.Pkg != nil && v.Pkg != fb.fn.Pkg.Pkg {
+			impPkg := fb.ensureImportedSSAPackage(v.Pkg)
+			g3, ok7 := impPkg.Members[lv.Value].(*SSAGlobal)
+			if !ok7 {
+				g3 = &SSAGlobal{name: lv.Value, typ: NewPointer(v.Typ), pkg: impPkg}
+				impPkg.SetMember(lv.Value, g3)
+			}
+			dst = g3
+		}
+	case *syntax.SelectorExpr:
+		dst = fb.buildSelectorAddr(lv)
+	case *syntax.Operation:
+		if lv.Y == nil && lv.Op == token.Mul {
+			dst = fb.buildExpr(lv.X)
+		}
+	}
+	if dst == nil {
+		return false
+	}
+	fb.emit(&SSAConstMemCpy{Dst: dst, ConstText: text, Bytes: bytes})
+	return true
 }
 
 func (fb *ssaFuncBuilder) buildCompositeLitWithType(e *syntax.CompositeLit, typ Type) (s SSAValue) {

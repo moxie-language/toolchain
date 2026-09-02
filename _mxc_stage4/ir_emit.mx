@@ -28,8 +28,10 @@ type irEmitter struct {
 	nextReg    int32
 	extDecls   map[string]string
 	extGlobals map[string]string
-	strConst   []string
-	strMap     map[string]int32
+	strConst     []string
+	strMap       map[string]int32
+	arrConsts    []string // constant array global bodies (compile arena)
+	pendArrConsts []string // fn-arena pending, merged by mergeAccumulators
 	curFunc    *SSAFunction
 	typeIDs      map[string]int32
 	typeIDNext   int32
@@ -946,6 +948,12 @@ func (e *irEmitter) emit() (s string) {
 		e.w(irEscapeString(sc))
 		e.w("\"\n")
 	}
+	if len(e.arrConsts) > 0 {
+		e.w("\ndeclare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n")
+		for i, ac := range e.arrConsts {
+			e.w("@.arr." | irItoa(i) | " = private constant " | ac | "\n")
+		}
+	}
 
 
 	if len(e.extDecls) > 0 {
@@ -1141,6 +1149,11 @@ func (e *irEmitter) mergeAccumulators() {
 		}
 	}
 	e.pendStrConsts = nil
+	for _, a := range e.pendArrConsts {
+		if len(e.arrConsts) >= cap(e.arrConsts) { e.arrConsts = mxutil.GrowCap(e.arrConsts) }
+		push(e.arrConsts, copyStr(a))
+	}
+	e.pendArrConsts = nil
 	for _, p := range e.pendTypeIDs {
 		ck := copyStr(p.k)
 		if _, ok := e.typeIDs[ck]; !ok {
@@ -1911,6 +1924,8 @@ func (e *irEmitter) emitInstr(instr SSAInstruction) {
 		e.emitExtract(i)
 	case *SSAMakeSlice:
 		e.emitMakeSlice(i)
+	case *SSAConstMemCpy:
+		e.emitConstMemCpy(i)
 	case *SSASlice:
 		e.emitSliceOp(i)
 	case *SSAMakeInterface:
@@ -3029,6 +3044,17 @@ func (e *irEmitter) sextToIpt(val SSAValue, op string) (s string) {
 	return ext
 }
 
+func (e *irEmitter) emitConstMemCpy(m *SSAConstMemCpy) {
+	// ConstText lives in the fn arena; stage it in pendArrConsts and merge
+	// (copied) after the arena dies - same lifecycle as pendStrConsts. The
+	// global index is base + pending position, matching merge order.
+	idx := int32(len(e.arrConsts) + len(e.pendArrConsts))
+	if len(e.pendArrConsts) >= cap(e.pendArrConsts) { e.pendArrConsts = mxutil.GrowCap(e.pendArrConsts) }
+	push(e.pendArrConsts, m.ConstText)
+	gname := "@.arr." | irItoa(idx)
+	e.w("  call void @llvm.memcpy.p0.p0.i64(ptr " | e.operand(m.Dst) | ", ptr " | gname | ", i64 " | irItoa64(m.Bytes) | ", i1 false)\n")
+}
+
 func (e *irEmitter) emitMakeSlice(m *SSAMakeSlice) {
 	reg := e.regName(m)
 	ipt := e.intptrType()
@@ -3396,6 +3422,9 @@ func (e *irEmitter) instrOperands(instr SSAInstruction) (ss []SSAValue) {
 	case *SSAStore:
 		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.Addr, i.Val)
+	case *SSAConstMemCpy:
+		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
+		push(e.operandBuf, i.Dst)
 	case *SSAUnOp:
 		if len(e.operandBuf) >= cap(e.operandBuf) { e.operandBuf = mxutil.GrowCap(e.operandBuf) }
 		push(e.operandBuf, i.X)
