@@ -5411,6 +5411,34 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
 				}
 			}
 		}
+	case *syntax.IndexExpr:
+		// Generic instantiation Curve[int32]: carry the instantiation args
+		// on a shallow Named copy so method resolution and layout
+		// substitution see them. Mirrors resolveTypeExprWithSubst.
+		base := fb.resolveTypeAST(ev.X)
+		if named, ok := base.(*Named); ok && named.TArgs == nil && ev.Index != nil {
+			args := []Type{}
+			if le, ok2 := ev.Index.(*syntax.ListExpr); ok2 {
+				for _, te := range le.ElemList {
+					ta := fb.resolveTypeAST(te)
+					if ta == nil {
+						return nil
+					}
+					push(args, ta)
+				}
+			} else {
+				ta := fb.resolveTypeAST(ev.Index)
+				if ta == nil {
+					return nil
+				}
+				push(args, ta)
+			}
+			if len(args) > 0 {
+				inst := &Named{Obj: named.Obj, Under: named.Under, Methods: named.Methods, TParams: named.TParams, TArgs: args}
+				return inst
+			}
+		}
+		return base
 	case *syntax.ParenExpr:
 		return fb.resolveTypeAST(ev.X)
 	}
@@ -6000,6 +6028,27 @@ func matchTypeParam(paramType syntax.Expr, argType Type, tparams []*syntax.Field
 		for i, r := range pt.ResultList {
 			if sig.Results != nil && i < int32(sig.Results.Len()) {
 				matchTypeParam(r.Type, sig.Results.At(int32(i)).Typ, tparams, typeMap)
+			}
+		}
+	case *syntax.IndexExpr:
+		// Generic instantiation Curve[T] in the parameter: bind the type
+		// args from the argument's instantiation args (a shallow Named
+		// with TArgs). E.g. Curve[T] vs Curve[int32] binds T=int32.
+		argNamed, ok := argType.(*Named)
+		if !ok {
+			if p, ok2 := SafeUnderlying(argType).(*Pointer); ok2 {
+				argNamed, ok = p.Base.(*Named)
+			}
+		}
+		if ok && argNamed.TArgs != nil {
+			if le, ok2 := pt.Index.(*syntax.ListExpr); ok2 {
+				for i, te := range le.ElemList {
+					if i < int32(len(argNamed.TArgs)) {
+						matchTypeParam(te, argNamed.TArgs[i], tparams, typeMap)
+					}
+				}
+			} else if int32(len(argNamed.TArgs)) == 1 {
+				matchTypeParam(pt.Index, argNamed.TArgs[0], tparams, typeMap)
 			}
 		}
 	}
