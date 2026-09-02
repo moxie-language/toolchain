@@ -1153,6 +1153,7 @@ func scanFileRegions(data []byte, imports map[string]bool) (bodyStart int32, bod
 	off := int32(0)
 	lineNum := int32(1)
 	bodyStart = -1
+	seenPkg := false
 	for off < int32(len(data)) {
 		// Find line extent
 		lineStart := off
@@ -1174,6 +1175,7 @@ func scanFileRegions(data []byte, imports map[string]bool) (bodyStart int32, bod
 		}
 		trimmed := data[ls:le]
 		if len(trimmed) >= 8 && string(trimmed[:8]) == "package " {
+			seenPkg = true
 			lineNum++
 			continue
 		}
@@ -1218,8 +1220,11 @@ func scanFileRegions(data []byte, imports map[string]bool) (bodyStart int32, bod
 			lineNum++
 			continue
 		}
-		// First body line
-		if bodyStart < 0 {
+		// First body line: only after the package clause, so the
+		// concatenated body never duplicates the file's own "package "
+		// header (a duplicate package clause confuses the parser and
+		// drops the following declarations).
+		if seenPkg && bodyStart < 0 {
 			bodyStart = lineStart
 			bodyLine = lineNum
 		}

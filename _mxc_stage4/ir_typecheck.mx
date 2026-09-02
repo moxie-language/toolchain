@@ -123,7 +123,47 @@ func stripUnusedConsts(src []byte) (out []byte) {
 		}
 		i++
 	}
-	// Pass 3: filter const declarations. Keep only those whose names
+	// Pass 3: collect identifiers from const declaration values, so a
+	// const referenced only by another const's initializer (e.g.
+	// `const UintSize = uintSize`) is not stripped as unused. Such
+	// const-to-const references keep the referenced const alive.
+	i = 0
+	for i < len(src) {
+		ls := i
+		for ls < len(src) && (src[ls] == ' ' || src[ls] == '\t') {
+			ls++
+		}
+		if ls+6 < len(src) && src[ls] == 'c' && src[ls+1] == 'o' && src[ls+2] == 'n' && src[ls+3] == 's' && src[ls+4] == 't' && src[ls+5] == ' ' {
+			j := ls + 6
+			// skip the name(s) up to '='
+			for j < len(src) && src[j] != '=' && src[j] != '\n' {
+				j++
+			}
+			if j < len(src) && src[j] == '=' {
+				j++
+				for j < len(src) && src[j] != '\n' {
+					if isIdentStart(src[j]) {
+						k := j + 1
+						for k < len(src) && isIdentCont(src[k]) {
+							k++
+						}
+						funcRefs[string(src[j:k])] = true
+						j = k
+					} else {
+						j++
+					}
+				}
+			}
+		}
+		for i < len(src) && src[i] != '\n' {
+			i++
+		}
+		if i < len(src) {
+			i++
+		}
+	}
+
+	// Pass 4: filter const declarations. Keep only those whose names
 	// appear in funcRefs. Scan for "const " or "const(" patterns.
 	// For simplicity, only strip individual const lines (not grouped).
 	// This handles the bulk of zerrors/zsysnum generated constants.
@@ -183,6 +223,7 @@ func isIdentCont(c byte) (ok bool) {
 }
 
 func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage, file *syntax.File) {
+
 	shortName := name
 	for i := len(name) - 1; i >= 0; i-- {
 		if name[i] == '/' {
