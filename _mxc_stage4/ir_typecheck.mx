@@ -1405,7 +1405,33 @@ func tcResolveNameInline(e syntax.Expr, scope *Scope) (t Type) {
 			}
 		}
 	case *syntax.IndexExpr:
-		return tcResolveNameInline(ex.X, scope)
+		// Generic instantiation Curve[T]: carry the type args on a shallow
+		// Named copy so var/field/return types keep their instantiation
+		// (e.g. _p224Cached *Curve[*nistec.P224Point] must not collapse to
+		// the bare generic Curve, which breaks type-arg inference).
+		base := tcResolveNameInline(ex.X, scope)
+		if named, ok := base.(*Named); ok && named.TArgs == nil && ex.Index != nil {
+			var args []Type
+			if le, ok2 := ex.Index.(*syntax.ListExpr); ok2 {
+				for _, te := range le.ElemList {
+					ta := tcResolveNameInline(te, scope)
+					if ta == nil {
+						return base
+					}
+					push(args, ta)
+				}
+			} else {
+				ta := tcResolveNameInline(ex.Index, scope)
+				if ta == nil {
+					return base
+				}
+				push(args, ta)
+			}
+			if len(args) > 0 {
+				return &Named{Obj: named.Obj, Under: named.Under, Methods: named.Methods, TParams: named.TParams, TArgs: args}
+			}
+		}
+		return base
 	case *syntax.Operation:
 		if ex.Y == nil && ex.Op == token.Mul {
 			base := tcResolveNameInline(ex.X, scope)
