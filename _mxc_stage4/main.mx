@@ -2568,13 +2568,19 @@ func mxhCountWords(d string, from, limit int32) (n int32) {
 }
 
 func loadMxhData(data []byte) (ok bool) {
-	// Types created here must survive on the root arena - they're stored
-	// in cctx.universe.Registry which outlives any compile/typecheck arena.
+	// Types created here land in the per-worker mxh arena, reset between
+	// packages by workerCompilePkg. Using the never-freed root arena leaked
+	// every package's transitive-dep types across the whole build (8GB+ on
+	// the fips140 chain). The registry is reset per package anyway, so the
+	// types only need to survive one package's compile.
 	// Manual-arena mode: FnArenaPush is a no-op, so helper functions
 	// (parseTypeDesc, NewNamed, ...) allocate here too instead of in
 	// their own transient fn arenas.
-	runtime.SovereignSetArena(runtime.RootArena())
-	defer runtime.SovereignRestoreArena(runtime.RootArena())
+	if cctx.mxhArena == nil {
+		cctx.mxhArena = runtime.ArenaNew(256 * 1024 * 1024)
+	}
+	runtime.SovereignSetArena(cctx.mxhArena)
+	defer runtime.SovereignRestoreArena(cctx.mxhArena)
 
 	// Copy the mxh bytes into the root arena: every substring derived
 	// from d (pkgPath, names, sigs) becomes a registry key and must not
@@ -4818,6 +4824,12 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 	// worker happened to compile). Reset so the registry holds exactly this
 	// package's transitive deps - deterministic and scheduling-independent.
 	resetWorkerRegistry()
+	// Reclaim the previous package's mxh types from the per-worker arena.
+	// The registry entries were deleted above; without this the mxh arena
+	// grows with every package's transitive deps for the whole build.
+	if cctx.mxhArena != nil {
+		runtime.ArenaReset(cctx.mxhArena)
+	}
 
 	// Load all dependency .mxh from cache (recursively, transitive deps first)
 	if loadErr := workerLoadDeps(pkg, meta, idxByPath, hashes); loadErr != "" {
