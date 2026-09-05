@@ -714,10 +714,24 @@ func ScanGenericDecls(src []byte, name string) {
 				}
 			}
 		case *syntax.VarDecl:
+			// Resolve the declared type from source when the registry
+			// package is unavailable (its own compile in progress) or the
+			// var is unexported and absent from the mxh export. Without
+			// this, unexported vars referenced from a monomorphized body
+			// (e.g. ecdsa's _p256Cached *Curve[*nistec.P256Point]) get a
+			// nil-typed synthetic object and degrade to the __any
+			// interface, emitting a {i64, ptr} load where the store wrote
+			// a plain ptr.
+			var declType Type
+			if dd.Type != nil {
+				declType = resolveTypeExprWithSubst(dd.Type, nil, scope)
+			}
 			for _, vn := range dd.NameList {
 				if scope.Lookup(vn.Value) == nil {
-					if ro := regScopeLookup(regPkg,vn.Value); ro != nil {
+					if ro := regScopeLookup(regPkg, vn.Value); ro != nil {
 						scope.Insert(ro)
+					} else if declType != nil {
+						scope.Insert(NewTCVar(thePkg, vn.Value, declType))
 					} else {
 						scope.Insert(NewTCVar(thePkg, vn.Value, nil))
 					}
