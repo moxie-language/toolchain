@@ -21,6 +21,8 @@ type irEmitter struct {
 	spawnWrappers map[string]bool // dedup of emitted spawn $gowrapper functions
 	spawnWrapperTexts []string    // compiled spawn wrapper IR, emitted at package tail
 	pendSpawnWrappers []string    // per-function accumulator for wrapper IR
+	pendKeepIface []Type // fn-arena: interfaces boxed during the current function
+	keepIfaceTypes []Type // compile-arena: merged; module-tail llvm.used
 	triple     string
 	ptrBits    int32
 	pkg        *SSAPackage
@@ -954,6 +956,7 @@ func (e *irEmitter) emit() (s string) {
 			e.w("@.arr." | irItoa(i) | " = private constant " | ac | "\n")
 		}
 	}
+	e.emitKeepIfaceUsed()
 
 
 	if len(e.extDecls) > 0 {
@@ -1154,6 +1157,11 @@ func (e *irEmitter) mergeAccumulators() {
 		push(e.arrConsts, copyStr(a))
 	}
 	e.pendArrConsts = nil
+	for _, it := range e.pendKeepIface {
+		if len(e.keepIfaceTypes) >= cap(e.keepIfaceTypes) { e.keepIfaceTypes = mxutil.GrowCap(e.keepIfaceTypes) }
+		push(e.keepIfaceTypes, it)
+	}
+	e.pendKeepIface = nil
 	for _, p := range e.pendTypeIDs {
 		ck := copyStr(p.k)
 		if _, ok := e.typeIDs[ck]; !ok {

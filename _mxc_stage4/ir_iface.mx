@@ -10,6 +10,9 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 	val := e.operand(m.X)
 	valType := e.llvmType(m.X.SSAType())
 	ity := e.ifaceType()
+	if m.IType != nil {
+		e.keepIfaceImpls(m.IType)
+	}
 	if valType == "void" {
 		ipt := e.intptrType()
 		e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(ity) ; e.w(" zeroinitializer, " | ipt | " 0, 0\n")
@@ -97,6 +100,92 @@ func normalizePkgPath(pkgPath string) (s string) {
 
 func (e *irEmitter) reflectTypeName(t Type) (s string) {
 	return "reflect/types.type:" | e.typeDescName(t)
+}
+
+// keepIfaceImpls records that a value is being boxed into a non-empty
+// interface. Interface dispatch in OTHER modules references this module's
+// implementation methods only via extern_weak declarations, and --gc-sections
+// drops weak-referenced sections even when this package IS linked - so a
+// main-defined concrete type's Read was silently removed and every dispatch
+// arm for it fell through to "no impl". Record the interface in a pend list
+// (fn-arena) and at module tail emit an llvm.used entry for each matching
+// same-module method, keeping it reachable from the GC root.
+func (e *irEmitter) keepIfaceImpls(ifaceType Type) {
+	it, ok := SafeUnderlying(ifaceType).(*TCInterface)
+	if !ok || it.IsEmpty() || it.NumMethods() == 0 {
+		return
+	}
+	if len(e.pendKeepIface) >= cap(e.pendKeepIface) { e.pendKeepIface = mxutil.GrowCap(e.pendKeepIface) }
+	push(e.pendKeepIface, ifaceType)
+}
+
+// emitKeepIfaceUsed writes @llvm.used entries (strong relocations that keep
+// sections alive under --gc-sections) for this module's methods that
+// implement any recorded non-empty interface. Runs at module tail with the
+// compile arena current, so the map backings are safe.
+func (e *irEmitter) emitKeepIfaceUsed() {
+	if len(e.keepIfaceTypes) == 0 {
+		return
+	}
+	seenIf := map[string]bool{}
+	var syms []string
+	seenSym := map[string]bool{}
+	for _, ift := range e.keepIfaceTypes {
+		it, ok := SafeUnderlying(ift).(*TCInterface)
+		if !ok || it.IsEmpty() || it.NumMethods() == 0 {
+			continue
+		}
+		key := e.typeDescName(ift)
+		if seenIf[key] {
+			continue
+		}
+		seenIf[key] = true
+		var mkeys []string
+		for k := range e.pkg.Members {
+			if len(mkeys) >= cap(mkeys) { mkeys = mxutil.GrowCap(mkeys) }
+			push(mkeys, k)
+		}
+		for mi := int32(0); mi < it.NumMethods(); mi++ {
+			mname := it.Method(mi).Name
+			if mname == "" {
+				continue
+			}
+			for _, k := range mkeys {
+				dotIdx := int32(-1)
+				for i := int32(len(k)) - 1; i >= 0; i-- {
+					if k[i] == '.' {
+						dotIdx = i
+						break
+					}
+				}
+				if dotIdx < 0 || k[dotIdx+1:] != mname {
+					continue
+				}
+				fn, isFn := e.pkg.Members[k].(*SSAFunction)
+				if !isFn || fn == nil {
+					continue
+				}
+				sym := e.funcSymbol(fn)
+				if mxutil.HasPrefix(sym, "@__mxc_nil_func") || seenSym[sym] {
+					continue
+				}
+				seenSym[sym] = true
+				if len(syms) >= cap(syms) { syms = mxutil.GrowCap(syms) }
+				push(syms, sym)
+			}
+		}
+	}
+	if len(syms) == 0 {
+		return
+	}
+	e.w("\n@llvm.used = appending global [" | irItoa(len(syms)) | " x ptr] [")
+	for i, s2 := range syms {
+		if i > 0 {
+			e.w(", ")
+		}
+		e.w("ptr ") ; e.w(s2)
+	}
+	e.w("]\n")
 }
 
 func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
@@ -738,6 +827,13 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 	}
 	ok := ""
 	for ti := 0; ti < len(tids); ti++ {
+		// Emit the referenced type descriptor in this module (linkonce_odr)
+		// so the ptrtoint compare has a defined global. Candidate impls can
+		// come from any package in the link set (whole-link registry), and
+		// their descriptors are not otherwise emitted here.
+		if dq := irDescriptorGlobalFromTID(tids[ti]); dq != "" {
+			e.collectTypeDescFromTail(dq)
+		}
 		cmp := e.nextReg2("ta")
 		e.w("  ") ; e.w(cmp) ; e.w(" = icmp eq " | e.intptrType() | " ") ; e.w(typeID) ; e.w(", ") ; e.w(tids[ti]) ; e.w("\n")
 		if ok == "" {
@@ -754,6 +850,29 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 		e.w("  ") ; e.w(ok) ; e.w(" = icmp eq " | e.intptrType() | " ") ; e.w(typeID) ; e.w(", -1\n")
 	}
 	return ok
+}
+
+// irDescriptorGlobalFromTID extracts the descriptor tail (the part after
+// "reflect/types.type:") from a typeID expression like
+// 'ptrtoint (ptr @"reflect/types.type:pointer:named:x.Y" to i64)'.
+func irDescriptorGlobalFromTID(tid string) (s string) {
+	const marker = "@\"reflect/types.type:"
+	mi := -1
+	for i := int32(0); i+int32(len(marker)) <= int32(len(tid)); i++ {
+		if tid[i:i+int32(len(marker))] == marker {
+			mi = i + int32(len(marker))
+			break
+		}
+	}
+	if mi < 0 {
+		return ""
+	}
+	for j := mi; j < int32(len(tid)); j++ {
+		if tid[j] == '"' {
+			return tid[mi:j]
+		}
+	}
+	return ""
 }
 
 // collectIfaceMethodNames returns the deduplicated method names of an

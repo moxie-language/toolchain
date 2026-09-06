@@ -3970,6 +3970,36 @@ func main() {
 		bst.tlsFailed = true
 		bst.buildJobs = 1
 	}
+	// Whole-link registry pre-pass: interface dispatch emits a typeID switch
+	// over impls found in cctx.universe.Registry, which is populated in
+	// dependency order. A type defined in a downstream package (main) passed
+	// into an upstream package's interface param was invisible to the
+	// upstream dispatch, which silently called a wrong impl (or hit "no
+	// impl"). Typecheck every package in the closure into the registry and
+	// write every mxh to the cache before the first emission, so dispatch
+	// enumerates the whole link set: serial emission reads the accumulated
+	// registry directly, workers load every mxh at startup.
+	for _, pkg := range pkgs {
+		if pkg.baked {
+			continue
+		}
+		compilePath := pkg.path
+		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
+			compilePath = pkg.name
+		}
+		hash := pkgHash(pkg)
+		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+		if mxutil.FileExists(cachedMxh) && !forceRebuild {
+			loadMxh(cachedMxh)
+			continue
+		}
+		src := concatSources(pkg.dir, pkg.files)
+		if len(src) == 0 {
+			continue
+		}
+		mkdirAll(mxutil.JoinPath(cacheBase, safeName(pkg.path)), 0755)
+		TypeCheckOnly(src, compilePath, cachedMxh)
+	}
 	var allBcFiles []string
 	var hasRuntimePkg bool
 	if bst.buildJobs > 1 {
@@ -4802,12 +4832,6 @@ func workerLoadDeps(pkg *pkgInfo, meta *workerMeta, idxByPath map[string]int32, 
 // workerCompilePkg compiles one package in the worker thread. All deps must
 // already have .mxh in cache. Returns empty string on success, error text on failure.
 func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map[string]int32, hashes []string) (errMsg string) {
-	// Reset the registry to builtins before each package: the worker reuses
-	// one thread for many packages, and interface dispatch / descriptor
-	// emission scan the registry. Accumulating the union of every prior
-	// package's deps makes output depend on scheduling (which packages this
-	// worker happened to compile). Reset so the registry holds exactly this
-	// package's transitive deps - deterministic and scheduling-independent.
 	resetWorkerRegistry()
 
 	// Load all dependency .mxh from cache (recursively, transitive deps first)
