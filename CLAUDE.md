@@ -75,6 +75,17 @@ Only METHOD RECEIVERS can be written to. Changes to receiver fields are tracked 
 
 Return values are serialized at return along with values written into the receiver, then decoded into the caller's arena with pointers rewritten, and the function arena can then be fully released.
 
+## Closures Do Not Capture Outer Scope
+
+Function scope = function scope. A closure (function value / anonymous function) is a STANDALONE function that receives everything it needs through its parameters. It does NOT capture variables from the enclosing function scope - there is no closure environment carrying outer locals, and this is not a compiler limitation to be fixed. The isolation is deliberate: a closure that pulled state from its enclosing frame would create an ownership tangle between the caller's arena (which dies at return) and the closure's own lifetime.
+
+Consequences:
+
+- Ported Go code that writes `func(x T) R { return usesOuterVar(x) }` inside a function is WRONG in Moxie and must be rewritten to pass `usesOuterVar`'s inputs (or a pointer to a sovereign holder) as explicit parameters or receivers.
+- A closure may read globals and its own parameters only. If it needs mutable state, that state must live in a sovereign self-mutating type passed as a parameter or receiver - not be captured from the enclosing scope.
+- Function values still exist and can be passed/called, but a function value carries only its code pointer, never an environment.
+- `spawn` already refuses to transit closure captures; the same rule applies everywhere, not just across spawn boundaries.
+
 ## Arena Relocation Rules (Stage4 correct, Legacy must match)
 
 - Every function that returns pointer-containing types gets FnArenaPush at entry and full three-pass relocation at exit.
