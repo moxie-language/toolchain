@@ -4904,6 +4904,15 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 	if imported.Path == "unsafe" && funcName == "Offsetof" {
 		return NewSSAConst(&ConstInt{V:0}, Typ[Int64])
 	}
+	if imported.Path == "internal/abi" && (funcName == "Escape" || funcName == "NoEscape") {
+		// Escape is a no-op identity in the arena model (values are
+		// serialized across function returns regardless); NoEscape
+		// passes the pointer through.
+		if len(argList) == 1 {
+			return fb.buildExpr(argList[0])
+		}
+		return nil
+	}
 	if result, handled := fb.tryGenericPkgCall(pn, funcName, argList, hasDots); handled {
 		return result
 	}
@@ -6294,6 +6303,29 @@ func extractConstraintTypeParams(constraint syntax.Expr, concreteType Type, tpar
 				}
 			}
 		}
+	case *syntax.MapType:
+		// ~map[K]V constraints (e.g. maps.All[Map ~map[K]V, K, V]): bind
+		// the key and value type params from the concrete map type.
+		if m, ok := SafeUnderlying(concreteType).(*TCMap); ok {
+			if name, ok2 := c.Key.(*syntax.Name); ok2 {
+				for _, tp := range tparams {
+					if tp.Name != nil && tp.Name.Value == name.Value {
+						if _, already := typeMap[name.Value]; !already {
+							typeMap[name.Value] = m.Key
+						}
+					}
+				}
+			}
+			if name, ok2 := c.Value.(*syntax.Name); ok2 {
+				for _, tp := range tparams {
+					if tp.Name != nil && tp.Name.Value == name.Value {
+						if _, already := typeMap[name.Value]; !already {
+							typeMap[name.Value] = m.Elem
+						}
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -6592,6 +6624,7 @@ func (fb *ssaFuncBuilder) tryGenericLocalCall(funcName string, argList []syntax.
 	typeArgs = fb.inferTypeArgsFromArgASTs(fd, argList, typeArgs)
 	return fb.monomorphizeAndCall(fd, funcName, typeArgs, args, fb.fn.Pkg, pkgPath, hasDots)
 }
+
 
 func (fb *ssaFuncBuilder) tryGenericPkgCall(pn *PkgName, funcName string, argList []syntax.Expr, hasDots bool) (s SSAValue, handled bool) {
 	imported := pn.Imported
