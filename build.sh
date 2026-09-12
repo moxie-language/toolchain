@@ -43,16 +43,10 @@ MOXIE="$(cd "$(dirname "$MOXIE")" && pwd)/$(basename "$MOXIE")"
 echo "=== Building moxie (self-hosting) ==="
 echo "Bootstrap: $MOXIE"
 
-# find compiler source directory
-COMPILER_SRC=""
-for d in "$MOXIEROOT/_mxc_stage4" "$MOXIEROOT/cmd/moxie"; do
-    if [ -d "$d" ] && [ -f "$d/main.mx" ]; then
-        COMPILER_SRC="$d"
-        break
-    fi
-done
-if [ -z "$COMPILER_SRC" ]; then
-    echo "error: compiler source not found in _mxc_stage4/ or cmd/moxie/" >&2
+# compiler source directory
+COMPILER_SRC="$MOXIEROOT/_mxc_stage4"
+if [ ! -d "$COMPILER_SRC" ] || [ ! -f "$COMPILER_SRC/main.mx" ]; then
+    echo "error: compiler source not found in _mxc_stage4/" >&2
     exit 1
 fi
 echo "Source: $COMPILER_SRC"

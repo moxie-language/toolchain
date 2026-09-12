@@ -726,7 +726,16 @@ func (a *Adapter) stmt(s Stmt) ast.Stmt {
 			Label:  a.ident(s.Label),
 		}
 	case *CallStmt:
-		ce := a.expr(s.Call).(*ast.CallExpr)
+		x := a.expr(s.Call)
+		ce, ok := x.(*ast.CallExpr)
+		if !ok {
+			// bare `defer f` / `go f`: f is a function value, not a call
+			ce = &ast.CallExpr{
+				Fun:    x,
+				Lparen: a.pos(s.Pos()),
+				Rparen: a.pos(s.Pos()),
+			}
+		}
 		if s.Tok == Defer {
 			return &ast.DeferStmt{
 				Defer: a.pos(s.Pos()),

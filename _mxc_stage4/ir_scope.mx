@@ -2,6 +2,8 @@ package main
 
 import (
 	"git.smesh.lol/moxie/pkg/mxutil"
+	"git.smesh.lol/moxie/pkg/syntax"
+	"git.smesh.lol/moxie/pkg/token"
 	. "git.smesh.lol/moxie/pkg/types"
 )
 
@@ -135,6 +137,108 @@ func checkGlobalMutation(f *SSAFunction) {
 					if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
 					push(cctx.compileErrors, f.name | ": package globals are immutable outside init: mutate through the methods of a sovereign self-mutating type")
 				}
+			}
+		}
+	}
+}
+
+// checkSovereignLoopDecls rejects variable declarations inside a loop body in
+// a self-mutating (sovereign) method. Such declarations allocate per iteration
+// into the receiver's sovereign arena, accumulating scratch that is only
+// reclaimed at method return. Move the loop scratch into a helper function.
+// Applies to all code, the compiler included.
+func checkSovereignLoopDecls(p *SSAPackage, files []*syntax.File) {
+	if p == nil {
+		return
+	}
+	for _, f := range files {
+		if f == nil {
+			continue
+		}
+		for _, d := range f.DeclList {
+			fd, ok := d.(*syntax.FuncDecl)
+			if !ok || fd.Recv == nil || fd.Body == nil || fd.Name == nil {
+				continue
+			}
+			recvName := ssaRecvTypeName(fd.Recv)
+			if recvName == "" {
+				continue
+			}
+			member, ok2 := p.Members["(*" | recvName | ")." | fd.Name.Value]
+			if !ok2 {
+				member, ok2 = p.Members[recvName | "." | fd.Name.Value]
+			}
+			fn, ok3 := member.(*SSAFunction)
+			if !ok3 || fn.Signature == nil || fn.Signature.Recv == nil || !ssaFuncHasReceiverWrite(fn) {
+				continue
+			}
+			var named *Named
+			if ptr, okp := SafeUnderlying(fn.Signature.Recv.Typ).(*Pointer); okp {
+				if n, okn := ptr.Base.(*Named); okn {
+					named = n
+				}
+			}
+			if named == nil || !ssaIsSovereignNamedType(p, named) {
+				continue
+			}
+			scanSovLoopDecls(fn.name, fd.Body.List, false)
+		}
+	}
+}
+
+func sovLoopErr(name, msg string) {
+	if len(cctx.compileErrors) >= cap(cctx.compileErrors) {
+		cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors)
+	}
+	push(cctx.compileErrors, name | ": " | msg)
+}
+
+func scanSovLoopDecls(name string, stmts []syntax.Stmt, inLoop bool) {
+	for _, s := range stmts {
+		if s == nil {
+			continue
+		}
+		switch st := s.(type) {
+		case *syntax.DeclStmt:
+			if inLoop {
+				for _, d := range st.DeclList {
+					if _, ok := d.(*syntax.VarDecl); ok {
+						sovLoopErr(name, "variable declaration inside a loop in a self-mutating method is not allowed: move the loop scratch into a helper function")
+					}
+				}
+			}
+		case *syntax.AssignStmt:
+			if inLoop && st.Op == token.Def {
+				sovLoopErr(name, "':=' declaration inside a loop in a self-mutating method is not allowed: move the loop scratch into a helper function")
+			}
+		case *syntax.ForStmt:
+			if st.Body != nil {
+				scanSovLoopDecls(name, st.Body.List, true)
+			}
+		case *syntax.BlockStmt:
+			scanSovLoopDecls(name, st.List, inLoop)
+		case *syntax.IfStmt:
+			if st.Then != nil {
+				scanSovLoopDecls(name, st.Then.List, inLoop)
+			}
+			if st.Else != nil {
+				scanSovLoopDecls(name, []syntax.Stmt{st.Else}, inLoop)
+			}
+		case *syntax.SwitchStmt:
+			for _, c := range st.Body {
+				if c != nil {
+					scanSovLoopDecls(name, c.Body, inLoop)
+				}
+			}
+		case *syntax.SelectStmt:
+			for _, c := range st.Body {
+				if c != nil {
+					scanSovLoopDecls(name, c.Body, inLoop)
+				}
+			}
+		case *syntax.LabeledStmt:
+			if st.Stmt != nil {
+				scanSovLoopDecls(name, []syntax.Stmt{st.Stmt}, inLoop)
 			}
 		}
 	}

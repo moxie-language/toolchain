@@ -60,6 +60,21 @@ func codecIsStableAddr(p uintptr) (ok bool) {
 		}
 		return true
 	}
+	if codecRetTransient {
+		// Return-value encoding: only the callee's own fn arena (the top
+		// of the stack) dies at return. Pointers into any other arena -
+		// including ancestor function arenas - keep identity so caller
+		// locals passed as receivers to nested calls (e.g. chained
+		// method calls on a sovereign method's locals) alias correctly.
+		if domainRoot.fnTop >= 1 {
+			i := domainRoot.fnTop
+			if domainRoot.fnBorrow[i>>6]&(1<<(i&63)) == 0 &&
+				codecArenaContains(domainRoot.fnStack[i], p) {
+				return false
+			}
+		}
+		return true
+	}
 	nreg := domainRoot.fnTop
 	if nreg < 0 {
 		nreg = 0
@@ -77,6 +92,10 @@ func codecIsStableAddr(p uintptr) (ok bool) {
 
 // codecTopOnlyTransient: see codecIsStableAddr.
 var codecTopOnlyTransient bool
+
+// codecRetTransient: see codecIsStableAddr. Set by the compiler around
+// return-value encoding.
+var codecRetTransient bool
 
 // codecNoteStable marks the owner arena of a stable emission as escaped
 // when the pointer targets a sovereign data arena: external holders now
@@ -487,13 +506,20 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 			n := int32(codecReadVarint(cb))
 			ncp := int32(codecReadVarint(cb))
 			hdr := alloc(typ.Size(), unsafe.Pointer(typ))
-			if n > 0 {
-				dataPtr := alloc(uintptr(n), nil)
+			// The backing allocation must cover the capacity, not just
+			// the length: push() never grows and writes at len, up to
+			// cap. Allocating only n when ncp > n hands out a truncated
+			// buffer whose tail writes land in the next allocation and
+			// are destroyed by the next alloc's memzero.
+			allocN := ncp
+			if allocN < n {
+				allocN = n
+			}
+			if allocN > 0 {
+				dataPtr := alloc(uintptr(allocN), nil)
 				memcpy(dataPtr, unsafe.Pointer(&cb.data[cb.pos]), uintptr(n))
 				cb.pos += n
 				*(*unsafe.Pointer)(hdr) = dataPtr
-			} else if ncp > 0 {
-				*(*unsafe.Pointer)(hdr) = alloc(uintptr(ncp), nil)
 			}
 			*(*uintptr)(unsafe.Add(hdr, 8)) = uintptr(n)
 			if typ.Size() > 16 {
@@ -1101,5 +1127,10 @@ func codecDecodeRecvWrites(cb *CodecBuf, ds *codecDecodeSeen, table unsafe.Point
 // codecSetTopOnlyTransient sets the store-back transient mode.
 func codecSetTopOnlyTransient(b bool) {
 	codecTopOnlyTransient = b
+}
+
+// codecSetRetTransient sets the return-value encode transient mode.
+func codecSetRetTransient(b bool) {
+	codecRetTransient = b
 }
 

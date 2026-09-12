@@ -114,14 +114,24 @@ func stringConcat(x, y _string) _string {
 // destination is allocated via SecureAlloc so the concatenated result
 // inherits guard-page + wipe protection and its pointer lives inside a
 // registered arena (so subsequent comparisons promote to constant-time).
-// bytesConcat: borrow semantics (z := x | y). Allocates new buffer,
-// copies both sides. x and y untouched. Allocates with 2x capacity
-// so subsequent move-concats in a chain can extend in place.
+// bytesConcat: borrow semantics (z := x | y). When x is empty and has
+// capacity, the result is written into x's backing (the append-into-
+// buffer idiom, e.g. Sum(dst[:0])). Otherwise allocates a new buffer with
+// 2x capacity so subsequent move-concats in a chain can extend in place.
 func bytesConcat(x, y []byte) []byte {
 	if len(x) == 0 && len(y) == 0 {
 		return nil
 	}
-	length := len(x) + len(y)
+	needed := len(x) + len(y)
+	if len(x) == 0 && cap(x) >= needed {
+		if len(y) > 0 {
+			xPtr := unsafe.Pointer((*_string)(unsafe.Pointer(&x)).ptr)
+			yPtr := unsafe.Pointer((*_string)(unsafe.Pointer(&y)).ptr)
+			memmove(xPtr, yPtr, uintptr(len(y)))
+		}
+		return x[:needed]
+	}
+	length := needed
 	bufCap := uintptr(length) * 2
 	if bufCap < 64 {
 		bufCap = 64

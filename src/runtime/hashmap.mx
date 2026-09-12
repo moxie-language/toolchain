@@ -85,6 +85,36 @@ func hashmapMake(keySize, valueSize uintptr, sizeHint uintptr, alg uint8) *hashm
 	}
 }
 
+// hashmapOwner returns the arena a map should allocate its index (bucket
+// arrays) and items (key copies) in. A map is sovereign over its own storage:
+// it derives its home arena from its current header address rather than
+// trusting the arena captured at construction, which may have been freed after
+// the map was relocated into another arena. Falls back to the recorded owner
+// (for a data-arena map whose header is not on the frame stack), then to the
+// root arena so an allocation can never target a dead arena.
+func hashmapOwner(m *hashmap) (a *Arena) {
+	p := uintptr(unsafe.Pointer(m))
+	a = sovFindContainingArena(p)
+	if a != nil {
+		return a
+	}
+	// The header may live in a sovereign data arena, which is not on the
+	// function arena stack. The current method's stable arena (and the
+	// enclosing stable stack) are the registered data arenas.
+	if domainRoot.stableArena != nil && sovInArena(domainRoot.stableArena, p) {
+		return domainRoot.stableArena
+	}
+	for i := int32(0); i < domainRoot.stableTop; i++ {
+		if domainRoot.stableStack[i] != nil && sovInArena(domainRoot.stableStack[i], p) {
+			return domainRoot.stableStack[i]
+		}
+	}
+	if m.owner != nil {
+		return m.owner
+	}
+	return domainRoot.fnStack[0]
+}
+
 // Remove all entries from the map, without actually deallocating the space for
 // it. This is used for the clear builtin, and can be used to reuse a map (to
 // avoid extra heap allocations).
@@ -321,9 +351,7 @@ func hashmapSet(m *hashmap, key unsafe.Pointer, value unsafe.Pointer, hash uint3
 func hashmapInsertIntoNewBucket(m *hashmap, key, value unsafe.Pointer, tophash uint8) *hashmapBucket {
 	bucketBufSize := hashmapBucketSize(m)
 	saved := CurrentArena()
-	if m.owner != nil {
-		SetCurrentArena(m.owner)
-	}
+	SetCurrentArena(hashmapOwner(m))
 	bucketBuf := alloc(bucketBufSize, nil)
 	SetCurrentArena(saved)
 	bucket := (*hashmapBucket)(bucketBuf)
@@ -348,9 +376,7 @@ func hashmapGrow(m *hashmap) {
 
 	// Allocate new buckets in the map's owning arena.
 	saved := CurrentArena()
-	if m.owner != nil {
-		SetCurrentArena(m.owner)
-	}
+	SetCurrentArena(hashmapOwner(m))
 
 	m.bucketBits = oldBits + 1
 	m.count = 0
@@ -635,9 +661,7 @@ func hashmapContentSet(m *hashmap, key string, value unsafe.Pointer) {
 	_s := (*_string)(unsafe.Pointer(&key))
 	if _s.length > 0 {
 		saved := CurrentArena()
-		if m.owner != nil {
-			SetCurrentArena(m.owner)
-		}
+		SetCurrentArena(hashmapOwner(m))
 		kb := alloc(uintptr(_s.length), nil)
 		memcpy(kb, unsafe.Pointer(_s.ptr), uintptr(_s.length))
 		SetCurrentArena(saved)

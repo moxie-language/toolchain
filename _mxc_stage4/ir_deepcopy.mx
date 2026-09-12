@@ -68,29 +68,29 @@ func (e *irEmitter) funcNeedsCodec(f *SSAFunction) (ok bool) {
 }
 
 func (e *irEmitter) isSovereignNamedType(named *Named) (ok bool) {
+	return ssaIsSovereignNamedType(e.pkg, named)
+}
+
+// ssaIsSovereignNamedType reports whether named is a self-mutating (sovereign)
+// type: a named struct that needs a codec and has at least one method that
+// writes a receiver field. The syntax package and the compiler's main package
+// are excluded (mirrors the legacy compiler).
+func ssaIsSovereignNamedType(p *SSAPackage, named *Named) (ok bool) {
 	if named == nil || named.Obj == nil {
 		return false
 	}
-	// The syntax package's Scanner and Parser overwrite receiver fields as
-	// scratch; keep them out of the sovereign arena model (mirrors the
-	// legacy compiler's exclusion). Likewise the compiler's own main
-	// package (irEmitter, SSA builders) accumulates transient scratch.
-	// All other packages, including pkg/types, stay sovereign: the sovGroup
-	// lifecycle is bound to the receiver's arena (ArenaFree/ArenaRelease
-	// sweep), so per-package scratch receivers get fresh groups each
-	// package and dead groups die with their arena - no exemption needed.
-	if named.Obj.Pkg != nil &&
-		(named.Obj.Pkg.Path == "main" ||
-			named.Obj.Pkg.Path == "git.smesh.lol/moxie/pkg/syntax") {
-		return false
+	if named.Obj.Pkg != nil {
+		pp := named.Obj.Pkg.Path
+		if pp == "main" || pp == "git.smesh.lol/moxie/pkg/syntax" || pp == "syntax" {
+			return false
+		}
 	}
-	st, ok2 := SafeUnderlying(named).(*TCStruct)
+	_, ok2 := SafeUnderlying(named).(*TCStruct)
 	if !ok2 || !typeNeedsCodec(named) {
 		return false
 	}
-	_ = st
 	mangledPrefix := "(*" | named.Obj.Name | ")."
-	for mname, member := range e.pkg.Members {
+	for mname, member := range p.Members {
 		if !mxutil.HasPrefix(mname, mangledPrefix) {
 			continue
 		}
@@ -110,13 +110,32 @@ func ssaFuncHasReceiverWrite(fn *SSAFunction) (ok bool) {
 		return false
 	}
 	recvParam := fn.Params[0]
+	// The stage4 SSA spills the receiver and locals into allocas and reloads
+	// them. Map each alloca to the value stored into it so the walk can follow
+	// a load back to its source (e.g. xLimbs := x.limbs[:size]).
+	localStore := map[SSAValue]SSAValue{}
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
 			store, ok2 := instr.(*SSAStore)
 			if !ok2 {
 				continue
 			}
-			if ssaValueRootedIn(store.Addr, recvParam) {
+			if _, isAlloc := store.Addr.(*SSAAlloc); !isAlloc {
+				continue
+			}
+			localStore[store.Addr] = store.Val
+		}
+	}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			store, ok2 := instr.(*SSAStore)
+			if !ok2 {
+				continue
+			}
+			if _, isAlloc := store.Addr.(*SSAAlloc); isAlloc {
+				continue
+			}
+			if ssaRecvRooted(store.Addr, recvParam, localStore) {
 				return true
 			}
 		}
@@ -124,30 +143,41 @@ func ssaFuncHasReceiverWrite(fn *SSAFunction) (ok bool) {
 	return false
 }
 
-func ssaValueRootedIn(v SSAValue, target SSAValue) (ok bool) {
+// ssaRecvRooted reports whether v derives from the receiver param through
+// field/index/slice operations, resolving loads of local allocas to the value
+// stored into them.
+func ssaRecvRooted(v SSAValue, recvParam SSAValue, localStore map[SSAValue]SSAValue) (ok bool) {
 	seen := map[SSAValue]bool{}
-	var walk func(x SSAValue) bool
-	walk = func(x SSAValue) bool {
-		if seen[x] {
+	var walk func(x SSAValue, depth int32) bool
+	walk = func(x SSAValue, depth int32) bool {
+		if x == nil || depth > 64 || seen[x] {
 			return false
 		}
 		seen[x] = true
+		if x == recvParam {
+			return true
+		}
 		switch vv := x.(type) {
 		case *SSAFieldAddr:
-			return walk(vv.X)
+			return walk(vv.X, depth+1)
 		case *SSAIndexAddr:
-			return walk(vv.X)
+			return walk(vv.X, depth+1)
 		case *SSASlice:
-			return walk(vv.X)
+			return walk(vv.X, depth+1)
 		case *SSAUnOp:
-			return walk(vv.X)
+			if vv.Op == OpMul {
+				if sv, has := localStore[vv.X]; has && sv != nil {
+					return walk(sv, depth+1)
+				}
+			}
+			return walk(vv.X, depth+1)
 		case *SSAMakeInterface:
-			return walk(vv.X)
+			return walk(vv.X, depth+1)
 		default:
-			return x == target
+			return false
 		}
 	}
-	return walk(v)
+	return walk(v, 0)
 }
 
 func (e *irEmitter) emitArenaPrologue() (ok bool) {
@@ -164,23 +194,35 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 		if ptr, ok2 := SafeUnderlying(recvTyp).(*Pointer); ok2 {
 			if named, ok3 := ptr.Base.(*Named); ok3 {
 				if e.isSovereignNamedType(named) {
-					recvName := e.curFunc.Params[0].SSAName()
-					// Sovereign arena is held in a root-arena hashmap keyed by
-					// receiver address (no struct layout change).
+					recvName := e.operand(e.curFunc.Params[0])
+					// Acquire the receiver's sovereign group (root-arena
+					// hashmap keyed by receiver address), register its data
+					// arena as stable, open an allocation batch, and borrow the
+					// data arena as this method's working arena. Allocations
+					// land there and are recorded; codecSovereignEndCall at
+					// return reclaims the batch.
 					e.nextReg++
-					arenaVal := "%sov_arena"
-					arenaVal = arenaVal | irItoa(e.nextReg)
-					e.w("  ") ; e.w(arenaVal) ; e.w(" = call ptr @runtime.codecSovereignArena(ptr ") ; e.w(recvName) ; e.w(", ptr null)\n")
+					group := "%sov_group"
+					group = group | irItoa(e.nextReg)
+					e.w("  ") ; e.w(group) ; e.w(" = call ptr @runtime.codecSovereignArena(ptr ") ; e.w(recvName) ; e.w(", ptr null)\n")
 					e.declareRuntime("runtime.codecSovereignArena", "ptr", "ptr, ptr")
 					e.nextReg++
 					parentArena := "%sov_parent"
 					parentArena = parentArena | irItoa(e.nextReg)
 					e.w("  ") ; e.w(parentArena) ; e.w(" = call ptr @runtime.CurrentArena(ptr null)\n")
 					e.declareRuntime("runtime.CurrentArena", "ptr", "")
-					e.w("  call void @runtime.SovereignSetArena(ptr ") ; e.w(arenaVal) ; e.w(", ptr null)\n")
-					e.declareRuntime("runtime.SovereignSetArena", "void", "ptr")
-					e.w("  call void @runtime.SovereignRegStable(ptr ") ; e.w(arenaVal) ; e.w(", ptr null)\n")
+					e.nextReg++
+					dataArena := "%sov_data"
+					dataArena = dataArena | irItoa(e.nextReg)
+					e.w("  ") ; e.w(dataArena) ; e.w(" = call ptr @runtime.sovDataArena(ptr ") ; e.w(group) ; e.w(", ptr null)\n")
+					e.declareRuntime("runtime.sovDataArena", "ptr", "ptr")
+					e.w("  call void @runtime.SovereignRegStable(ptr ") ; e.w(dataArena) ; e.w(", ptr null)\n")
 					e.declareRuntime("runtime.SovereignRegStable", "void", "ptr")
+					e.w("  call void @runtime.codecSovereignEnter(ptr ") ; e.w(group) ; e.w(", ptr null)\n")
+					e.declareRuntime("runtime.codecSovereignEnter", "void", "ptr")
+					e.w("  call void @runtime.SovereignSetArena(ptr ") ; e.w(dataArena) ; e.w(", ptr null)\n")
+					e.declareRuntime("runtime.SovereignSetArena", "void", "ptr")
+					e.sovereignGroupReg = group
 					e.parentArenaReg = parentArena
 					e.arenaActive = true
 					e.arenaBorrowed = true
@@ -202,7 +244,7 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 		recvTyp := e.curFunc.Signature.Recv.Typ
 		if ptr, ok2 := SafeUnderlying(recvTyp).(*Pointer); ok2 {
 			if named, ok3 := ptr.Base.(*Named); ok3 && e.isSovereignNamedType(named) && !ssaFuncHasReceiverWrite(e.curFunc) {
-				recvName := e.curFunc.Params[0].SSAName()
+				recvName := e.operand(e.curFunc.Params[0])
 				e.w("  call void @runtime.codecRegStable(ptr ") ; e.w(recvName) ; e.w(", ptr null)\n")
 				e.declareRuntime("runtime.codecRegStable", "void", "ptr, ptr")
 				e.stableReg = true
@@ -214,12 +256,16 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 }
 
 func (e *irEmitter) emitSovereignEpilogue(llvmType string, val string) {
+	// Mark this call's batch dead; the receiver-rooted mark-compact at region
+	// exhaustion reclaims the dead blocks.
+	e.w("  call void @runtime.codecSovereignEndCall(ptr ") ; e.w(e.sovereignGroupReg) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.codecSovereignEndCall", "void", "ptr")
+
 	if llvmType == "void" || e.curFunc.Signature.Results == nil || int32(e.curFunc.Signature.Results.Len()) == 0 {
-		e.w("  call void @runtime.SovereignRestoreArena(ptr ") ; e.w(e.parentArenaReg)
-		e.w(", ptr null)\n")
-		e.declareRuntime("runtime.SovereignRestoreArena", "void", "ptr")
 		e.w("  call void @runtime.SovereignRegRestore(ptr null)\n")
 		e.declareRuntime("runtime.SovereignRegRestore", "void", "")
+		e.w("  call void @runtime.SovereignRestoreArena(ptr ") ; e.w(e.parentArenaReg) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.SovereignRestoreArena", "void", "ptr")
 		e.w("  ret void\n")
 		return
 	}
@@ -235,11 +281,10 @@ func (e *irEmitter) emitSovereignEpilogue(llvmType string, val string) {
 		}
 	}
 	if !needsCodec {
-		e.w("  call void @runtime.SovereignRestoreArena(ptr ") ; e.w(e.parentArenaReg)
-		e.w(", ptr null)\n")
-		e.declareRuntime("runtime.SovereignRestoreArena", "void", "ptr")
 		e.w("  call void @runtime.SovereignRegRestore(ptr null)\n")
 		e.declareRuntime("runtime.SovereignRegRestore", "void", "")
+		e.w("  call void @runtime.SovereignRestoreArena(ptr ") ; e.w(e.parentArenaReg) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.SovereignRestoreArena", "void", "ptr")
 		e.w("  ret ") ; e.w(llvmType) ; e.w(" ") ; e.w(val) ; e.w("\n")
 		return
 	}
@@ -264,6 +309,11 @@ func (e *irEmitter) emitSovereignEpilogue(llvmType string, val string) {
 	e.declareRuntime("runtime.codecBufInit", "void", "ptr")
 	e.w("  call void @runtime.codecSeenInit(ptr ") ; e.w(ss) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.codecSeenInit", "void", "ptr")
+	// Return-value encode: only the callee's own fn arena is transient so
+	// pointers into ancestor arenas (e.g. the caller's locals used as
+	// chained method receivers) keep identity instead of being copied.
+	e.w("  call void @runtime.codecSetRetTransient(i1 true, ptr null)\n")
+	e.declareRuntime("runtime.codecSetRetTransient", "void", "i1")
 
 	for i := int32(0); i < int32(e.curFunc.Signature.Results.Len()); i++ {
 		rt := e.curFunc.Signature.Results.At(i).Typ
@@ -280,6 +330,7 @@ func (e *irEmitter) emitSovereignEpilogue(llvmType string, val string) {
 		}
 		e.emitCodecEncode(rootReg, rt, cb, ss)
 	}
+	e.w("  call void @runtime.codecSetRetTransient(i1 false, ptr null)\n")
 
 	// Save CodecBuf data pointer and position.
 	e.nextReg++
@@ -292,8 +343,9 @@ func (e *irEmitter) emitSovereignEpilogue(llvmType string, val string) {
 	sp := "%csp" ; sp = sp | irItoa(e.nextReg)
 	e.w("  ") ; e.w(sp) ; e.w(" = extractvalue ") ; e.w(st) ; e.w(" ") ; e.w(sd) ; e.w(", 1\n")
 
-	e.w("  call void @runtime.SovereignRestoreArena(ptr ") ; e.w(e.parentArenaReg)
-	e.w(", ptr null)\n")
+	// Restore the caller's arena for the decode phase. The data arena is
+	// borrowed, not freed.
+	e.w("  call void @runtime.SovereignRestoreArena(ptr ") ; e.w(e.parentArenaReg) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.SovereignRestoreArena", "void", "ptr")
 	e.w("  call void @runtime.SovereignRegRestore(ptr null)\n")
 	e.declareRuntime("runtime.SovereignRegRestore", "void", "")
@@ -354,7 +406,7 @@ func (e *irEmitter) emitSovereignEpilogue(llvmType string, val string) {
 		} else if newReg != fixReg {
 			e.nextReg++
 			ins := "%cdins" ; ins = ins | irItoa(e.nextReg)
-			e.w("  ") ; e.w(ins) ; e.w(" = insertvalue ") ; e.w(llvmType) ; e.w(" ") ; e.w(cur) ; e.w(", ptr ") ; e.w(newReg) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
+			e.w("  ") ; e.w(ins) ; e.w(" = insertvalue ") ; e.w(llvmType) ; e.w(" ") ; e.w(cur) ; e.w(", ") ; e.w(e.llvmType(rt)) ; e.w(" ") ; e.w(newReg) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
 			cur = ins
 		}
 	}
@@ -423,6 +475,11 @@ func (e *irEmitter) emitRetWithCodec(llvmType string, val string) {
 	e.declareRuntime("runtime.codecBufInit", "void", "ptr")
 	e.w("  call void @runtime.codecSeenInit(ptr ") ; e.w(ss) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.codecSeenInit", "void", "ptr")
+	// Return-value encode: only the callee's own fn arena is transient so
+	// pointers into ancestor arenas (e.g. the caller's locals used as
+	// chained method receivers) keep identity instead of being copied.
+	e.w("  call void @runtime.codecSetRetTransient(i1 true, ptr null)\n")
+	e.declareRuntime("runtime.codecSetRetTransient", "void", "i1")
 
 	for i := int32(0); i < int32(e.curFunc.Signature.Results.Len()); i++ {
 		rt := e.curFunc.Signature.Results.At(i).Typ
@@ -439,6 +496,7 @@ func (e *irEmitter) emitRetWithCodec(llvmType string, val string) {
 		}
 		e.emitCodecEncode(rootReg, rt, cb, ss)
 	}
+	e.w("  call void @runtime.codecSetRetTransient(i1 false, ptr null)\n")
 
 	// Save CodecBuf data pointer and position (scalars survive FnArenaPop)
 	e.nextReg++

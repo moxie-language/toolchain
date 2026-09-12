@@ -204,9 +204,7 @@ func NewPublicKey[P Point[P]](c *Curve[P], Q []byte) (*PublicKey, error) {
 func GenerateKey[P Point[P]](c *Curve[P], rand io.Reader) (*PrivateKey, error) {
 	fips140.RecordApproved()
 
-	k, Q, err := randomPoint(c, func(b []byte) error {
-		return drbg.ReadWithReader(rand, b)
-	})
+	k, Q, err := randomPoint(c, rand, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -228,10 +226,15 @@ func GenerateKey[P Point[P]](c *Curve[P], rand io.Reader) (*PrivateKey, error) {
 // Generation of Private Keys by Rejection Sampling) or Appendix A.3.3
 // (Per-Message Secret Number Generation for Deterministic ECDSA) followed by
 // Step 5 of Section 6.4.1.
-func randomPoint[P Point[P]](c *Curve[P], generate func([]byte) error) (k *bigmod.Nat, p P, err error) {
+// Moxie closures do not capture outer scope, so the randomness source is
+// passed explicitly: d != nil uses the deterministic DRBG, otherwise rand
+// feeds drbg.ReadWithReader.
+func randomPoint[P Point[P]](c *Curve[P], rand io.Reader, d *hmacDRBG) (k *bigmod.Nat, p P, err error) {
 	for {
 		b := []byte{:c.N.Size()}
-		if err := generate(b); err != nil {
+		if d != nil {
+			d.Generate(b)
+		} else if err := drbg.ReadWithReader(rand, b); err != nil {
 			return nil, nil, err
 		}
 
@@ -330,10 +333,7 @@ func bits2octets[P Point[P]](c *Curve[P], hash []byte) []byte {
 func signGeneric[P Point[P]](c *Curve[P], priv *PrivateKey, drbg *hmacDRBG, hash []byte) (*Signature, error) {
 	// FIPS 186-5, Section 6.4.1
 
-	k, R, err := randomPoint(c, func(b []byte) error {
-		drbg.Generate(b)
-		return nil
-	})
+	k, R, err := randomPoint(c, nil, drbg)
 	if err != nil {
 		return nil, err
 	}

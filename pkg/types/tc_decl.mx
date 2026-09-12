@@ -107,8 +107,9 @@ func (c *Checker) collectImport(d *syntax.ImportDecl) {
 	}
 	if localName == "." {
 		if imported.Scope != nil {
+			var obj Object
 			for _, n := range imported.Scope.Names() {
-				obj := imported.Scope.Lookup(n)
+				obj = imported.Scope.Lookup(n)
 				if obj != nil && ObjectExported(obj) {
 					if c.fileScope != nil {
 						c.fileScope.Insert(obj)
@@ -162,9 +163,10 @@ func (c *Checker) checkTypeDecl(d *syntax.TypeDecl) {
 			tpParent = c.fileScope
 		}
 		tmpScope := NewScope(tpParent)
+		var tpObj *TypeName
 		for _, tp := range d.TParamList {
 			if tp.Name != nil && tp.Name.Value != "" {
-				tpObj := NewTypeName(c.pkg, tp.Name.Value,
+				tpObj = NewTypeName(c.pkg, tp.Name.Value,
 					NewTypeParam(NewTypeName(c.pkg, tp.Name.Value, nil), nil))
 				tmpScope.Insert(tpObj)
 			}
@@ -176,8 +178,9 @@ func (c *Checker) checkTypeDecl(d *syntax.TypeDecl) {
 	named := NewNamed(obj, nil)
 	// Mark generic types: their methods are never emitted (erasure +
 	// monomorphization), so dispatch and mxh generation must skip them.
+	var tpName string
 	for _, tp := range d.TParamList {
-		tpName := ""
+		tpName = ""
 		if tp.Name != nil {
 			tpName = tp.Name.Value
 		}
@@ -211,8 +214,9 @@ func (c *Checker) checkFuncDecl(d *syntax.FuncDecl) {
 			tpParent = c.fileScope
 		}
 		tmpScope := NewScope(tpParent)
+		var obj *TypeName
 		for _, name := range typeParams {
-			obj := NewTypeName(c.pkg, name, NewTypeParam(NewTypeName(c.pkg, name, nil), nil))
+			obj = NewTypeName(c.pkg, name, NewTypeParam(NewTypeName(c.pkg, name, nil), nil))
 			tmpScope.Insert(obj)
 		}
 		saved := c.localScope
@@ -265,8 +269,12 @@ func (c *Checker) checkFuncBody(fd *syntax.FuncDecl) {
 	defer func() { c.localScope = saved }()
 	// Register all type parameters (function-level + receiver type args) in
 	// the body scope so the signature and body can reference them.
+	var obj *TypeName
+	var p *TCVar
+	var r *TCVar
+	var nameNode *syntax.Name
 	for _, name := range collectFuncTypeParams(fd) {
-		obj := NewTypeName(c.pkg, name, NewTypeParam(NewTypeName(c.pkg, name, nil), nil))
+		obj = NewTypeName(c.pkg, name, NewTypeParam(NewTypeName(c.pkg, name, nil), nil))
 		scope.Insert(obj)
 	}
 	sig := c.resolveFuncType(fd.Type, fd.Recv)
@@ -278,9 +286,9 @@ func (c *Checker) checkFuncBody(fd *syntax.FuncDecl) {
 		// Parameters.
 		if sig.Params != nil {
 			for i := 0; i < sig.Params.Len(); i++ {
-				p := sig.Params.At(i)
+				p = sig.Params.At(i)
 				if p.Name != "" && p.Name != "_" {
-					var nameNode *syntax.Name
+					nameNode = nil
 					if i < len(fd.Type.ParamList) && fd.Type.ParamList[i].Name != nil {
 						nameNode = fd.Type.ParamList[i].Name
 					}
@@ -291,9 +299,9 @@ func (c *Checker) checkFuncBody(fd *syntax.FuncDecl) {
 		// Named results.
 		if sig.Results != nil {
 			for i := 0; i < sig.Results.Len(); i++ {
-				r := sig.Results.At(i)
+				r = sig.Results.At(i)
 				if r.Name != "" && r.Name != "_" {
-					var nameNode *syntax.Name
+					nameNode = nil
 					if i < len(fd.Type.ResultList) && fd.Type.ResultList[i].Name != nil {
 						nameNode = fd.Type.ResultList[i].Name
 					}

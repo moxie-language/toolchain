@@ -46,12 +46,19 @@ func slicePush(ptr unsafe.Pointer, slen, scap, n, elemSize uintptr) (unsafe.Poin
 }
 
 // sliceConcat concatenates two slices (the | operator on arbitrary slice
-// types). Allocates a fresh buffer of exactly len(x)+len(y) elements and
-// copies both halves. No growth, no reuse of input buffers.
-func sliceConcat(xPtr, yPtr unsafe.Pointer, xLen, yLen, elemSize uintptr) (unsafe.Pointer, uintptr, uintptr) {
+// types). When x is empty and has capacity, the result is written into
+// x's backing (the append-into-buffer idiom). Otherwise allocates a fresh
+// buffer of exactly len(x)+len(y) elements and copies both halves.
+func sliceConcat(xPtr, yPtr unsafe.Pointer, xLen, yLen, xCap, elemSize uintptr) (unsafe.Pointer, uintptr, uintptr) {
 	newLen := xLen + yLen
 	if newLen == 0 {
 		return nil, 0, 0
+	}
+	if xLen == 0 && xCap >= newLen {
+		if yLen > 0 {
+			memmove(xPtr, yPtr, yLen*elemSize)
+		}
+		return xPtr, newLen, xCap
 	}
 	buf := alloc(newLen*elemSize, nil)
 	if xLen > 0 {

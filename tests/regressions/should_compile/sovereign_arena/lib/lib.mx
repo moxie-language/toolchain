@@ -1,0 +1,61 @@
+package lib
+
+// Regression: sovereign (self-mutating) receivers own an arena. Mutations
+// through maps, slices and linked pointers must persist across method calls,
+// and a map's internal owner arena must survive the receiver.
+
+type Node struct {
+	next *Node
+	val  int32
+}
+
+type Obj interface {
+	Key() (s string)
+}
+
+type Named struct {
+	name string
+}
+
+func NewNamed(name string) (n *Named) {
+	return &Named{name: name}
+}
+
+func (n *Named) Key() (s string) { return n.name }
+
+type Store struct {
+	head  *Node
+	items []*Node
+	byKey map[string]Obj
+}
+
+func (s *Store) Add(k string, v int32) {
+	n := &Node{val: v}
+	n.next = s.head
+	s.head = n
+	s.items = push(s.items, n)
+	if s.byKey == nil {
+		s.byKey = map[string]Obj{}
+	}
+	s.byKey[k] = NewNamed(k)
+}
+
+func (s *Store) Sum() (n int32) {
+	p := s.head
+	for p != nil {
+		n += p.val
+		p = p.next
+	}
+	for _, q := range s.items {
+		n += q.val
+	}
+	return n
+}
+
+func (s *Store) KeyName(k string) (name string) {
+	o := s.byKey[k]
+	if o == nil {
+		return ""
+	}
+	return o.Key()
+}

@@ -620,12 +620,16 @@ func (x *Nat) shiftIn(y uint32, m *Modulus) *Nat {
 	// The next iteration (and finally the return line) will use either result
 	// based on whether 2x + b overflows m.
 	needSubtraction := no
+	var carry uint32
+	var borrow uint32
+	var mask uint32
+	var l uint32
 	for i := _W - 1; i >= 0; i-- {
-		carry := (y >> i) & 1
-		var borrow uint32
-		mask := ctMask(needSubtraction)
+		carry = (y >> i) & 1
+		borrow = 0
+		mask = ctMask(needSubtraction)
 		for i := 0; i < size; i++ {
-			l := xLimbs[i] ^ (mask & (xLimbs[i] ^ dLimbs[i]))
+			l = xLimbs[i] ^ (mask & (xLimbs[i] ^ dLimbs[i]))
 			xLimbs[i], carry = bits.Add(l, l, carry)
 			dLimbs[i], borrow = bits.Sub(xLimbs[i], mLimbs[i], borrow)
 		}
@@ -1008,6 +1012,7 @@ func (out *Nat) Exp(x *Nat, e []byte, m *Modulus) *Nat {
 	out.limbs[0] = 1
 	out.montgomeryRepresentation(m)
 	tmp := NewNat().ExpandFor(m)
+	var k uint32
 	for _, b := range e {
 		for _, j := range []int32{4, 0} {
 			// Square four times. Optimization note: this can be implemented
@@ -1018,7 +1023,7 @@ func (out *Nat) Exp(x *Nat, e []byte, m *Modulus) *Nat {
 			out.montgomeryMul(out, out, m)
 
 			// Select x^k in constant time from the table.
-			k := uint32((b >> j) & 0b1111)
+			k = uint32((b >> j) & 0b1111)
 			for i := range table {
 				tmp.assign(ctEq(k, uint32(i+1)), table[i])
 			}

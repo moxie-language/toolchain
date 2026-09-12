@@ -22,6 +22,14 @@ func _rc() [24]uint64 {
 	}
 }
 
+// keccakfStoreBack writes the little-endian state words back into the
+// byte array, called deferred by keccakF1600Generic on big-endian hosts.
+func keccakfStoreBack(da *[200]byte, a *[25]uint64) {
+	for i := range a {
+		byteorder.LEPutUint64(da[i*8:], a[i])
+	}
+}
+
 // keccakF1600Generic applies the Keccak permutation.
 func keccakF1600Generic(da *[200]byte) {
 	rc := _rc()
@@ -31,11 +39,9 @@ func keccakF1600Generic(da *[200]byte) {
 		for i := range a {
 			a[i] = byteorder.LEUint64(da[i*8:])
 		}
-		defer func() {
-			for i := range a {
-				byteorder.LEPutUint64(da[i*8:], a[i])
-			}
-		}()
+		// Closures do not capture in Moxie: the deferred write-back is a
+		// plain function call; da and a are evaluated at defer time.
+		defer keccakfStoreBack(da, a)
 	} else {
 		a = (*[25]uint64)(unsafe.Pointer(da))
 	}

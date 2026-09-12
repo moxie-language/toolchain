@@ -48,11 +48,20 @@ func (f *File) readdir(n int32, mode readdirMode) (names []string, dirents []Dir
 		n = -1
 	}
 
+	var errno error
+	var buf []byte
+	var reclen uint64
+	var ok bool
+	var rec []byte
+	var ino uint64
+	var namlen uint64
+	var name []byte
+	var de DirEntry
+	var info FileInfo
 	for n != 0 {
 		// Refill the buffer if necessary
 		if d.bufp >= d.nbuf {
 			d.bufp = 0
-			var errno error
 			d.nbuf, errno = syscall.ReadDirent(syscallFd(f.handle.(unixFileHandle)), d.buf[:])
 			if d.nbuf < 0 {
 				errno = handleSyscallError(errno)
@@ -66,14 +75,14 @@ func (f *File) readdir(n int32, mode readdirMode) (names []string, dirents []Dir
 		}
 
 		// Drain the buffer
-		buf := d.buf[d.bufp:d.nbuf]
-		reclen, ok := direntReclen(buf)
+		buf = d.buf[d.bufp:d.nbuf]
+		reclen, ok = direntReclen(buf)
 		if !ok || reclen > uint64(len(buf)) {
 			break
 		}
-		rec := buf[:reclen]
+		rec = buf[:reclen]
 		d.bufp += int32(reclen)
-		ino, ok := direntIno(rec)
+		ino, ok = direntIno(rec)
 		if !ok {
 			break
 		}
@@ -81,11 +90,11 @@ func (f *File) readdir(n int32, mode readdirMode) (names []string, dirents []Dir
 			continue
 		}
 		const namoff = uint64(unsafe.Offsetof(syscall.Dirent{}.Name))
-		namlen, ok := direntNamlen(rec)
+		namlen, ok = direntNamlen(rec)
 		if !ok || namoff+namlen > uint64(len(rec)) {
 			break
 		}
-		name := rec[namoff : namoff+namlen]
+		name = rec[namoff : namoff+namlen]
 		for i, c := range name {
 			if c == 0 {
 				name = name[:i]
@@ -103,7 +112,7 @@ func (f *File) readdir(n int32, mode readdirMode) (names []string, dirents []Dir
 			if len(names) >= cap(names) { names = mxutil.GrowCap(names) }
 			names = push(names, string(name))
 		} else if mode == readdirDirEntry {
-			de, err := newUnixDirent(f.name, string(name), direntType(rec))
+			de, err = newUnixDirent(f.name, string(name), direntType(rec))
 			if IsNotExist(err) {
 				// File disappeared between readdir and stat.
 				// Treat as if it didn't exist.
@@ -115,7 +124,7 @@ func (f *File) readdir(n int32, mode readdirMode) (names []string, dirents []Dir
 			if len(dirents) >= cap(dirents) { dirents = mxutil.GrowCap(dirents) }
 			dirents = push(dirents, de)
 		} else {
-			info, err := Lstat(f.name + "/" + string(name))
+			info, err = Lstat(f.name + "/" + string(name))
 			if IsNotExist(err) {
 				// File disappeared between readdir + stat.
 				// Treat as if it didn't exist.

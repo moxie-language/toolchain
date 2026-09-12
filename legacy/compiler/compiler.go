@@ -215,7 +215,6 @@ type builder struct {
 	stableRegistered bool   // true when the receiver's arena is registered as stable for this frame
 	sovereignActive  bool   // true inside a mutating sovereign method
 	sovereignGroupVal llvm.Value // the receiver's sovGroup (for alloc redirection)
-	sovereignEscapeAllocs map[ssa.Value]bool // allocs/makes that flow into receiver stores
 }
 
 func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *builder {
@@ -1480,8 +1479,8 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 // emitSovereignPrologue sets up a mutating method on a sovereign receiver:
 // a scratch fn arena becomes the current arena, the receiver's group is
 // acquired (lazily created), its data arena is registered stable, and a
-// new allocation batch is started. Allocations that flow into receiver
-// stores are redirected to the data arena (see sovereignEscapeAllocs).
+// new allocation batch is started. All scratch data reachable from the
+// receiver is relocated into the data arena at return (see the epilogue).
 func (b *builder) emitSovereignPrologue(named *types.Named) {
 	b.parentArenaVal = b.createRuntimeCall("CurrentArena", nil, "sov.parent")
 	recv := b.fn.Params[0]
@@ -1495,20 +1494,16 @@ func (b *builder) emitSovereignPrologue(named *types.Named) {
 	group := b.createRuntimeCall("codecSovereignArena", []llvm.Value{recvPtr, typeDesc}, "sov.group")
 	b.sovereignGroupVal = group
 	b.sovereignActive = true
-	b.collectReceiverEscapeAllocs()
 	dataArena := b.createRuntimeCall("sovDataArena", []llvm.Value{group}, "sov.data")
 	b.createRuntimeCall("SovereignRegStable", []llvm.Value{dataArena}, "")
 	b.createRuntimeCall("codecSovereignEnter", []llvm.Value{group}, "")
-	// Scratch fn arena: all non-receiver-escape allocations land here and
-	// are freed wholesale at return. Marked as a sovereign scratch so the
-	// codec treats it (and ancestor sovereign scratches) as transient
-	// during store-backs, even across recursive sovereign calls.
-	b.fnArenaVal = b.createRuntimeCall("FnArenaPush", []llvm.Value{
-		llvm.ConstInt(b.uintptrType, 65536, false),
-	}, "fn_arena")
-	b.createRuntimeCall("SovereignMarkScratch", nil, "")
+	// Borrow the receiver's data arena as this method's working arena: every
+	// allocation lands there and is recorded by the arena's owner map, and
+	// codecSovereignEndCall at return reclaims the call's batch. No scratch,
+	// no relocation - maps and other arena-owning structures stay put.
+	b.createRuntimeCall("SovereignSetArena", []llvm.Value{dataArena}, "")
 	b.arenaActive = true
-	b.arenaBorrowed = false
+	b.arenaBorrowed = true
 	b.stableRegistered = true
 }
 
@@ -1780,79 +1775,10 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		if b.targetData.TypeAllocSize(llvmVal.Type()) == 0 {
 			return
 		}
-		// Sovereign receiver-field store: if the value is not a statically
-		// redirected allocation (it lives in the scratch fn arena), copy it
-		// into the receiver's data arena so it survives this call.
-		if b.sovereignActive && len(b.fn.Params) > 0 &&
-			ssaValueRootedIn(instr.Addr, b.fn.Params[0]) {
-			vt := instr.Val.Type()
-			if typeNeedsCopy(vt) {
-				base := baseAllocValue(instr.Val)
-				if base == nil || !b.sovereignEscapeAllocs[base] {
-					llvmVal = b.emitSovereignStoreBack(llvmVal, vt)
-				}
-			}
-		}
 		b.CreateStore(llvmVal, llvmAddr)
 	default:
 		b.addError(instr.Pos(), "unknown instruction: "+instr.String())
 	}
-}
-
-// emitSovereignStoreBack copies a value into the receiver's data arena via
-// the codec: encode in the scratch arena, decode with the data arena
-// current, so the copy (and its nested data) lands in receiver-owned
-// memory. The whole round-trip is one runtime call so it can skip the copy
-// during manual-arena mode (where the scratch arena is already stable) and
-// avoid splitting the current basic block mid-loop.
-func (b *builder) emitSovereignStoreBack(val llvm.Value, t types.Type) llvm.Value {
-	cbType := b.getLLVMRuntimeType("CodecBuf")
-	ssType := b.getLLVMRuntimeType("codecSeenSet")
-	dsType := b.getLLVMRuntimeType("codecDecodeSeen")
-	rtPkg := b.program.ImportedPackage("runtime")
-
-	cb := b.CreateAlloca(cbType, "ssb")
-	b.CreateStore(llvm.ConstNull(cbType), cb)
-	ss := b.CreateAlloca(ssType, "sss")
-	b.CreateStore(llvm.ConstNull(ssType), ss)
-	b.createRuntimeCall("codecBufInit", []llvm.Value{cb}, "")
-	if ssInit, ok := rtPkg.Members["codecSeenInit"].(*ssa.Function); ok {
-		ssInitType, ssInitFn := b.getFunction(ssInit)
-		b.CreateCall(ssInitType, ssInitFn, []llvm.Value{ss, llvm.Undef(b.dataPtrType)}, "")
-	}
-	b.createRuntimeCall("codecSetTopOnlyTransient", []llvm.Value{llvm.ConstInt(b.ctx.Int1Type(), 1, false)}, "")
-	b.emitCodecEncodeReturn(val, t, cb, ss)
-	b.createRuntimeCall("codecSetTopOnlyTransient", []llvm.Value{llvm.ConstInt(b.ctx.Int1Type(), 0, false)}, "")
-
-	cbLoad := b.CreateLoad(cbType, cb, "")
-	cbData := b.CreateExtractValue(cbLoad, 0, "ssd")
-	dataPtr := b.CreateExtractValue(cbData, 0, "ssd.ptr")
-	dataLen := b.CreateExtractValue(cbData, 1, "ssd.len")
-
-	dataArena := b.createRuntimeCall("sovDataArena", []llvm.Value{b.sovereignGroupVal}, "sov.data")
-	saveArena := b.createRuntimeCall("CurrentArena", nil, "ssave")
-	b.createRuntimeCall("SetCurrentArena", []llvm.Value{dataArena}, "")
-
-	sliceType := b.getLLVMRuntimeType("_string")
-	cb2 := b.CreateAlloca(cbType, "ssb2")
-	sliceVal := llvm.Undef(sliceType)
-	sliceVal = b.CreateInsertValue(sliceVal, dataPtr, 0, "")
-	sliceVal = b.CreateInsertValue(sliceVal, dataLen, 1, "")
-	sliceVal = b.CreateInsertValue(sliceVal, dataLen, 2, "")
-	cb2Val := llvm.Undef(cbType)
-	cb2Val = b.CreateInsertValue(cb2Val, sliceVal, 0, "")
-	cb2Val = b.CreateInsertValue(cb2Val, llvm.ConstInt(b.ctx.Int32Type(), 0, false), 1, "")
-	b.CreateStore(cb2Val, cb2)
-	ds := b.CreateAlloca(dsType, "ssds")
-	b.CreateStore(llvm.ConstNull(dsType), ds)
-	if dsInit, ok := rtPkg.Members["codecDecodeSeenInit"].(*ssa.Function); ok {
-		dsInitType, dsInitFn := b.getFunction(dsInit)
-		b.CreateCall(dsInitType, dsInitFn, []llvm.Value{ds, llvm.Undef(b.dataPtrType)}, "")
-	}
-	decoded := b.emitCodecDecodeReturn(val, t, cb2, ds)
-
-	b.createRuntimeCall("SetCurrentArena", []llvm.Value{saveArena}, "")
-	return decoded
 }
 
 // sliceAllocType returns the slice/string underlying type for an Alloc,
@@ -2559,16 +2485,8 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 				return llvm.Value{}, b.makeError(expr.Pos(), fmt.Sprintf("value is too big (%v bytes)", size))
 			}
 			sizeValue := llvm.ConstInt(b.uintptrType, size, false)
-			var buf llvm.Value
-			if b.sovereignActive && b.sovereignEscapeAllocs[expr] {
-				// Receiver-owned allocation: goes to the sovereign data
-				// arena so it survives the scratch fn arena.
-				typeDesc := b.getTypeCode(expr.Type().Underlying().(*types.Pointer).Elem())
-				buf = b.createRuntimeCall("codecSovereignAlloc", []llvm.Value{b.sovereignGroupVal, sizeValue, typeDesc}, expr.Comment)
-			} else {
-				layoutValue := b.createObjectLayout(typ, expr.Pos())
-				buf = b.createRuntimeCall("alloc", []llvm.Value{sizeValue, layoutValue}, expr.Comment)
-			}
+			layoutValue := b.createObjectLayout(typ, expr.Pos())
+			buf := b.createRuntimeCall("alloc", []llvm.Value{sizeValue, layoutValue}, expr.Comment)
 			align := b.targetData.ABITypeAlignment(typ)
 			buf.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(align)))
 			if b.PrintAllocs != nil {
@@ -2791,17 +2709,6 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		val := b.getValue(expr.X, getPos(expr))
 		return b.createMakeInterface(val, expr.X.Type(), expr.Pos()), nil
 	case *ssa.MakeMap:
-		if b.sovereignActive && b.sovereignEscapeAllocs[expr] {
-			// Receiver-owned map: create it with the data arena current so
-			// the map's internal allocations (hashmap struct, bucket
-			// arrays) land there and are recorded as opaque blocks.
-			dataArena := b.createRuntimeCall("sovDataArena", []llvm.Value{b.sovereignGroupVal}, "sov.data")
-			saveArena := b.createRuntimeCall("CurrentArena", nil, "sov.save")
-			b.createRuntimeCall("SetCurrentArena", []llvm.Value{dataArena}, "")
-			result, err := b.createMakeMap(expr)
-			b.createRuntimeCall("SetCurrentArena", []llvm.Value{saveArena}, "")
-			return result, err
-		}
 		return b.createMakeMap(expr)
 	case *ssa.MakeSlice:
 		sliceLen := b.getValue(expr.Len, getPos(expr))
@@ -2832,14 +2739,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		}
 		sliceSize := b.CreateBinOp(llvm.Mul, elemSizeValue, sliceCapCast, "makeslice.cap")
 		layoutValue := b.createObjectLayout(llvmElemType, expr.Pos())
-		var slicePtr llvm.Value
-		if b.sovereignActive && b.sovereignEscapeAllocs[expr] {
-			// Receiver-owned backing array: opaque record (the slice
-			// value's walker walks the elements).
-			slicePtr = b.createRuntimeCall("codecSovereignAlloc", []llvm.Value{b.sovereignGroupVal, sliceSize, llvm.ConstNull(b.dataPtrType)}, "makeslice.buf")
-		} else {
-			slicePtr = b.createRuntimeCall("alloc", []llvm.Value{sliceSize, layoutValue}, "makeslice.buf")
-		}
+		slicePtr := b.createRuntimeCall("alloc", []llvm.Value{sliceSize, layoutValue}, "makeslice.buf")
 		slicePtr.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(elemAlign)))
 		if b.PrintAllocs != nil {
 			b.emitLogAlloc(expr.Pos())
@@ -3451,15 +3351,17 @@ func (b *builder) createBinOp(op token.Token, typ, ytyp types.Type, x, y llvm.Va
 			}
 		}
 		// Moxie: | on any slice type is concatenation.
-		// Allocates a fresh buffer of exactly len(x)+len(y), copies both.
+		// Reuses x's spare capacity when available; otherwise allocates
+		// a fresh buffer of exactly len(x)+len(y), copies both.
 		if op == token.OR {
 			xPtr := b.CreateExtractValue(x, 0, "concat.xPtr")
 			xLen := b.CreateExtractValue(x, 1, "concat.xLen")
+			xCap := b.CreateExtractValue(x, 2, "concat.xCap")
 			yPtr := b.CreateExtractValue(y, 0, "concat.yPtr")
 			yLen := b.CreateExtractValue(y, 1, "concat.yLen")
 			elemType := b.getLLVMType(typ.Elem())
 			elemSize := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(elemType), false)
-			result := b.createRuntimeCall("sliceConcat", []llvm.Value{xPtr, yPtr, xLen, yLen, elemSize}, "concat.new")
+			result := b.createRuntimeCall("sliceConcat", []llvm.Value{xPtr, yPtr, xLen, yLen, xCap, elemSize}, "concat.new")
 			newPtr := b.CreateExtractValue(result, 0, "concat.ptr")
 			newLen := b.CreateExtractValue(result, 1, "concat.len")
 			newCap := b.CreateExtractValue(result, 2, "concat.cap")
@@ -3987,7 +3889,7 @@ func (c *compilerContext) isSovereignNamedType(t types.Type) bool {
 	// package and dead groups die with their arena - no exemption needed.
 	if obj := named.Obj(); obj != nil && obj.Pkg() != nil {
 		p := obj.Pkg().Path()
-		if p == "main" || p == "git.smesh.lol/moxie/pkg/syntax" {
+		if p == "main" || p == "git.smesh.lol/moxie/pkg/syntax" || p == "syntax" {
 			return false
 		}
 	}
@@ -4072,105 +3974,6 @@ func ssaFuncWritesReceiver(fn *ssa.Function) bool {
 	return false
 }
 
-// collectReceiverEscapeAllocs computes the set of alloc/make instructions
-// whose values flow into receiver-rooted stores. These allocations are
-// redirected to the receiver's data arena so their data survives the
-// scratch fn arena. Transitive: values stored INTO an escape-rooted
-// alloc's memory also escape.
-func (b *builder) collectReceiverEscapeAllocs() {
-	b.sovereignEscapeAllocs = map[ssa.Value]bool{}
-	if len(b.fn.Params) == 0 {
-		return
-	}
-	recv := b.fn.Params[0]
-	escape := map[ssa.Value]bool{}
-	for _, block := range b.fn.Blocks {
-		for _, instr := range block.Instrs {
-			if st, ok := instr.(*ssa.Store); ok && ssaValueRootedIn(st.Addr, recv) {
-				escape[st.Val] = true
-			}
-		}
-	}
-	changed := true
-	for changed {
-		changed = false
-		for _, block := range b.fn.Blocks {
-			for _, instr := range block.Instrs {
-				st, ok := instr.(*ssa.Store)
-				if !ok {
-					continue
-				}
-				if addrRootsIntoValue(escape, st.Addr) && !escape[st.Val] {
-					escape[st.Val] = true
-					changed = true
-				}
-			}
-		}
-	}
-	for v := range escape {
-		if base := baseAllocValue(v); base != nil {
-			b.sovereignEscapeAllocs[base] = true
-		}
-	}
-}
-
-// addrRootsIntoValue reports whether the address derives (field/index
-// chains) from any marked value.
-func addrRootsIntoValue(marked map[ssa.Value]bool, addr ssa.Value) bool {
-	seen := map[ssa.Value]bool{}
-	var walk func(x ssa.Value) bool
-	walk = func(x ssa.Value) bool {
-		if seen[x] {
-			return false
-		}
-		seen[x] = true
-		switch xv := x.(type) {
-		case *ssa.FieldAddr:
-			return walk(xv.X)
-		case *ssa.IndexAddr:
-			return walk(xv.X)
-		case *ssa.Slice:
-			return walk(xv.X)
-		case *ssa.UnOp:
-			return walk(xv.X)
-		default:
-			return marked[x]
-		}
-	}
-	return walk(addr)
-}
-
-// baseAllocValue resolves a value down to its base allocation/make
-// instruction, or nil if it is not rooted in one.
-func baseAllocValue(v ssa.Value) ssa.Value {
-	for {
-		switch xv := v.(type) {
-		case *ssa.Alloc, *ssa.MakeSlice, *ssa.MakeMap, *ssa.MakeChan:
-			return xv
-		case *ssa.FieldAddr:
-			v = xv.X
-		case *ssa.IndexAddr:
-			v = xv.X
-		case *ssa.UnOp:
-			v = xv.X
-		case *ssa.Extract:
-			v = xv.Tuple
-		case *ssa.Convert:
-			v = xv.X
-		case *ssa.ChangeType:
-			v = xv.X
-		case *ssa.ChangeInterface:
-			v = xv.X
-		case *ssa.MakeInterface:
-			v = xv.X
-		case *ssa.Slice:
-			v = xv.X
-		default:
-			return nil
-		}
-	}
-}
-
 // ssaValueRootedIn reports whether the SSA value v derives from target
 // through field/index/slice operations.
 func ssaValueRootedIn(v, target ssa.Value) bool {
@@ -4215,7 +4018,7 @@ func typeNeedsCopyDepth(t types.Type, depth int) bool {
 	case *types.Chan:
 		return true
 	case *types.Signature:
-		return false
+		return true
 	case *types.Interface:
 		return true
 	case *types.Struct:
@@ -4241,7 +4044,7 @@ func funcNeedsArenaCopy(fn *ssa.Function) bool {
 		return false
 	}
 	path := fn.Pkg.Pkg.Path()
-	if path == "runtime" || path == "unsafe" ||
+	if path == "runtime" || path == "unsafe" || path == "syscall" || path == "os" ||
 		path == "main" ||
 		strings.HasPrefix(path, "git.smesh.lol/moxie/pkg/") {
 		return false
@@ -4281,8 +4084,8 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 	}
 
 	if b.sovereignActive {
-		// Mark this call's allocations dead except what the receiver's
-		// fields still reference; update batch statistics.
+		// Mark this call's batch dead; the receiver-rooted mark-compact at
+		// region exhaustion reclaims the dead blocks.
 		b.createRuntimeCall("codecSovereignEndCall", []llvm.Value{b.sovereignGroupVal}, "")
 	}
 
@@ -4291,7 +4094,11 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 		if b.stableRegistered {
 			b.createRuntimeCall("SovereignRegRestore", nil, "")
 		}
-		b.createRuntimeCall("FnArenaPopFree", nil, "")
+		if b.sovereignActive {
+			b.createRuntimeCall("SovereignRestoreArena", []llvm.Value{b.parentArenaVal}, "")
+		} else {
+			b.createRuntimeCall("FnArenaPopFree", nil, "")
+		}
 		b.CreateRetVoid()
 		return
 	}
@@ -4313,7 +4120,11 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 		if b.stableRegistered {
 			b.createRuntimeCall("SovereignRegRestore", nil, "")
 		}
-		b.createRuntimeCall("FnArenaPopFree", nil, "")
+		if b.sovereignActive {
+			b.createRuntimeCall("SovereignRestoreArena", []llvm.Value{b.parentArenaVal}, "")
+		} else {
+			b.createRuntimeCall("FnArenaPopFree", nil, "")
+		}
 		b.CreateRet(retVal)
 		return
 	}
@@ -4334,6 +4145,12 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 		ssInitType, ssInitFn := b.getFunction(ssInit)
 		b.CreateCall(ssInitType, ssInitFn, []llvm.Value{ss, llvm.Undef(b.dataPtrType)}, "")
 	}
+	// Return-value encode: only the callee's own fn arena is transient so
+	// pointers into ancestor arenas (e.g. the caller's locals used as
+	// chained method receivers) keep identity instead of being copied.
+	b.createRuntimeCall("codecSetRetTransient", []llvm.Value{
+		llvm.ConstInt(b.ctx.Int1Type(), 1, false),
+	}, "")
 	for i := 0; i < sig.Results().Len(); i++ {
 		rt := sig.Results().At(i).Type()
 		if !typeNeedsCopy(rt) {
@@ -4347,13 +4164,23 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 		}
 		b.emitCodecEncodeReturn(rootReg, rt, cb, ss)
 	}
+	b.createRuntimeCall("codecSetRetTransient", []llvm.Value{
+		llvm.ConstInt(b.ctx.Int1Type(), 0, false),
+	}, "")
 
 	// Save CodecBuf data pointer and length (scalars survive FnArenaPop)
 	cbLoad := b.CreateLoad(cbType, cb, "")
 	cbData := b.CreateExtractValue(cbLoad, 0, "csd")        // data: _string
 	dataPtr := b.CreateExtractValue(cbData, 0, "csd.ptr")   // backing array ptr
 	dataLen := b.CreateExtractValue(cbData, 1, "csd.len")   // total bytes (uintptr)
-	popped := b.createRuntimeCall("FnArenaPop", nil, "cfn")
+	var popped llvm.Value
+	if b.sovereignActive {
+		// Restore the caller's arena for the decode phase. The data arena is
+		// borrowed, not freed.
+		b.createRuntimeCall("SovereignRestoreArena", []llvm.Value{b.parentArenaVal}, "")
+	} else {
+		popped = b.createRuntimeCall("FnArenaPop", nil, "cfn")
+	}
 
 	// Decode phase: rebuild CodecBuf from saved data ptr + len.
 	// cb2.data = {dataPtr, dataLen, dataLen}, cb2.pos = 0
@@ -4388,21 +4215,23 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 		}
 	}
 
-	// If a basic-typed pointer escaped into the fn arena, the pointee's
-	// memory must stay alive for the caller: leak the arena instead of
-	// releasing it to the pool.
-	escaped := b.createRuntimeCall("codecEscapeOccurred", nil, "cesc")
-	joinBlock := b.ctx.AddBasicBlock(b.llvmFn, "rel.join")
-	relBlock := b.ctx.AddBasicBlock(b.llvmFn, "rel.release")
-	leakBlock := b.ctx.AddBasicBlock(b.llvmFn, "rel.leak")
-	escCmp := b.CreateICmp(llvm.IntEQ, escaped, llvm.ConstInt(escaped.Type(), 0, false), "cesc.cmp")
-	b.CreateCondBr(escCmp, relBlock, leakBlock)
-	b.SetInsertPointAtEnd(relBlock)
-	b.createRuntimeCall("ArenaRelease", []llvm.Value{popped}, "")
-	b.CreateBr(joinBlock)
-	b.SetInsertPointAtEnd(leakBlock)
-	b.CreateBr(joinBlock)
-	b.SetInsertPointAtEnd(joinBlock)
+	if !b.sovereignActive {
+		// If a basic-typed pointer escaped into the fn arena, the pointee's
+		// memory must stay alive for the caller: leak the arena instead of
+		// releasing it to the pool.
+		escaped := b.createRuntimeCall("codecEscapeOccurred", nil, "cesc")
+		joinBlock := b.ctx.AddBasicBlock(b.llvmFn, "rel.join")
+		relBlock := b.ctx.AddBasicBlock(b.llvmFn, "rel.release")
+		leakBlock := b.ctx.AddBasicBlock(b.llvmFn, "rel.leak")
+		escCmp := b.CreateICmp(llvm.IntEQ, escaped, llvm.ConstInt(escaped.Type(), 0, false), "cesc.cmp")
+		b.CreateCondBr(escCmp, relBlock, leakBlock)
+		b.SetInsertPointAtEnd(relBlock)
+		b.createRuntimeCall("ArenaRelease", []llvm.Value{popped}, "")
+		b.CreateBr(joinBlock)
+		b.SetInsertPointAtEnd(leakBlock)
+		b.CreateBr(joinBlock)
+		b.SetInsertPointAtEnd(joinBlock)
+	}
 	if b.stableRegistered {
 		b.createRuntimeCall("SovereignRegRestore", nil, "")
 	}

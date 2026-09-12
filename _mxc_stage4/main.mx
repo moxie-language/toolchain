@@ -23,6 +23,7 @@ type buildState struct {
 	wasmRtPkgs      map[string]bool
 	builtinOnly     []string
 	pkgKeyMemo      map[string]string
+	linkSetKey      string // hash of the whole link set; interface dispatch impls depend on it
 	tlsProbeVar     int32
 }
 
@@ -333,7 +334,16 @@ func compilerHash() (s string) {
 	// Hash the compiler's own source files, NOT the running binary:
 	// hashing /proc/self/exe embeds a different hash every generation and
 	// the self-host fixpoint (identical binaries) can never converge.
-	dir := mxutil.JoinPath(getMoxiePath(), "_mxc_stage4")
+	// Hash the compiler source under MOXIEROOT (what the build resolves
+	// against), falling back to the install path. Without this the hash is
+	// "unknown" whenever the source is not at $HOME/moxie, so every compiler
+	// revision shares one cache dir and stale .bc files (old type
+	// descriptors) poison dispatch.
+	srcRoot := getenv("MOXIEROOT")
+	if srcRoot == "" {
+		srcRoot = getMoxiePath()
+	}
+	dir := mxutil.JoinPath(srcRoot, "_mxc_stage4")
 	files := listFiles(dir, ".mx")
 	for i := int32(1); i < int32(len(files)); i++ {
 		for j := i; j > 0 && files[j] < files[j-1]; j-- {
@@ -941,9 +951,33 @@ func pkgHash(p *pkgInfo) (s string) {
 			acc = acc | []byte("|") | dh
 		}
 	}
+	// Interface dispatch tables enumerate impls from the whole link set, so a
+	// cached .bc is only valid for the link set it was built against. Fold a
+	// hash of the link set into every package key.
+	acc = acc | []byte("|L") | []byte(bst.linkSetKey)
 	hv := fnvHash(acc)
 	bst.pkgKeyMemo[p.path] = hv
 	return hv
+}
+
+// linkSetHash hashes the set of packages (path@version) in a build so cached
+// dispatch tables are invalidated when the link set changes.
+func linkSetHash(pkgs []*pkgInfo) (h string) {
+	names := []string{:0:len(pkgs)}
+	for _, p := range pkgs {
+		if len(names) >= cap(names) { names = mxutil.GrowCap(names) }
+		push(names, p.path | "@" | p.version)
+	}
+	for i := int32(1); i < int32(len(names)); i++ {
+		for j := i; j > 0 && names[j] < names[j-1]; j-- {
+			names[j], names[j-1] = names[j-1], names[j]
+		}
+	}
+	var acc []byte
+	for _, n := range names {
+		acc = acc | []byte(n) | []byte("|")
+	}
+	return fnvHash(acc)
 }
 
 func versionedCacheName(hash, version, ext string) (s string) {
@@ -1617,7 +1651,10 @@ func buildTagTrue(tag string) (ok bool) {
 		"go1.9", "go1.10", "go1.11", "go1.12", "go1.13", "go1.14",
 		"go1.15", "go1.16", "go1.17", "go1.18", "go1.19", "go1.20",
 		"go1.21", "go1.22", "go1.23", "go1.24",
-		"moxie", "moxie.linux":
+		"moxie", "moxie.linux",
+		// Matches legacy compileopts.Config.BuildTags so the same source
+		// files are selected (pure-Go math/big, no cgo/osusergo paths).
+		"purego", "osusergo", "math_big_pure_go", "moxie.unicore":
 		return true
 	case "wasm", "js", "moxie.wasm":
 		return mxutil.TargetArch == "wasm"
@@ -2046,6 +2083,16 @@ func typeDescStr(t Type) (s string) {
 	return string(b.data[:b.off])
 }
 
+// isUnexportedName reports whether an identifier begins with a lowercase
+// letter (moxie identifiers follow Go case rules).
+func isUnexportedName(name string) (ok bool) {
+	if len(name) == 0 {
+		return false
+	}
+	c := name[0]
+	return c >= 'a' && c <= 'z'
+}
+
 func typeDescWrite(b *mxhBuf, t Type) {
 	if t == nil {
 		b.w("__any")
@@ -2210,6 +2257,17 @@ func typeDescWrite(b *mxhBuf, t Type) {
 			return
 		}
 		if v.Obj != nil {
+			// Inline unexported method-less named basic types: struct field
+			// descs reference them (Curve.curve curveID) and an importer
+			// that cannot resolve the name degrades the field to int32,
+			// shifting every following field offset relative to the
+			// defining package's layout.
+			if isUnexportedName(v.Obj.Name) && v.NumMethods() == 0 {
+				if ub, ok := SafeUnderlying(v.Under).(*Basic); ok {
+					typeDescWrite(b, ub)
+					return
+				}
+			}
 			if cctx.typeDescPkgPath != "" && v.Obj.Pkg != nil && v.Obj.Pkg.Path != cctx.typeDescPkgPath {
 				b.w(v.Obj.Pkg.Path)
 				b.w(".")
@@ -2282,7 +2340,14 @@ func generateMxh(pkg *TCPackage) (s string) {
 			if tn, ok := obj.(*TypeName); ok {
 				if named, ok2 := tn.Typ.(*Named); ok2 {
 					_, isStruct := named.Under.(*TCStruct)
-					if named.NumMethods() == 0 && !isStruct {
+					_, isBasic := SafeUnderlying(named.Under).(*Basic)
+					// Keep unexported named basic types too: struct field
+					// descs reference them (Curve.curve curveID), and an
+					// importing package that cannot resolve the name would
+					// degrade the field to int32, diverging the struct
+					// layout from the defining package (e.g. string vs i32
+					// shifts every following field offset).
+					if named.NumMethods() == 0 && !isStruct && !isBasic {
 						continue
 					}
 				} else {
@@ -3847,6 +3912,7 @@ func main() {
 
 	registerBuiltins()
 	pkgs := resolveAll(pkgPath, root)
+	bst.linkSetKey = linkSetHash(pkgs)
 	// Dedup with a sorted slice: hashmap-based dedup is sensitive to
 	// hashmap state during bootstrap.
 	{

@@ -12,6 +12,7 @@ import (
 	"crypto/internal/fips140/sha256"
 	"crypto/internal/fips140/sha3"
 	"crypto/internal/fips140/sha512"
+	"crypto/internal/fips140hash"
 	"errors"
 	"hash"
 )
@@ -42,6 +43,19 @@ type HMAC struct {
 	// forHKDF and keyLen are stored to inform the service indicator decision.
 	forHKDF bool
 	keyLen  int32
+}
+
+// hmacSameHash reports whether two hash.Hash values are equal. The
+// comparison may panic if the underlying types are not comparable; treat
+// that as not-equal. (Closures do not capture in Moxie, so the recover
+// helper is a plain deferred function.)
+func hmacSameHash(a, b hash.Hash) (same bool) {
+	defer hmacRecoverPanic
+	return a == b
+}
+
+func hmacRecoverPanic() {
+	_ = recover()
 }
 
 func (h *HMAC) Sum(in []byte) []byte {
@@ -169,19 +183,12 @@ func (h *HMAC) Clone() (hash.Cloner, error) {
 // New returns a new HMAC hash using the given [hash.Hash] type and key.
 func New[H hash.Hash](h func() H, key []byte) *HMAC {
 	hm := &HMAC{keyLen: len(key)}
-	hm.outer = h()
-	hm.inner = h()
-	unique := true
-	func() {
-		defer func() {
-			// The comparison might panic if the underlying types are not comparable.
-			_ = recover()
-		}()
-		if hm.outer == hm.inner {
-			unique = false
-		}
-	}()
-	if !unique {
+	// Apply Unwrap at the use site rather than through a returned closure:
+	// moxie closures do not capture, so a wrapper returned from a helper
+	// cannot reference its declaring scope.
+	hm.outer = fips140hash.Unwrap(h())
+	hm.inner = fips140hash.Unwrap(h())
+	if hmacSameHash(hm.outer, hm.inner) {
 		panic("crypto/hmac: hash generation function does not produce unique values")
 	}
 	blocksize := hm.inner.BlockSize()

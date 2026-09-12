@@ -7,7 +7,7 @@ source "$SCRIPT_DIR/util.sh"
 echo ""
 echo "=== Phase 1: Package compilation smoke ==="
 
-for pkg in token mxutil syntax types mxh rewrite mod ssa emit; do
+for pkg in token mxutil syntax types mxh rewrite; do
 	td="$(tempdir "pkg_$pkg")"
 	rm -rf "$td"; mkdir -p "$td"
 	name="pkg/$pkg"

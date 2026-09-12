@@ -173,6 +173,11 @@ func (b *builder) checkMoxieRestrictions() {
 	// invariant that holds for stdlib code too. No exemptions.
 	b.checkChannelCompleteness()
 
+	// Self-mutating methods must not declare variables in a loop body; such
+	// declarations accumulate per-iteration scratch in the sovereign arena.
+	// Applies to all code, the compiler included (runtime is exempt inside).
+	b.checkSovereignLoopDecls()
+
 	if !b.isUserPackage(b.fn.Pkg) {
 		return
 	}
@@ -187,6 +192,74 @@ func (b *builder) checkMoxieRestrictions() {
 	b.checkFallthroughRestriction()
 	// Check that non-constant spawn args aren't used after the spawn call.
 	b.checkSpawnMoveRestriction()
+}
+
+// checkSovereignLoopDecls rejects new variable declarations inside a loop body
+// in a self-mutating method. Such declarations allocate per iteration into the
+// receiver's sovereign arena, accumulating scratch that is only reclaimed at
+// method return - the sovereign bloat failure. Move the loop scratch into a
+// helper function so it runs in a per-call arena. Applies to all code (the
+// compiler included); the runtime implements the arena system and is exempt.
+func (b *builder) checkSovereignLoopDecls() {
+	if !b.hasReceiver() || b.fn == nil || b.fn.Signature == nil || b.fn.Signature.Recv() == nil {
+		return
+	}
+	recvType := b.fn.Signature.Recv().Type()
+	if ptr, ok := recvType.(*types.Pointer); ok {
+		recvType = ptr.Elem()
+	}
+	named, ok := recvType.(*types.Named)
+	if !ok || !b.isSovereignNamedType(named) {
+		return
+	}
+	if !ssaFuncWritesReceiver(b.fn) {
+		return
+	}
+	decl, ok := b.fn.Syntax().(*ast.FuncDecl)
+	if !ok || decl.Body == nil {
+		return
+	}
+	scanSovLoopDecls(b, decl.Body.List, false)
+}
+
+func scanSovLoopDecls(b *builder, stmts []ast.Stmt, inLoop bool) {
+	for _, s := range stmts {
+		switch st := s.(type) {
+		case *ast.DeclStmt:
+			if inLoop {
+				if gd, ok := st.Decl.(*ast.GenDecl); ok && gd.Tok == token.VAR {
+					b.addError(st.Pos(), "moxie: variable declaration inside a loop in a self-mutating method is not allowed: move the loop scratch into a helper function")
+				}
+			}
+		case *ast.AssignStmt:
+			if inLoop && st.Tok == token.DEFINE {
+				b.addError(st.Pos(), "moxie: ':=' declaration inside a loop in a self-mutating method is not allowed: move the loop scratch into a helper function")
+			}
+		case *ast.ForStmt:
+			scanSovLoopDecls(b, st.Body.List, true)
+		case *ast.RangeStmt:
+			scanSovLoopDecls(b, st.Body.List, true)
+		case *ast.BlockStmt:
+			scanSovLoopDecls(b, st.List, inLoop)
+		case *ast.IfStmt:
+			scanSovLoopDecls(b, st.Body.List, inLoop)
+			if st.Else != nil {
+				scanSovLoopDecls(b, []ast.Stmt{st.Else}, inLoop)
+			}
+		case *ast.SwitchStmt:
+			scanSovLoopDecls(b, st.Body.List, inLoop)
+		case *ast.TypeSwitchStmt:
+			scanSovLoopDecls(b, st.Body.List, inLoop)
+		case *ast.SelectStmt:
+			scanSovLoopDecls(b, st.Body.List, inLoop)
+		case *ast.LabeledStmt:
+			scanSovLoopDecls(b, []ast.Stmt{st.Stmt}, inLoop)
+		case *ast.CaseClause:
+			scanSovLoopDecls(b, st.Body, inLoop)
+		case *ast.CommClause:
+			scanSovLoopDecls(b, st.Body, inLoop)
+		}
+	}
 }
 
 func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
