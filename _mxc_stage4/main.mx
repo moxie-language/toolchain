@@ -2392,6 +2392,10 @@ func generateMxh(pkg *TCPackage) (s string) {
 			mxhWriteTypeName(&b, objName, tn2)
 		}
 	}
+	// Generic declarations, so later builds identify them without parsing.
+	for _, gn := range cctx.pkgGenerics {
+		b.w("gfunc ") ; b.w(gn) ; b.nl()
+	}
 	return string(b.data[:b.off])
 }
 
@@ -2671,6 +2675,26 @@ func loadMxhData(data []byte) (ok bool) {
 	}
 	pkgName := string(d[ns:ne])
 	pkg := NewTCPackage(pkgPath, pkgName)
+
+	// Record generic declarations. An entry exists for every package whose
+	// mxh is loaded (possibly empty), so ScanGenericDecls can skip parsing
+	// packages the mxh says have no generics.
+	if cctx.mxhGenerics == nil {
+		cctx.mxhGenerics = map[string]map[string]bool{}
+	}
+	if cctx.mxhGenerics[pkgPath] == nil {
+		cctx.mxhGenerics[pkgPath] = map[string]bool{}
+	}
+	{
+		gpos := pos
+		for gpos < dlen {
+			gls, gle, gnext := mxhNextLine(d, gpos)
+			gpos = gnext
+			if mxhHasPrefix(d, gls, gle, "gfunc ") {
+				cctx.mxhGenerics[pkgPath][string(d[gls+6:gle])] = true
+			}
+		}
+	}
 
 	// Collect direct imports.
 	var dimps []string

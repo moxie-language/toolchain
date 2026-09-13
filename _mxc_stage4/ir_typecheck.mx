@@ -36,6 +36,8 @@ type compileCtx struct {
 	compileTargetTriple  string
 	concatSourceMap      []srcSpan
 	genericPkgLocalDecls map[string]*syntax.FuncDecl
+	mxhGenerics          map[string]map[string]bool // pkgPath -> generic decl names (from mxh)
+	pkgGenerics          []string                   // generic decl names collected for the current package
 	genericPkgScopes     map[string]*Scope
 	typeDescPkgPath      string
 	parseTypePkgScope    *Scope
@@ -247,6 +249,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 	}
 
 	cctx.parseErrors = nil
+	cctx.pkgGenerics = nil
 	cctx.constValMap = nil
 	cctx.tcPkgSrc = []byte{:len(src)}; copy(cctx.tcPkgSrc, src)
 	cctx.compileExportMap = scanExportPragmas(cctx.tcPkgSrc)
@@ -475,7 +478,11 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 				if len(dd.TParamList) > 0 {
 					// Generic functions are registered by ScanGenericDecls
 					// in the outer arena. Do not register here - this runs
-					// in the per-compilation arena which gets freed.
+					// in the per-compilation arena which gets freed. Record
+					// the name for the mxh so later builds can identify this
+					// package's generics without re-parsing.
+					if len(cctx.pkgGenerics) >= cap(cctx.pkgGenerics) { cctx.pkgGenerics = mxutil.GrowCap(cctx.pkgGenerics) }
+					push(cctx.pkgGenerics, dd.Name.Value)
 					continue
 				}
 				sig := tcResolveFuncInline(dd.Type, scope)
@@ -494,6 +501,13 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 	runtime.SetCurrentArena(runtime.RootArena())
 	for _, d := range file.DeclList {
 		if fd, ok := d.(*syntax.FuncDecl); ok && fd.Recv != nil {
+			if recvTypeHasIndex(fd.Recv.Type) {
+				rn := genericRecvTypeName(fd.Recv.Type)
+				if rn != "" {
+					if len(cctx.pkgGenerics) >= cap(cctx.pkgGenerics) { cctx.pkgGenerics = mxutil.GrowCap(cctx.pkgGenerics) }
+					push(cctx.pkgGenerics, rn | "." | fd.Name.Value)
+				}
+			}
 			recvType := tcResolveRecvType(fd.Recv, scope)
 			if recvType == nil {
 				continue
@@ -607,6 +621,15 @@ func ScanGenericDecls(src []byte, name string) {
 		return
 	}
 	cctx.scannedGeneric[name] = true
+	// The mxh records whether a package declares generics. When it is loaded
+	// and says none, skip the probe parse entirely - most packages have no
+	// generics, so this avoids parsing the whole package just to find out.
+	if cctx.mxhGenerics != nil {
+		gens := cctx.mxhGenerics[name]
+		if gens != nil && len(gens) == 0 {
+			return
+		}
+	}
 	if cctx.genericArena == nil {
 		cctx.genericArena = runtime.ArenaNew(64 * 1024 * 1024)
 	}
