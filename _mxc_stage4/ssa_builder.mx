@@ -1877,6 +1877,38 @@ func (fb *ssaFuncBuilder) evalLocalConstExpr(e syntax.Expr, iotaVal int64) (c Co
 	return nil
 }
 
+// operandType returns the static type of an unsafe.Sizeof/Alignof/Offsetof
+// operand without leaving it evaluated. It first tries the syntactic resolver
+// (no IR), and only if that cannot see the type (literals, conversions,
+// package-qualified globals) falls back to evaluating the expression and
+// rolling back the instructions and name counter it emitted. The original
+// buildExpr-only path left dead IR (e.g. an alloc for a composite literal)
+// that survived optimization; the syntactic-only path returned the default 8
+// for slices/strings/small ints and corrupted allocation and hash state.
+func (fb *ssaFuncBuilder) operandType(e syntax.Expr) (t Type) {
+	if e == nil {
+		return nil
+	}
+	if t = fb.exprStaticType(e); t != nil {
+		return t
+	}
+	block := fb.currentBlock
+	n := int32(0)
+	if block != nil {
+		n = len(block.Instrs)
+	}
+	savedCounter := fb.counter
+	v := fb.buildExpr(e)
+	if block != nil && len(block.Instrs) > n {
+		block.Instrs = block.Instrs[:n]
+	}
+	fb.counter = savedCounter
+	if v != nil {
+		return v.SSAType()
+	}
+	return nil
+}
+
 // exprStaticType returns the static type of a value expression without
 // emitting IR. Used by unsafe.Sizeof/Alignof/Offsetof const folding, where
 // the operand is inspected, never evaluated.
@@ -1939,7 +1971,7 @@ func (fb *ssaFuncBuilder) evalOffsetofArg(e syntax.Expr) (off int64, ok bool) {
 	if !isSel || sel == nil || sel.Sel == nil {
 		return 0, false
 	}
-	st, isStruct := SafeUnderlying(fb.exprStaticType(sel.X)).(*TCStruct)
+	st, isStruct := SafeUnderlying(fb.operandType(sel.X)).(*TCStruct)
 	if !isStruct {
 		return 0, false
 	}
@@ -5021,11 +5053,9 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 	if imported.Path == "unsafe" && funcName == "Sizeof" {
 		sz := int64(8)
 		if len(argList) == 1 {
-			// The operand is not evaluated (Go spec); use its static type
-			// only. Evaluating it would emit dead IR (e.g. an alloc for a
-			// composite literal) that survives whole-program optimization
-			// and can recurse through the arena recorder.
-			if t := fb.exprStaticType(argList[0]); t != nil {
+			// The operand is not evaluated (Go spec); operandType gets its
+			// type without leaving IR behind.
+			if t := fb.operandType(argList[0]); t != nil {
 				sz = TypeSize(t)
 			}
 		}
@@ -5034,7 +5064,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 	if imported.Path == "unsafe" && funcName == "Alignof" {
 		al := int64(8)
 		if len(argList) == 1 {
-			if t := fb.exprStaticType(argList[0]); t != nil {
+			if t := fb.operandType(argList[0]); t != nil {
 				al = TypeAlign(t)
 			}
 		}
