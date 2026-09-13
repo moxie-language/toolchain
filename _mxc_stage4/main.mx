@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"runtime"
 	"unsafe"
@@ -3071,6 +3073,90 @@ func printTargets() {
 	}
 }
 
+type vendorHash struct {
+	path string
+	hash string
+}
+
+func vendorCopyTree(src, dst string) (hashes []vendorHash) {
+	mxutil.MkdirAll(dst, 0755)
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return hashes
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if len(name) == 0 || name[0] == '.' || name[0] == '_' {
+			continue
+		}
+		sp := mxutil.JoinPath(src, name)
+		dp := mxutil.JoinPath(dst, name)
+		if e.IsDir() {
+			for _, h := range vendorCopyTree(sp, dp) {
+				if len(hashes) >= cap(hashes) { hashes = mxutil.GrowCap(hashes) }
+				push(hashes, h)
+			}
+			continue
+		}
+		data, ok := mxutil.ReadFile(sp)
+		if !ok {
+			continue
+		}
+		mxutil.WriteFile(dp, data, 0644)
+		sum := sha256.Sum256(data)
+		if len(hashes) >= cap(hashes) { hashes = mxutil.GrowCap(hashes) }
+		push(hashes, vendorHash{path: dp, hash: "sha256:" | string(hex.EncodeToString(sum[:]))})
+	}
+	return hashes
+}
+
+func cmdVendor() {
+	_, modDir := findModuleRoot(".")
+	if modDir == "" {
+		fatal("vendor: no module file found")
+	}
+	_, reqs, repls := parseModRequires(modDir)
+	if len(reqs) == 0 && len(repls) == 0 {
+		mxutil.WriteStr(1, "no dependencies to vendor\n")
+		return
+	}
+	vendorDir := mxutil.JoinPath(modDir, "vendor")
+	removeAll(vendorDir)
+	mxutil.MkdirAll(vendorDir, 0755)
+	var modulesTxt string
+	var sumLines []string
+	for _, r := range reqs {
+		mod := r.path
+		srcDir := ""
+		if d, ok := repls[mod]; ok {
+			srcDir = d
+		} else {
+			srcDir = mxutil.JoinPath(getMoxiePath(), mod)
+		}
+		if !mxutil.FileExists(srcDir) {
+			fatal("vendor: source not found for " | mod | " at " | srcDir)
+		}
+		hashes := vendorCopyTree(srcDir, mxutil.JoinPath(vendorDir, mod))
+		modulesTxt = modulesTxt | "# " | mod | " " | r.version | "\n## explicit\n"
+		for _, h := range hashes {
+			if len(sumLines) >= cap(sumLines) { sumLines = mxutil.GrowCap(sumLines) }
+			push(sumLines, h.hash | " " | h.path)
+		}
+	}
+	mxutil.WriteFile(mxutil.JoinPath(vendorDir, "modules.txt"), []byte(modulesTxt), 0644)
+	for i := int32(1); i < int32(len(sumLines)); i++ {
+		for j := i; j > 0 && sumLines[j] < sumLines[j-1]; j-- {
+			sumLines[j], sumLines[j-1] = sumLines[j-1], sumLines[j]
+		}
+	}
+	sumContent := ""
+	for _, l := range sumLines {
+		sumContent = sumContent | l | "\n"
+	}
+	mxutil.WriteFile(mxutil.JoinPath(vendorDir, "moxie.sum"), []byte(sumContent), 0644)
+	mxutil.WriteStr(1, "vendored " | simpleItoa(int32(len(reqs))) | " modules into " | vendorDir | "\n")
+}
+
 func cacheClean() {
 	base := pkgCacheDir()
 	mxutil.WriteStr(2, "cleaning cache: " | base | "\n")
@@ -3884,6 +3970,10 @@ func main() {
 		mxutil.WriteStr(2, "cleaning cache: " | cacheRoot | "\n")
 		removeAll(cacheRoot)
 		mxutil.WriteStr(2, "  done\n")
+		return
+	}
+	if cmd == "vendor" {
+		cmdVendor()
 		return
 	}
 	if cmd == "cache" {
