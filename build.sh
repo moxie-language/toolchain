@@ -51,7 +51,7 @@ if [ ! -d "$COMPILER_SRC" ] || [ ! -f "$COMPILER_SRC/main.mx" ]; then
 fi
 echo "Source: $COMPILER_SRC"
 
-$MOXIE build -internal-nodwarf -o "$MOXIEROOT/moxie-new" "$COMPILER_SRC/"
+$MOXIE build -o "$MOXIEROOT/moxie-new" "$COMPILER_SRC/"
 
 # verify the new binary works
 "$MOXIEROOT/moxie-new" version

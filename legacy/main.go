@@ -504,7 +504,6 @@ func main() {
 	printIR := flag.Bool("internal-printir", false, "print LLVM IR")
 	dumpSSA := flag.Bool("internal-dumpssa", false, "dump internal Moxie SSA")
 	verifyIR := flag.Bool("internal-verifyir", false, "run extra verification steps on LLVM IR")
-	skipDwarf := flag.Bool("internal-nodwarf", false, "internal flag, use -no-debug instead")
 	standaloneRuntime := flag.Bool("standalone-runtime", false, "keep runtime symbols external (for build-runtime)")
 	rebuildAll := flag.Bool("a", false, "rebuild all packages from scratch (ignore build cache; required for bootstrap)")
 
@@ -572,7 +571,6 @@ func main() {
 		PrintIR:       *printIR,
 		DumpSSA:       *dumpSSA,
 		VerifyIR:      *verifyIR,
-		SkipDWARF:     *skipDwarf,
 		Semaphore:     make(chan struct{}, *parallelism),
 		Debug:         !*nodebug,
 		Nobounds:      *nobounds,
