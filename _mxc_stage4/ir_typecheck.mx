@@ -569,14 +569,14 @@ func releasePerPkgState() {
 	}
 }
 
-func scanParse(src []byte, name string) (file *syntax.File) {
+func scanParse(src []byte, name string, arena *runtime.Arena) (file *syntax.File) {
 	rw := rewriteSliceMakeLiterals(src)
 	rw = rewriteChanMakeLiterals(rw)
 	rw = stripDuplicatePackageClauses2(rw)
 	if len(rw) == 0 {
 		return nil
 	}
-	f, _ := syntax.ParseBytesArena(token.NewFileBase(name|".mx"), rw, silentErrh, nil, 0, runtime.CurrentArena())
+	f, _ := syntax.ParseBytesArena(token.NewFileBase(name|".mx"), rw, silentErrh, nil, 0, arena)
 	return f
 }
 
@@ -617,17 +617,21 @@ func ScanGenericDecls(src []byte, name string) {
 	// instead of accumulating every package's parsed source.
 	scan := runtime.ArenaNew(uintptr(len(src))*200 + 4*1024*1024)
 	runtime.ManualArenaEnter(scan)
-	probe := scanParse(src, name)
+	probe := scanParse(src, name, scan)
 	hasGeneric := probe != nil && fileHasGeneric(probe)
 	runtime.ManualArenaExit(scan)
 	runtime.ArenaFree(scan)
 	if !hasGeneric {
 		return
 	}
-	// Re-parse into the persistent arena so the AST outlives this call.
-	runtime.ManualArenaEnter(cctx.genericArena)
-	defer runtime.ManualArenaExit(cctx.genericArena)
-	file := scanParse(src, name)
+	// Re-parse into the persistent arena so the AST outlives this call. Do
+	// NOT enter manual-arena mode: nested calls must get their own
+	// freed-at-return arenas so only the AST is retained, not the whole parse
+	// trace (the parser is a self-mutating type and its scratch is large).
+	saveArena := runtime.CurrentArena()
+	runtime.SetCurrentArena(cctx.genericArena)
+	defer runtime.SetCurrentArena(saveArena)
+	file := scanParse(src, name, cctx.genericArena)
 	if file == nil {
 		return
 	}
