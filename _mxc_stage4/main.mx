@@ -408,6 +408,20 @@ func parseReplaceLine(line string, baseDir string) (from string, to string, ok b
 	return from, to, true
 }
 
+// isDirPath reports whether pkgPath names a directory on disk (and so must
+// be resolved through the module root) rather than an import path.
+func isDirPath(pkgPath string) (ok bool) {
+	if pkgPath == "." || pkgPath == ".." ||
+		mxutil.HasPrefix(pkgPath, "./") || mxutil.HasPrefix(pkgPath, "../") ||
+		mxutil.HasPrefix(pkgPath, "/") {
+		return true
+	}
+	if pkgPath == "" {
+		return false
+	}
+	return len(listFiles(pkgPath, ".mx")) > 0
+}
+
 func findModuleRoot(startDir string) (modName string, dir string) {
 	// "" means "the current directory"; walk from "." so that a relative
 	// target like ./pkg still finds the module root next to moxie.mod.
@@ -3621,7 +3635,11 @@ func cmdTest(args []string) {
 	triple := "x86_64-unknown-linux-musleabihf"
 	clang := "clang-22"
 
-	if mxutil.HasPrefix(pkgPath, "./") || mxutil.HasPrefix(pkgPath, "../") || pkgPath == "." || mxutil.HasPrefix(pkgPath, "/") {
+	// A target that names a directory on disk (./pkg, ../pkg, /abs/pkg, or
+	// a bare relative dir like pkg) is resolved through the module root; an
+	// import path like "fmt" is not. Missing this leaves globalModDir empty
+	// and module-internal imports unresolvable.
+	if isDirPath(pkgPath) {
 		absDir := pkgPath
 		if absDir == "." {
 			absDir = ""
@@ -4397,7 +4415,11 @@ func main() {
 	isWasm := mxutil.TargetArch == "wasm"
 	clang := "clang-22"
 
-	if mxutil.HasPrefix(pkgPath, "./") || mxutil.HasPrefix(pkgPath, "../") || pkgPath == "." || mxutil.HasPrefix(pkgPath, "/") {
+	// A target that names a directory on disk (./pkg, ../pkg, /abs/pkg, or
+	// a bare relative dir like pkg) is resolved through the module root; an
+	// import path like "fmt" is not. Missing this leaves globalModDir empty
+	// and module-internal imports unresolvable.
+	if isDirPath(pkgPath) {
 		absDir := pkgPath
 		if absDir == "." {
 			absDir = ""

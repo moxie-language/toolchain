@@ -3,8 +3,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MOXIEROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-export STATUSFILE="/tmp/moxie-test-status-$$"
-export TMPROOT="/tmp/moxie-tests-$$"
+export STATUSFILE="${STATUSFILE:-/tmp/moxie-test-status-$$}"
+export TMPROOT="${TMPROOT:-/tmp/moxie-tests-$$}"
 export MOXIEROOT
 > "$STATUSFILE"
 mkdir -p "$TMPROOT"
