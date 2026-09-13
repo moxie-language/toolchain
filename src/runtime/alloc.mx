@@ -46,6 +46,8 @@ type DomainRoot struct {
 	stableArena *Arena // receiver sovereign arena of the current method (if any)
 	stableStack  []*Arena // stack of previous stable arenas for nested sovereign methods
 	stableTop    int32
+	manualStack  []*Arena // stack of previous manual arenas for nested manual phases
+	manualTop    int32
 	sovereignRoot *hashmap // receiver -> sovereign arena, created lazily in root arena
 	domStack []uintptr // child domain root addresses
 	domTop   int32
@@ -94,10 +96,12 @@ var arenaPoolN int32
 const sovMaxDepth = int32(2)
 var sovDepth int32
 
-// manualArena is the current manual compile arena (set by
-// SovereignSetArena). While active, FnArenaPush/FnArenaPop are no-ops so
-// the whole phase allocates into the manual arena directly, keeping the
-// manual arena current instead of burying it under scratch arenas.
+// manualArena is the current manual compile arena (set by ManualArenaEnter,
+// never by SovereignSetArena). While active, FnArenaPush/FnArenaPop are
+// no-ops so the whole phase allocates into the manual arena directly, keeping
+// the manual arena current instead of burying it under scratch arenas. Used
+// only by the typecheck/compile phases; a sovereign method borrow leaves it
+// nil so nested helpers get their own freed-at-return arenas.
 var manualArena *Arena
 
 //:noinline
@@ -161,6 +165,8 @@ func initDomain(capacity uintptr) {
 	dr.sovScratch = rawSliceU64(p, (fnStackMax+63)/64)
 	p += uintptr((fnStackMax+63)/64) * 8
 	dr.stableStack = rawSliceArena(p, fnStackMax)
+	p += uintptr(fnStackMax) * unsafe.Sizeof(&dr.root)
+	dr.manualStack = rawSliceArena(p, fnStackMax)
 	p += uintptr(fnStackMax) * unsafe.Sizeof(&dr.root)
 	dr.domStack = rawSliceUptr(p, domStackMax)
 	p += uintptr(domStackMax) * unsafe.Sizeof(uintptr(0))
@@ -1155,11 +1161,16 @@ func sovInvalidateArena(a *Arena) {
 	}
 }
 
-// SovereignSetArena borrows the receiver's sovereign arena by PUSHING a new
-// frame slot, never overwriting the current slot. The previous slot stays in
-// place so the caller's arena (possibly the root arena) is untouched.
-// It also enters manual-arena mode: while active, FnArenaPush/FnArenaPop
-// are no-ops so the whole phase allocates into this arena directly.
+// SovereignSetArena borrows the receiver's sovereign data arena as the
+// current working frame by PUSHING a new slot, never overwriting the current
+// slot. The previous slot stays in place so the caller's arena (possibly the
+// root arena) is untouched.
+//
+// This does NOT enter manual-arena mode: a nested helper call's FnArenaPush
+// pushes a fresh per-call arena above this frame, so helper scratch is freed
+// at helper return and only the method's direct allocations persist in the
+// receiver's arena. A mutating method that needs heavy scratch must push it
+// into a helper for exactly this reason.
 func SovereignSetArena(a *Arena) {
 	if domainRoot == nil {
 		return
@@ -1171,7 +1182,6 @@ func SovereignSetArena(a *Arena) {
 	domainRoot.fnTop = i
 	domainRoot.fnStack[i] = a
 	domainRoot.fnBorrow[i>>6] |= 1 << (i & 63)
-	manualArena = a
 }
 
 // SovereignRestoreArena pops the borrowed sovereign slot, restoring the
@@ -1187,7 +1197,47 @@ func SovereignRestoreArena(a *Arena) {
 	domainRoot.fnBorrow[i>>6] &^= 1 << (i & 63)
 	domainRoot.fnStack[i] = nil
 	domainRoot.fnTop = i - 1
-	manualArena = nil
+}
+
+// ManualArenaEnter routes an entire phase (including nested helper calls) into
+// one long-lived arena: while active, FnArenaPush/FnArenaPop are no-ops so the
+// arena is never buried under transient fn arenas. Used by the typecheck and
+// compile phases, whose type graph is built by many helpers and must outlive
+// them. Not used for sovereign method borrows - see SovereignSetArena.
+func ManualArenaEnter(a *Arena) {
+	if domainRoot == nil {
+		return
+	}
+	i := domainRoot.fnTop + 1
+	if i >= fnStackMax {
+		runtimePanic("manual arena stack overflow")
+	}
+	domainRoot.fnTop = i
+	domainRoot.fnStack[i] = a
+	if domainRoot.manualTop < int32(len(domainRoot.manualStack)) {
+		domainRoot.manualStack[domainRoot.manualTop] = manualArena
+		domainRoot.manualTop++
+	}
+	manualArena = a
+}
+
+// ManualArenaExit leaves manual-arena mode and pops the phase frame.
+func ManualArenaExit(a *Arena) {
+	if domainRoot == nil {
+		return
+	}
+	i := domainRoot.fnTop
+	if i == 0 {
+		runtimePanic("manual arena underflow")
+	}
+	domainRoot.fnStack[i] = nil
+	domainRoot.fnTop = i - 1
+	if domainRoot.manualTop > 0 {
+		domainRoot.manualTop--
+		manualArena = domainRoot.manualStack[domainRoot.manualTop]
+	} else {
+		manualArena = nil
+	}
 }
 
 // SovereignRegStable marks the receiver's sovereign arena as the current

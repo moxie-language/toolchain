@@ -578,8 +578,8 @@ func ScanGenericDecls(src []byte, name string) {
 	if cctx.genericArena == nil {
 		cctx.genericArena = runtime.ArenaNew(64 * 1024 * 1024)
 	}
-	runtime.SovereignSetArena(cctx.genericArena)
-	defer runtime.SovereignRestoreArena(cctx.genericArena)
+	runtime.ManualArenaEnter(cctx.genericArena)
+	defer runtime.ManualArenaExit(cctx.genericArena)
 	rw := rewriteSliceMakeLiterals(src)
 	src = rewriteChanMakeLiterals(rw)
 	src = stripDuplicatePackageClauses2(src)
@@ -813,11 +813,11 @@ func TypeCheckOnly(src []byte, name string, mxhPath string) {
 	// in root-lifetime memory. The typecheck arena's contents - and any
 	// sovereign groups whose receivers live in it - die together at
 	// ArenaFree below (sovInvalidateArena sweep).
-	runtime.SovereignSetArena(arena)
+	runtime.ManualArenaEnter(arena)
 	pkg, file := typeCheckPkg(src, name, arena)
 	if pkg != nil && file != nil {
 		mxhData := generateMxh(pkg)
-		runtime.SovereignRestoreArena(arena)
+		runtime.ManualArenaExit(arena)
 		// mxh text must land in the caller's (persistent) arena so the
 		// registry survives ArenaFree.
 		if mxhPath != "" {
@@ -825,7 +825,7 @@ func TypeCheckOnly(src []byte, name string, mxhPath string) {
 		}
 		loadMxhData([]byte(mxhData))
 	} else {
-		runtime.SovereignRestoreArena(arena)
+		runtime.ManualArenaExit(arena)
 	}
 	ScanGenericDecls(src, name)
 	runtime.ArenaFree(arena)
@@ -864,7 +864,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	ScanGenericDecls(src, name)
 
 	arena := runtime.ArenaNew(compileArenaSize)
-	runtime.SovereignSetArena(arena)
+	runtime.ManualArenaEnter(arena)
 
 	pkg, file := typeCheckPkg(src, name, arena)
 
@@ -873,16 +873,16 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	// serialized text on the root arena. No cross-arena graph copy.
 	if pkg != nil && file != nil {
 		mxhData := generateMxh(pkg)
-		runtime.SovereignRestoreArena(arena)
+		runtime.ManualArenaExit(arena)
 		loadMxhData([]byte(mxhData))
 		// Copy mxh text to root arena so it survives ArenaFree.
 		mxhCopy := []byte{:len(mxhData)}
 		copy(mxhCopy, mxhData)
 		cctx.lastMxhData = string(mxhCopy)
-		runtime.SovereignSetArena(arena)
+		runtime.ManualArenaEnter(arena)
 	}
 
-	runtime.SovereignRestoreArena(arena)
+	runtime.ManualArenaExit(arena)
 
 	if file == nil {
 		var errSegs []string
@@ -909,7 +909,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	}
 
 	// Re-enter compilation arena for SSA + IR emit.
-	runtime.SovereignSetArena(arena)
+	runtime.ManualArenaEnter(arena)
 
 	mxutil.WriteStr(2, "    SSA build\n")
 	prog := NewSSAProgram()
@@ -923,7 +923,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 		}
 		cctx.compileErrors = cctx.compileErrors[:0]
 		res := joinStrs(errSegs)
-		runtime.SovereignRestoreArena(arena)
+		runtime.ManualArenaExit(arena)
 		resCopy := []byte{:len(res)}
 		copy(resCopy, res)
 		runtime.ArenaFree(arena)
@@ -934,9 +934,9 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	mxutil.WriteStr(2, "    IR emit\n")
 	if cctx.irOutputFile != "" {
 		// Create file on outer arena (os.File must outlive inner arena).
-		runtime.SovereignRestoreArena(arena)
+		runtime.ManualArenaExit(arena)
 		f, ferr := os.Create(cctx.irOutputFile)
-		runtime.SovereignSetArena(arena)
+		runtime.ManualArenaEnter(arena)
 		if ferr == nil {
 			emitter.outFile = f
 		} else {
@@ -951,7 +951,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 
 
 	// Copy IR to outer arena before inner arena dies.
-	runtime.SovereignRestoreArena(arena)
+	runtime.ManualArenaExit(arena)
 	var result string
 	if len(ir) > 0 {
 		heapIR := []byte{:len(ir)}
