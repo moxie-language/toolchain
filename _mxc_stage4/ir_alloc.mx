@@ -21,13 +21,17 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 			e.scopeTrackAlloc(reg)
 		} else {
 			e.w("  ") ; e.w(reg) ; e.w(" = alloca ") ; e.w(at) ; e.w("\n")
-			e.w("  store ") ; e.w(at) ; e.w(" zeroinitializer, ptr ") ; e.w(reg) ; e.w("\n")
+			if !a.NoZero {
+				e.emitZeroInit(reg, at)
+			}
 		}
 		return
 	}
 	if at, ok := e.allocTypes[a]; ok && !a.Heap && len(at) > 0 && at[0] == '{' {
 		e.w("  ") ; e.w(reg) ; e.w(" = alloca ") ; e.w(at) ; e.w("\n")
-		e.w("  store ") ; e.w(at) ; e.w(" zeroinitializer, ptr ") ; e.w(reg) ; e.w("\n")
+		if !a.NoZero {
+			e.emitZeroInit(reg, at)
+		}
 		return
 	}
 	elemType := e.llvmType(a.SSAType())
@@ -141,7 +145,13 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 		e.w(" = alloca ")
 		e.w(elemType)
 		e.w("\n")
-		e.w("  store ") ; e.w(elemType) ; e.w(" zeroinitializer, ptr ") ; e.w(reg) ; e.w("\n")
+		if a.NoZero {
+			// builder fully initializes this alloca
+		} else if len(elemType) > 0 && (elemType[0] == '[' || elemType[0] == '{') {
+			e.emitZeroInit(reg, elemType)
+		} else {
+			e.w("  store ") ; e.w(elemType) ; e.w(" zeroinitializer, ptr ") ; e.w(reg) ; e.w("\n")
+		}
 	}
 }
 

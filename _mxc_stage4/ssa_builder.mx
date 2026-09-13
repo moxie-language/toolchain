@@ -4565,40 +4565,10 @@ func (fb *ssaFuncBuilder) buildCompositeLit(e *syntax.CompositeLit) (s SSAValue)
 	}
 
 	alloc := fb.emitAlloc(typ, 0)
-	posIdx := 0
-	for _, el := range e.ElemList {
-		if kv, ok := el.(*syntax.KeyValueExpr); ok {
-			if _, ok2 := SafeUnderlying(typ).(*TCStruct); ok2 {
-				idx := fb.fieldIndex(typ, kv.Key.(*syntax.Name).Value)
-				if idx >= 0 {
-					fa := &SSAFieldAddr{X: alloc, Field: idx}
-					ft := fb.fieldType(typ, idx)
-					fa.typ = NewPointer(ft)
-					fa.name = fb.nextName()
-					fb.emit(fa)
-					v := fb.buildExpr(kv.Value)
-					if v != nil {
-						v = fb.coerceToInterface(v, ft)
-						fb.emitStore(fa, v)
-					}
-				}
-			}
-		} else {
-			v := fb.buildExpr(el)
-			if v != nil {
-				if _, ok2 := SafeUnderlying(typ).(*TCStruct); ok2 {
-					ft := fb.fieldType(typ, posIdx)
-					fa := &SSAFieldAddr{X: alloc, Field: posIdx}
-					fa.typ = NewPointer(ft)
-					fa.name = fb.nextName()
-					fb.emit(fa)
-					v = fb.coerceToInterface(v, ft)
-					fb.emitStore(fa, v)
-				}
-			}
-			posIdx++
-		}
+	if litFullyCovers(e, typ) {
+		alloc.NoZero = true
 	}
+	fb.buildCompositeLitInto(alloc, e, typ)
 	return fb.emitLoad(alloc, typ)
 }
 
@@ -4608,31 +4578,10 @@ func (fb *ssaFuncBuilder) buildArrayLit(e *syntax.CompositeLit, typ Type, ar *Ar
 		typ = ar
 	}
 	alloc := fb.emitAlloc(typ, 0)
-	elemTyp := ar.Elem
-	for i, el := range e.ElemList {
-		var expr syntax.Expr
-		if kv, ok := el.(*syntax.KeyValueExpr); ok {
-			expr = kv.Value
-		} else {
-			expr = el
-		}
-		var v SSAValue
-		if cl, ok := expr.(*syntax.CompositeLit); ok && cl.Type == nil {
-			v = fb.buildCompositeLitWithType(cl, elemTyp)
-		} else {
-			v = fb.buildExpr(expr)
-		}
-		if v == nil {
-			continue
-		}
-		idx := &SSAConst{typ: Typ[Int32], val: &ConstInt{V:int64(i)}}
-		ia := &SSAIndexAddr{X: alloc, Index: idx}
-		ia.typ = NewPointer(elemTyp)
-		ia.name = fb.nextName()
-		fb.emit(ia)
-		v = fb.coerceToInterface(v, elemTyp)
-		fb.emitStore(ia, v)
+	if litFullyCovers(e, typ) {
+		alloc.NoZero = true
 	}
+	fb.buildCompositeLitInto(alloc, e, typ)
 	return fb.emitLoad(alloc, typ)
 }
 
@@ -4820,41 +4769,110 @@ func (fb *ssaFuncBuilder) buildCompositeLitWithType(e *syntax.CompositeLit, typ 
 		return fb.buildArrayLit(e, typ, ar)
 	}
 	alloc := fb.emitAlloc(typ, 0)
-	posIdx := 0
-	for _, el := range e.ElemList {
-		if kv, ok := el.(*syntax.KeyValueExpr); ok {
-			if _, ok2 := SafeUnderlying(typ).(*TCStruct); ok2 {
-				idx := fb.fieldIndex(typ, kv.Key.(*syntax.Name).Value)
-				if idx >= 0 {
-					ft := fb.fieldType(typ, idx)
-					fa := &SSAFieldAddr{X: alloc, Field: idx}
-					fa.typ = NewPointer(ft)
-					fa.name = fb.nextName()
-					fb.emit(fa)
-					v := fb.buildExpr(kv.Value)
-					if v != nil {
-						v = fb.coerceToInterface(v, ft)
-						fb.emitStore(fa, v)
+	if litFullyCovers(e, typ) {
+		alloc.NoZero = true
+	}
+	fb.buildCompositeLitInto(alloc, e, typ)
+	return fb.emitLoad(alloc, typ)
+}
+
+// buildCompositeLitInto writes a composite literal into dst (a pointer to
+// typ) with direct field/index stores instead of building a temporary
+// aggregate value per element. Nested array and struct literals recurse.
+func (fb *ssaFuncBuilder) buildCompositeLitInto(dst SSAValue, e *syntax.CompositeLit, typ Type) {
+	if ar, isArr := SafeUnderlying(typ).(*Array); isArr {
+		posIdx := int32(0)
+		for _, el := range e.ElemList {
+			expr := syntax.Expr(el)
+			idx := posIdx
+			if kv, ok := el.(*syntax.KeyValueExpr); ok {
+				expr = kv.Value
+				if bl, ok2 := kv.Key.(*syntax.BasicLit); ok2 {
+					if ci, ok3 := EvalBasicLitLocal(bl).(*ConstInt); ok3 {
+						idx = int32(ci.V)
 					}
 				}
 			}
-		} else {
-			v := fb.buildExpr(el)
-			if v != nil {
-				if _, ok2 := SafeUnderlying(typ).(*TCStruct); ok2 {
-					ft := fb.fieldType(typ, posIdx)
-					fa := &SSAFieldAddr{X: alloc, Field: posIdx}
-					fa.typ = NewPointer(ft)
-					fa.name = fb.nextName()
-					fb.emit(fa)
-					v = fb.coerceToInterface(v, ft)
-					fb.emitStore(fa, v)
+			posIdx++
+			ia := &SSAIndexAddr{X: dst, Index: &SSAConst{typ: Typ[Int32], val: &ConstInt{V: int64(idx)}}}
+			ia.typ = NewPointer(ar.Elem)
+			ia.name = fb.nextName()
+			fb.emit(ia)
+			fb.storeLitElem(ia, expr, ar.Elem)
+		}
+		return
+	}
+	if _, isStruct := SafeUnderlying(typ).(*TCStruct); isStruct {
+		posIdx := int32(0)
+		for _, el := range e.ElemList {
+			expr := syntax.Expr(el)
+			idx := posIdx
+			if kv, ok := el.(*syntax.KeyValueExpr); ok {
+				expr = kv.Value
+				if nm, ok2 := kv.Key.(*syntax.Name); ok2 {
+					idx = fb.fieldIndex(typ, nm.Value)
 				}
 			}
 			posIdx++
+			if idx < 0 {
+				continue
+			}
+			ft := fb.fieldType(typ, idx)
+			fa := &SSAFieldAddr{X: dst, Field: idx}
+			fa.typ = NewPointer(ft)
+			fa.name = fb.nextName()
+			fb.emit(fa)
+			fb.storeLitElem(fa, expr, ft)
 		}
+		return
 	}
-	return fb.emitLoad(alloc, typ)
+	// Not an aggregate: fall back to a value store.
+	if v := fb.buildExpr(e); v != nil {
+		fb.emitStore(dst, v)
+	}
+}
+
+// storeLitElem stores one composite-literal element at dst. An untyped nested
+// literal is written directly into dst so no temporary aggregate is created.
+func (fb *ssaFuncBuilder) storeLitElem(dst SSAValue, expr syntax.Expr, elemTyp Type) {
+	if cl, ok := expr.(*syntax.CompositeLit); ok && cl.Type == nil {
+		fb.buildCompositeLitInto(dst, cl, elemTyp)
+		return
+	}
+	v := fb.buildExpr(expr)
+	if v == nil {
+		return
+	}
+	v = fb.coerceToInterface(v, elemTyp)
+	fb.emitStore(dst, v)
+}
+
+// litFullyCovers reports whether a positional composite literal specifies
+// every element/field of typ, so an alloca holding it needs no zero-init.
+func litFullyCovers(e *syntax.CompositeLit, typ Type) (ok bool) {
+	if ar, isArr := SafeUnderlying(typ).(*Array); isArr {
+		if int64(len(e.ElemList)) != ar.Len {
+			return false
+		}
+		for _, el := range e.ElemList {
+			if _, isKV := el.(*syntax.KeyValueExpr); isKV {
+				return false
+			}
+		}
+		return true
+	}
+	if st, isStruct := SafeUnderlying(typ).(*TCStruct); isStruct {
+		if int32(len(e.ElemList)) != int32(len(st.Fields)) {
+			return false
+		}
+		for _, el := range e.ElemList {
+			if _, isKV := el.(*syntax.KeyValueExpr); isKV {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ Type, sl *Slice) (s SSAValue) {

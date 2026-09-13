@@ -519,6 +519,24 @@ func (e *irEmitter) declareRuntimeNoCtx(name, retType, params string) {
 	e.appendEmitKV(emitKV{name, retType | " @" | name | "(" | params | ")"})
 }
 
+func (e *irEmitter) declareIntrinsic(name, retType, params string) {
+	e.appendEmitKV(emitKV{name, retType | " @" | name | "(" | params | ")"})
+}
+
+// emitZeroInit zero-fills the memory at reg (a pointer to at) using
+// llvm.memset. A single aggregate `store zeroinitializer` is expanded by
+// the backend into one store per 8 bytes; for large arrays that is
+// thousands of instructions, whereas memset lowers to a loop/rep stosb.
+func (e *irEmitter) emitZeroInit(reg, at string) {
+	ipt := e.intptrType()
+	fn := "llvm.memset.p0." | ipt
+	e.nextReg++
+	sz := "%zi" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(at) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+	e.w("  call void @") ; e.w(fn) ; e.w("(ptr ") ; e.w(reg) ; e.w(", i8 0, ") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", i1 false)\n")
+	e.declareIntrinsic(fn, "void", "ptr, i8, " | ipt | ", i1")
+}
+
 
 func (e *irEmitter) declareExternalGlobal(g *SSAGlobal) {
 	if g.pkg == nil || g.pkg == e.pkg {
