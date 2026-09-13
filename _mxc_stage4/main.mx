@@ -3061,6 +3061,8 @@ func printHelp() {
 	mxutil.WriteStr(1, "  targets: list all supported targets\n")
 	mxutil.WriteStr(1, "  info:    print target information\n")
 	mxutil.WriteStr(1, "  list:    list packages in the current module\n")
+	mxutil.WriteStr(1, "  header:  emit a .mxh protocol header for a package\n")
+	mxutil.WriteStr(1, "  install: fetch and cache a package\n")
 	mxutil.WriteStr(1, "  version: print version information\n")
 	mxutil.WriteStr(1, "  env:     print environment information\n")
 	mxutil.WriteStr(1, "  fetch:   fetch and cache all dependencies declared in moxie.mod\n")
@@ -3247,6 +3249,175 @@ func cmdVendor() {
 	}
 	mxutil.WriteFile(mxutil.JoinPath(vendorDir, "moxie.sum"), []byte(sumContent), 0644)
 	mxutil.WriteStr(1, "vendored " | simpleItoa(int32(len(reqs))) | " modules into " | vendorDir | "\n")
+}
+
+func hex16(v uint64) (s string) {
+	digits := "0123456789abcdef"
+	buf := []byte{:0:16}
+	for i := int32(0); i < 16; i++ {
+		shift := uint64((15 - i) * 4)
+		buf = push(buf, digits[(v>>shift)&0xf])
+	}
+	return string(buf)
+}
+
+func tcTypeStr(t Type) (s string) {
+	if t == nil {
+		return "?"
+	}
+	switch tt := SafeUnderlying(t).(type) {
+	case *Basic:
+		return tt.Name
+	case *Slice:
+		return "[]" | tcTypeStr(tt.Elem)
+	case *Array:
+		return "[" | simpleItoa(int32(tt.Len)) | "]" | tcTypeStr(tt.Elem)
+	case *Pointer:
+		return "*" | tcTypeStr(tt.Base)
+	case *Named:
+		if tt.Obj != nil {
+			return tt.Obj.Name
+		}
+		return "?"
+	case *TCStruct:
+		return "struct"
+	case *TCMap:
+		return "map"
+	case *TCInterface:
+		return "interface"
+	}
+	return "?"
+}
+
+func tcIsVarLen(t Type) (ok bool) {
+	switch SafeUnderlying(t).(type) {
+	case *Slice, *TCMap:
+		return true
+	}
+	return false
+}
+
+func tcHasCodecMethod(t Type) (ok bool) {
+	hasEnc := false
+	hasDec := false
+	switch tt := t.(type) {
+	case *Named:
+		for _, m := range tt.Methods {
+			if m.Name == "EncodeTo" { hasEnc = true }
+			if m.Name == "DecodeFrom" { hasDec = true }
+		}
+	case *Basic:
+		for _, m := range tt.Methods {
+			if m.Name == "EncodeTo" { hasEnc = true }
+			if m.Name == "DecodeFrom" { hasDec = true }
+		}
+	}
+	return hasEnc && hasDec
+}
+
+func cmdHeader(pkgName, outdir string) {
+	if pkgName == "" {
+		fatal("header: package name required")
+	}
+	pkg := discoverPkg(pkgName, ".")
+	if pkg == nil {
+		fatal("header: package not found: " | pkgName)
+	}
+	src := concatSources(pkg.dir, pkg.files)
+	compilePath := pkg.path
+	if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
+		compilePath = pkg.name
+	}
+	TypeCheckOnly(src, compilePath, "")
+	tpkg := cctx.universe.Registry[compilePath]
+	if tpkg == nil || tpkg.Scope == nil {
+		fatal("header: typecheck failed for " | pkgName)
+	}
+	body := "// wire: uint32-length-prefixed EncodeTo/DecodeFrom at cross-binary spawn boundaries\n"
+	names := tpkg.Scope.Names()
+	for i := int32(1); i < int32(len(names)); i++ {
+		for j := i; j > 0 && names[j] < names[j-1]; j-- {
+			names[j], names[j-1] = names[j-1], names[j]
+		}
+	}
+	for _, name := range names {
+		obj := tpkg.Scope.Lookup(name)
+		tn, ok := obj.(*TypeName)
+		if !ok {
+			continue
+		}
+		t := tn.Typ
+		if t == nil {
+			continue
+		}
+		if !tcHasCodecMethod(t) {
+			continue
+		}
+		if _, isIface := SafeUnderlying(t).(*TCInterface); isIface {
+			continue
+		}
+		body = body | "type " | name
+		if st, isStruct := SafeUnderlying(t).(*TCStruct); isStruct {
+			body = body | " struct {\n"
+			for _, f := range st.Fields {
+				if !f.Exported() {
+					continue
+				}
+				if tcIsVarLen(f.Typ) {
+					fatal("header: variable-length field " | name | "." | f.Name | " cannot appear in .mxh struct layout")
+				}
+				body = body | "\t" | f.Name | " " | tcTypeStr(f.Typ) | "\n"
+			}
+			body = body | "}\n"
+		} else if !tcIsVarLen(t) {
+			body = body | " " | tcTypeStr(t) | "\n"
+		} else {
+			body = body | " opaque\n"
+		}
+		body = body | "func (" | name | ") EncodeTo(w io.Writer) error\n"
+		body = body | "func (*" | name | ") DecodeFrom(r io.Reader) error\n"
+	}
+	headerLine := "// mxh v1 " | hex16(fnv1a64(body))
+	full := headerLine | "\n" | body
+	if outdir == "-" {
+		mxutil.WriteStr(1, full)
+		return
+	}
+	mxutil.MkdirAll(outdir, 0755)
+	outPath := mxutil.JoinPath(outdir, baseName(pkg.dir) | ".mxh")
+	mxutil.WriteFile(outPath, []byte(full), 0644)
+	mxutil.WriteStr(2, "header: wrote " | outPath | "\n")
+}
+
+func cmdInstall(pkgName string) {
+	firstSeg := pkgName
+	for i := 0; i < len(pkgName); i++ {
+		if pkgName[i] == '/' {
+			firstSeg = pkgName[:i]
+			break
+		}
+	}
+	isRemote := false
+	for i := 0; i < len(firstSeg); i++ {
+		if firstSeg[i] == '.' {
+			isRemote = true
+			break
+		}
+	}
+	if isRemote && !mxutil.FileExists(pkgName) {
+		cmdFetch(pkgName)
+	}
+	pkg := discoverPkg(pkgName, ".")
+	if pkg == nil {
+		fatal("install: package not found: " | pkgName)
+	}
+	compilePath := pkg.path
+	if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
+		compilePath = pkg.name
+	}
+	src := concatSources(pkg.dir, pkg.files)
+	TypeCheckOnly(src, compilePath, "")
+	mxutil.WriteStr(2, "install: " | compilePath | " cached\n")
 }
 
 func cacheClean() {
@@ -4076,6 +4247,32 @@ func main() {
 	}
 	if cmd == "vendor" {
 		cmdVendor()
+		return
+	}
+	if cmd == "header" {
+		pkgName := ""
+		outdir := "."
+		ai := int32(2)
+		for ai < int32(len(args)) {
+			if args[ai] == "-o" && ai+1 < int32(len(args)) {
+				outdir = args[ai+1]
+				ai = ai + 2
+				continue
+			}
+			if pkgName == "" {
+				pkgName = args[ai]
+			}
+			ai++
+		}
+		cmdHeader(pkgName, outdir)
+		return
+	}
+	if cmd == "install" {
+		if len(args) < 3 {
+			mxutil.WriteStr(2, "usage: mxc install <package>\n")
+			os.Exit(1)
+		}
+		cmdInstall(args[2])
 		return
 	}
 	if cmd == "cache" {
