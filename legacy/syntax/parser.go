@@ -323,9 +323,7 @@ const stopset uint64 = 1<<Break |
 	1<<Const |
 	1<<Continue |
 	1<<Defer |
-	1<<Fallthrough |
 	1<<For |
-	1<<Go |
 	1<<Goto |
 	1<<If |
 	1<<Return |
@@ -2592,8 +2590,8 @@ func (p *Parser) commClause() *CommClause {
 //
 //	Statement =
 //		Declaration | LabeledStmt | SimpleStmt |
-//		GoStmt | ReturnStmt | BreakStmt | ContinueStmt | GotoStmt |
-//		FallthroughStmt | Block | IfStmt | SwitchStmt | SelectStmt | ForStmt |
+//		ReturnStmt | BreakStmt | ContinueStmt | GotoStmt |
+//		Block | IfStmt | SwitchStmt | SelectStmt | ForStmt |
 //		DeferStmt .
 func (p *Parser) stmtOrNil() Stmt {
 	if trace {
@@ -2651,13 +2649,6 @@ func (p *Parser) stmtOrNil() Stmt {
 	case If:
 		return p.ifStmt()
 
-	case Fallthrough:
-		s := new(BranchStmt)
-		s.pos = p.pos()
-		p.Next()
-		s.Tok = Fallthrough
-		return s
-
 	case Break, Continue:
 		s := new(BranchStmt)
 		s.pos = p.pos()
@@ -2668,7 +2659,7 @@ func (p *Parser) stmtOrNil() Stmt {
 		}
 		return s
 
-	case Go, Defer:
+	case Defer:
 		return p.callStmt()
 
 	case Goto:

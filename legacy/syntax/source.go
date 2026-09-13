@@ -5,7 +5,6 @@ import (
 	"unicode/utf8"
 )
 
-
 // The source buffer is accessed using three indices b (begin),
 // r (read), and e (end):
 //
@@ -38,10 +37,10 @@ type Source struct {
 
 	buf       []byte // source buffer
 	ioerr     error  // pending I/O error, or nil
-	b, r, e   int32    // buffer indices (see comment above)
-	line, col uint32   // source position of ch (0-based)
+	b, r, e   int32  // buffer indices (see comment above)
+	line, col uint32 // source position of ch (0-based)
 	ch        rune   // most recently read character
-	chw       int32    // width of ch
+	chw       int32  // width of ch
 }
 
 const sentinel = utf8.RuneSelf

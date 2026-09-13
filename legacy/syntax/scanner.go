@@ -40,7 +40,7 @@ type Scanner struct {
 	Bad       bool     // valid if tok is _Literal, true if a syntax error occurred, lit may be malformed
 	Kind      LitKind  // valid if tok is _Literal
 	Op        Operator // valid if tok is _Operator, _Star, _AssignOp, or _IncOp
-	Prec      int32      // valid if tok is _Operator, _Star, _AssignOp, or _IncOp
+	Prec      int32    // valid if tok is _Operator, _Star, _AssignOp, or _IncOp
 }
 
 func (s *Scanner) Init(src io.Reader, errh func(line, col uint32, msg string), mode uint) {
@@ -114,7 +114,7 @@ redo:
 			s.Tok = Semi
 			break
 		}
-		s.Tok =EOF
+		s.Tok = EOF
 
 	case '\n':
 		s.nextch()
@@ -311,7 +311,7 @@ redo:
 		if s.ch == '=' {
 			s.nextch()
 			s.Op, s.Prec = Geq, PrecCmp
-			s.Tok =OperatorType
+			s.Tok = OperatorType
 			break
 		}
 		if s.ch == '>' {
@@ -396,7 +396,7 @@ func (s *Scanner) Ident() {
 	lit := s.segment()
 	if len(lit) >= 2 {
 		if tok := keywordMap[Hash(lit)]; tok != 0 && TokStrFast(tok) == string(lit) {
-			s.nlsemi = contains(1<<Break|1<<Continue|1<<Fallthrough|1<<Return, tok)
+			s.nlsemi = contains(1<<Break|1<<Continue|1<<Return, tok)
 			s.Tok = tok
 			return
 		}
@@ -491,9 +491,9 @@ func (s *Scanner) Digits(base int32, invalid *int32) (digsep int32) {
 func (s *Scanner) Number(seenPoint bool) {
 	ok := true
 	kind := IntLit
-	base := int32(10)  // number base
-	prefix := rune(0)  // one of 0 (decimal), '0' (0-octal), 'x', 'o', or 'b'
-	digsep := int32(0) // bit 0: digit present, bit 1: '_' present
+	base := int32(10)    // number base
+	prefix := rune(0)    // one of 0 (decimal), '0' (0-octal), 'x', 'o', or 'b'
+	digsep := int32(0)   // bit 0: digit present, bit 1: '_' present
 	invalid := int32(-1) // index of invalid digit in literal, or < 0
 
 	// integer part
@@ -776,7 +776,11 @@ func (s *Scanner) lineComment() {
 	}
 
 	for _, r := range prefix {
-		if s.ch != r { s.stop(); s.skipLine(); return }
+		if s.ch != r {
+			s.stop()
+			s.skipLine()
+			return
+		}
 		s.nextch()
 	}
 	// directive text
@@ -819,7 +823,11 @@ func (s *Scanner) fullComment() {
 	const prefix = "line "
 
 	for _, r := range prefix {
-		if s.ch != r { s.stop(); s.skipComment(); return }
+		if s.ch != r {
+			s.stop()
+			s.skipComment()
+			return
+		}
 		s.nextch()
 	}
 	// directive text

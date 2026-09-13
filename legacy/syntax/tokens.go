@@ -9,22 +9,22 @@ type Token uint32
 //go:generate stringer -type token -linecomment tokens.go
 
 const (
-	_    Token = iota
+	_   Token = iota
 	EOF       // EOF
 
 	// names and literals
-	NameType    // name
-	Literal // literal
+	NameType // name
+	Literal  // literal
 
 	// operators and operations
 	// Operator is excluding '*' (Star)
 	OperatorType // op
-	AssignOp // op=
-	IncOp    // opop
-	Assign   // =
-	Define   // :=
-	Arrow    // <-
-	Star     // *
+	AssignOp     // op=
+	IncOp        // opop
+	Assign       // =
+	Define       // :=
+	Arrow        // <-
+	Star         // *
 
 	// delimiters
 	Lparen    // (
@@ -40,33 +40,31 @@ const (
 	DotDotDot // ...
 
 	// keywords
-	Break       // break
-	Case        // case
-	Chan        // chan
-	Const       // const
-	Continue    // continue
-	Default     // default
-	Defer       // defer
-	Else        // else
-	Fallthrough // fallthrough
-	For         // for
-	Func        // func
-	Go          // go
-	Goto        // goto
-	If          // if
-	Import      // import
-	Interface   // interface
-	Map         // map
-	Package     // package
-	Range       // range
-	Return      // return
-	Select      // select
-	Struct      // struct
-	Switch      // switch
-	TypeType        // type
-	Var         // var
+	Break     // break
+	Case      // case
+	Chan      // chan
+	Const     // const
+	Continue  // continue
+	Default   // default
+	Defer     // defer
+	Else      // else
+	For       // for
+	Func      // func
+	Goto      // goto
+	If        // if
+	Import    // import
+	Interface // interface
+	Map       // map
+	Package   // package
+	Range     // range
+	Return    // return
+	Select    // select
+	Struct    // struct
+	Switch    // switch
+	TypeType  // type
+	Var       // var
 
-    // empty line comment to exclude it from .String
+	// empty line comment to exclude it from .String
 	tokenCount //
 )
 

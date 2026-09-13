@@ -715,8 +715,6 @@ func (a *Adapter) stmt(s Stmt) ast.Stmt {
 		switch s.Tok {
 		case Continue:
 			tok = token.CONTINUE
-		case Fallthrough:
-			tok = token.FALLTHROUGH
 		case Goto:
 			tok = token.GOTO
 		}
@@ -729,22 +727,16 @@ func (a *Adapter) stmt(s Stmt) ast.Stmt {
 		x := a.expr(s.Call)
 		ce, ok := x.(*ast.CallExpr)
 		if !ok {
-			// bare `defer f` / `go f`: f is a function value, not a call
+			// bare `defer f`: f is a function value, not a call
 			ce = &ast.CallExpr{
 				Fun:    x,
 				Lparen: a.pos(s.Pos()),
 				Rparen: a.pos(s.Pos()),
 			}
 		}
-		if s.Tok == Defer {
-			return &ast.DeferStmt{
-				Defer: a.pos(s.Pos()),
-				Call:  ce,
-			}
-		}
-		return &ast.GoStmt{
-			Go:   a.pos(s.Pos()),
-			Call: ce,
+		return &ast.DeferStmt{
+			Defer: a.pos(s.Pos()),
+			Call:  ce,
 		}
 	case *ReturnStmt:
 		return &ast.ReturnStmt{

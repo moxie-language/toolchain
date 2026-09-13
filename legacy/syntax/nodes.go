@@ -379,19 +379,19 @@ type (
 	}
 
 	BranchStmt struct {
-		Tok   Token // Break, Continue, Fallthrough, or Goto
+		Tok   Token // Break, Continue, or Goto
 		Label *Name
 		// Target is the continuation of the control flow after executing
 		// the branch; it is computed by the parser if CheckBranches is set.
 		// Target is a *LabeledStmt for gotos, and a *SwitchStmt, *SelectStmt,
 		// or *ForStmt for breaks and continues, depending on the context of
-		// the branch. Target is not set for fallthroughs.
+		// the branch.
 		Target Stmt
 		stmt
 	}
 
 	CallStmt struct {
-		Tok     Token // Go or Defer
+		Tok     Token // Defer
 		Call    Expr
 		DeferAt Expr // argument to runtime.deferprocat
 		stmt

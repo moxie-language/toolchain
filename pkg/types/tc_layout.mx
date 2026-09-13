@@ -1,0 +1,126 @@
+package types
+
+// Type layout for unsafe.Sizeof/Alignof/Offsetof.
+//
+// The type checker's const evaluator and the SSA builder's const folder both
+// need byte sizes, alignments, and struct field offsets. This is the single
+// source of truth for both. Layout follows the Go rules for the Moxie type
+// set: string/slice are three words, interface and func values are two words,
+// map/chan/pointer are one word, arrays and structs are laid out with
+// per-field alignment padding.
+
+func alignUp(n, a int64) (r int64) {
+	if a <= 1 {
+		return n
+	}
+	rem := n % a
+	if rem == 0 {
+		return n
+	}
+	return n + (a - rem)
+}
+
+func basicSize(k BasicKind) (sz int64) {
+	switch k {
+	case Bool, Int8, Uint8:
+		return 1
+	case Int16, Uint16:
+		return 2
+	case Int32, Uint32, Float32:
+		return 4
+	case Int64, Uint64, Float64, Uintptr, UnsafePointer:
+		return 8
+	case TCString, UntypedString:
+		return 24
+	}
+	return 8
+}
+
+func basicAlign(k BasicKind) (a int64) {
+	switch k {
+	case Bool, Int8, Uint8:
+		return 1
+	case Int16, Uint16:
+		return 2
+	case Int32, Uint32, Float32:
+		return 4
+	}
+	return 8
+}
+
+// TypeSize returns the byte size of t.
+func TypeSize(t Type) (sz int64) {
+	u := SafeUnderlying(t)
+	if u == nil {
+		return 8
+	}
+	switch v := u.(type) {
+	case *Basic:
+		return basicSize(v.Kind)
+	case *Pointer:
+		return 8
+	case *Slice:
+		return 24
+	case *Signature:
+		return 16
+	case *TCInterface:
+		return 16
+	case *TCMap, *TCChan:
+		return 8
+	case *Array:
+		return TypeSize(v.Elem) * v.Len
+	case *TCStruct:
+		total := int64(0)
+		maxa := int64(1)
+		for i := int32(0); i < v.NumFields(); i++ {
+			ft := v.Field(i).Typ
+			a := TypeAlign(ft)
+			if a > maxa {
+				maxa = a
+			}
+			total = alignUp(total, a)
+			total += TypeSize(ft)
+		}
+		return alignUp(total, maxa)
+	}
+	return 8
+}
+
+// TypeAlign returns the alignment of t.
+func TypeAlign(t Type) (a int64) {
+	u := SafeUnderlying(t)
+	if u == nil {
+		return 8
+	}
+	switch v := u.(type) {
+	case *Basic:
+		return basicAlign(v.Kind)
+	case *Array:
+		return TypeAlign(v.Elem)
+	case *TCStruct:
+		a = 1
+		for i := int32(0); i < v.NumFields(); i++ {
+			fa := TypeAlign(v.Field(i).Typ)
+			if fa > a {
+				a = fa
+			}
+		}
+		return a
+	}
+	return 8
+}
+
+// StructFieldOffset returns the byte offset of field idx in st, following the
+// same layout TypeSize uses.
+func StructFieldOffset(st *TCStruct, idx int32) (off int64) {
+	off = 0
+	for i := int32(0); i < idx && i < st.NumFields(); i++ {
+		ft := st.Field(i).Typ
+		off = alignUp(off, TypeAlign(ft))
+		off += TypeSize(ft)
+	}
+	if idx >= 0 && idx < st.NumFields() {
+		off = alignUp(off, TypeAlign(st.Field(idx).Typ))
+	}
+	return off
+}

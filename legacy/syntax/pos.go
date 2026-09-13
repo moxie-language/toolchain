@@ -31,8 +31,8 @@ func MakePos(base *PosBase, line, col uint32) Pos { return Pos{base, sat32(line)
 func (pos Pos) Pos() Pos       { return pos }
 func (pos Pos) IsKnown() bool  { return pos.line > 0 }
 func (pos Pos) Base() *PosBase { return pos.base }
-func (pos Pos) Line() uint32     { return pos.line }
-func (pos Pos) Col() uint32      { return pos.col }
+func (pos Pos) Line() uint32   { return pos.line }
+func (pos Pos) Col() uint32    { return pos.col }
 
 // FileBase returns the PosBase of the file containing pos,
 // skipping over intermediate PosBases from //line directives.

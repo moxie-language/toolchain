@@ -1192,7 +1192,11 @@ func (fb *ssaFuncBuilder) buildStmt(s syntax.Stmt) {
 	case *syntax.ExprStmt:
 		if name, ok := ss.X.(*syntax.Name); ok && name.Value != "_" {
 			if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
-			push(cctx.compileErrors, "evaluated but not used: " | name.Value)
+			if fb.nameResolves(name) {
+				push(cctx.compileErrors, "evaluated but not used: " | name.Value)
+			} else {
+				push(cctx.compileErrors, "undefined: " | name.Value)
+			}
 			break
 		}
 		fb.buildExpr(ss.X)
@@ -1378,7 +1382,7 @@ func (fb *ssaFuncBuilder) coerceToInterface(val SSAValue, targetType Type) (s SS
 	}
 	if _, isIface := SafeUnderlying(targetType).(*TCInterface); isIface {
 		if _, alreadyIface := SafeUnderlying(val.SSAType()).(*TCInterface); !alreadyIface {
-			mi := &SSAMakeInterface{X: val}
+			mi := &SSAMakeInterface{X: val, IType: targetType}
 			mi.typ = targetType
 			mi.name = fb.nextName()
 			fb.emit(mi)
@@ -1812,11 +1816,49 @@ func (fb *ssaFuncBuilder) evalLocalConstExpr(e syntax.Expr, iotaVal int64) (c Co
 		return EvalBinaryLocal(ev.Op, xr, yr)
 	case *syntax.ParenExpr:
 		return fb.evalLocalConstExpr(ev.X, iotaVal)
+	case *syntax.SelectorExpr:
+		// Qualified constant: pkg.Const. Resolve the package through the
+		// builder's scopes (imports are file-scoped), then read the const.
+		if pkgName, ok := ev.X.(*syntax.Name); ok {
+			if pn, ok2 := fb.lookupObject(pkgName.Value).(*PkgName); ok2 && pn.Imported != nil && pn.Imported.Scope != nil {
+				if obj := pn.Imported.Scope.Lookup(ev.Sel.Value); obj != nil {
+					if k, ok3 := obj.(*TCConst); ok3 && k.Val != nil {
+						return k.Val
+					}
+				}
+			}
+		}
+		return tcEvalConstExpr(ev, fb.fn.Pkg.Pkg.Scope, iotaVal)
 	case *syntax.CallExpr:
 		if name, ok := ev.Fun.(*syntax.Name); ok && name.Value == "len" && len(ev.ArgList) == 1 {
 			inner := fb.evalLocalConstExpr(ev.ArgList[0], iotaVal)
 			if cs, ok2 := inner.(*ConstStr); ok2 {
 				return &ConstInt{V: int64(len(cs.S))}
+			}
+			// len of an array-typed expression is a compile-time constant.
+			if arr, ok2 := SafeUnderlying(fb.exprStaticType(ev.ArgList[0])).(*Array); ok2 {
+				return &ConstInt{V: arr.Len}
+			}
+		}
+		if sel, ok := ev.Fun.(*syntax.SelectorExpr); ok {
+			if pg, ok2 := sel.X.(*syntax.Name); ok2 && pg.Value == "unsafe" && len(ev.ArgList) == 1 {
+				switch sel.Sel.Value {
+				case "Offsetof":
+					if off, ok3 := fb.evalOffsetofArg(ev.ArgList[0]); ok3 {
+						return &ConstInt{V: off}
+					}
+					return nil
+				case "Sizeof":
+					if t := fb.exprStaticType(ev.ArgList[0]); t != nil {
+						return &ConstInt{V: TypeSize(t)}
+					}
+					return nil
+				case "Alignof":
+					if t := fb.exprStaticType(ev.ArgList[0]); t != nil {
+						return &ConstInt{V: TypeAlign(t)}
+					}
+					return nil
+				}
 			}
 		}
 		if len(ev.ArgList) != 1 {
@@ -1833,6 +1875,70 @@ func (fb *ssaFuncBuilder) evalLocalConstExpr(e syntax.Expr, iotaVal int64) (c Co
 		return ConvertConstLocal(inner, targetType)
 	}
 	return nil
+}
+
+// exprStaticType returns the static type of a value expression without
+// emitting IR. Used by unsafe.Sizeof/Alignof/Offsetof const folding, where
+// the operand is inspected, never evaluated.
+func (fb *ssaFuncBuilder) exprStaticType(e syntax.Expr) (t Type) {
+	switch ex := e.(type) {
+	case *syntax.Name:
+		if obj := fb.lookupObject(ex.Value); obj != nil {
+			return ObjectType(obj)
+		}
+	case *syntax.ParenExpr:
+		return fb.exprStaticType(ex.X)
+	case *syntax.Operation:
+		if ex.Y == nil && ex.Op == token.Mul {
+			if p, ok := SafeUnderlying(fb.exprStaticType(ex.X)).(*Pointer); ok {
+				return p.Base
+			}
+		}
+	case *syntax.CompositeLit:
+		if ex.Type != nil {
+			return fb.resolveType(ex.Type)
+		}
+	case *syntax.SelectorExpr:
+		bt := fb.exprStaticType(ex.X)
+		if bt == nil {
+			return nil
+		}
+		st, ok := SafeUnderlying(bt).(*TCStruct)
+		if !ok {
+			return nil
+		}
+		for i := int32(0); i < st.NumFields(); i++ {
+			if st.Field(i).Name == ex.Sel.Value {
+				return st.Field(i).Typ
+			}
+		}
+	case *syntax.IndexExpr:
+		switch u := SafeUnderlying(fb.exprStaticType(ex.X)).(type) {
+		case *Slice:
+			return u.Elem
+		case *Array:
+			return u.Elem
+		}
+	}
+	return nil
+}
+
+// evalOffsetofArg computes unsafe.Offsetof(sel) for a struct field selector.
+func (fb *ssaFuncBuilder) evalOffsetofArg(e syntax.Expr) (off int64, ok bool) {
+	sel, isSel := e.(*syntax.SelectorExpr)
+	if !isSel || sel == nil || sel.Sel == nil {
+		return 0, false
+	}
+	st, isStruct := SafeUnderlying(fb.exprStaticType(sel.X)).(*TCStruct)
+	if !isStruct {
+		return 0, false
+	}
+	for i := int32(0); i < st.NumFields(); i++ {
+		if st.Field(i).Name == sel.Sel.Value {
+			return StructFieldOffset(st, i), true
+		}
+	}
+	return 0, false
 }
 
 func (fb *ssaFuncBuilder) buildIf(s *syntax.IfStmt) {
@@ -2715,7 +2821,7 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 					if u != nil && u != Type(n) {
 						if _, isIface := u.(*TCInterface); isIface {
 							if _, alreadyIface := SafeUnderlying(v.SSAType()).(*TCInterface); !alreadyIface {
-								mi := &SSAMakeInterface{X: v}
+								mi := &SSAMakeInterface{X: v, IType: retType}
 								mi.typ = retType
 								mi.name = fb.nextName()
 								fb.emit(mi)
@@ -2849,6 +2955,15 @@ func (fb *ssaFuncBuilder) buildIdent(e *syntax.Name) (s SSAValue) {
 			return c
 		}
 	}
+	// Local constants of enclosing functions are compile-time values, not
+	// captured state: a closure may read them without an explicit parameter.
+	for p := fb.parent; p != nil; p = p.parent {
+		if p.localConsts != nil {
+			if c, ok := p.localConsts[e.Value]; ok {
+				return c
+			}
+		}
+	}
 	obj := fb.lookupObject(e.Value)
 	if obj == nil && fb.info != nil {
 		obj = fb.info.Uses[e]
@@ -2881,7 +2996,15 @@ func (fb *ssaFuncBuilder) buildIdent(e *syntax.Name) (s SSAValue) {
 				return nc.Value
 			}
 		}
-		return fb.builtinValue(e.Value)
+		if bv := fb.builtinValue(e.Value); bv != nil {
+			return bv
+		}
+		// No local, free var, package member, predeclared type, or builtin:
+		// the name does not exist. Fail loud - a dropped reference compiles
+		// the surrounding code to garbage far from the cause.
+		if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
+		push(cctx.compileErrors, "undefined: " | e.Value)
+		return nil
 	}
 	switch ob := obj.(type) {
 	case *TCVar:
@@ -3279,16 +3402,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 	args := fb.buildArgs(e.ArgList)
 
 	if fn == nil {
-		// Report undefined callee for the removed predeclared builtins only.
-		// Other unresolved names may be cross-file or assembly symbols (e.g.
-		// crypto's sha1block) that the SSA layer doesn't see as functions.
-		if name, ok := e.Fun.(*syntax.Name); ok {
-			switch name.Value {
-			case "make", "new", "append", "complex", "real", "imag", "int", "uint", "any":
-				if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
-				push(cctx.compileErrors, "undefined: " | name.Value)
-			}
-		}
+		// buildIdent already reported "undefined" for an unresolved callee name.
 		return nil
 	}
 	if bi, ok := fn.(*SSABuiltin); ok {
@@ -4899,13 +5013,20 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		if len(argList) == 1 {
 			arg := fb.buildExpr(argList[0])
 			if arg != nil && arg.SSAType() != nil {
-				sz = ssaSizeofType(arg.SSAType())
+				sz = TypeSize(arg.SSAType())
 			}
 		}
 		return NewSSAConst(&ConstInt{V:sz}, Typ[Int64])
 	}
 	if imported.Path == "unsafe" && funcName == "Alignof" {
-		return NewSSAConst(&ConstInt{V:8}, Typ[Int64])
+		al := int64(8)
+		if len(argList) == 1 {
+			arg := fb.buildExpr(argList[0])
+			if arg != nil && arg.SSAType() != nil {
+				al = TypeAlign(arg.SSAType())
+			}
+		}
+		return NewSSAConst(&ConstInt{V:al}, Typ[Int64])
 	}
 	if imported.Path == "unsafe" && funcName == "TypeOf" {
 		if len(argList) != 1 {
@@ -4924,7 +5045,13 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		return td
 	}
 	if imported.Path == "unsafe" && funcName == "Offsetof" {
-		return NewSSAConst(&ConstInt{V:0}, Typ[Int64])
+		off := int64(0)
+		if len(argList) == 1 {
+			if o, ok := fb.evalOffsetofArg(argList[0]); ok {
+				off = o
+			}
+		}
+		return NewSSAConst(&ConstInt{V:off}, Typ[Int64])
 	}
 	if imported.Path == "internal/abi" && (funcName == "Escape" || funcName == "NoEscape") {
 		// Escape is a no-op identity in the arena model (values are
@@ -5050,6 +5177,58 @@ func (fb *ssaFuncBuilder) lookupObject(name string) (o Object) {
 		return nil
 	}
 	return nil
+}
+
+// nameResolves reports whether a bare identifier statement refers to a defined
+// symbol (local, parent free var, package member, predeclared, or builtin).
+// Removed Go names (int, make, fallthrough, go, ...) are not registered
+// anywhere, so they resolve false and report "undefined", matching the legacy
+// compiler's go/types behavior.
+func (fb *ssaFuncBuilder) nameResolves(n *syntax.Name) (ok bool) {
+	if n.Value == "nil" {
+		return true
+	}
+	if fb.localConsts != nil {
+		if _, ok := fb.localConsts[n.Value]; ok {
+			return true
+		}
+	}
+	if fb.lookupObject(n.Value) != nil {
+		return true
+	}
+	if fb.info != nil {
+		if fb.info.Uses[n] != nil {
+			return true
+		}
+	}
+	if fb.parent != nil {
+		for p := fb.parent; p != nil; p = p.parent {
+			if p.localConsts != nil {
+				if _, ok := p.localConsts[n.Value]; ok {
+					return true
+				}
+			}
+			for pobj := range p.vars {
+				if ObjectName(pobj) == n.Value {
+					return true
+				}
+			}
+			if p.freeVarPtrs != nil {
+				if _, ok := p.freeVarPtrs[n.Value]; ok {
+					return true
+				}
+			}
+		}
+	}
+	if fb.fn.Pkg != nil {
+		if fb.fn.Pkg.Members[n.Value] != nil {
+			return true
+		}
+	}
+	if _, ok := ssaBuiltinID(n.Value); ok {
+		return true
+	}
+	return false
 }
 
 func (fb *ssaFuncBuilder) getOrCreateFreeVar(name string, typ Type) (s SSAValue) {
@@ -6027,59 +6206,6 @@ func ssaExprNames(e syntax.Expr) (ns []*syntax.Name) {
 		return names
 	}
 	return nil
-}
-
-// ssaSizeofType computes byte size for a type, used by unsafe.Sizeof.
-func ssaSizeofType(t Type) (sz int64) {
-	if t == nil {
-		return 8
-	}
-	u := SafeUnderlying(t)
-	if u == nil {
-		return 8
-	}
-	switch v := u.(type) {
-	case *Basic:
-		switch v.Kind {
-		case Bool, Int8, Uint8:
-			return 1
-		case Int16, Uint16:
-			return 2
-		case Int32, Uint32, Float32:
-			return 4
-		case Int64, Uint64, Float64, UnsafePointer:
-			return 8
-		case TCString, UntypedString:
-			return 24
-		}
-		return 8
-	case *Pointer:
-		return 8
-	case *Slice:
-		return 24
-	case *Signature:
-		return 16
-	case *TCInterface:
-		return 16
-	case *TCMap, *TCChan:
-		return 8
-	case *Array:
-		return ssaSizeofType(v.Elem) * v.Len
-	case *TCStruct:
-		total := int64(0)
-		for i := 0; i < v.NumFields(); i++ {
-			fsz := ssaSizeofType(v.Field(i).Typ)
-			if fsz >= 8 && total%8 != 0 {
-				total = (total + 7) & ^int64(7)
-			}
-			total = total + fsz
-		}
-		if total%8 != 0 {
-			total = (total + 7) & ^int64(7)
-		}
-		return total
-	}
-	return 8
 }
 
 func localizeConstVal(val ConstVal, typ Type) (c ConstVal) {

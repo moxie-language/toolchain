@@ -32,10 +32,11 @@ func (b *builder) isUserPackage(pkg *ssa.Package) bool {
 	}
 	path := pkg.Pkg.Path()
 	// The moxie compiler's own packages are exempt from user restrictions.
-	// The main package is the compiler when it DIRECTLY imports the moxie
-	// compiler infrastructure (git.smesh.lol/moxie/pkg/...). Test programs
-	// staged inside the moxie tree import only stdlib/runtime, so they stay
-	// subject to the rules even though their module path is the moxie module.
+	// A package that DIRECTLY imports the moxie compiler infrastructure
+	// (git.smesh.lol/moxie/pkg/...) is compiler code. A build rooted at the
+	// moxie module also compiles its own infrastructure packages directly
+	// (path becomes "command-line-arguments"); those are exempt too, mirroring
+	// stage4's buildHasMoxieModule() gate.
 	if b.pkgModulePath == "git.smesh.lol/moxie" {
 		importsMoxiePkg := false
 		for _, imp := range pkg.Pkg.Imports() {
@@ -49,7 +50,7 @@ func (b *builder) isUserPackage(pkg *ssa.Package) bool {
 		}
 	}
 	if path == "main" || path == "command-line-arguments" {
-		return true
+		return b.pkgModulePath != "git.smesh.lol/moxie"
 	}
 	if strings.HasPrefix(path, "golang.org/x/") {
 		return false
@@ -188,8 +189,6 @@ func (b *builder) checkMoxieRestrictions() {
 	}
 	// Check for restricted types and builtins in AST (SSA may optimize them away).
 	b.checkASTRestrictions()
-	// Check for fallthrough (lowered away by SSA, must check AST).
-	b.checkFallthroughRestriction()
 	// Check that non-constant spawn args aren't used after the spawn call.
 	b.checkSpawnMoveRestriction()
 }
@@ -295,23 +294,6 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 	}
 }
 
-// checkFallthroughRestriction walks the function's AST looking for
-// fallthrough statements. SSA eliminates these, so we must check the
-// raw syntax tree.
-func (b *builder) checkFallthroughRestriction() {
-	syntax := b.fn.Syntax()
-	if syntax == nil {
-		return
-	}
-	ast.Inspect(syntax, func(n ast.Node) bool {
-		if br, ok := n.(*ast.BranchStmt); ok && br.Tok == token.FALLTHROUGH {
-			b.addError(br.Pos(), "moxie: 'fallthrough' is not allowed: each case must be self-contained")
-			return false
-		}
-		return true
-	})
-}
-
 // checkASTRestrictions walks the function's AST to catch restricted types
 // and builtins that SSA may optimize away (dead code elimination removes
 // unused complex64 vars, unused complex() calls, etc).
@@ -322,9 +304,6 @@ func (b *builder) checkASTRestrictions() {
 	}
 	ast.Inspect(syntax, func(n ast.Node) bool {
 		switch node := n.(type) {
-		case *ast.GoStmt:
-			// Step 3: reject go keyword at AST level (redundant with SSA check, fires earlier).
-			b.addError(node.Pos(), "moxie: 'go' keyword is not allowed: use channels+select or spawn")
 		case *ast.CallExpr:
 			// Ban parenthesized call targets: (f)(args) is not valid Moxie.
 			// Exempt: type conversions like (*byte)(expr) where the paren wraps a type.
@@ -726,4 +705,3 @@ func checkInitBodyRestrictions(c *compilerContext, body *ast.BlockStmt) {
 		return true
 	})
 }
-
