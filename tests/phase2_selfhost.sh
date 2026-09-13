@@ -58,4 +58,18 @@ else
 	exit 1
 fi
 
+# 2e: verify the fixpoint: stage2 must emit the same binary that emitted it
+name="selfhost:fixpoint"
+t0=$(date +%s%N)
+if "$td/stage2" build -o "$td/stage3" "$ROOT/_mxc_stage4/" >"$td/stage3.log" 2>&1; then
+	if cmp -s "$td/stage2" "$td/stage3"; then
+		t1=$(date +%s%N)
+		log_pass "$name" "stage2 == stage3"
+	else
+		log_fail "$name" "stage2 != stage3 (bootstrap does not converge)"
+	fi
+else
+	log_fail "$name" "stage2 self-host failed: $(tail -3 "$td/stage3.log")"
+fi
+
 rm -rf "$td"

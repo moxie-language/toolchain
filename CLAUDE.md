@@ -374,8 +374,19 @@ Every step of the self-hosting bootstrap MUST use `moxie build -a` to force rebu
 Bootstrap cycle:
   1. Build legacy Go compiler: `cd legacy && go build -o moxie .`
   2. Compile stage4 with legacy: `cd .. && MOXIEROOT=$PWD legacy/moxie build -a -o mxc-stage4 ./_mxc_stage4`
-  3. Compile stage4 with new binary: `MOXIEROOT=$PWD ./mxc-stage4 build -a -o mxc-stage4-2 ./_mxc_stage4`
-  4. Verify fixpoint: `sha256sum mxc-stage4 mxc-stage4-2` (should match)
+  3. Compile stage4 with the first bootstrap: `MOXIEROOT=$PWD ./mxc-stage4 build -a -o mxc-stage4-2 ./_mxc_stage4`
+  4. Compile stage4 with the second bootstrap: `MOXIEROOT=$PWD ./mxc-stage4-2 build -a -o mxc-stage4-3 ./_mxc_stage4`
+  5. Verify fixpoint: `sha256sum mxc-stage4-2 mxc-stage4-3` (should match)
+
+The fixpoint is bootstrap-against-bootstrap: the compiler must emit the
+identical binary that emitted it. The legacy compiler is a reference
+implementation and a way to build Moxie from scratch, not a codegen oracle -
+`mxc-stage4` (legacy-built) is NOT expected to equal `mxc-stage4-2`. Legacy
+and stage4 need only be functionally identical; their binaries differ.
+
+Do not use `sha256sum mxc-stage4 mxc-stage4-2` as the fixpoint check. A
+mismatch there is expected and carries no signal; only `stage4-2 == stage4-3`
+does.
 
 ## What NOT To Do
 
