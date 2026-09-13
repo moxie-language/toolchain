@@ -568,42 +568,56 @@ func releasePerPkgState() {
 	}
 }
 
+func scanParse(src []byte, name string) (file *syntax.File) {
+	rw := rewriteSliceMakeLiterals(src)
+	rw = rewriteChanMakeLiterals(rw)
+	rw = stripDuplicatePackageClauses2(rw)
+	if len(rw) == 0 {
+		return nil
+	}
+	f, _ := syntax.ParseBytesArena(token.NewFileBase(name|".mx"), rw, silentErrh, nil, 0, runtime.CurrentArena())
+	return f
+}
+
+func fileHasGeneric(file *syntax.File) (ok bool) {
+	for _, d := range file.DeclList {
+		fd, isFn := d.(*syntax.FuncDecl)
+		if !isFn {
+			continue
+		}
+		if fd.Recv == nil && fd.Name != nil && fd.Name.Value != "init" && len(fd.TParamList) > 0 {
+			return true
+		}
+		if fd.Recv != nil && recvTypeHasIndex(fd.Recv.Type) {
+			return true
+		}
+	}
+	return false
+}
+
 func ScanGenericDecls(src []byte, name string) {
-	// The parse allocates slice backings in the current arena while AST
-	// nodes go to the arena passed to ParseBytesArena; both must outlive
-	// every package compile (generic decls are referenced by later
-	// packages). Run the scan in a persistent manual arena: with a manual
-	// arena active, FnArenaPush is a no-op so every allocation inside the
-	// parse lands here, and the arena is never released.
 	if cctx.genericArena == nil {
 		cctx.genericArena = runtime.ArenaNew(64 * 1024 * 1024)
 	}
+	// First pass in a scratch arena: detect whether the package declares any
+	// generics. Only generic packages' ASTs are retained (their FuncDecl nodes
+	// are referenced later by monomorphization), so the never-freed
+	// genericArena stays bounded to the handful of packages that need it
+	// instead of accumulating every package's parsed source.
+	scan := runtime.ArenaNew(uintptr(len(src))*200 + 4*1024*1024)
+	runtime.ManualArenaEnter(scan)
+	probe := scanParse(src, name)
+	hasGeneric := probe != nil && fileHasGeneric(probe)
+	runtime.ManualArenaExit(scan)
+	runtime.ArenaFree(scan)
+	if !hasGeneric {
+		return
+	}
+	// Re-parse into the persistent arena so the AST outlives this call.
 	runtime.ManualArenaEnter(cctx.genericArena)
 	defer runtime.ManualArenaExit(cctx.genericArena)
-	rw := rewriteSliceMakeLiterals(src)
-	src = rewriteChanMakeLiterals(rw)
-	src = stripDuplicatePackageClauses2(src)
-	if len(src) == 0 {
-		return
-	}
-	file, _ := syntax.ParseBytesArena(token.NewFileBase(name|".mx"), src, silentErrh, nil, 0, runtime.CurrentArena())
+	file := scanParse(src, name)
 	if file == nil {
-		return
-	}
-	hasGeneric := false
-	for _, d := range file.DeclList {
-		if fd, ok := d.(*syntax.FuncDecl); ok {
-			if fd.Recv == nil && fd.Name != nil && fd.Name.Value != "init" && len(fd.TParamList) > 0 {
-				hasGeneric = true
-				break
-			}
-			if fd.Recv != nil && recvTypeHasIndex(fd.Recv.Type) {
-				hasGeneric = true
-				break
-			}
-		}
-	}
-	if !hasGeneric {
 		return
 	}
 	shortName := name
