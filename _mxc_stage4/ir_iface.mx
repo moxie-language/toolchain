@@ -1400,7 +1400,19 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 			loaded = e.nextReg2("ta")
 			e.w("  ") ; e.w(loaded) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", ptr null\n")
 		} else if e.isScalarType(assertedType) {
-			extracted := e.extractScalarFromIface(valPtr, assertedType)
+			// The interface data pointer is null for a nil interface and
+			// meaningless when the assertion fails, so the load must go
+			// through a pointer that is valid in both cases. Loading valPtr
+			// unconditionally would segfault on a failed assert of a nil
+			// interface (Go spec: a failed comma-ok assert yields the zero
+			// value, and must not touch the interface data).
+			e.nextReg++
+			zeroSlot := "%taz" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(zeroSlot) ; e.w(" = alloca ") ; e.w(assertedType) ; e.w("\n")
+			e.w("  store ") ; e.w(assertedType) ; e.w(" zeroinitializer, ptr ") ; e.w(zeroSlot) ; e.w("\n")
+			safePtr := e.nextReg2("ta")
+			e.w("  ") ; e.w(safePtr) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", ptr ") ; e.w(zeroSlot) ; e.w("\n")
+			extracted := e.extractScalarFromIface(safePtr, assertedType)
 			zero := "0"
 			if assertedType == "float" || assertedType == "double" {
 				zero = "0.000000e+00"

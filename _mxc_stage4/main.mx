@@ -3059,6 +3059,8 @@ func printHelp() {
 	mxutil.WriteStr(1, "  test:    test packages\n")
 	mxutil.WriteStr(1, "  clean:   empty the cache directory\n")
 	mxutil.WriteStr(1, "  targets: list all supported targets\n")
+	mxutil.WriteStr(1, "  info:    print target information\n")
+	mxutil.WriteStr(1, "  list:    list packages in the current module\n")
 	mxutil.WriteStr(1, "  version: print version information\n")
 	mxutil.WriteStr(1, "  env:     print environment information\n")
 	mxutil.WriteStr(1, "  fetch:   fetch and cache all dependencies declared in moxie.mod\n")
@@ -3077,6 +3079,83 @@ func printEnv() {
 	mxutil.WriteStr(1, "MOXIEROOT=\"" | getenv("MOXIEROOT") | "\"\n")
 	mxutil.WriteStr(1, "MOXIEPATH=\"" | getMoxiePath() | "\"\n")
 	mxutil.WriteStr(1, "CACHE=\"" | moxieCacheDir() | "\"\n")
+}
+
+func printInfo() {
+	if mxutil.TargetOS == "" {
+		mxutil.SetTarget("linux", "amd64")
+	}
+	triple := "x86_64-unknown-linux-musleabihf"
+	if mxutil.TargetArch == "arm64" {
+		triple = "aarch64-unknown-linux-musl"
+	}
+	if mxutil.TargetArch == "wasm" {
+		triple = "wasm32-unknown-wasi"
+	}
+	mxutil.WriteStr(1, "LLVM triple:       " | triple | "\n")
+	mxutil.WriteStr(1, "GOOS:              " | mxutil.TargetOS | "\n")
+	mxutil.WriteStr(1, "GOARCH:            " | mxutil.TargetArch | "\n")
+	mxutil.WriteStr(1, "build tags:        \n")
+	mxutil.WriteStr(1, "scheduler:         async\n")
+}
+
+func baseName(p string) (b string) {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == '/' {
+			return p[i+1:len(p)]
+		}
+	}
+	return p
+}
+
+func hasMxSuffix(name string) (ok bool) {
+	n := len(name)
+	if n < 4 {
+		return false
+	}
+	return name[n-3] == '.' && name[n-2] == 'm' && name[n-1] == 'x'
+}
+
+func listWalk(dir, prefix string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	hasMx := false
+	var subs []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() {
+			if name == "vendor" || name == "tmp" || name == "tests" || len(name) > 0 && name[0] == '.' {
+				continue
+			}
+			if len(subs) >= cap(subs) { subs = mxutil.GrowCap(subs) }
+			subs = push(subs, mxutil.JoinPath(dir, name))
+			continue
+		}
+		if hasMxSuffix(name) {
+			hasMx = true
+		}
+	}
+	if hasMx {
+		mxutil.WriteStr(1, prefix | "\n")
+	}
+	for _, sd := range subs {
+		base := baseName(sd)
+		np := base
+		if prefix != "" {
+			np = prefix | "/" | base
+		}
+		listWalk(sd, np)
+	}
+}
+
+func cmdList() {
+	_, modDir := findModuleRoot(".")
+	if modDir == "" {
+		fatal("list: no module file found")
+	}
+	listWalk(modDir, ".")
 }
 
 func printTargets() {
@@ -3978,6 +4057,14 @@ func main() {
 	}
 	if cmd == "targets" {
 		printTargets()
+		return
+	}
+	if cmd == "info" {
+		printInfo()
+		return
+	}
+	if cmd == "list" {
+		cmdList()
 		return
 	}
 	if cmd == "clean" {
