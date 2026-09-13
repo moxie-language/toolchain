@@ -153,6 +153,18 @@ func fatal(msg string) {
 	os.Exit(1)
 }
 
+func mem2regBc(bcFile string) {
+	tmp := bcFile | ".m2r"
+	rc := run([]string{"opt", "-passes=mem2reg", bcFile, "-o", tmp})
+	if rc != 0 {
+		fatal("opt mem2reg failed for " | bcFile)
+	}
+	data, ok := mxutil.ReadFile(tmp)
+	if ok {
+		mxutil.WriteFile(bcFile, data, 0644)
+	}
+}
+
 func clangCompileToObj(clang, triple, bcFile string) (s string) {
 	oFile := bcFile | ".o"
 	// Function/data sections so --gc-sections drops unreferenced code -
@@ -3017,12 +3029,13 @@ func cmdCacheWarm() {
 		llFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		bcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc")
-		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", "-Wno-everything", llFile, "-o", bcFile})
+		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", "-Wno-everything", "-Xclang", "-disable-O0-optnone", llFile, "-o", bcFile})
 		if rc != 0 {
 			mxutil.WriteStr(2, "  FAIL: " | pkg.path | "\n")
 			failed++
 			continue
 		}
+		mem2regBc(bcFile)
 		cdir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
 		mkdirAll(cdir, 0755)
 		data, rok := mxutil.ReadFile(bcFile)
@@ -3248,11 +3261,12 @@ func cmdUpdate(rebuildAll bool) {
 		llFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		bcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc")
-		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", "-Wno-everything", llFile, "-o", bcFile})
+		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", "-Wno-everything", "-Xclang", "-disable-O0-optnone", llFile, "-o", bcFile})
 		if rc != 0 {
 			mxutil.WriteStr(2, "    FAIL: clang for " | pkg.path | "\n")
 			continue
 		}
+		mem2regBc(bcFile)
 		hash := pkgHash(pkg)
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
 		cdir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
@@ -3519,10 +3533,11 @@ func cmdTest(args []string) {
 		llFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		bcFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | ".bc")
-		drc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", "-Wno-everything", llFile, "-o", bcFile})
+		drc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", "-Wno-everything", "-Xclang", "-disable-O0-optnone", llFile, "-o", bcFile})
 		if drc != 0 {
 			fatal("clang failed for " | dp.path)
 		}
+		mem2regBc(bcFile)
 		if dp != pkg {
 			cacheDir := mxutil.JoinPath(cacheBase, safeName(dp.path))
 			mkdirAll(cacheDir, 0755)
@@ -4632,7 +4647,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		bcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc")
 		// Defer clang call - collect for parallel execution after all IR emitted.
 		if len(deferredClang) >= cap(deferredClang) { deferredClang = mxutil.GrowCap(deferredClang) }
-		push(deferredClang, []string{clang, "--target=" | triple, "-emit-llvm", "-c", "-Wno-everything", llFile, "-o", bcFile})
+		push(deferredClang, []string{clang, "--target=" | triple, "-emit-llvm", "-c", "-Wno-everything", "-Xclang", "-disable-O0-optnone", llFile, "-o", bcFile})
 		// mxh written inside CompileToIR's arena before it dies.
 		if len(cctx.lastMxhData) > 0 {
 			cdir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
@@ -4685,6 +4700,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			cached := cachedBcPath(cacheBase, compilePath, hash, pkg.version)
 			bcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc")
 			if mxutil.FileExists(bcFile) {
+				mem2regBc(bcFile)
 				cacheDir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
 				mkdirAll(cacheDir, 0755)
 				data, rok := mxutil.ReadFile(bcFile)
@@ -5115,10 +5131,11 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 	writeFile(llFile, []byte(ir), 0644)
 
 	bcFile := mxutil.JoinPath(meta.tmpdir, safeName(pkg.path) | ".bc")
-	rc := run([]string{meta.clang, "--target=" | meta.triple, "-emit-llvm", "-c", "-Wno-everything", llFile, "-o", bcFile})
+	rc := run([]string{meta.clang, "--target=" | meta.triple, "-emit-llvm", "-c", "-Wno-everything", "-Xclang", "-disable-O0-optnone", llFile, "-o", bcFile})
 	if rc != 0 {
 		return "clang failed for " | pkg.path
 	}
+	mem2regBc(bcFile)
 
 	// Cache .bc
 	cacheDir := mxutil.JoinPath(meta.cacheBase, safeName(pkg.path))
@@ -5539,10 +5556,11 @@ func cmdBuildRuntime() {
 		llFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | ".ll")
 		writeFile(llFile, []byte(ir), 0644)
 		bcFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | ".bc")
-		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", "-Wno-everything", llFile, "-o", bcFile})
+		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", "-Wno-everything", "-Xclang", "-disable-O0-optnone", llFile, "-o", bcFile})
 		if rc != 0 {
 			fatal("clang failed for " | dp.path)
 		}
+		mem2regBc(bcFile)
 		if len(bcFiles) >= cap(bcFiles) { bcFiles = mxutil.GrowCap(bcFiles) }
 		push(bcFiles, bcFile)
 		for _, cf := range dp.cfiles {
