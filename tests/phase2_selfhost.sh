@@ -12,8 +12,8 @@ td="$(tempdir "selfhost")"; rm -rf "$td"; mkdir -p "$td"
 # 2a: build stage1 with legacy compiler
 name="selfhost:stage1"
 t0=$(date +%s%N)
-	legacy_moxie="${LEGACY_MOXIE:-$HOME/.local/bin/moxie}"
-	if (cd "$ROOT" && MOXIEROOT="$ROOT" "$legacy_moxie" build -internal-nodwarf -o "$td/stage1" ./_mxc_stage4/) >"$td/stage1.log" 2>&1; then
+	legacy_moxie="${LEGACY_MOXIE:-$ROOT/legacy/moxie}"
+	if (cd "$ROOT" && MOXIEROOT="$ROOT" "$legacy_moxie" build -o "$td/stage1" ./_mxc_stage4/) >"$td/stage1.log" 2>&1; then
 	t1=$(date +%s%N)
 	log_pass "$name" "ok"
 else
