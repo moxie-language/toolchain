@@ -3924,12 +3924,14 @@ func main() {
 		cmdBuildRuntime()
 		return
 	}
-	if cmd != "build" {
-		mxutil.WriteStr(2, "usage: mxc <build|test|version|cache|fetch|update|build-runtime> ...\n")
+	if cmd != "build" && cmd != "run" {
+		mxutil.WriteStr(2, "usage: mxc <build|run|test|version|cache|fetch|update|build-runtime> ...\n")
 		os.Exit(1)
 	}
+	runAfter := cmd == "run"
 
 	outpath := ""
+	var runArgs []string
 	pkgPath := ""
 	printIR := false
 	forceRebuild := false
@@ -3956,8 +3958,12 @@ func main() {
 			i += 2
 		} else if args[i] == "-gc=dealloc" || args[i] == "-buildmode=c-shared" || args[i] == "-x" || args[i] == "-work" {
 			i++
-		} else {
+		} else if pkgPath == "" {
 			pkgPath = args[i]
+			i++
+		} else {
+			if len(runArgs) >= cap(runArgs) { runArgs = mxutil.GrowCap(runArgs) }
+			push(runArgs, args[i])
 			i++
 		}
 	}
@@ -4438,6 +4444,14 @@ func main() {
 		}
 	}
 	mxutil.WriteStr(2, "  -> " | outpath | "\n")
+	if runAfter {
+		execArgs := []string{outpath}
+		for _, a := range runArgs {
+			if len(execArgs) >= cap(execArgs) { execArgs = mxutil.GrowCap(execArgs) }
+			push(execArgs, a)
+		}
+		os.Exit(run(execArgs))
+	}
 }
 
 // buildPkgsSerial type-checks and compiles each package in dependency order
