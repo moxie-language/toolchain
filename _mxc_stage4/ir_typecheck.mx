@@ -46,6 +46,7 @@ type compileCtx struct {
 	compileArena         *runtime.Arena
 	parseArena           *runtime.Arena
 	genericArena         *runtime.Arena
+	scannedGeneric       map[string]bool
 	universe             *UniverseState
 	irOutputFile         string
 	curPkgPath           string
@@ -596,6 +597,16 @@ func fileHasGeneric(file *syntax.File) (ok bool) {
 }
 
 func ScanGenericDecls(src []byte, name string) {
+	if cctx.scannedGeneric == nil {
+		cctx.scannedGeneric = map[string]bool{}
+	}
+	// A package is scanned in the whole-link pre-pass and again in the compile
+	// pass; the genericArena is never freed, so a second parse would retain a
+	// duplicate AST. Scan each package once.
+	if cctx.scannedGeneric[name] {
+		return
+	}
+	cctx.scannedGeneric[name] = true
 	if cctx.genericArena == nil {
 		cctx.genericArena = runtime.ArenaNew(64 * 1024 * 1024)
 	}
