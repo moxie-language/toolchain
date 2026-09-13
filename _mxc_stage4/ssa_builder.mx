@@ -1889,10 +1889,20 @@ func (fb *ssaFuncBuilder) exprStaticType(e syntax.Expr) (t Type) {
 	case *syntax.ParenExpr:
 		return fb.exprStaticType(ex.X)
 	case *syntax.Operation:
+		if ex.Y == nil && ex.Op == token.And {
+			if bt := fb.exprStaticType(ex.X); bt != nil {
+				return &Pointer{Base: bt}
+			}
+			return nil
+		}
 		if ex.Y == nil && ex.Op == token.Mul {
 			if p, ok := SafeUnderlying(fb.exprStaticType(ex.X)).(*Pointer); ok {
 				return p.Base
 			}
+		}
+	case *syntax.CallExpr:
+		if sig, ok := SafeUnderlying(fb.exprStaticType(ex.Fun)).(*Signature); ok && sig != nil && sig.Results != nil && sig.Results.Len() > 0 {
+			return sig.Results.At(0).Typ
 		}
 	case *syntax.CompositeLit:
 		if ex.Type != nil {
@@ -5011,9 +5021,12 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 	if imported.Path == "unsafe" && funcName == "Sizeof" {
 		sz := int64(8)
 		if len(argList) == 1 {
-			arg := fb.buildExpr(argList[0])
-			if arg != nil && arg.SSAType() != nil {
-				sz = TypeSize(arg.SSAType())
+			// The operand is not evaluated (Go spec); use its static type
+			// only. Evaluating it would emit dead IR (e.g. an alloc for a
+			// composite literal) that survives whole-program optimization
+			// and can recurse through the arena recorder.
+			if t := fb.exprStaticType(argList[0]); t != nil {
+				sz = TypeSize(t)
 			}
 		}
 		return NewSSAConst(&ConstInt{V:sz}, Typ[Int64])
@@ -5021,9 +5034,8 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 	if imported.Path == "unsafe" && funcName == "Alignof" {
 		al := int64(8)
 		if len(argList) == 1 {
-			arg := fb.buildExpr(argList[0])
-			if arg != nil && arg.SSAType() != nil {
-				al = TypeAlign(arg.SSAType())
+			if t := fb.exprStaticType(argList[0]); t != nil {
+				al = TypeAlign(t)
 			}
 		}
 		return NewSSAConst(&ConstInt{V:al}, Typ[Int64])

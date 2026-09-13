@@ -2328,6 +2328,19 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon, callInstr *ssa.Call)
 		switch call.Name() {
 		case "spawn":
 			return b.createSpawn(instr)
+		case "Sizeof", "Alignof":
+			// unsafe.Sizeof/Alignof inspect the static type of the operand;
+			// the operand is not evaluated (Go spec). Building params first
+			// would emit dead IR (e.g. an alloc for a composite literal) that
+			// can survive whole-program optimization and recurse through the
+			// arena allocation recorder.
+			if len(instr.Args) == 1 {
+				llvmType := b.getLLVMType(instr.Args[0].Type())
+				if call.Name() == "Sizeof" {
+					return llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(llvmType), false), nil
+				}
+				return llvm.ConstInt(b.uintptrType, uint64(b.targetData.ABITypeAlignment(llvmType)), false), nil
+			}
 		}
 	}
 

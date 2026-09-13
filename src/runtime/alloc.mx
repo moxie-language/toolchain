@@ -239,12 +239,22 @@ func FnArenaPopFree() {
 
 // --- Backward-compatible arena API ---
 
-// RootArena returns the domain root arena (fnStack[0]).
-func RootArena() (a *Arena) {
+// trueRootArena returns the invariant domain root arena. fnStack[0] is
+// normally &domainRoot.root, but a temporary SetCurrentArena switch at
+// fnTop==0 (hashmap owner-arena switching) clobbers the slot with a possibly
+// sovereign arena. Code that must allocate from a non-recording, root-lifetime
+// arena (sovRootAlloc, sovereign group setup, hashmap fallback owner) must use
+// this, never fnStack[0].
+func trueRootArena() (a *Arena) {
 	if domainRoot == nil {
 		return nil
 	}
-	return domainRoot.fnStack[0]
+	return &domainRoot.root
+}
+
+// RootArena returns the domain root arena.
+func RootArena() (a *Arena) {
+	return trueRootArena()
 }
 
 // CurrentArena returns the active arena (top of function stack).
@@ -319,7 +329,7 @@ type sovGroup struct {
 // arena.
 func sovRootAlloc(sz uintptr) unsafe.Pointer {
 	save := CurrentArena()
-	SetCurrentArena(domainRoot.fnStack[0])
+	SetCurrentArena(trueRootArena())
 	p := alloc(sz, nil)
 	SetCurrentArena(save)
 	return p
@@ -363,7 +373,7 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 	m := domainRoot.sovereignRoot
 	if m == nil {
 		save := CurrentArena()
-		SetCurrentArena(domainRoot.fnStack[0])
+		SetCurrentArena(trueRootArena())
 		m = hashmapMake(8, 8, 8, uint8(moxie.HashmapAlgorithmBinary))
 		domainRoot.sovereignRoot = m
 		SetCurrentArena(save)
@@ -375,7 +385,7 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 		return (*sovGroup)(av)
 	}
 	save := CurrentArena()
-	SetCurrentArena(domainRoot.fnStack[0])
+	SetCurrentArena(trueRootArena())
 	g = (*sovGroup)(alloc(unsafe.Sizeof(sovGroup{}), nil))
 	g.data = sovNewArena(65536)
 	g.data.sovereign = 1
