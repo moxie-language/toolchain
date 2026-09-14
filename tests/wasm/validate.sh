@@ -27,6 +27,17 @@ fi
 
 rm -rf "$WORK"; mkdir -p "$WORK"
 
+# Start from an empty package cache. Native and wasm share a compiler hash but
+# not a cache directory (pkg/ vs pkg-wasm/), and a cache entry written while
+# the wrong target was active makes the other target compile that target's
+# bitcode - which shows up as "Cannot select: intrinsic %llvm.wasm.memory.size"
+# when a native object is built from a wasm runtime, or the reverse. Clearing
+# once per run keeps the comparison honest.
+rm -rf "$HOME/moxie/cache" 2>/dev/null
+if [ -n "${MOXIEPATH:-}" ]; then
+    rm -rf "$MOXIEPATH/cache" 2>/dev/null
+fi
+
 for t in "${TARGETS[@]}"; do
     name="$(basename "$t")"; name="${name%.mx}"
     d="$WORK/$name"
@@ -54,9 +65,18 @@ for t in "${TARGETS[@]}"; do
         continue
     fi
 
-    # run in a browser
-    if ! python3 "$ROOT/tests/wasm/run.py" -q "$d/app.wasm" >"$d/wasm.out" 2>&1; then
-        printf '%-32s FAIL  (browser run failed)\n' "$name"
+    # Run in a browser. A module that spins never yields, so the driver cannot
+    # deliver run.py's own wait_for_function timeout and the call blocks
+    # forever: bound each run here, or one bad module stalls the whole suite
+    # and hides every later result. RUN_TIMEOUT is seconds.
+    timeout "${RUN_TIMEOUT:-60}" python3 "$ROOT/tests/wasm/run.py" -q "$d/app.wasm" >"$d/wasm.out" 2>&1
+    rrc=$?
+    if [ "$rrc" -ne 0 ]; then
+        if [ "$rrc" -eq 124 ]; then
+            printf '%-32s FAIL  (browser run timed out after %ss)\n' "$name" "${RUN_TIMEOUT:-60}"
+        else
+            printf '%-32s FAIL  (browser run failed)\n' "$name"
+        fi
         tail -3 "$d/wasm.out" | sed 's/^/      /'
         FAIL=$((FAIL+1))
         continue
