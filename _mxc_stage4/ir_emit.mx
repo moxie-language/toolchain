@@ -199,7 +199,17 @@ func (e *irEmitter) emitCallCheckpoint() {
 	e.nextReg++
 	eq := "%ckp" | irItoa(e.nextReg)
 	cont := "ck.cont" | irItoa(e.nextReg)
-	e.w("  ") ; e.w(ck) ; e.w(` = call i64 asm sideeffect "leaq 1f(%rip), %rax\0Amovq %rax, 8($1)\0Axorq %rax, %rax\0A1:", "={rax},{rbx},~{rbx},~{rcx},~{rdx},~{rsi},~{rdi},~{rbp},~{r8},~{r9},~{r10},~{r11},~{r12},~{r13},~{r14},~{r15},~{xmm0},~{xmm1},~{xmm2},~{xmm3},~{xmm4},~{xmm5},~{xmm6},~{xmm7},~{xmm8},~{xmm9},~{xmm10},~{xmm11},~{xmm12},~{xmm13},~{xmm14},~{xmm15},~{fpsr},~{fpcr},~{flags},~{dirflag},~{memory}"(ptr `) ; e.w(e.deferFrame) ; e.w(")\n")
+	if e.ptrBits == 32 {
+		// wasm32: there is no resume PC to record. moxie_longjmp_arch traps
+		// rather than jumping, so the checkpoint only ever returns 0 and the
+		// landing branch is unreachable. Calling a runtime helper keeps the
+		// x86 register-constraint asm out of the module, where clang cannot
+		// allocate {rax} and refuses to compile it at all.
+		e.w("  ") ; e.w(ck) ; e.w(" = call i64 @runtime.moxie_longjmp_checkpoint(ptr ") ; e.w(e.deferFrame) ; e.w(")\n")
+		e.declareRuntime("runtime.moxie_longjmp_checkpoint", "i64", "ptr")
+	} else {
+		e.w("  ") ; e.w(ck) ; e.w(` = call i64 asm sideeffect "leaq 1f(%rip), %rax\0Amovq %rax, 8($1)\0Axorq %rax, %rax\0A1:", "={rax},{rbx},~{rbx},~{rcx},~{rdx},~{rsi},~{rdi},~{rbp},~{r8},~{r9},~{r10},~{r11},~{r12},~{r13},~{r14},~{r15},~{xmm0},~{xmm1},~{xmm2},~{xmm3},~{xmm4},~{xmm5},~{xmm6},~{xmm7},~{xmm8},~{xmm9},~{xmm10},~{xmm11},~{xmm12},~{xmm13},~{xmm14},~{xmm15},~{fpsr},~{fpcr},~{flags},~{dirflag},~{memory}"(ptr `) ; e.w(e.deferFrame) ; e.w(")\n")
+	}
 	e.w("  ") ; e.w(eq) ; e.w(" = icmp eq i64 ") ; e.w(ck) ; e.w(", 0\n")
 	e.w("  br i1 ") ; e.w(eq) ; e.w(", label %") ; e.w(cont) ; e.w(", label %") ; e.w(e.deferLanding) ; e.w("\n")
 	e.w(cont) ; e.w(":\n")

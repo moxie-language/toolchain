@@ -21,7 +21,9 @@ except ImportError:
 
 ROOT = pathlib.Path(__file__).resolve().parent
 REPO = ROOT.parent.parent
-WASM = sys.argv[1] if len(sys.argv) > 1 else str(ROOT / "app.wasm")
+args = [a for a in sys.argv[1:] if a != "-q"]
+QUIET = "-q" in sys.argv[1:]
+WASM = args[0] if args else str(ROOT / "app.wasm")
 TIMEOUT = 20000
 
 
@@ -62,12 +64,15 @@ def main():
         browser.close()
     srv.shutdown()
 
-    print("stdout: " + json.dumps(out["logs"]))
+    if not QUIET:
+        print("stdout: " + json.dumps(out["logs"]))
     if out["errs"]:
         print("console errors: " + json.dumps(out["errs"]))
     if out["error"]:
         print("JS error: " + out["error"])
         return 1
+    # -q prints only the module's stdout, so callers can diff it against a
+    # native run.
     for line in out["logs"]:
         print(line, end="")
     return 0

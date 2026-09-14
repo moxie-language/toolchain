@@ -464,6 +464,19 @@ func parseModuleName(data string) (name string) {
 	return ""
 }
 
+// runtimeBakePath is where the runtime bitcode bake lives. The bake is
+// target-specific: a native bake contains x86 code and a wasm bake contains
+// wasm code, and compiling one for the other fails with unsupported
+// intrinsics (llvm.returnaddress, llvm.wasm.memory.size). Keeping one shared
+// file meant whichever target built last silently broke the other.
+func runtimeBakePath(sysroot string) (s string) {
+	name := "runtime_go.bc"
+	if mxutil.TargetArch == "wasm" {
+		name = "runtime_go_wasm.bc"
+	}
+	return mxutil.JoinPath(sysroot, name)
+}
+
 // ensureRuntimeBake returns the path of the runtime bitcode bake, creating it
 // from source when it is missing. The bake is a cache, so it is not shipped:
 // the first application build against a fresh tree pays for compiling the
@@ -474,7 +487,7 @@ func parseModuleName(data string) (name string) {
 // address, and detecting staleness here would mean hashing the whole runtime
 // tree on every build.
 func ensureRuntimeBake(sysroot, root string) (bc string) {
-	bc = mxutil.JoinPath(sysroot, "runtime_go.bc")
+	bc = runtimeBakePath(sysroot)
 	if _, ok := mxutil.ReadFile(bc); ok {
 		return bc
 	}
@@ -5975,7 +5988,13 @@ func cmdBuildRuntime() {
 		root = "."
 	}
 	ensureModuleRoot(root)
+	// The bake follows the target in effect for this invocation: main
+	// resolves -target before anything else, and ensureRuntimeBake calls
+	// this when an application needs a bake that does not exist yet.
 	triple := "x86_64-unknown-linux-musleabihf"
+	if mxutil.TargetArch == "wasm" {
+		triple = "wasm32-unknown-wasi"
+	}
 	clang := "clang-22"
 	sysroot := mxutil.JoinPath(root, "sysroot")
 	tmpdir := "/tmp/mxc-rt-build"
@@ -6074,7 +6093,7 @@ func cmdBuildRuntime() {
 		if len(bcFiles) >= cap(bcFiles) { bcFiles = mxutil.GrowCap(bcFiles) }
 		push(bcFiles, ssBc)
 	}
-	outBc := mxutil.JoinPath(sysroot, "runtime_go.bc")
+	outBc := runtimeBakePath(sysroot)
 	if len(bcFiles) == 1 {
 		data, ok := mxutil.ReadFile(bcFiles[0])
 		if !ok {
