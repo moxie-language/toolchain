@@ -1661,8 +1661,17 @@ func hasBuildConstraint(data []byte, forbidden []string) (ok bool) {
 			if !evalBuildLine(line) {
 				return true
 			}
+			// A forbidden tag excludes the file only when the tag itself is
+			// true for this target. Matching textually would forbid any file
+			// that merely mentions it - "baremetal || !linux" contains
+			// "baremetal" but selects the file everywhere baremetal is false,
+			// which is what the stub relies on.
+			//
+			// evalBuildLine already evaluated the expression, so a forbidden
+			// tag can only appear positively on a true line; testing it here
+			// is enough.
 			for _, f := range forbidden {
-				if line == f || mxutil.HasPrefix(line, f | " ") || mxutil.HasPrefix(line, f | "\t") || mxutil.HasPrefix(line, f | "(") {
+				if buildTagTrue(f) {
 					return true
 				}
 			}
@@ -1754,17 +1763,24 @@ func evalBuildUnary(line string, pos int32) (val bool, next int32) {
 // buildTagTrue reports whether a build tag is true for the current target.
 func buildTagTrue(tag string) (ok bool) {
 	switch tag {
-	case "linux", "unix", "amd64",
-		"go1.9", "go1.10", "go1.11", "go1.12", "go1.13", "go1.14",
+	case "linux", "unix", "amd64":
+		// Platform tags belong to the native target only. Enabling them for
+		// wasm32 pulls in Linux-only files (e.g. secalloc's mmap-backed
+		// guarded arenas) whose syscall constants and mmap/munmap do not
+		// exist there.
+		return mxutil.TargetArch != "wasm"
+	case "go1.9", "go1.10", "go1.11", "go1.12", "go1.13", "go1.14",
 		"go1.15", "go1.16", "go1.17", "go1.18", "go1.19", "go1.20",
 		"go1.21", "go1.22", "go1.23", "go1.24",
-		"moxie", "moxie.linux",
+		"moxie",
 		// Matches legacy compileopts.Config.BuildTags so the same source
 		// files are selected (pure-Go math/big, no cgo/osusergo paths).
 		"purego", "osusergo", "math_big_pure_go", "moxie.unicore":
 		return true
 	case "wasm", "js", "moxie.wasm":
 		return mxutil.TargetArch == "wasm"
+	case "moxie.linux":
+		return mxutil.TargetArch != "wasm"
 	case "wasm_unknown":
 		return false
 	}
