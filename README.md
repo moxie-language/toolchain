@@ -20,14 +20,28 @@ Moxie descends from [TinyGo](https://tinygo.org/). All embedded targets and thre
 
 ### Prerequisites
 
-- **LLVM 22** - clang, lld, llvm-link (versioned as `clang-22`, `ld.lld-22`, `llvm-link-22`)
-- On Arch Linux: `pacman -S llvm clang lld`
-- If your distro installs unversioned binaries, create symlinks:
-  ```sh
-  sudo ln -sf /bin/clang /usr/local/bin/clang-22
-  sudo ln -sf /bin/ld.lld /usr/local/bin/ld.lld-22
-  sudo ln -sf /bin/llvm-link /usr/local/bin/llvm-link-22
-  ```
+**LLVM 22** is pinned across the stack: clang, ld.lld, llvm-link, opt and
+llvm-extract must all be major version 22, and the legacy bootstrap compiler
+links libLLVM-22. Go 1.25+ is needed only to build that bootstrap compiler.
+
+Most distributions ship LLVM 22 as the unversioned toolchain, so:
+
+```sh
+# Arch
+sudo pacman -S llvm clang lld
+
+# Fedora / RHEL
+sudo dnf install llvm clang lld
+
+# Debian / Ubuntu (use apt.llvm.org if your release predates LLVM 22)
+sudo apt install llvm-22 clang-22 lld-22
+```
+
+`build.sh` verifies the major version of every tool before building, so a
+mis-provisioned machine fails immediately with a list of what is wrong.
+
+See [docs/building.md](docs/building.md) for the full dependency list,
+per-distribution instructions, and the bootstrap protocol.
 
 ```sh
 # Build the compiler

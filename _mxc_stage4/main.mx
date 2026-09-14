@@ -422,6 +422,22 @@ func isDirPath(pkgPath string) (ok bool) {
 	return len(listFiles(pkgPath, ".mx")) > 0
 }
 
+// ensureModuleRoot resolves the module root once per process, before any
+// package discovery. Without it globalModPrefix/globalModDir stay empty and a
+// module-internal import (git.smesh.lol/moxie/pkg/mxutil, reached from the
+// runtime's errors dependency) cannot be resolved, so the build dies with
+// "undefined: mxutil" on some unrelated package. Every command that resolves
+// packages must call this after computing root.
+func ensureModuleRoot(root string) {
+	if bst.globalModPrefix != "" {
+		return
+	}
+	if root == "" {
+		root = "."
+	}
+	bst.globalModPrefix, bst.globalModDir = findModuleRoot(root)
+}
+
 func findModuleRoot(startDir string) (modName string, dir string) {
 	// "" means "the current directory"; walk from "." so that a relative
 	// target like ./pkg still finds the module root next to moxie.mod.
@@ -3014,6 +3030,7 @@ func cmdCacheWarm() {
 	if root == "" {
 		root = "."
 	}
+	ensureModuleRoot(root)
 	srcDir := mxutil.JoinPath(root, "src")
 	mxutil.WriteStr(2, "warming stdlib cache from " | srcDir | " ...\n")
 	pkgPaths := walkStdlibPkgs(srcDir, "", nil)
@@ -3347,6 +3364,7 @@ func cmdHeader(pkgName, outdir string) {
 	if pkgName == "" {
 		fatal("header: package name required")
 	}
+	ensureModuleRoot(".")
 	pkg := discoverPkg(pkgName, ".")
 	if pkg == nil {
 		fatal("header: package not found: " | pkgName)
@@ -3418,6 +3436,7 @@ func cmdHeader(pkgName, outdir string) {
 }
 
 func cmdInstall(pkgName string) {
+	ensureModuleRoot(".")
 	firstSeg := pkgName
 	for i := 0; i < len(pkgName); i++ {
 		if pkgName[i] == '/' {
@@ -3494,6 +3513,7 @@ func cmdUpdate(rebuildAll bool) {
 	if root == "" {
 		root = "."
 	}
+	ensureModuleRoot(root)
 	cacheBase := pkgCacheDir()
 	pkgDirs := listFiles(cacheBase, "")
 	if pkgDirs == nil {
@@ -5821,12 +5841,7 @@ func cmdBuildRuntime() {
 	if root == "" {
 		root = "."
 	}
-	// Resolve the module root before dependency discovery: without it a
-	// module-internal import such as git.smesh.lol/moxie/pkg/mxutil is
-	// unresolvable and the runtime bake fails on the errors package.
-	if bst.globalModPrefix == "" {
-		bst.globalModPrefix, bst.globalModDir = findModuleRoot(root)
-	}
+	ensureModuleRoot(root)
 	triple := "x86_64-unknown-linux-musleabihf"
 	clang := "clang-22"
 	sysroot := mxutil.JoinPath(root, "sysroot")

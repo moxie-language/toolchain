@@ -4,6 +4,8 @@ set -e
 # LLVM 22 is pinned across the whole stack. Some distros ship only the
 # unversioned tool names for opt/llvm-extract, so accept either name but
 # verify the major version is 22 - a name is not proof of provenance.
+# Output formats differ ("clang version 22.1.8", "LLD 22.1.8",
+# "LLVM version 22.1.8"), so pull the first major.minor token.
 need_llvm22() {
     local name="$1" bin=""
     for c in "${name}-22" "$name"; do
@@ -11,7 +13,7 @@ need_llvm22() {
     done
     if [ -z "$bin" ]; then FAIL="$FAIL ${name}-22"; return; fi
     local ver
-    ver="$("$bin" --version 2>/dev/null | grep -oE 'version [0-9]+' | head -1 | grep -oE '[0-9]+')"
+    ver="$("$bin" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1 | cut -d. -f1)"
     if [ "$ver" != "22" ]; then FAIL="$FAIL ${name}(=${ver:-unknown})"; fi
 }
 
