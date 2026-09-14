@@ -20,6 +20,7 @@ import * as idb from './idb.mjs';
 import * as sw from './sw.mjs';
 import * as markdown from './markdown.mjs';
 import * as node from './node.mjs';
+import * as sabChannel from './sab-channel.mjs';
 
 let memory;
 let instance;
@@ -793,10 +794,69 @@ function buildBridge() {
     app_RegisterPointerEvents() { app.RegisterPointerEvents(); },
     app_RegisterKeyEvents() { app.RegisterKeyEvents(); },
     app_RegisterResizeEvents() { app.RegisterResizeEvents(); },
+    // Spawn bridge: channels are SPSC rings over SharedArrayBuffer, and a
+    // domain is a dedicated Worker running the same module. The module only
+    // ever sees an int32 handle, so the host keeps the table.
+    ...(() => {
+      const handles = new Map();
+      let next = 1;
+      return {
+        channel_create(slotSize, slotCount) {
+          const h = next++;
+          handles.set(h, sabChannel.create(slotSize, slotCount));
+          return h;
+        },
+        channel_send(h, ptr, len) {
+          const sab = handles.get(h);
+          if (sab) sabChannel.send(sab, readBytes(ptr, len));
+        },
+        channel_recv(h, ptr, cap) {
+          const sab = handles.get(h);
+          if (!sab) return -1;
+          const dst = new Uint8Array(memory.buffer, ptr, cap);
+          return sabChannel.recv(sab, dst);
+        },
+        channel_close(h) {
+          const sab = handles.get(h);
+          if (sab) { sabChannel.close(sab); handles.delete(h); }
+        },
+        is_worker_context() { return 0; },
+        spawn_domain(fnIdx, argPtr, argLen, chanHandlesPtr, nChans) {
+          // Workers are started from the host: the module cannot create one.
+          // The entry index and the bound channel handles are handed to the
+          // worker over its own message port so the child can bind the same
+          // rings from the far end.
+          const args = readBytes(argPtr, argLen);
+          const chans = [];
+          const dv = new DataView(memory.buffer);
+          for (let i = 0; i < nChans; i++) {
+            const h = dv.getInt32(chanHandlesPtr + i * 4, true);
+            if (handles.has(h)) chans.push({ handle: h, sab: handles.get(h) });
+          }
+          spawnWorker(fnIdx, args, chans);
+        },
+      };
+    })(),
   };
 }
 
+// spawnWorker starts a new domain for a Moxie spawn. The child runs the same
+// module in a dedicated Worker; the module cannot create one itself, and the
+// bound channel rings travel to the child as SharedArrayBuffers, which is the
+// only inter-domain state there is.
+function spawnWorker(fnIdx, argBytes, chans) {
+  const w = new Worker(new URL('./worker-host.mjs', import.meta.url), { type: 'module' });
+  w.postMessage({
+    wasm: globalThis.__moxie_wasm_url,
+    fnIdx,
+    args: argBytes,
+    chans: chans.map(c => ({ handle: c.handle, sab: c.sab })),
+  });
+  return w;
+}
+
 export async function load(wasmPath) {
+  globalThis.__moxie_wasm_url = wasmPath;
   const response = await fetch(wasmPath);
   const bytes = await response.arrayBuffer();
 
@@ -828,6 +888,22 @@ export async function load(wasmPath) {
       },
     },
     bridge,
+    // Host shims for pkg/mxutil. Those functions are declared with
+    // //export, which makes them imports under wasm, and mxutil arrives in
+    // an application's closure because the standard library's errors
+    // package uses its GrowCap helper. A browser app has no filesystem, so
+    // these report failure rather than pretending to work; they are only
+    // reached if something calls them, which nothing in a page does.
+    env: {
+      mxc_readfile: () => 0,
+      mxc_filesize: () => -1,
+      mxc_getenv: () => 0,
+      mxc_listdir: () => 0,
+      mxc_writefile: () => -1,
+      mxc_mkdir: () => -1,
+      // libc write, pulled in by the compiler-side C shims.
+      write: () => -1,
+    },
   });
 
   instance = result.instance;
