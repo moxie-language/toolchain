@@ -1489,6 +1489,12 @@ func fileContainsPart(base string, part string) (ok bool) {
 	return false
 }
 
+// shouldSkipFile applies the filename platform rule, which is a fallback for
+// files that carry no //:build constraint. The caller checks the constraint
+// first and only consults the name when there is none, mirroring Go, where an
+// explicit //go:build beats the filename. Getting that order wrong breaks
+// src/time/sys_unix.mx, which is tagged 'unix || (js && wasm)' specifically so
+// wasm keeps its POSIX wrappers despite the _unix name.
 func shouldSkipFile(name string) (ok bool) {
 	if mxutil.HasSuffix(name, "_test.mx") {
 		return true
@@ -1498,23 +1504,32 @@ func shouldSkipFile(name string) (ok bool) {
 		base = base[:len(base)-3]
 	}
 	if mxutil.TargetArch == "wasm" {
-		for _, a := range []string{"amd64", "arm64", "386"} {
+		for _, a := range []string{"amd64", "arm64", "386", "linux", "darwin", "posix"} {
 			if fileContainsPart(base, a) {
 				return true
 			}
 		}
-		for _, s := range []string{"_linux", "_unix", "_darwin", "_posix"} {
-			if mxutil.HasSuffix(base, s) {
-				return true
-			}
+		return false
+	}
+	for _, a := range []string{"arm64", "wasm", "386"} {
+		if fileContainsPart(base, a) {
+			return true
 		}
-	} else {
-		for _, a := range []string{"arm64"} {
-			if fileContainsPart(base, a) {
-				return true
-			}
+	}
+	return false
+}
+
+
+// hasPlatformSuffix reports whether a file name carries a platform suffix
+// that the target heuristic would otherwise act on.
+func hasPlatformSuffix(base string) (ok bool) {
+	for _, a := range []string{"amd64", "arm64", "386", "wasm"} {
+		if fileContainsPart(base, a) {
+			return true
 		}
-		if mxutil.HasSuffix(base, "_wasm") {
+	}
+	for _, s := range []string{"_linux", "_unix", "_darwin", "_posix", "_wasm"} {
+		if mxutil.HasSuffix(base, s) {
 			return true
 		}
 	}
@@ -1697,6 +1712,28 @@ func hasBuildConstraint(data []byte, forbidden []string) (ok bool) {
 
 // evalBuildLine evaluates a //:build constraint expression for the current
 // target. Unknown tags are false; negation of unknown tags is true.
+// hasBuildLine reports whether the file states a //:build constraint. Its
+// verdict is not inspected here - hasBuildConstraint does that later.
+func hasBuildLine(data []byte) (ok bool) {
+	for i := int32(0); i < int32(len(data)) && i < 512; i++ {
+		if data[i] == 'p' {
+			return false
+		}
+		if i+9 < int32(len(data)) && string(data[i:i+9]) == "//:build " {
+			return true
+		}
+		if data[i] == '\n' {
+			continue
+		}
+		if data[i] == '/' && i+1 < int32(len(data)) && data[i+1] == '/' {
+			for i < int32(len(data)) && data[i] != '\n' {
+				i++
+			}
+		}
+	}
+	return false
+}
+
 func evalBuildLine(line string) (ok bool) {
 	v, _ := evalBuildOr(line, 0)
 	return v
@@ -1768,12 +1805,19 @@ func evalBuildUnary(line string, pos int32) (val bool, next int32) {
 // buildTagTrue reports whether a build tag is true for the current target.
 func buildTagTrue(tag string) (ok bool) {
 	switch tag {
-	case "linux", "unix", "amd64":
+	case "linux", "amd64":
 		// Platform tags belong to the native target only. Enabling them for
 		// wasm32 pulls in Linux-only files (e.g. secalloc's mmap-backed
 		// guarded arenas) whose syscall constants and mmap/munmap do not
 		// exist there.
 		return mxutil.TargetArch != "wasm"
+	case "unix":
+		// Go's unix tag is a composite of the unix-like GOOS values and is
+		// false for js, so syscall's unix files must not be selected for
+		// wasm - syscall_js.mx is the implementation there. Files that do
+		// want wasm spell it out: src/time/sys_unix.mx is
+		// 'unix || (js && wasm)'.
+		return mxutil.TargetOS != "js"
 	case "go1.9", "go1.10", "go1.11", "go1.12", "go1.13", "go1.14",
 		"go1.15", "go1.16", "go1.17", "go1.18", "go1.19", "go1.20",
 		"go1.21", "go1.22", "go1.23", "go1.24",
@@ -1931,11 +1975,19 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 	}
 	files := []string{:0:len(allMx)}
 	for _, f := range allMx {
-		if shouldSkipFile(f) {
-			continue
-		}
 		data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, f))
 		if !ok {
+			continue
+		}
+		// Go selects on //go:build before the filename. When a file states
+		// its own constraint, that constraint is the verdict - it may
+		// positively select a platform-suffixed name
+		// (src/time/sys_unix.mx: 'unix || (js && wasm)') or negatively
+		// select one (src/math/dim_noasm.mx: '!amd64 && !arm64 && !wasm').
+		// The filename rule is only a fallback for files with no
+		// constraint of their own. hasBuildConstraint below still applies
+		// the target's forbidden tags.
+		if !hasBuildLine(data) && shouldSkipFile(f) {
 			continue
 		}
 		bc := hasBuildConstraint(data, forbidden)
