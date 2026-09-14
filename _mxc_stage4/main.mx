@@ -4298,10 +4298,37 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 	return out
 }
 
+// resolveTargetFlag scans argv for -target and applies it. It must run before
+// the type universe is built: uintptr is sized from TargetArch, so a universe
+// built before the target is known bakes 64-bit pointers into every builtin
+// type, and a wasm32 build then emits 64-bit signatures for the runtime while
+// packages (whose widths come from explicit source types) are 32-bit.
+func resolveTargetFlag(args []string) {
+	for i := int32(2); i < int32(len(args)); i++ {
+		if args[i] == "-target" && i+1 < int32(len(args)) {
+			applyTargetFlag(args[i+1])
+			return
+		}
+	}
+	applyTargetFlag("")
+}
+
+func applyTargetFlag(flag string) {
+	mxutil.SetTarget("linux", "amd64")
+	if flag == "js/wasm" || flag == "wasm" {
+		mxutil.SetTarget("js", "wasm")
+	} else if flag == "wasi/wasm" {
+		mxutil.SetTarget("wasi", "wasm")
+	}
+}
+
 func main() {
 	// Root arena is the domain root's arena, set up by the runtime.
 	// 2GB virtual - pages committed on touch by the MMU.
 	initCompileCtx()
+	// The target must be known before InitUniverse: uintptr's width depends
+	// on it, and InitUniverse builds the type table once per process.
+	resolveTargetFlag(os.Args)
 	cctx.universe = InitUniverse()
 	SetUniverseGlobals(cctx.universe)
 	initBuildState()
@@ -4484,13 +4511,9 @@ func main() {
 	if root == "" {
 		root = "."
 	}
-	mxutil.SetTarget("linux", "amd64")
+	applyTargetFlag(targetFlag)
 	triple := "x86_64-unknown-linux-musleabihf"
-	if targetFlag == "js/wasm" || targetFlag == "wasm" {
-		mxutil.SetTarget("js", "wasm")
-		triple = "wasm32-unknown-wasi"
-	} else if targetFlag == "wasi/wasm" {
-		mxutil.SetTarget("wasi", "wasm")
+	if mxutil.TargetArch == "wasm" {
 		triple = "wasm32-unknown-wasi"
 	}
 	isWasm := mxutil.TargetArch == "wasm"
