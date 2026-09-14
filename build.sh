@@ -1,14 +1,26 @@
 #!/bin/bash
 set -e
 
+# LLVM 22 is pinned across the whole stack. Some distros ship only the
+# unversioned tool names for opt/llvm-extract, so accept either name but
+# verify the major version is 22 - a name is not proof of provenance.
+need_llvm22() {
+    local name="$1" bin=""
+    for c in "${name}-22" "$name"; do
+        if command -v "$c" >/dev/null 2>&1; then bin="$c"; break; fi
+    done
+    if [ -z "$bin" ]; then FAIL="$FAIL ${name}-22"; return; fi
+    local ver
+    ver="$("$bin" --version 2>/dev/null | grep -oE 'version [0-9]+' | head -1 | grep -oE '[0-9]+')"
+    if [ "$ver" != "22" ]; then FAIL="$FAIL ${name}(=${ver:-unknown})"; fi
+}
+
 FAIL=""
-command -v llvm-extract-22 >/dev/null 2>&1 || command -v llvm-extract-21 >/dev/null 2>&1 || FAIL="$FAIL llvm-extract-21"
-command -v ld.lld-22 >/dev/null 2>&1 || command -v ld.lld-21 >/dev/null 2>&1 || FAIL="$FAIL ld.lld-21"
-command -v clang-22 >/dev/null 2>&1 || command -v clang-21 >/dev/null 2>&1 || FAIL="$FAIL clang-21"
+for tool in clang ld.lld opt llvm-link llvm-extract; do need_llvm22 "$tool"; done
 if [ -n "$FAIL" ]; then
-    echo "error: LLVM 21 required. missing:$FAIL" >&2
-    echo "  arch:   pacman -S llvm21 clang21 lld21" >&2
-    echo "  debian: apt install llvm-21 clang-21 lld-21" >&2
+    echo "error: LLVM 22 required (pinned across the stack). bad/missing:$FAIL" >&2
+    echo "  arch:   pacman -S llvm22 clang22 lld22" >&2
+    echo "  debian: apt install llvm-22 clang-22 lld-22" >&2
     exit 1
 fi
 

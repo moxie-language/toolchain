@@ -6,29 +6,33 @@ set -e
 REAL_GOROOT=$(go env GOROOT)
 MOXIE_GOROOT="${MOXIE_GOROOT_CACHE:-/tmp/moxie-goroot}"
 
+# LLVM 22 is pinned across the whole stack: the legacy compiler links
+# libLLVM-22, stage4 invokes clang-22/llvm-link-22/ld.lld-22/opt, and the
+# top-level build.sh checks for the -22 tools. Do not fall back to another
+# major version - mixing majors yields bitcode one tool cannot read.
+# Some distros install LLVM 22 as the unversioned toolchain, so accept the
+# unversioned llvm-config but verify the major version it reports.
+LLVM_VER="22"
 LLVM_PREFIX=""
-LLVM_VER=""
-# Prefer llvm-config to determine paths.
-for c in llvm-config llvm-config-22 llvm-config-21 llvm-config-20; do
+for c in "llvm-config-${LLVM_VER}" llvm-config; do
     if command -v "$c" >/dev/null 2>&1; then
-        LLVM_PREFIX="$($c --prefix)"
-        LLVM_VER="$($c --version | cut -d. -f1)"
-        break
+        ver="$("$c" --version 2>/dev/null | cut -d. -f1)"
+        if [ "$ver" = "$LLVM_VER" ]; then
+            LLVM_PREFIX="$("$c" --prefix)"
+            break
+        fi
     fi
 done
 if [ -z "$LLVM_PREFIX" ]; then
-    for v in 22 21 20; do
-        for p in /usr/lib/llvm-$v /usr/lib/llvm$v /usr/lib/llvm/$v; do
-            if [ -d "$p" ]; then
-                LLVM_PREFIX="$p"
-                LLVM_VER="$v"
-                break 2
-            fi
-        done
+    for p in "/usr/lib/llvm-${LLVM_VER}" "/usr/lib/llvm${LLVM_VER}" "/usr/lib/llvm/${LLVM_VER}"; do
+        if [ -d "$p" ]; then
+            LLVM_PREFIX="$p"
+            break
+        fi
     done
 fi
-if [ -z "$LLVM_PREFIX" ] || [ -z "$LLVM_VER" ]; then
-    echo "error: LLVM not found (tried 22, 21, 20)" >&2
+if [ -z "$LLVM_PREFIX" ]; then
+    echo "error: LLVM ${LLVM_VER} not found (need an llvm-config reporting ${LLVM_VER}, or /usr/lib/llvm-${LLVM_VER})" >&2
     exit 1
 fi
 

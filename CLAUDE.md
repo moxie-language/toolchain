@@ -374,9 +374,27 @@ Every step of the self-hosting bootstrap MUST use `moxie build -a` to force rebu
 Bootstrap cycle:
   1. Build legacy Go compiler: `cd legacy && go build -o moxie .`
   2. Compile stage4 with legacy: `cd .. && MOXIEROOT=$PWD legacy/moxie build -a -o mxc-stage4 ./_mxc_stage4`
-  3. Compile stage4 with the first bootstrap: `MOXIEROOT=$PWD ./mxc-stage4 build -a -o mxc-stage4-2 ./_mxc_stage4`
-  4. Compile stage4 with the second bootstrap: `MOXIEROOT=$PWD ./mxc-stage4-2 build -a -o mxc-stage4-3 ./_mxc_stage4`
-  5. Verify a generation reproduces itself: `sha256sum mxc-stage4-2 mxc-stage4-3` (should match)
+  3. Bake the runtime from source with the compiler just built: `MOXIEROOT=$PWD ./mxc-stage4 build-runtime`
+  4. Compile stage4 with the first bootstrap: `MOXIEROOT=$PWD ./mxc-stage4 build -a -o mxc-stage4-2 ./_mxc_stage4`
+  5. Compile stage4 with the second bootstrap: `MOXIEROOT=$PWD ./mxc-stage4-2 build -a -o mxc-stage4-3 ./_mxc_stage4`
+  6. Verify a generation reproduces itself: `sha256sum mxc-stage4-2 mxc-stage4-3` (should match)
+
+`sysroot/runtime_go.bc` is an INPUT to application links, not a build product:
+it is only read when the runtime is not itself in the build closure (i.e. for
+apps, not for the compiler, which compiles the runtime from source). Nothing
+regenerates it automatically, so it drifts from `src/runtime` and apps then
+fail to link with undefined symbols. Step 3 exists so the bake is a product
+of the bootstrap rather than a distributed blob - no prebuilt runtime needs
+to be shipped.
+
+The bake is compiler-specific: the legacy compiler writes a different blob
+(different symbol set and linkage) which will NOT link against stage4's
+expectations. Always bake with the compiler that will consume it.
+
+LLVM is pinned to major version 22 across the stack: legacy links
+libLLVM-22, and stage4 invokes clang-22/llvm-link-22/ld.lld-22 plus
+mem2reg via opt. build.sh verifies the major version of each tool rather
+than trusting the name.
 
 The fixpoint is bootstrap-against-bootstrap: some generation must emit the
 identical binary that emitted it. The legacy compiler is a reference

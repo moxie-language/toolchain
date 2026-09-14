@@ -34,6 +34,20 @@ else
 	exit 1
 fi
 
+# 2b2: rebuild the baked runtime from source with the freshly built compiler.
+# sysroot/runtime_go.bc is an input, not a build product: nothing regenerates
+# it unless asked, so it silently drifts from src/runtime and then apps fail
+# to link against it. Rebuilding here keeps the bake a product of this
+# bootstrap, so no runtime blob needs to be distributed.
+name="selfhost:runtime-bake"
+t0=$(date +%s%N)
+if MOXIEROOT="$ROOT" "$td/stage1" build-runtime >"$td/runtime.log" 2>&1; then
+	t1=$(date +%s%N)
+	log_pass "$name" "ok"
+else
+	log_fail "$name" "build-runtime failed: $(tail -3 "$td/runtime.log")"
+fi
+
 # 2c: self-host with stage1
 name="selfhost:stage2"
 t0=$(date +%s%N)

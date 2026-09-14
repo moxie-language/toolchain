@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the Moxie compiler with PureGo LLVM bindings.
 # No C/C++ toolchain needed at build time.
-# Runtime deps: libLLVM-21.so, clang-21, ld.lld-21 (distro packages).
+# Runtime deps: libLLVM-22.so, clang-22, ld.lld-22 (distro packages).
 set -e
 
 REAL_GOROOT=$(go env GOROOT)
