@@ -435,7 +435,33 @@ func ensureModuleRoot(root string) {
 	if root == "" {
 		root = "."
 	}
-	bst.globalModPrefix, bst.globalModDir = findModuleRoot(root)
+	prefix, dir := findModuleRoot(root)
+	if prefix == "" {
+		// The target may live outside the module (the test harness stages
+		// builds under /tmp, so no moxie.mod is reachable by walking up).
+		// MOXIEROOT names the module root explicitly; without this a
+		// module-internal import cannot be resolved from the module prefix
+		// and would be looked up as a filesystem path instead.
+		if rt := getenv("MOXIEROOT"); rt != "" {
+			if data, ok := mxutil.ReadFile(mxutil.JoinPath(rt, "moxie.mod")); ok {
+				if mn := parseModuleName(string(data)); mn != "" {
+					prefix, dir = mn, rt
+				}
+			}
+		}
+	}
+	bst.globalModPrefix, bst.globalModDir = prefix, dir
+}
+
+// parseModuleName returns the module path declared in moxie.mod content.
+func parseModuleName(data string) (name string) {
+	for _, line := range mxutil.SplitLines(data) {
+		line = mxutil.TrimSpace(line)
+		if mxutil.HasPrefix(line, "module ") {
+			return mxutil.TrimSpace(line[7:])
+		}
+	}
+	return ""
 }
 
 // ensureRuntimeBake returns the path of the runtime bitcode bake, creating it
@@ -3683,11 +3709,7 @@ func cmdTest(args []string) {
 	// import path like "fmt" is not. Missing this leaves globalModDir empty
 	// and module-internal imports unresolvable.
 	if isDirPath(pkgPath) {
-		absDir := pkgPath
-		if absDir == "." {
-			absDir = ""
-		}
-		bst.globalModPrefix, bst.globalModDir = findModuleRoot(absDir)
+		ensureModuleRoot(pkgPath)
 	}
 
 	registerBuiltins()
@@ -4458,11 +4480,7 @@ func main() {
 	// import path like "fmt" is not. Missing this leaves globalModDir empty
 	// and module-internal imports unresolvable.
 	if isDirPath(pkgPath) {
-		absDir := pkgPath
-		if absDir == "." {
-			absDir = ""
-		}
-		bst.globalModPrefix, bst.globalModDir = findModuleRoot(absDir)
+		ensureModuleRoot(pkgPath)
 	}
 
 	registerBuiltins()
