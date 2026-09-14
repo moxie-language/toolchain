@@ -408,19 +408,27 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		iface := *(*_interface)(ptr)
 		codecWriteVarint(cb, codecTagIface)
 		codecWriteBytes(cb, unsafe.Slice((*byte)(unsafe.Pointer(&iface.typecode)), 8))
-		if iface.typecode != nil && uintptr(iface.typecode) > 4096 && uintptr(iface.typecode) < (uintptr(1)<<48) {
-			tc := uintptr(iface.typecode)
-			if tc > 0x1000 && tc < 0x40000000 {
-				ct := (*RawType)(iface.typecode)
-				if ct.Kind() != Invalid && ct.Size() <= 65536 {
-					// Zero-size structs (e.g. empty context markers) still
-					// emit their struct tag + field count so the decode
-					// side stays in lockstep with the wire format.
-					if ct.Size() <= unsafe.Sizeof(uintptr(0)) {
-						codecEncodeValue(cb, ss, unsafe.Pointer(&iface.value), ct)
-					} else {
-						codecEncodeValue(cb, ss, iface.value, ct)
-					}
+		// Plausibility bound for a type descriptor pointer: above the first
+		// page and below the top of the address space. The upper bound must
+		// suit the target's pointer width - on a 32-bit target
+		// uintptr(1)<<48 overflows to 0, making the test "below zero" and
+		// silently rejecting every descriptor, which truncates the wire
+		// format and desynchronises the decode side.
+		tc := uintptr(iface.typecode)
+		tcMax := uintptr(1) << 48
+		if tcMax == 0 {
+			tcMax = ^uintptr(0)
+		}
+		if tc > 0x1000 && tc < tcMax {
+			ct := (*RawType)(iface.typecode)
+			if ct.Kind() != Invalid && ct.Size() <= 65536 {
+				// Zero-size structs (e.g. empty context markers) still
+				// emit their struct tag + field count so the decode
+				// side stays in lockstep with the wire format.
+				if ct.Size() <= unsafe.Sizeof(uintptr(0)) {
+					codecEncodeValue(cb, ss, unsafe.Pointer(&iface.value), ct)
+				} else {
+					codecEncodeValue(cb, ss, iface.value, ct)
 				}
 			}
 		}
