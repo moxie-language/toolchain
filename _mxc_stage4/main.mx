@@ -438,6 +438,29 @@ func ensureModuleRoot(root string) {
 	bst.globalModPrefix, bst.globalModDir = findModuleRoot(root)
 }
 
+// ensureRuntimeBake returns the path of the runtime bitcode bake, creating it
+// from source when it is missing. The bake is a cache, so it is not shipped:
+// the first application build against a fresh tree pays for compiling the
+// runtime once, and every later build links the cached blob.
+//
+// The bake is compiler-specific, so if the compiler changes the existing blob
+// is stale - but source changes are what the `-a` flag and `build-runtime`
+// address, and detecting staleness here would mean hashing the whole runtime
+// tree on every build.
+func ensureRuntimeBake(sysroot, root string) (bc string) {
+	bc = mxutil.JoinPath(sysroot, "runtime_go.bc")
+	if _, ok := mxutil.ReadFile(bc); ok {
+		return bc
+	}
+	mxutil.WriteStr(2, "  runtime bake missing; building it from source\n")
+	cmdBuildRuntime()
+	if _, ok := mxutil.ReadFile(bc); ok {
+		return bc
+	}
+	fatal("runtime bake failed to produce " | bc)
+	return bc
+}
+
 func findModuleRoot(startDir string) (modName string, dir string) {
 	// "" means "the current directory"; walk from "." so that a relative
 	// target like ./pkg still finds the module root next to moxie.mod.
@@ -3951,14 +3974,9 @@ func cmdTest(args []string) {
 	mxutil.WriteStr(2, "  compile objects\n")
 	var objList []string
 	if !hasRuntimePkg {
-		runtimeGoBc := mxutil.JoinPath(sysroot, "runtime_go.bc")
-		if _, gok := mxutil.ReadFile(runtimeGoBc); gok {
-			if len(objList) >= cap(objList) { objList = mxutil.GrowCap(objList) }
-			push(objList, clangCompileToObj(clang, triple,runtimeGoBc))
-		} else {
-			if len(objList) >= cap(objList) { objList = mxutil.GrowCap(objList) }
-			push(objList, clangCompileToObj(clang, triple,runtimeBc))
-		}
+		runtimeGoBc := ensureRuntimeBake(sysroot, root)
+		if len(objList) >= cap(objList) { objList = mxutil.GrowCap(objList) }
+		push(objList, clangCompileToObj(clang, triple, runtimeGoBc))
 	}
 	if !hasRuntimePkg {
 		rtShims := mxutil.JoinPath(sysroot, "rt_shims.bc")
@@ -4817,14 +4835,9 @@ func main() {
 		mxutil.WriteStr(2, "  compile objects\n")
 		var objList []string
 		if !hasRuntimePkg {
-			runtimeGoBc := mxutil.JoinPath(sysroot, "runtime_go.bc")
-			if _, gok := mxutil.ReadFile(runtimeGoBc); gok {
-				if len(objList) >= cap(objList) { objList = mxutil.GrowCap(objList) }
-				push(objList, clangCompileToObj(clang, triple,runtimeGoBc))
-			} else {
-				if len(objList) >= cap(objList) { objList = mxutil.GrowCap(objList) }
-				push(objList, clangCompileToObj(clang, triple,runtimeBc))
-			}
+			runtimeGoBc := ensureRuntimeBake(sysroot, root)
+			if len(objList) >= cap(objList) { objList = mxutil.GrowCap(objList) }
+			push(objList, clangCompileToObj(clang, triple, runtimeGoBc))
 		}
 		rtShims := mxutil.JoinPath(sysroot, "rt_shims.bc")
 		if _, rsk := mxutil.ReadFile(rtShims); rsk {
