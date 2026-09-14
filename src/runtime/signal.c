@@ -1,4 +1,10 @@
 //go:build none
+//:build linux
+//
+// The //go:build none above is the upstream marker for a file that Go's
+// toolchain must not compile on its own; these are included manually for
+// Linux targets. Stage4 selects files with //:build, so without this it
+// compiles them for every target - and they include Linux headers.
 
 // Ignore the //go:build above. This file is manually included on Linux and
 // MacOS to provide os/signal support.

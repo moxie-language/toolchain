@@ -1,0 +1,67 @@
+//:build wasm
+
+package runtime
+
+import "unsafe"
+
+// Arena memory for wasm32 comes from linear memory growth, not mmap.
+//
+// The platform files otherwise assume mmap/munmap and the Linux MAP_*/PROT_*
+// constants; wasm has neither. What the allocator actually needs from a
+// region is that it is contiguous, zeroed, page-aligned, and stable for the
+// lifetime of the domain - all of which `memory.grow` provides, because the
+// new pages are appended past everything already in use (data segments,
+// stack, and previously handed-out regions) and WebAssembly guarantees fresh
+// pages are zero-filled.
+//
+// Growth is a bump allocation: memory is never given back within a domain.
+// That matches the arena model, where regions are only released when the
+// domain exits, and a wasm process has exactly one domain.
+
+// sysMemBump is the next free offset in linear memory. Zero means "not yet
+// initialised"; the first call seeds it from the current memory size, since
+// all memory below that is already spoken for.
+var sysMemBump uintptr
+
+// sysMap returns a zeroed, 64 KiB-aligned region of size bytes, or nil if
+// linear memory could not be grown.
+func sysMap(size uintptr) unsafe.Pointer {
+	if size == 0 {
+		return nil
+	}
+	size = (size + wasmPageSize - 1) &^ (wasmPageSize - 1)
+	pages := int32(size / wasmPageSize)
+
+	if sysMemBump == 0 {
+		sysMemBump = uintptr(wasm_memory_size(0)) * wasmPageSize
+	}
+	prev := wasm_memory_grow(0, pages)
+	if prev < 0 {
+		return nil
+	}
+	base := sysMemBump
+	sysMemBump = base + size
+	// memory.grow returns the previous page count, so the pages this call
+	// added start exactly at prev*wasmPageSize. A bump cursor that does not
+	// agree means the cursor was seeded after something else already grew
+	// memory, which would hand out overlapping regions - fail loud rather
+	// than corrupt the heap.
+	if uintptr(prev)*wasmPageSize != base {
+		runtimePanic("wasm: memory.grow overtook the region cursor")
+	}
+	return unsafe.Pointer(base)
+}
+
+// sysMapShared is sysMap: there is no second address space to share with.
+// A wasm domain has no fork, so "shared" memory is just memory.
+func sysMapShared(size uintptr) unsafe.Pointer {
+	return sysMap(size)
+}
+
+// sysUnmap is a no-op. Linear memory cannot be returned to the host, and
+// there is no allocator below us that could reuse it. The arena model only
+// releases at domain exit, at which point the whole process memory goes away.
+func sysUnmap(p unsafe.Pointer, size uintptr) {
+	_ = p
+	_ = size
+}

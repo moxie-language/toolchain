@@ -514,3 +514,36 @@ func waitForEvents() {
 		runtimePanic("deadlocked: no event source")
 	}
 }
+
+// --- Arena memory mapping ---
+
+// sysMap returns a zeroed, page-aligned region of size bytes, or nil on
+// failure. Anonymous private memory: the caller owns it outright.
+//
+// The arena allocator needs a single primitive that both platforms can
+// provide. Native pages come from mmap; wasm derives them from linear
+// memory growth.
+func sysMap(size uintptr) unsafe.Pointer {
+	p := mmap(nil, size, flag_PROT_READ|flag_PROT_WRITE,
+		flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
+	if uintptr(p) == ^uintptr(0) {
+		return nil
+	}
+	return p
+}
+
+// sysMapShared is sysMap with MAP_SHARED, for memory both sides of a
+// process boundary write to. Only meaningful where fork exists.
+func sysMapShared(size uintptr) unsafe.Pointer {
+	p := mmap(nil, size, flag_PROT_READ|flag_PROT_WRITE,
+		flag_MAP_SHARED|flag_MAP_ANONYMOUS, -1, 0)
+	if uintptr(p) == ^uintptr(0) {
+		return nil
+	}
+	return p
+}
+
+// sysUnmap releases a region from sysMap or sysMapShared.
+func sysUnmap(p unsafe.Pointer, size uintptr) {
+	munmap(p, size)
+}

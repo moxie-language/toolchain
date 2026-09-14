@@ -149,8 +149,7 @@ func initDomain(capacity uintptr) {
 	if capacity < headerSz+4096 {
 		capacity = (headerSz + 4096 + 4095) &^ 4095
 	}
-	addr := mmap(nil, capacity, flag_PROT_READ|flag_PROT_WRITE,
-		flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
+	addr := sysMap(capacity)
 	if addr == unsafe.Pointer(^uintptr(0)) {
 		runtimePanic("domain: mmap failed")
 	}
@@ -1275,8 +1274,7 @@ func ArenaNew(capacity uintptr) (a *Arena) {
 	if capacity < headerSz+dataStart+4096 {
 		capacity = (headerSz + dataStart + 4096 + 4095) &^ 4095
 	}
-	addr := mmap(nil, capacity, flag_PROT_READ|flag_PROT_WRITE,
-		flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
+	addr := sysMap(capacity)
 	if addr == unsafe.Pointer(^uintptr(0)) {
 		runtimePanic("arena: mmap failed")
 	}
@@ -1338,8 +1336,7 @@ func arenaAllocRaw(a *Arena, size uintptr) unsafe.Pointer {
 		if size > newCap {
 			newCap = (size + 4095) &^ 4095
 		}
-		addr := mmap(nil, newCap, flag_PROT_READ|flag_PROT_WRITE,
-			flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
+		addr := sysMap(newCap)
 		if addr == unsafe.Pointer(^uintptr(0)) {
 			runtimePanic("arena: region mmap failed")
 		}
@@ -1379,8 +1376,7 @@ func ArenaAllocTD(a *Arena, size uintptr, td *RawType) unsafe.Pointer {
 		if size > newCap {
 			newCap = (size + 4095) &^ 4095
 		}
-		addr := mmap(nil, newCap, flag_PROT_READ|flag_PROT_WRITE,
-			flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
+		addr := sysMap(newCap)
 		if addr == unsafe.Pointer(^uintptr(0)) {
 			runtimePanic("arena: region mmap failed")
 		}
@@ -1409,11 +1405,11 @@ func ArenaFree(a *Arena) {
 	// die with it.
 	sovInvalidateArena(a)
 	for i := a.nregions - 1; i > 0; i-- {
-		munmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
+		sysUnmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
 	}
 	b := a.regions[0].base
 	c := a.regions[0].cap
-	munmap(unsafe.Pointer(b), c)
+	sysUnmap(unsafe.Pointer(b), c)
 }
 
 // ArenaReset resets the arena for reuse. Frees all regions except
@@ -1423,7 +1419,7 @@ func ArenaReset(a *Arena) {
 		return
 	}
 	for i := a.nregions - 1; i > 0; i-- {
-		munmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
+		sysUnmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
 	}
 	a.nregions = 1
 	a.regions[0].off = arenaDataOffset()
