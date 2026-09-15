@@ -142,41 +142,6 @@ func checkGlobalMutation(f *SSAFunction) {
 	}
 }
 
-// checkWasmSpawn rejects spawn() when the target is wasm.
-//
-// The compiler side of the wasm spawn path exists - spawn targets are scanned
-// and numbered, the parent calls runtime.SpawnDomain with the SAB handles, and
-// __spawn_entry dispatches in the child Worker - but the runtime side is not
-// finished: the boundary needs wasm counterparts of the codec channel
-// operations, and the encode path currently traps inside alloc.
-//
-// Until that lands, refuse the build. The alternative is a module that links,
-// runs, and quietly does the wrong thing, which is what a missing
-// ChanSendDual did before: the wasm link allows undefined symbols, so the
-// call resolved to nothing and the child never received anything.
-func checkWasmSpawn(f *SSAFunction) {
-	if mxutil.TargetArch != "wasm" {
-		return
-	}
-	if f == nil || f.Blocks == nil {
-		return
-	}
-	for _, b := range f.Blocks {
-		for _, instr := range b.Instrs {
-			c, ok := instr.(*SSACall)
-			if !ok {
-				continue
-			}
-			bi, ok2 := c.Call.Value.(*SSABuiltin)
-			if !ok2 || bi.id != BuiltinSpawn {
-				continue
-			}
-			if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
-			push(cctx.compileErrors, f.name | ": spawn is not supported for the wasm target yet: the compiler emits the parent, __spawn_entry and the SAB channel handles, but the runtime's boundary channel operations and codec encode path are not finished for wasm. Build this program natively, or with the legacy compiler (whose wasm path came first and is complete).")
-		}
-	}
-}
-
 // scanWasmSpawnTargets collects the static functions reachable through spawn()
 // in one package and assigns each a dispatch index.
 //

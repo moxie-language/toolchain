@@ -939,25 +939,41 @@ function spawnWorker(fnIdx, argBytes, chans) {
     fnIdx,
     args: argBytes,
     chans: chans.map(c => ({ handle: c.handle, sab: c.sab })),
-  });
+  }, null, true);
 }
 
 // startDomain creates the Worker that runs a Moxie domain and posts it its
 // boot message. A domain always runs in its own Worker: channel receives
 // block in Atomics.wait, which the browser forbids on the page thread, and a
 // domain that spawns must itself be able to create a Worker.
-export function startDomain(boot, onSettled) {
+export function startDomain(boot, onSettled, relayUp) {
   const w = new Worker(new URL('./worker-host.mjs', import.meta.url), { type: 'module' });
+  // A spawned domain reports to the domain that spawned it, not to the page, so
+  // its output would otherwise stop one hop short and never be seen. relayUp
+  // forwards it along the chain; in the page the same postMessage has no
+  // listener and is ignored, so this is safe at every level.
+  const up = (kind, text) => {
+    if (relayUp) globalThis.postMessage({ kind, text });
+  };
   w.addEventListener('message', (e) => {
     const m = e.data;
     if (!m) return;
-    if (m.kind === 'stdout') console.log(m.text);
-    else if (m.kind === 'stderr') console.error(m.text);
+    if (m.kind === 'stdout') { console.log(m.text); up('stdout', m.text); }
+    else if (m.kind === 'stderr') { console.error(m.text); up('stderr', m.text); }
     else if (m.kind === 'done') { w.terminate(); onSettled && onSettled(null); }
-    else if (m.kind === 'error') { w.terminate(); onSettled && onSettled(new Error(m.error)); }
+    else if (m.kind === 'error') {
+      w.terminate();
+      if (onSettled) onSettled(new Error(m.error));
+      // A spawned domain has no caller to reject: the parent reaches it only
+      // through channels. Relay the failure to the page rather than dropping
+      // it, or a domain that dies on startup just leaves the parent waiting.
+      else globalThis.postMessage({ kind: 'stderr', text: '[domain] ' + m.error + '\n' });
+    }
   });
   w.addEventListener('error', (e) => {
-    onSettled && onSettled(new Error(String(e.message || e.error || e)));
+    const msg = String(e.message || e.error || e);
+    if (onSettled) onSettled(new Error(msg));
+    else globalThis.postMessage({ kind: 'stderr', text: '[domain] ' + msg + '\n' });
   });
   w.postMessage(boot);
   return w;
