@@ -573,6 +573,16 @@ func isUserPackageByPath(path string) bool {
 // - reject scope shadowing including builtins (step 10)
 // - enforce init() rules: main pkg can't have init, library max one, no select/spawn
 func (c *compilerContext) checkPackageRestrictions(pkg *loader.Package) {
+	// Shadowing and import-name collisions apply to ALL code - the stdlib, the
+	// compiler, and user packages alike. They therefore run before the
+	// user-package gate below, which otherwise makes the rules depend on
+	// whether a package happens to be the build root: `moxie build ./src/math`
+	// reaches this with a relative ImportPath and was checked, while the same
+	// package imported as `math` was not. stage4 enforces both everywhere, so
+	// gating them here was the whole of the legacy/stage4 divergence.
+	c.checkScopeShadowing(pkg)
+	c.checkImportNameCollisions(pkg)
+
 	// Use the original ImportPath from JSON (which preserves the real module path
 	// or absolute directory), not the type checker's path (which is "main" for
 	// main packages).
@@ -632,10 +642,6 @@ func (c *compilerContext) checkPackageRestrictions(pkg *loader.Package) {
 			}
 		}
 	}
-	// Step 10: reject scope shadowing (including builtins from Universe).
-	c.checkScopeShadowing(pkg)
-	// Step 11: reject names that collide with an imported package name.
-	c.checkImportNameCollisions(pkg)
 }
 
 // checkImportNameCollisions rejects any declaration in the package whose name is
