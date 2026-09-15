@@ -1999,6 +1999,13 @@ func (fb *ssaFuncBuilder) evalOffsetofArg(e syntax.Expr) (off int64, ok bool) {
 }
 
 func (fb *ssaFuncBuilder) buildIf(s *syntax.IfStmt) {
+	// An if statement is its own implicit block. Without this scope an init
+	// ':=' that reuses an outer name was treated as a same-scope assignment:
+	// it overwrote the outer variable (a parameter, typically) instead of
+	// shadowing it, and the body then resolved the name to the outer object -
+	// so `if w, ok := w.(io.ReaderFrom); ok { w.ReadFrom(...) }` failed to
+	// resolve ReadFrom against the outer io.Writer.
+	ifScope := fb.enterScope()
 	var savedVars map[Object]*SSAAlloc
 	if s.Init != nil {
 		savedVars = fb.saveVars()
@@ -2008,6 +2015,7 @@ func (fb *ssaFuncBuilder) buildIf(s *syntax.IfStmt) {
 		if savedVars != nil {
 			fb.vars = savedVars
 		}
+		fb.exitScope(ifScope)
 		return
 	}
 	cond := fb.buildExpr(s.Cond)
@@ -2015,6 +2023,7 @@ func (fb *ssaFuncBuilder) buildIf(s *syntax.IfStmt) {
 		if savedVars != nil {
 			fb.vars = savedVars
 		}
+		fb.exitScope(ifScope)
 		return
 	}
 
@@ -2062,13 +2071,18 @@ func (fb *ssaFuncBuilder) buildIf(s *syntax.IfStmt) {
 	if savedVars != nil {
 		fb.vars = savedVars
 	}
+	fb.exitScope(ifScope)
 }
 
 func (fb *ssaFuncBuilder) buildFor(s *syntax.ForStmt) {
+	// A for statement is its own implicit block, so its init ':=' shadows an
+	// outer name of the same name rather than assigning to it.
+	forScope := fb.enterScope()
 	var savedVars map[Object]*SSAAlloc
 	if s.Init != nil {
 		if rc, ok := s.Init.(*syntax.RangeClause); ok {
 			fb.buildRangeLoop(s, rc)
+			fb.exitScope(forScope)
 			return
 		}
 		savedVars = fb.saveVars()
@@ -2104,7 +2118,6 @@ func (fb *ssaFuncBuilder) buildFor(s *syntax.ForStmt) {
 		fb.pushPred(bodyBlock, condBlock)
 	}
 
-	forScope := fb.enterScope()
 	bodyBlock.ScopeID = fb.scopeID
 	fb.currentBlock = bodyBlock
 	fb.buildBlock(s.Body)
@@ -2279,6 +2292,9 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *syntax.ForStmt, rc *syntax.RangeClau
 }
 
 func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
+	// A switch statement is its own implicit block, so its init ':=' shadows
+	// an outer name of the same name rather than assigning to it.
+	switchScope := fb.enterScope()
 	var savedVars map[Object]*SSAAlloc
 	if s.Init != nil {
 		savedVars = fb.saveVars()
@@ -2288,6 +2304,7 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 		if savedVars != nil {
 			fb.vars = savedVars
 		}
+		fb.exitScope(switchScope)
 		return
 	}
 
@@ -2305,6 +2322,7 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 			if savedVars != nil {
 				fb.vars = savedVars
 			}
+			fb.exitScope(switchScope)
 			return
 		}
 	}
@@ -2457,6 +2475,7 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 	if savedVars != nil {
 		fb.vars = savedVars
 	}
+	fb.exitScope(switchScope)
 }
 
 func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.TypeSwitchGuard, doneBlock *SSABasicBlock) {

@@ -141,13 +141,21 @@ func (s *Scanner) Scan() bool {
 		return false
 	}
 	s.scanCalled = true
-	// Loop until we have a token.
+	// Loop until we have a token. advance, token, err, newSize, newBuf and n
+	// are declared outside the loop: a declaration in the body of a
+	// self-mutating method allocates in the sovereign arena on every iteration.
+	var advance int32
+	var token []byte
+	var err error
+	var newSize int32
+	var newBuf []byte
+	var n int32
 	for {
 		// See if we can get a token with what we already have.
 		// If we've run out of data but have an error, give the split function
 		// a chance to recover any remaining, possibly empty token.
 		if s.end > s.start || s.err != nil {
-			advance, token, err := s.split(s.buf[s.start:s.end], s.err != nil)
+			advance, token, err = s.split(s.buf[s.start:s.end], s.err != nil)
 			if err != nil {
 				if err == ErrFinalToken {
 					s.token = token
@@ -201,12 +209,12 @@ func (s *Scanner) Scan() bool {
 				s.setErr(ErrTooLong)
 				return false
 			}
-			newSize := len(s.buf) * 2
+			newSize = len(s.buf) * 2
 			if newSize == 0 {
 				newSize = startBufSize
 			}
 			newSize = min(newSize, s.maxTokenSize)
-			newBuf := []byte{:newSize}
+			newBuf = []byte{:newSize}
 			copy(newBuf, s.buf[s.start:s.end])
 			s.buf = newBuf
 			s.end -= s.start
@@ -216,7 +224,7 @@ func (s *Scanner) Scan() bool {
 		// a misbehaving Reader. Officially we don't need to do this, but let's
 		// be extra careful: Scanner is for safe, simple jobs.
 		for loop := 0; ; {
-			n, err := s.r.Read(s.buf[s.end:len(s.buf)])
+			n, err = s.r.Read(s.buf[s.end:len(s.buf)])
 			if n < 0 || len(s.buf)-s.end < n {
 				s.setErr(ErrBadReadCount)
 				break

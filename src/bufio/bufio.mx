@@ -108,9 +108,13 @@ func (b *Reader) fill() {
 		panic("bufio: tried to fill full buffer")
 	}
 
-	// Read new data: try a limited number of times.
+	// Read new data: try a limited number of times. n and err are declared
+	// outside the loop: a declaration in the body of a self-mutating method
+	// allocates in the sovereign arena on every iteration.
+	var n int32
+	var err error
 	for i := maxConsecutiveEmptyReads; i > 0; i-- {
-		n, err := b.rd.Read(b.buf[b.w:])
+		n, err = b.rd.Read(b.buf[b.w:])
 		if n < 0 {
 			panic(errNegativeRead.Error())
 		}
@@ -186,8 +190,9 @@ func (b *Reader) Discard(n int32) (discarded int32, err error) {
 	b.lastRuneSize = -1
 
 	remain := n
+	var skip int32
 	for {
-		skip := b.Buffered()
+		skip = b.Buffered()
 		if skip == 0 {
 			b.fill()
 			skip = b.Buffered()
@@ -543,9 +548,10 @@ func (b *Reader) WriteTo(w io.Writer) (n int64, err error) {
 		b.fill() // buffer not full
 	}
 
+	var m int64
 	for b.r < b.w {
 		// b.r < b.w => buffer is not empty
-		m, err := b.writeBuf(w)
+		m, err = b.writeBuf(w)
 		n += m
 		if err != nil {
 			return n, err
@@ -678,8 +684,8 @@ func (b *Writer) Buffered() int32 { return b.n }
 // If nn < len(p), it also returns an error explaining
 // why the write is short.
 func (b *Writer) Write(p []byte) (nn int32, err error) {
+	var n int32
 	for len(p) > b.Available() && b.err == nil {
-		var n int32
 		if b.Buffered() == 0 {
 			// Large write, empty buffer.
 			// Write directly from p to avoid copy.
@@ -695,7 +701,7 @@ func (b *Writer) Write(p []byte) (nn int32, err error) {
 	if b.err != nil {
 		return nn, b.err
 	}
-	n := copy(b.buf[b.n:], p)
+	n = copy(b.buf[b.n:], p)
 	b.n += n
 	nn += n
 	return nn, nil
@@ -753,8 +759,8 @@ func (b *Writer) WriteString(s []byte) (int32, error) {
 	tryStringWriter := true
 
 	nn := 0
+	var n int32
 	for len(s) > b.Available() && b.err == nil {
-		var n int32
 		if b.Buffered() == 0 && sw == nil && tryStringWriter {
 			// Check at most once whether b.wr is a StringWriter.
 			sw, tryStringWriter = b.wr.(io.StringWriter)
@@ -775,7 +781,7 @@ func (b *Writer) WriteString(s []byte) (int32, error) {
 	if b.err != nil {
 		return nn, b.err
 	}
-	n := copy(b.buf[b.n:], s)
+	n = copy(b.buf[b.n:], s)
 	b.n += n
 	nn += n
 	return nn, nil
@@ -791,6 +797,8 @@ func (b *Writer) ReadFrom(r io.Reader) (n int64, err error) {
 	}
 	readerFrom, readerFromOK := b.wr.(io.ReaderFrom)
 	var m int32
+	var nn int64
+	var nr int32
 	for {
 		if b.Available() == 0 {
 			if err1 := b.Flush(); err1 != nil {
@@ -798,12 +806,12 @@ func (b *Writer) ReadFrom(r io.Reader) (n int64, err error) {
 			}
 		}
 		if readerFromOK && b.Buffered() == 0 {
-			nn, err := readerFrom.ReadFrom(r)
+			nn, err = readerFrom.ReadFrom(r)
 			b.err = err
 			n += nn
 			return n, err
 		}
-		nr := 0
+		nr = 0
 		for nr < maxConsecutiveEmptyReads {
 			m, err = r.Read(b.buf[b.n:])
 			if m != 0 || err != nil {
