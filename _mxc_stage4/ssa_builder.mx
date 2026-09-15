@@ -904,6 +904,10 @@ type ssaFuncBuilder struct {
 	decl         *syntax.FuncDecl
 	scopeID      int32
 	nextScopeID  int32
+	// scopeParent records the enclosing scope of each entered scope, so a
+	// declaration can tell an enclosing binding (shadowing) from one in a
+	// sibling scope (an earlier case of the same switch), which is not.
+	scopeParent  map[int32]int32
 }
 
 type ssaLoopState struct {
@@ -918,8 +922,9 @@ func newSSAFuncBuilder(fn *SSAFunction, info *Info) (p *ssaFuncBuilder) {
 		fn:         fn,
 		info:       info,
 		vars:       map[Object]*SSAAlloc{},
-		varScope:   map[Object]int32{},
-		localTypes: map[string]Type{},
+		varScope:    map[Object]int32{},
+		localTypes:  map[string]Type{},
+		scopeParent: map[int32]int32{},
 	}
 }
 
@@ -932,8 +937,25 @@ func (fb *ssaFuncBuilder) newBlock(comment string) (s *SSABasicBlock) {
 func (fb *ssaFuncBuilder) enterScope() (prev int32) {
 	fb.nextScopeID++
 	prev = fb.scopeID
+	fb.scopeParent[fb.nextScopeID] = prev
 	fb.scopeID = fb.nextScopeID
 	return prev
+}
+
+// scopeIsAncestor reports whether scope a encloses scope b. Only a binding from
+// an enclosing scope is shadowed by a declaration in b; one from a sibling
+// scope is a separate binding, which legacy's checkScopeShadowing also allows.
+func (fb *ssaFuncBuilder) scopeIsAncestor(a, b int32) (ok bool) {
+	s := b
+	for {
+		if s == a {
+			return true
+		}
+		if s == 0 {
+			return false
+		}
+		s = fb.scopeParent[s]
+	}
 }
 
 func (fb *ssaFuncBuilder) exitScope(old int32) {
@@ -1526,15 +1548,21 @@ func (fb *ssaFuncBuilder) shortVarStore(name *syntax.Name, val SSAValue, typ Typ
 	// the current scope, := assigns to it (Go semantics). A name that resolves
 	// to an enclosing scope would be shadowing, which Moxie forbids.
 	if ex := fb.lookupObject(name.Value); ex != nil {
-		if sc, ok := fb.varScope[ex]; ok && sc == fb.scopeID {
-			if alloc, ok2 := fb.vars[ex]; ok2 {
-				if val != nil {
-					fb.emitStore(alloc, val)
+		if sc, ok := fb.varScope[ex]; ok {
+			if sc == fb.scopeID {
+				if alloc, ok2 := fb.vars[ex]; ok2 {
+					if val != nil {
+						fb.emitStore(alloc, val)
+					}
+					return
 				}
-				return
 			}
-		}
-		if fb.fn != nil {
+			if fb.fn != nil && fb.scopeIsAncestor(sc, fb.scopeID) {
+				shadowErr(fb.fn.name, name.Value)
+			}
+		} else if fb.fn != nil {
+			// Not in varScope: a package, file, or predeclared name, all of
+			// which enclose the function body.
 			shadowErr(fb.fn.name, name.Value)
 		}
 	} else if Universe.Lookup(name.Value) != nil && fb.fn != nil {
@@ -1739,8 +1767,14 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			if name.Value == "_" {
 				continue
 			}
-			if fb.fn != nil && (fb.lookupObject(name.Value) != nil || Universe.Lookup(name.Value) != nil) {
-				shadowErr(fb.fn.name, name.Value)
+			if fb.fn != nil {
+				if ex := fb.lookupObject(name.Value); ex != nil {
+					if sc, ok := fb.varScope[ex]; !ok || fb.scopeIsAncestor(sc, fb.scopeID) {
+						shadowErr(fb.fn.name, name.Value)
+					}
+				} else if Universe.Lookup(name.Value) != nil {
+					shadowErr(fb.fn.name, name.Value)
+				}
 			}
 			fb.removeVar(name.Value)
 			var obj Object

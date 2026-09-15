@@ -191,8 +191,8 @@ func stringFromRunes(runeSlice []rune) (s _string) {
 	// Encode runes to UTF-8 and store the resulting bytes in the string.
 	index := uintptr(0)
 	for _, r := range runeSlice {
-		array, numBytes := encodeUTF8(r)
-		for _, c := range array[:numBytes] {
+		utf8buf, numBytes := encodeUTF8(r)
+		for _, c := range utf8buf[:numBytes] {
 			*(*byte)(unsafe.Add(unsafe.Pointer(s.ptr), index)) = c
 			index++
 		}
@@ -218,11 +218,14 @@ func stringToRunes(s string) []int32 {
 
 // Create a string from a Unicode code point.
 func stringFromUnicode(x rune) _string {
-	array, length := encodeUTF8(x)
-	// Copy stack-local array to heap. Returning &array would be a stack escape -
-	// the _string.ptr would point into a dead stack frame after return.
+	utf8buf, length := encodeUTF8(x)
+	// Copy the stack-local array to the heap. Returning &utf8buf would be a
+	// stack escape - the _string.ptr would point into a dead stack frame after
+	// return. Named utf8buf rather than array: `array` is an imported package
+	// name elsewhere in this package, and stage4's lookupObject consults a
+	// scope shared across the package's files, so it reads as a shadow.
 	buf := alloc(length, nil)
-	memcpy(buf, unsafe.Pointer(&array), length)
+	memcpy(buf, unsafe.Pointer(&utf8buf), length)
 	return _string{ptr: (*byte)(buf), length: length, cap: length}
 }
 
