@@ -831,11 +831,14 @@ export function buildBridge(opts = {}) {
     },
     is_worker_context() { return isWorker; },
     spawn_domain(fnIdx, argPtr, argLen, chanHandlesPtr, nChans) {
-      // Workers are started from the host: the module cannot create one.
-      // The entry index and the bound channel handles are handed to the
-      // worker over its own message port so the child can bind the same
-      // rings from the far end. A spawned domain does not spawn again.
-      if (isWorker) return;
+      // Workers are started from the host: the module cannot create one. The
+      // entry index and the bound channel handles are handed to the child over
+      // its own message port so it can bind the same rings from the far end.
+      //
+      // Every domain runs in a Worker, root and child alike, so being a worker
+      // is not a reason to refuse: the runtime only requires that spawn is
+      // reached from a worker context (channel receives block in Atomics.wait,
+      // which the page thread forbids), and a Worker may start another Worker.
       const args = readBytes(argPtr, argLen);
       const chans = [];
       const dv = new DataView(memory.buffer);
