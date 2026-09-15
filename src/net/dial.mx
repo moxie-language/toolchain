@@ -8,7 +8,6 @@ import (
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"context"
 	"internal/bytealg"
-	"internal/nettrace"
 	"syscall"
 	"time"
 )
@@ -525,16 +524,9 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn
 		ctx = subCtx
 	}
 
-	// Shadow the nettrace (if any) during resolve so Connect events don't fire for DNS lookups.
-	resolveCtx := ctx
-	if trace, okta := ctx.Value(nettrace.TraceKey{}).(*nettrace.Trace); okta && (trace != nil) {
-		shadow := *trace
-		shadow.ConnectStart = nil
-		shadow.ConnectDone = nil
-		resolveCtx = context.WithValue(resolveCtx, nettrace.TraceKey{}, &shadow)
-	}
-
-	addrs, err := d.resolver().resolveAddrList(resolveCtx, "dial", network, address, d.LocalAddr)
+	// Moxie's Context carries no value bag - there is no empty interface to
+	// hang one on - so there is no nettrace to shadow during resolve.
+	addrs, err := d.resolver().resolveAddrList(ctx, "dial", network, address, d.LocalAddr)
 	if err != nil {
 		return nil, &OpError{Op: "dial", Net: network, Source: nil, Addr: nil, Err: err}
 	}
@@ -615,19 +607,6 @@ func (sd *sysDialer) dialSerial(ctx context.Context, ras addrList) (Conn, error)
 // dialSingle attempts to establish and returns a single connection to
 // the destination address.
 func (sd *sysDialer) dialSingle(ctx context.Context, ra Addr) (c Conn, err error) {
-	var trace *nettrace.Trace
-	if okv, okok := ctx.Value(nettrace.TraceKey{}).(*nettrace.Trace); okok {
-		trace = okv
-	}
-	if trace != nil {
-		raStr := ra.String()
-		if trace.ConnectStart != nil {
-			trace.ConnectStart(sd.network, raStr)
-		}
-		if trace.ConnectDone != nil {
-			defer func() { trace.ConnectDone(sd.network, raStr, err) }()
-		}
-	}
 	la := sd.LocalAddr
 	switch ra := ra.(type) {
 	case *TCPAddr:

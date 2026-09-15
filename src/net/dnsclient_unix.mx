@@ -640,29 +640,24 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
 	case '6':
 		qtypes = []dnsmessage.Type{dnsmessage.TypeAAAA}
 	}
-	var queryFn func(fqdn string, qtype dnsmessage.Type)
-	var responseFn func(fqdn string, qtype dnsmessage.Type) result
-	queryFn = func(fqdn string, qtype dnsmessage.Type) {}
-	responseFn = func(fqdn string, qtype dnsmessage.Type) result {
-		p, server, err := r.tryOneName(ctx, conf, fqdn, qtype)
-		return result{p, server, err}
-	}
+	// The Go original routes these through queryFn/responseFn closures for
+	// httptrace. Moxie closures do not capture the enclosing scope, and the
+	// trace hooks have no context value bag to arrive through, so call the
+	// resolver directly.
 	var lastErr error
 	for _, fqdn := range conf.nameList(name) {
-		for _, qtype := range qtypes {
-			queryFn(fqdn, qtype)
-		}
 		hitStrictError := false
 		for _, qtype := range qtypes {
-			result := responseFn(fqdn, qtype)
-			if result.error != nil {
-				if nerr, ok := result.error.(Error); ok && nerr.Temporary() && r.strictErrors() {
+			p, server, rerr := r.tryOneName(ctx, conf, fqdn, qtype)
+			res := result{p, server, rerr}
+			if res.error != nil {
+				if nerr, ok := res.error.(Error); ok && nerr.Temporary() && r.strictErrors() {
 					// This error will abort the nameList loop.
 					hitStrictError = true
-					lastErr = result.error
+					lastErr = res.error
 				} else if lastErr == nil || fqdn == name+"." {
 					// Prefer error for original name.
-					lastErr = result.error
+					lastErr = res.error
 				}
 				continue
 			}
@@ -684,12 +679,12 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
 
 		loop:
 			for {
-				h, err := result.p.AnswerHeader()
+				h, err := res.p.AnswerHeader()
 				if err != nil && err != dnsmessage.ErrSectionDone {
 					lastErr = &DNSError{
 						Err:    errCannotUnmarshalDNSMessage.String(),
 						Name:   name,
-						Server: result.server,
+						Server: res.server,
 					}
 				}
 				if err != nil {
@@ -697,12 +692,12 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
 				}
 				switch h.Type {
 				case dnsmessage.TypeA:
-					a, err := result.p.AResource()
+					a, err := res.p.AResource()
 					if err != nil {
 						lastErr = &DNSError{
 							Err:    errCannotUnmarshalDNSMessage.String(),
 							Name:   name,
-							Server: result.server,
+							Server: res.server,
 						}
 						break loop
 					}
@@ -713,12 +708,12 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
 					}
 
 				case dnsmessage.TypeAAAA:
-					aaaa, err := result.p.AAAAResource()
+					aaaa, err := res.p.AAAAResource()
 					if err != nil {
 						lastErr = &DNSError{
 							Err:    errCannotUnmarshalDNSMessage.String(),
 							Name:   name,
-							Server: result.server,
+							Server: res.server,
 						}
 						break loop
 					}
@@ -729,12 +724,12 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
 					}
 
 				case dnsmessage.TypeCNAME:
-					c, err := result.p.CNAMEResource()
+					c, err := res.p.CNAMEResource()
 					if err != nil {
 						lastErr = &DNSError{
 							Err:    errCannotUnmarshalDNSMessage.String(),
 							Name:   name,
-							Server: result.server,
+							Server: res.server,
 						}
 						break loop
 					}
@@ -743,11 +738,11 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
 					}
 
 				default:
-					if err := result.p.SkipAnswer(); err != nil {
+					if err := res.p.SkipAnswer(); err != nil {
 						lastErr = &DNSError{
 							Err:    errCannotUnmarshalDNSMessage.String(),
 							Name:   name,
-							Server: result.server,
+							Server: res.server,
 						}
 						break loop
 					}

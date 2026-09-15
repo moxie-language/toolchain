@@ -1721,6 +1721,14 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			typ = fb.resolveType(dd.Type)
 		}
 		initVal := fb.buildExpr(dd.Values)
+		if typ == nil && initVal != nil {
+			// No explicit type and nothing recorded on the object: the
+			// initializer's SSA type IS the declaration's type, which is the
+			// same source buildShortVarDecl uses for ':'. Without this a
+			// 'var b = pkgs.New()' left b untyped, so a later b.Method()
+			// failed to resolve.
+			typ = initVal.SSAType()
+		}
 		for _, name := range dd.NameList {
 			if name.Value == "_" {
 				continue
@@ -1732,6 +1740,9 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			}
 			if obj == nil {
 				obj = NewTCVar(fb.fn.Pkg.Pkg, name.Value, typ)
+			}
+			if tv, isVar := obj.(*TCVar); isVar && tv.Typ == nil {
+				tv.Typ = typ
 			}
 			alloc := fb.emitAlloc(ObjectType(obj), 0)
 			fb.vars[obj] = alloc
