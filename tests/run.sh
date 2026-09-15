@@ -38,6 +38,7 @@ case "$PHASE" in
 	bash "$SCRIPT_DIR/phase2_selfhost.sh"
 	bash "$SCRIPT_DIR/phase3_ir_validate.sh"
 	bash "$SCRIPT_DIR/phase4_binary_smoke.sh"
+	bash "$SCRIPT_DIR/phase5_wasm.sh"
 	;;
 --phase)
 	if [ -z "${2:-}" ]; then
@@ -50,7 +51,8 @@ case "$PHASE" in
 		2) bash "$SCRIPT_DIR/phase2_selfhost.sh" ;;
 		3) bash "$SCRIPT_DIR/phase3_ir_validate.sh" ;;
 		4) bash "$SCRIPT_DIR/phase4_binary_smoke.sh" ;;
-		*) echo "phase $2 not found (0-4)" ; exit 1 ;;
+		5) bash "$SCRIPT_DIR/phase5_wasm.sh" ;;
+		*) echo "phase $2 not found (0-5)" ; exit 1 ;;
 	esac
 	;;
 *)
