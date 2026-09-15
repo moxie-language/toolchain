@@ -421,11 +421,11 @@ func structFieldOffset(t *TCStruct, i int32) (off int32) {
 // uvarintBytes encodes n as an unsigned LEB128 varint (binary.PutUvarint).
 func uvarintBytes(n uint32) (b []byte) {
 	for n >= 0x80 {
-		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = mxutil.Ensure(b, 1)
 		push(b, byte(n)|0x80)
 		n >>= 7
 	}
-	if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+	b = mxutil.Ensure(b, 1)
 	push(b, byte(n))
 	return b
 }
@@ -568,7 +568,7 @@ func (e *irEmitter) emitTypeDescs() {
 	e.w("%runtime.structField = type { ptr, ptr }\n")
 	var tails []string
 	for t := range e.pendTypeDescs {
-		if len(tails) >= cap(tails) { tails = mxutil.GrowCap(tails) }
+		tails = mxutil.Ensure(tails, 1)
 		push(tails, t)
 	}
 	for i := 1; i < len(tails); i++ {
@@ -592,7 +592,7 @@ func (e *irEmitter) emitTypeDesc(tail string) {
 			return
 		}
 	}
-	if len(e.emittedTails) >= cap(e.emittedTails) { e.emittedTails = mxutil.GrowCap(e.emittedTails) }
+	e.emittedTails = mxutil.Ensure(e.emittedTails, 1)
 	e.emittedTails = push(e.emittedTails, tail)
 	tt := e.typeFromTail(tail)
 	if tt == nil || tt == Typ[Invalid] {
@@ -625,12 +625,12 @@ func tailSplitTop(s string) (parts []string) {
 		} else if c == '}' {
 			depth--
 		} else if c == ',' && depth == 0 {
-			if len(parts) >= cap(parts) { parts = mxutil.GrowCap(parts) }
+			parts = mxutil.Ensure(parts, 1)
 			push(parts, s[start:i])
 			start = i + 1
 		}
 	}
-	if len(parts) >= cap(parts) { parts = mxutil.GrowCap(parts) }
+	parts = mxutil.Ensure(parts, 1)
 	push(parts, s[start:])
 	return parts
 }
@@ -777,7 +777,7 @@ func (e *irEmitter) typeFromTailInner(tail string) (t Type) {
 				msig := e.typeFromTail(m[ci+1:])
 				ss, isSig := msig.(*Signature)
 				if isSig {
-					if len(methods) >= cap(methods) { methods = mxutil.GrowCap(methods) }
+					methods = mxutil.Ensure(methods, 1)
 					push(methods, NewTCIfaceMethod(mname, ss))
 				}
 			}
@@ -803,7 +803,7 @@ func (e *irEmitter) typeFromTailInner(tail string) (t Type) {
 				if ps[i] == "" {
 					continue
 				}
-				if len(params) >= cap(params) { params = mxutil.GrowCap(params) }
+				params = mxutil.Ensure(params, 1)
 				push(params, NewTCVar(nil, "", e.typeFromTail(ps[i])))
 			}
 		}
@@ -816,7 +816,7 @@ func (e *irEmitter) typeFromTailInner(tail string) (t Type) {
 					if rs[i] == "" {
 						continue
 					}
-					if len(results) >= cap(results) { results = mxutil.GrowCap(results) }
+					results = mxutil.Ensure(results, 1)
 					push(results, NewTCVar(nil, "", e.typeFromTail(rs[i])))
 				}
 			}
@@ -864,9 +864,9 @@ func (e *irEmitter) typeFromTailInner(tail string) (t Type) {
 				ftail = ftail[:bt]
 			}
 			ft := e.typeFromTail(ftail)
-			if len(flds) >= cap(flds) { flds = mxutil.GrowCap(flds) }
+			flds = mxutil.Ensure(flds, 1)
 			push(flds, NewTCField(nil, fname, ft, anon))
-			if len(tags) >= cap(tags) { tags = mxutil.GrowCap(tags) }
+			tags = mxutil.Ensure(tags, 1)
 			push(tags, tag)
 		}
 		return NewTCStruct(flds, tags)
@@ -1115,25 +1115,25 @@ func (e *irEmitter) emitStructDesc(t Type, st *TCStruct, gname string, meta int3
 			flags |= 4
 		}
 		var data []byte
-		if len(data) >= cap(data) { data = mxutil.GrowCap(data) }
+		data = mxutil.Ensure(data, 1)
 		push(data, flags)
 		vv := uvarintBytes(uint32(off))
 		for _, vb := range vv {
-			if len(data) >= cap(data) { data = mxutil.GrowCap(data) }
+			data = mxutil.Ensure(data, 1)
 			push(data, vb)
 		}
 		for j := int32(0); j < int32(len(f.Name)); j++ {
-			if len(data) >= cap(data) { data = mxutil.GrowCap(data) }
+			data = mxutil.Ensure(data, 1)
 			push(data, f.Name[j])
 		}
-		if len(data) >= cap(data) { data = mxutil.GrowCap(data) }
+		data = mxutil.Ensure(data, 1)
 		push(data, 0)
 		tag := st.Tag(i)
 		if tag != "" {
-			if len(data) >= cap(data) { data = mxutil.GrowCap(data) }
+			data = mxutil.Ensure(data, 1)
 			push(data, byte(len(tag)))
 			for j := int32(0); j < int32(len(tag)); j++ {
-				if len(data) >= cap(data) { data = mxutil.GrowCap(data) }
+				data = mxutil.Ensure(data, 1)
 				push(data, tag[j])
 			}
 		}
@@ -1143,7 +1143,7 @@ func (e *irEmitter) emitStructDesc(t Type, st *TCStruct, gname string, meta int3
 		e.w(" x i8] c\"")
 		e.w(irEscapeString(string(data)))
 		e.w("\", align 1\n")
-		if len(fieldRefs) >= cap(fieldRefs) { fieldRefs = mxutil.GrowCap(fieldRefs) }
+		fieldRefs = mxutil.Ensure(fieldRefs, 1)
 		push(fieldRefs, "%runtime.structField { ptr @" | ftGlobal | ", ptr @\"" | dgName | "\" }")
 	}
 

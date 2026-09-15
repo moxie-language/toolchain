@@ -968,7 +968,7 @@ func http2filterOutClientConn(in []*http2ClientConn, exclude *http2ClientConn) [
 	out := in[:0]
 	for _, v := range in {
 		if v != exclude {
-			if len(out) >= cap(out) { out = mxutil.GrowCap(out) }
+			out = mxutil.Ensure(out, 1)
 			out = push(out, v)
 		}
 	}
@@ -1288,7 +1288,7 @@ func (b *http2dataBuffer) lastChunkOrAlloc(want int64) []byte {
 		}
 	}
 	chunk := http2getDataBufferChunk(want)
-	if len(b.chunks) >= cap(b.chunks) { b.chunks = mxutil.GrowCap(b.chunks) }
+	b.chunks = mxutil.Ensure(b.chunks, 1)
 	b.chunks = push(b.chunks, chunk)
 	b.w = 0
 	return chunk
@@ -1949,7 +1949,7 @@ func (f *http2Framer) writeBytes(v []byte) { f.wbuf = push(f.wbuf, v...) }
 func (f *http2Framer) writeUint16(v uint16) { f.wbuf = push(f.wbuf, byte(v>>8), byte(v)) }
 
 func (f *http2Framer) writeUint32(v uint32) {
-	if len(f.wbuf) >= cap(f.wbuf) { f.wbuf = mxutil.GrowCap(f.wbuf) }
+	f.wbuf = mxutil.Ensure(f.wbuf, 1)
 	f.wbuf = push(f.wbuf, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
 }
 
@@ -2258,7 +2258,7 @@ func (f *http2Framer) startWriteDataPadded(streamID uint32, endStream bool, data
 	}
 	f.startWrite(http2FrameData, flags, streamID)
 	if pad != nil {
-		if len(f.wbuf) >= cap(f.wbuf) { f.wbuf = mxutil.GrowCap(f.wbuf) }
+		f.wbuf = mxutil.Ensure(f.wbuf, 1)
 		f.wbuf = push(f.wbuf, byte(len(pad)))
 	}
 	f.wbuf = mxutil.Ensure(f.wbuf, len(data))
@@ -3148,7 +3148,7 @@ func (fr *http2Framer) readMetaFrame(hf *http2HeadersFrame) (http2Frame, error) 
 		}
 		remainSize -= size
 
-		if len(mh.Fields) >= cap(mh.Fields) { mh.Fields = mxutil.GrowCap(mh.Fields) }
+		mh.Fields = mxutil.Ensure(mh.Fields, 1)
 		mh.Fields = push(mh.Fields, hf)
 	})
 	// Lose reference to MetaHeadersFrame:
@@ -3764,7 +3764,7 @@ func (s *http2sorter) Less(i, j int32) bool { return s.v[i] < s.v[j] }
 func (s *http2sorter) Keys(h Header) [][]byte {
 	keys := s.v[:0]
 	for k := range h {
-		if len(keys) >= cap(keys) { keys = mxutil.GrowCap(keys) }
+		keys = mxutil.Ensure(keys, 1)
 		keys = push(keys, k)
 	}
 	s.v = keys
@@ -4165,11 +4165,11 @@ func http2ConfigureServer(s *Server, conf *http2Server) error {
 	s.TLSConfig.PreferServerCipherSuites = true
 
 	if !http2strSliceContains(s.TLSConfig.NextProtos, http2NextProtoTLS) {
-		if len(s.TLSConfig.NextProtos) >= cap(s.TLSConfig.NextProtos) { s.TLSConfig.NextProtos = mxutil.GrowCap(s.TLSConfig.NextProtos) }
+		s.TLSConfig.NextProtos = mxutil.Ensure(s.TLSConfig.NextProtos, 1)
 		s.TLSConfig.NextProtos = push(s.TLSConfig.NextProtos, http2NextProtoTLS)
 	}
 	if !http2strSliceContains(s.TLSConfig.NextProtos, "http/1.1") {
-		if len(s.TLSConfig.NextProtos) >= cap(s.TLSConfig.NextProtos) { s.TLSConfig.NextProtos = mxutil.GrowCap(s.TLSConfig.NextProtos) }
+		s.TLSConfig.NextProtos = mxutil.Ensure(s.TLSConfig.NextProtos, 1)
 		s.TLSConfig.NextProtos = push(s.TLSConfig.NextProtos, "http/1.1")
 	}
 
@@ -4779,7 +4779,7 @@ func (sc *http2serverConn) serve(conf http2http2Config) {
 		{http2SettingInitialWindowSize, uint32(sc.initialStreamRecvWindowSize)},
 	}
 	if !http2disableExtendedConnectProtocol {
-		if len(settings) >= cap(settings) { settings = mxutil.GrowCap(settings) }
+		settings = mxutil.Ensure(settings, 1)
 		settings = push(settings, http2Setting{http2SettingEnableConnectProtocol, 1})
 	}
 	sc.writeFrame(http2FrameWriteRequest{
@@ -6220,7 +6220,7 @@ func (sc *http2serverConn) scheduleHandler(streamID uint32, rw *http2responseWri
 	if len(sc.unstartedHandlers) > int32(4*sc.advMaxStreams) {
 		return sc.countError("too_many_early_resets", http2ConnectionError(http2ErrCodeEnhanceYourCalm))
 	}
-	if len(sc.unstartedHandlers) >= cap(sc.unstartedHandlers) { sc.unstartedHandlers = mxutil.GrowCap(sc.unstartedHandlers) }
+	sc.unstartedHandlers = mxutil.Ensure(sc.unstartedHandlers, 1)
 	sc.unstartedHandlers = push(sc.unstartedHandlers, http2unstartedHandler{
 		streamID: streamID,
 		rw:       rw,
@@ -6500,7 +6500,7 @@ func (rws *http2responseWriterState) declareTrailer(k string) {
 		return
 	}
 	if !http2strSliceContains(rws.trailers, k) {
-		if len(rws.trailers) >= cap(rws.trailers) { rws.trailers = mxutil.GrowCap(rws.trailers) }
+		rws.trailers = mxutil.Ensure(rws.trailers, 1)
 		rws.trailers = push(rws.trailers, k)
 	}
 }
@@ -7455,7 +7455,7 @@ func http2configureTransports(t1 *Transport) (*http2Transport, error) {
 		t1.TLSClientConfig.NextProtos = push([][]byte{"h2"}, t1.TLSClientConfig.NextProtos...)
 	}
 	if !http2strSliceContains(t1.TLSClientConfig.NextProtos, "http/1.1") {
-		if len(t1.TLSClientConfig.NextProtos) >= cap(t1.TLSClientConfig.NextProtos) { t1.TLSClientConfig.NextProtos = mxutil.GrowCap(t1.TLSClientConfig.NextProtos) }
+		t1.TLSClientConfig.NextProtos = mxutil.Ensure(t1.TLSClientConfig.NextProtos, 1)
 		t1.TLSClientConfig.NextProtos = push(t1.TLSClientConfig.NextProtos, "http/1.1")
 	}
 	upgradeFn := func(scheme, authority string, c net.Conn) RoundTripper {
@@ -8036,14 +8036,14 @@ func (t *http2Transport) newClientConn(c net.Conn, singleUse bool) (*http2Client
 		{ID: http2SettingEnablePush, Val: 0},
 		{ID: http2SettingInitialWindowSize, Val: uint32(cc.initialStreamRecvWindowSize)},
 	}
-	if len(initialSettings) >= cap(initialSettings) { initialSettings = mxutil.GrowCap(initialSettings) }
+	initialSettings = mxutil.Ensure(initialSettings, 1)
 	initialSettings = push(initialSettings, http2Setting{ID: http2SettingMaxFrameSize, Val: conf.MaxReadFrameSize})
 	if max := t.maxHeaderListSize(); max != 0 {
-		if len(initialSettings) >= cap(initialSettings) { initialSettings = mxutil.GrowCap(initialSettings) }
+		initialSettings = mxutil.Ensure(initialSettings, 1)
 		initialSettings = push(initialSettings, http2Setting{ID: http2SettingMaxHeaderListSize, Val: max})
 	}
 	if maxHeaderTableSize != http2initialHeaderTableSize {
-		if len(initialSettings) >= cap(initialSettings) { initialSettings = mxutil.GrowCap(initialSettings) }
+		initialSettings = mxutil.Ensure(initialSettings, 1)
 		initialSettings = push(initialSettings, http2Setting{ID: http2SettingHeaderTableSize, Val: maxHeaderTableSize})
 	}
 
@@ -10852,7 +10852,7 @@ type http2writeQueue struct {
 func (q *http2writeQueue) empty() bool { return len(q.s) == 0 }
 
 func (q *http2writeQueue) push(wr http2FrameWriteRequest) {
-	if len(q.s) >= cap(q.s) { q.s = mxutil.GrowCap(q.s) }
+	q.s = mxutil.Ensure(q.s, 1)
 	q.s = push(q.s, wr)
 }
 

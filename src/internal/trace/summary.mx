@@ -76,7 +76,7 @@ func (s *UserTaskSummary) Complete() bool {
 func (s *UserTaskSummary) Descendents() []*UserTaskSummary {
 	descendents := []*UserTaskSummary{s}
 	for _, child := range s.Children {
-		if len(descendents) >= cap(descendents) { descendents = mxutil.GrowCap(descendents) }
+		descendents = mxutil.Ensure(descendents, 1)
 		descendents = push(descendents, child.Descendents()...)
 	}
 	return descendents
@@ -238,7 +238,7 @@ func (g *GoroutineSummary) finalize(lastTs Time, trigger *Event) {
 		for _, s := range g.activeRegions {
 			s.End = trigger
 			s.GoroutineExecStats = finalStat.sub(s.GoroutineExecStats)
-			if len(g.Regions) >= cap(g.Regions) { g.Regions = mxutil.GrowCap(g.Regions) }
+			g.Regions = mxutil.Ensure(g.Regions, 1)
 			g.Regions = push(g.Regions, s)
 		}
 	}
@@ -513,11 +513,11 @@ func (s *Summarizer) Event(ev *Event) {
 			Start:              ev,
 			GoroutineExecStats: g.snapshotStat(ev.Time()),
 		}
-		if len(g.activeRegions) >= cap(g.activeRegions) { g.activeRegions = mxutil.GrowCap(g.activeRegions) }
+		g.activeRegions = mxutil.Ensure(g.activeRegions, 1)
 		g.activeRegions = push(g.activeRegions, region)
 		// Associate the region and current goroutine to the task.
 		task := s.getOrAddTask(r.Task)
-		if len(task.Regions) >= cap(task.Regions) { task.Regions = mxutil.GrowCap(task.Regions) }
+		task.Regions = mxutil.Ensure(task.Regions, 1)
 		task.Regions = push(task.Regions, region)
 		task.Goroutines[g.ID] = g
 	case EventRegionEnd:
@@ -537,12 +537,12 @@ func (s *Summarizer) Event(ev *Event) {
 			// Associate the region and current goroutine to the task.
 			task := s.getOrAddTask(r.Task)
 			task.Goroutines[g.ID] = g
-			if len(task.Regions) >= cap(task.Regions) { task.Regions = mxutil.GrowCap(task.Regions) }
+			task.Regions = mxutil.Ensure(task.Regions, 1)
 			task.Regions = push(task.Regions, sd)
 		}
 		sd.GoroutineExecStats = g.snapshotStat(ev.Time()).sub(sd.GoroutineExecStats)
 		sd.End = ev
-		if len(g.Regions) >= cap(g.Regions) { g.Regions = mxutil.GrowCap(g.Regions) }
+		g.Regions = mxutil.Ensure(g.Regions, 1)
 		g.Regions = push(g.Regions, sd)
 
 	// Handle tasks and logs.
@@ -563,7 +563,7 @@ func (s *Summarizer) Event(ev *Event) {
 		if t.Parent != NoTask && task.Parent == nil {
 			parent := s.getOrAddTask(t.Parent)
 			task.Parent = parent
-			if len(parent.Children) >= cap(parent.Children) { parent.Children = mxutil.GrowCap(parent.Children) }
+			parent.Children = mxutil.Ensure(parent.Children, 1)
 			parent.Children = push(parent.Children, task)
 		}
 	case EventLog:
@@ -572,7 +572,7 @@ func (s *Summarizer) Event(ev *Event) {
 		// doesn't exist (it's just been mentioned now).
 		task := s.getOrAddTask(log.Task)
 		task.Goroutines[ev.Goroutine()] = s.gs[ev.Goroutine()]
-		if len(task.Logs) >= cap(task.Logs) { task.Logs = mxutil.GrowCap(task.Logs) }
+		task.Logs = mxutil.Ensure(task.Logs, 1)
 		task.Logs = push(task.Logs, ev)
 	}
 }
@@ -644,7 +644,7 @@ func RelatedGoroutinesV2(events []Event, goid GoID) map[GoID]struct{} {
 		if old == new || old != GoWaiting {
 			continue
 		}
-		if len(unblockEdges) >= cap(unblockEdges) { unblockEdges = mxutil.GrowCap(unblockEdges) }
+		unblockEdges = mxutil.Ensure(unblockEdges, 1)
 		unblockEdges = push(unblockEdges, unblockEdge{
 			operator: ev.Goroutine(),
 			operand:  id,
