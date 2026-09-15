@@ -8,6 +8,23 @@ package types
 // set: string/slice are three words, interface and func values are two words,
 // map/chan/pointer are one word, arrays and structs are laid out with
 // per-field alignment padding.
+//
+// Words are the TARGET's width, not the host's. Codegen places struct fields
+// with LLVM's target data, so a folded unsafe.Sizeof/Offsetof that assumed
+// 64-bit pointers would disagree with the addresses the same compiler emits;
+// on wasm32 that made unsafe.Sizeof of a two-pointer struct 16 instead of 8
+// while the struct itself was 8 bytes.
+
+import "git.smesh.lol/moxie/pkg/mxutil"
+
+// ptrSize is the target's pointer width in bytes. Only wasm is 32-bit among
+// the targets this compiler emits.
+func ptrSize() (n int64) {
+	if mxutil.TargetArch == "wasm" {
+		return 4
+	}
+	return 8
+}
 
 func alignUp(n, a int64) (r int64) {
 	if a <= 1 {
@@ -28,10 +45,12 @@ func basicSize(k BasicKind) (sz int64) {
 		return 2
 	case Int32, Uint32, Float32:
 		return 4
-	case Int64, Uint64, Float64, Uintptr, UnsafePointer:
+	case Int64, Uint64, Float64:
 		return 8
+	case Uintptr, UnsafePointer:
+		return ptrSize()
 	case TCString, UntypedString:
-		return 24
+		return ptrSize() * 3
 	}
 	return 8
 }
@@ -44,6 +63,13 @@ func basicAlign(k BasicKind) (a int64) {
 		return 2
 	case Int32, Uint32, Float32:
 		return 4
+	case Int64, Uint64, Float64:
+		// 64-bit scalars stay 8-aligned on the wasm32 target too: the
+		// alignment the backend uses for i64 is 8, whatever the pointer
+		// width is.
+		return 8
+	case Uintptr, UnsafePointer, TCString, UntypedString:
+		return ptrSize()
 	}
 	return 8
 }
@@ -52,21 +78,21 @@ func basicAlign(k BasicKind) (a int64) {
 func TypeSize(t Type) (sz int64) {
 	u := SafeUnderlying(t)
 	if u == nil {
-		return 8
+		return ptrSize()
 	}
 	switch v := u.(type) {
 	case *Basic:
 		return basicSize(v.Kind)
 	case *Pointer:
-		return 8
+		return ptrSize()
 	case *Slice:
-		return 24
+		return ptrSize() * 3
 	case *Signature:
-		return 16
+		return ptrSize() * 2
 	case *TCInterface:
-		return 16
+		return ptrSize() * 2
 	case *TCMap, *TCChan:
-		return 8
+		return ptrSize()
 	case *Array:
 		return TypeSize(v.Elem) * v.Len
 	case *TCStruct:
@@ -83,14 +109,14 @@ func TypeSize(t Type) (sz int64) {
 		}
 		return alignUp(total, maxa)
 	}
-	return 8
+	return ptrSize()
 }
 
 // TypeAlign returns the alignment of t.
 func TypeAlign(t Type) (a int64) {
 	u := SafeUnderlying(t)
 	if u == nil {
-		return 8
+		return ptrSize()
 	}
 	switch v := u.(type) {
 	case *Basic:
@@ -107,7 +133,7 @@ func TypeAlign(t Type) (a int64) {
 		}
 		return a
 	}
-	return 8
+	return ptrSize()
 }
 
 // StructFieldOffset returns the byte offset of field idx in st, following the
