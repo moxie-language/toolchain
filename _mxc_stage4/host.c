@@ -1,3 +1,12 @@
+//:build !wasm
+//
+// Host-side process and file services for the native compiler: fork/exec,
+// pthreads, ring buffers over shared memory, and direct file IO through libc.
+// None of it exists in a wasm32 module - there is no libc to include, no fork,
+// and no threads - and the compiler takes its serial path there, so the file
+// is excluded from wasm builds rather than compiled against headers that are
+// not in the sysroot.
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
