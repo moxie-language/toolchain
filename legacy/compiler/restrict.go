@@ -11,6 +11,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"sort"
 	"strings"
 
 	"moxie/loader"
@@ -633,6 +634,76 @@ func (c *compilerContext) checkPackageRestrictions(pkg *loader.Package) {
 	}
 	// Step 10: reject scope shadowing (including builtins from Universe).
 	c.checkScopeShadowing(pkg)
+	// Step 11: reject names that collide with an imported package name.
+	c.checkImportNameCollisions(pkg)
+}
+
+// checkImportNameCollisions rejects any declaration in the package whose name is
+// also an imported package name. Moxie keeps one binding per name: an import and
+// a variable of the same name are two bindings for one identifier, and which one
+// a given reference means then depends on the file it sits in. Alias the import
+// (import stdio "io") or rename the declaration.
+func (c *compilerContext) checkImportNameCollisions(pkg *loader.Package) {
+	info := pkg.TypeInfo()
+	if info == nil {
+		return
+	}
+	imported := map[string]bool{}
+	for _, f := range pkg.Files {
+		if f == nil {
+			continue
+		}
+		for _, spec := range f.Imports {
+			// An explicit name wins; otherwise the imported package's own
+			// name, which is not necessarily the path tail. Blank and dot
+			// imports bind no name.
+			var obj types.Object
+			if spec.Name != nil {
+				obj = info.Defs[spec.Name]
+			} else {
+				obj = info.Implicits[spec]
+			}
+			if obj == nil {
+				continue
+			}
+			if _, isPkg := obj.(*types.PkgName); !isPkg {
+				continue
+			}
+			imported[obj.Name()] = true
+		}
+	}
+	if len(imported) == 0 {
+		return
+	}
+
+	type collision struct {
+		pos  token.Pos
+		name string
+	}
+	var hits []collision
+	for ident, obj := range info.Defs {
+		if ident == nil || obj == nil {
+			continue
+		}
+		// The import itself is not a collision.
+		if _, isPkg := obj.(*types.PkgName); isPkg {
+			continue
+		}
+		if imported[ident.Name] {
+			hits = append(hits, collision{pos: ident.Pos(), name: ident.Name})
+		}
+	}
+	// info.Defs is a map, so sort before reporting: diagnostics must not
+	// depend on map iteration order.
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].pos != hits[j].pos {
+			return hits[i].pos < hits[j].pos
+		}
+		return hits[i].name < hits[j].name
+	})
+	for _, h := range hits {
+		c.addError(h.pos, "moxie: '"+h.name+"' collides with an imported package name: alias the import or rename the declaration")
+	}
 }
 
 // checkScopeShadowing walks all scopes in the package and rejects any
