@@ -101,6 +101,36 @@ Consequences:
 
 Any "feature X is complete" claim must be backed by a test that exercises X end-to-end on a fresh build, not by the agent's recollection of having implemented it. Trust the test artifact, not the narrative. This is the most important rule and why it's first. Tattoo it backwards. Never ever skip this. Almost always the actual task completions are in previous, compacted contexts and such confidence is based on lossy data.
 
+## Guards Are A Smell: Find The Root Cause
+
+The moment you catch yourself adding a nil check, a default, a defensive branch, or a special case to stop a piece of code misbehaving, **stop and read that as evidence about something upstream**. A guard makes a symptom disappear; it does not tell you why the wrong state ever arrived. The wrong state is the bug.
+
+The diagnostic is the repetition. One guard is a boundary condition. The **second** guard on the same call path is proof you are treating symptoms - because you have just watched the failure move a few lines further along instead of going away. That is the signal to abandon the local fix and search upstream for what is producing the bad input.
+
+Symptoms that are guards in disguise:
+
+- A check for a nil value that "should never be nil here."
+- Falling back to a zero value or an empty result when something is missing.
+- A branch that exists only to keep a specific caller or package working.
+- Catching an error and continuing with a default.
+- Widening a condition until the failing case slips past it.
+
+What "upstream" means depends on the layer, and the search is always the same shape: **who produced this value, and under what assumption?** In this codebase it is usually one of:
+
+- The type checker or SSA builder handing a later phase a nil type, a nil Scope, or a `Signature` whose slots were never filled - state that should have been established before the phase ran.
+- A pass running against state it was never meant to see, e.g. type inference executing before the universe is installed.
+- A struct whose layout or field offsets differ between the compiler that emitted it and the runtime that reads it.
+- One compiler of the pair (legacy, stage4) having a feature the other lacks, so the "wrong" value is simply never written on one side.
+- An arena lifetime mistake: state allocated in an arena that is bulk-freed before the reader runs.
+
+A guard is acceptable in exactly these cases, and you should say which one applies in the comment:
+
+1. The input is genuinely untrusted and can be hostile or malformed at a real boundary.
+2. The nil/absent case is a **defined, expected** state that the algorithm handles - not an impossible one being papered over.
+3. The guard is a *temporary* fail-loud stop that changes a silent wrong answer into a loud, named one, and the real fix is recorded as the next step.
+
+If none of those hold, you have not fixed anything. Delete the guard and go upstream.
+
 ## Thinking outputs
 
 Don't waste time generating printed thinking outputs with long chains of reasoning. Just summarize the points in one sentence after a long chain.
