@@ -421,7 +421,8 @@ func appendInt(b []byte, x int32, width int32) []byte {
 	if len(b)+n <= cap(b) {
 		b = b[:len(b)+n]
 	} else {
-		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+		b = mxutil.Ensure(b, len([]byte{:n}))
+		b = push(b, []byte{:n}...)
 		b = push(b, []byte{:n}...)
 	}
 
@@ -531,7 +532,8 @@ func (t Time) String() string {
 		m1, m2 := m2/1e9, m2%1e9
 		m0, m1 := m1/1e9, m1%1e9
 		buf := []byte{:0:24}
-		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = mxutil.Ensure(buf, len(" m="))
+		buf = push(buf, " m="...)
 		buf = push(buf, " m="...)
 		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
 		buf = push(buf, sign)
@@ -557,43 +559,54 @@ func (t Time) GoString() []byte {
 	hour, minute, second := abs.clock()
 
 	buf := []byte{:0:len("time.Date(9999, time.September, 31, 23, 59, 59, 999999999, time.Local)")}
-	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = mxutil.Ensure(buf, len("time.Date("))
+	buf = push(buf, "time.Date("...)
 	buf = push(buf, "time.Date("...)
 	buf = appendInt(buf, year, 0)
 	if January <= month && month <= December {
-		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = mxutil.Ensure(buf, len(", time."))
+		buf = push(buf, ", time."...)
 		buf = push(buf, ", time."...)
 		lmn := _longMonthNames()
-		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = mxutil.Ensure(buf, len(lmn[month-1]))
+		buf = push(buf, lmn[month-1]...)
 		buf = push(buf, lmn[month-1]...)
 	} else {
 		// It's difficult to construct a time.Time with a date outside the
 		// standard range but we might as well try to handle the case.
 		buf = appendInt(buf, int32(month), 0)
 	}
-	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = mxutil.Ensure(buf, len(", "))
+	buf = push(buf, ", "...)
 	buf = push(buf, ", "...)
 	buf = appendInt(buf, day, 0)
-	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = mxutil.Ensure(buf, len(", "))
+	buf = push(buf, ", "...)
 	buf = push(buf, ", "...)
 	buf = appendInt(buf, hour, 0)
-	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = mxutil.Ensure(buf, len(", "))
+	buf = push(buf, ", "...)
 	buf = push(buf, ", "...)
 	buf = appendInt(buf, minute, 0)
-	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = mxutil.Ensure(buf, len(", "))
+	buf = push(buf, ", "...)
 	buf = push(buf, ", "...)
 	buf = appendInt(buf, second, 0)
-	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = mxutil.Ensure(buf, len(", "))
+	buf = push(buf, ", "...)
 	buf = push(buf, ", "...)
 	buf = appendInt(buf, t.Nanosecond(), 0)
-	if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+	buf = mxutil.Ensure(buf, len(", "))
+	buf = push(buf, ", "...)
 	buf = push(buf, ", "...)
 	switch loc := t.Location(); loc {
 	case UTC(), nil:
-		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = mxutil.Ensure(buf, len("time.UTC"))
+		buf = push(buf, "time.UTC"...)
 		buf = push(buf, "time.UTC"...)
 	case Local():
-		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = mxutil.Ensure(buf, len("time.Local"))
+		buf = push(buf, "time.Local"...)
 		buf = push(buf, "time.Local"...)
 	default:
 		// there are several options for how we could display this, none of
@@ -611,9 +624,11 @@ func (t Time) GoString() []byte {
 		//
 		// Of these, Location(loc.name) is the least disruptive. This is an edge
 		// case we hope not to hit too often.
-		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = mxutil.Ensure(buf, len(`time.Location(`))
 		buf = push(buf, `time.Location(`...)
-		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+		buf = push(buf, `time.Location(`...)
+		buf = mxutil.Ensure(buf, len(quote(loc.name)))
+		buf = push(buf, quote(loc.name)...)
 		buf = push(buf, quote(loc.name)...)
 		if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
 		buf = push(buf, ')')
@@ -675,7 +690,8 @@ func (t Time) appendFormat(b []byte, layout []byte) []byte {
 	for layout != "" {
 		prefix, std, suffix := nextStdChunk(layout)
 		if prefix != "" {
-			if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+			b = mxutil.Ensure(b, len(prefix))
+			b = push(b, prefix...)
 			b = push(b, prefix...)
 		}
 		if std == 0 {
@@ -706,22 +722,26 @@ func (t Time) appendFormat(b []byte, layout []byte) []byte {
 		case stdLongYear:
 			b = appendInt(b, year, 4)
 		case stdMonth:
-			if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+			b = mxutil.Ensure(b, len(month.String()[:3]))
+			b = push(b, month.String()[:3]...)
 			b = push(b, month.String()[:3]...)
 		case stdLongMonth:
 			m := month.String()
-			if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+			b = mxutil.Ensure(b, len(m))
+			b = push(b, m...)
 			b = push(b, m...)
 		case stdNumMonth:
 			b = appendInt(b, int32(month), 0)
 		case stdZeroMonth:
 			b = appendInt(b, int32(month), 2)
 		case stdWeekDay:
-			if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+			b = mxutil.Ensure(b, len(days.weekday().String()[:3]))
+			b = push(b, days.weekday().String()[:3]...)
 			b = push(b, days.weekday().String()[:3]...)
 		case stdLongWeekDay:
 			s := days.weekday().String()
-			if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+			b = mxutil.Ensure(b, len(s))
+			b = push(b, s...)
 			b = push(b, s...)
 		case stdDay:
 			b = appendInt(b, day, 0)
@@ -771,18 +791,22 @@ func (t Time) appendFormat(b []byte, layout []byte) []byte {
 			b = appendInt(b, sec, 2)
 		case stdPM:
 			if hour >= 12 {
-				if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+				b = mxutil.Ensure(b, len("PM"))
+				b = push(b, "PM"...)
 				b = push(b, "PM"...)
 			} else {
-				if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+				b = mxutil.Ensure(b, len("AM"))
+				b = push(b, "AM"...)
 				b = push(b, "AM"...)
 			}
 		case stdpm:
 			if hour >= 12 {
-				if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+				b = mxutil.Ensure(b, len("pm"))
+				b = push(b, "pm"...)
 				b = push(b, "pm"...)
 			} else {
-				if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+				b = mxutil.Ensure(b, len("am"))
+				b = push(b, "am"...)
 				b = push(b, "am"...)
 			}
 		case stdISO8601TZ, stdISO8601ColonTZ, stdISO8601SecondsTZ, stdISO8601ShortTZ, stdISO8601ColonSecondsTZ, stdNumTZ, stdNumColonTZ, stdNumSecondsTz, stdNumShortTZ, stdNumColonSecondsTZ:
@@ -824,7 +848,8 @@ func (t Time) appendFormat(b []byte, layout []byte) []byte {
 
 		case stdTZ:
 			if name != "" {
-				if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
+				b = mxutil.Ensure(b, len(name))
+				b = push(b, name...)
 				b = push(b, name...)
 				break
 			}
@@ -892,7 +917,8 @@ func quote(s []byte) []byte {
 				}
 			}
 			for j := 0; j < width; j++ {
-				if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
+				buf = mxutil.Ensure(buf, len(`\x`))
+				buf = push(buf, `\x`...)
 				buf = push(buf, `\x`...)
 				if len(buf) >= cap(buf) { buf = mxutil.GrowCap(buf) }
 				buf = push(buf, lowerhex[s[i+j]>>4])

@@ -447,6 +447,40 @@ func IsRemotePath(path string) (ok bool) {
 // GrowCap returns s with capacity at least len(s)+1, doubling (min 16)
 // when full. Explicit growth only - no automatic grow. Old backing
 // arrays are left to the arena.
+// Ensure returns s with at least n spare elements of capacity, growing
+// geometrically when it must. push does not grow and its bound check fails
+// loud, so a spread push needs Ensure(s, len(src)): the older
+// `if len(s) >= cap(s) { GrowCap(s) }` idiom only reserves ONE element and
+// panics for any longer spread.
+func Ensure[T comparable](s []T, n int32) (r0 []T) {
+	if n <= 0 || cap(s)-len(s) >= n {
+		return s
+	}
+	nc := cap(s) * 2
+	if nc < 16 {
+		nc = 16
+	}
+	for nc-len(s) < n {
+		nc = nc * 2
+	}
+	nb := []T{:0:nc}
+	copy(nb[:len(s)], s)
+	return nb[:len(s)]
+}
+
+// Reserve returns s with capacity for at least total elements, allocating
+// exactly that much when it has to grow. Use it when the final size is known:
+// unlike Ensure it leaves no doubling slack, and an arena is never reused
+// within a frame, so slack is spent space rather than spare space.
+func Reserve[T comparable](s []T, total int32) (r0 []T) {
+	if total <= cap(s) {
+		return s
+	}
+	nb := []T{:0:total}
+	copy(nb[:len(s)], s)
+	return nb[:len(s)]
+}
+
 func GrowCap[T comparable](s []T) (r0 []T) {
 	if len(s) < cap(s) {
 		return s

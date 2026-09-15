@@ -392,7 +392,8 @@ func (hc *halfConn) decrypt(record []byte) ([]byte, recordType, error) {
 				additionalData = record[:recordHeaderLen]
 			} else {
 				additionalData = push(hc.scratchBuf[:0], hc.seq[:]...)
-				if len(additionalData) >= cap(additionalData) { additionalData = mxutil.GrowCap(additionalData) }
+				additionalData = mxutil.Ensure(additionalData, len(record[:3]))
+				additionalData = push(additionalData, record[:3]...)
 				additionalData = push(additionalData, record[:3]...)
 				n := len(payload) - c.Overhead()
 				if len(additionalData) >= cap(additionalData) { additionalData = mxutil.GrowCap(additionalData) }
@@ -539,7 +540,8 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 		}
 
 		if hc.version == VersionTLS13 {
-			if len(record) >= cap(record) { record = mxutil.GrowCap(record) }
+			record = mxutil.Ensure(record, len(payload))
+			record = push(record, payload...)
 			record = push(record, payload...)
 
 			// Encrypt the actual ContentType and replace the plaintext one.
@@ -555,7 +557,8 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 				nonce, record[recordHeaderLen:], record[:recordHeaderLen])
 		} else {
 			additionalData := push(hc.scratchBuf[:0], hc.seq[:]...)
-			if len(additionalData) >= cap(additionalData) { additionalData = mxutil.GrowCap(additionalData) }
+			additionalData = mxutil.Ensure(additionalData, len(record[:recordHeaderLen]))
+			additionalData = push(additionalData, record[:recordHeaderLen]...)
 			additionalData = push(additionalData, record[:recordHeaderLen]...)
 			record = c.a.Seal(record, nonce, payload, additionalData)
 		}
@@ -972,7 +975,8 @@ func (c *Conn) maxPayloadSizeForWrite(typ recordType) int32 {
 
 func (c *Conn) write(data []byte) (int32, error) {
 	if c.buffering {
-		if len(c.sendBuf) >= cap(c.sendBuf) { c.sendBuf = mxutil.GrowCap(c.sendBuf) }
+		c.sendBuf = mxutil.Ensure(c.sendBuf, len(data))
+		c.sendBuf = push(c.sendBuf, data...)
 		c.sendBuf = push(c.sendBuf, data...)
 		return len(data), nil
 	}

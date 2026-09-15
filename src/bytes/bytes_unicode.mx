@@ -66,19 +66,23 @@ func Fields(s []byte) [][]byte {
 //
 // FieldsFunc makes no guarantees about the order in which it calls f(c)
 // and assumes that f always returns the same value for a given c.
-func FieldsFunc(s []byte, f func(rune) bool) [][]byte {
-	// A span is used to record a slice of s of the form s[start:end].
-	// The start index is inclusive and the end index is exclusive.
-	type span struct {
-		start int32
-		end   int32
-	}
-	spans := []span{:0:32}
+// byteSpan records a slice of s of the form s[start:end]; start is inclusive
+// and end exclusive. Package scope so the span buffer can be built by a helper.
+type byteSpan struct {
+	start int32
+	end   int32
+}
 
-	// Find the field start and end indices.
-	// Doing this in a separate pass (rather than slicing the string s
-	// and collecting the result substrings right away) is significantly
-	// more efficient, possibly due to cache effects.
+// fieldSpans records the spans of s that f does not delimit. The buffer grows
+// here rather than in the caller: this call is a fresh frame with its own
+// arena, so every intermediate buffer a growth step abandons is reclaimed when
+// it returns, and only the exact result reaches the caller's arena. Growing in
+// the caller instead would leave each dead buffer live for the rest of that
+// frame, since an arena is never reused within one.
+func fieldSpans(s []byte, f func(rune) bool) (spans []byteSpan) {
+	// Find the field start and end indices. Doing this in a separate pass
+	// (rather than slicing s and collecting the substrings right away) is
+	// significantly more efficient, possibly due to cache effects.
 	start := -1 // valid span start if >= 0
 	for i := 0; i < len(s); {
 		size := 1
@@ -88,8 +92,8 @@ func FieldsFunc(s []byte, f func(rune) bool) [][]byte {
 		}
 		if f(r) {
 			if start >= 0 {
-				if len(spans) >= cap(spans) { spans = mxutil.GrowCap(spans) }
-				spans = push(spans, span{start, i})
+				spans = mxutil.Ensure(spans, 1)
+				spans = push(spans, byteSpan{start, i})
 				start = -1
 			}
 		} else {
@@ -99,19 +103,22 @@ func FieldsFunc(s []byte, f func(rune) bool) [][]byte {
 		}
 		i += size
 	}
-
 	// Last field might end at EOF.
 	if start >= 0 {
-		if len(spans) >= cap(spans) { spans = mxutil.GrowCap(spans) }
-		spans = push(spans, span{start, len(s)})
+		spans = mxutil.Ensure(spans, 1)
+		spans = push(spans, byteSpan{start, len(s)})
 	}
+	return spans
+}
+
+func FieldsFunc(s []byte, f func(rune) bool) [][]byte {
+	spans := fieldSpans(s, f)
 
 	// Create subslices from recorded field indices.
 	a := [][]byte{:len(spans)}
-	for i, span := range spans {
-		a[i] = s[span.start:span.end:span.end]
+	for i, sp := range spans {
+		a[i] = s[sp.start:sp.end:sp.end]
 	}
-
 	return a
 }
 
@@ -285,14 +292,42 @@ func ToTitleSpecial(c unicode.SpecialCase, s []byte) []byte {
 // ToValidUTF8 treats s as UTF-8-encoded bytes and returns a copy with each run of bytes
 // representing invalid UTF-8 replaced with the bytes in replacement, which may be empty.
 func ToValidUTF8(s, replacement []byte) []byte {
-	b := []byte{:0:len(s)+len(replacement)}
+	// Sized in one scan rather than grown. The output length depends on how many
+	// invalid runs s holds, which this scan already walks; growing instead would
+	// allocate a doubling sequence whose dead buffers are never reclaimed inside
+	// an arena, so the count is cheaper than the growth it avoids. The guards it
+	// replaces also only reserved one element, which is wrong for the two spread
+	// pushes below whenever replacement or a run is longer than a byte.
 	invalid := false // previous byte was from an invalid UTF-8 sequence
+	var nInvalid int32
+	for i := 0; i < len(s); {
+		if s[i] < utf8.RuneSelf {
+			i++
+			invalid = false
+			continue
+		}
+		_, wid := utf8.DecodeRune(s[i:])
+		if wid == 1 {
+			i++
+			if !invalid {
+				invalid = true
+				nInvalid++
+			}
+			continue
+		}
+		invalid = false
+		i += wid
+	}
+
+	// Kept bytes never exceed len(s), so this bounds the result exactly enough
+	// to need no further allocation.
+	b := []byte{:0:len(s) + nInvalid*len(replacement)}
+	invalid = false
 	for i := 0; i < len(s); {
 		c := s[i]
 		if c < utf8.RuneSelf {
 			i++
 			invalid = false
-			if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
 			b = push(b, c)
 			continue
 		}
@@ -301,13 +336,11 @@ func ToValidUTF8(s, replacement []byte) []byte {
 			i++
 			if !invalid {
 				invalid = true
-				if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
 				b = push(b, replacement...)
 			}
 			continue
 		}
 		invalid = false
-		if len(b) >= cap(b) { b = mxutil.GrowCap(b) }
 		b = push(b, s[i:i+wid]...)
 		i += wid
 	}
@@ -893,7 +926,7 @@ func Clone(b []byte) []byte {
 	if b == nil {
 		return nil
 	}
-	return push([]byte{}, b...)
+	return push([]byte(nil), b...)
 }
 
 // CutPrefix returns s without the provided leading prefix byte slice
