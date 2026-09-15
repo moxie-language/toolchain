@@ -986,7 +986,14 @@ func (e *irEmitter) emitTypeDescValue(t Type) {
 		e.needTypeDesc(pt)
 		sliceOf := NewSlice(elem)
 		e.needTypeDesc(sliceOf)
-		e.w("@" | gname | " = linkonce_odr constant { i8, i16, ptr, ptr, i64, ptr } { i8 " | irItoa64(int64(meta)) | ", i16 0, ptr @" | descGlobalName(ptTail) | ", ptr @" | descGlobalName(e.typeDescName(elem)) | ", i64 " | token.Itoa64(tt.Len) | ", ptr @" | descGlobalName(e.typeDescName(sliceOf)) | " }, align 8\n")
+		// The length is a uintptr, so it must be the target's word width.
+		// Emitting a fixed i64 aligns it to 8 on wasm32 and lands it at
+		// offset 16, while the runtime's rtArrayType.arrayLen is a 4-byte
+		// word at offset 12: the runtime then reads padding and sees 0,
+		// which makes every array-typed field decode as a zero-length
+		// array of size 0.
+		ipt := e.intptrType()
+		e.w("@" | gname | " = linkonce_odr constant { i8, i16, ptr, ptr, " | ipt | ", ptr } { i8 " | irItoa64(int64(meta)) | ", i16 0, ptr @" | descGlobalName(ptTail) | ", ptr @" | descGlobalName(e.typeDescName(elem)) | ", " | ipt | " " | token.Itoa64(tt.Len) | ", ptr @" | descGlobalName(e.typeDescName(sliceOf)) | " }, align 8\n")
 	case *TCMap:
 		e.needTypeDesc(tt.Key)
 		e.needTypeDesc(tt.Elem)
