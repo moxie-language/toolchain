@@ -142,6 +142,40 @@ func checkGlobalMutation(f *SSAFunction) {
 	}
 }
 
+// checkWasmSpawn rejects spawn() when the target is wasm.
+//
+// Stage4 implements only the native spawn sequence (fork/pipe channels via
+// runtime.spawnDomain and friends). None of those symbols exist for wasm, but
+// the wasm link runs with --allow-undefined, so they became imports the host
+// resolved to nothing: the module built, ran, and silently never started the
+// child domain. Producing a binary that lies is worse than refusing it, so
+// this fails the compile until stage4 mirrors the legacy compiler's wasm spawn
+// path (legacy/compiler/wasmspawn.go), which creates SAB channels through the
+// bridge, calls bridge.spawn_domain with a function index, and exports
+// __spawn_entry to dispatch to the target in the child Worker.
+func checkWasmSpawn(f *SSAFunction) {
+	if mxutil.TargetArch != "wasm" {
+		return
+	}
+	if f == nil || f.Blocks == nil {
+		return
+	}
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			c, ok := instr.(*SSACall)
+			if !ok {
+				continue
+			}
+			bi, ok2 := c.Call.Value.(*SSABuiltin)
+			if !ok2 || bi.id != BuiltinSpawn {
+				continue
+			}
+			if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
+			push(cctx.compileErrors, f.name | ": spawn is not supported for the wasm target by this compiler: it emits only the native fork/pipe sequence, whose runtime symbols do not exist on wasm. Build this program with the legacy compiler, which implements the wasm spawn path, or remove spawn.")
+		}
+	}
+}
+
 // checkSovereignLoopDecls rejects variable declarations inside a loop body in
 // a self-mutating (sovereign) method. Such declarations allocate per iteration
 // into the receiver's sovereign arena, accumulating scratch that is only
