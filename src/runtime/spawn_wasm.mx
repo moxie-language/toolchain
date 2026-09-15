@@ -2,7 +2,10 @@
 
 package runtime
 
-import "unsafe"
+import (
+	"moxie"
+	"unsafe"
+)
 
 // Bridge imports for spawn-boundary SAB channels and domain creation.
 // These are provided by wasm-worker-host.mjs in the JS host.
@@ -59,4 +62,131 @@ func SpawnDomain(fnIdx int32, argPtr unsafe.Pointer, argLen int32, chanHandlesPt
 		runtimePanic("moxie/spawn: wasm binary must be loaded inside a Web Worker - channel_recv uses Atomics.wait which is blocked on the main thread")
 	}
 	bridgeSpawnDomain(fnIdx, (*byte)(argPtr), argLen, (*byte)(chanHandlesPtr), nChans)
+}
+
+// --- spawn-boundary channel behaviour ---
+//
+// chan.mx routes a channel whose spawnBound flag is set through
+// tryPipeSend/tryPipeRecv/PipeChanCloseSignal instead of the in-runtime queue.
+// On native those move bytes through mmap'd SPSC rings; on wasm the same rings
+// live in JavaScript behind an opaque int32 handle, so this file supplies the
+// wasm implementation of that same seam. Nothing in chan.mx changes per
+// target - only these three symbols differ.
+
+// sabHandleOf returns the boundary handle for a channel, or 0 if it is local.
+func sabHandleOf(ch *channel) uintptr {
+	if ch == nil || !ch.spawnBound {
+		return 0
+	}
+	return ch.sabHandle
+}
+
+// MarkChannelSAB tags a channel as sitting on a wasm spawn boundary and
+// records the ring handle the host created for it. The parent calls this for
+// each channel it passes to spawn(); afterwards send and receive on that
+// channel reach the far side without the compiler having to track the value
+// through every copy and reload.
+func MarkChannelSAB(ch *channel, handle uintptr) {
+	if ch == nil {
+		return
+	}
+	ch.spawnBound = true
+	ch.sabHandle = handle
+}
+
+// SpawnChannelWrap builds the child's view of a boundary channel from the
+// handle that arrived in the spawn argument list. __spawn_entry calls it so
+// the target function receives an ordinary channel it can send, receive and
+// close on; the handle inside routes those operations to the same ring.
+func SpawnChannelWrap(handle uintptr, elementSize uintptr) (ch *channel) {
+	if handle == 0 {
+		return nil
+	}
+	ch = chanMake(elementSize, 0)
+	ch.spawnBound = true
+	ch.sabHandle = handle
+	return ch
+}
+
+// tryPipeSend writes one value to the boundary ring.
+func (ch *channel) tryPipeSend(value unsafe.Pointer) bool {
+	h := sabHandleOf(ch)
+	if h == 0 {
+		return false
+	}
+	SpawnChannelSend(h, value, int32(ch.elementSize))
+	return true
+}
+
+// tryPipeRecv reads one value from the boundary ring. A closed ring (-1)
+// reports ok=false, matching the local receiver's behaviour on a closed
+// channel.
+func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
+	h := sabHandleOf(ch)
+	if h == 0 {
+		return false, false
+	}
+	n := SpawnChannelRecv(h, value, int32(ch.elementSize))
+	if n < 0 {
+		return false, false
+	}
+	return true, true
+}
+
+// PipeChanCloseSignal closes the boundary ring.
+func PipeChanCloseSignal(ch *channel) {
+	h := sabHandleOf(ch)
+	if h == 0 {
+		return
+	}
+	SpawnChannelClose(h)
+}
+
+// --- codec channel operations across the boundary ---
+//
+// The compiler emits ChanSendDual/ChanRecvDual for any channel whose element
+// type implements moxie.Codec. On native those live in pipe_channel.mx and
+// route through mmap'd rings; here they route through the SAB bridge. Values
+// cross encoded, exactly as they do natively, so the wire format is the same.
+
+// sabFrameMax bounds one boundary frame. The native transport chunks larger
+// messages through its ring; the SAB bridge hands a whole message to a single
+// receive, so a frame must fit the buffer the receiver offers. Overflowing it
+// is a fail-loud panic, not a silent truncation.
+const sabFrameMax = 1 << 20
+
+func ChanSendDual(ch *channel, c moxie.Codec, value unsafe.Pointer, op *channelOp) {
+	if ch != nil && ch.spawnBound && ch.sabHandle != 0 {
+		var w moxie.PipeWriter
+		if err := c.EncodeTo(&w); err != nil {
+			return
+		}
+		if len(w.Buf) == 0 {
+			SpawnChannelSend(ch.sabHandle, nil, 0)
+			return
+		}
+		SpawnChannelSend(ch.sabHandle, unsafe.Pointer(&w.Buf[0]), int32(len(w.Buf)))
+		return
+	}
+	chanSend(ch, value, op)
+}
+
+func ChanRecvDual(ch *channel, c moxie.Codec, value unsafe.Pointer, op *channelOp) bool {
+	if ch != nil && ch.spawnBound && ch.sabHandle != 0 {
+		buf := []byte{:sabFrameMax}
+		n := SpawnChannelRecv(ch.sabHandle, unsafe.Pointer(&buf[0]), int32(len(buf)))
+		if n <= 0 {
+			return false
+		}
+		if n > int32(len(buf)) {
+			runtimePanic("moxie/spawn: boundary frame exceeds the receive buffer")
+		}
+		var r moxie.PipeReader
+		r.Buf = buf[:n]
+		if err := c.DecodeFrom(&r); err != nil {
+			return false
+		}
+		return true
+	}
+	return chanRecv(ch, value, op)
 }
