@@ -67,6 +67,46 @@ per-function arena stack. compiler emits FnArenaPush() at function entry, reloca
 
 No global heap allocator, no startup bump allocator, no growHeap. Every allocation goes through FnArenaPush or the root arena's ArenaAlloc. domainRoot MUST be initialized before any allocation - there is no fallback path. The root arena is mmap'd once in initDomain; further regions are added via ArenaAlloc when a region fills. NEVER use a "heap" or "startup allocator" that bypasses the arena system.
 
+## Buffer Growth and Arena Discipline
+
+An arena is never reused within a frame: `FnArenaPop` reclaims the position for
+the *next callee*, not for you. Every buffer a growth step abandons therefore
+stays live for the rest of the frame, and peak arena is the **sum** of every
+intermediate, not the last one. Doubling to N costs roughly 2-3x N of arena;
+allocating N costs N. Growth is the exception, and where it is unavoidable it
+belongs somewhere its garbage dies early.
+
+`push` does not grow. From a zero-capacity slice it lazy-inits to exactly the
+first batch (floor 4) in one allocation, so that first push already *is* "one
+buffer, sized once". Once cap is non-zero it is a bounded store that fails loud
+with "push past end of slice capacity". The growth regime is **entered**, not
+inherent, and the goal is never to enter it.
+
+Choose by how the final size is known:
+
+| how the size is known | technique |
+| --- | --- |
+| one scan, or a `len()` of the input | presize exactly, cursor write |
+| a second pass over a cheap predicate | presize exactly, cursor write |
+| a second pass over a user-supplied func (`FieldsFunc`, `Map`) | grow, but inside a free function |
+| genuinely streaming, input consumed as read | grow, but inside a free function |
+
+- **Presize and cursor-write.** `b := []T{:n}`, write `b[i] = v; i++`, return
+  `b[:i]`. No capacity checks in the loop, no guards, no dead buffers.
+- **Grow inside a free function.** A free function gets its own frame arena, so
+  every intermediate a growth step abandons is reclaimed when it returns, and
+  the value returned is relocated into the caller at exactly its length. Never
+  let a buffer enter the doubling regime in an arena that outlives the call - in
+  a sovereign arena every doubling step is permanent.
+- **Never hand-write the capacity guard.** `if len(x) >= cap(x) { x = GrowCap(x) }`
+  reserves ONE element and is a latent panic before a spread push, because
+  `push(x, src...)` needs `len(src)`. Use `mxutil.Ensure(x, len(src))` for a
+  spread, and `mxutil.Reserve(x, total)` when the total is known.
+
+One function, one arena, one buffer, one pass is the target shape: read the
+sources, write the output through a cursor. There is no concurrency, so a
+transform whose output size is a function of its input needs no growth at all.
+
 ## Parameter and Receiver Rules
 
 Function parameters are IMMUTABLE BORROWS - writing through a parameter pointer is a compile-time error enforced by the compiler, not by MMU page protection. This is a type-system-level guarantee that is "expensive now" (compile-time enforcement) but "free at runtime" (no runtime checks). Because parameters cannot be mutated, they never need deep copying across arena boundaries.
