@@ -144,15 +144,16 @@ func checkGlobalMutation(f *SSAFunction) {
 
 // checkWasmSpawn rejects spawn() when the target is wasm.
 //
-// Stage4 implements only the native spawn sequence (fork/pipe channels via
-// runtime.spawnDomain and friends). None of those symbols exist for wasm, but
-// the wasm link runs with --allow-undefined, so they became imports the host
-// resolved to nothing: the module built, ran, and silently never started the
-// child domain. Producing a binary that lies is worse than refusing it, so
-// this fails the compile until stage4 mirrors the legacy compiler's wasm spawn
-// path (legacy/compiler/wasmspawn.go), which creates SAB channels through the
-// bridge, calls bridge.spawn_domain with a function index, and exports
-// __spawn_entry to dispatch to the target in the child Worker.
+// The compiler side of the wasm spawn path exists - spawn targets are scanned
+// and numbered, the parent calls runtime.SpawnDomain with the SAB handles, and
+// __spawn_entry dispatches in the child Worker - but the runtime side is not
+// finished: the boundary needs wasm counterparts of the codec channel
+// operations, and the encode path currently traps inside alloc.
+//
+// Until that lands, refuse the build. The alternative is a module that links,
+// runs, and quietly does the wrong thing, which is what a missing
+// ChanSendDual did before: the wasm link allows undefined symbols, so the
+// call resolved to nothing and the child never received anything.
 func checkWasmSpawn(f *SSAFunction) {
 	if mxutil.TargetArch != "wasm" {
 		return
@@ -171,7 +172,72 @@ func checkWasmSpawn(f *SSAFunction) {
 				continue
 			}
 			if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
-			push(cctx.compileErrors, f.name | ": spawn is not supported for the wasm target by this compiler: it emits only the native fork/pipe sequence, whose runtime symbols do not exist on wasm. Build this program with the legacy compiler, which implements the wasm spawn path, or remove spawn.")
+			push(cctx.compileErrors, f.name | ": spawn is not supported for the wasm target yet: the compiler emits the parent, __spawn_entry and the SAB channel handles, but the runtime's boundary channel operations and codec encode path are not finished for wasm. Build this program natively, or with the legacy compiler (whose wasm path came first and is complete).")
+		}
+	}
+}
+
+// scanWasmSpawnTargets collects the static functions reachable through spawn()
+// in one package and assigns each a dispatch index.
+//
+// The parent passes the index to bridge.spawn_domain and the child's
+// __spawn_entry switches on it, so the numbering must be stable across the two
+// sides and reproducible between builds: Members is a map, so the walk is
+// ordered by name rather than by map iteration.
+func scanWasmSpawnTargets(p *SSAPackage) {
+	if mxutil.TargetArch != "wasm" || p == nil {
+		return
+	}
+	p.wasmSpawnIndex = map[string]int32{}
+	names := []string{:0:len(p.Members)}
+	for name := range p.Members {
+		if len(names) >= cap(names) { names = mxutil.GrowCap(names) }
+		push(names, name)
+	}
+	for i := int32(1); i < int32(len(names)); i++ {
+		for j := i; j > 0 && names[j] < names[j-1]; j-- {
+			names[j], names[j-1] = names[j-1], names[j]
+		}
+	}
+	for _, name := range names {
+		f, ok := p.Members[name].(*SSAFunction)
+		if !ok || f.Blocks == nil {
+			continue
+		}
+		for _, b := range f.Blocks {
+			for _, instr := range b.Instrs {
+				c, ok2 := instr.(*SSACall)
+				if !ok2 {
+					continue
+				}
+				bi, ok3 := c.Call.Value.(*SSABuiltin)
+				if !ok3 || bi.id != BuiltinSpawn || len(c.Call.Args) == 0 {
+					continue
+				}
+				target, ok4 := c.Call.Args[0].(*SSAFunction)
+				if !ok4 {
+					continue
+				}
+				if _, seen := p.wasmSpawnIndex[target.name]; seen {
+					continue
+				}
+				t := &wasmSpawnTarget{fn: target, fnIdx: int32(len(p.wasmSpawnTargets))}
+				if target.Signature != nil && target.Signature.Params != nil {
+					for i := int32(0); i < target.Signature.Params.Len(); i++ {
+						pt := target.Signature.Params.At(i).Typ
+						if _, isChan := SafeUnderlying(pt).(*TCChan); isChan {
+							if len(t.chanParamIdx) >= cap(t.chanParamIdx) { t.chanParamIdx = mxutil.GrowCap(t.chanParamIdx) }
+							push(t.chanParamIdx, i)
+						} else {
+							if len(t.scalarIdx) >= cap(t.scalarIdx) { t.scalarIdx = mxutil.GrowCap(t.scalarIdx) }
+							push(t.scalarIdx, i)
+						}
+					}
+				}
+				if len(p.wasmSpawnTargets) >= cap(p.wasmSpawnTargets) { p.wasmSpawnTargets = mxutil.GrowCap(p.wasmSpawnTargets) }
+				push(p.wasmSpawnTargets, t)
+				p.wasmSpawnIndex[target.name] = t.fnIdx
+			}
 		}
 	}
 }

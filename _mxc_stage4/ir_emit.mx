@@ -21,6 +21,10 @@ type irEmitter struct {
 	spawnWrappers map[string]bool // dedup of emitted spawn $gowrapper functions
 	spawnWrapperTexts []string    // compiled spawn wrapper IR, emitted at package tail
 	pendSpawnWrappers []string    // per-function accumulator for wrapper IR
+	// wasmSpawnTargets/wasmSpawnIndex mirror the package's spawn dispatch
+	// table for the package this emitter is compiling.
+	wasmSpawnTargets []*wasmSpawnTarget
+	wasmSpawnIndex   map[string]int32
 	pendKeepIface []Type // fn-arena: interfaces boxed during the current function
 	keepIfaceTypes []Type // compile-arena: merged; module-tail llvm.used
 	triple     string
@@ -111,6 +115,8 @@ func newIREmitter(pkg *SSAPackage, triple string, srcLen int32) (p *irEmitter) {
 		triple:   triple,
 		ptrBits:  ptrBits,
 		pkg:      pkg,
+		wasmSpawnTargets: pkg.wasmSpawnTargets,
+		wasmSpawnIndex:   pkg.wasmSpawnIndex,
 		valName:  map[SSAValue]string{},
 		extDecls:     map[string]string{},
 		extGlobals:   map[string]string{},
@@ -1053,6 +1059,7 @@ func (e *irEmitter) emit() (s string) {
 	}
 	e.emitTypeDescs()
 	e.emitSpawnWrappers()
+	e.emitWasmSpawnEntry()
 	// Emit wasm import attribute groups
 	for _, wa := range e.wasmAttrs {
 		e.w("attributes #" | wa[0] | " = { \"wasm-import-module\"=\"" | wa[1] | "\" \"wasm-import-name\"=\"" | wa[2] | "\" }\n")
@@ -1700,6 +1707,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 				e.emitFreeVarUnpack(e.curFunc)
 			}
 			e.emitArenaPrologue()
+			e.setupWasmSpawnTargetChannels()
 			e.deferCheckpointOn = e.deferFrame != ""
 			for _, instr := range b.Instrs {
 				e.emitInstr(instr)

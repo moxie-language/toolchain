@@ -1,0 +1,310 @@
+package main
+
+import (
+	"git.smesh.lol/moxie/pkg/mxutil"
+	. "git.smesh.lol/moxie/pkg/types"
+)
+
+// wasm spawn: parent and child halves of a domain boundary that crosses a
+// Worker instead of a fork.
+//
+// On wasm a spawned domain is a dedicated Worker running the same module.
+// Channels that cross the boundary are SPSC rings over SharedArrayBuffer, and
+// the module only ever holds an int32 handle for one: bridge.channel_create
+// returns it, bridge.channel_send/recv/close take it, and bridge.spawn_domain
+// starts the Worker with the target's dispatch index and the handle list.
+//
+// The parent side packs scalar arguments into a byte buffer and the handles
+// into an i32 array; the child's __spawn_entry switches on the index, reloads
+// the scalars at the offsets the parent used, turns each handle back into the
+// pointer-shaped value the channel parameter holds, and calls the target.
+//
+// The enumeration of targets and their indices lives in cctx and is filled by
+// scanWasmSpawnTargets, so both halves agree on the numbering.
+
+// setupWasmSpawnTargetChannels records the SAB handle each channel parameter
+// of the current spawn target carries. __spawn_entry delivered it as an int32
+// inttoptr'd into the parameter, so ptrtoint recovers it. Every send, receive
+// and close on that parameter then goes through the bridge instead of the
+// runtime's channel object, which the child does not have.
+func (e *irEmitter) setupWasmSpawnTargetChannels() {
+	if e.ptrBits != 32 || e.curFunc == nil {
+		return
+	}
+	t := e.wasmSpawnTargetForFunc(e.curFunc)
+	if t == nil {
+		return
+	}
+	mxutil.WriteStr(2, "  wasm-spawn: target-channels\n")
+	ipt := e.intptrType()
+	for _, pi := range t.chanParamIdx {
+		if pi < 0 || pi >= int32(len(e.curFunc.Params)) {
+			continue
+		}
+		p := e.curFunc.Params[pi]
+		e.nextReg++
+		h := "%sabh" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(h) ; e.w(" = ptrtoint ptr ") ; e.w(e.regName(p)) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+	}
+}
+
+// emitWasmSpawnCall emits spawn(fn, args...) for the wasm target.
+func (e *irEmitter) emitWasmSpawnCall(c *SSACall) {
+	mxutil.WriteStr(2, "  wasm-spawn: call\n")
+	ipt := e.intptrType()
+	i32 := "i32"
+	reg := e.regName(c)
+
+	targetFn, ok := c.Call.Args[0].(*SSAFunction)
+	if !ok {
+		if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
+		push(cctx.compileErrors, "spawn: the target must be a static top-level function")
+		e.emitZeroReg(reg, c.SSAType())
+		return
+	}
+	fnIdx := int32(-1)
+	ok2 := false
+	if e.wasmSpawnIndex != nil {
+		fnIdx, ok2 = e.wasmSpawnIndex[targetFn.name]
+	}
+	if !ok2 {
+		// The scan in the same package should have found it. Reaching here
+		// means the numbering would not match the child's switch, so refuse
+		// rather than hand spawn_domain an index that dispatches nowhere.
+		if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
+		push(cctx.compileErrors, "spawn: " | targetFn.name | " is not in the wasm dispatch table; a wasm spawn target must be a static function in the same package as the spawn call")
+		e.emitZeroReg(reg, c.SSAType())
+		return
+	}
+	mxutil.WriteStr(2, "    call: target=" | targetFn.name | "\n")
+	if targetFn.Signature == nil || targetFn.Signature.Params == nil {
+		e.emitZeroReg(reg, c.SSAType())
+		return
+	}
+	nParams := targetFn.Signature.Params.Len()
+	if len(c.Call.Args)-1 != nParams {
+		if len(cctx.compileErrors) >= cap(cctx.compileErrors) { cctx.compileErrors = mxutil.GrowCap(cctx.compileErrors) }
+		push(cctx.compileErrors, "spawn: " | targetFn.name | " argument count does not match its parameters")
+		e.emitZeroReg(reg, c.SSAType())
+		return
+	}
+
+
+	// Channel arguments become SAB handles: one ring per channel, sized from
+	// the element type. Both sides keep the handle, not the ring.
+	handles := []string{:0:nParams}
+	for i := int32(0); i < nParams; i++ {
+			arg := c.Call.Args[i+1]
+			isChan2 := false
+		if _, ic := SafeUnderlying(arg.SSAType()).(*TCChan); ic {
+			isChan2 = true
+		}
+			if !isChan2 {
+			continue
+		}
+		elemT := e.chanElemTType(arg.SSAType())
+			elemSz := int32(64)
+		if elemT != nil {
+			if tsz := TypeSize(elemT); tsz > 0 {
+				elemSz = int32(tsz)
+			}
+		}
+			slotSize := int32(64)
+		for slotSize < elemSz+12 {
+			slotSize = slotSize * 2
+		}
+			e.nextReg++
+		h := "%sabch" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(h) ; e.w(" = call ") ; e.w(ipt) ; e.w(" @runtime.SpawnChannelCreate(") ; e.w(i32) ; e.w(" ") ; e.w(irItoa(slotSize)) ; e.w(", ") ; e.w(i32) ; e.w(" 16, ptr null)\n")
+			e.declareRuntime("runtime.SpawnChannelCreate", ipt, i32 | ", " | i32)
+			// Tag the parent's channel so its sends and receives reach the ring.
+			// Marking at run time is what keeps this correct through the copies
+			// and reloads stage4's alloca-based SSA introduces: the same source
+			// variable is a different SSA value at the spawn and at the send, so
+			// tracking SSA values misses it.
+			e.w("  call void @runtime.MarkChannelSAB(ptr ") ; e.w(e.operand(arg)) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(h) ; e.w(", ptr null)\n")
+			e.declareRuntime("runtime.MarkChannelSAB", "void", "ptr, " | ipt)
+			if len(handles) >= cap(handles) { handles = mxutil.GrowCap(handles) }
+		push(handles, h)
+		}
+
+	// Pack the scalar arguments in parameter order, skipping channels, at the
+	// same offsets the child will read them from.
+	scalarVals := []string{:0:nParams}
+	scalarTys := []string{:0:nParams}
+	scalarSizes := []int32{:0:nParams}
+	total := int32(0)
+	for i := int32(0); i < nParams; i++ {
+		arg := c.Call.Args[i+1]
+		if _, isChan := SafeUnderlying(arg.SSAType()).(*TCChan); isChan {
+			continue
+		}
+		lt := e.llvmType(arg.SSAType())
+		if lt == "" || lt == "void" {
+			lt = ipt
+		}
+		sz := int32(TypeSize(arg.SSAType()))
+		if len(scalarVals) >= cap(scalarVals) { scalarVals = mxutil.GrowCap(scalarVals) }
+		push(scalarVals, e.operand(arg))
+		if len(scalarTys) >= cap(scalarTys) { scalarTys = mxutil.GrowCap(scalarTys) }
+		push(scalarTys, lt)
+		if len(scalarSizes) >= cap(scalarSizes) { scalarSizes = mxutil.GrowCap(scalarSizes) }
+		push(scalarSizes, sz)
+		total += sz
+	}
+
+	mxutil.WriteStr(2, "    call: scalars=" | simpleItoa(int32(len(scalarVals))) | " bytes=" | simpleItoa(total) | "\n")
+	argPtr := "null"
+	argLen := "0"
+	if total > 0 {
+		e.nextReg++
+		buf := "%sabargs" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(buf) ; e.w(" = alloca [") ; e.w(irItoa(total)) ; e.w(" x i8], align 8\n")
+		off := int32(0)
+		for i := 0; i < len(scalarVals); i++ {
+			if scalarSizes[i] <= 0 {
+				continue
+			}
+			e.nextReg++
+			g := "%sabarg" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(g) ; e.w(" = getelementptr inbounds [") ; e.w(irItoa(total)) ; e.w(" x i8], ptr ") ; e.w(buf) ; e.w(", i32 0, i32 ") ; e.w(irItoa(off)) ; e.w("\n")
+			e.w("  store ") ; e.w(scalarTys[i]) ; e.w(" ") ; e.w(scalarVals[i]) ; e.w(", ptr ") ; e.w(g) ; e.w("\n")
+			off += scalarSizes[i]
+		}
+		e.nextReg++
+		ap := "%sabargp" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(ap) ; e.w(" = getelementptr inbounds [") ; e.w(irItoa(total)) ; e.w(" x i8], ptr ") ; e.w(buf) ; e.w(", i32 0, i32 0\n")
+		argPtr = ap
+		argLen = irItoa(total)
+	}
+
+	// The handle array mirrors the child's channel-parameter order.
+	chanPtr := "null"
+	nChans := int32(len(handles))
+	if nChans > 0 {
+		e.nextReg++
+		harr := "%sabharr" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(harr) ; e.w(" = alloca [") ; e.w(irItoa(nChans)) ; e.w(" x ") ; e.w(ipt) ; e.w("], align 8\n")
+		for i := 0; i < len(handles); i++ {
+			e.nextReg++
+			g := "%sabhp" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(g) ; e.w(" = getelementptr inbounds [") ; e.w(irItoa(nChans)) ; e.w(" x ") ; e.w(ipt) ; e.w("], ptr ") ; e.w(harr) ; e.w(", i32 0, i32 ") ; e.w(irItoa(int32(i))) ; e.w("\n")
+			e.w("  store ") ; e.w(ipt) ; e.w(" ") ; e.w(handles[i]) ; e.w(", ptr ") ; e.w(g) ; e.w("\n")
+		}
+		e.nextReg++
+		hp := "%sabhp0" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(hp) ; e.w(" = getelementptr inbounds [") ; e.w(irItoa(nChans)) ; e.w(" x ") ; e.w(ipt) ; e.w("], ptr ") ; e.w(harr) ; e.w(", i32 0, i32 0\n")
+		chanPtr = hp
+	}
+
+	mxutil.WriteStr(2, "    call: emitting spawn_domain\n")
+	e.w("  call void @runtime.SpawnDomain(") ; e.w(i32) ; e.w(" ") ; e.w(irItoa(fnIdx))
+	e.w(", ptr ") ; e.w(argPtr) ; e.w(", ") ; e.w(i32) ; e.w(" ") ; e.w(argLen)
+	e.w(", ptr ") ; e.w(chanPtr) ; e.w(", ") ; e.w(i32) ; e.w(" ") ; e.w(irItoa(nChans)) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.SpawnDomain", "void", i32 | ", ptr, " | i32 | ", ptr, " | i32)
+
+	// spawn() yields the domain's lifecycle channel on native. A wasm domain
+	// has no such channel, and the legacy compiler returns an undefined value
+	// here too, so keep the two compilers agreeing on that.
+	e.emitZeroReg(reg, c.SSAType())
+}
+
+// emitWasmSpawnEntry emits the child-side dispatch the Worker calls instead of
+// _start: __spawn_entry(fnIdx, argPtr, argLen, chanHandlesPtr, nChans).
+//
+// One block per target reloads that target's scalars from the same offsets
+// emitWasmSpawnCall wrote, converts each handle back to the pointer-shaped
+// value the channel parameter holds, and calls it. An unknown index traps,
+// because silently returning would leave the parent waiting on a domain that
+// never existed.
+func (e *irEmitter) emitWasmSpawnEntry() {
+	if e.ptrBits != 32 || len(e.wasmSpawnTargets) == 0 {
+		return
+	}
+	mxutil.WriteStr(2, "  wasm-spawn: entry\n")
+	ipt := e.intptrType()
+	i32 := "i32"
+	// Declared here rather than through declareRuntime: the declaration block
+	// is emitted before this runs, so anything registered now would be dropped.
+	e.w("\ndeclare ptr @runtime.SpawnChannelWrap(") ; e.w(ipt) ; e.w(", ") ; e.w(ipt) ; e.w(", ptr)\n")
+	e.w("declare void @llvm.trap()\n")
+	e.w("\ndefine void @__spawn_entry(") ; e.w(i32) ; e.w(" %fnIdx, ptr %argPtr, ") ; e.w(i32) ; e.w(" %argLen, ptr %chanHandlesPtr, ") ; e.w(i32) ; e.w(" %nChans) {\nentry:\n")
+	e.w("  switch ") ; e.w(i32) ; e.w(" %fnIdx, label %spawn.bad [\n")
+	for _, t := range e.wasmSpawnTargets {
+		e.w("    ") ; e.w(i32) ; e.w(" ") ; e.w(irItoa(t.fnIdx)) ; e.w(", label %spawn.case") ; e.w(irItoa(t.fnIdx)) ; e.w("\n")
+	}
+	e.w("  ]\n\n")
+	e.w("spawn.bad:\n  call void @llvm.trap()\n  unreachable\n")
+
+	for _, t := range e.wasmSpawnTargets {
+		e.w("\nspawn.case") ; e.w(irItoa(t.fnIdx)) ; e.w(":\n")
+		sig := t.fn.Signature
+		if sig == nil || sig.Params == nil {
+			e.w("  ret void\n")
+			continue
+		}
+		// Scalars arrive in parameter order at the offsets the parent used;
+		// channel parameters take the next handle from the handle array.
+		scalarOff := int32(0)
+		chanN := int32(0)
+		var callArgs []string
+		callArgs = []string{:0:sig.Params.Len()}
+		for i := int32(0); i < sig.Params.Len(); i++ {
+			pt := sig.Params.At(i).Typ
+			if _, isChan := SafeUnderlying(pt).(*TCChan); isChan {
+				e.nextReg++
+				g := "%seh" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(g) ; e.w(" = getelementptr inbounds ") ; e.w(ipt) ; e.w(", ptr %chanHandlesPtr, i32 ") ; e.w(irItoa(chanN)) ; e.w("\n")
+				e.nextReg++
+				hv := "%shv" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(hv) ; e.w(" = load ") ; e.w(ipt) ; e.w(", ptr ") ; e.w(g) ; e.w("\n")
+				e.nextReg++
+				hp := "%shp" | irItoa(e.nextReg)
+				// The child gets an ordinary channel whose handle routes send,
+				// receive and close to the parent's ring.
+				e.w("  ") ; e.w(hp) ; e.w(" = call ptr @runtime.SpawnChannelWrap(") ; e.w(ipt) ; e.w(" ") ; e.w(hv) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(irItoa(int32(TypeSize(pt)))) ; e.w(", ptr null)\n")
+				push(callArgs, "ptr " | hp)
+				chanN++
+				continue
+			}
+			lt := e.llvmType(pt)
+			if lt == "" || lt == "void" {
+				lt = ipt
+			}
+			e.nextReg++
+			g := "%sag" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(g) ; e.w(" = getelementptr inbounds i8, ptr %argPtr, i32 ") ; e.w(irItoa(scalarOff)) ; e.w("\n")
+			e.nextReg++
+			v := "%sav" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(v) ; e.w(" = load ") ; e.w(lt) ; e.w(", ptr ") ; e.w(g) ; e.w("\n")
+			push(callArgs, lt | " " | v)
+			scalarOff += int32(TypeSize(pt))
+		}
+		e.w("  call void ") ; e.w(e.funcSymbol(t.fn)) ; e.w("(")
+		for i, a := range callArgs {
+			if i > 0 {
+				e.w(", ")
+			}
+			e.w(a)
+		}
+		if len(callArgs) > 0 {
+			e.w(", ")
+		}
+		e.w("ptr null)\n")
+		e.w("  ret void\n")
+	}
+	e.w("}\n")
+}
+
+// wasmSpawnTargetForFunc returns the dispatch entry for a function, or nil.
+func (e *irEmitter) wasmSpawnTargetForFunc(f *SSAFunction) (t *wasmSpawnTarget) {
+	if f == nil {
+		return nil
+	}
+	for _, t2 := range e.wasmSpawnTargets {
+		if t2.fn == f {
+			return t2
+		}
+	}
+	return nil
+}
