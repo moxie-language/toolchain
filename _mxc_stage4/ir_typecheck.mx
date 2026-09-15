@@ -1079,12 +1079,16 @@ func tcResolveFuncReturn(e syntax.Expr, scope *Scope) (t Type) {
 		}
 		if scope != nil {
 			_, pkgObj := scope.LookupParent(pkgName.Value)
-			if pn, ok2 := pkgObj.(*PkgName); ok2 && pn.Imported != nil {
+			// A partially initialised package can carry a nil Scope; looking
+			// through it is a nil dereference, not a miss.
+			if pn, ok2 := pkgObj.(*PkgName); ok2 && pn.Imported != nil && pn.Imported.Scope != nil {
 				obj = pn.Imported.Scope.Lookup(ex.Sel.Value)
 			}
 		}
-		if obj == nil {
-			if imp := cctx.universe.LookupByName(pkgName.Value); imp != nil {
+		if obj == nil && cctx.universe != nil {
+			// Type inference runs before the universe is installed for some
+			// packages; there is simply nothing to consult yet.
+			if imp := cctx.universe.LookupByName(pkgName.Value); imp != nil && imp.Scope != nil {
 				obj = imp.Scope.Lookup(ex.Sel.Value)
 			}
 		}
@@ -1100,21 +1104,17 @@ func tcResolveFuncReturn(e syntax.Expr, scope *Scope) (t Type) {
 	if !ok || sig.Results == nil || sig.Results.Len() == 0 {
 		return nil
 	}
-	// A result slot can hold a nil *TCVar - the count alone does not prove the
-	// element is there, and dereferencing it took the compiler down with a nil
-	// panic while type-checking. Report "unknown" instead.
-	if sig.Results.Len() == 1 {
-		if v := sig.Results.At(0); v != nil {
-			return v.Typ
-		}
+	// Only a single result is meaningful here: this infers the type of a value
+	// an expression yields, and a call with several results does not yield one.
+	// A result slot can also hold a nil *TCVar - the count alone does not prove
+	// the element is there - so report "unknown" rather than dereferencing it.
+	if sig.Results.Len() != 1 {
 		return nil
 	}
-	for i := int32(0); i < sig.Results.Len(); i++ {
-		if sig.Results.At(i) == nil {
-			return nil
-		}
+	if v := sig.Results.At(0); v != nil {
+		return v.Typ
 	}
-	return NewTuple(sig.Results.Vars...)
+	return nil
 }
 
 func compileTargetArch() (s string) {
@@ -1496,7 +1496,7 @@ func tcResolveNameInline(e syntax.Expr, scope *Scope) (t Type) {
 			}
 		}
 		// Fallback: look up by short package name via index.
-		if pkgName2, ok2 := ex.X.(*syntax.Name); ok2 {
+		if pkgName2, ok2 := ex.X.(*syntax.Name); ok2 && cctx.universe != nil {
 			if imp := cctx.universe.LookupByName(pkgName2.Value); imp != nil {
 				typeObj := imp.Scope.Lookup(ex.Sel.Value)
 				if typeObj != nil {
