@@ -26,7 +26,11 @@ export function create(slotSize, slotCount) {
   if ((slotCount & (slotCount - 1)) !== 0) throw new Error('slot_count must be power-of-two');
   if (slotSize < 64) throw new Error('slot_size minimum 64');
   const sab = new SharedArrayBuffer(HDR + slotCount * slotSize);
-  const u32 = new Uint32Array(sab);
+  // Int32Array, not Uint32Array: the header is driven by Atomics, and
+  // Atomics.wait/notify only accept an Int32Array or BigInt64Array view. The
+  // bit patterns are identical, and every value the header holds is small and
+  // positive, so the signed view is equivalent here.
+  const u32 = new Int32Array(sab);
   u32[2] = slotSize;
   u32[3] = slotCount;
   return sab;
@@ -35,7 +39,11 @@ export function create(slotSize, slotCount) {
 // send blocks until a slot is free, then writes bytes as chunked slots.
 // Throws if the channel is closed or bytes.length exceeds channel capacity.
 export function send(sab, bytes) {
-  const u32 = new Uint32Array(sab);
+  // Int32Array, not Uint32Array: the header is driven by Atomics, and
+  // Atomics.wait/notify only accept an Int32Array or BigInt64Array view. The
+  // bit patterns are identical, and every value the header holds is small and
+  // positive, so the signed view is equivalent here.
+  const u32 = new Int32Array(sab);
   const slotSize = u32[2];
   const slotCount = u32[3];
   const payload_capacity = slotSize - SLOT_HDR;
@@ -86,7 +94,11 @@ export function send(sab, bytes) {
 // Returns byte count (0 for zero-byte message), or -1 if channel is closed.
 // dstBuf must be at least (slotCount - 1) * (slotSize - SLOT_HDR) bytes.
 export function recv(sab, dstBuf) {
-  const u32 = new Uint32Array(sab);
+  // Int32Array, not Uint32Array: the header is driven by Atomics, and
+  // Atomics.wait/notify only accept an Int32Array or BigInt64Array view. The
+  // bit patterns are identical, and every value the header holds is small and
+  // positive, so the signed view is equivalent here.
+  const u32 = new Int32Array(sab);
   const slotSize = u32[2];
   const slotCount = u32[3];
   const payload_capacity = slotSize - SLOT_HDR;
@@ -145,7 +157,11 @@ export function recv(sab, dstBuf) {
 // close sets the closed flag, writes a sentinel zero-len slot, notifies receiver.
 // Use when the sender side closes cleanly (knows the ring is not full).
 export function close(sab) {
-  const u32 = new Uint32Array(sab);
+  // Int32Array, not Uint32Array: the header is driven by Atomics, and
+  // Atomics.wait/notify only accept an Int32Array or BigInt64Array view. The
+  // bit patterns are identical, and every value the header holds is small and
+  // positive, so the signed view is equivalent here.
+  const u32 = new Int32Array(sab);
   const slotCount = u32[3];
 
   Atomics.or(u32, 4, 1);
@@ -173,7 +189,11 @@ export function close(sab) {
 //   - Blocked recv: wakes in wait loop, sees bit0, returns -1.
 //   - Blocked send: wakes in wait loop, sees bit0, throws "send on closed channel".
 export function forceClose(sab) {
-  const u32 = new Uint32Array(sab);
+  // Int32Array, not Uint32Array: the header is driven by Atomics, and
+  // Atomics.wait/notify only accept an Int32Array or BigInt64Array view. The
+  // bit patterns are identical, and every value the header holds is small and
+  // positive, so the signed view is equivalent here.
+  const u32 = new Int32Array(sab);
   Atomics.or(u32, 4, 1);
   Atomics.notify(u32, 0, Atomics.MAX_VALUE); // wake blocked receivers
   Atomics.notify(u32, 1, Atomics.MAX_VALUE); // wake blocked senders
