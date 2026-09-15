@@ -492,7 +492,9 @@ func shadowSimple(fn string, outer []string, scopes [][]string, sx syntax.Simple
 	return out
 }
 
-func shadowStmt(fn string, outer []string, scopes [][]string, st syntax.Stmt) (out [][]string) {
+// shadowDeclStmt declares the bindings a single statement introduces directly
+// into the current block, without entering nested blocks.
+func shadowDeclStmt(fn string, outer []string, scopes [][]string, st syntax.Stmt) (out [][]string) {
 	out = scopes
 	if st == nil {
 		return out
@@ -502,8 +504,20 @@ func shadowStmt(fn string, outer []string, scopes [][]string, st syntax.Stmt) (o
 		return shadowDecls(fn, outer, out, t.DeclList)
 	case *syntax.AssignStmt:
 		if t.Op == token.Def {
-			out = shadowLHS(fn, outer, out, t.Lhs)
+			return shadowLHS(fn, outer, out, t.Lhs)
 		}
+	case *syntax.LabeledStmt:
+		return shadowDeclStmt(fn, outer, out, t.Stmt)
+	}
+	return out
+}
+
+func shadowStmt(fn string, outer []string, scopes [][]string, st syntax.Stmt) (out [][]string) {
+	out = scopes
+	if st == nil {
+		return out
+	}
+	switch t := st.(type) {
 	case *syntax.LabeledStmt:
 		out = shadowStmt(fn, outer, out, t.Stmt)
 	case *syntax.BlockStmt:
@@ -559,6 +573,13 @@ func shadowStmt(fn string, outer []string, scopes [][]string, st syntax.Stmt) (o
 
 func shadowStmts(fn string, outer []string, scopes [][]string, ss []syntax.Stmt) (out [][]string) {
 	out = scopes
+	// A binding is taken for its entire block, not from the point it appears:
+	// declare every name this block introduces before walking any nested
+	// statement, so a nested declaration that appears textually before a later
+	// sibling still collides with it.
+	for _, st := range ss {
+		out = shadowDeclStmt(fn, outer, out, st)
+	}
 	for _, st := range ss {
 		out = shadowStmt(fn, outer, out, st)
 	}
@@ -639,23 +660,43 @@ func importNamesOf(f *syntax.File) (names []string) {
 // in regardless of where in that block it is written.
 func checkShadowing(files []*syntax.File) {
 	pkgNames := packageDeclNames(files)
+	imports := packageImportNames(files)
 	for _, f := range files {
 		if f == nil {
 			continue
 		}
-		outer := concatNames(pkgNames, importNamesOf(f))
+		outer := concatNames(pkgNames, imports)
 		for _, d := range f.DeclList {
 			fd, ok := d.(*syntax.FuncDecl)
 			if !ok || fd.Body == nil || fd.Name == nil {
 				continue
 			}
+			// A function body's top-level bindings share the parameter scope:
+			// `r, n := f()` redeclares a named result (or a parameter) rather
+			// than shadowing it, which is what the legacy compiler's go/types
+			// scopes give. Nested blocks are pushed by shadowStmt.
 			scopes := [][]string{[]string{}}
 			scopes = shadowDeclField(fd.Name.Value, outer, scopes, fd.Recv)
 			scopes = shadowDeclSig(fd.Name.Value, outer, scopes, fd.Type)
-			scopes = shadowPush(scopes)
 			shadowStmts(fd.Name.Value, outer, scopes, fd.Body.List)
 		}
 	}
+}
+
+// packageImportNames collects every import binding in the package, deduped.
+func packageImportNames(files []*syntax.File) (names []string) {
+	for _, f := range files {
+		if f == nil {
+			continue
+		}
+		for _, nm := range importNamesOf(f) {
+			if !inNameList(names, nm) {
+				names = mxutil.Ensure(names, 1)
+				names = push(names, nm)
+			}
+		}
+	}
+	return names
 }
 
 // checkParamMutation rejects stores through function parameters.

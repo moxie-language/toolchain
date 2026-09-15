@@ -694,23 +694,43 @@ func (c *compilerContext) checkImportNameCollisions(pkg *loader.Package) {
 		name string
 	}
 	var hits []collision
-	for ident, obj := range info.Defs {
-		if ident == nil || obj == nil {
-			continue
+	// Only lexical bindings collide with an import name: package scope and the
+	// scopes inside function bodies. A method name or a struct field name is
+	// bound to a type, not to a scope, so `func (c nistCurve) ecdh(...)` does
+	// not collide with an imported `ecdh` package.
+	seen := map[token.Pos]bool{}
+	flag := func(scope *types.Scope) {
+		if scope == nil {
+			return
 		}
-		// The import itself is not a collision, and the blank identifier is
-		// not a name.
-		if _, isPkg := obj.(*types.PkgName); isPkg {
-			continue
-		}
-		if ident.Name == "_" {
-			continue
-		}
-		if imported[ident.Name] {
-			hits = append(hits, collision{pos: ident.Pos(), name: ident.Name})
+		for _, name := range scope.Names() {
+			if name == "_" || !imported[name] {
+				continue
+			}
+			obj := scope.Lookup(name)
+			if obj == nil {
+				continue
+			}
+			// The import binding itself is not a collision.
+			if _, isPkg := obj.(*types.PkgName); isPkg {
+				continue
+			}
+			if seen[obj.Pos()] {
+				continue
+			}
+			seen[obj.Pos()] = true
+			hits = append(hits, collision{pos: obj.Pos(), name: name})
 		}
 	}
-	// info.Defs is a map, so sort before reporting: diagnostics must not
+	pkgScope := pkg.Pkg.Scope()
+	flag(pkgScope)
+	for _, scope := range info.Scopes {
+		if scope == nil || scope == pkgScope {
+			continue
+		}
+		flag(scope)
+	}
+	// info.Scopes is a map, so sort before reporting: diagnostics must not
 	// depend on map iteration order.
 	sort.Slice(hits, func(i, j int) bool {
 		if hits[i].pos != hits[j].pos {
@@ -773,11 +793,29 @@ func isDemotedStringConst(vs *ast.ValueSpec) bool {
 		if len(call.Args) != 1 {
 			return false
 		}
-		if lit, ok := call.Args[0].(*ast.BasicLit); !ok || lit.Kind != token.STRING {
+		// The argument is a string expression: a literal, or literals joined
+		// with | or + (wrapStringExpr normalizes | to + and wraps the whole
+		// expression in one []byte conversion).
+		if !isStringLiteralExpr(call.Args[0]) {
 			return false
 		}
 	}
 	return true
+}
+
+// isStringLiteralExpr reports whether expr is a string literal, possibly
+// joined with + or | and parenthesized.
+func isStringLiteralExpr(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		return e.Kind == token.STRING
+	case *ast.BinaryExpr:
+		return (e.Op == token.ADD || e.Op == token.OR) &&
+			isStringLiteralExpr(e.X) && isStringLiteralExpr(e.Y)
+	case *ast.ParenExpr:
+		return isStringLiteralExpr(e.X)
+	}
+	return false
 }
 
 func checkInitBodyRestrictions(c *compilerContext, body *ast.BlockStmt) {

@@ -46,9 +46,10 @@ func ssaConstEqual(a, b *SSAConst) (eq bool) {
 // CreatePackage builds the SSA Package from type-checked syntax files.
 func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info *Info) (s *SSAPackage) {
 	p := &SSAPackage{
-		Prog:    prog,
-		Pkg:     pkg,
-		Members: map[string]SSAMember{},
+		Prog:        prog,
+		Pkg:         pkg,
+		Members:     map[string]SSAMember{},
+		ImportNames: packageImportNames(files),
 	}
 	prog.packages[pkg] = p
 	prog.imported[pkg.Path] = p
@@ -963,6 +964,30 @@ func (fb *ssaFuncBuilder) exitScope(old int32) {
 	fb.scopeID = old
 }
 
+// bindingShadows reports whether obj is visible from an enclosing scope of the
+// function being built, so that a declaration of the same name shadows it.
+//
+// A binding of an enclosing function lives in that function's builder and
+// carries scope ids from that builder's numbering, which cannot be compared
+// with this one's. The closure is built while its parent is still walking the
+// statement that contains it, so the parent's current scope is exactly the
+// scope the closure was created in: the ancestry test runs in the parent's id
+// space. Names bound outside any function body - package scope, file imports,
+// predeclared - enclose every function.
+func (fb *ssaFuncBuilder) bindingShadows(obj Object) (ok bool) {
+	if _, mine := fb.vars[obj]; mine {
+		sc, hasScope := fb.varScope[obj]
+		return !hasScope || fb.scopeIsAncestor(sc, fb.scopeID)
+	}
+	for p := fb.parent; p != nil; p = p.parent {
+		if _, found := p.vars[obj]; found {
+			sc, hasScope := p.varScope[obj]
+			return !hasScope || p.scopeIsAncestor(sc, p.scopeID)
+		}
+	}
+	return true
+}
+
 func (fb *ssaFuncBuilder) labelBlock(name string) (s *SSABasicBlock) {
 	if fb.labels == nil {
 		fb.labels = map[string]*SSABasicBlock{}
@@ -1227,7 +1252,11 @@ func (fb *ssaFuncBuilder) buildStmt(s syntax.Stmt) {
 	case *syntax.AssignStmt:
 		fb.buildAssign(ss)
 	case *syntax.BlockStmt:
+		// A bare block is its own scope: bindings inside it do not outlive it,
+		// and a later sibling block may reuse their names.
+		blockScope := fb.enterScope()
 		fb.buildBlock(ss)
+		fb.exitScope(blockScope)
 	case *syntax.DeclStmt:
 		for _, d := range ss.DeclList {
 			fb.buildLocalDecl(d)
@@ -1551,9 +1580,9 @@ func (fb *ssaFuncBuilder) shortVarStore(name *syntax.Name, val SSAValue, typ Typ
 	if ex := fb.lookupObject(name.Value); ex != nil {
 		if sc, ok := fb.varScope[ex]; ok {
 			if sc == fb.scopeID {
-				if alloc, ok2 := fb.vars[ex]; ok2 {
+				if existing, ok2 := fb.vars[ex]; ok2 {
 					if val != nil {
-						fb.emitStore(alloc, val)
+						fb.emitStore(existing, val)
 					}
 					return
 				}
@@ -1561,11 +1590,13 @@ func (fb *ssaFuncBuilder) shortVarStore(name *syntax.Name, val SSAValue, typ Typ
 			if fb.fn != nil && fb.scopeIsAncestor(sc, fb.scopeID) {
 				shadowErr(fb.fn.name, name.Value)
 			}
-		} else if fb.fn != nil {
-			// Not in varScope: a package, file, or predeclared name, all of
-			// which enclose the function body.
+		} else if fb.fn != nil && fb.bindingShadows(ex) {
 			shadowErr(fb.fn.name, name.Value)
 		}
+	} else if fb.fn != nil && fb.fn.Pkg != nil && inNameList(fb.fn.Pkg.ImportNames, name.Value) {
+		// Bound by an import in another file of this package. The collision
+		// rule is package-wide, so this is still a collision.
+		shadowErr(fb.fn.name, name.Value)
 	} else if Universe.Lookup(name.Value) != nil && fb.fn != nil {
 		// Predeclared identifiers are in scope everywhere.
 		shadowErr(fb.fn.name, name.Value)
@@ -1770,9 +1801,12 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			}
 			if fb.fn != nil {
 				if ex := fb.lookupObject(name.Value); ex != nil {
-					if sc, ok := fb.varScope[ex]; !ok || fb.scopeIsAncestor(sc, fb.scopeID) {
+					if fb.bindingShadows(ex) {
 						shadowErr(fb.fn.name, name.Value)
 					}
+				} else if fb.fn.Pkg != nil && inNameList(fb.fn.Pkg.ImportNames, name.Value) {
+					// Bound by an import in another file of this package.
+					shadowErr(fb.fn.name, name.Value)
 				} else if Universe.Lookup(name.Value) != nil {
 					shadowErr(fb.fn.name, name.Value)
 				}
@@ -1790,6 +1824,7 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			}
 			alloc := fb.emitAlloc(ObjectType(obj), 0)
 			fb.vars[obj] = alloc
+			fb.varScope[obj] = fb.scopeID
 			fb.fn.Locals = mxutil.Ensure(fb.fn.Locals, 1)
 			push(fb.fn.Locals, alloc)
 			if initVal != nil {
@@ -1901,8 +1936,8 @@ func (fb *ssaFuncBuilder) evalLocalConstExpr(e syntax.Expr, iotaVal int64) (c Co
 		return tcEvalConstExpr(ev, fb.fn.Pkg.Pkg.Scope, iotaVal)
 	case *syntax.CallExpr:
 		if name, ok := ev.Fun.(*syntax.Name); ok && name.Value == "len" && len(ev.ArgList) == 1 {
-			inner := fb.evalLocalConstExpr(ev.ArgList[0], iotaVal)
-			if cs, ok2 := inner.(*ConstStr); ok2 {
+			lenArg := fb.evalLocalConstExpr(ev.ArgList[0], iotaVal)
+			if cs, ok2 := lenArg.(*ConstStr); ok2 {
 				return &ConstInt{V: int64(len(cs.S))}
 			}
 			// len of an array-typed expression is a compile-time constant.
@@ -2019,11 +2054,18 @@ func (fb *ssaFuncBuilder) exprStaticType(e syntax.Expr) (t Type) {
 		if !ok {
 			return nil
 		}
-		for i := int32(0); i < st.NumFields(); i++ {
-			if st.Field(i).Name == ex.Sel.Value {
-				return st.Field(i).Typ
-			}
+		if i := fb.fieldIndex(st, ex.Sel.Value); i >= 0 {
+			return st.Field(i).Typ
 		}
+		path := fb.findEmbeddedFieldPath(st, ex.Sel.Value)
+		if len(path) == 0 {
+			return nil
+		}
+		var cur Type = st
+		for _, idx := range path {
+			cur = fb.fieldType(cur, idx)
+		}
+		return cur
 	case *syntax.IndexExpr:
 		switch u := SafeUnderlying(fb.exprStaticType(ex.X)).(type) {
 		case *Slice:
@@ -2035,7 +2077,10 @@ func (fb *ssaFuncBuilder) exprStaticType(e syntax.Expr) (t Type) {
 	return nil
 }
 
-// evalOffsetofArg computes unsafe.Offsetof(sel) for a struct field selector.
+// evalOffsetofArg computes unsafe.Offsetof(sel) for a struct field selector,
+// following embedded fields the same way an ordinary selector does. Offsets are
+// accumulated along the embedded path; a path that hops through a pointer has no
+// constant offset and reports false.
 func (fb *ssaFuncBuilder) evalOffsetofArg(e syntax.Expr) (off int64, ok bool) {
 	sel, isSel := e.(*syntax.SelectorExpr)
 	if !isSel || sel == nil || sel.Sel == nil {
@@ -2045,12 +2090,31 @@ func (fb *ssaFuncBuilder) evalOffsetofArg(e syntax.Expr) (off int64, ok bool) {
 	if !isStruct {
 		return 0, false
 	}
-	for i := int32(0); i < st.NumFields(); i++ {
-		if st.Field(i).Name == sel.Sel.Value {
-			return StructFieldOffset(st, i), true
+	if i := fb.fieldIndex(st, sel.Sel.Value); i >= 0 {
+		return int64(structFieldOffset(st, i)), true
+	}
+	path := fb.findEmbeddedFieldPath(st, sel.Sel.Value)
+	if len(path) < 2 {
+		return 0, false
+	}
+	var total int64
+	var cur Type = st
+	for pi, idx := range path {
+		cst, isS := SafeUnderlying(cur).(*TCStruct)
+		if !isS {
+			return 0, false
+		}
+		total += int64(structFieldOffset(cst, idx))
+		cur = fb.fieldType(cur, idx)
+		if pi < len(path)-1 {
+			if _, isPtr := SafeUnderlying(cur).(*Pointer); isPtr {
+				// The remaining offsets are relative to the pointed-to
+				// struct, not to the operand, so there is no constant offset.
+				return 0, false
+			}
 		}
 	}
-	return 0, false
+	return total, true
 }
 
 func (fb *ssaFuncBuilder) buildIf(s *syntax.IfStmt) {
@@ -4102,7 +4166,7 @@ func (fb *ssaFuncBuilder) tryGenericMethodCall(sel *syntax.SelectorExpr, recv SS
 		return nil
 	}
 	isPtr := false
-	if p, ok := SafeUnderlying(typ).(*Pointer); ok {
+	if p, isP := SafeUnderlying(typ).(*Pointer); isP {
 		typ = p.Base
 		isPtr = true
 	}
@@ -5200,7 +5264,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 	if imported.Path == "unsafe" && funcName == "Offsetof" {
 		off := int64(0)
 		if len(argList) == 1 {
-			if o, ok := fb.evalOffsetofArg(argList[0]); ok {
+			if o, offOK := fb.evalOffsetofArg(argList[0]); offOK {
 				off = o
 			}
 		}
@@ -5342,7 +5406,7 @@ func (fb *ssaFuncBuilder) nameResolves(n *syntax.Name) (ok bool) {
 		return true
 	}
 	if fb.localConsts != nil {
-		if _, ok := fb.localConsts[n.Value]; ok {
+		if _, haveConst := fb.localConsts[n.Value]; haveConst {
 			return true
 		}
 	}
@@ -5357,7 +5421,7 @@ func (fb *ssaFuncBuilder) nameResolves(n *syntax.Name) (ok bool) {
 	if fb.parent != nil {
 		for p := fb.parent; p != nil; p = p.parent {
 			if p.localConsts != nil {
-				if _, ok := p.localConsts[n.Value]; ok {
+				if _, parentConst := p.localConsts[n.Value]; parentConst {
 					return true
 				}
 			}
@@ -5367,7 +5431,7 @@ func (fb *ssaFuncBuilder) nameResolves(n *syntax.Name) (ok bool) {
 				}
 			}
 			if p.freeVarPtrs != nil {
-				if _, ok := p.freeVarPtrs[n.Value]; ok {
+				if _, isFree := p.freeVarPtrs[n.Value]; isFree {
 					return true
 				}
 			}
@@ -5378,7 +5442,7 @@ func (fb *ssaFuncBuilder) nameResolves(n *syntax.Name) (ok bool) {
 			return true
 		}
 	}
-	if _, ok := ssaBuiltinID(n.Value); ok {
+	if _, isBuiltin := ssaBuiltinID(n.Value); isBuiltin {
 		return true
 	}
 	return false
@@ -5632,8 +5696,8 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 					recv = g
 				} else if tv, okT := obj.(*TCVar); okT && tv.Pkg != nil && tv.Pkg != fb.fn.Pkg.Pkg {
 					impPkg := fb.ensureImportedSSAPackage(tv.Pkg)
-					if g, okG := impPkg.Members[nameExpr.Value].(*SSAGlobal); okG {
-						recv = g
+					if ig, iokG := impPkg.Members[nameExpr.Value].(*SSAGlobal); iokG {
+						recv = ig
 					}
 				}
 			} else if innerSel, ok42 := sel.X.(*syntax.SelectorExpr); ok42 {
@@ -5826,7 +5890,7 @@ func (fb *ssaFuncBuilder) buildEmbeddedIfaceMethodCall(sel *syntax.SelectorExpr,
 	}
 	t := recv.SSAType()
 	isPtr := false
-	if p, ok := SafeUnderlying(t).(*Pointer); ok {
+	if p, isP := SafeUnderlying(t).(*Pointer); isP {
 		t = p.Base
 		isPtr = true
 	}
@@ -6368,8 +6432,8 @@ func localizeConstVal(val ConstVal, typ Type) (c ConstVal) {
 	return val
 }
 
-func mangleGenericName(baseName string, typeArgs []Type) (s string) {
-	s = baseName | "__"
+func mangleGenericName(plainName string, typeArgs []Type) (s string) {
+	s = plainName | "__"
 	for i, t := range typeArgs {
 		if i > 0 {
 			s = s | "_"
@@ -6898,13 +6962,13 @@ func (fb *ssaFuncBuilder) unifyParamAST(paramAST syntax.Expr, argAST syntax.Expr
 // was emitted - the value is nil for void functions, so callers must NOT use
 // value-nilness to decide whether to fall through to a non-generic call path
 // (that double-emits the call).
-func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, baseName string, typeArgs []Type, args []SSAValue, targetPkg *SSAPackage, srcPkgPath string, hasDots bool) (s SSAValue, handled bool) {
+func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, plainName string, typeArgs []Type, args []SSAValue, targetPkg *SSAPackage, srcPkgPath string, hasDots bool) (s SSAValue, handled bool) {
 	for _, ta := range typeArgs {
 		if ta == nil {
 			return nil, false
 		}
 	}
-	mangledName := mangleGenericName(baseName, typeArgs)
+	mangledName := mangleGenericName(plainName, typeArgs)
 	if srcPkgPath != "" {
 		// Two generic funcs with the same name from different packages can
 		// mangle identically (e.g. crypto/pbkdf2.Key and
