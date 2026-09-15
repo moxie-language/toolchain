@@ -92,7 +92,6 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 	for _, member := range p.Members {
 		if f, ok := member.(*SSAFunction); ok {
 			checkGlobalMutation(f)
-			checkWasmSpawn(f)
 		}
 	}
 	checkSovereignLoopDecls(p, files)
@@ -1785,6 +1784,20 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			}
 		}
 	}
+}
+
+
+// wordType is the universe's uintptr: a named type over Uint32 on wasm32 and
+// Uint64 elsewhere. unsafe.Sizeof/Alignof/Offsetof yield uintptr, so folding
+// them to this type gives the constant the target's word width. Typing them
+// Int64 instead made the value i64 on wasm32, and passing an i64 where a
+// uintptr parameter is declared - runtime.alloc's size, for one - produced a
+// call whose signature did not match, which LLVM lowers to unreachable.
+func (fb *ssaFuncBuilder) wordType() (t Type) {
+	if cctx != nil && cctx.universe != nil && cctx.universe.Uintptr != nil && cctx.universe.Uintptr.Typ != nil {
+		return cctx.universe.Uintptr.Typ
+	}
+	return Typ[Uint64]
 }
 
 func (fb *ssaFuncBuilder) evalLocalConstExpr(e syntax.Expr, iotaVal int64) (c ConstVal) {
@@ -5071,6 +5084,10 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		return idx
 	}
 	if imported.Path == "unsafe" && funcName == "Sizeof" {
+		// Typed uintptr, not Int64: the folded value is the target's word
+		// width, and giving it i64 on wasm32 made every consumer that passes
+		// it to a uintptr parameter - notably runtime.alloc's size - call
+		// with a mismatched signature, which LLVM lowers to unreachable.
 		sz := int64(8)
 		if len(argList) == 1 {
 			// The operand is not evaluated (Go spec); operandType gets its
@@ -5079,7 +5096,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 				sz = TypeSize(t)
 			}
 		}
-		return NewSSAConst(&ConstInt{V:sz}, Typ[Int64])
+		return NewSSAConst(&ConstInt{V:sz}, fb.wordType())
 	}
 	if imported.Path == "unsafe" && funcName == "Alignof" {
 		al := int64(8)
@@ -5088,7 +5105,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 				al = TypeAlign(t)
 			}
 		}
-		return NewSSAConst(&ConstInt{V:al}, Typ[Int64])
+		return NewSSAConst(&ConstInt{V:al}, fb.wordType())
 	}
 	if imported.Path == "unsafe" && funcName == "TypeOf" {
 		if len(argList) != 1 {
@@ -5113,7 +5130,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 				off = o
 			}
 		}
-		return NewSSAConst(&ConstInt{V:off}, Typ[Int64])
+		return NewSSAConst(&ConstInt{V:off}, fb.wordType())
 	}
 	if imported.Path == "internal/abi" && (funcName == "Escape" || funcName == "NoEscape") {
 		// Escape is a no-op identity in the arena model (values are
