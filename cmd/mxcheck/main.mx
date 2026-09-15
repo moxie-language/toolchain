@@ -1,0 +1,413 @@
+package main
+
+import (
+	"git.smesh.lol/moxie/pkg/mxutil"
+)
+
+// mxcheck reports Moxie declaration-rule violations in .mx source.
+//
+// Two rules are checked, both from the compiler's restriction set:
+//
+//  1. import collision - a declaration whose name is also an imported package
+//     name. Moxie keeps one binding per name: alias the import or rename the
+//     declaration.
+//  2. shadowing - a declaration whose name is already bound in an enclosing
+//     block of the same function.
+//
+// It is deliberately lexical. Comments are blanked, braces and case clauses
+// drive a scope stack, and declarations are recognised by shape. That is enough
+// to find both rule classes without a type checker, which is the point: the
+// compiler stops at the first non-compliant package, and these are the
+// violations that stop it. A standalone scan reports all of them in one pass.
+//
+// Output is sorted by file, then line, so a run is reproducible.
+//
+// STATUS: compiles and links, but does NOT run yet. It panics with "slice: push
+// past end of slice capacity" because every push here is bare: Moxie's push
+// does not grow a slice, so each call site needs
+//   if len(x) >= cap(x) { x = mxutil.GrowCap(x) }
+// first, which is what the rest of this tree does. Fix that, then verify
+// against src/encoding/base64 and src/time, which are known non-compliant.
+// Directory arguments also need checking: ListFiles returned nothing for
+// "tmp/pc" while an explicit .mx path reached addFile.
+//
+// Usage: MXCHECK="path..." mxcheck        (path is a .mx file or a directory)
+//
+// Paths come from the MXCHECK environment variable rather than argv, and the
+// only import is mxutil, because mxcheck has to be runnable while the tree is
+// still non-compliant - the compiler refuses a package with these violations,
+// so anything that pulls in os/syscall cannot be built until the sweep it is
+// meant to drive is already done. mxutil is in the compiler's own closure and
+// stays buildable. Once the stdlib is compliant this can take os.Args instead.
+//
+// Covered: import names, top-level func names, and every var/const/type and
+// ':=' declaration in a function body, at any nesting the scope stack models.
+// Not covered: parameters and named results, struct field names (not bindings,
+// and must not be flagged), and function literals nested inside expressions.
+
+const (
+	kindIdent  = 0
+	kindString = 1
+	kindOther  = 2
+	kindOpen   = 3
+	kindClose  = 4
+)
+
+type finding struct {
+	path string
+	line int32
+	col  int32
+	msg  string
+}
+
+func isIdentStart(c byte) (ok bool) {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isIdentPart(c byte) (ok bool) {
+	return isIdentStart(c) || (c >= '0' && c <= '9')
+}
+
+func isSpace(c byte) (ok bool) {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
+}
+
+// lex yields identifiers, string literals (with their quotes, so an import path
+// survives), and single significant characters. Comments produce nothing.
+func lex(src []byte) (kind []int32, text []string, line []int32, col []int32) {
+	var ln int32 = 1
+	var cl int32 = 1
+	var i int32
+	for i < len(src) {
+		c := src[i]
+		if c == '\n' {
+			ln++
+			cl = 1
+			i++
+			continue
+		}
+		if isSpace(c) {
+			cl++
+			i++
+			continue
+		}
+		if c == '/' && i+1 < len(src) && src[i+1] == '/' {
+			for i < len(src) && src[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if c == '/' && i+1 < len(src) && src[i+1] == '*' {
+			i += 2
+			for i < len(src) {
+				if src[i] == '\n' {
+					ln++
+					cl = 1
+				}
+				if src[i] == '*' && i+1 < len(src) && src[i+1] == '/' {
+					i += 2
+					break
+				}
+				i++
+			}
+			continue
+		}
+		if c == '"' || c == '\'' || c == '`' {
+			quote := c
+			j := i + 1
+			for j < len(src) {
+				if src[j] == '\\' && quote != '`' {
+					j += 2
+					continue
+				}
+				if src[j] == quote {
+					j++
+					break
+				}
+				if src[j] == '\n' {
+					ln++
+				}
+				j++
+			}
+			kind = push(kind, kindString)
+			text = push(text, string(src[i:j]))
+			line = push(line, ln)
+			col = push(col, cl)
+			cl += j - i
+			i = j
+			continue
+		}
+		if isIdentStart(c) {
+			j := i
+			for j < len(src) && isIdentPart(src[j]) {
+				j++
+			}
+			kind = push(kind, kindIdent)
+			text = push(text, string(src[i:j]))
+			line = push(line, ln)
+			col = push(col, cl)
+			cl += j - i
+			i = j
+			continue
+		}
+		k := kindOther
+		if c == '{' || c == '(' || c == '[' {
+			k = kindOpen
+		} else if c == '}' || c == ')' || c == ']' {
+			k = kindClose
+		}
+		kind = push(kind, k)
+		text = push(text, string(src[i:i+1]))
+		line = push(line, ln)
+		col = push(col, cl)
+		cl++
+		i++
+	}
+	return
+}
+
+// skipGroup returns the index just past the group opened at j.
+func skipGroup(text []string, j int32, open, close string) (n int32) {
+	depth := int32(0)
+	for j < len(text) {
+		if text[j] == open {
+			depth++
+		} else if text[j] == close {
+			depth--
+			if depth == 0 {
+				return j + 1
+			}
+		}
+		j++
+	}
+	return j
+}
+
+// pathBase returns the last element of an import path.
+func pathBase(lit string) (s string) {
+	body := lit
+	if len(body) >= 2 {
+		body = body[1 : len(body)-1]
+	}
+	last := int32(-1)
+	for i := int32(0); i < len(body); i++ {
+		if body[i] == '/' {
+			last = i
+		}
+	}
+	return body[last+1:]
+}
+
+// importNames collects the name each import binds: the explicit alias when
+// present, otherwise the path tail. The compiler resolves an unaliased import
+// to the imported package's own name, which can differ from the path tail; an
+// alias always wins, and that is the escape hatch the rule offers.
+func importNames(kind []int32, text []string, names map[string]bool) {
+	i := int32(0)
+	for i < len(text) {
+		if kind[i] != kindIdent || text[i] != "import" {
+			i++
+			continue
+		}
+		j := i + 1
+		if j < len(text) && text[j] == "(" {
+			j++
+			for j < len(text) && text[j] != ")" {
+				j = importSpec(kind, text, j, names)
+			}
+			i = j + 1
+			continue
+		}
+		i = importSpec(kind, text, j, names)
+	}
+}
+
+func importSpec(kind []int32, text []string, j int32, names map[string]bool) (next int32) {
+	alias := ""
+	if j < len(text) && kind[j] == kindIdent && j+1 < len(text) && text[j+1] != "(" {
+		alias = text[j]
+		j++
+	}
+	if j < len(text) && kind[j] == kindString {
+		if alias == "" {
+			alias = pathBase(text[j])
+		} else if alias == "_" || alias == "." {
+			// Blank and dot imports bind no name.
+			alias = ""
+		}
+		if alias != "" {
+			names[alias] = true
+		}
+		j++
+	}
+	return j
+}
+
+// declare records a binding at the current scope, reporting a collision with an
+// import name or a binding in an enclosing scope.
+func declare(f *[]finding, path string, scopes []map[string]bool, line, col int32, name string, imports map[string]bool) {
+	if name == "" || name == "_" {
+		return
+	}
+	if imports[name] {
+		*f = push(*f, finding{path: path, line: line, col: col,
+			msg: "'" + name + "' collides with an imported package name: alias the import or rename the declaration"})
+	}
+	for s := 0; s < len(scopes)-1; s++ {
+		if scopes[s][name] {
+			*f = push(*f, finding{path: path, line: line, col: col,
+				msg: "'" + name + "' shadows a declaration in an enclosing scope"})
+			break
+		}
+	}
+	scopes[len(scopes)-1][name] = true
+}
+
+// firstOnLine reports whether token k is the first token on its source line.
+func firstOnLine(line []int32, k int32) (ok bool) {
+	return k == 0 || line[k] != line[k-1]
+}
+
+// declNames emits the names in a var/const/type declaration starting at keyword
+// index k; it returns the index just past the declaration.
+func declNames(f *[]finding, path string, kind []int32, text []string, line, col []int32,
+	scopes []map[string]bool, imports map[string]bool, k int32) (next int32) {
+	j := k + 1
+	if j < len(text) && text[j] == "(" {
+		j++
+		for j < len(text) && text[j] != ")" {
+			if kind[j] == kindIdent && firstOnLine(line, j) {
+				declare(f, path, scopes, line[j], col[j], text[j], imports)
+			}
+			j++
+		}
+		return j + 1
+	}
+	// var a, b T   /   type X struct   /   const C = v
+	for j < len(text) {
+		if kind[j] == kindIdent {
+			declare(f, path, scopes, line[j], col[j], text[j], imports)
+			j++
+			if j < len(text) && text[j] == "," {
+				j++
+				continue
+			}
+		}
+		break
+	}
+	return j
+}
+
+func checkTokens(path string, kind []int32, text []string, line, col []int32, out *[]finding) {
+	imports := map[string]bool{}
+	importNames(kind, text, imports)
+
+	scopes := []map[string]bool{map[string]bool{}}
+	caseScope := []bool{false}
+	var i int32
+	for i < len(text) {
+		t := text[i]
+		if kind[i] == kindOpen && t == "{" {
+			scopes = push(scopes, map[string]bool{})
+			caseScope = push(caseScope, false)
+			i++
+			continue
+		}
+		if kind[i] == kindClose && t == "}" {
+			// A case clause scope sits inside its switch's brace scope; drop
+			// it along with the brace.
+			if len(scopes) > 1 {
+				if caseScope[len(caseScope)-1] {
+					scopes = scopes[:len(scopes)-1]
+					caseScope = caseScope[:len(caseScope)-1]
+				}
+				scopes = scopes[:len(scopes)-1]
+				caseScope = caseScope[:len(caseScope)-1]
+			}
+			i++
+			continue
+		}
+		if kind[i] == kindIdent && (t == "case" || t == "default") {
+			// Each clause is a sibling scope, so the previous one closes.
+			if len(scopes) > 1 && caseScope[len(caseScope)-1] {
+				scopes = scopes[:len(scopes)-1]
+				caseScope = caseScope[:len(caseScope)-1]
+			}
+			scopes = push(scopes, map[string]bool{})
+			caseScope = push(caseScope, true)
+			i++
+			continue
+		}
+		if kind[i] == kindIdent && (t == "var" || t == "const" || t == "type") {
+			i = declNames(out, path, kind, text, line, col, scopes, imports, i)
+			continue
+		}
+		if kind[i] == kindIdent && t == "func" {
+			// func [(recv)] Name( - declare the name; parameters are skipped.
+			j := i + 1
+			if j < len(text) && text[j] == "(" {
+				j = skipGroup(text, j, "(", ")")
+			}
+			if j < len(text) && kind[j] == kindIdent && text[j] != "(" {
+				declare(out, path, scopes, line[j], col[j], text[j], imports)
+			}
+			i = j
+			continue
+		}
+		// x := ...   and   a, b := ...
+		if kind[i] == kindOther && t == ":" && i+1 < len(text) && text[i+1] == "=" {
+			j := i - 1
+			for j >= 0 {
+				if kind[j] == kindIdent && !(j > 0 && text[j-1] == ".") {
+					declare(out, path, scopes, line[j], col[j], text[j], imports)
+					j--
+					if j >= 0 && text[j] == "," {
+						j--
+						continue
+					}
+				}
+				break
+			}
+		}
+		i++
+	}
+}
+
+func addFile(path string, out *[]finding) {
+	src, ok := mxutil.ReadFile(path)
+	if !ok {
+		return
+	}
+	kind, text, line, col := lex(src)
+	checkTokens(path, kind, text, line, col, out)
+}
+
+func main() {
+	for _, p := range mxutil.SplitBySpace(mxutil.Getenv("MXCHECK")) {
+		if mxutil.HasSuffix(p, ".mx") {
+			addFile(p, &findings)
+			continue
+		}
+		for _, fp := range mxutil.ListFiles(p, ".mx") {
+			addFile(fp, &findings)
+		}
+	}
+	// Sort by file then line so a run is reproducible.
+	for i := 1; i < len(findings); i++ {
+		for j := i; j > 0; j-- {
+			a := findings[j]
+			b := findings[j-1]
+			if a.path > b.path || (a.path == b.path && a.line >= b.line) {
+				break
+			}
+			findings[j] = b
+			findings[j-1] = a
+		}
+	}
+	for _, fd := range findings {
+		mxutil.WriteStr(1, fd.path | ":" | mxutil.SimpleItoa(fd.line) | ":" | mxutil.SimpleItoa(fd.col) | ": " | fd.msg | "\n")
+	}
+	mxutil.WriteStr(1, mxutil.SimpleItoa(int32(len(findings))) | " findings\n")
+}
+
+var findings []finding
