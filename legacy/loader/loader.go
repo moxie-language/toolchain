@@ -324,7 +324,13 @@ func (p *Package) parseFile(path string, mode parser.Mode) (*ast.File, error) {
 	data = rewritePkgMainToInit(data)
 
 	chanResult := rewriteChanLiterals(data, p.program.fset)
+	if chanResult.Err != nil {
+		return nil, chanResult.Err
+	}
 	sliceResult := rewriteSliceLiterals(chanResult.Src, p.program.fset, chanResult.MakeOffsets)
+	if sliceResult.Err != nil {
+		return nil, sliceResult.Err
+	}
 	data = sliceResult.Src
 
 	if p.program.keepSyntaxFiles {

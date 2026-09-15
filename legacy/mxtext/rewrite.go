@@ -27,12 +27,17 @@ import (
 	"go/scanner"
 	"go/token"
 	"go/types"
+	"sort"
 	"strings"
 )
 
 // RewriteResult holds rewritten source and metadata about generated tokens.
 type RewriteResult struct {
 	Src            []byte
+	// Err is set when the rewrite refused to emit text. Callers must check it:
+	// a corrupted rewrite produces source that no longer parses, and the parse
+	// error points at the wrong place.
+	Err            error
 	MakeOffsets    []int // byte offsets of loader-generated 'make' tokens
 	// PriorOffsets are make offsets from an earlier rewrite pass, adjusted
 	// to account for byte shifts introduced by this rewrite. Only populated
@@ -313,6 +318,10 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int
 	var offsets []int
 	lastEnd := 0
 
+	// Spans this pass rewrote, checked for overlaps once the scan is done.
+	type span struct{ start, end int }
+	var spans []span
+
 	// Track input-to-output byte delta for remapping prior offsets.
 	// Each entry: replacement consumed src[replStart:replEnd] and wrote
 	// outputLen bytes. Prior offsets after replStart shift by the
@@ -343,19 +352,31 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int
 			braceIdx = lbrackIdx + 1
 		} else {
 			depth := 0
-			for j := i + 2; j < len(toks); j++ {
+			stop := false
+			for j := i + 2; j < len(toks) && !stop; j++ {
 			switch toks[j].tok {
 			case token.LBRACK:
 				depth++
 			case token.RBRACK:
-				depth--
+				// The scan began after the opening '[', so a ']' with nothing
+				// open inside the window closes an enclosing construct.
+				if depth == 0 {
+					stop = true
+				} else {
+					depth--
+				}
 			case token.LPAREN:
 				depth++
 			case token.RPAREN:
-				depth--
+				if depth == 0 {
+					stop = true
+				} else {
+					depth--
+				}
 			case token.LBRACE:
 				if depth == 0 {
 					braceIdx = j
+					stop = true
 				}
 			}
 			if braceIdx >= 0 {
@@ -501,6 +522,7 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int
 		}
 
 		replInputEnd := toks[closeIdx].end
+		spans = append(spans, span{start: replInputStart, end: replInputEnd})
 		cumDelta = result.Len() - replInputEnd
 		deltas = append(deltas, deltaEntry{inputEnd: replInputEnd, cumDelta: cumDelta})
 
@@ -516,6 +538,25 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int
 		return r
 	}
 	result.Write(src[lastEnd:])
+
+	// Sort the rewritten spans and reject any overlap. Two spans covering the
+	// same bytes means the scanner matched a region twice, or matched across a
+	// construct it should not have entered; splicing both would emit text that
+	// no longer parses, so refuse instead of corrupting the source.
+	if len(spans) > 1 {
+		sorted := make([]span, len(spans))
+		copy(sorted, spans)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].start < sorted[j].start })
+		for i := 1; i < len(sorted); i++ {
+			if sorted[i].start < sorted[i-1].end {
+				return RewriteResult{
+					Src: src,
+					Err: fmt.Errorf("slice-literal rewrite: overlapping matches at bytes %d-%d and %d-%d",
+						sorted[i-1].start, sorted[i-1].end, sorted[i].start, sorted[i].end),
+				}
+			}
+		}
+	}
 
 	// Remap prior offsets from the earlier rewrite pass.
 	var remapped []int
