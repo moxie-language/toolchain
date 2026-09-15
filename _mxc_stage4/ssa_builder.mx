@@ -1523,8 +1523,8 @@ func (fb *ssaFuncBuilder) shortVarStore(name *syntax.Name, val SSAValue, typ Typ
 		return
 	}
 	// Same-scope reassignment: if a variable with this name was declared in
-	// the current scope, := assigns to it (Go semantics). A name from an
-	// outer scope is shadowed by a fresh local.
+	// the current scope, := assigns to it (Go semantics). A name that resolves
+	// to an enclosing scope would be shadowing, which Moxie forbids.
 	if ex := fb.lookupObject(name.Value); ex != nil {
 		if sc, ok := fb.varScope[ex]; ok && sc == fb.scopeID {
 			if alloc, ok2 := fb.vars[ex]; ok2 {
@@ -1534,6 +1534,12 @@ func (fb *ssaFuncBuilder) shortVarStore(name *syntax.Name, val SSAValue, typ Typ
 				return
 			}
 		}
+		if fb.fn != nil {
+			shadowErr(fb.fn.name, name.Value)
+		}
+	} else if Universe.Lookup(name.Value) != nil && fb.fn != nil {
+		// Predeclared identifiers are in scope everywhere.
+		shadowErr(fb.fn.name, name.Value)
 	}
 	fb.removeVar(name.Value)
 	var obj Object
@@ -1732,6 +1738,9 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 		for _, name := range dd.NameList {
 			if name.Value == "_" {
 				continue
+			}
+			if fb.fn != nil && (fb.lookupObject(name.Value) != nil || Universe.Lookup(name.Value) != nil) {
+				shadowErr(fb.fn.name, name.Value)
 			}
 			fb.removeVar(name.Value)
 			var obj Object
