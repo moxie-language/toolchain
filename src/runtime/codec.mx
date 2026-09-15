@@ -16,8 +16,18 @@ const (
 	codecTagBackref = 0x05 // back-reference: uint32 index into seen set
 	codecTagNil    = 0x06  // nil pointer
 	codecTagStable   = 0x07 // stable pointer: 8 raw address bytes, identity preserved
-	codecTagStableSlice = 0x08 // stable string/[]byte: raw 24-byte header, no copy
+	codecTagStableSlice = 0x08 // stable string/[]byte: raw target-word header (3 words), no copy
 )
+
+// codecStrHdr is the byte width of a string/slice header ({ptr, len, cap}).
+// It is three target words, not three 64-bit words: on wasm32 the header is
+// 12 bytes, and encoding or decoding 24 would run past both the local and the
+// allocation the decode side makes from typ.Size().
+func codecStrHdr() uintptr { return unsafe.Sizeof(_string{}) }
+
+// codecPtrSize is the target's word size. Tables of raw pointers inside the
+// codec are laid out in target words.
+func codecPtrSize() uintptr { return unsafe.Sizeof(uintptr(0)) }
 
 // codecArenaContains reports whether addr lies in any allocated region of a.
 func codecArenaContains(a *Arena, p uintptr) (ok bool) {
@@ -317,7 +327,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		if s.length > 0 && s.ptr != nil && codecIsStableAddr(uintptr(unsafe.Pointer(s.ptr))) {
 			codecNoteStable(uintptr(unsafe.Pointer(s.ptr)))
 			codecWriteVarint(cb, codecTagStableSlice)
-			codecWriteRaw(cb, unsafe.Pointer(&s), 24)
+			codecWriteRaw(cb, unsafe.Pointer(&s), codecStrHdr())
 			return
 		}
 		if s.length > 0 && (s.ptr == nil || uintptr(unsafe.Pointer(s.ptr)) < 65536) {
@@ -356,7 +366,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 			!(sl.length > 0 && codecTopOnlyTransient && elemType != nil && sovTypeHasPtrs(elemType)) {
 			codecNoteStable(uintptr(unsafe.Pointer(sl.ptr)))
 			codecWriteVarint(cb, codecTagStableSlice)
-			codecWriteRaw(cb, unsafe.Pointer(&sl), 24)
+			codecWriteRaw(cb, unsafe.Pointer(&sl), codecStrHdr())
 			return
 		}
 		codecWriteVarint(cb, codecTagSlice)
@@ -407,7 +417,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 	case KindInterface:
 		iface := *(*_interface)(ptr)
 		codecWriteVarint(cb, codecTagIface)
-		codecWriteBytes(cb, unsafe.Slice((*byte)(unsafe.Pointer(&iface.typecode)), 8))
+		codecWriteBytes(cb, unsafe.Slice((*byte)(unsafe.Pointer(&iface.typecode)), codecPtrSize()))
 		// Plausibility bound for a type descriptor pointer: above the first
 		// page and below the top of the address space. The upper bound must
 		// suit the target's pointer width - on a 32-bit target
@@ -506,8 +516,8 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 		tag := codecReadVarint(cb)
 		if tag == codecTagStableSlice {
 			hdr := alloc(typ.Size(), unsafe.Pointer(typ))
-			memcpy(hdr, unsafe.Pointer(&cb.data[cb.pos]), 24)
-			cb.pos += 24
+			memcpy(hdr, unsafe.Pointer(&cb.data[cb.pos]), codecStrHdr())
+			cb.pos += int32(codecStrHdr())
 			return hdr
 		}
 		if tag == codecTagStr {
@@ -529,9 +539,11 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 				cb.pos += n
 				*(*unsafe.Pointer)(hdr) = dataPtr
 			}
-			*(*uintptr)(unsafe.Add(hdr, 8)) = uintptr(n)
-			if typ.Size() > 16 {
-				*(*uintptr)(unsafe.Add(hdr, 16)) = uintptr(ncp)
+			// Header fields are target words: {ptr, len, cap}. The cap
+			// slot only exists for the three-word form.
+			*(*uintptr)(unsafe.Add(hdr, codecPtrSize())) = uintptr(n)
+			if typ.Size() > codecPtrSize()*2 {
+				*(*uintptr)(unsafe.Add(hdr, codecPtrSize()*2)) = uintptr(ncp)
 			}
 			return hdr
 		}
@@ -546,8 +558,8 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 		tag := codecReadVarint(cb)
 		if tag == codecTagStableSlice {
 			hdr := alloc(typ.Size(), unsafe.Pointer(typ))
-			memcpy(hdr, unsafe.Pointer(&cb.data[cb.pos]), 24)
-			cb.pos += 24
+			memcpy(hdr, unsafe.Pointer(&cb.data[cb.pos]), codecStrHdr())
+			cb.pos += int32(codecStrHdr())
 			return hdr
 		}
 		if tag == codecTagSlice {
@@ -565,8 +577,8 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 					memcpy(ep, dec, elemSize)
 				}
 			}
-			*(*uintptr)(unsafe.Add(hdr, 8)) = uintptr(ln)
-			*(*uintptr)(unsafe.Add(hdr, 16)) = uintptr(cp)
+			*(*uintptr)(unsafe.Add(hdr, codecPtrSize())) = uintptr(ln)
+			*(*uintptr)(unsafe.Add(hdr, codecPtrSize()*2)) = uintptr(cp)
 			return hdr
 		}
 		cb.pos = startPos
@@ -629,10 +641,10 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 		}
 		if ct.Size() <= unsafe.Sizeof(uintptr(0)) {
 			inner := codecDecodeValue(cb, ds, ct)
-			memcpy(unsafe.Add(buf, 8), inner, ct.Size())
+			memcpy(unsafe.Add(buf, codecPtrSize()), inner, ct.Size())
 		} else {
 			inner := codecDecodeValue(cb, ds, ct)
-			*(*unsafe.Pointer)(unsafe.Add(buf, 8)) = inner
+			*(*unsafe.Pointer)(unsafe.Add(buf, codecPtrSize())) = inner
 		}
 		return buf
 	case KindStruct:
@@ -813,7 +825,7 @@ func codecEncodeMap(m *hashmap, cb *CodecBuf, ss *codecSeenSet, fixupFlags uint8
 					} else if fixIface {
 						iface := *(*_interface)(vp)
 						codecWriteVarint(cb, codecTagIface)
-						codecWriteBytes(cb, unsafe.Slice((*byte)(unsafe.Pointer(&iface.typecode)), 8))
+						codecWriteBytes(cb, unsafe.Slice((*byte)(unsafe.Pointer(&iface.typecode)), codecPtrSize()))
 						if iface.typecode != nil {
 							ct := (*RawType)(iface.typecode)
 							if ct.Size() <= unsafe.Sizeof(uintptr(0)) {
@@ -883,7 +895,7 @@ func codecEncodePtrValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, ele
 // codecEncodeIfaceValue encodes an interface from its typecode and value fields.
 func codecEncodeIfaceValue(cb *CodecBuf, ss *codecSeenSet, typecode, value unsafe.Pointer, typ *RawType) {
 	codecWriteVarint(cb, codecTagIface)
-	codecWriteBytes(cb, unsafe.Slice((*byte)(unsafe.Pointer(&typecode)), 8))
+	codecWriteBytes(cb, unsafe.Slice((*byte)(unsafe.Pointer(&typecode)), codecPtrSize()))
 	if typecode != nil {
 		ct := (*RawType)(typecode)
 		if ct.Size() <= unsafe.Sizeof(uintptr(0)) {
@@ -1105,11 +1117,11 @@ func codecDecodeMapFlagged(cb *CodecBuf, ds *codecDecodeSeen, keySz, valSz uintp
 // codecEncodeRecvWrites encodes the receiver write table into cb.
 func codecEncodeRecvWrites(cb *CodecBuf, ss *codecSeenSet, table unsafe.Pointer, count int32) {
 	codecWriteVarint(cb, uint64(uint32(count)))
-	entrySize := uintptr(24)
+	entrySize := codecPtrSize() * 3
 	for i := int32(0); i < count; i++ {
 		ep := unsafe.Add(table, uintptr(i)*entrySize)
-		valPtr := *(*unsafe.Pointer)(unsafe.Add(ep, 8))
-		typeDesc := *(*unsafe.Pointer)(unsafe.Add(ep, 16))
+		valPtr := *(*unsafe.Pointer)(unsafe.Add(ep, codecPtrSize()))
+		typeDesc := *(*unsafe.Pointer)(unsafe.Add(ep, codecPtrSize()*2))
 		if typeDesc != nil {
 			codecEncodeValue(cb, ss, valPtr, (*RawType)(typeDesc))
 		}
@@ -1120,11 +1132,11 @@ func codecEncodeRecvWrites(cb *CodecBuf, ss *codecSeenSet, table unsafe.Pointer,
 // pointers back into the receiver field addresses recorded in the table.
 func codecDecodeRecvWrites(cb *CodecBuf, ds *codecDecodeSeen, table unsafe.Pointer) {
 	n := int32(codecReadVarint(cb))
-	entrySize := uintptr(24)
+	entrySize := codecPtrSize() * 3
 	for i := int32(0); i < n; i++ {
 		ep := unsafe.Add(table, uintptr(i)*entrySize)
 		fieldAddr := *(*unsafe.Pointer)(unsafe.Pointer(ep))
-		typeDesc := *(*unsafe.Pointer)(unsafe.Add(ep, 16))
+		typeDesc := *(*unsafe.Pointer)(unsafe.Add(ep, codecPtrSize()*2))
 		if typeDesc != nil && fieldAddr != nil {
 			dec := codecDecodeValue(cb, ds, (*RawType)(typeDesc))
 			*(*unsafe.Pointer)(fieldAddr) = dec
