@@ -60,27 +60,27 @@ const (
 // without any special treatment for multi-byte UTF-8.
 // The resulting Encoding uses the default padding character ('='),
 // which may be changed or disabled via [Encoding.WithPadding].
-func NewEncoding(encoder []byte) *Encoding {
-	if len(encoder) != 64 {
+func NewEncoding(alphabet []byte) *Encoding {
+	if len(alphabet) != 64 {
 		panic("encoding alphabet is not 64-bytes long")
 	}
 
 	e := &Encoding{}
 	e.padChar = StdPadding
-	copy(e.encode[:], encoder)
+	copy(e.encode[:], alphabet)
 	copy(e.decodeMap[:], decodeMapInitialize)
 
-	for i := 0; i < len(encoder); i++ {
+	for i := 0; i < len(alphabet); i++ {
 		// Note: While we document that the alphabet cannot contain
 		// the padding character, we do not enforce it since we do not know
 		// if the caller intends to switch the padding from StdPadding later.
 		switch {
-		case encoder[i] == '\n' || encoder[i] == '\r':
+		case alphabet[i] == '\n' || alphabet[i] == '\r':
 			panic("encoding alphabet contains newline character")
-		case e.decodeMap[encoder[i]] != invalidIndex:
+		case e.decodeMap[alphabet[i]] != invalidIndex:
 			panic("encoding alphabet includes duplicate symbols")
 		}
-		e.decodeMap[encoder[i]] = uint8(i)
+		e.decodeMap[alphabet[i]] = uint8(i)
 	}
 	return e
 }
@@ -153,12 +153,12 @@ func (enc *Encoding) Encode(dst, src []byte) {
 	n := (len(src) / 3) * 3
 	for si < n {
 		// Convert 3x 8bit source bytes into 4 bytes
-		val := uint32(src[si+0])<<16 | uint32(src[si+1])<<8 | uint32(src[si+2])
+		v3 := uint32(src[si+0])<<16 | uint32(src[si+1])<<8 | uint32(src[si+2])
 
-		dst[di+0] = enc.encode[val>>18&0x3F]
-		dst[di+1] = enc.encode[val>>12&0x3F]
-		dst[di+2] = enc.encode[val>>6&0x3F]
-		dst[di+3] = enc.encode[val&0x3F]
+		dst[di+0] = enc.encode[v3>>18&0x3F]
+		dst[di+1] = enc.encode[v3>>12&0x3F]
+		dst[di+2] = enc.encode[v3>>6&0x3F]
+		dst[di+3] = enc.encode[v3&0x3F]
 
 		si += 3
 		di += 4
@@ -494,10 +494,10 @@ func (d *decoder) Read(p []byte) (n int32, err error) {
 	if d.nbuf < 4 {
 		if d.enc.padChar == NoPadding && d.nbuf > 0 {
 			// Decode final fragment, without padding.
-			var nw int32
-			nw, d.err = d.enc.Decode(d.outbuf[:], d.buf[:d.nbuf])
+			var fw int32
+			fw, d.err = d.enc.Decode(d.outbuf[:], d.buf[:d.nbuf])
 			d.nbuf = 0
-			d.out = d.outbuf[:nw]
+			d.out = d.outbuf[:fw]
 			n = copy(p, d.out)
 			d.out = d.out[n:]
 			if n > 0 || len(p) == 0 && len(d.out) > 0 {

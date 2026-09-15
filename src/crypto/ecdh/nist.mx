@@ -100,7 +100,7 @@ func (c nistCurve) fipsECDH(priv *ecdh.PrivateKey, pub *ecdh.PublicKey) ([]byte,
 func (c nistCurve) GenerateKey(rand io.Reader) (*PrivateKey, error) {
 	name := c.boringName()
 	if boring.Enabled && rand == boring.RandReader {
-		key, bytes, err := boring.GenerateKeyECDH(name)
+		key, keyBytes, err := boring.GenerateKeyECDH(name)
 		if err != nil {
 			return nil, err
 		}
@@ -110,7 +110,7 @@ func (c nistCurve) GenerateKey(rand io.Reader) (*PrivateKey, error) {
 		}
 		k := &PrivateKey{
 			curve:      c,
-			privateKey: bytes,
+			privateKey: keyBytes,
 			publicKey:  &PublicKey{curve: c, publicKey: pub.Bytes(), boring: pub},
 			boring:     key,
 		}
@@ -121,12 +121,12 @@ func (c nistCurve) GenerateKey(rand io.Reader) (*PrivateKey, error) {
 		return nil, errors.New("crypto/ecdh: only crypto/rand.Reader is allowed in FIPS 140-only mode")
 	}
 
-	privateKey, err := c.fipsGenerateKey(rand)
-	if err != nil {
-		return nil, err
+	privateKey, kerr := c.fipsGenerateKey(rand)
+	if kerr != nil {
+		return nil, kerr
 	}
 
-	k := &PrivateKey{
+	priv := &PrivateKey{
 		curve:      c,
 		privateKey: privateKey.Bytes(),
 		fips:       privateKey,
@@ -137,7 +137,7 @@ func (c nistCurve) GenerateKey(rand io.Reader) (*PrivateKey, error) {
 		},
 	}
 	if boring.Enabled {
-		bk, err := boring.NewPrivateKeyECDH(name, k.privateKey)
+		bk, err := boring.NewPrivateKeyECDH(name, priv.privateKey)
 		if err != nil {
 			return nil, err
 		}
@@ -145,10 +145,10 @@ func (c nistCurve) GenerateKey(rand io.Reader) (*PrivateKey, error) {
 		if err != nil {
 			return nil, err
 		}
-		k.boring = bk
-		k.publicKey.boring = pub
+		priv.boring = bk
+		priv.publicKey.boring = pub
 	}
-	return k, nil
+	return priv, nil
 }
 
 func (c nistCurve) NewPrivateKey(key []byte) (*PrivateKey, error) {
@@ -171,11 +171,11 @@ func (c nistCurve) NewPrivateKey(key []byte) (*PrivateKey, error) {
 		return k, nil
 	}
 
-	fk, err := c.fipsNewPrivateKey(key)
-	if err != nil {
-		return nil, err
+	fk, kerr := c.fipsNewPrivateKey(key)
+	if kerr != nil {
+		return nil, kerr
 	}
-	k := &PrivateKey{
+	priv := &PrivateKey{
 		curve:      c,
 		privateKey: bytes.Clone(key),
 		fips:       fk,
@@ -185,7 +185,7 @@ func (c nistCurve) NewPrivateKey(key []byte) (*PrivateKey, error) {
 			fips:      fk.PublicKey(),
 		},
 	}
-	return k, nil
+	return priv, nil
 }
 
 func (c nistCurve) NewPublicKey(key []byte) (*PublicKey, error) {

@@ -449,14 +449,14 @@ func (x *Nat) BitLenVarTime() int32 {
 // its value. bits.Len and bits.LeadingZeros use a lookup table for the
 // low-order bits on some architectures.
 func bitLen(n uint32) int32 {
-	len := 0
+	nb := 0
 	// We assume, here and elsewhere, that comparison to zero is constant time
 	// with respect to different non-zero values.
 	for n != 0 {
-		len++
+		nb++
 		n >>= 1
 	}
-	return len
+	return nb
 }
 
 // Modulus is used for modular arithmetic, precomputing relevant constants.
@@ -478,17 +478,17 @@ type Modulus struct {
 
 // rr returns R*R with R = 2^(_W * n) and n = len(m.nat.limbs).
 func rr(m *Modulus) *Nat {
-	rr := NewNat().ExpandFor(m)
-	n := uint32(len(rr.limbs))
+	r2 := NewNat().ExpandFor(m)
+	n := uint32(len(r2.limbs))
 	mLen := uint32(m.BitLen())
 	logR := _W * n
 
 	// We start by computing R = 2^(_W * n) mod m. We can get pretty close, to
 	// 2^⌊log₂m⌋, by setting the highest bit we can without having to reduce.
-	rr.limbs[n-1] = 1 << ((mLen - 1) % _W)
+	r2.limbs[n-1] = 1 << ((mLen - 1) % _W)
 	// Then we double until we reach 2^(_W * n).
-	for i := mLen - 1; i < logR; i++ {
-		rr.Add(rr, m)
+	for j := mLen - 1; j < logR; j++ {
+		r2.Add(r2, m)
 	}
 
 	// Next we need to get from R to 2^(_W * n) R mod m (aka from one to R in
@@ -508,20 +508,20 @@ func rr(m *Modulus) *Nat {
 		i--
 	}
 	for k := uint32(0); k < logR>>i; k++ {
-		rr.Add(rr, m)
+		r2.Add(r2, m)
 	}
 
 	// Then we process the remaining bits of the exponent with a
 	// square-and-double chain.
 	for i > 0 {
-		rr.montgomeryMul(rr, rr, m)
+		r2.montgomeryMul(r2, r2, m)
 		i--
 		if logR>>i&1 != 0 {
-			rr.Add(rr, m)
+			r2.Add(r2, m)
 		}
 	}
 
-	return rr
+	return r2
 }
 
 // minusInverseModW computes -x⁻¹ mod _W with x odd.
@@ -628,10 +628,10 @@ func (x *Nat) shiftIn(y uint32, m *Modulus) *Nat {
 		carry = (y >> i) & 1
 		borrow = 0
 		mask = ctMask(needSubtraction)
-		for i := 0; i < size; i++ {
-			l = xLimbs[i] ^ (mask & (xLimbs[i] ^ dLimbs[i]))
-			xLimbs[i], carry = bits.Add(l, l, carry)
-			dLimbs[i], borrow = bits.Sub(xLimbs[i], mLimbs[i], borrow)
+		for j := 0; j < size; j++ {
+			l = xLimbs[j] ^ (mask & (xLimbs[j] ^ dLimbs[j]))
+			xLimbs[j], carry = bits.Add(l, l, carry)
+			dLimbs[j], borrow = bits.Sub(xLimbs[j], mLimbs[j], borrow)
 		}
 		// Like in maybeSubtractModulus, we need the subtraction if either it
 		// didn't underflow (meaning 2x + b > m) or if computing 2x + b
@@ -852,45 +852,45 @@ func (x *Nat) montgomeryMul(a *Nat, b *Nat, m *Modulus) *Nat {
 	// assembly with loop unrolling depending on the architecture and bounds
 	// checks are removed by the compiler thanks to the constant size.
 	case 1024 / _W:
-		const n = 1024 / _W // compiler hint
-		T := []uint32{:n*2}
+		const nLimbs = 1024 / _W // compiler hint
+		T := []uint32{:nLimbs*2}
 		var c uint32
-		for i := 0; i < n; i++ {
+		for i := 0; i < nLimbs; i++ {
 			d := bLimbs[i]
 			c1 := addMulVVW1024(&T[i], &aLimbs[0], d)
 			Y := T[i] * m.m0inv
 			c2 := addMulVVW1024(&T[i], &mLimbs[0], Y)
-			T[n+i], c = bits.Add(c1, c2, c)
+			T[nLimbs+i], c = bits.Add(c1, c2, c)
 		}
-		copy(x.reset(n).limbs, T[n:])
+		copy(x.reset(nLimbs).limbs, T[nLimbs:])
 		x.maybeSubtractModulus(choice(c), m)
 
 	case 1536 / _W:
-		const n = 1536 / _W // compiler hint
-		T := []uint32{:n*2}
+		const nLimbs = 1536 / _W // compiler hint
+		T := []uint32{:nLimbs*2}
 		var c uint32
-		for i := 0; i < n; i++ {
+		for i := 0; i < nLimbs; i++ {
 			d := bLimbs[i]
 			c1 := addMulVVW1536(&T[i], &aLimbs[0], d)
 			Y := T[i] * m.m0inv
 			c2 := addMulVVW1536(&T[i], &mLimbs[0], Y)
-			T[n+i], c = bits.Add(c1, c2, c)
+			T[nLimbs+i], c = bits.Add(c1, c2, c)
 		}
-		copy(x.reset(n).limbs, T[n:])
+		copy(x.reset(nLimbs).limbs, T[nLimbs:])
 		x.maybeSubtractModulus(choice(c), m)
 
 	case 2048 / _W:
-		const n = 2048 / _W // compiler hint
-		T := []uint32{:n*2}
+		const nLimbs = 2048 / _W // compiler hint
+		T := []uint32{:nLimbs*2}
 		var c uint32
-		for i := 0; i < n; i++ {
+		for i := 0; i < nLimbs; i++ {
 			d := bLimbs[i]
 			c1 := addMulVVW2048(&T[i], &aLimbs[0], d)
 			Y := T[i] * m.m0inv
 			c2 := addMulVVW2048(&T[i], &mLimbs[0], Y)
-			T[n+i], c = bits.Add(c1, c2, c)
+			T[nLimbs+i], c = bits.Add(c1, c2, c)
 		}
-		copy(x.reset(n).limbs, T[n:])
+		copy(x.reset(nLimbs).limbs, T[nLimbs:])
 		x.maybeSubtractModulus(choice(c), m)
 	}
 
@@ -956,24 +956,24 @@ func (x *Nat) Mul(y *Nat, m *Modulus) *Nat {
 	// The following specialized cases follow the exact same algorithm, but
 	// optimized for the sizes most used in RSA. See montgomeryMul for details.
 	case 1024 / _W:
-		const n = 1024 / _W // compiler hint
-		T := []uint32{:n*2}
-		for i := 0; i < n; i++ {
-			T[n+i] = addMulVVW1024(&T[i], &xLimbs[0], yLimbs[i])
+		const nLimbs = 1024 / _W // compiler hint
+		T := []uint32{:nLimbs*2}
+		for i := 0; i < nLimbs; i++ {
+			T[nLimbs+i] = addMulVVW1024(&T[i], &xLimbs[0], yLimbs[i])
 		}
 		return x.Mod(&Nat{limbs: T}, m)
 	case 1536 / _W:
-		const n = 1536 / _W // compiler hint
-		T := []uint32{:n*2}
-		for i := 0; i < n; i++ {
-			T[n+i] = addMulVVW1536(&T[i], &xLimbs[0], yLimbs[i])
+		const nLimbs = 1536 / _W // compiler hint
+		T := []uint32{:nLimbs*2}
+		for i := 0; i < nLimbs; i++ {
+			T[nLimbs+i] = addMulVVW1536(&T[i], &xLimbs[0], yLimbs[i])
 		}
 		return x.Mod(&Nat{limbs: T}, m)
 	case 2048 / _W:
-		const n = 2048 / _W // compiler hint
-		T := []uint32{:n*2}
-		for i := 0; i < n; i++ {
-			T[n+i] = addMulVVW2048(&T[i], &xLimbs[0], yLimbs[i])
+		const nLimbs = 2048 / _W // compiler hint
+		T := []uint32{:nLimbs*2}
+		for i := 0; i < nLimbs; i++ {
+			T[nLimbs+i] = addMulVVW2048(&T[i], &xLimbs[0], yLimbs[i])
 		}
 		return x.Mod(&Nat{limbs: T}, m)
 	}

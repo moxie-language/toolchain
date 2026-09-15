@@ -308,10 +308,10 @@ func UnquoteChar(s []byte, quote byte) (value rune, multibyte bool, tail []byte,
 		err = ErrSyntax
 		return
 	}
-	c := s[1]
+	esc := s[1]
 	s = s[2:]
 
-	switch c {
+	switch esc {
 	case 'a':
 		value = '\a'
 	case 'b':
@@ -328,7 +328,7 @@ func UnquoteChar(s []byte, quote byte) (value rune, multibyte bool, tail []byte,
 		value = '\v'
 	case 'x', 'u', 'U':
 		n := 0
-		switch c {
+		switch esc {
 		case 'x':
 			n = 2
 		case 'u':
@@ -350,7 +350,7 @@ func UnquoteChar(s []byte, quote byte) (value rune, multibyte bool, tail []byte,
 			v = v<<4 | x
 		}
 		s = s[n:]
-		if c == 'x' {
+		if esc == 'x' {
 			// single-byte string, possibly not UTF-8
 			value = v
 			break
@@ -362,7 +362,7 @@ func UnquoteChar(s []byte, quote byte) (value rune, multibyte bool, tail []byte,
 		value = v
 		multibyte = true
 	case '0', '1', '2', '3', '4', '5', '6', '7':
-		v := rune(c) - '0'
+		v := rune(esc) - '0'
 		if len(s) < 2 {
 			err = ErrSyntax
 			return
@@ -384,11 +384,11 @@ func UnquoteChar(s []byte, quote byte) (value rune, multibyte bool, tail []byte,
 	case '\\':
 		value = '\\'
 	case '\'', '"':
-		if c != quote {
+		if esc != quote {
 			err = ErrSyntax
 			return
 		}
-		value = rune(c)
+		value = rune(esc)
 	default:
 		err = ErrSyntax
 		return
@@ -489,19 +489,19 @@ func unquote(in []byte, unescape bool) (out, rem []byte, err error) {
 		for len(in) > 0 && in[0] != quote {
 			// Process the next character,
 			// rejecting any unescaped newline characters which are invalid.
-			r, multibyte, rem, err := UnquoteChar(in, quote)
-			if in[0] == '\n' || err != nil {
+			ch, mb, rest, uerr := UnquoteChar(in, quote)
+			if in[0] == '\n' || uerr != nil {
 				return "", in0, ErrSyntax
 			}
-			in = rem
+			in = rest
 
 			// Append the character if unescaping the input.
 			if unescape {
-				if r < utf8.RuneSelf || !multibyte {
+				if ch < utf8.RuneSelf || !mb {
 					buf = mxutil.Ensure(buf, 1)
-					buf = push(buf, byte(r))
+					buf = push(buf, byte(ch))
 				} else {
-					buf = utf8.AppendRune(buf, r)
+					buf = utf8.AppendRune(buf, ch)
 				}
 			}
 
@@ -1291,26 +1291,26 @@ func IsPrint(r rune) bool {
 	// If we find x in a range, make sure x is not in isNotPrint list.
 
 	if 0 <= r && r < 1<<16 {
-		rr, isPrint, isNotPrint := uint16(r), isPrint16, isNotPrint16
-		i, _ := bsearch(isPrint, rr)
-		if i >= len(isPrint) || rr < isPrint[i&^1] || isPrint[i|1] < rr {
+		r16, pr16, np16 := uint16(r), isPrint16, isNotPrint16
+		i16, _ := bsearch(pr16, r16)
+		if i16 >= len(pr16) || r16 < pr16[i16&^1] || pr16[i16|1] < r16 {
 			return false
 		}
-		_, found := bsearch(isNotPrint, rr)
-		return !found
+		_, f16 := bsearch(np16, r16)
+		return !f16
 	}
 
-	rr, isPrint, isNotPrint := uint32(r), isPrint32, isNotPrint32
-	i, _ := bsearch(isPrint, rr)
-	if i >= len(isPrint) || rr < isPrint[i&^1] || isPrint[i|1] < rr {
+	r32, pr32, np32 := uint32(r), isPrint32, isNotPrint32
+	i32, _ := bsearch(pr32, r32)
+	if i32 >= len(pr32) || r32 < pr32[i32&^1] || pr32[i32|1] < r32 {
 		return false
 	}
 	if r >= 0x20000 {
 		return true
 	}
 	r -= 0x10000
-	_, found := bsearch(isNotPrint, uint16(r))
-	return !found
+	_, f32 := bsearch(np32, uint16(r))
+	return !f32
 }
 
 // IsGraphic reports whether the rune is defined as a Graphic by Unicode. Such

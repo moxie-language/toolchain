@@ -176,8 +176,8 @@ func (fd *FD) Pread(p []byte, off int64) (int32, error) {
 	// Call incref, not readLock, because since pread specifies the
 	// offset it is independent from other reads.
 	// Similarly, using the poller doesn't make sense for pread.
-	if err := fd.incref(); err != nil {
-		return 0, err
+	if ierr := fd.incref(); ierr != nil {
+		return 0, ierr
 	}
 	if fd.IsStream && len(p) > maxRW {
 		p = p[:maxRW]
@@ -366,19 +366,19 @@ func (fd *FD) Write(p []byte) (int32, error) {
 	}
 	var nn int32
 	for {
-		max := len(p)
-		if fd.IsStream && max-nn > maxRW {
-			max = nn + maxRW
+		limit := len(p)
+		if fd.IsStream && limit-nn > maxRW {
+			limit = nn + maxRW
 		}
-		n, err := ignoringEINTRIO(syscall.Write, fd.Sysfd, p[nn:max])
+		n, err := ignoringEINTRIO(syscall.Write, fd.Sysfd, p[nn:limit])
 		if n > 0 {
-			if n > max-nn {
+			if n > limit-nn {
 				// This can reportedly happen when using
 				// some VPN software. Issue #61060.
 				// If we don't check this we will panic
 				// with slice bounds out of range.
 				// Use a more informative panic.
-				panic("invalid return from write: got " | itoa.Itoa(n) | " from a write of " | itoa.Itoa(max-nn))
+				panic("invalid return from write: got " | itoa.Itoa(n) | " from a write of " | itoa.Itoa(limit-nn))
 			}
 			nn += n
 		}
@@ -410,11 +410,11 @@ func (fd *FD) Pwrite(p []byte, off int64) (int32, error) {
 	defer fd.decref()
 	var nn int32
 	for {
-		max := len(p)
-		if fd.IsStream && max-nn > maxRW {
-			max = nn + maxRW
+		limit := len(p)
+		if fd.IsStream && limit-nn > maxRW {
+			limit = nn + maxRW
 		}
-		n, err := syscall.Pwrite(fd.Sysfd, p[nn:max], off+int64(nn))
+		n, err := syscall.Pwrite(fd.Sysfd, p[nn:limit], off+int64(nn))
 		if err == syscall.EINTR {
 			continue
 		}
@@ -732,7 +732,7 @@ func (fd *FD) RawWrite(f func(uintptr) bool) error {
 }
 
 // ignoringEINTRIO is like ignoringEINTR, but just for IO calls.
-func ignoringEINTRIO(fn func(fd int32, p []byte) (int32, error), fd int32, p []byte) (int32, error) {
+func ignoringEINTRIO(fn func(f int32, b []byte) (int32, error), fd int32, p []byte) (int32, error) {
 	for {
 		n, err := fn(fd, p)
 		if err != syscall.EINTR {

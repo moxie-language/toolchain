@@ -129,16 +129,16 @@ func (h *huffmanDecoder) init(lengths []int32) bool {
 	// Count number of codes of each length,
 	// compute min and max length.
 	var count [maxCodeLen]int32
-	var min, max int32
+	var minLen, maxLen int32
 	for _, n := range lengths {
 		if n == 0 {
 			continue
 		}
-		if min == 0 || n < min {
-			min = n
+		if minLen == 0 || n < minLen {
+			minLen = n
 		}
-		if n > max {
-			max = n
+		if n > maxLen {
+			maxLen = n
 		}
 		count[n]++
 	}
@@ -150,13 +150,13 @@ func (h *huffmanDecoder) init(lengths []int32) bool {
 	// codes for the HLIT and HDIST trees. Similarly, an empty HLIT tree is
 	// guaranteed to fail later since the compressed data section must be
 	// composed of at least one symbol (the end-of-block marker).
-	if max == 0 {
+	if maxLen == 0 {
 		return true
 	}
 
 	code := 0
 	var nextcode [maxCodeLen]int32
-	for i := min; i <= max; i++ {
+	for i := minLen; i <= maxLen; i++ {
 		code <<= 1
 		nextcode[i] = code
 		code += count[i]
@@ -167,13 +167,13 @@ func (h *huffmanDecoder) init(lengths []int32) bool {
 	// Exception: To be compatible with zlib, we also need to
 	// accept degenerate single-code codings. See also
 	// TestDegenerateHuffmanCoding.
-	if code != 1<<uint32(max) && !(code == 1 && max == 1) {
+	if code != 1<<uint32(maxLen) && !(code == 1 && maxLen == 1) {
 		return false
 	}
 
-	h.min = min
-	if max > huffmanChunkBits {
-		numLinks := 1 << (uint32(max) - huffmanChunkBits)
+	h.min = minLen
+	if maxLen > huffmanChunkBits {
+		numLinks := 1 << (uint32(maxLen) - huffmanChunkBits)
 		h.linkMask = uint32(numLinks - 1)
 
 		// create link tables
@@ -195,10 +195,10 @@ func (h *huffmanDecoder) init(lengths []int32) bool {
 		if n == 0 {
 			continue
 		}
-		code := nextcode[n]
+		c := nextcode[n]
 		nextcode[n]++
 		chunk := uint32(i<<huffmanValueShift | n)
-		reverse := int32(bits.Reverse16(uint16(code)))
+		reverse := int32(bits.Reverse16(uint16(c)))
 		reverse >>= uint32(16 - n)
 		if n <= huffmanChunkBits {
 			for off := reverse; off < len(h.chunks); off += 1 << uint32(n) {
@@ -448,8 +448,8 @@ func (f *decompressor) readHuffman() error {
 			b = 0
 		}
 		for f.nb < nb {
-			if err := f.moreBits(); err != nil {
-				return err
+			if merr := f.moreBits(); merr != nil {
+				return merr
 			}
 		}
 		rep += int32(f.b & uint32(1<<nb-1))
@@ -772,20 +772,20 @@ func (f *decompressor) makeReader(r io.Reader) {
 
 func (f *decompressor) initFixedHuffmanDecoder() {
 	// These come from the RFC section 3.2.6.
-	var bits [288]int32
+	var lens [288]int32
 	for i := 0; i < 144; i++ {
-		bits[i] = 8
+		lens[i] = 8
 	}
 	for i := 144; i < 256; i++ {
-		bits[i] = 9
+		lens[i] = 9
 	}
 	for i := 256; i < 280; i++ {
-		bits[i] = 7
+		lens[i] = 7
 	}
 	for i := 280; i < 288; i++ {
-		bits[i] = 8
+		lens[i] = 8
 	}
-	f.fixedHuffmanDecoder.init(bits[:])
+	f.fixedHuffmanDecoder.init(lens[:])
 }
 
 func (f *decompressor) Reset(r io.Reader, dict []byte) error {

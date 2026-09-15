@@ -119,7 +119,7 @@ func (q *chanQueue) pop(chanOp uint32) *channelOp {
 		newDataValue = chanOp | popped.index<<2
 
 		// Try to be the first to proceed with this goroutine.
-		swapped = popped.task.CompareAndSwapDataUint32(0, newDataValue)
+		swapped = popped.taskRef.CompareAndSwapDataUint32(0, newDataValue)
 		if swapped {
 			return popped
 		}
@@ -143,7 +143,7 @@ func (q *chanQueue) remove(remove *channelOp) {
 
 type channelOp struct {
 	next  *channelOp
-	task  *task.Task
+	taskRef *task.Task
 	index uint32         // select index, 0 for non-select operation
 	value unsafe.Pointer // if this is a sender, this is the value to send
 }
@@ -234,8 +234,8 @@ func (ch *channel) trySend(value unsafe.Pointer) bool {
 	// the value directly into the receiver.
 	if ch.bufLen == 0 {
 		if receiver := ch.receivers.pop(chanOperationOk); receiver != nil {
-			memcpy(receiver.task.Ptr, value, ch.elementSize)
-			scheduleTask(receiver.task)
+			memcpy(receiver.taskRef.Ptr, value, ch.elementSize)
+			scheduleTask(receiver.taskRef)
 			return true
 		}
 	}
@@ -266,7 +266,7 @@ func chanSend(ch *channel, value unsafe.Pointer, op *channelOp) {
 	// Can't proceed. Add us to the list of senders and wait until we're awoken.
 	t := task.Current()
 	t.SetDataUint32(chanOperationWaiting)
-	op.task = t
+	op.taskRef = t
 	op.index = 0
 	op.value = value
 	ch.senders.push(op)
@@ -314,7 +314,7 @@ func (ch *channel) tryRecv(value unsafe.Pointer) (received, ok bool) {
 		// Check for the next sender available and push it to the buffer.
 		if sender := ch.senders.pop(chanOperationOk); sender != nil {
 			ch.bufferPush(sender.value)
-			scheduleTask(sender.task)
+			scheduleTask(sender.taskRef)
 		}
 
 		return true, true
@@ -330,7 +330,7 @@ func (ch *channel) tryRecv(value unsafe.Pointer) (received, ok bool) {
 	// immediately.
 	if sender := ch.senders.pop(chanOperationOk); sender != nil {
 		memcpy(value, sender.value, ch.elementSize)
-		scheduleTask(sender.task)
+		scheduleTask(sender.taskRef)
 		return true, true
 	}
 
@@ -355,7 +355,7 @@ func chanRecv(ch *channel, value unsafe.Pointer, op *channelOp) bool {
 	t := task.Current()
 	t.Ptr = value
 	t.SetDataUint32(chanOperationWaiting)
-	op.task = t
+	op.taskRef = t
 	op.index = 0
 	ch.receivers.push(op)
 	interrupt.Restore(mask)
@@ -403,10 +403,10 @@ func chanClose(ch *channel) {
 		}
 
 		// Zero the value that the receiver is getting.
-		memzero(receiver.task.Ptr, ch.elementSize)
+		memzero(receiver.taskRef.Ptr, ch.elementSize)
 
 		// Wake up the receiving goroutine.
-		scheduleTask(receiver.task)
+		scheduleTask(receiver.taskRef)
 	}
 
 	// Let all senders panic.
@@ -417,7 +417,7 @@ func chanClose(ch *channel) {
 		}
 
 		// Wake up the sender.
-		scheduleTask(sender.task)
+		scheduleTask(sender.taskRef)
 	}
 
 	ch.closed = true
@@ -499,7 +499,7 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 			continue
 		}
 		op := &ops[i]
-		op.task = t
+		op.taskRef = t
 		op.index = uint32(i)
 		if state.value == nil { // chan receive
 			state.ch.receivers.push(op)

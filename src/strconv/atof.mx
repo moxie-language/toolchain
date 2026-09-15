@@ -36,7 +36,7 @@ func commonPrefixLenIgnoreCase(s, prefix []byte) int32 {
 // and NaN. The result is ok if a prefix of s contains one
 // of these representations and n is the length of that prefix.
 // The character case is ignored.
-func special(s []byte) (f float64, n int32, ok bool) {
+func special(s []byte) (float64, int32, bool) {
 	if len(s) == 0 {
 		return 0, 0, false
 	}
@@ -407,12 +407,12 @@ overflow:
 
 out:
 	// Assemble bits.
-	bits := mant & (uint64(1)<<flt.mantbits - 1)
-	bits |= uint64((exp-flt.bias)&(1<<flt.expbits-1)) << flt.mantbits
+	bv := mant & (uint64(1)<<flt.mantbits - 1)
+	bv |= uint64((exp-flt.bias)&(1<<flt.expbits-1)) << flt.mantbits
 	if d.neg {
-		bits |= 1 << flt.mantbits << flt.expbits
+		bv |= 1 << flt.mantbits << flt.expbits
 	}
-	return bits, overflow
+	return bv, overflow
 }
 
 // If possible to convert decimal representation to 64-bit float f exactly,
@@ -557,23 +557,23 @@ func atofHex(s []byte, flt *floatInfo, mantissa uint64, exp int32, neg, trunc bo
 		err = rangeError(fnParseFloat, s)
 	}
 
-	bits := mantissa & (1<<flt.mantbits - 1)
-	bits |= uint64((exp-flt.bias)&(1<<flt.expbits-1)) << flt.mantbits
+	bv := mantissa & (1<<flt.mantbits - 1)
+	bv |= uint64((exp-flt.bias)&(1<<flt.expbits-1)) << flt.mantbits
 	if neg {
-		bits |= 1 << flt.mantbits << flt.expbits
+		bv |= 1 << flt.mantbits << flt.expbits
 	}
 	if flt.mantbits == 23 {
-		return float64(math.Float32frombits(uint32(bits))), err
+		return float64(math.Float32frombits(uint32(bv))), err
 	}
-	return math.Float64frombits(bits), err
+	return math.Float64frombits(bv), err
 }
 
 const fnParseFloat = "ParseFloat"
 
-func atof32(s []byte) (f float32, n int32, err error) {
+func atof32(s []byte) (float32, int32, error) {
 	float32info := floatInfo{23, 8, -127}
-	if val, n, ok := special(s); ok {
-		return float32(val), n, nil
+	if val, sn, sok := special(s); sok {
+		return float32(val), sn, nil
 	}
 
 	mantissa, exp, neg, trunc, hex, n, ok := readFloat(s)
@@ -582,29 +582,29 @@ func atof32(s []byte) (f float32, n int32, err error) {
 	}
 
 	if hex {
-		f, err := atofHex(s[:n], &float32info, mantissa, exp, neg, trunc)
-		return float32(f), n, err
+		hf, herr := atofHex(s[:n], &float32info, mantissa, exp, neg, trunc)
+		return float32(hf), n, herr
 	}
 
 	if optimize {
 		// Try pure floating-point arithmetic conversion, and if that fails,
 		// the Eisel-Lemire algorithm.
 		if !trunc {
-			if f, ok := atof32exact(mantissa, exp, neg); ok {
-				return f, n, nil
+			if xe, xok := atof32exact(mantissa, exp, neg); xok {
+				return xe, n, nil
 			}
 		}
-		f, ok := eiselLemire32(mantissa, exp, neg)
-		if ok {
+		le, lok := eiselLemire32(mantissa, exp, neg)
+		if lok {
 			if !trunc {
-				return f, n, nil
+				return le, n, nil
 			}
 			// Even if the mantissa was truncated, we may
 			// have found the correct result. Confirm by
 			// converting the upper mantissa bound.
-			fUp, ok := eiselLemire32(mantissa+1, exp, neg)
-			if ok && f == fUp {
-				return f, n, nil
+			up, uok := eiselLemire32(mantissa+1, exp, neg)
+			if uok && le == up {
+				return le, n, nil
 			}
 		}
 	}
@@ -615,17 +615,16 @@ func atof32(s []byte) (f float32, n int32, err error) {
 		return 0, n, syntaxError(fnParseFloat, s)
 	}
 	b, ovf := d.floatBits(&float32info)
-	f = math.Float32frombits(uint32(b))
 	if ovf {
-		err = rangeError(fnParseFloat, s)
+		return math.Float32frombits(uint32(b)), n, rangeError(fnParseFloat, s)
 	}
-	return f, n, err
+	return math.Float32frombits(uint32(b)), n, nil
 }
 
-func atof64(s []byte) (f float64, n int32, err error) {
+func atof64(s []byte) (float64, int32, error) {
 	float64info := floatInfo{52, 11, -1023}
-	if val, n, ok := special(s); ok {
-		return val, n, nil
+	if val, sn, sok := special(s); sok {
+		return val, sn, nil
 	}
 
 	mantissa, exp, neg, trunc, hex, n, ok := readFloat(s)
@@ -634,29 +633,29 @@ func atof64(s []byte) (f float64, n int32, err error) {
 	}
 
 	if hex {
-		f, err := atofHex(s[:n], &float64info, mantissa, exp, neg, trunc)
-		return f, n, err
+		hf, herr := atofHex(s[:n], &float64info, mantissa, exp, neg, trunc)
+		return hf, n, herr
 	}
 
 	if optimize {
 		// Try pure floating-point arithmetic conversion, and if that fails,
 		// the Eisel-Lemire algorithm.
 		if !trunc {
-			if f, ok := atof64exact(mantissa, exp, neg); ok {
-				return f, n, nil
+			if xe, xok := atof64exact(mantissa, exp, neg); xok {
+				return xe, n, nil
 			}
 		}
-		f, ok := eiselLemire64(mantissa, exp, neg)
-		if ok {
+		le, lok := eiselLemire64(mantissa, exp, neg)
+		if lok {
 			if !trunc {
-				return f, n, nil
+				return le, n, nil
 			}
 			// Even if the mantissa was truncated, we may
 			// have found the correct result. Confirm by
 			// converting the upper mantissa bound.
-			fUp, ok := eiselLemire64(mantissa+1, exp, neg)
-			if ok && f == fUp {
-				return f, n, nil
+			up, uok := eiselLemire64(mantissa+1, exp, neg)
+			if uok && le == up {
+				return le, n, nil
 			}
 		}
 	}
@@ -667,11 +666,10 @@ func atof64(s []byte) (f float64, n int32, err error) {
 		return 0, n, syntaxError(fnParseFloat, s)
 	}
 	b, ovf := d.floatBits(&float64info)
-	f = math.Float64frombits(b)
 	if ovf {
-		err = rangeError(fnParseFloat, s)
+		return math.Float64frombits(b), n, rangeError(fnParseFloat, s)
 	}
-	return f, n, err
+	return math.Float64frombits(b), n, nil
 }
 
 // ParseFloat converts the string s to a floating-point number

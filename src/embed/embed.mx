@@ -251,8 +251,8 @@ func (f FS) lookup(name string) *file {
 	// and then check if name is at that position.
 	dir, elem, _ := split(name)
 	files := *f.files
-	i := sortSearch(len(files), func(i int32) bool {
-		idir, ielem, _ := split(files[i].name)
+	i := sortSearch(len(files), func(idx int32) bool {
+		idir, ielem, _ := split(files[idx].name)
 		return idir > dir || idir == dir && ielem >= elem
 	})
 	if i < len(files) && stringslite.TrimSuffix(files[i].name, "/") == name {
@@ -269,12 +269,12 @@ func (f FS) readDir(dir string) []file {
 	// Binary search to find where dir starts and ends in the list
 	// and then return that slice of the list.
 	files := *f.files
-	i := sortSearch(len(files), func(i int32) bool {
-		idir, _, _ := split(files[i].name)
+	i := sortSearch(len(files), func(idx int32) bool {
+		idir, _, _ := split(files[idx].name)
 		return idir >= dir
 	})
-	j := sortSearch(len(files), func(j int32) bool {
-		jdir, _, _ := split(files[j].name)
+	j := sortSearch(len(files), func(jdx int32) bool {
+		jdir, _, _ := split(files[jdx].name)
 		return jdir > dir
 	})
 	return files[i:j]
@@ -284,23 +284,23 @@ func (f FS) readDir(dir string) []file {
 //
 // The returned file implements [io.Seeker] and [io.ReaderAt] when the file is not a directory.
 func (f FS) Open(name string) (fs.File, error) {
-	file := f.lookup(name)
-	if file == nil {
+	entry := f.lookup(name)
+	if entry == nil {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 	}
-	if file.IsDir() {
-		return &openDir{file, f.readDir(name), 0}, nil
+	if entry.IsDir() {
+		return &openDir{entry, f.readDir(name), 0}, nil
 	}
-	return &openFile{file, 0}, nil
+	return &openFile{entry, 0}, nil
 }
 
 // ReadDir reads and returns the entire named directory.
 func (f FS) ReadDir(name string) ([]fs.DirEntry, error) {
-	file, err := f.Open(name)
+	entry, err := f.Open(name)
 	if err != nil {
 		return nil, err
 	}
-	dir, ok := file.(*openDir)
+	dir, ok := entry.(*openDir)
 	if !ok {
 		return nil, &fs.PathError{Op: "read", Path: name, Err: errors.New("not a directory")}
 	}
@@ -313,11 +313,11 @@ func (f FS) ReadDir(name string) ([]fs.DirEntry, error) {
 
 // ReadFile reads and returns the content of the named file.
 func (f FS) ReadFile(name string) ([]byte, error) {
-	file, err := f.Open(name)
+	entry, err := f.Open(name)
 	if err != nil {
 		return nil, err
 	}
-	ofile, ok := file.(*openFile)
+	ofile, ok := entry.(*openFile)
 	if !ok {
 		return nil, &fs.PathError{Op: "read", Path: name, Err: errors.New("is a directory")}
 	}

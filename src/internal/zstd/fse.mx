@@ -23,8 +23,8 @@ type fseEntry struct {
 // RFC 4.1.1.
 func (r *Reader) readFSE(data block, off, maxSym, maxBits int32, table []fseEntry) (tableBits, roff int32, err error) {
 	br := r.makeBitReader(data, off)
-	if err := br.moreBits(); err != nil {
-		return 0, 0, err
+	if berr := br.moreBits(); berr != nil {
+		return 0, 0, berr
 	}
 
 	accuracyLog := int32(br.val(4)) + 5
@@ -53,8 +53,8 @@ func (r *Reader) readFSE(data block, off, maxSym, maxBits int32, table []fseEntr
 	var norm [256]int16
 
 	for remaining > 1 && sym <= maxSym {
-		if err := br.moreBits(); err != nil {
-			return 0, 0, err
+		if berr := br.moreBits(); berr != nil {
+			return 0, 0, berr
 		}
 
 		if prev0 {
@@ -66,16 +66,16 @@ func (r *Reader) readFSE(data block, off, maxSym, maxBits int32, table []fseEntr
 				zsym += 3 * 6
 				br.bits >>= 12
 				br.cnt -= 12
-				if err := br.moreBits(); err != nil {
-					return 0, 0, err
+				if berr := br.moreBits(); berr != nil {
+					return 0, 0, berr
 				}
 			}
 			for (br.bits & 3) == 3 {
 				zsym += 3
 				br.bits >>= 2
 				br.cnt -= 2
-				if err := br.moreBits(); err != nil {
-					return 0, 0, err
+				if berr := br.moreBits(); berr != nil {
+					return 0, 0, berr
 				}
 			}
 
@@ -96,9 +96,9 @@ func (r *Reader) readFSE(data block, off, maxSym, maxBits int32, table []fseEntr
 			continue
 		}
 
-		max := (2*threshold - 1) - remaining
+		limit := (2*threshold - 1) - remaining
 		var count int32
-		if int32(br.bits&uint32(threshold-1)) < max {
+		if int32(br.bits&uint32(threshold-1)) < limit {
 			// A small value.
 			count = int32(br.bits & uint32((threshold - 1)))
 			br.bits >>= bitsNeeded - 1
@@ -107,7 +107,7 @@ func (r *Reader) readFSE(data block, off, maxSym, maxBits int32, table []fseEntr
 			// A large value.
 			count = int32(br.bits & uint32((2*threshold - 1)))
 			if count >= threshold {
-				count -= max
+				count -= limit
 			}
 			br.bits >>= bitsNeeded
 			br.cnt -= uint32(bitsNeeded)
@@ -143,8 +143,8 @@ func (r *Reader) readFSE(data block, off, maxSym, maxBits int32, table []fseEntr
 
 	br.backup()
 
-	if err := r.buildFSE(off, norm[:maxSym+1], table, accuracyLog); err != nil {
-		return 0, 0, err
+	if berr := r.buildFSE(off, norm[:maxSym+1], table, accuracyLog); berr != nil {
+		return 0, 0, berr
 	}
 
 	return accuracyLog, int32(br.off), nil
@@ -196,9 +196,9 @@ func (r *Reader) buildFSE(off int32, norm []int16, table []fseEntry, tableBits i
 
 		highBit := 15 - bits.LeadingZeros16(nextState)
 
-		bits := tableBits - highBit
-		table[i].bits = uint8(bits)
-		table[i].base = (nextState << bits) - uint16(tableSize)
+		nbits := tableBits - highBit
+		table[i].bits = uint8(nbits)
+		table[i].base = (nextState << nbits) - uint16(tableSize)
 	}
 
 	return nil

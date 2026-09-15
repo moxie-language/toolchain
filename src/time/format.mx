@@ -330,8 +330,8 @@ func nextStdChunk(layout []byte) (prefix []byte, std int32, suffix []byte) {
 					if layout[i+1] == '9' {
 						code = stdFracSecond9
 					}
-					std := stdFracSecond(code, j-(i+1), c)
-					return layout[0:i], std, layout[j:]
+					sd := stdFracSecond(code, j-(i+1), c)
+					return layout[0:i], sd, layout[j:]
 				}
 			}
 		}
@@ -394,7 +394,7 @@ func appendInt(b []byte, x int32, width int32) []byte {
 	}
 
 	// 2-digit and 4-digit fields are the most common in time formats.
-	utod := func(u uint32) byte { return '0' + byte(u) }
+	utod := func(dv uint32) byte { return '0' + byte(dv) }
 	switch {
 	case width == 2 && u < 1e2:
 		return push(b, utod(u/1e1), utod(u%1e1))
@@ -632,12 +632,12 @@ func (t Time) GoString() []byte {
 func (t Time) Format(layout []byte) []byte {
 	const bufSize = 64
 	var b []byte
-	max := len(layout) + 10
-	if max < bufSize {
+	need := len(layout) + 10
+	if need < bufSize {
 		var buf [bufSize]byte
 		b = buf[:0]
 	} else {
-		b = []byte{:0:max}
+		b = []byte{:0:need}
 	}
 	b = t.AppendFormat(b, layout)
 	return []byte(b)
@@ -665,10 +665,10 @@ func (t Time) appendFormat(b []byte, layout []byte) []byte {
 		year  int32 = -1
 		month Month
 		day   int32
-		yday  int32 = -1
-		hour  int32 = -1
-		min   int32
-		sec   int32
+		yday   int32 = -1
+		hour   int32 = -1
+		minute int32
+		sec    int32
 	)
 
 	// Each iteration generates one std value.
@@ -693,7 +693,7 @@ func (t Time) appendFormat(b []byte, layout []byte) []byte {
 
 		// Compute hour, minute, second if needed.
 		if hour < 0 && std&stdNeedClock != 0 {
-			hour, min, sec = abs.clock()
+			hour, minute, sec = abs.clock()
 		}
 
 		switch std & stdMask {
@@ -762,9 +762,9 @@ func (t Time) appendFormat(b []byte, layout []byte) []byte {
 			}
 			b = appendInt(b, hr, 2)
 		case stdMinute:
-			b = appendInt(b, min, 0)
+			b = appendInt(b, minute, 0)
 		case stdZeroMinute:
-			b = appendInt(b, min, 2)
+			b = appendInt(b, minute, 2)
 		case stdSecond:
 			b = appendInt(b, sec, 0)
 		case stdZeroSecond:
@@ -793,24 +793,24 @@ func (t Time) appendFormat(b []byte, layout []byte) []byte {
 				b = push(b, 'Z')
 				break
 			}
-			zone := offset / 60 // convert to minutes
+			zt := offset / 60 // convert to minutes
 			absoffset := offset
-			if zone < 0 {
+			if zt < 0 {
 				b = mxutil.Ensure(b, 1)
 				b = push(b, '-')
-				zone = -zone
+				zt = -zt
 				absoffset = -absoffset
 			} else {
 				b = mxutil.Ensure(b, 1)
 				b = push(b, '+')
 			}
-			b = appendInt(b, zone/60, 2)
+			b = appendInt(b, zt/60, 2)
 			if std == stdISO8601ColonTZ || std == stdNumColonTZ || std == stdISO8601ColonSecondsTZ || std == stdNumColonSecondsTZ {
 				b = mxutil.Ensure(b, 1)
 				b = push(b, ':')
 			}
 			if std != stdNumShortTZ && std != stdISO8601ShortTZ {
-				b = appendInt(b, zone%60, 2)
+				b = appendInt(b, zt%60, 2)
 			}
 
 			// append seconds if appropriate
@@ -830,17 +830,17 @@ func (t Time) appendFormat(b []byte, layout []byte) []byte {
 			}
 			// No time zone known for this time, but we must print one.
 			// Use the -0700 format.
-			zone := offset / 60 // convert to minutes
-			if zone < 0 {
+			zt := offset / 60 // convert to minutes
+			if zt < 0 {
 				b = mxutil.Ensure(b, 1)
 				b = push(b, '-')
-				zone = -zone
+				zt = -zt
 			} else {
 				b = mxutil.Ensure(b, 1)
 				b = push(b, '+')
 			}
-			b = appendInt(b, zone/60, 2)
-			b = appendInt(b, zone%60, 2)
+			b = appendInt(b, zt/60, 2)
+			b = appendInt(b, zt%60, 2)
 		case stdFracSecond0, stdFracSecond9:
 			b = appendNano(b, t.Nanosecond(), std)
 		}
@@ -1076,7 +1076,7 @@ func parse(layout, value []byte, defaultLocation, local *Location) (Time, error)
 		day        int32 = -1
 		yday       int32 = -1
 		hour       int32
-		min        int32
+		minute     int32
 		sec        int32
 		nsec       int32
 		z          *Location
@@ -1171,8 +1171,8 @@ func parse(layout, value []byte, defaultLocation, local *Location) (Time, error)
 				rangeErrString = "hour"
 			}
 		case stdMinute, stdZeroMinute:
-			min, value, err = getnum(value, std == stdZeroMinute)
-			if min < 0 || 60 <= min {
+			minute, value, err = getnum(value, std == stdZeroMinute)
+			if minute < 0 || 60 <= minute {
 				rangeErrString = "minute"
 			}
 		case stdSecond, stdZeroSecond:
@@ -1238,7 +1238,7 @@ func parse(layout, value []byte, defaultLocation, local *Location) (Time, error)
 				z = UTC()
 				break
 			}
-			var sign, hour, min, seconds []byte
+			var sign, hb, mb, seconds []byte
 			if std == stdISO8601ColonTZ || std == stdNumColonTZ {
 				if len(value) < 6 {
 					err = errBad
@@ -1248,13 +1248,13 @@ func parse(layout, value []byte, defaultLocation, local *Location) (Time, error)
 					err = errBad
 					break
 				}
-				sign, hour, min, seconds, value = value[0:1], value[1:3], value[4:6], "00", value[6:]
+				sign, hb, mb, seconds, value = value[0:1], value[1:3], value[4:6], "00", value[6:]
 			} else if std == stdNumShortTZ || std == stdISO8601ShortTZ {
 				if len(value) < 3 {
 					err = errBad
 					break
 				}
-				sign, hour, min, seconds, value = value[0:1], value[1:3], "00", "00", value[3:]
+				sign, hb, mb, seconds, value = value[0:1], value[1:3], "00", "00", value[3:]
 			} else if std == stdISO8601ColonSecondsTZ || std == stdNumColonSecondsTZ {
 				if len(value) < 9 {
 					err = errBad
@@ -1264,24 +1264,24 @@ func parse(layout, value []byte, defaultLocation, local *Location) (Time, error)
 					err = errBad
 					break
 				}
-				sign, hour, min, seconds, value = value[0:1], value[1:3], value[4:6], value[7:9], value[9:]
+				sign, hb, mb, seconds, value = value[0:1], value[1:3], value[4:6], value[7:9], value[9:]
 			} else if std == stdISO8601SecondsTZ || std == stdNumSecondsTz {
 				if len(value) < 7 {
 					err = errBad
 					break
 				}
-				sign, hour, min, seconds, value = value[0:1], value[1:3], value[3:5], value[5:7], value[7:]
+				sign, hb, mb, seconds, value = value[0:1], value[1:3], value[3:5], value[5:7], value[7:]
 			} else {
 				if len(value) < 5 {
 					err = errBad
 					break
 				}
-				sign, hour, min, seconds, value = value[0:1], value[1:3], value[3:5], "00", value[5:]
+				sign, hb, mb, seconds, value = value[0:1], value[1:3], value[3:5], "00", value[5:]
 			}
 			var hr, mm, ss int32
-			hr, _, err = getnum(hour, true)
+			hr, _, err = getnum(hb, true)
 			if err == nil {
-				mm, _, err = getnum(min, true)
+				mm, _, err = getnum(mb, true)
 				if err == nil {
 					ss, _, err = getnum(seconds, true)
 				}
@@ -1407,11 +1407,11 @@ func parse(layout, value []byte, defaultLocation, local *Location) (Time, error)
 	}
 
 	if z != nil {
-		return Date(year, Month(month), day, hour, min, sec, nsec, z), nil
+		return Date(year, Month(month), day, hour, minute, sec, nsec, z), nil
 	}
 
 	if zoneOffset != -1 {
-		t := Date(year, Month(month), day, hour, min, sec, nsec, UTC())
+		t := Date(year, Month(month), day, hour, minute, sec, nsec, UTC())
 		t.addSec(-int64(zoneOffset))
 
 		// Look for local zone with the given offset.
@@ -1429,7 +1429,7 @@ func parse(layout, value []byte, defaultLocation, local *Location) (Time, error)
 	}
 
 	if zoneName != "" {
-		t := Date(year, Month(month), day, hour, min, sec, nsec, UTC())
+		t := Date(year, Month(month), day, hour, minute, sec, nsec, UTC())
 		// Look for local zone with the given offset.
 		// If that zone was in effect at the given time, use it.
 		offset, ok := local.lookupName(zoneName, t.unixSec())
@@ -1450,7 +1450,7 @@ func parse(layout, value []byte, defaultLocation, local *Location) (Time, error)
 	}
 
 	// Otherwise, fall back to default.
-	return Date(year, Month(month), day, hour, min, sec, nsec, defaultLocation), nil
+	return Date(year, Month(month), day, hour, minute, sec, nsec, defaultLocation), nil
 }
 
 // parseTimeZone parses a time zone string and returns its length. Time zones
@@ -1479,7 +1479,7 @@ func parseTimeZone(value []byte) (length int32, ok bool) {
 	// Special Case 3: Some time zones are not named, but have +/-00 format
 	if value[0] == '+' || value[0] == '-' {
 		length = parseSignedOffset(value)
-		ok := length > 0 // parseSignedOffset returns 0 in case of bad input
+		ok = length > 0 // parseSignedOffset returns 0 in case of bad input
 		return length, ok
 	}
 	// How many upper-case letters are there? Need at least three, at most five.
@@ -1688,9 +1688,9 @@ func ParseDuration(s []byte) (Duration, error) {
 		post := false
 		if s != "" && s[0] == '.' {
 			s = s[1:]
-			pl := len(s)
+			pl2 := len(s)
 			f, scale, s = leadingFraction(s)
-			post = pl != len(s)
+			post = pl2 != len(s)
 		}
 		if !pre && !post {
 			// no digits (e.g. ".s" or "-.s")

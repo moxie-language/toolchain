@@ -19,6 +19,7 @@ package os
 
 import (
 	"errors"
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"io"
 	"io/fs"
 	"syscall"
@@ -37,11 +38,11 @@ const (
 // Mkdir creates a directory. If the operation fails, it will return an error of
 // type *PathError.
 func Mkdir(path string, perm FileMode) error {
-	fs, suffix := findMount(path)
-	if fs == nil {
+	mnt, suffix := findMount(path)
+	if mnt == nil {
 		return &PathError{Op: "mkdir", Path: path, Err: ErrNotExist}
 	}
-	err := fs.Mkdir(suffix, perm)
+	err := mnt.Mkdir(suffix, perm)
 	if err != nil {
 		return &PathError{Op: "mkdir", Path: path, Err: err}
 	}
@@ -60,11 +61,11 @@ func fixCount(n int32, err error) (int32, error) {
 // Remove removes a file or (empty) directory. If the operation fails, it will
 // return an error of type *PathError.
 func Remove(path string) error {
-	fs, suffix := findMount(path)
-	if fs == nil {
+	mnt, suffix := findMount(path)
+	if mnt == nil {
 		return &PathError{Op: "remove", Path: path, Err: ErrNotExist}
 	}
-	err := fs.Remove(suffix)
+	err := mnt.Remove(suffix)
 	if err != nil {
 		return err
 	}
@@ -79,11 +80,11 @@ func (f *File) Name() string {
 // OpenFile opens the named file. If the operation fails, the returned error
 // will be of type *PathError.
 func OpenFile(name string, flag int32, perm FileMode) (*File, error) {
-	fs, suffix := findMount(name)
-	if fs == nil {
+	mnt, suffix := findMount(name)
+	if mnt == nil {
 		return nil, &PathError{Op: "open", Path: name, Err: ErrNotExist}
 	}
-	handle, err := fs.OpenFile(suffix, flag, perm)
+	handle, err := mnt.OpenFile(suffix, flag, perm)
 	if err != nil {
 		return nil, &PathError{Op: "open", Path: name, Err: err}
 	}
@@ -452,7 +453,8 @@ func ReadFile(name string) ([]byte, error) {
 	defer f.Close()
 
 	var size int32
-	if info, err := f.Stat(); err == nil {
+	info, serr := f.Stat()
+	if serr == nil {
 		size64 := info.Size()
 		if int64(int32(size64)) == size64 {
 			size = int32(size64)
@@ -470,20 +472,14 @@ func ReadFile(name string) ([]byte, error) {
 
 	data := []byte{:0:size}
 	for {
-		if len(data) >= cap(data) {
-			// Grow: allocate a new backing array of doubled capacity,
-			// copy the read bytes, and adopt it. Explicit - no auto-grow.
-			nb := []byte{:len(data):len(data) * 2}
-			copy(nb, data)
-			data = nb
-		}
-		n, err := f.Read(data[len(data):cap(data)])
+		data = mxutil.Ensure(data, 512)
+		n, rerr := f.Read(data[len(data):cap(data)])
 		data = data[:len(data)+n]
-		if err != nil {
-			if err == io.EOF {
-				err = nil
+		if rerr != nil {
+			if rerr == io.EOF {
+				rerr = nil
 			}
-			return data, err
+			return data, rerr
 		}
 	}
 }

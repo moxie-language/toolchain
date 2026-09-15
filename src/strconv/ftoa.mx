@@ -59,22 +59,22 @@ func AppendFloat(dst []byte, f float64, fmt byte, prec, bitSize int32) []byte {
 func genericFtoa(dst []byte, val float64, fmt byte, prec, bitSize int32) []byte {
 	float32info := floatInfo{23, 8, -127}
 	float64info := floatInfo{52, 11, -1023}
-	var bits uint64
+	var bv uint64
 	var flt *floatInfo
 	switch bitSize {
 	case 32:
-		bits = uint64(math.Float32bits(float32(val)))
+		bv = uint64(math.Float32bits(float32(val)))
 		flt = &float32info
 	case 64:
-		bits = math.Float64bits(val)
+		bv = math.Float64bits(val)
 		flt = &float64info
 	default:
 		panic("strconv: illegal AppendFloat/FormatFloat bitSize")
 	}
 
-	neg := bits>>(flt.expbits+flt.mantbits) != 0
-	exp := int32(bits>>flt.mantbits) & (1<<flt.expbits - 1)
-	mant := bits & (uint64(1)<<flt.mantbits - 1)
+	neg := bv>>(flt.expbits+flt.mantbits) != 0
+	exp := int32(bv>>flt.mantbits) & (1<<flt.expbits - 1)
+	mant := bv & (uint64(1)<<flt.mantbits - 1)
 
 	switch exp {
 	case 1<<flt.expbits - 1:
@@ -133,27 +133,27 @@ func genericFtoa(dst []byte, val float64, fmt byte, prec, bitSize int32) []byte 
 		}
 	} else if fmt != 'f' {
 		// Fixed number of digits.
-		digits := prec
+		nd := prec
 		switch fmt {
 		case 'e', 'E':
-			digits++
+			nd++
 		case 'g', 'G':
 			if prec == 0 {
 				prec = 1
 			}
-			digits = prec
+			nd = prec
 		default:
 			// Invalid mode.
-			digits = 1
+			nd = 1
 		}
 		var buf [24]byte
-		if bitSize == 32 && digits <= 9 {
+		if bitSize == 32 && nd <= 9 {
 			digs.d = buf[:]
-			ryuFtoaFixed32(&digs, uint32(mant), exp-int32(flt.mantbits), digits)
+			ryuFtoaFixed32(&digs, uint32(mant), exp-int32(flt.mantbits), nd)
 			ok = true
-		} else if digits <= 18 {
+		} else if nd <= 18 {
 			digs.d = buf[:]
-			ryuFtoaFixed64(&digs, mant, exp-int32(flt.mantbits), digits)
+			ryuFtoaFixed64(&digs, mant, exp-int32(flt.mantbits), nd)
 			ok = true
 		}
 	}
@@ -284,9 +284,9 @@ func roundShortest(d *decimal, mant uint64, exp int32, flt *floatInfo) {
 		mantlo = mant*2 - 1
 		explo = exp - 1
 	}
-	lower := &decimal{}
-	lower.Assign(mantlo*2 + 1)
-	lower.Shift(explo - int32(flt.mantbits) - 1)
+	lo := &decimal{}
+	lo.Assign(mantlo*2 + 1)
+	lo.Shift(explo - int32(flt.mantbits) - 1)
 
 	// The upper and lower bounds are possible outputs only if
 	// the original mantissa is even, so that IEEE round-to-even
@@ -316,10 +316,10 @@ func roundShortest(d *decimal, mant uint64, exp int32, flt *floatInfo) {
 		if mi >= d.nd {
 			break
 		}
-		li := ui - upper.dp + lower.dp
+		li := ui - upper.dp + lo.dp
 		l := byte('0') // lower digit
-		if li >= 0 && li < lower.nd {
-			l = lower.d[li]
+		if li >= 0 && li < lo.nd {
+			l = lo.d[li]
 		}
 		m := byte('0') // middle digit
 		if mi >= 0 {
@@ -333,7 +333,7 @@ func roundShortest(d *decimal, mant uint64, exp int32, flt *floatInfo) {
 		// Okay to round down (truncate) if lower has a different digit
 		// or if lower is inclusive and is exactly the result of rounding
 		// down (i.e., and we have reached the final digit of lower).
-		okdown := l != m || inclusive && li+1 == lower.nd
+		okdown := l != m || inclusive && li+1 == lo.nd
 
 		switch {
 		case upperdelta == 0 && m+1 < u:

@@ -165,26 +165,26 @@ func (l *Location) lookup(sec int64) (name []byte, offset int32, start, end int6
 		return
 	}
 
-	if zone := l.cacheZone; zone != nil && l.cacheStart <= sec && sec < l.cacheEnd {
-		name = zone.name
-		offset = zone.offset
+	if cz := l.cacheZone; cz != nil && l.cacheStart <= sec && sec < l.cacheEnd {
+		name = cz.name
+		offset = cz.offset
 		start = l.cacheStart
 		end = l.cacheEnd
-		isDST = zone.isDST
+		isDST = cz.isDST
 		return
 	}
 
 	if len(l.tx) == 0 || sec < l.tx[0].when {
-		zone := &l.zone[l.lookupFirstZone()]
-		name = zone.name
-		offset = zone.offset
+		fz := &l.zone[l.lookupFirstZone()]
+		name = fz.name
+		offset = fz.offset
 		start = alpha
 		if len(l.tx) > 0 {
 			end = l.tx[0].when
 		} else {
 			end = omega
 		}
-		isDST = zone.isDST
+		isDST = fz.isDST
 		return
 	}
 
@@ -204,12 +204,12 @@ func (l *Location) lookup(sec int64) (name []byte, offset int32, start, end int6
 			lo = m
 		}
 	}
-	zone := &l.zone[tx[lo].index]
-	name = zone.name
-	offset = zone.offset
+	z := &l.zone[tx[lo].index]
+	name = z.name
+	offset = z.offset
 	start = tx[lo].when
 	// end = maintained during the search
-	isDST = zone.isDST
+	isDST = z.isDST
 
 	// If we're at the end of the known zone transitions,
 	// try the extend string.
@@ -538,25 +538,25 @@ func tzsetRule(s []byte) (rule, []byte, bool) {
 // tzsetNum parses a number from a tzset string.
 // It returns the number, and the remainder of the string, and reports success.
 // The number must be between min and max.
-func tzsetNum(s []byte, min, max int32) (num int32, rest []byte, ok bool) {
+func tzsetNum(s []byte, lo, hi int32) (num int32, rest []byte, ok bool) {
 	if len(s) == 0 {
 		return 0, "", false
 	}
 	num = 0
 	for i, r := range s {
 		if r < '0' || r > '9' {
-			if i == 0 || num < min {
+			if i == 0 || num < lo {
 				return 0, "", false
 			}
 			return num, s[i:], true
 		}
 		num *= 10
 		num += int32(r) - '0'
-		if num > max {
+		if num > hi {
 			return 0, "", false
 		}
 	}
-	if num < min {
+	if num < lo {
 		return 0, "", false
 	}
 	return num, "", true
@@ -623,20 +623,20 @@ func (l *Location) lookupName(name []byte, unix int64) (offset int32, ok bool) {
 	// It's not perfect: during the backward transition we might pick
 	// either one.)
 	for i := range l.zone {
-		zone := &l.zone[i]
-		if zone.name == name {
-			nam, offset, _, _, _ := l.lookup(unix - int64(zone.offset))
-			if nam == zone.name {
-				return offset, true
+		z := &l.zone[i]
+		if z.name == name {
+			nam, off, _, _, _ := l.lookup(unix - int64(z.offset))
+			if nam == z.name {
+				return off, true
 			}
 		}
 	}
 
 	// Otherwise fall back to an ordinary name match.
 	for i := range l.zone {
-		zone := &l.zone[i]
-		if zone.name == name {
-			return zone.offset, true
+		z := &l.zone[i]
+		if z.name == name {
+			return z.offset, true
 		}
 	}
 
@@ -691,10 +691,11 @@ func LoadLocation(name []byte) (*Location, error) {
 	var firstErr error
 	if *zoneinfo != "" {
 		if zoneData, err := loadTzinfoFromDirOrZip(*zoneinfo, name); err == nil {
-			if z, err := LoadLocationFromTZData(name, zoneData); err == nil {
+			z, lerr := LoadLocationFromTZData(name, zoneData)
+			if lerr == nil {
 				return z, nil
 			}
-			firstErr = err
+			firstErr = lerr
 		} else if err != syscall.ENOENT {
 			firstErr = err
 		}

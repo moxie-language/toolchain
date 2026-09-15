@@ -18,7 +18,7 @@ import (
 // its own.
 
 // ExpandLabel implements HKDF-Expand-Label from RFC 8446, Section 7.1.
-func ExpandLabel[H hash.Hash](hash func() H, secret []byte, label []byte, context []byte, length int32) []byte {
+func ExpandLabel[H hash.Hash](hfn func() H, secret []byte, label []byte, context []byte, length int32) []byte {
 	if len("tls13 ")+len(label) > 255 || len(context) > 255 {
 		// It should be impossible for this to panic: labels are fixed strings,
 		// and context is either a fixed-length computed hash, or parsed from a
@@ -42,21 +42,21 @@ func ExpandLabel[H hash.Hash](hash func() H, secret []byte, label []byte, contex
 	hkdfLabel = push(hkdfLabel, byte(len(context)))
 	hkdfLabel = mxutil.Ensure(hkdfLabel, len(context))
 	hkdfLabel = push(hkdfLabel, context...)
-	return hkdf.Expand(hash, secret, hkdfLabel, length)
+	return hkdf.Expand(hfn, secret, hkdfLabel, length)
 }
 
-func extract[H hash.Hash](hash func() H, newSecret, currentSecret []byte) []byte {
+func extract[H hash.Hash](hfn func() H, newSecret, currentSecret []byte) []byte {
 	if newSecret == nil {
-		newSecret = []byte{:hash().Size()}
+		newSecret = []byte{:hfn().Size()}
 	}
-	return hkdf.Extract(hash, newSecret, currentSecret)
+	return hkdf.Extract(hfn, newSecret, currentSecret)
 }
 
-func deriveSecret[H hash.Hash](hash func() H, secret []byte, label []byte, transcript hash.Hash) []byte {
+func deriveSecret[H hash.Hash](hfn func() H, secret []byte, label []byte, transcript hash.Hash) []byte {
 	if transcript == nil {
-		transcript = hash()
+		transcript = hfn()
 	}
-	return ExpandLabel(hash, secret, label, transcript.Sum(nil), transcript.Size())
+	return ExpandLabel(hfn, secret, label, transcript.Sum(nil), transcript.Size())
 }
 
 const (

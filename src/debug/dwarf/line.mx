@@ -165,10 +165,10 @@ func (d *Data) LineReader(cu *Entry) (*LineReader, error) {
 
 	// Create the LineReader.
 	u := &d.unit[d.offsetToUnit(cu.Offset)]
-	buf := makeBuf(d, u, "line", Offset(off), d.line[off:])
+	lbuf := makeBuf(d, u, "line", Offset(off), d.line[off:])
 	// The compilation directory is implicitly directories[0].
 	r := LineReader{
-		buf:     buf,
+		buf:     lbuf,
 		section: d.line,
 		str:     d.str,
 		lineStr: d.lineStr,
@@ -188,17 +188,17 @@ func (d *Data) LineReader(cu *Entry) (*LineReader, error) {
 // readHeader reads the line number program header from r.buf and sets
 // all of the header fields in r.
 func (r *LineReader) readHeader(compDir string) error {
-	buf := &r.buf
+	b := &r.buf
 
 	// Read basic header fields [DWARF2 6.2.4].
-	hdrOffset := buf.off
-	unitLength, dwarf64 := buf.unitLength()
-	r.endOffset = buf.off + unitLength
-	if r.endOffset > buf.off+Offset(len(buf.data)) {
-		return DecodeError{"line", hdrOffset, fmt.Sprintf("line table end %d exceeds section size %d", r.endOffset, buf.off+Offset(len(buf.data)))}
+	hdrOffset := b.off
+	unitLength, dwarf64 := b.unitLength()
+	r.endOffset = b.off + unitLength
+	if r.endOffset > b.off+Offset(len(b.data)) {
+		return DecodeError{"line", hdrOffset, fmt.Sprintf("line table end %d exceeds section size %d", r.endOffset, b.off+Offset(len(b.data)))}
 	}
-	r.version = buf.uint16()
-	if buf.err == nil && (r.version < 2 || r.version > 5) {
+	r.version = b.uint16()
+	if b.err == nil && (r.version < 2 || r.version > 5) {
 		// DWARF goes to all this effort to make new opcodes
 		// backward-compatible, and then adds fields right in
 		// the middle of the header in new versions, so we're
@@ -207,37 +207,37 @@ func (r *LineReader) readHeader(compDir string) error {
 		return DecodeError{"line", hdrOffset, fmt.Sprintf("unknown line table version %d", r.version)}
 	}
 	if r.version >= 5 {
-		r.addrsize = int32(buf.uint8())
-		r.segmentSelectorSize = int32(buf.uint8())
+		r.addrsize = int32(b.uint8())
+		r.segmentSelectorSize = int32(b.uint8())
 	} else {
-		r.addrsize = buf.format.addrsize()
+		r.addrsize = b.format.addrsize()
 		r.segmentSelectorSize = 0
 	}
 	var headerLength Offset
 	if dwarf64 {
-		headerLength = Offset(buf.uint64())
+		headerLength = Offset(b.uint64())
 	} else {
-		headerLength = Offset(buf.uint32())
+		headerLength = Offset(b.uint32())
 	}
-	programOffset := buf.off + headerLength
+	programOffset := b.off + headerLength
 	if programOffset > r.endOffset {
 		return DecodeError{"line", hdrOffset, fmt.Sprintf("malformed line table: program offset %d exceeds end offset %d", programOffset, r.endOffset)}
 	}
 	r.programOffset = programOffset
-	r.minInstructionLength = int32(buf.uint8())
+	r.minInstructionLength = int32(b.uint8())
 	if r.version >= 4 {
 		// [DWARF4 6.2.4]
-		r.maxOpsPerInstruction = int32(buf.uint8())
+		r.maxOpsPerInstruction = int32(b.uint8())
 	} else {
 		r.maxOpsPerInstruction = 1
 	}
-	r.defaultIsStmt = buf.uint8() != 0
-	r.lineBase = int32(int8(buf.uint8()))
-	r.lineRange = int32(buf.uint8())
+	r.defaultIsStmt = b.uint8() != 0
+	r.lineBase = int32(int8(b.uint8()))
+	r.lineRange = int32(b.uint8())
 
 	// Validate header.
-	if buf.err != nil {
-		return buf.err
+	if b.err != nil {
+		return b.err
 	}
 	if r.maxOpsPerInstruction == 0 {
 		return DecodeError{"line", hdrOffset, "invalid maximum operations per instruction: 0"}
@@ -247,15 +247,15 @@ func (r *LineReader) readHeader(compDir string) error {
 	}
 
 	// Read standard opcode length table. This table starts with opcode 1.
-	r.opcodeBase = int32(buf.uint8())
+	r.opcodeBase = int32(b.uint8())
 	r.opcodeLengths = []int32{:r.opcodeBase}
 	for i := 1; i < r.opcodeBase; i++ {
-		r.opcodeLengths[i] = int32(buf.uint8())
+		r.opcodeLengths[i] = int32(b.uint8())
 	}
 
 	// Validate opcode lengths.
-	if buf.err != nil {
-		return buf.err
+	if b.err != nil {
+		return b.err
 	}
 	kol := _knownOpcodeLengths()
 	for i, length := range r.opcodeLengths {
@@ -268,9 +268,9 @@ func (r *LineReader) readHeader(compDir string) error {
 		// Read include directories table.
 		r.directories = [][]byte{compDir}
 		for {
-			directory := buf.string()
-			if buf.err != nil {
-				return buf.err
+			directory := b.string()
+			if b.err != nil {
+				return b.err
 			}
 			if len(directory) == 0 {
 				break
@@ -296,7 +296,7 @@ func (r *LineReader) readHeader(compDir string) error {
 		}
 	} else {
 		dirFormat := r.readLNCTFormat()
-		c := buf.uintVar()
+		c := b.uintVar()
 		r.directories = [][]byte{:c}
 		for i := range r.directories {
 			dir, _, _, err := r.readLNCT(dirFormat, dwarf64)
@@ -306,7 +306,7 @@ func (r *LineReader) readHeader(compDir string) error {
 			r.directories[i] = dir
 		}
 		fileFormat := r.readLNCTFormat()
-		c = buf.uintVar()
+		c = b.uintVar()
 		r.fileEntries = []*LineFile{:c}
 		for i := range r.fileEntries {
 			name, mtime, size, err := r.readLNCT(fileFormat, dwarf64)
@@ -319,7 +319,7 @@ func (r *LineReader) readHeader(compDir string) error {
 
 	r.initialFileEntries = len(r.fileEntries)
 
-	return buf.err
+	return b.err
 }
 
 // lnctForm is a pair of an LNCT code and a form. This represents an
@@ -342,7 +342,7 @@ func (r *LineReader) readLNCTFormat() []lnctForm {
 }
 
 // readLNCT reads a sequence of LNCT entries and returns path information.
-func (r *LineReader) readLNCT(s []lnctForm, dwarf64 bool) (path string, mtime uint64, size uint64, err error) {
+func (r *LineReader) readLNCT(s []lnctForm, dwarf64 bool) (fpath string, mtime uint64, size uint64, err error) {
 	var dir string
 	for _, lf := range s {
 		var str string
@@ -407,7 +407,7 @@ func (r *LineReader) readLNCT(s []lnctForm, dwarf64 bool) (path string, mtime ui
 
 		switch lf.lnct {
 		case lnctPath:
-			path = str
+			fpath = str
 		case lnctDirectoryIndex:
 			if val >= uint64(len(r.directories)) {
 				return "", 0, 0, DecodeError{"line", r.buf.off, "directory index out of range"}
@@ -422,11 +422,11 @@ func (r *LineReader) readLNCT(s []lnctForm, dwarf64 bool) (path string, mtime ui
 		}
 	}
 
-	if dir != "" && path != "" {
-		path = pathJoin(dir, path)
+	if dir != "" && fpath != "" {
+		fpath = pathJoin(dir, fpath)
 	}
 
-	return path, mtime, size, nil
+	return fpath, mtime, size, nil
 }
 
 // readFileEntry reads a file entry from either the header or a
@@ -544,9 +544,9 @@ func (r *LineReader) step(entry *LineEntry) bool {
 		// Extended opcode [DWARF2 6.2.5.3]
 		length := Offset(r.buf.uint32())
 		startOff := r.buf.off
-		opcode := r.buf.uint8()
+		extOp := r.buf.uint8()
 
-		switch opcode {
+		switch extOp {
 		case lneEndSequence:
 			r.state.EndSequence = true
 			*entry = r.state
@@ -583,7 +583,7 @@ func (r *LineReader) step(entry *LineEntry) bool {
 
 		r.buf.skip(int32(startOff + length - r.buf.off))
 
-		if opcode == lneEndSequence {
+		if extOp == lneEndSequence {
 			return true
 		}
 
@@ -795,9 +795,9 @@ func (r *LineReader) SeekPC(pc uint64, entry *LineEntry) error {
 // absolute paths. We avoid the filepath package because we want this
 // to behave the same regardless of our host system and because we
 // don't know what system the paths came from.
-func pathIsAbs(path string) bool {
-	_, path = splitDrive(path)
-	return len(path) > 0 && (path[0] == '/' || path[0] == '\\')
+func pathIsAbs(p string) bool {
+	_, p = splitDrive(p)
+	return len(p) > 0 && (p[0] == '/' || p[0] == '\\')
 }
 
 // pathJoin joins dirname and filename. filename must be relative.
@@ -836,24 +836,24 @@ func pathJoin(dirname, filename string) string {
 
 // splitDrive splits the DOS drive letter or UNC share point from
 // path, if any. path == drive + rest
-func splitDrive(path string) (drive, rest string) {
-	if len(path) >= 2 && path[1] == ':' {
-		if c := path[0]; 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' {
-			return path[:2], path[2:]
+func splitDrive(p string) (drive, rest string) {
+	if len(p) >= 2 && p[1] == ':' {
+		if c := p[0]; 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' {
+			return p[:2], p[2:]
 		}
 	}
-	if len(path) > 3 && (path[0] == '\\' || path[0] == '/') && (path[1] == '\\' || path[1] == '/') {
+	if len(p) > 3 && (p[0] == '\\' || p[0] == '/') && (p[1] == '\\' || p[1] == '/') {
 		// Normalize the path so we can search for just \ below.
-		npath := bytes.ReplaceAll(path, "/", `\`)
+		npath := bytes.ReplaceAll(p, "/", `\`)
 		// Get the host part, which must be non-empty.
 		slash1 := bytes.IndexByte(npath[2:], '\\') + 2
 		if slash1 > 2 {
 			// Get the mount-point part, which must be non-empty.
 			slash2 := bytes.IndexByte(npath[slash1+1:], '\\') + slash1 + 1
 			if slash2 > slash1 {
-				return path[:slash2], path[slash2:]
+				return p[:slash2], p[slash2:]
 			}
 		}
 	}
-	return "", path
+	return "", p
 }

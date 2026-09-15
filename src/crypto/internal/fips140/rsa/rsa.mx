@@ -101,8 +101,8 @@ func newPrivateKey(n *bigmod.Modulus, e int32, d *bigmod.Nat, p, q *bigmod.Modul
 		d: d, p: p, q: q,
 		dP: dP, dQ: dQ, qInv: qInv,
 	}
-	if err := checkPrivateKey(pk); err != nil {
-		return nil, err
+	if cerr := checkPrivateKey(pk); cerr != nil {
+		return nil, cerr
 	}
 	return pk, nil
 }
@@ -138,8 +138,8 @@ func NewPrivateKeyWithPrecomputation(N []byte, e int32, d, P, Q, dP, dQ, qInv []
 		d: dN, p: p, q: q,
 		dP: dP, dQ: dQ, qInv: qInvNat,
 	}
-	if err := checkPrivateKey(pk); err != nil {
-		return nil, err
+	if cerr := checkPrivateKey(pk); cerr != nil {
+		return nil, cerr
 	}
 	return pk, nil
 }
@@ -162,8 +162,8 @@ func NewPrivateKeyWithoutCRT(N []byte, e int32, d []byte) (*PrivateKey, error) {
 		},
 		d: dN,
 	}
-	if err := checkPrivateKey(pk); err != nil {
-		return nil, err
+	if cerr := checkPrivateKey(pk); cerr != nil {
+		return nil, cerr
 	}
 	return pk, nil
 }
@@ -192,8 +192,8 @@ func (priv *PrivateKey) Export() (N []byte, e int32, d, P, Q, dP, dQ, qInv []byt
 func checkPrivateKey(priv *PrivateKey) error {
 	priv.fipsApproved = true
 
-	if fipsApproved, err := checkPublicKey(&priv.pub); err != nil {
-		return err
+	if fipsApproved, kerr := checkPublicKey(&priv.pub); kerr != nil {
+		return kerr
 	} else if !fipsApproved {
 		priv.fipsApproved = false
 	}
@@ -215,11 +215,11 @@ func checkPrivateKey(priv *PrivateKey) error {
 
 	// Check that pq ≡ 1 mod N (and that p < N and q < N).
 	pN := bigmod.NewNat().ExpandFor(N)
-	if _, err := pN.SetBytes(p.Nat().Bytes(p), N); err != nil {
+	if _, serr := pN.SetBytes(p.Nat().Bytes(p), N); serr != nil {
 		return errors.New("crypto/rsa: invalid prime")
 	}
 	qN := bigmod.NewNat().ExpandFor(N)
-	if _, err := qN.SetBytes(q.Nat().Bytes(q), N); err != nil {
+	if _, qerr := qN.SetBytes(q.Nat().Bytes(q), N); qerr != nil {
 		return errors.New("crypto/rsa: invalid prime")
 	}
 	if pN.Mul(qN, N).IsZero() != 1 {
@@ -281,10 +281,10 @@ func checkPrivateKey(priv *PrivateKey) error {
 	// do generate such keys. See Hanno Böck, Fermat Factorization in the Wild,
 	// https://eprint.iacr.org/2023/026.pdf.
 	diff := bigmod.NewNat()
-	if qP, err := bigmod.NewNat().SetBytes(q.Nat().Bytes(q), p); err != nil {
+	if dqP, berr := bigmod.NewNat().SetBytes(q.Nat().Bytes(q), p); berr != nil {
 		// q > p
-		pQ, err := bigmod.NewNat().SetBytes(p.Nat().Bytes(p), q)
-		if err != nil {
+		pQ, perr := bigmod.NewNat().SetBytes(p.Nat().Bytes(p), q)
+		if perr != nil {
 			return errors.New("crypto/rsa: p == q")
 		}
 		// diff = 0 - p mod q = q - p
@@ -292,7 +292,7 @@ func checkPrivateKey(priv *PrivateKey) error {
 	} else {
 		// p > q
 		// diff = 0 - q mod p = p - q
-		diff.ExpandFor(p).Sub(qP, p)
+		diff.ExpandFor(p).Sub(dqP, p)
 	}
 	// A tiny bit of leakage is acceptable because it's not adaptive, an
 	// attacker only learns the magnitude of p - q.

@@ -234,8 +234,8 @@ func randomPoint[P Point[P]](c *Curve[P], rand io.Reader, d *hmacDRBG) (k *bigmo
 		b := []byte{:c.N.Size()}
 		if d != nil {
 			d.Generate(b)
-		} else if err := drbg.ReadWithReader(rand, b); err != nil {
-			return nil, nil, err
+		} else if rerr := drbg.ReadWithReader(rand, b); rerr != nil {
+			return nil, nil, rerr
 		}
 
 		// Take only the leftmost bits of the generated random value. This is
@@ -261,9 +261,9 @@ func randomPoint[P Point[P]](c *Curve[P], rand io.Reader, d *hmacDRBG) (k *bigmo
 		// checks that k < N, and we explicitly check 0 != k. Since k can't be
 		// negative, this is strictly equivalent. None of this matters anyway
 		// because the chance of selecting zero is cryptographically negligible.
-		if k, err := bigmod.NewNat().SetBytes(b, c.N); err == nil && k.IsZero() == 0 {
-			p, err := c.newPoint().ScalarBaseMult(k.Bytes(c.N))
-			return k, p, err
+		if nk, nerr := bigmod.NewNat().SetBytes(b, c.N); nerr == nil && nk.IsZero() == 0 {
+			np, perr := c.newPoint().ScalarBaseMult(nk.Bytes(c.N))
+			return nk, np, perr
 		}
 
 	}
@@ -279,7 +279,7 @@ type Signature struct {
 // the hash function H) using the private key, priv. If the hash is longer than
 // the bit-length of the private key's curve order, the hash will be truncated
 // to that length.
-func Sign[P Point[P], H hash.Hash](c *Curve[P], h func() H, priv *PrivateKey, rand io.Reader, hash []byte) (*Signature, error) {
+func Sign[P Point[P], H hash.Hash](c *Curve[P], h func() H, priv *PrivateKey, rand io.Reader, digest []byte) (*Signature, error) {
 	if priv.pub.curve != c.curve {
 		return nil, errors.New("ecdsa: private key does not match curve")
 	}
@@ -302,9 +302,9 @@ func Sign[P Point[P], H hash.Hash](c *Curve[P], h func() H, priv *PrivateKey, ra
 	// per SP 800-90Ar1, Section 8.6.7, and the rest is a personalization
 	// string, which per SP 800-90Ar1, Section 8.7.1 may contain secret
 	// information.
-	drbg := newDRBG(h, Z, nil, blockAlignedPersonalizationString{priv.d, bits2octets(c, hash)})
+	gen := newDRBG(h, Z, nil, blockAlignedPersonalizationString{priv.d, bits2octets(c, digest)})
 
-	return sign(c, priv, drbg, hash)
+	return sign(c, priv, gen, digest)
 }
 
 // SignDeterministic signs a hash (which shall be the result of hashing a
@@ -312,28 +312,28 @@ func Sign[P Point[P], H hash.Hash](c *Curve[P], h func() H, priv *PrivateKey, ra
 // hash is longer than the bit-length of the private key's curve order, the hash
 // will be truncated to that length. This applies Deterministic ECDSA as
 // specified in FIPS 186-5 and RFC 6979.
-func SignDeterministic[P Point[P], H hash.Hash](c *Curve[P], h func() H, priv *PrivateKey, hash []byte) (*Signature, error) {
+func SignDeterministic[P Point[P], H hash.Hash](c *Curve[P], h func() H, priv *PrivateKey, digest []byte) (*Signature, error) {
 	if priv.pub.curve != c.curve {
 		return nil, errors.New("ecdsa: private key does not match curve")
 	}
 	fips140.RecordApproved()
 	fipsSelfTestDeterministic()
-	drbg := newDRBG(h, priv.d, bits2octets(c, hash), nil) // RFC 6979, Section 3.3
-	return sign(c, priv, drbg, hash)
+	gen := newDRBG(h, priv.d, bits2octets(c, digest), nil) // RFC 6979, Section 3.3
+	return sign(c, priv, gen, digest)
 }
 
 // bits2octets as specified in FIPS 186-5, Appendix B.2.4 or RFC 6979,
 // Section 2.3.4. See RFC 6979, Section 3.5 for the rationale.
-func bits2octets[P Point[P]](c *Curve[P], hash []byte) []byte {
+func bits2octets[P Point[P]](c *Curve[P], digest []byte) []byte {
 	e := bigmod.NewNat()
-	hashToNat(c, e, hash)
+	hashToNat(c, e, digest)
 	return e.Bytes(c.N)
 }
 
-func signGeneric[P Point[P]](c *Curve[P], priv *PrivateKey, drbg *hmacDRBG, hash []byte) (*Signature, error) {
+func signGeneric[P Point[P]](c *Curve[P], priv *PrivateKey, gen *hmacDRBG, digest []byte) (*Signature, error) {
 	// FIPS 186-5, Section 6.4.1
 
-	k, R, err := randomPoint(c, nil, drbg)
+	k, R, err := randomPoint(c, nil, gen)
 	if err != nil {
 		return nil, err
 	}
@@ -359,7 +359,7 @@ func signGeneric[P Point[P]](c *Curve[P], priv *PrivateKey, drbg *hmacDRBG, hash
 	}
 
 	e := bigmod.NewNat()
-	hashToNat(c, e, hash)
+	hashToNat(c, e, digest)
 
 	s, err := bigmod.NewNat().SetBytes(priv.d, c.N)
 	if err != nil {
@@ -383,8 +383,8 @@ func inverse[P Point[P]](c *Curve[P], kInv, k *bigmod.Nat) {
 		kBytes, err := c.ordInverse(k.Bytes(c.N))
 		// Some platforms don't implement ordInverse, and always return an error.
 		if err == nil {
-			_, err := kInv.SetBytes(kBytes, c.N)
-			if err != nil {
+			_, verr := kInv.SetBytes(kBytes, c.N)
+			if verr != nil {
 				panic("ecdsa: internal error: ordInverse produced an invalid value")
 			}
 			return
@@ -398,18 +398,18 @@ func inverse[P Point[P]](c *Curve[P], kInv, k *bigmod.Nat) {
 
 // hashToNat sets e to the left-most bits of hash, according to
 // FIPS 186-5, Section 6.4.1, point 2 and Section 6.4.2, point 3.
-func hashToNat[P Point[P]](c *Curve[P], e *bigmod.Nat, hash []byte) {
+func hashToNat[P Point[P]](c *Curve[P], e *bigmod.Nat, digest []byte) {
 	// ECDSA asks us to take the left-most log2(N) bits of hash, and use them as
 	// an integer modulo N. This is the absolute worst of all worlds: we still
 	// have to reduce, because the result might still overflow N, but to take
 	// the left-most bits for P-521 we have to do a right shift.
-	if size := c.N.Size(); len(hash) >= size {
-		hash = hash[:size]
-		if excess := len(hash)*8 - c.N.BitLen(); excess > 0 {
-			hash = rightShift(hash, excess)
+	if size := c.N.Size(); len(digest) >= size {
+		digest = digest[:size]
+		if excess := len(digest)*8 - c.N.BitLen(); excess > 0 {
+			digest = rightShift(digest, excess)
 		}
 	}
-	_, err := e.SetOverflowingBytes(hash, c.N)
+	_, err := e.SetOverflowingBytes(digest, c.N)
 	if err != nil {
 		panic("ecdsa: internal error: truncated hash is too long")
 	}
@@ -441,16 +441,16 @@ func rightShift(b []byte, shift int32) []byte {
 //
 // The inputs are not considered confidential, and may leak through timing side
 // channels, or if an attacker has control of part of the inputs.
-func Verify[P Point[P]](c *Curve[P], pub *PublicKey, hash []byte, sig *Signature) error {
+func Verify[P Point[P]](c *Curve[P], pub *PublicKey, digest []byte, sig *Signature) error {
 	if pub.curve != c.curve {
 		return errors.New("ecdsa: public key does not match curve")
 	}
 	fips140.RecordApproved()
 	fipsSelfTest()
-	return verify(c, pub, hash, sig)
+	return verify(c, pub, digest, sig)
 }
 
-func verifyGeneric[P Point[P]](c *Curve[P], pub *PublicKey, hash []byte, sig *Signature) error {
+func verifyGeneric[P Point[P]](c *Curve[P], pub *PublicKey, digest []byte, sig *Signature) error {
 	// FIPS 186-5, Section 6.4.2
 
 	Q, err := c.newPoint().SetBytes(pub.q)
@@ -474,7 +474,7 @@ func verifyGeneric[P Point[P]](c *Curve[P], pub *PublicKey, hash []byte, sig *Si
 	}
 
 	e := bigmod.NewNat()
-	hashToNat(c, e, hash)
+	hashToNat(c, e, digest)
 
 	// w = s⁻¹
 	w := bigmod.NewNat()

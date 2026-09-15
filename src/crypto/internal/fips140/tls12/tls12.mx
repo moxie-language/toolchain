@@ -15,19 +15,19 @@ import (
 
 // PRF implements the TLS 1.2 pseudo-random function, as defined in RFC 5246,
 // Section 5 and allowed by SP 800-135, Revision 1, Section 4.2.2.
-func PRF[H hash.Hash](hash func() H, secret []byte, label []byte, seed []byte, keyLen int32) []byte {
+func PRF[H hash.Hash](newHash func() H, secret []byte, label []byte, seed []byte, keyLen int32) []byte {
 	labelAndSeed := []byte{:len(label)+len(seed)}
 	copy(labelAndSeed, label)
 	copy(labelAndSeed[len(label):], seed)
 
 	result := []byte{:keyLen}
-	pHash(hash, result, secret, labelAndSeed)
+	pHash(newHash, result, secret, labelAndSeed)
 	return result
 }
 
 // pHash implements the P_hash function, as defined in RFC 5246, Section 5.
-func pHash[H hash.Hash](hash func() H, result, secret, seed []byte) {
-	h := hmac.New(hash, secret)
+func pHash[H hash.Hash](newHash func() H, result, secret, seed []byte) {
+	h := hmac.New(newHash, secret)
 	h.Write(seed)
 	a := h.Sum(nil)
 
@@ -50,10 +50,10 @@ const extendedMasterSecretLabel = "extended master secret"
 
 // MasterSecret implements the TLS 1.2 extended master secret derivation, as
 // defined in RFC 7627 and allowed by SP 800-135, Revision 1, Section 4.2.2.
-func MasterSecret[H hash.Hash](hash func() H, preMasterSecret, transcript []byte) []byte {
+func MasterSecret[H hash.Hash](newHash func() H, preMasterSecret, transcript []byte) []byte {
 	// "The TLS 1.2 KDF is an approved KDF when the following conditions are
 	// satisfied: [...] (3) P_HASH uses either SHA-256, SHA-384 or SHA-512."
-	h := hash()
+	h := newHash()
 	switch unsafe.TypeOf(h) {
 	case unsafe.TypeOf(sha256.Digest{}):
 		if h.Size() != 32 {
@@ -67,5 +67,5 @@ func MasterSecret[H hash.Hash](hash func() H, preMasterSecret, transcript []byte
 		fips140.RecordNonApproved()
 	}
 
-	return PRF(hash, preMasterSecret, extendedMasterSecretLabel, transcript, masterSecretLength)
+	return PRF(newHash, preMasterSecret, extendedMasterSecretLabel, transcript, masterSecretLength)
 }

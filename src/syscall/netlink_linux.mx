@@ -59,12 +59,12 @@ func NetlinkRIB(proto, family int32) ([]byte, error) {
 	}
 	defer Close(s)
 	sa := &SockaddrNetlink{Family: AF_NETLINK}
-	if err := Bind(s, sa); err != nil {
-		return nil, err
+	if berr := Bind(s, sa); berr != nil {
+		return nil, berr
 	}
 	wb := newNetlinkRouteRequest(proto, 1, family)
-	if err := Sendto(s, wb, 0, sa); err != nil {
-		return nil, err
+	if serr := Sendto(s, wb, 0, sa); serr != nil {
+		return nil, serr
 	}
 	lsa, err := Getsockname(s)
 	if err != nil {
@@ -80,20 +80,20 @@ func NetlinkRIB(proto, family int32) ([]byte, error) {
 	rbNew := &rb
 done:
 	for {
-		rb := *rbNew
-		nr, _, err := Recvfrom(s, rb, 0)
-		if err != nil {
-			return nil, err
+		rbuf := *rbNew
+		nr, _, rerr := Recvfrom(s, rbuf, 0)
+		if rerr != nil {
+			return nil, rerr
 		}
 		if nr < NLMSG_HDRLEN {
 			return nil, EINVAL
 		}
-		rb = rb[:nr]
-		tab = mxutil.Ensure(tab, len(rb))
-		tab = push(tab, rb...)
-		msgs, err := ParseNetlinkMessage(rb)
-		if err != nil {
-			return nil, err
+		rbuf = rbuf[:nr]
+		tab = mxutil.Ensure(tab, len(rbuf))
+		tab = push(tab, rbuf...)
+		msgs, merr := ParseNetlinkMessage(rbuf)
+		if merr != nil {
+			return nil, merr
 		}
 		for _, m := range msgs {
 			if m.Header.Seq != 1 || m.Header.Pid != lsanl.Pid {

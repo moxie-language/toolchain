@@ -448,7 +448,7 @@ func (u *Userinfo) String() string {
 // Maybe rawURL is of the form scheme:path.
 // (Scheme must be [a-zA-Z][a-zA-Z0-9+.-]*)
 // If so, return scheme, path; else return "", rawURL.
-func getScheme(rawURL string) (scheme, path string, err error) {
+func getScheme(rawURL string) (scheme, rest string, err error) {
 	for i := 0; i < len(rawURL); i++ {
 		c := rawURL[i]
 		switch {
@@ -585,8 +585,8 @@ func parse(rawURL string, viaRequest bool) (*URL, error) {
 	// RawPath is a hint of the encoding of Path. We don't want to set it if
 	// the default escaping of Path is equivalent, to help make sure that people
 	// don't rely on it in general.
-	if err := url.setPath(rest); err != nil {
-		return nil, err
+	if perr := url.setPath(rest); perr != nil {
+		return nil, perr
 	}
 	return url, nil
 }
@@ -641,9 +641,9 @@ func parseHost(host string) (string, error) {
 		if !validOptionalPort(colonPort) {
 			return "", fmt.Errorf("invalid port %q after host", colonPort)
 		}
-		unescapedColonPort, err := unescape(colonPort, encodeHost)
-		if err != nil {
-			return "", err
+		unescapedColonPort, uerr := unescape(colonPort, encodeHost)
+		if uerr != nil {
+			return "", uerr
 		}
 
 		hostname := host[openBracketIdx+1 : closeBracketIdx]
@@ -656,29 +656,29 @@ func parseHost(host string) (string, error) {
 		// like newlines.
 		zoneIdx := bytes.Index(hostname, "%25")
 		if zoneIdx >= 0 {
-			hostPart, err := unescape(hostname[:zoneIdx], encodeHost)
-			if err != nil {
-				return "", err
+			hostPart, herr := unescape(hostname[:zoneIdx], encodeHost)
+			if herr != nil {
+				return "", herr
 			}
-			zonePart, err := unescape(hostname[zoneIdx:], encodeZone)
-			if err != nil {
-				return "", err
+			zonePart, herr := unescape(hostname[zoneIdx:], encodeZone)
+			if herr != nil {
+				return "", herr
 			}
 			unescapedHostname = hostPart + zonePart
 		} else {
-			var err error
-			unescapedHostname, err = unescape(hostname, encodeHost)
-			if err != nil {
-				return "", err
+			var zerr error
+			unescapedHostname, zerr = unescape(hostname, encodeHost)
+			if zerr != nil {
+				return "", zerr
 			}
 		}
 
 		// Per RFC 3986, only a host identified by a valid
 		// IPv6 address can be enclosed by square brackets.
 		// This excludes any IPv4 or IPv4-mapped addresses.
-		addr, err := netip.ParseAddr(unescapedHostname)
-		if err != nil {
-			return "", fmt.Errorf("invalid host: %w", err)
+		addr, uerr := netip.ParseAddr(unescapedHostname)
+		if uerr != nil {
+			return "", fmt.Errorf("invalid host: %w", uerr)
 		}
 		if addr.Is4() || addr.Is4In6() {
 			return "", errors.New("invalid IPv6 host")
@@ -717,12 +717,12 @@ func parseHost(host string) (string, error) {
 //
 //:linkname badSetPath net/url.URL.setPath
 func (u *URL) setPath(p string) error {
-	path, err := unescape(p, encodePath)
+	decPath, err := unescape(p, encodePath)
 	if err != nil {
 		return err
 	}
-	u.Path = path
-	if escp := escape(path, encodePath); p == escp {
+	u.Path = decPath
+	if escp := escape(decPath, encodePath); p == escp {
 		// Default encoding is fine.
 		u.RawPath = ""
 	} else {
@@ -895,8 +895,8 @@ func (u *URL) String() string {
 				}
 			}
 		}
-		path := u.EscapedPath()
-		if path != "" && path[0] != '/' && u.Host != "" {
+		escPath := u.EscapedPath()
+		if escPath != "" && escPath[0] != '/' && u.Host != "" {
 			buf.WriteByte('/')
 		}
 		if buf.Len() == 0 {
@@ -906,11 +906,11 @@ func (u *URL) String() string {
 			// it would be mistaken for a scheme name. Such a segment must be
 			// preceded by a dot-segment (e.g., "./this:that") to make a relative-
 			// path reference.
-			if segment, _, _ := bytes.Cut(path, "/"); bytes.Contains(segment, ":") {
+			if segment, _, _ := bytes.Cut(escPath, "/"); bytes.Contains(segment, ":") {
 				buf.WriteString("./")
 			}
 		}
-		buf.WriteString(path)
+		buf.WriteString(escPath)
 	}
 	if u.ForceQuery || u.RawQuery != "" {
 		buf.WriteByte('?')
@@ -1044,13 +1044,13 @@ func (v Values) Encode() string {
 	for _, k := range keys {
 		vs := v[k]
 		keyEscaped := QueryEscape(k)
-		for _, v := range vs {
+		for _, val := range vs {
 			if buf.Len() > 0 {
 				buf.WriteByte('&')
 			}
 			buf.WriteString(keyEscaped)
 			buf.WriteByte('=')
-			buf.WriteString(QueryEscape(v))
+			buf.WriteString(QueryEscape(val))
 		}
 	}
 	return buf.String()

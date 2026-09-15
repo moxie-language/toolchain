@@ -45,16 +45,16 @@ func _hashPrefixes() map[string][]byte {
 //
 // hash is the name of the hash function as returned by [crypto.Hash.String]
 // or the empty string to indicate that the message is signed directly.
-func SignPKCS1v15(priv *PrivateKey, hash string, hashed []byte) ([]byte, error) {
+func SignPKCS1v15(priv *PrivateKey, hashName string, hashed []byte) ([]byte, error) {
 	fipsSelfTest()
 	fips140.RecordApproved()
-	checkApprovedHashName(hash)
+	checkApprovedHashName(hashName)
 
-	return signPKCS1v15(priv, hash, hashed)
+	return signPKCS1v15(priv, hashName, hashed)
 }
 
-func signPKCS1v15(priv *PrivateKey, hash string, hashed []byte) ([]byte, error) {
-	em, err := pkcs1v15ConstructEM(&priv.pub, hash, hashed)
+func signPKCS1v15(priv *PrivateKey, hashName string, hashed []byte) ([]byte, error) {
+	em, err := pkcs1v15ConstructEM(&priv.pub, hashName, hashed)
 	if err != nil {
 		return nil, err
 	}
@@ -62,13 +62,13 @@ func signPKCS1v15(priv *PrivateKey, hash string, hashed []byte) ([]byte, error) 
 	return decrypt(priv, em, withCheck)
 }
 
-func pkcs1v15ConstructEM(pub *PublicKey, hash string, hashed []byte) ([]byte, error) {
+func pkcs1v15ConstructEM(pub *PublicKey, hashName string, hashed []byte) ([]byte, error) {
 	// Special case: "" is used to indicate that the data is signed directly.
 	var prefix []byte
-	if hash != "" {
+	if hashName != "" {
 		var ok bool
 		hp := _hashPrefixes()
-		prefix, ok = hp[hash]
+		prefix, ok = hp[hashName]
 		if !ok {
 			return nil, errors.New("crypto/rsa: unsupported hash function")
 		}
@@ -93,17 +93,17 @@ func pkcs1v15ConstructEM(pub *PublicKey, hash string, hashed []byte) ([]byte, er
 //
 // hash is the name of the hash function as returned by [crypto.Hash.String]
 // or the empty string to indicate that the message is signed directly.
-func VerifyPKCS1v15(pub *PublicKey, hash string, hashed []byte, sig []byte) error {
+func VerifyPKCS1v15(pub *PublicKey, hashName string, hashed []byte, sig []byte) error {
 	fipsSelfTest()
 	fips140.RecordApproved()
-	checkApprovedHashName(hash)
+	checkApprovedHashName(hashName)
 
-	return verifyPKCS1v15(pub, hash, hashed, sig)
+	return verifyPKCS1v15(pub, hashName, hashed, sig)
 }
 
-func verifyPKCS1v15(pub *PublicKey, hash string, hashed []byte, sig []byte) error {
-	if fipsApproved, err := checkPublicKey(pub); err != nil {
-		return err
+func verifyPKCS1v15(pub *PublicKey, hashName string, hashed []byte, sig []byte) error {
+	if fipsApproved, kerr := checkPublicKey(pub); kerr != nil {
+		return kerr
 	} else if !fipsApproved {
 		fips140.RecordNonApproved()
 	}
@@ -120,7 +120,7 @@ func verifyPKCS1v15(pub *PublicKey, hash string, hashed []byte, sig []byte) erro
 		return ErrVerification
 	}
 
-	expected, err := pkcs1v15ConstructEM(pub, hash, hashed)
+	expected, err := pkcs1v15ConstructEM(pub, hashName, hashed)
 	if err != nil {
 		return ErrVerification
 	}
@@ -131,8 +131,8 @@ func verifyPKCS1v15(pub *PublicKey, hash string, hashed []byte, sig []byte) erro
 	return nil
 }
 
-func checkApprovedHashName(hash string) {
-	switch hash {
+func checkApprovedHashName(hashName string) {
+	switch hashName {
 	case "SHA-224", "SHA-256", "SHA-384", "SHA-512", "SHA-512/224", "SHA-512/256",
 		"SHA3-224", "SHA3-256", "SHA3-384", "SHA3-512":
 	default:

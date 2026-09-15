@@ -164,9 +164,9 @@ func formatDecimal(d *decimalSlice, m uint64, trunc bool, roundUp bool, prec int
 		1, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9,
 		1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19,
 	}
-	max := uint64pow10[prec]
+	limit := uint64pow10[prec]
 	trimmed := 0
-	for m >= max {
+	for m >= limit {
 		a, b := m/10, m%10
 		m = a
 		trimmed++
@@ -186,7 +186,7 @@ func formatDecimal(d *decimalSlice, m uint64, trunc bool, roundUp bool, prec int
 	if roundUp {
 		m++
 	}
-	if m >= max {
+	if m >= limit {
 		// Happens if di was originally 99999....xx
 		m /= 10
 		trimmed++
@@ -348,23 +348,23 @@ func mulByLog10Log2(x int32) int32 {
 // computeBounds returns a floating-point vector (l, c, u)×2^e2
 // where the mantissas are 55-bit (or 26-bit) integers, describing the interval
 // represented by the input float64 or float32.
-func computeBounds(mant uint64, exp int32, flt *floatInfo) (lower, central, upper uint64, e2 int32) {
+func computeBounds(mant uint64, exp int32, flt *floatInfo) (lo, central, up uint64, e2 int32) {
 	if mant != 1<<flt.mantbits || exp == flt.bias+1-int32(flt.mantbits) {
 		// regular case (or denormals)
-		lower, central, upper = 2*mant-1, 2*mant, 2*mant+1
+		lo, central, up = 2*mant-1, 2*mant, 2*mant+1
 		e2 = exp - 1
 		return
 	} else {
 		// border of an exponent
-		lower, central, upper = 4*mant-1, 4*mant, 4*mant+2
+		lo, central, up = 4*mant-1, 4*mant, 4*mant+2
 		e2 = exp - 2
 		return
 	}
 }
 
-func ryuDigits(d *decimalSlice, lower, central, upper uint64,
+func ryuDigits(d *decimalSlice, lo, central, upper uint64,
 	c0, cup bool) {
-	lhi, llo := divmod1e9(lower)
+	lhi, llo := divmod1e9(lo)
 	chi, clo := divmod1e9(central)
 	uhi, ulo := divmod1e9(upper)
 	if uhi == 0 {
@@ -408,7 +408,7 @@ func ryuDigits(d *decimalSlice, lower, central, upper uint64,
 }
 
 // ryuDigits32 emits decimal digits for a number less than 1e9.
-func ryuDigits32(d *decimalSlice, lower, central, upper uint32,
+func ryuDigits32(d *decimalSlice, lo, central, upper uint32,
 	c0, cup bool, endindex int32) {
 	if upper == 0 {
 		d.dp = endindex + 1
@@ -424,7 +424,7 @@ func ryuDigits32(d *decimalSlice, lower, central, upper uint32,
 		// c = Round(central / 10^k)
 		// u = Floor(upper / 10^k)
 		// and stop when c goes out of the (l, u) interval.
-		l := (lower + 9) / 10
+		l := (lo + 9) / 10
 		c, cdigit := central/10, central%10
 		u := upper / 10
 		if l > u {
@@ -450,7 +450,7 @@ func ryuDigits32(d *decimalSlice, lower, central, upper uint32,
 		// Remember trimmed digits of c
 		c0 = c0 && cNextDigit == 0
 		cNextDigit = int32(cdigit)
-		lower, central, upper = l, c, u
+		lo, central, upper = l, c, u
 	}
 	// should we round up?
 	if trimmed > 0 {

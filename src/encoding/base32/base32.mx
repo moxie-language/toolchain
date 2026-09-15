@@ -58,27 +58,27 @@ const (
 // without any special treatment for multi-byte UTF-8.
 // The resulting Encoding uses the default padding character ('='),
 // which may be changed or disabled via [Encoding.WithPadding].
-func NewEncoding(encoder []byte) *Encoding {
-	if len(encoder) != 32 {
+func NewEncoding(alphabet []byte) *Encoding {
+	if len(alphabet) != 32 {
 		panic("encoding alphabet is not 32-bytes long")
 	}
 
 	e := &Encoding{}
 	e.padChar = StdPadding
-	copy(e.encode[:], encoder)
+	copy(e.encode[:], alphabet)
 	copy(e.decodeMap[:], decodeMapInitialize)
 
-	for i := 0; i < len(encoder); i++ {
+	for i := 0; i < len(alphabet); i++ {
 		// Note: While we document that the alphabet cannot contain
 		// the padding character, we do not enforce it since we do not know
 		// if the caller intends to switch the padding from StdPadding later.
 		switch {
-		case encoder[i] == '\n' || encoder[i] == '\r':
+		case alphabet[i] == '\n' || alphabet[i] == '\r':
 			panic("encoding alphabet contains newline character")
-		case e.decodeMap[encoder[i]] != invalidIndex:
+		case e.decodeMap[alphabet[i]] != invalidIndex:
 			panic("encoding alphabet includes duplicate symbols")
 		}
-		e.decodeMap[encoder[i]] = uint8(i)
+		e.decodeMap[alphabet[i]] = uint8(i)
 	}
 	return e
 }
@@ -469,20 +469,20 @@ type decoder struct {
 	outbuf [1024 / 8 * 5]byte
 }
 
-func readEncodedData(r io.Reader, buf []byte, min int32, expectsPadding bool) (n int32, err error) {
-	for n < min && err == nil {
+func readEncodedData(r io.Reader, buf []byte, minLen int32, expectsPadding bool) (n int32, err error) {
+	for n < minLen && err == nil {
 		var nn int32
 		nn, err = r.Read(buf[n:])
 		n += nn
 	}
 	// data was read, less than min bytes could be read
-	if n < min && n > 0 && err == io.EOF {
+	if n < minLen && n > 0 && err == io.EOF {
 		err = io.ErrUnexpectedEOF
 	}
 	// no data was read, the buffer already contains some data
 	// when padding is disabled this is not an error, as the message can be of
 	// any length
-	if expectsPadding && min < 8 && n == 0 && err == io.EOF {
+	if expectsPadding && minLen < 8 && n == 0 && err == io.EOF {
 		err = io.ErrUnexpectedEOF
 	}
 	return
@@ -513,19 +513,19 @@ func (d *decoder) Read(p []byte) (n int32, err error) {
 	}
 
 	// Minimum amount of bytes that needs to be read each cycle
-	var min int32
+	var minLen int32
 	var expectsPadding bool
 	if d.enc.padChar == NoPadding {
-		min = 1
+		minLen = 1
 		expectsPadding = false
 	} else {
-		min = 8 - d.nbuf
+		minLen = 8 - d.nbuf
 		expectsPadding = true
 	}
 
-	nn, d.err = readEncodedData(d.r, d.buf[d.nbuf:nn], min, expectsPadding)
+	nn, d.err = readEncodedData(d.r, d.buf[d.nbuf:nn], minLen, expectsPadding)
 	d.nbuf += nn
-	if d.nbuf < min {
+	if d.nbuf < minLen {
 		return 0, d.err
 	}
 	if nn > 0 && d.end {

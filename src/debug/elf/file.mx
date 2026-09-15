@@ -290,8 +290,8 @@ func NewFile(r io.ReaderAt) (*File, error) {
 	sr := io.NewSectionReader(r, 0, 1<<63-1)
 	// Read and decode ELF identifier
 	var ident [16]uint8
-	if _, err := r.ReadAt(ident[0:], 0); err != nil {
-		return nil, err
+	if _, rerr := r.ReadAt(ident[0:], 0); rerr != nil {
+		return nil, rerr
 	}
 	if ident[0] != '\x7f' || ident[1] != 'E' || ident[2] != 'L' || ident[3] != 'F' {
 		return nil, &FormatError{0, "bad magic number", ident[0:4]}
@@ -336,8 +336,8 @@ func NewFile(r io.ReaderAt) (*File, error) {
 	case ELFCLASS32:
 		var hdr Header32
 		data := []byte{:unsafe.Sizeof(hdr)}
-		if _, err := sr.ReadAt(data, 0); err != nil {
-			return nil, err
+		if _, derr := sr.ReadAt(data, 0); derr != nil {
+			return nil, derr
 		}
 		f.Type = Type(bo.Uint16(data[unsafe.Offsetof(hdr.Type):]))
 		f.Machine = Machine(bo.Uint16(data[unsafe.Offsetof(hdr.Machine):]))
@@ -355,8 +355,8 @@ func NewFile(r io.ReaderAt) (*File, error) {
 	case ELFCLASS64:
 		var hdr Header64
 		data := []byte{:unsafe.Sizeof(hdr)}
-		if _, err := sr.ReadAt(data, 0); err != nil {
-			return nil, err
+		if _, derr := sr.ReadAt(data, 0); derr != nil {
+			return nil, derr
 		}
 		f.Type = Type(bo.Uint16(data[unsafe.Offsetof(hdr.Type):]))
 		f.Machine = Machine(bo.Uint16(data[unsafe.Offsetof(hdr.Machine):]))
@@ -457,16 +457,16 @@ func NewFile(r io.ReaderAt) (*File, error) {
 		switch f.Class {
 		case ELFCLASS32:
 			sh := &Section32{}
-			if err := binary.Read(sr, bo, unsafe.TypeOf(*sh), unsafe.Pointer(sh)); err != nil {
-				return nil, err
+			if serr := binary.Read(sr, bo, unsafe.TypeOf(*sh), unsafe.Pointer(sh)); serr != nil {
+				return nil, serr
 			}
 			shnum = int32(sh.Size)
 			typ = sh.Type
 			link = sh.Link
 		case ELFCLASS64:
 			sh := &Section64{}
-			if err := binary.Read(sr, bo, unsafe.TypeOf(*sh), unsafe.Pointer(sh)); err != nil {
-				return nil, err
+			if serr := binary.Read(sr, bo, unsafe.TypeOf(*sh), unsafe.Pointer(sh)); serr != nil {
+				return nil, serr
 			}
 			shnum = int32(sh.Size)
 			typ = sh.Type
@@ -563,8 +563,8 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			case ELFCLASS32:
 				var ch Chdr32
 				chdata := []byte{:unsafe.Sizeof(ch)}
-				if _, err := s.sr.ReadAt(chdata, 0); err != nil {
-					return nil, err
+				if _, cerr := s.sr.ReadAt(chdata, 0); cerr != nil {
+					return nil, cerr
 				}
 				s.compressionType = CompressionType(bo.Uint32(chdata[unsafe.Offsetof(ch.Type):]))
 				s.Size = uint64(bo.Uint32(chdata[unsafe.Offsetof(ch.Size):]))
@@ -573,8 +573,8 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			case ELFCLASS64:
 				var ch Chdr64
 				chdata := []byte{:unsafe.Sizeof(ch)}
-				if _, err := s.sr.ReadAt(chdata, 0); err != nil {
-					return nil, err
+				if _, cerr := s.sr.ReadAt(chdata, 0); cerr != nil {
+					return nil, cerr
 				}
 				s.compressionType = CompressionType(bo.Uint32(chdata[unsafe.Offsetof(ch.Type):]))
 				s.Size = bo.Uint64(chdata[unsafe.Offsetof(ch.Size):])
@@ -1352,9 +1352,9 @@ func (f *File) DWARF() (*dwarf.Data, error) {
 	// sectionData gets the data for s, checks its size, and
 	// applies any applicable relations.
 	sectionData := func(i int32, s *Section) ([]byte, error) {
-		b, err := s.Data()
-		if err != nil && uint64(len(b)) < s.Size {
-			return nil, err
+		b, derr := s.Data()
+		if derr != nil && uint64(len(b)) < s.Size {
+			return nil, derr
 		}
 
 		if f.Type == ET_EXEC {
@@ -1371,13 +1371,13 @@ func (f *File) DWARF() (*dwarf.Data, error) {
 			if int32(r.Info) != i {
 				continue
 			}
-			rd, err := r.Data()
-			if err != nil {
-				return nil, err
+			rd, rerr := r.Data()
+			if rerr != nil {
+				return nil, rerr
 			}
-			err = f.applyRelocations(b, rd)
-			if err != nil {
-				return nil, err
+			rerr = f.applyRelocations(b, rd)
+			if rerr != nil {
+				return nil, rerr
 			}
 		}
 		return b, nil
@@ -1394,9 +1394,9 @@ func (f *File) DWARF() (*dwarf.Data, error) {
 		if _, ok := dat[suffix]; !ok {
 			continue
 		}
-		b, err := sectionData(i, s)
-		if err != nil {
-			return nil, err
+		b, aerr := sectionData(i, s)
+		if aerr != nil {
+			return nil, aerr
 		}
 		dat[suffix] = b
 	}
@@ -1417,18 +1417,18 @@ func (f *File) DWARF() (*dwarf.Data, error) {
 			continue
 		}
 
-		b, err := sectionData(i, s)
-		if err != nil {
-			return nil, err
+		b, aerr := sectionData(i, s)
+		if aerr != nil {
+			return nil, aerr
 		}
 
 		if suffix == "types" {
-			if err := d.AddTypes(fmt.Sprintf("types-%d", i), b); err != nil {
-				return nil, err
+			if terr := d.AddTypes(fmt.Sprintf("types-%d", i), b); terr != nil {
+				return nil, terr
 			}
 		} else {
-			if err := d.AddSection(".debug_"+suffix, b); err != nil {
-				return nil, err
+			if serr := d.AddSection(".debug_"+suffix, b); serr != nil {
+				return nil, serr
 			}
 		}
 	}
@@ -1488,16 +1488,16 @@ func (f *File) ImportedSymbols() ([]ImportedSymbol, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := f.gnuVersionInit(str); err != nil {
-		return nil, err
+	if _, verr := f.gnuVersionInit(str); verr != nil {
+		return nil, verr
 	}
 	var all []ImportedSymbol
 	for i, s := range sym {
 		if ST_BIND(s.Info) == STB_GLOBAL && s.Section == SHN_UNDEF {
 			all = mxutil.Ensure(all, 1)
 			all = push(all, ImportedSymbol{Name: s.Name})
-			sym := &all[len(all)-1]
-			_, _, sym.Version, sym.Library = f.gnuVersion(i)
+			isym := &all[len(all)-1]
+			_, _, isym.Version, isym.Library = f.gnuVersion(i)
 		}
 	}
 	return all, nil
@@ -1690,7 +1690,7 @@ func (f *File) dynamicVersionNeeds(str []byte) error {
 			flags := DynamicVersionFlag(f.ByteOrder.Uint16(d[j+4 : j+6]))
 			index := f.ByteOrder.Uint16(d[j+6 : j+8])
 			nameoff := f.ByteOrder.Uint32(d[j+8 : j+12])
-			next := f.ByteOrder.Uint32(d[j+12 : j+16])
+			dnext := f.ByteOrder.Uint32(d[j+12 : j+16])
 			depName, _ := getString(str, int32(nameoff))
 
 			deps = mxutil.Ensure(deps, 1)
@@ -1700,10 +1700,10 @@ func (f *File) dynamicVersionNeeds(str []byte) error {
 				Dep:   depName,
 			})
 
-			if next == 0 {
+			if dnext == 0 {
 				break
 			}
-			j += int32(next)
+			j += int32(dnext)
 		}
 
 		dynVerNeeds = mxutil.Ensure(dynVerNeeds, 1)

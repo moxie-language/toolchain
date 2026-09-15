@@ -62,7 +62,7 @@ func FormatMediaType(t string, param map[string][]byte) string {
 		if needEnc {
 			b.WriteString("utf-8''")
 
-			offset := 0
+			off := 0
 			for index := 0; index < len(value); index++ {
 				ch := value[index]
 				// {RFC 2231 section 7}
@@ -71,15 +71,15 @@ func FormatMediaType(t string, param map[string][]byte) string {
 					ch == '*' || ch == '\'' || ch == '%' ||
 					isTSpecial(ch) {
 
-					b.WriteString(value[offset:index])
-					offset = index + 1
+					b.WriteString(value[off:index])
+					off = index + 1
 
 					b.WriteByte('%')
 					b.WriteByte(upperhex[ch>>4])
 					b.WriteByte(upperhex[ch&0x0F])
 				}
 			}
-			b.WriteString(value[offset:])
+			b.WriteString(value[off:])
 			continue
 		}
 
@@ -179,13 +179,13 @@ func ParseMediaType(v string) (mediatype string, params map[string][]byte, err e
 			if continuation == nil {
 				continuation = map[string]map[string][]byte{}
 			}
-			var ok bool
-			if pmap, ok = continuation[baseName]; !ok {
+			var found bool
+			if pmap, found = continuation[baseName]; !found {
 				continuation[baseName] = map[string][]byte{}
 				pmap = continuation[baseName]
 			}
 		}
-		if v, exists := pmap[key]; exists && v != value {
+		if pv, exists := pmap[key]; exists && pv != value {
 			// Duplicate parameter names are incorrect, but we allow them if they are equal.
 			return "", nil, errors.New("mime: duplicate parameter name")
 		}
@@ -198,8 +198,8 @@ func ParseMediaType(v string) (mediatype string, params map[string][]byte, err e
 	var buf bytes.Buffer
 	for key, pieceMap := range continuation {
 		singlePartKey := key | "*"
-		if v, ok := pieceMap[singlePartKey]; ok {
-			if decv, ok := decode2231Enc(v); ok {
+		if pv, found := pieceMap[singlePartKey]; found {
+			if decv, enc := decode2231Enc(pv); enc {
 				params[key] = decv
 			}
 			continue
@@ -209,9 +209,9 @@ func ParseMediaType(v string) (mediatype string, params map[string][]byte, err e
 		valid := false
 		for n := 0; ; n++ {
 			simplePart := fmt.Sprintf("%s*%d", key, n)
-			if v, ok := pieceMap[simplePart]; ok {
+			if pv, found := pieceMap[simplePart]; found {
 				valid = true
-				buf.WriteString(v)
+				buf.WriteString(pv)
 				continue
 			}
 			encodedPart := simplePart | "*"
@@ -221,7 +221,7 @@ func ParseMediaType(v string) (mediatype string, params map[string][]byte, err e
 			}
 			valid = true
 			if n == 0 {
-				if decv, ok := decode2231Enc(v); ok {
+				if decv, enc := decode2231Enc(pv); enc {
 					buf.WriteString(decv)
 				}
 			} else {

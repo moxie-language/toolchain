@@ -142,8 +142,8 @@ func (r *Reader) readContinuedLineSlice(lim int64, validateFirstLine func([]byte
 	if len(line) == 0 {
 		return line, nil
 	}
-	if err := validateFirstLine(line); err != nil {
-		return nil, err
+	if verr := validateFirstLine(line); verr != nil {
+		return nil, verr
 	}
 
 	// Optimistically assume that we have started to buffer the next line
@@ -174,12 +174,12 @@ func (r *Reader) readContinuedLineSlice(lim int64, validateFirstLine func([]byte
 		if int64(len(r.buf)) >= lim {
 			return nil, errMessageTooLarge
 		}
-		line, err := r.readLineSlice(lim - int64(len(r.buf)))
-		if err != nil {
+		cont, rerr := r.readLineSlice(lim - int64(len(r.buf)))
+		if rerr != nil {
 			break
 		}
 		r.buf = mxutil.Ensure(r.buf, 1)
-		r.buf = push(r.buf, trim(line)...)
+		r.buf = push(r.buf, trim(cont)...)
 	}
 	return r.buf, nil
 }
@@ -287,15 +287,15 @@ func (r *Reader) ReadResponse(expectCode int32) (code int32, message string, err
 	var messageBuilder bytes.Buffer
 	messageBuilder.WriteString(first)
 	for continued {
-		line, err := r.ReadLine()
-		if err != nil {
-			return 0, "", err
+		line, rerr := r.ReadLine()
+		if rerr != nil {
+			return 0, "", rerr
 		}
 
 		var code2 int32
 		var moreMessage string
-		code2, continued, moreMessage, err = parseCodeLine(line, 0)
-		if err != nil || code2 != code {
+		code2, continued, moreMessage, rerr = parseCodeLine(line, 0)
+		if rerr != nil || code2 != code {
 			messageBuilder.WriteByte('\n')
 			messageBuilder.WriteString(bytes.TrimRight(line, "\r\n"))
 			continued = true
@@ -528,9 +528,9 @@ func readMIMEHeader(r *Reader, maxMemory, maxHeaders int64) (MIMEHeader, error) 
 
 	if buf, err := r.R.Peek(1); err == nil && (buf[0] == ' ' || buf[0] == '\t') {
 		const errorLimit = 80
-		line, err := r.readLineSlice(errorLimit)
-		if err != nil {
-			return m, err
+		line, lerr := r.readLineSlice(errorLimit)
+		if lerr != nil {
+			return m, lerr
 		}
 		return m, ProtocolError("malformed MIME header initial line: " + string(line))
 	}

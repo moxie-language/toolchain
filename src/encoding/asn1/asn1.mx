@@ -56,8 +56,8 @@ func (e SyntaxError) String() string { return e.Error() }
 
 // BOOLEAN
 
-func parseBool(bytes []byte) (ret bool, err error) {
-	if len(bytes) != 1 {
+func parseBool(der []byte) (ret bool, err error) {
+	if len(der) != 1 {
 		err = SyntaxError{"invalid boolean"}
 		return
 	}
@@ -65,7 +65,7 @@ func parseBool(bytes []byte) (ret bool, err error) {
 	// DER demands that "If the encoding represents the boolean value TRUE,
 	// its single contents octet shall have all eight bits set to one."
 	// Thus only 0 and 255 are valid encoded values.
-	switch bytes[0] {
+	switch der[0] {
 	case 0:
 		ret = false
 	case 0xff:
@@ -81,14 +81,14 @@ func parseBool(bytes []byte) (ret bool, err error) {
 
 // checkInteger returns nil if the given bytes are a valid DER-encoded
 // INTEGER and an error otherwise.
-func checkInteger(bytes []byte) error {
-	if len(bytes) == 0 {
+func checkInteger(der []byte) error {
+	if len(der) == 0 {
 		return StructuralError{"empty integer"}
 	}
-	if len(bytes) == 1 {
+	if len(der) == 1 {
 		return nil
 	}
-	if (bytes[0] == 0 && bytes[1]&0x80 == 0) || (bytes[0] == 0xff && bytes[1]&0x80 == 0x80) {
+	if (der[0] == 0 && der[1]&0x80 == 0) || (der[0] == 0xff && der[1]&0x80 == 0x80) {
 		return StructuralError{"integer not minimally-encoded"}
 	}
 	return nil
@@ -96,34 +96,34 @@ func checkInteger(bytes []byte) error {
 
 // parseInt64 treats the given bytes as a big-endian, signed integer and
 // returns the result.
-func parseInt64(bytes []byte) (ret int64, err error) {
-	err = checkInteger(bytes)
+func parseInt64(der []byte) (ret int64, err error) {
+	err = checkInteger(der)
 	if err != nil {
 		return
 	}
-	if len(bytes) > 8 {
+	if len(der) > 8 {
 		// We'll overflow an int64 in this case.
 		err = StructuralError{"integer too large"}
 		return
 	}
-	for bytesRead := 0; bytesRead < len(bytes); bytesRead++ {
+	for bytesRead := 0; bytesRead < len(der); bytesRead++ {
 		ret <<= 8
-		ret |= int64(bytes[bytesRead])
+		ret |= int64(der[bytesRead])
 	}
 
 	// Shift up and down in order to sign extend the result.
-	ret <<= 64 - uint8(len(bytes))*8
-	ret >>= 64 - uint8(len(bytes))*8
+	ret <<= 64 - uint8(len(der))*8
+	ret >>= 64 - uint8(len(der))*8
 	return
 }
 
 // parseInt32 treats the given bytes as a big-endian, signed integer and returns
 // the result.
-func parseInt32(bytes []byte) (int32, error) {
-	if err := checkInteger(bytes); err != nil {
-		return 0, err
+func parseInt32(der []byte) (int32, error) {
+	if cerr := checkInteger(der); cerr != nil {
+		return 0, cerr
 	}
-	ret64, err := parseInt64(bytes)
+	ret64, err := parseInt64(der)
 	if err != nil {
 		return 0, err
 	}
@@ -135,23 +135,23 @@ func parseInt32(bytes []byte) (int32, error) {
 
 // parseBigInt treats the given bytes as a big-endian, signed integer and returns
 // the result.
-func parseBigInt(bytes []byte) (*big.Int, error) {
-	if err := checkInteger(bytes); err != nil {
+func parseBigInt(der []byte) (*big.Int, error) {
+	if err := checkInteger(der); err != nil {
 		return nil, err
 	}
 	ret := &big.Int{}
-	if len(bytes) > 0 && bytes[0]&0x80 == 0x80 {
+	if len(der) > 0 && der[0]&0x80 == 0x80 {
 		// This is a negative number.
-		notBytes := []byte{:len(bytes)}
+		notBytes := []byte{:len(der)}
 		for i := range notBytes {
-			notBytes[i] = ^bytes[i]
+			notBytes[i] = ^der[i]
 		}
 		ret.SetBytes(notBytes)
 		ret.Add(ret, big.NewInt(1))
 		ret.Neg(ret)
 		return ret, nil
 	}
-	ret.SetBytes(bytes)
+	ret.SetBytes(der)
 	return ret, nil
 }
 
@@ -195,20 +195,20 @@ func (b BitString) RightAlign() []byte {
 }
 
 // parseBitString parses an ASN.1 bit string from the given byte slice and returns it.
-func parseBitString(bytes []byte) (ret BitString, err error) {
-	if len(bytes) == 0 {
+func parseBitString(der []byte) (ret BitString, err error) {
+	if len(der) == 0 {
 		err = SyntaxError{"zero length BIT STRING"}
 		return
 	}
-	paddingBits := int32(bytes[0])
+	paddingBits := int32(der[0])
 	if paddingBits > 7 ||
-		len(bytes) == 1 && paddingBits > 0 ||
-		bytes[len(bytes)-1]&((1<<bytes[0])-1) != 0 {
+		len(der) == 1 && paddingBits > 0 ||
+		der[len(der)-1]&((1<<der[0])-1) != 0 {
 		err = SyntaxError{"invalid padding bits in BIT STRING"}
 		return
 	}
-	ret.BitLength = (len(bytes)-1)*8 - paddingBits
-	ret.Bytes = bytes[1:]
+	ret.BitLength = (len(der)-1)*8 - paddingBits
+	ret.Bytes = der[1:]
 	return
 }
 
@@ -246,21 +246,21 @@ func (oi ObjectIdentifier) String() string {
 // parseObjectIdentifier parses an OBJECT IDENTIFIER from the given bytes and
 // returns it. An object identifier is a sequence of variable length integers
 // that are assigned in a hierarchy.
-func parseObjectIdentifier(bytes []byte) (s ObjectIdentifier, err error) {
-	if len(bytes) == 0 {
+func parseObjectIdentifier(der []byte) (s ObjectIdentifier, err error) {
+	if len(der) == 0 {
 		err = SyntaxError{"zero length OBJECT IDENTIFIER"}
 		return
 	}
 
 	// In the worst case, we get two elements from the first byte (which is
 	// encoded differently) and then every varint is a single byte long.
-	s = []int32{:len(bytes)+1}
+	s = []int32{:len(der)+1}
 
 	// The first varint is 40*value1 + value2:
 	// According to this packing, value1 can take the values 0, 1 and 2 only.
 	// When value1 = 0 or value1 = 1, then value2 is <= 39. When value1 = 2,
 	// then there are no restrictions on value2.
-	v, offset, err := parseBase128Int(bytes, 0)
+	v, offset, err := parseBase128Int(der, 0)
 	if err != nil {
 		return
 	}
@@ -273,8 +273,8 @@ func parseObjectIdentifier(bytes []byte) (s ObjectIdentifier, err error) {
 	}
 
 	i := 2
-	for ; offset < len(bytes); i++ {
-		v, offset, err = parseBase128Int(bytes, offset)
+	for ; offset < len(der); i++ {
+		v, offset, err = parseBase128Int(der, offset)
 		if err != nil {
 			return
 		}
@@ -296,10 +296,10 @@ type Flag bool
 
 // parseBase128Int parses a base-128 encoded int32 from the given offset in the
 // given byte slice. It returns the value and the new offset.
-func parseBase128Int(bytes []byte, initOffset int32) (ret, offset int32, err error) {
+func parseBase128Int(der []byte, initOffset int32) (ret, offset int32, err error) {
 	offset = initOffset
 	var ret64 int64
-	for shifted := 0; offset < len(bytes); shifted++ {
+	for shifted := 0; offset < len(der); shifted++ {
 		// 5 * 7 bits per byte == 35 bits of data
 		// Thus the representation is either non-minimal or too large for an int32
 		if shifted == 5 {
@@ -307,7 +307,7 @@ func parseBase128Int(bytes []byte, initOffset int32) (ret, offset int32, err err
 			return
 		}
 		ret64 <<= 7
-		b := bytes[offset]
+		b := der[offset]
 		// integers should be minimally encoded, so the leading octet should
 		// never be 0x80
 		if shifted == 0 && b == 0x80 {
@@ -331,8 +331,8 @@ func parseBase128Int(bytes []byte, initOffset int32) (ret, offset int32, err err
 
 // UTCTime
 
-func parseUTCTime(bytes []byte) (ret time.Time, err error) {
-	s := []byte(bytes)
+func parseUTCTime(der []byte) (ret time.Time, err error) {
+	s := []byte(der)
 
 	formatStr := "0601021504Z0700"
 	ret, err = time.Parse(formatStr, s)
@@ -359,9 +359,9 @@ func parseUTCTime(bytes []byte) (ret time.Time, err error) {
 
 // parseGeneralizedTime parses the GeneralizedTime from the given byte slice
 // and returns the resulting time.
-func parseGeneralizedTime(bytes []byte) (ret time.Time, err error) {
+func parseGeneralizedTime(der []byte) (ret time.Time, err error) {
 	const formatStr = "20060102150405.999999999Z0700"
-	s := []byte(bytes)
+	s := []byte(der)
 
 	if ret, err = time.Parse(formatStr, s); err != nil {
 		return
@@ -378,13 +378,13 @@ func parseGeneralizedTime(bytes []byte) (ret time.Time, err error) {
 
 // parseNumericString parses an ASN.1 NumericString from the given byte array
 // and returns it.
-func parseNumericString(bytes []byte) (ret []byte, err error) {
-	for _, b := range bytes {
+func parseNumericString(der []byte) (ret []byte, err error) {
+	for _, b := range der {
 		if !isNumeric(b) {
 			return "", SyntaxError{"NumericString contains invalid character"}
 		}
 	}
-	return []byte(bytes), nil
+	return []byte(der), nil
 }
 
 // isNumeric reports whether the given b is in the ASN.1 NumericString set.
@@ -397,14 +397,14 @@ func isNumeric(b byte) bool {
 
 // parsePrintableString parses an ASN.1 PrintableString from the given byte
 // array and returns it.
-func parsePrintableString(bytes []byte) (ret []byte, err error) {
-	for _, b := range bytes {
+func parsePrintableString(der []byte) (ret []byte, err error) {
+	for _, b := range der {
 		if !isPrintable(b, allowAsterisk, allowAmpersand) {
 			err = SyntaxError{"PrintableString contains invalid character"}
 			return
 		}
 	}
-	ret = []byte(bytes)
+	ret = []byte(der)
 	return
 }
 
@@ -447,14 +447,14 @@ func isPrintable(b byte, asterisk asteriskFlag, ampersand ampersandFlag) bool {
 
 // parseIA5String parses an ASN.1 IA5String (ASCII string) from the given
 // byte slice and returns it.
-func parseIA5String(bytes []byte) (ret []byte, err error) {
-	for _, b := range bytes {
+func parseIA5String(der []byte) (ret []byte, err error) {
+	for _, b := range der {
 		if b >= utf8.RuneSelf {
 			err = SyntaxError{"IA5String contains invalid character"}
 			return
 		}
 	}
-	ret = []byte(bytes)
+	ret = []byte(der)
 	return
 }
 
@@ -462,7 +462,7 @@ func parseIA5String(bytes []byte) (ret []byte, err error) {
 
 // parseT61String parses an ASN.1 T61String (8-bit clean string) from the given
 // byte slice and returns it.
-func parseT61String(bytes []byte) (ret []byte, err error) {
+func parseT61String(der []byte) (ret []byte, err error) {
 	// T.61 is a defunct ITU 8-bit character encoding which preceded Unicode.
 	// T.61 uses a code page layout that _almost_ exactly maps to the code
 	// page layout of the ISO 8859-1 (Latin-1) character encoding, with the
@@ -472,8 +472,8 @@ func parseT61String(bytes []byte) (ret []byte, err error) {
 	// Instead of mapping which characters are present in Latin-1 but not T.61,
 	// we just treat these strings as being encoded using Latin-1. This matches
 	// what most of the world does, including BoringSSL.
-	buf := []byte{:0:len(bytes)}
-	for _, v := range bytes {
+	buf := []byte{:0:len(der)}
+	for _, v := range der {
 		// All the 1-byte UTF-8 runes map 1-1 with Latin-1.
 		buf = utf8.AppendRune(buf, rune(v))
 	}
@@ -484,11 +484,11 @@ func parseT61String(bytes []byte) (ret []byte, err error) {
 
 // parseUTF8String parses an ASN.1 UTF8String (raw UTF-8) from the given byte
 // array and returns it.
-func parseUTF8String(bytes []byte) (ret []byte, err error) {
-	if !utf8.Valid(bytes) {
+func parseUTF8String(der []byte) (ret []byte, err error) {
+	if !utf8.Valid(der) {
 		return "", errors.New("asn1: invalid UTF-8 string")
 	}
-	return []byte(bytes), nil
+	return []byte(der), nil
 }
 
 // BMPString
@@ -559,15 +559,15 @@ type RawContent []byte
 // into a byte slice. It returns the parsed data and the new offset. SET and
 // SET OF (tag 17) are mapped to SEQUENCE and SEQUENCE OF (tag 16) since we
 // don't distinguish between ordered and unordered objects in this code.
-func parseTagAndLength(bytes []byte, initOffset int32) (ret tagAndLength, offset int32, err error) {
+func parseTagAndLength(der []byte, initOffset int32) (ret tagAndLength, offset int32, err error) {
 	offset = initOffset
 	// parseTagAndLength should not be called without at least a single
 	// byte to read. Thus this check is for robustness:
-	if offset >= len(bytes) {
+	if offset >= len(der) {
 		err = errors.New("asn1: internal error in parseTagAndLength")
 		return
 	}
-	b := bytes[offset]
+	b := der[offset]
 	offset++
 	ret.class = int32(b >> 6)
 	ret.isCompound = b&0x20 == 0x20
@@ -576,7 +576,7 @@ func parseTagAndLength(bytes []byte, initOffset int32) (ret tagAndLength, offset
 	// If the bottom five bits are set, then the tag number is actually base 128
 	// encoded afterwards
 	if ret.tag == 0x1f {
-		ret.tag, offset, err = parseBase128Int(bytes, offset)
+		ret.tag, offset, err = parseBase128Int(der, offset)
 		if err != nil {
 			return
 		}
@@ -586,11 +586,11 @@ func parseTagAndLength(bytes []byte, initOffset int32) (ret tagAndLength, offset
 			return
 		}
 	}
-	if offset >= len(bytes) {
+	if offset >= len(der) {
 		err = SyntaxError{"truncated tag or length"}
 		return
 	}
-	b = bytes[offset]
+	b = der[offset]
 	offset++
 	if b&0x80 == 0 {
 		// The length is encoded in the bottom 7 bits.
@@ -604,11 +604,11 @@ func parseTagAndLength(bytes []byte, initOffset int32) (ret tagAndLength, offset
 		}
 		ret.length = 0
 		for i := 0; i < numBytes; i++ {
-			if offset >= len(bytes) {
+			if offset >= len(der) {
 				err = SyntaxError{"truncated tag or length"}
 				return
 			}
-			b = bytes[offset]
+			b = der[offset]
 			offset++
 			if ret.length >= 1<<23 {
 				// We can't shift ret.length up without
@@ -647,9 +647,9 @@ func parseSequenceOfUnsafe(data []byte, elemType *_rawType) (slicePtr unsafe.Poi
 	}
 
 	numElements := 0
-	for offset := 0; offset < len(data); {
+	for off := 0; off < len(data); {
 		var t tagAndLength
-		t, offset, err = parseTagAndLength(data, offset)
+		t, off, err = parseTagAndLength(data, off)
 		if err != nil {
 			return
 		}
@@ -663,11 +663,11 @@ func parseSequenceOfUnsafe(data []byte, elemType *_rawType) (slicePtr unsafe.Poi
 			err = StructuralError{"sequence tag mismatch"}
 			return
 		}
-		if invalidLength(offset, t.length, len(data)) {
+		if invalidLength(off, t.length, len(data)) {
 			err = SyntaxError{"truncated sequence"}
 			return
 		}
-		offset += t.length
+		off += t.length
 		numElements++
 	}
 
@@ -749,15 +749,15 @@ func parseFieldUnsafe(typ *_rawType, ptr unsafe.Pointer, data []byte, initOffset
 		return
 	}
 	if params.explicit {
-		expectedClass := ClassContextSpecific
+		wantClass := ClassContextSpecific
 		if params.application {
-			expectedClass = ClassApplication
+			wantClass = ClassApplication
 		}
 		if offset == len(data) {
 			err = StructuralError{"explicit tag has no child"}
 			return
 		}
-		if t.class == expectedClass && t.tag == *params.tag && (t.length == 0 || t.isCompound) {
+		if t.class == wantClass && t.tag == *params.tag && (t.length == 0 || t.isCompound) {
 			if typ == _rawValueTC() {
 				// The inner element should not be parsed for RawValues.
 			} else if t.length > 0 {

@@ -34,7 +34,7 @@ func removeAll(path string) error {
 	// Otherwise, is this a directory we need to recurse into?
 	dir, serr := Lstat(path)
 	if serr != nil {
-		if serr, ok := serr.(*PathError); ok && (IsNotExist(serr.Err) || serr.Err == syscall.ENOTDIR) {
+		if perr, ok := serr.(*PathError); ok && (IsNotExist(perr.Err) || perr.Err == syscall.ENOTDIR) {
 			return nil
 		}
 		return serr
@@ -47,13 +47,13 @@ func removeAll(path string) error {
 	// Remove contents & return first error.
 	err = nil
 	for {
-		fd, err := Open(path)
-		if err != nil {
-			if IsNotExist(err) {
+		d, oerr := Open(path)
+		if oerr != nil {
+			if IsNotExist(oerr) {
 				// Already deleted by someone else.
 				return nil
 			}
-			return err
+			return oerr
 		}
 
 		const reqSize = 1024
@@ -62,14 +62,14 @@ func removeAll(path string) error {
 
 		for {
 			numErr := 0
-			names, readErr = fd.Readdirnames(reqSize)
+			names, readErr = d.Readdirnames(reqSize)
 
 			for _, name := range names {
-				err1 := RemoveAll(path + string(PathSeparator) + name)
+				derr := RemoveAll(path + string(PathSeparator) + name)
 				if err == nil {
-					err = err1
+					err = derr
 				}
-				if err1 != nil {
+				if derr != nil {
 					numErr++
 				}
 			}
@@ -86,7 +86,7 @@ func removeAll(path string) error {
 		// again may skip some entries. The only reliable way
 		// to avoid this is to close and re-open the
 		// directory. See issue 20841.
-		fd.Close()
+		d.Close()
 
 		if readErr == io.EOF {
 			break
@@ -104,8 +104,8 @@ func removeAll(path string) error {
 		// simply removing the directory now. If that
 		// succeeds, we are done.
 		if len(names) < reqSize {
-			err1 := Remove(path)
-			if err1 == nil || IsNotExist(err1) {
+			derr := Remove(path)
+			if derr == nil || IsNotExist(derr) {
 				return nil
 			}
 
@@ -123,12 +123,12 @@ func removeAll(path string) error {
 	}
 
 	// Remove directory.
-	err1 := Remove(path)
-	if err1 == nil || IsNotExist(err1) {
+	rerr := Remove(path)
+	if rerr == nil || IsNotExist(rerr) {
 		return nil
 	}
 	if err == nil {
-		err = err1
+		err = rerr
 	}
 	return err
 }

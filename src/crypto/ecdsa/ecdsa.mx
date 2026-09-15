@@ -323,11 +323,11 @@ func privateKeyBytes[P ecdsa.Point[P]](c *ecdsa.Curve[P], priv *PrivateKey) ([]b
 // 6979. When producing a deterministic signature, opts.HashFunc() must be the
 // function used to produce digest and priv.Curve must be one of
 // [elliptic.P224], [elliptic.P256], [elliptic.P384], or [elliptic.P521].
-func (priv *PrivateKey) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
-	if rand == nil {
+func (priv *PrivateKey) Sign(rnd io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	if rnd == nil {
 		return signRFC6979(priv, digest, opts)
 	}
-	return SignASN1(rand, priv, digest)
+	return SignASN1(rnd, priv, digest)
 }
 
 // GenerateKey generates a new ECDSA private key for the specified curve.
@@ -335,10 +335,10 @@ func (priv *PrivateKey) Sign(rand io.Reader, digest []byte, opts crypto.SignerOp
 // Most applications should use [crypto/rand.Reader] as rand. Note that the
 // returned key does not depend deterministically on the bytes read from rand,
 // and may change between calls and/or between versions.
-func GenerateKey(c elliptic.Curve, rand io.Reader) (*PrivateKey, error) {
-	randutil.MaybeReadByte(rand)
+func GenerateKey(c elliptic.Curve, rnd io.Reader) (*PrivateKey, error) {
+	randutil.MaybeReadByte(rnd)
 
-	if boring.Enabled && rand == boring.RandReader {
+	if boring.Enabled && rnd == boring.RandReader {
 		x, y, d, err := boring.GenerateKeyECDSA(c.Params().Name)
 		if err != nil {
 			return nil, err
@@ -349,23 +349,23 @@ func GenerateKey(c elliptic.Curve, rand io.Reader) (*PrivateKey, error) {
 
 	switch c.Params() {
 	case elliptic.P224().Params():
-		return generateFIPS(c, ecdsa.P224(), rand)
+		return generateFIPS(c, ecdsa.P224(), rnd)
 	case elliptic.P256().Params():
-		return generateFIPS(c, ecdsa.P256(), rand)
+		return generateFIPS(c, ecdsa.P256(), rnd)
 	case elliptic.P384().Params():
-		return generateFIPS(c, ecdsa.P384(), rand)
+		return generateFIPS(c, ecdsa.P384(), rnd)
 	case elliptic.P521().Params():
-		return generateFIPS(c, ecdsa.P521(), rand)
+		return generateFIPS(c, ecdsa.P521(), rnd)
 	default:
-		return generateLegacy(c, rand)
+		return generateLegacy(c, rnd)
 	}
 }
 
-func generateFIPS[P ecdsa.Point[P]](curve elliptic.Curve, c *ecdsa.Curve[P], rand io.Reader) (*PrivateKey, error) {
-	if fips140only.Enabled && !fips140only.ApprovedRandomReader(rand) {
+func generateFIPS[P ecdsa.Point[P]](curve elliptic.Curve, c *ecdsa.Curve[P], rnd io.Reader) (*PrivateKey, error) {
+	if fips140only.Enabled && !fips140only.ApprovedRandomReader(rnd) {
 		return nil, errors.New("crypto/ecdsa: only crypto/rand.Reader is allowed in FIPS 140-only mode")
 	}
-	privateKey, err := ecdsa.GenerateKey(c, rand)
+	privateKey, err := ecdsa.GenerateKey(c, rnd)
 	if err != nil {
 		return nil, err
 	}
@@ -384,10 +384,10 @@ const errNoAsm = errors.Const("no assembly implementation available")
 // The signature is randomized. Most applications should use [crypto/rand.Reader]
 // as rand. Note that the returned signature does not depend deterministically on
 // the bytes read from rand, and may change between calls and/or between versions.
-func SignASN1(rand io.Reader, priv *PrivateKey, hash []byte) ([]byte, error) {
-	randutil.MaybeReadByte(rand)
+func SignASN1(rnd io.Reader, priv *PrivateKey, hash []byte) ([]byte, error) {
+	randutil.MaybeReadByte(rnd)
 
-	if boring.Enabled && rand == boring.RandReader {
+	if boring.Enabled && rnd == boring.RandReader {
 		b, err := boringPrivateKey(priv)
 		if err != nil {
 			return nil, err
@@ -398,20 +398,20 @@ func SignASN1(rand io.Reader, priv *PrivateKey, hash []byte) ([]byte, error) {
 
 	switch priv.Curve.Params() {
 	case elliptic.P224().Params():
-		return signFIPS(ecdsa.P224(), priv, rand, hash)
+		return signFIPS(ecdsa.P224(), priv, rnd, hash)
 	case elliptic.P256().Params():
-		return signFIPS(ecdsa.P256(), priv, rand, hash)
+		return signFIPS(ecdsa.P256(), priv, rnd, hash)
 	case elliptic.P384().Params():
-		return signFIPS(ecdsa.P384(), priv, rand, hash)
+		return signFIPS(ecdsa.P384(), priv, rnd, hash)
 	case elliptic.P521().Params():
-		return signFIPS(ecdsa.P521(), priv, rand, hash)
+		return signFIPS(ecdsa.P521(), priv, rnd, hash)
 	default:
-		return signLegacy(priv, rand, hash)
+		return signLegacy(priv, rnd, hash)
 	}
 }
 
-func signFIPS[P ecdsa.Point[P]](c *ecdsa.Curve[P], priv *PrivateKey, rand io.Reader, hash []byte) ([]byte, error) {
-	if fips140only.Enabled && !fips140only.ApprovedRandomReader(rand) {
+func signFIPS[P ecdsa.Point[P]](c *ecdsa.Curve[P], priv *PrivateKey, rnd io.Reader, hash []byte) ([]byte, error) {
+	if fips140only.Enabled && !fips140only.ApprovedRandomReader(rnd) {
 		return nil, errors.New("crypto/ecdsa: only crypto/rand.Reader is allowed in FIPS 140-only mode")
 	}
 	k, err := privateKeyToFIPS(c, priv)
@@ -421,7 +421,7 @@ func signFIPS[P ecdsa.Point[P]](c *ecdsa.Curve[P], priv *PrivateKey, rand io.Rea
 	// Always using SHA-512 instead of the hash that computed hash is
 	// technically a violation of draft-irtf-cfrg-det-sigs-with-noise-04 but in
 	// our API we don't get to know what it was, and this has no security impact.
-	sig, err := ecdsa.Sign(c, sha512.New, k, rand, hash)
+	sig, err := ecdsa.Sign(c, sha512.New, k, rnd, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -467,12 +467,12 @@ func signFIPSDeterministic[P ecdsa.Point[P]](c *ecdsa.Curve[P], hashFunc crypto.
 }
 
 func encodeSignature(r, s []byte) ([]byte, error) {
-	var b cryptobyte.Builder
-	b.AddASN1(asn1.SEQUENCE, func(b *cryptobyte.Builder) {
-		addASN1IntBytes(b, r)
-		addASN1IntBytes(b, s)
+	var bld cryptobyte.Builder
+	bld.AddASN1(asn1.SEQUENCE, func(inner *cryptobyte.Builder) {
+		addASN1IntBytes(inner, r)
+		addASN1IntBytes(inner, s)
 	})
-	return b.Bytes()
+	return bld.Bytes()
 }
 
 // addASN1IntBytes encodes in ASN.1 a positive integer represented as
@@ -527,11 +527,11 @@ func verifyFIPS[P ecdsa.Point[P]](c *ecdsa.Curve[P], pub *PublicKey, hash, sig [
 	if err != nil {
 		return false
 	}
-	k, err := publicKeyToFIPS(c, pub)
-	if err != nil {
+	k, kerr := publicKeyToFIPS(c, pub)
+	if kerr != nil {
 		return false
 	}
-	if err := ecdsa.Verify(c, k, hash, &ecdsa.Signature{R: r, S: s}); err != nil {
+	if verr := ecdsa.Verify(c, k, hash, &ecdsa.Signature{R: r, S: s}); verr != nil {
 		return false
 	}
 	return true

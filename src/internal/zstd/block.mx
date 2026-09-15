@@ -26,8 +26,8 @@ func (r *Reader) compressedBlock(blockSize int32) error {
 		r.compressedBuf = push(r.compressedBuf, []byte{:need}...)
 	}
 
-	if _, err := io.ReadFull(r.r, r.compressedBuf); err != nil {
-		return r.wrapNonEOFError(0, err)
+	if _, rerr := io.ReadFull(r.r, r.compressedBuf); rerr != nil {
+		return r.wrapNonEOFError(0, rerr)
 	}
 
 	data := block(r.compressedBuf)
@@ -235,8 +235,8 @@ func (r *Reader) setSeqTable(data block, off int32, kind seqCode, mode byte) (in
 		}
 		r.seqTableBuffers[kind] = r.seqTableBuffers[kind][:1<<tableBits]
 
-		if err := info.toBaseline(r, roff, r.fseScratch, r.seqTableBuffers[kind]); err != nil {
-			return 0, err
+		if ferr := info.toBaseline(r, roff, r.fseScratch, r.seqTableBuffers[kind]); ferr != nil {
+			return 0, ferr
 		}
 
 		r.seqTables[kind] = r.seqTableBuffers[kind]
@@ -289,21 +289,21 @@ func (r *Reader) execSeqs(data block, off int32, litbuf []byte, seqCount int32) 
 		ptmatch := &r.seqTables[seqMatch][matchState]
 		ptliteral := &r.seqTables[seqLiteral][literalState]
 
-		add, err := rbr.val(ptoffset.basebits)
-		if err != nil {
-			return err
+		add, verr := rbr.val(ptoffset.basebits)
+		if verr != nil {
+			return verr
 		}
 		offset := ptoffset.baseline + add
 
-		add, err = rbr.val(ptmatch.basebits)
-		if err != nil {
-			return err
+		add, verr = rbr.val(ptmatch.basebits)
+		if verr != nil {
+			return verr
 		}
 		match := ptmatch.baseline + add
 
-		add, err = rbr.val(ptliteral.basebits)
-		if err != nil {
-			return err
+		add, verr = rbr.val(ptliteral.basebits)
+		if verr != nil {
+			return verr
 		}
 		literal := ptliteral.baseline + add
 
@@ -340,21 +340,21 @@ func (r *Reader) execSeqs(data block, off int32, litbuf []byte, seqCount int32) 
 		seq++
 		if seq < seqCount {
 			// Update the states.
-			add, err = rbr.val(ptliteral.bits)
-			if err != nil {
-				return err
+			add, verr = rbr.val(ptliteral.bits)
+			if verr != nil {
+				return verr
 			}
 			literalState = uint32(ptliteral.base) + add
 
-			add, err = rbr.val(ptmatch.bits)
-			if err != nil {
-				return err
+			add, verr = rbr.val(ptmatch.bits)
+			if verr != nil {
+				return verr
 			}
 			matchState = uint32(ptmatch.base) + add
 
-			add, err = rbr.val(ptoffset.bits)
-			if err != nil {
-				return err
+			add, verr = rbr.val(ptoffset.bits)
+			if verr != nil {
+				return verr
 			}
 			offsetState = uint32(ptoffset.base) + add
 		}
@@ -376,8 +376,8 @@ func (r *Reader) execSeqs(data block, off int32, litbuf []byte, seqCount int32) 
 		}
 
 		if match > 0 {
-			if err := r.copyFromWindow(&rbr, offset, match); err != nil {
-				return err
+			if cerr := r.copyFromWindow(&rbr, offset, match); cerr != nil {
+				return cerr
 			}
 		}
 	}
@@ -407,16 +407,16 @@ func (r *Reader) copyFromWindow(rbr *reverseBitReader, offset, match uint32) err
 	lenBlock := uint32(len(r.buffer))
 	if lenBlock < offset {
 		lenWindow := r.window.len()
-		copy := offset - lenBlock
-		if copy > lenWindow {
+		pending := offset - lenBlock
+		if pending > lenWindow {
 			return rbr.makeError("offset past window")
 		}
-		windowOffset := lenWindow - copy
-		if copy > match {
-			copy = match
+		windowOffset := lenWindow - pending
+		if pending > match {
+			pending = match
 		}
-		r.buffer = r.window.appendTo(r.buffer, windowOffset, windowOffset+copy)
-		match -= copy
+		r.buffer = r.window.appendTo(r.buffer, windowOffset, windowOffset+pending)
+		match -= pending
 	} else {
 		bufferOffset = lenBlock - offset
 	}
@@ -424,13 +424,13 @@ func (r *Reader) copyFromWindow(rbr *reverseBitReader, offset, match uint32) err
 	// We are being asked to copy data that we are adding to the
 	// buffer in the same copy.
 	for match > 0 {
-		copy := uint32(len(r.buffer)) - bufferOffset
-		if copy > match {
-			copy = match
+		avail := uint32(len(r.buffer)) - bufferOffset
+		if avail > match {
+			avail = match
 		}
-		r.buffer = mxutil.Ensure(r.buffer, len(r.buffer[bufferOffset:bufferOffset+copy]))
-		r.buffer = push(r.buffer, r.buffer[bufferOffset:bufferOffset+copy]...)
-		match -= copy
+		r.buffer = mxutil.Ensure(r.buffer, len(r.buffer[bufferOffset:bufferOffset+avail]))
+		r.buffer = push(r.buffer, r.buffer[bufferOffset:bufferOffset+avail]...)
+		match -= avail
 	}
 	return nil
 }

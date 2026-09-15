@@ -241,7 +241,7 @@ func (w *Writer) Write(data []byte) (n int32, err error) {
 		src = w.src[:w.n]
 	}
 	for {
-		nDst, nSrc, err := w.t.Transform(w.dst, src, false)
+		nDst, nSrc, terr := w.t.Transform(w.dst, src, false)
 		if _, werr := w.w.Write(w.dst[:nDst]); werr != nil {
 			return n, werr
 		}
@@ -254,11 +254,11 @@ func (w *Writer) Write(data []byte) (n int32, err error) {
 			w.n = 0
 			n -= len(src)
 			src = data[n:]
-			if n < len(data) && (err == nil || err == ErrShortSrc) {
+			if n < len(data) && (terr == nil || terr == ErrShortSrc) {
 				continue
 			}
 		}
-		switch err {
+		switch terr {
 		case ErrShortDst:
 			// This error is okay as long as we are making progress.
 			if nDst > 0 || nSrc > 0 {
@@ -273,7 +273,7 @@ func (w *Writer) Write(data []byte) (n int32, err error) {
 					n += m
 				}
 				w.n = m
-				err = nil
+				terr = nil
 			} else if nDst > 0 || nSrc > 0 {
 				// Not enough buffer to store the remainder. Keep processing as
 				// long as there is progress. Without this case, transforms that
@@ -285,10 +285,10 @@ func (w *Writer) Write(data []byte) (n int32, err error) {
 			}
 		case nil:
 			if w.n > 0 {
-				err = errInconsistentByteCount
+				terr = errInconsistentByteCount
 			}
 		}
-		return n, err
+		return n, terr
 	}
 }
 
@@ -417,9 +417,9 @@ func (c *chain) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int32, err er
 	// decrease i. We try to completely fill a buffer before converting it.
 	for low, i, high := c.errStart, c.errStart, len(c.link)-2; low <= i && i <= high; {
 		in, out := &c.link[i], &c.link[i+1]
-		nDst, nSrc, err0 := in.t.Transform(out.dst(), in.src(), atEOF && low == i)
-		out.n += nDst
-		in.p += nSrc
+		dstN, srcN, err0 := in.t.Transform(out.dst(), in.src(), atEOF && low == i)
+		out.n += dstN
+		in.p += srcN
 		if i > 0 && in.p == in.n {
 			in.p, in.n = 0, 0
 		}
@@ -452,7 +452,7 @@ func (c *chain) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int32, err er
 			// Source bytes were depleted before filling up the destination buffer.
 			// Verify we made some progress, move the remaining bytes to the errStart
 			// and try to get more source bytes.
-			if needProgress && nSrc == 0 || in.n-in.p == len(in.b) {
+			if needProgress && srcN == 0 || in.n-in.p == len(in.b) {
 				// There were not enough source bytes to proceed while the source
 				// buffer cannot hold any more bytes. Return a fatal error as this
 				// transformation can never complete.
@@ -572,7 +572,7 @@ func String(t Transformer, s string) (result string, n int32, err error) {
 	if s == "" {
 		// Fast path for the common case for empty input. Results in about a
 		// 86% reduction of running time for BenchmarkStringLowerEmpty.
-		if _, _, err := t.Transform(nil, nil, true); err == nil {
+		if _, _, terr := t.Transform(nil, nil, true); terr == nil {
 			return "", 0, nil
 		}
 	}
@@ -599,8 +599,8 @@ func String(t Transformer, s string) (result string, n int32, err error) {
 	for {
 		// Invariant: pDst == pPrefix && pSrc == pPrefix.
 
-		n := copy(src, s[pSrc:])
-		nDst, nSrc, err = t.Transform(dst, src[:n], pSrc+n == len(s))
+		nb := copy(src, s[pSrc:])
+		nDst, nSrc, err = t.Transform(dst, src[:nb], pSrc+nb == len(s))
 		pDst += nDst
 		pSrc += nSrc
 
@@ -649,27 +649,27 @@ func String(t Transformer, s string) (result string, n int32, err error) {
 
 	// Transform the remaining input, growing dst and src buffers as necessary.
 	for {
-		n := copy(src, s[pSrc:])
-		atEOF := pSrc+n == len(s)
-		nDst, nSrc, err := t.Transform(dst[pDst:], src[:n], atEOF)
-		pDst += nDst
-		pSrc += nSrc
+		nb := copy(src, s[pSrc:])
+		atEOF := pSrc+nb == len(s)
+		dstN, srcN, terr := t.Transform(dst[pDst:], src[:nb], atEOF)
+		pDst += dstN
+		pSrc += srcN
 
 		// If we got ErrShortDst or ErrShortSrc, do not grow as long as we can
 		// make progress. This may avoid excessive allocations.
-		if err == ErrShortDst {
-			if nDst == 0 {
+		if terr == ErrShortDst {
+			if dstN == 0 {
 				dst = grow(dst, pDst)
 			}
-		} else if err == ErrShortSrc {
+		} else if terr == ErrShortSrc {
 			if atEOF {
-				return string(dst[:pDst]), pSrc, err
+				return string(dst[:pDst]), pSrc, terr
 			}
-			if nSrc == 0 {
+			if srcN == 0 {
 				src = grow(src, 0)
 			}
-		} else if err != nil || pSrc == len(s) {
-			return string(dst[:pDst]), pSrc, err
+		} else if terr != nil || pSrc == len(s) {
+			return string(dst[:pDst]), pSrc, terr
 		}
 	}
 }
@@ -684,8 +684,8 @@ func Bytes(t Transformer, b []byte) (result []byte, n int32, err error) {
 // n <= len(src), If err == nil, n will be len(src). It calls Reset on t.
 func Append(t Transformer, dst, src []byte) (result []byte, n int32, err error) {
 	if len(dst) == cap(dst) {
-		n := len(src) + len(dst) // It is okay for this to be 0.
-		b := []byte{:n}
+		nb := len(src) + len(dst) // It is okay for this to be 0.
+		b := []byte{:nb}
 		dst = b[:copy(b, dst)]
 	}
 	return doAppend(t, len(dst), dst[:cap(dst)], src)
@@ -695,11 +695,11 @@ func doAppend(t Transformer, pDst int32, dst, src []byte) (result []byte, n int3
 	t.Reset()
 	pSrc := 0
 	for {
-		nDst, nSrc, err := t.Transform(dst[pDst:], src[pSrc:], true)
+		nDst, nSrc, terr := t.Transform(dst[pDst:], src[pSrc:], true)
 		pDst += nDst
 		pSrc += nSrc
-		if err != ErrShortDst {
-			return dst[:pDst], pSrc, err
+		if terr != ErrShortDst {
+			return dst[:pDst], pSrc, terr
 		}
 
 		// Grow the destination buffer, but do not grow as long as we can make

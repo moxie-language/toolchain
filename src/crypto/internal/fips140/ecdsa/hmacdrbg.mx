@@ -49,16 +49,16 @@ type personalizationString interface {
 	isPersonalizationString()
 }
 
-func newDRBG[H hash.Hash](hash func() H, entropy, nonce []byte, s personalizationString) *hmacDRBG {
+func newDRBG[H hash.Hash](hfunc func() H, entropy, nonce []byte, s personalizationString) *hmacDRBG {
 	// HMAC_DRBG_Instantiate_algorithm, per Section 10.1.2.3.
 	fips140.RecordApproved()
 
 	d := &hmacDRBG{
 		newHMAC: func(key []byte) *hmac.HMAC {
-			return hmac.New(hash, key)
+			return hmac.New(hfunc, key)
 		},
 	}
-	size := hash().Size()
+	size := hfunc().Size()
 
 	// K = 0x00 0x00 0x00 ... 0x00
 	K := []byte{:size}
@@ -68,17 +68,17 @@ func newDRBG[H hash.Hash](hash func() H, entropy, nonce []byte, s personalizatio
 
 	// HMAC_DRBG_Update, per Section 10.1.2.2.
 	// K = HMAC (K, V || 0x00 || provided_data)
-	h := hmac.New(hash, K)
+	h := hmac.New(hfunc, K)
 	h.Write(d.V)
 	h.Write([]byte{0x00})
 	h.Write(entropy)
 	h.Write(nonce)
-	switch s := s.(type) {
+	switch ps := s.(type) {
 	case plainPersonalizationString:
-		h.Write(s)
+		h.Write(ps)
 	case blockAlignedPersonalizationString:
 		l := len(d.V) + 1 + len(entropy) + len(nonce)
-		for _, b := range s {
+		for _, b := range ps {
 			pad000(h, l)
 			h.Write(b)
 			l = len(b)
@@ -86,7 +86,7 @@ func newDRBG[H hash.Hash](hash func() H, entropy, nonce []byte, s personalizatio
 	}
 	K = h.Sum(K[:0])
 	// V = HMAC (K, V)
-	h = hmac.New(hash, K)
+	h = hmac.New(hfunc, K)
 	h.Write(d.V)
 	d.V = h.Sum(d.V[:0])
 	// K = HMAC (K, V || 0x01 || provided_data).
@@ -95,12 +95,12 @@ func newDRBG[H hash.Hash](hash func() H, entropy, nonce []byte, s personalizatio
 	h.Write([]byte{0x01})
 	h.Write(entropy)
 	h.Write(nonce)
-	switch s := s.(type) {
+	switch ps := s.(type) {
 	case plainPersonalizationString:
-		h.Write(s)
+		h.Write(ps)
 	case blockAlignedPersonalizationString:
 		l := len(d.V) + 1 + len(entropy) + len(nonce)
-		for _, b := range s {
+		for _, b := range ps {
 			pad000(h, l)
 			h.Write(b)
 			l = len(b)
@@ -108,7 +108,7 @@ func newDRBG[H hash.Hash](hash func() H, entropy, nonce []byte, s personalizatio
 	}
 	K = h.Sum(K[:0])
 	// V = HMAC (K, V)
-	h = hmac.New(hash, K)
+	h = hmac.New(hfunc, K)
 	h.Write(d.V)
 	d.V = h.Sum(d.V[:0])
 
@@ -122,8 +122,8 @@ func newDRBG[H hash.Hash](hash func() H, entropy, nonce []byte, s personalizatio
 //
 // This should only be used for ACVP testing. hmacDRBG is not intended to be
 // used directly.
-func TestingOnlyNewDRBG[H hash.Hash](hash func() H, entropy, nonce []byte, s []byte) *hmacDRBG {
-	return newDRBG(hash, entropy, nonce, plainPersonalizationString(s))
+func TestingOnlyNewDRBG[H hash.Hash](hfunc func() H, entropy, nonce []byte, s []byte) *hmacDRBG {
+	return newDRBG(hfunc, entropy, nonce, plainPersonalizationString(s))
 }
 
 func pad000(h *hmac.HMAC, writtenSoFar int32) {

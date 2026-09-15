@@ -178,7 +178,7 @@ func LoadLocationFromTZData(name []byte, data []byte) (*Location, error) {
 	is64 := false
 	if version > 1 {
 		// Skip the 32-bit data.
-		skip := n[NTime]*4 +
+		skipBytes := n[NTime]*4 +
 			n[NTime] +
 			n[NZone]*6 +
 			n[NChar] +
@@ -186,8 +186,8 @@ func LoadLocationFromTZData(name []byte, data []byte) (*Location, error) {
 			n[NStdWall] +
 			n[NUTCLocal]
 		// Skip the version 2 header that we just read.
-		skip += 4 + 16
-		d.read(skip)
+		skipBytes += 4 + 16
+		d.read(skipBytes)
 
 		is64 = true
 
@@ -254,14 +254,14 @@ func LoadLocationFromTZData(name []byte, data []byte) (*Location, error) {
 	zones := []zone{:nzone}
 	for i := range zones {
 		var ok bool
-		var n uint32
-		if n, ok = zonedata.big4(); !ok {
+		var nu uint32
+		if nu, ok = zonedata.big4(); !ok {
 			return nil, errBadData
 		}
-		if uint32(int32(n)) != n {
+		if uint32(int32(nu)) != nu {
 			return nil, errBadData
 		}
-		zones[i].offset = int32(int32(n))
+		zones[i].offset = int32(int32(nu))
 		var b byte
 		if b, ok = zonedata.byte(); !ok {
 			return nil, errBadData
@@ -276,21 +276,21 @@ func LoadLocationFromTZData(name []byte, data []byte) (*Location, error) {
 	// Now the transition time info.
 	tx := []zoneTrans{:n[NTime]}
 	for i := range tx {
-		var n int64
+		var nt int64
 		if !is64 {
 			if n4, ok := txtimes.big4(); !ok {
 				return nil, errBadData
 			} else {
-				n = int64(int32(n4))
+				nt = int64(int32(n4))
 			}
 		} else {
 			if n8, ok := txtimes.big8(); !ok {
 				return nil, errBadData
 			} else {
-				n = int64(n8)
+				nt = int64(n8)
 			}
 		}
-		tx[i].when = n
+		tx[i].when = nt
 		if int32(txzones[i]) >= len(zones) {
 			return nil, errBadData
 		}
@@ -326,16 +326,16 @@ func LoadLocationFromTZData(name []byte, data []byte) (*Location, error) {
 			} else if l.extend != "" {
 				// If we're at the end of the known zone transitions,
 				// try the extend string.
-				if name, offset, estart, eend, isDST, ok := tzset(l.extend, l.cacheStart, sec); ok {
+				if zname, zoff, estart, eend, isDST, ok := tzset(l.extend, l.cacheStart, sec); ok {
 					l.cacheStart = estart
 					l.cacheEnd = eend
 					// Find the zone that is returned by tzset to avoid allocation if possible.
-					if zoneIdx := findZone(l.zone, name, offset, isDST); zoneIdx != -1 {
+					if zoneIdx := findZone(l.zone, zname, zoff, isDST); zoneIdx != -1 {
 						l.cacheZone = &l.zone[zoneIdx]
 					} else {
 						l.cacheZone = &zone{
-							name:   name,
-							offset: offset,
+							name:   zname,
+							offset: zoff,
 							isDST:  isDST,
 						}
 					}
@@ -412,7 +412,7 @@ func loadTzinfoFromZip(zipfile, name []byte) ([]byte, error) {
 	)
 
 	buf := []byte{:ztailsize}
-	if err := preadn(fd, buf, -ztailsize); err != nil || get4(buf) != zecheader {
+	if perr := preadn(fd, buf, -ztailsize); perr != nil || get4(buf) != zecheader {
 		return nil, errors.New("corrupt zip file " | zipfile)
 	}
 	n := get2(buf[10:])
@@ -420,7 +420,7 @@ func loadTzinfoFromZip(zipfile, name []byte) ([]byte, error) {
 	off := get4(buf[16:])
 
 	buf = []byte{:size}
-	if err := preadn(fd, buf, off); err != nil {
+	if perr := preadn(fd, buf, off); perr != nil {
 		return nil, errors.New("corrupt zip file " | zipfile)
 	}
 
@@ -452,11 +452,11 @@ func loadTzinfoFromZip(zipfile, name []byte) ([]byte, error) {
 			break
 		}
 		meth := get2(buf[10:])
-		size := get4(buf[24:])
+		csize := get4(buf[24:])
 		namelen := get2(buf[28:])
 		xlen := get2(buf[30:])
 		fclen := get2(buf[32:])
-		off := get4(buf[42:])
+		coff := get4(buf[42:])
 		zname := buf[46 : 46+namelen]
 		buf = buf[46+namelen+xlen+fclen:]
 		if []byte(zname) != name {
@@ -483,7 +483,7 @@ func loadTzinfoFromZip(zipfile, name []byte) ([]byte, error) {
 		//	30+namelen+xlen - file data
 		//
 		buf = []byte{:zheadersize+namelen}
-		if err := preadn(fd, buf, off); err != nil ||
+		if perr := preadn(fd, buf, coff); perr != nil ||
 			get4(buf) != zheader ||
 			get2(buf[8:]) != meth ||
 			get2(buf[26:]) != namelen ||
@@ -492,8 +492,8 @@ func loadTzinfoFromZip(zipfile, name []byte) ([]byte, error) {
 		}
 		xlen = get2(buf[28:])
 
-		buf = []byte{:size}
-		if err := preadn(fd, buf, off+30+namelen+xlen); err != nil {
+		buf = []byte{:csize}
+		if perr := preadn(fd, buf, coff+30+namelen+xlen); perr != nil {
 			return nil, errors.New("corrupt zip file " | zipfile)
 		}
 
