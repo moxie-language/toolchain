@@ -1254,9 +1254,9 @@ func (fb *ssaFuncBuilder) buildStmt(s syntax.Stmt) {
 	case *syntax.BlockStmt:
 		// A bare block is its own scope: bindings inside it do not outlive it,
 		// and a later sibling block may reuse their names.
-		blockScope := fb.enterScope()
+		blockScope := fb.enterBlock()
 		fb.buildBlock(ss)
-		fb.exitScope(blockScope)
+		fb.exitBlock(blockScope)
 	case *syntax.DeclStmt:
 		for _, d := range ss.DeclList {
 			fb.buildLocalDecl(d)
@@ -1577,6 +1577,11 @@ func (fb *ssaFuncBuilder) shortVarStore(name *syntax.Name, val SSAValue, typ Typ
 	// Same-scope reassignment: if a variable with this name was declared in
 	// the current scope, := assigns to it (Go semantics). A name that resolves
 	// to an enclosing scope would be shadowing, which Moxie forbids.
+	//
+	// The report is only made inside a function literal: checkShadowing already
+	// walks every named function body, position-insensitively, and it does not
+	// walk closures, so this is the closure's only check. Reporting outside a
+	// closure would duplicate that pass's diagnostic.
 	if ex := fb.lookupObject(name.Value); ex != nil {
 		if sc, ok := fb.varScope[ex]; ok {
 			if sc == fb.scopeID {
@@ -1587,17 +1592,17 @@ func (fb *ssaFuncBuilder) shortVarStore(name *syntax.Name, val SSAValue, typ Typ
 					return
 				}
 			}
-			if fb.fn != nil && fb.scopeIsAncestor(sc, fb.scopeID) {
+			if fb.parent != nil && fb.scopeIsAncestor(sc, fb.scopeID) {
 				shadowErr(fb.fn.name, name.Value)
 			}
-		} else if fb.fn != nil && fb.bindingShadows(ex) {
+		} else if fb.parent != nil && fb.bindingShadows(ex) {
 			shadowErr(fb.fn.name, name.Value)
 		}
-	} else if fb.fn != nil && fb.fn.Pkg != nil && inNameList(fb.fn.Pkg.ImportNames, name.Value) {
+	} else if fb.parent != nil && fb.fn.Pkg != nil && inNameList(fb.fn.Pkg.ImportNames, name.Value) {
 		// Bound by an import in another file of this package. The collision
 		// rule is package-wide, so this is still a collision.
 		shadowErr(fb.fn.name, name.Value)
-	} else if Universe.Lookup(name.Value) != nil && fb.fn != nil {
+	} else if fb.parent != nil && Universe.Lookup(name.Value) != nil {
 		// Predeclared identifiers are in scope everywhere.
 		shadowErr(fb.fn.name, name.Value)
 	}
@@ -1799,7 +1804,9 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			if name.Value == "_" {
 				continue
 			}
-			if fb.fn != nil {
+			// Only a closure is checked here: checkShadowing covers every named
+			// function body and does not walk function literals.
+			if fb.parent != nil {
 				if ex := fb.lookupObject(name.Value); ex != nil {
 					if fb.bindingShadows(ex) {
 						shadowErr(fb.fn.name, name.Value)
@@ -2124,25 +2131,17 @@ func (fb *ssaFuncBuilder) buildIf(s *syntax.IfStmt) {
 	// shadowing it, and the body then resolved the name to the outer object -
 	// so `if w, ok := w.(io.ReaderFrom); ok { w.ReadFrom(...) }` failed to
 	// resolve ReadFrom against the outer io.Writer.
-	ifScope := fb.enterScope()
-	var savedVars map[Object]*SSAAlloc
+	ifScope := fb.enterBlock()
 	if s.Init != nil {
-		savedVars = fb.saveVars()
 		fb.buildStmt(s.Init)
 	}
 	if fb.currentBlock == nil {
-		if savedVars != nil {
-			fb.vars = savedVars
-		}
-		fb.exitScope(ifScope)
+		fb.exitBlock(ifScope)
 		return
 	}
 	cond := fb.buildExpr(s.Cond)
 	if cond == nil {
-		if savedVars != nil {
-			fb.vars = savedVars
-		}
-		fb.exitScope(ifScope)
+		fb.exitBlock(ifScope)
 		return
 	}
 
@@ -2162,7 +2161,7 @@ func (fb *ssaFuncBuilder) buildIf(s *syntax.IfStmt) {
 	fb.pushPred(thenBlock, fb.currentBlock)
 	fb.pushPred(elseBlock, fb.currentBlock)
 
-	oldThen := fb.enterScope()
+	thenScope := fb.enterBlock()
 	thenBlock.ScopeID = fb.scopeID
 	fb.currentBlock = thenBlock
 	fb.buildBlock(s.Then)
@@ -2171,10 +2170,10 @@ func (fb *ssaFuncBuilder) buildIf(s *syntax.IfStmt) {
 		fb.pushSucc(fb.currentBlock, doneBlock)
 		fb.pushPred(doneBlock, fb.currentBlock)
 	}
-	fb.exitScope(oldThen)
+	fb.exitBlock(thenScope)
 
 	if s.Else != nil {
-		oldElse := fb.enterScope()
+		elseScope := fb.enterBlock()
 		elseBlock.ScopeID = fb.scopeID
 		fb.currentBlock = elseBlock
 		fb.buildStmt(s.Else)
@@ -2183,28 +2182,23 @@ func (fb *ssaFuncBuilder) buildIf(s *syntax.IfStmt) {
 			fb.pushSucc(fb.currentBlock, doneBlock)
 			fb.pushPred(doneBlock, fb.currentBlock)
 		}
-		fb.exitScope(oldElse)
+		fb.exitBlock(elseScope)
 	}
 
 	fb.currentBlock = doneBlock
-	if savedVars != nil {
-		fb.vars = savedVars
-	}
-	fb.exitScope(ifScope)
+	fb.exitBlock(ifScope)
 }
 
 func (fb *ssaFuncBuilder) buildFor(s *syntax.ForStmt) {
 	// A for statement is its own implicit block, so its init ':=' shadows an
 	// outer name of the same name rather than assigning to it.
-	forScope := fb.enterScope()
-	var savedVars map[Object]*SSAAlloc
+	forScope := fb.enterBlock()
 	if s.Init != nil {
 		if rc, ok := s.Init.(*syntax.RangeClause); ok {
 			fb.buildRangeLoop(s, rc)
-			fb.exitScope(forScope)
+			fb.exitBlock(forScope)
 			return
 		}
-		savedVars = fb.saveVars()
 		fb.buildStmt(s.Init)
 	}
 
@@ -2256,17 +2250,14 @@ func (fb *ssaFuncBuilder) buildFor(s *syntax.ForStmt) {
 		fb.pushSucc(fb.currentBlock, condBlock)
 		fb.pushPred(condBlock, fb.currentBlock)
 	}
-	fb.exitScope(forScope)
+	fb.exitBlock(forScope)
 
 	fb.loops = fb.loops[:len(fb.loops)-1]
 	fb.currentBlock = doneBlock
-	if savedVars != nil {
-		fb.vars = savedVars
-	}
 }
 
 func (fb *ssaFuncBuilder) buildRangeLoop(s *syntax.ForStmt, rc *syntax.RangeClause) {
-	savedVars := fb.saveVars()
+	rangeScope := fb.enterBlock()
 	iterExpr := fb.buildExpr(rc.X)
 	if iterExpr == nil {
 		return
@@ -2359,7 +2350,7 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *syntax.ForStmt, rc *syntax.RangeClau
 	fb.pushPred(bodyBlock, condBlock)
 	fb.pushPred(doneBlock, condBlock)
 
-	rangeScope := fb.enterScope()
+	rangeScope := fb.enterBlock()
 	bodyBlock.ScopeID = fb.scopeID
 	fb.currentBlock = bodyBlock
 	if rc.Lhs != nil && rc.Def {
@@ -2403,27 +2394,21 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *syntax.ForStmt, rc *syntax.RangeClau
 		fb.pushSucc(fb.currentBlock, condBlock)
 		fb.pushPred(condBlock, fb.currentBlock)
 	}
-	fb.exitScope(rangeScope)
+	fb.exitBlock(rangeScope)
 
 	fb.loops = fb.loops[:len(fb.loops)-1]
 	fb.currentBlock = doneBlock
-	fb.vars = savedVars
 }
 
 func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 	// A switch statement is its own implicit block, so its init ':=' shadows
 	// an outer name of the same name rather than assigning to it.
-	switchScope := fb.enterScope()
-	var savedVars map[Object]*SSAAlloc
+	switchScope := fb.enterBlock()
 	if s.Init != nil {
-		savedVars = fb.saveVars()
 		fb.buildStmt(s.Init)
 	}
 	if fb.currentBlock == nil {
-		if savedVars != nil {
-			fb.vars = savedVars
-		}
-		fb.exitScope(switchScope)
+		fb.exitBlock(switchScope)
 		return
 	}
 
@@ -2438,10 +2423,7 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 			fb.buildTypeSwitch(s, tsg, doneBlock)
 			fb.loops = savedLoops
 			fb.currentBlock = doneBlock
-			if savedVars != nil {
-				fb.vars = savedVars
-			}
-			fb.exitScope(switchScope)
+			fb.exitBlock(switchScope)
 			return
 		}
 	}
@@ -2563,10 +2545,9 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 			fb.pushPred(caseBlock, fb.currentBlock)
 		}
 
-		caseScope := fb.enterScope()
+		caseScope := fb.enterBlock()
 		caseBlock.ScopeID = fb.scopeID
 		fb.currentBlock = caseBlock
-		caseSaved := fb.saveVars()
 		for _, stmt := range clause.Body {
 			fb.buildStmt(stmt)
 			if fb.currentBlock == nil {
@@ -2578,8 +2559,7 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 			fb.pushSucc(fb.currentBlock, doneBlock)
 			fb.pushPred(doneBlock, fb.currentBlock)
 		}
-		fb.exitScope(caseScope)
-		fb.vars = caseSaved
+		fb.exitBlock(caseScope)
 		fb.currentBlock = nextBlock
 	}
 
@@ -2591,10 +2571,7 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 
 	fb.loops = savedLoops
 	fb.currentBlock = doneBlock
-	if savedVars != nil {
-		fb.vars = savedVars
-	}
-	fb.exitScope(switchScope)
+	fb.exitBlock(switchScope)
 }
 
 func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.TypeSwitchGuard, doneBlock *SSABasicBlock) {
@@ -2738,9 +2715,8 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.Type
 			}
 		}
 
-		tsScope := fb.enterScope()
+		tsScope := fb.enterBlock()
 		caseBlock.ScopeID = fb.scopeID
-		caseSaved := fb.saveVars()
 		for _, stmt := range clause.Body {
 			fb.buildStmt(stmt)
 			if fb.currentBlock == nil {
@@ -2752,8 +2728,7 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.Type
 			fb.pushSucc(fb.currentBlock, doneBlock)
 			fb.pushPred(doneBlock, fb.currentBlock)
 		}
-		fb.exitScope(tsScope)
-		fb.vars = caseSaved
+		fb.exitBlock(tsScope)
 		fb.currentBlock = nextBlock
 	}
 	if savedObj != nil && savedAlloc != nil {
@@ -2868,7 +2843,7 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 	// Build case bodies.
 	recvIdx := recvFieldIdx
 	for i, clause := range s.Body {
-		selScope := fb.enterScope()
+		selScope := fb.enterBlock()
 		caseBlocks[i].ScopeID = fb.scopeID
 		fb.currentBlock = caseBlocks[i]
 
@@ -2913,7 +2888,7 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 			fb.pushSucc(fb.currentBlock, doneBlock)
 			fb.pushPred(doneBlock, fb.currentBlock)
 		}
-		fb.exitScope(selScope)
+		fb.exitBlock(selScope)
 	}
 
 	fb.currentBlock = doneBlock
@@ -5140,6 +5115,39 @@ func (fb *ssaFuncBuilder) saveVars() (m map[Object]*SSAAlloc) {
 		saved[k] = v
 	}
 	return saved
+}
+
+func (fb *ssaFuncBuilder) saveVarScopes() (m map[Object]int32) {
+	saved := map[Object]int32{}
+	for k, v := range fb.varScope {
+		saved[k] = v
+	}
+	return saved
+}
+
+// scopeVars is the binding snapshot taken when a block is entered.
+type scopeVars struct {
+	prev  int32
+	vars  map[Object]*SSAAlloc
+	scope map[Object]int32
+}
+
+// enterBlock enters a nested scope. exitBlock leaves it and drops the bindings
+// the block introduced, so a name declared inside a block is undefined after
+// it - the same thing go/types gives the legacy compiler. Without the restore a
+// later sibling statement resolved the name to the dead binding instead of
+// reporting it undefined.
+func (fb *ssaFuncBuilder) enterBlock() (s scopeVars) {
+	s.prev = fb.enterScope()
+	s.vars = fb.saveVars()
+	s.scope = fb.saveVarScopes()
+	return s
+}
+
+func (fb *ssaFuncBuilder) exitBlock(s scopeVars) {
+	fb.vars = s.vars
+	fb.varScope = s.scope
+	fb.exitScope(s.prev)
 }
 
 func (fb *ssaFuncBuilder) removeVar(name string) {
