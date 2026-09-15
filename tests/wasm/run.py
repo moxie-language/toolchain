@@ -36,6 +36,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return str(ROOT / "host.html")
         return str(ROOT) + path
 
+    def end_headers(self):
+        # SharedArrayBuffer - the backing store for every channel that crosses
+        # a spawn boundary - only exists in a cross-origin isolated context.
+        # Without these two headers the browser leaves the constructor
+        # undefined and channel_create fails before a domain can start.
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
+        super().end_headers()
+
     def log_message(self, *args):
         pass
 
