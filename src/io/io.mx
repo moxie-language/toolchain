@@ -306,21 +306,23 @@ func WriteString(w Writer, s []byte) (n int32, err error) {
 // ReadAtLeast reads from r into buf until it has read at least min bytes.
 // It returns the number of bytes copied and an error if fewer bytes were read.
 // The error is EOF only if no bytes were read.
-// If an EOF happens after reading fewer than min bytes,
+// If an EOF happens after reading fewer than minLen bytes,
 // ReadAtLeast returns [ErrUnexpectedEOF].
-// If min is greater than the length of buf, ReadAtLeast returns [ErrShortBuffer].
-// On return, n >= min if and only if err == nil.
-// If r returns an error having read at least min bytes, the error is dropped.
-func ReadAtLeast(r Reader, buf []byte, min int32) (n int32, err error) {
-	if len(buf) < min {
+// If minLen is greater than the length of buf, ReadAtLeast returns [ErrShortBuffer].
+// On return, n >= minLen if and only if err == nil.
+// If r returns an error having read at least minLen bytes, the error is dropped.
+// The parameter is minLen rather than min because min is a predeclared
+// identifier and Moxie forbids shadowing.
+func ReadAtLeast(r Reader, buf []byte, minLen int32) (n int32, err error) {
+	if len(buf) < minLen {
 		return 0, ErrShortBuffer
 	}
-	for n < min && err == nil {
+	for n < minLen && err == nil {
 		var nn int32
 		nn, err = r.Read(buf[n:])
 		n += nn
 	}
-	if n >= min {
+	if n >= minLen {
 		err = nil
 	} else if n > 0 && err == EOF {
 		err = ErrUnexpectedEOF
@@ -495,8 +497,8 @@ func (s *SectionReader) Read(p []byte) (n int32, err error) {
 	if s.off >= s.limit {
 		return 0, EOF
 	}
-	if max := s.limit - s.off; int64(len(p)) > max {
-		p = p[0:max]
+	if lim := s.limit - s.off; int64(len(p)) > lim {
+		p = p[0:lim]
 	}
 	n, err = s.r.ReadAt(p, s.off)
 	s.off += int64(n)
@@ -529,8 +531,8 @@ func (s *SectionReader) ReadAt(p []byte, off int64) (n int32, err error) {
 		return 0, EOF
 	}
 	off += s.base
-	if max := s.limit - off; int64(len(p)) > max {
-		p = p[0:max]
+	if lim := s.limit - off; int64(len(p)) > lim {
+		p = p[0:lim]
 		n, err = s.r.ReadAt(p, off)
 		if err == nil {
 			err = EOF
@@ -612,8 +614,8 @@ type teeReader struct {
 func (t *teeReader) Read(p []byte) (n int32, err error) {
 	n, err = t.r.Read(p)
 	if n > 0 {
-		if n, err := t.w.Write(p[:n]); err != nil {
-			return n, err
+		if wn, werr := t.w.Write(p[:n]); werr != nil {
+			return wn, werr
 		}
 	}
 	return
