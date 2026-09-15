@@ -675,6 +675,13 @@ func (c *compilerContext) checkImportNameCollisions(pkg *loader.Package) {
 			if _, isPkg := obj.(*types.PkgName); !isPkg {
 				continue
 			}
+			// A blank import defines the blank identifier, which go/types puts
+			// in Defs as an object named "_". "_" is not a binding, so treating
+			// it as an imported package name flagged every blank declaration in
+			// the package (210 of them in one generated syscall file).
+			if obj.Name() == "_" {
+				continue
+			}
 			imported[obj.Name()] = true
 		}
 	}
@@ -691,8 +698,12 @@ func (c *compilerContext) checkImportNameCollisions(pkg *loader.Package) {
 		if ident == nil || obj == nil {
 			continue
 		}
-		// The import itself is not a collision.
+		// The import itself is not a collision, and the blank identifier is
+		// not a name.
 		if _, isPkg := obj.(*types.PkgName); isPkg {
+			continue
+		}
+		if ident.Name == "_" {
 			continue
 		}
 		if imported[ident.Name] {

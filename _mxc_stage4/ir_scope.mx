@@ -319,6 +319,345 @@ func scanSovLoopDecls(name string, stmts []syntax.Stmt, inLoop bool) {
 	}
 }
 
+// --- position-insensitive shadow checking ----------------------------------
+//
+// Moxie forbids a declaration in a nested block that reuses a name bound
+// anywhere in an enclosing block of the same function, INCLUDING one declared
+// LATER in that enclosing block: a name is taken for the whole block it appears
+// in. legacy's checkScopeShadowing walks finished go/types scopes and so is
+// position-insensitive, while the SSA builder could only check as each
+// declaration was built and could not see a binding it had not reached yet. The
+// two compilers therefore disagreed about the same source, so the rule is
+// enforced here, over the whole body.
+//
+// Scope model: one name set per block, threaded as a stack. The function's own
+// scope holds its receiver, parameters and results; the body is nested inside
+// it; each if/for/switch body and each case clause is nested further. Reusing a
+// name between SIBLING scopes is legal - two cases of one switch may each
+// declare x - so only ancestors are consulted.
+
+func inNameList(names []string, name string) (ok bool) {
+	for _, n := range names {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+func concatNames(a, b []string) (out []string) {
+	out = a
+	for _, s := range b {
+		out = mxutil.Ensure(out, 1)
+		out = push(out, s)
+	}
+	return out
+}
+
+// shadowPush opens a nested scope.
+func shadowPush(scopes [][]string) (out [][]string) {
+	out = mxutil.Ensure(scopes, 1)
+	return push(out, []string{})
+}
+
+func shadowPop(scopes [][]string) (out [][]string) {
+	if len(scopes) > 1 {
+		return scopes[:len(scopes)-1]
+	}
+	return scopes
+}
+
+// shadowDeclare records a binding in the innermost scope, reporting the name
+// when it is already bound in an enclosing scope, at package level, or in the
+// predeclared universe.
+func shadowDeclare(fn string, outer []string, scopes [][]string, name string) (out [][]string) {
+	if name == "" || name == "_" {
+		return scopes
+	}
+	if inNameList(outer, name) || Universe.Lookup(name) != nil {
+		shadowErr(fn, name)
+	} else {
+		for i := 0; i < len(scopes)-1; i++ {
+			if inNameList(scopes[i], name) {
+				shadowErr(fn, name)
+				break
+			}
+		}
+	}
+	top := mxutil.Ensure(scopes[len(scopes)-1], 1)
+	top = push(top, name)
+	out = mxutil.Ensure(scopes[:len(scopes)-1], 1)
+	return push(out, top)
+}
+
+func shadowDeclField(fn string, outer []string, scopes [][]string, f *syntax.Field) (out [][]string) {
+	if f == nil || f.Name == nil {
+		return scopes
+	}
+	return shadowDeclare(fn, outer, scopes, f.Name.Value)
+}
+
+func shadowDeclFields(fn string, outer []string, scopes [][]string, fs []*syntax.Field) (out [][]string) {
+	out = scopes
+	for _, f := range fs {
+		out = shadowDeclField(fn, outer, out, f)
+	}
+	return out
+}
+
+func shadowDeclSig(fn string, outer []string, scopes [][]string, ft *syntax.FuncType) (out [][]string) {
+	if ft == nil {
+		return scopes
+	}
+	out = shadowDeclFields(fn, outer, scopes, ft.ParamList)
+	return shadowDeclFields(fn, outer, out, ft.ResultList)
+}
+
+func shadowDecl(fn string, outer []string, scopes [][]string, d syntax.Decl) (out [][]string) {
+	out = scopes
+	switch t := d.(type) {
+	case *syntax.VarDecl:
+		for _, n := range t.NameList {
+			if n != nil {
+				out = shadowDeclare(fn, outer, out, n.Value)
+			}
+		}
+	case *syntax.ConstDecl:
+		for _, n := range t.NameList {
+			if n != nil {
+				out = shadowDeclare(fn, outer, out, n.Value)
+			}
+		}
+	case *syntax.TypeDecl:
+		if t.Name != nil {
+			out = shadowDeclare(fn, outer, out, t.Name.Value)
+		}
+	case *syntax.FuncDecl:
+		if t.Name != nil {
+			out = shadowDeclare(fn, outer, out, t.Name.Value)
+		}
+		out = shadowDeclField(fn, outer, out, t.Recv)
+		out = shadowPush(out)
+		out = shadowDeclSig(fn, outer, out, t.Type)
+		if t.Body != nil {
+			out = shadowPush(out)
+			out = shadowStmts(fn, outer, out, t.Body.List)
+			out = shadowPop(out)
+		}
+		out = shadowPop(out)
+	}
+	return out
+}
+
+func shadowDecls(fn string, outer []string, scopes [][]string, ds []syntax.Decl) (out [][]string) {
+	out = scopes
+	for _, d := range ds {
+		out = shadowDecl(fn, outer, out, d)
+	}
+	return out
+}
+
+func shadowLHS(fn string, outer []string, scopes [][]string, e syntax.Expr) (out [][]string) {
+	out = scopes
+	if e == nil {
+		return out
+	}
+	if le, ok := e.(*syntax.ListExpr); ok {
+		for _, x := range le.ElemList {
+			out = shadowLHS(fn, outer, out, x)
+		}
+		return out
+	}
+	if n, ok := e.(*syntax.Name); ok {
+		return shadowDeclare(fn, outer, out, n.Value)
+	}
+	return out
+}
+
+func shadowSimple(fn string, outer []string, scopes [][]string, sx syntax.SimpleStmt) (out [][]string) {
+	out = scopes
+	if sx == nil {
+		return out
+	}
+	switch t := sx.(type) {
+	case *syntax.AssignStmt:
+		if t.Op == token.Def {
+			out = shadowLHS(fn, outer, out, t.Lhs)
+		}
+	case *syntax.RangeClause:
+		if t.Def {
+			out = shadowLHS(fn, outer, out, t.Lhs)
+		}
+	}
+	return out
+}
+
+func shadowStmt(fn string, outer []string, scopes [][]string, st syntax.Stmt) (out [][]string) {
+	out = scopes
+	if st == nil {
+		return out
+	}
+	switch t := st.(type) {
+	case *syntax.DeclStmt:
+		return shadowDecls(fn, outer, out, t.DeclList)
+	case *syntax.AssignStmt:
+		if t.Op == token.Def {
+			out = shadowLHS(fn, outer, out, t.Lhs)
+		}
+	case *syntax.LabeledStmt:
+		out = shadowStmt(fn, outer, out, t.Stmt)
+	case *syntax.BlockStmt:
+		out = shadowPush(out)
+		out = shadowStmts(fn, outer, out, t.List)
+		out = shadowPop(out)
+	case *syntax.IfStmt:
+		out = shadowPush(out)
+		out = shadowSimple(fn, outer, out, t.Init)
+		if t.Then != nil {
+			out = shadowPush(out)
+			out = shadowStmts(fn, outer, out, t.Then.List)
+			out = shadowPop(out)
+		}
+		out = shadowStmt(fn, outer, out, t.Else)
+		out = shadowPop(out)
+	case *syntax.ForStmt:
+		out = shadowPush(out)
+		out = shadowSimple(fn, outer, out, t.Init)
+		if t.Body != nil {
+			out = shadowPush(out)
+			out = shadowStmts(fn, outer, out, t.Body.List)
+			out = shadowPop(out)
+		}
+		out = shadowPop(out)
+	case *syntax.SwitchStmt:
+		out = shadowPush(out)
+		out = shadowSimple(fn, outer, out, t.Init)
+		for _, c := range t.Body {
+			if c == nil {
+				continue
+			}
+			out = shadowPush(out)
+			out = shadowStmts(fn, outer, out, c.Body)
+			out = shadowPop(out)
+		}
+		out = shadowPop(out)
+	case *syntax.SelectStmt:
+		out = shadowPush(out)
+		for _, c := range t.Body {
+			if c == nil {
+				continue
+			}
+			out = shadowPush(out)
+			out = shadowSimple(fn, outer, out, c.Comm)
+			out = shadowStmts(fn, outer, out, c.Body)
+			out = shadowPop(out)
+		}
+		out = shadowPop(out)
+	}
+	return out
+}
+
+func shadowStmts(fn string, outer []string, scopes [][]string, ss []syntax.Stmt) (out [][]string) {
+	out = scopes
+	for _, st := range ss {
+		out = shadowStmt(fn, outer, out, st)
+	}
+	return out
+}
+
+// packageDeclNames collects the names bound at package scope, which enclose
+// every function body.
+func packageDeclNames(files []*syntax.File) (names []string) {
+	for _, f := range files {
+		if f == nil {
+			continue
+		}
+		for _, d := range f.DeclList {
+			switch t := d.(type) {
+			case *syntax.FuncDecl:
+				if t.Recv == nil && t.Name != nil {
+					names = mxutil.Ensure(names, 1)
+					names = push(names, t.Name.Value)
+				}
+			case *syntax.TypeDecl:
+				if t.Name != nil {
+					names = mxutil.Ensure(names, 1)
+					names = push(names, t.Name.Value)
+				}
+			case *syntax.VarDecl:
+				for _, n := range t.NameList {
+					if n != nil {
+						names = mxutil.Ensure(names, 1)
+						names = push(names, n.Value)
+					}
+				}
+			case *syntax.ConstDecl:
+				for _, n := range t.NameList {
+					if n != nil {
+						names = mxutil.Ensure(names, 1)
+						names = push(names, n.Value)
+					}
+				}
+			}
+		}
+	}
+	return names
+}
+
+// importNamesOf collects the local name each import binds: the alias when
+// present, otherwise the imported package's own name, which is not necessarily
+// the path tail.
+func importNamesOf(f *syntax.File) (names []string) {
+	for _, d := range f.DeclList {
+		im, ok := d.(*syntax.ImportDecl)
+		if !ok || im.Path == nil {
+			continue
+		}
+		path := im.Path.Value
+		if len(path) >= 2 && path[0] == '"' {
+			path = path[1 : len(path)-1]
+		}
+		imported := cctx.universe.Registry[path]
+		if imported == nil {
+			continue
+		}
+		localName := imported.Name
+		if im.LocalPkgName != nil {
+			localName = im.LocalPkgName.Value
+		}
+		if localName == "" || localName == "_" || localName == "." {
+			continue
+		}
+		names = mxutil.Ensure(names, 1)
+		names = push(names, localName)
+	}
+	return names
+}
+
+// checkShadowing enforces the naming rule over every function body in the
+// package, in one pass, so that a binding is visible to the whole block it sits
+// in regardless of where in that block it is written.
+func checkShadowing(files []*syntax.File) {
+	pkgNames := packageDeclNames(files)
+	for _, f := range files {
+		if f == nil {
+			continue
+		}
+		outer := concatNames(pkgNames, importNamesOf(f))
+		for _, d := range f.DeclList {
+			fd, ok := d.(*syntax.FuncDecl)
+			if !ok || fd.Body == nil || fd.Name == nil {
+				continue
+			}
+			scopes := [][]string{[]string{}}
+			scopes = shadowDeclField(fd.Name.Value, outer, scopes, fd.Recv)
+			scopes = shadowDeclSig(fd.Name.Value, outer, scopes, fd.Type)
+			scopes = shadowPush(scopes)
+			shadowStmts(fd.Name.Value, outer, scopes, fd.Body.List)
+		}
+	}
+}
+
 // checkParamMutation rejects stores through function parameters.
 // Parameters are borrowed references into the caller's arena. Writing
 // through them places callee-arena data in caller-owned storage,
