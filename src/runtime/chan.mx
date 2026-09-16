@@ -255,6 +255,17 @@ func chanSend(ch *channel, value unsafe.Pointer, op *channelOp) {
 		deadlock()
 	}
 
+	// Spawn-bound channels carry their payload in the shared ring, not in
+	// the in-runtime queue. tryPipeSend is a single non-blocking attempt, so
+	// parking on ch.senders after it fails would never be woken: the remote
+	// end writes the ring, it does not know about this domain's senders.
+	// Retry in the pipe helper, which knows how to distinguish backpressure
+	// from a closed or dead peer.
+	if ch.spawnBound {
+		PipeChanSendRaw(ch, value, int32(ch.elementSize))
+		return
+	}
+
 	mask := interrupt.Disable()
 
 	// See whether we can proceed immediately, and if so, return early.
@@ -341,6 +352,14 @@ func chanRecv(ch *channel, value unsafe.Pointer, op *channelOp) bool {
 	if ch == nil {
 		// A nil channel blocks forever. Do not schedule this goroutine again.
 		deadlock()
+	}
+
+	// Spawn-bound channels deliver through the shared ring and have no
+	// in-runtime waker. Parking on ch.receivers after one empty ring read
+	// would hang forever; poll the ring instead. PipeChanRecvRaw also
+	// reports closed and dead-peer as ok=false, matching chanRecv.
+	if ch.spawnBound {
+		return PipeChanRecvRaw(ch, value, int32(ch.elementSize))
 	}
 
 	mask := interrupt.Disable()
