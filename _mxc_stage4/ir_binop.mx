@@ -156,9 +156,22 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 		}
 	}
 	isStringOp := lt == e.sliceType()
-	// Fallback: if RV looks like a string aggregate but LV has a
-	// mismatched type (interface, void), bitcast LV to string type.
-	if !isStringOp && (b.Op == OpEql || b.Op == OpNeq) {
+	// Fallback: if RV looks like a string aggregate but LV has a mismatched
+	// type, bitcast LV to string type. An interface LV must NOT take this
+	// path: reloading the first 24 bytes of an {i64, ptr} interface as a
+	// {ptr, i64, i64} string compares the type-ID and data pointer as if they
+	// were the string header. `switch target { case oserror.ErrNotExist }`
+	// (errors.Const is a string-kind named type) silently never matched,
+	// which broke errors.Is / os.IsNotExist in every binary built here. The
+	// dedicated interface comparison below extracts the data pointer and
+	// compares the boxed string instead.
+	lvIsIface := lt == e.ifaceType()
+	if !lvIsIface && b.X != nil && b.X.SSAType() != nil {
+		if _, ok := SafeUnderlying(b.X.SSAType()).(*TCInterface); ok {
+			lvIsIface = true
+		}
+	}
+	if !isStringOp && !lvIsIface && (b.Op == OpEql || b.Op == OpNeq) {
 		rvIsStr := len(rv) > 6 && rv[0] == '{' && rv[2] == 'p' && rv[3] == 't' && rv[4] == 'r'
 		if rvIsStr {
 			sty := e.sliceType()
@@ -316,6 +329,33 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 			}
 		}
 		if isSig2 || isIfce2 {
+			// Interface == interface: delegate to the runtime's kind-aware
+			// comparison, the same runtime.interfaceEqual legacy emits. The
+			// inline path below compares the value-slot pointers, which is
+			// only correct when the dynamic value is boxed by identity: two
+			// separately boxed copies of a string-kind constant
+			// (errors.Const sentinels, syscall.Errno.Is cases) or of a struct
+			// compare unequal although Go says equal.
+			if !isSig2 && b.Y != nil && b.Y.SSAType() != nil {
+				_, yIfce := SafeUnderlying(b.Y.SSAType()).(*TCInterface)
+				if yIfce && lt == e.ifaceType() {
+					ity := e.ifaceType()
+					aPair := e.ifacePtrPair(lv)
+					bPair := e.ifacePtrPair(rv)
+					if b.Op == OpEql {
+						e.w("  ") ; e.w(reg) ; e.w(" = call i1 @runtime.interfaceEqual({ptr, ptr} ") ; e.w(aPair)
+						e.w(", {ptr, ptr} ") ; e.w(bPair) ; e.w(", ptr null)\n")
+					} else {
+						e.nextReg++
+						eqr := "%ieq" | irItoa(e.nextReg)
+						e.w("  ") ; e.w(eqr) ; e.w(" = call i1 @runtime.interfaceEqual({ptr, ptr} ") ; e.w(aPair)
+						e.w(", {ptr, ptr} ") ; e.w(bPair) ; e.w(", ptr null)\n")
+						e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(eqr) ; e.w(", true\n")
+					}
+					e.declareRuntime("runtime.interfaceEqual", "i1", "{ptr, ptr}, {ptr, ptr}")
+					return
+				}
+			}
 			nilField := "0"
 			if isSig2 {
 				nilField = "1"
@@ -782,6 +822,27 @@ func (e *irEmitter) emitStringCompare(reg string, op SSAOp, lv, rv string) {
 	default:
 		e.w("  ") ; e.w(reg) ; e.w(" = icmp eq i1 ") ; e.w(lv) ; e.w(", ") ; e.w(rv) ; e.w("\n")
 	}
+}
+
+// ifacePtrPair converts stage4's {intptr, ptr} interface value to the
+// runtime's {ptr, ptr} _interface layout. The typecode is kept as an integer
+// for dispatch (every compare ptrtoints it), while src/runtime/interface.mx
+// declares _interface with a pointer typecode. Both are two words of the same
+// ABI, but bitcode linking is type-exact, so convert before the call.
+func (e *irEmitter) ifacePtrPair(src string) (out string) {
+	ipt := e.intptrType()
+	ity := "{" | ipt | ", ptr}"
+	t0 := e.nextReg2("ip")
+	e.w("  ") ; e.w(t0) ; e.w(" = extractvalue ") ; e.w(ity) ; e.w(" ") ; e.w(src) ; e.w(", 0\n")
+	p0 := e.nextReg2("ip")
+	e.w("  ") ; e.w(p0) ; e.w(" = inttoptr ") ; e.w(ipt) ; e.w(" ") ; e.w(t0) ; e.w(" to ptr\n")
+	v1 := e.nextReg2("ip")
+	e.w("  ") ; e.w(v1) ; e.w(" = extractvalue ") ; e.w(ity) ; e.w(" ") ; e.w(src) ; e.w(", 1\n")
+	t1 := e.nextReg2("ip")
+	e.w("  ") ; e.w(t1) ; e.w(" = insertvalue {ptr, ptr} undef, ptr ") ; e.w(p0) ; e.w(", 0\n")
+	out = e.nextReg2("ip")
+	e.w("  ") ; e.w(out) ; e.w(" = insertvalue {ptr, ptr} ") ; e.w(t1) ; e.w(", ptr ") ; e.w(v1) ; e.w(", 1\n")
+	return out
 }
 
 func (e *irEmitter) emitStructCompare(reg string, op SSAOp, st *TCStruct, lt, lv, rv string) {

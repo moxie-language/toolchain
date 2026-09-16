@@ -209,6 +209,59 @@ func scanExportPragmas(src []byte) (m map[string]string) {
 	return result
 }
 
+// scanExternGlobals maps a package-level variable name to the C symbol named
+// by the //:extern pragma directly above its declaration:
+//
+//	//:extern environ
+//	var environ *unsafe.Pointer
+//
+// Such a global must be declared external, never defined: defining it shadows
+// the real libc object with a zeroed variable and SIGSEGVs on first read.
+func scanExternGlobals(src []byte) (m map[string]string) {
+	m = map[string]string{}
+	slen := int32(len(src))
+	pending := ""
+	i := int32(0)
+	for i < slen {
+		le := srcFindByte(src, i, slen, '\n')
+		if le < 0 {
+			le = slen
+		}
+		ts := srcTrimStart(src, i, le)
+		te := srcTrimEnd(src, i, le)
+		if srcHasPrefix(src, ts, te, []byte("//:extern ")) {
+			rs := srcTrimStart(src, ts+10, te)
+			re := srcTrimEnd(src, rs, te)
+			if re > rs {
+				pending = string(src[rs:re])
+			}
+		} else if te > ts {
+			if pending != "" && srcHasPrefix(src, ts, te, []byte("var ")) {
+				vs := srcTrimStart(src, ts+4, te)
+				ve := vs
+				for ve < te {
+					c := src[ve]
+					if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+						ve++
+						continue
+					}
+					break
+				}
+				if ve > vs {
+					m[string(src[vs:ve])] = pending
+				}
+			}
+			pending = ""
+		}
+		if le < slen {
+			i = le + 1
+		} else {
+			i = slen
+		}
+	}
+	return m
+}
+
 func scanLinknameMap(src []byte) (m map[string]string) {
 	result := map[string]string{}
 	prefix := []byte("//:linkname ")

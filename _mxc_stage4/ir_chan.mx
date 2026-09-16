@@ -39,11 +39,17 @@ func (e *irEmitter) chanElemTType(chanType Type) (t Type) {
 	return nil
 }
 
-// codecIface returns the moxie.Codec interface type, or nil if the moxie
-// package is not loaded. Found by scanning the universe registry for a
-// package-scope "Codec" object whose underlying type is an interface, so
-// the module path does not matter. A named interface type is *Named{Under:
-// *TCInterface}, so unwrap through SafeUnderlying.
+// codecIface returns the moxie.Codec interface type. Found by scanning the
+// universe registry for a package-scope "Codec" object whose underlying type
+// is an interface, so the module path does not matter. A named interface type
+// is *Named{Under: *TCInterface}, so unwrap through SafeUnderlying.
+//
+// The moxie package is registered only when the package being compiled (or
+// one of its registered imports) names it, so the scan misses it for a
+// package whose chan element type merely has the two Codec methods. Fall
+// back to the canonical shape in that case: whether a chan op routes through
+// the codec path must not depend on which packages happen to be in the
+// registry.
 func (e *irEmitter) codecIface() *TCInterface {
 	for _, pkg := range cctx.universe.Registry {
 		if pkg == nil || pkg.Scope == nil {
@@ -63,7 +69,44 @@ func (e *irEmitter) codecIface() *TCInterface {
 			}
 		}
 	}
-	return nil
+	return e.synthCodecIface()
+}
+
+// synthCodecIface builds moxie.Codec from its fixed shape:
+//
+//	EncodeTo(w io.Writer) error
+//	DecodeFrom(r io.Reader) error
+//
+// io is always registered when a package can declare these methods (the
+// signatures name it), and error lives in the universe.
+func (e *irEmitter) synthCodecIface() (iface *TCInterface) {
+	ioPkg := cctx.universe.LookupByName("io")
+	if ioPkg == nil || ioPkg.Scope == nil {
+		return nil
+	}
+	wObj := ioPkg.Scope.Lookup("Writer")
+	rObj := ioPkg.Scope.Lookup("Reader")
+	if wObj == nil || rObj == nil || cctx.universe.Error == nil {
+		return nil
+	}
+	wT := ObjectType(wObj)
+	rT := ObjectType(rObj)
+	errT := ObjectType(cctx.universe.Error)
+	if wT == nil || rT == nil || errT == nil {
+		return nil
+	}
+	encSig := NewSignature(nil,
+		NewTuple(NewTCVar(nil, "w", wT)),
+		NewTuple(NewTCVar(nil, "", errT)), false)
+	decSig := NewSignature(nil,
+		NewTuple(NewTCVar(nil, "r", rT)),
+		NewTuple(NewTCVar(nil, "", errT)), false)
+	methods := []*IfaceMethod{:0:2}
+	methods = push(methods, NewTCIfaceMethod("EncodeTo", encSig))
+	methods = push(methods, NewTCIfaceMethod("DecodeFrom", decSig))
+	iface = NewTCInterface(methods, nil)
+	iface.Complete()
+	return iface
 }
 
 // elemImplementsCodec reports whether the chan element type (or *T) satisfies

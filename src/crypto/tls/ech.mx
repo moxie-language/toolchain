@@ -171,12 +171,12 @@ func pickECHConfig(list []echConfig) (*echConfig, hpke.PublicKey, hpke.KDF, hpke
 		if unsupportedExt {
 			continue
 		}
-		kem, err := hpke.NewKEM(ec.KemID)
-		if err != nil {
+		kem, err4 := hpke.NewKEM(ec.KemID)
+		if err4 != nil {
 			continue
 		}
-		pub, err := kem.NewPublicKey(ec.PublicKey)
-		if err != nil {
+		pub, err3 := kem.NewPublicKey(ec.PublicKey)
+		if err3 != nil {
 			// This is an error in the config, but killing the connection feels
 			// excessive.
 			continue
@@ -185,15 +185,15 @@ func pickECHConfig(list []echConfig) (*echConfig, hpke.PublicKey, hpke.KDF, hpke
 			// All of the supported AEADs and KDFs are fine, rather than
 			// imposing some sort of preference here, we just pick the first
 			// valid suite.
-			kdf, err := hpke.NewKDF(cs.KDFID)
-			if err != nil {
+			kdf, err2 := hpke.NewKDF(cs.KDFID)
+			if err2 != nil {
 				continue
 			}
-			aead, err := hpke.NewAEAD(cs.AEADID)
-			if err != nil {
+			aead1, err1 := hpke.NewAEAD(cs.AEADID)
+			if err1 != nil {
 				continue
 			}
-			return &ec, pub, kdf, aead
+			return &ec, pub, kdf, aead1
 		}
 	}
 	return nil, nil, nil, nil
@@ -402,9 +402,9 @@ func decodeInnerClientHello(outer *clientHelloMsg, encoded []byte) (*clientHello
 	return inner, nil
 }
 
-func decryptECHPayload(context *hpke.Recipient, hello, payload []byte) ([]byte, error) {
+func decryptECHPayload(ctxInfo *hpke.Recipient, hello, payload []byte) ([]byte, error) {
 	outerAAD := bytes.Replace(hello[4:], payload, []byte{:len(payload)}, 1)
-	return context.Open(outerAAD, payload)
+	return ctxInfo.Open(outerAAD, payload)
 }
 
 func generateOuterECHExt(id uint8, kdfID, aeadID uint16, encodedKey []byte, payload []byte) ([]byte, error) {
@@ -554,9 +554,9 @@ func parseECHExt(ext []byte) (echType echExtType, cs echCipher, configID uint8, 
 }
 
 func (c *Conn) processECHClientHello(outer *clientHelloMsg, echKeys []EncryptedClientHelloKey) (*clientHelloMsg, *echServerContext, error) {
-	echType, echCiphersuite, configID, encap, payload, err := parseECHExt(outer.encryptedClientHello)
-	if err != nil {
-		if errors.Is(err, errInvalidECHExt) {
+	echType, echCiphersuite, configID, encap, payload, err9 := parseECHExt(outer.encryptedClientHello)
+	if err9 != nil {
+		if errors.Is(err9, errInvalidECHExt) {
 			c.sendAlert(alertIllegalParameter)
 		} else {
 			c.sendAlert(alertDecodeError)
@@ -573,44 +573,62 @@ func (c *Conn) processECHClientHello(outer *clientHelloMsg, echKeys []EncryptedC
 		return outer, nil, nil
 	}
 
+	var skip bool
+	var config echConfig
+	var err8 error
+	var kem hpke.KEM
+	var err7 error
+	var echPriv hpke.PrivateKey
+	var err6 error
+	var kdf hpke.KDF
+	var err5 error
+	var aead1 hpke.AEAD
+	var err4 error
+	var info []byte
+	var hpkeContext *hpke.Recipient
+	var err3 error
+	var encodedInner []byte
+	var err2 error
+	var echInner *clientHelloMsg
+	var err1 error
 	for _, echKey := range echKeys {
-		skip, config, err := parseECHConfig(echKey.Config)
-		if err != nil || skip {
+		skip, config, err8 = parseECHConfig(echKey.Config)
+		if err8 != nil || skip {
 			c.sendAlert(alertInternalError)
-			return nil, nil, fmt.Errorf("tls: invalid EncryptedClientHelloKey Config: %s", err)
+			return nil, nil, fmt.Errorf("tls: invalid EncryptedClientHelloKey Config: %s", err8)
 		}
 		if skip {
 			continue
 		}
-		kem, err := hpke.NewKEM(config.KemID)
-		if err != nil {
+		kem, err7 = hpke.NewKEM(config.KemID)
+		if err7 != nil {
 			c.sendAlert(alertInternalError)
-			return nil, nil, fmt.Errorf("tls: invalid EncryptedClientHelloKey Config KEM: %s", err)
+			return nil, nil, fmt.Errorf("tls: invalid EncryptedClientHelloKey Config KEM: %s", err7)
 		}
-		echPriv, err := kem.NewPrivateKey(echKey.PrivateKey)
-		if err != nil {
+		echPriv, err6 = kem.NewPrivateKey(echKey.PrivateKey)
+		if err6 != nil {
 			c.sendAlert(alertInternalError)
-			return nil, nil, fmt.Errorf("tls: invalid EncryptedClientHelloKey PrivateKey: %s", err)
+			return nil, nil, fmt.Errorf("tls: invalid EncryptedClientHelloKey PrivateKey: %s", err6)
 		}
-		kdf, err := hpke.NewKDF(echCiphersuite.KDFID)
-		if err != nil {
+		kdf, err5 = hpke.NewKDF(echCiphersuite.KDFID)
+		if err5 != nil {
 			c.sendAlert(alertInternalError)
-			return nil, nil, fmt.Errorf("tls: invalid EncryptedClientHelloKey Config KDF: %s", err)
+			return nil, nil, fmt.Errorf("tls: invalid EncryptedClientHelloKey Config KDF: %s", err5)
 		}
-		aead, err := hpke.NewAEAD(echCiphersuite.AEADID)
-		if err != nil {
+		aead1, err4 = hpke.NewAEAD(echCiphersuite.AEADID)
+		if err4 != nil {
 			c.sendAlert(alertInternalError)
-			return nil, nil, fmt.Errorf("tls: invalid EncryptedClientHelloKey Config AEAD: %s", err)
+			return nil, nil, fmt.Errorf("tls: invalid EncryptedClientHelloKey Config AEAD: %s", err4)
 		}
-		info := push([]byte("tls ech\x00"), echKey.Config...)
-		hpkeContext, err := hpke.NewRecipient(encap, echPriv, kdf, aead, info)
-		if err != nil {
+		info = push([]byte("tls ech\x00"), echKey.Config...)
+		hpkeContext, err3 = hpke.NewRecipient(encap, echPriv, kdf, aead1, info)
+		if err3 != nil {
 			// attempt next trial decryption
 			continue
 		}
 
-		encodedInner, err := decryptECHPayload(hpkeContext, outer.original, payload)
-		if err != nil {
+		encodedInner, err2 = decryptECHPayload(hpkeContext, outer.original, payload)
+		if err2 != nil {
 			// attempt next trial decryption
 			continue
 		}
@@ -621,8 +639,8 @@ func (c *Conn) processECHClientHello(outer *clientHelloMsg, echKeys []EncryptedC
 		// encrypt the payload. This is only a MAY in the spec, so we're not
 		// doing anything revolutionary.
 
-		echInner, err := decodeInnerClientHello(outer, encodedInner)
-		if err != nil {
+		echInner, err1 = decodeInnerClientHello(outer, encodedInner)
+		if err1 != nil {
 			c.sendAlert(alertIllegalParameter)
 			return nil, nil, errInvalidECHExt
 		}

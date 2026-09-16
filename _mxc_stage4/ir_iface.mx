@@ -79,7 +79,7 @@ func (e *irEmitter) typeIDHash(t Type) (s string) {
 	if _, isIface := t.(*TCInterface); !isIface {
 		e.collectTypeDesc(t)
 	}
-	return "ptrtoint (ptr @\"" | "reflect/types.type:" | tail | "\" to " | e.intptrType() | ")"
+	return "ptrtoint (ptr " | irQuoteName("reflect/types.type:" | tail) | " to " | e.intptrType() | ")"
 }
 
 // typeIDHashI64 returns the type-ID as an intptr-typed operand.
@@ -250,6 +250,16 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 		}
 		impls = mxutil.Ensure(impls, 1)
 		push(impls, ifaceImpl{fn: fn, recvType: recvT, ptrRecv: isPtrRecv})
+		if !isPtrRecv {
+			// *T's method set includes T's value-receiver methods, and a
+			// value boxed for an interface that needs both a value- and a
+			// pointer-receiver method (moxie.Codec: EncodeTo/DecodeFrom) is
+			// boxed as *T. Without this arm the dispatch falls through to
+			// "no impl for EncodeTo". The cross-package scan below adds the
+			// same arm for imported types.
+			impls = mxutil.Ensure(impls, 1)
+			push(impls, ifaceImpl{fn: fn, recvType: NewPointer(tn.Typ), ptrRecv: false})
+		}
 		hasType[tname] = true
 	}
 	scopeNames := e.pkg.Pkg.Scope.Names()
@@ -277,6 +287,19 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 				embedType:  embedT,
 				embedChain: chain,
 			})
+			if !isPtrRecv {
+				// Same method-set promotion as above: the promoted
+				// value-receiver method is in T's set as well as *T's.
+				impls = mxutil.Ensure(impls, 1)
+				push(impls, ifaceImpl{
+					fn:         fn,
+					recvType:   tn2.Typ,
+					ptrRecv:    false,
+					embedField: chain[0],
+					embedType:  embedT,
+					embedChain: chain,
+				})
+			}
 			hasType[sname] = true
 		}
 	}
@@ -364,6 +387,18 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 			if len(named3.TParams) > 0 {
 				continue
 			}
+			// The method and its typeID belong to the type's DEFINING
+			// package and name, not to the package whose scope spelled it.
+			// An alias (`type PathError = fs.PathError`, recorded in the mxh
+			// as the target's qualified name) is found in os's scope but is
+			// io/fs's type: emitting os.PathError here would reference a
+			// descriptor nobody defines and a symbol nobody emits.
+			defPath := fullPath
+			defName := tname
+			if named3.Obj != nil && named3.Obj.Pkg != nil {
+				defPath = named3.Obj.Pkg.Path
+				defName = named3.Obj.Name
+			}
 			found := false
 			for mi := 0; mi < named3.NumMethods(); mi++ {
 				m := named3.Method(mi)
@@ -371,17 +406,17 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 					continue
 				}
 				isPR := m.PtrRecv
-				sym := fullPath | ".(*" | tname | ")." | methodName
+				sym := defPath | ".(*" | defName | ")." | methodName
 				tid := ""
-				normPath := normalizePkgPath(pkgPath)
+				normPath := normalizePkgPath(defPath)
 		// Moxie's all-ptr-receiver ABI: all methods receive a pointer.
 		// The interface stores a pointer for pointer types and the value
 		// itself for value types. Use ptrRecv: pointer-receiver methods
 		// key on pointer:named, value-receiver methods key on named.
 		if isPR {
-			tid = "reflect/types.type:pointer:named:" | normPath | "." | tname
+			tid = "reflect/types.type:pointer:named:" | normPath | "." | defName
 		} else {
-			tid = "reflect/types.type:named:" | normPath | "." | tname
+			tid = "reflect/types.type:named:" | normPath | "." | defName
 		}
 			msig := m.Signature()
 				impls = mxutil.Ensure(impls, 1)
@@ -398,7 +433,7 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 					// dispatches it. The Codec interface relies on this:
 					// EncodeTo is value-receiver, DecodeFrom is
 					// pointer-receiver, and the compiler boxes &v as *T.
-					ptid := "reflect/types.type:pointer:named:" | normPath | "." | tname
+					ptid := "reflect/types.type:pointer:named:" | normPath | "." | defName
 					impls = mxutil.Ensure(impls, 1)
 					push(impls, ifaceImpl{
 						recvType:  NewPointer(tn3.Typ),
@@ -411,9 +446,11 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 				found = true
 			}
 			if !found {
-				chain, embedSym, embedSig, embedT := findExtEmbedMethod(named3, pkgPath, tname, methodName, 0)
+				// The promoted method is looked up through the type's own
+				// package: an alias's embed chain lives in the target type.
+				chain, embedSym, embedSig, embedT := findExtEmbedMethod(named3, normalizePkgPath(defPath), defName, methodName, 0)
 				if embedSym != "" {
-					tid := "reflect/types.type:pointer:named:" | pkgPath | "." | tname
+					tid := "reflect/types.type:pointer:named:" | normalizePkgPath(defPath) | "." | defName
 					impls = mxutil.Ensure(impls, 1)
 					push(impls, ifaceImpl{
 						recvType:   NewPointer(tn3.Typ),
@@ -492,8 +529,16 @@ func (e *irEmitter) findEmbedMethod(t Type, methodName string, depth int32) (cha
 			continue
 		}
 		embedType := f.Typ
+		embedBase := embedType
+		if pt2, isp2 := embedBase.(*Pointer); isp2 && pt2.Base != nil {
+			// An embedded pointer (*Inner) promotes Inner's methods just
+			// like an embedded value does; skipping it left the outer type
+			// with no registered impl, so dispatch called the inner method
+			// with the outer receiver.
+			embedBase = pt2.Base
+		}
 		embedName := ""
-		if en, ok2 := embedType.(*Named); ok2 && en.Obj != nil {
+		if en, ok2 := embedBase.(*Named); ok2 && en.Obj != nil {
 			embedName = en.Obj.Name
 		}
 		if embedName == "" {
@@ -507,7 +552,7 @@ func (e *irEmitter) findEmbedMethod(t Type, methodName string, depth int32) (cha
 		if fok {
 			return []int32{fi}, fn2, embedType
 		}
-		sub, fn3, embedT2 := e.findEmbedMethod(embedType, methodName, depth+1)
+		sub, fn3, embedT2 := e.findEmbedMethod(embedBase, methodName, depth+1)
 		if fn3 != nil {
 			return []int32{fi} | sub, fn3, embedT2
 		}
@@ -587,7 +632,7 @@ type ifaceImpl struct {
 func (e *irEmitter) implFuncSym(impl ifaceImpl) (s string) {
 	if impl.extSymbol != "" {
 		if irNeedsQuote(impl.extSymbol) {
-			return "@\"" | impl.extSymbol | "\""
+			return irQuoteName(impl.extSymbol)
 		}
 		return "@" | impl.extSymbol
 	}
@@ -744,7 +789,7 @@ func (e *irEmitter) implTypeID(impl ifaceImpl) (s string) {
 		if mxutil.HasPrefix(impl.extTypeID, "reflect/types.type:") {
 			tail := impl.extTypeID[len("reflect/types.type:"):]
 			e.collectTypeDescFromTail(tail)
-			return "ptrtoint (ptr @\"" | "reflect/types.type:" | tail | "\" to " | e.intptrType() | ")"
+			return "ptrtoint (ptr " | irQuoteName("reflect/types.type:" | tail) | " to " | e.intptrType() | ")"
 		}
 		return e.intptrType() | " 0"
 	}
@@ -831,11 +876,11 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 		base := order[oi]
 		if allCount[base] == n {
 			tids = mxutil.Ensure(tids, 1)
-			push(tids, "ptrtoint (ptr @\"" | pfx | "pointer:" | base[len(pfx):] | "\" to " | e.intptrType() | ")")
+			push(tids, "ptrtoint (ptr " | irQuoteName(pfx | "pointer:" | base[len(pfx):]) | " to " | e.intptrType() | ")")
 		}
 		if valCount[base] == n {
 			tids = mxutil.Ensure(tids, 1)
-			push(tids, "ptrtoint (ptr @\"" | base | "\" to " | e.intptrType() | ")")
+			push(tids, "ptrtoint (ptr " | irQuoteName(base) | " to " | e.intptrType() | ")")
 		}
 	}
 	ok := ""
@@ -977,14 +1022,25 @@ func (e *irEmitter) emitEmbedChainGEP(impl ifaceImpl, valPtr string) (s string) 
 	cur := valPtr
 	curType := outerType
 	for _, idx := range chain {
+		st, ok := SafeUnderlying(curType).(*TCStruct)
+		if !ok || idx >= st.NumFields() {
+			return cur
+		}
 		outerLLVM := e.llvmType(curType)
 		gep := e.nextReg2("eg")
 		e.w("  ") ; e.w(gep) ; e.w(" = getelementptr inbounds ") ; e.w(outerLLVM)
 		e.w(", ptr ") ; e.w(cur) ; e.w(", i32 0, i32 ") ; e.w(irItoa(idx)) ; e.w("\n")
 		cur = gep
-		st, ok := SafeUnderlying(curType).(*TCStruct)
-		if ok && idx < st.NumFields() {
-			curType = st.Field(idx).Typ
+		curType = st.Field(idx).Typ
+		// An embedded pointer field IS the receiver: load the stored
+		// pointer. Without the load the callee got the address of the
+		// field instead of the embedded value, so a struct embedding a
+		// pointer dispatched to the right method with a bad receiver.
+		if pt, isPtr := curType.(*Pointer); isPtr && pt.Base != nil {
+			ld := e.nextReg2("eg")
+			e.w("  ") ; e.w(ld) ; e.w(" = load ptr, ptr ") ; e.w(cur) ; e.w("\n")
+			cur = ld
+			curType = pt.Base
 		}
 	}
 	return cur

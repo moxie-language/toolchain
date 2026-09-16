@@ -154,20 +154,20 @@ func bigIntEqual(a, b *big.Int) bool {
 // This method implements [crypto.Signer], which is an interface to support keys
 // where the private part is kept in, for example, a hardware module. Common
 // uses should use the Sign* functions in this package directly.
-func (priv *PrivateKey) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+func (priv *PrivateKey) Sign(random io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
 	if pssOpts, ok := opts.(*PSSOptions); ok {
-		return SignPSS(rand, priv, pssOpts.Hash, digest, pssOpts)
+		return SignPSS(random, priv, pssOpts.Hash, digest, pssOpts)
 	}
 
-	return SignPKCS1v15(rand, priv, opts.HashFunc(), digest)
+	return SignPKCS1v15(random, priv, opts.HashFunc(), digest)
 }
 
 // Decrypt decrypts ciphertext with priv. If opts is nil or of type
 // *[PKCS1v15DecryptOptions] then PKCS #1 v1.5 decryption is performed. Otherwise
 // opts must have type *[OAEPOptions] and OAEP decryption is done.
-func (priv *PrivateKey) Decrypt(rand io.Reader, ciphertext []byte, opts crypto.DecrypterOpts) (plaintext []byte, err error) {
+func (priv *PrivateKey) Decrypt(random io.Reader, ciphertext []byte, opts crypto.DecrypterOpts) (plaintext []byte, err error) {
 	if opts == nil {
-		return DecryptPKCS1v15(rand, priv, ciphertext)
+		return DecryptPKCS1v15(random, priv, ciphertext)
 	}
 
 	switch opts := opts.(type) {
@@ -181,15 +181,15 @@ func (priv *PrivateKey) Decrypt(rand io.Reader, ciphertext []byte, opts crypto.D
 	case *PKCS1v15DecryptOptions:
 		if l := opts.SessionKeyLen; l > 0 {
 			plaintext = []byte{:l}
-			if _, err := io.ReadFull(rand, plaintext); err != nil {
-				return nil, err
+			if _, err2 := io.ReadFull(random, plaintext); err2 != nil {
+				return nil, err2
 			}
-			if err := DecryptPKCS1v15SessionKey(rand, priv, ciphertext, plaintext); err != nil {
-				return nil, err
+			if err1 := DecryptPKCS1v15SessionKey(random, priv, ciphertext, plaintext); err1 != nil {
+				return nil, err1
 			}
 			return plaintext, nil
 		} else {
-			return DecryptPKCS1v15(rand, priv, ciphertext)
+			return DecryptPKCS1v15(random, priv, ciphertext)
 		}
 
 	default:
@@ -267,17 +267,17 @@ func checkPublicKeySize(k *PublicKey) error {
 //
 // [Minimum key size]: https://pkg.go.dev/crypto/rsa#hdr-Minimum_key_size
 func GenerateKey(random io.Reader, bits int32) (*PrivateKey, error) {
-	if err := checkKeySize(bits); err != nil {
-		return nil, err
+	if err3 := checkKeySize(bits); err3 != nil {
+		return nil, err3
 	}
 
 	if boring.Enabled && random == boring.RandReader &&
 		(bits == 2048 || bits == 3072 || bits == 4096) {
-		bN, bE, bD, bP, bQ, bDp, bDq, bQinv, err := boring.GenerateKeyRSA(bits)
-		if err != nil {
-			return nil, err
+		bN, bE, bD, bP, bQ, bDp, bDq, bQinv, err1 := boring.GenerateKeyRSA(bits)
+		if err1 != nil {
+			return nil, err1
 		}
-		N := bbig.Dec(bN)
+		N1 := bbig.Dec(bN)
 		E := bbig.Dec(bE)
 		D := bbig.Dec(bD)
 		P := bbig.Dec(bP)
@@ -290,9 +290,9 @@ func GenerateKey(random io.Reader, bits int32) (*PrivateKey, error) {
 			return nil, errors.New("crypto/rsa: generated key exponent too large")
 		}
 
-		key := &PrivateKey{
+		key1 := &PrivateKey{
 			PublicKey: PublicKey{
-				N: N,
+				N: N1,
 				E: int32(e64),
 			},
 			D:      D,
@@ -304,7 +304,7 @@ func GenerateKey(random io.Reader, bits int32) (*PrivateKey, error) {
 				CRTValues: []CRTValue{:0}, // non-nil, to match Precompute
 			},
 		}
-		return key, nil
+		return key1, nil
 	}
 
 	if fips140only.Enabled && bits < 2048 {
@@ -317,8 +317,8 @@ func GenerateKey(random io.Reader, bits int32) (*PrivateKey, error) {
 		return nil, errors.New("crypto/rsa: only crypto/rand.Reader is allowed in FIPS 140-only mode")
 	}
 
-	k, err := rsa.GenerateKey(random, bits)
-	if bits < 256 && err != nil {
+	k, err2 := rsa.GenerateKey(random, bits)
+	if bits < 256 && err2 != nil {
 		// Toy-sized keys have a non-negligible chance of hitting two hard
 		// failure cases: p == q and d <= 2^(nlen / 2).
 		//
@@ -329,17 +329,17 @@ func GenerateKey(random io.Reader, bits int32) (*PrivateKey, error) {
 		// Instead, just rerun the whole process a total of 8 times, which
 		// brings the chance of failure for 32-bit keys down to the same as for
 		// 256-bit keys.
-		for i := 1; i < 8 && err != nil; i++ {
-			k, err = rsa.GenerateKey(random, bits)
+		for i := 1; i < 8 && err2 != nil; i++ {
+			k, err2 = rsa.GenerateKey(random, bits)
 		}
 	}
-	if err != nil {
-		return nil, err
+	if err2 != nil {
+		return nil, err2
 	}
-	N, e, d, p, q, dP, dQ, qInv := k.Export()
-	key := &PrivateKey{
+	N2, e, d, p, q, dP, dQ, qInv := k.Export()
+	key2 := &PrivateKey{
 		PublicKey: PublicKey{
-			N: (&big.Int{}).SetBytes(N),
+			N: (&big.Int{}).SetBytes(N2),
 			E: e,
 		},
 		D: (&big.Int{}).SetBytes(d),
@@ -353,7 +353,7 @@ func GenerateKey(random io.Reader, bits int32) (*PrivateKey, error) {
 			CRTValues: []CRTValue{:0}, // non-nil, to match Precompute
 		},
 	}
-	return key, nil
+	return key2, nil
 }
 
 // GenerateMultiPrimeKey generates a multi-prime RSA keypair of the given bit
@@ -528,26 +528,26 @@ func (priv *PrivateKey) precompute() (PrecomputedValues, error) {
 
 	// If the CRT values are already set, use them.
 	if priv.Precomputed.Dp != nil && priv.Precomputed.Dq != nil && priv.Precomputed.Qinv != nil {
-		k, err := rsa.NewPrivateKeyWithPrecomputation(priv.N.Bytes(), priv.E, priv.D.Bytes(),
+		k1, err1 := rsa.NewPrivateKeyWithPrecomputation(priv.N.Bytes(), priv.E, priv.D.Bytes(),
 			priv.Primes[0].Bytes(), priv.Primes[1].Bytes(),
 			priv.Precomputed.Dp.Bytes(), priv.Precomputed.Dq.Bytes(), priv.Precomputed.Qinv.Bytes())
-		if err != nil {
-			return precomputed, err
+		if err1 != nil {
+			return precomputed, err1
 		}
 		precomputed = priv.Precomputed
-		precomputed.fips = k
+		precomputed.fips = k1
 		precomputed.CRTValues = []CRTValue{:0}
 		return precomputed, nil
 	}
 
-	k, err := rsa.NewPrivateKey(priv.N.Bytes(), priv.E, priv.D.Bytes(),
+	k2, err2 := rsa.NewPrivateKey(priv.N.Bytes(), priv.E, priv.D.Bytes(),
 		priv.Primes[0].Bytes(), priv.Primes[1].Bytes())
-	if err != nil {
-		return precomputed, err
+	if err2 != nil {
+		return precomputed, err2
 	}
 
-	precomputed.fips = k
-	_, _, _, _, _, dP, dQ, qInv := k.Export()
+	precomputed.fips = k2
+	_, _, _, _, _, dP, dQ, qInv := k2.Export()
 	precomputed.Dp = (&big.Int{}).SetBytes(dP)
 	precomputed.Dq = (&big.Int{}).SetBytes(dQ)
 	precomputed.Qinv = (&big.Int{}).SetBytes(qInv)

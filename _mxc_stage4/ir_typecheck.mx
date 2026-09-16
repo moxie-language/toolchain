@@ -30,6 +30,7 @@ type compileCtx struct {
 	constValMap          map[string]int64
 	embedVars            map[string]*embedInfo
 	linknameMap          map[string]string
+	externGlobals        map[string]string // local var name -> C symbol from //:extern
 	wasmImportMap        map[string][]string
 	tcPkgSrc             []byte
 	compilePkgDir        string
@@ -377,6 +378,15 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 				}
 				typ := tcResolveNameInline(typeExpr, scope)
 				if typ == nil && valExpr != nil {
+					// A re-exported constant (`ErrNotExist =
+					// oserror.ErrNotExist`) takes the imported constant's own
+					// type; inferring it from the value alone records the
+					// untyped default and the sentinel stops comparing equal.
+					if c := tcSelectorConst(valExpr, scope); c != nil && c.Typ != nil {
+						typ = c.Typ
+					}
+				}
+				if typ == nil && valExpr != nil {
 					typ = tcInferTypeFromExpr(valExpr, scope)
 				}
 				var val ConstVal
@@ -583,6 +593,9 @@ func releasePerPkgState() {
 	}
 	if cctx.linknameMap != nil {
 		clear(cctx.linknameMap)
+	}
+	if cctx.externGlobals != nil {
+		clear(cctx.externGlobals)
 	}
 	if cctx.wasmImportMap != nil {
 		clear(cctx.wasmImportMap)
@@ -912,6 +925,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	cctx.curPkgPath = name
 	scanEmbedPragmas(src, cctx.compilePkgDir)
 	cctx.linknameMap = scanLinknameMap(src)
+	cctx.externGlobals = scanExternGlobals(src)
 	cctx.wasmImportMap = scanWasmImportMap(src, name)
 
 	// Arena sized from source. Virtual address space is free - pages
@@ -1090,6 +1104,15 @@ func tcResolveFuncReturn(e syntax.Expr, scope *Scope) (t Type) {
 		}
 	}
 	if obj == nil {
+		return nil
+	}
+	if c, okc := obj.(*TCConst); okc {
+		if c.Typ != nil {
+			return c.Typ
+		}
+		if c.Val != nil {
+			return UntypedTypeOfCV(c.Val)
+		}
 		return nil
 	}
 	fn, ok := obj.(*TCFunc)
@@ -1465,6 +1488,34 @@ func tcEvalConstExpr(e syntax.Expr, scope *Scope, iotaVal int64) (c ConstVal) {
 	return nil
 }
 
+// tcSelectorConst resolves `pkg.Name` to the imported package's constant
+// object, so a re-exported constant can take that constant's type instead of
+// an untyped default.
+func tcSelectorConst(e syntax.Expr, scope *Scope) (c *TCConst) {
+	sel, ok := e.(*syntax.SelectorExpr)
+	if !ok {
+		return nil
+	}
+	id, ok2 := sel.X.(*syntax.Name)
+	if !ok2 {
+		return nil
+	}
+	if scope != nil {
+		_, obj := scope.LookupParent(id.Value)
+		if pn, ok3 := obj.(*PkgName); ok3 && pn.Imported != nil && pn.Imported.Scope != nil {
+			if k, ok4 := pn.Imported.Scope.Lookup(sel.Sel.Value).(*TCConst); ok4 {
+				return k
+			}
+		}
+	}
+	if imp := cctx.universe.LookupByName(id.Value); imp != nil && imp.Scope != nil {
+		if k, ok5 := imp.Scope.Lookup(sel.Sel.Value).(*TCConst); ok5 {
+			return k
+		}
+	}
+	return nil
+}
+
 func tcResolveNameInline(e syntax.Expr, scope *Scope) (t Type) {
 	if e == nil {
 		return nil
@@ -1591,7 +1642,7 @@ func tcResolveNameInline(e syntax.Expr, scope *Scope) (t Type) {
 			push(fields, NewTCField(nil, fname, typ, field.Name == nil))
 			tag := ""
 			if i < len(ex.TagList) && ex.TagList[i] != nil {
-				tag = ex.TagList[i].Value
+				tag = TagText(ex.TagList[i].Value)
 			}
 			tags = mxutil.Ensure(tags, 1)
 			push(tags, tag)

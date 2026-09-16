@@ -117,16 +117,16 @@ type ecdhKeyExchange struct {
 	curve ecdh.Curve
 }
 
-func (ke *ecdhKeyExchange) keyShares(rand io.Reader) (*keySharePrivateKeys, []keyShare, error) {
-	priv, err := ke.curve.GenerateKey(rand)
-	if err != nil {
-		return nil, nil, err
+func (ke *ecdhKeyExchange) keyShares(rnd io.Reader) (*keySharePrivateKeys, []keyShare, error) {
+	priv, err1 := ke.curve.GenerateKey(rnd)
+	if err1 != nil {
+		return nil, nil, err1
 	}
 	return &keySharePrivateKeys{ecdhe: priv}, []keyShare{{ke.id, priv.PublicKey().Bytes()}}, nil
 }
 
-func (ke *ecdhKeyExchange) serverSharedSecret(rand io.Reader, clientKeyShare []byte) ([]byte, keyShare, error) {
-	key, err := ke.curve.GenerateKey(rand)
+func (ke *ecdhKeyExchange) serverSharedSecret(rnd io.Reader, clientKeyShare []byte) ([]byte, keyShare, error) {
+	key, err := ke.curve.GenerateKey(rnd)
 	if err != nil {
 		return nil, keyShare{}, err
 	}
@@ -165,18 +165,18 @@ type hybridKeyExchange struct {
 	newMLKEMPublicKey  func([]byte) (crypto.Encapsulator, error)
 }
 
-func (ke *hybridKeyExchange) keyShares(rand io.Reader) (*keySharePrivateKeys, []keyShare, error) {
-	priv, ecdhShares, err := ke.ecdh.keyShares(rand)
-	if err != nil {
-		return nil, nil, err
+func (ke *hybridKeyExchange) keyShares(rnd io.Reader) (*keySharePrivateKeys, []keyShare, error) {
+	priv, ecdhShares, err2 := ke.ecdh.keyShares(rnd)
+	if err2 != nil {
+		return nil, nil, err2
 	}
 	seed := []byte{:mlkem.SeedSize}
-	if _, err := io.ReadFull(rand, seed); err != nil {
-		return nil, nil, err
+	if _, err1 := io.ReadFull(rnd, seed); err1 != nil {
+		return nil, nil, err1
 	}
-	priv.mlkem, err = ke.newMLKEMPrivateKey(seed)
-	if err != nil {
-		return nil, nil, err
+	priv.mlkem, err2 = ke.newMLKEMPrivateKey(seed)
+	if err2 != nil {
+		return nil, nil, err2
 	}
 	var shareData []byte
 	// For X25519MLKEM768, the ML-KEM-768 encapsulation key comes first.
@@ -190,7 +190,7 @@ func (ke *hybridKeyExchange) keyShares(rand io.Reader) (*keySharePrivateKeys, []
 	return priv, []keyShare{{ke.id, shareData}, ecdhShares[0]}, nil
 }
 
-func (ke *hybridKeyExchange) serverSharedSecret(rand io.Reader, clientKeyShare []byte) ([]byte, keyShare, error) {
+func (ke *hybridKeyExchange) serverSharedSecret(rnd io.Reader, clientKeyShare []byte) ([]byte, keyShare, error) {
 	if len(clientKeyShare) != ke.ecdhElementSize+ke.mlkemPublicKeySize {
 		return nil, keyShare{}, errors.New("tls: invalid client key share length for hybrid key exchange")
 	}
@@ -202,7 +202,7 @@ func (ke *hybridKeyExchange) serverSharedSecret(rand io.Reader, clientKeyShare [
 		ecdhShareData = clientKeyShare[:ke.ecdhElementSize]
 		mlkemShareData = clientKeyShare[ke.ecdhElementSize:]
 	}
-	ecdhSharedSecret, ks, err := ke.ecdh.serverSharedSecret(rand, ecdhShareData)
+	ecdhSharedSecret, ks, err := ke.ecdh.serverSharedSecret(rnd, ecdhShareData)
 	if err != nil {
 		return nil, keyShare{}, err
 	}

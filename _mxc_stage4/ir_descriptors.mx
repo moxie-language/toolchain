@@ -346,8 +346,14 @@ func typeDescSize(t Type) (sz int32) {
 		case UnsafePointer:
 			return 8
 		}
-	case *Pointer, *TCMap, *TCChan, *Signature:
+	case *Pointer, *TCMap, *TCChan:
 		return 8
+	case *Signature:
+		// Func values are two words: the LLVM type is {ptr, ptr} and
+		// legacy's stdSizes.Sizeof returns PtrSize*2. Reporting 8 here
+		// shifted every field after a func field by 8 bytes in the type
+		// descriptor, so the codec read the wrong slot.
+		return 16
 	case *Slice:
 		return 24
 	case *TCInterface:
@@ -431,8 +437,10 @@ func uvarintBytes(n uint32) (b []byte) {
 }
 
 // descGlobalName returns the quoted global name for a descriptor tail.
+// The tail carries struct tags verbatim, so the name must be escaped for
+// LLVM exactly as go-llvm escapes it on the legacy side.
 func descGlobalName(tail string) (s string) {
-	return "\"" | "reflect/types.type:" | tail | "\""
+	return "\"" | "reflect/types.type:" | irEscapeString(tail) | "\""
 }
 
 // emitPkgpath emits the pkgpath string global once per path.
@@ -448,7 +456,7 @@ func (e *irEmitter) emitPkgpath(pkgpath string) (name string) {
 		return ppName
 	}
 	e.emittedPkgpaths[ppName] = true
-	e.w("@\"" | ppName | "\" = private constant [")
+	e.w(irQuoteName(ppName) | " = private constant [")
 	e.w(irItoa64(int64(len(pkgpath) + 1)))
 	e.w(" x i8] c\"")
 	e.w(irEscapeString(pkgpath))
@@ -537,7 +545,7 @@ func (e *irEmitter) emitBasicIdentities() {
 		"uint8", "uint16", "uint32", "uint64", "uintptr", "float32", "float64", "bytes"}
 	for _, bn := range basicNames {
 		sym := "basic:" | bn | ".String$identity"
-		e.w("define internal " | st | " @\"" | sym | "\"(ptr %idp, ptr %idc) {\n")
+		e.w("define internal " | st | " " | irQuoteName(sym) | "(ptr %idp, ptr %idc) {\n")
 		e.w("entry:\n")
 		e.w("  %idr = load " | st | ", ptr %idp\n")
 		e.w("  ret " | st | " %idr\n")
@@ -596,7 +604,7 @@ func (e *irEmitter) emitTypeDesc(tail string) {
 	e.emittedTails = push(e.emittedTails, tail)
 	tt := e.typeFromTail(tail)
 	if tt == nil || tt == Typ[Invalid] {
-		e.w("@\"" | "reflect/types.type:" | tail | "\" = linkonce_odr constant { i8, ptr } { i8 0, ptr null }, align 8\n")
+		e.w(irQuoteName("reflect/types.type:" | tail) | " = linkonce_odr constant { i8, ptr } { i8 0, ptr null }, align 8\n")
 		return
 	}
 	e.emitTypeDescValue(tt)
@@ -618,8 +626,21 @@ func tailAtoi64(s string) (n int64) {
 func tailSplitTop(s string) (parts []string) {
 	depth := int32(0)
 	start := int32(0)
+	inTag := false
 	for i := int32(0); i < int32(len(s)); i++ {
 		c := s[i]
+		if c == '`' {
+			// Struct tags sit verbatim between backticks and may contain
+			// ',', '{' or '}' (asn1:"optional,default:0"). Treating their
+			// contents as structure split one field into several, so the
+			// descriptor rebuilt from the tail named a type that no
+			// definition matched.
+			inTag = !inTag
+			continue
+		}
+		if inTag {
+			continue
+		}
 		if c == '{' {
 			depth++
 		} else if c == '}' {
@@ -850,18 +871,26 @@ func (e *irEmitter) typeFromTailInner(tail string) (t Type) {
 				anon = true
 				fname = fname[1:]
 			}
-			// strip the optional `tag` suffix
-			bt := -1
+			// Strip the optional `tag` suffix. The tag is the trailing
+			// backtick run, but the type before it may contain nested
+			// tags, so walk the whole field tracking tag state rather
+			// than taking the first backtick.
+			tag := ""
+			inTag := false
+			lastOpen := -1
 			for j := 0; j < len(ftail); j++ {
 				if ftail[j] == '`' {
-					bt = j
-					break
+					if inTag {
+						inTag = false
+					} else {
+						inTag = true
+						lastOpen = j
+					}
 				}
 			}
-			tag := ""
-			if bt >= 0 {
-				tag = ftail[bt+1 : len(ftail)-1]
-				ftail = ftail[:bt]
+			if !inTag && lastOpen >= 0 && len(ftail) > 0 && ftail[len(ftail)-1] == '`' {
+				tag = ftail[lastOpen+1 : len(ftail)-1]
+				ftail = ftail[:lastOpen]
 			}
 			ft := e.typeFromTail(ftail)
 			flds = mxutil.Ensure(flds, 1)
@@ -1057,7 +1086,7 @@ func (e *irEmitter) emitNamedDesc(t Type, named *Named) {
 
 	nameStr := pkgname | "." | name
 	gnameRaw := "reflect/types.type:" | e.typeDescName(t)
-	e.w("@\"" | gnameRaw | "\" = linkonce_odr constant { i8, i16, ptr, ptr, ptr, [")
+	e.w(irQuoteName(gnameRaw) | " = linkonce_odr constant { i8, i16, ptr, ptr, ptr, [")
 	e.w(irItoa64(int64(len(nameStr) + 1)))
 	e.w(" x i8] } { i8 ")
 	e.w(irItoa64(int64(meta)))
@@ -1065,9 +1094,9 @@ func (e *irEmitter) emitNamedDesc(t Type, named *Named) {
 	e.w(descGlobalName(ptTail))
 	e.w(", ptr @")
 	e.w(descGlobalName(e.typeDescName(named.Under)))
-	e.w(", ptr @\"")
-	e.w(ppName)
-	e.w("\", [")
+	e.w(", ptr ")
+	e.w(irQuoteName(ppName))
+	e.w(", [")
 	e.w(irItoa64(int64(len(nameStr) + 1)))
 	e.w(" x i8] c\"")
 	e.w(irEscapeString(nameStr))
@@ -1138,13 +1167,13 @@ func (e *irEmitter) emitStructDesc(t Type, st *TCStruct, gname string, meta int3
 			}
 		}
 		dgName := "reflect/types.type:" | tail | "." | f.Name
-		e.w("@\"" | dgName | "\" = private constant [")
+		e.w(irQuoteName(dgName) | " = private constant [")
 		e.w(irItoa64(int64(len(data))))
 		e.w(" x i8] c\"")
 		e.w(irEscapeString(string(data)))
 		e.w("\", align 1\n")
 		fieldRefs = mxutil.Ensure(fieldRefs, 1)
-		push(fieldRefs, "%runtime.structField { ptr @" | ftGlobal | ", ptr @\"" | dgName | "\" }")
+		push(fieldRefs, "%runtime.structField { ptr @" | ftGlobal | ", ptr " | irQuoteName(dgName) | " }")
 	}
 
 	e.w("@" | gname | " = linkonce_odr constant { i8, i16, ptr, ptr, i32, i16, [")
@@ -1153,9 +1182,9 @@ func (e *irEmitter) emitStructDesc(t Type, st *TCStruct, gname string, meta int3
 	e.w(irItoa64(int64(meta)))
 	e.w(", i16 0, ptr @")
 	e.w(ptGlobal)
-	e.w(", ptr @\"")
-	e.w(ppName)
-	e.w("\", i32 ")
+	e.w(", ptr ")
+	e.w(irQuoteName(ppName))
+	e.w(", i32 ")
 	e.w(irItoa64(int64(size)))
 	e.w(", i16 ")
 	e.w(irItoa64(int64(nf)))

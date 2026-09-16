@@ -37,6 +37,10 @@ func (e *irEmitter) emitNext(n *SSANext) {
 			return
 		}
 	}
+	if bt, ok := SafeUnderlying(rangeInstr.X.SSAType()).(*Basic); ok && bt.Info&IsInteger != 0 {
+		e.emitNextInt(reg, iterPtr, collVal, rangeInstr.X, bt, n)
+		return
+	}
 	collLLVM := e.llvmType(rangeInstr.X.SSAType())
 	if len(collLLVM) > 0 && collLLVM[0] == 'i' {
 		tupType := e.llvmType(n.SSAType())
@@ -47,6 +51,54 @@ func (e *irEmitter) emitNext(n *SSANext) {
 		return
 	}
 	e.emitNextSlice(reg, iterPtr, collVal, rangeInstr, n)
+}
+
+// emitNextInt iterates an integer operand (Go 1.22 range-over-int): the key
+// runs 0..n-1 in the operand's own integer type. A negative bound yields no
+// iterations, so the bound is sign-extended and compared signed; unsigned
+// bounds zero-extend. Iterating an integer used to emit `ok = false`, which
+// silently ran the body zero times.
+func (e *irEmitter) emitNextInt(reg, iterPtr, collVal string, bound SSAValue, bt *Basic, n *SSANext) {
+	ipt := e.intptrType()
+	keyLLVM := e.llvmType(bt)
+	idx := e.nextReg2("rn")
+	e.w("  ") ; e.w(idx) ; e.w(" = load ") ; e.w(ipt) ; e.w(", ptr ") ; e.w(iterPtr) ; e.w("\n")
+	lim := collVal
+	valType := e.llvmType(bound.SSAType())
+	if valType != ipt {
+		lim = e.nextReg2("rn")
+		op := "sext"
+		if bt.Info&IsUnsigned != 0 {
+			op = "zext"
+		}
+		srcBits := e.intBits(valType)
+		dstBits := e.intBits(ipt)
+		if srcBits > dstBits {
+			op = "trunc"
+		}
+		e.w("  ") ; e.w(lim) ; e.w(" = ") ; e.w(op) ; e.w(" ") ; e.w(valType) ; e.w(" ") ; e.w(collVal) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+	}
+	ok := e.nextReg2("rn")
+	e.w("  ") ; e.w(ok) ; e.w(" = icmp slt ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(", ") ; e.w(lim) ; e.w("\n")
+	inc := e.nextReg2("rn")
+	e.w("  ") ; e.w(inc) ; e.w(" = add ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(", 1\n")
+	newCnt := e.nextReg2("rn")
+	e.w("  ") ; e.w(newCnt) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(inc) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w("\n")
+	e.w("  store ") ; e.w(ipt) ; e.w(" ") ; e.w(newCnt) ; e.w(", ptr ") ; e.w(iterPtr) ; e.w("\n")
+	key := idx
+	if keyLLVM != ipt {
+		key = e.nextReg2("rn")
+		if e.intBits(keyLLVM) < e.intBits(ipt) {
+			e.w("  ") ; e.w(key) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(" to ") ; e.w(keyLLVM) ; e.w("\n")
+		} else {
+			e.w("  ") ; e.w(key) ; e.w(" = sext ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(" to ") ; e.w(keyLLVM) ; e.w("\n")
+		}
+	}
+	tupType := "{i1, " | keyLLVM | ", i8}"
+	e.allocTypes[n] = tupType
+	t1 := e.nextReg2("rn")
+	e.w("  ") ; e.w(t1) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" undef, i1 ") ; e.w(ok) ; e.w(", 0\n")
+	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(tupType) ; e.w(" ") ; e.w(t1) ; e.w(", ") ; e.w(keyLLVM) ; e.w(" ") ; e.w(key) ; e.w(", 1\n")
 }
 
 func (e *irEmitter) emitNextSlice(reg, iterPtr, collVal string, rangeInstr *SSARange, n *SSANext) {

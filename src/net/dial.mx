@@ -227,8 +227,8 @@ func (d *Dialer) deadline(ctx context.Context, now time.Time) (earliest time.Tim
 	if d.Timeout != 0 { // including negative, for historical reasons
 		earliest = now.Add(d.Timeout)
 	}
-	if d, ok := ctx.Deadline(); ok {
-		earliest = minNonzeroTime(earliest, d)
+	if d1, ok := ctx.Deadline(); ok {
+		earliest = minNonzeroTime(earliest, d1)
 	}
 	return minNonzeroTime(earliest, d.Deadline)
 }
@@ -251,17 +251,17 @@ func partialDeadline(now, deadline time.Time, addrsRemaining int32) (time.Time, 
 		return time.Time{}, errTimeout()
 	}
 	// Tentatively allocate equal time to each remaining address.
-	timeout := timeRemaining / time.Duration(addrsRemaining)
+	timeout1 := timeRemaining / time.Duration(addrsRemaining)
 	// If the time per address is too short, steal from the end of the list.
 	const saneMinimum = 2 * time.Second
-	if timeout < saneMinimum {
+	if timeout1 < saneMinimum {
 		if timeRemaining < saneMinimum {
-			timeout = timeRemaining
+			timeout1 = timeRemaining
 		} else {
-			timeout = saneMinimum
+			timeout1 = saneMinimum
 		}
 	}
-	return now.Add(timeout), nil
+	return now.Add(timeout1), nil
 }
 
 func (d *Dialer) fallbackDelay() time.Duration {
@@ -273,8 +273,8 @@ func (d *Dialer) fallbackDelay() time.Duration {
 }
 
 func parseNetwork(ctx context.Context, network string, needsProto bool) (afnet string, proto int32, err error) {
-	i := bytealg.LastIndexByteString(network, ':')
-	if i < 0 { // no colon
+	i2 := bytealg.LastIndexByteString(network, ':')
+	if i2 < 0 { // no colon
 		switch network {
 		case "tcp", "tcp4", "tcp6":
 		case "udp", "udp4", "udp6":
@@ -288,18 +288,18 @@ func parseNetwork(ctx context.Context, network string, needsProto bool) (afnet s
 		}
 		return network, 0, nil
 	}
-	afnet = network[:i]
+	afnet = network[:i2]
 	switch afnet {
 	case "ip", "ip4", "ip6":
-		protostr := network[i+1:]
-		proto, i, ok := dtoi(protostr)
-		if !ok || i != len(protostr) {
-			proto, err = lookupProtocol(ctx, protostr)
+		protostr := network[i2+1:]
+		proto1, i1, ok := dtoi(protostr)
+		if !ok || i1 != len(protostr) {
+			proto1, err = lookupProtocol(ctx, protostr)
 			if err != nil {
 				return "", 0, err
 			}
 		}
-		return afnet, proto, nil
+		return afnet, proto1, nil
 	}
 	return "", 0, UnknownNetworkError(network)
 }
@@ -308,27 +308,27 @@ func parseNetwork(ctx context.Context, network string, needsProto bool) (afnet s
 // addresses. The result contains at least one address when error is
 // nil.
 func (r *Resolver) resolveAddrList(ctx context.Context, op, network, addr string, hint Addr) (addrList, error) {
-	afnet, _, err := parseNetwork(ctx, network, true)
-	if err != nil {
-		return nil, err
+	afnet, _, err3 := parseNetwork(ctx, network, true)
+	if err3 != nil {
+		return nil, err3
 	}
 	if op == "dial" && addr == "" {
 		return nil, errMissingAddress
 	}
 	switch afnet {
 	case "unix", "unixgram", "unixpacket":
-		addr, err := ResolveUnixAddr(afnet, addr)
-		if err != nil {
-			return nil, err
+		addr2, err1 := ResolveUnixAddr(afnet, addr)
+		if err1 != nil {
+			return nil, err1
 		}
-		if op == "dial" && hint != nil && addr.Network() != hint.Network() {
+		if op == "dial" && hint != nil && addr2.Network() != hint.Network() {
 			return nil, &AddrError{Err: "mismatched local address type", Addr: hint.String()}
 		}
-		return addrList{addr}, nil
+		return addrList{addr2}, nil
 	}
-	addrs, err := r.internetAddrList(ctx, afnet, addr)
-	if err != nil || op != "dial" || hint == nil {
-		return addrs, err
+	addrs, err2 := r.internetAddrList(ctx, afnet, addr)
+	if err2 != nil || op != "dial" || hint == nil {
+		return addrs, err2
 	}
 	var (
 		tcp      *TCPAddr
@@ -348,29 +348,29 @@ func (r *Resolver) resolveAddrList(ctx context.Context, op, network, addr string
 		wildcard = ip.isWildcard()
 	}
 	naddrs := addrs[:0]
-	for _, addr := range addrs {
-		if addr.Network() != hint.Network() {
+	for _, addr3 := range addrs {
+		if addr3.Network() != hint.Network() {
 			return nil, &AddrError{Err: "mismatched local address type", Addr: hint.String()}
 		}
-		switch addr := addr.(type) {
+		switch addr1 := addr3.(type) {
 		case *TCPAddr:
-			if !wildcard && !addr.isWildcard() && !addr.IP.matchAddrFamily(tcp.IP) {
+			if !wildcard && !addr1.isWildcard() && !addr1.IP.matchAddrFamily(tcp.IP) {
 				continue
 			}
 			naddrs = mxutil.Ensure(naddrs, 1)
-			naddrs = push(naddrs, addr)
+			naddrs = push(naddrs, addr1)
 		case *UDPAddr:
-			if !wildcard && !addr.isWildcard() && !addr.IP.matchAddrFamily(udp.IP) {
+			if !wildcard && !addr1.isWildcard() && !addr1.IP.matchAddrFamily(udp.IP) {
 				continue
 			}
 			naddrs = mxutil.Ensure(naddrs, 1)
-			naddrs = push(naddrs, addr)
+			naddrs = push(naddrs, addr1)
 		case *IPAddr:
-			if !wildcard && !addr.isWildcard() && !addr.IP.matchAddrFamily(ip.IP) {
+			if !wildcard && !addr1.isWildcard() && !addr1.IP.matchAddrFamily(ip.IP) {
 				continue
 			}
 			naddrs = mxutil.Ensure(naddrs, 1)
-			naddrs = push(naddrs, addr)
+			naddrs = push(naddrs, addr1)
 		}
 	}
 	if len(naddrs) == 0 {
@@ -506,7 +506,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn
 	}
 	deadline := d.deadline(ctx, time.Now())
 	if !deadline.IsZero() {
-		if d, ok := ctx.Deadline(); !ok || deadline.Before(d) {
+		if d1, ok := ctx.Deadline(); !ok || deadline.Before(d1) {
 			subCtx, cancel := context.WithDeadline(ctx, deadline)
 			defer cancel()
 			ctx = subCtx
@@ -574,27 +574,27 @@ func (sd *sysDialer) dialSerial(ctx context.Context, ras addrList) (Conn, error)
 
 		dialCtx := ctx
 		if deadline, hasDeadline := ctx.Deadline(); hasDeadline {
-			partialDeadline, err := partialDeadline(time.Now(), deadline, len(ras)-i)
-			if err != nil {
+			partialDeadline1, err1 := partialDeadline(time.Now(), deadline, len(ras)-i)
+			if err1 != nil {
 				// Ran out of time.
 				if firstErr == nil {
-					firstErr = &OpError{Op: "dial", Net: sd.network, Source: sd.LocalAddr, Addr: ra, Err: err}
+					firstErr = &OpError{Op: "dial", Net: sd.network, Source: sd.LocalAddr, Addr: ra, Err: err1}
 				}
 				break
 			}
-			if partialDeadline.Before(deadline) {
+			if partialDeadline1.Before(deadline) {
 				var cancel context.CancelFunc
-				dialCtx, cancel = context.WithDeadline(ctx, partialDeadline)
+				dialCtx, cancel = context.WithDeadline(ctx, partialDeadline1)
 				defer cancel()
 			}
 		}
 
-		c, err := sd.dialSingle(dialCtx, ra)
-		if err == nil {
+		c, err2 := sd.dialSingle(dialCtx, ra)
+		if err2 == nil {
 			return c, nil
 		}
 		if firstErr == nil {
-			firstErr = err
+			firstErr = err2
 		}
 	}
 

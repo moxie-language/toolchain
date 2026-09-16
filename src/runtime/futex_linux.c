@@ -30,6 +30,19 @@ void moxie_futex_wait_timeout(uint32_t *addr, uint32_t cmp, uint64_t timeout) {
     syscall(SYS_futex, addr, FUTEX_WAIT|FUTEX_PRIVATE_FLAG, cmp, &ts, NULL, 0);
 }
 
+// Cross-process futex on a MAP_SHARED word: FUTEX_PRIVATE_FLAG keys the wait
+// queue per mm, so a child's wake would never reach the parent's wait.
+void moxie_futex_wait_timeout_shared(uint32_t *addr, uint32_t cmp, uint64_t timeout) {
+    struct timespec ts = {0};
+    ts.tv_sec = timeout / 1000000000;
+    ts.tv_nsec = timeout % 1000000000;
+    syscall(SYS_futex, addr, FUTEX_WAIT, cmp, &ts, NULL, 0);
+}
+
+void moxie_futex_wake_all_shared(uint32_t *addr) {
+    syscall(SYS_futex, addr, FUTEX_WAKE, INT_MAX, NULL, NULL, 0);
+}
+
 void moxie_futex_wake(uint32_t *addr) {
     syscall(SYS_futex, addr, FUTEX_WAKE|FUTEX_PRIVATE_FLAG, 1, NULL, NULL, 0);
 }

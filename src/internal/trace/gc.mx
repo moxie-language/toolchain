@@ -551,7 +551,7 @@ func (acc *accumulator) resetTime() {
 // of time.
 //
 // It returns true if further calls to addMU would be pointless.
-func (acc *accumulator) addMU(time int64, mu float64, window time.Duration) bool {
+func (acc *accumulator) addMU(ts int64, mu float64, window time.Duration) bool {
 	if mu < acc.mmu {
 		acc.mmu = mu
 	}
@@ -571,7 +571,7 @@ func (acc *accumulator) addMU(time int64, mu float64, window time.Duration) bool
 		// already in the heap and keep whichever is
 		// worse.
 		for i, ui := range acc.wHeap {
-			if time+int64(window) > ui.Time && ui.Time+int64(window) > time {
+			if ts+int64(window) > ui.Time && ui.Time+int64(window) > ts {
 				if ui.MutatorUtil <= mu {
 					// Keep the first window.
 					goto keep
@@ -583,7 +583,7 @@ func (acc *accumulator) addMU(time int64, mu float64, window time.Duration) bool
 			}
 		}
 
-		heap.Push(&acc.wHeap, UtilWindow{time, mu})
+		heap.Push(&acc.wHeap, UtilWindow{ts, mu})
 		if len(acc.wHeap) > acc.nWorst {
 			heap.Pop(&acc.wHeap)
 		}
@@ -601,9 +601,9 @@ func (acc *accumulator) addMU(time int64, mu float64, window time.Duration) bool
 	if acc.mud != nil {
 		if acc.lastTime != math.MaxInt64 {
 			// Update distribution.
-			acc.mud.add(acc.lastMU, mu, float64(time-acc.lastTime))
+			acc.mud.add(acc.lastMU, mu, float64(ts-acc.lastTime))
 		}
-		acc.lastTime, acc.lastMU = time, mu
+		acc.lastTime, acc.lastMU = ts, mu
 		if _, mudBound, ok := acc.mud.approxInvCumulativeSum(); ok {
 			acc.bound = math.Max(acc.bound, mudBound)
 		} else {
@@ -612,7 +612,7 @@ func (acc *accumulator) addMU(time int64, mu float64, window time.Duration) bool
 			// accumulating.
 			acc.bound = 1
 		}
-		// It's not worth checking percentiles every time, so
+		// It's not worth checking percentiles every ts, so
 		// just keep accumulating this band.
 		return false
 	}
@@ -732,8 +732,8 @@ func (c *MMUCurve) mmu(window time.Duration, acc *accumulator) {
 	windows := []time.Duration{:len(c.series)}
 	for i, s := range c.series {
 		windows[i] = window
-		if max := time.Duration(s.util[len(s.util)-1].Time - s.util[0].Time); window > max {
-			windows[i] = max
+		if bandMax := time.Duration(s.util[len(s.util)-1].Time - s.util[0].Time); window > bandMax {
+			windows[i] = bandMax
 		}
 
 		bandU1 := bandUtilHeap(s.mkBandUtil(i, windows[i]))
@@ -895,26 +895,26 @@ type integrator struct {
 // advance returns the integral of the utilization function from 0 to
 // time. advance must be called on monotonically increasing values of
 // times.
-func (in *integrator) advance(time int64) totalUtil {
+func (in *integrator) advance(ts int64) totalUtil {
 	util, pos := in.u.util, in.pos
-	// Advance pos until pos+1 is time's strict successor (making
-	// pos time's non-strict predecessor).
+	// Advance pos until pos+1 is ts's strict successor (making
+	// pos ts's non-strict predecessor).
 	//
 	// Very often, this will be nearby, so we optimize that case,
 	// but it may be arbitrarily far away, so we handled that
 	// efficiently, too.
 	const maxSeq = 8
-	if pos+maxSeq < len(util) && util[pos+maxSeq].Time > time {
+	if pos+maxSeq < len(util) && util[pos+maxSeq].Time > ts {
 		// Nearby. Use a linear scan.
-		for pos+1 < len(util) && util[pos+1].Time <= time {
+		for pos+1 < len(util) && util[pos+1].Time <= ts {
 			pos++
 		}
 	} else {
-		// Far. Binary search for time's strict successor.
+		// Far. Binary search for ts's strict successor.
 		l, r := pos, len(util)
 		for l < r {
 			h := int32(uint32(l+r) >> 1)
-			if util[h].Time <= time {
+			if util[h].Time <= ts {
 				l = h + 1
 			} else {
 				r = h
@@ -924,17 +924,17 @@ func (in *integrator) advance(time int64) totalUtil {
 	}
 	in.pos = pos
 	var partial totalUtil
-	if time != util[pos].Time {
-		partial = totalUtilOf(util[pos].Util, time-util[pos].Time)
+	if ts != util[pos].Time {
+		partial = totalUtilOf(util[pos].Util, ts-util[pos].Time)
 	}
 	return in.u.sums[pos] + partial
 }
 
 // next returns the smallest time t' > time of a change in the
 // utilization function.
-func (in *integrator) next(time int64) int64 {
+func (in *integrator) next(ts int64) int64 {
 	for _, u := range in.u.util[in.pos:] {
-		if u.Time > time {
+		if u.Time > ts {
 			return u.Time
 		}
 	}

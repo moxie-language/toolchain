@@ -718,20 +718,28 @@ func (e *irEmitter) emit() (s string) {
 			}
 		}
 	}
-	// Also declare basic type descriptors from the universe scope.
+	// Also declare basic type descriptors from the universe scope. The
+	// canonical descriptor spelling comes from the kind (uint8, int32,
+	// bytes), not from the universe name: `byte`, `rune` and `string` are
+	// named types, so poking `basic:byte` here only created a descriptor
+	// that no reference could match.
 	if cctx.universe != nil && cctx.universe.Scope != nil {
 		for _, name := range cctx.universe.Scope.Names() {
-			if mxutil.HasPrefix(name, "int") || mxutil.HasPrefix(name, "uint") ||
-				name == "bool" || name == "byte" || name == "rune" ||
-				mxutil.HasPrefix(name, "float") || name == "string" {
-				tail := "basic:" | name
-				if _, exists := e.pendTypeDescs[tail]; !exists {
-					e.pendTypeDescs[tail] = Typ[Invalid]
-				}
-				ptail := "pointer:" | tail
-				if _, exists := e.pendTypeDescs[ptail]; !exists {
-					e.pendTypeDescs[ptail] = Typ[Invalid]
-				}
+			tn, isTN := cctx.universe.Scope.Lookup(name).(*TypeName)
+			if !isTN || tn.Typ == nil {
+				continue
+			}
+			b, isBasic := SafeUnderlying(tn.Typ).(*Basic)
+			if !isBasic || b == nil {
+				continue
+			}
+			tail := "basic:" | basicTypeDescName(b.Kind)
+			if _, exists := e.pendTypeDescs[tail]; !exists {
+				e.pendTypeDescs[tail] = Typ[Invalid]
+			}
+			ptail := "pointer:" | tail
+			if _, exists := e.pendTypeDescs[ptail]; !exists {
+				e.pendTypeDescs[ptail] = Typ[Invalid]
 			}
 		}
 	}
@@ -1227,6 +1235,18 @@ func (e *irEmitter) pkgMembers() (ss []SSAMember) {
 
 func (e *irEmitter) emitGlobal(g *SSAGlobal) {
 	name := e.globalName(g)
+	if cctx.externGlobals != nil {
+		if _, ok := cctx.externGlobals[g.name]; ok {
+			// Extern global: reference the C runtime's symbol. A definition
+			// here would shadow it with a zeroed (and thread-local) object,
+			// so the first read sees nil instead of environ/__ehdr_start.
+			e.w(name)
+			e.w(" = external global ")
+			e.w(e.resolveGlobalDeclType(g))
+			e.w("\n")
+			return
+		}
+	}
 	if ei, ok := cctx.embedVars[g.name]; ok {
 		e.emitEmbedGlobal(g, name, ei)
 		return
@@ -1307,6 +1327,14 @@ func (e *irEmitter) embedElemSize(elemType string) (sz int32) {
 }
 
 func (e *irEmitter) globalName(g *SSAGlobal) (s string) {
+	if cctx.externGlobals != nil {
+		if tgt, ok := cctx.externGlobals[g.name]; ok {
+			if irNeedsQuote(tgt) {
+				return irQuoteName(tgt)
+			}
+			return "@" | tgt
+		}
+	}
 	pkg := e.pkg.Pkg.Path
 	if g.pkg != nil {
 		pkg = g.pkg.Pkg.Path
@@ -1358,14 +1386,14 @@ func (e *irEmitter) funcSymbol(f *SSAFunction) (s string) {
 	if f.externalSymbol != "" {
 		sym := f.externalSymbol
 		if irNeedsQuote(sym) {
-			return "@\"" | sym | "\""
+			return irQuoteName(sym)
 		}
 		return "@" | sym
 	}
 	if cctx.linknameMap != nil {
 		if target, ok := cctx.linknameMap[f.name]; ok {
 			if irNeedsQuote(target) {
-				return "@\"" | target | "\""
+				return irQuoteName(target)
 			}
 			return "@" | target
 		}
@@ -1437,32 +1465,30 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		// Emit a forwarding wrapper so the linker can resolve both.
 		if cctx.linknameMap != nil {
 			if target, ok := cctx.linknameMap[f.name]; ok {
-				_ = target
 				pkg := e.pkg.Pkg.Path
 				if f.Pkg != nil {
 					pkg = f.Pkg.Pkg.Path
 				}
+				pkgDot := pkg | "."
 				origSym := irGlobalSymbol(pkg, f.name)
 				tgtSym := sym // already the linkname target from funcSymbol
-				// Check if the target is defined in the same package
-				// (has a body). If so, skip the declare to avoid
-				// conflicting with the existing define.
-				// If the linkname target is in the same package, the
-				// target function is already defined - skip the declare
-				// to avoid conflicting with the existing define.
-				pkgDot := pkg | "."
-				samePackage := mxutil.HasPrefix(target, pkgDot)
-				if !samePackage {
+				if !mxutil.HasPrefix(target, pkgDot) {
 					e.emitFuncDecl(f)
-				} else if origSym == tgtSym {
-					// Self-referential linkname: the function's linkname
-					// target is its own fully-qualified name. Body is
-					// provided by another package. Emit a declare.
+					if origSym != tgtSym {
+						e.emitLinknameForwarder(f, origSym, tgtSym)
+					}
+					return
+				}
+				if origSym == tgtSym {
+					// Self-referential linkname: the target is this
+					// declaration's own fully-qualified name and the body
+					// lives in another package, so declare it.
 					e.emitFuncDecl(f)
+					return
 				}
-				if origSym != tgtSym {
-					e.emitLinknameForwarder(f, origSym, tgtSym)
-				}
+				// Same-package foreign spelling (net/url.URL.setPath): the
+				// body is emitted under the Moxie name, and nothing in Moxie
+				// links against the foreign spelling, so leave it empty.
 				return
 			}
 		}
@@ -2727,7 +2753,7 @@ func (e *irEmitter) emitTypeDescAddr(td *SSATypeDesc) {
 		e.collectTypeDesc(td.t)
 	}
 	tn := e.reflectTypeName(td.t)
-	e.w("  ") ; e.w(reg) ; e.w(" = bitcast ptr @\"") ; e.w(tn) ; e.w("\" to ptr\n")
+	e.w("  ") ; e.w(reg) ; e.w(" = bitcast ptr ") ; e.w(irQuoteName(tn)) ; e.w(" to ptr\n")
 }
 
 func (e *irEmitter) resolveFieldAddrBase(f *SSAFieldAddr) (s string) {
@@ -3002,6 +3028,9 @@ func (e *irEmitter) emitExtract(ex *SSAExtract) {
 			if ar, ok5 := SafeUnderlying(p.Base).(*Array); ok5 {
 				tupType = "{i1, i32, " | e.llvmType(ar.Elem) | "}"
 			}
+		} else if bt, okb := SafeUnderlying(rangeInstr.X.SSAType()).(*Basic); okb && bt.Info&IsInteger != 0 {
+			// range-over-int: key in the operand's own integer type, no value.
+			tupType = "{i1, " | e.llvmType(bt) | ", i8}"
 		} else {
 			et := "i32"
 			if sl, ok6 := SafeUnderlying(rangeInstr.X.SSAType()).(*Slice); ok6 {

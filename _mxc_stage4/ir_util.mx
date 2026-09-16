@@ -163,9 +163,39 @@ func irNeedsQuote(s string) (ok bool) {
 func irGlobalSymbol(pkg, name string) (s string) {
 	sym := pkg | "." | name
 	if irNeedsQuote(sym) {
-		return "@\"" | sym | "\""
+		return irQuoteName(sym)
 	}
 	return "@" | sym
+}
+
+// irSymbolSuffix appends suffix to a symbol already rendered by
+// funcSymbol/irGlobalSymbol. The suffix must land INSIDE the quoted
+// identifier: LLVM's quoted form covers the whole name, so appending after
+// `@"a/b"` would place the suffix outside the quotes and clang rejects the
+// module with "expected 'to' after cast value" at the ptrtoint.
+func irSymbolSuffix(sym, suffix string) (s string) {
+	name := sym
+	if len(name) > 0 && name[0] == '@' {
+		name = name[1:]
+	}
+	if len(name) >= 2 && name[0] == '"' && name[len(name)-1] == '"' {
+		name = name[1 : len(name)-1]
+	}
+	name = name | suffix
+	if irNeedsQuote(name) {
+		return irQuoteName(name)
+	}
+	return "@" | name
+}
+
+// irQuoteName renders a symbol as an LLVM quoted identifier, escaping the
+// bytes LLVM escapes when it prints a name ("", backslash, control and
+// non-ASCII). Legacy emits every name through go-llvm, which escapes on
+// print; the text emitter has to reproduce those bytes exactly or a name
+// carrying a struct tag (`json:"a"`) terminates its own quote and clang
+// rejects the module.
+func irQuoteName(name string) (s string) {
+	return "@\"" | irEscapeString(name) | "\""
 }
 
 
@@ -182,19 +212,27 @@ func parseStructFields(s string) (ss []string) {
 	var fields []string
 	depth := 0
 	start := int32(0)
+	inTag := false
 	for i := int32(0); i < int32(len(inner)); i++ {
-		switch inner[i] {
-		case '{':
+		ch := inner[i]
+		if ch == '`' {
+			// A struct tag is verbatim between backticks and may contain
+			// the separators used here.
+			inTag = !inTag
+			continue
+		}
+		if inTag {
+			continue
+		}
+		if ch == '{' {
 			depth++
-		case '}':
+		} else if ch == '}' {
 			depth--
-		case ',':
-			if depth == 0 {
-				fv := llvmTrimSpace(string(inner[start:i]))
-				fields = mxutil.Ensure(fields, 1)
-				push(fields, fv)
-				start = i + 1
-			}
+		} else if ch == ',' && depth == 0 {
+			fv := llvmTrimSpace(string(inner[start:i]))
+			fields = mxutil.Ensure(fields, 1)
+			push(fields, fv)
+			start = i + 1
 		}
 	}
 	f := llvmTrimSpace(string(inner[start:]))

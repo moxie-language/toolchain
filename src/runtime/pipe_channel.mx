@@ -372,6 +372,7 @@ func PipeChildReady() {
 	}
 	ctl := (*spawnCtl)(unsafe.Pointer(spawnCtlPtr))
 	atomicStoreU32(&ctl.ready, 1)
+	moxie_futex_wake_all_shared(&ctl.ready)
 }
 
 // PipeWaitChildReady blocks until the child sets the shared ready flag
@@ -392,7 +393,10 @@ func PipeWaitChildReady() bool {
 		if !childAlive(lastSpawnPid) {
 			return false
 		}
-		sleepTicks(nanosecondsToTicks(1_000_000))
+		// Block on the ready word itself: the child wakes it the moment its
+		// channels are bound. Polling with a timer sleep made every spawn pay
+		// the full timeout whenever the parent got there before the child.
+		moxie_futex_wait_timeout_shared(&ctl.ready, 0, 1_000_000)
 	}
 	return false
 }

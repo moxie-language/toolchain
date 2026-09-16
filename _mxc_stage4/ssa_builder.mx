@@ -2309,7 +2309,10 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *syntax.ForStmt, rc *syntax.RangeClau
 	valTyp := asType(Typ[Invalid])
 	iterT := iterSSAType
 	iterU := SafeUnderlying(iterT)
-	if sl, ok := iterU.(*Slice); ok {
+	if bt, okb := iterU.(*Basic); okb && bt.Info&IsInteger != 0 {
+		// range-over-int: the index carries the operand's own integer type.
+		keyTyp = iterT
+	} else if sl, ok := iterU.(*Slice); ok {
 		valTyp = sl.Elem
 	} else if sl2, ok12 := iterT.(*Slice); ok12 {
 		valTyp = sl2.Elem
@@ -4067,6 +4070,14 @@ func (fb *ssaFuncBuilder) buildPushTargetAddr(e syntax.Expr) (a SSAValue) {
 		if base == nil || idx == nil {
 			return nil
 		}
+		// A map element is not addressable. `m[k] = push(m[k], v)` writes
+		// the new header through the map update, and a bare `push(m[k], v)`
+		// has nowhere to put it. Indexing the map as if it were a slice
+		// emitted a GEP whose index was the key (invalid IR), and the map
+		// update then also fired, so the element was written twice.
+		if _, isMap := SafeUnderlying(base.SSAType()).(*TCMap); isMap {
+			return nil
+		}
 		var baseAddr SSAValue
 		if n, ok := lv.X.(*syntax.Name); ok {
 			obj := fb.lookupObject(n.Value)
@@ -4376,6 +4387,26 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue)
 		if x == nil || idx == nil {
 			return nil
 		}
+		if mt, isMap := SafeUnderlying(x.SSAType()).(*TCMap); isMap {
+			// A map index is a lookup, not an address. GEP'ing into the
+			// hashmap pointer produced a load from the map struct at element
+			// offset k, so `m[k].Field` read garbage and crashed.
+			lk := &SSALookup{X: x, Index: fb.coerceToInterface(idx, mt.Key)}
+			lk.typ = mt.Elem
+			lk.name = fb.nextName()
+			fb.emit(lk)
+			elemT := mt.Elem
+			addr = lk
+			structType = elemT
+			if _, isPtr := SafeUnderlying(elemT).(*Pointer); !isPtr {
+				// Map values are not addressable: the only valid field select
+				// on a map value goes through the pointer it holds.
+				return nil
+			}
+			ld := fb.emitLoad(lk, elemT)
+			addr = ld
+			structType = elemT
+		} else {
 		ia := &SSAIndexAddr{X: x, Index: idx}
 		elemT := ssaElemType(x.SSAType())
 		ia.typ = NewPointer(elemT)
@@ -4387,6 +4418,7 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue)
 			ld := fb.emitLoad(ia, elemT)
 			addr = ld
 			structType = elemT
+		}
 		}
 	} else {
 		x := fb.buildExpr(e.X)
@@ -6202,7 +6234,7 @@ func (fb *ssaFuncBuilder) resolveStructTypeAST(e *syntax.StructType) (t *TCStruc
 		push(fields, NewTCField(fb.fn.Pkg.Pkg, name, typ, f.Name == nil))
 		tag := ""
 		if i < len(e.TagList) && e.TagList[i] != nil {
-			tag = e.TagList[i].Value
+			tag = TagText(e.TagList[i].Value)
 		}
 		tags = mxutil.Ensure(tags, 1)
 		push(tags, tag)

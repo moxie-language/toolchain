@@ -17,13 +17,20 @@ type domainEntry struct {
 
 var domainList *domainEntry
 
+// The entry outlives this frame. Allocating it in the per-function arena
+// would be reclaimed when this returns, and the next registration would
+// land on the same address with next pointing at itself, so
+// domainReapChildren would never reach the end of the list.
 func domainRegister(pid, lockdownFd int32) {
+	save := CurrentArena()
+	SetCurrentArena(trueRootArena())
 	domainList = &domainEntry{
 		pid:        pid,
 		lockdownFd: lockdownFd,
 		alive:      true,
 		next:       domainList,
 	}
+	SetCurrentArena(save)
 }
 
 // LastSpawnedLockdownFd returns the parent's read end of the secalloc
@@ -49,7 +56,12 @@ func LastSpawnedLockdownFd() int32 {
 func SpawnLifecycleChannel() *channel {
 	// string = {ptr, len, cap} = 3 pointers
 	ptrSize := unsafe.Sizeof(uintptr(0))
+	// The channel is held by the domain entry and outlives the spawning
+	// frame that receives it, so it comes from the root arena too.
+	save := CurrentArena()
+	SetCurrentArena(trueRootArena())
 	ch := chanMake(ptrSize*3, 1)
+	SetCurrentArena(save)
 	if domainList != nil {
 		domainList.doneCh = ch
 	}

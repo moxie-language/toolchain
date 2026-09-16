@@ -388,7 +388,7 @@ func parseRFC2821Mailbox(in string) (mailbox rfc2821Mailbox, ok bool) {
 	// The RFC species a format for domains, but that's known to be
 	// violated in practice so we accept that anything after an '@' is the
 	// domain part.
-	if _, ok := domainToReverseLabels(in); !ok {
+	if _, ok1 := domainToReverseLabels(in); !ok1 {
 		return mailbox, false
 	}
 
@@ -560,7 +560,7 @@ func matchDomainConstraint(domain, constraint string, reversedDomainsCache map[s
 // form of name, suitable for passing to the match function. The total number
 // of comparisons is tracked in the given count and should not exceed the given
 // limit.
-func (c *Certificate) checkNameConstraints[T fmt.Stringer](count *int32,
+func checkNameConstraints[T fmt.Stringer](c *Certificate, count *int32,
 	maxConstraintComparisons int32,
 	nameType string,
 	name string,
@@ -674,14 +674,14 @@ func (c *Certificate) isValid(certType int32, currentChain []*Certificate, opts 
 	if (certType == intermediateCertificate || certType == rootCertificate) &&
 		c.hasNameConstraints() {
 		toCheck := []*Certificate{}
-		for _, c := range currentChain {
-			if c.hasSANExtension() {
+		for _, c1 := range currentChain {
+			if c1.hasSANExtension() {
 				toCheck = mxutil.Ensure(toCheck, 1)
-				toCheck = push(toCheck, c)
+				toCheck = push(toCheck, c1)
 			}
 		}
 		for _, sanCert := range toCheck {
-			err := forEachSAN(sanCert.getSANExtension(), func(tag int32, data []byte) error {
+			err6 := forEachSAN(sanCert.getSANExtension(), func(tag int32, data []byte) error {
 				switch tag {
 				case nameTypeEmail:
 					name := string(data)
@@ -690,11 +690,11 @@ func (c *Certificate) isValid(certType int32, currentChain []*Certificate, opts 
 						return fmt.Errorf("x509: cannot parse rfc822Name %q", mailbox)
 					}
 
-					if err := c.checkNameConstraints(&comparisonCount, maxConstraintComparisons, "email address", name,
+					if err5 := checkNameConstraints(c, &comparisonCount, maxConstraintComparisons, "email address", name,
 						func(constraint string) (bool, error) {
 							return matchEmailConstraint(mailbox, constraint, reversedDomainsCache, reversedConstraintsCache)
-						}, c.PermittedEmailAddresses, c.ExcludedEmailAddresses); err != nil {
-						return err
+						}, c.PermittedEmailAddresses, c.ExcludedEmailAddresses); err5 != nil {
+						return err5
 					}
 
 				case nameTypeDNS:
@@ -703,25 +703,25 @@ func (c *Certificate) isValid(certType int32, currentChain []*Certificate, opts 
 						return fmt.Errorf("x509: cannot parse dnsName %q", name)
 					}
 
-					if err := c.checkNameConstraints(&comparisonCount, maxConstraintComparisons, "DNS name", name,
+					if err4 := checkNameConstraints(c, &comparisonCount, maxConstraintComparisons, "DNS name", name,
 						func(constraint string) (bool, error) {
 							return matchDomainConstraint(name, constraint, reversedDomainsCache, reversedConstraintsCache)
-						}, c.PermittedDNSDomains, c.ExcludedDNSDomains); err != nil {
-						return err
+						}, c.PermittedDNSDomains, c.ExcludedDNSDomains); err4 != nil {
+						return err4
 					}
 
 				case nameTypeURI:
 					name := string(data)
-					uri, err := url.Parse(name)
-					if err != nil {
+					uri, err3 := url.Parse(name)
+					if err3 != nil {
 						return fmt.Errorf("x509: internal error: URI SAN %q failed to parse", name)
 					}
 
-					if err := c.checkNameConstraints(&comparisonCount, maxConstraintComparisons, "URI", name,
+					if err2 := checkNameConstraints(c, &comparisonCount, maxConstraintComparisons, "URI", name,
 						func(constraint string) (bool, error) {
 							return matchURIConstraint(uri, constraint, reversedDomainsCache, reversedConstraintsCache)
-						}, c.PermittedURIDomains, c.ExcludedURIDomains); err != nil {
-						return err
+						}, c.PermittedURIDomains, c.ExcludedURIDomains); err2 != nil {
+						return err2
 					}
 
 				case nameTypeIP:
@@ -730,11 +730,11 @@ func (c *Certificate) isValid(certType int32, currentChain []*Certificate, opts 
 						return fmt.Errorf("x509: internal error: IP SAN %x failed to parse", data)
 					}
 
-					if err := c.checkNameConstraints(&comparisonCount, maxConstraintComparisons, "IP address", ip.String(),
+					if err1 := checkNameConstraints(c, &comparisonCount, maxConstraintComparisons, "IP address", ip.String(),
 						func(constraint *net.IPNet) (bool, error) {
 							return matchIPConstraint(ip, constraint)
-						}, c.PermittedIPRanges, c.ExcludedIPRanges); err != nil {
-						return err
+						}, c.PermittedIPRanges, c.ExcludedIPRanges); err1 != nil {
+						return err1
 					}
 
 				default:
@@ -744,8 +744,8 @@ func (c *Certificate) isValid(certType int32, currentChain []*Certificate, opts 
 				return nil
 			})
 
-			if err != nil {
-				return err
+			if err6 != nil {
+				return err6
 			}
 		}
 	}
@@ -820,11 +820,11 @@ func (c *Certificate) Verify(opts VerifyOptions) (chains [][]*Certificate, err e
 		return nil, errNotParsed
 	}
 	for i := 0; i < opts.Intermediates.len(); i++ {
-		c, _, err := opts.Intermediates.cert(i)
-		if err != nil {
-			return nil, fmt.Errorf("crypto/x509: error fetching intermediate: %w", err)
+		c1, _, err1 := opts.Intermediates.cert(i)
+		if err1 != nil {
+			return nil, fmt.Errorf("crypto/x509: error fetching intermediate: %w", err1)
 		}
-		if len(c.Raw) == 0 {
+		if len(c1.Raw) == 0 {
 			return nil, errNotParsed
 		}
 	}
@@ -1000,9 +1000,9 @@ func (c *Certificate) buildChains(currentChain []*Certificate, sigChecks *int32,
 			return
 		}
 
-		if err := c.CheckSignatureFrom(candidate.cert); err != nil {
+		if err2 := c.CheckSignatureFrom(candidate.cert); err2 != nil {
 			if hintErr == nil {
-				hintErr = err
+				hintErr = err2
 				hintCert = candidate.cert
 			}
 			return
@@ -1018,9 +1018,9 @@ func (c *Certificate) buildChains(currentChain []*Certificate, sigChecks *int32,
 		}
 
 		if candidate.constraint != nil {
-			if err := candidate.constraint(currentChain); err != nil {
+			if err1 := candidate.constraint(currentChain); err1 != nil {
 				if hintErr == nil {
-					hintErr = err
+					hintErr = err1
 					hintCert = candidate.cert
 				}
 				return
@@ -1241,8 +1241,8 @@ func checkChainForKeyUsage(chain []*Certificate, keyUsages []ExtKeyUsage) bool {
 	// is unacceptable.
 
 NextCert:
-	for i := len(chain) - 1; i >= 0; i-- {
-		cert := chain[i]
+	for i2 := len(chain) - 1; i2 >= 0; i2-- {
+		cert := chain[i2]
 		if len(cert.ExtKeyUsage) == 0 && len(cert.UnknownExtKeyUsage) == 0 {
 			// The certificate doesn't have any extended key usage specified.
 			continue
@@ -1258,7 +1258,7 @@ NextCert:
 		const invalidUsage ExtKeyUsage = -1
 
 	NextRequestedUsage:
-		for i, requestedUsage := range usages {
+		for i1, requestedUsage := range usages {
 			if requestedUsage == invalidUsage {
 				continue
 			}
@@ -1269,7 +1269,7 @@ NextCert:
 				}
 			}
 
-			usages[i] = invalidUsage
+			usages[i1] = invalidUsage
 			usagesRemaining--
 			if usagesRemaining == 0 {
 				return false
@@ -1448,18 +1448,18 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 	}
 
 	// n is the length of the chain minus the trust anchor
-	n := len(chain) - 1
+	n3 := len(chain) - 1
 
 	pg := newPolicyGraph()
 	var inhibitAnyPolicy, explicitPolicy, policyMapping int32
 	if !opts.inhibitAnyPolicy {
-		inhibitAnyPolicy = n + 1
+		inhibitAnyPolicy = n3 + 1
 	}
 	if !opts.requireExplicitPolicy {
-		explicitPolicy = n + 1
+		explicitPolicy = n3 + 1
 	}
 	if !opts.inhibitPolicyMapping {
-		policyMapping = n + 1
+		policyMapping = n3 + 1
 	}
 
 	initialUserPolicySet := map[string]bool{}
@@ -1472,7 +1472,7 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 		initialUserPolicySet[string(anyPolicyOID().der)] = true
 	}
 
-	for i := n - 1; i >= 0; i-- {
+	for i := n3 - 1; i >= 0; i-- {
 		cert := chain[i]
 
 		isSelfSigned := bytes.Equal(cert.RawIssuer, cert.RawSubject)
@@ -1518,7 +1518,7 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 			// In the specification chains go from the trust anchor to the leaf, whereas our
 			// chains go from the leaf to the trust anchor, so our i's our inverted. Our
 			// check here matches the check "i < n" in the specification.
-			if policies[string(anyPolicyOID().der)] && (inhibitAnyPolicy > 0 || (n-i < n && isSelfSigned)) {
+			if policies[string(anyPolicyOID().der)] && (inhibitAnyPolicy > 0 || (n3-i < n3 && isSelfSigned)) {
 				missing := map[string][]*policyGraphNode{}
 				leaves := pg.leaves()
 				for _, p := range pg.parents() {
@@ -1561,13 +1561,13 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 
 					for issuerStr, subjectPolicies := range mappings {
 						// 6.1.4 (b) (1) -- as updated by RFC 9618
-						if matching := pg.leafWithPolicy(OID{der: []byte(issuerStr)}); matching != nil {
-							matching.expectedPolicySet = subjectPolicies
-						} else if matching := pg.leafWithPolicy(anyPolicyOID()); matching != nil {
+						if matching1 := pg.leafWithPolicy(OID{der: []byte(issuerStr)}); matching1 != nil {
+							matching1.expectedPolicySet = subjectPolicies
+						} else if matching2 := pg.leafWithPolicy(anyPolicyOID()); matching2 != nil {
 							// 6.1.4 (b) (2) -- as updated by RFC 9618
-							n := newPolicyGraphNode(OID{der: []byte(issuerStr)}, []*policyGraphNode{matching})
-							n.expectedPolicySet = subjectPolicies
-							pg.insert(n)
+							n1 := newPolicyGraphNode(OID{der: []byte(issuerStr)}, []*policyGraphNode{matching2})
+							n1.expectedPolicySet = subjectPolicies
+							pg.insert(n1)
 						}
 					}
 				}
@@ -1626,8 +1626,8 @@ func policiesValid(chain []*Certificate, opts VerifyOptions) bool {
 
 	// 6.1.5 (g) (4) -- as updated by RFC 9618
 	authorityConstrainedPolicySet := map[string]bool{}
-	for _, n := range validPolicyNodeSet {
-		authorityConstrainedPolicySet[string(n.validPolicy.der)] = true
+	for _, n2 := range validPolicyNodeSet {
+		authorityConstrainedPolicySet[string(n2.validPolicy.der)] = true
 	}
 	// 6.1.5 (g) (5) -- as updated by RFC 9618
 	userConstrainedPolicySet := map[string]bool{}

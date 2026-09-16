@@ -90,10 +90,10 @@ func lookupProtocolMap(name string) (int32, error) {
 // something longer is added in the future.
 const maxPortBufSize = len("mobility-header") + 10
 
-func lookupPortMap(network, service string) (port int32, error error) {
+func lookupPortMap(network, service string) (port int32, err error) {
 	switch network {
 	case "ip": // no hints
-		if p, err := lookupPortMapWithNetwork("tcp", "ip", service); err == nil {
+		if p, err1 := lookupPortMapWithNetwork("tcp", "ip", service); err1 == nil {
 			return p, nil
 		}
 		return lookupPortMapWithNetwork("udp", "ip", service)
@@ -105,13 +105,13 @@ func lookupPortMap(network, service string) (port int32, error error) {
 	return 0, &DNSError{Err: "unknown network", Name: network + "/" + service}
 }
 
-func lookupPortMapWithNetwork(network, errNetwork, service string) (port int32, error error) {
-	if m, ok := _services()[network]; ok {
+func lookupPortMapWithNetwork(network, errNetwork, service string) (port int32, err error) {
+	if m, ok2 := _services()[network]; ok2 {
 		var lowerService [maxPortBufSize]byte
 		n := copy(lowerService[:], service)
 		lowerASCIIBytes(lowerService[:n])
-		if port, ok := m[string(lowerService[:n])]; ok && n == len(service) {
-			return port, nil
+		if port1, ok1 := m[string(lowerService[:n])]; ok1 && n == len(service) {
+			return port1, nil
 		}
 		return 0, newDNSError(errUnknownPort(), errNetwork+"/"+service, "")
 	}
@@ -204,7 +204,7 @@ func (r *Resolver) LookupHost(ctx context.Context, host string) (addrs [][]byte,
 	if host == "" {
 		return nil, newDNSError(errNoSuchHost(), host, "")
 	}
-	if _, err := netip.ParseAddr(host); err == nil {
+	if _, err1 := netip.ParseAddr(host); err1 == nil {
 		return [][]byte{host}, nil
 	}
 	return r.lookupHost(ctx, host)
@@ -330,15 +330,15 @@ func (r *Resolver) lookupIPAddr(ctx context.Context, network, host string) ([]IP
 		}
 		err := newDNSError(mapErr(ctx.Err()), host, "")
 		return nil, err
-	case r := <-ch:
+	case r1 := <-ch:
 		lookupGroupCancel()
-		err := r.Err
+		err := r1.Err
 		if err != nil {
 			if _, ok := err.(*DNSError); !ok {
 				err = newDNSError(mapErr(err), host, "")
 			}
 		}
-		return lookupIPReturn(r.Val, err, r.Shared)
+		return lookupIPReturn(r1.Val, err, r1.Shared)
 	}
 }
 
@@ -510,9 +510,9 @@ func LookupMX(name string) ([]*MX, error) {
 // If the response contains invalid names, those records are filtered out
 // and an error will be returned alongside the remaining results, if any.
 func (r *Resolver) LookupMX(ctx context.Context, name string) ([]*MX, error) {
-	records, err := r.lookupMX(ctx, name)
-	if err != nil {
-		return nil, err
+	records, err2 := r.lookupMX(ctx, name)
+	if err2 != nil {
+		return nil, err2
 	}
 	filteredMX := []*MX{:0:len(records)}
 	for _, mx := range records {
@@ -522,8 +522,8 @@ func (r *Resolver) LookupMX(ctx context.Context, name string) ([]*MX, error) {
 		if !isDomainName(mx.Host) {
 			// Check for IP address. In practice we observe
 			// these with a trailing dot, so strip that.
-			ip, err := netip.ParseAddr(stringslite.TrimSuffix(mx.Host, "."))
-			if err != nil || ip.Zone() != "" {
+			ip, err1 := netip.ParseAddr(stringslite.TrimSuffix(mx.Host, "."))
+			if err1 != nil || ip.Zone() != "" {
 				continue
 			}
 		}
@@ -651,15 +651,15 @@ func (r *Resolver) dial(ctx context.Context, network, server string) (Conn, erro
 	// already checked that all the cfg.servers are IP
 	// addresses, which Dial will use without a DNS lookup.
 	var c Conn
-	var err error
+	var err1 error
 	if r != nil && r.Dial != nil {
-		c, err = r.Dial(ctx, network, server)
+		c, err1 = r.Dial(ctx, network, server)
 	} else {
 		var d Dialer
-		c, err = d.DialContext(ctx, network, server)
+		c, err1 = d.DialContext(ctx, network, server)
 	}
-	if err != nil {
-		return nil, mapErr(err)
+	if err1 != nil {
+		return nil, mapErr(err1)
 	}
 	return c, nil
 }
@@ -679,17 +679,17 @@ func (r *Resolver) goLookupSRV(ctx context.Context, service, proto, name string)
 	} else {
 		target = "_" + service + "._" + proto + "." + name
 	}
-	p, server, err := r.lookup(ctx, target, dnsmessage.TypeSRV, nil)
-	if err != nil {
-		return "", nil, err
+	p, server, err4 := r.lookup(ctx, target, dnsmessage.TypeSRV, nil)
+	if err4 != nil {
+		return "", nil, err4
 	}
 	var cname dnsmessage.Name
 	for {
-		h, err := p.AnswerHeader()
-		if err == dnsmessage.ErrSectionDone {
+		h, err3 := p.AnswerHeader()
+		if err3 == dnsmessage.ErrSectionDone {
 			break
 		}
-		if err != nil {
+		if err3 != nil {
 			return "", nil, &DNSError{
 				Err:    "cannot unmarshal DNS message",
 				Name:   name,
@@ -697,7 +697,7 @@ func (r *Resolver) goLookupSRV(ctx context.Context, service, proto, name string)
 			}
 		}
 		if h.Type != dnsmessage.TypeSRV {
-			if err := p.SkipAnswer(); err != nil {
+			if err1 := p.SkipAnswer(); err1 != nil {
 				return "", nil, &DNSError{
 					Err:    "cannot unmarshal DNS message",
 					Name:   name,
@@ -709,8 +709,8 @@ func (r *Resolver) goLookupSRV(ctx context.Context, service, proto, name string)
 		if cname.Length == 0 && h.Name.Length != 0 {
 			cname = h.Name
 		}
-		srv, err := p.SRVResource()
-		if err != nil {
+		srv, err2 := p.SRVResource()
+		if err2 != nil {
 			return "", nil, &DNSError{
 				Err:    "cannot unmarshal DNS message",
 				Name:   name,
@@ -726,17 +726,17 @@ func (r *Resolver) goLookupSRV(ctx context.Context, service, proto, name string)
 
 // goLookupMX returns the MX records for name.
 func (r *Resolver) goLookupMX(ctx context.Context, name string) ([]*MX, error) {
-	p, server, err := r.lookup(ctx, name, dnsmessage.TypeMX, nil)
-	if err != nil {
-		return nil, err
+	p, server, err4 := r.lookup(ctx, name, dnsmessage.TypeMX, nil)
+	if err4 != nil {
+		return nil, err4
 	}
 	var mxs []*MX
 	for {
-		h, err := p.AnswerHeader()
-		if err == dnsmessage.ErrSectionDone {
+		h, err3 := p.AnswerHeader()
+		if err3 == dnsmessage.ErrSectionDone {
 			break
 		}
-		if err != nil {
+		if err3 != nil {
 			return nil, &DNSError{
 				Err:    "cannot unmarshal DNS message",
 				Name:   name,
@@ -744,7 +744,7 @@ func (r *Resolver) goLookupMX(ctx context.Context, name string) ([]*MX, error) {
 			}
 		}
 		if h.Type != dnsmessage.TypeMX {
-			if err := p.SkipAnswer(); err != nil {
+			if err1 := p.SkipAnswer(); err1 != nil {
 				return nil, &DNSError{
 					Err:    "cannot unmarshal DNS message",
 					Name:   name,
@@ -753,8 +753,8 @@ func (r *Resolver) goLookupMX(ctx context.Context, name string) ([]*MX, error) {
 			}
 			continue
 		}
-		mx, err := p.MXResource()
-		if err != nil {
+		mx, err2 := p.MXResource()
+		if err2 != nil {
 			return nil, &DNSError{
 				Err:    "cannot unmarshal DNS message",
 				Name:   name,
@@ -771,17 +771,17 @@ func (r *Resolver) goLookupMX(ctx context.Context, name string) ([]*MX, error) {
 
 // goLookupNS returns the NS records for name.
 func (r *Resolver) goLookupNS(ctx context.Context, name string) ([]*NS, error) {
-	p, server, err := r.lookup(ctx, name, dnsmessage.TypeNS, nil)
-	if err != nil {
-		return nil, err
+	p, server, err4 := r.lookup(ctx, name, dnsmessage.TypeNS, nil)
+	if err4 != nil {
+		return nil, err4
 	}
 	var nss []*NS
 	for {
-		h, err := p.AnswerHeader()
-		if err == dnsmessage.ErrSectionDone {
+		h, err3 := p.AnswerHeader()
+		if err3 == dnsmessage.ErrSectionDone {
 			break
 		}
-		if err != nil {
+		if err3 != nil {
 			return nil, &DNSError{
 				Err:    "cannot unmarshal DNS message",
 				Name:   name,
@@ -789,7 +789,7 @@ func (r *Resolver) goLookupNS(ctx context.Context, name string) ([]*NS, error) {
 			}
 		}
 		if h.Type != dnsmessage.TypeNS {
-			if err := p.SkipAnswer(); err != nil {
+			if err1 := p.SkipAnswer(); err1 != nil {
 				return nil, &DNSError{
 					Err:    "cannot unmarshal DNS message",
 					Name:   name,
@@ -798,8 +798,8 @@ func (r *Resolver) goLookupNS(ctx context.Context, name string) ([]*NS, error) {
 			}
 			continue
 		}
-		ns, err := p.NSResource()
-		if err != nil {
+		ns, err2 := p.NSResource()
+		if err2 != nil {
 			return nil, &DNSError{
 				Err:    "cannot unmarshal DNS message",
 				Name:   name,
@@ -814,17 +814,17 @@ func (r *Resolver) goLookupNS(ctx context.Context, name string) ([]*NS, error) {
 
 // goLookupTXT returns the TXT records from name.
 func (r *Resolver) goLookupTXT(ctx context.Context, name string) ([][]byte, error) {
-	p, server, err := r.lookup(ctx, name, dnsmessage.TypeTXT, nil)
-	if err != nil {
-		return nil, err
+	p, server, err4 := r.lookup(ctx, name, dnsmessage.TypeTXT, nil)
+	if err4 != nil {
+		return nil, err4
 	}
 	var txts [][]byte
 	for {
-		h, err := p.AnswerHeader()
-		if err == dnsmessage.ErrSectionDone {
+		h, err3 := p.AnswerHeader()
+		if err3 == dnsmessage.ErrSectionDone {
 			break
 		}
-		if err != nil {
+		if err3 != nil {
 			return nil, &DNSError{
 				Err:    "cannot unmarshal DNS message",
 				Name:   name,
@@ -832,7 +832,7 @@ func (r *Resolver) goLookupTXT(ctx context.Context, name string) ([][]byte, erro
 			}
 		}
 		if h.Type != dnsmessage.TypeTXT {
-			if err := p.SkipAnswer(); err != nil {
+			if err1 := p.SkipAnswer(); err1 != nil {
 				return nil, &DNSError{
 					Err:    "cannot unmarshal DNS message",
 					Name:   name,
@@ -841,8 +841,8 @@ func (r *Resolver) goLookupTXT(ctx context.Context, name string) ([][]byte, erro
 			}
 			continue
 		}
-		txt, err := p.TXTResource()
-		if err != nil {
+		txt, err2 := p.TXTResource()
+		if err2 != nil {
 			return nil, &DNSError{
 				Err:    "cannot unmarshal DNS message",
 				Name:   name,

@@ -3055,7 +3055,11 @@ func loadMxhData(data []byte) (ok bool) {
 					n := ssaParseInt64(cval)
 					val = &ConstInt{V: n}
 				} else {
-					if b, isb := typ.(*Basic); isb && (b.Kind == TCString || b.Kind == UntypedString) {
+					// A named string kind (`type Const string`) is not a
+					// *Basic: without unwrapping it a re-exported sentinel
+					// like fs.ErrNotExist was read back as ConstInt{0}, so
+					// every errors.Const comparison against it failed.
+					if b, isb := SafeUnderlying(typ).(*Basic); isb && (b.Kind == TCString || b.Kind == UntypedString) {
 						val = &ConstStr{S: cval}
 					} else {
 						val = &ConstInt{V: 0}
@@ -5505,6 +5509,13 @@ func workerEntryExport(arg unsafe.Pointer) {
 		hashes[i] = pkgHash(meta.pkgs[i])
 	}
 
+	// Whole-link registry: dispatch chains must see every type in the link,
+	// not just the compiling package's deps.
+	if lsErr := workerLoadLinkSet(meta, hashes); lsErr != "" {
+		workerSendResult(ringB, -1, lsErr)
+		return
+	}
+
 	// Work loop: receive job index, compile, send result
 	for {
 		idx, ok := ringRecvInt32(ringA)
@@ -5543,20 +5554,6 @@ func workerSendResult(ring unsafe.Pointer, idx int32, errMsg string) {
 
 // workerLoadDeps recursively loads .mxh files for a package's imports,
 // ensuring transitive deps are loaded before the package that references them.
-// resetWorkerRegistry clears every non-builtin package from the registry so
-// a worker's next compile sees only the builtins (unsafe, moxie, runtime,
-// os) plus whatever deps workerLoadDeps loads for the current package. The
-// worker reuses one thread for many packages; without the reset the registry
-// accumulates the union of prior packages' deps and interface dispatch /
-// descriptor emission become scheduling-dependent.
-func resetWorkerRegistry() {
-	for k := range cctx.universe.Registry {
-		if k != "unsafe" && k != "runtime" && k != "os" {
-			delete(cctx.universe.Registry, k)
-		}
-	}
-}
-
 func workerLoadDeps(pkg *pkgInfo, meta *workerMeta, idxByPath map[string]int32, hashes []string) (errMsg string) {
 	for _, imp := range pkg.imports {
 		di, ok := idxByPath[imp]
@@ -5586,12 +5583,42 @@ func workerLoadDeps(pkg *pkgInfo, meta *workerMeta, idxByPath map[string]int32, 
 	return ""
 }
 
+// workerLoadLinkSet loads every package's .mxh into the worker registry once,
+// before any job runs. Interface dispatch emits a typeID switch over the
+// registry, so a package's dispatch must enumerate the whole link set - the
+// same invariant the serial path gets from its whole-link pre-pass. Loading
+// only a package's own deps leaves downstream types invisible, which makes a
+// spawn-channel Codec dispatch fall through to "no impl" depending on which
+// worker happened to compile the runtime. The set is fixed at startup, so
+// this is deterministic, not scheduling-dependent.
+func workerLoadLinkSet(meta *workerMeta, hashes []string) (errMsg string) {
+	for i := int32(0); i < int32(len(meta.pkgs)); i++ {
+		dep := meta.pkgs[i]
+		compilePath := dep.path
+		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
+			compilePath = dep.name
+		}
+		if existing := cctx.universe.Registry[compilePath]; existing != nil && !existing.Synthetic {
+			continue
+		}
+		cachedMxh := cachedMxhPath(meta.cacheBase, dep.path, hashes[i], dep.version)
+		if !mxutil.FileExists(cachedMxh) {
+			continue
+		}
+		if !loadMxh(cachedMxh) {
+			return "missing link-set .mxh for " | dep.path
+		}
+		src := concatSources(dep.dir, dep.files)
+		ScanGenericDecls(src, compilePath)
+	}
+	return ""
+}
+
 // workerCompilePkg compiles one package in the worker thread. All deps must
 // already have .mxh in cache. Returns empty string on success, error text on failure.
 func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map[string]int32, hashes []string) (errMsg string) {
-	resetWorkerRegistry()
-
-	// Load all dependency .mxh from cache (recursively, transitive deps first)
+	// The whole link set is already loaded (workerLoadLinkSet at startup);
+	// reloading the deps is a no-op that keeps a lone worker correct.
 	if loadErr := workerLoadDeps(pkg, meta, idxByPath, hashes); loadErr != "" {
 		return loadErr
 	}

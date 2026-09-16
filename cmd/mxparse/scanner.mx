@@ -247,15 +247,15 @@ func (s *Source) fill() {
 }
 
 func nextSize(size int32) (n int32) {
-	const min = 4 << 10
-	const max = 1 << 20
-	if size < min {
-		return min
+	const min1 = 4 << 10
+	const max1 = 1 << 20
+	if size < min1 {
+		return min1
 	}
-	if size <= max {
+	if size <= max1 {
 		return size << 1
 	}
-	return size + max
+	return size + max1
 }
 
 
@@ -685,12 +685,12 @@ func IsHex(ch rune) (ok bool) { return '0' <= ch && ch <= '9' || 'a' <= Lower(ch
 
 func (s *Scanner) Digits(base int32, invalid *int32) (digsep int32) {
 	if base <= 10 {
-		max := rune('0' + base)
+		maxR := rune('0' + base)
 		for IsDecimal(s.ch) || s.ch == '_' {
 			ds := int32(1)
 			if s.ch == '_' {
 				ds = 2
-			} else if s.ch >= max && *invalid < 0 {
+			} else if s.ch >= maxR && *invalid < 0 {
 				_, col := s.pos()
 				*invalid = int32(col - s.col)
 			}
@@ -2492,19 +2492,19 @@ func isEmptyFuncDecl(dcl Decl) (ok bool) {
 // elements are accepted. list returns the position of the closing 
 //
 // list = [ f { sep f } [sep] ] close .
-func (p *Parser) list(context string, sep, close Token, f func() bool) (pv Pos) {
-	if debug && (sep != Comma && sep != Semi || close != Rparen && close != Rbrace && close != Rbrack) {
-		panic("invalid sep or close argument for list")
+func (p *Parser) list(context string, sep, closeTok Token, f func() bool) (pv Pos) {
+	if debug && (sep != Comma && sep != Semi || closeTok != Rparen && closeTok != Rbrace && closeTok != Rbrack) {
+		panic("invalid sep or closeTok argument for list")
 	}
 
 	done := false
-	for p.Tok != EOF && p.Tok != close && !done {
+	for p.Tok != EOF && p.Tok != closeTok && !done {
 		done = f()
-		// sep is optional before close
-		if !p.got(sep) && p.Tok != close {
-			p.syntaxError("in " | context | "; possibly missing " | tokstring(sep) | " or " | tokstring(close))
+		// sep is optional before closeTok
+		if !p.got(sep) && p.Tok != closeTok {
+			p.syntaxError("in " | context | "; possibly missing " | tokstring(sep) | " or " | tokstring(closeTok))
 			p.advance(Rparen, Rbrack, Rbrace)
-			if p.Tok != close {
+			if p.Tok != closeTok {
 				// position could be better but we had an error so we don't care
 				return p.pos()
 			}
@@ -2512,7 +2512,7 @@ func (p *Parser) list(context string, sep, close Token, f func() bool) (pv Pos) 
 	}
 
 	pos := p.pos()
-	p.want(close)
+	p.want(closeTok)
 	return pos
 }
 
@@ -3475,14 +3475,14 @@ func (p *Parser) funcType(context string) ([]*Field, *FuncType) {
 
 // "[" has already been consumed, and pos is its position.
 // If len != nil it is the already consumed array length.
-func (p *Parser) arrayType(pos Pos, len Expr) (e Expr) {
+func (p *Parser) arrayType(pos Pos, n Expr) (e Expr) {
 	if trace {
 		defer p.trace("arrayType")()
 	}
 
-	if len == nil && !p.got(DotDotDot) {
+	if n == nil && !p.got(DotDotDot) {
 		p.Xnest++
-		len = p.expr()
+		n = p.expr()
 		p.Xnest--
 	}
 	if p.Tok == Comma {
@@ -3495,7 +3495,7 @@ func (p *Parser) arrayType(pos Pos, len Expr) (e Expr) {
 	p.want(Rbrack)
 	t := &ArrayType{}
 	t.pos = pos
-	t.Len = len
+	t.Len = n
 	t.Elem = p.type_()
 	return t
 }
@@ -3989,14 +3989,14 @@ func (p *Parser) paramDeclOrNil(name *Name, follow Token) (f *Field) {
 // If name != nil, it is the first name after "(" or "[".
 // If typ != nil, name must be != nil, and (name, typ) is the first field in the list.
 // In the result list, either all fields have a name, or no field has a name.
-func (p *Parser) paramList(name *Name, typ Expr, close Token, requireNames, dddok bool) (list []*Field) {
+func (p *Parser) paramList(name *Name, typ Expr, closeTok Token, requireNames, dddok bool) (list []*Field) {
 	if trace {
 		defer p.trace("paramList")()
 	}
 
 	// p.list won't invoke its function argument if we're at the end of the
 	// parameter list. If we have a complete field, handle this case here.
-	if name != nil && typ != nil && p.Tok == close {
+	if name != nil && typ != nil && p.Tok == closeTok {
 		p.Next()
 		par := &Field{}
 		par.pos = name.pos
@@ -4007,7 +4007,7 @@ func (p *Parser) paramList(name *Name, typ Expr, close Token, requireNames, dddo
 
 	var named int32 // number of parameters that have an explicit name and type
 	var typed int32 // number of parameters that have an explicit type
-	end := p.list("parameter list", Comma, close, func() bool {
+	end := p.list("parameter list", Comma, closeTok, func() bool {
 		var par *Field
 		if typ != nil {
 			if debug && name == nil {
@@ -4018,7 +4018,7 @@ func (p *Parser) paramList(name *Name, typ Expr, close Token, requireNames, dddo
 			par.Name = name
 			par.Type = typ
 		} else {
-			par = p.paramDeclOrNil(name, close)
+			par = p.paramDeclOrNil(name, closeTok)
 		}
 		name = nil // 1st name was consumed if present
 		typ = nil  // 1st type was consumed if present
