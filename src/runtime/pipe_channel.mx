@@ -14,7 +14,6 @@ package runtime
 //   - child death    -> waitpid on the parent, getppid on the child
 
 import (
-	"internal/task"
 	"moxie"
 	"unsafe"
 )
@@ -260,43 +259,6 @@ func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
 		return false, false
 	}
 	return false, false
-}
-
-// pipeSelectRecheck is called from chanSelect's blocking poll loop to
-// detect readiness on spawn-bound channels (which have no in-runtime
-// waker mechanism). It returns true if any state proceeded, with t.Data
-// updated to encode the case index + completion status.
-//
-// Single-threaded scheduler: the CAS always wins. The CAS is kept for
-// correctness if/when this is ported to a multi-thread scheduler.
-func pipeSelectRecheck(t *task.Task, states []chanSelectState, recvbuf unsafe.Pointer) bool {
-	for i, state := range states {
-		if state.ch == nil || !state.ch.spawnBound {
-			continue
-		}
-		var newDataValue uint32
-		if state.value == nil {
-			received, ok := state.ch.tryPipeRecv(recvbuf)
-			if !received {
-				continue
-			}
-			newDataValue = uint32(uint32(i) << 2)
-			if !ok {
-				newDataValue |= chanOperationClosed
-			} else {
-				newDataValue |= chanOperationOk
-			}
-		} else {
-			if !state.ch.tryPipeSend(state.value) {
-				continue
-			}
-			newDataValue = uint32(uint32(i)<<2) | chanOperationOk
-		}
-		if t.CompareAndSwapDataUint32(0, newDataValue) {
-			return true
-		}
-	}
-	return false
 }
 
 // ChanSendDual is the runtime dispatch the compiler emits for any

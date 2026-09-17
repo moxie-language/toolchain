@@ -49,13 +49,6 @@ type DomainRoot struct {
 	manualStack  []*Arena // stack of previous manual arenas for nested manual phases
 	manualTop    int32
 	sovereignRoot *hashmap // receiver -> sovereign arena, created lazily in root arena
-	// sovDataList holds every sovereign group. A relocation that leaves a
-	// frame must not alias data owned by one of them: the data arena is not
-	// on the fn stack, it lives and dies with its receiver, and nothing
-	// guarantees the receiver outlives the caller. Copying is always safe.
-	// Groups are kept (not arenas) so freed groups can be skipped: a freed
-	// data arena's memory is gone, including its Arena header.
-	sovDataList []*sovGroup
 	domStack []uintptr // child domain root addresses
 	domTop   int32
 	root     Arena // inline root arena, fnStack[0] = &root
@@ -358,22 +351,6 @@ func sovRootAlloc(sz uintptr) unsafe.Pointer {
 // be freed. The list has root lifetime: it must outlive the frame that
 // created the group.
 func sovTrackArenaGroup(g *sovGroup) {
-	// Register the data arena globally: most receivers are not inside any
-	// arena on the fn stack (stack locals, globals, relocated copies), so the
-	// per-arena list alone cannot tell that a pointer is sovereign data.
-	if g.data != nil {
-		n := len(domainRoot.sovDataList)
-		if n >= cap(domainRoot.sovDataList) {
-			nc := cap(domainRoot.sovDataList) * 2
-			if nc < 16 {
-				nc = 16
-			}
-			nb := unsafe.Slice((**sovGroup)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(&sovGroup{}))), nc)
-			copy(nb, domainRoot.sovDataList)
-			domainRoot.sovDataList = nb[:n]
-		}
-		domainRoot.sovDataList = push(domainRoot.sovDataList, g)
-	}
 	a := g.ctxArena
 	if a == nil {
 		return
@@ -389,21 +366,6 @@ func sovTrackArenaGroup(g *sovGroup) {
 		a.sovGroupList = nb[:len(a.sovGroupList)]
 	}
 	a.sovGroupList = push(a.sovGroupList, g)
-}
-
-// sovInSovereignDataArena reports whether p points into any live sovereign
-// data arena. Such data must be copied, never aliased, by a relocation that
-// leaves a frame.
-func sovInSovereignDataArena(p uintptr) (ok bool) {
-	for _, g := range domainRoot.sovDataList {
-		if g == nil || g.released || g.data == nil {
-			continue
-		}
-		if codecArenaContains(g.data, p) {
-			return true
-		}
-	}
-	return false
 }
 
 // sovGroupInDyingArena reports whether p points into the data arena of a
@@ -1032,10 +994,13 @@ func codecSovereignCompact(g *sovGroup, needed uintptr) {
 	ArenaFree(oldTbl)
 	ArenaFree(oldData)
 	g.data = nd
-	// The old data arena is unmapped; any frame that registered it as
-	// stable (the current method's prologue, or a nested same-receiver
-	// frame whose stableStack entry captured it) now must see the relocated
-	// arena instead.
+	// The old data arena is unmapped, so every structure that still names it
+	// must be pointed at the relocated arena. That is not just the top frame:
+	// a mutating method on the receiver can be nested inside another mutating
+	// method on the same receiver, and both frames borrow the same data arena.
+	// The inner method's compaction below must therefore repair every fnStack
+	// slot (and the stable registrations) rather than only CurrentArena; an
+	// ancestor left holding the freed arena allocates into unmapped memory.
 	if domainRoot.stableArena == oldData {
 		domainRoot.stableArena = nd
 	}
@@ -1044,8 +1009,18 @@ func codecSovereignCompact(g *sovGroup, needed uintptr) {
 			domainRoot.stableStack[i] = nd
 		}
 	}
-	if CurrentArena() == oldData {
-		SetCurrentArena(nd)
+	for i := int32(0); i <= domainRoot.fnTop; i++ {
+		if domainRoot.fnStack[i] == oldData {
+			domainRoot.fnStack[i] = nd
+		}
+	}
+	if manualArena == oldData {
+		manualArena = nd
+	}
+	for i := int32(0); i < domainRoot.manualTop; i++ {
+		if domainRoot.manualStack[i] == oldData {
+			domainRoot.manualStack[i] = nd
+		}
 	}
 	g.compacting = false
 }

@@ -66,6 +66,35 @@ func codecIsStableArenaAddr(p uintptr) (ok bool) {
 	if domainRoot == nil {
 		return true
 	}
+	if codecRetTransient {
+		// Return-value encoding. The callee's working arena is the top of the
+		// fn stack, and it dies at return in both shapes: a plain frame is
+		// popped and released, and a borrowed sovereign data arena has this
+		// call's batch reclaimed by codecSovereignEndCall (and any later method
+		// boundary on the same receiver can copy-compact it). Aliasing data
+		// from it hands the caller memory the receiver is free to reclaim, so
+		// the top frame is always transient - borrowed or not. This must be
+		// decided before the stableArena test: a mutating method registers the
+		// same borrowed arena as stable, and that early "true" is what handed
+		// back an event whose ID slice pointed into a reclaimed data arena.
+		// Ancestor arenas keep identity: caller locals passed as receivers to
+		// nested calls must still alias.
+		if domainRoot.fnTop >= 1 {
+			top := domainRoot.fnStack[domainRoot.fnTop]
+			if codecArenaContains(top, p) {
+				return false
+			}
+			// A sovereign group whose receiver lives in the frame being
+			// released is freed with it (sovInvalidateArena). Data owned by
+			// such a group must be copied, not aliased.
+			if sovGroupInDyingArena(top, p) {
+				return false
+			}
+		}
+		if codecOnStack(p) {
+			return false
+		}
+	}
 	if domainRoot.stableArena != nil && codecArenaContains(domainRoot.stableArena, p) {
 		return true
 	}
@@ -85,36 +114,6 @@ func codecIsStableArenaAddr(p uintptr) (ok bool) {
 		return true
 	}
 	if codecRetTransient {
-		// Return-value encoding: only the callee's own fn arena (the top
-		// of the stack) dies at return. Pointers into any other arena -
-		// including ancestor function arenas - keep identity so caller
-		// locals passed as receivers to nested calls (e.g. chained
-		// method calls on a sovereign method's locals) alias correctly.
-		if domainRoot.fnTop >= 1 {
-			i := domainRoot.fnTop
-			if domainRoot.fnBorrow[i>>6]&(1<<(i&63)) == 0 &&
-				codecArenaContains(domainRoot.fnStack[i], p) {
-				return false
-			}
-			// A sovereign group whose receiver lives in the frame being
-			// released is freed with it (sovInvalidateArena). Data owned by
-			// such a group must be copied, not aliased: the caller keeps its
-			// copy after this frame is gone. Getting this wrong handed back
-			// an event whose ID slice pointed into the freed data arena.
-			if sovGroupInDyingArena(domainRoot.fnStack[i], p) {
-				return false
-			}
-		}
-		if codecOnStack(p) {
-			return false
-		}
-		// Sovereign data is owned by its receiver, not by an arena on the fn
-		// stack. A relocation that leaves a frame must copy it: the receiver
-		// may die with any enclosing frame, and then the data arena is freed
-		// or compacted while the caller still points into it.
-		if sovInSovereignDataArena(p) {
-			return false
-		}
 		return true
 	}
 	nreg := domainRoot.fnTop
@@ -462,15 +461,14 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		codecWriteVarint(cb, codecTagIface)
 		codecWriteBytes(cb, unsafe.Slice((*byte)(unsafe.Pointer(&iface.typecode)), codecPtrSize()))
 		// Plausibility bound for a type descriptor pointer: above the first
-		// page and below the top of the address space. The upper bound must
-		// suit the target's pointer width - on a 32-bit target
-		// uintptr(1)<<48 overflows to 0, making the test "below zero" and
-		// silently rejecting every descriptor, which truncates the wire
-		// format and desynchronises the decode side.
+		// page and below the top of the address space. On a 32-bit target
+		// the whole space is plausible, so there is no upper bound to apply:
+		// 2^48 does not fit a uintptr there, and shifting a 32-bit value by
+		// 48 is not expressible at all.
 		tc := uintptr(iface.typecode)
-		tcMax := uintptr(1) << 48
-		if tcMax == 0 {
-			tcMax = ^uintptr(0)
+		tcMax := ^uintptr(0)
+		if codecPtrSize() >= 8 {
+			tcMax = ^uintptr(0) >> 16
 		}
 		if tc > 0x1000 && tc < tcMax {
 			ct := (*RawType)(iface.typecode)
