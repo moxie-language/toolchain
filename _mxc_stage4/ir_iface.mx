@@ -39,18 +39,14 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 	var valPtr string
 	if valType == "ptr" {
 		valPtr = val
-	} else if e.isScalarType(valType) {
-		// Always heap-allocate scalar values for interface boxing.
-		// The invoke dispatch passes the value pointer to methods that
-		// dereference it; inlining via inttoptr produces an invalid address.
-		ipt := e.intptrType()
-		sz := e.nextReg2("mi")
-		e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(valType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
-		valPtr = e.nextReg2("mi")
-		e.w("  ") ; e.w(valPtr) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
-		e.w("  store ") ; e.w(valType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
-		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
-		e.scopeTrackAlloc(valPtr)
+	} else if e.isScalarType(valType) && e.ifaceInlineWidth(valType) > 0 && e.ifaceInlineWidth(valType) <= e.intBits(e.intptrType()) {
+		// A value that fits in a pointer is stored INLINE in the value
+		// slot. The shared codec (codecEncodeValue KindInterface) and the
+		// legacy compiler's emitPointerPack both define the representation
+		// that way, so boxing here made the codec copy the box pointer as
+		// if it were the value: after relocation the interface pointed at
+		// a box in the source frame's arena, which then died with it.
+		valPtr = e.emitInlineToPtr(valType, val, "mi")
 	} else {
 		ipt := e.intptrType()
 		sz := e.nextReg2("ha")
@@ -65,6 +61,97 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 	t1 := e.nextReg2("mi")
 	e.w("  ") ; e.w(t1) ; e.w(" = insertvalue " | e.ifaceType() | " undef, " | e.intptrType() | " ") ; e.w(typeid) ; e.w(", 0\n")
 	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue " | e.ifaceType() | " ") ; e.w(t1) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", 1\n")
+}
+
+// ifaceInlineWidth returns the bit width of a concrete value that the
+// interface representation stores INLINE in the value slot, or 0 when the
+// value is stored out of line behind a pointer. The rule mirrors the
+// legacy compiler's emitPointerPack and the shared codec's
+// codecEncodeValue KindInterface: anything no wider than a pointer is the
+// data itself; pointers pass through unchanged.
+func (e *irEmitter) ifaceInlineWidth(lt string) (bits int32) {
+	if lt == "float" {
+		return 32
+	}
+	if lt == "double" {
+		return 64
+	}
+	ib := e.intBits(lt)
+	return ib
+}
+
+// emitInlineToPtr stores an inline concrete value in the interface value
+// slot by reinterpreting it as a pointer, exactly as emitPointerPack does.
+func (e *irEmitter) emitInlineToPtr(lt, val, prefix string) (reg string) {
+	ipt := e.intptrType()
+	reg = e.nextReg2(prefix)
+	if lt == "float" {
+		ib := e.nextReg2(prefix)
+		e.w("  ") ; e.w(ib) ; e.w(" = bitcast float ") ; e.w(val) ; e.w(" to i32\n")
+		ext := e.nextReg2(prefix)
+		e.w("  ") ; e.w(ext) ; e.w(" = zext i32 ") ; e.w(ib) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = inttoptr ") ; e.w(ipt) ; e.w(" ") ; e.w(ext) ; e.w(" to ptr\n")
+		return reg
+	}
+	if lt == "double" {
+		ib := e.nextReg2(prefix)
+		e.w("  ") ; e.w(ib) ; e.w(" = bitcast double ") ; e.w(val) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = inttoptr ") ; e.w(ipt) ; e.w(" ") ; e.w(ib) ; e.w(" to ptr\n")
+		return reg
+	}
+	if e.intBits(lt) == e.intBits(ipt) {
+		e.w("  ") ; e.w(reg) ; e.w(" = inttoptr ") ; e.w(ipt) ; e.w(" ") ; e.w(val) ; e.w(" to ptr\n")
+		return reg
+	}
+	extw := e.nextReg2(prefix)
+	e.w("  ") ; e.w(extw) ; e.w(" = zext ") ; e.w(lt) ; e.w(" ") ; e.w(val) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+	e.w("  ") ; e.w(reg) ; e.w(" = inttoptr ") ; e.w(ipt) ; e.w(" ") ; e.w(extw) ; e.w(" to ptr\n")
+	return reg
+}
+
+// emitInlineFromPtr extracts an inline concrete value from an interface
+// value slot. The mirror of emitInlineToPtr.
+func (e *irEmitter) emitInlineFromPtr(lt, valPtr, prefix string) (s string) {
+	ipt := e.intptrType()
+	iv := e.nextReg2(prefix)
+	e.w("  ") ; e.w(iv) ; e.w(" = ptrtoint ptr ") ; e.w(valPtr) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+	if lt == "float" {
+		t32 := e.nextReg2(prefix)
+		e.w("  ") ; e.w(t32) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(iv) ; e.w(" to i32\n")
+		s = e.nextReg2(prefix)
+		e.w("  ") ; e.w(s) ; e.w(" = bitcast i32 ") ; e.w(t32) ; e.w(" to float\n")
+		return s
+	}
+	if lt == "double" {
+		s = e.nextReg2(prefix)
+		e.w("  ") ; e.w(s) ; e.w(" = bitcast ") ; e.w(ipt) ; e.w(" ") ; e.w(iv) ; e.w(" to double\n")
+		return s
+	}
+	if e.intBits(lt) == e.intBits(ipt) {
+		return iv
+	}
+	s = e.nextReg2(prefix)
+	e.w("  ") ; e.w(s) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(iv) ; e.w(" to ") ; e.w(lt) ; e.w("\n")
+	return s
+}
+
+// materializeIfaceValue returns a pointer to the concrete data behind an
+// interface value slot. An inline value (fits in a pointer) is unpacked
+// into a fresh alloca; anything else already is that pointer.
+func (e *irEmitter) materializeIfaceValue(t Type, valPtr string) (reg string) {
+	if t == nil {
+		return valPtr
+	}
+	lt := e.llvmType(t)
+	w := e.ifaceInlineWidth(lt)
+	if w <= 0 || w > e.intBits(e.intptrType()) {
+		return valPtr
+	}
+	v := e.emitInlineFromPtr(lt, valPtr, "ifv")
+	reg = e.nextReg2("ifa")
+	e.w("  ") ; e.w(reg) ; e.w(" = alloca ") ; e.w(lt) ; e.w("\n")
+	e.w("  store ") ; e.w(lt) ; e.w(" ") ; e.w(v) ; e.w(", ptr ") ; e.w(reg) ; e.w("\n")
+	return reg
 }
 
 // typeIDHash returns the interface type-ID for t: the descriptor pointer
@@ -1117,16 +1204,21 @@ func (e *irEmitter) boxConcreteToIfaceParam(paramType Type, arg SSAValue, argT, 
 	}
 	ity := e.ifaceType()
 	if argT != "ptr" {
-		// Non-pointer concrete value: heap-allocate a copy and box its address.
-		ipt := e.intptrType()
-		sz := e.nextReg2("boxsz")
-		e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(argT) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
-		vp := e.nextReg2("boxvp")
-		e.w("  ") ; e.w(vp) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
-		e.w("  store ") ; e.w(argT) ; e.w(" ") ; e.w(argV) ; e.w(", ptr ") ; e.w(vp) ; e.w("\n")
-		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
-		e.scopeTrackAlloc(vp)
-		argV = vp
+		if w := e.ifaceInlineWidth(argT); w > 0 && w <= e.intBits(e.intptrType()) {
+			// Fits in a pointer: inline in the value slot.
+			argV = e.emitInlineToPtr(argT, argV, "box")
+		} else {
+			// Wider than a pointer: heap-allocate a copy and box its address.
+			ipt := e.intptrType()
+			sz := e.nextReg2("boxsz")
+			e.w("  ") ; e.w(sz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(argT) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+			vp := e.nextReg2("boxvp")
+			e.w("  ") ; e.w(vp) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
+			e.w("  store ") ; e.w(argT) ; e.w(" ") ; e.w(argV) ; e.w(", ptr ") ; e.w(vp) ; e.w("\n")
+			e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
+			e.scopeTrackAlloc(vp)
+			argV = vp
+		}
 	}
 	typeid := e.typeIDHash(arg.SSAType())
 	e.nextReg++
@@ -1228,9 +1320,9 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 
 	if len(impls) == 1 {
 		impl := impls[0]
-		callRecv := valPtr
+		callRecv := e.materializeIfaceValue(impl.recvType, valPtr)
 		if impl.embedType != nil {
-			callRecv = e.emitEmbedChainGEP(impl, valPtr)
+			callRecv = e.emitEmbedChainGEP(impl, callRecv)
 		}
 		// All receivers are ptr in Moxie.
 		recvLLVM := "ptr"
@@ -1286,9 +1378,9 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 
 		e.w(caseLabels[i]) ; e.w(":\n")
 		// All receivers are ptr in Moxie.
-		callRecv := valPtr
+		callRecv := e.materializeIfaceValue(impl.recvType, valPtr)
 		if impl.embedType != nil {
-			callRecv = e.emitEmbedChainGEP(impl, valPtr)
+			callRecv = e.emitEmbedChainGEP(impl, callRecv)
 		}
 		recvLLVM := "ptr"
 		recv := callRecv
@@ -1456,19 +1548,11 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 			loaded = e.nextReg2("ta")
 			e.w("  ") ; e.w(loaded) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", ptr null\n")
 		} else if e.isScalarType(assertedType) {
-			// The interface data pointer is null for a nil interface and
-			// meaningless when the assertion fails, so the load must go
-			// through a pointer that is valid in both cases. Loading valPtr
-			// unconditionally would segfault on a failed assert of a nil
-			// interface (Go spec: a failed comma-ok assert yields the zero
-			// value, and must not touch the interface data).
-			e.nextReg++
-			zeroSlot := "%taz" | irItoa(e.nextReg)
-			e.w("  ") ; e.w(zeroSlot) ; e.w(" = alloca ") ; e.w(assertedType) ; e.w("\n")
-			e.w("  store ") ; e.w(assertedType) ; e.w(" zeroinitializer, ptr ") ; e.w(zeroSlot) ; e.w("\n")
-			safePtr := e.nextReg2("ta")
-			e.w("  ") ; e.w(safePtr) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ptr ") ; e.w(valPtr) ; e.w(", ptr ") ; e.w(zeroSlot) ; e.w("\n")
-			extracted := e.extractScalarFromIface(safePtr, assertedType)
+			// Inline representation: unpacking is a bit-cast of the value
+			// slot, never a load, so a nil interface or a failed assertion
+			// yields zero without touching memory (Go spec: a failed
+			// comma-ok assert yields the zero value).
+			extracted := e.extractScalarFromIface(valPtr, assertedType)
 			zero := "0"
 			if assertedType == "float" || assertedType == "double" {
 				zero = "0.000000e+00"
@@ -1565,10 +1649,8 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 }
 
 func (e *irEmitter) extractScalarFromIface(valPtr string, assertedType string) (s string) {
-	// Interface boxing heap-allocates scalar values and stores a pointer
-	// in the data field (see emitMakeInterface / boxConcreteToIfaceParam),
-	// so the asserted value must be loaded back through that pointer.
-	loaded := e.nextReg2("ta")
-	e.w("  ") ; e.w(loaded) ; e.w(" = load ") ; e.w(assertedType) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
-	return loaded
+	// A scalar that fits in a pointer is stored inline in the interface
+	// value slot (see emitMakeInterface / boxConcreteToIfaceParam), so the
+	// asserted value is that slot reinterpreted, not a load through it.
+	return e.emitInlineFromPtr(assertedType, valPtr, "ta")
 }
