@@ -49,6 +49,11 @@ type DomainRoot struct {
 	manualStack  []*Arena // stack of previous manual arenas for nested manual phases
 	manualTop    int32
 	sovereignRoot *hashmap // receiver -> sovereign arena, created lazily in root arena
+	// sovDataList holds every live sovereign data arena. A relocation that
+	// leaves a frame must not alias data owned by one of them: the arena is
+	// not on the fn stack, it lives and dies with its receiver, and nothing
+	// guarantees the receiver outlives the caller. Copying is always safe.
+	sovDataList []*Arena
 	domStack []uintptr // child domain root addresses
 	domTop   int32
 	root     Arena // inline root arena, fnStack[0] = &root
@@ -350,6 +355,22 @@ func sovRootAlloc(sz uintptr) unsafe.Pointer {
 // be freed. The list has root lifetime: it must outlive the frame that
 // created the group.
 func sovTrackArenaGroup(g *sovGroup) {
+	// Register the data arena globally: most receivers are not inside any
+	// arena on the fn stack (stack locals, globals, relocated copies), so the
+	// per-arena list alone cannot tell that a pointer is sovereign data.
+	if g.data != nil {
+		n := len(domainRoot.sovDataList)
+		if n >= cap(domainRoot.sovDataList) {
+			nc := cap(domainRoot.sovDataList) * 2
+			if nc < 16 {
+				nc = 16
+			}
+			nb := unsafe.Slice((**Arena)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(&Arena{}))), nc)
+			copy(nb, domainRoot.sovDataList)
+			domainRoot.sovDataList = nb[:n]
+		}
+		domainRoot.sovDataList = push(domainRoot.sovDataList, g.data)
+	}
 	a := g.ctxArena
 	if a == nil {
 		return
@@ -365,6 +386,18 @@ func sovTrackArenaGroup(g *sovGroup) {
 		a.sovGroupList = nb[:len(a.sovGroupList)]
 	}
 	a.sovGroupList = push(a.sovGroupList, g)
+}
+
+// sovInSovereignDataArena reports whether p points into any live sovereign
+// data arena. Such data must be copied, never aliased, by a relocation that
+// leaves a frame.
+func sovInSovereignDataArena(p uintptr) (ok bool) {
+	for _, a := range domainRoot.sovDataList {
+		if a != nil && codecArenaContains(a, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // sovGroupInDyingArena reports whether p points into the data arena of a
