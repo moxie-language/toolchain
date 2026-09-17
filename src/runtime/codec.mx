@@ -48,7 +48,21 @@ func codecArenaContains(a *Arena, p uintptr) (ok bool) {
 // When codecTopOnlyTransient is set (sovereign store-backs), only the
 // CURRENT fn arena (the method's scratch) counts as transient: data in
 // the caller's arenas must keep its identity instead of being copied.
+// codecIsStableAddr reports whether a pointer may be kept by identity
+// (aliased) instead of being copied. Stack memory is never stable: frames are
+// reclaimed on return but are not arenas, so the arena scans below cannot see
+// them. Without this, returning a slice of a local array (sha256.Sum256(x)[:]
+// in event.Hash and every similar helper) handed the caller a pointer into a
+// frame that had already returned.
 func codecIsStableAddr(p uintptr) (ok bool) {
+	if codecOnStack(p) {
+		return false
+	}
+	return codecIsStableArenaAddr(p)
+}
+
+// codecIsStableArenaAddr is the arena-only half of codecIsStableAddr.
+func codecIsStableArenaAddr(p uintptr) (ok bool) {
 	if domainRoot == nil {
 		return true
 	}
@@ -106,6 +120,17 @@ func codecIsStableAddr(p uintptr) (ok bool) {
 		}
 	}
 	return true
+}
+
+// codecOnStack reports whether p addresses the current thread's stack. Stack
+// frames are not arenas, so callers must copy stack-backed data rather than
+// alias it across a return.
+func codecOnStack(p uintptr) (ok bool) {
+	if stackTop == 0 {
+		return false
+	}
+	sp := getCurrentStackPointer()
+	return p >= sp && p < stackTop
 }
 
 // codecTopOnlyTransient: see codecIsStableAddr.
