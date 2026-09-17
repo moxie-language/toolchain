@@ -49,11 +49,13 @@ type DomainRoot struct {
 	manualStack  []*Arena // stack of previous manual arenas for nested manual phases
 	manualTop    int32
 	sovereignRoot *hashmap // receiver -> sovereign arena, created lazily in root arena
-	// sovDataList holds every live sovereign data arena. A relocation that
-	// leaves a frame must not alias data owned by one of them: the arena is
-	// not on the fn stack, it lives and dies with its receiver, and nothing
+	// sovDataList holds every sovereign group. A relocation that leaves a
+	// frame must not alias data owned by one of them: the data arena is not
+	// on the fn stack, it lives and dies with its receiver, and nothing
 	// guarantees the receiver outlives the caller. Copying is always safe.
-	sovDataList []*Arena
+	// Groups are kept (not arenas) so freed groups can be skipped: a freed
+	// data arena's memory is gone, including its Arena header.
+	sovDataList []*sovGroup
 	domStack []uintptr // child domain root addresses
 	domTop   int32
 	root     Arena // inline root arena, fnStack[0] = &root
@@ -332,6 +334,7 @@ type sovGroup struct {
 	allocBytes uintptr
 	batchMax   uintptr
 	escaped  bool
+	released bool // group's arenas are freed; skip it in every scan
 	compacting bool // set during copy-compact: ArenaAlloc skips auto-record
 	recs  []*sovRecord // records in allocation order
 	recsSorted bool     // true when recs are sorted by dataAddr
@@ -365,11 +368,11 @@ func sovTrackArenaGroup(g *sovGroup) {
 			if nc < 16 {
 				nc = 16
 			}
-			nb := unsafe.Slice((**Arena)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(&Arena{}))), nc)
+			nb := unsafe.Slice((**sovGroup)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(&sovGroup{}))), nc)
 			copy(nb, domainRoot.sovDataList)
 			domainRoot.sovDataList = nb[:n]
 		}
-		domainRoot.sovDataList = push(domainRoot.sovDataList, g.data)
+		domainRoot.sovDataList = push(domainRoot.sovDataList, g)
 	}
 	a := g.ctxArena
 	if a == nil {
@@ -392,8 +395,11 @@ func sovTrackArenaGroup(g *sovGroup) {
 // data arena. Such data must be copied, never aliased, by a relocation that
 // leaves a frame.
 func sovInSovereignDataArena(p uintptr) (ok bool) {
-	for _, a := range domainRoot.sovDataList {
-		if a != nil && codecArenaContains(a, p) {
+	for _, g := range domainRoot.sovDataList {
+		if g == nil || g.released || g.data == nil {
+			continue
+		}
+		if codecArenaContains(g.data, p) {
 			return true
 		}
 	}
@@ -409,7 +415,10 @@ func sovGroupInDyingArena(a *Arena, p uintptr) (ok bool) {
 		return false
 	}
 	for _, g := range a.sovGroupList {
-		if g != nil && g.data != nil && codecArenaContains(g.data, p) {
+		if g == nil || g.released || g.data == nil {
+			continue
+		}
+		if codecArenaContains(g.data, p) {
 			return true
 		}
 	}
@@ -1180,6 +1189,7 @@ func codecSovereignFree(recv unsafe.Pointer) {
 		return
 	}
 	g := (*sovGroup)(av)
+	g.released = true
 	if g.ctxArena != nil && g.ctxArena.sovGroups > 0 {
 		g.ctxArena.sovGroups--
 	}
@@ -1501,6 +1511,7 @@ func ArenaReset(a *Arena) {
 	}
 	a.nregions = 1
 	a.regions[0].off = arenaDataOffset()
+	a.sovGroupList = a.sovGroupList[:0]
 }
 
 // ArenaAcquire returns a pooled arena with cap >= capacity, or

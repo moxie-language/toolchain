@@ -85,7 +85,7 @@ func (e *irEmitter) ifaceInlineWidth(lt string) (bits int32) {
 func (e *irEmitter) emitInlineToPtr(lt, val, prefix string) (reg string) {
 	ipt := e.intptrType()
 	reg = e.nextReg2(prefix)
-	if lt == "float" {
+	if lt == "float" && e.intBits(ipt) >= 32 {
 		ib := e.nextReg2(prefix)
 		e.w("  ") ; e.w(ib) ; e.w(" = bitcast float ") ; e.w(val) ; e.w(" to i32\n")
 		ext := e.nextReg2(prefix)
@@ -93,7 +93,7 @@ func (e *irEmitter) emitInlineToPtr(lt, val, prefix string) (reg string) {
 		e.w("  ") ; e.w(reg) ; e.w(" = inttoptr ") ; e.w(ipt) ; e.w(" ") ; e.w(ext) ; e.w(" to ptr\n")
 		return reg
 	}
-	if lt == "double" {
+	if lt == "double" && e.intBits(ipt) >= 64 {
 		ib := e.nextReg2(prefix)
 		e.w("  ") ; e.w(ib) ; e.w(" = bitcast double ") ; e.w(val) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
 		e.w("  ") ; e.w(reg) ; e.w(" = inttoptr ") ; e.w(ipt) ; e.w(" ") ; e.w(ib) ; e.w(" to ptr\n")
@@ -115,14 +115,14 @@ func (e *irEmitter) emitInlineFromPtr(lt, valPtr, prefix string) (s string) {
 	ipt := e.intptrType()
 	iv := e.nextReg2(prefix)
 	e.w("  ") ; e.w(iv) ; e.w(" = ptrtoint ptr ") ; e.w(valPtr) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
-	if lt == "float" {
+	if lt == "float" && e.intBits(ipt) >= 32 {
 		t32 := e.nextReg2(prefix)
 		e.w("  ") ; e.w(t32) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(iv) ; e.w(" to i32\n")
 		s = e.nextReg2(prefix)
 		e.w("  ") ; e.w(s) ; e.w(" = bitcast i32 ") ; e.w(t32) ; e.w(" to float\n")
 		return s
 	}
-	if lt == "double" {
+	if lt == "double" && e.intBits(ipt) >= 64 {
 		s = e.nextReg2(prefix)
 		e.w("  ") ; e.w(s) ; e.w(" = bitcast ") ; e.w(ipt) ; e.w(" ") ; e.w(iv) ; e.w(" to double\n")
 		return s
@@ -1652,5 +1652,13 @@ func (e *irEmitter) extractScalarFromIface(valPtr string, assertedType string) (
 	// A scalar that fits in a pointer is stored inline in the interface
 	// value slot (see emitMakeInterface / boxConcreteToIfaceParam), so the
 	// asserted value is that slot reinterpreted, not a load through it.
+	// Anything wider than a pointer (i64/double on a 32-bit target) was
+	// boxed, so it must be loaded through the value pointer.
+	w := e.ifaceInlineWidth(assertedType)
+	if w <= 0 || w > e.intBits(e.intptrType()) {
+		loaded := e.nextReg2("ta")
+		e.w("  ") ; e.w(loaded) ; e.w(" = load ") ; e.w(assertedType) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
+		return loaded
+	}
 	return e.emitInlineFromPtr(assertedType, valPtr, "ta")
 }
