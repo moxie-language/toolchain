@@ -49,6 +49,14 @@ type DomainRoot struct {
 	manualStack  []*Arena // stack of previous manual arenas for nested manual phases
 	manualTop    int32
 	sovereignRoot *hashmap // receiver -> sovereign arena, created lazily in root arena
+	// sovRanges holds [lo, hi) pairs of every live sovereign data-arena
+	// region, sorted by lo. A pointer into one of them is owned by a
+	// receiver and can be reclaimed by that receiver's compaction at any
+	// later method boundary, so a relocation that leaves a frame must copy
+	// it rather than alias it. Sorted + binary search: the earlier linear
+	// scan over every group made each stability check O(groups) and stalled
+	// the compiler on large packages.
+	sovRanges []uint64
 	domStack []uintptr // child domain root addresses
 	domTop   int32
 	root     Arena // inline root arena, fnStack[0] = &root
@@ -346,6 +354,85 @@ func sovRootAlloc(sz uintptr) unsafe.Pointer {
 	return p
 }
 
+// sovRangeRegister records [base, base+cap) as a live sovereign data-arena
+// region. Insertion keeps sovRanges sorted by lo.
+func sovRangeRegister(base, size uintptr) {
+	if size == 0 {
+		return
+	}
+	lo := base
+	hi := base + size
+	r := domainRoot.sovRanges
+	i := int32(0)
+	j := int32(len(r)) / 2
+	for i < j {
+		m := (i + j) / 2
+		if r[m*2] < lo {
+			i = m + 1
+		} else {
+			j = m
+		}
+	}
+	need := len(r) + 2
+	if need > cap(r) {
+		nc := cap(r) * 2
+		if nc < 32 {
+			nc = 32
+		}
+		nb := unsafe.Slice((*uint64)(sovRootAlloc(uintptr(nc)*8)), nc)
+		copy(nb, r)
+		domainRoot.sovRanges = nb[:len(r)]
+		r = domainRoot.sovRanges
+	}
+	r = r[:len(r)+2]
+	copy(r[(i+1)*2:], r[i*2:len(r)-2])
+	r[i*2] = lo
+	r[i*2+1] = hi
+	domainRoot.sovRanges = r
+}
+
+// sovRangeUnregister drops the entry whose lo is base, if present.
+func sovRangeUnregister(base uintptr) {
+	r := domainRoot.sovRanges
+	i := int32(0)
+	j := int32(len(r)) / 2
+	for i < j {
+		m := (i + j) / 2
+		if r[m*2] < base {
+			i = m + 1
+		} else {
+			j = m
+		}
+	}
+	if i*2+1 >= len(r) || r[i*2] != base {
+		return
+	}
+	copy(r[i*2:], r[(i+1)*2:])
+	domainRoot.sovRanges = r[:len(r)-2]
+}
+
+// sovInSovereignDataArena reports whether p lies in a live sovereign
+// data-arena region.
+func sovInSovereignDataArena(p uintptr) (ok bool) {
+	r := domainRoot.sovRanges
+	i := int32(0)
+	j := int32(len(r)) / 2
+	for i < j {
+		m := (i + j) / 2
+		if r[m*2] <= p {
+			i = m + 1
+		} else {
+			j = m
+		}
+	}
+	if i == 0 {
+		return false
+	}
+	lo := r[(i-1)*2]
+	hi := r[(i-1)*2+1]
+	return p >= lo && p < hi
+}
+
 // sovTrackArenaGroup records g as owned by the arena holding its receiver,
 // so a relocation can tell whether a pointer into g's data arena is about to
 // be freed. The list has root lifetime: it must outlive the frame that
@@ -441,6 +528,7 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 	g = (*sovGroup)(alloc(unsafe.Sizeof(sovGroup{}), nil))
 	g.data = sovNewArena(65536)
 	g.data.sovereign = 1
+	sovRangeRegister(g.data.regions[0].base, g.data.regions[0].cap)
 	g.data.owner = g
 	g.allocTbl = sovNewArena(65536)
 	g.refTbl = sovNewArena(65536)
@@ -925,6 +1013,7 @@ func codecSovereignCompact(g *sovGroup, needed uintptr) {
 	newCap := live + g.batchMax + needed + 65536
 	nd := sovNewArena(newCap)
 	nd.sovereign = 1
+	sovRangeRegister(nd.regions[0].base, nd.regions[0].cap)
 	nd.owner = g
 	nt := sovNewArena(65536)
 
@@ -1407,6 +1496,9 @@ func arenaAllocRaw(a *Arena, size uintptr) unsafe.Pointer {
 		a.regions[a.nregions].off = 0
 		a.regions[a.nregions].cap = newCap
 		a.nregions++
+		if a.sovereign != 0 {
+			sovRangeRegister(uintptr(addr), newCap)
+		}
 		active = a.nregions - 1
 	}
 	ptr := unsafe.Pointer(a.regions[active].base + a.regions[active].off)
@@ -1467,6 +1559,11 @@ func ArenaFree(a *Arena) {
 	// Binding rule: sovereign groups whose receivers live in this arena
 	// die with it.
 	sovInvalidateArena(a)
+	for i := int32(0); i < a.nregions; i++ {
+		if a.sovereign != 0 {
+			sovRangeUnregister(a.regions[i].base)
+		}
+	}
 	for i := a.nregions - 1; i > 0; i-- {
 		sysUnmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
 	}
