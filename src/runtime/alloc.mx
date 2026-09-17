@@ -80,7 +80,12 @@ type Arena struct {
 	sovereign int32 // nonzero: sovereign data arena (records allocations)
 	owner     *sovGroup
 	sovGroups int32 // live sovGroups whose receivers live in this arena
-	regions   []ArenaRegion
+	// sovGroupList holds those groups. sovInvalidateArena frees their data
+	// arenas when this arena is released, so a value relocation that is
+	// about to leave a frame must COPY data out of them instead of aliasing
+	// it (see codecIsStableAddr / sovGroupInDyingArena).
+	sovGroupList []*sovGroup
+	regions      []ArenaRegion
 }
 
 // Arena pool: bounded freelist of reset arenas for reuse.
@@ -340,6 +345,44 @@ func sovRootAlloc(sz uintptr) unsafe.Pointer {
 	return p
 }
 
+// sovTrackArenaGroup records g as owned by the arena holding its receiver,
+// so a relocation can tell whether a pointer into g's data arena is about to
+// be freed. The list has root lifetime: it must outlive the frame that
+// created the group.
+func sovTrackArenaGroup(g *sovGroup) {
+	a := g.ctxArena
+	if a == nil {
+		return
+	}
+	need := len(a.sovGroupList) + 1
+	if need > cap(a.sovGroupList) {
+		nc := cap(a.sovGroupList) * 2
+		if nc < 8 {
+			nc = 8
+		}
+		nb := unsafe.Slice((**sovGroup)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(&sovGroup{}))), nc)
+		copy(nb, a.sovGroupList)
+		a.sovGroupList = nb[:len(a.sovGroupList)]
+	}
+	a.sovGroupList = push(a.sovGroupList, g)
+}
+
+// sovGroupInDyingArena reports whether p points into the data arena of a
+// sovereign group whose receiver lives in arena a, i.e. a group that
+// sovInvalidateArena frees the moment a is released. A copy made by a
+// relocation that leaves a's frame must not alias such a data arena.
+func sovGroupInDyingArena(a *Arena, p uintptr) (ok bool) {
+	if a == nil || len(a.sovGroupList) == 0 {
+		return false
+	}
+	for _, g := range a.sovGroupList {
+		if g != nil && g.data != nil && codecArenaContains(g.data, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // sovGrowRecs grows the record slice with root-lifetime backing.
 func sovGrowRecs(g *sovGroup) {
 	nc := cap(g.recs) * 2
@@ -406,6 +449,7 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 	av = unsafe.Pointer(g)
 	SetCurrentArena(save)
 	hashmapSet(m, unsafe.Pointer(&keyv), unsafe.Pointer(&av), h)
+	sovTrackArenaGroup(g)
 	return g
 }
 
@@ -1155,6 +1199,7 @@ func sovInvalidateArena(a *Arena) {
 	for _, recv := range dead {
 		codecSovereignFree(recv)
 	}
+	a.sovGroupList = a.sovGroupList[:0]
 	if a.sovGroups != 0 {
 		a.sovGroups = 0
 	}
