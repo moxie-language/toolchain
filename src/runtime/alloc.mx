@@ -798,6 +798,39 @@ func sovWalkValue(g *sovGroup, p unsafe.Pointer, td *RawType) {
 	sovWalkDepth--
 }
 
+// sovReadable reports whether p lies in memory this domain still owns and may
+// dereference: a live frame or manual arena, a registered sovereign data-arena
+// region, or this thread's own stack. A receiver graph can name an address
+// from an arena that has since been released - or, with a forked domain, from
+// another address space entirely - and reading through such a pointer is what
+// turns a stale reference into a fault. Package globals are zero-value until
+// init and cannot name a sovereign arena, so leaving them out costs no
+// liveness.
+func sovReadable(p uintptr) (ok bool) {
+	if p == 0 {
+		return false
+	}
+	if codecOnStack(p) {
+		return true
+	}
+	if domainRoot != nil {
+		for i := int32(0); i <= domainRoot.fnTop; i++ {
+			if codecArenaContains(domainRoot.fnStack[i], p) {
+				return true
+			}
+		}
+		for i := int32(0); i < domainRoot.manualTop; i++ {
+			if codecArenaContains(domainRoot.manualStack[i], p) {
+				return true
+			}
+		}
+		if codecArenaContains(manualArena, p) {
+			return true
+		}
+	}
+	return sovInSovereignDataArena(p)
+}
+
 func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 	k := td.Kind()
 	switch k {
@@ -815,7 +848,7 @@ func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 			// the field's element type. Depth-bounded to keep compile-arena
 			// cycles (parent/prog chains) from unbounded traversal.
 			et := td.Elem()
-			if et != nil && sovTypeHasPtrs(et) && !sovInArena(g.data, uintptr(v)) && sovDepth < sovMaxDepth {
+			if et != nil && sovTypeHasPtrs(et) && !sovInArena(g.data, uintptr(v)) && sovDepth < sovMaxDepth && sovReadable(uintptr(v)) {
 				sovDepth++
 				sovWalkValue(g, v, et)
 				sovDepth--
@@ -828,7 +861,7 @@ func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 		}
 	case KindSlice:
 		s := *(*_string)(p)
-		if s.ptr != nil && s.length > 0 {
+		if s.ptr != nil && s.length > 0 && sovReadable(uintptr(unsafe.Pointer(s.ptr))) {
 			et := td.Elem()
 			if et != nil {
 				sovMarkBlock(g, unsafe.Pointer(s.ptr))
@@ -852,7 +885,7 @@ func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 		}
 	case KindMap:
 		m := *(*unsafe.Pointer)(p)
-		if m != nil {
+		if m != nil && sovReadable(uintptr(m)) {
 			sovMarkMap(g, (*hashmap)(m), td)
 		}
 	case KindStruct:
@@ -1169,7 +1202,7 @@ func sovRebaseValue1(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 		// arena) so data-arena pointers nested in it get rebased too.
 		nv := *(*unsafe.Pointer)(p)
 		et := td.Elem()
-		if nv != nil && et != nil && sovTypeHasPtrs(et) && !sovInArena(nd, uintptr(nv)) && sovDepth < sovMaxDepth {
+		if nv != nil && et != nil && sovTypeHasPtrs(et) && !sovInArena(nd, uintptr(nv)) && sovDepth < sovMaxDepth && sovReadable(uintptr(nv)) {
 			sovDepth++
 			sovRebaseValue(g, nv, et, nd)
 			sovDepth--
@@ -1187,7 +1220,7 @@ func sovRebaseValue1(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 			*(*_string)(p) = s
 		}
 		et := td.Elem()
-		if et != nil && sovTypeHasPtrs(et) {
+		if et != nil && sovTypeHasPtrs(et) && sovReadable(uintptr(unsafe.Pointer(s.ptr))) {
 			esz := et.Size()
 			for i := int32(0); i < int32(s.length); i++ {
 				sovRebaseValue(g, unsafe.Add(unsafe.Pointer(s.ptr), uintptr(i)*esz), et, nd)
@@ -1211,8 +1244,10 @@ func sovRebaseValue1(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 		m := *(*unsafe.Pointer)(p)
 		if m != nil && !sovInArena(nd, uintptr(m)) {
 			*(*unsafe.Pointer)(p) = sovRebasePtr(g, uintptr(m), nd)
-			sovRebaseMap(g, (*hashmap)(*(*unsafe.Pointer)(p)), td, nd)
-		} else if m != nil {
+			if sovReadable(uintptr(*(*unsafe.Pointer)(p))) {
+				sovRebaseMap(g, (*hashmap)(*(*unsafe.Pointer)(p)), td, nd)
+			}
+		} else if m != nil && sovReadable(uintptr(m)) {
 			sovRebaseMap(g, (*hashmap)(m), td, nd)
 		}
 	case KindStruct:
