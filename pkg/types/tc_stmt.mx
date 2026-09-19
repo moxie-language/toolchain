@@ -212,27 +212,33 @@ func (c *Checker) checkSwitch(s *syntax.SwitchStmt, scope *Scope) {
 	if s.Init != nil {
 		c.checkStmt(s.Init, inner)
 	}
+	// Declared outside the loops: a declaration in the body of a self-mutating
+	// method allocates in the sovereign arena on every iteration.
+	var clauseScope *Scope
+	var caseTyp Type
+	var obj *TCVar
+	var t Type
 
 	// Type switch: switch v := x.(type) { case T: ... }
 	if s.Tag != nil {
 		if tsg, ok := s.Tag.(*syntax.TypeSwitchGuard); ok {
 			xTyp := c.checkExpr(tsg.X, inner)
 			for _, clause := range s.Body {
-				clauseScope := c.openScope(clause, inner)
+				clauseScope = c.openScope(clause, inner)
 				// Bind the guard variable to the case type in each clause.
 				if tsg.Lhs != nil {
-					caseTyp := xTyp // default / multi-type: keep interface type
+					caseTyp = xTyp // default / multi-type: keep interface type
 					if clause.Cases != nil {
 						if _, multi := clause.Cases.(*syntax.ListExpr); !multi {
 							// nil case or single type: nil keeps interface type.
 							if n, isNil := clause.Cases.(*syntax.Name); !isNil || n.Value != "nil" {
-								if t := c.resolveTypeExpr(clause.Cases); t != nil {
+								if t = c.resolveTypeExpr(clause.Cases); t != nil {
 									caseTyp = t
 								}
 							}
 						}
 					}
-					obj := NewTCVar(c.pkg, tsg.Lhs.Value, caseTyp)
+					obj = NewTCVar(c.pkg, tsg.Lhs.Value, caseTyp)
 					clauseScope.Insert(obj)
 					if c.info != nil {
 						c.info.Implicits[clause] = obj
@@ -251,7 +257,7 @@ func (c *Checker) checkSwitch(s *syntax.SwitchStmt, scope *Scope) {
 		c.checkExpr(s.Tag, inner)
 	}
 	for _, clause := range s.Body {
-		clauseScope := c.openScope(clause, inner)
+		clauseScope = c.openScope(clause, inner)
 		if clause.Cases != nil {
 			c.checkExpr(clause.Cases, clauseScope)
 		}

@@ -72,9 +72,11 @@ func (e *irEmitter) isSovereignNamedType(named *Named) (ok bool) {
 }
 
 // ssaIsSovereignNamedType reports whether named is a self-mutating (sovereign)
-// type: a named struct that needs a codec and has at least one method that
-// writes a receiver field. The syntax package and the compiler's main package
-// are excluded (mirrors the legacy compiler).
+// type: a named type that needs a codec and has at least one method that
+// writes the receiver. The receiver may be a struct or a named slice/map: for
+// a non-struct descriptor the runtime roots compaction at the receiver value
+// itself (sovFullMark/sovRebaseRoots). The syntax package and the compiler's
+// main package are excluded (mirrors the legacy compiler).
 func ssaIsSovereignNamedType(p *SSAPackage, named *Named) (ok bool) {
 	if named == nil || named.Obj == nil {
 		return false
@@ -85,8 +87,7 @@ func ssaIsSovereignNamedType(p *SSAPackage, named *Named) (ok bool) {
 			return false
 		}
 	}
-	_, ok2 := SafeUnderlying(named).(*TCStruct)
-	if !ok2 || !typeNeedsCodec(named) {
+	if !typeNeedsCodec(named) {
 		return false
 	}
 	mangledPrefix := "(*" | named.Obj.Name | ")."
@@ -181,10 +182,14 @@ func ssaRecvRooted(v SSAValue, recvParam SSAValue, localStore map[SSAValue]SSAVa
 }
 
 func (e *irEmitter) emitArenaPrologue() (ok bool) {
-	if !e.funcNeedsCodec(e.curFunc) {
-		return false
-	}
-	// Sovereign arena prologue: borrow receiver's arena instead of FnArenaPush.
+	// Sovereign arena prologue: borrow the receiver's arena instead of
+	// FnArenaPush. This is decided before the codec gate below: that gate asks
+	// whether the *return values* need relocating, but a mutating method that
+	// returns nothing (or only an error) still fills receiver fields, and those
+	// allocations must land in the receiver's arena rather than in whatever
+	// frame happens to be current - otherwise the caller's frame is released
+	// while the receiver still points into it. The legacy compiler checks the
+	// sovereign case first for the same reason.
 	// Only methods that actually write to receiver fields borrow; read-only
 	// methods get a regular per-function arena so their scratch is cleared at
 	// return.
@@ -201,12 +206,14 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 					// data arena as this method's working arena. Allocations
 					// land there and are recorded; codecSovereignEndCall at
 					// return reclaims the batch.
-					// The receiver's own struct descriptor is required by the
+					// The receiver's own type descriptor is required by the
 					// runtime: sovFullMark and sovRebaseRoots walk the
-					// receiver's fields as the compaction roots, and without
-					// the descriptor every block is unreachable, so compaction
-					// empties the arena and the receiver's fields keep
-					// pointing into the unmapped old region.
+					// receiver's fields (or the receiver value itself when the
+					// descriptor is not a struct, e.g. a named slice) as the
+					// compaction roots, and without the descriptor every block
+					// is unreachable, so compaction empties the arena and the
+					// receiver's fields keep pointing into the unmapped old
+					// region.
 					e.collectTypeDesc(named)
 					e.nextReg++
 					group := "%sov_group"
@@ -238,6 +245,9 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 				}
 			}
 		}
+	}
+	if !e.funcNeedsCodec(e.curFunc) {
+		return false
 	}
 	ipt := e.intptrType()
 	e.w("  %fn_arena = call ptr @runtime.FnArenaPush(")
