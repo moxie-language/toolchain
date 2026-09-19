@@ -56,7 +56,7 @@ type DomainRoot struct {
 	// it rather than alias it. Sorted + binary search: the earlier linear
 	// scan over every group made each stability check O(groups) and stalled
 	// the compiler on large packages.
-	sovRanges []uint64
+	sovRanges []uintptr
 	domStack []uintptr // child domain root addresses
 	domTop   int32
 	root     Arena // inline root arena, fnStack[0] = &root
@@ -108,6 +108,14 @@ var arenaPoolN int32
 // (compile-arena objects reached through receiver pointer fields).
 const sovMaxDepth = int32(2)
 var sovDepth int32
+
+// sovMaxWalkDepth bounds the whole mark/rebase walk. A receiver graph can cycle
+// through a slice or a map - a map whose value points back at its owner - and
+// those cases have no other bound, so the traversal would recurse until the
+// stack overflows. sovMaxDepth above bounds only the narrower
+// outside-the-arena pointer case.
+const sovMaxWalkDepth = int32(256)
+var sovWalkDepth int32
 
 // manualArena is the current manual compile arena (set by ManualArenaEnter,
 // never by SovereignSetArena). While active, FnArenaPush/FnArenaPop are
@@ -379,7 +387,7 @@ func sovRangeRegister(base, size uintptr) {
 		if nc < 32 {
 			nc = 32
 		}
-		nb := unsafe.Slice((*uint64)(sovRootAlloc(uintptr(nc)*8)), nc)
+		nb := unsafe.Slice((*uintptr)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(uintptr(0)))), nc)
 		copy(nb, r)
 		domainRoot.sovRanges = nb[:len(r)]
 		r = domainRoot.sovRanges
@@ -782,9 +790,15 @@ func sovMarkBlock(g *sovGroup, p unsafe.Pointer) {
 
 // sovWalkValue marks every block reachable through the value at p.
 func sovWalkValue(g *sovGroup, p unsafe.Pointer, td *RawType) {
-	if td == nil || p == nil {
+	if td == nil || p == nil || sovWalkDepth >= sovMaxWalkDepth {
 		return
 	}
+	sovWalkDepth++
+	sovWalkValue1(g, p, td)
+	sovWalkDepth--
+}
+
+func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 	k := td.Kind()
 	switch k {
 	case KindPointer:
@@ -939,6 +953,7 @@ func codecSovereignEndCall(g *sovGroup) {
 // actually reachable. Runs only at compaction.
 func sovFullMark(g *sovGroup) {
 	sovDepth = 0
+	sovWalkDepth = 0
 	for i := int32(0); i < int32(len(g.recs)); i++ {
 		g.recs[i].live = false
 	}
@@ -1031,6 +1046,7 @@ func codecSovereignCompact(g *sovGroup, needed uintptr) {
 	// Rebase pass: rewrite interior pointers of live blocks (walking the
 	// new copies, translating old addresses via the record table).
 	sovDepth = 0
+	sovWalkDepth = 0
 	for i := int32(0); i < int32(len(g.recs)); i++ {
 		rec := g.recs[i]
 		if !rec.live {
@@ -1133,9 +1149,15 @@ func sovRebasePtr(g *sovGroup, p uintptr, nd *Arena) unsafe.Pointer {
 // sovRebaseValue rewrites the interior pointers of the value at p after a
 // compaction.
 func sovRebaseValue(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
-	if td == nil || p == nil {
+	if td == nil || p == nil || sovWalkDepth >= sovMaxWalkDepth {
 		return
 	}
+	sovWalkDepth++
+	sovRebaseValue1(g, p, td, nd)
+	sovWalkDepth--
+}
+
+func sovRebaseValue1(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 	k := td.Kind()
 	switch k {
 	case KindPointer:
