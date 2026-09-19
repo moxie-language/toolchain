@@ -888,6 +888,19 @@ func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 		if m != nil && sovReadable(uintptr(m)) {
 			sovMarkMap(g, (*hashmap)(m), td)
 		}
+	case KindArray:
+		// A backing array is one block holding every element, so the block's
+		// descriptor has to be the array type and the walk has to visit each
+		// element - otherwise only element zero is reachable and compaction
+		// reclaims the rest.
+		et := td.Elem()
+		if et != nil && sovTypeHasPtrs(et) {
+			esz := et.Size()
+			an := td.ArrayLen()
+			for i := int32(0); i < an; i++ {
+				sovWalkValue(g, unsafe.Add(p, uintptr(i)*esz), et)
+			}
+		}
 	case KindStruct:
 		nf := td.NumField()
 		for i := int32(0); i < nf; i++ {
@@ -1249,6 +1262,15 @@ func sovRebaseValue1(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 			}
 		} else if m != nil && sovReadable(uintptr(m)) {
 			sovRebaseMap(g, (*hashmap)(m), td, nd)
+		}
+	case KindArray:
+		et := td.Elem()
+		if et != nil && sovTypeHasPtrs(et) {
+			esz := et.Size()
+			an := td.ArrayLen()
+			for i := int32(0); i < an; i++ {
+				sovRebaseValue(g, unsafe.Add(p, uintptr(i)*esz), et, nd)
+			}
 		}
 	case KindStruct:
 		nf := td.NumField()

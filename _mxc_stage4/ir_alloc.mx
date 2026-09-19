@@ -4,6 +4,28 @@ import (
 	. "git.smesh.lol/moxie/pkg/types"
 )
 
+// allocBlockTypeDesc returns the quoted type descriptor for the type of the
+// block a heap allocation produces, and registers it for emission. The arena
+// records it alongside the block so a sovereign compaction can walk the
+// block's interior. With a nil descriptor the mark pass stops at the block
+// itself, every block nested inside it is reclaimed, and the receiver is left
+// pointing at freed memory. The legacy compiler passes the same layout here
+// (createObjectLayout), so this is the stage4 side catching up.
+func (e *irEmitter) allocBlockTypeDesc(a *SSAAlloc) (td string) {
+	t := a.SSAType()
+	if t == nil {
+		return "null"
+	}
+	if p, ok := SafeUnderlying(t).(*Pointer); ok && p.Base != nil {
+		t = p.Base
+	}
+	if b, okB := SafeUnderlying(t).(*Basic); okB && (b.Kind == Invalid || b.Kind == UntypedNil) {
+		return "null"
+	}
+	e.collectTypeDesc(t)
+	return irQuoteName(e.reflectTypeName(t))
+}
+
 func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 	reg := e.regName(a)
 	if at, ok := e.allocTypes[a]; ok && len(at) > 0 && at[0] == '[' {
@@ -16,7 +38,7 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 			e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 			e.w("  ") ; e.w(reg)
 			e.w(" = call ptr @runtime.alloc(") ; e.w(ipt)
-			e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
+			e.w(" ") ; e.w(sz) ; e.w(", ptr ") ; e.w(e.allocBlockTypeDesc(a)) ; e.w(", ptr null)\n")
 			e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 			e.scopeTrackAlloc(reg)
 		} else {
@@ -136,7 +158,7 @@ func (e *irEmitter) emitAlloc(a *SSAAlloc) {
 		e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 		e.w("  ") ; e.w(reg)
 		e.w(" = call ptr @runtime.alloc(") ; e.w(ipt)
-		e.w(" ") ; e.w(sz) ; e.w(", ptr null, ptr null)\n")
+		e.w(" ") ; e.w(sz) ; e.w(", ptr ") ; e.w(e.allocBlockTypeDesc(a)) ; e.w(", ptr null)\n")
 		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 		e.scopeTrackAlloc(reg)
 	} else {
