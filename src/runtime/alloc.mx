@@ -855,13 +855,17 @@ func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 			}
 		}
 	case KindBytes:
+		// Length is not the test: a slice with length 0 keeps its backing
+		// array, and the next push or | writes straight into it. Reclaiming
+		// that array out from under a resliced-to-zero buffer is a write into
+		// freed memory.
 		s := *(*_string)(p)
-		if s.ptr != nil && s.length > 0 {
+		if s.ptr != nil {
 			sovMarkBlock(g, unsafe.Pointer(s.ptr))
 		}
 	case KindSlice:
 		s := *(*_string)(p)
-		if s.ptr != nil && s.length > 0 && sovReadable(uintptr(unsafe.Pointer(s.ptr))) {
+		if s.ptr != nil && sovReadable(uintptr(unsafe.Pointer(s.ptr))) {
 			et := td.Elem()
 			if et != nil {
 				sovMarkBlock(g, unsafe.Pointer(s.ptr))
@@ -1058,6 +1062,53 @@ func sovRebaseRoots(g *sovGroup, nd *Arena) {
 	}
 }
 
+// sovRekeyRelocated moves the sovereign group keyed by a receiver address
+// that a compaction just relocated, so the object and the arena holding its
+// data stay associated. Called for every live block of the retiring arena:
+// only the block that is some group's receiver matches an entry.
+func sovRekeyRelocated(g *sovGroup, oldData *Arena, oldAddr, newAddr uintptr, nd *Arena) {
+	if g == nil || oldData == nil || nd == nil || oldAddr == 0 || newAddr == 0 || oldAddr == newAddr {
+		return
+	}
+	m := domainRoot.sovereignRoot
+	if m == nil {
+		return
+	}
+	keyv := unsafe.Pointer(oldAddr)
+	h := m.keyHash(unsafe.Pointer(&keyv), 8, m.seed)
+	var av unsafe.Pointer
+	if !hashmapGet(m, unsafe.Pointer(&keyv), unsafe.Pointer(&av), 8, h) || av == nil {
+		return
+	}
+	grp := (*sovGroup)(av)
+	if grp.released {
+		return
+	}
+	hashmapDelete(m, unsafe.Pointer(&keyv), h)
+	grp.recv = unsafe.Pointer(newAddr)
+	if grp.ctxArena == oldData {
+		// The receiver now lives in nd, so the group belongs to nd's release
+		// sweep instead. Move the count with it or nd never invalidates it.
+		if grp.ctxArena.sovGroups > 0 {
+			grp.ctxArena.sovGroups--
+		}
+		if nd.sovGroups < 0x7FFFFFFF {
+			nd.sovGroups++
+		}
+		grp.ctxArena = nd
+	}
+	nv := unsafe.Pointer(newAddr)
+	nh := m.keyHash(unsafe.Pointer(&nv), 8, m.seed)
+	var exist unsafe.Pointer
+	if hashmapGet(m, unsafe.Pointer(&nv), unsafe.Pointer(&exist), 8, nh) {
+		// Something already registered at the destination, so this entry is
+		// the stale half of a pair. Leaving it unregistered is correct: the
+		// group's data arena is referenced only by the object we just moved.
+		return
+	}
+	hashmapSet(m, unsafe.Pointer(&nv), unsafe.Pointer(&av), nh)
+}
+
 // codecSovereignCompact copy-compacts the group's live data into a fresh
 // arena (live data shifted together at the front; tail becomes free),
 // rebuilding the allocation map and rewriting interior pointers.
@@ -1133,6 +1184,12 @@ func codecSovereignCompact(g *sovGroup, needed uintptr) {
 		if !rec.live {
 			continue
 		}
+		// A sovereign group is keyed by its receiver's address. If that
+		// receiver was a block of the arena being retired, it has just moved:
+		// the entry has to move with it, or a lookup by the new address builds
+		// a second empty group while the object's data stays behind in the
+		// first one's arena - and the first one's context arena is unmapped.
+		sovRekeyRelocated(g, g.data, uintptr(rec.dataAddr), rec.newAddr, nd)
 		nrec := (*sovRecord)(ArenaAlloc(nt, unsafe.Sizeof(sovRecord{})))
 		*nrec = *rec
 		nrec.dataAddr = rec.newAddr
