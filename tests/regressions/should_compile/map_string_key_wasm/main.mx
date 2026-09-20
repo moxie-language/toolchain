@@ -1,0 +1,35 @@
+// Regression: map keys kept their bytes across a cross-package return on wasm.
+//
+// The map fixup paths wrote a string/[]byte header's length at the hardcoded
+// offset 8 (and cap at 16) - correct only where a pointer is 8 bytes. On wasm
+// the length landed in the cap slot and the length field stayed 0, so every
+// map key decoded empty: the relay proxy re-serialized a tag filter
+// {"#p":[pubkey]} as {"":[pubkey]} and matched nothing.
+//
+// Fixed in: src/runtime/codec.mx (codecDecodeMapValue, fixKey/fixStrVal/fixIface
+// use codecPtrSize() offsets) and src/runtime/relocate.mx
+// (relocFixupInterfaceValue).
+
+package main
+
+import (
+	"os"
+	"tests/regressions/should_compile/map_string_key_wasm/lib"
+)
+
+const want = `{"#p":["abc123"]}`
+
+func check(label, got string) {
+	if got == want {
+		println(label, "ok")
+		return
+	}
+	println(label, "FAIL got", got, "want", want)
+	os.Exit(1)
+}
+
+func main() {
+	check("lit   ", lib.Serialize(lib.BuildLit("abc123")))
+	check("concat", lib.Serialize(lib.BuildConcat("p", "abc123")))
+	check("sub   ", lib.Serialize(lib.BuildSub("x#py", "abc123")))
+}

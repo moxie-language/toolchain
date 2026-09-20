@@ -1,0 +1,50 @@
+// Regression: map values that own memory were raw-copied across the return
+// boundary of a non-main package.
+//
+// codecEncodeMap wrote a value slot verbatim unless its type was bytes,
+// pointer or interface. A map[string][]string value is a 3-word slice header
+// pointing at the callee's fn arena: the header was copied into the codec
+// buffer, decoded, and handed to the caller still pointing at that arena. The
+// arena is released at return and handed to the next callee, whose
+// codecSeenInit overwrote the caller's live value on the second call.
+//
+// Fixed in: src/runtime/codec.mx (codecMapValDeep delegates slice, struct,
+// map and array values to codecEncodeValue/codecDecodeValue). Only non-main
+// packages relocate returns, and only two calls into the same callee reuse the
+// pooled arena, so the bug needs a library type called twice.
+
+package main
+
+import (
+	"os"
+	"tests/regressions/should_compile/map_value_return_reloc/lib"
+)
+
+func fail(what, got string) {
+	println("FAIL: " | what | " got [" | got | "]")
+	os.Exit(1)
+}
+
+func main() {
+	h := lib.New("smesh-settings")
+	for i := 0; i < 3; i++ {
+		_ = lib.Describe(h)
+		v := h.Tags["#d"]
+		if len(v) != 1 {
+			fail("tag slice length", "")
+		}
+		if v[0] != "smesh-settings" {
+			fail("tag slice value", v[0])
+		}
+		if h.Props["p"].S != "ssmesh-settings" {
+			fail("struct value", h.Props["p"].S)
+		}
+		if h.Props["p"].N != 7 {
+			fail("struct field", "")
+		}
+		if h.Nested["n"]["k"] != "nsmesh-settings" {
+			fail("nested map value", h.Nested["n"]["k"])
+		}
+	}
+	println("map value relocation ok")
+}

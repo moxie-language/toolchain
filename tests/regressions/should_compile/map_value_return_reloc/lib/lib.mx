@@ -1,0 +1,41 @@
+package lib
+
+// Sub is a struct-valued map value: it owns a string, so a raw copy of the
+// value slot would point into the arena that dies at return.
+type Sub struct {
+	N int32
+	S string
+}
+
+// Holder holds maps whose values are not bytes/pointer/interface: a slice, a
+// struct and a nested map. Value slots of those kinds used to be written to
+// the codec buffer verbatim, so the decoded map pointed back into the callee's
+// released fn arena; the next function to acquire that arena overwrote it.
+type Holder struct {
+	Tags   map[string][]string
+	Props  map[string]Sub
+	Nested map[string]map[string]string
+}
+
+func New(v string) (h *Holder) {
+	h = &Holder{}
+	h.Tags = map[string][]string{}
+	h.Tags["#d"] = []string{v}
+	h.Props = map[string]Sub{}
+	h.Props["p"] = Sub{N: 7, S: "s" | v}
+	h.Nested = map[string]map[string]string{}
+	inner := map[string]string{}
+	inner["k"] = "n" | v
+	h.Nested["n"] = inner
+	return h
+}
+
+func Describe(h *Holder) (s string) {
+	s = "tag="
+	for _, v := range h.Tags["#d"] {
+		s = s | v
+	}
+	s = s | " prop=" | h.Props["p"].S
+	s = s | " nest=" | h.Nested["n"]["k"]
+	return s
+}

@@ -30,3 +30,13 @@
 //   Bug: "unresolved range type" when iterating over imported []T.
 //   The type checker couldn't resolve element types of cross-package
 //   slices, producing nil types that crashed the emitter.
+//
+// map_value_return_reloc/
+//   Bug: map values that own memory were raw-copied across a return from a
+//   non-main package. codecEncodeMap wrote the value slot verbatim unless the
+//   value type was bytes/pointer/interface, so a map[string][]string value
+//   kept its data pointer into the callee's fn arena; the arena was released
+//   at return, and the next callee's codecSeenInit overwrote the caller's live
+//   value on its second call. Slice, struct, map and array values are now
+//   delegated to codecEncodeValue/codecDecodeValue (codecMapValDeep in
+//   src/runtime/codec.mx).
