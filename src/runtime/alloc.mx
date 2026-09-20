@@ -1010,13 +1010,24 @@ func sovFullMark(g *sovGroup) {
 	g.liveBytes = 0
 	// Roots: the receiver's fields (or the receiver value itself for
 	// non-struct receivers such as named slice types).
-	td := g.recvTypeDesc
-	if td == nil || g.recv == nil {
+	sovMarkReceiverRoots(g, g.recv, g.recvTypeDesc)
+	// A receiver whose method is currently executing is live even when nothing
+	// in this group's graph points at it: the frame holds it on the stack, and
+	// the borrow of its data arena is the proof. Marking only the compacting
+	// group's own receiver dropped such a receiver as dead, the copy pass left
+	// its memory behind, and the invalidation walk then freed the group whose
+	// data arena the running frame was still allocating into.
+	sovMarkBorrowedReceivers(g)
+}
+
+// sovMarkReceiverRoots marks everything reachable from one sovereign receiver.
+func sovMarkReceiverRoots(g *sovGroup, recv unsafe.Pointer, td *RawType) {
+	if td == nil || recv == nil {
 		return
 	}
 	if td.Kind() != KindStruct {
 		if sovTypeHasPtrs(td) {
-			sovWalkValue(g, g.recv, td)
+			sovWalkValue(g, recv, td)
 		}
 		return
 	}
@@ -1026,7 +1037,7 @@ func sovFullMark(g *sovGroup) {
 		if ft == nil || !sovTypeHasPtrs(ft) {
 			continue
 		}
-		faddr := unsafe.Add(g.recv, td.StructFieldOffset(i))
+		faddr := unsafe.Add(recv, td.StructFieldOffset(i))
 		// A pointer field may hold a slot object; resolve it.
 		if ft.Kind() == KindPointer {
 			v := *(*unsafe.Pointer)(faddr)
@@ -1038,6 +1049,46 @@ func sovFullMark(g *sovGroup) {
 		}
 		sovWalkValue(g, faddr, ft)
 	}
+}
+
+// sovMarkBorrowedReceivers marks every group receiver that is currently
+// borrowed by a live frame and lives in g's data arena, so a compaction keeps
+// the objects a running method is still using.
+func sovMarkBorrowedReceivers(g *sovGroup) {
+	if g == nil || g.data == nil || domainRoot == nil {
+		return
+	}
+	m := domainRoot.sovereignRoot
+	if m == nil {
+		return
+	}
+	var it hashmapIterator
+	var kb [8]uint8
+	var vb [8]uint8
+	for hashmapNext(m, &it, unsafe.Pointer(&kb[0]), unsafe.Pointer(&vb[0])) {
+		recv := *(*unsafe.Pointer)(unsafe.Pointer(&kb[0]))
+		if recv == nil || !sovAddrInArena(g.data, uintptr(recv)) {
+			continue
+		}
+		g2 := (*sovGroup)(*(*unsafe.Pointer)(unsafe.Pointer(&vb[0])))
+		if g2 == nil || g2.data == nil || !sovArenaBorrowed(g2.data) {
+			continue
+		}
+		sovMarkReceiverRoots(g, recv, g2.recvTypeDesc)
+	}
+}
+
+// sovArenaBorrowed reports whether a is the working arena of a live frame.
+func sovArenaBorrowed(a *Arena) (ok bool) {
+	if a == nil || domainRoot == nil {
+		return false
+	}
+	for i := int32(0); i <= domainRoot.fnTop; i++ {
+		if domainRoot.fnStack[i] == a {
+			return true
+		}
+	}
+	return false
 }
 
 // sovRebaseRoots rewrites the receiver's root fields after a compaction.
@@ -1199,8 +1250,10 @@ func codecSovereignCompact(g *sovGroup, needed uintptr) {
 		g.liveBytes += rec.size
 	}
 	oldData := g.data
-	ArenaFree(oldTbl)
-	ArenaFree(oldData)
+	// Repoint every live reference to the relocated arena BEFORE unmapping the
+	// retired one: ArenaFree runs sovInvalidateArena, which allocates (it grows
+	// a dead list), and that allocation lands in the current fn arena - the one
+	// being retired if the repair has not happened yet.
 	g.data = nd
 	// The old data arena is unmapped, so every structure that still names it
 	// must be pointed at the relocated arena. That is not just the top frame:
@@ -1230,6 +1283,8 @@ func codecSovereignCompact(g *sovGroup, needed uintptr) {
 			domainRoot.manualStack[i] = nd
 		}
 	}
+	ArenaFree(oldTbl)
+	ArenaFree(oldData)
 	g.compacting = false
 }
 
