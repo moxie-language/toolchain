@@ -1160,11 +1160,48 @@ func sovRekeyRelocated(g *sovGroup, oldData *Arena, oldAddr, newAddr uintptr, nd
 	hashmapSet(m, unsafe.Pointer(&nv), unsafe.Pointer(&av), nh)
 }
 
+// sovBorrowedReceiverIn reports whether a receiver living in g's data arena
+// belongs to a group whose arena is currently a live frame's working arena.
+func sovBorrowedReceiverIn(g *sovGroup) (ok bool) {
+	if g == nil || g.data == nil || domainRoot == nil {
+		return false
+	}
+	m := domainRoot.sovereignRoot
+	if m == nil {
+		return false
+	}
+	var it hashmapIterator
+	var kb [8]uint8
+	var vb [8]uint8
+	for hashmapNext(m, &it, unsafe.Pointer(&kb[0]), unsafe.Pointer(&vb[0])) {
+		recv := *(*unsafe.Pointer)(unsafe.Pointer(&kb[0]))
+		if recv == nil || !sovAddrInArena(g.data, uintptr(recv)) {
+			continue
+		}
+		g2 := (*sovGroup)(*(*unsafe.Pointer)(unsafe.Pointer(&vb[0])))
+		if g2 == nil || g2.data == nil || !sovArenaBorrowed(g2.data) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // codecSovereignCompact copy-compacts the group's live data into a fresh
 // arena (live data shifted together at the front; tail becomes free),
 // rebuilding the allocation map and rewriting interior pointers.
 func codecSovereignCompact(g *sovGroup, needed uintptr) {
 	if g.escaped || g.compacting {
+		return
+	}
+	// A receiver inside this arena whose method is currently executing cannot be
+	// relocated: the running frame holds its address in a register or a local,
+	// and the rebuild pass only rewrites references it can see (this group's
+	// records, the receiver's roots, the fn/stable/manual arena slots). Moving
+	// such a block would leave that frame on retired memory - the crash seen in
+	// the store's WAL replay. Treat it as escaped and grow the arena instead.
+	if sovBorrowedReceiverIn(g) {
+		g.escaped = true
 		return
 	}
 	g.compacting = true
