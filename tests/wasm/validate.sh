@@ -23,6 +23,13 @@ else
         [ -f "$f" ] || continue
         grep -q 'func main' "$f" && TARGETS+=("$f")
     done
+    # Directory cases: main.mx plus a lib/ subpackage. A cross-package call is
+    # not inlined and crosses the return codec, so whole classes of layout bug
+    # are only reachable this way.
+    for d in "$ROOT"/tests/regressions/should_compile/*/; do
+        [ -f "$d/main.mx" ] || continue
+        TARGETS+=("${d%/}")
+    done
 fi
 
 rm -rf "$WORK"; mkdir -p "$WORK"

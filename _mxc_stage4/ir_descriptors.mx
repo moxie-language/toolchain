@@ -326,6 +326,21 @@ func typeDescComparable(t Type) (ok bool) {
 	return false
 }
 
+// descPtrSize returns the target pointer size in bytes. Type descriptors
+// describe the target's memory layout, not the host's: on wasm32 a pointer is
+// 4 bytes, so a string is {ptr, i32, i32} (12) and the compiler's own struct
+// offsets differ from the 64-bit host layout. Legacy reads the pointer size
+// from LLVM's TargetData (legacy/compiler/sizes.go), so a descriptor built
+// here with 64-bit offsets makes the runtime codec read and write the wrong
+// slots on wasm - a cross-package struct return then loses every field after
+// the first.
+func descPtrSize() (n int32) {
+	if mxutil.TargetArch == "wasm" {
+		return 4
+	}
+	return 8
+}
+
 // typeDescSize returns the in-memory size of the type, matching the LLVM
 // struct layout (natural alignment).
 func typeDescSize(t Type) (sz int32) {
@@ -342,22 +357,22 @@ func typeDescSize(t Type) (sz int32) {
 		case Int64, Uint64, Float64, UntypedFloat:
 			return 8
 		case TCString, UntypedString:
-			return 24
+			return descPtrSize() * 3
 		case UnsafePointer:
-			return 8
+			return descPtrSize()
 		}
 	case *Pointer, *TCMap, *TCChan:
-		return 8
+		return descPtrSize()
 	case *Signature:
 		// Func values are two words: the LLVM type is {ptr, ptr} and
 		// legacy's stdSizes.Sizeof returns PtrSize*2. Reporting 8 here
 		// shifted every field after a func field by 8 bytes in the type
 		// descriptor, so the codec read the wrong slot.
-		return 16
+		return descPtrSize() * 2
 	case *Slice:
-		return 24
+		return descPtrSize() * 3
 	case *TCInterface:
-		return 16
+		return descPtrSize() * 2
 	case *Array:
 		es := typeDescSize(tt.Elem)
 		ea := typeDescAlign(tt.Elem)
@@ -387,6 +402,11 @@ func typeDescAlign(t Type) (al int32) {
 	u := SafeUnderlying(t)
 	switch tt := u.(type) {
 	case *Basic:
+		if tt.Kind == TCString || tt.Kind == UntypedString {
+			// Strings are {ptr, len, cap}: pointer-aligned, not 8-aligned,
+			// so on wasm32 (12-byte string) the alignment is 4.
+			return descPtrSize()
+		}
 		s := typeDescSize(tt)
 		if s > 4 {
 			return 8
@@ -396,7 +416,7 @@ func typeDescAlign(t Type) (al int32) {
 		}
 		return s
 	case *Pointer, *TCMap, *TCChan, *Signature, *Slice, *TCInterface:
-		return 8
+		return descPtrSize()
 	case *Array:
 		return typeDescAlign(tt.Elem)
 	case *TCStruct:
