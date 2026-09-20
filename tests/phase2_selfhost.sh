@@ -75,7 +75,12 @@ fi
 # 2e: verify the fixpoint: stage2 must emit the same binary that emitted it
 name="selfhost:fixpoint"
 t0=$(date +%s%N)
-if "$td/stage2" build -a -o "$td/stage3" "$ROOT/_mxc_stage4/" >"$td/stage3.log" 2>&1; then
+# Every build must pin MOXIEROOT to this tree. Without it the compiler reads the
+# stdlib from whatever MOXIEROOT the caller's environment carries - an installed
+# tree from another revision - and then reports that tree's source against the
+# sources here, which is a confusing failure that has nothing to do with the
+# chain being tested.
+if MOXIEROOT="$ROOT" "$td/stage2" build -a -o "$td/stage3" "$ROOT/_mxc_stage4/" >"$td/stage3.log" 2>&1; then
 	if cmp -s "$td/stage2" "$td/stage3"; then
 		t1=$(date +%s%N)
 		log_pass "$name" "stage2 == stage3"
@@ -85,7 +90,7 @@ if "$td/stage2" build -a -o "$td/stage3" "$ROOT/_mxc_stage4/" >"$td/stage3.log" 
 		# one-generation edge). What must hold is that a generation reproduces
 		# itself: once stageN == stageN+1 the bootstrap has reached its fixed
 		# point. Only a persistent mismatch is a failure.
-		if "$td/stage3" build -a -o "$td/stage4" "$ROOT/_mxc_stage4/" >"$td/stage4.log" 2>&1; then
+		if MOXIEROOT="$ROOT" "$td/stage3" build -a -o "$td/stage4" "$ROOT/_mxc_stage4/" >"$td/stage4.log" 2>&1; then
 			if cmp -s "$td/stage3" "$td/stage4"; then
 				t1=$(date +%s%N)
 				log_pass "$name" "stage2 != stage3; stage3 == stage4 (converged)"

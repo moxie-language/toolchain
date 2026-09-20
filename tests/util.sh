@@ -4,7 +4,12 @@
 set -euo pipefail
 
 MOXIE="${MOXIE:-./moxie}"
-MOXIEROOT="${MOXIEROOT:-$(pwd)}"
+# The suite tests the tree it lives in. An inherited MOXIEROOT (an installed
+# tree from another revision) would make the compiler read that tree's stdlib
+# and report its sources against these, which reads as a compiler bug in the
+# very tree under test. run.sh already pins this; a phase script invoked
+# directly gets the same root here.
+MOXIEROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export MOXIEROOT
 
 RED='\033[0;31m'
