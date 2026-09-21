@@ -1609,6 +1609,21 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		}
 	}
 	e.hoisted = hoistAllocs
+	// Heap allocas must stay where they are declared: they emit a
+	// runtime.alloc call, so hoisting one to the entry block reorders a side
+	// effect ahead of everything that precedes its declaration. runtime.main
+	// takes the address of its rlimit buffer, and hoisting that allocation
+	// ran it before initDomain ("alloc: domainRoot not initialized"). The
+	// legacy compiler emits the same allocation at its declaration point.
+	hoisted := map[SSAValue]bool{}
+	for _, hb := range f.Blocks {
+		for _, hinstr := range hb.Instrs {
+			if a, ok := hinstr.(*SSAAlloc); ok && hoistAllocs[a] && !a.Heap {
+				hoisted[a] = true
+			}
+		}
+	}
+	e.hoisted = hoisted
 	e.missingStores = nil
 	e.storedTo = map[string]bool{}
 	for _, b := range f.Blocks {
@@ -1660,10 +1675,10 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 	}
 	var hoistList []*SSAAlloc
 	// Collect allocas deterministically: iterate blocks/instructions in order
-	// (both are slices). Using hoistAllocs map only as a set membership check.
+	// (both are slices). Using hoisted map only as a set membership check.
 	for _, hb := range f.Blocks {
 		for _, hinstr := range hb.Instrs {
-			if a, ok := hinstr.(*SSAAlloc); ok && hoistAllocs[a] {
+			if a, ok := hinstr.(*SSAAlloc); ok && hoisted[a] {
 				hoistList = mxutil.Ensure(hoistList, 1)
 				push(hoistList, a)
 			}

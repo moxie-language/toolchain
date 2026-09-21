@@ -3298,6 +3298,7 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 				obj := fb.lookupObject(name.Value)
 				if obj != nil {
 					if alloc, ok2 := fb.vars[obj]; ok2 {
+						alloc.Heap = true
 						return alloc
 					}
 					if g, ok2 := fb.fn.Pkg.Members[name.Value].(*SSAGlobal); ok2 {
@@ -3340,11 +3341,13 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 				ia.typ = NewPointer(ssaElemType(base.SSAType()))
 				ia.name = fb.nextName()
 				fb.emit(ia)
+				fb.markAddrEscaping(ia)
 				return ia
 			}
 			if sel, ok := e.X.(*syntax.SelectorExpr); ok {
 				addr := fb.buildSelectorAddr(sel)
 				if addr != nil {
+					fb.markAddrEscaping(addr)
 					return addr
 				}
 			}
@@ -4361,6 +4364,47 @@ func (fb *ssaFuncBuilder) buildPkgMember(pn *PkgName, memberName string) (s SSAV
 	return nil
 }
 
+func markAddrEscapingRec(v SSAValue, seen map[SSAValue]bool, depth int32) {
+	if v == nil || depth > 32 || seen[v] {
+		return
+	}
+	seen[v] = true
+	switch t := v.(type) {
+	case *SSAAlloc:
+		t.Heap = true
+	case *SSAFieldAddr:
+		markAddrEscapingRec(t.X, seen, depth+1)
+	case *SSAIndexAddr:
+		markAddrEscapingRec(t.X, seen, depth+1)
+	case *SSASlice:
+		markAddrEscapingRec(t.X, seen, depth+1)
+	case *SSAChangeType:
+		markAddrEscapingRec(t.X, seen, depth+1)
+	case *SSAConvert:
+		markAddrEscapingRec(t.X, seen, depth+1)
+	case *SSAPhi:
+		for _, edge := range t.Edges {
+			markAddrEscapingRec(edge, seen, depth+1)
+		}
+	}
+}
+
+// markAddrEscaping marks every local alloca an address expression is rooted at
+// as heap-allocated. The legacy compiler makes exactly this decision in
+// builder.addr(fn, e, escaping=true) -> Function.lookup(obj, true), which sets
+// Alloc.Heap: an address that is formed by & (or by slicing an addressable
+// array, or by taking the receiver of a pointer method) may be stored
+// anywhere, so its storage has to outlive the frame. Without it a
+// self-mutating method writes a stack pointer into the receiver's sovereign
+// arena and the pointer dangles as soon as the method returns.
+//
+// The walk stops at a load: &p.f addresses the pointee, not the storage of p,
+// so p's own alloca does not escape (legacy: sel.indirect receiver loads the
+// pointer without taking an address).
+func (fb *ssaFuncBuilder) markAddrEscaping(v SSAValue) {
+	markAddrEscapingRec(v, map[SSAValue]bool{}, 0)
+}
+
 func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue) {
 	var addr SSAValue
 	var structType Type
@@ -4554,7 +4598,11 @@ func (fb *ssaFuncBuilder) buildSlice(e *syntax.SliceExpr) (s SSAValue) {
 	// Slicing an addressable array must alias its storage: arr[:] passed to
 	// a writer mutates arr. Building the array VALUE would slice a copy.
 	x := fb.buildArrayAddr(e.X)
-	if x == nil {
+	if x != nil {
+		// Slicing an addressable array aliases its storage, so the array must
+		// outlive the frame (legacy: b.addr(fn, e.X, escaping=true)).
+		fb.markAddrEscaping(x)
+	} else {
 		x = fb.buildExpr(e.X)
 	}
 	if x == nil {
@@ -5727,6 +5775,7 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 				obj := fb.lookupObject(nameExpr.Value)
 				if obj != nil {
 					if alloc, ok3 := fb.vars[obj]; ok3 {
+						alloc.Heap = true
 						recv = alloc
 					}
 				}
@@ -5743,6 +5792,7 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 			} else if innerSel, ok42 := sel.X.(*syntax.SelectorExpr); ok42 {
 					addr := fb.buildSelectorAddr(innerSel)
 					if addr != nil {
+						fb.markAddrEscaping(addr)
 						recv = addr
 					}
 				}
@@ -5759,6 +5809,7 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 		if innerSel, ok3 := sel.X.(*syntax.SelectorExpr); ok3 {
 			addr := fb.buildSelectorAddr(innerSel)
 			if addr != nil {
+				fb.markAddrEscaping(addr)
 				recv = addr
 				fixed = true
 			}
@@ -5768,6 +5819,7 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 				obj := fb.lookupObject(nameExpr.Value)
 				if obj != nil {
 					if a, ok4 := fb.vars[obj]; ok4 {
+						a.Heap = true
 						recv = a
 						fixed = true
 					}
@@ -5775,7 +5827,7 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 			}
 		}
 		if !fixed {
-			alloc := &SSAAlloc{}
+			alloc := &SSAAlloc{Heap: true}
 			alloc.typ = NewPointer(recv.SSAType())
 			alloc.name = fb.nextName()
 			fb.emit(alloc)
