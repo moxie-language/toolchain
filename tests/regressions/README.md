@@ -40,3 +40,12 @@
 //   value on its second call. Slice, struct, map and array values are now
 //   delegated to codecEncodeValue/codecDecodeValue (codecMapValDeep in
 //   src/runtime/codec.mx).
+//
+// switch_default_first.mx
+//   Bug: a default clause written before the cases was emitted where it stood,
+//   as an unconditional jump, so every case after it was dead. crypto/aes
+//   NewCipher validates its key with 'switch k { default: ...; case 16, 24,
+//   32: break }' and rejected a valid 32-byte AES-256 key, trapping the smesh
+//   signer worker on addIdentity. buildSwitch now chains the case tests first
+//   and enters the default body only when none matched, as the legacy
+//   compiler does.

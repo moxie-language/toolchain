@@ -1,0 +1,57 @@
+// Regression: a default clause written before the cases swallowed the switch.
+//
+// The SSA builder emitted the default clause's body where it stood, as an
+// unconditional jump, so every case after it was dead. crypto/aes.NewCipher
+// validates its key with
+//
+//	switch k {
+//	default:
+//		return nil, KeySizeError(k)
+//	case 16, 24, 32:
+//		break
+//	}
+//
+// and rejected a valid 32-byte AES-256 key ("crypto/aes: invalid key size
+// 32"), which trapped the signer worker on addIdentity.
+//
+// Reproduces: switch with default first, and a tagless switch with default.
+// Fixed in: _mxc_stage4 ssa_builder buildSwitch (default evaluated last).
+
+package main
+
+func classify(n int32) (s string) {
+	switch n {
+	default:
+		return "other"
+	case 1, 2, 3:
+		break
+	}
+	return "small"
+}
+
+func tagless(n int32) (s string) {
+	switch {
+	default:
+		return "none"
+	case n == 1:
+		return "one"
+	case n == 2, n == 3:
+		return "few"
+	}
+}
+
+func main() {
+	if classify(1) != "small" || classify(3) != "small" {
+		panic("case after default did not match")
+	}
+	if classify(9) != "other" {
+		panic("default did not run")
+	}
+	if tagless(1) != "one" || tagless(3) != "few" {
+		panic("tagless case after default did not match")
+	}
+	if tagless(9) != "none" {
+		panic("tagless default did not run")
+	}
+	println("ok")
+}

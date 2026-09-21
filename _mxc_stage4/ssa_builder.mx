@@ -2436,7 +2436,28 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 		tag = fb.buildExpr(s.Tag)
 	}
 
+	// A default clause is tested last no matter where it is written: every case
+	// expression is evaluated before control falls back to default. Emitting
+	// default where it stands jumped into its body unconditionally and made
+	// every case after it dead, so crypto/aes.NewCipher rejected a 32-byte key
+	// ('switch k { default: ...; case 16, 24, 32: break }' always took
+	// default). The legacy compiler evaluates the cases first.
+	var defaultClause *syntax.CaseClause
 	for _, clause := range s.Body {
+		if clause.Cases == nil {
+			defaultClause = clause
+			break
+		}
+	}
+	var defaultBlock *SSABasicBlock
+	if defaultClause != nil {
+		defaultBlock = fb.newBlock("switch.default")
+	}
+
+	for _, clause := range s.Body {
+		if clause.Cases == nil {
+			continue
+		}
 		caseBlock := fb.newBlock("switch.case")
 		nextBlock := fb.newBlock("switch.next")
 
@@ -2566,7 +2587,29 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 		fb.currentBlock = nextBlock
 	}
 
-	if fb.currentBlock != nil {
+	if defaultClause != nil {
+		// The fallthrough of the last case test reaches the default body.
+		if fb.currentBlock != nil {
+			fb.emit(&SSAJump{Comment: "switch.default"})
+			fb.pushSucc(fb.currentBlock, defaultBlock)
+			fb.pushPred(defaultBlock, fb.currentBlock)
+		}
+		defaultScope := fb.enterBlock()
+		defaultBlock.ScopeID = fb.scopeID
+		fb.currentBlock = defaultBlock
+		for _, stmt := range defaultClause.Body {
+			fb.buildStmt(stmt)
+			if fb.currentBlock == nil {
+				break
+			}
+		}
+		if fb.currentBlock != nil && !fb.blockTerminated(fb.currentBlock) {
+			fb.emit(&SSAJump{Comment: "switch.done"})
+			fb.pushSucc(fb.currentBlock, doneBlock)
+			fb.pushPred(doneBlock, fb.currentBlock)
+		}
+		fb.exitBlock(defaultScope)
+	} else if fb.currentBlock != nil {
 		fb.emit(&SSAJump{Comment: "switch.done"})
 		fb.pushSucc(fb.currentBlock, doneBlock)
 		fb.pushPred(doneBlock, fb.currentBlock)
