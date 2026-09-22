@@ -22,6 +22,12 @@
 //   The SSAType for one argument resolved to int32 instead of string.
 //   clang rejected: expected {ptr,i64,i64} but got i32.
 //
+// named_slice_method.mx
+//   Bug: slicing a named slice type returned the underlying slice, so the
+//   name (and its methods) were lost. A method call on the sliced value
+//   resolved to nothing and the argument was silently dropped from the
+//   enclosing call, which then passed fewer arguments than the callee takes.
+//
 // ptr_recv_array_elem.mx
 //   Bug: a pointer-receiver method called on an array element reached through
 //   a pointer (p.arr[i].M()) passed the element by value. The call signature
