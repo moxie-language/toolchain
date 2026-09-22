@@ -3330,6 +3330,89 @@ func (fb *ssaFuncBuilder) buildLit(e *syntax.BasicLit) (s SSAValue) {
 	return nil
 }
 
+// buildOperandAddr returns the address of an addressable operand. It backs
+// both the unary & operator and the receiver of a pointer-receiver method
+// call, which must pass the address of the operand rather than a loaded copy:
+// a copy makes the call's signature disagree with the method definition (a
+// struct by value where wasm32 expects an i32 pointer, which the wasm
+// validator rejects) and silently discards writes the method makes to its
+// receiver.
+func (fb *ssaFuncBuilder) buildOperandAddr(e syntax.Expr) (s SSAValue) {
+	switch x := e.(type) {
+	case *syntax.ParenExpr:
+		return fb.buildOperandAddr(x.X)
+	case *syntax.Name:
+		obj := fb.lookupObject(x.Value)
+		if obj != nil {
+			if alloc, ok := fb.vars[obj]; ok {
+				alloc.Heap = true
+				return alloc
+			}
+			if g, ok := fb.fn.Pkg.Members[x.Value].(*SSAGlobal); ok {
+				return g
+			}
+		}
+	case *syntax.IndexExpr:
+		idx := fb.buildExpr(x.Index)
+		if idx == nil {
+			return nil
+		}
+		var base SSAValue
+		if sel, ok := x.X.(*syntax.SelectorExpr); ok {
+			base = fb.buildSelectorAddr(sel)
+		}
+		if base == nil {
+			base = fb.buildExpr(x.X)
+		}
+		if base == nil {
+			return nil
+		}
+		// &s.field[i] where field is a slice: base is a pointer to the slice
+		// header; load the header so IndexAddr indexes the slice's data
+		// pointer, not the header itself.
+		if pt, okp := SafeUnderlying(base.SSAType()).(*Pointer); okp && pt.Base != nil {
+			pte := pt.Base
+			pteu := SafeUnderlying(pte)
+			isSl := false
+			if _, ok := pteu.(*Slice); ok {
+				isSl = true
+			} else if bb, okb := pteu.(*Basic); okb && bb.Info&IsString != 0 {
+				isSl = true
+			}
+			if isSl {
+				base = fb.emitLoad(base, pte)
+			}
+		}
+		ia := &SSAIndexAddr{X: base, Index: idx}
+		ia.typ = NewPointer(ssaElemType(base.SSAType()))
+		ia.name = fb.nextName()
+		fb.emit(ia)
+		fb.markAddrEscaping(ia)
+		return ia
+	case *syntax.SelectorExpr:
+		addr := fb.buildSelectorAddr(x)
+		if addr != nil {
+			fb.markAddrEscaping(addr)
+			return addr
+		}
+	case *syntax.Operation:
+		// &*p is p: the pointer is already the operand's address.
+		if x.Y == nil && x.Op == token.Mul {
+			return fb.buildExpr(x.X)
+		}
+	}
+	xv := fb.buildExpr(e)
+	if xv == nil {
+		return nil
+	}
+	a := &SSAAlloc{Heap: true}
+	a.typ = NewPointer(xv.SSAType())
+	a.name = fb.nextName()
+	fb.emit(a)
+	fb.emitStore(a, xv)
+	return a
+}
+
 func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 	if e.Y == nil {
 		if e.Op == token.Add {
@@ -3337,73 +3420,7 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 		}
 		op2 := syntaxOpToSSAOp(e.Op, true)
 		if op2 == OpAnd {
-			if name, ok := e.X.(*syntax.Name); ok {
-				obj := fb.lookupObject(name.Value)
-				if obj != nil {
-					if alloc, ok2 := fb.vars[obj]; ok2 {
-						alloc.Heap = true
-						return alloc
-					}
-					if g, ok2 := fb.fn.Pkg.Members[name.Value].(*SSAGlobal); ok2 {
-						return g
-					}
-				}
-			}
-			if ie, ok := e.X.(*syntax.IndexExpr); ok {
-				idx := fb.buildExpr(ie.Index)
-				if idx == nil {
-					return nil
-				}
-				var base SSAValue
-				if sel, ok2 := ie.X.(*syntax.SelectorExpr); ok2 {
-					base = fb.buildSelectorAddr(sel)
-				}
-				if base == nil {
-					base = fb.buildExpr(ie.X)
-				}
-				if base == nil {
-					return nil
-				}
-				// &s.field[i] where field is a slice: base is a pointer to
-				// the slice header; load the header so IndexAddr indexes the
-				// slice's data pointer, not the header itself.
-				if pt, okp := SafeUnderlying(base.SSAType()).(*Pointer); okp && pt.Base != nil {
-					pte := pt.Base
-					pteu := SafeUnderlying(pte)
-					isSl := false
-					if _, ok2 := pteu.(*Slice); ok2 {
-						isSl = true
-					} else if bb, okb := pteu.(*Basic); okb && bb.Info&IsString != 0 {
-						isSl = true
-					}
-					if isSl {
-						base = fb.emitLoad(base, pte)
-					}
-				}
-				ia := &SSAIndexAddr{X: base, Index: idx}
-				ia.typ = NewPointer(ssaElemType(base.SSAType()))
-				ia.name = fb.nextName()
-				fb.emit(ia)
-				fb.markAddrEscaping(ia)
-				return ia
-			}
-			if sel, ok := e.X.(*syntax.SelectorExpr); ok {
-				addr := fb.buildSelectorAddr(sel)
-				if addr != nil {
-					fb.markAddrEscaping(addr)
-					return addr
-				}
-			}
-			xv2 := fb.buildExpr(e.X)
-			if xv2 == nil {
-				return nil
-			}
-			a := &SSAAlloc{Heap: true}
-			a.typ = NewPointer(xv2.SSAType())
-			a.name = fb.nextName()
-			fb.emit(a)
-			fb.emitStore(a, xv2)
-			return a
+			return fb.buildOperandAddr(e.X)
 		}
 		xv3 := fb.buildExpr(e.X)
 		if xv3 == nil {
@@ -3569,9 +3586,33 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 				return fb.buildPkgCall(pn, sel.Sel.Value, e.ArgList, e.HasDots)
 			}
 		}
+		// The receiver is built as a value first, because the method can only
+		// be resolved against the operand's type. A pointer-receiver method
+		// must be handed the operand's address rather than a loaded copy: a
+		// copy makes the call's signature disagree with the method definition
+		// (a struct by value where the callee takes a pointer, which the wasm
+		// validator rejects) and loses receiver writes. When the resolved
+		// method wants a pointer and the operand came in as a value, the
+		// instructions just emitted for the value are discarded and the
+		// operand is rebuilt as an address, so it is evaluated once.
+		block := fb.currentBlock
+		recvMark := int32(0)
+		if block != nil {
+			recvMark = len(block.Instrs)
+		}
+		recvCounter := fb.counter
 		recv := fb.buildExpr(sel.X)
 		if recv != nil && recv.SSAType() != nil {
 			if fn2, fixedRecv := fb.resolveMethodCallWithRecv(sel, recv); fn2 != nil {
+				if fb.methodNeedsAddr(fn2, fixedRecv) {
+					if block != nil {
+						block.Instrs = block.Instrs[:recvMark]
+					}
+					fb.counter = recvCounter
+					if addr := fb.buildOperandAddr(sel.X); addr != nil {
+						fixedRecv = addr
+					}
+				}
 				fixedRecv = fb.derefValueRecv(fn2, fixedRecv)
 				args4 := fb.buildArgs(e.ArgList)
 				if fn2.Signature != nil {
@@ -5609,6 +5650,22 @@ func (fb *ssaFuncBuilder) lookupVar(name string) (t *TCVar) {
 // method is called on a pointer: the definition takes the receiver by value
 // (an LLVM aggregate), so passing the raw pointer reinterprets pointer bits
 // as field data.
+// methodNeedsAddr reports whether a resolved method call needs its operand's
+// address: the method has a pointer receiver while the built receiver is a
+// value.
+func (fb *ssaFuncBuilder) methodNeedsAddr(fn *SSAFunction, recv SSAValue) (ok bool) {
+	if fn == nil || recv == nil || fn.Signature == nil || fn.Signature.Recv == nil {
+		return false
+	}
+	if _, recvIsPtr := SafeUnderlying(fn.Signature.Recv.Typ).(*Pointer); !recvIsPtr {
+		return false
+	}
+	if _, haveIsPtr := SafeUnderlying(recv.SSAType()).(*Pointer); haveIsPtr {
+		return false
+	}
+	return true
+}
+
 func (fb *ssaFuncBuilder) derefValueRecv(fn *SSAFunction, recv SSAValue) (s SSAValue) {
 	if fn == nil || recv == nil || fn.Signature == nil || fn.Signature.Recv == nil {
 		return recv

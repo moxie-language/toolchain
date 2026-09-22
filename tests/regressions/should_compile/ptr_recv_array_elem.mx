@@ -1,0 +1,45 @@
+// Regression: a pointer-receiver method called on an element of an array
+// reached through a pointer passed the element's value instead of its
+// address. The call's signature then disagreed with the method definition,
+// which the wasm validator rejected (a struct by value where wasm32 expects
+// an i32 pointer, "type mismatch in call"), and a method that wrote to its
+// receiver wrote to a copy.
+//
+// The receiver form is now chosen from the selection the type checker
+// recorded: a pointer-receiver method gets the operand's address.
+package main
+
+type cell struct {
+	vals [4]int32
+}
+
+type grid struct {
+	cells [2]cell
+}
+
+func (c *cell) bump(i int32) {
+	c.vals[i] = c.vals[i] + 10
+}
+
+func newGrid() (g *grid) {
+	g = &grid{}
+	return g
+}
+
+func main() {
+	g := newGrid()
+	g.cells[0].vals[1] = 1
+	g.cells[0].bump(1)
+	println("a=", int64(g.cells[0].vals[1]))
+
+	g.cells[1].vals[3] = 5
+	g.cells[1].bump(3)
+	println("b=", int64(g.cells[1].vals[3]))
+
+	// Slice elements are addressable too, and the receiver must still be the
+	// element itself.
+	cells := []cell{{}, {}}
+	cells[1].vals[0] = 7
+	cells[1].bump(0)
+	println("c=", int64(cells[1].vals[0]))
+}

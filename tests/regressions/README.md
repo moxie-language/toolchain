@@ -22,6 +22,14 @@
 //   The SSAType for one argument resolved to int32 instead of string.
 //   clang rejected: expected {ptr,i64,i64} but got i32.
 //
+// ptr_recv_array_elem.mx
+//   Bug: a pointer-receiver method called on an array element reached through
+//   a pointer (p.arr[i].M()) passed the element by value. The call signature
+//   then disagreed with the method definition - a struct by value where
+//   wasm32 expects an i32 pointer - which the wasm validator rejected, and
+//   receiver writes went to a copy. The receiver form is now chosen from the
+//   type checker's selection: a pointer receiver takes the operand's address.
+//
 // type_assert_on_iface.mx
 //   Bug: SSATypeAssert generated on concrete type value, not interface.
 //   The emitter extracted {i64,ptr} from an i32 value. clang rejected.
