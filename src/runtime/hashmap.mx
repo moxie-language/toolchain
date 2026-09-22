@@ -569,22 +569,13 @@ func hashmapNext(m *hashmap, it *hashmapIterator, key, value unsafe.Pointer) boo
 		}
 		it.count = pos
 
-		// Insertion sort by keyLess.
-		less := m.keyLess
+		// Heapsort by keyLess. The insertion sort this replaces was O(n^2),
+		// and the sovereign receiver map is iterated whenever an arena that
+		// tracks a group is released: a few thousand entries cost hundreds of
+		// milliseconds per iteration, on a path that runs per method call.
 		ks := m.keySize
 		tmp := alloc(ks, nil)
-		for i := uintptr(1); i < pos; i++ {
-			for j := i; j > 0; j-- {
-				kj := unsafe.Add(buf, j*ks)
-				kjm1 := unsafe.Add(buf, (j-1)*ks)
-				if !less(kj, kjm1, ks) {
-					break
-				}
-				memcpy(tmp, kj, ks)
-				memcpy(kj, kjm1, ks)
-				memcpy(kjm1, tmp, ks)
-			}
-		}
+		hashmapSortKeys(buf, pos, ks, m.keyLess, tmp)
 	}
 
 	if it.index >= it.count {
@@ -599,6 +590,48 @@ func hashmapNext(m *hashmap, it *hashmapIterator, key, value unsafe.Pointer) boo
 	hashmapGet(m, key, value, m.valueSize, hash)
 	it.index++
 	return true
+}
+
+// hashmapSortKeys sorts n keySize-strided keys at buf in place with a
+// heapsort: O(n log n) time, one key of auxiliary space. Keys in a map are
+// unique, so the resulting order is the total order keyLess defines.
+func hashmapSortKeys(buf unsafe.Pointer, n, ks uintptr, less func(ka, kb unsafe.Pointer, sz uintptr) bool, tmp unsafe.Pointer) {
+	if n < 2 {
+		return
+	}
+	i := n / 2
+	for i > 0 {
+		i--
+		hashmapSiftDown(buf, n, i, ks, less, tmp)
+	}
+	end := n
+	for end > 1 {
+		end--
+		memcpy(tmp, buf, ks)
+		memcpy(buf, unsafe.Add(buf, end*ks), ks)
+		memcpy(unsafe.Add(buf, end*ks), tmp, ks)
+		hashmapSiftDown(buf, end, 0, ks, less, tmp)
+	}
+}
+
+func hashmapSiftDown(buf unsafe.Pointer, n, i, ks uintptr, less func(ka, kb unsafe.Pointer, sz uintptr) bool, tmp unsafe.Pointer) {
+	for {
+		l := 2*i + 1
+		if l >= n {
+			return
+		}
+		big := l
+		if r := l + 1; r < n && less(unsafe.Add(buf, big*ks), unsafe.Add(buf, r*ks), ks) {
+			big = r
+		}
+		if !less(unsafe.Add(buf, i*ks), unsafe.Add(buf, big*ks), ks) {
+			return
+		}
+		memcpy(tmp, unsafe.Add(buf, i*ks), ks)
+		memcpy(unsafe.Add(buf, i*ks), unsafe.Add(buf, big*ks), ks)
+		memcpy(unsafe.Add(buf, big*ks), tmp, ks)
+		i = big
+	}
 }
 
 // Hashmap with plain binary data keys (not containing strings etc.).

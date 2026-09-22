@@ -57,6 +57,10 @@ type DomainRoot struct {
 	// scan over every group made each stability check O(groups) and stalled
 	// the compiler on large packages.
 	sovRanges []uintptr
+	// sovRangeOwners is the group owning the range at the same index in
+	// sovRanges, so "which receiver owns this address" is a binary search
+	// instead of a walk of the owning arena's group list.
+	sovRangeOwners []*sovGroup
 	domStack []uintptr // child domain root addresses
 	domTop   int32
 	root     Arena // inline root arena, fnStack[0] = &root
@@ -364,7 +368,7 @@ func sovRootAlloc(sz uintptr) unsafe.Pointer {
 
 // sovRangeRegister records [base, base+cap) as a live sovereign data-arena
 // region. Insertion keeps sovRanges sorted by lo.
-func sovRangeRegister(base, size uintptr) {
+func sovRangeRegister(base, size uintptr, owner *sovGroup) {
 	if size == 0 {
 		return
 	}
@@ -397,6 +401,21 @@ func sovRangeRegister(base, size uintptr) {
 	r[i*2] = lo
 	r[i*2+1] = hi
 	domainRoot.sovRanges = r
+	n := len(r) / 2
+	o := domainRoot.sovRangeOwners
+	if n > cap(o) {
+		nc := cap(o) * 2
+		if nc < 16 {
+			nc = 16
+		}
+		nb := unsafe.Slice((**sovGroup)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(&sovGroup{}))), nc)
+		copy(nb, o)
+		o = nb
+	}
+	o = o[:n]
+	copy(o[i+1:], o[i:n-1])
+	o[i] = owner
+	domainRoot.sovRangeOwners = o
 }
 
 // sovRangeUnregister drops the entry whose lo is base, if present.
@@ -417,6 +436,11 @@ func sovRangeUnregister(base uintptr) {
 	}
 	copy(r[i*2:], r[(i+1)*2:])
 	domainRoot.sovRanges = r[:len(r)-2]
+	o := domainRoot.sovRangeOwners
+	if i < len(o) {
+		copy(o[i:], o[i+1:])
+		domainRoot.sovRangeOwners = o[:len(o)-1]
+	}
 }
 
 // sovInSovereignDataArena reports whether p lies in a live sovereign
@@ -439,6 +463,32 @@ func sovInSovereignDataArena(p uintptr) (ok bool) {
 	lo := r[(i-1)*2]
 	hi := r[(i-1)*2+1]
 	return p >= lo && p < hi
+}
+
+// sovRangeOwner returns the group whose data arena contains p, or nil.
+func sovRangeOwner(p uintptr) (g *sovGroup) {
+	if domainRoot == nil {
+		return nil
+	}
+	r := domainRoot.sovRanges
+	i := int32(0)
+	j := int32(len(r)) / 2
+	for i < j {
+		m := (i + j) / 2
+		if r[m*2] <= p {
+			i = m + 1
+		} else {
+			j = m
+		}
+	}
+	if i == 0 {
+		return nil
+	}
+	k := i - 1
+	if p < r[k*2] || p >= r[k*2+1] {
+		return nil
+	}
+	return domainRoot.sovRangeOwners[k]
 }
 
 // sovTrackArenaGroup records g as owned by the arena holding its receiver,
@@ -468,18 +518,14 @@ func sovTrackArenaGroup(g *sovGroup) {
 // sovInvalidateArena frees the moment a is released. A copy made by a
 // relocation that leaves a's frame must not alias such a data arena.
 func sovGroupInDyingArena(a *Arena, p uintptr) (ok bool) {
-	if a == nil || len(a.sovGroupList) == 0 {
+	if a == nil || a.sovGroups <= 0 {
 		return false
 	}
-	for _, g := range a.sovGroupList {
-		if g == nil || g.released || g.data == nil {
-			continue
-		}
-		if codecArenaContains(g.data, p) {
-			return true
-		}
+	g := sovRangeOwner(p)
+	if g == nil || g.released || g.data == nil {
+		return false
 	}
-	return false
+	return g.ctxArena == a
 }
 
 // sovGrowRecs grows the record slice with root-lifetime backing.
@@ -536,7 +582,7 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 	g = (*sovGroup)(alloc(unsafe.Sizeof(sovGroup{}), nil))
 	g.data = sovNewArena(65536)
 	g.data.sovereign = 1
-	sovRangeRegister(g.data.regions[0].base, g.data.regions[0].cap)
+	sovRangeRegister(g.data.regions[0].base, g.data.regions[0].cap, g)
 	g.data.owner = g
 	g.allocTbl = sovNewArena(65536)
 	g.refTbl = sovNewArena(65536)
@@ -1147,6 +1193,9 @@ func sovRekeyRelocated(g *sovGroup, oldData *Arena, oldAddr, newAddr uintptr, nd
 			nd.sovGroups++
 		}
 		grp.ctxArena = nd
+		// nd releases the groups whose receivers live in it, consulting its
+		// own list, so the group has to be tracked there now.
+		sovTrackArenaGroup(grp)
 	}
 	nv := unsafe.Pointer(newAddr)
 	nh := m.keyHash(unsafe.Pointer(&nv), 8, m.seed)
@@ -1213,7 +1262,7 @@ func codecSovereignCompact(g *sovGroup, needed uintptr) {
 	newCap := live + g.batchMax + needed + 65536
 	nd := sovNewArena(newCap)
 	nd.sovereign = 1
-	sovRangeRegister(nd.regions[0].base, nd.regions[0].cap)
+	sovRangeRegister(nd.regions[0].base, nd.regions[0].cap, g)
 	nd.owner = g
 	nt := sovNewArena(65536)
 
@@ -1512,27 +1561,15 @@ func sovInvalidateArena(a *Arena) {
 		a.sovGroups = 0
 		return
 	}
-	var it hashmapIterator
-	var keyBuf [8]uint8
-	var valBuf [8]uint8
-	var dead []unsafe.Pointer
-	for hashmapNext(m, &it, unsafe.Pointer(&keyBuf[0]), unsafe.Pointer(&valBuf[0])) {
-		recv := *(*unsafe.Pointer)(unsafe.Pointer(&keyBuf[0]))
-		if recv != nil && sovAddrInArena(a, uintptr(recv)) {
-			if len(dead) >= cap(dead) {
-				nc := cap(dead) * 2
-				if nc < 4 {
-					nc = 4
-				}
-				nb := []unsafe.Pointer{:0:nc}
-				copy(nb[:len(dead)], dead)
-				dead = nb[:len(dead)]
-			}
-			dead = push(dead, recv)
+	// The arena's own group list names exactly the groups whose receivers live
+	// in it, so it is the set to release. Walking the global receiver map here
+	// instead made every release of an arena that tracks a group iterate a map
+	// holding thousands of entries.
+	for _, g := range a.sovGroupList {
+		if g == nil || g.released || g.recv == nil || g.ctxArena != a {
+			continue
 		}
-	}
-	for _, recv := range dead {
-		codecSovereignFree(recv)
+		codecSovereignFree(g.recv)
 	}
 	a.sovGroupList = a.sovGroupList[:0]
 	if a.sovGroups != 0 {
@@ -1725,7 +1762,7 @@ func arenaAllocRaw(a *Arena, size uintptr) unsafe.Pointer {
 		a.regions[a.nregions].cap = newCap
 		a.nregions++
 		if a.sovereign != 0 {
-			sovRangeRegister(uintptr(addr), newCap)
+			sovRangeRegister(uintptr(addr), newCap, a.owner)
 		}
 		active = a.nregions - 1
 	}
