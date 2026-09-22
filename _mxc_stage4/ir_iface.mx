@@ -929,23 +929,42 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 		impls := e.findIfaceImpls(mnames[mi])
 		seen := map[string]bool{}
 		for ii := 0; ii < len(impls); ii++ {
-			// Check return type and parameter count compatibility.
-			if msigs[mi] != nil && impls[ii].fn != nil && impls[ii].fn.Signature != nil {
-				ifaceRet := e.llvmType(msigs[mi].Results)
-				implRet := e.llvmType(impls[ii].fn.Signature.Results)
-				if ifaceRet != implRet {
-					continue
+			// An impl must match the interface method's results and parameter
+			// types, not merely its name. Cross-package impls arrive as an
+			// external symbol with only a signature, so both forms are
+			// checked here.
+			if msigs[mi] != nil {
+				var cand *Signature
+				if impls[ii].fn != nil {
+					cand = impls[ii].fn.Signature
+				} else if impls[ii].extSig != nil {
+					cand = impls[ii].extSig
 				}
-				ifaceParams := int32(0)
-				if msigs[mi].Params != nil {
-					ifaceParams = int32(msigs[mi].Params.Len())
-				}
-				implParams := int32(0)
-				if impls[ii].fn.Signature.Params != nil {
-					implParams = int32(impls[ii].fn.Signature.Params.Len())
-				}
-				if ifaceParams != implParams {
-					continue
+				if cand != nil {
+					if e.llvmType(msigs[mi].Results) != e.llvmType(cand.Results) {
+						continue
+					}
+					ifaceParams := int32(0)
+					if msigs[mi].Params != nil {
+						ifaceParams = int32(msigs[mi].Params.Len())
+					}
+					implParams := int32(0)
+					if cand.Params != nil {
+						implParams = int32(cand.Params.Len())
+					}
+					if ifaceParams != implParams {
+						continue
+					}
+					bad := false
+					for pi := int32(0); pi < ifaceParams; pi++ {
+						if e.llvmType(msigs[mi].Params.At(pi).Typ) != e.llvmType(cand.Params.At(pi).Typ) {
+							bad = true
+							break
+						}
+					}
+					if bad {
+						continue
+					}
 				}
 			}
 			base := e.implBaseTypeName(impls[ii])
@@ -1279,13 +1298,27 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 	}
 
 	allImpls := e.findIfaceImpls(inv.MethodName)
-	// Filter impls by return type and parameter count compatibility.
+	// The method the call actually targets, so an impl can be checked against
+	// its real signature rather than its name.
+	var ifaceSig *Signature
+	if inv.IfaceType != nil {
+		for _, im := range inv.IfaceType.AllMethods {
+			if im != nil && im.Name == inv.MethodName {
+				ifaceSig = im.Sig
+				break
+			}
+		}
+	}
+	// Filter impls by result and parameter compatibility. A name match alone
+	// is not an implementation: poly1305's Sum(*[16]byte) shares a name with
+	// hash.Hash's Sum([]byte) []byte but neither its parameters nor its
+	// result, and emitting the call with the interface's signature left a
+	// declaration that disagreed with the definition at the wasm link.
 	nInvokeArgs := int32(len(inv.Args))
 	var impls []ifaceImpl
 	for _, impl := range allImpls {
 		if impl.fn != nil && impl.fn.Signature != nil {
-			implRet := e.llvmType(impl.fn.Signature.Results)
-			if retType != implRet && retType != "void" && implRet != "void" {
+			if e.llvmType(impl.fn.Signature.Results) != retType {
 				continue
 			}
 			// Parameter count must match the invoke arg count.
@@ -1296,6 +1329,21 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 			if implParams != nInvokeArgs {
 				continue
 			}
+			if ifaceSig != nil && ifaceSig.Params != nil && impl.fn.Signature.Params != nil {
+				if int32(ifaceSig.Params.Len()) != implParams {
+					continue
+				}
+				bad := false
+				for pi := int32(0); pi < implParams; pi++ {
+					if e.llvmType(ifaceSig.Params.At(pi).Typ) != e.llvmType(impl.fn.Signature.Params.At(pi).Typ) {
+						bad = true
+						break
+					}
+				}
+				if bad {
+					continue
+				}
+			}
 		} else if impl.extSig != nil {
 			implParams := int32(0)
 			if impl.extSig.Params != nil {
@@ -1303,6 +1351,24 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 			}
 			if implParams != nInvokeArgs {
 				continue
+			}
+			if e.llvmType(impl.extSig.Results) != retType {
+				continue
+			}
+			if ifaceSig != nil && ifaceSig.Params != nil && impl.extSig.Params != nil {
+				if int32(ifaceSig.Params.Len()) != implParams {
+					continue
+				}
+				badExt := false
+				for pi := int32(0); pi < implParams; pi++ {
+					if e.llvmType(ifaceSig.Params.At(pi).Typ) != e.llvmType(impl.extSig.Params.At(pi).Typ) {
+						badExt = true
+						break
+					}
+				}
+				if badExt {
+					continue
+				}
 			}
 		}
 		impls = mxutil.Ensure(impls, 1)
