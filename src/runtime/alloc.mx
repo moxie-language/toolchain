@@ -529,10 +529,21 @@ func sovGroupInDyingArena(a *Arena, p uintptr) (ok bool) {
 }
 
 // sovGrowRecs grows the record slice with root-lifetime backing.
+// sovMapMax bounds a receiver's allocation map and slot table. Both are
+// rebuilt by compaction, so a map past this has either allocated far more
+// than its arena can hold or is leaking records; past it the doubling below
+// overflows int32 and the byte-size arithmetic turns into a multi-gigabyte
+// region request with a sign-extended capacity, which corrupted the arena
+// instead of failing.
+const sovMapMax = int32(1) << 27
+
 func sovGrowRecs(g *sovGroup) {
 	nc := cap(g.recs) * 2
 	if nc < 64 {
 		nc = 64
+	}
+	if nc > sovMapMax || nc < 0 {
+		runtimePanic("sovereign allocation map overflow: compaction did not reclaim records")
 	}
 	nb := unsafe.Slice((**sovRecord)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(&sovRecord{}))), nc)
 	copy(nb, g.recs)
@@ -544,6 +555,9 @@ func sovGrowSlots(g *sovGroup) {
 	nc := cap(g.slots) * 2
 	if nc < 16 {
 		nc = 16
+	}
+	if nc > sovMapMax || nc < 0 {
+		runtimePanic("sovereign slot table overflow")
 	}
 	nb := unsafe.Slice((**sovSlot)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(&sovSlot{}))), nc)
 	copy(nb, g.slots)

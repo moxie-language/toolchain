@@ -750,6 +750,16 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 		elemSize := elemType.Size()
 		length := typ.ArrayLen()
 		buf := alloc(typ.Size(), unsafe.Pointer(typ))
+		// A basic element encodes as raw bytes with no tag, so the array's
+		// payload is its elements back to back. Decoding element by element
+		// allocated a fresh block per element only to memcpy it into buf and
+		// abandon it: 64 leaked blocks per [64]byte, each one recorded in the
+		// receiver's allocation map when the target arena is sovereign.
+		if elemType != nil && isBasicKind(elemType.Kind()) {
+			memcpy(buf, unsafe.Pointer(&cb.data[cb.pos]), typ.Size())
+			cb.pos += int32(typ.Size())
+			return buf
+		}
 		for i := int32(0); i < length; i++ {
 			ep := unsafe.Add(buf, uintptr(i)*elemSize)
 			dec := codecDecodeValue(cb, ds, elemType)
