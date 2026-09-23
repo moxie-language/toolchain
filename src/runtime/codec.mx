@@ -99,12 +99,33 @@ func codecIsStableArenaAddr(p uintptr) (ok bool) {
 		return true
 	}
 	if codecTopOnlyTransient {
-		// Sovereign store-back: only sovereign scratch fn arenas (the
-		// method's own plus any ancestor sovereign method's scratch) are
-		// transient. Regular fn arenas (non-sovereign callers) keep their
-		// identity.
-		for i := int32(1); i <= domainRoot.fnTop; i++ {
-			if domainRoot.sovScratch[i>>6]&(1 << (i & 63)) == 0 {
+		// Sovereign store-back. A pointer written into the receiver is aliased
+		// only when the arena holding it outlives the receiver's own arena.
+		//
+		// The receiver's arena is the borrowed sovereign scratch frame nearest
+		// the top of the stack; everything above it is the method's own frame
+		// and its callees' frames, all of which die at the method's return, so
+		// data from them must be copied. Treating every non-sovereign frame as
+		// stable aliased helper results into the receiver's data arena, and
+		// they dangled the moment the helper returned - a parsed filter kept
+		// kind and tag lists that pointed at a released helper frame, which is
+		// the SIGSEGV in the store scan and in tag.(*T).Len.
+		owner := int32(-1)
+		for i := domainRoot.fnTop; i >= 1; i-- {
+			if domainRoot.sovScratch[i>>6]&(1<<(i&63)) != 0 {
+				owner = i
+				break
+			}
+		}
+		for i := owner + 1; i <= domainRoot.fnTop; i++ {
+			if codecArenaContains(domainRoot.fnStack[i], p) {
+				return false
+			}
+		}
+		// Ancestors below the receiver's arena keep identity, except the
+		// sovereign scratch frames, which the store-back reclaims itself.
+		for i := int32(1); i <= owner; i++ {
+			if domainRoot.sovScratch[i>>6]&(1<<(i&63)) == 0 {
 				continue
 			}
 			if codecArenaContains(domainRoot.fnStack[i], p) {
