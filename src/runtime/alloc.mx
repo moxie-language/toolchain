@@ -1810,6 +1810,18 @@ func ArenaAllocTD(a *Arena, size uintptr, td *RawType) unsafe.Pointer {
 		a.regions[a.nregions].base = uintptr(addr)
 		a.regions[a.nregions].off = 0
 		a.regions[a.nregions].cap = newCap
+		// A sovereign group's data arena is identified by its registered
+		// regions. Registers 0 of g.data is recorded when the group is made,
+		// and every region a compaction makes is recorded too, but a region
+		// grown here - the ordinary allocation path every method body uses -
+		// was not. sovInSovereignDataArena then missed the grown region, the
+		// codec treated a pointer into it as stable and aliased it instead of
+		// copying, and the caller kept a pointer into memory the group's
+		// ArenaFree unmapped: the SIGSEGV in store.(*Engine).scanKPC and in
+		// main after filter.UnmarshalFilters.
+		if a.sovereign != 0 {
+			sovRangeRegister(uintptr(addr), newCap, a.owner)
+		}
 		a.nregions++
 		active = a.nregions - 1
 	}
