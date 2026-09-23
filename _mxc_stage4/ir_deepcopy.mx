@@ -595,8 +595,29 @@ func (e *irEmitter) emitRetWithCodec(llvmType string, val string) {
 		}
 	}
 
+	// A pointer that escaped into the returned graph from the fn arena must
+	// stay alive for the caller: leak the arena instead of releasing it to the
+	// pool when the codec saw an escape. Mirrors legacy/compiler/compiler.go
+	// (codecEscapeOccurred), which has always done this - without it stage4
+	// released the frame the return value still pointed into and the caller
+	// read freed memory (SIGSEGV in main after filter.UnmarshalFilters).
+	esc := e.nextReg2("cesc")
+	e.w("  ") ; e.w(esc) ; e.w(" = call i1 @runtime.codecEscapeOccurred(ptr null)\n")
+	e.declareRuntime("runtime.codecEscapeOccurred", "i1", "")
+	escCmp := e.nextReg2("cesccmp")
+	e.w("  ") ; e.w(escCmp) ; e.w(" = icmp eq i1 ") ; e.w(esc) ; e.w(", false\n")
+	id := irItoa(e.nextReg)
+	relLbl := "rel.release" | id
+	leakLbl := "rel.leak" | id
+	joinLbl := "rel.join" | id
+	e.w("  br i1 ") ; e.w(escCmp) ; e.w(", label %") ; e.w(relLbl) ; e.w(", label %") ; e.w(leakLbl) ; e.w("\n")
+	e.w(relLbl) ; e.w(":\n")
 	e.w("  call void @runtime.ArenaRelease(ptr ") ; e.w(fn) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.ArenaRelease", "void", "ptr")
+	e.w("  br label %") ; e.w(joinLbl) ; e.w("\n")
+	e.w(leakLbl) ; e.w(":\n")
+	e.w("  br label %") ; e.w(joinLbl) ; e.w("\n")
+	e.w(joinLbl) ; e.w(":\n")
 	if e.stableReg {
 		e.w("  call void @runtime.SovereignRegRestore(ptr null)\n")
 		e.declareRuntime("runtime.SovereignRegRestore", "void", "")
