@@ -2880,21 +2880,6 @@ func loadMxhData(data []byte) (ok bool) {
 	}
 	pkgName := string(d[ns:ne])
 
-	// Register a package once per build. The same mxh is loaded from three
-	// places: the whole-link pre-pass, the cached-package branch of the build
-	// loop, and the emit pass after CompileToIR. Each load built a fresh
-	// TCPackage and overwrote the registry entry, but the replaced graph
-	// stayed reachable from every type object that had already resolved
-	// through it, so the build retained one extra full type graph per package
-	// and accumulated its way into swap. First registration wins: the cache
-	// key ties the mxh to the source, so a later load of the same path is the
-	// same package.
-	if existing := cctx.universe.Registry[pkgPath]; existing != nil && !existing.Synthetic {
-		mxhSkip++
-		return true
-	}
-	mxhFull++
-
 	pkg := NewTCPackage(pkgPath, pkgName)
 
 	// Record generic declarations. An entry exists for every package whose
@@ -5076,11 +5061,6 @@ func main() {
 	}
 }
 
-// mxhFull and mxhSkip count mxh registrations: a full parse into the
-// persistent arena versus the already-registered early return.
-var mxhFull int32
-var mxhSkip int32
-
 // rssKB reports this process's resident set size in kilobytes. Diagnostic only:
 // build-memory attribution reads /proc, which is linux-specific and never
 // wanted on a target.
@@ -5175,11 +5155,7 @@ func memLine(tag string) {
 		iren = int32(len(cctx.irResults))
 	}
 	maps, mapKB := mapCensus()
-	liveN, liveB := runtime.DbMapLive()
-	anw, afr, arel, arst, aacq, apool, asov, asovf := runtime.DbArenaCounters()
-	sg, sctx, sic, sie, sil, sisk, sif := runtime.DbSovCounters()
-	snRoot, snCur, snNone, snOther := runtime.DbSovNilCounters()
-	mxutil.WriteStr(2, "  mem "|tag|" rss="|simpleItoa(int32(rssKB()/1024))|"MB maps="|simpleItoa(maps)|" mapMB="|simpleItoa(int32(mapKB/1024))|" arenamaps="|simpleItoa(liveN)|" arenaMB="|simpleItoa(int32(liveB/1048576))|" aN="|simpleItoa(anw)|" aF="|simpleItoa(afr)|" aRel="|simpleItoa(arel)|" aRst="|simpleItoa(arst)|" aAcq="|simpleItoa(aacq)|" aPool="|simpleItoa(apool)|" sovN="|simpleItoa(asov)|" sovF="|simpleItoa(asovf)|" sg="|simpleItoa(sg)|" sctxnil="|simpleItoa(sctx)|" sic="|simpleItoa(sic)|" sie="|simpleItoa(sie)|" sil="|simpleItoa(sil)|" sisk="|simpleItoa(sisk)|" sif="|simpleItoa(sif)|" snRoot="|simpleItoa(snRoot)|" snCur="|simpleItoa(snCur)|" snNone="|simpleItoa(snNone)|" snOther="|simpleItoa(snOther)|" full="|simpleItoa(mxhFull)|" skip="|simpleItoa(mxhSkip)|" reg="|simpleItoa(reg)|" byname="|simpleItoa(byname)|" mxhg="|simpleItoa(mxhg)|" scang="|simpleItoa(scang)|" genS="|simpleItoa(genS)|" genF="|simpleItoa(genF)|" genM="|simpleItoa(genM)|" iren="|simpleItoa(iren)|"\n")
+	mxutil.WriteStr(2, "  mem "|tag|" rss="|simpleItoa(int32(rssKB()/1024))|"MB maps="|simpleItoa(maps)|" mapMB="|simpleItoa(int32(mapKB/1024))|" reg="|simpleItoa(reg)|" byname="|simpleItoa(byname)|" mxhg="|simpleItoa(mxhg)|" scang="|simpleItoa(scang)|" genS="|simpleItoa(genS)|" genF="|simpleItoa(genF)|" genM="|simpleItoa(genM)|" iren="|simpleItoa(iren)|"\n")
 }
 
 // buildPkgsSerial type-checks and compiles each package in dependency order
