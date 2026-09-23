@@ -76,14 +76,27 @@ func printCommand(cmd string, args ...string) {
 	fmt.Fprintln(os.Stderr, strings.Join(command, " "))
 }
 
+// moxieRoot resolves the module root the way every command wants it: MOXIEROOT
+// when set, otherwise the conventional install location $HOME/moxie. Falling
+// back to the current directory made an unset MOXIEROOT read whatever checkout
+// happened to be the cwd. Stage4 resolves it the same way (moxieRoot in
+// _mxc_stage4/main.mx).
+func moxieRoot() string {
+	if root := goenv.Get("MOXIEROOT"); root != "" {
+		return root
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		return "."
+	}
+	return filepath.Join(home, "moxie")
+}
+
 // BuildRuntime compiles the runtime packages into a standalone .bc file
 // with external linkage on all symbols.
 func BuildRuntime(outpath string, config *compileopts.Config) error {
 	if outpath == "" {
-		root := goenv.Get("MOXIEROOT")
-		if root == "" {
-			root = "."
-		}
+		root := moxieRoot()
 		outpath = filepath.Join(root, "sysroot", "runtime_go.bc")
 	}
 	if !strings.HasSuffix(outpath, ".bc") {

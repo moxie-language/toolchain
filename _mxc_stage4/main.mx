@@ -338,6 +338,37 @@ func getMoxiePath() (s string) {
 	return mxutil.JoinPath(home, "moxie")
 }
 
+// moxieRoot resolves the module root every command wants: MOXIEROOT when it is
+// set, otherwise the conventional install location $HOME/moxie (MOXIEPATH
+// overrides the parent, the same default getMoxiePath uses for the package
+// cache). Falling back to the current directory made an unset MOXIEROOT read
+// whatever checkout happened to be the cwd, which is how a stale installed
+// tree silently became the stdlib.
+func moxieRoot() (s string) {
+	root := getenv("MOXIEROOT")
+	if root == "" {
+		root = getMoxiePath()
+	}
+	// Fail loud when the resolved root is not a moxie tree. Without this an
+	// unset MOXIEROOT that lands on a directory with no stdlib makes every
+	// stdlib import resolve to nothing and the build dies later with
+	// unrelated "cannot resolve type of short var" errors instead of naming
+	// the root it looked in.
+	if !dirExists(mxutil.JoinPath(root, "src")) {
+		fatal("MOXIEROOT resolves to " | root | ", which has no src/ directory; set MOXIEROOT to your moxie checkout")
+	}
+	return root
+}
+
+// dirExists reports whether path is an existing directory.
+func dirExists(path string) (ok bool) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
+}
+
 func mxcVersion() (s string) { return "1.9.11" }
 
 
@@ -3178,10 +3209,7 @@ func walkStdlibPkgs(srcDir, prefix string, out []string) (result []string) {
 }
 
 func cmdCacheWarm() {
-	root := getenv("MOXIEROOT")
-	if root == "" {
-		root = "."
-	}
+	root := moxieRoot()
 	ensureModuleRoot(root)
 	srcDir := mxutil.JoinPath(root, "src")
 	mxutil.WriteStr(2, "warming stdlib cache from " | srcDir | " ...\n")
@@ -3661,10 +3689,7 @@ func cmdUpdate(rebuildAll bool) {
 	}
 	mxutil.WriteStr(2, "rebuilding all cached packages...\n")
 	mpath := getMoxiePath()
-	root := getenv("MOXIEROOT")
-	if root == "" {
-		root = "."
-	}
+	root := moxieRoot()
 	ensureModuleRoot(root)
 	cacheBase := pkgCacheDir()
 	pkgDirs := listFiles(cacheBase, "")
@@ -3800,10 +3825,7 @@ func cmdTest(args []string) {
 	}
 	_ = verbose
 
-	root := getenv("MOXIEROOT")
-	if root == "" {
-		root = "."
-	}
+	root := moxieRoot()
 	triple := "x86_64-unknown-linux-musleabihf"
 	clang := "clang-22"
 
@@ -4595,10 +4617,7 @@ func main() {
 		outpath = pathBase(pkgPath)
 	}
 
-	root := getenv("MOXIEROOT")
-	if root == "" {
-		root = "."
-	}
+	root := moxieRoot()
 	applyTargetFlag(targetFlag)
 	triple := "x86_64-unknown-linux-musleabihf"
 	if mxutil.TargetArch == "wasm" {
@@ -5875,10 +5894,7 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 	}
 
 	// Phase 2: serialize metadata and spawn workers
-	root := getenv("MOXIEROOT")
-	if root == "" {
-		root = "."
-	}
+	root := moxieRoot()
 	meta := serializePkgMeta(pkgs, triple, clang, tmpdir, cacheBase, root,
 		bst.globalModPrefix, bst.globalModDir)
 
@@ -6120,10 +6136,7 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 }
 
 func cmdBuildRuntime() {
-	root := getenv("MOXIEROOT")
-	if root == "" {
-		root = "."
-	}
+	root := moxieRoot()
 	ensureModuleRoot(root)
 	// The bake follows the target in effect for this invocation: main
 	// resolves -target before anything else, and ensureRuntimeBake calls
