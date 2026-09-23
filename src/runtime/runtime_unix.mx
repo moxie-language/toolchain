@@ -529,12 +529,119 @@ func waitForEvents() {
 // The arena allocator needs a single primitive that both platforms can
 // provide. Native pages come from mmap; wasm derives them from linear
 // memory growth.
+// TEMPORARY build-memory instrumentation: live mapping count and bytes, so a
+// leak can be attributed to a mapping instead of inferred.
+var dbgMapLive int32
+var dbgMapBytes int64
+
+// DbMapLive reports the number of live arena mappings and their total bytes.
+func DbMapLive() (n int32, bytes int64) { return dbgMapLive, dbgMapBytes }
+
+// Arena lifecycle counters, temporary.
+var dbgArenaNew int32
+var dbgArenaFree int32
+var dbgArenaRelease int32
+var dbgArenaReset int32
+var dbgArenaAcquire int32
+var dbgArenaPooled int32
+var dbgSovAcq int32
+var dbgSovFree int32
+
+// DbArenaCounters reports arena lifecycle totals.
+func DbArenaCounters() (nw, fr, rel, rst, acq, pooled, sovNew, sovFree int32) {
+	return dbgArenaNew, dbgArenaFree, dbgArenaRelease, dbgArenaReset, dbgArenaAcquire, dbgArenaPooled, dbgSovAcq, dbgSovFree
+}
+
+// Sovereign-group lifecycle counters, temporary.
+var dbgSovNewGroups int32
+var dbgSovCtxNil int32
+var dbgSovInvalCalls int32
+var dbgSovInvalEarly int32
+var dbgSovInvalListed int32
+var dbgSovInvalSkip int32
+var dbgSovInvalFreed int32
+
+// Where unattributed receivers live: root arena, current arena, or nowhere
+// on the frame stack.
+var dbgSovNilRoot int32
+var dbgSovNilCur int32
+var dbgSovNilNone int32
+var dbgSovNilOther int32
+
+// DbSovNilCounters reports the location split for unattributed receivers.
+func DbSovNilCounters() (inRoot, inCur, noWhere, other int32) {
+	return dbgSovNilRoot, dbgSovNilCur, dbgSovNilNone, dbgSovNilOther
+}
+
+// DbSovNilBump increments one unattributed-location counter (1..4).
+func DbSovNilBump(which int32) {
+	switch which {
+	case 1:
+		dbgSovNilRoot++
+	case 2:
+		dbgSovNilCur++
+	case 3:
+		dbgSovNilNone++
+	case 4:
+		dbgSovNilOther++
+	}
+}
+
+// DbSovCounters reports sovereign-group lifecycle totals.
+func DbSovCounters() (newG, ctxNil, invalCalls, invalEarly, invalListed, invalSkip, invalFreed int32) {
+	return dbgSovNewGroups, dbgSovCtxNil, dbgSovInvalCalls, dbgSovInvalEarly, dbgSovInvalListed, dbgSovInvalSkip, dbgSovInvalFreed
+}
+
+// DbSovBump increments one sovereign counter by name (1..7).
+func DbSovBump(which int32) {
+	switch which {
+	case 1:
+		dbgSovNewGroups++
+	case 2:
+		dbgSovCtxNil++
+	case 3:
+		dbgSovInvalCalls++
+	case 4:
+		dbgSovInvalEarly++
+	case 5:
+		dbgSovInvalListed++
+	case 6:
+		dbgSovInvalSkip++
+	case 7:
+		dbgSovInvalFreed++
+	}
+}
+
+// DbArenaBump increments one lifecycle counter by name (1..8).
+func DbArenaBump(which int32) {
+	switch which {
+	case 1:
+		dbgArenaNew++
+	case 2:
+		dbgArenaFree++
+	case 3:
+		dbgArenaRelease++
+	case 4:
+		dbgArenaReset++
+	case 5:
+		dbgArenaAcquire++
+	case 6:
+		dbgArenaPooled++
+	case 7:
+		dbgSovAcq++
+	case 8:
+		dbgSovFree++
+	}
+}
+
 func sysMap(size uintptr) unsafe.Pointer {
 	p := mmap(nil, size, flag_PROT_READ|flag_PROT_WRITE,
 		flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
 	if uintptr(p) == ^uintptr(0) {
 		return nil
 	}
+	dbgMapLive++
+	dbgMapBytes += int64(size)
 	return p
 }
 
@@ -551,5 +658,7 @@ func sysMapShared(size uintptr) unsafe.Pointer {
 
 // sysUnmap releases a region from sysMap or sysMapShared.
 func sysUnmap(p unsafe.Pointer, size uintptr) {
+	dbgMapLive--
+	dbgMapBytes -= int64(size)
 	munmap(p, size)
 }

@@ -2879,6 +2879,22 @@ func loadMxhData(data []byte) (ok bool) {
 		return false
 	}
 	pkgName := string(d[ns:ne])
+
+	// Register a package once per build. The same mxh is loaded from three
+	// places: the whole-link pre-pass, the cached-package branch of the build
+	// loop, and the emit pass after CompileToIR. Each load built a fresh
+	// TCPackage and overwrote the registry entry, but the replaced graph
+	// stayed reachable from every type object that had already resolved
+	// through it, so the build retained one extra full type graph per package
+	// and accumulated its way into swap. First registration wins: the cache
+	// key ties the mxh to the source, so a later load of the same path is the
+	// same package.
+	if existing := cctx.universe.Registry[pkgPath]; existing != nil && !existing.Synthetic {
+		mxhSkip++
+		return true
+	}
+	mxhFull++
+
 	pkg := NewTCPackage(pkgPath, pkgName)
 
 	// Record generic declarations. An entry exists for every package whose
@@ -5060,12 +5076,119 @@ func main() {
 	}
 }
 
+// mxhFull and mxhSkip count mxh registrations: a full parse into the
+// persistent arena versus the already-registered early return.
+var mxhFull int32
+var mxhSkip int32
+
+// rssKB reports this process's resident set size in kilobytes. Diagnostic only:
+// build-memory attribution reads /proc, which is linux-specific and never
+// wanted on a target.
+func rssKB() (kb int64) {
+	data, rerr := os.ReadFile("/proc/self/statm")
+	if rerr != nil {
+		return 0
+	}
+	// Fields: size resident shared text lib data dt. Take the second.
+	i := int32(0)
+	for i < len(data) && data[i] != ' ' {
+		i++
+	}
+	i++
+	var pages int64
+	for i < len(data) && data[i] >= '0' && data[i] <= '9' {
+		pages = pages*10 + int64(data[i]-'0')
+		i++
+	}
+	return pages * 4 // 4 KiB pages
+}
+
+// mapCensus counts this process's virtual memory areas and their total size.
+// A mapping count that grows per package with no live structure to match it is
+// an arena that was never unmapped; a flat count means the growth is live data.
+func mapCensus() (lines int32, totalKB int64) {
+	data, merr := os.ReadFile("/proc/self/maps")
+	if merr != nil {
+		return 0, 0
+	}
+	i := int32(0)
+	for i < len(data) {
+		nl := int32(0)
+		for i < len(data) && data[i] != '\n' {
+			i++
+			nl++
+		}
+		i++
+		lines++
+		// Each line ends with the mapping size in hex.
+		j := i - 1
+		if nl > 0 {
+			j = i - 2
+		}
+		hs := j
+		for hs > 0 && isHexDigit(data[hs]) {
+			hs--
+		}
+		hs++
+		var sz int64
+		for k := hs; k <= j; k++ {
+			sz = sz*16 + int64(hexVal(data[k]))
+		}
+		totalKB += sz / 1024
+	}
+	return lines, totalKB
+}
+
+func isHexDigit(c byte) (ok bool) {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+func hexVal(c byte) (v int32) {
+	if c >= '0' && c <= '9' {
+		return int32(c - '0')
+	}
+	if c >= 'a' && c <= 'f' {
+		return int32(c-'a') + 10
+	}
+	return int32(c-'A') + 10
+}
+
+// memLine prints one build-memory attribution line: RSS plus the size of every
+// persistent structure the build carries from one package to the next. A
+// counter that tracks RSS is the accumulator.
+func memLine(tag string) {
+	var reg, byname, mxhg, scang, genS, genF, genM, iren int32
+	if cctx != nil {
+		if cctx.universe != nil {
+			if cctx.universe.Registry != nil {
+				reg = int32(len(cctx.universe.Registry))
+			}
+			if cctx.universe.ByName != nil {
+				byname = int32(len(cctx.universe.ByName))
+			}
+		}
+		mxhg = int32(len(cctx.mxhGenerics))
+		scang = int32(len(cctx.scannedGeneric))
+		genS = int32(len(cctx.genericPkgScopes))
+		genF = int32(len(cctx.genericFuncDecls))
+		genM = int32(len(cctx.genericMethodDecls))
+		iren = int32(len(cctx.irResults))
+	}
+	maps, mapKB := mapCensus()
+	liveN, liveB := runtime.DbMapLive()
+	anw, afr, arel, arst, aacq, apool, asov, asovf := runtime.DbArenaCounters()
+	sg, sctx, sic, sie, sil, sisk, sif := runtime.DbSovCounters()
+	snRoot, snCur, snNone, snOther := runtime.DbSovNilCounters()
+	mxutil.WriteStr(2, "  mem "|tag|" rss="|simpleItoa(int32(rssKB()/1024))|"MB maps="|simpleItoa(maps)|" mapMB="|simpleItoa(int32(mapKB/1024))|" arenamaps="|simpleItoa(liveN)|" arenaMB="|simpleItoa(int32(liveB/1048576))|" aN="|simpleItoa(anw)|" aF="|simpleItoa(afr)|" aRel="|simpleItoa(arel)|" aRst="|simpleItoa(arst)|" aAcq="|simpleItoa(aacq)|" aPool="|simpleItoa(apool)|" sovN="|simpleItoa(asov)|" sovF="|simpleItoa(asovf)|" sg="|simpleItoa(sg)|" sctxnil="|simpleItoa(sctx)|" sic="|simpleItoa(sic)|" sie="|simpleItoa(sie)|" sil="|simpleItoa(sil)|" sisk="|simpleItoa(sisk)|" sif="|simpleItoa(sif)|" snRoot="|simpleItoa(snRoot)|" snCur="|simpleItoa(snCur)|" snNone="|simpleItoa(snNone)|" snOther="|simpleItoa(snOther)|" full="|simpleItoa(mxhFull)|" skip="|simpleItoa(mxhSkip)|" reg="|simpleItoa(reg)|" byname="|simpleItoa(byname)|" mxhg="|simpleItoa(mxhg)|" scang="|simpleItoa(scang)|" genS="|simpleItoa(genS)|" genF="|simpleItoa(genF)|" genM="|simpleItoa(genM)|" iren="|simpleItoa(iren)|"\n")
+}
+
 // buildPkgsSerial type-checks and compiles each package in dependency order
 // in a single pass. Each package's working set dies before the next begins.
 func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, forceRebuild, printIR bool) (bcs []string, hasRT bool) {
 	var deferredClang [][]string
 	isWasmTarget := mxutil.TargetArch == "wasm"
 	for _, pkg := range pkgs {
+		memLine(pkg.path)
 		// Baked packages: types already loaded into the registry by the
 		// pre-pass TypeCheckOnly; symbols come from the sysroot bake. Skip.
 		if pkg.baked {

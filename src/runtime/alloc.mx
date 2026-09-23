@@ -560,6 +560,7 @@ func sovNewArena(capacity uintptr) (a *Arena) {
 // creating it in the root arena and storing it in a root-arena hashmap
 // keyed by the receiver address.
 func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGroup) {
+	DbArenaBump(7)
 	if recv == nil {
 		runtimePanic("sovereign: nil receiver")
 	}
@@ -577,6 +578,16 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 	if hashmapGet(m, unsafe.Pointer(&keyv), unsafe.Pointer(&av), 8, h) && av != nil {
 		return (*sovGroup)(av)
 	}
+	DbSovBump(1)
+	// Attribute the receiver to the arena that owns it BEFORE switching the
+	// current arena to the root. SetCurrentArena overwrites the top fnStack
+	// slot, and that slot is the only record that the receiver's arena is
+	// live; attributing afterwards made sovFindContainingArena miss the arena
+	// and left ctxArena nil, so sovInvalidateArena never released the group
+	// when the arena died. Every self-mutating object built into a manual
+	// arena - the compiler's per-package compile arena is one - then leaked
+	// its three mappings for the life of the process.
+	home := sovFindContainingArena(uintptr(recv))
 	save := CurrentArena()
 	SetCurrentArena(trueRootArena())
 	g = (*sovGroup)(alloc(unsafe.Sizeof(sovGroup{}), nil))
@@ -588,9 +599,11 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 	g.refTbl = sovNewArena(65536)
 	g.recv = recv
 	g.recvTypeDesc = recvTypeDesc
-	g.ctxArena = sovFindContainingArena(uintptr(recv))
+	g.ctxArena = home
 	if g.ctxArena != nil {
 		g.ctxArena.sovGroups++
+	} else {
+		DbSovBump(2)
 	}
 	av = unsafe.Pointer(g)
 	SetCurrentArena(save)
@@ -612,6 +625,16 @@ func sovFindContainingArena(addr uintptr) (a *Arena) {
 		if ca != nil && sovAddrInArena(ca, addr) {
 			return ca
 		}
+	}
+	// Attribute the miss: which known arena, if any, holds this address.
+	if sovAddrInArena(trueRootArena(), addr) {
+		DbSovNilBump(1)
+	} else if ca := CurrentArena(); ca != nil && sovAddrInArena(ca, addr) {
+		DbSovNilBump(2)
+	} else if manualArena != nil && sovAddrInArena(manualArena, addr) {
+		DbSovNilBump(4)
+	} else {
+		DbSovNilBump(3)
 	}
 	return nil
 }
@@ -1516,6 +1539,7 @@ func sovRebaseMap(g *sovGroup, m *hashmap, td *RawType, nd *Arena) {
 
 // codecSovereignFree releases the receiver's entire group.
 func codecSovereignFree(recv unsafe.Pointer) {
+	DbArenaBump(8)
 	if recv == nil {
 		return
 	}
@@ -1553,9 +1577,14 @@ func codecSovereignFree(recv unsafe.Pointer) {
 // runs after the returns are processed in the epilogue). O(1) when no
 // group is tracked in this arena.
 func sovInvalidateArena(a *Arena) {
+	DbSovBump(3)
 	if a == nil || domainRoot == nil || a.sovGroups <= 0 {
+		if a != nil && a.sovGroups <= 0 {
+			DbSovBump(4)
+		}
 		return
 	}
+	DbSovBump(5)
 	m := domainRoot.sovereignRoot
 	if m == nil {
 		a.sovGroups = 0
@@ -1567,8 +1596,10 @@ func sovInvalidateArena(a *Arena) {
 	// holding thousands of entries.
 	for _, g := range a.sovGroupList {
 		if g == nil || g.released || g.recv == nil || g.ctxArena != a {
+			DbSovBump(6)
 			continue
 		}
+		DbSovBump(7)
 		codecSovereignFree(g.recv)
 	}
 	a.sovGroupList = a.sovGroupList[:0]
@@ -1685,6 +1716,7 @@ func SovereignRegRestore() {
 // ArenaNew creates a new arena. The Arena struct is embedded at offset 0
 // of the mmap'd region, with its region registry carved after the header.
 func ArenaNew(capacity uintptr) (a *Arena) {
+	DbArenaBump(1)
 	capacity = (capacity + 4095) &^ 4095
 	headerSz := arenaHeaderSize()
 	dataStart := arenaDataOffset()
@@ -1818,6 +1850,7 @@ func ArenaAllocTD(a *Arena, size uintptr, td *RawType) unsafe.Pointer {
 // ArenaFree unmaps all regions in the arena.
 // The primary region contains the Arena struct itself.
 func ArenaFree(a *Arena) {
+	DbArenaBump(2)
 	if a == nil {
 		return
 	}
@@ -1840,6 +1873,7 @@ func ArenaFree(a *Arena) {
 // ArenaReset resets the arena for reuse. Frees all regions except
 // the first, resets the first region's offset.
 func ArenaReset(a *Arena) {
+	DbArenaBump(4)
 	if a == nil {
 		return
 	}
@@ -1854,6 +1888,7 @@ func ArenaReset(a *Arena) {
 // ArenaAcquire returns a pooled arena with cap >= capacity, or
 // creates a new one via ArenaNew. First-fit scan of bounded pool.
 func ArenaAcquire(capacity uintptr) (a *Arena) {
+	DbArenaBump(5)
 	capacity = (capacity + 4095) &^ 4095
 	headerSz := arenaHeaderSize()
 	if capacity < headerSz+arenaDataOffset()+4096 {
@@ -1861,6 +1896,7 @@ func ArenaAcquire(capacity uintptr) (a *Arena) {
 	}
 	for i := int32(0); i < arenaPoolN; i++ {
 		if arenaPool[i].regions[0].cap >= capacity && arenaPool[i].sovereign == 0 {
+			DbArenaBump(6)
 			a = arenaPool[i]
 			arenaPoolN--
 			arenaPool[i] = arenaPool[arenaPoolN]
@@ -1874,6 +1910,7 @@ func ArenaAcquire(capacity uintptr) (a *Arena) {
 // ArenaRelease resets an arena and returns it to the pool.
 // If the pool is full, frees the arena entirely.
 func ArenaRelease(a *Arena) {
+	DbArenaBump(3)
 	if a == nil {
 		return
 	}
