@@ -577,6 +577,13 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 	if hashmapGet(m, unsafe.Pointer(&keyv), unsafe.Pointer(&av), 8, h) && av != nil {
 		return (*sovGroup)(av)
 	}
+	// Attribute the receiver to the arena that owns it BEFORE switching the
+	// current arena to the root. SetCurrentArena overwrites the top fnStack
+	// slot, and that slot is the only record that the receiver's arena is
+	// live; attributing afterwards made sovFindContainingArena miss the arena,
+	// so ctxArena stayed nil and sovInvalidateArena never released the group
+	// when the arena died.
+	home := sovFindContainingArena(uintptr(recv))
 	save := CurrentArena()
 	SetCurrentArena(trueRootArena())
 	g = (*sovGroup)(alloc(unsafe.Sizeof(sovGroup{}), nil))
@@ -588,7 +595,7 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 	g.refTbl = sovNewArena(65536)
 	g.recv = recv
 	g.recvTypeDesc = recvTypeDesc
-	g.ctxArena = sovFindContainingArena(uintptr(recv))
+	g.ctxArena = home
 	if g.ctxArena != nil {
 		g.ctxArena.sovGroups++
 	}
