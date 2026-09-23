@@ -2,6 +2,15 @@
 # Run stdlib tests using the stage-2 (moxie-compiled) compiler
 set -euo pipefail
 
+# Pin MOXIEROOT to this checkout. The compiler reads the stdlib from
+# $MOXIEROOT/src, and an inherited MOXIEROOT (a stale installed tree, e.g.
+# ~/.local/share/moxie) silently compiles THAT source instead - which showed up
+# as seven bogus "stdlib test failures" reporting a shadowing violation that
+# the current tree had already fixed. tests/run.sh pins it the same way.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MOXIEROOT="$SCRIPT_DIR"
+export MOXIEROOT
+
 MOXIE="${MOXIE:-./moxie}"
 TMPBASE="${TMPBASE:-/home/mleku/tmp/mxtest}"
 PASSED=0
