@@ -44,6 +44,16 @@ if [ ! -w "$(dirname "$INSTALL_DIR")" ] && [ "$(id -u)" != "0" ]; then
 fi
 
 if [ -d "$INSTALL_DIR" ]; then
+    # MOXIE_INSTALL_DIR is allowed to name a source checkout, and the
+    # release tarball layout would replace it wholesale. Deleting a checkout
+    # destroys work that is not the installer's to remove, so refuse loudly
+    # and let the user pick a directory or move the checkout.
+    if [ -e "$INSTALL_DIR/.git" ]; then
+        echo "error: $INSTALL_DIR is a source checkout (it has .git)" >&2
+        echo "       refusing to delete it; set MOXIE_INSTALL_DIR to the directory" >&2
+        echo "       this installer should own (default: \$HOME/.local/share/moxie)" >&2
+        exit 1
+    fi
     echo "removing old installation ..." >&2
     $SUDO rm -rf "$INSTALL_DIR"
 fi
