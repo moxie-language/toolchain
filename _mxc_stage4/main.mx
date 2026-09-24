@@ -5745,7 +5745,12 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 				}
 				ih := pkgHash(ip)
 				if data, ok := mxutil.ReadFile(cachedMxhPath(cacheBase, ip.path, ih, ip.version)); ok {
-					ar := runtime.ArenaNew(32 * 1024 * 1024)
+					// One arena per tier-2 package, sized to the graph it holds
+					// (the package's mxh text is a few KB): a flat 32MB per
+					// package reserved ~1792MB of mostly-empty mappings by the
+					// time the last package emitted. ArenaAlloc chains 64MB
+					// regions when a graph genuinely outgrows this.
+					ar := runtime.ArenaNew(4 * 1024 * 1024)
 					cctx.loadArena = ar
 					loadMxhInto(data)
 					cctx.loadArena = nil
@@ -5758,7 +5763,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 				// Leaving it set would direct every later load into an arena
 				// that is freed when this package's last user passes, leaving
 				// dangling registry entries behind.
-				cctx.dispTier2Arena[pkgKey] = runtime.ArenaNew(32 * 1024 * 1024)
+				cctx.dispTier2Arena[pkgKey] = runtime.ArenaNew(4 * 1024 * 1024)
 			}
 		}
 		// Baked packages: types already loaded into the registry by the
