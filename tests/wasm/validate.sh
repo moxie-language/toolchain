@@ -34,12 +34,13 @@ fi
 
 rm -rf "$WORK"; mkdir -p "$WORK"
 
-# Start from an empty package cache. Native and wasm share a compiler hash but
-# not a cache directory (pkg/ vs pkg-wasm/), and a cache entry written while
-# the wrong target was active makes the other target compile that target's
-# bitcode - which shows up as "Cannot select: intrinsic %llvm.wasm.memory.size"
-# when a native object is built from a wasm runtime, or the reverse. Clearing
-# once per run keeps the comparison honest.
+# Start from an empty package cache: each run measures a cold compile, not
+# whatever an earlier run happened to cache. The cross-target corruption this
+# used to also guard against ("Cannot select: intrinsic %llvm.wasm.memory.size"
+# from a native build linking a wasm object) is fixed at the source: a compiler
+# process now owns a private scratch directory (buildScratchDir), so concurrent
+# builds cannot overwrite each other's IR between clang writing it and the read
+# that caches it, and each target has its own cache root.
 rm -rf "$HOME/moxie/cache" 2>/dev/null
 if [ -n "${MOXIEPATH:-}" ]; then
     rm -rf "$MOXIEPATH/cache" 2>/dev/null

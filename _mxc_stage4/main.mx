@@ -421,8 +421,15 @@ func compilerHash() (s string) {
 	return bst.selfHash
 }
 
+// The cache root is per target. The package key folds the target in too, but a
+// key computed while the wrong target was active - a worker reconstructing it
+// from an ambiguous triple, a stale environment - writes one target's bitcode
+// where another target reads it, and the result is a native binary linked from
+// wasm32 objects or an arm64 runtime. One root per target makes the wrong read
+// unrepresentable instead of merely unlikely.
 func moxieCacheDir() (s string) {
-	return mxutil.JoinPath(mxutil.JoinPath(getMoxiePath(), "cache"), "mxc-" | mxcVersion() | "-" | compilerHash())
+	return mxutil.JoinPath(mxutil.JoinPath(getMoxiePath(), "cache"),
+		"mxc-" | mxcVersion() | "-" | compilerHash() | "-" | mxutil.TargetOS | "-" | mxutil.TargetArch)
 }
 
 
@@ -1052,10 +1059,16 @@ func fnvHash(data []byte) (s string) {
 }
 
 func pkgCacheDir() (s string) {
-	if mxutil.TargetArch == "wasm" {
-		return mxutil.JoinPath(moxieCacheDir(), "pkg-wasm")
-	}
 	return mxutil.JoinPath(moxieCacheDir(), "pkg")
+}
+
+// Scratch directory for one compiler process. A fixed name is a shared mutable
+// resource: two builds in the same tree - native beside wasm, relay beside
+// bootstrap - overwrite each other's IR and bitcode between clang writing it
+// and the read that caches it, so one target's object is cached under the
+// other's key and the next build links it. The pid makes the two disjoint.
+func buildScratchDir(base, tag string) (s string) {
+	return mxutil.JoinPath(base, tag | "-" | simpleItoa(os.Getpid()))
 }
 
 func pkgCacheKey(dir string, files []string) (s string) {
@@ -3220,7 +3233,7 @@ func cmdCacheWarm() {
 	}
 	triple := "x86_64-unknown-linux-musleabihf"
 	clang := "clang-22"
-	tmpdir := "./tmp/mxc-build"
+	tmpdir := buildScratchDir("./tmp", "mxc-build")
 	mkdirAll(tmpdir, 0755)
 	cacheBase := pkgCacheDir()
 	registerBuiltins()
@@ -3664,14 +3677,17 @@ func cacheClean() {
 
 func cmdUpdate(rebuildAll bool) {
 	cacheRoot := mxutil.JoinPath(getMoxiePath(), "cache")
-	currentDir := "mxc-" | mxcVersion()
+	// Cache dirs are named mxc-<version>-<compilerHash>-<os>-<arch>. "Old"
+	// means another moxie version: every variant of this version - other
+	// compiler hashes, other targets - is current and must survive.
+	currentPrefix := "mxc-" | mxcVersion() | "-"
 	entries := listFiles(cacheRoot, "")
 	if entries == nil {
 		mxutil.WriteStr(2, "cache is empty\n")
 		return
 	}
 	for _, e := range entries {
-		if mxutil.HasPrefix(e, "mxc-") && e != currentDir {
+		if mxutil.HasPrefix(e, "mxc-") && !mxutil.HasPrefix(e, currentPrefix) {
 			mxutil.WriteStr(2, "  remove old: " | e | "\n")
 			fullPath := mxutil.JoinPath(cacheRoot, e)
 			pkgEntries := listFiles(fullPath, "")
@@ -3699,7 +3715,7 @@ func cmdUpdate(rebuildAll bool) {
 	}
 	triple := "x86_64-unknown-linux-musleabihf"
 	clang := "clang-22"
-	tmpdir := "./tmp/mxc-build"
+	tmpdir := buildScratchDir("./tmp", "mxc-build")
 	mkdirAll(tmpdir, 0755)
 	registerBuiltins()
 	for _, pkgDir := range pkgDirs {
@@ -3885,7 +3901,7 @@ func cmdTest(args []string) {
 		pkgName = "main"
 	}
 
-	tmpdir := "./tmp/mxc-testbuild"
+	tmpdir := buildScratchDir("./tmp", "mxc-testbuild")
 	mkdirAll(tmpdir, 0755)
 
 	testMainSrc := generateTestMain(pkgName, allTestFuncs)
@@ -4749,7 +4765,7 @@ func main() {
 		fatal("no packages to compile")
 	}
 
-	tmpdir := "./tmp/mxc-build"
+	tmpdir := buildScratchDir("./tmp", "mxc-build")
 	mkdirAll(tmpdir, 0755)
 
 	// TLS probe: if this binary's globals aren't thread_local, the parallel
@@ -5415,7 +5431,7 @@ func ringRecvInt32(ring unsafe.Pointer) (v int32, ok bool) {
 // Text format: newline-separated fields. All strings are raw UTF-8.
 // Layout:
 //   numPkgs\n
-//   triple\n clang\n tmpdir\n cacheBase\n root\n modPrefix\n modDir\n
+//   triple\n targetOS\n targetArch\n clang\n tmpdir\n cacheBase\n root\n modPrefix\n modDir\n
 //   for each pkg: path\n name\n dir\n version\n
 //     numFiles\n file1\n ... numCfiles\n cf1\n ... numBcfiles\n bf1\n ...
 //     numImports\n imp1\n ...
@@ -5426,6 +5442,15 @@ func serializePkgMeta(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase, root, m
 	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	b = b | triple
+	b = mxutil.Ensure(b, 1)
+	push(b, '\n')
+	// The target rides along as its own fields. The triple cannot stand in for
+	// them: both wasm targets share "wasm32-unknown-wasi", so a worker that
+	// reconstructed js-vs-wasi from it hashed the same package under two keys.
+	b = b | mxutil.TargetOS
+	b = mxutil.Ensure(b, 1)
+	push(b, '\n')
+	b = b | mxutil.TargetArch
 	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	b = b | clang
@@ -5514,14 +5539,16 @@ func deserInt(data []byte, pos int32) (v int32, next int32) {
 }
 
 type workerMeta struct {
-	pkgs      []*pkgInfo
-	triple    string
-	clang     string
-	tmpdir    string
-	cacheBase string
-	root      string
-	modPrefix string
-	modDir    string
+	pkgs       []*pkgInfo
+	triple     string
+	targetOS   string
+	targetArch string
+	clang      string
+	tmpdir     string
+	cacheBase  string
+	root       string
+	modPrefix  string
+	modDir     string
 }
 
 func deserializePkgMeta(data []byte) (m *workerMeta) {
@@ -5529,6 +5556,8 @@ func deserializePkgMeta(data []byte) (m *workerMeta) {
 	numPkgs, pos := deserInt(data, pos)
 	m = &workerMeta{}
 	m.triple, pos = deserLine(data, pos)
+	m.targetOS, pos = deserLine(data, pos)
+	m.targetArch, pos = deserLine(data, pos)
 	m.clang, pos = deserLine(data, pos)
 	m.tmpdir, pos = deserLine(data, pos)
 	m.cacheBase, pos = deserLine(data, pos)
@@ -5617,12 +5646,11 @@ func workerEntryExport(arg unsafe.Pointer) {
 	bst.globalModDir = meta.modDir
 	bst.quietDiscover = true
 
-	// Set target globals from triple (needed by registerBuiltins for uintptr sizing)
-	if len(meta.triple) >= 4 && meta.triple[:4] == "wasm" {
-		mxutil.SetTarget("js", "wasm")
-	} else {
-		mxutil.SetTarget("linux", "amd64")
-	}
+	// The target comes from the metadata, never from the triple string: both
+	// wasm targets share "wasm32-unknown-wasi", and "not wasm" used to mean
+	// linux/amd64, so an arm64 worker hashed and cached arm64 bitcode under the
+	// amd64 key that the next amd64 build linked.
+	mxutil.SetTarget(meta.targetOS, meta.targetArch)
 
 	// Initialize this thread's compiler state (TLS globals are zeroed)
 	registerBuiltins()
@@ -6147,7 +6175,7 @@ func cmdBuildRuntime() {
 	}
 	clang := "clang-22"
 	sysroot := mxutil.JoinPath(root, "sysroot")
-	tmpdir := "/tmp/mxc-rt-build"
+	tmpdir := buildScratchDir("/tmp", "mxc-rt-build")
 	mkdirAll(tmpdir, 0755)
 
 	registerBuiltins()
