@@ -5753,9 +5753,12 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 				}
 			}
 			if isTier2 && cctx.dispTier2Arena[pkgKey] == nil {
-				ar := runtime.ArenaNew(32 * 1024 * 1024)
-				cctx.loadArena = ar
-				cctx.dispTier2Arena[pkgKey] = ar
+				// Registered here, but NOT made the ambient arena: that is set
+				// only around the call that materialises THIS package's graph.
+				// Leaving it set would direct every later load into an arena
+				// that is freed when this package's last user passes, leaving
+				// dangling registry entries behind.
+				cctx.dispTier2Arena[pkgKey] = runtime.ArenaNew(32 * 1024 * 1024)
 			}
 		}
 		// Baked packages: types already loaded into the registry by the
@@ -5808,7 +5811,9 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 
 		if isStdlib(pkg.path) && bcOk && !forceRebuild {
 			mxutil.WriteStr(2, "  cached " | pkg.path | "\n")
+			cctx.loadArena = cctx.dispTier2Arena[pkgKey]
 			typeCheckPkgSource(cacheBase, pkg.dir, pkg.files, pkg.path, compilePath, cachedMxh)
+			cctx.loadArena = nil
 			if cctx.compileArena != nil {
 				runtime.ArenaFree(cctx.compileArena)
 				cctx.compileArena = nil
@@ -5823,7 +5828,9 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		// Stream IR directly to .ll file to avoid accumulating entire
 		// package IR in memory (unicode/tables.mx produces ~10MB IR).
 		cctx.irOutputFile = llFile
+		cctx.loadArena = cctx.dispTier2Arena[pkgKey]
 		ir := compilePkgSource(pkg.dir, pkg.files, compilePath, triple)
+		cctx.loadArena = nil
 		cctx.irOutputFile = ""
 		if printIR && len(ir) > 0 {
 			mxutil.WriteStr(1, ir)
