@@ -208,6 +208,51 @@ func codecEscapeOccurred() (b bool) {
 	return b
 }
 
+// An escape used to be silent. Before the leak it dangled and the process died
+// later in an unrelated frame - the SIGSEGV in tag.(*T).Len was this pointer -
+// and after it the only symptom is a slow RSS climb, which is exactly the kind
+// of quiet failure that should be loud. Warn once (a hot loop can escape on
+// every iteration), then report the running count every 1024 so the rate stays
+// measurable without flooding stderr.
+var codecEscapeWarned bool
+var codecEscapeCount int32
+
+func codecEscWarn(msg string) {
+	if len(msg) == 0 {
+		return
+	}
+	MoxieWrite(2, unsafe.Pointer(&([]byte(msg))[0]), int32(len(msg)))
+}
+
+func codecEscWarnInt(msg string, n int32) {
+	codecEscWarn(msg)
+	var buf [12]byte
+	i := int32(len(buf))
+	if n == 0 {
+		i--
+		buf[i] = '0'
+	}
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + (n % 10))
+		n = n / 10
+	}
+	MoxieWrite(2, unsafe.Pointer(&buf[i]), int32(len(buf))-i)
+	codecEscWarn("\n")
+}
+
+func codecEscapeNote() {
+	codecEscapePtr = true
+	codecEscapeCount++
+	if codecEscapeCount == 1 {
+		codecEscWarn("moxie: codec arena escape: pointer into a transient frame arena preserved instead of copied (unknown-extent pointee); that frame arena is leaked for the pointer's lifetime\n")
+		return
+	}
+	if codecEscapeCount%1024 == 0 {
+		codecEscWarnInt("moxie: codec arena escapes so far: ", codecEscapeCount)
+	}
+}
+
 // codecBufScratch is the reusable encode buffer. The structural codec never
 // re-enters compiled code, so only one encode is in flight at a time, and the
 // epilogue reads the encoded bytes during its decode before the next encode
@@ -498,7 +543,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		// real object. Preserve the address and leak the fn arena so
 		// the pointee stays alive for the caller.
 		if et := typ.Elem(); et != nil && isBasicKind(et.Kind()) {
-			codecEscapePtr = true
+			codecEscapeNote()
 			codecWriteVarint(cb, codecTagStable)
 			codecWriteRaw(cb, unsafe.Pointer(&p), 8)
 			return
