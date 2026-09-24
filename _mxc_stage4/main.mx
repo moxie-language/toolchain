@@ -2918,6 +2918,18 @@ func loadMxhData(data []byte) (ok bool) {
 		return false
 	}
 	pkgPath := string(d[ws:we])
+	if cctx.mxhLoaded == nil {
+		cctx.mxhLoaded = map[string]bool{}
+	}
+	if cctx.mxhLoaded[pkgPath] {
+		// This package's graph is already in the registry from an earlier
+		// load in this process. Re-loading it would allocate a second copy of
+		// the whole graph in the root arena, which is never released: the
+		// serial path loads every package in the whole-link pre-pass and then
+		// loads each cached package again, which was ~400MB of duplicate graph
+		// on the relay build. One path, one graph.
+		return true
+	}
 	ns, ne := mxhNextWord(d, we, le)
 	if ns == ne {
 		return false
@@ -3174,6 +3186,7 @@ func loadMxhData(data []byte) (ok bool) {
 
 	cctx.parseTypePkgScope = oldScope
 	cctx.universe.Registry[pkgPath] = pkg
+	cctx.mxhLoaded[pkgPath] = true
 	return true
 }
 
