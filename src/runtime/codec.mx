@@ -543,6 +543,19 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		// real object. Preserve the address and leak the fn arena so
 		// the pointee stays alive for the caller.
 		if et := typ.Elem(); et != nil && isBasicKind(et.Kind()) {
+			// A pointee inside a sovereign arena is NOT transient: the arena
+			// lives as long as its receiver, so the address is stable and
+			// nothing needs leaking. The stable registration is LIFO and can
+			// already have been popped by the time a caller encodes a pointer
+			// into a callee's arena, so ask the region itself rather than the
+			// registration - this is the path the relay reported three times a
+			// run (pointee arena class 1), leaking a frame for every one.
+			if sovFindContainingArena(uintptr(p)) != nil {
+				codecNoteStable(uintptr(p))
+				codecWriteVarint(cb, codecTagStable)
+				codecWriteRaw(cb, unsafe.Pointer(&p), 8)
+				return
+			}
 			codecEscapeNote()
 			codecWriteVarint(cb, codecTagStable)
 			codecWriteRaw(cb, unsafe.Pointer(&p), 8)
