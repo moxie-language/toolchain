@@ -936,13 +936,21 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	cctx.externGlobals = scanExternGlobals(src)
 	cctx.wasmImportMap = scanWasmImportMap(src, name)
 
-	// Arena sized from source. Virtual address space is free - pages
-	// commit on touch. 1000x covers generated-table-heavy packages
-	// like syscall and unicode; the arena appends 64MB chain regions
-	// if a package (e.g. the generated fips140/nistec code) exceeds it.
+	// Arena sized from source. Virtual address space is free - pages commit
+	// on touch. 1000x covers generated-table-heavy packages like syscall and
+	// unicode; the arena appends 64MB chain regions if a package exceeds it,
+	// so the reservation is an optimisation and never a requirement - which
+	// is why it can be capped. The largest generated source in the tree asked
+	// for ~6.7GB of address space for a single package; that reservation (and
+	// its guard pages) costs address-space accounting and page-table work even
+	// where nothing is touched, so bound it and let the chain regions cover
+	// anything larger.
 	compileArenaSize := uintptr(len(src)) * 1000
 	if compileArenaSize < 64*1024*1024 {
 		compileArenaSize = 64 * 1024 * 1024
+	}
+	if compileArenaSize > 512*1024*1024 {
+		compileArenaSize = 512 * 1024 * 1024
 	}
 	// Scan generic decls in the caller's arena: the resulting AST nodes
 	// and generic scopes are referenced by later package compiles and
