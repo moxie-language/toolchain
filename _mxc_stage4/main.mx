@@ -5226,6 +5226,25 @@ func main() {
 		bst.tlsFailed = true
 		bst.buildJobs = 1
 	}
+	// Index pass, no graph materialisation: read each package's cached mxh and
+	// record its methods and the closure's interface-method universe, so the
+	// tier-1/tier-2 split is known before anything is loaded.
+	cctx.dispIfaceMethods = map[string]bool{}
+	if cctx.dispMethodsByPkg == nil {
+		cctx.dispMethodsByPkg = map[string]map[string]bool{}
+	}
+	for _, ipkg := range pkgs {
+		if ipkg.baked {
+			continue
+		}
+		ihash := pkgHash(ipkg)
+		if data, ok := mxutil.ReadFile(cachedMxhPath(cacheBase, ipkg.path, ihash, ipkg.version)); ok {
+			d := string(data)
+			cctx.dispMethodsByPkg[dispPkgKey(ipkg)] = dispParseMethods(d)
+			dispParseIfaceMethods(d, cctx.dispIfaceMethods)
+		}
+	}
+
 	// Whole-link registry pre-pass: interface dispatch emits a typeID switch
 	// over impls found in cctx.universe.Registry, which is populated in
 	// dependency order. A type defined in a downstream package (main) passed
@@ -5246,6 +5265,16 @@ func main() {
 		hash := pkgHash(pkg)
 		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
 		if mxutil.FileExists(cachedMxh) && !forceRebuild {
+			if !tier1(dispPkgKey(pkg), cctx.dispIfaceMethods, cctx.dispMethodsByPkg) {
+				// Tier 2 AND already cached: no dispatch can reach it, its mxh
+				// is on disk, and the compile loop materialises it lazily into a
+				// relessable arena. A package that must be COMPILED still runs
+				// TypeCheckOnly below, because a later compile can need its
+				// declarations through a path that is not a direct import -
+				// mangleGenericName is that path, and skipping it broke the
+				// self-host twice.
+				continue
+			}
 			// Record the package's declared methods while its mxh is being
 			// read anyway: this is the index findIfaceImpls consults to skip
 			// packages that cannot implement the method being dispatched.
@@ -5653,8 +5682,82 @@ func memLine(tag string) {
 func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, forceRebuild, printIR bool) (bcs []string, hasRT bool) {
 	var deferredClang [][]string
 	isWasmTarget := mxutil.TargetArch == "wasm"
-	for _, pkg := range pkgs {
+	if cctx.dispLastUse == nil {
+		cctx.dispLastUse = map[string]int32{}
+		byPathL := map[string]*pkgInfo{}
+		for _, lp := range pkgs {
+			byPathL[lp.path] = lp
+			byPathL[dispPkgKey(lp)] = lp
+		}
+		for li, lp := range pkgs {
+			seenL := map[string]bool{}
+			outL := map[string]bool{}
+			dispTier2Closure(lp, byPathL, cctx.dispIfaceMethods, cctx.dispMethodsByPkg, seenL, outL)
+			for k := range outL {
+				cctx.dispLastUse[k] = int32(li)
+			}
+		}
+	}
+	if cctx.dispTier2Arena == nil {
+		cctx.dispTier2Arena = map[string]*runtime.Arena{}
+	}
+	byPathT2 := map[string]*pkgInfo{}
+	for _, tp := range pkgs {
+		byPathT2[tp.path] = tp
+		byPathT2[dispPkgKey(tp)] = tp
+	}
+	for pi, pkg := range pkgs {
 		memLine(pkg.path)
+		// Release every transient tier-2 graph whose last transitive user has
+		// already been emitted. Releasing here (rather than at the loop's many
+		// exit points) keeps every path covered.
+		var doneT2 []string
+		for k := range cctx.dispTier2Arena {
+			if cctx.dispLastUse[k] < pi {
+				doneT2 = mxutil.Ensure(doneT2, 1)
+				doneT2 = push(doneT2, k)
+			}
+		}
+		for _, k := range doneT2 {
+			copyGenericsToRoot(k)
+			delete(cctx.universe.Registry, k)
+			delete(cctx.mxhLoaded, k)
+			runtime.ArenaFree(cctx.dispTier2Arena[k])
+			delete(cctx.dispTier2Arena, k)
+		}
+		pkgKey := dispPkgKey(pkg)
+		isTier2 := !tier1(pkgKey, cctx.dispIfaceMethods, cctx.dispMethodsByPkg)
+		// Lazily materialise the tier-2 packages this one names, each in its own
+		// arena, and give this package's own graph a transient arena too if it
+		// is tier 2. Released below once their last user has been emitted.
+		if !pkg.baked {
+			for _, imp := range pkg.imports {
+				ip := byPathT2[imp]
+				if ip == nil || ip.baked {
+					continue
+				}
+				ik := dispPkgKey(ip)
+				if cctx.dispTier2Arena[ik] != nil || cctx.mxhLoaded[ik] {
+					continue
+				}
+				if tier1(ik, cctx.dispIfaceMethods, cctx.dispMethodsByPkg) {
+					continue
+				}
+				ih := pkgHash(ip)
+				if data, ok := mxutil.ReadFile(cachedMxhPath(cacheBase, ip.path, ih, ip.version)); ok {
+					ar := runtime.ArenaNew(32 * 1024 * 1024)
+					cctx.loadArena = ar
+					loadMxhInto(data)
+					cctx.loadArena = nil
+					cctx.dispTier2Arena[ik] = ar
+				}
+			}
+			if isTier2 && cctx.dispTier2Arena[pkgKey] == nil {
+				ar := runtime.ArenaNew(32 * 1024 * 1024)
+				cctx.loadArena = ar
+				cctx.dispTier2Arena[pkgKey] = ar
+			}
+		}
 		// Baked packages: types already loaded into the registry by the
 		// pre-pass TypeCheckOnly; symbols come from the sysroot bake. Skip.
 		if pkg.baked {
