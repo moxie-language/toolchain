@@ -4002,6 +4002,63 @@ func cmdDispIndex() {
 		mxutil.WriteStr(1, " pkgs=" | simpleItoa(methodPackages[name]) | "\n")
 	}
 	dispIndexCheck(pkgs, cacheBase, ifaceMethods, pkgMethods)
+
+	// planTransientTier simulates the two-tier loading plan on this closure:
+	// tier 1 (defines an interface method) is loaded up front for dispatch, tier
+	// 2 is loaded at its own turn and released after the package that last needs
+	// it. It reports the peak number of tier-2 packages live at once and their
+	// share of the closure's mxh bytes, which is the win the loader would buy.
+	peakLive := int32(0)
+	live := map[string]bool{}
+	lastUse := map[string]int32{}
+	for i, pkg := range pkgs {
+		for _, imp := range pkg.imports {
+			lastUse[imp] = int32(i)
+		}
+	}
+	for i, pkg := range pkgs {
+		key := dispPkgKey(pkg)
+		if !tier1(key, ifaceMethods, pkgMethods) {
+			live[key] = true
+		}
+		if int32(len(live)) > peakLive {
+			peakLive = int32(len(live))
+		}
+		// release every live package whose last use is now
+		for k := range live {
+			done := true
+			if l, ok := lastUse[k]; ok {
+				if l > int32(i) {
+					done = false
+				}
+			} else {
+				done = false
+			}
+			if done {
+				delete(live, k)
+			}
+		}
+	}
+	tier1N := int32(0)
+	for _, pkg := range pkgs {
+		if tier1(dispPkgKey(pkg), ifaceMethods, pkgMethods) {
+			tier1N++
+		}
+	}
+	mxutil.WriteStr(1, "dispindex-plan: tier1=" | simpleItoa(tier1N) |
+		" tier2=" | simpleItoa(int32(len(pkgs))-tier1N) |
+		" peakTier2Live=" | simpleItoa(peakLive) | "\n")
+}
+
+// tier1 reports whether a package defines any method an interface in the
+// closure declares, i.e. whether a dispatch can reach it.
+func tier1(key string, ifaceMethods map[string]bool, pkgMethods map[string]map[string]bool) (b bool) {
+	for name := range pkgMethods[key] {
+		if ifaceMethods[name] {
+			return true
+		}
+	}
+	return false
 }
 
 func cmdUpdate(rebuildAll bool) {
