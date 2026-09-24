@@ -5340,25 +5340,28 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		}
 		// Cache the .bc files
 		for _, pkg := range pkgs {
-			compilePath := pkg.path
-			if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
-				compilePath = pkg.name
-			}
-			hash := pkgHash(pkg)
-			cached := cachedBcPath(cacheBase, compilePath, hash, pkg.version)
-			bcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc")
-			if mxutil.FileExists(bcFile) {
-				mem2regBc(bcFile)
-				cacheDir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
-				mkdirAll(cacheDir, 0755)
-				data, rok := mxutil.ReadFile(bcFile)
-				if rok {
-					writeFile(cached, data, 0644)
-				}
-			}
+			cacheCompiledBc(cacheBase, tmpdir, pkg.path, pkgHash(pkg), pkg.version)
 		}
 	}
 	return bcs, hasRT
+}
+
+// cacheCompiledBc runs mem2reg on one package's compiled .bc and copies it
+// into the package cache under the same key the reader looks up. A free
+// function so the file data dies with its frame: inline in the loop, every
+// package's bitcode (megabytes each) stayed live in the caller's arena until
+// the whole build returned.
+func cacheCompiledBc(cacheBase, tmpdir, pkgPath, hash, version string) {
+	bcFile := mxutil.JoinPath(tmpdir, safeName(pkgPath) | ".bc")
+	if !mxutil.FileExists(bcFile) {
+		return
+	}
+	mem2regBc(bcFile)
+	mkdirAll(mxutil.JoinPath(cacheBase, safeName(pkgPath)), 0755)
+	data, rok := mxutil.ReadFile(bcFile)
+	if rok {
+		writeFile(cachedBcPath(cacheBase, pkgPath, hash, version), data, 0644)
+	}
 }
 
 // --- Ring buffer helpers ---
