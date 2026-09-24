@@ -605,8 +605,11 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 	g.data.sovereign = 1
 	sovRangeRegister(g.data.regions[0].base, g.data.regions[0].cap, g)
 	g.data.owner = g
-	g.allocTbl = sovNewArena(65536)
-	g.refTbl = sovNewArena(65536)
+	// allocTbl and refTbl are created on first use. A build creates hundreds of
+	// thousands of sovereign groups (418k / 25GB of cumulative capacity on a
+	// cold relay build, ~9GB of it mapped at the peak): two eager 64KB arenas
+	// per group is most of that virtual peak. An absent table is a defined
+	// state - the same as an empty table.
 	g.recv = recv
 	g.recvTypeDesc = recvTypeDesc
 	g.ctxArena = home
@@ -701,6 +704,9 @@ func codecSovereignEnter(g *sovGroup) {
 func sovAddRec(g *sovGroup, dataAddr, size uintptr, typeDesc *RawType) {
 	if len(g.recs) >= cap(g.recs) {
 		sovGrowRecs(g)
+	}
+	if g.allocTbl == nil {
+		g.allocTbl = sovNewArena(65536)
 	}
 	rec := (*sovRecord)(ArenaAlloc(g.allocTbl, unsafe.Sizeof(sovRecord{})))
 	rec.dataAddr = dataAddr
@@ -904,7 +910,7 @@ func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 	case KindPointer:
 		v := *(*unsafe.Pointer)(p)
 		if v != nil {
-			if sovInArena(g.refTbl, uintptr(v)) {
+			if g.refTbl != nil && sovInArena(g.refTbl, uintptr(v)) {
 				v = (*sovSlot)(v).dataPtr
 			}
 			sovMarkBlock(g, v)
@@ -1108,7 +1114,7 @@ func sovMarkReceiverRoots(g *sovGroup, recv unsafe.Pointer, td *RawType) {
 		// A pointer field may hold a slot object; resolve it.
 		if ft.Kind() == KindPointer {
 			v := *(*unsafe.Pointer)(faddr)
-			if v != nil && sovInArena(g.refTbl, uintptr(v)) {
+			if v != nil && g.refTbl != nil && sovInArena(g.refTbl, uintptr(v)) {
 				v = (*sovSlot)(v).dataPtr
 				sovMarkBlock(g, v)
 				continue
