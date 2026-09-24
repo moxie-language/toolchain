@@ -296,8 +296,16 @@ type codecSeenSet struct {
 
 const codecSeenCap = 65536
 
+// codecSeenTab is the reusable encode-side seen table (the same 256-entry
+// capacity the per-call table had; a larger graph still grows it). A seen set is live
+// only for the duration of one encode (or decode), so a fresh 256-pointer
+// table per call is pure waste - and it is 2 KiB the per-frame arena never
+// reclaims. The compiler runs the codec on every call that returns a pointer,
+// inside a per-package arena, so that waste was 3.8 GB of a ~5 GB peak.
+var codecSeenTab [256]unsafe.Pointer
+
 func codecSeenInit(ss *codecSeenSet) {
-	ss.ptrs = []unsafe.Pointer{:0:256}
+	ss.ptrs = codecSeenTab[:0]
 	ss.count = 0
 }
 
@@ -322,8 +330,11 @@ type codecDecodeSeen struct {
 	count int32
 }
 
+// codecDecodeSeenTab is the reusable decode-side seen table.
+var codecDecodeSeenTab [256]unsafe.Pointer
+
 func codecDecodeSeenInit(ds *codecDecodeSeen) {
-	ds.ptrs = []unsafe.Pointer{:0:256}
+	ds.ptrs = codecDecodeSeenTab[:0]
 	ds.count = 0
 }
 
