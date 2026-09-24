@@ -4048,6 +4048,45 @@ func cmdDispIndex() {
 	mxutil.WriteStr(1, "dispindex-plan: tier1=" | simpleItoa(tier1N) |
 		" tier2=" | simpleItoa(int32(len(pkgs))-tier1N) |
 		" peakTier2Live=" | simpleItoa(peakLive) | "\n")
+	// The simpler loader shape: before compiling Q, load Q's transitive tier-2
+	// closure and release it after Q. Its peak is max over Q of |closure(Q)|,
+	// which decides whether the last-use rule is needed at all.
+	byPath := map[string]*pkgInfo{}
+	for _, pkg := range pkgs {
+		byPath[pkg.path] = pkg
+		byPath[dispPkgKey(pkg)] = pkg
+	}
+	peakPerCompile := int32(0)
+	for _, pkg := range pkgs {
+		seen := map[string]bool{}
+		out := map[string]bool{}
+		dispTier2Closure(pkg, byPath, ifaceMethods, pkgMethods, seen, out)
+		if int32(len(out)) > peakPerCompile {
+			peakPerCompile = int32(len(out))
+		}
+	}
+	mxutil.WriteStr(1, "dispindex-plan2: peakPerCompileTier2=" | simpleItoa(peakPerCompile) | "\n")
+}
+
+// dispTier2Closure collects the tier-2 packages in pkg's transitive import
+// closure. Free function with explicit parameters: moxie closures do not capture
+// outer scope, so recursion needs its state passed in.
+func dispTier2Closure(pkg *pkgInfo, byPath map[string]*pkgInfo, ifaceMethods map[string]bool, pkgMethods map[string]map[string]bool, seen map[string]bool, out map[string]bool) {
+	for _, imp := range pkg.imports {
+		p := byPath[imp]
+		if p == nil {
+			continue
+		}
+		key := dispPkgKey(p)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if !tier1(key, ifaceMethods, pkgMethods) {
+			out[key] = true
+		}
+		dispTier2Closure(p, byPath, ifaceMethods, pkgMethods, seen, out)
+	}
 }
 
 // tier1 reports whether a package defines any method an interface in the
