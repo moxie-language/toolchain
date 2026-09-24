@@ -3721,6 +3721,19 @@ func cacheClean() {
 
 
 
+// dispPkgKey is the path a package's mxh header carries and the registry keys
+// it under: a local package path (".", "./x", "../x") is recorded by name, not
+// by the literal path. The index must use the same key or a comparison against
+// the registry reports the main package as index-only for every method it
+// defines.
+func dispPkgKey(pkg *pkgInfo) (s string) {
+	s = pkg.path
+	if s == "." || s == ".." || mxutil.HasPrefix(s, "/") || mxutil.HasPrefix(s, "./") || mxutil.HasPrefix(s, "../") {
+		s = pkg.name
+	}
+	return s
+}
+
 // dispIndexCheck loads the link set's mxh - the very cost the index exists to
 // avoid - and compares, per interface method, the packages the index attributes
 // the method to against the packages the live registry sees. Direct methods
@@ -3730,7 +3743,7 @@ func cacheClean() {
 func dispIndexCheck(pkgs []*pkgInfo, cacheBase string, ifaceMethods map[string]bool, pkgMethods map[string]map[string]bool) {
 	closure := map[string]bool{}
 	for _, pkg := range pkgs {
-		closure[pkg.path] = true
+		closure[dispPkgKey(pkg)] = true
 	}
 	loaded := int32(0)
 	for _, pkg := range pkgs {
@@ -3795,6 +3808,13 @@ func dispIndexCheck(pkgs []*pkgInfo, cacheBase string, ifaceMethods map[string]b
 				mxutil.WriteStr(1, "  mismatch " | name | ": reg=" | simpleItoa(len(reg)) |
 					" idx=" | simpleItoa(len(idx)) | " missing=" | simpleItoa(missing) |
 					" extra=" | simpleItoa(extra) | "\n")
+				shown := int32(0)
+				for path := range idx {
+					if !reg[path] && shown < 2 {
+						mxutil.WriteStr(1, "    index-only: " | path | "\n")
+						shown++
+					}
+				}
 			}
 		}
 	}
@@ -3888,7 +3908,7 @@ func cmdDispIndex() {
 				}
 			}
 		}
-		pkgMethods[pkg.path] = m
+		pkgMethods[dispPkgKey(pkg)] = m
 	}
 	relevant := int32(0)
 	methodPackages := map[string]int32{}
