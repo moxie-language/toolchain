@@ -570,6 +570,65 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 	}
 }
 
+// codecDecodeInto decodes the next value into dst instead of returning a
+// freshly allocated block for it.
+//
+// Callers that place an element or a field inline decoded with
+// codecDecodeValue and then memcpy'd the result, abandoning one allocation per
+// value: for a []*K of n elements that is n abandoned blocks per copy. When
+// the target arena is a sovereign receiver's, every one of those blocks is
+// also recorded in its allocation map, which is how a 3000-element fill grew
+// the map to tens of millions of entries and allocated gigabytes. Basic
+// values and pointers (nil, back-reference, fresh or stable) are written
+// directly; anything with interior structure still decodes through
+// codecDecodeValue and is copied in.
+func codecDecodeInto(cb *CodecBuf, ds *codecDecodeSeen, dst unsafe.Pointer, typ *RawType) {
+	k := typ.Kind()
+	if isBasicKind(k) {
+		sz := typ.Size()
+		if sz > 65536 {
+			runtimePanic("codec basic bad size")
+		}
+		memcpy(dst, unsafe.Pointer(&cb.data[cb.pos]), sz)
+		cb.pos += int32(sz)
+		return
+	}
+	if k == KindPointer {
+		tag := codecReadVarint(cb)
+		switch tag {
+		case codecTagNil:
+			*(*unsafe.Pointer)(dst) = nil
+			return
+		case codecTagBackref:
+			idx := int32(codecReadVarint(cb))
+			orig := codecDecodeSeenLookup(ds, idx)
+			if orig == nil {
+				runtimePanic("codec backref nil")
+			}
+			*(*unsafe.Pointer)(dst) = orig
+			codecDecodeSeenAdd(ds, orig)
+			return
+		case codecTagPtr:
+			inner := codecDecodeValue(cb, ds, typ.Elem())
+			codecDecodeSeenAdd(ds, inner)
+			*(*unsafe.Pointer)(dst) = inner
+			return
+		case codecTagStable:
+			if cb.pos+8 > int32(len(cb.data)) {
+				runtimePanic("codec stable underflow")
+			}
+			sp := *(*unsafe.Pointer)(unsafe.Pointer(&cb.data[cb.pos]))
+			cb.pos += 8
+			*(*unsafe.Pointer)(dst) = sp
+			codecDecodeSeenAdd(ds, sp)
+			return
+		}
+		runtimePanic("codec bad pointer tag")
+	}
+	dec := codecDecodeValue(cb, ds, typ)
+	memcpy(dst, dec, typ.Size())
+}
+
 func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Pointer {
 	k := typ.Kind()
 	if isBasicKind(k) {
@@ -642,8 +701,7 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 				*(*unsafe.Pointer)(hdr) = arr
 				for i := int32(0); i < ln; i++ {
 					ep := unsafe.Add(arr, uintptr(i)*elemSize)
-					dec := codecDecodeValue(cb, ds, elemType)
-					memcpy(ep, dec, elemSize)
+					codecDecodeInto(cb, ds, ep, elemType)
 				}
 			}
 			*(*uintptr)(unsafe.Add(hdr, codecPtrSize())) = uintptr(ln)
@@ -741,8 +799,7 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 			ft := typ.StructFieldType(i)
 			off := typ.StructFieldOffset(i)
 			fp := unsafe.Add(buf, off)
-			dec := codecDecodeValue(cb, ds, ft)
-			memcpy(fp, dec, ft.Size())
+			codecDecodeInto(cb, ds, fp, ft)
 		}
 		return buf
 	case KindArray:
@@ -762,8 +819,7 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 		}
 		for i := int32(0); i < length; i++ {
 			ep := unsafe.Add(buf, uintptr(i)*elemSize)
-			dec := codecDecodeValue(cb, ds, elemType)
-			memcpy(ep, dec, elemSize)
+			codecDecodeInto(cb, ds, ep, elemType)
 		}
 		return buf
 	case KindMap:
