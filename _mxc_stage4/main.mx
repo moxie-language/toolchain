@@ -3823,6 +3823,75 @@ func dispIndexCheck(pkgs []*pkgInfo, cacheBase string, ifaceMethods map[string]b
 		" mxhLoaded=" | simpleItoa(loaded) | "\n")
 }
 
+// dispParseMethods returns the non-generic method names a package's mxh
+// declares. Generic types' methods are never emitted as standalone symbols and
+// findIfaceImpls skips them, so the index does too; mxh records the parameters
+// in the declaration ("type Array[$T]").
+func dispParseMethods(d string) (m map[string]bool) {
+	m = map[string]bool{}
+	generic := map[string]bool{}
+	pos := int32(0)
+	for pos < int32(len(d)) {
+		ls, le, next := mxhNextLine(d, pos)
+		pos = next
+		if mxhHasPrefix(d, ls, le, "type ") {
+			ws, we := mxhNextWord(d, ls+5, le)
+			if ws != we && we < le && d[we] == '[' {
+				generic[string(d[ws:we])] = true
+			}
+		}
+	}
+	pos = 0
+	for pos < int32(len(d)) {
+		ls, le, next := mxhNextLine(d, pos)
+		pos = next
+		if mxhHasPrefix(d, ls, le, "method ") {
+			ws, we := mxhNextWord(d, ls+7, le)
+			if ws == we {
+				continue
+			}
+			if generic[string(d[ws:we])] {
+				continue
+			}
+			ns, ne := mxhNextWord(d, we, le)
+			if ns == ne {
+				continue
+			}
+			m[string(d[ns:ne])] = true
+		}
+	}
+	return m
+}
+
+// dispParseIfaceMethods adds every method name declared by an iface line.
+func dispParseIfaceMethods(d string, out map[string]bool) {
+	pos := int32(0)
+	for pos < int32(len(d)) {
+		ls, le, next := mxhNextLine(d, pos)
+		pos = next
+		if !mxhHasPrefix(d, ls, le, "iface ") {
+			continue
+		}
+		ws, we := mxhNextWord(d, ls+6, le)
+		if ws == we {
+			continue
+		}
+		i := we
+		for i < le {
+			if d[i] == '=' {
+				j := i - 1
+				for j > ws && d[j-1] != ';' && d[j-1] != ' ' {
+					j--
+				}
+				if j < i {
+					out[string(d[j:i])] = true
+				}
+			}
+			i++
+		}
+	}
+}
+
 // cmdDispIndex prints the compact dispatch index the per-package isolation work
 // needs: which packages in a closure define which methods, and which of those
 // methods any interface in the closure declares. It reads the mxh files already
@@ -3852,62 +3921,9 @@ func cmdDispIndex() {
 		}
 		scanned++
 		d := string(data)
-		m := map[string]bool{}
-		// Generic types' methods are never emitted as standalone symbols, and
-		// findIfaceImpls skips them; mxh records the parameters in the
-		// declaration ("type Array[$T]"), so the index applies the same filter.
-		generic := map[string]bool{}
-		gpos := int32(0)
-		for gpos < int32(len(d)) {
-			gls, gle, gnext := mxhNextLine(d, gpos)
-			gpos = gnext
-			if mxhHasPrefix(d, gls, gle, "type ") {
-				gws, gwe := mxhNextWord(d, gls+5, gle)
-				if gws != gwe && gwe < gle && d[gwe] == '[' {
-					generic[string(d[gws:gwe])] = true
-				}
-			}
-		}
-		pos := int32(0)
-		for pos < int32(len(d)) {
-			ls, le, next := mxhNextLine(d, pos)
-			pos = next
-			if mxhHasPrefix(d, ls, le, "method ") {
-				// method <Type> <Name> <sig> <ptrRecv>
-				ws, we := mxhNextWord(d, ls+7, le)
-				if ws == we {
-					continue
-				}
-				if generic[string(d[ws:we])] {
-					continue
-				}
-				ns, ne := mxhNextWord(d, we, le)
-				if ns == ne {
-					continue
-				}
-				m[string(d[ns:ne])] = true
-				methodLines++
-			} else if mxhHasPrefix(d, ls, le, "iface ") {
-				// iface <Name> M=sig;M=sig;...
-				ws, we := mxhNextWord(d, ls+6, le)
-				if ws == we {
-					continue
-				}
-				i := we
-				for i < le {
-					if d[i] == '=' {
-						j := i - 1
-						for j > ws && d[j-1] != ';' && d[j-1] != ' ' {
-							j--
-						}
-						if j < i {
-							ifaceMethods[string(d[j:i])] = true
-						}
-					}
-					i++
-				}
-			}
-		}
+		m := dispParseMethods(d)
+		methodLines += int32(len(m))
+		dispParseIfaceMethods(d, ifaceMethods)
 		pkgMethods[dispPkgKey(pkg)] = m
 	}
 	relevant := int32(0)
@@ -5064,7 +5080,16 @@ func main() {
 		hash := pkgHash(pkg)
 		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
 		if mxutil.FileExists(cachedMxh) && !forceRebuild {
-			loadMxh(cachedMxh)
+			// Record the package's declared methods while its mxh is being
+			// read anyway: this is the index findIfaceImpls consults to skip
+			// packages that cannot implement the method being dispatched.
+			if data, dok := mxutil.ReadFile(cachedMxh); dok {
+				if cctx.dispMethodsByPkg == nil {
+					cctx.dispMethodsByPkg = map[string]map[string]bool{}
+				}
+				cctx.dispMethodsByPkg[dispPkgKey(pkg)] = dispParseMethods(string(data))
+				loadMxhData(data)
+			}
 			continue
 		}
 		typeCheckPkgSource(cacheBase, pkg.dir, pkg.files, pkg.path, compilePath, cachedMxh)
