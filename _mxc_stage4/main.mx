@@ -2294,6 +2294,37 @@ func compileSource(src []byte, pkgName, triple, pkgDir string) (s string) {
 	return ir
 }
 
+// scanPkgGenerics reads a package's sources and records its generic
+// declarations. A free function so the source text dies with its frame: the
+// build loops called concatSources directly, and the copy stayed live in the
+// loop's arena - up to megabytes per package for the generated packages -
+// until the whole link returned.
+func scanPkgGenerics(dir string, files []string, compilePath string) {
+	src := concatSources(dir, files)
+	ScanGenericDecls(src, compilePath)
+}
+
+// typeCheckPkgSource concatenates a package's sources and type-checks them into
+// the registry, creating the cache directory first. Free function for the same
+// reason as scanPkgGenerics: only the type graph (root arena) outlives the
+// call, not the source text.
+func typeCheckPkgSource(cacheBase, dir string, files []string, pkgPath, compilePath, cachedMxh string) {
+	src := concatSources(dir, files)
+	if len(src) == 0 {
+		return
+	}
+	mkdirAll(mxutil.JoinPath(cacheBase, safeName(pkgPath)), 0755)
+	TypeCheckOnly(src, compilePath, cachedMxh)
+}
+
+// compilePkgSource concatenates a package's sources and compiles them. Free
+// function so the source text - the largest per-package transient - is released
+// when the compile returns instead of living in the build loop's arena.
+func compilePkgSource(dir string, files []string, compilePath, triple string) (ir string) {
+	src := concatSources(dir, files)
+	return compileSource(src, compilePath, triple, dir)
+}
+
 
 // mxhBuf accumulates mxh output. Pre-sized buffer with offset write.
 // No growth, no abandoned arrays under arena allocation.
@@ -4811,12 +4842,7 @@ func main() {
 			loadMxh(cachedMxh)
 			continue
 		}
-		src := concatSources(pkg.dir, pkg.files)
-		if len(src) == 0 {
-			continue
-		}
-		mkdirAll(mxutil.JoinPath(cacheBase, safeName(pkg.path)), 0755)
-		TypeCheckOnly(src, compilePath, cachedMxh)
+		typeCheckPkgSource(cacheBase, pkg.dir, pkg.files, pkg.path, compilePath, cachedMxh)
 	}
 	var allBcFiles []string
 	var hasRuntimePkg bool
@@ -5242,8 +5268,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			}
 			mxutil.WriteStr(2, "\n")
 			loadMxh(cachedMxh)
-			gsrc := concatSources(pkg.dir, pkg.files)
-			ScanGenericDecls(gsrc, compilePath)
+			scanPkgGenerics(pkg.dir, pkg.files, compilePath)
 			bcs = mxutil.Ensure(bcs, 1)
 			push(bcs, cached)
 			for _, cf := range pkg.cfiles {
@@ -5264,10 +5289,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 
 		if isStdlib(pkg.path) && bcOk && !forceRebuild {
 			mxutil.WriteStr(2, "  cached " | pkg.path | "\n")
-			csrc := concatSources(pkg.dir, pkg.files)
-			cdir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
-			mkdirAll(cdir, 0755)
-			TypeCheckOnly(csrc, compilePath, cachedMxh)
+			typeCheckPkgSource(cacheBase, pkg.dir, pkg.files, pkg.path, compilePath, cachedMxh)
 			if cctx.compileArena != nil {
 				runtime.ArenaFree(cctx.compileArena)
 				cctx.compileArena = nil
@@ -5278,12 +5300,11 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		}
 
 		mxutil.WriteStr(2, "  compile " | pkg.path | "\n")
-		src := concatSources(pkg.dir, pkg.files)
 		llFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".ll")
 		// Stream IR directly to .ll file to avoid accumulating entire
 		// package IR in memory (unicode/tables.mx produces ~10MB IR).
 		cctx.irOutputFile = llFile
-		ir := compileSource(src, compilePath, triple, pkg.dir)
+		ir := compilePkgSource(pkg.dir, pkg.files, compilePath, triple)
 		cctx.irOutputFile = ""
 		if printIR && len(ir) > 0 {
 			mxutil.WriteStr(1, ir)
