@@ -3743,6 +3743,28 @@ func dispPkgKey(pkg *pkgInfo) (s string) {
 	return s
 }
 
+// copyGenericsToRoot repoints a package's recorded generic-declaration names at
+// root-lifetime memory. loadMxhDataIn copies the mxh text into the arena it is
+// given, and mxhGenerics keys are substrings of that text; once a package's
+// graph is loaded into a transient arena, those keys would dangle for the read
+// at ir_typecheck.mx:662 that decides whether to scan a package's generics.
+func copyGenericsToRoot(pkgPath string) {
+	gens := cctx.mxhGenerics[pkgPath]
+	if gens == nil {
+		return
+	}
+	save := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
+	fresh := map[string]bool{}
+	for name := range gens {
+		c := []byte{:len(name)}
+		copy(c, name)
+		fresh[string(c)] = true
+	}
+	runtime.SetCurrentArena(save)
+	cctx.mxhGenerics[pkgPath] = fresh
+}
+
 // dispIndexCheck loads the link set's mxh - the very cost the index exists to
 // avoid - and compares, per interface method, the packages the index attributes
 // the method to against the packages the live registry sees. Direct methods
@@ -3842,6 +3864,8 @@ func dispIndexCheck(pkgs []*pkgInfo, cacheBase string, ifaceMethods map[string]b
 	// maps filled from that text (mxhGenerics and friends) are not consulted
 	// after this point.
 	for _, pkg := range pkgs {
+		// Names recorded from the mxh text must survive the arena that held it.
+		copyGenericsToRoot(dispPkgKey(pkg))
 		delete(cctx.universe.Registry, dispPkgKey(pkg))
 	}
 	runtime.ArenaFree(arena)
