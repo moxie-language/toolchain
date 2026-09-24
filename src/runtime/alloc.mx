@@ -73,8 +73,12 @@ type ArenaRegion struct {
 	cap  uintptr
 }
 
-// arenaMaxRegions is the maximum number of regions per arena.
-const arenaMaxRegions = int32(1024)
+// arenaMaxRegions is the maximum number of regions per arena. It is also the
+// size of each arena's region registry, which is carved from the arena's own
+// first region: 1024 entries cost 24KB of every arena, most of a small arena's
+// mapping, and a build creates hundreds of thousands of small arenas.
+// 128 regions at the 64MB default region size still allows 8GB per arena.
+const arenaMaxRegions = int32(128)
 
 // arenaDefaultRegion is the capacity of chained (overflow) regions.
 const arenaDefaultRegion = uintptr(64) * 1024 * 1024 // 64MB chain regions
@@ -90,6 +94,11 @@ const arenaDefaultRegion = uintptr(64) * 1024 * 1024 // 64MB chain regions
 type Arena struct {
 	nregions  int32
 	sovereign int32 // nonzero: sovereign data arena (records allocations)
+	// growDouble chains overflow regions at twice the active region's capacity
+	// (capped at arenaDefaultRegion) instead of a fixed 64MB. Sovereign group
+	// arenas are created in the hundreds of thousands at a few KB each, and a
+	// fixed 64MB overflow region would reserve 64MB to hold a few KB more.
+	growDouble int32
 	owner     *sovGroup
 	sovGroups int32 // live sovGroups whose receivers live in this arena
 	// sovGroupList holds those groups. sovInvalidateArena frees their data
@@ -567,6 +576,7 @@ func sovGrowSlots(g *sovGroup) {
 // sovNewArena creates a fresh non-pooled arena of the given capacity.
 func sovNewArena(capacity uintptr) (a *Arena) {
 	a = ArenaNew(capacity)
+	a.growDouble = 1
 	return a
 }
 
@@ -601,7 +611,7 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 	save := CurrentArena()
 	SetCurrentArena(trueRootArena())
 	g = (*sovGroup)(alloc(unsafe.Sizeof(sovGroup{}), nil))
-	g.data = sovNewArena(65536)
+	g.data = sovNewArena(8192)
 	g.data.sovereign = 1
 	sovRangeRegister(g.data.regions[0].base, g.data.regions[0].cap, g)
 	g.data.owner = g
@@ -706,7 +716,7 @@ func sovAddRec(g *sovGroup, dataAddr, size uintptr, typeDesc *RawType) {
 		sovGrowRecs(g)
 	}
 	if g.allocTbl == nil {
-		g.allocTbl = sovNewArena(65536)
+		g.allocTbl = sovNewArena(8192)
 	}
 	rec := (*sovRecord)(ArenaAlloc(g.allocTbl, unsafe.Sizeof(sovRecord{})))
 	rec.dataAddr = dataAddr
@@ -1797,6 +1807,12 @@ func arenaAllocRaw(a *Arena, size uintptr) unsafe.Pointer {
 			runtimePanic("arena: region table full")
 		}
 		newCap := arenaDefaultRegion
+		if a.growDouble != 0 {
+			newCap = a.regions[active].cap * 2
+			if newCap > arenaDefaultRegion {
+				newCap = arenaDefaultRegion
+			}
+		}
 		if size > newCap {
 			newCap = (size + 4095) &^ 4095
 		}
@@ -1850,6 +1866,12 @@ func ArenaAllocTD(a *Arena, size uintptr, td *RawType) unsafe.Pointer {
 			runtimePanic("arena: region table full")
 		}
 		newCap := arenaDefaultRegion
+		if a.growDouble != 0 {
+			newCap = a.regions[active].cap * 2
+			if newCap > arenaDefaultRegion {
+				newCap = arenaDefaultRegion
+			}
+		}
 		if size > newCap {
 			newCap = (size + 4095) &^ 4095
 		}
