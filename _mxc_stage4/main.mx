@@ -2916,14 +2916,23 @@ func mxhCountWords(d string, from, limit int32) (n int32) {
 	return n
 }
 
+// loadMxhData materialises a package's type graph on the root arena: the
+// registry keys and names derived from the mxh text must outlive any
+// compile/typecheck arena. loadMxhDataIn is the same work with the arena given
+// by the caller, so a graph that is only needed for one package's compile can
+// be materialised into an arena that is released afterwards.
 func loadMxhData(data []byte) (ok bool) {
+	return loadMxhDataIn(data, runtime.RootArena())
+}
+
+func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
 	// Types created here must survive on the root arena - they're stored
 	// in cctx.universe.Registry which outlives any compile/typecheck arena.
 	// Manual-arena mode: FnArenaPush is a no-op, so helper functions
 	// (parseTypeDesc, NewNamed, ...) allocate here too instead of in
 	// their own transient fn arenas.
-	runtime.ManualArenaEnter(runtime.RootArena())
-	defer runtime.ManualArenaExit(runtime.RootArena())
+	runtime.ManualArenaEnter(arena)
+	defer runtime.ManualArenaExit(arena)
 
 	// Copy the mxh bytes into the root arena: every substring derived
 	// from d (pkgPath, names, sigs) becomes a registry key and must not
@@ -3745,11 +3754,19 @@ func dispIndexCheck(pkgs []*pkgInfo, cacheBase string, ifaceMethods map[string]b
 	for _, pkg := range pkgs {
 		closure[dispPkgKey(pkg)] = true
 	}
+	// Rehearsal for per-package isolation: the comparison needs the graphs, the
+	// command does not need them afterwards, so they are materialised into an
+	// arena this function owns and the registry entries are dropped before it
+	// is freed. This is the exact cycle the build path will use for packages
+	// that no dispatch can reach.
+	arena := runtime.ArenaNew(64 * 1024 * 1024)
 	loaded := int32(0)
 	for _, pkg := range pkgs {
 		hash := pkgHash(pkg)
-		if loadMxh(cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)) {
-			loaded++
+		if data, ok := mxutil.ReadFile(cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)); ok {
+			if loadMxhDataIn(data, arena) {
+				loaded++
+			}
 		}
 	}
 	regMethods := map[string]map[string]bool{}
@@ -3821,6 +3838,13 @@ func dispIndexCheck(pkgs []*pkgInfo, cacheBase string, ifaceMethods map[string]b
 	mxutil.WriteStr(1, "dispindex-check: ifaceMethods=" | simpleItoa(len(ifaceMethods)) |
 		" match=" | simpleItoa(okCount) | " mismatch=" | simpleItoa(badCount) |
 		" mxhLoaded=" | simpleItoa(loaded) | "\n")
+	// Release: drop every entry this call materialised, then the arena. The
+	// maps filled from that text (mxhGenerics and friends) are not consulted
+	// after this point.
+	for _, pkg := range pkgs {
+		delete(cctx.universe.Registry, dispPkgKey(pkg))
+	}
+	runtime.ArenaFree(arena)
 }
 
 // dispParseMethods returns the non-generic method names a package's mxh
