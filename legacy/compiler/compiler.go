@@ -1255,6 +1255,19 @@ func (c *compilerContext) getEmbedFileString(file *loader.EmbedFile) llvm.Value 
 // This is separated out from createFunction() so that it is also usable to
 // define compiler intrinsics like the atomic operations in sync/atomic.
 func (b *builder) createFunctionStart(intrinsic bool) {
+	// Per-frame arena state. The prologue emitters set these and the epilogue
+	// reads them, so they must be cleared here for every function: leaking a
+	// set flag into the next function makes it pop a stable-arena
+	// registration (or restore a borrowed arena) that it never entered. A
+	// free helper emitted after a sovereign method did exactly that - the
+	// Ensure instantiation for []*K emitted SovereignRegRestore with no
+	// matching SovereignRegStable, clearing the receiver's registration on
+	// the first call so every later element relocation fell back to a deep
+	// copy.
+	b.arenaActive = false
+	b.arenaBorrowed = false
+	b.sovereignActive = false
+	b.stableRegistered = false
 	if b.DumpSSA {
 		fmt.Printf("\nfunc %s:\n", b.fn)
 	}
