@@ -1745,11 +1745,31 @@ func arenaDataOffset() (off uintptr) {
 // arenaAllocRaw bumps size bytes in the arena without recording an
 // allocation-map entry. Used by the compaction copy pass and by
 // codecSovereignAlloc, which record their own entries.
+// maxSingleAlloc bounds one allocation. Sizes reaching the allocator come
+// from decoded length fields and computed table sizes; when one of those is
+// corrupt the request used to be honoured, and a multi-gigabyte region whose
+// capacity came out sign-extended (0xFFFFFFFF80000000) then handed out
+// pointers outside its own arena - corruption instead of a failure. No
+// legitimate single allocation is anywhere near this: package sources and
+// codec buffers are kilobytes, and arenas themselves are mapped by ArenaNew,
+// not here.
+const maxSingleAlloc = uintptr(1) << 30
+
 func arenaAllocRaw(a *Arena, size uintptr) unsafe.Pointer {
 	if a == nil {
 		runtimePanic("ArenaAlloc: nil arena")
 	}
 	size = align(size)
+	if size > maxSingleAlloc {
+		printstring("alloc: implausible size ")
+		printuint64(uint64(size))
+		printstring(" arena=")
+		printuint64(uint64(uintptr(unsafe.Pointer(a))))
+		printstring(" sovereign=")
+		printuint64(uint64(a.sovereign))
+		printstring("\n")
+		runtimePanic("alloc: implausible allocation size")
+	}
 	active := a.nregions - 1
 	if a.regions[active].off+size > a.regions[active].cap {
 		if a.nregions >= arenaMaxRegions {
@@ -1808,6 +1828,16 @@ func ArenaAllocTD(a *Arena, size uintptr, td *RawType) unsafe.Pointer {
 		runtimePanic("ArenaAlloc: nil arena")
 	}
 	size = align(size)
+	if size > maxSingleAlloc {
+		printstring("alloc: implausible size ")
+		printuint64(uint64(size))
+		printstring(" arena=")
+		printuint64(uint64(uintptr(unsafe.Pointer(a))))
+		printstring(" sovereign=")
+		printuint64(uint64(a.sovereign))
+		printstring("\n")
+		runtimePanic("alloc: implausible allocation size")
+	}
 	active := a.nregions - 1
 	if a.regions[active].off+size > a.regions[active].cap {
 		if a.nregions >= arenaMaxRegions {
