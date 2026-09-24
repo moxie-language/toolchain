@@ -3719,6 +3719,105 @@ func cacheClean() {
 	mxutil.WriteStr(2, "  done\n")
 }
 
+
+// cmdDispIndex prints the compact dispatch index the per-package isolation work
+// needs: which packages in a closure define which methods, and which of those
+// methods any interface in the closure declares. It reads the mxh files already
+// on disk and materialises no type graph - that is the point, because dispatch
+// enumeration is the only reason the whole link set's graphs are retained.
+func cmdDispIndex() {
+	root := moxieRoot()
+	pkgPath := "."
+	if len(os.Args) > 2 {
+		pkgPath = os.Args[2]
+	}
+	pkgs := resolveAll(pkgPath, root)
+	// pkgHash folds the link set key in, and that is only computed during a
+	// build. Without it every mxh path here is a key nobody wrote.
+	bst.linkSetKey = linkSetHash(pkgs)
+	cacheBase := pkgCacheDir()
+	ifaceMethods := map[string]bool{}
+	pkgMethods := map[string]map[string]bool{}
+	scanned := int32(0)
+	methodLines := int32(0)
+	for _, pkg := range pkgs {
+		hash := pkgHash(pkg)
+		mxhPath := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+		data, ok := mxutil.ReadFile(mxhPath)
+		if !ok {
+			continue
+		}
+		scanned++
+		d := string(data)
+		m := map[string]bool{}
+		pos := int32(0)
+		for pos < int32(len(d)) {
+			ls, le, next := mxhNextLine(d, pos)
+			pos = next
+			if mxhHasPrefix(d, ls, le, "method ") {
+				// method <Type> <Name> <sig> <ptrRecv>
+				ws, we := mxhNextWord(d, ls+7, le)
+				if ws == we {
+					continue
+				}
+				ns, ne := mxhNextWord(d, we, le)
+				if ns == ne {
+					continue
+				}
+				m[string(d[ns:ne])] = true
+				methodLines++
+			} else if mxhHasPrefix(d, ls, le, "iface ") {
+				// iface <Name> M=sig;M=sig;...
+				ws, we := mxhNextWord(d, ls+6, le)
+				if ws == we {
+					continue
+				}
+				i := we
+				for i < le {
+					if d[i] == '=' {
+						j := i - 1
+						for j > ws && d[j-1] != ';' && d[j-1] != ' ' {
+							j--
+						}
+						if j < i {
+							ifaceMethods[string(d[j:i])] = true
+						}
+					}
+					i++
+				}
+			}
+		}
+		pkgMethods[pkg.path] = m
+	}
+	relevant := int32(0)
+	methodPackages := map[string]int32{}
+	for _, m := range pkgMethods {
+		hit := false
+		for name := range m {
+			methodPackages[name]++
+			if ifaceMethods[name] {
+				hit = true
+			}
+		}
+		if hit {
+			relevant++
+		}
+	}
+	mxutil.WriteStr(1, "dispindex: packages=" | simpleItoa(len(pkgs)) | " mxh=" | simpleItoa(scanned) |
+		" methodLines=" | simpleItoa(methodLines) | " methods=" | simpleItoa(len(methodPackages)) |
+		" ifaceMethods=" | simpleItoa(len(ifaceMethods)) |
+		" dispatchRelevantPkgs=" | simpleItoa(relevant) | "\n")
+	for _, name := range []string{"String", "Error", "EncodeTo", "DecodeFrom", "Read", "Write"} {
+		mxutil.WriteStr(1, "  " | name | ": iface=")
+		if ifaceMethods[name] {
+			mxutil.WriteStr(1, "yes")
+		} else {
+			mxutil.WriteStr(1, "no")
+		}
+		mxutil.WriteStr(1, " pkgs=" | simpleItoa(methodPackages[name]) | "\n")
+	}
+}
+
 func cmdUpdate(rebuildAll bool) {
 	cacheRoot := mxutil.JoinPath(getMoxiePath(), "cache")
 	// Cache dirs are named mxc-<version>-<compilerHash>-<os>-<arch>. "Old"
@@ -4534,6 +4633,10 @@ func main() {
 	}
 	if cmd == "env" {
 		printEnv()
+		return
+	}
+	if cmd == "dispindex" {
+		cmdDispIndex()
 		return
 	}
 	if cmd == "targets" {
