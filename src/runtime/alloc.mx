@@ -548,8 +548,14 @@ const sovMapMax = int32(1) << 27
 
 func sovGrowRecs(g *sovGroup) {
 	nc := cap(g.recs) * 2
-	if nc < 64 {
-		nc = 64
+	// Small floor: a build creates hundreds of thousands of groups, the record
+	// slice's backing is root-lifetime and never freed, and most groups record
+	// only a handful of allocations. A 64-record floor cost ~2.5KB per group -
+	// ~400MB over one cold relay build, which was the whole parked RSS growth.
+	// Growth is still geometric, so a group that needs thousands of records
+	// reaches them in the same number of steps.
+	if nc < 4 {
+		nc = 4
 	}
 	if nc > sovMapMax || nc < 0 {
 		runtimePanic("sovereign allocation map overflow: compaction did not reclaim records")
@@ -562,8 +568,8 @@ func sovGrowRecs(g *sovGroup) {
 // sovGrowSlots grows the slot slice with root-lifetime backing.
 func sovGrowSlots(g *sovGroup) {
 	nc := cap(g.slots) * 2
-	if nc < 16 {
-		nc = 16
+	if nc < 4 {
+		nc = 4
 	}
 	if nc > sovMapMax || nc < 0 {
 		runtimePanic("sovereign slot table overflow")
@@ -698,8 +704,8 @@ func codecRegStable(recv unsafe.Pointer) {
 func codecSovereignEnter(g *sovGroup) {
 	if len(g.batchStart) >= cap(g.batchStart) {
 		nc := cap(g.batchStart) * 2
-		if nc < 16 {
-			nc = 16
+		if nc < 4 {
+			nc = 4
 		}
 		nb := unsafe.Slice((*int32)(sovRootAlloc(uintptr(nc)*4)), nc)
 		copy(nb, g.batchStart)
