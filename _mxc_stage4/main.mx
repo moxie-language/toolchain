@@ -2793,6 +2793,17 @@ func parseMxhTParams(raw string) (name string, tparams []*TypeParam) {
 	return name, tparams
 }
 
+// cacheWrite publishes a cache file atomically: write a per-process temp name
+// in the same directory, then rename over the target. A build killed mid-write
+// otherwise leaves a truncated .bc/.mxh behind, and a later build reads it -
+// which is not hypothetical: after several killed `build -a` runs a compile
+// spun at 100% CPU on a torn cache entry and never finished.
+func cacheWrite(path string, data []byte) {
+	tmp := path | ".tmp" | simpleItoa(os.Getpid())
+	writeFile(tmp, data, 0644)
+	os.Rename(tmp, path)
+}
+
 func loadMxh(path string) (ok bool) {
 	data, ok := mxutil.ReadFile(path)
 	if !ok {
@@ -3342,10 +3353,10 @@ func cmdCacheWarm() {
 		mkdirAll(cdir, 0755)
 		data, rok := mxutil.ReadFile(bcFile)
 		if rok {
-			writeFile(cached, data, 0644)
+			cacheWrite(cached, data)
 		}
 		if len(cctx.lastMxhData) > 0 {
-			writeFile(cachedMxh, []byte(cctx.lastMxhData), 0644)
+			cacheWrite(cachedMxh, []byte(cctx.lastMxhData))
 			cctx.lastMxhData = ""
 		}
 		compiled++
@@ -4200,11 +4211,11 @@ func cmdUpdate(rebuildAll bool) {
 		mkdirAll(cdir, 0755)
 		data, rok := mxutil.ReadFile(bcFile)
 		if rok {
-			writeFile(cached, data, 0644)
+			cacheWrite(cached, data)
 		}
 		if len(cctx.lastMxhData) > 0 {
 			cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
-			writeFile(cachedMxh, []byte(cctx.lastMxhData), 0644)
+			cacheWrite(cachedMxh, []byte(cctx.lastMxhData))
 			cctx.lastMxhData = ""
 		}
 	}
@@ -4467,10 +4478,10 @@ func cmdTest(args []string) {
 			mkdirAll(cacheDir, 0755)
 			data, rok := mxutil.ReadFile(bcFile)
 			if rok {
-				writeFile(cached, data, 0644)
+				cacheWrite(cached, data)
 			}
 			if len(cctx.lastMxhData) > 0 {
-				writeFile(cachedMxh, []byte(cctx.lastMxhData), 0644)
+				cacheWrite(cachedMxh, []byte(cctx.lastMxhData))
 				cctx.lastMxhData = ""
 			}
 		}
@@ -5726,7 +5737,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		if len(cctx.lastMxhData) > 0 {
 			cdir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
 			mkdirAll(cdir, 0755)
-			writeFile(cachedMxh, []byte(cctx.lastMxhData), 0644)
+			cacheWrite(cachedMxh, []byte(cctx.lastMxhData))
 			cctx.lastMxhData = ""
 		}
 		bcs = mxutil.Ensure(bcs, 1)
@@ -5786,7 +5797,7 @@ func cacheCompiledBc(cacheBase, tmpdir, pkgPath, hash, version string) {
 	mkdirAll(mxutil.JoinPath(cacheBase, safeName(pkgPath)), 0755)
 	data, rok := mxutil.ReadFile(bcFile)
 	if rok {
-		writeFile(cachedBcPath(cacheBase, pkgPath, hash, version), data, 0644)
+		cacheWrite(cachedBcPath(cacheBase, pkgPath, hash, version), data)
 	}
 }
 
@@ -6255,13 +6266,13 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 	cached := cachedBcPath(meta.cacheBase, pkg.path, hash, pkg.version)
 	bcData, rok := mxutil.ReadFile(bcFile)
 	if rok {
-		writeFile(cached, bcData, 0644)
+		cacheWrite(cached, bcData)
 	}
 
 	// Cache .mxh (already generated inside CompileToIR's arena)
 	if len(cctx.lastMxhData) > 0 {
 		cachedMxh := cachedMxhPath(meta.cacheBase, pkg.path, hash, pkg.version)
-		writeFile(cachedMxh, []byte(cctx.lastMxhData), 0644)
+		cacheWrite(cachedMxh, []byte(cctx.lastMxhData))
 		cctx.lastMxhData = ""
 	}
 
