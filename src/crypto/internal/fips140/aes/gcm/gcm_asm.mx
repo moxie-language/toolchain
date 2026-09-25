@@ -60,10 +60,9 @@ func initGCM(g *GCM) {
 	gcmAesInit(&g.productTable, aes.EncryptionKeySchedule(&g.cipher))
 }
 
-func seal(out []byte, g *GCM, nonce, plaintext, data []byte) {
+func seal(g *GCM, nonce, plaintext, data []byte) (out []byte) {
 	if !supportsAESGCM() {
-		sealGeneric(out, g, nonce, plaintext, data)
-		return
+		return sealGeneric(g, nonce, plaintext, data)
 	}
 
 	var counter, tagMask [gcmBlockSize]byte
@@ -83,16 +82,18 @@ func seal(out []byte, g *GCM, nonce, plaintext, data []byte) {
 	var tagOut [gcmTagSize]byte
 	gcmAesData(&g.productTable, data, &tagOut)
 
+	out = []byte{:len(plaintext) + gcmTagSize}
 	if len(plaintext) > 0 {
 		gcmAesEnc(&g.productTable, out, plaintext, &counter, &tagOut, aes.EncryptionKeySchedule(&g.cipher))
 	}
 	gcmAesFinish(&g.productTable, &tagMask, &tagOut, uint64(len(plaintext)), uint64(len(data)))
 	copy(out[len(plaintext):], tagOut[:])
+	return out
 }
 
-func open(out []byte, g *GCM, nonce, ciphertext, data []byte) error {
+func open(g *GCM, nonce, ciphertext, data []byte) (out []byte, err error) {
 	if !supportsAESGCM() {
-		return openGeneric(out, g, nonce, ciphertext, data)
+		return openGeneric(g, nonce, ciphertext, data)
 	}
 
 	tag := ciphertext[len(ciphertext)-g.tagSize:]
@@ -116,13 +117,14 @@ func open(out []byte, g *GCM, nonce, ciphertext, data []byte) error {
 	var expectedTag [gcmTagSize]byte
 	gcmAesData(&g.productTable, data, &expectedTag)
 
+	out = []byte{:len(ciphertext)}
 	if len(ciphertext) > 0 {
 		gcmAesDec(&g.productTable, out, ciphertext, &counter, &expectedTag, aes.EncryptionKeySchedule(&g.cipher))
 	}
 	gcmAesFinish(&g.productTable, &tagMask, &expectedTag, uint64(len(ciphertext)), uint64(len(data)))
 
 	if subtle.ConstantTimeCompare(expectedTag[:g.tagSize], tag) != 1 {
-		return errOpen
+		return nil, errOpen
 	}
-	return nil
+	return out, nil
 }

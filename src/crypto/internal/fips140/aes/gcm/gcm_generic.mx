@@ -10,20 +10,26 @@ import (
 	"crypto/internal/fips140deps/byteorder"
 )
 
-func sealGeneric(out []byte, g *GCM, nonce, plaintext, additionalData []byte) {
+func sealGeneric(g *GCM, nonce, plaintext, additionalData []byte) (out []byte) {
 	var H, counter, tagMask [gcmBlockSize]byte
 	aes.EncryptBlockInternal(&g.cipher, H[:], H[:])
 	deriveCounterGeneric(&H, &counter, nonce)
 	gcmCounterCryptGeneric(&g.cipher, tagMask[:], tagMask[:], &counter)
 
+	// Moxie has no aliasing: a slice handed back alongside another over the
+	// same buffer is relocated, so writing through the out half of a
+	// sliceForAppend pair comes back zeros at the caller. Seal into a slice
+	// this function owns and return it; the caller copies it into place.
+	out = []byte{:len(plaintext) + gcmTagSize}
 	gcmCounterCryptGeneric(&g.cipher, out, plaintext, &counter)
 
 	var tag [gcmTagSize]byte
 	gcmAuthGeneric(tag[:], &H, &tagMask, out[:len(plaintext)], additionalData)
 	copy(out[len(plaintext):], tag[:])
+	return out
 }
 
-func openGeneric(out []byte, g *GCM, nonce, ciphertext, additionalData []byte) error {
+func openGeneric(g *GCM, nonce, ciphertext, additionalData []byte) (out []byte, err error) {
 	var H, counter, tagMask [gcmBlockSize]byte
 	aes.EncryptBlockInternal(&g.cipher, H[:], H[:])
 	deriveCounterGeneric(&H, &counter, nonce)
@@ -35,12 +41,12 @@ func openGeneric(out []byte, g *GCM, nonce, ciphertext, additionalData []byte) e
 	var expectedTag [gcmTagSize]byte
 	gcmAuthGeneric(expectedTag[:], &H, &tagMask, ciphertext, additionalData)
 	if subtle.ConstantTimeCompare(expectedTag[:g.tagSize], tag) != 1 {
-		return errOpen
+		return nil, errOpen
 	}
 
+	out = []byte{:len(ciphertext)}
 	gcmCounterCryptGeneric(&g.cipher, out, ciphertext, &counter)
-
-	return nil
+	return out, nil
 }
 
 // deriveCounterGeneric computes the initial GCM counter state from the given nonce.

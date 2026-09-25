@@ -76,16 +76,16 @@ func (g *GCM) sealAfterIndicator(dst, nonce, plaintext, data []byte) []byte {
 		panic("crypto/cipher: message too large for GCM")
 	}
 
-	ret, out := sliceForAppend(dst, len(plaintext)+g.tagSize)
-	if alias.InexactOverlap(out, plaintext) {
+	sealed := seal(g, nonce, plaintext, data)
+	out := growFor(dst, len(sealed))
+	if alias.InexactOverlap(out[len(dst):], plaintext) {
 		panic("crypto/cipher: invalid buffer overlap of output and input")
 	}
-	if alias.AnyOverlap(out, data) {
+	if alias.AnyOverlap(out[len(dst):], data) {
 		panic("crypto/cipher: invalid buffer overlap of output and additional data")
 	}
-
-	seal(out, g, nonce, plaintext, data)
-	return ret
+	copy(out[len(dst):], sealed)
+	return out
 }
 
 const errOpen = errors.Const("cipher: message authentication failed")
@@ -107,37 +107,40 @@ func (g *GCM) Open(dst, nonce, ciphertext, data []byte) ([]byte, error) {
 		return nil, errOpen
 	}
 
-	ret, out := sliceForAppend(dst, len(ciphertext)-g.tagSize)
-	if alias.InexactOverlap(out, ciphertext) {
-		panic("crypto/cipher: invalid buffer overlap of output and input")
-	}
-	if alias.AnyOverlap(out, data) {
-		panic("crypto/cipher: invalid buffer overlap of output and additional data")
-	}
-
-	fips140.RecordApproved()
-	if err := open(out, g, nonce, ciphertext, data); err != nil {
+	pt, err := open(g, nonce, ciphertext, data)
+	if err != nil {
 		// We sometimes decrypt and authenticate concurrently, so we overwrite
 		// dst in the event of a tag mismatch. To be consistent across platforms
-		// and to avoid releasing unauthenticated plaintext, we clear the buffer
-		// in the event of an error.
-		clear(out)
+		// and to avoid releasing unauthenticated plaintext, we clear the
+		// destination in the event of an error.
+		zeroed := growFor(dst, len(ciphertext)-g.tagSize)
+		clear(zeroed[len(dst):])
 		return nil, err
 	}
-	return ret, nil
+	out := growFor(dst, len(pt))
+	if alias.InexactOverlap(out[len(dst):], ciphertext) {
+		panic("crypto/cipher: invalid buffer overlap of output and input")
+	}
+	if alias.AnyOverlap(out[len(dst):], data) {
+		panic("crypto/cipher: invalid buffer overlap of output and additional data")
+	}
+	fips140.RecordApproved()
+	copy(out[len(dst):], pt)
+	return out, nil
 }
 
-// sliceForAppend takes a slice and a requested number of bytes. It returns a
-// slice with the contents of the given slice followed by that many bytes and a
-// second slice that aliases into it and contains only the extra bytes. If the
-// original slice has sufficient capacity then no allocation is performed.
-func sliceForAppend(in []byte, n int32) (head, tail []byte) {
-	if total := len(in) + n; cap(in) >= total {
-		head = in[:total]
-	} else {
-		head = []byte{:total}
-		copy(head, in)
+// growFor returns a slice with the contents of in followed by n fresh bytes.
+// The extra bytes are written by the caller with copy, never by handing a
+// second slice over the same buffer to another function: a pair of slices
+// sharing one buffer does not stay shared across a call boundary, so
+// sliceForAppend's tail came back unchanged.
+func growFor(in []byte, n int32) (out []byte) {
+	total := len(in) + n
+	if cap(in) >= total {
+		out = in[:total]
+		return out
 	}
-	tail = head[len(in):]
-	return
+	out = []byte{:total}
+	copy(out, in)
+	return out
 }
