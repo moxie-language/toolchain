@@ -2,9 +2,9 @@ package runtime
 
 // This file implements compiler builtins for slices: copy(), push(),
 // and the | concatenation operator. push is the ONLY way to write
-// elements into a slice. It never grows: reaching the end of a slice's
-// capacity panics. To extend a slice, allocate a new backing array with
-// the required capacity, copy the old data, and assign the new slice.
+// elements into a slice. It grows geometrically on overflow (see
+// slicePush); a slice that must not grow is presized with []T{:n} and
+// written through a cursor.
 
 import (
 	"unsafe"
@@ -23,15 +23,26 @@ func sliceCopy(dst, src unsafe.Pointer, dstLen, srcLen uintptr, elemSize uintptr
 
 // slicePush handles push() builtin.
 //
-// push(s, v...) writes elements at len; if the slice is nil it is
-// lazily initialized to the exact capacity needed (min 4 elements).
-// Once a slice has been initialized, writing past its capacity panics:
-// there is no automatic growth. To extend a slice beyond its capacity,
-// allocate a new backing array and copy.
+// Nil slice: lazy-init with capacity for the first push batch (min 4).
+// Non-nil overflow (len+n > cap): reallocate with geometric growth. The
+// abandoned backing stays in the arena that allocated it, and that arena
+// decides whether that is a leak: a function frame arena releases it at
+// return, and a sovereign receiver's arena records it as dead so the group's
+// compaction (codecSovereignCompact) reclaims it - which is why growth is
+// acceptable there. Only a bare package-level slice accumulates its abandoned
+// backings in the root arena, which is never reclaimed; an accumulator that
+// must survive many appends belongs in a self-mutating holder so its arena
+// compacts, or must be presized.
+//
+// Making overflow panic instead (c8fb6a2b, re-applied by d93685c1) turned
+// every dynamic accumulator in the app into a crash the moment its code path
+// ran: the browser client's signerCBs, the feed/notif/profile workers, and
+// nostr Tags.GetAll all push into lists whose size is unknowable at
+// declaration time.
 func slicePush(ptr unsafe.Pointer, slen, scap, n, elemSize uintptr) (unsafe.Pointer, uintptr, uintptr) {
 	newLen := slen + n
 	if scap == 0 {
-		// Lazy init: exact capacity for the first push batch.
+		// Lazy init: capacity for the first push batch.
 		scap = n
 		if scap < 4 {
 			scap = 4
@@ -39,10 +50,19 @@ func slicePush(ptr unsafe.Pointer, slen, scap, n, elemSize uintptr) (unsafe.Poin
 		ptr = alloc(scap*elemSize, nil)
 		return ptr, newLen, scap
 	}
-	if newLen > scap {
-		runtimePanicAt(returnAddress(0), "slice: push past end of slice capacity")
+	if newLen <= scap {
+		return ptr, newLen, scap
 	}
-	return ptr, newLen, scap
+	for newLen > scap {
+		newCap := scap * 2
+		if newCap < 4 {
+			newCap = 4
+		}
+		scap = newCap
+	}
+	newPtr := alloc(scap*elemSize, nil)
+	memmove(newPtr, ptr, slen*elemSize)
+	return newPtr, newLen, scap
 }
 
 // sliceConcat concatenates two slices (the | operator on arbitrary slice
