@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-COMPACTION: ;always preserve: moxie is not Go, no stubs - remove dead references instead, no adding GC models to work around bugs, assembler pass required for .S files
+COMPACTION: ;always preserve: moxie is not Go, no stubs - remove dead references instead, no adding GC models to work around bugs, assembler pass required for .S files; slices replace arrays (an array type is leftover Go slice bypass), string and []byte are one MUTABLE type, and there is no aliasing - a subslice is a copy
 
 ## WOOD LAW: Bilateral Compiler Sync
 
@@ -265,6 +265,36 @@ Five laws. Five elements. One generative cycle. One destructive cycle. Every arc
 Moxie source files use the `.mx` extension. The compiler does **not** read `.go`
 files. There are no Go stdlib imports (`fmt`, `strconv`, `go/*`, `strings`,
 `reflect`, `sync`, `context`, `encoding/*`). Moxie has its own stdlib.
+
+## Slices Replace Arrays; string Is []byte
+
+Arrays are eliminated from Moxie. An array type still in this tree is leftover
+Go slice-bypass code and should be rewritten as a slice. A slice already knows
+its own length and there is no heap, so an array buys no stack layout and no
+speed - it exists in Go only to dodge the runtime's slice bookkeeping, and
+Moxie has no such bookkeeping to dodge.
+
+- **No `append`.** `push` and `pop` are the slice mutators. `push` is bounded:
+  from a zero-capacity slice it lazy-inits to the first batch (floor 4), and
+  past the end of capacity it fails loud. Presize with `[]T{:n}` and write
+  through a cursor.
+- **Slices compare with `==` / `!=`.** With no reflect and no empty interface,
+  that is the comparison there is.
+- **`string` and `[]byte` are one type.** `len`, indexing, slicing and
+  assignment work the same on both spellings.
+- **Strings are mutable.** There is no immutable-string contract to preserve,
+  so a function may take a `string` parameter and write through it exactly like
+  any other byte slice.
+- **There is no aliasing: a subslice is a copy.** `s[a:b]` allocates and copies.
+  A write through a subslice does NOT reach the parent, so Go code that relied
+  on overlapping views - in-place XOR, "read src fully before writing dst",
+  `copy` overlap reasoning - is wrong here. Take the value you mean to change
+  and write it back, or build the result in a fresh slice.
+
+For the compiler this means: element loads and stores are bounds-checked for
+slices and strings (forming an address from an index is not), and there is no
+slice-to-array or array-to-slice conversion machinery to lean on - code that
+needs one works in slices.
 
 ## Type System: No int/uint, Builtin Stringers
 
