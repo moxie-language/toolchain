@@ -32,6 +32,15 @@ type timeTimer struct {
 
 //:linkname newTimer time.newTimer
 func newTimer(when, period int64, f func(a unsafe.Pointer, seq uintptr, delta int64), arg unsafe.Pointer, c unsafe.Pointer) *timeTimer {
+	// The timer and its queue node are owned by the runtime and outlive the
+	// frame that created them: allocate both in the root arena. Allocating
+	// them with the caller's current arena put the node in a frame arena that
+	// was released and reused while the node was still queued, and
+	// timerQueueRemove then walked a queue whose node pointer was a recycled
+	// address (SIGSEGV at cmp %rcx,0x8(%rax) with rax=0x73, reached from
+	// net.DialTimeout -> context.WithDeadline's Timer.Stop).
+	prevArena := CurrentArena()
+	SetCurrentArena(trueRootArena())
 	tim := &timeTimer{
 		c:    c,
 		init: true,
@@ -47,6 +56,7 @@ func newTimer(when, period int64, f func(a unsafe.Pointer, seq uintptr, delta in
 		timer:    &tim.timer,
 		callback: timerCallback,
 	})
+	SetCurrentArena(prevArena)
 	return tim
 }
 
@@ -62,7 +72,12 @@ func resetTimer(t *timeTimer, when, period int64) bool {
 	n := removeTimer(&t.timer)
 	removed := n != nil
 	if n == nil {
+		// Same lifetime rule as newTimer: the node is re-queued and must not
+		// live in the caller's frame arena.
+		prevArena := CurrentArena()
+		SetCurrentArena(trueRootArena())
 		n = &timerNode{}
+		SetCurrentArena(prevArena)
 	}
 	n.timer = &t.timer
 	n.callback = timerCallback

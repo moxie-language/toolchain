@@ -2641,24 +2641,16 @@ func generateMxh(pkg *TCPackage) (s string) {
 		if obj == nil {
 			continue
 		}
+		// Unexported *types* are emitted too. Descriptors in this same mxh
+		// reference them by name (a struct field, a method result, a slice
+		// element), and a reader that cannot resolve the name degrades it to
+		// int32, which diverges layouts and signatures from the defining
+		// package. Skipping unexported method-less non-struct types was
+		// exactly that gap (workerDoneList, proxyInList, encoder, aead,
+		// sockaddr, transcriptHash, ...). Unexported funcs/vars/consts stay
+		// out: nothing in another package can name them.
 		if !exported {
-			if tn, ok := obj.(*TypeName); ok {
-				if named, ok2 := tn.Typ.(*Named); ok2 {
-					_, isStruct := named.Under.(*TCStruct)
-					_, isBasic := SafeUnderlying(named.Under).(*Basic)
-					// Keep unexported named basic types too: struct field
-					// descs reference them (Curve.curve curveID), and an
-					// importing package that cannot resolve the name would
-					// degrade the field to int32, diverging the struct
-					// layout from the defining package (e.g. string vs i32
-					// shifts every following field offset).
-					if named.NumMethods() == 0 && !isStruct && !isBasic {
-						continue
-					}
-				} else {
-					continue
-				}
-			} else {
+			if _, okType := obj.(*TypeName); !okType {
 				continue
 			}
 		}

@@ -4,7 +4,16 @@ import "internal/task"
 
 const schedulerDebug = false
 
-var timerQueue *timerNode
+// earlyTimers holds timers created before initDomain (single-threaded startup).
+var earlyTimers *timerNode
+
+// timerQueueRef returns the current domain's timer queue head.
+func timerQueueRef() (q **timerNode) {
+	if domainRoot != nil {
+		return &domainRoot.timers
+	}
+	return &earlyTimers
+}
 
 // Simple logging, for debugging.
 func scheduleLog(msg string) {
@@ -28,7 +37,7 @@ func scheduleLogChan(msg string, ch *channel, t *task.Task) {
 }
 
 func timerQueueAdd(tn *timerNode) {
-	q := &timerQueue
+	q := timerQueueRef()
 	for ; *q != nil; q = &(*q).next {
 		if tn.whenTicks() < (*q).whenTicks() {
 			// this will finish earlier than the next - insert here
@@ -40,7 +49,7 @@ func timerQueueAdd(tn *timerNode) {
 }
 
 func timerQueueRemove(t *timer) *timerNode {
-	for q := &timerQueue; *q != nil; q = &(*q).next {
+	for q := timerQueueRef(); *q != nil; q = &(*q).next {
 		if (*q).timer == t {
 			scheduleLog("removed timer")
 			n := *q

@@ -5,6 +5,7 @@
 package time
 
 import (
+	"runtime"
 	"unsafe"
 )
 
@@ -180,9 +181,20 @@ func After(d Duration) <-chan Time {
 // be used to cancel the call using its Stop method.
 // The returned Timer's C field is not used and will be nil.
 func AfterFunc(d Duration, f func()) *Timer {
-	return (*Timer)(newTimer(when(d), 0, goFunc, *(*unsafe.Pointer)(unsafe.Pointer(&f)), nil))
+	// A Moxie func value is the pair {env, code}. This used to pass only its
+	// first word (*(*unsafe.Pointer)(unsafe.Pointer(&f)) - the env) and goFunc
+	// rebuilt a func value from a pointer to that single word, so the code
+	// pointer was read from whatever followed it on the stack: the timer called
+	// 0x0 (SIGSEGV in time[goFunc], seen through context.WithDeadline's timer).
+	// Box the whole value in the root arena - it must outlive the timer - and
+	// pass the address of the boxed copy.
+	prev := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
+	box := []func(){f}
+	runtime.SetCurrentArena(prev)
+	return (*Timer)(newTimer(when(d), 0, goFunc, unsafe.Pointer(&box[0]), nil))
 }
 
 func goFunc(arg unsafe.Pointer, seq uintptr, delta int64) {
-	(*(*func())(unsafe.Pointer(&arg)))()
+	(*(*func())(arg))()
 }
