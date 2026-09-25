@@ -2646,9 +2646,8 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			// assumes index is a signed integer.
 			index = b.extendInteger(index, expr.Index.Type(), b.uintptrType)
 
-			// Check bounds.
-			arrayLen := llvm.ConstInt(b.uintptrType, uint64(xType.Len()), false)
-			b.createLookupBoundsCheck(arrayLen, index)
+			// Moxie has no arrays: an array type is only a Go slice
+			// bypass, so there is no index check to make here.
 
 			// Can't load directly from array (as index is non-constant), so
 			// have to do it using an alloca+gep+load.
