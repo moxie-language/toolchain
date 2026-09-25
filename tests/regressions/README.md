@@ -63,3 +63,15 @@
 //   signer worker on addIdentity. buildSwitch now chains the case tests first
 //   and enters the default body only when none matched, as the legacy
 //   compiler does.
+//
+// push_index_nested_slice.mx
+//   Bug: the store-back that makes push an in-place mutation addressed an
+//   INDEX target wrongly. It passed the address of the slice variable to
+//   IndexAddr, where the emitter expects the slice value (as buildOperandAddr
+//   does for an assignment lvalue), so the address came out relative to the
+//   slice HEADER rather than its data. `d[i] = push(d[i], v)` then wrote the
+//   element's header over the outer slice: the directory gained an entry and
+//   its lengths scrambled on every call, which made a slice-of-slices
+//   accumulator impossible to build. The legacy compiler addressed the element
+//   correctly, so this was a stage4 divergence; buildPushTargetAddr now passes
+//   the slice value.

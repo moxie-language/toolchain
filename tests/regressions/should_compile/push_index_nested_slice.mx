@@ -1,0 +1,65 @@
+// Regression: the store-back for an indexed push target addressed the slice
+// variable instead of its element.
+//
+// push is an in-place mutation, so the SSA builder emits a store of the grown
+// header back into the argument's storage - without it a statement-form
+// push(x, v) silently drops the appended elements. For an INDEX target that
+// store computed the address wrongly: it passed the address of the slice
+// variable to IndexAddr, where the emitter expects the slice value (as
+// buildOperandAddr does for an assignment lvalue), so the address came out as
+// data + index*elemSize relative to the slice HEADER. `d[i] = push(d[i], v)`
+// therefore wrote the element's header over the outer slice: the directory
+// gained an entry and its element lengths scrambled on every call, and a
+// slice-of-slices accumulator could not be built at all.
+//
+// The legacy compiler addressed the element correctly, so this was a stage4
+// divergence. The fix passes the slice value, and this case pins the chunked
+// accumulator shape that exposed it.
+package main
+
+import "fmt"
+
+func main() {
+	// Grow a slice-of-slices one element at a time, in fixed-size chunks.
+	var d [][]byte
+	for i := 0; i < 6; i++ {
+		if len(d) == 0 || len(d[len(d)-1]) == 4 {
+			d = push(d, []byte{:0:4})
+		}
+		last := int32(len(d)) - 1
+		d[last] = push(d[last], byte('a'+i))
+	}
+	if len(d) != 2 {
+		panic("wrong chunk count: the push store-back clobbered the directory")
+	}
+	if len(d[0]) != 4 || len(d[1]) != 2 {
+		panic("wrong chunk lengths")
+	}
+	if string(d[0]) != "abcd" || string(d[1]) != "ef" {
+		panic("wrong chunk contents")
+	}
+
+	// The same shape one level deeper: a field holding a slice-of-slices,
+	// grown from a method on the outer type.
+	var h holder
+	h.add("aa")
+	h.add("bbb")
+	if len(h.rows) != 2 {
+		panic("wrong row count")
+	}
+	if string(h.rows[0]) != "aa" || string(h.rows[1]) != "bbb" {
+		panic("wrong row contents")
+	}
+
+	fmt.Println("ok")
+}
+
+type holder struct {
+	rows [][]byte
+}
+
+func (h *holder) add(s string) {
+	h.rows = push(h.rows, []byte{:0:4})
+	last := int32(len(h.rows)) - 1
+	h.rows[last] = push(h.rows[last], []byte(s)...)
+}

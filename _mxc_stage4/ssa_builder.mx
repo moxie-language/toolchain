@@ -4165,26 +4165,19 @@ func (fb *ssaFuncBuilder) buildPushTargetAddr(e syntax.Expr) (a SSAValue) {
 		if _, isMap := SafeUnderlying(base.SSAType()).(*TCMap); isMap {
 			return nil
 		}
-		var baseAddr SSAValue
-		if n, ok := lv.X.(*syntax.Name); ok {
-			obj := fb.lookupObject(n.Value)
-			if obj != nil {
-				if alloc, ok2 := fb.vars[obj]; ok2 {
-					baseAddr = alloc
-				} else if g2, ok3 := fb.fn.Pkg.Members[n.Value].(*SSAGlobal); ok3 {
-					baseAddr = g2
-				}
-			}
-		} else if sel, ok2 := lv.X.(*syntax.SelectorExpr); ok2 {
-			baseAddr = fb.buildSelectorAddr(sel)
-		}
-		if baseAddr != nil {
-			ia := &SSAIndexAddr{X: baseAddr, Index: idx}
-			ia.typ = NewPointer(ssaElemType(base.SSAType()))
-			ia.name = fb.nextName()
-			fb.emit(ia)
-			return ia
-		}
+		// IndexAddr takes the slice VALUE, exactly as buildOperandAddr does for
+		// an assignment lvalue: the emitter then addresses data+index*elemSize.
+		// This branch used to pass the ADDRESS of the slice variable instead,
+		// so the store-back of the grown header targeted the slice header
+		// itself rather than its element. `d[i] = push(d[i], v)` therefore
+		// overwrote the outer slice with the element's header - the directory
+		// gained an entry and its lengths scrambled on every call - and a
+		// slice-of-slices accumulator could not be built at all.
+		ia := &SSAIndexAddr{X: base, Index: idx}
+		ia.typ = NewPointer(ssaElemType(base.SSAType()))
+		ia.name = fb.nextName()
+		fb.emit(ia)
+		return ia
 	}
 	return nil
 }
