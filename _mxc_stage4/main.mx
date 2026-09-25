@@ -2141,6 +2141,12 @@ type resolver struct {
 	visited map[string]bool
 	order   []*pkgInfo
 	root    string
+	// rootPkg is the package the build was asked for. A dependency that
+	// resolves to nothing is skipped (builtin-only and optional packages rely
+	// on that), but the requested package resolving to nothing means the path
+	// does not exist - the legacy loader reports that as "cannot find package"
+	// and this compiler used to link a stub instead.
+	rootPkg string
 }
 
 func (r *resolver) walk(path string) {
@@ -2153,6 +2159,9 @@ func (r *resolver) walk(path string) {
 	}
 	pkg := discoverPkg(path, r.root)
 	if pkg == nil {
+		if path == r.rootPkg {
+			fatal("cannot find package " | path)
+		}
 		return
 	}
 	for _, imp := range pkg.imports {
@@ -2167,6 +2176,7 @@ func resolveAll(rootPkg string, root string) (ss []*pkgInfo) {
 		visited: map[string]bool{},
 		order:   []*pkgInfo{:0:64},
 		root:    root,
+		rootPkg: rootPkg,
 	}
 	r.walk(rootPkg)
 	return r.order
@@ -3329,7 +3339,8 @@ func cmdCacheWarm() {
 		}
 		pkg := discoverPkg(pkgPath, root)
 		if pkg == nil {
-			skipped++
+			mxutil.WriteStr(2, "  FAIL: " | pkgPath | " (cannot find package)\n")
+			failed++
 			continue
 		}
 		hash := pkgHash(pkg)
