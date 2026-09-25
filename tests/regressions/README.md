@@ -75,3 +75,12 @@
 //   accumulator impossible to build. The legacy compiler addressed the element
 //   correctly, so this was a stage4 divergence; buildPushTargetAddr now passes
 //   the slice value.
+//
+// slice_pop_resize.mx
+//   Bug: pop and resize panicked on every call. The stage4 emitters passed the
+//   overflow condition to runtime.slicePanic as an argument with no branch
+//   around the call, but the runtime panic entries are unconditional - they
+//   panic as soon as they are entered - so a valid pop() on a non-empty slice
+//   and a valid resize() within capacity both aborted. Legacy branches to a
+//   fault block and was correct. Both now call a runtime entry that performs
+//   the test itself (runtime.sliceCheckPop/sliceCheckResize).

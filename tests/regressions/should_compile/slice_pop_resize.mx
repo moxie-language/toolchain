@@ -1,0 +1,37 @@
+// Regression: pop and resize aborted on every call in a stage4 build.
+//
+// The emitters called runtime.slicePanic with the condition as an argument and
+// no branch around it, but the runtime panic entries are unconditional: they
+// panic the moment they are entered. So pop() on a non-empty slice and
+// resize() within capacity both aborted, while legacy - which branches to a
+// fault block - was correct. They now call runtime.sliceCheckPop and
+// runtime.sliceCheckResize, entries that carry the test themselves.
+package main
+
+import "fmt"
+
+func main() {
+	s := []int32{:3}
+	s[0] = 7
+	s[1] = 8
+	s[2] = 9
+	if x := pop(s); x != 9 {
+		panic("pop returned the wrong element")
+	}
+
+	t := []int32{:0:8}
+	t = resize(t, 5)
+	if len(t) != 5 {
+		panic("resize did not set the length")
+	}
+	t = push(t, int32(4))
+	if len(t) != 6 {
+		panic("push after resize")
+	}
+	t[5] = 11
+	if t[5] != 11 {
+		panic("resized tail is not writable")
+	}
+
+	fmt.Println("ok")
+}
