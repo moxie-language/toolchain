@@ -5258,11 +5258,20 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *syntax.FuncLit) (s SSAValue) {
 			} else if pfv2, ok28 := fb.freeVarPtrs[fv.name]; ok28 {
 				push(bindings, pfv2)
 			} else {
+				// No live slot for this captured name. Binding a nil pointer
+				// here produced a closure that called through a null captured
+				// value, and the program died at run time with "indirect call
+				// to null" in a frame unrelated to the capture (smesh's
+				// create-vault UI). Fail at compile time and name it.
+				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+				push(cctx.compileErrors, fb.fn.name | ": closure capture '" | fv.name | "' has no live slot")
 				push(bindings, &SSAConst{typ: NewPointer(fv.typ), val: nil})
 			}
 		} else if pfv, ok := fb.freeVarPtrs[fv.name]; ok {
 			push(bindings, pfv)
 		} else {
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, fb.fn.name | ": closure capture '" | fv.name | "' has no live slot")
 			push(bindings, &SSAConst{typ: NewPointer(fv.typ), val: nil})
 		}
 	}
@@ -5637,6 +5646,39 @@ func (fb *ssaFuncBuilder) getOrCreateFreeVar(name string, typ Type) (s SSAValue)
 		fb.freeVarPtrs = map[string]*SSAFreeVar{}
 	}
 	fb.freeVarPtrs[name] = fv
+	// Propagate the capture through every enclosing closure up to the frame
+	// that owns the name. A grandchild's reference used to stop here, so an
+	// intermediate closure held no slot for it and the make-closure binding
+	// built in that frame bound nil. The program then called through a null
+	// captured value and died with "indirect call to null" in a frame with no
+	// relation to the capture (smesh's create-vault UI; 50 such captures
+	// across the app). Inner closure bodies are built before the enclosing
+	// closure value is created, so adding to each frame here is in time for
+	// that frame's binding list.
+	for p := fb.parent; p != nil; p = p.parent {
+		if p.freeVarPtrs != nil {
+			if _, have := p.freeVarPtrs[name]; have {
+				break
+			}
+		}
+		owns := false
+		for pobj := range p.vars {
+			if ObjectName(pobj) == name {
+				owns = true
+				break
+			}
+		}
+		if owns {
+			break
+		}
+		pf := &SSAFreeVar{name: name, typ: typ, parent: p.fn}
+		p.fn.FreeVars = mxutil.Ensure(p.fn.FreeVars, 1)
+		push(p.fn.FreeVars, pf)
+		if p.freeVarPtrs == nil {
+			p.freeVarPtrs = map[string]*SSAFreeVar{}
+		}
+		p.freeVarPtrs[name] = pf
+	}
 	return fv
 }
 
