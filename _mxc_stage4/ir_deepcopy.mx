@@ -272,17 +272,46 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 	return true
 }
 
-func (e *irEmitter) emitSovereignEpilogue(llvmType string, val string) {
-	// Mark this call's batch dead; the receiver-rooted mark-compact at region
-	// exhaustion reclaims the dead blocks.
+// emitSovereignCleanup hands the receiver's borrowed data arena back, marking
+// this call's batch dead so the receiver-rooted mark-compact at region
+// exhaustion reclaims the dead blocks. EVERY return path out of a mutating
+// method on a sovereign receiver must run it: the borrow occupies a slot on the
+// runtime's fn-stack, and leaving it there keeps the group's arena marked
+// borrowed for the life of the process, which makes the group permanently
+// un-compactable - its arena then grows without bound, which is exactly what
+// the pending-compaction queue exists to prevent.
+func (e *irEmitter) emitSovereignCleanup() {
 	e.w("  call void @runtime.codecSovereignEndCall(ptr ") ; e.w(e.sovereignGroupReg) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.codecSovereignEndCall", "void", "ptr")
+	e.w("  call void @runtime.SovereignRegRestore(ptr null)\n")
+	e.declareRuntime("runtime.SovereignRegRestore", "void", "")
+	e.w("  call void @runtime.SovereignRestoreArena(ptr ") ; e.w(e.parentArenaReg) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.SovereignRestoreArena", "void", "ptr")
+}
 
-	if llvmType == "void" || e.curFunc.Signature.Results == nil || int32(e.curFunc.Signature.Results.Len()) == 0 {
+// emitArenaExit releases whatever arena this frame pushed, without relocating a
+// return value. Used by return paths that carry no value of their own - the
+// recover block of a function without named results. Mirrors legacy
+// emitArenaEpilogue's zero-result branch.
+func (e *irEmitter) emitArenaExit() {
+	if !e.arenaActive {
+		return
+	}
+	if e.arenaBorrowed {
+		e.emitSovereignCleanup()
+		return
+	}
+	if e.stableReg {
 		e.w("  call void @runtime.SovereignRegRestore(ptr null)\n")
 		e.declareRuntime("runtime.SovereignRegRestore", "void", "")
-		e.w("  call void @runtime.SovereignRestoreArena(ptr ") ; e.w(e.parentArenaReg) ; e.w(", ptr null)\n")
-		e.declareRuntime("runtime.SovereignRestoreArena", "void", "ptr")
+	}
+	e.w("  call void @runtime.FnArenaPopFree(ptr null)\n")
+	e.declareRuntime("runtime.FnArenaPopFree", "void", "")
+}
+
+func (e *irEmitter) emitSovereignEpilogue(llvmType string, val string) {
+	if llvmType == "void" || e.curFunc.Signature.Results == nil || int32(e.curFunc.Signature.Results.Len()) == 0 {
+		e.emitSovereignCleanup()
 		e.w("  ret void\n")
 		return
 	}

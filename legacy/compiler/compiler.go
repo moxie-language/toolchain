@@ -4127,7 +4127,20 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 		} else {
 			b.createRuntimeCall("FnArenaPopFree", nil, "")
 		}
-		b.CreateRetVoid()
+		if llvmType.TypeKind() == llvm.VoidTypeKind {
+			b.CreateRetVoid()
+		} else {
+			// A function whose declared result is non-void but whose return
+			// carries no SSA values: the recover block of a function without
+			// named results, reached because a panic unwound out of this frame.
+			// A bare ret void is invalid IR for a function returning a value,
+			// so return a zero of the result type. The arena was still handed
+			// back above, which is the point: a mutating method on a sovereign
+			// receiver must restore its borrowed data arena on this path or the
+			// borrow leaks for the life of the process and the group can never
+			// be compacted. Mirrors stage4 ir_emit.emitArenaExit.
+			b.CreateRet(llvm.ConstNull(llvmType))
+		}
 		return
 	}
 

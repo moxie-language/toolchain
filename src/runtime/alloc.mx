@@ -361,7 +361,7 @@ type sovGroup struct {
 	liveBytes  uintptr
 	allocBytes uintptr
 	batchMax   uintptr
-	escaped  bool
+	escaped  bool // an exterior holder was handed a stable pointer: never compact
 	released bool // group's arenas are freed; skip it in every scan
 	compacting bool // set during copy-compact: ArenaAlloc skips auto-record
 	recs  []*sovRecord // records in allocation order
@@ -369,6 +369,8 @@ type sovGroup struct {
 	batchStart []int32  // per-batch first-rec index stack (root lifetime)
 	slots []*sovSlot   // all slots ever allocated
 	ctxArena *Arena    // arena containing the receiver; group dies with it
+	queued      bool       // linked into the pending-compaction list
+	pendingNext *sovGroup  // next group queued for compaction
 }
 
 // sovRootAlloc grows a root-lifetime slice without disturbing the current
@@ -583,6 +585,84 @@ func sovGrowSlots(g *sovGroup) {
 	nb := unsafe.Slice((**sovSlot)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(&sovSlot{}))), nc)
 	copy(nb, g.slots)
 	g.slots = nb[:len(g.slots)]
+}
+
+// Pending compaction queue.
+//
+// The ratchet that used to copy-compact inline at every method boundary could
+// not relocate memory a live frame was holding, so it had to bail out and mark
+// the group escaped whenever the arena was borrowed or one of its receivers
+// had a method on the stack - and a single such bail-out disabled compaction
+// for that group forever. Queue instead: the ratchet only *marks* that the
+// group is under pressure, and SovDrainCompactions compacts it at a safe point
+// where no frame of those receivers can be live (an event loop's yield), which
+// is deterministic because the queue is insertion-ordered. Groups are linked
+// through themselves, so the queue needs no backing store of its own.
+//
+// A group is only compactable at a yield point outside every frame that
+// borrows it. The relay's event loop is therefore reachable only from
+// read-only methods of its sovereign types: a mutating method holds its
+// receiver's arena for its whole body, and an event loop is a body that never
+// returns, so a borrow taken there is never released and the group that owns
+// it can never be compacted. That is a property of the caller, not something
+// this queue can work around.
+var sovPendingHead *sovGroup
+var sovPendingTail *sovGroup
+
+// sovQueueCompact records that g has reached its pressure ratchet and should be
+// compacted at the next safe point. It deliberately does NOT test whether the
+// group is borrowed: the only caller is codecSovereignEndCall, which runs in
+// the epilogue of a method that has the group's own arena pushed as its working
+// frame, so that test is true by construction and would make this a no-op. The
+// borrow check belongs at the drain, which runs where no such frame is live.
+func sovQueueCompact(g *sovGroup) {
+	if g == nil || g.queued || g.escaped || g.released || g.compacting || g.data == nil {
+		return
+	}
+	g.queued = true
+	g.pendingNext = nil
+	if sovPendingTail == nil {
+		sovPendingHead = g
+		sovPendingTail = g
+		return
+	}
+	sovPendingTail.pendingNext = g
+	sovPendingTail = g
+}
+
+// SovDrainCompactions compacts up to budget queued groups and returns how many
+// it examined. Call it only at a safe point where no frame of the affected
+// receivers is live - the native event loop's yield, or the wasm host's
+// message-dispatch boundary - and from a frame that does not itself borrow a
+// sovereign arena, or the group belonging to that frame can never be reached.
+// Never mid-allocation.
+//
+// A group whose arena turns out to be borrowed is rotated to the tail rather
+// than dropped: it stays queued, so the next drain retries it, and the groups
+// behind it still make progress.
+func SovDrainCompactions(budget int32) (n int32) {
+	for n < budget {
+		g := sovPendingHead
+		if g == nil {
+			break
+		}
+		sovPendingHead = g.pendingNext
+		if sovPendingHead == nil {
+			sovPendingTail = nil
+		}
+		g.pendingNext = nil
+		g.queued = false
+		n++
+		if g.released || g.compacting || g.data == nil {
+			continue
+		}
+		if sovArenaBorrowed(g.data) || sovBorrowedReceiverIn(g) {
+			sovQueueCompact(g)
+			continue
+		}
+		codecSovereignCompact(g, 0)
+	}
+	return
 }
 
 // sovNewArena creates a fresh non-pooled arena of the given capacity.
@@ -1101,10 +1181,10 @@ func codecSovereignEndCall(g *sovGroup) {
 		if slack == 0 {
 			slack = da.regions[act].cap / 4
 			if da.regions[act].off+slack > da.regions[act].cap {
-				codecSovereignCompact(g, 0)
+				sovQueueCompact(g)
 			}
 		} else if g.allocBytes > g.liveBytes && da.regions[act].off+slack > da.regions[act].cap {
-			codecSovereignCompact(g, 0)
+			sovQueueCompact(g)
 		}
 	}
 }
@@ -1305,7 +1385,7 @@ func sovBorrowedReceiverIn(g *sovGroup) (ok bool) {
 // arena (live data shifted together at the front; tail becomes free),
 // rebuilding the allocation map and rewriting interior pointers.
 func codecSovereignCompact(g *sovGroup, needed uintptr) {
-	if g.escaped || g.compacting {
+	if g == nil || g.data == nil || g.escaped || g.compacting {
 		return
 	}
 	// A receiver inside this arena whose method is currently executing cannot be
@@ -1313,9 +1393,10 @@ func codecSovereignCompact(g *sovGroup, needed uintptr) {
 	// and the rebuild pass only rewrites references it can see (this group's
 	// records, the receiver's roots, the fn/stable/manual arena slots). Moving
 	// such a block would leave that frame on retired memory - the crash seen in
-	// the store's WAL replay. Treat it as escaped and grow the arena instead.
+	// the store's WAL replay. SovDrainCompactions tests for this before calling
+	// and leaves the group queued, so returning here means the caller skipped
+	// the test; it is not a permanent opt-out the way `escaped` is.
 	if sovArenaBorrowed(g.data) || sovBorrowedReceiverIn(g) {
-		g.escaped = true
 		return
 	}
 	g.compacting = true
