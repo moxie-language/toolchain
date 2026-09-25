@@ -2940,9 +2940,16 @@ func (e *irEmitter) emitIndexBoundsCheck(index, idxLLVM, lenReg string, lenConst
 	}
 	// A runtime call, not an inline branch: splitting a block here leaves the
 	// continuation as a new predecessor and every later PHI then names the
-	// wrong block.
-	e.w("  call void @runtime.lookupCheck(") ; e.w(cmpType) ; e.w(" ") ; e.w(cmpIdx) ; e.w(", ") ; e.w(lenOperand) ; e.w(", ptr null)\n")
-	e.declareRuntime("runtime.lookupCheck", "void", cmpType | ", " | cmpType)
+	// wrong block. A 64-bit index on a 32-bit target needs the uint64 entry:
+	// calling the uintptr one with an i64 argument is a type mismatch, and the
+	// wasm link answers a mismatched call with a stub that traps even when the
+	// index is in bounds.
+	check := "runtime.lookupCheck"
+	if w > pw {
+		check = "runtime.lookupCheck64"
+	}
+	e.w("  call void @") ; e.w(check) ; e.w("(") ; e.w(cmpType) ; e.w(" ") ; e.w(cmpIdx) ; e.w(", ") ; e.w(lenOperand) ; e.w(", ptr null)\n")
+	e.declareRuntime(check, "void", cmpType | ", " | cmpType)
 }
 
 func (e *irEmitter) emitIndexAddr(idx *SSAIndexAddr) {
