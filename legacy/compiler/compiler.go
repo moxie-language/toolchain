@@ -2704,8 +2704,15 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		// assumes index is a signed integer.
 		index = b.extendInteger(index, expr.Index.Type(), b.uintptrType)
 
-		// Bounds check.
-		b.createLookupBoundsCheck(buflen, index)
+		// Bounds check. Only an element load or store is checked: forming an
+		// address (unsafe.Pointer(&s[i]), passing &s[i] on) is pointer
+		// arithmetic, and the runtime's buffer cursors sit one past the end
+		// of a full buffer by design. An out-of-bounds *store* used to write
+		// into spare capacity and leave len unchanged, so the value silently
+		// vanished at the next push.
+		if addressIsElementAccess(expr) {
+			b.createLookupBoundsCheck(buflen, index)
+		}
 
 		switch expr.X.Type().Underlying().(type) {
 		case *types.Pointer:

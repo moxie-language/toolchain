@@ -1496,6 +1496,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		return
 	}
 	e.curFunc = f
+	markIndexAccesses(f)
 	e.arenaActive = false
 	e.arenaBorrowed = false
 	// Per-frame arena state must be cleared for every function: the prologue
@@ -2848,6 +2849,102 @@ func (e *irEmitter) emitFieldAddr(f *SSAFieldAddr) {
 	e.w("\n")
 }
 
+// markAddressAccess marks the IndexAddr at the root of an address chain as
+// element-accessed, following field and element links (out[i].f, out[i][j]).
+func markAddressAccess(v SSAValue) {
+	switch a := v.(type) {
+	case *SSAIndexAddr:
+		a.accessed = true
+		markAddressAccess(a.X)
+	case *SSAFieldAddr:
+		markAddressAccess(a.X)
+	}
+}
+
+// markIndexAccesses records every index address whose value is loaded or
+// stored. Address formation (unsafe.Pointer(&s[i]), passing &s[i] on) is
+// pointer arithmetic, and the runtime's buffer cursors sit one past the end of
+// a full buffer by design. Legacy checks exactly this set - see
+// addressIsElementAccess in legacy/compiler/asserts.go.
+func markIndexAccesses(f *SSAFunction) {
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			switch in := instr.(type) {
+			case *SSAUnOp:
+				if in.Op == OpMul {
+					markAddressAccess(in.X)
+				}
+			case *SSAStore:
+				markAddressAccess(in.Addr)
+			}
+		}
+	}
+}
+
+// llvmIntWidth returns the bit width of an LLVM integer type name ("i64").
+func llvmIntWidth(t string) (w int32) {
+	if len(t) < 2 || t[0] != 'i' {
+		return 0
+	}
+	for i := 1; i < len(t); i++ {
+		c := t[i]
+		if c < '0' || c > '9' {
+			return 0
+		}
+		w = w*10 + int32(c-'0')
+	}
+	return w
+}
+
+// emitIndexBoundsCheck traps when index is not below the length of the slice
+// or array being indexed. Moxie dropped index bounds checks, so an index store
+// past len wrote into spare capacity and left len unchanged: the value silently
+// vanished at the next push. A silent wrong answer is worse than a trap.
+// Mirrors legacy's createLookupBoundsCheck, including the
+// sign-extend-then-compare-unsigned so a negative index is caught too. The
+// comparison is done at the wider of the index width and the pointer width: a
+// 64-bit index on a 32-bit target must not be truncated, and a narrower index
+// is sign/zero-extended. lenReg is the length as an iptr register; when it is
+// empty lenConst is the compile-time length.
+func (e *irEmitter) emitIndexBoundsCheck(index, idxLLVM, lenReg string, lenConst int64, idxGo Type) {
+	ipt := e.intptrType()
+	pw := llvmIntWidth(ipt)
+	w := llvmIntWidth(idxLLVM)
+	if w == 0 {
+		w = pw
+	}
+	cmpIdx := index
+	if w < pw {
+		ext := "sext"
+		if b, ok := SafeUnderlying(idxGo).(*Basic); ok && b.Info&IsUnsigned != 0 {
+			ext = "zext"
+		}
+		cmpIdx = e.nextReg2("lb")
+		e.w("  ") ; e.w(cmpIdx) ; e.w(" = ") ; e.w(ext) ; e.w(" ") ; e.w(idxLLVM) ; e.w(" ") ; e.w(index) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+		w = pw
+	}
+	cmpType := "i" | irItoa(w)
+	var lenOperand string
+	if lenReg != "" {
+		if w > pw {
+			// A length never exceeds the address space, so zero-extending it
+			// is exact and keeps a huge index out of range.
+			wide := e.nextReg2("lb")
+			e.w("  ") ; e.w(wide) ; e.w(" = zext ") ; e.w(ipt) ; e.w(" ") ; e.w(lenReg) ; e.w(" to ") ; e.w(cmpType) ; e.w("\n")
+			lenOperand = cmpType | " " | wide
+		} else {
+			lenOperand = cmpType | " " | lenReg
+		}
+	} else {
+		lenOperand = cmpType | " " | irItoa64(lenConst)
+	}
+	// A runtime call, not an inline branch: splitting a block here leaves the
+	// continuation as a new predecessor and every later PHI then names the
+	// wrong block.
+	e.w("  call void @runtime.lookupCheck(") ; e.w(cmpType) ; e.w(" ") ; e.w(cmpIdx) ; e.w(", ") ; e.w(lenOperand) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.lookupCheck", "void", cmpType | ", " | cmpType)
+}
+
 func (e *irEmitter) emitIndexAddr(idx *SSAIndexAddr) {
 	reg := e.regName(idx)
 	elemType := e.llvmType(idx.SSAType())
@@ -2912,6 +3009,11 @@ func (e *irEmitter) emitIndexAddr(idx *SSAIndexAddr) {
 		e.w(" ")
 		e.w(base)
 		e.w(", 0\n")
+		if idx.accessed {
+			lenReg := e.nextReg2("lb")
+			e.w("  ") ; e.w(lenReg) ; e.w(" = extractvalue ") ; e.w(e.sliceType()) ; e.w(" ") ; e.w(base) ; e.w(", 1\n")
+			e.emitIndexBoundsCheck(index, idxType, lenReg, 0, idx.Index.SSAType())
+		}
 		e.w("  ")
 		e.w(reg)
 		e.w(" = getelementptr inbounds ")
@@ -2953,6 +3055,10 @@ func (e *irEmitter) emitIndexAddr(idx *SSAIndexAddr) {
 				isArray = true
 				e.allocTypes[idx.X] = at
 				allocBase := e.operand(load.X)
+				nArr, okArr := arrayTypeLen(at)
+				if idx.accessed && okArr && nArr > 0 {
+					e.emitIndexBoundsCheck(index, idxType, "", nArr, idx.Index.SSAType())
+				}
 				e.w("  ") ; e.w(reg) ; e.w(" = getelementptr inbounds ")
 				e.w(at) ; e.w(", ptr ") ; e.w(allocBase) ; e.w(", i32 0, ")
 				e.w(e.llvmType(idx.Index.SSAType())) ; e.w(" ") ; e.w(index) ; e.w("\n")
@@ -2975,6 +3081,10 @@ func (e *irEmitter) emitIndexAddr(idx *SSAIndexAddr) {
 		_, isGlobal := idx.X.(*SSAGlobal)
 		_, isAlloc := idx.X.(*SSAAlloc)
 		_, isFieldAddr := idx.X.(*SSAFieldAddr)
+		nArr, okArr := arrayTypeLen(arrType)
+		if idx.accessed && okArr && nArr > 0 {
+			e.emitIndexBoundsCheck(index, idxType, "", nArr, idx.Index.SSAType())
+		}
 		if isGlobal || isAlloc || isFieldAddr {
 			_ = arr
 			e.w("  ") ; e.w(reg) ; e.w(" = getelementptr inbounds ")

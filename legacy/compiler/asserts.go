@@ -12,14 +12,56 @@ import (
 	"tinygo.org/x/go-llvm"
 )
 
+// addressIsElementAccess reports whether an address is used to load or store
+// an element, directly or through a field/element chain (out[i].f = v). Only
+// then is an index bounds check required: forming an address is pointer
+// arithmetic and is deliberately unchecked.
+func addressIsElementAccess(v ssa.Value) bool {
+	for _, ref := range *v.Referrers() {
+		switch ref := ref.(type) {
+		case *ssa.UnOp:
+			// A load is a dereference (token.MUL) of the address.
+			if ref.Op == token.MUL {
+				return true
+			}
+		case *ssa.Store:
+			return true
+		case *ssa.FieldAddr:
+			if addressIsElementAccess(ref) {
+				return true
+			}
+		case *ssa.IndexAddr:
+			if addressIsElementAccess(ref) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // createLookupBoundsCheck emits a bounds check before doing a lookup into a
 // slice. This is required by the Go language spec: an index out of bounds must
 // cause a panic.
 // The caller should make sure that index is at least as big as arrayLen.
 func (b *builder) createLookupBoundsCheck(arrayLen, index llvm.Value) {
-	// Moxie: no bounds checks. The programmer is responsible for ensuring
-	// indices are within bounds. This function is kept as a no-op to avoid
-	// changing all the call sites.
+	if b.info.nobounds {
+		// The //go:nobounds pragma was added to the function to avoid bounds
+		// checking.
+		return
+	}
+
+	// Both operands are unsigned: the caller has already sign-extended a
+	// signed index, so a negative index compares as a very large unsigned
+	// value and is caught by the same test.
+	if arrayLen.Type().IntTypeWidth() < index.Type().IntTypeWidth() {
+		arrayLen = b.CreateZExt(arrayLen, index.Type(), "")
+	}
+
+	// Moxie: an index store into slice capacity past len used to write
+	// silently and leave len unchanged, so the value vanished on the next
+	// push. A silent wrong answer is worse than a trap: fail loud.
+	outOfBounds := b.CreateICmp(llvm.IntUGE, index, arrayLen, "")
+	b.createRuntimeAssert(outOfBounds, "lookup", "lookupPanic")
 }
 
 // createSliceBoundsCheck emits a bounds check before a slicing operation to make
