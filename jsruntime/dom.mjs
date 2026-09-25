@@ -496,6 +496,12 @@ export function RegisterCallback(fn) {
   return id;
 }
 
+// Counts for the instrumentation hooks the wasm host exposes as
+// window.__moxie_element_count / window.__moxie_callback_count, used by the
+// memory tests. Tracked maps are the same ones the release paths drain.
+export function ElementCount() { return _elements.size; }
+export function CallbackCount() { return _callbacks.size; }
+
 export function ReleaseCallback(id) {
   _callbacks.delete(id);
 }
