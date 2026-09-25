@@ -1075,13 +1075,29 @@ func codecSovereignEndCall(g *sovGroup) {
 	if batchBytes > g.batchMax {
 		g.batchMax = batchBytes
 	}
-	// Ratchet: when dead space has accumulated and the next batch would
-	// overflow the data arena, copy-compact at this safe method boundary
-	// instead of growing regions. Never mid-allocation.
-	if !g.compacting && g.allocBytes > g.liveBytes {
+	// Ratchet: when the next batch would overflow the data arena, copy-compact
+	// at this safe method boundary instead of growing regions. Never
+	// mid-allocation. Compaction recomputes liveness itself (sovFullMark), so
+	// this only has to decide when the arena is under pressure.
+	//
+	// A receiver whose allocations are not bracketed by a method batch
+	// (codecSovereignEnter/EndCall) never gets batch accounting, so
+	// liveBytes only ever grows: `allocBytes > liveBytes` can never become
+	// true and compaction could never run. Its record table then doubled
+	// until the 2^27 guard aborted the process with "sovereign allocation map
+	// overflow: compaction did not reclaim records" - the relay, minutes after
+	// start, with live == alloc. Such a group compacts on region pressure
+	// alone.
+	if !g.compacting {
 		da := g.data
 		act := da.nregions - 1
-		if da.regions[act].off+2*g.batchMax > da.regions[act].cap {
+		slack := 2 * g.batchMax
+		if slack == 0 {
+			slack = da.regions[act].cap / 4
+			if da.regions[act].off+slack > da.regions[act].cap {
+				codecSovereignCompact(g, 0)
+			}
+		} else if g.allocBytes > g.liveBytes && da.regions[act].off+slack > da.regions[act].cap {
 			codecSovereignCompact(g, 0)
 		}
 	}
