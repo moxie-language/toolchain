@@ -5262,6 +5262,12 @@ func main() {
 	// write every mxh to the cache before the first emission, so dispatch
 	// enumerates the whole link set: serial emission reads the accumulated
 	// registry directly, workers load every mxh at startup.
+	byPathAll := map[string]*pkgInfo{}
+	for _, p := range pkgs {
+		byPathAll[p.path] = p
+		byPathAll[dispPkgKey(p)] = p
+	}
+	importsLoaded := map[string]bool{}
 	for _, pkg := range pkgs {
 		if pkg.baked {
 			continue
@@ -5287,6 +5293,23 @@ func main() {
 			// read anyway: this is the index findIfaceImpls consults to skip
 			// packages that cannot implement the method being dispatched.
 			if data, dok := mxutil.ReadFile(cachedMxh); dok {
+				// Load this package's direct imports first. A descriptor names
+				// types from their packages, and an unresolved qualifier
+				// degrades to int32: crypto's `method Hash New ->hash.Hash`
+				// became crypto.Hash (int32) because hash was skipped here as
+				// tier 2, and every importer then declared an i32 return
+				// (LLVM: extractvalue {i64, ptr} on i32).
+				for _, imp := range pkg.imports {
+					ip := byPathAll[imp]
+					if ip == nil || ip.baked || importsLoaded[imp] {
+						continue
+					}
+					importsLoaded[imp] = true
+					ih := pkgHash(ip)
+					if idata, iok := mxutil.ReadFile(cachedMxhPath(cacheBase, ip.path, ih, ip.version)); iok {
+						loadMxhData(idata)
+					}
+				}
 				if cctx.dispMethodsByPkg == nil {
 					cctx.dispMethodsByPkg = map[string]map[string]bool{}
 				}

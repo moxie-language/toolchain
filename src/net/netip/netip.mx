@@ -12,6 +12,7 @@
 package netip
 
 import (
+	"runtime"
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"cmp"
 	"errors"
@@ -73,8 +74,17 @@ var (
 
 func netipInit() {
 	if z4 != nil { return }
+	// The sentinels are compared against and dereferenced for the life of the
+	// process (Zone reads ip.z.zoneV6), so they must live in a durable arena.
+	// Allocated in whatever arena the first caller happened to have current,
+	// they dangled once that frame returned: net.ParseIP -> netip.Addr.Zone
+	// read a freed addrDetail (SIGSEGV inside (*Addr).Zone) on the relay's
+	// proxy dial path.
+	prev := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
 	z4 = &addrDetail{}
 	z6noz = &addrDetail{isV6: true}
+	runtime.SetCurrentArena(prev)
 }
 
 // IPv6LinkLocalAllNodes returns the IPv6 link-local all nodes multicast
