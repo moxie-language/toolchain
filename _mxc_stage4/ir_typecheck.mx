@@ -103,54 +103,73 @@ func initCompileCtx() {
 // elimination - avoids parsing/type-checking thousands of unreferenced
 // constants (e.g., syscall error tables).
 func stripUnusedConsts(src []byte) (out []byte) {
-	// Pass 1: collect all identifier-like tokens from the source.
-	// Simple byte scan - not a real tokenizer, just word boundaries.
-	refs := map[string]bool{}
+	// Pass 1: scan function bodies for references. Constants that appear
+	// only in const blocks and in no function body are dead. This used to
+	// first build a map of every identifier in the source; nothing read it.
 	i := int32(0)
-	for i < len(src) {
-		if isIdentStart(src[i]) {
-			j := i + 1
-			for j < len(src) && isIdentCont(src[j]) {
-				j++
-			}
-			refs[string(src[i:j])] = true
-			i = j
-		} else {
-			i++
-		}
-	}
-	// Pass 2: scan for const blocks. If a const name appears only in its
-	// own declaration (count == 1 in refs - the declaration itself), skip it.
-	// But refs counts ALL occurrences including the declaration. A truly
-	// unused const appears exactly once (its declaration). Since our refs
-	// map is boolean (present/absent), we can't count. Instead: collect
-	// const names, remove them from refs, then check if they're still in refs.
-	// Actually simpler: scan function bodies for references. Constants
-	// only in const blocks but not in func bodies are dead.
 	funcRefs := map[string]bool{}
 	inFunc := false
 	depth := int32(0)
-	i = 0
 	for i < len(src) {
-		if !inFunc && i+4 < len(src) && src[i] == 'f' && src[i+1] == 'u' && src[i+2] == 'n' && src[i+3] == 'c' && !isIdentCont(src[i+4]) {
+		// A brace inside a string, rune literal or comment is not structure,
+		// and one stray '}' is enough to break the rest of the scan: depth
+		// goes negative, `depth == 0` never fires again, inFunc stays set and
+		// every later function body stops contributing references. json.mx
+		// has bytes('{') once and '}' twice, so any file order that put it
+		// before a const's users stripped that const as unused.
+		c := src[i]
+		if c == '"' || c == '\'' || c == '`' {
+			i++
+			for i < len(src) {
+				if c != '`' && src[i] == '\\' {
+					i += 2
+					continue
+				}
+				if src[i] == c {
+					i++
+					break
+				}
+				if c != '`' && src[i] == '\n' {
+					break
+				}
+				i++
+			}
+			continue
+		}
+		if c == '/' && i+1 < len(src) && src[i+1] == '/' {
+			for i < len(src) && src[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if c == '/' && i+1 < len(src) && src[i+1] == '*' {
+			i += 2
+			for i+1 < len(src) && !(src[i] == '*' && src[i+1] == '/') {
+				i++
+			}
+			i += 2
+			continue
+		}
+		if !inFunc && i+4 < len(src) && c == 'f' && src[i+1] == 'u' && src[i+2] == 'n' && src[i+3] == 'c' && !isIdentCont(src[i+4]) {
 			inFunc = true
 			i += 4
 			continue
 		}
-		if src[i] == '{' {
+		if c == '{' {
 			depth++
 			i++
 			continue
 		}
-		if src[i] == '}' {
+		if c == '}' {
 			depth--
-			if depth == 0 {
+			if depth <= 0 {
+				depth = 0
 				inFunc = false
 			}
 			i++
 			continue
 		}
-		if inFunc && depth > 0 && isIdentStart(src[i]) {
+		if inFunc && depth > 0 && isIdentStart(c) {
 			j := i + 1
 			for j < len(src) && isIdentCont(src[j]) {
 				j++
@@ -161,7 +180,7 @@ func stripUnusedConsts(src []byte) (out []byte) {
 		}
 		i++
 	}
-	// Pass 3: collect identifiers from const declaration values, so a
+	// Pass 2: collect identifiers from const declaration values, so a
 	// const referenced only by another const's initializer (e.g.
 	// `const UintSize = uintSize`) is not stripped as unused. Such
 	// const-to-const references keep the referenced const alive.
@@ -201,7 +220,7 @@ func stripUnusedConsts(src []byte) (out []byte) {
 		}
 	}
 
-	// Pass 4: filter const declarations. Keep only those whose names
+	// Pass 3: filter const declarations. Keep only those whose names
 	// appear in funcRefs. Scan for "const " or "const(" patterns.
 	// For simplicity, only strip individual const lines (not grouped).
 	// This handles the bulk of zerrors/zsysnum generated constants.
