@@ -399,7 +399,15 @@ func compilerHash() (s string) {
 		mxutil.JoinPath(srcRoot, "_mxc_stage4"),
 		mxutil.JoinPath(mxutil.JoinPath(srcRoot, "src"), "runtime"),
 	}
-	var acc []byte
+	// Read every source once, then concatenate into one exactly-sized buffer.
+	// `acc = acc | data` in the read loop allocated a fresh accumulator per
+	// file and left every intermediate in the arena: with the compiler's
+	// sources that was ~90MB of garbage retained for the process's lifetime
+	// (compilerHash is called once, from the cache-dir path, before any
+	// package work). The concatenation is byte-identical to the previous
+	// result, so cache keys are unchanged.
+	var parts [][]byte
+	total := int32(0)
 	for _, dir := range dirs {
 		files := listFiles(dir, ".mx")
 		for i := int32(1); i < int32(len(files)); i++ {
@@ -409,13 +417,21 @@ func compilerHash() (s string) {
 		}
 		for _, f := range files {
 			if data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, f)); ok {
-				acc = acc | data
+				parts = mxutil.Ensure(parts, 1)
+				parts = push(parts, data)
+				total += int32(len(data))
 			}
 		}
 	}
-	if len(acc) == 0 {
+	if total == 0 {
 		bst.selfHash = "unknown"
 		return bst.selfHash
+	}
+	acc := []byte{:total}
+	off := int32(0)
+	for _, part := range parts {
+		copy(acc[off:], part)
+		off += int32(len(part))
 	}
 	bst.selfHash = fnvHash(acc)
 	return bst.selfHash
