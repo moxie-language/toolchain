@@ -6,195 +6,11 @@ import (
 	"git.smesh.lol/moxie/pkg/token"
 )
 
-func (c *Checker) checkConstGroup(decls []*syntax.ConstDecl) {
-	var prevType syntax.Expr
-	var prevValues syntax.Expr
-	for i, d := range decls {
-		typ := d.Type
-		vals := d.Values
-		if vals == nil {
-			typ = prevType
-			vals = prevValues
-		} else {
-			prevType = typ
-			prevValues = vals
-		}
-		c.checkConstDeclAt(d, typ, vals, int64(i))
-	}
-}
 
-func (c *Checker) checkConstDeclAt(d *syntax.ConstDecl, typExpr syntax.Expr, valExpr syntax.Expr, iotaVal int64) {
-	var typ Type
-	if typExpr != nil {
-		typ = c.resolveTypeExpr(typExpr)
-	}
 
-	var vals []ConstVal
-	if valExpr != nil {
-		vals = c.evalConstExprList(valExpr, iotaVal)
-	}
 
-	// When no explicit type and the value is a type conversion (CallExpr
-	// with a type name as Fun), infer the type from the conversion target.
-	// e.g. const EOF = errors.Const("EOF") -> type is errors.Const
-	var inferredTypes []Type
-	if typ == nil && valExpr != nil {
-		inferredTypes = c.inferConstTypeList(valExpr)
-	}
 
-	for i, name := range d.NameList {
-		if name.Value == "_" {
-			continue
-		}
-		obj, ok := c.pkg.Scope.Lookup(name.Value).(*TCConst)
-		if !ok {
-			continue
-		}
-		var cv ConstVal
-		if i < len(vals) {
-			cv = vals[i]
-		}
-		obj.Val = cv
-		if typ != nil {
-			obj.Typ = typ
-		} else if i < len(inferredTypes) && inferredTypes[i] != nil {
-			obj.Typ = inferredTypes[i]
-		} else if cv != nil {
-			obj.Typ = UntypedTypeOfCV(cv)
-		}
-		if c.info != nil {
-			c.info.Defs[name] = obj
-		}
-	}
-}
 
-func (c *Checker) inferConstTypeList(e syntax.Expr) (ts []Type) {
-	if l, ok := e.(*syntax.ListExpr); ok {
-		var out []Type
-		for _, el := range l.ElemList {
-			out = mxutil.Ensure(out, 1)
-			push(out, c.inferConstType(el))
-		}
-		return out
-	}
-	return []Type{c.inferConstType(e)}
-}
-
-func (c *Checker) inferConstType(e syntax.Expr) (t Type) {
-	if e == nil {
-		return nil
-	}
-	ce, ok := e.(*syntax.CallExpr)
-	if !ok {
-		return nil
-	}
-	if len(ce.ArgList) != 1 {
-		return nil
-	}
-	return c.resolveTypeExpr(ce.Fun)
-}
-
-func (c *Checker) evalConstExprList(e syntax.Expr, iotaVal int64) (cs []ConstVal) {
-	if l, ok := e.(*syntax.ListExpr); ok {
-		var out []ConstVal
-		for _, el := range l.ElemList {
-			cv := c.evalConst(el, iotaVal)
-			out = mxutil.Ensure(out, 1)
-			push(out, cv)
-		}
-		return out
-	}
-	v := c.evalConst(e, iotaVal)
-	return []ConstVal{v}
-}
-
-func (c *Checker) evalConst(e syntax.Expr, iotaVal int64) (cv ConstVal) {
-	if e == nil {
-		return nil
-	}
-	switch ex := e.(type) {
-	case *syntax.BasicLit:
-		return EvalBasicLitLocal(ex)
-	case *syntax.Name:
-		if ex.Value == "iota" {
-			return &ConstInt{V:iotaVal}
-		}
-		var obj Object
-		if c.localScope != nil {
-			_, obj = c.localScope.LookupParent(ex.Value)
-		}
-		if obj == nil {
-			_, obj = c.lookup(ex.Value, c.pkg.Scope)
-		}
-		if obj == nil {
-			mxutil.WriteStr(2, "  CONST-LOOKUP-FAIL name=" | ex.Value | " pkg=" | c.pkg.Path | "\n")
-			return nil
-		}
-		if k, matched := obj.(*TCConst); matched {
-			if k.Val == nil {
-				mxutil.WriteStr(2, "  CONST-REF-NIL name=" | ex.Value | " pkg=" | c.pkg.Path | "\n")
-			}
-			return k.Val
-		}
-		return nil
-	case *syntax.SelectorExpr:
-		if pkgName, matched := ex.X.(*syntax.Name); matched {
-			if _, imp := c.lookupType(pkgName.Value); imp != nil {
-				if pn, ok2 := imp.(*PkgName); ok2 && pn.Imported != nil {
-					if obj := pn.Imported.Scope.Lookup(ex.Sel.Value); obj != nil {
-						if k, ok3 := obj.(*TCConst); ok3 {
-							return k.Val
-						}
-					}
-				}
-			}
-		}
-		return nil
-	case *syntax.Operation:
-		return c.evalConstOp(ex, iotaVal)
-	case *syntax.ParenExpr:
-		return c.evalConst(ex.X, iotaVal)
-	case *syntax.CallExpr:
-		if id, matched := ex.Fun.(*syntax.Name); matched && id.Value == "len" && len(ex.ArgList) == 1 {
-			if lit, matched2 := ex.ArgList[0].(*syntax.BasicLit); matched2 && lit.Kind == token.StringLit {
-				lv := EvalBasicLitLocal(lit)
-				if cs2, matched3 := lv.(*ConstStr); matched3 {
-					return &ConstInt{V:int64(len(cs2.S))}
-				}
-			}
-			lenArg := c.evalConst(ex.ArgList[0], iotaVal)
-			if cs2, matched2 := lenArg.(*ConstStr); matched2 {
-				return &ConstInt{V:int64(len(cs2.S))}
-			}
-		}
-		if sel, matched := ex.Fun.(*syntax.SelectorExpr); matched {
-			if pkg, matched2 := sel.X.(*syntax.Name); matched2 && pkg.Value == "unsafe" {
-				switch sel.Sel.Value {
-				case "Sizeof", "Alignof", "Offsetof":
-					return &ConstInt{V:8}
-				}
-			}
-		}
-		if len(ex.ArgList) != 1 {
-			return nil
-		}
-		arg := c.evalConst(ex.ArgList[0], iotaVal)
-		if arg == nil {
-			return nil
-		}
-		targetType := c.resolveTypeExpr(ex.Fun)
-		if targetType == nil {
-			funName := "?"
-			if id, ok2 := ex.Fun.(*syntax.Name); ok2 {
-				funName = id.Value
-			}
-			mxutil.WriteStr(2, "  CONST-CONV-FAIL fun=" | funName | " pkg=" | c.pkg.Path | "\n")
-			return nil
-		}
-		return ConvertConstLocal(arg, targetType)
-	}
-	return nil
-}
 
 func EvalBasicLitLocal(e *syntax.BasicLit) (c ConstVal) {
 	switch e.Kind {
@@ -487,35 +303,6 @@ func appendRuneUTF8(buf []byte, r rune) (buf2 []byte) {
 	return buf
 }
 
-func (c *Checker) evalConstOp(e *syntax.Operation, iotaVal int64) (cv ConstVal) {
-	if e.Y == nil {
-		xu := c.evalConst(e.X, iotaVal)
-		if xu == nil {
-			mxutil.WriteStr(2, "  CONSTOP-UNARY-NIL-X pkg=" | c.pkg.Path | "\n")
-			return nil
-		}
-		r := EvalUnaryLocal(e.Op, xu)
-		if r == nil {
-			mxutil.WriteStr(2, "  CONSTOP-UNARY-NIL-R pkg=" | c.pkg.Path | " x=" | xu.String() | "\n")
-		}
-		// ^x on a typed operand must be masked to the operand's width: the
-		// arbitrary-precision result (-x-1) is only correct for untyped
-		// constants.  Without this, uint64(^someUint32Const) sign-extends
-		// the stored negative value to 0xffffffffXXXXXXXX.
-		if r != nil && e.Op == token.Xor {
-			if b := c.constExprBasic(e.X); b != nil {
-				r = MaskConstToBasic(r, b)
-			}
-		}
-		return r
-	}
-	x := c.evalConst(e.X, iotaVal)
-	y := c.evalConst(e.Y, iotaVal)
-	if x == nil || y == nil {
-		return nil
-	}
-	return EvalBinaryLocal(e.Op, x, y)
-}
 
 func EvalUnaryLocal(op token.Operator, x ConstVal) (c ConstVal) {
 	switch op {
@@ -739,53 +526,6 @@ func MaskConstToBasic(v ConstVal, b *Basic) (c ConstVal) {
 // constExprBasic resolves the basic type of a constant expression, used to
 // apply width masking to typed constant operations.  Returns nil when the
 // type cannot be determined (untyped literals and untracked forms).
-func (c *Checker) constExprBasic(e syntax.Expr) (b *Basic) {
-	switch ex := e.(type) {
-	case *syntax.Name:
-		var obj Object
-		if c.localScope != nil {
-			_, obj = c.localScope.LookupParent(ex.Value)
-		}
-		if obj == nil {
-			_, obj = c.lookup(ex.Value, c.pkg.Scope)
-		}
-		if k, matched := obj.(*TCConst); matched && k.Typ != nil {
-			if bb, matched2 := SafeUnderlying(k.Typ).(*Basic); matched2 {
-				return bb
-			}
-		}
-	case *syntax.SelectorExpr:
-		if pkgName, matched := ex.X.(*syntax.Name); matched {
-			if _, imp := c.lookupType(pkgName.Value); imp != nil {
-				if pn, matched2 := imp.(*PkgName); matched2 && pn.Imported != nil {
-					if obj := pn.Imported.Scope.Lookup(ex.Sel.Value); obj != nil {
-						if k, matched3 := obj.(*TCConst); matched3 && k.Typ != nil {
-							if bb, matched4 := SafeUnderlying(k.Typ).(*Basic); matched4 {
-								return bb
-							}
-						}
-					}
-				}
-			}
-		}
-	case *syntax.ParenExpr:
-		return c.constExprBasic(ex.X)
-	case *syntax.CallExpr:
-		if t := c.resolveTypeExpr(ex.Fun); t != nil {
-			if bb, matched := SafeUnderlying(t).(*Basic); matched {
-				return bb
-			}
-		}
-	case *syntax.Operation:
-		if bb := c.constExprBasic(ex.X); bb != nil && bb.Info&IsUntyped == 0 {
-			return bb
-		}
-		if ex.Y != nil {
-			return c.constExprBasic(ex.Y)
-		}
-	}
-	return nil
-}
 
 func UntypedTypeOfCV(v ConstVal) (t Type) {
 	switch cvKind(v) {
@@ -827,18 +567,7 @@ func constInt64CV(v ConstVal) (n int64, valid bool) {
 	return 0, false
 }
 
-func (c *Checker) IsConstExpr(e syntax.Expr) (ok bool) {
-	return c.evalConst(e, 0) != nil
-}
 
-func (c *Checker) evalArrayLen(e syntax.Expr) (n int64) {
-	v := c.evalConst(e, 0)
-	if v == nil {
-		return 0
-	}
-	n, _ = constInt64CV(v)
-	return n
-}
 
 func cvInt(v ConstVal) (n int64) {
 	if ci, ok := v.(*ConstInt); ok {
