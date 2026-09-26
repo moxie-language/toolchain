@@ -1,0 +1,166 @@
+//:build alloc_trace
+
+package runtime
+
+import (
+	"unsafe"
+)
+
+// Per-site allocation instrumentation for -print-allocs.
+//
+// The compiler emits a logAlloc(siteID, size) call immediately before every
+// arena allocation in a function matched by -print-allocs, and writes a side
+// file mapping each siteID to the function it came from. Counting here is how
+// an instrumented build reports which source sites actually allocate.
+//
+// The whole file is selected by the alloc_trace tag, so a build that does not
+// ask for instrumentation carries neither the tables nor the exported
+// readers - alloc_trace_off.mx supplies the no-op logAlloc instead.
+
+// maxAllocSites bounds the tables. -print-allocs numbers one site per matching
+// allocation, so this only has to exceed the number of distinct matched sites
+// in one build.
+const maxAllocSites = int32(8192)
+
+// The tables are slices, not arrays: Moxie has no arrays. They are allocated
+// from the ROOT arena on the first logAlloc call rather than in init(), so a
+// build that never calls logAlloc never pays for them, and the root arena
+// outlives every function frame (a frame arena is released at return).
+var allocCounters []uint64
+var allocSizes []uint64
+var numAllocSites int32
+
+func allocTraceTables() {
+	if allocCounters != nil {
+		return
+	}
+	a := RootArena()
+	if a == nil {
+		return
+	}
+	bytes := uintptr(maxAllocSites) * 8
+	allocCounters = rawSliceU64(uintptr(ArenaAlloc(a, bytes)), maxAllocSites)
+	allocSizes = rawSliceU64(uintptr(ArenaAlloc(a, bytes)), maxAllocSites)
+}
+
+//:noinline
+func logAlloc(siteID int32, size uintptr) {
+	if siteID < 0 || siteID >= maxAllocSites {
+		return
+	}
+	allocTraceTables()
+	if allocCounters == nil {
+		return
+	}
+	allocCounters[siteID]++
+	allocSizes[siteID] += uint64(size)
+	if siteID >= numAllocSites {
+		numAllocSites = siteID + 1
+	}
+}
+
+// PrintAllocCounters writes one line per site that recorded an allocation:
+// the site id, the call count and the total bytes. The compiler's
+// <output>.alloc_sites.json maps the id to "pkg.Func@where". A wasm host
+// instead reads the tables through the exported pointers below.
+func PrintAllocCounters() {
+	for i := int32(0); i < numAllocSites; i++ {
+		if allocCounters[i] == 0 {
+			continue
+		}
+		allocTracePuts("allocsite ")
+		allocTraceU64(uint64(i))
+		allocTracePuts(" count=")
+		allocTraceU64(allocCounters[i])
+		allocTracePuts(" bytes=")
+		allocTraceU64(allocSizes[i])
+		allocTracePuts("\n")
+	}
+}
+
+func allocTracePuts(s string) {
+	if len(s) == 0 {
+		return
+	}
+	MoxieWrite(2, unsafe.Pointer(&([]byte(s))[0]), int32(len(s)))
+}
+
+func allocTraceU64(v uint64) {
+	buf := []byte{:24}
+	i := int32(24)
+	if v == 0 {
+		i--
+		buf[i] = '0'
+	}
+	for v > 0 {
+		i--
+		buf[i] = byte(v%10) + '0'
+		v = v / 10
+	}
+	MoxieWrite(2, unsafe.Pointer(&buf[i]), 24-i)
+}
+
+// --- exported readers, used by the wasm memory-profile host ---
+
+//export __moxie_alloc_counters_ptr
+func allocCountersPtr() (p uintptr) {
+	if allocCounters == nil {
+		return 0
+	}
+	return uintptr(unsafe.Pointer(&allocCounters[0]))
+}
+
+//export __moxie_alloc_sizes_ptr
+func allocSizesPtr() (p uintptr) {
+	if allocSizes == nil {
+		return 0
+	}
+	return uintptr(unsafe.Pointer(&allocSizes[0]))
+}
+
+//export __moxie_alloc_n_sites
+func allocNSites() (n int32) {
+	return numAllocSites
+}
+
+//export __moxie_total_alloc
+func allocTotalAlloc() (n uint64) {
+	return totalAlloc
+}
+
+//export __moxie_mallocs
+func allocMallocs() (n uint64) {
+	return mallocs
+}
+
+// allocHeapPtr reports the bytes handed out in the arenas on the current
+// function arena stack - the live working set. There is no single heap break
+// in the arena model, and the OS-committed size is a reservation (the root
+// arena maps its full capacity up front), so the used offsets are the
+// meaningful quantity.
+//
+//export __moxie_heap_ptr
+func allocHeapPtr() (n uintptr) {
+	if domainRoot == nil {
+		return 0
+	}
+	for i := int32(0); i <= domainRoot.fnTop; i++ {
+		n += allocArenaUsed(domainRoot.fnStack[i])
+	}
+	return n
+}
+
+func allocArenaUsed(a *Arena) (n uintptr) {
+	if a == nil {
+		return 0
+	}
+	for i := int32(0); i < a.nregions; i++ {
+		n += a.regions[i].off
+	}
+	// Region 0's offset starts past the arena header and the region registry.
+	ov := arenaHeaderSize() + arenaDataOffset()
+	if n >= ov {
+		n -= ov
+	}
+	return n
+}

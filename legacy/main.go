@@ -502,7 +502,7 @@ func main() {
 	stackSize := flag.Uint64("stack-size", 0, "goroutine stack size")
 	printSize := flag.String("size", "", "print sizes (none, short, full)")
 	printStacks := flag.Bool("print-stacks", false, "print stack sizes of goroutines")
-	printAllocsString := flag.String("print-allocs", "", "regular expression of functions for which heap allocations should be printed")
+	printAllocsString := flag.String("print-allocs", "", "regular expression of functions for which arena allocations should be printed (needs -tags alloc_trace for the runtime to count them)")
 	printCommands := flag.Bool("x", false, "Print commands")
 	flagJSON := flag.Bool("json", false, "print output in JSON format")
 	parallelism := flag.Int("p", runtime.GOMAXPROCS(0), "the number of build jobs that can run in parallel")
@@ -568,6 +568,15 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		// Site ids are handed out in compile order and collected in one
+		// slice, so an instrumented build compiles packages serially.
+		// Concurrent package compiles would interleave nextAllocSite and
+		// hand the same allocation the same id in two packages.
+		*parallelism = 1
+		// A package served from the build cache is never compiled, so it
+		// would be missing from alloc_sites.json. Instrumented builds
+		// therefore always start clean.
+		*rebuildAll = true
 	}
 
 	options := &compileopts.Options{

@@ -26,7 +26,9 @@ func (b *builder) createMakeChan(expr *ssa.MakeChan) llvm.Value {
 	}
 	ch := b.createRuntimeCall("chanMake", []llvm.Value{elementSizeValue, bufSize}, "")
 	if b.PrintAllocs != nil {
-		b.emitLogAlloc(expr.Pos())
+		// The channel's storage belongs to the runtime allocator, so the byte
+		// size is not known here; the site is still counted.
+		b.emitLogAlloc(expr.Pos(), llvm.ConstInt(b.uintptrType, 0, false))
 	}
 	return ch
 }

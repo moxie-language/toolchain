@@ -1,6 +1,10 @@
 package mxutil
 
-import "unsafe"
+import (
+	"unsafe"
+
+	"git.smesh.lol/moxie/pkg/mxregexp"
+)
 
 //export write
 func cWrite(fd int32, buf unsafe.Pointer, count uint32) (n int32)
@@ -49,6 +53,114 @@ func (c *targetConfig) appendSeg(seg ImportSeg) {
 	c.segs = Ensure(c.segs, 1)
 	push(c.segs, seg)
 }
+
+// --- -print-allocs site table ---
+
+// allocSiteTable maps the site ids the compiler hands to runtime.logAlloc
+// back to the function each one came from.
+//
+// Like target, it is a package variable of a sovereign self-mutating type.
+// The table is filled from inside the IR emitter, whose arena is released
+// when the package it belongs to is finished, and read again once every
+// package is gone: a plain global slice would be left pointing into a dead
+// arena. For the same reason the key and the stored name are rebuilt inside
+// the borrowing methods - the caller's copies die with the caller's frame.
+type allocSiteTable struct {
+	pat   string
+	match map[string]bool  // memoised pattern verdict per function: the pattern is a regexp, so re-matching at every site would re-compile it
+	seq   map[string]int32 // allocation ordinal within one function, for the name
+	names []string         // id -> name, written to <output>.alloc_sites.json
+}
+
+func (t *allocSiteTable) reset(pat string) {
+	t.pat = copyString(pat)
+	t.match = map[string]bool{}
+	t.seq = map[string]int32{}
+	t.names = []string{:0}
+}
+
+// add records fn as an allocation site when the -print-allocs pattern
+// matches it. It returns the site id, or -1 when the pattern does not match.
+// The match verdict is memoised per function so a pattern is compiled once.
+func (t *allocSiteTable) add(fn string) (id int32) {
+	key := copyString(fn)
+	m, seen := t.match[key]
+	if !seen {
+		r, _ := mxregexp.Match(t.pat, key)
+		t.match[key] = r
+		m = r
+	}
+	if !m {
+		return -1
+	}
+	seq := t.seq[key]
+	t.seq[key] = seq + 1
+	id = int32(len(t.names))
+	t.names = Ensure(t.names, 1)
+	// A name is a package path, an identifier and an ordinal, none of which
+	// can carry a JSON metacharacter, so it goes into the file verbatim.
+	push(t.names, key|"@"|itoa32(seq))
+	return id
+}
+
+func copyString(s string) (r string) {
+	b := []byte{:len(s)}
+	copy(b, s)
+	return string(b)
+}
+
+func itoa32(n int32) (s string) {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	buf := []byte{:0:12}
+	for n > 0 {
+		buf = Ensure(buf, 1)
+		push(buf, byte('0'+n%10))
+		n /= 10
+	}
+	if neg {
+		buf = Ensure(buf, 1)
+		push(buf, '-')
+	}
+	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
+
+var allocSites allocSiteTable
+
+// ResetAllocSites arms the site table with the -print-allocs pattern and
+// reports whether that pattern is one the matcher supports. An empty pattern
+// disables instrumentation.
+func ResetAllocSites(pat string) (err string) {
+	if pat != "" {
+		_, err = mxregexp.Match(pat, "")
+	}
+	allocSites.reset(pat)
+	return err
+}
+
+// AllocSitesEnabled reports whether -print-allocs is active.
+func AllocSitesEnabled() (ok bool) { return len(allocSites.pat) > 0 }
+
+// AllocPattern returns the active -print-allocs pattern, "" when inactive.
+func AllocPattern() (s string) { return allocSites.pat }
+
+// AddAllocSite returns the site id for fn, or -1 when the pattern does not
+// match it.
+func AddAllocSite(fn string) (id int32) { return allocSites.add(fn) }
+
+// AllocSiteCount returns how many sites have been recorded.
+func AllocSiteCount() (n int32) { return int32(len(allocSites.names)) }
+
+// AllocSiteName returns the name recorded for a site id.
+func AllocSiteName(i int32) (s string) { return allocSites.names[i] }
 
 var target targetConfig
 

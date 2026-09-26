@@ -98,6 +98,7 @@ type packageAction struct {
 	Imports          map[string]string // map from imported package to action ID hash
 	OptLevel         string            // LLVM optimization level (O0, O1, O2, Os, Oz)
 	UndefinedGlobals []string          // globals that are left as external globals (no initializer)
+	PrintAllocs      string            // -print-allocs pattern; adds instrumentation to the bitcode
 }
 
 // Build performs a single package to executable Go build. It takes in a package
@@ -109,8 +110,10 @@ type packageAction struct {
 func Build(
 	pkgName, outpath, tmpdir string, config *compileopts.Config,
 ) (BuildResult, error) {
+	printAllocsKey := ""
 	if config.Options.PrintAllocs != nil {
 		compiler.ResetAllocSites()
+		printAllocsKey = config.Options.PrintAllocs.String()
 	}
 
 	// Read the build ID of the moxie binary.
@@ -365,6 +368,7 @@ func Build(
 					),
 					OptLevel:         optLevel,
 					UndefinedGlobals: undefinedGlobals,
+					PrintAllocs:      printAllocsKey,
 				}
 				for filePath, hash := range pkg.FileHashes {
 					actionID.FileHashes[filePath] = hex.EncodeToString(hash)

@@ -1,0 +1,585 @@
+// Package mxregexp matches a byte string against a regular expression.
+//
+// Legacy's -print-allocs takes a Go regexp and matches it against the
+// function name, so the stage4 compiler needs the same semantics to select
+// the same functions. Only a boolean answer is needed, which is why the
+// matcher is a Thompson NFA simulation: it explores every alternative at
+// once, so greediness and backtracking order cannot change the result and
+// pathological patterns cannot blow up exponentially.
+//
+// Supported: literal bytes, '.', classes '[...]' with ranges, leading '^'
+// negation and \d \D \w \W \s \S members, the repeats '*', '+', '?' (and
+// their lazy '?' forms), '|', '(' ')', '^', '$', and a backslash escaping a
+// metacharacter. Not supported: '{m,n}' repetition, '(?...)' flags and
+// backreferences - each returns a non-empty error rather than a wrong
+// answer.
+//
+// The parser is a self-mutating type, so its per-iteration scratch is
+// declared before the loops that use it: a declaration inside a loop body
+// would allocate in the receiver's sovereign arena once per iteration.
+package mxregexp
+
+// Instruction opcodes. Every instruction carries its successor in either
+// next (single) or a/b (split); opMatch is terminal.
+const (
+	opChar = int32(iota) // consume one byte equal to ch
+	opAny                // consume one byte other than '\n'
+	opClass              // consume one byte whose class entry is set
+	opJmp                // continue at next
+	opSplit              // continue at a, or at b
+	opBol                // zero width: only at the start of the text
+	opEol                // zero width: only at the end of the text
+	opMatch              // accept
+)
+
+type inst struct {
+	op    int32
+	ch    int32   // opChar
+	class []uint8 // opClass: 256 entries, 1 = member
+	next  int32   // successor for every single-successor op
+	a     int32   // opSplit: preferred branch
+	b     int32   // opSplit: alternative branch
+}
+
+// patch names a successor field that is still unknown: instruction idx,
+// field 0 = next, 1 = b.
+type patch struct {
+	idx   int32
+	field int32
+}
+
+// frag is a partially built fragment plus the outlets that still need a
+// successor.
+type frag struct {
+	start int32
+	outs  []patch
+}
+
+// program is a compiled pattern: insts with entry point start.
+type program struct {
+	insts []inst
+	start int32
+}
+
+// Match reports whether pattern matches anywhere in s, like Go's
+// regexp.MatchString. A non-empty err means the pattern uses syntax this
+// matcher does not implement.
+func Match(pattern, s string) (ok bool, err string) {
+	pa := &parser{pat: pattern}
+	f := pa.parseAlt()
+	if pa.err != "" {
+		return false, pa.err
+	}
+	if pa.pos != int32(len(pa.pat)) {
+		return false, "unbalanced ')' in pattern"
+	}
+	m := pa.emit(inst{op: opMatch, next: -1, a: -1, b: -1})
+	pa.patchAll(f.outs, m)
+	p := &program{insts: pa.prog, start: f.start}
+	return p.match(s), ""
+}
+
+// --- parsing and Thompson construction ---
+
+type parser struct {
+	pat  string
+	pos  int32
+	prog []inst
+	err  string
+}
+
+func (pa *parser) emit(in inst) (idx int32) {
+	pa.prog = ensureInst(pa.prog, 1)
+	idx = int32(len(pa.prog))
+	push(pa.prog, in)
+	return idx
+}
+
+// ensureInst is mxutil.Ensure for []inst. Ensure's element type must be
+// comparable and inst holds a class slice, so the growth is spelled out here.
+func ensureInst(s []inst, n int32) (r0 []inst) {
+	if n <= 0 || cap(s)-len(s) >= n {
+		return s
+	}
+	nc := cap(s) * 2
+	if nc < 16 {
+		nc = 16
+	}
+	for nc-len(s) < n {
+		nc = nc * 2
+	}
+	nb := []inst{:0:nc}
+	copy(nb[:len(s)], s)
+	return nb[:len(s)]
+}
+
+func (pa *parser) patchAll(outs []patch, target int32) {
+	for i := int32(0); i < int32(len(outs)); i++ {
+		if outs[i].field == 0 {
+			pa.prog[outs[i].idx].next = target
+		} else {
+			pa.prog[outs[i].idx].b = target
+		}
+	}
+}
+
+func joinPatches(x, y []patch) (r []patch) {
+	r = []patch{:int32(len(x)) + int32(len(y))}
+	for i := int32(0); i < int32(len(x)); i++ {
+		r[i] = x[i]
+	}
+	for i := int32(0); i < int32(len(y)); i++ {
+		r[int32(len(x))+i] = y[i]
+	}
+	return r
+}
+
+func (pa *parser) parseAlt() (f frag) {
+	var r frag
+	var sid int32
+	f = pa.parseConcat()
+	for pa.err == "" && pa.pos < int32(len(pa.pat)) && pa.pat[pa.pos] == '|' {
+		pa.pos++
+		r = pa.parseConcat()
+		sid = pa.emit(inst{op: opSplit, ch: -1, next: -1, a: f.start, b: r.start})
+		f = frag{start: sid, outs: joinPatches(f.outs, r.outs)}
+	}
+	return f
+}
+
+func (pa *parser) parseConcat() (f frag) {
+	empty := true
+	var ch byte
+	var r frag
+	var sid int32
+	for pa.err == "" && pa.pos < int32(len(pa.pat)) {
+		ch = pa.pat[pa.pos]
+		if ch == '|' || ch == ')' {
+			break
+		}
+		r = pa.parseRepeat()
+		if pa.err != "" {
+			break
+		}
+		if empty {
+			f = r
+			empty = false
+		} else {
+			pa.patchAll(f.outs, r.start)
+			f = frag{start: f.start, outs: r.outs}
+		}
+	}
+	if empty {
+		// An empty branch matches the empty string.
+		sid = pa.emit(inst{op: opJmp, ch: -1, next: -1, a: -1, b: -1})
+		f = frag{start: sid, outs: []patch{{idx: sid, field: 0}}}
+	}
+	return f
+}
+
+func (pa *parser) parseRepeat() (f frag) {
+	var ch byte
+	var sid int32
+	f = pa.parseAtom()
+	if pa.err != "" {
+		return f
+	}
+	for pa.pos < int32(len(pa.pat)) {
+		ch = pa.pat[pa.pos]
+		// '{' only begins a repetition when a digit follows; Go treats any
+		// other '{' as an ordinary literal, so "a{" must stay a match for
+		// the text "a{" rather than an error.
+		if ch == '{' && pa.pos+1 < int32(len(pa.pat)) && pa.pat[pa.pos+1] >= '0' && pa.pat[pa.pos+1] <= '9' {
+			pa.err = "'{m,n}' repetition is not supported"
+			return f
+		}
+		if ch != '*' && ch != '+' && ch != '?' {
+			break
+		}
+		pa.pos++
+		// A trailing '?' is the lazy form. Greediness cannot change whether
+		// a match exists, only which one is reported, so it is dropped.
+		if pa.pos < int32(len(pa.pat)) && pa.pat[pa.pos] == '?' {
+			pa.pos++
+		} else if pa.pos < int32(len(pa.pat)) && (pa.pat[pa.pos] == '*' || pa.pat[pa.pos] == '+') {
+			pa.err = "nested repetition operator"
+			return f
+		}
+		sid = pa.emit(inst{op: opSplit, ch: -1, next: -1, a: f.start, b: -1})
+		if ch == '+' {
+			// The loop body is entered once before the split back-edge.
+			pa.patchAll(f.outs, sid)
+			f = frag{start: f.start, outs: []patch{{idx: sid, field: 1}}}
+			continue
+		}
+		if ch == '*' {
+			pa.patchAll(f.outs, sid)
+			f = frag{start: sid, outs: []patch{{idx: sid, field: 1}}}
+			continue
+		}
+		f = frag{start: sid, outs: joinPatches(f.outs, []patch{{idx: sid, field: 1}})}
+	}
+	return f
+}
+
+func (pa *parser) parseAtom() (f frag) {
+	var idx int32
+	if pa.pos >= int32(len(pa.pat)) {
+		return frag{start: -1, outs: []patch{}}
+	}
+	ch := pa.pat[pa.pos]
+	switch ch {
+	case '(':
+		pa.pos++
+		if pa.pos < int32(len(pa.pat)) && pa.pat[pa.pos] == '?' {
+			pa.err = "'(?...)' flags are not supported"
+			return frag{start: -1, outs: []patch{}}
+		}
+		inner := pa.parseAlt()
+		if pa.err != "" {
+			return frag{start: -1, outs: []patch{}}
+		}
+		if pa.pos >= int32(len(pa.pat)) || pa.pat[pa.pos] != ')' {
+			pa.err = "missing ')'"
+			return frag{start: -1, outs: []patch{}}
+		}
+		pa.pos++
+		return inner
+	case ')':
+		pa.err = "unbalanced ')' in pattern"
+		return frag{start: -1, outs: []patch{}}
+	case '[':
+		return pa.parseClass()
+	case '.':
+		pa.pos++
+		idx = pa.emit(inst{op: opAny, ch: -1, next: -1, a: -1, b: -1})
+		return frag{start: idx, outs: []patch{{idx: idx, field: 0}}}
+	case '^':
+		pa.pos++
+		idx = pa.emit(inst{op: opBol, ch: -1, next: -1, a: -1, b: -1})
+		return frag{start: idx, outs: []patch{{idx: idx, field: 0}}}
+	case '$':
+		pa.pos++
+		idx = pa.emit(inst{op: opEol, ch: -1, next: -1, a: -1, b: -1})
+		return frag{start: idx, outs: []patch{{idx: idx, field: 0}}}
+	case '*', '+', '?':
+		pa.err = "missing operand before repeat operator"
+		return frag{start: -1, outs: []patch{}}
+	case '\\':
+		return pa.parseEscape()
+	}
+	pa.pos++
+	idx = pa.emit(inst{op: opChar, ch: int32(ch), next: -1, a: -1, b: -1})
+	return frag{start: idx, outs: []patch{{idx: idx, field: 0}}}
+}
+
+func (pa *parser) parseEscape() (f frag) {
+	pa.pos++
+	if pa.pos >= int32(len(pa.pat)) {
+		pa.err = "trailing backslash"
+		return frag{start: -1, outs: []patch{}}
+	}
+	ch := pa.pat[pa.pos]
+	pa.pos++
+	switch ch {
+	case 'd':
+		return pa.classFrag(digitClass())
+	case 'D':
+		return pa.classFrag(invertClass(digitClass()))
+	case 'w':
+		return pa.classFrag(wordClass())
+	case 'W':
+		return pa.classFrag(invertClass(wordClass()))
+	case 's':
+		return pa.classFrag(spaceClass())
+	case 'S':
+		return pa.classFrag(invertClass(spaceClass()))
+	case 'n':
+		return pa.literal('\n')
+	case 't':
+		return pa.literal('\t')
+	case 'r':
+		return pa.literal('\r')
+	case 'a':
+		return pa.literal(7)
+	case 'f':
+		return pa.literal('\f')
+	case 'v':
+		return pa.literal(11)
+	case 'b', 'B', 'A', 'z', 'Z', 'p', 'P', 'x', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		pa.err = "unsupported escape in pattern"
+		return frag{start: -1, outs: []patch{}}
+	}
+	return pa.literal(ch)
+}
+
+func (pa *parser) literal(ch byte) (f frag) {
+	i := pa.emit(inst{op: opChar, ch: int32(ch), next: -1, a: -1, b: -1})
+	return frag{start: i, outs: []patch{{idx: i, field: 0}}}
+}
+
+func (pa *parser) classFrag(cls []uint8) (f frag) {
+	i := pa.emit(inst{op: opClass, ch: -1, class: cls, next: -1, a: -1, b: -1})
+	return frag{start: i, outs: []patch{{idx: i, field: 0}}}
+}
+
+func (pa *parser) parseClass() (f frag) {
+	pa.pos++ // consume '['
+	cls := []uint8{:256}
+	negated := false
+	var ch byte
+	var ec byte
+	var hi byte
+	var b int32
+	if pa.pos < int32(len(pa.pat)) && pa.pat[pa.pos] == '^' {
+		negated = true
+		pa.pos++
+	}
+	first := true
+	for {
+		if pa.pos >= int32(len(pa.pat)) {
+			pa.err = "missing ']'"
+			return frag{start: -1, outs: []patch{}}
+		}
+		ch = pa.pat[pa.pos]
+		if ch == ']' && !first {
+			pa.pos++
+			break
+		}
+		first = false
+		if ch == '\\' {
+			pa.pos++
+			if pa.pos >= int32(len(pa.pat)) {
+				pa.err = "trailing backslash"
+				return frag{start: -1, outs: []patch{}}
+			}
+			ec = pa.pat[pa.pos]
+			pa.pos++
+			switch ec {
+			case 'd':
+				unionClass(cls, digitClass())
+			case 'D':
+				unionClass(cls, invertClass(digitClass()))
+			case 'w':
+				unionClass(cls, wordClass())
+			case 'W':
+				unionClass(cls, invertClass(wordClass()))
+			case 's':
+				unionClass(cls, spaceClass())
+			case 'S':
+				unionClass(cls, invertClass(spaceClass()))
+			case 'n':
+				cls['\n'] = 1
+			case 't':
+				cls['\t'] = 1
+			case 'r':
+				cls['\r'] = 1
+			case 'a':
+				cls[7] = 1
+			case 'f':
+				cls['\f'] = 1
+			case 'v':
+				cls[11] = 1
+			case 'b':
+				cls[8] = 1 // backspace inside a class
+			case 'A', 'z', 'Z', 'p', 'P', 'x', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+				pa.err = "unsupported escape in class"
+				return frag{start: -1, outs: []patch{}}
+			default:
+				cls[ec] = 1
+			}
+			continue
+		}
+		pa.pos++
+		if pa.pos+1 < int32(len(pa.pat)) && pa.pat[pa.pos] == '-' && pa.pat[pa.pos+1] != ']' {
+			hi = pa.pat[pa.pos+1]
+			pa.pos += 2
+			if hi < ch {
+				pa.err = "invalid character class range"
+				return frag{start: -1, outs: []patch{}}
+			}
+			b = int32(ch)
+			for b <= int32(hi) {
+				cls[b] = 1
+				b++
+			}
+			continue
+		}
+		cls[ch] = 1
+	}
+	if negated {
+		for b = 0; b < 256; b++ {
+			if cls[b] == 1 {
+				cls[b] = 0
+			} else {
+				cls[b] = 1
+			}
+		}
+	}
+	return pa.classFrag(cls)
+}
+
+func digitClass() (c []uint8) {
+	c = []uint8{:256}
+	for b := int32('0'); b <= int32('9'); b++ {
+		c[b] = 1
+	}
+	return c
+}
+
+func wordClass() (c []uint8) {
+	c = []uint8{:256}
+	for b := int32('0'); b <= int32('9'); b++ {
+		c[b] = 1
+	}
+	for b := int32('A'); b <= int32('Z'); b++ {
+		c[b] = 1
+	}
+	for b := int32('a'); b <= int32('z'); b++ {
+		c[b] = 1
+	}
+	c['_'] = 1
+	return c
+}
+
+// spaceClass is Go's \s: [\t\n\f\r ].
+func spaceClass() (c []uint8) {
+	c = []uint8{:256}
+	c['\t'] = 1
+	c['\n'] = 1
+	c['\f'] = 1
+	c['\r'] = 1
+	c[' '] = 1
+	return c
+}
+
+func unionClass(dst, src []uint8) {
+	for i := int32(0); i < 256; i++ {
+		if src[i] == 1 {
+			dst[i] = 1
+		}
+	}
+}
+
+func invertClass(src []uint8) (c []uint8) {
+	c = []uint8{:256}
+	for i := int32(0); i < 256; i++ {
+		if src[i] != 1 {
+			c[i] = 1
+		}
+	}
+	return c
+}
+
+// --- simulation ---
+
+type vm struct {
+	p     *program
+	s     string
+	seen  []int32
+	stack []int32
+}
+
+// match simulates the program over s. Threads are seeded at every position,
+// which makes the search unanchored. seen is stamped per batch rather than
+// cleared, so a state is entered at most once per position and a loop that
+// consumes nothing terminates.
+func (p *program) match(s string) (ok bool) {
+	n := int32(len(p.insts))
+	v := &vm{p: p, s: s, seen: []int32{:n}, stack: []int32{:n}}
+	for i := int32(0); i < n; i++ {
+		v.seen[i] = -1
+	}
+	clist := []int32{:n}
+	nlist := []int32{:n}
+	clen := int32(0)
+	nlen := int32(0)
+	gen := int32(0)
+	textLen := int32(len(s))
+	for pos := int32(0); ; pos++ {
+		gen++
+		clen = v.add(clist, clen, p.start, pos, gen)
+		for i := int32(0); i < clen; i++ {
+			if p.insts[clist[i]].op == opMatch {
+				return true
+			}
+		}
+		if pos >= textLen {
+			break
+		}
+		gen++
+		nlen = 0
+		c := s[pos]
+		for i := int32(0); i < clen; i++ {
+			in := p.insts[clist[i]]
+			consumed := false
+			switch in.op {
+			case opChar:
+				consumed = int32(c) == in.ch
+			case opAny:
+				consumed = c != '\n'
+			case opClass:
+				consumed = in.class[c] == 1
+			}
+			if consumed {
+				nlen = v.add(nlist, nlen, in.next, pos+1, gen)
+			}
+		}
+		clist, nlist = nlist, clist
+		clen, nlen = nlen, 0
+	}
+	return false
+}
+
+// add follows pc through every zero-width instruction reachable without
+// consuming input, appending the resulting consuming-or-accepting states to
+// list from index len0 and returning the new length. States are marked in
+// seen on push, so the DFS stack never exceeds one entry per instruction.
+func (v *vm) add(list []int32, len0, pc, pos, gen int32) (out int32) {
+	sp := int32(0)
+	var cur int32
+	var in inst
+	v.seen[pc] = gen
+	v.stack[sp] = pc
+	sp++
+	for sp > 0 {
+		sp--
+		cur = v.stack[sp]
+		in = v.p.insts[cur]
+		switch in.op {
+		case opJmp:
+			if v.seen[in.next] != gen {
+				v.seen[in.next] = gen
+				v.stack[sp] = in.next
+				sp++
+			}
+		case opSplit:
+			if v.seen[in.a] != gen {
+				v.seen[in.a] = gen
+				v.stack[sp] = in.a
+				sp++
+			}
+			if v.seen[in.b] != gen {
+				v.seen[in.b] = gen
+				v.stack[sp] = in.b
+				sp++
+			}
+		case opBol:
+			if pos == 0 && v.seen[in.next] != gen {
+				v.seen[in.next] = gen
+				v.stack[sp] = in.next
+				sp++
+			}
+		case opEol:
+			if pos == int32(len(v.s)) && v.seen[in.next] != gen {
+				v.seen[in.next] = gen
+				v.stack[sp] = in.next
+				sp++
+			}
+		default:
+			list[len0] = cur
+			len0++
+		}
+	}
+	return len0
+}

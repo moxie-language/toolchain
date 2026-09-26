@@ -49,7 +49,9 @@ func (b *builder) createMakeMap(expr *ssa.MakeMap) (llvm.Value, error) {
 	}
 	hashmap := b.createRuntimeCall("hashmapMake", []llvm.Value{llvmKeySize, llvmValueSize, sizeHint, algEnum}, "")
 	if b.PrintAllocs != nil {
-		b.emitLogAlloc(expr.Pos())
+		// The map's storage belongs to the runtime allocator, so the byte
+		// size is not known here; the site is still counted.
+		b.emitLogAlloc(expr.Pos(), llvm.ConstInt(b.uintptrType, 0, false))
 	}
 
 	return hashmap, nil

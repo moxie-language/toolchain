@@ -33,6 +33,10 @@ type buildState struct {
 	pkgKeyMemo      map[string]string
 	linkSetKey      string // hash of the whole link set; interface dispatch impls depend on it
 	tlsProbeVar     int32
+
+	// extraTags are the -tags values, on top of the target and release tags
+	// buildTagTrue already knows.
+	extraTags []string
 }
 
 var bst *buildState
@@ -1164,6 +1168,10 @@ func pkgHash(p *pkgInfo) (s string) {
 	// cached .bc is only valid for the link set it was built against. Fold a
 	// hash of the link set into every package key.
 	acc = acc | []byte("|L") | []byte(bst.linkSetKey)
+	// -print-allocs adds calls to the cached bitcode, so the pattern is part
+	// of the key: without it an uninstrumented .bc compiled earlier would be
+	// reused for an instrumented build and the sites would never fire.
+	acc = acc | []byte("|P") | []byte(mxutil.AllocPattern())
 	hv := fnvHash(acc)
 	bst.pkgKeyMemo[p.path] = hv
 	return hv
@@ -1867,8 +1875,137 @@ func evalBuildUnary(line string, pos int32) (val bool, next int32) {
 	return buildTagTrue(line[start:pos]), pos
 }
 
+// appendBuildTags parses a -tags value the way legacy's buildutil.TagsFlag
+// does: a space-separated (optionally quoted) list when the value contains a
+// space or a quote, otherwise a comma-separated list.
+func appendBuildTags(v string) {
+	if strContains(v, " ") || strContains(v, "'") {
+		i := int32(0)
+		for i < int32(len(v)) {
+			for i < int32(len(v)) && (v[i] == ' ' || v[i] == '\t') {
+				i++
+			}
+			wstart := i
+			for i < int32(len(v)) && v[i] != ' ' && v[i] != '\t' {
+				i++
+			}
+			if i == wstart {
+				continue
+			}
+			t := v[wstart:i]
+			if len(t) >= 2 && t[0] == '\'' && t[len(t)-1] == '\'' {
+				t = t[1 : len(t)-1]
+			}
+			if len(t) > 0 {
+				bst.extraTags = mxutil.Ensure(bst.extraTags, 1)
+				push(bst.extraTags, t)
+			}
+		}
+		return
+	}
+	start := int32(0)
+	for j := int32(0); j <= int32(len(v)); j++ {
+		if j < int32(len(v)) && v[j] != ',' {
+			continue
+		}
+		t := v[start:j]
+		if len(t) > 0 {
+			bst.extraTags = mxutil.Ensure(bst.extraTags, 1)
+			push(bst.extraTags, t)
+		}
+		start = j + 1
+	}
+}
+
+// setPrintAllocs arms -print-allocs. The pattern is validated once here so a
+// bad regexp is reported before any package is compiled, and the build is
+// forced serial: site ids are handed out in compile order, and parallel
+// package compiles would number two packages' sites from the same counter.
+func setPrintAllocs(pat string) {
+	if perr := mxutil.ResetAllocSites(pat); perr != "" {
+		fatal("-print-allocs " | pat | ": " | perr)
+	}
+	if pat == "" {
+		return
+	}
+	bst.buildJobs = 1
+}
+
+// funcRelName is the name -print-allocs matches against: the package path, a
+// dot, and the function name. Legacy matches its regexp against
+// ssa.Function.RelString(nil), which is the same shape.
+func (e *irEmitter) funcRelName() (s string) {
+	if e.curFunc == nil {
+		return ""
+	}
+	if e.curFunc.Pkg == nil || e.curFunc.Pkg.Pkg == nil {
+		return e.curFunc.name
+	}
+	p := e.curFunc.Pkg.Pkg.Path
+	if p == "" {
+		return e.curFunc.name
+	}
+	return p | "." | e.curFunc.name
+}
+
+// emitLogAlloc emits the per-site allocation instrumentation call in front of
+// an allocation of sizeReg bytes, when -print-allocs selected this function.
+//
+// The call is emitted whether or not the alloc_trace tag is selected: without
+// it the runtime's logAlloc is a no-op, so the compiler needs no knowledge of
+// which runtime files a build chose. The site is recorded for
+// <output>.alloc_sites.json.
+func (e *irEmitter) emitLogAlloc(sizeReg string) {
+	if !mxutil.AllocSitesEnabled() {
+		return
+	}
+	id := mxutil.AddAllocSite(e.funcRelName())
+	if id < 0 {
+		return
+	}
+	ipt := e.intptrType()
+	e.w("  call void @runtime.logAlloc(i32 ")
+	e.w(irItoa(id))
+	e.w(", ")
+	e.w(ipt)
+	e.w(" ")
+	e.w(sizeReg)
+	e.w(", ptr null)\n")
+	e.declareRuntime("runtime.logAlloc", "void", "i32, " | ipt)
+}
+
+// writeAllocSites writes the -print-allocs site table beside the output, in
+// the same shape legacy writes with encoding/json.
+func writeAllocSites(outpath string) {
+	if !mxutil.AllocSitesEnabled() {
+		return
+	}
+	data := []byte("[")
+	for i := int32(0); i < mxutil.AllocSiteCount(); i++ {
+		if i > 0 {
+			data = data | []byte(",")
+		}
+		data = data | []byte("{\"id\":")
+		data = data | []byte(irItoa(i))
+		data = data | []byte(",\"name\":\"")
+		data = data | []byte(mxutil.AllocSiteName(i))
+		data = data | []byte("\"}")
+	}
+	data = data | []byte("]")
+	mxutil.WriteFile(outpath|".alloc_sites.json", data, 420)
+}
+
 // buildTagTrue reports whether a build tag is true for the current target.
+// Extra tags from -tags win over the target's own: legacy adds them to
+// build.Context.BuildTags, which go/build consults before GOOS/GOARCH.
 func buildTagTrue(tag string) (ok bool) {
+	if bst != nil {
+		for i := int32(0); i < int32(len(bst.extraTags)); i++ {
+			if bst.extraTags[i] == tag {
+				return true
+			}
+		}
+	}
 	switch tag {
 	case "linux", "amd64":
 		// Platform tags belong to the native target only. Enabling them for
@@ -4297,6 +4434,12 @@ func cmdTest(args []string) {
 		} else if args[i] == "-v" {
 			verbose = true
 			i++
+		} else if args[i] == "-tags" && i+1 < int32(len(args)) {
+			appendBuildTags(args[i+1])
+			i += 2
+		} else if args[i] == "-print-allocs" && i+1 < int32(len(args)) {
+			setPrintAllocs(args[i+1])
+			i += 2
 		} else {
 			pkgPath = args[i]
 			i++
@@ -4304,6 +4447,9 @@ func cmdTest(args []string) {
 	}
 	if pkgPath == "" {
 		pkgPath = "."
+	}
+	if mxutil.AllocSitesEnabled() {
+		forceRebuild = true
 	}
 	_ = verbose
 
@@ -5082,6 +5228,12 @@ func main() {
 				bst.buildJobs = 1
 			}
 			i += 2
+		} else if args[i] == "-tags" && i+1 < int32(len(args)) {
+			appendBuildTags(args[i+1])
+			i += 2
+		} else if args[i] == "-print-allocs" && i+1 < int32(len(args)) {
+			setPrintAllocs(args[i+1])
+			i += 2
 		} else if args[i] == "-gc=dealloc" || args[i] == "-buildmode=c-shared" || args[i] == "-x" || args[i] == "-work" {
 			i++
 		} else if pkgPath == "" {
@@ -5096,6 +5248,11 @@ func main() {
 	if printIR {
 		// -print-ir needs the in-process compile path.
 		bst.buildJobs = 1
+	}
+	if mxutil.AllocSitesEnabled() {
+		// The site table is built while packages are emitted, so a package
+		// taken from the build cache would be missing from it.
+		forceRebuild = true
 	}
 	if pkgPath == "" {
 		fatal("no package specified")
@@ -5613,6 +5770,7 @@ func main() {
 			fatal("linker failed")
 		}
 	}
+	writeAllocSites(outpath)
 	mxutil.WriteStr(2, "  -> " | outpath | "\n")
 	if runAfter {
 		execArgs := []string{outpath}

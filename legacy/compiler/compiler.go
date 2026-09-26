@@ -453,19 +453,19 @@ func (c *compilerContext) getRuntimeType(name string) types.Type {
 	return obj.(*types.TypeName).Type()
 }
 
-// emitLogAlloc emits runtime.logAlloc(siteID) at a heap allocation site
-// when the function name matches the -print-allocs pattern.
-func (b *builder) emitLogAlloc(pos token.Pos) {
+// emitLogAlloc emits runtime.logAlloc(siteID, size) at an allocation site
+// when the function name matches the -print-allocs pattern. The runtime
+// supplies the counter tables only when the alloc_trace build tag is set;
+// without it logAlloc is a no-op and the site still gets a name in
+// <output>.alloc_sites.json, so the emitted code is identical either way.
+func (b *builder) emitLogAlloc(pos token.Pos, size llvm.Value) {
 	if !b.PrintAllocs.MatchString(b.fn.RelString(nil)) {
-		return
-	}
-	if b.program.ImportedPackage("runtime").Members["logAlloc"] == nil {
 		return
 	}
 	position := b.program.Fset.Position(pos)
 	siteName := b.fn.RelString(nil) + "@" + position.Filename + ":" + strconv.Itoa(position.Line)
 	siteIDVal := llvm.ConstInt(b.ctx.Int32Type(), uint64(nextAllocSite(siteName)), false)
-	b.createRuntimeCall("logAlloc", []llvm.Value{siteIDVal}, "")
+	b.createRuntimeCall("logAlloc", []llvm.Value{siteIDVal, size}, "")
 }
 
 // getLLVMRuntimeType obtains a named type from the runtime package and returns
@@ -2518,7 +2518,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			align := b.targetData.ABITypeAlignment(typ)
 			buf.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(align)))
 			if b.PrintAllocs != nil {
-				b.emitLogAlloc(expr.Pos())
+				b.emitLogAlloc(expr.Pos(), sizeValue)
 			}
 	
 			return buf, nil
@@ -2776,7 +2776,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		slicePtr := b.createRuntimeCall("alloc", []llvm.Value{sliceSize, layoutValue}, "makeslice.buf")
 		slicePtr.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(elemAlign)))
 		if b.PrintAllocs != nil {
-			b.emitLogAlloc(expr.Pos())
+			b.emitLogAlloc(expr.Pos(), sliceSize)
 		}
 	
 

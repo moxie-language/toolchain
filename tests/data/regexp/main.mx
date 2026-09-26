@@ -1,0 +1,138 @@
+package main
+
+import (
+	"os"
+
+	"git.smesh.lol/moxie/pkg/mxregexp"
+)
+
+// Reads a case file of "pattern<TAB>text" lines and prints one "i ok" line
+// per case, so the same file fed to a Go regexp reference can be diffed
+// against this output. The text column is escape-decoded (\n, \t, \r, \\)
+// because a real newline cannot be carried in a line-oriented file; the
+// pattern column is passed to the matcher verbatim.
+func main() {
+	if len(os.Args) < 2 {
+		println("usage: regexp_case <cases-file>")
+		return
+	}
+	data, rerr := os.ReadFile(os.Args[1])
+	if rerr != nil {
+		println("cannot read " | os.Args[1])
+		return
+	}
+	line := int32(0)
+	start := int32(0)
+	i := int32(0)
+	for i <= int32(len(data)) {
+		if i < int32(len(data)) && data[i] != '\n' {
+			i++
+			continue
+		}
+		if i > start {
+			tab := start
+			for tab < i && data[tab] != '\t' {
+				tab++
+			}
+			if tab >= i {
+				println("case " | itoa(line) | ": missing tab")
+				return
+			}
+			// The error text is not compared: both sides must agree only on
+			// whether the pattern is rejected at all.
+			m, merr := mxregexp.Match(data[start:tab], unescape(data[tab+1:i]))
+			if merr != "" {
+				println(itoa(line) | " error")
+			} else if m {
+				println(itoa(line) | " true")
+			} else {
+				println(itoa(line) | " false")
+			}
+		}
+		line++
+		i++
+		start = i
+	}
+}
+
+// grow is mxutil.Ensure inlined: the test program must not import mxutil,
+// whose file helpers are //export externs supplied by the compiler binary.
+func grow(b []byte, n int32) (r0 []byte) {
+	if cap(b)-len(b) >= n {
+		return b
+	}
+	nc := cap(b) * 2
+	if nc < 16 {
+		nc = 16
+	}
+	for nc-len(b) < n {
+		nc = nc * 2
+	}
+	nb := []byte{:0:nc}
+	copy(nb[:len(b)], b)
+	return nb[:len(b)]
+}
+
+func unescape(s string) (r string) {
+	needs := false
+	for i := int32(0); i < int32(len(s)); i++ {
+		if s[i] == '\\' {
+			needs = true
+			break
+		}
+	}
+	if !needs {
+		return s
+	}
+	buf := []byte{:0:int32(len(s))}
+	j := int32(0)
+	for j < int32(len(s)) {
+		if s[j] == '\\' && j+1 < int32(len(s)) {
+			c := s[j+1]
+			if c == 'n' {
+				buf = grow(buf, 1)
+				push(buf, '\n')
+				j += 2
+				continue
+			}
+			if c == 't' {
+				buf = grow(buf, 1)
+				push(buf, '\t')
+				j += 2
+				continue
+			}
+			if c == 'r' {
+				buf = grow(buf, 1)
+				push(buf, '\r')
+				j += 2
+				continue
+			}
+			if c == '\\' {
+				buf = grow(buf, 1)
+				push(buf, '\\')
+				j += 2
+				continue
+			}
+		}
+		buf = grow(buf, 1)
+		push(buf, s[j])
+		j++
+	}
+	return string(buf)
+}
+
+func itoa(n int32) (s string) {
+	if n == 0 {
+		return "0"
+	}
+	buf := []byte{:0:12}
+	for n > 0 {
+		buf = grow(buf, 1)
+		push(buf, byte('0'+n%10))
+		n /= 10
+	}
+	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
