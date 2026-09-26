@@ -181,7 +181,7 @@ func generateKey(dk *DecapsulationKey768) (*DecapsulationKey768, error) {
 	drbg.Read(d[:])
 	var z [32]byte
 	drbg.Read(z[:])
-	kemKeyGen(dk, &d, &z)
+	kemKeyGen(dk, d[:], z[:])
 	fips140.PCT("ML-KEM PCT", func() error { return kemPCT(dk) })
 	fips140.RecordApproved()
 	return dk, nil
@@ -191,7 +191,7 @@ func generateKey(dk *DecapsulationKey768) (*DecapsulationKey768, error) {
 // exclusively for use in tests.
 func GenerateKeyInternal768(d, z *[32]byte) *DecapsulationKey768 {
 	dk := &DecapsulationKey768{}
-	kemKeyGen(dk, d, z)
+	kemKeyGen(dk, d[:], z[:])
 	return dk
 }
 
@@ -207,9 +207,7 @@ func newKeyFromSeed(dk *DecapsulationKey768, seed []byte) (*DecapsulationKey768,
 	if len(seed) != SeedSize {
 		return nil, errors.New("mlkem: invalid seed length")
 	}
-	d := (*[32]byte)(seed[:32])
-	z := (*[32]byte)(seed[32:])
-	kemKeyGen(dk, d, z)
+	kemKeyGen(dk, seed[:32], seed[32:])
 	fips140.RecordApproved()
 	return dk, nil
 }
@@ -266,12 +264,12 @@ func TestingOnlyNewDecapsulationKey768(b []byte) (*DecapsulationKey768, error) {
 // It implements ML-KEM.KeyGen_internal according to FIPS 203, Algorithm 16, and
 // K-PKE.KeyGen according to FIPS 203, Algorithm 13. The two are merged to save
 // copies and allocations.
-func kemKeyGen(dk *DecapsulationKey768, d, z *[32]byte) {
-	dk.d = *d
-	dk.z = *z
+func kemKeyGen(dk *DecapsulationKey768, d, z []byte) {
+	copy(dk.d[:], d)
+	copy(dk.z[:], z)
 
 	g := sha3.New512()
-	g.Write(d[:])
+	g.Write(d)
 	g.Write([]byte{k}) // Module dimension as a domain separator.
 	G := g.Sum([]byte{:0:64})
 	rho, sigma := G[:32], G[32:]
@@ -366,7 +364,7 @@ func kemEncaps(cc *[CiphertextSize768]byte, ek *EncapsulationKey768, m *[message
 	g.Write(ek.h[:])
 	G := g.Sum(nil)
 	K, r := G[:SharedKeySize], G[SharedKeySize:]
-	c = pkeEncrypt(cc, &ek.encryptionKey, m, r)
+	c = pkeEncrypt(cc, &ek.encryptionKey, m[:], r)
 	return K, c
 }
 
@@ -414,7 +412,7 @@ func parseEK(ek *EncapsulationKey768, ekPKE []byte) (*EncapsulationKey768, error
 //
 // It implements K-PKE.Encrypt according to FIPS 203, Algorithm 14, although the
 // computation of t and AT is done in parseEK.
-func pkeEncrypt(cc *[CiphertextSize768]byte, ex *encryptionKey, m *[messageSize]byte, rnd []byte) []byte {
+func pkeEncrypt(cc *[CiphertextSize768]byte, ex *encryptionKey, m []byte, rnd []byte) []byte {
 	var N byte
 	r, e1 := []nttElement{:k}, []ringElement{:k}
 	for i := range r {
@@ -485,7 +483,7 @@ func kemDecaps(dk *DecapsulationKey768, c *[CiphertextSize768]byte) (K []byte) {
 	Kout := []byte{:SharedKeySize}
 	J.Read(Kout)
 	var cc [CiphertextSize768]byte
-	c1 := pkeEncrypt(&cc, &dk.encryptionKey, (*[32]byte)(m), r)
+	c1 := pkeEncrypt(&cc, &dk.encryptionKey, m, r)
 
 	subtle.ConstantTimeCopy(subtle.ConstantTimeCompare(c[:], c1), Kout, Kprime)
 	return Kout
