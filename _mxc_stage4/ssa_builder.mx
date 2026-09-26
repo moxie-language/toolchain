@@ -98,6 +98,7 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 	checkSovereignLoopDecls(p, files)
 	checkShadowing(files)
 	checkDuplicateCases(p, files)
+	checkClosureCaptures(p)
 	scanWasmSpawnTargets(p)
 	return p
 }
@@ -3465,7 +3466,24 @@ func (fb *ssaFuncBuilder) buildBranch(s *syntax.BranchStmt) {
 	}
 }
 
+// buildDeferStmt lowers `defer call`.
+//
+// A deferred method call goes through a thunk whose first parameter is the
+// receiver, the way legacy lowers it: the receiver travels as an argument on
+// the defer record, so `defer f.Close()` stays legal while `x := f.Close` is a
+// capture and is rejected. Building a bound method value here instead (a) made
+// a legal defer look like a capture to checkClosureCaptures and (b) could not
+// serve an interface receiver at all, because that call is an invoke, which is
+// an instruction rather than a value - `defer i.M()` was dropped in silence.
 func (fb *ssaFuncBuilder) buildDeferStmt(call *syntax.CallExpr) {
+	if sel, ok := call.Fun.(*syntax.SelectorExpr); ok {
+		if target, allArgs := fb.buildDeferMethodTarget(sel, call.ArgList, call.HasDots); target != nil {
+			deferred := &SSADefer{Call: SSACallCommon{Value: target, Args: allArgs}}
+			fb.emit(deferred)
+			fb.deferred++
+			return
+		}
+	}
 	fn := fb.buildExpr(call.Fun)
 	if fn == nil {
 		return
@@ -3474,6 +3492,182 @@ func (fb *ssaFuncBuilder) buildDeferStmt(call *syntax.CallExpr) {
 	d := &SSADefer{Call: SSACallCommon{Value: fn, Args: args}}
 	fb.emit(d)
 	fb.deferred++
+}
+
+// buildDeferMethodTarget resolves `recv.M(...)` for a deferred call into the
+// thunk to run plus its arguments, receiver first. A nil target means the
+// selector is not a method call (a package-qualified function, or a function
+// stored in a field) and the generic path should evaluate it; the speculative
+// receiver and argument instructions are rolled back first so the expression
+// is evaluated exactly once.
+func (fb *ssaFuncBuilder) buildDeferMethodTarget(sel *syntax.SelectorExpr, argExprs []syntax.Expr, hasDots bool) (target SSAValue, allArgs []SSAValue) {
+	if name, ok := sel.X.(*syntax.Name); ok {
+		if _, isPkg := fb.lookupObject(name.Value).(*PkgName); isPkg {
+			return nil, nil
+		}
+	}
+	block := fb.currentBlock
+	recvMark := int32(0)
+	if block != nil {
+		recvMark = len(block.Instrs)
+	}
+	recvCounter := fb.counter
+	recv := fb.buildExpr(sel.X)
+	if recv != nil && recv.SSAType() != nil {
+		mfn, fixedRecv := fb.resolveMethodCallWithRecv(sel, recv)
+		if mfn != nil && mfn.Signature != nil {
+			// A pointer-receiver method needs the operand's address, not a
+			// loaded copy: discard the value instructions and rebuild it as an
+			// address, exactly as buildCall does for a direct method call. The
+			// arguments are built after that rollback, so no live value is
+			// left pointing at a discarded instruction.
+			if fb.methodNeedsAddr(mfn, fixedRecv) {
+				if block != nil {
+					block.Instrs = block.Instrs[:recvMark]
+				}
+				fb.counter = recvCounter
+				if addr := fb.buildOperandAddr(sel.X); addr != nil {
+					fixedRecv = addr
+				}
+			}
+			fixedRecv = fb.derefValueRecv(mfn, fixedRecv)
+			args := fb.buildArgs(argExprs)
+			fb.checkCallArgs(args, mfn.Signature, hasDots)
+			if mfn.Signature.Variadic && !hasDots {
+				args = fb.wrapVariadicArgs(args, mfn.Signature)
+			}
+			args = fb.coerceArgsToInterface(args, mfn.Signature)
+			thunk := fb.buildDeferThunk(mfn, nil, "", fixedRecv.SSAType(), args, mfn.Signature)
+			return thunk, prependValue(fixedRecv, args)
+		}
+		if iface, msig := ifaceMethodOf(recv, sel.Sel.Value); iface != nil && msig != nil {
+			args := fb.buildArgs(argExprs)
+			fb.checkCallArgs(args, msig, hasDots)
+			if msig.Variadic && !hasDots {
+				args = fb.wrapVariadicArgs(args, msig)
+			}
+			args = fb.coerceArgsToInterface(args, msig)
+			thunk := fb.buildDeferThunk(nil, iface, sel.Sel.Value, recv.SSAType(), args, msig)
+			return thunk, prependValue(recv, args)
+		}
+	}
+	if block != nil {
+		block.Instrs = block.Instrs[:recvMark]
+	}
+	fb.counter = recvCounter
+	return nil, nil
+}
+
+func prependValue(first SSAValue, rest []SSAValue) (all []SSAValue) {
+	all = []SSAValue{:0:len(rest) + 1}
+	push(all, first)
+	for _, r := range rest {
+		push(all, r)
+	}
+	return all
+}
+
+// ifaceMethodOf resolves methodName on the interface recv is typed as,
+// unwrapping a pointer to the interface. Returns nil for a concrete receiver.
+func ifaceMethodOf(recv SSAValue, methodName string) (iface *TCInterface, sig *Signature) {
+	typ := recv.SSAType()
+	if p7, ok := SafeUnderlying(typ).(*Pointer); ok {
+		typ = p7.Base
+	}
+	ifc, ok2 := SafeUnderlying(typ).(*TCInterface)
+	if !ok2 {
+		return nil, nil
+	}
+	for k := int32(0); k < ifc.NumMethods(); k++ {
+		m := ifc.Method(k)
+		if m == nil {
+			continue
+		}
+		if m.Name == methodName {
+			return ifc, m.Sig
+		}
+	}
+	return ifc, nil
+}
+
+// buildDeferThunk creates the function a deferred method call runs: parameter 0
+// is the receiver and the rest are the call's arguments, so it captures
+// nothing. With mfn non-nil the body is a direct call to it; otherwise the body
+// invokes methodName on the interface in parameter 0.
+func (fb *ssaFuncBuilder) buildDeferThunk(mfn *SSAFunction, iface *TCInterface, methodName string, recvType Type, argVals []SSAValue, sig *Signature) (t *SSAFunction) {
+	recvVar := &TCVar{Name: "recv", Typ: recvType}
+	var params *Tuple
+	{
+		vars := []*TCVar{:0:len(argVals) + 1}
+		push(vars, recvVar)
+		for i := int32(0); i < int32(len(argVals)); i++ {
+			vars = mxutil.Ensure(vars, 1)
+			push(vars, &TCVar{Name: "a" | ssaItoa(i), Typ: argVals[i].SSAType()})
+		}
+		params = NewTuple(vars...)
+	}
+	var results *Tuple
+	if sig != nil {
+		results = sig.Results
+	}
+	thunk := &SSAFunction{
+		name:      fb.fn.name | "__dthunk" | ssaItoa(len(fb.fn.AnonFuncs)+1),
+		Signature: NewSignature(nil, params, results, false),
+		Pkg:       fb.fn.Pkg,
+		Prog:      fb.fn.Prog,
+		parent:    fb.fn,
+	}
+	fb.fn.AnonFuncs = mxutil.Ensure(fb.fn.AnonFuncs, 1)
+	push(fb.fn.AnonFuncs, thunk)
+	recvParam := &SSAParameter{name: "recv", typ: recvType, parent: thunk}
+	thunk.Params = mxutil.Ensure(thunk.Params, 1)
+	push(thunk.Params, recvParam)
+	for i := int32(0); i < int32(len(argVals)); i++ {
+		p := &SSAParameter{name: "a" | ssaItoa(i), typ: argVals[i].SSAType(), parent: thunk}
+		thunk.Params = mxutil.Ensure(thunk.Params, 1)
+		push(thunk.Params, p)
+	}
+	entry := NewSSABasicBlock(thunk, "entry")
+	var retType Type
+	if results != nil && results.Len() == 1 {
+		retType = results.At(0).Typ
+	} else if results != nil && results.Len() > 1 {
+		retType = results
+	}
+	var body SSAValue
+	if mfn != nil {
+		callArgs := []SSAValue{:0:len(thunk.Params)}
+		for _, p := range thunk.Params {
+			push(callArgs, p)
+		}
+		call := &SSACall{Call: SSACallCommon{Value: mfn, Args: callArgs}}
+		call.typ = retType
+		call.name = "t1"
+		call.setBlock(entry)
+		entry.Instrs = mxutil.Ensure(entry.Instrs, 1)
+		push(entry.Instrs, call)
+		body = call
+	} else {
+		invArgs := []SSAValue{:0:len(thunk.Params) - 1}
+		for i := int32(1); i < int32(len(thunk.Params)); i++ {
+			push(invArgs, thunk.Params[i])
+		}
+		inv := &SSAInvoke{X: recvParam, MethodName: methodName, IfaceType: iface, Args: invArgs}
+		inv.typ = retType
+		inv.name = "t1"
+		inv.setBlock(entry)
+		entry.Instrs = mxutil.Ensure(entry.Instrs, 1)
+		push(entry.Instrs, inv)
+		body = inv
+	}
+	ret := &SSAReturn{}
+	if retType != nil {
+		ret.Results = []SSAValue{body}
+	}
+	ret.setBlock(entry)
+	entry.Instrs = mxutil.Ensure(entry.Instrs, 1)
+	push(entry.Instrs, ret)
+	return thunk
 }
 
 // Expression builders.

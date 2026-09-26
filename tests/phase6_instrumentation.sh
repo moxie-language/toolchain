@@ -21,6 +21,15 @@ if [ ! -x "$LEGACY" ]; then
 	exit 0
 fi
 
+# The legacy compiler is a prebuilt binary and the suite never builds it. A
+# stale one silently disagrees with its own source (a changed logAlloc
+# signature showed up as an LLVM verifier failure), so say so instead of
+# reporting a compiler bug that is not there.
+if [ -n "$(find "$ROOT/legacy" -name '*.go' -newer "$LEGACY" -print -quit 2>/dev/null)" ]; then
+	log_skip "phase6" "legacy compiler older than its source; run legacy/build.sh"
+	exit 0
+fi
+
 # fixture <name> copies a fixture directory out of the tree. In-tree
 # directories are built in place by the rest of the suite, but these tests
 # want a scratch copy so a stray build product never lands in the repo.

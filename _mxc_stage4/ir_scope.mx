@@ -1054,6 +1054,66 @@ func dupCaseKey(cv ConstVal) (k string) {
 	return ""
 }
 
+// checkClosureCaptures rejects a closure that captures an outer variable.
+//
+// A Moxie closure is a standalone function that receives everything it needs
+// through parameters: there is no closure environment and no scope chain, so a
+// capture would tie the closure's lifetime to the caller's frame arena. Legacy
+// enforces exactly this on ssa.MakeClosure bindings (restrict.go), which also
+// makes a bound method value a capture - the receiver is the binding. Reading a
+// package-level global is not a capture: globals are not free variables.
+//
+// Like legacy, this applies to user code only: the stdlib uses captures
+// internally (os.ReadFile's method values bind recv, os.Symlink closes over
+// its arguments) and legacy exempts those packages, so flagging them would
+// reject every program that imports os.
+func checkClosureCaptures(p *SSAPackage) {
+	if p == nil || p.Pkg == nil {
+		return
+	}
+	if bst != nil && bst.allowCaptures {
+		return
+	}
+	if !isUserPackagePath(p.Pkg.Path) {
+		return
+	}
+	names := []string{:0:len(p.Members)}
+	for n := range p.Members {
+		names = mxutil.Ensure(names, 1)
+		push(names, n)
+	}
+	for i := int32(1); i < int32(len(names)); i++ {
+		for j := i; j > 0 && names[j] < names[j-1]; j-- {
+			names[j], names[j-1] = names[j-1], names[j]
+		}
+	}
+	for _, n := range names {
+		if f, ok := p.Members[n].(*SSAFunction); ok {
+			checkCaptureFunc(f, 0)
+		}
+	}
+}
+
+func checkCaptureFunc(f *SSAFunction, depth int32) {
+	if f == nil || depth > 32 {
+		return
+	}
+	captured := ""
+	for i := int32(0); i < int32(len(f.FreeVars)); i++ {
+		if i > 0 {
+			captured = captured | ", "
+		}
+		captured = captured | f.FreeVars[i].name
+	}
+	if captured != "" {
+		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+		push(cctx.compileErrors, f.name | ": closure captures outer variable(s) [" | captured | "]; pass as explicit parameter(s)")
+	}
+	for _, af := range f.AnonFuncs {
+		checkCaptureFunc(af, depth+1)
+	}
+}
+
 // Scope dealloc functions: all no-ops in arena model.
 func (e *irEmitter) scopeTrackAlloc(ptrReg string) {}
 func (e *irEmitter) scopeBeforeReturn(r *SSAReturn) {}

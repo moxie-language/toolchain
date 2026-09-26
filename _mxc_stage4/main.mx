@@ -37,6 +37,9 @@ type buildState struct {
 	// extraTags are the -tags values, on top of the target and release tags
 	// buildTagTrue already knows.
 	extraTags []string
+	// allowCaptures relaxes the closure-capture rule for this build. See
+	// setAllowCaptures.
+	allowCaptures bool
 }
 
 var bst *buildState
@@ -1172,6 +1175,13 @@ func pkgHash(p *pkgInfo) (s string) {
 	// of the key: without it an uninstrumented .bc compiled earlier would be
 	// reused for an instrumented build and the sites would never fire.
 	acc = acc | []byte("|P") | []byte(mxutil.AllocPattern())
+	// Whether captures were allowed changes what the compiler accepts from
+	// these sources, so a relaxed build must not satisfy a strict one.
+	caps := "0"
+	if bst.allowCaptures {
+		caps = "1"
+	}
+	acc = acc | []byte("|C") | []byte(caps)
 	hv := fnvHash(acc)
 	bst.pkgKeyMemo[p.path] = hv
 	return hv
@@ -1921,6 +1931,20 @@ func appendBuildTags(v string) {
 // bad regexp is reported before any package is compiled, and the build is
 // forced serial: site ids are handed out in compile order, and parallel
 // package compiles would number two packages' sites from the same counter.
+// setAllowCaptures turns off the closure-capture rejection.
+//
+// Moxie closures do not capture: a closure receives what it needs through its
+// parameters, and legacy rejects a capturing closure outright. stage4 enforces
+// the same rule by default, which is what keeps the two compilers in parity.
+// A tree that predates the rule (smesh's UI registers hundreds of handlers
+// that close over the enclosing frame) can ask for the relaxation explicitly,
+// so the debt is declared in its build files instead of being silent. The flag
+// is part of the package cache key, because a package compiled with it must
+// not satisfy a build that wants the rule enforced.
+func setAllowCaptures() {
+	bst.allowCaptures = true
+}
+
 func setPrintAllocs(pat string) {
 	if perr := mxutil.ResetAllocSites(pat); perr != "" {
 		fatal("-print-allocs " | pat | ": " | perr)
@@ -4440,6 +4464,9 @@ func cmdTest(args []string) {
 		} else if args[i] == "-print-allocs" && i+1 < int32(len(args)) {
 			setPrintAllocs(args[i+1])
 			i += 2
+		} else if args[i] == "-allow-closure-captures" {
+			setAllowCaptures()
+			i++
 		} else {
 			pkgPath = args[i]
 			i++
@@ -5234,6 +5261,9 @@ func main() {
 		} else if args[i] == "-print-allocs" && i+1 < int32(len(args)) {
 			setPrintAllocs(args[i+1])
 			i += 2
+		} else if args[i] == "-allow-closure-captures" {
+			setAllowCaptures()
+			i++
 		} else if args[i] == "-gc=dealloc" || args[i] == "-buildmode=c-shared" || args[i] == "-x" || args[i] == "-work" {
 			i++
 		} else if pkgPath == "" {

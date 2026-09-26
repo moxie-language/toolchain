@@ -1,0 +1,45 @@
+// Regression: a deferred interface method call was dropped in silence.
+//
+// buildDeferStmt lowered `defer c.Close()` by building a bound method value,
+// which the method-value path cannot produce for an interface receiver - that
+// call is an invoke, an instruction rather than a value - so the defer was
+// dropped and Close never ran. A deferred method call now goes through a thunk
+// whose first parameter is the receiver, the way legacy lowers it, which also
+// keeps `defer c.Close()` free of the capture the bound wrapper used to make.
+//
+// The deferred calls must run when their enclosing function returns, so each
+// step checks the effect before moving on.
+package main
+
+type Counter struct {
+	n int32
+}
+
+func (c *Counter) Close() {
+	c.n = c.n + 1
+}
+
+type Closer interface {
+	Close()
+}
+
+func deferConcrete(c *Counter) {
+	defer c.Close()
+}
+
+func deferInterface(c Closer) {
+	defer c.Close()
+}
+
+func main() {
+	c := &Counter{}
+	deferConcrete(c)
+	if c.n != 1 {
+		panic("deferred concrete method call did not run")
+	}
+	deferInterface(c)
+	if c.n != 2 {
+		panic("deferred interface method call did not run")
+	}
+	println("ok")
+}
