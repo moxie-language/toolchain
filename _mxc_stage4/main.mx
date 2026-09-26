@@ -2714,6 +2714,17 @@ func mxhWriteTypeName(b *mxhBuf, objName string, v *TypeName) {
 		return
 	}
 	typ := v.Typ
+	// An alias: this TypeName points at another type object. Serialize the
+	// target, not the target's underlying and methods under this name. Writing
+	// it as a `type` line rebuilt the target as a clone in every importer, and
+	// a method called through the alias then mangled to the alias's package
+	// (crypto/ec.(*FieldVal).Equals against secp256k1's definition).
+	if named, isNamed := typ.(*Named); isNamed && named.Obj != v {
+		b.w("alias ") ; b.w(objName) ; b.w(" ")
+		typeDescWrite(b, named)
+		b.nl()
+		return
+	}
 	if named, ok := typ.(*Named); ok {
 		if ui, ok2 := named.Under.(*TCInterface); ok2 && !ui.IsEmpty() {
 			complete := true
@@ -3080,6 +3091,15 @@ func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
 				named.TParams = tparams
 				pkg.Scope.Insert(tn)
 			}
+		} else if mxhHasPrefix(d, ls2, le2, "alias ") {
+			ws2, we2 := mxhNextWord(d, ls2+6, le2)
+			if ws2 < we2 {
+				actualName, tparams := parseMxhTParams(string(d[ws2:we2]))
+				tn := NewTypeName(pkg, actualName, nil)
+				named := NewNamed(tn, nil)
+				named.TParams = tparams
+				pkg.Scope.Insert(tn)
+			}
 		} else if mxhHasPrefix(d, ls2, le2, "iface ") {
 			ws2, we2 := mxhNextWord(d, ls2+6, le2)
 			if ws2 < we2 {
@@ -3122,6 +3142,26 @@ func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
 				named.Under = NewTCStruct(nil, nil)
 			} else {
 				named.Under = parseTypeDesc(string(d[ts:te]))
+			}
+		} else if mxhHasPrefix(d, ls2, le2, "alias ") {
+			ws2, we2 := mxhNextWord(d, ls2+6, le2)
+			if ws2 >= we2 {
+				continue
+			}
+			ts, te := mxhNextWord(d, we2, le2)
+			aliasName, _ := parseMxhTParams(string(d[ws2:we2]))
+			obj := pkg.Scope.Lookup(aliasName)
+			if obj == nil {
+				continue
+			}
+			tn, istn := obj.(*TypeName)
+			if !istn {
+				continue
+			}
+			// Bind to the target type object so alias and target are the same
+			// type, exactly as the defining package sees them.
+			if ts < te {
+				tn.Typ = parseTypeDesc(string(d[ts:te]))
 			}
 		} else if mxhHasPrefix(d, ls2, le2, "iface ") {
 			ws2, we2 := mxhNextWord(d, ls2+6, le2)

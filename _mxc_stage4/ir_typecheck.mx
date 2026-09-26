@@ -301,16 +301,13 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 			}
 		}
 	}
-	// Bind aliases whose target is local to this package. `type A = B` must
-	// reach B's type object, or A and B are distinct types and `var y B = anA`
-	// is rejected. Two shapes keep the Named form:
-	//  - interface targets: the SSA builder's interface call/return typing
-	//    depends on Named-ness (ConstVal = interface{ String() string });
-	//  - a Named from another package: re-exporting it (os.FileMode =
-	//    fs.FileMode, ec.FieldVal = secp256k1.FieldVal) round-trips through the
-	//    export/import path, which rebuilds the target as a clone carrying its
-	//    methods; binding here orphaned that clone and the link failed on
-	//    crypto/ec.(*FieldVal).Equals.
+	// Bind aliases before the declarations that name them resolve. `type A = B`
+	// must reach B's type object, or A and B are distinct types and
+	// `var y B = anA` is rejected. Interface targets keep the Named form: the
+	// SSA builder's interface call/return typing depends on Named-ness
+	// (ConstVal = interface{ String() string }). Cross-package targets bind too;
+	// the mxh writer emits an `alias` line for them so importers get the same
+	// type object instead of a clone carrying the target's methods.
 	boundAlias := map[string]bool{}
 	for pass := int32(0); pass < 8; pass++ {
 		progress := false
@@ -329,9 +326,6 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 				continue
 			}
 			if _, isIface := SafeUnderlying(target).(*TCInterface); isIface {
-				continue
-			}
-			if tgtNamed, isNamed := target.(*Named); isNamed && tgtNamed.Obj != nil && tgtNamed.Obj.Pkg != nil && tgtNamed.Obj.Pkg.Path != pkg.Path {
 				continue
 			}
 			tn.Typ = target
