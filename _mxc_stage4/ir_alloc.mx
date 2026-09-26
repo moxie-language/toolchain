@@ -274,58 +274,6 @@ func (e *irEmitter) inferAllocTypeFromCallArgs(a *SSAAlloc) (s string) {
 	return ""
 }
 
-func (e *irEmitter) inferAllocTypeFromPushUsage(a *SSAAlloc) (s string) {
-	allocName := a.SSAName()
-	loadNames := map[string]bool{}
-	for _, b := range e.curFunc.Blocks {
-		for _, instr := range b.Instrs {
-			if uop, ok := instr.(*SSAUnOp); ok && uop.Op == OpMul && uop.X != nil && uop.X.SSAName() == allocName {
-				loadNames[uop.SSAName()] = true
-			}
-		}
-	}
-	if len(loadNames) == 0 {
-		return ""
-	}
-	for _, b := range e.curFunc.Blocks {
-		for _, instr := range b.Instrs {
-			call, ok := instr.(*SSACall)
-			if !ok {
-				continue
-			}
-			bi, ok2 := call.Call.Value.(*SSABuiltin)
-			if !ok2 || bi.SSAName() != "push" {
-				continue
-			}
-			if len(call.Call.Args) < 2 {
-				continue
-			}
-			for j := 1; j < len(call.Call.Args); j++ {
-				arg := call.Call.Args[j]
-				if arg == nil {
-					continue
-				}
-				if !loadNames[arg.SSAName()] {
-					continue
-				}
-				sliceArg := call.Call.Args[0]
-				if sl, ok3 := SafeUnderlying(sliceArg.SSAType()).(*Slice); ok3 {
-					et := e.llvmType(sl.Elem)
-					if et != "" && et != "void" && et != "ptr" && len(et) > 0 && et[0] == '{' {
-						return et
-					}
-				}
-				if sl, ok3 := sliceArg.SSAType().(*Slice); ok3 {
-					et := e.llvmType(sl.Elem)
-					if et != "" && et != "void" && et != "ptr" && len(et) > 0 && et[0] == '{' {
-						return et
-					}
-				}
-			}
-		}
-	}
-	return ""
-}
 
 func (e *irEmitter) inferAllocTypeFromFieldAddrs(a *SSAAlloc, baseType string) (s string) {
 	allocName := a.SSAName()
@@ -413,50 +361,6 @@ func (e *irEmitter) inferAllocTypeFromFieldAddrs(a *SSAAlloc, baseType string) (
 	return s | "}"
 }
 
-func (e *irEmitter) inferAllocTypeFromUsage(a *SSAAlloc) (s string) {
-	allocName := a.SSAName()
-	loadNames := map[string]bool{}
-	for _, b := range e.curFunc.Blocks {
-		for _, instr := range b.Instrs {
-			load, ok := instr.(*SSAUnOp)
-			if !ok || load.Op != OpMul {
-				continue
-			}
-			if load.X != nil && load.X.SSAName() == allocName {
-				loadNames[load.SSAName()] = true
-			}
-		}
-	}
-	if len(loadNames) == 0 {
-		return "ptr"
-	}
-	for _, b := range e.curFunc.Blocks {
-		for _, instr := range b.Instrs {
-			switch u := instr.(type) {
-			case *SSASlice:
-				if u.X != nil && loadNames[u.X.SSAName()] {
-					return e.sliceType()
-				}
-			case *SSAIndexAddr:
-				if u.X != nil && loadNames[u.X.SSAName()] {
-					return e.sliceType()
-				}
-			case *SSACall:
-				for _, arg := range u.Call.Args {
-					if arg != nil && loadNames[arg.SSAName()] {
-						if bi, ok2 := u.Call.Value.(*SSABuiltin); ok2 {
-							nm := bi.SSAName()
-							if nm == "append" || nm == "copy" || nm == "len" || nm == "cap" {
-								return e.sliceType()
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-	return "ptr"
-}
 
 func (e *irEmitter) emitZeroReg(reg string, typ Type) {
 	rt := e.llvmType(typ)
