@@ -98,6 +98,17 @@ func ssaGlobalRoot(v SSAValue, depth int32) (s string) {
 	return ""
 }
 
+// isInitFuncName mirrors legacy restrict.go isInitFunc: package initialization
+// code may set globals. The prefix rule is legacy's, kept verbatim so both
+// compilers accept exactly the same functions - the constructor an app calls
+// to build its state lives in the root arena and is named initState/initX.
+func isInitFuncName(name string) bool {
+	if name == "init" {
+		return true
+	}
+	return len(name) > 4 && name[:4] == "init"
+}
+
 // checkGlobalMutation rejects stores that mutate package-level globals in
 // user code. Globals are initialized by __varinit (package var initializers)
 // and immutable afterward. Sovereign self-mutating types are mutated through
@@ -110,7 +121,7 @@ func checkGlobalMutation(f *SSAFunction) {
 	if !isUserPackagePath(f.Pkg.Pkg.Path) {
 		return
 	}
-	if f.name == "__varinit" {
+	if f.name == "__varinit" || isInitFuncName(f.name) {
 		return
 	}
 	// Library packages without a real main get their package-var
