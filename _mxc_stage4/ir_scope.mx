@@ -1054,6 +1054,200 @@ func dupCaseKey(cv ConstVal) (k string) {
 	return ""
 }
 
+// checkMissingReturn rejects a function with results whose body can fall off
+// the end. go/types rejects it on the legacy side ("missing return"); stage4
+// compiled it and returned the zero value, so a forgotten return path was
+// accepted in silence on one side only.
+//
+// Applies to every package, the stdlib included: legacy's check lives in
+// go/types, which type-checks all of them. The rules are the Go spec's
+// terminating statements, mirroring go/types' isTerminating (return.go) so the
+// two compilers agree on which bodies are complete. A call to a name spelled
+// "panic" is accepted as terminating without resolving it, which can only make
+// this check more permissive than go/types, never stricter: a stricter check
+// would reject valid stdlib code.
+func checkMissingReturn(files []*syntax.File) {
+	for _, f := range files {
+		if f == nil {
+			continue
+		}
+		decls := f.DeclList
+		for _, d := range decls {
+			fd, ok := d.(*syntax.FuncDecl)
+			if !ok || fd == nil || fd.Body == nil || fd.Type == nil {
+				continue
+			}
+			if len(fd.Type.ResultList) == 0 {
+				continue
+			}
+			if stmtsTerminate(fd.Body.List, "") {
+				continue
+			}
+			where := fd.Name.Value
+			if fd.Recv != nil {
+				where = where | " (method)"
+			}
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, where | ": missing return")
+		}
+	}
+}
+
+// stmtsTerminate reports whether a statement list ends in a terminating
+// statement. Trailing empty statements are permitted, as in go/types.
+func stmtsTerminate(list []syntax.Stmt, label string) (ok bool) {
+	for i := int32(len(list)) - 1; i >= 0; i-- {
+		if _, isEmpty := list[i].(*syntax.EmptyStmt); isEmpty {
+			continue
+		}
+		return stmtTerminates(list[i], label)
+	}
+	return false
+}
+
+func stmtTerminates(s syntax.Stmt, label string) (ok bool) {
+	switch st := s.(type) {
+	case *syntax.LabeledStmt:
+		inner := ""
+		if st.Label != nil {
+			inner = st.Label.Value
+		}
+		if st.Stmt == nil {
+			return false
+		}
+		return stmtTerminates(st.Stmt, inner)
+	case *syntax.ExprStmt:
+		call, isCall := st.X.(*syntax.CallExpr)
+		if !isCall || call == nil {
+			return false
+		}
+		name, isName := call.Fun.(*syntax.Name)
+		return isName && name.Value == "panic"
+	case *syntax.ReturnStmt:
+		return true
+	case *syntax.BranchStmt:
+		// Moxie has no fallthrough token, so goto is the only branch that
+		// ends a statement list.
+		return st.Tok == token.Goto
+	case *syntax.BlockStmt:
+		return stmtsTerminate(st.List, "")
+	case *syntax.IfStmt:
+		if st.Then == nil || st.Else == nil {
+			return false
+		}
+		return stmtsTerminate(st.Then.List, "") && stmtTerminates(st.Else, "")
+	case *syntax.SwitchStmt:
+		return switchTerminates(st.Body, label)
+	case *syntax.SelectStmt:
+		for _, cc := range st.Body {
+			if cc == nil {
+				return false
+			}
+			if !stmtsTerminate(cc.Body, "") || hasBreakList(cc.Body, label, true) {
+				return false
+			}
+		}
+		return true
+	case *syntax.ForStmt:
+		// A range clause is carried as the loop's init, and a range loop
+		// always ends, so it is never terminating.
+		if _, isRange := st.Init.(*syntax.RangeClause); isRange {
+			return false
+		}
+		if st.Cond != nil || st.Body == nil {
+			return false
+		}
+		return !hasBreakList(st.Body.List, label, true)
+	}
+	return false
+}
+
+// switchTerminates reports whether a switch both covers every value (there is
+// a default clause) and leaves no clause able to fall out of it.
+func switchTerminates(body []*syntax.CaseClause, label string) (ok bool) {
+	hasDefault := false
+	for _, cc := range body {
+		if cc == nil {
+			return false
+		}
+		if cc.Cases == nil {
+			hasDefault = true
+		}
+		if !stmtsTerminate(cc.Body, "") || hasBreakList(cc.Body, label, true) {
+			return false
+		}
+	}
+	return hasDefault
+}
+
+// hasBreakList reports whether any statement in list breaks out of the
+// breakable statement named label, or (when implicit is set) out of the
+// innermost one enclosing it.
+func hasBreakList(list []syntax.Stmt, label string, implicit bool) (ok bool) {
+	for _, s := range list {
+		if hasBreakIn(s, label, implicit) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasBreakIn(s syntax.Stmt, label string, implicit bool) (ok bool) {
+	switch st := s.(type) {
+	case *syntax.LabeledStmt:
+		if st.Stmt == nil {
+			return false
+		}
+		return hasBreakIn(st.Stmt, label, implicit)
+	case *syntax.BranchStmt:
+		if st.Tok != token.Break {
+			return false
+		}
+		if st.Label == nil {
+			return implicit
+		}
+		return st.Label.Value == label
+	case *syntax.BlockStmt:
+		return hasBreakList(st.List, label, implicit)
+	case *syntax.IfStmt:
+		if st.Then != nil && hasBreakList(st.Then.List, label, implicit) {
+			return true
+		}
+		if st.Else != nil && hasBreakIn(st.Else, label, implicit) {
+			return true
+		}
+		return false
+	case *syntax.SwitchStmt:
+		// An unlabelled break inside a nested switch belongs to that switch,
+		// so it only counts against label when one is being matched.
+		if label == "" {
+			return false
+		}
+		for _, cc := range st.Body {
+			if cc != nil && hasBreakList(cc.Body, label, false) {
+				return true
+			}
+		}
+		return false
+	case *syntax.SelectStmt:
+		if label == "" {
+			return false
+		}
+		for _, cc := range st.Body {
+			if cc != nil && hasBreakList(cc.Body, label, false) {
+				return true
+			}
+		}
+		return false
+	case *syntax.ForStmt:
+		if label == "" || st.Body == nil {
+			return false
+		}
+		return hasBreakList(st.Body.List, label, false)
+	}
+	return false
+}
+
 // checkClosureCaptures rejects a closure that captures an outer variable.
 //
 // A Moxie closure is a standalone function that receives everything it needs

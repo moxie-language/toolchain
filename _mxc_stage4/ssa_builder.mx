@@ -86,7 +86,7 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 		pb.buildFile(f)
 	}
 	pb.curFileScope = nil
-	if len(pb.varInits) > 0 {
+	if len(pb.varInits) > 0 || pb.initFn != nil {
 		pb.buildVarInits()
 	}
 	// Restriction checks run before the compileErrors gate in ir_typecheck.
@@ -98,6 +98,7 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 	checkSovereignLoopDecls(p, files)
 	checkShadowing(files)
 	checkDuplicateCases(p, files)
+	checkMissingReturn(files)
 	checkClosureCaptures(p)
 	scanWasmSpawnTargets(p)
 	return p
@@ -109,6 +110,12 @@ type ssaPkgBuilder struct {
 	info          *Info
 	prog          *SSAProgram
 	varInits      []*syntax.VarDecl
+	// initFn is the package's single init() function, registered like any
+	// other function and called at the end of the package entry that
+	// runtime.initAll invokes. Legacy allows one init() per package (main
+	// packages excepted) and runs it; stage4 skipped every init after printing
+	// a message, so a library's setup never happened.
+	initFn        *SSAFunction
 	fileScopes    map[*syntax.File]*Scope
 	curFileScope  *Scope
 	varInitScopes map[*syntax.VarDecl]*Scope
@@ -434,8 +441,16 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 		return
 	}
 	if d.Name.Value == "init" {
-		mxutil.WriteStr(2, "compile error: init() is not allowed; use main() for package initialization\n")
-		return
+		if pb.pkg.Pkg.Name == "main" {
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, "init() is not allowed in main package: use main() for program entry")
+			return
+		}
+		if pb.initFn != nil {
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, "at most one init() per package")
+			return
+		}
 	}
 	var obj *TCFunc
 	if o := pb.pkg.Pkg.Scope.Lookup(d.Name.Value); o != nil {
@@ -466,6 +481,9 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 		fn.isExternC = true
 	}
 	pb.pkg.SetMember(fn.name, fn)
+	if d.Name.Value == "init" {
+		pb.initFn = fn
+	}
 }
 
 
@@ -833,6 +851,12 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 			}
 			fb.buildStore(name, rhs)
 		}
+	}
+	// Package-level variable initializers run first, then init(), as in Go.
+	if pb.initFn != nil {
+		callInit := &SSACall{Call: SSACallCommon{Value: pb.initFn}}
+		callInit.name = "pinit"
+		fb.emit(callInit)
 	}
 	fb.emit(&SSAReturn{})
 }
