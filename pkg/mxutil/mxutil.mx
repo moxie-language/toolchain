@@ -23,27 +23,56 @@ func cWritefile(path unsafe.Pointer, pathLen int32, data unsafe.Pointer, dataLen
 //export mxc_mkdir
 func cMkdir(path unsafe.Pointer, pathLen int32, mode uint32) (n int32)
 
-var TargetOS string
-var TargetArch string
-
+// ImportSeg is one source file's import block in the concatenated package
+// stream, keyed by the concat line its body starts at.
 type ImportSeg struct {
 	OutStart int32
 	Specs    []string
 }
 
-var ConcatImportSegs []ImportSeg
+// targetConfig holds the mutable build configuration. It is a sovereign
+// self-mutating type because SetTarget writes it during a build and package
+// globals are immutable outside init(): mutable state must live in a type
+// mutated through its methods, not in a bare package variable.
+type targetConfig struct {
+	os   string
+	arch string
+	segs []ImportSeg
+}
+
+func (c *targetConfig) setTarget(os, arch string) {
+	c.os = os
+	c.arch = arch
+}
+
+func (c *targetConfig) appendSeg(seg ImportSeg) {
+	c.segs = Ensure(c.segs, 1)
+	push(c.segs, seg)
+}
+
+var target targetConfig
 
 func SetTarget(os, arch string) {
-	TargetOS = os
-	TargetArch = arch
+	target.setTarget(os, arch)
+}
+
+func TargetOS() (s string) {
+	return target.os
+}
+
+func TargetArch() (s string) {
+	return target.arch
+}
+
+func ConcatImportSegs() (segs []ImportSeg) {
+	return target.segs
 }
 
 func ResetConcatImportSegs() {
 }
 
 func AppendConcatImportSeg(seg ImportSeg) {
-	ConcatImportSegs = Ensure(ConcatImportSegs, 1)
-	push(ConcatImportSegs, seg)
+	target.appendSeg(seg)
 }
 
 func WriteStr(fd int32, s string) {

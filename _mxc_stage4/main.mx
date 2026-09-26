@@ -451,7 +451,7 @@ func compilerHash() (s string) {
 // unrepresentable instead of merely unlikely.
 func moxieCacheDir() (s string) {
 	return mxutil.JoinPath(mxutil.JoinPath(getMoxiePath(), "cache"),
-		"mxc-" | mxcVersion() | "-" | compilerHash() | "-" | mxutil.TargetOS | "-" | mxutil.TargetArch)
+		"mxc-" | mxcVersion() | "-" | compilerHash() | "-" | mxutil.TargetOS() | "-" | mxutil.TargetArch())
 }
 
 
@@ -544,7 +544,7 @@ func parseModuleName(data string) (name string) {
 // file meant whichever target built last silently broke the other.
 func runtimeBakePath(sysroot string) (s string) {
 	name := "runtime_go.bc"
-	if mxutil.TargetArch == "wasm" {
+	if mxutil.TargetArch() == "wasm" {
 		name = "runtime_go_wasm.bc"
 	}
 	return mxutil.JoinPath(sysroot, name)
@@ -1153,7 +1153,7 @@ func pkgHash(p *pkgInfo) (s string) {
 	// and for a 64-bit native target produce incompatible bitcode (argument
 	// widths differ), and reusing one for the other yields a wasm module
 	// with 64-bit signatures that wasm-ld warns about or miscompiles.
-	acc := []byte(mxutil.TargetOS | "/" | mxutil.TargetArch | "|")
+	acc := []byte(mxutil.TargetOS() | "/" | mxutil.TargetArch() | "|")
 	acc = acc | []byte(pkgCacheKey(p.dir, p.files))
 	for _, imp := range sorted {
 		if dh, ok := bst.pkgKeyMemo[imp]; ok {
@@ -1600,7 +1600,7 @@ func shouldSkipFile(name string) (ok bool) {
 	if mxutil.HasSuffix(base, ".mx") {
 		base = base[:len(base)-3]
 	}
-	if mxutil.TargetArch == "wasm" {
+	if mxutil.TargetArch() == "wasm" {
 		for _, a := range []string{"amd64", "arm64", "386", "linux", "darwin", "posix"} {
 			if fileContainsPart(base, a) {
 				return true
@@ -1643,7 +1643,7 @@ func collectAsmFiles(dir string) (ss []string) {
 			if len(base) > 2 {
 				base = base[:len(base)-2]
 			}
-			if mxutil.TargetArch == "wasm" {
+			if mxutil.TargetArch() == "wasm" {
 				skip := false
 				for _, a := range []string{"amd64", "arm64", "386"} {
 					if fileContainsPart(base, a) {
@@ -1907,14 +1907,14 @@ func buildTagTrue(tag string) (ok bool) {
 		// wasm32 pulls in Linux-only files (e.g. secalloc's mmap-backed
 		// guarded arenas) whose syscall constants and mmap/munmap do not
 		// exist there.
-		return mxutil.TargetArch != "wasm"
+		return mxutil.TargetArch() != "wasm"
 	case "unix":
 		// Go's unix tag is a composite of the unix-like GOOS values and is
 		// false for js, so syscall's unix files must not be selected for
 		// wasm - syscall_js.mx is the implementation there. Files that do
 		// want wasm spell it out: src/time/sys_unix.mx is
 		// 'unix || (js && wasm)'.
-		return mxutil.TargetOS != "js"
+		return mxutil.TargetOS() != "js"
 	case "go1.9", "go1.10", "go1.11", "go1.12", "go1.13", "go1.14",
 		"go1.15", "go1.16", "go1.17", "go1.18", "go1.19", "go1.20",
 		"go1.21", "go1.22", "go1.23", "go1.24",
@@ -1924,9 +1924,9 @@ func buildTagTrue(tag string) (ok bool) {
 		"purego", "osusergo", "math_big_pure_go", "moxie.unicore":
 		return true
 	case "wasm", "js", "moxie.wasm":
-		return mxutil.TargetArch == "wasm"
+		return mxutil.TargetArch() == "wasm"
 	case "moxie.linux":
-		return mxutil.TargetArch != "wasm"
+		return mxutil.TargetArch() != "wasm"
 	case "wasm_unknown":
 		return false
 	}
@@ -2041,7 +2041,7 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 	bcFiles := listFiles(dir, ".bc")
 	allMx := mxFiles
 	var forbidden []string
-	if mxutil.TargetArch == "wasm" {
+	if mxutil.TargetArch() == "wasm" {
 		forbidden = []string{"none", "linux", "unix", "darwin", "amd64", "arm64",
 			"ignore", "compiler_bootstrap",
 			"scheduler.tasks", "scheduler.cores", "scheduler.asyncify",
@@ -3458,30 +3458,30 @@ func printHelp() {
 }
 
 func printEnv() {
-	if mxutil.TargetOS == "" {
+	if mxutil.TargetOS() == "" {
 		mxutil.SetTarget("linux", "amd64")
 	}
-	mxutil.WriteStr(1, "GOOS=\"" | mxutil.TargetOS | "\"\n")
-	mxutil.WriteStr(1, "GOARCH=\"" | mxutil.TargetArch | "\"\n")
+	mxutil.WriteStr(1, "GOOS=\"" | mxutil.TargetOS() | "\"\n")
+	mxutil.WriteStr(1, "GOARCH=\"" | mxutil.TargetArch() | "\"\n")
 	mxutil.WriteStr(1, "MOXIEROOT=\"" | getenv("MOXIEROOT") | "\"\n")
 	mxutil.WriteStr(1, "MOXIEPATH=\"" | getMoxiePath() | "\"\n")
 	mxutil.WriteStr(1, "CACHE=\"" | moxieCacheDir() | "\"\n")
 }
 
 func printInfo() {
-	if mxutil.TargetOS == "" {
+	if mxutil.TargetOS() == "" {
 		mxutil.SetTarget("linux", "amd64")
 	}
 	triple := "x86_64-unknown-linux-musleabihf"
-	if mxutil.TargetArch == "arm64" {
+	if mxutil.TargetArch() == "arm64" {
 		triple = "aarch64-unknown-linux-musl"
 	}
-	if mxutil.TargetArch == "wasm" {
+	if mxutil.TargetArch() == "wasm" {
 		triple = "wasm32-unknown-wasi"
 	}
 	mxutil.WriteStr(1, "LLVM triple:       " | triple | "\n")
-	mxutil.WriteStr(1, "GOOS:              " | mxutil.TargetOS | "\n")
-	mxutil.WriteStr(1, "GOARCH:            " | mxutil.TargetArch | "\n")
+	mxutil.WriteStr(1, "GOOS:              " | mxutil.TargetOS() | "\n")
+	mxutil.WriteStr(1, "GOARCH:            " | mxutil.TargetArch() | "\n")
 	mxutil.WriteStr(1, "build tags:        \n")
 	mxutil.WriteStr(1, "scheduler:         async\n")
 }
@@ -4974,7 +4974,7 @@ func main() {
 	SetUniverseGlobals(cctx.universe)
 	initBuildState()
 	bst.buildJobs = adaptiveJobs()
-	if mxutil.TargetArch == "wasm" {
+	if mxutil.TargetArch() == "wasm" {
 		// wasm32 has no fork, no threads and no worker fds, so the
 		// compiler's parallel package pipeline cannot exist there. Force the
 		// serial path rather than letting it reference the worker IPC.
@@ -5161,10 +5161,10 @@ func main() {
 	root := moxieRoot()
 	applyTargetFlag(targetFlag)
 	triple := "x86_64-unknown-linux-musleabihf"
-	if mxutil.TargetArch == "wasm" {
+	if mxutil.TargetArch() == "wasm" {
 		triple = "wasm32-unknown-wasi"
 	}
-	isWasm := mxutil.TargetArch == "wasm"
+	isWasm := mxutil.TargetArch() == "wasm"
 	clang := "clang-22"
 
 	// A target that names a directory on disk (./pkg, ../pkg, /abs/pkg, or
@@ -5779,7 +5779,7 @@ func memLine(tag string) {
 // in a single pass. Each package's working set dies before the next begins.
 func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, forceRebuild, printIR bool) (bcs []string, hasRT bool) {
 	var deferredClang [][]string
-	isWasmTarget := mxutil.TargetArch == "wasm"
+	isWasmTarget := mxutil.TargetArch() == "wasm"
 	if cctx.dispLastUse == nil {
 		cctx.dispLastUse = map[string]int32{}
 		byPathL := map[string]*pkgInfo{}
@@ -6113,10 +6113,10 @@ func serializePkgMeta(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase, root, m
 	// The target rides along as its own fields. The triple cannot stand in for
 	// them: both wasm targets share "wasm32-unknown-wasi", so a worker that
 	// reconstructed js-vs-wasi from it hashed the same package under two keys.
-	b = b | mxutil.TargetOS
+	b = b | mxutil.TargetOS()
 	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
-	b = b | mxutil.TargetArch
+	b = b | mxutil.TargetArch()
 	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	b = b | clang
@@ -6845,7 +6845,7 @@ func cmdBuildRuntime() {
 	// resolves -target before anything else, and ensureRuntimeBake calls
 	// this when an application needs a bake that does not exist yet.
 	triple := "x86_64-unknown-linux-musleabihf"
-	if mxutil.TargetArch == "wasm" {
+	if mxutil.TargetArch() == "wasm" {
 		triple = "wasm32-unknown-wasi"
 	}
 	clang := "clang-22"
