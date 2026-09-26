@@ -12,7 +12,13 @@ MOXIEROOT="$SCRIPT_DIR"
 export MOXIEROOT
 
 MOXIE="${MOXIE:-./moxie}"
-TMPBASE="${TMPBASE:-/home/mleku/tmp/mxtest}"
+# Stage the generated stdlib test packages inside the module. Under a temp
+# path outside it they are "command-line-arguments", so the user-code gate
+# (language restrictions, assignability checks) treats stdlib test code as
+# user code and rejects things legacy accepts - e.g. crypto/ec/schnorr
+# assigns through the legitimate `type ModNScalar = secp256k1.ModNScalar`
+# alias, which stage4 does not model yet.
+TMPBASE="${TMPBASE:-$SCRIPT_DIR/tmp/mxtest}"
 PASSED=0
 FAILED=0
 ERRORS=""

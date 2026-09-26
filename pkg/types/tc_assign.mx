@@ -1,5 +1,18 @@
 package types
 
+// predeclaredAlias returns the underlying type of the predeclared aliases
+// byte (uint8) and rune (int32), or ok=false for anything else.
+func predeclaredAlias(T Type) (u Type, ok bool) {
+	n, isNamed := T.(*Named)
+	if !isNamed || n.Obj == nil {
+		return nil, false
+	}
+	if n.Obj.Name == "byte" || n.Obj.Name == "rune" {
+		return n.Under, true
+	}
+	return nil, false
+}
+
 // Identical reports whether T and U are identical types under Moxie rules:
 // - string = []byte (Moxie text unification)
 // - int32 = int32, uint32 = uint32 (enforced via universe scope, but checked here too)
@@ -9,6 +22,16 @@ func Identical(T, U Type) (ok bool) {
 	}
 	if T == nil || U == nil {
 		return false
+	}
+	// byte and rune are ALIASES in Go (uint8 and int32); stage4 models them as
+	// named types with those underlying types, so identity has to look through
+	// the name or [32]byte and [32]uint8 stop matching - which is exactly the
+	// mismatch the assignability check found in smesh's nip44.
+	if a, isAlias := predeclaredAlias(T); isAlias {
+		T = a
+	}
+	if a, isAlias := predeclaredAlias(U); isAlias {
+		U = a
 	}
 	switch t := T.(type) {
 	case *Basic:
@@ -203,12 +226,53 @@ func Assignable(V, T Type) (ok bool) {
 	return false
 }
 
+// ConcreteAssignTypes reports whether both types are resolved enough for
+// Assignable to be trusted in the compiler's build path. Interfaces and type
+// parameters are skipped there: their method sets and instantiations may not
+// be resolved yet, and a false error is worse than a missing one.
+func ConcreteAssignTypes(V, T Type) (ok bool) {
+	if V == nil || T == nil {
+		return false
+	}
+	if _, isTP := V.(*TypeParam); isTP {
+		return false
+	}
+	if _, isTP := T.(*TypeParam); isTP {
+		return false
+	}
+	if _, isTP := SafeUnderlying(V).(*TypeParam); isTP {
+		return false
+	}
+	if _, isTP := SafeUnderlying(T).(*TypeParam); isTP {
+		return false
+	}
+	if _, isIface := SafeUnderlying(V).(*TCInterface); isIface {
+		return false
+	}
+	if _, isIface := SafeUnderlying(T).(*TCInterface); isIface {
+		return false
+	}
+	// An untyped type on either side means the type is not resolved yet (a
+	// bare constant, or a variable whose type came from one). Untyped values
+	// are handled by checkAssignable's constant rule.
+	if bv, isUntyped := SafeUnderlying(V).(*Basic); isUntyped && bv.Info&IsUntyped != 0 {
+		return false
+	}
+	if bt, isUntypedT := SafeUnderlying(T).(*Basic); isUntypedT && bt.Info&IsUntyped != 0 {
+		return false
+	}
+	return true
+}
+
 func isNilable(T Type) (ok bool) {
 	switch SafeUnderlying(T).(type) {
 	case *Pointer, *Slice, *TCMap, *TCChan, *Signature, *TCInterface:
 		return true
 	}
-	return false
+	// string and []byte are one type in Moxie, so nil is a valid empty
+	// string just as it is a valid empty byte slice. Go's checker has no nil
+	// string; the runtime's Goexit passes nil for "no message".
+	return isTextType(T)
 }
 
 func untypedAssignable(V *Basic, T Type) (ok bool) {

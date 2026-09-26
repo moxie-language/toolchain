@@ -1445,6 +1445,95 @@ func (fb *ssaFuncBuilder) coerceToInterface(val SSAValue, targetType Type) (s SS
 	return val
 }
 
+// checkAssignable reports a value that cannot be assigned to the target type,
+// mirroring the go/types diagnostic the legacy compiler gets for free. stage4
+// accepted every mismatch - `var x int32 = "s"` compiled and printed 2288828
+// before crashing - because nothing consulted the type rules while building.
+// Interfaces and type parameters are skipped: their method sets and
+// instantiations may not be resolved yet, and a false error is worse than a
+// missing one.
+func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
+	if val == nil || T == nil {
+		return
+	}
+	// User code only, like the language restrictions: the stdlib carries
+	// latent assignability errors that go/types also reports but the legacy
+	// loader never surfaces, and clearing them is its own cleanup. The real
+	// fix for that is recorded as an open issue; this is a fail-loud stop for
+	// the code the compiler is asked to check.
+	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
+		return
+	}
+	if !isUserPackagePath(fb.fn.Pkg.Pkg.Path) {
+		return
+	}
+	V := val.SSAType()
+	if V == nil {
+		return
+	}
+	if Assignable(V, T) {
+		return
+	}
+	// Constants and untyped values arrive with a default or unresolved type
+	// (an untyped int is int32, a short-declared "s" keeps untyped string), so
+	// Assignable cannot see the untypedness that makes `var x uint32 = PrimeRK`
+	// legal while `var x int32 = "s"` is not. Compare kind classes for those
+	// instead: only a mismatch between two known classes is reported.
+	_, isConst := val.(*SSAConst)
+	_, isNamedConst := val.(*SSANamedConst)
+	untypedInvolved := false
+	if bv, isB := SafeUnderlying(V).(*Basic); isB && bv.Info&IsUntyped != 0 {
+		untypedInvolved = true
+	}
+	if bt, isB := SafeUnderlying(T).(*Basic); isB && bt.Info&IsUntyped != 0 {
+		untypedInvolved = true
+	}
+	if isConst || isNamedConst || untypedInvolved {
+		if constClass(V) == constClass(T) {
+			return
+		}
+	} else if !ConcreteAssignTypes(V, T) {
+		return
+	}
+	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+	push(cctx.compileErrors, "cannot use value of type " | V.String() | " as " | T.String() | " in " | what)
+}
+
+// Constant kind classes, for checkAssignable's constant rule.
+const (
+	constClassOther int32 = 0
+	constClassText  int32 = 1
+	constClassNum   int32 = 2
+	constClassBool  int32 = 3
+)
+
+// constClass classifies T coarsely: text (string/[]byte), numeric, boolean,
+// or unknown. Only a mismatch between two known classes is reported.
+func constClass(T Type) (c int32) {
+	if T == nil {
+		return constClassOther
+	}
+	b, ok := SafeUnderlying(T).(*Basic)
+	if !ok {
+		if sl, isSl := SafeUnderlying(T).(*Slice); isSl {
+			if eb, isB := SafeUnderlying(sl.Elem).(*Basic); isB && eb.Kind == Uint8 {
+				return constClassText
+			}
+		}
+		return constClassOther
+	}
+	if b.Info&IsString != 0 {
+		return constClassText
+	}
+	if b.Info&IsBoolean != 0 {
+		return constClassBool
+	}
+	if b.Info&(IsInteger|IsFloat) != 0 {
+		return constClassNum
+	}
+	return constClassOther
+}
+
 func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 	if lhs == nil {
 		panic("buildStore: nil lhs")
@@ -1461,6 +1550,7 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 		if obj == nil {
 			return
 		}
+		fb.checkAssignable(val, ObjectType(obj), "assignment")
 		if alloc, ok2 := fb.vars[obj]; ok2 {
 			val = fb.coerceToInterface(val, ObjectType(obj))
 			fb.emitStore(alloc, val)
@@ -1793,6 +1883,9 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			typ = fb.resolveType(dd.Type)
 		}
 		initVal := fb.buildExpr(dd.Values)
+		if dd.Type != nil && initVal != nil && typ != nil {
+			fb.checkAssignable(initVal, typ, "variable declaration")
+		}
 		if typ == nil && initVal != nil {
 			// No explicit type and nothing recorded on the object: the
 			// initializer's SSA type IS the declaration's type, which is the
@@ -3033,6 +3126,7 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 		for i, v := range vals {
 			if i < fb.fn.Signature.Results.Len() {
 				retType := fb.fn.Signature.Results.At(i).Typ
+				fb.checkAssignable(v, retType, "return statement")
 				if n, ok := retType.(*Named); ok && n != nil {
 					u := n.Underlying()
 					if u != nil && u != Type(n) {
