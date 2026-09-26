@@ -399,7 +399,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 					}
 				}
 				if typ == nil && valExpr != nil {
-					typ = tcInferTypeFromExpr(valExpr, scope)
+					typ = tcInferConstTypeFromExpr(valExpr, scope)
 				}
 				var val ConstVal
 				if valExpr != nil {
@@ -1108,6 +1108,26 @@ func tcInferTypeFromExpr(e syntax.Expr, scope *Scope) (t Type) {
 		}
 	}
 	return nil
+}
+
+// tcInferConstTypeFromExpr is tcInferTypeFromExpr for a constant declaration.
+// An untyped literal must keep its untyped type: `const BlockSize = 16` with
+// the default int32 became a typed constant that beat a typed sibling, so
+// `BlockSize - remainder` (remainder uint64) was int32 and could not pass to a
+// uint64 parameter. Untyped constants take the type their context gives them.
+func tcInferConstTypeFromExpr(e syntax.Expr, scope *Scope) (t Type) {
+	if bl, ok := e.(*syntax.BasicLit); ok {
+		switch bl.Kind {
+		case token.IntLit:
+			return Typ[UntypedInt]
+		case token.FloatLit:
+			return Typ[UntypedFloat]
+		}
+	}
+	if n, ok := e.(*syntax.Name); ok && (n.Value == "true" || n.Value == "false") {
+		return Typ[UntypedBool]
+	}
+	return tcInferTypeFromExpr(e, scope)
 }
 
 func tcResolveFuncReturn(e syntax.Expr, scope *Scope) (t Type) {

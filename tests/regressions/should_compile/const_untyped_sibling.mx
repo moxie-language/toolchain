@@ -1,0 +1,51 @@
+// A named constant keeps its untyped type, so it takes the type its context
+// gives it. stage4 inferred the default (int32) for `const BlockSize = 16`, and
+// as the LEFT operand that beat the typed sibling: `BlockSize - remainder`
+// with remainder uint64 was int32, so passing it to bits.Add64 failed
+// (crypto/internal/fips140/aes RoundToBlock). Untyped constants take the type
+// of the expression they appear in.
+package main
+
+import "math/bits"
+
+const BlockSize = 16
+
+func roundUp(offset uint64) (r uint64) {
+	if remainder := offset % BlockSize; remainder != 0 {
+		var carry uint64
+		r, carry = bits.Add64(offset, BlockSize-remainder, 0)
+		if carry != 0 {
+			panic("counter overflow")
+		}
+		return r
+	}
+	return offset
+}
+
+func widen(n uint64) (r uint64) {
+	r = lenUint(n) + BlockSize
+	return r
+}
+
+func lenUint(n uint64) (r uint64) {
+	if n == 0 {
+		return 0
+	}
+	return 1
+}
+
+func main() {
+	if roundUp(5) != 16 {
+		panic("round up wrong")
+	}
+	if roundUp(16) != 16 {
+		panic("aligned offset changed")
+	}
+	if roundUp(20) != 32 {
+		panic("round up across two blocks wrong")
+	}
+	if widen(1) != 17 {
+		panic("untyped constant did not take the uint64 context")
+	}
+	println(roundUp(20))
+}
