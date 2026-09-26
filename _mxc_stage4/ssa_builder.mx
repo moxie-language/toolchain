@@ -3540,6 +3540,30 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 	return b
 }
 
+// checkSliceToArrayConv rejects (*[N]T)(s) when s is a slice: slices replace
+// arrays and Moxie has no slice-to-array conversion machinery. Pointer-to-array
+// puns are unaffected - their operand is a pointer, not a slice.
+func (fb *ssaFuncBuilder) checkSliceToArrayConv(x SSAValue, dst Type) {
+	if x == nil || dst == nil || fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
+		return
+	}
+	if !isUserPackagePath(fb.fn.Pkg.Pkg.Path) {
+		return
+	}
+	if _, isSl := x.SSAType().(*Slice); !isSl {
+		return
+	}
+	p, isPtr := dst.(*Pointer)
+	if !isPtr {
+		return
+	}
+	if _, isArr := p.Base.(*Array); !isArr {
+		return
+	}
+	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+	push(cctx.compileErrors, "slice-to-array-pointer conversion is not allowed: work in slices")
+}
+
 func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 	if ie, ok := e.Fun.(*syntax.IndexExpr); ok {
 		if result, handled := fb.tryGenericCallFromIndex(ie, e.ArgList, e.HasDots); handled {
@@ -3554,6 +3578,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 				if len(args2) == 1 && args2[0] != nil {
 					conv := &SSAConvert{X: args2[0]}
 					conv.typ = tn.Typ
+					fb.checkSliceToArrayConv(args2[0], tn.Typ)
 					conv.name = fb.nextName()
 					fb.emit(conv)
 					return conv
@@ -3570,6 +3595,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 		if len(args3) == 1 && args3[0] != nil {
 			conv := &SSAConvert{X: args3[0]}
 			conv.typ = convType
+			fb.checkSliceToArrayConv(args3[0], convType)
 			conv.name = fb.nextName()
 			fb.emit(conv)
 			return conv

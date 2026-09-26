@@ -292,6 +292,14 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 			}
 			b.addError(v.Pos(), "moxie: closure captures outer variable(s) ["+strings.Join(names, ", ")+"]; pass as explicit parameter(s)")
 		}
+
+	case *ssa.SliceToArrayPointer:
+		// Slices replace arrays; there is no slice-to-array machinery. This
+		// conversion hands back a pointer into slice storage with a fixed
+		// length the runtime does not track, so it is rejected outright.
+		// Pointer-to-array puns ((*[N]T)(unsafe.Pointer(&x))) are unchanged -
+		// they are *ssa.Convert, not this node.
+		b.addError(v.Pos(), "moxie: slice-to-array-pointer conversion is not allowed: work in slices")
 	}
 }
 
