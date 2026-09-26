@@ -1724,6 +1724,29 @@ func constReprSkipUnsigned(T Type, cv ConstVal, explicitNeg bool) (skip bool) {
 	return false
 }
 
+// shiftConstWiden returns a 64-bit type able to hold an untyped integer
+// constant shifted by a non-constant count when the count's type cannot, or
+// nil when T already holds the value. A shift result takes the left operand's
+// type, so letting the count's type decide truncated 0x20000000000000 to zero
+// (math.expm1 computed 0 instead of 4.6e18).
+func shiftConstWiden(x SSAValue, T Type) Type {
+	c := ssaExtractConst(x)
+	if c == nil || c.val == nil {
+		return nil
+	}
+	ci, ok := c.val.(*ConstInt)
+	if !ok {
+		return nil
+	}
+	if b, isB := SafeUnderlying(T).(*Basic); isB && b.Info&IsInteger != 0 && intFitsKind(ci.V, b.Kind) {
+		return nil
+	}
+	if ci.V >= 0 {
+		return Typ[Uint64]
+	}
+	return Typ[Int64]
+}
+
 func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 	if lhs == nil {
 		panic("buildStore: nil lhs")
@@ -3823,6 +3846,15 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 			b.typ = yT
 		} else {
 			b.typ = xT
+		}
+		// A shift's result type follows the left operand, not the count.
+		// Where the left operand is an untyped constant, the count's type
+		// must not truncate it: 0x20000000000000 >> uint32(k) is 2^49, and
+		// adopting the uint32 count computed it as 0 (math.expm1).
+		if (op == OpShl || op == OpShr) && xUntyped && b.typ != nil {
+			if wider := shiftConstWiden(x, b.typ); wider != nil {
+				b.typ = wider
+			}
 		}
 	}
 	fb.emit(b)
