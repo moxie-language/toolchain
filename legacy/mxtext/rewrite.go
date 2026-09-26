@@ -3520,9 +3520,18 @@ func FilterStringByteMismatch(errs []error) []error {
 			continue
 		}
 
-		// Pattern 6: cannot use string as []byte or vice versa in struct literal
-		if (hasByte || hasString) &&
-			(strings.Contains(msg, "cannot use") || strings.Contains(msg, "cannot convert")) {
+		// Pattern 6 used to drop every "cannot use"/"cannot convert" error
+		// that merely mentioned string, which swallowed real mismatches:
+		// `var x int32 = "s"` and `f("s")` for an int32 parameter were
+		// accepted and produced a wrong value (0) at runtime. A genuine
+		// string/[]byte mismatch names both types (Pattern 1) or is an
+		// untyped string into []byte (Pattern 5), so it needs no catch-all.
+		//
+		// Moxie unification: string is []byte, so nil is a valid empty
+		// string. go/types has no nil string, and this is the only such
+		// error in the tree (runtime/scheduler.mx Goexit passes nil for "no
+		// message"). stage4 accepts it through isNilable(isTextType).
+		if strings.Contains(msg, "cannot use nil as string") {
 			continue
 		}
 
