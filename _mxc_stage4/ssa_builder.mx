@@ -1526,6 +1526,15 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 	if V == nil {
 		return
 	}
+	// A constant must be representable before any type compatibility is
+	// considered: an untyped int is Assignable to int8, but 1000 is not.
+	if cv, explicitNeg := constValueOf(val); cv != nil {
+		if msg := constReprError(cv, T); msg != "" && !constReprSkipUnsigned(T, cv, explicitNeg) {
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, "cannot use " | cv.String() | " as " | T.String() | " in " | what | " (" | msg | ")")
+			return
+		}
+	}
 	if Assignable(V, T) {
 		return
 	}
@@ -1559,6 +1568,27 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 	push(cctx.compileErrors, "cannot use value of type " | V.String() | " as " | T.String() | " in " | what)
 }
 
+// checkConstConvert reports a constant conversion whose value cannot be
+// represented in the target type. go/types rejects `int8(1000)` (overflows)
+// and `int32(1.5)` (truncated); stage4 emitted the convert and the value
+// wrapped or truncated silently.
+func (fb *ssaFuncBuilder) checkConstConvert(val SSAValue, T Type) {
+	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
+		return
+	}
+	if !isUserPackagePath(fb.fn.Pkg.Pkg.Path) {
+		return
+	}
+	cv, explicitNeg := constValueOf(val)
+	if cv == nil {
+		return
+	}
+	if msg := constReprError(cv, T); msg != "" && !constReprSkipUnsigned(T, cv, explicitNeg) {
+		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+		push(cctx.compileErrors, "cannot convert " | cv.String() | " to " | T.String() | " (" | msg | ")")
+	}
+}
+
 // Constant kind classes, for checkAssignable's constant rule.
 const (
 	constClassOther int32 = 0
@@ -1590,6 +1620,108 @@ func constClass(T Type) (c int32) {
 		return constClassNum
 	}
 	return constClassOther
+}
+
+// intFitsKind reports whether v is representable in the integer kind k.
+// uintptr is treated as unsigned 64-bit so the same source does not report a
+// false overflow on the wide targets while wasm32 accepts it.
+func intFitsKind(v int64, k BasicKind) (ok bool) {
+	switch k {
+	case Int8:
+		return v >= -128 && v <= 127
+	case Int16:
+		return v >= -32768 && v <= 32767
+	case Int32:
+		return v >= -2147483648 && v <= 2147483647
+	case Int64:
+		return true
+	case Uint8:
+		return v >= 0 && v <= 255
+	case Uint16:
+		return v >= 0 && v <= 65535
+	case Uint32:
+		return v >= 0 && v <= 4294967295
+	case Uint64:
+		return v >= 0
+	case Uintptr:
+		return v >= 0
+	}
+	return true
+}
+
+// constReprError returns why a constant cannot be represented in T, or "".
+// go/types applies this at every assignment and conversion; stage4
+// materializes a constant at its default type, so `var x int8 = 1000`,
+// `var x uint8 = -1` and `int32(1.5)` used to compile and print the wrapped
+// or truncated value.
+func constReprError(cv ConstVal, T Type) (msg string) {
+	bt, isB := SafeUnderlying(T).(*Basic)
+	if !isB {
+		return ""
+	}
+	switch c := cv.(type) {
+	case *ConstInt:
+		if bt.Info&IsInteger != 0 && !intFitsKind(c.V, bt.Kind) {
+			return "overflows " | T.String()
+		}
+	case *ConstFloat:
+		if bt.Info&IsInteger != 0 {
+			if c.V < -9.2e18 || c.V > 9.2e18 {
+				return "overflows " | T.String()
+			}
+			if c.V != float64(int64(c.V)) {
+				return "truncated to integer"
+			}
+			if !intFitsKind(int64(c.V), bt.Kind) {
+				return "overflows " | T.String()
+			}
+		}
+	}
+	return ""
+}
+
+// constValueOf extracts the constant value behind a value, folding a unary
+// minus: `-1` is built as SSAMinus(const 1), so without the fold a negative
+// constant assigned to an unsigned type was never seen as a constant at all.
+// explicitNeg distinguishes that fold from a value that merely looks negative:
+// ConstInt holds an int64, so the uint64 literal 0xFFFFFFFFFFFFFFFF is stored
+// as -1 and only the written form may be judged against an unsigned target.
+func constValueOf(val SSAValue) (cv ConstVal, explicitNeg bool) {
+	if c := ssaExtractConst(val); c != nil {
+		return c.val, false
+	}
+	if u, ok := val.(*SSAUnOp); ok && u.Op == OpSub {
+		if c := ssaExtractConst(u.X); c != nil {
+			switch k := c.val.(type) {
+			case *ConstInt:
+				return &ConstInt{V: -k.V}, true
+			case *ConstFloat:
+				return &ConstFloat{V: -k.V, Lit: "-" | k.Lit}, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// constReprSkipUnsigned suppresses a verdict for a negative constant against
+// an unsigned target when the source did not write the minus (see
+// constValueOf). A positive constant cannot be a wrapped unsigned literal, so
+// it is always judged.
+func constReprSkipUnsigned(T Type, cv ConstVal, explicitNeg bool) (skip bool) {
+	if explicitNeg {
+		return false
+	}
+	bt, isB := SafeUnderlying(T).(*Basic)
+	if !isB || bt.Info&IsUnsigned == 0 {
+		return false
+	}
+	switch c := cv.(type) {
+	case *ConstInt:
+		return c.V < 0
+	case *ConstFloat:
+		return c.V < 0
+	}
+	return false
 }
 
 func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
@@ -3729,6 +3861,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 			if _, isTP := tn.Typ.(*TypeParam); !isTP {
 				args2 := fb.buildArgs(e.ArgList)
 				if len(args2) == 1 && args2[0] != nil {
+					fb.checkConstConvert(args2[0], tn.Typ)
 					conv := &SSAConvert{X: args2[0]}
 					conv.typ = tn.Typ
 					fb.checkSliceToArrayConv(args2[0], tn.Typ)
@@ -3746,6 +3879,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 	if convType := fb.resolveTypeProbe(e.Fun); convType != nil {
 		args3 := fb.buildArgs(e.ArgList)
 		if len(args3) == 1 && args3[0] != nil {
+			fb.checkConstConvert(args3[0], convType)
 			conv := &SSAConvert{X: args3[0]}
 			conv.typ = convType
 			fb.checkSliceToArrayConv(args3[0], convType)
