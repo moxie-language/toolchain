@@ -301,8 +301,52 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 			}
 		}
 	}
+	// Bind aliases whose target is local to this package. `type A = B` must
+	// reach B's type object, or A and B are distinct types and `var y B = anA`
+	// is rejected. Two shapes keep the Named form:
+	//  - interface targets: the SSA builder's interface call/return typing
+	//    depends on Named-ness (ConstVal = interface{ String() string });
+	//  - a Named from another package: re-exporting it (os.FileMode =
+	//    fs.FileMode, ec.FieldVal = secp256k1.FieldVal) round-trips through the
+	//    export/import path, which rebuilds the target as a clone carrying its
+	//    methods; binding here orphaned that clone and the link failed on
+	//    crypto/ec.(*FieldVal).Equals.
+	boundAlias := map[string]bool{}
+	for pass := int32(0); pass < 8; pass++ {
+		progress := false
+		for _, d := range file.DeclList {
+			td, ok := d.(*syntax.TypeDecl)
+			if !ok || td.Name == nil || !td.Alias || td.Type == nil || boundAlias[td.Name.Value] {
+				continue
+			}
+			obj := scope.Lookup(td.Name.Value)
+			tn, ok2 := obj.(*TypeName)
+			if !ok2 || tn == nil {
+				continue
+			}
+			target := resolveTypeExprWithSubst(td.Type, nil, scope)
+			if target == nil {
+				continue
+			}
+			if _, isIface := SafeUnderlying(target).(*TCInterface); isIface {
+				continue
+			}
+			if tgtNamed, isNamed := target.(*Named); isNamed && tgtNamed.Obj != nil && tgtNamed.Obj.Pkg != nil && tgtNamed.Obj.Pkg.Path != pkg.Path {
+				continue
+			}
+			tn.Typ = target
+			boundAlias[td.Name.Value] = true
+			progress = true
+		}
+		if !progress {
+			break
+		}
+	}
 	for _, d := range file.DeclList {
 		if td, ok := d.(*syntax.TypeDecl); ok {
+			if td.Alias && boundAlias[td.Name.Value] {
+				continue
+			}
 			obj := scope.Lookup(td.Name.Value)
 			if tn, ok2 := obj.(*TypeName); ok2 && tn != nil {
 				if n, ok3 := tn.Typ.(*Named); ok3 && n != nil && n.Under == nil {
@@ -402,6 +446,9 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 	}
 	for _, d := range file.DeclList {
 		if td, ok := d.(*syntax.TypeDecl); ok {
+			if td.Alias && boundAlias[td.Name.Value] {
+				continue
+			}
 			// Generic type decls resolve in a child scope holding their type
 			// params, so fields like newPoint func() P keep a TypeParam that
 			// monomorphized bodies substitute via fb.typeSubst.
@@ -435,6 +482,9 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 	}
 	for _, d := range file.DeclList {
 		if td, ok := d.(*syntax.TypeDecl); ok {
+			if td.Alias && boundAlias[td.Name.Value] {
+				continue
+			}
 			obj := scope.Lookup(td.Name.Value)
 			if obj != nil {
 				if tn, ok2 := obj.(*TypeName); ok2 {
