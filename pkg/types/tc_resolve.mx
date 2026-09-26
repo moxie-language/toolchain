@@ -159,7 +159,10 @@ func (c *Checker) resolveStructType(e *syntax.StructType) (t *TCStruct) {
 			push(fields, NewTCField(c.pkg, f.Name.Value, typ, false))
 		} else {
 			// anonymous/embedded
-			name := TypeBaseName(typ)
+			name := EmbeddedFieldName(f.Type)
+			if name == "" {
+				name = TypeBaseName(typ)
+			}
 			fields = mxutil.Ensure(fields, 1)
 			push(fields, NewTCField(c.pkg, name, typ, true))
 		}
@@ -265,6 +268,28 @@ func (c *Checker) resolveGenericInst(e *syntax.IndexExpr) (t Type) {
 }
 
 // TypeBaseName returns the name of the base type for an anonymous field.
+// EmbeddedFieldName returns the field name of an embedded type: the type's
+// name as written. Deriving it from the resolved type instead loses the name
+// of the predeclared interfaces, so an embedded `error` field was registered
+// with an empty name and res.error could not be selected.
+func EmbeddedFieldName(e syntax.Expr) (s string) {
+	switch t := e.(type) {
+	case *syntax.Name:
+		return t.Value
+	case *syntax.SelectorExpr:
+		if t.Sel != nil {
+			return t.Sel.Value
+		}
+	case *syntax.IndexExpr:
+		return EmbeddedFieldName(t.X)
+	case *syntax.Operation:
+		if t.Y == nil && t.Op == token.Mul {
+			return EmbeddedFieldName(t.X)
+		}
+	}
+	return ""
+}
+
 func TypeBaseName(t Type) (s string) {
 	if t == nil {
 		return ""

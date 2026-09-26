@@ -1502,6 +1502,7 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 	case *syntax.SelectorExpr:
 		addr := fb.buildSelectorAddr(lv)
 		if addr == nil {
+			fb.reportUndefinedField(lv, fb.operandType(lv.X))
 			return
 		}
 		if p, ok2 := addr.SSAType().(*Pointer); ok2 && p.Base != nil {
@@ -4046,6 +4047,39 @@ func (fb *ssaFuncBuilder) emitMake(typ Type, sizeArgs []SSAValue) (s SSAValue) {
 	return nil
 }
 
+// reportUndefinedField mirrors legacy's diagnostic for a selector that is
+// neither a field nor a method on a struct operand. go/types reports
+// "x.f undefined (type T has no field or method f)" and stops; without the
+// same check here the failed lookup left a nil value behind and the emitter
+// dereferenced it, so a typo compiled into invalid wasm instead of an error.
+// The struct check keeps speculative selector paths (method expressions on
+// non-struct types, type parameters) from reporting.
+func (fb *ssaFuncBuilder) reportUndefinedField(sel *syntax.SelectorExpr, t Type) {
+	if sel == nil || sel.Sel == nil || sel.Sel.Value == "" {
+		return
+	}
+	// A field selected on a map value (m[k].f) is legal even though the map
+	// element is not addressable: the value path copies the element out. Only
+	// the operand kinds that must resolve to an address are reported.
+	if ie, ok := sel.X.(*syntax.IndexExpr); ok {
+		if _, isMap := SafeUnderlying(fb.operandType(ie.X)).(*TCMap); isMap {
+			return
+		}
+	}
+	if p, ok := SafeUnderlying(t).(*Pointer); ok {
+		t = p.Base
+	}
+	if _, isStruct := SafeUnderlying(t).(*TCStruct); !isStruct {
+		return
+	}
+	name := ""
+	if t != nil {
+		name = t.String()
+	}
+	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+	push(cctx.compileErrors, sel.Sel.Value | " undefined (type " | name | " has no field or method " | sel.Sel.Value | ")")
+}
+
 func (fb *ssaFuncBuilder) buildSelector(e *syntax.SelectorExpr) (s SSAValue) {
 	if name, ok := e.X.(*syntax.Name); ok {
 		obj := fb.lookupObject(name.Value)
@@ -4079,7 +4113,11 @@ func (fb *ssaFuncBuilder) buildSelector(e *syntax.SelectorExpr) (s SSAValue) {
 	if recv == nil {
 		return nil
 	}
-	return fb.buildMethodValue(e, recv)
+	mv := fb.buildMethodValue(e, recv)
+	if mv == nil {
+		fb.reportUndefinedField(e, recv.SSAType())
+	}
+	return mv
 }
 
 func (fb *ssaFuncBuilder) buildMethodValue(sel *syntax.SelectorExpr, recv SSAValue) (s SSAValue) {
@@ -4176,7 +4214,11 @@ func (fb *ssaFuncBuilder) buildPushTargetAddr(e syntax.Expr) (a SSAValue) {
 			return fb.buildExpr(lv.X)
 		}
 	case *syntax.SelectorExpr:
-		return fb.buildSelectorAddr(lv)
+		s := fb.buildSelectorAddr(lv)
+		if s == nil {
+			fb.reportUndefinedField(lv, fb.operandType(lv.X))
+		}
+		return s
 	case *syntax.IndexExpr:
 		base := fb.buildExpr(lv.X)
 		idx := fb.buildExpr(lv.Index)
@@ -4555,7 +4597,7 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue)
 			structType = elemT
 		} else {
 		ia := &SSAIndexAddr{X: x, Index: idx}
-		elemT := ssaElemType(x.SSAType())
+		elemT := ssaIndexElemType(x.SSAType())
 		ia.typ = NewPointer(elemT)
 		ia.name = fb.nextName()
 		fb.emit(ia)
@@ -6442,6 +6484,11 @@ func (fb *ssaFuncBuilder) resolveStructTypeAST(e *syntax.StructType) (t *TCStruc
 		name := ""
 		if f.Name != nil {
 			name = f.Name.Value
+		} else {
+			name = EmbeddedFieldName(f.Type)
+			if name == "" {
+				name = TypeBaseName(typ)
+			}
 		}
 		fields = mxutil.Ensure(fields, 1)
 		push(fields, NewTCField(fb.fn.Pkg.Pkg, name, typ, f.Name == nil))
