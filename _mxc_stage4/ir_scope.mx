@@ -23,33 +23,27 @@ func strContains(s, sub string) bool {
 	return false
 }
 
-// buildHasMoxieModule reports whether this build program includes the moxie
-// compiler module: the build root is the moxie module, or some package in
-// the program has a git.smesh.lol/moxie/ path (mirrors legacy
-// moxieModulePath). The registry fallback makes the exemption robust in
-// spawned workers regardless of modPrefix propagation timing.
-func buildHasMoxieModule() bool {
-	if bst != nil && bst.globalModPrefix == "git.smesh.lol/moxie" {
-		return true
+// targetIsMoxieModule reports whether the package being compiled belongs to
+// the moxie compiler's own module. Legacy reads this from the target package's
+// module (restrict.go isUserPackage: b.pkgModulePath == "git.smesh.lol/moxie").
+// The resolved build module cannot stand in for it: a target outside any module
+// falls back to MOXIEROOT so that its imports resolve, and inheriting that
+// fallback would exempt every out-of-tree user package from the restrictions.
+func targetIsMoxieModule() bool {
+	if bst == nil {
+		return false
 	}
-	if cctx != nil && cctx.universe != nil && cctx.universe.Registry != nil {
-		for p := range cctx.universe.Registry {
-			if mxutil.HasPrefix(p, "git.smesh.lol/moxie/") {
-				return true
-			}
-		}
-	}
-	return false
+	return bst.rootModPrefix == "git.smesh.lol/moxie"
 }
 
 // isUserPackagePath mirrors legacy restrict.go isUserPackage: a package is
 // subject to Moxie language restrictions if its import path contains a dot
 // (user module paths look like domain paths), except golang.org/x/ and the
 // compiler's own /pkg/ infrastructure. Main packages are user code unless
-// the build program is the moxie compiler module itself.
+// the target itself lives in the moxie compiler module.
 func isUserPackagePath(path string) bool {
 	if path == "main" || path == "command-line-arguments" {
-		return !buildHasMoxieModule()
+		return !targetIsMoxieModule()
 	}
 	if mxutil.HasPrefix(path, "golang.org/x/") {
 		return false

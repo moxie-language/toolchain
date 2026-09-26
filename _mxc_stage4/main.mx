@@ -18,6 +18,12 @@ type buildState struct {
 	selfHash        string
 	globalModPrefix string
 	globalModDir    string
+	// rootModPrefix is the module the TARGET lives in ("" when it lives in no
+	// module). globalModPrefix is where imports resolve from and falls back to
+	// MOXIEROOT for out-of-tree targets; restriction gating must not inherit
+	// that fallback or an out-of-tree user package looks like compiler code.
+	rootModPrefix  string
+
 	globalReplaces  map[string]string
 	buildJobs       int32
 	tlsFailed       bool // TLS probe failed: globals shared, workers forced serial
@@ -502,6 +508,7 @@ func ensureModuleRoot(root string) {
 		root = "."
 	}
 	prefix, dir := findModuleRoot(root)
+	bst.rootModPrefix = prefix
 	if prefix == "" {
 		// The target may live outside the module (the test harness stages
 		// builds under /tmp, so no moxie.mod is reachable by walking up).
@@ -6050,12 +6057,12 @@ func ringRecvInt32(ring unsafe.Pointer) (v int32, ok bool) {
 // Text format: newline-separated fields. All strings are raw UTF-8.
 // Layout:
 //   numPkgs\n
-//   triple\n targetOS\n targetArch\n clang\n tmpdir\n cacheBase\n root\n modPrefix\n modDir\n
+//   triple\n targetOS\n targetArch\n clang\n tmpdir\n cacheBase\n root\n modPrefix\n modDir\n rootModPrefix\n
 //   for each pkg: path\n name\n dir\n version\n
 //     numFiles\n file1\n ... numCfiles\n cf1\n ... numBcfiles\n bf1\n ...
 //     numImports\n imp1\n ...
 
-func serializePkgMeta(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase, root, modPrefix, modDir string) (data []byte) {
+func serializePkgMeta(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase, root, modPrefix, modDir, rootModPrefix string) (data []byte) {
 	var b []byte
 	b = b | simpleItoa(len(pkgs))
 	b = mxutil.Ensure(b, 1)
@@ -6088,6 +6095,9 @@ func serializePkgMeta(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase, root, m
 	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	b = b | modDir
+	b = mxutil.Ensure(b, 1)
+	push(b, '\n')
+	b = b | rootModPrefix
 	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	for _, p := range pkgs {
@@ -6168,6 +6178,10 @@ type workerMeta struct {
 	root       string
 	modPrefix  string
 	modDir     string
+	// rootModPrefix is the target module, distinct from modPrefix (which may
+	// be the MOXIEROOT fallback) so workers gate restrictions identically to
+	// the parent.
+	rootModPrefix string
 }
 
 func deserializePkgMeta(data []byte) (m *workerMeta) {
@@ -6183,6 +6197,7 @@ func deserializePkgMeta(data []byte) (m *workerMeta) {
 	m.root, pos = deserLine(data, pos)
 	m.modPrefix, pos = deserLine(data, pos)
 	m.modDir, pos = deserLine(data, pos)
+	m.rootModPrefix, pos = deserLine(data, pos)
 	m.pkgs = []*pkgInfo{:numPkgs}
 	for i := int32(0); i < numPkgs; i++ {
 		p := &pkgInfo{}
@@ -6263,6 +6278,7 @@ func workerEntryExport(arg unsafe.Pointer) {
 	// Set up module context from metadata
 	bst.globalModPrefix = meta.modPrefix
 	bst.globalModDir = meta.modDir
+	bst.rootModPrefix = meta.rootModPrefix
 	bst.quietDiscover = true
 
 	// The target comes from the metadata, never from the triple string: both
@@ -6543,7 +6559,7 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 	// Phase 2: serialize metadata and spawn workers
 	root := moxieRoot()
 	meta := serializePkgMeta(pkgs, triple, clang, tmpdir, cacheBase, root,
-		bst.globalModPrefix, bst.globalModDir)
+		bst.globalModPrefix, bst.globalModDir, bst.rootModPrefix)
 
 	workers := []*workerInfo{:jobs}
 	for wi := int32(0); wi < jobs; wi++ {
