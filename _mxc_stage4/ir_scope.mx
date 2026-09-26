@@ -957,6 +957,103 @@ func markReturnEscapes(f *SSAFunction) {
 }
 
 
+// checkDuplicateCases reports two case clauses of one switch with the same
+// constant value. go/types rejects that on the legacy side; stage4 compiled the
+// second clause, which can never run. Applies to every package, like
+// checkShadowing, because legacy type-checks the stdlib too.
+func checkDuplicateCases(p *SSAPackage, files []*syntax.File) {
+	if p == nil || p.Pkg == nil || p.Pkg.Scope == nil {
+		return
+	}
+	for _, f := range files {
+		if f == nil {
+			continue
+		}
+		for _, d := range f.DeclList {
+			fd, ok := d.(*syntax.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			dupCaseStmts(fd.Body.List, p.Pkg.Scope)
+		}
+	}
+}
+
+func dupCaseStmts(list []syntax.Stmt, scope *Scope) {
+	for _, s := range list {
+		switch st := s.(type) {
+		case *syntax.BlockStmt:
+			dupCaseStmts(st.List, scope)
+		case *syntax.IfStmt:
+			if st.Then != nil {
+				dupCaseStmts(st.Then.List, scope)
+			}
+			if st.Else != nil {
+				dupCaseStmts([]syntax.Stmt{st.Else}, scope)
+			}
+		case *syntax.ForStmt:
+			if st.Body != nil {
+				dupCaseStmts(st.Body.List, scope)
+			}
+		case *syntax.SwitchStmt:
+			dupCaseClauses(st.Body, scope)
+			for _, cc := range st.Body {
+				if cc != nil {
+					dupCaseStmts(cc.Body, scope)
+				}
+			}
+		case *syntax.SelectStmt:
+			for _, cc := range st.Body {
+				if cc != nil {
+					dupCaseStmts(cc.Body, scope)
+				}
+			}
+		}
+	}
+}
+
+func dupCaseClauses(clauses []*syntax.CaseClause, scope *Scope) {
+	seen := map[string]bool{}
+	for _, cc := range clauses {
+		if cc == nil {
+			continue
+		}
+		var exprs []syntax.Expr
+		if l, ok := cc.Cases.(*syntax.ListExpr); ok {
+			exprs = l.ElemList
+		} else if cc.Cases != nil {
+			exprs = []syntax.Expr{cc.Cases}
+		}
+		for _, e := range exprs {
+			cv := tcEvalConstExpr(e, scope, -1)
+			if cv == nil {
+				continue
+			}
+			key := dupCaseKey(cv)
+			if key == "" {
+				continue
+			}
+			if seen[key] {
+				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+				push(cctx.compileErrors, "duplicate case in switch")
+			}
+			seen[key] = true
+		}
+	}
+}
+
+// dupCaseKey canonicalises a constant case value so equal values written
+// differently (1 and 0x1) compare equal. Only integers key, which is what
+// legacy's go/types flags: it accepts duplicate string and bool cases (e.g.
+// `case "a", "a":`), so reporting those would be stricter than the reference
+// compiler.
+func dupCaseKey(cv ConstVal) (k string) {
+	if c, ok := cv.(*ConstInt); ok {
+		return "i" | irItoa64(c.V)
+	}
+	return ""
+}
+
 // Scope dealloc functions: all no-ops in arena model.
 func (e *irEmitter) scopeTrackAlloc(ptrReg string) {}
 func (e *irEmitter) scopeBeforeReturn(r *SSAReturn) {}
