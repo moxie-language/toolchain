@@ -1,0 +1,32 @@
+// A generic instantiated inside its own package must resolve package types to
+// that package's live scope. ScanGenericDecls rebuilds the package's types in a
+// persistent arena (they must outlive the compile arena), and instantiation
+// used that copy: the generic's signature and the non-generic code calling it
+// then held distinct `T` objects, so a valid program was rejected as
+// `main.T as main.T in return statement` (src/time showed the same as
+// `time.Time as time.Time` through parseRFC3339).
+package main
+
+type T struct{ n int32 }
+type Month int32
+
+func gen[B []byte](b B, m Month) (r T) {
+	if len(b) > 0 && m == 1 {
+		return T{n: 1}
+	}
+	return T{}
+}
+
+func call(b []byte) (r T) {
+	return gen(b, Month(1))
+}
+
+func main() {
+	if call([]byte("x")).n != 1 {
+		panic("generic instantiation lost the package type")
+	}
+	if call(nil).n != 0 {
+		panic("empty input should build the zero value")
+	}
+	println(call([]byte("x")).n)
+}

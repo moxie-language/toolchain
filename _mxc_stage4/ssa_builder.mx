@@ -7769,7 +7769,17 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, plainName str
 		}
 	}
 	var srcScope *Scope
-	if cctx.genericPkgScopes != nil {
+	// Instantiation inside the package being compiled uses that package's live
+	// scope. genericPkgScopes holds a scope ScanGenericDecls rebuilt in a
+	// persistent arena (it must outlive the compile arena), and the Named
+	// objects in it are copies of the package's own types: a generic's
+	// signature then disagreed with the non-generic code that calls it
+	// (time.Parse returned a Time that parseRFC3339's result type did not
+	// match - `time.Time as time.Time`).
+	if fb.fn != nil && fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil && srcPkgPath == fb.fn.Pkg.Pkg.Path {
+		srcScope = fb.fn.Pkg.Pkg.Scope
+	}
+	if srcScope == nil && cctx.genericPkgScopes != nil {
 		if sc, ok := cctx.genericPkgScopes[srcPkgPath]; ok {
 			srcScope = sc
 		}
