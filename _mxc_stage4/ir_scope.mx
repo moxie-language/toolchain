@@ -129,6 +129,18 @@ func checkGlobalMutation(f *SSAFunction) {
 	if f.name == "main" && f.Pkg.Pkg.Path != "main" {
 		return
 	}
+	checkGlobalStores(f, 0)
+}
+
+// checkGlobalStores walks one function body, descending into function
+// literals. A closure is not a package member, so the member loop in
+// checkGlobalMutation never reaches its body and a global store inside one
+// escaped the check entirely: `f := func() { g = g + 1 }` compiled cleanly
+// while the same store in a named function was rejected.
+func checkGlobalStores(f *SSAFunction, depth int32) {
+	if f == nil || f.Blocks == nil || depth > 32 {
+		return
+	}
 	for _, b := range f.Blocks {
 		for _, instr := range b.Instrs {
 			switch i := instr.(type) {
@@ -141,6 +153,10 @@ func checkGlobalMutation(f *SSAFunction) {
 				if ssaGlobalRoot(i.Map, 0) != "" {
 					cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 					push(cctx.compileErrors, f.name | ": package globals are immutable outside init: mutate through the methods of a sovereign self-mutating type")
+				}
+			case *SSAMakeClosure:
+				if cf, ok := i.Fn.(*SSAFunction); ok {
+					checkGlobalStores(cf, depth+1)
 				}
 			}
 		}

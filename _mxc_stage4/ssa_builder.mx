@@ -3829,12 +3829,18 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 			if inv := fb.buildEmbeddedIfaceMethodCall(sel, recv, e.ArgList); inv != nil {
 				return inv
 			}
-			if fv := fb.buildFuncFieldCall(sel, e.ArgList, e.HasDots); fv != nil {
+			if fv, handled := fb.buildFuncFieldCall(sel, e.ArgList, e.HasDots); handled {
 				return fv
 			}
 			if gm := fb.tryGenericMethodCall(sel, recv, e.ArgList, e.HasDots); gm != nil {
 				return gm
 			}
+			// No method, interface dispatch, function field or generic
+			// instantiation matched the selector. Legacy rejects this in
+			// go/types ("n.Nope undefined (type int32 has no field or
+			// method Nope)"); returning nil here dropped the call, so a
+			// typo compiled silently instead of failing loud.
+			fb.reportUndefinedField(sel, recv.SSAType())
 			return nil
 		}
 	}
@@ -4233,13 +4239,20 @@ func (fb *ssaFuncBuilder) reportUndefinedField(sel *syntax.SelectorExpr, t Type)
 	if p, ok := SafeUnderlying(t).(*Pointer); ok {
 		t = p.Base
 	}
-	// Structs only. Extending this to every concrete type reported field reads
-	// on closure-captured receivers that stage4 does not resolve here
-	// (smesh's relay reads c.ScheduleReconnect and sub.OnEvent through
-	// captures), which are false errors. Non-struct selectors are an open gap:
-	// `n.Nope()` on an int32 is still accepted, where legacy reports "n.Nope
-	// undefined (type int32 has no field or method Nope)".
-	if _, isStruct := SafeUnderlying(t).(*TCStruct); !isStruct {
+	if t == nil {
+		return
+	}
+	// Operand kinds whose method set stage4 cannot resolve completely are
+	// skipped: interfaces and type parameters (the methods live in the
+	// constraint), function signatures and tuples, and a pointer that the
+	// single unwrap above did not reach. Named types are judged by their
+	// underlying kind, which became safe once a function-typed field call
+	// reported itself handled even when it returns nothing: the misses that
+	// looked like unknown fields on captured or cross-package receivers were
+	// really dropped void func-field calls.
+	u := SafeUnderlying(t)
+	switch u.(type) {
+	case *TCInterface, *TypeParam, *Signature, *Tuple, *Pointer:
 		return
 	}
 	name := ""
@@ -4421,20 +4434,24 @@ func (fb *ssaFuncBuilder) buildPushTargetAddr(e syntax.Expr) (a SSAValue) {
 }
 
 // buildFuncFieldCall builds a call through a struct field of function type
-// (e.g. m.keyHash(...) where keyHash is a func field on hashmap).
-func (fb *ssaFuncBuilder) buildFuncFieldCall(sel *syntax.SelectorExpr, argList []syntax.Expr, hasDots bool) (s SSAValue) {
+// (e.g. m.keyHash(...) where keyHash is a func field on hashmap). handled
+// distinguishes "not a function field" from a void call: the call is emitted
+// either way, but a coincidental nil return made buildCall keep searching and
+// report the field as missing (relay's c.onReady(false), c.ScheduleReconnect,
+// sub.OnEvent - all void fields).
+func (fb *ssaFuncBuilder) buildFuncFieldCall(sel *syntax.SelectorExpr, argList []syntax.Expr, hasDots bool) (s SSAValue, handled bool) {
 	recv := fb.buildExpr(sel.X)
 	if recv == nil || recv.SSAType() == nil {
-		return nil
+		return nil, false
 	}
 	ft := fb.fieldType(recv.SSAType(), fb.fieldIndex(recv.SSAType(), sel.Sel.Value))
 	sig, ok := SafeUnderlying(ft).(*Signature)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	addr := fb.buildSelectorAddr(sel)
 	if addr == nil {
-		return nil
+		return nil, false
 	}
 	fv := fb.emitLoad(addr, ft)
 	args := fb.buildArgs(argList)
@@ -4453,9 +4470,9 @@ func (fb *ssaFuncBuilder) buildFuncFieldCall(sel *syntax.SelectorExpr, argList [
 	call.name = fb.nextName()
 	fb.emit(call)
 	if retType == nil {
-		return nil
+		return nil, true
 	}
-	return call
+	return call, true
 }
 
 // tryGenericMethodCall monomorphizes a method call on a generic receiver
