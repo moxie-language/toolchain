@@ -3669,7 +3669,11 @@ func (fb *ssaFuncBuilder) buildOperandAddr(e syntax.Expr) (s SSAValue) {
 			}
 		}
 		ia := &SSAIndexAddr{X: base, Index: idx}
-		ia.typ = NewPointer(ssaElemType(base.SSAType()))
+		// ssaIndexElemType, not ssaElemType: &arr[i] on a *[N]T base (e.g.
+		// &bucket.tophash[i] where tophash is an [8]uint8 field) has to yield
+		// *uint8. ssaElemType stops at the pointee and gave *[8]uint8, which
+		// the assignability check then rejected.
+		ia.typ = NewPointer(ssaIndexElemType(base.SSAType()))
 		ia.name = fb.nextName()
 		fb.emit(ia)
 		fb.markAddrEscaping(ia)
@@ -5788,7 +5792,22 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		ptr := fb.buildExpr(argList[0])
 		offset := fb.buildExpr(argList[1])
 		idx := &SSAIndexAddr{X: ptr, Index: offset}
-		idx.typ = NewPointer(Typ[Uint8])
+		// unsafe.Add is declared `func Add(ptr Pointer, len IntegerType)
+		// Pointer`, and the runtime hands its result straight to functions
+		// that take unsafe.Pointer (every memcpy call). Typing it as the
+		// element pointer - the old NewPointer(Uint8) - made those arguments
+		// look like `*uint8` where a Pointer is wanted, so enabling the
+		// assignability check outside user code reported 53 false errors in
+		// runtime. Take the declared type from the unsafe package and keep
+		// byteStepping in the emitter.
+		var ptrType Type = Typ[UnsafePointer]
+		if ptrObj := imported.Scope.Lookup("Pointer"); ptrObj != nil {
+			if tn, ok2 := ptrObj.(*TypeName); ok2 && tn.Typ != nil {
+				ptrType = tn.Typ
+			}
+		}
+		idx.typ = ptrType
+		idx.byteStep = true
 		idx.name = fb.nextName()
 		idx.setBlock(fb.currentBlock)
 		fb.currentBlock.Instrs = mxutil.Ensure(fb.currentBlock.Instrs, 1)
