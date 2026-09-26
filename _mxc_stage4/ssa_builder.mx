@@ -3475,6 +3475,21 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 	sel.name = fb.nextName()
 	fb.emit(sel)
 
+	// A select with no clauses needs no dispatch, and its block still needs a
+	// terminator: without the jump the emitted block fell through into the next
+	// one with no branch, which clang rejects ("expected instruction opcode").
+	// This is legacy's shortcut for len(States) == 0, where the blocking form
+	// blocks forever (the runtime reports a deadlock) and the default form does
+	// nothing. The deadlock call itself is emitted for the select node, which
+	// carries Blocking.
+	if len(s.Body) == 0 {
+		fb.emit(&SSAJump{Comment: "select.done"})
+		fb.pushSucc(fb.currentBlock, doneBlock)
+		fb.pushPred(doneBlock, fb.currentBlock)
+		fb.currentBlock = doneBlock
+		return
+	}
+
 	// Extract index from select result.
 	idxExt := &SSAExtract{Tuple: sel, Index: 0}
 	idxExt.typ = Typ[Int32]

@@ -285,6 +285,18 @@ func (e *irEmitter) emitCodecChanSend(s *SSASend) {
 }
 
 func (e *irEmitter) emitSelect(s *SSASelect) {
+	// A select with no clauses is the one legacy shortcuts in createSelect:
+	// select {} blocks forever, which the runtime reports through deadlock()
+	// (runtimePanic("deadlock")), and a select whose only clause is default has
+	// nothing to do. No channel state, no dispatch, no result registers - the
+	// builder emits no consumers for either form.
+	if len(s.States) == 0 {
+		if s.Blocking {
+			e.w("  call void @runtime.deadlock(ptr null)\n")
+			e.declareRuntime("runtime.deadlock", "void", "")
+		}
+		return
+	}
 	_ = e.regName(s)
 	ipt := e.intptrType()
 	sty := e.sliceType()
