@@ -89,6 +89,8 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 	if len(pb.varInits) > 0 || pb.initFn != nil {
 		pb.buildVarInits()
 	}
+	// Every body has been built by now, so the import marks are complete.
+	pb.checkUnusedImports()
 	// Restriction checks run before the compileErrors gate in ir_typecheck.
 	for _, member := range p.Members {
 		if f, ok := member.(*SSAFunction); ok {
@@ -116,6 +118,9 @@ type ssaPkgBuilder struct {
 	// packages excepted) and runs it; stage4 skipped every init after printing
 	// a message, so a library's setup never happened.
 	initFn        *SSAFunction
+	// segImports records every import of every source file, one entry per
+	// spec, so checkUnusedImports can report the ones nothing referred to.
+	segImports    []segImport
 	fileScopes    map[*syntax.File]*Scope
 	curFileScope  *Scope
 	varInitScopes map[*syntax.VarDecl]*Scope
@@ -131,8 +136,233 @@ type segScope struct {
 
 // buildImportSegScopes turns the driver's per-file import segments into
 // scopes holding each file's PkgName bindings.
+// segImport is one import spec of one source file. seg is the index of the
+// file's body in ConcatImportSegs, which is what pairs the import with the
+// text the check scans. dot marks a dot import, whose members are bound
+// directly in the file scope instead of under a package name.
+type segImport struct {
+	seg   int32
+	path  string
+	local string
+	dot   bool
+}
+
+// checkUnusedImports reports an imported package whose name never appears in
+// its own file's body. go/types rejects these on the legacy side ("math"
+// imported and not used); stage4 linked them and said nothing, so a file could
+// import a package it never mentioned and only the legacy compiler would
+// object.
+//
+// Per file, not per package: two files may import the same package and one of
+// them not using it is an error even when the other does. A dot import binds
+// the package's members rather than a name, so it is left alone (see
+// buildImportSegScopes).
+//
+// The test is textual - does the local name appear as a whole identifier in
+// the file's source range - rather than a record of resolved uses. Resolution
+// cannot answer this per file: an import name is bound in the file's scope and
+// in the package scope, So a lookup may reach either object, and the package
+// scope holds one shared binding for every file that imports the name. Scanning
+// the text errs only towards missing a report (a name mentioned in a comment or
+// string counts as used), which is the safe direction for a rule whose
+// false positives would refuse valid code; it never reports an import that the
+// file really uses.
+func (pb *ssaPkgBuilder) checkUnusedImports() {
+	if len(pb.segImports) == 0 {
+		return
+	}
+	src := cctx.tcPkgSrc
+	if len(src) == 0 {
+		return
+	}
+	for _, im := range pb.segImports {
+		if im.dot {
+			continue
+		}
+		startLine := pb.segStartLine(im.seg)
+		if startLine <= 0 {
+			continue
+		}
+		endLine := pb.segStartLine(im.seg + 1)
+		body := concatSegText(src, startLine, endLine)
+		if identAppearsOutsideImports(body, im.local) {
+			continue
+		}
+		elem := im.path
+		for i := len(im.path) - 1; i >= 0; i-- {
+			if im.path[i] == '/' {
+				elem = im.path[i+1:]
+				break
+			}
+		}
+		// go/types names the alias only when it differs from the path
+		// element, which covers both a renamed import and a package whose
+		// declared name does not match its directory.
+		msg := "\"" | im.path | "\" imported and not used"
+		if im.local != "" && im.local != elem {
+			msg = "\"" | im.path | "\" imported as " | im.local | " and not used"
+		}
+		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+		push(cctx.compileErrors, msg)
+	}
+}
+
+// segStartLine returns the 1-based line one source file's body starts at, or 0
+// when there is no such segment (the end of the package).
+func (pb *ssaPkgBuilder) segStartLine(seg int32) (n int32) {
+	if seg < 0 || seg >= int32(len(pb.segScopes)) {
+		return 0
+	}
+	return pb.segScopes[seg].outStart
+}
+
+// concatSegText returns the concatenated source between two 1-based start
+// lines; endLine 0 means the end of the text.
+func concatSegText(src string, startLine, endLine int32) (t string) {
+	start := lineStartByte(src, startLine)
+	end := int32(len(src))
+	if endLine > startLine {
+		end = lineStartByte(src, endLine)
+	}
+	if start >= end {
+		return ""
+	}
+	return src[start:end]
+}
+
+// lineStartByte returns the byte offset line starts at, 1-based; a line past
+// the end returns the end of the text.
+func lineStartByte(src string, line int32) (off int32) {
+	if line <= 1 {
+		return 0
+	}
+	cur := int32(1)
+	for i := int32(0); i < int32(len(src)); i++ {
+		if src[i] != '\n' {
+			continue
+		}
+		cur++
+		if cur == line {
+			return i + 1
+		}
+	}
+	return int32(len(src))
+}
+
+// identAppearsOutsideImports is identAppears over the parts of a segment that
+// are not an import declaration.
+//
+// A file's concatenated body starts at its own import block, so the path
+// string of the import being tested is in the text: "…/pkg/mxutil" contains
+// the local name mxutil as a whole identifier, and a plain text search would
+// find every import used. Import declarations are therefore skipped: a line
+// opening an import block (or a single-line import) is skipped entirely, and
+// the lines up to the closing ')' are skipped with it.
+func identAppearsOutsideImports(body, name string) (ok bool) {
+	inImport := false
+	i := int32(0)
+	for i <= int32(len(body)) {
+		le := i
+		for le < int32(len(body)) && body[le] != '\n' {
+			le++
+		}
+		ts := lineTrimStart(body, i, le)
+		if inImport {
+			if ts < le && body[ts] == ')' {
+				inImport = false
+			}
+		} else if lineOpensImport(body, ts, le) {
+			if importBlockStaysOpen(body, ts, le) {
+				inImport = true
+			}
+		} else if identAppears(body[i:le], name) {
+			return true
+		}
+		i = le + 1
+	}
+	return false
+}
+
+func lineTrimStart(s string, i, le int32) (t int32) {
+	t = i
+	for t < le && (s[t] == ' ' || s[t] == '\t' || s[t] == '\r') {
+		t++
+	}
+	return t
+}
+
+// lineOpensImport reports whether the line begins with the import keyword.
+func lineOpensImport(s string, ts, le int32) (ok bool) {
+	if le-ts < 6 {
+		return false
+	}
+	if s[ts] != 'i' || s[ts+1] != 'm' || s[ts+2] != 'p' || s[ts+3] != 'o' || s[ts+4] != 'r' || s[ts+5] != 't' {
+		return false
+	}
+	return ts+6 == le || !importIdentByte(s[ts+6])
+}
+
+// importBlockStaysOpen reports whether an import line opens a parenthesized
+// block that later lines continue.
+func importBlockStaysOpen(s string, ts, le int32) (ok bool) {
+	hasOpen := false
+	hasClose := false
+	for k := ts; k < le; k++ {
+		if s[k] == '(' {
+			hasOpen = true
+		}
+		if s[k] == ')' {
+			hasClose = true
+		}
+	}
+	return hasOpen && !hasClose
+}
+
+// identAppears reports whether name occurs in text as a whole identifier, so a
+// shorter name inside a longer one does not count.
+func identAppears(text, name string) (ok bool) {
+	n := int32(len(name))
+	if n == 0 || n > int32(len(text)) {
+		return false
+	}
+	for i := int32(0); i+n <= int32(len(text)); i++ {
+		matched := true
+		for j := int32(0); j < n; j++ {
+			if text[i+j] != name[j] {
+				matched = false
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		if i > 0 && importIdentByte(text[i-1]) {
+			continue
+		}
+		if i+n < int32(len(text)) && importIdentByte(text[i+n]) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func importIdentByte(c byte) (ok bool) {
+	if c == '_' {
+		return true
+	}
+	if c >= 'a' && c <= 'z' {
+		return true
+	}
+	if c >= 'A' && c <= 'Z' {
+		return true
+	}
+	return c >= '0' && c <= '9'
+}
+
 func (pb *ssaPkgBuilder) buildImportSegScopes() {
 	pb.segScopes = nil
+	pb.segImports = nil
 	for si := 0; si < len(mxutil.ConcatImportSegs()); si++ {
 		seg := mxutil.ConcatImportSegs()[si]
 		sc := NewScope(pb.pkg.Pkg.Scope)
@@ -142,7 +372,16 @@ func (pb *ssaPkgBuilder) buildImportSegScopes() {
 				continue
 			}
 			alias := importSpecAlias(spec)
-			if alias == "." || alias == "_" {
+			if alias == "." {
+				// A dot import binds the package's members in the file scope,
+				// not a name, so nothing here refers to the package name
+				// itself. go/types still reports an unmentioned dot import;
+				// stage4 leaves it alone rather than guess at member use.
+				pb.segImports = mxutil.Ensure(pb.segImports, 1)
+				push(pb.segImports, segImport{seg: si, path: path, local: ".", dot: true})
+				continue
+			}
+			if alias == "_" {
 				continue
 			}
 			target := pb.resolveImportTarget(path)
@@ -165,6 +404,8 @@ func (pb *ssaPkgBuilder) buildImportSegScopes() {
 				}
 			}
 			sc.Insert(NewPkgName(nil, localName, target))
+			pb.segImports = mxutil.Ensure(pb.segImports, 1)
+			push(pb.segImports, segImport{seg: si, path: path, local: localName})
 		}
 		pb.segScopes = mxutil.Ensure(pb.segScopes, 1)
 		push(pb.segScopes, segScope{outStart: seg.OutStart, scope: sc})
