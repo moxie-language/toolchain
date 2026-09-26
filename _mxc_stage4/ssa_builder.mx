@@ -1747,6 +1747,52 @@ func shiftConstWiden(x SSAValue, T Type) Type {
 	return Typ[Int64]
 }
 
+// intTypeBits returns the width of an integer type, or 0 when T is not a
+// concrete integer. A shift is re-typed by its context only where the width is
+// unchanged, so the codegen already decided for it still holds.
+func intTypeBits(T Type) (n int32) {
+	b, ok := SafeUnderlying(T).(*Basic)
+	if !ok || b.Info&IsInteger == 0 {
+		return 0
+	}
+	switch b.Kind {
+	case Int8, Uint8:
+		return 8
+	case Int16, Uint16:
+		return 16
+	case Int32, Uint32:
+		return 32
+	case Int64, Uint64, Uintptr:
+		return 64
+	}
+	return 0
+}
+
+// isUntypedBasicType reports whether T is an untyped basic type, so an
+// arithmetic result over it is still waiting for its context type.
+func isUntypedBasicType(T Type) (ok bool) {
+	b, isB := SafeUnderlying(T).(*Basic)
+	return isB && b.Info&IsUntyped != 0
+}
+
+// retypeUntypedShift gives a shift, and the shifts feeding it, the context type
+// T. A chain such as `1 << mantbits << expbits` takes one type from the
+// surrounding expression, so assigning the outer shift the context type is not
+// enough: the inner shift must emit at that width too, or a 52-bit shift runs
+// at 32 bits (strconv's denormal path). Only instructions that were marked
+// context-dependent are touched, so a typed count or left operand is unaffected.
+func retypeUntypedShift(v SSAValue, T Type) {
+	bin, ok := v.(*SSABinOp)
+	if !ok || bin == nil || !bin.untypedShift || T == nil || intTypeBits(T) == 0 {
+		return
+	}
+	bin.typ = T
+	retypeUntypedShift(bin.X, T)
+	if bin.Y != nil {
+		retypeUntypedShift(bin.Y, T)
+	}
+}
+
 func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 	if lhs == nil {
 		panic("buildStore: nil lhs")
@@ -1762,6 +1808,14 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 		obj := fb.lookupObject(lv.Value)
 		if obj == nil {
 			return
+		}
+		// A shift whose left operand is an untyped constant takes the type the
+		// assignment gives it: `mantissa = 1 << flt.mantbits` with mantissa
+		// uint64 is a 64-bit shift (mantbits is 52 for float64). The emitter
+		// shifts at the instruction's declared type, so re-typing here also
+		// fixes the width.
+		if bin, okB := val.(*SSABinOp); okB && bin.untypedShift {
+			retypeUntypedShift(bin, ObjectType(obj))
 		}
 		fb.checkAssignable(val, ObjectType(obj), "assignment")
 		if alloc, ok2 := fb.vars[obj]; ok2 {
@@ -3828,6 +3882,22 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 			}
 		}
 	}
+	// Go types a shift whose left operand is an untyped constant by the type
+	// that operand would take in context, so the enclosing operation supplies
+	// the type, not the count: `1<<uint32(expbits) + int32(bias)` is int32, and
+	// only the sibling operand knows that (strconv's atofHex). The width guard
+	// keeps codegen unchanged - the shift already emits at that width, and a
+	// fully constant shift returned above.
+	if xs, ok := x.(*SSABinOp); ok && xs.untypedShift {
+		if n := intTypeBits(y.SSAType()); n > 0 && n == intTypeBits(xs.SSAType()) {
+			retypeUntypedShift(xs, y.SSAType())
+		}
+	}
+	if ys, ok := y.(*SSABinOp); ok && ys.untypedShift {
+		if n := intTypeBits(x.SSAType()); n > 0 && n == intTypeBits(ys.SSAType()) {
+			retypeUntypedShift(ys, x.SSAType())
+		}
+	}
 	b := &SSABinOp{Op: op, X: x, Y: y}
 	b.name = fb.nextName()
 	switch op {
@@ -3851,9 +3921,28 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 		// Where the left operand is an untyped constant, the count's type
 		// must not truncate it: 0x20000000000000 >> uint32(k) is 2^49, and
 		// adopting the uint32 count computed it as 0 (math.expm1).
-		if (op == OpShl || op == OpShr) && xUntyped && b.typ != nil {
-			if wider := shiftConstWiden(x, b.typ); wider != nil {
-				b.typ = wider
+		if op == OpShl || op == OpShr {
+			xShifted := false
+			if xs, okS := x.(*SSABinOp); okS && xs.untypedShift {
+				xShifted = true
+			}
+			if xUntyped || xShifted {
+				if xUntyped && b.typ != nil {
+					if wider := shiftConstWiden(x, b.typ); wider != nil {
+						b.typ = wider
+					}
+				}
+				b.untypedShift = true
+			}
+		} else {
+			// Keep the marker while the expression is still untyped-derived:
+			// the `- 1` in `1<<uint32(expbits) - 1 + bias` must not lose it,
+			// or the final `+ bias` can no longer supply the context type.
+			if xs, okS := x.(*SSABinOp); okS && xs.untypedShift && isUntypedBasicType(yT) {
+				b.untypedShift = true
+			}
+			if ys, okS := y.(*SSABinOp); okS && ys.untypedShift && isUntypedBasicType(xT) {
+				b.untypedShift = true
 			}
 		}
 	}

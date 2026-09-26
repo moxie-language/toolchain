@@ -484,6 +484,29 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 			return
 		}
 	}
+	// A shift's result type is declared on the instruction, not derived from
+	// its operands: Go lets an untyped left operand take the context type, so
+	// `1 << uint32(n)` assigned to a uint64 value is a 64-bit shift, and the
+	// count may be any integer type. Emit at the declared width and bring both
+	// operands to it. Previously the width came from the left operand, which
+	// truncated the wide case (strconv's `mantissa = 1 << flt.mantbits`,
+	// mantbits 52, became an i32 shift of 52).
+	if b.Op == OpShl || b.Op == OpShr {
+		resT := e.llvmType(b.SSAType())
+		if e.intBits(resT) > 0 {
+			if xt := e.llvmType(b.X.SSAType()); xt != resT && e.intBits(xt) > 0 {
+				lv = e.coerceInt(lv, xt, resT, e.isUnsignedType(b.X.SSAType()))
+			}
+			if b.Y != nil && b.Y.SSAType() != nil {
+				if yt := e.llvmType(b.Y.SSAType()); yt != resT && e.intBits(yt) > 0 {
+					rv = e.coerceInt(rv, yt, resT, e.isUnsignedType(b.Y.SSAType()))
+				}
+			}
+			e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(e.llvmBinOp(b.Op, b.X.SSAType())) ; e.w(" ") ; e.w(resT) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(rv) ; e.w("\n")
+			e.setRegType(b, reg, resT)
+			return
+		}
+	}
 	if b.Op == OpAndNot {
 		rt3 := ""
 		if b.Y != nil && b.Y.SSAType() != nil {
