@@ -13,6 +13,23 @@ func predeclaredAlias(T Type) (u Type, ok bool) {
 	return nil, false
 }
 
+// basicOf returns T's Basic after unwrapping the predeclared aliases byte and
+// rune, or nil. []byte's element is the named byte in stage4, so a plain
+// type assertion to *Basic missed the string/[]byte unification for []string
+// against [][]byte.
+func basicOf(T Type) (b *Basic) {
+	if a, isAlias := predeclaredAlias(T); isAlias {
+		T = a
+	}
+	b, _ = SafeUnderlying(T).(*Basic)
+	return b
+}
+
+// TextType reports whether T is Moxie text: string or []byte.
+func TextType(T Type) (ok bool) {
+	return isTextType(T)
+}
+
 // Identical reports whether T and U are identical types under Moxie rules:
 // - string = []byte (Moxie text unification)
 // - int32 = int32, uint32 = uint32 (enforced via universe scope, but checked here too)
@@ -41,8 +58,8 @@ func Identical(T, U Type) (ok bool) {
 			if t.Info&IsString != 0 {
 				sl, slOk := U.(*Slice)
 				if slOk {
-					eb, ebOk := sl.Elem.(*Basic)
-					if ebOk && eb.Kind == Uint8 {
+					eb := basicOf(sl.Elem)
+					if eb != nil && eb.Kind == Uint8 {
 						return true
 					}
 				}
@@ -73,8 +90,8 @@ func Identical(T, U Type) (ok bool) {
 			// []byte = string in Moxie (including untyped string)
 			b, bOk := U.(*Basic)
 			if bOk && b.Info&IsString != 0 {
-				eb, ebOk := t.Elem.(*Basic)
-				if ebOk && eb.Kind == Uint8 {
+				eb := basicOf(t.Elem)
+				if eb != nil && eb.Kind == Uint8 {
 					return true
 				}
 			}
@@ -252,16 +269,34 @@ func ConcreteAssignTypes(V, T Type) (ok bool) {
 	if _, isIface := SafeUnderlying(T).(*TCInterface); isIface {
 		return false
 	}
-	// An untyped type on either side means the type is not resolved yet (a
-	// bare constant, or a variable whose type came from one). Untyped values
-	// are handled by checkAssignable's constant rule.
-	if bv, isUntyped := SafeUnderlying(V).(*Basic); isUntyped && bv.Info&IsUntyped != 0 {
-		return false
-	}
-	if bt, isUntypedT := SafeUnderlying(T).(*Basic); isUntypedT && bt.Info&IsUntyped != 0 {
+	// An untyped type anywhere on either side means the type is not resolved
+	// yet (a bare constant, or a pointer to a constant's default-less type:
+	// stage4 produced `*untyped bool` in smesh's nostr package). Untyped
+	// values are handled by checkAssignable's constant rule.
+	if hasUntyped(V) || hasUntyped(T) {
 		return false
 	}
 	return true
+}
+
+// hasUntyped reports whether an untyped basic type appears anywhere in T.
+func hasUntyped(T Type) (ok bool) {
+	if T == nil {
+		return false
+	}
+	switch u := SafeUnderlying(T).(type) {
+	case *Basic:
+		return u.Info&IsUntyped != 0
+	case *Pointer:
+		return hasUntyped(u.Base)
+	case *Slice:
+		return hasUntyped(u.Elem)
+	case *Array:
+		return hasUntyped(u.Elem)
+	case *TCMap:
+		return hasUntyped(u.Key) || hasUntyped(u.Elem)
+	}
+	return false
 }
 
 func isNilable(T Type) (ok bool) {
@@ -302,8 +337,8 @@ func isTextType(T Type) (ok bool) {
 	}
 	sl, slOk := SafeUnderlying(T).(*Slice)
 	if slOk {
-		eb, ebOk := SafeUnderlying(sl.Elem).(*Basic)
-		if ebOk && eb.Kind == Uint8 {
+		eb := basicOf(sl.Elem)
+		if eb != nil && eb.Kind == Uint8 {
 			return true
 		}
 	}

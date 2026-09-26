@@ -1445,6 +1445,61 @@ func (fb *ssaFuncBuilder) coerceToInterface(val SSAValue, targetType Type) (s SS
 	return val
 }
 
+// checkCallArgs reports argument-count and argument-type mismatches, mirroring
+// go/types. Conservative: only signatures that carry a parameter tuple are
+// checked, a variadic tail is compared against the element type (or the slice
+// itself when the call uses ...), and checkAssignable skips interfaces and
+// type parameters. Call it before wrapVariadicArgs, while args are still one
+// per source argument.
+func (fb *ssaFuncBuilder) checkCallArgs(args []SSAValue, sig *Signature, hasDots bool) {
+	if sig == nil || sig.Params == nil {
+		return
+	}
+	np := sig.Params.Len()
+	n := int32(len(args))
+	if sig.Variadic && np > 0 {
+		if n < np-1 {
+			fb.errArgs("not enough arguments in call")
+			return
+		}
+	} else if n > np {
+		fb.errArgs("too many arguments in call")
+		return
+	} else if n < np {
+		fb.errArgs("not enough arguments in call")
+		return
+	}
+	for i := int32(0); i < n; i++ {
+		var pt Type
+		if sig.Variadic && np > 0 && i >= np-1 {
+			if hasDots {
+				pt = sig.Params.At(np - 1).Typ
+			} else if sl, isSl := SafeUnderlying(sig.Params.At(np-1).Typ).(*Slice); isSl {
+				pt = sl.Elem
+			}
+		} else if i < np {
+			pt = sig.Params.At(i).Typ
+		}
+		if pt == nil {
+			continue
+		}
+		fb.checkAssignable(args[i], pt, "argument to function")
+	}
+}
+
+// errArgs records a call-arity error for user packages only, matching the gate
+// checkAssignable uses.
+func (fb *ssaFuncBuilder) errArgs(msg string) {
+	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
+		return
+	}
+	if !isUserPackagePath(fb.fn.Pkg.Pkg.Path) {
+		return
+	}
+	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+	push(cctx.compileErrors, msg)
+}
+
 // checkAssignable reports a value that cannot be assigned to the target type,
 // mirroring the go/types diagnostic the legacy compiler gets for free. stage4
 // accepted every mismatch - `var x int32 = "s"` compiled and printed 2288828
@@ -1489,7 +1544,12 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 		untypedInvolved = true
 	}
 	if isConst || isNamedConst || untypedInvolved {
-		if constClass(V) == constClass(T) {
+		// Only a mismatch between two KNOWN classes is reported: an interface
+		// target (fmt.Stringer) or a container has no class here, and
+		// `fmt.Println("x")` against a ...fmt.Stringer parameter is legal.
+		cv := constClass(V)
+		ct := constClass(T)
+		if cv == constClassOther || ct == constClassOther || cv == ct {
 			return
 		}
 	} else if !ConcreteAssignTypes(V, T) {
@@ -1513,13 +1573,11 @@ func constClass(T Type) (c int32) {
 	if T == nil {
 		return constClassOther
 	}
+	if TextType(T) {
+		return constClassText
+	}
 	b, ok := SafeUnderlying(T).(*Basic)
 	if !ok {
-		if sl, isSl := SafeUnderlying(T).(*Slice); isSl {
-			if eb, isB := SafeUnderlying(sl.Elem).(*Basic); isB && eb.Kind == Uint8 {
-				return constClassText
-			}
-		}
 		return constClassOther
 	}
 	if b.Info&IsString != 0 {
@@ -3737,6 +3795,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 				fixedRecv = fb.derefValueRecv(fn2, fixedRecv)
 				args4 := fb.buildArgs(e.ArgList)
 				if fn2.Signature != nil {
+					fb.checkCallArgs(args4, fn2.Signature, e.HasDots)
 					if fn2.Signature.Variadic && !e.HasDots {
 						args4 = fb.wrapVariadicArgs(args4, fn2.Signature)
 					}
@@ -3793,6 +3852,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 	var retType Type
 	if fn.SSAType() != nil {
 		if sig, ok := SafeUnderlying(fn.SSAType()).(*Signature); ok {
+			fb.checkCallArgs(args, sig, e.HasDots)
 			if sig.Results != nil && sig.Results.Len() == 1 {
 				retType = sig.Results.At(0).Typ
 			} else if sig.Results != nil && sig.Results.Len() > 1 {
@@ -4152,6 +4212,16 @@ func (fb *ssaFuncBuilder) reportUndefinedField(sel *syntax.SelectorExpr, t Type)
 	if sel == nil || sel.Sel == nil || sel.Sel.Value == "" {
 		return
 	}
+	// User packages only, like the other assignability diagnostics: the stdlib
+	// has selector shapes stage4 cannot resolve yet (a method on a generic
+	// instantiation, e.g. array.Array.Next) and reporting those would be
+	// false errors. go/types still covers the stdlib on the legacy side.
+	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
+		return
+	}
+	if !isUserPackagePath(fb.fn.Pkg.Pkg.Path) {
+		return
+	}
 	// A field selected on a map value (m[k].f) is legal even though the map
 	// element is not addressable: the value path copies the element out. Only
 	// the operand kinds that must resolve to an address are reported.
@@ -4163,6 +4233,12 @@ func (fb *ssaFuncBuilder) reportUndefinedField(sel *syntax.SelectorExpr, t Type)
 	if p, ok := SafeUnderlying(t).(*Pointer); ok {
 		t = p.Base
 	}
+	// Structs only. Extending this to every concrete type reported field reads
+	// on closure-captured receivers that stage4 does not resolve here
+	// (smesh's relay reads c.ScheduleReconnect and sub.OnEvent through
+	// captures), which are false errors. Non-struct selectors are an open gap:
+	// `n.Nope()` on an int32 is still accepted, where legacy reports "n.Nope
+	// undefined (type int32 has no field or method Nope)".
 	if _, isStruct := SafeUnderlying(t).(*TCStruct); !isStruct {
 		return
 	}
@@ -5536,7 +5612,18 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 	if imported.Path == "unsafe" && (funcName == "SliceData" || funcName == "StringData") {
 		arg := fb.buildExpr(argList[0])
 		extract := &SSAExtract{Tuple: arg, Index: 0}
-		extract.typ = Typ[UnsafePointer]
+		// The declared results are *byte (StringData) and *T (SliceData), not
+		// unsafe.Pointer. Pointing the value at the element type keeps the
+		// type honest, so passing it to a *byte parameter - every wasm bridge
+		// does - is the assignment Go also allows, instead of an implicit
+		// unsafe.Pointer-to-*byte conversion that neither compiler permits.
+		var elemT Type = Typ[Uint8]
+		if funcName == "SliceData" {
+			if sl, isSl := SafeUnderlying(arg.SSAType()).(*Slice); isSl && sl.Elem != nil {
+				elemT = sl.Elem
+			}
+		}
+		extract.typ = NewPointer(elemT)
 		extract.name = fb.nextName()
 		extract.setBlock(fb.currentBlock)
 		fb.currentBlock.Instrs = mxutil.Ensure(fb.currentBlock.Instrs, 1)
@@ -5649,6 +5736,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 	args := fb.buildArgs(argList)
 	var retType Type
 	if ssaFn.Signature != nil {
+		fb.checkCallArgs(args, ssaFn.Signature, hasDots)
 		if ssaFn.Signature.Variadic && !hasDots {
 			args = fb.wrapVariadicArgs(args, ssaFn.Signature)
 		}
