@@ -5467,22 +5467,14 @@ func main() {
 	// record its methods and the closure's interface-method universe, so the
 	// tier-1/tier-2 split is known before anything is loaded.
 	//
-	// KNOWN CACHE DEPENDENCE, measured 2026-09-27 but not fixed: this index is
-	// read from the cached mxh files that exist at this moment, and the tier
-	// split it produces decides which packages the registry pre-pass below
-	// loads and which it skips. A package whose mxh is missing (a cached .bc
-	// reused after its mxh was removed, or a first build that has not written
-	// it yet) contributes nothing here, so the split can differ between a
-	// warmed cache and -a - and with it the impls the interface dispatch
-	// enumerates. On the smesh relay that is .text +12,352 bytes across 52
-	// functions (math/bits.Div64 gains 346 bytes of extra error-impl arms) with
-	// the symbol table, .rodata and .data byte-identical; forced builds match
-	// each other with or without -j, cached builds match each other, and small
-	// closures where every package is tier 1 are identical. The fix belongs
-	// here: make the split a function of the closure and the sources, not of
-	// which mxh files happen to be on disk (moxie's own dispindex command
-	// reports mxhLoaded=0 against a build's cache whenever its flags differ,
-	// which is how this was found).
+	// This index must be complete: it is what findIfaceImpls consults to skip
+	// packages that cannot implement the method being dispatched, so reading it
+	// while some mxh files did not exist yet meant an arm was emitted for every
+	// type in the registry. The same sources then produced different code
+	// depending on nothing but cache state - measured on the smesh relay as
+	// .text differing by 12,352 bytes across 52 functions, all larger in the
+	// cached build, the extra code being error-impl dispatch arms. The mxh
+	// pre-pass above is what guarantees the index is complete; keep it there.
 	cctx.dispIfaceMethods = map[string]bool{}
 	if cctx.dispMethodsByPkg == nil {
 		cctx.dispMethodsByPkg = map[string]map[string]bool{}
