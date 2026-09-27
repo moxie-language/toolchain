@@ -9,7 +9,6 @@ import (
 
 var (
 	validBuildModeOptions     = []string{"default", "c-shared"}
-	validSchedulerOptions     = []string{"none", "tasks"}
 	validPanicStrategyOptions = []string{"print", "trap"}
 	validOptOptions           = []string{"none", "0", "1", "2", "s", "z"}
 )
@@ -23,8 +22,6 @@ type Options struct {
 	BuildMode     string
 	Opt           string
 	PanicStrategy string
-	Scheduler     string
-	StackSize     uint64
 	Work          bool
 	InterpTimeout time.Duration
 	PrintIR       bool
@@ -36,7 +33,6 @@ type Options struct {
 	Nobounds      bool
 	PrintSizes    string
 	PrintAllocs   *regexp.Regexp
-	PrintStacks   bool
 	Tags          []string
 	GlobalValues  map[string]map[string]string
 	TestConfig    TestConfig
@@ -51,10 +47,6 @@ func (o *Options) Verify() error {
 	if o.BuildMode != "" && !isInArray(validBuildModeOptions, o.BuildMode) {
 		return fmt.Errorf(`invalid buildmode option '%s': valid values are %s`,
 			o.BuildMode, strings.Join(validBuildModeOptions, ", "))
-	}
-	if o.Scheduler != "" && !isInArray(validSchedulerOptions, o.Scheduler) {
-		return fmt.Errorf(`invalid scheduler option '%s': valid values are %s`,
-			o.Scheduler, strings.Join(validSchedulerOptions, ", "))
 	}
 	if o.PanicStrategy != "" && !isInArray(validPanicStrategyOptions, o.PanicStrategy) {
 		return fmt.Errorf(`invalid panic option '%s': valid values are %s`,

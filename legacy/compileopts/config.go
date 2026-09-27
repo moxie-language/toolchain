@@ -71,11 +71,9 @@ func (c *Config) BuildTags() []string {
 	return tags
 }
 
-// Scheduler returns the scheduler implementation. Moxie uses "none" (no goroutines).
+// Scheduler returns the scheduler implementation. Moxie uses "none" (no
+// goroutines); the value comes from the target spec.
 func (c *Config) Scheduler() string {
-	if c.Options.Scheduler != "" {
-		return c.Options.Scheduler
-	}
 	if c.Target.Scheduler != "" {
 		return c.Target.Scheduler
 	}
@@ -102,9 +100,6 @@ func (c *Config) OptLevel() (level string, speedLevel, sizeLevel int) {
 func (c *Config) PanicStrategy() string { return c.Options.PanicStrategy }
 
 func (c *Config) StackSize() uint64 {
-	if c.Options.StackSize != 0 {
-		return c.Options.StackSize
-	}
 	return c.Target.DefaultStackSize
 }
 

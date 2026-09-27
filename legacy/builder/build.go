@@ -6,8 +6,6 @@ package builder
 import (
 	"crypto/sha256"
 	"crypto/sha512"
-	"debug/elf"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -28,7 +26,6 @@ import (
 	"moxie/interp"
 	"moxie/loader"
 	"moxie/compiler/llvmutil"
-	"moxie/stacksize"
 	"moxie/transform"
 	"tinygo.org/x/go-llvm"
 )
@@ -744,16 +741,6 @@ func Build(
 		}
 	}
 
-	if config.Options.BuildMode == "wasi-legacy" {
-		if !strings.HasPrefix(config.Triple(), "wasm32-") {
-			return result, fmt.Errorf("buildmode wasi-legacy is only supported on wasm")
-		}
-
-		if config.Options.Scheduler != "none" {
-			return result, fmt.Errorf("buildmode wasi-legacy only supports scheduler=none")
-		}
-	}
-
 	// Add compiler-rt dependency if needed. Usually this is a simple load from
 	// a cache.
 	if config.Target.RTLib == "compiler-rt" {
@@ -864,20 +851,6 @@ func Build(
 				return err
 			}
 
-			var calculatedStacks []string
-			var stackSizes map[string]functionStackSize
-			if config.Options.PrintStacks {
-				// Try to determine stack sizes at compile time.
-				// Don't do this by default as it usually doesn't work on
-				// unsupported architectures.
-				calculatedStacks, stackSizes, err = determineStackSizes(
-					mod, result.Executable,
-				)
-				if err != nil {
-					return err
-				}
-			}
-
 			// Boot patches and RP2040 boot CRC removed (moxie doesn't target embedded).
 
 			// Run wasm-opt for wasm binaries
@@ -961,11 +934,6 @@ func Build(
 					}
 					fmt.Println("Wrote size report to", filename)
 				}
-			}
-
-			// Print goroutine stack sizes, as far as possible.
-			if config.Options.PrintStacks {
-				printStacks(calculatedStacks, stackSizes)
 			}
 
 			return nil
@@ -1229,255 +1197,6 @@ func makeGlobalsModule(
 	}
 
 	return mod
-}
-
-// functionStackSizes keeps stack size information about a single function
-// (usually a goroutine).
-type functionStackSize struct {
-	humanName        string
-	stackSize        uint64
-	stackSizeType    stacksize.SizeType
-	missingStackSize *stacksize.CallNode
-}
-
-// determineStackSizes tries to determine the stack sizes of all started
-// goroutines and of the reset vector. The LLVM module is necessary to find
-// functions that call a function pointer.
-func determineStackSizes(mod llvm.Module, executable string) (
-	[]string, map[string]functionStackSize, error,
-) {
-	var callsIndirectFunction []string
-	gowrappers := []string{}
-	gowrapperNames := make(map[string]string)
-	for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
-		// Determine which functions call a function pointer.
-		for bb := fn.FirstBasicBlock(); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
-			for inst := bb.FirstInstruction(); !inst.IsNil(); inst = llvm.NextInstruction(inst) {
-				if inst.IsACallInst().IsNil() {
-					continue
-				}
-				if callee := inst.CalledValue(); callee.IsAFunction().IsNil() && callee.IsAInlineAsm().IsNil() {
-					callsIndirectFunction = append(
-						callsIndirectFunction, fn.Name(),
-					)
-				}
-			}
-		}
-
-		// Get a list of "go wrappers", small wrapper functions that decode
-		// parameters when starting a new goroutine.
-		attr := fn.GetStringAttributeAtIndex(-1, "moxie-gowrapper")
-		if !attr.IsNil() {
-			gowrappers = append(gowrappers, fn.Name())
-			gowrapperNames[fn.Name()] = attr.GetStringValue()
-		}
-	}
-	sort.Strings(gowrappers)
-
-	// Load the ELF binary.
-	f, err := elf.Open(executable)
-	if err != nil {
-		return nil, nil, fmt.Errorf(
-			"could not load executable for stack size analysis: %w", err,
-		)
-	}
-	defer f.Close()
-
-	// Determine the frame size of each function (if available) and the callgraph.
-	functions, err := stacksize.CallGraph(f, callsIndirectFunction)
-	if err != nil {
-		return nil, nil, fmt.Errorf(
-			"could not parse executable for stack size analysis: %w", err,
-		)
-	}
-
-	// Goroutines need to be started and finished and take up some stack space
-	// that way. This can be measured by measuring the stack size of
-	// moxie_startTask.
-	if numFuncs := len(functions["moxie_startTask"]); numFuncs != 1 {
-		return nil, nil, fmt.Errorf(
-			"expected exactly one definition of moxie_startTask, got %d",
-			numFuncs,
-		)
-	}
-	baseStackSize, baseStackSizeType, baseStackSizeFailedAt := functions["moxie_startTask"][0].StackSize()
-
-	sizes := make(map[string]functionStackSize)
-
-	// Add the reset handler function, for convenience. The reset handler runs
-	// startup code and the scheduler. The listed stack size is not the full
-	// stack size: interrupts are not counted.
-	var resetFunction string
-	switch f.Machine {
-	case elf.EM_ARM:
-		// Note: all interrupts happen on this stack so the real size is bigger.
-		resetFunction = "Reset_Handler"
-	}
-	if resetFunction != "" {
-		funcs := functions[resetFunction]
-		if len(funcs) != 1 {
-			return nil, nil, fmt.Errorf(
-				"expected exactly one definition of %s in the callgraph, found %d",
-				resetFunction, len(funcs),
-			)
-		}
-		stackSize, stackSizeType, missingStackSize := funcs[0].StackSize()
-		sizes[resetFunction] = functionStackSize{
-			stackSize:        stackSize,
-			stackSizeType:    stackSizeType,
-			missingStackSize: missingStackSize,
-			humanName:        resetFunction,
-		}
-	}
-
-	// Add all goroutine wrapper functions.
-	for _, name := range gowrappers {
-		funcs := functions[name]
-		if len(funcs) != 1 {
-			return nil, nil, fmt.Errorf(
-				"expected exactly one definition of %s in the callgraph, found %d",
-				name, len(funcs),
-			)
-		}
-		humanName := gowrapperNames[name]
-		if humanName == "" {
-			humanName = name // fallback
-		}
-		stackSize, stackSizeType, missingStackSize := funcs[0].StackSize()
-		if baseStackSizeType != stacksize.Bounded {
-			// It was not possible to determine the stack size at compile time
-			// because moxie_startTask does not have a fixed stack size. This
-			// can happen when using -opt=1.
-			stackSizeType = baseStackSizeType
-			missingStackSize = baseStackSizeFailedAt
-		} else if stackSize < baseStackSize {
-			// This goroutine has a very small stack, but still needs to fit all
-			// registers to start and suspend the goroutine. Otherwise a stack
-			// overflow will occur even before the goroutine is started.
-			stackSize = baseStackSize
-		}
-		sizes[name] = functionStackSize{
-			stackSize:        stackSize,
-			stackSizeType:    stackSizeType,
-			missingStackSize: missingStackSize,
-			humanName:        humanName,
-		}
-	}
-
-	if resetFunction != "" {
-		return append([]string{resetFunction}, gowrappers...), sizes, nil
-	}
-	return gowrappers, sizes, nil
-}
-
-// modifyStackSizes modifies the .moxie_stacksizes section with the updated
-// stack size information. Before this modification, all stack sizes in the
-// section assume the default stack size (which is relatively big).
-func modifyStackSizes(
-	executable string, stackSizeLoads []string,
-	stackSizes map[string]functionStackSize,
-) error {
-	data, fileHeader, err := getElfSectionData(executable, ".moxie_stacksizes")
-	if err != nil {
-		return err
-	}
-
-	if len(stackSizeLoads)*4 != len(data) {
-		// Note: while AVR should use 2 byte stack sizes, even 64-bit platforms
-		// should probably stick to 4 byte stack sizes as a larger than 4GB
-		// stack doesn't make much sense.
-		return errors.New("expected 4 byte stack sizes")
-	}
-
-	// Modify goroutine stack sizes with a compile-time known worst case stack
-	// size.
-	for i, name := range stackSizeLoads {
-		fn, ok := stackSizes[name]
-		if !ok {
-			return fmt.Errorf("could not find symbol %s in ELF file", name)
-		}
-		if fn.stackSizeType == stacksize.Bounded {
-			stackSize := uint32(fn.stackSize)
-
-			// Add stack size used by interrupts.
-			switch fileHeader.Machine {
-			case elf.EM_ARM:
-				if stackSize%8 != 0 {
-					// If the stack isn't a multiple of 8, it means the leaf
-					// function with the biggest stack depth doesn't have an aligned
-					// stack. If the STKALIGN flag is set (which it is by default)
-					// the interrupt controller will forcibly align the stack before
-					// storing in-use registers. This will thus overwrite one word
-					// past the end of the stack (off-by-one).
-					stackSize += 4
-				}
-
-				// On Cortex-M (assumed here), this stack size is 8 words or 32
-				// bytes. This is only to store the registers that the interrupt
-				// may modify, the interrupt will switch to the interrupt stack
-				// (MSP).
-				// Some background:
-				// https://interrupt.memfault.com/blog/cortex-m-rtos-context-switching
-				stackSize += 32
-
-				// Adding 4 for the stack canary, and another 4 to keep the
-				// stack aligned. Even though the size may be automatically
-				// determined, stack overflow checking is still important as the
-				// stack size cannot be determined for all goroutines.
-				stackSize += 8
-			default:
-				return fmt.Errorf(
-					"unknown architecture: %s", fileHeader.Machine.String(),
-				)
-			}
-
-			// Finally write the stack size to the binary.
-			binary.LittleEndian.PutUint32(data[i*4:], stackSize)
-		}
-	}
-
-	return replaceElfSection(executable, ".moxie_stacksizes", data)
-}
-
-// printStacks prints the maximum stack depth for functions that are started as
-// goroutines. Stack sizes cannot always be determined statically, in particular
-// recursive functions and functions that call interface methods or function
-// pointers may have an unknown stack depth (depending on what the optimizer
-// manages to optimize away).
-//
-// It might print something like the following:
-//
-//	function                         stack usage (in bytes)
-//	Reset_Handler                    316
-//	examples/blinky2.led1            92
-//	runtime.run$1                    300
-func printStacks(
-	calculatedStacks []string, stackSizes map[string]functionStackSize,
-) {
-	// Print the sizes of all stacks.
-	fmt.Printf("%-32s %s\n", "function", "stack usage (in bytes)")
-	for _, name := range calculatedStacks {
-		fn := stackSizes[name]
-		switch fn.stackSizeType {
-		case stacksize.Bounded:
-			fmt.Printf("%-32s %d\n", fn.humanName, fn.stackSize)
-		case stacksize.Unknown:
-			fmt.Printf(
-				"%-32s unknown, %s does not have stack frame information\n",
-				fn.humanName, fn.missingStackSize,
-			)
-		case stacksize.Recursive:
-			fmt.Printf(
-				"%-32s recursive, %s may call itself\n", fn.humanName,
-				fn.missingStackSize,
-			)
-		case stacksize.IndirectCall:
-			fmt.Printf(
-				"%-32s unknown, %s calls a function pointer\n", fn.humanName,
-				fn.missingStackSize,
-			)
-		}
-	}
 }
 
 // lock may acquire a lock at the specified path.

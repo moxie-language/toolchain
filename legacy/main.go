@@ -492,16 +492,13 @@ func main() {
 
 	opt := flag.String("opt", "0", "optimization level: 0, 1, 2, s, z (Moxie default: 0 — LLVM optimization is forbidden; Moxie's source-to-codegen mapping is 1:1, the optimizer assumes semantics Moxie does not have)")
 	panicStrategy := flag.String("panic", "print", "panic strategy (print, trap)")
-	scheduler := flag.String("scheduler", "", "which scheduler to use (none, tasks)")
 	work := flag.Bool("work", false, "print the name of the temporary build directory and do not delete this directory on exit")
 	interpTimeout := flag.Duration("interp-timeout", 180*time.Second, "interp optimization pass timeout")
 	var tags buildutil.TagsFlag
 	flag.Var(&tags, "tags", "a space-separated list of extra build tags")
 	target := flag.String("target", "", "target specification")
 	buildMode := flag.String("buildmode", "", "build mode to use (default)")
-	stackSize := flag.Uint64("stack-size", 0, "goroutine stack size")
 	printSize := flag.String("size", "", "print sizes (none, short, full)")
-	printStacks := flag.Bool("print-stacks", false, "print stack sizes of goroutines")
 	printAllocsString := flag.String("print-allocs", "", "regular expression of functions for which arena allocations should be printed (needs -tags alloc_trace for the runtime to count them)")
 	printCommands := flag.Bool("x", false, "Print commands")
 	flagJSON := flag.Bool("json", false, "print output in JSON format")
@@ -584,10 +581,8 @@ func main() {
 		GOARCH:        goenv.Get("GOARCH"),
 		Target:        *target,
 		BuildMode:     *buildMode,
-		StackSize:     *stackSize,
 		Opt:           *opt,
 		PanicStrategy: *panicStrategy,
-		Scheduler:     *scheduler,
 		Work:          *work,
 		InterpTimeout: *interpTimeout,
 		PrintIR:       *printIR,
@@ -597,7 +592,6 @@ func main() {
 		Debug:         !*nodebug,
 		Nobounds:      *nobounds,
 		PrintSizes:    *printSize,
-		PrintStacks:   *printStacks,
 		PrintAllocs:   printAllocs,
 		Tags:          []string(tags),
 		TestConfig:    testConfig,
