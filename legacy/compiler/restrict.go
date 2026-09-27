@@ -8,9 +8,11 @@ package compiler
 // Runtime/internal packages are permanently exempt.
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
+	"os"
 	"sort"
 	"strings"
 
@@ -300,6 +302,16 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 		// Pointer-to-array puns ((*[N]T)(unsafe.Pointer(&x))) are unchanged -
 		// they are *ssa.Convert, not this node.
 		b.addError(v.Pos(), "moxie: slice-to-array-pointer conversion is not allowed: work in slices")
+
+	case *ssa.Call:
+		// os.Exit is legal, but it ends the process without running deferred
+		// cleanup, so whatever the program owns - a scratch tree, a lock, a
+		// socket - is left behind. Warn; do not reject, a short-lived tool may
+		// mean it.
+		if fn := v.Common().StaticCallee(); fn != nil && fn.Pkg != nil && fn.Pkg.Pkg != nil &&
+			fn.Pkg.Pkg.Path() == "os" && fn.Name() == "Exit" {
+			fmt.Fprintf(os.Stderr, "  warning: os.Exit does not run deferred cleanup in %s\n", b.fn.Pkg.Pkg.Path())
+		}
 	}
 }
 

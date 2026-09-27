@@ -44,6 +44,9 @@ type buildState struct {
 	printCommands bool
 	// keepWork is -work: keep the build scratch directory and echo its path.
 	keepWork bool
+	// scratchDirs are the build scratch directories this run created; cleanup
+	// removes them unless -work keeps them.
+	scratchDirs []string
 }
 
 var bst *buildState
@@ -167,7 +170,7 @@ func mkdirAll(path string, mode uint32) {
 
 func fatal(msg string) {
 	mxutil.WriteStr(2, "mxc: " | msg | "\n")
-	os.Exit(1)
+	exitNow(1)
 }
 
 func mem2regBc(bcFile string) {
@@ -252,14 +255,43 @@ func echoCommand(args []string) {
 	mxutil.WriteStr(2, line | "\n")
 }
 
-// dropScratch removes a build scratch directory unless -work asked to keep it.
-// The run and test paths leave through os.Exit, which skips the deferred
-// cleanup, so they drop the directory explicitly before exiting.
-func dropScratch(dir string) {
+// registerScratch records a build scratch directory for cleanup. With -work
+// the directory is kept instead, and its path is reported.
+func registerScratch(dir string) {
 	if bst.keepWork {
+		mxutil.WriteStr(1, "WORK=" | dir | "\n")
 		return
 	}
-	os.RemoveAll(dir)
+	bst.scratchDirs = mxutil.Ensure(bst.scratchDirs, 1)
+	push(bst.scratchDirs, dir)
+}
+
+// cleanupScratch removes every scratch directory this run created. It runs
+// from main's defer on completion and from the SIGINT handler, so running it
+// twice must be harmless.
+func cleanupScratch() {
+	for _, d := range bst.scratchDirs {
+		os.RemoveAll(d)
+	}
+	bst.scratchDirs = nil
+}
+
+// exitNow leaves with code after cleaning up. os.Exit does not run defers, so
+// every exit that can happen with a scratch directory live goes through here.
+func exitNow(code int32) {
+	cleanupScratch()
+	os.Exit(code)
+}
+
+// cInstallInterruptHandler asks the runtime to run moxieOnInterrupt when the
+// process is interrupted, then leave with the conventional 128+SIGINT status.
+//
+//export moxie_install_interrupt_handler
+func cInstallInterruptHandler()
+
+//export moxie_on_interrupt
+func moxieOnInterrupt() {
+	cleanupScratch()
 }
 
 // runPool runs cmds with at most jobs concurrent children. Returns false if
@@ -3519,11 +3551,7 @@ func cmdCacheWarm() {
 	clang := "clang-22"
 	tmpdir := buildScratchDir("./tmp", "mxc-build")
 	mkdirAll(tmpdir, 0755)
-	if bst.keepWork {
-		mxutil.WriteStr(1, "WORK=" | tmpdir | "\n")
-	} else {
-		defer os.RemoveAll(tmpdir)
-	}
+	registerScratch(tmpdir)
 	cacheBase := pkgCacheDir()
 	registerBuiltins()
 	compiled := int32(0)
@@ -4379,11 +4407,7 @@ func cmdUpdate(rebuildAll bool) {
 	clang := "clang-22"
 	tmpdir := buildScratchDir("./tmp", "mxc-build")
 	mkdirAll(tmpdir, 0755)
-	if bst.keepWork {
-		mxutil.WriteStr(1, "WORK=" | tmpdir | "\n")
-	} else {
-		defer os.RemoveAll(tmpdir)
-	}
+	registerScratch(tmpdir)
 	registerBuiltins()
 	for _, pkgDir := range pkgDirs {
 		pkgPath := ""
@@ -4589,11 +4613,7 @@ func cmdTest(args []string) {
 
 	tmpdir := buildScratchDir("./tmp", "mxc-testbuild")
 	mkdirAll(tmpdir, 0755)
-	if bst.keepWork {
-		mxutil.WriteStr(1, "WORK=" | tmpdir | "\n")
-	} else {
-		defer os.RemoveAll(tmpdir)
-	}
+	registerScratch(tmpdir)
 
 	testMainSrc := generateTestMain(pkgName, allTestFuncs)
 	testMainFile := mxutil.JoinPath(tmpdir, "_testmain.mx")
@@ -4896,8 +4916,7 @@ func cmdTest(args []string) {
 
 	mxutil.WriteStr(2, "  run tests\n")
 	rc = run([]string{outpath})
-	dropScratch(tmpdir)
-	os.Exit(int32(rc))
+	exitNow(int32(rc))
 }
 
 func hasImportStr(imports []string, pkg string) (ok bool) {
@@ -5144,6 +5163,10 @@ func main() {
 	cctx.universe = InitUniverse()
 	SetUniverseGlobals(cctx.universe)
 	initBuildState()
+	// Scratch directories die on completion, from the SIGINT handler, and from
+	// exitNow on the paths that need an exit status.
+	defer cleanupScratch()
+	cInstallInterruptHandler()
 	bst.buildJobs = adaptiveJobs()
 	if mxutil.TargetArch() == "wasm" {
 		// wasm32 has no fork, no threads and no worker fds, so the
@@ -5168,7 +5191,7 @@ func main() {
 	args := os.Args
 	if len(args) < 2 {
 		mxutil.WriteStr(2, "usage: mxc <build|test|version|cache|fetch|update> ...\n")
-		os.Exit(1)
+		exitNow(1)
 	}
 
 	cmd := args[1]
@@ -5232,7 +5255,7 @@ func main() {
 	if cmd == "install" {
 		if len(args) < 3 {
 			mxutil.WriteStr(2, "usage: mxc install <package>\n")
-			os.Exit(1)
+			exitNow(1)
 		}
 		cmdInstall(args[2])
 		return
@@ -5247,7 +5270,7 @@ func main() {
 			return
 		}
 		mxutil.WriteStr(2, "usage: mxc cache <clean|warm>\n")
-		os.Exit(1)
+		exitNow(1)
 	}
 	if cmd == "fetch" {
 		fetchURL := ""
@@ -5277,7 +5300,7 @@ func main() {
 	}
 	if cmd != "build" && cmd != "run" {
 		mxutil.WriteStr(2, "usage: mxc <build|run|test|version|cache|fetch|update|build-runtime> ...\n")
-		os.Exit(1)
+		exitNow(1)
 	}
 	runAfter := cmd == "run"
 
@@ -5506,11 +5529,7 @@ func main() {
 
 	tmpdir := buildScratchDir("./tmp", "mxc-build")
 	mkdirAll(tmpdir, 0755)
-	if bst.keepWork {
-		mxutil.WriteStr(1, "WORK=" | tmpdir | "\n")
-	} else {
-		defer os.RemoveAll(tmpdir)
-	}
+	registerScratch(tmpdir)
 
 	// TLS probe: if this binary's globals aren't thread_local, the parallel
 	// path would corrupt shared state. Fall back to serial.
@@ -5928,8 +5947,7 @@ func main() {
 			execArgs = mxutil.Ensure(execArgs, 1)
 			push(execArgs, a)
 		}
-		dropScratch(tmpdir)
-		os.Exit(run(execArgs))
+		exitNow(run(execArgs))
 	}
 }
 
@@ -7107,11 +7125,7 @@ func cmdBuildRuntime() {
 	sysroot := mxutil.JoinPath(root, "sysroot")
 	tmpdir := buildScratchDir("/tmp", "mxc-rt-build")
 	mkdirAll(tmpdir, 0755)
-	if bst.keepWork {
-		mxutil.WriteStr(1, "WORK=" | tmpdir | "\n")
-	} else {
-		defer os.RemoveAll(tmpdir)
-	}
+	registerScratch(tmpdir)
 
 	registerBuiltins()
 

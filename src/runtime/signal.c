@@ -62,3 +62,24 @@ void moxie_signal_disable(uint32_t sig) {
     act.sa_handler = SIG_DFL;
     sigaction(sig, &act, NULL);
 }
+
+// Interrupt handling for a program that owns resources it must clean up before
+// dying. The program overrides moxie_on_interrupt; the default does nothing.
+// _exit is used because the handler must not run atexit handlers or flush
+// stdio that a nested fault could be holding.
+__attribute__((weak)) void moxie_on_interrupt(void) {}
+
+static void interrupt_handler(int sig) {
+    moxie_on_interrupt();
+    _exit(128 + sig);
+}
+
+// moxie_install_interrupt_handler cleans up on the signals that mean "stop":
+// SIGINT from the terminal and SIGTERM from a supervisor.
+void moxie_install_interrupt_handler(void) {
+    struct sigaction act = { 0 };
+    act.sa_handler = &interrupt_handler;
+    act.sa_flags = 0;
+    sigaction(SIGINT, &act, NULL);
+    sigaction(SIGTERM, &act, NULL);
+}

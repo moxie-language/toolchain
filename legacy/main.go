@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -17,6 +18,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/shlex"
@@ -108,7 +111,7 @@ func BuildRuntime(outpath string, config *compileopts.Config) error {
 		return err
 	}
 	if !config.Options.Work {
-		defer os.RemoveAll(tmpdir)
+		registerScratch(tmpdir)
 	}
 
 	// Compile runtime as the "main" package - the loader resolves all
@@ -130,7 +133,7 @@ func Build(pkgName, outpath string, config *compileopts.Config) error {
 		return err
 	}
 	if !config.Options.Work {
-		defer os.RemoveAll(tmpdir)
+		registerScratch(tmpdir)
 	}
 
 	result, err := builder.Build(pkgName, outpath, tmpdir, config)
@@ -284,7 +287,7 @@ func buildAndRun(pkgName string, config *compileopts.Config, stdout io.Writer, c
 		return builder.BuildResult{}, err
 	}
 	if !config.Options.Work {
-		defer os.RemoveAll(tmpdir)
+		registerScratch(tmpdir)
 	}
 
 	result, err := builder.Build(pkgName, "", tmpdir, config)
@@ -393,7 +396,7 @@ func handleCompilerError(err error) {
 			wd = ""
 		}
 		diagnostics.CreateDiagnostics(err).WriteTo(os.Stderr, wd)
-		os.Exit(1)
+		exitNow(1)
 	}
 }
 
@@ -422,7 +425,7 @@ func printBuildOutput(err error, jsonDiagnostics bool) {
 			output, _ := json.Marshal(jsonDiag{diags.ImportPath, "build-fail", ""})
 			os.Stdout.Write(append(output, '\n'))
 		}
-		os.Exit(1)
+		exitNow(1)
 	}
 	handleCompilerError(err)
 }
@@ -478,15 +481,58 @@ func handleChdirFlag() {
 	}
 	if err := os.Chdir(dir); err != nil {
 		fmt.Fprintln(os.Stderr, "cannot chdir:", err)
-		os.Exit(1)
+		exitNow(1)
 	}
 }
 
+// scratchDirs are the build directories this process created. They are removed
+// on completion by main's defer, by exitNow, and by the interrupt handler, so
+// neither a failing build nor a killed one leaves a scratch tree behind.
+var (
+	scratchMu   sync.Mutex
+	scratchDirs []string
+)
+
+func registerScratch(dir string) {
+	scratchMu.Lock()
+	scratchDirs = append(scratchDirs, dir)
+	scratchMu.Unlock()
+}
+
+func cleanupScratch() {
+	scratchMu.Lock()
+	dirs := scratchDirs
+	scratchDirs = nil
+	scratchMu.Unlock()
+	for _, dir := range dirs {
+		os.RemoveAll(dir)
+	}
+}
+
+// exitNow leaves with code after cleaning up: os.Exit does not run defers.
+func exitNow(code int) {
+	cleanupScratch()
+	os.Exit(code)
+}
+
 func main() {
+	defer cleanupScratch()
+	// Ctrl-C and a supervisor's SIGTERM must clean up too, and unlike a normal
+	// return they cannot wait for the defers.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		cleanupScratch()
+		if sig == syscall.SIGTERM {
+			os.Exit(143)
+		}
+		os.Exit(130)
+	}()
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "No command-line arguments supplied.")
 		usage("")
-		os.Exit(1)
+		exitNow(1)
 	}
 	command := os.Args[1]
 
@@ -546,16 +592,16 @@ func main() {
 	case "clang", "ld.lld", "wasm-ld":
 		err := builder.RunTool(command, os.Args[2:]...)
 		if err != nil {
-			os.Exit(1)
+			exitNow(1)
 		}
-		os.Exit(0)
+		exitNow(0)
 	}
 
 	flag.CommandLine.Parse(os.Args[2:])
 	globalVarValues, extLDFlags, err := parseGoLinkFlag(*ldflags)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		exitNow(1)
 	}
 
 	var printAllocs *regexp.Regexp
@@ -563,7 +609,7 @@ func main() {
 		printAllocs, err = regexp.Compile(*printAllocsString)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			exitNow(1)
 		}
 		// Site ids are handed out in compile order and collected in one
 		// slice, so an instrumented build compiles packages serially.
@@ -608,7 +654,7 @@ func main() {
 		options.ExtLDFlags, err = shlex.Split(extLDFlags)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "could not parse -extldflags:", err)
-			os.Exit(1)
+			exitNow(1)
 		}
 	}
 
@@ -616,19 +662,19 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		usage(command)
-		os.Exit(1)
+		exitNow(1)
 	}
 
 	if *cpuprofile != "" {
 		f, err := os.Create(*cpuprofile)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "could not create CPU profile: ", err)
-			os.Exit(1)
+			exitNow(1)
 		}
 		defer f.Close()
 		if err := pprof.StartCPUProfile(f); err != nil {
 			fmt.Fprintln(os.Stderr, "could not start CPU profile: ", err)
-			os.Exit(1)
+			exitNow(1)
 		}
 		defer pprof.StopCPUProfile()
 	}
@@ -656,7 +702,7 @@ func main() {
 		} else if flag.NArg() > 1 {
 			fmt.Fprintln(os.Stderr, "build only accepts a single positional argument: package name")
 			usage(command)
-			os.Exit(1)
+			exitNow(1)
 		}
 		config, err := builder.NewConfig(options)
 		handleCompilerError(err)
@@ -666,7 +712,7 @@ func main() {
 		if flag.NArg() < 1 {
 			fmt.Fprintln(os.Stderr, "No package specified.")
 			usage(command)
-			os.Exit(1)
+			exitNow(1)
 		}
 		pkgName := filepath.ToSlash(flag.Arg(0))
 		err := Run(pkgName, options, flag.Args()[1:])
@@ -682,11 +728,11 @@ func main() {
 		explicitPkgNames, err := getListOfPackages(pkgNames, options)
 		if err != nil {
 			fmt.Printf("cannot resolve packages: %v\n", err)
-			os.Exit(1)
+			exitNow(1)
 		}
 		if outpath != "" && len(explicitPkgNames) > 1 {
 			fmt.Println("cannot use -o flag with multiple packages")
-			os.Exit(1)
+			exitNow(1)
 		}
 
 		fail := make(chan struct{}, 1)
@@ -716,7 +762,7 @@ func main() {
 				if err != nil {
 					wd, _ := os.Getwd()
 					diagnostics.CreateDiagnostics(err).WriteTo(os.Stderr, wd)
-					os.Exit(1)
+					exitNow(1)
 				}
 				if !passed {
 					select {
@@ -732,7 +778,7 @@ func main() {
 		<-flusherDone
 		close(fail)
 		if _, fail := <-fail; fail {
-			os.Exit(1)
+			exitNow(1)
 		}
 	case "targets":
 		specs := compileopts.GetTargetSpecs()
@@ -748,7 +794,7 @@ func main() {
 		config, err := builder.NewConfig(options)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			exitNow(1)
 		}
 		config.GoMinorVersion = 0
 		if *flagJSON {
@@ -779,7 +825,7 @@ func main() {
 		config, err := builder.NewConfig(options)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			exitNow(1)
 		}
 		var extraArgs []string
 		if *flagJSON {
@@ -794,33 +840,33 @@ func main() {
 		cmd, err := loader.List(config, extraArgs, flag.Args())
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "failed to run `moxie list`:", err)
-			os.Exit(1)
+			exitNow(1)
 		}
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		err = cmd.Run()
 		if err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok {
-				os.Exit(exitErr.ExitCode())
+				exitNow(exitErr.ExitCode())
 			}
 			fmt.Fprintln(os.Stderr, "failed to run `moxie list`:", err)
-			os.Exit(1)
+			exitNow(1)
 		}
 	case "vendor":
 		wd, err := os.Getwd()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			exitNow(1)
 		}
 		if err := loader.Vendor(wd); err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			exitNow(1)
 		}
 	case "clean":
 		err := os.RemoveAll(goenv.Get("GOCACHE"))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "cannot clean cache:", err)
-			os.Exit(1)
+			exitNow(1)
 		}
 	case "header":
 		pkgName := "."
@@ -841,25 +887,25 @@ func main() {
 		err := Header(pkgName, outpath, prevPath, options)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			exitNow(1)
 		}
 	case "install":
 		if flag.NArg() < 1 {
 			fmt.Fprintln(os.Stderr, "install requires a package path")
 			usage(command)
-			os.Exit(1)
+			exitNow(1)
 		}
 		pkgName := filepath.ToSlash(flag.Arg(0))
 		err := Install(pkgName, options)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			exitNow(1)
 		}
 	case "fetch":
 		err := Fetch(options)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			exitNow(1)
 		}
 	case "cache":
 		subcmd := ""
@@ -870,20 +916,20 @@ func main() {
 		case "clean":
 			if err := cache.Clean(); err != nil {
 				fmt.Fprintln(os.Stderr, "cannot clean install cache:", err)
-				os.Exit(1)
+				exitNow(1)
 			}
 		case "list":
 			paths, err := cache.List()
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
+				exitNow(1)
 			}
 			for _, p := range paths {
 				fmt.Println(p)
 			}
 		default:
 			fmt.Fprintln(os.Stderr, "cache subcommand must be 'list' or 'clean'")
-			os.Exit(1)
+			exitNow(1)
 		}
 	case "build-runtime":
 		options.StandaloneRuntime = true
@@ -912,7 +958,7 @@ func main() {
 	default:
 		fmt.Fprintln(os.Stderr, "Unknown command:", command)
 		usage("")
-		os.Exit(1)
+		exitNow(1)
 	}
 }
 
