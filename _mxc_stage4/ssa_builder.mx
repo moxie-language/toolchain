@@ -718,7 +718,7 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 		return
 	}
 	if d.Name.Value == "init" {
-		if pb.pkg.Pkg.Name == "main" {
+		if pb.pkg.Pkg.Name == "main" && !testWrapsLibrary() {
 			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 			push(cctx.compileErrors, "init() is not allowed in main package: use main() for program entry")
 			return
@@ -843,7 +843,7 @@ func isNoContextExtern(pkg, name string) (ok bool) {
 }
 
 func (pb *ssaPkgBuilder) registerMethod(d *syntax.FuncDecl) {
-	if !ssaRecvIsPtr(d.Recv) && isUserPackagePath(pb.pkg.Pkg.Path) {
+	if !ssaRecvIsPtr(d.Recv) && isUserPackagePath(restrictPath(pb.pkg.Pkg.Path)) {
 		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 		push(cctx.compileErrors, "value receiver is not allowed: use pointer receiver (*" | ssaRecvTypeName(d.Recv) | ")")
 		return
@@ -1808,7 +1808,7 @@ func (fb *ssaFuncBuilder) errArgs(msg string) {
 	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
 		return
 	}
-	if !isUserPackagePath(fb.fn.Pkg.Pkg.Path) {
+	if !isUserPackagePath(restrictPath(fb.fn.Pkg.Pkg.Path)) {
 		return
 	}
 	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
@@ -1834,7 +1834,7 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
 		return
 	}
-	if !isUserPackagePath(fb.fn.Pkg.Pkg.Path) {
+	if !isUserPackagePath(restrictPath(fb.fn.Pkg.Pkg.Path)) {
 		return
 	}
 	V := val.SSAType()
@@ -1891,7 +1891,7 @@ func (fb *ssaFuncBuilder) checkConstConvert(val SSAValue, T Type) {
 	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
 		return
 	}
-	if !isUserPackagePath(fb.fn.Pkg.Pkg.Path) {
+	if !isUserPackagePath(restrictPath(fb.fn.Pkg.Pkg.Path)) {
 		return
 	}
 	cv, explicitNeg := constValueOf(val)
@@ -4471,7 +4471,7 @@ func (fb *ssaFuncBuilder) checkSliceToArrayConv(x SSAValue, dst Type) {
 	if x == nil || dst == nil || fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
 		return
 	}
-	if !isUserPackagePath(fb.fn.Pkg.Pkg.Path) {
+	if !isUserPackagePath(restrictPath(fb.fn.Pkg.Pkg.Path)) {
 		return
 	}
 	if _, isSl := x.SSAType().(*Slice); !isSl {
@@ -4998,7 +4998,7 @@ func (fb *ssaFuncBuilder) reportUndefinedField(sel *syntax.SelectorExpr, t Type)
 	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
 		return
 	}
-	if !isUserPackagePath(fb.fn.Pkg.Pkg.Path) {
+	if !isUserPackagePath(restrictPath(fb.fn.Pkg.Pkg.Path)) {
 		return
 	}
 	// A field selected on a map value (m[k].f) is legal even though the map
@@ -6398,7 +6398,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 	if imported == nil {
 		return nil
 	}
-	if imported.Path == "os" && funcName == "Exit" && isUserPackagePath(fb.fn.Pkg.Pkg.Path) {
+	if imported.Path == "os" && funcName == "Exit" && isUserPackagePath(restrictPath(fb.fn.Pkg.Pkg.Path)) {
 		// Legal, but it ends the process without running deferred cleanup, so
 		// whatever the program owns - a scratch tree, a lock, a socket - is
 		// left behind. Warn; do not reject, a short-lived tool may mean it.

@@ -59,6 +59,33 @@ func isUserPackagePath(path string) bool {
 	return false
 }
 
+// restrictPath maps the synthetic main a test build creates back to the package
+// it came from. `moxie test` concatenates the package under test and its test
+// files into one `package main` so the harness can link them, and that override
+// reached the restriction checks: code a normal build compiles as
+// `git.smesh.lol/smesh/pkg/nostr/kind` (exempt - the path contains /pkg/) was
+// judged as a fresh user `main`, so a package with a lazily initialised global
+// (`ensureKinds`, `ensureKindData`) failed to compile in its own test build and
+// nowhere else. The restrictions must judge the package by where it came from.
+func restrictPath(path string) (r string) {
+	if path == "main" && bst != nil && bst.testSrcPkgPath != "" {
+		return bst.testSrcPkgPath
+	}
+	return path
+}
+
+// testWrapsLibrary reports whether this compile is the synthetic main a test
+// build creates around a package that is not itself a main package. Such a
+// wrapper is named main for the linker, but it is a library, so the rules that
+// apply to a program's own main package - init() not allowed, no entry point
+// other than main - must not fire on it.
+func testWrapsLibrary() (ok bool) {
+	if bst == nil || bst.testSrcPkgPath == "" {
+		return false
+	}
+	return bst.testSrcPkgPath != "main" && bst.testSrcPkgPath != "command-line-arguments"
+}
+
 // ssaGlobalRoot returns the name of the package-level global an address is
 // rooted in, or "" if the address is local or goes THROUGH a global pointer.
 // Mirrors legacy restrict.go globalName: a global whose type is a pointer is
@@ -118,7 +145,7 @@ func checkGlobalMutation(f *SSAFunction) {
 	if f == nil || f.Blocks == nil || f.Pkg == nil || f.Pkg.Pkg == nil {
 		return
 	}
-	if !isUserPackagePath(f.Pkg.Pkg.Path) {
+	if !isUserPackagePath(restrictPath(f.Pkg.Pkg.Path)) {
 		return
 	}
 	if f.name == "__varinit" || isInitFuncName(f.name) {
@@ -1268,7 +1295,7 @@ func checkClosureCaptures(p *SSAPackage) {
 	if bst != nil && bst.allowCaptures {
 		return
 	}
-	if !isUserPackagePath(p.Pkg.Path) {
+	if !isUserPackagePath(restrictPath(p.Pkg.Path)) {
 		return
 	}
 	names := []string{:0:len(p.Members)}

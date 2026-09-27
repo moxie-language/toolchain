@@ -47,6 +47,10 @@ type buildState struct {
 	// cover is -cover: emit a coverage hit per basic block and write the site
 	// table beside the output.
 	cover bool
+	// testSrcPkgPath is the import path of the package `moxie test` compiles as
+	// main, so the language restrictions judge that code by the package it came
+	// from rather than by the synthetic wrapper. See restrictPath.
+	testSrcPkgPath string
 	// scratchDirs are the build scratch directories this run created; cleanup
 	// removes them unless -work keeps them.
 	scratchDirs []string
@@ -4791,6 +4795,16 @@ func cmdTest(args []string) {
 	}
 	pkg.files = mxutil.Ensure(pkg.files, 1)
 	push(pkg.files, testMainFile)
+	// The package under test is linked as main. Record the path a normal build
+	// would compile it under before the name is overwritten, so the language
+	// restrictions judge this code as the package it came from and not as a
+	// fresh user `main` (restrictPath). set before the dispatch index runs:
+	// that pass type-checks the package first.
+	testPath := pkg.path
+	if testPath == "." || testPath == ".." || mxutil.HasPrefix(testPath, "/") || mxutil.HasPrefix(testPath, "./") || mxutil.HasPrefix(testPath, "../") {
+		testPath = pkg.name
+	}
+	bst.testSrcPkgPath = testPath
 	pkg.name = "main"
 
 	if !hasImportStr(pkg.imports, "testing") {
