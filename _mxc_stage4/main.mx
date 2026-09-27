@@ -5432,6 +5432,16 @@ func prepareDispatchIndex(pkgs []*pkgInfo, cacheBase string, skip *pkgInfo) {
 		hash := pkgHash(pkg)
 		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
 		if mxutil.FileExists(cachedMxh) {
+			// Load the cached mxh, do not merely skip it. Packages are in
+			// dependency order, and a later package whose mxh is missing is
+			// type-checked below. Skipping its cached imports left them out of
+			// the registry, so a type they declare (`*event.E` in a store
+			// method signature) resolved to nil, generateMxh wrote `__any` for
+			// it, and that poisoned mxh was registered. mxhLoaded then made the
+			// correct mxh from the compile pass a no-op, so every caller saw
+			// `{ i64, ptr }` where a pointer belonged and clang rejected the
+			// IR: `%t73 defined with type '{ i64, ptr }' but expected 'ptr'`.
+			loadMxh(cachedMxh)
 			continue
 		}
 		typeCheckPkgSource(cacheBase, pkg.dir, pkg.files, pkg.path, compilePath, cachedMxh)

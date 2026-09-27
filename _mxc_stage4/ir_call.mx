@@ -554,6 +554,26 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			}
 		}
 	} else if name == "push" {
+		// legacy rejects `push` on anything but a slice: a slice contributes
+		// its element type, a basic does too (a string is []byte here), and
+		// anything else is "push on non-slice type". stage4 hardcoded the
+		// slice type and emitted extractvalue against whatever it was handed,
+		// so `*s = push(*s, v)` on a struct produced IR clang refuses instead
+		// of the error legacy gives - which is how pkg/grapevine's and
+		// pkg/crawler's tests looked like an IR-emit bug.
+		if len(c.Call.Args) == 0 || c.Call.Args[0] == nil {
+			e.emitZeroReg(e.regName(c), c.SSAType())
+			return
+		}
+		at := SafeUnderlying(c.Call.Args[0].SSAType())
+		_, isSlArg := at.(*Slice)
+		_, isBasicArg := at.(*Basic)
+		if !isSlArg && !isBasicArg {
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, "push on non-slice type")
+			e.emitZeroReg(e.regName(c), c.SSAType())
+			return
+		}
 		if len(c.Call.Args) == 1 {
 			src := e.operand(c.Call.Args[0])
 			p := e.nextReg2("ap")
