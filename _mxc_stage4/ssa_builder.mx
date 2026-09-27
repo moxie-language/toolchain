@@ -145,6 +145,10 @@ type segImport struct {
 	path  string
 	local string
 	dot   bool
+	// target is the imported package. A dot import binds no name, so the
+	// check has to look for the package's own members in the file; the other
+	// forms only need the name they bind.
+	target *TCPackage
 }
 
 // checkUnusedImports reports an imported package whose name never appears in
@@ -176,15 +180,24 @@ func (pb *ssaPkgBuilder) checkUnusedImports() {
 		return
 	}
 	for _, im := range pb.segImports {
-		if im.dot {
-			continue
-		}
 		startLine := pb.segStartLine(im.seg)
 		if startLine <= 0 {
 			continue
 		}
 		endLine := pb.segStartLine(im.seg + 1)
 		body := concatSegText(src, startLine, endLine)
+		if im.dot {
+			// A dot import is used when one of the package's exported names
+			// appears in the file. go/types reports an unused dot import the
+			// same way it reports a named one ("path" imported and not used);
+			// stage4 did not, which was the last gap in this check.
+			if dotImportMentioned(body, im.target) {
+				continue
+			}
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, "\"" | im.path | "\" imported and not used")
+			continue
+		}
 		if identAppearsOutsideImports(body, im.local) {
 			continue
 		}
@@ -205,6 +218,29 @@ func (pb *ssaPkgBuilder) checkUnusedImports() {
 		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 		push(cctx.compileErrors, msg)
 	}
+}
+
+// dotImportMentioned reports whether a dot import's package contributes any
+// name to the file. An unresolved package counts as mentioned: without its
+// scope there is nothing to look for, and reporting an import the file may
+// well use would refuse valid code.
+func dotImportMentioned(body string, target *TCPackage) (ok bool) {
+	if target == nil || target.Scope == nil {
+		return true
+	}
+	names := target.Scope.Names()
+	for i := int32(0); i < int32(len(names)); i++ {
+		n := names[i]
+		if len(n) == 0 || n[0] < 'A' || n[0] > 'Z' {
+			// Unexported names cannot be reached through a dot import, and
+			// matching them would only hide a genuinely unused one.
+			continue
+		}
+		if identAppearsOutsideImports(body, n) {
+			return true
+		}
+	}
+	return false
 }
 
 // segStartLine returns the 1-based line one source file's body starts at, or 0
@@ -373,12 +409,12 @@ func (pb *ssaPkgBuilder) buildImportSegScopes() {
 			}
 			alias := importSpecAlias(spec)
 			if alias == "." {
-				// A dot import binds the package's members in the file scope,
-				// not a name, so nothing here refers to the package name
-				// itself. go/types still reports an unmentioned dot import;
-				// stage4 leaves it alone rather than guess at member use.
+				// A dot import binds the package's members in the file scope
+				// rather than a name, so the check looks for the members. The
+				// target is still resolved, so an unresolved one is treated as
+				// used below rather than reported.
 				pb.segImports = mxutil.Ensure(pb.segImports, 1)
-				push(pb.segImports, segImport{seg: si, path: path, local: ".", dot: true})
+				push(pb.segImports, segImport{seg: si, path: path, local: ".", dot: true, target: pb.resolveImportTarget(path)})
 				continue
 			}
 			if alias == "_" {
