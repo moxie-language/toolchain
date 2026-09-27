@@ -120,6 +120,70 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 	}
 	lv := e.operand(b.X)
 	rv := e.operand(b.Y)
+	// One interface and one concrete operand. Go's type-checker converts the
+	// concrete side to the interface before comparing, and legacy inherits
+	// that from go/ssa; stage4's builder leaves the pair mixed. Do this
+	// before the string/slice/null paths, which would otherwise treat the
+	// interface as a concrete string (`errors.Const sentinel == err`) or
+	// compare the interface's data slot against the address of a freshly
+	// boxed copy (always false: syscall.Errno against a non-blocking
+	// connect's EINPROGRESS). Box the concrete side into the interface
+	// representation and delegate to the runtime's kind-aware comparison.
+	if (b.Op == OpEql || b.Op == OpNeq) && b.X != nil && b.X.SSAType() != nil && b.Y != nil && b.Y.SSAType() != nil {
+		xIfaceCmp := false
+		yIfaceCmp := false
+		_, xIfaceCmp = SafeUnderlying(b.X.SSAType()).(*TCInterface)
+		_, yIfaceCmp = SafeUnderlying(b.Y.SSAType()).(*TCInterface)
+		isNullCmpEarly := rv == "null" || rv == "zeroinitializer" || lv == "null" || lv == "zeroinitializer"
+		if xIfaceCmp != yIfaceCmp && !isNullCmpEarly {
+			var cmpIfaceLLVM string
+			var cmpIfaceVal string
+			var cmpConc SSAValue
+			var cmpConcT string
+			var cmpConcV string
+			if xIfaceCmp {
+				cmpIfaceLLVM = lt
+				cmpIfaceVal = lv
+				cmpConc = b.Y
+				cmpConcT = e.llvmType(b.Y.SSAType())
+				cmpConcV = rv
+			} else {
+				cmpIfaceLLVM = e.llvmType(b.Y.SSAType())
+				cmpIfaceVal = rv
+				cmpConc = b.X
+				cmpConcT = e.llvmType(b.X.SSAType())
+				cmpConcV = lv
+			}
+			if at, ok := e.allocTypes[cmpConc]; ok && at != "" && at != "void" {
+				cmpConcT = at
+			}
+			if cmpIfaceLLVM == e.ifaceType() && cmpConcT != "" && cmpConcT != e.ifaceType() && cmpConcT != "{ptr, ptr}" {
+				var cmpIfaceSSA Type
+				if xIfaceCmp {
+					cmpIfaceSSA = b.X.SSAType()
+				} else {
+					cmpIfaceSSA = b.Y.SSAType()
+				}
+				bxT, bxV := e.boxConcreteToIfaceParam(cmpIfaceSSA, cmpConc, cmpConcT, cmpConcV)
+				if bxT == e.ifaceType() {
+					iaP := e.ifacePtrPair(cmpIfaceVal)
+					ibP := e.ifacePtrPair(bxV)
+					if b.Op == OpEql {
+						e.w("  ") ; e.w(reg) ; e.w(" = call i1 @runtime.interfaceEqual({ptr, ptr} ") ; e.w(iaP)
+						e.w(", {ptr, ptr} ") ; e.w(ibP) ; e.w(", ptr null)\n")
+					} else {
+						e.nextReg++
+						iNq := "%ineq" | irItoa(e.nextReg)
+						e.w("  ") ; e.w(iNq) ; e.w(" = call i1 @runtime.interfaceEqual({ptr, ptr} ") ; e.w(iaP)
+						e.w(", {ptr, ptr} ") ; e.w(ibP) ; e.w(", ptr null)\n")
+						e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(iNq) ; e.w(", true\n")
+					}
+					e.declareRuntime("runtime.interfaceEqual", "i1", "{ptr, ptr}, {ptr, ptr}")
+					return
+				}
+			}
+		}
+	}
 	if (b.Op == OpAdd || b.Op == OpOr) && b.X.SSAType() != nil {
 		if sl, ok := SafeUnderlying(b.X.SSAType()).(*Slice); ok {
 			e.emitSliceConcat(reg, sl, lv, rv)
