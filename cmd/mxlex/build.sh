@@ -21,5 +21,5 @@ if [ ! -x "$LEGACY" ]; then
     exit 1
 fi
 echo "trying: legacy moxie" >&2
-MOXIEROOT="$ROOT" "$LEGACY" build -gc=dealloc -o "$OUT" . 2>&1
+MOXIEROOT="$ROOT" "$LEGACY" build -o "$OUT" . 2>&1
 echo "built with legacy: $OUT" >&2

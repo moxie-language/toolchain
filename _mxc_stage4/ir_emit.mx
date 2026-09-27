@@ -1685,23 +1685,6 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 			}
 		}
 	}
-	scopeIDs := map[int32]bool{}
-	hasHeapAllocs := false
-	for _, b := range f.Blocks {
-		if b.ScopeID > 0 {
-			scopeIDs[b.ScopeID] = true
-		}
-		for _, instr := range b.Instrs {
-			switch instr.(type) {
-			case *SSAAlloc:
-				if instr.(*SSAAlloc).Heap {
-					hasHeapAllocs = true
-				}
-			case *SSAMakeSlice, *SSAMakeMap, *SSAMakeChan, *SSAMakeClosure, *SSASlice:
-				hasHeapAllocs = true
-			}
-		}
-	}
 	for _, b := range f.Blocks {
 		if b.Index == 0 {
 			e.w("_entry:\n")
@@ -2152,7 +2135,6 @@ func (e *irEmitter) emitStore(s *SSAStore) {
 			}
 		}
 	}
-	e.emitScopeRelocateOnStore(s, val, valType)
 	e.w("  store ")
 	e.w(valType)
 	e.w(" ")
@@ -2250,7 +2232,6 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 		e.w(", ptr null)\n")
 		e.declareRuntime("runtime.destroyDeferFrame", "void", "ptr")
 	}
-	e.scopeBeforeReturn(r)
 	frt := e.funcRetType(e.curFunc)
 	if len(r.Results) == 0 {
 		rt := e.funcRetType(e.curFunc)
@@ -2460,9 +2441,6 @@ func (e *irEmitter) emitJump(j *SSAJump) {
 	}
 	if len(blk.Succs) > 0 {
 		target := blk.Succs[0]
-		if blk.ScopeID > 0 && target.ScopeID != blk.ScopeID && !blockHasReturn(target) {
-			e.emitScopeFreesAt(blk.ScopeID)
-		}
 		e.w("  br label ")
 		e.w(e.blockLabel(target))
 		e.w("\n")
@@ -3288,7 +3266,6 @@ func (e *irEmitter) emitMakeSlice(m *SSAMakeSlice) {
 		e.w(", ptr null, ptr null)\n")
 		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
 		e.emitLogAlloc(allocSz)
-		e.scopeTrackAlloc(dataPtr)
 	}
 	e.nextReg++
 	s1 := "%ms" | irItoa(e.nextReg)
