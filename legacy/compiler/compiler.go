@@ -509,9 +509,37 @@ func (b *builder) emitCoverHit(block *ssa.BasicBlock) {
 		}
 	}
 	position := b.program.Fset.Position(pos)
-	siteName := b.fn.RelString(nil) + "@" + position.Filename + ":" + strconv.Itoa(position.Line)
+	// Compiler-synthesised helpers (__moxie_concat and friends) carry a
+	// synthetic position such as <moxie:builtins>. Coverage is about source
+	// lines, and a made-up file name in the report is noise, so they get no
+	// site. stage4 never builds those helpers from statements, so it has none
+	// to skip.
+	if strings.HasPrefix(position.Filename, "<") {
+		return
+	}
+	siteName := b.fn.RelString(nil) + "@" + b.coverReportFile(b.fn.Pkg.Pkg.Path(), position.Filename) + ":" + strconv.Itoa(position.Line)
 	siteIDVal := llvm.ConstInt(b.ctx.Int32Type(), uint64(nextCoverSite(siteName)), false)
 	b.createRuntimeCall("coverHit", []llvm.Value{siteIDVal}, "")
+}
+
+// coverReportFile qualifies a coverage site's file with its package path. The
+// source positions are absolute paths, so the base name alone would merge files
+// of different packages that share a name (a/hex.mx and b/hex.mx) into one row
+// of a per-file report. The main package is the module root, so it takes the
+// module path; that also keeps every site of a build under one prefix, which is
+// how the report selects the module out of the link set. stage4 names the same
+// site the same way.
+func (b *builder) coverReportFile(pkgPath, file string) string {
+	if file == "" {
+		return file
+	}
+	if pkgPath == "" || pkgPath == "main" {
+		pkgPath = b.pkgModulePath
+	}
+	if pkgPath == "" {
+		return path.Base(file)
+	}
+	return pkgPath + "/" + path.Base(file)
 }
 
 // getLLVMRuntimeType obtains a named type from the runtime package and returns

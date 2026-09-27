@@ -24,8 +24,14 @@ const char *moxie_cover_env(const char *name) {
 	return getenv(name);
 }
 
+// moxie_cover_open opens the coverage dump for appending. One file accumulates
+// every process and every spawn domain of a run: each test starts a fresh relay
+// and a spawn domain is a fork whose copy of the counter table is private, so
+// the dump has to be additive rather than a rewrite. O_APPEND makes each write
+// land at the end atomically, so domains that exit at the same time cannot
+// overwrite one another; the report tool sums the lines.
 int32_t moxie_cover_open(const char *path) {
-	return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	return open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
 }
 
 int32_t moxie_cover_close(int32_t fd) {
