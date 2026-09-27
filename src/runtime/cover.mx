@@ -61,17 +61,53 @@ func PrintCoverCounters() {
 	coverDump(2)
 }
 
+// coverPutStr appends s to buf at n and returns the new length.
+func coverPutStr(buf []byte, n int32, s string) int32 {
+	for i := int32(0); i < int32(len(s)); i++ {
+		buf[n] = s[i]
+		n++
+	}
+	return n
+}
+
+// coverPutU64 appends v in decimal to buf at n and returns the new length.
+func coverPutU64(buf []byte, n int32, v uint64) int32 {
+	if v == 0 {
+		buf[n] = '0'
+		return n + 1
+	}
+	d := int32(0)
+	for t := v; t > 0; t = t / 10 {
+		d++
+	}
+	end := n + d
+	for i := end - 1; i >= n; i-- {
+		buf[i] = byte(v%10) + '0'
+		v = v / 10
+	}
+	return end
+}
+
+// coverDump writes one "coversite <id> count=<n>\n" line per site that ran.
+// Each line is assembled in one buffer and written with a single write(2):
+// every domain of a spawn tree appends to the same file, and O_APPEND only
+// makes a write atomic as a whole. Emitting the line in pieces let domains
+// exiting at the same time interleave their writes inside one line, which the
+// reader then could not parse - the site vanished from the report.
 func coverDump(fd int32) {
+	buf := []byte{:64}
 	for i := int32(0); i < numCoverSites; i++ {
 		c := coverCounters[i]
 		if c == 0 {
 			continue
 		}
-		tracePuts(fd, "coversite ")
-		traceU64(fd, uint64(i))
-		tracePuts(fd, " count=")
-		traceU64(fd, c)
-		tracePuts(fd, "\n")
+		n := coverPutStr(buf, 0, "coversite ")
+		n = coverPutU64(buf, n, uint64(i))
+		n = coverPutStr(buf, n, " count=")
+		n = coverPutU64(buf, n, c)
+		buf[n] = '\n'
+		n++
+		MoxieWrite(fd, unsafe.Pointer(&buf[0]), n)
 	}
 }
 

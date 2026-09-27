@@ -114,21 +114,38 @@ func (e *irEmitter) emitNextSlice(reg, iterPtr, collVal string, rangeInstr *SSAR
 	e.truncToI32(key, idx)
 	dataPtr := e.nextReg2("rn")
 	e.w("  ") ; e.w(dataPtr) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(collVal) ; e.w(", 0\n")
+	// The tuple's value slot is the type the builder gave the loop variable: a
+	// byte for `range s` over a string (uint8), the element type for a slice.
+	// The *memory* the pointer walks is the same width - except for a string,
+	// whose elements are one byte while the value slot is i32. Defaulting the
+	// element type to i32 for a string (it is a basic, not a Slice) loaded four
+	// bytes per character, so `range` over a string produced one good value and
+	// then garbage: pkg/blossom's isHex rejected every real 64-hex hash (every
+	// blob GET/HEAD answered 404) and net/url rejected "http://host:8080".
 	elemType := "i32"
+	loadType := elemType
 	if sl, ok2 := SafeUnderlying(rangeInstr.X.SSAType()).(*Slice); ok2 {
 		elemType = e.llvmType(sl.Elem)
+		loadType = elemType
+	} else if e.isStringLike(rangeInstr.X.SSAType()) {
+		loadType = "i8"
 	}
 	eptr := e.nextReg2("rn")
-	e.w("  ") ; e.w(eptr) ; e.w(" = getelementptr ") ; e.w(elemType)
+	e.w("  ") ; e.w(eptr) ; e.w(" = getelementptr ") ; e.w(loadType)
 	e.w(", ptr ") ; e.w(dataPtr) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w("\n")
 	fallback := e.nextReg2("rn")
-	e.w("  ") ; e.w(fallback) ; e.w(" = alloca ") ; e.w(elemType) ; e.w("\n")
-	e.w("  store ") ; e.w(elemType) ; e.w(" zeroinitializer, ptr ") ; e.w(fallback) ; e.w("\n")
+	e.w("  ") ; e.w(fallback) ; e.w(" = alloca ") ; e.w(loadType) ; e.w("\n")
+	e.w("  store ") ; e.w(loadType) ; e.w(" zeroinitializer, ptr ") ; e.w(fallback) ; e.w("\n")
 	safePtr := e.nextReg2("rn")
 	e.w("  ") ; e.w(safePtr) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ptr ") ; e.w(eptr)
 	e.w(", ptr ") ; e.w(fallback) ; e.w("\n")
 	elem := e.nextReg2("rn")
-	e.w("  ") ; e.w(elem) ; e.w(" = load ") ; e.w(elemType) ; e.w(", ptr ") ; e.w(safePtr) ; e.w("\n")
+	e.w("  ") ; e.w(elem) ; e.w(" = load ") ; e.w(loadType) ; e.w(", ptr ") ; e.w(safePtr) ; e.w("\n")
+	if loadType != elemType {
+		wide := e.nextReg2("rn")
+		e.w("  ") ; e.w(wide) ; e.w(" = zext ") ; e.w(loadType) ; e.w(" ") ; e.w(elem) ; e.w(" to ") ; e.w(elemType) ; e.w("\n")
+		elem = wide
+	}
 	inc := e.nextReg2("rn")
 	e.w("  ") ; e.w(inc) ; e.w(" = add ") ; e.w(ipt) ; e.w(" ") ; e.w(idx) ; e.w(", 1\n")
 	newCnt := e.nextReg2("rn")
