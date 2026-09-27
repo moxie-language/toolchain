@@ -380,7 +380,21 @@ func (r *resolver) resolveDir(importPath string, srcDir string) (string, error) 
 		return candidate, nil
 	}
 
-	// 1c. Module-relative path (without module prefix).
+	// 2. Standard library (in synthetic GOROOT). Its paths are reserved: a
+	// module-relative lookup must not shadow them. The smesh tree nests a
+	// web/common module that contains crypto/hkdf, and resolving the stdlib
+	// crypto/hkdf to that directory made the package import itself.
+	stdDir := filepath.Join(r.goroot, "src", importPath)
+	if isDir(stdDir) {
+		return stdDir, nil
+	}
+	// 2b. Stdlib-vendored packages (e.g. golang.org/x/crypto).
+	stdVendorDir := filepath.Join(r.goroot, "src", "vendor", importPath)
+	if isDir(stdVendorDir) {
+		return stdVendorDir, nil
+	}
+
+	// 2c. Module-relative path (without module prefix).
 	if r.modDir != "" {
 		candidate = filepath.Join(r.modDir, importPath)
 		if isDir(candidate) {
@@ -390,17 +404,6 @@ func (r *resolver) resolveDir(importPath string, srcDir string) (string, error) 
 		if isDir(candidate) {
 			return candidate, nil
 		}
-	}
-
-	// 2. Standard library (in synthetic GOROOT).
-	stdDir := filepath.Join(r.goroot, "src", importPath)
-	if isDir(stdDir) {
-		return stdDir, nil
-	}
-	// 2b. Stdlib-vendored packages (e.g. golang.org/x/crypto).
-	stdVendorDir := filepath.Join(r.goroot, "src", "vendor", importPath)
-	if isDir(stdVendorDir) {
-		return stdVendorDir, nil
 	}
 
 	// 3. Module-local packages.
