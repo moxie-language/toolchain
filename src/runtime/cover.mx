@@ -1,0 +1,112 @@
+package runtime
+
+import "unsafe"
+
+// Per-block test coverage for -cover.
+//
+// The compiler emits a coverHit(siteID) call at the start of every basic block
+// and writes a side file mapping each id to "pkg.Func@file:line". An
+// instrumented build therefore reports exactly which blocks ran; coverBeforeExit
+// dumps the counters when the program ends - to the file named by
+// MOXIE_COVER_OUT when that is set and can be opened, stderr otherwise.
+//
+// The table and the dump hook are always linked (the hook is a nil check, the
+// table is allocated lazily on the first coverHit), so a program built without
+// -cover carries no cost and a coverage build needs no second runtime bake. The
+// -cover flag only decides whether the compiler emits hits and writes the site
+// file; the cover build tag is set too, for programs that want to gate their
+// own code on being instrumented.
+
+// maxCoverSites bounds the table. One site is numbered per basic block of the
+// whole link set, so this only has to exceed the block count of one build.
+const maxCoverSites = int32(1) << 18
+
+// The table is a slice, not an array: Moxie has no arrays. It is allocated from
+// the ROOT arena on the first coverHit call rather than in init(), so a build
+// that records nothing never pays for it, and the root arena outlives every
+// function frame (a frame arena is released at return).
+var coverCounters []uint64
+var numCoverSites int32
+
+func coverTables() {
+	if coverCounters != nil {
+		return
+	}
+	a := RootArena()
+	if a == nil {
+		return
+	}
+	coverCounters = rawSliceU64(uintptr(ArenaAlloc(a, uintptr(maxCoverSites)*8)), maxCoverSites)
+}
+
+//:noinline
+func coverHit(siteID int32) {
+	if siteID < 0 || siteID >= maxCoverSites {
+		return
+	}
+	coverTables()
+	if coverCounters == nil {
+		return
+	}
+	coverCounters[siteID]++
+	if siteID >= numCoverSites {
+		numCoverSites = siteID + 1
+	}
+}
+
+// PrintCoverCounters writes one line per site that ran: the site id and its
+// call count. The compiler's <output>.cover_sites.json maps the id to
+// "pkg.Func@file:line".
+func PrintCoverCounters() {
+	coverDump(2)
+}
+
+func coverDump(fd int32) {
+	for i := int32(0); i < numCoverSites; i++ {
+		c := coverCounters[i]
+		if c == 0 {
+			continue
+		}
+		tracePuts(fd, "coversite ")
+		traceU64(fd, uint64(i))
+		tracePuts(fd, " count=")
+		traceU64(fd, c)
+		tracePuts(fd, "\n")
+	}
+}
+
+// coverBeforeExit dumps the counters when the program ends. The runtime's exit
+// paths call it; a build without the cover tag has the no-op from
+// cover_off.mx.
+func coverBeforeExit() {
+	if coverCounters == nil || numCoverSites == 0 {
+		return
+	}
+	fd := coverOutFD()
+	coverDump(fd)
+	if fd != 2 {
+		moxieCoverClose(fd)
+	}
+}
+
+// coverOutFD (defined in cover_fd_native.mx, stubbed in cover_fd_stub.mx)
+// returns the descriptor to dump to: the file named by MOXIE_COVER_OUT when it
+// is set and can be opened, stderr otherwise.
+
+//export moxie_cover_close
+func moxieCoverClose(fd int32) (r int32)
+
+// --- exported readers, used by a wasm host ---
+
+//export __moxie_cover_counters_ptr
+func coverCountersPtr() (p uintptr) {
+	if coverCounters == nil {
+		return 0
+	}
+	return uintptr(unsafe.Pointer(&coverCounters[0]))
+}
+
+//export __moxie_cover_n_sites
+func coverNSites() (n int32) {
+	return numCoverSites
+}

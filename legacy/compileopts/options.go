@@ -31,6 +31,7 @@ type Options struct {
 	Semaphore     chan struct{}                    `json:"-"`
 	Debug         bool
 	Nobounds      bool
+	Cover         bool // record per-block coverage hits (-cover)
 	PrintSizes    string
 	PrintAllocs   *regexp.Regexp
 	Tags          []string

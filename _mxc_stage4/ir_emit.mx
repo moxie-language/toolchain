@@ -1864,6 +1864,37 @@ func (e *irEmitter) emitLinknameForwarder(f *SSAFunction, origSym, tgtSym string
 	e.w("}\n")
 }
 
+// emitCoverHitLine emits the -cover hit for a statement: one counter, labelled
+// "pkg.Func@file:line" in the site table the compiler writes beside the output
+// (writeCoverSites). Emitted from the SSACoverHit instruction the builder
+// places at each statement, so the label is the statement's own line. Without
+// -cover it emits nothing.
+//
+// Only user packages are instrumented: stdlib and runtime code is not what a
+// coverage run is measuring, and instrumenting the runtime's own coverHit would
+// have it call itself.
+func (e *irEmitter) emitCoverHitLine(line int32) {
+	if bst == nil || !bst.cover {
+		return
+	}
+	if e.curFunc == nil || e.curFunc.Pkg == nil || e.curFunc.Pkg.Pkg == nil {
+		return
+	}
+	if !coverPkg(e.curFunc.Pkg.Pkg.Path) {
+		return
+	}
+	file, srcLine := concatLineToFile(line)
+	siteName := e.funcRelName() | "@" | file | ":" | irItoa(srcLine)
+	id := addCoverSite(siteName)
+	if id < 0 {
+		return
+	}
+	e.w("  call void @runtime.coverHit(i32 ")
+	e.w(irItoa(id))
+	e.w(", ptr null)\n")
+	e.declareRuntime("runtime.coverHit", "void", "i32")
+}
+
 func (e *irEmitter) emitBlock(b *SSABasicBlock) {
 	label := "b" | irItoa(b.Index)
 	if b.Index == 0 {
@@ -1932,6 +1963,8 @@ func (e *irEmitter) emitInstr(instr SSAInstruction) {
 			break
 		}
 		e.emitAlloc(i)
+	case *SSACoverHit:
+		e.emitCoverHitLine(i.Line)
 	case *SSAStore:
 		e.emitStore(i)
 	case *SSABinOp:

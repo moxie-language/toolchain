@@ -10,11 +10,27 @@
 
 #define _GNU_SOURCE
 #define _XOPEN_SOURCE
+#include <fcntl.h>
 #include <signal.h>
-#include <unistd.h>
 #include <stdint.h>
-#include <ucontext.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <ucontext.h>
+
+// Coverage dump support: read an environment variable and open a path for
+// writing, with the mode bits taken from the C headers rather than hardcoded.
+const char *moxie_cover_env(const char *name) {
+	return getenv(name);
+}
+
+int32_t moxie_cover_open(const char *path) {
+	return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+}
+
+int32_t moxie_cover_close(int32_t fd) {
+	return close(fd);
+}
 
 void moxie_handle_fatal_signal(int sig, uintptr_t addr);
 void moxie_secalloc_on_fatal_signal(void);

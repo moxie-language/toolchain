@@ -64,6 +64,11 @@ func (c *Config) BuildTags() []string {
 		"scheduler."+c.Scheduler(),
 		"moxie.unicore", // always single-core cooperative
 	)
+	if c.Options.Cover {
+		// The cover tag selects the instrumented runtime (runtime/cover.mx)
+		// over its no-op counterpart; the compiler emits the matching hits.
+		tags = append(tags, "cover")
+	}
 	for i := 1; i <= c.GoMinorVersion; i++ {
 		tags = append(tags, fmt.Sprintf("go1.%d", i))
 	}

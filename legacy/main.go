@@ -551,6 +551,7 @@ func main() {
 	parallelism := flag.Int("p", runtime.GOMAXPROCS(0), "the number of build jobs that can run in parallel")
 	nodebug := flag.Bool("no-debug", false, "strip debug information")
 	nobounds := flag.Bool("nobounds", false, "do not emit bounds checks")
+	cover := flag.Bool("cover", false, "record per-block test coverage (writes <output>.cover_sites.json and dumps counters at exit)")
 	ldflags := flag.String("ldflags", "", "Go link tool compatible ldflags")
 	llvmFeatures := flag.String("llvm-features", "", "comma separated LLVM features to enable")
 	cpuprofile := flag.String("cpuprofile", "", "cpuprofile output")
@@ -637,6 +638,7 @@ func main() {
 		Semaphore:     make(chan struct{}, *parallelism),
 		Debug:         !*nodebug,
 		Nobounds:      *nobounds,
+		Cover:         *cover,
 		PrintSizes:    *printSize,
 		PrintAllocs:   printAllocs,
 		Tags:          []string(tags),

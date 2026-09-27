@@ -44,6 +44,9 @@ type buildState struct {
 	printCommands bool
 	// keepWork is -work: keep the build scratch directory and echo its path.
 	keepWork bool
+	// cover is -cover: emit a coverage hit per basic block and write the site
+	// table beside the output.
+	cover bool
 	// scratchDirs are the build scratch directories this run created; cleanup
 	// removes them unless -work keeps them.
 	scratchDirs []string
@@ -2019,6 +2022,18 @@ func setPrintAllocs(pat string) {
 	bst.buildJobs = 1
 }
 
+// enableCover arms -cover. The site table is reset, the cover build tag is set
+// (a program may gate its own code on being instrumented), and the build is
+// forced serial for the same reason -print-allocs is: block ids are handed out
+// in compile order, and parallel package compiles would number two packages'
+// blocks from the same counter.
+func enableCover() {
+	bst.cover = true
+	resetCoverSites()
+	appendBuildTags("cover")
+	bst.buildJobs = 1
+}
+
 // funcRelName is the name -print-allocs matches against: the package path, a
 // dot, and the function name. Legacy matches its regexp against
 // ssa.Function.RelString(nil), which is the same shape.
@@ -2064,6 +2079,124 @@ func (e *irEmitter) emitLogAlloc(sizeReg string) {
 
 // writeAllocSites writes the -print-allocs site table beside the output, in
 // the same shape legacy writes with encoding/json.
+// coverPkg reports whether -cover instruments a package: the module being built
+// and any main package. This is deliberately not isUserPackagePath: that rule
+// also exempts anything under a "/pkg/" segment, which is the compiler's own
+// layout, while a user module may well have one (smesh's relay lives in pkg/).
+func coverPkg(path string) (ok bool) {
+	if bst == nil || path == "" {
+		return false
+	}
+	if path == "main" || path == "command-line-arguments" {
+		return true
+	}
+	mp := bst.globalModPrefix
+	if mp == "" {
+		return false
+	}
+	return path == mp || mxutil.HasPrefix(path, mp|"/")
+}
+
+// --- -cover site table ---
+//
+// One entry per basic block, in emission order, named "pkg.Func@file:line".
+// Coverage has no pattern to match, so a site is recorded once -cover is on.
+//
+// The name array and the name bytes both live in the ROOT arena: the emitter
+// builds each name in a package's transient arena, and the table is read again
+// after every package has been emitted, so a frame-arena string is a dangling
+// reference by then. Reading one crashed the compiler at the end of the first
+// -cover build, which is why this table does not follow the alloc-site table's
+// plain-slice shape.
+var coverNames []string
+var coverCount int32
+
+const maxCoverSites = int32(1) << 20
+
+func resetCoverSites() {
+	coverCount = 0
+}
+
+func addCoverSite(name string) (id int32) {
+	a := runtime.RootArena()
+	if a == nil || coverCount >= maxCoverSites {
+		return -1
+	}
+	if coverNames == nil {
+		coverNames = unsafe.Slice((*string)(unsafe.Pointer(runtime.ArenaAlloc(a, uintptr(maxCoverSites)*unsafe.Sizeof("")))), maxCoverSites)
+	}
+	id = coverCount
+	coverNames[id] = rootCopyString(a, name)
+	coverCount++
+	return id
+}
+
+func coverSiteCount() (n int32) { return coverCount }
+
+func coverSiteName(i int32) (s string) {
+	if i < 0 || i >= coverCount {
+		return ""
+	}
+	return coverNames[i]
+}
+
+// rootCopyString copies s into the root arena, so it outlives the frame that
+// built it.
+func rootCopyString(a *runtime.Arena, s string) (r string) {
+	n := len(s)
+	if n == 0 {
+		return ""
+	}
+	b := unsafe.Slice((*byte)(unsafe.Pointer(runtime.ArenaAlloc(a, uintptr(n)))), n)
+	copy(b, s)
+	return string(b)
+}
+
+// writeCoverSites writes the -cover site table beside the output, in the same
+// shape legacy writes with encoding/json: [{"id":N,"name":"pkg.Func@file:line"}].
+//
+// Built presized through a cursor. A relay-sized build has hundreds of
+// thousands of sites, and appending one entry at a time reallocates and copies
+// the whole text per site - that is O(n^2) arena and it exhausted the root
+// arena's region table on the first real run.
+func writeCoverSites(outpath string) {
+	if !bst.cover {
+		return
+	}
+	n := coverSiteCount()
+	size := int32(2)
+	for i := int32(0); i < n; i++ {
+		size += int32(len(coverSiteName(i))) + 32
+	}
+	data := []byte{:size}
+	pos := int32(0)
+	data[pos] = '['
+	pos++
+	for i := int32(0); i < n; i++ {
+		if i > 0 {
+			data[pos] = ','
+			pos++
+		}
+		pos = copyLit(data, pos, "{\"id\":")
+		pos = copyLit(data, pos, irItoa(i))
+		pos = copyLit(data, pos, ",\"name\":\"")
+		pos = copyLit(data, pos, coverSiteName(i))
+		pos = copyLit(data, pos, "\"}")
+	}
+	data[pos] = ']'
+	pos++
+	mxutil.WriteFile(outpath|".cover_sites.json", data[:pos], 420)
+}
+
+// copyLit appends s at pos and returns the new position.
+func copyLit(dst []byte, pos int32, s string) (n int32) {
+	for i := int32(0); i < int32(len(s)); i++ {
+		dst[pos] = s[i]
+		pos++
+	}
+	return pos
+}
+
 func writeAllocSites(outpath string) {
 	if !mxutil.AllocSitesEnabled() {
 		return
@@ -4534,6 +4667,9 @@ func cmdTest(args []string) {
 			}
 			setPrintAllocs(args[i+1])
 			i += 2
+		} else if args[i] == "-cover" {
+			enableCover()
+			i++
 		} else if args[i] == "-allow-closure-captures" {
 			setAllowCaptures()
 			i++
@@ -4550,7 +4686,9 @@ func cmdTest(args []string) {
 	if pkgPath == "" {
 		pkgPath = "."
 	}
-	if mxutil.AllocSitesEnabled() {
+	if mxutil.AllocSitesEnabled() || bst.cover {
+		// The site table is built while packages are emitted, so a package
+		// taken from the build cache would be missing from it.
 		forceRebuild = true
 	}
 
@@ -4966,6 +5104,7 @@ func cmdTest(args []string) {
 		fatal("linker failed")
 	}
 
+	writeCoverSites(outpath)
 	mxutil.WriteStr(2, "  run tests\n")
 	rc = run([]string{outpath})
 	exitNow(int32(rc))
@@ -5449,6 +5588,9 @@ func main() {
 			}
 			setPrintAllocs(args[i+1])
 			i += 2
+		} else if args[i] == "-cover" {
+			enableCover()
+			i++
 		} else if args[i] == "-allow-closure-captures" {
 			setAllowCaptures()
 			i++
@@ -5492,7 +5634,7 @@ func main() {
 		// runtime objects, which this compiler has no path to produce.
 		fatal("buildmode c-shared is not implemented by this compiler; only the legacy bootstrap compiler builds shared libraries")
 	}
-	if mxutil.AllocSitesEnabled() {
+	if mxutil.AllocSitesEnabled() || bst.cover {
 		// The site table is built while packages are emitted, so a package
 		// taken from the build cache would be missing from it.
 		forceRebuild = true
@@ -5984,6 +6126,7 @@ func main() {
 		}
 	}
 	writeAllocSites(outpath)
+	writeCoverSites(outpath)
 	mxutil.WriteStr(2, "  -> " | outpath | "\n")
 	if runAfter {
 		execArgs := []string{outpath}

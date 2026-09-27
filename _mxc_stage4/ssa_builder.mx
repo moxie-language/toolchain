@@ -1199,6 +1199,9 @@ type ssaFuncBuilder struct {
 	srcScope     *Scope
 	fileScope    *Scope // imports of the file declaring this function
 	decl         *syntax.FuncDecl
+	// curLine is the 1-based concatenated-source line of the statement being
+	// built. Blocks record it so -cover can label each one with file:line.
+	curLine int32
 	scopeID      int32
 	nextScopeID  int32
 	// scopeParent records the enclosing scope of each entered scope, so a
@@ -1227,6 +1230,7 @@ func newSSAFuncBuilder(fn *SSAFunction, info *Info) (p *ssaFuncBuilder) {
 
 func (fb *ssaFuncBuilder) newBlock(comment string) (s *SSABasicBlock) {
 	b := NewSSABasicBlock(fb.fn, comment)
+	b.Line = fb.curLine
 	return b
 }
 
@@ -1323,6 +1327,10 @@ func (fb *ssaFuncBuilder) nextName() (s string) {
 
 func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 	fb.decl = d
+	// The entry block is created before any statement, so seed the line with the
+	// declaration's own line.
+	dp := d.Pos()
+	fb.curLine = int32(dp.Line()) + 1
 	entry := fb.newBlock("entry")
 	fb.currentBlock = entry
 
@@ -1510,6 +1518,11 @@ func (fb *ssaFuncBuilder) buildStmt(s syntax.Stmt) {
 	if s == nil {
 		return
 	}
+	// Parser lines are 0-based; the concatenated-source lines the coverage and
+	// error maps use are 1-based. Blocks created while this statement compiles
+	// carry its line.
+	sp := s.Pos()
+	fb.curLine = int32(sp.Line()) + 1
 	if ls, ok := s.(*syntax.LabeledStmt); ok {
 		if ls.Label != nil {
 			fb.pendingLabel = ls.Label.Value
@@ -1527,6 +1540,14 @@ func (fb *ssaFuncBuilder) buildStmt(s syntax.Stmt) {
 	}
 	if fb.currentBlock == nil {
 		return
+	}
+	// -cover: one hit per statement, labelled with its line. Emitted before the
+	// statement's own code so it lands in the block the statement executes in,
+	// after the LabeledStmt block above has been created.
+	if bst != nil && bst.cover {
+		ch := &SSACoverHit{}
+		ch.Line = fb.curLine
+		fb.emit(ch)
 	}
 	switch ss := s.(type) {
 	case *syntax.EmptyStmt:

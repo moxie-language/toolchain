@@ -112,6 +112,9 @@ func Build(
 		compiler.ResetAllocSites()
 		printAllocsKey = config.Options.PrintAllocs.String()
 	}
+	if config.Options.Cover {
+		compiler.ResetCoverSites()
+	}
 
 	// Read the build ID of the moxie binary.
 	// Used as a cache key for package builds.
@@ -215,6 +218,7 @@ func Build(
 		MaxStackAlloc:      config.MaxStackAlloc(),
 		Debug:              config.Options.Debug,
 		Nobounds:           config.Options.Nobounds,
+		Cover:              config.Options.Cover,
 		PanicStrategy:      config.PanicStrategy(),
 		StandaloneRuntime:  config.IsStandaloneRuntime(),
 	}
@@ -965,6 +969,11 @@ func Build(
 	if config.Options.PrintAllocs != nil && len(compiler.AllocSites) > 0 {
 		if data, err2 := json.Marshal(compiler.AllocSites); err2 == nil {
 			_ = os.WriteFile(outpath+".alloc_sites.json", data, 0666)
+		}
+	}
+	if config.Options.Cover && len(compiler.CoverSites) > 0 {
+		if data, err2 := json.Marshal(compiler.CoverSites); err2 == nil {
+			_ = os.WriteFile(outpath+".cover_sites.json", data, 0666)
 		}
 	}
 

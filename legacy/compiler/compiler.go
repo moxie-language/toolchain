@@ -62,6 +62,7 @@ type Config struct {
 	MaxStackAlloc      uint64
 	Debug              bool // Whether to emit debug information in the LLVM module.
 	Nobounds           bool // Whether to skip bounds checks
+	Cover              bool // Whether to emit per-block coverage hits (-cover)
 	PanicStrategy      string
 	StandaloneRuntime  bool // keep symbols external for cross-module linking
 }
@@ -169,6 +170,7 @@ type builder struct {
 	llvmFnType        llvm.Type
 	llvmFn            llvm.Value
 	info              functionInfo
+	coverThisFunc     bool // -cover and this function's package is user code
 	locals            map[ssa.Value]llvm.Value // local variables
 	blockInfo         []blockInfo
 	currentBlock      *ssa.BasicBlock
@@ -466,6 +468,50 @@ func (b *builder) emitLogAlloc(pos token.Pos, size llvm.Value) {
 	siteName := b.fn.RelString(nil) + "@" + position.Filename + ":" + strconv.Itoa(position.Line)
 	siteIDVal := llvm.ConstInt(b.ctx.Int32Type(), uint64(nextAllocSite(siteName)), false)
 	b.createRuntimeCall("logAlloc", []llvm.Value{siteIDVal, size}, "")
+}
+
+// coverPkg reports whether -cover instruments a package: the module being built
+// and any main package. This is deliberately not isUserPackage: that rule also
+// exempts anything under a "/pkg/" segment, which is the compiler's own layout,
+// while a user module may well have one (smesh's relay lives in pkg/).
+func (b *builder) coverPkg(pkg *ssa.Package) bool {
+	if pkg == nil || pkg.Pkg == nil {
+		return false
+	}
+	path := pkg.Pkg.Path()
+	if path == "main" || path == "command-line-arguments" {
+		return true
+	}
+	mp := b.pkgModulePath
+	if mp == "" {
+		return false
+	}
+	return path == mp || strings.HasPrefix(path, mp+"/")
+}
+
+// emitCoverHit emits runtime.coverHit(siteID) at the start of a basic block
+// when -cover is active. The runtime's counter table exists only with the cover
+// build tag, which -cover also sets; the site table is written beside the
+// output as <output>.cover_sites.json, so a reporter can turn the counters back
+// into covered and uncovered source lines.
+//
+// Only user packages are instrumented: stdlib and runtime code is not what a
+// coverage run is measuring, and instrumenting the runtime's own coverHit would
+// make it call itself while being compiled.
+func (b *builder) emitCoverHit(block *ssa.BasicBlock) {
+	if !b.Cover || !b.coverThisFunc {
+		return
+	}
+	pos := b.fn.Pos()
+	if len(block.Instrs) > 0 {
+		if p := block.Instrs[0].Pos(); p != token.NoPos {
+			pos = p
+		}
+	}
+	position := b.program.Fset.Position(pos)
+	siteName := b.fn.RelString(nil) + "@" + position.Filename + ":" + strconv.Itoa(position.Line)
+	siteIDVal := llvm.ConstInt(b.ctx.Int32Type(), uint64(nextCoverSite(siteName)), false)
+	b.createRuntimeCall("coverHit", []llvm.Value{siteIDVal}, "")
 }
 
 // getLLVMRuntimeType obtains a named type from the runtime package and returns
@@ -1551,6 +1597,10 @@ func (b *builder) createFunction() {
 	// Check Moxie language restrictions on user code.
 	b.checkMoxieRestrictions()
 
+	// -cover instruments the module's own code only; decided once per function
+	// so the per-block emission does not repeat the package walk.
+	b.coverThisFunc = b.Cover && b.coverPkg(b.fn.Pkg)
+
 	// Fill blocks with instructions.
 	for _, block := range b.fn.DomPreorder() {
 		if b.DumpSSA {
@@ -1559,7 +1609,19 @@ func (b *builder) createFunction() {
 		b.currentBlock = block
 		b.currentBlockInfo = &b.blockInfo[block.Index]
 		b.SetInsertPointAtEnd(b.currentBlockInfo.entry)
+		coverHitEmitted := false
 		for _, instr := range block.Instrs {
+			// The coverage hit goes after the block's PHI nodes and debug
+			// records: LLVM requires PHIs to be grouped at the top, and this
+			// position is the first instruction that is neither.
+			if !coverHitEmitted {
+				switch instr.(type) {
+				case *ssa.Phi, *ssa.DebugRef:
+				default:
+					b.emitCoverHit(block)
+					coverHitEmitted = true
+				}
+			}
 			if instr, ok := instr.(*ssa.DebugRef); ok {
 				if !b.Debug {
 					continue
