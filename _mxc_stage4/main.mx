@@ -5434,6 +5434,35 @@ func main() {
 		bst.tlsFailed = true
 		bst.buildJobs = 1
 	}
+	// mxh pre-pass: every package in the closure must have its mxh on disk
+	// BEFORE the index below is read, because the index comes from those files.
+	// The index is what findIfaceImpls consults to skip packages that cannot
+	// implement the method being dispatched, so a build whose mxh files do not
+	// exist yet (a cold cache, or the first build after a compiler change)
+	// indexed nothing, skipped nothing, and emitted an arm for every type in
+	// the registry: the same sources then produced different .text depending on
+	// nothing but cache state (measured on the smesh relay: 12,352 bytes across
+	// 52 functions, e.g. math/bits.Div64 gaining 346 bytes of error-impl arms,
+	// with symbols, .rodata and .data byte-identical). Type-checking here is
+	// the same work the registry pre-pass below does for a package whose mxh is
+	// missing, so ordering it first costs nothing and makes the emitted
+	// dispatch a function of the closure and its sources.
+	for _, pkg := range pkgs {
+		if pkg.baked {
+			continue
+		}
+		compilePath := pkg.path
+		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
+			compilePath = pkg.name
+		}
+		hash := pkgHash(pkg)
+		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+		if mxutil.FileExists(cachedMxh) {
+			continue
+		}
+		typeCheckPkgSource(cacheBase, pkg.dir, pkg.files, pkg.path, compilePath, cachedMxh)
+	}
+
 	// Index pass, no graph materialisation: read each package's cached mxh and
 	// record its methods and the closure's interface-method universe, so the
 	// tier-1/tier-2 split is known before anything is loaded.
