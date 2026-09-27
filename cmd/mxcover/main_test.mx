@@ -1,0 +1,185 @@
+package main
+
+import "testing"
+
+// The reporter is the only thing that turns a coverage run into a number, so
+// its parsing and its arithmetic are tested here rather than trusted: a wrong
+// percentage or a dropped site would look exactly like a real result.
+
+func TestI64Str(t *testing.T) {
+	if i64str(0) != "0" {
+		t.Fatal("zero")
+	}
+	if i64str(7) != "7" {
+		t.Fatal("single digit")
+	}
+	if i64str(1234567890) != "1234567890" {
+		t.Fatal("long")
+	}
+	// i64str(-42) is not asserted: stage4 zero-extends a negative constant
+	// argument to an int64 parameter, so -42 arrives as 4294967254 (legacy
+	// computes -42). i64str is only ever called with a non-negative count, so
+	// the reporter is unaffected; the compiler bug is recorded in
+	// docs/relay-test-coverage.md with this call as its repro.
+	if i32str(2147) != "2147" {
+		t.Fatal("int32 wrapper")
+	}
+}
+
+func TestPct(t *testing.T) {
+	if pct(0, 0) != "  0.0%" {
+		t.Fatal("empty denominator")
+	}
+	if pct(1, 1) != "100.0%" {
+		t.Fatal("all")
+	}
+	if pct(0, 4) != "0.0%" {
+		t.Fatal("none")
+	}
+	if pct(1, 3) != "33.3%" {
+		t.Fatal("one third")
+	}
+	if pct(2, 3) != "66.6%" {
+		t.Fatal("two thirds")
+	}
+	if pct(1, 8) != "12.5%" {
+		t.Fatal("eighth")
+	}
+	// three quarters of a large count must not overflow the int64 product
+	if pct(300000000, 400000000) != "75.0%" {
+		t.Fatal("large counts")
+	}
+}
+
+func TestParseU64(t *testing.T) {
+	if parseU64("0") != 0 {
+		t.Fatal("zero")
+	}
+	if parseU64("123456789012") != 123456789012 {
+		t.Fatal("large")
+	}
+	if parseU64("12x") != 12 {
+		t.Fatal("stops at a non-digit")
+	}
+	if parseU64("") != 0 {
+		t.Fatal("empty")
+	}
+}
+
+func TestParseCounts(t *testing.T) {
+	dump := "coversite 0 count=1\n" |
+		"coversite 7 count=42\n" |
+		"noise\n" |
+		"coversite 9\n" |
+		"coversite 11 count=\n" |
+		"  coversite 12 count=3  \n"
+	m := parseCounts(dump)
+	if m["0"] != 1 || m["7"] != 42 || m["12"] != 3 {
+		t.Fatal("valid lines")
+	}
+	// Three hits plus the empty count, which parses as zero rather than
+	// being dropped; a zero is what mxcover reports as uncovered either way.
+	if len(m) != 4 {
+		t.Fatal("coversite lines only: got " | i32str(int32(len(m))))
+	}
+	if _, ok := m["9"]; ok {
+		t.Fatal("a line with no count must be skipped")
+	}
+	if m["11"] != 0 {
+		t.Fatal("an empty count is zero, not a hit")
+	}
+}
+
+func TestParseSitesCountsHits(t *testing.T) {
+	sites := "[{\"id\":0,\"name\":\"pkg.F@a.mx:3\"},{\"id\":1,\"name\":\"pkg.G@a.mx:9\"}]"
+	hits := map[string]uint64{"1": 5}
+	recs := parseSites(sites, hits, "")
+	if len(recs) != 2 {
+		t.Fatal("site count")
+	}
+	// sorted by file then line
+	if recs[0].line != 3 || recs[0].hits != 0 {
+		t.Fatal("first site")
+	}
+	if recs[1].line != 9 || recs[1].hits != 5 {
+		t.Fatal("second site took its hits from the dump")
+	}
+	if recs[0].fn != "pkg.F" {
+		t.Fatal("function name is the part before @")
+	}
+}
+
+func TestParseSitesPrefixAndSyntheticSites(t *testing.T) {
+	sites := "[{\"id\":0,\"name\":\"pkg.F@mod/a.mx:3\"},{\"id\":1,\"name\":\"pkg.G@other/a.mx:4\"},{\"id\":2,\"name\":\"main.init@:0\"}]"
+	all := parseSites(sites, map[string]uint64{}, "")
+	if len(all) != 2 {
+		t.Fatal("a site with no source file is synthetic and dropped")
+	}
+	one := parseSites(sites, map[string]uint64{}, "mod/")
+	if len(one) != 1 {
+		t.Fatal("the prefix selects one file")
+	}
+	if one[0].file != "mod/a.mx" {
+		t.Fatal("prefix keeps the module-relative name")
+	}
+	none := parseSites(sites, map[string]uint64{}, "nomatch/")
+	if len(none) != 0 {
+		t.Fatal("a prefix that matches nothing selects nothing")
+	}
+}
+
+func TestSortRecsOrdersFileLineFunction(t *testing.T) {
+	rs := []rec{
+		{fn: "b", file: "z.mx", line: 1},
+		{fn: "a", file: "a.mx", line: 9},
+		{fn: "b", file: "a.mx", line: 9},
+		{fn: "a", file: "a.mx", line: 2},
+	}
+	sortRecs(rs)
+	want := []string{"a.mx:2:a", "a.mx:9:a", "a.mx:9:b", "z.mx:1:b"}
+	for i := int32(0); i < int32(len(rs)); i++ {
+		got := rs[i].file | ":" | i32str(rs[i].line) | ":" | rs[i].fn
+		if got != want[i] {
+			t.Fatal("sorted order is file, then line, then function: " | got)
+		}
+	}
+}
+
+func TestIndexHelpers(t *testing.T) {
+	if indexOf("abcabc", 0, "bc") != 1 {
+		t.Fatal("first index")
+	}
+	if indexOf("abcabc", 2, "bc") != 4 {
+		t.Fatal("index from an offset")
+	}
+	if indexOf("abc", 0, "z") != -1 {
+		t.Fatal("absent")
+	}
+	if lastIndexOf("a/b/c", '/') != 3 {
+		t.Fatal("last index")
+	}
+	if lastIndexOf("abc", '/') != -1 {
+		t.Fatal("absent separator")
+	}
+	if scanNumber("12ab", 0) != "12" {
+		t.Fatal("scanNumber stops at a non-digit")
+	}
+	if scanNumber("x", 0) != "" {
+		t.Fatal("scanNumber on no digits")
+	}
+	if parseInt32("202") != 202 {
+		t.Fatal("parseInt32")
+	}
+	if parseInt32("3x") != 3 {
+		t.Fatal("parseInt32 stops at a non-digit")
+	}
+}
+
+func TestPrefixNote(t *testing.T) {
+	if prefixNote("") != "" {
+		t.Fatal("no prefix, no note")
+	}
+	if prefixNote("mod/") != " under mod/" {
+		t.Fatal("prefix is named")
+	}
+}

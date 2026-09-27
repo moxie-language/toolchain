@@ -121,6 +121,13 @@ type ssaPkgBuilder struct {
 	// segImports records every import of every source file, one entry per
 	// spec, so checkUnusedImports can report the ones nothing referred to.
 	segImports    []segImport
+	// declared is every top-level function name seen in this package. A
+	// redeclaration used to be accepted silently: the second body replaced the
+	// first in the member map, so `func main()` twice compiled and ran the
+	// first body while the file that lost was never reported. Legacy rejects
+	// it through go/types ("main redeclared in this block"), so stage4 accepts
+	// nothing legacy does not.
+	declared      map[string]bool
 	fileScopes    map[*syntax.File]*Scope
 	curFileScope  *Scope
 	varInitScopes map[*syntax.VarDecl]*Scope
@@ -728,6 +735,22 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 			push(cctx.compileErrors, "at most one init() per package")
 			return
 		}
+	}
+	// A second declaration of the same top-level name is an error, the same
+	// one go/types reports. Before this, the later body silently replaced the
+	// earlier member and the earlier body still ran. The blank identifier is
+	// never a redeclaration - math/big declares `_` several times, which
+	// run_tests.sh caught the moment this check landed without the exemption.
+	if d.Name.Value != "_" {
+		if pb.declared == nil {
+			pb.declared = map[string]bool{}
+		}
+		if pb.declared[d.Name.Value] {
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, d.Name.Value | " redeclared in this block")
+			return
+		}
+		pb.declared[d.Name.Value] = true
 	}
 	var obj *TCFunc
 	if o := pb.pkg.Pkg.Scope.Lookup(d.Name.Value); o != nil {

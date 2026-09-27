@@ -5174,6 +5174,28 @@ func resolveTestDeps(testPkg *pkgInfo, root string) (ss []*pkgInfo) {
 	return r.order
 }
 
+// renamePkgMain renames a top-level `func main(` declaration to
+// `func __moxie_pkg_main(`. A test build must have exactly one main - the
+// generated test runner's - and the package under test is entitled to one of
+// its own: a command-line tool does. Only a line that begins with the
+// declaration is touched, so a mention in a comment or an expression is left
+// alone.
+func renamePkgMain(src string) (out string) {
+	lines := mxutil.SplitLines(src)
+	changed := false
+	for i, line := range lines {
+		trimmed := mxutil.TrimSpace(line)
+		if mxutil.HasPrefix(trimmed, "func main(") {
+			lines[i] = "func __moxie_pkg_main(" | trimmed[int32(len("func main(")):]
+			changed = true
+		}
+	}
+	if !changed {
+		return src
+	}
+	return joinStrings(lines, "\n")
+}
+
 func concatTestSources(dir string, files []string, testMainFile string) (buf []byte) {
 	imports := map[string]bool{}
 	var bodies [][]byte
@@ -5245,7 +5267,7 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 			i++
 		}
 		bodies = mxutil.Ensure(bodies, 1)
-		push(bodies, []byte(joinStrings(body, "\n")))
+		push(bodies, []byte(renamePkgMain(joinStrings(body, "\n"))))
 		bodyFiles = mxutil.Ensure(bodyFiles, 1)
 		push(bodyFiles, f)
 		bodyStartLines = mxutil.Ensure(bodyStartLines, 1)
