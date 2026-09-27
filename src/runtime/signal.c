@@ -15,8 +15,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-// Signal handler in the runtime.
-void moxie_signal_handler(int sig);
+// Signal delivery for a program that polls a self-pipe:
+// moxie_signal_pipe_init creates the pipe, moxie_signal_enable routes a signal
+// into it, and the program drains it with moxie_signal_pipe_read.
 
 // Self-pipe for waking epoll on signal delivery.
 static int signal_pipe[2] = {-1, -1};
@@ -43,23 +44,14 @@ static void signal_pipe_handler(int sig) {
     write(signal_pipe[1], &c, 1);
 }
 
-// Enable a signal from the runtime.
+// moxie_signal_enable routes a signal into the self-pipe. Without the pipe
+// there is nowhere to deliver it, so the default action is left in place
+// rather than swallowing the signal.
 void moxie_signal_enable(uint32_t sig) {
+    if (signal_pipe[1] < 0) return;
     struct sigaction act = { 0 };
-    act.sa_handler = signal_pipe[1] >= 0 ? &signal_pipe_handler : &moxie_signal_handler;
+    act.sa_handler = &signal_pipe_handler;
     act.sa_flags = 0;
-    sigaction(sig, &act, NULL);
-}
-
-void moxie_signal_ignore(uint32_t sig) {
-    struct sigaction act = { 0 };
-    act.sa_handler = SIG_IGN;
-    sigaction(sig, &act, NULL);
-}
-
-void moxie_signal_disable(uint32_t sig) {
-    struct sigaction act = { 0 };
-    act.sa_handler = SIG_DFL;
     sigaction(sig, &act, NULL);
 }
 

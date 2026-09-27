@@ -5,8 +5,6 @@ package runtime
 import (
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"array"
-	"internal/task"
-	"math/bits"
 	"moxie"
 	"unsafe"
 )
@@ -56,12 +54,6 @@ func libc_getrlimit(resource int32, rlim *[2]uint64) (r0 int32)
 
 //export setrlimit
 func libc_setrlimit(resource int32, rlim *[2]uint64) (r0 int32)
-
-//export usleep
-func usleep(usec uint32) (r0 int32)
-
-//export pause
-func pause() (r0 int32)
 
 // void *mmap(void *addr, size_t length, int32 prot, int32 flags, int32 fd, off_t offset);
 // Note: off_t is defined as int64 because:
@@ -313,19 +305,8 @@ func sleepTicks(d timeUnit) {
 			}
 			netpollBlock(ms)
 		} else {
-			// No netpoller - fall back to futex sleep.
-			// If a signal arrived before or during sleep, it exits early.
-			signalFutex.WaitUntil(0, uint64(ticksToNanoseconds(d)))
-		}
-
-		// Check whether there was a signal before or during the sleep.
-		if signalFutex.Swap(0) != 0 {
-			if checkSignals() && hasScheduler {
-				// We got a signal, so return to the scheduler.
-				// (If there is no scheduler, there is no other goroutine that
-				// might need to run now).
-				return
-			}
+			// No netpoller: sleep on a futex nobody wakes - it is a timer.
+			sleepFutex.WaitUntil(0, uint64(ticksToNanoseconds(d)))
 		}
 
 		// Set duration (in next loop iteration) to the remaining time.
@@ -371,154 +352,17 @@ func syscall_Exit(code int32) {
 func allocateHeap() {
 	// No-op: heap is removed. Arena only.
 }
-
-// Indicate whether signals have been registered.
-var hasSignals bool
-
-// Futex for the signal handler.
-// The value is 0 when there are no new signals, or 1 when there are unhandled
-// signals and the main thread doesn't know about it yet.
-// When a signal arrives, the futex value is changed to 1 and if it was 0
-// before, all waiters are awoken.
-// When a wait exits, the value is changed to 0 and if it wasn't 0 before, the
-// signals are checked.
-var signalFutex futex
-
-// Mask of signals that have been received. The signal handler atomically ORs
-// signals into this value.
-var receivedSignals uint32
-
-//:linkname signal_enable os/signal.signal_enable
-func signal_enable(s uint32) {
-	if s >= 32 {
-		// TODO: to support higher signal numbers, we need to turn
-		// receivedSignals into a uint32 array.
-		runtimePanicAt(returnAddress(0), "unsupported signal number")
-	}
-
-	// This is intentonally a non-atomic store. This is safe, since hasSignals
-	// is only used in waitForEvents which is only called when there's a
-	// scheduler (and therefore there is no parallelism).
-	hasSignals = true
-
-	// It's easier to implement this function in C.
-	moxie_signal_enable(s)
-}
-
-//:linkname signal_ignore os/signal.signal_ignore
-func signal_ignore(s uint32) {
-	if s >= 32 {
-		// TODO: to support higher signal numbers, we need to turn
-		// receivedSignals into a uint32 array.
-		runtimePanicAt(returnAddress(0), "unsupported signal number")
-	}
-	moxie_signal_ignore(s)
-}
-
-//:linkname signal_disable os/signal.signal_disable
-func signal_disable(s uint32) {
-	if s >= 32 {
-		// TODO: to support higher signal numbers, we need to turn
-		// receivedSignals into a uint32 array.
-		runtimePanicAt(returnAddress(0), "unsupported signal number")
-	}
-	moxie_signal_disable(s)
-}
-
-//:linkname signal_waitUntilIdle os/signal.signalWaitUntilIdle
-func signal_waitUntilIdle() {
-	// Wait until signal_recv has processed all signals.
-	for receivedSignals != 0 {
-		// TODO: this becomes a busy loop when using threads.
-		// We might want to pause until signal_recv has no more incoming signals
-		// to process.
-		Gosched()
-	}
-}
-
-//export moxie_signal_enable
-func moxie_signal_enable(s uint32)
-
-//export moxie_signal_ignore
-func moxie_signal_ignore(s uint32)
-
-//export moxie_signal_disable
-func moxie_signal_disable(s uint32)
-
-// void moxie_signal_handler(int32 sig);
-//
-//export moxie_signal_handler
-func moxie_signal_handler(s int32) {
-	receivedSignals |= uint32(1) << uint32(s)
-
-	// Notify the main thread that there was a signal.
-	// This will exit the call to Wait or WaitUntil early.
-	if signalFutex.Swap(1) == 0 {
-		// Changed from 0 to 1, so there may have been a waiting goroutine.
-		// This could be optimized to avoid a syscall when there are no waiting
-		// goroutines.
-		signalFutex.WakeAll()
-	}
-}
-
-// Task waiting for a signal to arrive, or nil if it is running or there are no
-// signals.
-var signalRecvWaiter *task.Task
-
-//:linkname signal_recv os/signal.signal_recv
-func signal_recv() (r0 uint32) {
-	// Function called from os/signal to get the next received signal.
-	for {
-		if receivedSignals == 0 {
-			old := signalRecvWaiter
-			signalRecvWaiter = task.Current()
-			if old != nil {
-				runtimePanic("signal_recv called concurrently")
-			}
-			task.Pause()
-			continue
-		}
-
-		num := uint32(bits.TrailingZeros32(receivedSignals))
-		receivedSignals &^= 1 << num
-
-		return num
-	}
-}
-
-// Reactivate the goroutine waiting for signals, if there are any.
-// Return true if it was reactivated (and therefore the scheduler should run
-// again), and false otherwise.
-func checkSignals() (r0 bool) {
-	if receivedSignals != 0 {
-		waiter := signalRecvWaiter
-		signalRecvWaiter = nil
-		if waiter != nil {
-			scheduleTask(waiter)
-			return true
-		}
-	}
-	return false
-}
+// sleepFutex is the no-netpoller timer: WaitUntil times it out and nothing
+// wakes it, so it is a sleep with a deadline.
+var sleepFutex futex
 
 func waitForEvents() {
 	if hasPoll {
 		// Block on epoll (100ms timeout) to avoid busy-spinning.
 		netpollBlock(100)
-		// Also check signals if applicable.
-		if hasSignals && signalFutex.Swap(0) != 0 {
-			checkSignals()
-		}
 		return
 	}
-	if hasSignals {
-		signalFutex.Wait(0)
-		if signalFutex.Swap(0) != 0 {
-			checkSignals()
-		}
-	} else {
-		runtimePanic("deadlocked: no event source")
-	}
+	runtimePanic("deadlocked: no event source")
 }
 
 // --- Arena memory mapping ---

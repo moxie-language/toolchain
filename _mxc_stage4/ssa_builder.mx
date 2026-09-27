@@ -5843,6 +5843,8 @@ func (fb *ssaFuncBuilder) buildCompositeLit(e *syntax.CompositeLit) (s SSAValue)
 				k := fb.buildExpr(kv.Key)
 				v := fb.buildExpr(kv.Value)
 				if k != nil && v != nil {
+					fb.checkAssignable(k, mt.Key, "map literal")
+					fb.checkAssignable(v, mt.Elem, "map literal")
 					k = fb.coerceToInterface(k, mt.Key)
 					v = fb.coerceToInterface(v, mt.Elem)
 					fb.emit(&SSAMapUpdate{Map: mm, Key: k, Value: v})
@@ -6090,7 +6092,7 @@ func (fb *ssaFuncBuilder) buildCompositeLitInto(dst SSAValue, e *syntax.Composit
 			ia.typ = NewPointer(ar.Elem)
 			ia.name = fb.nextName()
 			fb.emit(ia)
-			fb.storeLitElem(ia, expr, ar.Elem)
+			fb.storeLitElem(ia, expr, ar.Elem, "array or slice literal")
 		}
 		return
 	}
@@ -6114,7 +6116,7 @@ func (fb *ssaFuncBuilder) buildCompositeLitInto(dst SSAValue, e *syntax.Composit
 			fa.typ = NewPointer(ft)
 			fa.name = fb.nextName()
 			fb.emit(fa)
-			fb.storeLitElem(fa, expr, ft)
+			fb.storeLitElem(fa, expr, ft, "struct literal")
 		}
 		return
 	}
@@ -6126,7 +6128,7 @@ func (fb *ssaFuncBuilder) buildCompositeLitInto(dst SSAValue, e *syntax.Composit
 
 // storeLitElem stores one composite-literal element at dst. An untyped nested
 // literal is written directly into dst so no temporary aggregate is created.
-func (fb *ssaFuncBuilder) storeLitElem(dst SSAValue, expr syntax.Expr, elemTyp Type) {
+func (fb *ssaFuncBuilder) storeLitElem(dst SSAValue, expr syntax.Expr, elemTyp Type, what string) {
 	if cl, ok := expr.(*syntax.CompositeLit); ok && cl.Type == nil {
 		fb.buildCompositeLitInto(dst, cl, elemTyp)
 		return
@@ -6135,6 +6137,7 @@ func (fb *ssaFuncBuilder) storeLitElem(dst SSAValue, expr syntax.Expr, elemTyp T
 	if v == nil {
 		return
 	}
+	fb.checkAssignable(v, elemTyp, what)
 	v = fb.coerceToInterface(v, elemTyp)
 	fb.emitStore(dst, v)
 }
@@ -6194,6 +6197,7 @@ func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ Type, sl *Sl
 		if v == nil {
 			continue
 		}
+		fb.checkAssignable(v, elemTyp, "array or slice literal")
 		idx := &SSAConst{typ: Typ[Int32], val: &ConstInt{V:int64(i)}}
 		ia := &SSAIndexAddr{X: ms, Index: idx}
 		ia.typ = NewPointer(elemTyp)
