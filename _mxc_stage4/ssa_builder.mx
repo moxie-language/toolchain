@@ -3608,25 +3608,36 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 		if clause.Comm != nil && states[i].Dir == SelectDirRecv {
 			switch comm := clause.Comm.(type) {
 			case *syntax.AssignStmt:
-				// v := <-ch or v = <-ch
-				ext := &SSAExtract{Tuple: sel, Index: recvIdx}
-				ext.typ = ssaChanElemType(states[i].Chan.SSAType())
-				ext.name = fb.nextName()
-				fb.emit(ext)
-				if comm.Op == token.Def {
-					names := ssaExprNames(comm.Lhs)
-					for _, name := range names {
-						if name.Value == "_" {
-							continue
-						}
+				// v := <-ch, v = <-ch, or the comma-ok pair `ev, ok := <-ch`.
+				// The pair takes the value from this case's receive slot and ok
+				// from the select tuple's recvOk slot (index 1). Binding both
+				// names to the received value gave `ok` the element's type, so
+				// `if !ok` negated a pointer - `xor ptr %t, -1` - and clang
+				// refused the module, which is how pkg/nostr/ws failed to build.
+				names := ssaExprNames(comm.Lhs)
+				pair := comm.Op == token.Def && len(names) == 2
+				for ni := int32(0); ni < int32(len(names)); ni++ {
+					name := names[ni]
+					if name.Value == "_" {
+						continue
+					}
+					ext := &SSAExtract{Tuple: sel, Index: recvIdx}
+					ext.typ = ssaChanElemType(states[i].Chan.SSAType())
+					if pair && ni == 1 {
+						ext.Index = 1 // recvOk
+						ext.typ = Typ[Bool]
+					}
+					ext.name = fb.nextName()
+					fb.emit(ext)
+					if comm.Op == token.Def {
 						fb.removeVar(name.Value)
 						obj := NewTCVar(fb.fn.Pkg.Pkg, name.Value, ext.typ)
 						alloc := fb.emitAlloc(ext.typ, 0)
 						fb.vars[obj] = alloc
 						fb.emitStore(alloc, ext)
+					} else {
+						fb.buildStore(name, ext)
 					}
-				} else {
-					fb.buildStore(comm.Lhs, ext)
 				}
 			}
 			recvIdx++
