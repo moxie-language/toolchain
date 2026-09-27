@@ -150,10 +150,6 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 	if options.GOARCH != "wasm" {
 		spec.ExtraFiles = append(spec.ExtraFiles,
 			"src/runtime/asm_"+options.GOARCH+".S")
-		if spec.Scheduler == "tasks" {
-			spec.ExtraFiles = append(spec.ExtraFiles,
-				"src/internal/task/task_stack_"+options.GOARCH+".S")
-		}
 	}
 
 	// Cross-compilation emulator.
