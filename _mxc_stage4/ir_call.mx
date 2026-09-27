@@ -227,6 +227,78 @@ func (e *irEmitter) callArgType(arg SSAValue, sig *Signature, i int32) (s string
 	return "ptr"
 }
 
+// callParamType returns the LLVM type of parameter i of sig, accounting for the
+// receiver slot a method call passes first.
+func (e *irEmitter) callParamType(sig *Signature, i int32) (s string) {
+	if sig == nil || sig.Params == nil {
+		return ""
+	}
+	sigIdx := i
+	if sig.Recv != nil {
+		sigIdx = i - 1
+	}
+	if sigIdx < 0 || sigIdx >= sig.Params.Len() {
+		return ""
+	}
+	return e.llvmType(sig.Params.At(sigIdx).Typ)
+}
+
+// coerceIntArg widens or narrows an integer operand to the parameter's width.
+// The argument's own type is whatever the builder computed it at, which for an
+// untyped constant is the default width: `id(-42)` lowers the negation to
+// `sub i32 0, 42`, and passing an i32 where the signature declares i64 lets the
+// ABI zero-extend it, so -42 arrived as 4294967254. The extension follows the
+// argument's own signedness, as at every other widening site; a narrowing is a
+// trunc.
+func (e *irEmitter) coerceIntArg(arg SSAValue, at, pt, av string) (out string) {
+	if at == "" || pt == "" || at == "void" || pt == "void" || at == "i1" || pt == "i1" {
+		return av
+	}
+	sb := e.intBits(at)
+	db := e.intBits(pt)
+	if sb <= 0 || db <= 0 || sb == db {
+		return av
+	}
+	op := "sext"
+	if b, ok := SafeUnderlying(arg.SSAType()).(*Basic); ok && b.Info&IsUnsigned != 0 {
+		op = "zext"
+	}
+	if sb > db {
+		op = "trunc"
+	}
+	e.nextReg++
+	r := "%ca" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(r) ; e.w(" = ") ; e.w(op) ; e.w(" ") ; e.w(at) ; e.w(" ") ; e.w(av) ; e.w(" to ") ; e.w(pt) ; e.w("\n")
+	return r
+}
+
+// callArgTexts renders a call's argument list as one "type value" string per
+// argument, with the integer-width conversion an argument needs emitted before
+// the call. Rendering the whole list first also keeps operand materialisation
+// out of the middle of the call instruction, which is where a conversion would
+// otherwise land.
+func (e *irEmitter) callArgTexts(args []SSAValue, sig *Signature) (out []string) {
+	out = []string{:0:len(args)}
+	for i := int32(0); i < int32(len(args)); i++ {
+		arg := args[i]
+		if arg == nil {
+			push(out, "ptr null")
+			continue
+		}
+		at := e.callArgType(arg, sig, i)
+		av := e.operand(arg)
+		if pt := e.callParamType(sig, i); pt != "" && at != pt && e.intBits(at) > 0 && e.intBits(pt) > 0 {
+			av = e.coerceIntArg(arg, at, pt, av)
+			at = pt
+		}
+		if av == "null" && at != "ptr" {
+			av = "zeroinitializer"
+		}
+		push(out, at | " " | av)
+	}
+	return
+}
+
 func (e *irEmitter) callSig(c *SSACall) (s *Signature) {
 	if fn, ok := c.Call.Value.(*SSAFunction); ok && fn.Signature != nil {
 		return fn.Signature
@@ -269,6 +341,12 @@ func (e *irEmitter) emitCall(c *SSACall) {
 			e.nextReg++
 			sretTmp2 = "%sret." | irItoa(e.nextReg)
 			e.w("  ") ; e.w(sretTmp2) ; e.w(" = alloca ") ; e.w(retType) ; e.w("\n")
+		}
+		// Render every argument first: an argument whose width differs from its
+		// parameter's needs a conversion instruction in front of the call, not
+		// in the middle of it.
+		argTexts := e.callArgTexts(c.Call.Args, sig)
+		if useSret2 {
 			e.w("  call void ")
 		} else {
 			e.w("  ")
@@ -287,19 +365,9 @@ func (e *irEmitter) emitCall(c *SSACall) {
 		sym := e.funcSymbol(fn)
 		isIntrinsic := mxutil.HasPrefix(sym, "@llvm.") || mxutil.HasPrefix(sym, "@\"llvm.")
 		isExport := fn.externalSymbol != ""
-		for i, arg := range c.Call.Args {
+		for i := int32(0); i < int32(len(argTexts)); i++ {
 			if np > 0 { e.w(", ") }
-			if arg == nil {
-				e.w("ptr null")
-				np++
-				continue
-			}
-			at := e.callArgType(arg, sig, int32(i))
-			av := e.operand(arg)
-			if av == "null" && at != "ptr" {
-				av = "zeroinitializer"
-			}
-			e.w(at) ; e.w(" ") ; e.w(av)
+			e.w(argTexts[i])
 			np++
 		}
 		skipCtx := isIntrinsic || isExport
@@ -344,6 +412,8 @@ func (e *irEmitter) emitCall(c *SSACall) {
 	}
 	useSret := needsSret(retType)
 	sretTmp := ""
+	// Arguments first, for the same reason as the direct-call branch.
+	argTexts2 := e.callArgTexts(c.Call.Args, sig)
 	if useSret {
 		e.nextReg++
 		sretTmp = "%sret." | irItoa(e.nextReg)
@@ -358,14 +428,9 @@ func (e *irEmitter) emitCall(c *SSACall) {
 	}
 	np2 := 0
 	if useSret { np2++ }
-	for i, arg := range c.Call.Args {
+	for i := int32(0); i < int32(len(argTexts2)); i++ {
 		if np2 > 0 { e.w(", ") }
-		at := e.callArgType(arg, sig, int32(i))
-		av := e.operand(arg)
-		if av == "null" && at != "ptr" {
-			av = "zeroinitializer"
-		}
-		e.w(at) ; e.w(" ") ; e.w(av)
+		e.w(argTexts2[i])
 		np2++
 	}
 	if np2 > 0 { e.w(", ") }

@@ -1784,11 +1784,16 @@ func (fb *ssaFuncBuilder) coerceToInterface(val SSAValue, targetType Type) (s SS
 }
 
 // checkCallArgs reports argument-count and argument-type mismatches, mirroring
-// go/types. Conservative: only signatures that carry a parameter tuple are
-// checked, a variadic tail is compared against the element type (or the slice
-// itself when the call uses ...), and checkAssignable skips interfaces and
-// type parameters. Call it before wrapVariadicArgs, while args are still one
-// per source argument.
+// go/types, and returns the arguments converted to their parameter's type.
+// Conservative: only signatures that carry a parameter tuple are checked, a
+// variadic tail is compared against the element type (or the slice itself when
+// the call uses ...), and checkAssignable skips interfaces and type parameters.
+// Call it before wrapVariadicArgs, while args are still one per source argument.
+//
+// The conversion is what makes the call well typed. The emitter prints each
+// argument at the LLVM type of the value it was built as, and the ABI does not
+// convert: `id(-42)` folds the negation as an i32 sub, and passing an i32 where
+// the signature declares i64 zero-extended it, so -42 arrived as 4294967254.
 func (fb *ssaFuncBuilder) checkCallArgs(args []SSAValue, sig *Signature, hasDots bool) {
 	if sig == nil || sig.Params == nil {
 		return
@@ -3787,19 +3792,40 @@ func (fb *ssaFuncBuilder) buildBranch(s *syntax.BranchStmt) {
 			}
 		}
 	case token.Continue:
-		for i := len(fb.loops) - 1; i >= 0; i-- {
-			postBlock := fb.loops[i].post
-			if postBlock == nil {
-				postBlock = fb.loops[i].body
+		// A labelled continue targets the loop that owns the label, and the
+		// jump must skip the post statements of every loop inside it: a post
+		// statement runs on the way round its own loop and on no other. The
+		// label used to be ignored, so `continue outer` continued the
+		// innermost loop and ran one extra post - fmt's verb scanner then read
+		// the format string one byte ahead and printed a phantom `%!(NOVERB)`
+		// after every formatted value.
+		var postBlock *SSABasicBlock
+		if s.Label != nil {
+			for i := len(fb.loops) - 1; i >= 0; i-- {
+				if fb.loops[i].label == s.Label.Value {
+					postBlock = fb.loops[i].post
+					if postBlock == nil {
+						postBlock = fb.loops[i].body
+					}
+					break
+				}
 			}
-			if postBlock == nil {
-				continue
+		} else {
+			for i := len(fb.loops) - 1; i >= 0; i-- {
+				postBlock = fb.loops[i].post
+				if postBlock == nil {
+					postBlock = fb.loops[i].body
+				}
+				if postBlock != nil {
+					break
+				}
 			}
+		}
+		if postBlock != nil {
 			fb.emit(&SSAJump{Comment: "continue"})
 			fb.pushSucc(fb.currentBlock, postBlock)
 			fb.pushPred(postBlock, fb.currentBlock)
 			fb.currentBlock = nil
-			break
 		}
 	case token.Goto:
 		if s.Label != nil {
