@@ -4537,6 +4537,9 @@ func cmdTest(args []string) {
 		} else if args[i] == "-allow-closure-captures" {
 			setAllowCaptures()
 			i++
+		} else if args[i] == "-work" {
+			bst.keepWork = true
+			i++
 		} else if mxutil.HasPrefix(args[i], "-") && pkgPath == "" {
 			fatal("flag provided but not defined: " | args[i])
 		} else {
@@ -4636,11 +4639,43 @@ func cmdTest(args []string) {
 		pkg.imports = mxutil.Ensure(pkg.imports, 1)
 		push(pkg.imports, "testing")
 	}
+	// The test files' imports belong to the closure too. A dependency the
+	// package itself does not use - bytes, time, fmt in a test - was otherwise
+	// never resolved: the type came out invalid, `var b bytes.Buffer` allocated
+	// one byte, its method calls were dropped, and the test miscompiled
+	// silently until it panicked at "interface dispatch: no impl for Write".
+	for _, tf := range testFiles {
+		data, dok := mxutil.ReadFile(mxutil.JoinPath(testPkgDir, tf))
+		if !dok {
+			continue
+		}
+		for _, imp := range extractImports(data) {
+			if hasImportStr(pkg.imports, imp) {
+				continue
+			}
+			pkg.imports = mxutil.Ensure(pkg.imports, 1)
+			push(pkg.imports, imp)
+		}
+	}
 
 	pkgs := resolveTestDeps(pkg, root)
 
 	cacheBase := pkgCacheDir()
 
+	// Every package's cache key carries the link set, because the dispatch arms
+	// it emits depend on the closure. A test build has its own closure (the
+	// test package as main, testing, the test files' imports), so it has to key
+	// the cache separately: without this the test build reused a build's arms
+	// and panicked on the first call through an interface -
+	// "interface dispatch: no impl for Read" from crypto/rand.
+	bst.linkSetKey = linkSetHash(pkgs)
+
+	// A test binary emits dispatch too, so it needs the same index a build
+	// gets. The test package itself is type-checked below, under its generated
+	// main, and is skipped here.
+	prepareDispatchIndex(pkgs, cacheBase, pkg)
+
+	testMxh := ""
 	for _, dp := range pkgs {
 		compilePath := dp.path
 		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
@@ -4659,10 +4694,27 @@ func cmdTest(args []string) {
 			var src []byte
 			if dp == pkg {
 				src = concatTestSources(dp.dir, dp.files, testMainFile)
+				// The test package's own methods belong in the dispatch index
+				// too: it is compiled as the root, and without its entry every
+				// call it makes through an interface looked tier 2 and emitted
+				// no arms ("interface dispatch: no impl for Write"). Write its
+				// mxh so the same text the index reads exists.
+				testMxh = mxutil.JoinPath(tmpdir, "testpkg.mxh")
+				TypeCheckOnly(src, compilePath, testMxh)
 			} else {
 				src = concatSources(dp.dir, dp.files)
+				TypeCheckOnly(src, compilePath, "")
 			}
-			TypeCheckOnly(src, compilePath, "")
+		}
+	}
+	if testMxh != "" {
+		if data, tok := mxutil.ReadFile(testMxh); tok {
+			d := string(data)
+			if cctx.dispMethodsByPkg == nil {
+				cctx.dispMethodsByPkg = map[string]map[string]bool{}
+			}
+			cctx.dispMethodsByPkg[dispPkgKey(pkg)] = dispParseMethods(d)
+			dispParseIfaceMethods(d, cctx.dispIfaceMethods)
 		}
 	}
 
@@ -5153,6 +5205,51 @@ func applyTargetFlag(flag string) {
 	}
 }
 
+// prepareDispatchIndex writes every package's mxh, then fills the dispatch
+// index from those files. Both halves matter: the index is what findIfaceImpls
+// consults to skip packages that cannot implement the method being dispatched,
+// and it is read from the mxh files, so a build that reads the index before
+// the files exist indexes nothing, skips nothing, and emits an arm for every
+// type in the registry - the same sources then produce different .text
+// depending only on cache state (measured on the smesh relay: 12,352 bytes
+// across 52 functions). Every build that emits dispatch needs it; a test
+// binary built without it took every package for tier 2 and panicked the first
+// time a test called through an interface: "interface dispatch: no impl for
+// Write". skip is the root package a caller type-checks itself (the test
+// package, under its generated main), nil otherwise.
+func prepareDispatchIndex(pkgs []*pkgInfo, cacheBase string, skip *pkgInfo) {
+	for _, pkg := range pkgs {
+		if pkg.baked || pkg == skip {
+			continue
+		}
+		compilePath := pkg.path
+		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
+			compilePath = pkg.name
+		}
+		hash := pkgHash(pkg)
+		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+		if mxutil.FileExists(cachedMxh) {
+			continue
+		}
+		typeCheckPkgSource(cacheBase, pkg.dir, pkg.files, pkg.path, compilePath, cachedMxh)
+	}
+	cctx.dispIfaceMethods = map[string]bool{}
+	if cctx.dispMethodsByPkg == nil {
+		cctx.dispMethodsByPkg = map[string]map[string]bool{}
+	}
+	for _, ipkg := range pkgs {
+		if ipkg.baked || ipkg == skip {
+			continue
+		}
+		ihash := pkgHash(ipkg)
+		if data, ok := mxutil.ReadFile(cachedMxhPath(cacheBase, ipkg.path, ihash, ipkg.version)); ok {
+			d := string(data)
+			cctx.dispMethodsByPkg[dispPkgKey(ipkg)] = dispParseMethods(d)
+			dispParseIfaceMethods(d, cctx.dispIfaceMethods)
+		}
+	}
+}
+
 func main() {
 	// Root arena is the domain root's arena, set up by the runtime.
 	// 2GB virtual - pages committed on touch by the MMU.
@@ -5538,62 +5635,9 @@ func main() {
 		bst.tlsFailed = true
 		bst.buildJobs = 1
 	}
-	// mxh pre-pass: every package in the closure must have its mxh on disk
-	// BEFORE the index below is read, because the index comes from those files.
-	// The index is what findIfaceImpls consults to skip packages that cannot
-	// implement the method being dispatched, so a build whose mxh files do not
-	// exist yet (a cold cache, or the first build after a compiler change)
-	// indexed nothing, skipped nothing, and emitted an arm for every type in
-	// the registry: the same sources then produced different .text depending on
-	// nothing but cache state (measured on the smesh relay: 12,352 bytes across
-	// 52 functions, e.g. math/bits.Div64 gaining 346 bytes of error-impl arms,
-	// with symbols, .rodata and .data byte-identical). Type-checking here is
-	// the same work the registry pre-pass below does for a package whose mxh is
-	// missing, so ordering it first costs nothing and makes the emitted
-	// dispatch a function of the closure and its sources.
-	for _, pkg := range pkgs {
-		if pkg.baked {
-			continue
-		}
-		compilePath := pkg.path
-		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
-			compilePath = pkg.name
-		}
-		hash := pkgHash(pkg)
-		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
-		if mxutil.FileExists(cachedMxh) {
-			continue
-		}
-		typeCheckPkgSource(cacheBase, pkg.dir, pkg.files, pkg.path, compilePath, cachedMxh)
-	}
-
-	// Index pass, no graph materialisation: read each package's cached mxh and
-	// record its methods and the closure's interface-method universe, so the
-	// tier-1/tier-2 split is known before anything is loaded.
-	//
-	// This index must be complete: it is what findIfaceImpls consults to skip
-	// packages that cannot implement the method being dispatched, so reading it
-	// while some mxh files did not exist yet meant an arm was emitted for every
-	// type in the registry. The same sources then produced different code
-	// depending on nothing but cache state - measured on the smesh relay as
-	// .text differing by 12,352 bytes across 52 functions, all larger in the
-	// cached build, the extra code being error-impl dispatch arms. The mxh
-	// pre-pass above is what guarantees the index is complete; keep it there.
-	cctx.dispIfaceMethods = map[string]bool{}
-	if cctx.dispMethodsByPkg == nil {
-		cctx.dispMethodsByPkg = map[string]map[string]bool{}
-	}
-	for _, ipkg := range pkgs {
-		if ipkg.baked {
-			continue
-		}
-		ihash := pkgHash(ipkg)
-		if data, ok := mxutil.ReadFile(cachedMxhPath(cacheBase, ipkg.path, ihash, ipkg.version)); ok {
-			d := string(data)
-			cctx.dispMethodsByPkg[dispPkgKey(ipkg)] = dispParseMethods(d)
-			dispParseIfaceMethods(d, cctx.dispIfaceMethods)
-		}
-	}
+	// The dispatch index must be complete before anything is emitted: see
+	// prepareDispatchIndex.
+	prepareDispatchIndex(pkgs, cacheBase, nil)
 
 	// Whole-link registry pre-pass: interface dispatch emits a typeID switch
 	// over impls found in cctx.universe.Registry, which is populated in
