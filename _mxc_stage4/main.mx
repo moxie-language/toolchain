@@ -40,6 +40,10 @@ type buildState struct {
 	// allowCaptures relaxes the closure-capture rule for this build. See
 	// setAllowCaptures.
 	allowCaptures bool
+	// printCommands is -x: echo every child process before running it.
+	printCommands bool
+	// keepWork is -work: keep the build scratch directory and echo its path.
+	keepWork bool
 }
 
 var bst *buildState
@@ -202,6 +206,9 @@ func listFiles(dir, ext string) (ss []string) {
 }
 
 func run(args []string) (n int32) {
+	if bst.printCommands {
+		echoCommand(args)
+	}
 	argv := []unsafe.Pointer{:len(args) + 1}
 	cstrs := [][]byte{:len(args)}
 	for i, a := range args {
@@ -218,6 +225,9 @@ func run(args []string) (n int32) {
 // fork failure. The forked child copies the argv buffers, so parent-side
 // lifetimes end at return.
 func runAsync(args []string) (pid int32) {
+	if bst.printCommands {
+		echoCommand(args)
+	}
 	argv := []unsafe.Pointer{:len(args) + 1}
 	cstrs := [][]byte{:len(args)}
 	for i, a := range args {
@@ -228,6 +238,18 @@ func runAsync(args []string) (pid int32) {
 		argv[i] = unsafe.Pointer(unsafe.SliceData(b))
 	}
 	return cRunAsync(unsafe.Pointer(unsafe.SliceData(argv)), int32(len(args)))
+}
+
+// echoCommand reports a child process as -x asks, on one line.
+func echoCommand(args []string) {
+	line := ""
+	for i, a := range args {
+		if i > 0 {
+			line = line | " "
+		}
+		line = line | a
+	}
+	mxutil.WriteStr(2, line | "\n")
 }
 
 // runPool runs cmds with at most jobs concurrent children. Returns false if
@@ -3487,7 +3509,11 @@ func cmdCacheWarm() {
 	clang := "clang-22"
 	tmpdir := buildScratchDir("./tmp", "mxc-build")
 	mkdirAll(tmpdir, 0755)
-	defer os.RemoveAll(tmpdir)
+	if bst.keepWork {
+		mxutil.WriteStr(1, "WORK=" | tmpdir | "\n")
+	} else {
+		defer os.RemoveAll(tmpdir)
+	}
 	cacheBase := pkgCacheDir()
 	registerBuiltins()
 	compiled := int32(0)
@@ -4343,7 +4369,11 @@ func cmdUpdate(rebuildAll bool) {
 	clang := "clang-22"
 	tmpdir := buildScratchDir("./tmp", "mxc-build")
 	mkdirAll(tmpdir, 0755)
-	defer os.RemoveAll(tmpdir)
+	if bst.keepWork {
+		mxutil.WriteStr(1, "WORK=" | tmpdir | "\n")
+	} else {
+		defer os.RemoveAll(tmpdir)
+	}
 	registerBuiltins()
 	for _, pkgDir := range pkgDirs {
 		pkgPath := ""
@@ -4449,24 +4479,32 @@ func generateTestMain(pkgName string, testFuncs []string) (buf []byte) {
 func cmdTest(args []string) {
 	pkgPath := ""
 	forceRebuild := false
-	verbose := false
 	i := int32(2)
 	for i < int32(len(args)) {
 		if args[i] == "-a" {
 			forceRebuild = true
 			i++
 		} else if args[i] == "-v" {
-			verbose = true
+			// Test output already streams per test, which is all -v selects
+			// in the legacy compiler.
 			i++
-		} else if args[i] == "-tags" && i+1 < int32(len(args)) {
+		} else if args[i] == "-tags" {
+			if i+1 >= int32(len(args)) {
+				fatal("flag needs an argument: -tags")
+			}
 			appendBuildTags(args[i+1])
 			i += 2
-		} else if args[i] == "-print-allocs" && i+1 < int32(len(args)) {
+		} else if args[i] == "-print-allocs" {
+			if i+1 >= int32(len(args)) {
+				fatal("flag needs an argument: -print-allocs")
+			}
 			setPrintAllocs(args[i+1])
 			i += 2
 		} else if args[i] == "-allow-closure-captures" {
 			setAllowCaptures()
 			i++
+		} else if mxutil.HasPrefix(args[i], "-") && pkgPath == "" {
+			fatal("flag provided but not defined: " | args[i])
 		} else {
 			pkgPath = args[i]
 			i++
@@ -4478,7 +4516,6 @@ func cmdTest(args []string) {
 	if mxutil.AllocSitesEnabled() {
 		forceRebuild = true
 	}
-	_ = verbose
 
 	root := moxieRoot()
 	triple := "x86_64-unknown-linux-musleabihf"
@@ -4542,7 +4579,11 @@ func cmdTest(args []string) {
 
 	tmpdir := buildScratchDir("./tmp", "mxc-testbuild")
 	mkdirAll(tmpdir, 0755)
-	defer os.RemoveAll(tmpdir)
+	if bst.keepWork {
+		mxutil.WriteStr(1, "WORK=" | tmpdir | "\n")
+	} else {
+		defer os.RemoveAll(tmpdir)
+	}
 
 	testMainSrc := generateTestMain(pkgName, allTestFuncs)
 	testMainFile := mxutil.JoinPath(tmpdir, "_testmain.mx")
@@ -5235,12 +5276,19 @@ func main() {
 	printIR := false
 	forceRebuild := false
 	targetFlag := ""
+	buildMode := ""
 	i := int32(2)
 	for i < int32(len(args)) {
-		if args[i] == "-o" && i+1 < int32(len(args)) {
+		if args[i] == "-o" {
+			if i+1 >= int32(len(args)) {
+				fatal("flag needs an argument: -o")
+			}
 			outpath = args[i+1]
 			i += 2
-		} else if args[i] == "-target" && i+1 < int32(len(args)) {
+		} else if args[i] == "-target" {
+			if i+1 >= int32(len(args)) {
+				fatal("flag needs an argument: -target")
+			}
 			targetFlag = args[i+1]
 			i += 2
 		} else if args[i] == "-print-ir" {
@@ -5249,23 +5297,49 @@ func main() {
 		} else if args[i] == "-a" {
 			forceRebuild = true
 			i++
-		} else if args[i] == "-j" && i+1 < int32(len(args)) {
+		} else if args[i] == "-j" {
+			if i+1 >= int32(len(args)) {
+				fatal("flag needs an argument: -j")
+			}
 			bst.buildJobs = parseInt32(args[i+1])
 			if bst.buildJobs < 1 {
 				bst.buildJobs = 1
 			}
 			i += 2
-		} else if args[i] == "-tags" && i+1 < int32(len(args)) {
+		} else if args[i] == "-tags" {
+			if i+1 >= int32(len(args)) {
+				fatal("flag needs an argument: -tags")
+			}
 			appendBuildTags(args[i+1])
 			i += 2
-		} else if args[i] == "-print-allocs" && i+1 < int32(len(args)) {
+		} else if args[i] == "-print-allocs" {
+			if i+1 >= int32(len(args)) {
+				fatal("flag needs an argument: -print-allocs")
+			}
 			setPrintAllocs(args[i+1])
 			i += 2
 		} else if args[i] == "-allow-closure-captures" {
 			setAllowCaptures()
 			i++
-		} else if args[i] == "-gc=dealloc" || args[i] == "-buildmode=c-shared" || args[i] == "-x" || args[i] == "-work" {
+		} else if args[i] == "-buildmode" {
+			if i+1 >= int32(len(args)) {
+				fatal("flag needs an argument: -buildmode")
+			}
+			buildMode = args[i+1]
+			i += 2
+		} else if mxutil.HasPrefix(args[i], "-buildmode=") {
+			buildMode = args[i][int32(len("-buildmode=")):]
 			i++
+		} else if args[i] == "-x" {
+			bst.printCommands = true
+			i++
+		} else if args[i] == "-work" {
+			bst.keepWork = true
+			i++
+		} else if mxutil.HasPrefix(args[i], "-") && pkgPath == "" {
+			// Never drop a flag this compiler does not implement: building
+			// something other than what was asked is worse than failing.
+			fatal("flag provided but not defined: " | args[i])
 		} else if pkgPath == "" {
 			pkgPath = args[i]
 			i++
@@ -5278,6 +5352,14 @@ func main() {
 	if printIR {
 		// -print-ir needs the in-process compile path.
 		bst.buildJobs = 1
+	}
+	if buildMode != "" && buildMode != "default" {
+		if buildMode != "c-shared" {
+			fatal("invalid buildmode option '" | buildMode | "': valid values are default, c-shared")
+		}
+		// Legacy implements c-shared by building PIC libc, compiler-rt and
+		// runtime objects, which this compiler has no path to produce.
+		fatal("buildmode c-shared is not implemented by this compiler; only the legacy bootstrap compiler builds shared libraries")
 	}
 	if mxutil.AllocSitesEnabled() {
 		// The site table is built while packages are emitted, so a package
@@ -5311,22 +5393,10 @@ func main() {
 	registerBuiltins()
 	pkgs := resolveAll(pkgPath, root)
 	bst.linkSetKey = linkSetHash(pkgs)
-	// Dedup with a sorted slice: hashmap-based dedup is sensitive to
-	// hashmap state during bootstrap.
+	// Drop duplicate package paths, keeping the resolver's order.
 	{
-		var pks []string
-		pks = []string{:0:len(pkgs)}
-		for _, p := range pkgs {
-			pks = mxutil.Ensure(pks, 1)
-			push(pks, p.path)
-		}
-		for pi := int32(1); pi < int32(len(pks)); pi++ {
-			for pj := pi; pj > 0 && pks[pj] < pks[pj-1]; pj-- {
-				pks[pj], pks[pj-1] = pks[pj-1], pks[pj]
-			}
-		}
 		var deduped []*pkgInfo
-		deduped = []*pkgInfo{:0:len(pks)}
+		deduped = []*pkgInfo{:0:len(pkgs)}
 		var prev string
 		for _, p := range pkgs {
 			if p.path == prev {
@@ -5425,7 +5495,11 @@ func main() {
 
 	tmpdir := buildScratchDir("./tmp", "mxc-build")
 	mkdirAll(tmpdir, 0755)
-	defer os.RemoveAll(tmpdir)
+	if bst.keepWork {
+		mxutil.WriteStr(1, "WORK=" | tmpdir | "\n")
+	} else {
+		defer os.RemoveAll(tmpdir)
+	}
 
 	// TLS probe: if this binary's globals aren't thread_local, the parallel
 	// path would corrupt shared state. Fall back to serial.
@@ -5569,14 +5643,11 @@ func main() {
 		allBcFiles = a
 		hasRuntimePkg = h
 	}
-	// Link order must be deterministic across compiler generations or the
-	// self-host fixpoint never converges: the discovery order comes from
-	// hashmap iteration (fastrand-seeded), which differs per process.
-	for bi := int32(1); bi < int32(len(allBcFiles)); bi++ {
-		for bj := bi; bj > 0 && allBcFiles[bj] < allBcFiles[bj-1]; bj-- {
-			allBcFiles[bj], allBcFiles[bj-1] = allBcFiles[bj-1], allBcFiles[bj]
-		}
-	}
+	// Link order is the resolver's order, which depends only on the package
+	// set. Sorting these paths instead mixed two path spaces - a .bc read
+	// from the cache against one compiled into the scratch dir - and the
+	// linker lays sections out in input order, so a cold and a warm build of
+	// the same program differed in section order and padding.
 
 	// Assemble per-package .s/.S files for the current target.
 	// The runtime and internal/runtime/syscall assembly is prebuilt in
@@ -7024,7 +7095,11 @@ func cmdBuildRuntime() {
 	sysroot := mxutil.JoinPath(root, "sysroot")
 	tmpdir := buildScratchDir("/tmp", "mxc-rt-build")
 	mkdirAll(tmpdir, 0755)
-	defer os.RemoveAll(tmpdir)
+	if bst.keepWork {
+		mxutil.WriteStr(1, "WORK=" | tmpdir | "\n")
+	} else {
+		defer os.RemoveAll(tmpdir)
+	}
 
 	registerBuiltins()
 
