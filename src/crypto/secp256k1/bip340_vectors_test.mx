@@ -247,3 +247,44 @@ func TestNostrEventRoundtrip(t *testing.T) {
 		t.Fatal("VerifySchnorr accepted wrong message")
 	}
 }
+
+// TestLiftXRejectsNonCanonicalX: BIP-340 fails a public key whose x is not a
+// canonical field element ("fail if x >= p"). feFromBytes copies the bytes
+// into the limb representation without reducing, so a raw caller could lift a
+// point that no verifier accepts.
+func TestLiftXRejectsNonCanonicalX(t *testing.T) {
+	// p, p+1, and an all-ones x: every one of them is >= p.
+	for _, h := range []string{
+		"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F",
+		"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC30",
+		"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+	} {
+		raw, ok := hexDecode(h)
+		if !ok {
+			t.Fatalf("fixture %s is not hex", h)
+			continue
+		}
+		if _, lifted := LiftX(feFromBytes(raw)); lifted {
+			t.Errorf("LiftX accepted x = %s, which is >= p", h)
+		}
+	}
+	// A canonical x still lifts: p-1 is a curve point, and so is the generator's.
+	gx, okx := hexDecode("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798")
+	if !okx {
+		t.Fatal("generator x fixture is not hex")
+		return
+	}
+	if _, lifted := LiftX(feFromBytes(gx)); !lifted {
+		t.Error("LiftX rejected the generator's x coordinate")
+	}
+	// ECDH must refuse the non-canonical key as well.
+	var sk [32]byte
+	sk[31] = 5
+	var bad [32]byte
+	for i := int32(0); i < 32; i++ {
+		bad[i] = 0xFF
+	}
+	if _, ok := ECDH(sk, bad); ok {
+		t.Error("ECDH accepted an x coordinate >= p")
+	}
+}
