@@ -17,6 +17,7 @@ import (
 // never reassigned; fields are mutated through the pointer.
 type buildState struct {
 	selfHash        string
+	buildID         string
 	globalModPrefix string
 	globalModDir    string
 	// rootModPrefix is the module the TARGET lives in ("" when it lives in no
@@ -522,15 +523,42 @@ func compilerHash() (s string) {
 	return bst.selfHash
 }
 
+// compilerBuildID identifies the running binary by content. It is folded into
+// the cache DIRECTORY name only, never into generated code, so identical
+// self-host generations still emit identical binaries. Without it a binary
+// built from older compiler sources, run against a tree whose sources have
+// changed, computes the NEW source hash and writes objects the NEW compiler
+// then reads - the "stale .bc after adding a struct field" poisoning. The
+// binary's own /proc/self/exe is preferred; os.Args[0] is a fallback for
+// systems without it.
+func compilerBuildID() (s string) {
+	if bst.buildID != "" {
+		return bst.buildID
+	}
+	if data, ok := mxutil.ReadFile("/proc/self/exe"); ok && len(data) > 0 {
+		bst.buildID = fnvHash(data)
+		return bst.buildID
+	}
+	if len(os.Args) > 0 && os.Args[0] != "" {
+		if data, ok := mxutil.ReadFile(os.Args[0]); ok && len(data) > 0 {
+			bst.buildID = fnvHash(data)
+			return bst.buildID
+		}
+	}
+	bst.buildID = "nobuild"
+	return bst.buildID
+}
+
 // The cache root is per target. The package key folds the target in too, but a
 // key computed while the wrong target was active - a worker reconstructing it
 // from an ambiguous triple, a stale environment - writes one target's bitcode
 // where another target reads it, and the result is a native binary linked from
 // wasm32 objects or an arm64 runtime. One root per target makes the wrong read
-// unrepresentable instead of merely unlikely.
+// unrepresentable instead of merely unlikely. The running binary's build ID is
+// in the directory too: a stale binary must not seed the next compiler's cache.
 func moxieCacheDir() (s string) {
 	return mxutil.JoinPath(mxutil.JoinPath(getMoxiePath(), "cache"),
-		"mxc-" | mxcVersion() | "-" | compilerHash() | "-" | mxutil.TargetOS() | "-" | mxutil.TargetArch())
+		"mxc-" | mxcVersion() | "-" | compilerHash() | "-" | compilerBuildID() | "-" | mxutil.TargetOS() | "-" | mxutil.TargetArch())
 }
 
 

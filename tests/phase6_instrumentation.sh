@@ -271,6 +271,29 @@ for cc in "$MOXIE" "$LEGACY"; do
 	rm -rf "$td" "$fdir"
 done
 
+# 6h: the compiler's build identity is part of the cache directory, so a stale
+# binary cannot seed the next compiler's cache with objects it compiled under
+# the old sources but keyed on the new source hash. Two binaries from the same
+# tree (same source hash) must use different cache dirs.
+name="cacheid:stage4"
+td="$(tempdir cacheid)"; rm -rf "$td"; mkdir -p "$td"
+cp "$MOXIE" "$td/a"
+cp "$MOXIE" "$td/b"
+printf 'x' >> "$td/b"
+chmod +x "$td/b"
+ca="$(MOXIEROOT="$MOXIEROOT" "$td/a" env 2>/dev/null | sed -n 's/^CACHE="\(.*\)"$/\1/p' | head -1)"
+cb="$(MOXIEROOT="$MOXIEROOT" "$td/b" env 2>/dev/null | sed -n 's/^CACHE="\(.*\)"$/\1/p' | head -1)"
+if [ -z "$ca" ]; then
+	log_fail "$name" "could not read CACHE from mxc env"
+elif [ -z "$cb" ]; then
+	log_skip "$name" "the modified binary did not run (signed binary?)"
+elif [ "$ca" = "$cb" ]; then
+	log_fail "$name" "cache dir does not carry the build identity: $ca"
+else
+	log_pass "$name" "cache dir differs with the binary"
+fi
+rm -rf "$td"
+
 failed=0
 if [ -f "$STATUSFILE" ]; then
 	failed=$(grep -c FAIL "$STATUSFILE" 2>/dev/null) || failed=0
