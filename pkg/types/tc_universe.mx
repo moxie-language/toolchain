@@ -262,7 +262,16 @@ func addBasicStringMethod(b *Basic, strType *Basic) {
 // Placeholder constant values. These wrap go/constant values. In B4 they
 // become native Moxie values.
 type ConstBool struct{ V bool }
-type ConstInt struct{ V int64 }
+// ConstInt holds an untyped or typed integer constant in a 64-bit slot. Go
+// evaluates untyped constants exactly, without a width, so a value such as
+// `1<<64 - 1` is 2^64-1; V can only carry its low 64 bits (-1). Unsigned marks
+// a constant whose exact value is non-negative but at least 2^63, so folding
+// knows to divide, take a remainder and right-shift it in the unsigned domain
+// (maxUint64/10 is 1844674407370955161, not the signed -1/10 == 0).
+type ConstInt struct {
+	V        int64
+	Unsigned bool
+}
 type ConstFloat struct {
 	V   float64
 	Lit string
@@ -276,7 +285,35 @@ func untypedNil() (c ConstVal) { return &ConstNil{} }
 
 func (c *ConstBool) String() (s string) { if c.V { return "true" }; return "false" }
 func (c *ConstInt) String() (s string) {
-	n := c.V
+	// An unsigned constant's exact value is non-negative and does not fit the
+	// signed slot (math.MaxUint64 is V=-1, Unsigned=true). Printing the signed
+	// -1 made the .mxh round trip lose it: the reader saw "-1", stopped at the
+	// sign, and re-exported 0. Print the exact value instead.
+	if c.Unsigned && c.V < 0 {
+		return uint64Str(uint64(c.V))
+	}
+	return int64Str(c.V)
+}
+
+// uint64Str formats a non-negative 64-bit value in decimal.
+func uint64Str(u uint64) (s string) {
+	if u == 0 {
+		return "0"
+	}
+	buf := []byte{:0:20}
+	for u > 0 {
+		buf = mxutil.Ensure(buf, 1)
+		push(buf, byte('0'+u%10))
+		u /= 10
+	}
+	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
+
+// int64Str formats a signed value in decimal.
+func int64Str(n int64) (s string) {
 	if n == 0 {
 		return "0"
 	}

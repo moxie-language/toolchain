@@ -47,6 +47,54 @@ func structPtrFieldIdx(t string) (idx int32, ftype string) {
 	return 0, fields[0]
 }
 
+// emitShift materializes Go's shift rule for a shift whose operands are
+// already at the result width (resT). Go defines a shift count >= the operand
+// width as zero, and an arithmetic right shift by such a count as the sign bit
+// replicated. LLVM treats an out-of-range shl/ashr/lshr count as poison and the
+// x86 backend masks the count, so a runtime count of 64 became a shift by 0 -
+// strconv's maxVal := uint64(1)<<uint32(bitSize) computed 0 for bitSize 64 and
+// every digit tripped the range check. A constant count is folded here; a
+// dynamic count gets an explicit overshift select, with the signed-right case
+// capping the count at width-1 (ashr by width-1 is the required sign fill).
+func (e *irEmitter) emitShift(b *SSABinOp, reg, resT, lv, rv string) {
+	width := e.intBits(resT)
+	op := e.llvmBinOp(b.Op, b.X.SSAType())
+	if isNumericLiteral(rv) {
+		if n, ok := floatLitToInt(rv); ok {
+			if n >= int64(width) || n < 0 {
+				if op == "ashr" {
+					e.nextReg++
+					fill := "%sh" | irItoa(e.nextReg)
+					e.w("  ") ; e.w(fill) ; e.w(" = ashr ") ; e.w(resT) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(irItoa(width-1)) ; e.w("\n")
+					e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(resT) ; e.w(" ") ; e.w(fill) ; e.w(", 0\n")
+				} else {
+					e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(resT) ; e.w(" 0, 0\n")
+				}
+				e.setRegType(b, reg, resT)
+				return
+			}
+		}
+	}
+	if op == "ashr" {
+		e.nextReg++
+		over := "%sh" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(over) ; e.w(" = icmp uge ") ; e.w(resT) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(irItoa(width)) ; e.w("\n")
+		e.nextReg++
+		off := "%sh" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(off) ; e.w(" = select i1 ") ; e.w(over) ; e.w(", ") ; e.w(resT) ; e.w(" ") ; e.w(irItoa(width-1)) ; e.w(", ") ; e.w(resT) ; e.w(" ") ; e.w(rv) ; e.w("\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = ashr ") ; e.w(resT) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(off) ; e.w("\n")
+	} else {
+		e.nextReg++
+		over := "%sh" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(over) ; e.w(" = icmp uge ") ; e.w(resT) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(irItoa(width)) ; e.w("\n")
+		e.nextReg++
+		shifted := "%sh" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(shifted) ; e.w(" = ") ; e.w(op) ; e.w(" ") ; e.w(resT) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(rv) ; e.w("\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = select i1 ") ; e.w(over) ; e.w(", ") ; e.w(resT) ; e.w(" 0, ") ; e.w(resT) ; e.w(" ") ; e.w(shifted) ; e.w("\n")
+	}
+	e.setRegType(b, reg, resT)
+}
+
 func (e *irEmitter) emitBinOp(b *SSABinOp) {
 	if b.X == nil || b.X.SSAType() == nil {
 		recov := false
@@ -566,8 +614,7 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 					rv = e.coerceInt(rv, yt, resT, e.isUnsignedType(b.Y.SSAType()))
 				}
 			}
-			e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(e.llvmBinOp(b.Op, b.X.SSAType())) ; e.w(" ") ; e.w(resT) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(rv) ; e.w("\n")
-			e.setRegType(b, reg, resT)
+			e.emitShift(b, reg, resT, lv, rv)
 			return
 		}
 	}
@@ -762,7 +809,15 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 		rv = tmp
 		rt = "double"
 	}
-	op := e.llvmBinOp(b.Op, b.X.SSAType())
+	// Signedness follows the operation, not the left operand, when the left is
+	// an untyped constant: in `maxUint64/uint64(base)` the constant assumes the
+	// other operand's uint64, so the division is unsigned. Reading it from the
+	// untyped constant chose sdiv and turned maxUint64 into -1.
+	opSignedness := b.X.SSAType()
+	if isUntypedBasicType(opSignedness) && b.SSAType() != nil {
+		opSignedness = b.SSAType()
+	}
+	op := e.llvmBinOp(b.Op, opSignedness)
 	if op == "" {
 		e.w("  ; unsupported binop\n")
 		return

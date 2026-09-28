@@ -4560,6 +4560,14 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 			if _, isTP := tn.Typ.(*TypeParam); !isTP {
 				args2 := fb.buildArgs(e.ArgList)
 				if len(args2) == 1 && args2[0] != nil {
+					// An explicit conversion is a context for an untyped shift
+					// operand, exactly like an assignment: the `1` in
+					// `uint64(1 << uint32(bitSize-1))` assumes uint64, so the
+					// shift must emit at 64 bits or a 63-bit shift runs at 32
+					// and folds to 0 (strconv.ParseInt's cutoff).
+					if binS, okS := args2[0].(*SSABinOp); okS && binS.untypedShift {
+						retypeUntypedShift(binS, tn.Typ)
+					}
 					fb.checkConstConvert(args2[0], tn.Typ)
 					conv := &SSAConvert{X: args2[0]}
 					conv.typ = tn.Typ
@@ -4578,6 +4586,9 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 	if convType := fb.resolveTypeProbe(e.Fun); convType != nil {
 		args3 := fb.buildArgs(e.ArgList)
 		if len(args3) == 1 && args3[0] != nil {
+			if binS, okS := args3[0].(*SSABinOp); okS && binS.untypedShift {
+				retypeUntypedShift(binS, convType)
+			}
 			fb.checkConstConvert(args3[0], convType)
 			conv := &SSAConvert{X: args3[0]}
 			conv.typ = convType

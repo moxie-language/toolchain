@@ -3317,6 +3317,36 @@ func mxhCountWords(d string, from, limit int32) (n int32) {
 	return n
 }
 
+// mxhParseConstInt reads a decimal integer constant out of an .mxh line.
+// ssaParseInt64 stops at any non-digit, so a "-" prefix read as 0 (every
+// negative exported constant, e.g. math.MinInt32, came back 0), and a value
+// above int64 wrapped to a negative V without the unsigned mark that makes the
+// later divide/remainder folds unsigned (math.MaxUint64 re-exported as -1, so
+// uint64(math.MaxUint64) was 0). ConstInt.String now writes the exact unsigned
+// value, so the reader has to accept the full 64-bit range.
+func mxhParseConstInt(s string) (c ConstVal) {
+	neg := false
+	if len(s) > 0 && (s[0] == '-' || s[0] == '+') {
+		neg = s[0] == '-'
+		s = s[1:]
+	}
+	var u uint64
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if ch < '0' || ch > '9' {
+			break
+		}
+		u = u*10 + uint64(ch-'0')
+	}
+	if neg {
+		return &ConstInt{V: -int64(u)}
+	}
+	if u > 9223372036854775807 {
+		return &ConstInt{V: int64(u), Unsigned: true}
+	}
+	return &ConstInt{V: int64(u)}
+}
+
 // loadMxhData materialises a package's type graph on the root arena: the
 // registry keys and names derived from the mxh text must outlive any
 // compile/typecheck arena. loadMxhDataIn is the same work with the arena given
@@ -3602,8 +3632,7 @@ func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
 					}
 				}
 				if isNum {
-					n := ssaParseInt64(cval)
-					val = &ConstInt{V: n}
+					val = mxhParseConstInt(cval)
 				} else {
 					// A named string kind (`type Const string`) is not a
 					// *Basic: without unwrapping it a re-exported sentinel

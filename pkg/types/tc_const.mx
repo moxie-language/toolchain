@@ -321,6 +321,9 @@ func EvalUnaryLocal(op token.Operator, x ConstVal) (c ConstVal) {
 		}
 	case token.Xor:
 		if ci, ok := x.(*ConstInt); ok {
+			if ci.Unsigned {
+				return intConst(^uint64(ci.V))
+			}
 			return &ConstInt{V:^ci.V}
 		}
 	case token.Not:
@@ -331,10 +334,44 @@ func EvalUnaryLocal(op token.Operator, x ConstVal) (c ConstVal) {
 	return nil
 }
 
+// cvUnsigned reports whether an integer constant's exact value is
+// non-negative but too large for the signed 64-bit slot.
+func cvUnsigned(v ConstVal) (ok bool) {
+	if ci, matched := v.(*ConstInt); matched {
+		return ci.Unsigned
+	}
+	return false
+}
+
+// cvUint reads the low 64 bits of an integer constant without sign extension.
+func cvUint(v ConstVal) (u uint64) {
+	return uint64(cvInt(v))
+}
+
+// intConst rebuilds a folded integer constant, marking it unsigned when the
+// exact mathematical value stays non-negative but does not fit in an int64.
+// Shedding the mark when the value fits signed keeps genuinely negative
+// constants (a literal -1) on the signed path.
+func intConst(v uint64) (c ConstVal) {
+	if v > 1<<63-1 {
+		return &ConstInt{V:int64(v), Unsigned:true}
+	}
+	return &ConstInt{V:int64(v)}
+}
+
+// unsignedFold reports whether integer arithmetic between x and y must be done
+// in the unsigned domain: either side already carries a value >= 2^63.
+func unsignedFold(x ConstVal, y ConstVal) (ok bool) {
+	return cvUnsigned(x) || cvUnsigned(y)
+}
+
 func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 	switch op {
 	case token.Add:
 		if xi, ok := x.(*ConstInt); ok {
+			if unsignedFold(x, y) {
+				return intConst(uint64(xi.V) + cvUint(y))
+			}
 			return &ConstInt{V:xi.V + cvInt(y)}
 		}
 		if xf, ok := x.(*ConstFloat); ok {
@@ -345,6 +382,9 @@ func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 		}
 	case token.Sub:
 		if xi, ok := x.(*ConstInt); ok {
+			if unsignedFold(x, y) {
+				return intConst(uint64(xi.V) - cvUint(y))
+			}
 			return &ConstInt{V:xi.V - cvInt(y)}
 		}
 		if xf, ok := x.(*ConstFloat); ok {
@@ -352,6 +392,9 @@ func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 		}
 	case token.Mul:
 		if xi, ok := x.(*ConstInt); ok {
+			if unsignedFold(x, y) {
+				return intConst(uint64(xi.V) * cvUint(y))
+			}
 			return &ConstInt{V:xi.V * cvInt(y)}
 		}
 		if xf, ok := x.(*ConstFloat); ok {
@@ -359,6 +402,13 @@ func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 		}
 	case token.Div:
 		if xi, ok := x.(*ConstInt); ok {
+			if unsignedFold(x, y) {
+				du := cvUint(y)
+				if du == 0 {
+					return &ConstInt{V:0}
+				}
+				return intConst(uint64(xi.V) / du)
+			}
 			d := cvInt(y)
 			if d == 0 {
 				return &ConstInt{V:0}
@@ -374,6 +424,13 @@ func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 		}
 	case token.Rem:
 		if xi, ok := x.(*ConstInt); ok {
+			if unsignedFold(x, y) {
+				du := cvUint(y)
+				if du == 0 {
+					return &ConstInt{V:0}
+				}
+				return intConst(uint64(xi.V) % du)
+			}
 			d := cvInt(y)
 			if d == 0 {
 				return &ConstInt{V:0}
@@ -382,10 +439,16 @@ func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 		}
 	case token.And:
 		if xi, ok := x.(*ConstInt); ok {
+			if unsignedFold(x, y) {
+				return intConst(uint64(xi.V & cvInt(y)))
+			}
 			return &ConstInt{V:xi.V & cvInt(y)}
 		}
 	case token.Or:
 		if xi, ok := x.(*ConstInt); ok {
+			if unsignedFold(x, y) {
+				return intConst(uint64(xi.V | cvInt(y)))
+			}
 			return &ConstInt{V:xi.V | cvInt(y)}
 		}
 		if xs, ok := x.(*ConstStr); ok {
@@ -393,20 +456,50 @@ func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 		}
 	case token.Xor:
 		if xi, ok := x.(*ConstInt); ok {
+			if unsignedFold(x, y) {
+				return intConst(uint64(xi.V ^ cvInt(y)))
+			}
 			return &ConstInt{V:xi.V ^ cvInt(y)}
 		}
 	case token.Shl:
 		if xi, ok := x.(*ConstInt); ok {
 			shift := uint32(cvInt(y))
-			return &ConstInt{V:xi.V << shift}
+			var uv uint64
+			if shift < 64 {
+				uv = uint64(xi.V) << shift
+			}
+			if xi.Unsigned {
+				return &ConstInt{V:int64(uv), Unsigned:true}
+			}
+			if shift >= 64 && xi.V != 0 {
+				// The exact value is a positive multiple of 2^64, which is
+				// at least 2^63 even though the low bits are zero.
+				return &ConstInt{V:0, Unsigned:true}
+			}
+			return intConst(uv)
 		}
 	case token.Shr:
 		if xi, ok := x.(*ConstInt); ok {
 			shift := uint32(cvInt(y))
+			if xi.Unsigned {
+				if shift >= 64 {
+					return &ConstInt{V:0}
+				}
+				return intConst(uint64(xi.V) >> shift)
+			}
+			if shift >= 64 {
+				if xi.V < 0 {
+					return &ConstInt{V:-1}
+				}
+				return &ConstInt{V:0}
+			}
 			return &ConstInt{V:xi.V >> shift}
 		}
 	case token.AndNot:
 		if xi, ok := x.(*ConstInt); ok {
+			if unsignedFold(x, y) {
+				return intConst(uint64(xi.V &^ cvInt(y)))
+			}
 			return &ConstInt{V:xi.V &^ cvInt(y)}
 		}
 	case token.Eql:
@@ -439,6 +532,9 @@ func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 
 func constEqual(x ConstVal, y ConstVal) (eq bool) {
 	if xi, matched := x.(*ConstInt); matched {
+		if unsignedFold(x, y) {
+			return uint64(xi.V) == cvUint(y)
+		}
 		return xi.V == cvInt(y)
 	}
 	if xf, matched := x.(*ConstFloat); matched {
@@ -457,6 +553,9 @@ func constEqual(x ConstVal, y ConstVal) (eq bool) {
 
 func constLess(x ConstVal, y ConstVal) (lt bool) {
 	if xi, matched := x.(*ConstInt); matched {
+		if unsignedFold(x, y) {
+			return uint64(xi.V) < cvUint(y)
+		}
 		return xi.V < cvInt(y)
 	}
 	if xf, matched := x.(*ConstFloat); matched {
@@ -515,8 +614,16 @@ func MaskConstToBasic(v ConstVal, b *Basic) (c ConstVal) {
 		n = int64(uint16(n))
 	case Uint32:
 		n = int64(uint32(n))
-	case Int64, Uint64:
-		// 64-bit: int64 bit pattern is already exact.
+	case Int64:
+		// A signed 64-bit target is a genuinely signed value.
+		return &ConstInt{V:n}
+	case Uint64:
+		// 64-bit: int64 bit pattern is already exact. Keep the unsigned mark
+		// when the exact value is >= 2^63, so a later fold divides it unsigned.
+		if ci.Unsigned && n < 0 {
+			return &ConstInt{V:n, Unsigned:true}
+		}
+		return &ConstInt{V:n}
 	default:
 		return v
 	}
