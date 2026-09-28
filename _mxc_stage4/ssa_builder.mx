@@ -721,6 +721,22 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 		return
 	}
 	if d.Recv != nil {
+		// Receiver-qualified so T.M and U.M coexist, but two T.M do not:
+		// legacy reports "method T.M already declared in this block" and
+		// stage4 used to let the later body replace the earlier one.
+		recvName := ssaRecvTypeName(d.Recv)
+		if recvName != "" && d.Name.Value != "_" {
+			key := "method " | recvName | "." | d.Name.Value
+			if pb.declared == nil {
+				pb.declared = map[string]bool{}
+			}
+			if pb.declared[key] {
+				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+				push(cctx.compileErrors, key | " already declared")
+				return
+			}
+			pb.declared[key] = true
+		}
 		pb.registerMethod(d)
 		return
 	}

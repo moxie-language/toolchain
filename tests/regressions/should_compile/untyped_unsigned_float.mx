@@ -1,0 +1,42 @@
+// Regression: an untyped constant whose exact value is >= 2^63 carries the
+// unsigned mark and holds its low bits in the value slot. Reading that slot as
+// signed flipped the sign in three places - the constant fold, the emitter's
+// integer-to-float conversion, and a float comparison - so `10.0 >= 1 << 63`
+// was true, `math.Pow(2, 10)` answered +Inf (pow guards on that comparison)
+// and `uint64(math.MaxUint64) >> 32` was -1. Everything here is a typed
+// context, where the value must be exact.
+package main
+
+import (
+	"math"
+	"strconv"
+)
+
+func main() {
+	if 10.0 >= 1<<63 {
+		panic("10.0 >= 1<<63")
+	}
+	if !(10.0 < 1<<63) {
+		panic("10.0 < 1<<63")
+	}
+	var k uint32 = 32
+	if got := strconv.FormatUint(uint64(math.MaxUint64)>>k, 10); got != "4294967295" {
+		panic("uint64(math.MaxUint64)>>32 = " | got)
+	}
+	if got := strconv.FormatUint(math.MaxUint64/10, 10); got != "1844674407370955161" {
+		panic("math.MaxUint64/10 = " | got)
+	}
+	if got := strconv.FormatUint(uint64(0)-1, 10); got != "18446744073709551615" {
+		panic("uint64(0)-1 = " | got)
+	}
+	var a int64 = 0 - 9223372036854775807
+	if got := strconv.FormatInt(a, 10); got != "-9223372036854775807" {
+		panic("0 - 9223372036854775807 = " | got)
+	}
+	if got := math.Pow(2, 10); got != 1024 {
+		panic("math.Pow(2,10)")
+	}
+	if got := math.Sqrt(4); got != 2 {
+		panic("math.Sqrt(4)")
+	}
+}
