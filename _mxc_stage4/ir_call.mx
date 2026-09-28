@@ -511,6 +511,21 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 				}
 				return
 			}
+			// A channel reports the ring's occupancy, matching legacy's
+			// runtime.chanLen. Returning zero made every len(chan) wrong.
+			if _, isChan := u.(*TCChan); isChan {
+				rtC := e.llvmType(c.SSAType())
+				e.nextReg++
+				tmpC := "%cl" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(tmpC) ; e.w(" = call i32 @runtime.chanLen(ptr ") ; e.w(arg) ; e.w(", ptr null)\n")
+				if rtC != "i32" {
+					e.w("  ") ; e.w(reg) ; e.w(" = trunc i32 ") ; e.w(tmpC) ; e.w(" to ") ; e.w(rtC) ; e.w("\n")
+				} else {
+					e.w("  ") ; e.w(reg) ; e.w(" = add i32 ") ; e.w(tmpC) ; e.w(", 0\n")
+				}
+				e.declareRuntime("runtime.chanLen", "i32", "ptr")
+				return
+			}
 			// Not a slice, map, or string: return zero
 			rt4 := e.llvmType(c.SSAType())
 			if rt4 == "void" || rt4 == "" {
@@ -550,6 +565,21 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 				} else {
 					e.w("  ") ; e.w(reg) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(", 2\n")
 				}
+				return
+			}
+			// Capacity comes from the channel ring, matching legacy's
+			// runtime.chanCap; returning zero made every cap(chan) wrong.
+			if _, isChan := uc.(*TCChan); isChan {
+				rtC := e.llvmType(c.SSAType())
+				e.nextReg++
+				tmpC := "%cc" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(tmpC) ; e.w(" = call i32 @runtime.chanCap(ptr ") ; e.w(arg) ; e.w(", ptr null)\n")
+				if rtC != "i32" {
+					e.w("  ") ; e.w(reg) ; e.w(" = trunc i32 ") ; e.w(tmpC) ; e.w(" to ") ; e.w(rtC) ; e.w("\n")
+				} else {
+					e.w("  ") ; e.w(reg) ; e.w(" = add i32 ") ; e.w(tmpC) ; e.w(", 0\n")
+				}
+				e.declareRuntime("runtime.chanCap", "i32", "ptr")
 				return
 			}
 		}

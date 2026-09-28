@@ -216,6 +216,30 @@ for cc in "$MOXIE" "$LEGACY"; do
 	rm -rf "$td" "$gdir"
 done
 
+# 6f: len()/cap() on a channel report the ring in both compilers. stage4's
+# len/cap lowering had no channel arm and returned zero, while legacy called
+# runtime.chanLen/chanCap.
+for cc in "$MOXIE" "$LEGACY"; do
+	label="stage4"
+	if [ "$cc" = "$LEGACY" ]; then label="legacy"; fi
+	name="chanlen:$label"
+	td="$(tempdir "chanlen_$label")"; rm -rf "$td"; mkdir -p "$td"
+	cdir="$(fixture chanlen)"
+	rc=0
+	MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$cdir" >"$td/build.log" 2>&1 || rc=$?
+	if [ $rc -ne 0 ]; then
+		log_fail "$name" "build failed: $(tail -3 "$td/build.log" | tr '\n' ' ')"
+	else
+		out="$("$td/bin" 2>&1 || true)"
+		if [ "$(echo "$out" | head -1)" = "ok" ]; then
+			log_pass "$name" "channel len/cap report the ring"
+		else
+			log_fail "$name" "got '$(echo "$out" | head -1)', want 'ok'"
+		fi
+	fi
+	rm -rf "$td" "$cdir"
+done
+
 failed=0
 if [ -f "$STATUSFILE" ]; then
 	failed=$(grep -c FAIL "$STATUSFILE" 2>/dev/null) || failed=0
