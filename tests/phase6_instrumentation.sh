@@ -240,6 +240,37 @@ for cc in "$MOXIE" "$LEGACY"; do
 	rm -rf "$td" "$cdir"
 done
 
+# 6g: testing.T.Fatal/Skip abort the test body and the run continues with the
+# next test. This is the cross-frame recover path: stage4 never armed the defer
+# frame's JumpPC (call lines are emitted in fragments), and explicit
+# panic("const") went to the abort-only runtime._panicstr.
+for cc in "$MOXIE" "$LEGACY"; do
+	label="stage4"
+	if [ "$cc" = "$LEGACY" ]; then label="legacy"; fi
+	name="fatal:$label"
+	td="$(tempdir "fatal_$label")"; rm -rf "$td"; mkdir -p "$td"
+	fdir="$(fixture fatal)"
+	rc=0
+	MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$fdir" >"$td/build.log" 2>&1 || rc=$?
+	if [ $rc -ne 0 ]; then
+		log_fail "$name" "build failed: $(tail -3 "$td/build.log" | tr '\n' ' ')"
+	else
+		out="$("$td/bin" 2>&1 || true)"
+		msg=""
+		if echo "$out" | grep -q "unreachable after Fatal"; then msg="Fatal did not abort the test body"; fi
+		if [ -z "$msg" ] && echo "$out" | grep -q "unreachable after Skip"; then msg="Skip did not abort the test body"; fi
+		if [ -z "$msg" ] && ! echo "$out" | grep -q "second-ran"; then msg="the run did not continue to the next test"; fi
+		if [ -z "$msg" ] && ! echo "$out" | grep -q -e "--- FAIL: TestStopsAtFatal"; then msg="the Fatal test was not reported as failed"; fi
+		if [ -z "$msg" ] && ! echo "$out" | grep -q -e "--- SKIP: TestStopsAtSkip"; then msg="the Skip test was not reported as skipped"; fi
+		if [ -z "$msg" ]; then
+			log_pass "$name" "Fatal/Skip abort and the run continues"
+		else
+			log_fail "$name" "$msg"
+		fi
+	fi
+	rm -rf "$td" "$fdir"
+done
+
 failed=0
 if [ -f "$STATUSFILE" ]; then
 	failed=$(grep -c FAIL "$STATUSFILE" 2>/dev/null) || failed=0

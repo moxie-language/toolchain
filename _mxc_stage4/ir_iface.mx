@@ -875,11 +875,11 @@ func (e *irEmitter) emitExtInvokeCall(reg, retType, funcSym, recvLLVM, recv stri
 	casegs = mxutil.Ensure(casegs, 1)
 	push(casegs, "ptr null")
 	callArgs := joinStrs(commaSep(casegs))
-	e.w("  ")
+	prefix := "  "
 	if !isVoid {
-		e.w(reg) ; e.w(" = ")
+		prefix = prefix | reg | " = "
 	}
-	e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(funcSym) ; e.w("(")
+	e.w(prefix | "call " | retType | " ") ; e.w(funcSym) ; e.w("(")
 	e.w(callArgs)
 	e.w(")\n")
 }
@@ -1408,18 +1408,28 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 		if impl.extSymbol != "" {
 			e.emitExtInvokeCall(reg, retType, e.implFuncSym(impl), recvLLVM, recv, inv, isVoid, impl)
 		} else {
-			e.w("  ")
 			prepArgs := e.prepareInvokeArgs(inv, impl)
+			prefix := "  "
 			if !isVoid {
-				e.w(reg) ; e.w(" = ")
+				prefix = prefix | reg | " = "
 			}
-			e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(e.implFuncSym(impl)) ; e.w("(")
+			e.w(prefix | "call " | retType | " ") ; e.w(e.implFuncSym(impl)) ; e.w("(")
 			e.w(recvLLVM) ; e.w(" ") ; e.w(recv)
 			e.emitInvokeArgs(prepArgs)
 			e.w(", ptr null)\n")
 		}
 		return
 	}
+
+	// Arm the defer frame once before the dispatch. A checkpoint inside a case
+	// block would split it from its PHI incoming label at the merge, which LLVM
+	// rejects, so suppress the per-call checkpoint for the whole dispatch; the
+	// one checkpoint here covers every case call.
+	if e.deferCheckpointOn && e.deferFrame != "" {
+		e.emitCallCheckpoint()
+	}
+	prevNoCheckpoint := e.noCheckpoint
+	e.noCheckpoint = true
 
 	baseID := e.nextReg
 	mergeLabel := "invoke.merge" | irItoa(baseID)
@@ -1483,11 +1493,12 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 			e.emitExtInvokeCall(creg, retType, e.implFuncSym(impl), recvLLVM, recv, inv, isVoid, impl)
 		} else {
 			prepArgs := e.prepareInvokeArgs(inv, impl)
-			e.w("  ")
+			prepArgs := e.prepareInvokeArgs(inv, impl)
+			prefix := "  "
 			if !isVoid {
-				e.w(callRegs[i]) ; e.w(" = ")
+				prefix = prefix | callRegs[i] | " = "
 			}
-			e.w("call ") ; e.w(retType) ; e.w(" ") ; e.w(e.implFuncSym(impl)) ; e.w("(")
+			e.w(prefix | "call " | retType | " ") ; e.w(e.implFuncSym(impl)) ; e.w("(")
 			e.w(recvLLVM) ; e.w(" ") ; e.w(recv)
 			e.emitInvokeArgs(prepArgs)
 			e.w(", ptr null)\n")
@@ -1521,6 +1532,7 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 		}
 		e.w("\n")
 	}
+	e.noCheckpoint = prevNoCheckpoint
 }
 
 func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {

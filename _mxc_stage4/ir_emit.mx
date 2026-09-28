@@ -62,6 +62,7 @@ type irEmitter struct {
 	deferFrame string    // deferFrame alloca reg for functions with defers
 	deferLanding string  // landing pad label
 	deferCheckpointOn bool
+	noCheckpoint bool // suppress per-call checkpoints inside a lowered dispatch
 	blockDead  bool
 	currentEmitBlock *SSABasicBlock
 	sretType    string
@@ -136,7 +137,7 @@ func newIREmitter(pkg *SSAPackage, triple string, srcLen int32) (p *irEmitter) {
 }
 
 func (e *irEmitter) w(s string) {
-	if e.deferCheckpointOn && e.deferFrame != "" && (mxutil.HasPrefix(s, "  call ") || (len(s) >= 8 && mxutil.HasPrefix(s, "  %") && segHasCall(s))) {
+	if e.deferCheckpointOn && !e.noCheckpoint && e.deferFrame != "" && (mxutil.HasPrefix(s, "  call ") || (len(s) >= 8 && mxutil.HasPrefix(s, "  %") && segHasCall(s))) {
 		e.emitCallCheckpoint()
 	}
 	e.segs = mxutil.Ensure(e.segs, 1)
@@ -3451,14 +3452,6 @@ func (e *irEmitter) sliceIdxToIpt(val SSAValue, ipt string) (s string) {
 }
 
 func (e *irEmitter) emitPanic(p *SSAPanic) {
-	if c, ok := p.X.(*SSAConst); ok && e.isStringLike(c.SSAType()) {
-		sarg := e.operand(c)
-		sty := e.sliceType()
-		e.w("  call void @runtime._panicstr(") ; e.w(sty) ; e.w(" ") ; e.w(sarg) ; e.w(", ptr null)\n")
-		e.declareRuntime("runtime._panicstr", "void", sty)
-		e.w("  unreachable\n")
-		return
-	}
 	ity := e.sliceType()
 	arg := "zeroinitializer"
 	if p.X != nil && p.X.SSAType() != nil {

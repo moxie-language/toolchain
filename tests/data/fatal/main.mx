@@ -1,0 +1,35 @@
+// testing.T.Fatal/Skip must abort the rest of the test body, and the run must
+// continue with the next test.
+//
+// Two stage4 defects met here. First, stage4 never emitted the per-call defer
+// checkpoint: call lines are written in fragments ("  " then "call ..."), and
+// the w() sniffer keyed on a whole-line prefix, so every frame's JumpPC stayed
+// 0 and a moxie_longjmp jumped to 0. Second, explicit panic("const") was
+// lowered to the abort-only runtime._panicstr while legacy used the
+// recoverable runtime._panic. The recover handler is a plain function so the
+// deferred call needs no method thunk.
+package main
+
+import "testing"
+
+func TestStopsAtFatal(t *testing.T) {
+	t.Fatal("fatal worked")
+	t.Error("unreachable after Fatal")
+}
+
+func TestStillRuns(t *testing.T) {
+	println("second-ran")
+}
+
+func TestStopsAtSkip(t *testing.T) {
+	t.Skip("skip worked")
+	t.Error("unreachable after Skip")
+}
+
+func main() {
+	testing.Main([]testing.InternalTest{
+		{Name: "TestStopsAtFatal", F: TestStopsAtFatal},
+		{Name: "TestStillRuns", F: TestStillRuns},
+		{Name: "TestStopsAtSkip", F: TestStopsAtSkip},
+	})
+}

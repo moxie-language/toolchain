@@ -5,23 +5,70 @@ import (
 	"os"
 )
 
+// FailNow and SkipNow abort the current test by panicking, which testing.Main
+// recovers one sentinel per test. The rest of the test body therefore does not
+// run - Go's FailNow/SkipNow semantics - while the remaining tests still do.
+// A string is the only panic value Moxie carries, and a real message cannot
+// start with NUL, so the sentinels cannot collide with a user panic.
+const failNowSentinel = "\x00testing.FailNow"
+const skipNowSentinel = "\x00testing.SkipNow"
+
 type T struct {
 	name    string
 	failed  bool
 	skipped bool
 }
 
+// currentTest is the recover handler's handle on the running test. A method
+// receiver is a closure context and Moxie has no capture environment, so the
+// deferred handler is a plain function reading this package global instead.
+var currentTest *T
+
+func catchPanic() {
+	t := currentTest
+	if t == nil {
+		return
+	}
+	v := recover()
+	if v == skipNowSentinel {
+		t.skipped = true
+		return
+	}
+	if v == failNowSentinel {
+		// FailNow already set failed; the abort is the whole signal.
+		return
+	}
+	if v != "" {
+		fmt.Println("    panic:", v)
+		t.failed = true
+	}
+}
+
+// run executes one test under a defer frame so a FailNow/SkipNow panic stops
+// the test body instead of the whole run.
+func run(f func(*T), t *T) {
+	currentTest = t
+	defer catchPanic()
+	f(t)
+	currentTest = nil
+}
+
+func (t *T) FailNow() {
+	t.failed = true
+	panic(failNowSentinel)
+}
+
 func (t *T) Fatal(args ...fmt.Stringer) {
 	fmt.Print("    ")
 	fmt.Println(args...)
-	t.failed = true
+	t.FailNow()
 }
 
 func (t *T) Fatalf(format string, args ...fmt.Stringer) {
 	fmt.Print("    ")
 	fmt.Printf(format, args...)
 	fmt.Println()
-	t.failed = true
+	t.FailNow()
 }
 
 func (t *T) Error(args ...fmt.Stringer) {
@@ -56,10 +103,15 @@ func (t *T) Failed() bool {
 	return t.failed
 }
 
+func (t *T) SkipNow() {
+	t.skipped = true
+	panic(skipNowSentinel)
+}
+
 func (t *T) Skip(args ...fmt.Stringer) {
 	fmt.Print("    SKIP: ")
 	fmt.Println(args...)
-	t.skipped = true
+	t.SkipNow()
 }
 
 func (t *T) Helper() {}
@@ -81,7 +133,7 @@ func Main(tests []InternalTest) {
 	for _, test := range tests {
 		t := &T{name: test.Name}
 		fmt.Println("=== RUN  ", test.Name)
-		test.F(t)
+		run(test.F, t)
 		if t.skipped {
 			fmt.Println("--- SKIP:", test.Name)
 			skipped++
