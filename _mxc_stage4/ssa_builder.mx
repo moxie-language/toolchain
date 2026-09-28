@@ -1884,6 +1884,12 @@ func (fb *ssaFuncBuilder) coerceArg(val SSAValue, pt Type) (s SSAValue) {
 	if val == nil || val.SSAType() == nil || pt == nil {
 		return val
 	}
+	// An interface parameter boxes the concrete operand at the type it takes
+	// when no type is given, so an untyped constant that does not fit its
+	// default type must be rejected rather than truncated to its low bits.
+	if _, isIface := SafeUnderlying(pt).(*TCInterface); isIface {
+		fb.checkDefaultRepr(val, "argument to function")
+	}
 	sb, sIsBasic := SafeUnderlying(val.SSAType()).(*Basic)
 	db, dIsBasic := SafeUnderlying(pt).(*Basic)
 	if !sIsBasic || !dIsBasic || sb == db {
@@ -2185,6 +2191,60 @@ func intTypeBits(T Type) (n int32) {
 func isUntypedBasicType(T Type) (ok bool) {
 	b, isB := SafeUnderlying(T).(*Basic)
 	return isB && b.Info&IsUntyped != 0
+}
+
+// defaultReprType is the type an untyped constant takes when no type is given.
+// Moxie's int is 32 bits on every target (legacy's compiler.Sizes sets
+// intWidth = 32), so an untyped integer that does not fit int32 overflows.
+func defaultReprType(b *Basic) (t Type) {
+	if b == nil {
+		return nil
+	}
+	switch b.Kind {
+	case UntypedInt, UntypedRune:
+		return Typ[Int32]
+	case UntypedFloat:
+		return Typ[Float64]
+	case UntypedBool:
+		return Typ[Bool]
+	case UntypedString:
+		return Typ[TCString]
+	}
+	return nil
+}
+
+// checkDefaultRepr reports an untyped constant that is used without a type and
+// does not fit the type it then takes. go/types reports "overflows int" for
+// these; stage4 used to truncate the value to its low 32 bits, so
+// `0 - 9223372036854775807` became 1 and `math.MaxUint64 / 10` printed its low
+// half. Same user-code gate as checkAssignable: the stdlib carries latent
+// overflow errors that go/types reports but the legacy loader never surfaces.
+func (fb *ssaFuncBuilder) checkDefaultRepr(val SSAValue, what string) {
+	if val == nil || val.SSAType() == nil {
+		return
+	}
+	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
+		return
+	}
+	if !isUserPackagePath(restrictPath(fb.fn.Pkg.Pkg.Path)) {
+		return
+	}
+	b, isB := SafeUnderlying(val.SSAType()).(*Basic)
+	if !isB || b.Info&IsUntyped == 0 {
+		return
+	}
+	cv, explicitNeg := constValueOf(val)
+	if cv == nil {
+		return
+	}
+	dt := defaultReprType(b)
+	if dt == nil {
+		return
+	}
+	if msg := constReprError(cv, dt); msg != "" && !constReprSkipUnsigned(dt, cv, explicitNeg) {
+		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+		push(cctx.compileErrors, "cannot use " | cv.String() | " as " | dt.String() | " value in " | what | " (" | msg | ")")
+	}
 }
 
 // retypeUntypedShift gives a shift, and the shifts feeding it, the context type
@@ -2545,6 +2605,9 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *syntax.AssignStmt) {
 				initVal = rhs
 			}
 		}
+		if typ != nil && isUntypedBasicType(typ) {
+			fb.checkDefaultRepr(initVal, "assignment to " | name.Value)
+		}
 		fb.shortVarStore(name, initVal, typ)
 	}
 }
@@ -2572,6 +2635,9 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			// 'var b = pkgs.New()' left b untyped, so a later b.Method()
 			// failed to resolve.
 			typ = initVal.SSAType()
+			if isUntypedBasicType(typ) {
+				fb.checkDefaultRepr(initVal, "variable declaration")
+			}
 		}
 		for _, name := range dd.NameList {
 			if name.Value == "_" {

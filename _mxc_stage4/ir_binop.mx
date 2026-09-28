@@ -95,6 +95,26 @@ func (e *irEmitter) emitShift(b *SSABinOp, reg, resT, lv, rv string) {
 	e.setRegType(b, reg, resT)
 }
 
+// widerIntType returns the wider of an instruction's two integer operands,
+// falling back to def. An untyped constant is materialised at the narrowest
+// type that holds its exact value - i64 for a value >= 2^63, which carries the
+// unsigned mark - and Go evaluates an operation with an untyped operand at that
+// width rather than at the untyped 32-bit default.
+func (e *irEmitter) widerIntType(b *SSABinOp, def string) (w string) {
+	w = def
+	if b.X != nil && b.X.SSAType() != nil {
+		if at := e.resolvedType(b.X, e.llvmType(b.X.SSAType())); e.intBits(at) > e.intBits(w) {
+			w = at
+		}
+	}
+	if b.Y != nil && b.Y.SSAType() != nil {
+		if at := e.resolvedType(b.Y, e.llvmType(b.Y.SSAType())); e.intBits(at) > e.intBits(w) {
+			w = at
+		}
+	}
+	return w
+}
+
 func (e *irEmitter) emitBinOp(b *SSABinOp) {
 	if b.X == nil || b.X.SSAType() == nil {
 		recov := false
@@ -605,8 +625,14 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 	// mantbits 52, became an i32 shift of 52).
 	if b.Op == OpShl || b.Op == OpShr {
 		resT := e.llvmType(b.SSAType())
+		// An untyped operand takes the width its value needs, and Go evaluates
+		// the shift there: math.MaxUint64 >> uint32(32) is a 64-bit shift of a
+		// 64-bit constant, not an i32 shift of its low bits (which answered -1).
+		if isUntypedBasicType(b.SSAType()) {
+			resT = e.widerIntType(b, resT)
+		}
 		if e.intBits(resT) > 0 {
-			if xt := e.llvmType(b.X.SSAType()); xt != resT && e.intBits(xt) > 0 {
+			if xt := e.resolvedType(b.X, e.llvmType(b.X.SSAType())); xt != resT && e.intBits(xt) > 0 {
 				lv = e.coerceInt(lv, xt, resT, e.isUnsignedType(b.X.SSAType()))
 			}
 			if b.Y != nil && b.Y.SSAType() != nil {
@@ -653,6 +679,12 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 	if lt != rt && e.intBits(lt) > 0 && e.intBits(rt) > 0 {
 		isCmp := b.Op == OpEql || b.Op == OpNeq || b.Op == OpLss || b.Op == OpGtr || b.Op == OpLeq || b.Op == OpGeq
 		resType := e.llvmType(b.SSAType())
+		// Untyped arithmetic runs at the width its operands need, not at the
+		// untyped 32-bit default: `0 - 9223372036854775807` coerced the literal
+		// to i32 (0xFFFFFFFF, i.e. -1) and answered 1.
+		if isUntypedBasicType(b.SSAType()) {
+			resType = e.widerIntType(b, resType)
+		}
 		if !isCmp && e.intBits(resType) > 0 {
 			if lt != resType {
 				lv = e.coerceInt(lv, lt, resType, e.isUnsignedType(b.X.SSAType()))
