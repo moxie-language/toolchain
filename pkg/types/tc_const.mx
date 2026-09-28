@@ -17,8 +17,12 @@ import (
 func EvalBasicLitLocal(e *syntax.BasicLit) (c ConstVal) {
 	switch e.Kind {
 	case token.IntLit:
-		n := ParseIntLocal(e.Value)
-		return &ConstInt{V:n}
+		// A literal whose exact value is >= 2^63 (0xFFFFFFFFFFFFFFFF, 1<<63's
+		// decimal spelling) keeps its low bits in V, so it must carry the
+		// unsigned mark like any other folded constant: without it a float
+		// comparison against `9223372036854775808` used the signed text and
+		// was true for every value.
+		return intConst(uint64(ParseIntLocal(e.Value)))
 	case token.FloatLit:
 		f := parseFloatLocal(e.Value)
 		return &ConstFloat{V:f, Lit:e.Value}
@@ -316,12 +320,12 @@ func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 	// it folded 2^1023 * 2 and overflowed to +Inf, taking Pow, the float64
 	// Stringer and everything else that reads MaxFloat64 with it.
 	if _, xFloat := x.(*ConstFloat); xFloat {
-		if yi, yInt := y.(*ConstInt); yInt {
-			y = &ConstFloat{V: float64(yi.V)}
+		if _, yInt := y.(*ConstInt); yInt {
+			y = &ConstFloat{V: cvFloat(y)}
 		}
 	} else if _, yFloat := y.(*ConstFloat); yFloat {
-		if xi, xInt := x.(*ConstInt); xInt {
-			x = &ConstFloat{V: float64(xi.V)}
+		if _, xInt := x.(*ConstInt); xInt {
+			x = &ConstFloat{V: cvFloat(x)}
 		}
 	}
 	switch op {
@@ -640,6 +644,12 @@ func cvFloat(v ConstVal) (f float64) {
 		return cf.V
 	}
 	if ci, ok := v.(*ConstInt); ok {
+		// An unsigned-marked constant's exact value is >= 2^63 and V holds its
+		// low bits, so the signed conversion flips it: `10.0 >= 1<<63` folded
+		// to `10.0 >= -9223372036854775808.0` and was true.
+		if ci.Unsigned {
+			return float64(uint64(ci.V))
+		}
 		return float64(ci.V)
 	}
 	return 0

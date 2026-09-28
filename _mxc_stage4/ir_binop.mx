@@ -100,6 +100,21 @@ func (e *irEmitter) emitShift(b *SSABinOp, reg, resT, lv, rv string) {
 // type that holds its exact value - i64 for a value >= 2^63, which carries the
 // unsigned mark - and Go evaluates an operation with an untyped operand at that
 // width rather than at the untyped 32-bit default.
+// intConstToFloat renders an integer constant operand as an LLVM double
+// literal. A constant whose exact value is >= 2^63 carries the unsigned mark
+// and V holds its low bits, so the signed decimal text flips the sign:
+// `yi >= 1 << 63` compiled to `yi >= -9223372036854775808.0`, true for every
+// value, and math.Pow took its overflow branch for every integer exponent.
+// ConstInt.String prints the exact unsigned decimal for those.
+func intConstToFloat(v SSAValue, text string) (s string) {
+	if k, ok := v.(*SSAConst); ok {
+		if ci, ok2 := k.val.(*ConstInt); ok2 && ci.Unsigned {
+			return ensureFloatLit(ci.String())
+		}
+	}
+	return ensureFloatLit(text)
+}
+
 func (e *irEmitter) widerIntType(b *SSABinOp, def string) (w string) {
 	w = def
 	if b.X != nil && b.X.SSAType() != nil {
@@ -782,7 +797,7 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 			}
 			if !demoted {
 				if isConstOperand(lv) {
-					lv = ensureFloatLit(lv)
+					lv = intConstToFloat(b.X, lv)
 				} else {
 					lv = e.intToFloat(lv, lt, rt)
 				}
@@ -790,7 +805,7 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 			}
 		} else {
 			if isConstOperand(lv) {
-				lv = ensureFloatLit(lv)
+				lv = intConstToFloat(b.X, lv)
 			} else {
 				lv = e.intToFloat(lv, lt, rt)
 			}
@@ -813,7 +828,7 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 			}
 			if isLF {
 				if isConstOperand(rv) {
-					rv = ensureFloatLit(rv)
+					rv = intConstToFloat(b.Y, rv)
 				} else {
 					rv = e.intToFloat(rv, rt, lt)
 				}
@@ -821,7 +836,7 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 			}
 		} else {
 			if isConstOperand(rv) {
-				rv = ensureFloatLit(rv)
+				rv = intConstToFloat(b.Y, rv)
 			} else {
 				rv = e.intToFloat(rv, rt, lt)
 			}
