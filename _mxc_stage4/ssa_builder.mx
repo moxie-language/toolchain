@@ -1499,7 +1499,44 @@ func (fb *ssaFuncBuilder) emitAlloc(typ Type, pos int32) (s *SSAAlloc) {
 }
 
 func (fb *ssaFuncBuilder) emitStore(addr SSAValue, val SSAValue) {
+	val = fb.coerceStored(addr, val)
 	fb.emit(&SSAStore{Addr: addr, Val: val})
+}
+
+// coerceStored converts an untyped numeric constant to the type of the memory
+// it is stored into, and boxes a concrete value for an interface target. The
+// emitter prints a value at the LLVM type it was built as, so `var a float64 =
+// 4` stored the integer bit pattern 4 into a double slot: a printed as
+// 2e-323, math.Float64bits(a) returned 4, and every math function that starts
+// from Float64bits (Sqrt, Pow, Hypot, the portable Ceil/Floor/Trunc) answered
+// 0 because the constant was never converted.
+func (fb *ssaFuncBuilder) coerceStored(addr SSAValue, val SSAValue) (s SSAValue) {
+	if addr == nil || val == nil || val.SSAType() == nil || addr.SSAType() == nil {
+		return val
+	}
+	p, isPtr := SafeUnderlying(addr.SSAType()).(*Pointer)
+	if !isPtr || p.Base == nil {
+		return val
+	}
+	val = fb.coerceToInterface(val, p.Base)
+	if val.SSAType() == nil {
+		return val
+	}
+	sb, sIsBasic := SafeUnderlying(val.SSAType()).(*Basic)
+	db, dIsBasic := SafeUnderlying(p.Base).(*Basic)
+	if !sIsBasic || !dIsBasic || sb == db {
+		return val
+	}
+	// Only an untyped constant is converted here; a typed value of a different
+	// numeric type is rejected by checkAssignable, never silently converted.
+	if sb.Info&IsUntyped == 0 || sb.Info&IsNumeric == 0 || db.Info&IsNumeric == 0 {
+		return val
+	}
+	c := &SSAConvert{X: val}
+	c.typ = p.Base
+	c.name = fb.nextName()
+	fb.emit(c)
+	return c
 }
 
 func (fb *ssaFuncBuilder) emitLoad(addr SSAValue, typ Type) (s SSAValue) {
@@ -1658,6 +1695,12 @@ func (fb *ssaFuncBuilder) buildAssign(s *syntax.AssignStmt) {
 		if lv == nil || rv == nil {
 			return
 		}
+		// The left operand of a shift inside a compound assignment assumes the
+		// assignment target's type, the same context a plain assignment gives
+		// it. Without it `x &^= 1<<(64-12-e) - 1` folded at the untyped i32
+		// default, so the mask was 0xFFFFFFFF and math.Modf cleared 32 bits
+		// of the mantissa instead of 51 (Modf(2.1) returned 2.0999984).
+		retypeUntypedShift(rv, lv.SSAType())
 		op := compoundOp(s.Op)
 		bin := &SSABinOp{Op: op, X: lv, Y: rv}
 		bin.typ = lv.SSAType()
@@ -1827,7 +1870,33 @@ func (fb *ssaFuncBuilder) checkCallArgs(args []SSAValue, sig *Signature, hasDots
 			continue
 		}
 		fb.checkAssignable(args[i], pt, "argument to function")
+		args[i] = fb.coerceArg(args[i], pt)
 	}
+}
+
+// coerceArg converts an untyped numeric constant argument to the parameter's
+// type. The emitter passes an argument at the LLVM type it was built as and the
+// ABI does not convert, so `math.Sqrt(4)` handed the *integer* 4 to a double
+// parameter: the callee read 0 from its vector register and every function that
+// starts from its argument answered f(0) - Sqrt and Pow gave 0, Exp gave 1,
+// while `math.Sqrt(4.0)` (a float literal) was correct.
+func (fb *ssaFuncBuilder) coerceArg(val SSAValue, pt Type) (s SSAValue) {
+	if val == nil || val.SSAType() == nil || pt == nil {
+		return val
+	}
+	sb, sIsBasic := SafeUnderlying(val.SSAType()).(*Basic)
+	db, dIsBasic := SafeUnderlying(pt).(*Basic)
+	if !sIsBasic || !dIsBasic || sb == db {
+		return val
+	}
+	if sb.Info&IsUntyped == 0 || sb.Info&IsNumeric == 0 || db.Info&IsNumeric == 0 {
+		return val
+	}
+	c := &SSAConvert{X: val}
+	c.typ = pt
+	c.name = fb.nextName()
+	fb.emit(c)
+	return c
 }
 
 // errArgs records a call-arity error for user packages only, matching the gate

@@ -1,6 +1,8 @@
 package types
 
 import (
+	"strconv"
+
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"git.smesh.lol/moxie/pkg/syntax"
 	"git.smesh.lol/moxie/pkg/token"
@@ -85,77 +87,18 @@ func ParseIntLocal(s string) (n int64) {
 	return n
 }
 
+// parseFloatLocal reads a floating-point literal. The hand-rolled decimal
+// scan that used to live here had no hex-float support (0x1p1023 parsed as 0)
+// and built its decimal exponent by repeated multiplication (imprecise for
+// negative exponents and overflowing for large ones), so math.MaxFloat64
+// folded to 0 and every constant derived from it was wrong. strconv's parser
+// is correctly rounded and covers every Go literal form.
 func parseFloatLocal(s string) (f float64) {
-	if len(s) == 0 {
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
 		return 0.0
 	}
-	neg := false
-	i := 0
-	if s[0] == '-' {
-		neg = true
-		i = 1
-	} else if s[0] == '+' {
-		i = 1
-	}
-	var intPart float64
-	for ; i < len(s); i++ {
-		ch := s[i]
-		if ch == '_' {
-			continue
-		}
-		if ch < '0' || ch > '9' {
-			break
-		}
-		intPart = intPart*10.0 + float64(ch-'0')
-	}
-	var fracPart float64
-	if i < len(s) && s[i] == '.' {
-		i++
-		divisor := 10.0
-		for ; i < len(s); i++ {
-			ch := s[i]
-			if ch == '_' {
-				continue
-			}
-			if ch < '0' || ch > '9' {
-				break
-			}
-			fracPart = fracPart + float64(ch-'0')/divisor
-			divisor = divisor * 10.0
-		}
-	}
-	result := intPart + fracPart
-	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
-		i++
-		expNeg := false
-		if i < len(s) && s[i] == '-' {
-			expNeg = true
-			i++
-		} else if i < len(s) && s[i] == '+' {
-			i++
-		}
-		var exp int32
-		for ; i < len(s); i++ {
-			ch := s[i]
-			if ch < '0' || ch > '9' {
-				break
-			}
-			exp = exp*10 + int32(ch-'0')
-		}
-		mul := 1.0
-		for j := 0; j < exp; j++ {
-			mul = mul * 10.0
-		}
-		if expNeg {
-			result = result / mul
-		} else {
-			result = result * mul
-		}
-	}
-	if neg {
-		return -result
-	}
-	return result
+	return v
 }
 
 func interpStringLocal(s string) (sv string) {
@@ -366,6 +309,21 @@ func unsignedFold(x ConstVal, y ConstVal) (ok bool) {
 }
 
 func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
+	// Untyped constant arithmetic mixes kinds: an integer operand against a
+	// float operand is a float operation. Every branch below tests the left
+	// operand first, so `1 - 0x1p-52` ran in integer space (cvInt of the float
+	// is 0) and folded to 1; math.MaxFloat64 is 0x1p1023*(1+(1-0x1p-52)), so
+	// it folded 2^1023 * 2 and overflowed to +Inf, taking Pow, the float64
+	// Stringer and everything else that reads MaxFloat64 with it.
+	if _, xFloat := x.(*ConstFloat); xFloat {
+		if yi, yInt := y.(*ConstInt); yInt {
+			y = &ConstFloat{V: float64(yi.V)}
+		}
+	} else if _, yFloat := y.(*ConstFloat); yFloat {
+		if xi, xInt := x.(*ConstInt); xInt {
+			x = &ConstFloat{V: float64(xi.V)}
+		}
+	}
 	switch op {
 	case token.Add:
 		if xi, ok := x.(*ConstInt); ok {

@@ -1,6 +1,9 @@
 package types
 
 import (
+	"math"
+	"strconv"
+
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"runtime"
 )
@@ -340,20 +343,91 @@ func int64Str(n int64) (s string) {
 	return string(buf)
 }
 func (c *ConstFloat) String() (s string) {
+	// The .mxh reader parses this text with strconv.ParseFloat, so it must be
+	// a Go literal: the original Lit verbatim, or the shortest round-tripping
+	// form for a constant folded from an expression. Returning "0.0" for
+	// every folded value wrote `const MaxFloat64 untyped_float 0.0`, so an
+	// importer read the largest float64 as zero. IR text is a separate
+	// concern - the emitter normalizes Lit itself (NormalizeLLVMFloat).
 	if c.Lit != "" {
-		return NormalizeLLVMFloat(c.Lit)
+		return c.Lit
 	}
 	if c.V == 0.0 {
 		return "0.0"
 	}
-	return "0.0"
+	return string(strconv.FormatFloat(c.V, 'g', -1, 64))
 }
 func (c *ConstStr) String() (s string) { return c.S }
 func (c *ConstNil) String() (s string) { return "nil" }
 
+// llvmFloatBits renders a float64 as the hexadecimal bit pattern LLVM's IR
+// parser accepts as a double literal.
+func llvmFloatBits(f float64) (sv string) {
+	digits := "0123456789abcdef"
+	bits := math.Float64bits(f)
+	buf := []byte{:16}
+	for i := int32(15); i >= 0; i-- {
+		buf[i] = digits[bits&0xF]
+		bits >>= 4
+	}
+	return "0x" | string(buf)
+}
+
+// llvmSpecialFloat renders an infinity or NaN as the hexadecimal bits LLVM's
+// IR parser accepts. The textual spellings strconv produces ("+Inf", "NaN")
+// are not float literals to clang: `bitcast double +Inf.0 to i64` fails with
+// "expected value token", and appending ".0" to them produced exactly that.
+func llvmSpecialFloat(neg bool) (sv string) {
+	if neg {
+		return llvmFloatBits(math.Inf(-1))
+	}
+	return llvmFloatBits(math.Inf(1))
+}
+
+func isSpecialFloatText(s string) (neg bool, ok bool) {
+	i := 0
+	neg = false
+	if len(s) > 0 && (s[0] == '-' || s[0] == '+') {
+		neg = s[0] == '-'
+		i = 1
+	}
+	rest := s[i:]
+	if len(rest) == 0 {
+		return false, false
+	}
+	if rest[0] == 'I' || rest[0] == 'i' {
+		// Inf, Infinity, inf
+		return neg, true
+	}
+	if rest[0] == 'N' || rest[0] == 'n' {
+		// NaN, nan
+		return false, true
+	}
+	return false, false
+}
+
 func NormalizeLLVMFloat(s string) (sv string) {
 	if len(s) == 0 {
 		return "0.0"
+	}
+	if neg, special := isSpecialFloatText(s); special {
+		return llvmSpecialFloat(neg)
+	}
+	// A hexadecimal float literal (0x1p1023) is a C99 spelling; LLVM wants the
+	// bit pattern (0xK...K), and it has no '.'/'e' for the normalizer below, so
+	// appending ".0" produced "0x1p1023.0", which clang rejects ("expected ','
+	// after store operand"). math.MaxFloat64 is built from 0x1p1023, so parse
+	// it and hand the emitter the bit pattern it accepts.
+	hexStart := 0
+	if s[0] == '-' || s[0] == '+' {
+		hexStart = 1
+	}
+	if hexStart+1 < len(s) && s[hexStart] == '0' && (s[hexStart+1] == 'x' || s[hexStart+1] == 'X') {
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return "0.0"
+		}
+		return llvmFloatBits(f)
 	}
 	start := 0
 	if s[0] == '-' || s[0] == '+' {

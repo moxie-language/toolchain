@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"runtime"
+	"strconv"
 	"unsafe"
 
 	"git.smesh.lol/moxie/pkg/mxutil"
@@ -2808,6 +2809,23 @@ func typeDescWrite(b *mxhBuf, t Type) {
 			b.w("string")
 		case UnsafePointer:
 			b.w("ptr")
+		// Untyped kinds keep their own token. Writing them as the default
+		// int32 lost the kind entirely: a re-exported `const MaxFloat64 =
+		// 0x1p1023 * (...)` came back as an int32 const whose float text
+		// parsed to 0, so math.IsInf read `2.1 > MaxFloat64` as true and
+		// Ceil/Floor/Trunc/Sqrt returned their argument unchanged.
+		case UntypedBool:
+			b.w("untyped_bool")
+		case UntypedInt:
+			b.w("untyped_int")
+		case UntypedRune:
+			b.w("untyped_rune")
+		case UntypedFloat:
+			b.w("untyped_float")
+		case UntypedString:
+			b.w("untyped_string")
+		case UntypedNil:
+			b.w("untyped_nil")
 		default:
 			b.w("int32")
 		}
@@ -3631,18 +3649,30 @@ func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
 						break
 					}
 				}
-				if isNum {
+				// The kind decides how the value text is read. A float literal
+				// has a '.' or an exponent (math.Pi, math.MaxFloat64), so the
+				// integer scan above marks it non-numeric and it used to fall
+				// through to ConstInt{0}: every re-exported float constant was
+				// zero, so math.IsInf saw 2.1 > MaxFloat64 as true and
+				// Ceil/Floor/Trunc/Sqrt answered their argument unchanged.
+				// A named string kind (`type Const string`) is not a *Basic:
+				// without unwrapping it a re-exported sentinel like
+				// fs.ErrNotExist was read back as ConstInt{0}, so every
+				// errors.Const comparison against it failed.
+				b, isb := SafeUnderlying(typ).(*Basic)
+				if isb && (b.Kind == TCString || b.Kind == UntypedString) {
+					val = &ConstStr{S: cval}
+				} else if isb && (b.Kind == Float32 || b.Kind == Float64 || b.Kind == UntypedFloat) {
+					f, ferr := strconv.ParseFloat(cval, 64)
+					if ferr == nil {
+						val = &ConstFloat{V: f, Lit: cval}
+					} else {
+						val = &ConstFloat{}
+					}
+				} else if isNum {
 					val = mxhParseConstInt(cval)
 				} else {
-					// A named string kind (`type Const string`) is not a
-					// *Basic: without unwrapping it a re-exported sentinel
-					// like fs.ErrNotExist was read back as ConstInt{0}, so
-					// every errors.Const comparison against it failed.
-					if b, isb := SafeUnderlying(typ).(*Basic); isb && (b.Kind == TCString || b.Kind == UntypedString) {
-						val = &ConstStr{S: cval}
-					} else {
-						val = &ConstInt{V: 0}
-					}
+					val = &ConstInt{V: 0}
 				}
 			} else {
 				val = &ConstInt{V: 0}
