@@ -2640,7 +2640,23 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 		if typ == nil && dd.Type != nil {
 			typ = fb.resolveType(dd.Type)
 		}
-		initVal := fb.buildExpr(dd.Values)
+		// `var a, b T = x, y` gives each name its own value. Building the list
+		// once and storing it to every name handed the first value to both (and
+		// a values list that built to nil left them all zero):
+		// `var pow, sq uint32 = 1, PrimeRK` in bytealg.HashStrBytes left the
+		// rolling-hash factor at 0, so IndexRabinKarp answered -1 for needles
+		// that are present.
+		var initVal SSAValue
+		var multiVals []SSAValue
+		if vl, isList := dd.Values.(*syntax.ListExpr); isList && len(dd.NameList) > 1 && len(vl.ElemList) == len(dd.NameList) {
+			multiVals = []SSAValue{:len(vl.ElemList)}
+			for mi := int32(0); mi < len(vl.ElemList); mi++ {
+				multiVals[mi] = fb.buildExpr(vl.ElemList[mi])
+			}
+			initVal = multiVals[0]
+		} else {
+			initVal = fb.buildExpr(dd.Values)
+		}
 		if dd.Type != nil && initVal != nil && typ != nil {
 			fb.checkAssignable(initVal, typ, "variable declaration")
 		}
@@ -2655,7 +2671,7 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 				fb.checkDefaultRepr(initVal, "variable declaration")
 			}
 		}
-		for _, name := range dd.NameList {
+		for ni, name := range dd.NameList {
 			if name.Value == "_" {
 				continue
 			}
@@ -2689,9 +2705,16 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			fb.varScope[obj] = fb.scopeID
 			fb.fn.Locals = mxutil.Ensure(fb.fn.Locals, 1)
 			push(fb.fn.Locals, alloc)
-			if initVal != nil {
-				initVal = fb.coerceToInterface(initVal, ObjectType(obj))
-				fb.emitStore(alloc, initVal)
+			v := initVal
+			if multiVals != nil && ni < len(multiVals) {
+				v = multiVals[ni]
+				if v != nil {
+					fb.checkAssignable(v, ObjectType(obj), "variable declaration")
+				}
+			}
+			if v != nil {
+				v = fb.coerceToInterface(v, ObjectType(obj))
+				fb.emitStore(alloc, v)
 			} else {
 				fb.emitStore(alloc, &SSAConst{typ: ObjectType(obj), val: nil})
 			}

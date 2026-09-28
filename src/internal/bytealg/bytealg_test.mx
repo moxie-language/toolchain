@@ -1,0 +1,100 @@
+package bytealg
+
+import "testing"
+
+// manualIndex is an independent scan, so the search functions are compared
+// against something that shares no code with them.
+func manualIndexRabinKarp(s, sep []byte) (r int32) {
+	if len(sep) == 0 {
+		return 0
+	}
+	for i := int32(0); i+len(sep) <= len(s); i++ {
+		match := true
+		for j := int32(0); j < len(sep); j++ {
+			if s[i+j] != sep[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return i
+		}
+	}
+	return -1
+}
+
+func manualLastIndexRabinKarp(s, sep []byte) (r int32) {
+	r = -1
+	if len(sep) == 0 {
+		return int32(len(s))
+	}
+	for i := int32(0); i+len(sep) <= len(s); i++ {
+		match := true
+		for j := int32(0); j < len(sep); j++ {
+			if s[i+j] != sep[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			r = i
+		}
+	}
+	return
+}
+
+// TestRabinKarpMatchesBrute sweeps every offset of a haystack for a needle
+// that is present and for one that is absent. Index's brute path hands over to
+// bytealg.IndexRabinKarp once it has failed enough times
+// (`fails >= 4+i>>4`), and the audit recorded a miss on that path: a manual
+// scan found `"buckets":[1,` at offset 70 of a 132-byte buffer while
+// bytes.Index answered -1. Both directions of the handover are checked here.
+func TestRabinsKarpMatchesBrute(t *testing.T) {
+	sep := []byte("\"buckets\":[1,")
+	bad := int32(0)
+	for fill := byte('a'); fill <= byte('d'); fill++ {
+		for size := int32(0); size <= 180; size++ {
+			b := []byte{:size}
+			for i := int32(0); i < size; i++ {
+				b[i] = fill
+			}
+			for off := int32(0); off+int32(len(sep)) <= size; off++ {
+				// The needle is present at off.
+				for j := int32(0); j < int32(len(sep)); j++ {
+					b[off+j] = sep[j]
+				}
+				if w, g := manualIndexRabinKarp(b, sep), IndexRabinKarp(b, sep); w != g {
+					bad++
+					if bad < 5 {
+						t.Errorf("Index present size=%d off=%d: manual %d, Index %d", size, off, w, g)
+					}
+				}
+				if w, g := manualLastIndexRabinKarp(b, sep), LastIndexRabinKarp(b, sep); w != g {
+					bad++
+					if bad < 5 {
+						t.Errorf("LastIndex present size=%d off=%d: manual %d, LastIndex %d", size, off, w, g)
+					}
+				}
+				// The same haystack with the needle's last byte broken is a miss.
+				b[off+int32(len(sep))-1] = fill
+				if w, g := manualIndexRabinKarp(b, sep), IndexRabinKarp(b, sep); w != g {
+					bad++
+					if bad < 5 {
+						t.Errorf("Index absent size=%d off=%d: manual %d, Index %d", size, off, w, g)
+					}
+				}
+				if w, g := manualLastIndexRabinKarp(b, sep), LastIndexRabinKarp(b, sep); w != g {
+					bad++
+					if bad < 5 {
+						t.Errorf("LastIndex absent size=%d off=%d: manual %d, LastIndex %d", size, off, w, g)
+					}
+				}
+				// Restore for the next offset.
+				b[off+int32(len(sep))-1] = sep[len(sep)-1]
+			}
+		}
+	}
+	if bad > 0 {
+		t.Errorf("%d mismatches", bad)
+	}
+}
