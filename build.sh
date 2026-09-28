@@ -31,10 +31,19 @@ export MOXIEROOT
 export LLVM_GLUE_PATH="$MOXIEROOT/llvm-glue/libmoxie-llvm-glue.so"
 export PATH="/usr/local/bin:$PATH"
 
-# build llvm glue if missing
-if [ ! -f "$LLVM_GLUE_PATH" ]; then
+# Build the LLVM glue when missing or when a source is newer than the .so.
+# The purego bindings resolve glue symbols with mustSym, so a stale .so is a
+# hard failure (missing symbol), not a silent fallback.
+GLUE_SRC_DIR="$MOXIEROOT/llvm-glue"
+GLUE_STALE=0
+for src in "$GLUE_SRC_DIR/shims.c" \
+	"$MOXIEROOT/legacy/vendor/tinygo.org/x/go-llvm/IRBindings.cpp" \
+	"$MOXIEROOT/legacy/vendor/tinygo.org/x/go-llvm/backports.cpp"; do
+	if [ "$src" -nt "$LLVM_GLUE_PATH" ]; then GLUE_STALE=1; fi
+done
+if [ ! -f "$LLVM_GLUE_PATH" ] || [ "$GLUE_STALE" = 1 ]; then
     echo "Building llvm-glue ..."
-    bash "$MOXIEROOT/llvm-glue/build.sh"
+    bash "$GLUE_SRC_DIR/build.sh"
 fi
 
 # find a moxie binary to bootstrap with

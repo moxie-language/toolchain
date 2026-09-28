@@ -1,8 +1,23 @@
+#include "llvm-c/Core.h"
 #include "llvm-c/DebugInfo.h"
+#include <stdint.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* LLVMConstRealGetDouble returns a double in XMM0, which purego's integer-only
+ * SyscallN cannot capture. Return the IEEE-754 bit pattern as a uint64 instead
+ * so the purego binding can read it from RAX and bitcast it back. */
+uint64_t MoxieConstRealGetBits(LLVMValueRef ConstantVal)
+{
+    LLVMBool losesInfo = 0;
+    double value = LLVMConstRealGetDouble(ConstantVal, &losesInfo);
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
 
 LLVMMetadataRef MoxieCreateCompileUnit(
     LLVMDIBuilderRef builder,

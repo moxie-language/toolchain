@@ -190,6 +190,32 @@ for cc in "$MOXIE" "$LEGACY"; do
 	rm -rf "$td" "$adir"
 done
 
+# 6e: package-level float globals keep their initializer in both compilers.
+# The legacy interp read a constant float with LLVMConstRealGetDouble, whose
+# double return travels in XMM0 while the purego binding read RAX, so every
+# package-level float32/float64 variable was silently initialized to zero
+# (integers return in RAX and were fine).
+for cc in "$MOXIE" "$LEGACY"; do
+	label="stage4"
+	if [ "$cc" = "$LEGACY" ]; then label="legacy"; fi
+	name="globalinit:$label"
+	td="$(tempdir "globalinit_$label")"; rm -rf "$td"; mkdir -p "$td"
+	gdir="$(fixture globalinit)"
+	rc=0
+	MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$gdir" >"$td/build.log" 2>&1 || rc=$?
+	if [ $rc -ne 0 ]; then
+		log_fail "$name" "build failed: $(tail -3 "$td/build.log" | tr '\n' ' ')"
+	else
+		out="$("$td/bin" 2>&1 || true)"
+		if [ "$(echo "$out" | head -1)" = "ok" ]; then
+			log_pass "$name" "package-level float globals initialized"
+		else
+			log_fail "$name" "got '$(echo "$out" | head -1)', want 'ok'"
+		fi
+	fi
+	rm -rf "$td" "$gdir"
+done
+
 failed=0
 if [ -f "$STATUSFILE" ]; then
 	failed=$(grep -c FAIL "$STATUSFILE" 2>/dev/null) || failed=0

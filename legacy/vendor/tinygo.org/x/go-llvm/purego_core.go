@@ -4,6 +4,7 @@ package llvm
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"unsafe"
 
@@ -112,13 +113,13 @@ var (
 	symConstNull         uintptr
 	symConstAllOnes      uintptr
 	symGetUndef          uintptr
-	symConstPointerNull  uintptr
-	symIsConstant        uintptr
-	symIsNull            uintptr
-	symIsUndef           uintptr
-	symConstIntGetZExt   uintptr
-	symConstIntGetSExt   uintptr
-	symConstFloatGetDouble uintptr
+	symConstPointerNull uintptr
+	symIsConstant       uintptr
+	symIsNull           uintptr
+	symIsUndef          uintptr
+	symConstIntGetZExt  uintptr
+	symConstIntGetSExt  uintptr
+	symConstRealGetBits uintptr
 
 	// Constant expressions
 	symConstNeg          uintptr
@@ -537,7 +538,6 @@ func registerAll() {
 	symIsUndef = mustSym(libLLVM, "LLVMIsUndef")
 	symConstIntGetZExt = mustSym(libLLVM, "LLVMConstIntGetZExtValue")
 	symConstIntGetSExt = mustSym(libLLVM, "LLVMConstIntGetSExtValue")
-	symConstFloatGetDouble = mustSym(libLLVM, "LLVMConstRealGetDouble")
 
 	// Constant expressions
 	symConstNeg = mustSym(libLLVM, "LLVMConstNeg")
@@ -835,6 +835,7 @@ func registerAll() {
 		symGlobalObjectAddMetadata = mustSym(libGlue, "LLVMGlobalObjectAddMetadata")
 		symGoGetInlineAsm = mustSym(libGlue, "LLVMGoGetInlineAsm")
 		symGoSetCurrentDebugLocation = mustSym(libGlue, "LLVMGoSetCurrentDebugLocation")
+		symConstRealGetBits = mustSym(libGlue, "MoxieConstRealGetBits")
 	}
 	symGetCurrentDebugLocation2 = mustSym(libLLVM, "LLVMGetCurrentDebugLocation2")
 	symDILocationGetLine = mustSym(libLLVM, "LLVMDILocationGetLine")
@@ -1335,9 +1336,10 @@ func (v Value) SExtValue() int64 {
 }
 
 func (v Value) DoubleValue() (float64, bool) {
-	var lossy uintptr
-	r, _, _ := purego.SyscallN(symConstFloatGetDouble, v.C, uintptr(unsafe.Pointer(&lossy)))
-	return *(*float64)(unsafe.Pointer(&r)), lossy != 0
+	// LLVMConstRealGetDouble returns double in XMM0, which purego.SyscallN
+	// cannot capture, so read the bit pattern through the glue shim instead.
+	r, _, _ := purego.SyscallN(symConstRealGetBits, v.C)
+	return math.Float64frombits(uint64(r)), false
 }
 
 // ---- Constant expressions ----
