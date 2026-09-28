@@ -1110,11 +1110,29 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 			fb2.fileScope = pb.varInitScopes[d]
 			var rhs SSAValue
 			rhsBuilt := false
-			for _, name := range d.NameList {
+			// `var a, b T = x, y` gives each name its own value (see the
+			// function-scope form in buildLocalDecl): building the list once
+			// handed the last value to every name, so `var g1, g2 int32 = 3, 4`
+			// printed 4 4.
+			var multiVals2 []SSAValue
+			if vl, isList := d.Values.(*syntax.ListExpr); isList && len(d.NameList) > 1 && len(vl.ElemList) == len(d.NameList) {
+				multiVals2 = []SSAValue{:len(vl.ElemList)}
+				for mi := int32(0); mi < len(vl.ElemList); mi++ {
+					multiVals2[mi] = fb2.buildExpr(vl.ElemList[mi])
+				}
+			}
+			for ni, name := range d.NameList {
 				if name.Value == "_" {
 					continue
 				}
 				if fb2.tryConstArrayMemcpy(name, d.Values) {
+					continue
+				}
+				if multiVals2 != nil && ni < len(multiVals2) {
+					if multiVals2[ni] == nil {
+						break
+					}
+					fb2.buildStore(name, multiVals2[ni])
 					continue
 				}
 				if !rhsBuilt {
@@ -1151,11 +1169,29 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 		fb.fileScope = pb.varInitScopes[d]
 		var rhs SSAValue
 		rhsBuilt := false
-		for _, name := range d.NameList {
+		// `var a, b T = x, y` gives each name its own value, the same way
+		// buildLocalDecl does for the function-scope form. Building the list
+		// once and storing the result to every name gave both names the last
+		// value (`var g1, g2 int32 = 3, 4` printed 4 4).
+		var multiVals []SSAValue
+		if vl, isList := d.Values.(*syntax.ListExpr); isList && len(d.NameList) > 1 && len(vl.ElemList) == len(d.NameList) {
+			multiVals = []SSAValue{:len(vl.ElemList)}
+			for mi := int32(0); mi < len(vl.ElemList); mi++ {
+				multiVals[mi] = fb.buildExpr(vl.ElemList[mi])
+			}
+		}
+		for ni, name := range d.NameList {
 			if name.Value == "_" {
 				continue
 			}
 			if fb.tryConstArrayMemcpy(name, d.Values) {
+				continue
+			}
+			if multiVals != nil && ni < len(multiVals) {
+				if multiVals[ni] == nil {
+					break
+				}
+				fb.buildStore(name, multiVals[ni])
 				continue
 			}
 			if !rhsBuilt {
