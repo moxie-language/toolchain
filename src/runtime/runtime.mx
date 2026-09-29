@@ -64,6 +64,29 @@ func memzero(ptr unsafe.Pointer, size uintptr) {
 	}
 }
 
+// recvStore stores a received value at the receiver's destination. A nil
+// destination is a receive whose value is discarded (`<-ch` with no
+// assignment): the legacy compiler's codegen passes nil for the unused
+// operand while stage4 passes a scratch pointer, so the runtime has to accept
+// both. Writing through nil used to fault in memcpy the moment the peer
+// delivered a value, which is how a legacy-built spawn program died right
+// after its first exchange.
+func recvStore(dst, src unsafe.Pointer, size uintptr) {
+	if dst == nil || size == 0 {
+		return
+	}
+	memcpy(dst, src, size)
+}
+
+// recvZero is recvStore's counterpart for a closed channel, where the
+// receiver's slot is zeroed instead of filled.
+func recvZero(dst unsafe.Pointer, size uintptr) {
+	if dst == nil || size == 0 {
+		return
+	}
+	memzero(dst, size)
+}
+
 // Return the current stack pointer using the llvm.stacksave.p0 intrinsic.
 // It is normally used together with llvm.stackrestore.p0 but also works to get
 // the current stack pointer in a platform-independent way.

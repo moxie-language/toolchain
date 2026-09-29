@@ -350,28 +350,33 @@ done
 # parked on a ring whose child died must unpark, report the closed channel and
 # not hang. Before this both sides polled with a 1ms sleep.
 #
-# stage4 only, and measured: a legacy-built spawn program SIGSEGVs after its
-# first exchange with or without this change (the same probe built by stage4 is
-# clean), so the legacy compiler's spawn codegen is a separate, pre-existing
-# divergence that this check cannot certify. Recorded in the audit's open
-# items; the park is runtime .mx and both compilers compile the same source.
-name="futexpark:stage4"
-td="$(tempdir "futexpark_stage4")"; rm -rf "$td"; mkdir -p "$td"
-fpdir="$(fixture futexpark)"
-rc=0
-MOXIEROOT="$MOXIEROOT" "$MOXIE" build -o "$td/bin" "$fpdir" >"$td/build.log" 2>&1 || rc=$?
-if [ $rc -ne 0 ]; then
-	log_fail "$name" "build failed: $(tail -3 "$td/build.log" | tr '\n' ' ')"
-else
-	# A hang is the failure mode under test, so cap the run.
-	out="$(timeout 60 "$td/bin" 2>&1 || true)"
-	if echo "$out" | grep -q "^wake ok$" && echo "$out" | grep -q "^dead ok$"; then
-		log_pass "$name" "park wakes on publish and unparks on peer death"
+# The same fixture also pins the discarded-receive ABI: `<-done` with no
+# assignment passes a nil destination from the legacy compiler (stage4 passes a
+# scratch), and the runtime wrote the delivered value through it - a
+# legacy-built spawn program died in memcpy right after its first exchange.
+# recvStore/recvZero in runtime.mx treat a nil destination as "discard", so
+# both compilers run this now.
+for cc in "$MOXIE" "$LEGACY"; do
+	label="stage4"
+	if [ "$cc" = "$LEGACY" ]; then label="legacy"; fi
+	name="futexpark:$label"
+	td="$(tempdir "futexpark_$label")"; rm -rf "$td"; mkdir -p "$td"
+	fpdir="$(fixture futexpark)"
+	rc=0
+	MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$fpdir" >"$td/build.log" 2>&1 || rc=$?
+	if [ $rc -ne 0 ]; then
+		log_fail "$name" "build failed: $(tail -3 "$td/build.log" | tr '\n' ' ')"
 	else
-		log_fail "$name" "got '$(echo "$out" | tr '\n' ' ')'"
+		# A hang is the failure mode under test, so cap the run.
+		out="$(timeout 60 "$td/bin" 2>&1 || true)"
+		if echo "$out" | grep -q "^wake ok$" && echo "$out" | grep -q "^dead ok$"; then
+			log_pass "$name" "park wakes on publish and unparks on peer death"
+		else
+			log_fail "$name" "got '$(echo "$out" | tr '\n' ' ')'"
+		fi
 	fi
-fi
-rm -rf "$td" "$fpdir"
+	rm -rf "$td" "$fpdir"
+done
 
 # 6l: untyped float constants are exact rationals, in one package and across
 # the .mxh boundary. stage4 compared the rounded float64 and exported a folded

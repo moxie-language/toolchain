@@ -205,7 +205,7 @@ func (ch *channel) bufferPop(value unsafe.Pointer) {
 		ch.bufTail = 0
 	}
 
-	memcpy(value, elemAddr, ch.elementSize)
+	recvStore(value, elemAddr, ch.elementSize)
 
 	// Zero the slot after read.
 	memzero(elemAddr, ch.elementSize)
@@ -234,7 +234,7 @@ func (ch *channel) trySend(value unsafe.Pointer) bool {
 	// the value directly into the receiver.
 	if ch.bufLen == 0 {
 		if receiver := ch.receivers.pop(chanOperationOk); receiver != nil {
-			memcpy(receiver.taskRef.Ptr, value, ch.elementSize)
+			recvStore(receiver.taskRef.Ptr, value, ch.elementSize)
 			scheduleTask(receiver.taskRef)
 			return true
 		}
@@ -333,14 +333,14 @@ func (ch *channel) tryRecv(value unsafe.Pointer) (received, ok bool) {
 
 	if ch.closed {
 		// Channel is closed, so proceed immediately.
-		memzero(value, ch.elementSize)
+		recvZero(value, ch.elementSize)
 		return true, false
 	}
 
 	// If there is a sender, we can proceed with the channel operation
 	// immediately.
 	if sender := ch.senders.pop(chanOperationOk); sender != nil {
-		memcpy(value, sender.value, ch.elementSize)
+		recvStore(value, sender.value, ch.elementSize)
 		scheduleTask(sender.taskRef)
 		return true, true
 	}
