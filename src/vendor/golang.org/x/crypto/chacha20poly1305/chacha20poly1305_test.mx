@@ -1,0 +1,188 @@
+package chacha20poly1305
+
+// Known-answer tests for the AEAD, from RFC 8439 section 2.8.2, plus round
+// trips and the authentication failure. This file exists because the amd64
+// path used to dispatch to chacha20Poly1305Seal/Open, declared as external
+// assembly with no implementation anywhere in the tree: on any CPU with SSSE3
+// Seal returned an all-zero buffer, Open authenticated nothing, and every
+// caller saw "message authentication failed". A round trip alone would not
+// have caught a wrong-but-deterministic keystream, so the RFC vector is the
+// lock: it pins ChaCha20, Poly1305, the padding and the counter.
+
+import (
+	"bytes"
+	"testing"
+)
+
+func hx(s string) (b []byte) {
+	if len(s)%2 != 0 {
+		return nil
+	}
+	b = []byte{:len(s) / 2}
+	hexDigit := func(c byte) (v byte, ok bool) {
+		switch {
+		case c >= '0' && c <= '9':
+			return c - '0', true
+		case c >= 'a' && c <= 'f':
+			return c - 'a' + 10, true
+		case c >= 'A' && c <= 'F':
+			return c - 'A' + 10, true
+		}
+		return 0, false
+	}
+	for i := int32(0); i < int32(len(b)); i++ {
+		hi, ok1 := hexDigit(s[2*i])
+		lo, ok2 := hexDigit(s[2*i+1])
+		if !ok1 || !ok2 {
+			return nil
+		}
+		b[i] = hi<<4 | lo
+	}
+	return
+}
+
+// TestRFC8439Vector is the AEAD_CHACHA20_POLY1305 known-answer test.
+func TestRFC8439Vector(t *testing.T) {
+	key := hx("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
+	nonce := hx("070000004041424344454647")
+	aad := hx("50515253c0c1c2c3c4c5c6c7")
+	if key == nil || nonce == nil || aad == nil {
+		t.Fatal("bad test fixture")
+	}
+	plaintext := []byte("Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.")
+	want := hx("d31a8d34648e60db7b86afbc53ef7ec2" +
+		"a4aded51296e08fea9e2b5a736ee62d6" +
+		"3dbea45e8ca9671282fafb69da92728b" +
+		"1a71de0a9e060b2905d6a5b67ecd3b36" +
+		"92ddbd7f2d778b8c9803aee328091b58" +
+		"fab324e4fad675945585808b4831d7bc" +
+		"3ff4def08e4b7a9de576d26586cec64b" +
+		"6116" +
+		"1ae10b594f09e26a7e902ecbd0600691")
+	if want == nil {
+		t.Fatal("bad expected ciphertext")
+	}
+
+	c, err := New(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := c.Seal(nil, nonce, plaintext, aad)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("Seal produced %d bytes that do not match the RFC vector", len(got))
+	}
+	back, oerr := c.Open(nil, nonce, got, aad)
+	if oerr != nil {
+		t.Fatalf("Open: %s", oerr.Error())
+	}
+	if !bytes.Equal(back, plaintext) {
+		t.Fatal("Open did not return the plaintext")
+	}
+
+	// A single flipped ciphertext bit must fail authentication.
+	tampered := []byte{:len(got)}
+	for i := int32(0); i < int32(len(got)); i++ {
+		tampered[i] = got[i]
+	}
+	tampered[0] = tampered[0] ^ 1
+	if _, terr := c.Open(nil, nonce, tampered, aad); terr == nil {
+		t.Fatal("a tampered ciphertext must not authenticate")
+	}
+	// The wrong additional data must fail too.
+	wrongAAD := hx("000000000000")
+	if _, aerr := c.Open(nil, nonce, got, wrongAAD); aerr == nil {
+		t.Fatal("the wrong additional data must not authenticate")
+	}
+	// A short ciphertext is rejected without touching the buffer.
+	if _, serr := c.Open(nil, nonce, got[:8], aad); serr == nil {
+		t.Fatal("a short ciphertext must fail")
+	}
+}
+
+func TestSealOpenRoundTrips(t *testing.T) {
+	key := hx("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+	nonce := hx("000000000000004a00000000")
+	aad := hx("aabbccdd")
+	if key == nil || nonce == nil || aad == nil {
+		t.Fatal("bad test fixture")
+	}
+	c, err := New(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.NonceSize() != 12 || c.Overhead() != 16 {
+		t.Fatalf("sizes: nonce %d overhead %d", c.NonceSize(), c.Overhead())
+	}
+	for _, size := range []int32{0, 1, 15, 16, 17, 31, 32, 33, 64, 255, 1024} {
+		pt := []byte{:size}
+		for i := int32(0); i < size; i++ {
+			pt[i] = byte(i*13 + 7)
+		}
+		sealed := c.Seal(nil, nonce, pt, aad)
+		if int32(len(sealed)) != size+16 {
+			t.Fatalf("size %d: sealed %d bytes", size, len(sealed))
+		}
+		if size > 0 && bytes.Equal(sealed[:size], pt) {
+			t.Fatalf("size %d: ciphertext equals the plaintext", size)
+		}
+		back, oerr := c.Open(nil, nonce, sealed, aad)
+		if oerr != nil {
+			t.Fatalf("size %d: %s", size, oerr.Error())
+		}
+		if !bytes.Equal(back, pt) {
+			t.Fatalf("size %d: plaintext mismatch", size)
+		}
+	}
+}
+
+func TestNewRejectsShortKey(t *testing.T) {
+	if _, err := New(hx("00112233")); err == nil {
+		t.Fatal("a 4-byte key must be rejected")
+	}
+	if _, err := New(makeKey(32)); err != nil {
+		t.Fatal(err)
+	}
+	if _, xerr := NewX(hx("00112233")); xerr == nil {
+		t.Fatal("a 4-byte key must be rejected by NewX")
+	}
+}
+
+func makeKey(n int32) (b []byte) {
+	b = []byte{:n}
+	for i := int32(0); i < n; i++ {
+		b[i] = byte(i + 1)
+	}
+	return
+}
+
+// TestXChaChaRoundTrip covers the extended-nonce wrapper (HChaCha20 +
+// ChaCha20-Poly1305), which shares the removed asm dispatch.
+func TestXChaChaRoundTrip(t *testing.T) {
+	key := makeKey(32)
+	nonce := []byte{:24}
+	for i := int32(0); i < 24; i++ {
+		nonce[i] = byte(0x40 + i)
+	}
+	aad := []byte("xchacha aad")
+	pt := []byte("the extended nonce variant must round-trip too")
+	x, err := NewX(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if x.NonceSize() != 24 {
+		t.Fatalf("X nonce size %d", x.NonceSize())
+	}
+	sealed := x.Seal(nil, nonce, pt, aad)
+	back, oerr := x.Open(nil, nonce, sealed, aad)
+	if oerr != nil {
+		t.Fatalf("Open: %s", oerr.Error())
+	}
+	if !bytes.Equal(back, pt) {
+		t.Fatal("X round trip mismatch")
+	}
+	// A different nonce must not authenticate.
+	nonce[0] = nonce[0] ^ 1
+	if _, nerr := x.Open(nil, nonce, sealed, aad); nerr == nil {
+		t.Fatal("the wrong nonce must not authenticate")
+	}
+}
