@@ -1,0 +1,55 @@
+// `clear` on a slice or a map, in both compilers.
+//
+// stage4's builtin emitter had no `clear` arm at all, so every clear compiled
+// to nothing. math/big's basicMul opens with `clear(z[0:len(x)+len(y)])` and
+// then accumulates (`addMulVVWW`) into z, so a reused receiver kept the digits
+// of its previous product: big.Int.Exp(10, 20) answered 10^20+10^5, and a
+// 300-digit Text(10) walked a stale divisor and died with SIGFPE. Legacy has
+// always cleared through an inline memset.
+package main
+
+import "fmt"
+
+func main() {
+	a := []uint32{1, 2, 3, 4, 5}
+	clear(a)
+	if a[0] != 0 || a[1] != 0 || a[2] != 0 || a[3] != 0 || a[4] != 0 {
+		panic("clear on a slice")
+	}
+	// Through a view the length is the view's length, not the parent's.
+	b := []uint32{1, 2, 3, 4, 5}
+	clear(b[1:3])
+	if b[0] != 1 || b[1] != 0 || b[2] != 0 || b[3] != 4 || b[4] != 5 {
+		panic("clear on a subslice")
+	}
+	c := []uint32{1, 2, 3, 4, 5}
+	clear(c[2:])
+	if c[0] != 1 || c[1] != 2 || c[2] != 0 || c[4] != 0 {
+		panic("clear on a suffix")
+	}
+	d := []uint32{1, 2, 3, 4, 5}
+	clear(d[:2])
+	if d[0] != 0 || d[1] != 0 || d[2] != 3 {
+		panic("clear on a prefix")
+	}
+	// Multi-byte elements: the byte count is len*sizeof(elem). Clearing len
+	// elements instead would leave half of each word behind.
+	e := []uint64{0x1122334455667788, 0x99aabbccddeeff00}
+	clear(e)
+	if e[0] != 0 || e[1] != 0 {
+		panic("clear on uint64 elements")
+	}
+	// A nil slice is a no-op, not a fault.
+	var ns []int32
+	clear(ns)
+	m := map[string]int32{}
+	m["a"] = 1
+	m["b"] = 2
+	clear(m)
+	if len(m) != 0 {
+		panic("clear on a map")
+	}
+	var nm map[string]int32
+	clear(nm)
+	fmt.Println("ok")
+}

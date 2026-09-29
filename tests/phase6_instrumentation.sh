@@ -294,6 +294,110 @@ else
 fi
 rm -rf "$td"
 
+# 6i: untyped int/float constant promotion in both compilers. stage4's
+# SSA-builder fold used the left (int) operand's type, so `1/2.0` folded to
+# the int constant 0 and `1/Ln2` truncated - which also mis-sized math/big's
+# base-10 conversion buffer.
+for cc in "$MOXIE" "$LEGACY"; do
+	label="stage4"
+	if [ "$cc" = "$LEGACY" ]; then label="legacy"; fi
+	name="constpromo:$label"
+	td="$(tempdir "constpromo_$label")"; rm -rf "$td"; mkdir -p "$td"
+	pdir="$(fixture constpromo)"
+	rc=0
+	MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$pdir" >"$td/build.log" 2>&1 || rc=$?
+	if [ $rc -ne 0 ]; then
+		log_fail "$name" "build failed: $(tail -3 "$td/build.log" | tr '\n' ' ')"
+	else
+		out="$("$td/bin" 2>&1 || true)"
+		if [ "$(echo "$out" | head -1)" = "ok" ]; then
+			log_pass "$name" "untyped int/float promotion"
+		else
+			log_fail "$name" "got '$(echo "$out" | head -1)', want 'ok'"
+		fi
+	fi
+	rm -rf "$td" "$pdir"
+done
+
+# 6j: clear() zeroes a slice or a map in both compilers. stage4's builtin
+# emitter had no clear arm, so the call was dropped: math/big's basicMul
+# starts with clear(z[0:len(x)+len(y)]) and accumulates into z, so a reused
+# receiver kept its previous product's digits (Exp(10,20) = 10^20+10^5) and
+# a 300-digit Text(10) divided by a stale zero and died with SIGFPE.
+for cc in "$MOXIE" "$LEGACY"; do
+	label="stage4"
+	if [ "$cc" = "$LEGACY" ]; then label="legacy"; fi
+	name="clearzero:$label"
+	td="$(tempdir "clearzero_$label")"; rm -rf "$td"; mkdir -p "$td"
+	zdir="$(fixture clearzero)"
+	rc=0
+	MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$zdir" >"$td/build.log" 2>&1 || rc=$?
+	if [ $rc -ne 0 ]; then
+		log_fail "$name" "build failed: $(tail -3 "$td/build.log" | tr '\n' ' ')"
+	else
+		out="$("$td/bin" 2>&1 || true)"
+		if [ "$(echo "$out" | head -1)" = "ok" ]; then
+			log_pass "$name" "clear zeroes slices and maps"
+		else
+			log_fail "$name" "got '$(echo "$out" | head -1)', want 'ok'"
+		fi
+	fi
+	rm -rf "$td" "$zdir"
+done
+
+# 6k: the spawn ring's index word is the parking word. A receiver parked on the
+# write index must be woken by the publish (no lost wakeup), and a parent
+# parked on a ring whose child died must unpark, report the closed channel and
+# not hang. Before this both sides polled with a 1ms sleep.
+#
+# stage4 only, and measured: a legacy-built spawn program SIGSEGVs after its
+# first exchange with or without this change (the same probe built by stage4 is
+# clean), so the legacy compiler's spawn codegen is a separate, pre-existing
+# divergence that this check cannot certify. Recorded in the audit's open
+# items; the park is runtime .mx and both compilers compile the same source.
+name="futexpark:stage4"
+td="$(tempdir "futexpark_stage4")"; rm -rf "$td"; mkdir -p "$td"
+fpdir="$(fixture futexpark)"
+rc=0
+MOXIEROOT="$MOXIEROOT" "$MOXIE" build -o "$td/bin" "$fpdir" >"$td/build.log" 2>&1 || rc=$?
+if [ $rc -ne 0 ]; then
+	log_fail "$name" "build failed: $(tail -3 "$td/build.log" | tr '\n' ' ')"
+else
+	# A hang is the failure mode under test, so cap the run.
+	out="$(timeout 60 "$td/bin" 2>&1 || true)"
+	if echo "$out" | grep -q "^wake ok$" && echo "$out" | grep -q "^dead ok$"; then
+		log_pass "$name" "park wakes on publish and unparks on peer death"
+	else
+		log_fail "$name" "got '$(echo "$out" | tr '\n' ' ')'"
+	fi
+fi
+rm -rf "$td" "$fpdir"
+
+# 6l: untyped float constants are exact rationals, in one package and across
+# the .mxh boundary. stage4 compared the rounded float64 and exported a folded
+# constant as its shortest decimal, so `math.MaxFloat64 ==
+# 1.7976931348623157e308` was true where go/types (legacy) says false.
+for cc in "$MOXIE" "$LEGACY"; do
+	label="stage4"
+	if [ "$cc" = "$LEGACY" ]; then label="legacy"; fi
+	name="exactfloat:$label"
+	td="$(tempdir "exactfloat_$label")"; rm -rf "$td"; mkdir -p "$td"
+	edir="$(fixture exactfloat)"
+	rc=0
+	MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$edir" >"$td/build.log" 2>&1 || rc=$?
+	if [ $rc -ne 0 ]; then
+		log_fail "$name" "build failed: $(tail -3 "$td/build.log" | tr '\n' ' ')"
+	else
+		out="$("$td/bin" 2>&1 || true)"
+		if [ "$(echo "$out" | head -1)" = "ok" ]; then
+			log_pass "$name" "untyped float constants are exact"
+		else
+			log_fail "$name" "got '$(echo "$out" | head -1)', want 'ok'"
+		fi
+	fi
+	rm -rf "$td" "$edir"
+done
+
 failed=0
 if [ -f "$STATUSFILE" ]; then
 	failed=$(grep -c FAIL "$STATUSFILE" 2>/dev/null) || failed=0

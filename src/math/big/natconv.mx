@@ -484,14 +484,13 @@ type divisor struct {
 	ndigits int32 // digit length of divisor in terms of output base digits
 }
 
-var cacheBase10 struct {
-	table [64]divisor // cached divisors for base 10
-}
-
 // expWW computes x**y
 func (z nat) expWW(stk *stack, x, y Word) nat {
 	return z.expNN(stk, nat(nil).setWord(x), nat(nil).setWord(y), nil, false)
 }
+
+// maxDivisorEntries bounds k. It was the length of the base-10 cache table.
+const maxDivisorEntries = 64
 
 // construct table of powers of bb*leafSize to use in subdivisions.
 func divisors(stk *stack, m int32, b Word, ndigits int32, bb Word) []divisor {
@@ -502,42 +501,36 @@ func divisors(stk *stack, m int32, b Word, ndigits int32, bb Word) []divisor {
 
 	// determine k where (bb**leafSize)**(2**k) >= sqrt(x)
 	k := 1
-	for words := leafSize; words < m>>1 && k < len(cacheBase10.table); words <<= 1 {
+	for words := leafSize; words < m>>1 && k < maxDivisorEntries; words <<= 1 {
 		k++
 	}
 
-	// reuse and extend existing table of divisors or create new table as appropriate
-	var table []divisor // for b == 10, table overlaps with cacheBase10.table
-	if b == 10 {
-		table = cacheBase10.table[0:k] // reuse old table for this conversion
-	} else {
-		table = []divisor{:k} // create new table for this conversion
-	}
-
-	// extend table
-	if table[k-1].ndigits == 0 {
-		// add new entries as needed
-		var larger nat
-		for i := 0; i < k; i++ {
-			if table[i].ndigits == 0 {
-				if i == 0 {
-					table[0].bbb = nat(nil).expWW(stk, bb, Word(leafSize))
-					table[0].ndigits = ndigits * leafSize
-				} else {
-					table[i].bbb = nat(nil).sqr(stk, table[i-1].bbb)
-					table[i].ndigits = 2 * table[i-1].ndigits
-				}
-
-				// optimization: exploit aggregated extra bits in macro blocks
-				larger = nat(nil).set(table[i].bbb)
-				for mulAddVWW(larger, larger, b, 0) == 0 {
-					table[i].bbb = table[i].bbb.set(larger)
-					table[i].ndigits++
-				}
-
-				table[i].nbits = table[i].bbb.bitLen()
-			}
+	// Build the table in this frame's arena. It used to be cached in a package
+	// global, but the nats it holds are arena allocations: `ndigits` survived
+	// the return while the words behind `bbb` were reclaimed, so the next
+	// conversion divided by a divisor whose top word had been reused
+	// (`reciprocalWord(0)`, then a divide-by-zero in bits.Div32). It is
+	// rebuilt per conversion instead; the divisions it feeds dominate the
+	// squarings that build it.
+	table := []divisor{:k}
+	var larger nat
+	for i := 0; i < k; i++ {
+		if i == 0 {
+			table[0].bbb = nat(nil).expWW(stk, bb, Word(leafSize))
+			table[0].ndigits = ndigits * leafSize
+		} else {
+			table[i].bbb = nat(nil).sqr(stk, table[i-1].bbb)
+			table[i].ndigits = 2 * table[i-1].ndigits
 		}
+
+		// optimization: exploit aggregated extra bits in macro blocks
+		larger = nat(nil).set(table[i].bbb)
+		for mulAddVWW(larger, larger, b, 0) == 0 {
+			table[i].bbb = table[i].bbb.set(larger)
+			table[i].ndigits++
+		}
+
+		table[i].nbits = table[i].bbb.bitLen()
 	}
 
 	return table

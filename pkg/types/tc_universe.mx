@@ -2,6 +2,7 @@ package types
 
 import (
 	"math"
+	"math/big"
 	"strconv"
 
 	"git.smesh.lol/moxie/pkg/mxutil"
@@ -276,8 +277,9 @@ type ConstInt struct {
 	Unsigned bool
 }
 type ConstFloat struct {
-	V   float64
-	Lit string
+	V     float64
+	Lit   string
+	Exact *big.Rat
 }
 type ConstStr struct{ S string }
 type ConstNil struct{}
@@ -341,6 +343,23 @@ func int64Str(n int64) (s string) {
 		buf[i], buf[j] = buf[j], buf[i]
 	}
 	return string(buf)
+}
+// MxhText is the .mxh spelling of a float constant: the exact rational for a
+// folded value, so the importer reconstructs the same constant instead of the
+// nearest float64. That is what makes `math.MaxFloat64 ==
+// 1.7976931348623157e308` false across packages, as it is in Go. String()
+// stays the human decimal form - the truncation diagnostic reads it.
+func (c *ConstFloat) MxhText() (s string) {
+	if c.Exact != nil {
+		return string(c.Exact.RatString())
+	}
+	if c.Lit != "" {
+		return c.Lit
+	}
+	if c.V == 0.0 {
+		return "0.0"
+	}
+	return string(strconv.FormatFloat(c.V, 'g', -1, 64))
 }
 func (c *ConstFloat) String() (s string) {
 	// The .mxh reader parses this text with strconv.ParseFloat, so it must be

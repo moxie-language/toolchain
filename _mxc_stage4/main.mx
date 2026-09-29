@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"os"
 	"runtime"
-	"strconv"
 	"unsafe"
 
 	"git.smesh.lol/moxie/pkg/mxutil"
@@ -3090,7 +3089,15 @@ func generateMxh(pkg *TCPackage) (s string) {
 			b.w("const ") ; b.w(objName) ; b.w(" ")
 			typeDescWrite(&b, cn.Typ) ; b.w(" ")
 			if cn.Val != nil {
-				b.w(cn.Val.String())
+				// A float constant exports as its exact rational: the
+				// shortest decimal reads back as a different constant, so
+				// `math.MaxFloat64 == 1.7976931348623157e308` was true for
+				// an importer.
+				if cf, isF := cn.Val.(*ConstFloat); isF {
+					b.w(cf.MxhText())
+				} else {
+					b.w(cn.Val.String())
+				}
 			}
 			b.nl()
 		} else if tn2, ok4 := obj.(*TypeName); ok4 {
@@ -3691,9 +3698,13 @@ func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
 				if isb && (b.Kind == TCString || b.Kind == UntypedString) {
 					val = &ConstStr{S: cval}
 				} else if isb && (b.Kind == Float32 || b.Kind == Float64 || b.Kind == UntypedFloat) {
-					f, ferr := strconv.ParseFloat(cval, 64)
-					if ferr == nil {
-						val = &ConstFloat{V: f, Lit: cval}
+					// The text is the exporter's exact spelling ("num/den"
+					// for a folded constant, a literal otherwise); keep the
+					// rational so a comparison against a literal is exact.
+					ex := ExactFloatText(cval)
+					if ex != nil {
+						f, _ := ex.Float64()
+						val = &ConstFloat{V: f, Exact: ex}
 					} else {
 						val = &ConstFloat{}
 					}

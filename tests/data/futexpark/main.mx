@@ -1,0 +1,75 @@
+// The ring index word is the parking word (L21). Two properties are owed by
+// any parking scheme, and both are asserted here:
+//
+//   - no lost wakeup: a receiver parked on the write index is woken by the
+//     publish, so a ping-pong over a spawn channel completes every round;
+//   - no hang on peer death: a parent parked on a ring whose child died
+//     unpacks (bounded wait, then a liveness recheck) and reports the closed
+//     channel rather than sleeping forever.
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"time"
+)
+
+// echoWorker receives each value and answers with twice it, so the parent can
+// tell that the parked receive actually woke. It parks on `in` between
+// messages: that park is the wakeup the test is about.
+func echoWorker(in chan int32, out chan int32) {
+	for {
+		v, ok := <-in
+		if !ok {
+			return
+		}
+		out <- v * 2
+	}
+}
+
+// deadWorker returns without ever writing out, so its parent parks on out and
+// then has to notice the peer died.
+func deadWorker(in chan int32, out chan int32) {
+	time.Sleep(50 * time.Millisecond)
+}
+
+func main() {
+	// Chan memory must outlive this frame: the forked child reads the same
+	// channel memory, so allocate it in the root arena.
+	runtime.SovereignSetArena(runtime.RootArena())
+	in := chan int32{}
+	out := chan int32{}
+	done := spawn(echoWorker, in, out)
+
+	// 200 rounds: each one parks the worker on `in`, publishes, and requires
+	// the reply. If a wake were lost the round would stall until the bounded
+	// park timed out and the test would eventually fail on the value.
+	for i := int32(0); i < 200; i++ {
+		in <- i
+		v := <-out
+		if v != i*2 {
+			panic("echo value mismatch")
+		}
+	}
+	close(in)
+	<-done
+	fmt.Println("wake ok")
+
+	runtime.SovereignSetArena(runtime.RootArena())
+	in2 := chan int32{}
+	out2 := chan int32{}
+	done2 := spawn(deadWorker, in2, out2)
+
+	start := time.Now()
+	dv, ok := <-out2
+	elapsed := time.Since(start)
+	_ = dv
+	if ok {
+		panic("recv reported a value after the peer died")
+	}
+	if elapsed > 3*time.Second {
+		panic("recv did not unpark promptly after the peer died")
+	}
+	<-done2
+	fmt.Println("dead ok")
+}

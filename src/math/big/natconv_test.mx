@@ -1,0 +1,117 @@
+package big
+
+import (
+	"math"
+	"testing"
+)
+
+// The decimal expansion of 1.7976931348623157e308: 17 significant digits then
+// 292 zeros, a 1027-bit (17-word) numerator. It is the value the relay audit
+// recorded as broken under stage4 in both directions - big.Int could not print
+// a multi-word decimal, and big.Rat's decimal parse died on the next String().
+const maxFloat64Decimal = "179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+func pow10(k int32) (s []byte) {
+	s = []byte{:k + 1}
+	s[0] = '1'
+	for i := int32(1); i <= k; i++ {
+		s[i] = '0'
+	}
+	return
+}
+
+// TestIntDecimalRoundTrip walks the base-10 leaf and the recursive
+// divisors/convertWords path (values above leafSize words) and the power-of-two
+// branch, in both directions.
+func TestIntDecimalRoundTrip(t *testing.T) {
+	cases := []string{
+		"0",
+		"1",
+		"123456789012345678901234567890",
+		"18446744073709551615",
+		"18446744073709551616",
+		maxFloat64Decimal,
+	}
+	for i := int32(0); i < len(cases); i++ {
+		want := []byte(cases[i])
+		var x Int
+		if _, ok := x.SetString(want, 10); !ok {
+			t.Fatalf("SetString(%s, 10) failed", want)
+		}
+		if got := x.String(); got != want {
+			t.Fatalf("SetString(%s).String() = %s", want, got)
+		}
+		hex := x.Text(16)
+		var y Int
+		if _, ok := y.SetString(hex, 16); !ok {
+			t.Fatalf("SetString(%s, 16) failed", hex)
+		}
+		if got := y.String(); got != want {
+			t.Fatalf("hex round trip of %s = %s", want, got)
+		}
+	}
+}
+
+// TestIntExpReusesAccumulator squares 10^k through expNN for k past 20, where
+// the accumulator leaves one word. basicMul accumulates into z and relies on
+// its opening clear(z[0:len(x)+len(y)]); when stage4 dropped clear, every
+// reused accumulator kept its previous product's digits and Exp(10,20) came
+// out as 10^20+10^5.
+func TestIntExpReusesAccumulator(t *testing.T) {
+	for k := int32(1); k <= 70; k++ {
+		var want Int
+		want.SetString(pow10(k), 10)
+		var got Int
+		got.Exp(NewInt(10), NewInt(int64(k)), nil)
+		if got.Cmp(&want) != 0 {
+			t.Fatalf("Exp(10, %d) = %s, want %s", k, got.String(), want.String())
+		}
+	}
+}
+
+// TestRatLongDecimal is the audit's Rat repro: SetString of a long decimal
+// exponent succeeds, and the next String() formats a 309-digit numerator.
+func TestRatLongDecimal(t *testing.T) {
+	var r Rat
+	if _, ok := r.SetString([]byte("1.7976931348623157e308")); !ok {
+		t.Fatal("SetString(1.7976931348623157e308) failed")
+	}
+	if !r.IsInt() {
+		t.Fatal("1.7976931348623157e308 must be an integer")
+	}
+	if got := r.RatString(); got != []byte(maxFloat64Decimal) {
+		t.Fatalf("RatString() = %s", got)
+	}
+	var back Rat
+	if _, ok := back.SetString(r.String()); !ok {
+		t.Fatal("re-parsing Rat.String() failed")
+	}
+	if back.Cmp(&r) != 0 {
+		t.Fatal("Rat.String() did not round trip")
+	}
+}
+
+// TestRatSmallestSubnormal is the exact value of math.SmallestNonzeroFloat64:
+// 1/2^1074, whose decimal denominator needs a divisor above the 17-word table
+// (a second-level recursive conversion). The divisor table used to be cached in
+// a package global while the nats it holds are arena allocations, so the
+// metadata outlived the words: the next conversion divided by a divisor whose
+// top word had been reused, `reciprocalWord(0)` was reached, and bits.Div32
+// divided by zero.
+func TestRatSmallestSubnormal(t *testing.T) {
+	one := NewInt(1)
+	den := NewInt(2)
+	den.Exp(den, NewInt(1074), nil)
+	var r Rat
+	r.SetFrac(one, den)
+	got := string(r.RatString())
+	if len(got) != 326 {
+		t.Fatalf("RatString(1/2^1074) is %d bytes, want 326", len(got))
+	}
+	if got[0] != '1' || got[1] != '/' {
+		t.Fatalf("RatString(1/2^1074) = %s", got)
+	}
+	if f, _ := r.Float64(); f != math.SmallestNonzeroFloat64 {
+		t.Fatalf("1/2^1074 = %g, want SmallestNonzeroFloat64", f)
+	}
+}

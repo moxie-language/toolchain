@@ -1,6 +1,7 @@
 package types
 
 import (
+	"math/big"
 	"strconv"
 
 	"git.smesh.lol/moxie/pkg/mxutil"
@@ -25,7 +26,7 @@ func EvalBasicLitLocal(e *syntax.BasicLit) (c ConstVal) {
 		return intConst(uint64(ParseIntLocal(e.Value)))
 	case token.FloatLit:
 		f := parseFloatLocal(e.Value)
-		return &ConstFloat{V:f, Lit:e.Value}
+		return &ConstFloat{V:f, Lit:e.Value, Exact:ExactFloatText(e.Value)}
 	case token.StringLit:
 		s := interpStringLocal(e.Value)
 		return &ConstStr{S:s}
@@ -264,7 +265,14 @@ func EvalUnaryLocal(op token.Operator, x ConstVal) (c ConstVal) {
 			if cf.Lit != "" {
 				neg = "-" | cf.Lit
 			}
-			return &ConstFloat{V:-cf.V, Lit:neg}
+			r := floatExact(cf)
+			if r == nil {
+				return &ConstFloat{V:-cf.V, Lit:neg}
+			}
+			nr := big.NewRat(0, 1)
+			nr.Neg(r)
+			f, _ := nr.Float64()
+			return &ConstFloat{V:f, Lit:neg, Exact:nr}
 		}
 	case token.Xor:
 		if ci, ok := x.(*ConstInt); ok {
@@ -312,6 +320,214 @@ func unsignedFold(x ConstVal, y ConstVal) (ok bool) {
 	return cvUnsigned(x) || cvUnsigned(y)
 }
 
+
+// floatExact returns a constant's exact value as a rational. Integer constants
+// are exact by construction; a float constant carries the rational its folds
+// produced, and one that has none falls back to the exact value of its float64
+// (every finite float64 is a rational). A non-finite value has no rational, so
+// the caller falls back to float64 arithmetic.
+func floatExact(v ConstVal) (r *big.Rat) {
+	if cf, isFloat := v.(*ConstFloat); isFloat {
+		if cf.Exact != nil {
+			return cf.Exact
+		}
+		q := big.NewRat(0, 1)
+		if q.SetFloat64(cf.V) == nil {
+			return nil
+		}
+		return q
+	}
+	if ci, isInt := v.(*ConstInt); isInt {
+		if ci.Unsigned && ci.V < 0 {
+			q := big.NewRat(0, 1)
+			q.SetUint64(uint64(ci.V))
+			return q
+		}
+		return big.NewRat(ci.V, 1)
+	}
+	return nil
+}
+
+// floatConstOf re-presents a constant as a float constant carrying its exact
+// value, so a mixed int/float operation stays in the float domain without
+// rounding the integer through float64 first.
+func floatConstOf(v ConstVal) (c ConstVal) {
+	r := floatExact(v)
+	if r == nil {
+		return &ConstFloat{V:cvFloat(v)}
+	}
+	f, _ := r.Float64()
+	return &ConstFloat{V:f, Exact:r}
+}
+
+// floatOp folds a float binary operation exactly, as go/types does. The
+// difference is visible: 0.1+0.2 == 0.3 is true as constants and
+// 1.0/3.0 == 0.3333333333333333 is false.
+func floatOp(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
+	xr := floatExact(x)
+	yr := floatExact(y)
+	if xr == nil || yr == nil {
+		xf := cvFloat(x)
+		yf := cvFloat(y)
+		switch op {
+		case token.Add:
+			return &ConstFloat{V:xf + yf}
+		case token.Sub:
+			return &ConstFloat{V:xf - yf}
+		case token.Mul:
+			return &ConstFloat{V:xf * yf}
+		case token.Div:
+			if yf == 0.0 {
+				return &ConstFloat{V:0.0}
+			}
+			return &ConstFloat{V:xf / yf}
+		}
+		return nil
+	}
+	r := big.NewRat(0, 1)
+	switch op {
+	case token.Add:
+		r.Add(xr, yr)
+	case token.Sub:
+		r.Sub(xr, yr)
+	case token.Mul:
+		r.Mul(xr, yr)
+	case token.Div:
+		if yr.Sign() == 0 {
+			return &ConstFloat{V:0.0}
+		}
+		r.Quo(xr, yr)
+	default:
+		return nil
+	}
+	f, _ := r.Float64()
+	return &ConstFloat{V:f, Exact:r}
+}
+
+// floatCompare compares two numeric constants exactly. Comparing the rounded
+// float64 made `math.MaxFloat64 == 1.7976931348623157e308` true - the decimal
+// rounds to the binary value - while go/types compares the exact rationals.
+func floatCompare(x ConstVal, y ConstVal) (cmp int32) {
+	xr := floatExact(x)
+	yr := floatExact(y)
+	if xr == nil || yr == nil {
+		xf := cvFloat(x)
+		yf := cvFloat(y)
+		if xf < yf {
+			return -1
+		}
+		if xf > yf {
+			return 1
+		}
+		return 0
+	}
+	return xr.Cmp(yr)
+}
+
+// ExactFloatText parses a constant's exported text into its exact value:
+// "num/den" from a folded constant, a decimal float, or a C99 hex float. The
+// .mxh round trip carries the value through this, so an imported constant
+// compares exactly rather than as the nearest float64.
+func ExactFloatText(s string) (r *big.Rat) {
+	if r = hexFloatRat(s); r != nil {
+		return r
+	}
+	q := big.NewRat(0, 1)
+	if _, ok := q.SetString([]byte(s)); ok {
+		return q
+	}
+	return nil
+}
+
+// hexFloatRat parses 0x<hex>[.<hex>][p<exp>] exactly, which Rat.SetString does
+// not accept; the stdlib writes its IEEE boundaries this way (0x1p1023). The
+// mantissa is an integer and the exponent a binary shift, so no step rounds.
+func hexFloatRat(s string) (r *big.Rat) {
+	i := 0
+	neg := false
+	if len(s) > 0 && (s[0] == '-' || s[0] == '+') {
+		neg = s[0] == '-'
+		i = 1
+	}
+	if i+2 > len(s) || s[i] != '0' || (s[i+1] != 'x' && s[i+1] != 'X') {
+		return nil
+	}
+	i += 2
+	digits := []byte{}
+	frac := int32(0)
+	seenDot := false
+	for i < len(s) {
+		c := s[i]
+		if c == '.' {
+			seenDot = true
+			i++
+			continue
+		}
+		if c == 'p' || c == 'P' {
+			break
+		}
+		if !isHexDigit(c) {
+			return nil
+		}
+		digits = mxutil.Ensure(digits, 1)
+		digits = push(digits, c)
+		if seenDot {
+			frac++
+		}
+		i++
+	}
+	if len(digits) == 0 {
+		return nil
+	}
+	exp := int32(0)
+	if i < len(s) && (s[i] == 'p' || s[i] == 'P') {
+		exp = decTextInt32(s[i+1:])
+	}
+	num := big.NewInt(0)
+	if _, ok := num.SetString(digits, 16); !ok {
+		return nil
+	}
+	q := big.NewRat(0, 1)
+	shift := exp - 4*frac
+	if shift >= 0 {
+		num.Lsh(num, uint32(shift))
+		q.SetInt(num)
+	} else {
+		den := big.NewInt(1)
+		den.Lsh(den, uint32(-shift))
+		q.SetFrac(num, den)
+	}
+	if neg {
+		q.Neg(q)
+	}
+	return q
+}
+
+func isHexDigit(c byte) (ok bool) {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+}
+
+func decTextInt32(s string) (n int32) {
+	i := 0
+	neg := false
+	if i < len(s) && (s[i] == '-' || s[i] == '+') {
+		neg = s[i] == '-'
+		i++
+	}
+	for i < len(s) {
+		c := s[i]
+		if c < '0' || c > '9' {
+			break
+		}
+		n = n*10 + int32(c-'0')
+		i++
+	}
+	if neg {
+		return -n
+	}
+	return
+}
+
 func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 	// Untyped constant arithmetic mixes kinds: an integer operand against a
 	// float operand is a float operation. Every branch below tests the left
@@ -321,11 +537,11 @@ func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 	// Stringer and everything else that reads MaxFloat64 with it.
 	if _, xFloat := x.(*ConstFloat); xFloat {
 		if _, yInt := y.(*ConstInt); yInt {
-			y = &ConstFloat{V: cvFloat(y)}
+			y = floatConstOf(y)
 		}
 	} else if _, yFloat := y.(*ConstFloat); yFloat {
 		if _, xInt := x.(*ConstInt); xInt {
-			x = &ConstFloat{V: cvFloat(x)}
+			x = floatConstOf(x)
 		}
 	}
 	switch op {
@@ -337,7 +553,7 @@ func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 			return &ConstInt{V:xi.V + cvInt(y)}
 		}
 		if xf, ok := x.(*ConstFloat); ok {
-			return &ConstFloat{V:xf.V + cvFloat(y)}
+			return floatOp(op, xf, y)
 		}
 		if xs, ok := x.(*ConstStr); ok {
 			return &ConstStr{S:xs.S | cvStr(y)}
@@ -350,7 +566,7 @@ func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 			return &ConstInt{V:xi.V - cvInt(y)}
 		}
 		if xf, ok := x.(*ConstFloat); ok {
-			return &ConstFloat{V:xf.V - cvFloat(y)}
+			return floatOp(op, xf, y)
 		}
 	case token.Mul:
 		if xi, ok := x.(*ConstInt); ok {
@@ -360,7 +576,7 @@ func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 			return &ConstInt{V:xi.V * cvInt(y)}
 		}
 		if xf, ok := x.(*ConstFloat); ok {
-			return &ConstFloat{V:xf.V * cvFloat(y)}
+			return floatOp(op, xf, y)
 		}
 	case token.Div:
 		if xi, ok := x.(*ConstInt); ok {
@@ -378,11 +594,7 @@ func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 			return &ConstInt{V:xi.V / d}
 		}
 		if xf, ok := x.(*ConstFloat); ok {
-			d := cvFloat(y)
-			if d == 0.0 {
-				return &ConstFloat{V:0.0}
-			}
-			return &ConstFloat{V:xf.V / d}
+			return floatOp(op, xf, y)
 		}
 	case token.Rem:
 		if xi, ok := x.(*ConstInt); ok {
@@ -494,13 +706,15 @@ func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 
 func constEqual(x ConstVal, y ConstVal) (eq bool) {
 	if xi, matched := x.(*ConstInt); matched {
-		if unsignedFold(x, y) {
-			return uint64(xi.V) == cvUint(y)
+		if _, yFloat := y.(*ConstFloat); !yFloat {
+			if unsignedFold(x, y) {
+				return uint64(xi.V) == cvUint(y)
+			}
+			return xi.V == cvInt(y)
 		}
-		return xi.V == cvInt(y)
 	}
-	if xf, matched := x.(*ConstFloat); matched {
-		return xf.V == cvFloat(y)
+	if _, matched := x.(*ConstFloat); matched {
+		return floatCompare(x, y) == 0
 	}
 	if xs, matched := x.(*ConstStr); matched {
 		return xs.S == cvStr(y)
@@ -515,13 +729,15 @@ func constEqual(x ConstVal, y ConstVal) (eq bool) {
 
 func constLess(x ConstVal, y ConstVal) (lt bool) {
 	if xi, matched := x.(*ConstInt); matched {
-		if unsignedFold(x, y) {
-			return uint64(xi.V) < cvUint(y)
+		if _, yFloat := y.(*ConstFloat); !yFloat {
+			if unsignedFold(x, y) {
+				return uint64(xi.V) < cvUint(y)
+			}
+			return xi.V < cvInt(y)
 		}
-		return xi.V < cvInt(y)
 	}
-	if xf, matched := x.(*ConstFloat); matched {
-		return xf.V < cvFloat(y)
+	if _, matched := x.(*ConstFloat); matched {
+		return floatCompare(x, y) < 0
 	}
 	if xs, matched := x.(*ConstStr); matched {
 		return xs.S < cvStr(y)
@@ -539,11 +755,20 @@ func ConvertConstLocal(v ConstVal, target Type) (c ConstVal) {
 		iv := cvInt(v)
 		return MaskConstToBasic(&ConstInt{V:iv}, b)
 	case b.Info&IsFloat != 0:
-		fv := cvFloat(v)
-		if cf, matched := v.(*ConstFloat); matched {
-			return &ConstFloat{V:fv, Lit:cf.Lit}
+		// An untyped target keeps the exact value; a sized one rounds to it
+		// (float32(0.1) is the float32 value, not the decimal literal).
+		if b.Info&IsUntyped != 0 {
+			return floatConstOf(v)
 		}
-		return &ConstFloat{V:fv}
+		fv := cvFloat(v)
+		if b.Kind == Float32 {
+			fv = float64(float32(fv))
+		}
+		q := big.NewRat(0, 1)
+		if q.SetFloat64(fv) == nil {
+			return &ConstFloat{V:fv}
+		}
+		return &ConstFloat{V:fv, Exact:q}
 	case b.Info&IsString != 0:
 		if cvKind(v) == 3 {
 			n := cvInt(v)

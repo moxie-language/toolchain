@@ -4658,6 +4658,25 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 					if ct == nil {
 						ct = yc.typ
 					}
+					// A shift's result type follows its left operand; the
+					// count never types it (`1 << uint32(3)` is an untyped
+					// constant, and `0x20000000000000 >> uint32(3)` must not
+					// become uint32 and truncate).
+					if op != OpShl && op != OpShr {
+						if yc.typ != nil && !isUntypedBasicType(yc.typ) && (ct == nil || isUntypedBasicType(ct)) {
+							// A typed operand decides the result type.
+							ct = yc.typ
+						} else if isUntypedBasicType(ct) || ct == nil {
+							// An untyped integer against an untyped float
+							// folds to a float value; leaving ct as the left
+							// operand's int truncated `1/2.0` to 0 at every
+							// use. EvalBinaryLocal already mixes the kinds, so
+							// the folded value decides here too.
+							if _, isFloat := folded.(*ConstFloat); isFloat {
+								ct = Typ[UntypedFloat]
+							}
+						}
+					}
 					if _, isBool := folded.(*ConstBool); isBool {
 						ct = Typ[Bool]
 					}
@@ -5116,6 +5135,28 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		}
 		return nil
 	case BuiltinClose, BuiltinDelete, BuiltinClear, BuiltinPrint, BuiltinPrintln:
+		if b.id == BuiltinClear && len(args) == 1 {
+			// Legacy rejects clear on anything but a slice or a map. The
+			// check belongs here, before the compileErrors gate: one made at
+			// IR-emit time prints but still links a binary.
+			at := args[0].SSAType()
+			u := SafeUnderlying(at)
+			if u == nil {
+				u = at
+			}
+			_, isMap := u.(*TCMap)
+			_, isSlice := u.(*Slice)
+			if !isMap && !isSlice {
+				tn := "unknown"
+				if at != nil {
+					tn = at.String()
+				}
+				mxutil.WriteStr(2, "compile error: unsupported type in clear builtin: " | tn | "\n")
+				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+				push(cctx.compileErrors, "unsupported type in clear builtin: " | tn)
+				return nil
+			}
+		}
 		call4 := &SSACall{Call: SSACallCommon{Value: b, Args: args}}
 		call4.name = fb.nextName()
 		fb.emit(call4)

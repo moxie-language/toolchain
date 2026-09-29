@@ -831,6 +831,46 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			e.declareRuntime("runtime.sliceCopy", e.intptrType(), "ptr, ptr, " | e.intptrType() | ", " | e.intptrType() | ", " | e.intptrType())
 			return
 		}
+	} else if name == "clear" {
+		if len(c.Call.Args) == 1 {
+			arg := e.operand(c.Call.Args[0])
+			at := c.Call.Args[0].SSAType()
+			u := SafeUnderlying(at)
+			if u == nil {
+				u = at
+			}
+			if _, isMap := u.(*TCMap); isMap {
+				e.w("  call void @runtime.hashmapClear(ptr ") ; e.w(arg) ; e.w(", ptr null)\n")
+				e.declareRuntime("runtime.hashmapClear", "void", "ptr")
+				return
+			}
+			sl, isSlice := u.(*Slice)
+			if isSlice && sl.Elem != nil {
+				buf := e.nextReg2("cl")
+				e.w("  ") ; e.w(buf) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(", 0\n")
+				ln := e.nextReg2("cl")
+				e.w("  ") ; e.w(ln) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(", 1\n")
+				esz := e.nextReg2("cl")
+				e.w("  ") ; e.w(esz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(e.llvmType(sl.Elem)) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+				nb := e.nextReg2("cl")
+				e.w("  ") ; e.w(nb) ; e.w(" = mul ") ; e.w(ipt) ; e.w(" ") ; e.w(ln) ; e.w(", ") ; e.w(esz) ; e.w("\n")
+				e.w("  call void @llvm.memset.p0.") ; e.w(ipt) ; e.w("(ptr ") ; e.w(buf)
+				e.w(", i8 0, ") ; e.w(ipt) ; e.w(" ") ; e.w(nb) ; e.w(", i1 false)\n")
+				e.declareIntrinsic("llvm.memset.p0." | ipt, "void", "ptr, i8, " | ipt | ", i1")
+				return
+			}
+			// Legacy rejects clear on anything but a slice or a map. Dropping
+			// the call silently is what hid the missing lowering in the first
+			// place, so say so instead.
+			tn := "unknown"
+			if at != nil {
+				tn = at.String()
+			}
+			mxutil.WriteStr(2, "compile error: unsupported type in clear builtin: " | tn | "\n")
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, "unsupported type in clear builtin: " | tn)
+			return
+		}
 	} else if name == "print" || name == "println" {
 		e.w("  call void @runtime.printlock(ptr null)\n")
 		for i, arg := range c.Call.Args {

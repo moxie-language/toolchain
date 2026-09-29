@@ -109,9 +109,11 @@ func peerAlive(ch *channel) bool {
 
 // PipeChanSend is the runtime entry the compiler emits in place of the
 // in-runtime queue send for spawn-bound channels. Writes the encoded
-// bytes to the send ring. Retries with 1ms yield on backpressure.
-// Returns false on close or peer death. Fail-loud on frames that can
-// never fit the ring.
+// bytes to the send ring. Parks on the ring's read index when the ring
+// is full; the park is bounded and the loop rechecks liveness after
+// each return, so a crashed peer surfaces as a failed send rather than
+// a hang. Returns false on close or peer death. Fail-loud on frames
+// that can never fit the ring.
 func PipeChanSend(ch *channel, encoded []byte) bool {
 	if ch == nil || !ch.spawnBound {
 		return false
@@ -122,6 +124,7 @@ func PipeChanSend(ch *channel, encoded []byte) bool {
 	if !ringFits(ch.ringSend, int32(len(encoded))) {
 		runtimePanic("PipeChanSend: frame exceeds ring size")
 	}
+	need := ringAlign8(4 + uint32(len(encoded)))
 	for {
 		if ringIsClosed(ch.ringSend) {
 			return false
@@ -133,14 +136,16 @@ func PipeChanSend(ch *channel, encoded []byte) bool {
 			ringClose(ch.ringSend)
 			return false
 		}
-		sleepTicks(nanosecondsToTicks(1_000_000))
+		ringParkRead(ch.ringSend, need)
 	}
 }
 
 // PipeChanRecv is the runtime entry the compiler emits in place of the
-// in-runtime queue recv for spawn-bound channels. Polls the recv ring
-// with 1ms yield until data arrives, the channel closes, or the peer
-// dies. Returns (encoded_bytes, ok). ok=false means closed/dead.
+// in-runtime queue recv for spawn-bound channels. Parks on the recv
+// ring's write index until data arrives, the channel closes, or the
+// bounded wait elapses; the loop rechecks both ring state and peer
+// liveness on every return, so a dead peer is reported, never waited
+// on forever. Returns (encoded_bytes, ok). ok=false means closed/dead.
 func PipeChanRecv(ch *channel) ([]byte, bool) {
 	if ch == nil || !ch.spawnBound {
 		return nil, false
@@ -166,7 +171,7 @@ func PipeChanRecv(ch *channel) ([]byte, bool) {
 			}
 			return nil, false
 		}
-		sleepTicks(nanosecondsToTicks(1_000_000))
+		ringParkWrite(ch.ringRecv)
 	}
 }
 

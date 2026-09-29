@@ -1,0 +1,50 @@
+// Untyped float constants are exact rationals, not rounded float64s - in one
+// package and across the .mxh boundary.
+//
+// stage4 compared `constEqual`'s rounded float64, and exported a folded
+// constant as its shortest round-tripping decimal. Both made
+// `math.MaxFloat64 == 1.7976931348623157e308` true: the decimal rounds to the
+// binary value, so the two constants were indistinguishable after rounding.
+// go/types (the legacy compiler) compares the exact rationals and says false.
+package main
+
+import (
+	"fmt"
+	"math"
+)
+
+// The exact expression, in-package: 2^1023 * (1 + (1 - 2^-52)).
+const maxExpr = 0x1p1023 * (1 + (1 - 0x1p-52))
+
+func main() {
+	// Across packages: the exported constant carries its exact value, so the
+	// decimal that merely rounds to it is a different number.
+	if math.MaxFloat64 == 1.7976931348623157e308 {
+		panic("math.MaxFloat64 equals the decimal that rounds to it")
+	}
+	if !(math.MaxFloat64 == 0x1p1023*(1+(1-0x1p-52))) {
+		panic("math.MaxFloat64 is not the value of its exact expression")
+	}
+	// The same two comparisons from inside the defining package.
+	if maxExpr == 1.7976931348623157e308 {
+		panic("the exact expression equals the decimal that rounds to it")
+	}
+	if !(maxExpr == 0x1p1023*(1+(1-0x1p-52))) {
+		panic("identical expressions are not equal")
+	}
+	// Constant arithmetic is exact, so these follow go/types, not float64:
+	// 0.1+0.2 is 3/10 exactly, and 1/3 is not the 16-digit decimal.
+	if !(0.1+0.2 == 0.3) {
+		panic("0.1+0.2 must equal 0.3 exactly")
+	}
+	if 1.0/3.0 == 0.3333333333333333 {
+		panic("1/3 must not equal the 16-digit decimal")
+	}
+	if !(1.0/3.0*3.0 == 1.0) {
+		panic("1/3*3 must equal 1 exactly")
+	}
+	if math.MaxFloat64/2 == math.MaxFloat64 {
+		panic("MaxFloat64/2 is not MaxFloat64")
+	}
+	fmt.Println("ok")
+}
