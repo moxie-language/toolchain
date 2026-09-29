@@ -1,0 +1,323 @@
+// Package mxcover turns a -cover run into a coverage report.
+//
+// The compiler writes a site table (<output>.cover_sites.json) beside a -cover
+// build, and the instrumented runtime dumps "coversite <id> count=<n>" lines to
+// MOXIE_COVER_OUT as each domain exits. Report joins the two: the totals, a
+// per-file table, then every site that never ran.
+//
+// It is a package rather than a program because two callers need the same join:
+// the mxcover command, and `moxie test -cover`, which prints this report for the
+// package it just ran so the harness needs no external tool.
+package mxcover
+
+import (
+	"os"
+
+	"git.smesh.lol/moxie/pkg/mxutil"
+)
+
+// rec is one site from the table with its hit count.
+type rec struct {
+	fn   string
+	file string
+	line int32
+	hits uint64
+}
+
+// Report returns the coverage report for a site table and a counter dump,
+// limited to files under prefix. errText is empty on success; otherwise it says
+// what is missing (an unreadable file, or no sites under the prefix), which is
+// what the command line prints after "mxcover: ".
+func Report(sitesPath, countsPath, prefix string) (out string, errText string) {
+	// os.ReadFile, not mxutil.ReadFile: the latter is a host-provided C symbol
+	// the compiler links from its own host.c, so an ordinary program (the
+	// mxcover command) would fail to link it. The rest of mxutil used here is
+	// pure Moxie.
+	sitesData, serr := os.ReadFile(sitesPath)
+	if serr != nil {
+		return "", "cannot read " | sitesPath
+	}
+	countsData, cerr := os.ReadFile(countsPath)
+	if cerr != nil {
+		return "", "cannot read " | countsPath
+	}
+
+	recs := parseSites(string(sitesData), parseCounts(string(countsData)), prefix)
+	if len(recs) == 0 {
+		return "", "no sites" | prefixNote(prefix)
+	}
+	sortRecs(recs)
+
+	var b buf
+	covered := int32(0)
+	for _, r := range recs {
+		if r.hits > 0 {
+			covered++
+		}
+	}
+	b.w("sites: " | i32str(int32(len(recs))) | " covered: " | i32str(covered) | " (" | pct(covered, int32(len(recs))) | ")")
+	b.nl()
+
+	// Per-file table, in path order (sortRecs ordered by file, then line).
+	// The uncovered list below carries the detail.
+	var curFile string
+	var fileTotal, fileCov int32
+	for i := int32(0); i < int32(len(recs)); i++ {
+		r := recs[i]
+		if r.file != curFile {
+			if curFile != "" {
+				fileLine(&b, curFile, fileCov, fileTotal)
+			}
+			curFile = r.file
+			fileTotal = 0
+			fileCov = 0
+		}
+		fileTotal++
+		if r.hits > 0 {
+			fileCov++
+		}
+	}
+	if curFile != "" {
+		fileLine(&b, curFile, fileCov, fileTotal)
+	}
+
+	uncovered := int32(0)
+	for _, r := range recs {
+		if r.hits == 0 {
+			uncovered++
+		}
+	}
+	b.nl()
+	b.w("uncovered sites: " | i32str(uncovered))
+	b.nl()
+	for _, r := range recs {
+		if r.hits == 0 {
+			b.w("  " | r.file | ":" | i32str(r.line) | "  " | r.fn)
+			b.nl()
+		}
+	}
+	return string(b.data[:b.off]), ""
+}
+
+// buf accumulates the report. Moxie has no strings.Builder, and the writer
+// grows by hand so every store goes through an index, never through a
+// subslice.
+type buf struct {
+	data []byte
+	off  int32
+}
+
+func (b *buf) w(s string) {
+	need := b.off + int32(len(s))
+	if need > int32(len(b.data)) {
+		newCap := int32(len(b.data)) * 2
+		if newCap < need {
+			newCap = need + 1024
+		}
+		nd := []byte{:newCap}
+		for i := int32(0); i < b.off; i++ {
+			nd[i] = b.data[i]
+		}
+		b.data = nd
+	}
+	for i := int32(0); i < int32(len(s)); i++ {
+		b.data[b.off+i] = s[i]
+	}
+	b.off += int32(len(s))
+}
+
+func (b *buf) nl() {
+	b.w("\n")
+}
+
+func fileLine(b *buf, file string, cov, total int32) {
+	b.w(pct(cov, total) | "  " | i32str(cov) | "/" | i32str(total) | "  " | file)
+	b.nl()
+}
+
+// pct renders a percentage with one decimal, as text.
+func pct(n, total int32) (s string) {
+	if total == 0 {
+		return "  0.0%"
+	}
+	tenths := (int64(n) * 1000) / int64(total)
+	return i64str(tenths/10) | "." | i64str(tenths%10) | "%"
+}
+
+func i32str(n int32) (s string) { return i64str(int64(n)) }
+
+func i64str(n int64) (s string) {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	digits := []byte{:24}
+	i := int32(24)
+	for n > 0 {
+		i--
+		digits[i] = byte('0'+n%10)
+		n = n / 10
+	}
+	if neg {
+		i--
+		digits[i] = '-'
+	}
+	return string(digits[i:])
+}
+
+func prefixNote(prefix string) (s string) {
+	if prefix == "" {
+		return ""
+	}
+	return " under " | prefix
+}
+
+// parseCounts reads the runtime's dump: one "coversite <id> count=<n>" line per
+// site that ran, keyed by the id as text.
+func parseCounts(data string) (m map[string]uint64) {
+	m = map[string]uint64{}
+	for _, line := range mxutil.SplitLines(data) {
+		line = mxutil.TrimSpace(line)
+		if !mxutil.HasPrefix(line, "coversite ") {
+			continue
+		}
+		rest := line[int32(len("coversite ")):]
+		idEnd := int32(0)
+		for idEnd < int32(len(rest)) && rest[idEnd] != ' ' {
+			idEnd++
+		}
+		if idEnd == 0 || idEnd == int32(len(rest)) {
+			continue
+		}
+		id := rest[:idEnd]
+		rest = rest[idEnd+1:]
+		if !mxutil.HasPrefix(rest, "count=") {
+			continue
+		}
+		m[id] = parseU64(rest[int32(len("count=")):])
+	}
+	return
+}
+
+func parseU64(s string) (v uint64) {
+	for i := int32(0); i < int32(len(s)); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			break
+		}
+		v = v*10 + uint64(s[i]-'0')
+	}
+	return
+}
+
+// parseSites reads the compiler's table: [{"id":N,"name":"fn@file:line"}, ...].
+// Hand-parsed because the shape is fixed and the encoder writes no escaped
+// characters.
+func parseSites(data string, hits map[string]uint64, prefix string) (rs []rec) {
+	i := int32(0)
+	for i < int32(len(data)) {
+		k := indexOf(data, i, "\"id\":")
+		if k < 0 {
+			break
+		}
+		i = k + int32(len("\"id\":"))
+		id := scanNumber(data, i)
+		i += int32(len(id))
+		nk := indexOf(data, i, "\"name\":\"")
+		if nk < 0 {
+			break
+		}
+		i = nk + int32(len("\"name\":\""))
+		end := indexOf(data, i, "\"")
+		if end < 0 {
+			break
+		}
+		name := data[i:end]
+		i = end + 1
+
+		r := rec{hits: hits[id]}
+		at := lastIndexOf(name, '@')
+		if at < 0 {
+			continue
+		}
+		r.fn = name[:at]
+		loc := name[at+1:]
+		colon := lastIndexOf(loc, ':')
+		if colon < 0 {
+			continue
+		}
+		r.file = loc[:colon]
+		r.line = parseInt32(loc[colon+1:])
+		if r.file == "" {
+			// A synthetic block (a package init) has no source file.
+			continue
+		}
+		if prefix != "" && !mxutil.HasPrefix(r.file, prefix) {
+			continue
+		}
+		rs = mxutil.Ensure(rs, 1)
+		push(rs, r)
+	}
+	return
+}
+
+func indexOf(s string, from int32, needle string) (n int32) {
+	if len(needle) == 0 || from < 0 {
+		return -1
+	}
+	for i := from; i+int32(len(needle)) <= int32(len(s)); i++ {
+		if s[i:i+int32(len(needle))] == needle {
+			return i
+		}
+	}
+	return -1
+}
+
+func lastIndexOf(s string, c byte) (n int32) {
+	for i := int32(len(s)) - 1; i >= 0; i-- {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+func scanNumber(s string, from int32) (n string) {
+	i := from
+	for i < int32(len(s)) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	return s[from:i]
+}
+
+func parseInt32(s string) (v int32) {
+	for i := int32(0); i < int32(len(s)); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			break
+		}
+		v = v*10 + int32(s[i]-'0')
+	}
+	return
+}
+
+// sortRecs orders by file, then line, then function: insertion sort, because
+// Moxie's sort package has no Slice.
+func sortRecs(rs []rec) {
+	for i := int32(1); i < int32(len(rs)); i++ {
+		for j := i; j > 0 && less(rs[j], rs[j-1]); j-- {
+			rs[j], rs[j-1] = rs[j-1], rs[j]
+		}
+	}
+}
+
+func less(a, b rec) (ok bool) {
+	if a.file != b.file {
+		return a.file < b.file
+	}
+	if a.line != b.line {
+		return a.line < b.line
+	}
+	return a.fn < b.fn
+}

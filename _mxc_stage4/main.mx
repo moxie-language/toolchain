@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"unsafe"
 
+	"git.smesh.lol/moxie/pkg/mxcover"
 	"git.smesh.lol/moxie/pkg/mxutil"
 	. "git.smesh.lol/moxie/pkg/types"
 )
@@ -5258,8 +5259,34 @@ func cmdTest(args []string) {
 	}
 
 	writeCoverSites(outpath)
+	countsPath := ""
+	if bst.cover {
+		// The instrumented runtime appends its counters to MOXIE_COVER_OUT as
+		// each domain exits, and a child inherits the environment. Truncate
+		// first: one run is one report, and a stale dump would mark sites this
+		// run never reached as covered.
+		countsPath = mxutil.JoinPath(tmpdir, "cover.counts")
+		mxutil.WriteFile(countsPath, []byte{}, 0644)
+		mxutil.Setenv("MOXIE_COVER_OUT", countsPath)
+	}
 	mxutil.WriteStr(2, "  run tests\n")
 	rc = run([]string{outpath})
+	if bst.cover {
+		mxutil.Setenv("MOXIE_COVER_OUT", "")
+		prefix := bst.globalModPrefix
+		if prefix != "" {
+			prefix = prefix | "/"
+		}
+		// The harness owns both halves of a -cover run (it wrote the site
+		// table and it started the instrumented binary), so it prints the
+		// report itself instead of leaving the join to an external tool.
+		rep, coverErr := mxcover.Report(outpath|".cover_sites.json", countsPath, prefix)
+		if coverErr != "" {
+			mxutil.WriteStr(2, "coverage: " | coverErr | "\n")
+		} else {
+			mxutil.WriteStr(1, rep)
+		}
+	}
 	exitNow(int32(rc))
 }
 

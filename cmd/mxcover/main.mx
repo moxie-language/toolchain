@@ -10,23 +10,16 @@
 // path prefix limits the report to files under it, which is how a relay build
 // reports on its own tree while the runtime and stdlib are compiled in too.
 //
-// Output: the totals, a per-file table, then every line that never ran.
+// The join itself lives in pkg/mxcover, so `moxie test -cover` can print the
+// same report for the package it just ran without shelling out to this tool.
 package main
 
 import (
 	"fmt"
 	"os"
 
-	"git.smesh.lol/moxie/pkg/mxutil"
+	"git.smesh.lol/moxie/pkg/mxcover"
 )
-
-// rec is one site from the table with its hit count.
-type rec struct {
-	fn   string
-	file string
-	line int32
-	hits uint64
-}
 
 func main() {
 	args := os.Args
@@ -34,266 +27,14 @@ func main() {
 		fmt.Println("usage: mxcover <sites.json> <counts> [path-prefix]")
 		os.Exit(2)
 	}
-	sitesPath := args[1]
-	countsPath := args[2]
 	prefix := ""
 	if len(args) > 3 {
 		prefix = args[3]
 	}
-
-	sitesData, serr := os.ReadFile(sitesPath)
-	if serr != nil {
-		fmt.Println("mxcover: cannot read " | sitesPath)
+	out, errText := mxcover.Report(args[1], args[2], prefix)
+	if errText != "" {
+		fmt.Println("mxcover: " | errText)
 		os.Exit(1)
 	}
-	countsData, cerr := os.ReadFile(countsPath)
-	if cerr != nil {
-		fmt.Println("mxcover: cannot read " | countsPath)
-		os.Exit(1)
-	}
-
-	hits := parseCounts(string(countsData))
-	recs := parseSites(string(sitesData), hits, prefix)
-	if len(recs) == 0 {
-		fmt.Println("mxcover: no sites" | prefixNote(prefix))
-		os.Exit(1)
-	}
-	sortRecs(recs)
-
-	covered := int32(0)
-	for _, r := range recs {
-		if r.hits > 0 {
-			covered++
-		}
-	}
-	fmt.Println("sites: " | i32str(int32(len(recs))) | " covered: " | i32str(covered) | " (" | pct(covered, int32(len(recs))) | ")")
-
-	// Per-file table: covered sites over total sites, then the files with the
-	// most uncovered sites first would need a second sort, so the table stays in
-	// path order and the uncovered list below carries the detail.
-	var curFile string
-	var fileTotal, fileCov int32
-	for i := int32(0); i < int32(len(recs)); i++ {
-		r := recs[i]
-		if r.file != curFile {
-			if curFile != "" {
-				printFileLine(curFile, fileCov, fileTotal)
-			}
-			curFile = r.file
-			fileTotal = 0
-			fileCov = 0
-		}
-		fileTotal++
-		if r.hits > 0 {
-			fileCov++
-		}
-	}
-	if curFile != "" {
-		printFileLine(curFile, fileCov, fileTotal)
-	}
-
-	uncovered := int32(0)
-	for _, r := range recs {
-		if r.hits == 0 {
-			uncovered++
-		}
-	}
-	fmt.Println()
-	fmt.Println("uncovered sites: " | i32str(uncovered))
-	for _, r := range recs {
-		if r.hits == 0 {
-			fmt.Println("  " | r.file | ":" | i32str(r.line) | "  " | r.fn)
-		}
-	}
-}
-
-func printFileLine(file string, cov, total int32) {
-	fmt.Println(pct(cov, total) | "  " | i32str(cov) | "/" | i32str(total) | "  " | file)
-}
-
-// pct renders a percentage with one decimal, as text.
-func pct(n, total int32) (s string) {
-	if total == 0 {
-		return "  0.0%"
-	}
-	tenths := (int64(n) * 1000) / int64(total)
-	return i64str(tenths/10) | "." | i64str(tenths%10) | "%"
-}
-
-func i32str(n int32) (s string) { return i64str(int64(n)) }
-
-func i64str(n int64) (s string) {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	buf := []byte{:24}
-	i := int32(24)
-	for n > 0 {
-		i--
-		buf[i] = byte('0'+n%10)
-		n = n / 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
-}
-
-func prefixNote(prefix string) (s string) {
-	if prefix == "" {
-		return ""
-	}
-	return " under " | prefix
-}
-
-// parseCounts reads the runtime's dump: one "coversite <id> count=<n>" line per
-// site that ran, keyed by the id as text.
-func parseCounts(data string) (m map[string]uint64) {
-	m = map[string]uint64{}
-	for _, line := range mxutil.SplitLines(data) {
-		line = mxutil.TrimSpace(line)
-		if !mxutil.HasPrefix(line, "coversite ") {
-			continue
-		}
-		rest := line[int32(len("coversite ")):]
-		idEnd := int32(0)
-		for idEnd < int32(len(rest)) && rest[idEnd] != ' ' {
-			idEnd++
-		}
-		if idEnd == 0 || idEnd == int32(len(rest)) {
-			continue
-		}
-		id := rest[:idEnd]
-		rest = rest[idEnd+1:]
-		if !mxutil.HasPrefix(rest, "count=") {
-			continue
-		}
-		m[id] = parseU64(rest[int32(len("count=")):])
-	}
-	return
-}
-
-func parseU64(s string) (v uint64) {
-	for i := int32(0); i < int32(len(s)); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			break
-		}
-		v = v*10 + uint64(s[i]-'0')
-	}
-	return
-}
-
-// parseSites reads the compiler's table: [{"id":N,"name":"fn@file:line"}, ...].
-// Hand-parsed because the shape is fixed and the encoder writes no escaped
-// characters.
-func parseSites(data string, hits map[string]uint64, prefix string) (rs []rec) {
-	i := int32(0)
-	for i < int32(len(data)) {
-		k := indexOf(data, i, "\"id\":")
-		if k < 0 {
-			break
-		}
-		i = k + int32(len("\"id\":"))
-		id := scanNumber(data, i)
-		i += int32(len(id))
-		nk := indexOf(data, i, "\"name\":\"")
-		if nk < 0 {
-			break
-		}
-		i = nk + int32(len("\"name\":\""))
-		end := indexOf(data, i, "\"")
-		if end < 0 {
-			break
-		}
-		name := data[i:end]
-		i = end + 1
-
-		r := rec{hits: hits[id]}
-		at := lastIndexOf(name, '@')
-		if at < 0 {
-			continue
-		}
-		r.fn = name[:at]
-		loc := name[at+1:]
-		colon := lastIndexOf(loc, ':')
-		if colon < 0 {
-			continue
-		}
-		r.file = loc[:colon]
-		r.line = parseInt32(loc[colon+1:])
-		if r.file == "" {
-			// A synthetic block (a package init) has no source file.
-			continue
-		}
-		if prefix != "" && !mxutil.HasPrefix(r.file, prefix) {
-			continue
-		}
-		rs = mxutil.Ensure(rs, 1)
-		push(rs, r)
-	}
-	return
-}
-
-func indexOf(s string, from int32, needle string) (n int32) {
-	if len(needle) == 0 || from < 0 {
-		return -1
-	}
-	for i := from; i+int32(len(needle)) <= int32(len(s)); i++ {
-		if s[i:i+int32(len(needle))] == needle {
-			return i
-		}
-	}
-	return -1
-}
-
-func lastIndexOf(s string, c byte) (n int32) {
-	for i := int32(len(s)) - 1; i >= 0; i-- {
-		if s[i] == c {
-			return i
-		}
-	}
-	return -1
-}
-
-func scanNumber(s string, from int32) (n string) {
-	i := from
-	for i < int32(len(s)) && s[i] >= '0' && s[i] <= '9' {
-		i++
-	}
-	return s[from:i]
-}
-
-func parseInt32(s string) (v int32) {
-	for i := int32(0); i < int32(len(s)); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			break
-		}
-		v = v*10 + int32(s[i]-'0')
-	}
-	return
-}
-
-// sortRecs orders by file, then line, then function: insertion sort, because
-// Moxie's sort package has no Slice.
-func sortRecs(rs []rec) {
-	for i := int32(1); i < int32(len(rs)); i++ {
-		for j := i; j > 0 && less(rs[j], rs[j-1]); j-- {
-			rs[j], rs[j-1] = rs[j-1], rs[j]
-		}
-	}
-}
-
-func less(a, b rec) (ok bool) {
-	if a.file != b.file {
-		return a.file < b.file
-	}
-	if a.line != b.line {
-		return a.line < b.line
-	}
-	return a.fn < b.fn
+	fmt.Print(out)
 }

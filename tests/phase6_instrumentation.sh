@@ -403,6 +403,43 @@ for cc in "$MOXIE" "$LEGACY"; do
 	rm -rf "$td" "$edir"
 done
 
+# 6m: the coverage join is one implementation (pkg/mxcover) shared by the
+# mxcover command and `moxie test -cover`, so both print identical text. The
+# same fixture and expected report are asserted by legacy/cover's Go test for
+# the legacy harness (legacy's own `moxie test` cannot build these packages in
+# this tree, so its report is locked by that unit test instead).
+name="coverreport:stage4"
+td="$(tempdir "coverreport")"; rm -rf "$td"; mkdir -p "$td"
+rc=0
+MOXIEROOT="$MOXIEROOT" "$MOXIE" build -o "$td/mxcover" "$ROOT/cmd/mxcover" >"$td/build.log" 2>&1 || rc=$?
+if [ $rc -ne 0 ]; then
+	log_fail "$name" "mxcover build failed: $(tail -3 "$td/build.log" | tr '\n' ' ')"
+else
+	"$td/mxcover" "$SCRIPT_DIR/data/mxcover/sites.json" "$SCRIPT_DIR/data/mxcover/counts" "git.smesh.lol/smesh/" >"$td/got.txt" 2>&1 || rc=$?
+	if [ $rc -ne 0 ]; then
+		log_fail "$name" "mxcover exited $rc: $(tail -2 "$td/got.txt" | tr '\n' ' ')"
+	elif cmp -s "$td/got.txt" "$SCRIPT_DIR/data/mxcover/want.txt"; then
+		log_pass "$name" "report matches the shared fixture"
+	else
+		log_fail "$name" "report differs: $(diff "$SCRIPT_DIR/data/mxcover/want.txt" "$td/got.txt" | head -3 | tr '\n' ' ')"
+	fi
+fi
+rm -rf "$td"
+
+# 6n: the reporter's parser and arithmetic units, run by the compiler that
+# ships them (`moxie test ./pkg/mxcover`). pkg/mxcover is a package so the
+# harness can print the same report the command does.
+name="coverunit:stage4"
+td="$(tempdir "coverunit")"; rm -rf "$td"; mkdir -p "$td"
+rc=0
+out="$(MOXIEROOT="$MOXIEROOT" timeout 900 "$MOXIE" test "$ROOT/pkg/mxcover" 2>&1)" || rc=$?
+if [ $rc -eq 0 ] && echo "$out" | grep -q "^PASS: "; then
+	log_pass "$name" "$(echo "$out" | grep '^PASS: ')"
+else
+	log_fail "$name" "$(echo "$out" | tail -3 | tr '\n' ' ')"
+fi
+rm -rf "$td"
+
 failed=0
 if [ -f "$STATUSFILE" ]; then
 	failed=$(grep -c FAIL "$STATUSFILE" 2>/dev/null) || failed=0

@@ -26,6 +26,7 @@ import (
 	"moxie/builder"
 	"moxie/cache"
 	"moxie/compileopts"
+	"moxie/cover"
 	"moxie/diagnostics"
 	"moxie/goenv"
 	"moxie/loader"
@@ -204,6 +205,10 @@ func Test(pkgName string, stdout, stderr io.Writer, options *compileopts.Options
 
 	passed := false
 	var duration time.Duration
+	// Set when the test binary runs under -cover: the counters the instrumented
+	// runtime dumps, and the site table the compiler wrote beside the binary.
+	coverCounts := ""
+	coverSites := ""
 	result, err := buildAndRun(pkgName, config, output, flags, nil, 0, func(cmd *exec.Cmd, result builder.BuildResult) error {
 		if testConfig.CompileOnly || outpath != "" {
 			if outpath == "" {
@@ -216,6 +221,14 @@ func Test(pkgName string, stdout, stderr io.Writer, options *compileopts.Options
 			return nil
 		}
 		cmd.Dir = result.MainDir
+		if config.Options.Cover {
+			// One run, one report: a stale dump would mark sites this run never
+			// reached as covered. The child inherits the environment.
+			coverCounts = result.Binary + ".cover_counts"
+			coverSites = result.Binary + ".cover_sites.json"
+			_ = os.WriteFile(coverCounts, nil, 0666)
+			cmd.Env = append(os.Environ(), "MOXIE_COVER_OUT="+coverCounts)
+		}
 		start := time.Now()
 		err = cmd.Run()
 		duration = time.Since(start)
@@ -245,6 +258,19 @@ func Test(pkgName string, stdout, stderr io.Writer, options *compileopts.Options
 		fmt.Fprintf(w, "ok  \t%s\t%.3fs\n", importPath, duration.Seconds())
 	} else {
 		fmt.Fprintf(w, "FAIL\t%s\t%.3fs\n", importPath, duration.Seconds())
+	}
+	if coverCounts != "" {
+		// The harness owns both halves of a -cover run (it wrote the site table
+		// and it started the instrumented binary), so it prints the report
+		// itself rather than leaving the join to an external tool. stage4's
+		// `moxie test -cover` prints the same text.
+		wd, _ := os.Getwd()
+		prefix := cover.ModulePrefix(wd)
+		if rep, rerr := cover.Report(coverSites, coverCounts, prefix); rerr != nil {
+			fmt.Fprintf(w, "coverage: %v\n", rerr)
+		} else {
+			fmt.Fprint(w, rep)
+		}
 	}
 	return passed, err
 }
