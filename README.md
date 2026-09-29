@@ -16,6 +16,18 @@ A compiled systems language for domain-isolated event-driven programs. Each prog
 
 Moxie descends from [TinyGo](https://tinygo.org/). All embedded targets and threading infrastructure have been stripped. What remains is a compilation pipeline for Linux, Darwin, and browser JS, rewired for single-threaded domains with process-level isolation via `spawn`.
 
+## Axioms
+
+Everything in Moxie derives from two axioms. They are stated, justified, and expanded into thirty lemmas in **[docs/axioms.md](docs/axioms.md)**, which is the normative document: where any other document appears to conflict with it, the axioms win.
+
+**A1 - just the facts.** Every property that governs execution is declared and statically checkable. Nothing that determines behaviour is inferred, negotiated, or discovered at runtime.
+
+**A2 - total isolation.** No component can address another component's state, and every fact has exactly one authoritative owner. State has one owner; interfaces have two.
+
+The operational test: a proposed feature must name the axiom that forces it. If neither axiom forces it, it is an opinion, and it is deleted.
+
+Every rule below is a consequence of those two. Where a section states a rule, it is a lemma from docs/axioms.md.
+
 ## Quick Start
 
 ### Prerequisites
@@ -72,6 +84,8 @@ func main() {
 
 Each domain runs a single thread. No goroutines, no scheduler, no task switching.
 
+The tree of domains is the consequence of A2 (total isolation) and A1 (just the facts): `spawn` is the only construct that creates a peer, so the topology is a declared and statically checkable artifact (lemma L20).
+
 | Construct | Behavior |
 |-----------|----------|
 | Unbuffered channel send | Execution jumps to the waiting `select` case |
@@ -115,11 +129,19 @@ Built-in codec types: `Bool`, `Int8`, `Uint8`, `Int16`, `Uint16`, `Int32`, `Uint
 | `uintptr` | Explicit pointer types |
 | `import "strings"` | `import "bytes"` |
 
-## Spawn Channel Model: Non-blocking Duplex
+## Spawn Channel Model: Shared Rings, Non-blocking Duplex
 
-Spawn channels are non-blocking on both sides. The runtime uses `moxie_peek` (non-blocking) to check for data before reading, and `pipeSendNB` (non-blocking) for sends. When the pipe buffer is full or empty, the runtime yields for 1ms and retries indefinitely until the operation succeeds or the pipe closes. No domain ever blocks in a syscall waiting for the other side.
+A spawn-bound channel is a pair of shared single-producer single-consumer ring buffers, one per direction, created with `mmap(MAP_SHARED)` before `fork` so both processes map the same physical memory. There is no socketpair and no pipe in the channel transport. Each direction has exactly one writer and one reader (lemma L12), which is what makes the ring sound without locks.
 
-The spawn socketpair is full-duplex - both sides can send simultaneously. Both sides are symmetric concurrent peers. Backpressure is expressed by pipe buffer fullness, not by sender blocking.
+The ring is a 32MB data area per direction, lazily faulted, so the virtual reservation is cheap and no frame within `ringMaxMsg` can silently truncate.
+
+Both directions always exist. The two sides are symmetric concurrent peers, and neither can freeze the other. Backpressure is expressed by ring occupancy, never by a sender blocking in a syscall (lemma L21: the index word is both the state and the notification).
+
+Control rides the same shared memory rather than a separate channel:
+
+- **channel close** - the ring header's closed flag (`ringClose`)
+- **child readiness** - a shared control block's ready atomic, which the parent spins on for the synchronous spawn rendezvous
+- **child death** - `waitpid` on the parent side, `getppid` on the child side (an orphaned child observes the change and exits)
 
 ### ChanID convention
 
@@ -129,10 +151,10 @@ chanID 0 = control (close signals), chanID 1 = first spawn channel arg, chanID 2
 
 | Operation | Behavior |
 |-----------|----------|
-| `ch <- v` | Non-blocking send with retry-and-yield (1ms). Retries until success or pipe close. |
-| `v := <-ch` | Non-blocking recv with retry-and-yield (1ms). Retries until data arrives or pipe close. |
-| `select { case v := <-ch: }` | Non-blocking poll via `tryPipeRecv`/`tryPipeSend`. |
-| `close(ch)` | Sends close marker (chanID 0) to remote, then closes locally. |
+| `ch <- v` | Encode, `ringSend`, retry-and-yield on backpressure. Returns false on close or peer death. |
+| `v := <-ch` | `ringRecv`, retry-and-yield while empty. Returns `ok = false` on close or peer death. |
+| `select { case v := <-ch: }` | Non-blocking poll via `tryPipeRecv`/`tryPipeSend`, which must never block. |
+| `close(ch)` | `ringClose` on both rings; the peer observes the closed flag on recv and on send. |
 
 ## Targets
 
@@ -152,6 +174,7 @@ All native binaries are fully statically linked.
 
 ## Documentation
 
+- **[docs/axioms.md](docs/axioms.md)** - The two axioms, their justification, and the derived lemmas (normative)
 - **[REFERENCE.md](REFERENCE.md)** - Complete language specification
 - **[TUTORIAL.md](TUTORIAL.md)** - Learn Moxie from scratch
 - **[EXAMPLE_CLAUDE.md](EXAMPLE_CLAUDE.md)** - AI coding assistant configuration

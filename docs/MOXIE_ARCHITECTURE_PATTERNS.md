@@ -2,6 +2,8 @@
 
 *Domain-isolated, event-driven program design: principles, patterns, and worked examples.*
 
+The rules in this document are applications of the two axioms in [axioms.md](axioms.md), not independent recommendations. The Five Laws in section 2 are the axioms read at the inter-domain scale, and sections 3 and 4 are the patterns that follow from them in practice. Where a rule here appears to conflict with the axioms, the axioms are correct.
+
 ---
 
 ## 1. The Model
@@ -84,7 +86,7 @@ Rules of the fractal:
 
 - **Orchestrators route; leaves compute.** A domain is one or the other. Mixing the roles is the smell that precedes every tangled event loop.
 - **Parents own children.** A child's lifecycle belongs to its parent: the parent spawns it, the parent detects its death, the parent decides what death means. A child never knows about its siblings except through channels the parent wired up.
-- **Depth is cheap, width is deliberate.** Adding a level of orchestration costs one process and some pipe buffers. Adding width (pool size) is a capacity decision and should be a config number, not an architectural one.
+- **Depth is spent only where a pool is needed; width is the capacity number.** A level of orchestration exists to place N workers under a manager, and it costs one process plus its ring pairs. Depth is never spent for organization (lemma L23), and pools are never nested: if the workers turn out to be too granular, widen the workers rather than adding a level. Pool width is a config number, not an architectural one.
 
 ---
 
@@ -102,11 +104,11 @@ Anti-pattern: a "registry" domain that holds state belonging to many short-lived
 
 Every peer-to-peer interaction gets **independent bidirectional channels**. Give the stranger a key, not the house: a child receives exactly the channels it needs, typed to exactly the messages it handles, and nothing else. Moxie enforces the strong version of this - there is no way to pass a pointer, closure, or interface through `spawn`, so a child physically cannot reach anything it wasn't given.
 
-The duplex requirement is not stylistic. A simplex channel plus a lock-like turn-taking convention is strictly more complex and introduces deadlock: if both sides must take turns, each can end up waiting for the other's turn. The spawn socketpair is full-duplex and both sides are symmetric concurrent peers; design your logical channels the same way.
+The duplex requirement is not stylistic. A simplex channel plus a lock-like turn-taking convention is strictly more complex and introduces deadlock: if both sides must take turns, each can end up waiting for the other's turn. A spawn channel is duplex by construction - two shared rings, one per direction - and both sides are symmetric concurrent peers; design your logical channels the same way.
 
 ### Water - backpressure by buffer
 
-Contested flow resolves through buffer state, not through freezing the sender. Moxie's spawn channels implement this at the runtime level: sends and receives are non-blocking with retry-and-yield, and backpressure is expressed by pipe buffer fullness. Neither side can freeze the other in a syscall.
+Contested flow resolves through buffer state, not through freezing the sender. Moxie's spawn channels implement this at the runtime level: sends and receives are non-blocking with retry-and-yield, and backpressure is expressed by ring occupancy. Neither side can freeze the other in a syscall.
 
 At the application level, honor the same principle. A producer that outruns a consumer should see a full buffer and make a *policy decision* - drop, coalesce, spill, or slow its own intake - rather than wedging. The policy belongs to the producer because the producer has the context to decide what staleness means for its data.
 
@@ -327,7 +329,7 @@ func decoderPool(ctl chan moxie.Bytes, in chan RawMsg, out chan Event, width mox
 }
 ```
 
-Why not N workers reading one shared channel? Shared-channel work-stealing is implicit coordination - it works in Go's runtime but it is a structure the orchestrator does not control and cannot observe. Explicit dispatch keeps the routing decision where the routing knowledge is, makes per-worker load measurable (fire), and maps directly onto the spawn model where each child has its own pipe anyway.
+Why not N workers reading one shared channel? Shared-channel work-stealing is implicit coordination - it works in Go's runtime but it is a structure the orchestrator does not control and cannot observe. Explicit dispatch keeps the routing decision where the routing knowledge is, makes per-worker load measurable (fire), and maps directly onto the spawn model where each child has its own ring pair anyway.
 
 Buffered per-worker result channels eliminate head-of-line blocking: a slow worker just presents an empty buffer when the collector rotates past; fast workers never wait on it. Workers block only when their own buffer fills - backpressure, not deadlock (water).
 
@@ -354,7 +356,7 @@ Never auto-recover *state*. Respawning a worker recreates a process, not its mem
 
 ### 4.6 Shutdown
 
-Shutdown propagates root-to-leaf as control messages; completion propagates leaf-to-root as channel closes. The root closes control to its children; each orchestrator forwards to its children, waits for their closes, finishes its own teardown, then closes toward its parent. Inversion (leaves outliving parents) is impossible by construction because the pipe close is itself the death notification.
+Shutdown propagates root-to-leaf as control messages; completion propagates leaf-to-root as channel closes. The root closes control to its children; each orchestrator forwards to its children, waits for their closes, finishes its own teardown, then closes toward its parent. Inversion (leaves outliving parents) is impossible by construction: a child detects its own orphaning when `getppid` stops returning the pid it captured at spawn, and exits.
 
 Drain semantics are a per-stage decision and must be explicit: on shutdown, does a stage finish its queued input (drain-then-stop) or abandon it (stop-now)? Stages with durable side effects (store) drain; stages with idempotent or refetchable input (decoders) stop. Write it in the message contract.
 
@@ -382,6 +384,7 @@ The deepest alignment: DDD's central struggle is keeping models from bleeding ac
 
 Run against any design before building:
 
+- [ ] Does every placement satisfy the axioms - reach, lifetime, single authority, and depth only for throughput? (docs/axioms.md)
 - [ ] Does `main` contain only spawn, route, supervise? (§1.1)
 - [ ] Is every domain either an orchestrator or a leaf, never both? (§1.2)
 - [ ] Does every piece of state have exactly one owning domain, with the longer lifetime? (earth)
