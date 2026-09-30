@@ -440,6 +440,32 @@ else
 fi
 rm -rf "$td"
 
+# 6o: a shift whose left operand is an untyped constant is typed by its
+# context, not by the count. stage4 typed `1 << c` (c a byte) as uint8, so the
+# emitter's overshift select (Go: a count >= the width shifts to zero) zeroed
+# every count >= 8 - `bytes.TrimRight(s, "\r\n")` never trimmed and the
+# mediaproxy header loop read past the blank line. legacy was already right.
+for cc in "$MOXIE" "$LEGACY"; do
+	label="stage4"
+	if [ "$cc" = "$LEGACY" ]; then label="legacy"; fi
+	name="shiftconst:$label"
+	td="$(tempdir "shiftconst_$label")"; rm -rf "$td"; mkdir -p "$td"
+	sdir="$(fixture shiftconst)"
+	rc=0
+	MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$sdir" >"$td/build.log" 2>&1 || rc=$?
+	if [ $rc -ne 0 ]; then
+		log_fail "$name" "build failed: $(tail -3 "$td/build.log" | tr '\n' ' ')"
+	else
+		out="$("$td/bin" 2>&1 || true)"
+		if [ "$(echo "$out" | head -1)" = "ok" ]; then
+			log_pass "$name" "untyped-constant shift takes the context type"
+		else
+			log_fail "$name" "got '$(echo "$out" | head -1)', want 'ok'"
+		fi
+	fi
+	rm -rf "$td" "$sdir"
+done
+
 failed=0
 if [ -f "$STATUSFILE" ]; then
 	failed=$(grep -c FAIL "$STATUSFILE" 2>/dev/null) || failed=0

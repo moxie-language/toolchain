@@ -1921,6 +1921,12 @@ func (fb *ssaFuncBuilder) checkCallArgs(args []SSAValue, sig *Signature, hasDots
 		if pt == nil {
 			continue
 		}
+		// The parameter's type is the shift's context: `g(1 << n)` with a
+		// uint64 parameter is a 64-bit shift, the same context a return or an
+		// assignment gives it.
+		if bin, okB := args[i].(*SSABinOp); okB && bin.untypedShift {
+			retypeUntypedShift(bin, pt)
+		}
 		fb.checkAssignable(args[i], pt, "argument to function")
 		args[i] = fb.coerceArg(args[i], pt)
 	}
@@ -2694,6 +2700,10 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			initVal = fb.buildExpr(dd.Values)
 		}
 		if dd.Type != nil && initVal != nil && typ != nil {
+			// A declared type is the shift's context, like an assignment.
+			if bin, okB := initVal.(*SSABinOp); okB && bin.untypedShift {
+				retypeUntypedShift(bin, typ)
+			}
 			fb.checkAssignable(initVal, typ, "variable declaration")
 		}
 		if typ == nil && initVal != nil {
@@ -2745,6 +2755,9 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			if multiVals != nil && ni < len(multiVals) {
 				v = multiVals[ni]
 				if v != nil {
+					if bin, okB := v.(*SSABinOp); okB && bin.untypedShift {
+						retypeUntypedShift(bin, ObjectType(obj))
+					}
 					fb.checkAssignable(v, ObjectType(obj), "variable declaration")
 				}
 			}
@@ -3963,6 +3976,11 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 		for i, v := range vals {
 			if i < fb.fn.Signature.Results.Len() {
 				retType := fb.fn.Signature.Results.At(i).Typ
+				// The result type is the shift's context, so `return 1 << n`
+				// from a uint64 function is a 64-bit shift.
+				if bin, okB := v.(*SSABinOp); okB && bin.untypedShift {
+					retypeUntypedShift(bin, retType)
+				}
 				fb.checkAssignable(v, retType, "return statement")
 				if n, ok := retType.(*Named); ok && n != nil {
 					u := n.Underlying()
@@ -4730,9 +4748,24 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 				xShifted = true
 			}
 			if xUntyped || xShifted {
-				if xUntyped && b.typ != nil {
-					if wider := shiftConstWiden(x, b.typ); wider != nil {
-						b.typ = wider
+				if xUntyped {
+					// The shift's type is the left operand's, and an untyped
+					// operand takes the type it would have in context - with
+					// none, its default type. The count's type is not that
+					// context: `1 << c` with a byte count was typed uint8, so
+					// the emitter's overshift select (count >= 8) answered 0
+					// for every count >= 8 and `bytes.TrimRight(s, "\r\n")`
+					// never trimmed. A constant too wide for the default keeps
+					// its widened type, as before.
+					if xb, okB := SafeUnderlying(xT).(*Basic); okB {
+						if d := defaultReprType(xb); d != nil {
+							b.typ = d
+						}
+					}
+					if b.typ != nil {
+						if wider := shiftConstWiden(x, b.typ); wider != nil {
+							b.typ = wider
+						}
 					}
 				}
 				b.untypedShift = true
@@ -6186,6 +6219,13 @@ func (fb *ssaFuncBuilder) buildCompositeLit(e *syntax.CompositeLit) (s SSAValue)
 				k := fb.buildExpr(kv.Key)
 				v := fb.buildExpr(kv.Value)
 				if k != nil && v != nil {
+					// The map's key and element types are the shift's context.
+					if kb, okB := k.(*SSABinOp); okB && kb.untypedShift {
+						retypeUntypedShift(kb, mt.Key)
+					}
+					if vb, okB := v.(*SSABinOp); okB && vb.untypedShift {
+						retypeUntypedShift(vb, mt.Elem)
+					}
 					fb.checkAssignable(k, mt.Key, "map literal")
 					fb.checkAssignable(v, mt.Elem, "map literal")
 					k = fb.coerceToInterface(k, mt.Key)
@@ -6480,6 +6520,10 @@ func (fb *ssaFuncBuilder) storeLitElem(dst SSAValue, expr syntax.Expr, elemTyp T
 	if v == nil {
 		return
 	}
+	// The element type is the shift's context, like an assignment.
+	if bin, okB := v.(*SSABinOp); okB && bin.untypedShift {
+		retypeUntypedShift(bin, elemTyp)
+	}
 	fb.checkAssignable(v, elemTyp, what)
 	v = fb.coerceToInterface(v, elemTyp)
 	fb.emitStore(dst, v)
@@ -6539,6 +6583,9 @@ func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ Type, sl *Sl
 		}
 		if v == nil {
 			continue
+		}
+		if bin, okB := v.(*SSABinOp); okB && bin.untypedShift {
+			retypeUntypedShift(bin, elemTyp)
 		}
 		fb.checkAssignable(v, elemTyp, "array or slice literal")
 		idx := &SSAConst{typ: Typ[Int32], val: &ConstInt{V:int64(i)}}

@@ -1,0 +1,59 @@
+// A shift whose left operand is an untyped constant takes the type the
+// context gives it, never the count's type.
+//
+// stage4 typed `1 << c` (c a byte) as uint8, so the emitter's overshift
+// select - Go says a count >= the operand width shifts to zero - rejected
+// every count >= 8 and the result was 0: `bytes.TrimRight(s, "\r\n")` never
+// trimmed, so the mediaproxy header loop ran past the blank line and every
+// fetch failed with "read header: EOF" once the peer closed. legacy (go/ssa)
+// types the shift from its context and answered correctly.
+package main
+
+import "fmt"
+
+func byteCount(c byte) (r uint32) { return 1 << (c % 32) }
+func byteCountTy(c byte) (r uint32) { return uint32(1) << (c % 32) }
+func sixtyFour(c byte) (r uint64) { return 1 << (c % 64) }
+func fromCount(c byte) (r uint32) { return 1 << c }
+func addZero(c byte) (r uint32) { return 1<<(c%32) + 0 }
+func arg64(x uint64) (r uint64) { return x }
+func viaArg(c byte) (r uint64) { return arg64(1 << (c % 64)) }
+func viaSlice(c byte) (r uint64) { s := []uint64{1 << (c % 64)}; return s[0] }
+func viaMap(c byte) (r uint64) { m := map[string]uint64{"a": 1 << (c % 64)}; return m["a"] }
+func viaIf(c byte) (r uint64) { if v := uint64(1) << (c % 64); v > 0 { return v }; return 0 }
+
+var pkgShift byte = 13
+var pkgVal uint64 = 1 << (pkgShift % 32)
+
+func main() {
+	var c byte = 13
+	var big byte = 40
+	if byteCount(c) != 8192 || byteCountTy(c) != 8192 || fromCount(c) != 8192 || addZero(c) != 8192 {
+		panic("32-bit forms")
+	}
+	if sixtyFour(big) != 1<<40 || viaArg(big) != 1<<40 {
+		panic("64-bit context")
+	}
+	var assigned uint64 = 1 << (c % 32)
+	if assigned != 8192 {
+		panic("var declaration")
+	}
+	var multiA, multiB uint64 = 1 << (c % 32), 1 << (big % 32)
+	if multiA != 8192 || multiB != 256 {
+		panic("multi var declaration")
+	}
+	if viaSlice(big) != 1<<40 {
+		panic("slice literal element")
+	}
+	if viaMap(big) != 1<<40 {
+		panic("map literal value")
+	}
+	if viaIf(big) != 1<<40 {
+		panic("if initializer")
+	}
+	if pkgVal != 8192 {
+		panic("package variable")
+	}
+	fmt.Printf("ok\n")
+	fmt.Printf("shift %d %d %d %d %d %d\n", byteCount(c), sixtyFour(big), assigned, multiB, viaSlice(big), pkgVal)
+}
