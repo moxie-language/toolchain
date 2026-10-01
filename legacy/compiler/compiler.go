@@ -2966,6 +2966,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 
 			b.createNilCheck(expr.X, value, "slice")
 			b.createSliceBoundsCheck(llvmLen, low, high, max, lowType, highType, maxType)
+			low = b.clampSliceLow(low, high, llvmLen)
 
 			// Truncate ints bigger than uintptr. This is after the bounds
 			// check so it's safe.
@@ -3003,6 +3004,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			}
 
 			b.createSliceBoundsCheck(oldCap, low, high, max, lowType, highType, maxType)
+			low = b.clampSliceLow(low, high, oldLen)
 
 			if b.targetData.TypeAllocSize(low.Type()) > b.targetData.TypeAllocSize(b.uintptrType) {
 				low = b.CreateTrunc(low, b.uintptrType, "")
@@ -3055,6 +3057,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			}
 
 			b.createSliceBoundsCheck(oldLen, low, high, high, lowType, highType, maxType)
+			low = b.clampSliceLow(low, high, oldLen)
 
 			// Truncate ints bigger than uintptr. This is after the bounds
 			// check so it's safe.

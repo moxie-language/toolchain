@@ -466,6 +466,32 @@ for cc in "$MOXIE" "$LEGACY"; do
 	rm -rf "$td" "$sdir"
 done
 
+# 6p: a reslice is clamped to its parent instead of producing a negative
+# length. `s[1:]` on an empty slice was len -1, so the tree's
+# `for ; len(r) > 0; r = r[1:]` loops left `r` holding a negative length and
+# the `if len(r) == 0` guards that follow never fired; a truncated REQ filter
+# then read past the end and killed the relay.
+for cc in "$MOXIE" "$LEGACY"; do
+	label="stage4"
+	if [ "$cc" = "$LEGACY" ]; then label="legacy"; fi
+	name="sliceres:$label"
+	td="$(tempdir "sliceres_$label")"; rm -rf "$td"; mkdir -p "$td"
+	srdir="$(fixture sliceres)"
+	rc=0
+	MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$srdir" >"$td/build.log" 2>&1 || rc=$?
+	if [ $rc -ne 0 ]; then
+		log_fail "$name" "build failed: $(tail -3 "$td/build.log" | tr '\n' ' ')"
+	else
+		out="$("$td/bin" 2>&1 || true)"
+		if [ "$(echo "$out" | head -1)" = "ok" ]; then
+			log_pass "$name" "a reslice clamps to its parent"
+		else
+			log_fail "$name" "got '$(echo "$out" | head -1)', want 'ok'"
+		fi
+	fi
+	rm -rf "$td" "$srdir"
+done
+
 failed=0
 if [ -f "$STATUSFILE" ]; then
 	failed=$(grep -c FAIL "$STATUSFILE" 2>/dev/null) || failed=0

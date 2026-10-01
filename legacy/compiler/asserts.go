@@ -64,6 +64,19 @@ func (b *builder) createLookupBoundsCheck(arrayLen, index llvm.Value) {
 	b.createRuntimeAssert(outOfBounds, "lookup", "lookupPanic")
 }
 
+// clampSliceLow folds the low bound into [0, length] and never above high.
+// Moxie emits no slice bounds check - the programmer owns the indices - but an
+// exhausted cursor (`s[1:]` on an empty slice) must not produce a slice with a
+// negative length: the tree's `for ; len(r) > 0; r = r[1:]` loops leave `r`
+// empty and the `if len(r) == 0` guards that follow have to fire. A valid
+// slice (0 <= low <= high <= length) is untouched.
+func (b *builder) clampSliceLow(low, high, length llvm.Value) llvm.Value {
+	cmp := b.CreateICmp(llvm.IntULT, low, length, "")
+	low = b.CreateSelect(cmp, low, length, "")
+	cmp = b.CreateICmp(llvm.IntULT, low, high, "")
+	return b.CreateSelect(cmp, low, high, "")
+}
+
 // createSliceBoundsCheck emits a bounds check before a slicing operation to make
 // sure it is within bounds.
 //

@@ -3409,21 +3409,40 @@ func (e *irEmitter) emitSliceOp(s *SSASlice) {
 	}
 	// View: sub-slice aliases the parent (no shared memory, so no
 	// aliasing hazard; the runtime codec copies on return).
+	//
+	// No bounds check is emitted - Moxie leaves the indices to the programmer
+	// - but an exhausted cursor must not produce a negative length: the
+	// tree's `for ; len(r) > 0; r = r[1:]` loops leave `r` empty and the
+	// `if len(r) == 0` guards that follow have to fire (a truncated REQ
+	// filter read past the end and killed the relay). Clamp the low bound
+	// only, so every valid slice (0 <= low <= high <= len) is untouched.
+	lowC := e.uminIpt(ipt, low, oldLen)
+	lowC = e.uminIpt(ipt, lowC, high)
 	newLen := e.nextReg2("sl")
-	e.w("  ") ; e.w(newLen) ; e.w(" = sub ") ; e.w(ipt) ; e.w(" ") ; e.w(high) ; e.w(", ") ; e.w(low) ; e.w("\n")
+	e.w("  ") ; e.w(newLen) ; e.w(" = sub ") ; e.w(ipt) ; e.w(" ") ; e.w(high) ; e.w(", ") ; e.w(lowC) ; e.w("\n")
 	elemSz := e.nextReg2("sl")
 	e.w("  ") ; e.w(elemSz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(elemType) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
 	srcOff := e.nextReg2("sl")
-	e.w("  ") ; e.w(srcOff) ; e.w(" = mul ") ; e.w(ipt) ; e.w(" ") ; e.w(low) ; e.w(", ") ; e.w(elemSz) ; e.w("\n")
+	e.w("  ") ; e.w(srcOff) ; e.w(" = mul ") ; e.w(ipt) ; e.w(" ") ; e.w(lowC) ; e.w(", ") ; e.w(elemSz) ; e.w("\n")
 	srcPtr := e.nextReg2("sl")
 	e.w("  ") ; e.w(srcPtr) ; e.w(" = getelementptr inbounds i8, ptr ") ; e.w(oldPtr) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(srcOff) ; e.w("\n")
 	newCap := e.nextReg2("sl")
-	e.w("  ") ; e.w(newCap) ; e.w(" = sub ") ; e.w(ipt) ; e.w(" ") ; e.w(oldCap) ; e.w(", ") ; e.w(low) ; e.w("\n")
+	e.w("  ") ; e.w(newCap) ; e.w(" = sub ") ; e.w(ipt) ; e.w(" ") ; e.w(oldCap) ; e.w(", ") ; e.w(lowC) ; e.w("\n")
 	s1 := e.nextReg2("sl")
 	e.w("  ") ; e.w(s1) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" undef, ptr ") ; e.w(srcPtr) ; e.w(", 0\n")
 	s2 := e.nextReg2("sl")
 	e.w("  ") ; e.w(s2) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s1) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(newLen) ; e.w(", 1\n")
 	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s2) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(newCap) ; e.w(", 2\n")
+}
+
+// uminIpt emits the unsigned minimum of two intptr-width values, the clamp a
+// slice index needs so an exhausted cursor stays an empty view of its parent.
+func (e *irEmitter) uminIpt(ipt, a, b string) (s string) {
+	lt := e.nextReg2("mn")
+	e.w("  ") ; e.w(lt) ; e.w(" = icmp ult ") ; e.w(ipt) ; e.w(" ") ; e.w(a) ; e.w(", ") ; e.w(b) ; e.w("\n")
+	s = e.nextReg2("mn")
+	e.w("  ") ; e.w(s) ; e.w(" = select i1 ") ; e.w(lt) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(a) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(b) ; e.w("\n")
+	return
 }
 
 func (e *irEmitter) sliceIdxToIpt(val SSAValue, ipt string) (s string) {

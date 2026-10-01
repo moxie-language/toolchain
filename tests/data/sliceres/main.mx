@@ -1,0 +1,71 @@
+// A reslice past the end of a slice must stay a well-formed view of its
+// parent: an empty slice, not a slice with a negative length.
+//
+// Moxie emits no slice bounds check - the programmer owns the indices - but
+// `s[1:]` on an empty slice produced len -1, so the tree's
+// `for ; len(r) > 0; r = r[1:]` loops left `r` with a negative length and the
+// `if len(r) == 0` guards that follow never fired. A truncated REQ filter
+// (`{"kinds":[1`) then read past the end and killed the relay.
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func consume(s []byte) (n int32) {
+	for ; len(s) > 0; s = s[1:] {
+		if s[0] == 'x' {
+			return -1
+		}
+	}
+	return int32(len(s))
+}
+
+func main() {
+	fmt.Fprintf(os.Stderr, "ok\n")
+	empty := []byte{}
+	after := empty[1:]
+	if len(after) != 0 {
+		panic("reslicing past the end must produce an empty slice")
+	}
+	if consume([]byte("x")) != -1 {
+		panic("the loop body must still see its element")
+	}
+	if consume([]byte("xy")) != -1 {
+		panic("consume must stop at the matching element")
+	}
+	if consume(nil) != 0 {
+		panic("consume of nil must end immediately")
+	}
+	// Extending to capacity is a valid slice, not an out-of-range index.
+	buf := []byte{:0:8}
+	buf = push(buf, 'a', 'b')
+	grown := buf[:cap(buf)]
+	if len(grown) != 8 {
+		panic("reslicing to capacity must keep the capacity")
+	}
+	grown[7] = 'z'
+	if grown[7] != 'z' {
+		panic("the extended view must alias the parent buffer")
+	}
+	// An inverted range and a cursor past the end are both empty. The indices
+	// are variables because a constant inverted range is a frontend error.
+	var lo byte = 3
+	var hi byte = 1
+	inverted := buf[lo:hi]
+	if len(inverted) != 0 {
+		panic("an inverted range must be empty")
+	}
+	past := buf[99:]
+	if len(past) != 0 {
+		panic("a reslice starting past the end must be empty")
+	}
+	// A valid middle slice is unchanged.
+	mid := buf[2:5]
+	if len(mid) != 3 || mid[0] != 0 {
+		panic("a valid sub-slice must keep its bounds")
+	}
+	fmt.Fprintf(os.Stderr, "%d %d %d\n", int32(len(grown)), int32(len(inverted)), int32(len(past)))
+	fmt.Fprintf(os.Stderr, "done\n")
+}
