@@ -1,0 +1,65 @@
+// The AEAD must produce the RFC 8439 §2.8.2 ciphertext when it is a dependency
+// of an application build, not only when its own package is the build root.
+package main
+
+import (
+	"fmt"
+
+	"golang.org/x/crypto/chacha20poly1305"
+)
+
+func unhex(s string) (b []byte) {
+	b = []byte{:len(s) / 2}
+	digit := func(c byte) (v byte, ok bool) {
+		switch {
+		case c >= '0' && c <= '9':
+			return c - '0', true
+		case c >= 'a' && c <= 'f':
+			return c - 'a' + 10, true
+		}
+		return 0, false
+	}
+	for i := int32(0); i < int32(len(b)); i++ {
+		hi, ok1 := digit(s[2*i])
+		lo, ok2 := digit(s[2*i+1])
+		if !ok1 || !ok2 {
+			return nil
+		}
+		b[i] = hi<<4 | lo
+	}
+	return
+}
+
+func main() {
+	key := unhex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
+	nonce := unhex("070000004041424344454647")
+	aad := unhex("50515253c0c1c2c3c4c5c6c7")
+	plaintext := []byte("Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.")
+	wantHex := "d31a8d34648e60db7b86afbc53ef7ec2" +
+		"a4aded51296e08fea9e2b5a736ee62d6" +
+		"3dbea45e8ca9671282fafb69da92728b" +
+		"1a71de0a9e060b2905d6a5b67ecd3b36" +
+		"92ddbd7f2d778b8c9803aee328091b58" +
+		"fab324e4fad675945585808b4831d7bc" +
+		"3ff4def08e4b7a9de576d26586cec64b" +
+		"6116" +
+		"1ae10b594f09e26a7e902ecbd0600691"
+	want := unhex(wantHex)
+	aead, err := chacha20poly1305.New(key)
+	if err != nil {
+		fmt.Printf("New failed: %s\n", err.Error())
+		return
+	}
+	ct := aead.Seal(nil, nonce, plaintext, aad)
+	if len(ct) != len(want) {
+		fmt.Printf("bad length: got %d want %d\n", int32(len(ct)), int32(len(want)))
+		return
+	}
+	for i := int32(0); i < int32(len(want)); i++ {
+		if ct[i] != want[i] {
+			fmt.Printf("MISMATCH at %d: got %02x want %02x (first=%02x)\n", i, int32(ct[i]), int32(want[i]), int32(ct[0]))
+			return
+		}
+	}
+	fmt.Printf("ok %02x %02x\n", int32(ct[0]), int32(ct[len(ct)-1]))
+}

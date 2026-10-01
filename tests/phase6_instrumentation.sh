@@ -492,6 +492,33 @@ for cc in "$MOXIE" "$LEGACY"; do
 	rm -rf "$td" "$srdir"
 done
 
+# 6q: the ChaCha20-Poly1305 AEAD must produce the RFC 8439 vector when it is a
+# dependency of an application, not only when its own package is the build
+# root. The ported sealGeneric split one allocation into a head and a tail view
+# (the Go sliceForAppend idiom); Moxie relocates each returned slice on its
+# own, so the tail came back as a copy and Seal answered all zeros - which is
+# why Marmot DMs could not decrypt in an application build.
+for cc in "$MOXIE" "$LEGACY"; do
+	label="stage4"
+	if [ "$cc" = "$LEGACY" ]; then label="legacy"; fi
+	name="aeaddep:$label"
+	td="$(tempdir "aeaddep_$label")"; rm -rf "$td"; mkdir -p "$td"
+	addir="$(fixture aeaddep)"
+	rc=0
+	MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$addir" >"$td/build.log" 2>&1 || rc=$?
+	if [ $rc -ne 0 ]; then
+		log_fail "$name" "build failed: $(tail -3 "$td/build.log" | tr '\n' ' ')"
+	else
+		out="$("$td/bin" 2>&1 || true)"
+		if echo "$out" | grep -q "^ok d3 91$"; then
+			log_pass "$name" "the AEAD known-answer vector holds as a dependency"
+		else
+			log_fail "$name" "got '$(echo "$out" | head -1)', want 'ok d3 91'"
+		fi
+	fi
+	rm -rf "$td" "$addir"
+done
+
 failed=0
 if [ -f "$STATUSFILE" ]; then
 	failed=$(grep -c FAIL "$STATUSFILE" 2>/dev/null) || failed=0

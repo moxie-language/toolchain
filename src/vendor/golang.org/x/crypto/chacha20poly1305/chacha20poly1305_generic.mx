@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 
 	"golang.org/x/crypto/chacha20"
-	"golang.org/x/crypto/internal/alias"
 	"golang.org/x/crypto/internal/poly1305"
 )
 
@@ -28,11 +27,15 @@ func writeUint64(p *poly1305.MAC, n int32) {
 }
 
 func (c *chacha20poly1305) sealGeneric(dst, nonce, plaintext, additionalData []byte) []byte {
-	ret, out := sliceForAppend(dst, len(plaintext)+poly1305.TagSize)
-	ciphertext, tag := out[:len(plaintext)], out[len(plaintext):]
-	if alias.InexactOverlap(out, plaintext) {
-		panic("chacha20poly1305: invalid buffer overlap")
-	}
+	// The Go original splits one allocation into a head and a tail view with
+	// sliceForAppend. Moxie does not preserve that aliasing across a function
+	// return - every result is relocated on its own, so the tail came back as
+	// a copy of the head and the ciphertext and tag written through it never
+	// reached the returned buffer: Seal answered all zeros when this package
+	// was built as a dependency of an application (the root-package known
+	// answer test inlined the call and hid it). Build the pieces separately
+	// and concatenate; `|` copies, so no overlap can corrupt either side.
+	ciphertext := []byte{:len(plaintext)}
 
 	var polyKey [32]byte
 	s, _ := chacha20.NewUnauthenticatedCipher(c.key[:], nonce)
@@ -45,9 +48,9 @@ func (c *chacha20poly1305) sealGeneric(dst, nonce, plaintext, additionalData []b
 	writeWithPadding(p, ciphertext)
 	writeUint64(p, len(additionalData))
 	writeUint64(p, len(plaintext))
-	p.Sum(tag[:0])
+	tag := p.Sum(nil)
 
-	return ret
+	return dst | ciphertext | tag
 }
 
 func (c *chacha20poly1305) openGeneric(dst, nonce, ciphertext, additionalData []byte) ([]byte, error) {
@@ -65,17 +68,12 @@ func (c *chacha20poly1305) openGeneric(dst, nonce, ciphertext, additionalData []
 	writeUint64(p, len(additionalData))
 	writeUint64(p, len(ciphertext))
 
-	ret, out := sliceForAppend(dst, len(ciphertext))
-	if alias.InexactOverlap(out, ciphertext) {
-		panic("chacha20poly1305: invalid buffer overlap")
-	}
 	if !p.Verify(tag) {
-		for i := range out {
-			out[i] = 0
-		}
 		return nil, errOpen
 	}
-
-	s.XORKeyStream(out, ciphertext)
-	return ret, nil
+	// Nothing is written until the tag verifies, so there is no half-decrypted
+	// buffer to wipe on failure the way the Go original wiped its tail view.
+	plaintext := []byte{:len(ciphertext)}
+	s.XORKeyStream(plaintext, ciphertext)
+	return dst | plaintext, nil
 }
