@@ -5902,14 +5902,26 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue)
 			elemT := mt.Elem
 			addr = lk
 			structType = elemT
-			if _, isPtr := SafeUnderlying(elemT).(*Pointer); !isPtr {
-				// Map values are not addressable: the only valid field select
-				// on a map value goes through the pointer it holds.
-				return nil
+			if _, isPtr := SafeUnderlying(elemT).(*Pointer); isPtr {
+				// A pointer-valued map element selects through the pointer.
+				ld := fb.emitLoad(lk, elemT)
+				addr = ld
+				structType = elemT
+			} else {
+				// A map value is not addressable, but reading a field of one
+				// is: materialize the looked-up value and select from that.
+				// Returning nil here dropped the field select, and the nil
+				// argument to the enclosing call then failed arg-count
+				// checking - `m[k].Field` read a value the compiler never
+				// built.
+				alloc := &SSAAlloc{Comment: "mapval.fieldaddr.tmp"}
+				alloc.typ = NewPointer(elemT)
+				alloc.name = fb.nextName()
+				fb.emit(alloc)
+				fb.emitStore(alloc, lk)
+				addr = alloc
+				structType = elemT
 			}
-			ld := fb.emitLoad(lk, elemT)
-			addr = ld
-			structType = elemT
 		} else {
 		ia := &SSAIndexAddr{X: x, Index: idx}
 		elemT := ssaIndexElemType(x.SSAType())
@@ -6210,31 +6222,7 @@ func (fb *ssaFuncBuilder) buildCompositeLit(e *syntax.CompositeLit) (s SSAValue)
 	}
 
 	if mt, isMap := SafeUnderlying(typ).(*TCMap); isMap {
-		mm := &SSAMakeMap{}
-		mm.typ = typ
-		mm.name = fb.nextName()
-		fb.emit(mm)
-		for _, el := range e.ElemList {
-			if kv, ok := el.(*syntax.KeyValueExpr); ok {
-				k := fb.buildExpr(kv.Key)
-				v := fb.buildExpr(kv.Value)
-				if k != nil && v != nil {
-					// The map's key and element types are the shift's context.
-					if kb, okB := k.(*SSABinOp); okB && kb.untypedShift {
-						retypeUntypedShift(kb, mt.Key)
-					}
-					if vb, okB := v.(*SSABinOp); okB && vb.untypedShift {
-						retypeUntypedShift(vb, mt.Elem)
-					}
-					fb.checkAssignable(k, mt.Key, "map literal")
-					fb.checkAssignable(v, mt.Elem, "map literal")
-					k = fb.coerceToInterface(k, mt.Key)
-					v = fb.coerceToInterface(v, mt.Elem)
-					fb.emit(&SSAMapUpdate{Map: mm, Key: k, Value: v})
-				}
-			}
-		}
-		return mm
+		return fb.buildMapLit(e, typ, mt)
 	}
 
 	if ar, isArr := SafeUnderlying(typ).(*Array); isArr {
@@ -6247,6 +6235,50 @@ func (fb *ssaFuncBuilder) buildCompositeLit(e *syntax.CompositeLit) (s SSAValue)
 	}
 	fb.buildCompositeLitInto(alloc, e, typ)
 	return fb.emitLoad(alloc, typ)
+}
+
+// buildMapLit builds a map composite literal. A bare `{...}` in key or value
+// position carries no type of its own - its type is the map's key/element
+// type. buildExpr on an untyped composite literal returns nil, and the entry
+// was dropped without a word: map[string]map[string]string{"en": {"k": "v"}}
+// built an empty map, and map[string][]string{"a": {"x"}} a zero-length slice.
+// Pass the context type down instead, the way storeLitElem does for struct
+// fields and slice elements.
+func (fb *ssaFuncBuilder) buildMapLit(e *syntax.CompositeLit, typ Type, mt *TCMap) (s SSAValue) {
+	mm := &SSAMakeMap{}
+	mm.typ = typ
+	mm.name = fb.nextName()
+	fb.emit(mm)
+	for _, el := range e.ElemList {
+		if kv, ok := el.(*syntax.KeyValueExpr); ok {
+			k := fb.mapLitElem(kv.Key, mt.Key)
+			v := fb.mapLitElem(kv.Value, mt.Elem)
+			if k != nil && v != nil {
+				// The map's key and element types are the shift's context.
+				if kb, okB := k.(*SSABinOp); okB && kb.untypedShift {
+					retypeUntypedShift(kb, mt.Key)
+				}
+				if vb, okB := v.(*SSABinOp); okB && vb.untypedShift {
+					retypeUntypedShift(vb, mt.Elem)
+				}
+				fb.checkAssignable(k, mt.Key, "map literal")
+				fb.checkAssignable(v, mt.Elem, "map literal")
+				k = fb.coerceToInterface(k, mt.Key)
+				v = fb.coerceToInterface(v, mt.Elem)
+				fb.emit(&SSAMapUpdate{Map: mm, Key: k, Value: v})
+			}
+		}
+	}
+	return mm
+}
+
+// mapLitElem builds one map literal key or value. A nested composite literal
+// written without its type is built against the context type.
+func (fb *ssaFuncBuilder) mapLitElem(e syntax.Expr, typ Type) (v SSAValue) {
+	if cl, ok := e.(*syntax.CompositeLit); ok && cl.Type == nil {
+		return fb.buildCompositeLitWithType(cl, typ)
+	}
+	return fb.buildExpr(e)
 }
 
 func (fb *ssaFuncBuilder) buildArrayLit(e *syntax.CompositeLit, typ Type, ar *Array) (s SSAValue) {
@@ -6444,6 +6476,9 @@ func (fb *ssaFuncBuilder) buildCompositeLitWithType(e *syntax.CompositeLit, typ 
 	}
 	if ar, isArr := SafeUnderlying(typ).(*Array); isArr {
 		return fb.buildArrayLit(e, typ, ar)
+	}
+	if mt, isMap := SafeUnderlying(typ).(*TCMap); isMap {
+		return fb.buildMapLit(e, typ, mt)
 	}
 	alloc := fb.emitAlloc(typ, 0)
 	if litFullyCovers(e, typ) {

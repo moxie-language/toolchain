@@ -519,6 +519,39 @@ for cc in "$MOXIE" "$LEGACY"; do
 	rm -rf "$td" "$addir"
 done
 
+# 6r: an untyped `{...}` in a map literal and a field select on a map index.
+# Both compilers must build the same program and print the same values: stage4
+# silently dropped the map entry when its value was an untyped composite
+# literal (buildExpr answered nil), and it refused `m[k].Field` for a
+# struct-valued map because a map value is not addressable - the key was live
+# and the value was not there. Legacy builds both, so stage4 has to.
+for cc in "$MOXIE" "$LEGACY"; do
+	label="stage4"
+	if [ "$cc" = "$LEGACY" ]; then label="legacy"; fi
+	name="maplit:$label"
+	td="$(tempdir "maplit_$label")"; rm -rf "$td"; mkdir -p "$td"
+	addir="$(fixture maplit)"
+	rc=0
+	MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$addir" >"$td/build.log" 2>&1 || rc=$?
+	if [ $rc -ne 0 ]; then
+		log_fail "$name" "build failed: $(tail -3 "$td/build.log" | tr '\n' ' ')"
+	else
+		out="$("$td/bin" 2>&1 || true)"
+		want="nested en = EN LOGIN
+nested ja = JA LOGIN
+slice = one,two
+struct = one,two
+array = first,second
+ptr = five,six"
+		if [ "$out" = "$want" ]; then
+			log_pass "$name" "untyped map elements and map-index field selects hold"
+		else
+			log_fail "$name" "got '$(echo "$out" | tr '\n' '|')'"
+		fi
+	fi
+	rm -rf "$td" "$addir"
+done
+
 failed=0
 if [ -f "$STATUSFILE" ]; then
 	failed=$(grep -c FAIL "$STATUSFILE" 2>/dev/null) || failed=0
