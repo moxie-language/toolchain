@@ -16,6 +16,28 @@ func collectParseError(err error) {
 	push(cctx.parseErrors, err.Error())
 }
 
+// parseErrorReport renders the collected parse errors, so a failed parse names
+// the syntax error instead of leaving the reader with the unrelated symptoms of
+// a partial tree.
+func parseErrorReport() (s string) {
+	var errSegs []string
+	errSegs = mxutil.Ensure(errSegs, 1)
+	push(errSegs, "; parse error parseErrs=")
+	errSegs = mxutil.Ensure(errSegs, 1)
+	push(errSegs, simpleItoa(len(cctx.parseErrors)))
+	errSegs = mxutil.Ensure(errSegs, 1)
+	push(errSegs, "\n")
+	for _, pe := range cctx.parseErrors {
+		errSegs = mxutil.Ensure(errSegs, 1)
+		push(errSegs, "; ")
+		errSegs = mxutil.Ensure(errSegs, 1)
+		push(errSegs, pe)
+		errSegs = mxutil.Ensure(errSegs, 1)
+		push(errSegs, "\n")
+	}
+	return joinStrs(errSegs)
+}
+
 type embedInfo struct {
 	path     string
 	elemType string
@@ -242,9 +264,12 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 	cctx.compileExportMap = scanExportPragmas(cctx.tcPkgSrc)
 	syntax.CompileExportMap = cctx.compileExportMap
 	file, _ := syntax.ParseBytesArena(token.NewFileBase(name|".mx"), src, collectParseError, nil, 0, arena)
+	// A nil file means the parse bailed out, and its errors are what the reader
+	// needs: the loop this replaces counted them into an empty body and
+	// returned, so a hard parse failure surfaced as whatever unrelated symptom
+	// came next. A parse that recovered is still tolerated - the stdlib carries
+	// such recoveries - so this is only the nil case.
 	if file == nil {
-		for ei := int32(0); ei < int32(len(cctx.parseErrors)) && ei < 5; ei++ {
-		}
 		return nil, nil
 	}
 	// The package name is the clause name from the source, not the import
@@ -949,22 +974,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	runtime.ManualArenaExit(arena)
 
 	if file == nil {
-		var errSegs []string
-		errSegs = mxutil.Ensure(errSegs, 1)
-		push(errSegs, "; parse error parseErrs=")
-		errSegs = mxutil.Ensure(errSegs, 1)
-		push(errSegs, simpleItoa(len(cctx.parseErrors)))
-		errSegs = mxutil.Ensure(errSegs, 1)
-		push(errSegs, "\n")
-		for _, pe := range cctx.parseErrors {
-			errSegs = mxutil.Ensure(errSegs, 1)
-			push(errSegs, "; ")
-			errSegs = mxutil.Ensure(errSegs, 1)
-			push(errSegs, pe)
-			errSegs = mxutil.Ensure(errSegs, 1)
-			push(errSegs, "\n")
-		}
-		res := joinStrs(errSegs)
+		res := parseErrorReport()
 		resCopy := []byte{:len(res)}
 		copy(resCopy, res)
 		runtime.ArenaFree(arena)

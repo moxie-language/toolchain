@@ -717,6 +717,17 @@ else
 fi
 rm -rf "$td" "$itdir"
 
+# 6ab: a named result without parentheses is a syntax error. The parser used to
+# recover by swallowing the body, so the function's locals landed at package
+# scope - every other function using one of those names then reported a
+# shadowing error - and the only complaint was "unnamed return values", for a
+# signature that names one. Two bugs behind it: the early file==nil branch
+# collected the parse errors into an empty loop, and a recovered parse (file
+# non-nil, errors recorded) was allowed to carry on with a partial tree.
+reject_conflict_fixture badnamedresult \
+	"named result values require parentheses" \
+	"unexpected name"
+
 failed=0
 if [ -f "$STATUSFILE" ]; then
 	failed=$(grep -c FAIL "$STATUSFILE" 2>/dev/null) || failed=0

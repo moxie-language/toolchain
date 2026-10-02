@@ -286,6 +286,23 @@ func (p *Parser) funcResult() (fs []*Field) {
 		f := (*Field)(p.nodeAlloc(unsafe.Sizeof(Field{})))
 		f.pos = pos
 		f.Type = typ
+		// A named result needs parentheses: `func F() err error` is not valid.
+		// Accepting it let the parser swallow the body - the body's declarations
+		// then landed at package scope, so every other function using one of
+		// those names reported a shadowing error, and the reader was told the
+		// signature had an unnamed return when it names one. Legacy's
+		// go/parser rejects the same input ("unexpected name error after top
+		// level declaration"), so this rejects it too.
+		if p.Tok == token.NameType {
+			// Record it and bail out. Without the bailout the parser
+			// recovers by swallowing the body, so the function's locals land
+			// at package scope and the reader is told the signature has an
+			// unnamed return when it names one. Legacy's go/parser rejects
+			// the same input ("unexpected name error after top level
+			// declaration").
+			p.syntaxError("named result values require parentheses: write (name type)")
+			panic("named result values require parentheses: write (name type)")
+		}
 		return []*Field{f}
 	}
 
