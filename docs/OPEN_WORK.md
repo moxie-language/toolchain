@@ -55,7 +55,23 @@ Working layout that matters: the checkouts live at
    (waiting) lock instead of dying on contention. It can land before the
    removal, since it is just today's auto-fetch with a ref argument and an
    exposed front door.
-5. **VS Code / VSCodium: full Moxie language support.** Build the extension,
+5. **Make the model rules universal; make the conflict rule strict.** The
+   immutability guarantee is a model invariant, not a style preference, so it
+   belongs on the package root everywhere — with the **runtime/unsafe carve-out
+   only** (measured: 69 global stores in `src/runtime`, the layer that builds
+   sovereign arenas; see the finding below). Concretely:
+   (a) apply global immutability and the two decl rules to every package above
+   the runtime, deleting the `/pkg/` carve-out — costs the compiler tree
+   nothing, ~77 stdlib sites and 39 app-repo sites;
+   (b) forbid **dot imports** (all 20 are the compiler's
+   `. "git.smesh.lol/moxie/pkg/types"`; 3087 identifiers to qualify) or, if
+   that price is refused, make a dot import's names participate in the conflict
+   check instead of being invisible;
+   (c) make import conflicts hard errors: two imports binding one name, and an
+   import colliding with any declaration — currently import-vs-import keeps the
+   first binding silently and stage4 dedupes the names so the second is not
+   even seen.
+6. **VS Code / VSCodium: full Moxie language support.** Build the extension,
    install it into the local Codium, and keep the source in a folder in the
    moxie repo. Scope: TextMate grammar + `language-configuration.json`, the
    `pkg/token`/`pkg/syntax` keyword and operator sets as the source of truth,
@@ -65,7 +81,7 @@ Working layout that matters: the checkouts live at
    over `pkg/syntax`). No compiler subcommand exists for it yet; `moxie help`
    lists build/run/test/clean/targets/info/list/header/install/version/env/
    fetch/cache/update/build-runtime.
-6. **Wire `musiquay/pkg/protocol` into the running system.** Relay side:
+7. **Wire `musiquay/pkg/protocol` into the running system.** Relay side:
    storage/index/validation policy per kind, the `#x` blob -> asset index hosts
    need to gate, and the replaceable-range exception for 32218-32220. App side:
    adapters between these structs and `event.E` (native) / `core.Event` (wasm),
@@ -140,6 +156,49 @@ Splitting the checks by gate, for the remaining work:
   it cannot simply be switched on: it would reject 39 sites in the three app
   repos (see queue item 2).
 - **`CheckPlusOnText` (main module only):** `+` on text. Done, with the gate.
+
+### Why the immutability rule is user-gated (measured)
+
+Removing the gate from stage4's `checkGlobalMutation` and building the tree
+with the ungated compiler fails on the **first package compiled: `runtime`**,
+with 69 global stores outside `init()` — `spawnDomain` (7), `sovQueueCompact`,
+`InitCShared`, `codecSovereignCompact`, `ArenaAcquire`, `ArenaRelease`,
+`sovWalkValue`/`sovRebaseValue`/`sovFullMark`, `SovDrainCompactions`,
+`ManualArenaExit`, `alloc`, `semacquire1`/`semrelease1`, `fastrand`,
+`poll_runtime_pollServerInit`, `coverHit`. That is the arena/spawn/timer
+machinery itself: the layer that *constructs* sovereign arenas cannot route
+every one of its own globals through a sovereign type. CLAUDE.md already
+carves this out ("Runtime and unsafe packages are exempt — they implement the
+arena system"), so the runtime exemption is principled, not a shortcut.
+
+Everything above the runtime is already clean: `_mxc_stage4` and `pkg/` have
+**zero** package-level var initializers and zero named slice/map types, so
+making both decl rules apply to the compiler tree costs nothing. The stdlib has
+3 initialised vars in one `var(...)` block (`src/mime/type.mx`) plus a handful
+of top-level ones, and 74 named slice/map types across 49 files.
+
+Conclusion: the `/pkg/`-shaped carve-out is the accident to delete, not the
+runtime exemption. Deleting it costs a migration of 39 sites in the three app
+repos (see queue item 2) and ~77 in the stdlib, but costs the compiler tree
+nothing.
+
+### Dot imports are a hole in the no-conflict rule
+
+`grep '^\s*\.\s*"'` over every tree: `_mxc_stage4` 20, and **zero** in `pkg/`,
+`src/`, `nostr`, `morly`, `musiquay`. All 20 are the same import —
+`. "git.smesh.lol/moxie/pkg/types"` — pulling ~100 exported names into file
+scope, with 3087 identifier occurrences across 34,488 lines.
+
+Neither compiler can see them: legacy `checkImportNameCollisions` skips blank
+and dot imports explicitly (`restrict.go:684`), and stage4
+`packageImportNames` skips a local name of `.` (`ir_scope.mx:781`). So a dot
+import can inject a name that collides with a package declaration and no rule
+reports it — precisely the no-shadow guarantee the gate is supposed to give.
+
+Two further holes in the same rule: import-vs-import (two imports binding one
+local name keep the first silently — stage4 `registerImport`'s "first-wins"
+fallback), and stage4's `packageImportNames` *dedupes*, so the second binding
+is invisible even where a conflict check would look.
 
 ### The user-code exemption is a path substring, implemented three times
 
