@@ -41,10 +41,17 @@ Working layout that matters: the checkouts live at
    migration; until then stage4 keeps the `/pkg/`-exempting gate for these two.
    This is a bootstrap hazard, not a cosmetic gap: legacy builds stage4 first,
    so stage4-only shapes break the next bootstrap.
-3. **`moxie test` never runs the package under test's `init()`.** Proven:
-   a package whose `init()` sets a scalar global reads 0 in its own test
-   (`scalar global = 0, want 42`). Fix the harness so init runs, or document
-   the lazy-ensure workaround as the rule.
+3. **`moxie test` never runs the package under test's `init()`.** **Done.**
+   The harness builds a synthetic `main` around the library and injects a
+   `__varinit` call at the start of it, but never a call to `init()`: the
+   branch for a **synthesised** main already called both
+   (`ssa_builder.mx:1213`), the branch for a main that **already has a body**
+   called only `__varinit`. A program's main package cannot declare `init()`,
+   so a normal build never noticed; the synthetic main of a test build can.
+   Fixed, pinned by phase6 `6aa` (fixture `inittest`). stage4-only: legacy has
+   no `moxie test` and no `__varinit` of its own, it uses go/ssa's lowering.
+   The lazy-ensure workaround in `pkg/protocol` is no longer *required*, but it
+   stays: a root-arena table built on first use has no ordering question.
 4. **Remove modules** (design below). Delete `moxie.mod` handling from both
    compilers, resolve imports only through `MOXIEPATH` + `$MOXIEROOT/src`
    (+ vendor), and move version pinning into a single mod-style **`MANIFEST`**
@@ -254,10 +261,14 @@ Three things that measurement taught, worth keeping for the next rule:
   files for no gain; making it visible to the rule enforces the same guarantee.
 - **A package's files are concatenated into one `syntax.File` with a hoisted
   import block** (`ssa_builder.mx:59`), so the *same* import appears twice in
-  one `DeclList` for a one-file package like `pkg/mxutil`. A conflict must
-  therefore be keyed by **(name, path)** — two different paths binding one name
-  — not by name alone, which reported "unsafe is imported twice" for a file
-  that imports it once.
+  one `DeclList` for a one-file package like `pkg/mxutil`, and — worse — every
+  source file's imports land in one scope. Grouping by that file reported
+  `encoding/hex` (`event.mx`) and `nostr/pkg/hex` (`canonical.mx`) as two
+  bindings of one name in one file in `nostr/pkg/event`; they are in different
+  files and were always fine. The unit is a **concatenation segment**, which is
+  one original file: `checkImportConflicts` reads `pb.segImports`
+  (`ssa_builder.mx:407`), not the parsed file's decls. `importNamesOf` stays
+  for the package-wide reserved set, where per-file grouping does not matter.
 - **Legacy must skip objects whose `Pkg()` is not the package under check.**
   A dot import's objects sit in the file scope but belong to the imported
   package; without that guard every name a dot import injects reports as a

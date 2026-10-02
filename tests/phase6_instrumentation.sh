@@ -701,6 +701,22 @@ reject_conflict_fixture dotconflict \
 	"collides with an imported package name" \
 	"already declared through dot-import of package math"
 
+# 6aa: `moxie test` must run the package under test's init(). The harness
+# concatenates the library and its test files into a synthetic main package and
+# injects a __varinit call into that main, but it never called init() - so an
+# init-set global read zero in the package's own test and nowhere else.
+name="testinit:stage4"
+td="$(tempdir "testinit")"; rm -rf "$td"; mkdir -p "$td"
+itdir="$(fixture inittest)"
+rc=0
+out="$(MOXIEROOT="$MOXIEROOT" "$MOXIE" test "$itdir" 2>&1)" || rc=$?
+if [ $rc -eq 0 ] && echo "$out" | grep -q "^PASS: "; then
+	log_pass "$name" "$(echo "$out" | grep '^PASS: ')"
+else
+	log_fail "$name" "$(echo "$out" | grep -v '^\[mem\]' | tail -3 | tr '\n' ' ')"
+fi
+rm -rf "$td" "$itdir"
+
 failed=0
 if [ -f "$STATUSFILE" ]; then
 	failed=$(grep -c FAIL "$STATUSFILE" 2>/dev/null) || failed=0

@@ -99,7 +99,7 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 	}
 	checkSovereignLoopDecls(p, files)
 	checkShadowing(files)
-	checkImportConflicts(files)
+	pb.checkImportConflicts(files)
 	checkDuplicateCases(p, files)
 	checkMissingReturn(files)
 	checkClosureCaptures(p)
@@ -1151,15 +1151,34 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 			}
 		}
 		fb2.emit(&SSAReturn{})
-		// Inject call to __varinit at start of main
+		// Inject __varinit and, when the package has one, init() at the start
+		// of main, in that order. The synthesised-main branch below already
+		// does both; this branch is the target package, whose main already has
+		// a body. A program's main package cannot declare init(), so a normal
+		// build never needed the second call - but the synthetic main that
+		// `moxie test` builds around a library can, and it was skipped: a
+		// library's init() never ran in its own test (scalar global = 0,
+		// want 42).
+		pre := []SSAInstruction{}
 		callInstr := &SSACall{Call: SSACallCommon{Value: initFn}}
 		callInstr.name = "vinit"
+		pre = mxutil.Ensure(pre, 1)
+		pre = push(pre, callInstr)
+		if pb.initFn != nil {
+			callInit := &SSACall{Call: SSACallCommon{Value: pb.initFn}}
+			callInit.name = "pinit"
+			pre = mxutil.Ensure(pre, 1)
+			pre = push(pre, callInit)
+		}
 		oldEntry := fn.Blocks[0]
 		n := int32(len(oldEntry.Instrs))
-		combined := []SSAInstruction{:n+1}
-		combined[0] = callInstr
+		pn := int32(len(pre))
+		combined := []SSAInstruction{:n + pn}
+		for i := int32(0); i < pn; i++ {
+			combined[i] = pre[i]
+		}
 		for i := int32(0); i < n; i++ {
-			combined[i+1] = oldEntry.Instrs[i]
+			combined[i+pn] = oldEntry.Instrs[i]
 		}
 		oldEntry.Instrs = combined
 		return
