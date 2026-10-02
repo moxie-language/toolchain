@@ -182,6 +182,42 @@ runtime exemption. Deleting it costs a migration of 39 sites in the three app
 repos (see queue item 2) and ~77 in the stdlib, but costs the compiler tree
 nothing.
 
+### The full cost of universal immutability (inventory)
+
+Exempting the runtime and running the same check over everything else gives the
+complete list in one pass — **107 global stores outside `init()`**, by package:
+
+| package | sites | what it is |
+|---|---|---|
+| `internal/cpu` | 36 | `doinit` (32) and `processOptions` (4) |
+| `syscall` | 20 | `Setenv`/`Unsetenv`/`Clearenv`/`copyenv`/`loadenvs`, `_getMapper`, `ensureRlimit`/`Setrlimit`/`prlimit` |
+| `time` | 11 | `FixedZone`, `LoadLocation`, `_startNano`, `_ensureUtcLoc`, `(*Location).get` |
+| `os` | 10 | `signalsInit`, `ensureMinrand`/`minrand`, `Mount`, `ensureFS` |
+| `_mxc_stage4` (main) | 8 | `addCoverSite`/`resetCoverSites`, `(*irEmitter).typeFromTail`, `typeCheckPkg` |
+| `pkg/types` | 8 | `SetUniverseGlobals`, `LookupImportByName`, `DirectImportPaths` |
+| `crypto/internal/sysrand` | 4 | `urandomRead`, `Read` |
+| `math/rand`, `math/rand/v2`, `math` | 6 | `globalRand`, `checkUseFMA` |
+| `internal/testlog`, `internal/syscall/unix`, `crypto/internal/fips140` | 4 | logger/random/indicator hooks |
+
+Two distinct problems, and only the second is a migration:
+
+1. **The initialiser exemption is a name prefix.** `isInitFuncName` exempts
+   `init` and anything starting `init`, so `doinit` (32 sites — it *is*
+   internal/cpu's initialiser, called from `init()`), `processOptions`,
+   `signalsInit`, `_startNano`, `loadenvs`, `_ensureUtcLoc`, `checkUseFMA`,
+   `urandomRead`, `SetUniverseGlobals` all report as violations of a rule they
+   do not actually break. A principled "this function initialises package
+   state" notion is missing; the prefix test is the same substring hazard as
+   the `/pkg/` gate.
+2. **Genuine post-init caches** must move into sovereign holders: `syscall`'s
+   env/mapper/rlimit, `time`'s zone cache, `os`'s signal and minrand state,
+   `math/rand`'s global source, `crypto/internal/sysrand`, the compiler's cover
+   sites, and `pkg/types`' import registry.
+
+Measured, "immutability everywhere except the runtime" is a ~107-site stdlib
+program plus the 69 runtime sites, not a switch. Reverted to the gated rule
+until that is decided; the inventory above is the evidence for the decision.
+
 ### Dot imports are a hole in the no-conflict rule
 
 `grep '^\s*\.\s*"'` over every tree: `_mxc_stage4` 20, and **zero** in `pkg/`,
