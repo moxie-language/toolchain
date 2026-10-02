@@ -200,6 +200,46 @@ local name keep the first silently — stage4 `registerImport`'s "first-wins"
 fallback), and stage4's `packageImportNames` *dedupes*, so the second binding
 is invisible even where a conflict check would look.
 
+### The no-conflict rule is now universal, and dot imports are inside it
+
+Implemented in both compilers: a **dot import's names are reserved like any
+other import's**, and two imports binding one name in one file are a conflict.
+stage4 gained `checkImportConflicts` (it had no collision check at all — only
+`checkShadowing`, which sees a local shadowing an import, not two imports
+colliding); legacy already rejected both shapes through go/types and needed the
+dot names for its own check.
+
+Three things that measurement taught, worth keeping for the next rule:
+
+- **The tree is clean**, so the strict rule costs nothing: zero local or
+  package-level bindings in `_mxc_stage4` collide with any of the ~100 names
+  `pkg/types` exports, and the compiler builds with the rule on. Banning the
+  dot import outright would have meant qualifying 3087 identifiers across 20
+  files for no gain; making it visible to the rule enforces the same guarantee.
+- **A package's files are concatenated into one `syntax.File` with a hoisted
+  import block** (`ssa_builder.mx:59`), so the *same* import appears twice in
+  one `DeclList` for a one-file package like `pkg/mxutil`. A conflict must
+  therefore be keyed by **(name, path)** — two different paths binding one name
+  — not by name alone, which reported "unsafe is imported twice" for a file
+  that imports it once.
+- **Legacy must skip objects whose `Pkg()` is not the package under check.**
+  A dot import's objects sit in the file scope but belong to the imported
+  package; without that guard every name a dot import injects reports as a
+  collision with itself.
+- **Only exported names count.** `Scope().Names()` returns unexported helpers
+  *and* the `__moxie_*` builtins the legacy loader injects into the imported
+  package itself — `pkg/types` gets them, which is how `hexDigit`,
+  `isHexDigit`, `untypedNil`, `__moxie_concat`, `__moxie_eq`, `__moxie_lt`,
+  `__moxie_secalloc` all reported as colliding with themselves on the first
+  run. A dot import injects neither, so the filter is `token.IsExported`
+  (stage4: first byte `A`–`Z`).
+
+Pinned by phase6 `6y`/`6z` (fixtures `importconflict`, `dotconflict`). The two
+compilers reject for *different* reasons — legacy through go/types
+("redeclared in this block", "already declared through dot-import"), stage4
+through the rule — so the checks pin each side's message instead of pretending
+they share one.
+
 ### The user-code exemption is a path substring, implemented three times
 
 stage4 `_mxc_stage4/ir_scope.mx:44` — exempt when the path is `main` or

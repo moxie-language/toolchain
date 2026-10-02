@@ -756,10 +756,19 @@ func packageDeclNames(files []*syntax.File) (names []string) {
 	return names
 }
 
-// importNamesOf collects the local name each import binds: the alias when
-// present, otherwise the imported package's own name, which is not necessarily
-// the path tail.
-func importNamesOf(f *syntax.File) (names []string) {
+// importBindingsOf collects the local name each import binds, with the import
+// path that bound it. The alias wins when present; otherwise it is the imported
+// package's own name, which is not necessarily the path tail. A dot import
+// binds no single name: it binds every exported name of the imported package,
+// so each of those is reported against that path. Returning nothing for a dot
+// import (as this did) made every name it injects invisible to the no-conflict
+// rule, so a declaration could collide with one and nothing reported it.
+//
+// The path travels with the name because the driver concatenates a package's
+// files into one syntax.File with a hoisted import block: the same import then
+// appears twice in one DeclList, which is not a conflict. Two *different* paths
+// binding one name is.
+func importBindingsOf(f *syntax.File) (names []string, paths []string) {
 	for _, d := range f.DeclList {
 		im, ok := d.(*syntax.ImportDecl)
 		if !ok || im.Path == nil {
@@ -777,13 +786,75 @@ func importNamesOf(f *syntax.File) (names []string) {
 		if im.LocalPkgName != nil {
 			localName = im.LocalPkgName.Value
 		}
-		if localName == "" || localName == "_" || localName == "." {
+		if localName == "." {
+			// Only exported names: Scope().Names() also holds unexported
+			// helpers and the __moxie_* builtins injected into the imported
+			// package itself, and a dot import brings in neither.
+			if imported.Scope != nil {
+				for _, n := range imported.Scope.Names() {
+					if !isExportedName(n) {
+						continue
+					}
+					names = mxutil.Ensure(names, 1)
+					names = push(names, n)
+					paths = mxutil.Ensure(paths, 1)
+					paths = push(paths, path)
+				}
+			}
+			continue
+		}
+		if localName == "" || localName == "_" {
 			continue
 		}
 		names = mxutil.Ensure(names, 1)
 		names = push(names, localName)
+		paths = mxutil.Ensure(paths, 1)
+		paths = push(paths, path)
 	}
+	return names, paths
+}
+
+func importNamesOf(f *syntax.File) (names []string) {
+	names, _ = importBindingsOf(f)
 	return names
+}
+
+// isExportedName reports whether a package-scope name is one a dot import
+// injects. Only the first byte decides it, as in Go.
+func isExportedName(n string) (ok bool) {
+	if len(n) == 0 {
+		return false
+	}
+	return n[0] >= 'A' && n[0] <= 'Z'
+}
+
+// checkImportConflicts is the other half of the no-conflict rule, and like
+// checkShadowing it is universal. checkShadowing sees a local binding that
+// shadows an import or a package declaration; what nothing saw is two imports
+// binding one name in a file (registerImport keeps the first and the second
+// vanishes) and a package-level declaration colliding with an import.
+func checkImportConflicts(files []*syntax.File) {
+	pkgNames := packageDeclNames(files)
+	for _, f := range files {
+		if f == nil {
+			continue
+		}
+		names, paths := importBindingsOf(f)
+		for i := 0; i < len(names); i++ {
+			for j := i + 1; j < len(names); j++ {
+				if names[i] != names[j] || paths[i] == paths[j] {
+					continue
+				}
+				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+				push(cctx.compileErrors, "'" | names[i] | "' is imported twice in one file: alias one of the imports")
+				break
+			}
+			if inNameList(pkgNames, names[i]) {
+				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+				push(cctx.compileErrors, "'" | names[i] | "' collides with an imported package name: alias the import or rename the declaration")
+			}
+		}
+	}
 }
 
 // checkShadowing enforces the naming rule over every function body in the

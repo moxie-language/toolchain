@@ -661,6 +661,46 @@ reject_fixture parencall "parenthesized call target is not allowed"
 # 6x: '+' for text concatenation.
 reject_fixture plustext "'+' is not allowed for text concatenation"
 
+# 6y..6z: the no-conflict rule reaches imports. Legacy rejects both shapes
+# through its own type checker (a redeclared import; a declaration already
+# declared through the dot import), stage4 through the rule it gained here, so
+# the two compilers reject for different reasons and the check pins each side's
+# message rather than pretending they share one.
+reject_conflict_fixture() {
+	local fx="$1" want_s4="$2" want_legacy="$3"
+	for cc in "$MOXIE" "$LEGACY"; do
+		label="stage4"; want="$want_s4"
+		if [ "$cc" = "$LEGACY" ]; then label="legacy"; want="$want_legacy"; fi
+		name="$fx:$label"
+		td="$(tempdir "${fx}_$label")"; rm -rf "$td"; mkdir -p "$td"
+		fxdir="$(fixture "$fx")"
+		rc=0
+		if [ "$cc" = "$LEGACY" ]; then
+			PATH="/tmp/moxie-goroot/bin:$PATH" GOROOT=/tmp/moxie-goroot \
+				MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$fxdir" >"$td/build.log" 2>&1 || rc=$?
+		else
+			MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$fxdir" >"$td/build.log" 2>&1 || rc=$?
+		fi
+		if [ $rc -eq 0 ]; then
+			log_fail "$name" "the program compiled; want rejection"
+		elif grep -q "$want" "$td/build.log"; then
+			log_pass "$name" "rejected: $want"
+		else
+			log_fail "$name" "wrong error: $(tail -2 "$td/build.log" | tr '\n' ' ')"
+		fi
+		rm -rf "$td" "$fxdir"
+	done
+}
+
+# 6y: two different imports binding one name in one file.
+reject_conflict_fixture importconflict \
+	"is imported twice in one file" \
+	"redeclared in this block"
+# 6z: a declaration colliding with a name a dot import injects.
+reject_conflict_fixture dotconflict \
+	"collides with an imported package name" \
+	"already declared through dot-import of package math"
+
 failed=0
 if [ -f "$STATUSFILE" ]; then
 	failed=$(grep -c FAIL "$STATUSFILE" 2>/dev/null) || failed=0

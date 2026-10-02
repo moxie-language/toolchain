@@ -14,6 +14,7 @@ import (
 	"go/types"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"moxie/loader"
@@ -669,6 +670,13 @@ func (c *compilerContext) checkPackageRestrictions(pkg *loader.Package) {
 // a variable of the same name are two bindings for one identifier, and which one
 // a given reference means then depends on the file it sits in. Alias the import
 // (import stdio "io") or rename the declaration.
+//
+// Three things are reserved, not one: the name an import binds, every exported
+// name a dot import puts in scope, and - within a single file - each name once.
+// A dot import binds no single name, so treating it as binding nothing (as this
+// did) left every name it injects invisible to the rule: a declaration could
+// collide with it and nothing reported the conflict. Two imports binding one
+// name in one file is the same collision, one file up.
 func (c *compilerContext) checkImportNameCollisions(pkg *loader.Package) {
 	info := pkg.TypeInfo()
 	if info == nil {
@@ -679,10 +687,11 @@ func (c *compilerContext) checkImportNameCollisions(pkg *loader.Package) {
 		if f == nil {
 			continue
 		}
+		fileImports := map[string]token.Pos{}
 		for _, spec := range f.Imports {
 			// An explicit name wins; otherwise the imported package's own
-			// name, which is not necessarily the path tail. Blank and dot
-			// imports bind no name.
+			// name, which is not necessarily the path tail. Blank imports bind
+			// no name.
 			var obj types.Object
 			if spec.Name != nil {
 				obj = info.Defs[spec.Name]
@@ -702,6 +711,26 @@ func (c *compilerContext) checkImportNameCollisions(pkg *loader.Package) {
 			if obj.Name() == "_" {
 				continue
 			}
+			if obj.Name() == "." {
+				// Reserve every exported name the dot import injects - only
+				// exported ones: Scope().Names() also returns unexported
+				// helpers and the __moxie_* builtins the loader injects into
+				// the imported package itself, and a dot import brings in
+				// neither.
+				if imp := dotImportTarget(pkg, spec); imp != nil && imp.Scope() != nil {
+					for _, n := range imp.Scope().Names() {
+						if !token.IsExported(n) {
+							continue
+						}
+						imported[n] = true
+					}
+				}
+				continue
+			}
+			if _, dup := fileImports[obj.Name()]; dup {
+				c.addError(spec.Pos(), "moxie: '"+obj.Name()+"' is imported twice in one file: alias one of the imports")
+			}
+			fileImports[obj.Name()] = spec.Pos()
 			imported[obj.Name()] = true
 		}
 	}
@@ -735,6 +764,14 @@ func (c *compilerContext) checkImportNameCollisions(pkg *loader.Package) {
 			if _, isPkg := obj.(*types.PkgName); isPkg {
 				continue
 			}
+			// Nor is a name that came in through a dot import: those objects
+			// live in the file scope but belong to the imported package, so
+			// they are that package's binding, not a second one here. Without
+			// this every name a dot import injects reports as a collision with
+			// itself.
+			if op := obj.Pkg(); op != nil && op != pkg.Pkg {
+				continue
+			}
 			if seen[obj.Pos()] {
 				continue
 			}
@@ -761,6 +798,26 @@ func (c *compilerContext) checkImportNameCollisions(pkg *loader.Package) {
 	for _, h := range hits {
 		c.addError(h.pos, "moxie: '"+h.name+"' collides with an imported package name: alias the import or rename the declaration")
 	}
+}
+
+// dotImportTarget returns the package a dot import names, matched by its import
+// path. info is not used: a dot import's PkgName is named "." and go/types may
+// record it in Defs or Implicits depending on how it was written, while the
+// path is always on the spec.
+func dotImportTarget(pkg *loader.Package, spec *ast.ImportSpec) *types.Package {
+	if spec == nil || spec.Path == nil {
+		return nil
+	}
+	path, err := strconv.Unquote(spec.Path.Value)
+	if err != nil {
+		path = spec.Path.Value
+	}
+	for _, imp := range pkg.Pkg.Imports() {
+		if imp.Path() == path {
+			return imp
+		}
+	}
+	return nil
 }
 
 // checkScopeShadowing walks all scopes in the package and rejects any
