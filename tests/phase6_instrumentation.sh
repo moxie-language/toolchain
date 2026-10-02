@@ -622,6 +622,45 @@ for cc in "$MOXIE" "$LEGACY"; do
 	rm -rf "$td" "$pndir"
 done
 
+# 6v..6x: the three language rules legacy enforces and stage4 did not, each in
+# its own fixture and inside a real module. Legacy applies user restrictions
+# only to the main module (p.Module.Main), so a manifest-less directory version
+# of these programs is accepted by legacy and would prove nothing. Both
+# compilers must reject each one by name.
+reject_fixture() {
+	local fx="$1" want="$2"
+	for cc in "$MOXIE" "$LEGACY"; do
+		label="stage4"
+		if [ "$cc" = "$LEGACY" ]; then label="legacy"; fi
+		name="$fx:$label"
+		td="$(tempdir "${fx}_$label")"; rm -rf "$td"; mkdir -p "$td"
+		fxdir="$(fixture "$fx")"
+		rc=0
+		if [ "$cc" = "$LEGACY" ]; then
+			# The legacy loader shells out to the Go toolchain for go/types.
+			PATH="/tmp/moxie-goroot/bin:$PATH" GOROOT=/tmp/moxie-goroot \
+				MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$fxdir" >"$td/build.log" 2>&1 || rc=$?
+		else
+			MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$fxdir" >"$td/build.log" 2>&1 || rc=$?
+		fi
+		if [ $rc -eq 0 ]; then
+			log_fail "$name" "the program compiled; want rejection"
+		elif grep -q "$want" "$td/build.log"; then
+			log_pass "$name" "rejected: $want"
+		else
+			log_fail "$name" "wrong error: $(tail -2 "$td/build.log" | tr '\n' ' ')"
+		fi
+		rm -rf "$td" "$fxdir"
+	done
+}
+
+# 6v: unnamed return values.
+reject_fixture unnamedret "unnamed return values are not allowed"
+# 6w: a parenthesised call target.
+reject_fixture parencall "parenthesized call target is not allowed"
+# 6x: '+' for text concatenation.
+reject_fixture plustext "'+' is not allowed for text concatenation"
+
 failed=0
 if [ -f "$STATUSFILE" ]; then
 	failed=$(grep -c FAIL "$STATUSFILE" 2>/dev/null) || failed=0

@@ -534,6 +534,10 @@ func (pb *ssaPkgBuilder) registerFile(f *syntax.File) {
 		pb.curFileScope = pb.declScope(d)
 		switch dd := d.(type) {
 		case *syntax.FuncDecl:
+			// Both functions and methods are FuncDecls, so one call covers the
+			// rule for each; registerFunc's early returns for methods would
+			// otherwise skip it.
+			checkNamedReturns(dd, pb.pkg.Pkg.Path)
 			pb.registerFunc(dd)
 		case *syntax.VarDecl:
 			pb.registerVar(dd)
@@ -4680,6 +4684,18 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 	if x == nil || y == nil {
 		return nil
 	}
+	// Legacy rejects '+' for text in user code (restrict.go
+	// checkInstrRestrictions): concatenation is the '|' operator. It tests the
+	// left operand's resolved type, so this does too - the rune/string mix
+	// below is a separate error with its own message. The rule is a
+	// main-module rule in legacy (CheckPlusOnText), so a manifest-less target
+	// and a dependency package both keep '+' - see targetIsMainModule.
+	if e.Op == token.Add && ssaIsStringType(x.SSAType()) && targetIsMainModule() && fb.fn != nil && fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil {
+		if isUserPackagePath(restrictPath(fb.fn.Pkg.Pkg.Path)) {
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, "'+' is not allowed for text concatenation, use | operator")
+		}
+	}
 	if (op == OpOr || op == OpAdd) && x.SSAType() != nil && y.SSAType() != nil {
 		if IsRuneKind(x.SSAType()) && IsStringKind(y.SSAType()) || IsStringKind(x.SSAType()) && IsRuneKind(y.SSAType()) {
 			mxutil.WriteStr(2, "compile error: cannot concatenate rune with string - convert to UTF-8 first\n")
@@ -4831,6 +4847,9 @@ func (fb *ssaFuncBuilder) checkSliceToArrayConv(x SSAValue, dst Type) {
 }
 
 func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
+	if fb.fn != nil && fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil {
+		checkParenCallTarget(e, fb.fn.Pkg.Pkg.Path)
+	}
 	if ie, ok := e.Fun.(*syntax.IndexExpr); ok {
 		if result, handled := fb.tryGenericCallFromIndex(ie, e.ArgList, e.HasDots); handled {
 			return result

@@ -59,6 +59,89 @@ func isUserPackagePath(path string) bool {
 	return false
 }
 
+// targetIsMainModule reports whether the build target belongs to a module of
+// its own, other than the toolchain's. Legacy applies the '+' text rule only
+// when p.Module.Main is set (loader.go: `if p.Module.Main && p.Module.Path !=
+// "git.smesh.lol/moxie"`), and a manifest-less directory target is therefore
+// accepted there: outside a module the loader rewrites '+' to the pipe
+// operator before the rule can see it. rootModPrefix is "" when the target
+// lives in no module, which is that same case.
+func targetIsMainModule() bool {
+	if bst == nil || bst.rootModPrefix == "" {
+		return false
+	}
+	return bst.rootModPrefix != "git.smesh.lol/moxie"
+}
+
+// checkNamedReturns mirrors legacy restrict.go checkASTRestrictions: every
+// return value in user code must be named. An unnamed result has no slot the
+// relocation pass can write back through, and legacy has always rejected one.
+// Same gate, same message, so a function shaped this way fails in both
+// compilers rather than only in the bootstrap.
+func checkNamedReturns(d *syntax.FuncDecl, pkgPath string) {
+	if d == nil || d.Type == nil || d.Name == nil {
+		return
+	}
+	// Compiler-generated builtins are exempt, exactly as in legacy.
+	if mxutil.HasPrefix(d.Name.Value, "__moxie_") {
+		return
+	}
+	if !isUserPackagePath(restrictPath(pkgPath)) {
+		return
+	}
+	for _, r := range d.Type.ResultList {
+		if r.Name == nil {
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, "unnamed return values are not allowed: name all return values")
+			return
+		}
+	}
+}
+
+// checkParenCallTarget mirrors legacy restrict.go checkASTRestrictions:
+// `(f)(x)` is not valid Moxie, only a parenthesised type in a conversion like
+// `(*byte)(x)` is. Legacy exempts exactly the syntactic type forms, so the
+// exemption list below is isTypeExpr's.
+func checkParenCallTarget(e *syntax.CallExpr, pkgPath string) {
+	if e == nil {
+		return
+	}
+	pe, ok := e.Fun.(*syntax.ParenExpr)
+	if !ok || syntaxIsTypeExpr(pe.X) {
+		return
+	}
+	if !isUserPackagePath(restrictPath(pkgPath)) {
+		return
+	}
+	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+	push(cctx.compileErrors, "parenthesized call target is not allowed: write f(x), not (f)(x)")
+}
+
+// syntaxIsTypeExpr reports whether an expression is syntactically a type, the
+// forms legacy restrict.go isTypeExpr accepts. stage4 splits Go's ArrayType
+// into ArrayType and SliceType, so both appear here.
+func syntaxIsTypeExpr(e syntax.Expr) (ok bool) {
+	switch t := e.(type) {
+	case *syntax.Operation:
+		return t.Y == nil && t.Op == token.Mul
+	case *syntax.ArrayType:
+		return true
+	case *syntax.SliceType:
+		return true
+	case *syntax.MapType:
+		return true
+	case *syntax.ChanType:
+		return true
+	case *syntax.FuncType:
+		return true
+	case *syntax.StructType:
+		return true
+	case *syntax.InterfaceType:
+		return true
+	}
+	return false
+}
+
 // restrictPath maps the synthetic main a test build creates back to the package
 // it came from. `moxie test` concatenates the package under test and its test
 // files into one `package main` so the harness can link them, and that override
