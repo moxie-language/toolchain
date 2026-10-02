@@ -257,6 +257,31 @@ require (
 fetch and a build resolution cannot disagree. `moxie env` prints the manifest
 path, every manifest entry, and the directory each resolved to.
 
+### Build cache keyed by repo and ref
+
+A dependency at a pinned ref is immutable, so compiling it again is pure waste:
+the build cache must be keyed by **repo + resolved commit**, not by the
+directories a build happens to run in, and a cache hit means **linking the
+cached objects, not recompiling**.
+
+- **Key**: repo path, resolved commit (not the tag — the tag can move, the
+  commit cannot), target triple, and the identity of the compiler + baked
+  runtime that produced the objects. Any element changing is a miss; that is
+  what keeps a compiler change from reusing stale objects, the same hazard `-a`
+  exists for today.
+- **Layout**: `$MOXIEPATH/.build/<repo>/<commit>/<triple>/…` holding the
+  per-package object and `.bc` files the linker and IR emitter already consume.
+  Worktrees under `$MOXIEPATH/.refs/` become pure sources: nothing is written
+  into them by a build.
+- **A hit skips the compile and goes straight to the link**, which is the whole
+  point: a tag already built anywhere on the machine is a link-only cost.
+- **Consequence for MANIFEST**: a tag or commit pins a stable commit and hits
+  the cache; a branch re-resolves to a new commit and misses. One more reason
+  `require` lines name tags.
+- **Local edits bypass it**: a repo with no manifest entry is the checkout
+  being edited, whose objects must be rebuilt when it changes. A dirty worktree
+  is never a cache key.
+
 ### `moxie get`
 
 One command that fetches, places and checks out a repository, so nobody has to
