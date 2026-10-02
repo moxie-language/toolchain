@@ -1,0 +1,52 @@
+// A variable declared from an untyped constant takes that constant's default
+// type: `acc := 0` is an int32 variable, not a value that is still untyped.
+//
+// Stage4 left it untyped, which made every later use "context-dependent": the
+// `byte(...)` in `out[j] = byte((acc >> bits) & 0x1f)` retyped the whole shift
+// chain to uint8, the emitter declared an i8 shift, and the shift ran on acc's
+// low byte sign-extended. The five-bit packing below answered 1e 00 02 where
+// the correct groups are 02 04 1a - bech32 payloads came out wrong, and the
+// web app's npub/nsec encoding with them. Legacy (go/types) types the variable
+// int32 and was right, so stage4's declaration typing is what had to change.
+package main
+
+// conv packs eight-bit groups into five-bit ones, the conversion bech32 is
+// built on.
+func conv(data []byte, out []byte) (n int32) {
+	j := 0
+	acc := 0 // untyped literal: the variable is int32
+	bits := 0
+	for _, b := range data {
+		acc = (acc << 8) | int32(b)
+		bits += 8
+		for bits >= 5 {
+			bits -= 5
+			out[j] = byte((acc >> bits) & 0x1f)
+			j++
+		}
+		acc &= (1 << uint32(bits)) - 1
+	}
+	if bits > 0 {
+		out[j] = byte((acc << (5 - bits)) & 0x1f)
+		j++
+	}
+	return int32(j)
+}
+
+func hexs(b []byte, n int32) (s string) {
+	for i := int32(0); i < n; i++ {
+		s = s | nd(b[i]>>4) | nd(b[i]&0xf)
+	}
+	return s
+}
+
+func nd(v byte) (s string) {
+	const d = "0123456789abcdef"
+	return string([]byte{d[v]})
+}
+
+func main() {
+	out := []byte{:8}
+	n := conv([]byte{0x90, 0xa8, 0x22, 0x0b, 0x53}, out)
+	println("groups " | hexs(out, n))
+}

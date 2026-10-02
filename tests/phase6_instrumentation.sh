@@ -39,6 +39,10 @@ fixture() {
 	d="$(tempdir "fx_$name")"
 	rm -rf "$d"; mkdir -p "$d"
 	cp "$SCRIPT_DIR/data/$name"/*.mx "$d/"
+	# A fixture that exercises module manifests carries its own.
+	if [ -f "$SCRIPT_DIR/data/$name/moxie.mod" ]; then
+		cp "$SCRIPT_DIR/data/$name/moxie.mod" "$d/"
+	fi
 	echo "$d"
 }
 
@@ -550,6 +554,50 @@ ptr = five,six"
 		fi
 	fi
 	rm -rf "$td" "$addir"
+done
+
+# 6s: a replace that points at a directory holding no .mx files must fail with
+# the replace named. Resolving it to an empty package reported every symbol
+# from it as "undefined" at the import site, which reads as a bug in the
+# importing code - a wrong relative target is easy to write and hard to see.
+name="badreplace:stage4"
+td="$(tempdir "badreplace")"; rm -rf "$td"; mkdir -p "$td"
+brdir="$(fixture badreplace)"
+rc=0
+MOXIEROOT="$MOXIEROOT" "$MOXIE" build -o "$td/bin" "$brdir" >"$td/build.log" 2>&1 || rc=$?
+if [ $rc -eq 0 ]; then
+	log_fail "$name" "a replace with no .mx files built successfully"
+elif grep -q "replace target for example.com/gone" "$td/build.log"; then
+	log_pass "$name" "the missing replace target is named"
+else
+	log_fail "$name" "wrong error: $(tail -2 "$td/build.log" | tr '\n' ' ')"
+fi
+rm -rf "$td" "$brdir"
+
+# 6t: a variable declared from an untyped constant takes the constant's default
+# type. Left untyped, `acc := 0` made the shift in `byte((acc >> bits) & 0x1f)`
+# context-dependent, and the conversion retyped it to uint8 - an i8 shift on
+# acc's low byte. Bech32 payloads came out wrong. Legacy types it int32 and is
+# the reference here.
+for cc in "$MOXIE" "$LEGACY"; do
+	label="stage4"
+	if [ "$cc" = "$LEGACY" ]; then label="legacy"; fi
+	name="untypedvar:$label"
+	td="$(tempdir "untypedvar_$label")"; rm -rf "$td"; mkdir -p "$td"
+	uvdir="$(fixture untypedvar)"
+	rc=0
+	MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$uvdir" >"$td/build.log" 2>&1 || rc=$?
+	if [ $rc -ne 0 ]; then
+		log_fail "$name" "build failed: $(tail -3 "$td/build.log" | tr '\n' ' ')"
+	else
+		out="$("$td/bin" 2>&1 || true)"
+		if [ "$out" = "groups 1202140204021a13" ]; then
+			log_pass "$name" "a declaration from an untyped constant is int32"
+		else
+			log_fail "$name" "got '$out', want 'groups 1202140204021a13'"
+		fi
+	fi
+	rm -rf "$td" "$uvdir"
 done
 
 failed=0

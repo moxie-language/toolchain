@@ -2271,6 +2271,24 @@ func defaultReprType(b *Basic) (t Type) {
 	return nil
 }
 
+// defaultTypedVar gives a declaration's inferred type the default type of an
+// untyped constant. `acc := 0` declares an int32 variable, not a value that is
+// still untyped; go/types gives it int (int32 here) and legacy follows.
+//
+// Leaving it untyped made every later use context-dependent: in
+// `out[j] = byte((acc >> bits) & 0x1f)` the conversion retyped the shift chain
+// to uint8, the emitter declared an i8 shift, and bech32 encoding produced
+// wrong payloads (the shift ran on acc's low byte sign-extended). Legacy was
+// right, so the variable's type is what had to change.
+func defaultTypedVar(t Type) (r Type) {
+	if b, ok := SafeUnderlying(t).(*Basic); ok && b.Info&IsUntyped != 0 {
+		if dt := defaultReprType(b); dt != nil {
+			return dt
+		}
+	}
+	return t
+}
+
 // checkDefaultRepr reports an untyped constant that is used without a type and
 // does not fit the type it then takes. go/types reports "overflows int" for
 // these; stage4 used to truncate the value to its low 32 bits, so
@@ -2462,6 +2480,7 @@ func (fb *ssaFuncBuilder) shortVarStore(name *syntax.Name, val SSAValue, typ Typ
 	if name == nil || name.Value == "_" {
 		return
 	}
+	typ = defaultTypedVar(typ)
 	// Same-scope reassignment: if a variable with this name was declared in
 	// the current scope, := assigns to it (Go semantics). A name that resolves
 	// to an enclosing scope would be shadowing, which Moxie forbids.
@@ -2716,6 +2735,7 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			if isUntypedBasicType(typ) {
 				fb.checkDefaultRepr(initVal, "variable declaration")
 			}
+			typ = defaultTypedVar(typ)
 		}
 		for ni, name := range dd.NameList {
 			if name.Value == "_" {
