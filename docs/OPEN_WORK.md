@@ -43,7 +43,12 @@ Working layout that matters: the checkouts live at
    compilers, resolve imports only through `MOXIEPATH` + `$MOXIEROOT/src`
    (+ vendor), and replace version pinning with git refs plus compile locks
    (or worktrees). Delete the `moxie.mod` files from every repo and the
-   `replace`/`require` lines from the Makefiles.
+   `replace`/`require` lines from the Makefiles. **`moxie get
+   <path>[@<ref>]`** is the companion command: fetch, place at
+   `$MOXIEPATH/<repo-path>`, check out the tag/branch/commit, pin into
+   `./moxie.lock`, and take a real (waiting) lock instead of dying on
+   contention. It can land before the removal, since it is just today's
+   auto-fetch with a ref argument and an exposed front door.
 5. **VS Code / VSCodium: full Moxie language support.** Build the extension,
    install it into the local Codium, and keep the source in a folder in the
    moxie repo. Scope: TextMate grammar + `language-configuration.json`, the
@@ -163,9 +168,13 @@ cannot fight over the same checkout.
 What must be built or replaced:
 
 1. **Repo boundary**: make the upward `.git` walk the primary rule and cache
-   the repo root per import path; the import path is the clone path.
+   the repo root per import path; the import path is the clone path. For a
+   fresh clone the repo root is the first two components of a dotted import
+   path (`git.smesh.lol/nostr` from `git.smesh.lol/nostr/pkg/event`), with an
+   explicit override for anything unusual.
 2. **Auto-fetch stays**, unchanged in shape: `git clone https://<repo path>`
-   into `$MOXIEPATH/<repo path>`.
+   into `$MOXIEPATH/<repo path>`. `moxie get` below is the explicit front door
+   to the same machinery, so a build and a manual fetch can never disagree.
 3. **Version selection** needs a home once `require` is gone. Options, in
    preference order: (a) a flat pin file at the build root (`moxie.lock`: one
    `repo ref` line each), read when present, absent meaning "whatever is
@@ -200,8 +209,53 @@ the `replace` lines in the Makefiles. `tests/data/badreplace` and phase6 `6s`
 go with it; the other fixtures (`maplit`, `untypedvar`, `pushnil`, `aeaddep`)
 do not use manifests.
 
+### `moxie get`
+
+One command that fetches, places and checks out a repository, so nobody has to
+know where the tree lives or clone it by hand. It is the explicit front door to
+the same resolution step a build uses.
+
+```
+moxie get <import-path>[@<ref>] [<import-path>[@<ref>] ...]
+moxie get                       # materialise every entry in ./moxie.lock
+```
+
+- **Placement**: `$MOXIEPATH/<repo-path>` (`$MOXIEPATH` defaults to
+  `$HOME/moxie`; the toolchain tree `$MOXIEROOT` is a different thing and is
+  never written to). The repo path is the import path truncated to its repo
+  root: `git.smesh.lol/nostr/pkg/event@v1.2.3` -> repo `git.smesh.lol/nostr`,
+  package `pkg/event`.
+- **Fetch**: clone when the directory is absent, otherwise `fetch --tags
+  --prune`; `-offline` skips the network and fails if the ref is unknown.
+- **Ref**: a tag, branch, or commit. `@` splits at the *last* `@`. Tags and
+  commits check out detached; a branch checks out and fast-forwards unless
+  `-no-pull`. With no ref, a clone stays on its default branch and an existing
+  tree is left alone unless `-u`.
+- **Dirty trees are never discarded**: checking out a different ref refuses
+  while the tree has changes, naming them, unless `-force`.
+- **Concurrency**: an exclusive per-repo lock is held for the checkout, and a
+  waiting caller prints that it is waiting rather than dying (today's lock
+  fatals on contention, which killed a parallel build). `-worktree`
+  materialises the ref with `git worktree add` under
+  `$MOXIEPATH/.refs/<repo>/<ref>` and prints that path, leaving the main
+  checkout untouched — the way two builds can want two refs at once.
+- **Pinning**: `-pin` records `<repo> <ref>` in `./moxie.lock` (current HEAD
+  when no ref is given); `moxie get` with no arguments reads that file. The
+  file is a flat pin list, not a manifest: no module graph, no version solver.
+- **Remotes**: `https://<repo-path>` by default, `-remote <url>` to override
+  (an ssh remote, a mirror, a local path), `-protocol ssh|https` for the
+  common case.
+- **Output**: the resolved directory on stdout so scripts can use it, progress
+  and errors on stderr; non-zero exit with a name-and-reason message for an
+  unknown ref, a dirty tree, a fetch failure, or a lock timeout.
+- `moxie env` should print the resolved `MOXIEPATH`, each repo's checkout path
+  and ref, so "why is it building that version" has an answer.
+
 Sequencing: after the rule-parity work (queue item 2), because both compilers
-change either way, and the module code is bilateral too.
+change either way, and the module code is bilateral too. `moxie get` can land
+first inside that work, since it needs no module removal to be useful — it is
+just the current auto-fetch with a ref argument and a real lock, exposed as a
+command.
 
 What it does not fix: the `/pkg/` exemption (language rules, a separate axis
 from resolution) and the legacy/stage4 rule gap. It does remove the temptation
