@@ -39,17 +39,16 @@ Working layout that matters: the checkouts live at
    a package whose `init()` sets a scalar global reads 0 in its own test
    (`scalar global = 0, want 42`). Fix the harness so init runs, or document
    the lazy-ensure workaround as the rule.
-4. **Remove modules** (design below), **with versioning carried on the import
-   path itself** (`import "git.smesh.lol/nostr/pkg/event@v1.2.3"`). Delete
-   `moxie.mod` handling from both compilers, resolve imports only through
-   `MOXIEPATH` + `$MOXIEROOT/src` (+ vendor), and replace version pinning with
-   git refs plus per-ref worktrees and a waiting compile lock. Delete the
-   `moxie.mod` files from every repo and the `replace`/`require` lines from the
-   Makefiles. **`moxie get <path>[@<ref>]`** is the companion command: fetch,
-   place at `$MOXIEPATH/<repo-path>`, check out the tag/branch/commit, pin into
-   `./moxie.lock`, and take a real (waiting) lock instead of dying on
-   contention. It can land before the removal, since it is just today's
-   auto-fetch with a ref argument and an exposed front door.
+4. **Remove modules** (design below). Delete `moxie.mod` handling from both
+   compilers, resolve imports only through `MOXIEPATH` + `$MOXIEROOT/src`
+   (+ vendor), and move version pinning into a single mod-style **`MANIFEST`**
+   file at the build root. Delete the `moxie.mod` files from every repo and the
+   `replace`/`require` lines from the Makefiles. **`moxie get <path>[@<ref>]`**
+   is the companion command: fetch, place at `$MOXIEPATH/<repo-path>`, check
+   out the tag/branch/commit, record it in `MANIFEST`, and take a real
+   (waiting) lock instead of dying on contention. It can land before the
+   removal, since it is just today's auto-fetch with a ref argument and an
+   exposed front door.
 5. **VS Code / VSCodium: full Moxie language support.** Build the extension,
    install it into the local Codium, and keep the source in a folder in the
    moxie repo. Scope: TextMate grammar + `language-configuration.json`, the
@@ -176,10 +175,9 @@ What must be built or replaced:
 2. **Auto-fetch stays**, unchanged in shape: `git clone https://<repo path>`
    into `$MOXIEPATH/<repo path>`. `moxie get` below is the explicit front door
    to the same machinery, so a build and a manual fetch can never disagree.
-3. **Version selection** needs a home once `require` is gone. It is the
-   **import path** — see "Versioning on imports" below — with a flat pin file
-   at the build root (`moxie.lock`) recording the commit each ref resolved to.
-   Absent a ref and a pin, a repo is "whatever is checked out".
+3. **Version selection** lives in a single mod-style **`MANIFEST`** file at the
+   build root — see "Versioning: the MANIFEST file" below. No `MANIFEST`, or no
+   entry for a repo, means "whatever is checked out".
 4. **Concurrency**: a per-repo exclusive lock while checking out a different
    ref, and *either* a shared lock held for the whole compile *or* per-ref
    worktrees (`git worktree add` from a bare mirror, e.g.
@@ -205,54 +203,59 @@ What must be built or replaced:
 Code to delete, in both compilers: `findModuleRoot`, `parseReplaceLine`,
 `parseModRequires`, `mergeModReplaces`, `globalModPrefix`/`globalModDir` and the
 module-relative resolution step, plus the `moxie.mod` files in every repo and
-the `replace` lines in the Makefiles. `tests/data/badreplace` and phase6 `6s`
-go with it; the other fixtures (`maplit`, `untypedvar`, `pushnil`, `aeaddep`)
-do not use manifests.
+the `replace` lines in the Makefiles. In their place: one `MANIFEST` reader at
+the build root (repo -> ref), a ref materialiser (`worktree add` under
+`$MOXIEPATH/.refs/`), and one waiting per-repo lock. `tests/data/badreplace` and
+phase6 `6s` go with the replace code; the other fixtures (`maplit`,
+`untypedvar`, `pushnil`, `aeaddep`) do not use manifests.
 
-### Versioning on imports
+### Versioning: the MANIFEST file
 
-Without modules there is no manifest to hold a version, so the **version lives
-on the import path**, the way the old tooling did it:
+Without modules nothing holds a version, so there is one small manifest-style
+file at the **build root**, named `MANIFEST`, holding a ref per repository:
 
 ```
-import "git.smesh.lol/nostr/pkg/event@v1.2.3"
+# MANIFEST
+require (
+	git.smesh.lol/nostr v1.2.3
+	git.smesh.lol/morly dev
+)
 ```
 
-- The **last** `@` splits the ref (same rule `moxie get` uses). The ref may be a
-  semver tag, a branch, or a commit hash.
-- **Resolution**: strip `@ref` to get the repo (`git.smesh.lol/nostr`) and the
-  package (`pkg/event`); materialise that ref at
-  `$MOXIEPATH/.refs/<repo>/<ref>` with `git worktree add` from the main
-  checkout, which doubles as the mirror; load `<worktree>/pkg/event`. No ref:
-  `$MOXIEPATH/<repo-path>`, today's rule. `moxie get <path>@<ref>` performs
-  exactly this materialisation, so a build and a hand-fetch cannot disagree.
-- **The ref is part of package identity.** `event@v1.2.3` and `event@v2.0.0`
-  are two packages in one build — distinct import path, distinct registry key,
-  distinct symbols. Two versions coexisting is the entire point of putting the
-  version on the import; dropping the ref from identity would make the second
-  import silently alias the first. Because the discriminator is the `@ref`
-  suffix, there is no Go-style `/v2` path element to maintain.
-- **Per import site, no graph.** Each import names its own ref. There is no
-  minimum-version selection, no constraint solving, no transitive requirement:
-  a repo imported at two refs simply gets two worktrees and links both. `moxie
-  env` (or `moxie list`) reports each repo's refs and their worktree paths, so
-  "why is it building that version" has an answer; a two-ref build is legal and
-  reported, not an error.
-- **The lock pins commits, not refs.** A tag can be moved, so `moxie.lock`
-  records `<repo> <ref> <commit>`; `-offline` and a fresh `MOXIEPATH` reproduce
-  the tagged commit from the pin. A ref with no tag (a branch or a commit)
-  records the commit it resolved to at fetch time.
+- **Mod-style syntax, pin semantics.** `require` with a version per repo, plus
+  `replace` for a local override; the file is the one place a version is
+  written. There is no module graph, no minimum-version selection, no
+  transitive requirement, no checksum database — a line is a pin, nothing more.
+  A ref may be a tag, a branch, or a commit; a tag is preferred because it
+  names one commit.
+- **One ref per repo, so a tag can be re-pinned but two versions cannot
+  coexist.** Two repositories, or one repo at two refs, is not expressible and
+  is not supported: the layout is one checkout per repo. Duplicate lines for
+  the same repo are an error naming both.
+- **The manifest is the lock.** There is no second file: to freeze a moving
+  branch, `moxie get -pin` rewrites that line to the commit the branch resolved
+  to (or to the tag). Nothing resolves a version at compile time that is not in
+  this file.
+- **Only the build root's MANIFEST is read.** Nested manifests do not shadow it
+  — that was the `moxie.mod` failure mode (`findModuleRoot` stops at the first
+  manifest walking up, so musiquay needed the same replace at 12 depths). A
+  library's MANIFEST is ignored; the root build decides every version.
+- **Refs are materialised, not checked out in place.** The main checkout at
+  `$MOXIEPATH/<repo-path>` is the mirror; a ref goes to
+  `$MOXIEPATH/.refs/<repo>/<ref>` via `git worktree add`, so a build never
+  mutates what a developer is editing and two builds cannot fight over one
+  tree. A repo with no MANIFEST entry resolves to the main checkout itself,
+  which is the co-development path (edit `nostr`, build `musiquay`).
 - **Toolchain imports stay unversioned.** `git.smesh.lol/moxie/pkg/...`
   resolves once against `$MOXIEROOT`: the compiler cannot import a revision of
-  itself other than the one it is built from.
+  itself other than the one it is built from, and `MANIFEST` never names it.
 - **Repo boundary is unchanged**: the first two components of a dotted import
-  path (`git.smesh.lol/nostr` from `git.smesh.lol/nostr/pkg/event@v1.2.3`),
-  found by walking up to `.git` once the ref is stripped.
+  path (`git.smesh.lol/nostr` from `git.smesh.lol/nostr/pkg/event`), confirmed
+  by walking up to `.git`.
 
-Consequence for the resolution order: the ref is stripped before every step,
-and the stripped path is looked up at the worktree for that ref when one is
-pinned or materialised. A build never checks out a repo in place for a
-versioned import — that would make two refs in one build impossible.
+`moxie get <import-path>[@<ref>]` writes and honours these lines, so a manual
+fetch and a build resolution cannot disagree. `moxie env` prints the manifest
+path, every manifest entry, and the directory each resolved to.
 
 ### `moxie get`
 
@@ -262,7 +265,7 @@ the same resolution step a build uses.
 
 ```
 moxie get <import-path>[@<ref>] [<import-path>[@<ref>] ...]
-moxie get                       # materialise every entry in ./moxie.lock
+moxie get                       # materialise and install every MANIFEST entry
 ```
 
 - **Placement**: `$MOXIEPATH/<repo-path>` (`$MOXIEPATH` defaults to
@@ -284,13 +287,12 @@ moxie get                       # materialise every entry in ./moxie.lock
   materialises the ref with `git worktree add` under
   `$MOXIEPATH/.refs/<repo>/<ref>` and prints that path, leaving the main
   checkout untouched — the way two builds can want two refs at once.
-- **Pinning**: `-pin` records `<repo> <ref> <commit>` in `./moxie.lock` (current
-  HEAD when no ref is given) — the commit is recorded so a moved tag still
-  rebuilds the same bytes; `moxie get` with no arguments reads that file and
-  materialises every entry. The file is a flat pin list, not a manifest: no
-  module graph, no version solver. The same syntax is what an import path
-  carries (`pkg/event@v1.2.3`), which is what makes the pin and the source
-  agree by construction.
+- **Pinning**: `-pin` adds or rewrites a `require` line in the build root's
+  `MANIFEST` — `<repo> <ref>` as given, or the current HEAD commit when no ref
+  is given; a branch becomes the commit it resolved to, so a moving branch is
+  frozen. `moxie get` with no arguments reads `MANIFEST` and materialises every
+  entry. All of this is the same file the compiler reads at build time, so the
+  pin and the build agree by construction.
 - **Remotes**: `https://<repo-path>` by default, `-remote <url>` to override
   (an ssh remote, a mirror, a local path), `-protocol ssh|https` for the
   common case.
