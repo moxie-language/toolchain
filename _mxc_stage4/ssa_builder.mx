@@ -5243,6 +5243,26 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		fb.emit(call8)
 		return call8
 	case BuiltinPush, BuiltinResize:
+		// An untyped nil has no element type, so the call cannot be typed: the
+		// result used to become untyped nil and default to int32, which either
+		// produced IR clang refuses (an i32 where a slice header belongs) or
+		// silently yielded an empty slice. Legacy reports this; stage4 did not.
+		// The nil literal is built with a nil type (buildIdent), so both
+		// spellings have to be caught.
+		if len(args) > 0 && args[0] != nil {
+			at := args[0].SSAType()
+			untypedNil := at == nil
+			if !untypedNil {
+				if b0, ok0 := SafeUnderlying(at).(*Basic); ok0 && b0.Kind == UntypedNil {
+					untypedNil = true
+				}
+			}
+			if untypedNil {
+				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+				push(cctx.compileErrors, "invalid push: argument must be a slice; have untyped nil")
+				return nil
+			}
+		}
 		if len(args) > 1 {
 			if sl, ok := SafeUnderlying(args[0].SSAType()).(*Slice); ok {
 				if _, isIface := SafeUnderlying(sl.Elem).(*TCInterface); isIface {

@@ -600,6 +600,28 @@ for cc in "$MOXIE" "$LEGACY"; do
 	rm -rf "$td" "$uvdir"
 done
 
+# 6u: push on an untyped nil must fail loudly in both compilers. Stage4 typed
+# the call untyped nil, defaulted it to int32, and emitted an i32 where a slice
+# header belongs - or, in a short declaration, silently built an empty slice.
+# Legacy has always reported it; the fixture pins both sides to the same error.
+for cc in "$MOXIE" "$LEGACY"; do
+	label="stage4"
+	if [ "$cc" = "$LEGACY" ]; then label="legacy"; fi
+	name="pushnil:$label"
+	td="$(tempdir "pushnil_$label")"; rm -rf "$td"; mkdir -p "$td"
+	pndir="$(fixture pushnil)"
+	rc=0
+	MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$pndir" >"$td/build.log" 2>&1 || rc=$?
+	if [ $rc -eq 0 ]; then
+		log_fail "$name" "push on an untyped nil compiled"
+	elif grep -q "must be a slice; have untyped nil" "$td/build.log"; then
+		log_pass "$name" "push on an untyped nil is rejected by name"
+	else
+		log_fail "$name" "wrong error: $(tail -2 "$td/build.log" | tr '\n' ' ')"
+	fi
+	rm -rf "$td" "$pndir"
+done
+
 failed=0
 if [ -f "$STATUSFILE" ]; then
 	failed=$(grep -c FAIL "$STATUSFILE" 2>/dev/null) || failed=0
