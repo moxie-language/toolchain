@@ -47,14 +47,18 @@ Working layout that matters: the checkouts live at
    5 `web/wasm/signer`), morly 68 and nostr 36 — the last two all under `/pkg/`
    and therefore still exempt (nostr `make test` passes, 13 targets).
 
-   **Musiquay migrated and green** (`a22269d`): 142 signatures named, 28 files,
-   all four suites pass (19 unit, both harnesses, 108 signer, 12 playwright
-   smoke). Names are type-derived and disambiguated per function, so some carry
-   a numeric suffix and are worth renaming later. Neither of the other two
-   rules fired on app code.
+   **Musiquay migrated and green** (`a22269d`, plus `c54578d`).
+   **morly migrated** (`993378b`): its top-level `main` package is user code —
+   only `pkg/` is covered by the `/pkg/` exemption — so 6 signatures in
+   `main.mx`/`main_test.mx` needed naming. `make test-unit` now compiles;
+   `TestCrawlRelayAndPublish` then hits a **SIGSEGV that predates this work**
+   (reproduced with the migration stashed and a compiler built with the rule
+   disabled), so morly's unit suite is red for a runtime reason, not a language
+   one — that is a separate bug to chase.
 
-   The migration also found a parser defect: a paren-less named result list is
-   accepted and mis-parsed (see the finding below).
+   The migration also found a parser defect (fixed, see the finding below) and
+   the latent parse errors that must be cleared before recovered parses can be
+   treated as fatal (see the finding after it).
 
    Also fixed on the way, both real bugs the rules surfaced: `moxie test` never
    called the package's `init()` (`de85a620`, phase6 `6aa`), and stage4's
@@ -70,7 +74,20 @@ Working layout that matters: the checkouts live at
    no `moxie test` and no `__varinit` of its own, it uses go/ssa's lowering.
    The lazy-ensure workaround in `pkg/protocol` is no longer *required*, but it
    stays: a root-arena table built on first use has no ordering question.
-4. **Remove modules** (design below). Delete `moxie.mod` handling from both
+4. **Clear the latent parse errors and make a recovered parse fatal.** Three
+   known defects, each a real bug that has been silent for as long as the parse
+   errors were swallowed: the concatenator leaving an import line in the body
+   when a file's first line after the package clause is a comment (proven fix:
+   skip blank lines and leading comments, but never `//:` pragmas), the eight
+   vestigial blank imports in the stdlib, and one `//:generate` pragma before an
+   import. Details and verification in the finding above. Once these are gone,
+   `typeCheckPkg` can fail on `len(cctx.parseErrors) > 0` instead of only on
+   `file == nil`, and a partial tree never reaches the SSA builder.
+5. **morly: `TestCrawlRelayAndPublish` SIGSEGVs.** Pre-existing (reproduced with
+   the named-return migration stashed and the rule disabled), so it is a runtime
+   bug in the crawler path, not a language rule. morly's unit suite cannot go
+   green until it is found.
+6. **Remove modules** (design below). Delete `moxie.mod` handling from both
    compilers, resolve imports only through `MOXIEPATH` + `$MOXIEROOT/src`
    (+ vendor), and move version pinning into a single mod-style **`MANIFEST`**
    file at the build root. Delete the `moxie.mod` files from every repo and the
@@ -80,7 +97,7 @@ Working layout that matters: the checkouts live at
    (waiting) lock instead of dying on contention. It can land before the
    removal, since it is just today's auto-fetch with a ref argument and an
    exposed front door.
-5. **Make the model rules universal; make the conflict rule strict.** The
+7. **Make the model rules universal; make the conflict rule strict.** The
    immutability guarantee is a model invariant, not a style preference, so it
    belongs on the package root everywhere — with the **runtime/unsafe carve-out
    only** (measured: 69 global stores in `src/runtime`, the layer that builds
@@ -96,7 +113,7 @@ Working layout that matters: the checkouts live at
    import colliding with any declaration — currently import-vs-import keeps the
    first binding silently and stage4 dedupes the names so the second is not
    even seen.
-6. **VS Code / VSCodium: full Moxie language support.** Build the extension,
+8. **VS Code / VSCodium: full Moxie language support.** Build the extension,
    install it into the local Codium, and keep the source in a folder in the
    moxie repo. Scope: TextMate grammar + `language-configuration.json`, the
    `pkg/token`/`pkg/syntax` keyword and operator sets as the source of truth,
@@ -106,7 +123,7 @@ Working layout that matters: the checkouts live at
    over `pkg/syntax`). No compiler subcommand exists for it yet; `moxie help`
    lists build/run/test/clean/targets/info/list/header/install/version/env/
    fetch/cache/update/build-runtime.
-7. **Wire `musiquay/pkg/protocol` into the running system.** Relay side:
+9. **Wire `musiquay/pkg/protocol` into the running system.** Relay side:
    storage/index/validation policy per kind, the `#x` blob -> asset index hosts
    need to gate, and the replaceable-range exception for 32218-32220. App side:
    adapters between these structs and `event.E` (native) / `core.Event` (wasm),
@@ -157,28 +174,57 @@ directly`, `... '+' is not allowed for text concatenation, use | operator`
 not allowed: name all return values`, `... parenthesized call target is not
 allowed: write f(x), not (f)(x)`.
 
-### A paren-less named result list is accepted and mis-parsed
+### A paren-less named result list is accepted and mis-parsed — FIXED
 
 `func F() err error {` — a named result **without** parentheses — is not valid
-Moxie (nor Go), and the parser does not reject it. It parses the result list as
-unnamed, mis-nests the body, and **puts the body's declarations at package
-scope**: `packageDeclNames` then returns the locals, so every *other* function
-that declares a name from that set reports `'n' shadows declaration in enclosing
-scope`. One such signature produced 167 shadow errors in `musiquay/web/common/mls`,
-plus a misleading `unnamed return values are not allowed`.
+Moxie (nor Go). The parser did not reject it: it recovered by swallowing the
+body, so the function's declarations landed at package scope, and
+`packageDeclNames` returned the locals. Every *other* function declaring one of
+those names then reported `'n' shadows declaration in enclosing scope` — 167 of
+them in `musiquay/web/common/mls` — and the signature itself was reported as
+`unnamed return values are not allowed` when it names one. Found while migrating
+musiquay: the first rewrite emitted `func F() err2 error` for the 8 signatures
+with a single anonymous result; the correct form is `func F() (err2 error)`.
 
-Found while migrating musiquay: the first rewrite emitted `func F() err2 error`
-for the 8 signatures that had a single anonymous result, and the tree failed
-exactly this way. The correct form is `func F() (err2 error)`.
+**Fixed** (`210d2f99`), in both parsers — `pkg/syntax` (what the compiler uses)
+and `_mxc_stage4/syntax` (what `mxlex` uses):
 
-Two things to fix here, neither cosmetic:
-- the parser should report a syntax error for a named result list without
-  parentheses (the shape is invalid), not build a corrupt AST;
-- `checkNamedReturns` reports "unnamed" for it, which sends the reader looking
-  for a missing name that is right there.
+- the malformed shape is a syntax error and the parser bails out, the way
+  `syntaxError` does when no handler is installed. Legacy's go/parser rejects
+  the same input (`unexpected name error after top level declaration`).
+- `typeCheckPkg`'s `file == nil` branch had an **empty loop** where the parse
+  errors should have been reported, so a hard parse failure surfaced as whatever
+  unrelated symptom came next. It now reports them (`parseErrorReport`).
 
-Recorded, not yet fixed: it is a diagnostics/robustness bug, and the migration
-that hit it is done (`musiquay` `a22269d`).
+Pinned by phase6 `6ab` (fixture `badnamedresult`).
+
+### Latent parse errors: what must be fixed before they can be fatal
+
+A parse that *recovers* is still tolerated, because the stdlib carries several
+and making them fatal is its own cleanup. Found by temporarily treating every
+recovered parse error as fatal — each one is a real defect that has been silent:
+
+1. **The concatenator leaves an import line behind.** `scanFileRegions`
+   (`main.mx`) starts a file's body at the first non-blank line after the
+   package clause, so the common `package X\n\n// doc\nimport ...` prefix puts
+   the import inside the body: it is hoisted *and* left in place, and the parser
+   reports `imports must appear before other declarations` for `pkg/token`, the
+   runtime, and others. **Fixed during the investigation but reverted for scope**:
+   the correct rule is to skip blank lines and leading comments (but not `//:`
+   pragmas, which carry `linkname`/`embed`/`build`) when finding the body start.
+   The fix is proven: with it, `pkg/token` and the runtime parse clean.
+2. **Eight blank imports** in the stdlib (`import _ "unsafe"` ×7 for linkname,
+   `import _ "embed"` ×1) which the parser has always rejected
+   (`blank imports are not allowed in Moxie`) and silently ignored. Moxie
+   handles both via its own pragmas, so they are vestigial — removing them is
+   the fix, and it was verified to build.
+3. **One `//:generate` pragma before an import**
+   (`src/crypto/internal/fips140/mlkem/mlkem768.mx`); moving it below the
+   import block is enough.
+
+Doing all three makes recovered parse errors fatal-able, which is the honest
+end state: a recovered parse builds a partial tree, and every downstream
+diagnostic from it is a guess.
 
 ### Legacy's rules are gated twice, and one gate needs a module
 
