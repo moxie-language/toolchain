@@ -30,11 +30,17 @@ Working layout that matters: the checkouts live at
 1. **Explain the exemption and the divergences.** Done in the session; the
    findings are below.
 2. **Close the legacy/stage4 restriction gap.** Legacy enforces six rules
-   stage4 does not (table below). Implement them in stage4, one commit each,
-   each with a fixture pair under `tests/data/` and a `phase6` check, so both
-   compilers reject the same programs. This is a bootstrap hazard, not a
-   cosmetic gap: legacy builds stage4 first, so stage4-only shapes break the
-   next bootstrap.
+   stage4 does not (table below). Four are done — unnamed returns,
+   parenthesised call targets and `+` on text are implemented, verified with
+   both compilers and pinned by phase6 `6v`–`6x` (commit `ea7bb392`); value
+   receivers were already there. **Two remain: package-level var initializers
+   and named slice/map types.** Legacy gates those with `isUserPackageByPath`,
+   which has no `/pkg/` clause, so enforcing them in stage4 rejects 39 sites
+   across `nostr`/`morly`/`musiquay` (6+13+20 var initializers, 3+7+6 named
+   types). They need the explicit exemption declaration (item 5) first, or a
+   migration; until then stage4 keeps the `/pkg/`-exempting gate for these two.
+   This is a bootstrap hazard, not a cosmetic gap: legacy builds stage4 first,
+   so stage4-only shapes break the next bootstrap.
 3. **`moxie test` never runs the package under test's `init()`.** Proven:
    a package whose `init()` sets a scalar global reads 0 in its own test
    (`scalar global = 0, want 42`). Fix the harness so init runs, or document
@@ -86,25 +92,54 @@ Working layout that matters: the checkouts live at
 
 ### Legacy vs stage4: the same source compiles as two dialects
 
-Same program, ordinary user module (`example.com/app`), built with both:
+Same program, ordinary user module (`example.com/app`), built with both.
+**Re-measured; three rows of the original table were wrong** — they were
+observed through the module gate below without realising it:
 
-| program | legacy | stage4 |
-|---|---|---|
-| `var Version = []string{"1"}` | reject | **accept** |
-| `type Names []string` | reject | **accept** |
-| `type M map[string]string` | reject | **accept** |
-| `println("a" + "b")` | reject | **accept** |
-| unnamed return values | reject | **accept** |
-| `(f)()` parenthesised call target | reject | **accept** |
-| closure capture without `-allow-closure-captures` | reject | reject |
-| `init()` in a main package | reject | reject |
+| program | legacy | stage4 | now |
+|---|---|---|---|
+| unnamed return values | reject | accept | both reject (`ea7bb392`) |
+| `(f)()` parenthesised call target | reject | accept | both reject (`ea7bb392`) |
+| `println("a" + "b")` | reject | accept | both reject (`ea7bb392`) |
+| `var Version = []string{"1"}` | reject | accept | **open** — needs item 5 |
+| `type Names []string` | reject | accept | **open** — needs item 5 |
+| `type M map[string]string` | reject | accept | **open** — needs item 5 |
+| closure capture without `-allow-closure-captures` | reject | reject | parity |
+| `init()` in a main package | reject | reject | parity |
 
 Legacy's messages: `moxie: package-level var with initializer is not allowed:
 use zero-value declaration and init()`, `... named slice type 'Names' is not
 allowed: use []T directly`, `... named map type 'M' is not allowed: use map[K]V
-directly`, `... '+' is not allowed for text concatenation, use | operator`,
-`... unnamed return values are not allowed: name all return values`,
-`... parenthesized call target is not allowed: write f(x), not (f)(x)`.
+directly`, `... '+' is not allowed for text concatenation, use | operator`
+(a comma, not the colon `restrict.go:274` has — the live message comes from
+`mxtext.CheckPlusOnText`, not the SSA check), `... unnamed return values are
+not allowed: name all return values`, `... parenthesized call target is not
+allowed: write f(x), not (f)(x)`.
+
+### Legacy's rules are gated twice, and one gate needs a module
+
+Nothing is enforced on a directory target that has no `moxie.mod`: legacy
+skips `CheckPlusOnText` unless `p.Module.Main && p.Module.Path !=
+"git.smesh.lol/moxie"` (`legacy/loader/loader.go:439`), and outside a module
+the loader rewrites `+` to the pipe operator before any check sees it. So
+`println("a" + "b")` in a manifest-less directory is **accepted** by legacy,
+and the same program with a `moxie.mod` is **rejected**. stage4 now mirrors
+that with `targetIsMainModule()` (`bst.rootModPrefix` empty means no module),
+which is why the three new fixtures carry a `moxie.mod`: without one they
+would prove nothing.
+
+Splitting the checks by gate, for the remaining work:
+
+- **`isUserPackage` (SSA import path, `/pkg/` exempts, no module needed):**
+  unnamed returns, parenthesised call targets, global stores, closure
+  captures, spawn-move, slice-to-array, value receivers. stage4 mirrors it and
+  these are done.
+- **`isUserPackageByPath` (AST, real directory path, `/pkg/` does *not*
+  exempt, `main` always user):** package-level var initializers, named
+  slice/map types, `init()` rules. This is the pair still open, and the reason
+  it cannot simply be switched on: it would reject 39 sites in the three app
+  repos (see queue item 2).
+- **`CheckPlusOnText` (main module only):** `+` on text. Done, with the gate.
 
 ### The user-code exemption is a path substring, implemented three times
 
