@@ -41,18 +41,20 @@ Working layout that matters: the checkouts live at
    `golang.org/x/crypto/chacha20poly1305` was rejected the moment the rule
    landed — fixed by stripping `vendor/` before the gate (`3d015c07`). Then the
    rule reached **musiquay's own packages**, which are `git.smesh.lol/musiquay/
-   web/...` and so were never covered by the `/pkg/` accident:
-   `make test-unit` now fails at `web/common/jsbridge/schnorr`. Measured
-   unnamed-return signatures: **musiquay 142 in 28 files** (103 in
+   web/...` and so were never covered by the `/pkg/` accident. Measured
+   unnamed-return signatures: musiquay 142 in 28 files (103 in
    `web/common/mls`, 13 `marmot`, 10 `jsbridge/schnorr`, 9 `web/wasm/app`,
    5 `web/wasm/signer`), morly 68 and nostr 36 — the last two all under `/pkg/`
    and therefore still exempt (nostr `make test` passes, 13 targets).
 
-   So the choice is now concrete: migrate musiquay's `web/` tree to named
-   returns (142 signatures, mostly ported MLS reference code), or give those
-   packages an explicit exemption (item 5) and keep the rules honest for
-   everything else. The other two rules (paren call target, `+` on text) have
-   not been observed to fire on app code.
+   **Musiquay migrated and green** (`a22269d`): 142 signatures named, 28 files,
+   all four suites pass (19 unit, both harnesses, 108 signer, 12 playwright
+   smoke). Names are type-derived and disambiguated per function, so some carry
+   a numeric suffix and are worth renaming later. Neither of the other two
+   rules fired on app code.
+
+   The migration also found a parser defect: a paren-less named result list is
+   accepted and mis-parsed (see the finding below).
 
    Also fixed on the way, both real bugs the rules surfaced: `moxie test` never
    called the package's `init()` (`de85a620`, phase6 `6aa`), and stage4's
@@ -154,6 +156,29 @@ directly`, `... '+' is not allowed for text concatenation, use | operator`
 `mxtext.CheckPlusOnText`, not the SSA check), `... unnamed return values are
 not allowed: name all return values`, `... parenthesized call target is not
 allowed: write f(x), not (f)(x)`.
+
+### A paren-less named result list is accepted and mis-parsed
+
+`func F() err error {` — a named result **without** parentheses — is not valid
+Moxie (nor Go), and the parser does not reject it. It parses the result list as
+unnamed, mis-nests the body, and **puts the body's declarations at package
+scope**: `packageDeclNames` then returns the locals, so every *other* function
+that declares a name from that set reports `'n' shadows declaration in enclosing
+scope`. One such signature produced 167 shadow errors in `musiquay/web/common/mls`,
+plus a misleading `unnamed return values are not allowed`.
+
+Found while migrating musiquay: the first rewrite emitted `func F() err2 error`
+for the 8 signatures that had a single anonymous result, and the tree failed
+exactly this way. The correct form is `func F() (err2 error)`.
+
+Two things to fix here, neither cosmetic:
+- the parser should report a syntax error for a named result list without
+  parentheses (the shape is invalid), not build a corrupt AST;
+- `checkNamedReturns` reports "unnamed" for it, which sends the reader looking
+  for a missing name that is right there.
+
+Recorded, not yet fixed: it is a diagnostics/robustness bug, and the migration
+that hit it is done (`musiquay` `a22269d`).
 
 ### Legacy's rules are gated twice, and one gate needs a module
 
