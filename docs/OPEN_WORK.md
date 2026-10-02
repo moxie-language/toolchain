@@ -29,18 +29,34 @@ Working layout that matters: the checkouts live at
 
 1. **Explain the exemption and the divergences.** Done in the session; the
    findings are below.
-2. **Close the legacy/stage4 restriction gap.** Legacy enforces six rules
-   stage4 does not (table below). Four are done — unnamed returns,
-   parenthesised call targets and `+` on text are implemented, verified with
-   both compilers and pinned by phase6 `6v`–`6x` (commit `ea7bb392`); value
-   receivers were already there. **Two remain: package-level var initializers
-   and named slice/map types.** Legacy gates those with `isUserPackageByPath`,
-   which has no `/pkg/` clause, so enforcing them in stage4 rejects 39 sites
-   across `nostr`/`morly`/`musiquay` (6+13+20 var initializers, 3+7+6 named
-   types). They need the explicit exemption declaration (item 5) first, or a
-   migration; until then stage4 keeps the `/pkg/`-exempting gate for these two.
-   This is a bootstrap hazard, not a cosmetic gap: legacy builds stage4 first,
-   so stage4-only shapes break the next bootstrap.
+2. **Close the legacy/stage4 restriction gap.** Four of six done — unnamed
+   returns, parenthesised call targets and `+` on text are implemented,
+   verified with both compilers and pinned by phase6 `6v`–`6x` (`ea7bb392`);
+   value receivers were already there. **Two remain: package-level var
+   initializers and named slice/map types.**
+
+   **Landing the three exposed the real bill, and it is paid in app code, not
+   in the compiler.** stage4 compiles `vendor/golang.org/x/...` while legacy
+   sees `golang.org/x/...`, so the vendored exemption missed and
+   `golang.org/x/crypto/chacha20poly1305` was rejected the moment the rule
+   landed — fixed by stripping `vendor/` before the gate (`3d015c07`). Then the
+   rule reached **musiquay's own packages**, which are `git.smesh.lol/musiquay/
+   web/...` and so were never covered by the `/pkg/` accident:
+   `make test-unit` now fails at `web/common/jsbridge/schnorr`. Measured
+   unnamed-return signatures: **musiquay 142 in 28 files** (103 in
+   `web/common/mls`, 13 `marmot`, 10 `jsbridge/schnorr`, 9 `web/wasm/app`,
+   5 `web/wasm/signer`), morly 68 and nostr 36 — the last two all under `/pkg/`
+   and therefore still exempt (nostr `make test` passes, 13 targets).
+
+   So the choice is now concrete: migrate musiquay's `web/` tree to named
+   returns (142 signatures, mostly ported MLS reference code), or give those
+   packages an explicit exemption (item 5) and keep the rules honest for
+   everything else. The other two rules (paren call target, `+` on text) have
+   not been observed to fire on app code.
+
+   Also fixed on the way, both real bugs the rules surfaced: `moxie test` never
+   called the package's `init()` (`de85a620`, phase6 `6aa`), and stage4's
+   `isUserPackagePath` saw vendored paths that legacy never sees.
 3. **`moxie test` never runs the package under test's `init()`.** **Done.**
    The harness builds a synthetic `main` around the library and injects a
    `__varinit` call at the start of it, but never a call to `init()`: the
