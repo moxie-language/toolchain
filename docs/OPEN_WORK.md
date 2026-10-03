@@ -134,16 +134,32 @@ Working layout that matters: the checkouts live at
    import colliding with any declaration — currently import-vs-import keeps the
    first binding silently and stage4 dedupes the names so the second is not
    even seen.
-8. **VS Code / VSCodium: full Moxie language support.** Build the extension,
-   install it into the local Codium, and keep the source in a folder in the
-   moxie repo. Scope: TextMate grammar + `language-configuration.json`, the
-   `pkg/token`/`pkg/syntax` keyword and operator sets as the source of truth,
-   snippets for the shapes Moxie requires (named returns, pointer receivers,
-   `init()` + zero-value globals, root-arena ensure), and a language server
-   (diagnostics from `moxie build`'s stderr, completion, hover, go-to-definition
-   over `pkg/syntax`). No compiler subcommand exists for it yet; `moxie help`
-   lists build/run/test/clean/targets/info/list/header/install/version/env/
-   fetch/cache/update/build-runtime.
+8. **VS Code / VSCodium: full Moxie language support.** **Done**
+   (`editors/vscode/`, installed into ~/.vscode-oss/extensions as
+   `mleku.moxie-lang-1.1.0`).
+   - `syntaxes/moxie.tmLanguage.json`: keywords from `pkg/token/tokens.mx`
+     (no `go`, no `fallthrough`), builtin types from `pkg/types` (`byte`/`rune`
+     as aliases, no `int`/`uint`), builtin functions (`push`, `pop`, `resize`,
+     `len`, `cap`, `copy`, `delete`, `close`, `clear`, `min`, `max`, `panic`,
+     `recover`, `print`, `println`, `spawn`), `//:build`/`//:linkname`/`//export`
+     pragmas, and the *removed* names (`make`, `new`, `append`, `reflect`, `any`,
+     `int`, `uint`, `complex*`) as invalid so their use is visible.
+   - `snippets/moxie.json`: named returns, pointer receivers, sovereign types,
+     `init()` + zero-value globals, `[]T{:n:cap}`, `mxutil.Ensure` before a
+     spread push, a spawn worker, interface assertions.
+   - `src/extension.js`: diagnostics are the compiler's own - open/save builds
+     the document's package with `moxie build` and turns its positioned errors
+     into problems (`Moxie: Build the package and report diagnostics`,
+     Ctrl+Alt+B); completion and hover explain the Moxie semantics from the
+     keyword/builtin tables; go-to-definition indexes `func`/`type`/`var`/`const`
+     declarations across `**/*.mx`. Settings: `moxie.path`, `moxie.moxieRoot`,
+     `moxie.buildOnSave`, `moxie.buildFlags`, `moxie.trace`.
+   - Verified: manifest and grammar parse as JSON, the client source passes
+     `node --check`, and `codium --list-extensions` reports `mleku.moxie-lang`.
+     A headless run cannot exercise the extension host, so the in-editor
+     behaviour is verified by installing and reloading the window.
+   - A dedicated LSP server is not needed for this scope; the providers give the
+     same surface without a second process to keep alive.
 9. **Wire `musiquay/pkg/protocol` into the running system.** Relay side:
    storage/index/validation policy per kind, the `#x` blob -> asset index hosts
    need to gate, and the replaceable-range exception for 32218-32220. App side:
