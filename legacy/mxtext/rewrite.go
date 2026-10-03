@@ -249,6 +249,12 @@ func RewriteChanLiterals(src []byte, fset *token.FileSet) RewriteResult {
 			bufExpr = strings.TrimSpace(string(src[bufStart:bufEnd]))
 		}
 
+		// chan T{:n} is the capacity-only form (a channel has no length
+		// separate from its capacity): the allocator takes the number.
+		if strings.HasPrefix(bufExpr, ":") {
+			bufExpr = strings.TrimSpace(bufExpr[1:])
+		}
+
 		// Write everything before this channel literal.
 		result.Write(src[lastEnd:toks[chanIdx].pos])
 
