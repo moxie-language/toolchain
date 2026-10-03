@@ -71,6 +71,10 @@ func mxListPackagesImpl(config *compileopts.Config, goroot string, inputPkg stri
 		replaces:     replaces,
 		goroot:       goroot,
 		seen:         make(map[string]*PackageJSON),
+		buildDir:     wd,
+		moxiePath:    layoutMoxiePath(),
+		moxieRoot:    goenv.Get("MOXIEROOT"),
+		pins:         readManifestPins(wd, goenv.Get("MOXIEROOT")),
 	}
 
 	// The runtime package is an implicit dependency — never explicitly
@@ -295,6 +299,13 @@ type resolver struct {
 	goroot       string
 	seen         map[string]*PackageJSON
 	sorted       []*PackageJSON
+	// The layout rules stage4 shares for trees with no module file: a
+	// repository is its checkout under MOXIEPATH, or the worktree its MANIFEST
+	// pin names, and the toolchain repository is MOXIEROOT.
+	buildDir  string
+	moxiePath string
+	moxieRoot string
+	pins      map[string]string // repository path → pinned ref
 }
 
 // walk imports a package and recursively walks its dependencies.
@@ -430,6 +441,16 @@ func (r *resolver) resolveDir(importPath string, srcDir string) (string, error) 
 			return dir, nil
 		}
 		return "", fmt.Errorf("package %q not found in module at %s", importPath, dir)
+	}
+
+	// 3b. Repository layout: a sibling repository import resolves to its
+	// checkout under MOXIEPATH, or to the worktree a MANIFEST pin names. This
+	// is the model stage4 already uses and the one the module files are being
+	// removed in favour of, so it wins over the module readers below.
+	if dir, err := r.layoutRepoDir(importPath); err != nil {
+		return "", err
+	} else if dir != "" {
+		return dir, nil
 	}
 
 	// 4a. Local replace directives.
@@ -579,6 +600,143 @@ func withinDir(dir, root string) bool {
 		return true
 	}
 	return strings.HasPrefix(dir, root+string(filepath.Separator))
+}
+
+// layoutMoxiePath is the directory repositories are checked out under.
+// MOXIEPATH overrides it; the default matches the stage4 compiler's.
+func layoutMoxiePath() string {
+	if p := os.Getenv("MOXIEPATH"); p != "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "moxie")
+}
+
+// splitRepoPath cuts a repository import path into its repository (the first
+// two components) and the package path inside it. ok is false for paths that
+// are not laid out that way, e.g. a single-component path or a relative one.
+func splitRepoPath(importPath string) (repo, rel string, ok bool) {
+	first := strings.Index(importPath, "/")
+	if first <= 0 {
+		return "", "", false
+	}
+	second := strings.Index(importPath[first+1:], "/")
+	if second < 0 {
+		return importPath, "", true
+	}
+	second += first + 1
+	return importPath[:second], importPath[second+1:], true
+}
+
+// readManifestPins returns the repository → ref pins in the build root's
+// MANIFEST, falling back to MOXIEROOT's. The grammar is the one stage4 reads:
+// single `require <repo> <ref>` lines and `require ( <repo> <ref> ... )` blocks.
+func readManifestPins(buildDir, root string) map[string]string {
+	var data []byte
+	for _, dir := range []string{buildDir, root} {
+		if dir == "" {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, "MANIFEST"))
+		if err == nil {
+			data = b
+			break
+		}
+	}
+	if data == nil {
+		return nil
+	}
+	pins := make(map[string]string)
+	inBlock := false
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "//") || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if line == "require (" {
+			inBlock = true
+			continue
+		}
+		if inBlock && line == ")" {
+			inBlock = false
+			continue
+		}
+		if strings.HasPrefix(line, "require ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "require"))
+		} else if !inBlock {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) == 0 {
+			continue
+		}
+		ref := ""
+		if len(f) > 1 {
+			ref = f[1]
+		}
+		pins[f[0]] = ref
+	}
+	return pins
+}
+
+// layoutRepoDir resolves a repository import path through the layout rules.
+// The toolchain repository is MOXIEROOT; a pinned repository is the worktree
+// its pin names under MOXIEPATH/.refs, which `moxie get` materialises; every
+// other repository is its checkout under MOXIEPATH. It returns "" when the
+// path is not a repository import or no tree exists for it, letting the
+// module readers below have their turn.
+//
+// A pin whose worktree is missing is an error, not a fallback to the checkout:
+// silently building a version nobody asked for is the failure stage4 already
+// refuses.
+func (r *resolver) layoutRepoDir(importPath string) (string, error) {
+	repo, rel, ok := splitRepoPath(importPath)
+	if !ok {
+		return "", nil
+	}
+	if repo == "git.smesh.lol/moxie" {
+		if r.moxieRoot == "" {
+			return "", nil
+		}
+		dir := filepath.Join(r.moxieRoot, rel)
+		if isDir(dir) {
+			return dir, nil
+		}
+		return "", nil
+	}
+	if r.moxiePath == "" {
+		return "", nil
+	}
+	if ref := r.pins[repo]; ref != "" {
+		wt := filepath.Join(r.moxiePath, ".refs", repo, ref)
+		if !isDir(wt) {
+			return "", fmt.Errorf("MANIFEST pins %s to %s but %s is not materialised; run `moxie get %s@%s`",
+				repo, ref, wt, repo, ref)
+		}
+		dir := wt
+		if rel != "" {
+			dir = filepath.Join(wt, rel)
+		}
+		if isDir(dir) {
+			return dir, nil
+		}
+		return "", fmt.Errorf("MANIFEST: %s %s has no package %s", repo, ref, importPath)
+	}
+	base := filepath.Join(r.moxiePath, repo)
+	if !isDir(base) {
+		return "", nil
+	}
+	dir := base
+	if rel != "" {
+		dir = filepath.Join(base, rel)
+	}
+	if isDir(dir) {
+		return dir, nil
+	}
+	return "", nil
 }
 
 // parseGoMod extracts the module path, go version, and moxie version from

@@ -123,6 +123,24 @@ Working layout that matters: the checkouts live at
    `moduleFromRoots`), delete the files and the Makefile `replace`/`require`
    lines, and key the build cache on repo + resolved commit.
 
+   **Legacy now resolves by layout too.** `legacy/loader/mxlist.go` gained
+   `layoutRepoDir`, consulted after the package's own module and before the
+   `replace`/module-cache readers: `git.smesh.lol/moxie/...` is `$MOXIEROOT`,
+   a repository the build root's `MANIFEST` pins is the
+   `$MOXIEPATH/.refs/<repo>/<ref>` worktree `moxie get` materialises, and every
+   other repository is its checkout under `$MOXIEPATH`. A pin whose worktree is
+   missing is an error naming the `moxie get` command, never a silent fallback
+   to the checkout. Legacy does not clone or add worktrees itself - the
+   materialisation stays in one implementation, stage4's.
+
+   Verified with a hermetic fixture (`git.smesh.lol/depa` with `pkg/greet`
+   printing a different word per tag, a consumer importing it, no module file
+   anywhere): with no MANIFEST the legacy build resolves the sibling repository
+   and prints the checkout's word (it failed "not found" before); with
+   `require git.smesh.lol/depa v2` and the v2 worktree present it prints the
+   v2 word; with a pin whose worktree is absent it fails loud; stage4 builds the
+   same fixture with the same result. Suite 167/167 after the change.
+
    **Build cache keying is done and verified.** The package key is the content
    hash of the package's files plus the sorted hashes of its dependencies, plus
    target, `-cover`, capture policy and the link-set hash; and
