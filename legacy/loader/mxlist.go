@@ -504,10 +504,66 @@ func readModInfo(startDir string) (modPath, modDir, goVersion string, err error)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return "", startDir, "", nil // no module file found, use wd
+			// No module file anywhere up the tree. The repository the
+			// directory sits in is the module: the toolchain tree inside
+			// MOXIEROOT, a checkout under MOXIEPATH (its first two path
+			// components), and nothing at all outside both - which leaves the
+			// package subject to the language restrictions, as user code
+			// should be.
+			if mp, md := moduleFromRoots(startDir); mp != "" {
+				return mp, md, "", nil
+			}
+			return "", startDir, "", nil
 		}
 		dir = parent
 	}
+}
+
+// moduleFromRoots derives a module path and directory from the layout rules
+// the stage4 compiler shares, for trees that carry no module file: MOXIEROOT
+// is the toolchain module, and a directory under MOXIEPATH belongs to the
+// repository named by its first two components. A directory outside both has
+// no module.
+func moduleFromRoots(dir string) (modPath, modDir string) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", ""
+	}
+	if root := goenv.Get("MOXIEROOT"); root != "" {
+		if rabs, err2 := filepath.Abs(root); err2 == nil && withinDir(abs, rabs) {
+			return "git.smesh.lol/moxie", rabs
+		}
+	}
+	mpath := os.Getenv("MOXIEPATH")
+	if mpath == "" {
+		if home, err2 := os.UserHomeDir(); err2 == nil {
+			mpath = filepath.Join(home, "moxie")
+		}
+	}
+	if mpath == "" {
+		return "", ""
+	}
+	mabs, err2 := filepath.Abs(mpath)
+	if err2 != nil || !withinDir(abs, mabs) {
+		return "", ""
+	}
+	rel, err3 := filepath.Rel(mabs, abs)
+	if err3 != nil {
+		return "", ""
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return "", ""
+	}
+	return parts[0] + "/" + parts[1], filepath.Join(mabs, parts[0], parts[1])
+}
+
+// withinDir reports whether dir is root or sits under it.
+func withinDir(dir, root string) bool {
+	if dir == root {
+		return true
+	}
+	return strings.HasPrefix(dir, root+string(filepath.Separator))
 }
 
 // parseGoMod extracts the module path, go version, and moxie version from

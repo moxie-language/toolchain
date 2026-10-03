@@ -169,6 +169,30 @@ Working layout that matters: the checkouts live at
    adapters between these structs and `event.E` (native) / `core.Event` (wasm),
    plus the publish paths.
 
+### Open: the `+` text rule's scope without a module file
+
+Removing `moxie.mod` took away the thing the `+`-on-text rule was scoped by.
+Legacy gated it on `p.Module.Main` (the input package and the input module's
+packages, never a dependency); stage4 gated it on `rootModPrefix !=
+"git.smesh.lol/moxie"`, which before the removal was the target's module and is
+now just "not the toolchain".
+
+Two tests pin the two sides of the gap, and both are red in the current tree
+(the full suite is 166/168):
+
+- `plustext:legacy` - a directory target outside every module is no longer
+  rejected, because no module file sets `Module.Main` for it.
+- `aeaddep:stage4` - the broad stage4 gate rejects a `+` inside a *dependency*,
+  which legacy never did.
+
+The fix is one notion of "the target's own code" implemented in both compilers:
+the package the build was asked for, plus the packages under the repository it
+lives in. stage4 has the pieces (`bst.targetPkgPath` from the resolver's entry
+whose `path` equals the requested target, `rootModPrefix` for the repository);
+legacy marks the input package `Module.Main` even with no module file. Both were
+prototyped and are half-landed; the missing part is identifying the target
+package reliably in stage4's resolver order, which is not "last".
+
 ## Decisions taken
 
 - **Three-repo split**: `nostr` = shared primitives and codecs; `morly` = the
