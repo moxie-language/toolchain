@@ -118,9 +118,36 @@ Working layout that matters: the checkouts live at
    pinning v2: the build read v2 from the worktree and the checkout stayed at v1
    on a clean tree; a bogus ref fails loud; no MANIFEST uses the checkout.
 
-   **Still to do:** remove `moxie.mod` resolution from stage4 and legacy, delete
-   the files and the Makefile `replace`/`require` lines, and key the build cache
-   on repo + resolved commit.
+   **Still to do:** remove `moxie.mod` resolution from stage4 and legacy (stage4
+   is done; legacy still reads `moxie.mod`/`go.mod` and falls back to
+   `moduleFromRoots`), delete the files and the Makefile `replace`/`require`
+   lines, and key the build cache on repo + resolved commit.
+
+   **Build cache keying is done and verified.** The package key is the content
+   hash of the package's files plus the sorted hashes of its dependencies, plus
+   target, `-cover`, capture policy and the link-set hash; and
+   `cachedBcPath`/`cachedMxhPath` append `pkg.version`, which for a repository
+   package is `manifestCommit(repoRootOf(pkgPath))` - the **resolved commit**,
+   never the tag. Compiler identity is one level up in the cache directory name
+   (`mxc-<version>-<compilerHash>-<buildID>-<os>-<arch>`, and `compilerHash`
+   covers `_mxc_stage4/` *and* `src/runtime/`), so a compiler or runtime change
+   cannot reuse an object. A hit pushes the cached `.bc` straight to the linker
+   (plus any C files, which still compile) and the build does not recompile the
+   package.
+
+   The key is a strict superset of "repo + resolved commit": the commit alone
+   would hit an object built from a *different* tree that claims the same
+   commit, so content hash + commit + compiler identity is kept. The layout
+   stays `$MOXIEPATH/cache/pkg/<package-path>/<hash>_<commit>.bc` rather than
+   `$MOXIEPATH/.build/<repo>/<commit>/<triple>/`: the unit the linker consumes
+   is the package, and the content hash is what makes the path a build happens
+   to run in irrelevant. `moxie clean` empties the cache.
+
+   Verified with the hermetic fixture above: the pinned tag `v1` was compiled
+   once, the second build printed `cached example.com/thing/pkg/greet @
+   d6af9e93...` (the resolved commit) and linked it, and the checkout under
+   `$MOXIEPATH/example.com/thing` stayed where it was while the build read the
+   worktree under `.refs/`.
 7. **Make the model rules universal; make the conflict rule strict.** The
    immutability guarantee is a model invariant, not a style preference, so it
    belongs on the package root everywhere — with the **runtime/unsafe carve-out
@@ -167,18 +194,47 @@ Working layout that matters: the checkouts live at
    storage/index/validation policy per kind, the `#x` blob -> asset index hosts
    need to gate, and the replaceable-range exception for 32218-32220. App side:
    adapters between these structs and `event.E` (native) / `core.Event` (wasm),
-   plus the publish paths.
+   plus the publish paths. **Started:** the 32218-32220 exception is fixed and
+   pinned (`pkg/relay/pipeline/policy.mx`, morly 28/28); the inventory, the
+   seams, the ordered edits and the open decisions are in the finding below.
 
 ### Repository locks are held for the whole build
 
 A build resolves a repository, then spends minutes compiling packages out of it;
 another build wanting a different ref must not check the tree out underneath it.
 Every repository a build reads is locked at resolution (`holdRepoLock`) and the
-lock is kept until the process exits, released on every exit path including
-`fatal` and interrupts (`releaseHeldRepoLocks` in `exitNow`). The lock file
-records the holder's pid, and waiting past the timeout names that pid and the
-lock path instead of failing anonymously. `moxie get` keeps its shorter
-acquire/release around the checkout itself.
+lock is kept until the process exits. The lock file records the holder's pid,
+and waiting past the timeout names that pid and the lock path instead of failing
+anonymously. `moxie get` keeps its shorter acquire/release around the checkout
+itself.
+
+The first version leaked the lock: `releaseHeldRepoLocks` lived only in
+`exitNow`, and only `fatal` and the usage errors go through `exitNow` - every
+successful build returns from `main` and left the lock file behind. The next
+build then waited three minutes and died naming a pid that had been gone since
+the previous build finished. Two more defects sat behind it:
+
+- **The acquire was not atomic.** It read the lock path and then wrote it, so
+  two builds could both see an empty path and both write their pid; neither
+  waited and both checked out the same tree. The create is now the test:
+  `os.OpenFile(lp, O_WRONLY|O_CREATE|O_EXCL, 0644)`, and only the process that
+  creates it holds the lock.
+- **A dead holder wedged the repository for good.** A SIGKILLed or crashed
+  build leaves the file, and pid reuse is the only thing that could ever clear
+  it. After five failed acquires (one second) the waiter runs `kill -0` on the
+  recorded pid: a gone holder's lock is removed and the waiter proceeds, a live
+  one is left alone and the wait continues to the three-minute fatal.
+
+Release is now a `defer releaseHeldRepoLocks()` in `main` beside
+`defer cleanupScratch()`, so every `return` path drops it, and `exitNow` still
+releases explicitly for the paths that bypass defers.
+
+Verified on a fresh `-a` build with a hermetic fixture (`example.com/thing`
+tagged `v1`/`v2`, a consumer whose `MANIFEST` pins `v1`): a successful build
+leaves no lock file; a second build is a pure cache hit
+(`cached example.com/thing/pkg/greet @ d6af9e93...`); a lock file written with a
+dead pid is broken after one second and the build proceeds; a lock held by a
+live pid is still respected (the build waits, does not break it).
 
 ### `+` on text is the target's rule, and is bilateral again
 
@@ -838,8 +894,117 @@ explicit exemption declaration.
   12 playwright smoke on port 3401); `cd morly && make test-unit`.
 - The compiler's module cache is `$HOME/moxie` (`MOXIEPATH` overrides), the
   stdlib is `$MOXIEROOT/src`.
-- Concurrent compiles collide on `~/.moxie/*.lock`-style repo locks and fail
-  rather than wait; serialise builds that touch the same module cache.
+- Concurrent compiles against the same `MOXIEPATH` serialise on a per-repository
+  lock file (`$MOXIEPATH/<repo>.lock`, holder pid inside): a second build waits
+  and prints whose lock it is waiting for, a lock whose holder is gone is broken
+  after a second, and every path releases on exit.
 - The relay serves the app with `ORLY_STATIC_DIR=<musiquay>/web/static`; the
   smoke suite starts its own relay, so a stray listener on the test port fails
   the fixture on purpose.
+
+## Module-file audit (what still reads a module file)
+
+An exhaustive sweep of `moxie/legacy/`, the four live repos and the eight older
+ones, with probes rather than recollection. `moxie.mod` is gone from the four
+live repos and stage4 has no module machinery left at all; what remains:
+
+**legacy is the lagging side, and it is not just the reader.** `legacy/mxlist.go`
+still walks up for `moxie.mod`/`go.mod` (`findModFile`, `readModInfo`,
+`parseGoMod`, `readModRequires`, `readModReplaces`), and - the part that
+actually blocks the removal - legacy's `resolveDir` has **no `$MOXIEPATH/<repo>`
+layout fallback**. Proven: with `morly/go.mod` moved aside, `legacy/moxie build
+./pkg/access` fails at `resolving "git.smesh.lol/nostr/pkg/event": package not
+found (not in stdlib, module, or cache)`, while stage4 resolves the same tree by
+layout. `nostr`'s own packages do resolve without a module file (self-imports
+via `moduleFromRoots`), so the gap is exactly the cross-repo import.
+
+Legacy also cannot start without a Go toolchain: `legacy/goenv/goenv.go` shells
+out to `go env -json` (`could not find 'go' command` with Go off `PATH`). The
+`legacy/go.mod`/`go.sum` and the `llvmpure`/`probe` module files are Go build
+inputs, not Moxie ones, and stay until that dependency is ported.
+
+**A bilateral language bug sits in the way of any legacy end-to-end test.**
+legacy rejects `nostr/pkg/lol/errorf/errorf.mx:8-13` - `[]fmt.Stringer` passed
+where `fmt.Stringer` is wanted - and stage4 compiles the same file cleanly.
+Until legacy agrees, "legacy builds it" cannot be used as evidence.
+
+**Cross-repo resolution gaps that are not about module files.** `nostr/pkg/core`
+imports `git.smesh.lol/musiquay/web/common/helpers`, which no `go.mod` replace
+ever covered and the layout rule will. `iskra` (28 files) and `transdb`
+(16 files) import `git.smesh.lol/iskradb/lattice`; `gio-demo` imports
+`git.smesh.lol/gio`; `transdb` imports the bare root `git.smesh.lol/iskra`.
+
+**Files still on disk:** `go.mod` in `nostr`, `morly`, `musiquay`, `smesh`, and
+vestigial Go ones in `gnarl-hamadryad`, `iskra/go-ref`,
+`iskra/tools/mx-transpile`, `zilch`; `moxie.mod` in `gio`, `gio-demo`,
+`iskra` (+3 under `cmd/`), `iskradb`, `transdb`, `smesh` (+13 nested under
+`web/`), `musiquay/web/**` (11 nested; note `web/common/moxie.mod` and every
+`web/wasm/*/moxie.mod` declare the *sub-directory* as their own module, which is
+already inconsistent with the layout rule), `gnarl-hamadryad/moxie`.
+
+**`smesh/Makefile:179`** derives `COVER_PREFIX` with
+`sed -n 's/^module[[:space:]]*//p' moxie.mod`. Deleting the file yields an empty
+prefix, and `pkg/mxcover/report.mx:257` treats empty as *no filter*, so `make
+cover` would report runtime and stdlib sites too. Replace with the layout value
+(`git.smesh.lol/$(notdir $(CURDIR))/`).
+
+**Order to finish it:** (1) give legacy the `$MOXIEPATH/<repo>` + `.refs` pin
+resolution stage4 already has; (2) collapse legacy's `readModInfo` onto
+`moduleFromRoots` and delete the module readers and the `requires`/`replaces`
+plumbing; (3) rewrite `legacy/cover/cover.go` `ModulePrefix` the same way;
+(4) delete legacy's `fetch`/`vendor` commands and their files; (5) fix the
+`errorf.mx` divergence bilaterally; (6) delete the sibling module files repo by
+repo with a build check each; (7) docs. Two decisions are outstanding and are
+not mine to take: the `.mxh` API-stability gate
+(`legacy/header.go:92`, `legacy/compiler/apicheck.go:68`) reads
+`ParseMoxieModVersion`, so deleting the files silently removes the major-version
+escape hatch; and whether the older repos are in scope now or only the four.
+
+## Protocol wiring: what is there and what it needs
+
+`musiquay/pkg/protocol` (6278 lines, 20 payload types) is imported by nothing.
+Every payload has `Tags() [][]string`, `Parse*(tags, content)` and
+`Validate() (err error)`; `kind.mx` is the only policy surface, and it is a
+taxonomy, not a retention table: `IsAddressable` (32210-32217), `IsRegular`
+(3221, 3222, 32218-32220), `IsPrivate` (3222, 32218), `InReplaceableRange`
+(30000-39999), `RegularInReplaceableRange()` = exactly {32218, 32219, 32220}.
+
+**The 32218-32220 bug is live and now fixed.** `kind.IsParameterizedReplaceable`
+is `30000 <= k < 40000`, so `pipeline.mx` sent delivery receipts, host
+aggregates and publisher rollups down the addressable path; none carries a `d`
+tag, so they all compared equal and the second record deleted the first. The
+relay now consults the protocol first (`pkg/relay/pipeline/policy.mx`,
+`countedInReplaceableRange`) and stores them as regular events, leaving 32210's
+`d`-tag replacement untouched. Pinned by
+`TestIngestCountedKindsInReplaceableRange`: three records for each of 32218,
+32219, 32220 all survive, and a 32210 pair on one `d` still collapses to the
+newer. morly `pkg/relay/pipeline`: 28 passed.
+
+**The `#x` lookup already exists.** `store/engine.mx` indexes every
+single-letter tag into `tc/tkc/tpc/tkp`, so `{"kinds":[32210],"#x":["<sha256>"]}`
+answers today and survives a WAL rebuild; what is missing is a named resolution
+entry point (`ResolveBlob`) and an ingest-time asset index. No schema change.
+
+**The Blossom serve path is ungated and has no store.** `pkg/blossom/blossom.mx`
+serves any 64-hex hash; `wire.BlossomRequest` carries no requester identity, and
+the dbengine domain is the only holder of `*store.Engine`, so a gate needs a new
+tree op (`OpAsset`) plus a decision in the root server before `doDispatchBlossom`.
+The gate order the docs describe is: unresolvable blob -> serve; asset with no
+32217 filter -> serve; gated with no `Authorization: Nostr` -> 401; valid
+24242 `t=get` with a bloom member -> serve; otherwise 402. `nostr/pkg/httpauth`
+implements NIP-98 (27235) and hard-rejects other kinds, so 24242 needs its own
+checker.
+
+**App side has no native binary** - `musiquay` is wasm only, and
+`nostr/pkg/core.Event.Tags` is already `[][]string`, so the wasm adapter is
+nearly free while an `event.E` adapter would drag secp256k1 into every wasm
+bundle. Publish path: unsigned JSON -> `signer.SignEvent` -> `routeMsg` ->
+relay-proxy `PublishTo` -> `Conn.Publish`; it is copy-pasted a dozen times and
+wants one helper plus thin per-payload entry points. Do not add publish paths
+for 3222/32218 - they are private and belong inside NIP-59 wraps.
+
+**Decisions this needs:** whether the relay is also the host that gates blobs
+(suggested: gate behind an env flag, default off); whether a bare 3222/32218
+should be rejected (the protocol says they are never published as-is); the
+BUD-11 24242 checker versus widening `httpauth`; and hex case, where
+`protocol.IsHex64` is lowercase-only while `blossom.isHex` accepts uppercase.

@@ -703,17 +703,37 @@ func repoLockPath(mpath, repoPath string) (s string) {
 
 func acquireRepoLock(mpath, repoPath string) (ok bool) {
 	lp := repoLockPath(mpath, repoPath)
-	if data, locked := mxutil.ReadFile(lp); locked {
-		holder := mxutil.TrimSpace(string(data))
-		if holder == "" {
-			holder = "unknown"
-		}
-		lastHolder = holder
+	mkdirAll(pathDir(lp), 0755)
+	// O_EXCL is the lock: the create is the test. A read-then-write let two
+	// builds both see an empty path and both write their pid, after which
+	// neither waited and both checked the same tree out.
+	f, err := os.OpenFile(lp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if err == nil {
+		f.WriteString(simpleItoa(os.Getpid()))
+		f.Close()
+		return true
+	}
+	data, locked := mxutil.ReadFile(lp)
+	if !locked {
 		return false
 	}
-	mkdirAll(pathDir(lp), 0755)
-	writeFile(lp, []byte(simpleItoa(os.Getpid())), 0644)
-	return true
+	holder := mxutil.TrimSpace(string(data))
+	if holder == "" {
+		holder = "unknown"
+	}
+	lastHolder = holder
+	return false
+}
+
+// processAlive reports whether a pid still exists. kill -0 performs the
+// existence and permission check without delivering a signal. It is only
+// consulted after a lock has already blocked this build, so the uncontended
+// path pays nothing for it.
+func processAlive(pid string) (ok bool) {
+	if pid == "" || pid == "unknown" {
+		return false
+	}
+	return run([]string{"kill", "-0", pid}) == 0
 }
 
 func releaseRepoLock(mpath, repoPath string) {
@@ -963,6 +983,16 @@ func waitRepoLock(mpath, repo string) {
 		}
 		run([]string{"sleep", "0.2"})
 		tries++
+		// A holder that no longer exists cannot still be checking the tree
+		// out, and one SIGKILLed build must not wedge every later one. Wait a
+		// few rounds first so a holder that is merely mid-checkout (and about
+		// to release) is not broken out from under.
+		if tries == 5 {
+			if !processAlive(lastHolder) {
+				mxutil.WriteStr(2, "  breaking stale lock: " | repo | " (pid " | lastHolder | " is gone)\n")
+				os.Remove(repoLockPath(mpath, repo))
+			}
+		}
 		if tries > 900 {
 			fatal("repo locked for over three minutes: " | repo | " (held by pid " | lastHolder | ", " | repoLockPath(mpath, repo) | ")")
 		}
@@ -5920,6 +5950,12 @@ func main() {
 	// Scratch directories die on completion, from the SIGINT handler, and from
 	// exitNow on the paths that need an exit status.
 	defer cleanupScratch()
+	// The repository locks have to die with the process too. Every command
+	// below returns from main rather than exiting (only fatal and the usage
+	// errors call exitNow), so releasing them in exitNow alone left the lock
+	// file behind after a successful build and the next build waited three
+	// minutes on a pid that was long gone.
+	defer releaseHeldRepoLocks()
 	cInstallInterruptHandler()
 	bst.buildJobs = adaptiveJobs()
 	if mxutil.TargetArch() == "wasm" {
