@@ -1222,3 +1222,44 @@ eight blank imports genuinely removable: `src/internal/cpu/cpu.mx`,
 `syscall/linkname_unix.mx` (`import _ "unsafe"`) and
 `crypto/ec/secp256k1/precomps.mx` (`import _ "embed"`). With those gone the
 stdlib parses clean, so queue item 4 is closed.
+
+### Stage 1 of item 7(a): the direction is not mechanical (measured)
+
+The approved plan's first step was to settle which side the named slice/map-type
+rule is on. Probes, both run on a dotted-path package under `$MOXIEPATH` with a
+named slice type and an initialised package var:
+
+- **stage4 accepts both.** It has no implementation of either rule at all - not
+  a scope difference. `moxie build` returns 0 and the program runs.
+- **legacy rejects both**, with `moxie: named slice type 'Tags' is not allowed:
+  use []T directly` and `moxie: package-level var with initializer is not
+  allowed: use zero-value declaration and init()`.
+- **legacy checks dependency packages too**, not just the build root: a `main`
+  package importing a library with `type Tags []string` fails on the library's
+  line. So switching stage4 on means every package in every repo, not only
+  targets.
+
+The cost divides into two very different migrations:
+
+- **Package-level var initializers** - 6 in nostr, 13 in morly, 20 in musiquay
+  (39, the number the finding already recorded; it is the var sites, not the
+  named types), scattered through packages, tests and `_test/` harnesses. All
+  are convertible to a zero-value declaration plus an assignment in `init()`,
+  and that is the model's preferred shape anyway, so migrating them is
+  behaviour-preserving work that no direction change can invalidate.
+  **Started this round.**
+- **Named slice/map types** - 16 in the app repos (`nostr/pkg/core/tags.mx`
+  `Tag []string` and `Tags []Tag`, `nostr/pkg/normalize` `Reason []byte`, seven
+  `...List` channel slices in `morly/pkg/relay/server/server.mx`, and six in
+  `musiquay/web/common/mls`: `ratchetLabel`, `secretTree`, `proposalRef`,
+  `GroupID`, `KeyPackageRef`, `ratchetTree`), plus 74 across 49 stdlib files.
+  This one is **not** mechanical: `nostr.Tag` and `nostr.Tags` carry the tag API
+  (`Key`, `Value`, `Relay`, `Marker`, `GetFirst`, `GetAll`, `GetD`,
+  `ContainsValue`), they are referenced 68 times across 9 files in all three
+  repos, and `[]T directly` has no methods. Enforcing the rule means dissolving
+  that API into free functions. That should be confirmed before it is done,
+  because the model elsewhere *depends* on named types with methods - builtin
+  Stringers are exactly that (`byte`/`rune` are named types over `uint8`/
+  `int32`, and the Stringer design says a named type's own `String()` wins).
+  The alternative reading of the rule is that it is legacy's leftover and
+  should be dropped, which costs no sites at all.
