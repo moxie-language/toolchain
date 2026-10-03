@@ -1101,3 +1101,68 @@ alone, and there is no parser at all for 31922, 31924, 30403, 30315, 24242,
 them. `ParseCalendarEvent`'s doc says 31922 and 31923 share a struct but only
 31923 is wired, and the same split exists between 30402 and 30403; neither was
 guessed at.
+
+### A `[][]string` built by repeated calls comes back aliased (open, blocking)
+
+Found while wiring the app: `protocol.*.Tags()` cannot be called at runtime.
+
+Minimal repro, native, no test harness (`$MOXIEPATH/git.smesh.lol/aliasprobe`):
+
+```
+package pb
+
+func Ret(dst [][]string, k, v string) (out [][]string) {
+	out = dst
+	t := []string{:2}
+	t[0] = k
+	t[1] = v
+	out = push(out, t)
+	return
+}
+
+func Three(a, b, c string) (tags [][]string) {
+	tags = Ret(nil, "d", a)
+	tags = Ret(tags, "title", b)
+	tags = Ret(tags, "artist", c)
+	return
+}
+```
+
+`pb.Three("d1","t1","a1")` then `println(r[0][1], r[1][1], r[2][1])` prints
+`d1 a1 a1`: rows 1 and 2 carry the *last* row's data. Four calls give
+`d1 x1 x1 x1` - every row after the first shows the final value. Two calls
+happen to work. The same shape built by one helper that appends every row
+itself is fine, so the trigger is the row buffer being allocated in a callee
+frame that the next call reclaims (FnArenaPop hands the position to the next
+callee), with the returned `[][]string`'s inner rows not deep-copied into the
+caller's arena.
+
+Consequence: `protocol.Track.Tags()` returns corrupt rows (it appends
+`[][]string` rows through several helpers), so anything that publishes a
+protocol payload built from `Tags()` would publish garbage or fault. The
+app-side adapter therefore has no test that calls `Tags()`; the publish
+wrappers do call it and are correct once this is fixed. Suspected to be the
+same family as the committed `map_value_return_reloc` fix, and it is likely a
+legacy/stage4 divergence - the return-value codec in `src/runtime/codec.mx`
+(`codecRetTransient`) is the place to look first.
+
+### Item 7(a) decision: staged universal migration
+
+Taken this session: **staged, verified per stage.** Measured at decision time -
+the named slice/map-type rule alone would hit 74 sites in `src/` outside
+`src/runtime` and 16 across the app repos (nostr 3, morly 7, musiquay 6), plus
+4 package-level var initializers in `src/`; the runtime keeps its carve-out
+(69 global stores). Legacy already rejects named slice/map types while stage4
+accepts them, so the two compilers disagree today and the first stage has to
+settle which side the rule is on before any site is rewritten.
+
+### App side of the protocol wiring (done)
+
+`musiquay/web/common/protocolwire` renders `[][]string` to JSON
+(`TagsJSON`), emits the unsigned event object (`UnsignedJSON`) and reads a
+`nostr.Event` back into each payload type (`XFromCore`, kind check then Parse
+then Validate; `Stall`/`Product` read content alone because they have no
+`Tags()`). `web/wasm/app` gained `publishProtocol` plus wrappers for the
+thirteen publishable payloads - no `PurchaseOrder`/`DeliveryReceipt` wrapper,
+since the protocol marks them private. Verified: protocolwire 7 passed,
+`make build-app-wasm` links, `make test-unit` 88 passed.
