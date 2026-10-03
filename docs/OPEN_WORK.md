@@ -1041,3 +1041,14 @@ BUD-11 24242 checker versus widening `httpauth`; and hex case, where
 The protocol's own tests were not in any gate: `musiquay`'s `test-unit` walked
 only `web/`, so the 62 tests beside the vocabulary never ran. The loop now walks
 `pkg` and `web`; `make test-unit` is 81 passed (protocol 62, marmot 18, mls 1).
+
+Landed since the audit: legacy resolves sibling repositories and MANIFEST pins
+by layout (`legacy/loader/mxlist.go`, `layoutRepoDir`); `nostr/go.mod` is
+deleted (194 tests pass, and stage4 type-checks `nostr/pkg/core`, whose
+cross-repository import no go.mod ever covered); `musiquay/go.mod` and the
+eleven nested `web/**/moxie.mod` files are deleted (`make test-unit` 81 passed,
+`build-app-wasm` and `build-store-wasm` link). What is left is `morly/go.mod`,
+the older repos' module files, and the two decisions above - plus the legacy
+language-rule gaps, which are now the only thing standing between legacy and an
+end-to-end build of these repos: `pkg/core/tags.mx` is rejected for a named
+slice type (`Tag`, `Tags`) that stage4 accepts.
