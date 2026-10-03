@@ -178,6 +178,15 @@ being usable, and each is a *workaround* that hides the next:
    `basic:<T>.String$identity` and the interface path calls that, so printing a
    basic works while calling `.String()` on it does not.
 
+Measured on a stage4 build: `fmt.Println(n, u, f, b, s, by, r)` prints
+`12345 99 2.5 true txt ? ?` - ints, floats, bool and string are converted
+correctly by the interface path, while **byte and rune print `?`**. The reason
+is in `ir_emit.mx:715`: the canonical descriptor spelling comes from the kind
+(`uint8`, `int32`, `bytes`), because `byte`, `rune` and `string` are *named
+types* over a basic, so their identity/no-op path is taken instead of a
+conversion. A correct `.String()` must therefore cover the named aliases as
+well as the bare basics, and the same defect shows up through `fmt` today.
+
 The fix, in order (no error filtering, no caller workarounds):
 
 - stage4: `registerMethod` attaches a builtin-receiver method to the universe
