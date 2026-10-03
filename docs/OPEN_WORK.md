@@ -83,13 +83,16 @@ Working layout that matters: the checkouts live at
    import. Details and verification in the finding above. Once these are gone,
    `typeCheckPkg` can fail on `len(cctx.parseErrors) > 0` instead of only on
    `file == nil`, and a partial tree never reaches the SSA builder.
-5. **morly: `TestCrawlRelayAndPublish` SIGSEGVs.** Pre-existing (reproduced with
-   the named-return migration stashed and the rule disabled), so it is a runtime
-   bug in the crawler path, not a language rule. morly's unit suite cannot go
-   green until it is found. Two blockers in front of it are gone: `chan T{:n}`
-   did not lower (see the finding), and `main.mx` had one `)` too many in the
-   version-JSON response, so the package did not parse at all. morly builds now
-   and the unit suite runs up to this test, which panics at 0x388a1d.
+5. **morly: `TestCrawlRelayAndPublish` SIGSEGVs.** **Done.** It was a `time`
+   package bug, not the crawler: `Location.cacheZone` is an interior pointer
+   into `zone`, and a Location value is *copied* (returned from LoadLocation,
+   assigned into the `localLoc` global); the copy leaves the pointer aimed at
+   the source's backing array, which dies with the source's frame. The first
+   `clog` call after a zone load then read through it. See the finding below.
+   morly's `make build` also needed two fixes in front of it: `chan T{:n}` did
+   not lower, and `main.mx` had one `)` too many in the version-JSON response,
+   so the package did not parse at all. With all three, morly builds and
+   `make test-unit` is green: 361 tests, 0 failures.
 6. **Remove modules** (design below). Delete `moxie.mod` handling from both
    compilers, resolve imports only through `MOXIEPATH` + `$MOXIEROOT/src`
    (+ vendor), and move version pinning into a single mod-style **`MANIFEST`**
@@ -285,6 +288,41 @@ Latent issues found on the way (not fixed here):
 - Calling `String()` on an untyped constant receiver (`"lit".String()`)
   resolves in stage4 (via `UntypedToTyped`) but not in legacy, which has no
   such conversion for a selector receiver.
+
+### `time`'s zone cache was an interior pointer, and a copied Location dangles
+
+morly's `make test-unit` died in `TestCrawlRelayAndPublish` inside
+`time.(*Time).locabs` (gdb: `locabs` <- `appendFormat` <- `AppendFormat` <-
+`Format` <- `clog` <- `crawlPass` <- the test). The panic address was a code
+address, so the faulting load was `Location.cacheZone` (or the slice read
+through it) pointing at memory freed with a frame.
+
+Two independent lifetime mistakes, both Moxie-specific:
+
+1. **`cacheZone *zone` is an interior pointer.** `LoadLocationFromTZData`,
+   `LoadLocation` and `FixedZone` set `l.cacheZone = &l.zone[i]`.
+   `loadLocation` returns a `*Location`; the return relocates the value (and
+   its slices) into the caller's arena, but the interior pointer still aims at
+   the *source's* array, which dies with the source's frame. A lookup that hits
+   the cache window then reads dead memory: a wrong offset if the page is still
+   mapped, an implausible allocation size (0x1000000030) once it is not.
+   Fixed by making the cache an **index** (`cacheIdx int32`, `cachedZone()`
+   resolves it against the Location's own `zone`); the one site that cached a
+   synthesized `&zone{...}` now appends that zone to `zone` so it stays
+   addressable by index. `zoneinfo_read.mx`, `zoneinfo.mx`, `time.mx`.
+2. **The globals were built in the initializing frame.** `localLoc` and
+   `unnamedFixedZones` are package globals filled lazily; the zone data they
+   held was allocated in the frame of `initLocal`/`FixedZone`, so it died at
+   return. Both now build in the **root arena** (`initLocal` ->
+   `initLocalInRoot`, `buildUnnamedFixedZones`), which is the same rule
+   `pkg/types` follows for its caches and the reason package globals are meant
+   to be settled in `init()`.
+
+Measured before the fix: `time.Local().String()` printed an empty name and
+`t.Local().String()` showed `+0000` where `date +%z` says `+0500`; after, both
+the local zone and `LoadLocation("Asia/Almaty")` report `+05` / offset 18000.
+legacy and stage4 share `src/time`, so the fix applies to both; the suite and
+morly's 361-test unit suite are the verification.
 
 ### `chan T{:n}` did not lower, and the parse position is off by one
 

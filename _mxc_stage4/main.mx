@@ -1347,7 +1347,10 @@ func materialiseRef(mpath, repo, ref string, force bool) (dir string) {
 	mkdirAll(pathDir(wt), 0755)
 	mxutil.WriteStr(2, "  worktree " | repo | "@" | ref | " -> " | wt | "\n")
 	if runQuiet([]string{"git", "-C", checkout, "worktree", "add", "--detach", wt, ref}) != 0 {
-		// The ref may be newer than the checkout: refresh once and retry.
+		// The ref may be newer than the checkout, and a worktree directory
+		// removed by hand leaves a registration behind that blocks the next
+		// add. Prune and refresh once, then retry.
+		runQuiet([]string{"git", "-C", checkout, "worktree", "prune"})
 		runQuiet([]string{"git", "-C", checkout, "fetch", "--tags", "--prune"})
 		if runQuiet([]string{"git", "-C", checkout, "worktree", "add", "--detach", wt, ref}) != 0 {
 			return ""
@@ -2964,16 +2967,13 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		rel := pkgPath[len(bst.globalModPrefix)+1:]
 		dir = mxutil.JoinPath(bst.globalModDir, rel)
 	}
-	if dir == "" && isRemotePath(pkgPath) {
-		// A remote import path belongs to a repository under $MOXIEPATH. The
-		// MANIFEST decides which ref: a pinned repo is materialised as a
-		// worktree so the build never reads (or mutates) the checkout.
-		dir = resolveRemotePkg(pkgPath)
-	}
 	if dir == "" {
+		// A checkout under $MOXIEPATH satisfies an import path directly. A
+		// repo the MANIFEST pins is not resolved here: the pin decides the
+		// ref, and the remote branch below materialises it.
 		candidate := mxutil.JoinPath(getMoxiePath(), pkgPath)
 		mxF := listFiles(candidate, ".mx")
-		if len(mxF) > 0 {
+		if len(mxF) > 0 && (!isRemotePath(pkgPath) || manifestRef(repoRootOf(pkgPath)) == "") {
 			dir = candidate
 		}
 	}
@@ -3000,6 +3000,9 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		}
 	}
 	if dir == "" && isRemotePath(pkgPath) {
+		// A remote import path belongs to a repository under $MOXIEPATH. A
+		// repo the MANIFEST pins resolves to a worktree of that ref, so the
+		// build never reads (or mutates) the checkout a developer is editing.
 		dir = resolveRemotePkg(pkgPath)
 	}
 	if dir != "" && dir != pkgPath {
