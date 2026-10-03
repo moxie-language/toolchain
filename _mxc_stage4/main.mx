@@ -31,6 +31,10 @@ type buildState struct {
 	// MOXIEROOT for out-of-tree targets; restriction gating must not inherit
 	// that fallback or an out-of-tree user package looks like compiler code.
 	rootModPrefix  string
+	// targetPkgPath is the compiled path of the package the build asked for.
+	// The language rules that are scoped to the target's own code - the '+'
+	// text rule - use it plus the target's repository.
+	targetPkgPath string
 
 	buildJobs       int32
 	tlsFailed       bool // TLS probe failed: globals shared, workers forced serial
@@ -294,6 +298,7 @@ func cleanupScratch() {
 // every exit that can happen with a scratch directory live goes through here.
 func exitNow(code int32) {
 	cleanupScratch()
+	releaseHeldRepoLocks()
 	os.Exit(code)
 }
 
@@ -698,17 +703,58 @@ func repoLockPath(mpath, repoPath string) (s string) {
 
 func acquireRepoLock(mpath, repoPath string) (ok bool) {
 	lp := repoLockPath(mpath, repoPath)
-	_, locked := mxutil.ReadFile(lp)
-	if locked {
+	if data, locked := mxutil.ReadFile(lp); locked {
+		holder := mxutil.TrimSpace(string(data))
+		if holder == "" {
+			holder = "unknown"
+		}
+		lastHolder = holder
 		return false
 	}
 	mkdirAll(pathDir(lp), 0755)
-	writeFile(lp, []byte("1"), 0644)
+	writeFile(lp, []byte(simpleItoa(os.Getpid())), 0644)
 	return true
 }
 
 func releaseRepoLock(mpath, repoPath string) {
 	os.Remove(repoLockPath(mpath, repoPath))
+}
+
+// lastHolder is the pid recorded in the lock file the last acquire lost to,
+// so the timeout can name who is holding it.
+var lastHolder string
+
+// heldRepoLocks are the per-repository locks this process holds. A build keeps
+// them for its whole life: a repository is checked out (or a worktree
+// materialised) while packages from it are still being compiled, and a second
+// build must not change the tree underneath the first. They are released on
+// every exit path, including fatal errors and interrupts.
+var heldRepoLocks []string
+
+// holdRepoLock takes a repository's lock, waiting for another process, and
+// keeps it until this process exits.
+func holdRepoLock(mpath, repo string) {
+	waitRepoLock(mpath, repo)
+	heldRepoLocks = mxutil.Ensure(heldRepoLocks, 1)
+	heldRepoLocks = push(heldRepoLocks, mpath | "\x00" | repo)
+}
+
+// releaseHeldRepoLocks drops every lock this process holds.
+func releaseHeldRepoLocks() {
+	for _, h := range heldRepoLocks {
+		nul := int32(-1)
+		for i := int32(0); i < int32(len(h)); i++ {
+			if h[i] == 0 {
+				nul = i
+				break
+			}
+		}
+		if nul < 0 {
+			continue
+		}
+		releaseRepoLock(h[:nul], h[nul+1:])
+	}
+	heldRepoLocks = nil
 }
 
 func autoFetchRepo(pkgPath, version string) (s string) {
@@ -735,10 +781,7 @@ func autoFetchRepo(pkgPath, version string) (s string) {
 		repoPath = parent
 	}
 
-	if !acquireRepoLock(mpath, repoPath) {
-		mxutil.WriteStr(2, "  waiting for lock: " | repoPath | "\n")
-		fatal("repo locked: " | repoPath)
-	}
+	holdRepoLock(mpath, repoPath)
 
 	dest := mxutil.JoinPath(mpath, repoPath)
 	gitHead := mxutil.JoinPath(dest, ".git/HEAD")
@@ -762,7 +805,6 @@ func autoFetchRepo(pkgPath, version string) (s string) {
 		}
 	}
 
-	releaseRepoLock(mpath, repoPath)
 	return mxutil.JoinPath(mpath, pkgPath)
 }
 
@@ -922,7 +964,7 @@ func waitRepoLock(mpath, repo string) {
 		run([]string{"sleep", "0.2"})
 		tries++
 		if tries > 900 {
-			fatal("repo locked for over three minutes: " | repo)
+			fatal("repo locked for over three minutes: " | repo | " (held by pid " | lastHolder | ", " | repoLockPath(mpath, repo) | ")")
 		}
 	}
 }
@@ -987,21 +1029,18 @@ func manifestCommit(repo string) (c string) {
 // a version nobody asked for.
 func resolvePinnedRepo(pkgPath, repo, ref string) (dir string) {
 	mpath := getMoxiePath()
-	waitRepoLock(mpath, repo)
+	holdRepoLock(mpath, repo)
 	if ensureCheckout(mpath, repo, "", "", false) == "" {
-		releaseRepoLock(mpath, repo)
 		fatal("MANIFEST: cannot fetch " | repo)
 	}
 	wt := materialiseRef(mpath, repo, ref, false)
 	if wt == "" {
-		releaseRepoLock(mpath, repo)
 		fatal("MANIFEST: " | repo | " has no ref " | ref)
 	}
 	if bst.manifestCommits == nil {
 		bst.manifestCommits = map[string]string{}
 	}
 	bst.manifestCommits[repo] = gitCapture([]string{"-C", wt, "rev-parse", "HEAD"}, mxutil.JoinPath(mpath, "cache/pin"))
-	releaseRepoLock(mpath, repo)
 	if len(pkgPath) <= len(repo) {
 		return wt
 	}
@@ -6145,6 +6184,18 @@ func main() {
 	registerBuiltins()
 	pkgs := resolveAll(pkgPath, root)
 	bst.linkSetKey = linkSetHash(pkgs)
+	// Record the target package's compiled path. The resolver's order does not
+	// say which package was asked for, so match on the path it was asked for.
+	for _, tp := range pkgs {
+		if tp.path != pkgPath {
+			continue
+		}
+		cp := tp.path
+		if mxutil.HasPrefix(cp, "/") || mxutil.HasPrefix(cp, "./") || mxutil.HasPrefix(cp, "../") {
+			cp = tp.name
+		}
+		bst.targetPkgPath = cp
+	}
 	// Drop duplicate package paths, keeping the resolver's order.
 	{
 		var deduped []*pkgInfo

@@ -92,6 +92,16 @@ func mxListPackagesImpl(config *compileopts.Config, goroot string, inputPkg stri
 	if err != nil {
 		return nil, err
 	}
+	// The input package is the program this build compiles, whether or not a
+	// module file names it: the '+' text rule is gated on Module.Main, and a
+	// directory target outside every module is still user code. Dependencies
+	// walked before it are not the input package and keep '+'.
+	if len(r.sorted) > 0 {
+		last := r.sorted[len(r.sorted)-1]
+		if !last.Module.Main && last.Module.Path != "git.smesh.lol/moxie" {
+			last.Module.Main = true
+		}
+	}
 
 	// The main package's module path is its OWN module (walking up from its
 	// directory), not the cwd's module. The restriction checker uses it to
@@ -102,7 +112,12 @@ func mxListPackagesImpl(config *compileopts.Config, goroot string, inputPkg stri
 		if ownDir == "" {
 			ownDir = wd
 		}
-		if ownMod, ownModDir, _, modErr := readModInfo(ownDir); modErr == nil && ownMod != "" {
+		ownMod, ownModDir, _, modErr := readModInfo(ownDir)
+		if modErr == nil {
+			// The input package is this build's program even when no module
+			// file names it: the '+' text rule is gated on Module.Main, and a
+			// directory target outside every module is still user code. A
+			// dependency package is not the input package and keeps '+'.
 			mp.Module.Path = ownMod
 			mp.Module.Main = true
 			mp.Module.Dir = ownModDir

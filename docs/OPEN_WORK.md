@@ -169,29 +169,35 @@ Working layout that matters: the checkouts live at
    adapters between these structs and `event.E` (native) / `core.Event` (wasm),
    plus the publish paths.
 
-### Open: the `+` text rule's scope without a module file
+### Repository locks are held for the whole build
 
-Removing `moxie.mod` took away the thing the `+`-on-text rule was scoped by.
-Legacy gated it on `p.Module.Main` (the input package and the input module's
-packages, never a dependency); stage4 gated it on `rootModPrefix !=
-"git.smesh.lol/moxie"`, which before the removal was the target's module and is
-now just "not the toolchain".
+A build resolves a repository, then spends minutes compiling packages out of it;
+another build wanting a different ref must not check the tree out underneath it.
+Every repository a build reads is locked at resolution (`holdRepoLock`) and the
+lock is kept until the process exits, released on every exit path including
+`fatal` and interrupts (`releaseHeldRepoLocks` in `exitNow`). The lock file
+records the holder's pid, and waiting past the timeout names that pid and the
+lock path instead of failing anonymously. `moxie get` keeps its shorter
+acquire/release around the checkout itself.
 
-Two tests pin the two sides of the gap, and both are red in the current tree
-(the full suite is 166/168):
+### `+` on text is the target's rule, and is bilateral again
 
-- `plustext:legacy` - a directory target outside every module is no longer
-  rejected, because no module file sets `Module.Main` for it.
-- `aeaddep:stage4` - the broad stage4 gate rejects a `+` inside a *dependency*,
-  which legacy never did.
+Removing `moxie.mod` took away what scoped the `+`-on-text rule: legacy gated it
+on `p.Module.Main` (the input package and its module, never a dependency) and
+stage4 on the target's module prefix. Without a module file the two disagreed -
+stage4 rejected a `+` inside a dependency, legacy accepted a `+` in a
+module-less directory target.
 
-The fix is one notion of "the target's own code" implemented in both compilers:
-the package the build was asked for, plus the packages under the repository it
-lives in. stage4 has the pieces (`bst.targetPkgPath` from the resolver's entry
-whose `path` equals the requested target, `rootModPrefix` for the repository);
-legacy marks the input package `Module.Main` even with no module file. Both were
-prototyped and are half-landed; the missing part is identifying the target
-package reliably in stage4's resolver order, which is not "last".
+Both now mean the same thing by "the target's own code":
+
+- stage4 records the target package's compiled path from the resolver entry for
+  the requested path, and `isTargetPkg` admits that package plus everything
+  under the target's repository (`rootModPrefix`); the rule is gated on both.
+- legacy marks the input package `Module.Main` even when no module file names
+  it, so its existing `p.Module.Main` gate covers exactly the same set.
+
+The `aeaddep` fixture was itself violating the rule - it joined the known-answer
+hex with `+` across lines, Go style - and now uses `|`. Suite: 167/167.
 
 ## Decisions taken
 
