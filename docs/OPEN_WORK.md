@@ -187,6 +187,18 @@ types* over a basic, so their identity/no-op path is taken instead of a
 conversion. A correct `.String()` must therefore cover the named aliases as
 well as the bare basics, and the same defect shows up through `fmt` today.
 
+Tried and reverted in round 2 (recorded so it is not repeated): attaching the
+method to the universe Basic at `registerMethod`, and resolving `*Basic` in
+`resolveMethodCallWithRecv` by looking the method up on that Basic and building
+a real call, both compile - and neither changes the outcome. `String undefined`
+still comes from `reportUndefinedField`, so the `*Basic` case in
+`resolveMethodCallWithRecv` **is not on the path that rejects `n.String()`**.
+The next step is to trace which selector/call path reports it (the error is
+produced by `buildSelector` calling `reportUndefinedField` after
+`buildMethodValue` returns nil, so instrument that call and the type it sees -
+it may be a `*Named` wrapper for the basic, or a call path that never reaches
+`buildMethodValue`).
+
 The fix, in order (no error filtering, no caller workarounds):
 
 - stage4: `registerMethod` attaches a builtin-receiver method to the universe
