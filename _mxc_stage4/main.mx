@@ -957,8 +957,426 @@ func autoFetchRepo(pkgPath, version string) (s string) {
 	return mxutil.JoinPath(mpath, pkgPath)
 }
 
-func gitURLToModPath(url string) (s string) {
-	u := url
+// --- moxie get -----------------------------------------------------------
+//
+// The explicit front door to the resolution a build performs: fetch a
+// repository, place it at $MOXIEPATH/<repo>, and materialise a ref as a git
+// worktree so a build never disturbs the checkout a developer is editing.
+
+type manifestEntry struct {
+	repo string
+	ref  string
+}
+
+func manifestFilePath() (s string) {
+	return "MANIFEST"
+}
+
+// splitImportRef splits `path@ref` at the LAST '@', so a path may contain one.
+func splitImportRef(arg string) (path string, ref string) {
+	at := int32(-1)
+	for i := int32(0); i < int32(len(arg)); i++ {
+		if arg[i] == '@' {
+			at = i
+		}
+	}
+	if at < 0 {
+		return arg, ""
+	}
+	return arg[:at], arg[at+1:]
+}
+
+// repoRootOf returns the repository a dotted import path belongs to: its first
+// two components (git.smesh.lol/nostr from git.smesh.lol/nostr/pkg/event). A
+// path with fewer components is its own repository.
+func repoRootOf(pkgPath string) (s string) {
+	seen := int32(0)
+	for i := int32(0); i < int32(len(pkgPath)); i++ {
+		if pkgPath[i] == '/' {
+			seen++
+			if seen == 2 {
+				return pkgPath[:i]
+			}
+		}
+	}
+	return pkgPath
+}
+
+// fieldsOf splits a line on spaces and tabs, dropping empty fields.
+func fieldsOf(s string) (out []string) {
+	start := int32(-1)
+	for i := int32(0); i <= int32(len(s)); i++ {
+		sep := i == int32(len(s)) || s[i] == ' ' || s[i] == '\t'
+		if sep {
+			if start >= 0 {
+				out = mxutil.Ensure(out, 1)
+				out = push(out, s[start:i])
+				start = -1
+			}
+			continue
+		}
+		if start < 0 {
+			start = i
+		}
+	}
+	return out
+}
+
+// readManifest returns the pins in ./MANIFEST: a `require ( repo ref )` block
+// and single `require repo ref` lines. A missing MANIFEST is empty, which means
+// "whatever is checked out".
+func readManifest() (entries []manifestEntry) {
+	data, ok := mxutil.ReadFile(manifestFilePath())
+	if !ok {
+		return entries
+	}
+	inBlock := false
+	for _, raw := range mxutil.SplitLines(string(data)) {
+		line := mxutil.TrimSpace(raw)
+		if line == "" || mxutil.HasPrefix(line, "//") || mxutil.HasPrefix(line, "#") {
+			continue
+		}
+		if line == "require (" {
+			inBlock = true
+			continue
+		}
+		if inBlock && line == ")" {
+			inBlock = false
+			continue
+		}
+		if mxutil.HasPrefix(line, "require ") {
+			line = mxutil.TrimSpace(line[8:])
+		} else if !inBlock {
+			continue
+		}
+		f := fieldsOf(line)
+		if len(f) == 0 {
+			continue
+		}
+		ref := ""
+		if len(f) > 1 {
+			ref = f[1]
+		}
+		entries = mxutil.Ensure(entries, 1)
+		entries = push(entries, manifestEntry{repo: f[0], ref: ref})
+	}
+	return entries
+}
+
+// writeManifestEntry adds or rewrites the line for a repository. The file is a
+// flat pin list, not a module graph: no versions to solve, no checksums.
+func writeManifestEntry(repo, ref string) {
+	entries := readManifest()
+	found := false
+	for i := int32(0); i < int32(len(entries)); i++ {
+		if entries[i].repo == repo {
+			entries[i].ref = ref
+			found = true
+		}
+	}
+	if !found {
+		entries = mxutil.Ensure(entries, 1)
+		entries = push(entries, manifestEntry{repo: repo, ref: ref})
+	}
+	var lines []string
+	lines = mxutil.Ensure(lines, 1)
+	lines = push(lines, "# MANIFEST - repository refs this build pins. Run `moxie get`")
+	lines = mxutil.Ensure(lines, 1)
+	lines = push(lines, "require (")
+	for _, e := range entries {
+		lines = mxutil.Ensure(lines, 1)
+		lines = push(lines, "	" | e.repo | " " | e.ref)
+	}
+	lines = mxutil.Ensure(lines, 1)
+	lines = push(lines, ")")
+	writeFile(manifestFilePath(), []byte(joinStrings(lines, "\n") | "\n"), 0644)
+}
+
+// waitRepoLock takes a repository's exclusive lock, waiting rather than dying:
+// a parallel build holding it is doing the same fetch, and the old behaviour -
+// fatal on contention - killed a parallel build outright.
+func waitRepoLock(mpath, repo string) {
+	waited := false
+	tries := int32(0)
+	for !acquireRepoLock(mpath, repo) {
+		if !waited {
+			mxutil.WriteStr(2, "  waiting for lock: " | repo | "\n")
+			waited = true
+		}
+		run([]string{"sleep", "0.2"})
+		tries++
+		if tries > 900 {
+			fatal("repo locked for over three minutes: " | repo)
+		}
+	}
+}
+
+// gitCapture runs git and returns its trimmed stdout, or "" when it fails.
+func gitCapture(args []string, tmp string) (out string) {
+	mkdirAll(pathDir(tmp), 0755)
+	cmd := "git"
+	for _, a := range args {
+		cmd = cmd | " '" | a | "'"
+	}
+	cmd = cmd | " > '" | tmp | "' 2>/dev/null"
+	if run([]string{"sh", "-c", cmd}) != 0 {
+		os.Remove(tmp)
+		return ""
+	}
+	data, ok := mxutil.ReadFile(tmp)
+	os.Remove(tmp)
+	if !ok {
+		return ""
+	}
+	return mxutil.TrimSpace(string(data))
+}
+
+// getRemoteURL builds the clone URL for a repository path.
+func getRemoteURL(repo, remote, protocol string) (s string) {
+	if remote != "" {
+		return remote
+	}
+	if protocol == "ssh" {
+		slash := int32(-1)
+		for i := int32(0); i < int32(len(repo)); i++ {
+			if repo[i] == '/' {
+				slash = i
+				break
+			}
+		}
+		if slash > 0 {
+			return "git@" | repo[:slash] | ":" | repo[slash+1:] | ".git"
+		}
+		return "git@" | repo | ".git"
+	}
+	return "https://" | repo
+}
+
+// runQuiet runs a command with its stdout sent to stderr. Only the resolved
+// directory belongs on this tool's stdout, and git prints "HEAD is now at ..."
+// there when it detaches a worktree.
+func runQuiet(args []string) (n int32) {
+	cmd := ""
+	for i, a := range args {
+		if i > 0 {
+			cmd = cmd | " "
+		}
+		cmd = cmd | "'" | a | "'"
+	}
+	return run([]string{"sh", "-c", cmd | " 1>&2"})
+}
+
+// gitOK reports whether a git command succeeds, discarding its output:
+// `rev-parse --verify` prints the object name on success, which must not reach
+// this tool's stdout.
+func gitOK(args []string) (ok bool) {
+	cmd := ""
+	for i, a := range args {
+		if i > 0 {
+			cmd = cmd | " "
+		}
+		cmd = cmd | "'" | a | "'"
+	}
+	return run([]string{"sh", "-c", cmd | " >/dev/null 2>&1"}) == 0
+}
+
+// worktreePath is where a ref is materialised. Distinct refs get distinct
+// directories, so two builds can want two versions at once and neither sees its
+// dependency change underneath it.
+func worktreePath(mpath, repo, ref string) (s string) {
+	return mxutil.JoinPath(mpath, ".refs/" | repo | "/" | ref)
+}
+
+// ensureCheckout clones the repository when absent and refreshes it otherwise.
+func ensureCheckout(mpath, repo, remote, protocol string, offline bool) (dir string) {
+	checkout := mxutil.JoinPath(mpath, repo)
+	if _, ok := mxutil.ReadFile(mxutil.JoinPath(checkout, ".git/HEAD")); !ok {
+		if offline {
+			mxutil.WriteStr(2, "  not cached and -offline: " | repo | "\n")
+			return ""
+		}
+		mkdirAll(pathDir(checkout), 0755)
+		url := getRemoteURL(repo, remote, protocol)
+		mxutil.WriteStr(2, "  clone " | url | " -> " | checkout | "\n")
+		if runQuiet([]string{"git", "clone", url, checkout}) != 0 {
+			return ""
+		}
+		return checkout
+	}
+	if !offline {
+		mxutil.WriteStr(2, "  fetch " | repo | "\n")
+		runQuiet([]string{"git", "-C", checkout, "fetch", "--tags", "--prune"})
+	}
+	return checkout
+}
+
+// materialiseRef puts a ref in its own worktree from the shared checkout, which
+// doubles as the mirror. Reused when already present.
+func materialiseRef(mpath, repo, ref string, force bool) (dir string) {
+	checkout := mxutil.JoinPath(mpath, repo)
+	wt := worktreePath(mpath, repo, ref)
+	_, exists := mxutil.ReadFile(mxutil.JoinPath(wt, ".git"))
+	if exists && force {
+		mxutil.WriteStr(2, "  drop worktree " | ref | "\n")
+		runQuiet([]string{"git", "-C", checkout, "worktree", "remove", "--force", wt})
+		os.RemoveAll(wt)
+		exists = false
+	}
+	if exists {
+		return wt
+	}
+	mkdirAll(pathDir(wt), 0755)
+	mxutil.WriteStr(2, "  worktree " | repo | "@" | ref | " -> " | wt | "\n")
+	if runQuiet([]string{"git", "-C", checkout, "worktree", "add", "--detach", wt, ref}) != 0 {
+		// The ref may be newer than the checkout: refresh once and retry.
+		runQuiet([]string{"git", "-C", checkout, "fetch", "--tags", "--prune"})
+		if runQuiet([]string{"git", "-C", checkout, "worktree", "add", "--detach", wt, ref}) != 0 {
+			return ""
+		}
+	}
+	return wt
+}
+
+// getRepo is one `moxie get` argument's worth of work. It returns the directory
+// the import path resolves to, or "" on failure.
+func getRepo(spec, remote, protocol string, offline, force, pin bool) (dir string) {
+	pkgPath, ref := splitImportRef(spec)
+	repo := repoRootOf(pkgPath)
+	mpath := getMoxiePath()
+	waitRepoLock(mpath, repo)
+	checkout := ensureCheckout(mpath, repo, remote, protocol, offline)
+	if checkout == "" {
+		releaseRepoLock(mpath, repo)
+		return ""
+	}
+	if ref == "" {
+		dir = mxutil.JoinPath(mpath, pkgPath)
+		if pin {
+			commit := gitCapture([]string{"-C", checkout, "rev-parse", "HEAD"}, mxutil.JoinPath(mpath, "cache/pin"))
+			if commit == "" {
+				releaseRepoLock(mpath, repo)
+				return ""
+			}
+			writeManifestEntry(repo, commit)
+			mxutil.WriteStr(2, "  pin " | repo | " " | commit | "\n")
+		}
+		releaseRepoLock(mpath, repo)
+		return dir
+	}
+	dir = materialiseRef(mpath, repo, ref, force)
+	if dir == "" {
+		releaseRepoLock(mpath, repo)
+		return ""
+	}
+	if pin {
+		// A tag names one commit and stays as written; a branch or a bare
+		// commit is frozen to the commit it resolved to.
+		isTag := gitOK([]string{"git", "-C", checkout, "rev-parse", "--verify", "--quiet", "refs/tags/" | ref})
+		pinRef := ref
+		if !isTag {
+			pinRef = gitCapture([]string{"-C", dir, "rev-parse", "HEAD"}, mxutil.JoinPath(mpath, "cache/pin"))
+			if pinRef == "" {
+				releaseRepoLock(mpath, repo)
+				return ""
+			}
+		}
+		writeManifestEntry(repo, pinRef)
+		mxutil.WriteStr(2, "  pin " | repo | " " | pinRef | "\n")
+	}
+	releaseRepoLock(mpath, repo)
+	return dir
+}
+
+// cmdGet is `moxie get [flags] <import-path>[@<ref>] ...`, or with no arguments
+// it materialises every MANIFEST entry.
+func cmdGet(args []string) {
+	offline := false
+	force := false
+	pin := false
+	remote := ""
+	protocol := ""
+	var specs []string
+	i := int32(2)
+	for i < int32(len(args)) {
+		a := args[i]
+		if a == "-offline" {
+			offline = true
+			i++
+			continue
+		}
+		if a == "-force" {
+			force = true
+			i++
+			continue
+		}
+		if a == "-pin" {
+			pin = true
+			i++
+			continue
+		}
+		if a == "-remote" {
+			if i+1 >= int32(len(args)) {
+				fatal("get: -remote needs a URL")
+			}
+			remote = args[i+1]
+			i += 2
+			continue
+		}
+		if a == "-protocol" {
+			if i+1 >= int32(len(args)) {
+				fatal("get: -protocol needs ssh or https")
+			}
+			protocol = args[i+1]
+			i += 2
+			continue
+		}
+		if mxutil.HasPrefix(a, "-") {
+			fatal("get: unknown flag " | a)
+		}
+		specs = mxutil.Ensure(specs, 1)
+		specs = push(specs, a)
+		i++
+	}
+	if len(specs) == 0 {
+		for _, e := range readManifest() {
+			if e.ref == "" {
+				specs = mxutil.Ensure(specs, 1)
+				specs = push(specs, e.repo)
+				continue
+			}
+			specs = mxutil.Ensure(specs, 1)
+			specs = push(specs, e.repo | "@" | e.ref)
+		}
+		if len(specs) == 0 {
+			mxutil.WriteStr(2, "get: no arguments and no MANIFEST entries in " | manifestFilePath() | "\n")
+			exitNow(1)
+		}
+		mxutil.WriteStr(2, "  MANIFEST: " | simpleItoa(int64(len(specs))) | " entr" | plural(len(specs), "y", "ies") | "\n")
+	}
+	failed := false
+	for _, spec := range specs {
+		dir := getRepo(spec, remote, protocol, offline, force, pin)
+		if dir == "" {
+			mxutil.WriteStr(2, "get: failed: " | spec | "\n")
+			failed = true
+			continue
+		}
+		mxutil.WriteStr(1, dir | "\n")
+	}
+	if failed {
+		exitNow(1)
+	}
+}
+
+// plural picks the suffix for a count.
+func plural(n int32, one, many string) (s string) {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+func gitURLToModPath(url string) (s string) {	u := url
 	// strip scheme
 	for _, scheme := range []string{"ssh://", "https://", "http://", "git://"} {
 		if mxutil.HasPrefix(u, scheme) {
@@ -3950,6 +4368,7 @@ func printHelp() {
 	mxutil.WriteStr(1, "  install: fetch and cache a package\n")
 	mxutil.WriteStr(1, "  version: print version information\n")
 	mxutil.WriteStr(1, "  env:     print environment information\n")
+	mxutil.WriteStr(1, "  get:     fetch a repository and materialise a ref (see MANIFEST)\n")
 	mxutil.WriteStr(1, "  fetch:   fetch and cache all dependencies declared in moxie.mod\n")
 	mxutil.WriteStr(1, "  cache:   manage the install cache (subcommands: list, clean, warm)\n")
 	mxutil.WriteStr(1, "  update:  rebuild cached packages\n")
@@ -3966,6 +4385,24 @@ func printEnv() {
 	mxutil.WriteStr(1, "MOXIEROOT=\"" | getenv("MOXIEROOT") | "\"\n")
 	mxutil.WriteStr(1, "MOXIEPATH=\"" | getMoxiePath() | "\"\n")
 	mxutil.WriteStr(1, "CACHE=\"" | moxieCacheDir() | "\"\n")
+	entries := readManifest()
+	if len(entries) == 0 {
+		mxutil.WriteStr(1, "MANIFEST=(none)\n")
+		return
+	}
+	mxutil.WriteStr(1, "MANIFEST=\"" | manifestFilePath() | "\"\n")
+	for _, e := range entries {
+		dir := mxutil.JoinPath(getMoxiePath(), e.repo)
+		ref := gitCapture([]string{"-C", dir, "rev-parse", "--short", "HEAD"}, mxutil.JoinPath(moxieCacheDir(), "env"))
+		state := "no checkout"
+		if ref != "" {
+			state = ref
+		}
+		if e.ref != "" {
+			state = e.ref | " (" | state | ")"
+		}
+		mxutil.WriteStr(1, "  " | e.repo | " " | state | " -> " | dir | "\n")
+	}
 }
 
 func printInfo() {
@@ -5771,6 +6208,10 @@ func main() {
 		}
 		mxutil.WriteStr(2, "usage: mxc cache <clean|warm>\n")
 		exitNow(1)
+	}
+	if cmd == "get" {
+		cmdGet(args)
+		return
 	}
 	if cmd == "fetch" {
 		fetchURL := ""
