@@ -264,12 +264,15 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 	cctx.compileExportMap = scanExportPragmas(cctx.tcPkgSrc)
 	syntax.CompileExportMap = cctx.compileExportMap
 	file, _ := syntax.ParseBytesArena(token.NewFileBase(name|".mx"), src, collectParseError, nil, 0, arena)
-	// A nil file means the parse bailed out, and its errors are what the reader
-	// needs: the loop this replaces counted them into an empty body and
-	// returned, so a hard parse failure surfaced as whatever unrelated symptom
-	// came next. A parse that recovered is still tolerated - the stdlib carries
-	// such recoveries - so this is only the nil case.
-	if file == nil {
+	// A parse error leaves a partial tree - the parser recovers and returns a
+	// file - so stop whenever the parse reported anything. Continuing produced
+	// "unnamed return values" for `func F() err error`, whose real defect is
+	// the missing parentheses, and an AST whose body declarations had landed
+	// at package scope. Everything downstream of a partial tree is a guess.
+	// The loop this replaces counted the errors into an empty body and
+	// returned, so even a hard parse failure surfaced as whatever unrelated
+	// symptom came next.
+	if file == nil || len(cctx.parseErrors) > 0 {
 		return nil, nil
 	}
 	// The package name is the clause name from the source, not the import

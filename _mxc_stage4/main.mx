@@ -1552,6 +1552,8 @@ func scanFileRegions(data []byte, imports map[string]bool) (bodyStart int32, bod
 	lineNum := int32(1)
 	bodyStart = -1
 	seenPkg := false
+	importsDone := false
+	inBlockComment := false
 	for off < int32(len(data)) {
 		// Find line extent
 		lineStart := off
@@ -1608,6 +1610,7 @@ func scanFileRegions(data []byte, imports map[string]bool) (bodyStart int32, bod
 					push(fimps, spec)
 				}
 			}
+			importsDone = true
 			continue
 		}
 		if len(trimmed) >= 7 && string(trimmed[:7]) == "import " && (len(trimmed) < 8 || trimmed[7] != '(') {
@@ -1616,15 +1619,50 @@ func scanFileRegions(data []byte, imports map[string]bool) (bodyStart int32, bod
 			fimps = mxutil.Ensure(fimps, 1)
 			push(fimps, spec)
 			lineNum++
+			importsDone = true
 			continue
 		}
-		// First body line: only after the package clause, so the
-		// concatenated body never duplicates the file's own "package "
-		// header (a duplicate package clause confuses the parser and
-		// drops the following declarations).
+		// The body starts at the first line that is not the package clause,
+		// not an import, not a blank, and not a plain comment. A *directive*
+		// comment is never skipped, because dropping one loses the directive:
+		//   - `//:linkname time_runtimeNano time.runtimeNano` opens
+		//     runtime/time.mx, which has no imports, and
+		//   - `//export setenv` sits above runtime's libc_setenv declaration.
+		// Skipping either produced `undefined symbol: time.runtimeNano` and
+		// `undefined symbol: runtime.libc_setenv`.
+		// A directive is a `//` comment whose first character is not a space,
+		// so `//:build`, `//export` and `//go:...` are kept while `// text`
+		// is a plain comment; a `//word` comment is kept too, which only means
+		// it stays in the body. No file has a directive-looking comment before
+		// its imports (the one `//:generate` that did was moved below them),
+		// so a directive never leaves an import line behind.
+		// Plain header comments are dropped, otherwise the usual package
+		// clause, blank line, doc comment, import sequence leaves the import
+		// line in the body - hoisted and in place at once - and the parser
+		// reports "imports must appear before other declarations".
 		if seenPkg && bodyStart < 0 {
-			bodyStart = lineStart
-			bodyLine = lineNum
+			start := false
+			if importsDone {
+				start = len(trimmed) > 0
+			} else if len(trimmed) > 0 {
+				if inBlockComment {
+					if len(trimmed) >= 2 && trimmed[0] == '*' && trimmed[1] == '/' {
+						inBlockComment = false
+					}
+				} else if len(trimmed) >= 2 && trimmed[0] == '/' && trimmed[1] == '*' {
+					if !mxutil.HasSuffix(string(trimmed), "*/") {
+						inBlockComment = true
+					}
+				} else if len(trimmed) >= 2 && trimmed[0] == '/' && trimmed[1] == '/' && (len(trimmed) == 2 || trimmed[2] == ' ' || trimmed[2] == '\t') {
+					// plain header comment, skipped
+				} else {
+					start = true
+				}
+			}
+			if start {
+				bodyStart = lineStart
+				bodyLine = lineNum
+			}
 		}
 		lineNum++
 	}
