@@ -74,15 +74,17 @@ Working layout that matters: the checkouts live at
    no `moxie test` and no `__varinit` of its own, it uses go/ssa's lowering.
    The lazy-ensure workaround in `pkg/protocol` is no longer *required*, but it
    stays: a root-arena table built on first use has no ordering question.
-4. **Clear the latent parse errors and make a recovered parse fatal.** Three
-   known defects, each a real bug that has been silent for as long as the parse
-   errors were swallowed: the concatenator leaving an import line in the body
-   when a file's first line after the package clause is a comment (proven fix:
-   skip blank lines and leading comments, but never `//:` pragmas), the eight
-   vestigial blank imports in the stdlib, and one `//:generate` pragma before an
-   import. Details and verification in the finding above. Once these are gone,
-   `typeCheckPkg` can fail on `len(cctx.parseErrors) > 0` instead of only on
-   `file == nil`, and a partial tree never reaches the SSA builder.
+4. **Clear the latent parse errors and make a recovered parse fatal.** **Done.**
+   All three defects are gone: the concatenator skips blank lines and leading
+   plain comments (but never `//:` pragmas) when it finds the body start, the
+   `//:generate` pragma was moved below the import block, and the eight blank
+   imports are deleted - which also required removing legacy's
+   `hasUnsafeImport` gate on `//:linkname`, since stage4 honours the pragma
+   without one and legacy did not (see the codec finding for the bootstrap
+   failure that exposed it). `typeCheckPkg` now returns without a package on
+   `len(cctx.parseErrors) > 0` as well as on `file == nil`, with a comment
+   saying a partial tree is a guess. Details and verification in the finding
+   above.
 5. **morly: `TestCrawlRelayAndPublish` SIGSEGVs.** **Done.** It was a `time`
    package bug, not the crawler: `Location.cacheZone` is an interior pointer
    into `zone`, and a Location value is *copied* (returned from LoadLocation,
@@ -173,7 +175,14 @@ Working layout that matters: the checkouts live at
    sovereign arenas; see the finding below). Concretely:
    (a) apply global immutability and the two decl rules to every package above
    the runtime, deleting the `/pkg/` carve-out — costs the compiler tree
-   nothing, ~77 stdlib sites and 39 app-repo sites;
+   nothing, ~77 stdlib sites and 39 app-repo sites. **Approved as staged work**
+   (decision taken this session, measured then): the named slice/map-type rule
+   alone is 74 sites in `src/` outside `src/runtime` and 16 across the app
+   repos (nostr 3, morly 7, musiquay 6), plus 4 package-level var initializers
+   in `src/`; the runtime keeps its carve-out. **First stage is not a rewrite:
+   legacy already rejects named slice/map types while stage4 accepts them, so
+   settle which side the rule is on, then enable it for one scope at a time and
+   keep the tree green after each stage.**
    (b) forbid **dot imports** (all 20 are the compiler's
    `. "git.smesh.lol/moxie/pkg/types"`; 3087 identifiers to qualify) or, if
    that price is refused, make a dot import's names participate in the conflict
@@ -1102,9 +1111,14 @@ them. `ParseCalendarEvent`'s doc says 31922 and 31923 share a struct but only
 31923 is wired, and the same split exists between 30402 and 30403; neither was
 guessed at.
 
-### A `[][]string` built by repeated calls comes back aliased (open, blocking)
+### A `[][]string` built by repeated calls comes back aliased (FIXED)
 
-Found while wiring the app: `protocol.*.Tags()` cannot be called at runtime.
+Found while wiring the app: `protocol.*.Tags()` could not be called at runtime.
+**Fixed in `src/runtime/codec.mx`** - see the mechanism and the fix below the
+repro. Verified on a fresh bake with the repro and with a real
+`protocol.ParseTrack(...).Tags()`: three rows, each reading its own data, on
+stage4; the alias probe is correct on legacy too. Pinned by
+`tests/regressions/should_compile/nested_slice_return/`.
 
 Minimal repro, native, no test harness (`$MOXIEPATH/git.smesh.lol/aliasprobe`):
 
@@ -1166,3 +1180,45 @@ then Validate; `Stall`/`Product` read content alone because they have no
 thirteen publishable payloads - no `PurchaseOrder`/`DeliveryReceipt` wrapper,
 since the protocol marks them private. Verified: protocolwire 7 passed,
 `make build-app-wasm` links, `make test-unit` 88 passed.
+
+**Mechanism.** `codecEncodeValue`'s `KindSlice` branch takes a shortcut when
+the backing array is judged stable, and its guard exempted only
+`codecTopOnlyTransient` (sovereign store-back). During a return
+(`codecRetTransient`, set by both compilers around the result encode) the
+caller's backing array counts as stable, so on the second and later calls into
+one helper the element walk never ran - and the element just pushed had been
+allocated in the helper's own frame, which `FnArenaPop` releases and the pooled
+`FnArenaPush` hands to the next callee. Every later row therefore held a header
+pointing at one recycled slot, so rows 1..n-1 all read the last call's data.
+Row 0 survived only because a nil start lazy-inits the outer backing inside the
+callee, which makes it transient on the first return; presize the outer in the
+caller and row 0 breaks too. The guard now exempts `codecRetTransient` as well,
+so a stable-backed slice whose element type can hold pointers is walked. The
+charge is O(len) instead of O(1) for those returns, the same trade-off already
+accepted for the sovereign store-back, and leaf buffers still alias through
+their own stability tests.
+
+**How the two compilers were involved.** The bug itself is runtime-only and
+therefore bilateral by construction: both compilers emit the same
+`codecSetRetTransient(true) -> codecEncodeValue -> FnArenaPop -> decode`
+sequence (`_mxc_stage4/ir_deepcopy.mx`, `legacy/compiler/compiler.go`) and call
+the same `src/runtime/codec.mx`. The legacy binary reproduced `d1 a1 a1`
+identically before the fix. The old three-pass `Reloc*` lifecycle in
+`src/runtime/relocate.mx` has no call sites in either compiler - `codec.mx`
+says outright that the codec primitives replaced it - so the fix stays in the
+codec.
+
+The repro also exposed the reason the corpus of "vestigial" blank imports was
+not vestigial to legacy: `legacy/compiler/symbol.go` enabled `//:linkname` only
+when the package imported `"unsafe"` (`hasUnsafeImport(f.Pkg.Pkg)`), so
+deleting `import _ "unsafe"` from `src/math/rand/rand.mx` made the legacy
+bootstrap fail with `linker could not find symbol math/rand.runtime_rand`.
+Stage4 has no such gate - `scanLinknameMap` reads the pragma directly - so the
+gate was the divergence, not the pragma. Both legacy sites (function and global
+linkname) now honour `//:linkname` unconditionally, which is what made the
+eight blank imports genuinely removable: `src/internal/cpu/cpu.mx`,
+`cpu_arm64_hwcap.mx`, `internal/runtime/atomic/atomic_andor_generic.mx`,
+`math/big/arith_decl.mx`, `math/rand/rand.mx`, `net/http/roundtrip.mx`,
+`syscall/linkname_unix.mx` (`import _ "unsafe"`) and
+`crypto/ec/secp256k1/precomps.mx` (`import _ "embed"`). With those gone the
+stdlib parses clean, so queue item 4 is closed.

@@ -430,10 +430,12 @@ func (c *compilerContext) parsePragmas(info *functionInfo, f *ssa.Function) {
 			if len(parts) != 3 || parts[1] != f.Name() {
 				continue
 			}
-			// Only enable go:linkname when the package imports "unsafe".
-			if hasUnsafeImport(f.Pkg.Pkg) {
-				info.linkName = parts[2]
-			}
+			// Moxie's //:linkname takes no "unsafe" import: stage4 scans the
+			// pragma directly. Requiring one here made the compilers
+			// disagree - a package that dropped its vestigial blank import
+			// built with stage4 and failed here with "linker could not find
+			// symbol <pkg>.<name>".
+			info.linkName = parts[2]
 		case "//go:section":
 			// Only enable go:section when the package imports "unsafe".
 			// go:section also implies go:noinline since inlining could
@@ -745,13 +747,9 @@ func (info *globalInfo) parsePragmas(doc *ast.CommentGroup, c *compilerContext, 
 			if len(parts) != 3 || parts[1] != g.Name() {
 				continue
 			}
-			// Only enable go:linkname when the package imports "unsafe".
-			// This is a slightly looser requirement than what gc uses: gc
-			// requires the file to import "unsafe", not the package as a
-			// whole.
-			if hasUnsafeImport(g.Pkg.Pkg) {
-				info.linkName = parts[2]
-			}
+			// No "unsafe" import gate: see the function-declaration case
+			// above. Stage4 honours the pragma either way.
+			info.linkName = parts[2]
 		}
 	}
 }

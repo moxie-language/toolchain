@@ -1,0 +1,45 @@
+// Regression: a [][]string built by calling one helper repeatedly came back
+// with every row after the first reading the last row's data.
+//
+// codecEncodeValue's KindSlice branch takes a shortcut for a backing array
+// judged stable, and only exempted a sovereign store-back (codecTopOnlyTransient)
+// from it - not a return (codecRetTransient). On the second call into the same
+// helper the outer backing already lives in the caller's arena, so the
+// shortcut fired and the element walk never ran; the element the helper had
+// just pushed was allocated in the helper's own frame, which FnArenaPop
+// releases and the next callee reuses. Every later row therefore held a header
+// pointing at one recycled slot, so `Three("d1","t1","a1")` printed
+// `d1 a1 a1` and the tag list `protocol.*.Tags()` builds was corrupt.
+//
+// Fixed in: src/runtime/codec.mx (the KindSlice shortcut now also exempts
+// codecRetTransient when the element type can hold pointers). The bug is
+// bilateral - both compilers set codecRetTransient around the return encode and
+// call the same runtime - and only non-main packages relocate returns, so the
+// helper lives in lib/.
+
+package main
+
+import (
+	"os"
+	"tests/regressions/should_compile/nested_slice_return/lib"
+)
+
+func chk(name, got, exp string) {
+	if got != exp {
+		println("FAIL: " | name | " got [" | got | "] want [" | exp | "]")
+		os.Exit(1)
+	}
+}
+
+func main() {
+	r := lib.Four("d1", "t1", "a1", "x1")
+	if len(r) != 4 {
+		println("FAIL: expected 4 rows, got ", len(r))
+		os.Exit(1)
+	}
+	chk("row0", r[0][1], "d1")
+	chk("row1", r[1][1], "t1")
+	chk("row2", r[2][1], "a1")
+	chk("row3", r[3][1], "x1")
+	println("ok")
+}

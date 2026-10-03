@@ -498,8 +498,19 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		// live in the data arena while a freshly-pushed element points into
 		// the scratch fn arena; walk such elements so the pointer targets
 		// get relocated.
+		//
+		// The same holds during a return (codecRetTransient). The callee's
+		// frame is released right after the encode, and FnArenaPop hands its
+		// region to the next callee, so an element allocated in that frame is
+		// dead even though the backing array it was pushed into lives in the
+		// caller's arena and is therefore "stable". Skipping the walk left
+		// every element after the first pointing at one recycled slot:
+		// `Ret(nil,..)` three times returned rows that all read the third
+		// call's row (`d1 a1 a1`). The element walk is O(len) instead of O(1)
+		// for such slices, which is the trade-off already accepted for the
+		// sovereign store-back.
 		if sl.ptr != nil && codecIsStableAddr(uintptr(unsafe.Pointer(sl.ptr))) &&
-			!(sl.length > 0 && codecTopOnlyTransient && elemType != nil && sovTypeHasPtrs(elemType)) {
+			!(sl.length > 0 && (codecTopOnlyTransient || codecRetTransient) && elemType != nil && sovTypeHasPtrs(elemType)) {
 			codecNoteStable(uintptr(unsafe.Pointer(sl.ptr)))
 			codecWriteVarint(cb, codecTagStableSlice)
 			codecWriteRaw(cb, unsafe.Pointer(&sl), codecStrHdr())
