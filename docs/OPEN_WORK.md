@@ -193,11 +193,31 @@ method to the universe Basic at `registerMethod`, and resolving `*Basic` in
 a real call, both compile - and neither changes the outcome. `String undefined`
 still comes from `reportUndefinedField`, so the `*Basic` case in
 `resolveMethodCallWithRecv` **is not on the path that rejects `n.String()`**.
-The next step is to trace which selector/call path reports it (the error is
-produced by `buildSelector` calling `reportUndefinedField` after
-`buildMethodValue` returns nil, so instrument that call and the type it sees -
-it may be a `*Named` wrapper for the basic, or a call path that never reaches
-`buildMethodValue`).
+**Round 3 traced it.** The receiver at that point is a `*Basic` (`Basic:int32`)
+with `NumMethods() == 1`, method `String`, signature present and `Pkg == nil` -
+the synthetic method `addBasicStringMethod` installs. Resolving that case in
+`resolveMethodCallWithRecv` to a real call *works*: the compile error
+disappears and the build moves to the **linker**:
+
+```
+ld.lld-22: error: undefined symbol: runtime.(*rune).String
+ld.lld-22: error: undefined symbol: runtime.(*int32).String
+```
+
+So stage4 already agrees on the right target symbol - `runtime.(*T).String`, from
+`src/runtime/stringer.mx` - and the only thing missing is that the symbol is not
+in the link. The baked `sysroot/runtime_go.bc` is the reason: rebuilding it
+(`moxie build-runtime`) still produces a blob with **no `(*int32).String`
+symbol**, i.e. the bake does not compile `stringer.mx` (the `//:build
+moxie.stringer` file). The named aliases (`byte`, `rune`, `string`) resolve the
+same way and fail the same way, which is also why `fmt` prints `?` for them.
+
+Remaining stage4 work is therefore: make the bake include the stringer methods
+(the baked runtime is what an app links against, so they must be in it), then
+land the `*Basic` resolution above. The same question applies to legacy: its
+`BuildTags()` must include `moxie.stringer` for non-wasm, and the vendored
+`go/types` must accept a method on a non-local basic type so the declaration
+type-checks - after which `filterImpossibleAssertErrors` can be deleted.
 
 The fix, in order (no error filtering, no caller workarounds):
 
