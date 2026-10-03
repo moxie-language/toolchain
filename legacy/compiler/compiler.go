@@ -1083,6 +1083,24 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 				if fn == nil {
 					continue // probably a generic method
 				}
+				// A named type over a builtin inherits that builtin's String()
+				// (moxie's method-set rule, mirrored in go/types). The inherited
+				// function belongs to the builtin's declaring package; emitting
+				// it here would define the same symbol in a second module.
+				if obj, ok := method.Obj().(*types.Func); ok {
+					memberT := member.Type()
+					if p, isPtr := memberT.(*types.Pointer); isPtr {
+						memberT = p.Elem()
+					}
+					if recvT := obj.Type().(*types.Signature).Recv().Type(); !types.Identical(recvT, memberT) {
+						if p, isPtr := recvT.(*types.Pointer); isPtr {
+							recvT = p.Elem()
+						}
+						if !types.Identical(recvT, memberT) {
+							continue
+						}
+					}
+				}
 				if member.Type().String() != member.String() {
 					// This is a member on a type alias. Do not build such a
 					// function.
@@ -1119,6 +1137,11 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 		}
 	}
 
+	// Methods declared on a builtin type (src/runtime/stringer.mx) have no
+	// *ssa.Type member to hang off: the receiver base is a universe type, not
+	// a package-level type name. Emit the ones this package declares.
+	c.createBuiltinMethods(irbuilder, pkg)
+
 	// Add forwarding functions for functions that would otherwise be
 	// implemented in assembly.
 	for _, name := range members {
@@ -1138,6 +1161,51 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 				}
 				b := newBuilder(c, irbuilder, member)
 				b.createAlias(alias)
+			}
+		}
+	}
+}
+
+// builtinMethodReceivers are the builtin types the runtime declares methods
+// on. Keep in step with src/runtime/stringer.mx.
+var builtinMethodReceivers = []types.BasicKind{
+	types.Bool,
+	types.Int8, types.Int16, types.Int32, types.Int64,
+	types.Uint8, types.Uint16, types.Uint32, types.Uint64,
+	types.Float32, types.Float64,
+	types.String,
+	types.Uintptr,
+}
+
+// createBuiltinMethods creates the definitions of the methods this package
+// declares on a builtin receiver. createPackage finds a named type's methods
+// through its *ssa.Type member; a builtin receiver has none, so without this
+// the declared function exists in the SSA program with a body but is never
+// emitted, and every call to it is an undefined symbol.
+func (c *compilerContext) createBuiltinMethods(irbuilder llvm.Builder, pkg *ssa.Package) {
+	for _, kind := range builtinMethodReceivers {
+		bt := types.Typ[kind]
+		if bt == nil {
+			continue
+		}
+		for _, typ := range []types.Type{bt, types.NewPointer(bt)} {
+			for _, sel := range getAllMethods(c.program, typ) {
+				obj, ok := sel.Obj().(*types.Func)
+				if !ok || obj.Pkg() == nil || obj.Pkg() != pkg.Pkg {
+					continue
+				}
+				fn := c.program.FuncValue(obj)
+				if fn == nil || fn.Blocks == nil || fn.Synthetic != "" {
+					continue
+				}
+				// A declaration may already exist: the interface invoke
+				// wrapper in this same module references the method before
+				// its body is emitted.
+				if llvmFn := c.mod.NamedFunction(c.getFunctionInfo(fn).linkName); !llvmFn.IsNil() && !llvmFn.IsDeclaration() {
+					continue
+				}
+				b := newBuilder(c, irbuilder, fn)
+				b.createFunction()
 			}
 		}
 	}

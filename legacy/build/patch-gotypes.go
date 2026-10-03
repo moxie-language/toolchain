@@ -77,8 +77,73 @@ func main() {
 	patchPanicRecoverString(dstDir)
 	patchExportAccess(dstDir)
 	patchScopeHashPrefix(dstDir)
+	patchBuiltinMethods(dstDir)
 
 	fmt.Fprintf(os.Stderr, "patched go/types in %s\n", dstDir)
+}
+
+// patchBuiltinMethods lets a builtin type carry methods. src/runtime/stringer.mx
+// declares String() on every builtin, and fmt dispatches through Stringer; Go
+// forbids methods on non-local types, so without this the file cannot be
+// compiled and the loader papers over it by deleting "missing method" errors.
+// The method set is stored on the Basic itself (the Typ singletons are shared,
+// so the methods are universal) and receiver base name resolution is taught to
+// accept a universe type name.
+func patchBuiltinMethods(dir string) {
+	// basic.go: a side table of methods on builtin types. A field on Basic
+	// would break the unkeyed literals that initialise Typ.
+	f := filepath.Join(dir, "basic.go")
+	src := mustRead(f)
+	src = mustReplace(f, src,
+		"// Kind returns the kind of basic type b.\nfunc (b *Basic) Kind() BasicKind { return b.kind }",
+		"// Kind returns the kind of basic type b.\nfunc (b *Basic) Kind() BasicKind { return b.kind }\n\n// Moxie: methods declared on the builtin type (src/runtime/stringer.mx).\n// A map keyed by the Basic keeps the struct unchanged: Typ is initialised\n// with unkeyed literals. The Typ entries are universe singletons, so a\n// method recorded here is in the method set everywhere.\nvar basicMethods = map[*Basic][]*Func{}\n\n// defBuiltinStringMethods declares the builtin String() methods in the\n// universe, exactly as Moxie's own universe does. A package may be\n// type-checked before the runtime that declares them, and fmt.Stringer\n// satisfaction is decided at check time, so the method must already be\n// visible. The runtime's real declaration replaces the placeholder.\nfunc defBuiltinStringMethods() {\n\tsig := NewSignatureType(nil, nil, nil, nil, NewTuple(NewVar(nopos, nil, \"\", Typ[String])), false)\n\tfor _, b := range []*Basic{\n\t\tTyp[Bool],\n\t\tTyp[Int8], Typ[Int16], Typ[Int32], Typ[Int64],\n\t\tTyp[Uint8], Typ[Uint16], Typ[Uint32], Typ[Uint64],\n\t\tTyp[Float32], Typ[Float64],\n\t\tTyp[String],\n\t\tTyp[Uintptr],\n\t} {\n\t\tbasicMethods[b] = []*Func{NewFunc(nopos, nil, \"String\", sig)}\n\t}\n}\n\n// basicAddMethod records a method on the builtin type. A re-check of the\n// same package replaces its own object (the SSA package is built from the\n// newest pass); a declaration from another package is a redeclaration and\n// the existing method is returned so the caller can report it.\nfunc basicCanon(t *Basic) *Basic {\n\t// byte and rune are separate Basic values in go/types but the same type\n\t// as uint8 and int32, so their methods live on the canonical entry.\n\tswitch t.kind {\n\tcase Byte:\n\t\treturn Typ[Uint8]\n\tcase Rune:\n\t\treturn Typ[Int32]\n\t}\n\treturn t\n}\n\nfunc basicAddMethod(t *Basic, m *Func) *Func {\n\tt = basicCanon(t)\n\tfor i, e := range basicMethods[t] {\n\t\tif e.sameId(m.Pkg(), m.Name(), false) {\n\t\t\tif e.Pkg() == nil || (m.Pkg() != nil && e.Pkg().Path() == m.Pkg().Path()) {\n\t\t\t\tbasicMethods[t][i] = m\n\t\t\t\treturn nil\n\t\t\t}\n\t\t\treturn e\n\t\t}\n\t}\n\tbasicMethods[t] = append(basicMethods[t], m)\n\treturn nil\n}\nfunc basicNumMethods(t *Basic) int    { return len(basicMethods[basicCanon(t)]) }\nfunc basicMethod(t *Basic, i int) *Func { return basicMethods[basicCanon(t)][i] }\n\n// basicLookupMethod returns the index and method with the given package and name.\nfunc basicLookupMethod(t *Basic, pkg *Package, name string, foldCase bool) (int, *Func) {\n\tt = basicCanon(t)\n\tfor i, m := range basicMethods[t] {\n\t\tif m.sameId(pkg, name, foldCase) {\n\t\t\treturn i, m\n\t\t}\n\t}\n\treturn 0, nil\n}")
+	mustWrite(f, src)
+
+	// resolver.go: accept a universe type name as a receiver base, and attach
+	// the method to the type when the base is a builtin.
+	f = filepath.Join(dir, "resolver.go")
+	src = mustRead(f)
+	src = mustReplace(f, src,
+		"\tfor name != nil {\n\t\t// name must denote an object found in the current package scope\n\t\t// (note that dot-imported objects are not in the package scope!)\n\t\tobj := check.pkg.scope.Lookup(name.Name)\n\t\tif obj == nil {\n\t\t\tbreak\n\t\t}",
+		"\tfor name != nil {\n\t\t// name must denote an object found in the current package scope\n\t\t// (note that dot-imported objects are not in the package scope!)\n\t\tobj := check.pkg.scope.Lookup(name.Name)\n\t\tif obj == nil {\n\t\t\t// Moxie: a builtin type may be the receiver base type\n\t\t\t// (func (n int32) String()). Its methods are registered on the\n\t\t\t// type object itself, not in check.methods.\n\t\t\tif uobj := Universe.Lookup(name.Name); uobj != nil {\n\t\t\t\tif utn, ok := uobj.(*TypeName); ok {\n\t\t\t\t\treturn ptr, utn\n\t\t\t\t}\n\t\t\t}\n\t\t\tbreak\n\t\t}")
+	src = mustReplace(f, src,
+		"\t\tptr, base := check.resolveBaseTypeName(m.ptr, m.recv)\n\t\tif base != nil {\n\t\t\tm.obj.hasPtrRecv_ = ptr\n\t\t\tcheck.methods[base] = append(check.methods[base], m.obj)\n\t\t}",
+		"\t\tptr, base := check.resolveBaseTypeName(m.ptr, m.recv)\n\t\tif base != nil {\n\t\t\tm.obj.hasPtrRecv_ = ptr\n\t\t\tif base.pkg == nil {\n\t\t\t\t// Moxie: a builtin receiver base - record the method on it.\n\t\t\t\tif basic, ok := base.typ.(*Basic); ok {\n\t\t\t\t\tif alt := basicAddMethod(basic, m.obj); alt != nil {\n\t\t\t\t\t\tcheck.errorf(m.obj, DuplicateMethod, \"method %s.%s already declared\", basic.name, m.obj.Name())\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tcheck.methods[base] = append(check.methods[base], m.obj)\n\t\t}")
+	mustWrite(f, src)
+
+	// universe.go: declare the builtin String() methods in the universe.
+	f = filepath.Join(dir, "universe.go")
+	src = mustRead(f)
+	src = mustReplace(f, src,
+		"\tdefPredeclaredFuncs()\n\n\tuniverseIota = Universe.Lookup(\"iota\")",
+		"\tdefPredeclaredFuncs()\n\n\t// Moxie: the builtin String() methods are part of the universe.\n\tdefBuiltinStringMethods()\n\n\tuniverseIota = Universe.Lookup(\"iota\")")
+	mustWrite(f, src)
+
+	// signature.go: allow the Basic receiver base.
+	f = filepath.Join(dir, "signature.go")
+	src = mustRead(f)
+	src = mustReplace(f, src,
+		"\tcase *Basic:\n\t\tcheck.errorf(pos, InvalidRecv, \"cannot define new methods on non-local type %s\", rtyp)",
+		"\tcase *Basic:\n\t\t// Moxie: a builtin type may carry methods (src/runtime/stringer.mx);\n\t\t// the method set is recorded on the type itself.")
+	mustWrite(f, src)
+
+	// methodset.go: include the builtin methods in the method set, and let a
+	// byte slice report string's methods (string and []byte are one type).
+	f = filepath.Join(dir, "methodset.go")
+	src = mustRead(f)
+	src = mustReplace(f, src,
+		"\t\t\tswitch t := under(typ).(type) {\n\t\t\tcase *Struct:",
+		"\t\t\t// Moxie: a builtin type may carry methods.\n\t\t\tif basic, ok := under(typ).(*Basic); ok {\n\t\t\t\tfor i := 0; i < basicNumMethods(basic); i++ {\n\t\t\t\t\tm := basicMethod(basic, i)\n\t\t\t\t\tif _, dup := mset[m.Id()]; dup {\n\t\t\t\t\t\tcontinue // the type declares its own method of that name\n\t\t\t\t\t}\n\t\t\t\t\tmset = mset.addOne(m, concat(e.index, i), e.indirect, e.multiples)\n\t\t\t\t}\n\t\t\t}\n\t\t\t// Moxie: []byte is the string type, whose method set carries String().\n\t\t\tif _, isSlice := Unalias(typ).(*Slice); isSlice && isByteSlice(typ) {\n\t\t\t\tbasic := Typ[String]\n\t\t\t\tfor i := 0; i < basicNumMethods(basic); i++ {\n\t\t\t\t\tmset = mset.addOne(basicMethod(basic, i), concat(e.index, i), e.indirect, e.multiples)\n\t\t\t\t}\n\t\t\t}\n\n\t\t\tswitch t := under(typ).(type) {\n\t\t\tcase *Struct:")
+	mustWrite(f, src)
+
+	// lookup.go: find the builtin methods when resolving a selector, and the
+	// string methods for a byte slice.
+	f = filepath.Join(dir, "lookup.go")
+	src = mustRead(f)
+	src = mustReplace(f, src,
+		"\t\t\tswitch t := under(typ).(type) {\n\t\t\tcase *Struct:\n\t\t\t\t// look for a matching field and collect embedded types",
+		"\t\t\t// Moxie: a builtin type may carry methods.\n\t\t\tif basic, ok := under(typ).(*Basic); ok {\n\t\t\t\tif i, m := basicLookupMethod(basic, pkg, name, foldCase); m != nil {\n\t\t\t\t\tindex = concat(e.index, i)\n\t\t\t\t\tif obj != nil || e.multiples {\n\t\t\t\t\t\treturn nil, index, false\n\t\t\t\t\t}\n\t\t\t\t\tobj = m\n\t\t\t\t\tindirect = e.indirect\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t}\n\t\t\t// Moxie: []byte is the string type, whose method set carries String().\n\t\t\tif _, isSlice := Unalias(typ).(*Slice); isSlice && isByteSlice(typ) {\n\t\t\t\tif i, m := basicLookupMethod(Typ[String], pkg, name, foldCase); m != nil {\n\t\t\t\t\tindex = concat(e.index, i)\n\t\t\t\t\tif obj != nil || e.multiples {\n\t\t\t\t\t\treturn nil, index, false\n\t\t\t\t\t}\n\t\t\t\t\tobj = m\n\t\t\t\t\tindirect = e.indirect\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t}\n\n\t\t\tswitch t := under(typ).(type) {\n\t\t\tcase *Struct:\n\t\t\t\t// look for a matching field and collect embedded types")
+	mustWrite(f, src)
 }
 
 func patchPredicates(dir string) {

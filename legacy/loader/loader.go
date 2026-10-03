@@ -428,7 +428,6 @@ func (p *Package) Check() error {
 	// no-new-var errors: string==[]byte makes some := seem redundant.
 	typeErrors = filterStringByteMismatch(typeErrors)
 	typeErrors = filterNoNewVarErrors(typeErrors)
-	typeErrors = filterImpossibleAssertErrors(typeErrors)
 	typeErrors = filterUndefinedSliceAlloc(typeErrors)
 	if err != nil && len(typeErrors) == 0 {
 		err = nil
@@ -498,7 +497,6 @@ func (p *Package) Check() error {
 		typeErrors = filterNoNewVarErrors(typeErrors)
 		typeErrors = filterStringByteMismatch(typeErrors)
 		typeErrors = filterUndefinedSliceAlloc(typeErrors)
-	typeErrors = filterImpossibleAssertErrors(typeErrors)
 		if err != nil && len(typeErrors) == 0 {
 			err = nil
 		}

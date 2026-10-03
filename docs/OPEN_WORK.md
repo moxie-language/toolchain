@@ -148,98 +148,106 @@ Working layout that matters: the checkouts live at
 
 ## Findings
 
-### Builtin Stringer methods do not work in either compiler (open)
+### Builtin Stringer methods work in both compilers — FIXED
 
-`n.String()` on an `int32` (or any builtin) is undefined in **both** compilers
-for an ordinary program:
-
-```
-; String undefined (type int32 has no field or method String)
-```
-
-`src/runtime/stringer.mx` defines the methods for every builtin (bool, int8/16/
-32/64, uint8/16/32/64, uintptr, float32/64, string, byte, rune), value
-receivers, behind `//:build moxie.stringer`. Three separate gaps keep them from
-being usable, and each is a *workaround* that hides the next:
-
-1. **stage4 never attaches them.** `pkg/types.Basic` already has
-   `Methods`/`AddMethod`/`NumMethods`/`Method`, and `findMethod` already looks at
-   them, but nothing ever calls `AddMethod` on a Basic (`registerMethod` only
-   `SetMember`s the mangled name), and `resolveMethodCallWithRecv` returns nil
-   for a `*Basic` with a comment saying a direct call is unsupported and
-   "boxing through an interface (fmt.Println, t.Fatalf) is the supported path".
-2. **legacy suppresses the type error.** `filterImpossibleAssertErrors`
-   (`legacy/loader/mxrewrite.go:117`) deletes every go/types "missing method"
-   error, so interface satisfaction by a basic type is accepted without the
-   method existing. Legacy's tag list (`compileopts/config.go:57`) does not
-   include `moxie.stringer`, so the file is not even compiled there.
-3. **The codegen path for interface boxing is a thunk, not the method.**
-   `emitBasicIdentities` (`ir_descriptors.mx:532`) defines
-   `basic:<T>.String$identity` and the interface path calls that, so printing a
-   basic works while calling `.String()` on it does not.
-
-Measured on a stage4 build: `fmt.Println(n, u, f, b, s, by, r)` prints
-`12345 99 2.5 true txt ? ?` - ints, floats, bool and string are converted
-correctly by the interface path, while **byte and rune print `?`**. The reason
-is in `ir_emit.mx:715`: the canonical descriptor spelling comes from the kind
-(`uint8`, `int32`, `bytes`), because `byte`, `rune` and `string` are *named
-types* over a basic, so their identity/no-op path is taken instead of a
-conversion. A correct `.String()` must therefore cover the named aliases as
-well as the bare basics, and the same defect shows up through `fmt` today.
-
-Tried and reverted in round 2 (recorded so it is not repeated): attaching the
-method to the universe Basic at `registerMethod`, and resolving `*Basic` in
-`resolveMethodCallWithRecv` by looking the method up on that Basic and building
-a real call, both compile - and neither changes the outcome. `String undefined`
-still comes from `reportUndefinedField`, so the `*Basic` case in
-`resolveMethodCallWithRecv` **is not on the path that rejects `n.String()`**.
-**Round 3 traced it.** The receiver at that point is a `*Basic` (`Basic:int32`)
-with `NumMethods() == 1`, method `String`, signature present and `Pkg == nil` -
-the synthetic method `addBasicStringMethod` installs. Resolving that case in
-`resolveMethodCallWithRecv` to a real call *works*: the compile error
-disappears and the build moves to the **linker**:
+`n.String()` on any builtin is now a real method call in the native build of
+both compilers, `fmt` formats `byte` and `rune` instead of printing `?`, and the
+loader no longer deletes go/types errors to make it type-check. Verified with one
+probe (`bool`, every int and uint, `uintptr`, `float32/64`, `string`, `byte`,
+`rune`, `[]byte`) covering direct calls, conversion receivers, a `[]byte` and a
+string through `fmt.Stringer`, and `fmt.Println`, on both compilers:
 
 ```
-ld.lld-22: error: undefined symbol: runtime.(*rune).String
-ld.lld-22: error: undefined symbol: runtime.(*int32).String
+bool true / int8 -8 / ... / uint64 64 / float32 +1.500000e+000
+float64 +2.50000000000000e+000 / string str / uintptr 0xff / byte 65 / rune 128512
+conv 7 / iface -32 / ifacebyte 65 / byteslice abc / ifacebytes abc / ifacestr lit
+fmt true -8 -16 -32 -64 8 16 32 64 1.5 2.5 str 0xff 65 128512
 ```
 
-So stage4 already agrees on the right target symbol - `runtime.(*T).String`, from
-`src/runtime/stringer.mx` - and the only thing missing is that the symbol is not
-in the link. The baked `sysroot/runtime_go.bc` is the reason: rebuilding it
-(`moxie build-runtime`) still produces a blob with **no `(*int32).String`
-symbol**, i.e. the bake does not compile `stringer.mx` (the `//:build
-moxie.stringer` file). The named aliases (`byte`, `rune`, `string`) resolve the
-same way and fail the same way, which is also why `fmt` prints `?` for them.
+The three gaps and what each needed:
 
-Remaining stage4 work is therefore: make the bake include the stringer methods
-(the baked runtime is what an app links against, so they must be in it), then
-land the `*Basic` resolution above. The same question applies to legacy: its
-`BuildTags()` must include `moxie.stringer` for non-wasm, and the vendored
-`go/types` must accept a method on a non-local basic type so the declaration
-type-checks - after which `filterImpossibleAssertErrors` can be deleted.
+1. **stage4 never resolved the call.** `resolveMethodCallWithRecv` returned nil
+   for a `*Basic` receiver. It now resolves the method out of the type's method
+   set (`resolveBuiltinMethod`): inside the runtime package that is the local
+   definition, elsewhere it is the ordinary ctx-carrying cross-package call into
+   `runtime.(*T).String`. The receiver ABI is a pointer even for a value
+   receiver, so the caller materialises the value and passes its address.
+2. **The interface table named a thunk, not the method.** `findIfaceImpls`
+   registered `basic:<T>.String$identity` wrappers (right only for `[]byte`,
+   which String()s to itself) and never registered the real symbol, so a boxed
+   basic dispatched to an identity load. It now registers each builtin against
+   `runtime.(*T).String`. `emitBasicIdentities` is deleted. The table is gated on
+   `buildTagTrue("moxie.stringer")`, so a compiler that does not carry the
+   methods does not reference them either.
+3. **legacy suppressed the type error.** `filterImpossibleAssertErrors`
+   (deleting every "missing method" error) is gone, and `moxie.stringer` is in
+   `BuildTags()` for non-wasm. The go/types patches are now real: a method may be
+   declared on a builtin, it is recorded in the type's method set, and a named
+   type over a builtin inherits it (mirroring stage4's `collectMethods`
+   recursion, which is why `math/big.Word` can go to `fmt.Sprintf`).
 
-The fix, in order (no error filtering, no caller workarounds):
+Decisions taken while landing it:
 
-- stage4: `registerMethod` attaches a builtin-receiver method to the universe
-  `*Basic`; `resolveMethodCallWithRecv` resolves `*Basic` through that method
-  set to a real call, the same way it resolves a `Named` (same package via
-  `Members`, imported via `ensureImportedSSAPackage` + `ExternalFunc`);
-- stage4: carry builtin methods through the `.mxh` (writer and reader) so a
-  package that never compiles `runtime` still sees them;
-- legacy: add `moxie.stringer` to `BuildTags()` for non-wasm targets (stage4's
-  non-wasm tag set includes it and its wasm `forbidden` list excludes it);
-- legacy: patch the vendored `go/types` so a method may be declared on a
-  non-local basic type and is recorded in that type's method set, then delete
-  `filterImpossibleAssertErrors` - with the methods real, nothing needs
-  filtering;
-- verify with one probe covering every builtin (`bool`, all ints, all uints,
-  `uintptr`, `float32/64`, `string`, `byte`, `rune`) on both compilers, plus
-  `fmt.Println` and a `fmt.Stringer` assertion, plus a wasm build where the tag
-  is excluded.
+- **`byte` and `rune` are aliases.** In go/types they are *separate* `*Basic`
+  values (`Typ[Byte] != Typ[Uint8]`) that are identical to `uint8`/`int32`;
+  stage4 keeps them as named types over the same kinds. Their String() is the
+  underlying method, mapped by name (`builtinAliasName` in stage4,
+  `basicCanon` in the patched go/types) — so both compilers print `byte(65)` as
+  `65` and `rune(0x1f600)` as `128512`. The bespoke hex byte/rune String bodies
+  were removed from `src/runtime/stringer.mx`: they printed `0xf600` for a rune
+  above the BMP (the buffer was a fixed four nibbles) and could not exist in
+  legacy at all, where `byte` *is* `uint8` and would have been a duplicate
+  method. `uintptr` keeps its own hex `String()`, which both compilers can
+  declare (legacy's `uintptr` is a distinct Basic, stage4's is a named type).
+- **Shadowing**: a named type that declares its own `String()` wins over the
+  inherited one. The go/types patch checks the method set before adding the
+  inherited method; without that, go/types records a same-depth collision and
+  drops the method entirely.
+- **The universe declares the methods.** A package can be type-checked before
+  the runtime that supplies the bodies, and `fmt.Stringer` satisfaction is
+  decided at check time, so `defBuiltinStringMethods()` pre-registers the
+  placeholders in the universe; the runtime's declaration replaces the
+  placeholder object. stage4 has the same shape (`addBasicStringMethod` at
+  universe construction).
+- **A byte slice inherits string's methods only when unnamed.** `[]byte("x")`
+  must satisfy Stringer; `type Bytes []byte` must not inherit string's — if it
+  does, `createPackage` emits the *string* method in the named type's module and
+  the link fails with "symbol multiply defined". stage4's `collectMethods` has
+  the same boundary (no `*Slice` case).
 
-Until then every `x.String()` on a builtin is a compile error and the compiler's
-own code avoids it (e.g. `simpleItoa` in `main.mx`).
+Legacy-side root cause worth remembering: `createPackage` emits methods only
+through a package-level `*ssa.Type` member's method set, so a method whose
+receiver base is a builtin - which has no such member - existed in the SSA
+program with a body but was never emitted, and every call to it was an undefined
+symbol. `createBuiltinMethods` emits the ones the package declares, and skips
+the ones a named type merely inherits (that method belongs to the builtin's
+declaring package).
+
+Latent issues found on the way (not fixed here):
+
+- stage4's per-file typecheck called `AddMethod` on the *universe* `byte`/`rune`
+  named types, storing a TCFunc whose Name string belonged to the file's parse
+  arena. In `src/runtime/stringer.mx` that produced two methods named `String`
+  on `byte` and a SIGSEGV inside `runtime.stringEqual` at emit time. Fixed by
+  skipping universe Named receivers in the typecheck attach step; the universe's
+  method set is pkg/types' business, not a file's.
+- `Named.AddMethod` (pkg/types) stores a caller-arena `*TCFunc` in a
+  root-arena-backed slice and compares method names by string equality, so a
+  name whose backing bytes died is read as garbage. Harmless today because the
+  only AddMethod calls with parsed names come from `registerMethod`/mxh loading,
+  but it is the reason the crash above was possible.
+- stage4 accepts an impossible interface type assertion (`val.(*SSANamedConst)`
+  where the type does not implement the interface); legacy's go/types rejects
+  it, so such dead assertions must be deleted to build stage4 with legacy (one
+  was, at `ssa_builder.mx` `assignable` checking).
+- Variadic generic inference picks an untyped constant's *default* type over the
+  slice element type: `push(dst, '0', byte(exp)+'0')` with `dst []byte` builds a
+  `[]int32` literal and stores an i8 into an i32 slot. It is latent while `byte`
+  is a named type (the inference then lands on `byte`); making `byte` an alias
+  exposed it as an LLVM type error in `strconv`. Worth a root-cause fix.
+- Calling `String()` on an untyped constant receiver (`"lit".String()`)
+  resolves in stage4 (via `UntypedToTyped`) but not in legacy, which has no
+  such conversion for a selector receiver.
 
 ### Legacy vs stage4: the same source compiles as two dialects
 

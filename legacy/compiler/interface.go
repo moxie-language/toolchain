@@ -132,12 +132,6 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 	if isInterface {
 		hasMethodSet = false
 	}
-	// Also generate method sets for basic types with auto-generated String().
-	if !hasMethodSet && !isInterface {
-		if isBasicTypeWithString(typ) || isByteSlice(typ) {
-			hasMethodSet = true
-		}
-	}
 
 	// As defined in https://pkg.go.dev/reflect#Type:
 	// NumMethod returns the number of methods accessible using Method.
@@ -630,14 +624,6 @@ func (c *compilerContext) getTypeMethodSet(typ types.Type, typeCodeName string) 
 			wrappers = append(wrappers, wrapper)
 		}
 
-		// For basic types and []byte that have auto-generated String() methods,
-		// create synthetic entries because go/types doesn't know about them.
-		if ms.Len() == 0 && (isBasicTypeWithString(typ) || isByteSlice(typ)) {
-			synthetic := c.createStringMethod(typ, typeCodeName)
-			signatures = append(signatures, synthetic.signature)
-			wrappers = append(wrappers, synthetic.wrapper)
-		}
-
 		// Construct global value.
 		nMethods := len(signatures)
 		globalValue := c.ctx.ConstStruct([]llvm.Value{
@@ -655,68 +641,6 @@ func (c *compilerContext) getTypeMethodSet(typ types.Type, typeCodeName string) 
 		llvmutil.AppendToGlobal(c.mod, "llvm.used", global)
 	}
 	return global
-}
-
-// stringMethod holds the signature and wrapper for a synthetic String() method.
-type stringMethod struct {
-	signature llvm.Value
-	wrapper   llvm.Value
-}
-
-// isBasicTypeWithString reports whether typ is a basic type with auto-generated String().
-func isBasicTypeWithString(typ types.Type) bool {
-	if b, ok := typ.Underlying().(*types.Basic); ok {
-		switch b.Kind() {
-		case types.Bool, types.Int, types.Int8, types.Int16, types.Int32, types.Int64,
-			types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64,
-			types.Uintptr, types.Float32, types.Float64, types.String:
-			return true
-		}
-	}
-	return false
-}
-
-// isByteSlice reports whether typ is []byte (the Moxie unified string type).
-func isByteSlice(typ types.Type) bool {
-	if s, ok := typ.Underlying().(*types.Slice); ok {
-		if b, ok := s.Elem().(*types.Basic); ok && b.Kind() == types.Byte {
-			return true
-		}
-	}
-	return false
-}
-
-// createStringMethod creates a synthetic String() string method for the
-// given type, generating an identity wrapper function in LLVM IR.
-func (c *compilerContext) createStringMethod(typ types.Type, typeCodeName string) stringMethod {
-	// Build a synthetic function signature: String() string
-	stringType := c.getLLVMRuntimeType("_string")
-
-	// Create signature global (an opaque i8* pointer used for method matching).
-	stringBasic := types.Typ[types.String]
-	params := types.NewTuple()
-	results := types.NewTuple(types.NewVar(token.NoPos, nil, "", stringBasic))
-	sig := types.NewSignatureType(nil, nil, nil, params, results, false)
-	fakeFunc := types.NewFunc(token.NoPos, nil, "String", sig)
-	signatureGlobal := c.getMethodSignature(fakeFunc)
-
-	// Create a small identity wrapper: load _string from ptr and return it.
-	wrapperName := typeCodeName + ".String$identity"
-	wrapper := c.mod.NamedFunction(wrapperName)
-	if wrapper.IsNil() {
-		fnType := llvm.FunctionType(stringType, []llvm.Type{c.dataPtrType, c.dataPtrType}, false)
-		wrapper = llvm.AddFunction(c.mod, wrapperName, fnType)
-		wrapper.SetLinkage(llvm.LinkOnceODRLinkage)
-		wrapper.SetUnnamedAddr(true)
-		b := c.ctx.NewBuilder()
-		entry := llvm.AddBasicBlock(wrapper, "entry")
-		b.SetInsertPointAtEnd(entry)
-		loaded := b.CreateLoad(stringType, wrapper.Param(0), "")
-		b.CreateRet(loaded)
-		b.Dispose()
-	}
-
-	return stringMethod{signature: signatureGlobal, wrapper: wrapper}
 }
 
 // getMethodSignatureName returns a unique name (that can be used as the name of
