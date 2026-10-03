@@ -1263,3 +1263,31 @@ The cost divides into two very different migrations:
   `int32`, and the Stringer design says a named type's own `String()` wins).
   The alternative reading of the rule is that it is legacy's leftover and
   should be dropped, which costs no sites at all.
+
+**Stage 1 landed: the package-level var initializers are gone from the app
+repos.** The real set was far larger than the 6/13/20 a flat grep suggested -
+**220 declarations** (nostr 36, morly 80, musiquay 104) once `var (...)` blocks
+and the demoted `var x = []byte("literal")` form are counted. All are now a
+zero-value declaration plus an assignment in `init()`, in dependency order where
+one initializer read another (`lol.Main` before its printers; the metrics
+histograms before `allHistograms`). Where a package is a `main` - morly's
+`main.mx`, musiquay's wasm bundles and the two `_test/` harnesses - the
+assignments live in an `initXxxGlobals()` called first in `main()`, which is
+exactly when the old package initializer ran, because a main package cannot
+declare `init()`. The mls package shares one `init()` in `encoding.mx`; its four
+`!wasm` test globals became function-local instead, since the single `init()`
+must live in an always-compiled file. Committed in all three repos and verified
+independently here: **653 tests green** (nostr 194, morly 370, musiquay 89),
+morly links, `app.wasm` links.
+
+**Direction for the named-type half: enforce it as written** (user decision,
+taken with the cost measured). Stage4 has no implementation of the rule at all -
+a `main` package under a dotted path with `type Tags []string` and a method
+builds and runs - while legacy rejects it everywhere, dependencies included, so
+"settle which side" resolves to legacy's. The blanket rule costs 75 named
+slice/map types in `src/` outside `src/runtime` and 16 in the app repos, and 63
+of the 75 and 8 of the 16 declare methods, which `[]T directly` cannot carry:
+`nostr.Tag`/`Tags` (8 methods, 68 references in 9 files), `normalize.Reason`,
+`mls.ratchetTree` (25 methods), `mls.secretTree`, `math/big.BigInt` and the
+rest all dissolve into free functions. The app-repo half is in flight; stage4's
+implementation of both rules and the stdlib's 75 are the stages after it.
