@@ -179,6 +179,72 @@ func (e *irEmitter) typeIDHashI64(t Type) (s string) {
 	return e.typeIDHash(t)
 }
 
+// builtinStringerTypes returns the concrete builtin types whose String()
+// body the runtime provides: every predeclared basic kind, plus the universe
+// named types byte, rune and uintptr.
+func builtinStringerTypes() (ts []Type) {
+	ts = []Type{
+		Typ[Bool],
+		Typ[Int8], Typ[Int16], Typ[Int32], Typ[Int64],
+		Typ[Uint8], Typ[Uint16], Typ[Uint32], Typ[Uint64],
+		Typ[Float32], Typ[Float64],
+		Typ[TCString],
+	}
+	if Universe == nil {
+		return ts
+	}
+	// byte and rune are named aliases of uint8 and int32; uintptr is a named
+	// type over the pointer-sized integer. See builtinAliasName.
+	for _, n := range []string{"byte", "rune", "uintptr"} {
+		obj := Universe.Lookup(n)
+		if obj == nil {
+			continue
+		}
+		tn, ok := obj.(*TypeName)
+		if !ok || tn.Typ == nil {
+			continue
+		}
+		ts = mxutil.Ensure(ts, 1)
+		push(ts, tn.Typ)
+	}
+	return ts
+}
+
+// builtinAliasName returns the name the runtime declares String() under. In
+// Go (and therefore in the legacy compiler's go/types) byte and rune are
+// aliases of uint8 and int32, so the runtime declares only the underlying
+// methods; stage4 models them as named types over the same kinds and maps the
+// name here.
+func builtinAliasName(name string) (s string) {
+	switch name {
+	case "byte":
+		return "uint8"
+	case "rune":
+		return "int32"
+	}
+	return name
+}
+
+// builtinStringSig returns the String() signature declared on a builtin
+// type's method set, or nil when it declares none.
+func builtinStringSig(t Type) (s *Signature) {
+	switch tt := t.(type) {
+	case *Basic:
+		for i := int32(0); i < tt.NumMethods(); i++ {
+			if m := tt.Method(i); m.Name == "String" {
+				return m.Signature()
+			}
+		}
+	case *Named:
+		for i := int32(0); i < tt.NumMethods(); i++ {
+			if m := tt.Method(i); m.Name == "String" {
+				return m.Signature()
+			}
+		}
+	}
+	return nil
+}
+
 func normalizePkgPath(pkgPath string) (s string) {
 	// Strip module prefix for consistent type IDs.
 	// The module root is git.smesh.lol/moxie/ - strip it so paths
@@ -566,11 +632,34 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 			}
 		}
 	}
-	// The basic types' String() methods (runtime/stringer.mx) are compiled
-	// into the runtime, not the package members. Register them as external
-	// impls so a boxed basic (e.g. fmt.Stringer wrapping a string) dispatches
-	// correctly. The identity thunks live in runtime.bc.
-	if methodName == "String" {
+	// The builtin types' String() methods (runtime/stringer.mx) are compiled
+	// into the runtime, not into the package being built. Register each
+	// concrete builtin against its real runtime symbol so a boxed builtin
+	// dispatches to the method that formats it.
+	if methodName == "String" && buildTagTrue("moxie.stringer") {
+		btypes := builtinStringerTypes()
+		for bi := 0; bi < len(btypes); bi++ {
+			bt := btypes[bi]
+			name := typeDeclName(bt)
+			sig := builtinStringSig(bt)
+			if name == "" || sig == nil {
+				continue
+			}
+			sym := "runtime.(*" | builtinAliasName(name) | ").String"
+			e.collectTypeDesc(bt)
+			// A value-receiver method is in both T's and *T's method set.
+			impls = mxutil.Ensure(impls, 1)
+			push(impls, ifaceImpl{recvType: bt, extSymbol: sym, extSig: sig})
+			impls = mxutil.Ensure(impls, 1)
+			push(impls, ifaceImpl{recvType: NewPointer(bt), extSymbol: sym, extSig: sig})
+		}
+	}
+	// Without the tag (the wasm target) the runtime carries no builtin
+	// String() bodies, and every module defines an identity thunk for each
+	// builtin instead (emitBasicIdentities). The thunk only means anything
+	// for []byte, which String()s to itself; the rest exist so the dispatch
+	// table has an arm for every builtin kind a program can box.
+	if methodName == "String" && !buildTagTrue("moxie.stringer") {
 		basicImpls := [][]string{
 			{"bool", "basic:bool.String$identity"},
 			{"int8", "basic:int8.String$identity"},
@@ -726,7 +815,7 @@ type ifaceImpl struct {
 	extSymbol  string
 	extTypeID  string
 	extSig     *Signature
-	strong     bool // symbol always defined in the linked runtime; no null check
+	strong     bool // the symbol is defined (internal) in every module; no declaration, no null check
 }
 
 func (e *irEmitter) implFuncSym(impl ifaceImpl) (s string) {
@@ -751,7 +840,8 @@ func (e *irEmitter) declareExtInvoke(impl ifaceImpl, inv *SSAInvoke) {
 		return
 	}
 	// The basic String() identity wrappers are defined (internal) by
-	// emitBasicIdentities in every module; no extern declaration needed.
+	// emitBasicIdentities in every module; declaring them extern_weak here
+	// would collide with that definition.
 	if impl.strong {
 		return
 	}

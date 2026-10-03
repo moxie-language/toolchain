@@ -2044,7 +2044,6 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 	// legal while `var x int32 = "s"` is not. Compare kind classes for those
 	// instead: only a mismatch between two known classes is reported.
 	_, isConst := val.(*SSAConst)
-	_, isNamedConst := val.(*SSANamedConst)
 	untypedInvolved := false
 	if bv, isB := SafeUnderlying(V).(*Basic); isB && bv.Info&IsUntyped != 0 {
 		untypedInvolved = true
@@ -2052,7 +2051,7 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 	if bt, isB := SafeUnderlying(T).(*Basic); isB && bt.Info&IsUntyped != 0 {
 		untypedInvolved = true
 	}
-	if isConst || isNamedConst || untypedInvolved {
+	if isConst || untypedInvolved {
 		// Only a mismatch between two KNOWN classes is reported: an interface
 		// target (fmt.Stringer) or a container has no class here, and
 		// `fmt.Println("x")` against a ...fmt.Stringer parameter is legal.
@@ -7265,6 +7264,81 @@ func (fb *ssaFuncBuilder) derefValueRecv(fn *SSAFunction, recv SSAValue) (s SSAV
 	return alloc
 }
 
+// builtinMethod finds a method in a builtin type's method set. The
+// universe (pkg/types) declares String() on every builtin and on the
+// universe aliases byte, rune and uintptr; the bodies live in
+// src/runtime/stringer.mx.
+func builtinMethod(t Type, name string) (m *TCFunc) {
+	switch tt := t.(type) {
+	case *Basic:
+		for i := int32(0); i < tt.NumMethods(); i++ {
+			if mm := tt.Method(i); mm.Name == name {
+				return mm
+			}
+		}
+	case *Named:
+		for i := int32(0); i < tt.NumMethods(); i++ {
+			if mm := tt.Method(i); mm.Name == name {
+				return mm
+			}
+		}
+	}
+	return nil
+}
+
+func typeDeclName(t Type) (s string) {
+	switch tt := t.(type) {
+	case *Basic:
+		return tt.Name
+	case *Named:
+		if tt.Obj != nil {
+			return tt.Obj.Name
+		}
+	}
+	return ""
+}
+
+// resolveBuiltinMethod resolves a call to a method whose body the runtime
+// provides. Inside the runtime package the call is the local definition;
+// anywhere else it is the ordinary ctx-carrying cross-package call. Moxie's
+// receiver ABI is a pointer even for a value receiver, so the caller
+// materialises the value and passes its address.
+func (fb *ssaFuncBuilder) resolveBuiltinMethod(t Type, typeName string, sel *syntax.SelectorExpr, recv SSAValue) (rfn *SSAFunction, rrecv SSAValue, ok bool) {
+	if !buildTagTrue("moxie.stringer") {
+		// Without the tag the runtime carries no builtin String() bodies,
+		// so there is no symbol to resolve to.
+		return nil, nil, false
+	}
+	if typeName == "" || recv == nil || recv.SSAType() == nil {
+		return nil, nil, false
+	}
+	m := builtinMethod(t, sel.Sel.Value)
+	if m == nil || m.Signature() == nil {
+		return nil, nil, false
+	}
+	target := recv
+	if _, isP := SafeUnderlying(recv.SSAType()).(*Pointer); !isP {
+		alloc := fb.emitAlloc(recv.SSAType(), 0)
+		fb.emitStore(alloc, recv)
+		target = alloc
+	}
+	// The runtime declares the body under the underlying type's name (byte
+	// and rune are aliases of uint8 and int32 in the legacy compiler).
+	mangled := "(*" | builtinAliasName(typeName) | ")." | sel.Sel.Value
+	if fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil && fb.fn.Pkg.Pkg.Path == "runtime" {
+		// The runtime defines this method: reference the symbol without
+		// re-registering the member that holds the definition.
+		fn := &SSAFunction{name: mangled, Signature: m.Signature(), Pkg: fb.fn.Pkg, Prog: fb.fn.Prog}
+		return fn, target, true
+	}
+	rtPkg := cctx.universe.Registry["runtime"]
+	if rtPkg == nil {
+		return nil, nil, false
+	}
+	impPkg := fb.ensureImportedSSAPackage(rtPkg)
+	return impPkg.ExternalFunc(mangled, m.Signature()), target, true
+}
+
 func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, recv SSAValue) (rfn *SSAFunction, rrecv SSAValue) {
 	typ := recv.SSAType()
 	if typ == nil {
@@ -7280,19 +7354,19 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 			return nil, nil
 		}
 	}
-	// The basic types' String() is an interface-only identity thunk
-	// (emitBasicIdentities): there is no runtime.<T>.String symbol to call,
-	// and a basic type's method set has no String in legacy either, so a
-	// direct call falls through to the undefined-field error both compilers
-	// report. Boxing through an interface (fmt.Println, t.Fatalf) is the
-	// supported path.
+	// A builtin receiver's methods are the universe's synthetic set (String
+	// on every builtin); the runtime provides the bodies. Resolve through
+	// that set, exactly as a Named type resolves its own methods.
 	if basic, ok38 := typ.(*Basic); ok38 {
 		resolved := UntypedToTyped(basic)
 		if resolved == nil {
-			return nil, nil
+			resolved = basic
 		}
 		switch rt := resolved.(type) {
 		case *Basic:
+			if bfn, brc, okb := fb.resolveBuiltinMethod(rt, rt.Name, sel, recv); okb {
+				return bfn, brc
+			}
 			return nil, nil
 		case *Named:
 			typ = rt
@@ -7310,6 +7384,13 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 	}
 	if typeName == "" {
 		return nil, nil
+	}
+	// byte, rune and uintptr are universe types with no package: their
+	// String() bodies live in the runtime exactly like the builtins'.
+	if named.Obj != nil && named.Obj.Pkg == nil {
+		if bfn, brc, okb := fb.resolveBuiltinMethod(named, typeName, sel, recv); okb {
+			return bfn, brc
+		}
 	}
 	resolveNamed := named
 	// Try registry for types imported from other packages,
