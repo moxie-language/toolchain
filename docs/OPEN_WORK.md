@@ -1052,3 +1052,52 @@ the older repos' module files, and the two decisions above - plus the legacy
 language-rule gaps, which are now the only thing standing between legacy and an
 end-to-end build of these repos: `pkg/core/tags.mx` is rejected for a named
 slice type (`Tag`, `Tags`) that stage4 accepts.
+
+### The relay now enforces the vocabulary, and an `event.Sign` segfault fell out
+
+Landed in morly, on top of the counted-kind fix:
+
+- `pkg/relay/protowire` binds `event.E` to the vocabulary: `TagsOf` copies the
+  tag list into `[][]string` with exact presizing, `ValidateEvent` dispatches
+  every kind that has a parser, and `AssetOf` answers the asset address a
+  blob-bearing event belongs to (first `a` for a track or delivery receipt, the
+  asset inside the `d` for an access filter).
+- `ingestStageB` step 2b validates Musiquay payloads after the limit checks and
+  before the ACL, rejecting with `invalid: <reason>`. The gate is
+  `protocol.IsMusiquay`, deliberately: the kinds the vocabulary reuses from a
+  NIP (comment 1111, calendar 31923, listing 30402) are shared with clients
+  that never heard of this protocol, so Musiquay's stricter parser would turn
+  their valid traffic away.
+- `store.Engine.ResolveBlob(xHex []byte)` answers the sha256 → asset lookup on
+  the existing single-letter `tc` index - newest first, serials deduped, no new
+  index family and no on-disk change, so it survives the WAL rebuild.
+- Tests: protowire 5, store 24, pipeline 30, `make build` links.
+
+Two things the work exposed:
+
+**A segfault in `event.Sign` when the tags come from the vocabulary.**
+Signing an event whose tag rows were produced by `protocol.Track.Tags()` and
+re-wrapped into a `*tag.S` - shallow copy and byte-deep copy both - faults
+inside `event.Sign`, while the identical wrapping of literal rows signs fine and
+`ValidateEvent` reads `Track.Tags()` output without trouble. Only the test path
+hit it (a decoded wire event is a different construction), and the pipeline
+fixtures were built with the existing `tTag` helper to get past it. Not
+explained yet; it is an arena/relocation question, not a protocol one, and it
+is the kind of thing the interior-pointer rule predicts (a pointer taken into a
+struct that is then copied).
+
+**The validators are much stricter than a tag-shaped fixture.** `Track.Validate`
+requires a non-empty `d`; `DeliveryReceipt` requires a well-formed
+`a`/`p`/`x`/`mode`/`amount`; `HostAggregate` and `PublisherRollup` require an
+asset and a period. The counted-kind test had to grow real payloads for its
+receipts, aggregates and rollups - the assertions did not change, the fixtures
+became things the protocol admits. Anyone publishing a slightly out-of-spec
+payload will now be rejected with a reason, which is the point, but it makes the
+protocol's `Validate` the contract for anything a host sends.
+
+Also unanswered by the vocabulary: `ParseStall` and `ParseProduct` take content
+alone, and there is no parser at all for 31922, 31924, 30403, 30315, 24242,
+10063, 9734, 9735, 13 or 1059, so `ValidateEvent` correctly returns nil for
+them. `ParseCalendarEvent`'s doc says 31922 and 31923 share a struct but only
+31923 is wired, and the same split exists between 30402 and 30403; neither was
+guessed at.
