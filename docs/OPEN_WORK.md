@@ -86,7 +86,10 @@ Working layout that matters: the checkouts live at
 5. **morly: `TestCrawlRelayAndPublish` SIGSEGVs.** Pre-existing (reproduced with
    the named-return migration stashed and the rule disabled), so it is a runtime
    bug in the crawler path, not a language rule. morly's unit suite cannot go
-   green until it is found.
+   green until it is found. Two blockers in front of it are gone: `chan T{:n}`
+   did not lower (see the finding), and `main.mx` had one `)` too many in the
+   version-JSON response, so the package did not parse at all. morly builds now
+   and the unit suite runs up to this test, which panics at 0x388a1d.
 6. **Remove modules** (design below). Delete `moxie.mod` handling from both
    compilers, resolve imports only through `MOXIEPATH` + `$MOXIEROOT/src`
    (+ vendor), and move version pinning into a single mod-style **`MANIFEST`**
@@ -97,6 +100,24 @@ Working layout that matters: the checkouts live at
    (waiting) lock instead of dying on contention. It can land before the
    removal, since it is just today's auto-fetch with a ref argument and an
    exposed front door.
+
+   **Landed so far (stage4):** `moxie get` (with `-pin`, `-worktree`,
+   `-offline`, `-force`, `-remote`, `-protocol`, and `moxie get` with no
+   arguments to materialise every MANIFEST entry) and MANIFEST-aware *build*
+   resolution. The build root's `MANIFEST` is read once per process (`$MOXIEROOT`
+   is the fallback, and only the build root's file counts, so a nested MANIFEST
+   cannot shadow it); a pinned repo is materialised with `git worktree add` at
+   `$MOXIEPATH/.refs/<repo>/<ref>` and the build reads that tree, leaving the
+   checkout a developer is editing untouched. An unpinned repo still resolves to
+   its checkout, fetched on demand. A pin whose ref cannot be materialised is
+   fatal - silently building the checkout instead would compile a version nobody
+   asked for. Verified with a local repo carrying tags v1/v2 and a MANIFEST
+   pinning v2: the build read v2 from the worktree and the checkout stayed at v1
+   on a clean tree; a bogus ref fails loud; no MANIFEST uses the checkout.
+
+   **Still to do:** remove `moxie.mod` resolution from stage4 and legacy, delete
+   the files and the Makefile `replace`/`require` lines, and key the build cache
+   on repo + resolved commit.
 7. **Make the model rules universal; make the conflict rule strict.** The
    immutability guarantee is a model invariant, not a style preference, so it
    belongs on the package root everywhere — with the **runtime/unsafe carve-out
@@ -248,6 +269,22 @@ Latent issues found on the way (not fixed here):
 - Calling `String()` on an untyped constant receiver (`"lit".String()`)
   resolves in stage4 (via `UntypedToTyped`) but not in legacy, which has no
   such conversion for a selector receiver.
+
+### `chan T{:n}` did not lower, and the parse position is off by one
+
+`rewriteChanMakeLiterals` turns `chan T{...}` into `__slicealloc(chan T, ...)`
+before parsing. A capacity-only literal (`chan struct{}{:64}`) carried its colon
+into the argument list, producing `__slicealloc(chan struct{}, :64)` - a syntax
+error. A channel has no length separate from its capacity, so the leading colon
+is simply dropped in both compilers (`ir_rewrite.mx` stage4,
+`legacy/mxtext/rewrite.go`). morly's relay is the first code to use the form.
+
+While chasing it: the line number a stage4 parse error names is **one behind**
+the real line for a single-file package (`main.mx:104:82` for an error on 105,
+whose length is 83 - the column is right, the line is not). The column is what
+pinpoints the character, so this is a reporting defect in the line remap
+(`concatLineToFile`/`concatSourceMap`), not a parse defect. The same off-by-one
+made the morly diagnosis take longer than the one-character fix did.
 
 ### Legacy vs stage4: the same source compiles as two dialects
 

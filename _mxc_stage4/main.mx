@@ -20,6 +20,14 @@ type buildState struct {
 	buildID         string
 	globalModPrefix string
 	globalModDir    string
+	// manifestPins is the build root's MANIFEST: repo -> ref. A pinned repo
+	// resolves to a worktree under $MOXIEPATH/.refs/<repo>/<ref>; a repo with
+	// no entry resolves to its checkout, which is the co-development path.
+	manifestPins map[string]string
+	manifestDir  string
+	// manifestCommits memoises the commit each pin resolved to, so the build
+	// cache keys on a commit rather than a tag that can move.
+	manifestCommits map[string]string
 	// rootModPrefix is the module the TARGET lives in ("" when it lives in no
 	// module). globalModPrefix is where imports resolve from and falls back to
 	// MOXIEROOT for out-of-tree targets; restriction gating must not inherit
@@ -613,6 +621,7 @@ func isDirPath(pkgPath string) (ok bool) {
 // "undefined: mxutil" on some unrelated package. Every command that resolves
 // packages must call this after computing root.
 func ensureModuleRoot(root string) {
+	loadManifest(root)
 	if bst.globalModPrefix != "" {
 		return
 	}
@@ -1030,8 +1039,15 @@ func readManifest() (entries []manifestEntry) {
 	if !ok {
 		return entries
 	}
+	return parseManifestText(string(data))
+}
+
+// parseManifestText parses a MANIFEST body: a `require ( repo ref )` block and
+// single `require repo ref` lines. A line is a pin, nothing more: no module
+// graph, no version solving, no checksums.
+func parseManifestText(data string) (entries []manifestEntry) {
 	inBlock := false
-	for _, raw := range mxutil.SplitLines(string(data)) {
+	for _, raw := range mxutil.SplitLines(data) {
 		line := mxutil.TrimSpace(raw)
 		if line == "" || mxutil.HasPrefix(line, "//") || mxutil.HasPrefix(line, "#") {
 			continue
@@ -1109,6 +1125,109 @@ func waitRepoLock(mpath, repo string) {
 			fatal("repo locked for over three minutes: " | repo)
 		}
 	}
+}
+
+// loadManifest reads the build root's MANIFEST once per process. Only the
+// build root's file is read - a nested MANIFEST does not shadow it, which was
+// moxie.mod's failure mode - with $MOXIEROOT's as the fallback so a build
+// staged outside the tree still sees the pins. No MANIFEST at all is not an
+// error: every repo then resolves to whatever is checked out.
+func loadManifest(root string) {
+	if root != "" && root == bst.manifestDir {
+		return
+	}
+	// The build root is the directory the target lives in; a MANIFEST there
+	// is the one that counts. A build of the toolchain has none there, so
+	// $MOXIEROOT's is the fallback.
+	if root != "" {
+		if data, ok := mxutil.ReadFile(mxutil.JoinPath(root, "MANIFEST")); ok {
+			bst.manifestDir = root
+			bst.manifestPins = map[string]string{}
+			for _, e := range parseManifestText(string(data)) {
+				bst.manifestPins[e.repo] = e.ref
+			}
+			return
+		}
+	}
+	if bst.manifestPins != nil {
+		return
+	}
+	bst.manifestPins = map[string]string{}
+	if rt := getenv("MOXIEROOT"); rt != "" && rt != root {
+		data, ok := mxutil.ReadFile(mxutil.JoinPath(rt, "MANIFEST"))
+		if ok {
+			bst.manifestDir = rt
+			for _, e := range parseManifestText(string(data)) {
+				bst.manifestPins[e.repo] = e.ref
+			}
+		}
+	}
+}
+
+// manifestRef returns the ref MANIFEST pins a repository to, or "".
+func manifestRef(repo string) (ref string) {
+	if bst.manifestPins == nil {
+		return ""
+	}
+	return bst.manifestPins[repo]
+}
+
+// manifestCommit returns the commit a pinned repository resolved to. The build
+// cache keys on this, not on the tag, because a tag can be moved.
+func manifestCommit(repo string) (c string) {
+	if bst.manifestCommits == nil {
+		return ""
+	}
+	return bst.manifestCommits[repo]
+}
+
+// resolvePinnedRepo materialises a pinned repository and returns the directory
+// the import path resolves to inside that ref. A pin that cannot be
+// materialised is fatal: silently building the checkout instead would compile
+// a version nobody asked for.
+func resolvePinnedRepo(pkgPath, repo, ref string) (dir string) {
+	mpath := getMoxiePath()
+	waitRepoLock(mpath, repo)
+	if ensureCheckout(mpath, repo, "", "", false) == "" {
+		releaseRepoLock(mpath, repo)
+		fatal("MANIFEST: cannot fetch " | repo)
+	}
+	wt := materialiseRef(mpath, repo, ref, false)
+	if wt == "" {
+		releaseRepoLock(mpath, repo)
+		fatal("MANIFEST: " | repo | " has no ref " | ref)
+	}
+	if bst.manifestCommits == nil {
+		bst.manifestCommits = map[string]string{}
+	}
+	bst.manifestCommits[repo] = gitCapture([]string{"-C", wt, "rev-parse", "HEAD"}, mxutil.JoinPath(mpath, "cache/pin"))
+	releaseRepoLock(mpath, repo)
+	if len(pkgPath) <= len(repo) {
+		return wt
+	}
+	return mxutil.JoinPath(wt, pkgPath[len(repo)+1:])
+}
+
+// resolveRemotePkg resolves a remote import path to a directory. A repo pinned
+// in the build root's MANIFEST is materialised as a worktree at
+// $MOXIEPATH/.refs/<repo>/<ref>, so the build reads exactly that commit and
+// never mutates the checkout a developer is editing. An unpinned repo uses the
+// checkout itself, fetching it when absent.
+func resolveRemotePkg(pkgPath string) (dir string) {
+	repo := repoRootOf(pkgPath)
+	ref := manifestRef(repo)
+	if ref != "" {
+		dir = resolvePinnedRepo(pkgPath, repo, ref)
+		if len(listFiles(dir, ".mx")) > 0 {
+			return dir
+		}
+		fatal("MANIFEST: " | repo | " " | ref | " has no package " | pkgPath)
+	}
+	fetched := autoFetchRepo(pkgPath, "")
+	if fetched != "" && len(listFiles(fetched, ".mx")) > 0 {
+		return fetched
+	}
+	return ""
 }
 
 // gitCapture runs git and returns its trimmed stdout, or "" when it fails.
@@ -2845,6 +2964,12 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		rel := pkgPath[len(bst.globalModPrefix)+1:]
 		dir = mxutil.JoinPath(bst.globalModDir, rel)
 	}
+	if dir == "" && isRemotePath(pkgPath) {
+		// A remote import path belongs to a repository under $MOXIEPATH. The
+		// MANIFEST decides which ref: a pinned repo is materialised as a
+		// worktree so the build never reads (or mutates) the checkout.
+		dir = resolveRemotePkg(pkgPath)
+	}
 	if dir == "" {
 		candidate := mxutil.JoinPath(getMoxiePath(), pkgPath)
 		mxF := listFiles(candidate, ".mx")
@@ -2875,23 +3000,7 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		}
 	}
 	if dir == "" && isRemotePath(pkgPath) {
-		ver := ""
-		if bst.globalModDir != "" {
-			_, reqs, _ := parseModRequires(bst.globalModDir)
-			for _, r := range reqs {
-				if r.path == pkgPath {
-					ver = r.version
-					break
-				}
-			}
-		}
-		fetched := autoFetchRepo(pkgPath, ver)
-		if fetched != "" {
-			mxF := listFiles(fetched, ".mx")
-			if len(mxF) > 0 {
-				dir = fetched
-			}
-		}
+		dir = resolveRemotePkg(pkgPath)
 	}
 	if dir != "" && dir != pkgPath {
 		mergeModReplaces(dir)
@@ -2994,7 +3103,10 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		mxutil.WriteStr(2, "]\n")
 	}
 	version := ""
-	if isRemotePath(pkgPath) && bst.globalModDir != "" {
+	if isRemotePath(pkgPath) {
+		version = manifestCommit(repoRootOf(pkgPath))
+	}
+	if version == "" && isRemotePath(pkgPath) && bst.globalModDir != "" {
 		_, reqs, _ := parseModRequires(bst.globalModDir)
 		for _, r := range reqs {
 			if r.path == pkgPath || mxutil.HasPrefix(pkgPath, r.path|"/") {
