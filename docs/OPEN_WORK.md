@@ -148,6 +148,58 @@ Working layout that matters: the checkouts live at
 
 ## Findings
 
+### Builtin Stringer methods do not work in either compiler (open)
+
+`n.String()` on an `int32` (or any builtin) is undefined in **both** compilers
+for an ordinary program:
+
+```
+; String undefined (type int32 has no field or method String)
+```
+
+`src/runtime/stringer.mx` defines the methods for every builtin (bool, int8/16/
+32/64, uint8/16/32/64, uintptr, float32/64, string, byte, rune), value
+receivers, behind `//:build moxie.stringer`. Three separate gaps keep them from
+being usable, and each is a *workaround* that hides the next:
+
+1. **stage4 never attaches them.** `pkg/types.Basic` already has
+   `Methods`/`AddMethod`/`NumMethods`/`Method`, and `findMethod` already looks at
+   them, but nothing ever calls `AddMethod` on a Basic (`registerMethod` only
+   `SetMember`s the mangled name), and `resolveMethodCallWithRecv` returns nil
+   for a `*Basic` with a comment saying a direct call is unsupported and
+   "boxing through an interface (fmt.Println, t.Fatalf) is the supported path".
+2. **legacy suppresses the type error.** `filterImpossibleAssertErrors`
+   (`legacy/loader/mxrewrite.go:117`) deletes every go/types "missing method"
+   error, so interface satisfaction by a basic type is accepted without the
+   method existing. Legacy's tag list (`compileopts/config.go:57`) does not
+   include `moxie.stringer`, so the file is not even compiled there.
+3. **The codegen path for interface boxing is a thunk, not the method.**
+   `emitBasicIdentities` (`ir_descriptors.mx:532`) defines
+   `basic:<T>.String$identity` and the interface path calls that, so printing a
+   basic works while calling `.String()` on it does not.
+
+The fix, in order (no error filtering, no caller workarounds):
+
+- stage4: `registerMethod` attaches a builtin-receiver method to the universe
+  `*Basic`; `resolveMethodCallWithRecv` resolves `*Basic` through that method
+  set to a real call, the same way it resolves a `Named` (same package via
+  `Members`, imported via `ensureImportedSSAPackage` + `ExternalFunc`);
+- stage4: carry builtin methods through the `.mxh` (writer and reader) so a
+  package that never compiles `runtime` still sees them;
+- legacy: add `moxie.stringer` to `BuildTags()` for non-wasm targets (stage4's
+  non-wasm tag set includes it and its wasm `forbidden` list excludes it);
+- legacy: patch the vendored `go/types` so a method may be declared on a
+  non-local basic type and is recorded in that type's method set, then delete
+  `filterImpossibleAssertErrors` - with the methods real, nothing needs
+  filtering;
+- verify with one probe covering every builtin (`bool`, all ints, all uints,
+  `uintptr`, `float32/64`, `string`, `byte`, `rune`) on both compilers, plus
+  `fmt.Println` and a `fmt.Stringer` assertion, plus a wasm build where the tag
+  is excluded.
+
+Until then every `x.String()` on a builtin is a compile error and the compiler's
+own code avoids it (e.g. `simpleItoa` in `main.mx`).
+
 ### Legacy vs stage4: the same source compiles as two dialects
 
 Same program, ordinary user module (`example.com/app`), built with both.
