@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"runtime"
@@ -34,7 +33,6 @@ type buildState struct {
 	// that fallback or an out-of-tree user package looks like compiler code.
 	rootModPrefix  string
 
-	globalReplaces  map[string]string
 	buildJobs       int32
 	tlsFailed       bool // TLS probe failed: globals shared, workers forced serial
 	quietDiscover   bool
@@ -570,38 +568,8 @@ func moxieCacheDir() (s string) {
 }
 
 
-func parseReplaceLine(line string, baseDir string) (from string, to string, ok bool) {
-	arrow := int32(-1)
-	for k := int32(0); k < int32(len(line))-1; k++ {
-		if line[k] == '=' && line[k+1] == '>' {
-			arrow = k
-			break
-		}
-	}
-	if arrow < 0 {
-		return "", "", false
-	}
-	from := mxutil.TrimSpace(line[:arrow])
-	to := mxutil.TrimSpace(line[arrow+2:])
-	for fi := int32(0); fi < int32(len(from)); fi++ {
-		if from[fi] == ' ' {
-			from = from[:fi]
-			break
-		}
-	}
-	// An absolute target is already the answer; joining it onto baseDir turned
-	// "/srv/nostr" into "<baseDir>/srv/nostr" and the replace silently resolved
-	// to nothing.
-	if mxutil.HasPrefix(to, "/") {
-		to = cleanPath(to)
-	} else if mxutil.HasPrefix(to, "./") || mxutil.HasPrefix(to, "../") {
-		to = cleanPath(mxutil.JoinPath(baseDir, to))
-	}
-	return from, to, true
-}
-
-// isDirPath reports whether pkgPath names a directory on disk (and so must
-// be resolved through the module root) rather than an import path.
+// isDirPath reports whether a target names a directory on disk (./pkg, an
+// absolute path, or a bare relative dir like pkg) rather than an import path.
 func isDirPath(pkgPath string) (ok bool) {
 	if pkgPath == "." || pkgPath == ".." ||
 		mxutil.HasPrefix(pkgPath, "./") || mxutil.HasPrefix(pkgPath, "../") ||
@@ -614,48 +582,59 @@ func isDirPath(pkgPath string) (ok bool) {
 	return len(listFiles(pkgPath, ".mx")) > 0
 }
 
-// ensureModuleRoot resolves the module root once per process, before any
-// package discovery. Without it globalModPrefix/globalModDir stay empty and a
-// module-internal import (git.smesh.lol/moxie/pkg/mxutil, reached from the
-// runtime's errors dependency) cannot be resolved, so the build dies with
-// "undefined: mxutil" on some unrelated package. Every command that resolves
-// packages must call this after computing root.
-func ensureModuleRoot(root string) {
-	loadManifest(root)
+// ensureModuleRoot settles the one import prefix the compiler maps to its own
+// tree, once per process and before any package discovery. There is no module
+// file: the toolchain's prefix resolves to MOXIEROOT, and every other import
+// path resolves through $MOXIEPATH (a MANIFEST-pinned ref, or the checkout) or
+// through $MOXIEROOT/src (+ vendor) for the standard library.
+func ensureModuleRoot(target string) {
+	loadManifest(target)
 	if bst.globalModPrefix != "" {
 		return
 	}
+	root := getenv("MOXIEROOT")
 	if root == "" {
 		root = "."
 	}
-	prefix, dir := findModuleRoot(root)
-	bst.rootModPrefix = prefix
-	if prefix == "" {
-		// The target may live outside the module (the test harness stages
-		// builds under /tmp, so no moxie.mod is reachable by walking up).
-		// MOXIEROOT names the module root explicitly; without this a
-		// module-internal import cannot be resolved from the module prefix
-		// and would be looked up as a filesystem path instead.
-		if rt := getenv("MOXIEROOT"); rt != "" {
-			if data, ok := mxutil.ReadFile(mxutil.JoinPath(rt, "moxie.mod")); ok {
-				if mn := parseModuleName(string(data)); mn != "" {
-					prefix, dir = mn, rt
-				}
-			}
-		}
-	}
-	bst.globalModPrefix, bst.globalModDir = prefix, dir
+	bst.globalModPrefix = "git.smesh.lol/moxie"
+	bst.globalModDir = root
+	// rootModPrefix is the repository the TARGET lives in, which the language
+	// restrictions use to tell a program apart from the toolchain. It is not
+	// the toolchain prefix unless the target really is the toolchain.
+	bst.rootModPrefix = targetImportPath(root, target)
 }
 
-// parseModuleName returns the module path declared in moxie.mod content.
-func parseModuleName(data string) (name string) {
-	for _, line := range mxutil.SplitLines(data) {
-		line = mxutil.TrimSpace(line)
-		if mxutil.HasPrefix(line, "module ") {
-			return mxutil.TrimSpace(line[7:])
+// targetImportPath returns the repository (module) import path a build target
+// lives in: the toolchain's prefix inside MOXIEROOT, the repository path under
+// $MOXIEPATH otherwise, and "" when it is neither - a tree outside both roots
+// has no module, and its packages are user code.
+func targetImportPath(root, target string) (p string) {
+	abs := target
+	if !mxutil.HasPrefix(abs, "/") {
+		wd, err := os.Getwd()
+		if err != nil {
+			return ""
+		}
+		abs = cleanPath(mxutil.JoinPath(wd, abs))
+	}
+	if root != "" {
+		rabs := cleanPath(root)
+		if abs == rabs || mxutil.HasPrefix(abs, rabs|"/") {
+			return "git.smesh.lol/moxie"
 		}
 	}
-	return ""
+	mpath := cleanPath(getMoxiePath())
+	if abs != mpath && !mxutil.HasPrefix(abs, mpath|"/") {
+		return ""
+	}
+	rel := abs[len(mpath):]
+	for len(rel) > 0 && rel[0] == '/' {
+		rel = rel[1:]
+	}
+	if rel == "" {
+		return "git.smesh.lol/moxie"
+	}
+	return repoRootOf(rel)
 }
 
 // runtimeBakePath is where the runtime bitcode bake lives. The bake is
@@ -692,184 +671,6 @@ func ensureRuntimeBake(sysroot, root string) (bc string) {
 	}
 	fatal("runtime bake failed to produce " | bc)
 	return bc
-}
-
-func findModuleRoot(startDir string) (modName string, dir string) {
-	// "" means "the current directory"; walk from "." so that a relative
-	// target like ./pkg still finds the module root next to moxie.mod.
-	dir = startDir
-	if dir == "" {
-		dir = "."
-	}
-	for {
-		data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, "moxie.mod"))
-		if ok {
-			modName = ""
-			bst.globalReplaces = map[string]string{}
-			lines := mxutil.SplitLines(string(data))
-			inReplace := false
-			for _, line := range lines {
-				line = mxutil.TrimSpace(line)
-				if mxutil.HasPrefix(line, "module ") {
-					modName = mxutil.TrimSpace(line[7:])
-					continue
-				}
-				if line == "replace (" {
-					inReplace = true
-					continue
-				}
-				if inReplace {
-					if line == ")" {
-						inReplace = false
-						continue
-					}
-					from, to, ok2 := parseReplaceLine(line, dir)
-					if ok2 {
-						bst.globalReplaces[from] = to
-					}
-					continue
-				}
-				if mxutil.HasPrefix(line, "replace ") {
-					from, to, ok2 := parseReplaceLine(line[8:], dir)
-					if ok2 {
-						bst.globalReplaces[from] = to
-					}
-				}
-			}
-			if modName != "" {
-				return modName, dir
-			}
-		}
-		parent := pathDir(dir)
-		// A relative path bottoms out at "" or "."; that IS the module
-		// root candidate, so try it once and then stop.
-		if parent == "" || parent == "." {
-			if dir == "." {
-				break
-			}
-			dir = "."
-			continue
-		}
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return "", ""
-}
-
-func mergeModReplaces(dir string) {
-	data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, "moxie.mod"))
-	if !ok {
-		return
-	}
-	if bst.globalReplaces == nil {
-		bst.globalReplaces = map[string]string{}
-	}
-	inReplace := false
-	for _, line := range mxutil.SplitLines(string(data)) {
-		line = mxutil.TrimSpace(line)
-		if line == "replace (" {
-			inReplace = true
-			continue
-		}
-		if inReplace {
-			if line == ")" {
-				inReplace = false
-				continue
-			}
-			from, to, ok2 := parseReplaceLine(line, dir)
-			if ok2 {
-				if _, exists := bst.globalReplaces[from]; !exists {
-					bst.globalReplaces[from] = to
-				}
-			}
-			continue
-		}
-		if mxutil.HasPrefix(line, "replace ") {
-			from, to, ok2 := parseReplaceLine(line[8:], dir)
-			if ok2 {
-				if _, exists := bst.globalReplaces[from]; !exists {
-					bst.globalReplaces[from] = to
-				}
-			}
-		}
-	}
-}
-
-type modRequire struct {
-	path    string
-	version string
-}
-
-func parseModRequires(dir string) (modName string, reqs []modRequire, repls map[string]string) {
-	data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, "moxie.mod"))
-	if !ok {
-		return "", nil, nil
-	}
-	modName = ""
-	repls = map[string]string{}
-	inRequire := false
-	inReplace := false
-	for _, line := range mxutil.SplitLines(string(data)) {
-		line = mxutil.TrimSpace(line)
-		if mxutil.HasPrefix(line, "module ") {
-			modName = mxutil.TrimSpace(line[7:])
-			continue
-		}
-		if line == "require (" {
-			inRequire = true
-			continue
-		}
-		if inRequire {
-			if line == ")" {
-				inRequire = false
-				continue
-			}
-			parts := splitBySpace(line)
-			if len(parts) >= 2 {
-				reqs = mxutil.Ensure(reqs, 1)
-				push(reqs, modRequire{path: parts[0], version: parts[1]})
-			} else if len(parts) == 1 {
-				reqs = mxutil.Ensure(reqs, 1)
-				push(reqs, modRequire{path: parts[0], version: ""})
-			}
-			continue
-		}
-		if mxutil.HasPrefix(line, "require ") {
-			parts := splitBySpace(line[8:])
-			if len(parts) >= 2 {
-				reqs = mxutil.Ensure(reqs, 1)
-				push(reqs, modRequire{path: parts[0], version: parts[1]})
-			} else if len(parts) == 1 {
-				reqs = mxutil.Ensure(reqs, 1)
-				push(reqs, modRequire{path: parts[0], version: ""})
-			}
-			continue
-		}
-		if line == "replace (" {
-			inReplace = true
-			continue
-		}
-		if inReplace {
-			if line == ")" {
-				inReplace = false
-				continue
-			}
-			from, to, ok2 := parseReplaceLine(line, dir)
-			if ok2 {
-				repls[from] = to
-			}
-			continue
-		}
-		if mxutil.HasPrefix(line, "replace ") {
-			from, to, ok2 := parseReplaceLine(line[8:], dir)
-			if ok2 {
-				repls[from] = to
-			}
-		}
-	}
-	return modName, reqs, repls
 }
 
 func isRemotePath(path string) (ok bool) {
@@ -1573,6 +1374,47 @@ func currentBranch(dest string) (s string) {
 	return line[len("ref: refs/heads/"):]
 }
 
+// fetchManifestEntries clones (or refreshes) every repository in the build
+// root's MANIFEST.
+func fetchManifestEntries(mpath string) {
+	for _, e := range readManifest() {
+		fetchOneRepo(mpath, e.repo, e.ref)
+	}
+}
+
+// fetchManifestEntriesFrom is fetchManifestEntries for a repository that was
+// just cloned: its own MANIFEST is the dependency list.
+func fetchManifestEntriesFrom(mpath, dir string) {
+	data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, "MANIFEST"))
+	if !ok {
+		return
+	}
+	for _, e := range parseManifestText(string(data)) {
+		fetchOneRepo(mpath, e.repo, e.ref)
+	}
+}
+
+// fetchOneRepo clones the repository when absent, refreshes it otherwise, and
+// materialises the pinned ref so the build can read exactly it.
+func fetchOneRepo(mpath, repo, ref string) {
+	waitRepoLock(mpath, repo)
+	defer releaseRepoLock(mpath, repo)
+	checkout := ensureCheckout(mpath, repo, "", "", false)
+	if checkout == "" {
+		mxutil.WriteStr(2, "  FAIL: cannot fetch " | repo | "\n")
+		return
+	}
+	if ref == "" {
+		mxutil.WriteStr(2, "  " | repo | " (no ref pinned)\n")
+		return
+	}
+	if materialiseRef(mpath, repo, ref, false) == "" {
+		mxutil.WriteStr(2, "  FAIL: " | repo | " has no ref " | ref | "\n")
+		return
+	}
+	mxutil.WriteStr(2, "  " | repo | " @ " | ref | "\n")
+}
+
 func cmdFetch(url string) {
 	mpath := getMoxiePath()
 	mkdirAll(mpath, 0755)
@@ -1610,79 +1452,12 @@ func cmdFetch(url string) {
 		rootDir = dest
 	}
 
-	modName, reqs, repls := parseModRequires(rootDir)
-	if modName == "" {
-		fatal("no moxie.mod in " | rootDir)
-	}
-	if url == "" {
-		mxutil.WriteStr(2, "module: " | modName | "\n")
-	}
-
-	queue := []modRequire{:0:len(reqs)}
-	for _, r := range reqs {
-		if _, ok := repls[r.path]; ok {
-			mxutil.WriteStr(2, "  skip (replaced): " | r.path | "\n")
-			continue
-		}
-		queue = mxutil.Ensure(queue, 1)
-		push(queue, r)
-	}
-
-	seen := map[string]bool{}
-	for len(queue) > 0 {
-		req := queue[0]
-		queue = queue[1:]
-		if seen[req.path] {
-			continue
-		}
-		seen[req.path] = true
-
-		if !acquireRepoLock(mpath, req.path) {
-			mxutil.WriteStr(2, "  locked: " | req.path | " (another build in progress)\n")
-			fatal("repo locked: " | req.path)
-		}
-
-		dest := mxutil.JoinPath(mpath, req.path)
-		gitHead := mxutil.JoinPath(dest, ".git/HEAD")
-		_, exists := mxutil.ReadFile(gitHead)
-
-		if !exists {
-			mkdirAll(pathDir(dest), 0755)
-			cloneURL := "https://" | req.path
-			mxutil.WriteStr(2, "  clone " | req.path | "\n")
-			if run([]string{"git", "clone", cloneURL, dest}) != 0 {
-				releaseRepoLock(mpath, req.path)
-				mxutil.WriteStr(2, "  FAIL: clone " | req.path | "\n")
-				continue
-			}
-		}
-
-		if req.version != "" && req.version != "v0.0.0" {
-			if run([]string{"git", "-C", dest, "checkout", req.version}) != 0 {
-				mxutil.WriteStr(2, "  tag " | req.version | " not found, pulling\n")
-				run([]string{"git", "-C", dest, "pull"})
-				if run([]string{"git", "-C", dest, "checkout", req.version}) != 0 {
-					mxutil.WriteStr(2, "  WARN: " | req.version | " unavailable for " | req.path | "\n")
-				}
-			} else {
-				mxutil.WriteStr(2, "  " | req.path | " @ " | req.version | "\n")
-			}
-		} else if exists {
-			mxutil.WriteStr(2, "  pull " | req.path | "\n")
-			run([]string{"git", "-C", dest, "pull"})
-		} else {
-			mxutil.WriteStr(2, "  fetched " | req.path | "\n")
-		}
-
-		releaseRepoLock(mpath, req.path)
-
-		_, subReqs, _ := parseModRequires(dest)
-		for _, sr := range subReqs {
-			if !seen[sr.path] {
-				queue = mxutil.Ensure(queue, 1)
-				push(queue, sr)
-			}
-		}
+	// Versions live in MANIFEST now: fetching is placing the repositories the
+	// build pins, or - for a URL - the repositories that repository pins.
+	if rootDir == "." {
+		fetchManifestEntries(mpath)
+	} else {
+		fetchManifestEntriesFrom(mpath, rootDir)
 	}
 
 	mxutil.WriteStr(2, "fetch done\n")
@@ -2937,28 +2712,6 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 	var dir string
 	if pkgPath == "." || pkgPath == ".." || mxutil.HasPrefix(pkgPath, "/") || mxutil.HasPrefix(pkgPath, "./") || mxutil.HasPrefix(pkgPath, "../") {
 		dir = pkgPath
-	} else if bst.globalReplaces != nil {
-		if rdir, ok := bst.globalReplaces[pkgPath]; ok {
-			dir = rdir
-		}
-		if dir == "" {
-			for from, to := range bst.globalReplaces {
-				if mxutil.HasPrefix(pkgPath, from|"/") {
-					rel := pkgPath[len(from)+1:]
-					dir = mxutil.JoinPath(to, rel)
-					break
-				}
-			}
-		}
-		if dir != "" && len(listFiles(dir, ".mx")) == 0 {
-			// A replace that resolves to a directory holding no .mx files
-			// yields an empty package, and every symbol imported from it then
-			// reports "undefined: X" at the import site - which reads as a bug
-			// in the importing package. Name the replace instead: a relative
-			// path is written once per manifest and one wrong "../" is easy to
-			// miss.
-			fatal("replace target for " | pkgPath | " holds no .mx files: " | dir)
-		}
 	}
 	if dir == "" && bst.globalModPrefix != "" && pkgPath == bst.globalModPrefix {
 		dir = bst.globalModDir
@@ -3004,9 +2757,6 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		// repo the MANIFEST pins resolves to a worktree of that ref, so the
 		// build never reads (or mutates) the checkout a developer is editing.
 		dir = resolveRemotePkg(pkgPath)
-	}
-	if dir != "" && dir != pkgPath {
-		mergeModReplaces(dir)
 	}
 	if dir == "" {
 		dir = mxutil.JoinPath(root, mxutil.JoinPath("src", pkgPath))
@@ -3108,15 +2858,6 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 	version := ""
 	if isRemotePath(pkgPath) {
 		version = manifestCommit(repoRootOf(pkgPath))
-	}
-	if version == "" && isRemotePath(pkgPath) && bst.globalModDir != "" {
-		_, reqs, _ := parseModRequires(bst.globalModDir)
-		for _, r := range reqs {
-			if r.path == pkgPath || mxutil.HasPrefix(pkgPath, r.path|"/") {
-				version = r.version
-				break
-			}
-		}
 	}
 	return &pkgInfo{
 		path:    pkgPath,
@@ -4489,7 +4230,7 @@ func printHelp() {
 	mxutil.WriteStr(1, "  version: print version information\n")
 	mxutil.WriteStr(1, "  env:     print environment information\n")
 	mxutil.WriteStr(1, "  get:     fetch a repository and materialise a ref (see MANIFEST)\n")
-	mxutil.WriteStr(1, "  fetch:   fetch and cache all dependencies declared in moxie.mod\n")
+	mxutil.WriteStr(1, "  fetch:   clone and materialise the repositories MANIFEST pins\n")
 	mxutil.WriteStr(1, "  cache:   manage the install cache (subcommands: list, clean, warm)\n")
 	mxutil.WriteStr(1, "  update:  rebuild cached packages\n")
 	mxutil.WriteStr(1, "  build-runtime: build the standalone runtime\n")
@@ -4595,11 +4336,13 @@ func listWalk(dir, prefix string) {
 }
 
 func cmdList() {
-	_, modDir := findModuleRoot(".")
-	if modDir == "" {
-		fatal("list: no module file found")
+	// There is no module file to bound the walk: the build root is the
+	// directory the command runs in.
+	dir, err := os.Getwd()
+	if err != nil {
+		fatal("list: cannot determine the current directory")
 	}
-	listWalk(modDir, ".")
+	listWalk(dir, ".")
 }
 
 func printTargets() {
@@ -4607,90 +4350,6 @@ func printTargets() {
 	for _, t := range targets {
 		mxutil.WriteStr(1, t | "\n")
 	}
-}
-
-type vendorHash struct {
-	path string
-	hash string
-}
-
-func vendorCopyTree(src, dst string) (hashes []vendorHash) {
-	mxutil.MkdirAll(dst, 0755)
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return hashes
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if len(name) == 0 || name[0] == '.' || name[0] == '_' {
-			continue
-		}
-		sp := mxutil.JoinPath(src, name)
-		dp := mxutil.JoinPath(dst, name)
-		if e.IsDir() {
-			for _, h := range vendorCopyTree(sp, dp) {
-				hashes = mxutil.Ensure(hashes, 1)
-				push(hashes, h)
-			}
-			continue
-		}
-		data, ok := mxutil.ReadFile(sp)
-		if !ok {
-			continue
-		}
-		mxutil.WriteFile(dp, data, 0644)
-		sum := sha256.Sum256(data)
-		hashes = mxutil.Ensure(hashes, 1)
-		push(hashes, vendorHash{path: dp, hash: "sha256:" | string(hex.EncodeToString(sum[:]))})
-	}
-	return hashes
-}
-
-func cmdVendor() {
-	_, modDir := findModuleRoot(".")
-	if modDir == "" {
-		fatal("vendor: no module file found")
-	}
-	_, reqs, repls := parseModRequires(modDir)
-	if len(reqs) == 0 && len(repls) == 0 {
-		mxutil.WriteStr(1, "no dependencies to vendor\n")
-		return
-	}
-	vendorDir := mxutil.JoinPath(modDir, "vendor")
-	removeAll(vendorDir)
-	mxutil.MkdirAll(vendorDir, 0755)
-	var modulesTxt string
-	var sumLines []string
-	for _, r := range reqs {
-		mod := r.path
-		srcDir := ""
-		if d, ok := repls[mod]; ok {
-			srcDir = d
-		} else {
-			srcDir = mxutil.JoinPath(getMoxiePath(), mod)
-		}
-		if !mxutil.FileExists(srcDir) {
-			fatal("vendor: source not found for " | mod | " at " | srcDir)
-		}
-		hashes := vendorCopyTree(srcDir, mxutil.JoinPath(vendorDir, mod))
-		modulesTxt = modulesTxt | "# " | mod | " " | r.version | "\n## explicit\n"
-		for _, h := range hashes {
-			sumLines = mxutil.Ensure(sumLines, 1)
-			push(sumLines, h.hash | " " | h.path)
-		}
-	}
-	mxutil.WriteFile(mxutil.JoinPath(vendorDir, "modules.txt"), []byte(modulesTxt), 0644)
-	for i := int32(1); i < int32(len(sumLines)); i++ {
-		for j := i; j > 0 && sumLines[j] < sumLines[j-1]; j-- {
-			sumLines[j], sumLines[j-1] = sumLines[j-1], sumLines[j]
-		}
-	}
-	sumContent := ""
-	for _, l := range sumLines {
-		sumContent = sumContent | l | "\n"
-	}
-	mxutil.WriteFile(mxutil.JoinPath(vendorDir, "moxie.sum"), []byte(sumContent), 0644)
-	mxutil.WriteStr(1, "vendored " | simpleItoa(int32(len(reqs))) | " modules into " | vendorDir | "\n")
 }
 
 func hex16(v uint64) (s string) {
@@ -6285,10 +5944,6 @@ func main() {
 		mxutil.WriteStr(2, "cleaning cache: " | cacheRoot | "\n")
 		removeAll(cacheRoot)
 		mxutil.WriteStr(2, "  done\n")
-		return
-	}
-	if cmd == "vendor" {
-		cmdVendor()
 		return
 	}
 	if cmd == "header" {

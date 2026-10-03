@@ -556,24 +556,6 @@ ptr = five,six"
 	rm -rf "$td" "$addir"
 done
 
-# 6s: a replace that points at a directory holding no .mx files must fail with
-# the replace named. Resolving it to an empty package reported every symbol
-# from it as "undefined" at the import site, which reads as a bug in the
-# importing code - a wrong relative target is easy to write and hard to see.
-name="badreplace:stage4"
-td="$(tempdir "badreplace")"; rm -rf "$td"; mkdir -p "$td"
-brdir="$(fixture badreplace)"
-rc=0
-MOXIEROOT="$MOXIEROOT" "$MOXIE" build -o "$td/bin" "$brdir" >"$td/build.log" 2>&1 || rc=$?
-if [ $rc -eq 0 ]; then
-	log_fail "$name" "a replace with no .mx files built successfully"
-elif grep -q "replace target for example.com/gone" "$td/build.log"; then
-	log_pass "$name" "the missing replace target is named"
-else
-	log_fail "$name" "wrong error: $(tail -2 "$td/build.log" | tr '\n' ' ')"
-fi
-rm -rf "$td" "$brdir"
-
 # 6t: a variable declared from an untyped constant takes the constant's default
 # type. Left untyped, `acc := 0` made the shift in `byte((acc >> bits) & 0x1f)`
 # context-dependent, and the conversion retyped it to uint8 - an i8 shift on
