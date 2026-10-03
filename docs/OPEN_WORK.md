@@ -177,11 +177,22 @@ Working layout that matters: the checkouts live at
    (b) forbid **dot imports** (all 20 are the compiler's
    `. "git.smesh.lol/moxie/pkg/types"`; 3087 identifiers to qualify) or, if
    that price is refused, make a dot import's names participate in the conflict
-   check instead of being invisible;
+   check instead of being invisible. **Done, by the second option**: the 20
+   dot imports in `_mxc_stage4/` remain, and a dot import's names now
+   participate in the conflict check - phase6 `dotconflict` requires stage4 to
+   reject a declaration colliding with an imported package name and legacy to
+   reject one "already declared through dot-import of package math";
    (c) make import conflicts hard errors: two imports binding one name, and an
    import colliding with any declaration — currently import-vs-import keeps the
    first binding silently and stage4 dedupes the names so the second is not
-   even seen.
+   even seen. **Done**: phase6 `importconflict` requires stage4 to reject
+   "is imported twice in one file" and legacy "redeclared in this block".
+
+   Both are in the suite today (167/167), so what is left of this item is (a)
+   alone, and (a) needs the decision recorded below: the runtime/unsafe
+   carve-out is fine, but ~77 stdlib sites and 39 app-repo sites become
+   compile errors the moment the `/pkg/` carve-out is deleted, and the app
+   sites are other repositories' working code.
 8. **VS Code / VSCodium: full Moxie language support.** **Done**
    (`editors/vscode/`, installed into ~/.vscode-oss/extensions as
    `mleku.moxie-lang-1.1.0`).
@@ -1026,3 +1037,7 @@ for 3222/32218 - they are private and belong inside NIP-59 wraps.
 should be rejected (the protocol says they are never published as-is); the
 BUD-11 24242 checker versus widening `httpauth`; and hex case, where
 `protocol.IsHex64` is lowercase-only while `blossom.isHex` accepts uppercase.
+
+The protocol's own tests were not in any gate: `musiquay`'s `test-unit` walked
+only `web/`, so the 62 tests beside the vocabulary never ran. The loop now walks
+`pkg` and `web`; `make test-unit` is 81 passed (protocol 62, marmot 18, mls 1).
