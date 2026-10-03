@@ -320,7 +320,7 @@ func LoadLocationFromTZData(name []byte, data []byte) (*Location, error) {
 		if tx[i].when <= sec && (i+1 == len(tx) || sec < tx[i+1].when) {
 			l.cacheStart = tx[i].when
 			l.cacheEnd = omega
-			l.cacheZone = &l.zone[tx[i].index]
+			l.cacheIdx = int32(tx[i].index)
 			if i+1 < len(tx) {
 				l.cacheEnd = tx[i+1].when
 			} else if l.extend != "" {
@@ -331,13 +331,17 @@ func LoadLocationFromTZData(name []byte, data []byte) (*Location, error) {
 					l.cacheEnd = eend
 					// Find the zone that is returned by tzset to avoid allocation if possible.
 					if zoneIdx := findZone(l.zone, zname, zoff, isDST); zoneIdx != -1 {
-						l.cacheZone = &l.zone[zoneIdx]
+						l.cacheIdx = zoneIdx
 					} else {
-						l.cacheZone = &zone{
+						// Keep the synthesized zone itself so the cache
+						// stays an index.
+						l.zone = mxutil.Ensure(l.zone, 1)
+						l.zone = push(l.zone, zone{
 							name:   zname,
 							offset: zoff,
 							isDST:  isDST,
-						}
+						})
+						l.cacheIdx = int32(len(l.zone)) - 1
 					}
 				}
 			}

@@ -12,6 +12,7 @@
 package time
 
 import (
+	"runtime"
 	"syscall"
 )
 
@@ -27,7 +28,19 @@ func _platformZoneSources() [][]byte {
 	}
 }
 
+// initLocal fills the localLoc package global. The Location it loads holds
+// slices allocated in the frame that read the tz file, and localLoc outlives
+// that frame, so the load runs in the root arena: without it the zone data
+// dies at return and the next locabs reads a dangling cacheZone (wrong offset
+// if the memory is still mapped, SIGSEGV once it is not).
 func initLocal() {
+	saved := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
+	initLocalInRoot()
+	runtime.SetCurrentArena(saved)
+}
+
+func initLocalInRoot() {
 	// consult $TZ to find the time zone to use.
 	// no $TZ means use the system default /etc/localtime.
 	// $TZ="" means use UTC.

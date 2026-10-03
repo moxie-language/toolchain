@@ -6,6 +6,7 @@ package time
 
 import (
 	"errors"
+	"runtime"
 	"syscall"
 )
 
@@ -42,7 +43,21 @@ type Location struct {
 	// to lookup.
 	cacheStart int64
 	cacheEnd   int64
-	cacheZone  *zone
+	// cacheIdx is the index of the cached zone in zone, or any out-of-range
+	// value when there is none. It is an index rather than a *zone because a
+	// Location is a value that gets copied - returned from LoadLocation,
+	// assigned into the localLoc global - and an interior pointer into zone
+	// would keep pointing at the source's backing array, which dies with the
+	// source's frame; reading through it then reads dead memory.
+	cacheIdx int32
+}
+
+// cachedZone returns the Location's cached zone, or nil when it has none.
+func (l *Location) cachedZone() (z *zone) {
+	if l.cacheIdx < 0 || l.cacheIdx >= int32(len(l.zone)) {
+		return nil
+	}
+	return &l.zone[l.cacheIdx]
 }
 
 // A zone represents a single time zone such as CET.
@@ -124,14 +139,25 @@ func FixedZone(name []byte, offset int32) *Location {
 	if name == "" && -hoursBeforeUTC <= hour && hour <= +hoursAfterUTC && hour*60*60 == offset {
 		if !unnamedFixedZonesDone {
 			unnamedFixedZonesDone = true
-			unnamedFixedZones = []*Location{:hoursBeforeUTC+1+hoursAfterUTC}
-			for hr := -hoursBeforeUTC; hr <= +hoursAfterUTC; hr++ {
-				unnamedFixedZones[hr+hoursBeforeUTC] = fixedZone("", hr*60*60)
-			}
+			buildUnnamedFixedZones(hoursBeforeUTC, hoursAfterUTC)
 		}
 		return unnamedFixedZones[hour+hoursBeforeUTC]
 	}
 	return fixedZone(name, offset)
+}
+
+// buildUnnamedFixedZones fills the shared unnamed-zone cache. It is a package
+// global, so its Locations must live in the root arena: a fixedZone built in
+// this frame would be freed when it returns, and every later FixedZone call
+// would hand out a dangling *Location.
+func buildUnnamedFixedZones(hoursBeforeUTC, hoursAfterUTC int32) {
+	saved := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
+	unnamedFixedZones = []*Location{:hoursBeforeUTC + 1 + hoursAfterUTC}
+	for hr := -hoursBeforeUTC; hr <= hoursAfterUTC; hr++ {
+		unnamedFixedZones[hr+hoursBeforeUTC] = fixedZone("", hr*60*60)
+	}
+	runtime.SetCurrentArena(saved)
 }
 
 func fixedZone(name []byte, offset int32) *Location {
@@ -142,7 +168,7 @@ func fixedZone(name []byte, offset int32) *Location {
 		cacheStart: alpha,
 		cacheEnd:   omega,
 	}
-	l.cacheZone = &l.zone[0]
+	l.cacheIdx = 0
 	return l
 }
 
@@ -165,7 +191,7 @@ func (l *Location) lookup(sec int64) (name []byte, offset int32, start, end int6
 		return
 	}
 
-	if cz := l.cacheZone; cz != nil && l.cacheStart <= sec && sec < l.cacheEnd {
+	if cz := l.cachedZone(); cz != nil && l.cacheStart <= sec && sec < l.cacheEnd {
 		name = cz.name
 		offset = cz.offset
 		start = l.cacheStart
