@@ -2389,3 +2389,77 @@ Rule that follows: after a change that converts a *value-boxed* implementation t
 a pointer receiver, install a compiler that already has the value-form arm
 (`cp /tmp/mxc-now ./moxie`) before rebuilding. `./moxie` is gitignored, so this is
 a bootstrap step, not a commit.
+
+# State at the end of this pass
+
+Committed (all verified by running, not by compiling):
+
+| commit | what |
+| --- | --- |
+| `c6255131` | `math/big.Rat.Mul` stored nothing after the free-function rewrite (returned 0/1) |
+| `158b2efb` | deleted the dead `math/big/internal/asmgen` generator |
+| `004c374c` | `weak`/`fips140cache`: no constraint in a receiver type-parameter list |
+| `f7a746d4` | cross-package pointer-receiver dispatch: `recvType` is `*T`, plus the value form for pointer-receiver methods |
+| `2033646b` | mxh: an `alias` line for a non-named alias target; `EncodeTo` declared on `*T` bilaterally |
+| `b0059dc9` | legacy: the value type's method set + the interp's recoverable pointer refusal |
+| `b239b155` | `isInitFuncName` strips the monomorphization prefix/suffix |
+| `b76ac386` | this document |
+
+Verification actually observed, in one place:
+
+- `tests/run.sh --full`: **175 passed / 0 failed / 0 skipped** with a compiler
+  built from the tree (slice B's run). The run recorded here had one transient
+  `wasm:hash_basic` build failure that rebuilds clean on its own.
+- Self-hosting: `selfhost:stage1`, `stage1-version`, `runtime-bake`, `stage2`,
+  `stage2-version` and **`fixpoint (stage2 == stage3)`** all PASS.
+- Bootstrap via legacy: `legacy/build.sh` succeeds and
+  `legacy/moxie build -a -o /tmp/s4-legacy ./_mxc_stage4` exits 0; the result
+  runs (`mxc 1.9.11`).
+- New regressions `iface_ptr_recv_crosspkg` and `slice_alias_crosspkg` pass on
+  native **and** wasm (`output matches native`).
+- Apps, with the rebuilt compiler and a fresh `build-runtime` bake: nostr
+  `make test` PASS 20/20; morly `make build` links; musiquay `make test-unit`
+  PASS 8/8 and `make build-app-wasm` writes `web/static/app.wasm`.
+- `sysroot/runtime_go.bc` was re-baked with the fixed compiler.
+
+Note: `./moxie` in the tree is gitignored and is now a compiler built from the
+committed state. A compiler built by a `./moxie` that predates the dispatch fix
+panics on its own `os` (see the bootstrap-artifact section above), so keep
+`./moxie` current after any value-box-to-pointer-receiver conversion.
+
+## Newly surfaced, sized, not done
+
+- **`crypto/ed25519` is a rule conflict, not debt.** `PublicKey`/`PrivateKey`
+  are named slice types (banned) *and* are asserted as value types by
+  `crypto/tls`/`crypto/x509` and used as a value `crypto.Signer` (and value
+  receivers are banned). Both bans cannot hold at once. The coherent resolution
+  is the pattern already used for `asn1.ObjectIdentifier`/`RawContent`: make
+  `PrivateKey`/`PublicKey` **structs** wrapping `[]byte`, with pointer receivers
+  and a free constructor, and adapt the call sites. That is a wide ripple (tls,
+  x509, and anything signing), so it is a deliberate design step.
+  `crypto/tls` and `crypto/x509` are otherwise wide-clean; ed25519 is their only
+  unmet dependency.
+- **The widened predicate now surfaces real type mismatches.** e.g.
+  `crypto/ecdsa` reports 16 `cannot use value of type *crypto/internal/fips140/
+  ecdsa.PublicKey as *ecdsa.PublicKey in return statement` and `cannot use value
+  of type ([]byte, interface{Error() string; String() string}) as []byte`. These
+  are genuinely wrong-ABI code that the `isUserPackagePath` gate has been hiding
+  (see the soundness-gate section) - fix them, do not re-gate.
+- **stage4 constant folding is not exact for untyped float-containing
+  expressions.** `time.Date`/`time.Parse` are correct under legacy and wrong
+  under stage4: `time.Date(2023, March, 14, 15, 9, 26, 0, time.UTC()).Unix()`
+  gives `4744828235076861952` instead of `1678806566`, and
+  `absoluteToUnix` prints as `-9.223372e+018` (a float64) instead of an int64.
+  `src/time/time.mx:555`'s
+  `-(absoluteYears*365.2425 + marchThruDecember) * secondsPerDay` is an exact
+  untyped constant in Go (arbitrary-precision constant arithmetic) and must be
+  folded exactly, then converted; Moxie's folder goes through a float64 and
+  loses the low bits of a ~9.2e18 intermediate. The source is right; the fix is
+  in stage4's constant folding (and its legacy mirror already behaves).
+- `compress/flate` is rule-clean but clang-22 still crashes in its backend;
+  `compress/gzip` links through it.
+- `src/syscall/js`, `net/http`'s `context.Value` gap, and the named public-API
+  types in `src/net/**` are unchanged from the sections above.
+- `os.Pipe`'s `var p [2]int32` and syscall's `[2]Timeval`/`[2]Timespec` unsafe
+  casts are the remaining rule-9 arrays; both are alias/unsafe-bound and correct
+  today, so they need their own decision.
