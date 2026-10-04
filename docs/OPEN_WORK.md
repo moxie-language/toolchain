@@ -1372,3 +1372,15 @@ value form is already refused - the sixteen sites are the compiler
 materialising a bound value for a selector it is about to call directly
 (`defer p.trace("file")()` in `pkg/syntax`). A direct-call lowering would
 remove seven of them without touching the parser.
+
+**Where the `__mval` wrappers are made.** `buildMethodValue` has exactly one
+caller, `buildSelector` (`ssa_builder.mx:5473`), so a wrapper appears only when
+a selector is evaluated *as a value*. `fileOrNil`'s only selector is `p.trace`
+in `defer p.trace("file")()`, and its four wrappers are named
+`fileOrNil__mval1..4` - so the deferred call-of-a-call path is evaluating the
+inner function expression through `buildExpr`/`buildSelector` instead of
+routing the inner call through `buildCall`, whose selector branch already
+resolves `recv.M(...)` directly. Instrumenting that branch (or teaching
+`buildDeferStmt` about a CallExpr fun) is the next step; with the wrappers gone,
+nine real source closures in `pkg/syntax` are all that stands between the
+compiler tree and the `/pkg/` carve-out.
