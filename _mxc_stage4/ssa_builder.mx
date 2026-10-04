@@ -1994,11 +1994,8 @@ func (fb *ssaFuncBuilder) errArgs(msg string) {
 	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
 		return
 	}
-	if !isUserPackagePath(restrictPath(fb.fn.Pkg.Pkg.Path)) {
-		return
-	}
 	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-	push(cctx.compileErrors, msg)
+	push(cctx.compileErrors, fb.errPos() | msg)
 }
 
 // checkAssignable reports a value that cannot be assigned to the target type,
@@ -2008,19 +2005,25 @@ func (fb *ssaFuncBuilder) errArgs(msg string) {
 // Interfaces and type parameters are skipped: their method sets and
 // instantiations may not be resolved yet, and a false error is worse than a
 // missing one.
+// errPos renders the source position of the check that is about to fail so
+// remapErrorLines turns it back into file:line when the diagnostic is printed
+// (the "prefix:number:" shape remapOneLine expects). Without it an assignability
+// error names no file, and the stdlib has many.
+func (fb *ssaFuncBuilder) errPos() (s string) {
+	if fb.curLine > 0 {
+		return "line:" | simpleItoa(fb.curLine) | ": "
+	}
+	if fb.fn != nil {
+		return fb.fn.name | ": "
+	}
+	return ""
+}
+
 func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 	if val == nil || T == nil {
 		return
 	}
-	// User code only, like the language restrictions: the stdlib carries
-	// latent assignability errors that go/types also reports but the legacy
-	// loader never surfaces, and clearing them is its own cleanup. The real
-	// fix for that is recorded as an open issue; this is a fail-loud stop for
-	// the code the compiler is asked to check.
 	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
-		return
-	}
-	if !isUserPackagePath(restrictPath(fb.fn.Pkg.Pkg.Path)) {
 		return
 	}
 	V := val.SSAType()
@@ -2032,7 +2035,7 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 	if cv, explicitNeg := constValueOf(val); cv != nil {
 		if msg := constReprError(cv, T); msg != "" && !constReprSkipUnsigned(T, cv, explicitNeg) {
 			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-			push(cctx.compileErrors, "cannot use " | cv.String() | " as " | T.String() | " in " | what | " (" | msg | ")")
+			push(cctx.compileErrors, fb.errPos() | "cannot use " | cv.String() | " as " | T.String() | " in " | what | " (" | msg | ")")
 			return
 		}
 	}
@@ -2065,7 +2068,7 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 		return
 	}
 	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-	push(cctx.compileErrors, "cannot use value of type " | V.String() | " as " | T.String() | " in " | what)
+	push(cctx.compileErrors, fb.errPos() | "cannot use value of type " | V.String() | " as " | T.String() | " in " | what)
 }
 
 // checkConstConvert reports a constant conversion whose value cannot be
@@ -2076,16 +2079,13 @@ func (fb *ssaFuncBuilder) checkConstConvert(val SSAValue, T Type) {
 	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
 		return
 	}
-	if !isUserPackagePath(restrictPath(fb.fn.Pkg.Pkg.Path)) {
-		return
-	}
 	cv, explicitNeg := constValueOf(val)
 	if cv == nil {
 		return
 	}
 	if msg := constReprError(cv, T); msg != "" && !constReprSkipUnsigned(T, cv, explicitNeg) {
 		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-		push(cctx.compileErrors, "cannot convert " | cv.String() | " to " | T.String() | " (" | msg | ")")
+		push(cctx.compileErrors, fb.errPos() | "cannot convert " | cv.String() | " to " | T.String() | " (" | msg | ")")
 	}
 }
 
@@ -2326,9 +2326,6 @@ func (fb *ssaFuncBuilder) checkDefaultRepr(val SSAValue, what string) {
 	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
 		return
 	}
-	if !isUserPackagePath(restrictPath(fb.fn.Pkg.Pkg.Path)) {
-		return
-	}
 	b, isB := SafeUnderlying(val.SSAType()).(*Basic)
 	if !isB || b.Info&IsUntyped == 0 {
 		return
@@ -2343,7 +2340,7 @@ func (fb *ssaFuncBuilder) checkDefaultRepr(val SSAValue, what string) {
 	}
 	if msg := constReprError(cv, dt); msg != "" && !constReprSkipUnsigned(dt, cv, explicitNeg) {
 		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-		push(cctx.compileErrors, "cannot use " | cv.String() | " as " | dt.String() | " value in " | what | " (" | msg | ")")
+		push(cctx.compileErrors, fb.errPos() | "cannot use " | cv.String() | " as " | dt.String() | " value in " | what | " (" | msg | ")")
 	}
 }
 
