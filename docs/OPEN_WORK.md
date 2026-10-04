@@ -29,11 +29,20 @@ Working layout that matters: the checkouts live at
 
 1. **Explain the exemption and the divergences.** Done in the session; the
    findings are below.
-2. **Close the legacy/stage4 restriction gap.** Four of six done — unnamed
-   returns, parenthesised call targets and `+` on text are implemented,
-   verified with both compilers and pinned by phase6 `6v`–`6x` (`ea7bb392`);
-   value receivers were already there. **Two remain: package-level var
-   initializers and named slice/map types.**
+2. **Close the legacy/stage4 restriction gap.** **Done.** All six rules are
+   bilateral and pinned in both compilers: unnamed returns, parenthesised call
+   targets and `+` on text (`ea7bb392`), value receivers (already there), and
+   the last two - package-level var initializers and named slice/map types -
+   landed in `3b13de5e`. Closing the last two needed three things: stage4 had
+   no implementation of either rule at all (a dotted-path `main` with
+   `type Tags []string` and `var counter = 5` built under stage4 and was
+   rejected by legacy, dependencies included); legacy's alias form
+   (`type X = []T`) had to stay legal, and stage4 had to mirror the demoted
+   `[]byte("literal")` constant form legacy allows; and legacy's package-decl
+   gate read the directory path, so the same program was checked from
+   `/tmp/moxie-tests.123` and exempted from `/tmp/moxie-tests-123`. A main
+   package is now user code wherever it sits. `declvar` and `namedslice` pin
+   both rules in both compilers (phase6 6x.1/6x.2); suite 171/171.
 
    **Landing the three exposed the real bill, and it is paid in app code, not
    in the compiler.** stage4 compiles `vendor/golang.org/x/...` while legacy
@@ -1329,3 +1338,14 @@ Operational note for the next round: the verified stage4 binary of `3b13de5e`
 is at `/tmp/mxc-rules2` (that is what the 171/171 run used). The in-tree
 `./moxie` could not be replaced because the named-type migration was building
 against it (`Text file busy`); copy it over once that stops.
+
+**What dropping the `/pkg/` carve-out is actually blocked on.** The decl rules
+are bilateral for user packages now, but the immutability rule still shares the
+same gate, and the inventory above lists 8 global stores outside `init()` in
+`pkg/types` plus 8 in `_mxc_stage4` (the latter exempt only because the
+compiler's own main package is not user code). Deleting `/pkg/` from
+`isUserPackagePath` therefore fails the compiler's own build before it ever
+reaches an app repo, so the order is: migrate those 16 compiler-tree stores,
+then drop the carve-out for the compiler and the app repos together, then the
+stdlib (75 named types, and its share of the 107 stores), then the runtime
+carve-out stays.
