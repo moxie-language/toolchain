@@ -2,20 +2,22 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package fips140cache provides a weak map that associates the lifetime of
-// values with the lifetime of keys.
+// Package fips140cache associates a precomputed value with a key pointer.
 //
 // It can be used to associate a precomputed value (such as an internal/fips140
 // PrivateKey value, which in FIPS 140-3 mode may have required an expensive
 // pairwise consistency test) with a type that doesn't have private fields (such
 // as an ed25519.PrivateKey), or that can't be safely modified because it may be
 // concurrently copied (such as an ecdsa.PrivateKey).
+//
+// Moxie has no garbage collector, so the cache cannot observe a key becoming
+// unreachable and never evicts an entry on its own. An entry is valid only
+// while its key is live, which in Moxie means while the arena holding the key
+// is live.
 package fips140cache
 
-import "weak"
-
 type Cache[K comparable, V comparable] struct {
-	m map[weak.Pointer[K]]*V
+	m map[*K]*V
 }
 
 // Get returns the result of new, for an associated key k.
@@ -23,14 +25,11 @@ type Cache[K comparable, V comparable] struct {
 // If Get was called with k before and didn't return an error, Get may return
 // the same value it returned from the previous call if check returns true on
 // it. If check returns false, Get will call new again and return the result.
-//
-// The cache is evicted some time after k becomes unreachable.
 func (c *Cache[K, V]) Get(k *K, new func() (*V, error), check func(*V) bool) (v *V, gerr error) {
 	if c.m == nil {
-		c.m = map[weak.Pointer[K]]*V{}
+		c.m = map[*K]*V{}
 	}
-	p := weak.Make(k)
-	if v2, ok := c.m[p]; ok {
+	if v2, ok := c.m[k]; ok {
 		if check(v2) {
 			return v2, nil
 		}
@@ -39,10 +38,6 @@ func (c *Cache[K, V]) Get(k *K, new func() (*V, error), check func(*V) bool) (v 
 	if err != nil {
 		return nil, err
 	}
-	c.m[p] = v1
+	c.m[k] = v1
 	return v1, nil
-}
-
-func (c *Cache[K, V]) evict(p weak.Pointer[K]) {
-	delete(c.m, p)
 }
