@@ -1988,3 +1988,18 @@ leads have been asked to run that build before declaring done and to bisect
 within their own slice. Until it passes, the `topLevelColon` rewriter fix stays
 parked at `/tmp/recolon.patch` (unverified compiler changes do not land) and
 `compress/gzip` is blocked on both the parse bug and this.
+
+**The `pkg/syntax` codegen failure was a direct victim of the `Const` change,
+and is fixed (slice A).** `pkg/syntax/source.mx:136` compared
+`s.ioerr.Error() != string(io.EOF)`: while `io.EOF` was an `errors.Const` (a
+string type) that produced `"EOF"`, but once it became `var error`,
+`string(io.EOF)` emitted an invalid bitcast (`{i64,ptr}` -> `{ptr,i64,i64}`) in
+`(*Source).nextch` and the compiler could not build itself. It is
+`s.ioerr.Error() != io.EOF.Error()` now. A sweep over 250 sentinel names found
+exactly three such sites: that one, plus `src/net/http/server.mx:1840` and
+`src/net/http/h2_bundle.mx:6247` (`string(ErrAbortHandler)`), all three fixed,
+and slice C was told about its two.
+
+**The general trap worth remembering:** converting the stdlib's sentinels from
+string-typed constants to `var error` breaks every `string(SENTINEL)` site,
+because a string constant and an `error` interface are not the same thing.
