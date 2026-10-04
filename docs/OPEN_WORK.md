@@ -1753,3 +1753,8 @@ The pre-existing debt list from the sweep section above (shadow errors,
 `undefined: slices.Sorted`/`Backward`, the `[]T{:...}` parse rejection, the
 clang-22 segfault) is independent of the store migration and can be taken in
 parallel.
+
+**os's lazy builders are named too** (`b322167e`): `ensureMinrand` -> `initMinrand`
+and `ensureFS` -> `initFS`, and the suite is **171/171, 0 failures** with both
+the syscall and os renames in place. `signalsInit` and the restart/fs state
+remain for the holder treatment.
