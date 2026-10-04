@@ -1339,13 +1339,15 @@ is at `/tmp/mxc-rules2` (that is what the 171/171 run used). The in-tree
 `./moxie` could not be replaced because the named-type migration was building
 against it (`Text file busy`); copy it over once that stops.
 
-**What dropping the `/pkg/` carve-out is actually blocked on.** The decl rules
-are bilateral for user packages now, but the immutability rule still shares the
-same gate, and the inventory above lists 8 global stores outside `init()` in
-`pkg/types` plus 8 in `_mxc_stage4` (the latter exempt only because the
-compiler's own main package is not user code). Deleting `/pkg/` from
-`isUserPackagePath` therefore fails the compiler's own build before it ever
-reaches an app repo, so the order is: migrate those 16 compiler-tree stores,
-then drop the carve-out for the compiler and the app repos together, then the
-stdlib (75 named types, and its share of the 107 stores), then the runtime
-carve-out stays.
+**What dropping the `/pkg/` carve-out is actually blocked on (measured).**
+Deleting the `/pkg/` exemption from `isUserPackagePath` and self-building the
+compiler with the result fails at **16 closure-capture violations in
+`pkg/syntax`** - `(*Parser).appendGroup__anon1` captures `f, g, list`,
+`argList__anon1` captures `list, p, hasDots`, and fourteen more - with no
+`immutable outside init` errors at all in the compiler tree. So the carve-out is
+load-bearing through the *closure* rule, not the declaration rules (which the
+compiler tree satisfies) and not the global-store rule as far as this build
+shows. The order is therefore: give `pkg/syntax`'s sixteen closures explicit
+parameters (which is the model's own rule anyway), then drop the carve-out for
+the compiler and the app repos together, then the stdlib (75 named types and its
+share of the global stores), and the runtime carve-out stays.
