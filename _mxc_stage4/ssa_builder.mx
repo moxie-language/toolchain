@@ -8144,12 +8144,37 @@ func (fb *ssaFuncBuilder) fieldType(t Type, idx int32) (tv Type) {
 	if pt, ok := SafeUnderlying(t).(*Pointer); ok {
 		t = pt.Base
 	}
-	if st, ok := SafeUnderlying(t).(*TCStruct); ok {
-		if idx >= 0 && idx < st.NumFields() {
-			return fb.substTypeParams(st.Field(idx).Typ)
-		}
+	st, isStruct := SafeUnderlying(t).(*TCStruct)
+	if !isStruct || idx < 0 || idx >= st.NumFields() {
+		return nil
 	}
-	return nil
+	ft := st.Field(idx).Typ
+	// An instantiated generic used in ORDINARY code has no fb.typeSubst - the
+	// bindings live on the Named's TArgs, and only monomorphized bodies carry a
+	// map. Without this the field type stayed the type parameter: `s.v[2]` for a
+	// Box[int32] was a T, so passing it to an int32 parameter carried the wrong
+	// value and printing it printed nothing. src/internal/trace's
+	// `ordering.queue` (a queue[Event]) depends on this to reach
+	// (*queue).pop at all.
+	if gn, okg := t.(*Named); okg && len(gn.TArgs) > 0 && len(gn.TParams) > 0 {
+		merged := map[string]Type{}
+		for k, v := range fb.typeSubst {
+			merged[k] = v
+		}
+		n := len(gn.TParams)
+		if len(gn.TArgs) < n {
+			n = len(gn.TArgs)
+		}
+		for i := int32(0); i < int32(n); i++ {
+			merged[gn.TParams[i].String()] = gn.TArgs[i]
+		}
+		saved := fb.typeSubst
+		fb.typeSubst = merged
+		out := fb.substTypeParams(ft)
+		fb.typeSubst = saved
+		return out
+	}
+	return fb.substTypeParams(ft)
 }
 
 // substTypeParams substitutes type parameters in t using fb.typeSubst.
