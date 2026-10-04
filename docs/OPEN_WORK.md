@@ -1868,3 +1868,27 @@ Then, in order:
 **Done is all four.** Until then the tree stays on the dot rule (stdlib exempt),
 so every app keeps building and the suite stays green at every commit; each
 slice lands as its own commit once its packages are clean and 171/171 holds.
+
+### Two findings from the stdlib migration that outrank the site count
+
+**1. The package cache key does not distinguish the compiler binary.** The sweep
+agent proved it: `compilerHash()` hashes the compiler's *source files*
+(`_mxc_stage4/` plus `src/runtime/`), and two binaries built from the same tree -
+`./moxie` with the narrow predicate and `/tmp/mxc-wide-a` with the wide one -
+read those same sources, so they compute the same hash and share a cache
+directory. A probe with one can then reuse `.bc` files compiled by the other and
+**falsely report a package clean**. Every wide sweep must pass `-a`; the
+measurement of 3,704 sites across 263 packages was taken without it and is
+therefore a **lower bound**. The real fix is to put the running compiler's
+identity in the key (its own build id), which the old comment rejected because
+hashing `/proc/self/exe` stops the self-host fixpoint from converging - so it has
+to be a build id that is stable per build but not derived from the binary's
+bytes, or `-a` on every probe stays the rule.
+
+**2. `errors` gates every per-package probe.** The wide probe aborts at the first
+failing package in a closure, and almost everything imports `errors`, so its two
+`Const` value receivers made every other package unmeasurable. `type Const` is
+being deleted in favour of `errors.New` (already pointer-receiver), with its 264
+`const X = errors.Const("...")` sites becoming `var X error` plus an `init()`
+assignment - one atomic pass across 95 files, because it is the blocker for all
+three slices.
