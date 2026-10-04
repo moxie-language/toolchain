@@ -1758,3 +1758,41 @@ parallel.
 and `ensureFS` -> `initFS`, and the suite is **171/171, 0 failures** with both
 the syscall and os renames in place. `signalsInit` and the restart/fs state
 remain for the holder treatment.
+
+**time's lazy builders are named too** (`fe15a8fa`): `_ensureUtcLoc` ->
+`initUtcLoc` and `_startNano` -> `initStartNano`, with the suite at **171/171,
+0 failures**. That is four stdlib packages this session (`internal/cpu`,
+`syscall`, `os`, `time`) whose one-time builders now carry the init-named
+exemption.
+
+### Where the objective stands at the end of the automatic rounds
+
+Done and verified, with a fresh build and the suite as the gate each time:
+builtin Stringers in both compilers (no caller workarounds); `moxie get` with
+`-pin`/`-worktree`/`-offline`/`-force`/`-remote`/`-protocol`, MANIFEST-aware
+resolution, module-file removal from moxie/nostr/morly/musiquay, and the
+commit-keyed build cache (a hit links, it does not recompile); morly's
+`TestCrawlRelayAndPublish` SIGSEGV (the `time` interior pointer); the VS
+Code/Codium extension; `musiquay/pkg/protocol` wired into the relay
+(validation, `ResolveBlob`, the 32218-32220 exception) and the app
+(`protocolwire`, publish paths); all six restriction rules bilateral with the
+`/pkg/` carve-out deleted; all three app repos migrated and green (nostr 194,
+morly 370, musiquay 89 + wasm); the stdlib sovereign-loop rule satisfied across
+the tree; and 171/171 on the in-tree compiler.
+
+Left for item (3)'s stdlib stage, in the order they should be taken:
+1. `syscall`: `Setenv`/`Unsetenv`/`Clearenv` need the `env`/`envs` pair behind a
+   self-mutating holder (the DNS-cache pattern); `_getMapper`, `ensureRlimit`,
+   `Setrlimit`, `prlimit` hold the remaining caches.
+2. `time`: `FixedZone`, `LoadLocation` and `(*Location).get` write globals the
+   zone cache no longer covers.
+3. `os`: `signalsInit`'s signal table wants a holder.
+4. The **75 named slice/map types across 49 files** (63 of them carry methods,
+   which `[]T` cannot; each method becomes a free function).
+5. Only then widen `isUserPackagePath` past the dot rule, so the tree builds at
+   every step.
+Independent of that, the pre-existing debt the sweep surfaced: the `[]T{:...}`
+slice-expression parse rejection (`gunzip.mx:210`), the clang-22 segfault on
+`flate.(*Writer).Close`, missing `slices.Sorted`/`slices.Backward`, and the
+shadow/unused-import errors in `archive/zip`, `debug/dwarf`,
+`internal/runtime/maps`, `index/suffixarray`, `image/*` and `x/text/*`.
