@@ -1324,3 +1324,8 @@ same slice-typing path, and the bootstrap covers it).
 types are being dissolved into free functions (in flight), then the `/pkg/`
 carve-out can go for the app repos, and the stdlib's 75 plus the global-stores
 scope expansion (107 sites above the runtime) are the stages after that.
+
+Operational note for the next round: the verified stage4 binary of `3b13de5e`
+is at `/tmp/mxc-rules2` (that is what the 171/171 run used). The in-tree
+`./moxie` could not be replaced because the named-type migration was building
+against it (`Text file busy`); copy it over once that stops.
