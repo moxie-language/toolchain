@@ -11,7 +11,6 @@ package gosym
 import (
 	"bytes"
 	"encoding/binary"
-	"sort"
 )
 
 // version of the pclntab
@@ -109,7 +108,7 @@ func (t *LineTable) parse(targetPC uint64, targetLine int32) (b []byte, pc uint6
 	return b, pc, line
 }
 
-func (t *LineTable) slice(pc uint64) *LineTable {
+func (t *LineTable) slice(pc uint64) (out *LineTable) {
 	data, pc, line := t.parse(pc, -1)
 	return &LineTable{Data: data, PC: pc, Line: line}
 }
@@ -117,11 +116,11 @@ func (t *LineTable) slice(pc uint64) *LineTable {
 // PCToLine returns the line number for the given program counter.
 //
 // Deprecated: Use Table's PCToLine method instead.
-func (t *LineTable) PCToLine(pc uint64) int32 {
+func (t *LineTable) PCToLine(pc uint64) (line int32) {
 	if t.isGo12() {
 		return t.go12PCToLine(pc)
 	}
-	_, _, line := t.parse(pc, -1)
+	_, _, line = t.parse(pc, -1)
 	return line
 }
 
@@ -129,7 +128,7 @@ func (t *LineTable) PCToLine(pc uint64) int32 {
 // considering only program counters before maxpc.
 //
 // Deprecated: Use Table's LineToPC method instead.
-func (t *LineTable) LineToPC(line int32, maxpc uint64) uint64 {
+func (t *LineTable) LineToPC(line int32, maxpc uint64) (out uint64) {
 	if t.isGo12() {
 		return 0
 	}
@@ -149,7 +148,7 @@ func (t *LineTable) LineToPC(line int32, maxpc uint64) uint64 {
 // This value may differ from the start
 // address of the text segment if
 // binary was built with cgo enabled.
-func NewLineTable(data []byte, text uint64) *LineTable {
+func NewLineTable(data []byte, text uint64) (out *LineTable) {
 	return &LineTable{Data: data, PC: text, Line: 0, funcNames: map[uint32]string{}, strings: map[uint32]string{}}
 }
 
@@ -165,7 +164,7 @@ func NewLineTable(data []byte, text uint64) *LineTable {
 // are expected to have that recovery logic.
 
 // isGo12 reports whether this is a Go 1.2 (or later) symbol table.
-func (t *LineTable) isGo12() bool {
+func (t *LineTable) isGo12() (rok bool) {
 	t.parsePclnTab()
 	return t.version >= ver12
 }
@@ -179,11 +178,21 @@ const (
 
 // uintptr returns the pointer-sized value encoded at b.
 // The pointer size is dictated by the table being read.
-func (t *LineTable) uintptr(b []byte) uint64 {
+func (t *LineTable) uintptr(b []byte) (out uint64) {
 	if t.ptrsize == 4 {
 		return uint64(t.binary.Uint32(b))
 	}
 	return t.binary.Uint64(b)
+}
+
+// pclnOffset returns the word'th pointer-sized header word.
+func (t *LineTable) pclnOffset(word uint32) (out uint64) {
+	return t.uintptr(t.Data[8+word*t.ptrsize:])
+}
+
+// pclnData returns the section starting at the word'th header word.
+func (t *LineTable) pclnData(word uint32) (out []byte) {
+	return t.Data[t.pclnOffset(word):]
 }
 
 // parsePclnTab parses the pclntab, setting the version.
@@ -199,12 +208,7 @@ func (t *LineTable) parsePclnTab() {
 	// Error paths through this code will default the version to 1.1.
 	t.version = ver11
 
-	if !disableRecover {
-		defer func() {
-			// If we panic parsing, assume it's a Go 1.1 pclntab.
-			recover()
-		}()
-	}
+	defer recoverDiscard()
 
 	// Check header: 4-byte magic, two zeros, pc quantum, pointer size.
 	if len(t.Data) < 16 || t.Data[4] != 0 || t.Data[5] != 0 ||
@@ -242,35 +246,28 @@ func (t *LineTable) parsePclnTab() {
 	t.quantum = uint32(t.Data[6])
 	t.ptrsize = uint32(t.Data[7])
 
-	offset := func(word uint32) uint64 {
-		return t.uintptr(t.Data[8+word*t.ptrsize:])
-	}
-	data := func(word uint32) []byte {
-		return t.Data[offset(word):]
-	}
-
 	switch possibleVersion {
 	case ver118, ver120:
-		t.nfunctab = uint32(offset(0))
-		t.nfiletab = uint32(offset(1))
+		t.nfunctab = uint32(t.pclnOffset(0))
+		t.nfiletab = uint32(t.pclnOffset(1))
 		t.textStart = t.PC // use the start PC instead of reading from the table, which may be unrelocated
-		t.funcnametab = data(3)
-		t.cutab = data(4)
-		t.filetab = data(5)
-		t.pctab = data(6)
-		t.funcdata = data(7)
-		t.functab = data(7)
+		t.funcnametab = t.pclnData(3)
+		t.cutab = t.pclnData(4)
+		t.filetab = t.pclnData(5)
+		t.pctab = t.pclnData(6)
+		t.funcdata = t.pclnData(7)
+		t.functab = t.pclnData(7)
 		functabsize := (int32(t.nfunctab)*2 + 1) * t.functabFieldSize()
 		t.functab = t.functab[:functabsize]
 	case ver116:
-		t.nfunctab = uint32(offset(0))
-		t.nfiletab = uint32(offset(1))
-		t.funcnametab = data(2)
-		t.cutab = data(3)
-		t.filetab = data(4)
-		t.pctab = data(5)
-		t.funcdata = data(6)
-		t.functab = data(6)
+		t.nfunctab = uint32(t.pclnOffset(0))
+		t.nfiletab = uint32(t.pclnOffset(1))
+		t.funcnametab = t.pclnData(2)
+		t.cutab = t.pclnData(3)
+		t.filetab = t.pclnData(4)
+		t.pctab = t.pclnData(5)
+		t.funcdata = t.pclnData(6)
+		t.functab = t.pclnData(6)
 		functabsize := (int32(t.nfunctab)*2 + 1) * t.functabFieldSize()
 		t.functab = t.functab[:functabsize]
 	case ver12:
@@ -291,22 +288,22 @@ func (t *LineTable) parsePclnTab() {
 }
 
 // go12Funcs returns a slice of Funcs derived from the Go 1.2+ pcln table.
-func (t *LineTable) go12Funcs() []Func {
+func (t *LineTable) go12Funcs() (out []Func) {
 	// Assume it is malformed and return nil on error.
-	if !disableRecover {
-		defer func() {
-			recover()
-		}()
-	}
+	defer recoverDiscard()
 
 	ft := t.funcTab()
 	funcs := []Func{:ft.Count()}
 	syms := []Sym{:len(funcs)}
+	// Declared once, outside the loop: a declaration in a loop in a
+	// self-mutating method is rejected.
+	var f *Func
+	var info funcData
 	for i := range funcs {
-		f := &funcs[i]
+		f = &funcs[i]
 		f.Entry = ft.pc(i)
 		f.End = ft.pc(i + 1)
-		info := t.funcData(uint32(i))
+		info = t.funcData(uint32(i))
 		f.LineTable = t
 		f.FrameSize = int32(info.deferreturn())
 		syms[i] = Sym{
@@ -323,20 +320,29 @@ func (t *LineTable) go12Funcs() []Func {
 }
 
 // findFunc returns the funcData corresponding to the given program counter.
-func (t *LineTable) findFunc(pc uint64) funcData {
+func (t *LineTable) findFunc(pc uint64) (out funcData) {
 	ft := t.funcTab()
 	if pc < ft.pc(0) || pc >= ft.pc(ft.Count()) {
 		return funcData{}
 	}
-	idx := sort.Search(int32(t.nfunctab), func(i int32) bool {
-		return ft.pc(i) > pc
-	})
-	idx--
+	// sort.Search(n, f) inlined: the predicate reads ft and pc, which a
+	// function value cannot carry without capturing them.
+	lo := int32(0)
+	hi := int32(t.nfunctab)
+	for lo < hi {
+		mid := lo + (hi-lo)/2
+		if ft.pc(mid) > pc {
+			hi = mid
+		} else {
+			lo = mid + 1
+		}
+	}
+	idx := lo - 1
 	return t.funcData(uint32(idx))
 }
 
 // readvarint reads, removes, and returns a varint from *pp.
-func (t *LineTable) readvarint(pp *[]byte) uint32 {
+func (t *LineTable) readvarint(pp *[]byte) (out uint32) {
 	var v, shift uint32
 	p := *pp
 	for shift = 0; ; shift += 7 {
@@ -352,34 +358,34 @@ func (t *LineTable) readvarint(pp *[]byte) uint32 {
 }
 
 // funcName returns the name of the function found at off.
-func (t *LineTable) funcName(off uint32) string {
+func (t *LineTable) funcName(off uint32) (name string) {
 	if s, ok := t.funcNames[off]; ok {
 		return s
 	}
 	i := bytes.IndexByte(t.funcnametab[off:], 0)
-	s := string(t.funcnametab[off : off+uint32(i)])
-	t.funcNames[off] = s
-	return s
+	name = string(t.funcnametab[off : off+uint32(i)])
+	t.funcNames[off] = name
+	return name
 }
 
 // stringFrom returns a Go string found at off from a position.
-func (t *LineTable) stringFrom(arr []byte, off uint32) string {
+func (t *LineTable) stringFrom(arr []byte, off uint32) (name string) {
 	if s, ok := t.strings[off]; ok {
 		return s
 	}
 	i := bytes.IndexByte(arr[off:], 0)
-	s := string(arr[off : off+uint32(i)])
-	t.strings[off] = s
-	return s
+	name = string(arr[off : off+uint32(i)])
+	t.strings[off] = name
+	return name
 }
 
 // string returns a Go string found at off.
-func (t *LineTable) string(off uint32) string {
+func (t *LineTable) string(off uint32) (out string) {
 	return t.stringFrom(t.funcdata, off)
 }
 
 // functabFieldSize returns the size in bytes of a single functab field.
-func (t *LineTable) functabFieldSize() int32 {
+func (t *LineTable) functabFieldSize() (out int32) {
 	if t.version >= ver118 {
 		return 4
 	}
@@ -387,7 +393,7 @@ func (t *LineTable) functabFieldSize() int32 {
 }
 
 // funcTab returns t's funcTab.
-func (t *LineTable) funcTab() funcTab {
+func (t *LineTable) funcTab() (out funcTab) {
 	return funcTab{LineTable: t, sz: t.functabFieldSize()}
 }
 
@@ -399,12 +405,12 @@ type funcTab struct {
 }
 
 // Count returns the number of func entries in f.
-func (f funcTab) Count() int32 {
+func (f *funcTab) Count() (out int32) {
 	return int32(f.nfunctab)
 }
 
 // pc returns the PC of the i'th func in f.
-func (f funcTab) pc(i int32) uint64 {
+func (f *funcTab) pc(i int32) (out uint64) {
 	u := f.uint32(f.functab[2*i*f.sz:])
 	if f.version >= ver118 {
 		u += f.textStart
@@ -413,12 +419,12 @@ func (f funcTab) pc(i int32) uint64 {
 }
 
 // funcOff returns the funcdata offset of the i'th func in f.
-func (f funcTab) funcOff(i int32) uint64 {
+func (f *funcTab) funcOff(i int32) (out uint64) {
 	return f.uint32(f.functab[(2*i+1)*f.sz:])
 }
 
 // uint32 returns the uint32 stored at b.
-func (f funcTab) uint32(b []byte) uint64 {
+func (f *funcTab) uint32(b []byte) (out uint64) {
 	if f.sz == 4 {
 		return uint64(f.binary.Uint32(b))
 	}
@@ -432,18 +438,18 @@ type funcData struct {
 }
 
 // funcData returns the ith funcData in t.functab.
-func (t *LineTable) funcData(i uint32) funcData {
+func (t *LineTable) funcData(i uint32) (out funcData) {
 	data := t.funcdata[t.funcTab().funcOff(int32(i)):]
 	return funcData{t: t, data: data}
 }
 
 // IsZero reports whether f is the zero value.
-func (f funcData) IsZero() bool {
+func (f *funcData) IsZero() (rok bool) {
 	return f.t == nil && f.data == nil
 }
 
 // entryPC returns the func's entry PC.
-func (f *funcData) entryPC() uint64 {
+func (f *funcData) entryPC() (out uint64) {
 	// In Go 1.18, the first field of _func changed
 	// from a uintptr entry PC to a uint32 entry offset.
 	if f.t.version >= ver118 {
@@ -454,16 +460,16 @@ func (f *funcData) entryPC() uint64 {
 	return f.t.uintptr(f.data)
 }
 
-func (f funcData) nameOff() uint32     { return f.field(1) }
-func (f funcData) deferreturn() uint32 { return f.field(3) }
-func (f funcData) pcfile() uint32      { return f.field(5) }
-func (f funcData) pcln() uint32        { return f.field(6) }
-func (f funcData) cuOffset() uint32    { return f.field(8) }
+func (f *funcData) nameOff() (out uint32)     { return f.field(1) }
+func (f *funcData) deferreturn() (out uint32) { return f.field(3) }
+func (f *funcData) pcfile() (out uint32)      { return f.field(5) }
+func (f *funcData) pcln() (out uint32)        { return f.field(6) }
+func (f *funcData) cuOffset() (out uint32)    { return f.field(8) }
 
 // field returns the nth field of the _func struct.
 // It panics if n == 0 or n > 9; for n == 0, call f.entryPC.
 // Most callers should use a named field accessor (just above).
-func (f funcData) field(n uint32) uint32 {
+func (f *funcData) field(n uint32) (out uint32) {
 	if n == 0 || n > 9 {
 		panic("bad funcdata field")
 	}
@@ -479,7 +485,7 @@ func (f funcData) field(n uint32) uint32 {
 }
 
 // step advances to the next pc, value pair in the encoded table.
-func (t *LineTable) step(p *[]byte, pc *uint64, val *int32, first bool) bool {
+func (t *LineTable) step(p *[]byte, pc *uint64, val *int32, first bool) (rok bool) {
 	uvdelta := t.readvarint(p)
 	if uvdelta == 0 && !first {
 		return false
@@ -499,7 +505,7 @@ func (t *LineTable) step(p *[]byte, pc *uint64, val *int32, first bool) bool {
 // pcvalue reports the value associated with the target pc.
 // off is the offset to the beginning of the pc-value table,
 // and entry is the start PC for the corresponding function.
-func (t *LineTable) pcvalue(off uint32, entry, targetpc uint64) int32 {
+func (t *LineTable) pcvalue(off uint32, entry, targetpc uint64) (out int32) {
 	p := t.pctab[off:]
 
 	val := int32(-1)
@@ -518,7 +524,7 @@ func (t *LineTable) pcvalue(off uint32, entry, targetpc uint64) int32 {
 // to file number. Since most functions come from a single file, these
 // are usually short and quick to scan. If a file match is found, then the
 // code goes to the expense of looking for a simultaneous line number match.
-func (t *LineTable) findFileLine(entry uint64, filetab, linetab uint32, filenum, line int32, cutab []byte) uint64 {
+func (t *LineTable) findFileLine(entry uint64, filetab, linetab uint32, filenum, line int32, cutab []byte) (out uint64) {
 	if filetab == 0 || linetab == 0 {
 		return 0
 	}
@@ -561,11 +567,7 @@ func (t *LineTable) findFileLine(entry uint64, filetab, linetab uint32, filenum,
 
 // go12PCToLine maps program counter to line number for the Go 1.2+ pcln table.
 func (t *LineTable) go12PCToLine(pc uint64) (line int32) {
-	defer func() {
-		if !disableRecover && recover() != "" {
-			line = -1
-		}
-	}()
+	defer recoverLine(&line)
 
 	f := t.findFunc(pc)
 	if f.IsZero() {
@@ -578,11 +580,7 @@ func (t *LineTable) go12PCToLine(pc uint64) (line int32) {
 
 // go12PCToFile maps program counter to file name for the Go 1.2+ pcln table.
 func (t *LineTable) go12PCToFile(pc uint64) (file string) {
-	defer func() {
-		if !disableRecover && recover() != "" {
-			file = ""
-		}
-	}()
+	defer recoverFile(&file)
 
 	f := t.findFunc(pc)
 	if f.IsZero() {
@@ -610,11 +608,7 @@ func (t *LineTable) go12PCToFile(pc uint64) (file string) {
 
 // go12LineToPC maps a (file, line) pair to a program counter for the Go 1.2+ pcln table.
 func (t *LineTable) go12LineToPC(file string, line int32) (pc uint64) {
-	defer func() {
-		if !disableRecover && recover() != "" {
-			pc = 0
-		}
-	}()
+	defer recoverPC(&pc)
 
 	t.initFileMap()
 	filenum, ok := t.fileMap[file]
@@ -626,11 +620,17 @@ func (t *LineTable) go12LineToPC(file string, line int32) (pc uint64) {
 	// If this turns out to be a bottleneck, we could build a map[int32][]int32
 	// mapping file number to a list of functions with code from that file.
 	var cutab []byte
+	// Declared once, outside the loop: a declaration in a loop in a
+	// self-mutating method is rejected.
+	var f funcData
+	var entry uint64
+	var filetab, linetab uint32
+	var found uint64
 	for i := uint32(0); i < t.nfunctab; i++ {
-		f := t.funcData(i)
-		entry := f.entryPC()
-		filetab := f.pcfile()
-		linetab := f.pcln()
+		f = t.funcData(i)
+		entry = f.entryPC()
+		filetab = f.pcfile()
+		linetab = f.pcln()
 		if t.version == ver116 || t.version == ver118 || t.version == ver120 {
 			if f.cuOffset() == ^uint32(0) {
 				// skip functions without compilation unit (not real function, or linker generated)
@@ -638,9 +638,9 @@ func (t *LineTable) go12LineToPC(file string, line int32) (pc uint64) {
 			}
 			cutab = t.cutab[f.cuOffset()*4:]
 		}
-		pc := t.findFileLine(entry, filetab, linetab, int32(filenum), int32(line), cutab)
-		if pc != 0 {
-			return pc
+		found = t.findFileLine(entry, filetab, linetab, int32(filenum), int32(line), cutab)
+		if found != 0 {
+			return found
 		}
 	}
 	return 0
@@ -653,15 +653,18 @@ func (t *LineTable) initFileMap() {
 	}
 	m := map[string]uint32{}
 
+	// Declared once, outside the loops: a declaration in a loop in a
+	// self-mutating method is rejected.
+	var s string
 	if t.version == ver12 {
 		for i := uint32(1); i < t.nfiletab; i++ {
-			s := t.string(t.binary.Uint32(t.filetab[4*i:]))
+			s = t.string(t.binary.Uint32(t.filetab[4*i:]))
 			m[s] = i
 		}
 	} else {
 		var pos uint32
 		for i := uint32(0); i < t.nfiletab; i++ {
-			s := t.stringFrom(t.filetab, pos)
+			s = t.stringFrom(t.filetab, pos)
 			m[s] = pos
 			pos += uint32(len(s) + 1)
 		}
@@ -673,11 +676,7 @@ func (t *LineTable) initFileMap() {
 // Every key maps to obj. That's not a very interesting map, but it provides
 // a way for callers to obtain the list of files in the program.
 func (t *LineTable) go12MapFiles(m map[string]*Obj, obj *Obj) {
-	if !disableRecover {
-		defer func() {
-			recover()
-		}()
-	}
+	defer recoverDiscard()
 
 	t.initFileMap()
 	for file := range t.fileMap {
@@ -688,3 +687,35 @@ func (t *LineTable) go12MapFiles(m map[string]*Obj, obj *Obj) {
 // disableRecover causes this package not to swallow panics.
 // This is useful when making changes.
 const disableRecover = false
+
+// The recover helpers are free functions, not deferred closures: a closure
+// that writes a named result would capture the enclosing frame, which Moxie
+// forbids. A deferred call receives the result's address as an argument.
+
+// recoverDiscard swallows a panic.
+func recoverDiscard() {
+	if !disableRecover {
+		recover()
+	}
+}
+
+// recoverLine resets a failed parse to the sentinel line -1.
+func recoverLine(line *int32) {
+	if !disableRecover && recover() != "" {
+		*line = -1
+	}
+}
+
+// recoverFile resets a failed parse to the empty file.
+func recoverFile(file *string) {
+	if !disableRecover && recover() != "" {
+		*file = ""
+	}
+}
+
+// recoverPC resets a failed parse to PC 0.
+func recoverPC(pc *uint64) {
+	if !disableRecover && recover() != "" {
+		*pc = 0
+	}
+}

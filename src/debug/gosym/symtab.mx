@@ -31,14 +31,14 @@ type Sym struct {
 }
 
 // Static reports whether this symbol is static (not visible outside its file).
-func (s *Sym) Static() bool { return s.Type >= 'a' }
+func (s *Sym) Static() (rok bool) { return s.Type >= 'a' }
 
 // nameWithoutInst returns s.Name if s.Name has no brackets (does not reference an
 // instantiated type, function, or method). If s.Name contains brackets, then it
 // returns s.Name with all the contents between (and including) the outermost left
 // and right bracket removed. This is useful to ignore any extra slashes or dots
 // inside the brackets from the string searches below, where needed.
-func (s *Sym) nameWithoutInst() string {
+func (s *Sym) nameWithoutInst() (out string) {
 	start := bytes.Index(s.Name, "[")
 	if start < 0 {
 		return s.Name
@@ -48,12 +48,12 @@ func (s *Sym) nameWithoutInst() string {
 		// Malformed name, should contain closing bracket too.
 		return s.Name
 	}
-	return s.Name[0:start] + s.Name[end+1:]
+	return s.Name[0:start] | s.Name[end+1:]
 }
 
 // PackageName returns the package part of the symbol name,
 // or the empty string if there is none.
-func (s *Sym) PackageName() string {
+func (s *Sym) PackageName() (out string) {
 	name := s.nameWithoutInst()
 
 	// Since go1.20, a prefix of "type:" and "go:" is a compiler-generated symbol,
@@ -83,7 +83,7 @@ func (s *Sym) PackageName() string {
 // ReceiverName returns the receiver type name of this symbol,
 // or the empty string if there is none.  A receiver name is only detected in
 // the case that s.Name is fully-specified with a package name.
-func (s *Sym) ReceiverName() string {
+func (s *Sym) ReceiverName() (out string) {
 	name := s.nameWithoutInst()
 	// If we find a slash in name, it should precede any bracketed expression
 	// that was removed, so pathend will apply correctly to name and s.Name.
@@ -108,7 +108,7 @@ func (s *Sym) ReceiverName() string {
 }
 
 // BaseName returns the symbol name without the package or receiver name.
-func (s *Sym) BaseName() string {
+func (s *Sym) BaseName() (out string) {
 	name := s.nameWithoutInst()
 	if i := bytes.LastIndex(name, "."); i != -1 {
 		if s.Name != name {
@@ -183,13 +183,16 @@ type sym struct {
 	name   []byte
 }
 
-func littleEndianSymtab() []byte    { return []byte{0xFD, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00} }
-func bigEndianSymtab() []byte       { return []byte{0xFF, 0xFF, 0xFF, 0xFD, 0x00, 0x00, 0x00} }
-func oldLittleEndianSymtab() []byte { return []byte{0xFE, 0xFF, 0xFF, 0xFF, 0x00, 0x00} }
+func littleEndianSymtab() (out []byte)    { return []byte{0xFD, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00} }
+func bigEndianSymtab() (out []byte)       { return []byte{0xFF, 0xFF, 0xFF, 0xFD, 0x00, 0x00, 0x00} }
+func oldLittleEndianSymtab() (out []byte) { return []byte{0xFE, 0xFF, 0xFF, 0xFF, 0x00, 0x00} }
 
-func walksymtab(data []byte, fn func(sym) error) error {
+// readSymtab decodes every symbol in data. It replaces the Go original's
+// callback: a Moxie function value carries no environment, so the two
+// callers' state cannot be captured - the decoded list is returned instead.
+func readSymtab(data []byte) (out []sym, err error) {
 	if len(data) == 0 { // missing symtab is okay
-		return nil
+		return nil, nil
 	}
 	var order binary.ByteOrder = binary.BigEndian()
 	newTable := false
@@ -209,11 +212,11 @@ func walksymtab(data []byte, fn func(sym) error) error {
 	var ptrsz int32
 	if newTable {
 		if len(data) < 8 {
-			return &DecodingError{len(data), "unexpected EOF", nil}
+			return nil, &DecodingError{len(data), "unexpected EOF", nil}
 		}
 		ptrsz = int32(data[7])
 		if ptrsz != 4 && ptrsz != 8 {
-			return &DecodingError{7, "invalid pointer size", ptrsz}
+			return nil, &DecodingError{7, "invalid pointer size", ptrsz}
 		}
 		data = data[8:]
 	}
@@ -235,7 +238,7 @@ func walksymtab(data []byte, fn func(sym) error) error {
 			p = p[1:]
 			if wideValue {
 				if len(p) < ptrsz {
-					return &DecodingError{len(data), "unexpected EOF", nil}
+					return nil, &DecodingError{len(data), "unexpected EOF", nil}
 				}
 				// fixed-width value
 				if ptrsz == 8 {
@@ -255,14 +258,14 @@ func walksymtab(data []byte, fn func(sym) error) error {
 					p = p[1:]
 				}
 				if len(p) == 0 {
-					return &DecodingError{len(data), "unexpected EOF", nil}
+					return nil, &DecodingError{len(data), "unexpected EOF", nil}
 				}
 				s.value |= uint64(p[0]) << shift
 				p = p[1:]
 			}
 			if goType {
 				if len(p) < ptrsz {
-					return &DecodingError{len(data), "unexpected EOF", nil}
+					return nil, &DecodingError{len(data), "unexpected EOF", nil}
 				}
 				// fixed-width go type
 				if ptrsz == 8 {
@@ -277,11 +280,11 @@ func walksymtab(data []byte, fn func(sym) error) error {
 			// Value, symbol type.
 			s.value = uint64(order.Uint32(p[0:4]))
 			if len(p) < 5 {
-				return &DecodingError{len(data), "unexpected EOF", nil}
+				return nil, &DecodingError{len(data), "unexpected EOF", nil}
 			}
 			typ = p[4]
 			if typ&0x80 == 0 {
-				return &DecodingError{len(data) - len(p) + 4, "bad symbol type", typ}
+				return nil, &DecodingError{len(data) - len(p) + 4, "bad symbol type", typ}
 			}
 			typ &^= 0x80
 			s.typ = typ
@@ -308,7 +311,7 @@ func walksymtab(data []byte, fn func(sym) error) error {
 			}
 		}
 		if len(p) < i+nnul {
-			return &DecodingError{len(data), "unexpected EOF", nil}
+			return nil, &DecodingError{len(data), "unexpected EOF", nil}
 		}
 		s.name = p[0:i]
 		i += nnul
@@ -316,26 +319,22 @@ func walksymtab(data []byte, fn func(sym) error) error {
 
 		if !newTable {
 			if len(p) < 4 {
-				return &DecodingError{len(data), "unexpected EOF", nil}
+				return nil, &DecodingError{len(data), "unexpected EOF", nil}
 			}
 			// Go type.
 			s.gotype = uint64(order.Uint32(p[:4]))
 			p = p[4:]
 		}
-		fn(s)
+		out = push(out, s)
 	}
-	return nil
+	return out, nil
 }
 
 // NewTable decodes the Go symbol table (the ".gosymtab" section in ELF),
 // returning an in-memory representation.
 // Starting with Go 1.3, the Go symbol table no longer includes symbol data.
-func NewTable(symtab []byte, pcln *LineTable) (*Table, error) {
-	var n int32
-	err := walksymtab(symtab, func(s sym) error {
-		n++
-		return nil
-	})
+func NewTable(symtab []byte, pcln *LineTable) (out *Table, err error) {
+	syms, err := readSymtab(symtab)
 	if err != nil {
 		return nil, err
 	}
@@ -345,14 +344,15 @@ func NewTable(symtab []byte, pcln *LineTable) (*Table, error) {
 		t.go12line = pcln
 	}
 	fname := map[uint16]string{}
-	t.Syms = []Sym{:0:n}
+	t.Syms = []Sym{:0:len(syms)}
 	nf := 0
 	nz := 0
 	lasttyp := uint8(0)
-	err = walksymtab(symtab, func(s sym) error {
-		n := len(t.Syms)
-		t.Syms = t.Syms[0 : n+1]
-		ts := &t.Syms[n]
+	for si := range syms {
+		s := syms[si]
+		ns := len(t.Syms)
+		t.Syms = t.Syms[0 : ns+1]
+		ts := &t.Syms[ns]
 		ts.Type = s.typ
 		ts.Value = s.value
 		ts.GoType = s.gotype
@@ -379,12 +379,13 @@ func NewTable(symtab []byte, pcln *LineTable) (*Table, error) {
 				eltIdx := binary.BigEndian().Uint16(s.name[i : i+2])
 				elt, ok := fname[eltIdx]
 				if !ok {
-					return &DecodingError{-1, "bad filename code", eltIdx}
+					return nil, &DecodingError{-1, "bad filename code", eltIdx}
 				}
-				if n := len(ts.Name); n > 0 && ts.Name[n-1] != '/' {
-					ts.Name += "/"
+				nameLen := len(ts.Name)
+				if nameLen > 0 && ts.Name[nameLen-1] != '/' {
+					ts.Name = ts.Name | "/"
 				}
-				ts.Name += elt
+				ts.Name = ts.Name | elt
 			}
 		}
 		switch s.typ {
@@ -394,10 +395,6 @@ func NewTable(symtab []byte, pcln *LineTable) (*Table, error) {
 			fname[uint16(s.value)] = ts.Name
 		}
 		lasttyp = s.typ
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
 
 	t.Funcs = []Func{:0:nf}
@@ -416,9 +413,11 @@ func NewTable(symtab []byte, pcln *LineTable) (*Table, error) {
 	// Count text symbols and attach frame sizes, parameters, and
 	// locals to them. Also, find object file boundaries.
 	lastf := 0
+	// pline tracks the line table as it narrows, without writing the parameter.
+	pline := pcln
 	for i := 0; i < len(t.Syms); i++ {
-		sym := &t.Syms[i]
-		switch sym.Type {
+		psym := &t.Syms[i]
+		switch psym.Type {
 		case 'Z', 'z': // path symbol
 			if t.go12line != nil {
 				// Go 1.2 binaries have the file information elsewhere. Ignore.
@@ -431,9 +430,9 @@ func NewTable(symtab []byte, pcln *LineTable) (*Table, error) {
 			lastf = len(t.Funcs)
 
 			// Start new object
-			n := len(t.Objs)
-			t.Objs = t.Objs[0 : n+1]
-			obj = &t.Objs[n]
+			objIdx := len(t.Objs)
+			t.Objs = t.Objs[0 : objIdx+1]
+			obj = &t.Objs[objIdx]
 
 			// Count & copy path symbols
 			var end int32
@@ -460,10 +459,11 @@ func NewTable(symtab []byte, pcln *LineTable) (*Table, error) {
 			}
 
 		case 'T', 't', 'L', 'l': // text symbol
-			if n := len(t.Funcs); n > 0 {
-				t.Funcs[n-1].End = sym.Value
+			funcCount := len(t.Funcs)
+			if funcCount > 0 {
+				t.Funcs[funcCount-1].End = psym.Value
 			}
-			if sym.Name == "runtime.etext" || sym.Name == "etext" {
+			if psym.Name == "runtime.etext" || psym.Name == "etext" {
 				continue
 			}
 
@@ -483,23 +483,23 @@ func NewTable(symtab []byte, pcln *LineTable) (*Table, error) {
 			}
 
 			// Fill in the function symbol
-			n := len(t.Funcs)
-			t.Funcs = t.Funcs[0 : n+1]
-			fn := &t.Funcs[n]
-			sym.Func = fn
+			fnIdx := len(t.Funcs)
+			t.Funcs = t.Funcs[0 : fnIdx+1]
+			fn := &t.Funcs[fnIdx]
+			psym.Func = fn
 			fn.Params = []*Sym{:0:np}
 			fn.Locals = []*Sym{:0:na}
-			fn.Sym = sym
-			fn.Entry = sym.Value
+			fn.Sym = psym
+			fn.Entry = psym.Value
 			fn.Obj = obj
 			if t.go12line != nil {
 				// All functions share the same line table.
 				// It knows how to narrow down to a specific
 				// function quickly.
 				fn.LineTable = t.go12line
-			} else if pcln != nil {
-				fn.LineTable = pcln.slice(fn.Entry)
-				pcln = fn.LineTable
+			} else if pline != nil {
+				fn.LineTable = pline.slice(fn.Entry)
+				pline = fn.LineTable
 			}
 			for j := i; j < end; j++ {
 				s := &t.Syms[j]
@@ -507,13 +507,13 @@ func NewTable(symtab []byte, pcln *LineTable) (*Table, error) {
 				case 'm':
 					fn.FrameSize = int32(s.Value)
 				case 'p':
-					n := len(fn.Params)
-					fn.Params = fn.Params[0 : n+1]
-					fn.Params[n] = s
+					pn := len(fn.Params)
+					fn.Params = fn.Params[0 : pn+1]
+					fn.Params[pn] = s
 				case 'a':
-					n := len(fn.Locals)
-					fn.Locals = fn.Locals[0 : n+1]
-					fn.Locals[n] = s
+					ln := len(fn.Locals)
+					fn.Locals = fn.Locals[0 : ln+1]
+					fn.Locals[ln] = s
 				}
 			}
 			i = end - 1 // loop will i++
@@ -531,7 +531,7 @@ func NewTable(symtab []byte, pcln *LineTable) (*Table, error) {
 
 // PCToFunc returns the function containing the program counter pc,
 // or nil if there is no such function.
-func (t *Table) PCToFunc(pc uint64) *Func {
+func (t *Table) PCToFunc(pc uint64) (out *Func) {
 	funcs := t.Funcs
 	for len(funcs) > 0 {
 		m := len(funcs) / 2
@@ -573,11 +573,11 @@ func (t *Table) LineToPC(file string, line int32) (pc uint64, fn *Func, err erro
 	}
 
 	if t.go12line != nil {
-		pc := t.go12line.go12LineToPC(file, line)
-		if pc == 0 {
+		found := t.go12line.go12LineToPC(file, line)
+		if found == 0 {
 			return 0, nil, &UnknownLineError{file, line}
 		}
-		return pc, t.PCToFunc(pc), nil
+		return found, t.PCToFunc(found), nil
 	}
 
 	abs, err := obj.alineFromLine(file, line)
@@ -586,9 +586,9 @@ func (t *Table) LineToPC(file string, line int32) (pc uint64, fn *Func, err erro
 	}
 	for i := range obj.Funcs {
 		f := &obj.Funcs[i]
-		pc := f.LineTable.LineToPC(abs, f.End)
-		if pc != 0 {
-			return pc, f, nil
+		found := f.LineTable.LineToPC(abs, f.End)
+		if found != 0 {
+			return found, f, nil
 		}
 	}
 	return 0, nil, &UnknownLineError{file, line}
@@ -596,7 +596,7 @@ func (t *Table) LineToPC(file string, line int32) (pc uint64, fn *Func, err erro
 
 // LookupSym returns the text, data, or bss symbol with the given name,
 // or nil if no such symbol is found.
-func (t *Table) LookupSym(name string) *Sym {
+func (t *Table) LookupSym(name string) (out *Sym) {
 	// TODO(austin) Maybe make a map
 	for i := range t.Syms {
 		s := &t.Syms[i]
@@ -612,7 +612,7 @@ func (t *Table) LookupSym(name string) *Sym {
 
 // LookupFunc returns the text, data, or bss symbol with the given name,
 // or nil if no such symbol is found.
-func (t *Table) LookupFunc(name string) *Func {
+func (t *Table) LookupFunc(name string) (out *Func) {
 	for i := range t.Funcs {
 		f := &t.Funcs[i]
 		if f.Sym.Name == name {
@@ -623,7 +623,7 @@ func (t *Table) LookupFunc(name string) *Func {
 }
 
 // SymByAddr returns the text, data, or bss symbol starting at the given address.
-func (t *Table) SymByAddr(addr uint64) *Sym {
+func (t *Table) SymByAddr(addr uint64) (out *Sym) {
 	for i := range t.Syms {
 		s := &t.Syms[i]
 		switch s.Type {
@@ -647,14 +647,17 @@ func (t *Table) SymByAddr(addr uint64) *Sym {
 //
 // Go 1.2 and later use a simpler format, documented at golang.org/s/go12symtab.
 
-func (o *Obj) lineFromAline(aline int32) (string, int32) {
-	type stackEnt struct {
-		path   string
-		start  int32
-		offset int32
-		prev   *stackEnt
-	}
+// stackEnt is one entry of the Plan 9 pc-line stack walked by lineFromAline.
+// It is a package-level type rather than a function-local one: a type
+// declaration inside a function body crashes stage4's SSA builder.
+type stackEnt struct {
+	path   string
+	start  int32
+	offset int32
+	prev   *stackEnt
+}
 
+func (o *Obj) lineFromAline(aline int32) (path string, line int32) {
 	noPath := &stackEnt{"", 0, 0, nil}
 	tos := noPath
 
@@ -689,7 +692,7 @@ pathloop:
 	return tos.path, aline - tos.start - tos.offset + 1
 }
 
-func (o *Obj) alineFromLine(path string, line int32) (int32, error) {
+func (o *Obj) alineFromLine(path string, line int32) (aline int32, err error) {
 	if line < 1 {
 		return 0, &UnknownLineError{path, line}
 	}
@@ -705,13 +708,13 @@ func (o *Obj) alineFromLine(path string, line int32) (int32, error) {
 		var incstart int32
 		line += int32(s.Value)
 	pathloop:
-		for _, s := range o.Paths[i:] {
-			val := int32(s.Value)
+		for _, p := range o.Paths[i:] {
+			val := int32(p.Value)
 			switch {
 			case depth == 1 && val >= line:
 				return line - 1, nil
 
-			case s.Name == "":
+			case p.Name == "":
 				depth--
 				if depth == 0 {
 					break pathloop
@@ -739,8 +742,8 @@ func (o *Obj) alineFromLine(path string, line int32) (int32, error) {
 // the symbol table.
 type UnknownFileError string
 
-func (e UnknownFileError) Error() string  { return "unknown file: " + string(e) }
-func (e UnknownFileError) String() string { return e.Error() }
+func (e *UnknownFileError) Error() (rs string)  { return "unknown file: " | string(*e) }
+func (e *UnknownFileError) String() (rs string) { return e.Error() }
 
 // UnknownLineError represents a failure to map a line to a program
 // counter, either because the line is beyond the bounds of the file
@@ -750,27 +753,25 @@ type UnknownLineError struct {
 	Line int32
 }
 
-func (e *UnknownLineError) Error() string {
-	return "no code at " + e.File + ":" + strconv.Itoa(e.Line)
+func (e *UnknownLineError) Error() (rs string) {
+	return "no code at " | e.File | ":" | strconv.Itoa(e.Line)
 }
 
-func (e *UnknownLineError) String() string { return e.Error() }
+func (e *UnknownLineError) String() (rs string) { return e.Error() }
 
 // DecodingError represents an error during the decoding of
 // the symbol table.
 type DecodingError struct {
 	off int32
 	msg string
-	val any
+	val fmt.Stringer
 }
 
-func (e *DecodingError) Error() string {
-	msg := e.msg
+func (e *DecodingError) Error() (rs string) {
 	if e.val != nil {
-		msg += fmt.Sprintf(" '%v'", e.val)
+		return e.msg | fmt.Sprintf(" '%v' at byte %#x", e.val, e.off)
 	}
-	msg += fmt.Sprintf(" at byte %#x", e.off)
-	return msg
+	return e.msg | fmt.Sprintf(" at byte %#x", e.off)
 }
 
-func (e *DecodingError) String() string { return e.Error() }
+func (e *DecodingError) String() (rs string) { return e.Error() }
