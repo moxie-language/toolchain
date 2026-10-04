@@ -2573,3 +2573,37 @@ passes natively and on wasm. Full suite: 177 passed / 0 failed, fixpoint holds.
    returns, so the codec runs and the monomorphized result's type metadata is
    wrong. Repro: `/tmp/genL2` - `lib.Use()` returns `b.Get().tag` where
    `Get() (out T)` and `b` is a `Box[E]`; it links and then panics.
+
+## A multi-value return from a generic method loses its values (new, reproduced)
+
+While narrowing `src/internal/trace` I found a second, sharper defect in the same
+area, and it is **silent data loss**, not a link error:
+
+- `func (q *queue[T]) pop() (out T, okay bool)` on `queue[Event]`, called
+  DIRECTLY from `main`: correct (`ok: true typ: 7 a: 11`).
+- The same call received inside another function:
+  - `func (o *ordering) Next() (out Event) { out, _ = o.queue.pop(); return }`
+    returns `typ: 0` (the value never arrives);
+  - `func (o *ordering) Next() (out Event, okay bool) { return o.queue.pop() }`
+    returns `ok: false` (the receiver state does not arrive either).
+- The single-result form is correct everywhere: `pop() (out T)` with
+  `Next() (out Event) { return o.queue.pop() }` prints `typ: 7 cmd: 11`.
+
+So a **two-result monomorphized method's tuple is not decoded/relocated
+correctly** at a call site inside a function whose own returns are relocated -
+`main` does not relocate, which is why the direct call works. This is almost
+certainly the same root as the `codec default bad size` panic recorded above (and
+the same family as the `[][]string` row-aliasing bug): the codec/relocation
+metadata for a monomorphized result tuple is misapplied. Reproducers are
+`/tmp/genE` (wrong state), `/tmp/genI` (minimal: wrong value), `/tmp/genH` and
+`/tmp/genF` (correct controls).
+
+`src/internal/trace` is *still* blocked before this can be reached, by a separate
+step: `o.queue.pop()` in `(*ordering).Next` calls the UNMANGLED
+`trace.(*queue).pop`, i.e. the `resolveMethodCallWithRecv` guard does not fire
+there. It does fire for the same shapes in a probe (`Box[E]` field, `queue[Event]`
+field, single- and multi-file layouts all route correctly), and the field typing
+is now substituted for all of them, so the remaining difference is specific to
+`ordering`/`Event`. Next step is cheap and decisive: print `recv.SSAType()`'s
+name plus its `TParams`/`TArgs` counts at the top of `resolveMethodCallWithRecv`
+when the selector is `pop`, build once, and read what `o.queue` actually carries.
