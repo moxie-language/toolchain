@@ -14,23 +14,26 @@ import (
 	"unsafe"
 )
 
+// lookupKind selects the C lookup retryWithBuffer performs.
+type lookupKind int32
+
+const (
+	lookupGetpwnam lookupKind = iota
+	lookupGetpwuid
+	lookupGetgrnam
+	lookupGetgrgid
+)
+
 func current() (ruser *User, rerr error) {
 	return lookupUnixUid(syscall.Getuid())
 }
 
 func lookupUser(username string) (ruser *User, rerr error) {
-	bufferInit()
-	var pwd _C_struct_passwd
-	var found bool
+	initBuffers()
 	nameC := []byte{:len(username)+1}
 	copy(nameC, username)
 
-	err := retryWithBuffer(userBuffer, func(buf []byte) syscall.Errno {
-		var errno syscall.Errno
-		pwd, found, errno = _C_getpwnam_r((*_C_char)(unsafe.Pointer(&nameC[0])),
-			(*_C_char)(unsafe.Pointer(&buf[0])), _C_size_t(len(buf)))
-		return errno
-	})
+	pwd, _, found, err := retryWithBuffer(userBuffer, lookupGetpwnam, nameC, 0)
 	if err == syscall.ENOENT || (err == nil && !found) {
 		return nil, UnknownUserError(username)
 	}
@@ -49,16 +52,8 @@ func lookupUserId(uid string) (ruser *User, rerr error) {
 }
 
 func lookupUnixUid(uid int32) (ruser *User, rerr error) {
-	bufferInit()
-	var pwd _C_struct_passwd
-	var found bool
-
-	err := retryWithBuffer(userBuffer, func(buf []byte) syscall.Errno {
-		var errno syscall.Errno
-		pwd, found, errno = _C_getpwuid_r(_C_uid_t(uid),
-			(*_C_char)(unsafe.Pointer(&buf[0])), _C_size_t(len(buf)))
-		return errno
-	})
+	initBuffers()
+	pwd, _, found, err := retryWithBuffer(userBuffer, lookupGetpwuid, nil, uid)
 	if err == syscall.ENOENT || (err == nil && !found) {
 		return nil, UnknownUserIdError(uid)
 	}
@@ -85,19 +80,11 @@ func buildUser(pwd *_C_struct_passwd) (ruser *User) {
 }
 
 func lookupGroup(groupname string) (rgroup *Group, rerr error) {
-	bufferInit()
-	var grp _C_struct_group
-	var found bool
-
+	initBuffers()
 	cname := []byte{:len(groupname)+1}
 	copy(cname, groupname)
 
-	err := retryWithBuffer(groupBuffer, func(buf []byte) syscall.Errno {
-		var errno syscall.Errno
-		grp, found, errno = _C_getgrnam_r((*_C_char)(unsafe.Pointer(&cname[0])),
-			(*_C_char)(unsafe.Pointer(&buf[0])), _C_size_t(len(buf)))
-		return errno
-	})
+	_, grp, found, err := retryWithBuffer(groupBuffer, lookupGetgrnam, cname, 0)
 	if err == syscall.ENOENT || (err == nil && !found) {
 		return nil, UnknownGroupError(groupname)
 	}
@@ -116,16 +103,8 @@ func lookupGroupId(gid string) (rgroup *Group, rerr error) {
 }
 
 func lookupUnixGid(gid int32) (rgroup *Group, rerr error) {
-	bufferInit()
-	var grp _C_struct_group
-	var found bool
-
-	err := retryWithBuffer(groupBuffer, func(buf []byte) syscall.Errno {
-		var errno syscall.Errno
-		grp, found, errno = _C_getgrgid_r(_C_gid_t(gid),
-			(*_C_char)(unsafe.Pointer(&buf[0])), _C_size_t(len(buf)))
-		return syscall.Errno(errno)
-	})
+	initBuffers()
+	_, grp, found, err := retryWithBuffer(groupBuffer, lookupGetgrgid, nil, gid)
 	if err == syscall.ENOENT || (err == nil && !found) {
 		return nil, UnknownGroupIdError(strconv.Itoa(gid))
 	}
@@ -146,20 +125,24 @@ func buildGroup(grp *_C_struct_group) (rgroup *Group) {
 type bufferKind _C_int
 
 var (
-	userBuffer  bufferKind
-	groupBuffer bufferKind
+	userBuffer      bufferKind
+	groupBuffer     bufferKind
 	_bufferInitDone bool
 )
 
-func bufferInit() {
-	if _bufferInitDone { return }
+// initBuffers is init-named: the only writer of the buffer-size globals, and
+// the immutability rule exempts an initializer.
+func initBuffers() {
+	if _bufferInitDone {
+		return
+	}
 	_bufferInitDone = true
 	userBuffer = bufferKind(_C__SC_GETPW_R_SIZE_MAX)
 	groupBuffer = bufferKind(_C__SC_GETGR_R_SIZE_MAX)
 }
 
-func (k bufferKind) initialSize() (r_C_size_t _C_size_t) {
-	sz := _C_sysconf(_C_int(k))
+func (k *bufferKind) initialSize() (rsize _C_size_t) {
+	sz := _C_sysconf(_C_int(*k))
 	if sz == -1 {
 		// DragonFly and FreeBSD do not have _SC_GETPW_R_SIZE_MAX.
 		// Additionally, not all Linux systems have it, either. For
@@ -173,21 +156,40 @@ func (k bufferKind) initialSize() (r_C_size_t _C_size_t) {
 	return _C_size_t(sz)
 }
 
-// retryWithBuffer repeatedly calls f(), increasing the size of the
-// buffer each time, until f succeeds, fails with a non-ERANGE error,
-// or the buffer exceeds a reasonable limit.
-func retryWithBuffer(kind bufferKind, f func([]byte) syscall.Errno) (rerr error) {
+// retryWithBuffer repeatedly performs the requested C lookup, increasing the
+// size of the buffer each time, until it succeeds, fails with a non-ERANGE
+// error, or the buffer exceeds a reasonable limit.
+//
+// The lookup is selected by op and carries its key as parameters rather than
+// as a closure: a Moxie function value has no environment, and a parameter
+// pointer cannot be written through, so the results are returned.
+func retryWithBuffer(kind bufferKind, op lookupKind, name []byte, id int32) (rpwd _C_struct_passwd, rgrp _C_struct_group, rfound bool, rerr error) {
 	buf := []byte{:kind.initialSize()}
 	for {
-		errno := f(buf)
+		var errno syscall.Errno
+		switch op {
+		case lookupGetpwnam:
+			rpwd, rfound, errno = _C_getpwnam_r((*_C_char)(unsafe.Pointer(&name[0])),
+				(*_C_char)(unsafe.Pointer(&buf[0])), _C_size_t(len(buf)))
+		case lookupGetpwuid:
+			rpwd, rfound, errno = _C_getpwuid_r(_C_uid_t(id),
+				(*_C_char)(unsafe.Pointer(&buf[0])), _C_size_t(len(buf)))
+		case lookupGetgrnam:
+			rgrp, rfound, errno = _C_getgrnam_r((*_C_char)(unsafe.Pointer(&name[0])),
+				(*_C_char)(unsafe.Pointer(&buf[0])), _C_size_t(len(buf)))
+		case lookupGetgrgid:
+			rgrp, rfound, errno = _C_getgrgid_r(_C_gid_t(id),
+				(*_C_char)(unsafe.Pointer(&buf[0])), _C_size_t(len(buf)))
+		}
 		if errno == 0 {
-			return nil
-		} else if errno != syscall.ERANGE {
-			return errno
+			return
+		}
+		if errno != syscall.ERANGE {
+			return rpwd, rgrp, rfound, errno
 		}
 		newSize := len(buf) * 2
 		if !isSizeReasonable(int64(newSize)) {
-			return fmt.Errorf("internal buffer exceeds %d bytes", maxBufferSize)
+			return rpwd, rgrp, rfound, fmt.Errorf("internal buffer exceeds %d bytes", maxBufferSize)
 		}
 		buf = []byte{:newSize}
 	}
