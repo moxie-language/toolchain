@@ -1729,3 +1729,27 @@ clang-22 segfault on `flate.(*Writer).Close` (huge struct value field plus
 
 The compiler carrying the spawn fix, the function-naming diagnostic, the
 carve-out deletion and this sweep is now **installed in-tree** (round 37).
+
+**Stdlib store migration: started.** `src/syscall`'s environment loaders are
+`initEnvs`/`initCopyenv` now (`cd612ee8`) - the largest single block there, and
+they take the init-named exemption - and the compiler builds clean with the
+rename. What is left of the inventory, in the order it should be taken:
+
+- **syscall (the rest)**: `Setenv`/`Unsetenv`/`Clearenv` write `env` and `envs`
+  after init and are public API, so they need the DNS-cache treatment - the
+  two globals behind a self-mutating holder whose methods do the writes;
+  `_getMapper`, `ensureRlimit`, `Setrlimit` and `prlimit` hold the other caches.
+- **time (11)**: `FixedZone`, `LoadLocation`, `_startNano`, `_ensureUtcLoc` and
+  `(*Location).get`. The zone *cache* is already an index; these are the
+  remaining global writes.
+- **os (10)**: `signalsInit`, `ensureMinrand`/`minrand`, `Mount`, `ensureFS`.
+  `ensureMinrand`/`ensureFS` are one-time builders and can be renamed; the
+  signal table is a genuine post-init cache.
+- then the **75 named slice/map types across 49 files**, and finally the scope
+  widening in `isUserPackagePath` - the migration should be complete *before*
+  the predicate changes, so the tree still builds at every step.
+
+The pre-existing debt list from the sweep section above (shadow errors,
+`undefined: slices.Sorted`/`Backward`, the `[]T{:...}` parse rejection, the
+clang-22 segfault) is independent of the store migration and can be taken in
+parallel.
