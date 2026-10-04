@@ -1831,3 +1831,40 @@ rest of the stdlib, then land the predicate.
 `errors.New`, `Error`, `String`, `Join` (result `jerr`, the body declares
 `err`), `Unwrap`, `Is` and the inner `is` are named. `Const` keeps value
 receivers until the 264 `const` sites move to `var` + `init()`.
+
+### The plan to the end (and what "done" means)
+
+Three agents own disjoint slices of the 263-package sweep and verify each package
+with `/tmp/mxc-wide-a` (the wide predicate), with the full suite as the behaviour
+gate:
+- **A**: `internal/**`, `math/**`, `unicode/**`, `strconv`, `strings`, `bytes`,
+  `bufio`, `sort`, `slices`, `maps`, `cmp`, `io/**`, `fmt`.
+- **B**: `encoding/**`, `compress/**`, `archive/**`, `image/**`, `text/**`,
+  `hash/**`, `crypto/**`, `index/**`, `debug/**`, `container/**`, `context`,
+  `path/**`, `evloop`.
+- **C**: `net/**`, `os/**`, `syscall/**`, `time/**`, `io/fs`, `mime/**`,
+  `log/**`, `regexp/**`, `math/rand/**` - the store-heavy slice, which also needs
+  the holder treatment (`syscall`'s `env`/`envs` pair and rlimit caches,
+  `time`'s `FixedZone`/`LoadLocation`, `os`'s signal table).
+
+Then, in order:
+1. **`errors.Const`**: convert its 264 `const X = errors.Const("...")`
+   declarations across 95 files to `var X error` + an `init()` assignment, then
+   switch `Const`'s receivers to pointers. Its own change, after the slices, so
+   the conversion is done once and not per package.
+2. **The rest of the sweep**: whatever the three slices do not finish, from
+   `/tmp/wide-sweep.txt` - the list is complete, so this is a work queue, not a
+   search.
+3. **Land the predicate**: put the widened `isUserPackagePath` in the tree, build
+   `_mxc_stage4` with it (the compiler complies with its own universal rules),
+   run the suite, and re-run the three app repos (nostr 194, morly 370,
+   musiquay 89 + wasm).
+4. **The independent debt** the sweep surfaced: the `[]T{:...}` slice-expression
+   parse rejection (`gunzip.mx:210`), the clang-22 segfault on
+   `flate.(*Writer).Close`, missing `slices.Sorted`/`slices.Backward`, and the
+   shadow/unused-import errors in `archive/zip`, `debug/dwarf`,
+   `internal/runtime/maps`, `index/suffixarray`, `image/*`, `x/text/*`.
+
+**Done is all four.** Until then the tree stays on the dot rule (stdlib exempt),
+so every app keeps building and the suite stays green at every commit; each
+slice lands as its own commit once its packages are clean and 171/171 holds.
