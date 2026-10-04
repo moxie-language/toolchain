@@ -1931,3 +1931,14 @@ it:
 3. `maps.All`/`Keys`/`Values` capture the map because `iter.Seq` takes no map
    parameter - that is the documented `iter` skip-list workaround, not a new
    blocker; the real fix is refactoring those signatures.
+
+**`context` is migrated** (slice B): `CancelFunc`/`CancelCauseFunc` are structs
+with pointer-receiver `Cancel()`; `AfterFunc(ctx, f)` takes a
+`context.Callback` (`Call()`) and returns a `StopFunc` with `Stop() bool`; and
+`WithDeadline` no longer uses a closure at all - a package-level
+`deadlineScheduler` arms one `time.AfterFunc(d, deadlineFired)` top-level
+callback. The `AfterFunc` signature change has exactly one caller in the tree
+(`src/crypto/tls/conn.mx`, slice B). The cross-slice call sites - `cancel()` ->
+`cancel.Cancel()` and `cancel(err)` -> `cancel.Cancel(err)` - are 24 lines in
+`src/net/dial.mx`, `src/net/http/{h2_bundle,server,transport}.mx`, all routed to
+slice C with line numbers; the type annotations stay unchanged.
