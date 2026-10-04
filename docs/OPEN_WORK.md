@@ -1445,3 +1445,16 @@ loops. Verified: compiler builds, a probe covering struct and interface
 declarations, nested composite literals and a variadic argument list prints
 `point 7 n 2 area 25 square sum 10`, and the suite is **171/171, 0 failures**.
 Thirteen of the sixteen are gone; `paramList`, `init` and `initBytes` remain.
+
+**paramList is inlined too** (`583f7258`), the last `p.list` closure: the
+callback captured `name`, `typ`, `named`, `typed` and `list`. `listSep`
+advances exactly as `p.list` did, so the position `p.list` returned survives as
+`end` on both the success and the unrecoverable-separator paths, and the closer
+is consumed only when the separator did not fail. Compiler builds; suite
+**171/171, 0 failures**. Fourteen of the sixteen are gone; only the `init` and
+`initBytes` scanner callbacks remain, and they need the same shape one level
+down: `Scanner.Init`/`InitBytes` take `errh func(line, col uint32, msg string)`
+and hand it to `Source.init`, where the only implementation is a closure over
+`p`. Storing the owning `*Parser` on the Scanner/Source and calling
+`p.scanError(...)` directly removes both without inventing a function value
+that would capture.
