@@ -1351,3 +1351,17 @@ shows. The order is therefore: give `pkg/syntax`'s sixteen closures explicit
 parameters (which is the model's own rule anyway), then drop the carve-out for
 the compiler and the app repos together, then the stdlib (75 named types and its
 share of the global stores), and the runtime carve-out stays.
+
+**The sixteen `pkg/syntax` captures are two different things.** Seven of them
+are not source closures at all: `fileOrNil__mval1..4` and `stmtOrNil__mval1..3`
+are wrappers `ssa_builder.mx` generates itself (`buildMethodValue`, the
+`__mval` name at `ssa_builder.mx:5528`) for a **bound method value**, and the
+wrapper's free variable is `recv`. A bound method value *is* a capture - the
+receiver is the environment - so the compiler is emitting code that its own
+capture rule rejects. The lowering needs to resolve a selector that is being
+called directly without materialising a bound value first, or a bound method
+value has to be rejected by name in user code, because a Moxie function value
+carries a code pointer and no environment and so cannot represent one. The
+other nine (`appendGroup`, `argList`, `complitexpr`, `init`, `initBytes`,
+`interfaceType`, `paramList`, `structType`, `trace`) are real source closures
+and want explicit parameters.
