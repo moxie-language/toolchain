@@ -14,7 +14,7 @@ func (*srcDone) String() (s string) { return "EOF" }
 
 type Source struct {
 	in    io.Reader
-	errh  func(line, col uint32, msg string)
+	owner *Parser
 	arena *runtime.Arena
 
 	buf       []byte
@@ -31,13 +31,13 @@ const sentinel = 0x80
 func (s *Source) release() {
 	s.buf = nil
 	s.in = nil
-	s.errh = nil
+	s.owner = nil
 	s.ioerr = nil
 }
 
-func (s *Source) init(in io.Reader, errh func(line, col uint32, msg string)) {
+func (s *Source) init(in io.Reader, owner *Parser) {
 	s.in = in
-	s.errh = errh
+	s.owner = owner
 
 	if s.buf == nil {
 		s.buf = []byte{:nextSize(0)}
@@ -51,9 +51,9 @@ func (s *Source) init(in io.Reader, errh func(line, col uint32, msg string)) {
 	s.chw = 0
 }
 
-func (s *Source) initBytes(src []byte, errh func(line, col uint32, msg string)) {
+func (s *Source) initBytes(src []byte, owner *Parser) {
 	s.in = nil
-	s.errh = errh
+	s.owner = owner
 	s.noFill = true
 	s.buf = []byte{:len(src) + 1}
 	copy(s.buf, src)
@@ -78,7 +78,7 @@ func (s *Source) Debugpos() (line, col uint32) {
 
 func (s *Source) error(msg string) {
 	line, col := s.pos()
-	s.errh(line, col, msg)
+	s.owner.scanError(line, col, msg)
 }
 
 func (s *Source) start()          { s.b = s.r - s.chw }

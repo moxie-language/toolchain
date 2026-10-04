@@ -52,7 +52,48 @@ func (p *Parser) init(file *token.PosBase, r io.Reader, Errh ErrorHandler, Pragh
 		// handler is always at or after the current reading
 		// position, it is safe to use the most recent position
 		// base to compute the corresponding Pos value.
-		func(line, col uint32, msg string) {
+p,
+		comments,
+	)
+
+	p.Base = file
+	p.First = nil
+	p.Errcnt = 0
+	p.Pragma = nil
+
+	p.Fnest = 0
+	p.Xnest = 0
+	p.Indent = nil
+}
+
+func (p *Parser) initBytes(file *token.PosBase, src []byte, Errh ErrorHandler, Pragh PragmaHandler, mode Mode) {
+	p.Top = true
+	p.File = file
+	p.Errh = Errh
+	p.Mode = mode
+	p.Pragh = Pragh
+	p.Scanner.arena = p.Arena
+	p.Scanner.InitBytes(
+		src,
+p,
+		comments,
+	)
+
+	p.Base = file
+	p.First = nil
+	p.Errcnt = 0
+	p.Pragma = nil
+
+	p.Fnest = 0
+	p.Xnest = 0
+	p.Indent = nil
+}
+
+// scanError is the scanner's error and directive handler. It is a method
+// rather than a func value the scanner holds because the handler needs the
+// parser, and a bound method value or a closure would capture it - Moxie
+// function values carry no environment.
+func (p *Parser) scanError(line, col uint32, msg string) {
 			if msg[0] != '/' {
 				p.errorAt(p.posAt(line, col), msg)
 				return
@@ -80,75 +121,14 @@ func (p *Parser) init(file *token.PosBase, r io.Reader, Errh ErrorHandler, Pragh
 
 			// go: directive (but be conservative and test)
 			if bytes.HasPrefix(text, "go:") || bytes.HasPrefix(text, ":") {
-				if Pragh != nil {
-					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma) // +2 to skip over // or /*
+				if p.Pragh != nil {
+					p.Pragma = p.Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma) // +2 to skip over // or /*
 				}
 			} else if bytes.HasPrefix(text, "export ") {
-				if Pragh != nil {
-					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
+				if p.Pragh != nil {
+					p.Pragma = p.Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
 				}
-			}
-		},
-		comments,
-	)
-
-	p.Base = file
-	p.First = nil
-	p.Errcnt = 0
-	p.Pragma = nil
-
-	p.Fnest = 0
-	p.Xnest = 0
-	p.Indent = nil
-}
-
-func (p *Parser) initBytes(file *token.PosBase, src []byte, Errh ErrorHandler, Pragh PragmaHandler, mode Mode) {
-	p.Top = true
-	p.File = file
-	p.Errh = Errh
-	p.Mode = mode
-	p.Pragh = Pragh
-	p.Scanner.arena = p.Arena
-	p.Scanner.InitBytes(
-		src,
-		func(line, col uint32, msg string) {
-			if msg[0] != '/' {
-				p.errorAt(p.posAt(line, col), msg)
-				return
-			}
-			text := commentText(msg)
-			if (col == Colbase || msg[1] == '*') && bytes.HasPrefix(text, "line ") {
-				var pos token.Pos
-				if msg[1] == '/' {
-					pos = token.MakePos(p.File, line+1, Colbase)
-				} else {
-					pos = token.MakePos(p.File, line, col+uint32(len(msg)))
-				}
-				p.updateBase(pos, line, col+2+5, text[5:])
-				return
-			}
-			if bytes.HasPrefix(text, "go:") || bytes.HasPrefix(text, ":") {
-				if Pragh != nil {
-					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
-				}
-			} else if bytes.HasPrefix(text, "export ") {
-				if Pragh != nil {
-					p.Pragma = Pragh(p.posAt(line, col+2), p.Scanner.Blank, text, p.Pragma)
-				}
-			}
-		},
-		comments,
-	)
-
-	p.Base = file
-	p.First = nil
-	p.Errcnt = 0
-	p.Pragma = nil
-
-	p.Fnest = 0
-	p.Xnest = 0
-	p.Indent = nil
-}
+			}}
 
 // takePragma returns the current parsed pragmas
 // and clears them from the parser state.
