@@ -1688,3 +1688,10 @@ yet installed in-tree because the stdlib sweep holds `./moxie`: the `spawn`
 control channel is `chan struct{}`, the unnamed-return diagnostic names the
 function, and `checkPackageDecls`/`isUserPackagePath` are as landed. Legacy's
 mirror of the spawn typing still needs checking (wood law).
+
+**Wood law checked for the spawn typing.** A probe that assigns `spawn(...)`'s
+result to a `chan struct{}` variable builds and runs identically on both
+compilers (`ok true`): legacy already typed the control channel `chan struct{}`,
+so the round-32 fix removed a divergence rather than creating one. The probe
+lives at `/tmp/spawnprobe` and is the shape any future spawn-result change
+should be checked against.
