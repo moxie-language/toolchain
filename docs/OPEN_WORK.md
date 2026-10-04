@@ -2086,3 +2086,23 @@ outside are four interface dispatches in the runtime, which already box
 headers (needs the bilateral legacy mirror), and `sysroot/runtime_go.bc` is now
 stale against the new codec and needs `build-runtime` before apps can call the
 free functions.
+
+**Alias sweep result:** `grep -rnE '^type [A-Za-z_][A-Za-z_0-9]* = (\[\]|map\[)' src` returned
+exactly the seven routed (archive/tar, archive/zip x2, crypto/internal/boring,
+debug/dwarf, image/jpeg) plus the two being fixed (math/big, internal/poll);
+`pkg/` has none. So the alias-free policy has a bounded work list, and slice A
+will re-run the grep after its two land.
+
+**Remaining owner gap closed:** slice C finished and stopped, leaving
+`src/net/**` unowned (275 value receivers, the removed-`any` debt in
+`net/http/transfer.mx` and `httptrace/trace.mx`, and `rawconn`). A new agent owns
+it, with the explicit instruction that value receivers on interface-used types
+must be **left alone and reported** until the cross-package pointer-receiver
+dispatch bug is fixed - converting them now would ship a runtime wrong-receiver
+bug. `src/net/rawconn.mx:89-90` is already done here (`poll.String` -> `[]byte`).
+
+**Probe status after `src/moxie` landed:** `fmt` still stops at
+`mxc: compile error for syscall` with its seven `value receiver (*Errno,
+*Signal)` lines - i.e. `fmt`'s own rules remain unmeasurable until the
+interface-dispatch bug is fixed, since those seven are exactly the receivers
+that cannot be converted yet.
