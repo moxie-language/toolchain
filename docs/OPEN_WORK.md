@@ -1631,3 +1631,11 @@ blockers** surfaced where the sweep landed, none of them the rule:
    the parser; and `gzip.mx` references an undefined package-level `le`.
 3. `archive/zip` carries ~9 pre-existing shadow errors and `debug/dwarf` an
    unused `errors` import, both present at HEAD.
+
+**musiquay is migrated and green** (`9ec2359`). Its only debt was `pkg/protocol`
+itself: `ensureFormats` and `ensureRoles` (the lazy one-time builders behind
+`credits.Formats` and `tag.RosterRoles`/`CreditRoles`) take the init-named
+exemption as `initFormats`/`initRoles`, and the two `"unknown role: "` joins use
+`|`. `make test-unit` is **89 passed** (protocol 62, marmot 18, mls 1,
+protocolwire 8) and `build-app-wasm` links. With nostr green too, only morly
+remains of the three app repos.
