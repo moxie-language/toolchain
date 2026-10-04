@@ -1572,3 +1572,18 @@ by `isUserPackagePath` (`checkSovereignLoopDecls` runs for every package), so
 the stdlib carries that violation independently of the carve-out; it surfaced
 here only because a nostr package's import closure reaches it. It is a stdlib
 item for the next stage, not nostr debt.
+
+**The ungated sovereign-loop rule has stdlib debt too.** Since
+`checkSovereignLoopDecls` is not gated by `isUserPackagePath`, every stdlib
+package with a declaration inside a loop in a self-mutating method fails as
+soon as anything compiles it - which is why nostr's build stopped at
+`net/textproto`. `src/net/textproto` is fixed (`2b2a1bd4`: `dotWriter.Write`,
+`dotReader.Read`, `(*Reader).readContinuedLineSlice` and `skipSpace` declare
+their loop scratch once, before the loop - behaviour-identical, and the scratch
+is allocated once instead of per iteration in the sovereign arena). A sweep
+over every stdlib package is running and has already flagged more, including
+`hash/crc32`'s `(*CRC32).archInitCastagnoli` and several decoder readers
+(`bitReader.ReadBits64`, `readFromBlock`, `(*reader).read`). Each is the same
+two-line hoist. The list lands in `/tmp/sovloop.txt`; it is stdlib work for the
+next stage, but it blocks any build whose closure reaches one of them, so it
+comes before the named-type and global-store sweeps.
