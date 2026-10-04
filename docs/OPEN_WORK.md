@@ -1695,3 +1695,11 @@ compilers (`ok true`): legacy already typed the control channel `chan struct{}`,
 so the round-32 fix removed a divergence rather than creating one. The probe
 lives at `/tmp/spawnprobe` and is the shape any future spawn-result change
 should be checked against.
+
+**Suite re-verified with the spawn-fix compiler: 171/171, 0 failures.** The run
+used `MOXIE=/tmp/mxc-spawn` (the binary still cannot be installed - the swipe
+sweep holds `./moxie`), and it covers the carve-out deletion, the `spawn`
+control-channel fix, the function-naming diagnostic and every stdlib
+sovereign-loop fix committed so far. That is the strongest single piece of
+evidence for the whole stage: nothing in the tree regressed while the app repos
+and the stdlib were being migrated.
