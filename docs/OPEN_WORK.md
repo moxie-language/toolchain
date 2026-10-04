@@ -1411,3 +1411,17 @@ function value carries no environment for the closure to read. The other nine
 are ordinary source closures (`argList`, `complitexpr`, `init`, `initBytes`,
 `interfaceType`, `paramList`, `structType`, `trace`) and want the same
 treatment.
+
+**Seven of the sixteen captures are gone** (`f2ef194b`). `appendGroup` and
+`declStmt` now take a small declaration-kind enum and dispatch through
+`declOfKind` instead of receiving `p.importDecl` / `p.varDecl` / ... as bound
+method values, and `appendGroup`'s loop is inlined so it no longer hands
+`p.list` a closure that reads `list` and `g` from the caller's frame. That is
+eight of the sixteen (seven method values plus the closure). Verified: the
+compiler builds - it parses its own source with the new parser - a probe with
+grouped `import`/`const`/`type` at package scope and grouped `const`/`var`
+inside a function prints `ok 33 6 1`, and the suite is **171/171 with 0
+failures**, bootstrap included. The remaining eight are ordinary source
+closures in `pkg/syntax` (`argList`, `complitexpr`, `init`, `initBytes`,
+`interfaceType`, `paramList`, `structType`, `trace`) and want explicit
+parameters.
