@@ -1639,3 +1639,16 @@ exemption as `initFormats`/`initRoles`, and the two `"unknown role: "` joins use
 `|`. `make test-unit` is **89 passed** (protocol 62, marmot 18, mls 1,
 protocolwire 8) and `build-app-wasm` links. With nostr green too, only morly
 remains of the three app repos.
+
+**morly's migration, second pass.** The first sweep's heuristic (result lists
+whose elements contain no space) missed every signature whose parameter list
+spans lines or whose single result is a bare type: `pickSmallest`'s `[]byte`,
+`mergeStep`'s `([]byte, []byte)`, `wal`'s Open/Append/Read, `transport`'s five,
+`wire`'s eighteen `EncodeTo`/`DecodeFrom` and `config`'s three parsers. A
+scanner that walks from `func` to the signature's opening brace catches them;
+that is the tool to use on any remaining repo. `acl`'s anonymous value
+receivers (`func (Open) AllowWrite(...)`) are named pointer receivers now.
+Remaining: `pkg/broadcast` (`New`/`PreSpawn` store globals, plus a
+`chan struct{}` / `<-chan string` mismatch), and the compiler diagnostic that
+names the failing function is built but still cannot be installed while the
+stdlib sweep holds `./moxie`.
