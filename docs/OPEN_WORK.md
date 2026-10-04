@@ -2598,12 +2598,15 @@ metadata for a monomorphized result tuple is misapplied. Reproducers are
 `/tmp/genE` (wrong state), `/tmp/genI` (minimal: wrong value), `/tmp/genH` and
 `/tmp/genF` (correct controls).
 
-`src/internal/trace` is *still* blocked before this can be reached, by a separate
-step: `o.queue.pop()` in `(*ordering).Next` calls the UNMANGLED
-`trace.(*queue).pop`, i.e. the `resolveMethodCallWithRecv` guard does not fire
-there. It does fire for the same shapes in a probe (`Box[E]` field, `queue[Event]`
-field, single- and multi-file layouts all route correctly), and the field typing
-is now substituted for all of them, so the remaining difference is specific to
-`ordering`/`Event`. Next step is cheap and decisive: print `recv.SSAType()`'s
-name plus its `TParams`/`TArgs` counts at the top of `resolveMethodCallWithRecv`
-when the selector is `pop`, build once, and read what `o.queue` actually carries.
+**`src/internal/trace` has moved on.** The diagnostic (print the receiver's
+`Named` name plus its `TParams`/`TArgs` counts at the top of
+`resolveMethodCallWithRecv`) answered it in one build:
+`ty=trace.queue named=queue tparams=0 targs=1`. The instantiated `Named` carries
+its ARGUMENTS but an EMPTY parameter list, so a guard testing `TParams` never
+fired. Keying the guard on `len(TArgs) > 0` as well routes it to the
+monomorphizing path; the `ptr`-vs-struct error is gone and trace now fails later,
+on `%tN defined with type 'i64' but expected 'i8'` - the same class as the
+`unique` bug recorded earlier (a generic struct's narrow field stored with the
+wide type). So TParams is unreliable and TArgs is the signal; anything else
+testing `len(TParams) > 0` to mean "this is a generic instantiation" should be
+audited the same way.
