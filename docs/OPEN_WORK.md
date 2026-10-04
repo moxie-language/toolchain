@@ -2003,3 +2003,28 @@ and slice C was told about its two.
 **The general trap worth remembering:** converting the stdlib's sentinels from
 string-typed constants to `var error` breaks every `string(SENTINEL)` site,
 because a string constant and an `error` interface are not the same thing.
+
+## CRITICAL: cross-package pointer-receiver interface dispatch is broken
+
+Reproduced minimally (`/tmp/ifacedisp`): a named basic `type E int32` in package
+`zzlib` with `func (e *E) Error() (s string)`, a constructor returning `*E`, and
+a caller in `package main`:
+
+```
+p := zzlib.MK();  p.Error()            -> "one"   correct
+var err error = zzlib.MK(); err.Error() -> "other" WRONG receiver
+```
+
+Same-package dispatch is correct; a custom `String()` interface behaves the
+same; a `const` of a named basic used as an interface value panics
+`interface dispatch: no impl for Error`; and boxing `syscall.Errno` in a stable
+root-arena holder still dispatched to the wrong receiver while a direct call on
+the box was correct.
+
+**Why it matters:** rule 2 (pointer receivers) cannot be applied to any type
+used through an interface until this is fixed - `syscall.Errno`/`Signal`,
+`io/fs.FileMode`, and the 49 `time.Time` value receivers are all in this class.
+The slice-C agent reverted `Errno`/`Signal` to value receivers to keep the tree
+green, and slice A's `FileMode` pointer receivers are suspect for the same
+reason. A diagnosis agent owns it now; a full write-up of the mechanism and the
+fix is the deliverable.
