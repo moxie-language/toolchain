@@ -321,8 +321,12 @@ func (d *decoder) parsetRNS(length uint32) error {
 		if len(d.palette) < n {
 			d.palette = d.palette[:n]
 		}
+		// Declared once, outside the loop: a declaration in a loop in a
+		// self-mutating method is rejected, and the scratch would otherwise be
+		// allocated into the sovereign arena on every iteration.
+		var rgba color.RGBA
 		for i := 0; i < n; i++ {
-			rgba := d.palette[i].(color.RGBA)
+			rgba = d.palette[i].(color.RGBA)
 			d.palette[i] = color.NRGBA{rgba.R, rgba.G, rgba.B, d.tmp[i]}
 		}
 
@@ -946,10 +950,15 @@ func (d *decoder) parseChunk(configOnly bool) error {
 	}
 	// Ignore this chunk (of a known length).
 	var ignored [4096]byte
+	// Declared once, outside the loop: a declaration in a loop in a
+	// self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var n int32
+	var rerr error
 	for length > 0 {
-		n, err := io.ReadFull(d.r, ignored[:min(len(ignored), int32(length))])
-		if err != nil {
-			return err
+		n, rerr = io.ReadFull(d.r, ignored[:min(len(ignored), int32(length))])
+		if rerr != nil {
+			return rerr
 		}
 		d.crc.Write(ignored[:n])
 		length -= uint32(n)

@@ -280,32 +280,43 @@ func (r *Reader) execSeqs(data block, off int32, litbuf []byte, seqCount int32) 
 	// Read and perform all the sequences. RFC 3.1.1.4.
 
 	seq := 0
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var ptoffset *fseBaselineEntry
+	var ptmatch *fseBaselineEntry
+	var ptliteral *fseBaselineEntry
+	var add uint32
+	var verr error
+	var offset uint32
+	var match uint32
+	var literal uint32
 	for seq < seqCount {
 		if len(r.buffer)+len(litbuf) > 128<<10 {
 			return rbr.makeError("uncompressed size too big")
 		}
 
-		ptoffset := &r.seqTables[seqOffset][offsetState]
-		ptmatch := &r.seqTables[seqMatch][matchState]
-		ptliteral := &r.seqTables[seqLiteral][literalState]
+		ptoffset = &r.seqTables[seqOffset][offsetState]
+		ptmatch = &r.seqTables[seqMatch][matchState]
+		ptliteral = &r.seqTables[seqLiteral][literalState]
 
-		add, verr := rbr.val(ptoffset.basebits)
+		add, verr = rbr.val(ptoffset.basebits)
 		if verr != nil {
 			return verr
 		}
-		offset := ptoffset.baseline + add
+		offset = ptoffset.baseline + add
 
 		add, verr = rbr.val(ptmatch.basebits)
 		if verr != nil {
 			return verr
 		}
-		match := ptmatch.baseline + add
+		match = ptmatch.baseline + add
 
 		add, verr = rbr.val(ptliteral.basebits)
 		if verr != nil {
 			return verr
 		}
-		literal := ptliteral.baseline + add
+		literal = ptliteral.baseline + add
 
 		// Handle repeat offsets. RFC 3.1.1.5.
 		// See the comment in makeOffsetBaselineFSE.
@@ -423,8 +434,12 @@ func (r *Reader) copyFromWindow(rbr *reverseBitReader, offset, match uint32) err
 
 	// We are being asked to copy data that we are adding to the
 	// buffer in the same copy.
+	// Declared once, outside the loop: a declaration in a loop in a
+	// self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var avail uint32
 	for match > 0 {
-		avail := uint32(len(r.buffer)) - bufferOffset
+		avail = uint32(len(r.buffer)) - bufferOffset
 		if avail > match {
 			avail = match
 		}

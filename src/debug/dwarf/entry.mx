@@ -468,8 +468,8 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 
 		b1 := makeBuf(b.dwarf, b.format, "str_offsets", 0, b.dwarf.strOffsets)
 		b1.skip(int32(stroff))
-		is64, _ := b.format.dwarf64()
-		if is64 {
+		c64, _ := b.format.dwarf64()
+		if c64 {
 			stroff = b1.uint64()
 		} else {
 			stroff = uint64(b1.uint32())
@@ -483,16 +483,16 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 		}
 		b1 = makeBuf(b.dwarf, b.format, "str", 0, b.dwarf.str)
 		b1.skip(int32(stroff))
-		val := b1.string()
+		sval := b1.string()
 		if b1.err != nil {
 			b.err = b1.err
 		}
-		return val
+		return sval
 	}
 
 	resolveRnglistx := func(rnglistsBase, rngoff uint64) uint64 {
-		is64, _ := b.format.dwarf64()
-		if is64 {
+		d64, _ := b.format.dwarf64()
+		if d64 {
 			rngoff *= 8
 		} else {
 			rngoff *= 4
@@ -504,7 +504,7 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 
 		b1 := makeBuf(b.dwarf, b.format, "rnglists", 0, b.dwarf.rngLists)
 		b1.skip(int32(rngoff))
-		if is64 {
+		if d64 {
 			rngoff = b1.uint64()
 		} else {
 			rngoff = uint64(b1.uint32())
@@ -519,15 +519,33 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 		return rnglistsBase + rngoff
 	}
 
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration. `sbuf`,
+	// `uStrBase` and `uRngBase` carry prefixes because the closures above
+	// bind `b1`, `strBase` and `rnglistsBase` in their own scopes.
+	var fm format
+	var val fieldValue
+	var aoff uint64
+	var addrBase int64
+	var err error
+	var fvers int32
+	var is64 bool
+	var known bool
+	var soff uint64
+	var sbuf buf
+	var uStrBase int64
+	var loff uint64
+	var uRngBase int64
+
 	for i := range e.Field {
 		e.Field[i].Attr = a.field[i].attr
 		e.Field[i].Class = a.field[i].class
-		fm := a.field[i].fmt
+		fm = a.field[i].fmt
 		if fm == formIndirect {
 			fm = format(b.uintVar())
 			e.Field[i].Class = formToClass(fm, a.field[i].attr, vers, b)
 		}
-		var val fieldValue
 		switch fm {
 		default:
 			b.error("unknown entry attr format 0x" + strconv.FormatInt(int64(fm), 16))
@@ -536,7 +554,6 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 		case formAddr:
 			val = valUint64(b.addr())
 		case formAddrx, formAddrx1, formAddrx2, formAddrx3, formAddrx4:
-			var aoff uint64
 			switch fm {
 			case formAddrx:
 				aoff = uint64(b.uint32())
@@ -556,8 +573,7 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 				return nil
 			}
 
-			addrBase := int64(u.addrBase())
-			var err error
+			addrBase = int64(u.addrBase())
 			val, err = b.dwarf.debugAddr(b.format, uint64(addrBase), aoff)
 			if err != nil {
 				if b.err == nil {
@@ -605,13 +621,13 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 
 		// reference to other entry
 		case formRefAddr:
-			fvers := b.format.version()
+			fvers = b.format.version()
 			if fvers == 0 {
 				b.error("unknown version for DW_FORM_ref_addr")
 			} else if fvers == 2 {
 				val = valOffset(Offset(b.addr()))
 			} else {
-				is64, known := b.format.dwarf64()
+				is64, known = b.format.dwarf64()
 				if !known {
 					b.error("unknown size for DW_FORM_ref_addr")
 				} else if is64 {
@@ -635,8 +651,8 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 		case formString:
 			val = valStr(b.string())
 		case formStrp, formLineStrp:
-			var soff uint64 // offset into .debug_str
-			is64, known := b.format.dwarf64()
+			// soff is an offset into .debug_str
+			is64, known = b.format.dwarf64()
 			if !known {
 				b.error("unknown size for DW_FORM_strp/line_strp")
 			} else if is64 {
@@ -650,24 +666,22 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 			if b.err != nil {
 				return nil
 			}
-			var b1 buf
 			if fm == formStrp {
-				b1 = makeBuf(b.dwarf, b.format, "str", 0, b.dwarf.str)
+				sbuf = makeBuf(b.dwarf, b.format, "str", 0, b.dwarf.str)
 			} else {
 				if len(b.dwarf.lineStr) == 0 {
 					b.error("DW_FORM_line_strp with no .debug_line_str section")
 					return nil
 				}
-				b1 = makeBuf(b.dwarf, b.format, "line_str", 0, b.dwarf.lineStr)
+				sbuf = makeBuf(b.dwarf, b.format, "line_str", 0, b.dwarf.lineStr)
 			}
-			b1.skip(int32(soff))
-			val = valStr(b1.string())
-			if b1.err != nil {
-				b.err = b1.err
+			sbuf.skip(int32(soff))
+			val = valStr(sbuf.string())
+			if sbuf.err != nil {
+				b.err = sbuf.err
 				return nil
 			}
 		case formStrx, formStrx1, formStrx2, formStrx3, formStrx4:
-			var soff uint64
 			switch fm {
 			case formStrx:
 				soff = b.uintVar()
@@ -683,7 +697,7 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 			if len(b.dwarf.strOffsets) == 0 {
 				b.error("DW_FORM_strx with no .debug_str_offsets section")
 			}
-			is64, known := b.format.dwarf64()
+			is64, known = b.format.dwarf64()
 			if !known {
 				b.error("unknown offset size for DW_FORM_strx")
 			}
@@ -696,11 +710,11 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 				soff *= 4
 			}
 
-			strBase := int64(u.strOffsetsBase())
-			val = valStr(resolveStrx(uint64(strBase), soff))
+			uStrBase = int64(u.strOffsetsBase())
+			val = valStr(resolveStrx(uint64(uStrBase), soff))
 
 		case formStrpSup:
-			is64, known := b.format.dwarf64()
+			is64, known = b.format.dwarf64()
 			if !known {
 				b.error("unknown size for DW_FORM_strp_sup")
 			} else if is64 {
@@ -713,7 +727,7 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 		// New in DWARF 4, but clang can generate them with -gdwarf-2.
 		// Section reference, replacing use of formData4 and formData8.
 		case formSecOffset, formGnuRefAlt, formGnuStrpAlt:
-			is64, known := b.format.dwarf64()
+			is64, known = b.format.dwarf64()
 			if !known {
 				b.error("unknown size for form 0x" + strconv.FormatInt(int64(fm), 16))
 			} else if is64 {
@@ -743,10 +757,10 @@ func (b *buf) entry(cu *Entry, u *unit) *Entry {
 
 		// rnglist
 		case formRnglistx:
-			loff := b.uintVar()
+			loff = b.uintVar()
 
-			rnglistsBase := int64(u.rngListsBase())
-			val = valUint64(resolveRnglistx(uint64(rnglistsBase), uint64(loff)))
+			uRngBase = int64(u.rngListsBase())
+			val = valUint64(resolveRnglistx(uint64(uRngBase), uint64(loff)))
 		}
 
 		e.Field[i].Val = val
@@ -945,6 +959,13 @@ func (r *Reader) offset() Offset {
 // an appropriate index using the Ranges method.
 func (r *Reader) SeekPC(pc uint64) (*Entry, error) {
 	uidx := r.unit
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var u *unit
+	var e *Entry
+	var err error
+	var ranges [][2]uint64
 	for i := 0; i < len(r.d.unit); i++ {
 		if uidx >= len(r.d.unit) {
 			uidx = 0
@@ -953,17 +974,17 @@ func (r *Reader) SeekPC(pc uint64) (*Entry, error) {
 		r.lastChildren = false
 		r.unit = uidx
 		r.cu = nil
-		u := &r.d.unit[uidx]
+		u = &r.d.unit[uidx]
 		r.b = makeBuf(r.d, u, "info", u.off, u.data)
 		r.collectDwarf5BaseOffsets(u)
-		e, err := r.Next()
+		e, err = r.Next()
 		if err != nil {
 			return nil, err
 		}
 		if e == nil || e.Tag == 0 {
 			return nil, ErrUnknownPC
 		}
-		ranges, err := r.d.Ranges(e)
+		ranges, err = r.d.Ranges(e)
 		if err != nil {
 			return nil, err
 		}

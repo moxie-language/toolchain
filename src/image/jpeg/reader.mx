@@ -262,8 +262,12 @@ func (d *decoder) readFull(p []byte) error {
 		d.bytes.nUnreadable = 0
 	}
 
+	// Loop scratch is declared once, outside the loop: a declaration in a loop
+	// in a self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var n int32
 	for {
-		n := copy(p, d.bytes.buf[d.bytes.i:d.bytes.j])
+		n = copy(p, d.bytes.buf[d.bytes.i:d.bytes.j])
 		p = p[n:]
 		d.bytes.i += n
 		if len(p) == 0 {
@@ -286,8 +290,12 @@ func (d *decoder) ignore(n int32) error {
 		d.bytes.nUnreadable = 0
 	}
 
+	// Loop scratch is declared once, outside the loop: a declaration in a loop
+	// in a self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var m int32
 	for {
-		m := d.bytes.j - d.bytes.i
+		m = d.bytes.j - d.bytes.i
 		if m > n {
 			m = n
 		}
@@ -331,6 +339,11 @@ func (d *decoder) processSOF(n int32) error {
 		return FormatError("SOF has wrong length")
 	}
 
+	// Loop scratch is declared once, outside the loop: a declaration in a loop
+	// in a self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var hv byte
+	var h, v int32
 	for i := 0; i < d.nComp; i++ {
 		d.comp[i].c = d.tmp[6+3*i]
 		// Section B.2.2 states that "the value of C_i shall be different from
@@ -346,8 +359,8 @@ func (d *decoder) processSOF(n int32) error {
 			return FormatError("bad Tq value")
 		}
 
-		hv := d.tmp[7+3*i]
-		h, v := int32(hv>>4), int32(hv&0x0f)
+		hv = d.tmp[7+3*i]
+		h, v = int32(hv>>4), int32(hv&0x0f)
 		if h < 1 || 4 < h || v < 1 || 4 < v {
 			return FormatError("luma/chroma subsampling ratio")
 		}
@@ -429,14 +442,20 @@ func (d *decoder) processSOF(n int32) error {
 
 // Specified in section B.2.4.1.
 func (d *decoder) processDQT(n int32) error {
+	// Loop scratch is declared once, outside the loop: a declaration in a loop
+	// in a self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var x byte
+	var err error
+	var tq byte
 loop:
 	for n > 0 {
 		n--
-		x, err := d.readByte()
+		x, err = d.readByte()
 		if err != nil {
 			return err
 		}
-		tq := x & 0x0f
+		tq = x & 0x0f
 		if tq > maxTq {
 			return FormatError("bad Tq value")
 		}
@@ -526,8 +545,15 @@ func (d *decoder) processApp14Marker(n int32) error {
 func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 	d.r = r
 
+	// Loop scratch is declared once, outside the loop: a declaration in a loop
+	// in a self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var err error
+	var marker byte
+	var n int32
+
 	// Check for the Start Of Image marker.
-	if err := d.readFull(d.tmp[:2]); err != nil {
+	if err = d.readFull(d.tmp[:2]); err != nil {
 		return nil, err
 	}
 	if d.tmp[0] != 0xff || d.tmp[1] != soiMarker {
@@ -536,7 +562,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 
 	// Process the remaining segments until the End Of Image marker.
 	for {
-		err := d.readFull(d.tmp[:2])
+		err = d.readFull(d.tmp[:2])
 		if err != nil {
 			return nil, err
 		}
@@ -567,7 +593,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 				return nil, err
 			}
 		}
-		marker := d.tmp[1]
+		marker = d.tmp[1]
 		if marker == 0 {
 			// Treat "\xff\x00" as extraneous data.
 			continue
@@ -598,7 +624,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 		if err = d.readFull(d.tmp[:2]); err != nil {
 			return nil, err
 		}
-		n := int32(d.tmp[0])<<8 + int32(d.tmp[1]) - 2
+		n = int32(d.tmp[0])<<8 + int32(d.tmp[1]) - 2
 		if n < 0 {
 			return nil, FormatError("short segment length")
 		}
@@ -653,7 +679,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 	}
 
 	if d.progressive {
-		if err := d.reconstructProgressiveImage(); err != nil {
+		if err = d.reconstructProgressiveImage(); err != nil {
 			return nil, err
 		}
 	}

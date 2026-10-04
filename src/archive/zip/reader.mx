@@ -141,8 +141,12 @@ func (r *Reader) init(rdr io.ReaderAt, size int64) error {
 	// Gloss over this by reading headers until we encounter
 	// a bad one, and then only report an ErrFormat or UnexpectedEOF if
 	// the file count modulo 65536 is incorrect.
+	// Declared once, outside the loop: a declaration in a loop in a
+	// self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var f *File
 	for {
-		f := &File{zip: r, zipr: rdr}
+		f = &File{zip: r, zipr: rdr}
 		err = readDirectoryHeader(f, buf)
 		if err == ErrFormat || err == io.ErrUnexpectedEOF {
 			break
@@ -804,9 +808,19 @@ func (r *Reader) initFileList() {
 		// because it appears as a prefix in a path.
 		dirs := map[string]bool{}
 
+		// Declared once, outside the loops: declarations in a loop in a
+		// self-mutating method are rejected, and the scratch would otherwise
+		// be allocated into the sovereign arena on every iteration. `newIdx`
+		// rather than `idx` because the lookups below declare their own
+		// `idx` in if-statements.
+		var isDir bool
+		var name string
+		var newIdx int32
+		var entry fileListEntry
+
 		for _, file := range r.File {
-			isDir := len(file.Name) > 0 && file.Name[len(file.Name)-1] == '/'
-			name := toValidName(file.Name)
+			isDir = len(file.Name) > 0 && file.Name[len(file.Name)-1] == '/'
+			name = toValidName(file.Name)
 			if name == "" {
 				continue
 			}
@@ -824,8 +838,8 @@ func (r *Reader) initFileList() {
 				dirs[dir] = true
 			}
 
-			idx := len(r.fileList)
-			entry := fileListEntry{
+			newIdx = len(r.fileList)
+			entry = fileListEntry{
 				name:  name,
 				file:  file,
 				isDir: isDir,
@@ -833,9 +847,9 @@ func (r *Reader) initFileList() {
 			r.fileList = mxutil.Ensure(r.fileList, 1)
 			r.fileList = push(r.fileList, entry)
 			if isDir {
-				knownDirs[name] = idx
+				knownDirs[name] = newIdx
 			} else {
-				files[name] = idx
+				files[name] = newIdx
 			}
 		}
 		for dir := range dirs {
@@ -843,7 +857,7 @@ func (r *Reader) initFileList() {
 				if idx, ok := files[dir]; ok {
 					r.fileList[idx].isDup = true
 				} else {
-					entry := fileListEntry{
+					entry = fileListEntry{
 						name:  dir,
 						file:  nil,
 						isDir: true,
@@ -973,8 +987,13 @@ func (d *openDir) ReadDir(count int32) ([]fs.DirEntry, error) {
 		return nil, io.EOF
 	}
 	list := []fs.DirEntry{:n}
+	// Declared once, outside the loop: a declaration in a loop in a
+	// self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var s fileInfoDirEntry
+	var err error
 	for i := range list {
-		s, err := d.files[d.offset+i].stat()
+		s, err = d.files[d.offset+i].stat()
 		if err != nil {
 			return nil, err
 		} else if s.Name() == "." || !fs.ValidPath(s.Name()) {

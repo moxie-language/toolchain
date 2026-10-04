@@ -77,8 +77,17 @@ func (l *Loop) Run(lnFD int32) error {
 	}
 
 	events := []syscall.EpollEvent{:64}
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration. `efd` rather
+	// than `fd` because the extra-fd range loop above binds `fd`.
+	var n int32
+	var werr error
+	var ev syscall.EpollEvent
+	var efd int32
+	var c *Conn
 	for {
-		n, werr := syscall.EpollWait(l.epfd, events, 5000)
+		n, werr = syscall.EpollWait(l.epfd, events, 5000)
 		if werr != nil {
 			if werr == syscall.EINTR {
 				return nil
@@ -90,17 +99,17 @@ func (l *Loop) Run(lnFD int32) error {
 			continue
 		}
 		for i := 0; i < n; i++ {
-			ev := events[i]
-			fd := int32(ev.Fd)
-			if fd == lnFD {
+			ev = events[i]
+			efd = int32(ev.Fd)
+			if efd == lnFD {
 				l.acceptAll()
 				continue
 			}
-			if l.extraFDs[int32(fd)] {
-				l.handler.OnFD(int32(fd))
+			if l.extraFDs[int32(efd)] {
+				l.handler.OnFD(int32(efd))
 				continue
 			}
-			c := l.conns[fd]
+			c = l.conns[efd]
 			if c == nil {
 				continue
 			}
@@ -111,7 +120,7 @@ func (l *Loop) Run(lnFD int32) error {
 			if ev.Events&syscall.EPOLLOUT != 0 {
 				c.drainWrite()
 				// If conn still alive and EPOLLIN also set, read too.
-				if l.conns[fd] != nil && ev.Events&syscall.EPOLLIN != 0 {
+				if l.conns[efd] != nil && ev.Events&syscall.EPOLLIN != 0 {
 					l.readConn(c)
 				}
 				continue

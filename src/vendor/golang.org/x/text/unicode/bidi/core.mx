@@ -210,11 +210,15 @@ func (p *paragraph) determineMatchingIsolates() {
 		p.matchingIsolateInitiator[i] = -1
 	}
 
+	// Declared once, outside the loop: a declaration in a loop in a
+	// self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var depthCounter int32
 	for i := range p.matchingPDI {
 		p.matchingPDI[i] = -1
 
 		if t := p.resultTypes[i]; t.in(LRI, RLI, FSI) {
-			depthCounter := 1
+			depthCounter = 1
 			for j := i + 1; j < p.Len(); j++ {
 				if u := p.resultTypes[j]; u.in(LRI, RLI, FSI) {
 					depthCounter++
@@ -307,12 +311,18 @@ func (p *paragraph) determineExplicitEmbeddingLevels() {
 	// Rule X1.
 	stack.push(p.embeddingLevel, ON, false)
 
+	// Declared once, outside the loop: a declaration in a loop in a
+	// self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var isIsolate bool
+	var isRTL bool
+	var newLevel level
 	for i, t := range p.resultTypes {
 		// Rules X2, X3, X4, X5, X5a, X5b, X5c
 		switch t {
 		case RLE, LRE, RLO, LRO, RLI, LRI, FSI:
-			isIsolate := t.in(RLI, LRI, FSI)
-			isRTL := t.in(RLE, RLO, RLI)
+			isIsolate = t.in(RLI, LRI, FSI)
+			isRTL = t.in(RLE, RLO, RLI)
 
 			// override if this is an FSI that resolves to RLI
 			if t == FSI {
@@ -325,7 +335,6 @@ func (p *paragraph) determineExplicitEmbeddingLevels() {
 				}
 			}
 
-			var newLevel level
 			if isRTL {
 				// least greater odd
 				newLevel = (stack.lastEmbeddingLevel() + 1) | 1
@@ -538,11 +547,17 @@ func (s *isolatingRunSequence) resolveWeakTypes() {
 	// either the current value will not change, or its change will have
 	// no effect on the remainder of the analysis.
 
+	// Declared once, outside the loop: a declaration in a loop in a
+	// self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var curType Class
+	var prevSepType Class
+	var succSepType Class
 	for i := 1; i < s.Len()-1; i++ {
-		t := s.types[i]
-		if t == ES || t == CS {
-			prevSepType := s.types[i-1]
-			succSepType := s.types[i+1]
+		curType = s.types[i]
+		if curType == ES || curType == CS {
+			prevSepType = s.types[i-1]
+			succSepType = s.types[i+1]
 			if prevSepType == EN && succSepType == EN {
 				s.types[i] = EN
 			} else if s.types[i] == CS && prevSepType == AN && succSepType == AN {
@@ -552,24 +567,30 @@ func (s *isolatingRunSequence) resolveWeakTypes() {
 	}
 
 	// Rule W5.
+	// Declared once, outside the loop: a declaration in a loop in a
+	// self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var runStart int32
+	var runEnd int32
+	var checkType Class
 	for i, t := range s.types {
 		if t == ET {
 			// locate end of sequence
-			runStart := i
-			runEnd := s.findRunLimit(runStart, ET)
+			runStart = i
+			runEnd = s.findRunLimit(runStart, ET)
 
 			// check values at ends of sequence
-			t := s.sos
+			checkType = s.sos
 			if runStart > 0 {
-				t = s.types[runStart-1]
+				checkType = s.types[runStart-1]
 			}
-			if t != EN {
-				t = s.eos
+			if checkType != EN {
+				checkType = s.eos
 				if runEnd < len(s.types) {
-					t = s.types[runEnd]
+					checkType = s.types[runEnd]
 				}
 			}
-			if t == EN {
+			if checkType == EN {
 				setTypes(s.types[runStart:runEnd], EN)
 			}
 			// continue at end of sequence
@@ -585,10 +606,14 @@ func (s *isolatingRunSequence) resolveWeakTypes() {
 	}
 
 	// Rule W7.
+	// Declared once, outside the loop: a declaration in a loop in a
+	// self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var prevStrongType Class
 	for i, t := range s.types {
 		if t == EN {
 			// set default if we reach start of run
-			prevStrongType := s.sos
+			prevStrongType = s.sos
 			for j := i - 1; j >= 0; j-- {
 				t = s.types[j]
 				if t == L || t == R { // AL's have been changed to R

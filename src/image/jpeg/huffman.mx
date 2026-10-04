@@ -46,8 +46,13 @@ func errShortHuffmanData() FormatError { return FormatError("short Huffman data"
 // least n. For best performance (avoiding function calls inside hot loops),
 // the caller is the one responsible for first checking that d.bits.n < n.
 func (d *decoder) ensureNBits(n int32) error {
+	// Loop scratch is declared once, outside the loop: a declaration in a loop
+	// in a self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var c byte
+	var err error
 	for {
-		c, err := d.readByteStuffedByte()
+		c, err = d.readByteStuffedByte()
 		if err != nil {
 			if err == io.ErrUnexpectedEOF {
 				return errShortHuffmanData()
@@ -89,6 +94,19 @@ func (d *decoder) receiveExtend(t uint8) (int32, error) {
 // processDHT processes a Define Huffman Table marker, and initializes a huffman
 // struct from its contents. Specified in section B.2.4.2.
 func (d *decoder) processDHT(n int32) error {
+	// Loop scratch is declared once, outside the loop: a declaration in a loop
+	// in a self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var (
+		tc       byte
+		th       byte
+		h        *huffman
+		nCodes   [maxCodeLength]int32
+		x, code  uint32
+		base     uint8
+		lutValue uint16
+		c, index int32
+	)
 	for n > 0 {
 		if n < 17 {
 			return FormatError("DHT has wrong length")
@@ -96,22 +114,21 @@ func (d *decoder) processDHT(n int32) error {
 		if err := d.readFull(d.tmp[:17]); err != nil {
 			return err
 		}
-		tc := d.tmp[0] >> 4
+		tc = d.tmp[0] >> 4
 		if tc > maxTc {
 			return FormatError("bad Tc value")
 		}
-		th := d.tmp[0] & 0x0f
+		th = d.tmp[0] & 0x0f
 		// The baseline th <= 1 restriction is specified in table B.5.
 		if th > maxTh || (d.baseline && th > 1) {
 			return FormatError("bad Th value")
 		}
-		h := &d.huff[tc][th]
+		h = &d.huff[tc][th]
 
 		// Read nCodes and h.vals (and derive h.nCodes).
 		// nCodes[i] is the number of codes with code length i.
 		// h.nCodes is the total number of codes.
 		h.nCodes = 0
-		var nCodes [maxCodeLength]int32
 		for i := range nCodes {
 			nCodes[i] = int32(d.tmp[i+1])
 			h.nCodes += nCodes[i]
@@ -132,7 +149,7 @@ func (d *decoder) processDHT(n int32) error {
 
 		// Derive the look-up table.
 		clear(h.lut[:])
-		var x, code uint32
+		x, code = 0, 0
 		for i := uint32(0); i < lutSize; i++ {
 			code <<= 1
 			for j := int32(0); j < nCodes[i]; j++ {
@@ -141,8 +158,8 @@ func (d *decoder) processDHT(n int32) error {
 				// whose codeLength's high bits matches code.
 				// The high 8 bits of lutValue are the encoded value.
 				// The low 8 bits are 1 plus the codeLength.
-				base := uint8(code << (7 - i))
-				lutValue := uint16(h.vals[x])<<8 | uint16(2+i)
+				base = uint8(code << (7 - i))
+				lutValue = uint16(h.vals[x])<<8 | uint16(2+i)
 				for k := uint8(0); k < 1<<(7-i); k++ {
 					h.lut[base|k] = lutValue
 				}
@@ -152,7 +169,7 @@ func (d *decoder) processDHT(n int32) error {
 		}
 
 		// Derive minCodes, maxCodes, and valsIndices.
-		var c, index int32
+		c, index = 0, 0
 		for i, n := range nCodes {
 			if n == 0 {
 				h.minCodes[i] = -1

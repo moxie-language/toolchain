@@ -202,6 +202,13 @@ func (p *Pipe) LoadPtrs(n Reg) {
 func (p *Pipe) LoadN(n int32) [][]Reg {
 	a := p.f.Asm
 	regs := [][]Reg{:len(p.inPtr)}
+	// Declared once, outside the loops: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var off int32
+	var mem Reg
+	var h Hint
+	var r Reg
 	for i, ptr := range p.inPtr {
 		regs[i] = []Reg{:n}
 		switch {
@@ -220,24 +227,23 @@ func (p *Pipe) LoadN(n int32) [][]Reg {
 			// Load from memory using offsets.
 			// We'll advance the pointers or the index counter later.
 			for j := range n {
-				off := p.readOff + j
+				off = p.readOff + j
 				if p.backward {
 					off = -(off + 1)
 				}
-				var mem Reg
 				if p.indexCounter != 0 {
 					mem = a.Arch.memIndex(a, off*a.Arch.WordBytes, p.index, ptr)
 				} else {
 					mem = ptr.mem(off * a.Arch.WordBytes)
 				}
-				h := HintNone
+				h = HintNone
 				if i < len(p.hints) {
 					h = p.hints[i]
 				}
 				if h == HintMemOK {
 					regs[i][j] = mem
 				} else {
-					r := p.f.Asm.RegHint(h)
+					r = p.f.Asm.RegHint(h)
 					a.Mov(mem, r)
 					regs[i][j] = r
 				}
@@ -256,6 +262,11 @@ func (p *Pipe) StoreN(regs [][]Reg) {
 		p.f.Asm.Fatalf("wrong number of output rows")
 	}
 	n := len(regs[0])
+	// Declared once, outside the loops: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var off int32
+	var mem Reg
 	for i, ptr := range p.outPtr {
 		switch {
 		case a.Arch.storeIncN != nil:
@@ -270,11 +281,10 @@ func (p *Pipe) StoreN(regs [][]Reg) {
 			// Store to memory using offsets.
 			// We'll advance the pointers or the index counter later.
 			for j, r := range regs[i] {
-				off := p.writeOff + j
+				off = p.writeOff + j
 				if p.backward {
 					off = -(off + 1)
 				}
-				var mem Reg
 				if p.indexCounter != 0 {
 					mem = a.Arch.memIndex(a, off*a.Arch.WordBytes, p.index, ptr)
 				} else {
@@ -410,6 +420,10 @@ func (p *Pipe) Restart(n Reg, factors ...int32) {
 	if len(factors) > 1 {
 		a.Comment("compute unrolled loop lengths")
 	}
+	// Declared once, outside the loops: a declaration in a loop in a
+	// self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var t Reg
 	switch {
 	default:
 		a.Fatalf("invalid factors %v", factors)
@@ -424,7 +438,7 @@ func (p *Pipe) Restart(n Reg, factors ...int32) {
 			if f&(f-1) != 0 {
 				a.Fatalf("non-power-of-two factors %v", factors)
 			}
-			t := p.f.Asm.Reg()
+			t = p.f.Asm.Reg()
 			f /= div
 			a.And(a.Imm(f-1), n, t)
 			a.Rsh(a.Imm(bits.TrailingZeros(uint32(f))), n, n)
@@ -442,7 +456,7 @@ func (p *Pipe) Restart(n Reg, factors ...int32) {
 			if f&(f-1) != 0 {
 				a.Fatalf("non-power-of-two factors %v", factors)
 			}
-			t := p.f.Asm.Reg()
+			t = p.f.Asm.Reg()
 			a.Rsh(a.Imm(bits.TrailingZeros(uint32(f))), n, t)
 			a.And(a.Imm(f-1), n, n)
 			p.counts[i] = t
@@ -488,8 +502,12 @@ func (p *Pipe) Loop(block func(in, out [][]Reg)) {
 	if p.factors == nil {
 		p.f.Asm.Fatalf("Pipe.Start not called")
 	}
+	// Declared once, outside the loop: a declaration in a loop in a
+	// self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var n Reg
 	for i, factor := range p.factors {
-		n := p.counts[i]
+		n = p.counts[i]
 		p.unroll(n, factor, block)
 		if i < len(p.factors)-1 {
 			p.f.Asm.Free(n)
@@ -533,14 +551,21 @@ func (p *Pipe) unroll(n Reg, factor int32, block func(in, out [][]Reg)) {
 	if p.unrollStart != nil {
 		p.unrollStart()
 	}
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var batch int32
+	var regs RegsUsed
+	var out [][]Reg
+	var in [][]Reg
 	for done := 0; done < factor; {
-		batch := min(factor-done, p.maxColumns)
-		regs := a.RegsUsed()
-		out := [][]Reg{:len(p.outPtr)}
+		batch = min(factor-done, p.maxColumns)
+		regs = a.RegsUsed()
+		out = [][]Reg{:len(p.outPtr)}
 		for i := range out {
 			out[i] = []Reg{:batch}
 		}
-		in := p.LoadN(batch)
+		in = p.LoadN(batch)
 		p.needWrite = true
 		block(in, out)
 		if p.needWrite && len(p.outPtr) > 0 {

@@ -128,15 +128,20 @@ func (e *encoder) Write(p []byte) (n int32, err error) {
 	}
 
 	// Large interior chunks.
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var nn int32
+	var chunkOut int32
 	for len(p) >= 4 {
-		nn := len(e.out) / 5 * 4
+		nn = len(e.out) / 5 * 4
 		if nn > len(p) {
 			nn = len(p)
 		}
 		nn -= nn % 4
 		if nn > 0 {
-			nout := Encode(e.out[0:], p[0:nn])
-			if _, e.err = e.w.Write(e.out[0:nout]); e.err != nil {
+			chunkOut = Encode(e.out[0:], p[0:nn])
+			if _, e.err = e.w.Write(e.out[0:chunkOut]); e.err != nil {
 				return n, e.err
 			}
 		}
@@ -265,6 +270,13 @@ func (d *decoder) Read(p []byte) (n int32, err error) {
 		return 0, d.err
 	}
 
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var nn int32
+	var nsrc int32
+	var ndst int32
+	var off int32
 	for {
 		// Copy leftover output from last decode.
 		if len(d.out) > 0 {
@@ -274,7 +286,6 @@ func (d *decoder) Read(p []byte) (n int32, err error) {
 		}
 
 		// Decode leftover input from last read.
-		var nn, nsrc, ndst int32
 		if d.nbuf > 0 {
 			ndst, nsrc, d.err = Decode(d.outbuf[0:], d.buf[0:d.nbuf], d.readErr != nil)
 			if ndst > 0 {
@@ -285,7 +296,7 @@ func (d *decoder) Read(p []byte) (n int32, err error) {
 			if ndst == 0 && d.err == nil {
 				// Special case: input buffer is mostly filled with non-data bytes.
 				// Filter out such bytes to make room for more input.
-				off := 0
+				off = 0
 				for i := 0; i < d.nbuf; i++ {
 					if d.buf[i] > ' ' {
 						d.buf[off] = d.buf[i]

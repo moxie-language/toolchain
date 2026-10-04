@@ -170,8 +170,14 @@ func (h *huffmanEncoder) bitCounts(list []literalNode, maxBits int32) []int32 {
 	levels[maxBits].needed = 2*n - 4
 
 	level := maxBits
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var l *levelInfo
+	var prevFreq int32
+	var cnt int32
 	for {
-		l := &levels[level]
+		l = &levels[level]
 		if l.nextPairFreq == math.MaxInt32 && l.nextCharFreq == math.MaxInt32 {
 			// We've run out of both leaves and pairs.
 			// End all calculations for this level.
@@ -183,10 +189,10 @@ func (h *huffmanEncoder) bitCounts(list []literalNode, maxBits int32) []int32 {
 			continue
 		}
 
-		prevFreq := l.lastFreq
+		prevFreq = l.lastFreq
 		if l.nextCharFreq < l.nextPairFreq {
 			// The next item on this row is a leaf node.
-			cnt := leafCounts[level][level] + 1
+			cnt = leafCounts[level][level] + 1
 			l.lastFreq = l.nextCharFreq
 			// Lower leafCounts are the same of the previous node.
 			leafCounts[level][level] = cnt
@@ -242,6 +248,10 @@ func (h *huffmanEncoder) bitCounts(list []literalNode, maxBits int32) []int32 {
 // in RFC 1951 3.2.2
 func (h *huffmanEncoder) assignEncodingAndSize(bitCount []int32, list []literalNode) {
 	code := uint16(0)
+	// Declared once, outside the loop: a declaration in a loop in a
+	// self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var chunk []literalNode
 	for n, nb := range bitCount {
 		code <<= 1
 		if n == 0 || nb == 0 {
@@ -251,7 +261,7 @@ func (h *huffmanEncoder) assignEncodingAndSize(bitCount []int32, list []literalN
 		// are encoded using "bits" bits, and get the values
 		// code, code + 1, ....  The code values are
 		// assigned in literal order (not frequency order).
-		chunk := list[len(list)-int32(nb):]
+		chunk = list[len(list)-int32(nb):]
 
 		h.lns.sort(chunk)
 		for _, node := range chunk {

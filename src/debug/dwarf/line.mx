@@ -264,11 +264,23 @@ func (r *LineReader) readHeader(compDir string) error {
 		}
 	}
 
+	// Declared once, outside the loops below: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration. `rerr` rather
+	// than `err` because `readFileEntry` declares its own `err` in an
+	// if-statement.
+	var directory []byte
+	var dir string
+	var rerr error
+	var name string
+	var mtime uint64
+	var size uint64
+
 	if r.version < 5 {
 		// Read include directories table.
 		r.directories = [][]byte{compDir}
 		for {
-			directory := b.string()
+			directory = b.string()
 			if b.err != nil {
 				return b.err
 			}
@@ -299,9 +311,9 @@ func (r *LineReader) readHeader(compDir string) error {
 		c := b.uintVar()
 		r.directories = [][]byte{:c}
 		for i := range r.directories {
-			dir, _, _, err := r.readLNCT(dirFormat, dwarf64)
-			if err != nil {
-				return err
+			dir, _, _, rerr = r.readLNCT(dirFormat, dwarf64)
+			if rerr != nil {
+				return rerr
 			}
 			r.directories[i] = dir
 		}
@@ -309,9 +321,9 @@ func (r *LineReader) readHeader(compDir string) error {
 		c = b.uintVar()
 		r.fileEntries = []*LineFile{:c}
 		for i := range r.fileEntries {
-			name, mtime, size, err := r.readLNCT(fileFormat, dwarf64)
-			if err != nil {
-				return err
+			name, mtime, size, rerr = r.readLNCT(fileFormat, dwarf64)
+			if rerr != nil {
+				return rerr
 			}
 			r.fileEntries[i] = &LineFile{name, mtime, int32(size)}
 		}

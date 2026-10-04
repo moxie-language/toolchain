@@ -50,13 +50,33 @@ func (d *decoder) makeImg(mxx, myy int32) {
 // Specified in section B.2.3.
 func (d *decoder) processSOS(n int32) error {
 	unzig := _unzig()
+	// Loop scratch is declared once, outside the loops: a declaration in a loop
+	// in a self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var (
+		err       error
+		cs        byte
+		compIndex int32
+		sComp     uint8
+		hi        int32
+		vi        int32
+		q         int32
+		zig       int32
+		value     uint8
+		dcDelta   int32
+		huff      *huffman
+		val0      uint8
+		val1      uint8
+		ac        int32
+		bitsVal   uint32
+	)
 	if d.nComp == 0 {
 		return FormatError("missing SOF marker")
 	}
 	if n < 6 || 4+2*d.nComp < n || n%2 != 0 {
 		return FormatError("SOS has wrong length")
 	}
-	if err := d.readFull(d.tmp[:n]); err != nil {
+	if err = d.readFull(d.tmp[:n]); err != nil {
 		return err
 	}
 	nComp := int32(d.tmp[0])
@@ -70,8 +90,8 @@ func (d *decoder) processSOS(n int32) error {
 	}
 	totalHV := 0
 	for i := 0; i < nComp; i++ {
-		cs := d.tmp[1+2*i] // Component selector.
-		compIndex := -1
+		cs = d.tmp[1+2*i] // Component selector.
+		compIndex = -1
 		for j, comp := range d.comp[:d.nComp] {
 			if cs == comp.c {
 				compIndex = j
@@ -152,9 +172,9 @@ func (d *decoder) processSOS(n int32) error {
 	}
 	if d.progressive {
 		for i := 0; i < nComp; i++ {
-			compIndex := scan[i].compIndex
-			if d.progCoeffs[compIndex] == nil {
-				d.progCoeffs[compIndex] = []block{:mxx*myy*d.comp[compIndex].h*d.comp[compIndex].v}
+			sComp = scan[i].compIndex
+			if d.progCoeffs[sComp] == nil {
+				d.progCoeffs[sComp] = []block{:mxx*myy*d.comp[sComp].h*d.comp[sComp].v}
 			}
 		}
 	}
@@ -173,9 +193,9 @@ func (d *decoder) processSOS(n int32) error {
 	for my := 0; my < myy; my++ {
 		for mx := 0; mx < mxx; mx++ {
 			for i := 0; i < nComp; i++ {
-				compIndex := scan[i].compIndex
-				hi := d.comp[compIndex].h
-				vi := d.comp[compIndex].v
+				sComp = scan[i].compIndex
+				hi = d.comp[sComp].h
+				vi = d.comp[sComp].v
 				for j := 0; j < hi*vi; j++ {
 					// The blocks are traversed one MCU at a time. For 4:2:0 chroma
 					// subsampling, there are four Y 8x8 blocks in every 16x16 MCU.
@@ -206,7 +226,7 @@ func (d *decoder) processSOS(n int32) error {
 						bx = hi*mx + j%hi
 						by = vi*my + j/hi
 					} else {
-						q := mxx * hi
+						q = mxx * hi
 						bx = blockCount % q
 						by = blockCount / q
 						blockCount++
@@ -217,53 +237,53 @@ func (d *decoder) processSOS(n int32) error {
 
 					// Load the previous partially decoded coefficients, if applicable.
 					if d.progressive {
-						b = d.progCoeffs[compIndex][by*mxx*hi+bx]
+						b = d.progCoeffs[sComp][by*mxx*hi+bx]
 					} else {
 						b = block{}
 					}
 
 					if ah != 0 {
-						if err := d.refine(&b, &d.huff[acTable][scan[i].ta], zigStart, zigEnd, 1<<al); err != nil {
+						if err = d.refine(&b, &d.huff[acTable][scan[i].ta], zigStart, zigEnd, 1<<al); err != nil {
 							return err
 						}
 					} else {
-						zig := zigStart
+						zig = zigStart
 						if zig == 0 {
 							zig++
 							// Decode the DC coefficient, as specified in section F.2.2.1.
-							value, err := d.decodeHuffman(&d.huff[dcTable][scan[i].td])
+							value, err = d.decodeHuffman(&d.huff[dcTable][scan[i].td])
 							if err != nil {
 								return err
 							}
 							if value > 16 {
 								return UnsupportedError("excessive DC component")
 							}
-							dcDelta, err := d.receiveExtend(value)
+							dcDelta, err = d.receiveExtend(value)
 							if err != nil {
 								return err
 							}
-							dc[compIndex] += dcDelta
-							b[0] = dc[compIndex] << al
+							dc[sComp] += dcDelta
+							b[0] = dc[sComp] << al
 						}
 
 						if zig <= zigEnd && d.eobRun > 0 {
 							d.eobRun--
 						} else {
 							// Decode the AC coefficients, as specified in section F.2.2.2.
-							huff := &d.huff[acTable][scan[i].ta]
+							huff = &d.huff[acTable][scan[i].ta]
 							for ; zig <= zigEnd; zig++ {
-								value, err := d.decodeHuffman(huff)
+								value, err = d.decodeHuffman(huff)
 								if err != nil {
 									return err
 								}
-								val0 := value >> 4
-								val1 := value & 0x0f
+								val0 = value >> 4
+								val1 = value & 0x0f
 								if val1 != 0 {
 									zig += int32(val0)
 									if zig > zigEnd {
 										break
 									}
-									ac, err := d.receiveExtend(val1)
+									ac, err = d.receiveExtend(val1)
 									if err != nil {
 										return err
 									}
@@ -272,11 +292,11 @@ func (d *decoder) processSOS(n int32) error {
 									if val0 != 0x0f {
 										d.eobRun = uint16(1 << val0)
 										if val0 != 0 {
-											bits, err := d.decodeBits(int32(val0))
+											bitsVal, err = d.decodeBits(int32(val0))
 											if err != nil {
 												return err
 											}
-											d.eobRun |= uint16(bits)
+											d.eobRun |= uint16(bitsVal)
 										}
 										d.eobRun--
 										break
@@ -289,7 +309,7 @@ func (d *decoder) processSOS(n int32) error {
 
 					if d.progressive {
 						// Save the coefficients.
-						d.progCoeffs[compIndex][by*mxx*hi+bx] = b
+						d.progCoeffs[sComp][by*mxx*hi+bx] = b
 						// At this point, we could call reconstructBlock to dequantize and perform the
 						// inverse DCT, to save early stages of a progressive image to the *image.YCbCr
 						// buffers (the whole point of progressive encoding), but in Go, the jpeg.Decode
@@ -299,7 +319,7 @@ func (d *decoder) processSOS(n int32) error {
 						// SOS markers are processed.
 						continue
 					}
-					if err := d.reconstructBlock(&b, bx, by, int32(compIndex)); err != nil {
+					if err = d.reconstructBlock(&b, bx, by, int32(sComp)); err != nil {
 						return err
 					}
 				} // for j
@@ -309,10 +329,10 @@ func (d *decoder) processSOS(n int32) error {
 				// For well-formed input, the RST[0-7] restart marker follows
 				// immediately. For corrupt input, call findRST to try to
 				// resynchronize.
-				if err := d.readFull(d.tmp[:2]); err != nil {
+				if err = d.readFull(d.tmp[:2]); err != nil {
 					return err
 				} else if d.tmp[0] != 0xff || d.tmp[1] != expectedRST {
-					if err := d.findRST(expectedRST); err != nil {
+					if err = d.findRST(expectedRST); err != nil {
 						return err
 					}
 				}
@@ -337,12 +357,22 @@ func (d *decoder) processSOS(n int32) error {
 // section G.1.2.
 func (d *decoder) refine(b *block, h *huffman, zigStart, zigEnd, delta int32) error {
 	unzig := _unzig()
+	// Loop scratch is declared once, outside the loop: a declaration in a loop
+	// in a self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var z int32
+	var value uint8
+	var err error
+	var val0 uint8
+	var val1 uint8
+	var bitsVal uint32
+	var bit bool
 	// Refining a DC component is trivial.
 	if zigStart == 0 {
 		if zigEnd != 0 {
 			panic("unreachable")
 		}
-		bit, err := d.decodeBit()
+		bit, err = d.decodeBit()
 		if err != nil {
 			return err
 		}
@@ -357,30 +387,30 @@ func (d *decoder) refine(b *block, h *huffman, zigStart, zigEnd, delta int32) er
 	if d.eobRun == 0 {
 	loop:
 		for ; zig <= zigEnd; zig++ {
-			z := int32(0)
-			value, err := d.decodeHuffman(h)
+			z = 0
+			value, err = d.decodeHuffman(h)
 			if err != nil {
 				return err
 			}
-			val0 := value >> 4
-			val1 := value & 0x0f
+			val0 = value >> 4
+			val1 = value & 0x0f
 
 			switch val1 {
 			case 0:
 				if val0 != 0x0f {
 					d.eobRun = uint16(1 << val0)
 					if val0 != 0 {
-						bits, err := d.decodeBits(int32(val0))
+						bitsVal, err = d.decodeBits(int32(val0))
 						if err != nil {
 							return err
 						}
-						d.eobRun |= uint16(bits)
+						d.eobRun |= uint16(bitsVal)
 					}
 					break loop
 				}
 			case 1:
 				z = delta
-				bit, err := d.decodeBit()
+				bit, err = d.decodeBit()
 				if err != nil {
 					return err
 				}
@@ -405,7 +435,7 @@ func (d *decoder) refine(b *block, h *huffman, zigStart, zigEnd, delta int32) er
 	}
 	if d.eobRun > 0 {
 		d.eobRun--
-		if _, err := d.refineNonZeroes(b, zig, zigEnd, -1, delta); err != nil {
+		if _, err = d.refineNonZeroes(b, zig, zigEnd, -1, delta); err != nil {
 			return err
 		}
 	}
@@ -491,11 +521,14 @@ func (d *decoder) reconstructBlock(b *block, bx, by, compIndex int32) error {
 		}
 	}
 	// Level shift by +128, clip to [0, 255], and write to dst.
+	var y8 int32
+	var yStride int32
+	var c int32
 	for y := 0; y < 8; y++ {
-		y8 := y * 8
-		yStride := y * stride
+		y8 = y * 8
+		yStride = y * stride
 		for x := 0; x < 8; x++ {
-			c := b[y8+x]
+			c = b[y8+x]
 			if c < -128 {
 				c = 0
 			} else if c > 127 {
@@ -519,12 +552,16 @@ func (d *decoder) reconstructBlock(b *block, bx, by, compIndex int32) error {
 // Precondition: d.tmp[:2] holds the next two bytes of JPEG-encoded input
 // (input in the d.readFull sense).
 func (d *decoder) findRST(expectedRST uint8) error {
+	// Loop scratch is declared once, outside the loop: a declaration in a loop
+	// in a self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var i int32
 	for {
 		// i is the index such that, at the bottom of the loop, we read 2-i
 		// bytes into d.tmp[i:2], maintaining the invariant that d.tmp[:2]
 		// holds the next two bytes of JPEG-encoded input. It is either 0 or 1,
 		// so that each iteration advances by 1 or 2 bytes (or returns).
-		i := 0
+		i = 0
 
 		if d.tmp[0] == 0xff {
 			if d.tmp[1] == expectedRST {

@@ -128,6 +128,17 @@ func (h *huffmanDecoder) init(lengths []int32) bool {
 
 	// Count number of codes of each length,
 	// compute min and max length.
+	// The loop scratch is declared once here: a declaration in a loop in a
+	// self-mutating method is rejected, and it would otherwise be allocated
+	// into the sovereign arena on every iteration. The names avoid the loop
+	// variables `off`/`chunk`/`linktab` used further down.
+	var reverse int32
+	var linkOff uint32
+	var c int32
+	var hchunk uint32
+	var chunkIdx int32
+	var value uint32
+	var linkTable []uint32
 	var count [maxCodeLen]int32
 	var minLen, maxLen int32
 	for _, n := range lengths {
@@ -180,14 +191,14 @@ func (h *huffmanDecoder) init(lengths []int32) bool {
 		link := nextcode[huffmanChunkBits+1] >> 1
 		h.links = [][]uint32{:huffmanNumChunks-link}
 		for j := uint32(link); j < huffmanNumChunks; j++ {
-			reverse := int32(bits.Reverse16(uint16(j)))
+			reverse = int32(bits.Reverse16(uint16(j)))
 			reverse >>= uint32(16 - huffmanChunkBits)
-			off := j - uint32(link)
+			linkOff = j - uint32(link)
 			if sanity && h.chunks[reverse] != 0 {
 				panic("impossible: overwriting existing chunk")
 			}
-			h.chunks[reverse] = uint32(off<<huffmanValueShift | (huffmanChunkBits + 1))
-			h.links[off] = []uint32{:numLinks}
+			h.chunks[reverse] = uint32(linkOff<<huffmanValueShift | (huffmanChunkBits + 1))
+			h.links[linkOff] = []uint32{:numLinks}
 		}
 	}
 
@@ -195,10 +206,10 @@ func (h *huffmanDecoder) init(lengths []int32) bool {
 		if n == 0 {
 			continue
 		}
-		c := nextcode[n]
+		c = nextcode[n]
 		nextcode[n]++
-		chunk := uint32(i<<huffmanValueShift | n)
-		reverse := int32(bits.Reverse16(uint16(c)))
+		hchunk = uint32(i<<huffmanValueShift | n)
+		reverse = int32(bits.Reverse16(uint16(c)))
 		reverse >>= uint32(16 - n)
 		if n <= huffmanChunkBits {
 			for off := reverse; off < len(h.chunks); off += 1 << uint32(n) {
@@ -210,23 +221,23 @@ func (h *huffmanDecoder) init(lengths []int32) bool {
 				if sanity && h.chunks[off] != 0 {
 					panic("impossible: overwriting existing chunk")
 				}
-				h.chunks[off] = chunk
+				h.chunks[off] = hchunk
 			}
 		} else {
-			j := reverse & (huffmanNumChunks - 1)
-			if sanity && h.chunks[j]&huffmanCountMask != huffmanChunkBits+1 {
+			chunkIdx = reverse & (huffmanNumChunks - 1)
+			if sanity && h.chunks[chunkIdx]&huffmanCountMask != huffmanChunkBits+1 {
 				// Longer codes should have been
 				// associated with a link table above.
 				panic("impossible: not an indirect chunk")
 			}
-			value := h.chunks[j] >> huffmanValueShift
-			linktab := h.links[value]
+			value = h.chunks[chunkIdx] >> huffmanValueShift
+			linkTable = h.links[value]
 			reverse >>= huffmanChunkBits
-			for off := reverse; off < len(linktab); off += 1 << uint32(n-huffmanChunkBits) {
-				if sanity && linktab[off] != 0 {
+			for off := reverse; off < len(linkTable); off += 1 << uint32(n-huffmanChunkBits) {
+				if sanity && linkTable[off] != 0 {
 					panic("impossible: overwriting existing chunk")
 				}
-				linktab[off] = chunk
+				linkTable[off] = hchunk
 			}
 		}
 	}
@@ -339,9 +350,13 @@ func (f *decompressor) nextBlock() {
 }
 
 func (f *decompressor) Read(b []byte) (int32, error) {
+	// Declared once, outside the loop: a declaration in a loop in a
+	// self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var n int32
 	for {
 		if len(f.toRead) > 0 {
-			n := copy(b, f.toRead)
+			n = copy(b, f.toRead)
 			f.toRead = f.toRead[n:]
 			if len(f.toRead) == 0 {
 				return n, f.err
@@ -413,10 +428,19 @@ func (f *decompressor) readHuffman() error {
 
 	// HLIT + 257 code lengths, HDIST + 1 code lengths,
 	// using the code length Huffman code.
+	// The loop scratch is declared once here: a declaration in a loop in a
+	// self-mutating method is rejected, and it would otherwise be allocated
+	// into the sovereign arena on every iteration. `herr` rather than `err`
+	// because the inner loops declare their own `err`.
+	var x int32
+	var herr error
+	var rep int32
+	var nb uint32
+	var b int32
 	for i, n := 0, nlit+ndist; i < n; {
-		x, err := f.huffSym(&f.h1)
-		if err != nil {
-			return err
+		x, herr = f.huffSym(&f.h1)
+		if herr != nil {
+			return herr
 		}
 		if x < 16 {
 			// Actual length.
@@ -425,9 +449,6 @@ func (f *decompressor) readHuffman() error {
 			continue
 		}
 		// Repeat previous length or zero.
-		var rep int32
-		var nb uint32
-		var b int32
 		switch x {
 		default:
 			return InternalError("unexpected length code")
@@ -722,9 +743,15 @@ func (f *decompressor) huffSym(h *huffmanDecoder) (int32, error) {
 	// but is smart enough to keep local variables in registers, so use nb and b,
 	// inline call to moreBits and reassign b,nb back to f on return.
 	nb, b := f.nb, f.b
+	// Declared once, outside the loops: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var c byte
+	var err error
+	var chunk uint32
 	for {
 		for nb < n {
-			c, err := f.r.ReadByte()
+			c, err = f.r.ReadByte()
 			if err != nil {
 				f.b = b
 				f.nb = nb
@@ -734,7 +761,7 @@ func (f *decompressor) huffSym(h *huffmanDecoder) (int32, error) {
 			b |= uint32(c) << (nb & 31)
 			nb += 8
 		}
-		chunk := h.chunks[b&(huffmanNumChunks-1)]
+		chunk = h.chunks[b&(huffmanNumChunks-1)]
 		n = uint32(chunk & huffmanCountMask)
 		if n > huffmanChunkBits {
 			chunk = h.links[chunk>>huffmanValueShift][(b>>huffmanChunkBits)&h.linkMask]

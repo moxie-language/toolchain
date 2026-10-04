@@ -181,24 +181,34 @@ func (d *compressor) fillWindow(b []byte) {
 
 	// Calculate 256 hashes at the time (more L1 cache hits)
 	loops := (n + 256 - minMatchLength) / 256
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var index int32
+	var end int32
+	var toCheck []byte
+	var dstSize int32
+	var dst []uint32
+	var di int32
+	var hh *uint32
 	for j := 0; j < loops; j++ {
-		index := j * 256
-		end := index + 256 + minMatchLength - 1
+		index = j * 256
+		end = index + 256 + minMatchLength - 1
 		if end > n {
 			end = n
 		}
-		toCheck := d.window[index:end]
-		dstSize := len(toCheck) - minMatchLength + 1
+		toCheck = d.window[index:end]
+		dstSize = len(toCheck) - minMatchLength + 1
 
 		if dstSize <= 0 {
 			continue
 		}
 
-		dst := d.hashMatch[:dstSize]
+		dst = d.hashMatch[:dstSize]
 		d.bulkHasher(toCheck, dst)
 		for i, val := range dst {
-			di := i + index
-			hh := &d.hashHead[val&hashMask]
+			di = i + index
+			hh = &d.hashHead[val&hashMask]
 			// Get previous value with the same hash.
 			// Our chain should point to the previous value.
 			d.hashPrev[di&windowMask] = *hh
@@ -370,12 +380,26 @@ func (d *compressor) deflate() {
 
 	d.maxInsertIndex = d.windowEnd - (minMatchLength - 1)
 
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var lookahead int32
+	var hv uint32
+	var hh *uint32
+	var prevLength int32
+	var prevOffset int32
+	var minIndex int32
+	var newIndex int32
+	var index int32
+	var hv2 uint32
+	var i int32
+
 Loop:
 	for {
 		if d.index > d.windowEnd {
 			panic("index > windowEnd")
 		}
-		lookahead := d.windowEnd - d.index
+		lookahead = d.windowEnd - d.index
 		if lookahead < minMatchLength+maxMatchLength {
 			if !d.sync {
 				break Loop
@@ -402,17 +426,17 @@ Loop:
 		}
 		if d.index < d.maxInsertIndex {
 			// Update the hash
-			hv := hash4(d.window[d.index : d.index+minMatchLength])
-			hh := &d.hashHead[hv&hashMask]
+			hv = hash4(d.window[d.index : d.index+minMatchLength])
+			hh = &d.hashHead[hv&hashMask]
 			d.chainHead = int32(*hh)
 			d.hashPrev[d.index&windowMask] = uint32(d.chainHead)
 			*hh = uint32(d.index + d.hashOffset)
 		}
-		prevLength := d.length
-		prevOffset := d.offset
+		prevLength = d.length
+		prevOffset = d.offset
 		d.length = minMatchLength - 1
 		d.offset = 0
-		minIndex := d.index - windowSize
+		minIndex = d.index - windowSize
 		if minIndex < 0 {
 			minIndex = 0
 		}
@@ -441,19 +465,18 @@ Loop:
 			// lookahead, the last two strings are not inserted into the hash
 			// table.
 			if d.length <= d.fastSkipHashing {
-				var newIndex int32
 				if d.fastSkipHashing != skipNever {
 					newIndex = d.index + d.length
 				} else {
 					newIndex = d.index + prevLength - 1
 				}
-				index := d.index
+				index = d.index
 				for index++; index < newIndex; index++ {
 					if index < d.maxInsertIndex {
-						hv2 := hash4(d.window[index : index+minMatchLength])
+						hv2 = hash4(d.window[index : index+minMatchLength])
 						// Get previous value with the same hash.
 						// Our chain should point to the previous value.
-						hh := &d.hashHead[hv2&hashMask]
+						hh = &d.hashHead[hv2&hashMask]
 						d.hashPrev[index&windowMask] = *hh
 						// Set the head of the hash chain to us.
 						*hh = uint32(index + d.hashOffset)
@@ -479,7 +502,7 @@ Loop:
 			}
 		} else {
 			if d.fastSkipHashing != skipNever || d.byteAvailable {
-				i := d.index - 1
+				i = d.index - 1
 				if d.fastSkipHashing != skipNever {
 					i = d.index
 				}

@@ -240,8 +240,15 @@ func (w *Writer) Write(data []byte) (n int32, err error) {
 		w.n += n
 		src = w.src[:w.n]
 	}
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var nDst int32
+	var nSrc int32
+	var terr error
+	var m int32
 	for {
-		nDst, nSrc, terr := w.t.Transform(w.dst, src, false)
+		nDst, nSrc, terr = w.t.Transform(w.dst, src, false)
 		if _, werr := w.w.Write(w.dst[:nDst]); werr != nil {
 			return n, werr
 		}
@@ -266,7 +273,7 @@ func (w *Writer) Write(data []byte) (n int32, err error) {
 			}
 		case ErrShortSrc:
 			if len(src) < len(w.src) {
-				m := copy(w.src, src)
+				m = copy(w.src, src)
 				// If w.n > 0, bytes from data were already copied to w.src and n
 				// was already set to the number of bytes consumed.
 				if w.n == 0 {
@@ -410,14 +417,23 @@ func (c *chain) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int32, err er
 	dstL.b, dstL.n = dst, 0
 	var lastFull, needProgress bool // for detecting progress
 
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var in *link
+	var out *link
+	var dstN int32
+	var srcN int32
+	var err0 error
+
 	// i is the index of the next Transformer to apply, for i in [low, high].
 	// low is the lowest index for which c.link[low] may still produce bytes.
 	// high is the highest index for which c.link[high] has a Transformer.
 	// The error returned by Transform determines whether to increase or
 	// decrease i. We try to completely fill a buffer before converting it.
 	for low, i, high := c.errStart, c.errStart, len(c.link)-2; low <= i && i <= high; {
-		in, out := &c.link[i], &c.link[i+1]
-		dstN, srcN, err0 := in.t.Transform(out.dst(), in.src(), atEOF && low == i)
+		in, out = &c.link[i], &c.link[i+1]
+		dstN, srcN, err0 = in.t.Transform(out.dst(), in.src(), atEOF && low == i)
 		out.n += dstN
 		in.p += srcN
 		if i > 0 && in.p == in.n {

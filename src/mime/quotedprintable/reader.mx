@@ -80,6 +80,14 @@ func (r *Reader) Read(p []byte) (n int32, err error) {
 	//    and it will be silently ignored.
 	// 4. it takes = as literal = if not followed by two hex digits
 	//    but not at end of line (issue 13219).
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var hasLF bool
+	var hasCR bool
+	var wholeLine []byte
+	var rightStripped []byte
+	var b byte
 	for len(p) > 0 {
 		if len(r.line) == 0 {
 			if r.rerr != nil {
@@ -88,12 +96,12 @@ func (r *Reader) Read(p []byte) (n int32, err error) {
 			r.line, r.rerr = r.br.ReadSlice('\n')
 
 			// Does the line end in CRLF instead of just LF?
-			hasLF := bytes.HasSuffix(r.line, _lf())
-			hasCR := bytes.HasSuffix(r.line, _crlf())
-			wholeLine := r.line
+			hasLF = bytes.HasSuffix(r.line, _lf())
+			hasCR = bytes.HasSuffix(r.line, _crlf())
+			wholeLine = r.line
 			r.line = bytes.TrimRightFunc(wholeLine, isQPDiscardWhitespace)
 			if bytes.HasSuffix(r.line, _softSuffix()) {
-				rightStripped := bytes.TrimLeft(wholeLine[len(r.line):], lwspChar)
+				rightStripped = bytes.TrimLeft(wholeLine[len(r.line):], lwspChar)
 				r.line = r.line[:len(r.line)-1]
 				if !bytes.HasPrefix(rightStripped, _lf()) && !bytes.HasPrefix(rightStripped, _crlf()) &&
 					!(len(rightStripped) == 0 && len(r.line) > 0 && r.rerr == io.EOF) {
@@ -110,7 +118,7 @@ func (r *Reader) Read(p []byte) (n int32, err error) {
 			}
 			continue
 		}
-		b := r.line[0]
+		b = r.line[0]
 
 		switch {
 		case b == '=':

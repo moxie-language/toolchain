@@ -198,10 +198,15 @@ func (w *huffmanBitWriter) generateCodegen(numLiterals int32, numOffsets int32, 
 	size := codegen[0]
 	count := 1
 	outIndex := 0
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var nextSize uint8
+	var n int32
 	for inIndex := 1; size != badCode; inIndex++ {
 		// INVARIANT: We have seen "count" copies of size that have not yet
 		// had output generated for them.
-		nextSize := codegen[inIndex]
+		nextSize = codegen[inIndex]
 		if nextSize == size {
 			count++
 			continue
@@ -213,7 +218,7 @@ func (w *huffmanBitWriter) generateCodegen(numLiterals int32, numOffsets int32, 
 			w.codegenFreq[size]++
 			count--
 			for count >= 3 {
-				n := 6
+				n = 6
 				if n > count {
 					n = count
 				}
@@ -226,7 +231,7 @@ func (w *huffmanBitWriter) generateCodegen(numLiterals int32, numOffsets int32, 
 			}
 		} else {
 			for count >= 11 {
-				n := 138
+				n = 138
 				if n > count {
 					n = count
 				}
@@ -530,13 +535,18 @@ func (w *huffmanBitWriter) indexTokens(tokens []token) (numLiterals, numOffsets 
 	clear(w.literalFreq)
 	clear(w.offsetFreq)
 
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var length uint32
+	var offset uint32
 	for _, t := range tokens {
 		if t < matchType {
 			w.literalFreq[t.literal()]++
 			continue
 		}
-		length := t.length()
-		offset := t.offset()
+		length = t.length()
+		offset = t.offset()
 		w.literalFreq[lengthCodesStart+lengthCode(length)]++
 		w.offsetFreq[offsetCode(offset)]++
 	}
@@ -664,19 +674,25 @@ func (w *huffmanBitWriter) writeBlockHuff(eof bool, input []byte) {
 	w.writeDynamicHeader(numLiterals, numOffsets, numCodegens, eof)
 	encoding := w.literalEncoding.codes[:257]
 	n := w.nbytes
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var c hcode
+	var pending uint64
+	var bytes []byte
 	for _, t := range input {
 		// Bitwriting inlined, ~30% speedup
-		c := encoding[t]
+		c = encoding[t]
 		w.bits |= uint64(c.code) << w.nbits
 		w.nbits += uint32(c.len)
 		if w.nbits < 48 {
 			continue
 		}
 		// Store 6 bytes
-		pending := w.bits
+		pending = w.bits
 		w.bits >>= 48
 		w.nbits -= 48
-		bytes := w.bytes[n : n+6]
+		bytes = w.bytes[n : n+6]
 		bytes[0] = byte(pending)
 		bytes[1] = byte(pending >> 8)
 		bytes[2] = byte(pending >> 16)
