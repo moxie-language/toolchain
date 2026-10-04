@@ -1395,4 +1395,4 @@ became free functions whose first parameter is the value: the nostr tag API is
 underlying `[]chan T`, and the mls types - including `ratchetTree` with its 25
 methods - are free functions. Verified with the compiler that enforces the rule
 (`3b13de5e`, installed as `./moxie`): nostr 194 tests, musiquay 89 tests,
-`make build-app-wasm` links, 0 failures; morly's 370 are running.
+`make build-app-wasm` links, 0 failures, and morly's 370 across 26 packages are green.
