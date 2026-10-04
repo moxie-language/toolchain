@@ -30,13 +30,13 @@ type Rat struct {
 }
 
 // NewRat creates a new [Rat] with numerator a and denominator b.
-func NewRat(a, b int64) *Rat {
+func NewRat(a, b int64) (rrat *Rat) {
 	return (&Rat{}).SetFrac64(a, b)
 }
 
 // SetFloat64 sets z to exactly f and returns z.
 // If f is not finite, SetFloat returns nil.
-func (z *Rat) SetFloat64(f float64) *Rat {
+func (z *Rat) SetFloat64(f float64) (rrat *Rat) {
 	const expMask = 1<<11 - 1
 	bv := math.Float64bits(f)
 	mantissa := bv & (1<<52 - 1)
@@ -74,7 +74,7 @@ func (z *Rat) SetFloat64(f float64) *Rat {
 // nearest to the quotient a/b, using round-to-even in
 // halfway cases. It does not mutate its arguments.
 // Preconditions: b is non-zero; a and b have no common factors.
-func quotToFloat32(stk *stack, a, b nat) (f float32, exact bool) {
+func quotToFloat32(stk *stack, a, b []Word) (f float32, exact bool) {
 	const (
 		// float size in bits
 		Fsize = 32
@@ -92,11 +92,11 @@ func quotToFloat32(stk *stack, a, b nat) (f float32, exact bool) {
 	)
 
 	// TODO(adonovan): specialize common degenerate cases: 1.0, integers.
-	alen := a.bitLen()
+	alen := natBitLen(a)
 	if alen == 0 {
 		return 0, true
 	}
-	blen := b.bitLen()
+	blen := natBitLen(b)
 	if blen == 0 {
 		panic("division by zero")
 	}
@@ -108,20 +108,20 @@ func quotToFloat32(stk *stack, a, b nat) (f float32, exact bool) {
 	// - the high-order 1 is omitted in "normal" representation;
 	// - the low-order 1 will be used during rounding then discarded.
 	exp := alen - blen
-	var a2, b2 nat
-	a2 = a2.set(a)
-	b2 = b2.set(b)
+	var a2, b2 []Word
+	a2 = natSet(a2, a)
+	b2 = natSet(b2, b)
 	if shift := Msize2 - exp; shift > 0 {
-		a2 = a2.lsh(a2, uint32(shift))
+		a2 = natLsh(a2, a2, uint32(shift))
 	} else if shift < 0 {
-		b2 = b2.lsh(b2, uint32(-shift))
+		b2 = natLsh(b2, b2, uint32(-shift))
 	}
 
 	// 2. Compute quotient and remainder (q, r).  NB: due to the
 	// extra shift, the low-order bit of q is logically the
 	// high-order bit of r.
-	var q nat
-	q, r := q.div(stk, a2, a2, b2) // (recycle a2)
+	var q []Word
+	q, r := natDiv(q, stk, a2, a2, b2) // (recycle a2)
 	mantissa := low32(q)
 	haveRem := len(r) > 0 // mantissa&1 && !haveRem => remainder is exactly half
 
@@ -172,7 +172,7 @@ func quotToFloat32(stk *stack, a, b nat) (f float32, exact bool) {
 // nearest to the quotient a/b, using round-to-even in
 // halfway cases. It does not mutate its arguments.
 // Preconditions: b is non-zero; a and b have no common factors.
-func quotToFloat64(stk *stack, a, b nat) (f float64, exact bool) {
+func quotToFloat64(stk *stack, a, b []Word) (f float64, exact bool) {
 	const (
 		// float size in bits
 		Fsize = 64
@@ -190,11 +190,11 @@ func quotToFloat64(stk *stack, a, b nat) (f float64, exact bool) {
 	)
 
 	// TODO(adonovan): specialize common degenerate cases: 1.0, integers.
-	alen := a.bitLen()
+	alen := natBitLen(a)
 	if alen == 0 {
 		return 0, true
 	}
-	blen := b.bitLen()
+	blen := natBitLen(b)
 	if blen == 0 {
 		panic("division by zero")
 	}
@@ -206,20 +206,20 @@ func quotToFloat64(stk *stack, a, b nat) (f float64, exact bool) {
 	// - the high-order 1 is omitted in "normal" representation;
 	// - the low-order 1 will be used during rounding then discarded.
 	exp := alen - blen
-	var a2, b2 nat
-	a2 = a2.set(a)
-	b2 = b2.set(b)
+	var a2, b2 []Word
+	a2 = natSet(a2, a)
+	b2 = natSet(b2, b)
 	if shift := Msize2 - exp; shift > 0 {
-		a2 = a2.lsh(a2, uint32(shift))
+		a2 = natLsh(a2, a2, uint32(shift))
 	} else if shift < 0 {
-		b2 = b2.lsh(b2, uint32(-shift))
+		b2 = natLsh(b2, b2, uint32(-shift))
 	}
 
 	// 2. Compute quotient and remainder (q, r).  NB: due to the
 	// extra shift, the low-order bit of q is logically the
 	// high-order bit of r.
-	var q nat
-	q, r := q.div(stk, a2, a2, b2) // (recycle a2)
+	var q []Word
+	q, r := natDiv(q, stk, a2, a2, b2) // (recycle a2)
 	mantissa := low64(q)
 	haveRem := len(r) > 0 // mantissa&1 && !haveRem => remainder is exactly half
 
@@ -304,23 +304,23 @@ func (x *Rat) Float64() (f float64, exact bool) {
 
 // SetFrac sets z to a/b and returns z.
 // If b == 0, SetFrac panics.
-func (z *Rat) SetFrac(a, b *Int) *Rat {
+func (z *Rat) SetFrac(a, b *Int) (rrat *Rat) {
 	z.a.neg = a.neg != b.neg
 	babs := b.abs
 	if len(babs) == 0 {
 		panic("division by zero")
 	}
 	if &z.a == b || alias(z.a.abs, babs) {
-		babs = nat(nil).set(babs) // make a copy
+		babs = natSet([]Word(nil), babs) // make a copy
 	}
-	z.a.abs = z.a.abs.set(a.abs)
-	z.b.abs = z.b.abs.set(babs)
+	z.a.abs = natSet(z.a.abs, a.abs)
+	z.b.abs = natSet(z.b.abs, babs)
 	return z.norm()
 }
 
 // SetFrac64 sets z to a/b and returns z.
 // If b == 0, SetFrac64 panics.
-func (z *Rat) SetFrac64(a, b int64) *Rat {
+func (z *Rat) SetFrac64(a, b int64) (rrat *Rat) {
 	if b == 0 {
 		panic("division by zero")
 	}
@@ -329,52 +329,52 @@ func (z *Rat) SetFrac64(a, b int64) *Rat {
 		b = -b
 		z.a.neg = !z.a.neg
 	}
-	z.b.abs = z.b.abs.setUint64(uint64(b))
+	z.b.abs = natSetUint64(z.b.abs, uint64(b))
 	return z.norm()
 }
 
 // SetInt sets z to x (by making a copy of x) and returns z.
-func (z *Rat) SetInt(x *Int) *Rat {
+func (z *Rat) SetInt(x *Int) (rrat *Rat) {
 	z.a.Set(x)
-	z.b.abs = z.b.abs.setWord(1)
+	z.b.abs = natSetWord(z.b.abs, 1)
 	return z
 }
 
 // SetInt64 sets z to x and returns z.
-func (z *Rat) SetInt64(x int64) *Rat {
+func (z *Rat) SetInt64(x int64) (rrat *Rat) {
 	z.a.SetInt64(x)
-	z.b.abs = z.b.abs.setWord(1)
+	z.b.abs = natSetWord(z.b.abs, 1)
 	return z
 }
 
 // SetUint64 sets z to x and returns z.
-func (z *Rat) SetUint64(x uint64) *Rat {
+func (z *Rat) SetUint64(x uint64) (rrat *Rat) {
 	z.a.SetUint64(x)
-	z.b.abs = z.b.abs.setWord(1)
+	z.b.abs = natSetWord(z.b.abs, 1)
 	return z
 }
 
 // Set sets z to x (by making a copy of x) and returns z.
-func (z *Rat) Set(x *Rat) *Rat {
+func (z *Rat) Set(x *Rat) (rrat *Rat) {
 	if z != x {
 		z.a.Set(&x.a)
 		z.b.Set(&x.b)
 	}
 	if len(z.b.abs) == 0 {
-		z.b.abs = z.b.abs.setWord(1)
+		z.b.abs = natSetWord(z.b.abs, 1)
 	}
 	return z
 }
 
 // Abs sets z to |x| (the absolute value of x) and returns z.
-func (z *Rat) Abs(x *Rat) *Rat {
+func (z *Rat) Abs(x *Rat) (rrat *Rat) {
 	z.Set(x)
 	z.a.neg = false
 	return z
 }
 
 // Neg sets z to -x and returns z.
-func (z *Rat) Neg(x *Rat) *Rat {
+func (z *Rat) Neg(x *Rat) (rrat *Rat) {
 	z.Set(x)
 	z.a.neg = len(z.a.abs) > 0 && !z.a.neg // 0 has no sign
 	return z
@@ -382,7 +382,7 @@ func (z *Rat) Neg(x *Rat) *Rat {
 
 // Inv sets z to 1/x and returns z.
 // If x == 0, Inv panics.
-func (z *Rat) Inv(x *Rat) *Rat {
+func (z *Rat) Inv(x *Rat) (rrat *Rat) {
 	if len(x.a.abs) == 0 {
 		panic("division by zero")
 	}
@@ -395,20 +395,20 @@ func (z *Rat) Inv(x *Rat) *Rat {
 //   - -1 if x < 0;
 //   - 0 if x == 0;
 //   - +1 if x > 0.
-func (x *Rat) Sign() int32 {
+func (x *Rat) Sign() (rn int32) {
 	return x.a.Sign()
 }
 
 // IsInt reports whether the denominator of x is 1.
-func (x *Rat) IsInt() bool {
-	return len(x.b.abs) == 0 || x.b.abs.cmp(_natOne()) == 0
+func (x *Rat) IsInt() (rok bool) {
+	return len(x.b.abs) == 0 || natCmp(x.b.abs, _natOne()) == 0
 }
 
 // Num returns the numerator of x; it may be <= 0.
 // The result is a reference to x's numerator; it
 // may change if a new value is assigned to x, and vice versa.
 // The sign of the numerator corresponds to the sign of x.
-func (x *Rat) Num() *Int {
+func (x *Rat) Num() (rint *Int) {
 	return &x.a
 }
 
@@ -419,26 +419,26 @@ func (x *Rat) Num() *Int {
 // any operation that sets x will do, including x.Set(x).)
 // If the result is a reference to x's denominator it
 // may change if a new value is assigned to x, and vice versa.
-func (x *Rat) Denom() *Int {
+func (x *Rat) Denom() (rint *Int) {
 	// Note that x.b.neg is guaranteed false.
 	if len(x.b.abs) == 0 {
 		// Note: If this proves problematic, we could
 		//       panic instead and require the Rat to
 		//       be explicitly initialized.
-		return &Int{abs: nat{1}}
+		return &Int{abs: []Word{1}}
 	}
 	return &x.b
 }
 
-func (z *Rat) norm() *Rat {
+func (z *Rat) norm() (rrat *Rat) {
 	switch {
 	case len(z.a.abs) == 0:
 		// z == 0; normalize sign and denominator
 		z.a.neg = false
-		z.b.abs = z.b.abs.setWord(1)
+		z.b.abs = natSetWord(z.b.abs, 1)
 	case len(z.b.abs) == 0:
 		// z is integer; normalize denominator
-		z.b.abs = z.b.abs.setWord(1)
+		z.b.abs = natSetWord(z.b.abs, 1)
 	default:
 		// z is fraction; normalize numerator and denominator
 		stk := getStack()
@@ -447,8 +447,8 @@ func (z *Rat) norm() *Rat {
 		z.a.neg = false
 		z.b.neg = false
 		if f := NewInt(0).lehmerGCD(nil, nil, &z.a, &z.b); f.Cmp(_intOne()) != 0 {
-			z.a.abs, _ = z.a.abs.div(stk, nil, z.a.abs, f.abs)
-			z.b.abs, _ = z.b.abs.div(stk, nil, z.b.abs, f.abs)
+			z.a.abs, _ = natDiv(z.a.abs, stk, nil, z.a.abs, f.abs)
+			z.b.abs, _ = natDiv(z.b.abs, stk, nil, z.b.abs, f.abs)
 		}
 		z.a.neg = neg
 	}
@@ -458,26 +458,26 @@ func (z *Rat) norm() *Rat {
 // mulDenom sets z to the denominator product x*y (by taking into
 // account that 0 values for x or y must be interpreted as 1) and
 // returns z.
-func mulDenom(stk *stack, z, x, y nat) nat {
+func mulDenom(stk *stack, z, x, y []Word) (rnat []Word) {
 	switch {
 	case len(x) == 0 && len(y) == 0:
-		return z.setWord(1)
+		return natSetWord(z, 1)
 	case len(x) == 0:
-		return z.set(y)
+		return natSet(z, y)
 	case len(y) == 0:
-		return z.set(x)
+		return natSet(z, x)
 	}
-	return z.mul(stk, x, y)
+	return natMul(z, stk, x, y)
 }
 
 // scaleDenom sets z to the product x*f.
 // If f == 0 (zero value of denominator), z is set to (a copy of) x.
-func (z *Int) scaleDenom(stk *stack, x *Int, f nat) {
+func (z *Int) scaleDenom(stk *stack, x *Int, f []Word) {
 	if len(f) == 0 {
 		z.Set(x)
 		return
 	}
-	z.abs = z.abs.mul(stk, x.abs, f)
+	z.abs = natMul(z.abs, stk, x.abs, f)
 	z.neg = x.neg
 }
 
@@ -485,7 +485,7 @@ func (z *Int) scaleDenom(stk *stack, x *Int, f nat) {
 //   - -1 if x < y;
 //   - 0 if x == y;
 //   - +1 if x > y.
-func (x *Rat) Cmp(y *Rat) int32 {
+func (x *Rat) Cmp(y *Rat) (rn int32) {
 	var a, b Int
 	stk := getStack()
 	defer stk.free()
@@ -495,7 +495,7 @@ func (x *Rat) Cmp(y *Rat) int32 {
 }
 
 // Add sets z to the sum x+y and returns z.
-func (z *Rat) Add(x, y *Rat) *Rat {
+func (z *Rat) Add(x, y *Rat) (rrat *Rat) {
 	stk := getStack()
 	defer stk.free()
 
@@ -508,7 +508,7 @@ func (z *Rat) Add(x, y *Rat) *Rat {
 }
 
 // Sub sets z to the difference x-y and returns z.
-func (z *Rat) Sub(x, y *Rat) *Rat {
+func (z *Rat) Sub(x, y *Rat) (rrat *Rat) {
 	stk := getStack()
 	defer stk.free()
 
@@ -521,22 +521,24 @@ func (z *Rat) Sub(x, y *Rat) *Rat {
 }
 
 // Mul sets z to the product x*y and returns z.
-func (z *Rat) Mul(x, y *Rat) *Rat {
+func (z *Rat) Mul(x, y *Rat) (rrat *Rat) {
 	stk := getStack()
 	defer stk.free()
 
 	if x == y {
 		// a squared Rat is positive and can't be reduced (no need to call norm())
 		z.a.neg = false
-		z.a.abs = z.a.abs.sqr(stk, x.a.abs)
+		z.a.abs = natSqr(z.a.abs, stk, x.a.abs)
 		if len(x.b.abs) == 0 {
-			z.b.abs = z.b.abs.setWord(1)
+			z.b.abs = natSetWord(z.b.abs, 1)
 		} else {
-			z.b.abs = z.b.abs.sqr(stk, x.b.abs)
+			z.b.abs = natSqr(z.b.abs, stk, x.b.abs)
 		}
 		return z
 	}
 
+	// Int.mul stores into its receiver; the free-function rewrite of it would
+	// have to assign the result back.
 	z.a.mul(stk, &x.a, &y.a)
 	z.b.abs = mulDenom(stk, z.b.abs, x.b.abs, y.b.abs)
 	return z.norm()
@@ -544,7 +546,7 @@ func (z *Rat) Mul(x, y *Rat) *Rat {
 
 // Quo sets z to the quotient x/y and returns z.
 // If y == 0, Quo panics.
-func (z *Rat) Quo(x, y *Rat) *Rat {
+func (z *Rat) Quo(x, y *Rat) (rrat *Rat) {
 	stk := getStack()
 	defer stk.free()
 
