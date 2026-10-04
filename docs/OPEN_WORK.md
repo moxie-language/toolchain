@@ -1425,3 +1425,14 @@ failures**, bootstrap included. The remaining eight are ordinary source
 closures in `pkg/syntax` (`argList`, `complitexpr`, `init`, `initBytes`,
 `interfaceType`, `paramList`, `structType`, `trace`) and want explicit
 parameters.
+
+**The trace closure is gone too** (`8fbe23f1`). `p.trace` returned a `func()`
+that captured the parser and the message, so all 47 `defer p.trace("x")()` sites
+were captures in disguise. It now returns the indent length it replaced and
+`traceEnd(prev)` restores it, so each site reads
+`defer p.traceEnd(p.trace("x"))` - the argument is still evaluated at defer
+time and the recover/panic behaviour is unchanged. Compiler builds; suite
+**171/171, 0 failures**. Nine of the sixteen are now gone (appendGroup's method
+value and closure, the seven `__mval` method values, and trace); the remaining
+seven are `argList`, `complitexpr`, `init`, `initBytes`, `interfaceType`,
+`paramList` and `structType`.
