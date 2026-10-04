@@ -164,12 +164,20 @@ func (cdr *CounterDataReader) readArgs() error {
 	}
 	nents := slr.ReadULEB128()
 	cdr.args = map[string][]byte{}
+	// Declared once, outside the loops: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var k []byte
+	var errk error
+	var v []byte
+	var errv error
+	var arg []byte
 	for i := uint64(0); i < nents; i++ {
-		k, errk := sget()
+		k, errk = sget()
 		if errk != nil {
 			return errk
 		}
-		v, errv := sget()
+		v, errv = sget()
 		if errv != nil {
 			return errv
 		}
@@ -185,7 +193,7 @@ func (cdr *CounterDataReader) readArgs() error {
 		}
 		cdr.osargs = [][]byte{:0:argc}
 		for i := 0; i < argc; i++ {
-			arg := cdr.args[fmt.Sprintf("argv%d", i)]
+			arg = cdr.args[fmt.Sprintf("argv%d", i)]
 			cdr.osargs = mxutil.Ensure(cdr.osargs, 1)
 			cdr.osargs = push(cdr.osargs, arg)
 		}
@@ -364,10 +372,16 @@ func (cdr *CounterDataReader) NextFunc(p *FuncPayload) (bool, error) {
 		p.Counters = []uint32{:0:1024}
 	}
 	p.Counters = p.Counters[:0]
+	// Declared once, outside the loop: a declaration in a loop in a
+	// self-mutating method is rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration. `rderr` rather
+	// than `rerr` because the closures above bind their own `rerr`.
+	var v uint32
+	var rderr error
 	for i := uint32(0); i < nc; i++ {
-		v, rerr := rdu32()
-		if rerr != nil {
-			return false, rerr
+		v, rderr = rdu32()
+		if rderr != nil {
+			return false, rderr
 		}
 		p.Counters = mxutil.Ensure(p.Counters, 1)
 		p.Counters = push(p.Counters, v)
