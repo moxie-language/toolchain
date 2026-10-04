@@ -2463,3 +2463,57 @@ panics on its own `os` (see the bootstrap-artifact section above), so keep
 - `os.Pipe`'s `var p [2]int32` and syscall's `[2]Timeval`/`[2]Timespec` unsafe
   casts are the remaining rule-9 arrays; both are alias/unsafe-bound and correct
   today, so they need their own decision.
+
+# Queue item 1 done: the soundness checks are ungated, and the wave is cleared
+
+`checkAssignable`, `errArgs`, `checkConstConvert` and `checkDefaultRepr` no
+longer return early on `!isUserPackagePath`. Correctness is not a style rule, and
+the predicate that gates the style rules was gating these too, so the whole
+stdlib went unchecked: that is how `natMul(z.a, stk, x.a, y.a)` - an `Int` where
+`[]Word` is declared, result discarded - compiled into a broken `math/big`.
+`go/types` reports the same mismatches and the legacy compiler always surfaced
+them, so stage4 was the odd one out once the migration had cleaned the tree.
+
+`errPos` also puts the failing position into these diagnostics in the
+`prefix:number:` shape `remapErrorLines` expects, so they name `file:line`. The
+eight violations in `src/runtime` were unlocatable before that.
+
+The wave was **three real defects in the whole tree**, and one of them was a
+genuine compiler bug:
+
+1. **A binary constant expression lost its typed operand's type.**
+   `const c = uintptr(64) * 1024 * 1024` was untyped - `tcInferTypeFromExpr` has
+   no binary case, so the declaration fell back to `UntypedTypeOfCV` and `x := c`
+   took the int32 default. `src/runtime`'s arena growth does
+   `newCap := arenaDefaultRegion` (a uintptr constant), so `newCap` was int32 and
+   `cap*2`, the 4095 rounding and `sysMap`'s uintptr parameter all ran in 32 bits.
+   Fixed in `tcInferConstTypeFromExpr` with Go's rule (an untyped constant
+   combines with a typed one and keeps the typed operand's type; comparisons and
+   logical operators stay untyped bool). Legacy was always right, so this is
+   stage4 catching up.
+2. **`src/net/**` passed `*netFD` to `runtime.KeepAlive`, whose parameter is
+   `unsafe.Pointer`** - 20 sites in 8 files, now spelled `unsafe.Pointer(x)`.
+   `src/syscall/js` has 19 more, all inside its `js && wasm` constraint, so they
+   go with that package's own debt.
+3. **`pkg/rewrite/resolve.mx` built `[]typeapi.Type` and handed it to
+   `types.NewTCInterface`, which takes `[]types.Type`.** Neither an assignment
+   nor an interface conversion is legal (`types.Type`'s method set is larger), so
+   the values are asserted on append; they always come from the types package's
+   constructors. The `typeapi` interface itself stays: `pkg/syntax` and
+   `pkg/types/shared_types` need the minimal view.
+
+Verified: a sweep of `pkg/**`, `cmd/**` and the previously wide-unclean packages
+reports **zero** soundness violations, and `tests/run.sh --full` is **175 passed
+/ 0 failed / 0 skipped** with the checks ungated, `pkg/rewrite` and
+`selfhost:stage1` included, `selfhost:fixpoint` holding.
+
+## What is left for the widened predicate
+
+With the soundness half done, the widened `isUserPackagePath` now waits only on
+the STYLE blockers that are already recorded above: `crypto/ed25519`'s named
+slice types vs value `crypto.Signer` (the struct-wrapper design), `net/http`'s
+`context.Value` gap, the named public API types in `src/net`, `debug/gosym`,
+`syscall/js`, and the `internal/trace`/`internal/coverage` codegen bugs. Note
+that `isUserPackagePath` is still the predicate for both roles; when the style
+migration finishes, the soundness checks are already unconditional and need no
+further change.
