@@ -1,0 +1,92 @@
+// Regression: a method on a GENERIC type must be reached through the
+// monomorphizing path.
+//
+// resolveMethodCallWithRecv resolved the generic declaration's own member and
+// emitted a call to it, so the call went to an unmangled
+// `main.(*Box).get` - a symbol the generic declaration never emits - and the
+// link failed with `undefined symbol: main.(*Box).get`. tryGenericMethodCall,
+// which substitutes the type arguments and mangles the instantiation, was never
+// reached because the plain path returned first.
+//
+// Nothing in the suite exercised a generic TYPE with methods (generic FUNCTIONS
+// were covered), so the whole feature was broken silently.
+//
+// Fixed in: _mxc_stage4/ssa_builder.mx - resolveMethodCallWithRecv returns nil
+// for a receiver whose type is a generic Named, and tryGenericMethodCall now
+// reports a handled flag like tryGenericLocalCall and buildFuncFieldCall (it
+// returned nil for a void method, so `Set` still fell through to "Set undefined
+// (type main.Box has no field or method Set)").
+//
+// NOT covered here, still broken (see docs/OPEN_WORK.md): reading a field
+// element of an instantiated generic in non-generic code (`b.v[i]`) yields the
+// type parameter rather than the substituted type, so passing it on as an int32
+// carries the wrong value and printing it prints nothing; a method on a generic
+// type defined in ANOTHER package is still "undefined (type lib.Box has no
+// field or method Get)"; and a monomorphized method returning T, called in a
+// non-main package whose return goes through the codec, panics "codec default
+// bad size". Method calls are what this fixture holds.
+
+package main
+
+type E struct {
+	tag int32
+	pad [4]int64
+}
+
+type Box[T comparable] struct {
+	v []T
+}
+
+// Returns the type parameter itself; the result is a struct here, which is what
+// made the unmangled call a hard IR type error rather than a wrong value.
+func (b *Box[T]) Get() (out T) {
+	return b.v[0]
+}
+
+// A method that does not mention T still lives on a generic type and is only
+// reachable through an instantiation.
+func (b *Box[T]) Set(i int32, val T) {
+	b.v[i] = val
+}
+
+func (b *Box[T]) Len() (n int32) {
+	return int32(len(b.v))
+}
+
+// At reads an element through the substituted signature; the field form
+// `s.v[2]` is still typed T and is the gap noted above.
+func (b *Box[T]) At(i int32) (out T) {
+	return b.v[i]
+}
+
+func chk(name string, got, want int32) {
+	if got != want {
+		println("FAIL: " | name | " got " | got.String() | " want " | want.String())
+		panic("mismatch")
+	}
+}
+
+func main() {
+	// local variable receiver
+	var b Box[E]
+	b.v = []E{:2}
+	b.Set(0, E{tag: 7})
+	chk("local-get", b.Get().tag, 7)
+	chk("local-len", b.Len(), 2)
+
+	// pointer receiver reached through an addressable local
+	p := &b
+	p.Set(0, E{tag: 11})
+	chk("ptr-get", p.Get().tag, 11)
+
+	// second instantiation of the same generic type must be its own code
+	var s Box[int32]
+	s.v = []int32{:3}
+	s.Set(0, 42)
+	s.Set(2, 99)
+	chk("int32-get", s.Get(), 42)
+	chk("int32-len", s.Len(), 3)
+	chk("int32-at", s.At(2), 99)
+
+	println("ok")
+}

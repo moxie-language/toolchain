@@ -4994,7 +4994,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 			if fv, handled := fb.buildFuncFieldCall(sel, e.ArgList, e.HasDots); handled {
 				return fv
 			}
-			if gm := fb.tryGenericMethodCall(sel, recv, e.ArgList, e.HasDots); gm != nil {
+			if gm, gmHandled := fb.tryGenericMethodCall(sel, recv, e.ArgList, e.HasDots); gmHandled {
 				return gm
 			}
 			// No method, interface dispatch, function field or generic
@@ -5690,10 +5690,10 @@ func (fb *ssaFuncBuilder) buildFuncFieldCall(sel *syntax.SelectorExpr, argList [
 // resolveTypeExprWithSubst). Looks up the generic method decl collected by
 // ScanGenericDecls, substitutes the type params, builds the body, and emits
 // the call with the receiver as first argument.
-func (fb *ssaFuncBuilder) tryGenericMethodCall(sel *syntax.SelectorExpr, recv SSAValue, argList []syntax.Expr, hasDots bool) (s SSAValue) {
+func (fb *ssaFuncBuilder) tryGenericMethodCall(sel *syntax.SelectorExpr, recv SSAValue, argList []syntax.Expr, hasDots bool) (s SSAValue, handled bool) {
 	typ := recv.SSAType()
 	if typ == nil {
-		return nil
+		return nil, false
 	}
 	isPtr := false
 	if p, isP := SafeUnderlying(typ).(*Pointer); isP {
@@ -5702,7 +5702,7 @@ func (fb *ssaFuncBuilder) tryGenericMethodCall(sel *syntax.SelectorExpr, recv SS
 	}
 	named, ok := typ.(*Named)
 	if !ok || named.Obj == nil || len(named.TArgs) == 0 {
-		return nil
+		return nil, false
 	}
 	pkgPath := ""
 	if named.Obj.Pkg != nil {
@@ -5711,11 +5711,11 @@ func (fb *ssaFuncBuilder) tryGenericMethodCall(sel *syntax.SelectorExpr, recv SS
 	key := pkgPath | "." | named.Obj.Name | "." | sel.Sel.Value
 	fd, ok2 := cctx.genericMethodDecls[key]
 	if !ok2 || fd == nil || fd.Recv == nil {
-		return nil
+		return nil, false
 	}
 	tparamNames := extractRecvTParamNames(fd.Recv.Type)
 	if len(tparamNames) == 0 || len(tparamNames) > len(named.TArgs) {
-		return nil
+		return nil, false
 	}
 	typeSubst := map[string]Type{}
 	for i, tn := range tparamNames {
@@ -5727,7 +5727,7 @@ func (fb *ssaFuncBuilder) tryGenericMethodCall(sel *syntax.SelectorExpr, recv SS
 	}
 	sig := resolveMethodSigWithSubst(fd, typeSubst, srcScope)
 	if sig == nil || sig.Recv == nil {
-		return nil
+		return nil, false
 	}
 	mangledName := mangleGenericName("(*"|named.Obj.Name|")."|sel.Sel.Value, named.TArgs)
 	if pkgPath != "" {
@@ -5771,7 +5771,7 @@ func (fb *ssaFuncBuilder) tryGenericMethodCall(sel *syntax.SelectorExpr, recv SS
 		push(allArgs, ma)
 	}
 	if fn5, ok5 := fb.fn.Pkg.Members[mangledName].(*SSAFunction); ok5 {
-		return fb.emitCallToSSAFunc(fn5, allArgs, hasDots)
+		return fb.emitCallToSSAFunc(fn5, allArgs, hasDots), true
 	}
 	fn := &SSAFunction{
 		name:      mangledName,
@@ -5784,7 +5784,7 @@ func (fb *ssaFuncBuilder) tryGenericMethodCall(sel *syntax.SelectorExpr, recv SS
 	subFb.typeSubst = typeSubst
 	subFb.srcScope = srcScope
 	subFb.buildBody(fd)
-	return fb.emitCallToSSAFunc(fn, allArgs, hasDots)
+	return fb.emitCallToSSAFunc(fn, allArgs, hasDots), true
 }
 
 // extractRecvTParamNames extracts the type parameter names declared on a
@@ -7351,6 +7351,15 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 	if p5, ok35 := SafeUnderlying(typ).(*Pointer); ok35 {
 		typ = p5.Base
 		isPtr = true
+	}
+	// A method on a GENERIC type is only reachable through the
+	// monomorphizing path (tryGenericMethodCall): an instantiation is emitted
+	// under a mangled name and the generic declaration itself emits no symbol,
+	// so resolving one here produced a call to a symbol nobody defines
+	// ("undefined symbol: main.(*Box).get") and skipped the substitution of
+	// the type arguments. Hand it to the generic path.
+	if gn, okg := typ.(*Named); okg && len(gn.TParams) > 0 {
+		return nil, nil
 	}
 	if _, ok36 := SafeUnderlying(typ).(*TCInterface); ok36 {
 		if named2, ok37 := typ.(*Named); !ok37 || named2.NumMethods() == 0 {
