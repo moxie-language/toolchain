@@ -1652,3 +1652,15 @@ Remaining: `pkg/broadcast` (`New`/`PreSpawn` store globals, plus a
 `chan struct{}` / `<-chan string` mismatch), and the compiler diagnostic that
 names the failing function is built but still cannot be installed while the
 stdlib sweep holds `./moxie`.
+
+**morly's last package is a compiler question, not a migration one.**
+`pkg/broadcast`'s stores are fixed (the pre-spawn handles live in a
+`preSpawnState` with `set`/`take`), but the build now stops on
+`cannot use value of type <-chan string as chan struct{}` at both
+`done := spawn(wire.BroadcastWorker, in, out, ready)` sites. The worker is
+`func BroadcastWorker(in chan SubCommand, frames chan BroadcastFrame, ready chan struct{})`
+and none of those element types is a string, yet the spawn result is typed
+`<-chan string`. Either spawn's result type is inferred from the wrong operand,
+or an earlier spawn in the same compilation leaked a type into it; the next step
+is to instrument the spawn builtin's result typing in `ssa_builder.mx` (grep
+`"spawn"` in the builtin-call path, not `checkInitExpr`).
