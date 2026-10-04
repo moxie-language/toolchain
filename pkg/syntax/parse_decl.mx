@@ -44,19 +44,19 @@ func (p *Parser) fileOrNil() (f *File) {
 		switch p.Tok {
 		case token.Import:
 			p.Next()
-			f.DeclList = p.appendGroup(f.DeclList, p.importDecl)
+			f.DeclList = p.appendGroup(f.DeclList, declImport)
 
 		case token.Const:
 			p.Next()
-			f.DeclList = p.appendGroup(f.DeclList, p.constDecl)
+			f.DeclList = p.appendGroup(f.DeclList, declConst)
 
 		case token.TypeType:
 			p.Next()
-			f.DeclList = p.appendGroup(f.DeclList, p.typeDecl)
+			f.DeclList = p.appendGroup(f.DeclList, declType)
 
 		case token.Var:
 			p.Next()
-			f.DeclList = p.appendGroup(f.DeclList, p.varDecl)
+			f.DeclList = p.appendGroup(f.DeclList, declVar)
 
 		case token.Func:
 			p.Next()
@@ -142,23 +142,62 @@ func pushDecl(list []Decl, x Decl) (r0 []Decl) {
 	return list
 }
 
-// appendGroup(f) = f + "(" { f ";" } ")" . // ";" is optional before ")"
-func (p *Parser) appendGroup(list []Decl, f func(*Group) Decl) (ds []Decl) {
-	if p.Tok == token.Lparen {
-		g := (*Group)(p.nodeAlloc(unsafe.Sizeof(Group{})))
-		p.clearPragma()
-		p.Next() // must consume "(" after calling clearPragma!
-		p.list("grouped declaration", token.Semi, token.Rparen, func() bool {
-			if x := f(g); x != nil {
-				list = pushDecl(list, x)
-			}
-			return false
-		})
-	} else {
-		if x := f(nil); x != nil {
+// The declaration kinds appendGroup and declStmt dispatch on. A small enum
+// rather than a func value: `p.importDecl` passed as a value is a bound method
+// value, which captures its receiver, and Moxie function values carry no
+// environment.
+const (
+	declImport int32 = iota + 1
+	declConst
+	declType
+	declVar
+)
+
+// declOfKind parses one declaration of the named kind.
+func (p *Parser) declOfKind(kind int32, g *Group) (d Decl) {
+	switch kind {
+	case declImport:
+		return p.importDecl(g)
+	case declConst:
+		return p.constDecl(g)
+	case declType:
+		return p.typeDecl(g)
+	case declVar:
+		return p.varDecl(g)
+	}
+	return nil
+}
+
+// appendGroup(kind) = kind + "(" { kind ";" } ")" . // ";" is optional before ")"
+//
+// The loop p.list would run is inlined here: the closure p.list takes would
+// have to read `list` and `g` from this frame, and a Moxie closure captures
+// nothing.
+func (p *Parser) appendGroup(list []Decl, kind int32) (ds []Decl) {
+	if p.Tok != token.Lparen {
+		if x := p.declOfKind(kind, nil); x != nil {
 			list = pushDecl(list, x)
 		}
+		return list
 	}
+	g := (*Group)(p.nodeAlloc(unsafe.Sizeof(Group{})))
+	p.clearPragma()
+	p.Next() // must consume "(" after calling clearPragma!
+	for p.Tok != token.EOF && p.Tok != token.Rparen {
+		if x := p.declOfKind(kind, g); x != nil {
+			list = pushDecl(list, x)
+		}
+		// sep is optional before closeTok
+		if !p.got(token.Semi) && p.Tok != token.Rparen {
+			p.syntaxError("in grouped declaration; possibly missing ; or )")
+			p.advance(token.Rparen, token.Rbrack, token.Rbrace)
+			if p.Tok != token.Rparen {
+				// position could be better but we had an error so we don't care
+				return list
+			}
+		}
+	}
+	p.want(token.Rparen)
 	return list
 }
 
