@@ -417,6 +417,14 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 			// same arm for imported types.
 			impls = mxutil.Ensure(impls, 1)
 			push(impls, ifaceImpl{fn: fn, recvType: NewPointer(tn.Typ), ptrRecv: false})
+		} else {
+			// Moxie bans value receivers, so pkg/types keeps a
+			// pointer-receiver method in T's method set as well as *T's. A
+			// value boxed as T (typeID named:...T, an inline scalar in the
+			// value slot) must dispatch too, on the copy that
+			// materializeIfaceValue materializes out of the slot.
+			impls = mxutil.Ensure(impls, 1)
+			push(impls, ifaceImpl{fn: fn, recvType: tn.Typ, ptrRecv: false})
 		}
 		hasType[tname] = true
 	}
@@ -445,19 +453,18 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 				embedType:  embedT,
 				embedChain: chain,
 			})
-			if !isPtrRecv {
-				// Same method-set promotion as above: the promoted
-				// value-receiver method is in T's set as well as *T's.
-				impls = mxutil.Ensure(impls, 1)
-				push(impls, ifaceImpl{
-					fn:         fn,
-					recvType:   tn2.Typ,
-					ptrRecv:    false,
-					embedField: chain[0],
-					embedType:  embedT,
-					embedChain: chain,
-				})
-			}
+			// The value form is in T's method set either way (pkg/types keeps
+			// pointer-receiver methods there too), and materializeIfaceValue
+			// hands emitEmbedChainGEP a pointer to a copy of T.
+			impls = mxutil.Ensure(impls, 1)
+			push(impls, ifaceImpl{
+				fn:         fn,
+				recvType:   tn2.Typ,
+				ptrRecv:    false,
+				embedField: chain[0],
+				embedType:  embedT,
+				embedChain: chain,
+			})
 			hasType[sname] = true
 		}
 	}
@@ -573,42 +580,40 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 				}
 				isPR := m.PtrRecv
 				sym := defPath | ".(*" | defName | ")." | methodName
-				tid := ""
 				normPath := normalizePkgPath(defPath)
-		// Moxie's all-ptr-receiver ABI: all methods receive a pointer.
-		// The interface stores a pointer for pointer types and the value
-		// itself for value types. Use ptrRecv: pointer-receiver methods
-		// key on pointer:named, value-receiver methods key on named.
-		if isPR {
-			tid = "reflect/types.type:pointer:named:" | normPath | "." | defName
-		} else {
-			tid = "reflect/types.type:named:" | normPath | "." | defName
-		}
-			msig := m.Signature()
+				ptid := "reflect/types.type:pointer:named:" | normPath | "." | defName
+				vtid := "reflect/types.type:named:" | normPath | "." | defName
+				msig := m.Signature()
+				// Moxie's all-ptr-receiver ABI: all methods receive a pointer.
+				// The interface stores the pointer itself for pointer types, so
+				// a pointer-receiver method's recvType must be *T. Handing
+				// materializeIfaceValue the value type made it unpack the slot
+				// as an inline scalar and truncate the real pointer: a named
+				// basic over int32 lost its top 32 bits and the callee read the
+				// low half of its own address. A value-receiver method is also
+				// in *T's set (Go promotion), and the compiler boxes &v for the
+				// Codec interface's EncodeTo.
+				impls = mxutil.Ensure(impls, 1)
+				push(impls, ifaceImpl{
+					recvType:  NewPointer(tn3.Typ),
+					ptrRecv:   isPR,
+					extSymbol: sym,
+					extTypeID: ptid,
+					extSig:    msig,
+				})
+				// The value form. In T's set for a value-receiver method by
+				// Go's rules; for a pointer-receiver method because Moxie bans
+				// value receivers, so pkg/types keeps the method in the value's
+				// set too. The value slot then holds an inline scalar and the
+				// callee runs on the copy materializeIfaceValue makes.
 				impls = mxutil.Ensure(impls, 1)
 				push(impls, ifaceImpl{
 					recvType:  tn3.Typ,
-					ptrRecv:   isPR,
+					ptrRecv:   false,
 					extSymbol: sym,
-					extTypeID: tid,
+					extTypeID: vtid,
 					extSig:    msig,
 				})
-				if !isPR {
-					// *T also carries the value-receiver method (Go method-set
-					// promotion). Emit the pointer variant too, so a boxed *T
-					// dispatches it. The Codec interface relies on this:
-					// EncodeTo is value-receiver, DecodeFrom is
-					// pointer-receiver, and the compiler boxes &v as *T.
-					ptid := "reflect/types.type:pointer:named:" | normPath | "." | defName
-					impls = mxutil.Ensure(impls, 1)
-					push(impls, ifaceImpl{
-						recvType:  NewPointer(tn3.Typ),
-						ptrRecv:   false,
-						extSymbol: sym,
-						extTypeID: ptid,
-						extSig:    msig,
-					})
-				}
 				found = true
 			}
 			if !found {
@@ -616,13 +621,28 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 				// package: an alias's embed chain lives in the target type.
 				chain, embedSym, embedSig, embedT := findExtEmbedMethod(named3, normalizePkgPath(defPath), defName, methodName, 0)
 				if embedSym != "" {
-					tid := "reflect/types.type:pointer:named:" | normalizePkgPath(defPath) | "." | defName
+					normDef := normalizePkgPath(defPath)
+					ptid := "reflect/types.type:pointer:named:" | normDef | "." | defName
+					vid := "reflect/types.type:named:" | normDef | "." | defName
 					impls = mxutil.Ensure(impls, 1)
 					push(impls, ifaceImpl{
 						recvType:   NewPointer(tn3.Typ),
 						ptrRecv:    true,
 						extSymbol:  embedSym,
-						extTypeID:  tid,
+						extTypeID:  ptid,
+						extSig:     embedSig,
+						embedField: chain[0],
+						embedType:  embedT,
+						embedChain: chain,
+					})
+					// The promoted method is in T's set as well (see above);
+					// the value-form box dispatches on a copy of T.
+					impls = mxutil.Ensure(impls, 1)
+					push(impls, ifaceImpl{
+						recvType:   tn3.Typ,
+						ptrRecv:    false,
+						extSymbol:  embedSym,
+						extTypeID:  vid,
 						extSig:     embedSig,
 						embedField: chain[0],
 						embedType:  embedT,
@@ -1065,16 +1085,31 @@ func (e *irEmitter) emitIfaceAssertOK(ifaceT *TCInterface, typeID string) (s str
 				}
 			}
 			base := e.implBaseTypeName(impls[ii])
-			if base == "" || seen[base] {
+			if base == "" {
 				continue
 			}
-			seen[base] = true
+			// A type carries up to two arms per method, one per form (the
+			// pointer receiver and the value). The assertion set counts each
+			// form once per method, so dedupe on (base, form), not on base.
+			isPtrForm := false
+			if _, isp := impls[ii].recvType.(*Pointer); isp {
+				isPtrForm = true
+			}
+			fkey := base | "#v"
+			if isPtrForm {
+				fkey = base | "#p"
+			}
+			if seen[fkey] {
+				continue
+			}
+			seen[fkey] = true
 			if _, have := allCount[base]; !have {
 				order = mxutil.Ensure(order, 1)
 				push(order, base)
 			}
-			allCount[base] = allCount[base] + 1
-			if !impls[ii].ptrRecv {
+			if isPtrForm {
+				allCount[base] = allCount[base] + 1
+			} else {
 				valCount[base] = valCount[base] + 1
 			}
 		}
@@ -1582,7 +1617,6 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 			}
 			e.emitExtInvokeCall(creg, retType, e.implFuncSym(impl), recvLLVM, recv, inv, isVoid, impl)
 		} else {
-			prepArgs := e.prepareInvokeArgs(inv, impl)
 			prepArgs := e.prepareInvokeArgs(inv, impl)
 			prefix := "  "
 			if !isVoid {

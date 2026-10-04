@@ -1,0 +1,51 @@
+// Regression: cross-package interface dispatch called a pointer-receiver
+// method with a truncated receiver.
+//
+// findIfaceImpls' cross-package scan registered a pointer-receiver method with
+// recvType = the value Named while its typeID said pointer:named. For a Named
+// over int32, llvmType is "i32", so materializeIfaceValue took the inline
+// scalar path and ptrtoint/trunc'd the real receiver pointer to 32 bits; the
+// callee then read the low half of its own address and returned "other". A
+// struct worked only by accident, because intBits returns 0 for a non-scalar
+// and the pointer passed through untouched.
+//
+// The value form had no arm at all: pkg/types keeps a pointer-receiver method
+// in T's method set (Moxie bans value receivers), so `var e error = lib.K` was
+// accepted and then panicked "interface dispatch: no impl for Error".
+//
+// Fixed in: _mxc_stage4/ir_iface.mx (recvType is *T for a pointer receiver; the
+// value form is registered for pointer-receiver methods; emitIfaceAssertOK
+// counts each form once per method).
+
+package main
+
+import "tests/regressions/should_compile/iface_ptr_recv_crosspkg/lib"
+
+func chk(name, got, exp string) {
+	if got != exp {
+		println("FAIL: " | name | " got [" | got | "] want [" | exp | "]")
+		panic("mismatch")
+	}
+}
+
+func main() {
+	p := lib.MK()
+	chk("direct-ptr", p.Error(), "one")
+
+	var ep error = lib.MK()
+	chk("iface-ptr", ep.Error(), "one")
+
+	var ev error = lib.C(1)
+	chk("iface-value", ev.Error(), "cone")
+
+	var ek error = lib.K
+	chk("iface-const", ek.Error(), "cone")
+
+	var es error = lib.NS()
+	chk("iface-struct-ptr", es.Error(), "sone")
+
+	var esv error = lib.S{V: 1}
+	chk("iface-struct-value", esv.Error(), "sone")
+
+	println("ok")
+}
