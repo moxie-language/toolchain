@@ -1458,3 +1458,18 @@ and hand it to `Source.init`, where the only implementation is a closure over
 `p`. Storing the owning `*Parser` on the Scanner/Source and calling
 `p.scanError(...)` directly removes both without inventing a function value
 that would capture.
+
+**All sixteen captures are gone** (`5ecd1740`). The scanner no longer takes an
+error-handler function: `Scanner`/`Source` hold the owning `*Parser` and call
+`p.scanError(line, col, msg)` directly, and the closure body is that method
+(`Pragh` became `p.Pragh`); `ErrorAtf` routes the same way. The two-stage build
+(a compiler built with the `/pkg/` exemption removed rebuilding the tree)
+reports **zero closure captures** in `pkg/syntax`, and the suite is
+**171/171, 0 failures**. The carve-out is not yet removable for two other
+reasons, both in `pkg/syntax` and only when it is treated as user code:
+`Pos undefined (type git.smesh.lol/moxie/pkg/syntax.AssignStmt has no field or
+method Pos)` and `not enough arguments in call`. Both need positions - stage4's
+`compileErrors` carry bare strings and the log shows neither line - so the next
+step is to instrument `checkNamedReturns`/the type-checker error path to print
+the enclosing function, or to bisect by compiling `pkg/syntax` alone with the
+exemption removed.
