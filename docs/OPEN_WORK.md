@@ -1510,3 +1510,27 @@ where stage4 resolved the selector against the value type; it reads `a.pos`
 directly now (`fecf1c12`). Suite **171/171, 0 failures** after clearing
 `~/.cache/moxie`, whose object files had been reaped and left 213 stale
 `.c.lock` files that failed `aeaddep:legacy` with `cannot open ... .bc`.
+
+**The `/pkg/` carve-out is gone** (`04331d6b`). `isUserPackagePath` no longer
+exempts paths containing `/pkg/`. Getting there took the sixteen `pkg/syntax`
+captures, the `(*Parser).header` value receiver, and the deprecated `pkg/types`
+bridges: `LookupImportByName`, `ImportByName`, the global `DirectImportPaths`
+and the `EnsureImportRegistry` stub are deleted (they had no callers), the
+universe and registry globals are written only from `initUniverseGlobals`
+(the immutability rule's own init-named exemption, with `SetUniverseGlobals` as
+the exported wrapper because `pkg/types` is dot-imported), and
+`extractTypeArgs` returns its names instead of pushing them through a callback
+that captured the caller's accumulator and map. The two-stage build - a
+compiler built with the exemption removed rebuilding the tree - is clean, and
+the suite is **171/171, 0 failures**.
+
+**Consequence, and the next stage: the app repos were relying on the
+carve-out.** With it gone, stage4 enforces every rule on `git.smesh.lol/*/pkg/`
+as well, and `nostr` stops at `pkg/signer/p8k` with five
+`unnamed return values are not allowed`. The queue already recorded this debt:
+"the last two all under `/pkg/` and therefore still exempt (nostr `make test`
+passes, 13 targets)" - nostr's 36 unnamed returns were never migrated because
+`/pkg/` exempted them. morly and musiquay pass `-allow-closure-captures`, so
+their closures stay legal, but their unnamed returns and any global stores in
+`pkg/` now count too. The app-repo migration is the next round's work, and it
+is the same shape as the earlier 220-initialiser sweep.
