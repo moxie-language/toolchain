@@ -1605,3 +1605,29 @@ returns, global stores in `ensureDNSAddr` (12), `ensureRoles` (6), `resolveHost`
 The `ensure*` names are the same rename-to-init opportunity nostr used. A morly
 agent is working the list, gated on `make build` plus **370 passed, 0
 failures**.
+
+**musiquay's debt is in `pkg/protocol` itself.** Building `web/common/protocolwire`
+and `web/wasm/app` fails on `git.smesh.lol/musiquay/pkg/protocol`:
+`ensureFormats` (4 stores, `credits.Formats`) and `ensureRoles` (6,
+`tag.RosterRoles`/`CreditRoles`) hit the global-store rule, and four sites use
+`+` for text. The `+` rule is gated on the target's own repository, so protocol
+is checked whenever a musiquay target is built - and protocol is the package the
+relay and the app both import. The taxonomy is small (10 stores, 4 concatenations)
+and the names are the same rename-to-init opportunity as elsewhere.
+
+**The stdlib sovereign-loop sweep is much larger than the first six packages.**
+Fixed so far, beyond `compress/{bzip2,flate,lzw}` and `archive/zip`:
+`debug/dwarf` (LineReader.readHeader, buf.entry x17, Reader.SeekPC, buf.varint),
+and found-but-pending `encoding/{ascii85,base32,csv}`,
+`evloop` (Conn.drainWrite, Loop.Run), `image/jpeg` (~50 sites),
+`image/png` (~35) and `index/suffixarray`. Three **pre-existing, unrelated
+blockers** surfaced where the sweep landed, none of them the rule:
+1. `compress/flate` compiles with zero rule errors but **clang-22 segfaults**
+   selecting `flate.(*Writer).Close` - a huge struct value field plus
+   `o.d.close()` produces a dead aggregate load and an i1 load at offset 655600
+   (exit 139). Everyone importing flate/gzip/zlib/archive/zip inherits it.
+2. `compress/gzip` does not parse: `data := []byte{:binary.LittleEndian().Uint16(z.buf[:2])}`
+   - a slice expression inside the `[]T{:...}` allocation form is rejected by
+   the parser; and `gzip.mx` references an undefined package-level `le`.
+3. `archive/zip` carries ~9 pre-existing shadow errors and `debug/dwarf` an
+   unused `errors` import, both present at HEAD.
