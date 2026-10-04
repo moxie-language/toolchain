@@ -615,6 +615,15 @@ func (c *compilerContext) checkPackageRestrictions(pkg *loader.Package) {
 	if strings.Contains(checkPath, "_mxc_stage4") || strings.Contains(checkPath, "cmd/moxie") {
 		return
 	}
+	// A main package is user code whatever directory it happens to sit in.
+	// The gate below reads the directory path, and a temp dir with no dot in
+	// it exempted a user program: the same fixture was checked from
+	// /tmp/moxie-tests.123 and accepted from /tmp/moxie-tests-123. stage4
+	// gates on the package path, which is "main" for a program, so both
+	// compilers now agree instead of the rule depending on the path's shape.
+	if pkg.Pkg.Name() == "main" {
+		checkPath = "main"
+	}
 	if !isUserPackageByPath(checkPath) {
 		return
 	}
@@ -649,6 +658,12 @@ func (c *compilerContext) checkPackageRestrictions(pkg *loader.Package) {
 				case token.TYPE:
 					for _, spec := range d.Specs {
 						ts := spec.(*ast.TypeSpec)
+						// An alias introduces no new named type: `type X = []T`
+						// is another spelling of []T, so the rule does not
+						// apply to it. stage4 exempts them the same way.
+						if ts.Assign.IsValid() {
+							continue
+						}
 						switch ts.Type.(type) {
 						case *ast.ArrayType:
 							at := ts.Type.(*ast.ArrayType)

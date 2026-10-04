@@ -143,6 +143,115 @@ func checkParenCallTarget(e *syntax.CallExpr, pkgPath string) {
 	push(cctx.compileErrors, "parenthesized call target is not allowed: write f(x), not (f)(x)")
 }
 
+// checkPackageDecls mirrors the two declaration rules of legacy restrict.go
+// checkPackageRestrictions: a package-level var may not carry an initializer
+// (declare the zero value, assign in init()), and a named slice or map type is
+// not allowed (use []T / map[K]V directly). The gate is the same predicate the
+// other restriction checks use, so the same package is checked by both
+// compilers rather than only in the bootstrap.
+//
+// A named type may carry methods, and []T directly cannot; that is the whole
+// reason the rule has a cost, and the migration that removes the named types
+// turns their methods into free functions.
+func checkPackageDecls(files []*syntax.File, pkgPath string) {
+	if !isUserPackagePath(restrictPath(pkgPath)) {
+		return
+	}
+	for _, f := range files {
+		if f == nil {
+			continue
+		}
+		for _, d := range f.DeclList {
+			switch t := d.(type) {
+			case *syntax.TypeDecl:
+				if t.Name == nil || t.Type == nil {
+					continue
+				}
+				// An alias introduces no new named type: `type X = []T` is
+				// another spelling of []T, so the rule does not apply to it.
+				if t.Alias {
+					continue
+				}
+				switch t.Type.(type) {
+				case *syntax.SliceType:
+					declErr("named slice type '" | t.Name.Value | "' is not allowed: use []T directly")
+				case *syntax.ArrayType:
+					if at := t.Type.(*syntax.ArrayType); at.Len == nil {
+						declErr("named slice type '" | t.Name.Value | "' is not allowed: use []T directly")
+					}
+				case *syntax.MapType:
+					declErr("named map type '" | t.Name.Value | "' is not allowed: use map[K]V directly")
+				}
+			case *syntax.VarDecl:
+				if t.Values == nil {
+					continue
+				}
+				// legacy's loader demotes a var whose value is a []byte(...)
+				// conversion of a string literal to a constant, and its var
+				// rule allows that form. Mirroring it keeps the two compilers
+				// agreeing on every input rather than only the common one.
+				if demotedStringConst(t.Values) {
+					continue
+				}
+				declErr("package-level var with initializer is not allowed: use zero-value declaration and init()")
+			}
+		}
+	}
+}
+
+func declErr(msg string) {
+	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+	push(cctx.compileErrors, msg)
+}
+
+// demotedStringConst reports whether every value of a var declaration is a
+// []byte(...) conversion of a string literal, the form legacy's loader demotes
+// to a constant. A multi-value declaration arrives as one ListExpr.
+func demotedStringConst(values syntax.Expr) (ok bool) {
+	if le, isList := values.(*syntax.ListExpr); isList {
+		if len(le.ElemList) == 0 {
+			return false
+		}
+		for _, e := range le.ElemList {
+			if !demotedStringConst(e) {
+				return false
+			}
+		}
+		return true
+	}
+	call, isCall := values.(*syntax.CallExpr)
+	if !isCall {
+		return false
+	}
+	switch ft := call.Fun.(type) {
+	case *syntax.SliceType:
+	case *syntax.ArrayType:
+		if ft.Len != nil {
+			return false
+		}
+	default:
+		return false
+	}
+	if len(call.ArgList) != 1 {
+		return false
+	}
+	return stringLiteralExpr(call.ArgList[0])
+}
+
+// stringLiteralExpr reports whether an expression is a string literal, possibly
+// joined with + or | and parenthesized. Mirrors legacy's isStringLiteralExpr.
+func stringLiteralExpr(e syntax.Expr) (ok bool) {
+	switch t := e.(type) {
+	case *syntax.BasicLit:
+		return t.Kind == token.StringLit
+	case *syntax.Operation:
+		return (t.Op == token.Add || t.Op == token.Or) && stringLiteralExpr(t.X) && stringLiteralExpr(t.Y)
+	case *syntax.ParenExpr:
+		return stringLiteralExpr(t.X)
+	}
+	return false
+}
+
 // syntaxIsTypeExpr reports whether an expression is syntactically a type, the
 // forms legacy restrict.go isTypeExpr accepts. stage4 splits Go's ArrayType
 // into ArrayType and SliceType, so both appear here.
