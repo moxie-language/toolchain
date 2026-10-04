@@ -1976,3 +1976,15 @@ The harmless duplicates (`crypto/cipher.errOpen` vs the gcm one,
 `internal/poll.ErrNoDeadline` vs `os.ErrNoDeadline`) need no change, and
 `src/syscall`'s `*Errno` value receivers are routed to slice C with the warning
 that a bare `Errno` value stops satisfying `error`.
+
+**The compiler's own parser no longer codegens** - `pkg/syntax` reproduces it
+alone (`MOXIEROOT=$PWD ./moxie build -o /tmp/x ./pkg/syntax` ->
+`invalid cast opcode for cast from '{ i64, ptr }' to '{ ptr, i64, i64 }'`), so
+it is a `src/` change, not a concurrency artifact. The suspects are changes that
+alter a *type* rather than a name: `const` -> `var error` conversions, pointer
+receivers that change a method set (`io/fs.FileMode`, `syscall.Errno`), anything
+that changes the static type of a value used as `string`/`[]byte`. Both slice
+leads have been asked to run that build before declaring done and to bisect
+within their own slice. Until it passes, the `topLevelColon` rewriter fix stays
+parked at `/tmp/recolon.patch` (unverified compiler changes do not land) and
+`compress/gzip` is blocked on both the parse bug and this.
