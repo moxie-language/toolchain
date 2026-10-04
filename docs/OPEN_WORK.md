@@ -1436,3 +1436,12 @@ time and the recover/panic behaviour is unchanged. Compiler builds; suite
 value and closure, the seven `__mval` method values, and trace); the remaining
 seven are `argList`, `complitexpr`, `init`, `initBytes`, `interfaceType`,
 `paramList` and `structType`.
+
+**Four more closures are gone** (`846788c5`). `p.list` took a `func() bool`
+callback, so every caller handed it a closure over its own locals. `listSep`
+now consumes the separator and reports whether the list continues, and
+`argList`, `complitexpr`, `structType` and `interfaceType` drive their own
+loops. Verified: compiler builds, a probe covering struct and interface
+declarations, nested composite literals and a variadic argument list prints
+`point 7 n 2 area 25 square sum 10`, and the suite is **171/171, 0 failures**.
+Thirteen of the sixteen are gone; `paramList`, `init` and `initBytes` remain.
