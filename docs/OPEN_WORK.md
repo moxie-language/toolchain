@@ -1796,3 +1796,38 @@ slice-expression parse rejection (`gunzip.mx:210`), the clang-22 segfault on
 `flate.(*Writer).Close`, missing `slices.Sorted`/`slices.Backward`, and the
 shadow/unused-import errors in `archive/zip`, `debug/dwarf`,
 `internal/runtime/maps`, `index/suffixarray`, `image/*` and `x/text/*`.
+
+### The widened scope, measured (round 40+)
+
+`isUserPackagePath` was widened to every package above the runtime (carve-outs:
+`runtime`, `unsafe`, `internal/runtime/`, vendored `golang.org/x/`) and a
+compiler carrying it swept every stdlib package. The result:
+
+- **3,704 violations across 263 packages**;
+- **3,118 unnamed return values** (the bulk, and purely mechanical: give each
+  result a name, avoiding the body's locals - the app-repo sweep is the recipe);
+- 180 shadowing errors, 18 `Const` value receivers, 14 package-level var
+  initializers, and the rest global stores;
+- the first package the *compiler's own* build stops at is `errors`, now
+  migrated (`13a1564d`), followed in the log by `internal/byteorder`,
+  `math/bits`, `unicode/utf8` and `internal/bytealg`.
+
+`errors.Const` is the one genuinely design-level item: it is used as
+`const X = errors.Const("...")` in 264 places across 95 files, and a `const`
+cannot be addressed, so the value-receiver rule cannot be satisfied without
+converting those to `var X error` plus an `init()` assignment first. That should
+be done as its own change, not folded into the mechanical sweep.
+
+The widened predicate is **not** in the tree: it would stop the compiler build
+at `errors` and then at each next package. The tree ships with the dot rule (the
+stdlib exempt) so every app keeps building; the wide predicate exists only in
+`/tmp/mxc-wide-a` and the sweep output in `/tmp/wide-sweep.txt`. The migration
+order that keeps the tree green at every step is: migrate the compiler's own
+dependency closure until `_mxc_stage4` builds with the wide predicate, then the
+rest of the stdlib, then land the predicate.
+
+### errors: named results
+
+`errors.New`, `Error`, `String`, `Join` (result `jerr`, the body declares
+`err`), `Unwrap`, `Is` and the inner `is` are named. `Const` keeps value
+receivers until the 264 `const` sites move to `var` + `init()`.
