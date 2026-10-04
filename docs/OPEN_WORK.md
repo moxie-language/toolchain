@@ -1892,3 +1892,26 @@ being deleted in favour of `errors.New` (already pointer-receiver), with its 264
 `const X = errors.Const("...")` sites becoming `var X error` plus an `init()`
 assignment - one atomic pass across 95 files, because it is the blocker for all
 three slices.
+
+**The sweep's method was weaker than the number suggests - two independent
+reasons, both found by the slice agents.**
+1. The cache key does not distinguish the compiler binary (above), so a probe
+   without `-a` can reuse narrow-built `.bc` and report a clean package.
+2. A probe of a *directory* target compiles it under a **bare package name**
+   (`./src/encoding/hex` becomes package `hex`), and the wide probe aborts at the
+   first failing package in the closure before it ever reaches the target. So a
+   per-package reading is only trustworthy when the whole closure is already
+   clean, and the 3,704/263 figure is a **lower bound on both counts**.
+
+The reliable probe the slice-B agent built is `/tmp/mxc-sliceprobe`: the wide
+predicate restricted to one slice with `errors` carved out, driven by tiny
+blank-import programs by **full import path**. Any future sweep should copy that
+shape rather than building a package directory.
+
+**`context` needs a real API change, and it is authorised.** `CancelFunc` is a
+`func()`, and `WithCancel`/`WithDeadline`/`AfterFunc` return closures over their
+cancel state; a Moxie function value carries no environment, so the type must
+become a stateful value with a method (`CancelFunc.Cancel()`, a `stop` type with
+`Stop() bool`) and the singletons stay pointer-receiver and address-stable so
+`errors.Is`/identity checks hold. The ripple into `net/http` is part of the same
+change, and any file outside slice B is reported rather than edited by it.
