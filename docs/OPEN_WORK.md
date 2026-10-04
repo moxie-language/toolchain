@@ -1473,3 +1473,19 @@ method Pos)` and `not enough arguments in call`. Both need positions - stage4's
 step is to instrument `checkNamedReturns`/the type-checker error path to print
 the enclosing function, or to bisect by compiling `pkg/syntax` alone with the
 exemption removed.
+
+**Narrowing the two remaining errors.** `pkg/syntax/nodes.mx` has
+`type stmt struct{ node }`, `type simpleStmt struct{ stmt }`,
+`type AssignStmt struct{ ...; simpleStmt }`, and `func (n *node) Pos()` - a
+pointer receiver, so `Pos` is promoted to `*AssignStmt` but not to the value
+`AssignStmt`. The error text names the value type, so the failing selector is
+on an addressable value: Go takes the address for such a selector, and stage4
+does too while `pkg/syntax` is exempt, but not when it is user code. No
+`value receiver is not allowed` error is emitted for it, so
+`registerMethod`'s early return is not the cause - the difference is in
+inherited-method lookup for value receivers, and the next step is to make the
+"no field or method" report name the receiver type and whether the package was
+treated as user code (the message is built where the lookup fails). `pkg/types`
+does not reference the user-path predicate, so the gate itself is not there.
+The second error, `not enough arguments in call`, is likely a cascade of the
+first: a call whose callee expression failed to resolve.
