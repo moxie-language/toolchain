@@ -2106,3 +2106,286 @@ bug. `src/net/rawconn.mx:89-90` is already done here (`poll.String` -> `[]byte`)
 *Signal)` lines - i.e. `fmt`'s own rules remain unmeasurable until the
 interface-dispatch bug is fixed, since those seven are exactly the receivers
 that cannot be converted yet.
+
+# The three compiler bugs: closed, and what they were
+
+All three landed as small commits after being reproduced *and* run, not just
+compiled. Evidence for each is in the commit message.
+
+1. **Cross-package pointer-receiver dispatch** (`_mxc_stage4/ir_iface.mx`,
+   004c374c..f7a746d4 range). `findIfaceImpls`' cross-package scan registered a
+   pointer-receiver method with `recvType` = the value `Named` while its typeID
+   said `pointer:named`. For a `Named` over `int32` `llvmType` is `i32`, so
+   `materializeIfaceValue` took the inline-scalar path and `ptrtoint`/`trunc`'d
+   the real receiver pointer to 32 bits; the callee read the low half of its own
+   address. Structs worked by accident (`intBits` returns 0 for a non-scalar and
+   the pointer passed through). The same-package scan already wrapped in
+   `NewPointer`; only imported types were hit. The **value form** also had no arm
+   at all: `pkg/types` keeps a pointer-receiver method in `T`'s method set, so
+   `var e error = K` was accepted and then panicked `interface dispatch: no impl
+   for Error`. Both scans now register the value form, and `emitIfaceAssertOK`
+   dedupes on `(base, form)` so the assertion set still covers both tids.
+   Verified: `/tmp/ifacedisp` prints `direct: one` / `iface: one` (was `other`);
+   `/tmp/vf` boxes a value, a const and a pointer of a named basic plus a struct
+   value and pointer and prints `cone/cone/cone/sone/sone`; the in-tree fixture
+   `tests/regressions/should_compile/iface_ptr_recv_crosspkg` builds, links and
+   prints `ok`.
+
+2. **Slice/map aliases dropped from the mxh** (`_mxc_stage4/main.mx`, 2033646b).
+   `mxhWriteTypeName` wrote an `alias` line only when the target was a `*Named`.
+   For `type X = []T` / `= map[K]V` / `= *T` / `= int32` the type-check pass
+   replaces the `TypeName`'s `Named` placeholder with the resolved target, so no
+   branch fired and *nothing* was written: the name was absent from the mxh and an
+   importer fell back to `int32` (its unresolved default), while a `Named` with no
+   underlying lowers to `"ptr"`. `internal/poll.String` came back `undefined` and
+   `math/big`'s `nat` reached a call as `ptr` where a 3-word slice header was
+   required. The loader already binds `alias <name> <typeDesc>` for any target.
+   Verified: `/tmp/al` fails to compile before (`cannot use value of type int32 as
+   []...Word in argument to function`) and prints `len: 3 / get: 11 33 / xlen: 3 /
+   mlen: 2` after; the in-tree `slice_alias_crosspkg` fixture prints `ok`.
+
+3. **`cmdHeader` emitted a value-receiver `EncodeTo`** (`_mxc_stage4/main.mx` +
+   `legacy/header.go`, 2033646b). `*T`'s method set always includes `T`'s
+   value-receiver methods, so the pointer spelling is valid either way and is the
+   only one valid under the pointer-receiver rule. Verified by emitting a header
+   with `./legacy/moxie header ./src/moxie`: it writes
+   `func (*BigInt32) EncodeTo(w io.Writer) error`.
+
+**A fourth bug, found on the way and fixed:** `src/math/big/rat.mx:540` had
+`natMul(z.a, stk, x.a, y.a)` where HEAD had `z.a.mul(stk, &x.a, &y.a)`. The
+free-function rewrite moved the receiver to the first argument and dropped the
+result, and `Int.mul` still exists, so a zero-valued `Rat` kept `abs == nil`:
+`Rat.Mul` returned `0/1` for `1/3 * 1/7` and the compiler's *own* constant folding
+inherited the wrong values (this is why a freshly built compiler segfaulted in
+`math/big.natMul` via `pkg/types[floatOp]`). Slice A's independent audit of all 43
+`nat*` free functions and their call sites found no other instance.
+
+## The type-checker hole behind it: soundness checks gated on a *style* predicate
+
+`_mxc_stage4/ssa_builder.mx`'s soundness checks - `checkAssignable` (~2011),
+`errArgs` (~1993), `checkConstConvert` (~2075), `checkDefaultRepr` (~2322) - each
+begin with `if !isUserPackagePath(restrictPath(...)) { return }`. Every **dotless**
+import path (the whole stdlib) is therefore exempt from argument type, arity and
+const-representability checking, and `pkg/types`' correct `Assignable` is never
+consulted. That is why the `Int`-where-`[]Word` call above compiled, and the IR
+kept the mismatched call (`%t67 = call ... @"math/big.natMul"({i1,{ptr,i64,i64}}
+%t59, ...)`).
+
+Decisive A/B: identical library source imported as `gateprobe/lib` (dotless)
+compiles; imported as `example.com/gateprobe/lib` (dotted) is rejected with
+`cannot use value of type ...Int as []...Word in argument to function`. The gate
+is a *correctness* check borrowing a *style* predicate.
+
+**Fix (not yet applied):** remove the `isUserPackagePath` early-return from those
+four checks; their existing nil / `ConcreteAssignTypes` guards already exclude
+unresolved interfaces and type params. Keep the predicate only for genuine style
+restrictions (`checkNamedReturns` etc.). This is bilateral: legacy's diagnostics
+come from `go/types` and are likewise not surfaced for stdlib, so mirror it. It
+should land together with the widened `isUserPackagePath`, because that is what
+activates them anyway - and it will surface latent stdlib mismatches that are real
+wrong-ABI code, so expect a wave and fix them rather than re-gating.
+
+## Bilateral divergence: the method set of a value type (bootstrap blocker)
+
+Moxie bans value receivers, so `pkg/types` keeps a pointer-receiver method in the
+**value** type's method set (`tc_assign.mx` `methodSet`/`collectMethods` register
+`t.Methods` on the `*Named`). Stage4 therefore accepts `var e error = C(1)`.
+Legacy goes through `go/types` and **rejects** it: `lib.C does not implement error
+(method Error has pointer receiver)`.
+
+This is on the critical path, not cosmetic: the stdlib migration converts
+`func (e Errno) Error()` to `func (e *Errno) Error()`, and the moment it does,
+legacy - the bootstrap path - can no longer compile `src/syscall`, so the
+bootstrap dies. Stage4's rule is the one to keep: with all receivers pointers, a
+value must stay usable as an interface value (it dispatches on a copy, exactly as
+`materializeIfaceValue` already materialises an inline scalar into a fresh
+alloca). An agent is mirroring the rule in the patched-GOROOT `go/types`
+(`legacy/build/patch-gotypes.go`) and verifying `/tmp/vf`, the in-tree fixture,
+and the full bootstrap (`legacy/build.sh`, then legacy building `_mxc_stage4`).
+
+Note for fixture authors: Moxie's builtin `error` is
+`interface { Error() string; String() string }` (`pkg/types/tc_universe.mx`).
+Named basics get a synthesised `String()`; a struct used as an error needs an
+explicit one.
+
+## `math/big/internal/asmgen` deleted
+
+It generates `arith_$GOARCH.s`; nothing imports it, no `.s` file exists for
+`math/big`, and `math_big_pure_go` is hardwired true in both compilers, so the
+generated assembly is unreachable. It carried six value receivers that cannot be
+converted without an unverifiable rewrite of ~60 `fmt.Stringer` call sites and
+there is no runnable entry point to test them - delete, per "no stubs - remove
+dead references instead". 19 files and the stale `//:generate` line are gone.
+
+## `src/regexp` does not exist - bounded, pre-existing, do not stub
+
+Five files import it: `internal/lazyregexp`, `internal/coverage/pods`,
+`internal/profile/prune`, `internal/trace/testtrace/expectation`,
+`index/suffixarray`. Only two have any consumer in-tree
+(`internal/coverage/cfile/testsupport.mx` -> `coverage/pods`, and
+`internal/trace/traceviewer/pprof.mx` -> `internal/profile`), both
+trace/coverage/profiling corners with no path to the apps, and none is in the
+compiler's closure. They fail identically before and after the migration
+(`undefined: regexp`). Leave them; do not invent a `regexp` package and do not
+rewrite them against `mxregexp` as part of this migration.
+
+## The relative-path entry point: a real bug, and a testing trap
+
+`moxie build <a relative directory inside the repo>` does **not** emit
+`main.main`: the link fails with `undefined symbol: main.main`, and the build
+otherwise succeeds. The same directory given as an **absolute** path links and
+runs. `tests/run.sh` uses absolute paths, so the suite is sound - but any manual
+reproduction with a relative path will look like a missing entry point and waste
+time. Two consequences worth fixing: the entry-point path should not depend on how
+the target was spelled, and `tests/util.sh`'s `compile_and_run` treats
+`undefined symbol: main.` as **success**, which turns a non-linking fixture into a
+silent PASS. That acceptance is a guard; the root cause is the relative-path
+resolution, and the guard should go with it.
+
+## Named public-API types still to dissolve in `src/net/**`
+
+The net agent finished its pass: `net/netip` is wide-clean, `net` and
+`net/internal/socktest` compile clean, value receivers 275 -> 66, `any` debt in
+`net/http` removed (a `httpMsg` marker interface; `[]any` -> `[]net.IPAddr`, which
+required `src/internal/nettrace/nettrace.mx`), and `rawconn.mx`'s
+`poll.String` -> `[]byte` confirmed. What remains there is the named slice/map
+rule on public API, which needs a coordinated rewrite of call sites inside and
+outside the tree: `net.IP` (18 methods), `net.IPMask`, `net.HardwareAddr`,
+`net.Buffers`, `net/http.Header` (13), `net/textproto.MIMEHeader`,
+`net/textproto.ProtocolError`, `net/url.Values` (6, a `map[string][]string`),
+`net/http.Dir`, plus the internal `fileInfoDirs`/`dirEntryDirs` (`sort.Interface`),
+`http2writeSettings` (`http2writeFramer`), `http2sortPriorityNodeSiblings`
+(`sort.Interface`), `http2writeQueuePool`, `htmlSig`, `byPriorityWeight`,
+`byPref`. `net/http` additionally **cannot compile** because `context.Context`
+has no `Value` and `context.WithValue` does not exist in this tree - and cannot
+exist under no-`any`. The Moxie-coherent answer is per-request state on the
+`*Request`/connection instead of a dynamic attribute bag (`httptrace` becomes a
+field), not a fake `any`.
+
+## Second bilateral divergence: pointer methods on non-addressable values
+
+Legacy rejects a pointer-receiver method called on a temporary; stage4 accepts it
+(auto-addressing a copy, the same model as the value box):
+
+    type V struct { r int32 }
+    func (v *V) Get() (out V) { return *v }
+    func Mk() (out V) { return V{r: 1} }
+    a := Mk().Get()        // legacy: cannot call pointer method Get on V
+
+Same root as the value-in-interface divergence above, and it is being patched at
+the same level (the go/types method set/lookup in the patched GOROOT): in Moxie
+every receiver is a pointer and a value is auto-addressed into a copy, so a value
+type satisfies a pointer-receiver interface and a temporary can be called through.
+It is the reason `syscall/js.Value`'s fluent API (`js.Global().Get(...).New()`)
+could not be converted.
+
+## `syscall/js` and `net/http/roundtrip_js` are recorded debt, not blocking
+
+Both `syscall/js` files are `//:build js && wasm`, so they are build-constrained
+out of every native build and cannot block the native wide-predicate landing, the
+bootstrap, or the compiler closure. Under `-target js/wasm` they have ~80 sites:
+~30 value receivers, ~25 unnamed returns, `any` in `ValueOf`/`Set`/`SetIndex`/
+`FuncOf`/the funcs map, package globals mutated by `jsInit`/`funcsInit`/
+`ensureEventHandler`, and capturing closures in `FuncOf`. The only caller is
+`net/http/roundtrip_js.mx`. CLAUDE.md puts Moxie's browser surface in `jsruntime/`,
+so these are Go-compat shims with no Moxie-native consumer: the eventual move is
+to delete both or rebuild the wasm RoundTripper on `jsruntime/`, not to redesign
+Go's API. Recognising a pointer-method chain on a temporary (see above) is now a
+legacy bug, not an authoring limitation.
+
+## Latent bugs found by the migration, independent of it
+
+- **`weak` is a lie.** `runtime_makeStrongFromWeak` has no implementation
+  anywhere; the runtime provides only `runtime_registerWeakPointer`, which is a
+  no-op. `weak.Make`/`Value` compile and then SIGSEGV on a call to 0. Nothing
+  instantiates `weak` yet (`crypto/internal/fips140cache` imports it).
+- **Generic instantiation, two defects.** `map[T]H[T]` as a composite literal
+  inside a generic function fails substitution (`cannot use map[int32]unique.Handle
+  as map[T]unique.Handle in struct literal`); and loading a generic
+  struct-with-pointer value out of a map emits `store i8 %tN` where `i8` is
+  expected, i.e. an `i32` value stored as `i8` (`clang: '%tN' defined with type
+  'i32' but expected 'i8'`). Minimal repro: `type H[T comparable] struct{v *T};
+  type hm[T comparable] struct{m map[T]H[T]}; func Look[T comparable](x hm[T], k T)
+  (out H[T]) { out = x.m[k]; return }`. Nothing imports `unique`, so it is latent.
+- **`src/net`'s public named types** and the `context.Value`/`WithValue` gap in
+  `net/http` are recorded above; `net/http` cannot compile until `context` gets a
+  concrete per-request state API or net/http stops using one.
+
+## Legacy cannot compile a package-level `error` global - bootstrap blocker
+
+A 20-line dependency-free repro (package `io2` with `var EOF error`, `init() {
+EOF = &E{...} }`, and a main that calls `EOF.Error()`) makes the legacy compiler
+fail while interpreting its own runtime:
+
+    src/runtime/runtime.mx:44:3: interp: ptrtoint integer size does not equal pointer size
+      call void @"io.init#1"(ptr undef), !dbg !1925
+
+Mechanism: `legacy/interp/memory.go:845` `rawValue.toLLVMValue` is asked to
+serialize the global's raw bytes into an **integer** LLVM type; the buffer's first
+word is a pointer (`buf[0] > 255`), so it takes the pointer branch and the
+`checks` guard at line 863 fires because `TypeAllocSize(llvmType) !=
+TypeAllocSize(dataPtrType)`. The global's *declared* LLVM type is a byte type
+while the value written by `init` is a pointer. The comment there already calls
+this "probably trying to serialize a pointer to a byte array, perhaps as a result
+of rawLLVMValue() in a previous interp run", and `interp.go:164` treats the same
+error as recoverable in one other place.
+
+Why it started now: before the migration, `io.EOF` was
+`const EOF = errors.Const("EOF")` - a constant expression, so no global existed
+to serialize. The `errors.Const` -> `var X error` + `init()` conversion created a
+mutable package-level `error` holding a pointer in 93 files. stage4 is unaffected
+(the repro builds, links and prints `boom` under `/tmp/mxc-iface2`), so this is a
+legacy/interp defect that the migration merely exposed. Nothing else in the
+compiler closure is reachable with legacy until it is fixed, so the bootstrap
+(`legacy/moxie build -a -o mxc-stage4 ./_mxc_stage4`) cannot run.
+
+Note the second blocker behind it: the migration converted `syscall.Errno`'s
+`Error()` to a pointer receiver, and legacy's `go/types` then rejects
+`Errno` used as an `error` (`cannot use EINVAL (constant 22 of uintptr type
+Errno) as error value in return statement: Errno does not implement error (method
+Error has pointer receiver)`) - the method-set divergence above. Both must be
+fixed for the bootstrap; the method-set one is staffed.
+
+## Runtime pointer arithmetic used int32 offsets
+
+`src/runtime/runtime.mx`'s `memcpy`/`memmove`/`memzero` cast their byte offsets
+with `int32(i)` and `secalloc.mx` used `-int32(secPageSize)`. Those are the
+`unsafe.Add` offsets, so an arena or copy larger than 2 GiB truncated. They were
+made pointer-sized (`i`, `i-1`, `-int64(secPageSize)`) while chasing the interp
+failure below, then REVERTED: the interp failure turned out to be the recoverable-
+error classification in `legacy/interp/errors.go`, not the offset width, and a
+runtime change should not ride along unverified. The truncation is real but needs
+a >2 GiB single copy to bite; re-apply and run the full suite before landing it.
+(The byte-by-byte `memcpy` loop itself is also why the interp walks it at all.)
+
+## A compiler built by the OLD in-tree `./moxie` cannot run its own `os` - and it looks like memory corruption
+
+Symptom: a compiler freshly built from the migrated tree panics on **every**
+build, before compiling anything:
+
+    panic: runtime error at 0x...: interface dispatch: no impl for Read
+
+with a backtrace through `os.(*File).Read` -> `os[ReadFile]` -> the compiler's own
+`mapCensus`/`memLine`. It is not memory corruption and not a stale cache (`-a`
+does not change it).
+
+Cause: `src/os/file_unix.mx` boxes the handle by VALUE
+(`&File{&file{handle: unixFileHandle(h), name: name}}`), so the interface value
+carries the tid `named:os.unixFileHandle`. The migration converted
+`func (f unixFileHandle) Read(...)` to a pointer receiver. Under the OLD compiler
+(no value-form arm) a pointer-receiver method registered ONLY `pointer:named:...`,
+so the value box stopped matching and the dispatch fell to the default arm. The
+fix is in `_mxc_stage4/ir_iface.mx` (the value form is registered for
+pointer-receiver methods), but a compiler binary only contains the arms it was
+BUILT with: `./moxie` predates the fix, so everything it builds panics.
+
+Diagnosis that finds this in one step: `grep -c 'icmp eq i64 .*named:os.unixFileHandle'`
+on the IR of `os` produced by a compiler that HAS the fix (non-zero, and both the
+`named:` and `pointer:named:` arms are present), versus the panicking binary. Any
+"dispatch arm exists in the IR but the program says none does" report should
+first ask **which compiler built the panicking binary**.
+
+Rule that follows: after a change that converts a *value-boxed* implementation to
+a pointer receiver, install a compiler that already has the value-form arm
+(`cp /tmp/mxc-now ./moxie`) before rebuilding. `./moxie` is gitignored, so this is
+a bootstrap step, not a commit.
