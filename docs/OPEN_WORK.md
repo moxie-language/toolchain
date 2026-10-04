@@ -1915,3 +1915,19 @@ become a stateful value with a method (`CancelFunc.Cancel()`, a `stop` type with
 `Stop() bool`) and the singletons stay pointer-receiver and address-stable so
 `errors.Is`/identity checks hold. The ripple into `net/http` is part of the same
 change, and any file outside slice B is reported rather than edited by it.
+
+**`errors.Const` is gone** (slice A): `type Const` and its methods are deleted,
+and its **264 `const X = errors.Const("...")` sites across 93 files** became
+`var X error` plus an `errors.New("...")` assignment in one `init()` per package
+- 54 `init()`s added or merged, none duplicated, no duplicate `errors` imports.
+`src/errors` is clean under the wide predicate. Three ripples were routed with
+it:
+1. `path/filepath`'s `const SkipDir/SkipAll = fs.SkipDir/SkipAll` is invalid now
+   that `io/fs` holds them as `var error`; they become `var` + `init()` (slice B).
+2. `io/fs`'s `FileMode` methods are pointer receivers, so `info.Mode().IsDir()`
+   on a non-addressable value no longer resolves and a `FileMode` **value** no
+   longer satisfies `fmt.Stringer`; callers in `archive`/`debug`/`image` (B) and
+   `os`/`net` (C) bind the mode to a local or take an addressable temp.
+3. `maps.All`/`Keys`/`Values` capture the map because `iter.Seq` takes no map
+   parameter - that is the documented `iter` skip-list workaround, not a new
+   blocker; the real fix is refactoring those signatures.
