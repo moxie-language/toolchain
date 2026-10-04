@@ -1703,3 +1703,29 @@ control-channel fix, the function-naming diagnostic and every stdlib
 sovereign-loop fix committed so far. That is the strongest single piece of
 evidence for the whole stage: nothing in the tree regressed while the app repos
 and the stdlib were being migrated.
+
+**The stdlib sovereign-loop sweep is done.** A whole-tree pass with the same
+loop prints nothing except `compress/gzip`, whose two sites (`(*Reader).readString`,
+`(*Reader).Read`) sit behind a pre-existing parse error so the checker never
+reaches them. 50 files were fixed - `compress/{bzip2,flate,lzw}`, `archive/zip`,
+`debug/dwarf`, `encoding/{ascii85,base32,csv}`, `evloop`, `image/jpeg` (46
+sites), `image/png` (26), `index/suffixarray`, `internal/{zstd,dag,coverage,maps}`,
+`text/*` and vendored packages - and the last two (`internal/coverage`'s
+decodecounter/encodecounter) are in `95050d7f`. Every one was the same two-line
+hoist: declare the loop scratch once, before the loop, and assign inside it.
+
+**What the sweep leaves behind is pre-existing debt of the ungated rules, not
+sovereign-loop debt:** `archive/zip` ~9 shadow errors, `debug/dwarf` an unused
+`errors` import, `internal/runtime/maps` 8 shadow errors, `index/suffixarray`
+`undefined: regexp` plus shadow errors, `math/big/internal/asmgen` `undefined:
+slices.Backward`/`Arch386`/`ArchARM64`, `image/{jpeg,png}` and
+`x/text/unicode/{bidi,norm}` shadow/undefined errors, `encodecounter`'s two
+`err` shadows plus `undefined: slices.Sorted`, and `gzip`'s parse rejection
+(`[]byte{:binary.LittleEndian().Uint16(...)}`, a slice expression inside the
+allocation form) and undefined `le`. Three of those are compiler or stdlib
+bugs in their own right: the `[]T{:...}` slice-expression parse rejection, the
+clang-22 segfault on `flate.(*Writer).Close` (huge struct value field plus
+`o.d.close()`, exit 139), and the missing `slices.Sorted`/`slices.Backward`.
+
+The compiler carrying the spawn fix, the function-naming diagnostic, the
+carve-out deletion and this sweep is now **installed in-tree** (round 37).
