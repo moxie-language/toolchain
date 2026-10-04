@@ -1664,3 +1664,27 @@ and none of those element types is a string, yet the spawn result is typed
 or an earlier spawn in the same compilation leaked a type into it; the next step
 is to instrument the spawn builtin's result typing in `ssa_builder.mx` (grep
 `"spawn"` in the builtin-call path, not `checkInitExpr`).
+
+**All three app repos are green under the carve-out-free compiler.** morly
+closed with `eb9dcb2`: `make build` links the relay and `make test-unit` is
+**370 passed across 26 packages, 0 failures**. The last fixes were a
+pre-existing type error the restriction errors had masked (transport's
+accept-loop timestamps were `time.Time` where `metrics.Now`/`Since` are
+`int64`), `server.OnTick`'s `tickCount` moving onto the `Server` (a global may
+not be written outside init), `routeHTTP`'s result renamed to `rc` (the body
+declares `status`), and - the one that only shows at runtime - passing `acl`'s
+checkers as pointers, because the value receivers became `*Open`/`*ReadOnly`
+and the interface dispatch table has no impl for the value forms
+(`interface dispatch: no impl for AllowWrite`).
+
+| repo | tests | note |
+|---|---|---|
+| nostr | 194 | `make test` |
+| morly | 370 | `make build` + `make test-unit`, 26 packages |
+| musiquay | 89 | `make test-unit` + `make build-app-wasm` |
+
+The compiler that made this possible (`/tmp/mxc-spawn`) carries three fixes not
+yet installed in-tree because the stdlib sweep holds `./moxie`: the `spawn`
+control channel is `chan struct{}`, the unnamed-return diagnostic names the
+function, and `checkPackageDecls`/`isUserPackagePath` are as landed. Legacy's
+mirror of the spawn typing still needs checking (wood law).
