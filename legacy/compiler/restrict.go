@@ -71,6 +71,16 @@ func (b *builder) isUserPackage(pkg *ssa.Package) bool {
 // init, or the init$N variants created by the Go SSA builder).
 func isInitFunc(fn *ssa.Function) bool {
 	name := fn.Name()
+	// A monomorphized clone carries its DEFINING package as a path prefix and
+	// its type arguments as a "__" suffix. It is still the initializer it was
+	// cloned from, so the mangling must not decide whether its stores to
+	// package globals are legal. Mirrors stage4's isInitFuncName.
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		name = name[i+1:]
+	}
+	if i := strings.Index(name, "__"); i >= 0 {
+		name = name[:i]
+	}
 	if name == "init" {
 		return true
 	}
