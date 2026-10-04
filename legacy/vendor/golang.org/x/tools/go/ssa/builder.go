@@ -1087,7 +1087,20 @@ func (b *builder) stmtList(fn *Function, list []ast.Stmt) {
 func (b *builder) receiver(fn *Function, e ast.Expr, wantAddr, escaping bool, sel *selection) Value {
 	var v Value
 	if wantAddr && !sel.indirect && !isPointerCore(fn.typeOf(e)) {
-		v = b.addr(fn, e, escaping).address(fn)
+		// Moxie: all receivers are pointers and a value expression is
+		// auto-addressed into a copy, so a pointer-receiver method is callable
+		// on a value that is not addressable (Mk().Get()). Materialize the
+		// value into a local and pass its address; the method runs on the
+		// copy. go/types (patched) admits the call; Go's own builder would
+		// panic in addr() because the call expression is not an lvalue.
+		if !fn.info.Types[e].Addressable() {
+			typ := fn.typeOf(e)
+			tmp := emitLocal(fn, typ, e.Pos(), "autoaddr")
+			emitStore(fn, tmp, b.expr(fn, e), e.Pos())
+			v = tmp
+		} else {
+			v = b.addr(fn, e, escaping).address(fn)
+		}
 	} else {
 		v = b.expr(fn, e)
 	}

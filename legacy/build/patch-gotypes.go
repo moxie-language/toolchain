@@ -78,8 +78,48 @@ func main() {
 	patchExportAccess(dstDir)
 	patchScopeHashPrefix(dstDir)
 	patchBuiltinMethods(dstDir)
+	patchPtrRecvMethodSet(dstDir)
 
 	fmt.Fprintf(os.Stderr, "patched go/types in %s\n", dstDir)
+}
+
+// patchPtrRecvMethodSet implements Moxie's method-set rule. Moxie bans value
+// receivers, so a pointer-receiver method belongs to the method set of the
+// value type T as well as *T: a value boxed into an interface is materialized
+// into a fresh copy and the method runs on a pointer to that copy. Go's rule
+// keeps a pointer-receiver method out of T's method set, which rejects
+//
+//	var e error = C(1)
+//
+// for a named type whose Error has a pointer receiver - and rejects the
+// Errno-value-as-error returns that the stdlib produces once Errno's Error is
+// a pointer receiver, which breaks the bootstrap. pkg/types (stage4) keeps the
+// method in T's set deliberately (methodSet/collectMethods); this is the
+// legacy mirror of that rule.
+func patchPtrRecvMethodSet(dir string) {
+	// methodset.go: include pointer-receiver methods in the value method set.
+	// NewMethodSet is what the legacy compiler consults for a type's method
+	// set (getTypeCode/getTypeMethodSet), so a value box needs the arm here.
+	f := filepath.Join(dir, "methodset.go")
+	src := mustRead(f)
+	src = mustReplace(f, src,
+		"\t\tif _, found := s[key]; !found && (indirect || !f.hasPtrRecv()) {",
+		"\t\t// Moxie: all receivers are pointers, so a pointer-receiver method\n\t\t// is in the method set of the value type T as well as *T.\n\t\tif _, found := s[key]; !found {")
+	mustWrite(f, src)
+
+	// lookup.go: drop Go's addressability requirement for a pointer-receiver
+	// method. In Moxie all receivers are pointers and a value expression is
+	// auto-addressed into a copy, so a pointer-receiver method is callable on
+	// a non-addressable value (Mk().Get()) exactly as it is in the value
+	// type's method set. The same rule makes interface satisfaction
+	// (missingMethod, which goes through this lookup) find Error on a value
+	// whose Error has a pointer receiver.
+	f = filepath.Join(dir, "lookup.go")
+	src = mustRead(f)
+	src = mustReplace(f, src,
+		"\t\t\tif f, _ := obj.(*Func); f != nil {\n\t\t\t\t// determine if method has a pointer receiver\n\t\t\t\tif f.hasPtrRecv() && !indirect && !addressable {\n\t\t\t\t\treturn nil, nil, true // pointer/addressable receiver required\n\t\t\t\t}\n\t\t\t}",
+		"\t\t\t// Moxie: all receivers are pointers and a value is auto-addressed\n\t\t\t// into a copy, so a pointer-receiver method is callable on a value\n\t\t\t// expression that is not addressable, and belongs to the value\n\t\t\t// type's method set. Go's addressability requirement is dropped.")
+	mustWrite(f, src)
 }
 
 // patchBuiltinMethods lets a builtin type carry methods. src/runtime/stringer.mx

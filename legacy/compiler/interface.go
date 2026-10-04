@@ -620,7 +620,21 @@ func (c *compilerContext) getTypeMethodSet(typ types.Type, typeCodeName string) 
 				// compiler error, so panic
 				panic("cannot find function: " + c.getFunctionInfo(fn).linkName)
 			}
-			wrapper := c.getInterfaceInvokeWrapper(fn, llvmFnType, llvmFn)
+			wrapper := llvm.Value{}
+			if sig, ok := method.Obj().Type().(*types.Signature); ok {
+				if p, isPtr := sig.Recv().Type().(*types.Pointer); isPtr && types.Identical(p.Elem(), method.Recv()) {
+					// Moxie keeps a pointer-receiver method in the value
+					// type's method set. The interface data slot then holds
+					// the value itself (inline when it fits in a word, or a
+					// pointer to the boxed value otherwise), not a pointer to
+					// it, so the dispatch wrapper must materialize a copy and
+					// pass its address. Mirrors stage4's materializeIfaceValue.
+					wrapper = c.getInterfaceValueReceiverWrapper(fn, llvmFnType, llvmFn, method.Recv())
+				}
+			}
+			if wrapper.IsNil() {
+				wrapper = c.getInterfaceInvokeWrapper(fn, llvmFnType, llvmFn)
+			}
 			wrappers = append(wrappers, wrapper)
 		}
 
@@ -894,6 +908,59 @@ func (c *compilerContext) getInterfaceInvokeWrapper(fn *ssa.Function, llvmFnType
 
 	receiverValue := b.emitPointerUnpack(wrapper.Param(0), []llvm.Type{receiverType})[0]
 	params := append(b.expandFormalParam(receiverValue), wrapper.Params()[1:]...)
+	if llvmFnType.ReturnType().TypeKind() == llvm.VoidTypeKind {
+		b.CreateCall(llvmFnType, llvmFn, params, "")
+		b.CreateRetVoid()
+	} else {
+		ret := b.CreateCall(llvmFnType, llvmFn, params, "ret")
+		b.CreateRet(ret)
+	}
+
+	return wrapper
+}
+
+// getInterfaceValueReceiverWrapper wraps a pointer-receiver method for the
+// value form of the interface's concrete type. The interface data slot holds
+// the value itself: inline when it fits in a word, or a pointer to the boxed
+// value otherwise. The method wants a pointer to the value, so the wrapper
+// unpacks the value out of the slot, stores it in a fresh alloca and passes
+// that address; the method runs on a copy, exactly as a Moxie value box
+// dispatches stage4's materializeIfaceValue.
+func (c *compilerContext) getInterfaceValueReceiverWrapper(fn *ssa.Function, llvmFnType llvm.Type, llvmFn llvm.Value, recvType types.Type) llvm.Value {
+	// Distinct from getInterfaceInvokeWrapper's "$invoke": the pointer form of
+	// the same method stores the method itself, and the two forms must not
+	// share a wrapper.
+	wrapperName := llvmFn.Name() + "$invoke.value"
+	wrapper := c.mod.NamedFunction(wrapperName)
+	if !wrapper.IsNil() {
+		return wrapper
+	}
+
+	valueType := c.getLLVMType(recvType)
+	paramTypes := append([]llvm.Type{c.dataPtrType}, llvmFnType.ParamTypes()[1:]...)
+	wrapFnType := llvm.FunctionType(llvmFnType.ReturnType(), paramTypes, false)
+	wrapper = llvm.AddFunction(c.mod, wrapperName, wrapFnType)
+	c.addStandardAttributes(wrapper)
+
+	wrapper.SetLinkage(llvm.LinkOnceODRLinkage)
+	wrapper.SetUnnamedAddr(true)
+
+	b := builder{
+		compilerContext: c,
+		Builder:         c.ctx.NewBuilder(),
+	}
+	defer b.Builder.Dispose()
+
+	block := b.ctx.AddBasicBlock(wrapper, "entry")
+	b.SetInsertPointAtEnd(block)
+
+	// Unpack the value from the interface data slot and take the address of a
+	// fresh copy for the pointer receiver.
+	unpacked := b.emitPointerUnpack(wrapper.Param(0), []llvm.Type{valueType})[0]
+	recvSlot := b.CreateAlloca(valueType, "iface.recv.copy")
+	b.CreateStore(unpacked, recvSlot)
+
+	params := append([]llvm.Value{recvSlot}, wrapper.Params()[1:]...)
 	if llvmFnType.ReturnType().TypeKind() == llvm.VoidTypeKind {
 		b.CreateCall(llvmFnType, llvmFn, params, "")
 		b.CreateRetVoid()

@@ -1077,12 +1077,23 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 			// without.
 			methods := getAllMethods(pkg.Prog, member.Type())
 			methods = append(methods, getAllMethods(pkg.Prog, types.NewPointer(member.Type()))...)
+			// Moxie keeps a pointer-receiver method in the value type's method
+			// set as well as *T's (a value boxes to a copy and dispatches on a
+			// pointer to it), and MethodValue maps the value selection and the
+			// pointer selection of that method to the same *ssa.Function.
+			// Emit each function once: a second createFunction is a
+			// redeclaration.
+			seen := make(map[*ssa.Function]bool)
 			for _, method := range methods {
 				// Parse this method.
 				fn := pkg.Prog.MethodValue(method)
 				if fn == nil {
 					continue // probably a generic method
 				}
+				if seen[fn] {
+					continue
+				}
+				seen[fn] = true
 				// A named type over a builtin inherits that builtin's String()
 				// (moxie's method-set rule, mirrored in go/types). The inherited
 				// function belongs to the builtin's declaring package; emitting

@@ -23,14 +23,20 @@ var (
 )
 
 // This is one of the errors that can be returned from toLLVMValue when the
-// passed type does not fit the data to serialize. It is recoverable by
-// serializing without a type (using rawValue.rawLLVMValue).
+// passed type does not fit the data to serialize: the raw data holds a
+// symbolic pointer but the requested LLVM type is a narrower integer. The
+// interpreter cannot know the pointee's address (nor which byte of it was
+// asked for), so it must not fabricate one. It is resolved either by
+// serializing without a type (rawValue.rawLLVMValue) when writing a global,
+// or - when it surfaces while materializing operands for a store/load that
+// has to be emitted at runtime - by not interpreting the enclosing call.
 var errInvalidPtrToIntSize = errors.New("interp: ptrtoint integer size does not equal pointer size")
 
 func isRecoverableError(err error) bool {
 	return err == errIntegerAsPointer || err == errUnsupportedInst ||
 		err == errUnsupportedRuntimeInst || err == errMapAlreadyCreated ||
-		err == errLoopUnrolled || err == errTimeout
+		err == errLoopUnrolled || err == errTimeout ||
+		err == errInvalidPtrToIntSize
 }
 
 // ErrorLine is one line in a traceback. The position may be missing.
