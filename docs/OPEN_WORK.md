@@ -1534,3 +1534,20 @@ passes, 13 targets)" - nostr's 36 unnamed returns were never migrated because
 their closures stay legal, but their unnamed returns and any global stores in
 `pkg/` now count too. The app-repo migration is the next round's work, and it
 is the same shape as the earlier 220-initialiser sweep.
+
+**App-repo debt: the enumeration trick and the first package.** The
+carve-out removal surfaced nostr's debt at `pkg/signer/p8k`, and the fix is
+mechanical but needs positions - stage4 reports `unnamed return values are not
+allowed` with no line number, while **legacy reports `file:line:col`**, so the
+work list comes from `legacy/moxie build ./pkg/<p>` and the fix is applied
+against it. p8k's five (New, Sign, Verify, ECDH, ECDHRaw) are named and its
+nine tests pass (`53d8512`); the remaining nostr signatures are delegated. Note
+that legacy reports **10** unnamed results in p8k where stage4 reported 5 - it
+names each result, stage4 counts each function once.
+
+The same sweep reaches morly (68 measured under `pkg/`) and musiquay (its
+unnamed returns were migrated earlier because its packages live under `web/`,
+but its `pkg/` global stores and any closure captures now count; its Makefile
+passes `-allow-closure-captures`). `internal/cpu`'s 36 stores are already
+exempt through the `initDo` rename (`3a47951e`), so the stdlib stage starts
+from ~71 stores and 75 named slice/map types across 49 files.
