@@ -1105,7 +1105,50 @@ func tcInferConstTypeFromExpr(e syntax.Expr, scope *Scope) (t Type) {
 	if n, ok := e.(*syntax.Name); ok && (n.Value == "true" || n.Value == "false") {
 		return Typ[UntypedBool]
 	}
+	// A binary constant expression takes the type of its TYPED operand: Go's
+	// rule is that an untyped constant combines with a typed one and the
+	// result keeps the typed operand's type. Without this the expression had
+	// no inferred type, the constant fell back to UntypedTypeOfCV, and
+	// `const c = uintptr(64) * 1024 * 1024` became an untyped int: `x := c`
+	// then took the int32 default representation, so src/runtime's
+	// `newCap := arenaDefaultRegion` was int32 and the arena's region
+	// capacity arithmetic (cap*2, size rounding, sysMap's uintptr parameter)
+	// ran in 32 bits. Comparisons and logical operators are excluded: they
+	// yield an untyped bool whatever the operands are, so they fall through to
+	// the value-based fallback.
+	if op, ok := e.(*syntax.Operation); ok && op.Y != nil {
+		switch op.Op {
+		case token.Eql, token.Neq, token.Lss, token.Leq, token.Gtr, token.Geq, token.OrOr, token.AndAnd:
+			return nil
+		}
+		xt := tcInferConstTypeFromExpr(op.X, scope)
+		yt := tcInferConstTypeFromExpr(op.Y, scope)
+		xtu := !constTypeIsTyped(xt)
+		ytu := !constTypeIsTyped(yt)
+		if !xtu && ytu {
+			return xt
+		}
+		if !ytu && xtu {
+			return yt
+		}
+		if !xtu && !ytu {
+			return xt
+		}
+		return nil
+	}
 	return tcInferTypeFromExpr(e, scope)
+}
+
+// constTypeIsTyped reports whether an inferred constant type is a real type
+// rather than an untyped constant kind or an unknown.
+func constTypeIsTyped(t Type) (ok bool) {
+	if t == nil {
+		return false
+	}
+	if b, isB := SafeUnderlying(t).(*Basic); isB && b.Info&IsUntyped != 0 {
+		return false
+	}
+	return true
 }
 
 func tcResolveFuncReturn(e syntax.Expr, scope *Scope) (t Type) {
