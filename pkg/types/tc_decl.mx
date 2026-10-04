@@ -17,44 +17,63 @@ type constGroupEntry struct {
 func collectFuncTypeParams(d *syntax.FuncDecl) (ss []string) {
 	seen := map[string]bool{}
 	var names []string
-	add := func(name string) {
-		if name != "" && !seen[name] {
-			seen[name] = true
-			names = mxutil.Ensure(names, 1)
-			push(names, name)
-		}
-	}
+	// The names come back as a slice rather than through a callback: a
+	// callback would capture `seen` and `names`, and a Moxie closure captures
+	// nothing.
 	for _, tp := range d.TParamList {
-		if tp.Name != nil {
-			add(tp.Name.Value)
-		}
+		names = appendUniqueName(names, seen, tp.Name)
 	}
 	// Extract type args from a generic receiver: func (h Foo[T, U]) ...
 	if d.Recv != nil {
-		extractTypeArgs(d.Recv.Type, add)
+		for _, a := range extractTypeArgs(d.Recv.Type) {
+			if !seen[a] && a != "" {
+				seen[a] = true
+				names = mxutil.Ensure(names, 1)
+				push(names, a)
+			}
+		}
 	}
 	return names
 }
 
-// extractTypeArgs recursively extracts bare Name nodes from a generic receiver
-// type expression like Handle[T] or Ptr[K, V].
-func extractTypeArgs(e syntax.Expr, add func(string)) {
+// appendUniqueName adds a declaration's name once, in order.
+func appendUniqueName(names []string, seen map[string]bool, n *syntax.Name) (out []string) {
+	if n == nil || n.Value == "" || seen[n.Value] {
+		return names
+	}
+	seen[n.Value] = true
+	names = mxutil.Ensure(names, 1)
+	push(names, n.Value)
+	return names
+}
+
+// extractTypeArgs returns the bare Name nodes of a generic receiver type
+// expression like Handle[T] or Ptr[K, V]. It returns them rather than pushing
+// them through a callback, which would capture the caller's accumulator.
+func extractTypeArgs(e syntax.Expr) (out []string) {
 	if e == nil {
-		return
+		return nil
 	}
 	switch ev := e.(type) {
 	case *syntax.IndexExpr:
 		// Handle[T] or Handle[T, U] (ListExpr inside)
-		extractTypeArgs(ev.Index, add)
+		return extractTypeArgs(ev.Index)
 	case *syntax.Name:
-		add(ev.Value)
+		out = mxutil.Ensure(out, 1)
+		push(out, ev.Value)
+		return out
 	case *syntax.ListExpr:
 		for _, el := range ev.ElemList {
-			extractTypeArgs(el, add)
+			for _, n := range extractTypeArgs(el) {
+				out = mxutil.Ensure(out, 1)
+				push(out, n)
+			}
 		}
+		return out
 	case *syntax.Operation:
 		if ev.Y == nil {
-			extractTypeArgs(ev.X, add)
+			return extractTypeArgs(ev.X)
 		}
 	}
+	return nil
 }
