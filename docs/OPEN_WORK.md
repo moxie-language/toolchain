@@ -1551,3 +1551,24 @@ but its `pkg/` global stores and any closure captures now count; its Makefile
 passes `-allow-closure-captures`). `internal/cpu`'s 36 stores are already
 exempt through the `initDo` rename (`3a47951e`), so the stdlib stage starts
 from ~71 stores and 75 named slice/map types across 49 files.
+
+**The nostr work list, enumerated.** Stage4 has no positions, so the loop is
+`for d in $(find pkg -name '*.mx' | xargs -n1 dirname | sort -u); do moxie build
+./$d; done` for the package-by-package failures and the legacy compiler for the
+positions (`/tmp/nostr-s4.txt`, `/tmp/nostr-unnamed.txt`). Three kinds show up,
+not one:
+1. unnamed return values across most packages (core, hex, ints, tag, filter,
+   envelope, event, varint, timestamp, crypto/nip44 six, crypto/
+   chacha20poly1305 two, crypto/aes256gcm two, ...);
+2. **value receivers** - `pkg/lol/log` reports three `value receiver is not
+   allowed: use pointer receiver (*Printer)`;
+3. **sovereign-loop declarations** - `pkg/core`'s
+   `(*Reader).readContinuedLineSlice` declares `:=` inside a loop in a
+   self-mutating method, which the rule sends to a helper function.
+
+The enumeration also reported `net/textproto`'s `dotWriter.Write` and
+`dotReader.Read` for the same sovereign-loop rule. That check is **not gated**
+by `isUserPackagePath` (`checkSovereignLoopDecls` runs for every package), so
+the stdlib carries that violation independently of the carve-out; it surfaced
+here only because a nostr package's import closure reaches it. It is a stdlib
+item for the next stage, not nostr debt.
