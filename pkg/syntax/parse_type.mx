@@ -746,7 +746,14 @@ func (p *Parser) paramList(name *Name, typ Expr, closeTok token.Token, requireNa
 
 	var named int32 // number of parameters that have an explicit name and type
 	var typed int32 // number of parameters that have an explicit type
-	end := p.list("parameter list", token.Comma, closeTok, func() bool {
+	var end token.Pos
+	// Inlined: the callback p.list took would capture name, typ, named, typed
+	// and list. listSep advances exactly as p.list did, so `end` is the
+	// position p.list would have returned in both the success and the
+	// unrecoverable-separator paths, and the closer is only consumed when the
+	// separator did not fail.
+	failed := false
+	for p.Tok != token.EOF && p.Tok != closeTok {
 		var par *Field
 		if typ != nil {
 			if debug && name == nil {
@@ -775,8 +782,19 @@ func (p *Parser) paramList(name *Name, typ Expr, closeTok token.Token, requireNa
 			list = mxutil.Ensure(list, 1)
 			push(list, par)
 		}
-		return false
-	})
+		more, ok := p.listSep("parameter list", token.Comma, closeTok)
+		if !ok {
+			failed = true
+			break
+		}
+		if !more {
+			break
+		}
+	}
+	end = p.pos()
+	if !failed {
+		p.want(closeTok)
+	}
 
 	if len(list) == 0 {
 		return
