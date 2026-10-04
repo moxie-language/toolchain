@@ -1365,3 +1365,10 @@ carries a code pointer and no environment and so cannot represent one. The
 other nine (`appendGroup`, `argList`, `complitexpr`, `init`, `initBytes`,
 `interfaceType`, `paramList`, `structType`, `trace`) are real source closures
 and want explicit parameters.
+
+Confirmed by probe: in user code `f := t.get` (a bound method value) is
+rejected with `main__mval1: closure captures outer variable(s) [recv]`, so the
+value form is already refused - the sixteen sites are the compiler
+materialising a bound value for a selector it is about to call directly
+(`defer p.trace("file")()` in `pkg/syntax`). A direct-call lowering would
+remove seven of them without touching the parser.
