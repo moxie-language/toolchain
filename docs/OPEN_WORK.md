@@ -1587,3 +1587,21 @@ over every stdlib package is running and has already flagged more, including
 two-line hoist. The list lands in `/tmp/sovloop.txt`; it is stdlib work for the
 next stage, but it blocks any build whose closure reaches one of them, so it
 comes before the named-type and global-store sweeps.
+
+**nostr is migrated and green** (`1a0acf5`). 23 files, all under `pkg/`: 31
+named result lists, 12 value receivers in `pkg/types`, `kind.ensureKinds` ->
+`initKinds` (124 stores, init-named), `kind/embed`'s data builder likewise with
+a thin wrapper kept for its tests, `filter`'s `Tainted` stores moved into
+`initSetTainted`, `lol`'s global `level int32` replaced by a self-mutating
+`logLevel`, plus shadowing, variadic-spread and receiver fixes. `make test` is
+**194 passed, 0 failures** and the legacy unnamed-return enumeration is empty.
+Correction to the round-24 note: nostr's Makefile *does* pass
+`-allow-closure-captures`, so its 17 remaining closures are legal; and
+`(*Reader).readContinuedLineSlice` is `net/textproto` (stdlib), not `pkg/core`.
+
+**morly's work list is enumerated** (`/tmp/morly-s4.txt`): 15 packages, 12 unnamed
+returns, global stores in `ensureDNSAddr` (12), `ensureRoles` (6), `resolveHost`
+(4) and `ensureFormats` (4), and two value receivers (`*Response`, `*Request`).
+The `ensure*` names are the same rename-to-init opportunity nostr used. A morly
+agent is working the list, gated on `make build` plus **370 passed, 0
+failures**.
