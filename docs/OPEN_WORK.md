@@ -2048,3 +2048,41 @@ is the suspect, `[]Word` direct is the fallback.
 Also noted: `index/suffixarray` is clean except three pre-existing
 `undefined: regexp` lines - `src/regexp` does not exist in this tree at all, so
 that is missing-stdlib debt, not migration debt.
+
+## THIRD COMPILER BUG: slice type aliases are mis-lowered
+
+Every rule-5 conversion in the tree used a type **alias** (`type X = []T`), and
+the compiler mis-lowers slice aliases - two demonstrated failures:
+`math/big`'s `nat = []Word` produced a `ptr` where a slice header was required
+(`math_big.ll:5231`, `'%t54' defined with type 'ptr' but expected
+'{ ptr, i64, i64 }'`), and `internal/poll`'s `String = []byte` produced
+`undefined: internal/poll.String`. Aliases are *legal* by the rule (an alias
+introduces no new named type, which is exactly why the rule exempts it), so this
+is a genuine compiler defect like the interface-dispatch one, not a language
+restriction.
+
+**Immediate policy (in force):** a rule-5 conversion must **spell the underlying
+type** (`[]T` / `map[K]V`) at every use site, never an alias. Who is doing which:
+- slice A: `src/math/big/nat.mx`, `src/internal/poll/fd.mx` (plus a tree-wide
+  `grep -rn "^type [A-Za-z_]* = \[\]\|^type [A-Za-z_]* = map\[" src/` sweep);
+- slice B: `debug/dwarf/entry.mx` (`abbrevTable`), `crypto/internal/boring/doc.mx`
+  (`BigInt`), `archive/tar/format.mx` (`sparseArray`, `sparseElem`),
+  `archive/zip/{reader,writer}.mx` (`readBuf`, `writeBuf`),
+  `image/jpeg/writer.mx` (`huffmanLUT`);
+- done here: `src/net/rawconn.mx:89-90` (`poll.String` -> `[]byte`).
+
+Same class as the `math/big` blocker recorded above; the compiler fix is the
+second half of it.
+
+## `src/moxie` is clean
+
+The dedicated agent finished it with two files: `codec.mx` (pointer receivers on
+all 20 `EncodeTo`s, `type Bytes []byte` replaced by `EncodeBytes`/`DecodeBytes`)
+and its Go mirror `codec.go` (compiled by the legacy module through
+`legacy/src -> ../src`; `go build ./src/moxie/` passes). The only call sites
+outside are four interface dispatches in the runtime, which already box
+`{*T, &v}` and need no edit. Two follow-ups it found: `_mxc_stage4/main.mx:4547`
+`cmdHeader` still emits a **value-receiver** `EncodeTo` into generated `.mxh`
+headers (needs the bilateral legacy mirror), and `sysroot/runtime_go.bc` is now
+stale against the new codec and needs `build-runtime` before apps can call the
+free functions.
