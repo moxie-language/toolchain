@@ -74,7 +74,9 @@ func Header(pkgName, outdir, prevPath string, options *compileopts.Options) erro
 			// Opaque type (e.g. type Bytes []byte): wire format via methods only.
 			body.WriteString(" opaque\n")
 		}
-		body.WriteString("func (")
+		// *T's method set always includes T's value-receiver methods, so the
+		// pointer spelling is valid whether EncodeTo was declared on T or *T.
+		body.WriteString("func (*")
 		body.WriteString(td.name)
 		body.WriteString(") EncodeTo(w io.Writer) error\n")
 		body.WriteString("func (*")

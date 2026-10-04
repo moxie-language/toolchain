@@ -3580,6 +3580,20 @@ func mxhWriteTypeName(b *mxhBuf, objName string, v *TypeName) {
 			mxhWriteIfaceMethods(b, iface)
 			b.nl()
 		}
+	} else if typ != nil {
+		// An alias whose target is not a named type: `type X = []T`,
+		// `type X = map[K]V`, `type X = *T`, `type X = int32`. The type-check
+		// pass allocates a Named placeholder for every TypeDecl and then
+		// replaces it with the resolved target for an alias, so there is no
+		// Named carrying this name and the branches above write nothing.
+		// Dropping the line lost the name from the mxh: the importer's
+		// unresolved fallback is int32, and a Named with no underlying lowers
+		// to "ptr", so a slice alias crossed a package boundary as a pointer
+		// (internal/poll.String became "undefined", math/big's nat became a
+		// ptr where a 3-word header was required).
+		b.w("alias ") ; b.w(objName) ; b.w(" ")
+		typeDescWrite(b, typ)
+		b.nl()
 	}
 }
 
@@ -4544,7 +4558,9 @@ func cmdHeader(pkgName, outdir string) {
 		} else {
 			body = body | " opaque\n"
 		}
-		body = body | "func (" | name | ") EncodeTo(w io.Writer) error\n"
+		// *T's method set always includes T's value-receiver methods, so the
+		// pointer spelling is valid whether EncodeTo was declared on T or *T.
+		body = body | "func (*" | name | ") EncodeTo(w io.Writer) error\n"
 		body = body | "func (*" | name | ") DecodeFrom(r io.Reader) error\n"
 	}
 	headerLine := "// mxh v1 " | hex16(fnv1a64(body))
