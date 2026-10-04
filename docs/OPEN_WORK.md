@@ -1942,3 +1942,20 @@ callback. The `AfterFunc` signature change has exactly one caller in the tree
 `cancel.Cancel()` and `cancel(err)` -> `cancel.Cancel(err)` - are 24 lines in
 `src/net/dial.mx`, `src/net/http/{h2_bundle,server,transport}.mx`, all routed to
 slice C with line numbers; the type annotations stay unchanged.
+
+**`src/moxie` is the next top blocker, and now has its own agent.** The `moxie`
+package carries the codec wrappers every other package encodes through, and it
+fails the wide predicate on `type Bytes []byte` (`codec.mx:401`, a named slice
+type) plus **20 value receivers** (`Bool`, `Int8`, `Uint8`, `Int16`, `Uint16`,
+`BigInt16`, `BigUint16`, `Int32`, `Uint32`, `BigInt32`, `BigUint32`, `Int64`,
+`Uint64`, `BigInt64`, `BigUint64`, `Float32`, `Float64`, `BigFloat32`,
+`BigFloat64`, `Bytes`). Because `fmt`, `io/fs`, `io/ioutil`, `maps`, `iter` and
+`internal/trace` all import it, the wide probe stopped there and none of them
+could be verified. The fix ripple is the interesting part: a pointer receiver
+needs an addressable value, and call sites pass conversions straight through
+(`Uint32(len(v)).EncodeTo(w)`), so every such site binds to a local first.
+`slices`-style free functions were considered and rejected as the wider change.
+
+Also routed: `src/os/user` fails the *narrow* compiler with `cannot resolve type
+of short var v in findGroupId/listGroupsFromReader` - a genuine compile error,
+handed to slice C.
