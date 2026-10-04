@@ -58,14 +58,14 @@ import (
 // referenced object. Typically, this batching only happens for tiny
 // (on the order of 16 bytes or less) and pointer-free objects.
 type Pointer[T comparable] struct {
-	// Mention T in the type definition to prevent conversions
-	// between Pointer types, like we do for sync/atomic.Pointer.
-	_ [0]*T
+	// T is monomorphized into a distinct Pointer type per instantiation,
+	// which is what prevents conversions between Pointer types (the
+	// upstream zero-length array marker is an array, and arrays are gone).
 	u unsafe.Pointer
 }
 
 // Make creates a weak pointer from a pointer to some value of type T.
-func Make[T comparable](ptr *T) Pointer[T] {
+func Make[T comparable](ptr *T) (out Pointer[T]) {
 	// Explicitly force ptr to escape to the heap.
 	ptr = abi.Escape(ptr)
 
@@ -73,7 +73,7 @@ func Make[T comparable](ptr *T) Pointer[T] {
 	if ptr != nil {
 		u = runtime_registerWeakPointer(unsafe.Pointer(ptr))
 	}
-	runtime.KeepAlive(ptr)
+	runtime.KeepAlive(unsafe.Pointer(ptr))
 	return Pointer[T]{u: u}
 }
 
@@ -82,7 +82,7 @@ func Make[T comparable](ptr *T) Pointer[T] {
 // the garbage collector.
 // If a weak pointer points to an object with a finalizer, then Value will
 // return nil as soon as the object's finalizer is queued for execution.
-func (p Pointer[T comparable]) Value() *T {
+func (p *Pointer[T]) Value() (out *T) {
 	if p.u == nil {
 		return nil
 	}
@@ -92,7 +92,7 @@ func (p Pointer[T comparable]) Value() *T {
 // Implemented in runtime.
 
 //:linkname runtime_registerWeakPointer
-func runtime_registerWeakPointer(unsafe.Pointer) unsafe.Pointer
+func runtime_registerWeakPointer(p unsafe.Pointer) (out unsafe.Pointer)
 
 //:linkname runtime_makeStrongFromWeak
-func runtime_makeStrongFromWeak(unsafe.Pointer) unsafe.Pointer
+func runtime_makeStrongFromWeak(u unsafe.Pointer) (out unsafe.Pointer)
