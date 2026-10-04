@@ -2028,3 +2028,23 @@ The slice-C agent reverted `Errno`/`Signal` to value receivers to keep the tree
 green, and slice A's `FileMode` pointer receivers are suspect for the same
 reason. A diagnosis agent owns it now; a full write-up of the mechanism and the
 fix is the deliverable.
+
+**`math/big`'s `nat` alias is the current tree blocker.** `src/math/big/nat.mx:35`
+is `type nat = []Word` (an alias to a slice) after the migration, and the
+compiler now fails to codegen the call at `math_big.ll:5231`:
+
+```
+error: '%t54' defined with type 'ptr' but expected '{ ptr, i64, i64 }'
+call {{ptr,i64,i64}, i32, i32, {i64,ptr}} @"math/big.natScan"({ptr,i64,i64} %t54, ...)
+```
+
+`natScan(z nat, ...)` (`natconv.mx:105`, called from floatconv/intconv/ratconv)
+receives its first argument as `ptr` instead of a slice header, so a type alias
+to a slice in a parameter position is not lowered like the slice it aliases -
+a compiler bug of the same family as the interface-dispatch one, and it stops
+the whole stage4 build and therefore the suite. Slice A owns it; the alias form
+is the suspect, `[]Word` direct is the fallback.
+
+Also noted: `index/suffixarray` is clean except three pre-existing
+`undefined: regexp` lines - `src/regexp` does not exist in this tree at all, so
+that is missing-stdlib debt, not migration debt.
