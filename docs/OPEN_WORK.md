@@ -1396,3 +1396,18 @@ underlying `[]chan T`, and the mls types - including `ratchetTree` with its 25
 methods - are free functions. Verified with the compiler that enforces the rule
 (`3b13de5e`, installed as `./moxie`): nostr 194 tests, musiquay 89 tests,
 `make build-app-wasm` links, 0 failures, and morly's 370 across 26 packages are green.
+
+**Correction, with instrumentation: all sixteen are real source captures.** A
+temporary log in `buildSelector` (`MVDBG fn=... sel=...`) shows the seven
+`__mval` wrappers come from `pkg/syntax/parse_decl.mx:47-59` -
+`p.appendGroup(f.DeclList, p.importDecl)` and its three siblings pass a **bound
+method value**, which is a capture by definition, and `parse_stmt.mx:192` does
+the same. The compiler is right to reject them; there is no lowering bug, and
+the earlier note blaming `buildDeferStmt` is withdrawn. `appendGroup` itself
+also captures (`list`, `f`, `g`) in the closure it hands to `p.list`, so the fix
+is a signature change: pass a declaration kind and dispatch inside, and either
+give `p.list` explicit state parameters or inline its loop, because a Moxie
+function value carries no environment for the closure to read. The other nine
+are ordinary source closures (`argList`, `complitexpr`, `init`, `initBytes`,
+`interfaceType`, `paramList`, `structType`, `trace`) and want the same
+treatment.
