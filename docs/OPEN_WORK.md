@@ -1959,3 +1959,20 @@ needs an addressable value, and call sites pass conversions straight through
 Also routed: `src/os/user` fails the *narrow* compiler with `cannot resolve type
 of short var v in findGroupId/listGroupsFromReader` - a genuine compile error,
 handed to slice C.
+
+**`errors.Const` -> `errors.New` broke sentinel *identity*, and two of those are
+real bugs** (slice A found them). `Const` compared equal by string; two
+`errors.New` pointers do not. Six duplicate-message groups turned up, and the
+two that break code are:
+1. `crypto/rsa` now makes its own `ErrDecryption`/`ErrVerification`/
+   `ErrMessageTooLong` while `crypto/rsa/fips.mx:383-391` switches on them for
+   errors produced by `crypto/internal/fips140/rsa` - distinct pointers, so no
+   case ever matches and `fipsError` returns the internal error instead of the
+   public sentinel. Fix: alias the internal sentinels in `crypto/rsa`'s init.
+2. `path/filepath.ErrBadPattern` and `path.ErrBadPattern` are now distinct, and
+   `io/fs.Glob` returns the `path` one, so `errors.Is(err,
+   filepath.ErrBadPattern)` stopped matching. Fix: alias one to the other.
+The harmless duplicates (`crypto/cipher.errOpen` vs the gcm one,
+`internal/poll.ErrNoDeadline` vs `os.ErrNoDeadline`) need no change, and
+`src/syscall`'s `*Errno` value receivers are routed to slice C with the warning
+that a bare `Errno` value stops satisfying `error`.
